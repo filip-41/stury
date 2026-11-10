@@ -21,9 +21,16 @@ Value_Kind :: enum {
 @(private)
 Value_Kinds :: bit_set[Value_Kind]
 
-// The kinds a value of `ti` can be, through its `Maybe`s and pointers and each arm of a union.
+// The kinds a value of `ti` can be, through its `Maybe`s and pointers and each arm of a union, a carrier's or a custom
+// carrier's being its carrier's.
 @(private)
-value_kinds :: proc(ti: ^runtime.Type_Info) -> (k: Value_Kinds) {
+value_kinds :: proc(ti: ^runtime.Type_Info, reg: ^Registry) -> (k: Value_Kinds) {
+	id := carried(reg, ti.id)
+	if c, is_carrier := carrier_of(id); is_carrier {
+		return c.subject
+	} else if id != ti.id {
+		return value_kinds(type_info_of(id), reg)
+	}
 	#partial switch v in runtime.type_info_base(ti).variant {
 	case runtime.Type_Info_String:
 		k = {.Text}
@@ -36,10 +43,10 @@ value_kinds :: proc(ti: ^runtime.Type_Info) -> (k: Value_Kinds) {
 	case runtime.Type_Info_Map:
 		k = {.Map}
 	case runtime.Type_Info_Pointer:
-		k = value_kinds(v.elem) if v.elem != nil else {}
+		k = value_kinds(v.elem, reg) if v.elem != nil else {}
 	case runtime.Type_Info_Union:
 		for arm in v.variants {
-			k += value_kinds(arm)
+			k += value_kinds(arm, reg)
 		}
 	}
 	return
@@ -56,8 +63,8 @@ Subject :: struct {
 
 // The subject of a value of `ti`, through its `Maybe`s and pointers.
 @(private)
-subject_of :: proc(ti: ^runtime.Type_Info) -> (s: Subject) {
-	s.kinds = value_kinds(ti)
+subject_of :: proc(ti: ^runtime.Type_Info, reg: ^Registry) -> (s: Subject) {
+	s.kinds = value_kinds(ti, reg)
 	base := ti
 	for next := held(base); next != nil; next = held(base) {
 		base = next

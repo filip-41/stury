@@ -52,9 +52,9 @@ handle_services :: proc "contextless" ($S: Spec) -> core.Services {
 		write    = document_write,
 		edit     = edit_of(S),
 		plans    = rawptr(proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Refusal) {
-			return plan_built(T, S, options_of(as), opts, checks_of(S), allocator)
+			return plan_built(T, S, options_of(as), opts, reads_of(S), allocator)
 		}),
-		reads    = checks_of(S),
+		reads    = reads_of(S),
 		tokens   = &TOKENS,
 		records  = framing_of(S),
 		docs     = record_docs(S),

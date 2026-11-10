@@ -187,8 +187,19 @@
 - A dsv build with `Options.infer` writes each cell's kind into its node, and a table's row is reached by its
   position: `child_at` on a table with a width is one step whatever the index.
 
+- `model.dump` and `model.dump_stream` write a value by its model: never a `write_only` member, and with `Dump_Opts`
+  leaving out the members its `Fields_Set` does not hold (`exclude_unset`), that hold null (`exclude_none`) or that
+  equal their default (`exclude_defaults`). `check` validates what the dump writes first and refuses a value that
+  fails as `.Check_Failed`.
+- `Load_Opts{partial = true}` reads a patch: the structs `merge` descends into miss no member and take no default.
+  `model.merge` copies the members a patch's `Fields_Set` holds and its captured members into an existing value, struct
+  members with their own set member by member.
+- `model.problem` (`write.problem`) makes an RFC 9457 problem document of a sink's entries, for any format to write.
+  `load`, `load_value` and `read` take `Load_Opts` in place of `dups`.
+
 ### Errors
 
+- `.Check_Failed` is a value a model's dump checked and found against its rules, with the first failure's code.
 - `core.render(w, src, e)` writes any error type, and a path or edit error carries the reason it was refused
   (`core.Path_Reason`, `core.Edit_Reason`), which render names.
 - A typed refusal names the type wanted and the value found (`Expected i64, found "lots" at .[0].population`), the tag
@@ -207,7 +218,7 @@
 
 - Every runner takes the same arguments and prints the machine it ran on. The stury arm is named `stury`. The typed
   lanes have serde_json and sonic-rs arms, and every write arm writes into one buffer. `gen.py --check` writes
-  nothing, and the CLI comparisons take `CASES`. [bench/README.md](bench/README.md) describes the harness.
+  nothing, and the CLI comparisons take `CASES`. `bench/write dump` writes the typed lanes through `model.dump`. [bench/README.md](bench/README.md) describes the harness.
 
 ### Development
 

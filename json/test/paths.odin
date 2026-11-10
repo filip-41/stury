@@ -921,7 +921,7 @@ deep_reads_grow_their_stacks :: proc(t: ^testing.T) {
 	testing.expect_value(t, qerr.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, len(answers), n)
 	delete(answers)
-	v: any
+	v: core.Value
 	walktest.expect_nil(t, typed.unmarshal(&doc, core.ROOT, &v, nil, {}, context.temp_allocator))
 	out, _, werr := core.write(&doc, allocator = context.temp_allocator)
 	walktest.expect_nil(t, werr)

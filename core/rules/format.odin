@@ -1,6 +1,5 @@
 package rules
 
-import "core:encoding/uuid"
 import "core:strings"
 import regex "../regex"
 import "../spell"
@@ -73,10 +72,23 @@ FORMAT_CHECKS := [String_Format]proc(s: string) -> bool {
 	.Iri = proc(s: string) -> bool {return uri_valid(s, true, false)},
 	.Iri_Reference = proc(s: string) -> bool {return uri_valid(s, true, true)},
 	.Uri_Template = template_valid,
-	.Uuid = proc(s: string) -> bool {_, err := uuid.read(s);return err == nil},
+	.Uuid = uuid_valid,
 	.Json_Pointer = pointer_valid,
 	.Relative_Json_Pointer = relative_pointer_valid,
 	.Regex = proc(s: string) -> bool {return regex.valid(s, {ecma = true})},
+}
+
+// The ECMA pattern that matches exactly the strings each format's check takes, "" where none of a fair length does: a
+// time's leap second hangs on its offset, and names and URIs on their lengths and tables.
+@(rodata)
+FORMAT_PATTERNS := #partial [String_Format]string {
+	.Date = `^(?:\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|02-(?:0[1-9]|1\d|2[0-8]))|(?:\d\d(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)-02-29)$`,
+	.Duration = `^P(?:\d+W|(?:\d+D|\d+M(?:\d+D)?|\d+Y(?:\d+M(?:\d+D)?)?)(?:T(?:\d+H(?:\d+M(?:\d+S)?)?|\d+M(?:\d+S)?|\d+S))?|T(?:\d+H(?:\d+M(?:\d+S)?)?|\d+M(?:\d+S)?|\d+S))$`,
+	.Ipv6 = `^(?:(?:(?:[\dA-Fa-f]{1,4}:){6}|::(?:[\dA-Fa-f]{1,4}:){5}|(?:[\dA-Fa-f]{1,4})?::(?:[\dA-Fa-f]{1,4}:){4}|(?:(?:[\dA-Fa-f]{1,4}:){0,1}[\dA-Fa-f]{1,4})?::(?:[\dA-Fa-f]{1,4}:){3}|(?:(?:[\dA-Fa-f]{1,4}:){0,2}[\dA-Fa-f]{1,4})?::(?:[\dA-Fa-f]{1,4}:){2}|(?:(?:[\dA-Fa-f]{1,4}:){0,3}[\dA-Fa-f]{1,4})?::[\dA-Fa-f]{1,4}:|(?:(?:[\dA-Fa-f]{1,4}:){0,4}[\dA-Fa-f]{1,4})?::)(?:[\dA-Fa-f]{1,4}:[\dA-Fa-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\dA-Fa-f]{1,4}:){0,5}[\dA-Fa-f]{1,4})?::[\dA-Fa-f]{1,4}|(?:(?:[\dA-Fa-f]{1,4}:){0,6}[\dA-Fa-f]{1,4})?::)$`,
+	.Ipv4 = `^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$`,
+	.Uuid = `^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`,
+	.Json_Pointer = `^(?:/(?:[^~/]|~[01])*)*$`,
+	.Relative_Json_Pointer = `^(?:0|[1-9]\d*)(?:[+-](?:0|[1-9]\d*))?(?:#|(?:/(?:[^~/]|~[01])*)*)$`,
 }
 
 // The format `name` is, `.None` for a name no checker judges.
@@ -133,7 +145,6 @@ is_leap :: proc(y: int) -> bool {
 }
 
 // The fields of an RFC 3339 date and time. `offset` is in minutes east of UTC, `nanosecond` the fraction cut at nine digits.
-@(private)
 Date_Time_Parts :: struct {
 	year, month, day, hour, minute, second, nanosecond, offset: int,
 }
@@ -197,7 +208,6 @@ time_of :: proc(s: string) -> (p: Date_Time_Parts, ok: bool) {
 }
 
 // RFC 3339 `date-time`: a date, `T` or `t`, and a time.
-@(private)
 date_time_of :: proc(s: string) -> (p: Date_Time_Parts, ok: bool) {
 	if len(s) <= 11 || s[10] != 'T' && s[10] != 't' {
 		return
@@ -217,8 +227,7 @@ duration_valid :: proc(s: string) -> bool {
 	}
 	r := s[1:]
 	if r[len(r) - 1] == 'W' {
-		_, ok := decimal(r[:len(r) - 1])
-		return ok
+		return digits(r) == len(r) - 1
 	}
 	date := duration_units(&r, "YMD")
 	time := false
@@ -308,6 +317,27 @@ ipv6_valid :: proc(s: string) -> bool {
 	head, head_ok := groups(s[:gap], false)
 	rest, rest_ok := groups(tail, true)
 	return head_ok && rest_ok && head + rest <= 7
+}
+
+// RFC 4122 text form, any variant and version.
+@(private)
+uuid_valid :: proc(s: string) -> bool {
+	if len(s) != 36 {
+		return false
+	}
+	for c, i in transmute([]u8)s {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		case:
+			if spell.HEX_NIBBLE[c] > 15 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // RFC 6901: empty, or `/` before every token, with `~` only as `~0` and `~1`.

@@ -37,6 +37,12 @@ checks :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	return checks_of(S)
 }
 
+// Returns the layout of spec `S` read and written with `opts`, which `model.compile` takes. It reaches only the passes of
+// `S`, where `as(spec, opts)` reaches every spec's.
+layout :: proc "contextless" ($S: Spec, opts := Options{}) -> core.As {
+	return bound_as(S, opts)
+}
+
 // Builds the plan of `T` for dsv's spelling, as `typed.plan_make` does, and refuses a `T` that is no list of rows and no
 // row. A write by the plan is of spec `spec` with the delimiter, comment byte, `no_header`, `crlf` and `.Ragged` of
 // `opts`, and `.Bad_Option` when the spec cannot spell them. A read takes its spec and options at the call. The plan
@@ -98,14 +104,14 @@ unmarshal_bound :: proc(src: []u8, $S: Spec, target: ^$T, opts := Options{}, rea
 		return refusal
 	}
 	defer typed.plan_destroy(&plan)
-	err := read_text(src, S, T, target, &plan, opts, read, allocator, false)
+	err := read_text(src, S, T, target, &plan, opts, read, allocator, false, typed.Reader)
 	typed.own_errors(&err, read.sink)
 	return core.error_of(err)
 }
 
 @(private)
 unmarshal_bound_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return core.error_of(read_text(src, S, T, target, plan, opts, read, allocator, false))
+	return core.error_of(read_text(src, S, T, target, plan, opts, read, allocator, false, typed.Reader))
 }
 
 @(private)
@@ -168,7 +174,7 @@ read_spec :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typei
 @(private)
 read_one :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator, check: bool) -> core.Typed_Refusal {
 	if !check {
-		return read_text(src, S, T, target, plan, opts, read, allocator, false)
+		return read_text(src, S, T, target, plan, opts, read, allocator, false, typed.Reader)
 	}
 	return check_one(src, S, T, target, plan, opts, read, allocator)
 }
@@ -176,20 +182,23 @@ read_one :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Pl
 // The check of a text of spec `S`: the description's when the plan has one, else the typed read's.
 @(private)
 check_one :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
-	if plan != nil && (plan.checking || plan.model_plan == .Load) {
+	if plan != nil && plan.checking {
 		return check_cells(src, S, target, T, plan, opts, read, allocator)
 	}
-	return read_text(src, S, T, target, plan, opts, read, allocator, true)
+	if plan != nil && plan.model_plan == .Load {
+		return read_text(src, S, T, target, plan, opts, read, allocator, true, typed.Check)
+	}
+	return read_text(src, S, T, target, plan, opts, read, allocator, true, typed.Reader)
 }
 
 @(private)
-read_text :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Refusal {
+read_text :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator, $CHECK: bool, $H: typeid) -> core.Typed_Refusal {
 	if foreign_plan(plan) {
 		return {kind = .Plan_Mismatch}
 	}
-	h := Cells{refuse_repeats = read.dups == .Refuse}
+	h := Cells_Of(H){refuse_repeats = read.dups == .Refuse}
 	frames: [ROW_FRAMES]typed.Frame = ---
-	regs, err := typed.read_start(&h.r, src, plan, bound_as(S, opts), T, target, read, frames[:], allocator, false)
+	regs, err := start_cells(&h, src, plan, bound_as(S, opts), T, target, read, frames[:], allocator)
 	if err.kind != .None {
 		return err
 	}
@@ -226,10 +235,20 @@ read_text :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.P
 	return typed.read_end(&h.r, regs, fault)
 }
 
+// Starts the typed read of `h`, a model's check under `typed.Check`.
+@(private)
+start_cells :: proc(h: ^Cells_Of($H), src: []u8, plan: ^typed.Plan, as: core.As, T: typeid, target: rawptr, read: typed.Read_Options, frames: []typed.Frame, allocator: runtime.Allocator) -> (core.Hook_Regs, core.Typed_Refusal) {
+	when H == typed.Check {
+		return typed.check_start(&h.r, src, untracked(plan), as, T, target, read, untracked_frames(frames), allocator)
+	} else {
+		return typed.read_start(&h.r, src, plan, as, T, target, read, frames, allocator, false)
+	}
+}
+
 // Reads the plan's row type into `h`: the row, whether the target is one row, the token that opens a row, the register
 // that names no field, and where a hot read stops short of the text's end.
 @(private)
-rows_of :: proc(h: ^Cells, plan: ^typed.Plan, text_len: int) {
+rows_of :: proc(h: ^Cells_Of($H), plan: ^typed.Plan, text_len: int) {
 	listed: bool
 	h.row, listed = row_of(plan)
 	h.single = !listed
@@ -249,7 +268,7 @@ ROW_FRAMES :: 4
 
 // The read's depth inside a row.
 @(private)
-row_depth :: #force_inline proc "contextless" (h: ^Cells) -> int {
+row_depth :: #force_inline proc "contextless" (h: ^Cells_Of($H)) -> int {
 	return ROW_FRAMES - 1 - int(h.single)
 }
 
@@ -277,10 +296,11 @@ Column :: struct {
 // `Hook_Regs` inside a row: `b` is the column of the next cell, and `c` the row or, in a list row, the next cell's
 // element. A map row keeps `a` and `c` 0, so the room test sends each cell to the read that makes its entry. `single`
 // says the target is one row, which reads the text's first record, and `opens` counts the text's open and the rows a
-// single read has met.
+// single read has met. `H` is `typed.Reader`, or `typed.Check` for a model's load, which judges each cell by its
+// member's rules and leaves an empty cell of a struct row absent for the row's close to judge.
 @(private)
-Cells :: struct {
-	r:              typed.Reader,
+Cells_Of :: struct($H: typeid) {
+	r:              H,
 	row:            ^typed.Field,
 	cols:           []Column,
 	keys:           []core.Token,
@@ -291,7 +311,12 @@ Cells :: struct {
 	single:         bool,
 	no_header:      bool,
 	refuse_repeats: bool,
+	quiet:          bool, // a model's record past the one that judged the header, which refuses none of it again
+	halted:         bool, // a model's header lacks a required column, which no row can make up
 }
+
+@(private)
+Cells :: Cells_Of(typed.Reader)
 
 @(private)
 is_record :: #force_inline proc "contextless" (f: ^typed.Field) -> bool {
@@ -302,7 +327,7 @@ is_record :: #force_inline proc "contextless" (f: ^typed.Field) -> bool {
 // comment. The hot kinds read a cell in place, and all else, an empty cell included, fails these reads and goes to
 // `cell_cold`.
 @(private)
-on_cell :: #force_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
+on_cell :: #force_inline proc "contextless" (h: ^Cells_Of($H), regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
 	if t.kind != .Plain {
 		return row_token(h, regs, t)
 	}
@@ -310,6 +335,9 @@ on_cell :: #force_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, t:
 		return regs, .Next
 	}
 	col := (^Column)(uintptr(regs.b))
+	when H == typed.Check {
+		return cell_cold(h, regs, col, t)
+	}
 	if regs.c >= regs.a || t.lo >= h.hot_end {
 		return cell_cold(h, regs, col, t)
 	}
@@ -358,14 +386,30 @@ on_cell :: #force_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, t:
 	return regs, .Next
 }
 
+// The typed read's hook, a check's for a model's load.
+@(private)
+read_token :: #force_inline proc "contextless" (h: ^Cells_Of($H), regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	when H == typed.Check {
+		return typed.on_token_check(&h.r, regs, t)
+	} else {
+		return typed.on_token(&h.r, regs, t)
+	}
+}
+
 // A row's open and close, and the text's. The first row's open, or the text's close when it has no row, comes after the
 // header, so the columns are bound there.
 @(private)
-row_token :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+row_token :: #force_no_inline proc "contextless" (h: ^Cells_Of($H), regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	regs := regs
 	if t.kind == .End {
 		if h.r.sp == row_depth(h) {
 			col := (^Column)(uintptr(regs.b))
+			when H == typed.Check {
+				// A model's struct row marked the members it read, which its close judges with the cursor before them all.
+				if is_record(h.row) {
+					return read_token(h, {regs.a, u64(uintptr(h.row.first)), regs.c}, t)
+				}
+			}
 			if col.must {
 				return missing_cell(h, regs, col, t)
 			}
@@ -378,11 +422,11 @@ row_token :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 		if h.single && h.r.sp == 1 {
 			return regs, .Next
 		}
-		return typed.on_token(&h.r, regs, t)
+		return read_token(h, regs, t)
 	}
 	if h.r.sp == 1 {
 		if !h.single {
-			return typed.on_token(&h.r, regs, t)
+			return read_token(h, regs, t)
 		}
 		// The text's open, then its first row. A row target holds one row, and a later one is refused and passed over.
 		h.met += 1
@@ -402,7 +446,7 @@ row_token :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 	token := t
 	token.kind = h.opens
 	action: core.Action
-	regs, action = typed.on_token(&h.r, regs, token)
+	regs, action = read_token(h, regs, token)
 	if action == .Next {
 		regs.b = u64(uintptr(raw_data(h.cols)))
 		if h.row.kind == .Map {
@@ -415,7 +459,7 @@ row_token :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 // Refuses the required field the cursor stands before, and under a check each one after it, at the row's end, and closes
 // the row.
 @(private, cold)
-missing_cell :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, col: ^Column, t: core.Token) -> (core.Hook_Regs, core.Action) {
+missing_cell :: #force_no_inline proc "contextless" (h: ^Cells_Of($H), regs: core.Hook_Regs, col: ^Column, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	cols := ([^]Column)(col)
 	regs := regs
 	regs.b = h.past
@@ -433,7 +477,7 @@ missing_cell :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_
 			break
 		}
 	}
-	return typed.on_token(&h.r, regs, t)
+	return read_token(h, regs, t)
 }
 
 // The byte past the cell `t` as written, where the entry of a refused cell ends.
@@ -446,7 +490,7 @@ cell_end :: #force_inline proc "contextless" (t: core.Token) -> u64 {
 // A cell no hot read took: an empty cell, a kind or a spelling the hot reads leave out, a cell near the text's end, and
 // the cell that needs room made for it first.
 @(private, cold)
-cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, col: ^Column, t: core.Token) -> (core.Hook_Regs, core.Action) {
+cell_cold :: #force_no_inline proc "contextless" (h: ^Cells_Of($H), regs: core.Hook_Regs, col: ^Column, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	context = h.r.ctx
 	next := regs
 	next.b += u64(col.step)
@@ -480,14 +524,31 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 			// binds now, named by its position.
 			return widen_columns(h, regs, t)
 		}
-		if !h.r.refuse_unknown {
-			return next, .Next
-		}
+		kind := core.Typed_Error_Kind.Unknown_Field
 		at.b = h.past
-		_, action := typed.refuse(&h.r, at, {kind = .Unknown_Field, at = t.lo}, cell_end(t))
+		if !h.r.refuse_unknown {
+			// A model's struct that forbids the members it does not name refuses a longer row at its last member.
+			if !is_record(h.row) || !h.r.plan.meta[h.row.meta].forbid {
+				return next, .Next
+			}
+			kind, at.b = .Wrong_Length, at.b - size_of(typed.Field)
+		}
+		_, action := typed.refuse(&h.r, at, {kind = kind, at = t.lo}, cell_end(t))
 		return regs, action
 	}
 	map_row := h.row.kind == .Map
+	when H == typed.Check {
+		if is_record(h.row) {
+			if t.n == 0 {
+				return next, .Next
+			}
+			typed.mark_member(&h.r, regs, int(uintptr(col.rec) - uintptr(h.row.first)) / size_of(typed.Field) - 1)
+			if fld := typed.field_at(at.b); fld.kind == .Before {
+				_, action := before_cell(h, at, t, fld, uintptr(regs.c) + uintptr(col.offset))
+				return next, action
+			}
+		}
+	}
 	if t.n == 0 {
 		if col.required {
 			_, action := typed.refuse(&h.r, at, {kind = .Missing_Field, at = t.lo}, cell_end(t))
@@ -524,12 +585,90 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 	} else if reason = read_cell(&h.r, typed.field_at(at.b), t, uintptr(at.c) + uintptr(col.offset)); reason != .None {
 		at, action = typed.refuse_value(&h.r, at, t, reason)
 	} else {
+		when H == typed.Check {
+			action = judge_cell(&h.r, at, t, typed.field_at(at.b), uintptr(at.c) + uintptr(col.offset))
+		}
 		at.c += u64(col.stride)
 	}
 	if !map_row {
 		next.a, next.c = at.a, at.c
 	}
 	return next, action
+}
+
+// Judges the cell `t` that `fld` stored at `dest` by the record's rules, a number read by the loose grammar.
+@(private)
+judge_cell :: proc(c: ^typed.Check, regs: core.Hook_Regs, t: core.Token, fld: ^typed.Field, dest: uintptr) -> core.Action {
+	if c.plan.meta[fld.meta].rule_set == 0 {
+		return .Next
+	}
+	leaf := fld
+	for leaf.kind == .Maybe || leaf.kind == .Union {
+		leaf = typed.field_at(u64(uintptr(leaf.first))) if leaf.kind == .Maybe else one_arm(c.plan, &c.plan.meta[leaf.meta])
+	}
+	token := t
+	token.kind = .String
+	if leaf.kind >= .I8 && leaf.kind <= .F64 {
+		text := inner_text(c, t)
+		lo := u64(uintptr(raw_data(text)) - uintptr(raw_data(c.src)))
+		_, integer, _, _ := spell.number_loose(c.src, lo, lo + u64(len(text)))
+		token = {kind = .Number, role = .Value, lo = lo, n = u32(len(text)), spelling = core.number_spelling(core.NUMBER_DECIMAL, 1, 0 if integer else 1)}
+	}
+	return typed.check_rules(c, regs, token, fld, dest)
+}
+
+// Rewrites the cell `t` by the `before` of the member `fld`, then reads the replacement as a cell of its own into the
+// member at `dest`. A refusal names the cell's bytes.
+@(cold, private)
+before_cell :: proc(h: ^Cells_Of(typed.Check), regs: core.Hook_Regs, t: core.Token, fld: ^typed.Field, dest: uintptr) -> (core.Hook_Regs, core.Action) {
+	c := &h.r
+	b := c.plan.meta[fld.meta].before
+	hi := t.lo + u64(t.n)
+	if b.call == nil {
+		return typed.refuse(c, regs, {kind = .Unsupported, at = t.lo}, hi)
+	}
+	cell := t
+	cell.kind = .String
+	text, read := core.token_text(c.plan.readers, &c.view, cell, context.temp_allocator)
+	if !read {
+		return typed.refuse(c, regs, {kind = .No_Memory, at = t.lo}, hi)
+	}
+	out, back, action, failed := typed.run_before(c, regs, b, text, t.lo, hi)
+	if failed {
+		return back, action
+	}
+	buf: [spell.F64_ROOM]u8
+	replaced, spelled := typed.scalar_text(out, &buf)
+	if !spelled {
+		return typed.refuse(c, regs, {kind = .Unsupported, at = t.lo}, hi)
+	}
+	// The replacement is read from a text of its own, a string member under `borrow_strings` keeping it.
+	own := make([]u8, len(replaced))
+	copy(own, replaced)
+	defer if !c.borrow {
+		delete(own)
+	}
+	sink := c.sink
+	entries := len(sink.entries) if sink != nil else 0
+	failed_before := c.first.kind != .None
+	held := c.src
+	c.src = own
+	replacement := core.Token{n = u32(len(own)), kind = t.kind, role = t.role}
+	reason := read_cell(c, &b.field, replacement, dest)
+	action = judge_cell(c, regs, replacement, &b.field, dest) if reason == .None else .Next
+	c.src = held
+	if sink != nil {
+		for &e in sink.entries[entries:] {
+			e.start, e.end = t.lo, hi
+		}
+	}
+	if !failed_before && c.first.kind != .None {
+		c.first.at = t.lo
+	}
+	if reason != .None {
+		return typed.refuse_value(c, regs, t, reason)
+	}
+	return regs, action
 }
 
 // Stores the text of a quoted cell holding a `""` into the string at `dest`, in memory of the read's allocator.
@@ -554,7 +693,7 @@ inner_text :: #force_inline proc "contextless" (r: ^typed.Reader, t: core.Token)
 // since what decodes to other bytes spells none of them. The rest read as a string token, whose text `Readers.text`
 // gives.
 @(private)
-read_cell :: proc(r: ^typed.Reader, fld: ^typed.Field, t: core.Token, dest: uintptr) -> core.Typed_Error_Kind {
+read_cell :: proc(r: ^$R, fld: ^typed.Field, t: core.Token, dest: uintptr) -> core.Typed_Error_Kind {
 	m := &r.plan.meta[fld.meta]
 	cell := t
 	cell.kind = .String
@@ -577,7 +716,7 @@ read_cell :: proc(r: ^typed.Reader, fld: ^typed.Field, t: core.Token, dest: uint
 		runtime.mem_zero(rawptr(dest), int(m.size))
 		(^bool)(dest)^ = text == "true"
 	case .I8 ..= .F64, .Enum:
-		if fld.kind == .Enum && r.plan.enums != .Int {
+		if fld.kind == .Enum && !typed.enum_by_number(r.plan, m.enum_info) {
 			return typed.store_enum(r, cell, m.enum_info, dest, m.size)
 		}
 		text := inner_text(r, t)
@@ -589,7 +728,15 @@ read_cell :: proc(r: ^typed.Reader, fld: ^typed.Field, t: core.Token, dest: uint
 		if fld.kind == .Enum {
 			return typed.store_enum_value(m.enum_info, n, dest, m.size)
 		}
-		return typed.store_number(n, integer, r, core.Token{lo = lo, n = u32(len(text))}, fld, dest)
+		token := core.Token{lo = lo, n = u32(len(text))}
+		reason := typed.store_number(n, integer, r, token, fld, dest)
+		when R == typed.Check {
+			// A check takes `1.0` and `1e2` into an integer, as it takes a JSON number of that spelling.
+			if reason == .Wrong_Kind && fld.kind <= .U64 {
+				reason = typed.store_integral(r, token, fld, dest)
+			}
+		}
+		return reason
 	case .Cstring:
 		return typed.store_cstring(r, cell, dest)
 	case .Hook:
@@ -636,7 +783,7 @@ one_arm :: #force_inline proc "contextless" (plan: ^typed.Plan, m: ^typed.Meta) 
 // the fields in order. Returns how the walk goes on. A refused header leaves the target as it was. `from` above 0 binds
 // one more column, past the `from` bound before, and refuses for that column alone, which keeps the rows read before it.
 @(private, cold)
-bind_columns :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, at: u64, from := 0) -> core.Action {
+bind_columns :: #force_no_inline proc "contextless" (h: ^Cells_Of($H), regs: core.Hook_Regs, at: u64, from := 0) -> core.Action {
 	context = h.r.ctx
 	sp := h.r.sp
 	// A header's refusal has its field alone as a path.
@@ -650,7 +797,7 @@ bind_columns :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_
 
 // Binds the column at the cursor, past the last bound, and reads cell `t` there.
 @(private, cold)
-widen_columns :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+widen_columns :: #force_no_inline proc "contextless" (h: ^Cells_Of($H), regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	from := len(h.cols) - 1
 	// A refused allocation leaves the columns as they were, and the cell passes.
 	if action := bind_columns(h, regs, t.lo, from); action == .Stop || len(h.cols) == from + 1 {
@@ -672,14 +819,18 @@ note_column :: proc(bound: ^map[string]int, name: string, c: int, first: bool) -
 	return
 }
 
+// Refuses a header's column, which a model's record past the one that judged the header leaves unjudged.
 @(private)
-refuse_header :: proc(h: ^Cells, regs: core.Hook_Regs, kind: core.Typed_Error_Kind, at: u64, name: string) -> core.Action {
+refuse_header :: proc(h: ^Cells_Of($H), regs: core.Hook_Regs, kind: core.Typed_Error_Kind, at: u64, name: string) -> core.Action {
+	if h.quiet && kind != .No_Memory {
+		return .Next
+	}
 	_, action := typed.refuse(&h.r, regs, {kind = kind, at = at, steps = {0 = core.Name(name)}, n_steps = 1})
 	return .Stop if action == .Stop else .Next
 }
 
 @(private)
-columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64, from: int) -> core.Action {
+columns_of :: proc(h: ^Cells_Of($H), regs: core.Hook_Regs, at: u64, from: int) -> core.Action {
 	plan := h.r.plan
 	row := h.row
 	record := is_record(row)
@@ -722,8 +873,16 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64, from: int) -> core.
 				break
 			}
 		}
-		if record && k < 0 && h.r.refuse_unknown && refusing && refuse_header(h, regs, .Unknown_Field, key.lo, spelled) == .Stop {
-			return .Stop
+		if record && k < 0 && refusing {
+			// A read_only member's name is refused only where the struct forbids the names it does not read.
+			m := &plan.meta[row.meta]
+			kind := core.Typed_Error_Kind.Unknown_Field if h.r.refuse_unknown || m.forbid else .None
+			if typed.read_only_key(m, name) {
+				kind = .Read_Only if m.forbid else .None
+			}
+			if kind != .None && refuse_header(h, regs, kind, key.lo, spelled) == .Stop {
+				return .Stop
+			}
 		}
 		if prev, repeated := note_column(&bound, name, c, h.r.first_key); repeated {
 			if h.refuse_repeats && refusing && refuse_header(h, regs, .Duplicate_Key, key.lo, spelled) == .Stop {
@@ -755,7 +914,14 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64, from: int) -> core.
 		return .Next
 	}
 	end := &plan.meta[int(plan.meta[row.meta].block) + len(members)]
-	for r in end.required {
+	required := end.required
+	when H == typed.Check {
+		// A partial load misses no column of a row it reads as its root, the patch of one record.
+		if h.r.partial && typed.holds_set(plan, &plan.fields[0]) {
+			required = nil
+		}
+	}
+	for r in required {
 		name := plan.meta[members[r].meta].name
 		c, found := bound[name]
 		if h.no_header {
@@ -763,9 +929,16 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64, from: int) -> core.
 		}
 		if found {
 			cols[c].required = true
-		} else if from == 0 && refuse_header(h, regs, .Missing_Field, h.keys[0].lo if len(h.keys) > 0 else at, name) == .Stop {
+			continue
+		}
+		if from == 0 && refuse_header(h, regs, .Missing_Field, h.keys[0].lo if len(h.keys) > 0 else at, name) == .Stop {
 			return .Stop
 		}
+		// A model's record cannot make up a column its header lacks, so the check reports the header alone.
+		h.halted = H == typed.Check
+	}
+	if h.halted {
+		return .Stop
 	}
 	must := false
 	#reverse for &col in cols[:width] {
@@ -778,7 +951,7 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64, from: int) -> core.
 // Where a walk's fault leaves the read. A fault in the header has no list to give the target and no path. A fault past it
 // has the header refused first, and one in a row stands at the row, which keeps the cells it read, with no field to name.
 @(private)
-fault_position :: proc(h: ^Cells, regs: ^core.Hook_Regs) {
+fault_position :: proc(h: ^Cells_Of($H), regs: ^core.Hook_Regs) {
 	if h.cols == nil && !h.no_header {
 		last := h.keys[len(h.keys) - 1] if len(h.keys) > 0 else core.Token{}
 		if last.lo == 0 && last.n == 0 {
@@ -792,7 +965,7 @@ fault_position :: proc(h: ^Cells, regs: ^core.Hook_Regs) {
 			h.r.frames[h.r.sp - 1].b = regs.b
 		} else if !is_record(h.row) {
 			// A list row closes, to be counted where it opened.
-			regs^, _ = typed.on_token(&h.r, regs^, core.Token{kind = .End, role = .Value})
+			regs^, _ = read_token(h, regs^, core.Token{kind = .End, role = .Value})
 			regs.c -= u64(h.row.stride)
 		}
 	}

@@ -164,9 +164,10 @@ leaf :: proc(r: ^Reading, kind: typed.Read_Kind, m: typed.Meta) -> (n: rules.Nod
 	case .Scalar:
 		n.kinds = {.Null, .Bool, .Number, .String}
 	case .Enum, .Bit_Elem:
-		if m.enum_info != nil && (r.plan.enums == .Name || exact_values(m.enum_info)) {
-			n.kinds = {.String} if r.plan.enums == .Name else {.Integer}
-			n.enum_of, n.has_enum = enum_operands(r, m.enum_info, r.plan.enums == .Name), true
+		by_name := m.enum_info != nil && !typed.enum_by_number(r.plan, m.enum_info)
+		if m.enum_info != nil && (by_name || exact_values(m.enum_info)) {
+			n.kinds = {.String} if by_name else {.Integer}
+			n.enum_of, n.has_enum = enum_operands(r, m.enum_info, by_name), true
 			break
 		}
 		n.kinds = {.Integer}
@@ -180,8 +181,25 @@ leaf :: proc(r: ^Reading, kind: typed.Read_Kind, m: typed.Meta) -> (n: rules.Nod
 		n.rules.minimum, n.rules.maximum = decimal(r, low), decimal(r, high)
 	case:
 		n.kinds = rules.EVERY_KIND
+		if kind == .Hook && m.data != nil {
+			return carrier_node(r, &(^Custom_Of)(m.data).plan)
+		}
+		if c, is_carrier := carrier_of(m.type); kind == .Hook && is_carrier {
+			n.kinds, n.content_encoding = c.kinds, c.encoding
+		}
 	}
 	return
+}
+
+// The node of a custom's value: the root's of its carrier's plan, whose blocks it shares.
+@(private)
+carrier_node :: proc(r: ^Reading, plan: ^typed.Plan) -> rules.Node {
+	sub := Reading{plan = plan, d = r.d, direction = r.direction}
+	at := node_of(&sub, 0)
+	delete(sub.nodes)
+	delete(sub.shapes)
+	r.failed ||= sub.failed
+	return {array = -1, object = -1} if r.failed else r.d.nodes[at]
 }
 
 @(private)
@@ -253,8 +271,9 @@ object_of :: proc(r: ^Reading, m: typed.Meta, is_map: bool) -> i32 {
 			}
 		}
 		x.rules.read_only, x.rules.write_only = role == .Read_Only, role == .Write_Only
+		// A dump with no option leaves out only what `omitempty` finds empty.
 		if r.direction == .Dump {
-			x.required = !r.plan.fields[record].omit
+			x.required = !r.plan.meta[record].omit_empty
 		}
 		append(&members, x)
 	}
@@ -270,7 +289,8 @@ arms_of :: proc(r: ^Reading, m: typed.Meta, null: bool) -> []rules.Node_Index {
 	arms, failed := make([]rules.Node_Index, len(m.arms) + (1 if null else 0))
 	r.failed ||= failed != nil
 	for arm, k in m.arms {
-		arms[k] = node_of(r, arm.fields, false)
+		// An arm's record holds the union's rules, with the arm type's own merged in when it has some.
+		arms[k] = node_of(r, arm.fields, r.plan.meta[arm.fields].rule_set != m.rule_set)
 	}
 	if null && !r.failed {
 		arms[len(m.arms)] = add(r, &r.d.nodes, rules.Node{kinds = {.Null}, array = -1, object = -1})
@@ -302,10 +322,10 @@ exact_values :: proc(e: ^runtime.Type_Info_Enum) -> bool {
 	return true
 }
 
-// The operands of the enum `e`: its names, or its values. The names are the type's and outlive the description.
+// The operands of the enum `e`: its names, or its values. The names are the plan's and outlive the description.
 @(private)
 enum_operands :: proc(r: ^Reading, e: ^runtime.Type_Info_Enum, names: bool) -> []core.Value {
-	out, failed := make([]core.Value, len(e.names))
+	out, failed := make([]core.Value, len(e.values))
 	r.failed ||= failed != nil
 	if failed == nil {
 		for &o, k in out {

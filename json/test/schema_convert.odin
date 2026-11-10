@@ -2,6 +2,7 @@ package json_tests
 
 import "core:testing"
 import core "../../core"
+import "../../core/typed"
 import schema "../../core/schema"
 import dsv "../../dsv"
 import json ".."
@@ -30,10 +31,16 @@ converted :: proc(t: ^testing.T, rules_text, src: string, from, to: core.As) -> 
 	return convert_document(t, &c, &doc, to)
 }
 
+// The typed reads a handle needs to check a description, those of CSV for a CSV handle and none for a JSON one.
+@(private = "file")
+checks_of :: proc(as: core.As) -> ^typed.Format_Reads {
+	return dsv.checks(.Csv) if as.readers == dsv.as(.Csv).readers else nil
+}
+
 @(private = "file")
 convert_document :: proc(t: ^testing.T, c: ^schema.Compiled, doc: ^core.Document, to: core.As) -> Converted {
 	cv: schema.Converter
-	err := schema.converter_init(&cv, c, doc.as, to)
+	err := schema.converter_init(&cv, c, doc.as, to, checks_of(doc.as), checks_of(to))
 	testing.expectf(t, err == nil, "%v", err)
 	defer schema.converter_destroy(&cv)
 	text, stage, err2 := schema.convert(&cv, doc, allocator = context.temp_allocator)

@@ -1,8 +1,6 @@
 package model
 
 import "base:runtime"
-import "core:reflect"
-import "core:strings"
 import core ".."
 import typed "../typed"
 
@@ -21,27 +19,10 @@ register_before :: proc(reg: ^Registry, $T: typeid, field: string, rewrite: proc
 	call :: proc(value: core.Value, fn: rawptr, r: ^Report) -> core.Value {
 		return (proc(value: core.Value, r: ^Report) -> core.Value)(fn)(value, r)
 	}
-	return add_before(reg, {T, field, {call = call, fn = rawptr(rewrite)}})
-}
-
-@(private)
-add_before :: proc(reg: ^Registry, x: Before_Of) -> runtime.Allocator_Error {
-	x := x
-	if len(x.field) == 0 || reflect.struct_field_by_name(x.type, x.field).name != x.field {
+	if !has_member(T, field, nil) {
 		return .Invalid_Argument
 	}
-	for &y in reg.befores {
-		if y.type == x.type && y.field == x.field {
-			y.b = x.b
-			return nil
-		}
-	}
-	x.field = strings.clone(x.field) or_return
-	if _, err := append(&reg.befores, x); err != nil {
-		delete(x.field)
-		return err
-	}
-	return nil
+	return add_hook(&reg.befores, Before_Of{T, field, {call = call, fn = rawptr(rewrite), value = typed.before_value}}, true)
 }
 
 // A copy of the `before` of member `field` of `owner` in a plan that loads, nil for none.
@@ -83,12 +64,19 @@ replacement_rule :: proc(h: ^typed.Model_Rules, owner: typeid, field: string, ty
 @(private)
 replacement_plans :: proc(c: ^Compiling, reads: ^typed.Format_Reads, p: ^typed.Plan, allocator: runtime.Allocator) -> core.Typed_Refusal {
 	for &m in p.meta {
+		if m.before != nil && m.before.first_match {
+			if p.value_text == nil {
+				// A format that holds no value alone, a table's, reads no text whole.
+				return {kind = .Unsupported, want = {m.type, "first match"}}
+			}
+			continue
+		}
 		if m.before == nil || p.value_text == nil {
 			continue
 		}
 		s := Replacement_Rules{c = c^, root = {rules = m.before.rules}, type = m.type}
 		s.model.member, s.model.rule_sets, s.model.leaves = replacement_rule, nil, nil
-		sub, refused := reads.plan(m.type, {enums = c.reg.naming.enums, rename = c.reg.naming.fields, union_tag = c.reg.naming.union_tag, model = &s.model}, allocator)
+		sub, refused := reads.plan(m.type, {rename = c.reg.naming.fields, union_tag = c.reg.naming.union_tag, model = &s.model, hooks = p.options.hooks}, allocator)
 		if refused.kind == .Unsupported {
 			// A format that holds a type only inside a record, a table's, reads a replacement as a cell of its own.
 			continue

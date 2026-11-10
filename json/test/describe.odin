@@ -140,7 +140,7 @@ class :: proc(plan: ^typed.Plan, f: typed.Field, m: typed.Meta) -> (string, bool
 	case .Scalar:
 		return "scalar", true
 	case .Enum, .Bit_Elem:
-		return "str" if m.enum_info != nil && plan.enums == .Name else "int", false
+		return "str" if m.enum_info != nil && !typed.enum_by_number(plan, m.enum_info) else "int", false
 	case .Struct, .Required, .Map:
 		return "obj", false
 	case .Slice, .Dynamic, .Array, .Fixed_List, .Bit_Set:

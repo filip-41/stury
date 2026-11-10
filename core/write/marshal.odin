@@ -124,6 +124,7 @@ Walker :: struct {
 	side:      map[typeid]^typed.Plan,
 	arena:     runtime.Arena, // what hooks allocate
 	tag_field: typed.Field, // the record of a union's tag, a string
+	omits:     ^typed.Omits, // what a model's dump leaves out, nil for none
 	err:       core.Typed_Refusal,
 	// A visit's visitor, and the open frame and depth of the record it is called at, which `visit_path` reads.
 	visitor:   ^Visitor,
@@ -138,7 +139,7 @@ marshal :: proc(value: any, plan: ^typed.Plan, write := core.Write_Options{}, al
 	if err := check_value(value, plan); err.kind != .None {
 		return nil, core.error_of(err)
 	}
-	text, err := plan.marshal(plan, value.data, write, {}, allocator)
+	text, err := plan.marshal(plan, value.data, write, {}, allocator, nil)
 	return text, core.error_of(err)
 }
 
@@ -147,7 +148,7 @@ marshal_stream :: proc(w: io.Stream, value: any, plan: ^typed.Plan, write := cor
 	if err := check_value(value, plan); err.kind != .None {
 		return core.error_of(err)
 	}
-	_, err := plan.marshal(plan, value.data, write, w, allocator)
+	_, err := plan.marshal(plan, value.data, write, w, allocator, nil)
 	return core.error_of(err)
 }
 
@@ -170,14 +171,16 @@ check_value :: proc(value: any, plan: ^typed.Plan) -> core.Typed_Refusal {
 
 // The compact and pretty instances of a format's walk, each with the plain string writer `put` and with `put_opted`, the
 // one a call with `ascii` or `escape_html` takes. `Plan.marshal` is a format's one call of this. The text comes from
-// `allocator`, and what lasts only the call from `context.allocator`.
-marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, $T: Tree, $put, $put_opted: Put) -> ([]u8, core.Typed_Refusal) {
+// `allocator`, and what lasts only the call from `context.allocator`. `omits`, nil for none, is asked at each member the
+// plan marks `omit`.
+marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, $T: Tree, $put, $put_opted: Put, omits: ^typed.Omits) -> ([]u8, core.Typed_Refusal) {
 	frames: [FRAMES]Frame = ---
 	ptrs: [core.MAX_DEPTH]Target = ---
 	spill: [ROOM_MAX]u8 = ---
 	w: Walker
 	init(&w.out, &spill, allocator, stream)
 	walker_init(&w, opts, raw_data(frames[:]), raw_data(ptrs[:]))
+	w.omits = omits
 	kind := walker_value(&w, plan, uintptr(value), T, put, put_opted)
 	release_walker(&w)
 	w.err.kind = kind
@@ -488,7 +491,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 				case .Struct, .Required:
 					if too_deep(w, top) {
 						k = .Too_Deep
-					} else if w.opts.sort_keys || vf.kind == .Required && w.meta[w.meta[vf.meta].block + w.meta[vf.meta].members].capture >= 0 {
+					} else if w.opts.sort_keys || vf.lists {
 						k = list_struct(w, vf, va, nil, put)
 						if k == .None {
 							break value
@@ -578,18 +581,28 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 						}
 					}
 				case .Any, .Hook:
+					// A visit judges what a hook with no rules refuses, which a hook with rules has judged.
 					when V {
-						continue next
-					} else {
-						a: any
-						// A hook's stand-in may come from `Walker.arena`, which lasts the call. A hook with no write proc refuses the value.
-						if vf.kind == .Any {
-							a = (^any)(va)^
-						} else if write := w.meta[vf.meta].write; write == nil {
-							k = .Unsupported
-						} else {
-							a, k = write(rawptr(va), runtime.arena_allocator(&w.arena))
+						if vf.kind == .Any || w.meta[vf.meta].rule_set > 0 {
+							continue next
 						}
+					}
+					a: any
+					// A hook's stand-in may come from `Walker.arena`, which lasts the call. A hook with no write proc refuses the value.
+					if vf.kind == .Any {
+						a = (^any)(va)^
+					} else if write := w.meta[vf.meta].write; write == nil {
+						k = .Unsupported
+					} else {
+						data := w.meta[vf.meta].data
+						context.user_ptr = data if data != nil else context.user_ptr
+						a, k = write(rawptr(va), runtime.arena_allocator(&w.arena))
+					}
+					when V {
+						if k == .None {
+							continue next
+						}
+					} else {
 						if k == .None {
 							rec, e := any_value(w, a, T, put)
 							k = e

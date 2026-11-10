@@ -28,14 +28,14 @@ READING_ROUNDS :: 16
 // The most failures of the output a round reads the readings from.
 READING_FAILURES :: 4096
 
-// Binds `c` to `from` and `to`. A schema `to` cannot bind is a `.Write` refusal of the caller's.
-converter_init :: proc(cv: ^Converter, c: ^Compiled, from, to: core.As) -> (err: core.Error) {
+// Binds `c` to `from` and `to`, each with the typed reads of its format as `bind` takes them. A schema `to` cannot bind is a `.Write` refusal of the caller's.
+converter_init :: proc(cv: ^Converter, c: ^Compiled, from, to: core.As, from_reads: ^typed.Format_Reads = nil, to_reads: ^typed.Format_Reads = nil) -> (err: core.Error) {
 	cv.to = to
-	cv.from = bind(c, from) or_return
+	cv.from = bind(c, from, from_reads) or_return
 	defer if err != nil {
 		unbind(&cv.from)
 	}
-	cv.into = bind(c, to) or_return
+	cv.into = bind(c, to, to_reads) or_return
 	if virtual.arena_init_growing(&cv.arena) != nil {
 		unbind(&cv.into)
 		return core.error_of(core.Typed_Refusal{kind = .No_Memory})

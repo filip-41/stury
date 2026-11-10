@@ -319,10 +319,11 @@ a_check_refuses_an_enum_a_bit_set_a_maybe_and_a_pointer_as_unmarshal_does :: pro
 }
 
 @(test)
-a_check_reads_an_any_and_reports_around_it :: proc(t: ^testing.T) {
+a_check_reads_a_raw_and_reports_around_it :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	refuses(t, `{"v":{"a":[1,{"k":2.5}]},"n":"x"}`, struct{ v: any, n: i32 }, .Wrong_Kind, {"/n"})
-	refuses(t, `{"v":[1],"n":"x"}`, struct{ v: any, n: i32 }, .Wrong_Kind, {"/n"})
+	refuses(t, `{"v":{"a":[1,{"k":2.5}]},"n":"x"}`, struct{ v: typed.Raw, n: i32 }, .Wrong_Kind, {"/n"})
+	refuses(t, `{"v":[1],"n":"x"}`, struct{ v: typed.Raw, n: i32 }, .Wrong_Kind, {"/n"})
+	refuses(t, `{"v":[1],"n":2}`, struct{ v: any, n: i32 }, .Unsupported, {"/v"})
 }
 
 @(test)

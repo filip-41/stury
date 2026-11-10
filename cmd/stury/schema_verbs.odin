@@ -172,7 +172,7 @@ sample_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 	// A value is a line, so the text is compact unless a layout option asks for more.
 	layout := output_layout(run).opts
 	layout.pretty = layout.pretty && cli.layout_flag != ""
-	values, serr := schema.sample(&d, as, {seed = cli.verbs.seed, count = cli.verbs.count, invalid = cli.verbs.invalid, comments = cli.verbs.comments, write = layout})
+	values, serr := schema.sample(&d, as, {reads = checks_of(as, writes_cells(o)), seed = cli.verbs.seed, count = cli.verbs.count, invalid = cli.verbs.invalid, comments = cli.verbs.comments, write = layout})
 	if serr != nil {
 		message.write_stderr("stury: error: %s\n", edit_error_text(text, serr))
 		os.exit(1)

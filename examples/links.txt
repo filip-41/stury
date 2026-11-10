@@ -6,6 +6,7 @@ crossformat 6 9
 dsv 0 43
 edit 4 0
 jsonc 5 0
+model 7 0
 quickstart 6 0
 records 1 0
 roundtrip 4 0

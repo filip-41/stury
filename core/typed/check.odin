@@ -780,10 +780,24 @@ store_integral :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token,
 	return store_int(u64(v) if v >= 0 else u64(-(v + 1)) + 1, v < 0, fld.kind, dest)
 }
 
-// Judges a scalar a type's plan stored by its record's rules, which the record's `Meta.rule_set` names. A string
-// record's stored text is its decoded text.
+// Stores into an enum read by number a number spelled with a fraction or an exponent that is an integer, as
+// `store_integral` stores one into an integer.
 @(cold)
-@(private)
+store_integral_enum :: proc(h: ^Check, t: core.Token, info: ^runtime.Type_Info_Enum, dest: uintptr, size: u32) -> core.Typed_Error_Kind {
+	if t.spelling & core.NUMBER_KIND_MASK != 0 {
+		return .Wrong_Kind
+	}
+	d := spell.decimal_of(string(raw_data(h.src)[t.lo:][:t.n]))
+	if !rules.integral(d) {
+		return .Wrong_Kind
+	}
+	v, fits := rules.decimal_i64(d)
+	return store_enum_value(info, {u64(v), .Int}, dest, size) if fits else .Not_A_Member
+}
+
+// Judges a scalar a type's plan stored by its record's rules, which the record's `Meta.rule_set` names. A string
+// record's stored text is its decoded text. `.Skip` says the scalar failed and the sink took its failures.
+@(cold)
 check_rules :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token, fld: ^Field, dest: uintptr) -> core.Action {
 	l := &h.plan.leaves[h.plan.meta[fld.meta].rule_set - 1]
 	fails: rules.Failures
@@ -809,7 +823,7 @@ check_rules :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_R
 			return .Stop
 		}
 	}
-	return .Next
+	return .Skip
 }
 
 // The step of the value at `at` inside the container `f` of the `Checked` record `owner`: its index, the name of the

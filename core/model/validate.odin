@@ -19,12 +19,12 @@ validate :: proc(m: ^Model($T), v: ^T, sink: ^typed.Sink = nil) -> core.Error {
 }
 
 @(private)
-validate_value :: proc(plan: ^typed.Plan, v: rawptr, sink: ^typed.Sink) -> core.Error {
+validate_value :: proc(plan: ^typed.Plan, v: rawptr, sink: ^typed.Sink, omits: ^typed.Omits = nil) -> core.Error {
 	j := Judging{visitor = {call = write.Visit(judge), close = close_struct}, plan = plan, sink = sink}
 	if sink != nil {
 		j.floor = len(sink.entries)
 	}
-	ended := write.visit(plan, v, &j.visitor)
+	ended := write.visit(plan, v, &j.visitor, omits)
 	regex.scratch_destroy(&j.scratch)
 	delete(j.steps)
 	if j.first.kind == .None {
@@ -50,6 +50,10 @@ Judging :: struct {
 judge :: proc(v: ^write.Visitor, f: ^typed.Field, at: uintptr, kind: core.Typed_Error_Kind) -> bool {
 	j := (^Judging)(v)
 	fails := rules.Failures{kind} if kind != .None else judged(j, f, at)
+	if .No_Memory in fails {
+		j.first = {kind = .No_Memory}
+		return false
+	}
 	for k in fails {
 		if !report(j, k) {
 			return false
@@ -94,6 +98,23 @@ judged :: proc(j: ^Judging, f: ^typed.Field, at: uintptr) -> rules.Failures {
 		return rules.judge_count(u64((^int)(at + uintptr(j.plan.meta[f.meta].tag))^), l.min_items, l.max_items)
 	case .Map:
 		return rules.judge_count(u64((^runtime.Raw_Map)(at).len), l.min_members, l.max_members)
+	case .Hook:
+		return judged_hooked(j, l, &j.plan.meta[f.meta], at)
+	}
+	return {}
+}
+
+// The rules a hooked value fails, judged on what its write hook gives: a string's text, or a number's.
+@(private)
+judged_hooked :: proc(j: ^Judging, l: ^rules.Leaf, m: ^typed.Meta, at: uintptr) -> rules.Failures {
+	context.user_ptr = m.data if m.data != nil else context.user_ptr
+	given, refused := m.write(rawptr(at), context.temp_allocator)
+	if refused != .None {
+		return {refused}
+	} else if given.id == string {
+		return rules.judge_string(l, (^string)(given.data)^, &j.scratch if l.pattern != nil else nil)
+	} else if given.id == core.Number_Text {
+		return rules.judge_number(l, (^core.Number_Text)(given.data).text, nil)
 	}
 	return {}
 }

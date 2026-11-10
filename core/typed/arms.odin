@@ -839,6 +839,8 @@ run_start :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run, rec: i32, nest: int, step: 
 	c.expect, c.borrow, c.first_key, c.refuse_unknown, c.wide, c.wrap_sp, c.wrap = h.expect, h.borrow, h.first_key, h.refuse_unknown, true, 0, nil
 	c.view, c.plan, c.ctx, c.find_tag, c.format = h.view, h.plan, h.ctx, h.find_tag, h.format
 	c.first, c.fatal, c.nest, c.pool, c.run, c.after, c.taken = {}, .None, nest, p, r, nil, nil
+	// An arm's structs sit below a union, which `merge` replaces whole, so a partial load reads them in full.
+	c.partial = false
 	c.sink = nil
 	if h.sink != nil && x.apply != nil {
 		switch {

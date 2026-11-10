@@ -1,5 +1,6 @@
 package typed
 
+import "base:runtime"
 import "core:reflect"
 import "core:strings"
 import rules "../rules"
@@ -100,16 +101,22 @@ renamed :: proc(b: ^Builder, name: string) -> string {
 	if b.rename == .None {
 		return name
 	}
-	out, failed := make([]u8, len(name))
+	out, failed := rename_text(name, b.rename, context.allocator)
 	if failed != nil {
 		refuse_plan(b, .No_Memory)
 		return name
 	}
+	return owned(b, transmute([]u8)out)
+}
+
+// A `snake_case` name spelled as `rename` says, in a new string.
+rename_text :: proc(name: string, rename: Rename, allocator: runtime.Allocator) -> (text: string, err: runtime.Allocator_Error) {
+	out := make([]u8, len(name), allocator) or_return
 	n := 0
-	upper := b.rename == .Pascal
+	upper := rename == .Pascal
 	for i in 0 ..< len(name) {
 		c := name[i]
-		#partial switch b.rename {
+		#partial switch rename {
 		case .Camel, .Pascal:
 			if c == '_' {
 				upper = true
@@ -127,9 +134,13 @@ renamed :: proc(b: ^Builder, name: string) -> string {
 			if c >= 'a' && c <= 'z' {
 				c -= 32
 			}
+		case .Snake:
+			if c >= 'A' && c <= 'Z' {
+				c += 32
+			}
 		}
 		out[n] = c
 		n += 1
 	}
-	return owned(b, out[:n])
+	return string(out[:n]), nil
 }

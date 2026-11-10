@@ -124,6 +124,10 @@ gather :: proc(h: ^Hints, d: ^rules.Description) {
 				append(&h.strings, t)
 			}
 		}
+		// A text of the grammar of a format is what tells one format from another.
+		if sample := format_sample(r.format); r.format != "" && sample != "" {
+			append(&h.strings, sample)
+		}
 	}
 	for o in d.objects {
 		for m in o.members {
@@ -212,13 +216,19 @@ candidates :: proc(s: ^Search, nodes: []rules.Node_Index, depth: int) -> []core.
 	return out[:]
 }
 
-// The first few values of `nodes` that the check of `s.from` takes.
+// The first few values of `nodes` that the check of `s.from` takes. A flat format cannot spell a sub-value, a cell or a
+// row, as a text of its own, so there the candidates stand unjudged and the check of the whole table decides.
 @(private = "file")
 fitting :: proc(s: ^Search, nodes: []rules.Node_Index, depth: int) -> []core.Value {
 	out := make([dynamic]core.Value, context.temp_allocator)
+	flat := s.from.as.readers != nil && s.from.as.readers.flat
 	for v in candidates(s, nodes, depth) {
 		if len(out) == MAX_CANDIDATES {
 			break
+		}
+		if flat {
+			append(&out, v)
+			continue
 		}
 		kept := context.temp_allocator
 		context.temp_allocator = virtual.arena_allocator(&s.texts)

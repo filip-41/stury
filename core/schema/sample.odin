@@ -21,6 +21,8 @@ import "../write"
 
 // What `sample` draws and how. The zero value gives one valid value from seed 0.
 Sample_Options :: struct {
+	// The typed reads of the format `as` names, as `bind` takes them, for one whose check a description needs them for.
+	reads:         ^typed.Format_Reads,
 	seed:          u64,
 	// How many values to give, 1 when 0.
 	count:         int,
@@ -70,7 +72,7 @@ sample :: proc(d: ^rules.Description, as: core.As, opts := Sample_Options{}, all
 	defer asserted_restore(d, asserted)
 	c := compile_description(d)
 	defer destroy(&c)
-	b := bind(&c, as) or_return
+	b := bind(&c, as, opts.reads) or_return
 	defer unbind(&b)
 	arena: virtual.Arena
 	if virtual.arena_init_growing(&arena) != nil {
@@ -651,6 +653,15 @@ letters :: proc(g: ^Gen, n: int) -> string {
 		c = u8('a' + below(g, 26))
 	}
 	return string(b)
+}
+
+// A text of the grammar the format `name` has, the same every call, in the temporary allocator. "" for a format that is
+// not known.
+@(private)
+format_sample :: proc(name: string) -> string {
+	context.allocator = context.temp_allocator
+	g := Gen{}
+	return format_text(&g, name)
 }
 
 // A text of the grammar the format `name` has, or "" for one that is not known.

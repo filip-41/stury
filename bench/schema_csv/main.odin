@@ -53,11 +53,12 @@ judge :: proc(line: string) -> string {
 		return fmt.tprint("E", cerr)
 	}
 	spec := dsv.Spec.Tsv if c.spec == "tsv" else .Csv
+	reads := dsv.checks(.Tsv) if spec == .Tsv else dsv.checks(.Csv)
 	opts := dsv.Options{no_header = c.no_header}
 	if c.ragged {
 		opts.tolerate = {.Ragged}
 	}
-	bound, berr := schema.bind(&compiled, dsv.as(spec, opts))
+	bound, berr := schema.bind(&compiled, dsv.as(spec, opts), reads)
 	defer schema.unbind(&bound)
 	if berr != nil {
 		return fmt.tprint("U", berr)

@@ -135,7 +135,7 @@ model_loads_a_built_value_as_its_text :: proc(t: ^testing.T) {
 csv_model_without_a_header_binds_by_position :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
-	by_position := dsv.as(.Csv, {no_header = true})
+	by_position := dsv.layout(.Csv, {no_header = true})
 	out, rows, _ := loaded(t, dsv.checks(.Csv), "1,ada,30\n2,b,10\nx,cy,20\n", layout = by_position)
 	testing.expect_value(t, out, "Too_Short/1/name;Below_Minimum/1/age;Wrong_Kind/2/id;")
 	testing.expect_value(t, rows[0].name, "ada")
@@ -148,7 +148,7 @@ csv_model_of_rows_that_are_no_structs_reads_plainly :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	reg: model.Registry
-	m, e := model.compile(&reg, [][]string, dsv.checks(.Csv), layout = dsv.as(.Csv, {no_header = true}))
+	m, e := model.compile(&reg, [][]string, dsv.checks(.Csv), layout = dsv.layout(.Csv, {no_header = true}))
 	walktest.expect_nil(t, e)
 	sink: typed.Sink
 	rows: [][]string
@@ -156,7 +156,7 @@ csv_model_of_rows_that_are_no_structs_reads_plainly :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, len(sink.entries), 0)
 	testing.expect_value(t, rows[1][1], "d")
-	numbers_model, ne := model.compile(&reg, [][]int, dsv.checks(.Csv), layout = dsv.as(.Csv, {no_header = true}))
+	numbers_model, ne := model.compile(&reg, [][]int, dsv.checks(.Csv), layout = dsv.layout(.Csv, {no_header = true}))
 	walktest.expect_nil(t, ne)
 	numbers: [][]int
 	sink2: typed.Sink
@@ -422,14 +422,14 @@ csv_model_reads_map_rows_and_plain_elements :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(rows), 2)
 	testing.expect_value(t, rows[0]["b"], 2)
 	testing.expect_value(t, spelled(&sink), "Wrong_Kind/1/b;")
-	flags, fe := model.compile(&reg, [][]bool, dsv.checks(.Csv), layout = dsv.as(.Csv, {no_header = true}))
+	flags, fe := model.compile(&reg, [][]bool, dsv.checks(.Csv), layout = dsv.layout(.Csv, {no_header = true}))
 	walktest.expect_nil(t, fe)
 	bools: [][]bool
 	sink2: typed.Sink
 	_ = model.load(&flags, transmute([]u8)string("true,x\n"), &bools, &sink2)
 	testing.expect_value(t, spelled(&sink2), "Wrong_Kind/0/1;")
 	testing.expect_value(t, bools[0][0], true)
-	whole, we := model.compile(&reg, [][]int, dsv.checks(.Csv), layout = dsv.as(.Csv, {no_header = true}))
+	whole, we := model.compile(&reg, [][]int, dsv.checks(.Csv), layout = dsv.layout(.Csv, {no_header = true}))
 	walktest.expect_nil(t, we)
 	ints: [][]int
 	sink3: typed.Sink
@@ -495,9 +495,36 @@ csv_model_judges_the_header_once_whole_or_streamed :: proc(t: ^testing.T) {
 csv_model_forbids_a_cell_past_the_last_column_of_a_headerless_row :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
-	by_position := dsv.as(.Csv, {no_header = true})
+	by_position := dsv.layout(.Csv, {no_header = true})
 	out, _, _ := loaded(t, dsv.checks(.Csv), "1,ada,30,n,EXTRA\n", extra = model.Extra.Forbid, layout = by_position)
 	testing.expect_value(t, out, "Wrong_Length/0/note;")
 	out, _, _ = loaded(t, dsv.checks(.Csv), "1,ada,30,n,EXTRA\n", layout = by_position)
 	testing.expect_value(t, out, "")
+}
+
+@(private = "file")
+Patch_Row :: struct {
+	id:   int,
+	name: string `model:"len>=2"`,
+	set:  model.Fields_Set,
+}
+
+// A partial read of a record misses no column and no cell, and a table's rows, which no merge descends into, read in full.
+@(test)
+csv_model_partial_record_misses_nothing :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	m, e := model.compile(nil, Patch_Row, dsv.checks(.Csv))
+	walktest.expect_nil(t, e)
+	for text in ([]string{"name\nada\n", "id,name\n,ada\n"}) {
+		it := dsv.records_open(transmute([]u8)text, dsv.Spec.Csv)
+		defer records.close(&it)
+		row: Patch_Row
+		err, _ := model.read(&it, &m, &row, opts = {partial = true})
+		walktest.expect_nil(t, err)
+		testing.expect(t, row.name == "ada" && !model.was_set(&m, Patch_Row, row.set, "id"))
+	}
+	table, _ := model.compile(nil, []Patch_Row, dsv.checks(.Csv))
+	rows: []Patch_Row
+	testing.expect(t, model.load(&table, transmute([]u8)string("name\nada\n"), &rows, opts = {partial = true}) != nil)
 }

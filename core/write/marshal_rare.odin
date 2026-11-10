@@ -90,14 +90,14 @@ enum_value :: proc "contextless" (info: ^runtime.Type_Info_Enum, v: uintptr) -> 
 	return i64(loaded(v, info.base.size, base.signed))
 }
 
-// The enum value `value` as `plan` writes it: its member's name, or under `Plan.enums == .Int` its integer, written at
+// The enum value `value` as `plan` writes it: its member's name, or under `typed.enum_by_number` its integer, written at
 // `p`, which holds `spell.INT_ROOM` bytes. A value no member has is refused either way, as a read refuses it.
 enum_spelled :: proc(plan: ^typed.Plan, info: ^runtime.Type_Info_Enum, value: i64, p: [^]u8) -> (string, core.Typed_Error_Kind) {
 	k := typed.enum_member(info, value)
 	if k < 0 {
 		return "", .Not_A_Member
 	}
-	if plan.enums != .Int {
+	if !typed.enum_by_number(plan, info) {
 		return info.names[k], .None
 	}
 	if base, ok := runtime.type_info_base(info.base).variant.(runtime.Type_Info_Integer); ok && !base.signed {
@@ -111,7 +111,7 @@ enum_spelled :: proc(plan: ^typed.Plan, info: ^runtime.Type_Info_Enum, value: i6
 put_enum :: proc(w: ^Walker, info: ^runtime.Type_Info_Enum, value: i64, $put: Put) -> core.Typed_Error_Kind {
 	p := room(&w.out, LEAF_ROOM)
 	name := enum_spelled(w.plan, info, value, p) or_return
-	if w.plan.enums == .Int {
+	if typed.enum_by_number(w.plan, info) {
 		w.out.cursor += len(name)
 		return .None
 	}
@@ -329,15 +329,18 @@ member_key :: proc(w: ^Walker, r: ^typed.Field, $T: Tree, $put: Put) -> core.Typ
 	return .None
 }
 
-// Whether a write leaves the member at `v` out: always for a model's write-only member, and under `omitempty` for a zero
-// number, false, an empty string, a nil, an empty list or map or bit set. An enum, a struct and a fixed array are kept
-// whatever they hold.
+// Whether a write leaves the member at `v` out: always for a model's write-only member, where the walker's `omits` says
+// so, and under `omitempty` for a zero number, false, an empty string, a nil, an empty list or map or bit set. An enum, a
+// struct and a fixed array are kept whatever they hold.
 @(cold)
 @(private)
 is_empty :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> bool {
 	m := &w.meta[r.meta]
-	if m.access == .Write_Only {
+	if left_out(w, r, v) {
 		return true
+	}
+	if !m.omit_empty {
+		return false
 	}
 	kind := m.key_kind if r.kind == .Hook else r.kind
 	#partial switch kind {
@@ -365,17 +368,33 @@ is_empty :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> bool {
 		bits: u128
 		runtime.mem_copy_non_overlapping(&bits, rawptr(v), int(m.size))
 		return bits == 0
-	case .Ptr:
+	case .Ptr, .Maybe, .Union, .Any:
+		return holds_null(m, kind, v)
+	case .Scalar:
+		return scalar_type((^typed.Scalar)(v)^) == nil
+	}
+	return false
+}
+
+// Whether a model's write leaves the member at `v` out: a write_only member, or one the walker's `omits` leaves out.
+@(private)
+left_out :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> bool {
+	return w.meta[r.meta].access == .Write_Only || w.omits != nil && w.omits.call(w.omits, w.plan, r, v)
+}
+
+// Whether the value at `v` of a record of `kind` and meta `m` is written as null: a nil pointer, `Maybe`, union, `any` or
+// cstring.
+holds_null :: proc(m: ^typed.Meta, kind: typed.Read_Kind, v: uintptr) -> bool {
+	#partial switch kind {
+	case .Ptr, .Cstring:
 		return (^rawptr)(v)^ == nil
 	case .Maybe:
 		return !(^bool)(v + uintptr(m.tag))^
 	case .Union:
-		return union_arm(&w.meta[r.meta], v) == nil
+		return union_arm(m, v) == nil
 	case .Any:
 		a := (^any)(v)^
 		return a.id == nil || a.data == nil
-	case .Scalar:
-		return scalar_type((^typed.Scalar)(v)^) == nil
 	}
 	return false
 }
@@ -587,7 +606,7 @@ list_struct :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, tag: ^string, $put:
 	w.mark = w.keys.cursor
 	first := len(w.entries)
 	if tag != nil {
-		add_entry(w, w.plan.union_tag, uintptr(tag), &w.tag_field, put) or_return
+		add_entry(w, w.meta[f.meta].union_tag, uintptr(tag), &w.tag_field, put) or_return
 	}
 	r := f.first
 	for ; r.kind != .Never; r = intrinsics.ptr_offset(r, 1) {
@@ -601,10 +620,15 @@ list_struct :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, tag: ^string, $put:
 		rec := &w.plan.fields[capture]
 		captured := len(w.entries)
 		add_map_entries(w, rec, &w.meta[rec.meta], v + uintptr(rec.offset), put) or_return
-		// A capture holds what the type does not name, so a key that also has a written member is no captured member.
+		// A capture holds what the type does not name, so a key that names a member is no captured member, unless the tag's
+		// `omitempty` left the member out. A member a model's write leaves out keeps its name.
 		for e in w.entries[captured:] {
-			for named in w.entries[first:captured] {
-				if entry_name(w, e) == entry_name(w, named) {
+			if tag != nil && entry_name(w, e) == w.meta[f.meta].union_tag {
+				return .Unwritable
+			}
+			for x := f.first; x.kind != .Never; x = intrinsics.ptr_offset(x, 1) {
+				at := v + uintptr(x.offset)
+				if entry_name(w, e) == w.meta[x.meta].name && (left_out(w, x, at) || !x.omit || !is_empty(w, x, at)) {
 					return .Unwritable
 				}
 			}

@@ -73,8 +73,8 @@ edit_of :: proc "contextless" ($S: Spec) -> ^core.Edit_Services {
 // The typed reads of a plan read as spec `S`.
 reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	@(static, rodata) r := typed.Format_Reads {
-		read      = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, S, T, target, plan, options_of(as), read, allocator, false)},
-		check     = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, S, T, target, plan, options_of(as), read, allocator, true)},
+		read      = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, S, T, target, plan, options_of(as), read, allocator, false, typed.Reader)},
+		check     = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, S, T, target, plan, options_of(as), read, allocator, true, typed.Reader)},
 		node_read = document_read,
 		build     = proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_spec(src, S, as.readers, options_of(as), false, allocator)},
 		plan      = proc(T: typeid, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Refusal) {return plan_built(T, S, {}, opts, reads_of(S), allocator)},
@@ -87,7 +87,7 @@ reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 // check.
 checks_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	@(static, rodata) r := typed.Format_Reads {
-		read       = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, S, T, target, plan, options_of(as), read, allocator, false)},
+		read       = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, S, T, target, plan, options_of(as), read, allocator, false, typed.Reader)},
 		check      = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return check_one(src, S, T, target, plan, options_of(as), read, allocator)},
 		node_read  = document_read,
 		node_check = document_check,

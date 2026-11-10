@@ -33,7 +33,7 @@ marshal_once :: proc(value: any, spec := Spec.Csv, opts := Options{}, write := c
 		return nil, refusal
 	}
 	defer typed.plan_destroy(&plan)
-	text, err := plan.marshal(&plan, value.data, write, {}, allocator)
+	text, err := plan.marshal(&plan, value.data, write, {}, allocator, nil)
 	return text, core.error_of(err)
 }
 

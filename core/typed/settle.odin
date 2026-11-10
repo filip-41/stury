@@ -56,7 +56,7 @@ load_struct :: proc(b: ^Builder, owner: typeid, at: i32, f: ^Field, m: ^Meta, me
 	checks := b.model.validators(b.model, owner) if b.model.validators != nil else nil
 	validated := n_after > 0 || len(checks) > 0
 	loading := b.model.loading
-	if !validated && (!loading || n == 0 && layout.fields_set == 0 && len(layout.read_only) == 0) {
+	if !validated && n == 0 && layout.fields_set == 0 && (!loading || len(layout.read_only) == 0) {
 		return
 	}
 	memory, made := plan_arena(b.p)
@@ -89,9 +89,10 @@ load_struct :: proc(b: ^Builder, owner: typeid, at: i32, f: ^Field, m: ^Meta, me
 	}
 	copy(kept, checks)
 	copy(read_only, layout.read_only[:])
-	sm^ = {afters = afters, checks = kept}
-	if loading {
-		sm^ = {fields_set = layout.fields_set, defaults = defaults, read_only = read_only, afters = afters, checks = kept}
+	// A whole plan's set and defaults are what a dump leaves out by.
+	sm^ = {fields_set = layout.fields_set, defaults = defaults, read_only = read_only, afters = afters, checks = kept}
+	if loading && validated {
+		sm.validate = b.model.close
 	}
 	end := &b.meta[int(at) + len(members)]
 	end.model, m.model = sm, sm
@@ -117,13 +118,14 @@ settle :: #force_no_inline proc "contextless" (h: ^Reader, sm: ^Struct_Model, f:
 			}
 		}
 	}
+	patch := partial(h, owner)
 	for d in sm.defaults {
-		if !member_seen(h, f, owner, regs, d.member) && d.make(rawptr(base + uintptr(fields[d.member].offset)), d.data, context.allocator) != nil {
+		if !patch && !member_seen(h, f, owner, regs, d.member) && d.make(rawptr(base + uintptr(fields[d.member].offset)), d.data, context.allocator) != nil {
 			return .No_Memory, false
 		}
 	}
-	if len(sm.afters) > 0 || len(sm.checks) > 0 {
-		return .None, validate_closed(h, sm, f, owner, regs, at, base)
+	if sm.validate != nil {
+		return .None, sm.validate(h, sm, f, owner, regs, at, base)
 	}
 	return .None, false
 }
@@ -131,7 +133,6 @@ settle :: #force_no_inline proc "contextless" (h: ^Reader, sm: ^Struct_Model, f:
 // Runs the validators of the struct that closes at `at`, whose members start at `base`. Returns whether one reported a
 // failure, which has been recorded.
 @(cold)
-@(private)
 validate_closed :: #force_no_inline proc "contextless" (h: ^Reader, sm: ^Struct_Model, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64, base: uintptr) -> bool {
 	context = h.ctx
 	path := make([dynamic]core.Step, context.temp_allocator)
@@ -154,7 +155,6 @@ validate_closed :: #force_no_inline proc "contextless" (h: ^Reader, sm: ^Struct_
 }
 
 // Whether `key` names a read_only member of the struct of `m`, which a load leaves out.
-@(private)
 read_only_key :: proc "contextless" (m: ^Meta, key: string) -> bool {
 	if m.model != nil {
 		for name in m.model.read_only {
@@ -164,47 +164,4 @@ read_only_key :: proc "contextless" (m: ^Meta, key: string) -> bool {
 		}
 	}
 	return false
-}
-
-// Judges the scalar `t` that a table stored at `dest`, in the member `fld`, by the member's rules.
-check_member :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token, fld: ^Field, dest: uintptr) -> core.Action {
-	return check_rules(h, regs, t, fld, dest) if h.plan.meta[fld.meta].rule_set > 0 else .Next
-}
-
-// Judges the columns of a table, `names` in order, against the members of the struct `row`, once, at the header. A
-// column no member names is refused under the struct's `forbid` and dropped, and so is the column of a read_only member.
-// Each member `required` that no column names is refused. `at` holds each column's byte and `drop` is set for the
-// columns the rows leave out. Returns `.Stop` when a required member has no column, which no row can make up.
-judge_header :: proc(h: ^Check, regs: core.Hook_Regs, row: ^Field, names: []string, at: []u64, drop: []bool) -> core.Action {
-	m := &h.plan.meta[row.meta]
-	end := &h.plan.meta[int(m.block) + int(m.members)]
-	action := core.Action.Next
-	for name, c in names {
-		if member_index(h, row, m, name) >= 0 {
-			continue
-		}
-		drop[c] = true
-		if m.forbid {
-			kind := core.Typed_Error_Kind.Read_Only if m.model != nil && read_only_key(m, name) else .Unknown_Field
-			if _, a := refuse(h, regs, {kind = kind, at = at[c], steps = {0 = core.Name(name)}, n_steps = 1}); a == .Stop {
-				return .Stop
-			}
-		}
-	}
-	members := ([^]Field)(row.first)
-	for r in end.required {
-		member := h.plan.meta[members[r].meta].name
-		named := false
-		for name in names {
-			named ||= name == member
-		}
-		if named {
-			continue
-		}
-		action = .Stop
-		if _, a := refuse(h, regs, {kind = .Missing_Field, at = at[0] if len(at) > 0 else 0, steps = {0 = core.Name(member)}, n_steps = 1}); a == .Stop {
-			break
-		}
-	}
-	return action
 }

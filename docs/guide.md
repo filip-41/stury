@@ -149,6 +149,42 @@ out, err := json.marshal(person, allocator = alloc)  // {"name":"ada","n":1}
 &target, &plan)` reads the node a `find` or `scan` answer reached. A path's value is read from the answer, never from a
 text.
 
+## Models
+
+`core/model` adds rules to a type: a model checks members' values as they are read, gives absent members their
+defaults, records which members a text held, and writes the value back by the same rules.
+
+```odin
+User :: struct {
+	id:    i64 `model:"read_only"`,
+	name:  string `model:"len>=2"`,
+	email: Maybe(string),
+	role:  string `model:"optional"`,
+	set:   model.Fields_Set,
+}
+
+reg: model.Registry
+model.register(&reg, User, "role", "member")
+m, err := model.compile(&reg, User, json.reads(.Json))
+user: User
+err = model.load(&m, body, &user, &sink)
+```
+
+- `load` refuses a missing required member and reads no `read_only` member. A `Fields_Set` member records what the
+  text held, which `was_set` asks by name. `validate` checks a value built in code by the same rules.
+- `model.problem(sink.entries[:], "Invalid body", 422)` makes an RFC 9457 problem document of every refusal, a struct
+  that `marshal` writes in any format.
+- `load` with `Load_Opts{partial = true}` reads a patch: the root and its struct members that hold a `Fields_Set`
+  miss no member and give none its default, and every other struct reads in full.
+  `model.merge(&m, &existing, &patch)` then copies what the patch's `Fields_Set` holds, and its captured members, into
+  `existing`, from the allocator given, so the patch can be freed.
+- `model.dump(&m, &user, opts)` writes the value as `marshal` does by the model's plan, never a `write_only` member.
+  `Dump_Opts` leaves out the members a load did not set (`exclude_unset`), that hold null (`exclude_none`) or that
+  equal their default (`exclude_defaults`), and `check` refuses a value whose written members fail its rules as
+  `.Check_Failed`.
+  `dump_stream` writes to a stream. Map keys and a struct's `extra` members are written in the order of their keys.
+- `model.schema(&m, .Load)` and `.Dump` describe what a load takes and what a dump with no option writes.
+
 ## Scan by path
 
 `json.find` answers one path and stops at the answer, and `json.scan` answers every value a path with `[]` reaches.
@@ -503,5 +539,6 @@ a reader that has no value for them.
 | [jsonc](../examples/jsonc/main.odin) | comments and edits that keep them |
 | [dsv](../examples/dsv/main.odin) | CSV into structs, dialects, documents, edits, records, writer |
 | [crossformat](../examples/crossformat/main.odin) | one struct and one procedure for CSV and JSON |
+| [model](../examples/model/main.odin) | a model's load, problem document, partial patch, `merge` and `dump` |
 
-Each prints a fixed answer, kept in its `expected.txt`, and `make test-examples` builds and runs all eight.
+Each prints a fixed answer, kept in its `expected.txt`, and `make test-examples` builds and runs all nine.

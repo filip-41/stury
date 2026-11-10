@@ -14,7 +14,7 @@ surrogate), CSV against RFC 4180.
 - **Read one value by path** (`.tags[1]`) without parsing the rest of the input, or answer several paths in
   one pass.
 - **Decode into Odin types and encode them back** (`unmarshal`, `marshal`): structs, slices, maps, unions,
-  bit sets and `any`, from the type alone. Field tags and hooks cover custom names and types.
+  bit sets and `core.Value`, from the type alone, and `any` as an encode source. Field tags and hooks cover custom names and types.
 - **Build a document** and query it by path, with strings that point into the input.
 - **Edit a text**: change, insert or remove a value and keep every other byte, formatting and comments
   included.
@@ -220,7 +220,7 @@ make check          # the checks the files you changed can reach, in seconds
 make gate           # what a branch passes before it lands, once (python3 tools/gate.py full adds the long runs)
 make test           # the library suites, the examples, the CLI smoke cases and the jq corpus
 make test-lib       # the library suites alone, one package per test directory (make test-one P=json/test T=name)
-make test-examples  # build and run the eight example programs against their expected output
+make test-examples  # build and run the nine example programs against their expected output
 make test-cli       # cmd/stury/test/smoke.py against build/stury, held to smoke.floor
 make test-jq        # jq's corpus and cmd/stury/test/cli.tsv, whose row layout its first lines describe
 make lint           # the vet set, with warnings as errors, and the import, word, global, API.txt and API_SHARED.txt checks

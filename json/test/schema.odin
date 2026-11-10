@@ -7,6 +7,7 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:testing"
+import regex "../../core/regex"
 import core "../../core"
 import compose "../../core/compose"
 import rules "../../core/rules"
@@ -439,6 +440,59 @@ schema_suite_checks :: proc(t: ^testing.T) {
 	}
 	log.infof("suite checks: %d schemas, %d bound, %d cases (%d of formats, %d of left-out optional behaviour judged as annotations), %d wrong", read_total, bound, cases, format_cases, left_out, wrong)
 	testing.expect_value(t, wrong, 0)
+}
+
+// The pattern written beside an asserted format takes exactly the strings its check takes, on every string instance of
+// the format suites and on the cases the checks part on.
+@(test)
+format_patterns_agree_with_their_checks :: proc(t: ^testing.T) {
+	arena: virtual.Arena
+	_ = virtual.arena_init_growing(&arena)
+	defer virtual.arena_destroy(&arena)
+	context.allocator = virtual.arena_allocator(&arena)
+	judged := 0
+	agree :: proc(t: ^testing.T, name: string, s: string, judged: ^int) {
+		f := rules.format_of(name)
+		re, err := regex.compile(rules.FORMAT_PATTERNS[f], {ecma = true})
+		testing.expectf(t, err == "", "%v: %s", f, err)
+		scratch: regex.Scratch
+		found, _ := regex.search(&re, s, 0, nil, &scratch)
+		leaf, _ := rules.rules_leaf({format = name, assert_format = true}, {.String})
+		checked := rules.judge_string(&leaf, s, &scratch) == {}
+		testing.expectf(t, found == checked, "%v %q: pattern %v, check %v", f, s, found, checked)
+		judged^ += 1
+	}
+	for dir in ([?]string{"draft2020-12", "draft2019-09", "draft7"}) {
+		w := os.walker_create_path(strings.concatenate({SUITE, dir, "/optional/format"}))
+		defer os.walker_destroy(&w)
+		for info in os.walker_walk(&w) {
+			name := strings.trim_suffix(info.name, ".json")
+			if rules.FORMAT_PATTERNS[rules.format_of(name)] == "" {
+				continue
+			}
+			bytes, _ := os.read_entire_file_from_path(info.fullpath, context.allocator)
+			doc, _ := core.build(bytes, json.as(.Json))
+			groups := core.children(&doc, core.ROOT)
+			for group in core.child_next(&groups) {
+				tests, _ := core.member(&doc, group, "tests")
+				all := core.children(&doc, tests)
+				for test in core.child_next(&all) {
+					data, _ := core.member(&doc, test, "data")
+					if core.kind(&doc, data) == .String {
+						text, _ := core.text_clone(&doc, data)
+						agree(t, name, text, &judged)
+					}
+				}
+			}
+		}
+	}
+	edges := [?]struct {
+		f, s: string,
+	}{{"date", "2000-02-29"}, {"date", "1900-02-29"}, {"date", "2024-02-29"}, {"date", "2023-02-29"}, {"date", "0000-02-29"}, {"date", "2021-04-31"}, {"date", "2021-12-31"}, {"duration", "P1Y1D"}, {"duration", "P1Y2M3DT4H5M6S"}, {"duration", "PT1M"}, {"duration", "P123456789012345678901W"}, {"duration", "P1DT"}, {"ipv4", "1.2.3.04"}, {"ipv4", "1.2.3.4\n"}, {"uuid", "2EB8AA08-AA98-11EA-B4AA-73B441D16380"}, {"ipv6", "::"}, {"ipv6", "1:2:3:4:5:6:7::"}, {"ipv6", "::2:3:4:5:6:7:8"}, {"ipv6", "1:2:3:4:5:6:1.2.3.4"}, {"ipv6", "1:2:3:4:5::1.2.3.4"}, {"ipv6", "1:2:3:4:5:6::1.2.3.4"}, {"ipv6", "1:2:3:4:5:6:7:1.2.3.4"}, {"ipv6", ":1:2:3:4:5:6:7"}, {"ipv6", "1::2::3"}, {"ipv6", "12345::"}, {"ipv6", "::ffff:1.2.3.04"}, {"ipv6", "1.2.3.4::"}, {"json-pointer", "/a~2"}, {"json-pointer", "//~0"}, {"relative-json-pointer", "0-1/a"}, {"relative-json-pointer", "01"}}
+	for e in edges {
+		agree(t, e.f, e.s, &judged)
+	}
+	log.infof("format patterns: %d strings judged alike", judged)
 }
 
 // `format` annotates unless the compile asks for it or the schema's meta-schema holds the format-assertion vocabulary,
@@ -1076,7 +1130,7 @@ Pairs :: map[[2]rules.Node_Index]bool
 // their requirement, the array and object shapes and the operands of `enum` and `const`. A node and its copy are one,
 // so a shared node written once equals a repeated one, and a `$ref` with rules beside it equals the node it reaches with
 // those rules. A block of the defaults equals no block. `with_rules` adds the rules a node has with the rules `ea` and
-// `eb` of its use, where `assert_format` counts only beside a `format`.
+// `eb` of its use, where `assert_format` counts only beside a format a check judges.
 @(private = "file")
 same_schema :: proc(a, b: ^rules.Description, from_a, from_b: rules.Node_Index, seen: ^Pairs, with_rules: bool, ea := rules.Rules{}, eb := rules.Rules{}) -> bool {
 	if from_a == rules.NONE || from_b == rules.NONE {
@@ -1092,7 +1146,11 @@ same_schema :: proc(a, b: ^rules.Description, from_a, from_b: rules.Node_Index, 
 	rx, _ := rules.merged(&x, ea)
 	ry, _ := rules.merged(&y, eb)
 	for r in ([?]^rules.Rules{&rx, &ry}) {
-		r.assert_format &&= r.format != ""
+		r.assert_format &&= rules.format_of(r.format) != .None
+		// A write adds the pattern that spells an asserted format.
+		if r.assert_format && r.pattern == rules.FORMAT_PATTERNS[rules.format_of(r.format)] {
+			r.pattern = ""
+		}
 	}
 	if x.kinds != y.kinds || (with_rules && rx != ry) || len(x.enum_of) != len(y.enum_of) || (x.enum_of == nil) != (y.enum_of == nil) {
 		return false
@@ -1249,17 +1307,8 @@ written_back :: proc(t: ^testing.T, d: ^rules.Description, doc: ^core.Document) 
 	built, berr := core.build(text, json.as(.Json))
 	testing.expectf(t, berr == nil, "built %s: %v", text, berr)
 	doc^ = built
-	asserts := false
-	for n in d.nodes {
-		asserts ||= n.rules.assert_format && n.rules.format != ""
-	}
-	for o in d.objects {
-		for m in o.members {
-			asserts ||= m.rules.assert_format && m.rules.format != ""
-		}
-	}
 	cerr: core.Error
-	back, cerr = schema.compile(doc, core.ROOT, {format_assert = asserts, resolver = {as = json.as(.Json)}})
+	back, cerr = schema.compile(doc, core.ROOT, {resolver = {as = json.as(.Json)}})
 	testing.expectf(t, cerr == nil, "read %s: %v", text, cerr)
 	if cerr != nil {
 		return {}, text, "compile"
@@ -1780,8 +1829,12 @@ schema_keeps_annotations :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
 	text := `{"type": "string", "title": "T", "description": "D", "default": "x", "examples": ["a", "b"], "deprecated": true, "contentEncoding": "base64", "contentMediaType": "text/plain"}`
-	d, _, doc, err := read_text(text)
+	// A default is a node of the document it was read from, so the document stays here.
+	doc, derr := core.build(transmute([]u8)text, json.as(.Json))
 	defer core.destroy(&doc)
+	testing.expect(t, derr == nil)
+	res := schema.Resolver{as = json.as(.Json), draft = .D2020_12}
+	d, err := schema.read(&doc, core.ROOT, "", &res)
 	testing.expect(t, err == nil)
 	n := d.nodes[d.root]
 	testing.expect_value(t, n.title, "T")

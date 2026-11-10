@@ -83,8 +83,8 @@ put_opted :: proc(out: ^write.Out, _: [^]u8, s: string, opts: ^core.Write_Option
 
 // The instance of the typed write `plan_make` puts in a plan.
 @(private)
-marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
-	return write.marshal_as(plan, value, opts, stream, allocator, TREE, put_plain, put_opted)
+marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, omits: ^typed.Omits) -> ([]u8, core.Typed_Refusal) {
+	return write.marshal_as(plan, value, opts, stream, allocator, TREE, put_plain, put_opted, omits)
 }
 
 // Writes `value` as JSON into new bytes from `allocator`, as `write` says. See `docs/writer.md`. The form with no plan
@@ -105,7 +105,7 @@ marshal_once :: proc(value: any, spec := Spec.Json, opts := Options{}, write := 
 		return nil, refusal
 	}
 	defer typed.plan_destroy(&plan)
-	text, err := plan.marshal(&plan, v.data, write, {}, allocator)
+	text, err := plan.marshal(&plan, v.data, write, {}, allocator, nil)
 	return text, core.error_of(err)
 }
 

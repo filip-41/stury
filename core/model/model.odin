@@ -8,6 +8,7 @@ import "core:strings"
 import core ".."
 import rules "../rules"
 import typed "../typed"
+import write "../write"
 
 // The rules of the models compiled from it: how members are named, the rules of types and of members beside their
 // `model:` tags, members' defaults, and the structs that forbid members they do not name. It owns copies of what it is
@@ -20,14 +21,20 @@ Registry :: struct {
 	loads:  Loads,
 	validators: [dynamic]Validator_Of,
 	befores:    [dynamic]Before_Of,
+	customs: [dynamic]Custom_Of,
+	enums:   [dynamic]Enum_Rule,
+	unions:  [dynamic]Union_Rule,
+	close:      typed.Close_Validators, // `typed.validate_closed` once a validator is registered
 }
 
 // How a model spells its members' names, where a tag names none, its enums' values, and the member an object names
 // its union arm by, "" for none, as `typed.Plan_Options.union_tag` says.
 Naming :: struct {
-	fields:    typed.Rename,
-	enums:     typed.Enum_Spelling,
-	union_tag: string,
+	fields:       typed.Rename,
+	enums:        typed.Enum_Spelling,
+	// How an enum's members are spelled by name: `.None` as declared, any other lowercased and then renamed.
+	enum_members: typed.Rename,
+	union_tag:    string,
 }
 
 @(private)
@@ -70,6 +77,12 @@ Extra :: enum u8 {
 // most 128 members.
 Fields_Set :: typed.Fields_Set
 
+// The problem document (RFC 9457) of a load's or a check's entries, for any format to write.
+Problem :: write.Problem
+Problem_Error :: write.Problem_Error
+problem :: write.problem
+problem_destroy :: write.problem_destroy
+
 register :: proc {
 	register_naming,
 	register_type,
@@ -80,6 +93,9 @@ register :: proc {
 	register_after,
 	register_validator,
 	register_before,
+	register_custom,
+	register_enum,
+	register_union,
 }
 
 // Sets how models compiled from `reg` spell names. `union_tag` must outlive the registry.
@@ -141,11 +157,11 @@ register_factory :: proc(reg: ^Registry, $T: typeid, field: string, make: proc(a
 	return add_default(reg, {T, field, made, rawptr(make)})
 }
 
-// Whether struct `T` has a member `field` of type `V`.
+// Whether struct `T` has a member `field` of type `V`, of any type for a nil `V`.
 @(private)
 has_member :: proc(T: typeid, field: string, V: typeid) -> bool {
 	member := reflect.struct_field_by_name(T, field)
-	return len(field) > 0 && member.name == field && member.type != nil && member.type.id == V
+	return len(field) > 0 && member.name == field && member.type != nil && (V == nil || member.type.id == V)
 }
 
 @(private)
@@ -181,18 +197,28 @@ register_extra :: proc(reg: ^Registry, $T: typeid, extra: Extra) -> runtime.Allo
 Model :: struct($T: typeid) {
 	plan:      typed.Plan,
 	load_plan: typed.Plan,
+	// The registry's customs with their carriers' plans, which the plans' hooks point at.
+	customs:   []Custom_Of,
 }
 
 // Compiles `T`'s model from `reg`, nil for a plain type, for the format whose typed reads are `reads`, as
 // `json.reads(.Json)` gives them. A rule that does not fit its member, and a registered rule of a member its struct does
 // not have, refuse the model as `.Bad_Tag`, at the member's path, with the struct as `want.type` and the item as
 // `want.text`, and so does an `extra` member of a struct that forbids the members it does not name, and a `Fields_Set`
-// in a struct that loads more than 128 members. `layout` is the handle a format's options make, such as
-// `dsv.as(.Csv, {no_header = true})`, which both plans read and write by.
+// in a struct that loads more than 128 members. `layout` is the layout a format's options make, such as
+// `dsv.layout(.Csv, {no_header = true})`, which both plans read and write by.
 compile :: proc(reg: ^Registry, $T: typeid, reads: ^typed.Format_Reads, allocator := context.allocator, layout: Maybe(core.As) = nil) -> (m: Model(T), err: core.Error) {
-	m.plan, err = plan_of(reg, T, reads, allocator, nil, nil, layout)
+	hooks: []typed.Type_Hook
+	m.customs, hooks, err = carriers_of(reg, reads, allocator)
+	defer delete(hooks, allocator)
 	if err == nil {
-		m.load_plan, err = plan_of(reg, T, reads, allocator, .Read_Only, &m.plan, layout)
+		m.plan, err = plan_of(reg, T, reads, allocator, nil, nil, layout, hooks)
+	}
+	if err == nil {
+		m.load_plan, err = plan_of(reg, T, reads, allocator, .Read_Only, &m.plan, layout, hooks)
+	}
+	if err == nil {
+		err = carrier_plans(&m, reads, hooks[:len(hooks) - len(m.customs)], allocator)
 	}
 	if err != nil {
 		destroy(&m)
@@ -204,12 +230,13 @@ compile :: proc(reg: ^Registry, $T: typeid, reads: ^typed.Format_Reads, allocato
 
 // The plan of `T` with `reg`'s rules, read with `reads`.
 @(private)
-plan_of :: proc(reg: ^Registry, T: typeid, reads: ^typed.Format_Reads, allocator: runtime.Allocator, without: Maybe(typed.Access), whole: ^typed.Plan, layout: Maybe(core.As)) -> (typed.Plan, core.Error) {
+plan_of :: proc(reg: ^Registry, T: typeid, reads: ^typed.Format_Reads, allocator: runtime.Allocator, without: Maybe(typed.Access), whole: ^typed.Plan, layout: Maybe(core.As), hooks: []typed.Type_Hook) -> (typed.Plan, core.Error) {
 	if reads == nil || reads.plan == nil {
 		return {}, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
 	none: Registry
-	c := Compiling{model = {member = member_rule, forbids = forbids, compile = rules.rules_leaf, structs = typed.load_struct, validators = validators_of}, reg = reg if reg != nil else &none, without = without}
+	c := Compiling{model = {member = member_rule, forbids = forbids, compile = rules.rules_leaf, structs = typed.load_struct, validators = validators_of, enum_names = enum_names, unions = unions}, reg = reg if reg != nil else &none, without = without}
+	c.model.close = c.reg.close
 	if whole != nil {
 		// A load's plan settles its structs, and takes the leaves of the plan of every member.
 		c.model.loading, c.model.rule_sets, c.model.leaves = true, whole.rule_sets, whole.leaves
@@ -223,7 +250,10 @@ plan_of :: proc(reg: ^Registry, T: typeid, reads: ^typed.Format_Reads, allocator
 			return {}, core.error_of(unknown)
 		}
 	}
-	plan, refused := reads.plan(T, {enums = c.reg.naming.enums, rename = c.reg.naming.fields, union_tag = c.reg.naming.union_tag, model = &c.model}, allocator)
+	if refused := enum_rules_refused(c.reg); refused.kind != .None {
+		return {}, core.error_of(refused)
+	}
+	plan, refused := reads.plan(T, {rename = c.reg.naming.fields, union_tag = c.reg.naming.union_tag, model = &c.model, hooks = hooks}, allocator)
 	if as, set := layout.?; set && refused.kind == .None {
 		plan.as = as
 	}
@@ -265,6 +295,15 @@ registry_destroy :: proc(reg: ^Registry) {
 	delete(reg.fields)
 	delete(reg.loads.defaults)
 	delete(reg.loads.forbids)
+	delete(reg.customs)
+	for x in reg.enums {
+		enum_rule_destroy(x)
+	}
+	delete(reg.enums)
+	for x in reg.unions {
+		delete(x.tag)
+	}
+	delete(reg.unions)
 	virtual.arena_destroy(&reg.loads.constants)
 	reg^ = {}
 }
@@ -277,6 +316,10 @@ model_destroy :: proc(m: ^Model($T)) {
 	replacement_destroy(&m.load_plan)
 	typed.plan_destroy(&m.load_plan)
 	typed.plan_destroy(&m.plan)
+	for &x in m.customs {
+		typed.plan_destroy(&x.plan)
+	}
+	delete(m.customs)
 }
 
 @(private)
@@ -291,10 +334,14 @@ Compiling :: struct {
 @(private)
 member_rule :: proc(h: ^typed.Model_Rules, owner: typeid, field: string, type: typeid, tag: string) -> (r: typed.Member_Rule) {
 	c := (^Compiling)(h)
-	subject := subject_of(type_info_of(type))
+	subject := subject_of(type_info_of(type), c.reg)
 	for ti := type_info_of(type); ti != nil; ti = held(ti) {
+		carrier := carried(c.reg, ti.id)
+		if x, is_carrier := carrier_of(carrier); is_carrier && !read_tag(x.tag, subject, false, &r) {
+			return
+		}
 		for x in c.reg.types {
-			if x.type == ti.id && !read_tag(x.tag, subject, false, &r) {
+			if (x.type == ti.id || x.type == carrier) && !read_tag(x.tag, subject, false, &r) {
 				return
 			}
 		}

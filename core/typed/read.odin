@@ -43,6 +43,9 @@ Read_Options :: struct {
 	outer:       ^Outer,
 	// How a `Check` meets a key that repeats in its object.
 	repeats:     Repeats,
+	// A model's patch: the structs `merge` descends into, the root and its struct members whose structs hold a
+	// `Fields_Set`, miss no member and take no default. Every other struct reads as a full load reads it.
+	partial:     bool,
 }
 
 // How a `Check` meets a key that repeats inside one object. `.Ignore` judges every value as it comes, which is the
@@ -91,6 +94,7 @@ Reader :: struct {
 	first_key: bool, // `.First`
 	refuse_unknown: bool,
 	wide:      bool, // a `Check`: the sink takes `core.Error_Entry`s
+	partial:   bool, // as `Read_Options.partial`
 	wrap_sp:   u32, // the depth `wrap`'s element is read at, 0 for none
 	// The source, the format and its read, which a token's text and number read through.
 	using view: core.Token_View,
@@ -101,8 +105,8 @@ Reader :: struct {
 	ctx:       runtime.Context,
 	first:     core.Typed_Refusal,
 	sink:      ^Sink,
-	// Finds the member `Plan.union_tag` of the object at a byte, for a union that reads by its tag.
-	find_tag:  proc(h: ^Reader, at: u64) -> Tag_Scan,
+	// Finds the member `name` of the object at a byte, for a union that reads by its tag.
+	find_tag:  proc(h: ^Reader, at: u64, name: string) -> Tag_Scan,
 	// The format's own options, for `find_tag`.
 	format:    rawptr,
 }
@@ -137,6 +141,7 @@ read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As
 	}
 	r.first_key = read.dups == .First
 	r.refuse_unknown = read.unknown == .Refuse
+	r.partial = read.partial
 	return {NO_LIMIT, u64(uintptr(plan.root)), u64(uintptr(target))}, {}
 }
 
@@ -527,7 +532,8 @@ close_container :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame, own: 
 		lo := u64(uintptr(f.data))
 		when H == Check {
 			if owner.kind == .Before {
-				return before_value(h, back, &h.plan.meta[owner.meta], list_dest(f, owner), lo, t.lo + u64(t.n))
+				m := &h.plan.meta[owner.meta]
+				return m.before.value(h, back, m, list_dest(f, owner), f.kind, lo, t.lo + u64(t.n))
 			}
 		}
 		if reason := store_whole(h, owner, &h.plan.meta[owner.meta], list_dest(f, owner), f.kind, lo, t.lo + u64(t.n), t); reason != .None {

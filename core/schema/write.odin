@@ -13,7 +13,8 @@ import "../write"
 // the rules a member adds beside its `$ref`. A description that writes a `$dynamicRef` writes each of its schema resources
 // under an `$id` of its own, so the `$dynamicRef` reaches the anchors it reached, and refers to every node by an absolute
 // URI. An operand the format cannot spell and a draft 4 integer are `.Unsupported`, naming the keyword in `want.text`. A
-// `format` is written as `format`, so a reader must assert formats, with `Options.format_assert`, to judge them.
+// description that asserts a format names `DIALECT_URI` as its `$schema`, so every `format` of it asserts, and writes
+// beside each asserted format the pattern that spells it, in an `allOf` when the node has a pattern of its own.
 write :: proc(d: ^rules.Description, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> (text: []u8, err: core.Error) {
 	uses, e := make([]u8, len(d.nodes), allocator)
 	refs: []string
@@ -70,7 +71,7 @@ write :: proc(d: ^rules.Description, as: core.As, opts := core.Write_Options{}, 
 		write.value_bool(&w.t, false)
 	} else {
 		write.open_object(&w.t)
-		put(&w, "$schema", "https://json-schema.org/draft/2020-12/schema")
+		put(&w, "$schema", DIALECT_URI if asserts(d) else "https://json-schema.org/draft/2020-12/schema")
 		body(&w, d.root, root, root.rules)
 		put_defs(&w, d.root)
 		write.close(&w.t)
@@ -85,6 +86,31 @@ write :: proc(d: ^rules.Description, as: core.As, opts := core.Write_Options{}, 
 	}
 	terr.want.text = w.refused if w.refused != "" else w.keyword
 	return text, core.error_of(terr)
+}
+
+// stury's dialect: 2020-12 with the format-assertion vocabulary in place of format-annotation. `DIALECT` is its
+// meta-schema, which a reader of a schema that names it needs at `DIALECT_URI`. stury's own reader holds it.
+DIALECT_URI :: "https://raw.githubusercontent.com/filip-41/stury/main/core/schema/meta/stury/format-assertion.json"
+@(private)
+DIALECT :: #load("meta/stury/format-assertion.json", string)
+
+// Whether a node or a member's use of `d` asserts a format a check judges, which an unknown one, refused under the
+// format-assertion vocabulary, does not make.
+@(private = "file")
+asserts :: proc(d: ^rules.Description) -> bool {
+	for n in d.nodes {
+		if n.rules.assert_format && rules.format_of(n.rules.format) != .None {
+			return true
+		}
+	}
+	for o in d.objects {
+		for m in o.members {
+			if m.rules.assert_format && rules.format_of(m.rules.format) != .None {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 @(private = "file")
@@ -268,7 +294,7 @@ schema :: proc(w: ^Writer, i: rules.Node_Index, extra := rules.Rules{}) {
 	case w.uses[i] == 2:
 		write.open_object(&w.t)
 		put(w, "$ref", ref_to(w, i))
-		put_rules(w, extra)
+		put_nodes(w, "allOf", nil, put_rules(w, extra))
 		write.close(&w.t)
 	case:
 		node(w, i, extra)
@@ -376,8 +402,7 @@ body :: proc(w: ^Writer, i: rules.Node_Index, n: ^rules.Node, rl: rules.Rules) {
 		key(w, "const")
 		write.value_of(&w.t, v)
 	}
-	put_rules(w, rl)
-	put_nodes(w, "allOf", n.all_of)
+	put_nodes(w, "allOf", n.all_of, put_rules(w, rl))
 	put_nodes(w, "anyOf", n.any_of)
 	put_nodes(w, "oneOf", n.one_of)
 	put_node(w, "not", n.not)
@@ -394,13 +419,19 @@ body :: proc(w: ^Writer, i: rules.Node_Index, n: ^rules.Node, rl: rules.Rules) {
 	}
 }
 
+// The nodes of `list` under `name`, then a node of `pattern` alone when it is not "".
 @(private = "file")
-put_nodes :: proc(w: ^Writer, name: string, list: []rules.Node_Index) {
-	if len(list) > 0 {
+put_nodes :: proc(w: ^Writer, name: string, list: []rules.Node_Index, pattern := "") {
+	if len(list) > 0 || pattern != "" {
 		key(w, name)
 		write.open_array(&w.t)
 		for c in list {
 			schema(w, c)
+		}
+		if pattern != "" {
+			write.open_object(&w.t)
+			put(w, "pattern", pattern)
+			write.close(&w.t)
 		}
 		write.close(&w.t)
 	}
@@ -423,8 +454,9 @@ MIN_KEYS := [?]string{"minLength", "minItems", "minProperties"}
 @(private = "file", rodata)
 MAX_KEYS := [?]string{"maxLength", "maxItems", "maxProperties"}
 
+// Writes `rl`, and answers the pattern of its asserted format when `rl` has a pattern of its own, for an `allOf`.
 @(private = "file")
-put_rules :: proc(w: ^Writer, rl: rules.Rules) {
+put_rules :: proc(w: ^Writer, rl: rules.Rules) -> (format_pattern: string) {
 	for text, j in ([?]string{rl.minimum, rl.maximum}) {
 		if text != "" {
 			exclusive := rl.exclusive_minimum if j == 0 else rl.exclusive_maximum
@@ -444,8 +476,9 @@ put_rules :: proc(w: ^Writer, rl: rules.Rules) {
 			put_count(w, MAX_KEYS[j], count)
 		}
 	}
-	if rl.pattern != "" {
-		put(w, "pattern", rl.pattern)
+	spelled := rules.FORMAT_PATTERNS[rules.format_of(rl.format)] if rl.assert_format else ""
+	if rl.pattern != "" || spelled != "" {
+		put(w, "pattern", rl.pattern if rl.pattern != "" else spelled)
 	}
 	if rl.format != "" {
 		put(w, "format", rl.format)
@@ -466,6 +499,7 @@ put_rules :: proc(w: ^Writer, rl: rules.Rules) {
 		put(w, "nodeType", NODE_TYPES[rl.markup])
 		write.close(&w.t)
 	}
+	return spelled if rl.pattern != "" && spelled != rl.pattern else ""
 }
 
 @(private = "file", rodata)

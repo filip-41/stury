@@ -27,8 +27,7 @@ Value :: union {
 #assert(size_of(Value) == 24)
 
 // A number's text: an integer no double holds exactly, or a number read and not computed on, whose digits are kept, with
-// the double they round to. `text` is a JSON number. As a typed target it takes any number, and an `any` holds a number
-// no integer or binary64 reads as one.
+// the double they round to. `text` is a JSON number. As a typed target it takes any number.
 Number_Text :: struct {
 	text:   string,
 	double: f64,

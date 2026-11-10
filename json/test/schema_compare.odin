@@ -3,10 +3,11 @@ package json_tests
 import "base:runtime"
 import "core:fmt"
 import "core:strings"
-import "core:time"
 import "core:testing"
 import core "../../core"
+import typed "../../core/typed"
 import schema "../../core/schema"
+import dsv "../../dsv"
 import json ".."
 
 // Schema comparison: the verdict in each direction, the witness of a No, and the changes that explain the difference.
@@ -35,7 +36,8 @@ release :: proc(s: ^Read_Schema) {
 }
 
 @(private = "file")
-compare_texts :: proc(t: ^testing.T, old, new: string, format_assert := false) -> (c: schema.Comparison, ok: bool) {
+compare_texts :: proc(t: ^testing.T, old, new: string, format_assert := false, as := core.As{}, reads: ^typed.Format_Reads = nil) -> (c: schema.Comparison, ok: bool) {
+	as := as if as.readers != nil else json.as(.Json)
 	a, b: Read_Schema
 	defer release(&a)
 	defer release(&b)
@@ -43,7 +45,7 @@ compare_texts :: proc(t: ^testing.T, old, new: string, format_assert := false) -
 		return
 	}
 	err: runtime.Allocator_Error
-	c, err = schema.compare(a.c.description, b.c.description, {as = json.as(.Json), format_assert = format_assert})
+	c, err = schema.compare(a.c.description, b.c.description, {as = as, reads = reads, format_assert = format_assert})
 	return c, err == nil
 }
 
@@ -272,7 +274,7 @@ compare_dynamic_ref_is_not_proven :: proc(t: ^testing.T) {
 	}
 }
 
-// A search through an object of thousands of members stays within the process's memory and a modest time.
+// A search through an object of thousands of members stays within the process's memory and its work budget.
 @(test)
 compare_witness_search_is_memory_bounded :: proc(t: ^testing.T) {
 	members := strings.builder_make(context.temp_allocator)
@@ -284,14 +286,14 @@ compare_witness_search_is_memory_bounded :: proc(t: ^testing.T) {
 	}
 	old := strings.concatenate({`{"type":"object","properties":{`, strings.to_string(members), `}}`}, context.temp_allocator)
 	new := strings.concatenate({`{"type":"object","required":["m3999"],"properties":{`, strings.to_string(members), `}}`}, context.temp_allocator)
-	start := time.tick_now()
 	c, ok := compare_texts(t, old, new)
 	if !ok {
 		return
 	}
 	defer schema.comparison_destroy(&c)
-	testing.expect(t, c.old_in_new.verdict != .Yes)
-	testing.expectf(t, time.duration_seconds(time.tick_since(start)) < 20, "the search took %v", time.tick_since(start))
+	// The search ends at a witness or at its work budget, which it answers as `Unknown` with the facet it could not decide.
+	in_new := c.old_in_new
+	testing.expectf(t, in_new.verdict == .No && in_new.witness != "" || in_new.verdict == .Unknown && in_new.reason != "", "the search answered %v", in_new)
 	free_all(context.temp_allocator)
 }
 
@@ -308,5 +310,32 @@ compare_long_reference_chain :: proc(t: ^testing.T) {
 	if ok {
 		schema.comparison_destroy(&c)
 	}
+	free_all(context.temp_allocator)
+}
+
+// A flat format writes the witness as the rows of a table.
+@(test)
+compare_witness_under_csv_is_a_table :: proc(t: ^testing.T) {
+	old := `{"type":"array","items":{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string"}},"required":["a","b"]}}`
+	new := `{"type":"array","items":{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string"},"c":{"type":"string"}},"required":["a","b","c"]}}`
+	c, ok := compare_texts(t, old, new, as = dsv.as(.Csv), reads = dsv.checks(.Csv))
+	if !ok {
+		return
+	}
+	defer schema.comparison_destroy(&c)
+	testing.expectf(t, c.old_in_new.verdict == .No && c.old_in_new.witness != "", "got %v (%s)", c.old_in_new.verdict, c.old_in_new.reason)
+	testing.expect(t, c.new_in_old.verdict == .Yes)
+	free_all(context.temp_allocator)
+}
+
+// A text of each format's grammar is a witness against the other format.
+@(test)
+compare_witness_from_format_grammar :: proc(t: ^testing.T) {
+	c, ok := compare_texts(t, `{"type":"string","format":"email"}`, `{"type":"string","format":"date"}`, true)
+	if !ok {
+		return
+	}
+	defer schema.comparison_destroy(&c)
+	testing.expectf(t, c.old_in_new.verdict == .No && c.new_in_old.verdict == .No, "got %v and %v", c.old_in_new.verdict, c.new_in_old.verdict)
 	free_all(context.temp_allocator)
 }

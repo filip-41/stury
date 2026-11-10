@@ -9,7 +9,7 @@ import "../typed"
 
 // What a visit calls at each record whose `Meta.rule_set` is set, with `kind` `.None`, and at each refusal of the walk,
 // with its kind. `f` is the record and `at` its value. It returns whether the visit goes on. The walk goes on past a
-// refused number or enum when it does, and ends at any other refusal.
+// refused number, enum or hooked value when it does, and ends at any other refusal.
 Visit :: #type proc(v: ^Visitor, f: ^typed.Field, at: uintptr, kind: core.Typed_Error_Kind) -> bool
 
 Visitor :: struct {
@@ -25,9 +25,10 @@ Visitor :: struct {
 VISIT_TREE :: Tree{.Open_Object = "{", .Close_Object = "}", .Open_Array = "[", .Close_Array = "]", .Comma = ",", .Colon = ":", .After_Colon = " ", .Null = "null", .True = "true", .False = "false"}
 
 // Walks `value`, of `plan`'s type, as `marshal` would write it, and calls `v.call` as `Visit` says. An `any` and a hooked
-// value are not entered. Returns the refusal that ended the visit, with its path. It allocates only for a map or a
-// struct whose members are listed before they are walked.
-visit :: proc(plan: ^typed.Plan, value: rawptr, v: ^Visitor) -> core.Typed_Refusal {
+// value are not entered, and a hooked value with no rule set is refused as its write hook refuses it. `omits`, nil for
+// none, leaves out members as it leaves them out of a write. Returns the refusal that ended the visit, with its path. It
+// allocates only for a map or a struct whose members are listed before they are walked.
+visit :: proc(plan: ^typed.Plan, value: rawptr, v: ^Visitor, omits: ^typed.Omits = nil) -> core.Typed_Refusal {
 	if plan.err.kind != .None {
 		return plan.err
 	}
@@ -37,7 +38,7 @@ visit :: proc(plan: ^typed.Plan, value: rawptr, v: ^Visitor) -> core.Typed_Refus
 	w: Walker
 	init(&w.out, &spill)
 	walker_init(&w, {}, raw_data(frames[:]), raw_data(ptrs[:]))
-	w.plan, w.meta, w.visitor, v.walker = plan, raw_data(plan.meta), v, &w
+	w.plan, w.meta, w.visitor, w.omits, v.walker = plan, raw_data(plan.meta), v, omits, &w
 	w.err.kind = walk(&w, uintptr(value), false, VISIT_TREE, visit_put, true)
 	v.walker = nil
 	release_walker(&w)
@@ -68,7 +69,7 @@ visit_record :: proc(w: ^Walker, open: Frame, top: int, f: ^typed.Field, at: uin
 	w.open, w.top = open, top
 	more := w.visitor.call(w.visitor, f, at, kind)
 	#partial switch f.kind {
-	case .F32, .F64, .Enum:
+	case .F32, .F64, .Enum, .Hook:
 		return more
 	}
 	return more && kind == .None

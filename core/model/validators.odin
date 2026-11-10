@@ -30,7 +30,8 @@ register_after :: proc(reg: ^Registry, $T: typeid, field: string, check: proc(va
 	call :: proc(value, fn: rawptr, r: ^Report) {
 		(proc(value: V, r: ^Report))(fn)((^V)(value)^, r)
 	}
-	return add_validator(reg, {T, field, {call, rawptr(check)}})
+	reg.close = typed.validate_closed
+	return add_hook(&reg.validators, Validator_Of{T, field, {call, rawptr(check)}}, true)
 }
 
 // Judges a whole `T` at its close, in a load and in `validate`, when none of its members failed, innermost struct first.
@@ -39,22 +40,26 @@ register_validator :: proc(reg: ^Registry, $T: typeid, check: proc(value: T, r: 
 	call :: proc(value, fn: rawptr, r: ^Report) {
 		(proc(value: T, r: ^Report))(fn)((^T)(value)^, r)
 	}
-	return add_validator(reg, {T, "", {call, rawptr(check)}})
+	reg.close = typed.validate_closed
+	return add_hook(&reg.validators, Validator_Of{T, "", {call, rawptr(check)}}, false)
 }
 
+// Adds hook `x` to `list`, under `replace` in the place of the one of the same struct and member, which keeps its name.
 @(private)
-add_validator :: proc(reg: ^Registry, x: Validator_Of) -> runtime.Allocator_Error {
-	x := x
-	if x.field != "" {
-		for &y in reg.validators {
+add_hook :: proc(list: ^[dynamic]$X, x: X, replace: bool) -> runtime.Allocator_Error {
+	if replace {
+		for &y in list {
 			if y.type == x.type && y.field == x.field {
-				y.v = x.v
+				field := y.field
+				y = x
+				y.field = field
 				return nil
 			}
 		}
 	}
+	x := x
 	x.field = strings.clone(x.field) or_return
-	if _, err := append(&reg.validators, x); err != nil {
+	if _, err := append(list, x); err != nil {
 		delete(x.field)
 		return err
 	}
@@ -76,6 +81,9 @@ validators_of :: proc(h: ^typed.Model_Rules, owner: typeid) -> []typed.Validator
 // The closing of a struct in `validate`: runs its validators and reports what they found.
 @(private)
 close_struct :: proc(v: ^write.Visitor, sm: ^typed.Struct_Model, base: uintptr) -> bool {
+	if len(sm.afters) == 0 && len(sm.checks) == 0 {
+		return true
+	}
 	j := (^Judging)(v)
 	clear(&j.steps)
 	if !write.visit_path(&j.visitor, &j.steps) {

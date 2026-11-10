@@ -42,7 +42,7 @@ convert_put :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document, as: core.As, a
 			schema.converter_destroy(&c.converter)
 		}
 		c.bound = false
-		if err := schema.converter_init(&c.converter, &c.check.compiled, ins.as, as); err != nil {
+		if err := schema.converter_init(&c.converter, &c.check.compiled, ins.as, as, checks_of(ins.as, ins.spec == nil), checks_of(as, writes_cells(&run.opts))); err != nil {
 			message.write_stderr("stury: error: %s: %s\n", ins.name, edit_error_text(ins.data, err))
 			return false
 		}

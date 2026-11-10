@@ -204,9 +204,9 @@ document_keyed :: proc "contextless" (d: ^Document_Read($H), _: core.Hook_Regs, 
 
 // Finds the tag member of the object at the node the replay is giving, by replaying that object alone.
 @(private)
-document_tag :: proc(h: ^Reader, _: u64) -> Tag_Scan {
+document_tag :: proc(h: ^Reader, _: u64, name: string) -> Tag_Scan {
 	d := (^Document_Read(Reader))(h.format)
-	s := Tag_Scan{view = {src = h.src, as = h.plan.as}, name = h.plan.union_tag}
+	s := Tag_Scan{view = {src = h.src, as = h.plan.as}, name = name}
 	regs: core.Hook_Regs
 	// The replay opens the object alone, so it needs no more than two levels of ends.
 	ends: [2]u32

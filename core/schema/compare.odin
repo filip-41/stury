@@ -6,6 +6,7 @@ import "core:mem/virtual"
 import "core:strings"
 import core "../"
 import "../rules"
+import "../typed"
 import "../write"
 
 // Whether one description takes every value another takes. A `Yes` is a proof over the descriptions' structure, a `No`
@@ -49,6 +50,8 @@ Change :: struct {
 Compare_Options :: struct {
 	// The format a witness is written in and a check reads.
 	as:            core.As,
+	// The typed reads of `as`, as `bind` takes them.
+	reads:         ^typed.Format_Reads,
 	// Whether `format` asserts, as it does in a compile with the same option.
 	format_assert: bool,
 }
@@ -80,6 +83,7 @@ Side :: struct {
 	d:      ^rules.Description,
 	c:      Compiled,
 	as:     core.As,
+	reads:  ^typed.Format_Reads,
 	judges: map[rules.Node_Index]^Bound,
 }
 
@@ -97,8 +101,8 @@ compare :: proc(old, new: ^rules.Description, opts := Compare_Options{}) -> (r: 
 	old_on, new_on := asserting(old, opts.format_assert), asserting(new, opts.format_assert)
 	defer asserted_restore(old, old_on)
 	defer asserted_restore(new, new_on)
-	a := Side{d = old, c = compile_description(old), as = opts.as}
-	b := Side{d = new, c = compile_description(new), as = opts.as}
+	a := Side{d = old, c = compile_description(old), as = opts.as, reads = opts.reads}
+	b := Side{d = new, c = compile_description(new), as = opts.as, reads = opts.reads}
 	defer side_destroy(&a)
 	defer side_destroy(&b)
 	arena := virtual.arena_allocator(&r.arena)
@@ -153,7 +157,7 @@ judge_of :: proc(s: ^Side, n: rules.Node_Index) -> ^Bound {
 	defer s.d.root = root
 	j := new(Bound)
 	err: core.Error
-	j^, err = bind(&s.c, s.as)
+	j^, err = bind(&s.c, s.as, s.reads)
 	if err != nil {
 		free(j)
 		j = nil
@@ -177,9 +181,13 @@ accepts :: proc(s: ^Side, nodes: []rules.Node_Index, text: []u8) -> (taken, know
 	return true, true
 }
 
-// The text of `v` in the format of `s`.
+// The text of `v` in the format of `s`. A flat format writes an array of objects as the rows of a table.
 @(private)
 text_of :: proc(s: ^Side, v: core.Value) -> (text: []u8, ok: bool) {
+	if s.as.readers != nil && s.as.readers.flat {
+		bytes, refusal := written(v, s.as, {}, context.temp_allocator)
+		return bytes, refusal.kind == .None
+	}
 	written, err := write.write_value(v, s.as, allocator = context.temp_allocator)
 	return written, err == nil
 }

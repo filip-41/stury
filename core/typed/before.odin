@@ -12,9 +12,12 @@ import rules "../rules"
 Before :: struct {
 	call:  proc(value: core.Value, fn: rawptr, r: ^Report) -> core.Value,
 	fn:    rawptr,
+	value: Before_Read, // `before_value`, which a registration or a first-match union names, so a load with neither links none of it
 	rules: rules.Rules, // the member's, which the root of `plan` takes
 	plan:  ^Plan, // reads the replacement as the member's type, which the model sets
 	field: Field, // the member's record as it was before it became `.Before`, for a format that reads a cell by it
+	// With a nil `call`, a union read by its first arm that reads its text whole, each arm by its own record.
+	first_match: bool,
 }
 
 // Makes record `at`, which `fill` has filled for its member's type, a `.Before` record that keeps the first.
@@ -78,14 +81,18 @@ scalar_text :: proc "contextless" (v: core.Value, buf: ^[spell.F64_ROOM]u8) -> (
 	return "", false
 }
 
+Before_Read :: #type proc "contextless" (h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64) -> (core.Hook_Regs, core.Action)
+
 // Reads the member at `dest`, whose value is the text `lo..hi` of a format that builds values and writes them back, as its
 // `before` rewrote it. A replacement the member's type or rules refuse is refused at the member, with the path it
 // refused at under the member.
 @(cold)
-@(private)
-before_value :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, lo, hi: u64) -> (core.Hook_Regs, core.Action) {
+before_value :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64) -> (core.Hook_Regs, core.Action) {
 	context = h.ctx
 	b := m.before
+	if b.call == nil {
+		return first_match(h, regs, m, dest, kind, lo, hi)
+	}
 	if h.plan.value_text == nil || b.plan == nil {
 		return refuse(h, regs, {kind = .Unsupported, at = lo}, hi)
 	}
@@ -171,4 +178,55 @@ carry_entries :: proc(h: ^Check, regs: core.Hook_Regs, sub: ^Sink, lo, hi: u64) 
 		h.first = refusal_at(x.kind, full[:], text, lo)
 	}
 	return regs, .Skip
+}
+
+// Reads the text `lo..hi` of a union at `dest`, a value of `kind`, into its first arm that reads the text with no
+// refusal, each tried into scratch first by the arm's record. A null is the union's nil where it has one. A text no arm
+// reads is refused as `.No_Arm`, followed by each arm's refusals. What the tries allocate is given back once the union is
+// read.
+@(private)
+first_match :: proc(h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64) -> (core.Hook_Regs, core.Action) {
+	if kind == .Null && !m.no_nil {
+		runtime.mem_zero(rawptr(dest), int(m.size))
+		return regs, .Next
+	}
+	// A load or sink whose allocator is the temporary one keeps what it stores there, so nothing is given back.
+	keep := context.allocator == context.temp_allocator || h.sink != nil && h.sink.entries.allocator == context.temp_allocator
+	guard := runtime.default_temp_allocator_temp_begin()
+	defer if !keep {
+		runtime.default_temp_allocator_temp_end(guard)
+	}
+	text := h.src[lo:hi]
+	dups := core.Duplicates.First if h.first_key else .Last
+	subs := make([]Sink, len(m.arms), context.temp_allocator)
+	scratch, failed := runtime.mem_alloc(int(m.size), 16, context.temp_allocator)
+	if failed != nil {
+		return refuse(h, regs, {kind = .No_Memory, at = lo}, hi)
+	}
+	for arm, k in m.arms {
+		// The plan read from the arm's record, as a plan of the arm's type. A read's root names the record after its own.
+		view := h.plan^
+		view.root, view.type = &h.plan.fields[arm.fields + 1], h.plan.meta[arm.fields].type
+		subs[k] = {max_errors = h.sink.max_errors if h.sink != nil else 1}
+		subs[k].entries.allocator = context.temp_allocator
+		if check_text(text, raw_data(scratch), view.type, &view, {dups = dups, sink = &subs[k]}, context.temp_allocator) != nil {
+			continue
+		}
+		// The text the arm read into scratch reads alike into the union, short of memory.
+		if check_text(text, rawptr(dest), view.type, &view, {dups = dups}, context.allocator) != nil {
+			return refuse(h, regs, {kind = .No_Memory, at = lo}, hi)
+		}
+		mark_arm(dest, &m.before.field, m, k)
+		return regs, .Next
+	}
+	back, action := refuse(h, regs, {kind = .No_Arm, at = lo}, hi)
+	for &sub in subs {
+		if action == .Stop || h.sink == nil {
+			break
+		}
+		if len(sub.entries) > 0 || sub.fatal.kind != .None {
+			back, action = carry_entries(h, back, &sub, lo, hi)
+		}
+	}
+	return back, action
 }

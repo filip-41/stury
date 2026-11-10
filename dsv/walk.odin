@@ -12,6 +12,7 @@
 // masks say they are needed.
 package dsv
 
+import "base:intrinsics"
 import "base:runtime"
 import core "../core"
 import kernel "../core/kernel"
@@ -521,7 +522,7 @@ field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S
 run :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, keys: []core.Token, width := 0) -> u64 {
 	// A document build or a record batch with the default options runs its own pass instance with literal options,
 	// which fold the option tests and leave the instance for other options out of its registers.
-	when H == engine.Builder || H == Batch || H == Cells {
+	when H == engine.Builder || H == Batch || intrinsics.type_is_specialization_of(H, Cells_Of) {
 		if opts == {} {
 			return run_tier(src, lo, S, opts, h, regs, on, EMIT, false, true, keys, width)
 		}

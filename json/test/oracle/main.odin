@@ -77,7 +77,7 @@ main :: proc() {
 		free_all(context.temp_allocator)
 		p: Profile
 		sink := typed.Sink{max_errors = 1000}
-		loaded := model.load(&m, transmute([]u8)line, &p, &sink, dups, context.temp_allocator)
+		loaded := model.load(&m, transmute([]u8)line, &p, &sink, {dups = dups}, context.temp_allocator)
 		if f, faulted := loaded.(core.Fault); faulted {
 			fmt.sbprintf(&out, "fatal %v\n", f.kind)
 			continue

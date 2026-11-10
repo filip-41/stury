@@ -22,6 +22,7 @@ META := [?]struct {
 	{"https://json-schema.org/draft/2020-12/meta/format-annotation", #load("meta/draft2020-12/meta/format-annotation.json", string), nil},
 	{"https://json-schema.org/draft/2020-12/meta/format-assertion", #load("meta/draft2020-12/meta/format-assertion.json", string), nil},
 	{"https://json-schema.org/draft/2020-12/meta/content", #load("meta/draft2020-12/meta/content.json", string), nil},
+	{DIALECT_URI, DIALECT, nil},
 	{"https://json-schema.org/draft/2019-09/schema", #load("meta/draft2019-09/schema.json", string), .D2019_09},
 	{"https://json-schema.org/draft/2019-09/meta/core", #load("meta/draft2019-09/meta/core.json", string), nil},
 	{"https://json-schema.org/draft/2019-09/meta/applicator", #load("meta/draft2019-09/meta/applicator.json", string), nil},

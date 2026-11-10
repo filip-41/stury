@@ -105,9 +105,9 @@ a_load_refuses_a_repeated_key_where_the_read_does :: proc(t: ^testing.T) {
 		testing.expectf(t, err != nil && len(sink.entries) > 0 && sink.entries[0].kind == .Duplicate_Key, "%s: %v", text, err)
 	}
 	p: Profile
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "age": 30, "age": 31}`), &p, nil, .Last))
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "age": 30, "age": 31}`), &p, nil, {dups = .Last}))
 	testing.expect_value(t, p.age, 31)
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "age": 30, "age": 31}`), &p, nil, .First))
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "age": 30, "age": 31}`), &p, nil, {dups = .First}))
 	testing.expect_value(t, p.age, 30)
 }
 
@@ -174,7 +174,7 @@ four_way :: proc(t: ^testing.T, v: $T, valid: bool, loc := #caller_location) {
 	validated := model.validate(&m, &v) == nil
 	text, _ := write.marshal(v, &m.plan, allocator = context.temp_allocator)
 	back: T
-	loaded := model.load(&m, text, &back, nil, .Refuse, context.temp_allocator) == nil
+	loaded := model.load(&m, text, &back, nil, {dups = .Refuse}, context.temp_allocator) == nil
 	checks: [model.Direction]bool
 	for direction in model.Direction {
 		d, _ := model.schema(&m, direction, context.temp_allocator)
@@ -380,8 +380,8 @@ a_load_captures_into_a_map_of_values_by_the_repeat_policy :: proc(t: ^testing.T)
 	m, _ := model.compile(&reg, Roles, json.reads(.Json))
 	text := transmute([]u8)string(`{"name": "a", "z": 1, "z": [2]}`)
 	first, last: Roles
-	walktest.expect_nil(t, model.load(&m, text, &first, nil, .First))
-	walktest.expect_nil(t, model.load(&m, text, &last, nil, .Last))
+	walktest.expect_nil(t, model.load(&m, text, &first, nil, {dups = .First}))
+	walktest.expect_nil(t, model.load(&m, text, &last, nil, {dups = .Last}))
 	z, z_last := first.extra["z"], last.extra["z"]
 	testing.expect(t, len(first.extra) == 1 && core.value_kind(z) == .Number, "first keeps the first")
 	testing.expect(t, len(last.extra) == 1 && core.value_kind(z_last) == .Array, "last keeps the last")

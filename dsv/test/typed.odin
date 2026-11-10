@@ -1,11 +1,14 @@
 package dsv_tests
 
+import "base:runtime"
 import "core:mem"
 import "core:strings"
 import "core:testing"
 import core "../../core"
 import typed "../../core/typed"
+import write "../../core/write"
 import dsv ".."
+import model "../../core/model"
 import walktest "../../walktest"
 
 // The typed read of a delimited text: each cell rule, each row form, each refusal, the collecting sink and who owns what
@@ -388,4 +391,42 @@ a_check_reports_every_missing_column_of_a_row :: proc(t: ^testing.T) {
 	_ = typed.unmarshal_text(text, &rows, []Row, &plan, {sink = &plain}, context.temp_allocator)
 	testing.expect_value(t, len(plain.errors), 2)
 	typed.sink_destroy(&sink)
+}
+
+@(private = "file")
+Cents :: distinct i64
+
+@(test)
+a_model_reads_and_writes_carriers_in_cells :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	reg: model.Registry
+	from :: proc(c: ^string, out: ^Cents, allocator: runtime.Allocator) -> core.Typed_Error_Kind {
+		return .None
+	}
+	to :: proc(v: ^Cents, allocator: runtime.Allocator) -> (string, core.Typed_Error_Kind) {
+		return "0", .None
+	}
+	model.register(&reg, model.Custom(Cents, string){from, to})
+	Row :: struct {
+		price: model.Decimal,
+	}
+	m, compiled := model.compile(&reg, []Row, dsv.checks(.Csv))
+	walktest.expect_nil(t, compiled)
+	rows: []Row
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string("price\n12.50\n"), &rows))
+	testing.expect(t, len(rows) == 1 && rows[0].price.text == "12.50")
+	text, written := write.marshal(rows, &m.plan, allocator = context.temp_allocator)
+	walktest.expect_nil(t, written)
+	testing.expect_value(t, string(text), "price\n12.50\n")
+	_, refused := model.compile(&reg, []struct{ c: Cents }, dsv.checks(.Csv))
+	walktest.expect_kind(t, refused, core.Typed_Error_Kind.Unsupported)
+	Either :: union {
+		i64,
+		string,
+	}
+	first: model.Registry
+	model.register(&first, model.Union_Rule{type = Either, mode = .First_Match})
+	_, refused = model.compile(&first, []struct{ e: Either }, dsv.checks(.Csv))
+	walktest.expect_kind(t, refused, core.Typed_Error_Kind.Unsupported)
 }

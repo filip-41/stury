@@ -8,6 +8,7 @@ import "base:runtime"
 import "core:io"
 import "core:mem/virtual"
 import "core:reflect"
+import "core:slice"
 import "core:strings"
 import core ".."
 import rules "../rules"
@@ -65,11 +66,13 @@ Field :: struct {
 	kind:      Read_Kind,
 	omit:      bool, // a member a write leaves out when it is empty, the tag's `omitempty`
 	key_size:  u8, // what a write stores of `key`, 0 for a member it must look at first: `omit`, the end, or a name to escape
+	lists:     bool, // a struct a write lists before it writes, since it captures unknown members
 	offset:    u32,
 	stride:    u32,
 	meta:      u32,
 	first:     ^Field,
 }
+#assert(size_of(Field) == 72)
 
 // The longest key text a write stores in line. A longer one is written through the format's string writer.
 KEY_SIZE_MAX :: 240
@@ -84,6 +87,7 @@ Meta :: struct {
 	read:       Unmarshal_Hook, // a `Hook`'s
 	before:     ^Before, // a `Before`'s
 	write:      Marshal_Hook, // a `Hook`'s
+	data:       rawptr, // a `Hook`'s `Type_Hook.data`
 	required:   []i32, // on a struct's `Never` record, the members that must be present
 	required_end: i32, // on a struct's own record, one past its last `required` member: a cursor at or past it has passed every one
 	names:      u64, // a struct's members' `name_bit`s, so most keys it does not hold are known by one test
@@ -101,12 +105,18 @@ Meta :: struct {
 	whole:      bool,
 	list:       bool, // `block` is a list's or map's, so `first` is past its element's record
 	zeroed:     bool, // a list's new elements must start zeroed, since their readers may leave bytes unwritten
-	tagged:     bool, // a `Union` that reads objects by `Plan.union_tag`, or such a union's named struct arm
+	tagged:     bool, // a `Union` that reads objects by `union_tag`, or such a union's named struct arm
+	union_tag:  string, // the member a tagged `Union` and its named struct arms name the arm by
 	no_nil:     bool, // a `Union` that has no nil
 	access:     Access, // a struct member's, under a model
+	omit_empty: bool, // a member the tag's `omitempty` leaves out when it is empty, where `Field.omit` may be a model's
+	optional:   bool, // a model's member that a load does not require
+	bit:        i8, // a model's member's bit in its struct's `Fields_Set`, -1 for one the load does not read
 	forbid:     bool, // a struct whose model refuses the members it does not name
 	model:      ^Struct_Model, // on a struct's records, what a load does with it, nil for none
+	owner:      ^Struct_Model, // on a model's member's record, its struct's model, nil for none
 	rule_set:   i32, // 1 + the record's leaf in `Plan.leaves`, and for a type's plan its set in `Plan.rule_sets`, 0 for none
+	default:    i32, // on a model's member's record, 1 + its default in `owner.defaults`, 0 for none
 }
 
 // A `Checked` record's use of its node, beside its `Meta`, so a type plan's records stay as they are. `items` is the
@@ -163,6 +173,50 @@ Enum_Spelling :: enum u8 {
 	Int,
 }
 
+// Whether a plan reads and writes the enum `info` as its integers, which a plan built with `.Int` does and a model's
+// plan does for an enum it gives no names.
+enum_by_number :: #force_inline proc "contextless" (plan: ^Plan, info: ^runtime.Type_Info_Enum) -> bool {
+	return plan.enums == .Int || len(info.names) == 0
+}
+
+// The enum of `ti` as the plan spells it: the type's own, or the plan's copy with the names its model gives. Two members a
+// model spells alike are refused as `.Bad_Tag`, with the enum as `want.type` and the name as `want.text`.
+@(private)
+enum_of :: proc(b: ^Builder, ti: ^runtime.Type_Info) -> ^runtime.Type_Info_Enum {
+	info := &runtime.type_info_base(ti).variant.(runtime.Type_Info_Enum)
+	if b.model == nil || b.model.enum_names == nil {
+		return info
+	}
+	room := size_of(runtime.Type_Info_Enum) + len(info.names) * size_of(string)
+	memory, failed := runtime.mem_alloc(room, align_of(runtime.Type_Info_Enum))
+	if failed != nil {
+		refuse_plan(b, .No_Memory)
+		return info
+	}
+	owned(b, memory)
+	copied := (^runtime.Type_Info_Enum)(raw_data(memory))
+	copied^ = info^
+	names := ([^]string)(&memory[size_of(runtime.Type_Info_Enum)])[:len(info.names)]
+	copy(names, info.names)
+	copied.names = nil
+	by_name, err := b.model.enum_names(b.model, ti.id, names)
+	if err != nil {
+		refuse_plan(b, .No_Memory)
+	}
+	if !by_name {
+		return copied
+	}
+	for &name, i in names {
+		if b.err.kind == .None && slice.contains(names[:i], name) {
+			refuse_plan(b, .Bad_Tag, text = name)
+			b.err.want.type = ti.id
+		}
+		name = name if name == info.names[i] else owned_copy(b, name)
+	}
+	copied.names = names
+	return copied
+}
+
 // The name a type's arm of a union goes by in place of its type name.
 Tag_Name :: struct {
 	type: typeid,
@@ -187,11 +241,15 @@ Unmarshal_Hook :: #type proc(v: Hook_Value, dest: rawptr, allocator: runtime.All
 Marshal_Hook :: #type proc(v: rawptr, allocator: runtime.Allocator) -> (stand_in: any, refuse: core.Typed_Error_Kind)
 
 // A type read or written by the caller's procs instead of by the plan. A nil `read` or `write` refuses the type on that
-// side as `.Unsupported`, at the value.
+// side as `.Unsupported`, at the value. `data` is `context.user_ptr` during a call of either when it is not nil.
+// `carrier` is a type whose values are the values `read` takes, which a union's arm of the hook's type picks by, nil for
+// a hook that takes every value.
 Type_Hook :: struct {
-	type:  typeid,
-	read:  Unmarshal_Hook,
-	write: Marshal_Hook,
+	type:    typeid,
+	read:    Unmarshal_Hook,
+	write:   Marshal_Hook,
+	data:    rawptr,
+	carrier: typeid,
 }
 
 // How a field with no name of its own in its tag is spelled from its Odin name.
@@ -201,6 +259,7 @@ Rename :: enum u8 {
 	Pascal, // `LastName`
 	Kebab, // `last-name`
 	Screaming, // `LAST_NAME`
+	Snake, // `last_name`, which an `Ada_Case` enum member is spelled as before any other
 }
 
 // What a plan is built with. `union_tag` is the member that names a struct arm of a union with two or more named struct
@@ -232,6 +291,14 @@ Model_Rules :: struct {
 	structs: proc(b: ^Builder, owner: typeid, at: i32, f: ^Field, m: ^Meta, members: []Member, layout: ^Struct_Layout),
 	// The validators of struct `owner`, which run at its close once none of its members failed, nil for none.
 	validators: proc(m: ^Model_Rules, owner: typeid) -> []Validator,
+	// How the model spells the members of enum `type`: `names` holds the type's own in its order, which it may replace,
+	// and false spells them as their integers. Nil keeps the plan's `enums`.
+	enum_names: proc(m: ^Model_Rules, type: typeid, names: []string) -> (by_name: bool, err: runtime.Allocator_Error),
+	// How union `type` is read: by the member `tag` that names its struct arms where `set`, in place of
+	// `Plan_Options.union_tag`, or by its first arm that reads a value, which takes arms that read one kind alike.
+	unions:     proc(m: ^Model_Rules, type: typeid) -> (tag: string, set: bool, first_match: bool),
+	// How a load runs them, `validate_closed`, which a registered validator names, so a load with none links none of it.
+	close:      Close_Validators,
 	// Whether the plan is a load's, whose structs settle at their close. Any other model plan holds only the validators.
 	loading: bool,
 	// The rule sets and leaves of the model's plan of the same type, which this plan takes in place of its own, nil for
@@ -254,12 +321,15 @@ Model_Plan :: enum u8 {
 // validators of its members and of the struct, which run at its close.
 Struct_Model :: struct {
 	settle:     proc "contextless" (h: ^Reader, sm: ^Struct_Model, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64) -> (core.Typed_Error_Kind, bool),
+	validate:   Close_Validators, // a load's, nil when the struct has no validator
 	fields_set: u32,
 	defaults:   []Default,
 	read_only:  []string,
 	afters:     []After,
 	checks:     []Validator,
 }
+
+Close_Validators :: #type proc "contextless" (h: ^Reader, sm: ^Struct_Model, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64, base: uintptr) -> bool
 
 @(private)
 Default :: struct {
@@ -322,7 +392,7 @@ Plan :: struct {
 	type:      typeid,
 	// What a key's writing adds to its name, `Field.n` less the name's length.
 	key_frame: u32,
-	// The name bytes of records and of renamed or unescaped names.
+	// The name bytes of records and of renamed or unescaped names, and the enums a model renames with their names.
 	strings:   [dynamic]string,
 	allocator: runtime.Allocator,
 	// A format whose tokens do not type their values reads a document's node through this, where its plan maker sets it.
@@ -366,7 +436,13 @@ Plan :: struct {
 
 // Writes the value of `plan`'s type at `value` as `opts` says, to `stream` when it has a procedure, else to new bytes
 // from `allocator`.
-Marshal_Text :: #type proc(plan: ^Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal)
+Marshal_Text :: #type proc(plan: ^Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, omits: ^Omits) -> ([]u8, core.Typed_Refusal)
+
+// What a write asks of each member a model's plan marks `Field.omit`, beside the tag's `omitempty`: whether to leave the
+// member of record `r` at `at` out.
+Omits :: struct {
+	call: proc(o: ^Omits, plan: ^Plan, r: ^Field, at: uintptr) -> bool,
+}
 
 // Writes the built value `v` in `plan`'s format into new bytes from `allocator`.
 Value_Text :: #type proc(plan: ^Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal)
@@ -826,7 +902,7 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset,
 	}
 	expect_name(b, &f, name)
 	if hook, hooked := hook_of(b, ti.id); hooked {
-		f.kind, m.read, m.write = .Hook, hook.read, hook.write
+		f.kind, m.read, m.write, m.data = .Hook, hook.read, hook.write, hook.data
 		m.key_kind = hooked_kind(base)
 		if hook.read == nil && hook.write == nil {
 			refuse_plan(b, .Unsupported)
@@ -847,11 +923,17 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset,
 		f.kind = .Scalar
 	case typeid_of(any):
 		f.kind = .Any
-		m.block, m.list = any_block(b), true
 	case:
 		fill_base(b, &f, &m, ti, base)
 	}
 	b.fields[at], b.meta[at] = f, m
+	// A load reads a first-match union wherever it is, as a `.Before` with no call.
+	if f.kind == .Union && b.model != nil && b.model.loading && b.model.unions != nil {
+		if _, _, first_match := b.model.unions(b.model, ti.id); first_match {
+			fm := Before{first_match = true, value = before_value}
+			keep_before(b, at, &fm)
+		}
+	}
 }
 
 // The kind whose test for empty a hooked value of base type `base` takes, `.Never` for a type with none.
@@ -937,7 +1019,7 @@ fill_base :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti, base: ^runtime.Type_Info
 		m.map_info = v.map_info
 		m.key_kind = map_key_kind(b, v.key)
 		if m.key_kind == .Enum {
-			m.enum_info = &runtime.type_info_base(v.key).variant.(runtime.Type_Info_Enum)
+			m.enum_info = enum_of(b, v.key)
 		}
 		b.widest = max(b.widest, v.value.size)
 		list(b, m, ti, v.value, 0)
@@ -947,7 +1029,7 @@ fill_base :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti, base: ^runtime.Type_Info
 			return
 		}
 		f.kind = .Enum
-		m.enum_info = &base.variant.(runtime.Type_Info_Enum)
+		m.enum_info = enum_of(b, ti)
 	case runtime.Type_Info_Pointer:
 		if v.elem == nil {
 			refuse_plan(b, .Unsupported)
@@ -1021,26 +1103,8 @@ fill_bit_set :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v
 	em := &b.meta[m.block]
 	em.lower, em.count = v.lower, u32(v.upper - v.lower + 1)
 	if is_enum {
-		em.enum_info = &elem.variant.(runtime.Type_Info_Enum)
+		em.enum_info = enum_of(b, v.elem)
 	}
-}
-
-// The block of an `any`'s boxed containers: a `map[string]any`'s record, a `Never` record, a `[dynamic]any`'s record,
-// a `Never` record.
-@(private)
-any_block :: proc(b: ^Builder) -> i32 {
-	if at, ok := b.blocks[{typeid_of(any), 0, 0}]; ok {
-		return at
-	}
-	at := reserve_block(b, 4, {typeid_of(any), 0, 0})
-	if at < 0 {
-		return -1
-	}
-	never(b, int(at) + 1)
-	never(b, int(at) + 3)
-	fill(b, int(at), type_info_of(map[string]any), "", 0, 0)
-	fill(b, int(at) + 2, type_info_of([dynamic]any), "", 0, 0)
-	return at
 }
 
 @(private)
@@ -1102,7 +1166,7 @@ fill_union :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: 
 		}
 		never(b, int(m.block) + len(v.variants))
 		for arm, k in v.variants {
-			fill(b, int(m.block) + k, arm, "", 0, 0, m.rule_set)
+			fill(b, int(m.block) + k, arm, "", 0, 0, arm_rules(b, arm, m.rule_set))
 		}
 	}
 	arms, failed := make([]Arm, len(v.variants))
@@ -1126,15 +1190,39 @@ fill_union :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: 
 			}
 		}
 	}
-	m.tagged = named >= 2 && len(b.union_tag) > 0
+	tag, first_match := b.union_tag, false
+	if b.model != nil && b.model.unions != nil {
+		named_tag, set := "", false
+		if named_tag, set, first_match = b.model.unions(b.model, ti.id); set {
+			tag = owned_copy(b, named_tag)
+		}
+	}
+	m.tagged, m.union_tag = named >= 2 && len(tag) > 0, tag
 	for &arm, k in m.arms {
 		if m.tagged && len(arm.name) > 0 {
 			b.meta[int(m.block) + k].tagged = true
+			b.meta[int(m.block) + k].union_tag = tag
 		} else {
 			arm.name = ""
 		}
 	}
-	refuse_overlap(b, m)
+	if !first_match {
+		refuse_overlap(b, m)
+	}
+}
+
+// The rule set of a union's arm of type `arm`: the union's rules, `rule_set`, with a model's rules of the arm's type.
+@(private)
+arm_rules :: proc(b: ^Builder, arm: ^runtime.Type_Info, rule_set: i32) -> i32 {
+	if b.model == nil || rule_set == 0 {
+		return rule_set
+	}
+	own := rules.Node{rules = b.model.member(b.model, nil, "", arm.id, "").rules}
+	joined, clash := rules.merged(&own, b.rule_sets[rule_set - 1])
+	if clash != "" {
+		refuse_plan(b, .Bad_Tag, text = clash)
+	}
+	return rule_set_of(b, joined)
 }
 
 // Refuses a union two of whose arms take one class of value, except objects that arms named by the union's tag take.
@@ -1167,7 +1255,7 @@ refuse_tag_members :: proc(b: ^Builder) {
 			}
 			s := &b.meta[arm.fields]
 			for j in 0 ..< int(s.members) {
-				if name := b.meta[int(s.block) + j].name; name == b.union_tag {
+				if name := b.meta[int(s.block) + j].name; name == m.union_tag {
 					refuse_plan(b, .Unsupported, name)
 				}
 			}
@@ -1181,8 +1269,8 @@ classes_of :: proc(b: ^Builder, ti: ^runtime.Type_Info, depth: int) -> (c: bit_s
 	if depth > 16 {
 		return
 	}
-	if _, hooked := hook_of(b, ti.id); hooked {
-		return EVERY_CLASS
+	if hook, hooked := hook_of(b, ti.id); hooked {
+		return classes_of(b, type_info_of(hook.carrier), depth + 1) if hook.carrier != nil else EVERY_CLASS
 	}
 	switch ti.id {
 	case typeid_of(Raw), typeid_of(any), typeid_of(core.Value):
@@ -1296,8 +1384,10 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 	if c, ok := capture.?; ok {
 		b.meta[int(at) + n].capture = at + i32(n) + 1
 		fill(b, int(at) + n + 1, c.type, "", u32(c.offset), 0)
-		f.kind = .Required
+		f.kind, f.lists = .Required, true
 	}
+	sm := b.meta[int(at) + n].model
+	bit := i8(0)
 	for x, i in members {
 		fill(b, int(at) + i, x.type, x.name, u32(x.offset), 0, x.rule_set)
 		b.meta[int(at) + i].access = x.access
@@ -1305,11 +1395,34 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 			keep_before(b, int(at) + i, x.before)
 		}
 		r := &b.fields[int(at) + i]
-		r.omit = x.omit
-		if !x.omit && r.n <= KEY_SIZE_MAX && plain_name(x.name) {
+		mm := &b.meta[int(at) + i]
+		mm.omit_empty, mm.optional, mm.bit, mm.owner = x.omit, !x.required, -1 if x.access == .Read_Only else bit, sm
+		bit += 0 if x.access == .Read_Only else 1
+		if sm != nil {
+			for d, j in sm.defaults {
+				mm.default = i32(j) + 1 if int(d.member) == i else mm.default
+			}
+		}
+		// A model's write may leave out a member that can be null, has a default or whose struct records its loaded members.
+		r.omit = x.omit || b.model != nil && !b.model.loading && (!x.required || layout.fields_set != 0 || nullable(x.type))
+		if !r.omit && r.n <= KEY_SIZE_MAX && plain_name(x.name) {
 			r.key_size = u8(r.n)
 		}
 	}
+}
+
+// Whether a value of `ti` can be null: a pointer, an `any`, a cstring or a union with a nil.
+@(private)
+nullable :: proc(ti: ^runtime.Type_Info) -> bool {
+	#partial switch v in runtime.type_info_base(ti).variant {
+	case runtime.Type_Info_Pointer, runtime.Type_Info_Any:
+		return true
+	case runtime.Type_Info_String:
+		return v.is_cstring
+	case runtime.Type_Info_Union:
+		return !v.no_nil
+	}
+	return false
 }
 
 // Points `f` at the struct block recorded under `key`, if there is one.
@@ -1323,6 +1436,7 @@ known_struct :: proc(b: ^Builder, key: Block_Key, f: ^Field, m: ^Meta) -> bool {
 	end := &b.meta[b.ends[at]]
 	m.required_end, m.model, m.forbid = end.required_end, end.model, end.forbid
 	f.kind = .Required if len(end.required) > 0 || end.capture >= 0 || end.model != nil && end.model.settle != nil else .Struct
+	f.lists = end.capture >= 0
 	return true
 }
 

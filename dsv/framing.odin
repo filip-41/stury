@@ -71,7 +71,7 @@ Batch :: struct {
 Columns_Key :: struct {
 	fields: rawptr,
 	stamp:  u64,
-	read:   [3]bool,
+	read:   [4]bool,
 }
 
 // Records the record from `lo` to `hi`, the header's line when `header`, and the `width` its check left. The first record
@@ -338,12 +338,19 @@ put_row_cells :: #force_inline proc(b: ^build.Builder, regs: core.Hook_Regs, cel
 }
 
 // Reads the next row into `target`, a row type, by replaying its cells through `on_cell` as `unmarshal` reads the text
-// of the header and that row. A list row reads the row alone, as it reads a header as data.
+// of the header and that row. A list row reads the row alone, as it reads a header as data. Under `typed.Check`, a model's
+// check, the header is the walk's keys, judged by a model's first record only: a record the read takes again, which a
+// short window makes it do, judges it again, and a header that lacks a required column stops the reads at the record
+// that judged it.
 @(private)
-read_row_spec :: #force_inline proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal, $S: Spec) -> bool {
+read_row_spec :: #force_inline proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal, $S: Spec, $H: typeid) -> bool {
 	opts := options_of(it.as)
-	h := Cells{refuse_repeats = read.dups == .Refuse}
-	regs, started := typed.read_start(&h.r, it.src, plan, it.as, T, target, read, it.frames, allocator, false)
+	h := Cells_Of(H){refuse_repeats = read.dups == .Refuse}
+	when H == typed.Check {
+		regs, started := typed.check_start(&h.r, it.src, untracked(plan), it.as, T, target, read, untracked_frames(it.frames), allocator)
+	} else {
+		regs, started := typed.read_start(&h.r, it.src, plan, it.as, T, target, read, it.frames, allocator, false)
+	}
 	h.r.ctx.temp_allocator = runtime.arena_allocator(&it.scratch)
 	if started.kind == .None && plan.marshal == nil {
 		started.kind = .Plan_Mismatch
@@ -361,10 +368,24 @@ read_row_spec :: #force_inline proc(it: ^records.Reader, target: rawptr, T: type
 		return false
 	}
 	_, ok := next_row_spec(it, S)
-	if !ok {
-		return false
-	}
 	b := (^Batch)(it.format)
+	when H == typed.Check {
+		record := judged_record(read)
+		if !ok {
+			if b != nil && b.judged == 0 && !opts.no_header && h.opens != .Array && len(b.keys) > 0 && (it.input.procedure == nil || it.eof) {
+				header_only(&h, it, b, regs, err)
+			}
+			return false
+		}
+		if b.halted != 0 && b.halted != it.base + b.rows[b.at - 1].at + 1 {
+			return false
+		}
+		h.quiet = b.judged != 0 && b.judged < record
+	} else {
+		if !ok {
+			return false
+		}
+	}
 	row := b.rows[b.at - 1]
 	src, at, joinable := joined(it, b, row)
 	if !joinable {
@@ -380,7 +401,7 @@ read_row_spec :: #force_inline proc(it: ^records.Reader, target: rawptr, T: type
 	if !h.no_header {
 		h.keys = b.keys
 	}
-	flags := [3]bool{h.r.refuse_unknown, h.r.first_key, h.refuse_repeats}
+	flags := [4]bool{h.r.refuse_unknown, h.r.first_key, h.refuse_repeats, H == typed.Check}
 	key := Columns_Key{raw_data(plan.fields), plan.stamp, flags}
 	if b.cols_key == key {
 		h.cols = b.cols
@@ -405,6 +426,14 @@ read_row_spec :: #force_inline proc(it: ^records.Reader, target: rawptr, T: type
 			regs, _ = row_token(&h, regs, {kind = .End, role = .Value, lo = at.hi})
 		}
 	}
+	when H == typed.Check {
+		if b.judged == 0 || b.judged >= judged_record(read) {
+			b.judged = judged_record(read)
+		}
+		if h.halted && b.halted == 0 {
+			b.halted = it.base + row.at + 1
+		}
+	}
 	// A read with no refusal leaves `err` as the caller zeroed it.
 	if h.r.first.kind != .None {
 		err^ = typed.read_end(&h.r, regs, nil)
@@ -416,9 +445,36 @@ read_row_spec :: #force_inline proc(it: ^records.Reader, target: rawptr, T: type
 			for &e in read.sink.errors[kept.errors:] {
 				place_error(it, b, row, &e)
 			}
+			when H == typed.Check {
+				for &e in read.sink.entries[kept.entries:] {
+					e.start, e.end = place_at(it, b, row, e.start), place_at(it, b, row, e.end)
+				}
+			}
 		}
 	}
 	return true
+}
+
+// The record of the sink a model's read stands at, plus one, which says whether the read is of a record it took before.
+@(private)
+judged_record :: #force_inline proc "contextless" (read: typed.Read_Options) -> i64 {
+	return read.sink.record + 1 if read.sink != nil else max(i64)
+}
+
+// Judges the header of a table with no row, which no record reads, as the check of a text judges it at the table's end.
+@(cold, private)
+header_only :: proc(h: ^Cells_Of(typed.Check), it: ^records.Reader, b: ^Batch, regs: core.Hook_Regs, err: ^core.Typed_Refusal) {
+	if it.input.procedure != nil {
+		h.r.src = b.key_src
+	}
+	h.keys = b.keys
+	if bind_columns(h, regs, 0) == .Stop {
+		h.r.sp = 1
+	}
+	b.judged = max(i64)
+	if h.r.first.kind != .None {
+		err^ = typed.read_end(&h.r, regs, nil)
+	}
 }
 
 // Moves the offsets of `e`, which name bytes of `joined`'s text, to the window's: the header's line is at `head_at` of

@@ -89,7 +89,7 @@ layout_ok :: proc(spec: Spec, layout: Options) -> bool {
 
 // The plan's `marshal`: the value is the list of rows.
 @(private)
-marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
+marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, _: ^typed.Omits) -> ([]u8, core.Typed_Refusal) {
 	spill: [write.ROOM_MAX]u8 = ---
 	w: Rows
 	rows_start(&w, &spill, options_of(plan.as), Spec(plan.spec), opts, stream, allocator, 0)
@@ -444,7 +444,7 @@ write_other :: #force_no_inline proc(w: ^Rows, pl: ^typed.Plan, f: ^typed.Field,
 		info := pl.meta[f.meta].enum_info
 		p := write.room(out, CELL_ROOM)
 		name := write.enum_spelled(pl, info, write.enum_value(info, v), p) or_return
-		if pl.enums == .Int {
+		if typed.enum_by_number(pl, info) {
 			return put_number(w, p, len(name), first)
 		}
 		return put_string(w, name, first, inner)
@@ -458,6 +458,12 @@ write_other :: #force_no_inline proc(w: ^Rows, pl: ^typed.Plan, f: ^typed.Field,
 		}
 	case .Hook:
 		return put_hooked(w, pl, f, v, first, inner)
+	case .Number_Text:
+		// The empty text, a null, is an empty cell.
+		text := (^core.Number_Text)(v).text
+		p := write.room(out, len(text) + 2)
+		intrinsics.mem_copy(p, raw_data(text), len(text))
+		return put_number(w, p, len(text), first)
 	case:
 		return .Unsupported
 	}
@@ -471,6 +477,8 @@ put_hooked :: proc(w: ^Rows, pl: ^typed.Plan, f: ^typed.Field, v: uintptr, first
 	if hook == nil {
 		return .Unsupported
 	}
+	data := pl.meta[f.meta].data
+	context.user_ptr = data if data != nil else context.user_ptr
 	a, kind := hook(rawptr(v), runtime.arena_allocator(&w.arena))
 	if kind != .None {
 		return kind

@@ -12,18 +12,32 @@ import records "../records"
 // first, so a member the text leaves out holds its default or its zero. A read_only member is neither read nor judged,
 // and a write_only one is read. A key the struct does not name is skipped unless the struct forbids it, and a key the
 // text repeats anywhere, inside a skipped value too, ends the load as `.Duplicate_Key` unless `dups` says which one
-// wins. Strings and the other values the text builds are allocated with `allocator`. Every refusal goes to `sink` as a
-// `core.Error_Entry` with its path, up to the sink's limit, and with no sink the first ends the read. Returns the first.
-load :: proc(m: ^Model($T), src: []u8, v: ^T, sink: ^typed.Sink = nil, dups := core.Duplicates.Refuse, allocator := context.allocator) -> core.Error {
-	// A zero `dups` is the read's default, which a load takes as a refusal.
-	read := typed.Read_Options{dups = .Refuse if dups == .Default else dups, sink = sink}
-	return typed.check_text(src, v, T, &m.load_plan, read, allocator)
+// wins, as `opts` says. Strings and the other values the text builds are allocated with `allocator`. Every refusal goes
+// to `sink` as a `core.Error_Entry` with its path, up to the sink's limit, and with no sink the first ends the read.
+// Returns the first.
+load :: proc(m: ^Model($T), src: []u8, v: ^T, sink: ^typed.Sink = nil, opts := Load_Opts{}, allocator := context.allocator) -> core.Error {
+	return typed.check_text(src, v, T, &m.load_plan, read_options(opts, sink), allocator)
+}
+
+// How a load reads. `dups` says which of a repeated key's values wins, and its zero refuses a repeat. A `partial` load
+// reads a patch for `merge`: in the structs merge descends into, the root and its struct members whose structs hold a
+// `Fields_Set`, it refuses no missing member and gives none its default, so a member the text leaves out is zero and
+// unset. A struct below a list, a map, a pointer or a union, or one without a set, which merge replaces whole, is read
+// in full.
+Load_Opts :: struct {
+	dups:    core.Duplicates,
+	partial: bool,
+}
+
+@(private)
+read_options :: proc(opts: Load_Opts, sink: ^typed.Sink) -> typed.Read_Options {
+	return {dups = .Refuse if opts.dups == .Default else opts.dups, sink = sink, partial = opts.partial}
 }
 
 // Loads the value `v` as `load` loads the text of the model's format that spells it, so a value built in memory is judged
 // and defaulted as a read of it would be. The offsets in the entries are from the start of that text. A format whose plan
 // writes no value text is `.Bad_Option`.
-load_value :: proc(m: ^Model($T), v: core.Value, out: ^T, sink: ^typed.Sink = nil, dups := core.Duplicates.Refuse, allocator := context.allocator) -> core.Error {
+load_value :: proc(m: ^Model($T), v: core.Value, out: ^T, sink: ^typed.Sink = nil, opts := Load_Opts{}, allocator := context.allocator) -> core.Error {
 	if m.load_plan.value_text == nil {
 		return core.error_of(core.Typed_Refusal{kind = .Bad_Option})
 	}
@@ -32,8 +46,7 @@ load_value :: proc(m: ^Model($T), v: core.Value, out: ^T, sink: ^typed.Sink = ni
 	if err.kind != .None {
 		return core.error_of(err)
 	}
-	read := typed.Read_Options{dups = .Refuse if dups == .Default else dups, sink = sink}
-	return typed.check_text(text, out, T, &m.load_plan, read, allocator)
+	return typed.check_text(text, out, T, &m.load_plan, read_options(opts, sink), allocator)
 }
 
 // Whether the load that filled `set`, a member of a struct of type `S` in `T`, read the member the text names `name`,
@@ -136,8 +149,11 @@ clone_map :: proc(dst, src: rawptr, ti: ^runtime.Type_Info, v: runtime.Type_Info
 	if from.len == 0 {
 		return nil
 	}
+	// A map that holds entries keeps its allocator, and the copies join them.
 	to := (^runtime.Raw_Map)(dst)
-	to.allocator = a
+	if to.allocator.procedure == nil {
+		to.allocator = a
+	}
 	key := runtime.mem_alloc(v.key.size, v.key.align, context.temp_allocator) or_return
 	value := runtime.mem_alloc(v.value.size, v.value.align, context.temp_allocator) or_return
 	it := 0
@@ -157,9 +173,9 @@ clone_map :: proc(dst, src: rawptr, ti: ^runtime.Type_Info, v: runtime.Type_Info
 // opened with a spec named at compile time takes the check read of the model's format. The
 // records may be of a stream, and each is judged and defaulted alone: a header is judged with the first record of a table.
 // A refused record returns its error and true, and the next call goes on after it. Every offset is from the input's first byte.
-read :: proc(it: ^records.Reader, m: ^Model($T), v: ^T, sink: ^typed.Sink = nil, dups := core.Duplicates.Refuse, allocator := context.allocator) -> (err: core.Error, more: bool) {
+read :: proc(it: ^records.Reader, m: ^Model($T), v: ^T, sink: ^typed.Sink = nil, opts := Load_Opts{}, allocator := context.allocator) -> (err: core.Error, more: bool) {
 	if it.docs == nil && m.load_plan.docs != nil {
 		it.docs = (^records.Record_Docs)(m.load_plan.docs())
 	}
-	return records.read(it, v, &m.load_plan, {dups = .Refuse if dups == .Default else dups, sink = sink}, allocator)
+	return records.read(it, v, &m.load_plan, read_options(opts, sink), allocator)
 }

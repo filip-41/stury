@@ -21,10 +21,10 @@ record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
 			return scan_record_spec(it, h, last, path, read, S)
 		},
 		read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
-			return read_spec(it, target, T, plan, read, allocator, err, S)
+			return read_spec(it, target, T, plan, read, allocator, err, S, false)
 		},
 		check_read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
-			return check_read_spec(it, target, T, plan, read, allocator, err, S)
+			return read_spec(it, target, T, plan, read, allocator, err, S, true)
 		},
 		check_run = proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_Options, visit: records.Record_Visit, data: rawptr) {
 			check_run_spec(it, plan, read, visit, data, S)

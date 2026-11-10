@@ -13,12 +13,12 @@ import json "../../json"
 
 // The rendered failures of `text` against `schema_text`, each as the message, its path and its keyword path, one a line.
 @(private = "file")
-failures :: proc(schema_text: string, text: string, handle: core.As, read := typed.Read_Options{}) -> (out: string, err: core.Error) {
+failures :: proc(schema_text: string, text: string, handle: core.As, read := typed.Read_Options{}, reads: ^typed.Format_Reads = nil) -> (out: string, err: core.Error) {
 	doc, _ := core.build(transmute([]u8)schema_text, json.as(.Json))
 	defer core.destroy(&doc)
 	c, _ := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
 	defer schema.destroy(&c)
-	b, berr := schema.bind(&c, handle)
+	b, berr := schema.bind(&c, handle, reads)
 	defer schema.unbind(&b)
 	if berr != nil {
 		return "", berr
@@ -62,9 +62,9 @@ check_one_schema_over_every_format :: proc(t: ^testing.T) {
 		want, werr := failures(ROWS, c.json, json.as(.Json))
 		testing.expect(t, werr == nil || len(want) > 0)
 		json5, _ := failures(ROWS, c.json5, json.as(.Json5))
-		csv, _ := failures(ROWS, c.csv, dsv.as(.Csv))
+		csv, _ := failures(ROWS, c.csv, dsv.as(.Csv), reads = dsv.checks(.Csv))
 		tabs, _ := strings.replace_all(c.csv, ",", "\t", context.temp_allocator)
-		tsv, _ := failures(ROWS, tabs, dsv.as(.Tsv))
+		tsv, _ := failures(ROWS, tabs, dsv.as(.Tsv), reads = dsv.checks(.Tsv))
 		testing.expect_value(t, json5, want)
 		testing.expect_value(t, csv, want)
 		// A quoted cell has no TSV spelling.
@@ -131,7 +131,7 @@ check_cell_rule :: proc(t: ^testing.T) {
 	for c in cases {
 		schema_text := strings.concatenate({`{"type": "array", "items": {"type": "object", "properties": {"a": `, c.property, `}}}`}, context.temp_allocator)
 		text := strings.concatenate({"a\n", c.cell, "\n"}, context.temp_allocator)
-		out, err := failures(schema_text, text, dsv.as(.Csv))
+		out, err := failures(schema_text, text, dsv.as(.Csv), reads = dsv.checks(.Csv))
 		testing.expect(t, err == nil == c.valid && (out == "") == c.valid, strings.concatenate({c.property, " ", c.cell, " ", out}, context.temp_allocator))
 	}
 }
@@ -154,7 +154,7 @@ check_empty_cells :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		schema_text := strings.concatenate({`{"type": "array", "items": `, c.property, `}`}, context.temp_allocator)
-		_, err := failures(schema_text, c.text, dsv.as(.Csv))
+		_, err := failures(schema_text, c.text, dsv.as(.Csv), reads = dsv.checks(.Csv))
 		testing.expect_value(t, err == nil, c.valid)
 	}
 }
@@ -165,12 +165,12 @@ check_empty_cells :: proc(t: ^testing.T) {
 check_repeated_columns :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	schema_text := `{"type": "array", "items": {"properties": {"a": {"type": "integer"}}, "maxProperties": 1}}`
-	_, last := failures(schema_text, "a,a\nx,1\n", dsv.as(.Csv), {dups = .Last})
-	_, first := failures(schema_text, "a,a\nx,1\n", dsv.as(.Csv), {dups = .First})
-	_, refuse := failures(schema_text, "a,a\n1,1\n", dsv.as(.Csv), {dups = .Refuse})
-	_, alone := failures(schema_text, "a,a\n", dsv.as(.Csv), {dups = .Refuse})
-	_, alone_last := failures(schema_text, "a,a\n", dsv.as(.Csv), {dups = .Last})
-	_, all := failures(schema_text, "a,a\n1,1\n", dsv.as(.Csv), {dups = .All})
+	_, last := failures(schema_text, "a,a\nx,1\n", dsv.as(.Csv), {dups = .Last}, reads = dsv.checks(.Csv))
+	_, first := failures(schema_text, "a,a\nx,1\n", dsv.as(.Csv), {dups = .First}, reads = dsv.checks(.Csv))
+	_, refuse := failures(schema_text, "a,a\n1,1\n", dsv.as(.Csv), {dups = .Refuse}, reads = dsv.checks(.Csv))
+	_, alone := failures(schema_text, "a,a\n", dsv.as(.Csv), {dups = .Refuse}, reads = dsv.checks(.Csv))
+	_, alone_last := failures(schema_text, "a,a\n", dsv.as(.Csv), {dups = .Last}, reads = dsv.checks(.Csv))
+	_, all := failures(schema_text, "a,a\n1,1\n", dsv.as(.Csv), {dups = .All}, reads = dsv.checks(.Csv))
 	testing.expect(t, last == nil)
 	testing.expect(t, first != nil)
 	testing.expect_value(t, refuse.(core.Fault).kind, core.Fault_Kind.Duplicate_Key)
@@ -184,9 +184,9 @@ check_repeated_columns :: proc(t: ^testing.T) {
 check_ragged_rows :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	schema_text := `{"type": "array", "items": {"required": ["b"], "properties": {"3": {"type": "string"}}, "additionalProperties": false}}`
-	_, strict := failures(schema_text, "a,b\n1\n", dsv.as(.Csv))
+	_, strict := failures(schema_text, "a,b\n1\n", dsv.as(.Csv), reads = dsv.checks(.Csv))
 	testing.expect(t, strict != nil)
-	out, ragged := failures(schema_text, "a,b\n1\n1,2,3\n", dsv.as(.Csv, {tolerate = {.Ragged}}))
+	out, ragged := failures(schema_text, "a,b\n1\n1,2,3\n", dsv.as(.Csv, {tolerate = {.Ragged}}), reads = dsv.checks(.Csv))
 	testing.expect(t, ragged != nil)
 	testing.expect_value(t, out, "No value is allowed here at .[0].a (.items.additionalProperties)\nRequired member \"b\" is missing at .[0] (.items.required)\nNo value is allowed here at .[1].a (.items.additionalProperties)\nNo value is allowed here at .[1].b (.items.additionalProperties)\n")
 }
@@ -202,7 +202,7 @@ check_document_agrees_with_text :: proc(t: ^testing.T) {
 	defer schema.destroy(&c)
 	for infer in ([?]bool{false, true}) {
 		handle := dsv.as(.Csv, {infer = infer})
-		b, berr := schema.bind(&c, handle)
+		b, berr := schema.bind(&c, handle, dsv.checks(.Csv))
 		defer schema.unbind(&b)
 		testing.expect(t, berr == nil)
 		for text in cases {
@@ -226,10 +226,10 @@ check_document_agrees_with_text :: proc(t: ^testing.T) {
 
 // Whether `text` passes `schema_text` read by `handle`, judged as the text and as the document built from it.
 @(private = "file")
-verdicts :: proc(schema_text, text: string, handle: core.As) -> (by_text, by_doc: bool) {
+verdicts :: proc(schema_text, text: string, handle: core.As, reads: ^typed.Format_Reads) -> (by_text, by_doc: bool) {
 	schema_doc, _ := core.build(transmute([]u8)schema_text, json.as(.Json), allocator = context.temp_allocator)
 	c, _ := schema.compile(&schema_doc, core.ROOT, {resolver = {as = json.as(.Json)}}, context.temp_allocator)
-	b, berr := schema.bind(&c, handle)
+	b, berr := schema.bind(&c, handle, reads)
 	defer schema.unbind(&b)
 	if berr != nil {
 		return false, false
@@ -243,7 +243,8 @@ verdicts :: proc(schema_text, text: string, handle: core.As) -> (by_text, by_doc
 expect_verdict :: proc(t: ^testing.T, schema_text, csv: string, valid: bool, loc := #caller_location) {
 	tabs, _ := strings.replace_all(csv, ",", "\t", context.temp_allocator)
 	for handle, i in ([2]core.As{dsv.as(.Csv), dsv.as(.Tsv)}) {
-		by_text, by_doc := verdicts(schema_text, csv if i == 0 else tabs, handle)
+		reads := dsv.checks(.Csv) if i == 0 else dsv.checks(.Tsv)
+		by_text, by_doc := verdicts(schema_text, csv if i == 0 else tabs, handle, reads)
 		testing.expectf(t, by_text == valid && by_doc == valid, "%s over %q: text %v, document %v, want %v", schema_text, csv, by_text, by_doc, valid, loc = loc)
 	}
 }
@@ -340,7 +341,7 @@ check_scalar_and_wrapped_const_agree :: proc(t: ^testing.T) {
 	}
 	// A quoted cell has no TSV spelling, and reads as the number its operand's kind asks for.
 	for schema_text in ([?]string{`{"type": "array", "items": {"properties": {"a": {"const": 5}}}}`, `{"type": "array", "items": {"const": {"a": 5}}}`}) {
-		by_text, by_doc := verdicts(schema_text, "a\n\"5\"\n", dsv.as(.Csv))
+		by_text, by_doc := verdicts(schema_text, "a\n\"5\"\n", dsv.as(.Csv), dsv.checks(.Csv))
 		testing.expectf(t, by_text && by_doc, "%s: text %v document %v", schema_text, by_text, by_doc)
 	}
 	// A string operand keeps the cell a string, a null one reads an unquoted `null`.
@@ -357,7 +358,7 @@ check_partial_document :: proc(t: ^testing.T) {
 	judge :: proc(schema_text, text, path: string, opts := dsv.Options{}) -> bool {
 		schema_doc, _ := core.build(transmute([]u8)schema_text, json.as(.Json), allocator = context.temp_allocator)
 		c, _ := schema.compile(&schema_doc, core.ROOT, {resolver = {as = json.as(.Json)}}, context.temp_allocator)
-		b, berr := schema.bind(&c, dsv.as(.Csv, opts))
+		b, berr := schema.bind(&c, dsv.as(.Csv, opts), dsv.checks(.Csv))
 		defer schema.unbind(&b)
 		parsed, _ := core.parse_path(path)
 		defer core.path_destroy(&parsed)

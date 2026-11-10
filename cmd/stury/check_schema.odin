@@ -13,6 +13,7 @@ import core "../../core"
 import "../../core/typed"
 import "../../core/write"
 import "../../core/schema"
+import dsv "../../dsv"
 import json "../../json"
 import "message"
 
@@ -94,10 +95,24 @@ schema_option :: proc(s: ^Schema_Options, args: []string, i: int) {
 schema_open :: proc(s: Schema_Options, src: Source, option := "--schema") -> ^Schema_Check {
 	sc := schema_read(s, option)
 	err: core.Error
-	if sc.bound, err = schema.bind(&sc.compiled, src.as); err != nil {
+	if sc.bound, err = schema.bind(&sc.compiled, src.as, checks_of(src.as, src.spec == nil)); err != nil {
 		usage_error("%s %s: %s", option, s.file, edit_error_text(sc.text, err))
 	}
 	return sc
+}
+
+// The reads that check a text of the format `as` by a description. A delimited format's spec is chosen at run time, and
+// a JSON-like one has none, whose handle reads them.
+checks_of :: proc(as: core.As, cells: bool) -> ^typed.Format_Reads {
+	if !cells {
+		return nil
+	}
+	switch dsv.Spec(as.spec) {
+	case .Csv:   return dsv.checks(.Csv)
+	case .Tsv:   return dsv.checks(.Tsv)
+	case .Plain: return dsv.checks(.Plain)
+	}
+	return nil
 }
 
 // The schema `s` names, read and compiled but not bound, or a usage error telling why not under the name `option`.

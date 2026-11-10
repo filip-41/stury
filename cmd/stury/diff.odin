@@ -207,7 +207,8 @@ by_records :: proc(src: Source) -> bool {
 	return src.framing != .Concatenated && !table_source(src)
 }
 
-// The document of the file `path`, or an exit telling why not. A file of records is one array of them.
+// The document of the file `path`, or an exit telling why not. A file of records is one array of them, and so is a
+// concatenated text that is not one value, which every other command reads value by value.
 @(private = "file")
 read_operand :: proc(o: ^Opts, src: Source, path: string) -> core.Document {
 	data := operand_bytes(path)
@@ -216,7 +217,12 @@ read_operand :: proc(o: ^Opts, src: Source, path: string) -> core.Document {
 		exit_on_fault(o, src, path, data)
 		text = records_array(data, src)
 	}
-	doc, fault := jq.build_text(text, src.as, runtime.heap_allocator())
+	heap := runtime.heap_allocator()
+	doc, fault := jq.build_text(text, src.as, heap)
+	if _, is_fault := fault.?; is_fault && src.framing == .Concatenated && !table_source(src) {
+		exit_on_fault(o, src, path, data)
+		doc, fault = jq.build_text(records_array(data, src), src.as, heap)
+	}
 	if bad, is_fault := fault.?; is_fault {
 		operand_fault(o, src, path, data, bad)
 	}

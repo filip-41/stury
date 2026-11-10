@@ -4,11 +4,8 @@ import "base:runtime"
 import "core:strings"
 import core ".."
 
-// What a model's validators are judged by: a validator is a procedure of the model's user, reached through `call`, which
-// reads the value at its first argument and reports what is wrong with it. The same judgment runs at the close of a
-// struct in a load and in `validate`, so both give the same entries.
-
-// Judges the value at `value` for the validator whose procedure is `fn`, and reports what it finds.
+// A procedure of the model's user, reached through `call`, which judges the value at `value` and reports what is wrong
+// with it. The same judgment runs at the close of a struct in a load and in `validate`, so both give the same entries.
 Validator :: struct {
 	call: proc(value, fn: rawptr, r: ^Report),
 	fn:   rawptr,

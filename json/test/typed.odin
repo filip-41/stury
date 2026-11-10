@@ -548,21 +548,19 @@ a_tagged_arm_may_not_key_a_member_as_the_tag :: proc(t: ^testing.T) {
 }
 
 @(test)
-any_holds_what_the_text_holds :: proc(t: ^testing.T) {
+an_any_is_written_and_refused_as_a_read_target :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	v: any
-	e := read(t, `{"a":[1,-0,1.5,18446744073709551615,1e400,"s",null,true]}`, &v)
-	walktest.expect_nil(t, e)
-	m := v.(map[string]any)
-	l := m["a"].([dynamic]any)
-	testing.expect_value(t, l[0].(i64), 1)
-	testing.expect_value(t, transmute(u64)l[1].(f64), u64(1) << 63)
-	testing.expect_value(t, l[2].(f64), 1.5)
-	testing.expect_value(t, l[3].(u64), max(u64))
-	testing.expect_value(t, l[4].(core.Number_Text).text, "1e400")
-	testing.expect_value(t, l[5].(string), "s")
-	testing.expect(t, l[6] == nil)
-	testing.expect_value(t, l[7].(bool), true)
+	for text in ([?]string{`{"a":[1,"s"]}`, `null`, `1`}) {
+		v: any
+		walktest.expect_kind(t, read(t, text, &v), core.Typed_Error_Kind.Unsupported)
+	}
+	S :: struct {
+		a: any,
+	}
+	n := 7
+	out, written := json.marshal(S{n}, .Json, allocator = context.temp_allocator)
+	walktest.expect_nil(t, written)
+	testing.expect_value(t, string(out), `{"a":7}`)
 }
 
 @(test)
@@ -958,6 +956,23 @@ Hooked_Struct :: struct {
 read_hooked_struct :: proc(v: typed.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Typed_Error_Kind) {
 	(^Hooked_Struct)(dest).n = len(v.text)
 	return nil
+}
+
+@(test)
+a_hook_with_no_data_keeps_the_callers_user_ptr :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	read :: proc(v: typed.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Typed_Error_Kind) {
+		(^Hooked_Struct)(dest).n = (^int)(context.user_ptr)^
+		return nil
+	}
+	hooks := []typed.Type_Hook{{type = Hooked_Struct, read = read}}
+	plan, err := json.plan_make(Hooked_Struct, plan = {hooks = hooks}, allocator = context.temp_allocator)
+	walktest.expect_nil(t, err)
+	seven := 7
+	context.user_ptr = &seven
+	h: Hooked_Struct
+	walktest.expect_nil(t, json.unmarshal(transmute([]u8)string(`1`), json.Spec.Json, &h, &plan, read = {}, opts = {}, allocator = context.temp_allocator))
+	testing.expect_value(t, h.n, 7)
 }
 
 @(test)

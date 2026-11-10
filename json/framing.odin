@@ -417,24 +417,44 @@ seq_fault :: proc(it: ^records.Reader, rec: records.Record, fault: Maybe(core.Fa
 	return core.Fault{at = rec.at + u64(len(rec.text)), rules = &RULES, kind = .Bad_Number, detail = u8(Detail.Cut_Number)}
 }
 
-// Reads the next record into `target`, under `.Seq` as `seq_fault` frames it.
+// Reads the next record into `target`, under `.Seq` as `seq_fault` frames it. A check, which a model's load plan needs,
+// frames the record first under every framing and reads its text in place.
 @(private)
-read_spec :: #force_inline proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal, $S: Spec) -> bool {
-	if it.framing >= .Concatenated {
-		return read_framed(it, target, T, plan, read, allocator, err, S)
+read_spec :: #force_inline proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal, $S: Spec, $CHECK: bool) -> bool {
+	rec: records.Record
+	ok: bool
+	when CHECK {
+		if it.framing >= .Concatenated {
+			rec, ok = it.services.next[it.framing](it)
+		} else {
+			rec, ok = frame_line(it)
+		}
+	} else {
+		if it.framing >= .Concatenated {
+			return read_framed(it, target, T, plan, read, allocator, err, S)
+		}
+		rec, ok = frame_line(it)
 	}
-	rec, ok := frame_line(it)
 	if !ok {
 		return false
 	}
-	if it.framing == .Lines {
-		// Inlined, with the read in place in it, so the reader of each line is one procedure.
-		#force_inline read_line(it, rec.at, rec.at + u64(len(rec.text)), target, T, plan, read, allocator, err, S)
-		return true
+	when !CHECK {
+		if it.framing == .Lines {
+			// Inlined, with the read in place in it, so the reader of each line is one procedure.
+			#force_inline read_line(it, rec.at, rec.at + u64(len(rec.text)), target, T, plan, read, allocator, err, S)
+			return true
+		}
 	}
 	kept := typed.sink_mark(read.sink)
-	if it.state[1] != UNFRAMED {
-		read_line(it, rec.at, rec.at + u64(len(rec.text)), target, T, plan, read, allocator, err, S)
+	if it.state[1] != UNFRAMED || CHECK && it.framing != .Seq {
+		when CHECK {
+			read_value(it.src, rec.at, rec.at + u64(len(rec.text)), S, target, T, plan, read, options_of(it.as), it.frames, allocator, runtime.arena_allocator(&it.scratch), err, false, true)
+			if it.framing != .Seq {
+				return true
+			}
+		} else {
+			read_line(it, rec.at, rec.at + u64(len(rec.text)), target, T, plan, read, allocator, err, S)
+		}
 		// A number the walk passed may have been cut short whatever the target makes of it.
 		if _, bad := seq_fault(it, rec, nil).?; !bad || err.kind == .Walk {
 			return true
@@ -442,39 +462,6 @@ read_spec :: #force_inline proc(it: ^records.Reader, target: rawptr, T: typeid, 
 		typed.sink_restore(read.sink, kept)
 	}
 	// The record is refused with its `seq_fault`, collected with the read's allocator.
-	f := seq_fault(it, rec, nil).?
-	err^ = {kind = .Walk, at = f.at, inner = f}
-	context.allocator = allocator
-	typed.sink_error(read.sink, err^)
-	return true
-}
-
-// Reads the next record into `target` as a check judges it, which a model's load plan needs: the record is framed first,
-// and its text is read in place. Under `.Seq` a record with a fault of its framing is refused with that fault.
-@(private)
-check_read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal, $S: Spec) -> bool {
-	rec: records.Record
-	ok: bool
-	if it.framing >= .Concatenated {
-		rec, ok = it.services.next[it.framing](it)
-	} else {
-		rec, ok = frame_line(it)
-	}
-	if !ok {
-		return false
-	}
-	opts := options_of(it.as)
-	kept := typed.sink_mark(read.sink)
-	if it.framing != .Seq || it.state[1] != UNFRAMED {
-		read_value(it.src, rec.at, rec.at + u64(len(rec.text)), S, target, T, plan, read, opts, it.frames, allocator, runtime.arena_allocator(&it.scratch), err, false, true)
-		if it.framing != .Seq {
-			return true
-		}
-		if _, bad := seq_fault(it, rec, nil).?; !bad || err.kind == .Walk {
-			return true
-		}
-		typed.sink_restore(read.sink, kept)
-	}
 	f := seq_fault(it, rec, nil).?
 	err^ = {kind = .Walk, at = f.at, inner = f}
 	context.allocator = allocator

@@ -231,7 +231,7 @@ float_law :: proc(t: ^testing.T, v: $T, valid: bool, loc := #caller_location) {
 	validated := model.validate(&m, &v) == nil
 	text, _ := write.marshal(v, &m.plan, allocator = context.temp_allocator)
 	back: T
-	loaded := model.load(&m, text, &back, nil, .Refuse, context.temp_allocator) == nil
+	loaded := model.load(&m, text, &back, nil, {dups = .Refuse}, context.temp_allocator) == nil
 	d, _ := model.schema(&m, .Dump, context.temp_allocator)
 	c := schema.compile_description(&d, allocator = context.temp_allocator)
 	b, _ := schema.bind(&c, json.as(.Json), allocator = context.temp_allocator)
@@ -439,7 +439,7 @@ a_write_leaves_out_write_only_members :: proc(t: ^testing.T) {
 	text, _ = write.marshal(v, &m.plan, allocator = context.temp_allocator)
 	testing.expect_value(t, string(text), `{"name":"a","rest":1}`)
 	back: Secret
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name":"b","key":"s"}`), &back, nil, .Refuse, context.temp_allocator))
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name":"b","key":"s"}`), &back, nil, {dups = .Refuse}, context.temp_allocator))
 	testing.expect_value(t, back.key, "s")
 }
 

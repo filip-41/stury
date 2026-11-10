@@ -485,6 +485,7 @@ Typed_Error_Kind :: enum u8 {
 	No_Sample, // a description no value passes, or none the bounded search found, `want.text` names the node
 	Read_Only, // a key of a read_only member, which a load refuses where its struct forbids the members it does not name
 	Custom, // a value a model's validator refused, `want.text` holds its message
+	Check_Failed, // a value a model's dump checked fails its rules, the steps lead to the first and `want.text` is its code
 }
 
 // The steps a `Typed_Refusal` holds.
@@ -564,7 +565,7 @@ Error_Entry :: struct {
 // by the tags.
 Typed_Detail :: struct #raw_union {
 	inner: Fault `raw_union_tag:"kind=Walk"`,
-	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Missing_Field,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema,kind=No_Sample,kind=Custom"`,
+	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Missing_Field,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema,kind=No_Sample,kind=Custom,kind=Check_Failed"`,
 	plans: Plan_Clash `raw_union_tag:"kind=Plan_Mismatch"`,
 }
 
@@ -627,6 +628,7 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 	.No_Sample     = {"no_sample", "No value passes the description"},
 	.Read_Only     = {"read_only", "Field is read only"},
 	.Custom        = {"custom", "Value is not valid"},
+	.Check_Failed  = {"check_failed", "Value fails its model's rules"},
 }
 
 // The messages of a schema check's entries, which name keywords and not a type's fields, where they differ.
