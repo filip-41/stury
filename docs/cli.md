@@ -259,6 +259,24 @@ before the fault, and the exit is 5.
 A schema that does not read, compile or bind, or a keyword the check does not judge, is a usage error (exit 2) naming it.
 The options need `--schema`, and `--schema` is `check`'s alone.
 
+## `schema`
+
+`stury schema infer [FILE...]` writes the JSON Schema that every record of the inputs passes: the kinds met at each
+position, a member required when every object there had it, and the elements of arrays as `items`. Nothing is guessed, so
+no enum, format or bound appears. An object with more than 64 names, or with names that are all integers or all UUIDs,
+is a map: `additionalProperties` and no members. A table's schema is an array of row objects, and an empty cell is an
+absent member. `--ranges` also keeps the least and greatest number, string length and array length (not a table's row
+count). Members come in the order they first appear. Long files are read on all cores and give the description one
+thread gives, and a record that does not read is exit 5. The layout options (`-c`, `--indent`, `--tab`, `-S`, `-a`) shape
+the schema's text.
+
+`stury schema sample SCHEMA` writes values that pass the schema, a text a line, in the format `--to` names (CSV and TSV
+texts are a table each). `--count N` (default 1) and `--seed N` choose how many and which. `--invalid` writes values
+that fail the schema, each a valid one changed in one place. `--comments` writes a node's `description` as a comment
+where the format has comments (`--to jsonc`). Each value is a line, compact unless a layout option asks for more, and a
+CSV or TSV value is a table, so those take `--count 1`. A schema that no value passes is exit 1 and names the keyword
+path of the node the search stopped at.
+
 ## `fmt`
 
 `fmt` writes each input back in the printer's layout, or in another format. It runs no filter, so it takes no

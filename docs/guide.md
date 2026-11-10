@@ -93,6 +93,10 @@ if schema.check(&b, src, &sink) != nil {
 
 `stury check --schema` is the same check on the command line ([cli.md](cli.md#schema-check)).
 
+`schema.infer` takes in values (and `schema.infer_records` the records of a text, on a runner's threads) and
+`schema.inferred` gives the description they all pass, which `schema.write` writes as JSON Schema. `schema.sample(&d, as,
+{count = 3, seed = 1})` writes values that pass a description in the format `as`, and `invalid = true` values that fail it.
+
 ## Read into Odin values
 
 `unmarshal` fills a value from a text during the scan, with no document between them.

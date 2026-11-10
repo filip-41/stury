@@ -48,6 +48,9 @@ Cli :: struct {
 	validating: bool,
 	formatting: bool,
 	editing:    bool,
+	// `schema`: the verb (`infer` or `sample`) is the first of `files`, and these are its options.
+	schema_verb: bool,
+	verbs:      Verb_Options,
 	filter:     Maybe(string), // the filter, or under -f the file it is in
 	files:      [dynamic]string,
 	// --arg, --argjson, --slurpfile and --rawfile, the first of a name standing.
@@ -83,6 +86,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		switch args[subcommand] {
 		case "fmt":  cli.formatting = true
 		case "edit": cli.editing = true
+		case "schema": cli.schema_verb = true
 		case:        cli.validating = true
 		}
 	}
@@ -110,7 +114,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		}
 		if args_done || !is_option(a) {
 			switch {
-			case !cli.validating && !cli.formatting && cli.filter == nil:
+			case !cli.validating && !cli.formatting && !cli.schema_verb && cli.filter == nil:
 				cli.filter = a
 			case rest_as == .Args:
 				append(&cli.positional, jq.valid_utf8(a))
@@ -176,6 +180,9 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			i += option_arity(a)
 		case "schema", "schema-ref", "max-errors", "report", "format-assert":
 			schema_option(&cli.schema, args, i)
+			i += option_arity(a)
+		case "ranges", "invalid", "comments", "seed", "count":
+			verb_option(&cli.verbs, args, i)
 			i += option_arity(a)
 		case "grow-header":
 			o.grow_header = true
@@ -382,7 +389,7 @@ is_option :: proc(a: string) -> bool {
 	return len(a) >= 2 && a[0] == '-' && (a[1] == '-' || ('a' <= a[1] && a[1] <= 'z') || ('A' <= a[1] && a[1] <= 'Z'))
 }
 
-// Where `check` (or `validate`), `fmt` or `edit` stands in `args`, or -1: the first argument that is not an option, before
+// Where `check` (or `validate`), `fmt`, `edit` or `schema` stands in `args`, or -1: the first argument that is not an option, before
 // `--`. Under -f that argument is the program file's name, which stays a file. Short options hold -f when an `f` comes
 // before any `L`, whose rest is a directory (`-Lfoo`).
 @(private = "file")
@@ -396,7 +403,7 @@ subcommand_index :: proc(args: []string) -> int {
 		case is_option(a):
 			i += option_arity(a)
 		case:
-			return i if a == "check" || a == "validate" || a == "fmt" || a == "edit" else -1
+			return i if a == "schema" || a == "check" || a == "validate" || a == "fmt" || a == "edit" else -1
 		}
 	}
 	return -1
@@ -407,7 +414,7 @@ subcommand_index :: proc(args: []string) -> int {
 @(private = "file")
 option_arity :: proc(a: string) -> int {
 	switch a {
-	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--max-errors", "--report":
+	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--max-errors", "--report", "--seed", "--count":
 		return 1
 	case "--arg", "--argjson", "--slurpfile", "--rawfile":
 		return 2
@@ -549,24 +556,24 @@ parse_max_depth :: proc(s: string) -> (n: u64, ok: bool) {
 
 // The command `cli` names, or "" for a filter run.
 command_name :: proc(cli: ^Cli) -> string {
-	return "check" if cli.validating else "fmt" if cli.formatting else "edit" if cli.editing else ""
+	return "check" if cli.validating else "fmt" if cli.formatting else "edit" if cli.editing else "schema" if cli.schema_verb else ""
 }
 
-// The first option given that `check`, `fmt` or `edit` has no use for, or "". fmt writes each input's own format, and
-// check prints nothing, so neither takes a layout or reshapes its input, but check takes --seq, which frames the records
-// it judges. edit writes each input back in its own format, so it takes no output format and no option that respells
+// The first option given that `check`, `fmt`, `edit` or `schema` has no use for, or "". fmt writes each input's own format,
+// and check prints nothing, so neither takes a layout or reshapes its input, but check takes --seq, which frames the records
+// it judges. schema writes a description or samples, so it takes the layout options and, for sample, --to. edit writes each input back in its own format, so it takes no output format and no option that respells
 // the output as a whole, but its filter takes the options of a filter run's input and its bindings, and a built value
 // is written with -a, -S, --indent and --tab.
 command_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
-	editing := cli.editing
+	editing, schema := cli.editing, cli.schema_verb
 	switch {
 	case editing && cli.formats.to != nil: return "--to"
-	case !cli.formatting && cli.cells_out_flag != "": return cli.cells_out_flag
+	case !cli.formatting && !schema && cli.cells_out_flag != "": return cli.cells_out_flag
 	case o.raw0:                 return "--raw-output0"
 	case o.raw:                  return "-j" if o.join else "-r"
-	case cli.compact_given && !editing: return "-c"
-	case o.ascii && !editing:    return "-a"
-	case o.sort_keys && !editing: return "-S"
+	case cli.compact_given && !editing && !schema: return "-c"
+	case o.ascii && !editing && !schema: return "-a"
+	case o.sort_keys && !editing && !schema: return "-S"
 	case cli.color_set:          return "-C"
 	case o.raw_input && !editing: return "-R"
 	case o.null_input:           return "-n"
@@ -578,7 +585,7 @@ command_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
 	case o.exit_status && !editing: return "-e"
 	case o.explain && !editing:  return "--explain"
 	case cli.binding_flag != "" && !editing: return cli.binding_flag
-	case !cli.formatting && !editing && cli.layout_flag != "": return cli.layout_flag
+	case !cli.formatting && !editing && !schema && cli.layout_flag != "": return cli.layout_flag
 	case cli.lib_dirs != nil && !editing: return "-L"
 	}
 	return ""

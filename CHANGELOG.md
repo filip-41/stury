@@ -4,6 +4,9 @@
 
 ### Command line
 
+- `stury schema infer [FILE...]` writes the JSON Schema that every record of the inputs passes, and `stury schema sample
+  SCHEMA` writes values that pass a schema, or with `--invalid` values that fail it. Both take the layout options.
+
 - `stury check --schema FILE` also checks each input against a JSON Schema and tells every failure, exit 1.
   `--report basic` and `--report problem` write the JSON Schema basic output or an RFC 9457 problem document,
   `--max-errors`, `--format-assert` and `--schema-ref` shape the check. Long files and records are checked on all cores.
@@ -83,6 +86,10 @@
 
 ### Library API
 
+- `schema.infer`, `schema.merge`, `schema.inferred` and `schema.infer_records` build a description from values and
+  records, which `schema.write` writes as JSON Schema. `schema.sample` writes values that pass a description, or fail it,
+  and is `.No_Sample` for a description that no value passes. A node has a `description` and a markup node
+  (`xml.nodeType`), and `write.comment` writes a comment in a format that has them.
 - `core.kind` of a CSV or TSV cell is the kind the cell reads as, in place of `.Plain`: an empty unquoted cell is
   `.Null`, as a typed read and the CLI read it, and with `infer` a boolean or number cell is `.True`, `.False` or
   `.Number`. A JSON write of a dsv document writes an empty cell as `null` without `infer` too. `core.resolve` is gone.

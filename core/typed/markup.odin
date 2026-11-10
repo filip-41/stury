@@ -19,12 +19,7 @@ import build "../build"
 
 // The node of a markup element a member record reads, which a format's `bind` sets from its keyword: `.Any` an
 // attribute or a child element of its name.
-Markup_Node :: enum u8 {
-	Any,
-	Attribute,
-	Element,
-	Text,
-}
+Markup_Node :: rules.Markup_Node
 
 // The spelling of the key the element step makes for an element's text, which no format's key has.
 @(private)

@@ -482,6 +482,7 @@ Typed_Error_Kind :: enum u8 {
 	Not_Allowed, // a value where a rule takes none
 	No_Arm, // a value that passes none of a rule's subschemas
 	Many_Arms, // a value that passes more than one of a rule's subschemas, where it takes one
+	No_Sample, // a description no value passes, or none the bounded search found, `want.text` names the node
 }
 
 // The steps a `Typed_Error` holds.
@@ -560,7 +561,7 @@ Error_Entry :: struct {
 // by the tags.
 Typed_Detail :: struct #raw_union {
 	inner: Fault `raw_union_tag:"kind=Walk"`,
-	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Missing_Field,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema"`,
+	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Missing_Field,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema,kind=No_Sample"`,
 	plans: Plan_Clash `raw_union_tag:"kind=Plan_Mismatch"`,
 }
 
@@ -620,6 +621,7 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 	.Not_Allowed   = {"not_allowed", "No value is allowed here"},
 	.No_Arm        = {"no_arm", "Value passes none of the subschemas"},
 	.Many_Arms     = {"many_arms", "Value passes more than one subschema"},
+	.No_Sample     = {"no_sample", "No value passes the description"},
 }
 
 // The messages of a schema check's entries, which name keywords and not a type's fields, where they differ.
@@ -631,7 +633,7 @@ SCHEMA_MESSAGES := #partial [Typed_Error_Kind]string {
 }
 
 // The kinds that name no byte of a source.
-TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Invalid_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
+TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .No_Sample, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Invalid_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
 
 // Moves the bytes of the source `e` names by `by`, for an error found in a text that starts `by` bytes in.
 move_typed_error :: proc(e: ^Typed_Error, by: u64) {
@@ -740,7 +742,7 @@ write_typed_message :: proc(w: io.Writer, e: Typed_Error) -> io.Error {
 			}
 			return nil
 		}
-	case .Unsupported, .Ambiguous_Union, .Bad_Schema:
+	case .Unsupported, .Ambiguous_Union, .Bad_Schema, .No_Sample:
 		io.write_string(w, TYPED_KIND_RULES[e.kind].message) or_return
 		if len(e.want.text) > 0 {
 			io.write_string(w, ": ") or_return

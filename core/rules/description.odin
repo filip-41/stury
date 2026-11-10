@@ -26,6 +26,15 @@ Node_Index :: distinct i32
 // No node: an array's items or an object's other members that take any value.
 NONE :: Node_Index(-1)
 
+// The node of a markup element a value is read from, which `xml.nodeType` names: `.Any` an attribute or a child element
+// of the member's name.
+Markup_Node :: enum u8 {
+	Any,
+	Attribute,
+	Element,
+	Text,
+}
+
 // Limits on a value, each read only for its kind: a number's bounds and divisor as exact decimal text, empty where there
 // is none, a string's length in code points, its pattern and format, an array's elements and an object's members.
 Rules :: struct {
@@ -39,6 +48,7 @@ Rules :: struct {
 	read_only, write_only:                bool,
 	min_length, min_items, min_members:   u64,
 	max_length, max_items, max_members:   Maybe(u64),
+	markup:                               Markup_Node,
 }
 
 // A node takes a value of one of `kinds` that passes the node's rules and, when there are arms, one of `any_of`.
@@ -68,6 +78,8 @@ Node :: struct {
 	unevaluated_items:      Maybe(Node_Index),
 	unevaluated_properties: Maybe(Node_Index),
 	resource:               Node_Index,
+	// The node's `description`, which a sample writes as a comment.
+	description:            string,
 }
 
 // An `if` with its `then` and `else`.

@@ -137,6 +137,7 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 		s = core.Name("$ref")
 	}
 	u.site = steps
+	u.node = markup_of(d, use, node, edge)
 	if node != rules.NONE && !bare && holds(b, d, node, edge) {
 		u.applies, u.verdict = checked_applies(b, d, arena, node, edge)
 	} else if node != rules.NONE {
@@ -188,6 +189,19 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 		return
 	}
 	b.fields[at], b.meta[at], b.uses[at] = f, m, u
+}
+
+// The markup node a member's record reads: what the used node, the node it reaches or the rules the use adds name
+// (`xml.nodeType`), else any.
+@(private = "file")
+markup_of :: proc(d: ^rules.Description, use, reached: rules.Node_Index, edge: rules.Rules) -> Markup_Node {
+	if use != rules.NONE && d.nodes[use].rules.markup != .Any {
+		return d.nodes[use].rules.markup
+	}
+	if reached != rules.NONE && d.nodes[reached].rules.markup != .Any {
+		return d.nodes[reached].rules.markup
+	}
+	return edge.markup
 }
 
 @(private)

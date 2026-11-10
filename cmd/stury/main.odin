@@ -87,9 +87,11 @@ main :: proc() {
 		usage_error("%s is fmt's and edit's: a filter run has no use for it", "--in-place" if o.in_place else "--check")
 	case !validating && cli.schema.flag != "":
 		usage_error("%s is check's: a schema judges the inputs of stury check", cli.schema.flag)
-	case validating || cli.formatting || cli.editing:
+	case !cli.schema_verb && cli.verbs.flag != "":
+		usage_error("%s is schema's: stury schema infer and stury schema sample take it", cli.verbs.flag)
+	case validating || cli.formatting || cli.editing || cli.schema_verb:
 		if flag := command_refused_option(o, &cli); flag != "" {
-			usage_error("%s has no use with %s: %s", flag, command_name(&cli), "it runs no filter and prints nothing" if validating else "it runs no filter and writes each input's own format" if cli.formatting else "it writes each input back in its own bytes")
+			usage_error("%s has no use with %s: %s", flag, command_name(&cli), "it runs no filter and prints nothing" if validating else "it runs no filter and writes each input's own format" if cli.formatting else "it runs no filter and writes a schema or samples" if cli.schema_verb else "it writes each input back in its own bytes")
 		}
 	}
 	if o.follow {
@@ -100,6 +102,9 @@ main :: proc() {
 	}
 	if cli.formatting {
 		fmt_main(&run, &cli)
+	}
+	if cli.schema_verb {
+		schema_main(&run, &cli)
 	}
 	if dirs, given := cli.lib_dirs.?; given {
 		run.ip.search_list = dirs[:]

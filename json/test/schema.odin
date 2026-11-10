@@ -1438,7 +1438,7 @@ schema_write_spells_json5_numbers_as_json :: proc(t: ^testing.T) {
 }
 
 // An attribute fact `name="value"` read as a format with attributes reads one, its value a string with nothing to decode.
-@(private = "file")
+@(private)
 markup_attribute :: proc "contextless" (doc: ^core.Document, f: core.Fact) -> (name, value: core.Token) {
 	lead := u32(core.comment_lead(f.spelling))
 	return {lo = f.lo, n = lead - 2, kind = .String, role = .Key}, {lo = f.lo + u64(lead), n = f.n - lead - 1, kind = .String}
@@ -1447,7 +1447,7 @@ markup_attribute :: proc "contextless" (doc: ^core.Document, f: core.Fact) -> (n
 // A markup document made by hand: `model` is the JSON text of its data model, where an element is a member whose value
 // is its text, empty when it is, or an object of its children and `#text` runs, and each attribute `name="value"` is a
 // fact of its node, written past the model.
-@(private = "file")
+@(private)
 markup_doc :: proc(model: string, attributes: []Markup_Attribute, readers: ^core.Readers) -> core.Document {
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, model)
@@ -1463,7 +1463,7 @@ markup_doc :: proc(model: string, attributes: []Markup_Attribute, readers: ^core
 	return doc
 }
 
-@(private = "file")
+@(private)
 Markup_Attribute :: struct {
 	node: core.Node_Index,
 	text: string,

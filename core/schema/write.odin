@@ -297,6 +297,9 @@ body :: proc(w: ^Writer, i: rules.Node_Index, n: ^rules.Node, rl: rules.Rules) {
 			write.close(&w.t)
 		}
 	}
+	if n.description != "" {
+		put(w, "description", n.description)
+	}
 	if ref, ok := n.ref.?; ok {
 		put(w, "$ref", ref_to(w, ref))
 	}
@@ -404,7 +407,16 @@ put_rules :: proc(w: ^Writer, rl: rules.Rules) {
 			write.value_bool(&w.t, true)
 		}
 	}
+	if rl.markup != .Any {
+		key(w, "xml")
+		write.open_object(&w.t)
+		put(w, "nodeType", NODE_TYPES[rl.markup])
+		write.close(&w.t)
+	}
 }
+
+@(private = "file", rodata)
+NODE_TYPES := [rules.Markup_Node]string{.Any = "", .Attribute = "attribute", .Element = "element", .Text = "text"}
 
 @(private = "file")
 put_array :: proc(w: ^Writer, a: rules.Array) {

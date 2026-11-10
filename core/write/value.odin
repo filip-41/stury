@@ -75,8 +75,28 @@ marshal_value :: proc(v: $T, plan: ^typed.Plan, allocator := context.allocator) 
 	return core.built_value({&doc, core.ROOT}), nil
 }
 
-// A value of any form, written as `marshal` writes it.
-value_of :: proc(t: ^Tokens, v: core.Value) -> core.Typed_Error_Kind {
+// A value of any form, written as `marshal` writes it. With `comments` the comments written on a value (`Commented`) go
+// before it where the format has comments, and without it they are left out.
+value_of :: proc(t: ^Tokens, v: core.Value, comments := false) -> core.Typed_Error_Kind {
+	if comments {
+		lead_comments(t, v) or_return
+	}
+	return value_plain(t, v, comments)
+}
+
+// The comments before the value `v`, which `comment` writes where a key does not wait for its value.
+@(private = "file")
+lead_comments :: proc(t: ^Tokens, v: core.Value) -> core.Typed_Error_Kind {
+	if c, is_commented := v.(^core.Commented); is_commented && .Comment in c.written {
+		for body in c.bodies[.Comment] {
+			comment(t, body) or_return
+		}
+	}
+	return .None
+}
+
+@(private = "file")
+value_plain :: proc(t: ^Tokens, v: core.Value, comments: bool) -> core.Typed_Error_Kind {
 	switch x in core.plain(v) {
 	case nil:
 		return value_null(t)
@@ -95,27 +115,33 @@ value_of :: proc(t: ^Tokens, v: core.Value) -> core.Typed_Error_Kind {
 	case ^core.Array:
 		open_array(t) or_return
 		for m in x.items {
-			value_of(t, m) or_return
+			value_of(t, m, comments) or_return
 		}
 		return close(t)
 	case ^core.Object:
 		open_object(t) or_return
 		if t.opts.sort_keys && len(x.keys) > 1 {
 			for m in sorted(x.keys[:], x.vals[:]) {
+				if comments {
+					lead_comments(t, m.val) or_return
+				}
 				key(t, m.key) or_return
-				value_of(t, m.val) or_return
+				value_plain(t, m.val, comments) or_return
 			}
 			return close(t)
 		}
 		for k, i in x.keys {
+			if comments {
+				lead_comments(t, x.vals[i]) or_return
+			}
 			key(t, k) or_return
-			value_of(t, x.vals[i]) or_return
+			value_plain(t, x.vals[i], comments) or_return
 		}
 		return close(t)
 	case core.Node_Ref:
 		return put_node(t, x)
 	case core.Trail:
-		return value_of(t, core.trail_array(x))
+		return value_of(t, core.trail_array(x), comments)
 	case ^core.Commented:
 	}
 	return .None

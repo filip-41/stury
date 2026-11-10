@@ -40,6 +40,8 @@ utf8_subpart :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8
 # core/regex
 Scratch :: struct { stack: [dynamic]Entry, slots: [dynamic]int, counts: [dynamic]int, seen: [dynamic]u64, good: [dynamic]u64, log: [dynamic]u32, resumes: int, }
 in_property :: proc(name: string, r: rune) -> bool
+random_below :: proc(s: ^Source, n: int) -> int
+random_next :: proc(s: ^Source) -> u64
 scratch_destroy :: proc(scratch: ^Scratch)
 search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch) -> (found: bool, err: string)
 # core
@@ -59,7 +61,7 @@ SPELLING_DECODE :: u16(1)
 SPELLING_LAX :: u16(4)
 SPELLING_QUOTED :: u16(2)
 STOPPED :: 1
-TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Invalid_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
+TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .No_Sample, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Invalid_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
 all_facts :: #force_inline proc(doc: ^Document, i: Node_Index) -> []Fact
 attribute_next :: proc(it: ^Attribute_Iter) -> (name, value: Token, ok: bool)
 attributes_of :: proc(doc: ^Document, i: Node_Index) -> Attribute_Iter
@@ -295,7 +297,7 @@ tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, alloc
 tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind
 tokens_release :: proc(t: ^Tokens)
 union_arm :: proc(m: ^typed.Meta, v: uintptr) -> ^typed.Arm
-value_of :: proc(t: ^Tokens, v: core.Value) -> core.Typed_Error_Kind
+value_of :: proc(t: ^Tokens, v: core.Value, comments := false) -> core.Typed_Error_Kind
 value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
 visit :: proc(plan: ^typed.Plan, value: rawptr, v: ^Visitor) -> core.Typed_Error
 visit_path :: proc(v: ^Visitor, steps: ^[dynamic]core.Step) -> bool

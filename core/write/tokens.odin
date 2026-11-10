@@ -31,6 +31,9 @@ Token_Spelling :: struct {
 	// Writes a value by a plan the format built as one record, with no frame: a value, or a row with its line end and,
 	// for the first, the header. A refusal's kind and path go to `err`, and the kind is returned.
 	record: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error) -> core.Typed_Error_Kind,
+	// Writes `text` as a comment to `out`. It writes nothing and answers false where the spec `spec` of the format has no
+	// comments, and with a nil `out` only says whether it has.
+	comment: proc(out: ^Out, spec: u8, text: string) -> bool,
 }
 
 // A token write's state. It holds `core.MAX_DEPTH` levels with no allocation and is not copied after `tokens_init`. A
@@ -43,9 +46,11 @@ Tokens :: struct {
 	base:   Out,
 	spill:  [ROOM_MAX]u8,
 	object: [core.MAX_DEPTH]bool, // per open level, whether it is an object
+	spec:   u8, // the format's spec, as `comment` takes it
 	top:    int, // the open levels
 	mark:   int, // the output offset where the open record began
 	first:  bool, // nothing is written yet in the open container or record
+	led:    bool, // a comment has written the comma that the next item owes
 	keyed:  bool, // a key is written and its value is owed
 	done:   bool, // the root value is whole
 	err:    core.Typed_Error_Kind,
@@ -57,6 +62,7 @@ Tokens :: struct {
 tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}, spell: ^Token_Spelling = nil) -> core.Typed_Error_Kind {
 	// The spill and the levels are not zeroed: a level is read only below `top`.
 	t.opts, t.spell, t.state, t.top, t.mark, t.first, t.keyed, t.done, t.err = opts, nil, nil, 0, 0, true, false, false, .None
+	t.spec, t.led = as.spec, false
 	init(&t.base, &t.spill, allocator, stream)
 	t.out = &t.base
 	t.spell = spell
@@ -95,7 +101,7 @@ close :: proc(t: ^Tokens) -> core.Typed_Error_Kind {
 	if t.err != .None || t.spell.line != nil {
 		return refuse(t, .Unsupported)
 	}
-	if t.top == 0 || t.keyed {
+	if t.top == 0 || t.keyed || t.led {
 		return refuse(t, .Out_Of_Order)
 	}
 	t.top -= 1
@@ -117,6 +123,26 @@ key :: proc(t: ^Tokens, name: string) -> core.Typed_Error_Kind {
 		put_text(t.out, t.spell.tree[.After_Colon])
 	}
 	t.keyed = true
+	return refuse(t, t.out.err)
+}
+
+// Writes `text` as a comment before the next key, value or container where the format has comments, and drops it where it
+// has none. A comment between a key and its value or before a close is `.Out_Of_Order`.
+comment :: proc(t: ^Tokens, text: string) -> core.Typed_Error_Kind {
+	if t.err != .None || t.spell.line != nil || t.spell.comment == nil || !t.spell.comment(nil, t.spec, text) {
+		return t.err
+	}
+	if t.keyed || t.top == 0 && t.done {
+		return refuse(t, .Out_Of_Order)
+	}
+	if t.top > 0 {
+		if !t.first && !t.led {
+			put_text(t.out, t.spell.tree[.Comma])
+		}
+		put_line(t.out, t.opts, t.top)
+	}
+	t.spell.comment(t.out, t.spec, text)
+	t.led = !t.first
 	return refuse(t, t.out.err)
 }
 
@@ -196,12 +222,12 @@ lead :: proc(t: ^Tokens, item: Item) -> bool {
 		t.keyed = false
 	case:
 		if t.top > 0 {
-			if !t.first {
+			if !t.first && !t.led {
 				put_text(t.out, t.spell.tree[.Comma])
 			}
 			put_line(t.out, t.opts, t.top)
 		}
-		t.first = false
+		t.first, t.led = false, false
 	}
 	return t.err == .None
 }

@@ -532,6 +532,23 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 		} else {
 			n.rules.pattern = keep(r, text)
 		}
+	case "description":
+		if text, ok := string_of(r, doc, v); ok {
+			n.description = keep(r, text)
+		}
+	case "xml":
+		// OpenAPI's keyword: only the node type is read.
+		if node, has := core.member(doc, v, "nodeType"); has {
+			text, _ := string_of(r, doc, node)
+			switch text {
+			case "attribute":
+				n.rules.markup = .Attribute
+			case "element":
+				n.rules.markup = .Element
+			case "text":
+				n.rules.markup = .Text
+			}
+		}
 	case "format":
 		if text, ok := string_of(r, doc, v); ok {
 			if .Format_Assert in sc.vocab && rules.format_of(text) == .None {

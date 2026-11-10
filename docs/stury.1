@@ -18,6 +18,14 @@ edit
 [\-\-from format|\-\-seq] [\-\-in\-place|\-\-check] [\-\-max\-depth n] [\-f file] [\-L dir] [\-\-arg name value] <jq filter> [file...]
 .br
 .B stury
+schema infer
+[\-\-from format] [\-\-ranges] [file...]
+.br
+.B stury
+schema sample
+[\-\-to format] [\-\-count n] [\-\-seed n] [\-\-invalid] [\-\-comments] [layout options] schema
+.br
+.B stury
 \-h | \-V | \-\-build\-configuration
 .SH DESCRIPTION
 stury applies a jq 1.8 filter to JSON inputs and gives jq's results and exit codes. Its messages start with stury: and are worded its own way. It accepts all of jq 1.8's options except \-\-run\-tests, \-\-debug\-dump\-disasm and \-\-debug\-trace, a test\-file runner and bytecode listings it does not have. The filter language and those options are described in

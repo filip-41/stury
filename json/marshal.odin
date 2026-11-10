@@ -2,6 +2,7 @@ package json
 
 import "base:runtime"
 import "core:io"
+import "core:strings"
 import spell "../core/spell"
 import core "../core"
 import typed "../core/typed"
@@ -46,6 +47,28 @@ TOKENS := write.Token_Spelling {
 		return write.tokens_marshal(t, plan, value, err, TREE, put_plain, put_opted)
 	},
 	stop = write.tokens_release,
+	comment = proc(out: ^write.Out, spec: u8, text: string) -> bool {
+		if Spec(spec) == .Json {
+			return false
+		}
+		if out != nil {
+			write.put_text(out, "/* ")
+			// A `*/` in the text would end the comment, so a space splits it.
+			rest := text
+			for {
+				end := strings.index(rest, "*/")
+				if end < 0 {
+					write.put_text(out, rest)
+					break
+				}
+				write.put_text(out, rest[:end + 1])
+				write.put_text(out, " ")
+				rest = rest[end + 1:]
+			}
+			write.put_text(out, " */")
+		}
+		return true
+	},
 }
 
 @(private)

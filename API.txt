@@ -462,7 +462,9 @@ decimal_of :: proc(lit: string) -> (d: Decimal)
 # core/regex
 Flags :: struct { fold, extend, dotall, multiline, ecma: bool, }
 Regex :: struct { insts: []Inst, bytes: string, classes: []^Class, refs: [][]int, callouts: []^Callout, names: []string, slots: int, opt: ^Search_Opt, visited: ^Visited, prefix: string, first: [4]u64, longest: bool, not_empty: bool, has_first: bool, calls_or_limits: bool, narrowed: bool, ecma: bool, linear: bool, }
+Source :: struct { state: u64, }
 compile :: proc(pattern: string, flags: Flags, allocator := context.allocator) -> (re: Regex, err: string)
+sample :: proc(pattern: string, src: ^Source, extra, least: int, allocator := context.allocator) -> (text: string, ok: bool)
 valid :: proc(pattern: string, flags: Flags) -> bool
 # core
 Attribute_Iter :: struct { doc: ^Document, facts: []Fact, }
@@ -538,12 +540,13 @@ Description :: struct { nodes: [dynamic]Node, arrays: [dynamic]Array, objects: [
 Kind :: enum u8 { Null, Bool, Integer, Number, String, Array, Object, }
 Kinds :: bit_set[Kind; u8]
 Leaf :: struct { kinds: Kinds, plain: Kinds, integer_spelled: bool, has_enum: bool, constant: bool, fast: bool, minimum, maximum: Bound, multiple_of: Maybe(spell.Decimal), min_length, max_length: u64, min_items, max_items: u64, min_members: u64, max_members: u64, pattern: rawptr, formats: bit_set[String_Format; u32], enum_keys: []string, }
+Markup_Node :: enum u8 { Any, Attribute, Element, Text, }
 Member :: struct { name: string, node: Node_Index, rules: Rules, required: bool, only_required: bool, }
-Node :: struct { kinds: Kinds, integer_spelled: bool, rules: Rules, array: i32, object: i32, any_of: []Node_Index, enum_of: []core.Value, has_enum: bool, const_of: Maybe(core.Value), all_of, one_of: []Node_Index, not: Maybe(Node_Index), cond: Conditional, ref, dynamic_ref: Maybe(Node_Index), unevaluated_items: Maybe(Node_Index), unevaluated_properties: Maybe(Node_Index), resource: Node_Index, }
+Node :: struct { kinds: Kinds, integer_spelled: bool, rules: Rules, array: i32, object: i32, any_of: []Node_Index, enum_of: []core.Value, has_enum: bool, const_of: Maybe(core.Value), all_of, one_of: []Node_Index, not: Maybe(Node_Index), cond: Conditional, ref, dynamic_ref: Maybe(Node_Index), unevaluated_items: Maybe(Node_Index), unevaluated_properties: Maybe(Node_Index), resource: Node_Index, description: string, }
 Node_Index :: distinct i32
 Object :: struct { members: []Member, additional: Node_Index, keys: Node_Index, patterns: []Pattern, dependents: []Dependent, }
 Pattern :: struct { expression: string, node: Node_Index, }
-Rules :: struct { minimum, maximum: string, multiple_of, pattern, format: string, unique: bool, assert_format: bool, exclusive_minimum, exclusive_maximum: bool, read_only, write_only: bool, min_length, min_items, min_members: u64, max_length, max_items, max_members: Maybe(u64), }
+Rules :: struct { minimum, maximum: string, multiple_of, pattern, format: string, unique: bool, assert_format: bool, exclusive_minimum, exclusive_maximum: bool, read_only, write_only: bool, min_length, min_items, min_members: u64, max_length, max_items, max_members: Maybe(u64), markup: Markup_Node, }
 String_Format :: enum u8 { None, Date_Time, Date, Time, Duration, Email, Idn_Email, Hostname, Idn_Hostname, Ipv4, Ipv6, Uri, Uri_Reference, Iri, Iri_Reference, Uri_Template, Uuid, Json_Pointer, Relative_Json_Pointer, Regex, }
 Uri :: struct { scheme, authority, path, query, fragment: string, has_scheme, has_authority, has_query: bool, }
 # core/build
@@ -566,7 +569,7 @@ Access :: enum u8 { Read_Write, Read_Only, Write_Only, }
 Check :: struct { using reader: Reader, after: []core.Step, run: ^Run, fork: ^Fork, pool: ^Pool, taken: ^Fork, nest: int, fatal: core.Typed_Error_Kind, outer: ^Outer, repeats: Repeats, floor: int, trackers: [dynamic]Tracker, tracked: int, }
 Format_Reads :: struct { read, check: Text_Read, node_read, node_check: Node_Read, build: Text_Build, plan: proc(T: typeid, opts: Plan_Options, allocator: runtime.Allocator) -> (Plan, core.Typed_Error), }
 Frame :: struct { a, b, c: u64, data: rawptr, seen: u64, run: ^Field, extra: [^]u64, owner: ^Field, target: uintptr, kind: core.Kind, }
-Markup_Node :: enum u8 { Any, Attribute, Element, Text, }
+Markup_Node :: rules.Markup_Node
 Member_Rule :: struct { rules: rules.Rules, name: string, alias: string, optional: bool, skip: bool, access: Access, refused: string, }
 Model_Rules :: struct { member: proc(m: ^Model_Rules, owner: typeid, field: string, type: typeid, tag: string) -> Member_Rule, compile: Rule_Compiler, }
 Node_Read :: #type proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error
@@ -593,7 +596,8 @@ unmarshal_value :: proc(v: core.Value, target: ^$T, plan: ^Plan, read := Read_Op
 Problem :: struct { type: string, title: string, status: int, }
 Report :: struct { file: string, records: bool, truncated: bool, }
 Scalar :: union { string, core.Number, Number_Literal, Tree_Part, }
-Token_Spelling :: struct { tree: Tree, start: proc(t: ^Tokens, as: core.As) -> core.Typed_Error_Kind, value: proc(t: ^Tokens, v: Scalar) -> core.Typed_Error_Kind, line: proc(t: ^Tokens) -> core.Typed_Error_Kind, stop: proc(t: ^Tokens), record: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error) -> core.Typed_Error_Kind, }
+Token_Spelling :: struct { tree: Tree, start: proc(t: ^Tokens, as: core.As) -> core.Typed_Error_Kind, value: proc(t: ^Tokens, v: Scalar) -> core.Typed_Error_Kind, line: proc(t: ^Tokens) -> core.Typed_Error_Kind, stop: proc(t: ^Tokens), record: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error) -> core.Typed_Error_Kind, comment: proc(out: ^Out, spec: u8, text: string) -> bool, }
+comment :: proc(t: ^Tokens, text: string) -> core.Typed_Error_Kind
 destroy :: proc(out: ^Out)
 insert_element :: proc(list: ^core.Edit_List, container: core.Node_Index, at: int, v: $T, plan: ^typed.Plan = nil) -> core.Error
 insert_member :: proc(list: ^core.Edit_List, container: core.Node_Index, at: int, key: string, v: $T, plan: ^typed.Plan = nil) -> core.Error
@@ -610,8 +614,10 @@ writer_destroy :: proc(wr: ^Writer)
 Bound :: struct { plan: typed.Plan, compiled: ^Compiled, elements: ^Elements, allocator: runtime.Allocator, }
 Compiled :: struct { description: ^rules.Description, opts: Options, owned: bool, allocator: runtime.Allocator, }
 Draft :: enum u8 { D04, D06, D07, D2019_09, D2020_12, }
+Inferred :: struct { root: ^Summary, ranges: bool, rows: bool, arena: virtual.Arena, failed: bool, seq: u64, trash: Summary, }
 Options :: struct { format_assert: bool, base: string, resolver: Resolver, dups: core.Duplicates, }
 Resolver :: struct { root: string, as: core.As, draft: Maybe(Draft), documents: [dynamic]^core.Document, texts: [dynamic][]u8, allocator: runtime.Allocator, }
+Sample_Options :: struct { seed: u64, count: int, depth: int, tries: int, size: int, invalid: bool, comments: bool, format_assert: bool, write: core.Write_Options, }
 bind :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (b: Bound, err: core.Error)
 check :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink = nil, runner: ^core.Runner = nil) -> core.Error
 check_node :: proc(b: ^Bound, doc: ^core.Document, node: core.Node_Index, sink: ^typed.Sink = nil) -> core.Error
@@ -619,8 +625,14 @@ check_records :: proc(b: ^Bound, src: []u8, framing := core.Framing.Lines, sink:
 compile :: proc(doc: ^core.Document, node: core.Node_Index, opts := Options{}, allocator := context.allocator) -> (c: Compiled, err: core.Error)
 compile_description :: proc(d: ^rules.Description, opts := Options{}, allocator := context.allocator) -> Compiled
 destroy :: proc(c: ^Compiled)
+infer :: proc(inf: ^Inferred, v: core.Value) -> runtime.Allocator_Error
+infer_records :: proc(inf: ^Inferred, src: []u8, as: core.As, framing := core.Framing.Lines, runner: ^core.Runner = nil) -> core.Error
+inferred :: proc(inf: ^Inferred, allocator := context.allocator) -> (d: rules.Description, err: runtime.Allocator_Error)
+inferred_destroy :: proc(inf: ^Inferred)
+merge :: proc(dst, src: ^Inferred) -> runtime.Allocator_Error
 read :: proc(doc: ^core.Document, node: core.Node_Index, base: string, res: ^Resolver, allocator := context.allocator) -> (d: rules.Description, err: core.Error)
 resolver_destroy :: proc(res: ^Resolver)
+sample :: proc(d: ^rules.Description, as: core.As, opts := Sample_Options{}, allocator := context.allocator) -> (out: [][]u8, err: core.Error)
 unbind :: proc(b: ^Bound)
 valid :: proc(b: ^Bound, src: []u8, runner: ^core.Runner = nil) -> bool
 write :: proc(d: ^rules.Description, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> (text: []u8, err: core.Error)

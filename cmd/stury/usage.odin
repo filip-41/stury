@@ -153,6 +153,29 @@ Exit status: 0 when every input is valid, 1 when one fails the schema, 5 when
 one holds a fault, 2 for a usage or file error. In full: stury(1), or docs/cli.md in stury's source.
 `
 
+// `stury schema --help`.
+@(private = "file")
+SCHEMA_HELP :: `Usage:	stury schema infer [--from format] [--ranges] [file...]
+	stury schema sample [--to format] [--count n] [--seed n] [--invalid] [--comments] schema
+
+infer writes the JSON Schema that every record of the inputs passes. sample
+writes values that pass the schema file, a text a line.
+
+Options:
+      --from format         read json (default), jsonc, json5, ndjson, csv or tsv;
+      --ranges              infer: keep the least and greatest number, string
+                            length and array length;
+      --to format           sample: write json (default), jsonc, ndjson, csv or tsv;
+      --count n, --seed n   sample: how many values, and from which seed;
+      --invalid             sample: values that fail the schema;
+      --comments            sample: write descriptions as comments;
+      -c, --indent n, --tab, -S, -a   the layout of the text written;
+  -h, --help                show this help.
+
+Exit status: 0, 1 when no value passes the schema, 5 when an input holds a
+fault, 2 for a usage or file error.
+`
+
 // `stury fmt --help`.
 @(private = "file")
 FMT_HELP :: `Usage:	stury fmt [--from format] [--to format] [--in-place|--check]
@@ -240,6 +263,8 @@ usage :: proc(code: int, short: bool, command := "") -> ! {
 		io.write_string(w, FMT_HELP)
 	case "edit":
 		io.write_string(w, EDIT_HELP)
+	case "schema":
+		io.write_string(w, SCHEMA_HELP)
 	case:
 		io.write_string(w, HELP_HEAD)
 		// The jq manpage, which the footer sends on, does not tell how stury's input differs.
