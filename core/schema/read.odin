@@ -115,6 +115,7 @@ read :: proc(doc: ^core.Document, node: core.Node_Index, base: string, res: ^Res
 		objects   = make([dynamic]rules.Object, allocator),
 		texts     = make([dynamic]string, allocator),
 		anchors   = make([dynamic]rules.Anchor, allocator),
+		names     = make(map[rules.Node_Index]string, allocator),
 		allocator = allocator,
 	}
 	r := Reader {
@@ -312,6 +313,14 @@ read_id :: proc(r: ^Reader, sc: ^Scope, at: core.Node_Index, i: rules.Node_Index
 	}
 }
 
+// Names node `i` `name` unless it has a name.
+@(private)
+named :: proc(r: ^Reader, i: rules.Node_Index, name: string) {
+	if i not_in r.d.names {
+		r.d.names[i] = keep(r, name)
+	}
+}
+
 // Files the anchor of the schema at `site` under its resource `base`.
 @(private)
 register_anchor :: proc(r: ^Reader, sc: Scope, site: Site, base, name, keyword: string, late: bool, i: rules.Node_Index) {
@@ -321,6 +330,7 @@ register_anchor :: proc(r: ^Reader, sc: Scope, site: Site, base, name, keyword: 
 		return
 	}
 	r.anchors[key] = {site, late}
+	named(r, i, name)
 	if late {
 		append(&r.d.anchors, rules.Anchor{keep(r, name), sc.resource, i})
 	}
@@ -365,7 +375,7 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 		read_vocabulary(r, sc, site, name)
 	case "$defs", "definitions":
 		for e in members_of(r, sc, v, name) {
-			read_schema(r, sc, e.v, core.Name(e.key))
+			named(r, read_schema(r, sc, e.v, core.Name(e.key)), e.key)
 		}
 	case "prefixItems", "items":
 		sh.is_array = true

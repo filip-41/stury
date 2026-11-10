@@ -39,7 +39,7 @@ write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: 
 		tokens_finish(&t)
 		return nil, {kind = kind}
 	}
-	put_value(&t, v)
+	value_of(&t, v)
 	return tokens_finish(&t)
 }
 
@@ -50,7 +50,7 @@ value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocato
 		tokens_finish(&t)
 		return nil, {kind = kind}
 	}
-	put_value(&t, v)
+	value_of(&t, v)
 	return tokens_finish(&t)
 }
 
@@ -75,8 +75,8 @@ marshal_value :: proc(v: $T, plan: ^typed.Plan, allocator := context.allocator) 
 	return core.built_value({&doc, core.ROOT}), nil
 }
 
-@(private = "file")
-put_value :: proc(t: ^Tokens, v: core.Value) -> core.Typed_Error_Kind {
+// A value of any form, written as `marshal` writes it.
+value_of :: proc(t: ^Tokens, v: core.Value) -> core.Typed_Error_Kind {
 	switch x in core.plain(v) {
 	case nil:
 		return value_null(t)
@@ -95,7 +95,7 @@ put_value :: proc(t: ^Tokens, v: core.Value) -> core.Typed_Error_Kind {
 	case ^core.Array:
 		open_array(t) or_return
 		for m in x.items {
-			put_value(t, m) or_return
+			value_of(t, m) or_return
 		}
 		return close(t)
 	case ^core.Object:
@@ -103,19 +103,19 @@ put_value :: proc(t: ^Tokens, v: core.Value) -> core.Typed_Error_Kind {
 		if t.opts.sort_keys && len(x.keys) > 1 {
 			for m in sorted(x.keys[:], x.vals[:]) {
 				key(t, m.key) or_return
-				put_value(t, m.val) or_return
+				value_of(t, m.val) or_return
 			}
 			return close(t)
 		}
 		for k, i in x.keys {
 			key(t, k) or_return
-			put_value(t, x.vals[i]) or_return
+			value_of(t, x.vals[i]) or_return
 		}
 		return close(t)
 	case core.Node_Ref:
 		return put_node(t, x)
 	case core.Trail:
-		return put_value(t, core.trail_array(x))
+		return value_of(t, core.trail_array(x))
 	case ^core.Commented:
 	}
 	return .None
@@ -142,7 +142,7 @@ put_node :: proc(t: ^Tokens, r: core.Node_Ref) -> core.Typed_Error_Kind {
 		open_array(t) or_return
 		it := core.children(r)
 		for m in core.child_next(&it) {
-			put_value(t, m) or_return
+			value_of(t, m) or_return
 		}
 		return close(t)
 	case .Object:
@@ -157,13 +157,13 @@ put_node :: proc(t: ^Tokens, r: core.Node_Ref) -> core.Typed_Error_Kind {
 			}
 			for m in sorted(keys[:], vals[:]) {
 				key(t, m.key) or_return
-				put_value(t, m.val) or_return
+				value_of(t, m.val) or_return
 			}
 			return close(t)
 		}
 		for k, m in core.pair_next(&it) {
 			key(t, k) or_return
-			put_value(t, m) or_return
+			value_of(t, m) or_return
 		}
 		return close(t)
 	}

@@ -231,8 +231,8 @@ a_plan_of_a_types_description_has_the_types_plan_shape :: proc(t: ^testing.T) {
 		{Zoo_Tree, {}},
 		{[]Maybe(Zoo_Inner), {}},
 		{map[string]any, {}},
-		{Ruled, {rule_tags = true}},
-		{Ruled_Union, {rule_tags = true}},
+		{Ruled, {rule_tags = rules.rules_leaf}},
+		{Ruled_Union, {rule_tags = rules.rules_leaf}},
 	}
 	for c in cases {
 		plan, planned := json.plan_make(c.type, plan = c.opts, allocator = context.temp_allocator)
@@ -273,7 +273,7 @@ a_type_and_its_description_read_the_classes_the_type_reads :: proc(t: ^testing.T
 two_members_of_one_type_with_different_rules_get_two_blocks :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	plain, _ := json.plan_make(Ruled, allocator = context.temp_allocator)
-	plan, planned := json.plan_make(Ruled, plan = {rule_tags = true}, allocator = context.temp_allocator)
+	plan, planned := json.plan_make(Ruled, plan = {rule_tags = rules.rules_leaf}, allocator = context.temp_allocator)
 	walktest.expect_nil(t, planned)
 	block :: proc(p: ^typed.Plan, member: i32) -> i32 {
 		return p.meta[p.meta[0].block + member].block
@@ -320,7 +320,7 @@ a_model_tag_it_cannot_hold_refuses_the_plan :: proc(t: ^testing.T) {
 		rest: map[string]typed.Raw `json:",unknown" model:">=1"`,
 	}
 	for T in ([?]typeid{Past_Max, Signed, Leading_Zero, Flattened, Capture}) {
-		_, err := json.plan_make(T, plan = {rule_tags = true}, allocator = context.temp_allocator)
+		_, err := json.plan_make(T, plan = {rule_tags = rules.rules_leaf}, allocator = context.temp_allocator)
 		testing.expectf(t, walktest.typed_kind(err) == .Bad_Tag, "%v: %v", T, err)
 	}
 }

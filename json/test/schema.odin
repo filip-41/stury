@@ -335,10 +335,12 @@ schema_binds_shapes :: proc(t: ^testing.T) {
 	testing.expect(t, berr2 == nil)
 }
 
-// Every case of a suite schema the check binds gets the suite's verdict, from its text and from its built document.
+// Every case of a suite schema the check binds gets the suite's verdict, from its text, from its built document and with
+// a sink.
 @(test)
 schema_suite_checks :: proc(t: ^testing.T) {
 	bound, cases, wrong, format_cases := 0, 0, 0, 0
+	refused := make(map[string]int, context.temp_allocator)
 	for entry in SUITE_DRAFTS {
 		w := os.walker_create_path(strings.concatenate({SUITE, entry.dir}, context.temp_allocator))
 		defer os.walker_destroy(&w)
@@ -364,6 +366,8 @@ schema_suite_checks :: proc(t: ^testing.T) {
 				}
 				b, berr := schema.bind(&c, json.as(.Json))
 				if berr != nil {
+					f, _ := berr.(core.Typed_Failure)
+					refused[strings.clone(f.want.text, context.temp_allocator)] += 1
 					continue
 				}
 				bound += 1
@@ -375,17 +379,24 @@ schema_suite_checks :: proc(t: ^testing.T) {
 					valid := core.kind(&doc, want) == .True
 					from_node := schema.check_node(&b, &doc, data) == nil
 					from_text := schema.valid(&b, core.span(&doc, data))
+					sink: typed.Sink
+					first := schema.check(&b, core.span(&doc, data), &sink)
+					from_sink := first == nil && len(sink.entries) == 0
+					typed.sink_destroy(&sink)
 					cases += 1
 					format_cases += int(in_formats)
-					if from_node != valid || from_text != valid {
+					if from_node != valid || from_text != valid || from_sink != valid {
 						wrong += 1
 						about, _ := core.member(&doc, test, "description")
 						text, _ := core.text_clone(&doc, about)
-						log.warnf("%s: %s: want %v, node %v, text %v", info.fullpath[len(SUITE):], text, valid, from_node, from_text)
+						log.warnf("%s: %s: want %v, node %v, text %v, sink %v", info.fullpath[len(SUITE):], text, valid, from_node, from_text, from_sink)
 					}
 				}
 			}
 		}
+	}
+	for keyword, n in refused {
+		log.infof("check refused %s: %d", keyword, n)
 	}
 	log.infof("suite checks: %d schemas bound, %d cases (%d of formats), %d wrong", bound, cases, format_cases, wrong)
 	testing.expect_value(t, wrong, 0)
@@ -483,10 +494,60 @@ schema_check_reports_each_failure :: proc(t: ^testing.T) {
 		core.render_entry(strings.to_stream(&out), src, e)
 		strings.write_byte(&out, '\n')
 	}
-	testing.expect_value(t, strings.to_string(out), "1:7: Number is below the minimum at .a (.properties.a.minimum)\n1:21: Value is not of the allowed type at .b[1] (.properties.b.items.type)\n1:30: No value is allowed here at .z (.additionalProperties)\n1:1: Required member is missing at .c (.required)\n")
+	testing.expect_value(t, strings.to_string(out), "1:7: Number is below the minimum at .a (.properties.a.minimum)\n1:21: Value is not of the allowed type at .b[1] (.properties.b.items.type)\n1:30: No value is allowed here at .z (.additionalProperties)\n1:1: Required member \"c\" is missing (.required)\n")
 	testing.expect(t, !schema.valid(&b, src))
 	// `c` is only required, so `additionalProperties` refuses it too.
 	testing.expect(t, !schema.valid(&b, transmute([]u8)string(`{"a": 2, "c": null}`)))
+}
+
+// A failure under an applicator reports the value's path and the keywords through the applicator to the rule.
+@(test)
+schema_check_reports_arms :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	text := `{"properties": {"a": {"allOf": [{"minimum": 2}], "anyOf": [{"type": "string"}, {"type": "boolean"}]}, "l": {"contains": {"const": 0}, "uniqueItems": true}}, "patternProperties": {"^x": {"type": "integer"}}, "dependentRequired": {"a": ["q"]}, "not": {"required": ["n"]}}`
+	ch, err := checked_make(text)
+	defer checked_destroy(ch)
+	testing.expect(t, err == nil)
+	src := transmute([]u8)string(`{"a": 1, "xy": "s", "l": [1, 1], "n": 0}`)
+	sink: typed.Sink
+	defer typed.sink_destroy(&sink)
+	first := schema.check(&ch.bound, src, &sink)
+	testing.expect_value(t, first.(core.Typed_Failure).kind, core.Typed_Error_Kind.Below_Minimum)
+	out := strings.builder_make(context.temp_allocator)
+	for e in sink.entries {
+		core.render_entry(strings.to_stream(&out), src, e)
+		strings.write_byte(&out, '\n')
+	}
+	testing.expect_value(t, strings.to_string(out), "1:7: Number is below the minimum at .a (.properties.a.allOf[0].minimum)\n1:7: Value passes none of the subschemas at .a (.properties.a.anyOf)\n1:26: Elements are not unique at .l (.properties.l.uniqueItems)\n1:26: Too few elements or members at .l (.properties.l.contains)\n1:1: Value passes a subschema it must fail (.not)\n1:16: Value is not of the allowed type at .xy (.patternProperties.\"^x\".type)\n1:1: Required member \"q\" is missing (.dependentRequired)\n")
+}
+
+// A failing property name reports its keyword under `propertyNames` at the object, a `false` there allows no name, and a
+// missing member of a nested object is reported at the object.
+@(test)
+schema_check_reports_names_and_required :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	cases := [?]struct {
+		schema, text, want: string,
+	} {
+		{`{"propertyNames": {"maxLength": 1}}`, `{"ab": 1}`, "1:2: String is too long (.propertyNames.maxLength)\n"},
+		{`{"propertyNames": false}`, `{"a": 1}`, "1:2: No value is allowed here (.propertyNames)\n"},
+		{`{"properties": {"o": {"required": ["k"]}}}`, `{"o": {}}`, "1:7: Required member \"k\" is missing at .o (.properties.o.required)\n"},
+	}
+	for c in cases {
+		ch, err := checked_make(c.schema)
+		defer checked_destroy(ch)
+		testing.expectf(t, err == nil, "%s: %v", c.schema, err)
+		sink: typed.Sink
+		defer typed.sink_destroy(&sink)
+		src := transmute([]u8)c.text
+		schema.check(&ch.bound, src, &sink)
+		out := strings.builder_make(context.temp_allocator)
+		for e in sink.entries {
+			core.render_entry(strings.to_stream(&out), src, e)
+			strings.write_byte(&out, '\n')
+		}
+		testing.expectf(t, strings.to_string(out) == c.want, "%s on %s: %q", c.schema, c.text, strings.to_string(out))
+	}
 }
 
 @(private = "file")
@@ -574,7 +635,7 @@ schema_check_agrees_with_model_load :: proc(t: ^testing.T) {
 		{Corpus_Enum_Keys, `{"m": {"C": 1}}`, true, .Name},
 	}
 	for c in cases {
-		plan, planned := json.plan_make(c.type, plan = {rule_tags = true, enums = c.enums}, reads = json.reads(.Json))
+		plan, planned := json.plan_make(c.type, plan = {rule_tags = rules.rules_leaf, enums = c.enums}, reads = json.reads(.Json))
 		testing.expect(t, planned == nil)
 		target := make([]u8, size_of(Corpus_Keys))
 		loaded := typed.check_text(transmute([]u8)c.text, raw_data(target), c.type, &plan, {}) == nil
@@ -702,6 +763,22 @@ schema_check_verdicts :: proc(t: ^testing.T) {
 		{`{"multipleOf": 2}`, `1e400`, true},
 		{`{"pattern": "^\\/[^\\*\\?\\&\\%]*(\\/\\*)?$"}`, `"/a/*"`, true},
 		{`{"pattern": "^\\/[^\\*\\?\\&\\%]*(\\/\\*)?$"}`, `"/a&"`, false},
+		{`{"propertyNames": {"maxLength": 3}, "required": ["a"]}`, `{"b": 1}`, false},
+		{`{"propertyNames": {"maxLength": 3}, "required": ["a"]}`, `{"a": 1}`, true},
+		{`{"propertyNames": {"maxLength": 3}, "properties": {"a": {}}, "required": ["a"]}`, `{"b": 1}`, false},
+		{`{"propertyNames": {"maxLength": 3}, "properties": {"a": {}}, "required": ["a"]}`, `{"a": 1, "b": 2}`, true},
+		{`{"const": "x", "enum": ["y"]}`, `"x"`, false},
+		{`{"const": "x", "enum": ["y"]}`, `"y"`, false},
+		{`{"const": "x", "enum": ["x", "y"]}`, `"x"`, true},
+		{`{"const": "x", "enum": ["x", "y"]}`, `"y"`, false},
+		{`{"allOf": [{"$ref": "#"}]}`, `2`, false},
+		{`{"patternProperties": {"^a": {"type": "string"}}, "properties": {"ab": {"maxLength": 1}}, "additionalProperties": false}`, `{"ab": "x"}`, true},
+		{`{"patternProperties": {"^a": {"type": "string"}}, "properties": {"ab": {"maxLength": 1}}, "additionalProperties": false}`, `{"ab": 1}`, false},
+		{`{"patternProperties": {"^a": {"type": "string"}}, "properties": {"ab": {"maxLength": 1}}, "additionalProperties": false}`, `{"ac": "xy", "b": 1}`, false},
+		{`{"patternProperties": {"^a": {"type": "string"}}, "required": ["b"], "additionalProperties": {"type": "integer"}}`, `{"b": 1}`, true},
+		{`{"patternProperties": {"^a": {"type": "string"}}, "required": ["b"], "additionalProperties": {"type": "integer"}}`, `{"b": "x"}`, false},
+		{`{"items": {"anyOf": [{"type": "integer"}, {"enum": [[1]]}]}}`, `[1, [1], [1.0]]`, true},
+		{`{"items": {"anyOf": [{"type": "integer"}, {"enum": [[1]]}]}}`, `[[2]]`, false},
 	}
 	for c in cases {
 		ch, err := checked_make(c.schema)
@@ -725,6 +802,10 @@ schema_bind_refusals :: proc(t: ^testing.T) {
 		f, _ := err.(core.Typed_Failure)
 		testing.expectf(t, f.kind == .Unsupported && f.want.text == "multipleOf", "%s: %v", text, err)
 	}
+	names, nerr := checked_make(`{"propertyNames": {"anyOf": [{"maxLength": 1}]}}`)
+	defer checked_destroy(names)
+	nf, _ := nerr.(core.Typed_Failure)
+	testing.expect(t, nf.kind == .Unsupported && nf.want.text == "propertyNames")
 	doc, _ := core.build(transmute([]u8)string(`{"pattern": "["}`), json.as(.Json))
 	defer core.destroy(&doc)
 	c, cerr := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
@@ -813,7 +894,7 @@ schema_check_agrees_on_json5_numbers :: proc(t: ^testing.T) {
 		{Json5_Count, `{n: 0x1}`, true},
 	}
 	for c in cases {
-		plan, planned := json.plan_make(c.type, .Json5, plan = {rule_tags = true}, reads = json.reads(.Json5))
+		plan, planned := json.plan_make(c.type, .Json5, plan = {rule_tags = rules.rules_leaf}, reads = json.reads(.Json5))
 		testing.expect(t, planned == nil)
 		target := make([]u8, size_of(Json5_Bound))
 		loaded := typed.check_text(transmute([]u8)c.text, raw_data(target), c.type, &plan, {}) == nil
@@ -837,4 +918,372 @@ schema_leaf_refuses_two_divisors :: proc(t: ^testing.T) {
 	testing.expect_value(t, refused, "pattern")
 	_, refused = rules.leaf_of(&n, {multiple_of = "2", pattern = "a"}, context.temp_allocator)
 	testing.expect_value(t, refused, "")
+}
+
+@(private = "file")
+Pairs :: map[[2]rules.Node_Index]bool
+
+// Whether node `i` of `a` and node `j` of `b` take the same values by structure: the kinds, the arms, the members and
+// their requirement, the array and object shapes and the operands of `enum` and `const`. A node and its copy are one,
+// so a shared node written once equals a repeated one, and a `$ref` with rules beside it equals the node it reaches with
+// those rules. A block of the defaults equals no block. `with_rules` adds the rules a node has with the rules `ea` and
+// `eb` of its use, where `assert_format` counts only beside a `format`.
+@(private = "file")
+same_schema :: proc(a, b: ^rules.Description, from_a, from_b: rules.Node_Index, seen: ^Pairs, with_rules: bool, ea := rules.Rules{}, eb := rules.Rules{}) -> bool {
+	if from_a == rules.NONE || from_b == rules.NONE {
+		return from_a == from_b
+	}
+	ea, eb := ea, eb
+	i, j := followed(a, from_a, &ea), followed(b, from_b, &eb)
+	if seen[{i, j}] {
+		return true
+	}
+	seen[{i, j}] = true
+	x, y := a.nodes[i], b.nodes[j]
+	rx, _ := rules.merged(&x, ea)
+	ry, _ := rules.merged(&y, eb)
+	for r in ([?]^rules.Rules{&rx, &ry}) {
+		r.assert_format &&= r.format != ""
+	}
+	if x.kinds != y.kinds || (with_rules && rx != ry) || len(x.enum_of) != len(y.enum_of) || (x.enum_of == nil) != (y.enum_of == nil) {
+		return false
+	}
+	for v, k in x.enum_of {
+		if !core.equal(v, y.enum_of[k]) {
+			return false
+		}
+	}
+	cx, hx := x.const_of.?
+	cy, hy := y.const_of.?
+	if hx != hy || (hx && !core.equal(cx, cy)) {
+		return false
+	}
+	same_list :: proc(a, b: ^rules.Description, xs, ys: []rules.Node_Index, seen: ^Pairs, with_rules: bool) -> bool {
+		if len(xs) != len(ys) {
+			return false
+		}
+		for _, k in xs {
+			if !same_schema(a, b, xs[k], ys[k], seen, with_rules) {
+				return false
+			}
+		}
+		return true
+	}
+	opt :: proc(m: Maybe(rules.Node_Index)) -> rules.Node_Index {
+		return m.? or_else rules.NONE
+	}
+	if !same_list(a, b, x.any_of, y.any_of, seen, with_rules) || !same_list(a, b, x.all_of, y.all_of, seen, with_rules) || !same_list(a, b, x.one_of, y.one_of, seen, with_rules) {
+		return false
+	}
+	pairs := [?][2]rules.Node_Index {
+		{opt(x.not), opt(y.not)},
+		{opt(x.cond.test), opt(y.cond.test)},
+		{opt(x.cond.then), opt(y.cond.then)},
+		{opt(x.cond.other), opt(y.cond.other)},
+		{opt(x.unevaluated_items), opt(y.unevaluated_items)},
+		{opt(x.unevaluated_properties), opt(y.unevaluated_properties)},
+		{opt(x.ref), opt(y.ref)},
+	}
+	for p in pairs {
+		if !same_schema(a, b, p[0], p[1], seen, with_rules) {
+			return false
+		}
+	}
+	ax, ay := rules.Array{items = rules.NONE}, rules.Array{items = rules.NONE}
+	if x.array >= 0 {
+		ax = a.arrays[x.array]
+	}
+	if y.array >= 0 {
+		ay = b.arrays[y.array]
+	}
+	if !same_list(a, b, ax.prefix, ay.prefix, seen, with_rules) || !same_schema(a, b, ax.items, ay.items, seen, with_rules) || !same_schema(a, b, opt(ax.contains), opt(ay.contains), seen, with_rules) || ax.min_contains != ay.min_contains || ax.max_contains != ay.max_contains {
+		return false
+	}
+	ox, oy := rules.Object{additional = rules.NONE, keys = rules.NONE}, rules.Object{additional = rules.NONE, keys = rules.NONE}
+	if x.object >= 0 {
+		ox = a.objects[x.object]
+	}
+	if y.object >= 0 {
+		oy = b.objects[y.object]
+	}
+	if len(ox.members) != len(oy.members) || len(ox.patterns) != len(oy.patterns) || len(ox.dependents) != len(oy.dependents) {
+		return false
+	}
+	for m, k in ox.members {
+		n := oy.members[k]
+		if m.name != n.name || m.required != n.required || m.only_required != n.only_required || !same_schema(a, b, m.node, n.node, seen, with_rules, m.rules, n.rules) {
+			return false
+		}
+	}
+	for p, k in ox.patterns {
+		if p.expression != oy.patterns[k].expression || !same_schema(a, b, p.node, oy.patterns[k].node, seen, with_rules) {
+			return false
+		}
+	}
+	for p in ox.dependents {
+		q: rules.Dependent
+		for candidate in oy.dependents {
+			if candidate.name == p.name {
+				q = candidate
+			}
+		}
+		if q.name != p.name || len(p.required) != len(q.required) || !same_schema(a, b, opt(p.node), opt(q.node), seen, with_rules) {
+			return false
+		}
+		for name, e in p.required {
+			if name != q.required[e] {
+				return false
+			}
+		}
+	}
+	return same_schema(a, b, ox.additional, oy.additional, seen, with_rules) && same_schema(a, b, ox.keys, oy.keys, seen, with_rules)
+}
+
+// The node a `$ref` with at most rules beside it reaches, which judges as the reference does, with those rules added to
+// `extra`.
+@(private = "file")
+followed :: proc(d: ^rules.Description, i: rules.Node_Index, extra: ^rules.Rules) -> rules.Node_Index {
+	i := i
+	for {
+		bare := d.nodes[i]
+		bare.rules = {}
+		if !rules.ref_only(&bare) {
+			return i
+		}
+		extra^, _ = rules.merged(&d.nodes[i], extra^)
+		i = d.nodes[i].ref.?
+	}
+}
+
+// Writes `d` and compiles the text back as 2020-12, asserting formats when `d` does. A description the write refuses
+// comes back with the keyword it names.
+@(private = "file")
+written_back :: proc(t: ^testing.T, d: ^rules.Description, doc: ^core.Document) -> (back: schema.Compiled, text: []u8, refused: string) {
+	werr: core.Error
+	text, werr = schema.write(d, json.as(.Json))
+	if f, is_typed := werr.(core.Typed_Failure); is_typed && f.kind == .Unsupported {
+		return {}, nil, f.want.text
+	}
+	testing.expectf(t, werr == nil, "write: %v", werr)
+	built, berr := core.build(text, json.as(.Json))
+	testing.expectf(t, berr == nil, "built %s: %v", text, berr)
+	doc^ = built
+	asserts := false
+	for n in d.nodes {
+		asserts ||= n.rules.assert_format && n.rules.format != ""
+	}
+	for o in d.objects {
+		for m in o.members {
+			asserts ||= m.rules.assert_format && m.rules.format != ""
+		}
+	}
+	cerr: core.Error
+	back, cerr = schema.compile(doc, core.ROOT, {format_assert = asserts, resolver = {as = json.as(.Json)}})
+	testing.expectf(t, cerr == nil, "read %s: %v", text, cerr)
+	if cerr != nil {
+		return {}, text, "compile"
+	}
+	return back, text, ""
+}
+
+// Every schema of the suite that reads and has no dynamic reference or draft 4 integer writes and reads back as itself,
+// and the written schema judges every instance as the schema did, text and document alike, with formats asserted on both
+// sides where the suite asserts them. Verdicts under applicators wait for 5b, which the check does not judge yet, so a
+// schema that does not bind is counted and compared by shape only.
+@(test)
+schema_write_reads_back_to_the_suite_schemas :: proc(t: ^testing.T) {
+	written, differ, cases, wrong := 0, 0, 0, 0
+	skips := make(map[string]int, context.temp_allocator)
+	for entry in SUITE_DRAFTS {
+		w := os.walker_create_path(strings.concatenate({SUITE, entry.dir}, context.temp_allocator))
+		defer os.walker_destroy(&w)
+		for info in os.walker_walk(&w) {
+			if info.type != .Regular || !strings.has_suffix(info.name, ".json") || strings.has_suffix(info.fullpath, "optional/content.json") || strings.has_suffix(info.fullpath, "optional/dependencies-compatibility.json") {
+				continue
+			}
+			arena: virtual.Arena
+			_ = virtual.arena_init_growing(&arena)
+			defer virtual.arena_destroy(&arena)
+			context.allocator = virtual.arena_allocator(&arena)
+			bytes, _ := os.read_entire_file_from_path(info.fullpath, context.allocator)
+			doc, _ := core.build(bytes, json.as(.Json))
+			groups := core.children(&doc, core.ROOT)
+			in_formats := strings.contains(info.fullpath, "optional/format/")
+			for group in core.child_next(&groups) {
+				node, _ := core.member(&doc, group, "schema")
+				c, err := schema.compile(&doc, node, {format_assert = in_formats, resolver = {as = json.as(.Json), draft = entry.draft}})
+				if err != nil {
+					skips["read"] += 1
+					continue
+				}
+				back_doc: core.Document
+				back, text, refused := written_back(t, c.description, &back_doc)
+				if refused != "" {
+					skips[refused] += 1
+					testing.expectf(t, refused == "$dynamicRef" || refused == "integer", "%s: refused %s", info.fullpath[len(SUITE):], refused)
+					continue
+				}
+				written += 1
+				seen: Pairs
+				if !same_schema(c.description, back.description, c.description.root, back.description.root, &seen, true) {
+					differ += 1
+					log.warnf("%s: written back differs: %s", info.fullpath[len(SUITE):], text)
+				}
+				b, berr := schema.bind(&c, json.as(.Json))
+				b2, b2err := schema.bind(&back, json.as(.Json))
+				if berr != nil || b2err != nil {
+					skips["bind"] += 1
+					continue
+				}
+				tests, _ := core.member(&doc, group, "tests")
+				all := core.children(&doc, tests)
+				for test in core.child_next(&all) {
+					data, _ := core.member(&doc, test, "data")
+					want := schema.check_node(&b, &doc, data) == nil
+					from_text := schema.valid(&b2, core.span(&doc, data))
+					cases += 1
+					if from_text != want {
+						wrong += 1
+						log.warnf("%s: verdict %v, written %v: %s", info.fullpath[len(SUITE):], want, from_text, text)
+					}
+				}
+			}
+		}
+	}
+	log.infof("suite writes: %d written, %d differ, %d cases, %d wrong, skipped %v", written, differ, cases, wrong, skips)
+	testing.expect_value(t, differ, 0)
+	testing.expect_value(t, wrong, 0)
+}
+
+@(private = "file")
+Written_Tree :: struct {
+	name:  string,
+	kids:  []Written_Tree,
+	up:    ^Written_Tree,
+	may:   Maybe(Written_Leaf),
+	other: Written_Leaf,
+	pick:  union {
+		i64,
+		string,
+		[]Written_Leaf,
+	},
+	named: map[string]Written_Leaf,
+	fixed: [3]i16,
+	color: enum {
+		Red,
+		Green,
+	},
+	free:  any,
+}
+
+@(private = "file")
+Written_Leaf :: struct {
+	n: i32 `json:"n,required"`,
+	s: string `model:"len>=2"`,
+}
+
+// A type's description writes and reads back as a description of the same rules, a member's `model:` rules beside a
+// shared node's `$ref` or merged into an unshared one, and the written schema judges the instances of the merged types
+// as the type does. The check does not judge a `$ref` with siblings yet, so the shared members compare by shape.
+@(test)
+schema_write_reads_back_to_described_types :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	types := [?]typeid{Written_Tree, Corpus_Tie, Corpus_Formats, Corpus_Whole, Corpus_Narrow, Corpus_Keys, Corpus_Gap, Corpus_Enum_Keys, Written_Member, Written_Merge}
+	for type in types {
+		for enums in typed.Enum_Spelling {
+			plan, planned := json.plan_make(type, plan = {rule_tags = rules.rules_leaf, enums = enums}, reads = json.reads(.Json))
+			testing.expect(t, planned == nil)
+			d, described := model.describe(&plan)
+			testing.expect(t, described == nil)
+			doc: core.Document
+			back, text, refused := written_back(t, &d, &doc)
+			testing.expectf(t, refused == "", "%v: %s", type, refused)
+			seen: Pairs
+			testing.expectf(t, same_schema(&d, back.description, d.root, back.description.root, &seen, true), "%v %v: %s", type, enums, text)
+		}
+	}
+	plan, _ := json.plan_make(Written_Merge, plan = {rule_tags = rules.rules_leaf}, reads = json.reads(.Json))
+	d, _ := model.describe(&plan)
+	doc: core.Document
+	back, text, _ := written_back(t, &d, &doc)
+	b, bound := schema.bind(&back, json.as(.Json))
+	testing.expect(t, bound == nil)
+	cases := [?]struct {
+		text:  string,
+		valid: bool,
+	} {
+		{`{"at": "1998-12-31T23:59:60Z"}`, true},
+		{`{"at": "1998-12-31 23:59:59Z"}`, false},
+		{`{"at": "1998-13-31T23:59:59Z"}`, false},
+		{`{"at": "2021-02-30T00:00:00Z"}`, false},
+		{`{"a": 100, "b": 1}`, true},
+		{`{"a": 200}`, false},
+		{`{"b": 0}`, false},
+		{`{"b": 70000}`, false},
+	}
+	for c in cases {
+		testing.expectf(t, schema.valid(&b, transmute([]u8)c.text) == c.valid, "%s against %s", c.text, text)
+	}
+}
+
+// Members of one type, whose node is shared and so written as a `$ref` with the member's rules beside it.
+@(private = "file")
+Written_Member :: struct {
+	a: i8 `model:"<=1000"`,
+	b: i8,
+	c: i8 `model:">=1"`,
+}
+
+// Members of types of their own, whose rules merge into their nodes: a bound looser than the type's keeps the type's.
+@(private = "file")
+Written_Merge :: struct {
+	a:  i8 `model:"<=1000"`,
+	b:  i16 `model:">=1"`,
+	at: string `model:"format=date-time"`,
+}
+
+@(test)
+schema_write_refuses_what_it_cannot_spell :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	cases := [?]struct {
+		text, keyword: string,
+		draft:         schema.Draft,
+	} {
+		{`{"$dynamicRef": "#x", "$dynamicAnchor": "x"}`, "$dynamicRef", .D2020_12},
+		{`{"type": "integer"}`, "integer", .D04},
+	}
+	for c in cases {
+		d, _, _, err := read_text(c.text, c.draft)
+		testing.expectf(t, err == nil, "%s: %v", c.text, err)
+		_, werr := schema.write(&d, json.as(.Json))
+		f, _ := werr.(core.Typed_Failure)
+		testing.expectf(t, f.kind == .Unsupported && f.want.text == c.keyword, "%s: %v", c.text, werr)
+	}
+}
+
+// A JSON5 schema's numbers are written as JSON numbers, and one that is not finite is refused naming its keyword.
+@(test)
+schema_write_spells_json5_numbers_as_json :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	cases := [?]struct {
+		text, written, keyword: string,
+	} {
+		{`{minimum: 0x10, maximum: .5, multipleOf: +2.}`, `"minimum":16,"maximum":5e-1,"multipleOf":2e0`, ""},
+		{`{minimum: Infinity}`, "", "minimum"},
+	}
+	for c in cases {
+		doc, derr := core.build(transmute([]u8)c.text, json.as(.Json5))
+		testing.expect(t, derr == nil)
+		res := schema.Resolver {
+			as = json.as(.Json5),
+		}
+		d, rerr := schema.read(&doc, core.ROOT, "", &res)
+		testing.expectf(t, rerr == nil, "%s: %v", c.text, rerr)
+		text, werr := schema.write(&d, json.as(.Json))
+		f, _ := werr.(core.Typed_Failure)
+		testing.expectf(t, f.want.text == c.keyword && strings.contains(string(text), c.written), "%s: %s, %v", c.text, text, werr)
+	}
 }

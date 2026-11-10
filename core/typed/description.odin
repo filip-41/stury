@@ -36,6 +36,9 @@ plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, 
 		refuse_plan(&b, .No_Memory)
 	}
 	p.leaves, p.uses = b.leaves[:], b.uses[:]
+	for u in p.uses {
+		p.held ||= len(u.applies) > 0
+	}
 	return p, core.error_of(plan_finish(&b, description_stamp(d, as, opts)))
 }
 
@@ -106,7 +109,7 @@ node_struct :: proc(b: ^Builder, d: ^rules.Description, key: Block_Key, o: rules
 // else adds its step and reads the node it reaches. An object's members are a struct block that its uses share, and
 // an array's prefix and items records a block its uses share.
 @(private)
-fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, at: int, use: rules.Node_Index, name: string, edge: rules.Rules, site: []core.Step) {
+fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, at: int, use: rules.Node_Index, name: string, edge: rules.Rules, site: []core.Step, bare := false) {
 	depth := enter(b, name)
 	defer b.depth = depth
 	node, refs := reached(d, use)
@@ -124,18 +127,30 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 		s = core.Name("$ref")
 	}
 	u.site = steps
-	if node != rules.NONE {
+	if node != rules.NONE && !bare && holds(d, node, edge) {
+		u.applies = checked_applies(b, d, arena, node, edge)
+	} else if node != rules.NONE {
 		n := &d.nodes[node]
-		m.rule_set = checked_leaf(b, n, edge, arena)
+		judged := n^
+		if container_operands(n) {
+			judged.has_enum, judged.enum_of, judged.const_of = false, nil, nil
+		}
+		m.rule_set = checked_leaf(b, &judged, edge, arena)
 		if .Object in n.kinds {
 			o := d.objects[n.object] if n.object >= 0 else rules.Object{additional = rules.NONE, keys = rules.NONE}
+			// The members a pattern matches are judged by the held record's arms, and so are the others with them.
+			if len(o.patterns) > 0 {
+				o.additional = rules.NONE
+			}
 			if !known_struct(b, {typeid_of(rules.Object), n.object}, &f, &m) && struct_block(b, {typeid_of(rules.Object), n.object}, &f, &m, o.members, false) >= 0 {
 				checked_members(b, d, arena, m.block, o)
 			}
 			if o.additional != rules.NONE {
 				u.additional = checked_block(b, d, arena, {typeid_of(Maybe(rules.Object)), n.object}, nil, o.additional, ADDITIONAL)
 			}
-			if keys, _ := reached(d, o.keys); keys != rules.NONE {
+			if keys, _ := reached(d, o.keys); keys != rules.NONE && holds(d, keys, {}) {
+				refuse_plan(b, .Unsupported, text = "propertyNames")
+			} else if keys != rules.NONE {
 				u.keys = checked_leaf(b, &d.nodes[keys], {}, arena)
 			}
 		}
@@ -339,8 +354,14 @@ description_stamp :: proc(d: ^rules.Description, as: core.As, opts: Plan_Options
 		if v, has := n.const_of.?; has {
 			stamp_value(&h, v)
 		}
-		for x in n.any_of {
-			stamp_mix(&h, u64(x))
+		for list in ([?][]rules.Node_Index{n.any_of, n.all_of, n.one_of}) {
+			stamp_mix(&h, u64(len(list)))
+			for x in list {
+				stamp_mix(&h, u64(x))
+			}
+		}
+		for x in ([?]Maybe(rules.Node_Index){n.not, n.cond.test, n.cond.then, n.cond.other, n.dynamic_ref, n.unevaluated_items, n.unevaluated_properties}) {
+			stamp_mix(&h, u64(i64(x.? or_else rules.NONE)))
 		}
 	}
 	for a in d.arrays {
@@ -348,6 +369,9 @@ description_stamp :: proc(d: ^rules.Description, as: core.As, opts: Plan_Options
 		for x in a.prefix {
 			stamp_mix(&h, u64(x))
 		}
+		stamp_mix(&h, u64(i64(a.contains.? or_else rules.NONE)))
+		stamp_mix(&h, a.min_contains.? or_else max(u64))
+		stamp_mix(&h, a.max_contains.? or_else max(u64))
 	}
 	for o in d.objects {
 		stamp_mix(&h, u64(u32(o.additional)) | u64(u32(o.keys)) << 32)
@@ -356,6 +380,21 @@ description_stamp :: proc(d: ^rules.Description, as: core.As, opts: Plan_Options
 			stamp_mix(&h, u64(x.node) | u64(x.required) << 32 | u64(x.only_required) << 33)
 			limits(&h, x.rules)
 		}
+		for x in o.patterns {
+			stamp_text(&h, x.expression)
+			stamp_mix(&h, u64(x.node))
+		}
+		for x in o.dependents {
+			stamp_text(&h, x.name)
+			stamp_mix(&h, u64(i64(x.node.? or_else rules.NONE)) | u64(len(x.required)) << 32)
+			for r in x.required {
+				stamp_text(&h, r)
+			}
+		}
+	}
+	for x in d.anchors {
+		stamp_text(&h, x.name)
+		stamp_mix(&h, u64(x.resource) | u64(x.node) << 32)
 	}
 	return h
 }

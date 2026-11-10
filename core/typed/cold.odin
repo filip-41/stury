@@ -882,15 +882,24 @@ find_member :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Reg
 	if len(key) != 0 && m.names & name_bit(key) == 0 {
 		return unknown_key(h, regs, t, f, owner, key)
 	}
-	// A record that compares its name holds its length, so most members cost one compare.
+	if i := member_index(h, owner, m, key); i >= 0 {
+		return member_found(h, regs, t, f, owner, i)
+	}
+	return unknown_key(h, regs, t, f, owner, key)
+}
+
+// The member of the struct `owner` named `key`, -1 for none. A record that compares its name holds its length, so most
+// members cost one compare.
+@(private)
+member_index :: #force_inline proc "contextless" (h: ^Reader, owner: ^Field, m: ^Meta, key: string) -> int #no_bounds_check {
 	want := u32(len(key)) + h.plan.key_frame
 	at := ([^]Field)(owner.first)
 	for i in 0 ..< int(m.members) {
 		if (at[i].n == want || at[i].n == 0) && h.plan.meta[at[i].meta].name == key {
-			return member_found(h, regs, t, f, owner, i)
+			return i
 		}
 	}
-	return unknown_key(h, regs, t, f, owner, key)
+	return -1
 }
 
 // A key the type does not name.

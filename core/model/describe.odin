@@ -16,6 +16,7 @@ import typed "../typed"
 describe :: proc(plan: ^typed.Plan, allocator := context.allocator) -> (d: rules.Description, err: core.Error) {
 	context.allocator = allocator
 	d.allocator = allocator
+	d.names = make(map[rules.Node_Index]string, allocator)
 	if plan.type == nil {
 		return d, core.error_of(core.Typed_Error{kind = .Bad_Option})
 	}
@@ -109,6 +110,9 @@ node_of :: proc(r: ^Reading, record: i32) -> rules.Node_Index {
 		n.kinds += {.Null}
 	}
 	r.d.nodes[index] = n
+	if named, ok := type_info_of(m.type).variant.(runtime.Type_Info_Named); ok && f.kind == .Struct {
+		r.d.names[index] = named.name
+	}
 	return index
 }
 

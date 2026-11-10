@@ -131,6 +131,8 @@ Description :: struct {
 	objects:   [dynamic]Object,
 	texts:     [dynamic]string,
 	anchors:   [dynamic]Anchor,
+	// The name a node goes by: a schema's `$defs` key or `$anchor`, a type's name. The writer names a definition by it.
+	names:     map[Node_Index]string,
 	root:      Node_Index,
 	allocator: runtime.Allocator,
 }
@@ -163,47 +165,20 @@ description_destroy :: proc(d: ^Description) {
 	delete(d.objects)
 	delete(d.texts)
 	delete(d.anchors)
+	delete(d.names)
 	d^ = {}
 }
 
-// The first keyword a node of `d` holds that a check of `d` does not judge yet, "" for none. A `$ref` with no keyword
-// beside it is judged as the node it reaches.
+// The first keyword a node of `d` holds that a check of `d` does not judge yet, "" for none.
 unjudged :: proc(d: ^Description) -> string {
 	for &n in d.nodes {
 		switch {
-		case len(n.any_of) > 0:
-			return "anyOf"
-		case len(n.all_of) > 0:
-			return "allOf"
-		case len(n.one_of) > 0:
-			return "oneOf"
-		case n.not != nil:
-			return "not"
-		case n.cond.test != nil || n.cond.then != nil || n.cond.other != nil:
-			return "if"
-		case n.ref != nil && !ref_only(&n):
-			return "$ref"
 		case n.dynamic_ref != nil:
 			return "$dynamicRef"
 		case n.unevaluated_items != nil:
 			return "unevaluatedItems"
 		case n.unevaluated_properties != nil:
 			return "unevaluatedProperties"
-		case n.rules.unique:
-			return "uniqueItems"
-		}
-	}
-	for a in d.arrays {
-		if a.contains != nil {
-			return "contains"
-		}
-	}
-	for o in d.objects {
-		switch {
-		case len(o.patterns) > 0:
-			return "patternProperties"
-		case len(o.dependents) > 0:
-			return "dependencies"
 		}
 	}
 	return ""

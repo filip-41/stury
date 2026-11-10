@@ -77,7 +77,7 @@ field_tag :: proc(b: ^Builder, name, tag: string) -> (t: Field_Tag, bad_flag: st
 // `Meta.rule_set`. Members with equal rules share a set. An item the tag cannot spell refuses the plan.
 @(private)
 rules_of :: proc(b: ^Builder, name, tag: string) -> i32 {
-	if !b.rule_tags {
+	if b.rule_tags == nil {
 		return 0
 	}
 	value, found := reflect.struct_tag_lookup(reflect.Struct_Tag(tag), "model")

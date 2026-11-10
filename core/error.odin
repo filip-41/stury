@@ -439,7 +439,7 @@ Typed_Error_Kind :: enum u8 {
 	Out_Of_Range, // a value past what the target holds
 	Not_A_Member, // a name or number no enum or union member has
 	Wrong_Length, // an array's element count differs from a fixed array's, or passes a fixed capacity
-	Missing_Field, // a `required` member is absent, the last step names it
+	Missing_Field, // a `required` member is absent, the last step names it, or for a check `want.text` with the object's path
 	Unknown_Field, // a key the type does not name, the last step names it
 	Missing_Tag, // an object for a union that reads by tag has no tag member
 	Repeated_Tag, // an object for a union that reads by tag has two
@@ -470,6 +470,9 @@ Typed_Error_Kind :: enum u8 {
 	Too_Many, // an array or object with more elements or members than a rule allows
 	Not_Unique, // an array whose elements repeat where a rule wants them unique
 	Not_Allowed, // a value where a rule takes none
+	No_Arm, // a value that passes none of a rule's subschemas
+	Many_Arms, // a value that passes more than one of a rule's subschemas, where it takes one
+	Matches_Not, // a value that passes the subschema a rule wants it to fail
 }
 
 // The steps a `Typed_Error` holds.
@@ -548,7 +551,7 @@ Error_Entry :: struct {
 // by the tags.
 Typed_Detail :: struct #raw_union {
 	inner: Fault `raw_union_tag:"kind=Walk"`,
-	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema"`,
+	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Missing_Field,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema"`,
 	plans: Plan_Clash `raw_union_tag:"kind=Plan_Mismatch"`,
 }
 
@@ -606,6 +609,9 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 	.Too_Many      = {"too_many", "Too many elements or members"},
 	.Not_Unique    = {"not_unique", "Elements are not unique"},
 	.Not_Allowed   = {"not_allowed", "No value is allowed here"},
+	.No_Arm        = {"no_arm", "Value passes none of the subschemas"},
+	.Many_Arms     = {"many_arms", "Value passes more than one subschema"},
+	.Matches_Not   = {"matches_not", "Value passes a subschema it must fail"},
 }
 
 // The messages of a schema check's entries, which name keywords and not a type's fields, where they differ.
@@ -1018,7 +1024,13 @@ render_entry :: proc(w: io.Writer, src: []u8, e: Error_Entry, lines: ^Lines = ni
 	if len(e.keyword_path) > 0 && SCHEMA_MESSAGES[e.kind] != "" {
 		message = SCHEMA_MESSAGES[e.kind]
 	}
-	io.write_string(w, message) or_return
+	if name, named := e.operand.(string); named && e.kind == .Missing_Field {
+		io.write_string(w, "Required member ") or_return
+		io.write_quoted_string(w, name) or_return
+		io.write_string(w, " is missing") or_return
+	} else {
+		io.write_string(w, message) or_return
+	}
 	if len(e.path) > 0 {
 		io.write_string(w, " at ") or_return
 		write_steps(w, e.path, true) or_return

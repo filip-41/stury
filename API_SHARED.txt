@@ -172,8 +172,8 @@ judge_count :: #force_inline proc "contextless" (n, low, high: u64) -> (fails: F
 judge_number :: proc(l: ^Leaf, text: string, small: Maybe(i64)) -> (fails: Failures)
 judge_string :: proc(l: ^Leaf, text: string, scratch: ^regex.Scratch) -> (fails: Failures)
 leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator) -> (l: Leaf, refused: string)
+merged :: proc(n: ^Node, edge: Rules) -> (r: Rules, refused: string)
 ref_only :: proc(n: ^Node) -> bool
-rules_leaf :: proc(r: Rules, kinds: Kinds, allocator := context.allocator) -> (l: Leaf, refused: string)
 trivial :: proc(l: ^Leaf) -> bool
 unjudged :: proc(d: ^Description) -> string
 uri_split :: proc(s: string) -> (u: Uri)
@@ -212,10 +212,11 @@ scan_room :: #force_inline proc "contextless" (h: ^Scan) -> int
 scan_start :: proc(h: ^Scan, src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error
 set_answers :: proc(list: ^core.Edit_List, path: core.Path, in_: core.Edit_Input, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
 # core/typed
-Check :: struct { using reader: Reader, scratch: regex.Scratch, }
+Check :: struct { using reader: Reader, after: []core.Step, outer: ^Outer, nest: int, }
 KEY_SIZE_MAX :: 240
 check_document :: proc(doc: ^core.Document, node: core.Node_Index, target: rawptr, T: typeid, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
 check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error)
+check_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator := context.allocator) -> core.Error
 enum_member :: proc "contextless" (info: ^runtime.Type_Info_Enum, value: i64) -> int
 field_at :: #force_inline proc "contextless" (b: u64) -> ^Field
 grow_frames :: #force_no_inline proc "contextless" (h: ^Reader, have, want: int) -> (int, bool)
@@ -278,6 +279,7 @@ tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, alloc
 tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind
 tokens_release :: proc(t: ^Tokens)
 union_arm :: proc(m: ^typed.Meta, v: uintptr) -> ^typed.Arm
+value_of :: proc(t: ^Tokens, v: core.Value) -> core.Typed_Error_Kind
 value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
 write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator) -> (text: []u8, err: core.Typed_Error)
 # core/records

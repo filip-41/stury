@@ -1,6 +1,7 @@
 package typed
 
 import "base:runtime"
+import "core:mem"
 import "core:strconv"
 import regex "../regex"
 import spell "../spell"
@@ -11,9 +12,23 @@ import rules "../rules"
 // checks of a model add to. `check_start` starts one.
 Check :: struct {
 	using reader: Reader,
-	// The matcher's stack, which a pattern's search grows in the read's temp allocator once and reuses.
-	scratch: regex.Scratch,
+	// The keyword steps a failure's path takes after its value's use site, before the rule's keyword.
+	after:        []core.Step,
+	// What the path and the keyword path of a check of a held value start with, nil for a check of the whole value.
+	outer:        ^Outer,
+	// The held values this check is judging one inside the other, which `MAX_HELD` bounds.
+	nest:         int,
 }
+
+// The path to a held value and the keyword steps to the subschema it is judged by.
+@(private)
+Outer :: struct {
+	path, words: []core.Step,
+}
+
+@(private)
+@(rodata)
+KEYS := [1]core.Step{core.Name("propertyNames")}
 
 // A format's read of a whole text into `target`, a value of `plan`'s type `T`, under the handle `as`.
 Text_Read :: #type proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error
@@ -49,10 +64,19 @@ unmarshal_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: 
 
 // Reads `src` into `target` as `unmarshal_text` does, with every refusal in `read.sink.entries`. Returns the first.
 check_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator := context.allocator) -> core.Error {
-	if plan == nil || plan.check == nil {
+	if plan == nil || plan.check == nil || plan.held && plan.build == nil {
 		return core.error_of(plan_mismatch(plan, nil, T))
 	}
-	return core.error_of(plan.check(src, plan.as, target, T, plan, read, allocator))
+	if !plan.held {
+		return core.error_of(plan.check(src, plan.as, target, T, plan, read, allocator))
+	}
+	// A held record judges its value from the nodes of the document.
+	doc, err := plan.build(src, plan.as, context.allocator)
+	defer core.destroy(&doc)
+	if err.kind != .None {
+		return core.error_of(err)
+	}
+	return check_document(&doc, core.ROOT, target, T, plan, read, allocator)
 }
 
 // The value `t` at a `Checked` record: judges a scalar by the record's leaf, and opens a container a rule reads inside,
@@ -80,18 +104,29 @@ check_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs
 			first = &h.plan.fields[u.items]
 		}
 	case:
-		if l != nil && judge_value(h, regs, t, l) == .Stop {
-			return next, .Stop
+		if l != nil {
+			if judge_value(h, regs, t, l) == .Stop {
+				return next, .Stop
+			}
+		} else if len(u.applies) > 0 {
+			return next, check_held(h, regs, u, t)
 		}
 		return next, .Next
 	}
 	if first == nil {
+		if len(u.applies) > 0 && check_held(h, regs, u, t) == .Stop {
+			return next, .Stop
+		}
 		return next, .Skip
 	}
 	f := &h.frames[h.sp]
 	h.sp += 1
 	f.a, f.b, f.c, f.seen, f.run, f.extra = regs.a, regs.b, regs.c, 0, nil, nil
 	f.data, f.kind, f.owner, f.target = rawptr(uintptr(t.lo)), t.kind, nil, 0
+	if t.kind == .Object && u.keys != 0 {
+		// The cursor starts past every member, which it passed unread, so the members are tracked from here by their keys.
+		f.seen, f.run = SEEN_ON, first
+	}
 	return {NO_LIMIT, u64(uintptr(first)), 0}, .Next
 }
 
@@ -165,7 +200,52 @@ judge_string :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token, l
 	if l.has_enum && !rules.enum_has(l, .String, text) {
 		fails += {.Not_A_Member}
 	}
-	return fails + rules.judge_string(l, text, &h.scratch)
+	if l.pattern == nil {
+		return fails + rules.judge_string(l, text, nil)
+	}
+	// A search's scratch starts on the stack, and a block that outgrows it moves to the temp allocator.
+	room: [SCRATCH_ROOM]u8 = ---
+	stack: mem.Arena
+	mem.arena_init(&stack, room[:])
+	spill := runtime.Allocator{spill_proc, &stack}
+	scratch := regex.Scratch{}
+	scratch.stack.allocator, scratch.slots.allocator, scratch.counts.allocator = spill, spill, spill
+	scratch.seen.allocator, scratch.good.allocator, scratch.log.allocator = spill, spill, spill
+	return fails + rules.judge_string(l, text, &scratch)
+}
+
+// The bytes a pattern's search takes on the stack before it moves to the temp allocator.
+@(private)
+SCRATCH_ROOM :: 2048
+
+// Allocates from the arena at `data` while it has room and from the temp allocator past it, copying a block that grows
+// out of the arena. A block in the arena is freed with it.
+@(private)
+spill_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old: rawptr, old_size: int, loc := #caller_location) -> ([]byte, runtime.Allocator_Error) {
+	stack := (^mem.Arena)(data)
+	base := uintptr(raw_data(stack.data))
+	inside := uintptr(old) >= base && uintptr(old) < base + uintptr(len(stack.data))
+	#partial switch mode {
+	case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
+		if old != nil && !inside {
+			break
+		}
+		if got, err := mem.arena_allocator_proc(data, mode, size, alignment, old, old_size, loc); err != .Out_Of_Memory {
+			return got, err
+		}
+		got, err := runtime.mem_alloc_bytes(size, alignment, context.temp_allocator, loc)
+		if err == nil && old != nil {
+			copy(got, mem.byte_slice(old, min(old_size, size)))
+		}
+		return got, err
+	case .Free:
+		if inside || old == nil {
+			return nil, nil
+		}
+	case .Free_All:
+		return nil, .Mode_Not_Implemented
+	}
+	return context.temp_allocator.procedure(context.temp_allocator.data, mode, size, alignment, old, old_size, loc)
 }
 
 // The text a decoded string up to this long is decoded into on the stack. A longer one goes to the temp allocator.
@@ -311,11 +391,14 @@ check_key :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token)
 	}
 	if u.keys != 0 {
 		l := &h.plan.leaves[u.keys - 1]
-		fails := judge_string(h, t, l, key) if .String in l.kinds else {.Wrong_Kind}
+		fails := judge_string(h, t, l, key) if .String in l.kinds else ({.Not_Allowed} if l.kinds == {} else {.Wrong_Kind})
 		if fails != {} {
 			lo, hi := core.scalar_ends(t)
+			// The name is judged as the object's, under the keyword path of the names' own node.
 			h.sp -= 1
-			action := check_report(h, {f.a, f.b, f.c}, l, .String, fails, lo, hi, "propertyNames")
+			h.after = KEYS[:]
+			action := check_report(h, {f.a, f.b, f.c}, l, .String, fails, lo, hi)
+			h.after = nil
 			h.sp += 1
 			if action == .Stop {
 				return regs, .Stop
@@ -328,16 +411,14 @@ check_key :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token)
 		mark_run(h, f, owner, (^Field)(uintptr(regs.b)))
 		f.seen |= SEEN_ON
 		if len(key) == 0 || m.names & name_bit(key) != 0 {
-			for i in 0 ..< int(m.members) {
-				if h.plan.meta[at[i].meta].name == key {
-					seen_set(h, f, owner, i)
-					next := &at[i + 1]
-					if u.keys != 0 {
-						next = &h.plan.solo[2 * (int(uintptr(&at[i]) - uintptr(raw_data(h.plan.fields))) / size_of(Field)) + 1]
-					}
-					regs.b, f.run = u64(uintptr(next)), &at[i + 1]
-					return regs, .Next
+			if i := member_index(h, owner, m, key); i >= 0 {
+				seen_set(h, f, owner, i)
+				next := &at[i + 1]
+				if u.keys != 0 {
+					next = &h.plan.solo[2 * (int(uintptr(&at[i]) - uintptr(raw_data(h.plan.fields))) / size_of(Field)) + 1]
 				}
+				regs.b, f.run = u64(uintptr(next)), &at[i + 1]
+				return regs, .Next
 			}
 		}
 	}
@@ -362,9 +443,10 @@ check_close :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, owner:
 		context = h.ctx
 		for i := missing_member(h, f, owner, regs, 0); i >= 0; i = missing_member(h, f, owner, regs, i + 1) {
 			// The object's frame is reopened for the path, whose last step the name replaces.
-			h.sp += 1
-			note(h, at, {kind = .Missing_Field, at = lo, steps = {0 = core.Name(h.plan.meta[m.block + i].name)}, n_steps = 1}, hi, "required")
-			h.sp -= 1
+			// The path is the object's, as a schema's output names it, and the entry's operand names the member.
+			e := core.Typed_Error{kind = .Missing_Field, at = lo}
+			e.want.text = h.plan.meta[m.block + i].name
+			note(h, at, e, hi, "required")
 			if h.sink == nil {
 				return back, .Stop
 			}

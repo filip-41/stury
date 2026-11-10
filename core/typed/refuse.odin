@@ -63,6 +63,9 @@ entry_destroy :: proc(e: ^core.Error_Entry, allocator: runtime.Allocator) {
 			delete(string(name), allocator)
 		}
 	}
+	if name, named := e.operand.(string); named {
+		delete(name, allocator)
+	}
 	delete(e.path, allocator)
 	delete(e.keyword_path, allocator)
 	e^ = {}
@@ -176,17 +179,28 @@ entry_add :: proc(c: ^Sink, e: core.Typed_Error, h: ^Reader, regs: core.Hook_Reg
 	steps_of(h, regs, held, &steps)
 	words := make([dynamic]core.Step, context.temp_allocator)
 	if word, keyed := keyword.?; keyed && h.plan.checking {
+		ck := (^Check)(h)
+		if ck.outer != nil {
+			#reverse for s in ck.outer.path {
+				append(&steps, s)
+			}
+			append(&words, ..ck.outer.words)
+		}
 		for i in 1 ..< h.sp {
 			append(&words, ..h.plan.uses[field_at(h.frames[i].b).meta].site)
 		}
 		if !held {
 			append(&words, ..h.plan.uses[field_at(regs.b).meta].site)
 		}
+		append(&words, ..ck.after)
 		if word != "" {
 			append(&words, core.Name(word))
 		}
 	}
 	entry := core.Error_Entry{kind = e.kind, start = e.at, end = max(end, e.at), record = c.record}
+	if e.kind == .Missing_Field && h.wide && e.want.text != "" {
+		entry.operand = strings.clone(e.want.text)
+	}
 	path_ok, words_ok := owned_steps(&entry.path, steps[:], true), owned_steps(&entry.keyword_path, words[:], false)
 	if !path_ok || !words_ok {
 		entry_destroy(&entry, c.entries.allocator)

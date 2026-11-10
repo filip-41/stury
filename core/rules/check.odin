@@ -1,5 +1,6 @@
 package rules
 
+import "base:runtime"
 import "core:slice"
 import "core:strings"
 import regex "../regex"
@@ -38,11 +39,11 @@ Leaf :: struct {
 // The rules of a number that a value fails, as the error kinds that report them.
 Failures :: bit_set[core.Typed_Error_Kind; u64]
 
-// Compiles node `n`'s rules with the rules `edge` of its use added, allocating with `allocator`. A pattern that does
-// not compile, an operand that is a container, and a `multipleOf` or `pattern` that both the node and the use set
-// to different values come back as the keyword the check does not judge.
-leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator) -> (l: Leaf, refused: string) {
-	r := n.rules
+// The rules of `n` with the rules `edge` of one use added: the tighter bound and count of each pair. A `multipleOf` or
+// `pattern` that both set to different values is `refused`, since both would hold. An asserted `format` of the use
+// replaces a node's annotation.
+merged :: proc(n: ^Node, edge: Rules) -> (r: Rules, refused: string) {
+	r = n.rules
 	if r.multiple_of != "" && edge.multiple_of != "" && r.multiple_of != edge.multiple_of {
 		return {}, "multipleOf"
 	}
@@ -53,20 +54,44 @@ leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator) -> (l: Le
 	tighten(&r.maximum, &r.exclusive_maximum, edge.maximum, edge.exclusive_maximum, false)
 	r.multiple_of = r.multiple_of if r.multiple_of != "" else edge.multiple_of
 	r.pattern = r.pattern if r.pattern != "" else edge.pattern
+	if edge.format != "" && (r.format == "" || (edge.assert_format && !r.assert_format)) {
+		r.format, r.assert_format = edge.format, edge.assert_format
+	}
+	r.unique ||= edge.unique
 	r.min_length, r.min_items, r.min_members = max(r.min_length, edge.min_length), max(r.min_items, edge.min_items), max(r.min_members, edge.min_members)
-	r.max_length = min(r.max_length.? or_else max(u64), edge.max_length.? or_else max(u64))
-	r.max_items = min(r.max_items.? or_else max(u64), edge.max_items.? or_else max(u64))
-	r.max_members = min(r.max_members.? or_else max(u64), edge.max_members.? or_else max(u64))
+	r.max_length, r.max_items, r.max_members = least(r.max_length, edge.max_length), least(r.max_items, edge.max_items), least(r.max_members, edge.max_members)
+	return
+}
+
+@(private = "file")
+least :: proc(a, b: Maybe(u64)) -> Maybe(u64) {
+	x, have_a := a.?
+	y, have_b := b.?
+	return min(x, y) if have_a && have_b else (a if have_a else b)
+}
+
+// Compiles node `n`'s rules with the rules `edge` of its use added, allocating with `allocator`. A pattern that does
+// not compile, an operand that is a container, and a `multipleOf` or `pattern` that both the node and the use set
+// to different values come back as the keyword the check does not judge.
+leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator) -> (l: Leaf, refused: string) {
+	r, clash := merged(n, edge)
+	if clash != "" {
+		return {}, clash
+	}
 	l, refused = rules_leaf(r, n.kinds, allocator)
 	l.integer_spelled = n.integer_spelled
 	if edge.assert_format {
 		l.formats += {format_of(edge.format)} - {.None}
 	}
 	operands := n.enum_of
-	if c, has := n.const_of.?; has {
-		operands = {c}
-	}
 	l.has_enum, l.constant = n.const_of != nil || n.has_enum, n.const_of != nil
+	if c, has := n.const_of.?; has {
+		// A `const` beside an `enum` takes its one value only when the enum holds it too, and else no value, as the enum.
+		operands = {c}
+		if n.has_enum && !operand_in(c, n.enum_of, allocator) {
+			operands, l.constant = nil, false
+		}
+	}
 	l.fast &&= !l.has_enum
 	if !l.has_enum || refused != "" {
 		return
@@ -84,6 +109,27 @@ leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator) -> (l: Le
 	l.enum_keys = keys[:]
 	slice.sort_by(l.enum_keys, key_less)
 	return
+}
+
+// Whether the operand `c` is one of `operands` by the enum index's key, false for a container, which no index holds.
+@(private)
+operand_in :: proc(c: core.Value, operands: []core.Value, allocator: runtime.Allocator) -> bool {
+	k := core.value_kind(c)
+	if k == .Object || k == .Array {
+		return false
+	}
+	want := strings.builder_make(allocator)
+	operand_key(&want, c, k, allocator)
+	for v in operands {
+		if vk := core.value_kind(v); vk == k {
+			b := strings.builder_make(allocator)
+			operand_key(&b, v, vk, allocator)
+			if strings.to_string(b) == strings.to_string(want) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Compiles the rules `r` on a value of `kinds`, allocating a pattern with `allocator`. A pattern that does not compile

@@ -90,13 +90,14 @@ bind :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads = nil, alloca
 }
 
 // Checks `src`, one text of the format `b` is bound to, with every failure in `sink.entries`, and returns the first. With
-// no sink the check stops at the first failure. A check allocates only the entries, with the sink's allocator.
+// no sink the check stops at the first failure. A check allocates only the entries, with the sink's allocator, but for a
+// schema with an applicator, which builds the document of `src` first and judges its arms in the temp allocator.
 check :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink = nil) -> core.Error {
 	if b.plan.check == nil {
 		return core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
 	}
 	target: u8
-	return core.error_of(b.plan.check(src, b.plan.as, &target, nil, &b.plan, {sink = sink}, context.allocator))
+	return typed.check_text(src, &target, nil, &b.plan, {sink = sink})
 }
 
 // Whether `src` passes the schema, as `check` with no sink says.

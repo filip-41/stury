@@ -113,6 +113,8 @@ Use :: struct {
 	site:                    []core.Step,
 	step:                    bool, // a prefix record, which moves the cursor on to the next element's
 	inside:                  bool,
+	// A held record's arms, which judge its value from the document a check reads, empty for any other record.
+	applies:                 []Apply,
 }
 
 // A union's arm: the value classes it takes, its tag value, and its tag name when the tag names it.
@@ -185,8 +187,9 @@ Rename :: enum u8 {
 // arms, and `tag_names` the names that replace the arms' type names.
 Plan_Options :: struct {
 	enums:     Enum_Spelling,
-	// Reads each member's rules from its `model:` tag into the member's record. A read by the plan does not check them.
-	rule_tags: bool,
+	// Reads each member's rules from its `model:` tag into the member's record, compiled by this procedure, which is
+	// `rules.rules_leaf` or nil for no tags. A read by the plan does not check them. A plan without it links no compiler.
+	rule_tags: Rule_Compiler,
 	union_tag: string,
 	tag_names: []Tag_Name,
 	hooks:     []Type_Hook,
@@ -194,6 +197,9 @@ Plan_Options :: struct {
 	// Builds a description's plan as a check reads it: each record `Checked`, judging its use of its node.
 	checking:  bool,
 }
+
+// Compiles a rule set for the kinds a node takes into a leaf in `allocator`, or names the keyword it does not judge.
+Rule_Compiler :: #type proc(r: rules.Rules, kinds: rules.Kinds, allocator: runtime.Allocator) -> (rules.Leaf, string)
 
 // A plan is a value the caller owns, for one type and one format. `plan_make` builds it and `plan_destroy` frees it. It
 // is read only while reading, so a read needs nothing else and any number of reads may share it. A plan is not copied,
@@ -245,6 +251,8 @@ Plan :: struct {
 	leaves:    []rules.Leaf,
 	// A description's plan's `Use` of each record, by its `Meta` index.
 	uses:      []Use,
+	// A description's plan with a held record, whose check of a text checks the document the text builds.
+	held:      bool,
 	// What `leaves` and `uses` allocate: patterns, enum keys, keyword steps and the uses.
 	arena:     ^virtual.Arena,
 }
@@ -341,7 +349,7 @@ plan_leaves :: proc(p: ^Plan) -> core.Typed_Error {
 	}
 	for r, i in p.rule_sets {
 		refused: string
-		if leaves[i], refused = rules.rules_leaf(r, rules.EVERY_KIND, arena); refused != "" {
+		if leaves[i], refused = p.options.rule_tags(r, rules.EVERY_KIND, arena); refused != "" {
 			plan_destroy(p)
 			p.err = {kind = .Unsupported, want = {text = refused}}
 			return p.err
@@ -478,7 +486,7 @@ stamp_as :: proc(as: core.As, opts: Plan_Options) -> u64 {
 	for b in as.opts {
 		stamp_mix(&h, u64(b))
 	}
-	stamp_mix(&h, u64(opts.enums) | u64(opts.rename) << 8 | u64(opts.rule_tags) << 16 | u64(opts.checking) << 17)
+	stamp_mix(&h, u64(opts.enums) | u64(opts.rename) << 8 | u64(opts.rule_tags != nil) << 16 | u64(opts.checking) << 17)
 	stamp_text(&h, opts.union_tag)
 	for t in opts.tag_names {
 		stamp_mix(&h, transmute(u64)t.type)

@@ -29,39 +29,60 @@ String_Format :: enum u8 {
 	Regex,
 }
 
-// Each format's name and check. The checks take the decoded string. A regex is judged as ECMA-262 with the `u` flag,
-// as `pattern` is.
+// Each format's name. A name and its check are apart, so a plan that only names formats links no check.
 @(private, rodata)
-FORMATS := [String_Format]struct {
-	name:  string,
-	valid: proc(s: string) -> bool,
-} {
-	.None = {},
-	.Date_Time = {"date-time", proc(s: string) -> bool {_, ok := date_time_of(s);return ok}},
-	.Date = {"date", proc(s: string) -> bool {_, ok := date_of(s);return ok}},
-	.Time = {"time", proc(s: string) -> bool {_, ok := time_of(s);return ok}},
-	.Duration = {"duration", duration_valid},
-	.Email = {"email", proc(s: string) -> bool {return mailbox_valid(s, false)}},
-	.Idn_Email = {"idn-email", proc(s: string) -> bool {return mailbox_valid(s, true)}},
-	.Hostname = {"hostname", proc(s: string) -> bool {return domain_valid(s, false)}},
-	.Idn_Hostname = {"idn-hostname", proc(s: string) -> bool {return domain_valid(s, true)}},
-	.Ipv4 = {"ipv4", ipv4_valid},
-	.Ipv6 = {"ipv6", ipv6_valid},
-	.Uri = {"uri", proc(s: string) -> bool {return uri_valid(s, false, false)}},
-	.Uri_Reference = {"uri-reference", proc(s: string) -> bool {return uri_valid(s, false, true)}},
-	.Iri = {"iri", proc(s: string) -> bool {return uri_valid(s, true, false)}},
-	.Iri_Reference = {"iri-reference", proc(s: string) -> bool {return uri_valid(s, true, true)}},
-	.Uri_Template = {"uri-template", template_valid},
-	.Uuid = {"uuid", proc(s: string) -> bool {_, err := uuid.read(s);return err == nil}},
-	.Json_Pointer = {"json-pointer", pointer_valid},
-	.Relative_Json_Pointer = {"relative-json-pointer", relative_pointer_valid},
-	.Regex = {"regex", proc(s: string) -> bool {return regex.valid(s, {ecma = true})}},
+FORMAT_NAMES := [String_Format]string {
+	.None = "",
+	.Date_Time = "date-time",
+	.Date = "date",
+	.Time = "time",
+	.Duration = "duration",
+	.Email = "email",
+	.Idn_Email = "idn-email",
+	.Hostname = "hostname",
+	.Idn_Hostname = "idn-hostname",
+	.Ipv4 = "ipv4",
+	.Ipv6 = "ipv6",
+	.Uri = "uri",
+	.Uri_Reference = "uri-reference",
+	.Iri = "iri",
+	.Iri_Reference = "iri-reference",
+	.Uri_Template = "uri-template",
+	.Uuid = "uuid",
+	.Json_Pointer = "json-pointer",
+	.Relative_Json_Pointer = "relative-json-pointer",
+	.Regex = "regex",
+}
+
+// Each format's check, which takes the decoded string. A regex is judged as ECMA-262 with the `u` flag, as `pattern` is.
+@(private, rodata)
+FORMAT_CHECKS := [String_Format]proc(s: string) -> bool {
+	.None = nil,
+	.Date_Time = proc(s: string) -> bool {_, ok := date_time_of(s);return ok},
+	.Date = proc(s: string) -> bool {_, ok := date_of(s);return ok},
+	.Time = proc(s: string) -> bool {_, ok := time_of(s);return ok},
+	.Duration = duration_valid,
+	.Email = proc(s: string) -> bool {return mailbox_valid(s, false)},
+	.Idn_Email = proc(s: string) -> bool {return mailbox_valid(s, true)},
+	.Hostname = proc(s: string) -> bool {return domain_valid(s, false)},
+	.Idn_Hostname = proc(s: string) -> bool {return domain_valid(s, true)},
+	.Ipv4 = ipv4_valid,
+	.Ipv6 = ipv6_valid,
+	.Uri = proc(s: string) -> bool {return uri_valid(s, false, false)},
+	.Uri_Reference = proc(s: string) -> bool {return uri_valid(s, false, true)},
+	.Iri = proc(s: string) -> bool {return uri_valid(s, true, false)},
+	.Iri_Reference = proc(s: string) -> bool {return uri_valid(s, true, true)},
+	.Uri_Template = template_valid,
+	.Uuid = proc(s: string) -> bool {_, err := uuid.read(s);return err == nil},
+	.Json_Pointer = pointer_valid,
+	.Relative_Json_Pointer = relative_pointer_valid,
+	.Regex = proc(s: string) -> bool {return regex.valid(s, {ecma = true})},
 }
 
 // The format `name` is, `.None` for a name no checker judges.
 format_of :: proc(name: string) -> String_Format {
 	for f in String_Format.Date_Time ..= String_Format.Regex {
-		if FORMATS[f].name == name {
+		if FORMAT_NAMES[f] == name {
 			return f
 		}
 	}
@@ -71,7 +92,7 @@ format_of :: proc(name: string) -> String_Format {
 // Whether the decoded string `s` is a value of format `f`. Allocates nothing that outlives the call.
 @(private)
 format_valid :: proc(f: String_Format, s: string) -> bool {
-	return FORMATS[f].valid == nil || FORMATS[f].valid(s)
+	return FORMAT_CHECKS[f] == nil || FORMAT_CHECKS[f](s)
 }
 
 // The length of the run of ASCII digits that starts `s`.
