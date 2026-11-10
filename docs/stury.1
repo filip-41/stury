@@ -31,6 +31,8 @@ validates its inputs, accepting any input that
 .B stury .
 reads without error, and prints nothing when they are valid. Every file is judged, and each file's first fault is reported. It requires at least one JSON text: an empty or whitespace-only input is "No JSON text" and exits 5. It refuses the options fmt refuses, and \-\-indent and \-\-tab. It is the subcommand when it is the first argument that is not an option. With no file on a terminal it prints the short usage and exits 2. \fBstury check \-\-help\fR lists its options.
 .PP
+With \fB\-\-schema\fR \fIfile\fR, check also judges each input against the JSON Schema in \fIfile\fR (drafts 4 to 2020\-12) and tells every failure as file:line:col: message at path, on stderr, exiting 1 when an input parses and fails the schema. \fB\-\-schema\-ref\fR \fIdir\fR sets the directory a file reference may read, \fB\-\-format\-assert\fR makes format fail, \fB\-\-max\-errors\fR \fIn\fR keeps at most n failures of an input, and \fB\-\-report\fR \fIlines|basic|problem\fR writes the JSON Schema basic output or an RFC 9457 problem document on standard output instead. NDJSON and \-\-seq records are checked one by one. docs/cli.md has the details.
+.PP
 .B stury fmt
 writes each input back in the printer's layout, or in another format: it runs no filter, reads each file as
 \-\-from and writes it as \-\-to (the same format by default). JSON and JSONC are laid out as stury prints them, comments kept; ndjson is

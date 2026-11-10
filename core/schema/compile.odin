@@ -73,6 +73,9 @@ index_all :: proc(doc: ^core.Document) {
 Bound :: struct {
 	plan:     typed.Plan,
 	compiled: ^Compiled,
+	// Set when the root is an array checked entry by entry, which a check with a runner reads on its threads.
+	elements:  ^Elements,
+	allocator: runtime.Allocator,
 }
 
 // Binds `c` to the format `as`, whose check `reads` gives when it is set, as `typed.plan_of` takes it. A schema keyword
@@ -85,24 +88,41 @@ bind :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads = nil, alloca
 		return {}, core.error_of(core.Typed_Error{kind = .Unsupported, want = {text = keyword}})
 	}
 	b.compiled = c
+	b.allocator = allocator
 	b.plan, err = typed.plan_of(c.description, as, reads, {checking = true}, allocator)
+	if err == nil {
+		b.elements = elements_of(c, as, reads, allocator)
+	}
 	return
 }
 
 // Checks `src`, one text of the format `b` is bound to, with every failure in `sink.entries`, and returns the first. With
 // no sink the check stops at the first failure. A check allocates only the entries, with the sink's allocator, but for a
-// schema with an applicator, which builds the document of `src` first and judges its arms in the temp allocator.
-check :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink = nil) -> core.Error {
+// schema with an applicator, which builds the document of `src` first and judges its arms in the temp allocator. A root
+// array whose rules are per entry is checked on the threads of `runner` when one is given, with the same entries.
+check :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink = nil, runner: ^core.Runner = nil) -> core.Error {
 	if b.plan.check == nil {
 		return core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+	}
+	if b.elements != nil && runner != nil && runner.threads > 0 && !b.plan.held {
+		if err, done := check_elements(b, src, sink, runner); done {
+			return err
+		}
 	}
 	target: u8
 	return typed.check_text(src, &target, nil, &b.plan, {sink = sink})
 }
 
+// The check of `plan` over the text `src`, for a plan that holds no record.
+@(private)
+check_text :: proc(plan: ^typed.Plan, src: []u8, sink: ^typed.Sink) -> core.Typed_Error {
+	target: u8
+	return plan.check(src, plan.as, &target, nil, plan, {sink = sink}, context.allocator)
+}
+
 // Whether `src` passes the schema, as `check` with no sink says.
-valid :: proc(b: ^Bound, src: []u8) -> bool {
-	return check(b, src) == nil
+valid :: proc(b: ^Bound, src: []u8, runner: ^core.Runner = nil) -> bool {
+	return check(b, src, nil, runner) == nil
 }
 
 // Checks the value at `node` of `doc`, a document of the format `b` is bound to, as `check` checks a text.
@@ -112,6 +132,7 @@ check_node :: proc(b: ^Bound, doc: ^core.Document, node: core.Node_Index, sink: 
 }
 
 unbind :: proc(b: ^Bound) {
+	elements_destroy(b.elements, b.allocator)
 	typed.plan_destroy(&b.plan)
 	b^ = {}
 }

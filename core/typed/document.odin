@@ -63,6 +63,7 @@ Document_Read :: struct($H: typeid) {
 	doc:    ^core.Document,
 	at:     core.Node_Index,
 	room:   int, // the frames the reader holds
+	short:  bool, // a markup element's step could not allocate
 	reader: H,
 }
 
@@ -117,7 +118,7 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	h.format = &d
 	h.find_tag = document_tag
 	to := u32(node) + (doc.nodes[node].n if doc.nodes[node].kind > .Plain else 1)
-	if !build.feed_nodes(doc, u32(node), to, &d, &regs, ends[:], document_step, document_keyed, document_deepen, true) {
+	if !build.feed_nodes(doc, u32(node), to, &d, &regs, ends[:], document_step, document_keyed, document_deepen, true) || d.short {
 		return {kind = .No_Memory}
 	}
 	return read_end(h, regs, nil)
@@ -155,6 +156,9 @@ document_step :: proc "contextless" (d: ^Document_Read($H), regs: core.Hook_Regs
 		h.mant = fold_digits(h.src, t)
 	}
 	when H == Check {
+		if d.doc.readers.attribute != nil && t.role == .Value && t.kind != .End {
+			return element_step(d, regs, t, at)
+		}
 		return on_token_check_spelled(h, regs, t)
 	} else {
 		return on_token_spelled(h, regs, t)

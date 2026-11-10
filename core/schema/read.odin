@@ -93,6 +93,8 @@ Reader :: struct {
 	pending:   [dynamic]Pending,
 	anything:  Maybe(rules.Node_Index),
 	path:      [dynamic]core.Step,
+	// The base a root directory gives a schema that has no retrieval URI, which names no resource.
+	local:     string,
 	err:       core.Error,
 }
 
@@ -131,6 +133,7 @@ read :: proc(doc: ^core.Document, node: core.Node_Index, base: string, res: ^Res
 	base := base
 	if base == "" && res.root != "" {
 		base = strings.concatenate({"file://", root_path(res), "/"})
+		r.local = base
 	}
 	append(&r.sources, doc)
 	read_root(&r, 0, node, base)
@@ -225,6 +228,9 @@ read_object :: proc(r: ^Reader, sc: Scope, at: core.Node_Index, i: rules.Node_In
 	retrieved, starts := sc.base, at == sc.root
 	if !overridden {
 		read_id(r, &sc, at, i)
+	}
+	if i == 0 && sc.base != "" && sc.base != r.local {
+		r.d.uri = keep(r, sc.base)
 	}
 	if sc.root == at {
 		register_resource(r, sc, sc.base)

@@ -4,6 +4,10 @@
 
 ### Command line
 
+- `stury check --schema FILE` also checks each input against a JSON Schema and tells every failure, exit 1.
+  `--report basic` and `--report problem` write the JSON Schema basic output or an RFC 9457 problem document,
+  `--max-errors`, `--format-assert` and `--schema-ref` shape the check. Long files and records are checked on all cores.
+
 - `stury edit FILTER [FILE...]` writes each input back with the filter's one output spliced into its bytes: every byte
   the filter does not change is kept, comments and line ends included, and an insert follows its container's layout. A built object or array is laid out
   as the container it lands in: one member a line in its indent and colon spacing, or compact.

@@ -72,6 +72,27 @@ shows that `.Json` refuses a comment that `.Jsonc` takes:
 2:9: Expected ',' or '}' after an object member
 ```
 
+## Check against a schema
+
+`core/schema` compiles a JSON Schema (drafts 4 to 2020-12) once and binds it to a format. `schema.check` judges a text
+and puts every failure in a `typed.Sink`, each with its position, its path and the keywords that failed it. With a
+`core.Runner`, a long text of records (`schema.check_records`) or an array at the root whose rules apply to each entry
+is checked on its threads, with the entries a serial check gives. `write.write_basic` and `write.write_problem` write the
+entries as the JSON Schema basic output or an RFC 9457 problem document.
+
+```odin
+doc, _ := core.build(schema_text, json.as(.Json))
+c, _ := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
+b, _ := schema.bind(&c, json.as(.Json))
+sink := typed.Sink{}
+defer typed.sink_destroy(&sink)
+if schema.check(&b, src, &sink) != nil {
+	for e in sink.entries { core.render_entry(w, src, e) }
+}
+```
+
+`stury check --schema` is the same check on the command line ([cli.md](cli.md#schema-check)).
+
 ## Read into Odin values
 
 `unmarshal` fills a value from a text during the scan, with no document between them.

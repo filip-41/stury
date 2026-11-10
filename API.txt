@@ -337,6 +337,7 @@ can_resume :: #force_inline proc "contextless" (cursor: ^Cursor) -> bool
 cell :: records.cell
 cells :: records.cells
 check :: proc {check_bound, check_chosen}
+checks :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads
 child_at :: core.child_at
 child_next :: core.child_next
 children :: core.children
@@ -445,14 +446,17 @@ decimal_multiple_of :: proc(x, y: Decimal) -> (multiple, exact: bool)
 decimal_of :: proc(lit: string) -> (d: Decimal)
 # core/regex
 Flags :: struct { fold, extend, dotall, multiline, ecma: bool, }
+Regex :: struct { insts: []Inst, bytes: string, classes: []^Class, refs: [][]int, callouts: []^Callout, names: []string, slots: int, opt: ^Search_Opt, visited: ^Visited, prefix: string, first: [4]u64, longest: bool, not_empty: bool, has_first: bool, calls_or_limits: bool, narrowed: bool, ecma: bool, linear: bool, }
 Scratch :: struct { stack: [dynamic]Entry, slots: [dynamic]int, counts: [dynamic]int, seen: [dynamic]u64, good: [dynamic]u64, log: [dynamic]u32, resumes: int, }
+compile :: proc(pattern: string, flags: Flags, allocator := context.allocator) -> (re: Regex, err: string)
 scratch_destroy :: proc(scratch: ^Scratch)
 valid :: proc(pattern: string, flags: Flags) -> bool
 # core
+Attribute_Iter :: struct { doc: ^Document, facts: []Fact, }
 Comment_From :: enum u8 { None, Written, Source, }
 Edit_Input :: struct { text: string, value: Value, raw: bool, }
 Edit_Services :: struct { value: proc(v: ^Token_View, src: []u8, allocator: runtime.Allocator) -> Document_Error, key_text: proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool, comment: proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8), separators: proc(doc: ^Document, spec: u8) -> bool, member_sep: proc(doc: ^Document, c: Node_Index) -> string, key_sep: string, insert_check: proc(doc: ^Document, container: Node_Index, text: string, allocator: runtime.Allocator) -> Document_Error, interior: proc(doc: ^Document, c: Node_Index) -> (lo, hi: u64), fact_slot: proc(doc: ^Document, node: Node_Index, role: Role, emptied: bool) -> bool, emptied: proc(doc: ^Document, list: ^Edit_List) -> bool, plan: proc(doc: ^Document, list: ^Edit_List, out: ^[dynamic]Edit, allocator: runtime.Allocator) -> (changed: bool, err: Document_Error), validate: proc "contextless" (src: []u8, as: As) -> Maybe(Fault), spell: proc(doc: ^Document, v: Value, opts: Write_Options, colon: string, record: bool, at: u64, allocator: runtime.Allocator) -> ([]u8, Error), }
-Readers :: struct { text: proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool), key_equals: proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool, number: proc(v: ^Token_View, t: Token) -> (Number, bool), number_f32: proc(v: ^Token_View, t: Token) -> (f32, bool), resolve: proc(doc: ^Document, i: Node_Index) -> Kind, resolves: proc "contextless" (as: As) -> bool, close_end: proc(doc: ^Document, i: Node_Index) -> u64, format: proc "contextless" () -> ^Rules, tag_key: string, key_open: string, key_close: string, flat: bool, services: ^Services, }
+Readers :: struct { text: proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool), key_equals: proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool, number: proc(v: ^Token_View, t: Token) -> (Number, bool), number_f32: proc(v: ^Token_View, t: Token) -> (f32, bool), resolve: proc(doc: ^Document, i: Node_Index) -> Kind, resolves: proc "contextless" (as: As) -> bool, close_end: proc(doc: ^Document, i: Node_Index) -> u64, format: proc "contextless" () -> ^Rules, tag_key: string, key_open: string, key_close: string, flat: bool, services: ^Services, attribute: proc "contextless" (doc: ^Document, f: Fact) -> (name, value: Token), }
 Services :: struct { build: proc(src: []u8, as: As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (Document, Document_Error), validate: proc "contextless" (src: []u8, as: As) -> Maybe(Fault), scan: proc(src: []u8, as: As, paths: []Path, read: Path_Options, state: rawptr, on: proc(state: rawptr, a: Token_Answer) -> bool, allocator: runtime.Allocator) -> (Document, Path_Error), write: proc(doc: ^Document, opts: Write_Options, as: As, node: Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Error), edit: ^Edit_Services, plans: rawptr, reads: rawptr, tokens: rawptr, records: rawptr, docs: rawptr, }
 Table :: struct { node: Node_Index, header: Node_Index, first_row: Node_Index, width: u32, }
 Trail :: distinct ^Trail_Step
@@ -517,10 +521,10 @@ Array :: struct { prefix: []Node_Index, items: Node_Index, contains: Maybe(Node_
 Bound :: struct { set, exclusive, whole: bool, int: i64, exact: spell.Decimal, }
 Conditional :: struct { test, then, other: Maybe(Node_Index), }
 Dependent :: struct { name: string, required: []string, node: Maybe(Node_Index), }
-Description :: struct { nodes: [dynamic]Node, arrays: [dynamic]Array, objects: [dynamic]Object, texts: [dynamic]string, anchors: [dynamic]Anchor, names: map[Node_Index]string, root: Node_Index, allocator: runtime.Allocator, }
+Description :: struct { nodes: [dynamic]Node, arrays: [dynamic]Array, objects: [dynamic]Object, texts: [dynamic]string, anchors: [dynamic]Anchor, names: map[Node_Index]string, root: Node_Index, uri: string, allocator: runtime.Allocator, }
 Kind :: enum u8 { Null, Bool, Integer, Number, String, Array, Object, }
 Kinds :: bit_set[Kind; u8]
-Leaf :: struct { kinds: Kinds, integer_spelled: bool, has_enum: bool, constant: bool, fast: bool, minimum, maximum: Bound, multiple_of: Maybe(spell.Decimal), min_length, max_length: u64, min_items, max_items: u64, min_members: u64, max_members: u64, pattern: rawptr, formats: bit_set[String_Format; u32], enum_keys: []string, }
+Leaf :: struct { kinds: Kinds, plain: Kinds, integer_spelled: bool, has_enum: bool, constant: bool, fast: bool, minimum, maximum: Bound, multiple_of: Maybe(spell.Decimal), min_length, max_length: u64, min_items, max_items: u64, min_members: u64, max_members: u64, pattern: rawptr, formats: bit_set[String_Format; u32], enum_keys: []string, }
 Member :: struct { name: string, node: Node_Index, rules: Rules, required: bool, only_required: bool, }
 Node :: struct { kinds: Kinds, integer_spelled: bool, rules: Rules, array: i32, object: i32, any_of: []Node_Index, enum_of: []core.Value, has_enum: bool, const_of: Maybe(core.Value), all_of, one_of: []Node_Index, not: Maybe(Node_Index), cond: Conditional, ref, dynamic_ref: Maybe(Node_Index), unevaluated_items: Maybe(Node_Index), unevaluated_properties: Maybe(Node_Index), resource: Node_Index, }
 Node_Index :: distinct i32
@@ -548,8 +552,10 @@ set :: proc(src: []u8, as: core.As, path: core.Path, in_: core.Edit_Input, read 
 # core/typed
 Apply :: struct { kind: Apply_Kind, rec: i32, name: string, pattern: rawptr, names: []string, values: []core.Value, constant: bool, min, max: u64, }
 Apply_Kind :: enum u8 { All, Any, One, Not, If, Then, Else, Dependent, Requires, Pattern, Additional, Contains, Unique, Equal, }
+Check :: struct { using reader: Reader, after: []core.Step, outer: ^Outer, nest: int, }
 Format_Reads :: struct { read, check: Text_Read, node_read, node_check: Node_Read, build: Text_Build, }
 Frame :: struct { a, b, c: u64, data: rawptr, seen: u64, run: ^Field, extra: [^]u64, owner: ^Field, target: uintptr, kind: core.Kind, }
+Markup_Node :: enum u8 { Any, Attribute, Element, Text, }
 Node_Read :: #type proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error
 Plan_Make :: #type proc(T: typeid, as: core.As, opts: Plan_Options, allocator: runtime.Allocator) -> (Plan, core.Typed_Error)
 Reader :: struct { expect: ^Field, mant: u64, frames: [^]Frame, sp: int, borrow: bool, first_key: bool, refuse_unknown: bool, wide: bool, wrap_sp: u32, using view: core.Token_View, plan: ^Plan, wrap: ^core.Hook_Regs, ctx: runtime.Context, first: core.Typed_Error, sink: ^Sink, find_tag: proc(h: ^Reader, at: u64) -> Tag_Scan, format: rawptr, }
@@ -558,7 +564,7 @@ Scalar :: union { Null, bool, i64, u64, f64, core.Number_Text, string, }
 Tag_Scan :: struct { view: core.Token_View, name: string, depth: int, on_tag: bool, found: int, value: core.Token, fault: Maybe(core.Fault), }
 Text_Build :: #type proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error)
 Text_Read :: #type proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error
-Use :: struct { items, additional, keys: i32, site: []core.Step, step: bool, inside: bool, applies: []Apply, }
+Use :: struct { items, additional, keys: i32, site: []core.Step, step: bool, inside: bool, node: Markup_Node, applies: []Apply, }
 Value_Text :: #type proc(plan: ^Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
 plan_destroy :: proc(p: ^Plan)
 plan_make :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (Plan, core.Error)
@@ -569,6 +575,8 @@ unmarshal_node :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, 
 unmarshal_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator := context.allocator) -> core.Error
 unmarshal_value :: proc(v: core.Value, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
 # core/write
+Problem :: struct { type: string, title: string, status: int, }
+Report :: struct { uri: string, records: bool, truncated: bool, }
 Scalar :: union { string, core.Number, Number_Literal, Tree_Part, }
 Token_Spelling :: struct { tree: Tree, start: proc(t: ^Tokens, as: core.As) -> core.Typed_Error_Kind, value: proc(t: ^Tokens, v: Scalar) -> core.Typed_Error_Kind, line: proc(t: ^Tokens) -> core.Typed_Error_Kind, stop: proc(t: ^Tokens), record: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error) -> core.Typed_Error_Kind, }
 destroy :: proc(out: ^Out)
@@ -576,25 +584,29 @@ insert_element :: proc(list: ^core.Edit_List, container: core.Node_Index, at: in
 insert_member :: proc(list: ^core.Edit_List, container: core.Node_Index, at: int, key: string, v: $T, plan: ^typed.Plan = nil) -> core.Error
 marshal :: proc(value: any, plan: ^typed.Plan, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error)
 marshal_value :: proc(v: $T, plan: ^typed.Plan, allocator := context.allocator) -> (core.Value, core.Error)
+write_basic :: proc(t: ^Tokens, entries: []core.Error_Entry, r := Report{}) -> core.Typed_Error_Kind
+write_problem :: proc(t: ^Tokens, entries: []core.Error_Entry, p: Problem, r := Report{}) -> core.Typed_Error_Kind
 # core/records
 Framing_Services :: struct { next: [core.Framing]proc(it: ^Reader) -> (Record, bool), judge: proc(it: ^Reader, rec: Record) -> Maybe(core.Fault), guess: proc(it: ^Reader, to: u64) -> bool, span: proc(it: ^Reader, to: u64) -> (Record, bool), exact: proc(it: ^Reader) -> (kernel.Quotes, bool), piece: proc(it: ^Reader, lo, hi: u64) -> bool, whole: proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64), close: proc(it: ^Reader), ends: [core.Framing]u8, }
 RULES := core.Rules{"records", {{}, {"too_long", "Record is longer than the limit"}}}
+Record_Check :: #type proc(data: rawptr, text: []u8, sink: ^typed.Sink) -> core.Typed_Error
 Record_Docs :: struct { scan: proc(it: ^Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options) -> (Record, core.Path_Error, bool), read: proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool, build: proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), build_next: proc(it: ^Reader, b: ^engine.Builder, regs: ^core.Hook_Regs) -> (Record, bool), column: proc(it: ^Reader, name: string) -> int, cell: proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool), cells: proc(it: ^Reader, rec: Record, buf: []u8, upto: int) -> ([]cw.Scalar, bool), }
 writer_destroy :: proc(wr: ^Writer)
 # core/schema
-Bound :: struct { plan: typed.Plan, compiled: ^Compiled, }
+Bound :: struct { plan: typed.Plan, compiled: ^Compiled, elements: ^Elements, allocator: runtime.Allocator, }
 Compiled :: struct { description: ^rules.Description, opts: Options, owned: bool, allocator: runtime.Allocator, }
 Draft :: enum u8 { D04, D06, D07, D2019_09, D2020_12, }
 Options :: struct { format_assert: bool, base: string, resolver: Resolver, }
 Resolver :: struct { root: string, as: core.As, draft: Maybe(Draft), documents: [dynamic]^core.Document, texts: [dynamic][]u8, allocator: runtime.Allocator, }
 bind :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (b: Bound, err: core.Error)
-check :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink = nil) -> core.Error
+check :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink = nil, runner: ^core.Runner = nil) -> core.Error
 check_node :: proc(b: ^Bound, doc: ^core.Document, node: core.Node_Index, sink: ^typed.Sink = nil) -> core.Error
+check_records :: proc(b: ^Bound, src: []u8, framing := core.Framing.Lines, sink: ^typed.Sink = nil, runner: ^core.Runner = nil) -> core.Error
 compile :: proc(doc: ^core.Document, node: core.Node_Index, opts := Options{}, allocator := context.allocator) -> (c: Compiled, err: core.Error)
 compile_description :: proc(d: ^rules.Description, opts := Options{}, allocator := context.allocator) -> Compiled
 destroy :: proc(c: ^Compiled)
 read :: proc(doc: ^core.Document, node: core.Node_Index, base: string, res: ^Resolver, allocator := context.allocator) -> (d: rules.Description, err: core.Error)
 resolver_destroy :: proc(res: ^Resolver)
 unbind :: proc(b: ^Bound)
-valid :: proc(b: ^Bound, src: []u8) -> bool
+valid :: proc(b: ^Bound, src: []u8, runner: ^core.Runner = nil) -> bool
 write :: proc(d: ^rules.Description, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> (text: []u8, err: core.Error)

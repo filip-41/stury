@@ -70,11 +70,14 @@ comment_tail :: #force_inline proc "contextless" (spelling: u16) -> u64 {
 	return u64(spelling >> 8)
 }
 
-// A `Fact` holds a comment token, the node it belongs to and its role. Facts are sorted by the node they belong to,
-// and two facts of one node keep their source order. `lo` is the first byte and `n` the span's length, markers
-// included. `spelling`'s low byte is the marker's lead length and the next byte its tail length, so core slices a body
-// without knowing a format's markers. A `//` comment leads with two bytes and trails none, a `/* */` comment leads and
-// trails with two, and a delimited text's comment line leads with one.
+// A `Fact` holds a comment or attribute token, the node it belongs to and its role. Facts are sorted by the node they
+// belong to, and two facts of one node keep their source order. `lo` is the first byte and `n` the span's length,
+// markers included. A comment's `spelling` has the marker's lead length in its low byte and its tail length in the
+// next, so core slices a body without knowing a format's markers. A `//` comment leads with two bytes and trails none, a
+// `/* */` comment leads and trails with two, and a delimited text's comment line leads with one. An attribute's
+// `spelling` has the same layout: it leads through the value's opening quote and trails with the closing one, so its
+// body is the value as written, and a valueless attribute leads with its whole span. Only a comment role is a comment:
+// a writer or an edit that walks facts by their markers tests the role first.
 Fact :: struct {
 	lo:       u64,
 	node:     Node_Index,
@@ -333,7 +336,10 @@ Duplicates :: enum u8 {
 // format. `tag_key` is the format's own struct tag key, and `key_open` and `key_close` are what a key is written
 // between, empty for a format whose keys a typed read does not compare as text. `flat` says a text has no brackets, so
 // a container has no bytes of its own. `services` points at the run-time services of a handle, nil in a table that
-// serves a read only.
+// serves a read only. `attribute` gives an `Attribute` fact's name as a `Key` and its value as a `Value` token, each
+// read through `text` and `key_equals` as a node's is: a value with references or one the format normalizes sets
+// `SPELLING_DECODE`, and a valueless attribute's value is an empty `String`. It is nil for a format with no attributes,
+// and `attributes_of` is its one caller.
 Readers :: struct {
 	text:       proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
 	key_equals: proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool,
@@ -348,6 +354,7 @@ Readers :: struct {
 	key_close:  string,
 	flat:       bool,
 	services:   ^Services,
+	attribute:  proc "contextless" (doc: ^Document, f: Fact) -> (name, value: Token),
 }
 
 // The run-time services of a handle, which a call that chooses its format at run time reaches through
@@ -1104,6 +1111,34 @@ float_value :: proc(doc: ^Document, i: Node_Index) -> (f64, bool) {
 // a read allocates nothing.
 facts_of :: proc(doc: ^Document, i: Node_Index, role: Role) -> Fact_Iter {
 	return {doc = doc, facts = all_facts(doc, i), role = role}
+}
+
+// A walk over the attributes of the element whose value is node `i`, in source order, with `attribute_next` giving one
+// at a time. A check, a load and infer read an element's attributes as members through it.
+Attribute_Iter :: struct {
+	doc:   ^Document,
+	facts: []Fact,
+}
+
+// Returns a walk over the attributes of the element whose value is node `i`, none for a format with no attributes.
+attributes_of :: proc(doc: ^Document, i: Node_Index) -> Attribute_Iter {
+	if doc.readers == nil || doc.readers.attribute == nil {
+		return {doc = doc}
+	}
+	return {doc = doc, facts = all_facts(doc, i)}
+}
+
+// Returns the next attribute's name as a `Key` token and its value as a `Value` token, as `Readers.attribute` reads them.
+attribute_next :: proc(it: ^Attribute_Iter) -> (name, value: Token, ok: bool) {
+	for len(it.facts) > 0 {
+		f := it.facts[0]
+		it.facts = it.facts[1:]
+		if f.role == .Attribute {
+			name, value = it.doc.readers.attribute(it.doc, f)
+			return name, value, true
+		}
+	}
+	return {}, {}, false
 }
 
 // Returns the facts of node `i` and of every node in its subtree, all the document's for the root.

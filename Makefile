@@ -22,7 +22,7 @@ TEST_PKGS := core/spell/test core/regex/test host/test core/kernel/test core/tes
 # The packages the tests share, checked by `lint` and built through their imports.
 SUPPORT_PKGS := walktest bench/timing
 # The benchmark programs, which `lint` and the gate compile.
-BENCH_PKGS := bench bench/doc bench/editbench bench/paths bench/typed bench/write bench/records bench/schema
+BENCH_PKGS := bench bench/doc bench/editbench bench/paths bench/typed bench/write bench/records bench/schema bench/schema_csv
 # The test packages whose loops are compiled for the tier `-define:TIER` names.
 TIER_PKGS := core/kernel/test
 TEST_OPT  := -o:minimal
@@ -48,7 +48,7 @@ X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS)
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: help check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite diff-schema ecma-diff test-x86 test-wide test-asan test-tsan test-f32 test-sweep lint lint-man lint-fixtures api-write bench bench-doc bench-paths bench-typed bench-records bench-schema bench-schema-peers bench-write bench-peers bench-cli fixtures surface \
+.PHONY: help check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite diff-schema diff-schema-csv ecma-diff test-x86 test-wide test-asan test-tsan test-f32 test-sweep lint lint-man lint-fixtures api-write bench bench-doc bench-paths bench-typed bench-records bench-schema bench-schema-peers bench-write bench-peers bench-cli fixtures surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
 
 # The bench lanes' probes and peers, and the fixtures they read. BENCH_CC, BENCH_CXX and BENCH_CARGO name the compilers
@@ -94,6 +94,7 @@ help:
 	@echo "make test-asan, test-tsan, test-x86, test-wide, test-f32   sanitizers, x86 tiers, binary32"
 	@echo "make build-cli    build/stury (OPT=, STURY_VERSION=)"
 	@echo "make diff-schema  the schema lane's peers against the Python jsonschema package (needs uv)"
+	@echo "make diff-schema-csv  the check of CSV and TSV against a Python cell-rule converter and jsonschema (needs uv)"
 	@echo "make bench-doc, bench-paths, bench-typed, bench-records, bench-schema, bench-write, bench-cli   see bench/README.md"
 	@echo "ODIN=<path> names the compiler, and needs release $(MIN_ODIN) or later."
 
@@ -349,6 +350,13 @@ bench-schema: bench-schema-peers
 ORACLE_ARGS ?=
 diff-schema: bench-schema-peers
 	uv run --offline --no-project --with jsonschema==4.26.0 python3 bench/schema_oracle.py $(ORACLE_ARGS) $(SCHEMA_FIXTURES)
+
+# The check of CSV and TSV against an independent converter of the cell rule and the same package, over generated tables.
+CSV_ORACLE_ARGS ?=
+diff-schema-csv:
+	@mkdir -p $(BUILD)/oracle
+	$(ODIN) build bench/schema_csv $(TEST_OPT) -collection:stury=. -out:$(BUILD)/oracle/schema_csv
+	uv run --offline --no-project --with jsonschema==4.26.0 python3 -I bench/csv_oracle.py $(BUILD)/oracle/schema_csv $(CSV_ORACLE_ARGS)
 
 # The peers whose toolchain and sources are present: yyjson, simdjson (threaded, as its document_stream runs stage 1 in a
 # thread of its own), and the Rust binaries (sonic-rs, serde_json, simd-csv). The first Rust build downloads the crates

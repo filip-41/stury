@@ -126,7 +126,7 @@ full: docs/cli.md in stury's source, or man stury.
 
 // `stury check --help`.
 @(private = "file")
-CHECK_HELP :: `Usage:	stury check [--from format|--seq] [--max-depth n] [file...]
+CHECK_HELP :: `Usage:	stury check [--from format|--seq] [--max-depth n] [--schema file] [file...]
 
 stury check judges each input as stury . reads it and prints nothing when it
 is valid. Every file is judged, and each file's first fault is reported.
@@ -137,12 +137,19 @@ Options:
       --seq                 judge each record after a 0x1E separator as
                             one text;
       --max-depth n         refuse nesting past n levels (default 1024);
+      --schema file         also check each input against a JSON Schema and
+                            tell every failure, exit 1;
+      --schema-ref dir      the directory a file reference may read;
+      --format-assert       make format fail an input;
+      --max-errors n        keep at most n failures of an input;
+      --report kind         tell failures as lines (default), basic (the JSON
+                            Schema basic output) or problem (RFC 9457);
       --delimiter c, --no-header, --comment c, --ragged, --lazy-quotes
                             read csv or tsv as stury --help says;
   -h, --help                show this help.
 
-Exit status: 0 when every input is valid, 5 when one holds a fault, 2 for a
-usage or file error. In full: stury(1), or docs/cli.md in stury's source.
+Exit status: 0 when every input is valid, 1 when one fails the schema, 5 when
+one holds a fault, 2 for a usage or file error. In full: stury(1), or docs/cli.md in stury's source.
 `
 
 // `stury fmt --help`.

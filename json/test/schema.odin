@@ -7,8 +7,10 @@ import "core:os"
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import compose "../../core/compose"
 import rules "../../core/rules"
 import typed "../../core/typed"
+import write "../../core/write"
 import schema "../../core/schema"
 import json ".."
 import model "../../core/model"
@@ -1286,4 +1288,150 @@ schema_write_spells_json5_numbers_as_json :: proc(t: ^testing.T) {
 		f, _ := werr.(core.Typed_Failure)
 		testing.expectf(t, f.want.text == c.keyword && strings.contains(string(text), c.written), "%s: %s, %v", c.text, text, werr)
 	}
+}
+
+// An attribute fact `name="value"` read as a format with attributes reads one, its value a string with nothing to decode.
+@(private = "file")
+markup_attribute :: proc "contextless" (doc: ^core.Document, f: core.Fact) -> (name, value: core.Token) {
+	lead := u32(core.comment_lead(f.spelling))
+	return {lo = f.lo, n = lead - 2, kind = .String, role = .Key}, {lo = f.lo + u64(lead), n = f.n - lead - 1, kind = .String}
+}
+
+// A markup document made by hand: `model` is the JSON text of its data model, where an element is a member whose value
+// is its text, empty when it is, or an object of its children and `#text` runs, and each attribute `name="value"` is a
+// fact of its node, written past the model.
+@(private = "file")
+markup_doc :: proc(model: string, attributes: []Markup_Attribute, readers: ^core.Readers) -> core.Document {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, model)
+	facts := make([]core.Fact, len(attributes), context.temp_allocator)
+	for a, i in attributes {
+		strings.write_byte(&b, ' ')
+		name, _, _ := strings.partition(a.text, "=")
+		facts[i] = {lo = u64(len(b.buf)), node = a.node, n = u32(len(a.text)), role = .Attribute, spelling = core.comment_spelling(u8(len(name) + 2), 1)}
+		strings.write_string(&b, a.text)
+	}
+	doc, _ := core.build(b.buf[:len(model)], json.as(.Json))
+	doc.src, doc.facts, doc.readers = b.buf[:], facts, readers
+	return doc
+}
+
+@(private = "file")
+Markup_Attribute :: struct {
+	node: core.Node_Index,
+	text: string,
+}
+
+// The entries of a check, each without its position.
+@(private = "file")
+rendered :: proc(src: []u8, sink: ^typed.Sink) -> string {
+	out := strings.builder_make(context.temp_allocator)
+	line := strings.builder_make(context.temp_allocator)
+	for e in sink.entries {
+		strings.builder_reset(&line)
+		core.render_entry(strings.to_stream(&line), src, e)
+		_, _, rest := strings.partition(strings.to_string(line), ": ")
+		strings.write_string(&out, rest)
+		strings.write_byte(&out, '\n')
+	}
+	return strings.to_string(out)
+}
+
+// The check of a markup document gives the errors of the check of its JSON form: attributes and the element's text
+// as members, the siblings a member collects as an array at the first one's place, and a sequence bound by
+// `prefixItems` as the array of the element's children.
+@(test)
+schema_check_reads_markup :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	readers := json.as(.Json).readers^
+	readers.attribute = markup_attribute
+	markup := json.as(.Json)
+	markup.readers = &readers
+	cases := [?]struct {
+		schema, model, form: string,
+		attributes:          []Markup_Attribute,
+		errors:              int,
+		bind:                string, // a member whose record binds `node`, as `xml.nodeType` would
+		node:                typed.Markup_Node,
+	} {
+		// <price currency="EUR">5</price>
+		{`{"properties": {"price": {"type": "object", "properties": {"currency": {"enum": ["USD"]}, "#text": {"maxLength": 0}}, "required": ["currency", "amount"], "additionalProperties": false}}}`, `{"price": "5"}`, `{"price": {"currency": "EUR", "#text": "5"}}`, {{2, `currency="EUR"`}}, 3, "", .Any},
+		{`{"properties": {"price": {"type": "object", "properties": {"currency": {"enum": ["USD"]}, "amount": {"maxLength": 0}}, "required": ["currency", "amount"], "additionalProperties": false}}}`, `{"price": "5"}`, `{"price": {"currency": "EUR", "amount": "5"}}`, {{2, `currency="EUR"`}}, 2, "amount", .Text},
+		// <a id="x7" n="1"/>
+		{`{"properties": {"a": {"type": "object", "required": ["id", "name"], "properties": {"id": {"pattern": "^[a-z]+$"}}, "additionalProperties": false}}}`, `{"a": ""}`, `{"a": {"id": "x7", "n": "1"}}`, {{2, `id="x7"`}, {2, `n="1"`}}, 3, "", .Any},
+		{`{"properties": {"a": {"required": ["id"], "properties": {"id": {}}, "additionalProperties": false}}}`, `{"a": ""}`, `{"a": {"id": "x7"}}`, {{2, `id="x7"`}}, 0, "", .Any},
+		// <a/>, an empty element at a string record
+		{`{"properties": {"a": {"type": "string", "minLength": 1}}}`, `{"a": ""}`, `{"a": ""}`, nil, 1, "", .Any},
+		// <a id="1"><id>2</id></a>, an attribute and a child of one name, each bound to its node
+		{`{"properties": {"a": {"properties": {"id": {"const": "2"}}}}}`, `{"a": {"id": "2"}}`, `{"a": {"id": "2"}}`, {{2, `id="1"`}}, 0, "id", .Element},
+		// <a>5</a>, an element whose record takes objects
+		{`{"properties": {"a": {"type": "object", "required": ["#text"], "maxProperties": 0}}}`, `{"a": "5"}`, `{"a": {"#text": "5"}}`, nil, 1, "", .Any},
+		// <a k="1"><b>2</b>tail</a>
+		{`{"properties": {"a": {"properties": {"k": {"type": "integer"}, "b": {"maxLength": 0}, "#text": {"minLength": 5}}, "maxProperties": 2}}}`, `{"a": {"b": "2", "#text": "tail"}}`, `{"a": {"k": "1", "b": "2", "#text": "tail"}}`, {{2, `k="1"`}}, 4, "", .Any},
+		// <r><item>a</item><x/><item n="1">bb</item></r>
+		{`{"properties": {"r": {"properties": {"item": {"type": "array", "maxItems": 1, "items": {"type": "string"}}, "x": {"type": "string"}}, "maxProperties": 1}}}`, `{"r": {"item": "a", "x": null, "item": "bb"}}`, `{"r": {"item": ["a", {"n": "1", "#text": "bb"}], "x": null}}`, {{8, `n="1"`}}, 4, "", .Any},
+		{`{"properties": {"r": {"properties": {"item": {"type": "array", "minItems": 1}}, "maxProperties": 1}}}`, `{"r": {"item": "a", "x": null, "item": "bb"}}`, `{"r": {"item": ["a", "bb"], "x": null}}`, nil, 1, "", .Any},
+		// <p>Hi <b>you</b>!</p>
+		{`{"properties": {"p": {"type": "array", "prefixItems": [{"const": "Hi "}, {"maxLength": 2}, {"const": "?"}], "maxItems": 2}}}`, `{"p": {"#text": "Hi ", "b": "you", "#text": "!"}}`, `{"p": ["Hi ", "you", "!"]}`, nil, 3, "", .Any},
+		{`{"properties": {"p": {"type": "array", "prefixItems": [{"const": "Hi"}], "maxItems": 1}}}`, `{"p": "Hi"}`, `{"p": ["Hi"]}`, nil, 0, "", .Any},
+		// <p>Hi<b>x</b></p> under one prefixItems
+		{`{"properties": {"p": {"type": "array", "prefixItems": [{"const": "Hi"}]}}}`, `{"p": {"#text": "Hi", "b": "x"}}`, `{"p": ["Hi", "x"]}`, nil, 0, "", .Any},
+		{`{"properties": {"p": {"type": "array", "prefixItems": [{}], "maxItems": 1}}}`, `{"p": {"#text": "Hi", "b": "x"}}`, `{"p": ["Hi", "x"]}`, nil, 1, "", .Any},
+		// <r><item>a</item><item>b</item></r>, repeated under prefixItems
+		{`{"properties": {"r": {"properties": {"item": {"type": "array", "prefixItems": [{"const": "a"}, {"const": "c"}]}}}}}`, `{"r": {"item": "a", "item": "b"}}`, `{"r": {"item": ["a", "b"]}}`, nil, 1, "", .Any},
+		// repeated under a nullable array and under an array with no type
+		{`{"properties": {"r": {"properties": {"item": {"type": ["array", "null"], "maxItems": 1}}}}}`, `{"r": {"item": "a", "item": "b"}}`, `{"r": {"item": ["a", "b"]}}`, nil, 1, "", .Any},
+		{`{"properties": {"r": {"properties": {"item": {"items": {"type": "string"}, "maxItems": 1}}}}}`, `{"r": {"item": "a", "item": "b"}}`, `{"r": {"item": ["a", "b"]}}`, nil, 1, "", .Any},
+	}
+	for c in cases {
+		ch, err := checked_make(c.schema)
+		defer checked_destroy(ch)
+		testing.expectf(t, err == nil, "%s: %v", c.schema, err)
+		bound, _ := schema.bind(&ch.compiled, markup)
+		defer schema.unbind(&bound)
+		for m, i in bound.plan.meta {
+			if c.bind != "" && m.name == c.bind {
+				bound.plan.uses[i].node = c.node
+			}
+		}
+		doc := markup_doc(c.model, c.attributes, &readers)
+		defer core.destroy(&doc)
+		from_doc, from_form: typed.Sink
+		defer typed.sink_destroy(&from_doc)
+		defer typed.sink_destroy(&from_form)
+		schema.check_node(&bound, &doc, core.ROOT, &from_doc)
+		schema.check(&ch.bound, transmute([]u8)c.form, &from_form)
+		got, want := rendered(doc.src, &from_doc), rendered(transmute([]u8)c.form, &from_form)
+		testing.expectf(t, got == want && len(from_form.entries) == c.errors, "%s on %s:\n%s\nagainst %s:\n%s", c.schema, c.model, got, c.form, want)
+		testing.expectf(t, (schema.check_node(&bound, &doc, core.ROOT) == nil) == (c.errors == 0), "%s on %s: the first failure", c.schema, c.model)
+	}
+}
+
+// An edit and a write of a document with attributes keep them: no attribute is cut as a comment with no slot, and a
+// JSON write drops them. The stand-in's attributes stand past the JSON text, so its edit accepts any output.
+@(test)
+markup_attributes_survive_an_edit :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	readers := json.as(.Json).readers^
+	readers.attribute = markup_attribute
+	services := readers.services^
+	edit := services.edit^
+	edit.validate = proc "contextless" (_: []u8, _: core.As) -> Maybe(core.Fault) { return nil }
+	services.edit, readers.services = &edit, &services
+	doc := markup_doc(`{"price": "5", "n": 1}`, {{2, `currency="EUR"`}}, &readers)
+	defer core.destroy(&doc)
+	it := core.facts_of(&doc, 2, .Attribute)
+	body, _ := core.fact_next(&it)
+	testing.expect_value(t, body, "EUR")
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	testing.expect(t, write.set(&list, 4, typed.Raw("2")) == nil)
+	edited, _, err := compose.commit(&list)
+	defer delete(edited)
+	testing.expectf(t, err == nil, "%v", err)
+	testing.expect_value(t, string(edited), `{"price": "5", "n": 2} currency="EUR"`)
+	written, _, werr := json.write(&doc, .Json)
+	defer delete(written)
+	testing.expect(t, werr == nil)
+	testing.expect_value(t, string(written), `{"price":"5","n":1}`)
 }

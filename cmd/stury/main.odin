@@ -85,6 +85,8 @@ main :: proc() {
 	switch {
 	case (o.in_place || o.check) && !cli.formatting && !cli.editing:
 		usage_error("%s is fmt's and edit's: a filter run has no use for it", "--in-place" if o.in_place else "--check")
+	case !validating && cli.schema.flag != "":
+		usage_error("%s is check's: a schema judges the inputs of stury check", cli.schema.flag)
 	case validating || cli.formatting || cli.editing:
 		if flag := command_refused_option(o, &cli); flag != "" {
 			usage_error("%s has no use with %s: %s", flag, command_name(&cli), "it runs no filter and prints nothing" if validating else "it runs no filter and writes each input's own format" if cli.formatting else "it writes each input back in its own bytes")

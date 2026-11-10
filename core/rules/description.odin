@@ -134,6 +134,8 @@ Description :: struct {
 	// The name a node goes by: a schema's `$defs` key or `$anchor`, a type's name. The writer names a definition by it.
 	names:     map[Node_Index]string,
 	root:      Node_Index,
+	// The URI of the schema's root resource, "" for none: the base of its keyword locations.
+	uri:       string,
 	allocator: runtime.Allocator,
 }
 

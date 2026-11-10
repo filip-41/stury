@@ -105,7 +105,7 @@ check_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs
 		}
 	case:
 		if l != nil {
-			if judge_value(h, regs, t, l) == .Stop {
+			if judge_value(h, regs, plain_token(h, t, l) if t.kind == .Plain else t, l) == .Stop {
 				return next, .Stop
 			}
 		} else if len(u.applies) > 0 {
@@ -128,6 +128,64 @@ check_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs
 		f.seen, f.run = SEEN_ON, first
 	}
 	return {NO_LIMIT, u64(uintptr(first)), 0}, .Next
+}
+
+// A `Plain` token, text a format gives no kind, as the kind `l` allows reads it. A leaf that allows numbers alone reads the
+// text, quotes cut, with the loose number grammar, and one that allows booleans alone reads `true` and `false`, a null
+// beside them changing neither. Any other leaf reads an unquoted text by the strict grammar: a null only when the leaf
+// allows one, a boolean or a number only when it allows one, else a string. A leaf that allows a string beside that reading
+// takes the string when the other reading fails its enum or its rules and the string passes, unless it allows every kind.
+@(cold)
+@(private)
+plain_token :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token, l: ^rules.Leaf) -> core.Token {
+	context = h.ctx
+	lo, hi := t.lo, t.lo + u64(t.n)
+	exact := t.spelling & (core.SPELLING_QUOTED | core.SPELLING_DECODE) == 0
+	if t.spelling & core.SPELLING_QUOTED != 0 && hi - lo >= 2 {
+		lo, hi = lo + 1, hi - 1
+	}
+	text := string(raw_data(h.src)[lo:hi])
+	value, numbers, loose := t, l.plain & {.Integer, .Number}, l.plain - {.Null}
+	value.kind = .String
+	switch {
+	case exact && text == "null" && .Null in l.plain:
+		value.kind = .Null
+	case loose != {} && loose <= {.Integer, .Number}:
+		if _, integer, _, ok := spell.number_loose(h.src, lo, hi); ok {
+			value.kind, value.spelling = .Number, core.number_spelling(core.NUMBER_DECIMAL, 1, 0 if integer else 1)
+		}
+	case loose == {.Bool}:
+		value.kind = .True if text == "true" else .False if text == "false" else .String
+	case exact:
+		kind, integer := core.plain_kind(h.src, lo, hi, .Bool in l.plain, numbers != {})
+		value.kind = kind
+		if kind == .Number {
+			value.spelling = core.number_spelling(core.NUMBER_DECIMAL, 1, 0 if integer else 1)
+		}
+		if value.kind != .String && .String in l.plain && (l.has_enum || l.kinds != rules.EVERY_KIND) {
+			if value.kind == .Number {
+				value.lo, value.n = lo, u32(hi - lo)
+			}
+			if !reading_passes(h, value, l) && judge_string(h, t, l, nil) == {} {
+				value.kind = .String
+			}
+		}
+	}
+	if value.kind == .Number {
+		value.lo, value.n = lo, u32(hi - lo)
+	}
+	return value
+}
+
+// Whether `value`, one reading of a text, passes the enum and the rules of its kind.
+@(cold)
+@(private)
+reading_passes :: proc "contextless" (h: ^Check, value: core.Token, l: ^rules.Leaf) -> bool {
+	if value.kind != .Number {
+		return !l.has_enum || judge_operand(h, value, l) == {}
+	}
+	kind_ok := .Number in l.kinds
+	return judge_number(h, value, l, &kind_ok) == {} && kind_ok
 }
 
 // Judges the scalar `t` by `l`: its kind, its enum and the rules of its kind. A plain integer an i64 holds is judged here
@@ -385,7 +443,7 @@ check_key :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token)
 	m, u := &h.plan.meta[owner.meta], &h.plan.uses[owner.meta]
 	f.owner, f.target = (^Field)(uintptr(t.lo)), uintptr(t.n) | uintptr(t.spelling) << 32
 	buf: [TEXT_ROOM]u8 = ---
-	key, ok := decoded_text(h, t, buf[:])
+	key, ok := member_text(h, owner, t, buf[:])
 	if !ok {
 		return regs, .Stop
 	}
@@ -528,6 +586,9 @@ checked_step :: proc(h: ^Reader, f: ^Frame, owner: ^Field, at: core.Hook_Regs) -
 		return core.Name(h.plan.meta[rec].name), true
 	}
 	key := core.Token{lo = u64(uintptr(f.owner)), n = u32(f.target), kind = .String, role = .Key, spelling = u16(f.target >> 32)}
+	if key.spelling == TEXT_KEY {
+		return core.Name(TEXT_NAME), true
+	}
 	// The text is the input's or the temp allocator's, never the reader's.
 	text, ok := core.token_text(h.plan.readers, &h.view, key, context.temp_allocator)
 	return core.Name(text), ok

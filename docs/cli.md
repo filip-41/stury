@@ -19,7 +19,8 @@ stury [-c] [-r] [-j] [--raw-output0] [-a] [-S] [-C|-M] [--tab|--indent N] [--unb
       [--max-depth N] [--follow] [--explain]
       [--arg NAME VALUE] [--argjson NAME JSON] [--slurpfile NAME FILE] [--rawfile NAME FILE]
       [FILTER] [FILE...] [--args STRING...|--jsonargs JSON...]
-stury check [--from FORMAT|--seq] [--max-depth N] [FILE...]
+stury check [--from FORMAT|--seq] [--max-depth N] [--schema FILE [--schema-ref DIR] [--format-assert]
+            [--max-errors N] [--report lines|basic|problem]] [FILE...]
 stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] [--max-depth N] [FILE...]
 stury edit [--from FORMAT|--seq] [--in-place|--check] [--max-depth N] [-f FILE] [-L DIR] [--arg...] FILTER [FILE...]
 stury -h | -V | --build-configuration
@@ -228,11 +229,33 @@ usage error.
 | `--from json5` | Validate JSON5 as `stury --from json5 .` reads it, to the same limits. `Infinity` and `NaN` fail, since jq has no value for them. |
 | `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. A fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An empty input is valid, as the library takes it, and so is a header alone. |
 | `--max-depth N` | As [above](#sturys-own-options). |
+| `--schema FILE` | Also check each input against the JSON Schema in `FILE` (drafts 4 to 2020-12). See [Schema check](#schema-check). |
 | `FILE...` | One file per argument, read as the filter reads them. |
 
-`check` writes nothing, so `--to` with a format other than the default is a usage error.
+`check` without `--schema` writes nothing, so `--to` with a format other than the default is a usage error.
 
-Exit codes: 0 on success, 5 when any input is invalid, 2 for a usage or file error (which wins over 5).
+Exit codes: 0 on success, 5 when any input is invalid, 2 for a usage or file error (which wins over 5). With
+`--schema`, 1 when an input parses and the schema fails it, below 5 and above 0.
+
+### Schema check
+
+`stury check --schema schema.json [FILE...]` reads, compiles and binds the schema once, then judges each input as
+`stury check` does and, if it parses, against the schema. Every failure of an input is told, not only the first, as
+`FILE:LINE:COL: MESSAGE at PATH (KEYWORD-PATH)` on stderr. A text that does not parse is the plain `check`'s fault,
+told as it tells it. NDJSON and `--seq` check each record; a long file, or an array at the root whose rules apply to each
+entry, is checked on all cores and tells what a serial check tells.
+
+| Flag | Effect |
+| --- | --- |
+| `--schema-ref DIR` | The directory a reference to a `file:` URI may read from. Without it no file is read. |
+| `--format-assert` | `format` fails an input, where it otherwise only annotates. |
+| `--max-errors N` | Keep at most `N` failures of an input (default 100). The basic output and the problem document say `"truncated": true` when more were left out. |
+| `--report basic` | Write the JSON Schema basic output of each input on stdout, one line a file, `{"valid":true}` for a valid one. `keywordLocation`, `absoluteKeywordLocation` (where the schema has an `$id` and the keywords did not pass a `$ref`) and `instanceLocation` are JSON Pointers; with records, the instance location starts with the record's index. |
+| `--report problem` | Write an RFC 9457 problem document of each failing input on stdout: `title`, `status` 422 and `errors` of `pointer`, `code` and `message`. |
+| `--report lines` | The default. |
+
+A schema that does not read, compile or bind, or a keyword the check does not judge, is a usage error (exit 2) naming it.
+The options need `--schema`, and `--schema` is `check`'s alone.
 
 ## `fmt`
 

@@ -13,7 +13,7 @@ import json "../../json"
 import "jq"
 import "message"
 
-// Each file in turn. Exits 0, 2 after a file that did not open or read, or else 5 after a fault.
+// Each file in turn. Exits 0, 2 after a file that did not open or read, or else 5 after a fault, or else 1 after a schema failure.
 check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	o := &run.opts
 	if len(cli.files) == 0 && is_terminal(os.stdin) && is_terminal(os.stdout) {
@@ -21,7 +21,11 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		usage(EXIT_USAGE, true)
 	}
 	src := input_source(o, cli.json_reading)
-	failures, faults := 0, 0
+	failures, faults, invalid := 0, 0, 0
+	sc: ^Schema_Check
+	if cli.schema.flag != "" {
+		sc = schema_open(cli.schema, src)
+	}
 	for path in (cli.files[:] if len(cli.files) > 0 else STDIN_ONLY) {
 		f, read := open_file(path, "check")
 		data: []byte
@@ -45,14 +49,26 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		if len(data) >= POOLED_BYTES {
 			runner = run_pool(run)
 		}
-		if msg := check_text(file_name(path), data, src, o, runner); msg != "" {
-			message.write_stderr("stury: parse error: %s", msg)
-			faults += 1
+		verdict := Verdict.Fault
+		if sc != nil {
+			verdict = schema_judge(sc, cli.schema, file_name(path), data, src, runner)
+		}
+		switch verdict {
+		case .Valid:
+		case .Invalid:
+			invalid += 1
+		case .Fault:
+			if msg := check_text(file_name(path), data, src, o, runner); msg != "" {
+				message.write_stderr("stury: parse error: %s", msg)
+				faults += 1
+			} else if sc != nil {
+				invalid += 1
+			}
 		}
 		free_spent({data, mapped})
 		free_all(context.temp_allocator)
 	}
-	os.exit(EXIT_USAGE if failures > 0 else EXIT_INPUT if faults > 0 else 0)
+	os.exit(EXIT_USAGE if failures > 0 else EXIT_INPUT if faults > 0 else 1 if invalid > 0 else 0)
 }
 
 // The first fault of the text `data` of file `name`, read as `src` reads it, told with its note and a newline, or "".

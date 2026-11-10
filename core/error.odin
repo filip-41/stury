@@ -1016,20 +1016,29 @@ render :: proc(w: io.Writer, src: []u8, err: Error, lines: ^Lines = nil) -> io.E
 	return nil
 }
 
+// The message of a check's entry `e`, in a schema's words where the entry has a keyword path and the kind has such words.
+entry_message :: proc(e: Error_Entry) -> string {
+	if len(e.keyword_path) > 0 && SCHEMA_MESSAGES[e.kind] != "" {
+		return SCHEMA_MESSAGES[e.kind]
+	}
+	return TYPED_KIND_RULES[e.kind].message
+}
+
+// The stable code of a check's entry `e`, which a problem document and a caller match on.
+entry_code :: proc(e: Error_Entry) -> string {
+	return TYPED_KIND_RULES[e.kind].code
+}
+
 // Writes the rendered line of a check's entry `e` in `src`, as `line:col: message at path`, with the keyword path after
 // it in parentheses and the message in a schema's words where the entry has one. `lines` is as in `render_fault`.
 render_entry :: proc(w: io.Writer, src: []u8, e: Error_Entry, lines: ^Lines = nil) -> io.Error {
 	write_position(w, src, e.start, lines) or_return
-	message := TYPED_KIND_RULES[e.kind].message
-	if len(e.keyword_path) > 0 && SCHEMA_MESSAGES[e.kind] != "" {
-		message = SCHEMA_MESSAGES[e.kind]
-	}
 	if name, named := e.operand.(string); named && e.kind == .Missing_Field {
 		io.write_string(w, "Required member ") or_return
 		io.write_quoted_string(w, name) or_return
 		io.write_string(w, " is missing") or_return
 	} else {
-		io.write_string(w, message) or_return
+		io.write_string(w, entry_message(e)) or_return
 	}
 	if len(e.path) > 0 {
 		io.write_string(w, " at ") or_return

@@ -113,6 +113,7 @@ Use :: struct {
 	site:                    []core.Step,
 	step:                    bool, // a prefix record, which moves the cursor on to the next element's
 	inside:                  bool,
+	node:                    Markup_Node, // the node of a markup element a member record reads
 	// A held record's arms, which judge its value from the document a check reads, empty for any other record.
 	applies:                 []Apply,
 }

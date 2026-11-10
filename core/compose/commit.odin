@@ -220,7 +220,7 @@ push_all :: proc(d: ^[dynamic]$T, vs: []T) -> (count: int, ok: bool) {
 line_separators :: proc(doc: ^core.Document, allocator: runtime.Allocator) -> []u64 {
 	found := make([dynamic]u64, allocator)
 	for f in doc.facts {
-		if core.comment_tail(f.spelling) != 0 {
+		if f.role > .Comment_Foot || core.comment_tail(f.spelling) != 0 {
 			continue
 		}
 		end := f.lo + u64(f.n)

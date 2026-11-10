@@ -140,7 +140,7 @@ add_items :: proc(cx: ^Compose, node: core.Node_Index, lo, hi: u64) -> bool {
 			continue
 		}
 		action, edit := fact_action(cx, f)
-		push(&cx.items, Item{lo = f.lo, hi = f.lo + u64(f.n), edit = edit, action = action, role = f.role, line = core.comment_tail(f.spelling) == 0}) or_return
+		push(&cx.items, Item{lo = f.lo, hi = f.lo + u64(f.n), edit = edit, action = action, role = f.role, line = f.role <= .Comment_Foot && core.comment_tail(f.spelling) == 0}) or_return
 	}
 	return true
 }
@@ -850,7 +850,8 @@ compose_tree :: proc(cx: ^Compose) -> bool {
 		i = j
 	}
 	for f in doc.facts {
-		if fact_edit_of(cx, f.node, f.role) >= 0 || fact_slot(cx.edit, doc, f.node, f.role, style, emptied) {
+		// Only a comment is cut for want of a slot: an attribute is the format's markup, which stays with its node.
+		if f.role > .Comment_Foot || fact_edit_of(cx, f.node, f.role) >= 0 || fact_slot(cx.edit, doc, f.node, f.role, style, emptied) {
 			continue
 		}
 		// An unnamed root comment above shared keys reads as the root's foot once the root is emptied, so it stays.

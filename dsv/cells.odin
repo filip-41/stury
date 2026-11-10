@@ -3,7 +3,6 @@ package dsv
 
 import "base:intrinsics"
 import "core:strconv"
-import spell "../core/spell"
 import core "../core"
 import kernel "../core/kernel"
 import write "../core/write"
@@ -229,15 +228,13 @@ infer_cells :: proc(cells: []core.Token, texts: []write.Scalar) {
 		if !is_text || t.spelling & (core.SPELLING_QUOTED | core.SPELLING_DECODE) != 0 {
 			continue
 		}
-		switch s {
-		case "true":
+		#partial switch kind, _ := core.plain_kind(transmute([]u8)s, 0, u64(len(s)), true, true); kind {
+		case .True:
 			texts[i] = write.Tree_Part.True
-		case "false":
+		case .False:
 			texts[i] = write.Tree_Part.False
-		case:
-			if _, is_number := spell.number_strict(transmute([]u8)s, 0, u64(len(s))); is_number {
-				texts[i] = write.Number_Literal{s}
-			}
+		case .Number:
+			texts[i] = write.Number_Literal{s}
 		}
 	}
 }

@@ -21,6 +21,7 @@ Bound :: struct {
 // is whole. `pattern` is the compiled `^regex.Regex`.
 Leaf :: struct {
 	kinds:                  Kinds,
+	plain:                  Kinds, // `kinds` narrowed by the kinds of the `enum` and `const` operands, as a `Plain` token reads
 	integer_spelled:        bool,
 	has_enum:               bool,
 	constant:               bool, // the enum index holds a `const`
@@ -97,16 +98,23 @@ leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator) -> (l: Le
 		return
 	}
 	keys := make([dynamic]string, 0, len(operands), allocator)
+	held: Kinds
 	for v in operands {
 		k := core.value_kind(v)
 		if k == .Object || k == .Array {
 			return l, "const" if n.const_of != nil else "enum"
 		}
+		#partial switch k {
+		case .Null:           held += {.Null}
+		case .True, .False:   held += {.Bool}
+		case .Number:         held += {.Integer, .Number}
+		case .String:         held += {.String}
+		}
 		b := strings.builder_make(allocator)
 		operand_key(&b, v, k, allocator)
 		append(&keys, strings.to_string(b))
 	}
-	l.enum_keys = keys[:]
+	l.enum_keys, l.plain = keys[:], l.kinds & held
 	slice.sort_by(l.enum_keys, key_less)
 	return
 }
@@ -135,7 +143,7 @@ operand_in :: proc(c: core.Value, operands: []core.Value, allocator: runtime.All
 // Compiles the rules `r` on a value of `kinds`, allocating a pattern with `allocator`. A pattern that does not compile
 // comes back as "pattern", and a divisor `spell.decimal_multiple_of` does not judge exactly as "multipleOf".
 rules_leaf :: proc(r: Rules, kinds: Kinds, allocator := context.allocator) -> (l: Leaf, refused: string) {
-	l.kinds = kinds
+	l.kinds, l.plain = kinds, kinds
 	l.minimum, l.maximum = bound_of(r.minimum, r.exclusive_minimum), bound_of(r.maximum, r.exclusive_maximum)
 	if r.multiple_of != "" {
 		d := spell.decimal_of(r.multiple_of)

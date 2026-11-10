@@ -71,6 +71,8 @@ Cli :: struct {
 	// The first option given that reads a delimited text (--delimiter...), and the first that writes one (--crlf...).
 	cells_flag, cells_out_flag: string,
 	out_delimiter, out_comment: Maybe(byte),
+	// `check`'s schema options.
+	schema: Schema_Options,
 }
 
 // The command line `args` (os.args without the program) into `o`, as jq reads it.
@@ -171,6 +173,9 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		case "library-path":
 			i = lib_dir_arg(&cli, args, i)
 		case "from", "to":
+			i += option_arity(a)
+		case "schema", "schema-ref", "max-errors", "report", "format-assert":
+			schema_option(&cli.schema, args, i)
 			i += option_arity(a)
 		case "grow-header":
 			o.grow_header = true
@@ -402,7 +407,7 @@ subcommand_index :: proc(args: []string) -> int {
 @(private = "file")
 option_arity :: proc(a: string) -> int {
 	switch a {
-	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment":
+	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--max-errors", "--report":
 		return 1
 	case "--arg", "--argjson", "--slurpfile", "--rawfile":
 		return 2
@@ -518,7 +523,6 @@ parse_indent :: proc(s: string) -> (n: i8, ok: bool) {
 }
 
 // `s` as decimal digits only, and at least one, to `cap` at most. The cap keeps a long run from overflowing.
-@(private = "file")
 parse_digits :: proc(s: string, cap: u64) -> (n: u64, ok: bool) {
 	if len(s) == 0 {
 		return
