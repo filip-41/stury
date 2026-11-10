@@ -400,3 +400,26 @@ fact_sets :: proc(t: ^testing.T) {
 		{`{"a":1}`, .Jsonc, .Jsonc, {{.Set_Facts, 2, .Comment_Inline, 0, "x*/|y"}}, "{\"a\":1 /*y*/}", 1, nil},
 	})
 }
+
+// A document read as a constant spec holds no services of its format, so a commit to another spec reads its result by
+// the target's handle, and writes what a document read by a handle does.
+@(test)
+fact_bound_document_to_another_spec :: proc(t: ^testing.T) {
+	src := transmute([]u8)string("//h\n[1]")
+	bound, err := json.build(src, .Jsonc)
+	defer json.destroy(&bound)
+	chosen, chosen_err := core.build(src, json.as(.Jsonc))
+	defer core.destroy(&chosen)
+	if !walktest.expect_nil(t, err) || !walktest.expect_nil(t, chosen_err) {
+		return
+	}
+	bound_list := json.edit_list_init(&bound, .Jsonc)
+	defer json.destroy(&bound_list)
+	chosen_list := core.edit_list_init(&chosen)
+	defer core.edit_list_destroy(&chosen_list)
+	out, dropped, cerr := json.commit(&bound_list, json.as(.Json))
+	defer delete(out)
+	want, want_dropped, want_err := json.commit(&chosen_list, json.as(.Json))
+	defer delete(want)
+	testing.expectf(t, cerr == nil && want_err == nil && dropped == 1 && want_dropped == 1 && string(out) == string(want), "committed %q, %d dropped: %v, a handle's %q, %d dropped: %v", out, dropped, cerr, want, want_dropped, want_err)
+}

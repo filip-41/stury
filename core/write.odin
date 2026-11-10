@@ -59,7 +59,7 @@ format :: proc(src: []u8, as: As, opts := Write_Options{}, allocator := context.
 	doc, err := build(src, as, allocator = allocator)
 	if err != nil {
 		if _, refused := err.(Document_Error); refused {
-			return nil, error_of(Typed_Error{kind = .Unsupported})
+			return nil, error_of(Typed_Refusal{kind = .Unsupported})
 		}
 		return nil, err
 	}
@@ -69,7 +69,7 @@ format :: proc(src: []u8, as: As, opts := Write_Options{}, allocator := context.
 }
 
 @(private)
-write_to :: proc(doc: ^Document, opts: Write_Options, as: Maybe(As), node: Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Error) {
+write_to :: proc(doc: ^Document, opts: Write_Options, as: Maybe(As), node: Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Refusal) {
 	target := as.? or_else doc.as
 	services := services_of(target)
 	if services == nil || services.write == nil || int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {

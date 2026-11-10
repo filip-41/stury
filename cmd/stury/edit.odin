@@ -760,7 +760,7 @@ moved_error :: proc(err: core.Error, by: u64) -> core.Error {
 		moved := e
 		moved.at += by
 		return moved
-	case core.Path_Error, core.Typed_Failure, core.Typed_Error_Kind, runtime.Allocator_Error:
+	case core.Path_Error, core.Typed_Error, core.Typed_Error_Kind, runtime.Allocator_Error:
 	case nil:
 	}
 	return err

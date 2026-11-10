@@ -113,7 +113,7 @@ a_load_without_a_sink_stops_at_the_first_failure :: proc(t: ^testing.T) {
 	v: Outer
 	err := model.load(&m, transmute([]u8)string(`{"name":"x","pair":{"low":1,"high":2},"inner":{"n":1}}`), &v)
 	testing.expect(t, err != nil)
-	typed_err, is_typed := err.(core.Typed_Failure)
+	typed_err, is_typed := err.(core.Typed_Error)
 	testing.expect(t, is_typed && typed_err.kind == .Custom)
 }
 
@@ -170,7 +170,7 @@ a_failed_validator_names_its_path_from_the_outermost :: proc(t: ^testing.T) {
 	m, _ := compiled(t)
 	v: Outer
 	err := model.load(&m, transmute([]u8)string(`{"name":"a","pair":{"low":3,"high":2},"inner":{"n":1}}`), &v)
-	failure, is_typed := err.(core.Typed_Failure)
+	failure, is_typed := err.(core.Typed_Error)
 	testing.expect(t, is_typed)
 	testing.expect_value(t, len(failure.steps), 2)
 	if len(failure.steps) == 2 {

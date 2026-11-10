@@ -29,7 +29,7 @@ unmarshal_node :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, 
 // Reads the value a path found. An answer that is not `.Found` holds no value, and is `.Bad_Option`.
 unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error {
 	if answer.outcome != .Found {
-		return core.error_of(core.Typed_Error{kind = .Bad_Option})
+		return core.error_of(core.Typed_Refusal{kind = .Bad_Option})
 	}
 	return core.error_of(read_document(doc, answer.node, typeid_of(T), target, plan, read, allocator, false))
 }
@@ -43,7 +43,7 @@ unmarshal_value :: proc(v: core.Value, target: ^$T, plan: ^Plan, read := Read_Op
 		return core.error_of(read_document(r.doc, r.node, typeid_of(T), target, plan, read, allocator, false))
 	}
 	if plan == nil || plan.value_text == nil {
-		return core.error_of(core.Typed_Error{kind = .Bad_Option})
+		return core.error_of(core.Typed_Refusal{kind = .Bad_Option})
 	}
 	text, err := plan.value_text(plan, v, context.allocator)
 	defer delete(text)
@@ -74,15 +74,15 @@ check_document :: proc(doc: ^core.Document, node: core.Node_Index, target: rawpt
 }
 
 @(private)
-read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Error {
+read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Refusal {
 	if doc == nil || doc.readers == nil || int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key || read.dups == .Refuse {
 		return {kind = .Bad_Option}
 	}
 	if plan == nil {
 		made, refusal := plan_make(T, doc.as)
-		err: core.Typed_Error
-		if refused, is_typed := refusal.(core.Typed_Failure); is_typed {
-			err = core.typed_error_of(refused)
+		err: core.Typed_Refusal
+		if refused, is_typed := refusal.(core.Typed_Error); is_typed {
+			err = core.typed_refusal_of(refused)
 		} else if refusal != nil {
 			err.kind = .No_Memory
 		} else {
@@ -105,7 +105,7 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	ends: [2 * core.MAX_DEPTH]u32 = ---
 	d := Document_Read(Check when CHECK else Reader){doc = doc, room = len(frames)}
 	regs: core.Hook_Regs
-	err: core.Typed_Error
+	err: core.Typed_Refusal
 	// The reader passes as an address, which the stack escape check cannot follow through a `Check`'s base `Reader`. No
 	// refusal holds the reader or its frames.
 	h := (^type_of(d.reader))(uintptr(&d.reader))

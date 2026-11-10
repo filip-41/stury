@@ -79,6 +79,7 @@ Tolerance :: core.Tolerance
 Typed_Detail :: core.Typed_Detail
 Typed_Error :: core.Typed_Error
 Typed_Error_Kind :: core.Typed_Error_Kind
+Typed_Refusal :: core.Typed_Refusal
 Typed_Want :: core.Typed_Want
 Value :: core.Value
 Write_Options :: core.Write_Options

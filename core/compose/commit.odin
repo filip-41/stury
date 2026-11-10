@@ -25,13 +25,13 @@ commit :: proc(list: ^core.Edit_List, as: Maybe(core.As) = nil, allocator := con
 	if target.readers == nil || target.readers.format != doc.readers.format {
 		return nil, 0, core.error_of(core.Document_Error{kind = .Bad_Spec})
 	}
-	made, cut, refusal := commit_spec(list, target.spec, allocator)
+	made, cut, refusal := commit_spec(list, target, allocator)
 	return made, cut, core.error_of(refusal, edit = true)
 }
 
 @(private)
-commit_spec :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
-	doc := list.doc
+commit_spec :: proc(list: ^core.Edit_List, target: core.As, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
+	doc, spec := list.doc, target.spec
 	if doc == nil || doc.readers == nil {
 		return nil, 0, {kind = .Bad_Index}
 	}
@@ -81,7 +81,7 @@ commit_spec :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocato
 		delete(out, allocator)
 		return nil, 0, {kind = .Bad_Result}
 	}
-	if e := reads_as_source(list.edit, doc, out, spec); e.kind != .None {
+	if e := reads_as_source(list.edit, doc, out, target); e.kind != .None {
 		delete(out, allocator)
 		return nil, 0, e
 	}
@@ -93,16 +93,19 @@ commit_spec :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocato
 // source's own reading is no evidence and the output must read strictly. A text that fails even the format's tolerant
 // read returns `.Bad_Result`.
 @(private)
-reads_as_source :: proc(edit: ^core.Edit_Services, doc: ^core.Document, out: []u8, spec: u8) -> core.Document_Error {
+reads_as_source :: proc(edit: ^core.Edit_Services, doc: ^core.Document, out: []u8, target: core.As) -> core.Document_Error {
+	spec := target.spec
 	strict := doc.as
-	strict.spec, strict.tolerate = spec, {}
-	// The list's own validate reads its own spec. Another spec of the format is judged by the handle's.
+	strict.tolerate = {}
+	// The list's own validate reads its own spec. Another spec of the format is judged by the target's handle, which
+	// holds that spec's walk.
 	validate := edit.validate
 	if spec != doc.as.spec {
-		services := core.services_of(doc.as)
+		services := core.services_of(target)
 		if services == nil || services.validate == nil {
 			return {kind = .Bad_Spec}
 		}
+		strict.readers, strict.spec = target.readers, spec
 		validate = services.validate
 	}
 	f, faulted := validate(out, strict).?

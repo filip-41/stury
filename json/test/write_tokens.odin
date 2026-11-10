@@ -93,7 +93,7 @@ token_sample :: proc() -> Token_Sample {
 	}
 }
 
-token_text :: proc(v: Token_Sample, opts: core.Write_Options, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
+token_text :: proc(v: Token_Sample, opts: core.Write_Options, allocator := context.allocator) -> ([]u8, core.Typed_Refusal) {
 	tw: write.Tokens
 	write.tokens_init(&tw, json.as(.Json), opts, allocator)
 	write_sample(&tw, v)
@@ -342,7 +342,7 @@ write_value_of_built_value_and_node :: proc(t: ^testing.T) {
 	append(&o.keys, "a")
 	append(&o.vals, string("again"))
 	text, werr := write.write_value(o, json.as(.Json))
-	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, werr)
 	testing.expect_value(t, string(text), `{"a":[1,2.5,1234567890123456789012345678901234567890,"x",null,true,{"k":[1,"A",2.50]},["k",0]],"a":"again"}`)
 	deep: core.Value
 	for _ in 0 ..= core.MAX_DEPTH {
@@ -351,5 +351,5 @@ write_value_of_built_value_and_node :: proc(t: ^testing.T) {
 		deep = a
 	}
 	_, derr := write.write_value(deep, json.as(.Json))
-	testing.expect_value(t, derr.kind, core.Typed_Error_Kind.Too_Deep)
+	walktest.expect_kind(t, derr, core.Typed_Error_Kind.Too_Deep)
 }

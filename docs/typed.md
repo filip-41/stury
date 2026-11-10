@@ -151,16 +151,20 @@ when the read returns.
 Typed_Error :: struct {
 	kind:         Typed_Error_Kind,
 	truncated:    bool,
-	n_steps:      u8,
 	found:        Kind,
 	cause:        io.Error,
 	at:           u64,
 	using detail: Typed_Detail, // inner: Fault, want: Typed_Want, plans: Plan_Clash, by kind
-	steps:        [MAX_ERROR_STEPS]Step,
+	steps:        []Step,
 }
 ```
 
-`at` is the value's byte, a string's opening quote for a string. `steps[:n_steps]` is the path from the target, the
+`Typed_Error` is the arm of `core.Error` a read or a write returns. A reader, a writer and a sink hold the same fields
+as a `Typed_Refusal`, whose path is in line (`steps[:n_steps]` of `[MAX_ERROR_STEPS]Step`), so a refusal allocates
+nothing until `core.error_of` copies the path for the caller, to `context.temp_allocator`, or to the reader's own
+memory for a record read in a loop, where it lasts until the next call on the reader.
+
+`at` is the value's byte, a string's opening quote for a string. `steps` is the path from the target, the
 innermost `MAX_ERROR_STEPS` (8) when `truncated` says more were cut. A step's name lives as long as `src` or the plan,
 or, for a decoded key, as long as `context.temp_allocator`'s block. `detail` holds one of three by kind: `.Walk`'s fault
 in `inner`, the two formats or the plan's type a `.Plan_Mismatch` met in `plans`, and `want` for the rest. `want.type`
@@ -198,7 +202,7 @@ otherwise not a contract.
 
 ```odin
 Sink :: struct {
-	errors:     [dynamic]core.Typed_Error,
+	errors:     [dynamic]core.Typed_Refusal,
 	entries:    [dynamic]core.Error_Entry, // what a `check_text` read reports
 	max_errors: int,  // 100 for 0
 	record:     i64,  // the record index an entry takes

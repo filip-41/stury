@@ -372,7 +372,7 @@ Services :: struct {
 	build:    proc(src: []u8, as: As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (Document, Document_Error),
 	validate: proc "contextless" (src: []u8, as: As) -> Maybe(Fault),
 	scan:     proc(src: []u8, as: As, paths: []Path, read: Path_Options, state: rawptr, on: proc(state: rawptr, a: Token_Answer) -> bool, allocator: runtime.Allocator) -> (Document, Path_Error),
-	write:    proc(doc: ^Document, opts: Write_Options, as: As, node: Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Error),
+	write:    proc(doc: ^Document, opts: Write_Options, as: As, node: Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Refusal),
 	edit:     ^Edit_Services,
 	plans:    rawptr,
 	reads:    rawptr,

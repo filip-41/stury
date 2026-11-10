@@ -25,7 +25,7 @@ load :: proc(m: ^Model($T), src: []u8, v: ^T, sink: ^typed.Sink = nil, dups := c
 // writes no value text is `.Bad_Option`.
 load_value :: proc(m: ^Model($T), v: core.Value, out: ^T, sink: ^typed.Sink = nil, dups := core.Duplicates.Refuse, allocator := context.allocator) -> core.Error {
 	if m.load_plan.value_text == nil {
-		return core.error_of(core.Typed_Error{kind = .Bad_Option})
+		return core.error_of(core.Typed_Refusal{kind = .Bad_Option})
 	}
 	text, err := m.load_plan.value_text(&m.load_plan, v, context.allocator)
 	defer delete(text)

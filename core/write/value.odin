@@ -13,13 +13,15 @@ import "../typed"
 // Writes `v` in the format `as` names, as `opts` says, into new bytes from `allocator`. A format with no token writer
 // is `.Unsupported` and a value nested past `core.MAX_DEPTH` levels `.Too_Deep`. Under `opts.sort_keys` an object's
 // members are written in key order.
-write_value :: proc(v: core.Value, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> (text: []u8, err: core.Typed_Error) {
-	return write_laid(v, as, opts, "", nil, allocator)
+write_value :: proc(v: core.Value, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> (text: []u8, err: core.Error) {
+	refusal: core.Typed_Refusal
+	text, refusal = write_laid(v, as, opts, "", nil, allocator)
+	return text, core.error_of(refusal)
 }
 
 // `write_value` with the bytes between a member's key and its value given as `colon`, unless empty, and a format
-// that binds its spelling at compile time giving it as `spelling`.
-write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator) -> (text: []u8, err: core.Typed_Error) {
+// that binds its spelling at compile time giving it as `spelling`. The refusal is the writer's own.
+write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator) -> (text: []u8, err: core.Typed_Refusal) {
 	spelling := spelling
 	if spelling == nil && colon != "" {
 		services := core.services_of(as)
@@ -44,7 +46,7 @@ write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: 
 }
 
 // `v` in `plan`'s format, as a format's plans write a built value for `typed.unmarshal`.
-value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error) {
+value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
 	t: Tokens = ---
 	if kind := tokens_init(&t, plan.as, {}, allocator, {}, (^Token_Spelling)(plan.tokens)); kind != .None {
 		tokens_finish(&t)
@@ -59,7 +61,7 @@ value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocato
 marshal_value :: proc(v: $T, plan: ^typed.Plan, allocator := context.allocator) -> (core.Value, core.Error) {
 	v := v
 	if plan == nil || plan.build == nil {
-		return nil, core.error_of(core.Typed_Error{kind = .Unsupported})
+		return nil, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
 	text, merr := marshal(v, plan)
 	defer delete(text)

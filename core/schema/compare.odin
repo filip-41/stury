@@ -181,5 +181,5 @@ accepts :: proc(s: ^Side, nodes: []rules.Node_Index, text: []u8) -> (taken, know
 @(private)
 text_of :: proc(s: ^Side, v: core.Value) -> (text: []u8, ok: bool) {
 	written, err := write.write_value(v, s.as, allocator = context.temp_allocator)
-	return written, err.kind == .None
+	return written, err == nil
 }

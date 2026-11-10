@@ -56,14 +56,14 @@ write :: proc(d: ^rules.Description, as: core.As, opts := core.Write_Options{}, 
 		}
 	}
 	if w.refused != "" {
-		return nil, core.error_of(core.Typed_Error{kind = .Unsupported, want = {text = w.refused}})
+		return nil, core.error_of(core.Typed_Refusal{kind = .Unsupported, want = {text = w.refused}})
 	}
 	name_defs(&w, allocator)
 	defer for r in w.refs {
 		delete(r, allocator)
 	}
 	if kind := write.tokens_init(&w.t, as, opts, allocator); kind != .None {
-		return nil, core.error_of(core.Typed_Error{kind = kind})
+		return nil, core.error_of(core.Typed_Refusal{kind = kind})
 	}
 	root := &d.nodes[d.root]
 	if root.kinds == {} {
@@ -75,7 +75,7 @@ write :: proc(d: ^rules.Description, as: core.As, opts := core.Write_Options{}, 
 		put_defs(&w, d.root)
 		write.close(&w.t)
 	}
-	terr: core.Typed_Error
+	terr: core.Typed_Refusal
 	text, terr = write.tokens_finish(&w.t)
 	if terr.kind == .None {
 		return text, nil

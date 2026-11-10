@@ -82,7 +82,7 @@ a_model_validates_its_rules_with_paths :: proc(t: ^testing.T) {
 	bad.temps = make(map[string]Celsius, context.temp_allocator)
 	bad.temps["out"] = -274
 	first := model.validate(&m, &bad)
-	f, is_typed := first.(core.Typed_Failure)
+	f, is_typed := first.(core.Typed_Error)
 	testing.expect(t, is_typed)
 	testing.expect_value(t, f.kind, core.Typed_Error_Kind.Too_Long)
 	testing.expect_value(t, steps_text(f.steps), ".name")
@@ -177,7 +177,7 @@ a_rule_that_does_not_fit_refuses_the_model :: proc(t: ^testing.T) {
 		{refusal(Count_On_Number), "len>=1", Count_On_Number},
 	}
 	for c, i in cases {
-		f, _ := c.err.(core.Typed_Failure)
+		f, _ := c.err.(core.Typed_Error)
 		testing.expectf(t, f.kind == .Bad_Tag && f.want.text == c.item && f.want.type == c.type, "%d: %v", i, c.err)
 	}
 	reg: model.Registry
@@ -187,7 +187,7 @@ a_rule_that_does_not_fit_refuses_the_model :: proc(t: ^testing.T) {
 	testing.expect_value(t, walktest.typed_kind(flagged), core.Typed_Error_Kind.Bad_Tag)
 	testing.expect_value(t, model.register(&reg, model.Field_Rule_Of{Room, "nope", ">=1"}), runtime.Allocator_Error.None)
 	_, unknown := model.compile(&reg, Room, json.reads(.Json), context.temp_allocator)
-	f, _ := unknown.(core.Typed_Failure)
+	f, _ := unknown.(core.Typed_Error)
 	testing.expectf(t, f.kind == .Bad_Tag && f.want.type == Room && steps_text(f.steps) == ".nope", "%v", unknown)
 	clash: model.Registry
 	defer model.destroy(&clash)
@@ -391,14 +391,14 @@ a_rule_no_value_can_satisfy_refuses_the_model :: proc(t: ^testing.T) {
 		{refusal(Skipped_With_Rules), ">=5", Skipped_With_Rules, ".x"},
 	}
 	for c, i in cases {
-		f, _ := c.err.(core.Typed_Failure)
+		f, _ := c.err.(core.Typed_Error)
 		testing.expectf(t, f.kind == .Bad_Tag && f.want.text == c.item && f.want.type == c.type && steps_text(f.steps) == c.path, "%d: %v", i, c.err)
 	}
 	reg: model.Registry
 	defer model.destroy(&reg)
 	model.register(&reg, model.Field_Rule_Of{Registry_Clash, "x", "<=3"})
 	_, clashed := model.compile(&reg, Registry_Clash, json.reads(.Json), context.temp_allocator)
-	f, _ := clashed.(core.Typed_Failure)
+	f, _ := clashed.(core.Typed_Error)
 	testing.expectf(t, f.kind == .Bad_Tag && f.want.text == ">=5" && f.want.type == Registry_Clash, "%v", clashed)
 	message := fmt.tprint(refusal(Past_Type))
 	testing.expectf(t, strings.contains(message, "Past_Type"), "%s", message)

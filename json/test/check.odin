@@ -33,7 +33,7 @@ Shape :: struct {
 // Reads `text` by `plan.check` and by `json.unmarshal` into two values of `T`, which must agree on the value and the
 // first refusal. Returns the sink of the check.
 @(private = "file")
-both :: proc(t: ^testing.T, text: string, $T: typeid, spec: json.Spec, loc := #caller_location) -> (sink: typed.Sink, first: core.Typed_Error) {
+both :: proc(t: ^testing.T, text: string, $T: typeid, spec: json.Spec, loc := #caller_location) -> (sink: typed.Sink, first: core.Typed_Refusal) {
 	plan, planned := json.plan_make(T, spec, allocator = context.temp_allocator)
 	walktest.expect_nil(t, planned, loc = loc)
 	src := transmute([]u8)text

@@ -689,7 +689,7 @@ collecting_reads_past_each_refusal :: proc(t: ^testing.T) {
 		n: string `json:"n,required"`,
 	}
 	sink := typed.Sink {
-		errors = make([dynamic]core.Typed_Error, context.temp_allocator),
+		errors = make([dynamic]core.Typed_Refusal, context.temp_allocator),
 	}
 	s := S {
 		a = 7,
@@ -709,7 +709,7 @@ collecting_reads_past_each_refusal :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.p.y, 2)
 
 	few := typed.Sink {
-		errors     = make([dynamic]core.Typed_Error, context.temp_allocator),
+		errors     = make([dynamic]core.Typed_Refusal, context.temp_allocator),
 		max_errors = 2,
 	}
 	l: []i32
@@ -719,7 +719,7 @@ collecting_reads_past_each_refusal :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(l), 4)
 
 	// The walk still judges a passed-over value.
-	sink.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
+	sink.errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)
 	e = read(t, `{"a":[01]}`, &s, {sink = &sink})
 	walktest.expect_kind(t, e, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, sink.errors[len(sink.errors) - 1].kind, core.Typed_Error_Kind.Walk)

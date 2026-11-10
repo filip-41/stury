@@ -28,7 +28,7 @@ Document_Cells :: struct {
 }
 
 @(private)
-document_read :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
+document_read :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
 	if foreign_plan(plan) {
 		return {kind = .Plan_Mismatch}
 	}

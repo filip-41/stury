@@ -52,7 +52,7 @@ SUITE_DRAFTS := [?]struct {
 // The error of a refused read when it is a refusal that names a keyword, and "" else.
 @(private = "file")
 refused_keyword :: proc(err: core.Error) -> string {
-	if f, ok := err.(core.Typed_Failure); ok && f.kind == .Bad_Schema {
+	if f, ok := err.(core.Typed_Error); ok && f.kind == .Bad_Schema {
 		text, _, _ := strings.partition(f.want.text, ":")
 		return text
 	}
@@ -151,7 +151,7 @@ schema_refusals :: proc(t: ^testing.T) {
 		defer core.destroy(&doc)
 		defer schema.resolver_destroy(&res)
 		testing.expectf(t, refused_keyword(err) == c.keyword, "%s: %v", c.text, err)
-		if f, ok := err.(core.Typed_Failure); ok && c.step != "" {
+		if f, ok := err.(core.Typed_Error); ok && c.step != "" {
 			name, _ := f.steps[0].(core.Name)
 			testing.expectf(t, string(name) == c.step, "%s: path starts at %v", c.text, f.steps)
 		}
@@ -398,7 +398,7 @@ schema_suite_checks :: proc(t: ^testing.T) {
 				}
 				b, berr := schema.bind(&c, json.as(.Json))
 				if berr != nil {
-					f, _ := berr.(core.Typed_Failure)
+					f, _ := berr.(core.Typed_Error)
 					refused[strings.clone(f.want.text, context.temp_allocator)] += 1
 					continue
 				}
@@ -527,7 +527,7 @@ schema_check_reports_each_failure :: proc(t: ^testing.T) {
 	sink: typed.Sink
 	defer typed.sink_destroy(&sink)
 	first := schema.check(&b, src, &sink)
-	testing.expect_value(t, first.(core.Typed_Failure).kind, core.Typed_Error_Kind.Below_Minimum)
+	testing.expect_value(t, first.(core.Typed_Error).kind, core.Typed_Error_Kind.Below_Minimum)
 	out := strings.builder_make(context.temp_allocator)
 	for e in sink.entries {
 		core.render_entry(strings.to_stream(&out), src, e)
@@ -551,7 +551,7 @@ schema_check_reports_arms :: proc(t: ^testing.T) {
 	sink: typed.Sink
 	defer typed.sink_destroy(&sink)
 	first := schema.check(&ch.bound, src, &sink)
-	testing.expect_value(t, first.(core.Typed_Failure).kind, core.Typed_Error_Kind.Below_Minimum)
+	testing.expect_value(t, first.(core.Typed_Error).kind, core.Typed_Error_Kind.Below_Minimum)
 	out := strings.builder_make(context.temp_allocator)
 	for e in sink.entries {
 		core.render_entry(strings.to_stream(&out), src, e)
@@ -948,12 +948,12 @@ schema_bind_refusals :: proc(t: ^testing.T) {
 	for text in ([?]string{`{"multipleOf": 1e-1000000000000000000000000000000000}`}) {
 		ch, err := checked_make(text)
 		defer checked_destroy(ch)
-		f, _ := err.(core.Typed_Failure)
+		f, _ := err.(core.Typed_Error)
 		testing.expectf(t, f.kind == .Unsupported && f.want.text == "multipleOf", "%s: %v", text, err)
 	}
 	names, nerr := checked_make(`{"propertyNames": {"anyOf": [{"maxLength": 1}]}}`)
 	defer checked_destroy(names)
-	nf, _ := nerr.(core.Typed_Failure)
+	nf, _ := nerr.(core.Typed_Error)
 	testing.expect(t, nf.kind == .Unsupported && nf.want.text == "propertyNames")
 	doc, _ := core.build(transmute([]u8)string(`{"pattern": "["}`), json.as(.Json))
 	defer core.destroy(&doc)
@@ -961,7 +961,7 @@ schema_bind_refusals :: proc(t: ^testing.T) {
 	defer schema.destroy(&c)
 	testing.expect(t, cerr != nil)
 	_, berr := schema.bind(&c, json.as(.Json))
-	testing.expect_value(t, berr.(core.Typed_Failure).kind, core.Typed_Error_Kind.Bad_Option)
+	testing.expect_value(t, berr.(core.Typed_Error).kind, core.Typed_Error_Kind.Bad_Option)
 }
 
 // A bind frees what the stamp of an object operand sorts, whether it binds or is refused, and two numbers one double
@@ -1242,7 +1242,7 @@ followed :: proc(d: ^rules.Description, i: rules.Node_Index, extra: ^rules.Rules
 written_back :: proc(t: ^testing.T, d: ^rules.Description, doc: ^core.Document) -> (back: schema.Compiled, text: []u8, refused: string) {
 	werr: core.Error
 	text, werr = schema.write(d, json.as(.Json))
-	if f, is_typed := werr.(core.Typed_Failure); is_typed && f.kind == .Unsupported {
+	if f, is_typed := werr.(core.Typed_Error); is_typed && f.kind == .Unsupported {
 		return {}, nil, f.want.text
 	}
 	testing.expectf(t, werr == nil, "write: %v", werr)
@@ -1439,7 +1439,7 @@ schema_write_refuses_what_it_cannot_spell :: proc(t: ^testing.T) {
 		d, _, _, err := read_text(c.text, c.draft)
 		testing.expectf(t, err == nil, "%s: %v", c.text, err)
 		_, werr := schema.write(&d, json.as(.Json))
-		f, _ := werr.(core.Typed_Failure)
+		f, _ := werr.(core.Typed_Error)
 		testing.expectf(t, f.kind == .Unsupported && f.want.text == c.keyword, "%s: %v", c.text, werr)
 	}
 }
@@ -1483,7 +1483,7 @@ schema_write_spells_json5_numbers_as_json :: proc(t: ^testing.T) {
 		d, rerr := schema.read(&doc, core.ROOT, "", &res)
 		testing.expectf(t, rerr == nil, "%s: %v", c.text, rerr)
 		text, werr := schema.write(&d, json.as(.Json))
-		f, _ := werr.(core.Typed_Failure)
+		f, _ := werr.(core.Typed_Error)
 		testing.expectf(t, f.want.text == c.keyword && strings.contains(string(text), c.written), "%s: %s, %v", c.text, text, werr)
 	}
 }

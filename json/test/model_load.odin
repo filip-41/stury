@@ -325,7 +325,7 @@ Fenced :: struct {
 
 @(private = "file")
 mismatch :: proc(err: core.Error) -> bool {
-	f, ok := err.(core.Typed_Failure)
+	f, ok := err.(core.Typed_Error)
 	return ok && f.kind == .Plan_Mismatch
 }
 
@@ -446,10 +446,10 @@ a_model_refuses_what_it_cannot_load_at_compile :: proc(t: ^testing.T) {
 	reg: model.Registry
 	model.register(&reg, Roles, model.Extra.Forbid)
 	_, forbidden := model.compile(&reg, Roles, json.reads(.Json))
-	f, ok := forbidden.(core.Typed_Failure)
+	f, ok := forbidden.(core.Typed_Error)
 	testing.expect(t, ok && f.kind == .Bad_Tag)
 	_, wide := model.compile(&reg, Wide, json.reads(.Json))
-	w, wide_ok := wide.(core.Typed_Failure)
+	w, wide_ok := wide.(core.Typed_Error)
 	testing.expect(t, wide_ok && w.kind == .Bad_Tag)
 }
 

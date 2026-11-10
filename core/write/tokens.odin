@@ -30,7 +30,7 @@ Token_Spelling :: struct {
 	stop:   proc(t: ^Tokens), // frees `state`
 	// Writes a value by a plan the format built as one record, with no frame: a value, or a row with its line end and,
 	// for the first, the header. A refusal's kind and path go to `err`, and the kind is returned.
-	record: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error) -> core.Typed_Error_Kind,
+	record: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Refusal) -> core.Typed_Error_Kind,
 	// Writes `text` as a comment to `out`. It writes nothing and answers false where the spec `spec` of the format has no
 	// comments, and with a nil `out` only says whether it has.
 	comment: proc(out: ^Out, spec: u8, text: string) -> bool,
@@ -81,7 +81,7 @@ tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, alloc
 
 // Ends the text and returns it as `finish` does. A JSON text must be one value with every container closed, and a flat
 // text must have no cells waiting for their record's end, else the end is `.Out_Of_Order`.
-tokens_finish :: proc(t: ^Tokens) -> (bytes: []u8, err: core.Typed_Error) {
+tokens_finish :: proc(t: ^Tokens) -> (bytes: []u8, err: core.Typed_Refusal) {
 	if t.spell != nil && !(t.first if t.spell.line != nil else t.done) {
 		refuse(t, .Out_Of_Order)
 	}

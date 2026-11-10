@@ -14,7 +14,7 @@ Writer :: struct {
 	tokens:  cw.Tokens,
 	framing: core.Framing,
 	final:   bool, // `err` ends the writer: every later call returns its kind
-	err:     core.Typed_Error, // the last refusal, with its path
+	err:     core.Typed_Refusal, // the last refusal, with its path
 }
 
 // Starts a writer of records in format `as`, framed by `framing`, to `w`, or with no stream procedure into a buffer from

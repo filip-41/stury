@@ -138,7 +138,7 @@ before_failures_are_the_members :: proc(t: ^testing.T) {
 	testing.expect_value(t, found, "Custom(no root)/name;")
 	v: Person
 	failure := model.load(&m, transmute([]u8)string(`{"name":"root","age":1}`), &v)
-	typed_error, is_typed := failure.(core.Typed_Failure)
+	typed_error, is_typed := failure.(core.Typed_Error)
 	testing.expect(t, is_typed && typed_error.kind == .Custom)
 }
 
@@ -163,7 +163,7 @@ before_refusal_keeps_its_path_with_a_sink :: proc(t: ^testing.T) {
 	v: Short
 	sink: typed.Sink
 	failure := model.load(&m, transmute([]u8)string(`{"name":"a"}`), &v, &sink)
-	typed_error, is_typed := failure.(core.Typed_Failure)
+	typed_error, is_typed := failure.(core.Typed_Error)
 	testing.expect(t, is_typed && typed_error.kind == .Too_Long)
 	testing.expect_value(t, len(typed_error.steps), 1)
 }

@@ -153,13 +153,13 @@ check_elements :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink, runner: ^core.Ru
 // stops at the first failure. The result's first value is the number of records read. A sink with an allocator of its own is checked on this thread. A flat format's text under `.Lines` is `.Bad_Option`, since its schema describes the whole text, which `check` judges.
 check_records :: proc(b: ^Bound, src: []u8, framing := core.Framing.Lines, sink: ^typed.Sink = nil, runner: ^core.Runner = nil) -> (count: i64, err: core.Error) {
 	if b.plan.check == nil {
-		return 0, core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+		return 0, core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
 	}
 	// A flat format's text is one value, whose records `check` judges as the array they are.
 	if framing == .Lines && b.plan.as.readers != nil && b.plan.as.readers.flat {
-		return 0, core.error_of(core.Typed_Error{kind = .Bad_Option})
+		return 0, core.error_of(core.Typed_Refusal{kind = .Bad_Option})
 	}
-	failure, fatal: core.Typed_Error
+	failure, fatal: core.Typed_Refusal
 	count, failure, fatal, _ = records.check_each(src, b.plan.as, framing, &b.plan, nil, sink, runner, 0, b.compiled.opts.dups, .Notice)
 	return count, core.error_of(fatal if fatal.kind != .None else failure)
 }

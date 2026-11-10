@@ -110,7 +110,7 @@ value_text :: proc(v: any) -> string {
 	return fmt.tprintf("%v", v)
 }
 
-errors_agree :: proc(t: ^testing.T, want_in, got_in: core.Typed_Error, text: string, loc: runtime.Source_Code_Location, shift := u64(0)) {
+errors_agree :: proc(t: ^testing.T, want_in, got_in: core.Typed_Refusal, text: string, loc: runtime.Source_Code_Location, shift := u64(0)) {
 	want, got := want_in, got_in
 	testing.expectf(t, want.kind == got.kind, "%s: kind %v, a document gives %v", text, want.kind, got.kind, loc = loc)
 	testing.expectf(t, want.at + (shift if want.kind != .None else 0) == got.at, "%s: at %v, a document gives %v", text, want.at, got.at, loc = loc)
@@ -129,8 +129,8 @@ agree_as :: proc(t: ^testing.T, text: string, $S: json.Spec, init: $T, read := t
 	testing.expectf(t, built == nil, "%s: build %v", text, built, loc = loc)
 	a, b := init, init
 	by_text, by_doc := read, read
-	sink_a := typed.Sink{errors = make([dynamic]core.Typed_Error, context.temp_allocator)}
-	sink_b := typed.Sink{errors = make([dynamic]core.Typed_Error, context.temp_allocator)}
+	sink_a := typed.Sink{errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)}
+	sink_b := typed.Sink{errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)}
 	if read.sink != nil {
 		by_text.sink, by_doc.sink = &sink_a, &sink_b
 	}
@@ -279,7 +279,7 @@ a_collecting_read_reads_past_each_refusal :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, built)
 	plan, _ := json.plan_make(S, allocator = context.temp_allocator)
 	sink := typed.Sink {
-		errors = make([dynamic]core.Typed_Error, context.temp_allocator),
+		errors = make([dynamic]core.Typed_Refusal, context.temp_allocator),
 	}
 	s: S
 	e := typed.unmarshal(&doc, core.ROOT, &s, &plan, {sink = &sink}, context.temp_allocator)

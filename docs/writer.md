@@ -8,7 +8,7 @@ write into the bytes it hands back, and move its cursor.
 ```odin
 write.init    :: proc(out: ^write.Out, spill: ^[write.ROOM_MAX]u8, allocator := context.allocator, stream := io.Stream{}, hint := 0)
 write.room    :: proc(out: ^write.Out, n: int) -> [^]u8
-write.finish  :: proc(out: ^write.Out) -> (bytes: []u8, err: core.Typed_Error)
+write.finish  :: proc(out: ^write.Out) -> (bytes: []u8, err: core.Typed_Refusal)
 write.destroy :: proc(out: ^write.Out)
 ```
 

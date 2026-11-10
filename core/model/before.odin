@@ -81,7 +81,7 @@ replacement_rule :: proc(h: ^typed.Model_Rules, owner: typeid, field: string, ty
 // Gives each `before` member of the load plan `p` the plan that reads its replacement, as the member's type with the
 // member's rules at its root.
 @(private)
-replacement_plans :: proc(c: ^Compiling, reads: ^typed.Format_Reads, p: ^typed.Plan, allocator: runtime.Allocator) -> core.Typed_Error {
+replacement_plans :: proc(c: ^Compiling, reads: ^typed.Format_Reads, p: ^typed.Plan, allocator: runtime.Allocator) -> core.Typed_Refusal {
 	for &m in p.meta {
 		if m.before == nil || p.value_text == nil {
 			continue

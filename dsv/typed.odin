@@ -51,7 +51,7 @@ plan_make :: proc(T: typeid, spec := Spec.Csv, opts := Options{}, plan := typed.
 // is no list of rows and no row, as `plan_make` does. The reads are the plan's with `reads`, as for `plan_make`.
 plan_of :: proc(d: ^rules.Description, spec := Spec.Csv, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error) {
 	if !layout_ok(spec, {}) {
-		return {}, core.error_of(core.Typed_Error{kind = .Bad_Option})
+		return {}, core.error_of(core.Typed_Refusal{kind = .Bad_Option})
 	}
 	made, err := typed.plan_of(d, layout_as(spec, {}), reads, opts, allocator)
 	if err != nil {
@@ -65,15 +65,9 @@ plan_of :: proc(d: ^rules.Description, spec := Spec.Csv, opts := typed.Plan_Opti
 	return made, nil
 }
 
-// The spelling's `plans`.
-@(private)
-plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Error) {
-	return plan_built(T, Spec(as.spec), options_of(as), opts, &READS, allocator)
-}
-
 // The plan of `T` with the writer, the token writer and the document read of dsv, and the reads `reads` holds.
 @(private)
-plan_built :: proc(T: typeid, spec: Spec, layout: Options, opts: typed.Plan_Options, reads: ^typed.Format_Reads, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Error) {
+plan_built :: proc(T: typeid, spec: Spec, layout: Options, opts: typed.Plan_Options, reads: ^typed.Format_Reads, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Refusal) {
 	if !layout_ok(spec, layout) {
 		return {}, {kind = .Bad_Option}
 	}
@@ -97,29 +91,6 @@ plan_bind :: proc(p: ^typed.Plan) {
 	p.value_text = write.value_text
 }
 
-// The typed reads of the format, which a handle's plan copies.
-@(rodata)
-@(private)
-READS := typed.Format_Reads {
-	read      = read_as,
-	check     = check_as,
-	node_read = document_read,
-	node_check = document_check,
-	build     = proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_as(src, as, false, allocator)},
-}
-
-// The plan's `read` of a whole text under the handle `as`.
-@(private)
-read_as :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
-	return read_spec(src, Spec(as.spec), options_of(as), target, T, plan, read, allocator, false)
-}
-
-// The plan's `check` of a whole text: the read, with every refusal an entry of the sink, and every missing column of a row.
-@(private)
-check_as :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
-	return read_spec(src, Spec(as.spec), options_of(as), target, T, plan, read, allocator, true)
-}
-
 @(private)
 unmarshal_bound :: proc(src: []u8, $S: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	plan, refusal := plan_make(T, S)
@@ -141,7 +112,7 @@ unmarshal_bound_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan
 unmarshal_chosen :: proc(src: []u8, spec: Spec, target: any, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	data, T, pointer := typed.pointer_target(target)
 	if !pointer {
-		return core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
 	}
 	plan, refusal := plan_make(T, spec)
 	if refusal != nil {
@@ -157,7 +128,7 @@ unmarshal_chosen :: proc(src: []u8, spec: Spec, target: any, opts := Options{}, 
 unmarshal_chosen_plan :: proc(src: []u8, spec: Spec, target: any, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	data, T, pointer := typed.pointer_target(target)
 	if !pointer {
-		return core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
 	}
 	return core.error_of(read_spec(src, spec, opts, data, T, plan, read, allocator, false))
 }
@@ -171,7 +142,7 @@ check_bound :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read :=
 check_chosen :: proc(src: []u8, spec: Spec, target: any, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	data, T, pointer := typed.pointer_target(target)
 	if !pointer {
-		return core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
 	}
 	return core.error_of(read_spec(src, spec, options_of(plan.as), data, T, plan, read, allocator, true))
 }
@@ -184,7 +155,7 @@ foreign_plan :: proc "contextless" (plan: ^typed.Plan) -> bool {
 }
 
 @(private)
-read_spec :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, check: bool) -> core.Typed_Error {
+read_spec :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, check: bool) -> core.Typed_Refusal {
 	switch spec {
 	case .Csv:   return read_one(src, .Csv, T, target, plan, opts, read, allocator, check)
 	case .Tsv:   return read_one(src, .Tsv, T, target, plan, opts, read, allocator, check)
@@ -195,7 +166,7 @@ read_spec :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typei
 
 // A read or a check of spec `S`, a check being the description's when the plan has one.
 @(private)
-read_one :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator, check: bool) -> core.Typed_Error {
+read_one :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator, check: bool) -> core.Typed_Refusal {
 	if !check {
 		return read_text(src, S, T, target, plan, opts, read, allocator, false)
 	}
@@ -204,7 +175,7 @@ read_one :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Pl
 
 // The check of a text of spec `S`: the description's when the plan has one, else the typed read's.
 @(private)
-check_one :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
+check_one :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
 	if plan != nil && (plan.checking || plan.model_plan == .Load) {
 		return check_cells(src, S, target, T, plan, opts, read, allocator)
 	}
@@ -212,7 +183,7 @@ check_one :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.P
 }
 
 @(private)
-read_text :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Error {
+read_text :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Refusal {
 	if foreign_plan(plan) {
 		return {kind = .Plan_Mismatch}
 	}
@@ -846,7 +817,7 @@ NOT_FLAT :: "CSV and TSV hold flat records, so a row is a struct, a map or a lis
 
 // Refuses a type no text can be made of: a row or cell of a kind this format has no spelling for.
 @(private)
-rows_supported :: proc(plan: ^typed.Plan) -> core.Typed_Error {
+rows_supported :: proc(plan: ^typed.Plan) -> core.Typed_Refusal {
 	row, _ := row_of(plan)
 	#partial switch row.kind {
 	case .Struct, .Required:

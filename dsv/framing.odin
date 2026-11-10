@@ -13,30 +13,6 @@ import typed "../core/typed"
 import write "../core/write"
 import records "../core/records"
 
-// The framing and the record reads a handle reaches, which dispatch on the handle's spec and so link every spec's passes.
-// A constant spec gets `framing_of` and `record_docs`, which link the passes of that spec alone.
-@(private, rodata)
-FRAMING := records.Framing_Services {
-	next  = #partial {.Lines = next_row},
-	judge = proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) { return nil },
-	span  = next_span,
-	guess = guess_row,
-	exact = exact_row,
-	piece = piece_rows,
-	whole = proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64) { return as, .Lines, 0 },
-	close = close_rows,
-}
-
-@(private, rodata)
-DOCS := records.Record_Docs {
-	read   = read_row,
-	check_read = check_row,
-	build  = build_row,
-	column = column_of,
-	cell   = cell_of,
-	cells  = cells_texts,
-}
-
 // The rows a batch holds at most.
 @(private)
 BATCH :: 256
@@ -186,17 +162,7 @@ frame_batch :: proc(it: ^records.Reader, b: ^Batch, $S: Spec, opts: Options) {
 // in a window that has since moved is dropped. Before any row stands, the header is dropped too and read again, since
 // the window may have cut it.
 @(private)
-next_row :: proc(it: ^records.Reader) -> (records.Record, bool) {
-	switch Spec(it.as.spec) {
-	case .Csv:   return next_row_spec(it, .Csv)
-	case .Tsv:   return next_row_spec(it, .Tsv)
-	case .Plain: return next_row_spec(it, .Plain)
-	}
-	return {}, false
-}
-
-@(private)
-next_row_spec :: proc(it: ^records.Reader, $S: Spec) -> (records.Record, bool) {
+next_row_spec :: #force_inline proc(it: ^records.Reader, $S: Spec) -> (records.Record, bool) {
 	b := (^Batch)(it.format)
 	stream := it.input.procedure != nil
 	if stream && b != nil {
@@ -232,17 +198,7 @@ next_row_spec :: proc(it: ^records.Reader, $S: Spec) -> (records.Record, bool) {
 // starts there. The frame judged them, and a fault ends the records on the next call. The width the first record sets
 // is kept in `it.state[0:4]`, so a piece's reader, a copy of this one past its first record, checks rows against it.
 @(private)
-next_span :: proc(it: ^records.Reader, to: u64) -> (records.Record, bool) {
-	switch Spec(it.as.spec) {
-	case .Csv:   return next_span_spec(it, to, .Csv)
-	case .Tsv:   return next_span_spec(it, to, .Tsv)
-	case .Plain: return next_span_spec(it, to, .Plain)
-	}
-	return {}, false
-}
-
-@(private)
-next_span_spec :: proc(it: ^records.Reader, to: u64, $S: Spec) -> (records.Record, bool) {
+next_span_spec :: #force_inline proc(it: ^records.Reader, to: u64, $S: Spec) -> (records.Record, bool) {
 	b := Batch{width = int(intrinsics.unaligned_load((^u32)(&it.state[0]))), to = to}
 	if to == max(u64) {
 		// The rest of the text is one record, judged by the walk with no hook.
@@ -333,16 +289,6 @@ joined :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row) -> (src: []u8, at
 // `Array` with no header. On a stream the document is over the header's line and the row's, which lasts until the next
 // call on the reader, and its offsets count from that text.
 @(private)
-build_row :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-	switch Spec(it.as.spec) {
-	case .Csv:   return build_row_spec(it, rec, allocator, .Csv)
-	case .Tsv:   return build_row_spec(it, rec, allocator, .Tsv)
-	case .Plain: return build_row_spec(it, rec, allocator, .Plain)
-	}
-	return {}, {kind = .Bad_Spec}
-}
-
-@(private)
 build_row_spec :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator, $S: Spec) -> (core.Document, core.Document_Error) {
 	cells, ok := cells_of(it, rec, S)
 	if !ok {
@@ -394,27 +340,7 @@ put_row_cells :: #force_inline proc(b: ^build.Builder, regs: core.Hook_Regs, cel
 // Reads the next row into `target`, a row type, by replaying its cells through `on_cell` as `unmarshal` reads the text
 // of the header and that row. A list row reads the row alone, as it reads a header as data.
 @(private)
-read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
-	switch Spec(it.as.spec) {
-	case .Csv:   return read_row_spec(it, target, T, plan, read, allocator, err, .Csv)
-	case .Tsv:   return read_row_spec(it, target, T, plan, read, allocator, err, .Tsv)
-	case .Plain: return read_row_spec(it, target, T, plan, read, allocator, err, .Plain)
-	}
-	return false
-}
-
-@(private)
-check_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
-	switch Spec(it.as.spec) {
-	case .Csv:   return check_row_spec(it, target, T, plan, read, allocator, err, .Csv)
-	case .Tsv:   return check_row_spec(it, target, T, plan, read, allocator, err, .Tsv)
-	case .Plain: return check_row_spec(it, target, T, plan, read, allocator, err, .Plain)
-	}
-	return false
-}
-
-@(private)
-read_row_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
+read_row_spec :: #force_inline proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal, $S: Spec) -> bool {
 	opts := options_of(it.as)
 	h := Cells{refuse_repeats = read.dups == .Refuse}
 	regs, started := typed.read_start(&h.r, it.src, plan, it.as, T, target, read, it.frames, allocator, false)
@@ -450,7 +376,6 @@ read_row_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typ
 	if stream {
 		h.r.src, h.hot_end = src, u64(max(len(src) - HOT_REACH, 0))
 	}
-	h.r.as.spec = u8(S)
 	h.no_header = opts.no_header || h.opens == .Array
 	if !h.no_header {
 		h.keys = b.keys
@@ -499,7 +424,7 @@ read_row_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typ
 // Moves the offsets of `e`, which name bytes of `joined`'s text, to the window's: the header's line is at `head_at` of
 // the input, and the row's bytes are `row`'s.
 @(private)
-place_error :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row, e: ^core.Typed_Error) {
+place_error :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row, e: ^core.Typed_Refusal) {
 	if e.kind not_in core.TYPED_AT_NO_BYTE {
 		e.at = place_at(it, b, row, e.at)
 		if e.kind == .Walk {

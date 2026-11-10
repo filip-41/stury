@@ -26,7 +26,7 @@ marshal :: proc {marshal_once, write.marshal}
 @(private)
 marshal_once :: proc(value: any, spec := Spec.Csv, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
 	if value.id == nil || value.data == nil {
-		return nil, core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+		return nil, core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
 	}
 	plan, refusal := plan_make(value.id, spec, opts)
 	if refusal != nil {
@@ -40,7 +40,7 @@ marshal_once :: proc(value: any, spec := Spec.Csv, opts := Options{}, write := c
 // The handle of a delimited text of `spec` read or written with `opts`, which holds the delimiter `spec` reads when
 // `opts` leaves it 0. See the file's header for what a document may hold.
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
-	return as_of(&HANDLE, spec, opts)
+	return as_of(&HANDLES[spec] if spec <= max(Spec) else nil, spec, opts)
 }
 
 // The handle of `spec` read or written with `opts` over `readers`.
@@ -59,7 +59,7 @@ options_of :: #force_inline proc "contextless" (as: core.As) -> Options {
 
 // The spelling's `write`: `doc` as the handle `as` says.
 @(private)
-document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Error) {
+document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Refusal) {
 	spec, layout := Spec(as.spec), options_of(as)
 	if !layout_ok(spec, layout) {
 		return nil, 0, {kind = .Bad_Option}

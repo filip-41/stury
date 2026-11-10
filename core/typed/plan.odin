@@ -345,7 +345,7 @@ Plan :: struct {
 	// met in an `any`.
 	using options: Plan_Options,
 	// What `plan_make` refused a plan with, which a read or write given the refused plan returns.
-	err:       core.Typed_Error,
+	err:       core.Typed_Refusal,
 	// A hash of the type, format and options the plan was built from, so a reader that kept what it bound to one plan's
 	// records can tell a plan built the same at their address from another made there after the first was destroyed. A
 	// description's plan has 0, so a reader binds nothing to one.
@@ -366,10 +366,10 @@ Plan :: struct {
 
 // Writes the value of `plan`'s type at `value` as `opts` says, to `stream` when it has a procedure, else to new bytes
 // from `allocator`.
-Marshal_Text :: #type proc(plan: ^Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
+Marshal_Text :: #type proc(plan: ^Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal)
 
 // Writes the built value `v` in `plan`'s format into new bytes from `allocator`.
-Value_Text :: #type proc(plan: ^Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
+Value_Text :: #type proc(plan: ^Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal)
 
 // The members a plan builder names in a refusal's path, the outermost ones when the type nests deeper.
 @(private)
@@ -384,7 +384,7 @@ Builder :: struct {
 	blocks:        map[Block_Key]i32,
 	ends:          map[i32]i32, // a struct block's `Never` record
 	widest:        int,
-	err:           core.Typed_Error,
+	err:           core.Typed_Refusal,
 	// The names of the members being filled, outermost first, which a refusal reports as its path.
 	trail:         [TRAIL_MAX]string,
 	depth:         int,
@@ -424,7 +424,7 @@ Block_Key :: struct {
 }
 
 // A format's plan maker, which `core.Services.plans` points at: `plan_build` and what the format's reads and writes add.
-Plan_Make :: #type proc(T: typeid, as: core.As, opts: Plan_Options, allocator: runtime.Allocator) -> (Plan, core.Typed_Error)
+Plan_Make :: #type proc(T: typeid, as: core.As, opts: Plan_Options, allocator: runtime.Allocator) -> (Plan, core.Typed_Refusal)
 
 // Builds the plan of `T` for format `as`, by the format's plan maker, allocating with `allocator`. A type the read
 // cannot take is an error, with the path to it, and the plan is then the zero value with that error in `err`. `opts`'s
@@ -433,7 +433,7 @@ Plan_Make :: #type proc(T: typeid, as: core.As, opts: Plan_Options, allocator: r
 plan_make :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (Plan, core.Error) {
 	services := core.services_of(as)
 	if services == nil {
-		err := core.Typed_Error{kind = .Bad_Option}
+		err := core.Typed_Refusal{kind = .Bad_Option}
 		return {err = err}, core.error_of(err)
 	}
 	if services.plans != nil {
@@ -446,7 +446,7 @@ plan_make :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := c
 
 // The plan of `T` for format `as` with nothing a format adds: no writer and no document read of its own. A format's
 // plan maker starts from it, and so does a write's plan for a type met in an `any`.
-plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Typed_Error) {
+plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Typed_Refusal) {
 	context.allocator = allocator
 	b := plan_start(&p, as, opts)
 	p.type = T
@@ -488,7 +488,7 @@ plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := 
 // Compiles the leaves of a type's plan from its rule sets into the plan's arena. A rule the check does not judge
 // refuses the plan as `.Unsupported`, naming its keyword.
 @(private)
-plan_leaves :: proc(p: ^Plan, compile: Rule_Compiler) -> core.Typed_Error {
+plan_leaves :: proc(p: ^Plan, compile: Rule_Compiler) -> core.Typed_Refusal {
 	leaves, failed := make([]rules.Leaf, len(p.rule_sets))
 	p.leaves = leaves
 	arena, made := plan_arena(p)
@@ -585,7 +585,7 @@ root_block :: proc(b: ^Builder) -> bool {
 
 // Sets what records find each other by, once every block is filled, or frees the plan with its first refusal in `err`.
 @(private)
-plan_finish :: proc(b: ^Builder, stamp: u64) -> core.Typed_Error {
+plan_finish :: proc(b: ^Builder, stamp: u64) -> core.Typed_Refusal {
 	p := b.p
 	delete(b.blocks)
 	delete(b.ends)

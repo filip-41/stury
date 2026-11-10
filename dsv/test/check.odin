@@ -176,7 +176,7 @@ check_repeated_columns :: proc(t: ^testing.T) {
 	testing.expect_value(t, refuse.(core.Fault).kind, core.Fault_Kind.Duplicate_Key)
 	testing.expect_value(t, alone.(core.Fault).kind, core.Fault_Kind.Duplicate_Key)
 	testing.expect(t, alone_last == nil)
-	testing.expectf(t, all.(core.Typed_Failure).kind == .Bad_Option, "%v", all)
+	testing.expectf(t, all.(core.Typed_Error).kind == .Bad_Option, "%v", all)
 }
 
 // A ragged row keeps its cells, a short one lacks the rest and a long one names the extra by position.

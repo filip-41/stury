@@ -11,38 +11,49 @@ import build "../core/build"
 import typed "../core/typed"
 import write "../core/write"
 
-// JSON's document holds the walk's tokens over the caller's bytes, read through core's readers and JSON's `HANDLE`.
+// JSON's document holds the walk's tokens over the caller's bytes, read through core's readers and JSON's handles.
 // `build` is the only entry, and it runs the walk and the builder together.
 
-// `EDIT` holds JSON's edit services, cold. The same table serves every spec, since a spec differs only in the text it
-// accepts as an edit. Each service dispatches on `doc.as.spec`.
-@(rodata)
-EDIT := core.Edit_Services {
-	value      = edit_value_at,
-	key_text   = edit_key_text,
-	comment    = edit_comment,
-	separators = edit_separators,
-	member_sep = proc(_: ^core.Document, _: core.Node_Index) -> string {return ","},
-	key_sep    = ":",
-	validate   = validate_as,
-	spell      = edit_spell,
+// JSON's handles, one per spec, which only `as` names. A handle's readers are the readers a constant build of its spec
+// holds, and its services the walks of that spec, so a call through a handle never switches on the spec. The tables
+// hold pointers to the bound tables, so they are set at startup and never written after.
+HANDLES := [Spec]core.Readers {
+	.Json  = handle_readers(.Json, &SERVICES[.Json]),
+	.Jsonc = handle_readers(.Jsonc, &SERVICES[.Jsonc]),
+	.Json5 = handle_readers(.Json5, &SERVICES[.Json5]),
 }
 
-// `HANDLE` holds JSON's readers, in rodata, the same table for every spec, for a caller that knows no format. `text` and
-// `number` are the procedures a direct caller calls, and `key_equals` reaches core's key rule. The same reader serves
-// every spec, since a JSON token holds no form that only JSON5 reads. The document holds the spec because an edit's
-// text is judged by it. A comment or an identifier is a value or a key only in the spec that accepts it.
-HANDLE := core.Readers {
-	text = text, key_equals = key_equals_decode, number = number, number_f32 = number_f32,
-	resolve = spelling_resolve, close_end = close_end, format = rules_of,
-	tag_key = "json", key_open = "\"", key_close = "\":",
-	services = &SERVICES,
+SERVICES := [Spec]core.Services {
+	.Json  = handle_services(.Json),
+	.Jsonc = handle_services(.Jsonc),
+	.Json5 = handle_services(.Json5),
 }
 
-// `SERVICES` holds JSON's run-time services, which a handle reaches.
-SERVICES := core.Services {
-	build = build_as, validate = validate_as, scan = scan_as, write = write_text, edit = &EDIT,
-	plans = rawptr(plan_as), reads = &READS, tokens = &TOKENS, records = &FRAMING, docs = &DOCS,
+// The readers of the handle of spec `S`: `readers_of(S)` with the services of `S`.
+handle_readers :: proc "contextless" ($S: Spec, services: ^core.Services) -> core.Readers {
+	r := readers_of(S)^
+	r.services = services
+	return r
+}
+
+// The run-time services of spec `S`, which a handle reaches.
+handle_services :: proc "contextless" ($S: Spec) -> core.Services {
+	return {
+		build    = proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+			return build_spec(src, S, as, refuse_duplicates, allocator)
+		},
+		validate = edit_of(S).validate,
+		scan     = proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
+			return scan_spec(src, S, as, paths, read, state, on, allocator)
+		},
+		write    = write_text,
+		edit     = edit_of(S),
+		plans    = rawptr(plan_as),
+		reads    = reads_of(S),
+		tokens   = &TOKENS,
+		records  = framing_of(S),
+		docs     = record_docs(S),
+	}
 }
 
 // JSON's fault table, which names the format whatever the spec.
@@ -50,28 +61,10 @@ rules_of :: proc "contextless" () -> ^core.Rules {
 	return &RULES
 }
 
-// The typed reads of the format, which a plan copies.
-@(rodata)
-@(private)
-READS := typed.Format_Reads {
-	read = read_text_as, check = check_text_as,
-	build = proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_as(src, as, false, allocator)},
-}
-
 // A number's kind fits core's kind bits and leaves bit 0 (`SPELLING_DECODE`) clear.
 #assert(u16(Number_Spelling.Nan) & core.SPELLING_DECODE == 0)
 #assert(u16(Number_Spelling.Nan) <= core.NUMBER_KIND_MASK)
 #assert(u16(Number_Spelling.Decimal) == core.NUMBER_DECIMAL)
-
-// The handle's build: the walk compiled for the handle's spec.
-build_as :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-	switch Spec(as.spec) {
-	case .Json:  return build_spec(src, .Json, as, refuse_duplicates, allocator)
-	case .Jsonc: return build_spec(src, .Jsonc, as, refuse_duplicates, allocator)
-	case .Json5: return build_spec(src, .Json5, as, refuse_duplicates, allocator)
-	}
-	return {}, {kind = .Bad_Spec}
-}
 
 // Reads `src` as spec `S` into a document that holds the handle `handle`, allocating nodes and facts with `allocator`.
 build_spec :: proc(src: []u8, $S: Spec, handle: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
@@ -151,17 +144,6 @@ build_reserved :: proc(src: []u8, q: [^]u8, $S: Spec, handle: core.As, refuse_du
 // no close node, so it starts after the last descendant's own bytes (after the open when the container is empty), skips
 // each descendant container's close on the rightmost spine, then the container's own. Cold: only a nested span read
 // calls it.
-@(cold)
-close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
-	switch Spec(doc.as.spec) {
-	case .Json:  return close_end_spec(doc, i, .Json)
-	case .Jsonc: return close_end_spec(doc, i, .Jsonc)
-	case .Json5: return close_end_spec(doc, i, .Json5)
-	}
-	return 0
-}
-
-// `close_end` for a document of spec `S`.
 @(cold)
 close_end_spec :: proc(doc: ^core.Document, i: core.Node_Index, $S: Spec) -> u64 {
 	if i == core.ROOT && doc.root_close != 0 {
@@ -319,16 +301,6 @@ edit_key_text :: proc(_: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bool
 	}
 	_, appended := append(text, ..spelled)
 	return appended == nil
-}
-
-// The value check dispatches on `doc.as.spec`, since a proc pointer carries no compile-time spec.
-edit_value_at :: proc(doc: ^core.Token_View, src: []u8, allocator: runtime.Allocator) -> core.Document_Error {
-	switch Spec(doc.spec) {
-	case .Json:  return edit_value(src, allocator, doc.max_depth, .Json)
-	case .Jsonc: return edit_value(src, allocator, doc.max_depth, .Jsonc)
-	case .Json5: return edit_value(src, allocator, doc.max_depth, .Json5)
-	}
-	return {kind = .Bad_Value}
 }
 
 // Returns JSON's comment spelling for `spec`. It is `//` for the specs whose grammar has comments, and none for

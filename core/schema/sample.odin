@@ -74,7 +74,7 @@ sample :: proc(d: ^rules.Description, as: core.As, opts := Sample_Options{}, all
 	defer unbind(&b)
 	arena: virtual.Arena
 	if virtual.arena_init_growing(&arena) != nil {
-		return nil, core.error_of(core.Typed_Error{kind = .No_Memory})
+		return nil, core.error_of(core.Typed_Refusal{kind = .No_Memory})
 	}
 	defer virtual.arena_destroy(&arena)
 	g := Gen {
@@ -101,7 +101,7 @@ sample :: proc(d: ^rules.Description, as: core.As, opts := Sample_Options{}, all
 // The `.No_Sample` that names the node `g` stopped at, by its keyword path from the root.
 @(private = "file")
 no_sample :: proc(g: ^Gen, allocator: runtime.Allocator) -> core.Error {
-	e := core.Typed_Error {
+	e := core.Typed_Refusal {
 		kind = .No_Sample,
 	}
 	at := g.culprit if g.culprit != rules.NONE else g.d.root

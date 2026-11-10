@@ -7,18 +7,18 @@ import core ".."
 // Where a read puts its refusals, and a read given one reads past a refusal. It adds each to `errors` up to
 // `max_errors`, 100 for 0, and sets `truncated` past that, and passes over the refused value with the walk still judging
 // it. A value read is left where the refused one was, so a member keeps what it held and a list's element is zero. A
-// read of `Check` adds a `core.Error_Entry` to `entries` in place of the `Typed_Error`, with its path of any depth and
+// read of `Check` adds a `core.Error_Entry` to `entries` in place of the `Typed_Refusal`, with its path of any depth and
 // its names copied, and `record` is the record index each entry takes. Both arrays allocate with their own allocator,
 // the read's when it has none, and the caller frees them, `sink_destroy` freeing what an entry holds.
 Sink :: struct {
-	errors:     [dynamic]core.Typed_Error,
+	errors:     [dynamic]core.Typed_Refusal,
 	entries:    [dynamic]core.Error_Entry,
 	max_errors: int,
 	record:     i64,
 	truncated:  bool,
 	// The fault that ended a read, which is set whatever `max_errors` kept, so a text that does not parse is never an
 	// entry a limit can drop.
-	fatal:      core.Typed_Error,
+	fatal:      core.Typed_Refusal,
 }
 
 // What a collection held before a read, so a read taken back leaves it as it was. A nil collection's is zero.
@@ -93,7 +93,7 @@ entry_destroy :: proc(e: ^core.Error_Entry, allocator: runtime.Allocator) {
 }
 
 // Copies the names in `e`'s steps into the temp allocator, for an error that outlives the plan its names point into.
-own_names :: proc(e: ^core.Typed_Error) {
+own_names :: proc(e: ^core.Typed_Refusal) {
 	if e.kind == .Custom {
 		text, failed := strings.clone(e.want.text, context.temp_allocator)
 		e.want.text = text if failed == nil else ""
@@ -107,7 +107,7 @@ own_names :: proc(e: ^core.Typed_Error) {
 }
 
 // `own_names` for a read's error and each error it collected.
-own_errors :: proc(e: ^core.Typed_Error, c: ^Sink) {
+own_errors :: proc(e: ^core.Typed_Refusal, c: ^Sink) {
 	own_names(e)
 	if c != nil {
 		for &x in c.errors {
@@ -119,7 +119,7 @@ own_errors :: proc(e: ^core.Typed_Error, c: ^Sink) {
 // The one refusal: records `e` and says how the walk goes on, which is `.Stop` unless a `Sink` reads on. The hot
 // path has no branch on the sink.
 @(cold)
-refuse :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Error, end := u64(0)) -> (core.Hook_Regs, core.Action) {
+refuse :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Refusal, end := u64(0)) -> (core.Hook_Regs, core.Action) {
 	context = h.ctx
 	note(h, regs, e, end)
 	return regs, .Stop if h.sink == nil else .Skip
@@ -131,7 +131,7 @@ refuse :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs,
 refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, regs_in: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action) {
 	// `hi` is exact for a scalar, and a container's open token's end, as the skip that follows passes its close unseen.
 	lo, hi := core.scalar_ends(t)
-	e := core.Typed_Error{kind = kind, at = lo}
+	e := core.Typed_Refusal{kind = kind, at = lo}
 	fld := field_at(regs_in.b)
 	if kind == .Wrong_Kind || kind == .Out_Of_Range || kind == .Not_A_Member {
 		e.found = t.kind
@@ -164,7 +164,7 @@ refuse_element :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Ho
 // ending at `end`, with the path of any depth and its names copied, and under a `keyword` of a description's plan the
 // keyword path to it.
 @(private)
-note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Error, end: u64, keyword: Maybe(string) = nil) {
+note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Refusal, end: u64, keyword: Maybe(string) = nil) {
 	e := e
 	held := e.n_steps > 0
 	held_step := e.steps[0]
@@ -188,7 +188,7 @@ note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Error, end: u64, ke
 // Appends the entry of `e`, whose paths are copied to exactly the size they free at, and says whether it fit in memory.
 // The keyword path is each open record's use site, then the value's, then `keyword`, for a description's plan.
 @(private)
-entry_add :: proc(c: ^Sink, e: core.Typed_Error, h: ^Reader, regs: core.Hook_Regs, held: bool, held_step: core.Step, end: u64, keyword: Maybe(string)) -> bool {
+entry_add :: proc(c: ^Sink, e: core.Typed_Refusal, h: ^Reader, regs: core.Hook_Regs, held: bool, held_step: core.Step, end: u64, keyword: Maybe(string)) -> bool {
 	context.allocator = c.entries.allocator
 	// The paths are built in the sink's allocator and freed, so a sink a held value drops costs nothing that stays.
 	steps, words := make([dynamic]core.Step), make([dynamic]core.Step)
@@ -280,7 +280,7 @@ owned_steps :: proc(out: ^[]core.Step, steps: []core.Step, reverse: bool) -> boo
 }
 
 // Adds a refusal found before a read starts (a duplicate key, a fault of the text) to `c`, as an entry when `wide`.
-sink_refusal :: proc(c: ^Sink, e: core.Typed_Error, $wide: bool) {
+sink_refusal :: proc(c: ^Sink, e: core.Typed_Refusal, $wide: bool) {
 	when wide {
 		if c == nil {
 			return
@@ -294,7 +294,7 @@ sink_refusal :: proc(c: ^Sink, e: core.Typed_Error, $wide: bool) {
 }
 
 // Adds `e` to `c`, nil for none, and past its cap only marks it truncated.
-sink_error :: proc(c: ^Sink, e: core.Typed_Error) {
+sink_error :: proc(c: ^Sink, e: core.Typed_Refusal) {
 	if c == nil {
 		return
 	}
@@ -308,7 +308,7 @@ sink_error :: proc(c: ^Sink, e: core.Typed_Error) {
 // Builds `e`'s path from the open frames. A step `e` holds already is the last, in place of the step the registers stand
 // at.
 @(private)
-path_of :: proc(h: ^Reader, regs: core.Hook_Regs, e: ^core.Typed_Error) {
+path_of :: proc(h: ^Reader, regs: core.Hook_Regs, e: ^core.Typed_Refusal) {
 	e.n_steps = min(e.n_steps, 1)
 	steps_of(h, regs, e.n_steps > 0, e)
 	path_close(e)
@@ -345,7 +345,7 @@ add_step_wide :: proc(out: ^[dynamic]core.Step, s: core.Step) {
 
 // Adds `s`, the next step out, to the path of `e`, which `path_close` turns to read from the outermost. The path keeps
 // the innermost `MAX_ERROR_STEPS` steps, and `e.truncated` says when it dropped one.
-path_add :: proc "contextless" (e: ^core.Typed_Error, s: core.Step) {
+path_add :: proc "contextless" (e: ^core.Typed_Refusal, s: core.Step) {
 	if int(e.n_steps) == core.MAX_ERROR_STEPS {
 		e.truncated = true
 		return
@@ -355,7 +355,7 @@ path_add :: proc "contextless" (e: ^core.Typed_Error, s: core.Step) {
 }
 
 // Turns the path `path_add` built from the innermost step to read from the outermost.
-path_close :: proc "contextless" (e: ^core.Typed_Error) {
+path_close :: proc "contextless" (e: ^core.Typed_Refusal) {
 	for i in 0 ..< int(e.n_steps) / 2 {
 		j := int(e.n_steps) - 1 - i
 		e.steps[i], e.steps[j] = e.steps[j], e.steps[i]

@@ -31,7 +31,7 @@ TOKEN_ROWS := [?]Token_Row {
 	{8, "\\back;slash", false, 6, 5},
 }
 
-token_rows :: proc(rows: []Token_Row, spec: dsv.Spec, layout: dsv.Options, stream := io.Stream{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
+token_rows :: proc(rows: []Token_Row, spec: dsv.Spec, layout: dsv.Options, stream := io.Stream{}, allocator := context.allocator) -> ([]u8, core.Typed_Refusal) {
 	tw: write.Tokens
 	write.tokens_init(&tw, dsv.as(spec, layout), {}, allocator, stream)
 	if !layout.no_header {

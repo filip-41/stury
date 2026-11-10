@@ -846,7 +846,7 @@ fail :: proc(r: ^Reader, site: Site, keyword, why: string) {
 	if r.err != nil {
 		return
 	}
-	e := core.Typed_Error {
+	e := core.Typed_Refusal {
 		kind = .Bad_Schema,
 		at   = u64(r.sources[site.source].nodes[site.at].lo),
 	}

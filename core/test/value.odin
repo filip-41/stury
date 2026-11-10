@@ -100,7 +100,7 @@ repeated_key_reads_alike_in_both_forms :: proc(t: ^testing.T) {
 		}
 		testing.expect_value(t, len(keys), 3)
 		text, werr := write.write_value(v, json.as(.Json))
-		testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
+		walktest.expect_nil(t, werr)
 		testing.expect_value(t, string(text), src)
 	}
 	testing.expect(t, core.equal(node, built))

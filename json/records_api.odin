@@ -20,10 +20,10 @@ record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
 		scan = proc(it: ^records.Reader, h: ^build.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options) -> (records.Record, core.Path_Error, bool) {
 			return scan_record_spec(it, h, last, path, read, S)
 		},
-		read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
+		read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
 			return read_spec(it, target, T, plan, read, allocator, err, S)
 		},
-		check_read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
+		check_read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
 			return check_read_spec(it, target, T, plan, read, allocator, err, S)
 		},
 		check_run = proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_Options, visit: records.Record_Visit, data: rawptr) {

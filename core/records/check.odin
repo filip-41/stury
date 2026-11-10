@@ -11,10 +11,10 @@ import typed "../typed"
 Checked :: struct {
 	sink:    typed.Sink,
 	records: i64,
-	failure: core.Typed_Error,
+	failure: core.Typed_Refusal,
 	// The index in the piece of the record `failure` is the first failure of.
 	failed:  i64,
-	fatal:   core.Typed_Error,
+	fatal:   core.Typed_Refusal,
 }
 
 @(private)
@@ -41,7 +41,7 @@ Check_Job :: struct {
 // whose kind is `.None` for none, and the fault the records ended on, whose kind is `.None` for none, which is a `.Walk`
 // or a `.No_Memory` and outranks the failures before it. With no sink the check stops at the first failure. The last result
 // is the index of the record the failure is the first of. `dups` and `repeats` are the read's, see `typed.Repeats`.
-check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, outer: ^typed.Outer, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0, dups := core.Duplicates.Default, repeats := typed.Repeats.Ignore) -> (records: i64, failure: core.Typed_Error, fatal: core.Typed_Error, failed: i64) {
+check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, outer: ^typed.Outer, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0, dups := core.Duplicates.Default, repeats := typed.Repeats.Ignore) -> (records: i64, failure: core.Typed_Refusal, fatal: core.Typed_Refusal, failed: i64) {
 	heap := runtime.heap_allocator()
 	runner := runner
 	if sink != nil && sink.entries.allocator.procedure != nil && sink.entries.allocator.procedure != heap.procedure {
@@ -95,7 +95,7 @@ check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.P
 		return records, failure, {kind = .No_Memory}, failed
 	}
 	if f, bad := fault.?; bad {
-		walk := core.Typed_Error{kind = .Walk, inner = f, at = f.at}
+		walk := core.Typed_Refusal{kind = .Walk, inner = f, at = f.at}
 		failure = walk if failure.kind == .None else failure
 		// The entry only places the fault among the failures, the fault itself is returned.
 		if sink != nil {
@@ -158,7 +158,7 @@ check_piece :: proc(job: ^Check_Job, it: ^Reader, k: int) -> bool {
 }
 
 @(private)
-piece_visit :: proc(data: rawptr, rec: Record, first: core.Typed_Error) -> bool {
+piece_visit :: proc(data: rawptr, rec: Record, first: core.Typed_Refusal) -> bool {
 	run := (^Piece_Run)(data)
 	return piece_note(run.job, &run.p, first)
 }
@@ -166,7 +166,7 @@ piece_visit :: proc(data: rawptr, rec: Record, first: core.Typed_Error) -> bool 
 // Takes in the check of one more record, whose failure `e` and entries are from the input's first byte, and says whether
 // the piece goes on.
 @(private)
-piece_note :: proc(job: ^Check_Job, p: ^Checked, e: core.Typed_Error) -> bool {
+piece_note :: proc(job: ^Check_Job, p: ^Checked, e: core.Typed_Refusal) -> bool {
 	fatal := p.sink.fatal
 	p.sink.fatal = {}
 	p.records += 1

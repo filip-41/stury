@@ -9,16 +9,6 @@ import engine "../core/build"
 // name, and `.[i][j]` a cell by position. A partial document keeps a kept cell's key beside it, so it holds no shared
 // keys.
 
-// The spelling's `scan`: the walk compiled for the handle's spec.
-scan_as :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
-	switch Spec(handle.spec) {
-	case .Csv:   return scan_spec(src, .Csv, handle, paths, read, state, on, allocator)
-	case .Tsv:   return scan_spec(src, .Tsv, handle, paths, read, state, on, allocator)
-	case .Plain: return scan_spec(src, .Plain, handle, paths, read, state, on, allocator)
-	}
-	return {}, {kind = .Unsupported}
-}
-
 // Walks `src` as spec `S` with the scan's hook, the stream's when `on` is set, and ends the read.
 scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (doc: core.Document, err: core.Path_Error) {
 	opts := options_of(handle)

@@ -40,7 +40,7 @@ Judging :: struct {
 	plan:          ^typed.Plan,
 	sink:          ^typed.Sink,
 	floor:         int, // the sink's entries below this are an earlier call's
-	first:         core.Typed_Error,
+	first:         core.Typed_Refusal,
 	steps:         [dynamic]core.Step,
 	scratch:       regex.Scratch,
 }

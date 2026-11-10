@@ -228,7 +228,7 @@ put_value :: proc(b: ^strings.Builder, v: core.Value) {
 	heap := runtime.heap_allocator()
 	text, err := write.write_value(v, json.as(.Json), allocator = heap)
 	defer delete(text, heap)
-	strings.write_string(b, string(text) if err.kind == .None else "?")
+	strings.write_string(b, string(text) if err == nil else "?")
 }
 
 // The name of the enum value `e` in lower case.

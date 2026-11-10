@@ -33,10 +33,10 @@ framing_of :: proc "contextless" ($S: Spec) -> ^records.Framing_Services {
 // The reads of a record's row as spec `S`: its typed read, its document and its cells.
 record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
 	@(static, rodata) d := records.Record_Docs {
-		read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
+		read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
 			return read_row_spec(it, target, T, plan, read, allocator, err, S)
 		},
-		check_read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
+		check_read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
 			return check_row_spec(it, target, T, plan, read, allocator, err, S)
 		},
 		build = proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {

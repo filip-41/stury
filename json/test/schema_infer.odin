@@ -364,7 +364,7 @@ sample_gives_no_sample :: proc(t: ^testing.T) {
 		d, rerr := schema.read(&doc, core.ROOT, "", &res)
 		testing.expectf(t, rerr == nil, "%s: %v", text, rerr)
 		_, err := schema.sample(&d, json.as(.Json), {tries = 16})
-		f, _ := err.(core.Typed_Failure)
+		f, _ := err.(core.Typed_Error)
 		testing.expectf(t, f.kind == .No_Sample, "%s: %v", text, err)
 	}
 }
@@ -388,7 +388,7 @@ sample_is_bounded_and_takes_the_other_branch :: proc(t: ^testing.T) {
 		d, rerr := schema.read(&doc, core.ROOT, "", &res)
 		testing.expectf(t, rerr == nil, "%s: %v", text, rerr)
 		_, err := schema.sample(&d, json.as(.Json), {size = 1000})
-		f, _ := err.(core.Typed_Failure)
+		f, _ := err.(core.Typed_Error)
 		testing.expectf(t, f.kind == .No_Sample, "%s: %v", text, err)
 	}
 	others := [?]string {
@@ -426,7 +426,7 @@ sample_names_the_node :: proc(t: ^testing.T) {
 	}
 	d, _ := schema.read(&doc, core.ROOT, "", &res)
 	_, err := schema.sample(&d, json.as(.Json))
-	f, _ := err.(core.Typed_Failure)
+	f, _ := err.(core.Typed_Error)
 	testing.expectf(t, f.kind == .No_Sample, "%v", err)
 	testing.expect_value(t, f.kind, core.Typed_Error_Kind.No_Sample)
 	testing.expect_value(t, len(f.steps), 2)

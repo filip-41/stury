@@ -137,7 +137,7 @@ Framing_Services :: struct {
 }
 
 // What `Record_Docs.check_run` calls after each record it checks.
-Record_Visit :: #type proc(data: rawptr, rec: Record, first: core.Typed_Error) -> bool
+Record_Visit :: #type proc(data: rawptr, rec: Record, first: core.Typed_Refusal) -> bool
 
 // What a reader reads of a record's value, in its format's rodata, which `core.Services.docs` points at. It is apart
 // from the framing so that a program that only frames or judges records links no read, build or scan.
@@ -148,10 +148,10 @@ Record_Docs :: struct {
 	scan:   proc(it: ^Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options) -> (Record, core.Path_Error, bool),
 	// `next` and a typed read of the record into `target`, a `T`, whose typed reader takes `it.scratch` as its temp
 	// allocator.
-	read:   proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool,
+	read:   proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool,
 	// `read` for a model's load plan, which reads only as a check: the record is judged by the model's rules, into a zeroed
 	// `target`, with each refusal collected in `read.sink`. nil for a format that has no model.
-	check_read: proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool,
+	check_read: proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool,
 	// Builds a record's document.
 	build:  proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),
 	// `next`, and the record's nodes written to `b` by the walk that frames it, with the offsets of `it.src`. nil for a
@@ -245,21 +245,33 @@ next :: #force_inline proc(it: ^Reader) -> (Record, bool) {
 // it. A name the read decoded for `err`, and a stream's source text in it, lasts until the next call on `it`, and one
 // in a collected error as long as the caller's temp allocator.
 read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (err: core.Error, more: bool) {
-	refusal: core.Typed_Error
-	more, refusal = read_record(it, target, plan, opts, allocator)
-	if !more && refusal.kind != .None {
-		if it.fault == nil {
-			it.fault = core.Fault{kind = .No_Memory if refusal.kind == .No_Memory else .Bad_Option}
-		}
-		more = true
+	refusal: core.Typed_Refusal
+	more = read_record(it, target, plan, opts, allocator, &refusal)
+	if refusal.kind == .None {
+		return nil, more
 	}
-	return core.error_of(refusal, allocator = runtime.arena_allocator(&it.scratch)), more
+	return read_refused(it, &refusal, more), true
 }
 
+// The error of a refused read, whose path is the reader's until its next read. A refusal that ends the records is the
+// reader's fault when the text gave none.
 @(private)
-read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Read_Options, allocator: runtime.Allocator) -> (more: bool, err: core.Typed_Error) {
+@(cold)
+read_refused :: proc(it: ^Reader, refusal: ^core.Typed_Refusal, more: bool) -> core.Error {
+	if !more && it.fault == nil {
+		it.fault = core.Fault{kind = .No_Memory if refusal.kind == .No_Memory else .Bad_Option}
+	}
+	if it.scratch.backing_allocator.procedure == nil {
+		it.scratch = {backing_allocator = it.allocator, minimum_block_size = 4096}
+	}
+	return core.error_of(refusal^, allocator = runtime.arena_allocator(&it.scratch))
+}
+
+// The refusal goes to `err`, which the caller gives zeroed, so that a record that reads copies none.
+@(private)
+read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> (more: bool) {
 	if it.fault != nil {
-		return false, {}
+		return false
 	}
 	plan := plan
 	reads := it.docs.read if it.docs != nil else nil
@@ -268,23 +280,24 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 	}
 	if reads == nil {
 		it.fault = core.Fault{kind = .Bad_Option}
-		return false, {}
+		return false
 	}
 	if plan == nil {
 		if it.plan == nil || it.plan.type != T {
 			if refusal := reader_plan(it, T); refusal != nil {
-				// A plan is refused as a `Typed_Error`, or for memory.
-				err = {kind = .No_Memory}
-				if typed_refusal, is_typed := refusal.(core.Typed_Failure); is_typed {
-					err = core.typed_error_of(typed_refusal)
+				// A plan is refused as a `Typed_Refusal`, or for memory.
+				err^ = {kind = .No_Memory}
+				if typed_refusal, is_typed := refusal.(core.Typed_Error); is_typed {
+					err^ = core.typed_refusal_of(typed_refusal)
 				}
-				return false, err
+				return false
 			}
 		}
 		plan = it.plan
 	}
 	if !core.same_format(plan.readers, it.as.readers) || plan.type != T {
-		return false, typed.plan_mismatch(plan, it.as.readers, T)
+		err^ = typed.plan_mismatch(plan, it.as.readers, T)
+		return false
 	}
 	if it.frames == nil {
 		// A stream's window moves, so a record may be as long as the stream's bound. A record that nests deeper under a
@@ -292,7 +305,8 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 		bound := len(it.src) if it.input.procedure == nil else it.max_bytes
 		frames, failed := make([]typed.Frame, min(core.reserve_depth(it.as.max_depth, bound), core.MAX_DEPTH) + 2, it.allocator)
 		if failed != nil {
-			return false, {kind = .No_Memory}
+			err^ = {kind = .No_Memory}
+			return false
 		}
 		it.frames = frames
 		it.scratch = {backing_allocator = it.allocator, minimum_block_size = 4096}
@@ -302,28 +316,29 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 	}
 	kept := typed.sink_mark(opts.sink)
 	if it.input.procedure == nil {
-		more = reads(it, target, T, plan, opts, allocator, &err)
+		more = reads(it, target, T, plan, opts, allocator, err)
 	} else {
 		// A record the window cannot tell yet is read again after a refill, so what its first read collected and wrote
 		// goes. The restore is shallow, so what a first read allocated for `target` stays allocated.
 		before := target^
 		for {
 			if it.src == nil && (it.eof || !window_move(it)) {
-				return false, {}
+				return false
 			}
 			pos, state := it.pos, it.state
-			err = {}
-			more = reads(it, target, T, plan, opts, allocator, &err)
+			err^ = {}
+			more = reads(it, target, T, plan, opts, allocator, err)
 			if settle_window(it, more, pos, state) {
 				break
 			}
 			typed.sink_restore(opts.sink, kept)
 			target^ = before
 			if !window_move(it) {
-				return false, {}
+				err^ = {}
+				return false
 			}
 		}
-		core.move_typed_error(&err, it.base)
+		core.move_typed_error(err, it.base)
 	}
 	if opts.sink != nil {
 		keep_collected(it, opts.sink, kept.errors)

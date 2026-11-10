@@ -437,7 +437,7 @@ write :: proc {write_bound, write_chosen}
 @(private)
 write_bound :: proc(doc: ^core.Document, $S: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
 	if int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
-		return nil, 0, core.error_of(core.Typed_Error{kind = .Unsupported})
+		return nil, 0, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
 	out, cut, refusal := document_write(doc, opts, bound_as(S), node, {}, allocator)
 	return out, cut, core.error_of(refusal)
@@ -446,17 +446,6 @@ write_bound :: proc(doc: ^core.Document, $S: Spec, opts := core.Write_Options{},
 @(private)
 write_chosen :: #force_inline proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
 	return core.write(doc, opts, as(spec), node, allocator)
-}
-
-// The handle's verdict on the text from `lo`, a record's start, checking records against `width` when it is above 0.
-@(private)
-validate_from :: proc "contextless" (src: []u8, as: core.As, lo: u64, width: int) -> Maybe(core.Fault) {
-	switch Spec(as.spec) {
-	case .Csv:   return validate_spec(src, .Csv, options_of(as), lo, width)
-	case .Tsv:   return validate_spec(src, .Tsv, options_of(as), lo, width)
-	case .Plain: return validate_spec(src, .Plain, options_of(as), lo, width)
-	}
-	return core.Fault{rules = &RULES, kind = .Bad_Option}
 }
 
 @(private)

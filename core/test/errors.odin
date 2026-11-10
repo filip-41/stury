@@ -19,7 +19,7 @@ every_error_arm_renders :: proc(t: ^testing.T) {
 			{runtime.Allocator_Error.Out_Of_Memory, "Out of memory", "no_memory"},
 			{core.Document_Error{kind = .Bad_Index}, "The node takes no such edit", "document.bad_index"},
 			{core.Path_Error{kind = .Bad_Path, text = ".[", at = 1}, "1:2: Invalid path \".[\"", "path.bad_path"},
-			{core.Typed_Failure{kind = .Wrong_Kind}, "1:1: Value does not fit the field's type", "typed.wrong_kind"},
+			{core.Typed_Error{kind = .Wrong_Kind}, "1:1: Value does not fit the field's type", "typed.wrong_kind"},
 			{core.Typed_Error_Kind.Non_Finite, "Number is not finite", "typed.non_finite"},
 			{nil, "", ""},
 		}) {

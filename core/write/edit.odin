@@ -83,7 +83,7 @@ edit_input_of :: proc(v: any, plan: ^typed.Plan, scratch: ^Scratch) -> (in_: cor
 		return {value = digits(u64(x), allocator)}, nil
 	}
 	if plan == nil {
-		return {}, core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+		return {}, core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
 	}
 	built := marshal_value(v, plan, allocator) or_return
 	// A flat format writes one struct or map as a table of one record.

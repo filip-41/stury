@@ -156,7 +156,7 @@ schema_judge :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, named: 
 			tell(sc, s, name, file, data, told_before, by_record, &sink)
 		}
 		return .Fault, err
-	case core.Typed_Failure:
+	case core.Typed_Error:
 		if len(sink.entries) > 0 {
 			tell(sc, s, name, file, data, sink.entries[:], by_record, &sink)
 			return .Invalid, nil

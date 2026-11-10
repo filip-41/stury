@@ -46,7 +46,7 @@ run_before :: proc(h: ^Check, regs: core.Hook_Regs, b: ^Before, value: core.Valu
 			report_verdict(h, member_steps(h, regs), Verdict{failure = x}, lo)
 			back, action = regs, .Stop if h.sink == nil else .Skip
 		} else {
-			e := core.Typed_Error{kind = .Custom, at = lo}
+			e := core.Typed_Refusal{kind = .Custom, at = lo}
 			e.want.text = x.message
 			back, action = refuse(h, back, e, hi)
 		}

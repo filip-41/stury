@@ -228,7 +228,7 @@ Typed_Piece :: struct {
 
 // A typed error with its offsets moved by `at`, and its steps as text, which name keys by their bytes.
 @(private = "file")
-error_text :: proc(e: core.Typed_Error, at: u64) -> string {
+error_text :: proc(e: core.Typed_Refusal, at: u64) -> string {
 	e := e
 	if e.kind != .None {
 		e.at += at
@@ -263,7 +263,7 @@ records_read_in_bounded_memory :: proc(t: ^testing.T) {
 	}
 	it := records.open(few, json.as(.Json))
 	defer records.close(&it)
-	c := typed.Sink{errors = make([dynamic]core.Typed_Error, context.temp_allocator)}
+	c := typed.Sink{errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)}
 	for {
 		v: Number_Record
 		_, more := records.read(&it, &v, &rows, {unknown = .Refuse, sink = &c}, context.temp_allocator)
@@ -465,8 +465,8 @@ records_stream_read :: proc(t: ^testing.T) {
 			c := Chunked{src = transmute([]u8)src, sizes = {1 + round % 5}, fail_at = -1}
 			st := records.open_stream(chunked(&c), json.as(spec), framing)
 			ms, ss: typed.Sink
-			ms.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
-			ss.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
+			ms.errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)
+			ss.errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)
 			for {
 				v, w: Typed_Piece
 				err, more := records.read(&st, &v, &plan, {sink = &ss}, context.temp_allocator)

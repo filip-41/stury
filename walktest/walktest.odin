@@ -384,8 +384,8 @@ body_line_end :: proc(body: string) -> bool {
 // output that removed every record reads the comment as a foot. A JSON line comment ends at U+2028 or U+2029 too, so
 // such a body needs the block spelling, which holds no `*/`. An inline body with `*/` and no line end is either
 // spelled or dropped, so `fact_agrees` judges it by what reads back.
-fact_holdable :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Role, body: string, spec: u8, read: ^core.Document) -> bool {
-	edit := core.services_of(doc.as).edit
+fact_holdable :: proc(list: ^core.Edit_List, node: core.Node_Index, role: core.Role, body: string, spec: u8, read: ^core.Document) -> bool {
+	doc, edit := list.doc, list.edit
 	if edit == nil || edit.comment == nil {
 		return false
 	}
@@ -434,16 +434,16 @@ fact_holdable :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Rol
 
 // Whether a named fact's body holds `*/` and no line end under a `.Line` style, so core may spell it or drop it.
 @(private)
-fact_either :: proc(doc: ^core.Document, e: core.Edit, spec: u8) -> bool {
+fact_either :: proc(list: ^core.Edit_List, e: core.Edit, spec: u8) -> bool {
 	body := string(e.text)
 	if !strings.contains(body, "*/") || body_line_end(body) {
 		return false
 	}
-	edit := core.services_of(doc.as).edit
+	edit := list.edit
 	if edit == nil || edit.comment == nil {
 		return false
 	}
-	style, _ := edit.comment(doc, spec)
+	style, _ := edit.comment(list.doc, spec)
 	return style == .Line
 }
 
@@ -535,14 +535,14 @@ fact_agrees :: proc(t: ^testing.T, round: int, before: []Fact_Model, doc: ^core.
 			continue
 		}
 		kept += 1
-		slot := node != core.NO_NODE && fact_holdable(doc, e.node, e.role, "", spec, read)
-		if slot && fact_either(doc, e, spec) {
+		slot := node != core.NO_NODE && fact_holdable(list, e.node, e.role, "", spec, read)
+		if slot && fact_either(list, e, spec) {
 			if !fact_find(got[:], used, node, e.role, string(e.text)) {
 				either_missing += 1
 			}
 			continue
 		}
-		holdable := slot && fact_holdable(doc, e.node, e.role, string(e.text), spec, read)
+		holdable := slot && fact_holdable(list, e.node, e.role, string(e.text), spec, read)
 		if !holdable {
 			expected += 1
 			continue
@@ -561,11 +561,11 @@ fact_agrees :: proc(t: ^testing.T, round: int, before: []Fact_Model, doc: ^core.
 		foot := f.role == .Comment && f.node == core.ROOT && core.header_of(doc) != 0 && core.length(read, core.ROOT) == 0
 		// A source fact in the document's own spec already reads under it, so only a missing slot drops it. Under
 		// another spec the output must hold the whole fact, body included.
-		if spec != doc.as.spec && !foot && !fact_holdable(doc, f.node, f.role, f.body, spec, read) {
+		if spec != doc.as.spec && !foot && !fact_holdable(list, f.node, f.role, f.body, spec, read) {
 			expected += 1
 			continue
 		}
-		if spec == doc.as.spec && !foot && !fact_holdable(doc, f.node, f.role, "", spec, read) {
+		if spec == doc.as.spec && !foot && !fact_holdable(list, f.node, f.role, "", spec, read) {
 			expected += 1
 			continue
 		}
@@ -895,7 +895,7 @@ expect_kind :: proc(t: ^testing.T, err: core.Error, kind: $K, loc := #caller_loc
 			e, is_arm := err.(core.Path_Error)
 			ok = is_arm && e.kind == kind
 		} else {
-			e, is_arm := err.(core.Typed_Failure)
+			e, is_arm := err.(core.Typed_Error)
 			bare, is_bare := err.(core.Typed_Error_Kind)
 			ok = is_arm && e.kind == kind || is_bare && bare == kind
 		}
@@ -915,7 +915,7 @@ fault_of :: proc "contextless" (err: core.Error) -> Maybe(core.Fault) {
 		return e
 	case runtime.Allocator_Error:
 		return core.Fault{kind = .No_Memory}
-	case core.Document_Error, core.Path_Error, core.Typed_Failure, core.Typed_Error_Kind:
+	case core.Document_Error, core.Path_Error, core.Typed_Error, core.Typed_Error_Kind:
 		return core.Fault{kind = .No_Memory}
 	case nil:
 	}
@@ -937,7 +937,7 @@ at_of :: proc "contextless" (err: core.Error) -> u64 {
 		return e.at
 	case core.Path_Error:
 		return e.at
-	case core.Typed_Failure:
+	case core.Typed_Error:
 		return e.at
 	case runtime.Allocator_Error, core.Typed_Error_Kind:
 	case nil:
@@ -945,8 +945,8 @@ at_of :: proc "contextless" (err: core.Error) -> u64 {
 	return 0
 }
 
-// The `Document_Error`, `Path_Error` or `Typed_Error` that `err` holds, zero when it holds another arm. A bare
-// `Typed_Error_Kind` is a `Typed_Error` of that kind.
+// The `Document_Error`, `Path_Error` or `Typed_Refusal` that `err` holds, zero when it holds another arm. A bare
+// `Typed_Error_Kind` is a `Typed_Refusal` of that kind.
 document_of :: proc "contextless" (err: core.Error) -> core.Document_Error {
 	e, _ := err.(core.Document_Error)
 	return e
@@ -957,10 +957,10 @@ path_of :: proc "contextless" (err: core.Error) -> core.Path_Error {
 	return e
 }
 
-typed_of :: proc "contextless" (err: core.Error) -> core.Typed_Error {
+typed_of :: proc "contextless" (err: core.Error) -> core.Typed_Refusal {
 	switch e in err {
-	case core.Typed_Failure:
-		return core.typed_error_of(e)
+	case core.Typed_Error:
+		return core.typed_refusal_of(e)
 	case core.Typed_Error_Kind:
 		return {kind = e}
 	case core.Fault:
@@ -994,7 +994,7 @@ is_duplicate :: proc "contextless" (err: core.Error) -> bool {
 // allocation refused is `.No_Memory`.
 typed_kind :: proc "contextless" (err: core.Error) -> core.Typed_Error_Kind {
 	switch e in err {
-	case core.Typed_Failure:
+	case core.Typed_Error:
 		return e.kind
 	case core.Typed_Error_Kind:
 		return e
@@ -1026,8 +1026,8 @@ same_error :: proc "contextless" (a, b: core.Error) -> bool {
 	case core.Path_Error:
 		y, ok := b.(core.Path_Error)
 		return ok && x == y
-	case core.Typed_Failure:
-		y, ok := b.(core.Typed_Failure)
+	case core.Typed_Error:
+		y, ok := b.(core.Typed_Error)
 		return ok && x.kind == y.kind && x.at == y.at
 	case core.Typed_Error_Kind:
 		y, ok := b.(core.Typed_Error_Kind)

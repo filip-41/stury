@@ -42,7 +42,7 @@ convert_document :: proc(t: ^testing.T, c: ^schema.Compiled, doc: ^core.Document
 
 @(private = "file")
 expect_refused :: proc(t: ^testing.T, got: Converted, stage: schema.Stage, path: ..core.Step) {
-	failure, _ := got.err.(core.Typed_Failure)
+	failure, _ := got.err.(core.Typed_Error)
 	testing.expectf(t, got.stage == stage && got.err != nil, "stage %v, %v", got.stage, got.err)
 	testing.expectf(t, len(failure.steps) == len(path), "path %v, want %v", failure.steps, path)
 	for step, i in path {
@@ -67,7 +67,7 @@ convert_refuses_an_input_that_fails_the_schema :: proc(t: ^testing.T) {
 	s := `{"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}`
 	got := converted(t, s, `{"id": "7"}`, json.as(.Json), json.as(.Json5))
 	testing.expect_value(t, got.stage, schema.Stage.Input)
-	_, is_failure := got.err.(core.Typed_Failure)
+	_, is_failure := got.err.(core.Typed_Error)
 	testing.expect(t, is_failure)
 }
 

@@ -38,7 +38,7 @@ converter_init :: proc(cv: ^Converter, c: ^Compiled, from, to: core.As) -> (err:
 	cv.into = bind(c, to) or_return
 	if virtual.arena_init_growing(&cv.arena) != nil {
 		unbind(&cv.into)
-		return core.error_of(core.Typed_Error{kind = .No_Memory})
+		return core.error_of(core.Typed_Refusal{kind = .No_Memory})
 	}
 	return
 }
@@ -149,7 +149,7 @@ locate :: proc(m: ^Model, doc: ^core.Document, wrote: Refusal, allocator: runtim
 
 @(private = "file")
 refusal :: proc(kind: core.Typed_Error_Kind, steps: []core.Step, allocator: runtime.Allocator) -> core.Error {
-	e := core.Typed_Error{kind = kind}
+	e := core.Typed_Refusal{kind = kind}
 	kept := steps[max(0, len(steps) - core.MAX_ERROR_STEPS):]
 	e.n_steps, e.truncated = u8(len(kept)), len(kept) < len(steps)
 	copy(e.steps[:], kept)

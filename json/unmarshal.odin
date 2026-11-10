@@ -32,7 +32,7 @@ plan_make :: proc(T: typeid, spec := Spec.Json, opts := Options{}, plan := typed
 	made, err := plan_written(T, spec, opts, plan, reads, allocator)
 	if err == nil && made.build == nil && typed.plan_has_value(&made) {
 		typed.plan_destroy(&made)
-		return {}, core.error_of(core.Typed_Error{kind = .Unsupported})
+		return {}, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
 	return made, err
 }
@@ -71,7 +71,7 @@ plan_bind :: proc(p: ^typed.Plan, reads: ^typed.Format_Reads) {
 
 // The spelling's `plans`.
 @(private)
-plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Error) {
+plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Refusal) {
 	p, err := typed.plan_build(T, as, opts, allocator)
 	p.marshal, p.value_text = marshal_text, write.value_text
 	return p, err
@@ -98,9 +98,9 @@ unmarshal_bound_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan
 unmarshal_chosen :: proc(src: []u8, spec: Spec, target: any, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	data, T, pointer := typed.pointer_target(target)
 	if !pointer {
-		return core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
 	}
-	plan, refusal := plan_make(T, spec, opts, reads = &READS)
+	plan, refusal := plan_make(T, spec, opts, reads = reads_chosen(spec))
 	if refusal != nil {
 		return refusal
 	}
@@ -114,7 +114,7 @@ unmarshal_chosen :: proc(src: []u8, spec: Spec, target: any, opts := Options{}, 
 unmarshal_chosen_plan :: proc(src: []u8, spec: Spec, target: any, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	data, T, pointer := typed.pointer_target(target)
 	if !pointer {
-		return core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
 	}
 	return core.error_of(read_chosen(src, spec, opts, data, T, plan, read, allocator, false))
 }
@@ -128,25 +128,25 @@ check_bound :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read :=
 check_chosen :: proc(src: []u8, spec: Spec, target: any, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	data, T, pointer := typed.pointer_target(target)
 	if !pointer {
-		return core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
 	}
 	return core.error_of(read_chosen(src, spec, options_of(plan.as), data, T, plan, read, allocator, true))
 }
 
-// The plan's `read` and `check` of a whole text under the handle `as`.
+// The reads `build_of` gives for the spec `spec`, chosen at run time.
 @(private)
-read_text_as :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
-	return read_chosen(src, Spec(as.spec), options_of(as), target, T, plan, read, allocator, false)
-}
-
-@(private)
-check_text_as :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
-	return read_chosen(src, Spec(as.spec), options_of(as), target, T, plan, read, allocator, true)
+reads_chosen :: proc(spec: Spec) -> ^typed.Format_Reads {
+	switch spec {
+	case .Json:  return build_of(.Json)
+	case .Jsonc: return build_of(.Jsonc)
+	case .Json5: return build_of(.Json5)
+	}
+	return nil
 }
 
 // Reads a whole text as the spec `spec`, which is chosen at run time and so links the read of every spec.
 @(private)
-read_chosen :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Error {
+read_chosen :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Refusal {
 	switch spec {
 	case .Json:  return read_text(src, .Json, opts, target, T, plan, read, allocator, CHECK)
 	case .Jsonc: return read_text(src, .Jsonc, opts, target, T, plan, read, allocator, CHECK)
@@ -157,10 +157,10 @@ read_chosen :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typ
 
 // Reads a whole text as the constant spec `S`.
 @(private)
-read_text :: proc(src: []u8, $S: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Error {
+read_text :: proc(src: []u8, $S: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Refusal {
 	// A text that nests deeper under a raised `max_depth` grows the frames as it goes.
 	stack: [core.MAX_DEPTH + 2]typed.Frame = ---
-	err: core.Typed_Error
+	err: core.Typed_Refusal
 	when CHECK {
 		mark := typed.sink_mark(read.sink)
 	}
@@ -186,7 +186,7 @@ read_text :: proc(src: []u8, $S: Spec, opts: Options, target: rawptr, T: typeid,
 // copies of it through the record reader's calls cost a record's read more than its tokens. The duplicate check's
 // document lives in an arena on `scratch`, freed before the read, and `scratch` is the read's temp allocator.
 @(private)
-read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, opts: Options, frames: []typed.Frame, allocator, scratch: runtime.Allocator, err: ^core.Typed_Error, $LINE: bool, $CHECK: bool) -> (cold: bool) {
+read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, opts: Options, frames: []typed.Frame, allocator, scratch: runtime.Allocator, err: ^core.Typed_Refusal, $LINE: bool, $CHECK: bool) -> (cold: bool) {
 	if read.dups == .Refuse && !stray_bom(src[lo:cut], lo, S) {
 		arena := runtime.Arena{backing_allocator = scratch, minimum_block_size = 4096}
 		defer runtime.arena_destroy(&arena)
@@ -208,7 +208,7 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 	walk_opts := opts
 	text := src if LINE else src[:cut]
 	regs: core.Hook_Regs
-	started: core.Typed_Error
+	started: core.Typed_Refusal
 	when CHECK {
 		json_reader(&h.reader, untracked(&walk_opts), S)
 		regs, started = typed.check_start(&h, text, plan, bound_as(S, opts), T, target, read, untracked_frames(frames), allocator)

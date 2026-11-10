@@ -206,7 +206,7 @@ compile :: proc(reg: ^Registry, $T: typeid, reads: ^typed.Format_Reads, allocato
 @(private)
 plan_of :: proc(reg: ^Registry, T: typeid, reads: ^typed.Format_Reads, allocator: runtime.Allocator, without: Maybe(typed.Access), whole: ^typed.Plan, layout: Maybe(core.As)) -> (typed.Plan, core.Error) {
 	if reads == nil || reads.plan == nil {
-		return {}, core.error_of(core.Typed_Error{kind = .Unsupported})
+		return {}, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
 	none: Registry
 	c := Compiling{model = {member = member_rule, forbids = forbids, compile = rules.rules_leaf, structs = typed.load_struct, validators = validators_of}, reg = reg if reg != nil else &none, without = without}
@@ -216,7 +216,7 @@ plan_of :: proc(reg: ^Registry, T: typeid, reads: ^typed.Format_Reads, allocator
 	}
 	for x in c.reg.fields {
 		if len(x.field) == 0 || reflect.struct_field_by_name(x.type, x.field).name != x.field {
-			unknown := core.Typed_Error{kind = .Bad_Tag, n_steps = 1}
+			unknown := core.Typed_Refusal{kind = .Bad_Tag, n_steps = 1}
 			unknown.want = {x.type, x.tag}
 			unknown.steps[0] = core.Name(x.field)
 			typed.own_names(&unknown)

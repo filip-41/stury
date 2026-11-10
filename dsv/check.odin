@@ -40,7 +40,7 @@ Check_Cells :: struct {
 // Readies a model's read of a table, whose rows are structs: a cell is stored by member and judged by the member's rules,
 // by column name under a header and by position under `no_header`.
 @(private)
-model_rows :: proc(h: ^Check_Cells, plan: ^typed.Plan, opts: Options) -> core.Typed_Error {
+model_rows :: proc(h: ^Check_Cells, plan: ^typed.Plan, opts: Options) -> core.Typed_Refusal {
 	row, listed := row_of(plan)
 	h.model, h.single, h.record, h.positional = true, !listed, is_record(row), opts.no_header && is_record(row)
 	return {}
@@ -181,7 +181,7 @@ bind_repeats :: #force_no_inline proc "contextless" (h: ^Check_Cells, regs: core
 
 // Refuses `e`, a fault of the header, with no frame open, so its path is its column alone.
 @(cold, private)
-header_refused :: proc "contextless" (h: ^Check_Cells, regs: core.Hook_Regs, e: core.Typed_Error) -> core.Action {
+header_refused :: proc "contextless" (h: ^Check_Cells, regs: core.Hook_Regs, e: core.Typed_Refusal) -> core.Action {
 	sp := h.c.sp
 	h.c.sp = 1
 	defer h.c.sp = sp
@@ -417,7 +417,7 @@ untracked_frames :: #force_inline proc "contextless" (f: []typed.Frame) -> []typ
 
 // Checks `src`, a text of spec `S`, as the plan's description says.
 @(private)
-check_cells :: proc(src: []u8, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
+check_cells :: proc(src: []u8, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
 	h := Check_Cells{dups = read.dups}
 	frames: [ROW_FRAMES]typed.Frame = ---
 	regs, err := typed.check_start(&h.c, src, untracked(plan), bound_as(S, opts), T, target, read, untracked_frames(frames[:]), allocator)
@@ -462,7 +462,7 @@ Check_Document :: struct {
 // it, as the text's cells do, with an empty cell for a `null`. A partial document names its columns beside each cell it
 // kept, or by position, where a cell it did not keep is an empty one.
 @(private)
-document_check :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
+document_check :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
 	if node != core.ROOT && doc.nodes[node].kind <= .Plain {
 		return {kind = .Unsupported}
 	}
@@ -536,7 +536,7 @@ check_keyed :: proc "contextless" (d: ^Check_Document, _: core.Hook_Regs, i, ope
 // judged with the first row only, and the row's cells follow as the walk of a text would give them. On a stream the text is
 // the header's line then the row's, and the offsets of an error are put back to the window's.
 @(private)
-check_row_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
+check_row_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal, $S: Spec) -> bool {
 	rec, ok := next_row_spec(it, S)
 	opts := options_of(it.as)
 	b := (^Batch)(it.format)
@@ -615,7 +615,7 @@ check_row_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^ty
 
 // Judges the header of a table that has no row, which no record reads, as the check of a text judges it at the table's end.
 @(cold, private)
-judge_header_only :: proc(it: ^records.Reader, b: ^Batch, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) {
+judge_header_only :: proc(it: ^records.Reader, b: ^Batch, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) {
 	src := it.src if it.input.procedure == nil else b.key_src
 	h := Check_Cells{dups = read.dups}
 	regs, started := typed.check_start(&h.c, src, untracked(plan), it.as, T, target, read, untracked_frames(it.frames), allocator)

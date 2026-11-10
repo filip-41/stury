@@ -192,17 +192,7 @@ column_of :: proc(it: ^records.Reader, name: string) -> int {
 // The row is split only up to the cell. A quoted cell with a `""` the split marked, read strictly, is undoubled with no
 // general decode.
 @(private)
-cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool) {
-	switch Spec(it.as.spec) {
-	case .Csv:   return cell_of_spec(it, rec, column, buf, .Csv)
-	case .Tsv:   return cell_of_spec(it, rec, column, buf, .Tsv)
-	case .Plain: return cell_of_spec(it, rec, column, buf, .Plain)
-	}
-	return "", false
-}
-
-@(private)
-cell_of_spec :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8, $S: Spec) -> (string, bool) {
+cell_of_spec :: #force_inline proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8, $S: Spec) -> (string, bool) {
 	if column < 0 {
 		return "", false
 	}
@@ -242,17 +232,7 @@ infer_cells :: proc(cells: []core.Token, texts: []write.Scalar) {
 // The first `upto` cells of `rec`, the row `next` gave last, in `b.texts`, nil for an empty unquoted cell. Under `infer`
 // an unquoted cell that is a number, `true` or `false` is that kind.
 @(private)
-cells_texts :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto: int) -> ([]write.Scalar, bool) {
-	switch Spec(it.as.spec) {
-	case .Csv:   return cells_texts_spec(it, rec, buf, upto, .Csv)
-	case .Tsv:   return cells_texts_spec(it, rec, buf, upto, .Tsv)
-	case .Plain: return cells_texts_spec(it, rec, buf, upto, .Plain)
-	}
-	return nil, false
-}
-
-@(private)
-cells_texts_spec :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto: int, $S: Spec) -> ([]write.Scalar, bool) #no_bounds_check {
+cells_texts_spec :: #force_inline proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto: int, $S: Spec) -> ([]write.Scalar, bool) #no_bounds_check {
 	cells, ok := cells_of(it, rec, S, upto)
 	b := (^Batch)(it.format)
 	if !ok {

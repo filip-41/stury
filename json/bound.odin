@@ -11,7 +11,7 @@ import records "../core/records"
 
 // The tables a constant-spec entry point binds to its spec. Each factory returns the address of a `@(static, rodata)`
 // local of its instance, so a program links the walks of the specs it names. Nothing reachable from here may name `as`,
-// `HANDLE` or `SERVICES`, which reach every spec's walk.
+// `HANDLES` or `SERVICES`, which reach every spec's walk.
 
 // The readers of a document built as spec `S`: the leaves, and the spec's own `close_end`. It holds no services.
 readers_of :: proc "contextless" ($S: Spec) -> ^core.Readers {
@@ -46,10 +46,10 @@ edit_of :: proc "contextless" ($S: Spec) -> ^core.Edit_Services {
 // The typed reads of a plan read as spec `S`.
 reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	@(static, rodata) r := typed.Format_Reads {
-		read  = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {return read_text(src, S, options_of(as), target, T, plan, read, allocator, false)},
-		check = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {return read_text(src, S, options_of(as), target, T, plan, read, allocator, true)},
+		read  = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, S, options_of(as), target, T, plan, read, allocator, false)},
+		check = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, S, options_of(as), target, T, plan, read, allocator, true)},
 		build = proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_spec(src, S, as, false, allocator)},
-		plan  = proc(T: typeid, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Error) {
+		plan  = proc(T: typeid, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Refusal) {
 			p, err := typed.plan_build(T, plan_handle(S, {}), opts, allocator)
 			plan_bind(&p, reads_of(S))
 			return p, err

@@ -20,7 +20,7 @@ describe :: proc(plan: ^typed.Plan, direction: Direction, allocator: runtime.All
 	d.allocator = allocator
 	d.names = make(map[rules.Node_Index]string, allocator)
 	if plan.type == nil {
-		return d, core.error_of(core.Typed_Error{kind = .Bad_Option})
+		return d, core.error_of(core.Typed_Refusal{kind = .Bad_Option})
 	}
 	r := Reading{plan = plan, d = &d, direction = direction}
 	defer delete(r.nodes)

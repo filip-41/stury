@@ -8,16 +8,6 @@ import records "../core/records"
 
 // JSON's `Services.scan` walk and its record service, which `core/build`'s path reads run.
 
-// The spelling's `scan`: the walk compiled for the handle's spec.
-scan_as :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
-	switch Spec(handle.spec) {
-	case .Json:  return scan_spec(src, .Json, handle, paths, read, state, on, allocator)
-	case .Jsonc: return scan_spec(src, .Jsonc, handle, paths, read, state, on, allocator)
-	case .Json5: return scan_spec(src, .Json5, handle, paths, read, state, on, allocator)
-	}
-	return {}, {kind = .Unsupported}
-}
-
 // Walks `src` as spec `S` with the scan's hook, the stream's when `on` is set, judges what the walk leaves and ends the
 // read.
 scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (doc: core.Document, err: core.Path_Error) {
@@ -80,16 +70,7 @@ rewalk :: proc "contextless" ($S: Spec, $on: proc "contextless" (h: ^engine.Scan
 
 // The record service `scan`. A text of concatenated strict JSON is framed by the walk that reads it, and any other
 // record is framed first and then read in place.
-scan_record :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options) -> (records.Record, core.Path_Error, bool) {
-	switch Spec(it.as.spec) {
-	case .Json:  return scan_record_spec(it, h, last, path, read, .Json)
-	case .Jsonc: return scan_record_spec(it, h, last, path, read, .Jsonc)
-	case .Json5: return scan_record_spec(it, h, last, path, read, .Json5)
-	}
-	return {}, {}, false
-}
-
-scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options, $S: Spec) -> (rec: records.Record, err: core.Path_Error, ok: bool) {
+scan_record_spec :: #force_inline proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options, $S: Spec) -> (rec: records.Record, err: core.Path_Error, ok: bool) {
 	opts := options_of(it.as)
 	walked := it.framing == .Concatenated && S == .Json
 	src := it.src

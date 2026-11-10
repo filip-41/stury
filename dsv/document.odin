@@ -10,58 +10,55 @@ import core "../core"
 import compose "../core/compose"
 import kernel "../core/kernel"
 import build "../core/build"
+import typed "../core/typed"
 
 // dsv's document, built from the walk's tokens over the caller's bytes. A headed text is an `Array` of `Object` records
 // whose first child is the header row, an `Array` of role `Key` whose cells name every record's columns. A text without
 // a header is an `Array` of `Array`s. A cell is `Plain` until a reader asks `core.kind`, and a headed record's shared keys
 // sit in the table's header.
 
-// dsv's edit services, in rodata. The three specs share this table, and each service dispatches on `doc.as.spec`,
-// since the specs differ only in how a recorded text is read.
-@(rodata)
-EDIT := core.Edit_Services {
-	value         = proc(doc: ^core.Token_View, src: []u8, _: runtime.Allocator) -> core.Document_Error {return edit_cells(doc, src, false, edit_record_at)},
-	key_text      = edit_key_text,
-	// A delimited text's comment spelling is `.Byte` with the document's comment byte, or `.None` when the byte is 0.
-	comment       = proc(doc: ^core.Document, _: u8) -> (core.Comment_Spelling, u8) {return (.Byte if doc.as.opts[1] != 0 else .None), doc.as.opts[1]},
-	member_sep    = proc(doc: ^core.Document, c: core.Node_Index) -> string {return edit_record_sep(doc) if c == core.ROOT else string(doc.as.opts[:1])},
-	insert_check  = proc(doc: ^core.Document, c: core.Node_Index, text: string, _: runtime.Allocator) -> core.Document_Error {return edit_cells(doc, transmute([]u8)text, c == core.ROOT, edit_record_at)},
-	interior      = edit_interior,
-	fact_slot     = edit_fact_slot,
-	emptied       = edit_emptied,
-	plan          = proc(doc: ^core.Document, list: ^core.Edit_List, out: ^[dynamic]core.Edit, allocator: runtime.Allocator) -> (bool, core.Document_Error) {return edit_plan(doc, list, out, allocator, edit_record_at)},
-	spell         = edit_spell,
-	validate      = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_from(src, as, 0, 0)},
+// dsv's handles, one per spec, which only `as` names. A handle's readers are the readers a constant build of its spec
+// holds, and its services the passes of that spec, so a call through a handle never switches on the spec. The tables
+// hold pointers to the bound tables, so they are set at startup and never written after.
+HANDLES := [Spec]core.Readers {
+	.Csv   = handle_readers(.Csv, &SERVICES[.Csv]),
+	.Tsv   = handle_readers(.Tsv, &SERVICES[.Tsv]),
+	.Plain = handle_readers(.Plain, &SERVICES[.Plain]),
 }
 
-// dsv's readers, in rodata, the same table for every spec. A service dispatches on `doc.as.spec`, since the
-// specs decode a cell differently: a CSV cell's backslash is a byte and its `""` a quote, a TSV cell's backslash is an
-// escape, and a Plain cell has neither quotes nor escapes.
-HANDLE := core.Readers {
-	text       = proc(v: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool) {return cell_text(v.src, n, Spec(v.spec), buf)},
-	key_equals = spelling_key_equals,
-	number     = spelling_number,
-	resolve    = spelling_resolve,
-	resolves   = proc "contextless" (as: core.As) -> bool {return options_of(as).infer},
-	close_end  = close_end,
-	format     = rules_of,
-	tag_key    = "csv",
-	flat       = true,
-	services   = &SERVICES,
+SERVICES := [Spec]core.Services {
+	.Csv   = handle_services(.Csv),
+	.Tsv   = handle_services(.Tsv),
+	.Plain = handle_services(.Plain),
 }
 
-// dsv's run-time services, which a handle reaches.
-SERVICES := core.Services {
-	build    = build_as,
-	validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_from(src, as, 0, 0)},
-	scan     = scan_as,
-	write    = document_write,
-	edit     = &EDIT,
-	plans    = rawptr(plan_as),
-	reads    = &READS,
-	tokens   = &TOKENS,
-	records  = &FRAMING,
-	docs     = &DOCS,
+// The readers of the handle of spec `S`: `readers_of(S)` with the services of `S`.
+handle_readers :: proc "contextless" ($S: Spec, services: ^core.Services) -> core.Readers {
+	r := readers_of(S)^
+	r.services = services
+	return r
+}
+
+// The run-time services of spec `S`, which a handle reaches.
+handle_services :: proc "contextless" ($S: Spec) -> core.Services {
+	return {
+		build    = proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+			return build_spec(src, S, as.readers, options_of(as), refuse_duplicates, allocator)
+		},
+		validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, S, options_of(as))},
+		scan     = proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
+			return scan_spec(src, S, as, paths, read, state, on, allocator)
+		},
+		write    = document_write,
+		edit     = edit_of(S),
+		plans    = rawptr(proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Refusal) {
+			return plan_built(T, S, options_of(as), opts, checks_of(S), allocator)
+		}),
+		reads    = checks_of(S),
+		tokens   = &TOKENS,
+		records  = framing_of(S),
+		docs     = record_docs(S),
+	}
 }
 
 // dsv's fault table, which names the format whatever the spec.
@@ -78,16 +75,6 @@ SPELLING_DOUBLED :: u16(1 << 15)
 SPELLING_COLUMN :: u16(1 << 14)
 
 #assert(SPELLING_DOUBLED & (core.SPELLING_DECODE | core.SPELLING_QUOTED | core.SPELLING_LAX | core.NUMBER_KIND_MASK) == 0)
-
-// The handle's build: the walk compiled for the handle's spec.
-build_as :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-	switch Spec(as.spec) {
-	case .Csv:   return build_spec(src, .Csv, as.readers, options_of(as), refuse_duplicates, allocator)
-	case .Tsv:   return build_spec(src, .Tsv, as.readers, options_of(as), refuse_duplicates, allocator)
-	case .Plain: return build_spec(src, .Plain, as.readers, options_of(as), refuse_duplicates, allocator)
-	}
-	return {}, {kind = .Bad_Spec}
-}
 
 build_spec :: proc(src: []u8, $S: Spec, readers: ^core.Readers, opts: Options, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	if f, bad := option_fault(S, opts).?; bad {
@@ -490,7 +477,7 @@ header_keys :: proc(doc: ^core.Document) -> []core.Node {
 edit_interior :: proc(doc: ^core.Document, c: core.Node_Index) -> (lo, hi: u64) {
 	if c == core.ROOT {
 		if keys := core.header_of(doc); keys != 0 {
-			lo = close_end(doc, keys)
+			lo = doc.readers.close_end(doc, keys)
 		}
 		return lo, u64(len(doc.src))
 	}
@@ -498,7 +485,7 @@ edit_interior :: proc(doc: ^core.Document, c: core.Node_Index) -> (lo, hi: u64) 
 	if last, ok := core.child_at(doc, c, core.length(doc, c) - 1); ok {
 		return lo, core.node_start(doc.nodes[last]) + u64(len(core.span(doc, last)))
 	}
-	return lo, close_end(doc, c)
+	return lo, doc.readers.close_end(doc, c)
 }
 
 // Whether the output holds a fact: a comment on a record, or on the root above its first record, and a foot on the root.
@@ -615,16 +602,6 @@ edit_record_sep :: proc(doc: ^core.Document) -> string {
 
 Record_Check :: #type proc(doc: ^core.Token_View, src: []u8) -> (cells: int, err: core.Document_Error)
 
-// A record check for the document's spec, which a handle's edit services use.
-edit_record_at :: proc(doc: ^core.Token_View, src: []u8) -> (cells: int, err: core.Document_Error) {
-	switch Spec(doc.spec) {
-	case .Csv:   return edit_record(doc, src, .Csv)
-	case .Tsv:   return edit_record(doc, src, .Tsv)
-	case .Plain: return edit_record(doc, src, .Plain)
-	}
-	return 0, {kind = .Bad_Value}
-}
-
 // The byte just past record `i`'s line end, CR LF included. A record at the text's end stops past its last cell. A
 // header row `.Ragged` widened stops past its last named cell, since a key named by position has no bytes. The root
 // ends at `len(doc.src)`. Only a container span read calls it.
@@ -648,19 +625,8 @@ record_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 	return p
 }
 
-// The byte just past container `i`'s close. The root uses `root_close`, or `len(doc.src)` when the build did not
-// record it, a record ends at its line end.
-@(cold)
-close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
-	switch Spec(doc.as.spec) {
-	case .Csv:   return close_end_spec(doc, i, .Csv)
-	case .Tsv:   return close_end_spec(doc, i, .Tsv)
-	case .Plain: return close_end_spec(doc, i, .Plain)
-	}
-	return 0
-}
-
-// `close_end` for a document of spec `S`.
+// The byte just past container `i`'s close in a document of spec `S`. The root uses `root_close`, or `len(doc.src)`
+// when the build did not record it, a record ends at its line end.
 @(cold)
 close_end_spec :: proc(doc: ^core.Document, i: core.Node_Index, $S: Spec) -> u64 {
 	if i == core.ROOT {

@@ -418,7 +418,7 @@ write :: proc {write_bound, write_chosen}
 @(private)
 write_bound :: proc(doc: ^core.Document, $S: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
 	if int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
-		return nil, 0, core.error_of(core.Typed_Error{kind = .Unsupported})
+		return nil, 0, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
 	out, cut, refusal := write_text(doc, opts, bound_as(S), node, {}, allocator)
 	return out, cut, core.error_of(refusal)
@@ -441,19 +441,6 @@ blank :: proc "contextless" (src: []u8, spec: Spec) -> bool {
 	case .Json5: return gap_end(q, end, .Json5) == end
 	}
 	return false
-}
-
-// The handle's validate: the walk compiled for the handle's spec.
-@(private)
-validate_as :: proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {
-	h: core.No_Hooks
-	regs: core.Hook_Regs
-	switch Spec(as.spec) {
-	case .Json:  return walk_text(src, 0, .Json, options_of(as), &h, &regs, core.no_hook)
-	case .Jsonc: return walk_text(src, 0, .Jsonc, options_of(as), &h, &regs, core.no_hook)
-	case .Json5: return walk_text(src, 0, .Json5, options_of(as), &h, &regs, core.no_hook)
-	}
-	return core.Fault{rules = &RULES, kind = .Bad_Option}
 }
 
 // Reads `src` from `lo` as exactly one document through the hook, as `validate` checks it. A BOM is passed over only

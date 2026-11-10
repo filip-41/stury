@@ -27,7 +27,7 @@ VISIT_TREE :: Tree{.Open_Object = "{", .Close_Object = "}", .Open_Array = "[", .
 // Walks `value`, of `plan`'s type, as `marshal` would write it, and calls `v.call` as `Visit` says. An `any` and a hooked
 // value are not entered. Returns the refusal that ended the visit, with its path. It allocates only for a map or a
 // struct whose members are listed before they are walked.
-visit :: proc(plan: ^typed.Plan, value: rawptr, v: ^Visitor) -> core.Typed_Error {
+visit :: proc(plan: ^typed.Plan, value: rawptr, v: ^Visitor) -> core.Typed_Refusal {
 	if plan.err.kind != .None {
 		return plan.err
 	}

@@ -125,8 +125,8 @@ verdict_path :: proc(path: []core.Step, v: Verdict, allocator: runtime.Allocator
 }
 
 // The refusal of `kind` at byte `at` whose path is `steps`, outermost first, and whose wanted text is `message`.
-refusal_at :: proc(kind: core.Typed_Error_Kind, steps: []core.Step, message: string, at: u64) -> core.Typed_Error {
-	e := core.Typed_Error{kind = kind, at = at}
+refusal_at :: proc(kind: core.Typed_Error_Kind, steps: []core.Step, message: string, at: u64) -> core.Typed_Refusal {
+	e := core.Typed_Refusal{kind = kind, at = at}
 	e.want.text = message
 	#reverse for s in steps {
 		path_add(&e, s)

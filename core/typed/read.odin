@@ -99,7 +99,7 @@ Reader :: struct {
 	// its path from them, since the element's own registers name no member and no index.
 	wrap:      ^core.Hook_Regs,
 	ctx:       runtime.Context,
-	first:     core.Typed_Error,
+	first:     core.Typed_Refusal,
 	sink:      ^Sink,
 	// Finds the member `Plan.union_tag` of the object at a byte, for a union that reads by its tag.
 	find_tag:  proc(h: ^Reader, at: u64) -> Tag_Scan,
@@ -110,7 +110,7 @@ Reader :: struct {
 // Starts a read of `src` into `target`, a value of `plan`'s type. `frames` holds two more than the walk's
 // depth, for the frame below the root's and the root's. The walk then runs with `r` and the returned registers, and
 // `read_end` ends it. A read that is no `Check` passes `judged` false.
-read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator, judged := true) -> (regs: core.Hook_Regs, err: core.Typed_Error) {
+read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator, judged := true) -> (regs: core.Hook_Regs, err: core.Typed_Refusal) {
 	// A model's plan reads only as its load does: by the load plan, as a check, which judges the rules, into a zeroed
 	// target.
 	if plan == nil || !core.same_format(plan.readers, as.readers) || plan.type != T || plan.model_plan == .Whole || plan.model_plan == .Load && !judged {
@@ -176,8 +176,8 @@ read_release :: proc "contextless" (r: ^Reader, frames: []Frame) {
 // The refusal of a read or write given `plan` for a value of `T` in the format `readers` reads, which the plan does not
 // read: the plan's own error when `plan_make` refused it, else `.Plan_Mismatch` naming the two formats, or the plan's
 // type when the formats agree.
-plan_mismatch :: proc "contextless" (plan: ^Plan, readers: ^core.Readers, T: typeid) -> core.Typed_Error {
-	e := core.Typed_Error{kind = .Plan_Mismatch}
+plan_mismatch :: proc "contextless" (plan: ^Plan, readers: ^core.Readers, T: typeid) -> core.Typed_Refusal {
+	e := core.Typed_Refusal{kind = .Plan_Mismatch}
 	if plan == nil {
 		return e
 	}
@@ -190,13 +190,13 @@ plan_mismatch :: proc "contextless" (plan: ^Plan, readers: ^core.Readers, T: typ
 
 // Ends a read: gives the open lists to their destinations, so what the read allocated is reachable from the target, and
 // returns the first refusal or `fault`.
-read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> core.Typed_Error {
+read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> core.Typed_Refusal {
 	if r.plan.checking {
 		taken_settle((^Check)(r))
 	}
 	if f, faulted := fault.?; faulted {
 		context = r.ctx
-		e := core.Typed_Error{kind = .Walk, at = f.at, inner = f}
+		e := core.Typed_Refusal{kind = .Walk, at = f.at, inner = f}
 		if r.sink != nil {
 			r.sink.fatal = e
 		}
@@ -485,7 +485,7 @@ refuse_missing :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame, owner:
 	for at >= 0 {
 		// The struct's frame is reopened for the path, whose last step the name replaces.
 		h.sp += 1
-		r, action := refuse(h, back, core.Typed_Error{kind = .Missing_Field, at = t.lo, steps = {0 = core.Name(h.plan.meta[int(h.plan.meta[owner.meta].block) + int(at)].name)}, n_steps = 1}, t.lo + u64(t.n))
+		r, action := refuse(h, back, core.Typed_Refusal{kind = .Missing_Field, at = t.lo, steps = {0 = core.Name(h.plan.meta[int(h.plan.meta[owner.meta].block) + int(at)].name)}, n_steps = 1}, t.lo + u64(t.n))
 		h.sp -= 1
 		// A `Check` reports every absent member, a read the first.
 		when H != Check {
@@ -542,7 +542,7 @@ close_container :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame, own: 
 		}
 	case .Array:
 		if regs.c != regs.a {
-			return refuse(h, back, core.Typed_Error{kind = .Wrong_Length, at = t.lo}, t.lo + u64(t.n))
+			return refuse(h, back, core.Typed_Refusal{kind = .Wrong_Length, at = t.lo}, t.lo + u64(t.n))
 		}
 	case .Slice, .Dynamic, .Fixed_List:
 		publish_list(h, f, owner, regs.a, regs.c, false)

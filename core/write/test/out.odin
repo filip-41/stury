@@ -165,11 +165,11 @@ refused_allocation_gives_no_bytes :: proc(t: ^testing.T) {
 @(test)
 write_kinds_render :: proc(t: ^testing.T) {
 	Case :: struct {
-		err:     core.Typed_Error,
+		err:     core.Typed_Refusal,
 		code:    string,
 		message: string,
 	}
-	steps := core.Typed_Error{kind = .Non_Finite, n_steps = 2}
+	steps := core.Typed_Refusal{kind = .Non_Finite, n_steps = 2}
 	steps.steps[0], steps.steps[1] = core.Name("price"), core.Index(3)
 	cases := [?]Case {
 		{{kind = .Invalid_Utf8, at = 7}, "typed.invalid_utf8", "Invalid UTF-8"},

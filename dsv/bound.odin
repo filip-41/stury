@@ -10,7 +10,7 @@ import typed "../core/typed"
 
 // The tables a constant-spec entry point binds to its spec. Each factory returns the address of a `@(static, rodata)`
 // local of its instance, so a program links the passes of the specs it names. Nothing reachable from here may name `as`,
-// `HANDLE` or `SERVICES`, which reach every spec's passes.
+// `HANDLES` or `SERVICES`, which reach every spec's passes.
 
 // The readers of a document built as spec `S`: the leaves, and the spec's own `close_end`. It holds no services.
 readers_of :: proc "contextless" ($S: Spec) -> ^core.Readers {
@@ -73,11 +73,11 @@ edit_of :: proc "contextless" ($S: Spec) -> ^core.Edit_Services {
 // The typed reads of a plan read as spec `S`.
 reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	@(static, rodata) r := typed.Format_Reads {
-		read      = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {return read_text(src, S, T, target, plan, options_of(as), read, allocator, false)},
-		check     = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {return read_text(src, S, T, target, plan, options_of(as), read, allocator, true)},
+		read      = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, S, T, target, plan, options_of(as), read, allocator, false)},
+		check     = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, S, T, target, plan, options_of(as), read, allocator, true)},
 		node_read = document_read,
 		build     = proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_spec(src, S, as.readers, options_of(as), false, allocator)},
-		plan      = proc(T: typeid, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Error) {return plan_built(T, S, {}, opts, reads_of(S), allocator)},
+		plan      = proc(T: typeid, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Refusal) {return plan_built(T, S, {}, opts, reads_of(S), allocator)},
 	}
 	return &r
 }
@@ -87,12 +87,12 @@ reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 // check.
 checks_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	@(static, rodata) r := typed.Format_Reads {
-		read       = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {return read_text(src, S, T, target, plan, options_of(as), read, allocator, false)},
-		check      = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {return check_one(src, S, T, target, plan, options_of(as), read, allocator)},
+		read       = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, S, T, target, plan, options_of(as), read, allocator, false)},
+		check      = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return check_one(src, S, T, target, plan, options_of(as), read, allocator)},
 		node_read  = document_read,
 		node_check = document_check,
 		build      = proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_spec(src, S, as.readers, options_of(as), false, allocator)},
-		plan       = proc(T: typeid, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Error) {return plan_built(T, S, {}, opts, checks_of(S), allocator)},
+		plan       = proc(T: typeid, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Refusal) {return plan_built(T, S, {}, opts, checks_of(S), allocator)},
 		docs       = proc "contextless" () -> rawptr {return record_docs(S)},
 	}
 	return &r

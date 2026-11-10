@@ -66,7 +66,7 @@ Rows :: struct {
 	cols:    []Named, // a struct row's columns, in the order written
 	keys:    []string, // a map row's columns, sorted
 	headed:  bool, // the columns are bound
-	err:     core.Typed_Error,
+	err:     core.Typed_Refusal,
 }
 
 @(private)
@@ -89,7 +89,7 @@ layout_ok :: proc(spec: Spec, layout: Options) -> bool {
 
 // The plan's `marshal`: the value is the list of rows.
 @(private)
-marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error) {
+marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
 	spill: [write.ROOM_MAX]u8 = ---
 	w: Rows
 	rows_start(&w, &spill, options_of(plan.as), Spec(plan.spec), opts, stream, allocator, 0)
@@ -139,7 +139,7 @@ rows_free :: proc(w: ^Rows) {
 
 // Ends a write: the text, or the refusal `kind` with the path `w.err` holds.
 @(private)
-rows_end :: proc(w: ^Rows, kind: core.Typed_Error_Kind) -> ([]u8, core.Typed_Error) {
+rows_end :: proc(w: ^Rows, kind: core.Typed_Error_Kind) -> ([]u8, core.Typed_Refusal) {
 	rows_free(w)
 	w.err.kind = kind
 	return write.finish(&w.out, w.err)
@@ -367,7 +367,7 @@ write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed
 // columns and writes the header, unless the caller already wrote the head of the text, and every row after it takes the
 // same plan. What hooks allocate lasts the row.
 @(private)
-token_record :: proc(t: ^write.Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error) -> core.Typed_Error_Kind {
+token_record :: proc(t: ^write.Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Refusal) -> core.Typed_Error_Kind {
 	w := (^Rows)(t.state)
 	row, listed := row_of(plan)
 	if listed || w.plan != nil && w.plan != plan || plan.as != layout_as(w.spec, w.opts) {

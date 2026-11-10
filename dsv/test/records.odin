@@ -486,7 +486,7 @@ Required_Record_Row :: struct {
 @(private = "file")
 moved_error :: proc(err: core.Error, from, by: u64) -> string {
 	#partial switch e in err {
-	case core.Typed_Failure:
+	case core.Typed_Error:
 		moved := e
 		if moved.at >= from {
 			moved.at += by
@@ -827,8 +827,8 @@ rows_stream_read_as_in_memory :: proc(t: ^testing.T) {
 		c := Chunked{src = transmute([]u8)src, sizes = {1 + round % 7}}
 		st := records.open_stream(chunked(&c), dsv.as(spec, opts))
 		ms, ss: typed.Sink
-		ms.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
-		ss.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
+		ms.errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)
+		ss.errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)
 		for {
 			v, w: Required_Record_Row
 			err, more := records.read(&st, &v, &plan, {sink = &ss, unknown = .Refuse}, context.temp_allocator)

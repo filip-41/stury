@@ -669,13 +669,13 @@ infer_records :: proc(inf: ^Inferred, src: []u8, as: core.As, framing := core.Fr
 		}
 		// The pieces past a fault hold records that are no records of the text.
 		if k <= sums.bad_at && merge(inf, s) != .None && err == nil {
-			err = core.error_of(core.Typed_Error{kind = .No_Memory})
+			err = core.error_of(core.Typed_Refusal{kind = .No_Memory})
 		}
 		inferred_destroy(s)
 		free(s, heap)
 	}
 	if sums.failed && err == nil {
-		err = core.error_of(core.Typed_Error{kind = .No_Memory})
+		err = core.error_of(core.Typed_Refusal{kind = .No_Memory})
 	}
 	return err
 }
@@ -712,7 +712,7 @@ infer_piece :: proc(sums: ^Piece_Sums, it: ^records.Reader, k: int) -> bool {
 			break
 		}
 		if infer(mine, core.Node_Ref{&doc, core.ROOT}) != .None {
-			bad = core.error_of(core.Typed_Error{kind = .No_Memory})
+			bad = core.error_of(core.Typed_Refusal{kind = .No_Memory})
 		}
 		core.destroy(&doc)
 	}

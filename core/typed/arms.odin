@@ -471,7 +471,7 @@ Arm_Run :: struct {
 @(private)
 Failed :: struct {
 	index:    int,
-	first:    core.Typed_Error,
+	first:    core.Typed_Refusal,
 	from, to: int,
 }
 
@@ -1204,14 +1204,14 @@ fork_finish :: proc(h: ^Check, fk: ^Fork, hi: u64) -> core.Action {
 // Adds a failure of kind `kind` under the keyword `word` of the held record to the sink.
 @(private)
 fork_note :: proc(h: ^Check, fk: ^Fork, kind: core.Typed_Error_Kind, hi: u64, word: string, operand := "") {
-	e := core.Typed_Error{kind = kind, at = fk.lo}
+	e := core.Typed_Refusal{kind = kind, at = fk.lo}
 	e.want.text = operand
 	note(h, fk.regs, e, hi, word)
 }
 
 // Makes the failures `entries` of the chosen run `r` the held value's.
 @(private)
-fork_deliver :: proc(h: ^Check, r: ^Run, entries: []core.Error_Entry, first := core.Typed_Error{}) {
+fork_deliver :: proc(h: ^Check, r: ^Run, entries: []core.Error_Entry, first := core.Typed_Refusal{}) {
 	first := first if r == nil else r.c.first
 	if first.kind == .None {
 		return
@@ -1292,7 +1292,7 @@ fork_passes :: proc(data: rawptr, index: int, rec: i32) -> bool {
 // Notes the fault `e` at the innermost held value open in `c` by the check of the run that reads it, whose frames place
 // it, as the outermost check's. Says whether a held value was open.
 @(private)
-fault_note :: proc(c: ^Check, regs: core.Hook_Regs, e: core.Typed_Error) -> bool {
+fault_note :: proc(c: ^Check, regs: core.Hook_Regs, e: core.Typed_Refusal) -> bool {
 	at, at_regs := c, regs
 	for at.fork != nil && at.fork.open {
 		r: ^Run
@@ -1553,7 +1553,7 @@ taken_settle :: proc "contextless" (c: ^Check) {
 		}
 	}
 	if top != nil && c.first.kind != .None && c.first.kind != .Walk && c.fatal == .None {
-		e := core.Typed_Error{kind = .No_Arm, at = top.lo}
+		e := core.Typed_Refusal{kind = .No_Arm, at = top.lo}
 		sp := c.sp
 		c.sp = top.below
 		path_of(c, top.regs, &e)

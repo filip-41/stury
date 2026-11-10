@@ -88,7 +88,7 @@ line_end_len :: proc(src: []u8, pos: u64) -> u64
 locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines = nil) -> (line, col: u64)
 make_room :: #force_inline proc(a: ^[dynamic]$T)
 move_document_error :: proc(e: ^Document_Error, by: u64)
-move_typed_error :: proc(e: ^Typed_Error, by: u64)
+move_typed_error :: proc(e: ^Typed_Refusal, by: u64)
 no_hook :: #force_inline proc "contextless" (h: ^No_Hooks, s: Hook_Regs, t: Token) -> (Hook_Regs, Action)
 node_start :: #force_inline proc(n: Node) -> u64
 node_string :: proc(doc: ^Document, i: Node_Index) -> string
@@ -134,7 +134,7 @@ text_spelling :: #force_inline proc "contextless" (escaped, lax: bool) -> u16
 text_start :: proc "contextless" (src: []u8, lo: u64) -> u64
 token_text :: proc(readers: ^Readers, view: ^Token_View, t: Token, allocator: runtime.Allocator) -> (s: string, ok: bool)
 trail_array :: proc(t: Trail) -> ^Array
-typed_error_of :: proc "contextless" (f: Typed_Failure) -> Typed_Error
+typed_refusal_of :: proc "contextless" (f: Typed_Error) -> Typed_Refusal
 write_entry_message :: proc(w: io.Writer, e: Error_Entry) -> io.Error
 write_fault_message :: proc(w: io.Writer, src: []u8, f: Fault) -> io.Error
 write_steps :: proc(w: io.Writer, steps: []Step, whole: bool) -> io.Error
@@ -235,7 +235,7 @@ KEY_SIZE_MAX :: 240
 Verdict :: struct { member: string, failure: Failure, }
 check_document :: proc(doc: ^core.Document, node: core.Node_Index, target: rawptr, T: typeid, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
 check_member :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token, fld: ^Field, dest: uintptr) -> core.Action
-check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error)
+check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Refusal)
 check_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator := context.allocator) -> core.Error
 enum_member :: proc "contextless" (info: ^runtime.Type_Info_Enum, value: i64) -> int
 field_at :: #force_inline proc "contextless" (b: u64) -> ^Field
@@ -251,31 +251,31 @@ on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, 
 on_token_check :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
 on_token_check_spelled :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
 on_token_spelled :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
-own_errors :: proc(e: ^core.Typed_Error, c: ^Sink)
-path_add :: proc "contextless" (e: ^core.Typed_Error, s: core.Step)
-path_close :: proc "contextless" (e: ^core.Typed_Error)
-plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Typed_Error)
+own_errors :: proc(e: ^core.Typed_Refusal, c: ^Sink)
+path_add :: proc "contextless" (e: ^core.Typed_Refusal, s: core.Step)
+path_close :: proc "contextless" (e: ^core.Typed_Refusal)
+plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Typed_Refusal)
 plan_has_value :: proc(p: ^Plan) -> bool
-plan_mismatch :: proc "contextless" (plan: ^Plan, readers: ^core.Readers, T: typeid) -> core.Typed_Error
+plan_mismatch :: proc "contextless" (plan: ^Plan, readers: ^core.Readers, T: typeid) -> core.Typed_Refusal
 plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Error)
 plan_reads :: proc(p: ^Plan, reads: ^Format_Reads)
 pointer_target :: proc "contextless" (target: any) -> (data: rawptr, T: typeid, pointer: bool)
-read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> core.Typed_Error
+read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> core.Typed_Refusal
 read_release :: proc "contextless" (r: ^Reader, frames: []Frame)
-read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator, judged := true) -> (regs: core.Hook_Regs, err: core.Typed_Error)
-refusal_at :: proc(kind: core.Typed_Error_Kind, steps: []core.Step, message: string, at: u64) -> core.Typed_Error
+read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator, judged := true) -> (regs: core.Hook_Regs, err: core.Typed_Refusal)
+refusal_at :: proc(kind: core.Typed_Error_Kind, steps: []core.Step, message: string, at: u64) -> core.Typed_Refusal
 refuse_element :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action)
 refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, regs_in: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action)
 rejudge :: proc(read: Read_Options, mark: Sink_Mark, own: ^Sink, allocator: runtime.Allocator) -> Read_Options
-rejudged :: proc(own: ^Sink, e: core.Typed_Error) -> (first: core.Typed_Error)
+rejudged :: proc(own: ^Sink, e: core.Typed_Refusal) -> (first: core.Typed_Refusal)
 run_before :: proc(h: ^Check, regs: core.Hook_Regs, b: ^Before, value: core.Value, lo, hi: u64) -> (out: core.Value, back: core.Hook_Regs, action: core.Action, failed: bool)
 scalar_text :: proc "contextless" (v: core.Value, buf: ^[spell.F64_ROOM]u8) -> (text: string, ok: bool)
 select_member :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, i: int) -> (core.Hook_Regs, core.Action)
 sink_add :: proc(c: ^Sink, e: core.Error_Entry) -> (added: bool, err: runtime.Allocator_Error)
 sink_entry :: proc(c: ^Sink, entry: core.Error_Entry, steps, words: []core.Step, reverse: bool) -> bool
-sink_error :: proc(c: ^Sink, e: core.Typed_Error)
+sink_error :: proc(c: ^Sink, e: core.Typed_Refusal)
 sink_mark :: #force_inline proc(c: ^Sink) -> Sink_Mark
-sink_refusal :: proc(c: ^Sink, e: core.Typed_Error, $wide: bool)
+sink_refusal :: proc(c: ^Sink, e: core.Typed_Refusal, $wide: bool)
 sink_restore :: proc(c: ^Sink, m: Sink_Mark)
 sink_room :: proc(c: ^Sink, allocator: runtime.Allocator) -> bool
 store_cstring :: proc(h: ^Reader, t: core.Token, dest: uintptr) -> core.Typed_Error_Kind
@@ -295,11 +295,11 @@ edit_input :: proc(v: $T, plan: ^typed.Plan, scratch: ^Scratch) -> (in_: core.Ed
 end_record :: proc(t: ^Tokens) -> core.Typed_Error_Kind
 enum_spelled :: proc(plan: ^typed.Plan, info: ^runtime.Type_Info_Enum, value: i64, p: [^]u8) -> (string, core.Typed_Error_Kind)
 enum_value :: proc "contextless" (info: ^runtime.Type_Info_Enum, v: uintptr) -> i64
-finish :: proc(out: ^Out, refused := core.Typed_Error{}) -> (bytes: []u8, err: core.Typed_Error)
+finish :: proc(out: ^Out, refused := core.Typed_Refusal{}) -> (bytes: []u8, err: core.Typed_Refusal)
 init :: proc(out: ^Out, spill: ^[ROOM_MAX]u8, allocator := context.allocator, stream := io.Stream{}, hint := 0)
 int_text :: proc(p: [^]u8, kind: typed.Read_Kind, v: uintptr) -> int
 loaded :: proc "contextless" (v: uintptr, size: int, signed := false) -> (bits: u64)
-marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, $T: Tree, $put, $put_opted: Put) -> ([]u8, core.Typed_Error)
+marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, $T: Tree, $put, $put_opted: Put) -> ([]u8, core.Typed_Refusal)
 number_text :: proc(p: [^]u8, n: core.Number) -> (size: int, kind: core.Typed_Error_Kind)
 put_byte :: #force_inline proc(out: ^Out, b: u8)
 put_decimal :: proc(out: ^Out, lit: string, spelling: u16) -> core.Typed_Error_Kind
@@ -314,18 +314,18 @@ report_record :: proc(t: ^Tokens, r: Report, e: core.Error_Entry)
 room :: #force_inline proc(out: ^Out, n: int) -> [^]u8 #no_bounds_check
 scratch_destroy :: proc(s: ^Scratch)
 side_plan :: proc(side: ^map[typeid]^typed.Plan, parent: ^typed.Plan, T: typeid) -> (^typed.Plan, core.Typed_Error_Kind)
-tokens_finish :: proc(t: ^Tokens) -> (bytes: []u8, err: core.Typed_Error)
+tokens_finish :: proc(t: ^Tokens) -> (bytes: []u8, err: core.Typed_Refusal)
 tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}, spell: ^Token_Spelling = nil) -> core.Typed_Error_Kind
-tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind
+tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Refusal, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind
 tokens_release :: proc(t: ^Tokens)
 union_arm :: proc(m: ^typed.Meta, v: uintptr) -> ^typed.Arm
 value_of :: proc(t: ^Tokens, v: core.Value, comments := false) -> core.Typed_Error_Kind
-value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
-visit :: proc(plan: ^typed.Plan, value: rawptr, v: ^Visitor) -> core.Typed_Error
+value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal)
+visit :: proc(plan: ^typed.Plan, value: rawptr, v: ^Visitor) -> core.Typed_Refusal
 visit_path :: proc(v: ^Visitor, steps: ^[dynamic]core.Step) -> bool
-write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator) -> (text: []u8, err: core.Typed_Error)
+write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator) -> (text: []u8, err: core.Typed_Refusal)
 # core/records
-check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, outer: ^typed.Outer, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0, dups := core.Duplicates.Default, repeats := typed.Repeats.Ignore) -> (records: i64, failure: core.Typed_Error, fatal: core.Typed_Error, failed: i64)
+check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, outer: ^typed.Outer, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0, dups := core.Duplicates.Default, repeats := typed.Repeats.Ignore) -> (records: i64, failure: core.Typed_Refusal, fatal: core.Typed_Refusal, failed: i64)
 entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64) -> bool
 entries_of :: proc(src: []u8, as: core.As) -> (whole: core.As, at: u64, ok: bool)
 next_window :: proc(it: ^Reader) -> (window: []u8, base: u64, ok: bool)

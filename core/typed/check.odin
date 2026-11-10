@@ -61,10 +61,10 @@ Outer :: struct {
 KEYS := [1]core.Step{core.Name("propertyNames")}
 
 // A format's read of a whole text into `target`, a value of `plan`'s type `T`, under the handle `as`.
-Text_Read :: #type proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error
+Text_Read :: #type proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal
 
 // A format's read of a node of a built document into `target`.
-Node_Read :: #type proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error
+Node_Read :: #type proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal
 
 // What a format reads typed values with, where its `Services.reads` points. A plan copies the procedures. `check` and
 // `node_check` are the reads that report to a `Sink`'s `entries`, nil for a format that has none. `plan` builds the plan
@@ -73,7 +73,7 @@ Format_Reads :: struct {
 	read, check:           Text_Read,
 	node_read, node_check: Node_Read,
 	build:                 Text_Build,
-	plan:                  proc(T: typeid, opts: Plan_Options, allocator: runtime.Allocator) -> (Plan, core.Typed_Error),
+	plan:                  proc(T: typeid, opts: Plan_Options, allocator: runtime.Allocator) -> (Plan, core.Typed_Refusal),
 	// The format's `^records.Record_Docs` for a spec named at compile time, which a model's read of records installs in a
 	// reader that has none. Nil for reads that give none.
 	docs:                  proc "contextless" () -> rawptr,
@@ -83,7 +83,7 @@ Format_Reads :: struct {
 Text_Build :: #type proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error)
 
 // Starts a `Check` read, as `read_start` starts a read of the plan's own type. Its sink takes `core.Error_Entry`s.
-check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error) {
+check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Refusal) {
 	regs, err = read_start(&c.reader, src, plan, as, T, target, read, frames, allocator)
 	c.wide, c.outer = true, read.outer
 	c.repeats, c.tracked, c.floor = read.repeats, 0, len(read.sink.entries) if read.sink != nil else 0
@@ -713,7 +713,7 @@ check_close :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, owner:
 		for i := missing_member(h, f, owner, regs, 0); i >= 0; i = missing_member(h, f, owner, regs, i + 1) {
 			// The object's frame is reopened for the path, whose last step the name replaces.
 			// The path is the object's, as a schema's output names it, and the entry's operand names the member.
-			e := core.Typed_Error{kind = .Missing_Field, at = lo}
+			e := core.Typed_Refusal{kind = .Missing_Field, at = lo}
 			e.want.text = h.plan.meta[m.block + i].name
 			note(h, at, e, hi, "required")
 			if h.sink == nil {
@@ -749,7 +749,7 @@ dependent_missing :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, 
 		}
 		for want in r.wants {
 			if !member_seen(h, f, owner, regs, want) {
-				e := core.Typed_Error{kind = .Missing_Field, at = lo}
+				e := core.Typed_Refusal{kind = .Missing_Field, at = lo}
 				e.want.text = h.plan.meta[m.block + want].name
 				note(h, at, e, hi, "dependentRequired")
 				if h.sink == nil {
@@ -855,7 +855,7 @@ rejudge :: proc(read: Read_Options, mark: Sink_Mark, own: ^Sink, allocator: runt
 
 // The refusal of a read `rejudge` gave `own` as its sink, `e` when it ended on a fault, else the first entry it kept, none
 // for a text whose repeats left it nothing to fail. Frees `own`.
-rejudged :: proc(own: ^Sink, e: core.Typed_Error) -> (first: core.Typed_Error) {
+rejudged :: proc(own: ^Sink, e: core.Typed_Refusal) -> (first: core.Typed_Refusal) {
 	defer sink_destroy(own)
 	switch {
 	case e.kind == .Walk || e.kind == .No_Memory:

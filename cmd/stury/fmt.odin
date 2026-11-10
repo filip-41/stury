@@ -313,7 +313,7 @@ write_failed :: proc(path: string, err: os.Error) -> bool {
 // The kind of typed refusal `err`, a write's, which is a typed error or an allocation refused.
 write_refusal_kind :: proc(err: core.Error) -> core.Typed_Error_Kind {
 	switch e in err {
-	case core.Typed_Failure:
+	case core.Typed_Error:
 		return e.kind
 	case core.Typed_Error_Kind:
 		return e

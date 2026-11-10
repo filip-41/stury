@@ -35,8 +35,8 @@ JSON are `max_depth`, `tolerate` and `refuse_non_finite`, and for dsv `no_header
 
 ## Errors
 
-An error is a value with a `kind` and the byte it concerns, allocated nowhere: a text it names is a view of the input,
-the path's text or the plan. `err != nil` is the test, and `or_return` passes it up. Every call of the
+An error is a value with a `kind` and the byte it concerns. A text it names is a view of the input, the path's text or
+the plan, and the one thing allocated is a typed error's path, `steps`, by `context.temp_allocator`. `err != nil` is the test, and `or_return` passes it up. Every call of the
 library returns one union, `json.Error`, whose arms are `json.Fault` (a text broke the grammar, from `validate`, a build, a
 scan or a read), `runtime.Allocator_Error` (an allocation was refused), `json.Document_Error` (an edit or a commit was
 refused), `json.Path_Error`, `json.Typed_Error` (a read or write of an Odin value) and `json.Typed_Error_Kind` (a write

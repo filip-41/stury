@@ -171,6 +171,21 @@
   `dsv/names.odin`.
 - `json.query`, `dsv.query`, `json.commit` and `dsv.commit` replace `core.query` and `core.commit`. `commit` returns
   `Error`. The `query` and `commit` slots of the format tables are gone.
+- `core.Value` is the one value of the library, a union a built value and a node of a document both fit: null, a
+  `bool`, an `f64`, a `^Number_Text` that keeps a number's digits, a `string`, an `^Array`, an `^Object` and a
+  `Node_Ref`, the `{doc, node}` struct that was `core.Value`. `kind`, `length`, `member`, `children`, `pairs`, `text`
+  and `number` read a value as they read a node, `equal`, `compare` and `hash` order values as jq does, and
+  `write_value`, `marshal_value` and `unmarshal_value` write one, make one from an Odin value and read one into an
+  Odin value.
+- `set`, `set_member` and `insert` take an Odin value, which the document's format spells in the layout of the place it
+  goes: a string, a number, a bool, a `Value`, or a struct, a slice or a map with its plan. `typed.Raw(text)` is the
+  text of a value as it is. A string that is not UTF-8 is refused. `set` on an edit list is `set_node` in `json` and
+  `dsv`, where `set` takes a path.
+- `json.answers` and `dsv.answers` give a path's answers one at a time through `next`, with no document.
+  `json.walk` and `dsv.walk` take a `^Cursor`, which holds where a hook's `.Stop` left the walk, and `walk_resume`
+  goes on from there.
+- A dsv build with `Options.infer` writes each cell's kind into its node, and a table's row is reached by its
+  position: `child_at` on a table with a width is one step whatever the index.
 
 ### Errors
 
@@ -182,7 +197,9 @@
   `core.Error`, a union of those types, `runtime.Allocator_Error` and `Typed_Error_Kind`, so `or_return` passes any of
   them up and `err != nil` is the test. `core.error_of` makes the union from a concrete error. A refused allocation is
   `runtime.Allocator_Error.Out_Of_Memory`, a walk's fault is the `Fault` arm, and a repeated key met by a build, read
-  or scan is `Fault{kind = .Duplicate_Key}`. `core.render` and `core.write_code` take an `Error`, and `Path_Edit_Error`,
+  or scan is `Fault{kind = .Duplicate_Key}`. A `Typed_Error`'s path is `steps: []Step`, copied to
+  `context.temp_allocator`, and the type with the path in line, which a sink's `errors` hold, is `Typed_Refusal`.
+  `core.render` and `core.write_code` take an `Error`, and `Path_Edit_Error`,
   `render_edit` and `write_edit_code` are gone. A repeated key under `.Refuse` in a path edit has the code
   `duplicate_key`.
 

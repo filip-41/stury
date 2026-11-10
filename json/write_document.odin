@@ -354,13 +354,13 @@ copies_strings :: #force_inline proc "contextless" (opts: core.Write_Options) ->
 // once for each. A partial document keeps no comments. A document nested past `MAX_DEPTH` was built under a raised
 // `max_depth` and is written.
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
-	return {readers = &HANDLE, max_depth = opts.max_depth, spec = u8(spec), tolerate = opts.tolerate, opts = {0 = u8(opts.refuse_non_finite)}}
+	return {readers = &HANDLES[spec] if spec <= max(Spec) else nil, max_depth = opts.max_depth, spec = u8(spec), tolerate = opts.tolerate, opts = {0 = u8(opts.refuse_non_finite)}}
 }
 
 // The spelling's `write`: node `node` of `doc`, which `core.write` checked is a value the document holds, as the spec
 // `as` names.
 @(private)
-write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Error) {
+write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Refusal) {
 	// The source bytes and the nodes the write covers. A partial document's node holds no span of its own text, so its
 	// output grows from the least room.
 	src, count := doc.src, len(doc.nodes)

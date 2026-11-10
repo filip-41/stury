@@ -124,7 +124,7 @@ Walker :: struct {
 	side:      map[typeid]^typed.Plan,
 	arena:     runtime.Arena, // what hooks allocate
 	tag_field: typed.Field, // the record of a union's tag, a string
-	err:       core.Typed_Error,
+	err:       core.Typed_Refusal,
 	// A visit's visitor, and the open frame and depth of the record it is called at, which `visit_path` reads.
 	visitor:   ^Visitor,
 	open:      Frame,
@@ -152,7 +152,7 @@ marshal_stream :: proc(w: io.Stream, value: any, plan: ^typed.Plan, write := cor
 }
 
 @(private)
-check_value :: proc(value: any, plan: ^typed.Plan) -> core.Typed_Error {
+check_value :: proc(value: any, plan: ^typed.Plan) -> core.Typed_Refusal {
 	if plan != nil && plan.err.kind != .None {
 		return plan.err
 	}
@@ -171,7 +171,7 @@ check_value :: proc(value: any, plan: ^typed.Plan) -> core.Typed_Error {
 // The compact and pretty instances of a format's walk, each with the plain string writer `put` and with `put_opted`, the
 // one a call with `ascii` or `escape_html` takes. `Plan.marshal` is a format's one call of this. The text comes from
 // `allocator`, and what lasts only the call from `context.allocator`.
-marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, $T: Tree, $put, $put_opted: Put) -> ([]u8, core.Typed_Error) {
+marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, $T: Tree, $put, $put_opted: Put) -> ([]u8, core.Typed_Refusal) {
 	frames: [FRAMES]Frame = ---
 	ptrs: [core.MAX_DEPTH]Target = ---
 	spill: [ROOM_MAX]u8 = ---
@@ -227,7 +227,7 @@ Held_Walker :: struct {
 // walker is made at the first value and kept until `tokens_release`, so a run of values sets it up once, and the token
 // write's output moves into it, so `t.out` points into the walker from then on. A refusal's
 // kind and path go to `err`, and the kind is returned.
-tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind {
+tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Refusal, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind {
 	h := (^Held_Walker)(t.state)
 	if h == nil {
 		// The stacks are written before they are read, so only the walker is zeroed.

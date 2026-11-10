@@ -487,16 +487,29 @@ Typed_Error_Kind :: enum u8 {
 	Custom, // a value a model's validator refused, `want.text` holds its message
 }
 
-// The steps a `Typed_Error` holds.
+// The steps a `Typed_Refusal` holds.
 MAX_ERROR_STEPS :: 8
 
-// A typed read's or write's refusal. `at` is the value's byte in the source, 0 for a write and for a kind with no
-// byte. `steps[:n_steps]` is the path to the value from the target, the innermost `MAX_ERROR_STEPS` when `truncated`
-// says more were cut from the front. A step's name lives as long as `src` or the plan,
-// or for a decoded key as long as `context.temp_allocator`'s block. `found` is the kind of the value a `.Wrong_Kind`
-// read. `.Write_Failed` holds what the stream answered in `cause`, which is `.Unknown` for most failures of a `core:os`
-// file stream. `detail` holds the rest by kind.
+// A typed read's or write's refusal, as an `Error` holds it. `at` is the value's byte in the source, 0 for a write and
+// for a kind with no byte. `steps` is the path to the value from the target, the innermost `MAX_ERROR_STEPS` when
+// `truncated` says more were cut from the front. The path is a slice of an allocator's, so that the union stays small
+// on the path of every call that returns nil. A step's name lives as long as `src` or the plan, or for a decoded key as
+// long as `context.temp_allocator`'s block. `found` is the kind of the value a `.Wrong_Kind` read. `.Write_Failed` holds
+// what the stream answered in `cause`, which is `.Unknown` for most failures of a `core:os` file stream. `detail` holds
+// the rest by kind.
 Typed_Error :: struct {
+	kind:         Typed_Error_Kind,
+	truncated:    bool,
+	found:        Kind,
+	cause:        io.Error,
+	at:           u64,
+	using detail: Typed_Detail,
+	steps:        []Step,
+}
+
+// A `Typed_Error` with its path in line, `steps[:n_steps]`: what a reader, a writer and a sink hold, so that a refusal
+// allocates nothing.
+Typed_Refusal :: struct {
 	kind:         Typed_Error_Kind,
 	truncated:    bool,
 	n_steps:      u8,
@@ -507,24 +520,12 @@ Typed_Error :: struct {
 	steps:        [MAX_ERROR_STEPS]Step,
 }
 
-// A `Typed_Error` as an `Error` holds it: the same fields, with the path in `steps` as a slice of an allocator's, so
-// that the union stays small on the path of every call that returns nil. `truncated` is as in `Typed_Error`.
-Typed_Failure :: struct {
-	kind:         Typed_Error_Kind,
-	truncated:    bool,
-	found:        Kind,
-	cause:        io.Error,
-	at:           u64,
-	using detail: Typed_Detail,
-	steps:        []Step,
-}
-
-// Makes the `Typed_Failure` of `e`, whose path lives as long as `allocator`'s block. A path that cannot be copied is left
+// Makes the `Typed_Error` of `e`, whose path lives as long as `allocator`'s block. A path that cannot be copied is left
 // out.
 @(private)
-typed_failure_of :: proc(e: Typed_Error, allocator: runtime.Allocator) -> Typed_Failure {
+typed_error_of :: proc(e: Typed_Refusal, allocator: runtime.Allocator) -> Typed_Error {
 	e := e
-	f := Typed_Failure{kind = e.kind, truncated = e.truncated, found = e.found, cause = e.cause, at = e.at, detail = e.detail}
+	f := Typed_Error{kind = e.kind, truncated = e.truncated, found = e.found, cause = e.cause, at = e.at, detail = e.detail}
 	if e.n_steps > 0 {
 		if steps, failed := make([]Step, e.n_steps, allocator); failed == nil {
 			copy(steps, e.steps[:e.n_steps])
@@ -534,9 +535,9 @@ typed_failure_of :: proc(e: Typed_Error, allocator: runtime.Allocator) -> Typed_
 	return f
 }
 
-// The `Typed_Error` of `f`, whose path keeps the innermost `MAX_ERROR_STEPS` of `f.steps`.
-typed_error_of :: proc "contextless" (f: Typed_Failure) -> Typed_Error {
-	e := Typed_Error{kind = f.kind, truncated = f.truncated, found = f.found, cause = f.cause, at = f.at, detail = f.detail}
+// The `Typed_Refusal` of `f`, whose path keeps the innermost `MAX_ERROR_STEPS` of `f.steps`.
+typed_refusal_of :: proc "contextless" (f: Typed_Error) -> Typed_Refusal {
+	e := Typed_Refusal{kind = f.kind, truncated = f.truncated, found = f.found, cause = f.cause, at = f.at, detail = f.detail}
 	kept := f.steps[max(0, len(f.steps) - MAX_ERROR_STEPS):]
 	e.n_steps = u8(len(kept))
 	e.truncated = e.truncated || len(kept) < len(f.steps)
@@ -641,7 +642,7 @@ SCHEMA_MESSAGES := #partial [Typed_Error_Kind]string {
 TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .No_Sample, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Invalid_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
 
 // Moves the bytes of the source `e` names by `by`, for an error found in a text that starts `by` bytes in.
-move_typed_error :: proc(e: ^Typed_Error, by: u64) {
+move_typed_error :: proc(e: ^Typed_Refusal, by: u64) {
 	if e.kind not_in TYPED_AT_NO_BYTE && (e.kind != .Walk || e.inner.kind not_in AT_NO_BYTE) {
 		e.at += by
 		if e.kind == .Walk {
@@ -651,12 +652,12 @@ move_typed_error :: proc(e: ^Typed_Error, by: u64) {
 }
 
 @(private)
-write_typed_code :: proc(w: io.Writer, e: Typed_Error) -> io.Error {return write_coded(w, "typed.", TYPED_KIND_RULES[e.kind].code)}
+write_typed_code :: proc(w: io.Writer, e: Typed_Refusal) -> io.Error {return write_coded(w, "typed.", TYPED_KIND_RULES[e.kind].code)}
 
 // Writes `line:col: message at path` for `e`, the position left out where the kind has no byte. `.Walk` writes its
 // fault. `lines` is as in `render_fault`.
 @(private)
-render_typed :: proc(w: io.Writer, src: []u8, e: Typed_Error, lines: ^Lines = nil) -> io.Error {
+render_typed :: proc(w: io.Writer, src: []u8, e: Typed_Refusal, lines: ^Lines = nil) -> io.Error {
 	if e.kind == .Walk {
 		return render_fault(w, src, e.inner, lines)
 	}
@@ -686,7 +687,7 @@ SHOWN_TEXT_MAX :: 40
 
 // Writes `e`'s message, naming what `e.detail` holds where its kind has one.
 @(private)
-write_typed_message :: proc(w: io.Writer, e: Typed_Error) -> io.Error {
+write_typed_message :: proc(w: io.Writer, e: Typed_Refusal) -> io.Error {
 	#partial switch e.kind {
 	case .Wrong_Kind:
 		if e.want.type != nil {
@@ -889,22 +890,22 @@ write_step_name :: proc(w: io.Writer, name: string) -> io.Error {
 
 // What a public procedure returns when it fails, nil when it does not. The arms are disjoint by cause: a `Fault` is a
 // text that does not read, whichever call found it, and `runtime.Allocator_Error` is an allocation refused. The structs
-// hold what is theirs: a refused edit or document call, a refused path, a refused typed read or write as a `Typed_Failure`.
+// hold what is theirs: a refused edit or document call, a refused path, a refused typed read or write as a `Typed_Error`.
 // `Typed_Error_Kind` is what the token writer returns once a token.
 Error :: union {
 	Fault,
 	runtime.Allocator_Error,
 	Document_Error,
 	Path_Error,
-	Typed_Failure,
+	Typed_Error,
 	Typed_Error_Kind,
 }
 
 // Makes the `Error` of a concrete error: nil for the kind `.None`, the inner `Fault` for `.Walk`, an out of memory
-// for `.No_Memory`, a `Fault` for `.Duplicate_Key`, else the struct itself, a `Typed_Error` as its `Typed_Failure`. A struct that is assigned to an `Error`
-// by hand is not nil when its kind is `.None`, so every public procedure returns through this one. `edit` says a
-// `Document_Error` is an edit's own refusal, whose `.Duplicate_Key` is a commit's named cell that its record holds and
-// no fault of a text.
+// for `.No_Memory`, a `Fault` for `.Duplicate_Key`, else the struct itself, a `Typed_Refusal` as its `Typed_Error`. A
+// struct that is assigned to an `Error` by hand is not nil when its kind is `.None`, so every public procedure returns
+// through this one. `edit` says a `Document_Error` is an edit's own refusal, whose `.Duplicate_Key` is a commit's named
+// cell that its record holds and no fault of a text.
 error_of :: proc{error_of_untyped, error_of_typed}
 
 // Nil is judged in line, so that a call that succeeds does not unpack the struct it was given.
@@ -969,19 +970,19 @@ refusal_of :: #force_no_inline proc "contextless" (e: $E, edit: bool) -> Error {
 	}
 }
 
-// `error_of` of a `Typed_Error`, whose path is copied to `allocator`: the temp allocator, or a reader's own for a record read
-// in a loop.
+// `error_of` of a `Typed_Refusal`, whose path is copied to `allocator`: the temp allocator, or a reader's own for a
+// record read in a loop.
 @(private)
-error_of_typed :: #force_inline proc(e: Typed_Error, allocator := context.temp_allocator) -> Error {
+error_of_typed :: #force_inline proc(e: Typed_Refusal, allocator := context.temp_allocator) -> Error {
 	if e.kind == .None {
 		return nil
 	}
-	return typed_refusal_of(e, allocator)
+	return refusal_of_typed(e, allocator)
 }
 
 @(private)
 @(cold)
-typed_refusal_of :: #force_no_inline proc(e: Typed_Error, allocator: runtime.Allocator) -> Error {
+refusal_of_typed :: #force_no_inline proc(e: Typed_Refusal, allocator: runtime.Allocator) -> Error {
 	#partial switch e.kind {
 	case .Walk:
 		return error_of(e.inner)
@@ -990,7 +991,7 @@ typed_refusal_of :: #force_no_inline proc(e: Typed_Error, allocator: runtime.All
 	case .Duplicate_Key:
 		return Fault{at = e.at, kind = .Duplicate_Key}
 	}
-	return typed_failure_of(e, allocator)
+	return typed_error_of(e, allocator)
 }
 
 // Writes `err`'s code, as `json.literal`, `document.bad_index`, `path.bad_path` or `typed.wrong_kind`. A `Fault`'s is
@@ -1005,16 +1006,16 @@ write_code :: proc(w: io.Writer, err: Error) -> io.Error {
 		return write_document_code(w, e)
 	case Path_Error:
 		return write_path_code(w, e)
-	case Typed_Failure:
-		return write_typed_code(w, typed_error_of(e))
+	case Typed_Error:
+		return write_typed_code(w, typed_refusal_of(e))
 	case Typed_Error_Kind:
-		return write_typed_code(w, Typed_Error{kind = e})
+		return write_typed_code(w, Typed_Refusal{kind = e})
 	}
 	return nil
 }
 
 // Writes the rendered line of `err` in `src`, as `line:col: message`, with `at path` after a typed error's. A
-// `Typed_Error_Kind` renders as a `Typed_Error` of that kind, and an allocation refused as out of memory. `lines` is as in
+// `Typed_Error_Kind` renders as a `Typed_Refusal` of that kind, and an allocation refused as out of memory. `lines` is as in
 // `render_fault`. Nil writes nothing.
 render :: proc(w: io.Writer, src: []u8, err: Error, lines: ^Lines = nil) -> io.Error {
 	switch e in err {
@@ -1032,10 +1033,10 @@ render :: proc(w: io.Writer, src: []u8, err: Error, lines: ^Lines = nil) -> io.E
 		return render_document(w, src, e, lines)
 	case Path_Error:
 		return render_path(w, src, e, lines)
-	case Typed_Failure:
-		return render_typed(w, src, typed_error_of(e), lines)
+	case Typed_Error:
+		return render_typed(w, src, typed_refusal_of(e), lines)
 	case Typed_Error_Kind:
-		return render_typed(w, src, Typed_Error{kind = e}, lines)
+		return render_typed(w, src, Typed_Refusal{kind = e}, lines)
 	}
 	return nil
 }

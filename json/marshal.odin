@@ -43,7 +43,7 @@ TOKENS := write.Token_Spelling {
 		}
 		return .None
 	},
-	record = proc(t: ^write.Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error) -> core.Typed_Error_Kind {
+	record = proc(t: ^write.Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Refusal) -> core.Typed_Error_Kind {
 		return write.tokens_marshal(t, plan, value, err, TREE, put_plain, put_opted)
 	},
 	stop = write.tokens_release,
@@ -83,7 +83,7 @@ put_opted :: proc(out: ^write.Out, _: [^]u8, s: string, opts: ^core.Write_Option
 
 // The instance of the typed write `plan_make` puts in a plan.
 @(private)
-marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error) {
+marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
 	return write.marshal_as(plan, value, opts, stream, allocator, TREE, put_plain, put_opted)
 }
 

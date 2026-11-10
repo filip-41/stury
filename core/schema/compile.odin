@@ -86,7 +86,7 @@ Bound :: struct {
 // the check does not judge is refused as `.Unsupported`, naming it, and a compile that failed as `.Bad_Option`.
 bind :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (b: Bound, err: core.Error) {
 	if c == nil || c.description == nil {
-		return {}, core.error_of(core.Typed_Error{kind = .Bad_Option})
+		return {}, core.error_of(core.Typed_Refusal{kind = .Bad_Option})
 	}
 	b.compiled = c
 	b.allocator = allocator
@@ -103,7 +103,7 @@ bind :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads = nil, alloca
 // array whose rules are per entry is checked on the threads of `runner` when one is given, with the same entries.
 check :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink = nil, runner: ^core.Runner = nil) -> core.Error {
 	if b.plan.check == nil {
-		return core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
 	}
 	if parallel(b, runner) {
 		if err, done := check_elements(b, src, sink, runner); done {
@@ -134,7 +134,7 @@ outcome :: proc(err: core.Error, sink: ^typed.Sink) -> core.Error {
 
 // The check of `plan` over the text `src`, for a plan that holds no record.
 @(private)
-check_text :: proc(plan: ^typed.Plan, src: []u8, read: typed.Read_Options) -> core.Typed_Error {
+check_text :: proc(plan: ^typed.Plan, src: []u8, read: typed.Read_Options) -> core.Typed_Refusal {
 	target: u8
 	return plan.check(src, plan.as, &target, nil, plan, read, context.allocator)
 }
