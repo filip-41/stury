@@ -230,16 +230,18 @@ def cli_suites(absent):
     smoke.floor names them, and the random cases of regex_diff and jq_diff hold none different. They run on the binary `build-cli` makes,
     after every other stage so that a loaded host does not time them out."""
     test = at(f"{CLI}/test")
-    suite = lambda name, stage, *argv: Check(name, stage, 1, [at(CLI)], ["python3", *argv], trees=[test], cli=True)
+    suite = lambda name, stage, *argv, tier=1: Check(name, stage, tier, [at(CLI)], ["python3", *argv], trees=[test], cli=True)
     out = [
         suite("cli jq suite", 5, f"{test}/jq_suite.py", CLI_BINARY),
         suite("cli smoke", 5, f"{test}/smoke.py", CLI_BINARY),
     ]
     has_jq = shutil.which("jq") and subprocess.run(["jq", "--version"], capture_output=True, text=True).stdout.strip() == "jq-1.8.2"
-    for seed in DIFF_SEEDS:
-        out.append(suite(f"cli regex diff seed {seed}", 6, f"{test}/regex_diff.py", CLI_BINARY, f"--seed={seed}"))
+    # The merge tier runs the first seed, the full tier every seed.
+    for i, seed in enumerate(DIFF_SEEDS):
+        tier = 1 if i == 0 else 2
+        out.append(suite(f"cli regex diff seed {seed}", 6, f"{test}/regex_diff.py", CLI_BINARY, f"--seed={seed}", tier=tier))
         if has_jq:
-            out.append(suite(f"cli jq diff seed {seed}", 6, f"{test}/jq_diff.py", CLI_BINARY, f"--seed={seed}"))
+            out.append(suite(f"cli jq diff seed {seed}", 6, f"{test}/jq_diff.py", CLI_BINARY, f"--seed={seed}", tier=tier))
     if not has_jq:
         absent.append("cli jq diff (no jq 1.8.2 on PATH)")
     return out
@@ -256,10 +258,12 @@ def checks(odin):
     out.append(Check("lint", 0, 0, every, make(odin, "lint"), trees=[at("tools/checks.py"), at("API.txt"), at("API_SHARED.txt")], also="amd64"))
     out.append(Check("examples", 2, 1, examples, make(odin, "test-examples"), trees=[at("examples")]))
     if os.path.isdir(at(CLI)):
-        out.append(Check("cli build", 1, 0, [at(CLI)], make(odin, "build-cli")))
-        for name, script in (("cli pieces law", "pieces_law.py"), ("cli follow", "follow_test.py"), ("cli memory", "memory_test.py")):
+        # Only the merge tier's suites run the binary, and its -o:speed compile is the edit loop's longest step.
+        out.append(Check("cli build", 1, 1, [at(CLI)], make(odin, "build-cli")))
+        # The pieces law and the memory test build their own binaries, so they wait for the merge tier.
+        for name, script, tier in (("cli pieces law", "pieces_law.py", 1), ("cli follow", "follow_test.py", 0), ("cli memory", "memory_test.py", 1)):
             script = at(f"{CLI}/test/{script}")
-            out.append(Check(name, 2, 0, [at(CLI)], ["python3", script, f"--odin={odin}"], trees=[script, at(f"{CLI}/test/harness.py")]))
+            out.append(Check(name, 2, tier, [at(CLI)], ["python3", script, f"--odin={odin}"], trees=[script, at(f"{CLI}/test/harness.py")]))
         out += cli_suites(absent)
     for package in TEST_PKGS:
         name = package.replace("/", "-")
@@ -270,13 +274,16 @@ def checks(odin):
         out.append(Check(f"{name} asan", 3, 1, root, make(odin, f"build/test/asan/{package}"), trees=golden))
         if package in TSAN_PKGS:
             out.append(Check(f"{name} tsan", 3, 1, root, make(odin, f"build/test/tsan/{package}")))
+        # The merge tier runs v2 at -o:none and v3 at -o:speed, the full tier the other two.
         for opt in ("none", "speed"):
             for tier in (0, 1) if rosetta() else ():
                 target = f"build/test/x86/{opt}/{tier}/{package}"
-                out.append(Check(f"{name} x86 v{tier + 2} {opt}", 3, 1, root, make(odin, target), arch="amd64", trees=golden))
+                gate = 1 if (opt == "none") == (tier == 0) else 2
+                out.append(Check(f"{name} x86 v{tier + 2} {opt}", 3, gate, root, make(odin, target), arch="amd64", trees=golden))
     if not rosetta():
         absent.append("the x86 test packages (no Rosetta, and this is not an x86-64 machine)")
     # Alone in the last stage, since it fills every core.
+    out.append(Check("json-test full sweeps", 4, 2, [at("json/test")], make(odin, "test-sweep")))
     out.append(Check("f32 exhaustive", 4, 2, [at("core/spell"), at("core/spell/test")], make(odin, "test-f32")))
     return out, absent
 
@@ -315,7 +322,7 @@ def main():
     parser.add_argument("tier", nargs="?", default="quick", choices=TIERS)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--list", action="store_true")
-    parser.add_argument("-j", type=int, default=4)
+    parser.add_argument("-j", type=int, default=8)
     parser.add_argument("--odin", default=os.environ.get("ODIN", "odin"))
     args = parser.parse_args()
 

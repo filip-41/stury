@@ -48,7 +48,7 @@ X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS)
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: help check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite diff-schema ecma-diff test-x86 test-wide test-asan test-tsan test-f32 lint lint-man lint-fixtures api-write bench bench-doc bench-paths bench-typed bench-records bench-schema bench-schema-peers bench-write bench-peers bench-cli fixtures surface \
+.PHONY: help check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite diff-schema ecma-diff test-x86 test-wide test-asan test-tsan test-f32 test-sweep lint lint-man lint-fixtures api-write bench bench-doc bench-paths bench-typed bench-records bench-schema bench-schema-peers bench-write bench-peers bench-cli fixtures surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
 
 # The bench lanes' probes and peers, and the fixtures they read. BENCH_CC, BENCH_CXX and BENCH_CARGO name the compilers
@@ -193,6 +193,14 @@ test-wide:
 		$(SDE) -$$cpu -- $(BUILD)/wide/test || exit 1; \
 	done; done
 
+# The sweeps the edit loop narrows: the string writer at every length and offset up to 80, and a spine's records with
+# 16 bytes at either end broken in turn. The gate's full tier runs them.
+test-sweep:
+	@mkdir -p $(BUILD)/test/sweep
+	$(ODIN) test json/test -o:minimal $(TEST_MEMORY) $(TEST_PIECES) -define:FULL_SWEEP=true \
+		-define:ODIN_TEST_NAMES=json_tests.every_byte_at_every_offset,json_tests.records_validate_a_spine \
+		-out:$(BUILD)/test/sweep/json
+
 # Every binary32 pattern read back and checked shortest, on F32_THREADS threads at -o:speed, which the gate's full tier runs.
 F32_THREADS ?= 6
 test-f32:
@@ -222,10 +230,11 @@ test-tsan-cli:
 test-asan: $(ASAN_TARGETS)
 	@$(MAKE) --no-print-directory test-asan-cli
 
+# Under the sanitizer a text read on threads is cut in pieces of 16 bytes: the -o:minimal suites take the pieces of one byte.
 $(ASAN_TARGETS): $(BUILD)/test/asan/%:
 	@mkdir -p $(@D)
 	@echo "== $* (address)"
-	@$(ODIN) test $* -o:speed -sanitize:address -debug $(TEST_PIECES) -out:$@ || { echo "== $* (address) failed"; exit 1; }
+	@$(ODIN) test $* -o:minimal -sanitize:address -debug $(TEST_CHAINS) -out:$@ || { echo "== $* (address) failed"; exit 1; }
 
 test-tsan: $(TSAN_TARGETS)
 	@$(MAKE) --no-print-directory test-tsan-cli

@@ -114,16 +114,31 @@ check :: proc(t: ^testing.T, s: []u8, loc := #caller_location) {
 	}
 }
 
+// The full sweeps run under -define:FULL_SWEEP=true (`make test-sweep`, the gate's full tier). Otherwise the string
+// writer takes the lengths and offsets within two bytes of a 16-, 32- or 64-byte block edge or of the text's ends.
+FULL_SWEEP :: #config(FULL_SWEEP, false)
+
+@(private = "file")
+near_block_edge :: proc(n: int) -> bool {
+	return n <= 2 || n % 16 <= 2 || n % 16 >= 14
+}
+
 @(test)
 every_byte_at_every_offset :: proc(t: ^testing.T) {
 	for fill in ([]string{"a", "\xc3\xa9"}) {
 		for length in 0 ..= 80 {
+			if !FULL_SWEEP && !near_block_edge(length) {
+				continue
+			}
 			s := make([]u8, length)
 			defer delete(s)
 			for &b, i in s {
 				b = fill[i % len(fill)]
 			}
 			for at in 0 ..< length {
+				if !FULL_SWEEP && !near_block_edge(at) && !near_block_edge(length - 1 - at) {
+					continue
+				}
 				saved := s[at]
 				for v in 0 ..< 256 {
 					s[at] = u8(v)

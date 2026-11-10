@@ -205,12 +205,14 @@ records_validate_a_spine :: proc(t: ^testing.T) {
 	_, _, ok = json.spine(transmute([]u8)string(`{"a":[1]}`), json.as(.Json))
 	testing.expect(t, !ok)
 
-	// Bytes near either end and through the middle each broken in turn, and the text cut there.
+	// Bytes near either end and through the middle each broken in turn, and the text cut there. The ends are 16 bytes
+	// under FULL_SWEEP and 4 otherwise.
 	breakers := []string{"x", "]", ","}
+	ends := 16 if FULL_SWEEP else 4
 	buf := make([dynamic]u8, context.temp_allocator)
 	for src in texts {
 		for i in 0 ..= len(src) {
-			if i > 16 && i < len(src) - 16 && i % 997 != 0 {
+			if i > ends && i < len(src) - ends && i % 997 != 0 {
 				continue
 			}
 			for c in breakers {
