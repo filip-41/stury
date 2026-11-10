@@ -208,8 +208,11 @@ on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, 
 	return hook(h, regs, t)
 }
 
-// `on_token` for a `Check`.
+// `on_token` for a `Check`, which a description's plan reads by its own route.
 on_token_check :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	if h.plan.uses != nil {
+		return check_token(h, regs, t)
+	}
 	return hook(h, regs, t)
 }
 
@@ -317,8 +320,18 @@ hook :: #force_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t: core.
 	case:
 		return indirect(h, regs, t)
 	}
+	when H == Check {
+		if reason == .Wrong_Kind && t.kind == .Number && fld.kind >= .I8 && fld.kind <= .U64 {
+			reason = store_integral(h, t, fld, dest)
+		}
+	}
 	if reason != .None {
 		return refuse_value(h, regs, t, reason)
+	}
+	when H == Check {
+		if h.plan.leaves != nil && h.plan.meta[fld.meta].rule_set > 0 && check_rules(h, regs, t, fld, dest) == .Stop {
+			return regs, .Stop
+		}
 	}
 	regs.c += u64(fld.stride)
 	return regs, .Next
@@ -331,6 +344,9 @@ on_token_spelled :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hoo
 
 // `on_token_spelled` for a `Check`.
 on_token_check_spelled :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	if h.plan.uses != nil {
+		return check_token(h, regs, t)
+	}
 	return hook_spelled(h, regs, t)
 }
 

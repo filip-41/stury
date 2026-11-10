@@ -291,8 +291,9 @@ two_members_of_one_type_with_different_rules_get_two_blocks :: proc(t: ^testing.
 	testing.expect_value(t, small.maximum, "127")
 	bit := d.nodes[d.arrays[d.nodes[members[4].node].array].items].rules
 	testing.expect_value(t, bit.maximum, "7")
-	key := d.nodes[d.objects[d.nodes[members[5].node].object].keys].rules
-	testing.expect_value(t, key.maximum, "127")
+	key := d.nodes[d.objects[d.nodes[members[5].node].object].keys]
+	testing.expect_value(t, key.kinds, rules.Kinds{.String})
+	testing.expect_value(t, key.rules.pattern, `^(?:-(?:(?:[0-9])|(?:[1-9][0-9])|1(?:[0-1][0-9]|2(?:[0-8])))|(?:[0-9])|(?:[1-9][0-9])|1(?:[0-1][0-9]|2(?:[0-7])))$`)
 }
 
 @(private = "file")

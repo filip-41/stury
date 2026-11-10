@@ -96,8 +96,11 @@ decimal_compare :: proc(x, y: Decimal) -> (order: int, exact: bool) {
 	return -mag if x.neg else mag, exact
 }
 
-// Whether `x` is a whole multiple of `y`, for a `y` of at most 19 digits. `exact` is false for a longer one, which this
-// does not judge. The digits are taken modulo `y` and the power of ten by squaring, so exponents as far apart as `1e400`
+// The most digits a divisor of `decimal_multiple_of` may have, whose square a u128 holds.
+MULTIPLE_DIGITS :: 19
+
+// Whether `x` is a whole multiple of `y`, for a `y` of at most `MULTIPLE_DIGITS` digits. `exact` is false for a longer
+// one, which this does not judge. The digits are taken modulo `y` and the power of ten by squaring, so exponents as far apart as `1e400`
 // and `1e-400` cost no more than their width. Zero is a multiple of everything and a multiple of nothing but zero.
 decimal_multiple_of :: proc(x, y: Decimal) -> (multiple, exact: bool) {
 	ny := len(y.head) + len(y.tail)
@@ -108,7 +111,7 @@ decimal_multiple_of :: proc(x, y: Decimal) -> (multiple, exact: bool) {
 		return x.head == "", true
 	case x.head == "":
 		return true, true
-	case ny > 19:
+	case ny > MULTIPLE_DIGITS:
 		return false, false
 	}
 	// Neither has a trailing zero, so a `y` that ends below `x` leaves a fraction.

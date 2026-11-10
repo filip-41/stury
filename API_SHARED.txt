@@ -4,6 +4,7 @@ ESCAPED: [256]u8 = {
 F64_ROOM :: 1 + 17 + 16
 HEX_NIBBLE: [256]u8 = {
 INT_ROOM :: 20
+MULTIPLE_DIGITS :: 19
 POW10_F64 := [23]f64{
 Pending :: struct { buf: [4]u8, n: u8, at: u8, }
 REPLACEMENT :: [4]u8{0xEF, 0xBF, 0xBD, 0}
@@ -38,7 +39,6 @@ utf8_lax_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (spelled: [
 utf8_subpart :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8
 # core/regex
 Flags :: struct { fold, extend, dotall, multiline, ecma: bool, }
-Regex :: struct { insts: []Inst, bytes: string, classes: []^Class, refs: [][]int, callouts: []^Callout, names: []string, slots: int, longest: bool, not_empty: bool, opt: ^Search_Opt, prefix: string, first: [4]u64, has_first: bool, calls_or_limits: bool, narrowed: bool, ecma: bool, linear: bool, owner: []i32, loops: [][2]i32, loop_of: []i32, rows: []i32, }
 compile :: proc(pattern: string, flags: Flags, allocator := context.allocator) -> (re: Regex, err: string)
 search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch) -> (found: bool, err: string)
 # core
@@ -160,8 +160,20 @@ push :: proc(d: ^[dynamic]$T, v: T) -> (int, bool)
 push_all :: proc(d: ^[dynamic]$T, vs: []T) -> (count: int, ok: bool)
 # core/rules
 EVERY_KIND :: Kinds{.Null, .Bool, .Integer, .Number, .String, .Array, .Object}
+Failures :: bit_set[core.Typed_Error_Kind; u64]
 NONE :: Node_Index(-1)
+decimal_i64 :: proc(d: spell.Decimal) -> (v: i64, ok: bool)
 description_destroy :: proc(d: ^Description)
+enum_has :: proc(l: ^Leaf, kind: core.Kind, text: string) -> bool
+enum_key :: proc(b: ^strings.Builder, kind: core.Kind, text: string)
+integral :: proc(d: spell.Decimal) -> bool
+judge_count :: #force_inline proc "contextless" (n, low, high: u64) -> (fails: Failures)
+judge_number :: proc(l: ^Leaf, text: string, small: Maybe(i64)) -> (fails: Failures)
+judge_string :: proc(l: ^Leaf, text: string, scratch: ^regex.Scratch) -> (fails: Failures)
+leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator) -> (l: Leaf, refused: string)
+ref_only :: proc(n: ^Node) -> bool
+rules_leaf :: proc(r: Rules, kinds: Kinds, allocator := context.allocator) -> (l: Leaf, refused: string)
+trivial :: proc(l: ^Leaf) -> bool
 unjudged :: proc(d: ^Description, format_assert: bool) -> string
 # core/build
 ANSWER_BATCH :: 64
@@ -200,6 +212,8 @@ set_answers :: proc(list: ^core.Edit_List, path: core.Path, in_: core.Edit_Input
 # core/typed
 Check :: struct { using reader: Reader, }
 KEY_SIZE_MAX :: 240
+check_document :: proc(doc: ^core.Document, node: core.Node_Index, target: rawptr, T: typeid, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
+check_plan_of :: proc(d: ^rules.Description, as: core.As, allocator := context.allocator) -> (p: Plan, err: core.Error)
 check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error)
 enum_member :: proc "contextless" (info: ^runtime.Type_Info_Enum, value: i64) -> int
 field_at :: #force_inline proc "contextless" (b: u64) -> ^Field

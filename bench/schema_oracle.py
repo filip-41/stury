@@ -4,8 +4,8 @@
     schema_oracle.py [--instances N] [FIXTURE...]
 
 Fixtures: for each of the lane's 19 schemas (bench/schema.py), jsonschema judges the first N instances (1000) and every
-arm that judges a schema (Blaze, jsonschema-rs, boon) runs the same prefix; each instance's verdict must be equal, and
-the first that differs is named. stury's arm is `json.validate` until its schema check lands, so it is left out.
+arm (stury, Blaze, jsonschema-rs, boon) runs the same prefix; each instance's verdict must be equal, and the first that
+differs is named. An arm that fails on a fixture, stury on a schema its check does not bind among them, is named apart.
 --suite: jsonschema is also held to the expected verdicts of every required case of the vendored JSON-Schema-Test-Suite,
 drafts 4 to 2020-12, so a disagreement above is the arm's. A case whose schema jsonschema cannot compile or resolve is
 counted apart, not as a failure.
@@ -20,7 +20,7 @@ import jsonschema
 import referencing, referencing.jsonschema
 
 import schema as lane
-from doc import select_arms, spawn
+from doc import Failed, select_arms, spawn
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUITE = os.path.join(ROOT, "json", "test", "conformance", "JSON-Schema-Test-Suite", "tests")
@@ -52,8 +52,12 @@ def fixture_verdicts(name, limit):
         tmp.write(b"".join(t if t.endswith(b"\n") else t + b"\n" for t in texts))
         tmp.flush()
         theirs = {}
-        for arm in lane.judging(HAVE):
-            spawn(lane.command(arm, "verdict", schema_path, tmp.name), {"BENCH_PASSES": "1", "BENCH_VERDICTS": marks.name})
+        for arm in HAVE:
+            try:
+                spawn(lane.command(arm, "verdict", schema_path, tmp.name), {"BENCH_PASSES": "1", "BENCH_VERDICTS": marks.name})
+            except Failed as e:
+                print(f"left out: {name} {arm}: {e}", file=sys.stderr)
+                continue
             theirs[arm] = open(marks.name).read()
     return mine, theirs
 

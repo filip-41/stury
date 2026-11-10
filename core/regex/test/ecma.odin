@@ -82,6 +82,11 @@ test_ecma_rules :: proc(t: ^testing.T) {
 		{`(?:(a)|b)+`, "ab", 0, 2, -1, -1}, // an iteration unsets its groups
 		{`(a?)?`, "b", 0, 0, -1, -1}, // an optional iteration may not match empty either
 		{`^[a-z]{0,65535}$`, letters, 0, 20_000, -1, -1}, // a repeat of one character is no copies
+		{`(?=(a+))a\d`, "aaa1", 2, 4, 2, 3}, // a group in a look-ahead keeps its span past the visited set's shortcut
+		{`(?=(a|aa)*(b))a.*c`, "aabc", 0, 4, 1, 2},
+		{`(?<\u0061b>x)`, "x", 0, 1, 0, 1}, // a group name may be written with escapes
+		{`\&\%[\&\%]`, "x&%%", 1, 4, -1, -1}, // an escaped ASCII punctuation character is itself
+		{`^\/[^\*\?\&\%]*$`, "/a&", -1, -1, -1, -1},
 	}
 	for c in cases {
 		f := search(c.pattern, c.text)
@@ -90,9 +95,61 @@ test_ecma_rules :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_ecma_group_names :: proc(t: ^testing.T) {
+	Case :: struct {
+		pattern, name: string, // the name of group 1, "" for a pattern that is refused
+	}
+	cases := [?]Case {
+		{`(?<a>x)`, "a"},
+		{`(?<\u0061b>x)`, "ab"},
+		{`(?<a\u{62}>x)`, "ab"},
+		{`(?<\ud835\udc4ex>x)`, "\U0001d44ex"}, // a surrogate pair
+		{`(?<\u{1d44e}>x)`, "\U0001d44e"},
+		{`(?<\u0031>x)`, ""}, // a digit starts no name
+		{`(?<a\u0020>x)`, ""},
+		{`(?<\ud835>x)`, ""}, // a lone surrogate
+		{`(?<a\x62>x)`, ""}, // only \u is a name escape
+		{`(?<\u00>x)`, ""},
+		{`(?<a\u0062>x)(?<ab>y)`, ""}, // the same name twice
+	}
+	for c in cases {
+		arena: virtual.Arena
+		testing.expect(t, virtual.arena_init_growing(&arena) == nil)
+		defer virtual.arena_destroy(&arena)
+		re, err := regex.compile(c.pattern, {ecma = true}, virtual.arena_allocator(&arena))
+		if c.name == "" {
+			testing.expectf(t, err != "", "%q compiled", c.pattern)
+		} else {
+			testing.expectf(t, err == "" && len(re.names) == 2 && re.names[1] == c.name, "%q: %q, names %q", c.pattern, err, re.names)
+		}
+	}
+}
+
+@(test)
+test_regex_jq_group_names :: proc(t: ^testing.T) {
+	// Oniguruma's: a name starts with a word character, and a backslash in it is a backslash.
+	Case :: struct {
+		pattern, want: string,
+	}
+	cases := [?]Case {
+		{`(?<a\u0061>x)`, ""},
+		{`(?<_a-b>x)`, ""},
+		{`(?<é>x)`, ""},
+		{`(?<\u0061>x)`, "invalid char in group name <\\u0061>"},
+		{`(?<$a>x)`, "invalid char in group name <$a>"},
+		{`(?<-a>x)`, "invalid group name <-a>"},
+		{`(?<1a>x)`, "invalid group name <1a>"},
+	}
+	for c in cases {
+		_, err := regex.compile(c.pattern, {}, context.temp_allocator)
+		testing.expectf(t, err == c.want, "%q: %q, want %q", c.pattern, err, c.want)
+	}
+}
+
+@(test)
 test_ecma_refusals :: proc(t: ^testing.T) {
 	refused := [?]string {
-		`(a)\1`, `\k<x>`, `(?<x>a)\k<x>`, `(?<=a)b`, `(?<!a)b`, `a{`, `a{2,1}`, `]`, `}`, `\q`, `\-`, `[b-a]`, `[\d-z]`,
+		`(a)\1`, `\k<x>`, `(?<x>a)\k<x>`, `(?<=a)b`, `(?<!a)b`, `a{`, `a{2,1}`, `]`, `}`, `\q`, `[b-a]`, `[\d-z]`,
 		`\u{110000}`, `\p{Nope}`, `\p{scx=Latn}`, `\p{letter}`, `\p{Greek}`, `\p{Word}`, `\p{gc=Greek}`, `(?<1>a)`,
 		`(?<n>a)(?<n>b)`, `(?=a)*`, `^*`, `a**`, `(a`, `a)`, `(?x)`, `\c1`, `\00`,
 	}
@@ -200,9 +257,6 @@ test_ecma_visited_set_keeps_the_matches :: proc(t: ^testing.T) {
 		pattern := strings.to_string(b)
 		with, without := search(pattern, string(text)), search(pattern, string(text), linear = false)
 		with.resumes, without.resumes = 0, 0
-		if strings.contains(pattern, "(?=") { // the set may leave a look-ahead's groups unset (match.odin)
-			with.g1, with.g1_end, without.g1, without.g1_end = 0, 0, 0, 0
-		}
 		testing.expectf(t, with == without, "%q on %q: %v with the set, %v without", pattern, string(text), with, without)
 	}
 }

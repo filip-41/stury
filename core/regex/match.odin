@@ -106,8 +106,8 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 	linear := re.linear && !re.longest && !re.not_empty
 	words: int
 	if linear {
-		words = ((int(re.rows[len(re.insts)]) if re.rows != nil else len(re.insts)) * (len(s) + 1) + 63) / 64
-		m.room = MAX_BYTES - words * 8 * (2 if re.owner != nil else 1)
+		words = ((int(re.visited.rows[len(re.insts)]) if re.visited.rows != nil else len(re.insts)) * (len(s) + 1) + 63) / 64
+		m.room = MAX_BYTES - words * 8 * (2 if re.visited.owner != nil else 1)
 		if m.room < 0 && re.ecma {
 			return false, MEMORY_ERROR
 		}
@@ -117,7 +117,7 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 		resize(&scratch.seen, words)
 		slice.zero(scratch.seen[:])
 		m.seen = scratch.seen[:]
-		if re.owner != nil {
+		if re.visited.owner != nil {
 			resize(&scratch.good, words)
 			slice.zero(scratch.good[:])
 			m.good = scratch.good[:]
@@ -288,19 +288,26 @@ step :: #force_inline proc(re: ^Regex, ins: Inst, s: string, pos: int) -> int {
 }
 
 // The visited set's row of instruction `pc` at `pos`, past its first one for each loop around it whose iteration has
-// matched nothing up to `pos` (`Regex.rows`). Those loops are the innermost ones, since an iteration began no earlier
+// matched nothing up to `pos` (`Visited.rows`). Those loops are the innermost ones, since an iteration began no earlier
 // than the one around it.
 @(private = "file")
 row_of :: #force_inline proc(m: ^Matcher, pc, pos: int) -> int {
-	re := m.re
-	if re.rows == nil {
+	v := m.re.visited
+	if v.rows == nil {
 		return pc
 	}
-	row := int(re.rows[pc])
-	for l := re.loop_of[pc]; l >= 0 && m.slots[re.loops[l][0]] == pos; l = re.loops[l][1] {
+	row := int(v.rows[pc])
+	for l := v.loop_of[pc]; l >= 0 && m.slots[v.loops[l][0]] == pos; l = v.loops[l][1] {
 		row += 1
 	}
 	return row
+}
+
+// The row of a Rep's body past where the Rep began, where no loop's iteration has matched nothing.
+@(private = "file")
+stop_row :: #force_inline proc(re: ^Regex, pc: int) -> int {
+	rows := re.visited.rows
+	return int(rows[pc + 1]) if rows != nil else pc + 1
 }
 
 // Marks the pair of `row` at `pos` as visited, or returns false when it already was. A pair visited inside a
@@ -392,15 +399,15 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 		ok := true
 		when SET {
 			if row := row_of(m, pc, pos); !first_visit(m, row, pos) {
-				// A pair a look-ahead's body is known to match from carries on at the body's end, with the body's groups
-				// unset, which ECMA would have set.
+				// A pair a look-ahead's body is known to match from carries on at the body's end. When the caller reads
+				// groups and the body holds some, it runs the path again instead (the pairs on it are all known), since
+				// the groups it sets are the result.
 				ins = {op = .Seen}
 				if m.good != nil && in_good(m, row, pos) {
-					look := int(re.owner[pc])
-					if unset := insts[look + 1]; unset.op == .Unset {
-						unset_slots(m, unset)
+					look := int(re.visited.owner[pc])
+					if insts[look + 1].op != .Unset || len(m.caps) <= 2 {
+						pc = int(insts[look].b)
 					}
-					pc = int(insts[look].b)
 					ins = insts[pc]
 				}
 			}
@@ -595,8 +602,10 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 				// Under the set an unbounded repeat marks the stops past where it began in its body's row, which `run`
 				// never visits, and walks no further than a stop an earlier walk marked: that walk tries the stops from
 				// there. Past where it began, no loop's iteration has matched nothing, so the row is the first.
+				row := stop_row(re, pc) if SET else 0
+				_ = row
 				when SET {
-					if ins.b < 0 && p > pos && !first_visit(m, row_of(m, pc + 1, p), p) {
+					if ins.b < 0 && p > pos && !first_visit(m, row, p) {
 						ok = false
 						break
 					}
@@ -607,7 +616,7 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 						break
 					}
 					when SET {
-						if ins.b < 0 && !first_visit(m, row_of(m, pc + 1, next), next) {
+						if ins.b < 0 && !first_visit(m, row, next) {
 							break
 						}
 					}

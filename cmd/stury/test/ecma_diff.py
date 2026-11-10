@@ -21,10 +21,6 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-# Where core/regex answers otherwise on purpose: a group inside a look-ahead that the visited set carries on past from
-# a pair its body is known to match from is left unset (match.odin).
-KNOWN = "a group set inside a look-ahead"
-
 # Where Node answers otherwise against the spec: V8 tries a negative look-ahead between the two halves of a surrogate
 # pair, so `(?!.)` finds "😀" at 1.
 INSIDE = "Node stopping inside a surrogate pair"
@@ -78,8 +74,6 @@ def known(p, ours, node):
     """Why `ours` may differ from `node` on purpose, or None."""
     if node == "inside":
         return INSIDE
-    if "(?=" in p and ours.split()[:2] == node.split()[:2] and ours not in ("E", "-"):
-        return KNOWN
     return None
 
 

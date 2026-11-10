@@ -459,6 +459,16 @@ Typed_Error_Kind :: enum u8 {
 	Out_Of_Order, // a token call the text's grammar does not allow next, or a text finished before it is whole
 	Write_Failed, // the output stream refused bytes, which may have left a prefix in it
 	Bad_Schema, // a schema the reader refuses, `want.text` names the keyword and why, the steps lead to it
+	Below_Minimum, // a number below a rule's lower bound
+	Above_Maximum, // a number above a rule's upper bound
+	Not_Multiple, // a number that is no whole multiple of a rule's divisor
+	Too_Short, // a string with fewer code points than a rule allows
+	Too_Long, // a string with more code points than a rule allows
+	No_Match, // a string a rule's pattern does not match
+	Too_Few, // an array or object with fewer elements or members than a rule allows
+	Too_Many, // an array or object with more elements or members than a rule allows
+	Not_Unique, // an array whose elements repeat where a rule wants them unique
+	Not_Allowed, // a value where a rule takes none
 }
 
 // The steps a `Typed_Error` holds.
@@ -584,6 +594,24 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 	.Out_Of_Order  = {"out_of_order", "Token written out of order"},
 	.Write_Failed  = {"write_failed", "Output refused the bytes"},
 	.Bad_Schema    = {"bad_schema", "Schema is refused"},
+	.Below_Minimum = {"below_minimum", "Number is below the minimum"},
+	.Above_Maximum = {"above_maximum", "Number is above the maximum"},
+	.Not_Multiple  = {"not_multiple", "Number is not a multiple of the divisor"},
+	.Too_Short     = {"too_short", "String is too short"},
+	.Too_Long      = {"too_long", "String is too long"},
+	.No_Match      = {"no_match", "String does not match the pattern"},
+	.Too_Few       = {"too_few", "Too few elements or members"},
+	.Too_Many      = {"too_many", "Too many elements or members"},
+	.Not_Unique    = {"not_unique", "Elements are not unique"},
+	.Not_Allowed   = {"not_allowed", "No value is allowed here"},
+}
+
+// The messages of a schema check's entries, which name keywords and not a type's fields, where they differ.
+@(private, rodata)
+SCHEMA_MESSAGES := #partial [Typed_Error_Kind]string {
+	.Wrong_Kind    = "Value is not of the allowed type",
+	.Not_A_Member  = "Value is not one of the allowed values",
+	.Missing_Field = "Required member is missing",
 }
 
 // The kinds that name no byte of a source.
@@ -976,6 +1004,27 @@ render :: proc(w: io.Writer, src: []u8, err: Error, lines: ^Lines = nil) -> io.E
 		return render_typed(w, src, typed_error_of(e), lines)
 	case Typed_Error_Kind:
 		return render_typed(w, src, Typed_Error{kind = e}, lines)
+	}
+	return nil
+}
+
+// Writes the rendered line of a check's entry `e` in `src`, as `line:col: message at path`, with the keyword path after
+// it in parentheses and the message in a schema's words where the entry has one. `lines` is as in `render_fault`.
+render_entry :: proc(w: io.Writer, src: []u8, e: Error_Entry, lines: ^Lines = nil) -> io.Error {
+	write_position(w, src, e.start, lines) or_return
+	message := TYPED_KIND_RULES[e.kind].message
+	if len(e.keyword_path) > 0 && SCHEMA_MESSAGES[e.kind] != "" {
+		message = SCHEMA_MESSAGES[e.kind]
+	}
+	io.write_string(w, message) or_return
+	if len(e.path) > 0 {
+		io.write_string(w, " at ") or_return
+		write_steps(w, e.path, true) or_return
+	}
+	if len(e.keyword_path) > 0 {
+		io.write_string(w, " (") or_return
+		write_steps(w, e.keyword_path, false) or_return
+		io.write_byte(w, ')') or_return
 	}
 	return nil
 }

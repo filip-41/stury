@@ -136,8 +136,9 @@ leaf :: proc(r: ^Reading, kind: typed.Read_Kind, m: typed.Meta) -> (n: rules.Nod
 	case .Scalar:
 		n.kinds = {.Null, .Bool, .Number, .String}
 	case .Enum, .Bit_Elem:
-		if m.enum_info != nil && r.plan.enums == .Name {
-			n.kinds = {.String}
+		if m.enum_info != nil && (r.plan.enums == .Name || exact_values(m.enum_info)) {
+			n.kinds = {.String} if r.plan.enums == .Name else {.Integer}
+			n.enum_of = enum_operands(r, m.enum_info, r.plan.enums == .Name)
 			break
 		}
 		n.kinds = {.Integer}
@@ -193,7 +194,7 @@ object_of :: proc(r: ^Reading, m: typed.Meta, is_map: bool) -> i32 {
 		additional := node_of(r, m.block)
 		keys := rules.NONE
 		if m.key_kind != .String && m.key_kind != .Cstring {
-			keys = add(r, &r.d.nodes, leaf(r, m.key_kind, m))
+			keys = add(r, &r.d.nodes, key_node(r, m))
 		}
 		if !r.failed {
 			r.d.objects[at].additional, r.d.objects[at].keys = additional, keys
@@ -245,11 +246,41 @@ shape :: proc(r: ^Reading, block: i32, list: ^[dynamic]$T, empty: T) -> (at: i32
 	return at, !r.failed
 }
 
+// Whether a binary64 holds each value of `e` exactly, as an enum operand does.
+@(private)
+exact_values :: proc(e: ^runtime.Type_Info_Enum) -> bool {
+	for v in e.values {
+		if i64(v) < -(1 << 53) || i64(v) > 1 << 53 {
+			return false
+		}
+	}
+	return true
+}
+
+// The operands of the enum `e`: its names, or its values. The names are the type's and outlive the description.
+@(private)
+enum_operands :: proc(r: ^Reading, e: ^runtime.Type_Info_Enum, names: bool) -> []core.Value {
+	out, failed := make([]core.Value, len(e.names))
+	r.failed ||= failed != nil
+	if failed == nil {
+		for &o, k in out {
+			o = e.names[k] if names else f64(i64(e.values[k]))
+		}
+	}
+	return out
+}
+
 // The decimal text of `n`, which the description owns.
 @(private)
 decimal :: proc(r: ^Reading, n: i64) -> string {
 	buf: [24]u8
-	text, failed := strings.clone(strconv.write_int(buf[:], n, 10))
+	return keep(r, strconv.write_int(buf[:], n, 10))
+}
+
+// A copy of `s` the description owns.
+@(private)
+keep :: proc(r: ^Reading, s: string) -> string {
+	text, failed := strings.clone(s)
 	if _, no_room := append(&r.d.texts, text); failed != nil || no_room != nil {
 		delete(text)
 		r.failed = true
@@ -267,3 +298,101 @@ add :: proc(r: ^Reading, list: ^[dynamic]$T, x: T) -> rules.Node_Index {
 	}
 	return rules.Node_Index(len(list) - 1)
 }
+
+// The node of a map's integer or enum key, which is a member name and so a string: an enum's names, or the decimals of
+// the integers the key reads as, spelled as a key's number reads, by a pattern.
+@(private)
+key_node :: proc(r: ^Reading, m: typed.Meta) -> (n: rules.Node) {
+	n = leaf(r, m.key_kind, m)
+	if n.kinds != {.Integer} {
+		return
+	}
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, "^(?:")
+	if n.enum_of != nil {
+		for v, i in n.enum_of {
+			buf: [24]u8
+			strings.write_string(&b, "|" if i > 0 else "")
+			strings.write_string(&b, strconv.write_int(buf[:], i64(v.(f64)), 10))
+		}
+		delete(n.enum_of)
+		n.enum_of = nil
+	} else {
+		lo, _ := strconv.parse_i128(n.rules.minimum)
+		hi, _ := strconv.parse_i128(n.rules.maximum)
+		if lo <= 0 {
+			strings.write_string(&b, "-(?:")
+			magnitudes(&b, u64(max(0, -hi)), u64(-lo))
+			strings.write_string(&b, ")")
+		}
+		if hi >= 0 {
+			strings.write_string(&b, "|" if lo <= 0 else "")
+			magnitudes(&b, u64(max(lo, 0)), u64(hi))
+		}
+	}
+	strings.write_string(&b, ")$")
+	n.kinds, n.rules = {.String}, {pattern = keep(r, strings.to_string(b))}
+	return
+}
+
+// Writes the alternatives of a pattern of the decimals from `lo` to `hi`, with no leading zero.
+@(private)
+magnitudes :: proc(b: ^strings.Builder, lo, hi: u64) {
+	low, high: [20]u8
+	lo_text, hi_text := strconv.write_uint(low[:], lo, 10), strconv.write_uint(high[:], hi, 10)
+	for width in len(lo_text) ..= len(hi_text) {
+		from := lo_text if width == len(lo_text) else ONES_THEN_ZEROS[:width]
+		to := hi_text if width == len(hi_text) else NINES[:width]
+		strings.write_string(b, "|" if width > len(lo_text) else "")
+		digit_range(b, from, to)
+	}
+}
+
+// Writes a pattern of the decimals from `lo` to `hi`, two texts of one length.
+@(private)
+digit_range :: proc(b: ^strings.Builder, lo, hi: string) {
+	if lo == hi {
+		strings.write_string(b, lo)
+		return
+	}
+	n := len(lo) - 1
+	if lo[0] == hi[0] {
+		strings.write_byte(b, lo[0])
+		digit_range(b, lo[1:], hi[1:])
+		return
+	}
+	from_zeros, to_nines := lo[1:] == ZEROS[:n], hi[1:] == NINES[:n]
+	first, last := lo[0] + (0 if from_zeros else 1), hi[0] - (0 if to_nines else 1)
+	strings.write_string(b, "(?:")
+	if !from_zeros {
+		strings.write_byte(b, lo[0])
+		digit_range(b, lo[1:], NINES[:n])
+	}
+	if first <= last {
+		strings.write_string(b, "" if from_zeros else "|")
+		strings.write_byte(b, '[')
+		strings.write_byte(b, first)
+		strings.write_byte(b, '-')
+		strings.write_byte(b, last)
+		strings.write_byte(b, ']')
+		for _ in 0 ..< n {
+			strings.write_string(b, "[0-9]")
+		}
+	}
+	if !to_nines {
+		strings.write_byte(b, '|')
+		strings.write_byte(b, hi[0])
+		digit_range(b, ZEROS[:n], hi[1:])
+	}
+	strings.write_string(b, ")")
+}
+
+@(private, rodata)
+NINES := "99999999999999999999"
+
+@(private, rodata)
+ZEROS := "00000000000000000000"
+
+// The least decimal of each width past one.
+@(private, rodata)
+ONES_THEN_ZEROS := "10000000000000000000"

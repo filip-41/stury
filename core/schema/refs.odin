@@ -105,9 +105,11 @@ target_of :: proc(r: ^Reader, p: Pending) -> (node: rules.Node_Index, late: bool
 			return 0, false, "has a fragment that is no JSON Pointer"
 		}
 		doc := r.sources[sc.source]
-		at, sc := sc.root, sc
+		at, sc, here := sc.root, sc, Position.Schema
 		for step in steps.steps {
-			sc = enter(r, sc, at)
+			if here == .Schema {
+				sc = enter(r, sc, at)
+			}
 			ok := false
 			#partial switch s in step {
 			case core.Name:
@@ -122,6 +124,7 @@ target_of :: proc(r: ^Reader, p: Pending) -> (node: rules.Node_Index, late: bool
 			if !ok {
 				return 0, false, "points at nothing"
 			}
+			here = position_below(here, step, doc, at)
 		}
 		return read_schema(r, sc, at), false, ""
 	}
@@ -130,6 +133,47 @@ target_of :: proc(r: ^Reader, p: Pending) -> (node: rules.Node_Index, late: bool
 		return 0, false, "names an anchor its resource does not have"
 	}
 	return r.memo[anchor.site], anchor.late && p.late, ""
+}
+
+// What a place on a pointer's way is: a schema, an object or an array that holds schemas, or no schema at all, as `const`
+// and an unknown keyword's value are.
+@(private)
+Position :: enum {
+	None,
+	Schema,
+	Map,
+	List,
+}
+
+// The position of `at`, the child of a place at `here` that `step` named.
+@(private)
+position_below :: proc(here: Position, step: core.Step, doc: ^core.Document, at: core.Node_Index) -> Position {
+	switch here {
+	case .Map, .List:
+		return .Schema
+	case .None:
+		return .None
+	case .Schema:
+		name := ""
+		#partial switch s in step {
+		case core.Name:
+			name = string(s)
+		case core.Index_Or_Name:
+			name = s.name
+		}
+		switch name {
+		case "additionalProperties", "additionalItems", "contains", "not", "if", "then", "else", "propertyNames",
+		     "unevaluatedItems", "unevaluatedProperties", "contentSchema":
+			return .Schema
+		case "items":
+			return .List if core.kind(doc, at) == .Array else .Schema
+		case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies":
+			return .Map
+		case "allOf", "anyOf", "oneOf", "prefixItems":
+			return .List
+		}
+	}
+	return .None
 }
 
 // The scope inside the object at `at`, which a pointer passes on its way: the resource its `$id` starts, if it has one.
@@ -228,7 +272,7 @@ dialect :: proc(r: ^Reader, uri: string, depth := 0) -> (draft: Draft, vocab: Vo
 		return {}, {}, "names a meta-schema that is neither a draft's nor a file under the root"
 	}
 	doc := r.sources[source]
-	draft, vocab = r.res.draft, ALL_VOCABS
+	draft, vocab = r.res.draft.? or_else .D2020_12, ALL_VOCABS
 	if parent, has := core.member(doc, at, "$schema"); has {
 		text, _ := string_of(r, doc, parent)
 		draft, vocab, why = dialect(r, uri_resolve(named, text), depth + 1)

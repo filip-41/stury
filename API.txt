@@ -444,6 +444,7 @@ decimal_compare :: proc(x, y: Decimal) -> (order: int, exact: bool)
 decimal_multiple_of :: proc(x, y: Decimal) -> (multiple, exact: bool)
 decimal_of :: proc(lit: string) -> (d: Decimal)
 # core/regex
+Regex :: struct { insts: []Inst, bytes: string, classes: []^Class, refs: [][]int, callouts: []^Callout, names: []string, slots: int, opt: ^Search_Opt, visited: ^Visited, prefix: string, first: [4]u64, longest: bool, not_empty: bool, has_first: bool, calls_or_limits: bool, narrowed: bool, ecma: bool, linear: bool, }
 Scratch :: struct { stack: [dynamic]Entry, slots: [dynamic]int, counts: [dynamic]int, seen: [dynamic]u64, good: [dynamic]u64, log: [dynamic]u32, resumes: int, }
 scratch_destroy :: proc(scratch: ^Scratch)
 # core
@@ -478,6 +479,7 @@ insert_value :: proc { insert_element_value, insert_member_value, }
 lent :: #force_inline proc(a: ^Array) -> bool
 number :: proc { doc_number, value_number, }
 path_destroy :: proc(p: ^Path)
+render_entry :: proc(w: io.Writer, src: []u8, e: Error_Entry, lines: ^Lines = nil) -> io.Error
 same :: proc(a, b: Value) -> bool
 set_member_value :: proc(list: ^Edit_List, obj: Node_Index, name: string, v: Value, dups := Duplicates.Last) -> Error
 table_of :: #force_inline proc "contextless" (doc: ^Document, node: Node_Index) -> (found: Table, ok: bool)
@@ -511,17 +513,20 @@ utf8_block :: #force_inline proc "contextless" ($T: Tier, b: Block, s: ^Utf8_Sta
 # core/rules
 Anchor :: struct { name: string, resource: Node_Index, node: Node_Index, }
 Array :: struct { prefix: []Node_Index, items: Node_Index, contains: Maybe(Node_Index), min_contains: Maybe(u64), max_contains: Maybe(u64), }
+Bound :: struct { set, exclusive, whole: bool, int: i64, exact: spell.Decimal, }
 Conditional :: struct { test, then, other: Maybe(Node_Index), }
 Dependent :: struct { name: string, required: []string, node: Maybe(Node_Index), }
 Description :: struct { nodes: [dynamic]Node, arrays: [dynamic]Array, objects: [dynamic]Object, texts: [dynamic]string, anchors: [dynamic]Anchor, root: Node_Index, allocator: runtime.Allocator, }
 Kind :: enum u8 { Null, Bool, Integer, Number, String, Array, Object, }
 Kinds :: bit_set[Kind; u8]
-Member :: struct { name: string, node: Node_Index, rules: Rules, required: bool, }
-Node :: struct { kinds: Kinds, rules: Rules, array: i32, object: i32, any_of: []Node_Index, enum_of: []core.Value, const_of: Maybe(core.Value), all_of, one_of: []Node_Index, not: Maybe(Node_Index), cond: Conditional, ref, dynamic_ref: Maybe(Node_Index), unevaluated_items: Maybe(Node_Index), unevaluated_properties: Maybe(Node_Index), resource: Node_Index, }
+Leaf :: struct { kinds: Kinds, integer_spelled: bool, has_enum: bool, constant: bool, minimum, maximum: Bound, multiple_of: Maybe(spell.Decimal), min_length, max_length: u64, min_items, max_items: u64, min_members: u64, max_members: u64, pattern: ^regex.Regex, enum_keys: []string, }
+Member :: struct { name: string, node: Node_Index, rules: Rules, required: bool, only_required: bool, }
+Node :: struct { kinds: Kinds, integer_spelled: bool, rules: Rules, array: i32, object: i32, any_of: []Node_Index, enum_of: []core.Value, const_of: Maybe(core.Value), all_of, one_of: []Node_Index, not: Maybe(Node_Index), cond: Conditional, ref, dynamic_ref: Maybe(Node_Index), unevaluated_items: Maybe(Node_Index), unevaluated_properties: Maybe(Node_Index), resource: Node_Index, }
 Node_Index :: distinct i32
 Object :: struct { members: []Member, additional: Node_Index, keys: Node_Index, patterns: []Pattern, dependents: []Dependent, }
 Pattern :: struct { expression: string, node: Node_Index, }
 Rules :: struct { minimum, maximum: string, multiple_of, pattern, format: string, unique: bool, exclusive_minimum, exclusive_maximum: bool, min_length, min_items, min_members: u64, max_length, max_items, max_members: Maybe(u64), }
+code_points :: proc "contextless" (s: string) -> u64
 # core/build
 Answer_State :: enum u8 { Fresh, Walking, Done, }
 Builder :: struct { doc: core.Document, stack: []u64, n_facts: int, pending: int, last: core.Node_Index, root_close: u64, wide_node: core.Node_Index, wide_count: u32, wide_more: bool, n_counts: int, refuse: bool, borrowed: bool, err: core.Document_Error, }
@@ -547,6 +552,7 @@ Scalar :: union { Null, bool, i64, u64, f64, core.Number_Text, string, }
 Tag_Scan :: struct { view: core.Token_View, name: string, depth: int, on_tag: bool, found: int, value: core.Token, fault: Maybe(core.Fault), }
 Text_Build :: #type proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error)
 Text_Read :: #type proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error
+Use :: struct { leaf, keys: i32, array, additional: i32, step, only_required: bool, }
 Value_Text :: #type proc(plan: ^Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
 check_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator := context.allocator) -> core.Error
 plan_destroy :: proc(p: ^Plan)
@@ -575,11 +581,14 @@ Bound :: struct { plan: typed.Plan, compiled: ^Compiled, }
 Compiled :: struct { description: ^rules.Description, opts: Options, owned: bool, allocator: runtime.Allocator, }
 Draft :: enum u8 { D04, D06, D07, D2019_09, D2020_12, }
 Options :: struct { format_assert: bool, base: string, resolver: Resolver, }
-Resolver :: struct { root: string, as: core.As, draft: Draft, documents: [dynamic]^core.Document, texts: [dynamic][]u8, allocator: runtime.Allocator, }
+Resolver :: struct { root: string, as: core.As, draft: Maybe(Draft), documents: [dynamic]^core.Document, texts: [dynamic][]u8, allocator: runtime.Allocator, }
 bind :: proc(c: ^Compiled, as: core.As, allocator := context.allocator) -> (b: Bound, err: core.Error)
+check :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink = nil) -> core.Error
+check_node :: proc(b: ^Bound, doc: ^core.Document, node: core.Node_Index, sink: ^typed.Sink = nil) -> core.Error
 compile :: proc(doc: ^core.Document, node: core.Node_Index, opts := Options{}, allocator := context.allocator) -> (c: Compiled, err: core.Error)
 compile_description :: proc(d: ^rules.Description, opts := Options{}, allocator := context.allocator) -> Compiled
 destroy :: proc(c: ^Compiled)
 read :: proc(doc: ^core.Document, node: core.Node_Index, base: string, res: ^Resolver, allocator := context.allocator) -> (d: rules.Description, err: core.Error)
 resolver_destroy :: proc(res: ^Resolver)
 unbind :: proc(b: ^Bound)
+valid :: proc(b: ^Bound, src: []u8) -> bool

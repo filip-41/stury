@@ -19,8 +19,8 @@ Resolver :: struct {
 	root:      string,
 	// How referenced files and the vendored meta-schemas are read: a format whose text is JSON.
 	as:        core.As,
-	// The draft of a schema with no `$schema`.
-	draft:     Draft,
+	// The draft of a schema with no `$schema`, 2020-12 when nil.
+	draft:     Maybe(Draft),
 	// The documents the references loaded and the texts they read, freed by `resolver_destroy`.
 	documents: [dynamic]^core.Document,
 	texts:     [dynamic][]u8,
@@ -149,7 +149,7 @@ read_root :: proc(r: ^Reader, source: int, at: core.Node_Index, uri: string) {
 	sc := Scope {
 		source   = source,
 		base     = uri,
-		draft    = r.res.draft,
+		draft    = r.res.draft.? or_else .D2020_12,
 		vocab    = ALL_VOCABS,
 		root     = at,
 		resource = rules.Node_Index(len(r.d.nodes)),
@@ -456,6 +456,7 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 		n.unevaluated_properties = read_schema(r, sc, v)
 	case "type":
 		n.kinds = types_of(r, doc, site)
+		n.integer_spelled = sc.draft == .D04 && .Integer in n.kinds
 	case "const":
 		n.const_of = core.Value(core.Node_Ref{doc, v})
 	case "enum":
@@ -538,7 +539,7 @@ finish_blocks :: proc(r: ^Reader, n: ^rules.Node, sh: ^Shape) {
 			}
 		}
 		if !found {
-			append(&sh.members, rules.Member{name = required, node = any_node(r), required = true})
+			append(&sh.members, rules.Member{name = required, node = any_node(r), required = true, only_required = true})
 		}
 	}
 	if sh.is_object {
@@ -641,7 +642,8 @@ enum_values :: proc(r: ^Reader, doc: ^core.Document, site: Site) -> []core.Value
 		fail(r, site, "enum", "must be an array")
 		return nil
 	}
-	out := make([dynamic]core.Value, r.d.allocator)
+	// Room for one keeps an empty enum, which no value is in, apart from none.
+	out := make([dynamic]core.Value, 0, 1, r.d.allocator)
 	it := core.children(doc, site.at)
 	for c in core.child_next(&it) {
 		append(&out, core.Node_Ref{doc, c})

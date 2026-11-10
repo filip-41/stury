@@ -66,20 +66,45 @@ index_all :: proc(doc: ^core.Document) {
 	}
 }
 
-// A compiled schema bound to a format: the plan that reads a text of it.
+// A compiled schema bound to a format: the plan a check of a text or a document of it reads with.
 Bound :: struct {
 	plan:     typed.Plan,
 	compiled: ^Compiled,
 }
 
-// Binds `c` to the format `as`. A schema keyword the plan does not judge yet is refused as `.Unsupported`, naming it.
+// Binds `c` to the format `as`. A schema keyword the check does not judge yet is refused as `.Unsupported`, naming it,
+// and a compile that failed as `.Bad_Option`.
 bind :: proc(c: ^Compiled, as: core.As, allocator := context.allocator) -> (b: Bound, err: core.Error) {
+	if c == nil || c.description == nil {
+		return {}, core.error_of(core.Typed_Error{kind = .Bad_Option})
+	}
 	if keyword := rules.unjudged(c.description, c.opts.format_assert); keyword != "" {
 		return {}, core.error_of(core.Typed_Error{kind = .Unsupported, want = {text = keyword}})
 	}
 	b.compiled = c
-	b.plan, err = typed.plan_of(c.description, as, nil, {}, allocator)
+	b.plan, err = typed.check_plan_of(c.description, as, allocator)
 	return
+}
+
+// Checks `src`, one text of the format `b` is bound to, with every failure in `sink.entries`, and returns the first. With
+// no sink the check stops at the first failure. A check allocates only the entries, with the sink's allocator.
+check :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink = nil) -> core.Error {
+	if b.plan.check == nil {
+		return core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+	}
+	target: u8
+	return core.error_of(b.plan.check(src, b.plan.as, &target, nil, &b.plan, {sink = sink}, context.allocator))
+}
+
+// Whether `src` passes the schema, as `check` with no sink says.
+valid :: proc(b: ^Bound, src: []u8) -> bool {
+	return check(b, src) == nil
+}
+
+// Checks the value at `node` of `doc`, a document of the format `b` is bound to, as `check` checks a text.
+check_node :: proc(b: ^Bound, doc: ^core.Document, node: core.Node_Index, sink: ^typed.Sink = nil) -> core.Error {
+	target: u8
+	return typed.check_document(doc, node, &target, nil, &b.plan, {sink = sink})
 }
 
 unbind :: proc(b: ^Bound) {

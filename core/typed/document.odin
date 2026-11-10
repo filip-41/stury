@@ -23,7 +23,7 @@ import build "../build"
 unmarshal :: proc {unmarshal_node, unmarshal_answer, unmarshal_value}
 
 unmarshal_node :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error {
-	return core.error_of(read_document(doc, node, typeid_of(T), target, plan, read, allocator))
+	return core.error_of(read_document(doc, node, typeid_of(T), target, plan, read, allocator, false))
 }
 
 // Reads the value a path found. An answer that is not `.Found` holds no value, and is `.Bad_Option`.
@@ -31,7 +31,7 @@ unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, 
 	if answer.outcome != .Found {
 		return core.error_of(core.Typed_Error{kind = .Bad_Option})
 	}
-	return core.error_of(read_document(doc, answer.node, typeid_of(T), target, plan, read, allocator))
+	return core.error_of(read_document(doc, answer.node, typeid_of(T), target, plan, read, allocator, false))
 }
 
 // Reads the value `v` into `target` with `plan`, as a text of the plan's format spelling it would be read: a double
@@ -40,7 +40,7 @@ unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, 
 // `.Plan_Mismatch`.
 unmarshal_value :: proc(v: core.Value, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error {
 	if r, is_node := core.plain(v).(core.Node_Ref); is_node {
-		return core.error_of(read_document(r.doc, r.node, typeid_of(T), target, plan, read, allocator))
+		return core.error_of(read_document(r.doc, r.node, typeid_of(T), target, plan, read, allocator, false))
 	}
 	if plan == nil || plan.value_text == nil {
 		return core.error_of(core.Typed_Error{kind = .Bad_Option})
@@ -65,8 +65,14 @@ Document_Read :: struct {
 	room:   int, // the frames the reader holds
 }
 
+// Checks the value at `node` of `doc` into `target`, a value of `T`, with `plan`, as `unmarshal_node` reads it, with
+// every refusal in `read.sink.entries`. A description's plan takes a nil `T` and any target, which it does not write.
+check_document :: proc(doc: ^core.Document, node: core.Node_Index, target: rawptr, T: typeid, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error {
+	return core.error_of(read_document(doc, node, T, target, plan, read, allocator, true))
+}
+
 @(private)
-read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
+read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Error {
 	if doc == nil || doc.readers == nil || int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key || read.dups == .Refuse {
 		return {kind = .Bad_Option}
 	}
@@ -78,7 +84,7 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 		} else if refusal != nil {
 			err.kind = .No_Memory
 		} else {
-			err = read_document(doc, node, T, target, &made, read, allocator)
+			err = read_document(doc, node, T, target, &made, read, allocator, CHECK)
 		}
 		own_errors(&err, read.sink)
 		plan_destroy(&made)
@@ -86,16 +92,23 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	}
 	// A format that writes no key frame has tokens that do not type their values, so only its own plan maker's plan reads it.
 	if plan != nil && core.same_format(plan.readers, doc.readers) && len(doc.readers.key_open) == 0 {
-		if plan.node_read == nil {
+		node_read := plan.node_check if CHECK else plan.node_read
+		if node_read == nil {
 			return {kind = .Plan_Mismatch}
 		}
-		return plan.node_read(doc, node, T, target, plan, read, allocator)
+		return node_read(doc, node, T, target, plan, read, allocator)
 	}
 	// The frames and the replay's two words a level grow as the value nests past them.
 	frames: [core.MAX_DEPTH + 2]Frame = ---
 	ends: [2 * core.MAX_DEPTH]u32 = ---
 	d := Document_Read{doc = doc, room = len(frames)}
-	regs, err := read_start(&d.reader, doc.src, plan, doc.as, T, target, read, frames[:], allocator)
+	regs: core.Hook_Regs
+	err: core.Typed_Error
+	when CHECK {
+		regs, err = check_start((^Check)(&d.reader), doc.src, plan, doc.as, T, target, read, frames[:], allocator)
+	} else {
+		regs, err = read_start(&d.reader, doc.src, plan, doc.as, T, target, read, frames[:], allocator)
+	}
 	if err.kind != .None {
 		return err
 	}
@@ -103,7 +116,8 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	d.reader.format = &d
 	d.reader.find_tag = document_tag
 	to := u32(node) + (doc.nodes[node].n if doc.nodes[node].kind > .Plain else 1)
-	if !build.feed_nodes(doc, u32(node), to, &d, &regs, ends[:], document_step, document_keyed, document_deepen, true) {
+	step :: document_step_check when CHECK else document_step
+	if !build.feed_nodes(doc, u32(node), to, &d, &regs, ends[:], step, document_keyed, document_deepen, true) {
 		return {kind = .No_Memory}
 	}
 	return read_end(&d.reader, regs, nil)
@@ -137,6 +151,26 @@ document_step :: proc "contextless" (d: ^Document_Read, regs: core.Hook_Regs, t:
 		h.mant = fold_digits(h.src, t)
 	}
 	return on_token_spelled(h, regs, t)
+}
+
+// `document_step` for a `Check`, where every close of a description's plan reports at its byte.
+@(private)
+document_step_check :: proc "contextless" (d: ^Document_Read, regs: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
+	h := (^Check)(&d.reader)
+	d.at = at
+	t := t
+	if t.role == .Partial {
+		t.role = .Value
+	} else if t.kind == .End {
+		if h.plan.uses != nil || needs_close(&h.frames[h.sp - 1]) {
+			context = h.ctx
+			t.lo = d.doc.readers.close_end(d.doc, at) - 1
+			t.n = 1
+		}
+	} else if t.kind == .Number && t.spelling & core.NUMBER_KIND_MASK == 0 {
+		h.mant = fold_digits(h.src, t)
+	}
+	return on_token_check_spelled(h, regs, t)
 }
 
 // Whether the close of the container `f` holds reads the bracket's byte: a fixed array's length, a `required` member, or

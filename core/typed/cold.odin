@@ -718,8 +718,14 @@ spelled_number :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_R
 	if fld.kind < .I8 || fld.kind > .F64 {
 		return indirect(h, regs, t)
 	}
-	if reason := number_cold(h, t, fld, uintptr(regs.c) + uintptr(fld.offset)); reason != .None {
+	dest := uintptr(regs.c) + uintptr(fld.offset)
+	if reason := number_cold(h, t, fld, dest); reason != .None {
 		return refuse_value(h, regs, t, reason)
+	}
+	when H == Check {
+		if h.plan.leaves != nil && h.plan.meta[fld.meta].rule_set > 0 && check_rules(h, regs, t, fld, dest) == .Stop {
+			return regs, .Stop
+		}
 	}
 	regs.c += u64(fld.stride)
 	return regs, .Next

@@ -83,27 +83,32 @@ Regex :: struct {
 	callouts: []^Callout, // those that keep data, each at its index
 	names:    []string, // group n's name at n, "" for none; [0] is the whole match
 	slots:    int, // two per group with the whole match, then a mark per loop that can match empty
-	longest:   bool, // ONIG_OPTION_FIND_LONGEST: the longest match of all, not the first
-	not_empty: bool, // ONIG_OPTION_FIND_NOT_EMPTY: an empty match is no match
 	opt:      ^Search_Opt, // what Oniguruma's optimizer would have the search skip by, kept apart since a Regex is copied
+	visited:  ^Visited, // under `linear`, what the visited set needs of the program
 	prefix:   string, // every match starts with these bytes
 	first:     [4]u64, // with has_first, the bytes a match can start with
+	longest:   bool, // ONIG_OPTION_FIND_LONGEST: the longest match of all, not the first
+	not_empty: bool, // ONIG_OPTION_FIND_NOT_EMPTY: an empty match is no match
 	has_first: bool,
 	calls_or_limits: bool, // holds a subexpression call or an absent operator, whose tracking the match then runs
 	narrowed:  bool, // `opt` bounds the starts the search tries
 	ecma:      bool, // compiled under `Flags.ecma`, whose search refuses a text too long for the visited set
 	// A program with choices whose outcome at an instruction and a position does not depend on the way there: the search
-	// keeps the pairs it has been to, so no pair runs twice. Every ECMA program but a straight line, and the jq ones
-	// `linear_ops` allows.
+	// keeps the pairs it has been to, so no pair runs twice. The ECMA programs `linear_ops` allows, and the jq ones.
 	linear:    bool,
-	owner:     []i32, // under `linear`, the look-ahead each instruction lies in, -1 for none, or nil for no look-ahead
-	// Under `linear`, the ECMA loops whose body may match empty, each one's mark slot and the loop around it (-1 for
-	// none), the innermost each instruction lies in (-1 for none), and each instruction's first row of the visited set,
-	// the row count last. An instruction has a row and one more for each loop around it, since an iteration that has
-	// matched nothing yet fails where one that has goes on (`row_of`). Nil when no such loop.
-	loops:     [][2]i32,
-	loop_of:   []i32,
-	rows:      []i32,
+}
+
+// The program's facts the visited set reads, kept behind a pointer since a Regex is copied.
+@(private)
+Visited :: struct {
+	owner:   []i32, // the look-ahead each instruction lies in, -1 for none, or nil for no look-ahead
+	// The ECMA loops whose body may match empty, each one's mark slot and the loop around it (-1 for none), the
+	// innermost each instruction lies in (-1 for none), and each instruction's first row of the visited set, the row
+	// count last. An instruction has a row and one more for each loop around it, since an iteration that has matched
+	// nothing yet fails where one that has goes on (`row_of`). Nil when no such loop.
+	loops:   [][2]i32,
+	loop_of: []i32,
+	rows:    []i32,
 }
 
 @(private)
@@ -212,29 +217,34 @@ compile :: proc(pattern: string, flags: Flags, allocator := context.allocator) -
 	for ins in re.insts {
 		re.calls_or_limits ||= ins.op >= .Call
 	}
-	re.ecma, re.linear = flags.ecma, linear_ops(re.insts, flags.ecma)
-	if re.linear && flags.ecma {
-		re.owner = look_owners(re.insts)
-	}
-	if re.linear && len(c.loops) > 0 {
-		re.loops, re.loop_of = c.loops[:], c.loop_of[:]
-		re.rows = make([]i32, len(re.insts) + 1)
-		for l, pc in re.loop_of {
-			re.rows[pc + 1] = re.rows[pc] + 1
-			for k := l; k >= 0; k = re.loops[k][1] {
-				re.rows[pc + 1] += 1
+	re.ecma, re.linear = flags.ecma, linear_ops(re.insts, flags.ecma, re.opt.anchored)
+	if re.linear {
+		v := new(Visited)
+		re.visited = v
+		if flags.ecma {
+			v.owner = look_owners(re.insts)
+		}
+		if len(c.loops) > 0 {
+			v.loops, v.loop_of = c.loops[:], c.loop_of[:]
+			v.rows = make([]i32, len(re.insts) + 1)
+			for l, pc in v.loop_of {
+				v.rows[pc + 1] = v.rows[pc] + 1
+				for k := l; k >= 0; k = v.loops[k][1] {
+					v.rows[pc + 1] += 1
+				}
 			}
 		}
 	}
 	return re, ""
 }
 
-// Whether the visited set pays and holds for a program. Under ECMA it does with any choice. Under jq it does with a
+// Whether the visited set pays and holds for a program. Under ECMA it does with a loop, a look-ahead, two choices, or one
+// choice in a search that tries more than one start. Under jq it does with a
 // choice inside a loop, the one shape that backtracks past polynomial time, and when each instruction's outcome depends
 // on the position alone: no look-around, back reference, counter, call or callout, and no empty check, whose exit
 // Oniguruma takes where ECMA fails.
 @(private = "file")
-linear_ops :: proc(insts: []Inst, ecma: bool) -> bool {
+linear_ops :: proc(insts: []Inst, ecma: bool, anchored: bool) -> bool {
 	for ins in insts {
 		allowed := ecma
 		#partial switch ins.op {
@@ -249,15 +259,20 @@ linear_ops :: proc(insts: []Inst, ecma: bool) -> bool {
 			return false
 		}
 	}
+	choices := 0
 	for ins, i in insts {
-		if ecma && is_choice(ins) {
-			return true
-		}
-		if !ecma && ins.op == .Jmp && int(ins.a) < i && slice.any_of_proc(insts[ins.a + 1:i], is_choice) {
+		if ecma {
+			// A program that starts at one place and has one choice and no loop or look-ahead tries each alternative
+			// of it along a straight line, so the set would only cost.
+			choices += int(is_choice(ins))
+			if ins.op == .Look || ins.op == .Jmp && int(ins.a) < i {
+				return true
+			}
+		} else if ins.op == .Jmp && int(ins.a) < i && slice.any_of_proc(insts[ins.a + 1:i], is_choice) {
 			return true
 		}
 	}
-	return false
+	return choices > 1 || choices == 1 && !anchored
 }
 
 @(private = "file")

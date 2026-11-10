@@ -342,17 +342,14 @@ plain_run :: proc(p: ^Parser) -> ^Node {
 }
 
 // Whether `\c` is the character c itself, as an escaped ASCII character other than a letter or digit is, and under
-// ECMA only a syntax character or `/`.
+// ECMA an ASCII punctuation character, as Annex B's identity escapes take.
 @(private)
 escaped_punctuation :: proc(c: byte, ecma: bool) -> bool {
-	if ecma {
-		return strings.index_byte(`^$\.*+?()[]{}|/`, c) >= 0
-	}
 	switch c {
 	case 'a' ..= 'z', 'A' ..= 'Z', '0' ..= '9':
 		return false
 	}
-	return c < 0x80
+	return c > ' ' && c < 0x7F if ecma else c < 0x80
 }
 
 // Under (?x), white space and `#` comments between tokens.
@@ -734,16 +731,71 @@ parse_group :: proc(p: ^Parser) -> ^Node {
 	return parse_options(p)
 }
 
-// A group's name up to `close`, which must not be empty or start with a digit, and under ECMA is an identifier no
-// other group has.
+// A group's name up to `close`. Under Oniguruma it must not be empty, start with a digit or `-`, or start with a
+// character that is no word character, and a backslash in it is a backslash. Under ECMA it is an identifier no other
+// group has, whose characters may be written as `\uXXXX` or `\u{...}`.
 @(private = "file")
 group_name :: proc(p: ^Parser, close: byte) -> (string, bool) {
-	name, ok := read_name(p, close)
-	if ok && (name[0] >= '0' && name[0] <= '9' || p.flags.ecma && (!ecma_identifier(name) || slice.contains(p.names[:], name))) {
-		fail(p, strings.concatenate({"invalid group name <", name, ">"}))
+	name: string
+	ok: bool
+	if p.flags.ecma {
+		name, ok = ecma_name(p, close)
+	} else {
+		name, ok = read_name(p, close)
+	}
+	if !ok {
 		return "", false
 	}
-	return name, ok
+	if p.flags.ecma {
+		if !ecma_identifier(name) || slice.contains(p.names[:], name) {
+			fail(p, strings.concatenate({"invalid group name <", name, ">"}))
+			return "", false
+		}
+		return name, true
+	}
+	first, _ := utf8.decode_rune_in_string(name)
+	switch {
+	case first >= '0' && first <= '9' || first == '-':
+		fail(p, strings.concatenate({"invalid group name <", name, ">"}))
+		return "", false
+	case !is_word(first):
+		fail(p, strings.concatenate({"invalid char in group name <", name, ">"}))
+		return "", false
+	}
+	return name, true
+}
+
+// An ECMA group name up to `close`, with its `\u` escapes decoded.
+@(private = "file")
+ecma_name :: proc(p: ^Parser, close: byte) -> (string, bool) {
+	b := strings.builder_make()
+	for !at_end(p) && peek(p) != close {
+		if p.src[p.i] != '\\' {
+			strings.write_byte(&b, p.src[p.i])
+			p.i += 1
+			continue
+		}
+		if peek(p, 1) != 'u' {
+			fail(p, "invalid group name")
+			return "", false
+		}
+		p.i += 2
+		r, ok := ecma_char(p, 'u')
+		if !ok {
+			return "", false
+		}
+		strings.write_rune(&b, r)
+	}
+	if at_end(p) {
+		fail(p, "invalid group name")
+		return "", false
+	}
+	p.i += 1
+	if strings.builder_len(b) == 0 {
+		fail(p, "group name is empty")
+		return "", false
+	}
+	return strings.to_string(b), true
 }
 
 // A name up to `close`, which must not be empty.

@@ -3,8 +3,8 @@
 // `.jsonl` or `.ndjson` text, else as one document. `BENCH_PASSES=N` makes N untimed passes and prints `check` alone, for
 // the runner's instruction counts. `BENCH_VERDICTS=PATH` writes one 0 or 1 per instance, in order, to PATH.
 //
-// Until the schema check exists, both forms run `json.validate` on each instance, so a verdict is the instance's
-// well-formedness, SCHEMA is not read, and the two forms are the same work.
+// `verdict` asks `schema.valid` of each instance and `errors` collects each instance's errors with `schema.check`. A
+// schema the check does not bind exits 3 with the keyword it refuses.
 package schema_bench
 
 import "base:runtime"
@@ -14,16 +14,29 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 import "../timing"
+import core "../../core"
+import typed "../../core/typed"
 import records "../../core/records"
+import schema "../../core/schema"
 import json "../../json"
 
 lines: bool
+errors: bool
+bound: schema.Bound
 
 // Judges every instance of `src`, writing one 0 or 1 per instance to `marks` when it is not nil, and returns the number
 // of instances and the number refused.
 pass :: proc(src: []u8, marks: ^strings.Builder = nil) -> (n, refused: int) {
 	judge :: proc(text: []u8, marks: ^strings.Builder) -> int {
-		bad := int(json.validate(text, json.Spec.Json) != nil)
+		defer free_all(context.temp_allocator)
+		bad: int
+		if errors {
+			sink: typed.Sink
+			bad = int(schema.check(&bound, text, &sink) != nil)
+			typed.sink_destroy(&sink)
+		} else {
+			bad = int(!schema.valid(&bound, text))
+		}
 		if marks != nil {
 			strings.write_byte(marks, '0' if bad == 1 else '1')
 		}
@@ -46,6 +59,26 @@ main :: proc() {
 		fmt.eprintln("usage: schema <verdict|errors> <schema> <file>")
 		os.exit(2)
 	}
+	text, terr := os.read_entire_file(os.args[2], runtime.default_allocator())
+	if terr != nil {
+		fmt.eprintln(os.args[2], terr)
+		os.exit(1)
+	}
+	doc, berr := json.build(text, .Json)
+	if berr != nil {
+		fmt.eprintln(os.args[2], berr)
+		os.exit(1)
+	}
+	compiled, cerr := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
+	if cerr != nil {
+		fmt.eprintln(os.args[2], cerr)
+		os.exit(1)
+	}
+	if bound, cerr = schema.bind(&compiled, json.as(.Json)); cerr != nil {
+		fmt.eprintln(os.args[2], cerr)
+		os.exit(3)
+	}
+	errors = os.args[1] == "errors"
 	src, err := os.read_entire_file(os.args[3], runtime.default_allocator())
 	if err != nil {
 		fmt.eprintln(os.args[3], err)

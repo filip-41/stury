@@ -6,6 +6,7 @@ package typed
 import "base:intrinsics"
 import "base:runtime"
 import "core:io"
+import "core:mem/virtual"
 import "core:reflect"
 import "core:strings"
 import core ".."
@@ -226,6 +227,23 @@ Plan :: struct {
 	stamp:     u64,
 	// The rules of members, which `Meta.rule_set` names.
 	rule_sets: []rules.Rules,
+	// A check's rules: of `rule_sets`, in the same order, for a type's plan, and of the records' uses for a description's.
+	leaves:    []rules.Leaf,
+	// What a check judges at each record of a description's plan, indexed like `fields`, nil for a type's plan.
+	uses:      []Use,
+	// What `leaves` allocates: patterns and enum keys.
+	arena:     ^virtual.Arena,
+}
+
+// What a check judges at a record of a description's plan, each index 1 past its place and 0 for none. `leaf` is the
+// value's rules in `Plan.leaves`, `keys` the rules an object's member names pass. `array` is the record an array's
+// elements start at, and `additional` the record of an object's members no record names. `step` is set on an array's
+// prefix record, which moves the cursor to the next element's record. `only_required` is set on a member's record that
+// only `required` names, whose value is judged as a member no record names.
+Use :: struct {
+	leaf, keys:          i32,
+	array, additional:   i32,
+	step, only_required: bool,
 }
 
 // Writes the value of `plan`'s type at `value` as `opts` says, to `stream` when it has a procedure, else to new bytes
@@ -298,7 +316,35 @@ plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := 
 		refuse_tag_members(&b)
 	}
 	err = plan_finish(&b, plan_stamp(T, as, opts))
+	if err.kind == .None && len(p.rule_sets) > 0 {
+		err = plan_leaves(&p)
+	}
 	return
+}
+
+// Compiles the leaves of a type's plan from its rule sets into the plan's arena. A rule the check does not judge
+// refuses the plan as `.Unsupported`, naming its keyword.
+@(private)
+plan_leaves :: proc(p: ^Plan) -> core.Typed_Error {
+	leaves, failed := make([]rules.Leaf, len(p.rule_sets))
+	p.leaves = leaves
+	p.arena = new(virtual.Arena)
+	if failed != nil || p.arena == nil || virtual.arena_init_growing(p.arena) != nil {
+		free(p.arena)
+		p.arena = nil
+		plan_destroy(p)
+		p.err = {kind = .No_Memory}
+		return p.err
+	}
+	for r, i in p.rule_sets {
+		refused: string
+		if leaves[i], refused = rules.rules_leaf(r, rules.EVERY_KIND, virtual.arena_allocator(p.arena)); refused != "" {
+			plan_destroy(p)
+			p.err = {kind = .Unsupported, want = {text = refused}}
+			return p.err
+		}
+	}
+	return {}
 }
 
 // Gives `p` the text reads and node reads of `reads`, where it holds any.
@@ -451,6 +497,12 @@ plan_destroy :: proc(p: ^Plan) {
 	delete(p.options.hooks)
 	delete(p.options.tag_names)
 	delete(p.rule_sets)
+	delete(p.leaves)
+	delete(p.uses)
+	if p.arena != nil {
+		virtual.arena_destroy(p.arena)
+		free(p.arena)
+	}
 	p^ = {}
 }
 

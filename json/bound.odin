@@ -53,6 +53,15 @@ reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	return &r
 }
 
+// The reads of a plan that `unmarshal` of spec `S` makes for one call, which holds the build of a `core.Value` member and
+// no read or check, so the call links the walks it uses.
+build_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
+	@(static, rodata) r := typed.Format_Reads {
+		build = proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_spec(src, S, as, false, allocator)},
+	}
+	return &r
+}
+
 // The framing of records read as spec `S`: the walks that frame and judge a record are the walk of `S`. It holds no record
 // reads, which `record_docs(S)` gives.
 framing_of :: proc "contextless" ($S: Spec) -> ^records.Framing_Services {

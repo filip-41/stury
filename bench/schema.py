@@ -16,9 +16,8 @@ between two counted runs of different pass counts over the instance count, which
 The schema is the benchmark's `schema-noformat.json` (no `format` is asserted) for the 15 fixtures of
 sourcemeta-research/jsonschema-benchmark, and a schema from bench/gen.py for logs, twitter, citm and applicator.
 
-Until stury's schema check exists, the stury arm runs `json.validate` in both forms: it judges well-formedness, so its
-`check` is left out of the agreement test and its columns are validate only. The arms that judge a schema must agree on
-the verdict of every instance before a fixture is timed; one that disagrees or fails is left out of that fixture and named.
+The arms must agree on the verdict of every instance before a fixture is timed; one that disagrees or fails, stury on a
+schema its check does not bind among them, is left out of that fixture and named.
 The runner holds build/bench/timing.lock and kills a child over 1 GiB of live RSS.
 """
 import os, re, statistics, sys, tempfile
@@ -106,16 +105,9 @@ def geomean_row(rows, arms, base="blaze"):
     """Each arm's geometric mean of its ratio to `base` over the rows where both ran."""
     out = []
     for a in arms:
-        if a == "stury":
-            out.append(f"{'-':>12}")
-            continue
         r = [c[a] / c[base] for c in rows.values() if a in c and base in c and c[a] > 0 and c[base] > 0]
         out.append(f"{statistics.geometric_mean(r):12.2f}" if r else f"{'-':>12}")
     return f"{'geomean/' + base:16}" + "".join(out)
-
-
-def judging(arms):
-    return [a for a in arms if a != "stury"]
 
 
 def lane(rounds, have, wanted):
@@ -136,14 +128,14 @@ def lane(rounds, have, wanted):
                     live.append(arm)
                 except Failed as e:
                     notes.append(f"{name} {form} {arm}: {e}")
-            counts = [marks[a] for a in judging(live)]
+            counts = [marks[a] for a in live]
             want = statistics.mode(counts) if counts else None
-            for a in judging(live):
+            for a in live:
                 if marks[a] != want:
                     notes.append(f"{name} {form} {a}: differs from the other arms at instance {first_difference(marks[a], want)}")
             if form == "verdict":
-                verdicts[name] = (calls, accepted, {a: marks[a] == want for a in judging(live)})
-            live = [a for a in live if a == "stury" or marks[a] == want]
+                verdicts[name] = (calls, accepted, {a: marks[a] == want for a in live})
+            live = [a for a in live if marks[a] == want]
             best = dict.fromkeys(live, 0.0)
             ns = dict.fromkeys(live, None)
             for _ in range(rounds):
@@ -171,7 +163,7 @@ def lane(rounds, have, wanted):
         print(geomean_row(gbs[form], shown))
         table(f"{form}, µs per call", mics[form], shown, lambda v: f"{v:.2f}")
         table(f"{form}, instructions per call", inss[form], shown, lambda v: f"{v:.0f}")
-    shown = judging(have)
+    shown = have
     print("\ninstances accepted in the verdict form, and whether every instance's verdict agrees\n" + f"{'':16}" + "".join(f"{a:>12}" for a in ["instances", *shown, "agree"]))
     for name, (calls, accepted, same) in verdicts.items():
         agree = len(same) == len(shown) and all(same.values())
@@ -190,7 +182,7 @@ def main(argv):
     if "stury" not in have:
         sys.exit("the stury arm is not running: run make bench-schema, and leave stury in ARMS")
     preamble(rounds, "Single thread, parse + judge per instance. GB/s: the best of {rounds} rounds of each arm's median of "
-             "ten calls after two warm-ups. stury is json.validate only until its schema check lands.")
+             "ten calls after two warm-ups.")
     print("load average at the start: %.1f %.1f %.1f on %d cores" % (*os.getloadavg(), os.cpu_count()))
     with locked():
         lane(rounds, have, wanted)

@@ -416,7 +416,9 @@ hash :: proc(v: Value, seed := u64(0xcbf29ce484222325)) -> u64 {
 	case .Object:
 		// The members are summed, so their order does not count. A repeated key counts once, with its last value.
 		sum: u64
-		for m in sorted_members(v) {
+		members := sorted_members(v)
+		defer delete(members)
+		for m in members {
 			sum += mix(hash(m.key, seed), hash(m.val, seed))
 		}
 		h = mix(h, sum)

@@ -29,12 +29,19 @@ reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 // The plan reads only with `reads`, whose reads bind a spec and so the walk of that spec, and with none it reads
 // through `unmarshal`, `check` and the handle's `typed.unmarshal_text`.
 plan_make :: proc(T: typeid, spec := Spec.Json, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error) {
-	made, err := typed.plan_build(T, plan_handle(spec, opts), plan, allocator)
-	plan_bind(&made, reads)
-	if err.kind == .None && made.build == nil && typed.plan_has_value(&made) {
+	made, err := plan_written(T, spec, opts, plan, reads, allocator)
+	if err == nil && made.build == nil && typed.plan_has_value(&made) {
 		typed.plan_destroy(&made)
 		return {}, core.error_of(core.Typed_Error{kind = .Unsupported})
 	}
+	return made, err
+}
+
+// The plan of `plan_make` with no check that its reads build a `core.Value` member, which a write does not need.
+@(private)
+plan_written :: proc(T: typeid, spec: Spec, opts: Options, plan: typed.Plan_Options, reads: ^typed.Format_Reads, allocator: runtime.Allocator) -> (typed.Plan, core.Error) {
+	made, err := typed.plan_build(T, plan_handle(spec, opts), plan, allocator)
+	plan_bind(&made, reads)
 	return made, core.error_of(err)
 }
 
@@ -72,7 +79,7 @@ plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: run
 
 @(private)
 unmarshal_bound :: proc(src: []u8, $S: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	plan, refusal := plan_make(T, S, opts, reads = reads_of(S))
+	plan, refusal := plan_make(T, S, opts, reads = build_of(S))
 	if refusal != nil {
 		return refusal
 	}

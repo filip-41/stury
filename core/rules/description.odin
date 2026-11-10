@@ -40,7 +40,7 @@ Rules :: struct {
 // A node takes a value of one of `kinds` that passes the node's rules and, when there are arms, one of `any_of`.
 // `array` and `object` index the kind's block in the description, -1 for an array or object of any shape, so nodes
 // that differ only in kinds or rules share one. The fields below `any_of` are what a JSON Schema says beyond that,
-// each empty or nil for none: the value must be one of `enum_of` and the one of `const_of`, pass every node of `all_of`
+// each empty or nil for none, and `enum_of` nil for none: the value must be one of `enum_of` and the one of `const_of`, pass every node of `all_of`
 // and exactly one of `one_of`, fail `not`, pass `then` when it passes the `if` of `cond` and `other` when it does not,
 // and pass `ref` and `dynamic_ref`, which the schema read resolves to nodes. `dynamic_ref` names the node the
 // reference reaches first, and `anchors` the nodes that may replace it. `unevaluated_items` and
@@ -48,6 +48,8 @@ Rules :: struct {
 // holds the node, the unit a dynamic reference's scope is made of.
 Node :: struct {
 	kinds:                  Kinds,
+	// Draft 4's integer: a number spelled with a fraction or an exponent is not one, `1.0` included.
+	integer_spelled:        bool,
 	rules:                  Rules,
 	array:                  i32,
 	object:                 i32,
@@ -78,8 +80,8 @@ Array :: struct {
 	max_contains: Maybe(u64),
 }
 
-// An object's named members, the node every other member's value passes, and the node each member's name passes, read
-// as an integer where that node takes integers. `NONE` for any value or name. A member whose name matches a pattern of
+// An object's named members, the node every other member's value passes, and the node each member's name passes as a
+// string. `NONE` for any value or name. A member whose name matches a pattern of
 // `patterns` also passes that pattern's node, and is not "other". A member named in `dependents` needs the names of
 // its `required` and passes its `node`.
 Object :: struct {
@@ -109,11 +111,13 @@ Anchor :: struct {
 }
 
 // A member as one use of a node: its name, whether it must be present, and the rules this use adds to the node's.
+// `only_required` marks a name that only `required` lists, which leaves the member to the object's other members.
 Member :: struct {
-	name:     string,
-	node:     Node_Index,
-	rules:    Rules,
-	required: bool,
+	name:          string,
+	node:          Node_Index,
+	rules:         Rules,
+	required:      bool,
+	only_required: bool,
 }
 
 // A description owns its nodes, blocks and slices, allocated with `allocator`, and the strings in `texts`. It borrows
@@ -159,15 +163,13 @@ description_destroy :: proc(d: ^Description) {
 	d^ = {}
 }
 
-// The first keyword node `n` holds that a plan of `d` does not judge yet, "" for none. `format_assert` says `format` is
-// asserted and not an annotation.
+// The first keyword a node of `d` holds that a check of `d` does not judge yet, "" for none. `format_assert` says
+// `format` is asserted and not an annotation. A `$ref` with no keyword beside it is judged as the node it reaches.
 unjudged :: proc(d: ^Description, format_assert: bool) -> string {
-	for n in d.nodes {
+	for &n in d.nodes {
 		switch {
-		case len(n.enum_of) > 0:
-			return "enum"
-		case n.const_of != nil:
-			return "const"
+		case len(n.any_of) > 0:
+			return "anyOf"
 		case len(n.all_of) > 0:
 			return "allOf"
 		case len(n.one_of) > 0:
@@ -176,7 +178,7 @@ unjudged :: proc(d: ^Description, format_assert: bool) -> string {
 			return "not"
 		case n.cond.test != nil || n.cond.then != nil || n.cond.other != nil:
 			return "if"
-		case n.ref != nil:
+		case n.ref != nil && !ref_only(&n):
 			return "$ref"
 		case n.dynamic_ref != nil:
 			return "$dynamicRef"
@@ -184,10 +186,6 @@ unjudged :: proc(d: ^Description, format_assert: bool) -> string {
 			return "unevaluatedItems"
 		case n.unevaluated_properties != nil:
 			return "unevaluatedProperties"
-		case n.rules.multiple_of != "":
-			return "multipleOf"
-		case n.rules.pattern != "":
-			return "pattern"
 		case n.rules.format != "" && format_assert:
 			return "format"
 		case n.rules.unique:
@@ -208,4 +206,9 @@ unjudged :: proc(d: ^Description, format_assert: bool) -> string {
 		}
 	}
 	return ""
+}
+
+// Whether `n` is a `$ref` and nothing else, which judges a value as the node it reaches does.
+ref_only :: proc(n: ^Node) -> bool {
+	return n.ref != nil && n.kinds == EVERY_KIND && n.rules == {} && n.array < 0 && n.object < 0 && raw_data(n.enum_of) == nil && n.const_of == nil && len(n.any_of) == 0 && len(n.all_of) == 0 && len(n.one_of) == 0 && n.not == nil && n.cond == {} && n.dynamic_ref == nil && n.unevaluated_items == nil && n.unevaluated_properties == nil
 }

@@ -50,7 +50,7 @@ sink_destroy :: proc(c: ^Sink) {
 	delete(c.errors)
 }
 
-// An entry's path and names are the allocator of the sink's `entries`.
+// An entry's paths and their names are the allocator of the sink's `entries`.
 @(private)
 entry_destroy :: proc(e: ^core.Error_Entry, allocator: runtime.Allocator) {
 	for s in e.path {
@@ -58,7 +58,13 @@ entry_destroy :: proc(e: ^core.Error_Entry, allocator: runtime.Allocator) {
 			delete(string(name), allocator)
 		}
 	}
+	for s in e.keyword_path {
+		if name, named := s.(core.Name); named {
+			delete(string(name), allocator)
+		}
+	}
 	delete(e.path, allocator)
+	delete(e.keyword_path, allocator)
 	e^ = {}
 }
 
