@@ -5,7 +5,9 @@ package main
 //	stury [OPTIONS] [FILTER] [FILE...]
 //	stury check [--from format|--seq] [--max-depth n] [FILE...]
 //	stury fmt [--from format] [--to format] [--in-place|--check] [--indent n|--tab] [--max-depth n] [FILE...]
-//	stury edit [--from format|--seq] [--in-place|--check] FILTER [FILE...]
+//	stury edit [--from format|--seq] [--in-place|--check|--diff] FILTER [FILE...]
+//	stury diff [--set|--position|--key K] [--facts] [--json] OLD NEW
+//	stury diff --old-schema S1 --new-schema S2 [--compat backward|forward|full]
 //
 // FILTER is a jq program, and the output is what jq 1.8 prints for it. The options are listed in HELP_OPTIONS
 // (usage.odin). With no FILE it reads stdin, and with no FILTER it runs `.` unless stdin and stdout are both a
@@ -26,6 +28,8 @@ package main
 //	check.odin                       `stury check`, which judges the inputs
 //	fmt.odin                         `stury fmt`, which writes the inputs back in the printer's layout
 //	edit.odin                        `stury edit`, which splices the filter's value into the input's bytes
+//	diff.odin                        `stury diff` over two data files, and the preview of `edit --diff`
+//	diff_schema.odin                 `stury diff` over schemas: two compared, or one against a data file
 //	filter.odin                      the jq interpreter over each input
 //	print.odin                       output as jq prints it, and what it comes to (`Output`)
 //	message/                         the text of every message, built from a format and its values (package `message`)
@@ -83,6 +87,15 @@ main :: proc() {
 	refuse_format_clashes(o, &cli)
 	validating := cli.validating
 	switch {
+	case cli.diffing:
+		if flag := command_refused_option(o, &cli); flag != "" {
+			usage_error("%s has no use with diff: it runs no filter and prints the changes between its inputs", flag)
+		}
+		diff_main(&run, &cli)
+	case cli.diff.flag != "":
+		usage_error("%s is diff's: only stury diff compares two inputs", cli.diff.flag)
+	case o.diff && !cli.editing:
+		usage_error("--diff is edit's: it previews the changes of an edit")
 	case (o.in_place || o.check) && !cli.formatting && !cli.editing:
 		usage_error("%s is fmt's and edit's: a filter run has no use for it", "--in-place" if o.in_place else "--check")
 	case !validating && cli.schema.flag != "":
@@ -188,7 +201,7 @@ near_command :: proc(text: string) -> string {
 			return ""
 		}
 	}
-	for command in ([]string{"check", "fmt", "edit"}) {
+	for command in ([]string{"check", "fmt", "edit", "diff"}) {
 		if d := strings.levenshtein_distance(text, command, context.temp_allocator); d <= (len(command) - 1) / 2 {
 			return command
 		}

@@ -30,7 +30,9 @@ Usage:	stury [options] <jq filter> [file...]
 	stury check [--from format|--seq] [--max-depth n] [file...]
 	stury fmt [--from format] [--to format] [--in-place|--check]
 	          [--indent n|--tab] [--max-depth n] [file...]
-	stury edit [--from format|--seq] [--in-place|--check] <jq filter> [file...]
+	stury edit [--from format|--seq] [--in-place|--check|--diff] <jq filter> [file...]
+	stury diff [options] <old file> <new file>
+	stury diff --old-schema <schema> --new-schema <schema> [--compat direction]
 
 stury applies the filter to its JSON text inputs and writes the results as
 JSON, as jq 1.8.2 does, but reads strictly (RFC 8259): 01, 1., NaN, nan,
@@ -48,6 +50,8 @@ HELP_OPTIONS :: `Commands:
                             transcode it (stury fmt --help);
   edit                      splice the filter's one output into each
                             input's own bytes (stury edit --help);
+  diff                      tell what differs between two inputs, or two
+                            schemas (stury diff --help);
 
 Command options:
   -n, --null-input          use ` + "`null`" + ` as the single input value;
@@ -232,6 +236,8 @@ Options:
       --in-place            rewrite each file in place;
       --check               write nothing, name each file the filter would
                             change, and exit 1;
+      --diff                tell the value changes of each file's edit, and
+                            with --in-place write it too;
   -a, --ascii-output        write built values with ASCII escapes;
   -S, --sort-keys           sort the keys of every object, and the columns;
       --indent n            write built values with n spaces (0 to 7);
@@ -252,6 +258,46 @@ a fault or the filter fails on it, 2 for a usage or file error, and under -e
 as for a filter run. In full: stury(1), or docs/cli.md in stury's source.
 `
 
+// `stury diff --help`.
+@(private = "file")
+DIFF_HELP :: `Usage:	stury diff [options] <old file> <new file>
+	stury diff --old-schema <schema> --new-schema <schema> [--compat direction]
+	stury diff --old-schema <schema> <data file>
+	stury diff --shape [--from format] <old file> <new file>
+
+stury diff tells the changes that turn the first input into the second, a line
+each: + for an added member or element, - for a removed one, ~ for a changed
+value, with its path. Objects match by member name and arrays as sequences, so
+one inserted element is one change. Two schemas are compared too: each change
+names the keyword and whether it widens or narrows what the schema takes, and
+backward and forward tell whether the new schema takes what the old one does
+and the reverse, with a value that breaks it when not. A schema and one data
+file judge the data by the schema, as stury check --schema does, and tell the
+members the data has that the schema does not describe. A file of records is
+one array of them. --shape compares the shapes of two data files.
+
+Options:
+      --from format         read json (default), jsonc, json5, ndjson or csv, tsv;
+      --key member          match array elements by the value of member, or
+                            PATH=member for the array at PATH (.a[].b=id);
+      --set                 match equal elements wherever they stand;
+      --position            compare the elements at one index;
+      --facts               tell changes of comments and attributes too;
+      --json                write one record a line;
+      --shape               compare the shapes the two files infer to;
+      --old-schema file     the first input is this JSON Schema;
+      --new-schema file     the second input is this JSON Schema;
+      --compat direction    backward, forward or full: exit 1 unless the
+                            schemas are proven compatible that way;
+      --schema-ref dir      where file $refs of a schema resolve;
+      --format-assert       let format assert, as stury check does;
+  -h, --help                show this help.
+
+Exit status: 0 when nothing differs, 1 when something does or compatibility is
+not proven, 5 when an input does not parse, 2 for a usage or file error. In
+full: stury(1), or docs/cli.md in stury's source.
+`
+
 // jq's usage(): to stdout and exit 0 for --help, else to stderr and exit `code`. The options, or with `short` where
 // to find them. A `command`'s help is its own.
 usage :: proc(code: int, short: bool, command := "") -> ! {
@@ -265,6 +311,8 @@ usage :: proc(code: int, short: bool, command := "") -> ! {
 		io.write_string(w, EDIT_HELP)
 	case "schema":
 		io.write_string(w, SCHEMA_HELP)
+	case "diff":
+		io.write_string(w, DIFF_HELP)
 	case:
 		io.write_string(w, HELP_HEAD)
 		// The jq manpage, which the footer sends on, does not tell how stury's input differs.

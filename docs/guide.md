@@ -97,6 +97,26 @@ if schema.check(&b, src, &sink) != nil {
 `schema.inferred` gives the description they all pass, which `schema.write` writes as JSON Schema. `schema.sample(&d, as,
 {count = 3, seed = 1})` writes values that pass a description in the format `as`, and `invalid = true` values that fail it.
 
+## Compare schemas and diff values
+
+`schema.compare(old, new)` takes two compiled schemas' `description`s and answers, in each direction, whether one takes
+every value the other does: `Yes` by a proof over the descriptions, `No` with a `witness` value that the check of both
+confirmed, or `Unknown` with the keyword the proof stopped at. `changes` lists the keywords that differ by place in a
+value and what each does to the values taken. The search for a witness and the walk for changes have fixed bounds, and
+`truncated` says a bound ended the proof or the walk, and a proof that does is `Unknown` with the reason `budget`, never a
+`Yes` or a `No` it did not find a value for.
+
+```odin
+c, err := schema.compare(old.description, new.description, {as = json.as(.Json)})
+if err != nil { return err }
+defer schema.comparison_destroy(&c)
+if c.old_in_new.verdict != .Yes { fmt.println("a reader of the new schema may refuse old data:", c.old_in_new.witness) }
+```
+
+`core/diff` is the changes between two values of any format: `diff.values(a, b, opts)` of two values (nodes of documents, `core.Node_Ref{&doc, core.ROOT}`) lists each
+change with its path, `diff.Options` choosing how arrays match (`Sequence`, `Set`, `Position` or a `Key_Rule` by member).
+`stury diff` is the same on the command line ([cli.md](cli.md#diff)).
+
 ## Read into Odin values
 
 `unmarshal` fills a value from a text during the scan, with no document between them.

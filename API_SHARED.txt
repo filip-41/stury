@@ -38,12 +38,10 @@ utf8_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind
 utf8_lax_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (spelled: [4]u8, size: int, q: [^]u8)
 utf8_subpart :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8
 # core/regex
-Scratch :: struct { stack: [dynamic]Entry, slots: [dynamic]int, counts: [dynamic]int, seen: [dynamic]u64, good: [dynamic]u64, log: [dynamic]u32, resumes: int, }
 in_property :: proc(name: string, r: rune) -> bool
 random_below :: proc(s: ^Source, n: int) -> int
 random_next :: proc(s: ^Source) -> u64
 scratch_destroy :: proc(scratch: ^Scratch)
-search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch) -> (found: bool, err: string)
 # core
 AT_NO_BYTE :: bit_set[Fault_Kind]{.None, .No_Memory, .Bad_Option}
 COMMENT_ROLES :: bit_set[Role]{.Comment, .Comment_Inline, .Comment_Foot}
@@ -122,6 +120,7 @@ set_text :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Error
 set_value :: proc(list: ^Edit_List, node: Node_Index, v: Value) -> Error
 sorted_keys :: proc(v: Value) -> []string
 sorted_members :: proc(v: Value) -> []Member
+steps_clone :: proc(steps: []Step, allocator := context.allocator) -> []Step
 subtree_facts :: proc(doc: ^Document, i: Node_Index) -> []Fact
 tables_of :: #force_inline proc "contextless" (doc: ^Document) -> []Table
 text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator) -> (s: string, ok: bool)
@@ -134,6 +133,7 @@ trail_array :: proc(t: Trail) -> ^Array
 typed_error_of :: proc "contextless" (f: Typed_Failure) -> Typed_Error
 write_entry_message :: proc(w: io.Writer, e: Error_Entry) -> io.Error
 write_fault_message :: proc(w: io.Writer, src: []u8, f: Fault) -> io.Error
+write_steps :: proc(w: io.Writer, steps: []Step, whole: bool) -> io.Error
 # host
 writing :: proc(pool: ^Pool, on: bool)
 # core/kernel
@@ -166,6 +166,8 @@ utf8_window :: #force_inline proc "contextless" (prev, v: V) -> V
 # core/compose
 push :: proc(d: ^[dynamic]$T, v: T) -> (int, bool)
 push_all :: proc(d: ^[dynamic]$T, vs: []T) -> (count: int, ok: bool)
+# core/diff
+result_destroy :: proc(r: ^Result)
 # core/rules
 EVERY_KIND :: Kinds{.Null, .Bool, .Integer, .Number, .String, .Array, .Object}
 Failures :: bit_set[core.Typed_Error_Kind; u64]

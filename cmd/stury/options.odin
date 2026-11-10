@@ -41,6 +41,7 @@ Opts :: struct {
 	in_place:         bool,
 	check:            bool,
 	follow:           bool, // --follow: the one file is read on as it grows
+	diff:             bool, // edit --diff: tell the value changes of the edit
 }
 
 // What the command line gives besides the options.
@@ -51,6 +52,7 @@ Cli :: struct {
 	// `schema`: the verb (`infer` or `sample`) is the first of `files`, and these are its options.
 	schema_verb: bool,
 	verbs:      Verb_Options,
+	diffing:    bool,
 	filter:     Maybe(string), // the filter, or under -f the file it is in
 	files:      [dynamic]string,
 	// --arg, --argjson, --slurpfile and --rawfile, the first of a name standing.
@@ -74,8 +76,9 @@ Cli :: struct {
 	// The first option given that reads a delimited text (--delimiter...), and the first that writes one (--crlf...).
 	cells_flag, cells_out_flag: string,
 	out_delimiter, out_comment: Maybe(byte),
-	// `check`'s schema options.
+	// `check`'s schema options, which `diff` takes too.
 	schema: Schema_Options,
+	diff:   Diff_Options,
 }
 
 // The command line `args` (os.args without the program) into `o`, as jq reads it.
@@ -87,6 +90,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		case "fmt":  cli.formatting = true
 		case "edit": cli.editing = true
 		case "schema": cli.schema_verb = true
+		case "diff": cli.diffing = true
 		case:        cli.validating = true
 		}
 	}
@@ -114,7 +118,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		}
 		if args_done || !is_option(a) {
 			switch {
-			case !cli.validating && !cli.formatting && !cli.schema_verb && cli.filter == nil:
+			case !cli.validating && !cli.formatting && !cli.schema_verb && !cli.diffing && cli.filter == nil:
 				cli.filter = a
 			case rest_as == .Args:
 				append(&cli.positional, jq.valid_utf8(a))
@@ -184,6 +188,11 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		case "ranges", "invalid", "comments", "seed", "count":
 			verb_option(&cli.verbs, args, i)
 			i += option_arity(a)
+		case "old-schema", "new-schema", "compat", "key", "set", "position", "facts", "json", "shape":
+			diff_option(&cli.diff, args, i)
+			i += option_arity(a)
+		case "diff":
+			o.diff = true
 		case "grow-header":
 			o.grow_header = true
 		case "delimiter", "comment", "out-delimiter", "out-comment":
@@ -403,7 +412,7 @@ subcommand_index :: proc(args: []string) -> int {
 		case is_option(a):
 			i += option_arity(a)
 		case:
-			return i if a == "schema" || a == "check" || a == "validate" || a == "fmt" || a == "edit" else -1
+			return i if a == "schema" || a == "check" || a == "validate" || a == "fmt" || a == "edit" || a == "diff" else -1
 		}
 	}
 	return -1
@@ -414,7 +423,7 @@ subcommand_index :: proc(args: []string) -> int {
 @(private = "file")
 option_arity :: proc(a: string) -> int {
 	switch a {
-	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--max-errors", "--report", "--seed", "--count":
+	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--max-errors", "--report", "--seed", "--count", "--old-schema", "--new-schema", "--compat", "--key":
 		return 1
 	case "--arg", "--argjson", "--slurpfile", "--rawfile":
 		return 2
@@ -556,7 +565,7 @@ parse_max_depth :: proc(s: string) -> (n: u64, ok: bool) {
 
 // The command `cli` names, or "" for a filter run.
 command_name :: proc(cli: ^Cli) -> string {
-	return "check" if cli.validating else "fmt" if cli.formatting else "edit" if cli.editing else "schema" if cli.schema_verb else ""
+	return "check" if cli.validating else "fmt" if cli.formatting else "edit" if cli.editing else "diff" if cli.diffing else "schema" if cli.schema_verb else ""
 }
 
 // The first option given that `check`, `fmt`, `edit` or `schema` has no use for, or "". fmt writes each input's own format,
@@ -568,6 +577,7 @@ command_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
 	editing, schema := cli.editing, cli.schema_verb
 	switch {
 	case editing && cli.formats.to != nil: return "--to"
+	case cli.diffing && (o.in_place || o.check): return "--in-place" if o.in_place else "--check"
 	case !cli.formatting && !schema && cli.cells_out_flag != "": return cli.cells_out_flag
 	case o.raw0:                 return "--raw-output0"
 	case o.raw:                  return "-j" if o.join else "-r"
@@ -587,6 +597,7 @@ command_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
 	case cli.binding_flag != "" && !editing: return cli.binding_flag
 	case !cli.formatting && !editing && !schema && cli.layout_flag != "": return cli.layout_flag
 	case cli.lib_dirs != nil && !editing: return "-L"
+	case cli.diffing && cli.formats.to != nil: return "--to"
 	}
 	return ""
 }

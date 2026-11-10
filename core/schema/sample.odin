@@ -65,10 +65,8 @@ Gen :: struct {
 // is `.No_Sample` naming the node the search stopped at by its keyword path, which `allocator` holds, and one the check
 // cannot judge is the check's own refusal.
 sample :: proc(d: ^rules.Description, as: core.As, opts := Sample_Options{}, allocator := context.allocator) -> (out: [][]u8, err: core.Error) {
-	if opts.format_assert {
-		asserted := asserting(d)
-		defer asserted_restore(d, asserted)
-	}
+	asserted := asserting(d, opts.format_assert)
+	defer asserted_restore(d, asserted)
 	c := compile_description(d)
 	defer destroy(&c)
 	b := bind(&c, as) or_return
@@ -119,26 +117,6 @@ no_sample :: proc(g: ^Gen, allocator: runtime.Allocator) -> core.Error {
 		copy(e.steps[:], kept)
 	}
 	return core.error_of(e, allocator)
-}
-
-// The nodes of a description that format assertion is switched on for, which are the ones that did not assert.
-@(private = "file")
-asserting :: proc(d: ^rules.Description) -> (switched: [dynamic]rules.Node_Index) {
-	switched.allocator = context.temp_allocator
-	for &n, i in d.nodes {
-		if !n.rules.assert_format {
-			n.rules.assert_format = true
-			append(&switched, rules.Node_Index(i))
-		}
-	}
-	return
-}
-
-@(private = "file")
-asserted_restore :: proc(d: ^rules.Description, switched: [dynamic]rules.Node_Index) {
-	for i in switched {
-		d.nodes[i].rules.assert_format = false
-	}
 }
 
 // A search of a description's nodes for the keywords that lead to one.

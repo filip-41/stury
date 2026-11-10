@@ -15,7 +15,19 @@ fmt
 .br
 .B stury
 edit
-[\-\-from format|\-\-seq] [\-\-in\-place|\-\-check] [\-\-max\-depth n] [\-f file] [\-L dir] [\-\-arg name value] <jq filter> [file...]
+[\-\-from format|\-\-seq] [\-\-in\-place|\-\-check|\-\-diff] [\-\-max\-depth n] [\-f file] [\-L dir] [\-\-arg name value] <jq filter> [file...]
+.br
+.B stury
+diff
+[\-\-from format] [\-\-set|\-\-position] [\-\-key [path=]member] [\-\-facts] [\-\-json] old new
+.br
+.B stury
+diff
+\-\-old\-schema file \-\-new\-schema file [\-\-compat backward|forward|full] [\-\-json]
+.br
+.B stury
+diff
+\-\-shape [\-\-from format] old new
 .br
 .B stury
 schema infer
@@ -141,7 +153,7 @@ A number prints as it was written (1E2 stays 1E2), where jq prints 1E+2. A file 
 .PP
 stury reads strict RFC 8259 JSON. It rejects, with exit 5, these inputs that jq accepts: 01, 1., NaN, nan, Infinity, invalid UTF\-8 in a string, a lone low surrogate escape, a NUL after a value, and nesting past \-\-max\-depth. A parse error names the fault and the position of the byte where it was found. Each file ends its texts, except under \-\-seq. The full list is in docs/cli.md, "Differences from jq".
 .SH EXIT STATUS
-As jq: 1 under \-e when the last output is false or null, 2 for a usage or file error or output that cannot be written (a closed stdout included, except under check, fmt \-\-check and fmt \-\-in\-place), 3 for a filter that does not compile, 4 under \-e when there is no output, 5 for invalid input or an error on the last input. \fBfmt \-\-check\fR and \fBedit \-\-check\fR exit 1 when a file would change.
+As jq: 1 under \-e when the last output is false or null, 2 for a usage or file error or output that cannot be written (a closed stdout included, except under check, fmt \-\-check and fmt \-\-in\-place), 3 for a filter that does not compile, 4 under \-e when there is no output, 5 for invalid input or an error on the last input. \fBfmt \-\-check\fR and \fBedit \-\-check\fR exit 1 when a file would change, and \fBdiff\fR when the inputs differ or compatibility is not proven.
 .SH SEE ALSO
 .BR jq (1),
 docs/cli.md in stury's source.

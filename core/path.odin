@@ -2,6 +2,7 @@ package core
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:strings"
 
 // A path is a chain of steps from a value, spelled as jq text, as an RFC 6901 JSON Pointer, or as an Odin `Path` of step
 // literals. Each spelling gives the same `Path`.
@@ -212,3 +213,15 @@ parse_pointer :: proc(text: string, allocator := context.allocator) -> (path: Pa
 	return parsed, error_of(refusal)
 }
 
+// A copy of `steps` in `allocator`, with each name's text copied too.
+steps_clone :: proc(steps: []Step, allocator := context.allocator) -> []Step {
+	out := make([]Step, len(steps), allocator)
+	for s, i in steps {
+		if name, named := s.(Name); named {
+			out[i] = Name(strings.clone(string(name), allocator))
+		} else {
+			out[i] = s
+		}
+	}
+	return out
+}

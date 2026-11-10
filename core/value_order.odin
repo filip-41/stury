@@ -178,9 +178,14 @@ compare :: proc(a, b: Value, depth := 0, eq := false, too_deep: ^bool = nil, max
 		return -1 if na < nb else (1 if na > nb else 0)
 	case .Object:
 		if is_wide(a) && is_wide(b) {
-			return compare_members(sorted_members(a), sorted_members(b), depth, eq, too_deep, max_depth)
+			ma, mb := sorted_members(a), sorted_members(b)
+			defer delete(ma)
+			defer delete(mb)
+			return compare_members(ma, mb, depth, eq, too_deep, max_depth)
 		}
 		ka, kb := sorted_keys(a), sorted_keys(b)
+		defer delete(ka)
+		defer delete(kb)
 		for i in 0 ..< min(len(ka), len(kb)) {
 			if c := text_order(ka[i], kb[i]); c != 0 {
 				return c

@@ -11,6 +11,13 @@
   `--report basic` and `--report problem` write the JSON Schema basic output or an RFC 9457 problem document,
   `--max-errors`, `--format-assert` and `--schema-ref` shape the check. Long files and records are checked on all cores.
 
+- `stury diff OLD NEW` tells the value changes of two inputs a line each, exit 1 when they differ. Arrays match as
+  sequences, as sets (`--set`), by position (`--position`) or by a member (`--key`). `--old-schema S1 --new-schema S2`
+  compares two schemas, telling each change and whether each schema takes what the other does, with a value that breaks it
+  when not; `--compat` exits 1 unless that direction is proven. A schema with one data file judges the data by it and tells the members the data has that it does not describe.
+  `--shape` compares the shapes two data files infer to, and a file of records is one array of them.
+  `edit --diff` tells the value changes an edit makes.
+
 - `stury edit FILTER [FILE...]` writes each input back with the filter's one output spliced into its bytes: every byte
   the filter does not change is kept, comments and line ends included, and an insert follows its container's layout. A built object or array is laid out
   as the container it lands in: one member a line in its indent and colon spacing, or compact.
@@ -90,6 +97,9 @@
   records, which `schema.write` writes as JSON Schema. `schema.sample` writes values that pass a description, or fail it,
   and is `.No_Sample` for a description that no value passes. A node has a `description` and a markup node
   (`xml.nodeType`), and `write.comment` writes a comment in a format that has them.
+- `schema.compare` tells whether one description takes every value another does, with a proof, a witness or the keyword
+  the proof stopped at, and the changes between them. `core/diff` lists the changes between two values of any format.
+  `core.write_steps` writes a path.
 - `core.kind` of a CSV or TSV cell is the kind the cell reads as, in place of `.Plain`: an empty unquoted cell is
   `.Null`, as a typed read and the CLI read it, and with `infer` a boolean or number cell is `.True`, `.False` or
   `.Number`. A JSON write of a dsv document writes an empty cell as `null` without `infer` too. `core.resolve` is gone.

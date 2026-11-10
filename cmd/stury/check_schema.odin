@@ -86,7 +86,17 @@ schema_option :: proc(s: ^Schema_Options, args: []string, i: int) {
 }
 
 // The schema `s` names, read, compiled and bound to the inputs' format, or a usage error telling why not.
-schema_open :: proc(s: Schema_Options, src: Source) -> ^Schema_Check {
+schema_open :: proc(s: Schema_Options, src: Source, option := "--schema") -> ^Schema_Check {
+	sc := schema_read(s, option)
+	err: core.Error
+	if sc.bound, err = schema.bind(&sc.compiled, src.as); err != nil {
+		usage_error("%s %s: %s", option, s.file, edit_error_text(sc.text, err))
+	}
+	return sc
+}
+
+// The schema `s` names, read and compiled but not bound, or a usage error telling why not under the name `option`.
+schema_read :: proc(s: Schema_Options, option := "--schema") -> ^Schema_Check {
 	if s.file == "" {
 		usage_error("%s needs --schema", s.flag)
 	}
@@ -102,7 +112,7 @@ schema_open :: proc(s: Schema_Options, src: Source) -> ^Schema_Check {
 	err: core.Error
 	sc.doc, err = core.build(sc.text, json.as(.Json))
 	if err != nil {
-		usage_error("--schema %s: %s", s.file, edit_error_text(sc.text, err))
+		usage_error("%s %s: %s", option, s.file, edit_error_text(sc.text, err))
 	}
 	refs := s.refs if s.refs != "" else filepath.dir(s.file)
 	opts := schema.Options {
@@ -110,10 +120,7 @@ schema_open :: proc(s: Schema_Options, src: Source) -> ^Schema_Check {
 		resolver = {root = refs, as = json.as(.Json)},
 	}
 	if sc.compiled, err = schema.compile(&sc.doc, core.ROOT, opts); err != nil {
-		usage_error("--schema %s: %s", s.file, edit_error_text(sc.text, err))
-	}
-	if sc.bound, err = schema.bind(&sc.compiled, src.as); err != nil {
-		usage_error("--schema %s: %s", s.file, edit_error_text(sc.text, err))
+		usage_error("%s %s: %s", option, s.file, edit_error_text(sc.text, err))
 	}
 	return sc
 }
@@ -155,7 +162,6 @@ schema_judge :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, named: 
 }
 
 // Whether `src` reads delimited text, whose schema describes the whole table, an array of rows.
-@(private = "file")
 table_source :: proc(src: Source) -> bool {
 	return src.as.readers != nil && src.as.readers.flat
 }

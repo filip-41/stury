@@ -789,7 +789,6 @@ write_kind_word :: proc(w: io.Writer, k: Kind) -> io.Error {
 
 // Writes `steps` as stury path text, `.a[1]."b c"`, which `parse_path` reads back. `whole` says the steps start at the
 // root, so a first step that is no name opens with `.`.
-@(private)
 write_steps :: proc(w: io.Writer, steps: []Step, whole: bool) -> io.Error {
 	for s, i in steps {
 		if i == 0 && whole {

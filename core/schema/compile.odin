@@ -166,3 +166,27 @@ unbind :: proc(b: ^Bound) {
 	typed.plan_destroy(&b.plan)
 	b^ = {}
 }
+
+// The nodes of a description that format assertion is switched on for when `on`, which are the ones that did not
+// assert. `asserted_restore` switches them back.
+@(private)
+asserting :: proc(d: ^rules.Description, on: bool) -> (switched: [dynamic]rules.Node_Index) {
+	switched.allocator = context.temp_allocator
+	if !on {
+		return
+	}
+	for &n, i in d.nodes {
+		if !n.rules.assert_format {
+			n.rules.assert_format = true
+			append(&switched, rules.Node_Index(i))
+		}
+	}
+	return
+}
+
+@(private)
+asserted_restore :: proc(d: ^rules.Description, switched: [dynamic]rules.Node_Index) {
+	for i in switched {
+		d.nodes[i].rules.assert_format = false
+	}
+}

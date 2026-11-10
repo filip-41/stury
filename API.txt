@@ -471,9 +471,11 @@ decimal_of :: proc(lit: string) -> (d: Decimal)
 # core/regex
 Flags :: struct { fold, extend, dotall, multiline, ecma: bool, }
 Regex :: struct { insts: []Inst, bytes: string, classes: []^Class, refs: [][]int, callouts: []^Callout, names: []string, slots: int, opt: ^Search_Opt, visited: ^Visited, prefix: string, first: [4]u64, longest: bool, not_empty: bool, has_first: bool, calls_or_limits: bool, narrowed: bool, ecma: bool, linear: bool, }
+Scratch :: struct { stack: [dynamic]Entry, slots: [dynamic]int, counts: [dynamic]int, seen: [dynamic]u64, good: [dynamic]u64, log: [dynamic]u32, resumes: int, }
 Source :: struct { state: u64, }
 compile :: proc(pattern: string, flags: Flags, allocator := context.allocator) -> (re: Regex, err: string)
 sample :: proc(pattern: string, src: ^Source, extra, least: int, allocator := context.allocator) -> (text: string, ok: bool)
+search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch) -> (found: bool, err: string)
 valid :: proc(pattern: string, flags: Flags) -> bool
 # core
 Attribute_Iter :: struct { doc: ^Document, facts: []Fact, }
@@ -539,6 +541,14 @@ has :: #force_inline proc "contextless" (c: Block, bits: u8) -> Block
 load :: #force_inline proc "contextless" (p: [^]u8) -> Block
 utf8_block :: #force_inline proc "contextless" ($T: Tier, b: Block, s: ^Utf8_State)
 # core/compose
+# core/diff
+Arrays :: enum u8 { Sequence, Set, Position, }
+Change :: struct { path: []core.Step, old_path: []core.Step, op: Op, old, new: core.Value, kind_changed: bool, role: core.Role, }
+Key_Rule :: struct { at: []core.Step, member: string, }
+Op :: enum u8 { Added, Removed, Changed, Fact, }
+Options :: struct { arrays: Arrays, keys: []Key_Rule, facts: bool, max_edits: int, }
+Result :: struct { changes: []Change, truncated: bool, arena: virtual.Arena, }
+values :: proc(a, b: core.Value, opts := Options{}) -> (r: Result, err: runtime.Allocator_Error)
 # core/rules
 Anchor :: struct { name: string, resource: Node_Index, node: Node_Index, }
 Array :: struct { prefix: []Node_Index, items: Node_Index, contains: Maybe(Node_Index), min_contains: Maybe(u64), max_contains: Maybe(u64), }
@@ -624,16 +634,24 @@ Record_Visit :: #type proc(data: rawptr, rec: Record, first: core.Typed_Error) -
 writer_destroy :: proc(wr: ^Writer)
 # core/schema
 Bound :: struct { plan: typed.Plan, compiled: ^Compiled, elements: ^Elements, allocator: runtime.Allocator, }
+Change :: struct { path: []core.Step, keyword: string, old: string, new: string, effect: Effect, }
+Compare_Options :: struct { as: core.As, format_assert: bool, }
+Comparison :: struct { old_in_new: Inclusion, new_in_old: Inclusion, changes: []Change, truncated: bool, arena: virtual.Arena, }
 Compiled :: struct { description: ^rules.Description, opts: Options, owned: bool, allocator: runtime.Allocator, }
 Draft :: enum u8 { D04, D06, D07, D2019_09, D2020_12, }
+Effect :: enum u8 { None, Widens, Narrows, Both, Unknown, }
+Inclusion :: struct { verdict: Verdict, witness: string, reason: string, }
 Inferred :: struct { root: ^Summary, ranges: bool, rows: bool, arena: virtual.Arena, failed: bool, seq: u64, trash: Summary, }
 Options :: struct { format_assert: bool, base: string, resolver: Resolver, dups: core.Duplicates, }
 Resolver :: struct { root: string, as: core.As, draft: Maybe(Draft), documents: [dynamic]^core.Document, texts: [dynamic][]u8, allocator: runtime.Allocator, }
 Sample_Options :: struct { seed: u64, count: int, depth: int, tries: int, size: int, invalid: bool, comments: bool, format_assert: bool, write: core.Write_Options, }
+Verdict :: enum u8 { Yes, No, Unknown, }
 bind :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (b: Bound, err: core.Error)
 check :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink = nil, runner: ^core.Runner = nil) -> core.Error
 check_node :: proc(b: ^Bound, doc: ^core.Document, node: core.Node_Index, sink: ^typed.Sink = nil) -> core.Error
 check_records :: proc(b: ^Bound, src: []u8, framing := core.Framing.Lines, sink: ^typed.Sink = nil, runner: ^core.Runner = nil) -> (count: i64, err: core.Error)
+compare :: proc(old, new: ^rules.Description, opts := Compare_Options{}) -> (r: Comparison, err: runtime.Allocator_Error)
+comparison_destroy :: proc(c: ^Comparison)
 compile :: proc(doc: ^core.Document, node: core.Node_Index, opts := Options{}, allocator := context.allocator) -> (c: Compiled, err: core.Error)
 compile_description :: proc(d: ^rules.Description, opts := Options{}, allocator := context.allocator) -> Compiled
 destroy :: proc(c: ^Compiled)

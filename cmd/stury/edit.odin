@@ -64,6 +64,9 @@ refuse_edit :: proc(o: ^Opts) {
 	if o.in_place && o.check {
 		usage_error("--in-place rewrites each file; --check only reads it")
 	}
+	if o.diff && (o.check || o.raw_input || o.seq || reads_lines(o)) {
+		usage_error("--diff previews the changes of a whole document: it takes neither --check nor records")
+	}
 	o.to = o.from
 }
 
@@ -320,6 +323,14 @@ edit_writes_fact :: proc(list: ^core.Edit_List) -> bool {
 // Writes the edited text, or under `--check` names the file when it differs, or under `--in-place` replaces the file
 // with it.
 edit_publish :: proc(run: ^Run, path: string, src, out: []u8) -> int {
+	if run.opts.diff {
+		if !diff_preview(run, path, src, out) {
+			return EXIT_INPUT
+		}
+		if !run.opts.in_place {
+			return 0
+		}
+	}
 	switch {
 	case run.opts.check:
 		if bytes.equal(out, src) {

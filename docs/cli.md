@@ -22,7 +22,11 @@ stury [-c] [-r] [-j] [--raw-output0] [-a] [-S] [-C|-M] [--tab|--indent N] [--unb
 stury check [--from FORMAT|--seq] [--max-depth N] [--schema FILE [--schema-ref DIR] [--format-assert]
             [--max-errors N] [--report lines|basic|problem]] [FILE...]
 stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] [--max-depth N] [FILE...]
-stury edit [--from FORMAT|--seq] [--in-place|--check] [--max-depth N] [-f FILE] [-L DIR] [--arg...] FILTER [FILE...]
+stury edit [--from FORMAT|--seq] [--in-place|--check|--diff] [--max-depth N] [-f FILE] [-L DIR] [--arg...] FILTER [FILE...]
+stury diff [--from FORMAT] [--set|--position] [--key [PATH=]MEMBER]... [--facts] [--json] OLD NEW
+stury diff --old-schema FILE --new-schema FILE [--compat backward|forward|full] [--json]
+stury diff --old-schema FILE DATA | stury diff DATA --new-schema FILE
+stury diff --shape [--from FORMAT] OLD NEW
 stury -h | -V | --build-configuration
 ```
 
@@ -433,9 +437,56 @@ stury: <stdin> would change
 | --- | --- |
 | `--in-place` | Rewrite each named file through a temporary file and a rename, as `fmt` does. A file whose bytes do not change is left untouched. Standard input is refused (exit 2). |
 | `--check` | Write nothing to stdout. Name each file the edit would change on stderr, `stury: FILE would change`, and exit 1; 0 when none would change. A fault exits 5. |
+| `--diff` | Tell the value changes the edit makes of each file, in `diff`'s form under a `--- FILE` line, and write nothing; with `--in-place` the file is rewritten too. It takes whole documents, so it refuses `--check`, `--seq`, `-R` and NDJSON (exit 2). Layout is not a value, so a change of spacing is not told. |
 | `FILE...` | In argument order, or standard input. Without `--in-place` each file's edited text is written in turn. A fault is told for its file, as `fmt` tells it, and the next file is edited; the run exits with the worst file's status. |
 
 Errors name `<stdin>` or the file, with the line and column where the input has them.
+
+## `diff`
+
+`diff` tells what differs between two inputs and exits 1 when something does. Each file is one document, read as
+`--from` says. A file of records (`--from ndjson`, `--seq`) is one array of them, so `.[1]` is its second record.
+
+```sh
+$ stury diff old.json new.json
+~ .port: 8080 -> 9090
+~ .replicas: 3 -> "3"  (number -> string)
++ .tags[1]: "y"
+- .debug: true
+```
+
+- A line to a change: `+` an added member or element, `-` a removed one, `~` a changed value, with its path in the new
+  document, or in the old one for a removal. `(was PATH)` follows a change inside an array element that moved.
+- Objects match by member name, and numbers by value, so `1.0` equals `1` and member order is no change. Arrays match
+  as sequences by default, so one inserted element is one change. `--set` matches equal elements wherever they stand,
+  `--position` compares the elements at one index, and `--key MEMBER` pairs elements by the value of their member
+  (`--key PATH=MEMBER` for the array at PATH, `--key .users=id`) and compares each pair in depth. An array that differs by
+  more than 4,096 edits is told as replaced, and `stury: an array differs...` follows on stderr.
+- `--facts` tells changes of comments and attributes too, where both files' formats carry them.
+- `--json` writes a record a line: `{"path":["port"],"op":"changed","old":8080,"new":9090}`, with the path as
+  `getpath` takes it and `op` one of `added`, `removed`, `changed` and `fact`. A change inside an array that
+  moved its elements also carries `old_path`, its place in the old value.
+
+`--old-schema` and `--new-schema` mark a JSON Schema, never guessed from content. Both together compare the two
+schemas and take no file: each change names the place, the keyword and what it does to the values taken (`widens`,
+`narrows`, `both`, `unknown`), then `backward` says whether the new schema takes everything the old one takes and
+`forward` the reverse. A verdict is `yes` with a proof, `no` with a value one schema takes and the other refuses, or
+`unknown` with the keyword the proof stopped at. `--compat backward|forward|full` exits 1 unless that direction is
+proven, and without it the exit is 1 for any change. `--format-assert` and `--schema-ref` read as `check` reads them.
+A schema with one data file judges the data by the schema, as `check --schema` does (exit 1 for a failure), then tells each
+member the data has that the schema does not describe, `+ .z  not described by the schema`, which is also exit 1.
+`--shape` compares the shapes of two data files: each is described as `schema infer` describes it, and the two
+descriptions are compared and told as above. A comparison that reaches its bound answers `unknown` with the reason
+`budget` or `search`, and never a `yes` or a `no` it did not prove or find a value for. With
+`--json` a schema change is `{"path":["id"],"keyword":"minimum","old":"0","new":"1","effect":"narrows"}` and each
+verdict a last record.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Nothing differs, or the compatibility asked for is proven. |
+| 1 | The inputs differ, or the compatibility is not proven. |
+| 5 | An input does not parse. |
+| 2 | A usage or file error. |
 
 ## Formats
 

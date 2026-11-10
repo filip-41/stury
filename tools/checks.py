@@ -47,12 +47,12 @@ def odin_problem(odin):
 
 # The library packages, and the order imports of them take. json and dsv share the last rank.
 PACKAGES = makefile_list("LIB_PKGS")
-RANK = {"core/spell": 0, "core/regex": 0, "core": 1, "host": 2, "core/kernel": 2, "core/compose": 2, "core/rules": 2, "core/build": 3, "core/typed": 4, "core/write": 5, "core/records": 6, "core/schema": 7, "json": 7, "dsv": 7, "core/model": 8}
+RANK = {"core/spell": 0, "core/regex": 0, "core": 1, "host": 2, "core/kernel": 2, "core/compose": 2, "core/diff": 2, "core/rules": 2, "core/build": 3, "core/typed": 4, "core/write": 5, "core/records": 6, "core/schema": 7, "json": 7, "dsv": 7, "core/model": 8}
 FORMATS = {"json", "dsv"}
 
 # core's format-neutral packages name no format's concept in their code. core/kernel is left out: its tables are a byte
 # shuffle's.
-NEUTRAL = ["core/spell", "core", "core/compose", "core/rules", "core/build", "core/typed", "core/write", "core/records", "core/schema", "core/model"]
+NEUTRAL = ["core/spell", "core", "core/compose", "core/diff", "core/rules", "core/build", "core/typed", "core/write", "core/records", "core/schema", "core/model"]
 FORMAT_WORD = re.compile(r"(?<![a-z])(header|table|cell|delimiter)s?(?![a-z])")
 # The words a neutral package may use, since its users look for them: `records.cell` and `records.write_cells`, and the
 # document's `Table`, whose rows share a header.
