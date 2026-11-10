@@ -9,27 +9,64 @@ import "base:intrinsics"
 import "base:runtime"
 import spell "../core/spell"
 import core "../core"
+import rules "../core/rules"
 import typed "../core/typed"
 
 // Reads `src`, a text of spec `S`, into `target`, a slice or dynamic array of rows, replacing what it held, or into one
 // row, which reads the first record and refuses a second as `.Wrong_Length`. A row is a struct whose fields the header
 // names, a list of cells, or a map of string keys to cells. See `docs/typed.md`. The form with no plan builds one with
 // `context.allocator` and frees it before it returns, and a plan built once with `plan_make` is the form for many
-// reads. A refusal leaves everything the read allocated reachable from `target`.
-unmarshal :: proc {unmarshal_once, unmarshal_plan}
+// reads. A refusal leaves everything the read allocated reachable from `target`. A constant `spec` links the pass of
+// that spec alone, and a `spec` chosen at run time links the passes of every spec. The target of that form is any
+// pointer, and a target that is no pointer is `.Plan_Mismatch`.
+unmarshal :: proc {unmarshal_bound, unmarshal_bound_plan, unmarshal_chosen, unmarshal_chosen_plan}
+
+// Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
+// first. The options are the plan's, and any plan of the format reads.
+check :: proc {check_bound, check_chosen}
+
+// Returns the typed reads of spec `S`, which `plan_make` takes to read and check by that spec.
+reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
+	return reads_of(S)
+}
 
 // Builds the plan of `T` for dsv's spelling, as `typed.plan_make` does, and refuses a `T` that is no list of rows and no
 // row. A write by the plan is of spec `spec` with the delimiter, comment byte, `no_header`, `crlf` and `.Ragged` of
-// `opts`, and `.Bad_Option` when the spec cannot spell them. A read takes its spec and options at the call.
-plan_make :: proc(T: typeid, spec := Spec.Csv, opts := Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error) {
-	made, err := plan_as(T, as(spec, opts), plan, allocator)
+// `opts`, and `.Bad_Option` when the spec cannot spell them. A read takes its spec and options at the call. The plan
+// reads a text only with `reads`, whose reads bind a spec and so the pass of that spec, and with none it reads through
+// `unmarshal` and `check`.
+plan_make :: proc(T: typeid, spec := Spec.Csv, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error) {
+	made, err := plan_built(T, spec, opts, plan, reads, allocator)
 	return made, core.error_of(err)
+}
+
+// Builds the plan that reads values of description `d` as `spec`, as `typed.plan_of` does, and refuses a description that
+// is no list of rows and no row, as `plan_make` does. The reads are the plan's with `reads`, as for `plan_make`.
+plan_of :: proc(d: ^rules.Description, spec := Spec.Csv, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error) {
+	if !layout_ok(spec, {}) {
+		return {}, core.error_of(core.Typed_Error{kind = .Bad_Option})
+	}
+	made, err := typed.plan_of(d, layout_as(spec, {}), reads, opts, allocator)
+	if err != nil {
+		return made, err
+	}
+	if refusal := rows_supported(&made); refusal.kind != .None {
+		typed.plan_destroy(&made)
+		return {}, core.error_of(refusal)
+	}
+	plan_bind(&made)
+	return made, nil
 }
 
 // The spelling's `plans`.
 @(private)
 plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Error) {
-	spec, layout := Spec(as.spec), options_of(as)
+	return plan_built(T, Spec(as.spec), options_of(as), opts, &READS, allocator)
+}
+
+// The plan of `T` with the writer, the token writer and the document read of dsv, and the reads `reads` holds.
+@(private)
+plan_built :: proc(T: typeid, spec: Spec, layout: Options, opts: typed.Plan_Options, reads: ^typed.Format_Reads, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Error) {
 	if !layout_ok(spec, layout) {
 		return {}, {kind = .Bad_Option}
 	}
@@ -41,11 +78,18 @@ plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: run
 		typed.plan_destroy(&p)
 		return {}, err
 	}
-	p.marshal = marshal_text
+	plan_bind(&p)
+	typed.plan_reads(&p, reads)
 	return p, {}
 }
 
-// The typed reads of the format, which a plan copies.
+// Gives a plan dsv's writer, token writer and document read.
+@(private)
+plan_bind :: proc(p: ^typed.Plan) {
+	p.marshal, p.tokens, p.node_read = marshal_text, &TOKENS, document_read
+}
+
+// The typed reads of the format, which a handle's plan copies.
 @(rodata)
 @(private)
 READS := typed.Format_Reads {
@@ -67,20 +111,59 @@ check_as :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed
 }
 
 @(private)
-unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	plan, refusal := plan_make(T, spec)
+unmarshal_bound :: proc(src: []u8, $S: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	plan, refusal := plan_make(T, S)
 	if refusal != nil {
 		return refusal
 	}
 	defer typed.plan_destroy(&plan)
-	err := read_spec(src, spec, opts, target, T, &plan, read, allocator, false)
+	err := read_text(src, S, T, target, &plan, opts, read, allocator, false)
 	typed.own_errors(&err, read.sink)
 	return core.error_of(err)
 }
 
 @(private)
-unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return core.error_of(read_spec(src, spec, opts, target, T, plan, read, allocator, false))
+unmarshal_bound_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	return core.error_of(read_text(src, S, T, target, plan, opts, read, allocator, false))
+}
+
+@(private)
+unmarshal_chosen :: proc(src: []u8, spec: Spec, target: any, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	data, T, pointer := typed.pointer_target(target)
+	if !pointer {
+		return core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+	}
+	plan, refusal := plan_make(T, spec)
+	if refusal != nil {
+		return refusal
+	}
+	defer typed.plan_destroy(&plan)
+	err := read_spec(src, spec, opts, data, T, &plan, read, allocator, false)
+	typed.own_errors(&err, read.sink)
+	return core.error_of(err)
+}
+
+@(private)
+unmarshal_chosen_plan :: proc(src: []u8, spec: Spec, target: any, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	data, T, pointer := typed.pointer_target(target)
+	if !pointer {
+		return core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+	}
+	return core.error_of(read_spec(src, spec, opts, data, T, plan, read, allocator, false))
+}
+
+@(private)
+check_bound :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	return core.error_of(read_text(src, S, T, target, plan, options_of(plan.as), read, allocator, true))
+}
+
+@(private)
+check_chosen :: proc(src: []u8, spec: Spec, target: any, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	data, T, pointer := typed.pointer_target(target)
+	if !pointer {
+		return core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+	}
+	return core.error_of(read_spec(src, spec, options_of(plan.as), data, T, plan, read, allocator, true))
 }
 
 // Whether `plan` was made by `typed.plan_make` and not `plan_make`, which alone checks that a type is a list of rows of
@@ -92,9 +175,6 @@ foreign_plan :: proc "contextless" (plan: ^typed.Plan) -> bool {
 
 @(private)
 read_spec :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, check: bool) -> core.Typed_Error {
-	if foreign_plan(plan) {
-		return {kind = .Plan_Mismatch}
-	}
 	switch spec {
 	case .Csv:   return read_text(src, .Csv, T, target, plan, opts, read, allocator, check)
 	case .Tsv:   return read_text(src, .Tsv, T, target, plan, opts, read, allocator, check)
@@ -105,13 +185,15 @@ read_spec :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typei
 
 @(private)
 read_text :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator, check: bool) -> core.Typed_Error {
+	if foreign_plan(plan) {
+		return {kind = .Plan_Mismatch}
+	}
 	h := Cells{refuse_repeats = read.dups == .Refuse}
 	frames: [ROW_FRAMES]typed.Frame = ---
-	regs, err := typed.read_start(&h.r, src, plan, &SPELLING, T, target, read, frames[:], allocator)
+	regs, err := typed.read_start(&h.r, src, plan, bound_as(S, opts), T, target, read, frames[:], allocator)
 	if err.kind != .None {
 		return err
 	}
-	h.r.as.spec = u8(S)
 	h.r.wide = check
 	rows_of(&h, plan, len(src))
 	if h.row.kind == .Map && opts.no_header {
@@ -470,7 +552,7 @@ inner_text :: #force_inline proc "contextless" (h: ^Cells, t: core.Token) -> str
 }
 
 // Reads a present cell into the field `fld` at `dest`. A number, a bool and an enum's value read the cell's bytes,
-// since what decodes to other bytes spells none of them. The rest read as a string token, whose text `Spelling.text`
+// since what decodes to other bytes spells none of them. The rest read as a string token, whose text `Readers.text`
 // gives.
 @(private)
 read_cell :: proc(h: ^Cells, fld: ^typed.Field, t: core.Token, dest: uintptr) -> core.Typed_Error_Kind {
@@ -617,7 +699,7 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64, from: int) -> core.
 		// A column past the header's last is named by its position, and a refusal names it once, when it is bound.
 		key := column_key(h.keys, c)
 		positional, refusing := key.spelling & SPELLING_COLUMN != 0, c >= from
-		name, ok := core.token_text(h.r.plan.spelling, &h.r.view, key, context.temp_allocator)
+		name, ok := core.token_text(h.r.plan.readers, &h.r.view, key, context.temp_allocator)
 		if !ok {
 			return refuse_header(h, regs, .No_Memory, key.lo, "")
 		}

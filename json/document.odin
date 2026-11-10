@@ -11,32 +11,42 @@ import build "../core/build"
 import typed "../core/typed"
 import write "../core/write"
 
-// JSON's document holds the walk's tokens over the caller's bytes, read through core's readers and JSON's `SPELLING`.
+// JSON's document holds the walk's tokens over the caller's bytes, read through core's readers and JSON's `HANDLE`.
 // `build` is the only entry, and it runs the walk and the builder together.
 
 // `EDIT` holds JSON's edit services, cold. The same table serves every spec, since a spec differs only in the text it
 // accepts as an edit. Each service dispatches on `doc.as.spec`.
 @(rodata)
-EDIT := core.Edit_Spelling {
+EDIT := core.Edit_Services {
 	value      = edit_value_at,
 	key_text   = edit_key_text,
 	comment    = edit_comment,
 	separators = edit_separators,
 	member_sep = proc(_: ^core.Document, _: core.Node_Index) -> string {return ","},
 	key_sep    = ":",
-	commit     = compose.commit,
+	validate   = validate_as,
 }
 
-// `SPELLING` holds JSON's spelling services, in rodata, the same table for every spec, for a caller that knows no
-// format. `text` and `number` are the procedures a direct caller calls, and `key_equals` reaches core's key rule. The
-// same reader serves every spec, since a JSON token holds no form that only JSON5 reads. The document holds the spec
-// because an edit's text is judged by it. A comment or an identifier is a value or a key only in the spec that
-// accepts it.
-SPELLING := core.Spelling {
-	text = text, key_equals = key_equals_decode, number = number, number_f32 = number_f32, build = build_as, validate = validate_as, scan = scan_as,
-	resolve = spelling_resolve, close_end = close_end, query = build.query, edit = &EDIT, write = write_text, tokens = &TOKENS, records = &RECORDS,
-	plans = rawptr(plan_as), typed = &READS,
+// `HANDLE` holds JSON's readers, in rodata, the same table for every spec, for a caller that knows no format. `text` and
+// `number` are the procedures a direct caller calls, and `key_equals` reaches core's key rule. The same reader serves
+// every spec, since a JSON token holds no form that only JSON5 reads. The document holds the spec because an edit's
+// text is judged by it. A comment or an identifier is a value or a key only in the spec that accepts it.
+HANDLE := core.Readers {
+	text = text, key_equals = key_equals_decode, number = number, number_f32 = number_f32,
+	resolve = spelling_resolve, close_end = close_end, format = rules_of,
 	tag_key = "json", key_open = "\"", key_close = "\":",
+	services = &SERVICES,
+}
+
+// `SERVICES` holds JSON's run-time services, which a handle reaches.
+SERVICES := core.Services {
+	build = build_as, validate = validate_as, scan = scan_as, write = write_text, edit = &EDIT,
+	plans = rawptr(plan_as), reads = &READS, tokens = &TOKENS, records = &FRAMING, docs = &DOCS,
+}
+
+// JSON's fault table, which names the format whatever the spec.
+rules_of :: proc "contextless" () -> ^core.Rules {
+	return &RULES
 }
 
 // The typed reads of the format, which a plan copies.
@@ -54,15 +64,16 @@ READS := typed.Format_Reads {
 // The handle's build: the walk compiled for the handle's spec.
 build_as :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	switch Spec(as.spec) {
-	case .Json:  return build_spec(src, .Json, options_of(as), refuse_duplicates, allocator)
-	case .Jsonc: return build_spec(src, .Jsonc, options_of(as), refuse_duplicates, allocator)
-	case .Json5: return build_spec(src, .Json5, options_of(as), refuse_duplicates, allocator)
+	case .Json:  return build_spec(src, .Json, as, refuse_duplicates, allocator)
+	case .Jsonc: return build_spec(src, .Jsonc, as, refuse_duplicates, allocator)
+	case .Json5: return build_spec(src, .Json5, as, refuse_duplicates, allocator)
 	}
 	return {}, {kind = .Bad_Spec}
 }
 
-// Reads `src` as spec `S` into a document, allocating nodes and facts with `allocator`.
-build_spec :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+// Reads `src` as spec `S` into a document that holds the handle `handle`, allocating nodes and facts with `allocator`.
+build_spec :: proc(src: []u8, $S: Spec, handle: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+	opts := options_of(handle)
 	// `walk` passes over record separators before a document for streams. A built document is one text, so a 0x1E
 	// crossed by the shared pre-document run is the bad byte `validate` refuses.
 	q, sep := document_start(src, 0, S)
@@ -74,7 +85,7 @@ build_spec :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, 
 	// a token, so the last token may be missing its second byte. So a text makes at most `(len(src) + 1 + depth) / 2`
 	// nodes, the hooks test no capacity, and `builder_end` returns the unused tail.
 	depth := core.reserve_depth(opts.max_depth, len(src))
-	doc, err := build_reserved(src, q, S, opts, refuse_duplicates, allocator, (len(src) + depth) / 2 + 16, min(depth, core.MAX_DEPTH), 0)
+	doc, err := build_reserved(src, q, S, handle, refuse_duplicates, allocator, (len(src) + depth) / 2 + 16, min(depth, core.MAX_DEPTH), 0)
 	if err.kind != .No_Memory {
 		return doc, err
 	}
@@ -83,7 +94,7 @@ build_spec :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, 
 	count: build.Count
 	regs: core.Hook_Regs
 	walk_from(src, q, S, opts, &count, &regs, build.builder_hook_count)
-	return build_reserved(src, q, S, opts, refuse_duplicates, allocator, count.nodes, count.deepest, count.facts)
+	return build_reserved(src, q, S, handle, refuse_duplicates, allocator, count.nodes, count.deepest, count.facts)
 }
 
 // The fault of the record separator at `sep`, which a text that is one document may not hold before its value.
@@ -94,11 +105,12 @@ sep_error :: proc(src: []u8, sep: [^]u8) -> core.Document_Error {
 
 // Reads the document that starts at `q` into a builder with room for `nodes` nodes and `facts` facts, which must cover
 // every node the walk reaches, and a stack of `depth` open containers, which grows as the text nests past it.
-build_reserved :: proc(src: []u8, q: [^]u8, $S: Spec, opts: Options, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth, facts: int) -> (core.Document, core.Document_Error) {
+build_reserved :: proc(src: []u8, q: [^]u8, $S: Spec, handle: core.As, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth, facts: int) -> (core.Document, core.Document_Error) {
+	opts := options_of(handle)
 	// The edit services dispatch on the handle's spec and read at its depth. The open containers' stack is this frame's
 	// when it holds `depth`, so a build allocates none and an arena that keeps the document keeps none.
 	frames: [core.MAX_DEPTH]u64 = ---
-	b := build.builder_start(src, as(S, opts), refuse_duplicates, allocator, nodes, depth, facts, frames[:])
+	b := build.builder_start(src, handle, refuse_duplicates, allocator, nodes, depth, facts, frames[:])
 	if len(b.doc.nodes) == 0 {
 		// The reservation was refused, so no hook may run over a nil node array.
 		return build.builder_end(&b, build.BUILDER_REGS, nil)
@@ -139,13 +151,23 @@ build_reserved :: proc(src: []u8, q: [^]u8, $S: Spec, opts: Options, refuse_dupl
 // calls it.
 @(cold)
 close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
+	switch Spec(doc.as.spec) {
+	case .Json:  return close_end_spec(doc, i, .Json)
+	case .Jsonc: return close_end_spec(doc, i, .Jsonc)
+	case .Json5: return close_end_spec(doc, i, .Json5)
+	}
+	return 0
+}
+
+// `close_end` for a document of spec `S`.
+@(cold)
+close_end_spec :: proc(doc: ^core.Document, i: core.Node_Index, $S: Spec) -> u64 {
 	if i == core.ROOT && doc.root_close != 0 {
 		return doc.root_close
 	}
-	spec := Spec(doc.as.spec)
 	n := doc.nodes[i]
 	if doc.partial {
-		return close_by_walk(doc, n.lo, spec)
+		return close_by_walk(doc, n.lo, S)
 	}
 	end := int(i) + int(n.n)
 	p := n.lo + 1
@@ -173,10 +195,10 @@ close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 		}
 	}
 	for _ in 0 ..< closes {
-		p = skip_to_close(doc.src, p, spec)
+		p = skip_to_close(doc.src, p, S)
 		p += 1
 	}
-	p = skip_to_close(doc.src, p, spec)
+	p = skip_to_close(doc.src, p, S)
 	if p < u64(len(doc.src)) {
 		p += 1
 	}
@@ -187,17 +209,13 @@ close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 // last descendant. The walk tolerates every fault, since a tolerance changes no container's end and the read may have
 // tolerated any. A stopped read may leave text no walk judged, where this returns the fault's byte.
 @(cold)
-close_by_walk :: proc(doc: ^core.Document, lo: u64, spec: Spec) -> u64 {
+close_by_walk :: proc(doc: ^core.Document, lo: u64, $S: Spec) -> u64 {
 	regs: core.Hook_Regs
 	none: core.No_Hooks
 	hi: u64
 	fault: Maybe(core.Fault)
 	opts := Options{max_depth = doc.as.max_depth, tolerate = {.Invalid_Utf8, .Lone_Surrogate}}
-	switch spec {
-	case .Json:  hi, fault = walk(doc.src, lo, .Json, opts, &none, &regs, core.no_hook)
-	case .Jsonc: hi, fault = walk(doc.src, lo, .Jsonc, opts, &none, &regs, core.no_hook)
-	case .Json5: hi, fault = walk(doc.src, lo, .Json5, opts, &none, &regs, core.no_hook)
-	}
+	hi, fault = walk(doc.src, lo, S, opts, &none, &regs, core.no_hook)
 	if f, bad := fault.?; bad {
 		return f.at
 	}
@@ -208,13 +226,12 @@ close_by_walk :: proc(doc: ^core.Document, lo: u64, spec: Spec) -> u64 {
 // ends. JSON has neither a comment nor a trailing comma. `comment_run` reads the bytes as spec `spec`, the spec the
 // document was built as, since a JSON5 `//` comment ends at U+2028 and U+2029 and a JSONC one does not. The walk
 // already judged these bytes, so the fault is ignored.
-skip_to_close :: proc(src: []u8, p: u64, spec: Spec) -> u64 {
+skip_to_close :: proc(src: []u8, p: u64, $S: Spec) -> u64 {
 	q: [^]u8
-	switch spec {
-	case .Json:  q = skip_ws(raw_data(src)[p:], raw_data(src)[len(src):])
-	case .Jsonc: q, _, _ = comment_run(raw_data(src)[p:], raw_data(src)[len(src):], true, .Jsonc)
-	case .Json5: q, _, _ = comment_run(raw_data(src)[p:], raw_data(src)[len(src):], true, .Json5)
-	case:        return p
+	when S == .Json {
+		q = skip_ws(raw_data(src)[p:], raw_data(src)[len(src):])
+	} else {
+		q, _, _ = comment_run(raw_data(src)[p:], raw_data(src)[len(src):], true, S)
 	}
 	return u64(intrinsics.ptr_sub(q, raw_data(src)))
 }
@@ -227,20 +244,35 @@ edit_value :: proc(src: []u8, _: runtime.Allocator, depth: u32, $S: Spec) -> cor
 	if len(src) >= 3 && src[0] == 0xEF && src[1] == 0xBB && src[2] == 0xBF {
 		return {kind = .Bad_Value}
 	}
-	c: Value_Check
-	regs: core.Hook_Regs
-	hi, fault := walk(src, 0, S, {max_depth = depth}, &c, &regs, value_check_hook)
-	if f, bad := fault.?; bad {
-		return {kind = .Bad_Value, inner = f}
+	// Strict JSON has no fact, so a value that validates is the whole text and the check needs no hook.
+	when S == .Json {
+		h: core.No_Hooks
+		regs: core.Hook_Regs
+		if f, bad := walk_text(src, 0, S, {max_depth = depth}, &h, &regs, core.no_hook).?; bad {
+			return {kind = .Bad_Value, inner = f}
+		}
+		return {}
+	} else {
+		c: Value_Check
+		regs: core.Hook_Regs
+		// A record separator before the value is no part of it.
+		q, sep := document_start(src, 0, S)
+		if sep != nil {
+			return {kind = .Bad_Value}
+		}
+		hi, fault, _ := walk_from(src, q, S, {max_depth = depth}, &c, &regs, value_check_hook)
+		if f, bad := fault.?; bad {
+			return {kind = .Bad_Value, inner = f}
+		}
+		if f, bad := tail_fault(src, hi, S).?; bad {
+			return {kind = .Bad_Value, inner = f}
+		}
+		// No value, or a fact after it, since a comment there would swallow what a splice puts after the value.
+		if !c.done || c.after {
+			return {kind = .Bad_Value}
+		}
+		return {}
 	}
-	if f, bad := tail_fault(src, hi, S).?; bad {
-		return {kind = .Bad_Value, inner = f}
-	}
-	// No value, or a fact after it, since a comment there would swallow what a splice puts after the value.
-	if !c.done || c.after {
-		return {kind = .Bad_Value}
-	}
-	return {}
 }
 
 // `Value_Check` holds what `value_check_hook` records. It has whether a value was found, whether a fact follows it, and

@@ -114,6 +114,17 @@
   unless the options hold `.Ragged`, so what they write reads back with the same options.
 - `core.commit` of a JSONC document as JSON5 respells a U+2028 or U+2029 in an untouched `//` comment as `\u2028` or
   `\u2029`, as the tree writer does, instead of refusing the result with `.Bad_Result`.
+- Each `json` and `dsv` entry point is a group of a form that takes its spec as a constant (`json.validate(src, .Json)`)
+  and a form that takes it at run time (a variable, or an `As`). A program that names its specs links only the walks it
+  reaches. A document built through a constant form holds
+  no run-time services, so its `query`, `write` and `edit_list_init` are the format package's, with the spec named.
+- `json` and `dsv` export the names of `core`, `core/typed`, `core/write`, `core/records` and `host` that a program
+  calls, so a program imports one package (`json.Document`, `json.Error`, `json.render`, `json.parse_path`,
+  `json.records_check`, `json.Pool`). `destroy` is one group over a document, a path, an edit list, a plan, a sink, a
+  record writer and a pool. tools/names.txt lists the exports and `make api-write` writes `json/names.odin` and
+  `dsv/names.odin`.
+- `json.query`, `dsv.query`, `json.commit` and `dsv.commit` replace `core.query` and `core.commit`. `commit` returns
+  `Error`. The `query` and `commit` slots of the format tables are gone.
 
 ### Errors
 

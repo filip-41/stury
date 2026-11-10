@@ -97,9 +97,9 @@ Reader :: struct {
 // Starts a read of `src` into `target`, a value of `plan`'s type. `frames` holds two more than the walk's
 // depth, for the frame below the root's and the root's. The walk then runs with `r` and the returned registers, and
 // `read_end` ends it.
-read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, spelling: ^core.Spelling, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error) {
-	if plan == nil || plan.spelling != spelling || plan.type != T {
-		err = plan_mismatch(plan, spelling, T)
+read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error) {
+	if plan == nil || !core.same_format(plan.readers, as.readers) || plan.type != T {
+		err = plan_mismatch(plan, as.readers, T)
 		return
 	}
 	if target == nil {
@@ -112,7 +112,7 @@ read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, spelling: ^
 	frames[0].seen = 0
 	r.frames, r.sp, r.src, r.plan = raw_data(frames), 1, src, plan
 	r.borrow, r.sink = read.borrow_strings, read.sink
-	r.spelling = spelling
+	r.view.as = as
 	if read.dups == .All {
 		err.kind = .Bad_Option
 		return
@@ -156,10 +156,10 @@ read_release :: proc "contextless" (r: ^Reader, frames: []Frame) {
 	}
 }
 
-// The refusal of a read or write given `plan` for a value of `T` in the format `spelling`, which the plan does not
+// The refusal of a read or write given `plan` for a value of `T` in the format `readers` reads, which the plan does not
 // read: the plan's own error when `plan_make` refused it, else `.Plan_Mismatch` naming the two formats, or the plan's
 // type when the formats agree.
-plan_mismatch :: proc "contextless" (plan: ^Plan, spelling: ^core.Spelling, T: typeid) -> core.Typed_Error {
+plan_mismatch :: proc "contextless" (plan: ^Plan, readers: ^core.Readers, T: typeid) -> core.Typed_Error {
 	e := core.Typed_Error{kind = .Plan_Mismatch}
 	if plan == nil {
 		return e
@@ -167,7 +167,7 @@ plan_mismatch :: proc "contextless" (plan: ^Plan, spelling: ^core.Spelling, T: t
 	if plan.err.kind != .None {
 		return plan.err
 	}
-	e.plans = {plan.spelling, spelling, plan.type if plan.spelling == spelling else nil}
+	e.plans = {plan.readers, readers, plan.type if core.same_format(plan.readers, readers) else nil}
 	return e
 }
 
@@ -355,7 +355,7 @@ on_token_cold :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Re
 store_string :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, dest: ^string) -> core.Typed_Error_Kind {
 	context = h.ctx
 	if t.spelling & core.SPELLING_DECODE != 0 {
-		s, ok := core.token_text(h.plan.spelling, &h.view, t, context.allocator)
+		s, ok := core.token_text(h.plan.readers, &h.view, t, context.allocator)
 		if !ok {
 			return .No_Memory
 		}

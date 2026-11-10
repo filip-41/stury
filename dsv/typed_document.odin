@@ -40,11 +40,10 @@ document_read :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	d := Document_Cells{doc = doc}
 	h := &d.cells
 	frames: [ROW_FRAMES]typed.Frame = ---
-	regs, err := typed.read_start(&h.r, doc.src, plan, doc.spelling, T, target, read, frames[:], allocator)
+	regs, err := typed.read_start(&h.r, doc.src, plan, doc.as, T, target, read, frames[:], allocator)
 	if err.kind != .None {
 		return err
 	}
-	h.r.as.spec = doc.as.spec
 	// A node says less of a quoted cell than the walk's token, so every cell takes the cold read.
 	rows_of(h, plan, 0)
 	if h.row.kind == .Map && headless {
@@ -196,7 +195,7 @@ kept_position :: proc "contextless" (d: ^Document_Cells, at: core.Node_Index) ->
 document_close :: proc(d: ^Document_Cells, regs: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
 	t := t
 	if (^Column)(uintptr(regs.b)).must {
-		end := close_end(d.doc, at)
+		end := d.doc.readers.close_end(d.doc, at)
 		t.lo = end - u64(len(line_end_before(d.doc.src, end)))
 		t.n = u32(end - t.lo)
 	}

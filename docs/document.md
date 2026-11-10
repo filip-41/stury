@@ -14,12 +14,12 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 |---|---|
 | `core/document.odin` | `Node`, `Document`, the readers, `Fact`, `destroy`, `clone`, the spelling tables |
 | `core/build/build.odin` | `Builder`, the hooks, `builder_start`, `builder_end`, the header row, the duplicate-key check |
-| `core/edit.odin` | `Edit_List`, `Edit`, `set`, `insert`, `remove`, `set_fact`, `remove_fact`, `commit` |
+| `core/edit.odin` | `Edit_List`, `Edit`, `set`, `insert`, `remove`, `set_fact`, `remove_fact` |
 | `core/compose/compose.odin` | a commit's container composition: members, junctions and the placement of facts |
-| `core/compose/commit.odin` | the commit a format's table points at: plan, compose, splice, the read of the result |
+| `core/compose/commit.odin` | the commit, `commit` in a format package: plan, compose, splice, the read of the result |
 | `core/path.odin` | `Path`, its steps and spellings, `Answer`, `Token_Answer`, `Presence`, `member_of`, `element_of` and `length_exact` |
 | `core/path_text.odin` | the readers of a path's jq text and JSON Pointer spellings |
-| `core/build/scan.odin` | the one engine's entries: the hooks a format's `scan` walks with, the partial document, the query behind `core.query`, `scan`, `find`, `each_answer` and `set` over a handle |
+| `core/build/scan.odin` | the one engine's entries: the hooks a format's `scan` walks with, the partial document, the query behind `json.query` and `dsv.query`, `scan`, `find`, `each_answer` and `set` over a handle |
 | `core/build/step.odin` | the step logic every hook and the replay run |
 | `core/build/many.odin` | what only `$MANY` reads hold: armed path sets, rings of negative indexes, answers placed in text order, the stream |
 | `json/query.odin`, `dsv/query.odin` | each format's `Spelling.scan` walk, whose forwarders `scan`, `find`, `each_answer` and `set` sit in its `walk.odin` beside `validate` and `build` |
@@ -301,8 +301,7 @@ ill-formed sequence answer `.String`, since their span holds a quote, a backslas
 
 ## The spelling services
 
-A `Spelling` holds eight services, `text`, `key_equals`, `number`, `build`, `validate`, `resolve`, `resolves` and `close_end`, the `query` engine `core.query`
-dispatches through, which each format points at `core/build`'s, and a pointer to the format's `Edit_Spelling`. A document points at its format's table in rodata,
+A `Spelling` holds eight services, `text`, `key_equals`, `number`, `build`, `validate`, `resolve`, `resolves` and `close_end`, and a pointer to the format's `Edit_Spelling`. A document points at its format's table in rodata,
 one table for every spec of the format: a JSON token holds no form that only JSON5 reads, so `text` reads any JSON
 string, and dsv's `text` and `key_equals` read `Document.as.spec`, since a CSV backslash is a byte, a TSV
 backslash is an escape, and a `Plain` cell has neither. `text`, `key_equals` and `number` take a `Token_View`, the
@@ -465,7 +464,7 @@ JSON's key check reads the text as the only member of `{text:0}` and requires th
 commit :: proc(list: ^Edit_List, as: Maybe(As) = nil, allocator := context.allocator) -> (out: []u8, dropped: int, err: Error)
 ```
 
-`core.commit` writes the output in the document's own spec, or in the spec of `as`, such as `json.as(.Json)` for a
+`compose.commit`, which a format package exports as `commit`, writes the output in the document's own spec, or in the spec of `as`, such as `json.as(.Json)` for a
 JSON5 document. A text of another spec must read strictly, since the source's own reading is no evidence. A handle of
 another format is `.Bad_Spec`, and a delimited text refuses a spec change as `.Bad_Spec` before the splice, since it
 would respell every cell. The commit builds the output in one allocation with the format's separators, the caller frees `out`, and reading after edits is

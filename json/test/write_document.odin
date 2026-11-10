@@ -77,7 +77,7 @@ check_layout :: proc(t: ^testing.T, text: []u8, opts: core.Write_Options, label:
 // Writes `src` read as JSON under every option, reads each text again and compares the trees, writes the read-again
 // document once more for the same bytes, and checks `format`, the stream and `core.write` in its own spec against `core.write`.
 check_write :: proc(t: ^testing.T, src: []u8) -> bool {
-	doc, err := json.build(src, .Json)
+	doc, err := core.build(src, json.as(.Json))
 	if !testing.expectf(t, err == nil, "build %q: %v", src, err) {
 		return false
 	}
@@ -88,7 +88,7 @@ check_write :: proc(t: ^testing.T, src: []u8) -> bool {
 			return false
 		}
 		defer delete(text)
-		again, rerr := json.build(text, .Json)
+		again, rerr := core.build(text, json.as(.Json))
 		if !testing.expectf(t, rerr == nil, "re-read %q under %d: %v", text, k, rerr) {
 			return false
 		}
@@ -173,7 +173,7 @@ write_document_generated :: proc(t: ^testing.T) {
 @(test)
 write_document_layout :: proc(t: ^testing.T) {
 	src := `{"a":[1,2,{"b":null}],"c":{},"d":[]}`
-	doc, _ := json.build(transmute([]u8)src, .Json)
+	doc, _ := core.build(transmute([]u8)src, json.as(.Json))
 	defer core.destroy(&doc)
 	text, _, _ := core.write(&doc)
 	defer delete(text)
@@ -194,7 +194,7 @@ write_document_layout :: proc(t: ^testing.T) {
 @(test)
 write_document_string_options :: proc(t: ^testing.T) {
 	src := "[\"a<b>&c\",\"é😀\",\"é\\n\",\"x\x7fy\"]"
-	doc, _ := json.build(transmute([]u8)src, .Json)
+	doc, _ := core.build(transmute([]u8)src, json.as(.Json))
 	defer core.destroy(&doc)
 	plain, _, _ := core.write(&doc)
 	defer delete(plain)
@@ -205,7 +205,7 @@ write_document_string_options :: proc(t: ^testing.T) {
 		if !walktest.expect_nil(t, err) {
 			return
 		}
-		again, rerr := json.build(text, .Json)
+		again, rerr := core.build(text, json.as(.Json))
 		defer core.destroy(&again)
 		walktest.expect_nil(t, rerr)
 		for x, i in doc.nodes {
@@ -230,7 +230,7 @@ write_document_string_options :: proc(t: ^testing.T) {
 @(test)
 write_document_respell_strings :: proc(t: ^testing.T) {
 	src := `{"\u0061":["\u00e9\/x","\ud83d\ude00","é","\n\"\\",1E2]}`
-	doc, _ := json.build(transmute([]u8)string(src), .Json)
+	doc, _ := core.build(transmute([]u8)string(src), json.as(.Json))
 	defer core.destroy(&doc)
 	kept, _, _ := core.write(&doc)
 	defer delete(kept)
@@ -245,7 +245,7 @@ write_document_respell_strings :: proc(t: ^testing.T) {
 		walktest.expect_nil(t, err)
 		testing.expect_value(t, string(text), want)
 	}
-	jsonc, _ := json.build(transmute([]u8)string(`[/* \/ */ "\/"]`), .Jsonc)
+	jsonc, _ := core.build(transmute([]u8)string(`[/* \/ */ "\/"]`), json.as(.Jsonc))
 	defer core.destroy(&jsonc)
 	text, _, _ := core.write(&jsonc, {respell_strings = true})
 	defer delete(text)
@@ -255,7 +255,7 @@ write_document_respell_strings :: proc(t: ^testing.T) {
 // A subtree of a delimited target is the array's records, and a key or a node past the document is refused.
 @(test)
 write_document_nodes :: proc(t: ^testing.T) {
-	doc, _ := json.build(transmute([]u8)string(`{"n":1,"rows":[{"a":1,"b":"x"},{"a":2}]}`), .Json)
+	doc, _ := core.build(transmute([]u8)string(`{"n":1,"rows":[{"a":1,"b":"x"},{"a":2}]}`), json.as(.Json))
 	defer core.destroy(&doc)
 	rows, _ := core.member(&doc, core.ROOT, "rows")
 	csv, _, err := core.write(&doc, as = dsv.as(.Csv), node = rows)
@@ -272,7 +272,7 @@ write_document_nodes :: proc(t: ^testing.T) {
 
 @(test)
 write_document_refusals :: proc(t: ^testing.T) {
-	doc, _ := json.build(transmute([]u8)string(`{"a":1}`), .Json)
+	doc, _ := core.build(transmute([]u8)string(`{"a":1}`), json.as(.Json))
 	defer core.destroy(&doc)
 	whole, _, werr := core.write(&doc)
 	delete(whole)
@@ -316,7 +316,7 @@ empty_container_from_the_rare_path :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		text := empty_rows_text(c.levels, c.n)
-		doc, err := json.build(text, .Json, {}, .Last, context.temp_allocator)
+		doc, err := core.build(text, json.as(.Json, {}), .Last, context.temp_allocator)
 		walktest.expect_nil(t, err)
 		sorted := c.opts
 		sorted.sort_keys = true
@@ -350,7 +350,7 @@ write_document_comment_layout :: proc(t: ^testing.T) {
 	src := `// top
 { /* lead */ "a" /* k */ : 1, // trail
  "b": [2 /* t */] /* u */ /* f */ } // end`
-	doc, _ := json.build(transmute([]u8)src, .Jsonc)
+	doc, _ := core.build(transmute([]u8)src, json.as(.Jsonc))
 	defer core.destroy(&doc)
 	compact, _, _ := core.write(&doc)
 	defer delete(compact)
@@ -360,14 +360,14 @@ write_document_comment_layout :: proc(t: ^testing.T) {
 	want := "// top\n{\n  /* lead */\n  \"a\": /* k */ 1, // trail\n  \"b\": [\n    2 /* t */\n  ] /* u */ /* f */\n} // end\n"
 	testing.expect_value(t, string(pretty), want)
 	feet := "[ // x\n 1,\n // foot\n ]"
-	foot_doc, _ := json.build(transmute([]u8)feet, .Jsonc)
+	foot_doc, _ := core.build(transmute([]u8)feet, json.as(.Jsonc))
 	defer core.destroy(&foot_doc)
 	text, _, _ := core.write(&foot_doc, core.PRETTY)
 	defer delete(text)
 	testing.expect_value(t, string(text), "[\n  // x\n  1\n  // foot\n]")
 	// Compact text ends a value's line before a comment that is not the value's inline comment.
 	lines := "[1, /* i */\n /* head */ 2 /* i */\n /* foot */]\n/* root foot */"
-	lines_doc, _ := json.build(transmute([]u8)lines, .Jsonc)
+	lines_doc, _ := core.build(transmute([]u8)lines, json.as(.Jsonc))
 	defer core.destroy(&lines_doc)
 	broken, _, _ := core.write(&lines_doc)
 	defer delete(broken)
@@ -377,7 +377,7 @@ write_document_comment_layout :: proc(t: ^testing.T) {
 @(test)
 write_document_sort_keys :: proc(t: ^testing.T) {
 	src := `{"b":{"z":1,"a":[{"y":0,"x":0}]},"a":2,"é":3,"B":4, "a":5}`
-	doc, _ := json.build(transmute([]u8)src, .Json)
+	doc, _ := core.build(transmute([]u8)src, json.as(.Json))
 	defer core.destroy(&doc)
 	text, _, err := core.write(&doc, {sort_keys = true})
 	defer delete(text)
@@ -389,7 +389,7 @@ write_document_sort_keys :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(direct), string(text))
 	// Keys sort by what they decode to, and a member keeps its comments when it moves.
 	commented := "{\"b\":1, // one\n \"\\u0061\":2 /* two */}"
-	cdoc, _ := json.build(transmute([]u8)commented, .Jsonc)
+	cdoc, _ := core.build(transmute([]u8)commented, json.as(.Jsonc))
 	defer core.destroy(&cdoc)
 	moved, _, merr := core.write(&cdoc, {sort_keys = true})
 	defer delete(moved)
@@ -407,7 +407,7 @@ JSON5_TEXTS :: [?][2]string {
 @(test)
 write_document_json5 :: proc(t: ^testing.T) {
 	for pair in JSON5_TEXTS {
-		doc, err := json.build(transmute([]u8)pair[0], .Json5)
+		doc, err := core.build(transmute([]u8)pair[0], json.as(.Json5))
 		if !testing.expectf(t, err == nil, "build %q: %v", pair[0], err) {
 			return
 		}
@@ -427,7 +427,7 @@ write_document_json5 :: proc(t: ^testing.T) {
 		testing.expect_value(t, string(direct), string(own))
 	}
 	for src in ([?]string{`[Infinity]`, `{a:-Infinity}`, `[NaN]`, `[1,+NaN]`}) {
-		doc, _ := json.build(transmute([]u8)src, .Json5)
+		doc, _ := core.build(transmute([]u8)src, json.as(.Json5))
 		defer core.destroy(&doc)
 		_, _, err := core.write(&doc, as = json.as(.Json))
 		walktest.expect_kind(t, err, core.Typed_Error_Kind.Non_Finite)
@@ -442,7 +442,7 @@ write_document_json5_generated :: proc(t: ^testing.T) {
 		b: [dynamic]u8
 		defer delete(b)
 		gen.text(&b, 1 + rand.int_max(5), .Json5)
-		doc, err := json.build(b[:], .Json5)
+		doc, err := core.build(b[:], json.as(.Json5))
 		if !testing.expectf(t, err == nil, "build %q: %v", b[:], err) {
 			return
 		}
@@ -456,7 +456,7 @@ write_document_json5_generated :: proc(t: ^testing.T) {
 			if !testing.expectf(t, werr == nil, "write %q under %d: %v", b[:], k, werr) {
 				return
 			}
-			again, rerr := json.build(text, .Json)
+			again, rerr := core.build(text, json.as(.Json))
 			defer core.destroy(&again)
 			if !testing.expectf(t, rerr == nil, "%q is not JSON: %v", text, rerr) || !testing.expect_value(t, len(again.nodes), len(doc.nodes)) {
 				return
@@ -488,7 +488,7 @@ write_document_json5_generated :: proc(t: ^testing.T) {
 		if !walktest.expect_nil(t, oerr) {
 			return
 		}
-		back, berr := json.build(own, .Json5)
+		back, berr := core.build(own, json.as(.Json5))
 		defer core.destroy(&back)
 		if !testing.expectf(t, berr == nil, "%q is not JSON5: %v", own, berr) || !same_tree(t, &doc, &back, "json5") {
 			return
@@ -499,7 +499,7 @@ write_document_json5_generated :: proc(t: ^testing.T) {
 // A delimited text with a header is an array of records, its comment lines dropped and counted.
 @(test)
 write_document_shared_keys :: proc(t: ^testing.T) {
-	doc, err := dsv.build(transmute([]u8)string("x,y\n# note\n1,a\n2.5,\"b c\"\n"), .Csv, {comment = '#'})
+	doc, err := core.build(transmute([]u8)string("x,y\n# note\n1,a\n2.5,\"b c\"\n"), dsv.as(.Csv, {comment = '#'}))
 	defer core.destroy(&doc)
 	if !walktest.expect_nil(t, err) {
 		return
@@ -511,7 +511,7 @@ write_document_shared_keys :: proc(t: ^testing.T) {
 	pretty, _, perr := core.write(&doc, core.PRETTY, json.as(.Jsonc))
 	defer delete(pretty)
 	walktest.expect_nil(t, perr)
-	again, aerr := json.build(pretty, .Json)
+	again, aerr := core.build(pretty, json.as(.Json))
 	defer core.destroy(&again)
 	walktest.expect_nil(t, aerr)
 	dropping, dropped, _ := core.write(&doc, as = json.as(.Json))
@@ -545,7 +545,7 @@ write_document_kept :: proc(t: ^testing.T) {
 		return
 	}
 	defer core.destroy(&doc)
-	text, _, kerr := core.write(&doc)
+	text, _, kerr := json.write(&doc, .Json)
 	defer delete(text)
 	walktest.expect_nil(t, kerr)
 	testing.expect_value(t, string(text), `{"a":[2,{"k":[4]}],"b":{"d":2}}`)
@@ -565,7 +565,7 @@ write_document_kept_as_target :: proc(t: ^testing.T) {
 	if !walktest.expect_nil(t, err) {
 		return
 	}
-	full, ferr := json.build(src, .Json5)
+	full, ferr := core.build(src, json.as(.Json5))
 	defer core.destroy(&full)
 	walktest.expect_nil(t, ferr)
 	answer := doc.answers[0].node
@@ -576,7 +576,7 @@ write_document_kept_as_target :: proc(t: ^testing.T) {
 		defer delete(whole)
 		testing.expectf(t, walktest.typed_kind(kerr) == walktest.typed_kind(werr) && walktest.at_of(kerr) == walktest.at_of(werr) && string(kept) == string(whole), "%v: %q %v, full %q %v", target, kept, kerr, whole, werr)
 	}
-	own, _, oerr := core.write(&doc)
+	own, _, oerr := json.write(&doc, .Json5)
 	defer delete(own)
 	walktest.expect_nil(t, oerr)
 	testing.expect_value(t, string(own), "[{id:0x1F,v:Infinity,'s':'q'}]")
@@ -587,7 +587,7 @@ write_document_kept_as_target :: proc(t: ^testing.T) {
 @(test)
 write_document_line_separators_as_json5 :: proc(t: ^testing.T) {
 	src := "[1 // a , 2 b\n]"
-	doc, err := json.build(transmute([]u8)src, .Jsonc)
+	doc, err := core.build(transmute([]u8)src, json.as(.Jsonc))
 	defer core.destroy(&doc)
 	if !walktest.expect_nil(t, err) {
 		return
@@ -596,7 +596,7 @@ write_document_line_separators_as_json5 :: proc(t: ^testing.T) {
 	defer delete(text)
 	walktest.expect_nil(t, werr)
 	testing.expect_value(t, string(text), "[1// a\\u2028, 2\\u2029b\n]")
-	again, rerr := json.build(text, .Json5)
+	again, rerr := core.build(text, json.as(.Json5))
 	defer core.destroy(&again)
 	walktest.expect_nil(t, rerr)
 	testing.expect_value(t, len(again.nodes), len(doc.nodes))
@@ -611,7 +611,7 @@ write_document_line_separators_as_json5 :: proc(t: ^testing.T) {
 @(test)
 write_document_jsonc_without_comments :: proc(t: ^testing.T) {
 	src := `[1, 2,]`
-	doc, err := json.build(transmute([]u8)src, .Jsonc)
+	doc, err := core.build(transmute([]u8)src, json.as(.Jsonc))
 	defer core.destroy(&doc)
 	if !walktest.expect_nil(t, err) {
 		return
@@ -629,7 +629,7 @@ write_document_jsonc_without_comments :: proc(t: ^testing.T) {
 // A document of another format is written through its own text, number and kind: an empty cell is null.
 @(test)
 write_document_from_delimited_text :: proc(t: ^testing.T) {
-	doc, err := dsv.build(transmute([]u8)string("1,a\n2.5,\"b c\"\n"), .Csv, {no_header = true})
+	doc, err := core.build(transmute([]u8)string("1,a\n2.5,\"b c\"\n"), dsv.as(.Csv, {no_header = true}))
 	defer core.destroy(&doc)
 	if !walktest.expect_nil(t, err) {
 		return
@@ -642,7 +642,7 @@ write_document_from_delimited_text :: proc(t: ^testing.T) {
 	defer delete(own)
 	walktest.expect_nil(t, cerr)
 	testing.expect_value(t, string(own), "1,a\n2.5,b c\n")
-	headed, herr := dsv.build(transmute([]u8)string("x,y,z\n1,2,\n"), .Csv)
+	headed, herr := core.build(transmute([]u8)string("x,y,z\n1,2,\n"), dsv.as(.Csv))
 	defer core.destroy(&headed)
 	walktest.expect_nil(t, herr)
 	records, _, rerr := core.write(&headed, as = json.as(.Json))
@@ -656,7 +656,7 @@ write_document_from_delimited_text :: proc(t: ^testing.T) {
 @(test)
 write_document_infers_cells :: proc(t: ^testing.T) {
 	src := "a,b,c,d,e,f,g,h\n1,-2.50e3,true,false,,x,\"7\",0\n01,+1,.5,1.,0x1,NaN,-, 1\n"
-	doc, err := dsv.build(transmute([]u8)src, .Csv, {infer = true})
+	doc, err := core.build(transmute([]u8)src, dsv.as(.Csv, {infer = true}))
 	defer core.destroy(&doc)
 	if !walktest.expect_nil(t, err) {
 		return
@@ -666,7 +666,7 @@ write_document_infers_cells :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, werr)
 	testing.expect_value(t, string(text), `[{"a":1,"b":-2.50e3,"c":true,"d":false,"e":null,"f":"x","g":"7","h":0},` +
 		`{"a":"01","b":"+1","c":".5","d":"1.","e":"0x1","f":"NaN","g":"-","h":" 1"}]`)
-	again, aerr := json.build(text, .Json)
+	again, aerr := core.build(text, json.as(.Json))
 	defer core.destroy(&again)
 	walktest.expect_nil(t, aerr)
 }
@@ -739,7 +739,7 @@ writes_stop_at_the_end_of_a_page :: proc(t: ^testing.T) {
 	}
 	for text in texts {
 		src := walktest.fence_copy(&fence, transmute([]u8)text)
-		doc, err := json.build(src, .Json)
+		doc, err := core.build(src, json.as(.Json))
 		if !walktest.expect_nil(t, err) {
 			return
 		}
@@ -769,7 +769,7 @@ lone_surrogates_write_as_they_read :: proc(t: ^testing.T) {
 	}
 	read := json.Options{tolerate = {.Lone_Surrogate}}
 	for c in cases {
-		doc, err := json.build(transmute([]u8)c[0], .Json, read)
+		doc, err := core.build(transmute([]u8)c[0], json.as(.Json, read))
 		if !walktest.expect_nil(t, err) {
 			continue
 		}
@@ -794,7 +794,7 @@ tolerated_strings_through_the_row_walk :: proc(t: ^testing.T) {
 	FFFD :: "\xEF\xBF\xBD"
 	src := strings.concatenate({"[", strings.repeat("\"a\xff\",{\"k\xff\":\"b\"},1,", 3000, context.temp_allocator), "0]"}, context.temp_allocator)
 	want := strings.concatenate({"[", strings.repeat(`"a` + FFFD + `",{"k` + FFFD + `":"b"},1,`, 3000, context.temp_allocator), "0]"}, context.temp_allocator)
-	doc, err := json.build(transmute([]u8)src, .Json, {tolerate = {.Invalid_Utf8}})
+	doc, err := core.build(transmute([]u8)src, json.as(.Json, {tolerate = {.Invalid_Utf8}}))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
 	text, _, werr := core.write(&doc, {}, allocator = context.temp_allocator)
@@ -816,7 +816,7 @@ refusing_stream :: proc(data: rawptr, mode: io.Stream_Mode, p: []u8, offset: i64
 @(test)
 document_write_to_a_failing_stream :: proc(t: ^testing.T) {
 	for src in ([?]string{`[1,2]`, "[1, /* c */ 2]"}) {
-		doc, err := json.build(transmute([]u8)src, .Jsonc)
+		doc, err := core.build(transmute([]u8)src, json.as(.Jsonc))
 		defer core.destroy(&doc)
 		walktest.expect_nil(t, err)
 		dropped, serr := core.write_stream(io.Stream{procedure = refusing_stream}, &doc, {}, json.as(.Json))
@@ -856,7 +856,7 @@ spelling_options_in_the_row_walk :: proc(t: ^testing.T) {
 			strings.write_byte(&b, '}')
 		}
 		strings.write_byte(&b, ']')
-		doc, err := json.build(transmute([]u8)strings.to_string(b), .Json)
+		doc, err := core.build(transmute([]u8)strings.to_string(b), json.as(.Json))
 		defer core.destroy(&doc)
 		if !testing.expectf(t, err == nil, "build %q: %v", strings.to_string(b), err) {
 			return

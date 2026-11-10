@@ -107,10 +107,14 @@ gate:
 # The library suites, the examples, then the command line against its smoke cases and the jq corpus.
 test: test-lib test-examples test-cli test-jq
 
-# Each program under examples/ is built and run from here, and its output is the `expected.txt` beside it.
+# Each program under examples/ is built and run from here, and its output is the `expected.txt` beside it. The JSON
+# walks and dsv passes it links are the counts in `examples/links.txt`.
 test-examples:
 	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && for e in examples/*/; do e=$${e%/}; echo "== $$e"; \
 		$(ODIN) build $$e $(TEST_OPT) -collection:stury=. -out:$$d/x && $$d/x > $$d/out && diff $$d/out $$e/expected.txt || exit 1; \
+		want=$$(awk -v n=$${e#examples/} '$$1 == n {print $$2, $$3}' examples/links.txt); \
+		got="$$(nm $$d/x | grep -c 'json::st_value:') $$(nm $$d/x | grep -c 'dsv::pass_base:')"; \
+		[ "$$got" = "$$want" ] || { echo "$$e links $$got (walks passes), examples/links.txt says $$want" >&2; exit 1; }; \
 	done
 
 # The library suites at -o:minimal and at -o:speed, where the optimizer reasons about loads that the walk makes past an

@@ -9,7 +9,7 @@ import walktest "../../walktest"
 // Reading a built document: its nodes and spans, the readers, duplicate keys, facts, and the faults a build reports.
 
 build :: proc(src: string, $S: json.Spec, opts := json.Options{}, dups := core.Duplicates.Last) -> (core.Document, core.Error) {
-	return json.build(transmute([]u8)src, S, opts, dups)
+	return core.build(transmute([]u8)src, json.as(S, opts), dups)
 }
 
 // `{"a":[1,2],"b":{}}` makes 7 nodes. A container's `n` counts its subtree in nodes, a key node is written right
@@ -129,7 +129,7 @@ check_spans :: proc(t: ^testing.T, src: []u8, $S: json.Spec) -> bool {
 	defer free(log)
 	regs: core.Hook_Regs
 	_, fault := json.walk(src, 0, S, {}, log, &regs, walktest.log_hook)
-	doc, err := json.build(src, S)
+	doc, err := core.build(src, json.as(S))
 	defer core.destroy(&doc)
 	if fault == nil && log.n == 0 {
 		// A text with no value is no document: the walk reads it as a stream would, and `build` refuses it with
@@ -720,7 +720,7 @@ check_0x1e :: proc(t: ^testing.T, src: []u8, spec: json.Spec, text: string) -> b
 
 check_0x1e_one :: proc(t: ^testing.T, src: []u8, $S: json.Spec, text: string) -> bool {
 	want, bad := walktest.fault_of(json.validate(src, S)).?
-	doc, err := json.build(src, S)
+	doc, err := core.build(src, json.as(S))
 	defer core.destroy(&doc)
 	if bad {
 		return testing.expectf(t, walktest.fault_of(err) != nil && (walktest.fault_of(err).? or_else core.Fault{}).kind == want.kind && (walktest.fault_of(err).? or_else core.Fault{}).at == want.at, "%v %q: build %v, validate %v", S, text, err, want)
@@ -734,16 +734,18 @@ check_0x1e_one :: proc(t: ^testing.T, src: []u8, $S: json.Spec, text: string) ->
 @(test)
 spelling_complete :: proc(t: ^testing.T) {
 	src := []u8{'1'}
-	doc, err := json.build(src, .Json)
+	doc, err := core.build(src, json.as(.Json))
 	defer core.destroy(&doc)
 	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
 	}
-	s := doc.spelling
-	testing.expect(t, s.text != nil && s.key_equals != nil && s.number != nil && s.build != nil && s.validate != nil && s.resolve != nil && s.close_end != nil)
-	testing.expect(t, s.edit != nil && s.edit.value != nil && s.edit.key_text != nil)
-	testing.expect_value(t, s.edit.member_sep(nil, 0), ",")
-	testing.expect_value(t, s.edit.key_sep, ":")
+	s := doc.readers
+	testing.expect(t, s.text != nil && s.key_equals != nil && s.number != nil && s.resolve != nil && s.close_end != nil && s.format != nil)
+	services := s.services
+	testing.expect(t, services != nil && services.build != nil && services.validate != nil)
+	testing.expect(t, services.edit != nil && services.edit.value != nil && services.edit.key_text != nil)
+	testing.expect_value(t, services.edit.member_sep(nil, 0), ",")
+	testing.expect_value(t, services.edit.key_sep, ":")
 }
 
 // A refusing build finds a repeat in `{"a":1,"a":2 /* c */}` under JSONC, at byte 7, and leaves no nodes.

@@ -314,7 +314,7 @@ rows_name_wide_cells_by_position :: proc(t: ^testing.T) {
 		walktest.expect_nil(t, err)
 		want := []string{"7", "6"}
 		for p, i in ([]core.Path{path, same}) {
-			answers, _ := core.query(&doc, p, allocator = context.temp_allocator)
+			answers, _ := dsv.query(&doc, p, allocator = context.temp_allocator)
 			text: string
 			if len(answers) == 1 {
 				text, _ = core.text(&doc, answers[0].node, buf[:])
@@ -432,7 +432,7 @@ rows_columns_cells_and_documents :: proc(t: ^testing.T) {
 	doc, err := records.build(&it, rec, context.temp_allocator)
 	walktest.expect_nil(t, err)
 	path, _ := core.parse_path(".note", context.temp_allocator)
-	answers, _ := core.query(&doc, path, allocator = context.temp_allocator)
+	answers, _ := dsv.query(&doc, path, allocator = context.temp_allocator)
 	testing.expect(t, len(answers) == 1)
 	text, _ := core.text(&doc, answers[0].node, buf[:])
 	testing.expect_value(t, text, "a\"b")
@@ -670,7 +670,7 @@ drain :: proc(it: ^records.Reader) -> (g: Got) {
 		}
 		named: string
 		doc, err := records.build(it, rec, context.temp_allocator)
-		if answers, _ := core.query(&doc, path, allocator = context.temp_allocator); len(answers) == 1 {
+		if answers, _ := dsv.query(&doc, path, allocator = context.temp_allocator); len(answers) == 1 {
 			named, _ = core.text(&doc, answers[0].node, buf[:])
 		}
 		append(&g.rows, fmt.tprint(rec.at, string(rec.text), col, cells[:], err == nil, named))
@@ -923,7 +923,7 @@ gather :: proc(g: ^Gathered, it: ^records.Reader, _: int) -> bool {
 				return it.fault == nil
 			}
 			doc, err := records.build(it, rec, context.temp_allocator)
-			if answers, _ := core.query(&doc, g.path, allocator = context.temp_allocator); err == nil && len(answers) == 1 {
+			if answers, _ := dsv.query(&doc, g.path, allocator = context.temp_allocator); err == nil && len(answers) == 1 {
 				text, _ = core.text(&doc, answers[0].node, buf[:])
 			}
 		case .Read:

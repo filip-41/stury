@@ -34,7 +34,9 @@ Reader :: struct {
 	// the text past it, and 0 for none.
 	to:        u64,
 	as:        core.As,
-	services:  ^Services,
+	services:  ^Framing_Services,
+	// The reads of a record's value, nil for a reader opened with no `docs`.
+	docs:      ^Record_Docs,
 	// The typed reads' open containers, allocated with `allocator` by the first.
 	frames:    []typed.Frame,
 	// The plan of the last type a read with no plan took, built with `allocator`.
@@ -101,8 +103,9 @@ Detail :: enum u8 {
 @(rodata)
 RULES := core.Rules{"records", {{}, {"too_long", "Record is longer than the limit"}}}
 
-// A format's record services, in its rodata, which `core.Spelling.records` points at.
-Services :: struct {
+// A format's framing services, in its rodata, which `core.Services.records` points at. A reader holds one for its
+// life. A constant spec binds the framing of that spec alone.
+Framing_Services :: struct {
 	// Frames the next record under each framing the format takes, nil for one it does not, and returns false at the
 	// input's end or on a fault, which it stores in `it.fault`.
 	next:   [core.Framing]proc(it: ^Reader) -> (Record, bool),
@@ -123,13 +126,23 @@ Services :: struct {
 	// Makes a copy of a reader past its first record, or a new reader for `lo` 0, read the records from the cut `lo` up
 	// to the cut or text end `hi`, and returns false when its memory is refused.
 	piece:  proc(it: ^Reader, lo, hi: u64) -> bool,
+	// The format, framing and offset whose records make up the whole of `src`, for `validate_parallel`, nil for a format that
+	// does not take it.
+	whole:  proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64),
+	// Frees `it.format`, nil for a format that keeps none.
+	close:  proc(it: ^Reader),
+	// The byte that ends a record under each framing where a backward scan for it finds the end of a whole record, and 0
+	// where only a walk of the records does.
+	ends:   [core.Framing]u8,
+}
+
+// What a reader reads of a record's value, in its format's rodata, which `core.Services.docs` points at. It is apart
+// from the framing so that a program that only frames or judges records links no read, build or scan.
+Record_Docs :: struct {
 	// `next` and a read of `path` in the record by one walk, into `last`, a document whose text is the input up to the
 	// record's end. It starts `h` at the first call, and then with `engine.scan_again` while `h.again` is set, which
 	// writes the buffers `last` shares with the builder. nil reads a record as `next` gives it.
 	scan:   proc(it: ^Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options) -> (Record, core.Path_Error, bool),
-	// The format, framing and offset whose records make up the whole of `src`, for `validate_parallel`, nil for a format that
-	// does not take it.
-	whole:  proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64),
 	// `next` and a typed read of the record into `target`, a `T`, whose typed reader takes `it.scratch` as its temp
 	// allocator.
 	read:   proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool,
@@ -142,11 +155,24 @@ Services :: struct {
 	column: proc(it: ^Reader, name: string) -> int,
 	cell:   proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool),
 	cells:  proc(it: ^Reader, rec: Record, buf: []u8, upto: int) -> ([]cw.Scalar, bool),
-	// Frees `it.format`, nil for a format that keeps none.
-	close:  proc(it: ^Reader),
-	// The byte that ends a record under each framing where a backward scan for it finds the end of a whole record, and 0
-	// where only a walk of the records does.
-	ends:   [core.Framing]u8,
+}
+
+// Returns the framing services of `as`'s format, nil for a handle with none.
+@(private)
+services_of :: proc(as: core.As) -> ^Framing_Services {
+	if services := core.services_of(as); services != nil {
+		return (^Framing_Services)(services.records)
+	}
+	return nil
+}
+
+// Returns the record docs of `as`'s format, nil for a handle with none.
+@(private)
+docs_of :: proc(as: core.As) -> ^Record_Docs {
+	if services := core.services_of(as); services != nil {
+		return (^Record_Docs)(services.docs)
+	}
+	return nil
 }
 
 // Opens the records of `src` in format `as` under `framing`, from byte `at` of `src`, with every offset from `src[0]`.
@@ -154,8 +180,13 @@ Services :: struct {
 // format with no record reader, or one that does not take `framing`, ends the records with the fault `.Bad_Option`
 // before any is read.
 open :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator) -> Reader {
-	it := Reader{src = src, pos = core.text_start(src, at), from = at, as = as, framing = framing, allocator = allocator}
-	it.services = (^Services)(as.spelling.records) if as.spelling != nil else nil
+	return open_with(src, as, services_of(as), docs_of(as), framing, at, allocator)
+}
+
+// Opens the records as `open` does, with the framing `services` and the `docs` a format gives for a spec named at
+// compile time. `docs` may be nil, and then a read, a build, a scan or a cell of a record is refused.
+open_with :: proc(src: []u8, as: core.As, services: ^Framing_Services, docs: ^Record_Docs, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator) -> Reader {
+	it := Reader{src = src, pos = core.text_start(src, at), from = at, as = as, framing = framing, allocator = allocator, services = services, docs = docs}
 	if it.services == nil || it.services.next[framing] == nil || at > u64(len(src)) {
 		it.fault = core.Fault{kind = .Bad_Option}
 	}
@@ -166,7 +197,12 @@ open :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, at: u64 = 0,
 // `opts.max_bytes`. `input`'s first byte is the input's byte `at`. A record's text lasts until the next call on the
 // reader. Under `.Entries` the whole input is read first.
 open_stream :: proc(input: io.Reader, as: core.As, framing := core.Framing.Lines, opts := Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> Reader {
-	it := open(nil, as, framing, 0, allocator)
+	return open_stream_with(input, as, services_of(as), docs_of(as), framing, opts, at, allocator)
+}
+
+// Opens the records of a stream as `open_stream` does, with the `services` and `docs` of `open_with`.
+open_stream_with :: proc(input: io.Reader, as: core.As, services: ^Framing_Services, docs: ^Record_Docs, framing := core.Framing.Lines, opts := Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> Reader {
+	it := open_with(nil, as, services, docs, framing, 0, allocator)
 	it.input, it.base = input, at
 	it.max_bytes = opts.max_bytes if opts.max_bytes > 0 else max(int) - 1
 	return it
@@ -214,6 +250,10 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 	if it.fault != nil {
 		return false, {}
 	}
+	if it.docs == nil || it.docs.read == nil {
+		it.fault = core.Fault{kind = .Bad_Option}
+		return false, {}
+	}
 	plan := plan
 	if plan == nil {
 		if it.plan == nil || it.plan.type != T {
@@ -228,8 +268,8 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 		}
 		plan = it.plan
 	}
-	if plan.spelling != it.as.spelling || plan.type != T {
-		return false, typed.plan_mismatch(plan, it.as.spelling, T)
+	if !core.same_format(plan.readers, it.as.readers) || plan.type != T {
+		return false, typed.plan_mismatch(plan, it.as.readers, T)
 	}
 	if it.frames == nil {
 		// A stream's window moves, so a record may be as long as the stream's bound. A record that nests deeper under a
@@ -247,7 +287,7 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 	}
 	kept := typed.sink_mark(opts.sink)
 	if it.input.procedure == nil {
-		more = it.services.read(it, target, T, plan, opts, allocator, &err)
+		more = it.docs.read(it, target, T, plan, opts, allocator, &err)
 	} else {
 		// A record the window cannot tell yet is read again after a refill, so what its first read collected and wrote
 		// goes. The restore is shallow, so what a first read allocated for `target` stays allocated.
@@ -258,7 +298,7 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 			}
 			pos, state := it.pos, it.state
 			err = {}
-			more = it.services.read(it, target, T, plan, opts, allocator, &err)
+			more = it.docs.read(it, target, T, plan, opts, allocator, &err)
 			if settle_window(it, more, pos, state) {
 				break
 			}
@@ -341,8 +381,8 @@ scan :: proc(it: ^Reader, path: core.Path, read := core.Path_Options{}) -> (rec:
 		}
 	}
 	s := it.scan
-	if it.services != nil && it.services.scan != nil && it.input.procedure == nil {
-		walked, refusal, ok := it.services.scan(it, &s.h, &s.last, path, read)
+	if it.docs != nil && it.docs.scan != nil && it.input.procedure == nil {
+		walked, refusal, ok := it.docs.scan(it, &s.h, &s.last, path, read)
 		// A record that fails before its walk leaves `last` and its buffers for the next.
 		return walked, s.last if refusal.kind == .None else {}, core.error_of(refusal), ok
 	}
@@ -351,7 +391,8 @@ scan :: proc(it: ^Reader, path: core.Path, read := core.Path_Options{}) -> (rec:
 	s.answers = nil
 	if rec, more = next(it); more {
 		if s.last, err = build(it, rec, it.allocator); err == nil {
-			s.answers, err = core.query(&s.last, path, {dups = read.dups}, it.allocator)
+			answers, perr := engine.query(&s.last, []core.Path{path}, {dups = read.dups}, it.allocator)
+			s.answers, err = answers, core.error_of(perr)
 			s.last.answers = s.answers
 		}
 	}
@@ -363,30 +404,30 @@ scan :: proc(it: ^Reader, path: core.Path, read := core.Path_Options{}) -> (rec:
 // dsv's input. A streamed record's document lives until the next call on `it`.
 @(private)
 build_record :: proc(it: ^Reader, rec: Record, allocator := context.allocator) -> (core.Document, core.Error) {
-	if it.services == nil || it.services.build == nil {
+	if it.docs == nil || it.docs.build == nil {
 		return {}, core.error_of(core.Document_Error{kind = .Bad_Index})
 	}
-	doc, err := it.services.build(it, rec, allocator)
+	doc, err := it.docs.build(it, rec, allocator)
 	return doc, core.error_of(err)
 }
 
 // Returns the index of the first column `name` names, or -1 when none does or the format has no named columns. It may
 // read the first records, which `next` then gives.
 column :: proc(it: ^Reader, name: string) -> int {
-	if it.fault != nil || it.services == nil || it.services.column == nil {
+	if it.fault != nil || it.docs == nil || it.docs.column == nil {
 		return -1
 	}
-	return it.services.column(it, name)
+	return it.docs.column(it, name)
 }
 
 // Returns the text of cell `column` of `rec`, the record `next` gave last, decoded into `buf` when it must be, and false
 // when the record has no such cell, `buf` is too short, or the format has no cells, and on an allocation failure, as
 // `cells`.
 cell :: proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool) {
-	if it.services == nil || it.services.cell == nil {
+	if it.docs == nil || it.docs.cell == nil {
 		return "", false
 	}
-	return it.services.cell(it, rec, column, buf)
+	return it.docs.cell(it, rec, column, buf)
 }
 
 // Returns the cells of `rec`, the record `next` gave last, or its first `upto`, as `write_cells` takes them: nil for an
@@ -396,10 +437,10 @@ cell :: proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool)
 // short, or a format with no cells, and on an allocation failure, which ends the records with `.No_Memory` in
 // `it.fault`.
 cells :: proc(it: ^Reader, rec: Record, buf: []u8, upto := max(int)) -> ([]cw.Scalar, bool) {
-	if it.services == nil || it.services.cells == nil {
+	if it.docs == nil || it.docs.cells == nil {
 		return nil, false
 	}
-	return it.services.cells(it, rec, buf, upto)
+	return it.docs.cells(it, rec, buf, upto)
 }
 
 // Frees what the reads of `it` allocated.

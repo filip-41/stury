@@ -50,7 +50,7 @@ query_call :: proc(built: ^core.Document, src: []byte, paths: []core.Path, want_
 		own = build_document(src)
 		doc = &own
 	}
-	answers, err := core.query(doc, paths)
+	answers, err := json.query(doc, paths)
 	if err != nil {
 		fmt.eprintln("query:", err)
 		os.exit(1)

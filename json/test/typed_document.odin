@@ -125,7 +125,7 @@ agree_as :: proc(t: ^testing.T, text: string, $S: json.Spec, init: $T, read := t
 	src := transmute([]u8)text
 	plan, perr := json.plan_make(T, plan = plan_opts, allocator = context.temp_allocator)
 	walktest.expect_nil(t, perr, loc = loc)
-	doc, built := json.build(src, S, {}, .Last, context.temp_allocator)
+	doc, built := core.build(src, json.as(S, {}), .Last, context.temp_allocator)
 	testing.expectf(t, built == nil, "%s: build %v", text, built, loc = loc)
 	a, b := init, init
 	by_text, by_doc := read, read
@@ -275,7 +275,7 @@ a_collecting_read_reads_past_each_refusal :: proc(t: ^testing.T) {
 	agree(t, `[{"x":"a"},{"y":"b"},{"x":1}]`, []Pt{}, collect)
 
 	// The sink's errors are the read's, in order, and the read's own result is the first.
-	doc, built := json.build(transmute([]u8)string(`{"a":"no","l":[1,"x"]}`), json.Spec.Json, allocator = context.temp_allocator)
+	doc, built := core.build(transmute([]u8)string(`{"a":"no","l":[1,"x"]}`), json.as(json.Spec.Json), allocator = context.temp_allocator)
 	walktest.expect_nil(t, built)
 	plan, _ := json.plan_make(S, allocator = context.temp_allocator)
 	sink := typed.Sink {
@@ -296,7 +296,7 @@ a_node_inside_a_document_reads_as_its_span :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	text := `{"a":[{"x":1,"y":2},{"x":3},"no"],"b":{"k":{"x":4,"y":5}},"c":"s\n","d":7.5}`
 	src := transmute([]u8)text
-	doc, built := json.build(src, json.Spec.Json, allocator = context.temp_allocator)
+	doc, built := core.build(src, json.as(json.Spec.Json), allocator = context.temp_allocator)
 	walktest.expect_nil(t, built)
 	plan, _ := json.plan_make(Pt, allocator = context.temp_allocator)
 	for node in 0 ..< core.Node_Index(len(doc.nodes)) {
@@ -361,15 +361,15 @@ an_answer_reads_as_its_value :: proc(t: ^testing.T) {
 a_document_read_refuses_what_a_text_read_refuses :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	text := `{"x":1,"y":2}`
-	doc, _ := json.build(transmute([]u8)text, json.Spec.Json, allocator = context.temp_allocator)
+	doc, _ := core.build(transmute([]u8)text, json.as(json.Spec.Json), allocator = context.temp_allocator)
 	plan, _ := json.plan_make(Pt, allocator = context.temp_allocator)
 	other, _ := json.plan_make(Rich, allocator = context.temp_allocator)
 	p: Pt
 	walktest.expect_kind(t, typed.unmarshal(&doc, core.ROOT, &p, &other, {}, context.temp_allocator), core.Typed_Error_Kind.Plan_Mismatch)
 	r: Rich
 	walktest.expect_kind(t, typed.unmarshal(&doc, core.ROOT, &r, &plan, {}, context.temp_allocator), core.Typed_Error_Kind.Plan_Mismatch)
-	other_format := core.Spelling{}
-	elsewhere, _ := typed.plan_build(Pt, {spelling = &other_format}, allocator = context.temp_allocator)
+	other_format := core.Readers{}
+	elsewhere, _ := typed.plan_build(Pt, {readers = &other_format}, allocator = context.temp_allocator)
 	walktest.expect_kind(t, typed.unmarshal(&doc, core.ROOT, &p, &elsewhere, {}, context.temp_allocator), core.Typed_Error_Kind.Plan_Mismatch)
 	walktest.expect_kind(t, typed.unmarshal(&doc, core.ROOT, (^Pt)(nil), &plan, {}, context.temp_allocator), core.Typed_Error_Kind.Bad_Option)
 	walktest.expect_nil(t, typed.unmarshal(&doc, core.ROOT, &p, nil, {}, context.temp_allocator))
@@ -402,7 +402,7 @@ a_deep_document_uses_the_wide_stacks :: proc(t: ^testing.T) {
 	for _ in 0 ..< depth {
 		append(&text, '}')
 	}
-	doc, built := json.build(text[:], json.Spec.Json, json.Options{max_depth = u32(depth)}, allocator = context.temp_allocator)
+	doc, built := core.build(text[:], json.as(json.Spec.Json, json.Options{max_depth = u32(depth)}), allocator = context.temp_allocator)
 	walktest.expect_nil(t, built)
 	plan, _ := json.plan_make(Deep, allocator = context.temp_allocator)
 	d: Deep
@@ -439,7 +439,7 @@ a_read_borrows_the_source_and_not_the_document :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 
 	// Without `borrow_strings` nothing the target holds is the source's or the document's.
-	doc, _ := json.build(src, json.Spec.Json, allocator = context.temp_allocator)
+	doc, _ := core.build(src, json.as(json.Spec.Json), allocator = context.temp_allocator)
 	copied: Holder
 	walktest.expect_nil(t, typed.unmarshal(&doc, core.ROOT, &copied, &plan, {}, scratch))
 	testing.expect(t, !inside(raw_data(copied.keys[0]), src) && !inside(raw_data(copied.s), src) && !inside(raw_data(string(copied.r)), src) && !inside(raw_data(string(copied.n)), src))

@@ -16,11 +16,11 @@ import walktest "../../walktest"
 read_json :: proc(src: []u8, spec: any) -> (core.Document, core.Error) {
 	switch spec.(json.Spec) {
 	case .Json:
-		return json.build(src, .Json)
+		return core.build(src, json.as(.Json))
 	case .Jsonc:
-		return json.build(src, .Jsonc)
+		return core.build(src, json.as(.Jsonc))
 	case .Json5:
-		return json.build(src, .Json5)
+		return core.build(src, json.as(.Json5))
 	}
 	return {}, core.error_of(core.Document_Error{kind = .Bad_Value})
 }
@@ -131,7 +131,7 @@ edit_line_separator_comment :: proc(t: ^testing.T) {
 edit_line_separator_comment_as_json5 :: proc(t: ^testing.T) {
 	src := "{\"s\":\"a b\", // x y z\n\"a\":1 // w \n}"
 	want := "{\"s\":\"a b\", // x\\u2028y\\u2029z\n\"a\":2 // w\\u2028\n}"
-	doc, err := json.build(transmute([]u8)src, .Jsonc)
+	doc, err := core.build(transmute([]u8)src, json.as(.Jsonc))
 	defer core.destroy(&doc)
 	if !testing.expectf(t, err == nil, "%v", err) {
 		return
@@ -139,7 +139,7 @@ edit_line_separator_comment_as_json5 :: proc(t: ^testing.T) {
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	walktest.expect_nil(t, core.set(&list, 4, "2"))
-	out, _, e := core.commit(&list, json.as(.Json5))
+	out, _, e := compose.commit(&list, json.as(.Json5))
 	defer delete(out)
 	walktest.expect_nil(t, e)
 	testing.expect_value(t, string(out), want)
@@ -204,7 +204,7 @@ edit_remove :: proc(t: ^testing.T) {
 // The list's allocator holds the log as well as each edit's copy, so one `set` makes both allocations there.
 @(test)
 edit_log_uses_list_allocator :: proc(t: ^testing.T) {
-	doc, err := json.build(transmute([]u8)string(`[1]`), .Json)
+	doc, err := core.build(transmute([]u8)string(`[1]`), json.as(.Json))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
 	track: mem.Tracking_Allocator
@@ -221,7 +221,7 @@ edit_log_uses_list_allocator :: proc(t: ^testing.T) {
 @(test)
 edit_mixed :: proc(t: ^testing.T) {
 	{
-		doc, err := json.build(transmute([]u8)string(`{"a":[1,2],"b":{"c":3},"d":[4]}`), .Json)
+		doc, err := core.build(transmute([]u8)string(`{"a":[1,2],"b":{"c":3},"d":[4]}`), json.as(.Json))
 		defer core.destroy(&doc)
 		walktest.expect_nil(t, err)
 		list := core.edit_list_init(&doc)
@@ -233,7 +233,7 @@ edit_mixed :: proc(t: ^testing.T) {
 	}
 	{
 		// Removing adjacent members 2 and 3 leaves `[1,4]`: the separator between them is removed once.
-		doc, _ := json.build(transmute([]u8)string(`[1,2,3,4]`), .Json)
+		doc, _ := core.build(transmute([]u8)string(`[1,2,3,4]`), json.as(.Json))
 		defer core.destroy(&doc)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
@@ -243,7 +243,7 @@ edit_mixed :: proc(t: ^testing.T) {
 	}
 	{
 		// An insert at position 1 lies in the removal's run, so it moves to the cut end: `[1,9,3]`.
-		doc, _ := json.build(transmute([]u8)string(`[1,2,3]`), .Json)
+		doc, _ := core.build(transmute([]u8)string(`[1,2,3]`), json.as(.Json))
 		defer core.destroy(&doc)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
@@ -253,7 +253,7 @@ edit_mixed :: proc(t: ^testing.T) {
 	}
 	{
 		// Two inserts at position 0 keep their recorded order: `[7,8,1]`.
-		doc, _ := json.build(transmute([]u8)string(`[1]`), .Json)
+		doc, _ := core.build(transmute([]u8)string(`[1]`), json.as(.Json))
 		defer core.destroy(&doc)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
@@ -308,7 +308,7 @@ edit_reorder :: proc(t: ^testing.T) {
 		}
 	}
 	// An order that names a member twice, leaves a surviving one out, or names a removed one is refused.
-	doc, _ := json.build(transmute([]u8)string(`[1,2,3]`), .Json)
+	doc, _ := core.build(transmute([]u8)string(`[1,2,3]`), json.as(.Json))
 	defer core.destroy(&doc)
 	bad := [][]u32{{0, 0, 1}, {0, 1}, {0, 1, 2}}
 	for order, i in bad {
@@ -318,7 +318,7 @@ edit_reorder :: proc(t: ^testing.T) {
 			core.remove(&list, 2)
 		}
 		walktest.expect_nil(t, core.reorder(&list, 0, order))
-		out, _, e := core.commit(&list)
+		out, _, e := compose.commit(&list)
 		testing.expectf(t, walktest.document_of(e).kind == .Bad_Index, "%v: commit %v", order, e)
 		if len(out) > 0 {
 			delete(out)
@@ -333,7 +333,7 @@ edit_reorder :: proc(t: ^testing.T) {
 // member, and a set of a container with an insert inside it.
 @(test)
 edit_conflicts :: proc(t: ^testing.T) {
-	doc, _ := json.build(transmute([]u8)string(`{"a":[1,2],"b":3}`), .Json)
+	doc, _ := core.build(transmute([]u8)string(`{"a":[1,2],"b":3}`), json.as(.Json))
 	defer core.destroy(&doc)
 	Case :: struct {
 		name: string,
@@ -369,7 +369,7 @@ edit_conflicts :: proc(t: ^testing.T) {
 			ok &&= testing.expectf(t, res == nil, "%s: record %v", c.name, res)
 		}
 		if ok {
-			out, _, e := core.commit(&list)
+			out, _, e := compose.commit(&list)
 			testing.expectf(t, walktest.document_of(e).kind == .Conflicting_Edits, "%s: commit %v", c.name, e)
 			if len(out) > 0 {
 				delete(out)
@@ -382,7 +382,7 @@ edit_conflicts :: proc(t: ^testing.T) {
 // Each refused edit returns its error kind and leaves `list.edits` empty.
 @(test)
 edit_errors :: proc(t: ^testing.T) {
-	doc, _ := json.build(transmute([]u8)string(`{"a":[1,2]}`), .Json)
+	doc, _ := core.build(transmute([]u8)string(`{"a":[1,2]}`), json.as(.Json))
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
@@ -401,7 +401,7 @@ edit_errors :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(list.edits), 0)
 
 	// JSON5 refuses a comment after a value.
-	j5, _ := json.build(transmute([]u8)string(`{a:1}`), .Json5)
+	j5, _ := core.build(transmute([]u8)string(`{a:1}`), json.as(.Json5))
 	defer core.destroy(&j5)
 	l5 := core.edit_list_init(&j5)
 	defer core.edit_list_destroy(&l5)
@@ -412,7 +412,7 @@ edit_errors :: proc(t: ^testing.T) {
 	// A commit of no edit returns a copy of the source, at a different address.
 	empty := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&empty)
-	out, _, e := core.commit(&empty)
+	out, _, e := compose.commit(&empty)
 	defer delete(out)
 	walktest.expect_nil(t, e)
 	testing.expect_value(t, string(out), `{"a":[1,2]}`)
@@ -423,7 +423,7 @@ edit_errors :: proc(t: ^testing.T) {
 @(test)
 edit_document_unchanged :: proc(t: ^testing.T) {
 	src := `{"a":[1,2],"b":"x"}`
-	doc, _ := json.build(transmute([]u8)src, .Json)
+	doc, _ := core.build(transmute([]u8)src, json.as(.Json))
 	defer core.destroy(&doc)
 	spans: [8]string
 	for i in 0 ..< len(doc.nodes) {
@@ -457,7 +457,7 @@ edit_no_leak :: proc(t: ^testing.T) {
 	alloc := mem.tracking_allocator(&track)
 
 	src := `{"a":[1,2],"b":{"c":3}}`
-	doc, err := json.build(transmute([]u8)src, .Json)
+	doc, err := core.build(transmute([]u8)src, json.as(.Json))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
 	list := core.edit_list_init(&doc, allocator = alloc)
@@ -465,7 +465,7 @@ edit_no_leak :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, core.insert(&list, 2, 2, string("3")))
 	walktest.expect_nil(t, core.insert(&list, 0, 2, string("d"), string("4")))
 	walktest.expect_nil(t, core.remove(&list, 8))
-	out, _, cerr := core.commit(&list, allocator = alloc)
+	out, _, cerr := compose.commit(&list, allocator = alloc)
 	walktest.expect_nil(t, cerr)
 	delete(out, allocator = alloc)
 	core.edit_list_destroy(&list)
@@ -503,13 +503,13 @@ edit_error_codes :: proc(t: ^testing.T) {
 	}
 
 	// The conflict names byte 1, where the second set of node 1 starts.
-	doc, _ := json.build(transmute([]u8)string(`[1,2]`), .Json)
+	doc, _ := core.build(transmute([]u8)string(`[1,2]`), json.as(.Json))
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	walktest.expect_nil(t, core.set(&list, 1, string("8")))
 	walktest.expect_nil(t, core.set(&list, 1, string("9")))
-	_, _, e := core.commit(&list)
+	_, _, e := compose.commit(&list)
 	walktest.expect_kind(t, e, core.Document_Error_Kind.Conflicting_Edits)
 	testing.expect_value(t, walktest.at_of(e), u64(1))
 	strings.builder_reset(&b)
@@ -523,7 +523,7 @@ edit_error_codes :: proc(t: ^testing.T) {
 // A value that starts with a byte-order mark is refused when recorded, because a splice writes it after other bytes.
 @(test)
 edit_value_bom :: proc(t: ^testing.T) {
-	doc, err := json.build(transmute([]u8)string(`[1,2]`), .Jsonc)
+	doc, err := core.build(transmute([]u8)string(`[1,2]`), json.as(.Jsonc))
 	defer core.destroy(&doc)
 	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
@@ -549,23 +549,26 @@ reads_faults :: proc "contextless" (_: []u8, _: core.As) -> Maybe(core.Fault) {
 @(test)
 edit_check_policy :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("{\"a\":\"\xff\",\"b\":1}")
-	doc, err := json.build(src, .Json, {tolerate = {.Invalid_Utf8}})
+	doc, err := core.build(src, json.as(.Json, {tolerate = {.Invalid_Utf8}}))
 	defer core.destroy(&doc)
 	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
 	}
-	edit := core.Edit_Spelling{value = edit_accepts}
-	doc.spelling = &core.Spelling{edit = &edit, validate = reads_faults}
+	edit := core.Edit_Services{value = edit_accepts, validate = reads_faults}
+	services := core.Services{edit = &edit, validate = reads_faults}
+	readers := doc.readers^
+	readers.services = &services
+	doc.readers = &readers
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	if !walktest.expect_nil(t, core.set(&list, 4, string("2"))) {
 		return
 	}
-	out, _, cerr := compose.commit(&list, doc.as.spec, context.allocator)
+	out, _, cerr := compose.commit(&list)
 	defer if len(out) > 0 {
 		delete(out)
 	}
-	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.Bad_Result)
+	walktest.expect_kind(t, cerr, core.Document_Error_Kind.Bad_Result)
 }
 
 // A document built with `Invalid_Utf8` commits with no edit and with one, and each output reads under the same
@@ -573,7 +576,7 @@ edit_check_policy :: proc(t: ^testing.T) {
 @(test)
 edit_tolerated_source :: proc(t: ^testing.T) {
 	src := "{\"a\":\"\xff\",\"b\":1}"
-	doc, err := json.build(transmute([]u8)string(src), .Json, {tolerate = {.Invalid_Utf8}})
+	doc, err := core.build(transmute([]u8)string(src), json.as(.Json, {tolerate = {.Invalid_Utf8}}))
 	defer core.destroy(&doc)
 	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
@@ -585,12 +588,12 @@ edit_tolerated_source :: proc(t: ^testing.T) {
 		if want != src {
 			walktest.expect_nil(t, core.set(&list, 4, string("2")))
 		}
-		out, _, cerr := core.commit(&list)
+		out, _, cerr := compose.commit(&list)
 		if !testing.expectf(t, cerr == nil, "commit: %v", cerr) {
 			return
 		}
 		testing.expect_value(t, string(out), want)
-		read, rerr := json.build(out, .Json, {tolerate = {.Invalid_Utf8}})
+		read, rerr := core.build(out, json.as(.Json, {tolerate = {.Invalid_Utf8}}))
 		testing.expectf(t, rerr == nil, "committed text does not read: %v", rerr)
 		core.destroy(&read)
 		delete(out)
@@ -626,7 +629,7 @@ edit_inline_comment_survives :: proc(t: ^testing.T) {
 // commits.
 @(test)
 edit_commit_allocator :: proc(t: ^testing.T) {
-	doc, err := json.build(transmute([]u8)string("[1,2,3]"), .Json)
+	doc, err := core.build(transmute([]u8)string("[1,2,3]"), json.as(.Json))
 	defer core.destroy(&doc)
 	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
@@ -637,7 +640,7 @@ edit_commit_allocator :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, core.set(&list, 1, string("9")))
 	walktest.expect_nil(t, core.insert(&list, 0, 1, string("8")))
 	a.fail_all = true
-	out, _, cerr := core.commit(&list)
+	out, _, cerr := compose.commit(&list)
 	defer if len(out) > 0 {
 		delete(out)
 	}
@@ -648,7 +651,7 @@ edit_commit_allocator :: proc(t: ^testing.T) {
 // A removal of one member and a set of the next, which are siblings, do not conflict.
 @(test)
 edit_sibling_remove_and_set :: proc(t: ^testing.T) {
-	doc, _ := json.build(transmute([]u8)string("[10,20]"), .Json)
+	doc, _ := core.build(transmute([]u8)string("[10,20]"), json.as(.Json))
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
@@ -667,7 +670,7 @@ edit_deep_document :: proc(t: ^testing.T) {
 	strings.write_string(&b, strings.repeat("[", depth, context.temp_allocator))
 	strings.write_byte(&b, '0')
 	strings.write_string(&b, strings.repeat("]", depth, context.temp_allocator))
-	doc, err := json.build(transmute([]u8)strings.to_string(b), .Json, {max_depth = 4096})
+	doc, err := core.build(transmute([]u8)strings.to_string(b), json.as(.Json, {max_depth = 4096}))
 	defer core.destroy(&doc)
 	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
@@ -677,14 +680,14 @@ edit_deep_document :: proc(t: ^testing.T) {
 	if !walktest.expect_nil(t, core.set(&list, core.Node_Index(depth), "1")) {
 		return
 	}
-	out, _, cerr := core.commit(&list)
+	out, _, cerr := compose.commit(&list)
 	defer delete(out)
 	if !testing.expectf(t, cerr == nil, "commit: %v", cerr) {
 		return
 	}
 	testing.expect_value(t, len(out), 2 * depth + 1)
 	testing.expect_value(t, out[depth], u8('1'))
-	back, berr := json.build(out, .Json, {max_depth = 4096})
+	back, berr := core.build(out, json.as(.Json, {max_depth = 4096}))
 	defer core.destroy(&back)
 	testing.expectf(t, berr == nil, "read back: %v", berr)
 	num, num_ok := core.number(&back, core.Node_Index(depth))
@@ -701,7 +704,7 @@ edit_deep_value :: proc(t: ^testing.T) {
 		strings.repeat("[", 1500, context.temp_allocator),
 		strings.repeat("]", 1500, context.temp_allocator),
 	}, context.temp_allocator)
-	doc, err := json.build(transmute([]u8)string(`[1]`), .Json, {max_depth = 4096})
+	doc, err := core.build(transmute([]u8)string(`[1]`), json.as(.Json, {max_depth = 4096}))
 	defer core.destroy(&doc)
 	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
@@ -711,11 +714,11 @@ edit_deep_value :: proc(t: ^testing.T) {
 	if !walktest.expect_nil(t, core.set(&list, 1, deep)) {
 		return
 	}
-	out, _, cerr := core.commit(&list)
+	out, _, cerr := compose.commit(&list)
 	defer delete(out)
 	testing.expectf(t, cerr == nil, "commit: %v", cerr)
 
-	shallow, serr := json.build(transmute([]u8)string(`[1]`), .Json)
+	shallow, serr := core.build(transmute([]u8)string(`[1]`), json.as(.Json))
 	defer core.destroy(&shallow)
 	testing.expectf(t, serr == nil, "build: %v", serr)
 	other := core.edit_list_init(&shallow)
@@ -731,7 +734,7 @@ edit_deep_value :: proc(t: ^testing.T) {
 render_inner_cause :: proc(t: ^testing.T) {
 	b := strings.builder_make()
 	defer strings.builder_destroy(&b)
-	doc, _ := json.build(transmute([]u8)string(`{"a":[1,2]}`), .Json)
+	doc, _ := core.build(transmute([]u8)string(`{"a":[1,2]}`), json.as(.Json))
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
@@ -742,12 +745,12 @@ render_inner_cause :: proc(t: ^testing.T) {
 	testing.expect_value(t, strings.to_string(b), "Not one value of the format: Unfinished input at offset 2 of the new text")
 
 	// A JSON5 text committed under strict JSON reads as no JSON value, at the unquoted key.
-	j5, _ := json.build(transmute([]u8)string(`{a:1}`), .Json5)
+	j5, _ := core.build(transmute([]u8)string(`{a:1}`), json.as(.Json5))
 	defer core.destroy(&j5)
 	l5 := core.edit_list_init(&j5)
 	defer core.edit_list_destroy(&l5)
 	walktest.expect_nil(t, core.set(&l5, 2, string("2")))
-	_, _, ce := core.commit(&l5, json.as(.Json))
+	_, _, ce := compose.commit(&l5, json.as(.Json))
 	walktest.expect_kind(t, ce, core.Document_Error_Kind.Bad_Result)
 	strings.builder_reset(&b)
 	core.render(strings.to_writer(&b), j5.src, ce)
@@ -785,7 +788,7 @@ edit_insert_in_removal_run :: proc(t: ^testing.T) {
 			{`[1]`, `[9]`, {1}, {1}, "", "9"},
 			{`[1,2,3]`, `[9,3]`, {1, 2}, {1}, "", "9"},
 		}) {
-		doc, err := json.build(transmute([]u8)c.src, .Json)
+		doc, err := core.build(transmute([]u8)c.src, json.as(.Json))
 		defer core.destroy(&doc)
 		if !testing.expectf(t, err == nil, "%q: %v", c.src, err) {
 			return
@@ -802,7 +805,7 @@ edit_insert_in_removal_run :: proc(t: ^testing.T) {
 				core.insert(&list, 0, at, c.text)
 			}
 		}
-		out, _, cerr := core.commit(&list)
+		out, _, cerr := compose.commit(&list)
 		defer if len(out) > 0 {
 			delete(out)
 		}
@@ -812,7 +815,7 @@ edit_insert_in_removal_run :: proc(t: ^testing.T) {
 	// The removal takes the comma the insert counted on. The new member stays off the head comment's line, so the
 	// comment still leads `"c"`.
 	src := "{\n  \"a\": 1,\n  \"b\": 2,\n  //hc\n  \"c\": 3\n}"
-	doc, err := json.build(transmute([]u8)src, .Jsonc)
+	doc, err := core.build(transmute([]u8)src, json.as(.Jsonc))
 	defer core.destroy(&doc)
 	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
@@ -821,14 +824,14 @@ edit_insert_in_removal_run :: proc(t: ^testing.T) {
 	defer core.edit_list_destroy(&list)
 	walktest.expect_nil(t, core.remove(&list, 4))
 	walktest.expect_nil(t, core.insert(&list, 0, 2, string("x"), string("9")))
-	out, _, cerr := core.commit(&list)
+	out, _, cerr := compose.commit(&list)
 	defer if len(out) > 0 {
 		delete(out)
 	}
 	if !testing.expectf(t, cerr == nil, "multiline: commit %v", cerr) {
 		return
 	}
-	read, rerr := json.build(out, .Jsonc)
+	read, rerr := core.build(out, json.as(.Jsonc))
 	defer core.destroy(&read)
 	if !testing.expectf(t, rerr == nil, "multiline: committed text does not read: %v in %q", rerr, out) {
 		return
@@ -840,4 +843,23 @@ edit_insert_in_removal_run :: proc(t: ^testing.T) {
 	it := core.facts_of(&read, v, .Comment)
 	got, more := core.fact_next(&it)
 	testing.expectf(t, more && string(got) == "hc", "head comment on c: %q %v", got, more)
+}
+
+// The raw text of an edit is one value of the document's spec, with no trailing byte, comment, empty text or record
+// separator, in each spec.
+@(test)
+edit_value_each_spec :: proc(t: ^testing.T) {
+	for spec in json.Spec {
+		doc, err := core.build(transmute([]u8)string(`[1,2]`), json.as(spec))
+		if !testing.expectf(t, err == nil, "%v build: %v", spec, err) {
+			return
+		}
+		list := core.edit_list_init(&doc)
+		walktest.expect_nil(t, core.set(&list, 1, string(" [3, {\"a\": null}] ")))
+		for bad in ([]string{"", "  ", "1 2", "[1", "01", "\x1e1", "[]x"}) {
+			walktest.expect_kind(t, core.set(&list, 1, bad), core.Document_Error_Kind.Bad_Value)
+		}
+		core.edit_list_destroy(&list)
+		core.destroy(&doc)
+	}
 }

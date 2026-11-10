@@ -136,51 +136,182 @@ walk_keys :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}
 }
 
 // The walk's verdict on `src` for spec `S`, with no hook and after one leading BOM. Whether the first record is a
-// header changes the verdict only under `.Ragged`. It is `core.validate` with `as(spec, opts)`.
-validate :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
+// header changes the verdict only under `.Ragged`. A constant `spec` links the pass of that spec alone. A `spec`
+// chosen at run time is `core.validate` with `as(spec, opts)` and links every spec's pass. The same holds for the other
+// entry points below, and the forms that take a `Document` give it the readers of the spec.
+validate :: proc {validate_bound, validate_chosen}
+
+@(private)
+validate_bound :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error {
+	return core.error_of(validate_spec(src, S, opts))
+}
+
+@(private)
+validate_chosen :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
 	return core.validate(src, as(spec, opts))
 }
 
 // Reads a delimited text as spec `spec` into a document, allocating its nodes with `allocator`. `opts.no_header` makes the
 // first record data. `.Refuse` returns an error at a header name that repeats another in the header row. The
-// document borrows `src`, which must outlive it, and `core.destroy` frees the document. It is `core.build` with
-// `as(spec, opts)`.
-build :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
+// document borrows `src`, which must outlive it, and `core.destroy` frees the document.
+build :: proc {build_bound, build_chosen}
+
+@(private)
+build_bound :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
+	doc, err := build_spec(src, S, readers_of(S), opts, dups == .Refuse, allocator)
+	return doc, core.error_of(err)
+}
+
+@(private)
+build_chosen :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
 	return core.build(src, as(spec, opts), dups, allocator)
 }
 
-// The path reads of `core/build` over the handle. `scan`, `each_answer`, `find` and `set` take `spec` and `opts` and
-// forward to the same names in `core/build` with `as(spec, opts)`.
+// The path reads of `core/build`. `scan`, `each_answer`, `find` and `set` take `spec` and `opts`.
+scan :: proc {scan_bound_one, scan_bound_many, scan_chosen_one, scan_chosen_many}
+
 @(private)
-scan_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
+scan_bound_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
+	return scan_bound_many(src, S, []core.Path{path}, opts, read, allocator)
+}
+
+@(private)
+scan_bound_many :: proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
+	if read.dups == .Refuse {
+		built, e := build_bound(src, S, opts, .Refuse, allocator)
+		return engine.query_built(&built, e, paths, read)
+	}
+	doc, err := scan_spec(src, S, bound_as(S, opts), paths, read, nil, nil, allocator)
+	return doc, core.error_of(err)
+}
+
+@(private)
+scan_chosen_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
 	return engine.scan_one(src, as(spec, opts), path, read, allocator)
 }
 
 @(private)
-scan_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
+scan_chosen_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
 	return engine.scan_many(src, as(spec, opts), paths, read, allocator)
 }
 
-scan :: proc {scan_one, scan_many}
+each_answer :: proc {each_answer_bound_one, each_answer_bound_many, each_answer_chosen_one, each_answer_chosen_many}
 
 @(private)
-each_answer_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
+each_answer_bound_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
+	return each_answer_bound_many(src, S, []core.Path{path}, state, on, opts, read, allocator)
+}
+
+@(private)
+each_answer_bound_many :: proc(src: []u8, $S: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
+	if read.dups == .Refuse {
+		built, e := build_bound(src, S, opts, .Refuse, allocator)
+		core.destroy(&built)
+		if e != nil {
+			return e
+		}
+	}
+	doc, err := scan_spec(src, S, bound_as(S, opts), paths, read, state, on, allocator)
+	core.destroy(&doc)
+	return core.error_of(err)
+}
+
+@(private)
+each_answer_chosen_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
 	return engine.each_answer_one(src, as(spec, opts), path, state, on, read, allocator)
 }
 
 @(private)
-each_answer_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
+each_answer_chosen_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
 	return engine.each_answer_many(src, as(spec, opts), paths, state, on, read, allocator)
 }
 
-each_answer :: proc {each_answer_one, each_answer_many}
+find :: proc {find_bound, find_chosen}
 
-find :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
+@(private)
+find_bound :: proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
+	one := path
+	one.limit = min(path.limit.? or_else 1, 1)
+	doc, err = scan_bound_one(src, S, one, opts, read, allocator)
+	answer = doc.answers[0] if len(doc.answers) > 0 else {core.NO_NODE, core.NO_NODE, 0, .Missing}
+	return
+}
+
+@(private)
+find_chosen :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
 	return engine.find(src, as(spec, opts), path, read, allocator)
 }
 
-set :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, text: string, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+set :: proc {set_bound, set_chosen}
+
+@(private)
+set_bound :: proc(src: []u8, $S: Spec, path: core.Path, text: string, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+	doc, berr := build_bound(src, S, opts, read.dups, allocator)
+	defer core.destroy(&doc)
+	if berr != nil {
+		return nil, berr
+	}
+	list := edit_list_init_bound(&doc, S, allocator)
+	defer core.edit_list_destroy(&list)
+	return engine.set_answers(&list, path, text, read, allocator)
+}
+
+@(private)
+set_chosen :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, text: string, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
 	return engine.set(src, as(spec, opts), path, text, read, allocator)
+}
+
+// Answers `path` or `paths` over a document built whole. A document read as a constant spec holds no services, so
+// `core.query` does not answer for it.
+query :: proc {query_one, query_many}
+
+@(private)
+query_one :: proc(doc: ^core.Document, path: core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Error) {
+	return query_many(doc, []core.Path{path}, read, allocator)
+}
+
+@(private)
+query_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Error) {
+	if doc == nil || doc.readers == nil {
+		return nil, core.error_of(core.Path_Error{kind = .Unsupported})
+	}
+	found, refusal := engine.query(doc, paths, read, allocator)
+	return found, core.error_of(refusal)
+}
+
+// Returns an edit list over `doc`. A document read as a constant spec holds no edit services, so the list takes the
+// spec's.
+edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
+
+@(private)
+edit_list_init_bound :: proc(doc: ^core.Document, $S: Spec, allocator := context.allocator) -> core.Edit_List {
+	list := core.edit_list_init(doc, allocator)
+	list.edit = edit_of(S)
+	return list
+}
+
+@(private)
+edit_list_init_chosen :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List {
+	list := core.edit_list_init(doc, allocator)
+	list.edit = core.services_of(as(spec)).edit
+	return list
+}
+
+// Writes node `node` of `doc` as spec `spec`, as `core.write` does with `as(spec)`.
+write :: proc {write_bound, write_chosen}
+
+@(private)
+write_bound :: proc(doc: ^core.Document, $S: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
+	if int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
+		return nil, 0, core.error_of(core.Typed_Error{kind = .Unsupported})
+	}
+	out, cut, refusal := document_write(doc, opts, bound_as(S), node, {}, allocator)
+	return out, cut, core.error_of(refusal)
+}
+
+@(private)
+write_chosen :: #force_inline proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
+	return core.write(doc, opts, as(spec), node, allocator)
 }
 
 // The handle's verdict on the text from `lo`, a record's start, checking records against `width` when it is above 0.

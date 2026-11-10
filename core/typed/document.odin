@@ -8,7 +8,7 @@ import build "../build"
 
 // The typed read of a built document: the same hook as a read of a text, fed by `build.feed_nodes` from `doc.nodes`. The
 // document gives each token the walk gave, so a read of a node is the read of that value's text, and it names no format
-// but through `doc.spelling`.
+// but through `doc.readers`.
 //
 // A read borrows `doc.src` and nothing else of the document. With `borrow_strings` a string with nothing to decode is a
 // slice of `doc.src`. Every other string, and everything a read allocates, is the read's `allocator`'s, so the target
@@ -45,7 +45,7 @@ Document_Read :: struct {
 
 @(private)
 read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
-	if doc == nil || doc.spelling == nil || int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key || read.dups == .Refuse {
+	if doc == nil || doc.readers == nil || int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key || read.dups == .Refuse {
 		return {kind = .Bad_Option}
 	}
 	if plan == nil {
@@ -63,7 +63,7 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 		return err
 	}
 	// A format that writes no key frame has tokens that do not type their values, so only its own plan maker's plan reads it.
-	if plan != nil && plan.spelling == doc.spelling && len(doc.spelling.key_open) == 0 {
+	if plan != nil && core.same_format(plan.readers, doc.readers) && len(doc.readers.key_open) == 0 {
 		if plan.node_read == nil {
 			return {kind = .Plan_Mismatch}
 		}
@@ -73,7 +73,7 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	frames: [core.MAX_DEPTH + 2]Frame = ---
 	ends: [2 * core.MAX_DEPTH]u32 = ---
 	d := Document_Read{doc = doc, room = len(frames)}
-	regs, err := read_start(&d.reader, doc.src, plan, doc.spelling, T, target, read, frames[:], allocator)
+	regs, err := read_start(&d.reader, doc.src, plan, doc.as, T, target, read, frames[:], allocator)
 	if err.kind != .None {
 		return err
 	}
@@ -108,7 +108,7 @@ document_step :: proc "contextless" (d: ^Document_Read, regs: core.Hook_Regs, t:
 		f := &h.frames[h.sp - 1]
 		if needs_close(f) {
 			context = h.ctx
-			t.lo = h.plan.spelling.close_end(d.doc, at) - 1
+			t.lo = d.doc.readers.close_end(d.doc, at) - 1
 			t.n = 1
 		}
 	} else if t.kind == .Number && t.spelling & core.NUMBER_KIND_MASK == 0 {

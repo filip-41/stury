@@ -504,7 +504,7 @@ Typed_Want :: struct {
 // The formats a `.Plan_Mismatch` met, the plan's and the read's, and the plan's type when the formats agree. Both are
 // nil where the refusal does not know them.
 Plan_Clash :: struct {
-	plan, read: ^Spelling,
+	plan, read: ^Readers,
 	type:       typeid,
 }
 
@@ -623,7 +623,7 @@ write_typed_message :: proc(w: io.Writer, e: Typed_Error) -> io.Error {
 			return err
 		}
 	case .Plan_Mismatch:
-		if p := e.plans; p.plan != nil && p.read != nil && p.plan != p.read {
+		if p := e.plans; p.plan != nil && p.read != nil && p.plan.format != p.read.format {
 			io.write_string(w, "Plan is for ") or_return
 			io.write_string(w, p.plan.tag_key) or_return
 			io.write_string(w, ", the read is ") or_return

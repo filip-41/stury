@@ -5,12 +5,13 @@ import "core:mem"
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import compose "../../core/compose"
 import gen "gen"
 import walktest "../../walktest"
 import dsv ".."
 
 build :: proc(src: string, $S: dsv.Spec, opts := dsv.Options{}, dups := core.Duplicates.Last) -> (core.Document, core.Error) {
-	return dsv.build(transmute([]u8)src, S, opts, dups)
+	return core.build(transmute([]u8)src, dsv.as(S, opts), dups)
 }
 
 // `build` with the spec chosen at run time.
@@ -640,11 +641,11 @@ commit_refuses_another_spec :: proc(t: ^testing.T) {
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	walktest.expect_nil(t, core.set(&list, cell_node(&doc, 0, 0), "z"))
-	out, _, cerr := core.commit(&list)
+	out, _, cerr := compose.commit(&list)
 	testing.expectf(t, cerr == nil && string(out) == "a\nz\n", "commit: %v %q", cerr, out)
 	delete(out)
-	_, _, bad := doc.spelling.edit.commit(&list, u8(dsv.Spec.Csv), context.allocator)
-	testing.expect_value(t, bad.kind, core.Document_Error_Kind.Bad_Spec)
+	_, _, bad := compose.commit(&list, dsv.as(.Csv))
+	walktest.expect_kind(t, bad, core.Document_Error_Kind.Bad_Spec)
 }
 
 // A bad option is refused by `validate` and `build` for each spec: CSV refuses a quote as delimiter or comment, CR, LF or
@@ -793,9 +794,10 @@ spelling_complete :: proc(t: ^testing.T) {
 	for spec in dsv.Spec {
 		doc, err := build_any("a\n", spec)
 		defer core.destroy(&doc)
-		s := doc.spelling
+		s := doc.readers
 		walktest.expect_nil(t, err)
-		testing.expect(t, s.text != nil && s.key_equals != nil && s.number != nil && s.build != nil && s.validate != nil && s.resolve != nil && s.resolves != nil && s.close_end != nil)
-		testing.expect(t, s.edit != nil && s.edit.flat && s.edit.commit != nil && s.edit.interior != nil)
+		testing.expect(t, s.text != nil && s.key_equals != nil && s.number != nil && s.resolve != nil && s.resolves != nil && s.close_end != nil && s.format != nil)
+		testing.expect(t, s.flat && s.services != nil && s.services.build != nil && s.services.validate != nil)
+		testing.expect(t, s.services.edit != nil && s.services.edit.interior != nil)
 	}
 }

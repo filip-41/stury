@@ -119,7 +119,7 @@ tokens_equal_marshal :: proc(t: ^testing.T) {
 		defer delete(got)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 		testing.expectf(t, string(got) == string(want), "%v: %q, want %q", opts, got, want)
-		doc, derr := json.build(got, .Json)
+		doc, derr := core.build(got, json.as(.Json))
 		walktest.expect_nil(t, derr)
 		core.destroy(&doc)
 	}

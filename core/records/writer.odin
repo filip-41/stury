@@ -20,9 +20,10 @@ Writer :: struct {
 // Starts a writer of records in format `as`, framed by `framing`, to `w`, or with no stream procedure into a buffer from
 // `allocator` that `writer_end` returns. JSON ends a record with LF, and under `.Seq` also puts 0x1E before it. A
 // delimited text's rows end themselves and take `.Lines` alone. `.Entries` is one document, which `write.marshal` writes,
-// so it is `.Unsupported`, and pretty JSON under `.Lines` is `.Bad_Option`. A refusal here is final.
-writer_init :: proc(wr: ^Writer, w: io.Stream, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error_Kind {
-	kind := cw.tokens_init(&wr.tokens, as, opts, allocator, w)
+// so it is `.Unsupported`, and pretty JSON under `.Lines` is `.Bad_Option`. A refusal here is final. A format that binds
+// its spelling at compile time gives it as `spell`.
+writer_init :: proc(wr: ^Writer, w: io.Stream, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator, spell: ^cw.Token_Spelling = nil) -> core.Typed_Error_Kind {
+	kind := cw.tokens_init(&wr.tokens, as, opts, allocator, w, spell)
 	flat := kind == .None && wr.tokens.spell.line != nil
 	switch {
 	case kind != .None:
@@ -82,7 +83,7 @@ write :: proc(wr: ^Writer, value: any, plan: ^typed.Plan) -> core.Typed_Error_Ki
 
 @(private)
 mismatched :: proc(wr: ^Writer, id: typeid, plan: ^typed.Plan) -> bool {
-	return plan == nil || id != plan.type || plan.spelling == nil || plan.spelling.tokens != rawptr(wr.tokens.spell)
+	return plan == nil || id != plan.type || plan.tokens != rawptr(wr.tokens.spell)
 }
 
 @(private)

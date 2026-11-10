@@ -50,7 +50,7 @@ indirect :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t
 	case .Number:
 		reason = .Wrong_Kind
 		if t.kind == .Number {
-			if n, ok := h.plan.spelling.number(&h.view, t); ok {
+			if n, ok := h.plan.readers.number(&h.view, t); ok {
 				(^core.Number)(dest)^ = n
 				reason = .None
 			}
@@ -235,7 +235,7 @@ Tag_Scan :: struct {
 on_tag_token :: proc "contextless" (s: ^Tag_Scan, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	if t.role == .Key {
 		if s.depth == 1 {
-			s.on_tag = s.view.spelling.key_equals(&s.view, t, s.name)
+			s.on_tag = s.view.readers.key_equals(&s.view, t, s.name)
 			if s.on_tag {
 				s.found += 1
 				if s.found == 2 {
@@ -277,7 +277,7 @@ pick_arm :: proc(h: ^Reader, t: core.Token, m: ^Meta) -> (arm: int, reason: core
 			return 0, .Repeated_Tag, {}
 		}
 		if s.value.kind == .String {
-			name, ok := core.token_text(h.plan.spelling, &h.view, s.value, context.temp_allocator)
+			name, ok := core.token_text(h.plan.readers, &h.view, s.value, context.temp_allocator)
 			if !ok {
 				return 0, .No_Memory, {}
 			}
@@ -319,7 +319,7 @@ store_whole :: proc(h: ^Reader, fld: ^Field, m: ^Meta, dest: uintptr, kind: core
 	v.decoded = v.text
 	if kind == .String {
 		ok: bool
-		if v.decoded, ok = core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator); !ok {
+		if v.decoded, ok = core.token_text(h.plan.readers, &h.view, t, context.temp_allocator); !ok {
 			return .No_Memory
 		}
 	}
@@ -364,7 +364,7 @@ store_cstring :: proc(h: ^Reader, t: core.Token, dest: uintptr) -> core.Typed_Er
 	if t.kind != .String {
 		return .Wrong_Kind
 	}
-	s, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
+	s, ok := core.token_text(h.plan.readers, &h.view, t, context.temp_allocator)
 	if !ok {
 		return .No_Memory
 	}
@@ -398,7 +398,7 @@ store_decoded :: proc(h: ^Reader, t: core.Token, dest: ^Scalar) -> core.Typed_Er
 		}
 		dest^ = s
 	case .Number:
-		n, ok := h.plan.spelling.number(&h.view, t)
+		n, ok := h.plan.readers.number(&h.view, t)
 		if !ok {
 			return .Wrong_Kind
 		}
@@ -465,7 +465,7 @@ store_enum :: proc(h: ^Reader, t: core.Token, info: ^runtime.Type_Info_Enum, des
 	if t.kind != .String {
 		return .Wrong_Kind
 	}
-	name, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
+	name, ok := core.token_text(h.plan.readers, &h.view, t, context.temp_allocator)
 	if !ok {
 		return .No_Memory
 	}
@@ -518,7 +518,7 @@ write_uint :: proc "contextless" (dest: uintptr, v: u64, size: u32) {
 // An integer token as an i64.
 @(private)
 number_i64 :: proc(h: ^Reader, t: core.Token) -> (v: i64, reason: core.Typed_Error_Kind) {
-	n, ok := h.plan.spelling.number(&h.view, t)
+	n, ok := h.plan.readers.number(&h.view, t)
 	if !ok {
 		return 0, .Wrong_Kind
 	}
@@ -581,7 +581,7 @@ number_cold :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, f
 		// `mant` holds all the digits of a plain decimal, the one kind the walk folds.
 		return store_number(spell.number_significand(h.mant, -i64(frac), raw_data(h.src)[t.lo] == '-', sum <= 15), false, h, t, fld, dest)
 	}
-	n, ok := h.plan.spelling.number(&h.view, t)
+	n, ok := h.plan.readers.number(&h.view, t)
 	if !ok {
 		return .Wrong_Kind
 	}
@@ -638,7 +638,7 @@ store_number :: proc(n: core.Number, integer: bool, h: ^Reader, t: core.Token, f
 					// Rounds the decimal once. Past `max(f32)` it is infinity, refused below.
 					v, _ = strconv.parse_f32(string(raw_data(h.src)[t.lo:][:t.n]))
 				}
-			} else if read := h.plan.spelling.number_f32; read != nil {
+			} else if read := h.plan.readers.number_f32; read != nil {
 				if exact, ok := read(&h.view, t); ok {
 					v = exact
 				}
@@ -935,7 +935,7 @@ member_found :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.To
 @(private)
 key_decoded :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, f: ^Frame, owner: ^Field) -> (core.Hook_Regs, core.Action) {
 	context = h.ctx
-	key, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
+	key, ok := core.token_text(h.plan.readers, &h.view, t, context.temp_allocator)
 	if !ok {
 		return refuse(h, regs, {kind = .No_Memory, at = t.lo}, t.lo + u64(t.n))
 	}
@@ -947,7 +947,7 @@ map_key :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, 
 	context = h.ctx
 	regs := regs
 	f.extra, f.run = cast([^]u64)raw_data(h.src)[t.lo:], (^Field)(uintptr(t.n))
-	key, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
+	key, ok := core.token_text(h.plan.readers, &h.view, t, context.temp_allocator)
 	if !ok {
 		return refuse(h, regs, {kind = .No_Memory, at = t.lo}, t.lo + u64(t.n))
 	}

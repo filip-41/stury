@@ -212,22 +212,3 @@ parse_pointer :: proc(text: string, allocator := context.allocator) -> (path: Pa
 	return parsed, error_of(refusal)
 }
 
-// Answers `path` over a document built whole, in the order a scan of its text answers, and allocates nothing but the
-// list, which the caller frees with `delete(answers, allocator)`. A partial document cannot say what it does not hold,
-// so it is `.Unsupported`. An `Answer`'s nodes are `doc`'s.
-@(private)
-query_one :: proc(doc: ^Document, path: Path, read := Query_Options{}, allocator := context.allocator) -> (answers: []Answer, err: Error) {
-	return query_many(doc, []Path{path}, read, allocator)
-}
-
-// Answers `paths` over a document built whole, as for one path, each answer tagged with its path's number.
-@(private)
-query_many :: proc(doc: ^Document, paths: []Path, read := Query_Options{}, allocator := context.allocator) -> (answers: []Answer, err: Error) {
-	if doc == nil || doc.spelling == nil || doc.spelling.query == nil {
-		return nil, error_of(Path_Error{kind = .Unsupported})
-	}
-	found, refusal := doc.spelling.query(doc, paths, read, allocator)
-	return found, error_of(refusal)
-}
-
-query :: proc {query_one, query_many}

@@ -169,7 +169,7 @@ Token_View :: struct {
 	using as: As,
 }
 
-// A `Document` holds the walk's tokens over the caller's bytes, the facts beside them, and the format's `Spelling`
+// A `Document` holds the walk's tokens over the caller's bytes, the facts beside them, and the format's `Readers`
 // table. `src` is borrowed and must outlive the document. `nodes_alloc` is the allocation behind `nodes`, whose length
 // is its capacity, so `destroy` frees it after `nodes` shrank to the node count.
 //
@@ -264,51 +264,62 @@ Duplicates :: enum u8 {
 	Refuse,
 }
 
-// A `Spelling` holds a format's read services, in its rodata. `text` decodes a node's text into `buf` and returns false
-// when `buf` is too short, so a read never allocates. A node whose `SPELLING_DECODE` bit is clear is its span without
-// the quotes that surround it. `key_equals` compares a key without allocating. `number` reads a number token, and returns false for a token
-// that is no number of the format's.
-// `number_f32` reads a number token whose kind is above `NUMBER_DECIMAL` into an f32 with one rounding, and returns
-// false when narrowing `number`'s binary64 already rounds once. It is nil for a format with no such kinds.
-// `build` reads a text into a document and `validate` judges one without building, each as the handle says, see
-// `core.build` and `core.validate`. `scan` reads paths over a text as the handle says into a partial document, or gives
-// each answer to `on` when it is set, see `core/build`'s `scan` and `each_answer`. `resolve` returns what a `Plain` node
-// is, and `resolves` whether it can return anything but `.String` for a node with bytes under handle `as`, nil for a
-// format with no `Plain` nodes, so a writer asks once per text. `close_end` returns the byte just past a container's closing bytes, found
-// from its last descendant or its open, over the whitespace and comments the format allows there, the root's close is
-// `Document.root_close`, so a service may return it without a scan. `edit` points at the
-// format's edit services, nil for a format that accepts no edits. `tag_key` is the format's own struct tag key, and
-// `key_open` and `key_close` are what a key is written between, empty for a format whose keys a typed read does not
-// compare as text. `write` writes a node of the document as text of the format `as` names, into a buffer from `allocator` or to
-// `stream`, nil for a format with no document writer, see `core.write`. `tokens` is the format's `^write.Token_Spelling`,
-// nil for a format with no token writer. `records` is the format's `^records.Services`, nil for a format with no record
-// reader. `plans` is the format's `typed.Plan_Make`, nil for a format whose plans need nothing past `typed.plan_build`.
-// `typed` is the format's `^typed.Format_Reads`, nil for a format with no typed read. Each pointer is a `rawptr` since `core/write`, `core/records` and `core/typed` import `core`, and each is cast back to that
-// type unchecked, so a format sets them to exactly that type or leaves them nil.
-Spelling :: struct {
+// `Readers` holds what a read of a value needs of its format, in rodata. `text` decodes a node's text into `buf` and
+// returns false when `buf` is too short, so a read never allocates. A node whose `SPELLING_DECODE` bit is clear is its
+// span without the quotes that surround it. `key_equals` compares a key without allocating. `number` reads a number
+// token, and returns false for a token that is no number of the format's. `number_f32` reads a number token whose kind
+// is above `NUMBER_DECIMAL` into an f32 with one rounding, and returns false when narrowing `number`'s binary64 already
+// rounds once. It is nil for a format with no such kinds. `resolve` returns what a `Plain` node is, and `resolves`
+// whether it can return anything but `.String` for a node with bytes under handle `as`, nil for a format with no
+// `Plain` nodes, so a writer asks once per text. `close_end` returns the byte just past a container's closing bytes,
+// found from its last descendant or its open, over the whitespace and comments the format allows there, the root's
+// close is `Document.root_close`, so a service may return it without a scan. `format` is the format's identity: one
+// procedure for every spec of a format, which returns its fault table, so two tables compare equal when they read one
+// format. `tag_key` is the format's own struct tag key, and `key_open` and `key_close` are what a key is written
+// between, empty for a format whose keys a typed read does not compare as text. `flat` says a text has no brackets, so
+// a container has no bytes of its own. `services` points at the run-time services of a handle, nil in a table that
+// serves a read only.
+Readers :: struct {
 	text:       proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
 	key_equals: proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool,
 	number:     proc(v: ^Token_View, t: Token) -> (Number, bool),
 	number_f32: proc(v: ^Token_View, t: Token) -> (f32, bool),
-	build:      proc(src: []u8, as: As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (Document, Document_Error),
-	validate:   proc "contextless" (src: []u8, as: As) -> Maybe(Fault),
-	scan:       proc(src: []u8, as: As, paths: []Path, read: Path_Options, state: rawptr, on: proc(state: rawptr, a: Token_Answer) -> bool, allocator: runtime.Allocator) -> (Document, Path_Error),
 	resolve:    proc(doc: ^Document, i: Node_Index) -> Kind,
 	resolves:   proc "contextless" (as: As) -> bool,
 	close_end:  proc(doc: ^Document, i: Node_Index) -> u64,
-	query:      proc(doc: ^Document, paths: []Path, read: Query_Options, allocator: runtime.Allocator) -> (answers: []Answer, err: Path_Error),
-	edit:       ^Edit_Spelling,
-	write:      proc(doc: ^Document, opts: Write_Options, as: As, node: Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Error),
-	tokens:     rawptr,
-	records:    rawptr,
-	plans:      rawptr,
-	typed:      rawptr,
+	format:     proc "contextless" () -> ^Rules,
 	tag_key:    string,
 	key_open:   string,
 	key_close:  string,
+	flat:       bool,
+	services:   ^Services,
 }
 
-// An `Edit_Spelling` holds a format's edit services. A document's `Spelling` points at one table, and the services
+// The run-time services of a handle, which a call that chooses its format at run time reaches through
+// `Readers.services`. `build` reads a text into a document and `validate` judges one without building, each as the
+// handle says, see `core.build` and `core.validate`. `scan` reads paths over a text as the handle says into a partial
+// document, or gives each answer to `on` when it is set, see `core/build`'s `scan` and `each_answer`. `edit` points at the format's edit services, nil for a format that accepts no edits. `write`
+// writes a node of the document as text of the format `as` names, into a buffer from `allocator` or to `stream`, nil
+// for a format with no document writer, see `core.write`. `plans` is the format's `typed.Plan_Make`, nil for a format
+// whose plans need nothing past `typed.plan_build`. `reads` is the format's `^typed.Format_Reads`, nil for a format with
+// no typed read. `tokens` is the format's `^write.Token_Spelling`, nil for a format with no token writer. `records` is
+// the format's `^records.Services`, nil for a format with no record reader. Each pointer is a `rawptr` since
+// `core/write`, `core/records` and `core/typed` import `core`, and each is cast back to that type unchecked, so a
+// format sets them to exactly that type or leaves them nil.
+Services :: struct {
+	build:    proc(src: []u8, as: As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (Document, Document_Error),
+	validate: proc "contextless" (src: []u8, as: As) -> Maybe(Fault),
+	scan:     proc(src: []u8, as: As, paths: []Path, read: Path_Options, state: rawptr, on: proc(state: rawptr, a: Token_Answer) -> bool, allocator: runtime.Allocator) -> (Document, Path_Error),
+	write:    proc(doc: ^Document, opts: Write_Options, as: As, node: Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Error),
+	edit:     ^Edit_Services,
+	plans:    rawptr,
+	reads:    rawptr,
+	tokens:   rawptr,
+	records:  rawptr, // ^records.Framing_Services
+	docs:     rawptr, // ^records.Record_Docs
+}
+
+// An `Edit_Services` holds a format's edit services. A document's `Services` points at one table, and the services
 // dispatch on the document's `spec` and `opts`. `value` checks a text as exactly one value of the format and
 // spec, and `key_text` writes a decoded member name in the format's own spelling, quotes and escapes included. A member
 // insert's key and a key set take a decoded name, so no service judges a key. Each service receives the document, so it reads the run-time options the document holds. A text that is no value answers `.Bad_Value`, with
@@ -318,13 +329,10 @@ Spelling :: struct {
 // value. `comment` says how the output spells a comment under `spec` and is nil for a format that accepts no comment.
 // `insert_check` holds a format's rules on what a container takes.
 //
-// `commit` writes a list's edits as spec byte `spec`, which `core.commit` passes as the document's own: a format points it
-// at `core/compose`'s commit. `flat` says a text has no brackets, so a container has no bytes of its own.
-//
 // A flat format also supplies the rest. `interior` returns the bytes a container's members lie in, `fact_slot` says whether the output holds a fact of a role on a node, and `emptied` whether a list
 // removes every member of the root. `plan` runs first on a commit and may turn the whole list into plain edits, which
 // `out` receives with their texts borrowed or allocated with `allocator`, and it returns false to keep the list as it is.
-Edit_Spelling :: struct {
+Edit_Services :: struct {
 	value:         proc(v: ^Token_View, src: []u8, allocator: runtime.Allocator) -> Document_Error,
 	key_text:      proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
 	comment:       proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
@@ -336,8 +344,8 @@ Edit_Spelling :: struct {
 	fact_slot:     proc(doc: ^Document, node: Node_Index, role: Role, emptied: bool) -> bool,
 	emptied:       proc(doc: ^Document, list: ^Edit_List) -> bool,
 	plan:          proc(doc: ^Document, list: ^Edit_List, out: ^[dynamic]Edit, allocator: runtime.Allocator) -> (changed: bool, err: Document_Error),
-	commit:        proc(list: ^Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: Document_Error),
-	flat:          bool,
+	// Judges a text of the list's own spec, as a commit checks its output and the document's source.
+	validate:      proc "contextless" (src: []u8, as: As) -> Maybe(Fault),
 }
 
 // A `Comment_Spelling` names how a format spells a comment in an output: `//` for a JSON spec that has comments, the
@@ -423,7 +431,7 @@ kind :: #force_inline proc(doc: ^Document, i: Node_Index) -> Kind {
 	if k := doc.nodes[i].kind; k != .Plain {
 		return k
 	}
-	return doc.spelling.resolve(doc, i)
+	return doc.readers.resolve(doc, i)
 }
 
 // Returns the byte span of node `i`: a scalar's token, or a container's opening through its closing bytes. The
@@ -439,7 +447,7 @@ span :: #force_inline proc(doc: ^Document, i: Node_Index) -> []u8 {
 		if i == ROOT && doc.root_close != 0 {
 			return doc.src[n.lo:doc.root_close]
 		}
-		return doc.src[n.lo:doc.spelling.close_end(doc, i)]
+		return doc.src[n.lo:doc.readers.close_end(doc, i)]
 	case:
 		lo, hi := scalar_ends(n)
 		return doc.src[lo:hi]
@@ -537,7 +545,7 @@ key_equals :: #force_inline proc "contextless" (doc: ^Document, i: Node_Index, n
 // Out of line, so the hot loop of `member` passes the document and index as before and holds no token.
 @(private, cold)
 key_equals_decode :: #force_no_inline proc "contextless" (doc: ^Document, i: Node_Index, name: string) -> bool {
-	return doc.spelling.key_equals(&doc.view, doc.nodes[i], name)
+	return doc.readers.key_equals(&doc.view, doc.nodes[i], name)
 }
 
 // Returns the first source byte of node `n`. A quoted string's token starts one byte past its opening quote.
@@ -857,7 +865,7 @@ text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: stri
 	if n.spelling & SPELLING_DECODE == 0 {
 		return string(node_text(doc.src, n)), true
 	}
-	return doc.spelling.text(&doc.view, n, buf)
+	return doc.readers.text(&doc.view, n, buf)
 }
 
 // Returns a length of `buf` that always holds `text`'s decode of node `i`, which may pass the text's own length, and 0
@@ -880,9 +888,9 @@ decoded_room :: #force_inline proc "contextless" (spelling: u16, n: int) -> int 
 	return n
 }
 
-// Returns token `t`'s text as `spelling.text` gives it: its span when the token needs no decode, else a decode into a
+// Returns token `t`'s text as `readers.text` gives it: its span when the token needs no decode, else a decode into a
 // buffer allocated from `allocator`. Returns false for a refused allocation or a failed decode.
-token_text :: proc(spelling: ^Spelling, view: ^Token_View, t: Token, allocator: runtime.Allocator) -> (s: string, ok: bool) {
+token_text :: proc(readers: ^Readers, view: ^Token_View, t: Token, allocator: runtime.Allocator) -> (s: string, ok: bool) {
 	if t.spelling & SPELLING_DECODE == 0 {
 		return string(node_text(view.src, t)), true
 	}
@@ -891,7 +899,7 @@ token_text :: proc(spelling: ^Spelling, view: ^Token_View, t: Token, allocator: 
 	if err != nil {
 		return "", false
 	}
-	s, ok = spelling.text(view, t, buf)
+	s, ok = readers.text(view, t, buf)
 	if !ok {
 		runtime.mem_free_with_size(raw_data(buf), room, allocator)
 	}
@@ -945,9 +953,22 @@ text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator
 // string, a key, a cell that spells no number, and an index past the last node.
 number :: #force_inline proc(doc: ^Document, i: Node_Index) -> (Number, bool) {
 	if int(i) < len(doc.nodes) && doc.nodes[i].kind <= .Plain {
-		return doc.spelling.number(&doc.view, doc.nodes[i])
+		return doc.readers.number(&doc.view, doc.nodes[i])
 	}
 	return {}, false
+}
+
+// Whether `a` and `b` read one format. Two tables of one format differ by spec, so their addresses are no evidence.
+same_format :: #force_inline proc "contextless" (a, b: ^Readers) -> bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.format == b.format
+}
+
+// Returns the run-time services of `as`'s format, nil for a handle with none: a zero handle, and a table that serves a read only.
+services_of :: #force_inline proc "contextless" (as: As) -> ^Services {
+	return as.readers.services if as.readers != nil else nil
 }
 
 // Reads `src` into a document as `as` says: its format, spec, depth, tolerance and the format's own options.
@@ -955,20 +976,20 @@ number :: #force_inline proc(doc: ^Document, i: Node_Index) -> (Number, bool) {
 // borrows `src`, which must outlive it, and `destroy` frees it. A handle with no format's build returns `.Bad_Spec`, and
 // on any error the document is the zero value.
 build :: proc(src: []u8, as: As, dups := Duplicates.Last, allocator := context.allocator) -> (Document, Error) {
-	if as.spelling == nil || as.spelling.build == nil {
+	if services_of(as) == nil || services_of(as).build == nil {
 		return {}, error_of(Document_Error{kind = .Bad_Spec})
 	}
-	doc, err := as.spelling.build(src, as, dups == .Refuse, allocator)
+	doc, err := services_of(as).build(src, as, dups == .Refuse, allocator)
 	return doc, error_of(err)
 }
 
 // Judges `src` as `as` says without building or allocating. Returns the first fault, or nil for a text that reads. A
 // handle with no format's validate faults `.Bad_Option` at byte 0.
 validate :: proc "contextless" (src: []u8, as: As) -> Error {
-	if as.spelling == nil || as.spelling.validate == nil {
+	if services_of(as) == nil || services_of(as).validate == nil {
 		return error_of(Fault{kind = .Bad_Option})
 	}
-	return error_of(as.spelling.validate(src, as))
+	return error_of(services_of(as).validate(src, as))
 }
 
 // Returns the `i64` an `Int` node writes. Returns false for any other number.

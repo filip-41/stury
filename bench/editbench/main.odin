@@ -8,6 +8,7 @@ import "core:fmt"
 import "core:os"
 import "core:time"
 import core "../../core"
+import compose "../../core/compose"
 import dsv "../../dsv"
 import json "../../json"
 
@@ -32,15 +33,15 @@ main :: proc() {
 	derr: core.Error
 	switch {
 	case has_suffix(suffix, ".tsv"):
-		doc, derr = dsv.build(src, .Tsv)
+		doc, derr = core.build(src, dsv.as(.Tsv))
 	case has_suffix(suffix, ".csv"):
-		doc, derr = dsv.build(src, .Csv)
+		doc, derr = core.build(src, dsv.as(.Csv))
 	case has_suffix(suffix, ".json5"):
-		doc, derr = json.build(src, .Json5)
+		doc, derr = core.build(src, json.as(.Json5))
 	case has_suffix(suffix, ".jsonc"):
-		doc, derr = json.build(src, .Jsonc)
+		doc, derr = core.build(src, json.as(.Jsonc))
 	case:
-		doc, derr = json.build(src, .Json)
+		doc, derr = core.build(src, json.as(.Json))
 	}
 	defer core.destroy(&doc)
 	if derr != nil {
@@ -77,7 +78,7 @@ main :: proc() {
 	out: []u8
 	for _ in 0 ..< 3 {
 		start = time.tick_now()
-		next, _, cerr := core.commit(&list)
+		next, _, cerr := compose.commit(&list)
 		d := time.tick_since(start)
 		if cerr != nil {
 			fmt.eprintln("commit:", cerr)

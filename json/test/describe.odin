@@ -239,7 +239,7 @@ a_plan_of_a_types_description_has_the_types_plan_shape :: proc(t: ^testing.T) {
 		walktest.expect_nil(t, planned)
 		d, described := model.describe(&plan, context.temp_allocator)
 		walktest.expect_nil(t, described)
-		again, built := typed.plan_of(&d, json.as(.Json), c.opts, context.temp_allocator)
+		again, built := json.plan_of(&d, .Json, c.opts, allocator = context.temp_allocator)
 		walktest.expect_nil(t, built)
 		want, got := project(&plan), project(&again)
 		testing.expectf(t, want == got, "%v:\nplan        %s\ndescription %s", c.type, want, got)
@@ -263,7 +263,7 @@ a_type_and_its_description_read_the_classes_the_type_reads :: proc(t: ^testing.T
 	defer free_all(context.temp_allocator)
 	plan, _ := json.plan_make(Shown, allocator = context.temp_allocator)
 	d, _ := model.describe(&plan, context.temp_allocator)
-	again, _ := typed.plan_of(&d, json.as(.Json), allocator = context.temp_allocator)
+	again, _ := json.plan_of(&d, allocator = context.temp_allocator)
 	want := "obj#0 [\"#0 n: ?#1, t: num?, e: str, u: ?#2, l: arr<obj#0>, required []\", \"#1 | int \", \"#2 | bool | str \"]"
 	testing.expect_value(t, project(&plan), want)
 	testing.expect_value(t, project(&again), want)
@@ -330,16 +330,16 @@ describe_and_plan_of_free_what_they_allocate :: proc(t: ^testing.T) {
 	defer typed.plan_destroy(&plan)
 	d, _ := model.describe(&plan)
 	defer rules.description_destroy(&d)
-	again, built := typed.plan_of(&d, json.as(.Json))
+	again, built := json.plan_of(&d)
 	walktest.expect_nil(t, built)
 	typed.plan_destroy(&again)
-	_, empty := typed.plan_of(&rules.Description{}, json.as(.Json))
+	_, empty := json.plan_of(&rules.Description{})
 	walktest.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 	arms := [2]rules.Node_Index{1, 2}
 	objects := rules.Description{}
 	defer delete(objects.nodes)
 	append(&objects.nodes, rules.Node{kinds = rules.EVERY_KIND, any_of = arms[:], array = -1, object = -1})
 	append(&objects.nodes, rules.Node{kinds = {.Object}, array = -1, object = -1}, rules.Node{kinds = {.Object}, array = -1, object = -1})
-	_, ambiguous := typed.plan_of(&objects, json.as(.Json))
+	_, ambiguous := json.plan_of(&objects)
 	walktest.expect_kind(t, ambiguous, core.Typed_Error_Kind.Ambiguous_Union)
 }

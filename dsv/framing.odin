@@ -13,21 +13,27 @@ import typed "../core/typed"
 import write "../core/write"
 import records "../core/records"
 
+// The framing and the record reads a handle reaches, which dispatch on the handle's spec and so link every spec's passes.
+// A constant spec gets `framing_of` and `record_docs`, which link the passes of that spec alone.
 @(private, rodata)
-RECORDS := records.Services {
-	next   = #partial {.Lines = next_row},
-	judge  = proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) { return nil },
-	span   = next_span,
-	guess  = guess_row,
-	exact  = exact_row,
-	piece  = piece_rows,
-	whole  = proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64) { return as, .Lines, 0 },
+FRAMING := records.Framing_Services {
+	next  = #partial {.Lines = next_row},
+	judge = proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) { return nil },
+	span  = next_span,
+	guess = guess_row,
+	exact = exact_row,
+	piece = piece_rows,
+	whole = proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64) { return as, .Lines, 0 },
+	close = close_rows,
+}
+
+@(private, rodata)
+DOCS := records.Record_Docs {
 	read   = read_row,
 	build  = build_row,
 	column = column_of,
 	cell   = cell_of,
 	cells  = cells_texts,
-	close  = close_rows,
 }
 
 // The rows a batch holds at most.
@@ -107,7 +113,7 @@ frame_row :: #force_inline proc "contextless" (b: ^Batch, lo, hi: int, header: b
 
 // Frames the next batch from `it.pos`. Returns false when no row is left, with the fault, if any, in `it.fault`.
 @(private)
-refill :: proc(it: ^records.Reader) -> bool {
+refill :: proc(it: ^records.Reader, $S: Spec) -> bool {
 	b := (^Batch)(it.format)
 	if b == nil {
 		fresh, err := new(Batch, it.allocator)
@@ -120,7 +126,7 @@ refill :: proc(it: ^records.Reader) -> bool {
 	}
 	b.n, b.at, b.split_row, b.from, b.to = 0, 0, 0, it.pos, max(u64)
 	if !b.done {
-		frame(it, b)
+		frame_batch(it, b, S, options_of(it.as))
 	}
 	if b.n == 0 {
 		it.fault = b.fault
@@ -129,15 +135,6 @@ refill :: proc(it: ^records.Reader) -> bool {
 }
 
 // Frames rows from `it.pos` into `b` and leaves `it.pos` past them.
-@(private)
-frame :: proc(it: ^records.Reader, b: ^Batch) {
-	switch opts := options_of(it.as); Spec(it.as.spec) {
-	case .Csv:   frame_batch(it, b, .Csv, opts)
-	case .Tsv:   frame_batch(it, b, .Tsv, opts)
-	case .Plain: frame_batch(it, b, .Plain, opts)
-	}
-}
-
 @(private)
 frame_batch :: proc(it: ^records.Reader, b: ^Batch, $S: Spec, opts: Options) {
 	if f, bad := option_fault(S, opts).?; bad {
@@ -187,6 +184,16 @@ frame_batch :: proc(it: ^records.Reader, b: ^Batch, $S: Spec, opts: Options) {
 // the window may have cut it.
 @(private)
 next_row :: proc(it: ^records.Reader) -> (records.Record, bool) {
+	switch Spec(it.as.spec) {
+	case .Csv:   return next_row_spec(it, .Csv)
+	case .Tsv:   return next_row_spec(it, .Tsv)
+	case .Plain: return next_row_spec(it, .Plain)
+	}
+	return {}, false
+}
+
+@(private)
+next_row_spec :: proc(it: ^records.Reader, $S: Spec) -> (records.Record, bool) {
 	b := (^Batch)(it.format)
 	stream := it.input.procedure != nil
 	if stream && b != nil {
@@ -204,7 +211,7 @@ next_row :: proc(it: ^records.Reader) -> (records.Record, bool) {
 		}
 	}
 	if b == nil || b.at == b.n {
-		if !refill(it) {
+		if !refill(it, S) {
 			return {}, false
 		}
 		b = (^Batch)(it.format)
@@ -223,17 +230,27 @@ next_row :: proc(it: ^records.Reader) -> (records.Record, bool) {
 // is kept in `it.state[0:4]`, so a piece's reader, a copy of this one past its first record, checks rows against it.
 @(private)
 next_span :: proc(it: ^records.Reader, to: u64) -> (records.Record, bool) {
+	switch Spec(it.as.spec) {
+	case .Csv:   return next_span_spec(it, to, .Csv)
+	case .Tsv:   return next_span_spec(it, to, .Tsv)
+	case .Plain: return next_span_spec(it, to, .Plain)
+	}
+	return {}, false
+}
+
+@(private)
+next_span_spec :: proc(it: ^records.Reader, to: u64, $S: Spec) -> (records.Record, bool) {
 	b := Batch{width = int(intrinsics.unaligned_load((^u32)(&it.state[0]))), to = to}
 	if to == max(u64) {
 		// The rest of the text is one record, judged by the walk with no hook.
 		lo := it.pos
-		it.pos, it.fault = u64(len(it.src)), validate_from(it.src, it.as, lo, b.width)
+		it.pos, it.fault = u64(len(it.src)), validate_spec(it.src, S, options_of(it.as), lo, b.width)
 		return {text = it.src[lo:], at = lo}, lo < it.pos
 	}
 	lo := max(u64)
 	for {
 		b.n = 0
-		frame(it, &b)
+		frame_batch(it, &b, S, options_of(it.as))
 		if b.n > 0 {
 			lo = min(lo, b.rows[0].at)
 			if last := b.rows[b.n - 1].at; last >= to {
@@ -314,7 +331,17 @@ joined :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row) -> (src: []u8, at
 // call on the reader, and its offsets count from that text.
 @(private)
 build_row :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-	cells, ok := cells_of(it, rec)
+	switch Spec(it.as.spec) {
+	case .Csv:   return build_row_spec(it, rec, allocator, .Csv)
+	case .Tsv:   return build_row_spec(it, rec, allocator, .Tsv)
+	case .Plain: return build_row_spec(it, rec, allocator, .Plain)
+	}
+	return {}, {kind = .Bad_Spec}
+}
+
+@(private)
+build_row_spec :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator, $S: Spec) -> (core.Document, core.Document_Error) {
+	cells, ok := cells_of(it, rec, S)
 	if !ok {
 		return {}, {kind = .No_Memory if it.fault != nil else .Bad_Index, at = rec.at}
 	}
@@ -349,9 +376,19 @@ build_row :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.A
 // of the header and that row. A list row reads the row alone, as it reads a header as data.
 @(private)
 read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
-	spec, opts := Spec(it.as.spec), options_of(it.as)
+	switch Spec(it.as.spec) {
+	case .Csv:   return read_row_spec(it, target, T, plan, read, allocator, err, .Csv)
+	case .Tsv:   return read_row_spec(it, target, T, plan, read, allocator, err, .Tsv)
+	case .Plain: return read_row_spec(it, target, T, plan, read, allocator, err, .Plain)
+	}
+	return false
+}
+
+@(private)
+read_row_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
+	opts := options_of(it.as)
 	h := Cells{refuse_repeats = read.dups == .Refuse}
-	regs, started := typed.read_start(&h.r, it.src, plan, &SPELLING, T, target, read, it.frames, allocator)
+	regs, started := typed.read_start(&h.r, it.src, plan, it.as, T, target, read, it.frames, allocator)
 	h.r.ctx.temp_allocator = runtime.arena_allocator(&it.scratch)
 	if started.kind == .None && plan.marshal == nil {
 		started.kind = .Plan_Mismatch
@@ -368,7 +405,7 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 		err^ = started
 		return false
 	}
-	_, ok := next_row(it)
+	_, ok := next_row_spec(it, S)
 	if !ok {
 		return false
 	}
@@ -384,7 +421,7 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 	if stream {
 		h.r.src, h.hot_end = src, u64(max(len(src) - HOT_REACH, 0))
 	}
-	h.r.as.spec = u8(spec)
+	h.r.as.spec = u8(S)
 	h.no_header = opts.no_header || h.opens == .Array
 	if !h.no_header {
 		h.keys = b.keys
@@ -409,7 +446,7 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 		}
 	}
 	if action == .Next {
-		regs, action = split_any(src, at, spec, opts, .Value, &h, regs, on_cell)
+		regs, action = split_cells(src, at, S, opts, .Value, &h, regs, on_cell)
 		if action != .Stop {
 			regs, _ = row_token(&h, regs, {kind = .End, role = .Value, lo = at.hi})
 		}

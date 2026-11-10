@@ -114,7 +114,7 @@ doc_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed
 
 @(private)
 sweep_document :: proc(t: ^testing.T, src: string, $S: json.Spec, read: json.Options, opts: core.Write_Options, loc := #caller_location) {
-	doc, derr := json.build(transmute([]u8)src, S, read)
+	doc, derr := core.build(transmute([]u8)src, json.as(S, read))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, derr, loc = loc)
 	try := Doc_Try{&doc, opts}

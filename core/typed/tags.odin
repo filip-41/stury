@@ -25,7 +25,7 @@ Field_Tag :: struct {
 // `bad_flag`.
 @(private)
 field_tag :: proc(b: ^Builder, name, tag: string) -> (t: Field_Tag, bad_flag: string) {
-	value, found := reflect.struct_tag_lookup(reflect.Struct_Tag(tag), b.p.spelling.tag_key)
+	value, found := reflect.struct_tag_lookup(reflect.Struct_Tag(tag), b.p.readers.tag_key)
 	if !found {
 		value, found = reflect.struct_tag_lookup(reflect.Struct_Tag(tag), SHARED_TAG_KEY)
 	}

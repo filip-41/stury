@@ -37,14 +37,15 @@ both :: proc(t: ^testing.T, text: string, $T: typeid, spec: json.Spec, loc := #c
 	plan, planned := json.plan_make(T, spec, allocator = context.temp_allocator)
 	walktest.expect_nil(t, planned, loc = loc)
 	src := transmute([]u8)text
-	mine, theirs: T
+	mine, theirs := new(T, context.temp_allocator), T{}
 	sink.entries.allocator = context.temp_allocator
 	sink.errors.allocator = context.temp_allocator
-	first = walktest.typed_of(typed.check_text(src, &mine, T, &plan, {sink = &sink}, context.temp_allocator))
+	checked := walktest.typed_of(json.check(src, spec, mine, &plan, {sink = &sink}, context.temp_allocator))
+	first.kind, first.at = checked.kind, checked.at
 	want := json.unmarshal(src, spec, &theirs, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
 	testing.expectf(t, first.kind == walktest.typed_kind(want) && first.at == walktest.at_of(want), "%s: check gave %v at %d, unmarshal %v at %d", text, first.kind, first.at, want, walktest.at_of(want), loc = loc)
 	if first.kind == .None {
-		testing.expectf(t, fmt.tprint(mine) == fmt.tprint(theirs), "%s: check read %v, unmarshal %v", text, mine, theirs, loc = loc)
+		testing.expectf(t, fmt.tprint(mine^) == fmt.tprint(theirs), "%s: check read %v, unmarshal %v", text, mine^, theirs, loc = loc)
 	}
 	return
 }
@@ -140,7 +141,7 @@ a_check_entry_keeps_its_names_after_the_source_is_gone :: proc(t: ^testing.T) {
 	sink: typed.Sink
 	sink.entries.allocator = context.temp_allocator
 	v: Shape
-	_ = typed.check_text(src, &v, Shape, &plan, {sink = &sink}, context.temp_allocator)
+	_ = json.check(src, .Json, &v, &plan, {sink = &sink}, context.temp_allocator)
 	for &b in src {
 		b = 'x'
 	}
@@ -158,7 +159,7 @@ a_check_stops_adding_at_max_errors :: proc(t: ^testing.T) {
 	sink: typed.Sink
 	sink.entries.allocator = context.temp_allocator
 	sink.max_errors = 2
-	first := typed.check_text(transmute([]u8)string(`[1,"a","b","c"]`), &v, []i32, &plan, {sink = &sink}, context.temp_allocator)
+	first := json.check(transmute([]u8)string(`[1,"a","b","c"]`), .Json, &v, &plan, {sink = &sink}, context.temp_allocator)
 	walktest.expect_kind(t, first, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, len(sink.entries), 2)
 	testing.expect(t, sink.truncated)
@@ -191,7 +192,7 @@ a_check_ends_at_a_walk_fault :: proc(t: ^testing.T) {
 @(test)
 a_plans_read_slot_is_unmarshal :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	plan, _ := json.plan_make(Shape, allocator = context.temp_allocator)
+	plan, _ := json.plan_make(Shape, reads = json.reads(.Json), allocator = context.temp_allocator)
 	testing.expect(t, plan.read != nil && plan.check != nil)
 	a, b: Shape
 	text := `{"a":1,"name":"x","list":[1,2],"inner":{"n":3}}`
@@ -211,7 +212,7 @@ a_check_under_refuse_reports_a_duplicate_key_as_an_entry :: proc(t: ^testing.T) 
 	sink: typed.Sink
 	sink.entries.allocator = context.temp_allocator
 	v: Shape
-	first := typed.check_text(transmute([]u8)string(`{"a":1,"a":2}`), &v, Shape, &plan, {dups = .Refuse, sink = &sink}, context.temp_allocator)
+	first := json.check(transmute([]u8)string(`{"a":1,"a":2}`), .Json, &v, &plan, {dups = .Refuse, sink = &sink}, context.temp_allocator)
 	walktest.expect_kind(t, first, core.Typed_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, len(sink.entries), 1)
 	testing.expect_value(t, len(sink.errors), 0)
@@ -225,7 +226,7 @@ a_check_entry_of_an_unknown_field_ends_past_its_value :: proc(t: ^testing.T) {
 	sink.entries.allocator = context.temp_allocator
 	v: Inner
 	text := `{"n":1,"zz":2}`
-	_ = typed.check_text(transmute([]u8)string(text), &v, Inner, &plan, {unknown = .Refuse, sink = &sink}, context.temp_allocator)
+	_ = json.check(transmute([]u8)string(text), .Json, &v, &plan, {unknown = .Refuse, sink = &sink}, context.temp_allocator)
 	if testing.expect_value(t, len(sink.entries), 1) {
 		testing.expect(t, sink.entries[0].end > sink.entries[0].start)
 	}
@@ -296,7 +297,7 @@ a_check_refuses_a_union_as_unmarshal_does :: proc(t: ^testing.T) {
 			sink: typed.Sink
 			sink.entries.allocator = context.temp_allocator
 			want := json.unmarshal(transmute([]u8)c.text, spec, &v, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
-			first := typed.check_text(transmute([]u8)c.text, &v, struct{ u: Tagged }, &plan, {sink = &sink}, context.temp_allocator)
+			first := json.check(transmute([]u8)c.text, spec, &v, &plan, {sink = &sink}, context.temp_allocator)
 			testing.expectf(t, walktest.typed_kind(first) == c.kind && walktest.typed_kind(want) == c.kind && walktest.at_of(first) == walktest.at_of(want), "%s: check %v at %d, unmarshal %v at %d", c.text, first, walktest.at_of(first), want, walktest.at_of(want))
 			if testing.expect(t, len(sink.entries) >= 1, c.text) {
 				testing.expect_value(t, sink.entries[0].kind, c.kind)

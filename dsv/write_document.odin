@@ -40,8 +40,14 @@ marshal_once :: proc(value: any, spec := Spec.Csv, opts := Options{}, write := c
 // The handle of a delimited text of `spec` read or written with `opts`, which holds the delimiter `spec` reads when
 // `opts` leaves it 0. See the file's header for what a document may hold.
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
+	return as_of(&HANDLE, spec, opts)
+}
+
+// The handle of `spec` read or written with `opts` over `readers`.
+@(private)
+as_of :: proc "contextless" (readers: ^core.Readers, spec: Spec, opts: Options) -> core.As {
 	bytes := [10]u8{0 = spec_delimiter(spec, opts.delimiter), 1 = opts.comment, 2 = u8(opts.no_header), 3 = u8(opts.crlf), 4 = u8(opts.infer)}
-	return {spelling = &SPELLING, spec = u8(spec), tolerate = opts.tolerate, opts = bytes}
+	return {readers = readers, spec = u8(spec), tolerate = opts.tolerate, opts = bytes}
 }
 
 // The options a handle `as` made holds. The spec's own delimiter reads as 0, so a default handle's options are `{}`,
@@ -63,7 +69,7 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 	}
 	spill: [write.ROOM_MAX]u8 = ---
 	w: Rows
-	hint := len(doc.src) + write.ROOM_MAX if doc.spelling == &SPELLING else 0
+	hint := len(doc.src) + write.ROOM_MAX if doc.readers.format == rules_of else 0
 	rows_start(&w, &spill, layout, spec, opts, stream, allocator, hint)
 	written := write_records(&w, doc, node, true) if layout.infer else write_records(&w, doc, node, false)
 	text, err = rows_end((^Rows)(rawptr(&w)), written)

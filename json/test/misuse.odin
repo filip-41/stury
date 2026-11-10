@@ -3,6 +3,7 @@ package json_tests
 import "base:runtime"
 import "core:testing"
 import core "../../core"
+import compose "../../core/compose"
 import typed "../../core/typed"
 import cw "../../core/write"
 import records "../../core/records"
@@ -14,11 +15,11 @@ import walktest "../../walktest"
 @(test)
 a_zero_document_is_refused :: proc(t: ^testing.T) {
 	zero: core.Document
-	_, qerr := core.query(&zero, core.Path{})
+	_, qerr := json.query(&zero, core.Path{})
 	walktest.expect_kind(t, qerr, core.Path_Error_Kind.Unsupported)
-	_, _, cerr := core.commit(&core.Edit_List{doc = &zero})
+	_, _, cerr := compose.commit(&core.Edit_List{doc = &zero})
 	walktest.expect_kind(t, cerr, core.Document_Error_Kind.Bad_Index)
-	_, _, jerr := core.commit(&core.Edit_List{doc = &zero}, json.as(.Json))
+	_, _, jerr := compose.commit(&core.Edit_List{doc = &zero}, json.as(.Json))
 	walktest.expect_kind(t, jerr, core.Document_Error_Kind.Bad_Index)
 }
 
@@ -74,7 +75,7 @@ a_huge_depth_limit_reserves_by_the_input :: proc(t: ^testing.T) {
 	alloc := runtime.Allocator{largest_proc, &big}
 	src := transmute([]u8)string("[1]")
 	opts := json.Options{max_depth = 1 << 30}
-	doc, err := json.build(src, .Json, opts, .Last, alloc)
+	doc, err := core.build(src, json.as(.Json, opts), .Last, alloc)
 	walktest.expect_nil(t, err)
 	text, _, werr := core.write(&doc, allocator = alloc)
 	walktest.expect_nil(t, werr)

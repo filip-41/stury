@@ -10,7 +10,7 @@ import "core:slice"
 //
 // `set`, `insert` and `remove` append an edit, checked when it is recorded, in O(its text). A commit resolves every
 // edit to a source range, refuses the colliding ones, and splices the edits into the source. Every byte no edit
-// touched stays, and the format's `Edit_Spelling` supplies the separators.
+// touched stays, and the format's `Edit_Services` supplies the separators.
 //
 // A fact edit names a node and a role, and a set also a body. The commit writes the body where the role reads it, or
 // drops it and counts it when the output cannot hold it, and refuses a second fact edit of one node and role. A fact
@@ -53,12 +53,20 @@ Edit_List :: struct {
 	doc:       ^Document,
 	edits:     [dynamic]Edit,
 	allocator: runtime.Allocator,
+	// The edit services of the document's format, nil for a format that accepts no edits.
+	edit:      ^Edit_Services,
 }
 
 // Returns an edit list over `doc`. It allocates nothing until the first edit is recorded.
 edit_list_init :: proc(doc: ^Document, allocator := context.allocator) -> Edit_List {
 	edits, _ := make([dynamic]Edit, allocator)
-	return {doc = doc, edits = edits, allocator = allocator}
+	list := Edit_List{doc = doc, edits = edits, allocator = allocator}
+	if doc != nil {
+		if services := services_of(doc.as); services != nil {
+			list.edit = services.edit
+		}
+	}
+	return list
 }
 
 // Frees every edit's copies and the log, and sets the list to the zero value. The document is the caller's.
@@ -75,14 +83,14 @@ edit_list_destroy :: proc(list: ^Edit_List) {
 // are lines the format composes itself. A flat format writes the spec it was read as, since another
 // spec would respell every member.
 is_flat :: #force_inline proc(doc: ^Document) -> bool {
-	return doc.spelling.edit != nil && doc.spelling.edit.flat
+	return doc.readers.flat
 }
 
 // Checks a recorded text as a value. A member's key is a decoded name, so no text is judged as a key.
 @(private)
-judge :: proc(doc: ^Document, text: string, allocator: runtime.Allocator) -> Document_Error {
-	if doc.spelling.edit != nil && doc.spelling.edit.value != nil {
-		return doc.spelling.edit.value(doc, transmute([]u8)text, allocator)
+judge :: proc(doc: ^Document, edit: ^Edit_Services, text: string, allocator: runtime.Allocator) -> Document_Error {
+	if edit != nil && edit.value != nil {
+		return edit.value(doc, transmute([]u8)text, allocator)
 	}
 	return {}
 }
@@ -127,7 +135,7 @@ set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Error {
 	if n.role == .Key && !flat {
 		return error_of(edit_add(list, node, .Set, .Key, 0, "", text))
 	}
-	if e := judge(doc, text, list.allocator); e.kind != .None {
+	if e := judge(doc, list.edit, text, list.allocator); e.kind != .None {
 		return error_of(e)
 	}
 	return error_of(edit_add(list, node, .Set, .Value, 0, "", text))
@@ -201,14 +209,14 @@ insert_at :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string,
 	if at < 0 || at > n_members {
 		return refused(.Bad_Position)
 	}
-	if member && doc.spelling.edit.key_text == nil {
+	if member && list.edit.key_text == nil {
 		return refused(.Wrong_Container)
 	}
 	e: Document_Error
-	if !member && doc.spelling.edit != nil && doc.spelling.edit.insert_check != nil {
-		e = doc.spelling.edit.insert_check(doc, container, text, list.allocator)
+	if !member && list.edit != nil && list.edit.insert_check != nil {
+		e = list.edit.insert_check(doc, container, text, list.allocator)
 	} else {
-		e = judge(doc, text, list.allocator)
+		e = judge(doc, list.edit, text, list.allocator)
 	}
 	if e.kind != .None {
 		return error_of(e)
@@ -329,26 +337,6 @@ fact_node :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string) 
 		return {kind = .Bad_Fact}
 	}
 	return {}
-}
-
-// Returns the source bytes `list`'s edits make, in the spec of `as`, through the format's commit. A nil `as` is the
-// document's own spec, `as` of another format is `.Bad_Spec`, and only its spec counts. A text of another spec must
-// read strictly, since the source's reading under its own spec is no evidence, and a delimited text refuses a spec
-// change as `.Bad_Spec`, since it would respell every cell. The caller frees the result with `allocator`. An edit that
-// another covers, a second edit of one node, and a second fact edit of one node and role are `.Conflicting_Edits` at
-// the byte where the two meet. A result that reads less strictly than the source is `.Bad_Result`. `dropped` counts the
-// source facts and fact edits the output cannot hold.
-commit :: proc(list: ^Edit_List, as: Maybe(As) = nil, allocator := context.allocator) -> (out: []u8, dropped: int, err: Error) {
-	doc := list.doc
-	if doc == nil || doc.spelling == nil || doc.spelling.edit == nil {
-		return nil, 0, refused(.Bad_Index, .No_Document)
-	}
-	target := as.? or_else doc.as
-	if target.spelling != doc.spelling {
-		return nil, 0, refused(.Bad_Spec)
-	}
-	made, cut, refusal := doc.spelling.edit.commit(list, target.spec, allocator)
-	return made, cut, error_of(refusal, edit = true)
 }
 
 // Whether `body` holds LF or CR, the only line ends a delimited text's comment line ends at. U+2028 is a byte in its

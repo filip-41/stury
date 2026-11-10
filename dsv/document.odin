@@ -19,42 +19,53 @@ import build "../core/build"
 // dsv's edit services, in rodata. The three specs share this table, and each service dispatches on `doc.as.spec`,
 // since the specs differ only in how a recorded text is read.
 @(rodata)
-EDIT := core.Edit_Spelling {
-	value         = proc(doc: ^core.Token_View, src: []u8, _: runtime.Allocator) -> core.Document_Error {return edit_cells(doc, src, false)},
+EDIT := core.Edit_Services {
+	value         = proc(doc: ^core.Token_View, src: []u8, _: runtime.Allocator) -> core.Document_Error {return edit_cells(doc, src, false, edit_record_at)},
 	key_text      = edit_key_text,
 	// A delimited text's comment spelling is `.Byte` with the document's comment byte, or `.None` when the byte is 0.
 	comment       = proc(doc: ^core.Document, _: u8) -> (core.Comment_Spelling, u8) {return (.Byte if doc.as.opts[1] != 0 else .None), doc.as.opts[1]},
 	member_sep    = proc(doc: ^core.Document, c: core.Node_Index) -> string {return edit_record_sep(doc) if c == core.ROOT else string(doc.as.opts[:1])},
-	insert_check  = proc(doc: ^core.Document, c: core.Node_Index, text: string, _: runtime.Allocator) -> core.Document_Error {return edit_cells(doc, transmute([]u8)text, c == core.ROOT)},
+	insert_check  = proc(doc: ^core.Document, c: core.Node_Index, text: string, _: runtime.Allocator) -> core.Document_Error {return edit_cells(doc, transmute([]u8)text, c == core.ROOT, edit_record_at)},
 	interior      = edit_interior,
 	fact_slot     = edit_fact_slot,
 	emptied       = edit_emptied,
-	plan          = edit_plan,
-	commit        = compose.commit,
-	flat          = true,
+	plan          = proc(doc: ^core.Document, list: ^core.Edit_List, out: ^[dynamic]core.Edit, allocator: runtime.Allocator) -> (bool, core.Document_Error) {return edit_plan(doc, list, out, allocator, edit_record_at)},
+	validate      = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_from(src, as, 0, 0)},
 }
 
-// dsv's spelling services, in rodata, the same table for every spec. A service dispatches on `doc.as.spec`, since the
+// dsv's readers, in rodata, the same table for every spec. A service dispatches on `doc.as.spec`, since the
 // specs decode a cell differently: a CSV cell's backslash is a byte and its `""` a quote, a TSV cell's backslash is an
 // escape, and a Plain cell has neither quotes nor escapes.
-SPELLING := core.Spelling {
+HANDLE := core.Readers {
 	text       = proc(v: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool) {return cell_text(v.src, n, Spec(v.spec), buf)},
 	key_equals = spelling_key_equals,
 	number     = spelling_number,
-	build      = build_as,
-	plans      = rawptr(plan_as),
-	typed      = &READS,
-	validate   = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_from(src, as, 0, 0)},
-	scan       = scan_as,
 	resolve    = spelling_resolve,
 	resolves   = proc "contextless" (as: core.As) -> bool {return options_of(as).infer},
 	close_end  = close_end,
-	query      = build.query,
-	edit       = &EDIT,
+	format     = rules_of,
 	tag_key    = "csv",
-	write      = document_write,
-	tokens     = &TOKENS,
-	records    = &RECORDS,
+	flat       = true,
+	services   = &SERVICES,
+}
+
+// dsv's run-time services, which a handle reaches.
+SERVICES := core.Services {
+	build    = build_as,
+	validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_from(src, as, 0, 0)},
+	scan     = scan_as,
+	write    = document_write,
+	edit     = &EDIT,
+	plans    = rawptr(plan_as),
+	reads    = &READS,
+	tokens   = &TOKENS,
+	records  = &FRAMING,
+	docs     = &DOCS,
+}
+
+// dsv's fault table, which names the format whatever the spec.
+rules_of :: proc "contextless" () -> ^core.Rules {
+	return &RULES
 }
 
 // `Token.spelling`'s bit for a quoted CSV cell holding a `""`, set only on a walk for `Cells` or `Batch`.
@@ -67,14 +78,14 @@ SPELLING_COLUMN :: u16(16)
 // The handle's build: the walk compiled for the handle's spec.
 build_as :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	switch Spec(as.spec) {
-	case .Csv:   return build_spec(src, .Csv, options_of(as), refuse_duplicates, allocator)
-	case .Tsv:   return build_spec(src, .Tsv, options_of(as), refuse_duplicates, allocator)
-	case .Plain: return build_spec(src, .Plain, options_of(as), refuse_duplicates, allocator)
+	case .Csv:   return build_spec(src, .Csv, as.readers, options_of(as), refuse_duplicates, allocator)
+	case .Tsv:   return build_spec(src, .Tsv, as.readers, options_of(as), refuse_duplicates, allocator)
+	case .Plain: return build_spec(src, .Plain, as.readers, options_of(as), refuse_duplicates, allocator)
 	}
 	return {}, {kind = .Bad_Spec}
 }
 
-build_spec :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+build_spec :: proc(src: []u8, $S: Spec, readers: ^core.Readers, opts: Options, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	if f, bad := option_fault(S, opts).?; bad {
 		return {}, {kind = .Walk, inner = f}
 	}
@@ -101,7 +112,7 @@ build_spec :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, 
 	}
 	// The node reservation is `len(src) / 2` nodes, an estimate because a cell is not always one byte, and the hook
 	// checks capacity as it grows. A header row of `count` cells and its node follow the root.
-	doc, err := build_reserved(src, S, opts, refuse_duplicates, allocator, max(len(src) / 2, count + 2), 0, start, keys)
+	doc, err := build_reserved(src, S, readers, opts, refuse_duplicates, allocator, max(len(src) / 2, count + 2), 0, start, keys)
 	if err.kind == .No_Memory {
 		// The allocator refused the estimate or a growth. Reading the text again sizes every buffer exactly, so only a
 		// document that does not fit the allocator fails. The hook tests capacity before a close, which writes no node,
@@ -109,14 +120,14 @@ build_spec :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, 
 		need: build.Count
 		regs: core.Hook_Regs
 		walk_keys(src, 0, S, opts, &need, &regs, build.builder_hook_count_keyless, keys)
-		doc, err = build_reserved(src, S, opts, refuse_duplicates, allocator, need.nodes + count + 2, need.facts, start, keys)
+		doc, err = build_reserved(src, S, readers, opts, refuse_duplicates, allocator, need.nodes + count + 2, need.facts, start, keys)
 	}
 	opts := opts
 	if err.kind == .None {
 		// A write ends its lines as the text's first row ends, header or record, read before a widened header has keys
 		// with no bytes. A line end inside a quoted cell is the cell's text.
 		opts.crlf = len(doc.nodes) > 1 && line_end_before(src, record_end(&doc, 1)) == "\r\n"
-		doc.as = as(S, opts)
+		doc.as = as_of(readers, S, opts)
 	}
 	wide := count
 	if .Ragged in opts.tolerate && count > 0 && err.kind == .None {
@@ -142,17 +153,17 @@ build_spec :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, 
 	}
 	nodes, facts := len(doc.nodes) + wide - count + 1, len(doc.facts)
 	core.destroy(&doc)
-	return build_reserved(src, S, opts, refuse_duplicates, allocator, nodes, facts, start, wider)
+	return build_reserved(src, S, readers, opts, refuse_duplicates, allocator, nodes, facts, start, wider)
 }
 
 // Reads `src` into a builder with room for `nodes` nodes and `facts` facts, which the hooks grow past. `keys` holds a
 // token per header cell, and `start` is the header's first byte.
-build_reserved :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, facts, start: int, keys: []core.Token) -> (core.Document, core.Document_Error) {
+build_reserved :: proc(src: []u8, $S: Spec, readers: ^core.Readers, opts: Options, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, facts, start: int, keys: []core.Token) -> (core.Document, core.Document_Error) {
 	// A record is a container inside the document's array, so a dsv text nests at most two containers and 8 stack slots
 	// cover it.
 	// The document holds the options it was read with, so every edit service judges a recorded text and writes its
 	// separators the way this text reads.
-	b := build.builder_start(src, as(S, opts), refuse_duplicates, allocator, nodes, 8, facts)
+	b := build.builder_start(src, as_of(readers, S, opts), refuse_duplicates, allocator, nodes, 8, facts)
 	if len(b.doc.nodes) == 0 {
 		// The reservation was refused and the node array is nil, so no hook may run.
 		return build.builder_end(&b, build.BUILDER_REGS, nil)
@@ -280,7 +291,7 @@ written_text :: #force_inline proc "contextless" (src: []u8, n: core.Node, spec:
 	return nil, false
 }
 
-// The text of cell `n` of `src`, a text of spec `spec`, and dsv's `Spelling.text`. It returns a cell that needs no
+// The text of cell `n` of `src`, a text of spec `spec`, and dsv's `Readers.text`. It returns a cell that needs no
 // decode as a slice of the source. It decodes a quoted cell holding `""`, a TSV escape and a `lax` cell into `buf`, and returns
 // false when `buf` is too short.
 cell_text :: proc(src: []u8, n: core.Node, spec: Spec, buf: []u8) -> (s: string, ok: bool) {
@@ -298,7 +309,7 @@ cell_text :: proc(src: []u8, n: core.Node, spec: Spec, buf: []u8) -> (s: string,
 	return spell.decode_text(buf, dsv_decoded_init(src, n, spec), dsv_decoded_next)
 }
 
-// dsv's `Spelling.key_equals`. It returns whether cell `i` decodes to `name`, with no allocation. A cell that needs no
+// dsv's `Readers.key_equals`. It returns whether cell `i` decodes to `name`, with no allocation. A cell that needs no
 // decode is compared by its span, or by its inner span for a quoted cell without `""`, and one that needs it byte by
 // byte as it decodes.
 spelling_key_equals :: proc "contextless" (doc: ^core.Token_View, n: core.Node, name: string) -> bool {
@@ -315,7 +326,7 @@ spelling_key_equals :: proc "contextless" (doc: ^core.Token_View, n: core.Node, 
 
 
 
-// dsv's `Spelling.number`. It returns the JSON number a value cell spells, and false for any other cell. A quoted cell,
+// dsv's `Readers.number`. It returns the JSON number a value cell spells, and false for any other cell. A quoted cell,
 // a TSV escape and a key cell are never numbers, since no JSON number holds a quote, a backslash or a byte past 0x7F. A
 // header cell names a column and answers as a JSON key node does.
 spelling_number :: proc(doc: ^core.Token_View, n: core.Node) -> (core.Number, bool) {
@@ -325,7 +336,7 @@ spelling_number :: proc(doc: ^core.Token_View, n: core.Node) -> (core.Number, bo
 	return spell.number_strict(doc.src, n.lo, n.lo + u64(n.n))
 }
 
-// dsv's `Spelling.resolve` of a cell. An empty value cell, which holds no quotes, is `.Null`, as a typed read and the
+// dsv's `Readers.resolve` of a cell. An empty value cell, which holds no quotes, is `.Null`, as a typed read and the
 // CLI read it, and any other cell is `.String`. With the document's `infer`, a `true` or `false` value cell is `.True`
 // or `.False`, and a value cell that is exactly a JSON number is `.Number`. A quoted cell and a TSV escape are
 // `.String`, since no number, `true` or `false` holds a quote or a backslash.
@@ -454,11 +465,11 @@ edit_emptied :: proc(doc: ^core.Document, list: ^core.Edit_List) -> bool {
 
 // Checks a cell's text, empty or exactly one cell under the document's grammar, or with `record` a record inserted into
 // the root, whose width is the commit's to judge.
-edit_cells :: proc(doc: ^core.Token_View, src: []u8, record: bool) -> core.Document_Error {
+edit_cells :: proc(doc: ^core.Token_View, src: []u8, record: bool, record_at: Record_Check) -> core.Document_Error {
 	if len(src) == 0 && !record {
 		return {}
 	}
-	cells, err := edit_record_at(doc, src)
+	cells, err := record_at(doc, src)
 	return err if err.kind != .None || record || cells == 1 else {kind = .Bad_Value}
 }
 
@@ -524,6 +535,9 @@ edit_record_sep :: proc(doc: ^core.Document) -> string {
 	return "\n"
 }
 
+Record_Check :: #type proc(doc: ^core.Token_View, src: []u8) -> (cells: int, err: core.Document_Error)
+
+// A record check for the document's spec, which a handle's edit services use.
 edit_record_at :: proc(doc: ^core.Token_View, src: []u8) -> (cells: int, err: core.Document_Error) {
 	switch Spec(doc.spec) {
 	case .Csv:   return edit_record(doc, src, .Csv)
@@ -560,6 +574,17 @@ record_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 // record it, a record ends at its line end.
 @(cold)
 close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
+	switch Spec(doc.as.spec) {
+	case .Csv:   return close_end_spec(doc, i, .Csv)
+	case .Tsv:   return close_end_spec(doc, i, .Tsv)
+	case .Plain: return close_end_spec(doc, i, .Plain)
+	}
+	return 0
+}
+
+// `close_end` for a document of spec `S`.
+@(cold)
+close_end_spec :: proc(doc: ^core.Document, i: core.Node_Index, $S: Spec) -> u64 {
 	if i == core.ROOT {
 		if doc.root_close != 0 {
 			return doc.root_close
@@ -567,7 +592,7 @@ close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 		return u64(len(doc.src))
 	}
 	if doc.partial {
-		return record_end_by_walk(doc, i)
+		return record_end_by_walk(doc, i, S)
 	}
 	return record_end(doc, i)
 }
@@ -589,17 +614,13 @@ record_end_hook :: proc "contextless" (h: ^Record_End, s: core.Hook_Regs, t: cor
 // The walk tolerates every fault, since the read may have tolerated any and a judged text's record bounds stay. A
 // stopped read may leave text no walk judged, where this returns the fault's byte.
 @(cold)
-record_end_by_walk :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
+record_end_by_walk :: proc(doc: ^core.Document, i: core.Node_Index, $S: Spec) -> u64 {
 	h: Record_End
 	regs: core.Hook_Regs
 	lo := doc.nodes[i].lo
 	fault: Maybe(core.Fault)
 	opts := Options{no_header = true, delimiter = doc.as.opts[0], comment = doc.as.opts[1], tolerate = {.Invalid_Utf8, .Ragged, .Bare_Quote}}
-	switch Spec(doc.as.spec) {
-	case .Csv:   _, fault = walk(doc.src, lo, .Csv, opts, &h, &regs, record_end_hook)
-	case .Tsv:   _, fault = walk(doc.src, lo, .Tsv, opts, &h, &regs, record_end_hook)
-	case .Plain: _, fault = walk(doc.src, lo, .Plain, opts, &h, &regs, record_end_hook)
-	}
+	_, fault = walk(doc.src, lo, S, opts, &h, &regs, record_end_hook)
 	if f, bad := fault.?; bad {
 		return f.at
 	}

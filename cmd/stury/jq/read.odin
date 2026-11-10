@@ -49,7 +49,7 @@ judge_build :: proc(doc: core_pkg.Document, err: core_pkg.Error) -> (core_pkg.Do
 // Each value cell of `doc` that its format reads as a number, true or false under the document's handle, as `infer`
 // does, takes that kind, so the interpreter reads a stored kind. A build's document is given it before a value reads it.
 store_inferred_kinds :: #force_inline proc(doc: ^core_pkg.Document) {
-	if doc.spelling != nil && doc.spelling.resolves != nil && doc.spelling.resolves(doc.as) {
+	if doc.readers != nil && doc.readers.resolves != nil && doc.readers.resolves(doc.as) {
 		store_kinds(doc)
 	}
 }

@@ -311,7 +311,7 @@ records_build_places_faults :: proc(t: ^testing.T) {
 	doc, err := records.build(&it, rec, context.temp_allocator)
 	walktest.expect_nil(t, err)
 	path, _ := core.parse_path(".a[1]", context.temp_allocator)
-	answers, _ := core.query(&doc, path, allocator = context.temp_allocator)
+	answers, _ := json.query(&doc, path, allocator = context.temp_allocator)
 	testing.expect_value(t, len(answers), 1)
 	rec, _ = records.next(&it)
 	_, err = records.build(&it, rec, context.temp_allocator)

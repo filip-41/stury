@@ -328,7 +328,7 @@ a_plans_read_slot_reads_the_rows :: proc(t: ^testing.T) {
 	Row :: struct {
 		a, b: i32,
 	}
-	plan, err := dsv.plan_make([]Row, .Csv, allocator = context.temp_allocator)
+	plan, err := dsv.plan_make([]Row, .Csv, reads = dsv.reads(.Csv), allocator = context.temp_allocator)
 	walktest.expect_nil(t, err)
 	testing.expect(t, plan.read != nil && plan.node_read != nil)
 	testing.expect(t, plan.check != nil)
@@ -362,7 +362,7 @@ a_check_reports_every_missing_column_of_a_row :: proc(t: ^testing.T) {
 		c: i32,
 		d: i32 `csv:"d,required"`,
 	}
-	plan, err := dsv.plan_make([]Row, .Csv, dsv.Options{tolerate = {.Ragged}}, allocator = context.temp_allocator)
+	plan, err := dsv.plan_make([]Row, .Csv, dsv.Options{tolerate = {.Ragged}}, reads = dsv.reads(.Csv), allocator = context.temp_allocator)
 	walktest.expect_nil(t, err)
 	text := transmute([]u8)string("a,b,c,d\n1\n2,3,4,5\n6\n")
 	rows: []Row

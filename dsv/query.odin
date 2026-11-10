@@ -5,7 +5,7 @@ import "base:runtime"
 import core "../core"
 import engine "../core/build"
 
-// dsv's `Spelling.scan` walk, which `core/build`'s path reads run. `.[i]` is a record, `.[i].name` a cell by its header
+// dsv's `Services.scan` walk, which `core/build`'s path reads run. `.[i]` is a record, `.[i].name` a cell by its header
 // name, and `.[i][j]` a cell by position. A partial document keeps a kept cell's key beside it, so it holds no shared
 // keys.
 

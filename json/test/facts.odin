@@ -3,6 +3,7 @@ package json_tests
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import compose "../../core/compose"
 import json ".."
 import walktest "../../walktest"
 
@@ -12,7 +13,7 @@ import walktest "../../walktest"
 // Commits `list` with the output spec `as`, checks the text against `want` and the dropped count, and builds the text
 // as `S`.
 expect_fact_commit :: proc(t: ^testing.T, list: ^core.Edit_List, as: json.Spec, want: string, dropped: int, $S: json.Spec) -> bool {
-	out, got, err := core.commit(list, json.as(as))
+	out, got, err := compose.commit(list, json.as(as))
 	defer if len(out) > 0 {
 		delete(out)
 	}
@@ -25,7 +26,7 @@ expect_fact_commit :: proc(t: ^testing.T, list: ^core.Edit_List, as: json.Spec, 
 	if !testing.expectf(t, string(out) == want, "committed %q, want %q", string(out), want) {
 		return false
 	}
-	doc, derr := json.build(out, S)
+	doc, derr := core.build(out, json.as(S))
 	defer core.destroy(&doc)
 	return testing.expectf(t, derr == nil, "committed text does not read: %v", derr)
 }
@@ -34,7 +35,7 @@ expect_fact_commit :: proc(t: ^testing.T, list: ^core.Edit_List, as: json.Spec, 
 // comment after the last member of an object, which is the object's foot. A body is the text between the markers.
 @(test)
 fact_read_roles :: proc(t: ^testing.T) {
-	doc, err := json.build(transmute([]u8)string("//head\n{\"a\":1 /*i*/}"), .Jsonc)
+	doc, err := core.build(transmute([]u8)string("//head\n{\"a\":1 /*i*/}"), json.as(.Jsonc))
 	defer core.destroy(&doc)
 	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
@@ -42,7 +43,7 @@ fact_read_roles :: proc(t: ^testing.T) {
 	if !walktest.body(t, &doc, core.ROOT, .Comment, "head") || !walktest.body(t, &doc, 2, .Comment_Inline, "i") {
 		return
 	}
-	foot, ferr := json.build(transmute([]u8)string("{\"a\":1\n//f\n}"), .Jsonc)
+	foot, ferr := core.build(transmute([]u8)string("{\"a\":1\n//f\n}"), json.as(.Jsonc))
 	defer core.destroy(&foot)
 	if !testing.expectf(t, ferr == nil, "build: %v", ferr) {
 		return
@@ -53,7 +54,7 @@ fact_read_roles :: proc(t: ^testing.T) {
 // A body with an LF is written as a block comment. An LF in an inline fact's body is refused with `.Bad_Fact`.
 @(test)
 fact_shapes :: proc(t: ^testing.T) {
-	doc, _ := json.build(transmute([]u8)string(`{"a":1}`), .Jsonc)
+	doc, _ := core.build(transmute([]u8)string(`{"a":1}`), json.as(.Jsonc))
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
@@ -75,7 +76,7 @@ fact_each_role :: proc(t: ^testing.T) {
 			{.Comment_Inline, 1, "[1 //old\n]"},
 			{.Comment_Foot, 0, "[1\n//old\n]"},
 		}) {
-		doc, err := json.build(transmute([]u8)c.src, .Jsonc)
+		doc, err := core.build(transmute([]u8)c.src, json.as(.Jsonc))
 		defer core.destroy(&doc)
 		if !testing.expectf(t, err == nil, "%q: %v", c.src, err) {
 			return
@@ -85,14 +86,14 @@ fact_each_role :: proc(t: ^testing.T) {
 		if e := core.set_fact(&list, c.node, c.role, string("new")); !walktest.expect_nil(t, e) {
 			return
 		}
-		out, dropped, cerr := core.commit(&list, json.as(.Jsonc))
+		out, dropped, cerr := compose.commit(&list, json.as(.Jsonc))
 		defer if len(out) > 0 {
 			delete(out)
 		}
 		if !testing.expectf(t, cerr == nil && dropped == 0, "role %v: %v, %d dropped", c.role, cerr, dropped) {
 			return
 		}
-		read, rerr := json.build(out, .Jsonc)
+		read, rerr := core.build(out, json.as(.Jsonc))
 		if !testing.expectf(t, rerr == nil, "replace does not read: %v in %q", rerr, out) {
 			core.destroy(&read)
 			return
@@ -105,11 +106,11 @@ fact_each_role :: proc(t: ^testing.T) {
 		if e := core.remove_fact(&gone, c.node, c.role); !walktest.expect_nil(t, e) {
 			return
 		}
-		out2, _, err2 := core.commit(&gone, json.as(.Jsonc))
+		out2, _, err2 := compose.commit(&gone, json.as(.Jsonc))
 		defer if len(out2) > 0 {
 			delete(out2)
 		}
-		read2, rerr2 := json.build(out2, .Jsonc)
+		read2, rerr2 := core.build(out2, json.as(.Jsonc))
 		it := core.facts_of(&read2, c.node, c.role)
 		_, still := core.fact_next(&it)
 		testing.expectf(t, err2 == nil && rerr2 == nil && !still, "remove role %v: %v %v %q", c.role, err2, rerr2, out2)
@@ -121,7 +122,7 @@ fact_each_role :: proc(t: ^testing.T) {
 // and refused by `commit` with `.Conflicting_Edits`.
 @(test)
 fact_errors :: proc(t: ^testing.T) {
-	doc, _ := json.build(transmute([]u8)string(`{"a":1}`), .Jsonc)
+	doc, _ := core.build(transmute([]u8)string(`{"a":1}`), json.as(.Jsonc))
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
@@ -129,14 +130,14 @@ fact_errors :: proc(t: ^testing.T) {
 	walktest.expect_kind(t, core.set_fact(&list, 2, .Value, string("c")), core.Document_Error_Kind.Bad_Index)
 	walktest.expect_nil(t, core.set_fact(&list, 2, .Comment, string("c")))
 	walktest.expect_nil(t, core.set_fact(&list, 2, .Comment, string("d")))
-	_, _, err := core.commit(&list)
+	_, _, err := compose.commit(&list)
 	walktest.expect_kind(t, err, core.Document_Error_Kind.Conflicting_Edits)
 }
 
 // `Role(200)` is refused with `.Bad_Fact`, not a node error.
 @(test)
 fact_unknown_role :: proc(t: ^testing.T) {
-	doc, _ := json.build(transmute([]u8)string(`{"a":1}`), .Jsonc)
+	doc, _ := core.build(transmute([]u8)string(`{"a":1}`), json.as(.Jsonc))
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
@@ -147,7 +148,7 @@ fact_unknown_role :: proc(t: ^testing.T) {
 @(test)
 fact_on_removed_node :: proc(t: ^testing.T) {
 	for order in 0 ..< 2 {
-		doc, _ := json.build(transmute([]u8)string(`{"a":1,"b":2}`), .Jsonc)
+		doc, _ := core.build(transmute([]u8)string(`{"a":1,"b":2}`), json.as(.Jsonc))
 		list := core.edit_list_init(&doc)
 		if order == 0 {
 			walktest.expect_nil(t, core.set_fact(&list, 2, .Comment_Inline, string("x")))
@@ -156,7 +157,7 @@ fact_on_removed_node :: proc(t: ^testing.T) {
 			walktest.expect_nil(t, core.remove(&list, 2))
 			walktest.expect_nil(t, core.set_fact(&list, 2, .Comment_Inline, string("x")))
 		}
-		out, _, err := core.commit(&list)
+		out, _, err := compose.commit(&list)
 		if len(out) > 0 {
 			delete(out)
 		}
@@ -170,11 +171,11 @@ fact_on_removed_node :: proc(t: ^testing.T) {
 // fails with `.Bad_Result` and drops nothing.
 @(test)
 fact_spec_change_reads_strictly :: proc(t: ^testing.T) {
-	doc, _ := json.build(transmute([]u8)string("{a:1}"), .Json5)
+	doc, _ := core.build(transmute([]u8)string("{a:1}"), json.as(.Json5))
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	out, dropped, err := core.commit(&list, json.as(.Json))
+	out, dropped, err := compose.commit(&list, json.as(.Json))
 	defer if len(out) > 0 {
 		delete(out)
 	}
@@ -187,7 +188,7 @@ fact_spec_change_reads_strictly :: proc(t: ^testing.T) {
 @(test)
 fact_removed_member_takes_its_inline :: proc(t: ^testing.T) {
 	src := "[0//x\n,\"\",//\n//\n]"
-	doc, err := json.build(transmute([]u8)src, .Jsonc)
+	doc, err := core.build(transmute([]u8)src, json.as(.Jsonc))
 	defer core.destroy(&doc)
 	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
@@ -199,7 +200,7 @@ fact_removed_member_takes_its_inline :: proc(t: ^testing.T) {
 	defer core.edit_list_destroy(&list)
 	walktest.expect_nil(t, core.remove(&list, 2))
 	walktest.expect_nil(t, core.remove_fact(&list, core.ROOT, .Comment_Foot))
-	out, dropped, cerr := core.commit(&list, json.as(.Jsonc))
+	out, dropped, cerr := compose.commit(&list, json.as(.Jsonc))
 	defer if len(out) > 0 {
 		delete(out)
 	}
@@ -209,7 +210,7 @@ fact_removed_member_takes_its_inline :: proc(t: ^testing.T) {
 	if !testing.expectf(t, string(out) == "[0//x\n]", "committed %q", out) {
 		return
 	}
-	read, rerr := json.build(out, .Jsonc)
+	read, rerr := core.build(out, json.as(.Jsonc))
 	defer core.destroy(&read)
 	if !testing.expectf(t, rerr == nil, "committed text does not read: %v in %q", rerr, out) {
 		return
@@ -258,7 +259,7 @@ Fact_Row :: struct {
 
 fact_rows :: proc(t: ^testing.T, rows: []Fact_Row) {
 	for r in rows {
-		doc, err := json.build(transmute([]u8)r.src, r.from)
+		doc, err := core.build(transmute([]u8)r.src, json.as(r.from))
 		defer core.destroy(&doc)
 		if !testing.expectf(t, err == nil, "%q: %v", r.src, err) {
 			return
@@ -291,7 +292,7 @@ fact_rows :: proc(t: ^testing.T, rows: []Fact_Row) {
 				return
 			}
 		}
-		out, dropped, cerr := core.commit(&list, json.as(r.as))
+		out, dropped, cerr := compose.commit(&list, json.as(r.as))
 		defer if len(out) > 0 {
 			delete(out)
 		}
@@ -301,7 +302,7 @@ fact_rows :: proc(t: ^testing.T, rows: []Fact_Row) {
 		if r.want != "" && !testing.expectf(t, string(out) == r.want, "%q: committed %q, want %q", r.src, out, r.want) {
 			return
 		}
-		read, rerr := json.build(out, r.as)
+		read, rerr := core.build(out, json.as(r.as))
 		defer core.destroy(&read)
 		if !testing.expectf(t, rerr == nil, "%q: committed text does not read: %v in %q", r.src, rerr, out) {
 			return

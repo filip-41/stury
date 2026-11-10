@@ -676,7 +676,7 @@ edit_cell_of :: proc(w: ^Edit_State, v: jq.Value, at: u64) -> (text: string, ok:
 	}
 	cells := [1]write.Scalar{scalar}
 	if kind := records.write_cells(&wr, cells[:]); kind != .None {
-		w.err = edit_cell_refusal(cell, jq.kind(v) == .String && w.doc.spelling.resolves != nil && w.doc.spelling.resolves(w.doc.as))
+		w.err = edit_cell_refusal(cell, jq.kind(v) == .String && w.doc.readers.resolves != nil && w.doc.readers.resolves(w.doc.as))
 		return "", false
 	}
 	out, verr := records.writer_end(&wr)

@@ -81,13 +81,15 @@ path_error :: proc(e: Document_Error) -> Path_Error
 reorder :: proc(list: ^Edit_List, container: Node_Index, order: []u32) -> Error
 reserve_depth :: #force_inline proc "contextless" (max_depth: u32, n: int) -> int
 result_of :: #force_inline proc "contextless" (r: u64, rules: ^Rules) -> (hi: u64, fault: Maybe(Fault), stopped: bool)
+same_format :: #force_inline proc "contextless" (a, b: ^Readers) -> bool
 scalar_ends :: #force_inline proc "contextless" (t: Token) -> (lo, hi: u64)
+services_of :: #force_inline proc "contextless" (as: As) -> ^Services
 set_facts :: proc(list: ^Edit_List, node: Node_Index, role: Role, texts: []string, padded := false) -> Error
 subtree_facts :: proc(doc: ^Document, i: Node_Index) -> []Fact
 text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator) -> (s: string, ok: bool)
 text_spelling :: #force_inline proc "contextless" (escaped, lax: bool) -> u16
 text_start :: proc "contextless" (src: []u8, lo: u64) -> u64
-token_text :: proc(spelling: ^Spelling, view: ^Token_View, t: Token, allocator: runtime.Allocator) -> (s: string, ok: bool)
+token_text :: proc(readers: ^Readers, view: ^Token_View, t: Token, allocator: runtime.Allocator) -> (s: string, ok: bool)
 write_fault_message :: proc(w: io.Writer, src: []u8, f: Fault) -> io.Error
 # host
 writing :: proc(pool: ^Pool, on: bool)
@@ -142,6 +144,7 @@ builder_refuse_result :: #force_inline proc "contextless" (h: ^Builder, open, en
 builder_start :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth: int, facts := 0, frames: []u64 = nil) -> Builder
 feed_nodes :: proc "contextless" ( doc: ^core.Document, from, to: u32, h: ^$H, out: ^core.Hook_Regs, ends: []u32, $step: proc "contextless" (h: ^H, regs: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action), $keyed: proc "contextless" (h: ^H, regs: core.Hook_Regs, i, open: core.Node_Index) -> (core.Node_Index, bool), $deepen: proc "contextless" (h: ^H, extra: int) -> bool, $OPEN: bool, ) -> bool
 no_deepen :: proc "contextless" (_: ^$H, _: int) -> bool
+query_built :: proc(doc: ^core.Document, built: core.Error, paths: []core.Path, read: core.Path_Options) -> (core.Document, core.Error)
 scan_again :: proc(h: ^Scan, src: []u8, as: core.As, allocator: runtime.Allocator, frames: []u64) -> core.Path_Error
 scan_deepen :: #force_no_inline proc "contextless" (h: ^Scan, extra: int) -> bool
 scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(core.Fault), doc: ^core.Document) -> core.Path_Error
@@ -153,11 +156,11 @@ scan_kept :: proc "contextless" (h: ^Scan, d: int) -> bool
 scan_reserve :: proc "contextless" (h: ^Scan, nodes: int) -> bool
 scan_room :: #force_inline proc "contextless" (h: ^Scan) -> int
 scan_start :: proc(h: ^Scan, src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error
+set_answers :: proc(list: ^core.Edit_List, path: core.Path, text: string, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
 # core/typed
 Check :: struct { using reader: Reader, }
-Format_Reads :: struct { read, check: Text_Read, node_read, node_check: Node_Read, }
 KEY_SIZE_MAX :: 240
-check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, spelling: ^core.Spelling, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error)
+check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error)
 enum_member :: proc "contextless" (info: ^runtime.Type_Info_Enum, value: i64) -> int
 field_at :: #force_inline proc "contextless" (b: u64) -> ^Field
 grow_frames :: #force_no_inline proc "contextless" (h: ^Reader, have, want: int) -> (int, bool)
@@ -173,10 +176,13 @@ own_errors :: proc(e: ^core.Typed_Error, c: ^Sink)
 path_add :: proc "contextless" (e: ^core.Typed_Error, s: core.Step)
 path_close :: proc "contextless" (e: ^core.Typed_Error)
 plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Typed_Error)
-plan_mismatch :: proc "contextless" (plan: ^Plan, spelling: ^core.Spelling, T: typeid) -> core.Typed_Error
+plan_mismatch :: proc "contextless" (plan: ^Plan, readers: ^core.Readers, T: typeid) -> core.Typed_Error
+plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Error)
+plan_reads :: proc(p: ^Plan, reads: ^Format_Reads)
+pointer_target :: proc "contextless" (target: any) -> (data: rawptr, T: typeid, pointer: bool)
 read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> core.Typed_Error
 read_release :: proc "contextless" (r: ^Reader, frames: []Frame)
-read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, spelling: ^core.Spelling, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error)
+read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error)
 refuse_element :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action)
 refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, regs_in: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action)
 sink_error :: proc(c: ^Sink, e: core.Typed_Error)
@@ -209,13 +215,15 @@ release_sides :: proc(side: ^map[typeid]^typed.Plan)
 room :: #force_inline proc(out: ^Out, n: int) -> [^]u8 #no_bounds_check
 side_plan :: proc(side: ^map[typeid]^typed.Plan, parent: ^typed.Plan, T: typeid) -> (^typed.Plan, core.Typed_Error_Kind)
 tokens_finish :: proc(t: ^Tokens) -> (bytes: []u8, err: core.Typed_Error)
-tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind
+tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}, spell: ^Token_Spelling = nil) -> core.Typed_Error_Kind
 tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind
 tokens_release :: proc(t: ^Tokens)
 union_arm :: proc(m: ^typed.Meta, v: uintptr) -> ^typed.Arm
 # core/records
 entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64) -> bool
 next_window :: proc(it: ^Reader) -> (window: []u8, base: u64, ok: bool)
+open_stream_with :: proc(input: io.Reader, as: core.As, services: ^Framing_Services, docs: ^Record_Docs, framing := core.Framing.Lines, opts := Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> Reader
+open_with :: proc(src: []u8, as: core.As, services: ^Framing_Services, docs: ^Record_Docs, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator) -> Reader
 validate_parallel :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault)
 write_text :: proc(wr: ^Writer, text: []u8) -> core.Typed_Error_Kind
 writer_take :: proc(wr: ^Writer) -> []u8

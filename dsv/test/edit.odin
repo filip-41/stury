@@ -5,6 +5,7 @@ import "core:mem"
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import compose "../../core/compose"
 import dsv ".."
 import walktest "../../walktest"
 
@@ -127,7 +128,7 @@ run_edit :: proc(t: ^testing.T, c: Edit_Case) -> bool {
 	out: []u8
 	dropped: int
 	if got == nil {
-		out, dropped, got = core.commit(&list)
+		out, dropped, got = compose.commit(&list)
 	}
 	defer if len(out) > 0 {
 		delete(out)
@@ -243,7 +244,7 @@ edit_wide_record :: proc(t: ^testing.T) {
 		{src = wide, fail = .Bad_Width, opts = RAGGED, ops = {drop(2)}},
 		{src = wide, fail = .Bad_Width, opts = RAGGED, ops = {{kind = .Member, node = 9, a = "c", b = "z"}}},
 	})
-	doc, err := dsv.build(transmute([]u8)string("abc,de\n1,2,3\n"), .Csv, RAGGED)
+	doc, err := core.build(transmute([]u8)string("abc,de\n1,2,3\n"), dsv.as(.Csv, RAGGED))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, string(core.span(&doc, doc.shared_keys)), "abc,de\n")
@@ -385,7 +386,7 @@ edit_zero_width_cells :: proc(t: ^testing.T) {
 set_and_remove_of_a_cell :: proc(t: ^testing.T) {
 	for text in ([]string{"z", ""}) {
 		for set_first in ([]bool{true, false}) {
-			doc, _ := dsv.build(transmute([]u8)string("a\n1\n2\n"), .Csv)
+			doc, _ := core.build(transmute([]u8)string("a\n1\n2\n"), dsv.as(.Csv))
 			defer core.destroy(&doc)
 			list := core.edit_list_init(&doc)
 			defer core.edit_list_destroy(&list)
@@ -395,7 +396,7 @@ set_and_remove_of_a_cell :: proc(t: ^testing.T) {
 			}
 			walktest.expect_nil(t, apply(&list, first))
 			walktest.expect_nil(t, apply(&list, second))
-			out, _, e := core.commit(&list)
+			out, _, e := compose.commit(&list)
 			delete(out)
 			testing.expectf(t, walktest.document_of(e).kind == .Conflicting_Edits && walktest.at_of(e) == 2, "%q set first %v: %v", text, set_first, e)
 		}
@@ -416,14 +417,14 @@ edit_no_leak :: proc(t: ^testing.T) {
 	mem.tracking_allocator_init(&track, context.allocator)
 	defer mem.tracking_allocator_destroy(&track)
 	alloc := mem.tracking_allocator(&track)
-	doc, err := dsv.build(transmute([]u8)string("a,b\n1,2\n3,4\n"), .Csv)
+	doc, err := core.build(transmute([]u8)string("a,b\n1,2\n3,4\n"), dsv.as(.Csv))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
 	list := core.edit_list_init(&doc, allocator = alloc)
 	for op in ([]Op{put(5, "9"), ins(core.ROOT, 2, "7,8"), put(6, "9")}) {
 		walktest.expect_nil(t, apply(&list, op))
 	}
-	out, _, cerr := core.commit(&list, allocator = alloc)
+	out, _, cerr := compose.commit(&list, allocator = alloc)
 	walktest.expect_nil(t, cerr)
 	delete(out, allocator = alloc)
 	core.edit_list_destroy(&list)
@@ -432,7 +433,7 @@ edit_no_leak :: proc(t: ^testing.T) {
 
 @(test)
 edit_out_of_memory :: proc(t: ^testing.T) {
-	doc, _ := dsv.build(transmute([]u8)string("a,b\n1,2\n"), .Csv)
+	doc, _ := core.build(transmute([]u8)string("a,b\n1,2\n"), dsv.as(.Csv))
 	defer core.destroy(&doc)
 	f := walktest.Failing_Alloc{inner = context.allocator, fail_at = -1}
 	alloc := walktest.failing_allocator(&f)
@@ -457,7 +458,7 @@ edit_out_of_memory :: proc(t: ^testing.T) {
 	for fail_at in 0 ..< 32 {
 		f.n = 0
 		f.fail_at = fail_at
-		out, _, e := core.commit(&list, allocator = alloc)
+		out, _, e := compose.commit(&list, allocator = alloc)
 		if _, oom := e.(runtime.Allocator_Error); oom {
 			continue
 		}
@@ -474,11 +475,11 @@ edit_out_of_memory :: proc(t: ^testing.T) {
 // A spec change would respell every cell, so it is refused with `Bad_Spec` before anything is written.
 @(test)
 fact_spec_change_refused :: proc(t: ^testing.T) {
-	doc, _ := dsv.build(transmute([]u8)string("a,b\n1,2\n"), .Csv)
+	doc, _ := core.build(transmute([]u8)string("a,b\n1,2\n"), dsv.as(.Csv))
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	out, _, err := core.commit(&list, dsv.as(.Tsv))
+	out, _, err := compose.commit(&list, dsv.as(.Tsv))
 	walktest.expect_kind(t, err, core.Document_Error_Kind.Bad_Spec)
 	testing.expect(t, out == nil)
 }

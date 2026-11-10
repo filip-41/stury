@@ -11,16 +11,22 @@ import build "../core/build"
 import typed "../core/typed"
 import records "../core/records"
 
+// The framing and the record reads a handle reaches, which dispatch on the handle's spec and so link every spec's walk.
+// A constant spec gets `framing_of` and `record_docs`, which link the walks of that spec alone.
 @(private, rodata)
-RECORDS := records.Services {
+FRAMING := records.Framing_Services {
 	ends  = {.Lines = '\n', .Seq = 0x1e, .Concatenated = 0, .Entries = 0},
 	next  = {.Lines = frame_line, .Seq = frame_line, .Concatenated = next_walked, .Entries = next_walked},
 	judge = judge_record,
 	guess = guess_start,
 	exact = exact_cut,
 	piece = piece_of,
-	scan  = scan_record,
 	whole = whole_text,
+}
+
+@(private, rodata)
+DOCS := records.Record_Docs {
+	scan  = scan_record,
 	read  = read_record,
 	build = build_record,
 	build_next = build_next,
@@ -77,6 +83,12 @@ guess_start :: proc(it: ^records.Reader, to: u64) -> bool {
 @(private)
 whole_text :: proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64) {
 	at, levels, ok := spine(src, as)
+	return as, .Entries, at if ok && levels > 0 else 0
+}
+
+@(private)
+whole_spec :: proc(src: []u8, as: core.As, $S: Spec) -> (core.As, core.Framing, u64) {
+	at, levels, ok := spine_of(src, options_of(as), S)
 	return as, .Entries, at if ok && levels > 0 else 0
 }
 
@@ -143,13 +155,19 @@ spine_of :: proc(src: []u8, opts: Options, $S: Spec) -> (at: u64, levels: int, o
 
 @(private)
 next_walked :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) {
+	switch Spec(it.as.spec) {
+	case .Json:  return next_walked_spec(it, .Json)
+	case .Jsonc: return next_walked_spec(it, .Jsonc)
+	case .Json5: return next_walked_spec(it, .Json5)
+	}
+	return
+}
+
+@(private)
+next_walked_spec :: proc(it: ^records.Reader, $S: Spec) -> (rec: records.Record, ok: bool) {
 	h: core.No_Hooks
 	regs: core.Hook_Regs
-	switch Spec(it.as.spec) {
-	case .Json:  rec, ok, _ = frame_walked(it, .Json, options_of(it.as), &h, &regs, core.no_hook)
-	case .Jsonc: rec, ok, _ = frame_walked(it, .Jsonc, options_of(it.as), &h, &regs, core.no_hook)
-	case .Json5: rec, ok, _ = frame_walked(it, .Json5, options_of(it.as), &h, &regs, core.no_hook)
-	}
+	rec, ok, _ = frame_walked(it, S, options_of(it.as), &h, &regs, core.no_hook)
 	return
 }
 
@@ -399,9 +417,6 @@ find_byte :: #force_inline proc "contextless" (src: []u8, lo: u64, c: u8) -> u64
 
 @(private)
 judge_record :: proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) {
-	if it.framing >= .Concatenated {
-		return nil
-	}
 	switch Spec(it.as.spec) {
 	case .Json:  return judge_spec(it, rec, .Json)
 	case .Jsonc: return judge_spec(it, rec, .Jsonc)
@@ -412,6 +427,9 @@ judge_record :: proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fau
 
 @(private)
 judge_spec :: proc(it: ^records.Reader, rec: records.Record, $S: Spec) -> Maybe(core.Fault) {
+	if it.framing >= .Concatenated {
+		return nil
+	}
 	h: core.No_Hooks
 	regs: core.Hook_Regs
 	opts := options_of(it.as)
@@ -520,7 +538,7 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 	opts := options_of(it.as)
 	if read.dups == .Refuse {
 		// The duplicate check builds the record's text, so the framing's walk finds its end first.
-		rec, ok := RECORDS.next[it.framing](it)
+		rec, ok := it.services.next[it.framing](it)
 		if ok {
 			read_value(it.src, rec.at, rec.at + u64(len(rec.text)), S, target, T, plan, read, opts, it.frames, allocator, runtime.arena_allocator(&it.scratch), err, false, false)
 		}
@@ -528,7 +546,7 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 	}
 	h: typed.Reader
 	json_reader(&h, &opts, S)
-	regs, started := typed.read_start(&h, it.src, plan, &SPELLING, T, target, read, it.frames, allocator)
+	regs, started := typed.read_start(&h, it.src, plan, it.as, T, target, read, it.frames, allocator)
 	h.ctx.temp_allocator = runtime.arena_allocator(&it.scratch)
 	if started.kind != .None {
 		err^ = started
@@ -543,7 +561,7 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 	// hook ends where `next` does.
 	if stopped || it.fault != nil {
 		it.pos, it.state, it.fault = pos, state, nil
-		_, ok = RECORDS.next[it.framing](it)
+		_, ok = it.services.next[it.framing](it)
 	}
 	if !ok {
 		typed.sink_restore(read.sink, kept)
@@ -556,13 +574,23 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 // Builds the document of `rec`'s text, under `.Seq` as `seq_fault` frames it. Its offsets in a fault count from the
 // input's first byte.
 @(private)
-build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (doc: core.Document, err: core.Document_Error) {
+build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+	switch Spec(it.as.spec) {
+	case .Json:  return build_record_spec(it, rec, allocator, .Json)
+	case .Jsonc: return build_record_spec(it, rec, allocator, .Jsonc)
+	case .Json5: return build_record_spec(it, rec, allocator, .Json5)
+	}
+	return {}, {kind = .Bad_Spec}
+}
+
+@(private)
+build_record_spec :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator, $S: Spec) -> (doc: core.Document, err: core.Document_Error) {
 	// An unframed `.Seq` record is refused whole by `seq_fault`.
 	if it.framing != .Seq || it.state[1] != UNFRAMED {
-		if stray_bom(rec.text, rec.at, Spec(it.as.spec)) {
+		if stray_bom(rec.text, rec.at, S) {
 			return {}, {kind = .Walk, at = rec.at, inner = {at = rec.at, rules = &RULES, kind = .Bad_Char, detail = u8(Detail.Expected_Value)}}
 		}
-		doc, err = build_as(rec.text, it.as, false, allocator)
+		doc, err = build_spec(rec.text, S, it.as, false, allocator)
 	}
 	if it.framing == .Seq && err.kind == .None {
 		// `seq_fault` takes the record's offset in the window, which a stream's `rec.at` is not.
@@ -579,13 +607,26 @@ build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtim
 // Frames the next record under `.Concatenated` or `.Entries` by the walk that writes its nodes to `b`. Strict JSON
 // alone, whose walk gives no comment, which the builder's plain hooks take for a node.
 @(private)
-build_next :: proc(it: ^records.Reader, b: ^build.Builder, regs: ^core.Hook_Regs) -> (rec: records.Record, ok: bool) {
-	if Spec(it.as.spec) != .Json || it.framing < .Concatenated {
+build_next :: proc(it: ^records.Reader, b: ^build.Builder, regs: ^core.Hook_Regs) -> (records.Record, bool) {
+	if Spec(it.as.spec) != .Json {
 		it.fault = core.Fault{kind = .Bad_Option}
-	} else if b.refuse {
-		rec, ok, _ = frame_walked(it, .Json, options_of(it.as), b, regs, build.builder_hook_plain_refuse)
+		return {}, false
+	}
+	return build_next_spec(it, b, regs, .Json)
+}
+
+@(private)
+build_next_spec :: proc(it: ^records.Reader, b: ^build.Builder, regs: ^core.Hook_Regs, $S: Spec) -> (rec: records.Record, ok: bool) {
+	when S == .Json {
+		if it.framing < .Concatenated {
+			it.fault = core.Fault{kind = .Bad_Option}
+		} else if b.refuse {
+			rec, ok, _ = frame_walked(it, .Json, options_of(it.as), b, regs, build.builder_hook_plain_refuse)
+		} else {
+			rec, ok, _ = frame_walked(it, .Json, options_of(it.as), b, regs, build.builder_hook_plain)
+		}
 	} else {
-		rec, ok, _ = frame_walked(it, .Json, options_of(it.as), b, regs, build.builder_hook_plain)
+		it.fault = core.Fault{kind = .Bad_Option}
 	}
 	return
 }

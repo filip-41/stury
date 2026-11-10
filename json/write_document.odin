@@ -354,7 +354,7 @@ copies_strings :: #force_inline proc "contextless" (opts: core.Write_Options) ->
 // once for each. A partial document keeps no comments. A document nested past `MAX_DEPTH` was built under a raised
 // `max_depth` and is written.
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
-	return {spelling = &SPELLING, max_depth = opts.max_depth, spec = u8(spec), tolerate = opts.tolerate, opts = {0 = u8(opts.refuse_non_finite)}}
+	return {readers = &HANDLE, max_depth = opts.max_depth, spec = u8(spec), tolerate = opts.tolerate, opts = {0 = u8(opts.refuse_non_finite)}}
 }
 
 // The spelling's `write`: node `node` of `doc`, which `core.write` checked is a value the document holds, as the spec
@@ -379,7 +379,7 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, n
 	kind: core.Typed_Error_Kind
 	switch {
 	// The tree writes what the row walk does not: a partial document, another format's, comments, sorted keys and JSON5.
-	case doc.partial || doc.spelling != &SPELLING || len(core.subtree_facts(doc, node)) != 0 || opts.sort_keys || Spec(doc.as.spec) == .Json5:
+	case doc.partial || doc.readers.format != rules_of || len(core.subtree_facts(doc, node)) != 0 || opts.sort_keys || Spec(doc.as.spec) == .Json5:
 		dropped, kind = write_tree(doc, opts, &out, Spec(as.spec), node)
 	case dense_route(doc, opts, src, count):
 		write_dense(&out, src)

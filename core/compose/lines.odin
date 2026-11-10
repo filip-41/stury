@@ -43,7 +43,7 @@ compose_root_junction :: proc(cx: ^Compose, open, close: u64, l, r: int, inserts
 		a_end = max(lo, core.text_start(doc.src, 0))
 		b_lo = a_end
 	}
-	sep := transmute([]u8)doc.spelling.edit.member_sep(doc, core.ROOT)
+	sep := transmute([]u8)cx.edit.member_sep(doc, core.ROOT)
 	from := len(cx.text)
 	cx.in_line, cx.value_line = false, false
 	emit_range(cx, lo, a_end, false) or_return

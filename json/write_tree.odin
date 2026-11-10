@@ -44,17 +44,17 @@ Pair :: struct {
 // Writes node `node` of `doc` as spec `as` into `out`. The count is the facts `as` cannot hold.
 @(private)
 write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Out, as: Spec, node: core.Node_Index) -> (dropped: int, kind: core.Typed_Error_Kind) {
-	w := Tree{doc = doc, root = node, out = out, opts = opts, json = doc.spelling == &SPELLING}
+	w := Tree{doc = doc, root = node, out = out, opts = opts, json = doc.readers.format == rules_of}
 	w.keep = w.json && as != .Json && !doc.partial
 	w.respell = w.json && Spec(doc.as.spec) == .Json5 && as != .Json5
 	w.seps = as == .Json5
 	w.copy = w.json && !w.respell && copies_strings(opts)
-	w.resolve = doc.spelling.resolves != nil && doc.spelling.resolves(doc.as)
+	w.resolve = doc.readers.resolves != nil && doc.readers.resolves(doc.as)
 	if w.keep {
 		root := doc.nodes[node]
 		_, w.close = core.scalar_ends(root)
 		if root.kind >= .Array {
-			w.close = doc.spelling.close_end(doc, node)
+			w.close = doc.readers.close_end(doc, node)
 		}
 	} else {
 		w.dropped = len(core.subtree_facts(doc, node))
@@ -292,7 +292,7 @@ tree_scalar :: #force_inline proc(w: ^Tree, i: core.Node_Index) -> bool {
 		return w.kind == .None
 	}
 	cell := t
-	cell.kind = doc.spelling.resolve(doc, i) if t.kind == .Plain && (w.resolve || t.n == 0) else t.kind
+	cell.kind = doc.readers.resolve(doc, i) if t.kind == .Plain && (w.resolve || t.n == 0) else t.kind
 	w.kind = put_token(w.out, doc.src, doc, i, cell, w.opts, w.json, w.copy)
 	return w.kind == .None
 }

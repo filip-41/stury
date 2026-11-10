@@ -155,7 +155,9 @@ answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
 		} else if len(route.path.steps) == 0 && route.path.limit == nil {
 			answers = root[:] // `.`
 		} else {
-			answers, err = core.query(&doc, route.path, allocator = context.temp_allocator)
+			perr: core.Path_Error
+			answers, perr = engine.query(&doc, []core.Path{route.path}, allocator = context.temp_allocator)
+			err = core.error_of(perr)
 		}
 	} else {
 		doc, err = engine.scan(data, r, route.path, allocator = context.temp_allocator)

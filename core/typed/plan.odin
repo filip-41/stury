@@ -206,6 +206,10 @@ Plan :: struct {
 	node_check: Node_Read,
 	// The format's value writer, which holds its spelling compiled in, where its plan maker sets it.
 	marshal:   Marshal_Text,
+	// Checks a `Raw` member's text as one value of the format, and the format's `^write.Token_Spelling` a token write by
+	// the plan uses, nil for a format with none.
+	raw:       proc(v: ^core.Token_View, src: []u8, allocator: runtime.Allocator) -> core.Document_Error,
+	tokens:    rawptr,
 	// The options the plan was built with, which its reads and writes take, and so do the plans a write builds for a type
 	// met in an `any`.
 	using options: Plan_Options,
@@ -252,20 +256,21 @@ Block_Key :: struct {
 	of:   i32,
 }
 
-// A format's plan maker, which `core.Spelling.plans` points at: `plan_build` and what the format's reads and writes add.
+// A format's plan maker, which `core.Services.plans` points at: `plan_build` and what the format's reads and writes add.
 Plan_Make :: #type proc(T: typeid, as: core.As, opts: Plan_Options, allocator: runtime.Allocator) -> (Plan, core.Typed_Error)
 
 // Builds the plan of `T` for format `as`, by the format's plan maker, allocating with `allocator`. A type the read
 // cannot take is an error, with the path to it, and the plan is then the zero value with that error in `err`. `opts`'s
-// strings and slices are read here only. A format with no plan maker gets `plan_build`'s plan, and a nil spelling is
+// strings and slices are read here only. A format with no plan maker gets `plan_build`'s plan, and a handle with no services is
 // `.Bad_Option`.
 plan_make :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (Plan, core.Error) {
-	if as.spelling == nil {
+	services := core.services_of(as)
+	if services == nil {
 		err := core.Typed_Error{kind = .Bad_Option}
 		return {err = err}, core.error_of(err)
 	}
-	if as.spelling.plans != nil {
-		made, err := (Plan_Make)(as.spelling.plans)(T, as, opts, allocator)
+	if services.plans != nil {
+		made, err := (Plan_Make)(services.plans)(T, as, opts, allocator)
 		return made, core.error_of(err)
 	}
 	made, err := plan_build(T, as, opts, allocator)
@@ -288,13 +293,26 @@ plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := 
 	return
 }
 
+// Gives `p` the text reads and node reads of `reads`, where it holds any.
+plan_reads :: proc(p: ^Plan, reads: ^Format_Reads) {
+	if reads != nil {
+		p.read, p.check, p.node_read, p.node_check = reads.read, reads.check, reads.node_read, reads.node_check
+	}
+}
+
 // The plan both front ends start from: the format, its typed reads, and the options, which the plan owns.
 @(private)
 plan_start :: proc(p: ^Plan, as: core.As, opts: Plan_Options) -> Builder {
-	spelling := as.spelling
-	p^ = {as = as, key_frame = u32(len(spelling.key_open) + len(spelling.key_close)), allocator = context.allocator}
-	if reads := (^Format_Reads)(spelling.typed); reads != nil {
-		p.read, p.check, p.node_read, p.node_check = reads.read, reads.check, reads.node_read, reads.node_check
+	readers := as.readers
+	p^ = {as = as, key_frame = u32(len(readers.key_open) + len(readers.key_close)), allocator = context.allocator}
+	if services := readers.services; services != nil {
+		if reads := (^Format_Reads)(services.reads); reads != nil {
+			p.read, p.check, p.node_read, p.node_check = reads.read, reads.check, reads.node_read, reads.node_check
+		}
+		if services.edit != nil {
+			p.raw = services.edit.value
+		}
+		p.tokens = services.tokens
 	}
 	b := Builder{options = &p.options, p = p}
 	hooks, no_hooks := make([]Type_Hook, len(opts.hooks))
@@ -376,7 +394,7 @@ plan_stamp :: proc(T: typeid, as: core.As, opts: Plan_Options) -> u64 {
 		}
 	}
 	mix(&h, transmute(u64)T)
-	mix(&h, u64(uintptr(as.spelling)))
+	mix(&h, u64(uintptr(rawptr(as.readers.format))))
 	mix(&h, u64(as.max_depth) | u64(as.spec) << 32 | u64(transmute(u8)as.tolerate) << 40)
 	for b in as.opts {
 		mix(&h, u64(b))
@@ -464,7 +482,7 @@ owned_copy :: proc(b: ^Builder, s: string) -> string {
 @(private)
 expect_name :: proc(b: ^Builder, f: ^Field, name: string) {
 	f.mask = {max(u64), max(u64)}
-	open, close := b.p.spelling.key_open, b.p.spelling.key_close
+	open, close := b.p.readers.key_open, b.p.readers.key_close
 	if len(open) == 0 || len(name) == 0 {
 		return
 	}
@@ -1100,4 +1118,14 @@ hook_of :: proc(b: ^Builder, T: typeid) -> (hook: Type_Hook, ok: bool) {
 		}
 	}
 	return
+}
+
+// The address and type a pointer held in `target` points at, false for a value that is no non-nil pointer.
+pointer_target :: proc "contextless" (target: any) -> (data: rawptr, T: typeid, pointer: bool) {
+	if target.data == nil || target.id == nil {
+		return
+	}
+	info := runtime.type_info_base(type_info_of(target.id)).variant.(runtime.Type_Info_Pointer) or_return
+	data = (^rawptr)(target.data)^
+	return data, info.elem.id, info.elem != nil && data != nil
 }

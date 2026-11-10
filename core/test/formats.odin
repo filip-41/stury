@@ -5,6 +5,7 @@ import "core:io"
 import "core:strings"
 import "core:testing"
 import core ".."
+import compose "../compose"
 import dsv "../../dsv"
 import json "../../json"
 import walktest "../../walktest"
@@ -13,12 +14,12 @@ import walktest "../../walktest"
 @(test)
 json_commit_refuses_table :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("a\n1\n")
-	doc, err := dsv.build(src, .Csv)
+	doc, err := core.build(src, dsv.as(.Csv))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	out, _, cerr := core.commit(&list, json.as(.Json))
+	out, _, cerr := compose.commit(&list, json.as(.Json))
 	walktest.expect_kind(t, cerr, core.Document_Error_Kind.Bad_Spec)
 	testing.expect(t, out == nil)
 }

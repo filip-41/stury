@@ -81,11 +81,11 @@ tokens_equal_marshal :: proc(t: ^testing.T) {
 			derr: core.Error
 			switch c.spec {
 			case .Csv:
-				doc, derr = dsv.build(got, .Csv, c.layout)
+				doc, derr = core.build(got, dsv.as(.Csv, c.layout))
 			case .Tsv:
-				doc, derr = dsv.build(got, .Tsv, c.layout)
+				doc, derr = core.build(got, dsv.as(.Tsv, c.layout))
 			case .Plain:
-				doc, derr = dsv.build(got, .Plain, c.layout)
+				doc, derr = core.build(got, dsv.as(.Plain, c.layout))
 			}
 			walktest.expect_nil(t, derr)
 			core.destroy(&doc)

@@ -18,7 +18,7 @@ agree :: proc(t: ^testing.T, src: string, $T: typeid, $S: dsv.Spec, opts := dsv.
 	bytes := transmute([]u8)src
 	want, got: T
 	want_err := dsv.unmarshal(bytes, S, &want, read = read, opts = opts, allocator = context.temp_allocator)
-	doc, built := dsv.build(bytes, S, opts, .Last, context.temp_allocator)
+	doc, built := core.build(bytes, dsv.as(S, opts), .Last, context.temp_allocator)
 	defer core.destroy(&doc)
 	if built != nil {
 		// A text the walk faults on builds no document.
@@ -39,7 +39,7 @@ agree_maps :: proc(t: ^testing.T, src: string, loc := #caller_location) {
 	bytes := transmute([]u8)src
 	want, got: []map[string]i64
 	walktest.expect_nil(t, dsv.unmarshal(bytes, .Csv, &want, allocator = context.temp_allocator), loc)
-	doc, _ := dsv.build(bytes, .Csv, allocator = context.temp_allocator)
+	doc, _ := core.build(bytes, dsv.as(.Csv), allocator = context.temp_allocator)
 	plan, _ := dsv.plan_make([]map[string]i64, .Csv, allocator = context.temp_allocator)
 	walktest.expect_nil(t, typed.unmarshal(&doc, core.ROOT, &got, &plan, allocator = context.temp_allocator), loc)
 	testing.expect_value(t, len(got), len(want), loc)
@@ -214,14 +214,14 @@ a_partial_document_with_no_header_reads_a_cell_it_did_not_keep_as_absent :: proc
 @(test)
 a_document_read_refuses_what_a_text_read_cannot_take :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("id,name\n1,ann\n")
-	doc, _ := dsv.build(src, .Csv, allocator = context.temp_allocator)
+	doc, _ := core.build(src, dsv.as(.Csv), allocator = context.temp_allocator)
 	plan, _ := dsv.plan_make([]Pair, .Csv, allocator = context.temp_allocator)
 	rows: []Pair
 	walktest.expect_kind(t, typed.unmarshal(&doc, core.ROOT, &rows, &plan, {dups = .Refuse}, context.temp_allocator), core.Typed_Error_Kind.Bad_Option)
 	// The header row's cells are keys, and a cell is no row.
 	walktest.expect_kind(t, typed.unmarshal(&doc, 2, &rows, &plan, {}, context.temp_allocator), core.Typed_Error_Kind.Bad_Option)
 	walktest.expect_kind(t, typed.unmarshal(&doc, 5, &rows, &plan, {}, context.temp_allocator), core.Typed_Error_Kind.Unsupported)
-	headless, _ := dsv.build(src, .Csv, {no_header = true}, allocator = context.temp_allocator)
+	headless, _ := core.build(src, dsv.as(.Csv, {no_header = true}), allocator = context.temp_allocator)
 	maps: []map[string]string
 	map_plan, _ := dsv.plan_make([]map[string]string, .Csv, allocator = context.temp_allocator)
 	walktest.expect_kind(t, typed.unmarshal(&headless, core.ROOT, &maps, &map_plan, {}, context.temp_allocator), core.Typed_Error_Kind.Unsupported)
@@ -236,7 +236,7 @@ a_plan_not_made_by_dsv_refuses_a_document :: proc(t: ^testing.T) {
 		b: string,
 	}
 	src := "a,b\n1,x\n"
-	doc, _ := dsv.build(transmute([]u8)src, .Csv, allocator = context.temp_allocator)
+	doc, _ := core.build(transmute([]u8)src, dsv.as(.Csv), allocator = context.temp_allocator)
 	plan, planned := typed.plan_build([]Row, doc.as, allocator = context.temp_allocator)
 	testing.expect_value(t, planned.kind, core.Typed_Error_Kind.None)
 	rows: []Row

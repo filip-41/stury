@@ -267,10 +267,10 @@ path_reads :: proc(t: ^testing.T) {
 		testing.expectf(t, err == nil, "%q: %v", c.path, err)
 		check_answers(t, c, &doc, doc.answers, "scan")
 
-		full, berr := json.build(transmute([]u8)c.src, .Json)
+		full, berr := core.build(transmute([]u8)c.src, json.as(.Json))
 		defer core.destroy(&full)
 		walktest.expect_nil(t, berr)
-		answers, qerr := core.query(&full, path, {dups = c.opts.dups})
+		answers, qerr := json.query(&full, path, {dups = c.opts.dups})
 		defer delete(answers)
 		walktest.expect_nil(t, qerr)
 		check_answers(t, c, &full, answers, "query")
@@ -578,7 +578,7 @@ path_refusals :: proc(t: ^testing.T) {
 	defer core.path_destroy(&path)
 	doc, _ := json.scan(src, .Json, path)
 	defer core.destroy(&doc)
-	_, e := core.query(&doc, path)
+	_, e := json.query(&doc, path)
 	walktest.expect_kind(t, e, core.Path_Error_Kind.Unsupported)
 }
 
@@ -689,7 +689,7 @@ stream_spans_are_authored :: proc(t: ^testing.T) {
 @(test)
 presence_of_wrong_kinds :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`{"s":5,"a":[1,2,3],"n":null}`)
-	full, _ := json.build(src, .Json)
+	full, _ := core.build(src, json.as(.Json))
 	defer core.destroy(&full)
 	s, _ := core.member_of(&full, core.ROOT, "s")
 	a, _ := core.member_of(&full, core.ROOT, "a")
@@ -756,9 +756,9 @@ pointer_index_past_int :: proc(t: ^testing.T) {
 		defer core.destroy(&doc)
 		walktest.expect_nil(t, err)
 		testing.expectf(t, len(doc.answers) == 1 && doc.answers[0].outcome == c.outcome, "%s: %v", c.src, doc.answers)
-		full, _ := json.build(transmute([]u8)c.src, .Json)
+		full, _ := core.build(transmute([]u8)c.src, json.as(.Json))
 		defer core.destroy(&full)
-		answers, qerr := core.query(&full, path)
+		answers, qerr := json.query(&full, path)
 		defer delete(answers)
 		walktest.expect_nil(t, qerr)
 		testing.expectf(t, len(answers) == 1 && answers[0].outcome == c.outcome, "%s: %v", c.src, answers)
@@ -835,7 +835,7 @@ many_path_reads_survive_refused_allocations :: proc(t: ^testing.T) {
 	b, _ := core.parse_path(".a[-1]")
 	defer core.path_destroy(&b)
 	paths := [?]core.Path{a, b}
-	built, berr := json.build(src, .Json)
+	built, berr := core.build(src, json.as(.Json))
 	defer core.destroy(&built)
 	walktest.expect_nil(t, berr)
 	for hold in ([?]bool{false, true}) {
@@ -846,7 +846,7 @@ many_path_reads_survive_refused_allocations :: proc(t: ^testing.T) {
 			testing.expectf(t, err == nil || walktest.is_oom(err), "scan fail_at %d: %v", at, err)
 			core.destroy(&doc)
 			f = {inner = context.allocator, fail_at = at, fail_on = hold}
-			answers, qerr := core.query(&built, paths[:], allocator = alloc)
+			answers, qerr := json.query(&built, paths[:], allocator = alloc)
 			testing.expectf(t, qerr == nil || walktest.is_oom(qerr), "query fail_at %d: %v", at, qerr)
 			delete(answers, alloc)
 		}
@@ -891,9 +891,11 @@ many_path_reads :: proc(t: ^testing.T) {
 path_set_limit_counts_members :: proc(t: ^testing.T) {
 	src := `{"aaaaaaaaaaaaaaaaaaaaaaaac":{ "a":12} }`
 	path := core.Path{steps = {core.Descend{}, core.Name("a")}, limit = 1}
-	full, _ := json.build(transmute([]u8)src, .Json)
+	full, _ := core.build(transmute([]u8)src, json.as(.Json))
 	defer core.destroy(&full)
-	got, err := scan.set_answers(&full, path, "0")
+	list := json.edit_list_init(&full, .Json)
+	defer core.edit_list_destroy(&list)
+	got, err := scan.set_answers(&list, path, "0")
 	defer delete(got)
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, string(got), `{"aaaaaaaaaaaaaaaaaaaaaaaac":{ "a":0} }`)

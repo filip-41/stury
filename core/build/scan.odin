@@ -3,6 +3,7 @@ package build
 import "base:intrinsics"
 import "base:runtime"
 import core ".."
+import compose "../compose"
 
 // The path engine: one step logic that answers paths from any token source, with no format in it. `$MANY` true reads up
 // to 64 paths with the state of `many.odin`, and false compiles the same logic down to one path at step `d - 1`, where
@@ -325,7 +326,7 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 	return {}
 }
 
-// The query `Spelling.query` points at, behind `core.query`.
+// Answers `paths` over a document built whole, in the order a scan of its text answers.
 query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
 	if doc.partial {
 		return nil, {kind = .Unsupported}
@@ -373,9 +374,8 @@ query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Option
 // in that its container lacks is inserted there, an `Index` the path ends in that is its array's length appends, and a
 // `?` on either passes a container that is not of its kind. A missing parent is `.Bad_Index`, and an index past the
 // length `.Bad_Position`.
-set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	list := core.edit_list_init(doc, allocator)
-	defer core.edit_list_destroy(&list)
+set_answers :: proc(list: ^core.Edit_List, path: core.Path, text: string, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+	doc := list.doc
 	// A `Name` or an `Index` at the end is set through its container, so that a missing name or element is told from a
 	// missing parent.
 	read_path := path
@@ -405,14 +405,14 @@ set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := 
 		e := core.error_of(core.Document_Error{kind = .Bad_Index, reason = .No_Parent})
 		switch {
 		case a.outcome == .Found && (!(named || indexed) || whole):
-			e = core.set(&list, a.node, text)
+			e = core.set(list, a.node, text)
 		case a.outcome == .Found && named && doc.nodes[a.node].kind == .Object:
-			e = core.set_member(&list, a.node, string(name), text, read.dups)
+			e = core.set_member(list, a.node, string(name), text, read.dups)
 		case a.outcome == .Found && indexed:
-			e = set_element(&list, a.node, int(index), text)
+			e = set_element(list, a.node, int(index), text)
 		// A missing member names the container that lacks it.
 		case named && whole && a.outcome == .Missing && doc.nodes[a.owner].kind == .Object:
-			e = core.set_member(&list, a.owner, string(name), text, read.dups)
+			e = core.set_member(list, a.owner, string(name), text, read.dups)
 		case a.outcome == .Found && doc.nodes[a.node].kind != .Null:
 			e = core.error_of(core.Document_Error{kind = .Bad_Index, reason = .Not_Object})
 		}
@@ -424,7 +424,7 @@ set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := 
 			return nil, e
 		}
 	}
-	committed, _, e := core.commit(&list, allocator = allocator)
+	committed, _, e := compose.commit(list, allocator = allocator)
 	if e != nil {
 		return nil, e
 	}
@@ -479,7 +479,7 @@ query_built :: proc(doc: ^core.Document, built: core.Error, paths: []core.Path, 
 }
 
 // Reads `path` over `src` as `as` says, into a partial document holding what the path reached and `Document.answers` in
-// text order, through the format's `Spelling.scan`. Everything the walk passes is still judged, unless `read.stop_early`
+// text order, through the format's `Services.scan`. Everything the walk passes is still judged, unless `read.stop_early`
 // ends it. `core.destroy` frees the document, which borrows `src`. Under `.Refuse` the document holds the
 // whole text. A handle with no format's scan is `.Unsupported`.
 scan_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
@@ -493,10 +493,10 @@ scan_many :: proc(src: []u8, as: core.As, paths: []core.Path, read := core.Path_
 		built, e := core.build(src, as, .Refuse, allocator)
 		return query_built(&built, e, paths, read)
 	}
-	if as.spelling == nil || as.spelling.scan == nil {
+	if core.services_of(as) == nil || core.services_of(as).scan == nil {
 		return {}, core.error_of(core.Path_Error{kind = .Unsupported})
 	}
-	doc, err := as.spelling.scan(src, as, paths, read, nil, nil, allocator)
+	doc, err := core.services_of(as).scan(src, as, paths, read, nil, nil, allocator)
 	return doc, core.error_of(err)
 }
 
@@ -515,10 +515,10 @@ each_answer_many :: proc(src: []u8, as: core.As, paths: []core.Path, state: rawp
 			return e
 		}
 	}
-	if as.spelling == nil || as.spelling.scan == nil {
+	if core.services_of(as) == nil || core.services_of(as).scan == nil {
 		return core.error_of(core.Path_Error{kind = .Unsupported})
 	}
-	doc, err := as.spelling.scan(src, as, paths, read, state, on, allocator)
+	doc, err := core.services_of(as).scan(src, as, paths, read, state, on, allocator)
 	core.destroy(&doc)
 	return core.error_of(err)
 }
@@ -549,7 +549,9 @@ set :: proc(src: []u8, as: core.As, path: core.Path, text: string, read := core.
 	if berr != nil {
 		return nil, berr
 	}
-	return set_answers(&doc, path, text, read, allocator)
+	list := core.edit_list_init(&doc, allocator)
+	defer core.edit_list_destroy(&list)
+	return set_answers(&list, path, text, read, allocator)
 }
 
 // Feeds the step logic the tokens of nodes `from ..< to` by `feed_nodes`. Only the containers on the path open, so `ends`

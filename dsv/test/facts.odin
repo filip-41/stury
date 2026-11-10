@@ -24,7 +24,7 @@ fact_read_lines :: proc(t: ^testing.T) {
 		{"//hello\na,b\n1,2\n", '/', core.ROOT, .Comment, "/hello"},
 		{"\xEF\xBB\xBF#c\na,b\n1,2\n", '#', core.ROOT, .Comment, "c"},
 	}) {
-		doc, err := dsv.build(transmute([]u8)c.src, .Csv, {comment = c.comment})
+		doc, err := core.build(transmute([]u8)c.src, dsv.as(.Csv, {comment = c.comment}))
 		defer core.destroy(&doc)
 		if !testing.expectf(t, err == nil, "%q: %v", c.src, err) || !walktest.body(t, &doc, c.node, c.role, c.body) {
 			return

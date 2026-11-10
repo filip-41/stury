@@ -64,10 +64,10 @@ path_reads :: proc(t: ^testing.T) {
 		testing.expectf(t, err == nil, "%q: %v", c.path, err)
 		testing.expectf(t, slice_equal(answer_texts(&doc, doc.answers), c.want), "scan %q: %v", c.path, doc.answers)
 
-		full, berr := dsv.build(src, .Csv, {tolerate = {.Ragged}})
+		full, berr := core.build(src, dsv.as(.Csv, {tolerate = {.Ragged}}))
 		defer core.destroy(&full)
 		walktest.expect_nil(t, berr)
-		answers, qerr := core.query(&full, path)
+		answers, qerr := dsv.query(&full, path)
 		defer delete(answers)
 		walktest.expect_nil(t, qerr)
 		testing.expectf(t, slice_equal(answer_texts(&full, answers), c.want), "query %q: %v", c.path, answers)
@@ -317,9 +317,9 @@ path_model :: proc(t: ^testing.T) {
 		testing.expectf(t, err == nil, "%q: %v", string(src), err)
 		stopped, serr := dsv.scan(src, .Csv, paths, read = {stop_early = true})
 		testing.expectf(t, serr == nil, "%q: %v", string(src), serr)
-		full, berr := dsv.build(src, .Csv)
+		full, berr := core.build(src, dsv.as(.Csv))
 		walktest.expect_nil(t, berr)
-		answers, qerr := core.query(&full, paths)
+		answers, qerr := dsv.query(&full, paths)
 		walktest.expect_nil(t, qerr)
 		stream := Stream{src, make([dynamic]string, context.temp_allocator)}
 		eerr := dsv.each_answer(src, .Csv, paths, &stream, on_answer)
@@ -421,7 +421,7 @@ scan_allocates_from_its_allocator :: proc(t: ^testing.T) {
 @(test)
 presence_of_records :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("a,b\n1,2\n")
-	full, _ := dsv.build(src, .Csv)
+	full, _ := core.build(src, dsv.as(.Csv))
 	defer core.destroy(&full)
 	record, _ := core.element_of(&full, core.ROOT, 0)
 	cell, at := core.element_of(&full, record, 1)
@@ -457,5 +457,42 @@ path_set :: proc(t: ^testing.T) {
 		defer delete(out)
 		testing.expectf(t, err == nil, "%s: %v", c[0], err)
 		testing.expect_value(t, string(out), c[2])
+	}
+}
+
+// The walks that count a text after a refused reservation and that read one record alone for several paths read each
+// spec's text as a full read does.
+@(test)
+cold_walks_each_spec :: proc(t: ^testing.T) {
+	first, _ := core.parse_path(".[0].a")
+	other, _ := core.parse_path(".[1].b")
+	defer core.path_destroy(&first)
+	defer core.path_destroy(&other)
+	paths := [2]core.Path{first, other}
+	for spec in dsv.Spec {
+		defer free_all(context.temp_allocator)
+		sep := "\t" if spec == .Tsv else ","
+		row := strings.concatenate({"1", sep, "2\n"}, context.temp_allocator)
+		src := strings.concatenate({"a", sep, "b\n", strings.repeat(row, 3000, context.temp_allocator)}, context.temp_allocator)
+		whole, werr := dsv.build(transmute([]u8)src, spec)
+		walktest.expect_nil(t, werr)
+		backing := make([]u8, len(whole.nodes) * size_of(core.Node) + 512)
+		arena: mem.Arena
+		mem.arena_init(&arena, backing)
+		small, serr := dsv.build(transmute([]u8)src, spec, {}, .Last, mem.arena_allocator(&arena))
+		walktest.expect_nil(t, serr)
+		testing.expect_value(t, len(small.nodes), len(whole.nodes))
+		core.destroy(&small)
+		delete(backing)
+		core.destroy(&whole)
+
+		many, merr := dsv.scan(transmute([]u8)src, spec, paths[:])
+		walktest.expect_nil(t, merr)
+		if testing.expect_value(t, len(many.answers), 2) {
+			for a in many.answers {
+				testing.expect_value(t, string(core.span(&many, a.owner)), row)
+			}
+		}
+		core.destroy(&many)
 	}
 }

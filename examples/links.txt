@@ -1,0 +1,12 @@
+# What each example links at -o:minimal: the JSON walks (`json::st_value:` symbols) and the dsv passes (`dsv::pass_base:`
+# symbols). `make test-examples` builds each example and compares. A count above the line means a constant entry point
+# reaches a format's handle table; a count below it means the line is stale.
+# example walks passes
+crossformat 6 9
+dsv 0 43
+edit 4 0
+jsonc 5 0
+quickstart 6 0
+records 1 0
+roundtrip 4 0
+scan 7 0

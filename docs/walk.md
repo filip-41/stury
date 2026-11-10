@@ -245,11 +245,10 @@ lives in `core`, so a format adds no reader, no `query` and no `commit` of its o
 2. **The build.** `build` runs a count walk over `build.builder_hook_count`, reserves with `build.builder_start`, walks
    again with `build.builder_hook` and finishes the document. It is a thin entry that instantiates the walk for a spec.
 3. **The spelling.** One `core.Spelling` table in rodata, stored in the document, carries the services that need the
-   grammar: `text`, `key_equals`, `number`, `resolve` and `close_end`, plus `tag_key`, `key_open` and `key_close`. `query`
-   takes `build.query` unless the format routes paths itself. Set `edit` to one `core.Edit_Spelling` table.
+   grammar: `text`, `key_equals`, `number`, `resolve` and `close_end`, plus `tag_key`, `key_open` and `key_close`. Set `edit` to one `core.Edit_Spelling` table.
 4. **The paths.** `set` and the path walk instantiate `build.Scan` over the format's `walk`, and `Scan.rewalk` walks one
    value again for a ring's element. See `paths.md`.
-5. **The edits.** `Edit_Spelling.commit` is `compose.commit`. A format whose root has no brackets sets `flat`,
+5. **The edits.** `compose.commit` is the format package's `commit`. A format whose root has no brackets sets `flat`,
    gives the root's line end as its `member_sep` and supplies `interior`, `fact_slot`, `emptied` and `plan`.
 6. **The typed read.** `unmarshal` runs the format's `walk` over `typed.Reader`'s hook. A format that reads its values
    as JSON does needs no more. A format with its own value reader, as dsv has for a cell, stores through `core.token_text`,

@@ -19,10 +19,10 @@ Write_Options :: struct {
 // Pretty with two spaces per level.
 PRETTY :: Write_Options{pretty = true, indent = 2}
 
-// The handle of a format: its table, and the spec, depth, tolerance and option bytes a text is read or written with. A
+// The handle of a format: its readers, and the spec, depth, tolerance and option bytes a text is read or written with. A
 // format's `as` procedure makes one, and a document holds the one it was read with.
 As :: struct {
-	spelling:  ^Spelling,
+	readers:   ^Readers,
 	// The deepest nesting a read takes, 0 for `MAX_DEPTH`. An edit reads a value text at this depth.
 	max_depth: u32,
 	// The format's spec, which its services dispatch on.
@@ -70,8 +70,9 @@ format :: proc(src: []u8, as: As, opts := Write_Options{}, allocator := context.
 @(private)
 write_to :: proc(doc: ^Document, opts: Write_Options, as: Maybe(As), node: Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Error) {
 	target := as.? or_else doc.as
-	if target.spelling == nil || target.spelling.write == nil || int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
+	services := services_of(target)
+	if services == nil || services.write == nil || int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
 		return nil, 0, {kind = .Unsupported}
 	}
-	return target.spelling.write(doc, opts, target, node, stream, allocator)
+	return services.write(doc, opts, target, node, stream, allocator)
 }

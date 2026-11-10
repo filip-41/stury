@@ -12,7 +12,7 @@ import walktest "../../walktest"
 // the rows path writes, and checks that the two and `format` give the same text. A `bound` above zero also checks that
 // the source has fewer bytes per node than that.
 check_dense :: proc(t: ^testing.T, src: []u8, bound := 26) -> bool {
-	doc, err := json.build(src, .Json)
+	doc, err := core.build(src, json.as(.Json))
 	if !testing.expectf(t, err == nil, "build %q: %v", src, err) {
 		return false
 	}
@@ -20,7 +20,7 @@ check_dense :: proc(t: ^testing.T, src: []u8, bound := 26) -> bool {
 	if !testing.expectf(t, bound == 0 || len(src) < bound * len(doc.nodes), "%d bytes in %d nodes is not a dense text", len(src), len(doc.nodes)) {
 		return false
 	}
-	rows_doc, rerr := json.build(src, .Jsonc)
+	rows_doc, rerr := core.build(src, json.as(.Jsonc))
 	if !testing.expectf(t, rerr == nil, "build as JSONC %q: %v", src, rerr) {
 		return false
 	}
@@ -134,7 +134,7 @@ write_dense_segment_edges :: proc(t: ^testing.T) {
 @(test)
 write_dense_tolerant_read :: proc(t: ^testing.T) {
 	src := []u8{'[', '"', 'a', 0xFF, 'b', '"', ',', '0', ',', '0', ',', '0', ',', '0', ']'}
-	doc, err := json.build(src, .Json, {tolerate = {.Invalid_Utf8}})
+	doc, err := core.build(src, json.as(.Json, {tolerate = {.Invalid_Utf8}}))
 	defer core.destroy(&doc)
 	if !walktest.expect_nil(t, err) {
 		return
@@ -149,7 +149,7 @@ write_dense_tolerant_read :: proc(t: ^testing.T) {
 @(test)
 write_dense_leaves_other_options_to_rows :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`[ "<é>" , 1 , 2 , 3 , 4 , 5 , 6 , 7 ]`)
-	doc, _ := json.build(src, .Json)
+	doc, _ := core.build(src, json.as(.Json))
 	defer core.destroy(&doc)
 	for opts in ([?]core.Write_Options{{ascii = true}, {escape_html = true}}) {
 		text, _, err := core.write(&doc, opts)
@@ -158,7 +158,7 @@ write_dense_leaves_other_options_to_rows :: proc(t: ^testing.T) {
 		testing.expect(t, string(text) != `["<é>",1,2,3,4,5,6,7]`)
 	}
 	trailing := transmute([]u8)string(`[1,2,3,4,5,6,7,8,]`)
-	jsonc, _ := json.build(trailing, .Jsonc)
+	jsonc, _ := core.build(trailing, json.as(.Jsonc))
 	defer core.destroy(&jsonc)
 	text, _, err := core.write(&jsonc)
 	defer delete(text)

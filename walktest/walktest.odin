@@ -14,6 +14,7 @@ import "core:sync"
 import "core:sys/posix"
 import "core:testing"
 import core "../core"
+import compose "../core/compose"
 import host "../host"
 import typed "../core/typed"
 import records "../core/records"
@@ -384,7 +385,7 @@ body_line_end :: proc(body: string) -> bool {
 // such a body needs the block spelling, which holds no `*/`. An inline body with `*/` and no line end is either
 // spelled or dropped, so `fact_agrees` judges it by what reads back.
 fact_holdable :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Role, body: string, spec: u8, read: ^core.Document) -> bool {
-	edit := doc.spelling.edit
+	edit := core.services_of(doc.as).edit
 	if edit == nil || edit.comment == nil {
 		return false
 	}
@@ -438,7 +439,7 @@ fact_either :: proc(doc: ^core.Document, e: core.Edit, spec: u8) -> bool {
 	if !strings.contains(body, "*/") || body_line_end(body) {
 		return false
 	}
-	edit := doc.spelling.edit
+	edit := core.services_of(doc.as).edit
 	if edit == nil || edit.comment == nil {
 		return false
 	}
@@ -723,7 +724,7 @@ Build :: proc(src: []u8, spec: any) -> (core.Document, core.Error)
 
 // Commits `list`, checks the output against `want`, then builds the output with `build` and `spec`.
 expect_commit :: proc(t: ^testing.T, list: ^core.Edit_List, want: string, build: Build, spec: any) -> bool {
-	out, _, err := core.commit(list)
+	out, _, err := compose.commit(list)
 	defer if len(out) > 0 {
 		delete(out)
 	}

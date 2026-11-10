@@ -79,7 +79,12 @@ Named :: struct {
 // faults only on its options.
 @(private)
 layout_ok :: proc(spec: Spec, layout: Options) -> bool {
-	return validate(nil, spec, layout) == nil
+	switch spec {
+	case .Csv:   return option_fault(.Csv, layout) == nil
+	case .Tsv:   return option_fault(.Tsv, layout) == nil
+	case .Plain: return option_fault(.Plain, layout) == nil
+	}
+	return false
 }
 
 // The plan's `marshal`: the value is the list of rows.
@@ -96,7 +101,7 @@ marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options,
 // `.Ragged`.
 @(private)
 layout_as :: proc(spec: Spec, layout: Options) -> core.As {
-	return as(spec, {delimiter = layout.delimiter, comment = layout.comment, no_header = layout.no_header, crlf = layout.crlf, tolerate = layout.tolerate & {.Ragged}})
+	return as_of(&PLAN_READERS, spec, {delimiter = layout.delimiter, comment = layout.comment, no_header = layout.no_header, crlf = layout.crlf, tolerate = layout.tolerate & {.Ragged}})
 }
 
 @(private)

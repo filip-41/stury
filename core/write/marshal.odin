@@ -159,7 +159,7 @@ check_value :: proc(value: any, plan: ^typed.Plan) -> core.Typed_Error {
 		return {kind = .Plan_Mismatch}
 	}
 	if value.id != plan.type {
-		return typed.plan_mismatch(plan, plan.spelling, value.id)
+		return typed.plan_mismatch(plan, plan.readers, value.id)
 	}
 	return {}
 }

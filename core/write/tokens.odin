@@ -20,7 +20,7 @@ Number_Literal :: struct {
 	text: string,
 }
 
-// A format's token spelling, which `core.Spelling.tokens` points at. `tree` is the nested format's punctuation. `value`
+// A format's token spelling, which `core.Services.tokens` points at. `tree` is the nested format's punctuation. `value`
 // writes one scalar, or one cell of a flat format, and a key is a string. A format with a `line` is flat.
 Token_Spelling :: struct {
 	tree:   Tree,
@@ -53,15 +53,20 @@ Tokens :: struct {
 
 // Starts a write in the format `as` names, as `opts` says, into a buffer from `allocator` or to `stream`. A format with no
 // token writer is `.Unsupported`, and an `as` the format cannot write is its own refusal. The kind is also kept in `t`.
-tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind {
+// A format that binds its spelling at compile time gives it as `spell`, and then `as` need hold no services.
+tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}, spell: ^Token_Spelling = nil) -> core.Typed_Error_Kind {
 	// The spill and the levels are not zeroed: a level is read only below `top`.
 	t.opts, t.spell, t.state, t.top, t.mark, t.first, t.keyed, t.done, t.err = opts, nil, nil, 0, 0, true, false, false, .None
 	init(&t.base, &t.spill, allocator, stream)
 	t.out = &t.base
-	if as.spelling == nil || as.spelling.tokens == nil {
-		return refuse(t, .Unsupported)
+	t.spell = spell
+	if t.spell == nil {
+		services := core.services_of(as)
+		if services == nil || services.tokens == nil {
+			return refuse(t, .Unsupported)
+		}
+		t.spell = (^Token_Spelling)(services.tokens)
 	}
-	t.spell = (^Token_Spelling)(as.spelling.tokens)
 	if t.spell.start != nil {
 		return refuse(t, t.spell.start(t, as))
 	}

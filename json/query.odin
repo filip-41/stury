@@ -6,7 +6,7 @@ import core "../core"
 import engine "../core/build"
 import records "../core/records"
 
-// JSON's `Spelling.scan` walk and its record service, which `core/build`'s path reads run.
+// JSON's `Services.scan` walk and its record service, which `core/build`'s path reads run.
 
 // The spelling's `scan`: the walk compiled for the handle's spec.
 scan_as :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
@@ -114,7 +114,7 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 	room := ([^]u64)(rawptr(&frames))[:core.MAX_DEPTH]
 	if started := scan_begin(h, it, src, last, path, read, opts, room); started.kind != .None {
 		if walked {
-			rec, ok = RECORDS.next[it.framing](it)
+			rec, ok = it.services.next[it.framing](it)
 		}
 		return rec, started, ok || !walked
 	}
@@ -141,7 +141,7 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 	// A stop leaves the record's end to a walk with no hook.
 	if stopped {
 		it.pos, it.state = pos, state
-		rec, ok = RECORDS.next[it.framing](it)
+		rec, ok = it.services.next[it.framing](it)
 	}
 	// The input's end, which ends the records with no fault, ends the read with one and is no error.
 	fault := it.fault

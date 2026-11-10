@@ -162,7 +162,7 @@ emit :: proc(p: ^Printer, v: Value) {
 @(private = "file")
 write_node :: proc(p: ^Printer, v: Value) -> bool {
 	r, is_ref := v.(Ref)
-	if !is_ref || p.colors != nil || p.opts.pretty && p.depth > 0 || len(p.colon) > 0 || r.doc.spelling != json.as(.Json).spelling ||
+	if !is_ref || p.colors != nil || p.opts.pretty && p.depth > 0 || len(p.colon) > 0 || r.doc.readers.format != json.as(.Json).readers.format ||
 	   p.depth + max(int(r.doc.as.max_depth), core_pkg.MAX_DEPTH) > MAX_DEPTH || repeats_key(r) {
 		return false
 	}

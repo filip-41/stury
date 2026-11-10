@@ -34,7 +34,7 @@ doc_lane :: proc(src: []u8, direct: bool, pretty: bool) {
 		if direct {
 			text, err = core.format(src, json.as(.Json), opts)
 		} else {
-			text, _, err = core.write(&doc, opts, allocator = fixed)
+			text, _, err = json.write(&doc, .Json, opts, allocator = fixed)
 		}
 		d := i64(time.tick_since(start))
 		if err != nil {

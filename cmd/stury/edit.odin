@@ -11,6 +11,7 @@ import "core:bytes"
 import "core:mem/virtual"
 import "core:os"
 import core "../../core"
+import compose "../../core/compose"
 import records "../../core/records"
 import "jq"
 import "message"
@@ -275,7 +276,7 @@ edit_commit :: proc(w: ^Edit_State, src, text: []u8, base: u64) -> (out: []u8, o
 	if len(w.list.edits) == 0 {
 		return text, false, true
 	}
-	committed, dropped, cerr := core.commit(w.list, allocator = runtime.heap_allocator())
+	committed, dropped, cerr := compose.commit(w.list, allocator = runtime.heap_allocator())
 	if cerr != nil {
 		cerr = moved_error(cerr, base)
 		message.write_stderr("stury: error: %s: %s\n", w.name, edit_error_text(src, cerr))
@@ -285,7 +286,7 @@ edit_commit :: proc(w: ^Edit_State, src, text: []u8, base: u64) -> (out: []u8, o
 		delete(committed, runtime.heap_allocator())
 		flat, style := core.is_flat(w.doc), core.Comment_Spelling.None
 		if flat {
-			style, _ = w.doc.spelling.edit.comment(w.doc, w.doc.as.spec)
+			style, _ = w.doc.readers.services.edit.comment(w.doc, w.doc.as.spec)
 		}
 		switch {
 		case flat && style == .None:

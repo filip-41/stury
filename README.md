@@ -39,8 +39,8 @@ git clone https://github.com/filip-41/stury vendor/stury
 odin build . -collection:stury=vendor/stury -o:speed
 ```
 
-Then `import "stury:core"`, `import "stury:json"`, `import "stury:dsv"` for delimited text, and `import
-"stury:host"` for threads. Keep the package directories together. For the
+Then `import "stury:json"`, and `import "stury:dsv"` for delimited text. Each exports the names of `core`, `typed`,
+`records` and `host` that a program calls. Keep the package directories together. For the
 [ols](https://github.com/DanielGavin/ols) language server, add the same collection to `ols.json`:
 `{"collections": [{"name": "stury", "path": "vendor/stury"}]}`. `Unknown library collection: 'stury'` means the build
 was not given `-collection:stury=<path>`.
@@ -55,7 +55,6 @@ build it yourself, run `make build-cli`, which writes `build/stury`.
 ```odin
 package main
 
-import "stury:core"
 import "stury:json"
 import "core:fmt"
 import "core:mem/virtual"
@@ -71,7 +70,7 @@ Person :: struct {
 report :: proc(src: []u8, e: $E) {
 	b: strings.Builder
 	defer strings.builder_destroy(&b)
-	core.render(strings.to_writer(&b), src, e)
+	json.render(strings.to_writer(&b), src, e)
 	fmt.eprintln(strings.to_string(b))
 }
 
@@ -120,19 +119,19 @@ This is [examples/quickstart](examples/quickstart/main.odin). Run it from this d
 Read one value by path. The answer is a node of a small document that borrows `src`:
 
 ```odin
-second_tag, _ := core.parse_path(".tags[1]")
-defer core.path_destroy(&second_tag)
+second_tag, _ := json.parse_path(".tags[1]")
+defer json.destroy(&second_tag)
 doc, answer, err := json.find(src, .Json, second_tag)
-defer core.destroy(&doc)
+defer json.destroy(&doc)
 if answer.outcome == .Found {
-	fmt.println(string(core.span(&doc, answer.node))) // "engines"
+	fmt.println(string(json.span(&doc, answer.node))) // "engines"
 }
 ```
 
 Change one value and keep every other byte:
 
 ```odin
-name, _ := core.parse_path(".name")
+name, _ := json.parse_path(".name")
 out, err := json.set(src, .Json, name, `"grace"`) // {"name": "grace",  "tags": ["math"]}
 ```
 

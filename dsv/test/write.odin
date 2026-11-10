@@ -246,7 +246,7 @@ Doc_Case :: struct {
 build_source :: proc(c: Doc_Case) -> (core.Document, core.Error) {
 	src := transmute([]u8)c.src
 	switch c.from {
-	case .Csv:   return dsv.build(src, .Csv, c.read, .Last, context.temp_allocator)
+	case .Csv:   return core.build(src, dsv.as(.Csv, c.read), .Last, context.temp_allocator)
 	case .Json:  return json.build(src, .Json, {}, .Last, context.temp_allocator)
 	case .Json5: return json.build(src, .Json5, {}, .Last, context.temp_allocator)
 	case .Jsonc: return json.build(src, .Jsonc, {}, .Last, context.temp_allocator)
@@ -369,7 +369,7 @@ document_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.
 @(test)
 document_under_failing_allocators :: proc(t: ^testing.T) {
 	long := strings.repeat("k", 600, context.temp_allocator)
-	headed, herr := dsv.build(transmute([]u8)string("a,b\n1,\"x y\"\n2,3\n"), .Csv)
+	headed, herr := core.build(transmute([]u8)string("a,b\n1,\"x y\"\n2,3\n"), dsv.as(.Csv))
 	defer core.destroy(&headed)
 	walktest.expect_nil(t, herr)
 	src := strings.concatenate({`[{"`, long, `":1,"b":"`, long, `"},{"c":null}]`}, context.temp_allocator)
@@ -413,7 +413,7 @@ header_of_one_empty_name :: proc(t: ^testing.T) {
 	}
 	text, err := dsv.marshal(rows, .Csv, {}, write = {}, allocator = context.temp_allocator)
 	walktest.expect_nil(t, err)
-	doc, derr := dsv.build(text, .Csv)
+	doc, derr := core.build(text, dsv.as(.Csv))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, derr)
 	testing.expect_value(t, core.length(&doc, core.ROOT), 1)
@@ -422,7 +422,7 @@ header_of_one_empty_name :: proc(t: ^testing.T) {
 // A write that fails counts nothing, whether the document refuses or the stream does.
 @(test)
 failed_write_counts_nothing :: proc(t: ^testing.T) {
-	doc, err := dsv.build(transmute([]u8)string("# c\na\n1\n"), .Csv, {comment = '#'})
+	doc, err := core.build(transmute([]u8)string("# c\na\n1\n"), dsv.as(.Csv, {comment = '#'}))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
 	counted, dropped, kerr := core.write(&doc, as = dsv.as(.Csv), allocator = context.temp_allocator)
@@ -442,7 +442,7 @@ refusing_stream :: proc(data: rawptr, mode: io.Stream_Mode, p: []u8, offset: i64
 // `core.write_stream` gives the bytes of the text in memory, in the read spec and in another.
 @(test)
 document_streams :: proc(t: ^testing.T) {
-	doc, err := dsv.build(transmute([]u8)string("a,b\n1,\"x,y\"\n"), .Csv)
+	doc, err := core.build(transmute([]u8)string("a,b\n1,\"x,y\"\n"), dsv.as(.Csv))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
 	b := strings.builder_make(context.temp_allocator)

@@ -4,20 +4,35 @@ import "base:runtime"
 import "core:slice"
 import core ".."
 
-// A commit: what a format's `Edit_Spelling.commit` calls. It runs the format's plan, composes the junctions, splices the
-// chunks into the source and has the format read the result.
+// A commit runs the format's plan, composes the junctions, splices the chunks into the source and has the format read the
+// result.
 
-// Returns the source bytes the edits make: every byte no edit touched, the edits' texts in their places, and the
-// separators the format supplies, in the document's own spec. The caller frees the result with `allocator`. An edit
-// that another covers, a second edit of one node, and a second fact edit of one node and role are
-// `.Conflicting_Edits` at the byte where the two meet. An insert whose index lies in a removal run moves to the run's
-// cut end, so it is no conflict. The result is checked by the format, and a result that reads less strictly than the
-// source is `.Bad_Result`. A fact the output cannot hold is dropped with its source bytes. `dropped` counts the source
-// facts and fact edits the output cannot hold. A fact that is removed with a removed member or a set's span is not
-// counted.
-commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
+// Returns the source bytes `list`'s edits make, in the spec of `as`, through the format's edit services. A nil `as` is the
+// document's own spec, `as` of another format is `.Bad_Spec`, and only its spec counts. A text of another spec must
+// read strictly, since the source's reading under its own spec is no evidence, and a delimited text refuses a spec
+// change as `.Bad_Spec`, since it would respell every cell. The caller frees the result with `allocator`. An edit that
+// another covers, a second edit of one node, and a second fact edit of one node and role are `.Conflicting_Edits` at
+// the byte where the two meet. An insert whose index lies in a removal run moves to the run's cut end, so it is no
+// conflict. A result that reads less strictly than the source is `.Bad_Result`. A fact the output cannot hold is dropped
+// with its source bytes. `dropped` counts the source facts and fact edits the output cannot hold. A fact that is
+// removed with a removed member or a set's span is not counted.
+commit :: proc(list: ^core.Edit_List, as: Maybe(core.As) = nil, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Error) {
 	doc := list.doc
-	if doc == nil || doc.spelling == nil {
+	if doc == nil || doc.readers == nil || list.edit == nil {
+		return nil, 0, core.error_of(core.Document_Error{kind = .Bad_Index, reason = .No_Document})
+	}
+	target := as.? or_else doc.as
+	if target.readers == nil || target.readers.format != doc.readers.format {
+		return nil, 0, core.error_of(core.Document_Error{kind = .Bad_Spec})
+	}
+	made, cut, refusal := commit_spec(list, target.spec, allocator)
+	return made, cut, core.error_of(refusal, edit = true)
+}
+
+@(private)
+commit_spec :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
+	doc := list.doc
+	if doc == nil || doc.readers == nil {
 		return nil, 0, {kind = .Bad_Index}
 	}
 	// A partial document does not hold the members a commit composes.
@@ -32,10 +47,10 @@ commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) ->
 	arena := runtime.Arena{backing_allocator = allocator, minimum_block_size = 64 * 1024}
 	defer runtime.arena_destroy(&arena)
 	scratch := runtime.arena_allocator(&arena)
-	planned := core.Edit_List{doc = doc, allocator = scratch, edits = list.edits}
-	if doc.spelling.edit != nil && doc.spelling.edit.plan != nil {
+	planned := core.Edit_List{doc = doc, allocator = scratch, edits = list.edits, edit = list.edit}
+	if list.edit != nil && list.edit.plan != nil {
 		written, _ := make([dynamic]core.Edit, scratch)
-		changed, e := doc.spelling.edit.plan(doc, list, &written, scratch)
+		changed, e := list.edit.plan(doc, list, &written, scratch)
 		if e.kind != .None {
 			return nil, 0, e
 		}
@@ -43,8 +58,8 @@ commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) ->
 			planned.edits = written
 		}
 	}
-	cx := Compose{doc = doc, list = &planned, allocator = scratch, err = {kind = .No_Memory}}
-	if edit := doc.spelling.edit; edit != nil && edit.comment != nil {
+	cx := Compose{doc = doc, edit = list.edit, list = &planned, allocator = scratch, err = {kind = .No_Memory}}
+	if edit := list.edit; edit != nil && edit.comment != nil {
 		cx.style, cx.comment_byte = edit.comment(doc, spec)
 	}
 	if !compose_tree(&cx) {
@@ -54,7 +69,7 @@ commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) ->
 		return nil, 0, cx.err
 	}
 	seps: []u64
-	if edit := doc.spelling.edit; edit != nil && edit.separators != nil && edit.separators(doc, spec) {
+	if edit := list.edit; edit != nil && edit.separators != nil && edit.separators(doc, spec) {
 		seps = line_separators(doc, scratch)
 	}
 	out, err = splice(doc, cx.chunks[:], cx.text[:], cx.segments[:], seps, allocator)
@@ -66,7 +81,7 @@ commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) ->
 		delete(out, allocator)
 		return nil, 0, {kind = .Bad_Result}
 	}
-	if e := reads_as_source(doc, out, spec); e.kind != .None {
+	if e := reads_as_source(list.edit, doc, out, spec); e.kind != .None {
 		delete(out, allocator)
 		return nil, 0, e
 	}
@@ -78,22 +93,31 @@ commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) ->
 // source's own reading is no evidence and the output must read strictly. A text that fails even the format's tolerant
 // read returns `.Bad_Result`.
 @(private)
-reads_as_source :: proc(doc: ^core.Document, out: []u8, spec: u8) -> core.Document_Error {
+reads_as_source :: proc(edit: ^core.Edit_Services, doc: ^core.Document, out: []u8, spec: u8) -> core.Document_Error {
 	strict := doc.as
 	strict.spec, strict.tolerate = spec, {}
-	f, faulted := strict.spelling.validate(out, strict).?
+	// The list's own validate reads its own spec. Another spec of the format is judged by the handle's.
+	validate := edit.validate
+	if spec != doc.as.spec {
+		services := core.services_of(doc.as)
+		if services == nil || services.validate == nil {
+			return {kind = .Bad_Spec}
+		}
+		validate = services.validate
+	}
+	f, faulted := validate(out, strict).?
 	if !faulted {
 		return {}
 	}
 	tolerant := strict
 	tolerant.tolerate = ~bit_set[core.Tolerance; u8]{}
-	if g, still := tolerant.spelling.validate(out, tolerant).?; still {
+	if g, still := validate(out, tolerant).?; still {
 		return {kind = .Bad_Result, inner = g}
 	}
 	if spec != doc.as.spec {
 		return {kind = .Bad_Result, inner = f}
 	}
-	if _, src_bad := strict.spelling.validate(doc.src, strict).?; !src_bad {
+	if _, src_bad := validate(doc.src, strict).?; !src_bad {
 		return {kind = .Bad_Result, inner = f}
 	}
 	return {}

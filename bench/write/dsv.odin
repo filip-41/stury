@@ -78,7 +78,7 @@ dsv_rows_lane :: proc($R: typeid, src: []u8) {
 }
 
 dsv_document_lane :: proc(src: []u8) {
-	doc, derr := dsv.build(src, .Csv, {}, .Last, context.allocator)
+	doc, derr := core.build(src, dsv.as(.Csv, {}), .Last, context.allocator)
 	if derr != nil {
 		fmt.eprintln("document error:", derr)
 		os.exit(1)
