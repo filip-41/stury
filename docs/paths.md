@@ -77,7 +77,7 @@ read from its node: `core.span(doc, a.node)` for its bytes, and the node's `kind
 live, and a caller who tests only the outcome pays for neither.
 
 An `Answer` is a read result and holds no edit state. An edit names a node, and a path edit such as
-`set(src, S, port, "8080")` with a parsed `.port` is a build, one edit and a commit in one call.
+`set(src, S, port, 8080)` with a parsed `.port` is a build, one edit and a commit in one call.
 
 ## Reading
 
@@ -219,7 +219,7 @@ outcome. To read more of `config`, ask for `.config` or for each member.
 An edit names a node, so a `Not_Loaded` member cannot be edited. `core.set_member` on a listed `Missing` name is an insert
 after the container's last member, by name, and on a name no path looked for is `Bad_Index`.
 
-`json.set(src, S, port, "8080")` and `dsv.set`, with `port` the parsed `.port`, are a build of the text, one edit per
+`json.set(src, S, port, 8080)` and `dsv.set`, with `port` the parsed `.port`, are a build of the text, one edit per
 answer and a commit in one call. A path that ends in a `Name` inserts it where it is missing, as `set_member` does, and
 one that ends in an `Index` equal to its array's length appends there. A `?` on that last step passes a container not
 of its kind. A missing parent is `Bad_Index` with the reason `.No_Parent`, a container not of the last step's kind

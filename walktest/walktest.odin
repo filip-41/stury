@@ -895,7 +895,7 @@ expect_kind :: proc(t: ^testing.T, err: core.Error, kind: $K, loc := #caller_loc
 			e, is_arm := err.(core.Path_Error)
 			ok = is_arm && e.kind == kind
 		} else {
-			e, is_arm := err.(core.Typed_Error)
+			e, is_arm := err.(core.Typed_Failure)
 			bare, is_bare := err.(core.Typed_Error_Kind)
 			ok = is_arm && e.kind == kind || is_bare && bare == kind
 		}
@@ -915,7 +915,7 @@ fault_of :: proc "contextless" (err: core.Error) -> Maybe(core.Fault) {
 		return e
 	case runtime.Allocator_Error:
 		return core.Fault{kind = .No_Memory}
-	case core.Document_Error, core.Path_Error, core.Typed_Error, core.Typed_Error_Kind:
+	case core.Document_Error, core.Path_Error, core.Typed_Failure, core.Typed_Error_Kind:
 		return core.Fault{kind = .No_Memory}
 	case nil:
 	}
@@ -937,7 +937,7 @@ at_of :: proc "contextless" (err: core.Error) -> u64 {
 		return e.at
 	case core.Path_Error:
 		return e.at
-	case core.Typed_Error:
+	case core.Typed_Failure:
 		return e.at
 	case runtime.Allocator_Error, core.Typed_Error_Kind:
 	case nil:
@@ -959,8 +959,8 @@ path_of :: proc "contextless" (err: core.Error) -> core.Path_Error {
 
 typed_of :: proc "contextless" (err: core.Error) -> core.Typed_Error {
 	switch e in err {
-	case core.Typed_Error:
-		return e
+	case core.Typed_Failure:
+		return core.typed_error_of(e)
 	case core.Typed_Error_Kind:
 		return {kind = e}
 	case core.Fault:
@@ -994,7 +994,7 @@ is_duplicate :: proc "contextless" (err: core.Error) -> bool {
 // allocation refused is `.No_Memory`.
 typed_kind :: proc "contextless" (err: core.Error) -> core.Typed_Error_Kind {
 	switch e in err {
-	case core.Typed_Error:
+	case core.Typed_Failure:
 		return e.kind
 	case core.Typed_Error_Kind:
 		return e
@@ -1026,8 +1026,8 @@ same_error :: proc "contextless" (a, b: core.Error) -> bool {
 	case core.Path_Error:
 		y, ok := b.(core.Path_Error)
 		return ok && x == y
-	case core.Typed_Error:
-		y, ok := b.(core.Typed_Error)
+	case core.Typed_Failure:
+		y, ok := b.(core.Typed_Failure)
 		return ok && x.kind == y.kind && x.at == y.at
 	case core.Typed_Error_Kind:
 		y, ok := b.(core.Typed_Error_Kind)

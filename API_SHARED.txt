@@ -72,6 +72,8 @@ fault_at :: #force_inline proc "contextless" (pos: u64, kind: Fault_Kind, detail
 has_line_end :: #force_inline proc(body: []u8) -> bool
 header_of :: #force_inline proc "contextless" (doc: ^Document) -> Node_Index
 index_children :: proc(doc: ^Document, i: Node_Index) -> bool
+insert_input :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string, member: bool, in_: Edit_Input) -> Error
+insert_text :: proc(list: ^Edit_List, container: Node_Index, v: Value) -> (text: []u8, owned: bool, err: Error)
 is_flat :: #force_inline proc(doc: ^Document) -> bool
 is_wide :: proc(v: Value) -> bool
 keep_comments :: #force_inline proc(old, nv: Value) -> Value
@@ -104,8 +106,13 @@ rewrap :: proc(c: ^Commented, inner: Value) -> Value
 same_format :: #force_inline proc "contextless" (a, b: ^Readers) -> bool
 scalar_ends :: #force_inline proc "contextless" (t: Token) -> (lo, hi: u64)
 services_of :: #force_inline proc "contextless" (as: As) -> ^Services
+set_comments :: proc(list: ^Edit_List, node: Node_Index, c: ^Commented) -> Error
 set_facts :: proc(list: ^Edit_List, node: Node_Index, role: Role, texts: []string, padded := false) -> Error
+set_input :: proc(list: ^Edit_List, node: Node_Index, in_: Edit_Input) -> Error
+set_member_input :: proc(list: ^Edit_List, obj: Node_Index, name: string, in_: Edit_Input, dups: Duplicates) -> Error
 set_tables :: #force_inline proc "contextless" (doc: ^Document, tables: []Table)
+set_text :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Error
+set_value :: proc(list: ^Edit_List, node: Node_Index, v: Value) -> Error
 sorted_keys :: proc(v: Value) -> []string
 sorted_members :: proc(v: Value) -> []Member
 subtree_facts :: proc(doc: ^Document, i: Node_Index) -> []Fact
@@ -117,6 +124,7 @@ text_spelling :: #force_inline proc "contextless" (escaped, lax: bool) -> u16
 text_start :: proc "contextless" (src: []u8, lo: u64) -> u64
 token_text :: proc(readers: ^Readers, view: ^Token_View, t: Token, allocator: runtime.Allocator) -> (s: string, ok: bool)
 trail_array :: proc(t: Trail) -> ^Array
+typed_error_of :: proc "contextless" (f: Typed_Failure) -> Typed_Error
 write_fault_message :: proc(w: io.Writer, src: []u8, f: Fault) -> io.Error
 # host
 writing :: proc(pool: ^Pool, on: bool)
@@ -187,7 +195,7 @@ scan_kept :: proc "contextless" (h: ^Scan, d: int) -> bool
 scan_reserve :: proc "contextless" (h: ^Scan, nodes: int) -> bool
 scan_room :: #force_inline proc "contextless" (h: ^Scan) -> int
 scan_start :: proc(h: ^Scan, src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error
-set_answers :: proc(list: ^core.Edit_List, path: core.Path, text: string, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
+set_answers :: proc(list: ^core.Edit_List, path: core.Path, in_: core.Edit_Input, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
 # core/typed
 Check :: struct { using reader: Reader, }
 KEY_SIZE_MAX :: 240
@@ -228,6 +236,8 @@ store_string :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, 
 store_whole :: proc(h: ^Reader, fld: ^Field, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64, t: core.Token) -> core.Typed_Error_Kind
 # core/write
 LINE_ROOM :: 1024
+Scratch :: runtime.Arena
+edit_input :: proc(v: $T, plan: ^typed.Plan, scratch: ^Scratch) -> (in_: core.Edit_Input, err: core.Error)
 end_record :: proc(t: ^Tokens) -> core.Typed_Error_Kind
 enum_spelled :: proc(plan: ^typed.Plan, info: ^runtime.Type_Info_Enum, value: i64, p: [^]u8) -> (string, core.Typed_Error_Kind)
 enum_value :: proc "contextless" (info: ^runtime.Type_Info_Enum, v: uintptr) -> i64
@@ -244,6 +254,7 @@ put_number :: proc(out: ^Out, n: core.Number) -> core.Typed_Error_Kind
 put_text :: proc(out: ^Out, s: string)
 release_sides :: proc(side: ^map[typeid]^typed.Plan)
 room :: #force_inline proc(out: ^Out, n: int) -> [^]u8 #no_bounds_check
+scratch_destroy :: proc(s: ^Scratch)
 side_plan :: proc(side: ^map[typeid]^typed.Plan, parent: ^typed.Plan, T: typeid) -> (^typed.Plan, core.Typed_Error_Kind)
 tokens_finish :: proc(t: ^Tokens) -> (bytes: []u8, err: core.Typed_Error)
 tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}, spell: ^Token_Spelling = nil) -> core.Typed_Error_Kind
@@ -251,6 +262,7 @@ tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.
 tokens_release :: proc(t: ^Tokens)
 union_arm :: proc(m: ^typed.Meta, v: uintptr) -> ^typed.Arm
 value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
+write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator) -> (text: []u8, err: core.Typed_Error)
 # core/records
 entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64) -> bool
 next_window :: proc(it: ^Reader) -> (window: []u8, base: u64, ok: bool)

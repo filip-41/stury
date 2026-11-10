@@ -7,6 +7,7 @@ import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import typed "../../core/typed"
 import dsv ".."
 import walktest "../../walktest"
 
@@ -453,7 +454,7 @@ path_set :: proc(t: ^testing.T) {
 	for c in cases {
 		path, _ := core.parse_path(c[0])
 		defer core.path_destroy(&path)
-		out, err := dsv.set(src, .Csv, path, c[1], opts = opts)
+		out, err := dsv.set(src, .Csv, path, typed.Raw(c[1]), opts = opts)
 		defer delete(out)
 		testing.expectf(t, err == nil, "%s: %v", c[0], err)
 		testing.expect_value(t, string(out), c[2])

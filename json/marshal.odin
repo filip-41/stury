@@ -85,3 +85,9 @@ marshal_once :: proc(value: any, spec := Spec.Json, opts := Options{}, write := 
 	text, err := plan.marshal(&plan, v.data, write, {}, allocator)
 	return text, core.error_of(err)
 }
+
+// A value spelled as JSON text for an edit: the colon is the document's own when it shows one.
+edit_spell :: proc(doc: ^core.Document, v: core.Value, opts: core.Write_Options, colon: string, _: bool, _: u64, allocator: runtime.Allocator) -> ([]u8, core.Error) {
+	text, err := write.write_laid(v, doc.as, opts, colon, &TOKENS, allocator)
+	return text, core.error_of(err)
+}

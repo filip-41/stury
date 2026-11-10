@@ -486,7 +486,7 @@ Required_Record_Row :: struct {
 @(private = "file")
 moved_error :: proc(err: core.Error, from, by: u64) -> string {
 	#partial switch e in err {
-	case core.Typed_Error:
+	case core.Typed_Failure:
 		moved := e
 		if moved.at >= from {
 			moved.at += by

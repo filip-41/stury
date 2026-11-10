@@ -2,33 +2,29 @@ package main
 
 // How `stury edit` turns the filter's output value into edits of the node it replaces. A value the filter took from the
 // node keeps its bytes, a container of the node's kind edits the node's members, and a member or element the output
-// keeps but moves is moved with its bytes and comments. A value the filter built is written by jq's writer, or as a
-// delimited cell. The comments the filter wrote on a value the file holds are written on its node. A whole text's
+// keeps but moves is moved with its bytes and comments. A value the filter built is written by the library in the
+// document's format and the layout of its container. The comments the filter wrote on a value the file holds are written on its node. A whole text's
 // value written new keeps its comments, and the comments of the values nested in it, through a second pass over the
 // edited text, which holds a node for each.
 
-import "core:bytes"
 import "core:slice"
 import "core:strings"
+import "core:unicode/utf8"
 import core "../../core"
-import "../../core/write"
-import records "../../core/records"
 import "jq"
 import "message"
 
 // One document's edit: the edit list the filter's output is recorded on, why it stopped when it fails, the file it is
-// told in and the line of the record being edited, 0 for a whole document. `layout` writes a built value, the layout
-// of the container being edited when `shown`, and `sorted` puts every object's members in key order. A table's column order is the whole table's, so its records' members are
-// not moved here. `defers` says the caller writes the comments of values written new in a second pass, and `later`
-// that one carries comments for it.
+// told in and the line of the record being edited, 0 for a whole document. `sorted` puts every object's members in key
+// order. A table's column order is the whole table's, so its records' members are not moved here. `defers` says the
+// caller writes the comments of values written new in a second pass, and `later` that one carries comments for it. The
+// layout a built value is written in is the list's.
 Edit_State :: struct {
 	doc:    ^core.Document,
 	list:   ^core.Edit_List,
 	err:    string,
 	name:   string,
 	line:   int,
-	layout: jq.Layout,
-	shown:  bool,
 	sorted: bool,
 	defers: bool,
 	later:  bool,
@@ -74,11 +70,7 @@ edit_tree :: proc(w: ^Edit_State, node: core.Node_Index, value: jq.Value) -> boo
 			}
 		}
 	}
-	text, ok := edit_text_of(w, v, core.node_start(w.doc.nodes[node]))
-	if !ok {
-		return false
-	}
-	return edit_replace(w, node, text)
+	return edit_set(w, node, v)
 }
 
 // The comment edits of `node` for the roles `c` writes: a role's comments replaced by its bodies, or removed, and no
@@ -86,10 +78,7 @@ edit_tree :: proc(w: ^Edit_State, node: core.Node_Index, value: jq.Value) -> boo
 // cannot end.
 @(private = "file")
 edit_comments :: proc(w: ^Edit_State, node: core.Node_Index, c: ^jq.Commented) -> bool {
-	for role in c.written {
-		edit_role(w, node, role, c.bodies[role]) or_return
-	}
-	return true
+	return edit_check(w, core.set_comments(w.list, node, c))
 }
 
 // The edit that makes `bodies` the comments of `node` with `role`, none when they already are.
@@ -211,19 +200,17 @@ Source_Member :: struct {
 	node: core.Node_Index,
 }
 
-// A member or element the output adds: its key, empty for an element, and its text.
+// A member or element the output adds: its key, empty for an element, and its value.
 @(private = "file")
 Edit_New :: struct {
-	key, text: string,
+	key:   string,
+	value: jq.Value,
 }
 
 @(private = "file")
 edit_object :: proc(w: ^Edit_State, node: core.Node_Index, obj: ^jq.Object) -> bool {
-	parent := w.layout
-	defer w.layout = parent
-	w.layout = edit_shown_layout(w, node, parent)
 	if len(obj.keys) > 0 && edit_bare(w, node) {
-		return edit_replace(w, node, edit_text_of(w, obj, core.node_start(w.doc.nodes[node])) or_return)
+		return edit_set(w, node, obj)
 	}
 	members := edit_members(w, node) or_return
 	// The member a filter reads for a name is its last, as the CLI reads a repeated key.
@@ -252,7 +239,6 @@ edit_object :: proc(w: ^Edit_State, node: core.Node_Index, obj: ^jq.Object) -> b
 	}
 	entries := make([dynamic]int, 0, len(keys), context.temp_allocator)
 	news := make([dynamic]Edit_New, context.temp_allocator)
-	at := edit_member_at(w, node)
 	for key in keys {
 		value, _ := jq.object_get(obj, key)
 		if i := read_of(members, read, key); i >= 0 {
@@ -266,8 +252,8 @@ edit_object :: proc(w: ^Edit_State, node: core.Node_Index, obj: ^jq.Object) -> b
 			append(&entries, i)
 			continue
 		}
-		text := edit_text_of(w, value, at) or_return
-		append(&news, Edit_New{key = key, text = text})
+		edit_note_comments(w, value) or_return
+		append(&news, Edit_New{key = key, value = value})
 		append(&entries, -1 - (len(news) - 1))
 	}
 	for m in members {
@@ -318,23 +304,21 @@ edit_place_entries :: proc(w: ^Edit_State, node: core.Node_Index, length: int, e
 
 @(private = "file")
 edit_insert :: proc(w: ^Edit_State, node: core.Node_Index, at: int, n: Edit_New) -> bool {
+	v := edit_valid(jq.plain(n.value))
 	if core.kind(w.doc, node) == .Object {
-		return edit_check(w, core.insert(w.list, node, at, n.key, n.text))
+		return edit_check(w, core.insert_member_value(w.list, node, at, n.key, v), v)
 	}
-	return edit_check(w, core.insert(w.list, node, at, n.text))
+	return edit_check(w, core.insert_element_value(w.list, node, at, v), v)
 }
 
 // An array's elements: an element the output takes from it is kept and may move, one the output repeats or builds is
 // matched by value or by place with one it does not take, and the rest are removed or inserted.
 @(private = "file")
 edit_array :: proc(w: ^Edit_State, node: core.Node_Index, items: []jq.Value) -> bool {
-	parent := w.layout
-	defer w.layout = parent
-	w.layout = edit_shown_layout(w, node, parent)
 	if len(items) > 0 && edit_bare(w, node) {
 		built := jq.new_array(len(items))
 		append(&built.items, ..items)
-		return edit_replace(w, node, edit_text_of(w, built, core.node_start(w.doc.nodes[node])) or_return)
+		return edit_set(w, node, built)
 	}
 	have := core.length(w.doc, node)
 	children := make([]core.Node_Index, have, context.temp_allocator)
@@ -357,7 +341,6 @@ edit_array :: proc(w: ^Edit_State, node: core.Node_Index, items: []jq.Value) -> 
 	used := make([]bool, have, context.temp_allocator)
 	entries := make([]int, len(items), context.temp_allocator)
 	news := make([dynamic]Edit_New, context.temp_allocator)
-	at := edit_member_at(w, node)
 	for v, j in items {
 		if i := pairs[j]; i >= 0 {
 			used[i] = true
@@ -365,8 +348,8 @@ edit_array :: proc(w: ^Edit_State, node: core.Node_Index, items: []jq.Value) -> 
 			entries[j] = i
 			continue
 		}
-		text := edit_text_of(w, v, at) or_return
-		append(&news, Edit_New{text = text})
+		edit_note_comments(w, v) or_return
+		append(&news, Edit_New{value = v})
 		entries[j] = -1 - (len(news) - 1)
 	}
 	#reverse for child, i in children {
@@ -476,112 +459,145 @@ edit_members :: proc(w: ^Edit_State, node: core.Node_Index) -> ([]Source_Member,
 	}
 }
 
-// The byte a new member of `node` is written at, whose line's indent a value written over lines takes: the first
-// member's, or the container's own.
-@(private = "file")
-edit_member_at :: proc(w: ^Edit_State, node: core.Node_Index) -> u64 {
-	if first, ok := core.child_at(w.doc, node, 0); ok {
-		return core.node_start(w.doc.nodes[first])
-	}
-	return core.node_start(w.doc.nodes[node])
-}
-
-@(private = "file")
-edit_replace :: proc(w: ^Edit_State, node: core.Node_Index, text: string) -> bool {
-	if text == string(core.span(w.doc, node)) {
-		return true
-	}
-	return edit_check(w, core.set(w.list, node, text))
-}
-
-// Whether an edit was recorded, with its refusal in `w.err` when not.
-@(private = "file")
-edit_check :: proc(w: ^Edit_State, e: core.Error) -> bool {
+// Whether an edit was recorded, with its refusal in `w.err` when not. `v` is the value the edit wrote, and `record` says
+// it is a record's cells.
+edit_check :: proc(w: ^Edit_State, e: core.Error, v: jq.Value = nil, record := false) -> bool {
 	if e != nil {
-		w.err = edit_error_text(w.doc.src, e)
+		w.err = edit_refusal_text(w, e, v, record)
 		return false
 	}
 	return true
 }
 
-// The source text `v` takes at byte `at`: a value taken from the document keeps its span, and a value built is spelled
-// by the document's format, a JSON value or a delimited cell. A JSON value written over lines takes the indent of
-// `at`'s line on each line after its first.
-edit_text_of :: proc(w: ^Edit_State, value: jq.Value, at: u64) -> (text: string, ok: bool) {
-	// A value written new has no node to hold its comments until the second pass.
+// `v` as the node `node`, spelled by the document's format.
+@(private = "file")
+edit_set :: proc(w: ^Edit_State, node: core.Node_Index, v: jq.Value) -> bool {
+	edit_note_comments(w, v) or_return
+	return edit_check(w, core.set_value(w.list, node, edit_valid(jq.plain(v))), v)
+}
+
+// `v` with each string that is not UTF-8 made one as jq makes it, U+FFFD for each bad sequence: the library refuses such
+// a string, and a document must stay valid. A value with no such string is returned as it is.
+@(private = "file")
+edit_valid :: proc(v: jq.Value) -> jq.Value {
+	#partial switch x in v {
+	case string:
+		return x if utf8.valid_string(x) else jq.valid_utf8(x)
+	case ^jq.Array:
+		var: ^jq.Array
+		for item, i in x.items {
+			fixed := edit_valid(item)
+			if var == nil && !edit_same(fixed, item) {
+				var = new(jq.Array)
+				var.items = slice.clone_to_dynamic(x.items[:])
+			}
+			if var != nil {
+				var.items[i] = fixed
+			}
+		}
+		return var if var != nil else x
+	case ^jq.Object:
+		var: ^jq.Object
+		for val, i in x.vals {
+			key := x.keys[i]
+			fixed_key := key if utf8.valid_string(key) else jq.valid_utf8(key)
+			fixed := edit_valid(val)
+			if var == nil && (fixed_key != key || !edit_same(fixed, val)) {
+				var = new(jq.Object)
+				var.keys = slice.clone_to_dynamic(x.keys[:])
+				var.vals = slice.clone_to_dynamic(x.vals[:])
+				if x.index != nil {
+					var.index = make(map[string]int)
+				}
+			}
+			if var != nil {
+				var.keys[i] = fixed_key
+				var.vals[i] = fixed
+				if var.index != nil {
+					var.index[fixed_key] = i
+				}
+			}
+		}
+		return var if var != nil else x
+	}
+	return v
+}
+
+// Whether `edit_valid` left `a` as `b`: only a string, array or object can differ.
+@(private = "file")
+edit_same :: proc(a, b: jq.Value) -> bool {
+	#partial switch x in a {
+	case string:
+		y, is_string := b.(string)
+		return is_string && raw_data(x) == raw_data(y)
+	case ^jq.Array:
+		y, is_array := b.(^jq.Array)
+		return is_array && x == y
+	case ^jq.Object:
+		y, is_object := b.(^jq.Object)
+		return is_object && x == y
+	}
+	return true
+}
+
+// Notes the comments a value written new carries. A value written new has no node to hold its comments until the second
+// pass.
+edit_note_comments :: proc(w: ^Edit_State, value: jq.Value) -> bool {
 	if w.defers {
 		w.later = w.later || carries_comments(w, value, true)
 	} else if writes_comment(value) {
 		w.err = "cannot write a comment on a value the file does not hold"
-		return "", false
+		return false
 	}
-	v := jq.plain(value)
-	if r, is_ref := v.(jq.Ref); is_ref && r.doc == w.doc && !(w.sorted && jq.kind(v) == .Object) {
-		return string(core.span(r.doc, r.node)), true
-	}
-	if core.is_flat(w.doc) {
-		return edit_cell_of(w, v, at)
-	}
-	text = jq.to_json(v, w.layout, context.temp_allocator)
-	if !w.layout.opts.pretty || !strings.contains(text, "\n") {
-		return text, true
-	}
-	indent := edit_line_indent(w.doc.src, at)
-	if len(indent) == 0 {
-		return text, true
-	}
-	b := strings.builder_make(0, len(text) + 8 * len(indent), context.temp_allocator)
-	for line, i in strings.split_lines(text, context.temp_allocator) {
-		if i > 0 {
-			strings.write_byte(&b, '\n')
-			strings.write_string(&b, string(indent))
-		}
-		strings.write_string(&b, line)
-	}
-	return strings.to_string(b), true
+	return true
 }
 
-// The layout a value built in the container `c` is written in under `shown`: one member or element a line, in the
-// indent and colon spacing `c` shows, when its first member starts a line, and compact when it shares the bracket's
-// line. A container with no members, or with an indent the writer cannot repeat, shows none and takes `parent`.
-@(private = "file")
-edit_shown_layout :: proc(w: ^Edit_State, c: core.Node_Index, parent: jq.Layout) -> jq.Layout {
-	doc := w.doc
-	first, has := core.child_at(doc, c, 0)
-	if !w.shown || !has || core.is_flat(doc) {
-		return parent
+// Whether the refusal `e` is of a cell the table's format cannot spell.
+edit_cell_refused :: proc(e: core.Error) -> bool {
+	refusal, is_document := e.(core.Document_Error)
+	#partial switch refusal.reason {
+	case .Not_Scalar, .Empty_Text, .Starts_With_Mark, .Reads_Back_Typed, .No_Spelling:
+		return is_document
 	}
-	l := parent
-	start := core.node_start(doc.nodes[first])
-	if core.kind(doc, c) == .Object {
-		it := core.pairs(doc, c)
-		key, value, _ := core.pair_next(&it)
-		start = core.node_start(doc.nodes[key])
-		if colon, spaced := edit_colon(doc.src[start + u64(len(core.span(doc, key))):core.node_start(doc.nodes[value])]); spaced {
-			l.colon = colon
-		}
+	return false
+}
+
+// Why `e` refused an edit of `v`, in the words of the command line.
+edit_refusal_text :: proc(w: ^Edit_State, e: core.Error, v: jq.Value, record: bool) -> string {
+	if !edit_cell_refused(e) {
+		return edit_error_text(w.doc.src, e)
 	}
-	open := core.node_start(doc.nodes[c])
-	if !core.has_line_end(doc.src[open + 1:start]) {
-		l.opts.pretty, l.colon = false, ""
-		return l
+	refusal := e.(core.Document_Error)
+	cell := jq.plain(v)
+	if items, is_array := cell.(^jq.Array); record && is_array && int(refusal.at) < len(items.items) {
+		cell = jq.plain(items.items[refusal.at])
 	}
-	outer := edit_line_indent(doc.src, open)
-	inner := edit_line_indent(doc.src, start)
-	if !bytes.has_prefix(inner, outer) {
-		return parent
+	#partial switch refusal.reason {
+	case .Not_Scalar:
+		what := "an array" if jq.kind(cell) == .Array else "an object"
+		return message.build_temp("a cell is a text, a number, true, false or null; tojson makes text of %s", what)
+	case .Empty_Text:
+		return "cannot write an empty text: a TSV cell cannot hold one"
 	}
-	unit := inner[len(outer):]
-	switch {
-	case string(unit) == "\t":
-		l.opts.tab = true
-	case len(unit) <= int(max(u8)) && bytes.count(unit, {' '}) == len(unit):
-		l.opts.tab, l.opts.indent = false, u8(len(unit))
-	case:
-		return parent
+	text := ""
+	#partial switch jq.kind(cell) {
+	case .False:
+		text = "false"
+	case .True:
+		text = "true"
+	case .String:
+		text, _ = jq.string_of(cell)
+	case .Number:
+		text = jq.to_json(cell, {}, context.temp_allocator)
 	}
-	l.opts.pretty = true
-	return l
+	why := "the format has no spelling for it"
+	#partial switch refusal.reason {
+	case .Starts_With_Mark:
+		why = "it would start the text with a byte order mark"
+	case .Reads_Back_Typed:
+		why = "--infer would read it back as a number, true or false, and the format has no quotes"
+	}
+	return message.build_temp("cannot write the cell %q: %s", text, why)
 }
 
 // Whether the container `node` is empty with nothing but blanks inside, so a value built for it is written whole in the
@@ -598,107 +614,6 @@ edit_bare :: proc(w: ^Edit_State, node: core.Node_Index) -> bool {
 		}
 	}
 	return true
-}
-
-// The colon of a member with the blanks around it, when that is all `gap` holds.
-@(private = "file")
-edit_colon :: proc(gap: []u8) -> (string, bool) {
-	if bytes.count(gap, {':'}) != 1 {
-		return "", false
-	}
-	for b in gap {
-		if b != ':' && b != ' ' && b != '\t' {
-			return "", false
-		}
-	}
-	return string(gap), true
-}
-
-// The spaces and tabs that start the line holding byte `at`.
-@(private = "file")
-edit_line_indent :: proc(src: []u8, at: u64) -> []u8 {
-	lo := min(at, u64(len(src)))
-	for lo > 0 && src[lo - 1] != '\n' && src[lo - 1] != '\r' {
-		lo -= 1
-	}
-	hi := lo
-	for hi < u64(len(src)) && (src[hi] == ' ' || src[hi] == '\t') {
-		hi += 1
-	}
-	return src[lo:hi]
-}
-
-// The text of one delimited cell at byte `at`: the format's own writer spells the quotes and escapes. A null cell is
-// empty.
-edit_cell_of :: proc(w: ^Edit_State, v: jq.Value, at: u64) -> (text: string, ok: bool) {
-	cell: string
-	scalar: write.Scalar
-	switch jq.kind(v) {
-	case .Null:
-		return "", true
-	case .False:
-		cell, scalar = "false", write.Tree_Part.False
-	case .True:
-		cell, scalar = "true", write.Tree_Part.True
-	case .String:
-		cell, _ = jq.string_of(v)
-	case .Number:
-		cell = jq.to_json(v, {}, context.temp_allocator)
-		scalar = write.Number_Literal{cell}
-	case .Array, .Object:
-		what := "an array" if jq.kind(v) == .Array else "an object"
-		w.err = message.build_temp("a cell is a text, a number, true, false or null; tojson makes text of %s", what)
-		return "", false
-	}
-	// An empty string is the one text a TSV cell cannot tell from null.
-	if jq.kind(v) == .String && len(cell) == 0 && w.doc.as.opts[0] == '\t' {
-		w.err = "cannot write an empty text: a TSV cell cannot hold one"
-		return "", false
-	}
-	// A TSV cell has no quotes, so a byte order mark it starts with is refused only where it would start the text.
-	bom := ""
-	if w.doc.as.opts[0] == '\t' && strings.has_prefix(cell, "\xef\xbb\xbf") && at > core.text_start(w.doc.src, 0) {
-		bom, cell = cell[:3], cell[3:]
-	}
-	wr: records.Writer
-	if kind := records.writer_init(&wr, {}, w.doc.as, .Lines, allocator = context.temp_allocator); kind != .None {
-		w.err = "a delimited cell cannot be written"
-		return "", false
-	}
-	if jq.kind(v) == .String {
-		scalar = cell
-	}
-	cells := [1]write.Scalar{scalar}
-	if kind := records.write_cells(&wr, cells[:]); kind != .None {
-		w.err = edit_cell_refusal(cell, jq.kind(v) == .String && w.doc.readers.resolves != nil && w.doc.readers.resolves(w.doc.as))
-		return "", false
-	}
-	out, verr := records.writer_end(&wr)
-	if verr != nil {
-		w.err = edit_cell_refusal(cell, false)
-		return "", false
-	}
-	text = strings.trim_right(string(out), "\r\n")
-	// A table cell is a string or null, and a quoted empty one is the string.
-	if jq.kind(v) == .String && len(text) == 0 && bom == "" {
-		text = `""`
-	}
-	if bom != "" {
-		text = strings.concatenate({bom, text}, context.temp_allocator)
-	}
-	return text, true
-}
-
-// Why the table's writer refused `cell`.
-@(private = "file")
-edit_cell_refusal :: proc(cell: string, inferred: bool) -> string {
-	why := "the format has no spelling for it"
-	if strings.has_prefix(cell, "\xef\xbb\xbf") {
-		why = "it would start the text with a byte order mark"
-	} else if inferred {
-		why = "--infer would read it back as a number, true or false, and the format has no quotes"
-	}
-	return message.build_temp("cannot write the cell %q: %s", cell, why)
 }
 
 edit_key_text :: proc(w: ^Edit_State, key: core.Node_Index) -> (string, bool) {

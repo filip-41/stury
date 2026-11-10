@@ -6,6 +6,8 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import compose "../../core/compose"
+import typed "../../core/typed"
+import write "../../core/write"
 import gen "gen"
 import walktest "../../walktest"
 import dsv ".."
@@ -640,7 +642,7 @@ commit_refuses_another_spec :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, err)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	walktest.expect_nil(t, core.set(&list, cell_node(&doc, 0, 0), "z"))
+	walktest.expect_nil(t, write.set(&list, cell_node(&doc, 0, 0), typed.Raw("z")))
 	out, _, cerr := compose.commit(&list)
 	testing.expectf(t, cerr == nil && string(out) == "a\nz\n", "commit: %v %q", cerr, out)
 	delete(out)

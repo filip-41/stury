@@ -188,7 +188,13 @@ edit_slurped :: proc(er: ^Edit_Run, w: ^Edit_State, input: jq.Value) -> (items, 
 }
 
 edit_state :: proc(er: ^Edit_Run, doc: ^core.Document, list: ^core.Edit_List) -> Edit_State {
-	return {doc = doc, list = list, name = er.ins.name, layout = er.layout, shown = er.run.opts.layout_shown, sorted = er.run.opts.sort_keys}
+	// A built value is written in the CLI's layout and numbers, and in the container's where that shows one.
+	if list != nil {
+		list.write = er.layout.opts
+		list.write.escape_del, list.write.jq_numbers = true, true
+		list.fixed = !er.run.opts.layout_shown
+	}
+	return {doc = doc, list = list, name = er.ins.name, sorted = er.run.opts.sort_keys}
 }
 
 // A whole text, which holds one document, so the filter makes one output. Under `-s` it is the one record of an array.
@@ -672,7 +678,7 @@ edit_record_text :: proc(er: ^Edit_Run, doc: ^core.Document, src: []u8, span: Ed
 	defer core.edit_list_destroy(&list)
 	w := edit_state(er, doc, &list)
 	w.line = line
-	w.layout.opts.pretty = w.layout.opts.pretty && er.ins.framing == .Seq
+	list.write.pretty = list.write.pretty && er.ins.framing == .Seq
 	if !edit_tree(&w, core.ROOT, v) {
 		message.write_stderr("stury: error: %s: %s\n", edit_place(&w), w.err)
 		return nil, false, false
@@ -743,7 +749,7 @@ moved_error :: proc(err: core.Error, by: u64) -> core.Error {
 		moved := e
 		moved.at += by
 		return moved
-	case core.Path_Error, core.Typed_Error, core.Typed_Error_Kind, runtime.Allocator_Error:
+	case core.Path_Error, core.Typed_Failure, core.Typed_Error_Kind, runtime.Allocator_Error:
 	case nil:
 	}
 	return err

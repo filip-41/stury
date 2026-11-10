@@ -95,7 +95,6 @@ hash :: core.hash
 facts_of :: core.facts_of
 float_value :: core.float_value
 format :: core.format
-insert :: core.insert
 int_value :: core.int_value
 key_equals :: core.key_equals
 kind :: core.kind
@@ -119,7 +118,6 @@ remove_fact :: core.remove_fact
 render :: core.render
 rule_of :: core.rule_of
 set_fact :: core.set_fact
-set_member :: core.set_member
 span :: core.span
 text_room :: core.text_room
 write_code :: core.write_code
@@ -173,6 +171,9 @@ value_null :: write.value_null
 value_string :: write.value_string
 value_uint :: write.value_uint
 write_value :: write.write_value
+insert :: write.insert
+set_member :: write.set_member
+set_node :: write.set
 tokens_close :: write.close
 marshal_stream :: write.marshal_stream
 

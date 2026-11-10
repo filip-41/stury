@@ -142,7 +142,7 @@ refusal_after_a_flush_is_final :: proc(t: ^testing.T) {
 	testing.expect_value(t, records.write_text(&wr, {'1'}), core.Typed_Error_Kind.Non_Finite)
 	_, err := records.writer_end(&wr)
 	walktest.expect_kind(t, err, core.Typed_Error_Kind.Non_Finite)
-	typed_err, _ := err.(core.Typed_Error)
+	typed_err := walktest.typed_of(err)
 	testing.expect_value(t, typed_err.n_steps, 1)
 
 	records.writer_init(&wr, bytes.buffer_to_stream(&buf), dsv.as(.Csv))
@@ -240,7 +240,7 @@ failed_stream_is_final :: proc(t: ^testing.T) {
 	list := make([]Entry, 2000, context.temp_allocator)
 	err := records.marshal_stream(io.Stream{procedure = refusing_stream}, list, &plan, json.as(.Json))
 	walktest.expect_kind(t, err, core.Typed_Error_Kind.Write_Failed)
-	typed_err, _ := err.(core.Typed_Error)
+	typed_err := walktest.typed_of(err)
 	testing.expect_value(t, typed_err.cause, io.Error.Permission_Denied)
 }
 

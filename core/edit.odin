@@ -55,6 +55,13 @@ Edit_List :: struct {
 	allocator: runtime.Allocator,
 	// The edit services of the document's format, nil for a format that accepts no edits.
 	edit:      ^Edit_Services,
+	// How a value the caller builds is spelled: `write` is the layout, escapes and number spelling of the base. Unless
+	// `fixed`, a container's value takes the layout of the container it goes in, where that shows one, and `write` is
+	// the layout where none does.
+	write:     Write_Options,
+	fixed:     bool,
+	// The container of each node, made when a value is first spelled in a layout of the site.
+	parents:   []Node_Index,
 }
 
 // Returns an edit list over `doc`. It allocates nothing until the first edit is recorded.
@@ -76,6 +83,7 @@ edit_list_destroy :: proc(list: ^Edit_List) {
 		if e.key != nil { delete(e.key, list.allocator) } else if e.text != nil { delete(e.text, list.allocator) }
 	}
 	delete(list.edits)
+	delete(list.parents, list.allocator)
 	list^ = {}
 }
 
@@ -115,24 +123,35 @@ refused :: proc(kind: Document_Error_Kind, reason := Edit_Reason.None) -> Error 
 	return error_of(Document_Error{kind = kind, reason = reason})
 }
 
-// Makes `text` the source bytes of node `node`, a value or a key. A key's text is its decoded name, which the commit
-// writes in the format's own spelling, a value's text is source text and must read as one value, and in a flat text a
-// key is a member like any other, so its text is checked as a value. A fact node or a flat text's container returns
-// `.Bad_Index`.
-// Runs in O(len(text)), checking the text once and copying it once.
-set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Error {
-	doc, n, err := node_of(list, node)
-	if err.kind != .None {
-		return error_of(err)
+// What an edit writes: a value's source text as the caller spelled it when `raw`, else a value the format spells.
+Edit_Input :: struct {
+	text:  string,
+	value: Value,
+	raw:   bool,
+}
+
+// Makes `in_` the value or the key of node `node`. A key's text is its decoded name, which the commit writes in the
+// format's own spelling, a text is source text and must read as one value, and in a flat text a key is a member like any
+// other, so its text is checked as a value. A fact node or a flat text's container returns `.Bad_Index`.
+// A text runs in O(len(text)), checking it once and copying it once.
+set_input :: proc(list: ^Edit_List, node: Node_Index, in_: Edit_Input) -> Error {
+	if in_.raw {
+		return set_text(list, node, in_.text)
 	}
-	flat := is_flat(doc)
-	if n.role > .Key {
-		return refused(.Bad_Index, .Fact_Node)
+	_, n, err := settable(list, node)
+	if err != nil {
+		return err
 	}
-	if flat && (n.kind == .Array || n.kind == .Object) {
-		return refused(.Bad_Index, .Flat_Container)
+	return set_spelled(list, node, n, in_.value)
+}
+
+// `set_input` of a text: the text of a value as the caller spelled it.
+set_text :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Error {
+	doc, n, err := settable(list, node)
+	if err != nil {
+		return err
 	}
-	if n.role == .Key && !flat {
+	if n.role == .Key && !is_flat(doc) {
 		return error_of(edit_add(list, node, .Set, .Key, 0, "", text))
 	}
 	if e := judge(doc, list.edit, text, list.allocator); e.kind != .None {
@@ -141,9 +160,26 @@ set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Error {
 	return error_of(edit_add(list, node, .Set, .Value, 0, "", text))
 }
 
-// Makes `text` the value of the member of `obj` named `name`: a set of the member the document holds, or an insert after
+// Node `node` of `list`'s document, when an edit can set it.
+@(private)
+settable :: proc(list: ^Edit_List, node: Node_Index) -> (doc: ^Document, n: Node, err: Error) {
+	derr: Document_Error
+	doc, n, derr = node_of(list, node)
+	if derr.kind != .None {
+		return doc, n, error_of(derr)
+	}
+	if n.role > .Key {
+		return doc, n, refused(.Bad_Index, .Fact_Node)
+	}
+	if is_flat(doc) && (n.kind == .Array || n.kind == .Object) {
+		return doc, n, refused(.Bad_Index, .Flat_Container)
+	}
+	return doc, n, nil
+}
+
+// Makes `in_` the value of the member of `obj` named `name`: a set of the member the document holds, or an insert after
 // `obj`'s last member when it has none. `dups` picks the member of a repeated key, and `.All` sets each.
-set_member :: proc(list: ^Edit_List, obj: Node_Index, name, text: string, dups := Duplicates.Last) -> Error {
+set_member_input :: proc(list: ^Edit_List, obj: Node_Index, name: string, in_: Edit_Input, dups: Duplicates) -> Error {
 	doc := list.doc
 	if doc == nil {
 		return refused(.Bad_Index, .No_Document)
@@ -153,7 +189,7 @@ set_member :: proc(list: ^Edit_List, obj: Node_Index, name, text: string, dups :
 		it := members_named(doc, obj, name)
 		for v in member_next(&it) {
 			found = true
-			if e := set(list, v, text); e != nil {
+			if e := set_input(list, v, in_); e != nil {
 				return e
 			}
 		}
@@ -164,9 +200,9 @@ set_member :: proc(list: ^Edit_List, obj: Node_Index, name, text: string, dups :
 	v, presence := member_of(doc, obj, name, dups)
 	switch presence {
 	case .Found:
-		return set(list, v, text)
+		return set_input(list, v, in_)
 	case .Missing:
-		return insert_member(list, obj, length(doc, obj), name, text)
+		return insert_input(list, obj, length(doc, obj), name, true, in_)
 	case .Wrong_Kind:
 		return refused(.Bad_Index, .Not_Object)
 	case .Not_Loaded:
@@ -174,27 +210,8 @@ set_member :: proc(list: ^Edit_List, obj: Node_Index, name, text: string, dups :
 	return refused(.Bad_Index, .Not_Loaded)
 }
 
-// Inserts `text` into the array `container` before its element `at`, or after its last when `at` is its length.
-@(private)
-insert_value :: proc(list: ^Edit_List, container: Node_Index, at: int, text: string) -> Error {
-	return insert_at(list, container, at, "", false, text)
-}
-
-// Inserts `key` and `text` as a member of the object `container` before its member `at`, or after its last when
-// `at` is its length.
-@(private)
-insert_member :: proc(list: ^Edit_List, container: Node_Index, at: int, key, text: string) -> Error {
-	return insert_at(list, container, at, key, true, text)
-}
-
-// `insert` is `insert_value` for an array and `insert_member` for an object.
-insert :: proc {
-	insert_value,
-	insert_member,
-}
-
-@(private)
-insert_at :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string, member: bool, text: string) -> Error {
+// Inserts `in_` before member or element `at` of `container`, as a member named `key` when `member`.
+insert_input :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string, member: bool, in_: Edit_Input) -> Error {
 	doc := list.doc
 	if doc == nil {
 		return refused(.Bad_Index, .No_Document)
@@ -212,6 +229,10 @@ insert_at :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string,
 	if member && list.edit.key_text == nil {
 		return refused(.Wrong_Container)
 	}
+	if !in_.raw {
+		return insert_spelled(list, container, at, key, member, in_.value)
+	}
+	text := in_.text
 	e: Document_Error
 	if !member && list.edit != nil && list.edit.insert_check != nil {
 		e = list.edit.insert_check(doc, container, text, list.allocator)

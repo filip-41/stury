@@ -33,6 +33,7 @@ edit_of :: proc "contextless" ($S: Spec) -> ^core.Edit_Services {
 		separators = edit_separators,
 		member_sep = proc(_: ^core.Document, _: core.Node_Index) -> string {return ","},
 		key_sep    = ":",
+		spell      = edit_spell,
 		validate   = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {
 			h: core.No_Hooks
 			regs: core.Hook_Regs

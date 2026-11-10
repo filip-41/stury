@@ -132,7 +132,7 @@ Change one value and keep every other byte:
 
 ```odin
 name, _ := json.parse_path(".name")
-out, err := json.set(src, .Json, name, `"grace"`) // {"name": "grace",  "tags": ["math"]}
+out, err := json.set(src, .Json, name, "grace") // {"name": "grace",  "tags": ["math"]}
 ```
 
 Read CSV rows into structs by the header's column names:

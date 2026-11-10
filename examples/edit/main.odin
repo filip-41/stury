@@ -26,10 +26,10 @@ main :: proc() {
 }
 
 run :: proc(src: []u8) -> json.Error {
-	// The new value is JSON text, which the edit checks before it is spliced in.
+	// The new value is an Odin value, which the format spells.
 	name := json.parse_path(".name") or_return
 	defer json.destroy(&name)
-	out := json.set(src, .Json, name, `"grace"`) or_return
+	out := json.set(src, .Json, name, "grace") or_return
 	defer delete(out)
 	fmt.println(string(out)) // {"name": "grace",  "tags": ["math"]}: every byte outside the edit kept
 
@@ -39,7 +39,7 @@ run :: proc(src: []u8) -> json.Error {
 	list := json.edit_list_init(&doc, .Json)
 	defer json.destroy(&list)
 	tags, _ := json.member(&doc, json.ROOT, "tags")
-	json.set_member(&list, json.ROOT, "n", "1") or_return
+	json.set_member(&list, json.ROOT, "n", 1) or_return
 	json.remove(&list, tags) or_return
 	committed, _ := json.commit(&list) or_return
 	defer delete(committed)

@@ -242,7 +242,7 @@ read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Opt
 		}
 		more = true
 	}
-	return core.error_of(refusal), more
+	return core.error_of(refusal, allocator = runtime.arena_allocator(&it.scratch)), more
 }
 
 @(private)
@@ -260,8 +260,8 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 			if refusal := reader_plan(it, T); refusal != nil {
 				// A plan is refused as a `Typed_Error`, or for memory.
 				err = {kind = .No_Memory}
-				if typed_refusal, is_typed := refusal.(core.Typed_Error); is_typed {
-					err = typed_refusal
+				if typed_refusal, is_typed := refusal.(core.Typed_Failure); is_typed {
+					err = core.typed_error_of(typed_refusal)
 				}
 				return false, err
 			}

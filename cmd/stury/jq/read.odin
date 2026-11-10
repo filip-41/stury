@@ -39,7 +39,7 @@ judge_build :: proc(doc: core_pkg.Document, err: core_pkg.Error) -> (core_pkg.Do
 		if e.kind != .Duplicate_Key {
 			return {}, e
 		}
-	case runtime.Allocator_Error, core_pkg.Document_Error, core_pkg.Path_Error, core_pkg.Typed_Error, core_pkg.Typed_Error_Kind:
+	case runtime.Allocator_Error, core_pkg.Document_Error, core_pkg.Path_Error, core_pkg.Typed_Failure, core_pkg.Typed_Error_Kind:
 	}
 	return {}, core_pkg.Fault{kind = .No_Memory}
 }

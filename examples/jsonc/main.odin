@@ -33,7 +33,7 @@ run :: proc(src: []u8) -> json.Error {
 
 	a := json.parse_path(".a") or_return
 	defer json.destroy(&a)
-	out := json.set(src, .Jsonc, a, "2") or_return
+	out := json.set(src, .Jsonc, a, 2) or_return
 	defer delete(out)
 	fmt.print(string(out))
 	return nil

@@ -185,10 +185,10 @@ write_kinds_render :: proc(t: ^testing.T) {
 	for c in cases {
 		b: strings.Builder
 		defer strings.builder_destroy(&b)
-		core.render(strings.to_writer(&b), transmute([]u8)string("abc\ndef"), c.err)
+		core.render(strings.to_writer(&b), transmute([]u8)string("abc\ndef"), core.error_of(c.err))
 		testing.expect_value(t, strings.to_string(b), c.message)
 		strings.builder_reset(&b)
-		core.write_code(strings.to_writer(&b), c.err)
+		core.write_code(strings.to_writer(&b), core.error_of(c.err))
 		testing.expect_value(t, strings.to_string(b), c.code)
 	}
 }

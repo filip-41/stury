@@ -14,6 +14,7 @@ Write_Options :: struct {
 	escape_del:      bool, // DEL is written as `\u007f`, which `ascii` does as well. A string keeps it otherwise
 	sort_keys:       bool, // a struct's fields and a document's keys in byte order. A map's keys are always sorted
 	respell_strings: bool, // a string read from a source is written in the writer's own escapes, as a computed one is
+	jq_numbers:      bool, // a built value's number that is not finite is written as jq writes it: NaN as null, an infinity as the largest double of its sign
 }
 
 // Pretty with two spaces per level.

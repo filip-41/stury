@@ -30,6 +30,7 @@ EDIT := core.Edit_Services {
 	fact_slot     = edit_fact_slot,
 	emptied       = edit_emptied,
 	plan          = proc(doc: ^core.Document, list: ^core.Edit_List, out: ^[dynamic]core.Edit, allocator: runtime.Allocator) -> (bool, core.Document_Error) {return edit_plan(doc, list, out, allocator, edit_record_at)},
+	spell         = edit_spell,
 	validate      = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_from(src, as, 0, 0)},
 }
 

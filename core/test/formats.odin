@@ -6,6 +6,8 @@ import "core:strings"
 import "core:testing"
 import core ".."
 import compose "../compose"
+import typed "../typed"
+import write "../write"
 import dsv "../../dsv"
 import json "../../json"
 import walktest "../../walktest"
@@ -80,4 +82,59 @@ default_duplicates_read_as_last :: proc(t: ^testing.T) {
 @(test)
 error_entry_layout :: proc(t: ^testing.T) {
 	testing.expect(t, size_of(core.Error_Entry) <= 128)
+}
+
+@(private = "file")
+build_as :: proc(src: []u8, spec: any) -> (core.Document, core.Error) {
+	return core.build(src, spec.(core.As))
+}
+
+// One edit list over a record, run on a JSON array of objects and on a CSV table, writes each format's own text.
+@(test)
+value_edits_write_each_formats_text :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	rows := []struct {
+		src, want: string,
+		as:        core.As,
+	}{
+		{`[{"a":1,"b":2}]`, `[{"a":"x y","b":5}]`, json.as(.Json)},
+		{"a,b\n1,2\n", "a,b\nx y,5\n", dsv.as(.Csv)},
+		{"a\tb\n1\t2\n", "a\tb\nx y\t5\n", dsv.as(.Tsv)},
+	}
+	for row in rows {
+		walktest.check(t, row.src, row.want, build_as, row.as, proc(list: ^core.Edit_List) -> core.Error {
+			record, _ := core.child_at(list.doc, core.ROOT, 0)
+			write.set_member(list, record, "a", "x y") or_return
+			return write.set_member(list, record, "b", 5)
+		})
+	}
+}
+
+// A string literal and a string variable give the same bytes, and the text of a value is spelled only as `typed.Raw`.
+@(test)
+string_literal_and_variable_edit_alike :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := `{"a":1}`
+	as := json.as(.Json)
+	spelled := [3]string{`{"a":"[1]"}`, `{"a":"[1]"}`, `{"a":[1]}`}
+	for i in 0 ..< 3 {
+		doc, err := core.build(transmute([]u8)src, as)
+		defer core.destroy(&doc)
+		walktest.expect_nil(t, err)
+		list := core.edit_list_init(&doc)
+		defer core.edit_list_destroy(&list)
+		text := "[1]"
+		switch i {
+		case 0:
+			write.set_member(&list, core.ROOT, "a", "[1]")
+		case 1:
+			write.set_member(&list, core.ROOT, "a", text)
+		case 2:
+			write.set_member(&list, core.ROOT, "a", typed.Raw(text))
+		}
+		out, _, cerr := compose.commit(&list)
+		defer delete(out)
+		walktest.expect_nil(t, cerr)
+		testing.expect_value(t, string(out), spelled[i])
+	}
 }

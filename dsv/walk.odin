@@ -16,6 +16,8 @@ import "base:runtime"
 import core "../core"
 import kernel "../core/kernel"
 import engine "../core/build"
+import typed "../core/typed"
+import write "../core/write"
 
 // The grammar a text follows, chosen at compile time. Each spec instantiates its own pass, so a CSV build holds no TSV
 // code.
@@ -364,10 +366,17 @@ find_chosen :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts :
 	return engine.find(src, as(spec, opts), path, read, allocator)
 }
 
+// Makes `v` the value at every answer of `path` over `src`, in one call, and returns the new text, which the caller frees
+// with `allocator`. A `typed.Raw` is the text of a value, a struct, a slice or a map is built by `plan`, and any other
+// value is spelled by the format. A `Name` the path ends in that its container lacks is inserted after the container's
+// last member. `read.dups` picks among a repeated key as `query` does, and sets each repeat under `.All`.
 set :: proc {set_bound, set_chosen}
 
 @(private)
-set_bound :: proc(src: []u8, $S: Spec, path: core.Path, text: string, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+set_bound :: proc(src: []u8, $S: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+	scratch: write.Scratch
+	defer write.scratch_destroy(&scratch)
+	in_ := write.edit_input(v, plan, &scratch) or_return
 	doc, berr := build_bound(src, S, opts, read.dups, allocator)
 	defer core.destroy(&doc)
 	if berr != nil {
@@ -375,12 +384,15 @@ set_bound :: proc(src: []u8, $S: Spec, path: core.Path, text: string, opts := Op
 	}
 	list := edit_list_init_bound(&doc, S, allocator)
 	defer core.edit_list_destroy(&list)
-	return engine.set_answers(&list, path, text, read, allocator)
+	return engine.set_answers(&list, path, in_, read, allocator)
 }
 
 @(private)
-set_chosen :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, text: string, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	return engine.set(src, as(spec, opts), path, text, read, allocator)
+set_chosen :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+	scratch: write.Scratch
+	defer write.scratch_destroy(&scratch)
+	in_ := write.edit_input(v, plan, &scratch) or_return
+	return engine.set(src, as(spec, opts), path, in_, read, allocator)
 }
 
 // Answers `path` or `paths` over a document built whole. A document read as a constant spec holds no services, so

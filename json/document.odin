@@ -25,6 +25,7 @@ EDIT := core.Edit_Services {
 	member_sep = proc(_: ^core.Document, _: core.Node_Index) -> string {return ","},
 	key_sep    = ":",
 	validate   = validate_as,
+	spell      = edit_spell,
 }
 
 // `HANDLE` holds JSON's readers, in rodata, the same table for every spec, for a caller that knows no format. `text` and

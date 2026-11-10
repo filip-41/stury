@@ -64,6 +64,7 @@ edit_of :: proc "contextless" ($S: Spec) -> ^core.Edit_Services {
 		fact_slot    = edit_fact_slot,
 		emptied      = edit_emptied,
 		plan         = proc(doc: ^core.Document, list: ^core.Edit_List, out: ^[dynamic]core.Edit, allocator: runtime.Allocator) -> (bool, core.Document_Error) {return edit_plan(doc, list, out, allocator, record_check(S))},
+		spell        = edit_spell,
 		validate     = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, S, options_of(as))},
 	}
 	return &e

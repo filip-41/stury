@@ -73,8 +73,8 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	if plan == nil {
 		made, refusal := plan_make(T, doc.as)
 		err: core.Typed_Error
-		if refused, is_typed := refusal.(core.Typed_Error); is_typed {
-			err = refused
+		if refused, is_typed := refusal.(core.Typed_Failure); is_typed {
+			err = core.typed_error_of(refused)
 		} else if refusal != nil {
 			err.kind = .No_Memory
 		} else {

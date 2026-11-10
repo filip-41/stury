@@ -6,6 +6,8 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import compose "../../core/compose"
+import typed "../../core/typed"
+import write "../../core/write"
 import dsv ".."
 import walktest "../../walktest"
 
@@ -82,15 +84,15 @@ fact :: proc(node: core.Node_Index, role: core.Role, text: string) -> Op {
 apply :: proc(list: ^core.Edit_List, op: Op) -> core.Error {
 	switch op.kind {
 	case .Set:
-		return core.set(list, op.node, op.a)
+		return write.set(list, op.node, typed.Raw(op.a))
 	case .Insert:
-		return core.insert(list, op.node, op.at, op.a)
+		return write.insert(list, op.node, op.at, typed.Raw(op.a))
 	case .Add:
-		return core.insert(list, op.node, op.at, op.a, op.b)
+		return write.insert(list, op.node, op.at, op.a, typed.Raw(op.b))
 	case .Remove:
 		return core.remove(list, op.node)
 	case .Member:
-		return core.set_member(list, op.node, op.a, op.b)
+		return write.set_member(list, op.node, op.a, typed.Raw(op.b))
 	case .Fact:
 		return core.set_fact(list, op.node, op.role, op.a)
 	case .Facts:
@@ -443,7 +445,7 @@ edit_out_of_memory :: proc(t: ^testing.T) {
 	for fail_at in 0 ..< 8 {
 		f.n = 0
 		f.fail_at = fail_at
-		e := core.insert(&list, core.ROOT, 1, string("7,8"))
+		e := write.insert(&list, core.ROOT, 1, typed.Raw(string("7,8")))
 		if _, oom := e.(runtime.Allocator_Error); oom {
 			testing.expect_value(t, len(list.edits), 0)
 			continue
@@ -518,4 +520,20 @@ fact_edits :: proc(t: ^testing.T) {
 		// A removed comment line leaves the next record's leading blanks, which are its cell's data.
 		{src = "\xef\xbb\xbf& ;a\r\n12.5\r\na\r\n\"q\"\r\n&\\\\,\r\n sp \r\n", want = "\xef\xbb\xbf& ;a\r\n12.5\r\né\r\n\"q\"\r\n sp \r\n", opts = {no_header = true, delimiter = '#', comment = '&'}, ops = {put(4, "é"), {kind = .Unfact, node = 7, role = .Comment}}},
 	})
+}
+
+// A cell that is not UTF-8 is refused where it is recorded, and the text stays as it was.
+@(test)
+value_edit_refuses_a_cell_that_is_not_utf8 :: proc(t: ^testing.T) {
+	src := "a,b\n1,2\n"
+	doc, _ := core.build(transmute([]u8)src, dsv.as(.Csv))
+	defer core.destroy(&doc)
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	bad := [3]u8{'a', 0xff, 'b'}
+	walktest.expect_kind(t, write.set(&list, cell_node(&doc, 0, 0), transmute(string)bad[:]), core.Document_Error_Kind.Bad_Value)
+	out, _, err := compose.commit(&list, dsv.as(.Csv))
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, string(out), src)
+	delete(out)
 }

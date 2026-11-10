@@ -218,30 +218,33 @@ of that spec.
 
 ## Edit and keep every other byte
 
-`set` replaces the value at a path with JSON text. The text is checked before it is spliced in, and every byte outside
-the edit, spacing and comments included, is kept. [examples/edit](../examples/edit/main.odin):
+`set` replaces the value at a path with an Odin value, which the document's format spells: a string, a number, a bool, a
+`core.Value`, or a struct, a slice or a map with the `plan` that `plan_make` built with `reads` for its type. A value over
+lines takes the layout of the container it goes in, its indent and its colon spacing. Every byte outside the edit,
+spacing and comments included, is kept. [examples/edit](../examples/edit/main.odin):
 
 ```odin
 name, _ := json.parse_path(".name")
-out, err := json.set(src, .Json, name, `"grace"`)
+out, err := json.set(src, .Json, name, "grace")
 defer delete(out)
 // {"name": "grace",  "tags": ["math"]}
 ```
 
-Several edits on one document go on an `Edit_List`, each checked as it is recorded, and one commit applies them:
+Several edits on one document go on an `Edit_List`, and one commit applies them. A value is spelled where it is
+recorded, and a `typed.Raw` is the text of a value, which is checked as it is recorded:
 
 ```odin
 list := json.edit_list_init(&doc, .Json)
 defer json.destroy(&list)
 tags, _ := json.member(&doc, json.ROOT, "tags")
-json.set_member(&list, json.ROOT, "n", "1")
+json.set_member(&list, json.ROOT, "n", 1)
 json.remove(&list, tags)
 committed, _, cerr := json.commit(&list)
 defer delete(committed)
 // {"name": "ada",  "n": 1}
 ```
 
-`insert` adds an element, `core.set` replaces a node (`set` of a format package takes a path), and `remove` drops one.
+`insert` adds an element or a member, `set_node` replaces a node of a list (`set` takes a path), and `remove` drops one. In a delimited table `insert` takes a record as a struct, an array or an object of cells.
 In a dsv document, removing a cell from every row drops its column, header included. `dsv.set` and `dsv.commit` edit a
 table the same way.
 

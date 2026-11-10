@@ -4,6 +4,7 @@ import "core:testing"
 import core "../../core"
 import compose "../../core/compose"
 import typed "../../core/typed"
+import write "../../core/write"
 import dsv ".."
 import walktest "../../walktest"
 
@@ -46,7 +47,7 @@ every_entry_point_accepts_valid_input :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, ferr)
 	core.destroy(&fdoc)
 
-	out, oerr := dsv.set(src, .Csv, path, "7")
+	out, oerr := dsv.set(src, .Csv, path, typed.Raw("7"))
 	walktest.expect_nil(t, oerr)
 	delete(out)
 
@@ -87,7 +88,7 @@ constant_forms :: proc(t: ^testing.T, $S: dsv.Spec, text, edited: string) {
 	if testing.expect_value(t, len(answers), 1) {
 		list := dsv.edit_list_init(&doc, S)
 		defer core.edit_list_destroy(&list)
-		walktest.expect_nil(t, core.set(&list, answers[0].node, "7"))
+		walktest.expect_nil(t, write.set(&list, answers[0].node, typed.Raw("7")))
 		out, _, cerr := compose.commit(&list)
 		defer delete(out)
 		walktest.expect_nil(t, cerr)
@@ -110,7 +111,7 @@ constant_forms :: proc(t: ^testing.T, $S: dsv.Spec, text, edited: string) {
 	walktest.expect_nil(t, ferr)
 	testing.expect(t, found.outcome == .Found)
 	core.destroy(&fdoc)
-	out, oerr := dsv.set(src, S, path, "7")
+	out, oerr := dsv.set(src, S, path, typed.Raw("7"))
 	walktest.expect_nil(t, oerr)
 	testing.expect_value(t, string(out), edited)
 	delete(out)

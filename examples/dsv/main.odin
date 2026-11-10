@@ -93,7 +93,7 @@ document_and_edits :: proc(src: []byte) -> dsv.Error {
 
 	population, _ := dsv.parse_path(".[0].population")
 	defer dsv.destroy(&population)
-	edited := dsv.set(src, .Csv, population, "710000") or_return
+	edited := dsv.set(src, .Csv, population, 710000) or_return
 	defer delete(edited)
 	fmt.print(string(edited)) // City,population,lat,lon
 	//                           Oslo,710000,59.91,10.75
@@ -102,7 +102,9 @@ document_and_edits :: proc(src: []byte) -> dsv.Error {
 	// Edits on a document are recorded on a list and applied by one commit.
 	list := dsv.edit_list_init(&doc, .Csv)
 	defer dsv.destroy(&list)
-	dsv.insert(&list, dsv.ROOT, 2, "Bergen,,60.39,5.32") or_return
+	plan := dsv.plan_make(City, reads = dsv.reads(.Csv)) or_return
+	defer dsv.destroy(&plan)
+	dsv.insert(&list, dsv.ROOT, 2, City{name = "Bergen", lat = 60.39, lon = 5.32}, &plan) or_return
 	added, _ := dsv.commit(&list) or_return
 	defer delete(added)
 	fmt.print(string(added)[len(src):]) // Bergen,,60.39,5.32

@@ -4,6 +4,8 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import compose "../../core/compose"
+import typed "../../core/typed"
+import write "../../core/write"
 import json ".."
 import walktest "../../walktest"
 
@@ -276,9 +278,9 @@ fact_rows :: proc(t: ^testing.T, rows: []Fact_Row) {
 			case .Remove_Fact:
 				e = core.remove_fact(&list, op.node, op.role)
 			case .Set:
-				e = core.set(&list, op.node, op.text)
+				e = write.set(&list, op.node, typed.Raw(op.text))
 			case .Insert:
-				e = core.insert(&list, op.node, op.at, op.text)
+				e = write.insert(&list, op.node, op.at, typed.Raw(op.text))
 			case .Remove:
 				e = core.remove(&list, op.node)
 			case .Reorder:

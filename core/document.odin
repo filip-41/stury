@@ -401,6 +401,11 @@ Edit_Services :: struct {
 	plan:          proc(doc: ^Document, list: ^Edit_List, out: ^[dynamic]Edit, allocator: runtime.Allocator) -> (changed: bool, err: Document_Error),
 	// Judges a text of the list's own spec, as a commit checks its output and the document's source.
 	validate:      proc "contextless" (src: []u8, as: As) -> Maybe(Fault),
+	// Spells a built value as text of the document's format and spec, in a buffer from `allocator`. `opts` and `colon`
+	// are the layout, `colon` the bytes between a member's key and its value when they are not the format's own. `at` is
+	// the byte the text goes in at. A flat format spells a cell, or with `record` the cells of an array or object as one
+	// record without its line end, and refuses a cell it cannot spell as a `Document_Error` that names the cell by `reason`.
+	spell:         proc(doc: ^Document, v: Value, opts: Write_Options, colon: string, record: bool, at: u64, allocator: runtime.Allocator) -> ([]u8, Error),
 }
 
 // A `Comment_Spelling` names how a format spells a comment in an output: `//` for a JSON spec that has comments, the

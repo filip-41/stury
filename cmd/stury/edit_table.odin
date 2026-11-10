@@ -10,6 +10,8 @@ import "base:runtime"
 import "core:slice"
 import "core:strings"
 import core "../../core"
+import typed "../../core/typed"
+import write "../../core/write"
 import "jq"
 import "message"
 
@@ -354,7 +356,7 @@ edit_table_place :: proc(er: ^Edit_Run, w0: ^Edit_State, text: []u8, placed: []E
 		it := core.children(&doc, core.ROOT)
 		for row in core.child_next(&it) {
 			for k := core.length(&doc, row); k < len(names); k += 1 {
-				core.insert(&short, row, core.length(&doc, row), "")
+				write.insert(&short, row, core.length(&doc, row), typed.Raw(""))
 			}
 		}
 		if len(short.edits) == 0 {
@@ -449,40 +451,47 @@ edit_table_records :: proc(w0, w: ^Edit_State, placed: []Edit_Placed, final: []s
 
 @(private = "file")
 edit_record_insert :: proc(w: ^Edit_State, at: int, text: string) -> bool {
-	if e := core.insert(w.list, core.ROOT, at, text); e != nil {
+	if e := write.insert(w.list, core.ROOT, at, typed.Raw(text)); e != nil {
 		message.write_stderr("stury: error: %s: %s\n", w.name, edit_error_text(w.doc.src, e))
 		return false
 	}
 	return true
 }
 
-// A new record's line: its cells in the `final` columns, or in its own order for a table without a header, each
-// spelled as an edit spells a cell, a cell taken from the table keeping its bytes.
+// A new record's line: its cells in the `final` columns, or in its own order for a table without a header, each spelled
+// as the library spells a record, a cell taken from the table keeping its bytes.
 @(private = "file")
 edit_row_text :: proc(w: ^Edit_State, v: jq.Value, final: []string) -> (text: string, ok: bool) {
-	b := strings.builder_make(context.temp_allocator)
-	delimiter := w.doc.as.opts[0]
-	at := u64(len(w.doc.src))
+	row := edit_row_cells(w, v, final) or_return
+	spelled, owned, e := core.insert_text(w.list, core.ROOT, row)
+	if !edit_check(w, e, row, true) {
+		return "", false
+	}
+	text = strings.clone(string(spelled), context.temp_allocator)
+	if owned {
+		delete(spelled, w.list.allocator)
+	}
+	return text, true
+}
+
+// A new record's cells.
+@(private = "file")
+edit_row_cells :: proc(w: ^Edit_State, v: jq.Value, final: []string) -> (row: jq.Value, ok: bool) {
+	cells := jq.new_array(len(final))
 	if jq.kind(v) == .Object && final != nil {
-		for name, i in final {
-			if i > 0 {
-				strings.write_byte(&b, delimiter)
-			}
+		for name in final {
 			cell, _ := jq.object_get(v, name)
-			strings.write_string(&b, edit_text_of(w, cell, at) or_return)
+			edit_note_comments(w, cell) or_return
+			append(&cells.items, cell)
 		}
-		return strings.to_string(b), true
+		return cells, true
 	}
 	it := jq.iterate(v)
-	i := 0
 	for _, cell in jq.next_member(&it) {
-		if i > 0 {
-			strings.write_byte(&b, delimiter)
-		}
-		strings.write_string(&b, edit_text_of(w, cell, at) or_return)
-		i += 1
+		edit_note_comments(w, cell) or_return
+		append(&cells.items, cell)
 	}
-	return strings.to_string(b), true
+	return cells, true
 }
 
 // An object output's keys in its order, none for another value.

@@ -376,11 +376,11 @@ query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Option
 	return h.answers[:h.n_answers], {}
 }
 
-// Writes `text` as the value at every answer of `path` over the built `doc`, and returns the new text. A `Name` the path ends
+// Writes `in_` as the value at every answer of `path` over the built `doc`, and returns the new text. A `Name` the path ends
 // in that its container lacks is inserted there, an `Index` the path ends in that is its array's length appends, and a
 // `?` on either passes a container that is not of its kind. A missing parent is `.Bad_Index`, and an index past the
 // length `.Bad_Position`.
-set_answers :: proc(list: ^core.Edit_List, path: core.Path, text: string, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+set_answers :: proc(list: ^core.Edit_List, path: core.Path, in_: core.Edit_Input, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
 	doc := list.doc
 	// A `Name` or an `Index` at the end is set through its container, so that a missing name or element is told from a
 	// missing parent.
@@ -411,14 +411,14 @@ set_answers :: proc(list: ^core.Edit_List, path: core.Path, text: string, read :
 		e := core.error_of(core.Document_Error{kind = .Bad_Index, reason = .No_Parent})
 		switch {
 		case a.outcome == .Found && (!(named || indexed) || whole):
-			e = core.set(list, a.node, text)
+			e = core.set_input(list, a.node, in_)
 		case a.outcome == .Found && named && doc.nodes[a.node].kind == .Object:
-			e = core.set_member(list, a.node, string(name), text, read.dups)
+			e = core.set_member_input(list, a.node, string(name), in_, read.dups)
 		case a.outcome == .Found && indexed:
-			e = set_element(list, a.node, int(index), text)
+			e = set_element(list, a.node, int(index), in_)
 		// A missing member names the container that lacks it.
 		case named && whole && a.outcome == .Missing && doc.nodes[a.owner].kind == .Object:
-			e = core.set_member(list, a.owner, string(name), text, read.dups)
+			e = core.set_member_input(list, a.owner, string(name), in_, read.dups)
 		case a.outcome == .Found && doc.nodes[a.node].kind != .Null:
 			e = core.error_of(core.Document_Error{kind = .Bad_Index, reason = .Not_Object})
 		}
@@ -439,13 +439,13 @@ set_answers :: proc(list: ^core.Edit_List, path: core.Path, text: string, read :
 
 // Sets element `k` of `arr`, counted from the end when negative, or appends at its length.
 @(private = "file")
-set_element :: proc(list: ^core.Edit_List, arr: core.Node_Index, k: int, text: string) -> core.Error {
+set_element :: proc(list: ^core.Edit_List, arr: core.Node_Index, k: int, in_: core.Edit_Input) -> core.Error {
 	n := core.length(list.doc, arr)
 	k := k + n if k < 0 else k
 	v, presence := core.element_of(list.doc, arr, k)
 	switch presence {
 	case .Found:
-		return core.set(list, v, text)
+		return core.set_input(list, v, in_)
 	case .Wrong_Kind:
 		return core.error_of(core.Document_Error{kind = .Bad_Index, reason = .Not_Array})
 	case .Not_Loaded:
@@ -455,7 +455,7 @@ set_element :: proc(list: ^core.Edit_List, arr: core.Node_Index, k: int, text: s
 	if k != n {
 		return core.error_of(core.Document_Error{kind = .Bad_Position})
 	}
-	return core.insert(list, arr, k, text)
+	return core.insert_input(list, arr, k, "", false, in_)
 }
 
 // A `$MANY` read's re-walk of the value at node `at` of a built document.
@@ -545,11 +545,11 @@ find :: proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{
 	return
 }
 
-// Writes `text` as the value at every answer of `path` over `src`, in one call: a build of the text, one edit per answer
+// Writes `in_` as the value at every answer of `path` over `src`, in one call: a build of the text, one edit per answer
 // and a commit. A `Name` the path ends in that its container lacks is inserted after the container's last member. The
 // result is the new text, which the caller frees with `allocator`. `read.dups` picks among a repeated key as `query`
 // does, sets each repeat under `.All`, and under `.Refuse` fails the build at one.
-set :: proc(src: []u8, as: core.As, path: core.Path, text: string, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+set :: proc(src: []u8, as: core.As, path: core.Path, in_: core.Edit_Input, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
 	doc, berr := core.build(src, as, read.dups, allocator)
 	defer core.destroy(&doc)
 	if berr != nil {
@@ -557,7 +557,7 @@ set :: proc(src: []u8, as: core.As, path: core.Path, text: string, read := core.
 	}
 	list := core.edit_list_init(&doc, allocator)
 	defer core.edit_list_destroy(&list)
-	return set_answers(&list, path, text, read, allocator)
+	return set_answers(&list, path, in_, read, allocator)
 }
 
 // Feeds the step logic the tokens of nodes `from ..< to` by `feed_nodes`. Only the containers on the path open, so `ends`
