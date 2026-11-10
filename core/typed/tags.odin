@@ -103,14 +103,20 @@ rules_of :: proc(b: ^Builder, name, tag: string) -> i32 {
 
 // Reads the rules a `model:` tag spells into `r`: items separated by commas, each a bound `>=N`, `>N`, `<=N` or `<N` on
 // a number, or the same after `len` on a length, which counts a string's code points, an array's elements and an
-// object's members, and is ASCII digits with no leading zero. Returns the first item it cannot read. `r`'s numbers
-// borrow `tag`.
+// object's members, and is ASCII digits with no leading zero, or `format=` and the name of a format, which asserts.
+// Returns the first item it cannot read. `r`'s numbers and format borrow `tag`.
 @(private)
 parse_tag :: proc(tag: string, r: ^rules.Rules) -> (bad: string) {
 	rest := tag
 	for part in strings.split_iterator(&rest, ",") {
 		item := strings.trim_space(part)
 		if len(item) == 0 {
+			continue
+		}
+		if strings.has_prefix(item, "format=") {
+			if r.format, r.assert_format = item[7:], true; rules.format_of(r.format) == .None {
+				return item
+			}
 			continue
 		}
 		length := strings.has_prefix(item, "len")

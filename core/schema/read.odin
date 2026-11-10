@@ -460,7 +460,7 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 	case "const":
 		n.const_of = core.Value(core.Node_Ref{doc, v})
 	case "enum":
-		n.enum_of = enum_values(r, doc, site)
+		n.enum_of, n.has_enum = enum_values(r, doc, site), true
 	case "multipleOf":
 		if text, ok := number_of(r, doc, site, name); ok {
 			if d := spell.decimal_of(text); d.head == "" || d.neg {
@@ -509,7 +509,10 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 		}
 	case "format":
 		if text, ok := string_of(r, doc, v); ok {
-			n.rules.format = keep(r, text)
+			if .Format_Assert in sc.vocab && rules.format_of(text) == .None {
+				fail(r, site, name, "is a format no check judges, which the format-assertion vocabulary refuses")
+			}
+			n.rules.format, n.rules.assert_format = keep(r, text), .Format_Assert in sc.vocab
 		} else {
 			fail(r, site, name, "must be a string")
 		}
@@ -642,8 +645,7 @@ enum_values :: proc(r: ^Reader, doc: ^core.Document, site: Site) -> []core.Value
 		fail(r, site, "enum", "must be an array")
 		return nil
 	}
-	// Room for one keeps an empty enum, which no value is in, apart from none.
-	out := make([dynamic]core.Value, 0, 1, r.d.allocator)
+	out := make([dynamic]core.Value, r.d.allocator)
 	it := core.children(doc, site.at)
 	for c in core.child_next(&it) {
 		append(&out, core.Node_Ref{doc, c})

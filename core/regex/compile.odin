@@ -10,6 +10,7 @@ package regex
 // A pattern's tree as a program for the backtracking matcher (match.odin), with what the search can skip
 // by: Oniguruma's optimizer's choice (optimize.odin), a literal every match starts with, the bytes one starts with.
 
+import "core:mem"
 import "core:slice"
 import "core:strings"
 import "core:unicode/utf8"
@@ -132,6 +133,24 @@ Compiler :: struct {
 	called:     []bool, // by group number: a call reaches it, so it is a subroutine
 	recursive:  []bool, // by group number: its body calls itself
 	addr:       []int, // by group number: a called group's first instruction, -1 until emitted
+}
+
+// Whether `pattern` is well formed under `flags`. It builds no program, frees what it allocated, and under `ecma`
+// takes back references and look-behind as syntax, since a JSON Schema pattern may hold them.
+valid :: proc(pattern: string, flags: Flags) -> bool {
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena)
+	defer mem.dynamic_arena_destroy(&arena)
+	context.allocator = mem.dynamic_arena_allocator(&arena)
+	_, err := parse(pattern, flags, true)
+	return err == ""
+}
+
+// Whether `r` has the Unicode property `name` as Oniguruma spells it (`\p{name}`: a general category, a script or a
+// binary property). A name it does not know holds for no rune.
+in_property :: proc(name: string, r: rune) -> bool {
+	it, ok := named_prop(name)
+	return ok && in_table(int(it.table), r)
 }
 
 // `pattern` compiled as jq compiles it, or Oniguruma's message for why not. The program, what it was built from and

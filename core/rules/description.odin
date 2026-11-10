@@ -32,6 +32,8 @@ Rules :: struct {
 	minimum, maximum:                     string,
 	multiple_of, pattern, format:         string,
 	unique:                               bool,
+	// Whether `format` asserts and does not only annotate.
+	assert_format:                        bool,
 	exclusive_minimum, exclusive_maximum: bool,
 	min_length, min_items, min_members:   u64,
 	max_length, max_items, max_members:   Maybe(u64),
@@ -40,7 +42,7 @@ Rules :: struct {
 // A node takes a value of one of `kinds` that passes the node's rules and, when there are arms, one of `any_of`.
 // `array` and `object` index the kind's block in the description, -1 for an array or object of any shape, so nodes
 // that differ only in kinds or rules share one. The fields below `any_of` are what a JSON Schema says beyond that,
-// each empty or nil for none, and `enum_of` nil for none: the value must be one of `enum_of` and the one of `const_of`, pass every node of `all_of`
+// each empty or nil for none, and `enum_of` read only under `has_enum`: the value must be one of `enum_of` and the one of `const_of`, pass every node of `all_of`
 // and exactly one of `one_of`, fail `not`, pass `then` when it passes the `if` of `cond` and `other` when it does not,
 // and pass `ref` and `dynamic_ref`, which the schema read resolves to nodes. `dynamic_ref` names the node the
 // reference reaches first, and `anchors` the nodes that may replace it. `unevaluated_items` and
@@ -55,6 +57,7 @@ Node :: struct {
 	object:                 i32,
 	any_of:                 []Node_Index,
 	enum_of:                []core.Value,
+	has_enum:               bool, // an `enum` is set, which may hold no value
 	const_of:               Maybe(core.Value),
 	all_of, one_of:         []Node_Index,
 	not:                    Maybe(Node_Index),
@@ -163,9 +166,9 @@ description_destroy :: proc(d: ^Description) {
 	d^ = {}
 }
 
-// The first keyword a node of `d` holds that a check of `d` does not judge yet, "" for none. `format_assert` says
-// `format` is asserted and not an annotation. A `$ref` with no keyword beside it is judged as the node it reaches.
-unjudged :: proc(d: ^Description, format_assert: bool) -> string {
+// The first keyword a node of `d` holds that a check of `d` does not judge yet, "" for none. A `$ref` with no keyword
+// beside it is judged as the node it reaches.
+unjudged :: proc(d: ^Description) -> string {
 	for &n in d.nodes {
 		switch {
 		case len(n.any_of) > 0:
@@ -186,8 +189,6 @@ unjudged :: proc(d: ^Description, format_assert: bool) -> string {
 			return "unevaluatedItems"
 		case n.unevaluated_properties != nil:
 			return "unevaluatedProperties"
-		case n.rules.format != "" && format_assert:
-			return "format"
 		case n.rules.unique:
 			return "uniqueItems"
 		}
@@ -210,5 +211,5 @@ unjudged :: proc(d: ^Description, format_assert: bool) -> string {
 
 // Whether `n` is a `$ref` and nothing else, which judges a value as the node it reaches does.
 ref_only :: proc(n: ^Node) -> bool {
-	return n.ref != nil && n.kinds == EVERY_KIND && n.rules == {} && n.array < 0 && n.object < 0 && raw_data(n.enum_of) == nil && n.const_of == nil && len(n.any_of) == 0 && len(n.all_of) == 0 && len(n.one_of) == 0 && n.not == nil && n.cond == {} && n.dynamic_ref == nil && n.unevaluated_items == nil && n.unevaluated_properties == nil
+	return n.ref != nil && n.kinds == EVERY_KIND && n.rules == {} && n.array < 0 && n.object < 0 && !n.has_enum && n.const_of == nil && len(n.any_of) == 0 && len(n.all_of) == 0 && len(n.one_of) == 0 && n.not == nil && n.cond == {} && n.dynamic_ref == nil && n.unevaluated_items == nil && n.unevaluated_properties == nil
 }

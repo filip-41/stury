@@ -221,7 +221,7 @@ load :: proc(r: ^Reader, uri: string) -> (source: int, found: bool) {
 		}
 	}
 	if text == "" {
-		u := uri_split(uri)
+		u: rules.Uri = rules.uri_split(uri)
 		if r.res.root == "" || u.scheme != "file" || u.authority != "" {
 			return
 		}

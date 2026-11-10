@@ -133,9 +133,10 @@ refuse_element :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Ho
 }
 
 // Adds `e`, with the path to where the read stands, to the sink. A wide reader (a `Check`) adds a `core.Error_Entry`
-// ending at `end`, with the path of any depth and its names copied.
+// ending at `end`, with the path of any depth and its names copied, and under a `keyword` of a description's plan the
+// keyword path to it.
 @(private)
-note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Error, end: u64) {
+note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Error, end: u64, keyword: Maybe(string) = nil) {
 	e := e
 	held := e.n_steps > 0
 	held_step := e.steps[0]
@@ -158,43 +159,69 @@ note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Error, end: u64) {
 	if c.entries.allocator.procedure == nil {
 		c.entries.allocator = h.ctx.allocator
 	}
-	if !entry_add(c, e, h, regs, held, held_step, end) {
+	if !entry_add(c, e, h, regs, held, held_step, end, keyword) {
 		c.truncated = true
 	}
 }
 
-// Appends the entry of `e`, whose path is copied to exactly the size it frees at, and says whether it fit in memory.
+// Appends the entry of `e`, whose paths are copied to exactly the size they free at, and says whether it fit in memory.
+// The keyword path is each open record's use site, then the value's, then `keyword`, for a description's plan.
 @(private)
-entry_add :: proc(c: ^Sink, e: core.Typed_Error, h: ^Reader, regs: core.Hook_Regs, held: bool, held_step: core.Step, end: u64) -> bool {
+entry_add :: proc(c: ^Sink, e: core.Typed_Error, h: ^Reader, regs: core.Hook_Regs, held: bool, held_step: core.Step, end: u64, keyword: Maybe(string)) -> bool {
 	context.allocator = c.entries.allocator
 	steps := make([dynamic]core.Step, context.temp_allocator)
 	if held {
-		if _, grown := append(&steps, held_step); grown != nil {
-			return false
-		}
+		append(&steps, held_step)
 	}
 	steps_of(h, regs, held, &steps)
-	n := len(steps)
-	path, failed := make([]core.Step, n)
+	words := make([dynamic]core.Step, context.temp_allocator)
+	if word, keyed := keyword.?; keyed && h.plan.checking {
+		for i in 1 ..< h.sp {
+			append(&words, ..h.plan.uses[field_at(h.frames[i].b).meta].site)
+		}
+		if !held {
+			append(&words, ..h.plan.uses[field_at(regs.b).meta].site)
+		}
+		if word != "" {
+			append(&words, core.Name(word))
+		}
+	}
+	entry := core.Error_Entry{kind = e.kind, start = e.at, end = max(end, e.at), record = c.record}
+	path_ok, words_ok := owned_steps(&entry.path, steps[:], true), owned_steps(&entry.keyword_path, words[:], false)
+	if !path_ok || !words_ok {
+		entry_destroy(&entry, c.entries.allocator)
+		return false
+	}
+	if _, grown := append(&c.entries, entry); grown != nil {
+		entry_destroy(&entry, c.entries.allocator)
+		return false
+	}
+	return true
+}
+
+// Copies `steps`, read from the last when `reverse` says so, and their names into `out`, from the context allocator.
+// Says whether they fit in memory, with what fit in `out`.
+@(private)
+owned_steps :: proc(out: ^[]core.Step, steps: []core.Step, reverse: bool) -> bool {
+	if len(steps) == 0 {
+		return true
+	}
+	path, failed := make([]core.Step, len(steps))
 	if failed != nil {
 		return false
 	}
-	for i in 0 ..< n {
-		path[i] = steps[n - 1 - i]
+	for i in 0 ..< len(steps) {
+		path[i] = steps[len(steps) - 1 - i] if reverse else steps[i]
 		if name, named := path[i].(core.Name); named {
 			text, cloned := strings.clone(string(name))
 			if cloned != nil {
-				entry_destroy(&core.Error_Entry{path = path[:i]}, c.entries.allocator)
-				delete(path)
+				out^ = path[:i]
 				return false
 			}
 			path[i] = core.Name(text)
 		}
 	}
-	if _, grown := append(&c.entries, core.Error_Entry{kind = e.kind, start = e.at, end = max(end, e.at), record = c.record, path = path}); grown != nil {
-		entry_destroy(&core.Error_Entry{path = path}, c.entries.allocator)
-		return false
-	}
+	out^ = path
 	return true
 }
 
@@ -304,6 +331,8 @@ step_at :: proc(h: ^Reader, f: ^Frame, at: core.Hook_Regs) -> (s: core.Step, ok:
 			return core.Index(0), true
 		}
 		return core.Index((at.c - u64(uintptr(f.data))) / u64(h.plan.meta[owner.meta].elem_size)), true
+	case .Checked:
+		return checked_step(h, f, owner, at)
 	}
 	return
 }

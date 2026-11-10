@@ -96,7 +96,19 @@ ecma_escape :: proc(p: ^Parser, c: byte) -> ^Node {
 		it, ok := parse_property(p, c == 'P')
 		return prop_node(it) if ok else nil
 	case 'k', '1' ..= '9':
-		return fail(p, "back references are not supported")
+		if !p.syntax_only {
+			return fail(p, "back references are not supported")
+		}
+		if c != 'k' {
+			for !at_end(p) && peek(p) >= '0' && peek(p) <= '9' {
+				p.i += 1
+			}
+		} else if end := strings.index_byte(p.src[p.i:], '>'); !strings.has_prefix(p.src[p.i:], "<") || end < 2 {
+			return fail(p, "invalid named reference")
+		} else {
+			p.i += end + 1
+		}
+		return char_node(p, 0)
 	}
 	r, ok := ecma_char(p, c)
 	return char_node(p, r) if ok else nil

@@ -56,13 +56,14 @@ unmarshal_value :: proc(v: core.Value, target: ^$T, plan: ^Plan, read := Read_Op
 	return unmarshal_text(text, target, typeid_of(T), plan, read, allocator)
 }
 
-// A read's state beside the hook's own: the document, and the node `build.feed_nodes` is giving the hook.
+// A read's state beside the hook's own: the document, and the node `build.feed_nodes` is giving the hook. The reader,
+// a `Reader` or a `Check`, comes last, so the other fields sit where `document_tag` reads them under either.
 @(private)
-Document_Read :: struct {
-	reader: Reader,
+Document_Read :: struct($H: typeid) {
 	doc:    ^core.Document,
 	at:     core.Node_Index,
 	room:   int, // the frames the reader holds
+	reader: H,
 }
 
 // Checks the value at `node` of `doc` into `target`, a value of `T`, with `plan`, as `unmarshal_node` reads it, with
@@ -101,30 +102,29 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	// The frames and the replay's two words a level grow as the value nests past them.
 	frames: [core.MAX_DEPTH + 2]Frame = ---
 	ends: [2 * core.MAX_DEPTH]u32 = ---
-	d := Document_Read{doc = doc, room = len(frames)}
+	d := Document_Read(Check when CHECK else Reader){doc = doc, room = len(frames)}
 	regs: core.Hook_Regs
 	err: core.Typed_Error
-	when CHECK {
-		regs, err = check_start((^Check)(&d.reader), doc.src, plan, doc.as, T, target, read, frames[:], allocator)
-	} else {
-		regs, err = read_start(&d.reader, doc.src, plan, doc.as, T, target, read, frames[:], allocator)
-	}
+	// The reader passes as an address, which the stack escape check cannot follow through a `Check`'s base `Reader`. No
+	// refusal holds the reader or its frames.
+	h := (^type_of(d.reader))(uintptr(&d.reader))
+	start :: check_start when CHECK else read_start
+	regs, err = start(h, doc.src, plan, doc.as, T, target, read, frames[:], allocator)
 	if err.kind != .None {
 		return err
 	}
-	defer read_release(&d.reader, frames[:])
-	d.reader.format = &d
-	d.reader.find_tag = document_tag
+	defer read_release(h, frames[:])
+	h.format = &d
+	h.find_tag = document_tag
 	to := u32(node) + (doc.nodes[node].n if doc.nodes[node].kind > .Plain else 1)
-	step :: document_step_check when CHECK else document_step
-	if !build.feed_nodes(doc, u32(node), to, &d, &regs, ends[:], step, document_keyed, document_deepen, true) {
+	if !build.feed_nodes(doc, u32(node), to, &d, &regs, ends[:], document_step, document_keyed, document_deepen, true) {
 		return {kind = .No_Memory}
 	}
-	return read_end(&d.reader, regs, nil)
+	return read_end(h, regs, nil)
 }
 
 @(private)
-document_deepen :: proc "contextless" (d: ^Document_Read, extra: int) -> bool {
+document_deepen :: proc "contextless" (d: ^Document_Read($H), extra: int) -> bool {
 	room, grown := grow_frames(&d.reader, d.room, d.room + extra)
 	d.room = room
 	return grown
@@ -133,7 +133,7 @@ document_deepen :: proc "contextless" (d: ^Document_Read, extra: int) -> bool {
 // A token as the walk would have given it: a container a path left partial is a value, an `End` has its bracket's byte,
 // and a number's digits are folded for the hook.
 @(private)
-document_step :: proc "contextless" (d: ^Document_Read, regs: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
+document_step :: proc "contextless" (d: ^Document_Read($H), regs: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
 	h := &d.reader
 	d.at = at
 	t := t
@@ -142,7 +142,11 @@ document_step :: proc "contextless" (d: ^Document_Read, regs: core.Hook_Regs, t:
 	} else if t.kind == .End {
 		// Only the closes that report a byte or end a value read whole ask for it, since a format's `close_end` may walk.
 		f := &h.frames[h.sp - 1]
-		if needs_close(f) {
+		closes := needs_close(f)
+		when H == Check {
+			closes ||= field_at(f.b).kind == .Checked
+		}
+		if closes {
 			context = h.ctx
 			t.lo = d.doc.readers.close_end(d.doc, at) - 1
 			t.n = 1
@@ -150,27 +154,11 @@ document_step :: proc "contextless" (d: ^Document_Read, regs: core.Hook_Regs, t:
 	} else if t.kind == .Number && t.spelling & core.NUMBER_KIND_MASK == 0 {
 		h.mant = fold_digits(h.src, t)
 	}
-	return on_token_spelled(h, regs, t)
-}
-
-// `document_step` for a `Check`, where every close of a description's plan reports at its byte.
-@(private)
-document_step_check :: proc "contextless" (d: ^Document_Read, regs: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
-	h := (^Check)(&d.reader)
-	d.at = at
-	t := t
-	if t.role == .Partial {
-		t.role = .Value
-	} else if t.kind == .End {
-		if h.plan.uses != nil || needs_close(&h.frames[h.sp - 1]) {
-			context = h.ctx
-			t.lo = d.doc.readers.close_end(d.doc, at) - 1
-			t.n = 1
-		}
-	} else if t.kind == .Number && t.spelling & core.NUMBER_KIND_MASK == 0 {
-		h.mant = fold_digits(h.src, t)
+	when H == Check {
+		return on_token_check_spelled(h, regs, t)
+	} else {
+		return on_token_spelled(h, regs, t)
 	}
-	return on_token_check_spelled(h, regs, t)
 }
 
 // Whether the close of the container `f` holds reads the bracket's byte: a fixed array's length, a `required` member, or
@@ -203,14 +191,14 @@ fold_digits :: #force_inline proc "contextless" (src: []u8, t: core.Token) -> (m
 
 // The key of the value at node `i` of the record `open`, whose cells are its scalar children in column order.
 @(private)
-document_keyed :: proc "contextless" (d: ^Document_Read, _: core.Hook_Regs, i, open: core.Node_Index) -> (core.Node_Index, bool) {
+document_keyed :: proc "contextless" (d: ^Document_Read($H), _: core.Hook_Regs, i, open: core.Node_Index) -> (core.Node_Index, bool) {
 	return core.header_of(d.doc) + 1 + (i - open - 1), d.doc.nodes[open].kind == .Object
 }
 
 // Finds the tag member of the object at the node the replay is giving, by replaying that object alone.
 @(private)
 document_tag :: proc(h: ^Reader, _: u64) -> Tag_Scan {
-	d := (^Document_Read)(h.format)
+	d := (^Document_Read(Reader))(h.format)
 	s := Tag_Scan{view = {src = h.src, as = h.plan.as}, name = h.plan.union_tag}
 	regs: core.Hook_Regs
 	// The replay opens the object alone, so it needs no more than two levels of ends.

@@ -338,13 +338,13 @@ schema_binds_shapes :: proc(t: ^testing.T) {
 // Every case of a suite schema the check binds gets the suite's verdict, from its text and from its built document.
 @(test)
 schema_suite_checks :: proc(t: ^testing.T) {
-	bound, cases, wrong := 0, 0, 0
+	bound, cases, wrong, format_cases := 0, 0, 0, 0
 	for entry in SUITE_DRAFTS {
 		w := os.walker_create_path(strings.concatenate({SUITE, entry.dir}, context.temp_allocator))
 		defer os.walker_destroy(&w)
 		for info in os.walker_walk(&w) {
 			// Draft 7's content assertions and the later drafts' `dependencies` are optional behaviour the check leaves out.
-			if info.type != .Regular || !strings.has_suffix(info.name, ".json") || strings.contains(info.fullpath, "optional/format") || strings.has_suffix(info.fullpath, "optional/content.json") || strings.has_suffix(info.fullpath, "optional/dependencies-compatibility.json") {
+			if info.type != .Regular || !strings.has_suffix(info.name, ".json") || strings.has_suffix(info.fullpath, "optional/content.json") || strings.has_suffix(info.fullpath, "optional/dependencies-compatibility.json") {
 				continue
 			}
 			arena: virtual.Arena
@@ -354,9 +354,11 @@ schema_suite_checks :: proc(t: ^testing.T) {
 			bytes, _ := os.read_entire_file_from_path(info.fullpath, context.allocator)
 			doc, _ := core.build(bytes, json.as(.Json))
 			groups := core.children(&doc, core.ROOT)
+			// The format suites run with `format` asserting, since a format is an annotation unless asked to assert.
+			in_formats := strings.contains(info.fullpath, "optional/format/")
 			for group in core.child_next(&groups) {
 				node, _ := core.member(&doc, group, "schema")
-				c, err := schema.compile(&doc, node, {resolver = {as = json.as(.Json), draft = entry.draft}})
+				c, err := schema.compile(&doc, node, {format_assert = in_formats, resolver = {as = json.as(.Json), draft = entry.draft}})
 				if err != nil {
 					continue
 				}
@@ -374,6 +376,7 @@ schema_suite_checks :: proc(t: ^testing.T) {
 					from_node := schema.check_node(&b, &doc, data) == nil
 					from_text := schema.valid(&b, core.span(&doc, data))
 					cases += 1
+					format_cases += int(in_formats)
 					if from_node != valid || from_text != valid {
 						wrong += 1
 						about, _ := core.member(&doc, test, "description")
@@ -384,8 +387,77 @@ schema_suite_checks :: proc(t: ^testing.T) {
 			}
 		}
 	}
-	log.infof("suite checks: %d schemas bound, %d cases, %d wrong", bound, cases, wrong)
+	log.infof("suite checks: %d schemas bound, %d cases (%d of formats), %d wrong", bound, cases, format_cases, wrong)
 	testing.expect_value(t, wrong, 0)
+}
+
+// `format` annotates unless the compile asks for it or the schema's meta-schema holds the format-assertion vocabulary,
+// and a name no checker knows annotates under the option and is a schema error under the vocabulary.
+@(test)
+schema_format_asserts_on_request :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	cases := [?]struct {
+		schema:  string,
+		assert_: bool,
+		text:    string,
+		valid:   bool,
+	} {
+		{`{"format": "ipv4"}`, false, `"nope"`, true},
+		{`{"format": "ipv4"}`, true, `"nope"`, false},
+		{`{"format": "ipv4"}`, true, `"10.0.0.1"`, true},
+		{`{"format": "ipv4"}`, true, `7`, true},
+		{`{"format": "no-such-format"}`, true, `"nope"`, true},
+		{`{"$schema": "meta-format-assertion.json", "format": "ipv4"}`, false, `"nope"`, false},
+		{`{"$schema": "meta-format-assertion.json", "format": "ipv4"}`, false, `"10.0.0.1"`, true},
+		{`{"properties": {"a": {"format": "date-time"}}}`, true, `{"a": "1985-04-12T23:20:50.123456789012Z"}`, true},
+		{`{"properties": {"a": {"format": "uuid"}}}`, true, `{"a": "2eb8aa08-aa98-11ea-b4aa-73b441d16380"}`, true},
+		{`{"properties": {"a": {"format": "uuid"}}}`, true, `{"a": "2eb8aa08aa9811eab4aa73b441d16380"}`, false},
+		{`{"format": "regex"}`, true, `"(a)\\1"`, true},
+		{`{"format": "regex"}`, true, `"(?<=a)b("`, false},
+		{`{"format": "regex"}`, true, `"\\1("`, false},
+		{`{"format": "relative-json-pointer"}`, true, `"1-1#"`, true},
+		{`{"format": "relative-json-pointer"}`, true, `"0+01/a"`, false},
+		{`{"propertyNames": {"format": "hostname"}}`, true, `{"a_b": 1}`, false},
+		{`{"format": "idn-hostname"}`, true, `"a\u0378b"`, false},
+		{`{"format": "idn-hostname"}`, true, `"a\u30a0b"`, false},
+		{`{"format": "idn-hostname"}`, true, `"a\ufdd0b"`, false},
+		{`{"format": "idn-hostname"}`, true, `"a\u0e3fb"`, false},
+		{`{"format": "idn-hostname"}`, true, `"a\u3164b"`, false},
+		{`{"format": "idn-hostname"}`, true, `"a\u309bb"`, false},
+		{`{"format": "idn-hostname"}`, true, `"\ufb00.com"`, true},
+		{`{"format": "idn-hostname"}`, true, `"\uff71.com"`, true},
+		{`{"format": "idn-hostname"}`, true, `"a\u0340b"`, true},
+		{`{"format": "idn-hostname"}`, true, `"a\u02b0b"`, true},
+		{`{"format": "idn-hostname"}`, true, `"\u0627\u200c\u0628"`, false},
+		{`{"format": "idn-hostname"}`, true, `"\u0628\u200c\u0628"`, true},
+		{`{"format": "idn-hostname"}`, true, `"\u0628\u064e\u200c\u0628"`, true},
+		{`{"format": "idn-hostname"}`, true, `"\u0628\u200c\u0627"`, true},
+		{`{"format": "idn-hostname"}`, true, `"\u0628\u200c"`, false},
+		{`{"format": "idn-hostname"}`, true, `"\ud83a\udd22\ud83a\udd23"`, true},
+		{`{"format": "idn-hostname"}`, true, `"a\ud83a\udd22"`, false},
+		{`{"format": "idn-email"}`, true, `"a@ex\u30a0ample.com"`, false},
+		{`{"format": "idn-email"}`, true, `"\u00e0@\ufb00.com"`, true},
+	}
+	for c in cases {
+		doc, built := core.build(transmute([]u8)c.schema, json.as(.Json))
+		testing.expect(t, built == nil)
+		compiled, err := schema.compile(&doc, core.ROOT, {format_assert = c.assert_, resolver = {as = json.as(.Json), root = FIXTURES}})
+		testing.expectf(t, err == nil, "%s: %v", c.schema, err)
+		b, bound := schema.bind(&compiled, json.as(.Json))
+		testing.expectf(t, bound == nil, "%s: %v", c.schema, bound)
+		testing.expectf(t, schema.valid(&b, transmute([]u8)c.text) == c.valid, "%s asserting %v: %s", c.schema, c.assert_, c.text)
+	}
+}
+
+@(test)
+schema_unknown_format_refused_under_assertion_vocabulary :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	doc, built := core.build(transmute([]u8)string(`{"$schema": "meta-format-assertion.json", "format": "no-such-format"}`), json.as(.Json))
+	testing.expect(t, built == nil)
+	_, err := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json), root = FIXTURES}})
+	testing.expect(t, err != nil)
 }
 
 // A failure's entry holds where it is, the path to its value, and the keywords that lead to its rule.
@@ -420,6 +492,12 @@ schema_check_reports_each_failure :: proc(t: ^testing.T) {
 @(private = "file")
 Corpus_Tie :: struct {
 	x: f64 `model:"<=0.1"`,
+}
+
+@(private = "file")
+Corpus_Formats :: struct {
+	at: string `model:"format=date-time"`,
+	mail: string `model:"format=email"`,
 }
 
 @(private = "file")
@@ -467,6 +545,14 @@ schema_check_agrees_with_model_load :: proc(t: ^testing.T) {
 	} {
 		{Corpus_Tie, `{"x": 0.10000000000000000001}`, false, .Name},
 		{Corpus_Tie, `{"x": 0.1}`, true, .Name},
+		{Corpus_Formats, `{"at": "1998-12-31T23:59:60Z"}`, true, .Name},
+		{Corpus_Formats, `{"at": "1998-12-31T23:59:61Z"}`, false, .Name},
+		{Corpus_Formats, `{"at": "1998-12-31 23:59:59Z"}`, false, .Name},
+		{Corpus_Formats, `{"at": "1998-12-31t23:59:59z"}`, true, .Name},
+		{Corpus_Formats, `{"mail": "a@b"}`, true, .Name},
+		{Corpus_Formats, `{"mail": "a b@c"}`, false, .Name},
+		{Corpus_Formats, `{"mail": "a..b@c"}`, false, .Name},
+		{Corpus_Formats, `{"mail": "\"a b\"@c"}`, true, .Name},
 		{Corpus_Whole, `{"n": 1.0}`, true, .Name},
 		{Corpus_Whole, `{"n": 1e2}`, true, .Name},
 		{Corpus_Whole, `{"n": 1.5}`, false, .Name},
@@ -577,7 +663,7 @@ checked_make :: proc(text: string, spec := json.Spec.Json, allocator := context.
 	c = new(Checked)
 	c.doc, _ = core.build(transmute([]u8)text, json.as(.Json))
 	if c.compiled, err = schema.compile(&c.doc, core.ROOT, {resolver = {as = json.as(.Json)}}); err == nil {
-		c.bound, err = schema.bind(&c.compiled, json.as(spec), allocator)
+		c.bound, err = schema.bind(&c.compiled, json.as(spec), allocator = allocator)
 	}
 	return
 }

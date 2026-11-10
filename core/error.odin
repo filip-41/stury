@@ -465,6 +465,7 @@ Typed_Error_Kind :: enum u8 {
 	Too_Short, // a string with fewer code points than a rule allows
 	Too_Long, // a string with more code points than a rule allows
 	No_Match, // a string a rule's pattern does not match
+	Bad_Format, // a string that is no value of a rule's format
 	Too_Few, // an array or object with fewer elements or members than a rule allows
 	Too_Many, // an array or object with more elements or members than a rule allows
 	Not_Unique, // an array whose elements repeat where a rule wants them unique
@@ -600,6 +601,7 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 	.Too_Short     = {"too_short", "String is too short"},
 	.Too_Long      = {"too_long", "String is too long"},
 	.No_Match      = {"no_match", "String does not match the pattern"},
+	.Bad_Format    = {"bad_format", "String is not in the format"},
 	.Too_Few       = {"too_few", "Too few elements or members"},
 	.Too_Many      = {"too_many", "Too many elements or members"},
 	.Not_Unique    = {"not_unique", "Elements are not unique"},

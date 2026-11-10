@@ -23,6 +23,8 @@ Vocab :: enum u8 {
 	Unevaluated,
 	Validation,
 	Format,
+	// The format-assertion vocabulary, which makes `format` assert.
+	Format_Assert,
 }
 
 @(private)
@@ -54,7 +56,7 @@ VOCABS_2020 := [?]Vocabulary {
 	{"unevaluated", {.Unevaluated}},
 	{"validation", {.Validation}},
 	{"format-annotation", {.Format}},
-	{"format-assertion", {.Format}},
+	{"format-assertion", {.Format, .Format_Assert}},
 	{"meta-data", {}},
 	{"content", {}},
 }

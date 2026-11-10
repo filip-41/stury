@@ -138,7 +138,7 @@ leaf :: proc(r: ^Reading, kind: typed.Read_Kind, m: typed.Meta) -> (n: rules.Nod
 	case .Enum, .Bit_Elem:
 		if m.enum_info != nil && (r.plan.enums == .Name || exact_values(m.enum_info)) {
 			n.kinds = {.String} if r.plan.enums == .Name else {.Integer}
-			n.enum_of = enum_operands(r, m.enum_info, r.plan.enums == .Name)
+			n.enum_of, n.has_enum = enum_operands(r, m.enum_info, r.plan.enums == .Name), true
 			break
 		}
 		n.kinds = {.Integer}
@@ -309,14 +309,14 @@ key_node :: proc(r: ^Reading, m: typed.Meta) -> (n: rules.Node) {
 	}
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, "^(?:")
-	if n.enum_of != nil {
+	if n.has_enum {
 		for v, i in n.enum_of {
 			buf: [24]u8
 			strings.write_string(&b, "|" if i > 0 else "")
 			strings.write_string(&b, strconv.write_int(buf[:], i64(v.(f64)), 10))
 		}
 		delete(n.enum_of)
-		n.enum_of = nil
+		n.enum_of, n.has_enum = nil, false
 	} else {
 		lo, _ := strconv.parse_i128(n.rules.minimum)
 		hi, _ := strconv.parse_i128(n.rules.maximum)

@@ -51,6 +51,7 @@ Read_Kind :: enum u8 {
 	Bit_Elem, // an element of the `Bit_Set` whose block holds it
 	Fixed_List,
 	Inside, // a token of a value read whole
+	Checked, // a description's node, judged by a `Check` and stored nowhere
 }
 
 // The hook's number arm tests `U8 ..= U64` as one aligned block and `I8 ..= I32` and `F32 ..= F64` as ranges.
@@ -100,7 +101,18 @@ Meta :: struct {
 	zeroed:     bool, // a list's new elements must start zeroed, since their readers may leave bytes unwritten
 	tagged:     bool, // a `Union` that reads objects by `Plan.union_tag`, or such a union's named struct arm
 	no_nil:     bool, // a `Union` that has no nil
-	rule_set:   i32, // 1 + the record's set in `Plan.rule_sets`, 0 for none
+	rule_set:   i32, // 1 + the record's leaf in `Plan.leaves`, and for a type's plan its set in `Plan.rule_sets`, 0 for none
+}
+
+// A `Checked` record's use of its node, beside its `Meta`, so a type plan's records stay as they are. `items` is the
+// `Hook_Regs.b` its array's elements start at, `additional` that of the record of the members no record names, and
+// `keys` 1 + the leaf of its member names, each 0 for none. `inside` says a rule reads an element. `site` is the keyword
+// steps from the record that holds it to its own rules, `$ref`s included.
+Use :: struct {
+	items, additional, keys: i32,
+	site:                    []core.Step,
+	step:                    bool, // a prefix record, which moves the cursor on to the next element's
+	inside:                  bool,
 }
 
 // A union's arm: the value classes it takes, its tag value, and its tag name when the tag names it.
@@ -179,6 +191,8 @@ Plan_Options :: struct {
 	tag_names: []Tag_Name,
 	hooks:     []Type_Hook,
 	rename:    Rename,
+	// Builds a description's plan as a check reads it: each record `Checked`, judging its use of its node.
+	checking:  bool,
 }
 
 // A plan is a value the caller owns, for one type and one format. `plan_make` builds it and `plan_destroy` frees it. It
@@ -227,23 +241,12 @@ Plan :: struct {
 	stamp:     u64,
 	// The rules of members, which `Meta.rule_set` names.
 	rule_sets: []rules.Rules,
-	// A check's rules: of `rule_sets`, in the same order, for a type's plan, and of the records' uses for a description's.
+	// A check's rules, which `Meta.rule_set` names: of `rule_sets`, in the same order, for a type's plan.
 	leaves:    []rules.Leaf,
-	// What a check judges at each record of a description's plan, indexed like `fields`, nil for a type's plan.
+	// A description's plan's `Use` of each record, by its `Meta` index.
 	uses:      []Use,
-	// What `leaves` allocates: patterns and enum keys.
+	// What `leaves` and `uses` allocate: patterns, enum keys, keyword steps and the uses.
 	arena:     ^virtual.Arena,
-}
-
-// What a check judges at a record of a description's plan, each index 1 past its place and 0 for none. `leaf` is the
-// value's rules in `Plan.leaves`, `keys` the rules an object's member names pass. `array` is the record an array's
-// elements start at, and `additional` the record of an object's members no record names. `step` is set on an array's
-// prefix record, which moves the cursor to the next element's record. `only_required` is set on a member's record that
-// only `required` names, whose value is judged as a member no record names.
-Use :: struct {
-	leaf, keys:          i32,
-	array, additional:   i32,
-	step, only_required: bool,
 }
 
 // Writes the value of `plan`'s type at `value` as `opts` says, to `stream` when it has a procedure, else to new bytes
@@ -271,6 +274,8 @@ Builder :: struct {
 	trail:         [TRAIL_MAX]string,
 	depth:         int,
 	rule_sets:     [dynamic]rules.Rules,
+	leaves:        [dynamic]rules.Leaf,
+	uses:          [dynamic]Use,
 }
 
 // What a block is recorded under for its next use and for a value that holds itself: a type and the rule set its
@@ -328,23 +333,33 @@ plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := 
 plan_leaves :: proc(p: ^Plan) -> core.Typed_Error {
 	leaves, failed := make([]rules.Leaf, len(p.rule_sets))
 	p.leaves = leaves
-	p.arena = new(virtual.Arena)
-	if failed != nil || p.arena == nil || virtual.arena_init_growing(p.arena) != nil {
-		free(p.arena)
-		p.arena = nil
+	arena, made := plan_arena(p)
+	if failed != nil || !made {
 		plan_destroy(p)
 		p.err = {kind = .No_Memory}
 		return p.err
 	}
 	for r, i in p.rule_sets {
 		refused: string
-		if leaves[i], refused = rules.rules_leaf(r, rules.EVERY_KIND, virtual.arena_allocator(p.arena)); refused != "" {
+		if leaves[i], refused = rules.rules_leaf(r, rules.EVERY_KIND, arena); refused != "" {
 			plan_destroy(p)
 			p.err = {kind = .Unsupported, want = {text = refused}}
 			return p.err
 		}
 	}
 	return {}
+}
+
+// Gives `p` its arena, which `plan_destroy` frees, false when it does not fit in memory.
+@(private)
+plan_arena :: proc(p: ^Plan) -> (runtime.Allocator, bool) {
+	p.arena = new(virtual.Arena)
+	if p.arena == nil || virtual.arena_init_growing(p.arena) != nil {
+		free(p.arena)
+		p.arena = nil
+		return {}, false
+	}
+	return virtual.arena_allocator(p.arena), true
 }
 
 // Gives `p` the text reads and node reads of `reads`, where it holds any.
@@ -383,7 +398,7 @@ plan_start :: proc(p: ^Plan, as: core.As, opts: Plan_Options) -> Builder {
 	b := Builder{options = &p.options, p = p}
 	hooks, no_hooks := make([]Type_Hook, len(opts.hooks))
 	tag_names, no_names := make([]Tag_Name, len(opts.tag_names))
-	p.options = {enums = opts.enums, rule_tags = opts.rule_tags, union_tag = owned_copy(&b, opts.union_tag), rename = opts.rename, hooks = hooks, tag_names = tag_names}
+	p.options = {enums = opts.enums, rule_tags = opts.rule_tags, checking = opts.checking, union_tag = owned_copy(&b, opts.union_tag), rename = opts.rename, hooks = hooks, tag_names = tag_names}
 	copy(hooks, opts.hooks)
 	for &t, i in tag_names {
 		t = {opts.tag_names[i].type, owned_copy(&b, opts.tag_names[i].name)}
@@ -449,34 +464,45 @@ plan_finish :: proc(b: ^Builder, stamp: u64) -> core.Typed_Error {
 
 @(private)
 plan_stamp :: proc(T: typeid, as: core.As, opts: Plan_Options) -> u64 {
+	h := stamp_as(as, opts)
+	stamp_mix(&h, transmute(u64)T)
+	return h
+}
+
+// A hash of the format and the options a plan is built with, which each front end mixes what it reads into.
+@(private)
+stamp_as :: proc(as: core.As, opts: Plan_Options) -> u64 {
 	h := u64(0xcbf29ce484222325)
-	mix :: proc(h: ^u64, x: u64) {
-		h^ = (h^ ~ x) * 0x100000001b3
-	}
-	text :: proc(h: ^u64, s: string) {
-		mix(h, u64(len(s)))
-		for c in transmute([]u8)s {
-			mix(h, u64(c))
-		}
-	}
-	mix(&h, transmute(u64)T)
-	mix(&h, u64(uintptr(rawptr(as.readers.format))))
-	mix(&h, u64(as.max_depth) | u64(as.spec) << 32 | u64(transmute(u8)as.tolerate) << 40)
+	stamp_mix(&h, u64(uintptr(rawptr(as.readers.format))))
+	stamp_mix(&h, u64(as.max_depth) | u64(as.spec) << 32 | u64(transmute(u8)as.tolerate) << 40)
 	for b in as.opts {
-		mix(&h, u64(b))
+		stamp_mix(&h, u64(b))
 	}
-	mix(&h, u64(opts.enums) | u64(opts.rename) << 8 | u64(opts.rule_tags) << 16)
-	text(&h, opts.union_tag)
+	stamp_mix(&h, u64(opts.enums) | u64(opts.rename) << 8 | u64(opts.rule_tags) << 16 | u64(opts.checking) << 17)
+	stamp_text(&h, opts.union_tag)
 	for t in opts.tag_names {
-		mix(&h, transmute(u64)t.type)
-		text(&h, t.name)
+		stamp_mix(&h, transmute(u64)t.type)
+		stamp_text(&h, t.name)
 	}
 	for x in opts.hooks {
-		mix(&h, transmute(u64)x.type)
-		mix(&h, u64(uintptr(rawptr(x.read))))
-		mix(&h, u64(uintptr(rawptr(x.write))))
+		stamp_mix(&h, transmute(u64)x.type)
+		stamp_mix(&h, u64(uintptr(rawptr(x.read))))
+		stamp_mix(&h, u64(uintptr(rawptr(x.write))))
 	}
 	return h
+}
+
+@(private)
+stamp_mix :: proc(h: ^u64, x: u64) {
+	h^ = (h^ ~ x) * 0x100000001b3
+}
+
+@(private)
+stamp_text :: proc(h: ^u64, s: string) {
+	stamp_mix(h, u64(len(s)))
+	for c in transmute([]u8)s {
+		stamp_mix(h, u64(c))
+	}
 }
 
 // Frees what `plan_make` allocated and sets `p` to the zero value.
@@ -498,7 +524,6 @@ plan_destroy :: proc(p: ^Plan) {
 	delete(p.options.tag_names)
 	delete(p.rule_sets)
 	delete(p.leaves)
-	delete(p.uses)
 	if p.arena != nil {
 		virtual.arena_destroy(p.arena)
 		free(p.arena)

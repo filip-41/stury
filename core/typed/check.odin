@@ -2,7 +2,6 @@ package typed
 
 import "base:runtime"
 import "core:strconv"
-import "core:strings"
 import regex "../regex"
 import spell "../spell"
 import core ".."
@@ -12,6 +11,8 @@ import rules "../rules"
 // checks of a model add to. `check_start` starts one.
 Check :: struct {
 	using reader: Reader,
+	// The matcher's stack, which a pattern's search grows in the read's temp allocator once and reuses.
+	scratch: regex.Scratch,
 }
 
 // A format's read of a whole text into `target`, a value of `plan`'s type `T`, under the handle `as`.
@@ -54,70 +55,50 @@ check_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read
 	return core.error_of(plan.check(src, plan.as, target, T, plan, read, allocator))
 }
 
-// The check of a description's plan, which `on_token_check` hands every token: the record before `regs.b` judges the
-// value, and `regs.c` counts the values of the open container. A container no rule reads inside is skipped, unless it
-// fails its kind or enum, which its close reports so that the failure spans it. A
-// container's frame keeps the registers of its value, its open byte in `data` and its kind, and an object's frame its
-// last key in `owner` and `target`, as its text and length.
+// The value `t` at a `Checked` record: judges a scalar by the record's leaf, and opens a container a rule reads inside,
+// which its close judges, so a container's failure spans it. A container's frame keeps its open byte in `data` and its
+// kind, and an object's frame its last key's span and spelling in `owner` and `target`. `c` counts the values of the
+// open container.
 @(private)
-check_token :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
-	if t.role == .Key {
-		return check_key(h, regs, t)
-	}
-	if t.role != .Value {
-		return regs, .Next
-	}
-	if t.kind == .End {
-		return check_close(h, regs, t)
-	}
+check_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
 	fld := field_at(regs.b)
-	u := &h.plan.uses[fld.meta]
+	m, u := &h.plan.meta[fld.meta], &h.plan.uses[fld.meta]
 	next := core.Hook_Regs{regs.a, regs.b + (size_of(Field) if u.step else 0), regs.c + 1}
 	l: ^rules.Leaf
-	if u.leaf != 0 {
-		l = &h.plan.leaves[u.leaf - 1]
-		if check_value(h, regs, t, l) == .Stop {
-			return next, .Stop
-		}
+	if m.rule_set > 0 {
+		l = &h.plan.leaves[m.rule_set - 1]
 	}
-	inner: ^Field
+	first: ^Field
 	#partial switch t.kind {
 	case .Object:
-		if block := h.plan.meta[fld.meta].block; block >= 0 {
-			inner = &h.plan.fields[block]
-		} else if u.additional != 0 || u.keys != 0 || l != nil && (l.min_members > 0 || l.max_members < max(u64)) {
-			inner = &h.plan.fields[ANY_RECORD + 1]
+		if m.members > 0 || u.additional != 0 || u.keys != 0 || l != nil && (l.min_members > 0 || l.max_members < max(u64) || container_fails(l, .Object) != {}) {
+			// The block's `Never` record predicts no key, so each key reaches `check_key` and its name rules.
+			first = &h.plan.fields[m.block + m.members] if u.keys != 0 else fld.first
 		}
 	case .Array:
-		if u.array != 0 {
-			inner = &h.plan.fields[u.array]
-		} else if l != nil && (l.min_items > 0 || l.max_items < max(u64)) {
-			inner = &h.plan.fields[ANY_RECORD + 1]
+		if u.inside || l != nil && (l.min_items > 0 || l.max_items < max(u64) || container_fails(l, .Array) != {}) {
+			first = &h.plan.fields[u.items]
 		}
 	case:
+		if l != nil && judge_value(h, regs, t, l) == .Stop {
+			return next, .Stop
+		}
 		return next, .Next
 	}
-	if inner == nil && l != nil && container_fails(l, t.kind) != {} {
-		inner = &h.plan.fields[ANY_RECORD + 1]
-	}
-	if inner == nil {
+	if first == nil {
 		return next, .Skip
 	}
 	f := &h.frames[h.sp]
 	h.sp += 1
 	f.a, f.b, f.c, f.seen, f.run, f.extra = regs.a, regs.b, regs.c, 0, nil, nil
-	f.data, f.kind, f.target = rawptr(uintptr(t.lo)), t.kind, 0
-	return {0, u64(uintptr(inner)), 0}, .Next
+	f.data, f.kind, f.owner, f.target = rawptr(uintptr(t.lo)), t.kind, nil, 0
+	return {NO_LIMIT, u64(uintptr(first)), 0}, .Next
 }
 
-// The record of `root_block` that reads a value whole, which judges nothing in a description's plan, so a container
-// read only for its count gives each value to it.
+// Judges the scalar `t` by `l`: its kind, its enum and the rules of its kind. A plain integer an i64 holds is judged here
+// when `l.fast` says its bounds are whole, and the other rules are cold.
 @(private)
-ANY_RECORD :: 2
-
-// Judges the scalar `t` by `l`: its kind, its enum and the rules of its kind. A container is judged at its close.
-@(private)
-check_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token, l: ^rules.Leaf) -> core.Action {
+judge_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token, l: ^rules.Leaf) -> core.Action {
 	fails: rules.Failures
 	ok: bool
 	#partial switch t.kind {
@@ -127,80 +108,107 @@ check_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs
 		ok = .Bool in l.kinds
 	case .String:
 		ok = .String in l.kinds
-		if l.has_enum || l.min_length > 0 || l.max_length < max(u64) || l.pattern != nil {
-			fails = check_string(h, t, l)
+		if l.has_enum || l.min_length > 0 || l.max_length < max(u64) || l.pattern != nil || l.formats != {} {
+			fails = judge_string(h, t, l, nil)
 		}
 	case .Number:
-		ok = .Number in l.kinds
-		if !ok && .Integer in l.kinds || l.has_enum || l.minimum.set || l.maximum.set || l.multiple_of != nil {
-			fails = check_number(h, t, l, &ok)
+		if l.fast && t.spelling & core.NUMBER_KIND_MASK == 0 && core.number_shape(t.spelling) <= 19 && h.mant >> 63 == 0 {
+			v := -i64(h.mant) if raw_data(h.src)[t.lo] == '-' else i64(h.mant)
+			ok = l.kinds & {.Integer, .Number} != {}
+			if l.minimum.set && (v < l.minimum.int || v == l.minimum.int && l.minimum.exclusive) {
+				fails += {.Below_Minimum}
+			}
+			if l.maximum.set && (v > l.maximum.int || v == l.maximum.int && l.maximum.exclusive) {
+				fails += {.Above_Maximum}
+			}
+		} else {
+			ok = .Number in l.kinds
+			if !ok && .Integer in l.kinds || l.has_enum || l.minimum.set || l.maximum.set || l.multiple_of != nil {
+				fails = judge_number(h, t, l, &ok)
+			}
 		}
-	case .Object, .Array:
-		return .Next
 	}
 	if !ok {
 		fails += {.Not_Allowed} if l.kinds == {} else {.Wrong_Kind}
 	}
 	if l.has_enum && t.kind != .String && t.kind != .Number {
-		fails += check_operand(h, t, l)
+		fails += judge_operand(h, t, l)
 	}
 	if fails == {} {
 		return .Next
 	}
-	return check_fails(h, regs, t, l, fails)
+	lo, hi := core.scalar_ends(t)
+	return check_report(h, regs, l, t.kind, fails, lo, hi)
 }
 
 // Whether a value that is no string and no number fails `l`'s enum index.
 @(cold)
 @(private)
-check_operand :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token, l: ^rules.Leaf) -> rules.Failures {
+judge_operand :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token, l: ^rules.Leaf) -> rules.Failures {
 	context = h.ctx
 	return {} if rules.enum_has(l, t.kind, "") else {.Not_A_Member}
 }
 
-// The rules of `l` a string fails, from its decoded text.
+// The rules of `l` a string fails, from its decoded text: `key` when it is read already, else `t`'s.
 @(cold)
 @(private)
-check_string :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token, l: ^rules.Leaf) -> (fails: rules.Failures) {
+judge_string :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token, l: ^rules.Leaf, key: Maybe(string)) -> (fails: rules.Failures) {
 	context = h.ctx
 	context.allocator = context.temp_allocator
-	text, ok := core.token_text(h.plan.readers, &h.view, t, context.temp_allocator)
-	if !ok {
-		return {.No_Memory}
+	buf: [TEXT_ROOM]u8 = ---
+	text, read := key.?
+	if !read {
+		if text, read = decoded_text(h, t, buf[:]); !read {
+			return {.No_Memory}
+		}
 	}
 	if l.has_enum && !rules.enum_has(l, .String, text) {
 		fails += {.Not_A_Member}
 	}
-	// The matcher's stack lives in the read's temp allocator, which the read's caller frees.
-	scratch: regex.Scratch
-	return fails + rules.judge_string(l, text, &scratch)
+	return fails + rules.judge_string(l, text, &h.scratch)
 }
 
-// The rules of `l` a number fails, and in `integer` whether it passes `l`'s integer kind. A plain decimal is judged by
-// its text, and a number a format spells otherwise by the decimal its value writes as. Past binary64 such a number
-// fails every bound.
+// The text a decoded string up to this long is decoded into on the stack. A longer one goes to the temp allocator.
+@(private)
+TEXT_ROOM :: 256
+
+// `t`'s decoded text, into `buf` when it fits there.
+@(private)
+decoded_text :: proc "contextless" (h: ^Check, t: core.Token, buf: []u8) -> (string, bool) {
+	if t.spelling & core.SPELLING_DECODE == 0 {
+		return string(raw_data(h.src)[t.lo:][:t.n]), true
+	}
+	context = h.ctx
+	if 3 * int(t.n) + 4 <= len(buf) {
+		return h.plan.readers.text(&h.view, t, buf)
+	}
+	return core.token_text(h.plan.readers, &h.view, t, context.temp_allocator)
+}
+
+// The rules of `l` a number fails, and in `kind_ok` whether it passes `l`'s integer kind. A plain decimal is judged by
+// its text, and a number a format spells otherwise by the decimal its value writes as. NaN and the infinities fail
+// every bound.
 @(cold)
 @(private)
-check_number :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token, l: ^rules.Leaf, kind_ok: ^bool) -> (fails: rules.Failures) {
+judge_number :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token, l: ^rules.Leaf, kind_ok: ^bool) -> (fails: rules.Failures) {
 	context = h.ctx
 	text := string(raw_data(h.src)[t.lo:][:t.n])
 	small: Maybe(i64)
 	plain := core.number_shape(t.spelling) < 32
+	buf: [max(spell.F64_ROOM, 24)]u8 = ---
 	if t.spelling & core.NUMBER_KIND_MASK > core.NUMBER_DECIMAL {
 		n, read := h.plan.readers.number(&h.view, t)
-		buf := make([]u8, max(spell.F64_ROOM, 24), context.temp_allocator)
 		switch {
 		case !read:
 			return {.Wrong_Kind}
 		case n.kind == .Int:
-			text, small = strconv.write_int(buf, i64(n.bits), 10), i64(n.bits)
+			text, small = strconv.write_int(buf[:], i64(n.bits), 10), i64(n.bits)
 		case n.kind == .Uint:
-			text = strconv.write_uint(buf, n.bits, 10)
+			text = strconv.write_uint(buf[:], n.bits, 10)
 		case n.kind == .Float && abs(transmute(f64)n.bits) <= max(f64):
-			text = string(buf[:spell.f64_text(raw_data(buf), transmute(f64)n.bits)])
+			text = string(buf[:spell.f64_text(&buf[0], transmute(f64)n.bits)])
 			plain = false
 		case:
-			// NaN and the infinities are numbers no bound, divisor or operand takes.
 			kind_ok^ ||= .Number in l.kinds
 			if l.minimum.set {
 				fails += {.Below_Minimum}
@@ -229,45 +237,50 @@ check_number :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token, l
 	return fails + rules.judge_number(l, text, small)
 }
 
-// Reports each of `fails`, the rules value `t` fails, under the keyword that holds the rule.
+// Reports each of `fails`, the rules a value of kind `of` at `regs` fails by `l`, spanning `lo` to `hi`, under the
+// keyword `keyword_of` names, or `keyword`. Returns `.Stop` for a read with no sink.
 @(cold)
 @(private)
-check_fails :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token, l: ^rules.Leaf, fails: rules.Failures) -> core.Action {
-	lo, hi := core.scalar_ends(t)
+check_report :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, l: ^rules.Leaf, of: core.Kind, fails: rules.Failures, lo, hi: u64, keyword := "") -> core.Action {
+	context = h.ctx
 	for kind in fails {
-		if check_report(h, regs, kind, fail_keyword(l, kind, t.kind), lo, hi) == .Stop {
+		note(h, regs, {kind = kind, at = lo}, hi, keyword if keyword != "" else keyword_of(l, kind, of))
+		if h.sink == nil {
 			return .Stop
 		}
 	}
 	return .Next
 }
 
-// The keyword of `l` that holds the rule a value of kind `of` fails as `kind`.
+// The keyword of `l` that holds the rule a value of kind `of` fails as `kind`, none for a value its use takes nowhere,
+// whose keyword path ends at the use.
 @(private)
-fail_keyword :: proc "contextless" (l: ^rules.Leaf, kind: core.Typed_Error_Kind, of: core.Kind) -> string {
+keyword_of :: proc "contextless" (l: ^rules.Leaf, kind: core.Typed_Error_Kind, of: core.Kind) -> string {
 	#partial switch kind {
-	case .Wrong_Kind:
-		return "type"
 	case .Not_A_Member:
 		return "const" if l.constant else "enum"
 	case .Below_Minimum:
 		return "exclusiveMinimum" if l.minimum.exclusive else "minimum"
 	case .Above_Maximum:
 		return "exclusiveMaximum" if l.maximum.exclusive else "maximum"
-	case .Not_Multiple:
-		return "multipleOf"
-	case .Too_Short:
-		return "minLength"
-	case .Too_Long:
-		return "maxLength"
-	case .No_Match:
-		return "pattern"
 	case .Too_Few:
 		return "minProperties" if of == .Object else "minItems"
 	case .Too_Many:
 		return "maxProperties" if of == .Object else "maxItems"
 	}
-	return ""
+	return KEYWORDS[kind]
+}
+
+@(private)
+@(rodata)
+KEYWORDS := #partial [core.Typed_Error_Kind]string {
+	.Wrong_Kind    = "type",
+	.Not_Multiple  = "multipleOf",
+	.Too_Short     = "minLength",
+	.Too_Long      = "maxLength",
+	.No_Match      = "pattern",
+	.Bad_Format    = "format",
+	.Missing_Field = "required",
 }
 
 // The rules of `l` a container of kind `kind` fails before its count: its kind, and an enum, which holds no container.
@@ -282,52 +295,51 @@ container_fails :: #force_inline proc "contextless" (l: ^rules.Leaf, kind: core.
 	return
 }
 
-// A key of the open object: moves the cursor to the member it names, to the record of the members no record names, or
-// past the member, and judges the key by the object's `keys` rules.
+// A key of an open object at a `Checked` record: judges it by the object's name rules, and moves the cursor to the
+// member it names, to the record of the members no record names, or past the member.
 @(private)
 check_key :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
 	regs := regs
 	f := &h.frames[h.sp - 1]
 	owner := field_at(f.b)
-	u := &h.plan.uses[owner.meta]
-	key := string(raw_data(h.src)[t.lo:][:t.n])
-	if t.spelling & core.SPELLING_DECODE != 0 {
-		context = h.ctx
-		ok: bool
-		if key, ok = core.token_text(h.plan.readers, &h.view, t, context.temp_allocator); !ok {
-			return regs, .Stop
-		}
+	m, u := &h.plan.meta[owner.meta], &h.plan.uses[owner.meta]
+	f.owner, f.target = (^Field)(uintptr(t.lo)), uintptr(t.n) | uintptr(t.spelling) << 32
+	buf: [TEXT_ROOM]u8 = ---
+	key, ok := decoded_text(h, t, buf[:])
+	if !ok {
+		return regs, .Stop
 	}
-	f.owner, f.target = (^Field)(raw_data(key)), uintptr(len(key))
 	if u.keys != 0 {
-		h.sp -= 1
-		action := check_key_rules(h, {f.a, f.b, f.c}, t, &h.plan.leaves[u.keys - 1], key)
-		h.sp += 1
-		if action == .Stop {
-			return regs, .Stop
-		}
-	}
-	m := &h.plan.meta[owner.meta]
-	if m.block >= 0 && (len(key) == 0 || m.names & name_bit(key) != 0) {
-		at := ([^]Field)(owner.first)
-		for i in 0 ..< int(m.members) {
-			if h.plan.meta[at[i].meta].name == key {
-				mark_run(h, f, owner, (^Field)(uintptr(regs.b)))
-				f.seen |= SEEN_ON
-				seen_set(h, f, owner, i)
-				regs.b = u64(uintptr(&at[i + 1]))
-				f.run = &at[i + 1]
-				if h.plan.uses[at[i].meta].only_required && u.additional != 0 {
-					regs.b = u64(uintptr(&h.plan.fields[u.additional]))
-				}
-				return regs, .Next
+		l := &h.plan.leaves[u.keys - 1]
+		fails := judge_string(h, t, l, key) if .String in l.kinds else {.Wrong_Kind}
+		if fails != {} {
+			lo, hi := core.scalar_ends(t)
+			h.sp -= 1
+			action := check_report(h, {f.a, f.b, f.c}, l, .String, fails, lo, hi, "propertyNames")
+			h.sp += 1
+			if action == .Stop {
+				return regs, .Stop
 			}
 		}
 	}
-	if m.block >= 0 {
-		// The cursor leaves the block, so the members it passed are marked first.
+	if m.members > 0 {
+		at := ([^]Field)(owner.first)
+		// The cursor leaves where it stood, so the members it passed are marked first.
 		mark_run(h, f, owner, (^Field)(uintptr(regs.b)))
 		f.seen |= SEEN_ON
+		if len(key) == 0 || m.names & name_bit(key) != 0 {
+			for i in 0 ..< int(m.members) {
+				if h.plan.meta[at[i].meta].name == key {
+					seen_set(h, f, owner, i)
+					next := &at[i + 1]
+					if u.keys != 0 {
+						next = &h.plan.solo[2 * (int(uintptr(&at[i]) - uintptr(raw_data(h.plan.fields))) / size_of(Field)) + 1]
+					}
+					regs.b, f.run = u64(uintptr(next)), &at[i + 1]
+					return regs, .Next
+				}
+			}
+		}
 	}
 	if u.additional != 0 {
 		regs.b = u64(uintptr(&h.plan.fields[u.additional]))
@@ -337,150 +349,37 @@ check_key :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token)
 	return regs, .Skip
 }
 
-// Judges an object's key `key` by the rules `l` of its names, as a string. The object is the value a failure names.
+// The close of a container at a `Checked` record: judges an object's required members and its count, or an array's,
+// then gives back the registers past the container.
 @(cold)
 @(private)
-check_key_rules :: #force_no_inline proc "contextless" (h: ^Check, at: core.Hook_Regs, t: core.Token, l: ^rules.Leaf, key: string) -> core.Action {
-	context = h.ctx
-	context.allocator = context.temp_allocator
-	fails := rules.judge_string(l, key, &regex.Scratch{}) if .String in l.kinds else {.Wrong_Kind}
-	if l.has_enum && !rules.enum_has(l, .String, key) {
-		fails += {.Not_A_Member}
-	}
-	lo, hi := core.scalar_ends(t)
-	for kind in fails {
-		if check_report(h, at, kind, "propertyNames", lo, hi) == .Stop {
-			return .Stop
-		}
-	}
-	return .Next
-}
-
-// The close of a container: judges an object's required members and its count, or an array's, then gives back the
-// registers past the container.
-@(private)
-check_close :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
-	h.sp -= 1
-	f := &h.frames[h.sp]
-	owner := field_at(f.b)
-	u := &h.plan.uses[owner.meta]
+check_close :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
+	m := &h.plan.meta[owner.meta]
 	at := core.Hook_Regs{f.a, f.b, f.c}
-	back := core.Hook_Regs{f.a, f.b + (size_of(Field) if u.step else 0), f.c + 1}
+	back := core.Hook_Regs{f.a, f.b + (size_of(Field) if h.plan.uses[owner.meta].step else 0), f.c + 1}
 	lo, hi := u64(uintptr(f.data)), t.lo + u64(t.n)
-	if f.kind == .Object && owner.kind == .Required {
+	if f.kind == .Object && m.required_end > 0 {
+		context = h.ctx
 		for i := missing_member(h, f, owner, regs, 0); i >= 0; i = missing_member(h, f, owner, regs, i + 1) {
-			if check_report(h, at, .Missing_Field, "required", lo, hi, h.plan.meta[int(h.plan.meta[owner.meta].block) + int(i)].name) == .Stop {
+			// The object's frame is reopened for the path, whose last step the name replaces.
+			h.sp += 1
+			note(h, at, {kind = .Missing_Field, at = lo, steps = {0 = core.Name(h.plan.meta[m.block + i].name)}, n_steps = 1}, hi, "required")
+			h.sp -= 1
+			if h.sink == nil {
 				return back, .Stop
 			}
 		}
 	}
-	if u.leaf == 0 {
+	if m.rule_set == 0 {
 		return back, .Next
 	}
-	l := &h.plan.leaves[u.leaf - 1]
+	l := &h.plan.leaves[m.rule_set - 1]
 	fails := container_fails(l, f.kind)
 	fails += rules.judge_count(regs.c, l.min_members, l.max_members) if f.kind == .Object else rules.judge_count(regs.c, l.min_items, l.max_items)
-	for kind in fails {
-		if check_report(h, at, kind, fail_keyword(l, kind, f.kind), lo, hi) == .Stop {
-			return back, .Stop
-		}
+	if fails != {} && check_report(h, at, l, f.kind, fails, lo, hi) == .Stop {
+		return back, .Stop
 	}
 	return back, .Next
-}
-
-// Reports that the value at `regs` fails the rule `keyword` as `kind`, spanning `lo` to `hi`, with `named` a member
-// the path adds past the value, for one that is absent. Returns `.Stop` for a read with no sink.
-@(cold)
-@(private)
-check_report :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, kind: core.Typed_Error_Kind, keyword: string, lo, hi: u64, named := "") -> core.Action {
-	context = h.ctx
-	steps := make([dynamic]core.Step, context.temp_allocator)
-	words := make([dynamic]core.Step, context.temp_allocator)
-	check_steps(h, regs, &steps, &words)
-	if named != "" {
-		append(&steps, core.Name(named))
-	}
-	if keyword != "" {
-		append(&words, core.Name(keyword))
-	}
-	if h.first.kind == .None {
-		h.first = {kind = kind, at = lo}
-		for s in steps[max(0, len(steps) - core.MAX_ERROR_STEPS):] {
-			path_add(&h.first, s)
-		}
-		h.first.truncated = len(steps) > core.MAX_ERROR_STEPS
-		own_names(&h.first)
-	}
-	c := h.sink
-	if c == nil {
-		return .Stop
-	}
-	if len(c.entries) >= (c.max_errors if c.max_errors != 0 else 100) {
-		c.truncated = true
-		return .Next
-	}
-	if c.entries.allocator.procedure == nil {
-		c.entries.allocator = h.ctx.allocator
-	}
-	e := core.Error_Entry{kind = kind, start = lo, end = max(hi, lo), record = c.record}
-	e.path, e.keyword_path = owned_steps(steps[:], c.entries.allocator), owned_steps(words[:], c.entries.allocator)
-	if e.path == nil && len(steps) > 0 || e.keyword_path == nil && len(words) > 0 {
-		entry_destroy(&e, c.entries.allocator)
-		c.truncated = true
-	} else if _, grown := append(&c.entries, e); grown != nil {
-		entry_destroy(&e, c.entries.allocator)
-		c.truncated = true
-	}
-	return .Next
-}
-
-// The steps from the root to the value at `regs` into `path`, and in `words` the keywords that lead to its record.
-@(private)
-check_steps :: proc(h: ^Check, regs: core.Hook_Regs, path, words: ^[dynamic]core.Step) {
-	for i in 1 ..< h.sp {
-		f := &h.frames[i]
-		at := regs if i == h.sp - 1 else core.Hook_Regs{h.frames[i + 1].a, h.frames[i + 1].b, h.frames[i + 1].c}
-		owner, rec := field_at(f.b), field_at(at.b)
-		if f.kind == .Array {
-			append(path, core.Index(at.c))
-			if h.plan.uses[rec.meta].step {
-				append(words, core.Name("prefixItems"), core.Index(int(rec.meta) + 1 - int(h.plan.uses[owner.meta].array)))
-			} else {
-				append(words, core.Name("items"))
-			}
-			continue
-		}
-		m := &h.plan.meta[owner.meta]
-		if m.block >= 0 && i32(rec.meta) >= m.block && i32(rec.meta) < m.block + m.members {
-			append(path, core.Name(h.plan.meta[rec.meta].name))
-			append(words, core.Name("properties"), core.Name(h.plan.meta[rec.meta].name))
-		} else {
-			append(path, core.Name(string(([^]u8)(f.owner)[:f.target])))
-			append(words, core.Name("additionalProperties"))
-		}
-	}
-}
-
-// A copy of `steps` from `allocator` with its names copied, nil when it does not fit in memory.
-@(private)
-owned_steps :: proc(steps: []core.Step, allocator: runtime.Allocator) -> []core.Step {
-	out, failed := make([]core.Step, len(steps), allocator)
-	if failed != nil {
-		return nil
-	}
-	for s, i in steps {
-		out[i] = s
-		if name, named := s.(core.Name); named {
-			text, cloned := strings.clone(string(name), allocator)
-			if cloned != nil {
-				entry_destroy(&core.Error_Entry{path = out[:i]}, allocator)
-				delete(out, allocator)
-				return nil
-			}
-			out[i] = core.Name(text)
-		}
-	}
-	return out
 }
 
 // Stores into the integer record `fld` a number spelled with a fraction or an exponent that is an integer, `1.0` or
@@ -503,28 +402,28 @@ store_integral :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token,
 	return store_int(u64(v) if v >= 0 else u64(-(v + 1)) + 1, v < 0, fld.kind, dest)
 }
 
-// Judges a scalar a type's plan stored at `dest` by its record's rules, which the record's `Meta.rule_set` names.
+// Judges a scalar a type's plan stored by its record's rules, which the record's `Meta.rule_set` names. A string
+// record's stored text is its decoded text.
 @(cold)
 @(private)
 check_rules :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token, fld: ^Field, dest: uintptr) -> core.Action {
-	context = h.ctx
 	l := &h.plan.leaves[h.plan.meta[fld.meta].rule_set - 1]
 	fails: rules.Failures
 	#partial switch t.kind {
 	case .String:
-		text := (^string)(dest)^ if fld.kind == .String else ""
-		if fld.kind != .String {
-			ok: bool
-			if text, ok = core.token_text(h.plan.readers, &h.view, t, context.temp_allocator); !ok {
-				return .Stop
-			}
+		stored: Maybe(string)
+		if fld.kind == .String {
+			stored = (^string)(dest)^
 		}
-		context.allocator = context.temp_allocator
-		fails = rules.judge_string(l, text, &regex.Scratch{})
+		fails = judge_string(h, t, l, stored)
 	case .Number:
 		kind_ok := true
-		fails = check_number(h, t, l, &kind_ok)
+		fails = judge_number(h, t, l, &kind_ok)
 	}
+	if fails == {} {
+		return .Next
+	}
+	context = h.ctx
 	lo, hi := core.scalar_ends(t)
 	for kind in fails {
 		note(h, regs, {kind = kind, at = lo}, hi)
@@ -533,4 +432,21 @@ check_rules :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_R
 		}
 	}
 	return .Next
+}
+
+// The step of the value at `at` inside the container `f` of the `Checked` record `owner`: its index, the name of the
+// member whose record reads it, or the text of the object's last key.
+@(private)
+checked_step :: proc(h: ^Reader, f: ^Frame, owner: ^Field, at: core.Hook_Regs) -> (core.Step, bool) {
+	if f.kind == .Array {
+		return core.Index(at.c), true
+	}
+	m := &h.plan.meta[owner.meta]
+	if rec := i32(field_at(at.b).meta); rec >= m.block && rec < m.block + m.members {
+		return core.Name(h.plan.meta[rec].name), true
+	}
+	key := core.Token{lo = u64(uintptr(f.owner)), n = u32(f.target), kind = .String, role = .Key, spelling = u16(f.target >> 32)}
+	// The text is the input's or the temp allocator's, never the reader's.
+	text, ok := core.token_text(h.plan.readers, &h.view, key, context.temp_allocator)
+	return core.Name(text), ok
 }

@@ -2,39 +2,12 @@ package schema
 
 import "core:encoding/hex"
 import "core:strings"
-
-// A URI reference split at its delimiters, as RFC 3986 names the parts.
-@(private)
-Uri :: struct {
-	scheme, authority, path, query, fragment: string,
-	has_scheme, has_authority, has_query:     bool,
-}
-
-@(private)
-uri_split :: proc(s: string) -> (u: Uri) {
-	rest := s
-	if i := strings.index_byte(rest, '#'); i >= 0 {
-		u.fragment, rest = rest[i + 1:], rest[:i]
-	}
-	if i := strings.index_byte(rest, '?'); i >= 0 {
-		u.query, u.has_query, rest = rest[i + 1:], true, rest[:i]
-	}
-	if i := strings.index_any(rest, ":/"); i > 0 && rest[i] == ':' {
-		u.scheme, u.has_scheme, rest = rest[:i], true, rest[i + 1:]
-	}
-	if strings.has_prefix(rest, "//") {
-		end := strings.index_byte(rest[2:], '/')
-		end = len(rest) if end < 0 else end + 2
-		u.authority, u.has_authority, rest = rest[2:end], true, rest[end:]
-	}
-	u.path = rest
-	return
-}
+import "../rules"
 
 // `ref` resolved against `base` as RFC 3986 section 5.2 says, in the context's allocator. `base` is absolute or empty.
 @(private)
 uri_resolve :: proc(base, ref: string) -> string {
-	r, b := uri_split(ref), uri_split(base)
+	r, b := rules.uri_split(ref), rules.uri_split(base)
 	t := r
 	if !r.has_scheme {
 		t.scheme, t.has_scheme = b.scheme, b.has_scheme

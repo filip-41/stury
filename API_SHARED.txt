@@ -38,8 +38,9 @@ utf8_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind
 utf8_lax_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (spelled: [4]u8, size: int, q: [^]u8)
 utf8_subpart :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8
 # core/regex
-Flags :: struct { fold, extend, dotall, multiline, ecma: bool, }
+Regex :: struct { insts: []Inst, bytes: string, classes: []^Class, refs: [][]int, callouts: []^Callout, names: []string, slots: int, opt: ^Search_Opt, visited: ^Visited, prefix: string, first: [4]u64, longest: bool, not_empty: bool, has_first: bool, calls_or_limits: bool, narrowed: bool, ecma: bool, linear: bool, }
 compile :: proc(pattern: string, flags: Flags, allocator := context.allocator) -> (re: Regex, err: string)
+in_property :: proc(name: string, r: rune) -> bool
 search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch) -> (found: bool, err: string)
 # core
 AT_NO_BYTE :: bit_set[Fault_Kind]{.None, .No_Memory, .Bad_Option}
@@ -165,7 +166,7 @@ NONE :: Node_Index(-1)
 decimal_i64 :: proc(d: spell.Decimal) -> (v: i64, ok: bool)
 description_destroy :: proc(d: ^Description)
 enum_has :: proc(l: ^Leaf, kind: core.Kind, text: string) -> bool
-enum_key :: proc(b: ^strings.Builder, kind: core.Kind, text: string)
+format_of :: proc(name: string) -> String_Format
 integral :: proc(d: spell.Decimal) -> bool
 judge_count :: #force_inline proc "contextless" (n, low, high: u64) -> (fails: Failures)
 judge_number :: proc(l: ^Leaf, text: string, small: Maybe(i64)) -> (fails: Failures)
@@ -174,7 +175,8 @@ leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator) -> (l: Le
 ref_only :: proc(n: ^Node) -> bool
 rules_leaf :: proc(r: Rules, kinds: Kinds, allocator := context.allocator) -> (l: Leaf, refused: string)
 trivial :: proc(l: ^Leaf) -> bool
-unjudged :: proc(d: ^Description, format_assert: bool) -> string
+unjudged :: proc(d: ^Description) -> string
+uri_split :: proc(s: string) -> (u: Uri)
 # core/build
 ANSWER_BATCH :: 64
 BUILDER_REGS :: core.Hook_Regs{a = 0, b = u64(core.NO_NODE) << 32, c = 0}
@@ -210,10 +212,9 @@ scan_room :: #force_inline proc "contextless" (h: ^Scan) -> int
 scan_start :: proc(h: ^Scan, src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error
 set_answers :: proc(list: ^core.Edit_List, path: core.Path, in_: core.Edit_Input, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
 # core/typed
-Check :: struct { using reader: Reader, }
+Check :: struct { using reader: Reader, scratch: regex.Scratch, }
 KEY_SIZE_MAX :: 240
 check_document :: proc(doc: ^core.Document, node: core.Node_Index, target: rawptr, T: typeid, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
-check_plan_of :: proc(d: ^rules.Description, as: core.As, allocator := context.allocator) -> (p: Plan, err: core.Error)
 check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error)
 enum_member :: proc "contextless" (info: ^runtime.Type_Info_Enum, value: i64) -> int
 field_at :: #force_inline proc "contextless" (b: u64) -> ^Field

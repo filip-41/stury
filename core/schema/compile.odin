@@ -38,6 +38,9 @@ compile :: proc(doc: ^core.Document, node: core.Node_Index, opts := Options{}, a
 		destroy(&c)
 		return {}, err
 	}
+	for &n in c.description.nodes {
+		n.rules.assert_format ||= opts.format_assert
+	}
 	index_all(doc)
 	for d in c.opts.resolver.documents {
 		index_all(d)
@@ -72,17 +75,17 @@ Bound :: struct {
 	compiled: ^Compiled,
 }
 
-// Binds `c` to the format `as`. A schema keyword the check does not judge yet is refused as `.Unsupported`, naming it,
-// and a compile that failed as `.Bad_Option`.
-bind :: proc(c: ^Compiled, as: core.As, allocator := context.allocator) -> (b: Bound, err: core.Error) {
+// Binds `c` to the format `as`, whose check `reads` gives when it is set, as `typed.plan_of` takes it. A schema keyword
+// the check does not judge yet is refused as `.Unsupported`, naming it, and a compile that failed as `.Bad_Option`.
+bind :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (b: Bound, err: core.Error) {
 	if c == nil || c.description == nil {
 		return {}, core.error_of(core.Typed_Error{kind = .Bad_Option})
 	}
-	if keyword := rules.unjudged(c.description, c.opts.format_assert); keyword != "" {
+	if keyword := rules.unjudged(c.description); keyword != "" {
 		return {}, core.error_of(core.Typed_Error{kind = .Unsupported, want = {text = keyword}})
 	}
 	b.compiled = c
-	b.plan, err = typed.check_plan_of(c.description, as, allocator)
+	b.plan, err = typed.plan_of(c.description, as, reads, {checking = true}, allocator)
 	return
 }
 

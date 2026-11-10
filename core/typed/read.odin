@@ -208,17 +208,19 @@ on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, 
 	return hook(h, regs, t)
 }
 
-// `on_token` for a `Check`, which a description's plan reads by its own route.
+// `on_token` for a `Check`, which judges a record's rules as it reads, and a `Checked` record's in place of a store.
 on_token_check :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	if h.plan.uses != nil {
-		return check_token(h, regs, t)
-	}
 	return hook(h, regs, t)
 }
 
 @(private)
 hook :: #force_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
 	if t.role == .Key {
+		when H == Check {
+			if field_at(h.frames[h.sp - 1].b).kind == .Checked {
+				return check_key(h, regs, t)
+			}
+		}
 		return on_key(h, regs, t)
 	}
 	if t.role != .Value {
@@ -248,6 +250,11 @@ hook :: #force_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t: core.
 		}
 	}
 	fld := field_at(regs.b)
+	when H == Check {
+		if fld.kind == .Checked {
+			return check_value(h, regs, t)
+		}
+	}
 	dest := uintptr(regs.c) + uintptr(fld.offset)
 	reason: core.Typed_Error_Kind
 	#partial switch t.kind {
@@ -329,7 +336,7 @@ hook :: #force_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t: core.
 		return refuse_value(h, regs, t, reason)
 	}
 	when H == Check {
-		if h.plan.leaves != nil && h.plan.meta[fld.meta].rule_set > 0 && check_rules(h, regs, t, fld, dest) == .Stop {
+		if h.plan.meta[fld.meta].rule_set > 0 && check_rules(h, regs, t, fld, dest) == .Stop {
 			return regs, .Stop
 		}
 	}
@@ -344,9 +351,6 @@ on_token_spelled :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hoo
 
 // `on_token_spelled` for a `Check`.
 on_token_check_spelled :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	if h.plan.uses != nil {
-		return check_token(h, regs, t)
-	}
 	return hook_spelled(h, regs, t)
 }
 
@@ -441,6 +445,11 @@ refuse_missing :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame, owner:
 @(private)
 close_container :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame, own: ^Field, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
 	owner := frame_owner(f)
+	when H == Check {
+		if owner.kind == .Checked {
+			return check_close(h, f, owner, regs, t)
+		}
+	}
 	back := core.Hook_Regs{f.a, f.b, f.c + u64(own.stride)}
 	#partial switch owner.kind {
 	case .Raw, .Hook, .Value:

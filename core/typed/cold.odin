@@ -9,12 +9,18 @@ import spell "../spell"
 import core ".."
 
 // A value whose token the record's kind does not read at once. The element of a `Ptr`, a `Maybe`, a `Union` or an `Any`
-// reads through the hook with registers of its own, and a container it opens returns to this record.
+// reads through the hook with registers of its own, and a container it opens returns to this record. A `Check` judges a
+// scalar at a `Checked` record here, so the hook a type's plan reads by is the one it was.
 @(cold)
 @(private)
 indirect :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	context = h.ctx
 	fld := field_at(regs.b)
+	when H == Check {
+		if fld.kind == .Checked {
+			return check_value(h, regs, t)
+		}
+	}
 	dest := uintptr(regs.c) + uintptr(fld.offset)
 	m := &h.plan.meta[fld.meta]
 	reason: core.Typed_Error_Kind
@@ -723,7 +729,7 @@ spelled_number :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_R
 		return refuse_value(h, regs, t, reason)
 	}
 	when H == Check {
-		if h.plan.leaves != nil && h.plan.meta[fld.meta].rule_set > 0 && check_rules(h, regs, t, fld, dest) == .Stop {
+		if h.plan.meta[fld.meta].rule_set > 0 && check_rules(h, regs, t, fld, dest) == .Stop {
 			return regs, .Stop
 		}
 	}

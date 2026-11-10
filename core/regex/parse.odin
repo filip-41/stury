@@ -137,12 +137,13 @@ Parser :: struct {
 	callouts: [dynamic]^Callout,
 	err:    string,
 	depth:  int, // the groups being parsed and the quantifiers on the atom, as MAX_PARSE_DEPTH counts them
+	syntax_only: bool, // judging syntax alone: an ECMA back reference and look-behind parse and mean nothing
 	head:   bool, // at an absent's first atom, where Oniguruma keeps a `(?:...)` as a group of its own (group_head)
 }
 
 // The pattern's tree, or Oniguruma's message when it does not compile.
-parse :: proc(src: string, flags: Flags) -> (pat: Pattern, err: string) {
-	p := Parser{src = src, flags = flags}
+parse :: proc(src: string, flags: Flags, syntax_only := false) -> (pat: Pattern, err: string) {
+	p := Parser{src = src, flags = flags, syntax_only = syntax_only}
 	append(&p.names, "")
 	append(&p.groups, nil)
 	root := parse_alt(&p)
@@ -705,7 +706,7 @@ parse_group :: proc(p: ^Parser) -> ^Node {
 		return look_node(p, .Atomic)
 	case '<', '\'':
 		if c == '<' && (peek(p) == '=' || peek(p) == '!') {
-			if p.flags.ecma {
+			if p.flags.ecma && !p.syntax_only {
 				return fail(p, "look-behind is not supported")
 			}
 			p.i += 1

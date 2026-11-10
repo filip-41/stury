@@ -1,5 +1,6 @@
 package rules
 
+import "core:slice"
 import "core:strings"
 import regex "../regex"
 import spell "../spell"
@@ -13,20 +14,24 @@ Bound :: struct {
 }
 
 // The rules of one use of a node compiled for the check. A count is the elements of an array or the members of an
-// object. `enum_keys` is the enum index: `enum_key` of each scalar operand of `enum` or `const`, with `has_enum` set
-// when the node has either. `integer_spelled` is draft 4's integer, which `1.0` is not.
+// object. `enum_keys` is the enum index: `enum_key` of each scalar operand of `enum` or `const`, by length and then by
+// bytes, with `has_enum` set when the node has either. `integer_spelled` is draft 4's integer, which `1.0` is not.
+// `fast` holds when an integer an i64 holds is judged by its value alone: no enum, no `multipleOf`, and every bound set
+// is whole. `pattern` is the compiled `^regex.Regex`.
 Leaf :: struct {
 	kinds:                  Kinds,
 	integer_spelled:        bool,
 	has_enum:               bool,
 	constant:               bool, // the enum index holds a `const`
+	fast:                   bool,
 	minimum, maximum:       Bound,
 	multiple_of:            Maybe(spell.Decimal),
 	min_length, max_length: u64,
 	min_items, max_items:   u64,
 	min_members:            u64,
 	max_members:            u64,
-	pattern:                ^regex.Regex,
+	pattern:                rawptr,
+	formats:                bit_set[String_Format; u32], // every format the node or its use asserts
 	enum_keys:              []string,
 }
 
@@ -34,8 +39,8 @@ Leaf :: struct {
 Failures :: bit_set[core.Typed_Error_Kind; u64]
 
 // Compiles node `n`'s rules with the rules `edge` of its use added, allocating with `allocator`. A pattern that does
-// not compile, an operand that is a container, and a `multipleOf` or `pattern` that both the node and the use set to
-// different values come back as the keyword the check does not judge.
+// not compile, an operand that is a container, and a `multipleOf` or `pattern` that both the node and the use set
+// to different values come back as the keyword the check does not judge.
 leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator) -> (l: Leaf, refused: string) {
 	r := n.rules
 	if r.multiple_of != "" && edge.multiple_of != "" && r.multiple_of != edge.multiple_of {
@@ -54,11 +59,15 @@ leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator) -> (l: Le
 	r.max_members = min(r.max_members.? or_else max(u64), edge.max_members.? or_else max(u64))
 	l, refused = rules_leaf(r, n.kinds, allocator)
 	l.integer_spelled = n.integer_spelled
+	if edge.assert_format {
+		l.formats += {format_of(edge.format)} - {.None}
+	}
 	operands := n.enum_of
 	if c, has := n.const_of.?; has {
 		operands = {c}
 	}
-	l.has_enum, l.constant = n.const_of != nil || raw_data(n.enum_of) != nil, n.const_of != nil
+	l.has_enum, l.constant = n.const_of != nil || n.has_enum, n.const_of != nil
+	l.fast &&= !l.has_enum
 	if !l.has_enum || refused != "" {
 		return
 	}
@@ -73,6 +82,7 @@ leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator) -> (l: Le
 		append(&keys, strings.to_string(b))
 	}
 	l.enum_keys = keys[:]
+	slice.sort_by(l.enum_keys, key_less)
 	return
 }
 
@@ -88,9 +98,13 @@ rules_leaf :: proc(r: Rules, kinds: Kinds, allocator := context.allocator) -> (l
 		}
 		l.multiple_of = d
 	}
+	l.fast = l.multiple_of == nil && (!l.minimum.set || l.minimum.whole) && (!l.maximum.set || l.maximum.whole)
 	l.min_length, l.max_length = r.min_length, r.max_length.? or_else max(u64)
 	l.min_items, l.max_items = r.min_items, r.max_items.? or_else max(u64)
 	l.min_members, l.max_members = r.min_members, r.max_members.? or_else max(u64)
+	if r.assert_format {
+		l.formats = {format_of(r.format)} - {.None}
+	}
 	if r.pattern != "" {
 		re, err := regex.compile(r.pattern, {ecma = true}, allocator)
 		if err != "" {
@@ -103,7 +117,7 @@ rules_leaf :: proc(r: Rules, kinds: Kinds, allocator := context.allocator) -> (l
 
 // Whether `l` judges nothing: it takes every kind and holds no rule.
 trivial :: proc(l: ^Leaf) -> bool {
-	return l.kinds == EVERY_KIND && !l.has_enum && !l.minimum.set && !l.maximum.set && l.multiple_of == nil && l.pattern == nil && l.min_length == 0 && l.max_length == max(u64) && l.min_items == 0 && l.max_items == max(u64) && l.min_members == 0 && l.max_members == max(u64)
+	return l.kinds == EVERY_KIND && !l.has_enum && !l.minimum.set && !l.maximum.set && l.multiple_of == nil && l.pattern == nil && l.formats == {} && l.min_length == 0 && l.max_length == max(u64) && l.min_items == 0 && l.max_items == max(u64) && l.min_members == 0 && l.max_members == max(u64)
 }
 
 // The rules of `l` a string of `text`, decoded, fails. A pattern the regex gives up on fails it.
@@ -119,8 +133,13 @@ judge_string :: proc(l: ^Leaf, text: string, scratch: ^regex.Scratch) -> (fails:
 	}
 	if l.pattern != nil {
 		caps: [2]int
-		if found, err := regex.search(l.pattern, text, 0, caps[:], scratch); !found || err != "" {
+		if found, err := regex.search((^regex.Regex)(l.pattern), text, 0, caps[:], scratch); !found || err != "" {
 			fails += {.No_Match}
+		}
+	}
+	for f in l.formats {
+		if !format_valid(f, text) {
+			fails += {.Bad_Format}
 		}
 	}
 	return
@@ -239,6 +258,7 @@ multiple :: proc(x, m: spell.Decimal) -> bool {
 }
 
 // The code points of the UTF-8 text `s`.
+@(private)
 code_points :: proc "contextless" (s: string) -> u64 {
 	n := u64(0)
 	for i in 0 ..< len(s) {
@@ -249,6 +269,7 @@ code_points :: proc "contextless" (s: string) -> u64 {
 
 // Writes the key a scalar of kind `kind` has in an enum index: a letter for its kind, then a string's decoded `text`
 // or a number's exact decimal as its digits and point, so that `1`, `1.0` and `10e-1` have one key.
+@(private)
 enum_key :: proc(b: ^strings.Builder, kind: core.Kind, text: string) {
 	#partial switch kind {
 	case .String:
@@ -272,14 +293,6 @@ enum_key :: proc(b: ^strings.Builder, kind: core.Kind, text: string) {
 
 // Whether a scalar of kind `kind` and text `text`, a string's decoded, is in `l`'s enum index.
 enum_has :: proc(l: ^Leaf, kind: core.Kind, text: string) -> bool {
-	if kind == .String {
-		for k in l.enum_keys {
-			if len(k) == len(text) + 1 && k[0] == 's' && k[1:] == text {
-				return true
-			}
-		}
-		return false
-	}
 	if kind == .Object || kind == .Array {
 		return false
 	}
@@ -290,13 +303,21 @@ enum_has :: proc(l: ^Leaf, kind: core.Kind, text: string) -> bool {
 		b = strings.builder_make(context.temp_allocator)
 	}
 	enum_key(&b, kind, text)
-	key := strings.to_string(b)
-	for k in l.enum_keys {
-		if k == key {
-			return true
-		}
+	_, found := slice.binary_search_by(l.enum_keys, strings.to_string(b), key_order)
+	return found
+}
+
+@(private)
+key_less :: proc(a, b: string) -> bool {
+	return key_order(a, b) == .Less
+}
+
+@(private)
+key_order :: proc(a, b: string) -> slice.Ordering {
+	if len(a) != len(b) {
+		return .Less if len(a) < len(b) else .Greater
 	}
-	return false
+	return slice.Ordering(strings.compare(a, b))
 }
 
 @(private)
