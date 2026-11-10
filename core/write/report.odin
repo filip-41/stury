@@ -1,11 +1,10 @@
 package write
 
-import "core:io"
 import "core:strings"
 import core ".."
 
-// What a report of a check's entries says besides them. `records` puts the index of the entry's record first in its
-// instance location. `truncated` says entries past the check's limit were not kept. `file` names the input the entries
+// What a report of a check's entries says besides them. `records` gives each entry a `record` member, the index of its
+// record, beside a location that is the record's own. `truncated` says entries past the check's limit were not kept. `file` names the input the entries
 // are of, "" for none.
 Report :: struct {
 	file:      string,
@@ -37,7 +36,8 @@ write_problem :: proc(t: ^Tokens, entries: []core.Error_Entry, p: Problem, r := 
 	open_array(t)
 	for e in entries {
 		open_object(t)
-		report_location(t, "pointer", e.path, r.records, e.record, member_of(e))
+		report_location(t, "pointer", e.path, member_of(e))
+		report_record(t, r, e)
 		key(t, "code")
 		value_string(t, core.entry_code(e))
 		key(t, "message")
@@ -75,15 +75,18 @@ member_of :: proc(e: core.Error_Entry) -> string {
 	return name if named && e.kind == .Missing_Field else ""
 }
 
-// Writes a member `name` whose value is `steps` as a JSON Pointer, led by the record index when `record` says so, and by
-// `member` as a last step when it is not "".
-report_location :: proc(t: ^Tokens, name: string, steps: []core.Step, record := false, index := i64(0), member := "") {
+// Writes the `record` member of an entry of a report that tells its records.
+report_record :: proc(t: ^Tokens, r: Report, e: core.Error_Entry) {
+	if r.records {
+		key(t, "record")
+		value_int(t, e.record)
+	}
+}
+
+// Writes a member `name` whose value is `steps` as a JSON Pointer, and `member` as a last step when it is not "".
+report_location :: proc(t: ^Tokens, name: string, steps: []core.Step, member := "") {
 	b := strings.builder_make(context.temp_allocator)
 	w := strings.to_writer(&b)
-	if record {
-		io.write_byte(w, '/')
-		io.write_i64(w, index)
-	}
 	core.write_pointer(w, steps)
 	if member != "" {
 		core.write_pointer(w, {core.Name(member)})

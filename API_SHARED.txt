@@ -38,7 +38,9 @@ utf8_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind
 utf8_lax_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (spelled: [4]u8, size: int, q: [^]u8)
 utf8_subpart :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8
 # core/regex
+Scratch :: struct { stack: [dynamic]Entry, slots: [dynamic]int, counts: [dynamic]int, seen: [dynamic]u64, good: [dynamic]u64, log: [dynamic]u32, resumes: int, }
 in_property :: proc(name: string, r: rune) -> bool
+scratch_destroy :: proc(scratch: ^Scratch)
 search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch) -> (found: bool, err: string)
 # core
 AT_NO_BYTE :: bit_set[Fault_Kind]{.None, .No_Memory, .Bad_Option}
@@ -177,6 +179,7 @@ judge_string :: proc(l: ^Leaf, text: string, scratch: ^regex.Scratch) -> (fails:
 leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator) -> (l: Leaf, refused: string)
 merged :: proc(n: ^Node, edge: Rules) -> (r: Rules, refused: string)
 ref_only :: proc(n: ^Node) -> bool
+rules_leaf :: proc(r: Rules, kinds: Kinds, allocator := context.allocator) -> (l: Leaf, refused: string)
 trivial :: proc(l: ^Leaf) -> bool
 uri_split :: proc(s: string) -> (u: Uri)
 # core/build
@@ -244,11 +247,15 @@ read_release :: proc "contextless" (r: ^Reader, frames: []Frame)
 read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error)
 refuse_element :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action)
 refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, regs_in: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action)
+rejudge :: proc(read: Read_Options, mark: Sink_Mark, own: ^Sink, allocator: runtime.Allocator) -> Read_Options
+rejudged :: proc(own: ^Sink, e: core.Typed_Error) -> (first: core.Typed_Error)
 sink_add :: proc(c: ^Sink, e: core.Error_Entry) -> (added: bool, err: runtime.Allocator_Error)
+sink_entry :: proc(c: ^Sink, entry: core.Error_Entry, steps, words: []core.Step, reverse: bool) -> bool
 sink_error :: proc(c: ^Sink, e: core.Typed_Error)
 sink_mark :: #force_inline proc(c: ^Sink) -> Sink_Mark
 sink_refusal :: proc(c: ^Sink, e: core.Typed_Error, $wide: bool)
 sink_restore :: proc(c: ^Sink, m: Sink_Mark)
+sink_room :: proc(c: ^Sink, allocator: runtime.Allocator) -> bool
 store_cstring :: proc(h: ^Reader, t: core.Token, dest: uintptr) -> core.Typed_Error_Kind
 store_enum :: proc(h: ^Reader, t: core.Token, info: ^runtime.Type_Info_Enum, dest: uintptr, size: u32) -> core.Typed_Error_Kind
 store_enum_value :: proc(info: ^runtime.Type_Info_Enum, n: core.Number, dest: uintptr, size: u32) -> core.Typed_Error_Kind
@@ -258,6 +265,8 @@ store_whole :: proc(h: ^Reader, fld: ^Field, m: ^Meta, dest: uintptr, kind: core
 # core/write
 LINE_ROOM :: 1024
 Scratch :: runtime.Arena
+Visit :: #type proc(v: ^Visitor, f: ^typed.Field, at: uintptr, kind: core.Typed_Error_Kind) -> bool
+Visitor :: struct { call: Visit, walker: rawptr, }
 edit_input :: proc(v: $T, plan: ^typed.Plan, scratch: ^Scratch) -> (in_: core.Edit_Input, err: core.Error)
 end_record :: proc(t: ^Tokens) -> core.Typed_Error_Kind
 enum_spelled :: proc(plan: ^typed.Plan, info: ^runtime.Type_Info_Enum, value: i64, p: [^]u8) -> (string, core.Typed_Error_Kind)
@@ -275,8 +284,9 @@ put_number :: proc(out: ^Out, n: core.Number) -> core.Typed_Error_Kind
 put_text :: proc(out: ^Out, s: string)
 release_sides :: proc(side: ^map[typeid]^typed.Plan)
 report_file :: proc(t: ^Tokens, r: Report)
-report_location :: proc(t: ^Tokens, name: string, steps: []core.Step, record := false, index := i64(0), member := "")
+report_location :: proc(t: ^Tokens, name: string, steps: []core.Step, member := "")
 report_message :: proc(e: core.Error_Entry) -> string
+report_record :: proc(t: ^Tokens, r: Report, e: core.Error_Entry)
 room :: #force_inline proc(out: ^Out, n: int) -> [^]u8 #no_bounds_check
 scratch_destroy :: proc(s: ^Scratch)
 side_plan :: proc(side: ^map[typeid]^typed.Plan, parent: ^typed.Plan, T: typeid) -> (^typed.Plan, core.Typed_Error_Kind)
@@ -287,9 +297,11 @@ tokens_release :: proc(t: ^Tokens)
 union_arm :: proc(m: ^typed.Meta, v: uintptr) -> ^typed.Arm
 value_of :: proc(t: ^Tokens, v: core.Value) -> core.Typed_Error_Kind
 value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
+visit :: proc(plan: ^typed.Plan, value: rawptr, v: ^Visitor) -> core.Typed_Error
+visit_path :: proc(v: ^Visitor, steps: ^[dynamic]core.Step) -> bool
 write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator) -> (text: []u8, err: core.Typed_Error)
 # core/records
-check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, outer: ^typed.Outer, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0) -> (records: i64, failure: core.Typed_Error, fatal: core.Typed_Error, failed: i64)
+check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, outer: ^typed.Outer, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0, dups := core.Duplicates.Default, repeats := typed.Repeats.Ignore) -> (records: i64, failure: core.Typed_Error, fatal: core.Typed_Error, failed: i64)
 entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64) -> bool
 entries_of :: proc(src: []u8, as: core.As) -> (whole: core.As, at: u64, ok: bool)
 next_window :: proc(it: ^Reader) -> (window: []u8, base: u64, ok: bool)

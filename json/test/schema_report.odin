@@ -199,7 +199,7 @@ schema_report_locations :: proc(t: ^testing.T) {
 	write.tokens_init(&tw, json.as(.Json), {}, context.temp_allocator)
 	write.write_problem(&tw, sink.entries[:], {title = "Invalid", status = 422}, {records = true, truncated = true})
 	text, _ := write.tokens_finish(&tw)
-	testing.expect_value(t, string(text), `{"title":"Invalid","status":422,"errors":[{"pointer":"/4/a~0~1b/1","code":"wrong_kind","message":"Value is not of the allowed type"},{"pointer":"/4/c","code":"above_maximum","message":"Number is above the maximum"}],"truncated":true}`)
+	testing.expect_value(t, string(text), `{"title":"Invalid","status":422,"errors":[{"pointer":"/a~0~1b/1","record":4,"code":"wrong_kind","message":"Value is not of the allowed type"},{"pointer":"/c","record":4,"code":"above_maximum","message":"Number is above the maximum"}],"truncated":true}`)
 	testing.expect_value(t, basic_text(nil), `{"valid":true}`)
 	typed.sink_destroy(&sink)
 }

@@ -17,14 +17,16 @@ Apply :: struct {
 	// The arm's record, -1 for an arm that reads none, and the keyword steps to it from the held record.
 	rec:      i32,
 	site:     []core.Step,
-	// The member name a `.Dependent` or `.Requires` arm is keyed by, or a `.Pattern`'s expression.
+	// The member name a `.Dependent` arm is keyed by, or a `.Pattern`'s expression.
 	name:     string,
 	// A `.Pattern`'s compiled `^regex.Regex`.
 	pattern:  rawptr,
-	// The names a `.Requires` arm wants, and the names an `.Additional` arm leaves to the named members' records.
+	// The names an `.Additional` arm leaves to the named members' records.
 	names:    []string,
-	// The operands an `.Equal` arm takes, a `const` when `constant` says so, which may be containers.
+	// The operands an `.Equal` arm takes, a `const` when `constant` says so, which may be containers, in the order of
+	// their `core.hash` in `hashes`.
 	values:   []core.Value,
+	hashes:   []u64,
 	constant: bool,
 	// The elements a `.Contains` arm wants to pass.
 	min, max: u64,
@@ -43,7 +45,6 @@ Apply_Kind :: enum u8 {
 	Then,
 	Else,
 	Dependent, // an object with the member `name` passes the record
-	Requires, // an object with the member `name` has the members `names`
 	Pattern, // each member whose name the pattern matches passes the record
 	Additional, // each member no name of `names` and no pattern matches passes the record
 	Contains, // between `min` and `max` of an array's elements pass the record
@@ -55,7 +56,7 @@ Apply_Kind :: enum u8 {
 
 // Whether a use of `n` with `edge` judges by arms.
 @(private)
-holds :: proc(d: ^rules.Description, node: rules.Node_Index, edge: rules.Rules) -> bool {
+holds :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index, edge: rules.Rules) -> bool {
 	n := &d.nodes[node]
 	if len(n.any_of) > 0 || len(n.all_of) > 0 || len(n.one_of) > 0 || n.not != nil || n.ref != nil || n.dynamic_ref != nil || n.rules.unique || edge.unique || container_operands(n) {
 		return true
@@ -63,19 +64,30 @@ holds :: proc(d: ^rules.Description, node: rules.Node_Index, edge: rules.Rules) 
 	if n.cond.test != nil && (n.cond.then != nil || n.cond.other != nil) || n.unevaluated_items != nil || n.unevaluated_properties != nil {
 		return true
 	}
-	if n.object >= 0 && (len(d.objects[n.object].patterns) > 0 || len(d.objects[n.object].dependents) > 0) {
+	if n.object >= 0 && (len(d.objects[n.object].patterns) > 0 && n.object not_in b.inline || dependent_schemas(&d.objects[n.object])) {
 		return true
 	}
 	return n.array >= 0 && d.arrays[n.array].contains != nil
 }
 
+// Whether `o` has a `dependentSchemas` member, which an arm judges.
+@(private)
+dependent_schemas :: proc(o: ^rules.Object) -> bool {
+	for x in o.dependents {
+		if x.node != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // Whether `n` with `edge` judges anything past its arms.
 @(private)
-bare_judges :: proc(d: ^rules.Description, n: ^rules.Node, edge: rules.Rules) -> bool {
-	if edge != {} || n.kinds != rules.EVERY_KIND || n.rules != {} || n.has_enum || n.const_of != nil {
+bare_judges :: proc(b: ^Builder, d: ^rules.Description, n: ^rules.Node, edge: rules.Rules) -> bool {
+	if edge != {} || n.kinds != rules.EVERY_KIND || n.rules != {} || n.has_enum || n.const_of != nil || n.object in b.inline {
 		return true
 	}
-	if n.object >= 0 && (len(d.objects[n.object].members) > 0 || d.objects[n.object].additional != rules.NONE || d.objects[n.object].keys != rules.NONE) {
+	if n.object >= 0 && (len(d.objects[n.object].members) > 0 || len(d.objects[n.object].dependents) > 0 || d.objects[n.object].additional != rules.NONE || d.objects[n.object].keys != rules.NONE) {
 		return true
 	}
 	return n.array >= 0 && (len(d.arrays[n.array].prefix) > 0 || d.arrays[n.array].items != rules.NONE)
@@ -95,9 +107,9 @@ container_operands :: proc(n: ^rules.Node) -> bool {
 	return false
 }
 
-// The arms of a held use of `node` with `edge`, in `arena`.
+// The arms of a held use of `node` with `edge`, in `arena`, and those a check with no sink reads, nil for the same.
 @(private)
-checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, node: rules.Node_Index, edge: rules.Rules) -> []Apply {
+checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, node: rules.Node_Index, edge: rules.Rules) -> (applies, verdict: []Apply) {
 	n := d.nodes[node]
 	out := make([dynamic]Apply, arena)
 	arm :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, out: ^[dynamic]Apply, kind: Apply_Kind, node: rules.Node_Index, site: ..core.Step) -> ^Apply {
@@ -113,7 +125,7 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 	// judges nothing.
 	key := Block_Key{typeid_of(rules.Rules), i32(node), b.scope} if edge == {} else Block_Key{typeid_of(Use), i32(len(b.fields)), 0}
 	base, known := b.blocks[key]
-	if !known && bare_judges(d, &n, edge) {
+	if !known && bare_judges(b, d, &n, edge) {
 		if base = reserve_block(b, 1, key); base >= 0 {
 			fill_checked(b, d, arena, int(base), node, "", edge, nil, true)
 		}
@@ -159,24 +171,27 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 				values = nil
 			}
 		}
-		append(&out, Apply{kind = .Equal, rec = -1, values = values, constant = constant && !n.has_enum})
+		hashes: []u64
+		values, hashes = by_hash(values, arena)
+		append(&out, Apply{kind = .Equal, rec = -1, values = values, hashes = hashes, constant = constant && !n.has_enum})
 	}
 	if n.rules.unique || edge.unique {
 		append(&out, Apply{kind = .Unique, rec = -1})
 	}
 	if n.object >= 0 {
 		o := d.objects[n.object]
-		for x in o.patterns {
+		inline := n.object in b.inline
+		for x in o.patterns[:0 if inline else len(o.patterns)] {
 			re, err := regex.compile(x.expression, {ecma = true}, arena)
 			if err != "" {
 				refuse_plan(b, .Unsupported, text = "patternProperties")
-				return out[:]
+				return out[:], nil
 			}
 			if a := arm(b, d, arena, &out, .Pattern, x.node, core.Name("patternProperties"), core.Name(x.expression)); a != nil {
 				a.name, a.pattern = x.expression, new_clone(re, arena)
 			}
 		}
-		if len(o.patterns) > 0 && o.additional != rules.NONE {
+		if len(o.patterns) > 0 && !inline && o.additional != rules.NONE {
 			names := make([dynamic]string, arena)
 			for x in o.members {
 				if !x.only_required {
@@ -192,9 +207,6 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 				if a := arm(b, d, arena, &out, .Dependent, y, core.Name("dependentSchemas"), core.Name(x.name)); a != nil {
 					a.name = x.name
 				}
-			}
-			if len(x.required) > 0 {
-				append(&out, Apply{kind = .Requires, rec = -1, name = x.name, names = x.required})
 			}
 		}
 	}
@@ -220,7 +232,43 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 			}
 		}
 	}
-	return out[:]
+	c, conjoined := b.conjoined[node]
+	if !conjoined || edge != {} {
+		return out[:], nil
+	}
+	v := make([dynamic]Apply, arena)
+	if c.arms != nil {
+		kind := Apply_Kind.Any if len(n.any_of) > 0 else .One
+		for x in c.arms {
+			append(&v, Apply{kind = kind, rec = verdict_record(b, d, arena, x)})
+		}
+		return out[:], v[:]
+	}
+	append(&v, Apply{kind = .All, rec = arm_record(b, d, arena, c.node)})
+	for x in c.held {
+		append(&v, Apply{kind = .All, rec = arm_record(b, d, arena, x)})
+	}
+	for x in c.lifted {
+		y := d.nodes[x]
+		if z, has := y.not.?; has {
+			append(&v, Apply{kind = .Not, rec = arm_record(b, d, arena, z)})
+		}
+		if z, has := y.cond.test.?; has && (y.cond.then != nil || y.cond.other != nil) {
+			append(&v, Apply{kind = .If, rec = arm_record(b, d, arena, z)})
+			if w, then := y.cond.then.?; then {
+				append(&v, Apply{kind = .Then, rec = arm_record(b, d, arena, w)})
+			}
+			if w, other := y.cond.other.?; other {
+				append(&v, Apply{kind = .Else, rec = arm_record(b, d, arena, w)})
+			}
+		}
+	}
+	for a in out {
+		if a.kind != .All {
+			append(&v, a)
+		}
+	}
+	return out[:], v[:]
 }
 
 // The record of an arm that judges by `node`, which each use of the node by an arm in one scope shares. The keyword
@@ -261,12 +309,62 @@ fork_record :: proc(b: ^Builder) -> i32 {
 FORKING := [1]Apply{{rec = -1}}
 
 
-// Whether `v` equals one of `values`.
+// Whether `v` equals one of `values`. With their `hashes`, only the operands of `v`'s hash are compared, unless `v`
+// holds a `Plain` node, whose hash is its kind's only as an operand reads it. What a comparison takes in `space` is taken back.
 @(private)
-equals_one :: proc(v: core.Value, values: []core.Value, allocator := context.temp_allocator) -> bool {
-	context.allocator = allocator
-	for x in values {
-		if core.equal(v, x) {
+equals_one :: proc(v: core.Value, values: []core.Value, hashes: []u64 = nil, space: ^mem.Arena = nil) -> bool {
+	from := 0
+	to := len(values)
+	if hashes != nil && !holds_plain(v) {
+		mark := space.offset if space != nil else 0
+		h := core.hash(v)
+		if space != nil {
+			space.offset = mark
+		}
+		from, _ = slice.binary_search(hashes, h)
+		for to = from; to < len(hashes) && hashes[to] == h; to += 1 {}
+	}
+	for x in values[from:to] {
+		mark := space.offset if space != nil else 0
+		equal := core.equal(v, x)
+		if space != nil {
+			space.offset = mark
+		}
+		if equal {
+			return true
+		}
+	}
+	return false
+}
+
+// `values` sorted by their `core.hash`, and the hashes in that order.
+@(private)
+by_hash :: proc(values: []core.Value, arena: runtime.Allocator) -> (sorted: []core.Value, hashes: []u64) {
+	Hashed :: struct {
+		hash:  u64,
+		value: core.Value,
+	}
+	all := make([]Hashed, len(values), arena)
+	for x, i in values {
+		all[i] = {core.hash(x), x}
+	}
+	slice.sort_by(all, proc(a, b: Hashed) -> bool {return a.hash < b.hash})
+	sorted, hashes = make([]core.Value, len(values), arena), make([]u64, len(values), arena)
+	for x, i in all {
+		sorted[i], hashes[i] = x.value, x.hash
+	}
+	return
+}
+
+// Whether `v` is or holds a document's `Plain` node.
+@(private)
+holds_plain :: proc(v: core.Value) -> bool {
+	r, is_node := v.(core.Node_Ref)
+	if !is_node {
+		return false
+	}
+	for n in r.doc.nodes[r.node:] {
+		if n.kind == .Plain {
 			return true
 		}
 	}
@@ -340,6 +438,13 @@ Fork :: struct {
 	outer:      ^Fork,
 	space:      mem.Arena,
 	marks:      [dynamic]bool,
+	// The arms whose runs wait for the object's first member, its open token and first key, and the depth its runs nest at.
+	waiting:    int,
+	opened:     core.Token,
+	first_key:  Maybe(core.Token),
+	level:      int,
+	// Whether an arm judges each member or element, which takes every value at depth one.
+	per_member: bool,
 }
 
 // An arm's state in a fork: the run of the whole value, or of the member or element being read, its verdict, and what
@@ -353,10 +458,13 @@ Arm_Run :: struct {
 	rec:     i32,
 	run:     ^Run,
 	passed:  bool,
+	// An arm the value's kind or its object's first member fails, which takes no run, and one whose run waits for that member.
+	dead:    bool,
+	waiting: bool,
 	count:   u64,
 	passes:  [dynamic]bool,
 	failed:  [dynamic]Failed,
-	pending: Sink,
+	pending: ^Sink,
 }
 
 // A member or element that failed an arm: its place, its first failure, and its failures in the arm's `pending`.
@@ -370,6 +478,10 @@ Failed :: struct {
 // The bytes of a fork's space, which each held value's names, build and comparisons take from first.
 @(private)
 FORK_SPACE :: 1 << 16
+
+// The arms whose verdict alone counts, which a kind they refuse or a failing first member decides with no run.
+@(private)
+VERDICT_ARMS :: bit_set[Apply_Kind]{.Any, .One, .Not, .If}
 
 @(private)
 WHOLE_ARMS :: bit_set[Apply_Kind]{.All, .Any, .One, .Not, .If, .Then, .Else, .Dependent}
@@ -389,10 +501,18 @@ BUFFERED :: bit_set[Apply_Kind]{.Then, .Else, .Dependent, .Unevaluated_Members, 
 @(private)
 fork_value :: #force_no_inline proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	if raw_data(u.applies) != &FORKING[0] {
+		if t.kind != .Object && t.kind != .Array {
+			if passed, judged := scalar_verdict(h, u.verdict if h.sink == nil && u.verdict != nil else u.applies, t, 0); passed && judged {
+				return next, .Next
+			}
+		}
 		return fork_open(h, regs, next, u, t)
 	}
 	fk := h.fork
 	action := fork_token(h, t)
+	if action == .Skip {
+		return regs, .Skip
+	}
 	if t.kind == .Object || t.kind == .Array {
 		return {NO_LIMIT, regs.b, 0}, action
 	}
@@ -403,6 +523,73 @@ fork_value :: #force_no_inline proc "contextless" (h: ^Check, regs, next: core.H
 	}
 	return regs, action
 }
+
+// Whether the scalar `t` passes the arms `applies` by the leaves of their records and those records' own arms, and
+// whether that judges it: not when an arm judges more than a scalar's leaves, which the fork then judges.
+@(private)
+scalar_verdict :: proc "contextless" (h: ^Check, applies: []Apply, t: core.Token, depth: int) -> (passed, judged: bool) {
+	any, any_passed, ones, one, if_passed := false, false, false, 0, false
+	for &a in applies {
+		ok := true
+		if a.kind in SCALAR_ARMS && a.eval == nil {
+			if a.rec >= 0 {
+				if ok, judged = record_passes(h, a.rec, t, depth); !judged {
+					return
+				}
+			}
+		} else if a.kind not_in OBJECT_ARRAY_ARMS {
+			return false, false
+		}
+		switch a.kind {
+		case .All:
+			if !ok {
+				return false, true
+			}
+		case .Any:
+			any, any_passed = true, any_passed || ok
+		case .One:
+			ones, one = true, one + int(ok)
+		case .Not:
+			if ok {
+				return false, true
+			}
+		case .If:
+			if_passed = ok
+		case .Then, .Else:
+			if !ok && if_passed == (a.kind == .Then) {
+				return false, true
+			}
+		case .Dependent, .Pattern, .Additional, .Contains, .Unique, .Equal, .Unevaluated_Members, .Unevaluated_Items:
+		}
+	}
+	return (!any || any_passed) && (!ones || one == 1), true
+}
+
+// Whether the scalar `t` passes the record `rec`, and whether `scalar_verdict` judges that.
+@(private)
+record_passes :: proc "contextless" (h: ^Check, rec: i32, t: core.Token, depth: int) -> (passed, judged: bool) {
+	fld := &h.plan.fields[rec]
+	u := &h.plan.uses[fld.meta]
+	if len(u.applies) > 0 {
+		if depth == MAX_HELD || raw_data(u.applies) == &FORKING[0] {
+			return false, false
+		}
+		if passed, judged = scalar_verdict(h, u.verdict if h.sink == nil && u.verdict != nil else u.applies, t, depth + 1); !passed || !judged {
+			return
+		}
+	}
+	if m := &h.plan.meta[fld.meta]; m.rule_set > 0 {
+		l := &h.plan.leaves[m.rule_set - 1]
+		return scalar_fails(h, plain_token(h, t, l) if t.kind == .Plain else t, l) == {}, true
+	}
+	return true, true
+}
+
+// The arms `scalar_verdict` judges a scalar by, and those a scalar passes as no object or array.
+@(private)
+SCALAR_ARMS :: bit_set[Apply_Kind]{.All, .Any, .One, .Not, .If, .Then, .Else}
+@(private)
+OBJECT_ARRAY_ARMS :: bit_set[Apply_Kind]{.Dependent, .Pattern, .Additional, .Contains, .Unique, .Unevaluated_Members, .Unevaluated_Items}
 
 // Opens the fork of the held value `t` at `regs`: starts a run of the value for each arm that judges it whole, feeds
 // them `t`, and for a container opens its frame, whose values read at the fork record. A scalar is judged at once.
@@ -429,9 +616,6 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 		} else if h.fork = new(Fork, context.temp_allocator); h.fork != nil {
 			h.fork.arms.allocator, h.fork.names.allocator, h.fork.marks.allocator = context.temp_allocator, context.temp_allocator, context.temp_allocator
 			temp_scratch(&h.fork.scratch)
-			if block, failed := make([]u8, FORK_SPACE, context.temp_allocator); failed == nil {
-				mem.arena_init(&h.fork.space, block)
-			}
 		}
 	}
 	if h.pool == nil || h.fork == nil {
@@ -442,20 +626,24 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 	fk.u, fk.regs, fk.next, fk.lo, fk.kind = u, regs, next, t.lo if container else lo, t.kind
 	fk.depth, fk.below, fk.open, fk.n, fk.count, fk.key, fk.holds = 0, h.sp, true, 0, 0, "", false
 	fk.takes, fk.outer = h.sink == nil && container, nil
+	fk.waiting, fk.opened, fk.first_key, fk.level, fk.per_member = 0, t, nil, level, false
 	clear(&fk.names)
 	mem.arena_free_all(&fk.space)
-	for &a in u.applies {
+	applies := u.verdict if h.sink == nil && u.verdict != nil else u.applies
+	reserve(&fk.arms, len(applies))
+	for &a in applies {
 		fk.takes &&= a.kind <= .One && a.eval == nil
-		arm_add(h, fk, &a, a.kind, a.rec, level)
+		arm_add(h, fk, &a, a.kind, a.rec, level, t)
 		if a.eval != nil {
 			for rec in a.eval.wholes {
-				arm_add(h, fk, nil, .Any, rec, level)
+				arm_add(h, fk, nil, .Any, rec, level, t)
 			}
 			for rec in a.eval.elements {
-				arm_add(h, fk, nil, .Contains, rec, level)
+				arm_add(h, fk, nil, .Contains, rec, level, t)
 			}
 		}
 		fk.holds ||= a.kind == .Equal || a.kind == .Unique && t.kind == .Array
+		fk.per_member ||= a.kind in MEMBER_ARMS || a.eval != nil
 	}
 	if fk.holds {
 		fk.builder, fk.built = build.builder_start(h.src, h.view.as, false, fork_space(fk), 16, 8), build.BUILDER_REGS
@@ -471,7 +659,7 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 	if !container || action == .Stop {
 		return next, action
 	}
-	if fk.takes && fork_live(fk) == -1 {
+	if fk.takes && fk.waiting == 0 && fork_live(fk) == -1 {
 		// Every run is decided at the open, so the container is judged now and passed over.
 		return next, .Skip if fork_finish(h, fk, t.lo) == .Next else .Stop
 	}
@@ -499,10 +687,10 @@ fork_fault :: proc(h: ^Check, regs: core.Hook_Regs, kind: core.Typed_Error_Kind,
 	return .Stop
 }
 
-// Adds the arm `a` of kind `kind` with record `rec` to the fork, with a run of the value when it judges the value whole.
-// A record the evaluated set asks of is added once.
+// Adds the arm `a` of kind `kind` with record `rec` to the fork of the value `t`, with a run of the value when it judges
+// the value whole. A record the evaluated set asks of is added once.
 @(private)
-arm_add :: proc(h: ^Check, fk: ^Fork, a: ^Apply, kind: Apply_Kind, rec: i32, level: int) {
+arm_add :: proc(h: ^Check, fk: ^Fork, a: ^Apply, kind: Apply_Kind, rec: i32, level: int, t: core.Token) {
 	if a == nil {
 		// A record an arm already judges the value by answers the set's question.
 		for &x in fk.arms[:fk.n] {
@@ -521,13 +709,109 @@ arm_add :: proc(h: ^Check, fk: ^Fork, a: ^Apply, kind: Apply_Kind, rec: i32, lev
 	}
 	x := &fk.arms[fk.n]
 	fk.n += 1
-	x.apply, x.kind, x.rec, x.run, x.passed, x.count = a, kind, rec, nil, true, 0
+	x.apply, x.kind, x.rec, x.run, x.passed, x.count, x.dead, x.waiting = a, kind, rec, nil, true, 0, false, false
 	clear(&x.passes)
 	clear(&x.failed)
-	x.pending.entries = make([dynamic]core.Error_Entry, fork_space(fk))
+	x.pending = nil
+	if a != nil && kind in VERDICT_ARMS && rec >= 0 {
+		fld := &h.plan.fields[rec]
+		m := &h.plan.meta[fld.meta]
+		switch {
+		case !kind_admits(h, m, t):
+			x.dead = true
+			return
+		case t.kind == .Object && m.members > 0 && len(h.plan.uses[fld.meta].applies) == 0:
+			x.waiting = true
+			fk.waiting += 1
+			return
+		}
+	}
 	if kind in WHOLE_ARMS && rec >= 0 {
 		x.run = run_start(h, fk, x, rec, level + 1, nil)
 	}
+}
+
+// Whether a value of `t`'s kind can pass the record of `m`, which a held record's own leaf does not say.
+@(private)
+kind_admits :: proc "contextless" (h: ^Check, m: ^Meta, t: core.Token) -> bool {
+	if m.rule_set == 0 {
+		return true
+	}
+	kinds := h.plan.leaves[m.rule_set - 1].kinds
+	#partial switch t.kind {
+	case .Null:
+		return .Null in kinds
+	case .True, .False:
+		return .Bool in kinds
+	case .String:
+		return .String in kinds
+	case .Number:
+		return kinds & {.Integer, .Number} != {}
+	case .Object:
+		return .Object in kinds
+	case .Array:
+		return .Array in kinds
+	}
+	return true
+}
+
+// Starts the runs that wait for the held object's first member, as `t`, its value or the object's close, arrives: an arm
+// whose record fails a scalar first member by its kind or enum takes no run, and each other run is fed the object's open
+// and its first key.
+@(private)
+fork_wake :: proc(h: ^Check, fk: ^Fork, t: core.Token) -> core.Action {
+	scalar := t.kind != .Object && t.kind != .Array && t.kind != .End
+	buf: [TEXT_ROOM]u8 = ---
+	text, decoded := "", t.kind != .String
+	if scalar && !decoded {
+		text, decoded = decoded_text(h, t, buf[:])
+	}
+	for &x in fk.arms[:fk.n] {
+		if !x.waiting {
+			continue
+		}
+		x.waiting = false
+		if scalar && decoded && fk.first_key != nil && member_fails(h, x.rec, fk.key, t, text) {
+			x.dead = true
+			continue
+		}
+		if x.run = run_start(h, fk, &x, x.rec, fk.level + 1, nil); x.run == nil {
+			return .Stop
+		}
+		stopped := run_feed(h, x.run, fk.opened)
+		if k, keyed := fk.first_key.?; keyed && !stopped {
+			stopped = run_feed(h, x.run, k)
+		}
+		if stopped && arm_stopped(h, fk, &x) == .Stop {
+			return .Stop
+		}
+	}
+	fk.waiting = 0
+	return .Next
+}
+
+// Whether the scalar `t`, the member `key` of an object, fails the leaf of that member's record in the object record
+// `rec` by its kind or its enum. `text` is a string's decoded text. A number is left to the run.
+@(private)
+member_fails :: proc(h: ^Check, rec: i32, key: string, t: core.Token, text: string) -> bool {
+	owner := &h.plan.fields[rec]
+	i := member_index(h, owner, &h.plan.meta[owner.meta], key)
+	if i < 0 {
+		return false
+	}
+	fld := &([^]Field)(owner.first)[i]
+	m := &h.plan.meta[fld.meta]
+	if m.rule_set == 0 || len(h.plan.uses[fld.meta].applies) > 0 || t.kind == .Number || t.kind == .Plain {
+		return false
+	}
+	if !kind_admits(h, m, t) {
+		return true
+	}
+	l := &h.plan.leaves[m.rule_set - 1]
+	if !l.has_enum {
+		return false
+	}
+	return !rules.enum_has(l, t.kind, text)
 }
 
 // Starts a run of record `rec` for the arm `x` of the fork, of the held value or, under `step`, of its member or element.
@@ -561,8 +845,19 @@ run_start :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run, rec: i32, nest: int, step: 
 		case x.kind in REPORTING:
 			c.sink = h.sink
 		case x.kind in BUFFERED:
-			if c.sink = &r.buffer if step == nil else &x.pending; step == nil {
-				r.buffer.entries = make([dynamic]core.Error_Entry, fork_space(fk))
+			if step == nil {
+				c.sink = &r.buffer
+				r.buffer.entries = nil
+				r.buffer.entries.allocator = fork_space(fk)
+			} else {
+				if x.pending == nil {
+					if x.pending = new(Sink, fork_space(fk)); x.pending == nil {
+						h.fatal = .No_Memory
+						return nil
+					}
+					x.pending.entries.allocator = fork_space(fk)
+				}
+				c.sink = x.pending
 			}
 			c.sink.max_errors, c.sink.record = h.sink.max_errors, h.sink.record
 		}
@@ -588,7 +883,7 @@ run_free :: proc(h: ^Check, r: ^Run) {
 
 // Feeds `t` to the run, past the values it passes over. Says whether the run stopped on it.
 @(private)
-run_feed :: proc(h: ^Check, r: ^Run, t: core.Token) -> bool {
+run_feed :: #force_inline proc(h: ^Check, r: ^Run, t: core.Token) -> bool {
 	value := t.role == .Value
 	open := value && (t.kind == .Object || t.kind == .Array)
 	switch {
@@ -640,6 +935,10 @@ fork_token :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token) -> 
 	value := t.role == .Value
 	open := value && (t.kind == .Object || t.kind == .Array)
 	end := value && t.kind == .End
+	if fk.waiting > 0 && value && fk.depth == 1 && fork_wake(h, fk, t) == .Stop {
+		fork_release(h, fk)
+		return .Stop
+	}
 	if value && !end && fk.depth == 1 {
 		member_start(h, fk)
 	}
@@ -661,6 +960,9 @@ fork_token :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token) -> 
 		fork_release(h, fk)
 		return fork_fault(h, fk.regs, .No_Memory, fk.lo, fk.lo)
 	}
+	if open && fk.depth > 0 && fork_passes_over(fk, t) {
+		return .Skip
+	}
 	if open {
 		fk.depth += 1
 	} else if end {
@@ -674,6 +976,9 @@ fork_token :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token) -> 
 			return fork_fault(h, fk.regs, .No_Memory, fk.lo, fk.lo)
 		}
 		fk.key = key
+		if fk.first_key == nil {
+			fk.first_key = t
+		}
 	case value && fk.depth == 1 && !open:
 		member_end(h, fk)
 	case fk.depth == 0:
@@ -684,7 +989,36 @@ fork_token :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token) -> 
 		fork_release(h, fk)
 		return fork_fault(h, fk.regs, h.fatal, fk.lo, fk.lo)
 	}
+	if t.role == .Key && fork_passes_over(fk, t) {
+		return .Skip
+	}
 	return .Next
+}
+
+// Whether the walk passes over the value that the key or open `t` starts in the held value, which each run was just fed:
+// no run reads it and nothing else of the fork takes its tokens. Each run then stands as past the value's close, which
+// the walk does not give.
+@(private)
+fork_passes_over :: #force_inline proc "contextless" (fk: ^Fork, t: core.Token) -> bool {
+	if fk.holds || fk.waiting > 0 || fk.per_member {
+		return false
+	}
+	key := t.role == .Key
+	for &x in fk.arms[:fk.n] {
+		if r := x.run; r != nil && !r.done && (r.skip == 0 || !key && r.skip < 0) {
+			return false
+		}
+	}
+	for &x in fk.arms[:fk.n] {
+		if r := x.run; r != nil && !r.done {
+			if !key {
+				r.skip -= 1
+			} else if r.skip < 0 {
+				r.skip = 0
+			}
+		}
+	}
+	return true
 }
 
 // What a run that stopped does to the fork: a stop past its sink stops the check, noted at the held value when the run
@@ -758,7 +1092,7 @@ member_end :: proc(h: ^Check, fk: ^Fork) {
 		case .Unevaluated_Members, .Unevaluated_Items:
 			if first.kind != .None {
 				from := slice.last(x.failed[:]).to if len(x.failed) > 0 else 0
-				append(&x.failed, Failed{fk.count - 1, first, from, len(x.pending.entries)})
+				append(&x.failed, Failed{fk.count - 1, first, from, len(x.pending.entries) if x.pending != nil else from})
 			}
 		case:
 			if first.kind != .None && h.first.kind == .None {
@@ -799,7 +1133,7 @@ fork_finish :: proc(h: ^Check, fk: ^Fork, hi: u64) -> core.Action {
 		fk.holds = false
 	}
 	for &x in fk.arms[:fk.n] {
-		x.passed = x.run == nil || x.run.c.first.kind == .None
+		x.passed = !x.dead && (x.run == nil || x.run.c.first.kind == .None)
 	}
 	any, any_passed, ones, one, if_passed := false, false, false, 0, false
 	for &x in fk.arms[:fk.n] {
@@ -833,16 +1167,9 @@ fork_finish :: proc(h: ^Check, fk: ^Fork, hi: u64) -> core.Action {
 			if fk.kind == .Object && x.run != nil && named(fk.names[:], a.name) {
 				fork_deliver(h, x.run, x.run.buffer.entries[:])
 			}
-		case .Requires:
-			if fk.kind == .Object && named(fk.names[:], a.name) {
-				for want in a.names {
-					if !named(fk.names[:], want) {
-						fork_note(h, fk, .Missing_Field, hi, "dependentRequired", want)
-					}
-				}
-			}
 		case .Equal:
-			if !equals_one(core.Node_Ref{&doc, core.ROOT}, a.values, fork_space(fk)) {
+			context.allocator = fork_space(fk)
+			if !equals_one(core.Node_Ref{&doc, core.ROOT}, a.values, a.hashes, &fk.space) {
 				fork_note(h, fk, .Not_A_Member, hi, "const" if a.constant else "enum")
 			}
 		case .Unique:
@@ -939,7 +1266,7 @@ fork_unevaluated :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run) {
 	mark_evaluated(&ev, x.apply.eval, fk.marks[:], x.kind == .Unevaluated_Items)
 	for f in x.failed {
 		if !fk.marks[f.index] {
-			fork_deliver(h, nil, x.pending.entries[f.from:f.to], f.first)
+			fork_deliver(h, nil, x.pending.entries[f.from:f.to] if x.pending != nil else nil, f.first)
 		}
 	}
 }
@@ -1008,10 +1335,20 @@ fault_note :: proc(c: ^Check, regs: core.Hook_Regs, e: core.Typed_Error) -> bool
 	return true
 }
 
-// The allocator of the fork's space, which spills to the temp allocator past it and is rewound at each held value.
+// The allocator of the fork's space, which spills to the temp allocator past it and is rewound at each held value. The
+// space is taken from the temp allocator at its first use, since the temp allocator clears what it gave at its reset.
 @(private)
 fork_space :: proc(fk: ^Fork) -> runtime.Allocator {
-	return {spill_proc, &fk.space}
+	space :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old: rawptr, old_size: int, loc := #caller_location) -> ([]byte, runtime.Allocator_Error) {
+		fk := (^Fork)(data)
+		if fk.space.data == nil && mode != .Free && mode != .Free_All {
+			if block, failed := runtime.mem_alloc_non_zeroed(FORK_SPACE, allocator = context.temp_allocator); failed == nil {
+				mem.arena_init(&fk.space, block)
+			}
+		}
+		return spill_proc(&fk.space, mode, size, alignment, old, old_size, loc)
+	}
+	return {space, fk}
 }
 
 // Gives back the fork's runs.
@@ -1130,7 +1467,7 @@ fork_close :: proc "contextless" (h: ^Check, f: ^Frame, regs: core.Hook_Regs, t:
 // `taken` for the value's close.
 @(private)
 fork_take :: proc "contextless" (h: ^Check, fk: ^Fork) -> (core.Hook_Regs, bool) {
-	if !fk.takes {
+	if !fk.takes || fk.waiting > 0 {
 		return {}, false
 	}
 	live := fork_live(fk)
@@ -1173,7 +1510,7 @@ fork_live :: proc "contextless" (fk: ^Fork) -> int {
 fork_verdict :: proc "contextless" (fk: ^Fork, live: int, assume: bool) -> bool {
 	all, any, any_passed, ones, one := true, false, false, false, 0
 	for &x, i in fk.arms[:fk.n] {
-		passed := assume if i == live else x.run == nil || !x.run.done
+		passed := assume if i == live else !x.dead && (x.run == nil || !x.run.done)
 		#partial switch x.kind {
 		case .All:
 			all &&= passed
@@ -1228,3 +1565,4 @@ taken_settle :: proc "contextless" (c: ^Check) {
 		c.taken, fk.outer, c.pool.forks = fk.outer, c.pool.forks, fk
 	}
 }
+

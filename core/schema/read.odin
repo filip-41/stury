@@ -421,10 +421,10 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 	case "patternProperties":
 		sh.is_object = true
 		for e in members_of(r, sc, v, name) {
-			if pattern_valid(r, e.key) {
+			if why := pattern_refusal(e.key); why == "" {
 				append(&sh.patterns, rules.Pattern{keep(r, e.key), read_schema(r, sc, e.v, core.Name(e.key))})
 			} else {
-				fail(r, {sc.source, e.v}, name, "holds a name that is no regular expression")
+				fail(r, {sc.source, e.v}, name, strings.concatenate({"holds a name that is no regular expression: ", why}, context.temp_allocator))
 			}
 		}
 	case "dependentSchemas", "dependentRequired", "dependencies":
@@ -515,11 +515,20 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 			fail(r, site, name, "must be a boolean")
 		}
 		n.rules.unique = kind == .True
+	case "readOnly", "writeOnly":
+		if kind != .True && kind != .False {
+			fail(r, site, name, "must be a boolean")
+		}
+		if name == "readOnly" {
+			n.rules.read_only = kind == .True
+		} else {
+			n.rules.write_only = kind == .True
+		}
 	case "pattern":
 		if text, ok := string_of(r, doc, v); !ok {
 			fail(r, site, name, "must be a string")
-		} else if !pattern_valid(r, text) {
-			fail(r, site, name, "is no regular expression")
+		} else if why := pattern_refusal(text); why != "" {
+			fail(r, site, name, strings.concatenate({"is no regular expression: ", why}, context.temp_allocator))
 		} else {
 			n.rules.pattern = keep(r, text)
 		}
@@ -783,11 +792,11 @@ members_of :: proc(r: ^Reader, sc: Scope, v: core.Node_Index, name: string) -> (
 	return entries[:]
 }
 
-// Whether `expression` compiles as the ECMA 262 expression a schema's patterns are.
+// Why `expression` does not compile as the ECMA 262 expression a schema's patterns are, "" when it does.
 @(private)
-pattern_valid :: proc(r: ^Reader, expression: string) -> bool {
+pattern_refusal :: proc(expression: string) -> string {
 	_, err := regex.compile(expression, {ecma = true})
-	return err == ""
+	return err
 }
 
 // Refuses the read at `site`: `keyword` names the keyword and `why` says what its value is missing.

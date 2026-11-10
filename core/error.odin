@@ -732,8 +732,13 @@ write_typed_message :: proc(w: io.Writer, e: Typed_Error) -> io.Error {
 		if len(e.want.text) > 0 {
 			io.write_string(w, "Field tag flag \"") or_return
 			io.write_string(w, e.want.text) or_return
-			_, err := io.write_string(w, "\" is not one the field takes")
-			return err
+			io.write_string(w, "\" is not one the field takes") or_return
+			if e.want.type != nil {
+				io.write_string(w, " in ") or_return
+				_, err := reflect.write_typeid(w, e.want.type)
+				return err
+			}
+			return nil
 		}
 	case .Unsupported, .Ambiguous_Union, .Bad_Schema:
 		io.write_string(w, TYPED_KIND_RULES[e.kind].message) or_return

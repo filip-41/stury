@@ -329,12 +329,16 @@ member_key :: proc(w: ^Walker, r: ^typed.Field, $T: Tree, $put: Put) -> core.Typ
 	return .None
 }
 
-// Whether a read or write leaves the member at `v` out under `omitempty`: a zero number, false, an empty string, a nil, an
-// empty list or map or bit set. An enum, a struct and a fixed array are kept whatever they hold.
+// Whether a write leaves the member at `v` out: always for a model's write-only member, and under `omitempty` for a zero
+// number, false, an empty string, a nil, an empty list or map or bit set. An enum, a struct and a fixed array are kept
+// whatever they hold.
 @(cold)
 @(private)
 is_empty :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> bool {
 	m := &w.meta[r.meta]
+	if m.access == .Write_Only {
+		return true
+	}
 	kind := m.key_kind if r.kind == .Hook else r.kind
 	#partial switch kind {
 	case .Bool, .Bool_Wide, .I8, .I16, .I32, .I64, .U8, .U16, .U32, .U64:
@@ -616,10 +620,12 @@ list_struct :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, tag: ^string, $put:
 	return .None
 }
 
-// The frame of the object just listed, with its opening byte written.
+// The frame of the object just listed, with its opening byte written unless the walk is a visit.
 @(private)
-open_entries :: proc(w: ^Walker, $T: Tree) -> Frame {
-	put_byte(&w.out, T[.Open_Object][0])
+open_entries :: proc(w: ^Walker, $T: Tree, $V: bool) -> Frame {
+	when !V {
+		put_byte(&w.out, T[.Open_Object][0])
+	}
 	return {at = uintptr(len(w.entries) - w.listed), left = w.listed, total = w.listed, step = w.mark, mode = .Entries}
 }
 
@@ -759,19 +765,13 @@ refused :: proc(w: ^Walker, open: Frame, top: int, kind: core.Typed_Error_Kind) 
 	w.err.n_steps, w.err.truncated = 0, false
 	for i := top + 1; i >= 1; i -= 1 {
 		f := &open if i == top + 1 else &w.frames[i]
-		#partial switch f.mode {
-		case .Members:
-			r := intrinsics.ptr_offset(f.r, -1)
-			typed.path_add(&w.err, core.Name(strings.clone(w.meta[r.meta].name, context.temp_allocator)))
-		case .Elements:
-			if f.left < f.total {
-				typed.path_add(&w.err, core.Index(f.total - f.left - 1))
+		if step, ok := frame_step(w, f); ok {
+			if name, named := step.(core.Name); named {
+				step = core.Name(strings.clone(string(name), context.temp_allocator))
 			}
-		case .Entries:
-			if f.left < f.total {
-				typed.path_add(&w.err, core.Name(strings.clone(entry_name(w, w.entries[f.at - 1]), context.temp_allocator)))
-			}
-		case .Side:
+			typed.path_add(&w.err, step)
+		}
+		if f.mode == .Side {
 			leave_side(w)
 		}
 	}

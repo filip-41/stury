@@ -77,6 +77,7 @@ reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 		check     = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {return read_text(src, S, T, target, plan, options_of(as), read, allocator, true)},
 		node_read = document_read,
 		build     = proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_spec(src, S, as.readers, options_of(as), false, allocator)},
+		plan      = proc(T: typeid, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Error) {return plan_built(T, S, {}, opts, reads_of(S), allocator)},
 	}
 	return &r
 }

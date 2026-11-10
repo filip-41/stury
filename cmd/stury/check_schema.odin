@@ -127,7 +127,7 @@ schema_judge :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, named: 
 	}
 	defer typed.sink_destroy(&sink)
 	records, err := check_input(sc, data, src, runner, &sink)
-	by_record := src.framing != .Concatenated || records > 1
+	by_record := !table_source(src) && (src.framing != .Concatenated || records > 1)
 	file := name if named else ""
 	#partial switch _ in err {
 	case nil:
@@ -139,14 +139,14 @@ schema_judge :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, named: 
 		}
 		return .Valid, nil
 	case core.Fault:
+		// The failures of the records before a cut one are told before the fault, which the plain check tells.
+		if told_before := failures_before(sink.entries[:]); len(told_before) > 0 && (src.framing != .Concatenated || records > 0) {
+			tell(sc, s, name, file, data, told_before, by_record, &sink)
+		}
 		return .Fault, err
 	case core.Typed_Failure:
 		if len(sink.entries) > 0 {
-			if s.report == .Lines {
-				told(name, data, sink.entries[:])
-			} else {
-				report(sc, s, file, sink.entries[:], by_record, sink.truncated)
-			}
+			tell(sc, s, name, file, data, sink.entries[:], by_record, &sink)
 			return .Invalid, nil
 		}
 	}
@@ -154,10 +154,19 @@ schema_judge :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, named: 
 	return .Refused, err
 }
 
-// Checks `data` by its records, or as one text when the framing is concatenated and it is one, and returns how many
-// records it read. A concatenated text that does not check as one is read again value by value.
+// Whether `src` reads delimited text, whose schema describes the whole table, an array of rows.
+@(private = "file")
+table_source :: proc(src: Source) -> bool {
+	return src.as.readers != nil && src.as.readers.flat
+}
+
+// Checks `data` by its records, or as one text when the framing is concatenated and it is one or the source is a table,
+// and returns how many records it read. A concatenated text that does not check as one is read again value by value.
 @(private = "file")
 check_input :: proc(sc: ^Schema_Check, data: []byte, src: Source, runner: ^core.Runner, sink: ^typed.Sink) -> (records: i64, err: core.Error) {
+	if table_source(src) {
+		return 1, schema.check(&sc.bound, data, sink, runner)
+	}
 	if src.framing != .Concatenated {
 		return schema.check_records(&sc.bound, data, src.framing, sink, runner)
 	}
@@ -167,6 +176,29 @@ check_input :: proc(sc: ^Schema_Check, data: []byte, src: Source, runner: ^core.
 	}
 	typed.sink_restore(sink, {})
 	return schema.check_records(&sc.bound, data, .Concatenated, sink, runner)
+}
+
+// The entries of a check that ended on a fault, without the entry that places the fault among them.
+@(private = "file")
+failures_before :: proc(entries: []core.Error_Entry) -> []core.Error_Entry {
+	n := len(entries)
+	for n > 0 && entries[n - 1].kind == .Walk {
+		n -= 1
+	}
+	return entries[:n]
+}
+
+// Tells `entries` of the file `name` as the report says: lines on standard error, or the basic output or problem document.
+@(private = "file")
+tell :: proc(sc: ^Schema_Check, s: Schema_Options, name, file: string, data: []byte, entries: []core.Error_Entry, by_record: bool, sink: ^typed.Sink) {
+	if s.report == .Lines {
+		told(name, data, entries)
+		if sink.truncated {
+			message.write_stderr("%s: more failures past --max-errors %d\n", name, len(sink.entries))
+		}
+	} else {
+		report(sc, s, file, entries, by_record, sink.truncated)
+	}
 }
 
 // Tells each entry of the file `name` on standard error, one to a line.

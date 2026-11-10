@@ -817,6 +817,20 @@ seen_set :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, i: int) ->
 	return was
 }
 
+// Whether the object of frame `f` with its cursor at `regs` has its member `i`.
+@(private)
+member_seen :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, i: i32) -> bool {
+	if f.seen == 0 {
+		return i < i32((uintptr(regs.b) - uintptr(owner.first)) / size_of(Field))
+	}
+	mark_run(h, f, owner, (^Field)(uintptr(regs.b)))
+	if i < 63 {
+		return f.seen & (u64(1) << uint(i)) != 0
+	}
+	past := i - 63
+	return f.extra != nil && f.extra[past / 64] & (u64(1) << uint(past % 64)) != 0
+}
+
 // Marks the members the cursor read since `f.run`, each once. A cursor outside the block read nothing by its keys.
 @(private)
 mark_run :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, upto: ^Field) {

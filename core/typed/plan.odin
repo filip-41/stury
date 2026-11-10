@@ -101,6 +101,7 @@ Meta :: struct {
 	zeroed:     bool, // a list's new elements must start zeroed, since their readers may leave bytes unwritten
 	tagged:     bool, // a `Union` that reads objects by `Plan.union_tag`, or such a union's named struct arm
 	no_nil:     bool, // a `Union` that has no nil
+	access:     Access, // a struct member's, under a model
 	rule_set:   i32, // 1 + the record's leaf in `Plan.leaves`, and for a type's plan its set in `Plan.rule_sets`, 0 for none
 }
 
@@ -114,8 +115,22 @@ Use :: struct {
 	step:                    bool, // a prefix record, which moves the cursor on to the next element's
 	inside:                  bool,
 	node:                    Markup_Node, // the node of a markup element a member record reads
+	// The record of the members the compiled `^regex.Regex` `regex` matches and no other record names, 0 for none.
+	pattern:                 i32,
+	regex:                   rawptr,
 	// A held record's arms, which judge its value as the check reads it, empty for any other record.
 	applies:                 []Apply,
+	// The arms a check with no sink reads in their place, with the `allOf` and `$ref` arms conjoined, nil for the same.
+	verdict:                 []Apply,
+	// An object record's `dependentRequired`, which its close judges by the members seen.
+	requires:                []Requires,
+}
+
+// A member of an object record's block whose presence asks for the members `wants`, as places in the block.
+@(private)
+Requires :: struct {
+	trigger: i32,
+	wants:   []i32,
 }
 
 // A union's arm: the value classes it takes, its tag value, and its tag name when the tag names it.
@@ -188,15 +203,43 @@ Rename :: enum u8 {
 // arms, and `tag_names` the names that replace the arms' type names.
 Plan_Options :: struct {
 	enums:     Enum_Spelling,
-	// Reads each member's rules from its `model:` tag into the member's record, compiled by this procedure, which is
-	// `rules.rules_leaf` or nil for no tags. A read by the plan does not check them. A plan without it links no compiler.
-	rule_tags: Rule_Compiler,
+	// The model whose rules the members' records take, nil for none. A built plan holds nil here, so the plans a write
+	// builds for a type met in an `any` hold no rules. A read by the plan does not check them.
+	model:     ^Model_Rules,
 	union_tag: string,
 	tag_names: []Tag_Name,
 	hooks:     []Type_Hook,
 	rename:    Rename,
 	// Builds a description's plan as a check reads it: each record `Checked`, judging its use of its node.
 	checking:  bool,
+}
+
+// A model's rules, which a plan built with them asks for at each struct member and at each value no member holds, and
+// the compiler of each rule set the plan keeps.
+Model_Rules :: struct {
+	// The rules of member `field`, of type `type` and tag `tag`, of struct `owner`. With `owner` nil, of a value of `type`
+	// that no member holds: the root, a list's element, a map's value, a union's arm.
+	member:  proc(m: ^Model_Rules, owner: typeid, field: string, type: typeid, tag: string) -> Member_Rule,
+	compile: Rule_Compiler,
+}
+
+// What a model says of a member or a value. `name` replaces the member's name, "" for none, and `refused` is the item
+// the model refuses the member for, "" for none. A member that is not `optional` is required, unless it is read only.
+Member_Rule :: struct {
+	rules:    rules.Rules,
+	name:     string,
+	alias:    string, // the item that gave `name`, "" for none
+	optional: bool,
+	skip:     bool, // the member is no part of the model
+	access:   Access,
+	refused:  string,
+}
+
+// Whether a model's member is loaded and dumped, only dumped and never loaded, or only loaded and never dumped.
+Access :: enum u8 {
+	Read_Write,
+	Read_Only,
+	Write_Only,
 }
 
 // Compiles a rule set for the kinds a node takes into a leaf in `allocator`, or names the keyword it does not judge.
@@ -290,6 +333,20 @@ Builder :: struct {
 	scope:         i32,
 	scopes:        [dynamic]Scope,
 	evaluated:     map[Block_Key]^Evaluates,
+	// The conjoined node of each holder whose `allOf` and `$ref` arms conjoin, and the node each pair conjoins into.
+	conjoined:     map[rules.Node_Index]Conjoined,
+	pairs:         map[[2]rules.Node_Index]rules.Node_Index,
+	// The objects whose one pattern their record reads.
+	inline:        map[i32]Inline_Pattern,
+}
+
+// An object's one pattern, which its record reads: the expression, the node a member it matches passes, and the
+// compiled `^regex.Regex`.
+@(private)
+Inline_Pattern :: struct {
+	expression: string,
+	node:       rules.Node_Index,
+	regex:      rawptr,
 }
 
 // What a block is recorded under for its next use and for a value that holds itself: a type and the rule set its
@@ -335,17 +392,28 @@ plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := 
 	if b.err.kind == .None {
 		refuse_tag_members(&b)
 	}
-	err = plan_finish(&b, plan_stamp(T, as, opts))
-	if err.kind == .None && len(p.rule_sets) > 0 {
-		err = plan_leaves(&p)
+	stamp := plan_stamp(T, as, opts)
+	if b.model != nil {
+		for m in b.meta {
+			stamp_text(&stamp, m.name)
+			stamp_mix(&stamp, u64(m.rule_set) | u64(m.access) << 32 | u64(len(m.required)) << 40)
+			for k in m.required {
+				stamp_mix(&stamp, u64(k))
+			}
+		}
 	}
+	err = plan_finish(&b, stamp)
+	if err.kind == .None && len(p.rule_sets) > 0 {
+		err = plan_leaves(&p, opts.model.compile)
+	}
+	p.model = nil
 	return
 }
 
 // Compiles the leaves of a type's plan from its rule sets into the plan's arena. A rule the check does not judge
 // refuses the plan as `.Unsupported`, naming its keyword.
 @(private)
-plan_leaves :: proc(p: ^Plan) -> core.Typed_Error {
+plan_leaves :: proc(p: ^Plan, compile: Rule_Compiler) -> core.Typed_Error {
 	leaves, failed := make([]rules.Leaf, len(p.rule_sets))
 	p.leaves = leaves
 	arena, made := plan_arena(p)
@@ -356,7 +424,7 @@ plan_leaves :: proc(p: ^Plan) -> core.Typed_Error {
 	}
 	for r, i in p.rule_sets {
 		refused: string
-		if leaves[i], refused = p.options.rule_tags(r, rules.EVERY_KIND, arena); refused != "" {
+		if leaves[i], refused = compile(r, rules.EVERY_KIND, arena); refused != "" {
 			plan_destroy(p)
 			p.err = {kind = .Unsupported, want = {text = refused}}
 			return p.err
@@ -413,7 +481,7 @@ plan_start :: proc(p: ^Plan, as: core.As, opts: Plan_Options) -> Builder {
 	b := Builder{options = &p.options, p = p}
 	hooks, no_hooks := make([]Type_Hook, len(opts.hooks))
 	tag_names, no_names := make([]Tag_Name, len(opts.tag_names))
-	p.options = {enums = opts.enums, rule_tags = opts.rule_tags, checking = opts.checking, union_tag = owned_copy(&b, opts.union_tag), rename = opts.rename, hooks = hooks, tag_names = tag_names}
+	p.options = {enums = opts.enums, model = opts.model, checking = opts.checking, union_tag = owned_copy(&b, opts.union_tag), rename = opts.rename, hooks = hooks, tag_names = tag_names}
 	copy(hooks, opts.hooks)
 	for &t, i in tag_names {
 		t = {opts.tag_names[i].type, owned_copy(&b, opts.tag_names[i].name)}
@@ -493,7 +561,7 @@ stamp_as :: proc(as: core.As, opts: Plan_Options) -> u64 {
 	for b in as.opts {
 		stamp_mix(&h, u64(b))
 	}
-	stamp_mix(&h, u64(opts.enums) | u64(opts.rename) << 8 | u64(opts.rule_tags != nil) << 16 | u64(opts.checking) << 17)
+	stamp_mix(&h, u64(opts.enums) | u64(opts.rename) << 8 | u64(opts.model != nil) << 16 | u64(opts.checking) << 17)
 	stamp_text(&h, opts.union_tag)
 	for t in opts.tag_names {
 		stamp_mix(&h, transmute(u64)t.type)
@@ -665,6 +733,12 @@ enter :: proc(b: ^Builder, name: string) -> int {
 fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset, stride: u32, rule_set := i32(0)) {
 	depth := enter(b, name)
 	defer b.depth = depth
+	rule_set := rule_set
+	if b.model != nil && rule_set == 0 && len(name) == 0 {
+		if r := b.model.member(b.model, nil, "", ti.id, ""); r.rules != {} {
+			rule_set = rule_set_of(b, r.rules)
+		}
+	}
 	base := runtime.type_info_base(ti)
 	f := Field{offset = offset, stride = stride, meta = u32(at)}
 	m := Meta{name = name, type = ti.id, size = u32(base.size), block = -1, rule_set = rule_set}
@@ -1073,6 +1147,8 @@ Member :: struct {
 	required: bool,
 	omit:     bool,
 	rule_set: i32,
+	access:   Access,
+	alias:    string,
 }
 
 // A struct's block holds its members, a `Never` record that holds in its `Meta` what is true of every use of the struct,
@@ -1086,15 +1162,22 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 	members: [dynamic]Member
 	defer delete(members)
 	capture: Maybe(Member)
-	lay_out(b, v, 0, &members, &capture)
+	lay_out(b, ti.id, v, 0, &members, &capture)
 	for x, i in members {
 		for y in members[:i] {
-			if x.name == y.name {
+			if x.name != y.name {
+				continue
+			}
+			alias := x.alias if len(x.alias) > 0 else y.alias
+			if len(alias) > 0 && b.err.kind == .None {
+				refuse_plan(b, .Bad_Tag, x.name, alias)
+				b.err.want.type = ti.id
+			} else {
 				refuse_plan(b, .Unsupported, x.name)
 			}
 		}
 		// A write would leave out what the read then finds missing.
-		if x.required && x.omit {
+		if x.required && x.omit && x.access != .Write_Only {
 			refuse_plan(b, .Unsupported, x.name)
 		}
 	}
@@ -1110,6 +1193,7 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 	}
 	for x, i in members {
 		fill(b, int(at) + i, x.type, x.name, u32(x.offset), 0, x.rule_set)
+		b.meta[int(at) + i].access = x.access
 		r := &b.fields[int(at) + i]
 		r.omit = x.omit
 		if !x.omit && r.n <= KEY_SIZE_MAX && plain_name(x.name) {
@@ -1184,9 +1268,10 @@ plain_name :: proc(name: string) -> bool {
 	return true
 }
 
-// Collects a struct's members, with a `using` member its tag gives no name flattened into the struct that holds it.
+// Collects the members of struct `owner`, with a `using` member its tag gives no name flattened into the struct that
+// holds it, as the plan's model says when it has one.
 @(private)
-lay_out :: proc(b: ^Builder, v: runtime.Type_Info_Struct, base: uintptr, out: ^[dynamic]Member, capture: ^Maybe(Member)) {
+lay_out :: proc(b: ^Builder, owner: typeid, v: runtime.Type_Info_Struct, base: uintptr, out: ^[dynamic]Member, capture: ^Maybe(Member)) {
 	for i in 0 ..< int(v.field_count) {
 		tag, bad_flag := field_tag(b, v.names[i], v.tags[i])
 		if len(bad_flag) > 0 {
@@ -1197,16 +1282,34 @@ lay_out :: proc(b: ^Builder, v: runtime.Type_Info_Struct, base: uintptr, out: ^[
 			continue
 		}
 		_, hooked := hook_of(b, v.types[i].id)
+		model: Member_Rule
+		if b.model != nil {
+			model = b.model.member(b.model, owner, v.names[i], v.types[i].id, v.tags[i])
+			if len(model.refused) > 0 {
+				if b.err.kind == .None {
+					refuse_plan(b, .Bad_Tag, v.names[i], model.refused)
+					b.err.want.type = owner
+				}
+				return
+			}
+			if model.skip {
+				continue
+			}
+			if len(model.name) > 0 {
+				tag.name = owned_copy(b, model.name)
+			}
+			tag.required ||= !tag.unknown && !model.optional && model.access != .Read_Only
+		}
 		// A flattened or capturing member is no value of its own for rules to hold.
-		rule_set := rules_of(b, tag.name, v.tags[i])
+		rule_set := rule_set_of(b, model.rules) if model.rules != {} else 0
 		if inner, is_struct := runtime.type_info_base(v.types[i]).variant.(runtime.Type_Info_Struct); is_struct && v.usings[i] && !tag.named && !hooked && .raw_union not_in inner.flags && inner.soa_kind == .None {
 			if rule_set > 0 {
 				refuse_plan(b, .Bad_Tag, tag.name, "model")
 			}
-			lay_out(b, inner, base + v.offsets[i], out, capture)
+			lay_out(b, v.types[i].id, inner, base + v.offsets[i], out, capture)
 			continue
 		}
-		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required, tag.omit, rule_set}
+		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required, tag.omit || model.access == .Write_Only, rule_set, model.access, model.alias}
 		if tag.unknown {
 			if tag.required || rule_set > 0 {
 				refuse_plan(b, .Bad_Tag, tag.name, "required" if tag.required else "model")

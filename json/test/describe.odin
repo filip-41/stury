@@ -11,7 +11,7 @@ import json ".."
 import model "../../core/model"
 import walktest "../../walktest"
 
-// A type's description, `describe(plan)`, and the plan built from it, `plan_of`, agree on the plan's shape.
+// A type's description, `model.schema`, and the plan built from it, `plan_of`, agree on the plan's shape.
 
 @(private = "file")
 Zoo_Inner :: struct {
@@ -196,6 +196,26 @@ project_block :: proc(p: ^Projection, m: typed.Meta, union_block: bool) -> strin
 	return fmt.tprintf("#%d", k)
 }
 
+// The plan of `T`'s model with no registered rules, in the temp allocator, read as `reads` reads, JSON's for nil.
+ruled_plan :: proc($T: typeid, enums := typed.Enum_Spelling.Name, reads: ^typed.Format_Reads = nil) -> typed.Plan {
+	reg := model.Registry{naming = {enums = enums}}
+	m, _ := model.compile(&reg, T, reads if reads != nil else json.reads(.Json), context.temp_allocator)
+	return m.plan
+}
+
+// The load description of a plan under test, through a model that holds it.
+description_of :: proc(plan: ^typed.Plan, allocator := context.allocator) -> (rules.Description, core.Error) {
+	m := model.Model(struct{}){plan^}
+	return model.schema(&m, .Load, allocator)
+}
+
+// Why `T`'s model does not compile.
+refusal :: proc($T: typeid) -> core.Error {
+	reg: model.Registry
+	_, err := model.compile(&reg, T, json.reads(.Json), context.temp_allocator)
+	return err
+}
+
 @(private = "file")
 Ruled :: struct {
 	a:     Maybe(string) `model:"len>=3"`,
@@ -223,21 +243,26 @@ a_plan_of_a_types_description_has_the_types_plan_shape :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	hooks := []typed.Type_Hook{{type = Zoo_Hooked, read = read_zoo_hooked}}
 	cases := [?]struct {
-		type: typeid,
-		opts: typed.Plan_Options,
+		type:  typeid,
+		opts:  typed.Plan_Options,
+		model: Maybe(typed.Plan),
 	} {
-		{Zoo, {hooks = hooks}},
-		{Zoo, {enums = .Int, hooks = hooks}},
-		{Zoo_Tree, {}},
-		{[]Maybe(Zoo_Inner), {}},
-		{map[string]any, {}},
-		{Ruled, {rule_tags = rules.rules_leaf}},
-		{Ruled_Union, {rule_tags = rules.rules_leaf}},
+		{Zoo, {hooks = hooks}, nil},
+		{Zoo, {enums = .Int, hooks = hooks}, nil},
+		{Zoo_Tree, {}, nil},
+		{[]Maybe(Zoo_Inner), {}, nil},
+		{map[string]any, {}, nil},
+		{Ruled, {}, ruled_plan(Ruled)},
+		{Ruled_Union, {}, ruled_plan(Ruled_Union)},
 	}
 	for c in cases {
-		plan, planned := json.plan_make(c.type, plan = c.opts, allocator = context.temp_allocator)
-		walktest.expect_nil(t, planned)
-		d, described := model.describe(&plan, context.temp_allocator)
+		plan, ruled := c.model.?
+		if !ruled {
+			planned: core.Error
+			plan, planned = json.plan_make(c.type, plan = c.opts, allocator = context.temp_allocator)
+			walktest.expect_nil(t, planned)
+		}
+		d, described := description_of(&plan, context.temp_allocator)
 		walktest.expect_nil(t, described)
 		again, built := json.plan_of(&d, .Json, c.opts, allocator = context.temp_allocator)
 		walktest.expect_nil(t, built)
@@ -262,7 +287,7 @@ Shown :: struct {
 a_type_and_its_description_read_the_classes_the_type_reads :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	plan, _ := json.plan_make(Shown, allocator = context.temp_allocator)
-	d, _ := model.describe(&plan, context.temp_allocator)
+	d, _ := description_of(&plan, context.temp_allocator)
 	again, _ := json.plan_of(&d, allocator = context.temp_allocator)
 	want := "obj#0 [\"#0 n: ?#1, t: num?, e: str, u: ?#2, l: arr<obj#0>, required []\", \"#1 | int \", \"#2 | bool | str \"]"
 	testing.expect_value(t, project(&plan), want)
@@ -273,15 +298,14 @@ a_type_and_its_description_read_the_classes_the_type_reads :: proc(t: ^testing.T
 two_members_of_one_type_with_different_rules_get_two_blocks :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	plain, _ := json.plan_make(Ruled, allocator = context.temp_allocator)
-	plan, planned := json.plan_make(Ruled, plan = {rule_tags = rules.rules_leaf}, allocator = context.temp_allocator)
-	walktest.expect_nil(t, planned)
+	plan := ruled_plan(Ruled)
 	block :: proc(p: ^typed.Plan, member: i32) -> i32 {
 		return p.meta[p.meta[0].block + member].block
 	}
 	testing.expect_value(t, block(&plain, 0), block(&plain, 1))
 	testing.expect(t, block(&plan, 0) != block(&plan, 1))
 	testing.expect_value(t, block(&plan, 0), block(&plan, 2))
-	d, _ := model.describe(&plan, context.temp_allocator)
+	d, _ := description_of(&plan, context.temp_allocator)
 	members := d.objects[d.nodes[d.root].object].members
 	testing.expect_value(t, members[0].rules.min_length, 3)
 	testing.expect_value(t, members[1].rules.min_length, 0)
@@ -319,9 +343,9 @@ a_model_tag_it_cannot_hold_refuses_the_plan :: proc(t: ^testing.T) {
 	Capture :: struct {
 		rest: map[string]typed.Raw `json:",unknown" model:">=1"`,
 	}
-	for T in ([?]typeid{Past_Max, Signed, Leading_Zero, Flattened, Capture}) {
-		_, err := json.plan_make(T, plan = {rule_tags = rules.rules_leaf}, allocator = context.temp_allocator)
-		testing.expectf(t, walktest.typed_kind(err) == .Bad_Tag, "%v: %v", T, err)
+	refusals := [?]core.Error{refusal(Past_Max), refusal(Signed), refusal(Leading_Zero), refusal(Flattened), refusal(Capture)}
+	for err, i in refusals {
+		testing.expectf(t, walktest.typed_kind(err) == .Bad_Tag, "%d: %v", i, err)
 	}
 }
 
@@ -329,7 +353,7 @@ a_model_tag_it_cannot_hold_refuses_the_plan :: proc(t: ^testing.T) {
 describe_and_plan_of_free_what_they_allocate :: proc(t: ^testing.T) {
 	plan, _ := json.plan_make(Zoo, plan = {hooks = {{type = Zoo_Hooked, read = read_zoo_hooked}}})
 	defer typed.plan_destroy(&plan)
-	d, _ := model.describe(&plan)
+	d, _ := description_of(&plan)
 	defer rules.description_destroy(&d)
 	again, built := json.plan_of(&d)
 	walktest.expect_nil(t, built)

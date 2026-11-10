@@ -11,16 +11,18 @@ import typed "../typed"
 // Reads the description of the values `plan`, a type's plan, reads, allocating with `allocator`. A record's type gives
 // one node, which every use of the type shares, and a `Maybe` or pointer a copy that also takes null and shares the
 // node's blocks. A number's range is its node's `minimum` and `maximum`, a fixed array's length its item counts, a map's
-// integer or enum keys its object's `keys`, and a member's `model:` rules sit on its edge. The description borrows the
-// plan's names, so the plan must outlive it.
-describe :: proc(plan: ^typed.Plan, allocator := context.allocator) -> (d: rules.Description, err: core.Error) {
+// integer or enum keys its object's `keys`, a member's rules sit on its edge and a value's other rules on its node. The
+// description borrows the plan's names, so the plan must outlive it. It describes what a load reads, or under `.Dump`
+// what a write writes: a member is required unless it may be left out.
+@(private)
+describe :: proc(plan: ^typed.Plan, direction: Direction, allocator: runtime.Allocator) -> (d: rules.Description, err: core.Error) {
 	context.allocator = allocator
 	d.allocator = allocator
 	d.names = make(map[rules.Node_Index]string, allocator)
 	if plan.type == nil {
 		return d, core.error_of(core.Typed_Error{kind = .Bad_Option})
 	}
-	r := Reading{plan = plan, d = &d}
+	r := Reading{plan = plan, d = &d, direction = direction}
 	defer delete(r.nodes)
 	defer delete(r.shapes)
 	d.root = node_of(&r, 0)
@@ -38,12 +40,27 @@ Reading :: struct {
 	nodes:  map[Use]rules.Node_Index,
 	shapes: map[i32]i32, // a list or struct block's array or object block in the description
 	failed: bool,
+	direction: Direction,
+}
+
+// What a description of a model describes: what a load reads or what a write writes. A load skips a read-only member,
+// which its description then lets hold any value, and a write leaves out a write-only member, which its description then
+// omits.
+Direction :: enum {
+	Load,
+	Dump,
+}
+
+// The description of `m`'s values in `direction`, as `describe` reads it.
+schema :: proc(m: ^Model($T), direction: Direction, allocator := context.allocator) -> (rules.Description, core.Error) {
+	return describe(&m.plan, direction, allocator)
 }
 
 @(private)
 Use :: struct {
 	type:     typeid,
 	nullable: bool,
+	rule_set: i32,
 }
 
 // What each integer kind holds, `I8` first.
@@ -74,11 +91,12 @@ target :: proc(plan: ^typed.Plan, at: i32) -> (i32, bool) {
 	return at, nullable
 }
 
+// The node of the value at `record`, with the record's rules unless they sit on the edge of the member it is.
 @(private)
-node_of :: proc(r: ^Reading, record: i32) -> rules.Node_Index {
+node_of :: proc(r: ^Reading, record: i32, ruled := true) -> rules.Node_Index {
 	at, nullable := target(r.plan, record)
 	f, m := r.plan.fields[at], r.plan.meta[at]
-	use := Use{m.type, nullable}
+	use := Use{m.type, nullable, m.rule_set if ruled else 0}
 	if found, ok := r.nodes[use]; ok {
 		return found
 	}
@@ -108,6 +126,9 @@ node_of :: proc(r: ^Reading, record: i32) -> rules.Node_Index {
 	}
 	if nullable {
 		n.kinds += {.Null}
+	}
+	if use.rule_set > 0 {
+		n.rules, _ = rules.merged(&n, r.plan.rule_sets[use.rule_set - 1])
 	}
 	r.d.nodes[index] = n
 	if named, ok := type_info_of(m.type).variant.(runtime.Type_Info_Named); ok && f.kind == .Struct {
@@ -205,22 +226,36 @@ object_of :: proc(r: ^Reading, m: typed.Meta, is_map: bool) -> i32 {
 		}
 		return at
 	}
-	members, failed := make([]rules.Member, m.members)
-	r.d.objects[at].members = members
+	members, failed := make([dynamic]rules.Member, 0, m.members)
 	r.failed ||= failed != nil
 	required := r.plan.meta[m.block + m.members].required
-	for &x, j in members {
-		record := m.block + i32(j)
-		x.name = r.plan.meta[record].name
-		x.node = node_of(r, record)
-		folded, _ := target(r.plan, record)
-		if set := r.plan.meta[folded].rule_set; set > 0 {
-			x.rules = r.plan.rule_sets[set - 1]
+	for j in 0 ..< m.members {
+		record := m.block + j
+		role := r.plan.meta[record].access
+		if role == .Write_Only && r.direction == .Dump {
+			continue
 		}
-		for k in required {
-			x.required ||= k == i32(j)
+		x := rules.Member{name = r.plan.meta[record].name}
+		if role == .Read_Only && r.direction == .Load {
+			// A load skips the member, so any value passes.
+			x.node = add(r, &r.d.nodes, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1})
+		} else {
+			x.node = node_of(r, record, false)
+			folded, _ := target(r.plan, record)
+			if set := r.plan.meta[folded].rule_set; set > 0 {
+				x.rules = r.plan.rule_sets[set - 1]
+			}
+			for k in required {
+				x.required ||= k == j
+			}
 		}
+		x.rules.read_only, x.rules.write_only = role == .Read_Only, role == .Write_Only
+		if r.direction == .Dump {
+			x.required = !r.plan.fields[record].omit
+		}
+		append(&members, x)
 	}
+	r.d.objects[at].members = members[:]
 	return at
 }
 
@@ -229,7 +264,7 @@ arms_of :: proc(r: ^Reading, m: typed.Meta, null: bool) -> []rules.Node_Index {
 	arms, failed := make([]rules.Node_Index, len(m.arms) + (1 if null else 0))
 	r.failed ||= failed != nil
 	for arm, k in m.arms {
-		arms[k] = node_of(r, arm.fields)
+		arms[k] = node_of(r, arm.fields, false)
 	}
 	if null && !r.failed {
 		arms[len(m.arms)] = add(r, &r.d.nodes, rules.Node{kinds = {.Null}, array = -1, object = -1})

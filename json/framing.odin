@@ -617,22 +617,47 @@ check_run_spec :: proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_
 			renew = held
 		} else {
 			h.sp, h.fatal, h.wrap_sp, h.wrap, h.expect = 1, .None, 0, nil, nil
+			h.tracked, h.floor = 0, len(read.sink.entries) if read.sink != nil else 0
 			h.first.kind = .None
 			h.frames[0].seen = 0
 		}
 		regs = start
 		pos, state := it.pos, it.state
 		kept := typed.sink_mark(read.sink)
-		rec, ok, stopped := frame_walked(it, S, opts, &h, &regs, on)
-		// A walk with a hook reads the comments after a value, so a fault there is past the record, and a walk the hook
-		// stopped did not find its end. The framing's own walk finds where the record ends.
-		if stopped || it.fault != nil {
-			it.pos, it.state, it.fault = pos, state, nil
-			rec, ok = it.services.next[it.framing](it)
-		}
+		own: typed.Sink
+		rec: records.Record
+		ok: bool
 		first: core.Typed_Error
-		if ok && h.first.kind != .None {
-			first = typed.read_end(&h, regs, nil)
+		for judged := false; ; judged = true {
+			stopped: bool
+			rec, ok, stopped = frame_walked(it, S, opts, &h, &regs, on)
+			// A walk with a hook reads the comments after a value, so a fault there is past the record, and a walk the hook
+			// stopped did not find its end. The framing's own walk finds where the record ends.
+			if stopped || it.fault != nil {
+				it.pos, it.state, it.fault = pos, state, nil
+				rec, ok = it.services.next[it.framing](it)
+			}
+			first = {}
+			if ok && h.first.kind != .None {
+				first = typed.read_end(&h, regs, nil)
+			}
+			if judged || first.kind != .Duplicate_Key || read.repeats != .Notice || read.dups == .Refuse {
+				break
+			}
+			// A repeat the check noticed: the record is walked again, judging its repeats as `read.dups` says.
+			again := typed.rejudge(read, kept, &own, context.allocator)
+			pool, fork := h.pool, h.fork
+			h = {}
+			h.pool, h.fork = pool, fork
+			json_reader(&h.reader, untracked(&walk_opts), S)
+			start, _ = typed.check_start(&h, it.src, plan, plan.as, nil, &target, again, frames, context.allocator)
+			h.ctx.temp_allocator = context.temp_allocator
+			regs = start
+			it.pos, it.state, it.fault = pos, state, nil
+			renew = true
+		}
+		if own.entries.allocator.procedure != nil {
+			first = typed.rejudged(&own, first)
 		}
 		if held {
 			typed.read_release(&h, frames)

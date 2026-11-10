@@ -394,9 +394,15 @@ put_rules :: proc(w: ^Writer, rl: rules.Rules) {
 	if rl.format != "" {
 		put(w, "format", rl.format)
 	}
-	if rl.unique {
-		key(w, "uniqueItems")
-		write.value_bool(&w.t, true)
+	flags := [?]struct {
+		set:  bool,
+		name: string,
+	}{{rl.unique, "uniqueItems"}, {rl.read_only, "readOnly"}, {rl.write_only, "writeOnly"}}
+	for flag in flags {
+		if flag.set {
+			key(w, flag.name)
+			write.value_bool(&w.t, true)
+		}
 	}
 }
 

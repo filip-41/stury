@@ -597,6 +597,20 @@ literal_prefix :: proc(n: ^Node, out: ^[dynamic]byte) -> bool {
 		return true
 	case .Group:
 		return literal_prefix(n.kids[0], out)
+	case .Repeat:
+		// A counted literal is searched as the text it spells, so a long run does not retry at each start.
+		one: [dynamic]byte
+		defer delete(one)
+		if n.min == 0 || !literal_prefix(n.kids[0], &one) || len(one) == 0 || n.min * len(one) > PREFIX_MAXLEN {
+			return false
+		}
+		for _ in 0 ..< n.min {
+			append(out, ..one[:])
+		}
+		return n.max == n.min
 	}
 	return false
 }
+
+@(private)
+PREFIX_MAXLEN :: 1 << 16

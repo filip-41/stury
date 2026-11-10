@@ -29,6 +29,7 @@ Sink_Mark :: struct {
 }
 
 // How many entries or errors `c` keeps: its `max_errors`, 100 when that is 0.
+@(private)
 sink_limit :: #force_inline proc "contextless" (c: ^Sink) -> int {
 	return c.max_errors if c.max_errors != 0 else 100
 }
@@ -172,15 +173,8 @@ note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Error, end: u64, ke
 		return
 	}
 	c := h.sink
-	if c == nil {
+	if c == nil || !sink_room(c, h.ctx.allocator) {
 		return
-	}
-	if len(c.entries) >= (sink_limit(c)) {
-		c.truncated = true
-		return
-	}
-	if c.entries.allocator.procedure == nil {
-		c.entries.allocator = h.ctx.allocator
 	}
 	if !entry_add(c, e, h, regs, held, held_step, end, keyword) {
 		c.truncated = true
@@ -222,7 +216,28 @@ entry_add :: proc(c: ^Sink, e: core.Typed_Error, h: ^Reader, regs: core.Hook_Reg
 	if e.kind == .Missing_Field && h.wide && e.want.text != "" {
 		entry.operand = strings.clone(e.want.text)
 	}
-	path_ok, words_ok := owned_steps(&entry.path, steps[:], true), owned_steps(&entry.keyword_path, words[:], false)
+	return sink_entry(c, entry, steps[:], words[:], true)
+}
+
+// Whether `c` has room for another entry, which it marks as truncated when it has none. Entries that have no allocator
+// take `allocator`.
+sink_room :: proc(c: ^Sink, allocator: runtime.Allocator) -> bool {
+	if len(c.entries) >= sink_limit(c) {
+		c.truncated = true
+		return false
+	}
+	if c.entries.allocator.procedure == nil {
+		c.entries.allocator = allocator
+	}
+	return true
+}
+
+// Appends `entry` to `c` with copies of the paths `steps`, read from the last when `reverse` says so, and `words`, and of
+// their names. Says whether they fit in memory.
+sink_entry :: proc(c: ^Sink, entry: core.Error_Entry, steps, words: []core.Step, reverse: bool) -> bool {
+	context.allocator = c.entries.allocator
+	entry := entry
+	path_ok, words_ok := owned_steps(&entry.path, steps, reverse), owned_steps(&entry.keyword_path, words, false)
 	if !path_ok || !words_ok {
 		entry_destroy(&entry, c.entries.allocator)
 		return false
@@ -266,15 +281,7 @@ sink_refusal :: proc(c: ^Sink, e: core.Typed_Error, $wide: bool) {
 		if c == nil {
 			return
 		}
-		if len(c.entries) >= (sink_limit(c)) {
-			c.truncated = true
-			return
-		}
-		if c.entries.allocator.procedure == nil {
-			c.entries.allocator = context.allocator
-		}
-		context.allocator = c.entries.allocator
-		if _, grown := append(&c.entries, core.Error_Entry{kind = e.kind, start = e.at, end = e.at, record = c.record}); grown != nil {
+		if sink_room(c, context.allocator) && !sink_entry(c, core.Error_Entry{kind = e.kind, start = e.at, end = e.at, record = c.record}, nil, nil, false) {
 			c.truncated = true
 		}
 	} else {

@@ -161,7 +161,22 @@ read_text :: proc(src: []u8, $S: Spec, opts: Options, target: rawptr, T: typeid,
 	// A text that nests deeper under a raised `max_depth` grows the frames as it goes.
 	stack: [core.MAX_DEPTH + 2]typed.Frame = ---
 	err: core.Typed_Error
+	when CHECK {
+		mark := typed.sink_mark(read.sink)
+	}
 	read_value(src, 0, u64(len(src)), S, target, T, plan, read, opts, stack[:], allocator, context.temp_allocator, &err, false, CHECK)
+	when CHECK {
+		// A check that noticed a repeat reads again, judging the repeats as `read.dups` says.
+		if err.kind == .Duplicate_Key && read.repeats == .Notice && read.dups != .Refuse {
+			own: typed.Sink
+			judged := typed.rejudge(read, mark, untracked(&own), allocator)
+			err = {}
+			read_value(src, 0, u64(len(src)), S, target, T, plan, judged, opts, stack[:], allocator, context.temp_allocator, &err, false, CHECK)
+			if judged.sink == untracked(&own) {
+				err = typed.rejudged(untracked(&own), err)
+			}
+		}
+	}
 	return err
 }
 

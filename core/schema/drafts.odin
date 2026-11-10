@@ -23,6 +23,8 @@ Vocab :: enum u8 {
 	Unevaluated,
 	Validation,
 	Format,
+	// The meta-data vocabulary, whose `readOnly` and `writeOnly` the reader keeps.
+	Meta,
 	// The format-assertion vocabulary, which makes `format` assert.
 	Format_Assert,
 }
@@ -31,7 +33,7 @@ Vocab :: enum u8 {
 Vocabs :: bit_set[Vocab; u8]
 
 @(private)
-ALL_VOCABS :: Vocabs{.Core, .Applicator, .Unevaluated, .Validation, .Format}
+ALL_VOCABS :: Vocabs{.Core, .Applicator, .Unevaluated, .Validation, .Format, .Meta}
 
 @(private)
 Vocabulary :: struct {
@@ -44,10 +46,10 @@ VOCAB_URI_2019 :: "https://json-schema.org/draft/2019-09/vocab/"
 @(private)
 VOCAB_URI_2020 :: "https://json-schema.org/draft/2020-12/vocab/"
 
-// The standard vocabularies, under the URI prefix of their draft. Meta-data and content have no keyword the reader
-// judges. In 2019-09 the applicator vocabulary holds the unevaluated keywords.
+// The standard vocabularies, under the URI prefix of their draft. Meta-data has only the keywords the reader keeps, and
+// content none. In 2019-09 the applicator vocabulary holds the unevaluated keywords.
 @(private, rodata)
-VOCABS_2019 := [?]Vocabulary{{"core", {.Core}}, {"applicator", {.Applicator, .Unevaluated}}, {"validation", {.Validation}}, {"format", {.Format}}, {"meta-data", {}}, {"content", {}}}
+VOCABS_2019 := [?]Vocabulary{{"core", {.Core}}, {"applicator", {.Applicator, .Unevaluated}}, {"validation", {.Validation}}, {"format", {.Format}}, {"meta-data", {.Meta}}, {"content", {}}}
 
 @(private, rodata)
 VOCABS_2020 := [?]Vocabulary {
@@ -57,7 +59,7 @@ VOCABS_2020 := [?]Vocabulary {
 	{"validation", {.Validation}},
 	{"format-annotation", {.Format}},
 	{"format-assertion", {.Format, .Format_Assert}},
-	{"meta-data", {}},
+	{"meta-data", {.Meta}},
 	{"content", {}},
 }
 
@@ -144,6 +146,8 @@ KEYWORDS := [?]Row {
 	{"minProperties", .Validation, .D04, .D2020_12},
 	{"required", .Validation, .D04, .D2020_12},
 	{"format", .Format, .D04, .D2020_12},
+	{"readOnly", .Meta, .D07, .D2020_12},
+	{"writeOnly", .Meta, .D07, .D2020_12},
 }
 
 // Whether `name` is a keyword in `draft` when the dialect's vocabularies include its own.

@@ -35,6 +35,8 @@ Rules :: struct {
 	// Whether `format` asserts and does not only annotate.
 	assert_format:                        bool,
 	exclusive_minimum, exclusive_maximum: bool,
+	// The `readOnly` and `writeOnly` annotations, which no check reads.
+	read_only, write_only:                bool,
 	min_length, min_items, min_members:   u64,
 	max_length, max_items, max_members:   Maybe(u64),
 }

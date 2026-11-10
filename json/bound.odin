@@ -49,6 +49,11 @@ reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 		read  = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {return read_text(src, S, options_of(as), target, T, plan, read, allocator, false)},
 		check = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {return read_text(src, S, options_of(as), target, T, plan, read, allocator, true)},
 		build = proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_spec(src, S, as, false, allocator)},
+		plan  = proc(T: typeid, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Error) {
+			p, err := typed.plan_build(T, plan_handle(S, {}), opts, allocator)
+			plan_bind(&p, reads_of(S))
+			return p, err
+		},
 	}
 	return &r
 }

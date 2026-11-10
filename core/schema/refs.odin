@@ -343,13 +343,11 @@ vocabularies_of :: proc(r: ^Reader, doc: ^core.Document, v: core.Node_Index) -> 
 	}
 }
 
-// `$vocabulary` outside a meta-schema's dialect only has to be well formed.
+// `$vocabulary` read as part of a schema has no meaning and only has to be well formed. A schema used as `$schema` has
+// its vocabularies read by `dialect`, which requires the ones it knows.
 @(private)
 read_vocabulary :: proc(r: ^Reader, sc: Scope, site: Site, name: string) {
-	doc := r.sources[sc.source]
-	if core.kind(doc, site.at) != .Object {
+	if core.kind(r.sources[sc.source], site.at) != .Object {
 		fail(r, site, name, "must be an object")
-	} else if _, why := vocabularies_of(r, doc, site.at); why != "" {
-		fail(r, site, name, why)
 	}
 }

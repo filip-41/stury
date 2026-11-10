@@ -14,7 +14,6 @@ import typed "../../core/typed"
 import write "../../core/write"
 import schema "../../core/schema"
 import json ".."
-import model "../../core/model"
 
 @(private = "file")
 SUITE :: #directory + "conformance/JSON-Schema-Test-Suite/tests/"
@@ -141,7 +140,6 @@ schema_refusals :: proc(t: ^testing.T) {
 		{`{"$schema": "https://example.com/unknown"}`, "$schema", ""},
 		{`{"$defs": {"a": {"$anchor": "x"}, "b": {"$anchor": "x"}}}`, "$anchor", "$defs"},
 		{`{"$dynamicRef": "#nowhere"}`, "$dynamicRef", ""},
-		{`{"$vocabulary": {"https://example.com/vocab/geo": true}}`, "$vocabulary", ""},
 		{`{"type": []}`, "type", ""},
 		{`{"type": ["string", "string"]}`, "type", ""},
 		{`{"$ref": "#"}`, "$ref", ""},
@@ -159,6 +157,17 @@ schema_refusals :: proc(t: ^testing.T) {
 		}
 		testing.expect_value(t, len(d.nodes), 0)
 	}
+}
+
+// A `$vocabulary` outside a meta-schema is ignored, whatever vocabularies it names.
+@(test)
+schema_vocabulary_outside_a_meta_schema_is_ignored :: proc(t: ^testing.T) {
+	d, res, doc, err := read_text(`{"$vocabulary": {"https://example.com/vocab/geo": true}, "type": "string"}`)
+	defer core.destroy(&doc)
+	defer schema.resolver_destroy(&res)
+	defer rules.description_destroy(&d)
+	testing.expect_value(t, refused_keyword(err), "")
+	testing.expect(t, len(d.nodes) > 0)
 }
 
 // What only draft 4 refuses: an empty `required` and a boolean schema outside the additional keywords.
@@ -548,7 +557,60 @@ schema_check_reports_arms :: proc(t: ^testing.T) {
 		core.render_entry(strings.to_stream(&out), src, e)
 		strings.write_byte(&out, '\n')
 	}
-	testing.expect_value(t, strings.to_string(out), "1:7: Number is below the minimum at .a (.properties.a.allOf[0].minimum)\n1:7: Value passes none of the subschemas at .a (.properties.a.anyOf)\n1:16: Value is not of the allowed type at .xy (.patternProperties.\"^x\".type)\n1:26: Elements are not unique at .l (.properties.l.uniqueItems)\n1:26: Too few elements or members at .l (.properties.l.contains)\n1:1: No value is allowed here (.not)\n1:1: Required member \"q\" is missing (.dependentRequired)\n")
+	testing.expect_value(t, strings.to_string(out), "1:7: Number is below the minimum at .a (.properties.a.allOf[0].minimum)\n1:7: Value passes none of the subschemas at .a (.properties.a.anyOf)\n1:16: Value is not of the allowed type at .xy (.patternProperties.\"^x\".type)\n1:26: Elements are not unique at .l (.properties.l.uniqueItems)\n1:26: Too few elements or members at .l (.properties.l.contains)\n1:1: Required member \"q\" is missing (.dependentRequired)\n1:1: No value is allowed here (.not)\n")
+}
+
+// A check with no sink reads `allOf` and `$ref` arms conjoined into one, and the parts beside a lone `anyOf` or `oneOf`
+// spread into each of its arms, and its verdicts are those of a check with a sink, which reads each arm.
+@(test)
+schema_conjoined_verdicts_agree :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	schemas := [?]string{
+		`{"$defs": {"r": {"type": "object", "properties": {"a": {"type": "integer"}, "b": {"type": "string"}}, "additionalProperties": false}, "q": {"required": ["a", "b"]}}, "allOf": [{"$ref": "#/$defs/r"}, {"$ref": "#/$defs/q"}]}`,
+		`{"properties": {"a": {"minimum": 1}}, "allOf": [{"properties": {"a": {"maximum": 3}, "c": {"items": {"type": "integer"}}}}, {"properties": {"c": {"prefixItems": [{"const": 1}]}}}]}`,
+		`{"type": "object", "required": ["v"], "oneOf": [{"properties": {"v": {"const": 1}, "x": {"type": "string"}}, "additionalProperties": false}, {"properties": {"v": {"const": 2}}}]}`,
+		`{"properties": {"a": {"type": "string"}}, "anyOf": [{"required": ["a"]}, {"properties": {"a": {"maxLength": 1}}}], "allOf": [{"if": {"required": ["b"]}, "then": {"required": ["a"]}}]}`,
+	}
+	texts := [?]string{`{"a": 1, "b": "s"}`, `{"a": 1}`, `{"a": 4, "c": [1, 2]}`, `{"a": 2, "c": [2]}`, `{"v": 1, "x": "s"}`, `{"v": 2, "x": 1}`, `{"v": 1, "y": 0}`, `{"v": 3}`, `{"b": 0}`, `{"a": "ss", "b": 0}`, `{}`, `[]`, `1`}
+	for schema_text in schemas {
+		ch, err := checked_make(schema_text)
+		testing.expect(t, err == nil, schema_text)
+		for text in texts {
+			src := transmute([]u8)string(text)
+			sink: typed.Sink
+			reported := schema.check(&ch.bound, src, &sink) == nil
+			typed.sink_destroy(&sink)
+			testing.expectf(t, schema.valid(&ch.bound, src) == reported, "%s against %s", schema_text, text)
+		}
+		checked_destroy(ch)
+	}
+}
+
+// An `enum` of many object operands checks many items in memory that grows with neither: an item is compared with the
+// operands of its hash, and a comparison takes back what it took.
+@(test)
+schema_object_enum_memory :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	COUNT :: 10000
+	b: strings.Builder
+	strings.builder_init(&b, context.temp_allocator)
+	strings.write_string(&b, `{"items": {"enum": [`)
+	for i in 0 ..< COUNT {
+		strings.write_string(&b, `, {"a": ` if i > 0 else `{"a": `)
+		strings.write_int(&b, i)
+		strings.write_byte(&b, '}')
+	}
+	strings.write_string(&b, `]}}`)
+	ch, err := checked_make(strings.to_string(b))
+	testing.expect(t, err == nil)
+	defer checked_destroy(ch)
+	items := strings.to_string(b)[len(`{"items": {"enum": `):len(b.buf) - 2]
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.temp_allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.temp_allocator = mem.tracking_allocator(&track)
+	testing.expect(t, schema.valid(&ch.bound, transmute([]u8)items))
+	testing.expectf(t, track.peak_memory_allocated < 16 << 20, "%d bytes", track.peak_memory_allocated)
 }
 
 // A failing property name reports its keyword under `propertyNames` at the object, a `false` there allows no name, and a
@@ -587,8 +649,8 @@ Corpus_Tie :: struct {
 
 @(private = "file")
 Corpus_Formats :: struct {
-	at: string `model:"format=date-time"`,
-	mail: string `model:"format=email"`,
+	at: string `model:"format=date-time,optional"`,
+	mail: string `model:"format=email,optional"`,
 }
 
 @(private = "file")
@@ -620,6 +682,28 @@ Corpus_Gap :: struct {
 		A = 1,
 		C = 3,
 	},
+}
+
+@(private = "file")
+Typed_Spelling :: struct {
+	type:  typeid,
+	enums: typed.Enum_Spelling,
+}
+
+// The plans of the corpus types' models, in each spelling of enums.
+@(private = "file")
+corpus_plans :: proc() -> map[Typed_Spelling]typed.Plan {
+	plans := make(map[Typed_Spelling]typed.Plan, context.temp_allocator)
+	for enums in typed.Enum_Spelling {
+		plans[{Corpus_Tie, enums}] = ruled_plan(Corpus_Tie, enums)
+		plans[{Corpus_Formats, enums}] = ruled_plan(Corpus_Formats, enums)
+		plans[{Corpus_Whole, enums}] = ruled_plan(Corpus_Whole, enums)
+		plans[{Corpus_Narrow, enums}] = ruled_plan(Corpus_Narrow, enums)
+		plans[{Corpus_Keys, enums}] = ruled_plan(Corpus_Keys, enums)
+		plans[{Corpus_Gap, enums}] = ruled_plan(Corpus_Gap, enums)
+		plans[{Corpus_Enum_Keys, enums}] = ruled_plan(Corpus_Enum_Keys, enums)
+	}
+	return plans
 }
 
 // The known disagreements between a model's load and the check of its schema agree: a type's plan read through the
@@ -664,12 +748,12 @@ schema_check_agrees_with_model_load :: proc(t: ^testing.T) {
 		{Corpus_Enum_Keys, `{"m": {"2": 1}}`, false, .Int},
 		{Corpus_Enum_Keys, `{"m": {"C": 1}}`, true, .Name},
 	}
+	plans := corpus_plans()
 	for c in cases {
-		plan, planned := json.plan_make(c.type, plan = {rule_tags = rules.rules_leaf, enums = c.enums}, reads = json.reads(.Json))
-		testing.expect(t, planned == nil)
+		plan := plans[{c.type, c.enums}]
 		target := make([]u8, size_of(Corpus_Keys))
 		loaded := typed.check_text(transmute([]u8)c.text, raw_data(target), c.type, &plan, {}) == nil
-		d, described := model.describe(&plan)
+		d, described := description_of(&plan)
 		testing.expect(t, described == nil)
 		compiled := schema.compile_description(&d)
 		b, bound := schema.bind(&compiled, json.as(.Json))
@@ -922,12 +1006,12 @@ schema_check_agrees_on_json5_numbers :: proc(t: ^testing.T) {
 		{Json5_Count, `{n: -0x1}`, false},
 		{Json5_Count, `{n: 0x1}`, true},
 	}
+	plans := [?]typed.Plan{ruled_plan(Json5_Bound, reads = json.reads(.Json5)), ruled_plan(Json5_Count, reads = json.reads(.Json5))}
 	for c in cases {
-		plan, planned := json.plan_make(c.type, .Json5, plan = {rule_tags = rules.rules_leaf}, reads = json.reads(.Json5))
-		testing.expect(t, planned == nil)
+		plan := plans[0 if c.type == Json5_Bound else 1]
 		target := make([]u8, size_of(Json5_Bound))
 		loaded := typed.check_text(transmute([]u8)c.text, raw_data(target), c.type, &plan, {}) == nil
-		d, _ := model.describe(&plan)
+		d, _ := description_of(&plan)
 		compiled := schema.compile_description(&d)
 		b, bound := schema.bind(&compiled, json.as(.Json5))
 		testing.expect(t, bound == nil)
@@ -1235,22 +1319,23 @@ Written_Leaf :: struct {
 schema_write_reads_back_to_described_types :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
-	types := [?]typeid{Written_Tree, Corpus_Tie, Corpus_Formats, Corpus_Whole, Corpus_Narrow, Corpus_Keys, Corpus_Gap, Corpus_Enum_Keys, Written_Member, Written_Merge}
-	for type in types {
-		for enums in typed.Enum_Spelling {
-			plan, planned := json.plan_make(type, plan = {rule_tags = rules.rules_leaf, enums = enums}, reads = json.reads(.Json))
-			testing.expect(t, planned == nil)
-			d, described := model.describe(&plan)
-			testing.expect(t, described == nil)
-			doc: core.Document
-			back, text, refused := written_back(t, &d, &doc)
-			testing.expectf(t, refused == "", "%v: %s", type, refused)
-			seen: Pairs
-			testing.expectf(t, same_schema(&d, back.description, d.root, back.description.root, &seen, true), "%v %v: %s", type, enums, text)
-		}
+	plans := corpus_plans()
+	for enums in typed.Enum_Spelling {
+		plans[{Written_Tree, enums}] = ruled_plan(Written_Tree, enums)
+		plans[{Written_Member, enums}] = ruled_plan(Written_Member, enums)
+		plans[{Written_Merge, enums}] = ruled_plan(Written_Merge, enums)
 	}
-	plan, _ := json.plan_make(Written_Merge, plan = {rule_tags = rules.rules_leaf}, reads = json.reads(.Json))
-	d, _ := model.describe(&plan)
+	for key, &plan in plans {
+		d, described := description_of(&plan)
+		testing.expect(t, described == nil)
+		doc: core.Document
+		back, text, refused := written_back(t, &d, &doc)
+		testing.expectf(t, refused == "", "%v: %s", key.type, refused)
+		seen: Pairs
+		testing.expectf(t, same_schema(&d, back.description, d.root, back.description.root, &seen, true), "%v %v: %s", key.type, key.enums, text)
+	}
+	plan := ruled_plan(Written_Merge)
+	d, _ := description_of(&plan)
 	doc: core.Document
 	back, text, _ := written_back(t, &d, &doc)
 	b, bound := schema.bind(&back, json.as(.Json))
@@ -1284,9 +1369,9 @@ Written_Member :: struct {
 // Members of types of their own, whose rules merge into their nodes: a bound looser than the type's keeps the type's.
 @(private = "file")
 Written_Merge :: struct {
-	a:  i8 `model:"<=1000"`,
-	b:  i16 `model:">=1"`,
-	at: string `model:"format=date-time"`,
+	a:  i8 `model:"<=1000,optional"`,
+	b:  i16 `model:">=1,optional"`,
+	at: string `model:"format=date-time,optional"`,
 }
 
 @(test)

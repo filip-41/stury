@@ -13,6 +13,10 @@ Options :: struct {
 	base:          string,
 	// Where file references lead and how they are read, see `Resolver`.
 	resolver:      Resolver,
+	// How a key that repeats in an object is judged: the instance has the members `dups` reads, so a count, a rule for
+	// the key and a `required` see one member under `.Last` or `.First`, and `.Refuse` refuses every repeat. `.All` is
+	// `.Bad_Option` at a check.
+	dups:          core.Duplicates,
 }
 
 // A schema read once and frozen: share it across threads and bind it to each format. It owns its description, unless
@@ -107,7 +111,15 @@ check :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink = nil, runner: ^core.Runne
 		}
 	}
 	target: u8
-	return outcome(typed.check_text(src, &target, nil, &b.plan, {sink = sink}), sink)
+	return outcome(typed.check_text(src, &target, nil, &b.plan, read_of(b, sink)), sink)
+}
+
+// The options a check of `b` reads with: the schema's `dups`, and for a flat format's text, whose objects hold no repeat
+// but a header's, no repeats noticed.
+@(private)
+read_of :: proc(b: ^Bound, sink: ^typed.Sink) -> typed.Read_Options {
+	flat := b.plan.as.readers != nil && b.plan.as.readers.flat
+	return {sink = sink, dups = b.compiled.opts.dups, repeats = .Ignore if flat else .Notice}
 }
 
 // `err`, the first failure of a check, unless the check ended on a fault, which outranks it and which a limit of the
@@ -122,9 +134,9 @@ outcome :: proc(err: core.Error, sink: ^typed.Sink) -> core.Error {
 
 // The check of `plan` over the text `src`, for a plan that holds no record.
 @(private)
-check_text :: proc(plan: ^typed.Plan, src: []u8, sink: ^typed.Sink) -> core.Typed_Error {
+check_text :: proc(plan: ^typed.Plan, src: []u8, read: typed.Read_Options) -> core.Typed_Error {
 	target: u8
-	return plan.check(src, plan.as, &target, nil, plan, {sink = sink}, context.allocator)
+	return plan.check(src, plan.as, &target, nil, plan, read, context.allocator)
 }
 
 // Whether `src` passes the schema, as `check` with no sink says.

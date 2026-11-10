@@ -23,6 +23,9 @@ Check_Job :: struct {
 	outer:  ^typed.Outer,
 	collect: bool,
 	max:    int,
+	// How a repeated key is judged, as `Read_Options` takes it.
+	dups:    core.Duplicates,
+	repeats: typed.Repeats,
 	allocator: runtime.Allocator,
 	lock:   sync.Mutex,
 	pieces: [dynamic]Checked,
@@ -37,8 +40,8 @@ Check_Job :: struct {
 // with an allocator of its own is checked on this thread. The result is the number of records read and the first failure,
 // whose kind is `.None` for none, and the fault the records ended on, whose kind is `.None` for none, which is a `.Walk`
 // or a `.No_Memory` and outranks the failures before it. With no sink the check stops at the first failure. The last result
-// is the index of the record the failure is the first of.
-check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, outer: ^typed.Outer, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0) -> (records: i64, failure: core.Typed_Error, fatal: core.Typed_Error, failed: i64) {
+// is the index of the record the failure is the first of. `dups` and `repeats` are the read's, see `typed.Repeats`.
+check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, outer: ^typed.Outer, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0, dups := core.Duplicates.Default, repeats := typed.Repeats.Ignore) -> (records: i64, failure: core.Typed_Error, fatal: core.Typed_Error, failed: i64) {
 	heap := runtime.heap_allocator()
 	runner := runner
 	if sink != nil && sink.entries.allocator.procedure != nil && sink.entries.allocator.procedure != heap.procedure {
@@ -47,7 +50,7 @@ check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.P
 	if sink != nil && sink.entries.allocator.procedure == nil {
 		sink.entries.allocator = heap if runner != nil else context.allocator
 	}
-	job := Check_Job{plan = plan, outer = outer, collect = sink != nil, max = sink.max_errors if sink != nil else 0}
+	job := Check_Job{plan = plan, outer = outer, collect = sink != nil, max = sink.max_errors if sink != nil else 0, dups = dups, repeats = repeats}
 	if sink != nil {
 		job.allocator = sink.entries.allocator
 	}
@@ -119,7 +122,7 @@ check_piece :: proc(job: ^Check_Job, it: ^Reader, k: int) -> bool {
 	p.sink.entries.allocator = job.allocator
 	sink := &p.sink if job.collect else nil
 	if it.docs != nil && it.docs.check_run != nil && it.framing >= .Concatenated {
-		it.docs.check_run(it, job.plan, {sink = sink, outer = job.outer}, piece_visit, &run)
+		it.docs.check_run(it, job.plan, {sink = sink, outer = job.outer, dups = job.dups, repeats = job.repeats}, piece_visit, &run)
 	} else {
 		for {
 			rec, more := next(it)
@@ -129,7 +132,7 @@ check_piece :: proc(job: ^Check_Job, it: ^Reader, k: int) -> bool {
 			first := len(p.sink.entries)
 			p.sink.record = p.records
 			target: u8
-			e := job.plan.check(rec.text, job.plan.as, &target, nil, job.plan, {sink = sink, outer = job.outer}, context.allocator)
+			e := job.plan.check(rec.text, job.plan.as, &target, nil, job.plan, {sink = sink, outer = job.outer, dups = job.dups, repeats = job.repeats}, context.allocator)
 			for &x in p.sink.entries[first:] {
 				x.start += rec.at
 				x.end += rec.at

@@ -5,7 +5,8 @@ import core "../"
 import "../write"
 
 // Writes the JSON Schema basic output for `entries`: `valid`, then each entry as its `keywordLocation`, its
-// `absoluteKeywordLocation` where the keywords did not pass a `$ref`, its `instanceLocation` and its `error`. A
+// `absoluteKeywordLocation` where the keywords did not pass a `$ref`, its `instanceLocation` and its `error`. With
+// `r.records` an entry also has a `record` member, since a record's location is not part of the instance's. A
 // `truncated` member says the entries are not all of them. `uri` is the schema's root resource, the base of the absolute
 // keyword locations, "" for none.
 write_basic :: proc(t: ^write.Tokens, entries: []core.Error_Entry, uri: string, r := write.Report{}) -> core.Typed_Error_Kind {
@@ -25,7 +26,8 @@ write_basic :: proc(t: ^write.Tokens, entries: []core.Error_Entry, uri: string, 
 				write.key(t, "absoluteKeywordLocation")
 				write.value_string(t, strings.concatenate({uri, "#", fragment_of(e.keyword_path)}, context.temp_allocator))
 			}
-			write.report_location(t, "instanceLocation", e.path, r.records, e.record)
+			write.report_location(t, "instanceLocation", e.path)
+			write.report_record(t, r, e)
 			write.key(t, "error")
 			write.value_string(t, write.report_message(e))
 			write.close(t)

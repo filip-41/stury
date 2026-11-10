@@ -59,6 +59,8 @@ merged :: proc(n: ^Node, edge: Rules) -> (r: Rules, refused: string) {
 		r.format, r.assert_format = edge.format, edge.assert_format
 	}
 	r.unique ||= edge.unique
+	r.read_only ||= edge.read_only
+	r.write_only ||= edge.write_only
 	r.min_length, r.min_items, r.min_members = max(r.min_length, edge.min_length), max(r.min_items, edge.min_items), max(r.min_members, edge.min_members)
 	r.max_length, r.max_items, r.max_members = least(r.max_length, edge.max_length), least(r.max_items, edge.max_items), least(r.max_members, edge.max_members)
 	return

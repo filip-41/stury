@@ -27,7 +27,8 @@ plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, 
 		refuse_plan(&b, .Bad_Option)
 	} else if b.err.kind == .None && root_block(&b) {
 		if opts.checking {
-			fill_checked(&b, d, arena, 0, d.root, "", {}, {})
+			x := conjoin_description(&b, d, arena)
+			fill_checked(&b, &x, arena, 0, d.root, "", {}, {})
 		} else {
 			fill_node(&b, d, 0, d.root, "")
 		}
@@ -136,8 +137,8 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 		s = core.Name("$ref")
 	}
 	u.site = steps
-	if node != rules.NONE && !bare && holds(d, node, edge) {
-		u.applies = checked_applies(b, d, arena, node, edge)
+	if node != rules.NONE && !bare && holds(b, d, node, edge) {
+		u.applies, u.verdict = checked_applies(b, d, arena, node, edge)
 	} else if node != rules.NONE {
 		n := &d.nodes[node]
 		judged := n^
@@ -148,16 +149,21 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 		if .Object in n.kinds {
 			o := d.objects[n.object] if n.object >= 0 else rules.Object{additional = rules.NONE, keys = rules.NONE}
 			// The members a pattern matches are judged by the held record's arms, and so are the others with them.
-			if len(o.patterns) > 0 {
+			if len(o.patterns) > 0 && n.object not_in b.inline {
 				o.additional = rules.NONE
 			}
+			o.members, u.requires = dependent_members(b, arena, o)
 			if !known_struct(b, {typeid_of(rules.Object), n.object, b.scope}, &f, &m) && struct_block(b, {typeid_of(rules.Object), n.object, b.scope}, &f, &m, o.members, false) >= 0 {
 				checked_members(b, d, arena, m.block, o)
 			}
 			if o.additional != rules.NONE {
-				u.additional = checked_block(b, d, arena, {typeid_of(Maybe(rules.Object)), n.object, b.scope}, nil, o.additional, ADDITIONAL)
+				u.additional = checked_block(b, d, arena, {typeid_of(Maybe(rules.Object)), n.object, b.scope}, nil, o.additional, ADDITIONAL[:])
 			}
-			if keys, _ := reached(d, o.keys); keys != rules.NONE && holds(d, keys, {}) {
+			if p, inline := b.inline[n.object]; inline {
+				site := [2]core.Step{core.Name("patternProperties"), core.Name(p.expression)}
+				u.pattern, u.regex = checked_block(b, d, arena, {typeid_of(rules.Pattern), n.object, b.scope}, nil, p.node, site[:]), p.regex
+			}
+			if keys, _ := reached(d, o.keys); keys != rules.NONE && holds(b, d, keys, {}) {
 				refuse_plan(b, .Unsupported, text = "propertyNames")
 			} else if keys != rules.NONE {
 				u.keys = checked_leaf(b, &d.nodes[keys], {}, arena)
@@ -165,14 +171,14 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 		}
 		if .Array in n.kinds {
 			a := d.arrays[n.array] if n.array >= 0 else rules.Array{items = rules.NONE}
-			u.items = checked_block(b, d, arena, {typeid_of(rules.Array), n.array, b.scope}, a.prefix, a.items, ITEMS)
+			u.items = checked_block(b, d, arena, {typeid_of(rules.Array), n.array, b.scope}, a.prefix, a.items, ITEMS[:])
 			items, _ := reached(d, a.items)
 			u.inside = len(a.prefix) > 0 || items != rules.NONE
 		}
 	}
 	// A container of a kind the node reads no block for opens on the block that reads nothing, so its close judges it.
 	if m.block < 0 || u.items == 0 {
-		nothing := checked_block(b, d, arena, {typeid_of(rules.Array), -1, 0}, nil, rules.NONE, ITEMS)
+		nothing := checked_block(b, d, arena, {typeid_of(rules.Array), -1, 0}, nil, rules.NONE, ITEMS[:])
 		m.block = nothing if m.block < 0 else m.block
 		u.items = nothing if u.items == 0 else u.items
 	}
@@ -191,6 +197,42 @@ ADDITIONAL := [1]core.Step{core.Name("additionalProperties")}
 @(private)
 @(rodata)
 ITEMS := [1]core.Step{core.Name("items")}
+
+// The members of `o` with each name its `dependentRequired` lists and no other member names, which read as the object's
+// other members, and that keyword's members as places among them.
+@(private)
+dependent_members :: proc(b: ^Builder, arena: runtime.Allocator, o: rules.Object) -> ([]rules.Member, []Requires) {
+	place :: proc(members: ^[dynamic]rules.Member, name: string) -> i32 {
+		for x, i in members {
+			if x.name == name {
+				return i32(i)
+			}
+		}
+		append(members, rules.Member{name = name, node = rules.NONE, only_required = true})
+		return i32(len(members) - 1)
+	}
+	members := make([dynamic]rules.Member, arena)
+	requires := make([dynamic]Requires, arena)
+	for x in o.dependents {
+		if len(x.required) == 0 {
+			continue
+		}
+		if len(members) == 0 {
+			append(&members, ..o.members)
+		}
+		r := Requires{trigger = place(&members, x.name), wants = make([]i32, len(x.required), arena)}
+		for name, i in x.required {
+			r.wants[i] = place(&members, name)
+		}
+		if _, failed := append(&requires, r); failed != nil {
+			refuse_plan(b, .No_Memory)
+		}
+	}
+	if len(requires) == 0 {
+		return o.members, nil
+	}
+	return members[:], requires[:]
+}
 
 // Fills the members of struct block `at` of object `o`. A name only `required` lists reads as the object's other members.
 @(private)
@@ -313,7 +355,7 @@ checked_leaf :: proc(b: ^Builder, n: ^rules.Node, edge: rules.Rules, arena: runt
 // A block of a record per node of `prefix`, each moving the cursor on, then the record of `rest` under `site`, then a
 // `Never` record. Returns 1 past its first record, where the cursor of its first value stands.
 @(private)
-checked_block :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, key: Block_Key, prefix: []rules.Node_Index, rest: rules.Node_Index, site: [1]core.Step) -> i32 {
+checked_block :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, key: Block_Key, prefix: []rules.Node_Index, rest: rules.Node_Index, site: []core.Step) -> i32 {
 	if at, ok := b.blocks[key]; ok {
 		return at + 1
 	}
@@ -327,8 +369,7 @@ checked_block :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocat
 		fill_checked(b, d, arena, int(at) + i, x, "", {}, steps[:])
 		b.uses[int(at) + i].step = true
 	}
-	site := site
-	fill_checked(b, d, arena, int(at) + len(prefix), rest, "", {}, site[:])
+	fill_checked(b, d, arena, int(at) + len(prefix), rest, "", {}, site)
 	return at + 1
 }
 

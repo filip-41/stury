@@ -243,15 +243,17 @@ Exit codes: 0 on success, 5 when any input is invalid, 2 for a usage or file err
 `stury check` does and, if it parses, against the schema. Every failure of an input is told, not only the first, as
 `FILE:LINE:COL: MESSAGE at PATH (KEYWORD-PATH)` on stderr. A text that does not parse is the plain `check`'s fault,
 told as it tells it. NDJSON and `--seq` check each record; a long file, or an array at the root whose rules apply to each
-entry, is checked on all cores and tells what a serial check tells.
+entry, is checked on all cores and tells what a serial check tells. With `--from csv` or `tsv` the schema describes the
+table, an array of its rows, so `{"type":"array","items":{...}}` judges each row and `minItems` counts them. When the last NDJSON record is cut, the earlier records' failures are told
+before the fault, and the exit is 5.
 
 | Flag | Effect |
 | --- | --- |
 | `--schema-ref DIR` | The directory a reference to a `file:` URI may read from. The default is the schema file's directory. A schema with an `$id` resolves a relative reference against that `$id`, so its `file:` references need an `$id` that is one. |
 | `--format-assert` | `format` fails an input, where it otherwise only annotates. |
-| `--max-errors N` | Keep at most `N` failures of an input (default 100). The basic output and the problem document say `"truncated": true` when more were left out. |
-| `--report basic` | Write the JSON Schema basic output of each input on stdout, one line a file, `{"valid":true}` for a valid one. Each error unit has `"valid":false`. With several files each line starts with a `file` member naming its file. `keywordLocation`, `absoluteKeywordLocation` (where the schema has an `$id` and the keywords did not pass a `$ref`) and `instanceLocation` are JSON Pointers; with records, the instance location starts with the record's index. |
-| `--report problem` | Write an RFC 9457 problem document of each failing input on stdout: `title`, `status` 422 and `errors` of `pointer`, `code` and `message`. A missing member is named in its message, and its pointer is the member's. With several files the document starts with a `file` member. |
+| `--max-errors N` | Keep at most `N` failures of an input (default 100). The basic output and the problem document say `"truncated": true` when more were left out, and the lines end with `NAME: more failures past --max-errors N`. |
+| `--report basic` | Write the JSON Schema basic output of each input on stdout, one line a file, `{"valid":true}` for a valid one. Each error unit has `"valid":false`. With several files each line starts with a `file` member naming its file. `keywordLocation`, `absoluteKeywordLocation` (where the schema has an `$id` and the keywords did not pass a `$ref`) and `instanceLocation` are JSON Pointers; with records, a `record` member holds the record's index and the instance location is a pointer into that record. |
+| `--report problem` | Write an RFC 9457 problem document of each failing input on stdout: `title`, `status` 422 and `errors` of `pointer`, `code` and `message`, and a `record` member in an error of a record input. A missing member is named in its message, and its pointer is the member's. With several files the document starts with a `file` member. |
 | `--report lines` | The default. |
 
 A schema that does not read, compile or bind, or a keyword the check does not judge, is a usage error (exit 2) naming it.

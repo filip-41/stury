@@ -116,7 +116,7 @@ check_elements :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink, runner: ^core.Ru
 		return
 	}
 	mark := typed.sink_mark(sink)
-	count, failure, fatal, failed := records.check_each(src, whole, .Entries, &e.plan, &e.outer, sink, runner, at)
+	count, failure, fatal, failed := records.check_each(src, whole, .Entries, &e.plan, &e.outer, sink, runner, at, b.compiled.opts.dups, .Notice)
 	if fatal.kind != .None {
 		typed.sink_restore(sink, mark)
 		return
@@ -139,7 +139,7 @@ check_elements :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink, runner: ^core.Ru
 	most, limited := e.max.?
 	if (u64(count) < e.min || limited && u64(count) > most) && (sink != nil || failure.kind == .None) {
 		// The count is the array's own failure, after those of its entries.
-		counted := outcome(core.error_of(check_text(&e.counts, src, sink)), sink)
+		counted := outcome(core.error_of(check_text(&e.counts, src, read_of(b, sink))), sink)
 		if failure.kind == .None || sink.fatal.kind != .None {
 			return counted, true
 		}
@@ -150,12 +150,16 @@ check_elements :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink, runner: ^core.Ru
 // Checks each record of `src`, NDJSON or RFC 7464 under `framing`, against the schema `b` is bound to, on the threads of
 // `runner` when it is given. Every failure goes to `sink` with its record's index in `record`, up to its `max_errors`,
 // and the result is the fault that ends the records when there is one, else the first failure. With no sink the check
-// stops at the first failure. The result's first value is the number of records read. A sink with an allocator of its own is checked on this thread.
+// stops at the first failure. The result's first value is the number of records read. A sink with an allocator of its own is checked on this thread. A flat format's text under `.Lines` is `.Bad_Option`, since its schema describes the whole text, which `check` judges.
 check_records :: proc(b: ^Bound, src: []u8, framing := core.Framing.Lines, sink: ^typed.Sink = nil, runner: ^core.Runner = nil) -> (count: i64, err: core.Error) {
 	if b.plan.check == nil {
 		return 0, core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
 	}
+	// A flat format's text is one value, whose records `check` judges as the array they are.
+	if framing == .Lines && b.plan.as.readers != nil && b.plan.as.readers.flat {
+		return 0, core.error_of(core.Typed_Error{kind = .Bad_Option})
+	}
 	failure, fatal: core.Typed_Error
-	count, failure, fatal, _ = records.check_each(src, b.plan.as, framing, &b.plan, nil, sink, runner)
+	count, failure, fatal, _ = records.check_each(src, b.plan.as, framing, &b.plan, nil, sink, runner, 0, b.compiled.opts.dups, .Notice)
 	return count, core.error_of(fatal if fatal.kind != .None else failure)
 }

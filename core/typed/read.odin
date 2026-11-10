@@ -41,6 +41,19 @@ Read_Options :: struct {
 	sink:        ^Sink,
 	// What a `Check`'s entries start their paths with, nil for none.
 	outer:       ^Outer,
+	// How a `Check` meets a key that repeats in its object.
+	repeats:     Repeats,
+}
+
+// How a `Check` meets a key that repeats inside one object. `.Ignore` judges every value as it comes, which is the
+// view of a read that counts each repeat as a member. `.Notice` ends the read with `.Duplicate_Key` at the first repeat
+// that can change a verdict, so the caller reads again with `.Judge`. `.Judge` judges the object as `dups` reads it, a
+// repeat under `.Last` taking back the errors of the earlier value and under `.First` being skipped, and counts distinct
+// keys. `.Judge` needs a sink, which is where the earlier value's errors are taken back from.
+Repeats :: enum u8 {
+	Ignore,
+	Notice,
+	Judge,
 }
 
 // What a key the type does not name does.
@@ -185,6 +198,10 @@ read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> 
 		if !r.plan.checking || !fault_note((^Check)(r), regs, e) {
 			note(r, regs, e, f.at)
 		}
+	}
+	if r.plan.checking && r.sink == nil && (^Check)(r).repeats == .Notice && r.first.kind != .None && r.first.kind != .Walk && r.first.kind != .No_Memory && r.first.kind != .Duplicate_Key && repeat_may_retract(r) {
+		// With no sink the first refusal ends the read, before a later repeat can take it back.
+		r.first = {kind = .Duplicate_Key, at = r.first.at}
 	}
 	// A read ended early gives each open list to its destination.
 	top, child := regs, false

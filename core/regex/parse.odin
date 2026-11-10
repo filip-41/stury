@@ -693,7 +693,7 @@ parse_group :: proc(p: ^Parser) -> ^Node {
 	c := peek(p)
 	p.i += 1
 	if p.flags.ecma && strings.index_byte(":=!<", c) < 0 {
-		return fail(p, "invalid group")
+		return fail(p, "inline flags are not supported" if strings.index_byte("imsxu-", c) >= 0 else "invalid group")
 	}
 	switch c {
 	case ':':

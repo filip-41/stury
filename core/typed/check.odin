@@ -3,6 +3,7 @@ package typed
 import "base:runtime"
 import "core:mem"
 import "core:strconv"
+import "core:strings"
 import regex "../regex"
 import spell "../spell"
 import core ".."
@@ -26,6 +27,27 @@ Check :: struct {
 	fatal:        core.Typed_Error_Kind,
 	// What the path and the keyword path of the outermost check's entries start with, nil for none.
 	outer:        ^Outer,
+	// How a key that repeats in its object is met.
+	repeats:      Repeats,
+	// The sink's entries below this are an earlier record's, which a repeat never takes back.
+	floor:        int,
+	// The keys of the open objects that track them, outermost first: the first `tracked` of `trackers` are in use. The
+	// trackers and what they hold are in the temp allocator and are reused, so a long text does not grow them.
+	trackers:     [dynamic]Tracker,
+	tracked:      int,
+}
+
+// The keys an open object has met, for a check that meets repeats. `sp` is the object's frame.
+@(private)
+Tracker :: struct {
+	sp:      int,
+	// Each key's text and the index of its span.
+	keys:    map[string]int,
+	// The source span of each key's latest member, from its key to the next key, whose end is `open`'s until the next key.
+	spans:   [dynamic][2]u64,
+	open:    int,
+	// How many of the object's members repeat an earlier key.
+	repeats: u64,
 }
 
 // The path to a value inside a larger one and the keyword steps to the subschema it is judged by, which a check of that
@@ -45,11 +67,13 @@ Text_Read :: #type proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan:
 Node_Read :: #type proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error
 
 // What a format reads typed values with, where its `Services.reads` points. A plan copies the procedures. `check` and
-// `node_check` are the reads that report to a `Sink`'s `entries`, nil for a format that has none.
+// `node_check` are the reads that report to a `Sink`'s `entries`, nil for a format that has none. `plan` builds the plan
+// of a type that reads with these reads and writes the format, nil for reads that build none.
 Format_Reads :: struct {
 	read, check:           Text_Read,
 	node_read, node_check: Node_Read,
 	build:                 Text_Build,
+	plan:                  proc(T: typeid, opts: Plan_Options, allocator: runtime.Allocator) -> (Plan, core.Typed_Error),
 }
 
 // Builds `src` as a document of the format `as` names, as a format's `Format_Reads` does for `write.marshal_value`.
@@ -59,6 +83,7 @@ Text_Build :: #type proc(src: []u8, as: core.As, allocator: runtime.Allocator) -
 check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error) {
 	regs, err = read_start(&c.reader, src, plan, as, T, target, read, frames, allocator)
 	c.wide, c.outer = true, read.outer
+	c.repeats, c.tracked, c.floor = read.repeats, 0, len(read.sink.entries) if read.sink != nil else 0
 	// A check started again over its own pool gives back the held value an earlier record stopped in.
 	if c.fork != nil && c.fork.open {
 		fork_release(c, c.fork)
@@ -82,6 +107,129 @@ check_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read
 	return core.error_of(plan.check(src, plan.as, target, T, plan, read, allocator))
 }
 
+// Whether the keys of an object at record `owner`'s use reach `check_key` whatever the cursor predicts: the object's names are
+// judged, or a check that judges repeats needs every key, on a block that ends in the `Never` record.
+@(private)
+keyed :: #force_inline proc "contextless" (h: ^Check, m: ^Meta, u: ^Use) -> bool #no_bounds_check {
+	return u.keys != 0 || h.repeats == .Judge && h.plan.fields[m.block + m.members].kind == .Never
+}
+
+// Whether the frame `f` is the open object whose keys the innermost tracker holds.
+@(private)
+tracks :: #force_inline proc "contextless" (h: ^Check, f: ^Frame) -> bool {
+	return h.tracked > 0 && h.trackers[h.tracked - 1].sp == int((uintptr(f) - uintptr(h.frames)) / size_of(Frame))
+}
+
+// Starts tracking the keys of the object just opened at frame `h.sp - 1`. A check that notices tracks only an object
+// whose verdict a repeat of an unnamed key can change: a count, a rule for the members no record names, or names to judge.
+@(cold)
+@(private)
+track_open :: #force_no_inline proc "contextless" (h: ^Check, m: ^Meta, u: ^Use, l: ^rules.Leaf) {
+	if h.repeats == .Judge {
+		if !keyed(h, m, u) {
+			return
+		}
+	} else if u.additional == 0 && u.keys == 0 && !(l != nil && (l.min_members > 0 || l.max_members < max(u64))) {
+		return
+	}
+	context = h.ctx
+	context.allocator = context.temp_allocator
+	if h.tracked == len(h.trackers) {
+		if _, grown := append(&h.trackers, Tracker{}); grown != nil {
+			return
+		}
+	}
+	t := &h.trackers[h.tracked]
+	h.tracked += 1
+	clear(&t.keys)
+	clear(&t.spans)
+	t.sp, t.open, t.repeats = h.sp - 1, -1, 0
+}
+
+// What a key met by a tracker leaves to do.
+@(private)
+Key_Met :: enum {
+	New,
+	Skip,
+	Stop,
+}
+
+// Notes the key `t`, whose text is `key`, in the object `tr` tracks. A repeat ends the read when it is to notice one. It
+// takes back the errors of the earlier value under `.Last`, and under `.First` is skipped. Either is one member fewer.
+@(cold)
+@(private)
+track_key :: #force_no_inline proc "contextless" (h: ^Check, tr: ^Tracker, t: core.Token, key: string) -> Key_Met {
+	context = h.ctx
+	context.allocator = context.temp_allocator
+	lo, _ := core.scalar_ends(t)
+	if tr.open >= 0 {
+		tr.spans[tr.open][1] = lo
+	}
+	at, repeated := tr.keys[key]
+	if !repeated {
+		text, cloned := strings.clone(key)
+		_, grown := append(&tr.spans, [2]u64{lo, 0})
+		if cloned != nil || grown != nil {
+			return .Stop
+		}
+		tr.keys[text] = len(tr.spans) - 1
+		tr.open = len(tr.spans) - 1
+		return .New
+	}
+	if h.repeats == .Notice {
+		noticed(h, t)
+		return .Stop
+	}
+	tr.repeats += 1
+	if h.first_key {
+		tr.open = -1
+		return .Skip
+	}
+	take_back(h, tr.spans[at])
+	tr.spans[at] = {lo, 0}
+	tr.open = at
+	return .New
+}
+
+// Ends the read at the repeated key `t` with the refusal a caller that reads again with `.Judge` looks for.
+@(cold)
+@(private)
+noticed :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token) -> core.Action {
+	h.first = {kind = .Duplicate_Key, at = t.lo}
+	return .Stop
+}
+
+// Takes back the entries of this read that start inside `span`, the member a later value of its key replaces.
+@(cold)
+@(private)
+take_back :: proc "contextless" (h: ^Check, span: [2]u64) {
+	c := h.sink
+	if c == nil {
+		return
+	}
+	context = h.ctx
+	kept := h.floor
+	for i in h.floor ..< len(c.entries) {
+		e := &c.entries[i]
+		if e.start >= span[0] && e.start < span[1] {
+			entry_destroy(e, c.entries.allocator)
+		} else {
+			c.entries[kept] = e^
+			kept += 1
+		}
+	}
+	if kept == len(c.entries) {
+		return
+	}
+	resize(&c.entries, kept)
+	// What the read first refused is taken back with it, unless a limit left an entry out.
+	if kept == h.floor && !c.truncated {
+		h.first = {}
+	} else if kept > h.floor {
+		h.first = {kind = c.entries[h.floor].kind, at = c.entries[h.floor].start}
+	}
+}
+
 // The value `t` at a `Checked` record: judges a scalar by the record's leaf, and opens a container a rule reads inside,
 // which its close judges, so a container's failure spans it. A container's frame keeps its open byte in `data` and its
 // kind, and an object's frame its last key's span and spelling in `owner` and `target`. `c` counts the values of the
@@ -98,9 +246,9 @@ check_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs
 	first: ^Field
 	#partial switch t.kind {
 	case .Object:
-		if m.members > 0 || u.additional != 0 || u.keys != 0 || l != nil && (l.min_members > 0 || l.max_members < max(u64) || container_fails(l, .Object) != {}) {
+		if m.members > 0 || u.additional != 0 || u.pattern != 0 || u.keys != 0 || l != nil && (l.min_members > 0 || l.max_members < max(u64) || container_fails(l, .Object) != {}) {
 			// The block's `Never` record predicts no key, so each key reaches `check_key` and its name rules.
-			first = &h.plan.fields[m.block + m.members] if u.keys != 0 else fld.first
+			first = &h.plan.fields[m.block + m.members] if keyed(h, m, u) else fld.first
 		}
 	case .Array:
 		if u.inside || l != nil && (l.min_items > 0 || l.max_items < max(u64) || container_fails(l, .Array) != {}) {
@@ -126,9 +274,14 @@ check_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs
 	h.sp += 1
 	f.a, f.b, f.c, f.seen, f.run, f.extra = regs.a, regs.b, regs.c, 0, nil, nil
 	f.data, f.kind, f.owner, f.target = rawptr(uintptr(t.lo)), t.kind, nil, 0
-	if t.kind == .Object && u.keys != 0 {
-		// The cursor starts past every member, which it passed unread, so the members are tracked from here by their keys.
-		f.seen, f.run = SEEN_ON, first
+	if t.kind == .Object {
+		if keyed(h, m, u) {
+			// The cursor starts past every member, which it passed unread, so the members are tracked from here by their keys.
+			f.seen, f.run = SEEN_ON, first
+		}
+		if h.repeats != .Ignore && len(u.applies) == 0 {
+			track_open(h, m, u, l)
+		}
 	}
 	return {NO_LIMIT, u64(uintptr(first)), 0}, .Next
 }
@@ -195,7 +348,17 @@ reading_passes :: proc "contextless" (h: ^Check, value: core.Token, l: ^rules.Le
 // when `l.fast` says its bounds are whole, and the other rules are cold.
 @(private)
 judge_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token, l: ^rules.Leaf) -> core.Action {
-	fails: rules.Failures
+	fails := scalar_fails(h, t, l)
+	if fails == {} {
+		return .Next
+	}
+	lo, hi := core.scalar_ends(t)
+	return check_report(h, regs, l, t.kind, fails, lo, hi)
+}
+
+// What the scalar `t` fails of `l`: its kind, its enum and the rules of its kind.
+@(private)
+scalar_fails :: #force_inline proc "contextless" (h: ^Check, t: core.Token, l: ^rules.Leaf) -> (fails: rules.Failures) {
 	ok: bool
 	#partial switch t.kind {
 	case .Null:
@@ -230,11 +393,7 @@ judge_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs
 	if l.has_enum && t.kind != .String && t.kind != .Number {
 		fails += judge_operand(h, t, l)
 	}
-	if fails == {} {
-		return .Next
-	}
-	lo, hi := core.scalar_ends(t)
-	return check_report(h, regs, l, t.kind, fails, lo, hi)
+	return
 }
 
 // Whether a value that is no string and no number fails `l`'s enum index.
@@ -267,12 +426,28 @@ judge_string :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token, l
 	// A search's scratch starts on the stack, and a block that outgrows it moves to the temp allocator.
 	room: [SCRATCH_ROOM]u8 = ---
 	stack: mem.Arena
-	mem.arena_init(&stack, room[:])
-	spill := runtime.Allocator{spill_proc, &stack}
-	scratch := regex.Scratch{}
+	scratch := stack_scratch(&stack, room[:])
+	return fails + rules.judge_string(l, text, &scratch)
+}
+
+// Whether the compiled `^regex.Regex` at `re` matches in the member name `name`.
+@(private)
+key_matches :: #force_no_inline proc "contextless" (h: ^Check, re: rawptr, name: string) -> bool {
+	context = h.ctx
+	room: [SCRATCH_ROOM]u8 = ---
+	stack: mem.Arena
+	scratch := stack_scratch(&stack, room[:])
+	return matches(re, name, &scratch)
+}
+
+// A search's scratch that starts in `room` and moves to the temp allocator when it outgrows it.
+@(private)
+stack_scratch :: proc(stack: ^mem.Arena, room: []u8) -> (scratch: regex.Scratch) {
+	mem.arena_init(stack, room)
+	spill := runtime.Allocator{spill_proc, stack}
 	scratch.stack.allocator, scratch.slots.allocator, scratch.counts.allocator = spill, spill, spill
 	scratch.seen.allocator, scratch.good.allocator, scratch.log.allocator = spill, spill, spill
-	return fails + rules.judge_string(l, text, &scratch)
+	return
 }
 
 // The bytes a pattern's search takes on the stack before it moves to the temp allocator.
@@ -450,6 +625,16 @@ check_key :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token)
 	if !ok {
 		return regs, .Stop
 	}
+	if h.tracked > 0 && h.trackers[h.tracked - 1].sp == h.sp - 1 {
+		switch track_key(h, &h.trackers[h.tracked - 1], t, key) {
+		case .New:
+		case .Skip:
+			regs.c += 1
+			return regs, .Skip
+		case .Stop:
+			return regs, .Stop
+		}
+	}
 	if u.keys != 0 {
 		l := &h.plan.leaves[u.keys - 1]
 		fails := judge_string(h, t, l, key) if .String in l.kinds else ({.Not_Allowed} if l.kinds == {} else {.Wrong_Kind})
@@ -473,15 +658,21 @@ check_key :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token)
 		f.seen |= SEEN_ON
 		if len(key) == 0 || m.names & name_bit(key) != 0 {
 			if i := member_index(h, owner, m, key); i >= 0 {
-				seen_set(h, f, owner, i)
+				if seen_set(h, f, owner, i) && h.repeats == .Notice {
+					return regs, noticed(h, t)
+				}
 				next := &at[i + 1]
-				if u.keys != 0 {
+				if keyed(h, m, u) {
 					next = &h.plan.solo[2 * (int(uintptr(&at[i]) - uintptr(raw_data(h.plan.fields))) / size_of(Field)) + 1]
 				}
 				regs.b, f.run = u64(uintptr(next)), &at[i + 1]
 				return regs, .Next
 			}
 		}
+	}
+	if u.pattern != 0 && key_matches(h, u.regex, key) {
+		regs.b = u64(uintptr(&h.plan.fields[u.pattern]))
+		return regs, .Next
 	}
 	if u.additional != 0 {
 		regs.b = u64(uintptr(&h.plan.fields[u.additional]))
@@ -509,6 +700,11 @@ check_close :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, owner:
 	at := core.Hook_Regs{f.a, f.b, f.c}
 	back := core.Hook_Regs{f.a, f.b + (size_of(Field) if h.plan.uses[owner.meta].step else 0), f.c + 1}
 	lo, hi := u64(uintptr(f.data)), t.lo + u64(t.n)
+	count := regs.c
+	if tracks(h, f) {
+		count -= h.trackers[h.tracked - 1].repeats
+		h.tracked -= 1
+	}
 	if f.kind == .Object && m.required_end > 0 {
 		context = h.ctx
 		for i := missing_member(h, f, owner, regs, 0); i >= 0; i = missing_member(h, f, owner, regs, i + 1) {
@@ -522,16 +718,44 @@ check_close :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, owner:
 			}
 		}
 	}
+	if f.kind == .Object && len(h.plan.uses[owner.meta].requires) > 0 && dependent_missing(h, f, owner, regs, at, lo, hi) == .Stop {
+		return back, .Stop
+	}
 	if m.rule_set == 0 {
 		return back, .Next
 	}
 	l := &h.plan.leaves[m.rule_set - 1]
 	fails := container_fails(l, f.kind)
-	fails += rules.judge_count(regs.c, l.min_members, l.max_members) if f.kind == .Object else rules.judge_count(regs.c, l.min_items, l.max_items)
+	fails += rules.judge_count(count, l.min_members, l.max_members) if f.kind == .Object else rules.judge_count(count, l.min_items, l.max_items)
 	if fails != {} && check_report(h, at, l, f.kind, fails, lo, hi) == .Stop {
 		return back, .Stop
 	}
 	return back, .Next
+}
+
+// Reports each member the object's `dependentRequired` asks for and the object lacks. Returns `.Stop` for a read with no
+// sink.
+@(cold)
+@(private)
+dependent_missing :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, owner: ^Field, regs, at: core.Hook_Regs, lo, hi: u64) -> core.Action {
+	context = h.ctx
+	m := &h.plan.meta[owner.meta]
+	for r in h.plan.uses[owner.meta].requires {
+		if !member_seen(h, f, owner, regs, r.trigger) {
+			continue
+		}
+		for want in r.wants {
+			if !member_seen(h, f, owner, regs, want) {
+				e := core.Typed_Error{kind = .Missing_Field, at = lo}
+				e.want.text = h.plan.meta[m.block + want].name
+				note(h, at, e, hi, "dependentRequired")
+				if h.sink == nil {
+					return .Stop
+				}
+			}
+		}
+	}
+	return .Next
 }
 
 // Stores into the integer record `fld` a number spelled with a fraction or an exponent that is an integer, `1.0` or
@@ -604,4 +828,52 @@ checked_step :: proc(h: ^Reader, f: ^Frame, owner: ^Field, at: core.Hook_Regs) -
 	// The text is the input's or the temp allocator's, never the reader's.
 	text, ok := core.token_text(h.plan.readers, &h.view, key, context.temp_allocator)
 	return core.Name(text), ok
+}
+
+// How many entries a read judged again for its repeats keeps when the caller gave no sink, which a failure past it
+// reports as a failure with the entries it did keep.
+@(private)
+REJUDGE_ENTRIES :: 1 << 16
+
+// Starts the second read of a check that ended on `.Duplicate_Key` while noticing repeats: takes back what the first
+// read put in `read.sink` since `mark`, and returns the options of the read that judges them. A read with no sink gets
+// `own` as its sink, for `rejudged` to settle.
+rejudge :: proc(read: Read_Options, mark: Sink_Mark, own: ^Sink, allocator: runtime.Allocator) -> Read_Options {
+	judged := read
+	judged.repeats = .Judge
+	if read.sink != nil {
+		sink_restore(read.sink, mark)
+	} else {
+		own^ = {max_errors = REJUDGE_ENTRIES}
+		own.entries.allocator = allocator
+		judged.sink = own
+	}
+	return judged
+}
+
+// The refusal of a read `rejudge` gave `own` as its sink, `e` when it ended on a fault, else the first entry it kept, none
+// for a text whose repeats left it nothing to fail. Frees `own`.
+rejudged :: proc(own: ^Sink, e: core.Typed_Error) -> (first: core.Typed_Error) {
+	defer sink_destroy(own)
+	switch {
+	case e.kind == .Walk || e.kind == .No_Memory:
+		return e
+	case len(own.entries) > 0:
+		return {kind = own.entries[0].kind, at = own.entries[0].start}
+	case own.truncated:
+		return {kind = .Bad_Option}
+	}
+	return
+}
+
+// Whether a check with no sink that stopped on a refusal had an object open, whose later repeat of a key could take the
+// refusal back, so the caller reads again judging repeats.
+@(private)
+repeat_may_retract :: proc(r: ^Reader) -> bool {
+	for i in 1 ..< r.sp {
+		if r.frames[i].kind == .Object {
+			return true
+		}
+	}
+	return false
 }
