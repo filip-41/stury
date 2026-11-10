@@ -382,7 +382,8 @@ check_partial_document :: proc(t: ^testing.T) {
 	testing.expect(t, !judge(rows, "1,ann\n2,bob\n", ".[0][1]", {no_header = true}))
 }
 
-// `core.equal` and `core.hash` read a cell as the kind of the value it is set against, so equal values share a hash.
+// `core.equal` with `read_plain` and `core.hash` with `like` read a cell as the kind of the value it is set against, so equal
+// values share a hash. `core.equal` alone leaves a cell a string.
 @(test)
 check_equal_and_hash_retype_cells :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -398,8 +399,10 @@ check_equal_and_hash_retype_cells :: proc(t: ^testing.T) {
 		it := core.children(&doc, core.ROOT)
 		record, _ := core.child_next(&it)
 		cell := core.Node_Ref{&doc, record}
-		testing.expectf(t, core.equal(cell, operand) == c.equal, "%q", c.cells)
-		testing.expectf(t, core.equal(operand, cell) == c.equal, "%q", c.cells)
+		testing.expectf(t, core.equal(cell, operand, read_plain = true) == c.equal, "%q", c.cells)
+		testing.expectf(t, core.equal(operand, cell, read_plain = true) == c.equal, "%q", c.cells)
+		// Without the switch a cell is the string it is, so it is no number, boolean or null.
+		testing.expectf(t, !core.equal(cell, operand), "%q", c.cells)
 		if c.equal {
 			testing.expectf(t, core.hash(cell, like = operand) == core.hash(operand), "%q", c.cells)
 		}

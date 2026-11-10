@@ -149,6 +149,9 @@ Record_Docs :: struct {
 	// `next` and a typed read of the record into `target`, a `T`, whose typed reader takes `it.scratch` as its temp
 	// allocator.
 	read:   proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool,
+	// `read` for a model's load plan, which reads only as a check: the record is judged by the model's rules, into a zeroed
+	// `target`, with each refusal collected in `read.sink`. nil for a format that has no model.
+	check_read: proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool,
 	// Builds a record's document.
 	build:  proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),
 	// `next`, and the record's nodes written to `b` by the walk that frames it, with the offsets of `it.src`. nil for a
@@ -258,11 +261,15 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 	if it.fault != nil {
 		return false, {}
 	}
-	if it.docs == nil || it.docs.read == nil {
+	plan := plan
+	reads := it.docs.read if it.docs != nil else nil
+	if plan != nil && plan.model_plan == .Load && it.docs != nil {
+		reads = it.docs.check_read
+	}
+	if reads == nil {
 		it.fault = core.Fault{kind = .Bad_Option}
 		return false, {}
 	}
-	plan := plan
 	if plan == nil {
 		if it.plan == nil || it.plan.type != T {
 			if refusal := reader_plan(it, T); refusal != nil {
@@ -295,7 +302,7 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 	}
 	kept := typed.sink_mark(opts.sink)
 	if it.input.procedure == nil {
-		more = it.docs.read(it, target, T, plan, opts, allocator, &err)
+		more = reads(it, target, T, plan, opts, allocator, &err)
 	} else {
 		// A record the window cannot tell yet is read again after a refill, so what its first read collected and wrote
 		// goes. The restore is shallow, so what a first read allocated for `target` stays allocated.
@@ -306,7 +313,7 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 			}
 			pos, state := it.pos, it.state
 			err = {}
-			more = it.docs.read(it, target, T, plan, opts, allocator, &err)
+			more = reads(it, target, T, plan, opts, allocator, &err)
 			if settle_window(it, more, pos, state) {
 				break
 			}
@@ -320,6 +327,9 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 	}
 	if opts.sink != nil {
 		keep_collected(it, opts.sink, kept.errors)
+		for &e in opts.sink.entries[kept.entries:] {
+			e.start, e.end = e.start + it.base, e.end + it.base
+		}
 	}
 	return
 }

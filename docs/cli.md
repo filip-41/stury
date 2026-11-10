@@ -21,7 +21,8 @@ stury [-c] [-r] [-j] [--raw-output0] [-a] [-S] [-C|-M] [--tab|--indent N] [--unb
       [FILTER] [FILE...] [--args STRING...|--jsonargs JSON...]
 stury check [--from FORMAT|--seq] [--max-depth N] [--schema FILE [--schema-ref DIR] [--format-assert]
             [--max-errors N] [--report lines|basic|problem]] [FILE...]
-stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] [--max-depth N] [FILE...]
+stury check --filter FILTER --schema FILE [--from FORMAT] [-n] [-s] [-R] [--arg...] [-c]
+stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--format-assert] [--max-errors N]] [--in-place|--check] [--indent N|--tab] [--max-depth N] [FILE...]
 stury edit [--from FORMAT|--seq] [--in-place|--check|--diff] [--max-depth N] [-f FILE] [-L DIR] [--arg...] FILTER [FILE...]
 stury diff [--from FORMAT] [--set|--position] [--key [PATH=]MEMBER]... [--facts] [--json] OLD NEW
 stury diff --old-schema FILE --new-schema FILE [--compat backward|forward|full] [--json]
@@ -263,6 +264,39 @@ before the fault, and the exit is 5.
 A schema that does not read, compile or bind, or a keyword the check does not judge, is a usage error (exit 2) naming it.
 The options need `--schema`, and `--schema` is `check`'s alone.
 
+`stury check --filter FILTER --schema schema.json` types the filter against the schema of its inputs and reads no
+input. It refuses each step that no input the schema describes can take, on stderr as a compile error is told, and
+writes the JSON Schema that every output of the filter passes on stdout, shaped by the layout options. It exits 1 when
+it refused a step, else 0, and 3 when the filter does not compile.
+
+- A member read by name (`.emial`, `.["emial"]`, `{emial}`, `getpath(["emial"])`) that no object of the schema
+  describes is refused at the name, with the closest member it does describe: `"emial" is not a member of the object
+  the schema describes (did you mean "email"?)`. An object that lists members (`properties`, `patternProperties`, a
+  `const` or `enum` object) describes those, and every member where `additionalProperties` or `unevaluatedProperties`
+  takes one. An object that lists none (`{}`, `true`, `{"type":"object"}`) describes every member. A `?`, `try` or
+  `//` does not lift this refusal. A path an update or `path` reads may name any member, since an update makes it, and
+  a jq definition the prelude holds (`map_values`, `with_entries`, ...) is told at its call and refuses no member.
+- A step on kinds that never take it is refused as jq would fail it at run time: `.name + 1` when `.name` is a string,
+  `.[0]` on an object, `.[]` on a number, `ltrimstr` or `keys` on a number, `@csv` on an object. A step that some
+  value of its input takes passes. Inside `?`, `try` and the left of `//` these are the filter's choice and pass.
+- The written schema keeps the input's description of what a filter reads: `.email` writes the schema's `email`
+  member, `{n: .name}` an object of exactly `n`, `.tags | length` an integer, `type` the enum of the kinds the
+  schema allows. A member that may be absent adds null. What the typing cannot follow is written as `{}`, which takes
+  any value: a call deeper than two levels of recursion, a fold that does not settle, `fromjson`, `getpath` of a path
+  that is not a literal, a `catch` body's input. A value the filter computes keeps none of the input's rules: `-.`,
+  `.[1:]` and `ltrimstr("a")` of a constant or a bounded string give a number or a string. An update or `setpath`
+  whose path may be `.` gives what it writes, and arithmetic that may give NaN adds null, as jq writes NaN.
+- `-n` types the filter on null, `-s` on an array of the inputs, `-R` on strings, and `--arg` and `--argjson`
+  variables are their values. `input` and `inputs` read what the schema describes.
+- `--from csv` or `tsv` types the filter on the records a table reads: an object of the schema's member names, each
+  a string or null, and under `--infer` a number or a boolean too, or under `--no-header` an array of them. The other
+  formats read JSON values, which the schema describes.
+- In a format that reads byte strings, `type` on a string of `contentEncoding: base64` is `"bytes"`. No format of the
+  command line reads byte strings yet.
+
+FILE operands, `--seq`, `--report` and `--max-errors` are usage errors with `--filter`, as are the options that
+shape a filter run's output (`-r`, `-e`, `--stream`, ...).
+
 ## `schema`
 
 `stury schema infer [FILE...]` writes the JSON Schema that every record of the inputs passes: the kinds met at each
@@ -283,11 +317,22 @@ path of the node the search stopped at.
 
 ## `fmt`
 
+`fmt --schema FILE` converts each text of the input through a JSON Schema, a record at a time for NDJSON and the
+whole table for CSV: the text must pass it, every member it leaves open is kept, and the output must pass it as the
+output format reads it. A failure is told as `check --schema` tells it, in the input for an input that fails and
+against `NAME (output)` for an output that does, `--max-errors` limiting the failures told of a text, and it gives
+exit 1 while the other texts are still converted. A value the output format cannot spell, such as a nested cell in CSV,
+is told with its path. A CSV output takes the union of the rows' members as its columns, an empty cell is a member that
+is absent, and a row with no member at all is refused. Where the schema allows a cell to read as a string or as the value
+it spells, the reading the output passes is the one written. A format with attributes writes each as a member before the
+element's children, a name its children repeat as an array and its text as `#text` when the element has attributes; an
+attribute and a child of one name, and an array with attributes, are refused.
+
 `fmt` writes each input back in the printer's layout, or in another format. It runs no filter, so it takes no
 `FILTER`.
 
 ```sh
-stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] [--max-depth N] [FILE...]
+stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--format-assert] [--max-errors N]] [--in-place|--check] [--indent N|--tab] [--max-depth N] [FILE...]
 ```
 
 | Format | What `fmt` writes |
@@ -589,7 +634,7 @@ $ stury --from csv -r '[.name, .age] | @csv' people.csv
 ```
 
 - **Cells are strings or null.** A cell is read as a number or a boolean only under `--infer`
-  ([CSV and TSV options](#csv-and-tsv-options)); else convert with `tonumber` (`.age | tonumber`). A quoted field is its text without the quotes, with `""` read as one quote, and may
+  ([CSV and TSV options](#csv-and-tsv-options)); else convert with `tonumber` (`.age | tonumber`). A comparison reads a cell as the string it is, as the library's `core.compare` does: `.age == 30` is false without `--infer`. A quoted field is its text without the quotes, with `""` read as one quote, and may
   hold the delimiter and line breaks. An empty unquoted cell is `null` and a quoted `""` is `""`. In TSV,
   which has no quotes, every empty cell is `null`. `// ""` or `.a // empty` replaces a `null`. An empty line
   is no record, so a one-column file spells an empty cell `""`.
@@ -1055,8 +1100,9 @@ line and column in the stream, without a file's name.
   spelling is. A hex integer of up to 128 bits is compared by the decimal digits it prints
   (`0x20000000000001` equals `9007199254740993`), and a longer one is compared as its double.
 - A CSV or TSV cell is a string in a comparison, as `type` says: `.a == 1e-400` is false for the cell `1e-400`, and
-  `[.a, 1e-400] | unique` has two members. The library's `core.compare` reads such a cell as the number, boolean or
-  null it is compared with unless it is called with `read_plain = false`, which the filter does.
+  `[.a, 1e-400] | unique` has two members. The library's `core.compare` and `core.equal` do the same: a cell is a string
+  unless the document was read with `infer`, and only `read_plain = true`, which a schema's rules use, reads it as the number,
+  boolean or null it is compared with.
 - An integer literal of 18 or more digits is rounded to the nearest double. jq 1.8.2 can be one unit in the last
   place off: `712598146987295425 + 0` is `712598146987295500` in stury and `712598146987295400` in jq, and
   `1287579022434948980 % 7` is 5 in stury and 2 in jq. Python's `float()` gives stury's values.

@@ -4,12 +4,23 @@
 
 ### Command line
 
+- `stury fmt --schema FILE` converts through a JSON Schema: the input passes it, the members it leaves open are kept, and
+  the output passes it as the output format reads it. Library: `schema.Converter` and `schema.convert`.
+
+- `stury schema sample --to csv` writes the union of the rows' members as its columns, an absent member as an empty cell,
+  and refuses a nested cell.
+
 - `stury schema infer [FILE...]` writes the JSON Schema that every record of the inputs passes, and `stury schema sample
   SCHEMA` writes values that pass a schema, or with `--invalid` values that fail it. Both take the layout options.
 
 - `stury check --schema FILE` also checks each input against a JSON Schema and tells every failure, exit 1.
   `--report basic` and `--report problem` write the JSON Schema basic output or an RFC 9457 problem document,
   `--max-errors`, `--format-assert` and `--schema-ref` shape the check. Long files and records are checked on all cores.
+
+- `stury check --filter F --schema S` types the jq filter F against the schema S of its inputs: a member no object of
+  S lists (`.emial`) and a step on kinds that never take it are refused, exit 1, and the schema every output of F
+  passes is written. `--from csv` and `tsv` type F on the records a table reads. `type` on a string of
+  `contentEncoding: base64` is `"bytes"` in a format that reads byte strings.
 
 - `stury diff OLD NEW` tells the value changes of two inputs a line each, exit 1 when they differ. Arrays match as
   sequences, as sets (`--set`), by position (`--position`) or by a member (`--key`). `--old-schema S1 --new-schema S2`

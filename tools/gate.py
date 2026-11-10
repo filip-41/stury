@@ -225,15 +225,16 @@ def rosetta():
     return platform.machine() == "x86_64" or os.path.exists("/Library/Apple/usr/libexec/oah/libRosettaRuntime")
 
 
-def cli_suites(absent):
+def cli_suites(absent, odin):
     """The command line's suites against jq: every jq and cli.tsv case passes, the smoke cases fail only where
-    smoke.floor names them, and the random cases of regex_diff and jq_diff hold none different. They run on the binary `build-cli` makes,
+    smoke.floor names them, the random cases of regex_diff and jq_diff hold none different, and the types law holds. They run on the binary `build-cli` makes,
     after every other stage so that a loaded host does not time them out."""
     test = at(f"{CLI}/test")
     suite = lambda name, stage, *argv, tier=1: Check(name, stage, tier, [at(CLI)], ["python3", *argv], trees=[test], cli=True)
     out = [
         suite("cli jq suite", 5, f"{test}/jq_suite.py", CLI_BINARY),
         suite("cli smoke", 5, f"{test}/smoke.py", CLI_BINARY),
+        suite("cli types law", 5, f"{test}/types_law.py", CLI_BINARY, f"--odin={odin}"),
     ]
     has_jq = shutil.which("jq") and subprocess.run(["jq", "--version"], capture_output=True, text=True).stdout.strip() == "jq-1.8.2"
     # The merge tier runs the first seed, the full tier every seed.
@@ -264,7 +265,7 @@ def checks(odin):
         for name, script, tier in (("cli pieces law", "pieces_law.py", 1), ("cli follow", "follow_test.py", 0), ("cli memory", "memory_test.py", 1)):
             script = at(f"{CLI}/test/{script}")
             out.append(Check(name, 2, tier, [at(CLI)], ["python3", script, f"--odin={odin}"], trees=[script, at(f"{CLI}/test/harness.py")]))
-        out += cli_suites(absent)
+        out += cli_suites(absent, odin)
     for package in TEST_PKGS:
         name = package.replace("/", "-")
         root = [at(package)]

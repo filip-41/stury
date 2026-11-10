@@ -1192,17 +1192,32 @@ same_schema :: proc(a, b: ^rules.Description, from_a, from_b: rules.Node_Index, 
 	return same_schema(a, b, ox.additional, oy.additional, seen, with_rules) && same_schema(a, b, ox.keys, oy.keys, seen, with_rules)
 }
 
-// The dynamic anchor names of node `i`, joined, where the written `_recursive` is the read `$recursive`.
+// The dynamic anchor names of node `i` that a `$dynamicRef` names, joined, where the written `_recursive` is the read
+// `$recursive`.
 @(private = "file")
 anchor_names :: proc(d: ^rules.Description, i: rules.Node_Index) -> string {
 	names := make([dynamic]string, context.temp_allocator)
 	for x in d.anchors {
-		if x.node == i {
+		if x.node == i && dynamic_named(d, x.name) {
 			append(&names, strings.trim_left(x.name, "$_"))
 		}
 	}
 	slice.sort(names[:])
 	return strings.join(names[:], " ", context.temp_allocator)
+}
+
+// Whether a `$dynamicRef` of `d` names the dynamic anchor `name`, which no other keyword reads.
+@(private = "file")
+dynamic_named :: proc(d: ^rules.Description, name: string) -> bool {
+	for &n in d.nodes {
+		target := n.dynamic_ref.? or_else rules.NONE
+		for x in d.anchors {
+			if target != rules.NONE && x.node == target && x.name == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // The node a `$ref` with at most rules beside it reaches, which judges as the reference does, with those rules added to
@@ -1484,7 +1499,7 @@ markup_attribute :: proc "contextless" (doc: ^core.Document, f: core.Fact) -> (n
 // is its text, empty when it is, or an object of its children and `#text` runs, and each attribute `name="value"` is a
 // fact of its node, written past the model.
 @(private)
-markup_doc :: proc(model: string, attributes: []Markup_Attribute, readers: ^core.Readers) -> core.Document {
+markup_doc :: proc(model: string, attributes: []Markup_Attribute, readers: ^core.Readers, dups := core.Duplicates.Last) -> core.Document {
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, model)
 	facts := make([]core.Fact, len(attributes), context.temp_allocator)
@@ -1494,7 +1509,7 @@ markup_doc :: proc(model: string, attributes: []Markup_Attribute, readers: ^core
 		facts[i] = {lo = u64(len(b.buf)), node = a.node, n = u32(len(a.text)), role = .Attribute, spelling = core.comment_spelling(u8(len(name) + 2), 1)}
 		strings.write_string(&b, a.text)
 	}
-	doc, _ := core.build(b.buf[:len(model)], json.as(.Json))
+	doc, _ := core.build(b.buf[:len(model)], json.as(.Json), dups)
 	doc.src, doc.facts, doc.readers = b.buf[:], facts, readers
 	return doc
 }

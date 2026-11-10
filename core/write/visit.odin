@@ -14,6 +14,8 @@ Visit :: #type proc(v: ^Visitor, f: ^typed.Field, at: uintptr, kind: core.Typed_
 
 Visitor :: struct {
 	call:   Visit,
+	// Called at the close of a struct that has validators, with its model and the address of its first byte, nil for none.
+	close:  proc(v: ^Visitor, sm: ^typed.Struct_Model, base: uintptr) -> bool,
 	// The walk being visited, which `visit_path` reads during a call.
 	walker: rawptr,
 }
@@ -70,6 +72,16 @@ visit_record :: proc(w: ^Walker, open: Frame, top: int, f: ^typed.Field, at: uin
 		return more
 	}
 	return more && kind == .None
+}
+
+// Calls the visitor's close at the struct of frame `cur`, whose path is that of the frames below it, and says whether the
+// walk goes on.
+@(private)
+visit_close :: proc(w: ^Walker, cur: Frame, top: int, sm: ^typed.Struct_Model) -> bool {
+	open := cur
+	open.mode = .Target
+	w.open, w.top = open, top
+	return w.visitor.close(w.visitor, sm, cur.at)
 }
 
 // What a visit refuses of a value with no frame: a float that is not finite and an enum value no member has.

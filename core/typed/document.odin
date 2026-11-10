@@ -175,7 +175,7 @@ needs_close :: #force_inline proc "contextless" (f: ^Frame) -> bool {
 	#partial switch frame_owner(f).kind {
 	case .Array, .Required:
 		return true
-	case .Raw, .Hook, .Value:
+	case .Raw, .Hook, .Value, .Before:
 		return f.seen == 0
 	}
 	return false

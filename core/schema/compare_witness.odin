@@ -162,13 +162,13 @@ candidates :: proc(s: ^Search, nodes: []rules.Node_Index, depth: int) -> []core.
 		return nil
 	}
 	defer s.budget -= len(out)
-	bs, fits := branches(s.from.d, nodes)
+	bs, fits := rules.branches(s.from.d, nodes, false, MAX_BRANCHES)
 	if !fits {
 		return nil
 	}
 	for ab in bs {
 		an := nodes_of(s.from.d, ab[:])
-		kinds := kinds_of(an)
+		kinds := rules.kinds_of(s.from.d, ab[:])
 		for n in an {
 			if n.has_enum || n.const_of != nil {
 				listed := n.enum_of[:min(len(n.enum_of), MAX_LISTED)]

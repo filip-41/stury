@@ -19,9 +19,7 @@ infer_file :: proc(o: ^Opts, src: Source, path: string) -> ^rules.Description {
 infer_data :: proc(o: ^Opts, src: Source, path: string, data: []byte) -> ^rules.Description {
 	heap := runtime.heap_allocator()
 	inf := new(schema.Inferred, heap)
-	if err := schema.infer_records(inf, data, src.as, src.framing); err != nil {
-		exit_on_fault(o, src, path, data)
-		message.write_stderr("stury: parse error: %s: %s\n", file_name(path), edit_error_text(data, err))
+	if !infer_read(inf, src, path, data, told_by = o) {
 		os.exit(EXIT_INPUT)
 	}
 	d, derr := schema.inferred(inf, heap)

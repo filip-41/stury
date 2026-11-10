@@ -525,7 +525,8 @@ json5_spellings_compare_by_their_digits :: proc(t: ^testing.T) {
 	}
 }
 
-// A cell of a delimited text is read as the number it is compared with unless `read_plain` is false.
+// A cell of a delimited text is a string, in the library as in the command line, unless `read_plain` reads it as the number it is
+// compared with.
 @(test)
 a_cell_is_a_string_unless_read_as_a_number :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -537,9 +538,9 @@ a_cell_is_a_string_unless_read_as_a_number :: proc(t: ^testing.T) {
 	n, _ := core.doc_child_at(&doc, row, 0)
 	cell := core.Value(core.Node_Ref{&doc, n})
 	number := core.Value(core.number_text("1e-400"))
-	testing.expect(t, core.equal(cell, number))
-	testing.expect(t, core.compare(cell, number, eq = true, read_plain = false) != 0)
-	testing.expect(t, core.compare(cell, core.Value("1e-400"), eq = true, read_plain = false) == 0)
+	testing.expect(t, core.equal(cell, number, read_plain = true))
+	testing.expect(t, core.compare(cell, number, eq = true) != 0)
+	testing.expect(t, core.compare(cell, core.Value("1e-400"), eq = true) == 0)
 }
 
 // A hex integer of up to 128 bits equals, orders and hashes as the decimal that spells it, and one past 128 bits is its double.

@@ -20,7 +20,10 @@ validate :: proc(m: ^Model($T), v: ^T, sink: ^typed.Sink = nil) -> core.Error {
 
 @(private)
 validate_value :: proc(plan: ^typed.Plan, v: rawptr, sink: ^typed.Sink) -> core.Error {
-	j := Judging{visitor = {call = write.Visit(judge)}, plan = plan, sink = sink}
+	j := Judging{visitor = {call = write.Visit(judge), close = close_struct}, plan = plan, sink = sink}
+	if sink != nil {
+		j.floor = len(sink.entries)
+	}
 	ended := write.visit(plan, v, &j.visitor)
 	regex.scratch_destroy(&j.scratch)
 	delete(j.steps)
@@ -36,6 +39,7 @@ Judging :: struct {
 	using visitor: write.Visitor,
 	plan:          ^typed.Plan,
 	sink:          ^typed.Sink,
+	floor:         int, // the sink's entries below this are an earlier call's
 	first:         core.Typed_Error,
 	steps:         [dynamic]core.Step,
 	scratch:       regex.Scratch,

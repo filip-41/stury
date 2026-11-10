@@ -260,6 +260,21 @@ tighten :: proc(have: ^string, flag: ^bool, text: string, strict, lower: bool) {
 	have^, flag^ = text, strict
 }
 
+// How the bound `x` compares to `y` as a limit: above zero when `x` takes fewer values, below zero when more. Both are
+// bounds of one direction, `lower` for lower bounds, so a lower and an upper bound are not judged. A strict bound is
+// tighter than an equal one that is not, and equal bounds of one strictness give zero.
+tighter :: proc(x, y: string, strict_x, strict_y, lower: bool) -> int {
+	order := spell.decimal_compare(spell.decimal_of(x), spell.decimal_of(y))
+	order = order if lower else -order
+	switch {
+	case order != 0:
+		return order
+	case strict_x != strict_y:
+		return 1 if strict_x else -1
+	}
+	return 0
+}
+
 @(private)
 bound_of :: proc(text: string, exclusive: bool) -> (b: Bound) {
 	if text == "" {

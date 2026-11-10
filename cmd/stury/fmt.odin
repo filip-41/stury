@@ -43,6 +43,9 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	case o.in_place:
 		refuse_in_place_inputs(files)
 	}
+	if cli.schema.flag != "" {
+		run.convert = conversion_open(schema_read(cli.schema), cli.schema.max_errors)
+	}
 	init_output(&run.output, run)
 	run.output.held = o.check || o.in_place
 	ins := Inputs {
@@ -117,18 +120,20 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 		return false
 	}
 	heap := runtime.heap_allocator()
-	if !cells && ins.framing == .Concatenated && spine_print(ins, put_fmt) {
+	if !cells && ins.framing == .Concatenated && run.convert == nil && spine_print(ins, put_fmt) {
 		return true
 	}
-	if (cells == writes_cells(o) || !cells) && (cells || ins.framing == .Concatenated) {
+	converting := run.convert != nil
+	if (converting || cells == writes_cells(o) || !cells) && (cells || ins.framing == .Concatenated) {
 		doc, fault, texts := build_whole(data, ins.source, heap)
-		// A delimited text's fault is told at the record it is in, which the records below reach.
-		if f, bad := fault.?; bad && !cells {
+		// A delimited text's fault is told at the record it is in, which the records below reach, but a conversion
+		// reads the table whole.
+		if f, bad := fault.?; bad && (!cells || converting) {
 			tell_fault(ins, f)
 			return false
 		} else if !bad && !texts {
 			written := true
-			if cells == writes_cells(o) {
+			if converting || cells == writes_cells(o) {
 				written = put_document(run, ins, &doc)
 			} else {
 				emit_rows(run, ins, jq.document_value(doc))
@@ -155,6 +160,8 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 			return false
 		}
 		switch {
+		case converting:
+			put_document(run, ins, &doc, rec.at) or_return
 		case cells && writes_cells(o):
 			cut = int(rec.at) + len(rec.text)
 		case cells == writes_cells(o):
@@ -192,7 +199,7 @@ emit_rows :: proc(run: ^Run, ins: ^Inputs, v: jq.Value) {
 // own format: what a CSV file holds before a fault.
 @(private = "file")
 cells_cut :: proc(run: ^Run, ins: ^Inputs, cut: int) {
-	if !reads_cells(&run.opts) || !writes_cells(&run.opts) {
+	if !reads_cells(&run.opts) || !writes_cells(&run.opts) || run.convert != nil {
 		return
 	}
 	end := cut
@@ -207,10 +214,13 @@ cells_cut :: proc(run: ^Run, ins: ^Inputs, cut: int) {
 // The document `doc` of the open file written by the library's writer in the output's format and layout, and a
 // newline after it unless it ends with one or is empty, as a CSV file with no header is. False, told, when it cannot be.
 @(private = "file")
-put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
+put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document, at: u64 = 0) -> bool {
 	o := &run.opts
 	as := cells_written_as(o) if writes_cells(o) else json.as(.Jsonc if writes_comments(o) else .Json, {max_depth = o.max_depth})
 	out := &run.output
+	if run.convert != nil {
+		return convert_put(run, ins, doc, as, at)
+	}
 	text, _, err := core.write(doc, out.layout.opts, as, allocator = context.temp_allocator)
 	if err != nil {
 		flush_some(out, force = true)

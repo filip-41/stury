@@ -52,6 +52,7 @@ Read_Kind :: enum u8 {
 	Fixed_List,
 	Inside, // a token of a value read whole
 	Checked, // a description's node, judged by a `Check` and stored nowhere
+	Before, // a model's member whose value a `before` procedure rewrites first, which only a `Check` reads
 }
 
 // The hook's number arm tests `U8 ..= U64` as one aligned block and `I8 ..= I32` and `F32 ..= F64` as ranges.
@@ -81,6 +82,7 @@ Meta :: struct {
 	enum_info:  ^runtime.Type_Info_Enum,
 	arms:       []Arm, // a `Union`'s
 	read:       Unmarshal_Hook, // a `Hook`'s
+	before:     ^Before, // a `Before`'s
 	write:      Marshal_Hook, // a `Hook`'s
 	required:   []i32, // on a struct's `Never` record, the members that must be present
 	required_end: i32, // on a struct's own record, one past its last `required` member: a cursor at or past it has passed every one
@@ -228,6 +230,10 @@ Model_Rules :: struct {
 	// What a load's plan records of each struct it lays out, `load_struct` for a load's plan and nil for any other, so
 	// a program that loads no model links none of it.
 	structs: proc(b: ^Builder, owner: typeid, at: i32, f: ^Field, m: ^Meta, members: []Member, layout: ^Struct_Layout),
+	// The validators of struct `owner`, which run at its close once none of its members failed, nil for none.
+	validators: proc(m: ^Model_Rules, owner: typeid) -> []Validator,
+	// Whether the plan is a load's, whose structs settle at their close. Any other model plan holds only the validators.
+	loading: bool,
 	// The rule sets and leaves of the model's plan of the same type, which this plan takes in place of its own, nil for
 	// none. Each of this plan's rule sets is one of them.
 	rule_sets: []rules.Rules,
@@ -244,13 +250,15 @@ Model_Plan :: enum u8 {
 
 // What a load does with one of a model's structs. At its close it sets the `Fields_Set` at `fields_set` less one, if
 // that is not zero, and gives each member of `defaults` the input left out its default. A key of `read_only` is a
-// read_only member's, which the load skips, or refuses under the struct's `forbid`.
-@(private)
+// read_only member's, which the load skips, or refuses under the struct's `forbid`. `afters` and `checks` are the
+// validators of its members and of the struct, which run at its close.
 Struct_Model :: struct {
-	settle:     proc "contextless" (h: ^Reader, sm: ^Struct_Model, f: ^Frame, owner: ^Field, regs: core.Hook_Regs) -> core.Typed_Error_Kind,
+	settle:     proc "contextless" (h: ^Reader, sm: ^Struct_Model, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64) -> (core.Typed_Error_Kind, bool),
 	fields_set: u32,
 	defaults:   []Default,
 	read_only:  []string,
+	afters:     []After,
+	checks:     []Validator,
 }
 
 @(private)
@@ -282,6 +290,8 @@ Member_Rule :: struct {
 	// What writes the member's default from `data`, nil for none.
 	make:     Make_Default,
 	data:     rawptr,
+	after:    Validator, // judges the member's value once it is read and has passed its rules
+	before:   ^Before, // rewrites the member's value before it is read, nil for none
 	refused:  string,
 }
 
@@ -320,6 +330,7 @@ Plan :: struct {
 	// The format's text reads and the check of a node, copied from its `Format_Reads` by `plan_build`.
 	read, check: Text_Read,
 	node_check: Node_Read,
+	docs:       proc "contextless" () -> rawptr,
 	// The format's value writer, which holds its spelling compiled in, where its plan maker sets it.
 	marshal:   Marshal_Text,
 	// Checks a `Raw` member's text as one value of the format, and the format's `^write.Token_Spelling` a token write by
@@ -516,7 +527,7 @@ plan_arena :: proc(p: ^Plan) -> (runtime.Allocator, bool) {
 plan_reads :: proc(p: ^Plan, reads: ^Format_Reads) {
 	if reads != nil {
 		p.read, p.check, p.node_read, p.node_check = reads.read, reads.check, reads.node_read, reads.node_check
-		p.build = reads.build
+		p.build, p.docs = reads.build, reads.docs
 	}
 }
 
@@ -538,7 +549,7 @@ plan_start :: proc(p: ^Plan, as: core.As, opts: Plan_Options) -> Builder {
 	if services := readers.services; services != nil {
 		if reads := (^Format_Reads)(services.reads); reads != nil {
 			p.read, p.check, p.node_read, p.node_check = reads.read, reads.check, reads.node_read, reads.node_check
-			p.build = reads.build
+			p.build, p.docs = reads.build, reads.docs
 		}
 		if services.edit != nil {
 			p.raw = services.edit.value
@@ -698,7 +709,7 @@ reserve_block :: proc(b: ^Builder, n: int, key: Block_Key) -> i32 {
 never :: proc(b: ^Builder, at: int) {
 	f := &b.fields[at]
 	f.mask = {max(u64), max(u64)}
-	f.kind = .Never
+	f.kind, f.meta = .Never, u32(at)
 	b.meta[at] = {block = -1, capture = -1}
 }
 
@@ -1218,6 +1229,8 @@ Member :: struct {
 	alias:    string,
 	make:     Make_Default,
 	data:     rawptr,
+	after:    Validator,
+	before:   ^Before,
 }
 
 // What `lay_out` found of a struct besides its members: the member that captures unknown members, 1 + the offset of
@@ -1288,6 +1301,9 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 	for x, i in members {
 		fill(b, int(at) + i, x.type, x.name, u32(x.offset), 0, x.rule_set)
 		b.meta[int(at) + i].access = x.access
+		if x.before != nil {
+			keep_before(b, int(at) + i, x.before)
+		}
 		r := &b.fields[int(at) + i]
 		r.omit = x.omit
 		if !x.omit && r.n <= KEY_SIZE_MAX && plain_name(x.name) {
@@ -1416,7 +1432,7 @@ lay_out :: proc(b: ^Builder, owner: typeid, v: runtime.Type_Info_Struct, base: u
 			lay_out(b, v.types[i].id, inner, base + v.offsets[i], out, layout)
 			continue
 		}
-		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required, tag.omit || model.access == .Write_Only, rule_set, model.access, model.alias, model.make, model.data}
+		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required, tag.omit || model.access == .Write_Only, rule_set, model.access, model.alias, model.make, model.data, model.after, model.before}
 		if tag.unknown {
 			if tag.required || rule_set > 0 {
 				refuse_plan(b, .Bad_Tag, tag.name, "required" if tag.required else "model")

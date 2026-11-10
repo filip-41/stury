@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:mem/virtual"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:unicode/utf8"
@@ -227,9 +228,12 @@ value_text :: proc(g: ^Gen, b: ^Bound, as: core.As, opts: Sample_Options, scratc
 		}
 		if opts.invalid {
 			text, ok = broken(g, b, as, &v, opts, allocator)
-		} else if text, ok = written(v, as, opts, allocator); ok && (len(text) == 0 || !valid(b, text)) {
-			delete(text, allocator)
-			ok = false
+		} else {
+			refusal: Refusal
+			text, refusal = written(v, as, opts.write, allocator)
+			if ok = refusal.kind == .None && len(text) > 0 && valid(b, text); !ok {
+				delete(text, allocator)
+			}
 		}
 		if ok {
 			return
@@ -238,59 +242,93 @@ value_text :: proc(g: ^Gen, b: ^Bound, as: core.As, opts: Sample_Options, scratc
 	return nil, false
 }
 
-// `v` written in `as`, the bytes in `allocator`.
-@(private = "file")
-written :: proc(v: core.Value, as: core.As, opts: Sample_Options, allocator: runtime.Allocator) -> (text: []u8, ok: bool) {
-	t: write.Tokens
-	if write.tokens_init(&t, as, opts.write, allocator = allocator) != .None {
-		return nil, false
-	}
-	if t.spell.line != nil {
-		emit_rows(&t, v)
-	} else {
-		write.value_of(&t, v, true)
-	}
-	bytes, err := write.tokens_finish(&t)
-	return bytes, err.kind == .None
+// What a write refused: its kind, and for a flat format the row (-1 for a value that is no array) and the member name.
+@(private)
+Refusal :: struct {
+	kind: core.Typed_Error_Kind,
+	row:  int,
+	key:  string,
 }
 
-// A flat format's text: a record of the member names of the first row, then each row's values in that order, and
-// an empty slot for a value that is nested or absent. A value that is not an array is a table of one row.
+// `v` written in `as`, the bytes in `allocator`, or the refusal. A flat format's text is a record of the member names of
+// the rows, in the order they first appear, then each row's values in that order, null for a member a row lacks. A value
+// that is not an array is a table of one row. A row that is no object, a cell that is nested and rows with no member at
+// all are not written.
+@(private)
+written :: proc(v: core.Value, as: core.As, opts: core.Write_Options, allocator: runtime.Allocator) -> (text: []u8, refusal: Refusal) {
+	t: write.Tokens
+	if refusal.kind = write.tokens_init(&t, as, opts, allocator = allocator); refusal.kind != .None {
+		return nil, {refusal.kind, -1, ""}
+	}
+	if t.spell.line != nil {
+		refusal = emit_rows(&t, v)
+	} else {
+		refusal = {write.value_of(&t, v, true), -1, ""}
+	}
+	bytes, err := write.tokens_finish(&t)
+	if refusal.kind == .None {
+		refusal = {err.kind, -1, ""}
+	}
+	return bytes, refusal
+}
+
 @(private = "file")
-emit_rows :: proc(t: ^write.Tokens, v: core.Value) {
-	one := [1]core.Value{core.plain(v)}
-	rows := one[:]
-	if array, is_array := one[0].(^core.Array); is_array {
-		rows = array.items[:]
-	}
-	if len(rows) == 0 {
-		return
-	}
-	first, is_object := core.plain(rows[0]).(^core.Object)
-	if !is_object {
-		return
-	}
-	for k in first.keys {
-		write.value_string(t, k)
-	}
-	write.end_record(t)
-	for row in rows {
-		object, _ := core.plain(row).(^core.Object)
-		for k in first.keys {
-			slot: core.Value = ""
-			for i in 0 ..< (len(object.keys) if object != nil else 0) {
-				#partial switch x in core.plain(object.vals[i]) {
-				case ^core.Array, ^core.Object:
-				case:
-					if object.keys[i] == k {
-						slot = x
-					}
-				}
-			}
-			write.value_of(t, slot, true)
+emit_rows :: proc(t: ^write.Tokens, v: core.Value) -> Refusal {
+	rows := make([dynamic]core.Value, context.temp_allocator)
+	listed := core.value_kind(v) == .Array
+	if listed {
+		it := core.value_children(v)
+		for row in core.value_child_next(&it) {
+			append(&rows, row)
 		}
-		write.end_record(t)
+	} else {
+		append(&rows, v)
 	}
+	columns := make(map[string]int, context.temp_allocator)
+	names := make([dynamic]string, context.temp_allocator)
+	for row, i in rows {
+		if core.value_kind(row) != .Object {
+			return {.Unwritable, i if listed else -1, ""}
+		}
+		it := core.value_pairs(row)
+		for k in core.value_pair_next(&it) {
+			if k not_in columns {
+				columns[k] = len(names)
+				append(&names, k)
+			}
+		}
+	}
+	if len(names) == 0 {
+		return {.Unwritable if len(rows) > 0 else .None, 0 if listed else -1, ""}
+	}
+	for k in names {
+		if kind := write.value_string(t, k); kind != .None {
+			return {kind, -1, k}
+		}
+	}
+	if kind := write.end_record(t); kind != .None {
+		return {kind, -1, ""}
+	}
+	slots := make([]core.Value, len(names), context.temp_allocator)
+	for row, i in rows {
+		slice.zero(slots)
+		it := core.value_pairs(row)
+		for name, member in core.value_pair_next(&it) {
+			if kind := core.value_kind(member); kind == .Array || kind == .Object {
+				return {.Unwritable, i if listed else -1, name}
+			}
+			slots[columns[name]] = member
+		}
+		for slot, j in slots {
+			if kind := write.value_of(t, slot, true); kind != .None {
+				return {kind, i if listed else -1, names[j]}
+			}
+		}
+		if kind := write.end_record(t); kind != .None {
+			return {kind, i if listed else -1, ""}
+		}
+	}
+	return {}
 }
 
 // `v` with the `description` `note` written on it as a comment, when comments are asked for.
@@ -731,7 +769,7 @@ object_of :: proc(keys: [dynamic]string, vals: [dynamic]core.Value) -> ^core.Obj
 @(private = "file")
 repeated :: proc(items: []core.Value, e: core.Value) -> bool {
 	for x in items {
-		if core.equal(x, e) {
+		if core.equal(x, e, read_plain = true) {
 			return true
 		}
 	}
@@ -959,11 +997,11 @@ broken :: proc(g: ^Gen, b: ^Bound, as: core.As, v: ^core.Value, opts: Sample_Opt
 		old := at^
 		at^ = commented(g, mutants[i], note_text(old))
 		unordered_remove(&mutants, i)
-		if text, ok = written(v^, as, opts, allocator); ok {
-			if len(text) > 0 && fails_alone(b, text) {
-				return
+		if bytes, refusal := written(v^, as, opts.write, allocator); refusal.kind == .None {
+			if len(bytes) > 0 && fails_alone(b, bytes) {
+				return bytes, true
 			}
-			delete(text, allocator)
+			delete(bytes, allocator)
 		}
 		at^ = old
 	}

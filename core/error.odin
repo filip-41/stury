@@ -484,6 +484,7 @@ Typed_Error_Kind :: enum u8 {
 	Many_Arms, // a value that passes more than one of a rule's subschemas, where it takes one
 	No_Sample, // a description no value passes, or none the bounded search found, `want.text` names the node
 	Read_Only, // a key of a read_only member, which a load refuses where its struct forbids the members it does not name
+	Custom, // a value a model's validator refused, `want.text` holds its message
 }
 
 // The steps a `Typed_Error` holds.
@@ -562,7 +563,7 @@ Error_Entry :: struct {
 // by the tags.
 Typed_Detail :: struct #raw_union {
 	inner: Fault `raw_union_tag:"kind=Walk"`,
-	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Missing_Field,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema,kind=No_Sample"`,
+	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Missing_Field,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema,kind=No_Sample,kind=Custom"`,
 	plans: Plan_Clash `raw_union_tag:"kind=Plan_Mismatch"`,
 }
 
@@ -624,6 +625,7 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 	.Many_Arms     = {"many_arms", "Value passes more than one subschema"},
 	.No_Sample     = {"no_sample", "No value passes the description"},
 	.Read_Only     = {"read_only", "Field is read only"},
+	.Custom        = {"custom", "Value is not valid"},
 }
 
 // The messages of a schema check's entries, which name keywords and not a type's fields, where they differ.
@@ -744,6 +746,11 @@ write_typed_message :: proc(w: io.Writer, e: Typed_Error) -> io.Error {
 				return err
 			}
 			return nil
+		}
+	case .Custom:
+		if len(e.want.text) > 0 {
+			_, err := io.write_string(w, e.want.text)
+			return err
 		}
 	case .Unsupported, .Ambiguous_Union, .Bad_Schema, .No_Sample:
 		io.write_string(w, TYPED_KIND_RULES[e.kind].message) or_return
@@ -1036,6 +1043,10 @@ render :: proc(w: io.Writer, src: []u8, err: Error, lines: ^Lines = nil) -> io.E
 // The message of a check's entry `e`, in a schema's words where the entry has a keyword path and the kind has such words.
 // A missing member is named, which only the entry's operand does.
 write_entry_message :: proc(w: io.Writer, e: Error_Entry) -> io.Error {
+	if text, named := e.operand.(string); named && e.kind == .Custom {
+		_, err := io.write_string(w, text)
+		return err
+	}
 	if name, named := e.operand.(string); named && e.kind == .Missing_Field {
 		io.write_string(w, "Required member ") or_return
 		io.write_quoted_string(w, name) or_return

@@ -294,6 +294,11 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					r = intrinsics.ptr_offset(r, 1)
 				}
 				if r.kind == .Never {
+					when V {
+						if sm := w.meta[r.meta].model; sm != nil && w.visitor.close != nil && !visit_close(w, cur, top, sm) {
+							return .None
+						}
+					}
 					when !V {
 						p = room(out, CLOSE_ROOM)
 						if cur.lead == u32(T[.Open_Object][0]) {

@@ -3,6 +3,7 @@
 package rules
 
 import "base:runtime"
+import "core:slice"
 import core "../"
 
 // The kinds of value a node takes. `Integer` lies inside `Number`: a node of kind `Number` takes `1`.
@@ -196,4 +197,117 @@ description_destroy :: proc(d: ^Description) {
 // Whether `n` is a `$ref` and nothing else, which judges a value as the node it reaches does.
 ref_only :: proc(n: ^Node) -> bool {
 	return n.ref != nil && n.kinds == EVERY_KIND && n.rules == {} && n.array < 0 && n.object < 0 && !n.has_enum && n.const_of == nil && len(n.any_of) == 0 && len(n.all_of) == 0 && len(n.one_of) == 0 && n.not == nil && n.cond == {} && n.dynamic_ref == nil && n.unevaluated_items == nil && n.unevaluated_properties == nil
+}
+
+// The conjunctions that `nodes` alternate between: a `$ref` and an `allOf` join their targets to a conjunction, and an
+// `anyOf` splits it by its arms. Under `choices` a `oneOf` splits it too, an `if` splits it into what passes the `if` and
+// `then` and what passes the `else`, and a `$dynamicRef` into each node of its anchor's name it may reach. False when
+// more than `limit` would be open at once.
+branches :: proc(d: ^Description, nodes: []Node_Index, choices: bool, limit: int, allocator := context.temp_allocator) -> (out: [][dynamic]Node_Index, complete: bool) {
+	Open :: struct {
+		nodes: [dynamic]Node_Index,
+		next:  int,
+	}
+	join :: proc(o: ^Open, ids: ..Node_Index) {
+		for id in ids {
+			if id != NONE && !slice.contains(o.nodes[:], id) {
+				append(&o.nodes, id)
+			}
+		}
+	}
+	work := make([dynamic]Open, context.temp_allocator)
+	first := Open{nodes = make([dynamic]Node_Index, allocator)}
+	join(&first, ..nodes)
+	append(&work, first)
+	done := make([dynamic][dynamic]Node_Index, allocator)
+	ways := make([dynamic][2]Node_Index, context.temp_allocator)
+	forks := make([dynamic]Open, context.temp_allocator)
+	for len(work) > 0 {
+		if len(work) + len(done) > limit {
+			return nil, false
+		}
+		cur := pop(&work)
+		forked := false
+		for cur.next < len(cur.nodes) && !forked {
+			n := &d.nodes[cur.nodes[cur.next]]
+			cur.next += 1
+			join(&cur, n.ref.? or_else NONE)
+			join(&cur, ..n.all_of)
+			clear(&forks)
+			append(&forks, cur)
+			for split in 0 ..< (4 if choices else 1) {
+				clear(&ways)
+				switch split {
+				case 0:
+					for arm in n.any_of {
+						append(&ways, [2]Node_Index{arm, NONE})
+					}
+				case 1:
+					for arm in n.one_of {
+						append(&ways, [2]Node_Index{arm, NONE})
+					}
+				case 2:
+					if test, has := n.cond.test.?; has && (n.cond.then != nil || n.cond.other != nil) {
+						append(&ways, [2]Node_Index{test, n.cond.then.? or_else NONE}, [2]Node_Index{n.cond.other.? or_else NONE, NONE})
+					}
+				case 3:
+					if target, has := n.dynamic_ref.?; has {
+						dynamic_targets(d, target, &ways)
+					}
+				}
+				if len(ways) == 0 {
+					continue
+				}
+				if len(work) + len(done) + len(forks) * len(ways) > limit {
+					return nil, false
+				}
+				open := len(forks)
+				for _ in 0 ..< open {
+					f := pop_front(&forks)
+					for &w in ways {
+						fork := Open{nodes = slice.clone_to_dynamic(f.nodes[:], allocator), next = f.next}
+						join(&fork, ..w[:])
+						append(&forks, fork)
+					}
+				}
+				forked = true
+			}
+			if forked {
+				append(&work, ..forks[:])
+			}
+		}
+		if !forked {
+			append(&done, cur.nodes)
+		}
+	}
+	return done[:], true
+}
+
+// The nodes a `$dynamicRef` that reaches `target` first may reach: each dynamic anchor of the name `target` is anchored
+// by, or `target` alone when it is not a dynamic anchor.
+@(private = "file")
+dynamic_targets :: proc(d: ^Description, target: Node_Index, ways: ^[dynamic][2]Node_Index) {
+	for x in d.anchors {
+		if x.node != target {
+			continue
+		}
+		for y in d.anchors {
+			if y.name == x.name && !slice.contains(ways[:], [2]Node_Index{y.node, NONE}) {
+				append(ways, [2]Node_Index{y.node, NONE})
+			}
+		}
+	}
+	if len(ways) == 0 {
+		append(ways, [2]Node_Index{target, NONE})
+	}
+}
+
+// The kinds that the conjunction `ids` takes, `Number` counting its integers.
+kinds_of :: proc(d: ^Description, ids: []Node_Index) -> Kinds {
+	k := EVERY_KIND
+	for id in ids {
+		n := &d.nodes[id]
+		k &= n.kinds + ({.Integer} if .Number in n.kinds else {})
+	}
+	return k
 }

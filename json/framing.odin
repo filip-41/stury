@@ -28,6 +28,7 @@ FRAMING := records.Framing_Services {
 DOCS := records.Record_Docs {
 	scan  = scan_record,
 	read  = read_record,
+	check_read = check_read_record,
 	check_run = check_run,
 	build = build_record,
 	build_next = build_next,
@@ -500,6 +501,49 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 		typed.sink_restore(read.sink, kept)
 	}
 	// The record is refused with its `seq_fault`, collected with the read's allocator.
+	f := seq_fault(it, rec, nil).?
+	err^ = {kind = .Walk, at = f.at, inner = f}
+	context.allocator = allocator
+	typed.sink_error(read.sink, err^)
+	return true
+}
+
+@(private)
+check_read_record :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
+	switch Spec(it.as.spec) {
+	case .Json:  return check_read_spec(it, target, T, plan, read, allocator, err, .Json)
+	case .Jsonc: return check_read_spec(it, target, T, plan, read, allocator, err, .Jsonc)
+	case .Json5: return check_read_spec(it, target, T, plan, read, allocator, err, .Json5)
+	}
+	return false
+}
+
+// Reads the next record into `target` as a check judges it, which a model's load plan needs: the record is framed first,
+// and its text is read in place. Under `.Seq` a record with a fault of its framing is refused with that fault.
+@(private)
+check_read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
+	rec: records.Record
+	ok: bool
+	if it.framing >= .Concatenated {
+		rec, ok = it.services.next[it.framing](it)
+	} else {
+		rec, ok = frame_line(it)
+	}
+	if !ok {
+		return false
+	}
+	opts := options_of(it.as)
+	kept := typed.sink_mark(read.sink)
+	if it.framing != .Seq || it.state[1] != UNFRAMED {
+		read_value(it.src, rec.at, rec.at + u64(len(rec.text)), S, target, T, plan, read, opts, it.frames, allocator, runtime.arena_allocator(&it.scratch), err, false, true)
+		if it.framing != .Seq {
+			return true
+		}
+		if _, bad := seq_fault(it, rec, nil).?; !bad || err.kind == .Walk {
+			return true
+		}
+		typed.sink_restore(read.sink, kept)
+	}
 	f := seq_fault(it, rec, nil).?
 	err^ = {kind = .Walk, at = f.at, inner = f}
 	context.allocator = allocator

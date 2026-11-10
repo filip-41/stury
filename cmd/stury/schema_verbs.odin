@@ -55,6 +55,20 @@ schema_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	sample_main(run, cli, files)
 }
 
+// Reads the records of `data`, the file `path`, into `inf`. A fault is told on stderr and gives false, after the line of
+// the first fault of the bytes when `told_by` is given, which exits.
+infer_read :: proc(inf: ^schema.Inferred, src: Source, path: string, data: []byte, runner: ^core.Runner = nil, told_by: ^Opts = nil) -> bool {
+	err := schema.infer_records(inf, data, src.as, src.framing, runner)
+	if err == nil {
+		return true
+	}
+	if told_by != nil {
+		exit_on_fault(told_by, src, path, data)
+	}
+	message.write_stderr("stury: parse error: %s: %s\n", file_name(path), edit_error_text(data, err))
+	return false
+}
+
 // The description of the records of `files`, or of the standard input, written as JSON as the layout options say. Exits 5
 // after a text that does not read or runs out of memory, and 2 after a file that does not open.
 @(private = "file")
@@ -96,8 +110,7 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 		if len(data) >= POOLED_BYTES {
 			runner = run_pool(run)
 		}
-		if err := schema.infer_records(&inf, data, src.as, src.framing, runner); err != nil {
-			message.write_stderr("stury: parse error: %s: %s\n", file_name(path), edit_error_text(data, err))
+		if !infer_read(&inf, src, path, data, runner) {
 			faults += 1
 		}
 		free_spent({data, mapped})

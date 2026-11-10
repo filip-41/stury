@@ -28,6 +28,7 @@ Usage:	stury [options] <jq filter> [file...]
 	stury [options] --args <jq filter> [strings...]
 	stury [options] --jsonargs <jq filter> [JSON_TEXTS...]
 	stury check [--from format|--seq] [--max-depth n] [file...]
+	stury check --filter <jq filter> --schema <schema>
 	stury fmt [--from format] [--to format] [--in-place|--check]
 	          [--indent n|--tab] [--max-depth n] [file...]
 	stury edit [--from format|--seq] [--in-place|--check|--diff] <jq filter> [file...]
@@ -131,6 +132,7 @@ full: docs/cli.md in stury's source, or man stury.
 // `stury check --help`.
 @(private = "file")
 CHECK_HELP :: `Usage:	stury check [--from format|--seq] [--max-depth n] [--schema file] [file...]
+	stury check --filter <jq filter> --schema file [-n] [-s] [-R] [--arg name value]
 
 stury check judges each input as stury . reads it and prints nothing when it
 is valid. Every file is judged, and each file's first fault is reported.
@@ -149,6 +151,9 @@ Options:
       --max-errors n        keep at most n failures of an input;
       --report kind         tell failures as lines (default), basic (the JSON
                             Schema basic output) or problem (RFC 9457);
+      --filter f            read no input: type the jq filter f against
+                            --schema, refuse each step no input takes, exit
+                            1, and write the schema of its outputs;
       --delimiter c, --no-header, --comment c, --ragged, --lazy-quotes
                             read csv or tsv as stury --help says;
   -h, --help                show this help.

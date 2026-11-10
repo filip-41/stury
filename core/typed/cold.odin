@@ -32,7 +32,7 @@ indirect :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t
 		return regs, .Next
 	case .Ptr, .Maybe, .Union, .Any:
 		return wrapped(h, regs, t, fld, m, dest)
-	case .Raw, .Hook, .Value:
+	case .Raw, .Hook, .Value, .Before:
 		if t.kind == .Object || t.kind == .Array {
 			f := &h.frames[h.sp]
 			h.sp += 1
@@ -40,6 +40,11 @@ indirect :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t
 			return {NO_LIMIT, u64(uintptr(&h.plan.fields[3])), 0}, .Next
 		}
 		lo, hi := core.scalar_ends(t)
+		when H == Check {
+			if fld.kind == .Before {
+				return before_value(h, regs, m, dest, lo, hi)
+			}
+		}
 		reason = store_whole(h, fld, m, dest, t.kind, lo, hi, t)
 	case .Enum:
 		reason = store_enum(h, t, m.enum_info, dest, m.size)
@@ -1016,6 +1021,20 @@ member_found :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.To
 		release_text(h, uintptr(regs.c) + uintptr(at[i].offset))
 	}
 	return regs, .Next
+}
+
+// Moves the cursor to member `i` of the open struct for a cell read by position. A cell past the last member is passed
+// over, and refused under `refuse_unknown`.
+select_member :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, i: int) -> (core.Hook_Regs, core.Action) {
+	f := &h.frames[h.sp - 1]
+	owner := frame_owner(f)
+	if !is_struct(owner) || i >= int(h.plan.meta[owner.meta].members) {
+		if is_struct(owner) && (h.refuse_unknown || h.plan.meta[owner.meta].forbid) {
+			return refuse(h, regs, {kind = .Wrong_Length, at = t.lo}, t.lo + u64(t.n))
+		}
+		return regs, .Skip
+	}
+	return member_found(h, regs, t, f, owner, i)
 }
 
 @(cold)

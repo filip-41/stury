@@ -36,6 +36,9 @@ record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
 		read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
 			return read_row_spec(it, target, T, plan, read, allocator, err, S)
 		},
+		check_read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
+			return check_row_spec(it, target, T, plan, read, allocator, err, S)
+		},
 		build = proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 			return build_row_spec(it, rec, allocator, S)
 		},

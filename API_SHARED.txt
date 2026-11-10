@@ -45,6 +45,7 @@ random_next :: proc(s: ^Source) -> u64
 scratch_destroy :: proc(scratch: ^Scratch)
 # core
 AT_NO_BYTE :: bit_set[Fault_Kind]{.None, .No_Memory, .Bad_Option}
+Attribute_Iter :: struct { doc: ^Document, facts: []Fact, }
 COMMENT_ROLES :: bit_set[Role]{.Comment, .Comment_Inline, .Comment_Foot}
 FAULT_REACH :: 16
 HEX_ROOM :: 40
@@ -69,7 +70,7 @@ built_value :: proc(r: Node_Ref, dups := Duplicates.Last, borrow := false) -> Va
 children_from :: proc(doc: ^Document, i: Node_Index, k: int) -> Child_Iter
 comment_spelling :: #force_inline proc "contextless" (lead, tail: u8) -> u16
 comment_tail :: #force_inline proc "contextless" (spelling: u16) -> u64
-compare_members :: proc(a, b: []Member, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := true) -> int
+compare_members :: proc(a, b: []Member, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false) -> int
 double_of :: proc(v: Value, buf: []u8 = nil) -> (f: f64, digits: string, ok: bool)
 element_of :: proc(doc: ^Document, c: Node_Index, k: int) -> (Node_Index, Presence)
 entry_code :: proc(e: Error_Entry) -> string
@@ -97,6 +98,7 @@ number_f64 :: proc(n: Number, text: string) -> f64
 number_shape :: #force_inline proc "contextless" (spelling: u16) -> u16
 number_spelling :: #force_inline proc "contextless" (kind: u16, int_digits, frac_digits: u64) -> u16
 number_text :: proc(text: string, allocator := context.allocator) -> ^Number_Text
+object_append :: #force_inline proc(o: ^Object, k: string, v: Value)
 object_delete :: proc(o: ^Object, k: string)
 object_delete_all :: proc(o: ^Object, gone: map[string]bool)
 object_set :: proc(o: ^Object, k: string, v: Value)
@@ -175,6 +177,7 @@ EVERY_KIND :: Kinds{.Null, .Bool, .Integer, .Number, .String, .Array, .Object}
 Failures :: bit_set[core.Typed_Error_Kind; u64]
 NONE :: Node_Index(-1)
 Programs :: map[string]rawptr
+branches :: proc(d: ^Description, nodes: []Node_Index, choices: bool, limit: int, allocator := context.temp_allocator) -> (out: [][dynamic]Node_Index, complete: bool)
 decimal_i64 :: proc(d: spell.Decimal) -> (v: i64, ok: bool)
 description_destroy :: proc(d: ^Description)
 enum_has :: proc(l: ^Leaf, kind: core.Kind, text: string) -> bool
@@ -183,11 +186,13 @@ integral :: proc(d: spell.Decimal) -> bool
 judge_count :: #force_inline proc "contextless" (n, low, high: u64) -> (fails: Failures)
 judge_number :: proc(l: ^Leaf, text: string, small: Maybe(i64)) -> (fails: Failures)
 judge_string :: proc(l: ^Leaf, text: string, scratch: ^regex.Scratch) -> (fails: Failures)
+kinds_of :: proc(d: ^Description, ids: []Node_Index) -> Kinds
 leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator, programs: ^Programs = nil) -> (l: Leaf, refused: string)
 merged :: proc(n: ^Node, edge: Rules) -> (r: Rules, refused: string)
 program_of :: proc(programs: ^Programs, expression: string, allocator: runtime.Allocator) -> (re: rawptr, err: string)
 ref_only :: proc(n: ^Node) -> bool
 rules_leaf :: proc(r: Rules, kinds: Kinds, allocator := context.allocator) -> (l: Leaf, refused: string)
+tighter :: proc(x, y: string, strict_x, strict_y, lower: bool) -> int
 trivial :: proc(l: ^Leaf) -> bool
 uri_split :: proc(s: string) -> (u: Uri)
 # core/build
@@ -227,13 +232,17 @@ scan_start :: proc(h: ^Scan, src: []u8, as: core.As, paths: []core.Path, read: c
 set_answers :: proc(list: ^core.Edit_List, path: core.Path, in_: core.Edit_Input, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
 # core/typed
 KEY_SIZE_MAX :: 240
+Verdict :: struct { member: string, failure: Failure, }
 check_document :: proc(doc: ^core.Document, node: core.Node_Index, target: rawptr, T: typeid, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
+check_member :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token, fld: ^Field, dest: uintptr) -> core.Action
 check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error)
 check_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator := context.allocator) -> core.Error
 enum_member :: proc "contextless" (info: ^runtime.Type_Info_Enum, value: i64) -> int
 field_at :: #force_inline proc "contextless" (b: u64) -> ^Field
 grow_frames :: #force_no_inline proc "contextless" (h: ^Reader, have, want: int) -> (int, bool)
 grow_list :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs) -> (core.Hook_Regs, core.Typed_Error_Kind)
+judge_header :: proc(h: ^Check, regs: core.Hook_Regs, row: ^Field, names: []string, at: []u64, drop: []bool) -> core.Action
+judge_struct :: proc(sm: ^Struct_Model, base: uintptr, path: []core.Step, entries: []core.Error_Entry, seen: []bool, out: ^[dynamic]Verdict)
 load_struct :: proc(b: ^Builder, owner: typeid, at: i32, f: ^Field, m: ^Meta, members: []Member, layout: ^Struct_Layout)
 map_slot :: proc(h: ^Reader, m: ^Meta, raw: ^runtime.Raw_Map, key: string, t: core.Token, value: ^Field, fresh: bool) -> (slot: rawptr, reason: core.Typed_Error_Kind)
 mark_arm :: proc(dest: uintptr, fld: ^Field, m: ^Meta, arm: int)
@@ -254,10 +263,14 @@ pointer_target :: proc "contextless" (target: any) -> (data: rawptr, T: typeid, 
 read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> core.Typed_Error
 read_release :: proc "contextless" (r: ^Reader, frames: []Frame)
 read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator, judged := true) -> (regs: core.Hook_Regs, err: core.Typed_Error)
+refusal_at :: proc(kind: core.Typed_Error_Kind, steps: []core.Step, message: string, at: u64) -> core.Typed_Error
 refuse_element :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action)
 refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, regs_in: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action)
 rejudge :: proc(read: Read_Options, mark: Sink_Mark, own: ^Sink, allocator: runtime.Allocator) -> Read_Options
 rejudged :: proc(own: ^Sink, e: core.Typed_Error) -> (first: core.Typed_Error)
+run_before :: proc(h: ^Check, regs: core.Hook_Regs, b: ^Before, value: core.Value, lo, hi: u64) -> (out: core.Value, back: core.Hook_Regs, action: core.Action, failed: bool)
+scalar_text :: proc "contextless" (v: core.Value, buf: ^[spell.F64_ROOM]u8) -> (text: string, ok: bool)
+select_member :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, i: int) -> (core.Hook_Regs, core.Action)
 sink_add :: proc(c: ^Sink, e: core.Error_Entry) -> (added: bool, err: runtime.Allocator_Error)
 sink_entry :: proc(c: ^Sink, entry: core.Error_Entry, steps, words: []core.Step, reverse: bool) -> bool
 sink_error :: proc(c: ^Sink, e: core.Typed_Error)
@@ -268,14 +281,16 @@ sink_room :: proc(c: ^Sink, allocator: runtime.Allocator) -> bool
 store_cstring :: proc(h: ^Reader, t: core.Token, dest: uintptr) -> core.Typed_Error_Kind
 store_enum :: proc(h: ^Reader, t: core.Token, info: ^runtime.Type_Info_Enum, dest: uintptr, size: u32) -> core.Typed_Error_Kind
 store_enum_value :: proc(info: ^runtime.Type_Info_Enum, n: core.Number, dest: uintptr, size: u32) -> core.Typed_Error_Kind
+store_integral :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token, fld: ^Field, dest: uintptr) -> core.Typed_Error_Kind
 store_number :: proc(n: core.Number, integer: bool, h: ^Reader, t: core.Token, fld: ^Field, dest: uintptr) -> core.Typed_Error_Kind
 store_string :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, dest: ^string) -> core.Typed_Error_Kind
 store_whole :: proc(h: ^Reader, fld: ^Field, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64, t: core.Token) -> core.Typed_Error_Kind
+verdict_path :: proc(path: []core.Step, v: Verdict, allocator: runtime.Allocator) -> []core.Step
 # core/write
 LINE_ROOM :: 1024
 Scratch :: runtime.Arena
 Visit :: #type proc(v: ^Visitor, f: ^typed.Field, at: uintptr, kind: core.Typed_Error_Kind) -> bool
-Visitor :: struct { call: Visit, walker: rawptr, }
+Visitor :: struct { call: Visit, close: proc(v: ^Visitor, sm: ^typed.Struct_Model, base: uintptr) -> bool, walker: rawptr, }
 edit_input :: proc(v: $T, plan: ^typed.Plan, scratch: ^Scratch) -> (in_: core.Edit_Input, err: core.Error)
 end_record :: proc(t: ^Tokens) -> core.Typed_Error_Kind
 enum_spelled :: proc(plan: ^typed.Plan, info: ^runtime.Type_Info_Enum, value: i64, p: [^]u8) -> (string, core.Typed_Error_Kind)
@@ -319,6 +334,9 @@ open_with :: proc(src: []u8, as: core.As, services: ^Framing_Services, docs: ^Re
 validate_parallel :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault)
 write_text :: proc(wr: ^Writer, text: []u8) -> core.Typed_Error_Kind
 writer_take :: proc(wr: ^Writer) -> []u8
+# core/schema
+converter_destroy :: proc(cv: ^Converter)
+converter_init :: proc(cv: ^Converter, c: ^Compiled, from, to: core.As) -> (err: core.Error)
 # json
 Detail :: enum u8 { None, Literal, Identifier, Colon, Trailing, Unframed, Cut_Number, Non_Finite, Array_Separator, Member_Separator, Trailing_Comma, Lone_Comma, Unmatched_Bracket, Unmatched_Brace, Single_Quote, Control_Char, Invalid_Utf8, Leading_Zero, Leading_Dot, Leading_Plus, Key_Not_String, Expected_Value, }
 RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", "Invalid unquoted key"}, {"colon", "Missing colon after key"}, {"trailing", "Unexpected text after the value"}, {"unframed", "Text before the first RS"}, {"cut_number", "Potentially truncated top-level numeric value"}, {"non_finite", "Infinity and NaN have no JSON value"}, {"array_separator", "Expected ',' or ']' after an array element"}, {"member_separator", "Expected ',' or '}' after an object member"}, {"trailing_comma", "Trailing comma before the closing bracket"}, {"lone_comma", "Expected value before ','"}, {"unmatched_bracket", "Unmatched ']'"}, {"unmatched_brace", "Unmatched '}'"}, {"single_quote", "Invalid string literal; expected \", but got '"}, {"control_char", "Unescaped control character"}, {"invalid_utf8", "Invalid UTF-8"}, {"leading_zero", "Leading zero in a number"}, {"leading_dot", "A number cannot start with '.'"}, {"leading_plus", "A number cannot start with '+'"}, {"key_not_string", "Object keys must be strings"}, {"expected_value", "Expected a value"}}}

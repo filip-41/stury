@@ -11,7 +11,7 @@ import "../rules"
 // `$ref` and its `allOf`) and a disjunction of branches (its `anyOf`), and the proof checks each branch of the first
 // against some branch of the second, facet by facet. A pair the proof cannot decide is refused, never assumed.
 
-@(private = "file")
+@(private)
 MAX_BRANCHES :: 32
 
 @(private)
@@ -81,8 +81,8 @@ included :: proc(p: ^Prover, a, b: []rules.Node_Index, depth: int) -> bool {
 	}
 	p.running[key] = {}
 	defer delete_key(&p.running, key)
-	as, a_fits := branches(p.from.d, a)
-	bs, b_fits := branches(p.to.d, b)
+	as, a_fits := rules.branches(p.from.d, a, false, MAX_BRANCHES)
+	bs, b_fits := rules.branches(p.to.d, b, false, MAX_BRANCHES)
 	if !a_fits || !b_fits {
 		return refuse(p, "anyOf")
 	}
@@ -129,54 +129,6 @@ conjunction_key :: proc(d: ^rules.Description, ids: []rules.Node_Index) -> strin
 	return string(slice.to_bytes(reached[:kept]))
 }
 
-// The conjunctions that `nodes` alternate between: each `anyOf` splits a conjunction by its arms, and a `$ref` and an
-// `allOf` join their targets to it. False when there are too many to follow.
-@(private)
-branches :: proc(d: ^rules.Description, nodes: []rules.Node_Index) -> (out: [][dynamic]rules.Node_Index, fits: bool) {
-	Open :: struct {
-		nodes: [dynamic]rules.Node_Index,
-		next:  int,
-	}
-	work := make([dynamic]Open, context.temp_allocator)
-	first := Open{nodes = make([dynamic]rules.Node_Index, context.temp_allocator)}
-	append(&first.nodes, ..nodes)
-	append(&work, first)
-	done := make([dynamic][dynamic]rules.Node_Index, context.temp_allocator)
-	for len(work) > 0 {
-		if len(work) + len(done) > MAX_BRANCHES {
-			return nil, false
-		}
-		cur := pop(&work)
-		forked := false
-		for cur.next < len(cur.nodes) && !forked {
-			n := &d.nodes[cur.nodes[cur.next]]
-			cur.next += 1
-			if target, has := n.ref.?; has && !slice.contains(cur.nodes[:], target) {
-				append(&cur.nodes, target)
-			}
-			for m in n.all_of {
-				if !slice.contains(cur.nodes[:], m) {
-					append(&cur.nodes, m)
-				}
-			}
-			if len(n.any_of) > 0 {
-				forked = true
-				for arm in n.any_of {
-					fork := Open{nodes = slice.clone_to_dynamic(cur.nodes[:], context.temp_allocator), next = cur.next}
-					if !slice.contains(fork.nodes[:], arm) {
-						append(&fork.nodes, arm)
-					}
-					append(&work, fork)
-				}
-			}
-		}
-		if !forked {
-			append(&done, cur.nodes)
-		}
-	}
-	return done[:], true
-}
-
 @(private)
 nodes_of :: proc(d: ^rules.Description, ids: []rules.Node_Index) -> []^rules.Node {
 	out := make([]^rules.Node, len(ids), context.temp_allocator)
@@ -184,16 +136,6 @@ nodes_of :: proc(d: ^rules.Description, ids: []rules.Node_Index) -> []^rules.Nod
 		out[i] = &d.nodes[id]
 	}
 	return out
-}
-
-// The kinds that a conjunction takes, `Number` counting its integers.
-@(private)
-kinds_of :: proc(ns: []^rules.Node) -> rules.Kinds {
-	k := rules.EVERY_KIND
-	for n in ns {
-		k &= n.kinds + (rules.Kinds{.Integer} if .Number in n.kinds else {})
-	}
-	return k
 }
 
 @(private = "file")
@@ -204,7 +146,7 @@ exotic :: proc(n: ^rules.Node) -> bool {
 @(private = "file")
 branch_included :: proc(p: ^Prover, a, b: []rules.Node_Index, ab, bb: [dynamic]rules.Node_Index, depth: int) -> bool {
 	an, bn := nodes_of(p.from.d, ab[:]), nodes_of(p.to.d, bb[:])
-	ka, kb := kinds_of(an), kinds_of(bn)
+	ka, kb := rules.kinds_of(p.from.d, ab[:]), rules.kinds_of(p.to.d, bb[:])
 	if ka == {} {
 		return true
 	}
@@ -225,7 +167,7 @@ branch_included :: proc(p: ^Prover, a, b: []rules.Node_Index, ab, bb: [dynamic]r
 			matched ||= same_node(p, m, bb[i])
 		}
 		if negated, has := n.not.?; has && !matched {
-			matched = ka & kinds_of(nodes_of(p.to.d, {negated})) == {}
+			matched = ka & rules.kinds_of(p.to.d, {negated}) == {}
 		}
 		if !matched {
 			return refuse(p, "$dynamicRef" if n.dynamic_ref != nil else "applicator")
@@ -298,15 +240,27 @@ some :: proc(an: []^rules.Node, b: ^rules.Node, covers: proc(a, b: ^rules.Node) 
 	return false
 }
 
+// Whether the bound `x` of the first side holds at least as tight as `y`, which a `y` with no bound leaves to any.
 @(private = "file")
-at_least :: proc(x, y: string, strict_x, strict_y, lower: bool) -> bool {
-	order := spell.decimal_compare(spell.decimal_of(x), spell.decimal_of(y))
-	order = order if lower else -order
-	return order > 0 || order == 0 && (strict_x || !strict_y)
+as_tight :: proc(x, y: string, strict_x, strict_y, lower: bool) -> bool {
+	return y == "" || x != "" && rules.tighter(x, y, strict_x, strict_y, lower) >= 0
+}
+
+// The rules every node of `an` holds at once: the tighter bound and count of each, with no `multipleOf`, `pattern` or
+// `format`, which hold only as a whole and are matched node by node.
+@(private = "file")
+conjoined :: proc(an: []^rules.Node) -> (out: rules.Rules) {
+	for a in an {
+		edge := a.rules
+		edge.multiple_of, edge.pattern = "", ""
+		out, _ = rules.merged(&rules.Node{rules = out}, edge)
+	}
+	return
 }
 
 @(private = "file")
 facets_included :: proc(p: ^Prover, an, bn: []^rules.Node, ka: rules.Kinds, depth: int) -> bool {
+	have := conjoined(an)
 	for b in bn {
 		r := &b.rules
 		if ka & {.Integer, .Number} != {} {
@@ -314,14 +268,10 @@ facets_included :: proc(p: ^Prover, an, bn: []^rules.Node, ka: rules.Kinds, dept
 			if !ok {
 				return refuse(p, "type")
 			}
-			if r.minimum != "" && !some(an, b, proc(a, b: ^rules.Node) -> bool {
-					return a.rules.minimum != "" && at_least(a.rules.minimum, b.rules.minimum, a.rules.exclusive_minimum, b.rules.exclusive_minimum, true)
-				}) {
+			if !as_tight(have.minimum, r.minimum, have.exclusive_minimum, r.exclusive_minimum, true) {
 				return refuse(p, "minimum")
 			}
-			if r.maximum != "" && !some(an, b, proc(a, b: ^rules.Node) -> bool {
-					return a.rules.maximum != "" && at_least(a.rules.maximum, b.rules.maximum, a.rules.exclusive_maximum, b.rules.exclusive_maximum, false)
-				}) {
+			if !as_tight(have.maximum, r.maximum, have.exclusive_maximum, r.exclusive_maximum, false) {
 				return refuse(p, "maximum")
 			}
 			if r.multiple_of != "" {
@@ -336,10 +286,10 @@ facets_included :: proc(p: ^Prover, an, bn: []^rules.Node, ka: rules.Kinds, dept
 			}
 		}
 		if .String in ka {
-			if r.min_length > 0 && !some(an, b, proc(a, b: ^rules.Node) -> bool {return a.rules.min_length >= b.rules.min_length}) {
+			if have.min_length < r.min_length {
 				return refuse(p, "minLength")
 			}
-			if !at_most(an, b, proc(r: ^rules.Rules) -> Maybe(u64) {return r.max_length}) {
+			if !at_most(have.max_length, r.max_length) {
 				return refuse(p, "maxLength")
 			}
 			if r.pattern != "" && !some(an, b, proc(a, b: ^rules.Node) -> bool {return a.rules.pattern == b.rules.pattern}) {
@@ -350,42 +300,37 @@ facets_included :: proc(p: ^Prover, an, bn: []^rules.Node, ka: rules.Kinds, dept
 				return refuse(p, "format")
 			}
 		}
-		if .Array in ka && !array_included(p, an, b, depth) {
+		if .Array in ka && !array_included(p, an, &have, b, depth) {
 			return false
 		}
-		if .Object in ka && !object_included(p, an, b, depth) {
+		if .Object in ka && !object_included(p, an, &have, b, depth) {
 			return false
 		}
 	}
 	return true
 }
 
-// Whether some node of `an` bounds the count that `limit` reads at least as tightly as `b`, which a `b` with no bound
-// leaves to any.
+// Whether the count limit `have` is at least as tight as `want`, which no limit leaves to any.
 @(private = "file")
-at_most :: proc(an: []^rules.Node, b: ^rules.Node, limit: proc(r: ^rules.Rules) -> Maybe(u64)) -> bool {
-	want, bounded := limit(&b.rules).?
+at_most :: proc(have, want: Maybe(u64)) -> bool {
+	limit, bounded := want.?
 	if !bounded {
 		return true
 	}
-	for a in an {
-		if have, has := limit(&a.rules).?; has && have <= want {
-			return true
-		}
-	}
-	return false
+	h, has := have.?
+	return has && h <= limit
 }
 
 @(private = "file")
-array_included :: proc(p: ^Prover, an: []^rules.Node, b: ^rules.Node, depth: int) -> bool {
+array_included :: proc(p: ^Prover, an: []^rules.Node, have: ^rules.Rules, b: ^rules.Node, depth: int) -> bool {
 	r := &b.rules
-	if r.min_items > 0 && !some(an, b, proc(a, b: ^rules.Node) -> bool {return a.rules.min_items >= b.rules.min_items}) {
+	if have.min_items < r.min_items {
 		return refuse(p, "minItems")
 	}
-	if !at_most(an, b, proc(r: ^rules.Rules) -> Maybe(u64) {return r.max_items}) {
+	if !at_most(have.max_items, r.max_items) {
 		return refuse(p, "maxItems")
 	}
-	if r.unique && !some(an, b, proc(a, _: ^rules.Node) -> bool {return a.rules.unique}) {
+	if r.unique && !have.unique {
 		return refuse(p, "uniqueItems")
 	}
 	if b.array < 0 {
@@ -461,12 +406,12 @@ required_in :: proc(blocks: []^rules.Object, name: string) -> bool {
 }
 
 @(private = "file")
-object_included :: proc(p: ^Prover, an: []^rules.Node, b: ^rules.Node, depth: int) -> bool {
+object_included :: proc(p: ^Prover, an: []^rules.Node, have: ^rules.Rules, b: ^rules.Node, depth: int) -> bool {
 	r := &b.rules
-	if r.min_members > 0 && !some(an, b, proc(a, b: ^rules.Node) -> bool {return a.rules.min_members >= b.rules.min_members}) {
+	if have.min_members < r.min_members {
 		return refuse(p, "minProperties")
 	}
-	if !at_most(an, b, proc(r: ^rules.Rules) -> Maybe(u64) {return r.max_members}) {
+	if !at_most(have.max_members, r.max_members) {
 		return refuse(p, "maxProperties")
 	}
 	if b.object < 0 {

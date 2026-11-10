@@ -30,6 +30,7 @@ FRAMING := records.Framing_Services {
 @(private, rodata)
 DOCS := records.Record_Docs {
 	read   = read_row,
+	check_read = check_row,
 	build  = build_row,
 	column = column_of,
 	cell   = cell_of,
@@ -83,6 +84,8 @@ Batch :: struct {
 	fault:     Maybe(core.Fault),
 	cols:      []Column,
 	cols_key:  Columns_Key,
+	halted:    u64, // the input offset, plus one, of the record whose check of the header stopped the reads
+	judged:    i64, // the record of the sink whose check judged the header, plus one
 }
 
 // What a typed read's columns were bound for: the plan's field records, which the columns point at, the plan's stamp and
@@ -401,6 +404,16 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 }
 
 @(private)
+check_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
+	switch Spec(it.as.spec) {
+	case .Csv:   return check_row_spec(it, target, T, plan, read, allocator, err, .Csv)
+	case .Tsv:   return check_row_spec(it, target, T, plan, read, allocator, err, .Tsv)
+	case .Plain: return check_row_spec(it, target, T, plan, read, allocator, err, .Plain)
+	}
+	return false
+}
+
+@(private)
 read_row_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
 	opts := options_of(it.as)
 	h := Cells{refuse_repeats = read.dups == .Refuse}
@@ -487,16 +500,18 @@ read_row_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typ
 // the input, and the row's bytes are `row`'s.
 @(private)
 place_error :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row, e: ^core.Typed_Error) {
-	place :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row, at: u64) -> u64 {
-		n := u64(len(b.key_src))
-		return b.head_at + at - it.base if at < n else at - n + row.at
-	}
 	if e.kind not_in core.TYPED_AT_NO_BYTE {
-		e.at = place(it, b, row, e.at)
+		e.at = place_at(it, b, row, e.at)
 		if e.kind == .Walk {
-			e.inner.at = place(it, b, row, e.inner.at)
+			e.inner.at = place_at(it, b, row, e.inner.at)
 		}
 	}
+}
+
+@(private)
+place_at :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row, at: u64) -> u64 {
+	n := u64(len(b.key_src))
+	return b.head_at + at - it.base if at < n else at - n + row.at
 }
 
 @(private)

@@ -82,8 +82,9 @@ reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	return &r
 }
 
-// The reads of a plan made from a description and read as spec `S`: `reads_of` with the check of a text and of a document
-// by the description. A program that only unmarshals does not name it, so it does not link the check.
+// The reads of a plan made from a description or from a model, read as spec `S`: `reads_of` with the check of a text and of
+// a document by the description or the model. A program that only unmarshals does not name it, so it does not link the
+// check.
 checks_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	@(static, rodata) r := typed.Format_Reads {
 		read       = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {return read_text(src, S, T, target, plan, options_of(as), read, allocator, false)},
@@ -91,6 +92,8 @@ checks_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 		node_read  = document_read,
 		node_check = document_check,
 		build      = proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_spec(src, S, as.readers, options_of(as), false, allocator)},
+		plan       = proc(T: typeid, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Error) {return plan_built(T, S, {}, opts, checks_of(S), allocator)},
+		docs       = proc "contextless" () -> rawptr {return record_docs(S)},
 	}
 	return &r
 }

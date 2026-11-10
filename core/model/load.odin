@@ -6,6 +6,7 @@ import "core:reflect"
 import "core:strings"
 import core ".."
 import typed "../typed"
+import records "../records"
 
 // Reads `src` into `v` by the model's rules, and reports every rule a value fails, not only the first. `v` is zeroed
 // first, so a member the text leaves out holds its default or its zero. A read_only member is neither read nor judged,
@@ -17,6 +18,22 @@ load :: proc(m: ^Model($T), src: []u8, v: ^T, sink: ^typed.Sink = nil, dups := c
 	// A zero `dups` is the read's default, which a load takes as a refusal.
 	read := typed.Read_Options{dups = .Refuse if dups == .Default else dups, sink = sink}
 	return typed.check_text(src, v, T, &m.load_plan, read, allocator)
+}
+
+// Loads the value `v` as `load` loads the text of the model's format that spells it, so a value built in memory is judged
+// and defaulted as a read of it would be. The offsets in the entries are from the start of that text. A format whose plan
+// writes no value text is `.Bad_Option`.
+load_value :: proc(m: ^Model($T), v: core.Value, out: ^T, sink: ^typed.Sink = nil, dups := core.Duplicates.Refuse, allocator := context.allocator) -> core.Error {
+	if m.load_plan.value_text == nil {
+		return core.error_of(core.Typed_Error{kind = .Bad_Option})
+	}
+	text, err := m.load_plan.value_text(&m.load_plan, v, context.allocator)
+	defer delete(text)
+	if err.kind != .None {
+		return core.error_of(err)
+	}
+	read := typed.Read_Options{dups = .Refuse if dups == .Default else dups, sink = sink}
+	return typed.check_text(text, out, T, &m.load_plan, read, allocator)
 }
 
 // Whether the load that filled `set`, a member of a struct of type `S` in `T`, read the member the text names `name`,
@@ -134,4 +151,15 @@ clone_map :: proc(dst, src: rawptr, ti: ^runtime.Type_Info, v: runtime.Type_Info
 		}
 	}
 	return nil
+}
+
+// Loads the next record of `it` into `v` as `load` loads a text of one record, and returns whether `it` has more. A reader
+// opened with a spec named at compile time takes the check read of the model's format. The
+// records may be of a stream, and each is judged and defaulted alone: a header is judged with the first record of a table.
+// A refused record returns its error and true, and the next call goes on after it. Every offset is from the input's first byte.
+read :: proc(it: ^records.Reader, m: ^Model($T), v: ^T, sink: ^typed.Sink = nil, dups := core.Duplicates.Refuse, allocator := context.allocator) -> (err: core.Error, more: bool) {
+	if it.docs == nil && m.load_plan.docs != nil {
+		it.docs = (^records.Record_Docs)(m.load_plan.docs())
+	}
+	return records.read(it, v, &m.load_plan, {dups = .Refuse if dups == .Default else dups, sink = sink}, allocator)
 }

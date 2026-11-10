@@ -155,16 +155,12 @@ bound_changed :: proc(w: ^Walk, keyword: string, x, y: string, strict_x, strict_
 	case y == "":
 		emit(w, keyword, x, "", .Widens)
 	case:
-		order := spell.decimal_compare(spell.decimal_of(y), spell.decimal_of(x))
-		order = order if lower else -order
 		effect := Effect.Unknown
-		switch {
+		switch order := rules.tighter(y, x, strict_y, strict_x, lower); {
 		case order > 0:
 			effect = .Narrows
 		case order < 0:
 			effect = .Widens
-		case strict_x != strict_y:
-			effect = .Narrows if strict_y else .Widens
 		}
 		emit(w, keyword, x, y, effect)
 	}

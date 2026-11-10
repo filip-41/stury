@@ -10,10 +10,10 @@ import "../write"
 
 // Writes `d` as a 2020-12 JSON Schema in the format `as`. A node that is used twice, or that a `$ref` reaches, goes to
 // `$defs` under its name in `d` or `n<index>` and is referred to, so a shared or recursive node is written once, with
-// the rules a member adds beside its `$ref`. A description with dynamic anchors writes each of its schema resources under
-// an `$id` of its own, so a `$dynamicRef` reaches the anchors it reached, and refers to every node by an absolute URI. An
-// operand the format cannot spell and a draft 4 integer are `.Unsupported`, naming the keyword in `want.text`. A `format`
-// is written as `format`, so a reader must assert formats, with `Options.format_assert`, to judge them.
+// the rules a member adds beside its `$ref`. A description that writes a `$dynamicRef` writes each of its schema resources
+// under an `$id` of its own, so the `$dynamicRef` reaches the anchors it reached, and refers to every node by an absolute
+// URI. An operand the format cannot spell and a draft 4 integer are `.Unsupported`, naming the keyword in `want.text`. A
+// `format` is written as `format`, so a reader must assert formats, with `Options.format_assert`, to judge them.
 write :: proc(d: ^rules.Description, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> (text: []u8, err: core.Error) {
 	uses, e := make([]u8, len(d.nodes), allocator)
 	refs: []string
@@ -30,10 +30,19 @@ write :: proc(d: ^rules.Description, as: core.As, opts := core.Write_Options{}, 
 	}
 	defer delete(w.uses, allocator)
 	defer delete(w.refs, allocator)
-	w.anchored = len(d.anchors) > 0
 	count(&w, d.root, false)
-	for x in d.anchors {
-		count(&w, x.node, true)
+	// A dynamic anchor is written when a `$dynamicRef` of a written node names it.
+	for changed := true; changed; {
+		changed = false
+		for x in d.anchors {
+			if w.uses[x.node] != 2 && dynamic_reached(&w, x.name) {
+				count(&w, x.node, true)
+				changed = true
+			}
+		}
+	}
+	for u, j in w.uses {
+		w.anchored ||= u > 0 && d.nodes[j].dynamic_ref != nil
 	}
 	// A node written under a resource's `$defs` needs the resource written, as a definition of the root.
 	for changed := w.anchored; changed; {
@@ -86,7 +95,24 @@ Writer :: struct {
 	refs:    []string, // per node reached twice, the reference to it
 	keyword: string, // the keyword being written, which stops at the first refusal
 	refused: string, // the first keyword the description holds that no schema spells
-	anchored: bool, // the description has dynamic anchors, so every resource has an `$id` and every reference is absolute
+	anchored: bool, // a written node has a `$dynamicRef`, so every resource has an `$id` and every reference is absolute
+}
+
+// Whether a `$dynamicRef` of a written node names the dynamic anchor `name`.
+@(private = "file")
+dynamic_reached :: proc(w: ^Writer, name: string) -> bool {
+	for u, j in w.uses {
+		target, has := w.d.nodes[j].dynamic_ref.?
+		if u == 0 || !has {
+			continue
+		}
+		for x in w.d.anchors {
+			if x.node == target && x.name == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Counts how each node is reached. A node's children are counted once.
@@ -96,7 +122,9 @@ count :: proc(w: ^Writer, i: rules.Node_Index, by_ref: bool) {
 		return
 	}
 	seen := w.uses[i] > 0
-	w.uses[i] = 2 if seen || by_ref else 1
+	// A false schema is written in place wherever it is used, so only a `$ref` to it needs it defined.
+	shared := by_ref || seen && w.d.nodes[i].kinds != {}
+	w.uses[i] = 2 if shared || w.uses[i] == 2 else 1
 	if seen {
 		return
 	}

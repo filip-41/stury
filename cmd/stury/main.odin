@@ -40,7 +40,6 @@ package main
 
 import "core:os"
 import "core:slice"
-import "core:strings"
 import host "../../host"
 import "jq"
 import "message"
@@ -70,6 +69,7 @@ Run :: struct {
 	spares:      Spare_Outs, // the pieces' output buffers, kept from one file to the next
 	parallel:    Maybe(bool), // whether the filter runs on pieces, once `parallel` has decided it
 	collects:    int, // the collect jobs started, which number them from 1
+	convert:     ^Conversion, // fmt --schema: the schema a conversion follows
 }
 
 main :: proc() {
@@ -98,19 +98,19 @@ main :: proc() {
 		usage_error("--diff is edit's: it previews the changes of an edit")
 	case (o.in_place || o.check) && !cli.formatting && !cli.editing:
 		usage_error("%s is fmt's and edit's: a filter run has no use for it", "--in-place" if o.in_place else "--check")
-	case !validating && cli.schema.flag != "":
+	case !validating && !cli.formatting && cli.schema.flag != "":
 		usage_error("%s is check's: a schema judges the inputs of stury check", cli.schema.flag)
 	case !cli.schema_verb && cli.verbs.flag != "":
 		usage_error("%s is schema's: stury schema infer and stury schema sample take it", cli.verbs.flag)
 	case validating || cli.formatting || cli.editing || cli.schema_verb:
 		if flag := command_refused_option(o, &cli); flag != "" {
-			usage_error("%s has no use with %s: %s", flag, command_name(&cli), "it runs no filter and prints nothing" if validating else "it runs no filter and writes each input's own format" if cli.formatting else "it runs no filter and writes a schema or samples" if cli.schema_verb else "it writes each input back in its own bytes")
+			usage_error("%s has no use with %s: %s", flag, command_name(&cli), "it types the filter and writes the schema of its outputs" if validating && cli.schema.filter != nil else "it runs no filter and prints nothing" if validating else "it runs no filter and writes each input's own format" if cli.formatting else "it runs no filter and writes a schema or samples" if cli.schema_verb else "it writes each input back in its own bytes")
 		}
 	}
 	if o.follow {
 		refuse_follow(o, &cli)
 	}
-	if validating {
+	if validating && cli.schema.filter == nil {
 		check_main(&run, &cli)
 	}
 	if cli.formatting {
@@ -127,6 +127,9 @@ main :: proc() {
 	run.ip.debug_layout = output_layout(&run)
 	run.ip.debug_layout.opts.pretty = false
 	text, has := cli.filter.?
+	if typed, typing := cli.schema.filter.?; typing {
+		text, has = typed, true
+	}
 	switch {
 	case has && o.from_file:
 		text = program_file(&run.ip, text)
@@ -148,6 +151,9 @@ main :: proc() {
 	ready_interpreter(&run)
 	if cli.editing {
 		edit_main(&run, &cli)
+	}
+	if validating {
+		check_filter_main(&run, &cli)
 	}
 	choose_route(&run, text)
 	ins := Inputs {
@@ -201,12 +207,7 @@ near_command :: proc(text: string) -> string {
 			return ""
 		}
 	}
-	for command in ([]string{"check", "fmt", "edit", "diff"}) {
-		if d := strings.levenshtein_distance(text, command, context.temp_allocator); d <= (len(command) - 1) / 2 {
-			return command
-		}
-	}
-	return ""
+	return message.nearest({"check", "fmt", "edit", "diff"}, text)
 }
 
 // jq's count of compile errors, then exit as it does.

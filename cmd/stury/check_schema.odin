@@ -29,7 +29,9 @@ Schema_Options :: struct {
 	refs:          string,
 	max_errors:    int,
 	report:        Report_Kind,
+	reported:      bool,
 	format_assert: bool,
+	filter:        Maybe(string), // a filter to type against the schema, which judges no input then
 }
 
 // A schema compiled and bound to the format the inputs are read as. `doc` is the schema's text, which `compiled` borrows.
@@ -68,6 +70,8 @@ schema_option :: proc(s: ^Schema_Options, args: []string, i: int) {
 		s.file = value
 	case "--schema-ref":
 		s.refs = value
+	case "--filter":
+		s.filter = value
 	case "--max-errors":
 		n, ok := parse_digits(value, 1 << 31)
 		if !ok || n < 1 {
@@ -75,6 +79,7 @@ schema_option :: proc(s: ^Schema_Options, args: []string, i: int) {
 		}
 		s.max_errors = int(n)
 	case "--report":
+		s.reported = true
 		switch value {
 		case "lines":   s.report = .Lines
 		case "basic":   s.report = .Basic
@@ -208,7 +213,6 @@ tell :: proc(sc: ^Schema_Check, s: Schema_Options, name, file: string, data: []b
 }
 
 // Tells each entry of the file `name` on standard error, one to a line.
-@(private = "file")
 told :: proc(name: string, data: []byte, entries: []core.Error_Entry) {
 	lines: core.Lines
 	b := strings.builder_make(context.temp_allocator)

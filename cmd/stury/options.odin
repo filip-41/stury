@@ -182,7 +182,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			i = lib_dir_arg(&cli, args, i)
 		case "from", "to":
 			i += option_arity(a)
-		case "schema", "schema-ref", "max-errors", "report", "format-assert":
+		case "schema", "schema-ref", "max-errors", "report", "format-assert", "filter":
 			schema_option(&cli.schema, args, i)
 			i += option_arity(a)
 		case "ranges", "invalid", "comments", "seed", "count":
@@ -423,7 +423,7 @@ subcommand_index :: proc(args: []string) -> int {
 @(private = "file")
 option_arity :: proc(a: string) -> int {
 	switch a {
-	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--max-errors", "--report", "--seed", "--count", "--old-schema", "--new-schema", "--compat", "--key":
+	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--max-errors", "--report", "--filter", "--seed", "--count", "--old-schema", "--new-schema", "--compat", "--key":
 		return 1
 	case "--arg", "--argjson", "--slurpfile", "--rawfile":
 		return 2
@@ -574,9 +574,12 @@ command_name :: proc(cli: ^Cli) -> string {
 // the output as a whole, but its filter takes the options of a filter run's input and its bindings, and a built value
 // is written with -a, -S, --indent and --tab.
 command_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
-	editing, schema := cli.editing, cli.schema_verb
+	// check --filter runs no filter but types one, on the inputs the input options describe, and writes a schema.
+	typing := cli.validating && cli.schema.filter != nil
+	editing, schema := cli.editing, cli.schema_verb || typing
 	switch {
-	case editing && cli.formats.to != nil: return "--to"
+	case (editing || cli.diffing) && cli.formats.to != nil: return "--to"
+	case cli.formatting && cli.schema.reported: return "--report"
 	case cli.diffing && (o.in_place || o.check): return "--in-place" if o.in_place else "--check"
 	case !cli.formatting && !schema && cli.cells_out_flag != "": return cli.cells_out_flag
 	case o.raw0:                 return "--raw-output0"
@@ -585,19 +588,18 @@ command_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
 	case o.ascii && !editing && !schema: return "-a"
 	case o.sort_keys && !editing && !schema: return "-S"
 	case cli.color_set:          return "-C"
-	case o.raw_input && !editing: return "-R"
-	case o.null_input:           return "-n"
-	case o.slurp && !editing:    return "-s"
-	case o.from_file && !editing: return "-f"
-	case o.seq && cli.formatting: return "--seq"
+	case o.raw_input && !editing && !typing: return "-R"
+	case o.null_input && !typing: return "-n"
+	case o.slurp && !editing && !typing: return "-s"
+	case o.from_file && !editing && !typing: return "-f"
+	case o.seq && (cli.formatting || typing): return "--seq"
 	case o.stream_errors:        return "--stream-errors"
 	case o.stream:               return "--stream"
 	case o.exit_status && !editing: return "-e"
 	case o.explain && !editing:  return "--explain"
-	case cli.binding_flag != "" && !editing: return cli.binding_flag
+	case cli.binding_flag != "" && !editing && !typing: return cli.binding_flag
 	case !cli.formatting && !editing && !schema && cli.layout_flag != "": return cli.layout_flag
-	case cli.lib_dirs != nil && !editing: return "-L"
-	case cli.diffing && cli.formats.to != nil: return "--to"
+	case cli.lib_dirs != nil && !editing && !typing: return "-L"
 	}
 	return ""
 }

@@ -245,6 +245,30 @@ on_token_check :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_R
 	return hook(h, regs, t)
 }
 
+// Refuses the missing member `at` of the struct that closes at `t`, then judges the members that are there by their
+// validators, as `validate` judges a value that holds them. The struct's own validators wait for its members.
+@(cold, private)
+refuse_missing_settled :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame, owner: ^Field, back, regs: core.Hook_Regs, t: core.Token, at: i32) -> (core.Hook_Regs, core.Action) {
+	out, action := refuse_missing(h, f, owner, back, regs, t, at)
+	if sm := h.plan.meta[owner.meta].model; action != .Stop && sm != nil && sm.settle != nil {
+		sm.settle(h, sm, f, owner, regs, t.lo)
+	}
+	return out, action
+}
+
+// Settles the struct that closes at `t` by its model: a validator's failure has been recorded and skips the struct.
+@(cold, private)
+settle_close :: #force_no_inline proc "contextless" (h: ^$H, sm: ^Struct_Model, f: ^Frame, owner: ^Field, back, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	kind, reported := sm.settle(h, sm, f, owner, regs, t.lo)
+	switch {
+	case kind != .None:
+		return refuse(h, back, {kind = kind, at = t.lo}, t.lo + u64(t.n))
+	case reported:
+		return back, .Stop if h.sink == nil else .Skip
+	}
+	return back, .Next
+}
+
 @(private)
 hook :: #force_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
 	if t.role == .Key {
@@ -266,12 +290,10 @@ hook :: #force_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t: core.
 		if owner.kind == .Required {
 			if f.seen != 0 || regs.b < u64(uintptr(owner.first)) + u64(h.plan.meta[owner.meta].required_end) * size_of(Field) {
 				if at := missing_member(h, f, owner, regs, 0); at >= 0 {
-					return refuse_missing(h, f, owner, {f.a, f.b, f.c + u64(owner.stride)}, regs, t, at)
+					return refuse_missing_settled(h, f, owner, {f.a, f.b, f.c + u64(owner.stride)}, regs, t, at)
 				}
 				if sm := h.plan.meta[owner.meta].model; sm != nil && sm.settle != nil {
-					if kind := sm.settle(h, sm, f, owner, regs); kind != .None {
-						return refuse(h, {f.a, f.b, f.c + u64(owner.stride)}, {kind = kind, at = t.lo}, t.lo + u64(t.n))
-					}
+					return settle_close(h, sm, f, owner, {f.a, f.b, f.c + u64(owner.stride)}, regs, t)
 				}
 			}
 		} else if owner.kind != .Struct {
@@ -494,7 +516,7 @@ close_container :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame, own: 
 		}
 	}
 	#partial switch owner.kind {
-	case .Raw, .Hook, .Value:
+	case .Raw, .Hook, .Value, .Before:
 		// A container inside the value read whole counts in `seen`, with no frame of its own.
 		if f.seen != 0 {
 			f.seen -= 1
@@ -503,17 +525,20 @@ close_container :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame, own: 
 		}
 		context = h.ctx
 		lo := u64(uintptr(f.data))
+		when H == Check {
+			if owner.kind == .Before {
+				return before_value(h, back, &h.plan.meta[owner.meta], list_dest(f, owner), lo, t.lo + u64(t.n))
+			}
+		}
 		if reason := store_whole(h, owner, &h.plan.meta[owner.meta], list_dest(f, owner), f.kind, lo, t.lo + u64(t.n), t); reason != .None {
 			return refuse(h, back, {kind = reason, at = lo}, t.lo + u64(t.n))
 		}
 	case .Required:
 		if at := missing_member(h, f, owner, regs, 0); at >= 0 {
-			return refuse_missing(h, f, owner, back, regs, t, at)
+			return refuse_missing_settled(h, f, owner, back, regs, t, at)
 		}
 		if sm := h.plan.meta[owner.meta].model; sm != nil && sm.settle != nil {
-			if kind := sm.settle(h, sm, f, owner, regs); kind != .None {
-				return refuse(h, back, {kind = kind, at = t.lo}, t.lo + u64(t.n))
-			}
+			return settle_close(h, sm, f, owner, back, regs, t)
 		}
 	case .Array:
 		if regs.c != regs.a {

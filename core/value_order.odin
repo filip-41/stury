@@ -154,9 +154,9 @@ text_f64_slow :: #force_no_inline proc(text: string) -> f64 {
 
 // The order of `a` and `b`: -1, 0 or 1. With `eq` a value equals itself without being read, so `a == a` holds however
 // deep `a` is. Past `max_depth` levels the comparison stops: it sets `too_deep`, when given, and the levels below
-// compare equal. A plain node of a delimited text is read as the number, boolean or null it is compared with, by a schema's
-// plain rule, unless `read_plain` is false, and then it is the string its format gives it.
-compare :: proc(a, b: Value, depth := 0, eq := false, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := true) -> int {
+// compare equal. A plain node of a delimited text is the string its format gives it, as it is in the command line, unless
+// `read_plain` reads it as the number, boolean or null it is compared with, by a schema's plain rule.
+compare :: proc(a, b: Value, depth := 0, eq := false, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false) -> int {
 	if depth > max_depth {
 		if too_deep != nil {
 			too_deep^ = true
@@ -327,8 +327,8 @@ compare_numbers :: proc(x: f64, lx_in: string, y: f64, ly_in: string) -> int {
 }
 
 // Whether `a` and `b` are equal: `compare` with `eq` gives 0.
-equal :: proc(a, b: Value, too_deep: ^bool = nil, max_depth := MAX_DEPTH) -> bool {
-	return compare(a, b, eq = true, too_deep = too_deep, max_depth = max_depth) == 0
+equal :: proc(a, b: Value, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false) -> bool {
+	return compare(a, b, eq = true, too_deep = too_deep, max_depth = max_depth, read_plain = read_plain) == 0
 }
 
 // Whether `a` and `b` are one container or one document node, not two alike.
@@ -363,7 +363,7 @@ text_order :: proc(a, b: string) -> int {
 
 // `compare` of two arrays' members, then of their lengths.
 @(private = "file")
-compare_items :: proc(xs, ys: []Value, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := true) -> int {
+compare_items :: proc(xs, ys: []Value, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false) -> int {
 	for i in 0 ..< min(len(xs), len(ys)) {
 		if c := compare(xs[i], ys[i], depth + 1, eq, too_deep, max_depth, read_plain); c != 0 {
 			return c
@@ -493,7 +493,7 @@ sorted_keys :: proc(v: Value) -> []string {
 }
 
 // The order of two objects from their sorted members: the key sets, then the values in key order.
-compare_members :: proc(a, b: []Member, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := true) -> int {
+compare_members :: proc(a, b: []Member, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false) -> int {
 	for i in 0 ..< min(len(a), len(b)) {
 		if c := text_order(a[i].key, b[i].key); c != 0 {
 			return c

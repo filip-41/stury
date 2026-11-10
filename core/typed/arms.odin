@@ -326,7 +326,7 @@ equals_one :: proc(v: core.Value, values: []core.Value, hashes: []u64 = nil, spa
 	}
 	for x in values[from:to] {
 		mark := space.offset if space != nil else 0
-		equal := core.equal(v, x)
+		equal := core.equal(v, x, read_plain = true)
 		if space != nil {
 			space.offset = mark
 		}
@@ -1379,7 +1379,7 @@ unique :: proc(doc: ^core.Document, allocator: runtime.Allocator) -> bool {
 	slice.sort_by(all[:], proc(a, b: Hashed) -> bool {return a.hash < b.hash})
 	for i in 0 ..< len(all) {
 		for j := i + 1; j < len(all) && all[j].hash == all[i].hash; j += 1 {
-			if core.equal(core.Node_Ref{doc, all[i].node}, core.Node_Ref{doc, all[j].node}) {
+			if core.equal(core.Node_Ref{doc, all[i].node}, core.Node_Ref{doc, all[j].node}, read_plain = true) {
 				return false
 			}
 		}

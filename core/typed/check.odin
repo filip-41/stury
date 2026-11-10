@@ -74,6 +74,9 @@ Format_Reads :: struct {
 	node_read, node_check: Node_Read,
 	build:                 Text_Build,
 	plan:                  proc(T: typeid, opts: Plan_Options, allocator: runtime.Allocator) -> (Plan, core.Typed_Error),
+	// The format's `^records.Record_Docs` for a spec named at compile time, which a model's read of records installs in a
+	// reader that has none. Nil for reads that give none.
+	docs:                  proc "contextless" () -> rawptr,
 }
 
 // Builds `src` as a document of the format `as` names, as a format's `Format_Reads` does for `write.marshal_value`.
@@ -761,7 +764,6 @@ dependent_missing :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, 
 // Stores into the integer record `fld` a number spelled with a fraction or an exponent that is an integer, `1.0` or
 // `1e2`, which a check takes where a read refuses it.
 @(cold)
-@(private)
 store_integral :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token, fld: ^Field, dest: uintptr) -> core.Typed_Error_Kind {
 	if t.spelling & core.NUMBER_KIND_MASK != 0 {
 		return .Wrong_Kind

@@ -94,6 +94,10 @@ entry_destroy :: proc(e: ^core.Error_Entry, allocator: runtime.Allocator) {
 
 // Copies the names in `e`'s steps into the temp allocator, for an error that outlives the plan its names point into.
 own_names :: proc(e: ^core.Typed_Error) {
+	if e.kind == .Custom {
+		text, failed := strings.clone(e.want.text, context.temp_allocator)
+		e.want.text = text if failed == nil else ""
+	}
 	for &s in e.steps[:e.n_steps] {
 		if name, named := s.(core.Name); named {
 			text, failed := strings.clone(string(name), context.temp_allocator)
@@ -213,7 +217,7 @@ entry_add :: proc(c: ^Sink, e: core.Typed_Error, h: ^Reader, regs: core.Hook_Reg
 		}
 	}
 	entry := core.Error_Entry{kind = e.kind, start = e.at, end = max(end, e.at), record = c.record}
-	if e.kind == .Missing_Field && h.wide && e.want.text != "" {
+	if (e.kind == .Missing_Field || e.kind == .Custom) && h.wide && e.want.text != "" {
 		entry.operand = strings.clone(e.want.text)
 	}
 	return sink_entry(c, entry, steps[:], words[:], true)

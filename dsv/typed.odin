@@ -32,7 +32,7 @@ reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 }
 
 // Returns the reads of spec `S` for a plan made from a description, which `plan_of` and `schema.bind` take to check a text
-// or a document by that spec. `reads` serves a plan made from a type.
+// or a document by that spec, and for a model, which `model.compile` takes. `reads` serves a plan made from a type.
 checks :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	return checks_of(S)
 }
@@ -205,7 +205,7 @@ read_one :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Pl
 // The check of a text of spec `S`: the description's when the plan has one, else the typed read's.
 @(private)
 check_one :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
-	if plan != nil && plan.checking {
+	if plan != nil && (plan.checking || plan.model_plan == .Load) {
 		return check_cells(src, S, target, T, plan, opts, read, allocator)
 	}
 	return read_text(src, S, T, target, plan, opts, read, allocator, true)
@@ -480,7 +480,7 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 	next := regs
 	next.b += u64(col.step)
 	if col.kind == .String && t.spelling == core.SPELLING_DECODE | core.SPELLING_QUOTED | SPELLING_DOUBLED && regs.c < regs.a {
-		if store_undoubled(h, t, uintptr(regs.c) + uintptr(col.offset)) {
+		if store_undoubled(&h.r, t, uintptr(regs.c) + uintptr(col.offset)) {
 			next.c += u64(col.stride)
 			return next, .Next
 		}
@@ -497,7 +497,7 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 			}
 			fld := typed.field_at(at.b)
 			scratch, no_scratch := runtime.mem_alloc(int(h.r.plan.meta[fld.meta].size), 16, context.temp_allocator)
-			reason := read_cell(h, fld, t, uintptr(raw_data(scratch))) if no_scratch == nil else .No_Memory
+			reason := read_cell(&h.r, fld, t, uintptr(raw_data(scratch))) if no_scratch == nil else .No_Memory
 			if reason == .None {
 				return next, .Next
 			}
@@ -529,7 +529,7 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 	reason: core.Typed_Error_Kind
 	if map_row {
 		f := &h.r.frames[h.r.sp - 1]
-		spelled := col.name if col.key.spelling & SPELLING_COLUMN != 0 else inner_text(h, col.key)
+		spelled := col.name if col.key.spelling & SPELLING_COLUMN != 0 else inner_text(&h.r, col.key)
 		f.extra, f.run = cast([^]u64)raw_data(spelled), (^typed.Field)(uintptr(len(spelled)))
 		slot: rawptr
 		slot, reason = typed.map_slot(&h.r, &h.r.plan.meta[h.row.meta], (^runtime.Raw_Map)(f.data), col.name, col.key, typed.field_at(at.b), false)
@@ -550,7 +550,7 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 	if t.n == 0 {
 		runtime.mem_zero(rawptr(uintptr(at.c)), int(col.stride))
 		at.c += u64(col.stride)
-	} else if reason = read_cell(h, typed.field_at(at.b), t, uintptr(at.c) + uintptr(col.offset)); reason != .None {
+	} else if reason = read_cell(&h.r, typed.field_at(at.b), t, uintptr(at.c) + uintptr(col.offset)); reason != .None {
 		at, action = typed.refuse_value(&h.r, at, t, reason)
 	} else {
 		at.c += u64(col.stride)
@@ -563,68 +563,68 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 
 // Stores the text of a quoted cell holding a `""` into the string at `dest`, in memory of the read's allocator.
 @(private)
-store_undoubled :: proc (h: ^Cells, t: core.Token, dest: uintptr) -> bool {
+store_undoubled :: proc (r: ^typed.Reader, t: core.Token, dest: uintptr) -> bool {
 	buf, err := runtime.mem_alloc_non_zeroed(int(t.n), 1)
 	if err != nil {
 		return false
 	}
-	(^string)(dest)^ = undoubled(buf, inner_text(h, t))
+	(^string)(dest)^ = undoubled(buf, inner_text(r, t))
 	return true
 }
 
 // The bytes of a cell without the quote pair of a quoted cell.
 @(private)
-inner_text :: #force_inline proc "contextless" (h: ^Cells, t: core.Token) -> string {
+inner_text :: #force_inline proc "contextless" (r: ^typed.Reader, t: core.Token) -> string {
 	quotes := u64(t.spelling >> 1 & 1)
-	return string(h.r.src[t.lo + quotes:t.lo + u64(t.n) - quotes])
+	return string(r.src[t.lo + quotes:t.lo + u64(t.n) - quotes])
 }
 
 // Reads a present cell into the field `fld` at `dest`. A number, a bool and an enum's value read the cell's bytes,
 // since what decodes to other bytes spells none of them. The rest read as a string token, whose text `Readers.text`
 // gives.
 @(private)
-read_cell :: proc(h: ^Cells, fld: ^typed.Field, t: core.Token, dest: uintptr) -> core.Typed_Error_Kind {
-	m := &h.r.plan.meta[fld.meta]
+read_cell :: proc(r: ^typed.Reader, fld: ^typed.Field, t: core.Token, dest: uintptr) -> core.Typed_Error_Kind {
+	m := &r.plan.meta[fld.meta]
 	cell := t
 	cell.kind = .String
 	#partial switch fld.kind {
 	case .String:
 		// The walk marked it, so a `""` takes no scan and no general decode.
 		if t.spelling & (SPELLING_DOUBLED | core.SPELLING_LAX) == SPELLING_DOUBLED {
-			return .None if store_undoubled(h, t, dest) else .No_Memory
+			return .None if store_undoubled(r, t, dest) else .No_Memory
 		}
-		if t.spelling & (core.SPELLING_QUOTED | SPELLING_DOUBLED) == core.SPELLING_QUOTED && plain_quoted(h.r.src, t) {
+		if t.spelling & (core.SPELLING_QUOTED | SPELLING_DOUBLED) == core.SPELLING_QUOTED && plain_quoted(r.src, t) {
 			lo, hi := inner_span(t)
 			cell = core.Token{lo = lo, n = u32(hi - lo)}
 		}
-		return typed.store_string(&h.r, cell, (^string)(dest))
+		return typed.store_string(r, cell, (^string)(dest))
 	case .Bool, .Bool_Wide:
-		text := inner_text(h, t)
+		text := inner_text(r, t)
 		if text != "true" && text != "false" {
 			return .Wrong_Kind
 		}
 		runtime.mem_zero(rawptr(dest), int(m.size))
 		(^bool)(dest)^ = text == "true"
 	case .I8 ..= .F64, .Enum:
-		if fld.kind == .Enum && h.r.plan.enums != .Int {
-			return typed.store_enum(&h.r, cell, m.enum_info, dest, m.size)
+		if fld.kind == .Enum && r.plan.enums != .Int {
+			return typed.store_enum(r, cell, m.enum_info, dest, m.size)
 		}
-		text := inner_text(h, t)
-		lo := u64(uintptr(raw_data(text)) - uintptr(raw_data(h.r.src)))
-		n, integer, _, ok := spell.number_loose(h.r.src, lo, lo + u64(len(text)))
+		text := inner_text(r, t)
+		lo := u64(uintptr(raw_data(text)) - uintptr(raw_data(r.src)))
+		n, integer, _, ok := spell.number_loose(r.src, lo, lo + u64(len(text)))
 		if !ok || !integer && fld.kind == .Enum {
 			return .Wrong_Kind
 		}
 		if fld.kind == .Enum {
 			return typed.store_enum_value(m.enum_info, n, dest, m.size)
 		}
-		return typed.store_number(n, integer, &h.r, core.Token{lo = lo, n = u32(len(text))}, fld, dest)
+		return typed.store_number(n, integer, r, core.Token{lo = lo, n = u32(len(text))}, fld, dest)
 	case .Cstring:
-		return typed.store_cstring(&h.r, cell, dest)
+		return typed.store_cstring(r, cell, dest)
 	case .Hook:
-		return typed.store_whole(&h.r, fld, m, dest, .String, t.lo, t.lo + u64(t.n), cell)
+		return typed.store_whole(r, fld, m, dest, .String, t.lo, t.lo + u64(t.n), cell)
 	case .Maybe, .Union:
-		read_cell(h, typed.field_at(u64(uintptr(fld.first))) if fld.kind == .Maybe else one_arm(h.r.plan, m), t, dest) or_return
+		read_cell(r, typed.field_at(u64(uintptr(fld.first))) if fld.kind == .Maybe else one_arm(r.plan, m), t, dest) or_return
 		typed.mark_arm(dest, fld, m, 0)
 	}
 	return .None
@@ -742,7 +742,7 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64, from: int) -> core.
 		if !ok {
 			return refuse_header(h, regs, .No_Memory, key.lo, "")
 		}
-		spelled := name if positional else inner_text(h, key)
+		spelled := name if positional else inner_text(&h.r, key)
 		k := -1
 		for &m, i in members {
 			if plan.meta[m.meta].name == name {
@@ -878,6 +878,8 @@ cell_supported :: proc(plan: ^typed.Plan, f: ^typed.Field) -> bool {
 	#partial switch f.kind {
 	case .String, .Bool, .Bool_Wide, .I8 ..= .U64, .F32, .F64, .Enum, .Cstring, .Hook:
 		return true
+	case .Before:
+		return cell_supported(plan, &plan.meta[f.meta].before.field)
 	case .Maybe:
 		inner = typed.field_at(u64(uintptr(f.first)))
 	case .Union:

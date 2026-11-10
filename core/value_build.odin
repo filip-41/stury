@@ -64,8 +64,7 @@ object_set :: proc(o: ^Object, k: string, v: Value) {
 	object_append(o, k, v)
 }
 
-// `k`, which `o` does not have, set to `v`.
-@(private = "file")
+// `k` added to `o` as a member of its own, set to `v`, whether `o` has the name or not.
 object_append :: #force_inline proc(o: ^Object, k: string, v: Value) {
 	make_room(&o.keys)
 	make_room(&o.vals)

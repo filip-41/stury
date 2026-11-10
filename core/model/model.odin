@@ -18,6 +18,8 @@ Registry :: struct {
 	types:  [dynamic]Type_Rule,
 	fields: [dynamic]Field_Rule_Of,
 	loads:  Loads,
+	validators: [dynamic]Validator_Of,
+	befores:    [dynamic]Before_Of,
 }
 
 // How a model spells its members' names, where a tag names none, its enums' values, and the member an object names
@@ -75,6 +77,9 @@ register :: proc {
 	register_default,
 	register_factory,
 	register_extra,
+	register_after,
+	register_validator,
+	register_before,
 }
 
 // Sets how models compiled from `reg` spell names. `union_tag` must outlive the registry.
@@ -182,11 +187,12 @@ Model :: struct($T: typeid) {
 // `json.reads(.Json)` gives them. A rule that does not fit its member, and a registered rule of a member its struct does
 // not have, refuse the model as `.Bad_Tag`, at the member's path, with the struct as `want.type` and the item as
 // `want.text`, and so does an `extra` member of a struct that forbids the members it does not name, and a `Fields_Set`
-// in a struct that loads more than 128 members.
-compile :: proc(reg: ^Registry, $T: typeid, reads: ^typed.Format_Reads, allocator := context.allocator) -> (m: Model(T), err: core.Error) {
-	m.plan, err = plan_of(reg, T, reads, allocator, nil, nil)
+// in a struct that loads more than 128 members. `layout` is the handle a format's options make, such as
+// `dsv.as(.Csv, {no_header = true})`, which both plans read and write by.
+compile :: proc(reg: ^Registry, $T: typeid, reads: ^typed.Format_Reads, allocator := context.allocator, layout: Maybe(core.As) = nil) -> (m: Model(T), err: core.Error) {
+	m.plan, err = plan_of(reg, T, reads, allocator, nil, nil, layout)
 	if err == nil {
-		m.load_plan, err = plan_of(reg, T, reads, allocator, .Read_Only, &m.plan)
+		m.load_plan, err = plan_of(reg, T, reads, allocator, .Read_Only, &m.plan, layout)
 	}
 	if err != nil {
 		destroy(&m)
@@ -198,15 +204,15 @@ compile :: proc(reg: ^Registry, $T: typeid, reads: ^typed.Format_Reads, allocato
 
 // The plan of `T` with `reg`'s rules, read with `reads`.
 @(private)
-plan_of :: proc(reg: ^Registry, T: typeid, reads: ^typed.Format_Reads, allocator: runtime.Allocator, without: Maybe(typed.Access), whole: ^typed.Plan) -> (typed.Plan, core.Error) {
+plan_of :: proc(reg: ^Registry, T: typeid, reads: ^typed.Format_Reads, allocator: runtime.Allocator, without: Maybe(typed.Access), whole: ^typed.Plan, layout: Maybe(core.As)) -> (typed.Plan, core.Error) {
 	if reads == nil || reads.plan == nil {
 		return {}, core.error_of(core.Typed_Error{kind = .Unsupported})
 	}
 	none: Registry
-	c := Compiling{model = {member = member_rule, forbids = forbids, compile = rules.rules_leaf}, reg = reg if reg != nil else &none, without = without}
+	c := Compiling{model = {member = member_rule, forbids = forbids, compile = rules.rules_leaf, structs = typed.load_struct, validators = validators_of}, reg = reg if reg != nil else &none, without = without}
 	if whole != nil {
 		// A load's plan settles its structs, and takes the leaves of the plan of every member.
-		c.model.structs, c.model.rule_sets, c.model.leaves = typed.load_struct, whole.rule_sets, whole.leaves
+		c.model.loading, c.model.rule_sets, c.model.leaves = true, whole.rule_sets, whole.leaves
 	}
 	for x in c.reg.fields {
 		if len(x.field) == 0 || reflect.struct_field_by_name(x.type, x.field).name != x.field {
@@ -218,6 +224,16 @@ plan_of :: proc(reg: ^Registry, T: typeid, reads: ^typed.Format_Reads, allocator
 		}
 	}
 	plan, refused := reads.plan(T, {enums = c.reg.naming.enums, rename = c.reg.naming.fields, union_tag = c.reg.naming.union_tag, model = &c.model}, allocator)
+	if as, set := layout.?; set && refused.kind == .None {
+		plan.as = as
+	}
+	if whole != nil && refused.kind == .None {
+		refused = replacement_plans(&c, reads, &plan, allocator)
+		if refused.kind != .None {
+			replacement_destroy(&plan)
+			typed.plan_destroy(&plan)
+		}
+	}
 	return plan, core.error_of(refused)
 }
 
@@ -237,6 +253,14 @@ registry_destroy :: proc(reg: ^Registry) {
 	for x in reg.loads.defaults {
 		delete(x.field)
 	}
+	for x in reg.validators {
+		delete(x.field)
+	}
+	for x in reg.befores {
+		delete(x.field)
+	}
+	delete(reg.validators)
+	delete(reg.befores)
 	delete(reg.types)
 	delete(reg.fields)
 	delete(reg.loads.defaults)
@@ -250,6 +274,7 @@ model_destroy :: proc(m: ^Model($T)) {
 	if raw_data(m.load_plan.leaves) == raw_data(m.plan.leaves) {
 		m.load_plan.leaves = nil
 	}
+	replacement_destroy(&m.load_plan)
 	typed.plan_destroy(&m.load_plan)
 	typed.plan_destroy(&m.plan)
 }
@@ -287,8 +312,16 @@ member_rule :: proc(h: ^typed.Model_Rules, owner: typeid, field: string, type: t
 			r.make, r.data = x.make, x.data
 		}
 	}
+	for x in c.reg.validators {
+		if x.type == owner && x.field == field {
+			r.after = x.v
+		}
+	}
 	if value, found := reflect.struct_tag_lookup(reflect.Struct_Tag(tag), "model"); found {
 		read_tag(value, subject, true, &r)
+	}
+	if r.before = before_of(c, owner, field); r.before != nil {
+		r.before.rules = r.rules
 	}
 	r.skip ||= r.access != .Read_Write && c.without == r.access
 	return
