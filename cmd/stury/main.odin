@@ -120,7 +120,7 @@ main :: proc() {
 	named := len(cli.var_names)
 	if !slice.contains(cli.var_names[:], "JQ_BUILD_CONFIGURATION") {
 		append(&cli.var_names, "JQ_BUILD_CONFIGURATION")
-		append(&cli.var_values, BUILD_CONFIGURATION)
+		append(&cli.var_values, string(BUILD_CONFIGURATION))
 	}
 	run.program = {text, cli.var_names[:], cli.var_values[:], cli.positional[:], named}
 	explain_filter(&run)

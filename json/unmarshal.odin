@@ -4,6 +4,7 @@ import "base:runtime"
 import core "../core"
 import rules "../core/rules"
 import typed "../core/typed"
+import write "../core/write"
 
 // Reads `src`, one document, into `target`. An absent member keeps what `target` holds. See `docs/typed.md`. The form
 // with no plan builds one with `context.allocator` and frees it before it returns, and a plan built once with
@@ -53,6 +54,7 @@ plan_handle :: proc "contextless" (spec: Spec, opts: Options) -> core.As {
 @(private)
 plan_bind :: proc(p: ^typed.Plan, reads: ^typed.Format_Reads) {
 	p.marshal, p.raw, p.tokens = marshal_text, raw_check, &TOKENS
+	p.value_text = write.value_text
 	typed.plan_reads(p, reads)
 }
 
@@ -60,7 +62,7 @@ plan_bind :: proc(p: ^typed.Plan, reads: ^typed.Format_Reads) {
 @(private)
 plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Error) {
 	p, err := typed.plan_build(T, as, opts, allocator)
-	p.marshal = marshal_text
+	p.marshal, p.value_text = marshal_text, write.value_text
 	return p, err
 }
 

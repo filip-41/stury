@@ -6,11 +6,13 @@ Action :: core.Action
 All :: core.All
 Answer :: core.Answer
 Arm :: typed.Arm
+Array :: core.Array
 As :: core.As
 Child_Count :: core.Child_Count
 Child_Index :: core.Child_Index
 Child_Iter :: core.Child_Iter
 Comment_Spelling :: core.Comment_Spelling
+Commented :: core.Commented
 Descend :: core.Descend
 Document :: core.Document
 Document_Error :: core.Document_Error
@@ -49,12 +51,14 @@ Missing_Name :: core.Missing_Name
 Name :: core.Name
 Node :: core.Node
 Node_Index :: core.Node_Index
+Node_Ref :: core.Node_Ref
 Null :: typed.Null
 Number :: core.Number
 Number_Kind :: core.Number_Kind
 Number_Literal :: write.Number_Literal
 Number_Spelling :: enum u16 { Json = 0, Decimal = 2, Hex = 4, Infinity = 6, Nan = 8, }
-Number_Text :: typed.Number_Text
+Number_Text :: core.Number_Text
+Object :: core.Object
 Options :: struct { max_depth: u32, tolerate: bit_set[core.Tolerance; u8], refuse_non_finite: bool, }
 Out :: write.Out
 PRETTY :: core.PRETTY
@@ -105,24 +109,30 @@ Unknown_Fields :: typed.Unknown_Fields
 Unmarshal_Hook :: typed.Unmarshal_Hook
 Value :: core.Value
 Write_Options :: core.Write_Options
+array_append :: core.array_append
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As
 build :: proc {build_bound, build_chosen}
 cell :: records.cell
 cells :: records.cells
 check :: proc {check_bound, check_chosen}
 child_at :: core.child_at
+child_next :: core.child_next
 children :: core.children
 clone :: core.clone
 column :: records.column
 comment_lead :: core.comment_lead
+comments :: core.comments
 commit :: compose.commit
+compare :: core.compare
 destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy}
 each_answer :: proc {each_answer_bound_one, each_answer_bound_many, each_answer_chosen_one, each_answer_chosen_many}
 edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
+equal :: core.equal
 facts_of :: core.facts_of
 find :: proc {find_bound, find_chosen}
 float_value :: core.float_value
 format :: core.format
+hash :: core.hash
 insert :: core.insert
 int_value :: core.int_value
 key :: write.key
@@ -136,14 +146,20 @@ member :: core.member
 member_next :: core.member_next
 member_of :: core.member_of
 members_named :: core.members_named
+new_array :: core.new_array
+new_object :: core.new_object
+noted :: core.noted
 number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> (core.Number, bool)
 number_spelling_of :: #force_inline proc "contextless" (spelling: u16) -> Number_Spelling
+object_put :: core.object_put
 open_array :: write.open_array
 open_object :: write.open_object
 own_names :: typed.own_names
+pair_next :: core.pair_next
 pairs :: core.pairs
 parse_path :: core.parse_path
 parse_pointer :: core.parse_pointer
+plain :: core.plain
 plan_make :: proc(T: typeid, spec := Spec.Json, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 plan_of :: proc(d: ^rules.Description, spec := Spec.Json, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
@@ -190,6 +206,7 @@ write_cells :: records.write_cells
 write_code :: core.write_code
 write_pointer :: core.write_pointer
 write_stream :: core.write_stream
+write_value :: write.write_value
 writer_end :: records.writer_end
 writer_init :: proc {writer_init_bound, writer_init_chosen}
 # dsv
@@ -197,11 +214,13 @@ Action :: core.Action
 All :: core.All
 Answer :: core.Answer
 Arm :: typed.Arm
+Array :: core.Array
 As :: core.As
 Child_Count :: core.Child_Count
 Child_Index :: core.Child_Index
 Child_Iter :: core.Child_Iter
 Comment_Spelling :: core.Comment_Spelling
+Commented :: core.Commented
 Descend :: core.Descend
 Detail :: enum u8 { None, Too_Many, Too_Few, Bare_Quote, Invalid_Utf8, Lone_Cr, After_Quote, Open_Quote, Cut_Utf8, }
 Document :: core.Document
@@ -241,11 +260,13 @@ Missing_Name :: core.Missing_Name
 Name :: core.Name
 Node :: core.Node
 Node_Index :: core.Node_Index
+Node_Ref :: core.Node_Ref
 Null :: typed.Null
 Number :: core.Number
 Number_Kind :: core.Number_Kind
 Number_Literal :: write.Number_Literal
-Number_Text :: typed.Number_Text
+Number_Text :: core.Number_Text
+Object :: core.Object
 Options :: struct { no_header: bool, delimiter: byte, comment: byte, tolerate: bit_set[core.Tolerance; u8], crlf: bool, infer: bool, }
 Out :: write.Out
 PRETTY :: core.PRETTY
@@ -298,24 +319,30 @@ Unmarshal_Hook :: typed.Unmarshal_Hook
 Value :: core.Value
 Value_Class :: typed.Value_Class
 Write_Options :: core.Write_Options
+array_append :: core.array_append
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As
 build :: proc {build_bound, build_chosen}
 cell :: records.cell
 cells :: records.cells
 check :: proc {check_bound, check_chosen}
 child_at :: core.child_at
+child_next :: core.child_next
 children :: core.children
 clone :: core.clone
 column :: records.column
 comment_lead :: core.comment_lead
+comments :: core.comments
 commit :: compose.commit
+compare :: core.compare
 destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy}
 each_answer :: proc {each_answer_bound_one, each_answer_bound_many, each_answer_chosen_one, each_answer_chosen_many}
 edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
+equal :: core.equal
 facts_of :: core.facts_of
 find :: proc {find_bound, find_chosen}
 float_value :: core.float_value
 format :: core.format
+hash :: core.hash
 insert :: core.insert
 int_value :: core.int_value
 key :: write.key
@@ -329,12 +356,18 @@ member :: core.member
 member_next :: core.member_next
 member_of :: core.member_of
 members_named :: core.members_named
+new_array :: core.new_array
+new_object :: core.new_object
+noted :: core.noted
+object_put :: core.object_put
 open_array :: write.open_array
 open_object :: write.open_object
 own_names :: typed.own_names
+pair_next :: core.pair_next
 pairs :: core.pairs
 parse_path :: core.parse_path
 parse_pointer :: core.parse_pointer
+plain :: core.plain
 plan_make :: proc(T: typeid, spec := Spec.Csv, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 plan_of :: proc(d: ^rules.Description, spec := Spec.Csv, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
@@ -380,6 +413,7 @@ write_cells :: records.write_cells
 write_code :: core.write_code
 write_pointer :: core.write_pointer
 write_stream :: core.write_stream
+write_value :: write.write_value
 writer_end :: records.writer_end
 writer_init :: proc {writer_init_bound, writer_init_chosen}
 ## Format author names
@@ -393,18 +427,45 @@ Number_Kind :: enum u8 { Int, Uint, Float, Wide, }
 Scratch :: struct { stack: [dynamic]Entry, slots: [dynamic]int, counts: [dynamic]int, seen: [dynamic]u64, good: [dynamic]u64, log: [dynamic]u32, resumes: int, }
 scratch_destroy :: proc(scratch: ^Scratch)
 # core
+Comment_From :: enum u8 { None, Written, Source, }
 Edit_Services :: struct { value: proc(v: ^Token_View, src: []u8, allocator: runtime.Allocator) -> Document_Error, key_text: proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool, comment: proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8), separators: proc(doc: ^Document, spec: u8) -> bool, member_sep: proc(doc: ^Document, c: Node_Index) -> string, key_sep: string, insert_check: proc(doc: ^Document, container: Node_Index, text: string, allocator: runtime.Allocator) -> Document_Error, interior: proc(doc: ^Document, c: Node_Index) -> (lo, hi: u64), fact_slot: proc(doc: ^Document, node: Node_Index, role: Role, emptied: bool) -> bool, emptied: proc(doc: ^Document, list: ^Edit_List) -> bool, plan: proc(doc: ^Document, list: ^Edit_List, out: ^[dynamic]Edit, allocator: runtime.Allocator) -> (changed: bool, err: Document_Error), validate: proc "contextless" (src: []u8, as: As) -> Maybe(Fault), }
 Readers :: struct { text: proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool), key_equals: proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool, number: proc(v: ^Token_View, t: Token) -> (Number, bool), number_f32: proc(v: ^Token_View, t: Token) -> (f32, bool), resolve: proc(doc: ^Document, i: Node_Index) -> Kind, resolves: proc "contextless" (as: As) -> bool, close_end: proc(doc: ^Document, i: Node_Index) -> u64, format: proc "contextless" () -> ^Rules, tag_key: string, key_open: string, key_close: string, flat: bool, services: ^Services, }
 Services :: struct { build: proc(src: []u8, as: As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (Document, Document_Error), validate: proc "contextless" (src: []u8, as: As) -> Maybe(Fault), scan: proc(src: []u8, as: As, paths: []Path, read: Path_Options, state: rawptr, on: proc(state: rawptr, a: Token_Answer) -> bool, allocator: runtime.Allocator) -> (Document, Path_Error), write: proc(doc: ^Document, opts: Write_Options, as: As, node: Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Error), edit: ^Edit_Services, plans: rawptr, reads: rawptr, tokens: rawptr, records: rawptr, docs: rawptr, }
+Trail :: distinct ^Trail_Step
+Trail_Step :: struct { parent: ^Trail_Step, key: Value, depth: int, }
+Value_Iter :: struct { v: Value, i: int, nodes: Child_Iter, pairs: Pair_Iter, }
 build :: proc(src: []u8, as: As, dups := Duplicates.Last, allocator := context.allocator) -> (Document, Error)
 destroy :: proc(doc: ^Document)
+doc_child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_Index, bool)
+doc_child_next :: #force_inline proc(it: ^Child_Iter) -> (Node_Index, bool)
+doc_children :: proc(doc: ^Document, i: Node_Index) -> Child_Iter
+doc_kind :: #force_inline proc(doc: ^Document, i: Node_Index) -> Kind
+doc_length :: #force_inline proc(doc: ^Document, i: Node_Index) -> int
+doc_member :: #force_inline proc(doc: ^Document, obj: Node_Index, name: string, dups := Duplicates.Last) -> (Node_Index, bool)
+doc_number :: #force_inline proc(doc: ^Document, i: Node_Index) -> (Number, bool)
+doc_pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bool)
+doc_pairs :: proc(doc: ^Document, obj: Node_Index) -> Pair_Iter
+doc_text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool)
 edit_list_destroy :: proc(list: ^Edit_List)
 edit_list_init :: proc(doc: ^Document, allocator := context.allocator) -> Edit_List
 error_of :: proc "contextless" (e: $E, edit := false) -> Error
-number :: #force_inline proc(doc: ^Document, i: Node_Index) -> (Number, bool)
+lent :: #force_inline proc(a: ^Array) -> bool
+number :: proc { doc_number, value_number, }
 path_destroy :: proc(p: ^Path)
+same :: proc(a, b: Value) -> bool
 set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Error
+trail_keys :: proc(t: Trail, into: []Value)
 validate :: proc "contextless" (src: []u8, as: As) -> Error
+value_child_at :: proc(v: Value, k: int) -> (Value, bool)
+value_child_next :: #force_inline proc(it: ^Value_Iter) -> (Value, bool)
+value_children :: proc(v: Value) -> Value_Iter
+value_kind :: #force_inline proc(v: Value) -> Kind
+value_length :: #force_inline proc(v: Value) -> int
+value_member :: #force_inline proc(v: Value, name: string, dups := Duplicates.Last) -> (Value, bool)
+value_number :: #force_inline proc(v: Value) -> (Number, bool)
+value_pair_next :: #force_inline proc(it: ^Value_Iter) -> (key: string, val: Value, ok: bool)
+value_pairs :: proc(v: Value) -> Value_Iter
+value_text :: #force_inline proc(v: Value, buf: []u8) -> (string, bool)
 write :: proc(doc: ^Document, opts := Write_Options{}, as: Maybe(As) = nil, node := ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: Error)
 # host
 pool_destroy :: proc(pool: ^Pool)
@@ -444,27 +505,31 @@ scan_many :: proc(src: []u8, as: core.As, paths: []core.Path, read := core.Path_
 scan_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error)
 set :: proc(src: []u8, as: core.As, path: core.Path, text: string, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
 # core/typed
-Format_Reads :: struct { read, check: Text_Read, node_read, node_check: Node_Read, }
+Format_Reads :: struct { read, check: Text_Read, node_read, node_check: Node_Read, build: Text_Build, }
 Frame :: struct { a, b, c: u64, data: rawptr, seen: u64, run: ^Field, extra: [^]u64, owner: ^Field, target: uintptr, kind: core.Kind, }
 Node_Read :: #type proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error
 Plan_Make :: #type proc(T: typeid, as: core.As, opts: Plan_Options, allocator: runtime.Allocator) -> (Plan, core.Typed_Error)
 Reader :: struct { expect: ^Field, mant: u64, frames: [^]Frame, sp: int, borrow: bool, first_key: bool, refuse_unknown: bool, wide: bool, wrap_sp: u32, using view: core.Token_View, plan: ^Plan, wrap: ^core.Hook_Regs, ctx: runtime.Context, first: core.Typed_Error, sink: ^Sink, find_tag: proc(h: ^Reader, at: u64) -> Tag_Scan, format: rawptr, }
-Scalar :: union { Null, bool, i64, u64, f64, Number_Text, string, }
+Scalar :: union { Null, bool, i64, u64, f64, core.Number_Text, string, }
 Tag_Scan :: struct { view: core.Token_View, name: string, depth: int, on_tag: bool, found: int, value: core.Token, fault: Maybe(core.Fault), }
+Text_Build :: #type proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error)
 Text_Read :: #type proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error
+Value_Text :: #type proc(plan: ^Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
 check_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator := context.allocator) -> core.Error
 plan_destroy :: proc(p: ^Plan)
 plan_make :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (Plan, core.Error)
 sink_destroy :: proc(c: ^Sink)
-unmarshal :: proc {unmarshal_node, unmarshal_answer}
+unmarshal :: proc {unmarshal_node, unmarshal_answer, unmarshal_value}
 unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
 unmarshal_node :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
 unmarshal_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator := context.allocator) -> core.Error
+unmarshal_value :: proc(v: core.Value, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
 # core/write
 Scalar :: union { string, core.Number, Number_Literal, Tree_Part, }
 Token_Spelling :: struct { tree: Tree, start: proc(t: ^Tokens, as: core.As) -> core.Typed_Error_Kind, value: proc(t: ^Tokens, v: Scalar) -> core.Typed_Error_Kind, line: proc(t: ^Tokens) -> core.Typed_Error_Kind, stop: proc(t: ^Tokens), record: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error) -> core.Typed_Error_Kind, }
 destroy :: proc(out: ^Out)
 marshal :: proc(value: any, plan: ^typed.Plan, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error)
+marshal_value :: proc(v: $T, plan: ^typed.Plan, allocator := context.allocator) -> (core.Value, core.Error)
 # core/records
 Framing_Services :: struct { next: [core.Framing]proc(it: ^Reader) -> (Record, bool), judge: proc(it: ^Reader, rec: Record) -> Maybe(core.Fault), guess: proc(it: ^Reader, to: u64) -> bool, span: proc(it: ^Reader, to: u64) -> (Record, bool), exact: proc(it: ^Reader) -> (kernel.Quotes, bool), piece: proc(it: ^Reader, lo, hi: u64) -> bool, whole: proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64), close: proc(it: ^Reader), ends: [core.Framing]u8, }
 RULES := core.Rules{"records", {{}, {"too_long", "Record is longer than the limit"}}}

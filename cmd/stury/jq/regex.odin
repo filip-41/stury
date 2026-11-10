@@ -282,7 +282,7 @@ match_object :: proc(r: ^Regex, s: string, m: Match, w: ^Char_Walk) -> Value {
 			object_put(c, "length", num(0))
 		case lo == hi || m[0] == m[1]: // jq's own key order for an empty capture
 			object_put(c, "offset", num(f64(off if m[0] == m[1] else chars_before(w, s, lo))))
-			object_put(c, "string", "")
+			object_put(c, "string", string(""))
 			object_put(c, "length", num(0))
 		case:
 			at, n := span(w, s, lo, hi)
@@ -308,7 +308,7 @@ capture_object :: proc(r: ^Regex, s: string, m: Match) -> ^Object {
 		lo, hi := m[2 * g], m[2 * g + 1]
 		text: Value = nil
 		if lo >= 0 {
-			text = span_text(s, lo, hi) if m[0] < m[1] else ""
+			text = span_text(s, lo, hi) if m[0] < m[1] else string("")
 		}
 		object_put(o, name, text)
 	}

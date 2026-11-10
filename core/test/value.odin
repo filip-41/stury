@@ -1,0 +1,141 @@
+// The readers of a value over its two forms, a built value and a node, and the typed bridges to a built value.
+package core_test
+
+import "core:testing"
+import core ".."
+import typed "../typed"
+import write "../write"
+import json "../../json"
+import walktest "../../walktest"
+
+// What each reader answers for one text, which a node of the text and its built value must both give.
+@(private = "file")
+Reader_Case :: struct {
+	text:   string,
+	kind:   core.Kind,
+	length: int,
+	first:  core.Kind, // the kind of child 0, `.Null` when there is none
+	member: string, // a member `a` holds as text, "" when there is none
+}
+
+@(private = "file")
+READER_CASES := [?]Reader_Case {
+	{`null`, .Null, 0, .Null, ""},
+	{`true`, .True, 0, .Null, ""},
+	{`12.5`, .Number, 0, .Null, ""},
+	{`"x"`, .String, 0, .Null, ""},
+	{`[1,"b",[]]`, .Array, 3, .Number, ""},
+	{`{"a":"v","b":[1]}`, .Object, 2, .String, "v"},
+	{`[]`, .Array, 0, .Null, ""},
+	{`{}`, .Object, 0, .Null, ""},
+}
+
+@(test)
+readers_answer_alike_for_a_node_and_a_built_value :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	for c in READER_CASES {
+		doc, err := core.build(transmute([]u8)c.text, json.as(.Json))
+		walktest.expect_nil(t, err)
+		node := core.Value(core.Node_Ref{&doc, core.ROOT})
+		built := core.built_value(core.Node_Ref{&doc, core.ROOT})
+		for v in ([]core.Value{node, built}) {
+			testing.expectf(t, core.kind(v) == c.kind, "%s: kind %v", c.text, core.kind(v))
+			testing.expectf(t, core.length(v) == c.length, "%s: length %d", c.text, core.length(v))
+			first, has := core.child_at(v, 0)
+			if c.kind == .Object {
+				it := core.pairs(v)
+				_, first, has = core.pair_next(&it)
+			}
+			testing.expectf(t, (core.kind(first) if has else .Null) == c.first, "%s: first child", c.text)
+			a, found := core.member(v, "a")
+			buf: [16]u8
+			s, _ := core.text(a, buf[:])
+			testing.expectf(t, found == (c.member != "") && s == c.member, "%s: member a", c.text)
+		}
+		testing.expectf(t, core.equal(node, built) && core.hash(node) == core.hash(built), "%s: equal and hash", c.text)
+		core.destroy(&doc)
+	}
+	n, _ := core.number(core.Value(f64(3)))
+	testing.expect_value(t, n.kind, core.Number_Kind.Int)
+	n, _ = core.number(core.Value(f64(2.5)))
+	testing.expect_value(t, n.kind, core.Number_Kind.Float)
+}
+
+// An object with a repeated key, as a node and as a built value holding both members: `member` takes the last but under
+// `.First`, `pairs` and the writer give both, and two such objects are equal and hash alike.
+@(test)
+repeated_key_reads_alike_in_both_forms :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	src := `{"a":1,"b":true,"a":2}`
+	doc, err := core.build(transmute([]u8)string(src), json.as(.Json))
+	walktest.expect_nil(t, err)
+	defer core.destroy(&doc)
+	built := core.new_object()
+	append(&built.keys, "a", "b", "a")
+	append(&built.vals, core.Value(core.number_text("1")), core.Value(true), core.Value(f64(2)))
+	node := core.Value(core.Node_Ref{&doc, core.ROOT})
+	for v in ([]core.Value{node, built}) {
+		last, _ := core.member(v, "a")
+		first, _ := core.member(v, "a", .First)
+		l, _ := core.number(last)
+		f, _ := core.number(first)
+		testing.expect_value(t, l.bits, 2)
+		testing.expect_value(t, f.bits, 1)
+		it := core.pairs(v)
+		keys: [dynamic]string
+		for k in core.pair_next(&it) {
+			append(&keys, k)
+		}
+		testing.expect_value(t, len(keys), 3)
+		text, werr := write.write_value(v, json.as(.Json))
+		testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
+		testing.expect_value(t, string(text), src)
+	}
+	testing.expect(t, core.equal(node, built))
+	testing.expect_value(t, core.hash(node), core.hash(built))
+}
+
+// A typed value becomes a built value, an integer past 2^53 keeping its digits, and reads back into its type.
+@(test)
+typed_bridges_round_trip :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	S :: struct {
+		n:   int,
+		f:   f64,
+		s:   string,
+		big: u64,
+		xs:  []i32,
+	}
+	plan, perr := json.plan_make(S, reads = json.reads(.Json))
+	walktest.expect_nil(t, perr)
+	in_value := S{n = 7, f = 2.5, s = "x", big = 1 << 60 + 1, xs = {1, -2}}
+	v, merr := write.marshal_value(in_value, &plan)
+	walktest.expect_nil(t, merr)
+	n, _ := core.member(v, "n")
+	big, _ := core.member(v, "big")
+	_, is_double := n.(f64)
+	testing.expect(t, is_double)
+	testing.expect_value(t, big.(^core.Number_Text).text, "1152921504606846977")
+	out: S
+	walktest.expect_nil(t, typed.unmarshal(v, &out, &plan))
+	testing.expect_value(t, out.n, 7)
+	testing.expect_value(t, out.f, 2.5)
+	testing.expect_value(t, out.s, "x")
+	testing.expect_value(t, out.big, in_value.big)
+	testing.expect(t, len(out.xs) == 2 && out.xs[1] == -2)
+	// An integer field takes a double that holds an integer, and refuses one that does not.
+	I :: struct {
+		n: int,
+	}
+	iplan, _ := json.plan_make(I, reads = json.reads(.Json))
+	whole := core.new_object()
+	core.object_put(whole, "n", f64(3))
+	i: I
+	walktest.expect_nil(t, typed.unmarshal(core.Value(whole), &i, &iplan))
+	testing.expect_value(t, i.n, 3)
+	core.object_put(whole, "n", f64(3.5))
+	testing.expect(t, typed.unmarshal(core.Value(whole), &i, &iplan) != nil)
+}

@@ -41,11 +41,13 @@ indirect :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t
 		reason = store_cstring(h, t, dest)
 	case .Number_Text:
 		reason = .Wrong_Kind
+		n := (^core.Number_Text)(dest)
 		if t.kind == .Number {
-			reason = store_span(h, t.lo, u64(t.n), (^string)(dest))
+			reason = store_span(h, t.lo, u64(t.n), &n.text)
+			n.double = core.text_f64(n.text)
 		} else if t.kind == .Null {
 			// The empty text, which a write spells `null`.
-			(^string)(dest)^, reason = "", .None
+			n^, reason = {}, .None
 		}
 	case .Number:
 		reason = .Wrong_Kind
@@ -423,7 +425,7 @@ store_decoded :: proc(h: ^Reader, t: core.Token, dest: ^Scalar) -> core.Typed_Er
 			if reason := store_span(h, t.lo, u64(t.n), &s); reason != .None {
 				return reason
 			}
-			dest^ = Number_Text(s)
+			dest^ = core.Number_Text{s, core.text_f64(s)}
 		}
 	case:
 		return .Wrong_Kind

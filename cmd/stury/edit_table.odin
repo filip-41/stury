@@ -62,7 +62,7 @@ edit_table :: proc(er: ^Edit_Run, path: string) -> int {
 		}
 		// The table's own comments are the ones an output array writes, above the header and after the last record.
 		for v in outs {
-			for role in jq.Comment_Role {
+			for role in core.COMMENT_ROLES {
 				if bodies, from := jq.comments(v, role); from == .Written && !edit_role(&w, core.ROOT, role, bodies) {
 					message.write_stderr("stury: error: %s: %s\n", w.name, w.err)
 					return EXIT_INPUT
@@ -154,7 +154,7 @@ new_comments :: proc(placed: []Edit_Placed) -> bool {
 		if p.rec >= 0 {
 			continue
 		}
-		for role in jq.Comment_Role {
+		for role in core.COMMENT_ROLES {
 			if bodies, _ := jq.comments(p.value, role); len(bodies) > 0 {
 				return true
 			}

@@ -141,12 +141,17 @@ index_value :: proc(ip: ^Interp, t: Value, key: Value) -> (Value, Signal) {
 			return nil, .Go
 		}
 		return nil, fail(ip, "Cannot index %s with string (%s)", type_name(t), brief(ip, k))
-	case Number:
+	case f64, ^Number_Text:
 		if tk == .Array {
-			if math.is_nan(k.f) {
+			// A literal zero keeps its digits (`literal`), and `.[0]` is common.
+			f, is_f64 := key.(f64)
+			if !is_f64 {
+				f = key.(^Number_Text).double
+			}
+			if math.is_nan(f) {
 				return nil, .Go
 			}
-			i := int(k.f)
+			i := int(f)
 			if i < 0 {
 				i += length_of(t)
 			}
@@ -188,12 +193,12 @@ slice_bounds :: proc(ip: ^Interp, n: int, key: Value) -> (lo, hi: int, sig: Sign
 	to, tok := object_get(key, "end")
 	f, t := 0.0, f64(n)
 	if from != nil {
-		x: Number
+		x: Num
 		x, fok = number_of(from)
 		f = x.f
 	}
 	if to != nil {
-		x: Number
+		x: Num
 		x, tok = number_of(to)
 		t = x.f
 	}

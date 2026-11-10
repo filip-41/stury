@@ -96,7 +96,7 @@ every_scalar_kind :: proc(t: ^testing.T) {
 	written(t, cstring(nil), `null`)
 	written(t, typed.Raw(`{"a": [1]}`), `{"a": [1]}`)
 	written(t, typed.Raw(""), `null`)
-	written(t, typed.Number_Text("1.50"), `1.50`)
+	written(t, core.Number_Text{text = "1.50"}, `1.50`)
 	written(t, Color.Green, `"Green"`)
 	written(t, Signed.Low, `"Low"`)
 	written(t, core.Number{kind = .Int, bits = transmute(u64)i64(-2)}, `-2`)
@@ -106,7 +106,7 @@ every_scalar_kind :: proc(t: ^testing.T) {
 	written(t, typed.Scalar(true), `true`)
 	written(t, typed.Scalar(i64(3)), `3`)
 	written(t, typed.Scalar(string("s")), `"s"`)
-	written(t, typed.Scalar(typed.Number_Text("9e9")), `9e9`)
+	written(t, typed.Scalar(core.Number_Text{text = "9e9"}), `9e9`)
 }
 
 @(test)
@@ -416,8 +416,8 @@ what_a_write_refuses :: proc(t: ^testing.T) {
 	refused(t, typed.Raw(` 1`), .Bad_Raw)
 	refused(t, typed.Raw(`1 `), .Bad_Raw)
 	refused(t, typed.Raw(`1 2`), .Bad_Raw)
-	refused(t, typed.Number_Text(`"s"`), .Bad_Raw)
-	refused(t, typed.Number_Text(`01`), .Bad_Raw)
+	refused(t, core.Number_Text{text = `"s"`}, .Bad_Raw)
+	refused(t, core.Number_Text{text = `01`}, .Bad_Raw)
 	bad_key := map[Color]i64 {
 		transmute(Color)u8(2) = 1,
 	}

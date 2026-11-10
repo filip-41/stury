@@ -759,7 +759,7 @@ Copied :: struct {
 @(private = "file")
 copy_value :: proc(c: ^Copier, v: Value) -> Value {
 	switch x in v {
-	case nil, bool:
+	case nil, bool, f64:
 	case Ref:
 		if !held(c, x.doc) {
 			return v
@@ -772,8 +772,14 @@ copy_value :: proc(c: ^Copier, v: Value) -> Value {
 		d.src = transmute([]byte)copy_string(c, string(x.doc.src))
 		c.made[{x.doc, -1}] = Ref{d, core_pkg.ROOT}
 		return Ref{d, x.node}
-	case Number:
-		return Number{f = x.f, lit = copy_string(c, x.lit)}
+	case ^Number_Text:
+		text := copy_string(c, x.text)
+		if raw_data(text) == raw_data(x.text) && !held(c, x) {
+			return x
+		}
+		made := new_clone(x^)
+		made.text = text
+		return made
 	case string:
 		return copy_string(c, x)
 	case ^Array:

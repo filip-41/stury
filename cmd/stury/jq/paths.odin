@@ -1,8 +1,8 @@
 package jq
 
-import "base:runtime"
 import "core:math"
 import "core:slice"
+import core_pkg "../../../core"
 
 // Path tracking: the path an output was read at, kept beside it while a path expression runs.
 
@@ -13,42 +13,7 @@ extend :: proc(p: ^Path_Step, key: Value) -> ^Path_Step {
 }
 
 path_array :: proc(p: ^Path_Step) -> ^Array {
-	n := p.depth if p != nil else 0
-	a := new_array(n)
-	resize(&a.items, n)
-	for s := p; s != nil; s = s.parent {
-		n -= 1
-		a.items[n] = s.key
-	}
-	return a
-}
-
-PATH_KEYS_ON_STACK :: 32
-
-// `compare` of two arrays one of which is a path, whose keys are read into the stack or a heap block that
-// is freed on return, as a sort compares paths often and an arena frees no block.
-@(cold)
-compare_path_members :: proc(a, b: Value, depth: int, eq: bool) -> int {
-	bufs: [2][PATH_KEYS_ON_STACK]Value
-	xs: [2][]Value
-	for v, i in ([2]Value{a, b}) {
-		if p, is_path := v.(Path); is_path {
-			s := (^Path_Step)(p)
-			xs[i] = bufs[i][:s.depth] if s.depth <= PATH_KEYS_ON_STACK else make([]Value, s.depth, runtime.heap_allocator())
-			for n := s.depth; s != nil; s = s.parent {
-				n -= 1
-				xs[i][n] = s.key
-			}
-		} else {
-			xs[i] = elements(v)
-		}
-	}
-	defer for v, i in ([2]Value{a, b}) {
-		if _, is_path := v.(Path); is_path && len(xs[i]) > PATH_KEYS_ON_STACK {
-			delete(xs[i], runtime.heap_allocator())
-		}
-	}
-	return compare_items(xs[0], xs[1], depth, eq)
+	return core_pkg.trail_array(Path(p))
 }
 
 // The path of a value no path leads to, made by an expression that is not a path: a path expression
@@ -113,15 +78,12 @@ identical :: proc(a, b: Value) -> bool {
 		return false
 	}
 	#partial switch x in a {
-	case Number:
-		y, is_num := b.(Number)
-		if !is_num {
-			return false
-		}
-		if x.lit != "" || y.lit != "" {
-			return raw_data(x.lit) == raw_data(y.lit)
-		}
-		return transmute(u64)x.f == transmute(u64)y.f
+	case f64:
+		y, is_num := b.(f64)
+		return is_num && transmute(u64)x == transmute(u64)y
+	case ^Number_Text:
+		y, is_text := b.(^Number_Text)
+		return is_text && x == y
 	case string:
 		y, is_str := b.(string)
 		return is_str && raw_data(x) == raw_data(y) && len(x) == len(y)

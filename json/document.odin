@@ -54,6 +54,7 @@ rules_of :: proc "contextless" () -> ^core.Rules {
 @(private)
 READS := typed.Format_Reads {
 	read = read_text_as, check = check_text_as,
+	build = proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_as(src, as, false, allocator)},
 }
 
 // A number's kind fits core's kind bits and leaves bit 0 (`SPELLING_DECODE`) clear.

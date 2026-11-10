@@ -11,6 +11,7 @@ import spell "../core/spell"
 import core "../core"
 import rules "../core/rules"
 import typed "../core/typed"
+import write "../core/write"
 
 // Reads `src`, a text of spec `S`, into `target`, a slice or dynamic array of rows, replacing what it held, or into one
 // row, which reads the first record and refuses a second as `.Wrong_Length`. A row is a struct whose fields the header
@@ -87,6 +88,7 @@ plan_built :: proc(T: typeid, spec: Spec, layout: Options, opts: typed.Plan_Opti
 @(private)
 plan_bind :: proc(p: ^typed.Plan) {
 	p.marshal, p.tokens, p.node_read = marshal_text, &TOKENS, document_read
+	p.value_text = write.value_text
 }
 
 // The typed reads of the format, which a handle's plan copies.
@@ -96,6 +98,7 @@ READS := typed.Format_Reads {
 	read      = read_as,
 	check     = check_as,
 	node_read = document_read,
+	build     = proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_as(src, as, false, allocator)},
 }
 
 // The plan's `read` of a whole text under the handle `as`.

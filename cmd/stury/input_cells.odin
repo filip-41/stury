@@ -150,7 +150,7 @@ slurped :: proc(ins: ^Inputs, all: ^jq.Array) -> jq.Value {
 		v = jq.noted(v, .Comment, ins.head_notes[:])
 	}
 	if len(ins.foot_notes) > 0 {
-		v = jq.noted(v, .Foot, ins.foot_notes[:])
+		v = jq.noted(v, .Comment_Foot, ins.foot_notes[:])
 	}
 	ins.head_notes, ins.foot_notes = nil, nil
 	return v

@@ -50,9 +50,6 @@ Unknown_Fields :: enum u8 {
 // A value's text, kept as the format spells it: a struct field's or a captured unknown member's whole value.
 Raw :: distinct string
 
-// A number's text. As a target it takes any number, and an `any` holds a number no integer or binary64 reads as one.
-Number_Text :: distinct string
-
 // The arm of `Scalar` for a null.
 Null :: struct {}
 
@@ -63,7 +60,7 @@ Scalar :: union {
 	i64,
 	u64,
 	f64,
-	Number_Text,
+	core.Number_Text,
 	string,
 }
 

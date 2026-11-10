@@ -20,7 +20,7 @@ import build "../build"
 // and a nil target, a nil document, a node past
 // the document, a key and `.Refuse` are `.Bad_Option`: a document that must hold no repeated key is built under
 // `.Refuse`.
-unmarshal :: proc {unmarshal_node, unmarshal_answer}
+unmarshal :: proc {unmarshal_node, unmarshal_answer, unmarshal_value}
 
 unmarshal_node :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error {
 	return core.error_of(read_document(doc, node, typeid_of(T), target, plan, read, allocator))
@@ -32,6 +32,28 @@ unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, 
 		return core.error_of(core.Typed_Error{kind = .Bad_Option})
 	}
 	return core.error_of(read_document(doc, answer.node, typeid_of(T), target, plan, read, allocator))
+}
+
+// Reads the value `v` into `target` with `plan`, as a text of the plan's format spelling it would be read: a double
+// fills an integer field when it holds that integer exactly, and a `Number_Text` by its digits. A node is read from its
+// document. A nil plan, and one whose format writes no built value, is `.Bad_Option`, and a plan with no text read
+// `.Plan_Mismatch`.
+unmarshal_value :: proc(v: core.Value, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error {
+	if r, is_node := core.plain(v).(core.Node_Ref); is_node {
+		return core.error_of(read_document(r.doc, r.node, typeid_of(T), target, plan, read, allocator))
+	}
+	if plan == nil || plan.value_text == nil {
+		return core.error_of(core.Typed_Error{kind = .Bad_Option})
+	}
+	text, err := plan.value_text(plan, v, context.allocator)
+	defer delete(text)
+	if err.kind != .None {
+		return core.error_of(err)
+	}
+	// The text lasts only the call, so no string borrows from it.
+	read := read
+	read.borrow_strings = false
+	return unmarshal_text(text, target, typeid_of(T), plan, read, allocator)
 }
 
 // A read's state beside the hook's own: the document, and the node `build.feed_nodes` is giving the hook.

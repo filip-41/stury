@@ -11,11 +11,13 @@ import records "../core/records"
 Action :: core.Action
 All :: core.All
 Answer :: core.Answer
+Array :: core.Array
 As :: core.As
 Child_Count :: core.Child_Count
 Child_Index :: core.Child_Index
 Child_Iter :: core.Child_Iter
 Comment_Spelling :: core.Comment_Spelling
+Commented :: core.Commented
 Descend :: core.Descend
 Document :: core.Document
 Document_Error :: core.Document_Error
@@ -48,8 +50,11 @@ Missing_Name :: core.Missing_Name
 Name :: core.Name
 Node :: core.Node
 Node_Index :: core.Node_Index
+Node_Ref :: core.Node_Ref
 Number :: core.Number
 Number_Kind :: core.Number_Kind
+Number_Text :: core.Number_Text
+Object :: core.Object
 PRETTY :: core.PRETTY
 Pair_Iter :: core.Pair_Iter
 Path :: core.Path
@@ -76,10 +81,16 @@ Typed_Error_Kind :: core.Typed_Error_Kind
 Typed_Want :: core.Typed_Want
 Value :: core.Value
 Write_Options :: core.Write_Options
+array_append :: core.array_append
 child_at :: core.child_at
+child_next :: core.child_next
 children :: core.children
 clone :: core.clone
 comment_lead :: core.comment_lead
+comments :: core.comments
+compare :: core.compare
+equal :: core.equal
+hash :: core.hash
 facts_of :: core.facts_of
 float_value :: core.float_value
 format :: core.format
@@ -93,9 +104,15 @@ member :: core.member
 member_next :: core.member_next
 member_of :: core.member_of
 members_named :: core.members_named
+new_array :: core.new_array
+new_object :: core.new_object
+noted :: core.noted
+object_put :: core.object_put
+pair_next :: core.pair_next
 pairs :: core.pairs
 parse_path :: core.parse_path
 parse_pointer :: core.parse_pointer
+plain :: core.plain
 remove :: core.remove
 remove_fact :: core.remove_fact
 render :: core.render
@@ -121,7 +138,6 @@ Marshal_Hook :: typed.Marshal_Hook
 Marshal_Text :: typed.Marshal_Text
 Meta :: typed.Meta
 Null :: typed.Null
-Number_Text :: typed.Number_Text
 Plan :: typed.Plan
 Plan_Options :: typed.Plan_Options
 Raw :: typed.Raw
@@ -152,6 +168,7 @@ value_int :: write.value_int
 value_null :: write.value_null
 value_string :: write.value_string
 value_uint :: write.value_uint
+write_value :: write.write_value
 tokens_close :: write.close
 marshal_stream :: write.marshal_stream
 

@@ -81,7 +81,7 @@ Zoo :: struct {
 	bits:      bit_set[0 ..< 8],
 	colors:    bit_set[Zoo_Color],
 	num:       core.Number,
-	num_text:  typed.Number_Text,
+	num_text:  core.Number_Text,
 	scalar:    typed.Scalar,
 	hooked:    Zoo_Hooked,
 	captured:  struct {
@@ -249,7 +249,7 @@ a_plan_of_a_types_description_has_the_types_plan_shape :: proc(t: ^testing.T) {
 @(private = "file")
 Shown :: struct {
 	n: Maybe(i32),
-	t: typed.Number_Text,
+	t: core.Number_Text,
 	e: Zoo_Color,
 	u: union {
 		bool,

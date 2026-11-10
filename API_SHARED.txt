@@ -42,8 +42,11 @@ compile :: proc(pattern: string, flags: Flags, allocator := context.allocator) -
 search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch) -> (found: bool, err: string)
 # core
 AT_NO_BYTE :: bit_set[Fault_Kind]{.None, .No_Memory, .Bad_Option}
+COMMENT_ROLES :: bit_set[Role]{.Comment, .Comment_Inline, .Comment_Foot}
 FAULT_REACH :: 16
+INDEX_FROM :: 16
 MAX_PATHS :: 64
+Member :: struct { key: string, val: Value, }
 NO_NODE :: Node_Index(max(u32))
 NUMBER_DECIMAL :: u16(2)
 NUMBER_EXP :: u16(1 << 14)
@@ -55,41 +58,59 @@ SPELLING_QUOTED :: u16(2)
 STOPPED :: 1
 TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Invalid_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
 all_facts :: #force_inline proc(doc: ^Document, i: Node_Index) -> []Fact
-child_next :: #force_inline proc(it: ^Child_Iter) -> (Node_Index, bool)
+built_value :: proc(r: Node_Ref) -> Value
 children_from :: proc(doc: ^Document, i: Node_Index, k: int) -> Child_Iter
 comment_spelling :: #force_inline proc "contextless" (lead, tail: u8) -> u16
 comment_tail :: #force_inline proc "contextless" (spelling: u16) -> u64
+compare_members :: proc(a, b: []Member, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH) -> int
+double_of :: proc(v: Value) -> (f: f64, digits: string, ok: bool)
 element_of :: proc(doc: ^Document, c: Node_Index, k: int) -> (Node_Index, Presence)
 fact_next :: proc(it: ^Fact_Iter) -> (body: string, ok: bool)
 fault_at :: #force_inline proc "contextless" (pos: u64, kind: Fault_Kind, detail: u8 = 0) -> u64
 has_line_end :: #force_inline proc(body: []u8) -> bool
 index_children :: proc(doc: ^Document, i: Node_Index) -> bool
 is_flat :: #force_inline proc(doc: ^Document) -> bool
+is_wide :: proc(v: Value) -> bool
+keep_comments :: #force_inline proc(old, nv: Value) -> Value
 line_end_len :: proc(src: []u8, pos: u64) -> u64
 locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines = nil) -> (line, col: u64)
+make_room :: #force_inline proc(a: ^[dynamic]$T)
 move_document_error :: proc(e: ^Document_Error, by: u64)
 move_typed_error :: proc(e: ^Typed_Error, by: u64)
 no_hook :: #force_inline proc "contextless" (h: ^No_Hooks, s: Hook_Regs, t: Token) -> (Hook_Regs, Action)
 node_start :: #force_inline proc(n: Node) -> u64
+node_string :: proc(doc: ^Document, i: Node_Index) -> string
 number_digit_counts :: #force_inline proc "contextless" (spelling: u16) -> (int_digits, frac_digits: int)
 number_digits :: #force_inline proc "contextless" (spelling: u16) -> (frac, sum: u16)
+number_f64 :: proc(n: Number, text: string) -> f64
 number_shape :: #force_inline proc "contextless" (spelling: u16) -> u16
 number_spelling :: #force_inline proc "contextless" (kind: u16, int_digits, frac_digits: u64) -> u16
+number_text :: proc(text: string, allocator := context.allocator) -> ^Number_Text
+object_delete :: proc(o: ^Object, k: string)
+object_delete_all :: proc(o: ^Object, gone: map[string]bool)
+object_set :: proc(o: ^Object, k: string, v: Value)
+object_slot :: proc(o: ^Object, k: string) -> int
 own_reads :: proc(doc: ^Document) -> runtime.Allocator_Error
-pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bool)
 path_error :: proc(e: Document_Error) -> Path_Error
+reindex :: proc(o: ^Object)
 reorder :: proc(list: ^Edit_List, container: Node_Index, order: []u32) -> Error
 reserve_depth :: #force_inline proc "contextless" (max_depth: u32, n: int) -> int
 result_of :: #force_inline proc "contextless" (r: u64, rules: ^Rules) -> (hi: u64, fault: Maybe(Fault), stopped: bool)
+rewrap :: proc(c: ^Commented, inner: Value) -> Value
 same_format :: #force_inline proc "contextless" (a, b: ^Readers) -> bool
 scalar_ends :: #force_inline proc "contextless" (t: Token) -> (lo, hi: u64)
 services_of :: #force_inline proc "contextless" (as: As) -> ^Services
 set_facts :: proc(list: ^Edit_List, node: Node_Index, role: Role, texts: []string, padded := false) -> Error
+sorted_keys :: proc(v: Value) -> []string
+sorted_members :: proc(v: Value) -> []Member
 subtree_facts :: proc(doc: ^Document, i: Node_Index) -> []Fact
 text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator) -> (s: string, ok: bool)
+text_f64 :: proc(text: string) -> f64
+text_order :: proc(a, b: string) -> int
 text_spelling :: #force_inline proc "contextless" (escaped, lax: bool) -> u16
 text_start :: proc "contextless" (src: []u8, lo: u64) -> u64
 token_text :: proc(readers: ^Readers, view: ^Token_View, t: Token, allocator: runtime.Allocator) -> (s: string, ok: bool)
+trail_array :: proc(t: Trail) -> ^Array
 write_fault_message :: proc(w: io.Writer, src: []u8, f: Fault) -> io.Error
 # host
 writing :: proc(pool: ^Pool, on: bool)
@@ -219,6 +240,7 @@ tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, alloc
 tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind
 tokens_release :: proc(t: ^Tokens)
 union_arm :: proc(m: ^typed.Meta, v: uintptr) -> ^typed.Arm
+value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
 # core/records
 entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64) -> bool
 next_window :: proc(it: ^Reader) -> (window: []u8, base: u64, ok: bool)

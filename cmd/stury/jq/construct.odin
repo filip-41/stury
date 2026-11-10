@@ -109,7 +109,7 @@ column_into :: proc(n: ^Node, v: Value, into: ^[dynamic]Value) -> bool {
 			}
 		}
 		return true
-	case nil, bool, Number, string, ^Object, Path, ^Commented:
+	case nil, bool, f64, ^Number_Text, string, ^Object, Path, ^Commented:
 	}
 	return false
 }
@@ -136,7 +136,7 @@ append_field :: #force_inline proc(into: ^[dynamic]Value, e: Value, name: string
 	case nil:
 		append(into, nil)
 		return true
-	case bool, Number, string, ^Array, Path, ^Commented:
+	case bool, f64, ^Number_Text, string, ^Array, Path, ^Commented:
 	}
 	return false
 }

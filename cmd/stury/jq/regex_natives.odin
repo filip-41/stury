@@ -96,7 +96,7 @@ match_path_error :: proc(ip: ^Interp, r: ^Regex, s: string, ms: []Match) -> Sign
 // `split/2` as jq defines it, cutting at its matches' character offsets. jq's `match($re; flags + "g")`
 // adds the flags first, so a non-string fails as that addition before the input is validated.
 fn_split_regex :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	flags, sig := add(ip, args[1], "g")
+	flags, sig := add(ip, args[1], string("g"))
 	if sig != .Go {
 		return nil, sig
 	}
@@ -169,7 +169,7 @@ native_sub :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, o
 			}
 			tail := cut_rest(&cuts, s)
 			if len(results) == 0 {
-				append(&results, "")
+				append(&results, string(""))
 				tail = s
 			}
 			for v in results {

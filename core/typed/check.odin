@@ -20,7 +20,11 @@ Node_Read :: #type proc(doc: ^core.Document, node: core.Node_Index, T: typeid, t
 Format_Reads :: struct {
 	read, check:           Text_Read,
 	node_read, node_check: Node_Read,
+	build:                 Text_Build,
 }
+
+// Builds `src` as a document of the format `as` names, as a format's `Format_Reads` does for `write.marshal_value`.
+Text_Build :: #type proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error)
 
 // Starts a `Check` read, as `read_start` starts a read of the plan's own type. Its sink takes `core.Error_Entry`s.
 check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error) {

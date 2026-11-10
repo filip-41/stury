@@ -93,25 +93,19 @@ edit_comments :: proc(w: ^Edit_State, node: core.Node_Index, c: ^jq.Commented) -
 }
 
 // The edit that makes `bodies` the comments of `node` with `role`, none when they already are.
-edit_role :: proc(w: ^Edit_State, node: core.Node_Index, role: jq.Comment_Role, bodies: []string) -> bool {
-	ROLES :: [jq.Comment_Role]core.Role {
-		.Comment = .Comment,
-		.Inline  = .Comment_Inline,
-		.Foot    = .Comment_Foot,
-	}
-	roles := ROLES
+edit_role :: proc(w: ^Edit_State, node: core.Node_Index, role: core.Role, bodies: []string) -> bool {
 	have, _ := jq.comments(jq.Ref{w.doc, node}, role)
 	if slice.equal(bodies, have) {
 		return true
 	}
-	return edit_check(w, core.set_facts(w.list, node, roles[role], bodies, padded = true))
+	return edit_check(w, core.set_facts(w.list, node, role, bodies, padded = true))
 }
 
 // Whether `v` carries a comment that its text does not write: its own, or one of a value nested in it, which a value
 // taken from the document keeps in its bytes unless `kept` is false, when its text is spelled new.
 @(private = "file")
 carries_comments :: proc(w: ^Edit_State, v: jq.Value, kept: bool) -> bool {
-	for role in jq.Comment_Role {
+	for role in core.COMMENT_ROLES {
 		if bodies, _ := jq.comments(v, role); len(bodies) > 0 {
 			return true
 		}
@@ -139,7 +133,7 @@ carries_comments :: proc(w: ^Edit_State, v: jq.Value, kept: bool) -> bool {
 // comments `v` carries, and the same for the values nested in it. A comment the filter wrote is written, removed when
 // it wrote none, and one `v` takes from a source node is written over the node's own.
 edit_comment_tree :: proc(w: ^Edit_State, node: core.Node_Index, v: jq.Value) -> bool {
-	for role in jq.Comment_Role {
+	for role in core.COMMENT_ROLES {
 		bodies, from := jq.comments(v, role)
 		if from == .Written || from == .Source && len(bodies) > 0 {
 			edit_role(w, node, role, bodies) or_return

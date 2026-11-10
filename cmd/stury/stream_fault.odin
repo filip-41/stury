@@ -225,8 +225,7 @@ at_separator :: proc(p: ^Parser, at: int) -> string {
 	}
 	_, is_string := p.next.(string)
 	if len(p.path) > 0 || p.has_next && !is_string {
-		_, is_number := p.next.(jq.Number)
-		if check_literal(p, at) == "" && len(p.path) == 0 && is_number {
+		if check_literal(p, at) == "" && len(p.path) == 0 && jq.kind(p.next) == .Number {
 			return jq.TRUNCATED_NUMBER_NOTE
 		}
 		return "Truncated value"
@@ -380,8 +379,8 @@ check_literal :: proc(p: ^Parser, end: int) -> string {
 			return "Invalid numeric literal"
 		}
 		v = n
-		if x, is_number := n.(jq.Number); is_number {
-			v = jq.Number{f = x.f, lit = strings.clone(x.lit)}
+		if x, is_text := n.(^jq.Number_Text); is_text {
+			v = jq.number_text(strings.clone(x.text))
 		}
 	}
 	if msg := value(p, v); msg != "" {
@@ -408,7 +407,7 @@ found_string :: proc(p: ^Parser, i: int) -> string {
 
 @(private = "file")
 path_is_index :: proc(p: ^Parser) -> bool {
-	_, number := p.path[len(p.path) - 1].(jq.Number)
+	_, number := p.path[len(p.path) - 1].(f64)
 	return number
 }
 
@@ -472,8 +471,8 @@ stream_token :: proc(p: ^Parser, ch: byte) -> string {
 			append(&p.staged, jq.event_of(path_copy(p), p.next))
 			p.next, p.has_next = nil, false
 		}
-		if index, is_index := p.path[top].(jq.Number); is_index {
-			p.path[top] = jq.num(index.f + 1)
+		if index, is_index := p.path[top].(f64); is_index {
+			p.path[top] = index + 1
 		} else {
 			p.path[top] = nil // ready for another key
 		}

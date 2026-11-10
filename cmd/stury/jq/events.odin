@@ -143,8 +143,8 @@ event_of :: proc(path: ^Array, leaf: ..Value) -> Value {
 // An event or a part of one, made anew in the context allocator. An event's container leaf is empty.
 event_clone :: proc(v: Value) -> Value {
 	#partial switch x in v {
-	case Number:
-		return Number{f = x.f, lit = strings.clone(x.lit)}
+	case ^Number_Text:
+		return number_text(strings.clone(x.text))
 	case string:
 		return strings.clone(x)
 	case ^Array:

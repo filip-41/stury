@@ -25,8 +25,8 @@ MAX_CHILDREN :: u16(0xFFFF)
 // A node's index in a document's `nodes` array.
 Node_Index :: distinct u32
 
-// A node of a document, the value a rule's operand names.
-Value :: struct {
+// A node of a document as a `Value`.
+Node_Ref :: struct {
 	doc:  ^Document,
 	node: Node_Index,
 }
@@ -111,7 +111,7 @@ Pair_Iter :: struct {
 
 // Starts a `Pair_Iter` over the key/value pairs of `obj`. On a non-`Object` container, a scalar, or an index past the last
 // node, returns an empty iterator. `pair_next` tests the ends, so an empty `Object` needs no test here.
-pairs :: proc(doc: ^Document, obj: Node_Index) -> Pair_Iter {
+doc_pairs :: proc(doc: ^Document, obj: Node_Index) -> Pair_Iter {
 	if int(obj) >= len(doc.nodes) || doc.nodes[obj].kind != .Object {
 		return {doc = doc, done = true}
 	}
@@ -126,7 +126,7 @@ pairs :: proc(doc: ^Document, obj: Node_Index) -> Pair_Iter {
 // Returns the next key and value node of the `Object`. For an inline-key `Object`, key and value alternate in preorder.
 // For a shared-key `Object`, keys come from `doc.shared_keys` while values advance within `obj`. An inline-key `Object`
 // reads neither `val_at` nor `val_end`.
-pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bool) {
+doc_pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bool) {
 	if it.done {
 		return NO_NODE, NO_NODE, false
 	}
@@ -424,7 +424,7 @@ own_reads :: proc(doc: ^Document) -> runtime.Allocator_Error {
 
 // Returns the kind of node `i`, or `.Null` when `i` is past the last node. A `Plain` cell is the kind the format reads
 // it as under the handle the document was read with.
-kind :: #force_inline proc(doc: ^Document, i: Node_Index) -> Kind {
+doc_kind :: #force_inline proc(doc: ^Document, i: Node_Index) -> Kind {
 	if int(i) >= len(doc.nodes) {
 		return .Null
 	}
@@ -485,7 +485,7 @@ line_end_len :: proc(src: []u8, pos: u64) -> u64 {
 
 // Returns the number of members in container `i`, from its `spelling`, or 0 for a scalar or a node past the last.
 // A count that saturated `MAX_CHILDREN` is read from `Document.counts`.
-length :: #force_inline proc(doc: ^Document, i: Node_Index) -> int {
+doc_length :: #force_inline proc(doc: ^Document, i: Node_Index) -> int {
 	if int(i) >= len(doc.nodes) {
 		return 0
 	}
@@ -561,7 +561,7 @@ node_start :: #force_inline proc(n: Node) -> u64 {
 // count plus one. Any other container is read from its child index when `index_children` built one, else walked,
 // stepping one subtree size per member. A count that saturated `MAX_CHILDREN` is read from `Document.counts`, so
 // the stride test uses the true member count.
-child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_Index, bool) {
+doc_child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_Index, bool) {
 	if int(i) >= len(doc.nodes) || k < 0 {
 		return NO_NODE, false
 	}
@@ -703,7 +703,7 @@ Child_Iter :: struct {
 	done:   bool,
 }
 
-children :: proc(doc: ^Document, i: Node_Index) -> Child_Iter {
+doc_children :: proc(doc: ^Document, i: Node_Index) -> Child_Iter {
 	if int(i) >= len(doc.nodes) {
 		return {doc = doc, parent = i, done = true}
 	}
@@ -739,7 +739,7 @@ subtree_step :: #force_no_inline proc(v: int, n: u32) -> int {
 
 // Returns the next value of a container and is inlined at every call, so a call does not spill the iterator and
 // re-read it per member.
-child_next :: #force_inline proc(it: ^Child_Iter) -> (Node_Index, bool) {
+doc_child_next :: #force_inline proc(it: ^Child_Iter) -> (Node_Index, bool) {
 	if it.done {
 		return NO_NODE, false
 	}
@@ -763,7 +763,7 @@ child_next :: #force_inline proc(it: ^Child_Iter) -> (Node_Index, bool) {
 
 // Returns the value of the member of `obj` whose key decodes to `name`, the first under `.First` and else the last. `members_named` yields
 // every match. A headed dsv record's members are its cells, named by the header's cells.
-member :: #force_inline proc(doc: ^Document, obj: Node_Index, name: string, dups := Duplicates.Last) -> (Node_Index, bool) {
+doc_member :: #force_inline proc(doc: ^Document, obj: Node_Index, name: string, dups := Duplicates.Last) -> (Node_Index, bool) {
 	// A single loop handles both shapes: `member_next` is inlined, so an object's step uses this frame's registers.
 	it := members_named(doc, obj, name)
 	found := NO_NODE
@@ -853,7 +853,7 @@ member_next_shared :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool)
 // without its quotes. A node that needs decoding is written into `buf`, and the call returns false when `buf` is too short,
 // which `text_room` bytes never are, and its content is then unspecified. It allocates nothing, so a caller that has no buffer long
 // enough uses `text_clone`. Returns false for a container or a node past the last.
-text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool) {
+doc_text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool) {
 	if int(i) >= len(doc.nodes) {
 		return "", false
 	}
@@ -951,7 +951,7 @@ text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator
 
 // Returns the number node `i` writes, decoded from its span, and false for a node that is no number: a container, a
 // string, a key, a cell that spells no number, and an index past the last node.
-number :: #force_inline proc(doc: ^Document, i: Node_Index) -> (Number, bool) {
+doc_number :: #force_inline proc(doc: ^Document, i: Node_Index) -> (Number, bool) {
 	if int(i) < len(doc.nodes) && doc.nodes[i].kind <= .Plain {
 		return doc.readers.number(&doc.view, doc.nodes[i])
 	}

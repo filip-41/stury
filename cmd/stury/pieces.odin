@@ -889,7 +889,7 @@ collect_pieces :: proc(ins: ^Inputs) -> bool {
 		spare: [write.ROOM_MAX]u8
 		write.init(&frame, &spare, context.temp_allocator)
 		marked := jq.Array{}
-		append(&marked.items, "\x01stury")
+		append(&marked.items, string("\x01stury"))
 		layout.spill = nil
 		jq.write_value(&frame, &marked, layout)
 		text, _ := write.finish(&frame)

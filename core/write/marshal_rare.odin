@@ -41,13 +41,13 @@ leaf :: #force_no_inline proc(w: ^Walker, f: ^typed.Field, v: uintptr, top, nest
 	case .Raw:
 		return put_raw(w, string((^typed.Raw)(v)^), top - w.n_ptrs, T)
 	case .Number_Text:
-		return put_number_text(w, string((^typed.Number_Text)(v)^), top - w.n_ptrs, T)
+		return put_number_text(w, (^core.Number_Text)(v).text, top - w.n_ptrs, T)
 	case .Number:
 		return put_number(&w.out, (^core.Number)(v)^)
 	case .Scalar:
 		s := (^typed.Scalar)(v)^
-		if text, is_text := s.(typed.Number_Text); is_text {
-			return put_number_text(w, string(text), top - w.n_ptrs, T)
+		if text, is_text := s.(core.Number_Text); is_text {
+			return put_number_text(w, text.text, top - w.n_ptrs, T)
 		}
 		// Every other arm is written as an `any` of its type.
 		_, k := any_value(w, any{rawptr(v), scalar_type(s)}, T, put)

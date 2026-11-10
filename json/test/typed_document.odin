@@ -72,7 +72,7 @@ Checked :: struct {
 Whole :: struct {
 	a: typed.Raw,
 	b: []typed.Raw,
-	c: typed.Number_Text,
+	c: core.Number_Text,
 	d: typed.Scalar,
 	e: any,
 	f: Pt,
@@ -164,7 +164,7 @@ numbers_read_alike_at_each_width :: proc(t: ^testing.T) {
 		d: u64,
 		e: f32,
 		f: f64,
-		g: typed.Number_Text,
+		g: core.Number_Text,
 		h: core.Number,
 	}
 	agree(t, `{"a":-128,"b":255,"c":-9223372036854775808,"d":18446744073709551615,"e":0.1,"f":-0,"g":1e400,"h":12.5}`, N{})
@@ -429,7 +429,7 @@ a_read_borrows_the_source_and_not_the_document :: proc(t: ^testing.T) {
 		s:    string,
 		m:    map[string]string,
 		r:    typed.Raw,
-		n:    typed.Number_Text,
+		n:    core.Number_Text,
 	}
 	arena: mem.Dynamic_Arena
 	mem.dynamic_arena_init(&arena)
@@ -442,12 +442,12 @@ a_read_borrows_the_source_and_not_the_document :: proc(t: ^testing.T) {
 	doc, _ := core.build(src, json.as(json.Spec.Json), allocator = context.temp_allocator)
 	copied: Holder
 	walktest.expect_nil(t, typed.unmarshal(&doc, core.ROOT, &copied, &plan, {}, scratch))
-	testing.expect(t, !inside(raw_data(copied.keys[0]), src) && !inside(raw_data(copied.s), src) && !inside(raw_data(string(copied.r)), src) && !inside(raw_data(string(copied.n)), src))
+	testing.expect(t, !inside(raw_data(copied.keys[0]), src) && !inside(raw_data(copied.s), src) && !inside(raw_data(string(copied.r)), src) && !inside(raw_data(copied.n.text), src))
 
 	// With it, a string with nothing to decode is a slice of the source, and a decoded one is the read's.
 	borrowed: Holder
 	walktest.expect_nil(t, typed.unmarshal(&doc, core.ROOT, &borrowed, &plan, {borrow_strings = true}, scratch))
-	testing.expect(t, inside(raw_data(borrowed.keys[0]), src) && inside(raw_data(borrowed.s), src) && inside(raw_data(string(borrowed.r)), src) && inside(raw_data(string(borrowed.n)), src))
+	testing.expect(t, inside(raw_data(borrowed.keys[0]), src) && inside(raw_data(borrowed.s), src) && inside(raw_data(string(borrowed.r)), src) && inside(raw_data(borrowed.n.text), src))
 	testing.expect(t, !inside(raw_data(borrowed.keys[1]), src))
 	for k, v in borrowed.m {
 		testing.expect(t, inside(raw_data(v), src))
@@ -463,6 +463,6 @@ a_read_borrows_the_source_and_not_the_document :: proc(t: ^testing.T) {
 	testing.expect_value(t, borrowed.s, "also plain")
 	testing.expect_value(t, borrowed.m["e\t"], "w")
 	testing.expect_value(t, borrowed.r, typed.Raw(`{"a":1}`))
-	testing.expect_value(t, string(borrowed.n), "12345678901234567890123")
+	testing.expect_value(t, borrowed.n.text, "12345678901234567890123")
 	testing.expect_value(t, copied.keys[1], "esc\n")
 }

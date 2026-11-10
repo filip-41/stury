@@ -11,7 +11,7 @@ import "core:slice"
 // which must run before any key is compared.
 Sort_Atom :: struct {
 	kind: Kind,
-	s:    string, // a string, or a number's literal
+	s:    string, // a string, or a `Number_Text`'s digits
 	f:    f64, // a number's double; an object's place in `object_members`
 	v:    Value,
 }
@@ -28,13 +28,23 @@ Keyed :: struct {
 atom_depth: int
 
 sort_atom :: proc(v: Value) -> Sort_Atom {
+	// A number of a document is read from its literal, so it is not made anew.
+	if r, is_ref := plain(v).(Ref); is_ref && node_kind(r.doc, r.node) == .Number {
+		lit, f, is_literal := node_literal(r.doc, r.node)
+		if is_literal {
+			f = text_f64(lit)
+		}
+		return {kind = .Number, f = f, s = lit, v = v}
+	}
 	x := scalar(v)
 	a := Sort_Atom{kind = kind(x), v = x}
 	#partial switch y in x {
 	case string:
 		a.s = y
-	case Number:
-		a.f, a.s = y.f, y.lit
+	case f64:
+		a.f = y
+	case ^Number_Text:
+		a.f, a.s = y.double, y.text
 	}
 	return a
 }

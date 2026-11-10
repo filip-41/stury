@@ -210,6 +210,10 @@ Plan :: struct {
 	// the plan uses, nil for a format with none.
 	raw:       proc(v: ^core.Token_View, src: []u8, allocator: runtime.Allocator) -> core.Document_Error,
 	tokens:    rawptr,
+	// The format's writer of a built value, which a read of a value takes, where its plan maker sets it, and its build
+	// of a text, which `write.marshal_value` takes, copied from its `Format_Reads`.
+	value_text: Value_Text,
+	build:      Text_Build,
 	// The options the plan was built with, which its reads and writes take, and so do the plans a write builds for a type
 	// met in an `any`.
 	using options: Plan_Options,
@@ -226,6 +230,9 @@ Plan :: struct {
 // Writes the value of `plan`'s type at `value` as `opts` says, to `stream` when it has a procedure, else to new bytes
 // from `allocator`.
 Marshal_Text :: #type proc(plan: ^Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
+
+// Writes the built value `v` in `plan`'s format into new bytes from `allocator`.
+Value_Text :: #type proc(plan: ^Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
 
 // The members a plan builder names in a refusal's path, the outermost ones when the type nests deeper.
 @(private)
@@ -297,6 +304,7 @@ plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := 
 plan_reads :: proc(p: ^Plan, reads: ^Format_Reads) {
 	if reads != nil {
 		p.read, p.check, p.node_read, p.node_check = reads.read, reads.check, reads.node_read, reads.node_check
+		p.build = reads.build
 	}
 }
 
@@ -308,6 +316,7 @@ plan_start :: proc(p: ^Plan, as: core.As, opts: Plan_Options) -> Builder {
 	if services := readers.services; services != nil {
 		if reads := (^Format_Reads)(services.reads); reads != nil {
 			p.read, p.check, p.node_read, p.node_check = reads.read, reads.check, reads.node_read, reads.node_check
+			p.build = reads.build
 		}
 		if services.edit != nil {
 			p.raw = services.edit.value
@@ -573,7 +582,7 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset,
 	switch ti.id {
 	case typeid_of(Raw):
 		f.kind = .Raw
-	case typeid_of(Number_Text):
+	case typeid_of(core.Number_Text):
 		f.kind = .Number_Text
 	case typeid_of(core.Number):
 		f.kind = .Number
@@ -921,7 +930,7 @@ classes_of :: proc(b: ^Builder, ti: ^runtime.Type_Info, depth: int) -> (c: bit_s
 	switch ti.id {
 	case typeid_of(Raw), typeid_of(any):
 		return EVERY_CLASS
-	case typeid_of(Number_Text), typeid_of(core.Number):
+	case typeid_of(core.Number_Text), typeid_of(core.Number):
 		return {.Number}
 	case typeid_of(Scalar):
 		return {.String, .Bool, .Number}

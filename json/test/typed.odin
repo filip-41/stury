@@ -559,7 +559,7 @@ any_holds_what_the_text_holds :: proc(t: ^testing.T) {
 	testing.expect_value(t, transmute(u64)l[1].(f64), u64(1) << 63)
 	testing.expect_value(t, l[2].(f64), 1.5)
 	testing.expect_value(t, l[3].(u64), max(u64))
-	testing.expect_value(t, string(l[4].(typed.Number_Text)), "1e400")
+	testing.expect_value(t, l[4].(core.Number_Text).text, "1e400")
 	testing.expect_value(t, l[5].(string), "s")
 	testing.expect(t, l[6] == nil)
 	testing.expect_value(t, l[7].(bool), true)

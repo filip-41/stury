@@ -310,13 +310,13 @@ read_number :: proc(text: string) -> (Value, bool) {
 		lower := strings.to_lower(t, context.temp_allocator)
 		switch {
 		case lower == "inf" || lower == "infinity":
-			return Number{f = math.inf_f64(-1 if neg else 1)}, true
+			return num(math.inf_f64(-1 if neg else 1)), true
 		case strings.has_prefix(lower, "nan") || strings.has_prefix(lower, "snan"):
 			payload := lower[3:] if lower[0] == 'n' else lower[4:]
 			if strings.trim_left(payload, "0") != "" {
 				return nil, false
 			}
-			return Number{f = math.nan_f64()}, true
+			return num(math.nan_f64()), true
 		}
 	}
 	// Digits around an optional point, at least one, then an optional exponent (`.5` and `1.` count). The literal is
@@ -325,7 +325,10 @@ read_number :: proc(text: string) -> (Value, bool) {
 	if !ok {
 		return nil, false
 	}
-	return Number{f = number_f64(n, text), lit = text if strict else ""}, true
+	if !strict {
+		return num(number_f64(n, text)), true
+	}
+	return number_text(text), true // a literal is the place it is written (`identical`)
 }
 
 // The body of a JSON string decoded into `out` as jq's JSON parser decodes it, or why it cannot be, in jq's

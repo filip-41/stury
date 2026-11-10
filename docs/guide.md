@@ -164,6 +164,28 @@ n, _ := json.member(&doc, json.ROOT, "n")   // a member by name, without a path
 A reader given a node of the wrong kind, or an index no node holds, returns its miss value and never faults.
 [document.md](document.md) lists each reader's miss value.
 
+### Values
+
+A `Value` is null (`nil`), a `bool`, a `f64`, a `Number_Text`, a `string`, an `^Array`, an `^Object` or a node of a
+document (`Node_Ref`). A `Number_Text` keeps a number's digits: a number read and not computed on, or an integer no
+double holds exactly. `json.new_array`, `json.new_object`, `json.array_append` and `json.object_put` build one in the
+context allocator. The readers above take a value as they take a node, so one loop reads both:
+
+```odin
+v := json.Value(json.Node_Ref{&doc, json.ROOT})
+it := json.pairs(v)
+for key, member in json.pair_next(&it) {
+	fmt.println(key, json.kind(member))
+}
+```
+
+`json.equal`, `json.compare` and `json.hash` order values as jq does. Two numbers compare by their doubles, and when
+both keep their digits and the doubles are equal, by the digits. `json.write_value(v, json.as(.Json))` writes a value
+in any format with a token writer. `json.marshal_value(x, &plan)` makes the value of a typed `x`, and
+`json.unmarshal_value(v, &target, &plan)` reads a value into a typed target, an integer field from a double that holds
+it exactly or from the digits. Both take a plan made with `reads = json.reads(.Json)`, which gives it the read and build
+of that spec.
+
 ## Edit and keep every other byte
 
 `set` replaces the value at a path with JSON text. The text is checked before it is spliced in, and every byte outside
