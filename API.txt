@@ -434,11 +434,15 @@ writer_end :: records.writer_end
 writer_init :: proc {writer_init_bound, writer_init_chosen}
 ## Format author names
 # core/spell
+Decimal :: struct { neg: bool, saturated: bool, head, tail: string, point: i128, }
 Fault_Kind :: enum u8 { None, Truncated, Bad_Char, Bad_Escape, Bad_Number, Too_Deep, Too_Wide, No_Memory, Bad_Option, Bad_Width, Duplicate_Key, }
 MAX_NUMBER_DIGITS :: 256
 MAX_NUMBER_SCALE :: 4096
 Number :: struct { bits: u64, kind: Number_Kind, }
 Number_Kind :: enum u8 { Int, Uint, Float, Wide, }
+decimal_compare :: proc(x, y: Decimal) -> (order: int, exact: bool)
+decimal_multiple_of :: proc(x, y: Decimal) -> (multiple, exact: bool)
+decimal_of :: proc(lit: string) -> (d: Decimal)
 # core/regex
 Scratch :: struct { stack: [dynamic]Entry, slots: [dynamic]int, counts: [dynamic]int, seen: [dynamic]u64, good: [dynamic]u64, log: [dynamic]u32, resumes: int, }
 scratch_destroy :: proc(scratch: ^Scratch)

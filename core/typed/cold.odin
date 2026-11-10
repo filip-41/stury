@@ -26,7 +26,7 @@ indirect :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t
 		return regs, .Next
 	case .Ptr, .Maybe, .Union, .Any:
 		return wrapped(h, regs, t, fld, m, dest)
-	case .Raw, .Hook:
+	case .Raw, .Hook, .Value:
 		if t.kind == .Object || t.kind == .Array {
 			f := &h.frames[h.sp]
 			h.sp += 1
@@ -312,10 +312,43 @@ pick_arm :: proc(h: ^Reader, t: core.Token, m: ^Meta) -> (arm: int, reason: core
 	return 0, .Wrong_Kind, {}
 }
 
+// A value read whole, built from the text `lo..hi` in the read's allocator by the plan's `build`, which the reads it was
+// made with give. A plan with none is `.Unsupported`.
+@(private)
+store_value :: proc(h: ^Reader, lo, hi: u64, dest: ^core.Value) -> core.Typed_Error_Kind {
+	if h.plan.build == nil {
+		return .Unsupported
+	}
+	doc, err := h.plan.build(h.src[lo:hi], h.plan.as, context.allocator)
+	#partial switch err.kind {
+	case .None:
+	case .No_Memory:
+		return .No_Memory
+	case .Duplicate_Key:
+		return .Duplicate_Key
+	case .Walk:
+		#partial switch err.inner.kind {
+		case .Too_Deep:
+			return .Too_Deep
+		case .No_Memory:
+			return .No_Memory
+		}
+		return .Walk
+	case:
+		return .Unsupported
+	}
+	defer core.destroy(&doc)
+	dest^ = core.built_value({&doc, core.ROOT}, .First if h.first_key else .Last, h.borrow)
+	return .None
+}
+
 // Stores a value read whole, `lo..hi` of the text.
 store_whole :: proc(h: ^Reader, fld: ^Field, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64, t: core.Token) -> core.Typed_Error_Kind {
-	if fld.kind == .Raw {
+	#partial switch fld.kind {
+	case .Raw:
 		return store_span(h, lo, hi - lo, (^string)(dest))
+	case .Value:
+		return store_value(h, lo, hi, (^core.Value)(dest))
 	}
 	v := Hook_Value{kind = kind, text = string(h.src[lo:hi])}
 	v.decoded = v.text

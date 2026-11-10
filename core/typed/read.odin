@@ -427,7 +427,7 @@ close_container :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame, own: 
 	owner := frame_owner(f)
 	back := core.Hook_Regs{f.a, f.b, f.c + u64(own.stride)}
 	#partial switch owner.kind {
-	case .Raw, .Hook:
+	case .Raw, .Hook, .Value:
 		// A container inside the value read whole counts in `seen`, with no frame of its own.
 		if f.seen != 0 {
 			f.seen -= 1

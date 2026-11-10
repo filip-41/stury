@@ -60,7 +60,7 @@ SPELLING_QUOTED :: u16(2)
 STOPPED :: 1
 TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Invalid_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
 all_facts :: #force_inline proc(doc: ^Document, i: Node_Index) -> []Fact
-built_value :: proc(r: Node_Ref) -> Value
+built_value :: proc(r: Node_Ref, dups := Duplicates.Last, borrow := false) -> Value
 children_from :: proc(doc: ^Document, i: Node_Index, k: int) -> Child_Iter
 comment_spelling :: #force_inline proc "contextless" (lead, tail: u8) -> u16
 comment_tail :: #force_inline proc "contextless" (spelling: u16) -> u64
@@ -215,6 +215,7 @@ own_errors :: proc(e: ^core.Typed_Error, c: ^Sink)
 path_add :: proc "contextless" (e: ^core.Typed_Error, s: core.Step)
 path_close :: proc "contextless" (e: ^core.Typed_Error)
 plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Typed_Error)
+plan_has_value :: proc(p: ^Plan) -> bool
 plan_mismatch :: proc "contextless" (plan: ^Plan, readers: ^core.Readers, T: typeid) -> core.Typed_Error
 plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Error)
 plan_reads :: proc(p: ^Plan, reads: ^Format_Reads)

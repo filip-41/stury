@@ -40,6 +40,7 @@ Read_Kind :: enum u8 {
 	Any,
 	Hook,
 	Raw,
+	Value, // a `core.Value`, built from the text of whatever the member holds
 	Number_Text,
 	Number,
 	Scalar,
@@ -306,6 +307,16 @@ plan_reads :: proc(p: ^Plan, reads: ^Format_Reads) {
 		p.read, p.check, p.node_read, p.node_check = reads.read, reads.check, reads.node_read, reads.node_check
 		p.build = reads.build
 	}
+}
+
+// Whether `p` has a `core.Value` member, which reads only with a format's `build`.
+plan_has_value :: proc(p: ^Plan) -> bool {
+	for f in p.fields {
+		if f.kind == .Value {
+			return true
+		}
+	}
+	return false
 }
 
 // The plan both front ends start from: the format, its typed reads, and the options, which the plan owns.
@@ -582,6 +593,8 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset,
 	switch ti.id {
 	case typeid_of(Raw):
 		f.kind = .Raw
+	case typeid_of(core.Value):
+		f.kind = .Value
 	case typeid_of(core.Number_Text):
 		f.kind = .Number_Text
 	case typeid_of(core.Number):
@@ -928,7 +941,7 @@ classes_of :: proc(b: ^Builder, ti: ^runtime.Type_Info, depth: int) -> (c: bit_s
 		return EVERY_CLASS
 	}
 	switch ti.id {
-	case typeid_of(Raw), typeid_of(any):
+	case typeid_of(Raw), typeid_of(any), typeid_of(core.Value):
 		return EVERY_CLASS
 	case typeid_of(core.Number_Text), typeid_of(core.Number):
 		return {.Number}

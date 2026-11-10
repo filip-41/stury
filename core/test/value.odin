@@ -139,3 +139,73 @@ typed_bridges_round_trip :: proc(t: ^testing.T) {
 	core.object_put(whole, "n", f64(3.5))
 	testing.expect(t, typed.unmarshal(core.Value(whole), &i, &iplan) != nil)
 }
+
+// Two numbers equal by exact value hash alike however they are spelled, a node and a built value included, and numbers
+// that differ only past a double's digits are not equal.
+@(test)
+equal_numbers_hash_alike :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	same := [?][]string{{"0", "-0", "0.0", "-0e5"}, {"1", "1.0", "10e-1", "0.1e1", "1E0"}, {"1e400", "10e399", "1.0e+400"}}
+	for group in same {
+		first := core.Value(core.number_text(group[0]))
+		for spelling in group {
+			doc, err := core.build(transmute([]u8)spelling, json.as(.Json))
+			walktest.expect_nil(t, err)
+			for v in ([]core.Value{core.Node_Ref{&doc, core.ROOT}, core.number_text(spelling)}) {
+				testing.expectf(t, core.equal(first, v) && core.hash(first) == core.hash(v), "%s and %s", group[0], spelling)
+			}
+			core.destroy(&doc)
+		}
+	}
+	a, b := core.Value(core.number_text("100000000000000000001")), core.Value(core.number_text("100000000000000000000"))
+	testing.expect(t, !core.equal(a, b))
+	testing.expect(t, !core.equal(core.number_text("1e400"), core.number_text("1e401")))
+}
+
+// A number whose digits a double does not spell keeps them when built, and then equals what its node equals.
+@(test)
+built_numbers_keep_digits_and_equal_like_nodes :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	pairs := [?][2]string {
+		{"100000000000000000001", "100000000000000000000"},
+		{"1.5e-400", "0"},
+		{"0.10000000000000000000001", "0.1"},
+		{"9007199254740993.0", "9007199254740992"},
+		{"123456789012345678901234567890", "1.2345678901234568e+29"},
+	}
+	for pair in pairs {
+		built: [2]core.Value
+		nodes: [2]core.Value
+		docs: [2]core.Document
+		for text, i in pair {
+			err: core.Error
+			docs[i], err = core.build(transmute([]u8)text, json.as(.Json))
+			walktest.expect_nil(t, err)
+			nodes[i] = core.Node_Ref{&docs[i], core.ROOT}
+			built[i] = core.built_value(nodes[i].(core.Node_Ref))
+		}
+		_, kept := built[0].(^core.Number_Text)
+		testing.expectf(t, kept, "%s keeps its digits", pair[0])
+		testing.expectf(t, core.equal(nodes[0], nodes[1]) == core.equal(built[0], built[1]), "%s and %s", pair[0], pair[1])
+		testing.expectf(t, !core.equal(built[0], built[1]), "%s and %s are two numbers", pair[0], pair[1])
+	}
+}
+
+// A built object follows the read's `Duplicates`.
+@(test)
+built_object_follows_duplicates :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	src := `{"k": 1, "j": 0, "k": 2}`
+	doc, err := core.build(transmute([]u8)src, json.as(.Json))
+	walktest.expect_nil(t, err)
+	root := core.Node_Ref{&doc, core.ROOT}
+	testing.expect_value(t, core.length(core.built_value(root, .All)), 3)
+	first := core.built_value(root, .First)
+	testing.expect_value(t, core.length(first), 2)
+	k, _ := core.member(first, "k")
+	testing.expect_value(t, k.(f64), 1)
+	testing.expect_value(t, core.length(core.built_value(root, .Last)), 2)
+}

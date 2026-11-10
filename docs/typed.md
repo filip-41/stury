@@ -96,6 +96,7 @@ Item :: struct {
 | `f32`, `f64` | any number, and JSON5's `Infinity` and `NaN` unless the walk refuses them with `refuse_non_finite`. A decimal past the type's range is `.Out_Of_Range`, and any other reads as the nearest value, however many digits or however large an exponent it has |
 | `string`, `cstring` | a string |
 | `Raw` | any value, as the format spells it |
+| `core.Value` | any value, built: a number past a double keeps its digits. The plan needs the reads of its format (`json.reads`), else `.Unsupported` |
 | `Number_Text` | a number's text |
 | `core.Number` | a number |
 | `Scalar` | a scalar: `Null`, `bool`, `i64`, `u64`, `f64`, `Number_Text` or `string` |

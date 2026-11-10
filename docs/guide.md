@@ -199,7 +199,9 @@ A reader given a node of the wrong kind, or an index no node holds, returns its 
 A `Value` is null (`nil`), a `bool`, a `f64`, a `Number_Text`, a `string`, an `^Array`, an `^Object` or a node of a
 document (`Node_Ref`). A `Number_Text` keeps a number's digits: a number read and not computed on, or an integer no
 double holds exactly. `json.new_array`, `json.new_object`, `json.array_append` and `json.object_put` build one in the
-context allocator. The readers above take a value as they take a node, so one loop reads both:
+context allocator. `spell.decimal_of` reads a number's text as an exact decimal, `spell.decimal_compare` orders two of
+them and `spell.decimal_multiple_of` divides one by another, with no limit on the digits or the exponent. The readers
+above take a value as they take a node, so one loop reads both:
 
 ```odin
 v := json.Value(json.Node_Ref{&doc, json.ROOT})

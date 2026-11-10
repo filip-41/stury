@@ -4,6 +4,7 @@ package core
 // context allocator.
 
 import "base:intrinsics"
+import "core:math"
 import "core:strings"
 import "spell"
 
@@ -124,9 +125,11 @@ object_delete_all :: proc(o: ^Object, gone: map[string]bool) {
 	}
 }
 
-// The value of node `r` as a built value of its own, which outlives the document: a number is a double, but an integer
-// no double holds exactly, which keeps its digits as a `Number_Text`. An object with a repeated key keeps the last.
-built_value :: proc(r: Node_Ref) -> Value {
+// The value of node `r` as a built value of its own, which outlives the document: a number is a double, but a number
+// whose digits the double does not spell keeps them as a `Number_Text`. An object follows `dups`: `.All` keeps a
+// repeated key in order, `.First` the first and the others the last. With `borrow` a string or key that lies in the
+// document's text stays a slice of it.
+built_value :: proc(r: Node_Ref, dups := Duplicates.Last, borrow := false) -> Value {
 	#partial switch doc_kind(r.doc, r.node) {
 	case .False:
 		return false
@@ -140,26 +143,61 @@ built_value :: proc(r: Node_Ref) -> Value {
 			size := spell.i64_text(&digits[0], i64(n.bits)) if n.kind == .Int else spell.u64_text(&digits[0], n.bits)
 			return number_text(strings.clone(string(digits[:size])))
 		}
-		f, _, _ := double_of(r)
+		f, digits, _ := double_of(r)
+		if digits != "" && (n.kind == .Float || n.kind == .Wide) && !spells_digits(f, digits) {
+			return number_text(strings.clone(digits))
+		}
 		return f
 	case .String:
-		return strings.clone(node_string(r.doc, r.node))
+		return text_kept(r.doc, node_string(r.doc, r.node), borrow)
 	case .Array:
 		a := new_array(length(r))
 		it := children(r)
 		for m in child_next(&it) {
-			append(&a.items, built_value(m.(Node_Ref)))
+			append(&a.items, built_value(m.(Node_Ref), dups, borrow))
 		}
 		return a
 	case .Object:
 		o := new_object()
 		it := pairs(r)
 		for k, m in pair_next(&it) {
-			object_put(o, strings.clone(k), built_value(m.(Node_Ref)))
+			key, v := text_kept(r.doc, k, borrow), built_value(m.(Node_Ref), dups, borrow)
+			switch {
+			case dups == .All:
+				object_append(o, key, v)
+			case dups == .First && object_slot(o, key) >= 0:
+			case:
+				object_put(o, key, v)
+			}
 		}
 		return o
 	}
 	return nil
+}
+
+// `s` as a string of a built value: itself when it lies in the text of `doc` and `borrow` says so, else a copy.
+@(private = "file")
+text_kept :: proc(doc: ^Document, s: string, borrow: bool) -> string {
+	lo, at := uintptr(raw_data(doc.src)), uintptr(raw_data(s))
+	if borrow && at >= lo && at + uintptr(len(s)) <= lo + uintptr(len(doc.src)) {
+		return s
+	}
+	return strings.clone(s)
+}
+
+// Whether the double `f` is the number spelled `digits`: its shortest decimal is that number. A number of at most 15
+// characters and no exponent always is.
+@(private = "file")
+spells_digits :: proc(f: f64, digits: string) -> bool {
+	if len(digits) <= 15 && strings.index_any(digits, "eE") < 0 {
+		return true
+	}
+	if math.is_inf(f) || math.is_nan(f) {
+		return false
+	}
+	buf: [spell.F64_ROOM]u8
+	order, _ := spell.decimal_compare(spell.decimal_of(digits), spell.decimal_of(string(buf[:spell.f64_text(&buf[0], f)])))
+	return order == 0
 }
 
 // The largest integer every smaller one of which a double holds exactly.

@@ -40,6 +40,12 @@ leaf :: #force_no_inline proc(w: ^Walker, f: ^typed.Field, v: uintptr, top, nest
 		return put_enum(w, m.enum_info, enum_value(m.enum_info, v), put)
 	case .Raw:
 		return put_raw(w, string((^typed.Raw)(v)^), top - w.n_ptrs, T)
+	case .Value:
+		text, err := value_text(w.plan, (^core.Value)(v)^, context.temp_allocator)
+		if err.kind == .None {
+			put_text(&w.out, string(text))
+		}
+		return err.kind
 	case .Number_Text:
 		return put_number_text(w, (^core.Number_Text)(v).text, top - w.n_ptrs, T)
 	case .Number:

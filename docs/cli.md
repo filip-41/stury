@@ -985,6 +985,10 @@ change a text's length, and the script, emoji and other Unicode properties. Two 
 - a callout that reads which start positions are tried (`(*ERROR)` with a code other than -1, `(*TOTAL_COUNT)` read
   back), since Oniguruma's choice of starts depends on its optimizer.
 
+A choice inside a loop, as in `(a+)+$` or `(a|aa)*b`, runs in time linear in the text, so where jq stops with
+`retry-limit-in-match over`, stury answers. A counted repeat around a choice, as in `(a|aa){30,60}c`, still meets
+jq's limit.
+
 ## For library users
 
 The CLI reads input as `json.build` and `json.validate` do with their defaults (`.Json`, `core.Duplicates.Last`), and

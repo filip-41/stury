@@ -77,7 +77,7 @@ marshal_once :: proc(value: any, spec := Spec.Json, opts := Options{}, write := 
 	if v.id == nil || v.data == nil {
 		v = any{&nothing, typeid_of(any)}
 	}
-	plan, refusal := plan_make(v.id, spec, opts, allocator = context.allocator)
+	plan, refusal := plan_make(v.id, spec, opts, reads = &READS, allocator = context.allocator)
 	if refusal != nil {
 		return nil, refusal
 	}

@@ -1350,3 +1350,65 @@ a_repeated_key_is_refused_inside_a_skipped_value_and_a_list :: proc(t: ^testing.
 	walktest.expect_nil(t, e)
 	testing.expect_value(t, len(ok.l), 1)
 }
+
+// A `core.Value` member takes whatever its text holds, a number past a double keeping its digits, and writes it back.
+@(test)
+value_member_takes_any_text :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	S :: struct {
+		a: core.Value,
+		b: []core.Value,
+	}
+	src := `{"a": {"k": [1, "x", 1e400]}, "b": [null, 2.5, true]}`
+	plan, perr := json.plan_make(S, reads = json.reads(.Json))
+	walktest.expect_nil(t, perr)
+	var: S
+	walktest.expect_nil(t, json.unmarshal(transmute([]u8)string(src), json.Spec.Json, &var, &plan))
+	k, _ := core.member(var.a, "k")
+	big, _ := core.child_at(k, 2)
+	testing.expect_value(t, big.(^core.Number_Text).text, "1e400")
+	testing.expect_value(t, core.length(k), 3)
+	testing.expect_value(t, len(var.b), 3)
+	out, merr := json.marshal(var, &plan)
+	walktest.expect_nil(t, merr)
+	testing.expect_value(t, string(out), `{"a":{"k":[1,"x",1e400]},"b":[null,2.5,true]}`)
+}
+
+// The forms of `unmarshal` with no plan read `.Value` members, and a plan made with no reads is refused when made.
+@(test)
+value_member_reads_through_every_entry_point :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	S :: struct {
+		a: core.Value,
+	}
+	x: S
+	walktest.expect_nil(t, json.unmarshal(transmute([]u8)string(`{"a": [1]}`), json.Spec.Json, &x))
+	testing.expect_value(t, core.length(x.a), 1)
+	y: S
+	walktest.expect_nil(t, json.unmarshal(transmute([]u8)string(`{"a": [1, 2]}`), json.Spec.Jsonc, &y))
+	testing.expect_value(t, core.length(y.a), 2)
+	_, refusal := json.plan_make(S)
+	testing.expect(t, refusal != nil)
+}
+
+// A string of a `.Value` member borrows the text under `borrow_strings`, and a depth fault of its text is the walk's.
+@(test)
+value_member_borrows_strings_and_reports_its_fault :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	S :: struct {
+		a: core.Value,
+	}
+	src := transmute([]u8)string(`{"a": {"key": ["text"]}}`)
+	x: S
+	walktest.expect_nil(t, json.unmarshal(src, json.Spec.Json, &x, read = typed.Read_Options{borrow_strings = true}))
+	k, _ := core.member(x.a, "key")
+	s, _ := core.child_at(k, 0)
+	at := uintptr(raw_data(s.(string)))
+	testing.expect(t, at >= uintptr(raw_data(src)) && at < uintptr(raw_data(src)) + uintptr(len(src)))
+	z: S
+	err := json.unmarshal(transmute([]u8)string(`{"a": [[[[1]]]]}`), json.Spec.Json, &z, json.Options{max_depth = 3})
+	testing.expect(t, err != nil)
+}
