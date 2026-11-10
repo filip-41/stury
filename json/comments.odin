@@ -196,10 +196,10 @@ comment_run :: #force_inline proc "contextless" (p, end: [^]u8, comma: bool, $S:
 
 // Emits the comments in the run from `p` to `q`, which `comment_run` has read whole. With `inline`, a comment on the
 // run's first line is `Comment_Inline`, and the rest get role `rest`. With `rest` `.Value` the rest stay unread, for
-// the next document. Returns one past the last comment emitted, or `p`, whether a hook stopped the walk there, and
-// the `Too_Wide` comment or `.None`.
+// the next document. Returns one past the last comment emitted, or `p`, whether a hook stopped the walk there, the
+// `Too_Wide` comment or `.None`, and on a stop whether the next comment is still on the run's first line.
 @(private)
-emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, p, q: [^]u8, inline: bool, rest: core.Role) -> (r: [^]u8, stop: bool, kind: core.Fault_Kind) #no_bounds_check {
+emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, p, q: [^]u8, inline: bool, rest: core.Role) -> (r: [^]u8, stop: bool, kind: core.Fault_Kind, still_inline: bool) #no_bounds_check {
 	r = p
 	x := p
 	next_line := !inline
@@ -215,11 +215,9 @@ emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (
 			return
 		}
 		if too_wide(x, e) {
-			return x, false, .Too_Wide
+			return x, false, .Too_Wide, false
 		}
-		if emit(w, on, hs, .Plain, role, x, e, core.comment_spelling(2, 2 if x[1] == '*' else 0)) == .Stop {
-			return e, true, .None
-		}
+		stop = emit(w, on, hs, .Plain, role, x, e, core.comment_spelling(2, 2 if x[1] == '*' else 0)) == .Stop
 		// A `//` comment ends at a line end that is no byte of it, so only a `/* */` body can move to the next line.
 		// The role needs only whether the body holds a line end.
 		if !next_line && x[1] == '*' {
@@ -231,6 +229,9 @@ emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (
 			}
 		}
 		x, r = e, e
+		if stop {
+			return r, true, .None, !next_line
+		}
 	}
 	return
 }
@@ -240,7 +241,7 @@ emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (
 // returns. A `/` that opens no comment faults with `stray`, the detail the state after the run gives any byte it
 // refuses.
 @(private)
-comments_before :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, p, end: [^]u8, close: u8, stray: Detail) -> (q: [^]u8, done: bool, result: u64) {
+comments_before :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, p, end: [^]u8, d, ind: u64, close: u8, stray: Detail, $next: Follow) -> (q: [^]u8, done: bool, result: u64) {
 	kind: core.Fault_Kind
 	q, _, kind = comment_run(p, end, false, S)
 	if kind != .None {
@@ -248,12 +249,13 @@ comments_before :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc
 	}
 	when H != core.No_Hooks {
 		foot := close != 0 && q < end && q[0] == close
-		r, stop, wide := emit_comments(w, on, hs, p, q, false, .Comment_Foot if foot else .Comment)
+		role := core.Role.Comment_Foot if foot else .Comment
+		r, stop, wide, _ := emit_comments(w, on, hs, p, q, false, role)
 		if wide != .None {
 			return q, true, fault(w, hs^, r, wide)
 		}
 		if stop {
-			return q, true, stopped(w, hs^, r)
+			return q, true, stopped_in_run(w, hs^, r, q, d, ind, next, role, false, false)
 		}
 	}
 	return q, false, 0
@@ -264,7 +266,7 @@ comments_before :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc
 @(private, enable_target_feature = STATE_FEATURES)
 st_comments_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, done, result := comments_before(w, on, &hs, p, end, ']' if d & 1 == 0 && d >= 2 else 0, .None)
+	q, done, result := comments_before(w, on, &hs, p, end, d, ind, ']' if d & 1 == 0 && d >= 2 else 0, .None, .Comments_Value)
 	if done {
 		return result
 	}
@@ -276,7 +278,7 @@ st_comments_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 @(private, enable_target_feature = STATE_FEATURES)
 st_comments_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, done, result := comments_before(w, on, &hs, p, end, '}', .Identifier if .Es5 in FEATURES[S] else .None)
+	q, done, result := comments_before(w, on, &hs, p, end, d, ind, '}', .Identifier if .Es5 in FEATURES[S] else .None, .Comments_Key)
 	if done {
 		return result
 	}
@@ -288,7 +290,7 @@ st_comments_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 @(private, enable_target_feature = STATE_FEATURES)
 st_comments_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, done, result := comments_before(w, on, &hs, p, end, 0, .Colon)
+	q, done, result := comments_before(w, on, &hs, p, end, d, ind, 0, .Colon, .Comments_Colon)
 	if done {
 		return result
 	}
@@ -328,14 +330,14 @@ st_comments_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 		} else if crossed && q < end && q[0] != close {
 			rest = .Comment
 		}
-		stop: bool
+		stop, inline: bool
 		wide: core.Fault_Kind
-		r, stop, wide = emit_comments(w, on, &hs, p, q, true, rest)
+		r, stop, wide, inline = emit_comments(w, on, &hs, p, q, true, rest)
 		if wide != .None {
 			return fault(w, hs, r, wide)
 		}
 		if stop {
-			return stopped(w, hs, r)
+			return stopped_in_run(w, hs, r, q, d, ind, .Comments_After, rest, inline, crossed)
 		}
 	}
 	if d < 2 {

@@ -32,7 +32,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 			return #must_tail st_string(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		if emit_string(w, on, &hs, .String, .Value, p, q, 0) == .Stop {
-			return stopped(w, hs, q)
+			return stopped(w, hs, q, d, ind, .After)
 		}
 		return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Number:
@@ -49,7 +49,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 			return fault(w, hs, p, .Too_Wide)
 		}
 		if emit(w, on, &hs, .Number, .Value, p, q, spelling) == .Stop {
-			return stopped(w, hs, q)
+			return stopped(w, hs, q, d, ind, .After)
 		}
 		return #must_tail st_after_number(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Literal:
@@ -58,7 +58,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 			return #must_tail st_bad_literal(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		if emit(w, on, &hs, e, .Value, p, q, 0) == .Stop {
-			return stopped(w, hs, q)
+			return stopped(w, hs, q, d, ind, .After)
 		}
 		return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Map:
@@ -73,7 +73,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		case .Keep:
 			return #must_tail st_keep(p[1:], end, (d | 1) + 2, ind, w, hs.a, hs.b, hs.c, on)
 		case .Stop:
-			return stopped(w, hs, p[1:])
+			return stopped(w, hs, p[1:], (d | 1) + 2, ind, .Open)
 		}
 		return #must_tail st_open(p[1:], end, (d | 1) + 2, ind, w, hs.a, hs.b, hs.c, on)
 	case .Array:
@@ -88,7 +88,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		case .Keep:
 			return #must_tail st_keep(p[1:], end, (d | 1) + 1, ind, w, hs.a, hs.b, hs.c, on)
 		case .Stop:
-			return stopped(w, hs, p[1:])
+			return stopped(w, hs, p[1:], (d | 1) + 1, ind, .Open)
 		}
 		return #must_tail st_open(p[1:], end, (d | 1) + 1, ind, w, hs.a, hs.b, hs.c, on)
 	case .Bad:
@@ -137,7 +137,7 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^W
 	case .Skip:
 		return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Stop:
-		return stopped(w, hs, q)
+		return stopped(w, hs, q, d, ind, .Colon)
 	}
 	if r := colon_fast(q, end); r != nil {
 		return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
@@ -222,7 +222,7 @@ st_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w:
 		return fault(w, hs, p, .Too_Wide)
 	}
 	if emit_string(w, on, &hs, .String, .Value, p, q, 0) == .Stop {
-		return stopped(w, hs, q)
+		return stopped(w, hs, q, d, ind, .After)
 	}
 	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
@@ -240,7 +240,7 @@ st_string_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 		return fault(w, hs, p, .Too_Wide)
 	}
 	if emit_string(w, on, &hs, .String, .Value, p, q, 1) == .Stop {
-		return stopped(w, hs, q)
+		return stopped(w, hs, q, d, ind, .After)
 	}
 	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
@@ -264,7 +264,7 @@ st_key_string_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, d, 
 	case .Skip:
 		return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Stop:
-		return stopped(w, hs, q)
+		return stopped(w, hs, q, d, ind, .Colon)
 	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
@@ -281,7 +281,7 @@ st_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 		return fault(w, hs, p, .Too_Wide)
 	}
 	if emit_string(w, on, &hs, .String, .Value, p, q, core.text_spelling(esc, lax)) == .Stop {
-		return stopped(w, hs, q)
+		return stopped(w, hs, q, d, ind, .After)
 	}
 	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
@@ -306,7 +306,7 @@ st_key_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 	case .Skip:
 		return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Stop:
-		return stopped(w, hs, q)
+		return stopped(w, hs, q, d, ind, .Colon)
 	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
@@ -327,7 +327,7 @@ st_key_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind
 	case .Skip:
 		return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Stop:
-		return stopped(w, hs, q)
+		return stopped(w, hs, q, d, ind, .Colon)
 	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
@@ -412,7 +412,7 @@ st_open_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, 
 		case .Keep:
 			return #must_tail st_keep(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		case .Stop:
-			return stopped(w, hs, p)
+			return stopped(w, hs, p, d, ind, .Open)
 		}
 		if p >= end || p[0] != '[' {
 			break
@@ -542,7 +542,7 @@ st_close :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 	stack := w.stack
 	for {
 		if emit(w, on, &hs, .End, .Value, p, p[1:], 0) == .Stop {
-			return stopped(w, hs, p[1:])
+			return stopped(w, hs, p[1:], (depth - 1) << 1 | u64(stack[depth - 1]), ind, .After)
 		}
 		depth -= 1
 		p = p[1:]
@@ -602,7 +602,7 @@ st_value_spec :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 					return fault(w, hs, p, .Too_Wide)
 				}
 				if emit_string(w, on, &hs, .String, .Value, p, q, 0) == .Stop {
-					return stopped(w, hs, q)
+					return stopped(w, hs, q, d, ind, .After)
 				}
 				return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
@@ -662,7 +662,7 @@ st_key_spec :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, 
 		case .Skip:
 			return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		case .Stop:
-			return stopped(w, hs, q)
+			return stopped(w, hs, q, d, ind, .Colon)
 		}
 		if r := colon_fast(q, end); r != nil {
 			return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
@@ -697,7 +697,7 @@ st_keep :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 			// The builder's walk reads the container as a document's root, as `pass_over` does.
 			parent := d >> 1 - 1
 			regs := hs
-			v := Walk(S, build.Builder){w.base, &w.hooks.b, w.stack[parent:], &regs, w.depth - parent, w.tier, false, w.tolerate, w.finite, false, nil, 0, w.limit - parent}
+			v := Walk(S, build.Builder){w.base, &w.hooks.b, w.stack[parent:], &regs, w.depth - parent, w.tier, false, w.tolerate, w.finite, false, false, nil, 0, w.limit - parent}
 			r := st_open(p, end, 2 | d & 1, ind, &v, hs.a, hs.b, hs.c, build.builder_hook_plain)
 			if v.owned {
 				drop_stack(v.stack)
@@ -705,7 +705,7 @@ st_keep :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 			if hi, f, _ := core.result_of(r, &RULES); f == nil {
 				q := w.base[hi:]
 				if build.scan_kept(w.hooks, int(regs.c)) {
-					return stopped(w, regs, q)
+					return stopped(w, regs, q, parent << 1 | u64(w.stack[parent]), ind, .After)
 				}
 				return #must_tail st_after(q, end, parent << 1 | u64(w.stack[parent]), ind, w, regs.a, regs.b, regs.c, on)
 			}
@@ -866,7 +866,7 @@ st_number_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 			return fault(w, hs, p, .Too_Wide)
 		}
 		if emit(w, on, &hs, .Number, .Value, p, q, spelling) == .Stop {
-			return stopped(w, hs, q)
+			return stopped(w, hs, q, d, ind, .After)
 		}
 		// `q[1]` and `q[2]` are read only where three bytes remain, so a run that ends at the text's last element passes
 		// the separator to `st_after`.
@@ -930,7 +930,7 @@ st_member_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 			case .Skip:
 				skip = true
 			case .Stop:
-				return stopped(w, hs, q)
+				return stopped(w, hs, q, d, ind, .Colon)
 			}
 			// Finds the value after the colon when the colon is flush against it, or is `": "`, `" : "` or `" :"`.
 			key_end = q
@@ -963,7 +963,7 @@ st_member_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 			return fault(w, hs, r, .Too_Wide)
 		}
 		if !skip && emit(w, on, &hs, .Number, .Value, r, n, spelling) == .Stop {
-			return stopped(w, hs, n)
+			return stopped(w, hs, n, d, ind, .After)
 		}
 		// `n[1]` and `n[2]` are read only where three bytes remain, as in `st_number_run`.
 		if intrinsics.ptr_sub(end, n) <= 2 || n[0] != ',' {

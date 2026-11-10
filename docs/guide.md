@@ -139,6 +139,36 @@ engines
 A path is parsed once and owns its steps. [paths.md](paths.md) holds the grammar, the answer outcomes and what a partial
 document is.
 
+### One answer at a time
+
+`json.answers` and `dsv.answers` read a path's answers as the scan reaches them, with no document, and `next` gives
+them in a loop. Each answer is a `Token_Answer` whose `lo` and `hi` bound its value in the text. The read starts at the
+first `next` and walks a batch of answers at a time, from 1 doubling up to `max_batch`, so a loop that ends early has
+read little past what it took. A fault comes after every answer read before it, in `it.err` once the loop ends. A loop
+that breaks frees the read with `destroy`:
+
+```odin
+it := json.answers(src, .Json, every_tag)
+for a in json.next(&it) {
+	fmt.println(string(src[a.lo:a.hi]))         // "math", then "engines"
+	if done(a) {
+		break
+	}
+}
+json.destroy(&it)                                // only needed when the loop broke
+if it.err != nil {
+	// the text faulted past the last answer given
+}
+```
+
+`json.each_answer` and `dsv.each_answer` give the same answers to a callback instead.
+
+The iterator rides on a walk cursor. `json.walk` and `dsv.walk` take a `^Cursor`: a hook that returns `.Stop` saves
+where the walk stood, and `walk_resume` continues from there over the same text, with every token after the stop
+delivered as an unbroken walk delivers it. A json cursor resumes after any token. A dsv cursor resumes after a record's
+end and holds the header's cells in `cursor.keys`, the caller's storage. `can_resume` says whether a cursor holds a stop, and a resume
+on another text is refused with `.Bad_Option`.
+
 ## Build a document
 
 `json.build` or `dsv.build` returns a `Document`: a table of nodes that borrows the input. Strings are not

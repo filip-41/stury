@@ -43,7 +43,7 @@ st_number5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w
 		return fault(w, hs, p, .Too_Wide)
 	}
 	if emit(w, on, &hs, .Number, .Value, p, q, spelling) == .Stop {
-		return stopped(w, hs, q)
+		return stopped(w, hs, q, d, ind, .After)
 	}
 	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }

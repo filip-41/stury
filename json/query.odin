@@ -166,3 +166,81 @@ scan_begin :: proc(h: ^engine.Scan, it: ^records.Reader, src: []u8, last: ^core.
 	h.again = started.kind == .None && h.many == nil
 	return started
 }
+
+// An iterator over the answers of `paths`, or of `one` when `paths` is nil, that `fill` reads.
+answers_of :: proc(src: []u8, handle: core.As, paths: []core.Path, one: core.Path, read: core.Path_Options, allocator: runtime.Allocator, fill: proc(it: ^engine.Answer_Iter)) -> engine.Answer_Iter {
+	return {src = src, as = handle, paths = paths, one = one, read = read, allocator = allocator, fill = fill, max_batch = engine.ANSWER_BATCH}
+}
+
+answers_fill_of :: proc(spec: Spec) -> proc(it: ^engine.Answer_Iter) {
+	switch spec {
+	case .Json:  return answers_fill(.Json)
+	case .Jsonc: return answers_fill(.Jsonc)
+	case .Json5: return answers_fill(.Json5)
+	}
+	return answers_fill(.Json)
+}
+
+// The fill of an iterator over a text of spec `S`: the stream's walk with a cursor, which stops once the buffer holds a
+// batch. It judges what the walk leaves and ends the read as `scan_walk` does.
+answers_fill :: proc "contextless" ($S: Spec) -> proc(it: ^engine.Answer_Iter) {
+	return proc(it: ^engine.Answer_Iter) {
+		#assert(size_of(Cursor) <= size_of(it.cursor))
+		cursor := (^Cursor)(&it.cursor)
+		h := &it.scan
+		src := it.src
+		opts := options_of(it.as)
+		hi: u64
+		fault: Maybe(core.Fault)
+		if it.state == .Fresh {
+			if _, sep := document_start(src, 0, S); sep != nil {
+				engine.answers_fail(it, core.error_of(core.path_error(sep_error(src, sep))))
+				return
+			}
+			if it.read.dups == .Refuse {
+				built, e := build_bound(src, S, opts, .Refuse, it.allocator)
+				core.destroy(&built)
+				if e != nil {
+					engine.answers_fail(it, e)
+					return
+				}
+			}
+			it.stack = it.stack_room[:]
+			if opts.max_depth > core.MAX_DEPTH {
+				stack, e := make([]u8, opts.max_depth, it.allocator)
+				if e != nil {
+					engine.answers_fail(it, e)
+					return
+				}
+				it.stack = stack
+			}
+			if !engine.answers_start(it, false, min(core.reserve_depth(opts.max_depth, len(src)), core.MAX_DEPTH)) {
+				return
+			}
+			cursor^ = {stack = it.stack}
+			it.regs = engine.BUILDER_REGS
+			h.opts = &opts
+			h.rewalk = rewalk(S, engine.scan_hook_stream)
+			h.pause_on_flush = true
+			hi, fault = walk(src, 0, S, opts, h, &it.regs, engine.scan_hook_stream, cursor)
+		} else {
+			h.opts = &opts
+			hi, fault = walk_resume(src, cursor, S, opts, h, &it.regs, engine.scan_hook_stream)
+		}
+		h.opts = nil
+		if !h.stopped && can_resume(cursor) {
+			return
+		}
+		if fault == nil && !h.stopped {
+			fault = tail_fault(src, hi, S)
+		}
+		// The root is counted whether it was kept or not. A text with no value is no document.
+		if fault == nil && !h.stopped && u32(it.regs.b) == 0 {
+			fault = core.Fault{at = u64(len(src)), rules = &RULES, kind = .Truncated}
+		}
+		when .Comments in FEATURES[S] {
+			hi = 0
+		}
+		engine.answers_end(it, hi, fault)
+	}
+}

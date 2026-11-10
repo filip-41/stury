@@ -93,8 +93,106 @@ option_fault :: #force_inline proc "contextless" ($S: Spec, opts: Options) -> Ma
 // record's line end, 1 byte for LF and 2 for CR LF. The text's `End` is at its end, with `n` 0. A cell's span keeps its
 // quotes and leaves out the CR of a CR LF. The header makes no tokens, and an empty line or a line holding only a CR is
 // no record. `regs` nil starts from zero registers and keeps none. `opts` is `Options{}` by default.
-walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
+// With a `cursor`, a stop on a record's `End` is saved there for `walk_resume`, and the header's cells are written to
+// `cursor.keys`. The two are separate procedures so that a walk without a cursor links no saving pass.
+walk :: proc {walk_plain, walk_saving}
+
+@(private)
+walk_plain :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
 	return walk_keys(src, lo, S, opts, h, regs, on, nil)
+}
+
+// `Cursor` holds where a walk a hook stopped on a record's `End` stands, for `walk_resume` to continue it from the next
+// record: that record's first byte, the first record's cell count the others are checked against, the hook's
+// registers, and the text's address and length. `keys` is the caller's storage for the header's cells, one token a
+// cell, which a resumed walk names its cells with. A walk refuses a header of more cells with `.No_Memory`. A stop on
+// any other token ends the walk for good.
+Cursor :: struct {
+	keys:  []core.Token,
+	src:   [^]u8,
+	n:     u64,
+	at:    u64,
+	width: int,
+	regs:  core.Hook_Regs,
+	held:  bool,
+}
+
+// Whether `cursor` holds a stop that `walk_resume` continues, false once the walk it fills ended, faulted or stopped
+// on a token that is no record's `End`.
+can_resume :: #force_inline proc "contextless" (cursor: ^Cursor) -> bool {
+	return cursor.held
+}
+
+// Continues the walk `cursor` holds a stop of, over the same `src`, from the record after the one it stopped at the
+// end of. `regs` is passed to the first token in place of the registers the stop saved, unless it is nil. The results
+// are `walk`'s. A cursor that holds no stop, or that a walk of another text filled, is refused with `.Bad_Option`.
+walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
+	if !cursor.held || cursor.src != raw_data(src) || cursor.n != u64(len(src)) {
+		return 0, core.Fault{rules = &RULES, kind = .Bad_Option}
+	}
+	if regs != nil {
+		cursor.regs = regs^
+	}
+	return resume_saving(src, S, opts, h, regs, on, cursor, true)
+}
+
+// A walk that tracks the record depth of the tokens it passes on, so that a stop knows whether it is on a record's
+// `End`. `resumed` swallows the opening `Array` a walk from a record's first byte makes, which the stopped walk made.
+@(private)
+Saving :: struct($H: typeid) {
+	h:       ^H,
+	cursor:  ^Cursor,
+	depth:   int,
+	resumed: bool,
+}
+
+@(private)
+walk_saving :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor) -> (hi: u64, fault: Maybe(core.Fault)) {
+	cursor.src, cursor.n, cursor.held = raw_data(src), u64(len(src)), false
+	if f, bad := option_fault(S, opts).?; bad {
+		return 0, f
+	}
+	start := int(core.text_start(src, min(lo, u64(len(src)))))
+	cursor.width = header_cells(src, start, S, opts)
+	if !opts.no_header && len(cursor.keys) < cursor.width {
+		return 0, core.Fault{rules = &RULES, kind = .No_Memory}
+	}
+	cursor.regs = regs^ if regs != nil else {}
+	cursor.at = lo
+	return resume_saving(src, S, opts, h, regs, on, cursor, false)
+}
+
+// Walks from `cursor.at` with the hook wrapped in `Saving`, and saves a stop on a record's `End`.
+@(private)
+resume_saving :: proc "contextless" (src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor, resumed: bool) -> (hi: u64, fault: Maybe(core.Fault)) {
+	saving_hook :: proc "contextless" (s: ^Saving(H), regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+		if s.resumed {
+			s.resumed = false
+			return regs, .Next
+		}
+		r, a := on(s.h, regs, t)
+		#partial switch t.kind {
+		case .Array, .Object:
+			s.depth += int(a != .Skip)
+		case .End:
+			s.depth -= 1
+		}
+		if a == .Stop {
+			s.cursor.held = t.kind == .End && s.depth == 1
+			s.cursor.at = t.lo + u64(t.n)
+		}
+		return r, a
+	}
+	cursor.held = false
+	w := Saving(H){h, cursor, 1 if resumed else 0, resumed}
+	width := cursor.width if resumed else 0
+	keys := cursor.keys[:cursor.width] if !opts.no_header else nil
+	r := run(src, min(cursor.at, u64(len(src))), S, opts, &w, &cursor.regs, saving_hook, true, keys, width)
+	if regs != nil {
+		regs^ = cursor.regs
+	}
+	hi, fault, _ = core.result_of(r, &RULES)
+	return
 }
 
 // The walk behind `build`: a caller that holds a buffer of one token per header cell passes it as `keys`, and the walk
@@ -224,6 +322,30 @@ each_answer_chosen_one :: #force_inline proc(src: []u8, spec: Spec, path: core.P
 @(private)
 each_answer_chosen_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
 	return engine.each_answer_many(src, as(spec, opts), paths, state, on, read, allocator)
+}
+
+// The answers `each_answer` gives, as an iterator that `next` takes them from: `for a in dsv.next(&it)`. A loop that
+// ends before `next` returns false frees the read with `destroy(&it)`. `paths` is read at the first `next`.
+answers :: proc {answers_bound_one, answers_bound_many, answers_chosen_one, answers_chosen_many}
+
+@(private)
+answers_bound_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+	return answers_of(src, bound_as(S, opts), nil, path, read, allocator, answers_fill(S))
+}
+
+@(private)
+answers_bound_many :: #force_inline proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+	return answers_of(src, bound_as(S, opts), paths, {}, read, allocator, answers_fill(S))
+}
+
+@(private)
+answers_chosen_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+	return answers_of(src, as(spec, opts), nil, path, read, allocator, answers_fill_of(spec))
+}
+
+@(private)
+answers_chosen_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+	return answers_of(src, as(spec, opts), paths, {}, read, allocator, answers_fill_of(spec))
 }
 
 find :: proc {find_bound, find_chosen}

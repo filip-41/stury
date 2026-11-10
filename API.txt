@@ -5,6 +5,7 @@ describe :: proc(plan: ^typed.Plan, allocator := context.allocator) -> (d: rules
 Action :: core.Action
 All :: core.All
 Answer :: core.Answer
+Answer_Iter :: build.Answer_Iter
 Arm :: typed.Arm
 Array :: core.Array
 As :: core.As
@@ -13,6 +14,7 @@ Child_Index :: core.Child_Index
 Child_Iter :: core.Child_Iter
 Comment_Spelling :: core.Comment_Spelling
 Commented :: core.Commented
+Cursor :: struct { stack: []u8, src: [^]u8, n: u64, pos: u64, d: u64, ind: u64, held: u64, regs: core.Hook_Regs, run_end: u64, next: Follow, role: core.Role, inline: bool, crossed: bool, }
 Descend :: core.Descend
 Document :: core.Document
 Document_Error :: core.Document_Error
@@ -109,9 +111,11 @@ Unknown_Fields :: typed.Unknown_Fields
 Unmarshal_Hook :: typed.Unmarshal_Hook
 Value :: core.Value
 Write_Options :: core.Write_Options
+answers :: proc {answers_bound_one, answers_bound_many, answers_chosen_one, answers_chosen_many}
 array_append :: core.array_append
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As
 build :: proc {build_bound, build_chosen}
+can_resume :: #force_inline proc "contextless" (cursor: ^Cursor) -> bool
 cell :: records.cell
 cells :: records.cells
 check :: proc {check_bound, check_chosen}
@@ -124,7 +128,7 @@ comment_lead :: core.comment_lead
 comments :: core.comments
 commit :: compose.commit
 compare :: core.compare
-destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy}
+destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy}
 each_answer :: proc {each_answer_bound_one, each_answer_bound_many, each_answer_chosen_one, each_answer_chosen_many}
 edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
 equal :: core.equal
@@ -148,6 +152,7 @@ member_of :: core.member_of
 members_named :: core.members_named
 new_array :: core.new_array
 new_object :: core.new_object
+next :: build.answers_next
 noted :: core.noted
 number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> (core.Number, bool)
 number_spelling_of :: #force_inline proc "contextless" (spelling: u16) -> Number_Spelling
@@ -200,7 +205,8 @@ value_int :: write.value_int
 value_null :: write.value_null
 value_string :: write.value_string
 value_uint :: write.value_uint
-walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
+walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault))
+walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
 write :: proc {write_bound, write_chosen}
 write_cells :: records.write_cells
 write_code :: core.write_code
@@ -213,6 +219,7 @@ writer_init :: proc {writer_init_bound, writer_init_chosen}
 Action :: core.Action
 All :: core.All
 Answer :: core.Answer
+Answer_Iter :: build.Answer_Iter
 Arm :: typed.Arm
 Array :: core.Array
 As :: core.As
@@ -221,6 +228,7 @@ Child_Index :: core.Child_Index
 Child_Iter :: core.Child_Iter
 Comment_Spelling :: core.Comment_Spelling
 Commented :: core.Commented
+Cursor :: struct { keys: []core.Token, src: [^]u8, n: u64, at: u64, width: int, regs: core.Hook_Regs, held: bool, }
 Descend :: core.Descend
 Detail :: enum u8 { None, Too_Many, Too_Few, Bare_Quote, Invalid_Utf8, Lone_Cr, After_Quote, Open_Quote, Cut_Utf8, }
 Document :: core.Document
@@ -319,9 +327,11 @@ Unmarshal_Hook :: typed.Unmarshal_Hook
 Value :: core.Value
 Value_Class :: typed.Value_Class
 Write_Options :: core.Write_Options
+answers :: proc {answers_bound_one, answers_bound_many, answers_chosen_one, answers_chosen_many}
 array_append :: core.array_append
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As
 build :: proc {build_bound, build_chosen}
+can_resume :: #force_inline proc "contextless" (cursor: ^Cursor) -> bool
 cell :: records.cell
 cells :: records.cells
 check :: proc {check_bound, check_chosen}
@@ -334,7 +344,7 @@ comment_lead :: core.comment_lead
 comments :: core.comments
 commit :: compose.commit
 compare :: core.compare
-destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy}
+destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy}
 each_answer :: proc {each_answer_bound_one, each_answer_bound_many, each_answer_chosen_one, each_answer_chosen_many}
 edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
 equal :: core.equal
@@ -358,6 +368,7 @@ member_of :: core.member_of
 members_named :: core.members_named
 new_array :: core.new_array
 new_object :: core.new_object
+next :: build.answers_next
 noted :: core.noted
 object_put :: core.object_put
 open_array :: write.open_array
@@ -407,7 +418,8 @@ value_int :: write.value_int
 value_null :: write.value_null
 value_string :: write.value_string
 value_uint :: write.value_uint
-walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
+walk :: proc {walk_plain, walk_saving}
+walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
 write :: proc {write_bound, write_chosen}
 write_cells :: records.write_cells
 write_code :: core.write_code
@@ -494,9 +506,11 @@ Node_Index :: distinct i32
 Object :: struct { members: []Member, additional: Node_Index, keys: Node_Index, }
 Rules :: struct { minimum, maximum: string, exclusive_minimum, exclusive_maximum: bool, min_length, min_items, min_members: u64, max_length, max_items, max_members: Maybe(u64), }
 # core/build
+Answer_State :: enum u8 { Fresh, Walking, Done, }
 Builder :: struct { doc: core.Document, stack: []u64, n_facts: int, pending: int, last: core.Node_Index, root_close: u64, wide_node: core.Node_Index, wide_count: u32, wide_more: bool, n_counts: int, refuse: bool, borrowed: bool, err: core.Document_Error, }
-Scan :: struct { b: Builder, path: Scan_Path, keep: int, free: int, next: u64, matched: u64, maps: u64, cut: u64, flush: int, last: bool, every_key: bool, stop_early: bool, stopped: bool, positional: bool, again: bool, at: core.Node_Index, answers: []core.Answer, n_answers: int, kept: []core.Kept_Child, n_kept: int, missing: []core.Missing_Name, n_missing: int, many: ^Scan_Many, rewalk: Rewalk, opts: rawptr, ends: []u32, marks: [core.MAX_STEPS]Scan_Mark, slots: [core.MAX_STEPS]u32, first: [8]core.Answer, }
+Scan :: struct { b: Builder, path: Scan_Path, keep: int, free: int, next: u64, matched: u64, maps: u64, cut: u64, flush: int, last: bool, every_key: bool, stop_early: bool, stopped: bool, paused: bool, pause_on_flush: bool, positional: bool, again: bool, at: core.Node_Index, answers: []core.Answer, n_answers: int, kept: []core.Kept_Child, n_kept: int, missing: []core.Missing_Name, n_missing: int, many: ^Scan_Many, rewalk: Rewalk, opts: rawptr, ends: []u32, marks: [core.MAX_STEPS]Scan_Mark, slots: [core.MAX_STEPS]u32, first: [8]core.Answer, }
 Sink :: enum u8 { Document, Replay, Stream, }
+answers_destroy :: proc(it: ^Answer_Iter)
 each_answer :: proc {each_answer_one, each_answer_many}
 each_answer_many :: proc(src: []u8, as: core.As, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, allocator := context.allocator) -> core.Error
 each_answer_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, allocator := context.allocator) -> core.Error

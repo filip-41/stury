@@ -4,6 +4,7 @@ package dsv
 import core "../core"
 import host "../host"
 import compose "../core/compose"
+import build "../core/build"
 import typed "../core/typed"
 import write "../core/write"
 import records "../core/records"
@@ -131,6 +132,9 @@ pool_init :: host.pool_init
 
 commit :: compose.commit
 
+Answer_Iter :: build.Answer_Iter
+next :: build.answers_next
+
 Arm :: typed.Arm
 Enum_Spelling :: typed.Enum_Spelling
 Field :: typed.Field
@@ -191,4 +195,4 @@ column :: records.column
 write_cells :: records.write_cells
 writer_end :: records.writer_end
 
-destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy}
+destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy}

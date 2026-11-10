@@ -306,6 +306,30 @@ each_answer_chosen_many :: #force_inline proc(src: []u8, spec: Spec, paths: []co
 	return engine.each_answer_many(src, as(spec, opts), paths, state, on, read, allocator)
 }
 
+// The answers `each_answer` gives, as an iterator that `next` takes them from: `for a in json.next(&it)`. A loop that
+// ends before `next` returns false frees the read with `destroy(&it)`. `paths` is read at the first `next`.
+answers :: proc {answers_bound_one, answers_bound_many, answers_chosen_one, answers_chosen_many}
+
+@(private)
+answers_bound_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+	return answers_of(src, bound_as(S, opts), nil, path, read, allocator, answers_fill(S))
+}
+
+@(private)
+answers_bound_many :: #force_inline proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+	return answers_of(src, bound_as(S, opts), paths, {}, read, allocator, answers_fill(S))
+}
+
+@(private)
+answers_chosen_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+	return answers_of(src, as(spec, opts), nil, path, read, allocator, answers_fill_of(spec))
+}
+
+@(private)
+answers_chosen_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+	return answers_of(src, as(spec, opts), paths, {}, read, allocator, answers_fill_of(spec))
+}
+
 find :: proc {find_bound, find_chosen}
 
 @(private)
@@ -467,8 +491,9 @@ tail_fault :: proc "contextless" (src: []u8, hi: u64, $S: Spec) -> Maybe(core.Fa
 // whitespace in JSON5. When only those bytes remain, or `lo` is past the text's end, no token is made and the text's
 // end is returned with no fault. When a hook stops the walk, `hi` is one past the token it stopped on and no later
 // byte was read, so `hi` is no document boundary. `regs` is passed to the first token and holds what the hook
-// returned last, and a nil `regs` starts from zero registers and keeps none. `opts` is `Options{}` by default.
-walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
+// returned last, and a nil `regs` starts from zero registers and keeps none. `opts` is `Options{}` by default. With a
+// `cursor`, the walk keeps its depth stack in `cursor.stack`, and a stop saves where it stood there for `walk_resume`.
+walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault)) {
 	// The nil test runs once per walk, not per token.
 	zero: core.Hook_Regs
 	r := regs
@@ -476,8 +501,144 @@ walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: 
 		r = &zero
 	}
 	q, _ := document_start(src, lo, S)
+	if cursor != nil {
+		return walk_saving(src, q, S, opts, h, r, on, cursor)
+	}
 	h2, f2, _ := walk_from(src, q, S, opts, h, r, on)
 	return h2, f2
+}
+
+// `Cursor` holds where a walk a hook stopped stands, for `walk_resume` to continue it: the token's end, the depth and
+// indent there, the hook's registers, the state that follows, and the text's address and length. A walk given a cursor
+// keeps its depth stack in `stack`, the caller's storage of one byte a level, so the deepest a text may nest is
+// `len(stack)` when that is below `Options.max_depth`. A stop inside a run of comments also holds the run's end, the
+// role its other comments take, whether the next one is still on the line of the value before the run, and whether
+// the run crossed a comma. A cursor is for a walk whose hook holds its own state, a scan's or a caller's.
+Cursor :: struct {
+	stack:   []u8,
+	src:     [^]u8,
+	n:       u64,
+	pos:     u64,
+	d:       u64,
+	ind:     u64,
+	held:    u64, // the depth the stacks hold, which the walk checks an open bracket against
+	regs:    core.Hook_Regs,
+	run_end: u64,
+	next:    Follow,
+	role:    core.Role,
+	inline:  bool,
+	crossed: bool,
+}
+
+// Whether `cursor` holds a stop that `walk_resume` continues, false once the walk it fills ended or faulted.
+can_resume :: #force_inline proc "contextless" (cursor: ^Cursor) -> bool {
+	return cursor.next != .None
+}
+
+// The state a resumed walk enters, `.None` when the cursor holds no stop.
+@(private)
+Follow :: enum u8 {
+	None,
+	After, // `st_after`: past a value, at depth `d`
+	Open, // `st_open`: past an open bracket, `d` the container's
+	Colon, // `st_colon`: past a key
+	Comments_Value, // the rest of a comment run before a value, then `st_value`
+	Comments_Key, // the rest of a comment run before a key, then `st_key`
+	Comments_Colon, // the rest of a comment run before a colon, then `st_colon`
+	Comments_After, // the rest of a comment run after a value, then what follows the run
+}
+
+// Continues the walk `cursor` holds a stop of, over the same `src`, from the state after the token it stopped on.
+// `regs` is passed to the first token in place of the registers the stop saved, unless it is nil. The results are
+// `walk`'s. A cursor that holds no stop, or that a walk of another text filled, is refused with `.Bad_Option`.
+walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
+	if cursor.next == .None || cursor.src != raw_data(src) || cursor.n != u64(len(src)) {
+		return 0, core.Fault{rules = &RULES, kind = .Bad_Option}
+	}
+	if regs != nil {
+		cursor.regs = regs^
+	}
+	next := cursor.next
+	cursor.next = .None
+	r := resume_document(src, cursor, next, S, opts, h, on)
+	if regs != nil {
+		regs^ = cursor.regs
+	}
+	hi, fault, _ = core.result_of(r, &RULES)
+	if f, bad := fault.?; bad {
+		fault = describe(src, f, S)
+	}
+	return
+}
+
+// `walk_from` for a walk with a cursor, whose stack and registers are the cursor's.
+@(private)
+walk_saving :: proc "contextless" (src: []u8, q: [^]u8, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor) -> (hi: u64, fault: Maybe(core.Fault)) {
+	cursor.src, cursor.n, cursor.next, cursor.regs = raw_data(src), u64(len(src)), .None, regs^
+	if q == raw_data(src)[len(src):] {
+		return u64(len(src)), nil
+	}
+	w := cursor_walk(src, cursor, S, opts, h)
+	w.depth = depth_held(h, &cursor.regs, w.limit, w.limit)
+	r := st_value(q, w.base[len(src):], 0, INDENT_START, &w, cursor.regs.a, cursor.regs.b, cursor.regs.c, on)
+	regs^ = cursor.regs
+	hi, fault, _ = core.result_of(r, &RULES)
+	if f, bad := fault.?; bad {
+		fault = describe(src, f, S)
+	}
+	return
+}
+
+// A walk of `src` whose stack and registers are `cursor`'s. The deepest a text may nest is the limit `opts` sets or the
+// stack's length, whichever is less. The caller sets the depth it checks first.
+@(private)
+cursor_walk :: #force_inline proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts: Options, h: ^$H) -> Walk(S, H) {
+	limit := min(u64(opts.max_depth) if opts.max_depth != 0 else core.MAX_DEPTH, u64(len(cursor.stack)))
+	return Walk(S, H){raw_data(src), h, raw_data(cursor.stack), &cursor.regs, 0, kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, true, nil, 0, limit}
+}
+
+// Enters state `next` at the place `cursor` saved, in a walk whose stack and registers are the cursor's.
+@(private)
+resume_document :: proc "contextless" (src: []u8, cursor: ^Cursor, next: Follow, $S: Spec, opts: Options, h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	w := cursor_walk(src, cursor, S, opts, h)
+	w.depth = min(cursor.held, w.limit)
+	p, end := w.base[cursor.pos:], w.base[len(src):]
+	d, ind := cursor.d, cursor.ind
+	hs := cursor.regs
+	switch next {
+	case .None:
+	case .After:
+		return st_after(p, end, d, ind, &w, hs.a, hs.b, hs.c, on)
+	case .Open:
+		return st_open(p, end, d, ind, &w, hs.a, hs.b, hs.c, on)
+	case .Colon:
+		return st_colon(p, end, d, ind, &w, hs.a, hs.b, hs.c, on)
+	case .Comments_Value, .Comments_Key, .Comments_Colon, .Comments_After:
+		q := w.base[cursor.run_end:]
+		r, stop, wide, inline := emit_comments(&w, on, &hs, p, q, cursor.inline, cursor.role)
+		if wide != .None {
+			return fault(&w, hs, r, wide)
+		}
+		if stop {
+			return stopped_in_run(&w, hs, r, q, d, ind, next, cursor.role, inline, cursor.crossed)
+		}
+		#partial switch next {
+		case .Comments_Value:
+			return st_value(q, end, d, ind, &w, hs.a, hs.b, hs.c, on)
+		case .Comments_Key:
+			return st_key(q, end, d, ind, &w, hs.a, hs.b, hs.c, on)
+		case .Comments_Colon:
+			return st_colon(q, end, d, ind, &w, hs.a, hs.b, hs.c, on)
+		}
+		// The root's walk ends past its last comment emitted, and the rest of the run is the next document's.
+		if d < 2 {
+			return fault(&w, hs, r, .None)
+		}
+		// The run is read, so `st_comments_after` reads none of it again and goes on to what follows it.
+		w.resume, w.crossed = q, cursor.crossed
+		return st_comments_after(q, end, d, ind, &w, hs.a, hs.b, hs.c, on)
+	}
+	return core.fault_at(0, .Bad_Option)
 }
 
 // Whether `text`, at offset `at` of the input, starts with a BOM that is not the input's, which a walk in place refuses
@@ -551,6 +712,9 @@ Walk :: struct($S: Spec, $H: typeid) {
 	finite:   bool,
 	// Whether `stack` is this walk's own, grown on the default heap by `deepen`, which the walk's end frees.
 	owned:    bool,
+	// Whether `stack` and `regs` are a `Cursor`'s, which a stop fills. The stack does not move, since it holds
+	// `limit` levels.
+	saving:   bool,
 	// Where the next state continues: for `string_escaped`, the block holding the string's first backslash, for
 	// `st_comments_after`, the run's first comment, which the previous state has read up to.
 	resume:   [^]u8,
@@ -568,7 +732,7 @@ walk_document :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec
 	// `= ---` leaves the array unwritten, where a struct would be zeroed. Every slot is written before it is read.
 	stack: [core.MAX_DEPTH]u8 = ---
 	depth := u64(opts.max_depth) if opts.max_depth != 0 else core.MAX_DEPTH
-	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth_held(h, regs, depth), kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, nil, 0, depth}
+	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth_held(h, regs, depth, core.MAX_DEPTH), kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, false, nil, 0, depth}
 	r := st_value(p, w.base[len(src):], 0, INDENT_START, &w, regs.a, regs.b, regs.c, on)
 	if w.owned {
 		drop_stack(w.stack)
@@ -591,7 +755,7 @@ STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, slot, d, ind: u64, $open: bool) -> u64 {
 	h: core.No_Hooks
 	regs: core.Hook_Regs
-	v := Walk(S, core.No_Hooks){w.base, &h, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, false, nil, 0, w.limit - slot}
+	v := Walk(S, core.No_Hooks){w.base, &h, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, false, false, nil, 0, w.limit - slot}
 	when open {
 		r := st_open(p, end, d, ind, &v, 0, 0, 0, core.no_hook)
 	} else {
@@ -624,19 +788,19 @@ at :: #force_inline proc "contextless" (w: ^Walk($S, $H), p: [^]u8) -> u64 {
 	return u64(intrinsics.ptr_sub(p, w.base))
 }
 
-// The depth a walk with hooks `h` and registers `regs` checks first under the limit `limit`: at most the `MAX_DEPTH`
+// The depth a walk with hooks `h` and registers `regs` checks first under the limit `limit`: at most the `room`
 // levels its byte stack starts with, and the levels the hooks' own stacks hold past the depth they start at, which a
 // typed read's caller gives as many as its text can nest when that is fewer. `deepen` grows them all.
 @(private)
-depth_held :: #force_inline proc "contextless" (h: ^$H, regs: ^core.Hook_Regs, limit: u64) -> u64 {
+depth_held :: #force_inline proc "contextless" (h: ^$H, regs: ^core.Hook_Regs, limit, room: u64) -> u64 {
 	when H == typed.Reader || H == typed.Check {
-		return min(limit, core.MAX_DEPTH, u64(len(h.src)) + 16)
+		return min(limit, room, u64(len(h.src)) + 16)
 	} else when H == engine.Builder {
-		return min(limit, core.MAX_DEPTH, u64(len(h.stack)) - regs.c)
+		return min(limit, room, u64(len(h.stack)) - regs.c)
 	} else when H == engine.Scan {
-		return min(limit, core.MAX_DEPTH, u64(engine.scan_room(h)) - regs.c)
+		return min(limit, room, u64(engine.scan_room(h)) - regs.c)
 	} else {
-		return min(limit, core.MAX_DEPTH)
+		return min(limit, room)
 	}
 }
 
@@ -663,6 +827,10 @@ deepen :: #force_no_inline proc "contextless" (w: ^Walk($S, $H)) -> core.Fault_K
 			return .No_Memory
 		}
 	}
+	if w.saving {
+		w.depth = want
+		return .None
+	}
 	stack := runtime.heap_resize(w.stack, int(want)) if w.owned else runtime.heap_alloc(int(want), false)
 	if stack == nil {
 		return .No_Memory
@@ -687,9 +855,43 @@ fault :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: core.Hook_Regs,
 }
 
 // Returns the fault value for a hook that stopped the walk at the token ending at `p`, with `core.STOPPED` in the
-// detail.
+// detail. A walk with a cursor saves there that state `next` follows at `p`, at depth `d` and indent `ind`. A typed read
+// and a build keep their frames on the stack of the call and take no cursor.
 @(private)
-stopped :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: core.Hook_Regs, p: [^]u8) -> u64 {
+stopped :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: core.Hook_Regs, p: [^]u8, d, ind: u64, next: Follow) -> u64 {
 	w.regs^ = hs
+	when H != core.No_Hooks && H != typed.Reader && H != typed.Check && H != engine.Builder && H != engine.Count {
+		if w.saving {
+			save(w, p, d, ind, next)
+		}
+	}
 	return core.fault_at(at(w, p), .None, core.STOPPED)
+}
+
+// `stopped` for a stop inside a run of comments that ends at `q`, whose other comments take role `role`. `inline`
+// says the next is on the line of the value before the run, and `crossed` that the run crossed a comma.
+@(private)
+stopped_in_run :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: core.Hook_Regs, p, q: [^]u8, d, ind: u64, next: Follow, role: core.Role, inline, crossed: bool) -> u64 {
+	w.regs^ = hs
+	when H != core.No_Hooks && H != typed.Reader && H != typed.Check && H != engine.Builder && H != engine.Count {
+		if w.saving {
+			save(w, p, d, ind, next)
+			c := cursor_of(w)
+			c.run_end, c.role, c.inline, c.crossed = at(w, q), role, inline, crossed
+		}
+	}
+	return core.fault_at(at(w, p), .None, core.STOPPED)
+}
+
+// The cursor whose registers `w.regs` points to.
+@(private)
+cursor_of :: #force_inline proc "contextless" (w: ^Walk($S, $H)) -> ^Cursor {
+	return (^Cursor)(uintptr(w.regs) - offset_of(Cursor, regs))
+}
+
+// Saves a stop at `p` into the walk's cursor, out of line, so the states' stop paths hold one call.
+@(private, cold)
+save :: #force_no_inline proc "contextless" (w: ^Walk($S, $H), p: [^]u8, d, ind: u64, next: Follow) {
+	c := cursor_of(w)
+	c.pos, c.d, c.ind, c.held, c.next = at(w, p), d, ind, w.depth, next
 }

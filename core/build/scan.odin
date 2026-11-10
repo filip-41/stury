@@ -73,6 +73,10 @@ Scan :: struct {
 	every_key:  bool,
 	stop_early: bool,
 	stopped:    bool,
+	paused:     bool, // an `Answer_Iter`'s buffer holds a batch, so its walk stops on the next token it can resume from
+	// The walk resumes after any token, so the step stops on the token whose answers filled the batch. A walk that
+	// resumes only at some tokens tests `paused` in its own hook.
+	pause_on_flush: bool,
 	positional: bool, // an `Object`'s members answer an `Index`, as a dsv record's cells do
 	again:      bool, // `scan_end` keeps the lists for `scan_again`, and the document's answers borrow them
 	at:         core.Node_Index, // the node `query` is giving the logic

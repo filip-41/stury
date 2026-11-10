@@ -155,8 +155,12 @@ EVERY_KIND :: Kinds{.Null, .Bool, .Integer, .Number, .String, .Array, .Object}
 NONE :: Node_Index(-1)
 description_destroy :: proc(d: ^Description)
 # core/build
+ANSWER_BATCH :: 64
 BUILDER_REGS :: core.Hook_Regs{a = 0, b = u64(core.NO_NODE) << 32, c = 0}
 Count :: struct { nodes: int, facts: int, depth: int, deepest: int, }
+answers_end :: proc(it: ^Answer_Iter, hi: u64, fault: Maybe(core.Fault))
+answers_fail :: proc(it: ^Answer_Iter, e: core.Error)
+answers_start :: proc(it: ^Answer_Iter, positional: bool, depth: int) -> bool
 builder_close_node :: #force_inline proc "contextless" (h: ^Builder, a: int, open: core.Node_Index, count: u32)
 builder_deepen :: #force_no_inline proc "contextless" (b: ^Builder, extra: int) -> bool
 builder_end :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> (core.Document, core.Document_Error)

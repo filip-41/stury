@@ -1,9 +1,10 @@
-// `paths <scan|stop|query|build_query> <paths> <file> [batch]`: one read of `paths`, separated by `;`, and a checksum of
-// the answers' spans. A timed sample is `batch` calls (1 by default), each releasing what it made, and ns is the
-// median sample over two warm-ups and ten samples, divided by `batch`. `scan` runs `json.scan` over the text and
-// judges all of it. `stop` reads under `.First` with `stop_early`, as a reader that leaves the rest unread does. `query`
-// builds the document once outside the clock and times `core.query`. `build_query` times the build and the query, the job
-// the other libraries' arms do from the text.
+// `paths <scan|stop|query|build_query|each|iter> <paths> <file> [batch] [largest]`: one read of `paths`, separated by
+// `;`, and a checksum of the answers' spans. A timed sample is `batch` calls (1 by default), each releasing what it made,
+// and ns is the median sample over two warm-ups and ten samples, divided by `batch`. `scan` runs `json.scan` over the
+// text and judges all of it. `stop` reads under `.First` with `stop_early`, as a reader that leaves the rest unread
+// does. `query` builds the document once outside the clock and times `core.query`. `build_query` times the build and
+// the query, the job the other libraries' arms do from the text. `each` takes the answers from `json.each_answer` and
+// `iter` from `json.answers`, whose largest batch is `largest` (`ANSWER_BATCH` by default).
 package paths
 
 import "core:fmt"
@@ -12,6 +13,7 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 import core "../../core"
+import engine "../../core/build"
 import "../timing"
 import json "../../json"
 
@@ -42,6 +44,43 @@ scan_call :: proc(src: []byte, paths: []core.Path, read: core.Path_Options, want
 	return check
 }
 
+Stream_Check :: struct {
+	src:  []byte,
+	hash: u64,
+}
+
+fold_answer :: #force_inline proc(c: ^Stream_Check, a: core.Token_Answer) {
+	if a.outcome == .Found {
+		for b in c.src[a.lo:a.hi] {
+			c.hash = (c.hash ~ u64(b)) * CHECK_PRIME
+		}
+	}
+}
+
+// One call of `each` or `iter`. Both fold every answer as it comes, so the work past the read is the same in each.
+stream_call :: proc(src: []byte, paths: []core.Path, iterate: bool, largest: int) -> u64 {
+	c := Stream_Check{src, CHECK_OFFSET}
+	err: core.Error
+	if iterate {
+		it := json.answers(src, .Json, paths)
+		it.max_batch = largest
+		for a in json.next(&it) {
+			fold_answer(&c, a)
+		}
+		err = it.err
+	} else {
+		err = json.each_answer(src, .Json, paths, &c, proc(state: rawptr, a: core.Token_Answer) -> bool {
+			fold_answer((^Stream_Check)(state), a)
+			return true
+		})
+	}
+	if err != nil {
+		fmt.eprintln("answers:", err)
+		os.exit(1)
+	}
+	return c.hash
+}
+
 // One call of `query` on `built`, or of `build_query`, which builds its own document when `built` is nil.
 query_call :: proc(built: ^core.Document, src: []byte, paths: []core.Path, want_check: bool) -> u64 {
 	doc := built
@@ -64,13 +103,13 @@ query_call :: proc(built: ^core.Document, src: []byte, paths: []core.Path, want_
 }
 
 main :: proc() {
-	if len(os.args) != 4 && len(os.args) != 5 {
-		fmt.eprintln("usage: paths <scan|stop|query|build_query> <paths> <file> [batch]")
+	if len(os.args) < 4 || len(os.args) > 6 {
+		fmt.eprintln("usage: paths <scan|stop|query|build_query|each|iter> <paths> <file> [batch] [largest]")
 		os.exit(2)
 	}
 	lane := os.args[1]
-	if lane != "scan" && lane != "stop" && lane != "query" && lane != "build_query" {
-		fmt.eprintln("lane: scan, stop, query or build_query")
+	if lane != "scan" && lane != "stop" && lane != "query" && lane != "build_query" && lane != "each" && lane != "iter" {
+		fmt.eprintln("lane: scan, stop, query, build_query, each or iter")
 		os.exit(2)
 	}
 	src, read_err := os.read_entire_file_from_path(os.args[3], context.allocator)
@@ -79,8 +118,12 @@ main :: proc() {
 		os.exit(1)
 	}
 	batch := 1
-	if len(os.args) == 5 {
+	if len(os.args) >= 5 {
 		batch, _ = strconv.parse_int(os.args[4])
+	}
+	largest := engine.ANSWER_BATCH
+	if len(os.args) == 6 {
+		largest, _ = strconv.parse_int(os.args[5])
 	}
 	texts := strings.split(os.args[2], ";")
 	paths := make([]core.Path, len(texts))
@@ -100,12 +143,20 @@ main :: proc() {
 		prebuilt = &built
 	}
 	scanning := lane == "scan" || lane == "stop"
-	check := scan_call(src, paths, read, true) if scanning else query_call(prebuilt, src, paths, true)
+	streaming := lane == "each" || lane == "iter"
+	check: u64
+	switch {
+	case streaming: check = stream_call(src, paths, lane == "iter", largest)
+	case scanning:  check = scan_call(src, paths, read, true)
+	case:           check = query_call(prebuilt, src, paths, true)
+	}
 	times: [timing.TIMED]i64
 	for i in 0 ..< timing.WARMUP + timing.TIMED {
 		start := time.tick_now()
 		for _ in 0 ..< batch {
-			if scanning {
+			if streaming {
+				stream_call(src, paths, lane == "iter", largest)
+			} else if scanning {
 				scan_call(src, paths, read, false)
 			} else {
 				query_call(prebuilt, src, paths, false)
