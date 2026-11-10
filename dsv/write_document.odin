@@ -88,9 +88,10 @@ write_records :: #force_inline proc(w: ^Rows, doc: ^core.Document, list: core.No
 	header := make([dynamic]string, scratch)
 	column := make(map[string]int, scratch)
 	buf: [512]u8
-	keyed := doc.shared_keys != 0
+	keys := core.header_of(doc)
+	keyed := keys != 0
 	if keyed {
-		it := core.children(doc, doc.shared_keys)
+		it := core.children(doc, keys)
 		for key, more := core.child_next(&it); more; key, more = core.child_next(&it) {
 			name, whole := core.text_clone(doc, key, scratch)
 			if _, failed := append(&header, name); !whole || failed != nil {

@@ -116,15 +116,14 @@ doc_pairs :: proc(doc: ^Document, obj: Node_Index) -> Pair_Iter {
 		return {doc = doc, done = true}
 	}
 	end := obj + Node_Index(doc.nodes[obj].n)
-	if doc.shared_keys != 0 {
-		keys := doc.shared_keys
+	if keys := header_of(doc); keys != 0 {
 		return {doc = doc, key_at = keys + 1, val_at = obj + 1, key_end = keys + Node_Index(doc.nodes[keys].n), val_end = end, shared = true}
 	}
 	return {doc = doc, key_at = obj + 1, key_end = end}
 }
 
 // Returns the next key and value node of the `Object`. For an inline-key `Object`, key and value alternate in preorder.
-// For a shared-key `Object`, keys come from `doc.shared_keys` while values advance within `obj`. An inline-key `Object`
+// For a shared-key `Object`, keys come from the table's header while values advance within `obj`. An inline-key `Object`
 // reads neither `val_at` nor `val_end`.
 doc_pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bool) {
 	if it.done {
@@ -174,9 +173,9 @@ Token_View :: struct {
 // is its capacity, so `destroy` frees it after `nodes` shrank to the node count.
 //
 // A format whose root members share their keys keeps those keys as the root's first child, an `Array` of role `Key`, so
-// the root's readers step over it as they step over a member's key. `shared_keys` is that `Array`'s node, and its
-// children, at `shared_keys + 1` on, are the keys of every member `Object`: an `Object`'s `i`th value has key `i`. It is 0 for
-// a document with no shared keys, for every JSON text, and for a dsv text read without a header.
+// the root's readers step over it as they step over a member's key. A `Table` says where that `Array` is, and its
+// children, at `header + 1` on, are the keys of every member `Object`: an `Object`'s `i`th value has key `i`. `tables_of`
+// is empty for every JSON text. A dsv text has one table, with no header when it is read without one.
 Document :: struct {
 	using view:  Token_View,
 	nodes:       []Node,
@@ -184,7 +183,7 @@ Document :: struct {
 	facts:       []Fact,
 	facts_alloc: []Fact,
 	allocator:   runtime.Allocator,
-	shared_keys: Node_Index,
+	tables_at:   [^]Table,
 	// The byte just past the root value's authored bytes: the close of a root container, or the end of a root scalar,
 	// quotes included. 0 when the build did not record it. `span(ROOT)` and a whole-document writer read it instead
 	// of calling the format's `close_end`.
@@ -204,8 +203,64 @@ Document :: struct {
 	reads_block:  []u8,
 	partial:      bool,
 	stopped:      bool,
-	// The records of a partial document are positional, as a dsv record's cells are. A built document says it by `shared_keys`.
-	positional:   bool,
+	// Set by a build that gave every cell its kind, so a `Plain` cell is a string or null and resolves no further.
+	kinds_stored: bool,
+	n_tables:     u32,
+}
+
+// A container whose members are rows of cells. Rows are stored row by row: a row is its own node and then its `width`
+// cells, so row `k` is at `first_row + k * (width + 1)` when `width` is not 0. `header` is the node of the `Array` of
+// the shared keys, 0 for a table with none. A `width` of 0 means the rows have no common width (a ragged table, or a
+// partial document's records), and `first_row` is then not read. The records of a table answer an `Index` as the cells
+// of a dsv record do.
+Table :: struct {
+	node:      Node_Index,
+	header:    Node_Index,
+	first_row: Node_Index,
+	width:     u32,
+}
+
+// The tables of a partial document, whose records are positional and whose rows have no common width.
+@(rodata)
+POSITIONAL_TABLES := [1]Table{{node = ROOT}}
+
+// Returns the table whose rows are the members of container `node`, and whether `node` has one. The slice is empty for
+// JSON, so the test is a length check.
+table_of :: #force_inline proc "contextless" (doc: ^Document, node: Node_Index) -> (found: Table, ok: bool) {
+	for table in tables_of(doc) {
+		if table.node == node {
+			return table, true
+		}
+	}
+	return {}, false
+}
+
+// Returns the node of the shared keys `Array` that every `Object` of `doc` takes its keys from, or 0 when no `Object`
+// has shared keys: every JSON text, and a dsv text read without a header.
+header_of :: #force_inline proc "contextless" (doc: ^Document) -> Node_Index {
+	return doc.tables_at[0].header if doc.n_tables != 0 else 0
+}
+
+// Returns the tables of `doc`. A document keeps a pointer and a count, which a slice's length would double in size.
+tables_of :: #force_inline proc "contextless" (doc: ^Document) -> []Table {
+	return doc.tables_at[:doc.n_tables]
+}
+
+// Sets the tables of `doc` to `tables`, which `doc` owns unless they are `POSITIONAL_TABLES`.
+set_tables :: #force_inline proc "contextless" (doc: ^Document, tables: []Table) {
+	doc.tables_at, doc.n_tables = raw_data(tables), u32(len(tables))
+}
+
+// Returns whether the tables of `doc` are an allocation of the document, which is every table slice but the rodata one of a
+// partial document.
+owns_tables :: #force_inline proc "contextless" (doc: ^Document) -> bool {
+	return doc.n_tables != 0 && doc.tables_at != raw_data(POSITIONAL_TABLES[:])
+}
+
+// Returns whether the `Object`s of `doc` answer an `Index`, as a dsv record's cells do, which is whether `doc` has a table.
+@(private)
+positional :: #force_inline proc "contextless" (doc: ^Document) -> bool {
+	return doc.n_tables != 0
 }
 
 // A number token's `spelling`. Kinds are even, so bit 0 (`SPELLING_DECODE`) is clear.
@@ -363,6 +418,9 @@ destroy :: proc(doc: ^Document) {
 	delete(doc.nodes_alloc, doc.allocator)
 	delete(doc.facts_alloc, doc.allocator)
 	delete(doc.counts_alloc, doc.allocator)
+	if owns_tables(doc) {
+		delete(tables_of(doc), doc.allocator)
+	}
 	for x in doc.indexed {
 		delete(x.members, doc.allocator)
 	}
@@ -379,6 +437,9 @@ clone :: proc(doc: ^Document, allocator := context.allocator) -> (c: Document, e
 	c.allocator = allocator
 	c.nodes_alloc, c.facts_alloc, c.counts_alloc, c.reads_block = nil, nil, nil, nil
 	c.indexed = nil
+	if owns_tables(doc) {
+		c.tables_at, c.n_tables = nil, 0
+	}
 	defer if err != nil {
 		destroy(&c)
 	}
@@ -386,6 +447,9 @@ clone :: proc(doc: ^Document, allocator := context.allocator) -> (c: Document, e
 	c.facts_alloc = slice.clone(doc.facts, allocator) or_return
 	c.counts_alloc = slice.clone(doc.counts, allocator) or_return
 	c.nodes, c.facts, c.counts = c.nodes_alloc, c.facts_alloc, c.counts_alloc
+	if owns_tables(doc) {
+		set_tables(&c, slice.clone(tables_of(doc), allocator) or_return)
+	}
 	err = own_reads(&c)
 	return
 }
@@ -591,16 +655,19 @@ doc_child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (No
 // 0 when a member spans more nodes. The dsv header row is a child of the root but no member, so such a root gets 0.
 @(private)
 one_node_stride :: #force_inline proc(doc: ^Document, n: Node, count: int) -> int {
-	if n.kind == .Object && doc.shared_keys == 0 {
+	if n.kind == .Object && header_of(doc) == 0 {
 		return 2 if int(n.n) == 2 * count + 1 else 0
 	}
 	return 1 if int(n.n) == count + 1 else 0
 }
 
-// `child_at` for a container whose members are not all one node, with `k` below the member count. It reads the child
-// index if there is one, else walks.
+// `child_at` for a container whose members are not all one node, with `k` below the member count. The rows of a table
+// with a width are computed. Else it reads the child index if there is one, and walks if not.
 @(private, cold)
 child_at_walk :: #force_no_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_Index, bool) {
+	if table, ok := table_of(doc, i); ok && table.width != 0 {
+		return table.first_row + Node_Index(k) * Node_Index(table.width + 1), true
+	}
 	if members, indexed := indexed_members(doc, i); indexed && k < len(members) {
 		return members[k], true
 	}
@@ -711,7 +778,7 @@ doc_children :: proc(doc: ^Document, i: Node_Index) -> Child_Iter {
 	if n.kind != .Array && n.kind != .Object {
 		return {doc = doc, parent = i, done = true}
 	}
-	it := Child_Iter{doc = doc, parent = i, end = i + Node_Index(n.n), pairs = n.kind == .Object && doc.shared_keys == 0}
+	it := Child_Iter{doc = doc, parent = i, end = i + Node_Index(n.n), pairs = n.kind == .Object && header_of(doc) == 0}
 	j := int(i) + 1
 	if it.pairs {
 		// The first member's key is one node.
@@ -799,9 +866,8 @@ members_named :: proc(doc: ^Document, obj: Node_Index, name: string) -> Member_I
 	if n.kind != .Object {
 		return {doc = doc, rec = NO_NODE, done = true}
 	}
-	if doc.shared_keys != 0 {
-		h := doc.nodes[doc.shared_keys]
-		return {doc = doc, at = doc.shared_keys + 1, end = doc.shared_keys + Node_Index(h.n), name = name, rec = obj}
+	if keys := header_of(doc); keys != 0 {
+		return {doc = doc, at = keys + 1, end = keys + Node_Index(doc.nodes[keys].n), name = name, rec = obj}
 	}
 	return {doc = doc, at = obj + 1, end = obj + Node_Index(n.n), name = name, rec = NO_NODE}
 }
@@ -841,7 +907,7 @@ member_next_shared :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool)
 			break
 		}
 		it.at = Node_Index(j + 1)
-		col := j - int(it.doc.shared_keys) - 1
+		col := j - int(header_of(it.doc)) - 1
 		if col < width && key_equals(it.doc, Node_Index(j), it.name) {
 			return it.rec + Node_Index(1 + col), true
 		}

@@ -23,6 +23,7 @@ number_hex :: proc(src: []u8, lo, hi: u64) -> Number
 number_hex_f32 :: proc(src: []u8, lo, hi: u64) -> (f32, bool)
 number_int :: #force_inline proc(src: []u8, lo, hi: u64, digits: int) -> (Number, bool)
 number_loose :: proc(src: []u8, lo, hi: u64) -> (num: Number, integer, strict, ok: bool)
+number_shape_strict :: proc "contextless" (src: []u8, lo, hi: u64) -> (int_digits, frac_digits: u64, has_exp, ok: bool)
 number_significand :: #force_inline proc(mant: u64, e: i64, neg: bool, exact: bool) -> Number
 number_strict :: proc(src: []u8, lo, hi: u64) -> (Number, bool)
 pending_give :: #force_inline proc "contextless" (p: ^Pending, spelled: [4]u8, size: int) -> u8
@@ -52,6 +53,7 @@ NUMBER_DECIMAL :: u16(2)
 NUMBER_EXP :: u16(1 << 14)
 NUMBER_KIND_MASK :: u16(0xF)
 No_Hooks :: struct {}
+POSITIONAL_TABLES := [1]Table{{node = ROOT}}
 SPELLING_DECODE :: u16(1)
 SPELLING_LAX :: u16(4)
 SPELLING_QUOTED :: u16(2)
@@ -68,6 +70,7 @@ element_of :: proc(doc: ^Document, c: Node_Index, k: int) -> (Node_Index, Presen
 fact_next :: proc(it: ^Fact_Iter) -> (body: string, ok: bool)
 fault_at :: #force_inline proc "contextless" (pos: u64, kind: Fault_Kind, detail: u8 = 0) -> u64
 has_line_end :: #force_inline proc(body: []u8) -> bool
+header_of :: #force_inline proc "contextless" (doc: ^Document) -> Node_Index
 index_children :: proc(doc: ^Document, i: Node_Index) -> bool
 is_flat :: #force_inline proc(doc: ^Document) -> bool
 is_wide :: proc(v: Value) -> bool
@@ -91,6 +94,7 @@ object_delete_all :: proc(o: ^Object, gone: map[string]bool)
 object_set :: proc(o: ^Object, k: string, v: Value)
 object_slot :: proc(o: ^Object, k: string) -> int
 own_reads :: proc(doc: ^Document) -> runtime.Allocator_Error
+owns_tables :: #force_inline proc "contextless" (doc: ^Document) -> bool
 path_error :: proc(e: Document_Error) -> Path_Error
 reindex :: proc(o: ^Object)
 reorder :: proc(list: ^Edit_List, container: Node_Index, order: []u32) -> Error
@@ -101,9 +105,11 @@ same_format :: #force_inline proc "contextless" (a, b: ^Readers) -> bool
 scalar_ends :: #force_inline proc "contextless" (t: Token) -> (lo, hi: u64)
 services_of :: #force_inline proc "contextless" (as: As) -> ^Services
 set_facts :: proc(list: ^Edit_List, node: Node_Index, role: Role, texts: []string, padded := false) -> Error
+set_tables :: #force_inline proc "contextless" (doc: ^Document, tables: []Table)
 sorted_keys :: proc(v: Value) -> []string
 sorted_members :: proc(v: Value) -> []Member
 subtree_facts :: proc(doc: ^Document, i: Node_Index) -> []Fact
+tables_of :: #force_inline proc "contextless" (doc: ^Document) -> []Table
 text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator) -> (s: string, ok: bool)
 text_f64 :: proc(text: string) -> f64
 text_order :: proc(a, b: string) -> int

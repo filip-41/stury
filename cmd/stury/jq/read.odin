@@ -25,11 +25,9 @@ is_space :: #force_inline proc "contextless" (c: u8) -> bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
-// `src` as one text's document, its kinds stored as `store_inferred_kinds` does, or the fault that it is not one.
+// `src` as one text's document, or the fault that it is not one.
 build_text :: proc(src: []byte, r: core_pkg.As, allocator := context.allocator) -> (doc: core_pkg.Document, fault: Maybe(core_pkg.Fault)) {
-	doc, fault = judge_build(core_pkg.build(src, r, allocator = allocator))
-	store_inferred_kinds(&doc)
-	return
+	return judge_build(core_pkg.build(src, r, allocator = allocator))
 }
 
 // A build's document `doc`, or the fault its error `err` tells.
@@ -44,25 +42,6 @@ judge_build :: proc(doc: core_pkg.Document, err: core_pkg.Error) -> (core_pkg.Do
 	case runtime.Allocator_Error, core_pkg.Document_Error, core_pkg.Path_Error, core_pkg.Typed_Error, core_pkg.Typed_Error_Kind:
 	}
 	return {}, core_pkg.Fault{kind = .No_Memory}
-}
-
-// Each value cell of `doc` that its format reads as a number, true or false under the document's handle, as `infer`
-// does, takes that kind, so the interpreter reads a stored kind. A build's document is given it before a value reads it.
-store_inferred_kinds :: #force_inline proc(doc: ^core_pkg.Document) {
-	if doc.readers != nil && doc.readers.resolves != nil && doc.readers.resolves(doc.as) {
-		store_kinds(doc)
-	}
-}
-
-@(cold, private = "file")
-store_kinds :: proc(doc: ^core_pkg.Document) {
-	for &n, i in doc.nodes {
-		if n.kind == .Plain && n.role == .Value && n.n > 0 {
-			if k := core_pkg.kind(doc, core_pkg.Node_Index(i)); k != .String {
-				n.kind = k
-			}
-		}
-	}
 }
 
 // `src` as one JSON text, or the fault that it is not one.

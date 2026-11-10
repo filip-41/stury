@@ -184,7 +184,7 @@ table at every tier, since `vpcompressb` needs VBMI2, which the `.V4` tier does 
 `core.format` builds a document from the text as `as` says and writes it as `core.write` does in the same spec, for every
 format. A fault in the text is `.Walk` with the fault in `inner`.
 
-A document with comments (`facts`), `shared_keys`, JSON5 spelling or `sort_keys` is written by `write_tree`, a writer
+A document with comments (`facts`), a table header, JSON5 spelling or `sort_keys` is written by `write_tree`, a writer
 that is not on the common case's path: the row walk never sees it, and `write_text` picks it before the walk. It keeps
 a frame for each open container on a stack that grows with the depth, and writes every depth the document's
 `max_depth` reads.
@@ -199,7 +199,7 @@ that cannot hold a fact drops it, and `dropped` counts the drops, in every forma
 `sort_keys` orders the members of every object by decoded key, stable, so repeated keys keep their source order. Merging
 repeated keys belongs to the CLI. A JSON5 document written as JSON spells a number and a string again: a hex integer
 as decimal of any length, a leading `+`, a bare `.5` and a trailing `.` as JSON has them, and `Infinity` and `NaN` are
-`.Non_Finite`. A `shared_keys` document is written as an array of objects, and a positional record as an object through its
+`.Non_Finite`. A document with a table header is written as an array of objects, and a positional record as an object through its
 pairs.
 
 `core.write` writes a partial document from the nodes it kept, in the target spec as a full build of the same nodes is

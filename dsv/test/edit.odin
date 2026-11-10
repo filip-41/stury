@@ -247,7 +247,7 @@ edit_wide_record :: proc(t: ^testing.T) {
 	doc, err := core.build(transmute([]u8)string("abc,de\n1,2,3\n"), dsv.as(.Csv, RAGGED))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
-	testing.expect_value(t, string(core.span(&doc, doc.shared_keys)), "abc,de\n")
+	testing.expect_value(t, string(core.span(&doc, core.header_of(&doc))), "abc,de\n")
 }
 
 @(test)

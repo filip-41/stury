@@ -11,7 +11,7 @@ import typed "../core/typed"
 // The node read is the root, which reads as the list of rows, or a record, which reads as a list of that one row. A
 // cell reads in no plan, since `plan_make` refuses a type that is no list of rows.
 //
-// A full document binds its columns once, from the header row in `Document.shared_keys`. A list of rows reads the header
+// A full document binds its columns once, from the header row of `Document.tables`. A list of rows reads the header
 // row as its first row, as `unmarshal` does. A partial document has no shared keys: a headed record holds a key beside
 // each cell it kept, which binds that record's columns, and a record kept by position reads a cell it did not keep as an
 // empty unquoted one, which is absent.
@@ -52,20 +52,20 @@ document_read :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	h.no_header = headless || h.opens == .Array
 	d.positional = h.no_header
 	// With no header line there is no list of rows to give the target, so it keeps what it held.
-	if !h.no_header && doc.shared_keys == 0 && !doc.partial && core.length(doc, core.ROOT) == 0 {
+	if !h.no_header && core.header_of(doc) == 0 && !doc.partial && core.length(doc, core.ROOT) == 0 {
 		return {}
 	}
-	d.per_record = !h.no_header && doc.shared_keys == 0
+	d.per_record = !h.no_header && core.header_of(doc) == 0
 	defer if d.per_record {
 		delete(h.keys, context.temp_allocator)
 	}
 	defer delete(h.cols, context.temp_allocator)
-	if !h.no_header && doc.shared_keys != 0 {
+	if !h.no_header && core.header_of(doc) != 0 {
 		h.keys = header_keys(doc)
 	}
 	action: core.Action
 	regs, action = row_token(h, regs, {kind = .Array, role = .Value, lo = doc.nodes[0].lo if root else 0})
-	if root && h.opens == .Array && doc.shared_keys != 0 && action == .Next {
+	if root && h.opens == .Array && core.header_of(doc) != 0 && action == .Next {
 		regs, action = header_row(&d, regs)
 	}
 	to := u32(node) + doc.nodes[node].n

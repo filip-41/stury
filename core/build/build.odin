@@ -189,6 +189,9 @@ builder_free :: proc(b: ^Builder) {
 	if !b.borrowed {
 		release(b.doc.allocator, b.stack)
 	}
+	if core.owns_tables(&b.doc) {
+		release(b.doc.allocator, core.tables_of(&b.doc))
+	}
 	b^ = {}
 }
 

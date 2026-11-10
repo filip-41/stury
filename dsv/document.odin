@@ -14,7 +14,7 @@ import build "../core/build"
 // dsv's document, built from the walk's tokens over the caller's bytes. A headed text is an `Array` of `Object` records
 // whose first child is the header row, an `Array` of role `Key` whose cells name every record's columns. A text without
 // a header is an `Array` of `Array`s. A cell is `Plain` until a reader asks `core.kind`, and a headed record's shared keys
-// sit in `Document.shared_keys`.
+// sit in the table's header.
 
 // dsv's edit services, in rodata. The three specs share this table, and each service dispatches on `doc.as.spec`,
 // since the specs differ only in how a recorded text is read.
@@ -68,12 +68,15 @@ rules_of :: proc "contextless" () -> ^core.Rules {
 	return &RULES
 }
 
-// `Token.spelling`'s bit for a quoted CSV cell holding a `""`, set only on a walk for `Cells` or `Batch`.
-SPELLING_DOUBLED :: u16(8)
+// `Token.spelling`'s bit for a quoted CSV cell holding a `""`, set only on a walk for `Cells` or `Batch`. Bits 0 to 14
+// belong to a number node's kind and digit counts, so a cell that becomes a number node never carries it.
+SPELLING_DOUBLED :: u16(1 << 15)
 
 // `Token.spelling`'s bit for the key of a column past the header's last cell, which `column_key` makes. Its text is
-// `n`, the column's 1-based position, in decimal.
-SPELLING_COLUMN :: u16(16)
+// `n`, the column's 1-based position, in decimal. A key is never a number node, so it shares `core.NUMBER_EXP`'s bit.
+SPELLING_COLUMN :: u16(1 << 14)
+
+#assert(SPELLING_DOUBLED & (core.SPELLING_DECODE | core.SPELLING_QUOTED | core.SPELLING_LAX | core.NUMBER_KIND_MASK) == 0)
 
 // The handle's build: the walk compiled for the handle's spec.
 build_as :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
@@ -163,25 +166,37 @@ build_reserved :: proc(src: []u8, $S: Spec, readers: ^core.Readers, opts: Option
 	// cover it.
 	// The document holds the options it was read with, so every edit service judges a recorded text and writes its
 	// separators the way this text reads.
+	// The table is the first allocation, so a refused growth of the buffers above it still returns its tail to an arena.
+	tables, terr := make([]core.Table, 1, allocator)
+	if terr != nil {
+		return {}, {kind = .No_Memory}
+	}
 	b := build.builder_start(src, as_of(readers, S, opts), refuse_duplicates, allocator, nodes, 8, facts)
+	core.set_tables(&b.doc, tables)
 	if len(b.doc.nodes) == 0 {
 		// The reservation was refused and the node array is nil, so no hook may run.
 		return build.builder_end(&b, build.BUILDER_REGS, nil)
 	}
 	regs := build.BUILDER_REGS
 	// The header row is written before the walk, so the root's token steps over it and the walk's `Key` tokens name its
-	// cells. A text with no row leaves the root's next node zeroed for the hook's test. The row is `shared_keys` before
+	// cells. A text with no row leaves the root's next node zeroed for the hook's test. The row is the table's header before
 	// the walk, since `builder_end` recounts the members of a wide record through the readers, which read it.
 	count := len(keys)
 	if count > 0 {
 		b.doc.nodes[1] = core.Node{lo = u64(start), kind = .Array, role = .Key}
-		b.doc.shared_keys = 1
+		tables[0].header = 1
 		build.builder_close_node(&b, count + 2, 1, u32(count))
 	} else {
 		b.doc.nodes[1] = {}
 	}
 	fault: Maybe(core.Fault)
-	if opts.comment != 0 {
+	if opts.infer {
+		if opts.comment != 0 {
+			b.root_close, fault = walk_keys(src, 0, S, opts, &b, &regs, keyless_facts_infer, keys)
+		} else {
+			b.root_close, fault = walk_keys(src, 0, S, opts, &b, &regs, keyless_infer, keys)
+		}
+	} else if opts.comment != 0 {
 		b.root_close, fault = walk_keys(src, 0, S, opts, &b, &regs, build.builder_hook_keyless_facts, keys)
 	} else {
 		b.root_close, fault = walk_keys(src, 0, S, opts, &b, &regs, build.builder_hook_keyless, keys)
@@ -207,7 +222,68 @@ build_reserved :: proc(src: []u8, $S: Spec, readers: ^core.Readers, opts: Option
 			build.builder_refuse_result(&b, core.Node_Index(1), core.Node_Index(count + 2))
 		}
 	}
-	return build.builder_end(&b, regs, fault)
+	doc, err := build.builder_end(&b, regs, fault)
+	if err.kind == .None {
+		doc.kinds_stored = true
+		finish_table(&doc, opts)
+	}
+	return doc, err
+}
+
+// The builder's keyless hooks for a build with `infer`: a cell is stored as the kind `spelling_resolve` reads it as.
+@(private)
+keyless_infer :: #force_inline proc "contextless" (h: ^build.Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	return build.builder_hook_keyless(h, s, infer_token(h.doc.src, t))
+}
+
+@(private)
+keyless_facts_infer :: #force_inline proc "contextless" (h: ^build.Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	return build.builder_hook_keyless_facts(h, s, infer_token(h.doc.src, t))
+}
+
+// An unquoted, undecoded value cell as `infer` reads it: `true` and `false` are those kinds, and an RFC 8259 number is
+// `.Number` with its digit counts as JSON's walk spells them. The first byte picks the work, so a text cell costs one
+// load. Any other cell stays `.Plain`, which an empty cell, a quoted one and a TSV escape always are.
+@(private)
+infer_token :: #force_inline proc "contextless" (src: []u8, t: core.Token) -> core.Token {
+	t := t
+	if t.kind != .Plain || t.role != .Value || t.n == 0 || t.spelling != 0 {
+		return t
+	}
+	hi := t.lo + u64(t.n)
+	switch src[t.lo] {
+	case 't':
+		if string(src[t.lo:hi]) == "true" {
+			t.kind = .True
+		}
+	case 'f':
+		if string(src[t.lo:hi]) == "false" {
+			t.kind = .False
+		}
+	case '-', '0' ..= '9':
+		if int_digits, frac_digits, has_exp, ok := spell.number_shape_strict(src, t.lo, hi); ok {
+			t.kind = .Number
+			t.spelling = core.number_spelling(0, int_digits, frac_digits) | (core.NUMBER_EXP if has_exp else 0)
+		}
+	}
+	return t
+}
+
+// Writes the table's first row and width, which the walk's nodes decide. A text read with `Ragged` has no common width,
+// and a text with no record has no row to measure.
+finish_table :: proc(doc: ^core.Document, opts: Options) {
+	t := &doc.tables_at[0]
+	header := core.header_of(doc)
+	t.first_row = core.Node_Index(len(doc.nodes))
+	if header != 0 {
+		t.first_row = header + core.Node_Index(doc.nodes[header].n)
+	} else if len(doc.nodes) > 1 {
+		t.first_row = 1
+	}
+	if .Ragged in opts.tolerate || int(t.first_row) >= len(doc.nodes) {
+		return
+	}
+	t.width = u32(core.length(doc, header)) if header != 0 else doc.nodes[t.first_row].n - 1
 }
 
 // Returns quoted CSV cell `n`'s span without its quote pair. The walk gives a quoted cell only once it closes it.
@@ -386,8 +462,8 @@ edit_record :: proc(doc: ^core.Token_View, src: []u8, $S: Spec) -> (cells: int, 
 
 // Returns the cell count every record of a delimited text has: its header's, its first record's, or 0 for an empty text.
 dsv_width :: proc(doc: ^core.Document) -> int {
-	if doc.shared_keys != 0 {
-		return core.length(doc, doc.shared_keys)
+	if keys := core.header_of(doc); keys != 0 {
+		return core.length(doc, keys)
 	}
 	it := core.children(doc, core.ROOT)
 	if rec, ok := core.child_next(&it); ok {
@@ -396,10 +472,11 @@ dsv_width :: proc(doc: ^core.Document) -> int {
 	return 0
 }
 
-// The cells of the header's line, the start of `Document.shared_keys`, which goes on with a key for each column a wider
+// The cells of the header's line, the start of the table's header, which goes on with a key for each column a wider
 // record names by its position.
 header_keys :: proc(doc: ^core.Document) -> []core.Node {
-	keys := doc.nodes[int(doc.shared_keys) + 1:][:core.length(doc, doc.shared_keys)]
+	header := core.header_of(doc)
+	keys := doc.nodes[int(header) + 1:][:core.length(doc, header)]
 	n := len(keys)
 	for n > 0 && keys[n - 1].spelling & SPELLING_COLUMN != 0 {
 		n -= 1
@@ -411,8 +488,8 @@ header_keys :: proc(doc: ^core.Document) -> []core.Node {
 // a record's cells stop at its last cell, since its line end is the root's.
 edit_interior :: proc(doc: ^core.Document, c: core.Node_Index) -> (lo, hi: u64) {
 	if c == core.ROOT {
-		if doc.shared_keys != 0 {
-			lo = close_end(doc, doc.shared_keys)
+		if keys := core.header_of(doc); keys != 0 {
+			lo = close_end(doc, keys)
 		}
 		return lo, u64(len(doc.src))
 	}
@@ -433,7 +510,7 @@ edit_fact_slot :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Ro
 		return false
 	}
 	if node == core.ROOT {
-		return doc.shared_keys != 0 && core.length(doc, core.ROOT) > 0 && !emptied
+		return core.header_of(doc) != 0 && core.length(doc, core.ROOT) > 0 && !emptied
 	}
 	n := doc.nodes[node]
 	return n.role == .Value && (n.kind == .Array || n.kind == .Object)
@@ -527,8 +604,8 @@ edit_record_sep :: proc(doc: ^core.Document) -> string {
 			return e
 		}
 	}
-	if doc.shared_keys != 0 {
-		if e := line_end_before(doc.src, record_end(doc, doc.shared_keys)); e != "" {
+	if keys := core.header_of(doc); keys != 0 {
+		if e := line_end_before(doc.src, record_end(doc, keys)); e != "" {
 			return e
 		}
 	}

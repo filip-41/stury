@@ -58,7 +58,7 @@ node_layout :: proc(t: ^testing.T) {
 	if !walktest.expect_nodes(t, &doc, want) {
 		return
 	}
-	testing.expect_value(t, doc.shared_keys, 1)
+	testing.expect_value(t, core.header_of(&doc), 1)
 	testing.expect_value(t, doc.root_close, u64(len(src)))
 	testing.expect_value(t, core.length(&doc, 0), 1)
 	testing.expect_value(t, core.length(&doc, 1), 2)
@@ -95,10 +95,10 @@ child_at_reader :: proc(t: ^testing.T) {
 	_, has = core.child_at(&doc, 0, 1)
 	testing.expect(t, !has)
 	for i in 0 ..< 3 {
-		key, ok := core.child_at(&doc, doc.shared_keys, i)
-		testing.expect(t, ok && key == doc.shared_keys + 1 + core.Node_Index(i))
+		key, ok := core.child_at(&doc, core.header_of(&doc), i)
+		testing.expect(t, ok && key == core.header_of(&doc) + 1 + core.Node_Index(i))
 	}
-	_, has = core.child_at(&doc, doc.shared_keys, 3)
+	_, has = core.child_at(&doc, core.header_of(&doc), 3)
 	testing.expect(t, !has)
 
 	ragged, rerr := build("a,b,c\n1,2\n", .Csv, {tolerate = {.Ragged}})
@@ -318,7 +318,7 @@ key_reads :: proc(t: ^testing.T) {
 		if !testing.expectf(t, err == nil, "%q: %v", c.src, err) {
 			return
 		}
-		key := doc.shared_keys + 1 + core.Node_Index(c.key)
+		key := core.header_of(&doc) + 1 + core.Node_Index(c.key)
 		buf: [16]u8
 		s, ok := core.text(&doc, key, buf[:])
 		_, is_num := core.number(&doc, key)
@@ -333,7 +333,7 @@ key_reads :: proc(t: ^testing.T) {
 	}
 	doc, _ := build("a\nx\xffy\n", .Csv, {tolerate = {.Invalid_Utf8}})
 	defer core.destroy(&doc)
-	testing.expect(t, !core.key_equals(&doc, doc.shared_keys + 1, "x\uFFFdy"))
+	testing.expect(t, !core.key_equals(&doc, core.header_of(&doc) + 1, "x\uFFFdy"))
 }
 
 Dup_Case :: struct {
@@ -518,7 +518,7 @@ duplicate_names :: proc(t: ^testing.T) {
 	doc, _ := build("a,b\n1,2,3,4\n5\n", .Csv, {tolerate = {.Ragged}})
 	defer core.destroy(&doc)
 	buf: [8]u8
-	text, _ := core.text(&doc, doc.shared_keys + 3, buf[:])
+	text, _ := core.text(&doc, core.header_of(&doc) + 3, buf[:])
 	testing.expect_value(t, text, "3")
 	testing.expect_value(t, core.length(&doc, cell_node(&doc, 0, 0) - 1), 4)
 }
@@ -547,7 +547,7 @@ document_shapes :: proc(t: ^testing.T) {
 	}) {
 		doc, err := build(c.src, .Csv, c.opts)
 		defer core.destroy(&doc)
-		testing.expectf(t, err == nil && doc.shared_keys == c.keys && core.length(&doc, 0) == c.records, "%q: %v, header %d, %d records", c.src, err, doc.shared_keys, core.length(&doc, 0))
+		testing.expectf(t, err == nil && core.header_of(&doc) == c.keys && core.length(&doc, 0) == c.records, "%q: %v, header %d, %d records", c.src, err, core.header_of(&doc), core.length(&doc, 0))
 		if c.keys == 0 {
 			testing.expect_value(t, len(doc.nodes), 1)
 		}
@@ -558,12 +558,12 @@ document_shapes :: proc(t: ^testing.T) {
 	doc, _ := build("a,b\n", .Csv)
 	defer core.destroy(&doc)
 	testing.expect_value(t, string(core.span(&doc, 1)), "a,b\n")
-	testing.expect_value(t, core.length(&doc, doc.shared_keys), 2)
+	testing.expect_value(t, core.length(&doc, core.header_of(&doc)), 2)
 
 	// With a BOM, CRLF and no final line end, a header row and each record span their source bytes after the BOM.
 	bom, _ := build("\xef\xbb\xbfa,b\r\n1,2\r\n3,4", .Csv)
 	defer core.destroy(&bom)
-	testing.expect_value(t, string(core.span(&bom, bom.shared_keys)), "a,b\r\n")
+	testing.expect_value(t, string(core.span(&bom, core.header_of(&bom))), "a,b\r\n")
 	testing.expect_value(t, bom.nodes[0].spelling, u16(2))
 	for rec, i in ([]string{"1,2\r\n", "3,4"}) {
 		node, _ := core.child_at(&bom, 0, i)
@@ -592,9 +592,9 @@ generated_keys_agree :: proc(t: ^testing.T) {
 		}
 		// Each header cell's text is found by `key_equals`, and `member` returns a cell of the record whose header cell
 		// decodes to that text, at or before this column.
-		root: if !no_header && doc.shared_keys != 0 {
+		root: if !no_header && core.header_of(&doc) != 0 {
 			col := 0
-			it := core.children(&doc, doc.shared_keys)
+			it := core.children(&doc, core.header_of(&doc))
 			for {
 				key, more := core.child_next(&it)
 				if !more {
@@ -619,7 +619,7 @@ generated_keys_agree :: proc(t: ^testing.T) {
 					}
 					mv, mok := core.member(&doc, rec, kt, .First)
 					// A repeated name returns the first column, whose header cell decodes to the same text.
-					ok := mok && mv > rec && mv <= rec + 1 + core.Node_Index(col) && core.key_equals(&doc, doc.shared_keys + 1 + (mv - rec - 1), kt)
+					ok := mok && mv > rec && mv <= rec + 1 + core.Node_Index(col) && core.key_equals(&doc, core.header_of(&doc) + 1 + (mv - rec - 1), kt)
 					if !testing.expectf(t, ok, "round %d: member %q -> %v %v, column %d of record %d", round, kt, mv, mok, col, rec) {
 						break root
 					}
@@ -694,7 +694,7 @@ caller_key_buffer :: proc(t: ^testing.T) {
 	doc, err := dsv.build(src, .Csv)
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
-	testing.expect_value(t, doc.shared_keys, core.Node_Index(1))
+	testing.expect_value(t, core.header_of(&doc), core.Node_Index(1))
 	testing.expect_value(t, doc.nodes[2], core.Node{0, 1, .Plain, .Key, 0})
 	testing.expect_value(t, doc.nodes[3], core.Node{2, 1, .Plain, .Key, 0})
 	log := new(walktest.Log)
@@ -753,7 +753,7 @@ pairs_iteration :: proc(t: ^testing.T) {
 
 	only, _ := build("a,b,c\n", .Csv)
 	defer core.destroy(&only)
-	for node in ([]core.Node_Index{only.shared_keys, core.ROOT}) {
+	for node in ([]core.Node_Index{core.header_of(&only), core.ROOT}) {
 		n, _ = count(&only, node)
 		testing.expect_value(t, n, 0)
 	}
@@ -799,5 +799,99 @@ spelling_complete :: proc(t: ^testing.T) {
 		testing.expect(t, s.text != nil && s.key_equals != nil && s.number != nil && s.resolve != nil && s.resolves != nil && s.close_end != nil && s.format != nil)
 		testing.expect(t, s.flat && s.services != nil && s.services.build != nil && s.services.validate != nil)
 		testing.expect(t, s.services.edit != nil && s.services.edit.interior != nil)
+	}
+}
+
+// `child_at` of the root agrees with a walk over its children for every position and one past the last, and the table
+// says the width the rows have.
+expect_rows_by_position :: proc(t: ^testing.T, src: string, opts: dsv.Options, width: u32, rows: int) {
+	doc, err := build(src, .Csv, opts)
+	defer core.destroy(&doc)
+	walktest.expect_nil(t, err)
+	table, has := core.table_of(&doc, core.ROOT)
+	testing.expectf(t, has && table.width == width, "%q: table %v, width %d wanted", src, table, width)
+	testing.expectf(t, core.length(&doc, core.ROOT) == rows, "%q: %d rows", src, core.length(&doc, core.ROOT))
+	it := core.children(&doc, core.ROOT)
+	for k in 0 ..< rows + 1 {
+		want, more := core.child_next(&it)
+		got, found := core.child_at(&doc, core.ROOT, k)
+		testing.expectf(t, found == more && (!found || got == want), "%q: row %d is %d, %v, a walk gives %d, %v", src, k, got, found, want, more)
+	}
+}
+
+@(test)
+table_rows :: proc(t: ^testing.T) {
+	expect_rows_by_position(t, "a,b\n1,2\n3,4\n5,6\n", {}, 2, 3)
+	expect_rows_by_position(t, "a\n1\n2\n3\n", {}, 1, 3)
+	expect_rows_by_position(t, "a,b\n", {}, 0, 0)
+	expect_rows_by_position(t, "", {}, 0, 0)
+	expect_rows_by_position(t, "1,2\n3,4\n", {no_header = true}, 2, 2)
+	expect_rows_by_position(t, "a,b\n1\n2,3,4\n5,6\n", {tolerate = {.Ragged}}, 0, 3)
+	expect_rows_by_position(t, "1\n2,3\n", {no_header = true, tolerate = {.Ragged}}, 0, 2)
+}
+
+// A table is the root's only, and JSON has none.
+@(test)
+table_of_node :: proc(t: ^testing.T) {
+	doc, _ := build("a,b\n1,2\n", .Csv)
+	defer core.destroy(&doc)
+	table, has := core.table_of(&doc, core.ROOT)
+	testing.expect(t, has && table.header == 1 && table.first_row == 4 && table.width == 2)
+	_, has = core.table_of(&doc, 4)
+	testing.expect(t, !has)
+}
+
+// A build with `infer` stores the kind `Readers.resolve` gives a cell of the same text, for every spelling of a cell
+// that is or is not a number, `true` or `false`. A quoted cell, a doubled quote among them, is a string whatever it
+// holds.
+@(test)
+leaf_kinds_match_resolve :: proc(t: ^testing.T) {
+	cells := [?]string{
+		"0", "-0", "1", "-12", "1.5", "-1.5e3", "1E+2", "123456789012345678901234567890", "0.000001",
+		"01", "1.", ".5", "+1", "-", "1e", "1e+", "0x10", "1_0", " 1", "1 ", "NaN", "Infinity",
+		"true", "false", "True", "truex", "tru", "f", "t",
+		"abc", "é", "\"1\"", "\"1\"\"2\"", "\"\"\"1\"\"\"", "\"true\"", "\"1.5\"", "\"a\"\"b\"",
+	}
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, "c\n")
+	for c in cells {
+		strings.write_string(&b, c)
+		strings.write_byte(&b, '\n')
+	}
+	src := strings.to_string(b)
+	doc, err := build(src, .Csv, {infer = true})
+	defer core.destroy(&doc)
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, core.length(&doc, core.ROOT), len(cells))
+	for c, i in cells {
+		cell := cell_node(&doc, i, 0)
+		stored := core.kind(&doc, cell)
+		saved := doc.nodes[cell]
+		doc.nodes[cell].kind = .Plain
+		resolved := core.kind(&doc, cell)
+		doc.nodes[cell] = saved
+		testing.expectf(t, stored == resolved, "%q: stored %v, resolved %v", c, stored, resolved)
+		testing.expectf(t, (saved.kind == .Plain) == (stored == .String || stored == .Null), "%q: node kind %v for %v", c, saved.kind, stored)
+		if c[0] == '"' {
+			testing.expectf(t, stored == .String && saved.kind == .Plain, "%q: %v", c, stored)
+		}
+	}
+	// A number node's digit counts are the ones JSON's walk gives it.
+	number := doc.nodes[cell_node(&doc, 5, 0)]
+	int_digits, frac_digits := core.number_digit_counts(number.spelling)
+	testing.expectf(t, number.kind == .Number && int_digits == 1 && frac_digits == 1 && number.spelling & core.NUMBER_EXP != 0, "-1.5e3: %v", number)
+	big := doc.nodes[cell_node(&doc, 7, 0)]
+	int_digits, frac_digits = core.number_digit_counts(big.spelling)
+	testing.expectf(t, big.kind == .Number && int_digits == 30 && frac_digits == 0, "30 digits: %v", big)
+}
+
+// Without `infer` no cell is stored as anything but `.Plain`.
+@(test)
+leaf_kinds_off :: proc(t: ^testing.T) {
+	doc, err := build("a,b,c\n1,true,x\n", .Csv)
+	defer core.destroy(&doc)
+	walktest.expect_nil(t, err)
+	for c in 0 ..< 3 {
+		testing.expect_value(t, doc.nodes[cell_node(&doc, 0, c)].kind, core.Kind.Plain)
 	}
 }

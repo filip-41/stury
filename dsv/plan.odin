@@ -173,9 +173,9 @@ plan_columns :: proc(p: ^Plan) -> bool {
 
 plan_lines :: proc(p: ^Plan) -> bool {
 	doc := p.doc
-	if doc.shared_keys != 0 {
-		p.width = core.length(doc, doc.shared_keys)
-		compose.push(&p.lines, Line{node = doc.shared_keys, n = len(header_keys(doc)), header = true}) or_return
+	if keys := core.header_of(doc); keys != 0 {
+		p.width = core.length(doc, keys)
+		compose.push(&p.lines, Line{node = keys, n = len(header_keys(doc)), header = true}) or_return
 	}
 	it := core.children(doc, core.ROOT)
 	for rec in core.child_next(&it) {
@@ -277,9 +277,9 @@ plan_cuts :: proc(p: ^Plan) -> bool {
 // Sorts the list's cell inserts into new columns and the cells each record writes.
 plan_fills :: proc(p: ^Plan) -> bool {
 	doc := p.doc
-	if doc.shared_keys != 0 {
+	if keys := core.header_of(doc); keys != 0 {
 		for e in p.list.edits {
-			if e.op == .Insert && e.node == doc.shared_keys {
+			if e.op == .Insert && e.node == keys {
 				compose.push(&p.added, Column{id = len(p.added), p = int(e.at), order = len(p.added), cell = e.text}) or_return
 			}
 		}
@@ -333,8 +333,9 @@ plan_named :: proc(p: ^Plan, e: core.Edit) -> bool {
 	doc := p.doc
 	line := line_at(p.lines[:], e.node)
 	l := p.lines[line]
-	for c in 0 ..< core.length(doc, doc.shared_keys) {
-		cell := doc.shared_keys + 1 + core.Node_Index(c)
+	keys := core.header_of(doc)
+	for c in 0 ..< core.length(doc, keys) {
+		cell := keys + 1 + core.Node_Index(c)
 		if !core.key_equals(doc, cell, string(e.key)) {
 			continue
 		}

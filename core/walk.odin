@@ -52,8 +52,8 @@ Role :: enum u8 {
 // format's detail. Core reads bits 0 to 2 of a value or key and a comment's marker lengths, and the rest is the
 // format's own. json sets bit 0 for a string or key that needs decoding, bit 1 when it is quoted, bit 2 for a
 // tolerated ill-formed sequence, and a number's packed shape. dsv sets bit 0 for a cell that needs decoding, bit 1 for
-// a quoted CSV cell, bits 0 and 2 for a tolerated ill-formed sequence, bit 3 for a quoted cell holding a `""` on a walk
-// for `Cells` or `Batch`, and bit 4 for the key of a column past the header's last cell.
+// a quoted CSV cell, bits 0 and 2 for a tolerated ill-formed sequence, bit 15 for a quoted cell holding a `""` on a walk
+// for `Cells` or `Batch`, and bit 14 for the key of a column past the header's last cell.
 Token :: struct {
 	lo:       u64,
 	n:        u32,

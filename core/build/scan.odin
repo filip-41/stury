@@ -311,7 +311,9 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 	}
 	doc.partial = true
 	doc.stopped = h.stopped
-	doc.positional = h.positional
+	if h.positional {
+		core.set_tables(doc, core.POSITIONAL_TABLES[:])
+	}
 	if h.again {
 		doc.answers, doc.kept, doc.missing = h.answers[:h.n_answers], h.kept[:h.n_kept], h.missing[:h.n_missing]
 		return {}
@@ -334,7 +336,7 @@ query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Option
 	h: Scan
 	h.b.doc = doc^
 	h.b.doc.allocator = allocator
-	h.positional = doc.shared_keys != 0
+	h.positional = core.header_of(doc) != 0
 	depth := min(core.reserve_depth(doc.as.max_depth, len(doc.nodes)), core.MAX_DEPTH)
 	if e := scan_plan(&h, paths, {dups = read.dups}, depth, false, allocator); e.kind != .None {
 		many_free(&h, allocator)
@@ -584,7 +586,7 @@ replay_step_many :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Reg
 @(private)
 replay_keyed :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, _, _: core.Node_Index) -> (core.Node_Index, bool) {
 	doc := &h.b.doc
-	return doc.shared_keys + 1 + core.Node_Index(u32(s.b)), doc.nodes[s.b >> 32].kind == .Object
+	return core.header_of(doc) + 1 + core.Node_Index(u32(s.b)), doc.nodes[s.b >> 32].kind == .Object
 }
 
 // The hook a format's `scan` gives its walk.

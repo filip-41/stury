@@ -580,7 +580,6 @@ edit_read :: proc(r: ^Edit_Reader) -> (doc: ^core.Document, more: bool) {
 	}
 	doc = new(core.Document, heap)
 	doc^ = d
-	jq.store_inferred_kinds(doc)
 	append(&r.docs, doc)
 	full := rec.at + u64(len(rec.text))
 	end := full

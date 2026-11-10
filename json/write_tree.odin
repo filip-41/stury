@@ -328,7 +328,7 @@ tree_member :: #force_inline proc(w: ^Tree, f: ^Tree_Frame) -> (i, key: core.Nod
 	for f.at < f.end {
 		at := f.at
 		f.at += core.Node_Index(doc.nodes[at].n) if doc.nodes[at].kind >= .Array else 1
-		if at != doc.shared_keys {
+		if at != core.header_of(doc) {
 			f.members += 1
 			return at, core.NO_NODE, f.at < f.end, true
 		}

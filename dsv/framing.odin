@@ -359,17 +359,33 @@ build_row_spec :: proc(it: ^records.Reader, rec: records.Record, allocator: runt
 	b.root_close = at.hi
 	regs := build.BUILDER_REGS
 	regs, _ = build.builder_hook_plain(&b, regs, {kind = .Object if len(keys) > 0 else .Array, role = .Value, lo = at.at})
+	if options_of(it.as).infer {
+		regs = put_row_cells(&b, regs, cells, keys, src, at.at - row.at, true)
+	} else {
+		regs = put_row_cells(&b, regs, cells, keys, src, at.at - row.at, false)
+	}
+	regs, _ = build.builder_hook_plain(&b, regs, {kind = .End, lo = at.hi})
+	b.doc.kinds_stored = true
+	return build.builder_end(&b, regs, nil)
+}
+
+// Writes a row's keys and cells into `b`, a cell at its place in `src`, kinded as `infer` reads it when `INFER`.
+@(private)
+put_row_cells :: #force_inline proc(b: ^build.Builder, regs: core.Hook_Regs, cells, keys: []core.Token, src: []u8, shift: u64, $INFER: bool) -> core.Hook_Regs {
+	regs := regs
 	for t, c in cells {
 		if len(keys) > 0 {
-			regs, _ = build.builder_hook_plain(&b, regs, column_key(keys, c))
+			regs, _ = build.builder_hook_plain(b, regs, column_key(keys, c))
 		}
 		cell := t
 		cell.spelling &~= SPELLING_DOUBLED
-		cell.lo += at.at - row.at
-		regs, _ = build.builder_hook_plain(&b, regs, cell)
+		cell.lo += shift
+		when INFER {
+			cell = infer_token(src, cell)
+		}
+		regs, _ = build.builder_hook_plain(b, regs, cell)
 	}
-	regs, _ = build.builder_hook_plain(&b, regs, {kind = .End, lo = at.hi})
-	return build.builder_end(&b, regs, nil)
+	return regs
 }
 
 // Reads the next row into `target`, a row type, by replaying its cells through `on_cell` as `unmarshal` reads the text

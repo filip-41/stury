@@ -182,7 +182,7 @@ its limit cuts the sorted list.
 A dsv path addresses the tree its document has: `.[i]` is record `i`, `.[i].name` a cell by its header name, `.[i][j]`
 cell `j`, `.[]` every record, negative indexes included. A headed walk gives each cell its `Key` token, so the step
 logic needs no dsv code. A headerless text has no names. A partial document keeps a kept cell's key beside it, so it has
-no `shared_keys`.
+no table header.
 
 ## The partial document
 
@@ -252,9 +252,9 @@ hook sees `Object`, `Array`, `Key` and value tokens and returns `Next`, `Skip` o
   naming them.
 
 The step logic runs on two token sources: the walk's during a scan, and a document's during a query. `doc.nodes` is not
-the walk's token stream: it holds no `End` node, a headed dsv record's `Key` tokens live in `doc.shared_keys`, and a
+the walk's token stream: it holds no `End` node, a headed dsv record's `Key` tokens live in the table's header, and a
 container's `n` and `spelling` are rewritten at its close. `build.feed_nodes` feeds a hook from a document, restoring each
-`End` with a stack and each dsv key from `doc.shared_keys`. The step logic is one hook of it, and the typed read of an
+`End` with a stack and each dsv key from the table's header. The step logic is one hook of it, and the typed read of an
 answer another (see `docs/typed.md`): a caller reads an answer's value with `typed.unmarshal(&doc, answer, ...)`.
 
 A query over a full document, a scan of the text and a value-tree model give the same answers in the same order.

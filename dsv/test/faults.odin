@@ -325,7 +325,7 @@ tolerated_tokens :: proc(t: ^testing.T) {
 	}
 	for c in ([]Tokens {
 		{"a,b,c\n1,2\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {6, 0, .Object, .Value, 0}, {0, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {8, 1, .Plain, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
-		{"a,b\n1,2,3\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {4, 0, .Object, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {0, 3, .Plain, .Key, core.SPELLING_DECODE | 16}, {8, 1, .Plain, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
+		{"a,b\n1,2,3\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {4, 0, .Object, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {0, 3, .Plain, .Key, core.SPELLING_DECODE | 1 << 14}, {8, 1, .Plain, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
 		{"a\"b,c\n1,\"2\"", {.Bare_Quote}, {{0, 0, .Array, .Value, 0}, {6, 0, .Object, .Value, 0}, {0, 3, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {4, 1, .Plain, .Key, 0}, {8, 3, .Plain, .Value, core.SPELLING_DECODE | core.SPELLING_QUOTED}, {11, 0, .End, .Value, 0}, {11, 0, .End, .Value, 0}}},
 	}) {
 		log^ = {}

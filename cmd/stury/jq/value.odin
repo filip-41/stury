@@ -51,7 +51,6 @@ Num :: struct {
 document_value :: proc(d: core_pkg.Document) -> Value {
 	doc := new(core_pkg.Document)
 	doc^ = d
-	store_inferred_kinds(doc)
 	return Ref{doc, core_pkg.ROOT}
 }
 
@@ -108,8 +107,9 @@ jq_kind :: #force_inline proc(k: core_pkg.Kind) -> Kind {
 	return Kind(k)
 }
 
-// A document node's jq kind. A dsv cell is a string. The stored kind is read, which reads a cell as `core.kind` does
-// without `infer` and asks no format.
+// A document node's jq kind. A build with `infer` stores a cell's kind in its node. A cell left `Plain` is a string or
+// null, unless its document was not made by a build (a record, a partial read) and its first byte could start a number,
+// `true` or `false`, which the document's format then resolves.
 node_kind :: #force_inline proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Kind {
 	#partial switch k := doc.nodes[i].kind if int(i) < len(doc.nodes) else core_pkg.Kind.Null; k {
 	case .Array:
@@ -118,10 +118,26 @@ node_kind :: #force_inline proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index)
 		return .Object
 	case .Plain:
 		// A delimited cell: an empty unquoted one is null, a quoted one keeps its quotes in its span.
-		return .Null if doc.nodes[i].n == 0 && doc.nodes[i].role == .Value else .String
+		if doc.nodes[i].n == 0 && doc.nodes[i].role == .Value {
+			return .Null
+		}
+		return .String if doc.kinds_stored else unstored_kind(doc, i)
 	case:
 		return Kind(k)
 	}
+}
+
+// The kind of a `Plain` cell of a document that did not store kinds: a partial read. Its first byte decides whether the
+// format has anything to resolve.
+@(cold)
+unstored_kind :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Kind {
+	n := doc.nodes[i]
+	if n.role == .Value && n.spelling == 0 {
+		if c := doc.src[n.lo]; c == 't' || c == 'f' || c == '-' || c - '0' < 10 {
+			return Kind(core_pkg.kind(doc, i))
+		}
+	}
+	return .String
 }
 
 type_name :: #force_inline proc(v: Value) -> string {

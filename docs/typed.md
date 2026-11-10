@@ -245,7 +245,7 @@ kept, so a field no kept cell names keeps its value. A record kept by position r
 unquoted one, which is absent, and a list row holds it as an empty string.
 
 For a plan without `node_read`, the read is the hook of a read of a text, fed by `build.feed_nodes` from `doc.nodes`. The replay restores each `End` from a
-stack of container ends and each key a record shares from `doc.shared_keys`, which is how a path query over a document
+stack of container ends and each key a record shares from the table's header, which is how a path query over a document
 is fed too. The read gives the hook what the walk would have: a partial container is a value, a close has its bracket's
 byte where a refusal, a `required` check or a value read whole reads it, and a plain number has its digits folded in
 `Reader.mant`. A union that reads by its tag finds the member by replaying the object alone.

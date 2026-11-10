@@ -854,7 +854,7 @@ compose_tree :: proc(cx: ^Compose) -> bool {
 			continue
 		}
 		// An unnamed root comment above shared keys reads as the root's foot once the root is emptied, so it stays.
-		if f.role == .Comment && f.node == core.ROOT && doc.shared_keys != 0 && emptied {
+		if f.role == .Comment && f.node == core.ROOT && core.header_of(doc) != 0 && emptied {
 			continue
 		}
 		push(&cx.chunks, Chunk{lo = f.lo, hi = f.lo + u64(f.n), cut = true, drop = true}) or_return
@@ -925,7 +925,7 @@ Chunk :: struct {
 // Only an inline-key `Object`'s member has a key node before it. A shared-key root's first member follows the shared keys,
 // whose last also has role `Key` and names no member of the root.
 value_lo :: proc(doc: ^core.Document, parent, v: core.Node_Index) -> u64 {
-	if doc.shared_keys == 0 && doc.nodes[parent].kind == .Object && doc.nodes[v-1].role == .Key {
+	if core.header_of(doc) == 0 && doc.nodes[parent].kind == .Object && doc.nodes[v-1].role == .Key {
 		return core.node_start(doc.nodes[v-1])
 	}
 	return core.node_start(doc.nodes[v])

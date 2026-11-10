@@ -170,7 +170,7 @@ fold_digits :: #force_inline proc "contextless" (src: []u8, t: core.Token) -> (m
 // The key of the value at node `i` of the record `open`, whose cells are its scalar children in column order.
 @(private)
 document_keyed :: proc "contextless" (d: ^Document_Read, _: core.Hook_Regs, i, open: core.Node_Index) -> (core.Node_Index, bool) {
-	return d.doc.shared_keys + 1 + (i - open - 1), d.doc.nodes[open].kind == .Object
+	return core.header_of(d.doc) + 1 + (i - open - 1), d.doc.nodes[open].kind == .Object
 }
 
 // Finds the tag member of the object at the node the replay is giving, by replaying that object alone.

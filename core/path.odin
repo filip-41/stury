@@ -148,7 +148,7 @@ member_of :: proc(doc: ^Document, obj: Node_Index, name: string, dups := Duplica
 element_of :: proc(doc: ^Document, c: Node_Index, k: int) -> (Node_Index, Presence) {
 	if int(c) < len(doc.nodes) {
 		kind := doc.nodes[c].kind
-		if kind != .Array && kind != .Null && !(kind == .Object && (doc.positional || doc.shared_keys != 0)) {
+		if kind != .Array && kind != .Null && !(kind == .Object && positional(doc)) {
 			return NO_NODE, .Wrong_Kind
 		}
 	}

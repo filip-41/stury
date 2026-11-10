@@ -221,7 +221,7 @@ edit_row_input :: proc(data: rawptr) -> (jq.Value, string, jq.Parse_Status) {
 // The header's decoded names, or nil for a table without one.
 @(private = "file")
 edit_header :: proc(w: ^Edit_State) -> (names: []string, ok: bool) {
-	keys := w.doc.shared_keys
+	keys := core.header_of(w.doc)
 	if keys == 0 {
 		return nil, true
 	}
@@ -240,7 +240,7 @@ edit_header :: proc(w: ^Edit_State) -> (names: []string, ok: bool) {
 @(private = "file")
 edit_row_value :: proc(w: ^Edit_State, v: jq.Value, names: []string) -> (jq.Value, bool) {
 	k := jq.kind(v)
-	headed := w.doc.shared_keys != 0
+	headed := core.header_of(w.doc) != 0
 	if headed && k == .Object || !headed && k == .Array {
 		return v, true
 	}
@@ -378,7 +378,7 @@ edit_table_place :: proc(er: ^Edit_Run, w0: ^Edit_State, text: []u8, placed: []E
 		for p, i in perm {
 			final[i] = names[p]
 		}
-		edit_reorder(&w, doc.shared_keys, perm) or_return
+		edit_reorder(&w, core.header_of(&doc), perm) or_return
 		it := core.children(&doc, core.ROOT)
 		for row in core.child_next(&it) {
 			edit_reorder(&w, row, perm) or_return

@@ -88,8 +88,10 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
   received. `destroy` frees the allocations, the child index with them, and sets the document to zero. `clone` copies
   the nodes, facts, counts and a read's answers block into another allocator, so the original may go while the copy
   lives, and the copy borrows the same `src` and holds no child index. A reader that allocates takes its own allocator.
-- `shared_keys` is the dsv header row's node, 0 for a text read without a header, for a partial document and for every
-  JSON document.
+- `tables` is empty for every JSON document. A dsv text has one `Table`, `table_of(doc, ROOT)`: `header` is the header
+  row's node (0 for a text read without a header and for a partial document), `first_row` the first record's node, and
+  `width` the cell count every record has, 0 when records differ (`Ragged`) or none exists. A record is its own node and
+  its cells, so with a `width` record `k` is at `first_row + k * (width + 1)` and `child_at` of the root computes it.
 - `root_close` is one past the root value's authored bytes: the close of a root container, or the last byte of a root
   scalar, quotes included. It is 0 when the build did not record it. `span(ROOT)` and a whole-document writer use it
   instead of the format's `close_end`.
@@ -239,7 +241,7 @@ no members, so a later call gives false and writes nothing, and `child_at` walks
 
 `pairs` starts a `Pair_Iter` over an `Object` container's key/value member pairs and `pair_next` yields `(key, val, ok)` in
 source order. For an inline-key `Object`, key and value alternate in preorder. For a shared-key `Object`, keys come from
-`doc.shared_keys` while values step through the record's cells. A non-`Object` container, scalar, or out of range index yields
+the table's header while values step through the record's cells. A non-`Object` container, scalar, or out of range index yields
 an empty iterator.
 
 `member(doc, obj, name, dups := .Last)` returns the value of the member whose key decodes to `name`: `.First` the
@@ -298,6 +300,10 @@ quoted or escaped cell, and `.Null` for an empty value cell, as a typed read and
 `.String` in a document read without `Options.infer`. With `infer`, a `true` or `false` cell is `.True` or
 `.False`, and a cell that is exactly a JSON number is `.Number`. A quoted cell, a TSV escape and a cell holding an
 ill-formed sequence answer `.String`, since their span holds a quote, a backslash or a byte no JSON number holds.
+
+A build with `infer` writes that kind into the node as it makes the cell, with a number's digit counts in its `spelling`,
+so `kind` reads the node and `resolve` is asked only of an empty cell. A document not made by a build, such as a record or
+a partial read, keeps its cells `Plain` and `kind` resolves them.
 
 ## The spelling services
 
@@ -370,7 +376,7 @@ keeps the earliest repeat in the build's error and which a format's `build` may 
 A delimited text is an `Array` of records whose first child may be the header row.
 
 - The root is an `Array` of role `Value`, and its readers step over the header row as over a member's key, so `length`
-  counts records and `children` returns the records. `Document.shared_keys` is the header row's node, 0 for a text read
+  counts records and `children` returns the records. The root's `Table` names the header row's node, 0 for a text read
   without one.
 - A record with a header is stored as a `Kind.Object` with no inline key nodes. Its cells are its children, each
   a `Plain` token of role `Value`. No record stores a key node, so it holds one node per cell.
@@ -386,7 +392,7 @@ A delimited text is an `Array` of records whose first child may be the header ro
   remove a wide record's cells and drop a positional column. It may not set a positional header cell (`.Bad_Index`),
   and a column added or dropped before the positional ones, which would rename them, is `.Bad_Width`.
 - A header cell reads as a key node, so `key_equals`, `text`, `number` and `kind` answer for it as for a JSON key.
-- A headerless text (`no_header` true) has no header row (`doc.shared_keys == 0`), making the first record data and every
+- A headerless text (`no_header` true) has no header row (the table's `header` is 0), making the first record data and every
   record an `Array` of `Plain` value cells, with no key node at all.
 
 ## Facts
