@@ -91,8 +91,15 @@ Matcher :: struct {
 }
 
 // The first match of `re` in `s` at or after byte `start`, with its groups' byte bounds in `caps` (2 per group with
-// the whole match; -1 for a group that did not take part), or Oniguruma's message when the search gave up.
+// the whole match; -1 for a group that did not take part), or Oniguruma's message when the search gave up. With no
+// `caps` it answers only whether there is one.
 search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch) -> (found: bool, err: string) {
+	if len(caps) == 0 && re.dfa != nil {
+		if hit, judged := dfa_search(re.dfa, s, start); judged {
+			scratch.resumes = 0
+			return hit, ""
+		}
+	}
 	defer shrink(&scratch.stack)
 	resize(&scratch.slots, re.slots)
 	resize(&scratch.counts, len(re.callouts))
@@ -422,8 +429,10 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 			}
 			// A \K in a look-ahead may keep past the end, where Oniguruma starts the match at its end.
 			if !re.longest {
-				copy(m.caps, slots[:len(m.caps)])
-				m.caps[0], m.caps[1] = min(m.caps[0], pos), pos
+				if len(m.caps) > 0 {
+					copy(m.caps, slots[:len(m.caps)])
+					m.caps[0], m.caps[1] = min(m.caps[0], pos), pos
+				}
 				return true
 			}
 			// Oniguruma takes the latest \K on the stack, or where the last match at this start kept from when
@@ -437,8 +446,10 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 			}
 			if pos - at > m.best_len {
 				m.best_len = pos - at
-				copy(m.caps, slots[:len(m.caps)])
-				m.caps[0], m.caps[1] = min(m.keep, pos), pos
+				if len(m.caps) > 0 {
+					copy(m.caps, slots[:len(m.caps)])
+					m.caps[0], m.caps[1] = min(m.keep, pos), pos
+				}
 			}
 			ok = false
 		case .Str:

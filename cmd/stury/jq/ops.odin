@@ -43,10 +43,11 @@ binary_op :: proc(ip: ^Interp, op: Op, a, b: Value, owned: ^Owned = nil) -> (Val
 			case .Mul:
 				return x * y, .Go
 			case .Eq, .Ne, .Lt, .Le, .Gt, .Ge:
-				// Two numbers compare by their doubles unless both keep digits (core's `compare`).
+				// Rounding keeps order, so doubles that differ order their numbers, as do two computed ones. Others
+				// of one double are told apart by their digits (core's `compare`).
 				_, a_computed := a.(f64)
 				_, b_computed := b.(f64)
-				if a_computed || b_computed {
+				if x != y || a_computed && b_computed {
 					return compared(op, double_order(x, y)), .Go
 				}
 			}

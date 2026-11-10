@@ -310,6 +310,8 @@ sample_passes_its_check :: proc(t: ^testing.T) {
 		`{"anyOf": [{"type": "integer"}, {"type": "string"}]}`,
 		`{"oneOf": [{"type": "integer", "minimum": 10}, {"type": "string"}]}`,
 		`{"allOf": [{"type": "integer"}, {"minimum": 5}, {"maximum": 5}]}`,
+		`{"type": "integer", "multipleOf": 1e-1000, "minimum": 1, "maximum": 3}`,
+		`{"type": "number", "multipleOf": 1e-100000000000000000000, "minimum": 1, "maximum": 3}`,
 		`{"if": {"type": "integer"}, "then": {"minimum": 3}, "else": {"type": "string"}}`,
 		`{"$defs": {"n": {"type": "object", "properties": {"next": {"$ref": "#/$defs/n"}}}}, "$ref": "#/$defs/n"}`,
 		`{"description": "a thing", "type": "object", "properties": {"a": {"description": "the a", "type": "integer"}}, "required": ["a"]}`,

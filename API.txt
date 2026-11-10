@@ -457,23 +457,23 @@ writer_end :: records.writer_end
 writer_init :: proc {writer_init_bound, writer_init_chosen}
 ## Format author names
 # core/spell
-Decimal :: struct { neg: bool, saturated: bool, head, tail: string, point: i128, }
+Decimal :: struct { neg: bool, head, tail: string, point: i128, wide: string, wide_neg: bool, }
 Fault_Kind :: enum u8 { None, Truncated, Bad_Char, Bad_Escape, Bad_Number, Too_Deep, Too_Wide, No_Memory, Bad_Option, Bad_Width, Duplicate_Key, }
-LONG_SHIFT_DIGITS :: 400
 MAX_NUMBER_DIGITS :: 256
 MAX_NUMBER_SCALE :: 4096
 MULTIPLE_DIGITS :: 19
 Number :: struct { bits: u64, kind: Number_Kind, }
 Number_Kind :: enum u8 { Int, Uint, Float, Wide, }
-decimal_compare :: proc(x, y: Decimal) -> (order: int, exact: bool)
+decimal_compare :: proc(x, y: Decimal) -> int
 decimal_multiple_of :: proc(x, y: Decimal) -> (multiple, exact: bool)
 decimal_of :: proc(lit: string) -> (d: Decimal)
 # core/regex
 Flags :: struct { fold, extend, dotall, multiline, ecma: bool, }
-Regex :: struct { insts: []Inst, bytes: string, classes: []^Class, refs: [][]int, callouts: []^Callout, names: []string, slots: int, opt: ^Search_Opt, visited: ^Visited, prefix: string, first: [4]u64, longest: bool, not_empty: bool, has_first: bool, calls_or_limits: bool, narrowed: bool, ecma: bool, linear: bool, }
+Regex :: struct { insts: []Inst, bytes: string, classes: []^Class, refs: [][]int, callouts: []^Callout, names: []string, slots: int, opt: ^Search_Opt, visited: ^Visited, dfa: ^Dfa, prefix: string, first: [4]u64, longest: bool, not_empty: bool, has_first: bool, calls_or_limits: bool, narrowed: bool, ecma: bool, linear: bool, }
 Scratch :: struct { stack: [dynamic]Entry, slots: [dynamic]int, counts: [dynamic]int, seen: [dynamic]u64, good: [dynamic]u64, log: [dynamic]u32, resumes: int, }
 Source :: struct { state: u64, }
 compile :: proc(pattern: string, flags: Flags, allocator := context.allocator) -> (re: Regex, err: string)
+refusal :: proc(pattern: string, flags: Flags, allocator := context.allocator) -> string
 sample :: proc(pattern: string, src: ^Source, extra, least: int, allocator := context.allocator) -> (text: string, ok: bool)
 search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch) -> (found: bool, err: string)
 valid :: proc(pattern: string, flags: Flags) -> bool

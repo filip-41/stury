@@ -22,6 +22,7 @@ plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, 
 			refuse_plan(&b, .No_Memory)
 		}
 		b.uses.allocator = arena
+		b.programs = make(rules.Programs, arena)
 	}
 	if d.root < 0 || int(d.root) >= len(d.nodes) {
 		refuse_plan(&b, .Bad_Option)
@@ -351,7 +352,7 @@ dynamic_target :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Inde
 // The `Meta.rule_set` of the leaf of `n` with `edge` added, 0 when it judges nothing.
 @(private)
 checked_leaf :: proc(b: ^Builder, n: ^rules.Node, edge: rules.Rules, arena: runtime.Allocator) -> i32 {
-	l, refused := rules.leaf_of(n, edge, arena)
+	l, refused := rules.leaf_of(n, edge, arena, &b.programs)
 	if refused != "" {
 		refuse_plan(b, .Unsupported, text = refused)
 		return 0
@@ -548,9 +549,12 @@ stamp_value :: proc(h: ^u64, v: core.Value) {
 			return
 		}
 		x := spell.decimal_of(digits)
-		stamp_mix(h, u64(x.neg) | u64(i64(x.point) if x.head != "" else 0) << 1)
+		stamp_mix(h, u64(x.neg) | u64(x.wide_neg) << 1)
+		stamp_mix(h, u64(x.point))
+		stamp_mix(h, u64(x.point >> 64))
 		stamp_text(h, x.head)
 		stamp_text(h, x.tail)
+		stamp_text(h, x.wide)
 	case .Array:
 		it := core.value_children(v)
 		for x in core.value_child_next(&it) {

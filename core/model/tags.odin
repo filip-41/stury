@@ -192,7 +192,7 @@ read_item :: proc(item: string, subject: Subject, member: bool, r: ^typed.Member
 @(private)
 unsatisfiable :: proc(r: rules.Rules, subject: Subject) -> bool {
 	past :: proc(low, high: string, exclusive: bool) -> bool {
-		order, _ := spell.decimal_compare(spell.decimal_of(low), spell.decimal_of(high))
+		order := spell.decimal_compare(spell.decimal_of(low), spell.decimal_of(high))
 		return order > 0 || order == 0 && exclusive
 	}
 	if r.minimum != "" && r.maximum != "" && past(r.minimum, r.maximum, r.exclusive_minimum || r.exclusive_maximum) {

@@ -90,6 +90,12 @@
 - A regex holds a run of plain characters as one node over the pattern's text, and a sequence of one element as that
   element, so a long literal, alternation or run of groups compiles in about jq's memory. A pattern of more than 32767
   groups fails with `Regex failure: too many captures`, as jq's does.
+- Numbers are equal, ordered and hashed by the exact decimal a literal spells, at any size, in the filter's `==`, `<`,
+  `sort`, `unique` and `group_by` as in the library. jq reads a literal past decNumber's range as its double, so it
+  calls `1e1000000000` and `1e1000000001` equal and `1e-2000000000` zero. A double that arithmetic made from a longer
+  literal, and an infinity, are no longer equal to a literal they round to.
+  A JSON5 decimal written with a sign or a point is compared by its digits, and a CSV or TSV cell is a string in these
+  comparisons.
 
 ### Library API
 
@@ -100,6 +106,14 @@
 - `schema.compare` tells whether one description takes every value another does, with a proof, a witness or the keyword
   the proof stopped at, and the changes between them. `core/diff` lists the changes between two values of any format.
   `core.write_steps` writes a path.
+- `core.equal`, `core.compare` and `core.hash` take a number literal at its exact decimal at any size, an exponent of
+  any width included, where they read one past decNumber's range as its double. `spell.Decimal` holds an exponent of more
+  than 30 digits in `wide` and `wide_neg`, with the shift of its digits in `point`, in place of `saturated`, and
+  `spell.write_point` writes the point either way. `core.compare` takes `read_plain`, false for a plain node that is to
+  stay a string. `spell.decimal_compare` has one result.
+- A schema `pattern` over a text too long for the regex's visited set gets an answer from the pattern's automaton, where
+  the check failed the text before. A schema compiles each distinct pattern once, and its read checks a pattern's syntax
+  without building the automaton. `regex.refusal` is that check.
 - `core.kind` of a CSV or TSV cell is the kind the cell reads as, in place of `.Plain`: an empty unquoted cell is
   `.Null`, as a typed read and the CLI read it, and with `infer` a boolean or number cell is `.True`, `.False` or
   `.Number`. A JSON write of a dsv document writes an empty cell as `null` without `infer` too. `core.resolve` is gone.

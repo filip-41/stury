@@ -567,15 +567,19 @@ put_number :: proc(w: ^Writer, name, text: string) {
 			return
 		}
 		spelled = int_text(int(n))
-	} else if d := spell.decimal_of(text); d.saturated || strings.trim_left(text, "0123456789+-.eE") != "" {
+	} else if d := spell.decimal_of(text); strings.trim_left(text, "0123456789+-.eE") != "" {
 		refuse(w, name)
 		return
 	} else if d.head == "" {
 		spelled = "0"
 	} else {
 		digits := strings.concatenate({d.head, d.tail}, context.temp_allocator)
-		exponent := int_text(int(d.point) - len(digits))
-		spelled = strings.concatenate({"-" if d.neg else "", digits, "e", exponent}, context.temp_allocator)
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_string(&b, "-" if d.neg else "")
+		strings.write_string(&b, digits)
+		strings.write_byte(&b, 'e')
+		spell.write_point(&b, d, -i128(len(digits)))
+		spelled = strings.to_string(b)
 	}
 	write.value_of(&w.t, &core.Number_Text{text = spelled})
 }

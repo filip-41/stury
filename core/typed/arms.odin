@@ -182,13 +182,13 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 		o := d.objects[n.object]
 		inline := n.object in b.inline
 		for x in o.patterns[:0 if inline else len(o.patterns)] {
-			re, err := regex.compile(x.expression, {ecma = true}, arena)
+			re, err := rules.program_of(&b.programs, x.expression, arena)
 			if err != "" {
 				refuse_plan(b, .Unsupported, text = "patternProperties")
 				return out[:], nil
 			}
 			if a := arm(b, d, arena, &out, .Pattern, x.node, core.Name("patternProperties"), core.Name(x.expression)); a != nil {
-				a.name, a.pattern = x.expression, new_clone(re, arena)
+				a.name, a.pattern = x.expression, re
 			}
 		}
 		if len(o.patterns) > 0 && !inline && o.additional != rules.NONE {
@@ -1390,8 +1390,7 @@ unique :: proc(doc: ^core.Document, allocator: runtime.Allocator) -> bool {
 // Whether the compiled `^regex.Regex` at `p` matches in `name`.
 @(private)
 matches :: proc(p: rawptr, name: string, scratch: ^regex.Scratch) -> bool {
-	caps: [2]int
-	found, err := regex.search((^regex.Regex)(p), name, 0, caps[:], scratch)
+	found, err := regex.search((^regex.Regex)(p), name, 0, nil, scratch)
 	return found && err == ""
 }
 

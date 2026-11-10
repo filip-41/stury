@@ -1035,17 +1035,28 @@ line and column in the stream, without a file's name.
 **Numbers**
 
 - A number is printed as it was written, where jq prints decNumber's canonical spelling (`1e3` and `1E+3`, `0.1e1` and
-  `1`, `12.5e-1147483647` and `1E-1146...`). Two literals are compared by value, as jq compares them (`1.0` equals
-  `1`, and `100000000000000000001` is above `100000000000000000000`).
-- `sort` over mixed number literals past a double's range, which jq compares in a way that depends on where each
-  starts, does not give jq's order:
+  `1`, `12.5e-1147483647` and `1E-1146...`).
+- Numbers are equal, ordered and hashed by the exact decimal a literal spells, at any size, as the library does (`1.0`
+  equals `1`, `-0` equals `0`, and `100000000000000000001` is above `100000000000000000000`). jq compares a literal
+  that way only within decNumber's range, an adjusted exponent from -1147483646 to 999999999, and reads one past it as
+  its double. In stury `1e1000000000` is below `1e1000000001`, `1e-2000000000` is above `0`, and `sort`, `unique` and
+  `group_by` tell them apart:
 
   ```
-  [1e1000000000,1e1000000001,1.7976931348623157e309,1e400] | sort
-  stury: [1e1000000000,1e1000000001,1.7976931348623157e309,1e400]
-  jq:    [1.7976931348623157E+309,1E+400,1.7976931348623157e+308,1.7976931348623157e+308]
+  [1e1000000000, 1e1000000001] | .[0] == .[1], (unique | length)
+  stury: false, 2
+  jq:    true, 1
   ```
 
+- A double is its shortest decimal, so the double that arithmetic made from a literal is another number when the
+  literal has more digits (`12345678901234567890123456789012345678901 | . == . + 0` is false, where jq says true), and an
+  infinity, which is no decimal, is above every literal (`infinite == 1e400` is false, `infinite > 1e400` true).
+- A JSON5 decimal written with a sign or a point of its own, `+1e400` or `.5e400`, is compared by its digits as the JSON
+  spelling is. A hex integer of up to 128 bits is compared by the decimal digits it prints
+  (`0x20000000000001` equals `9007199254740993`), and a longer one is compared as its double.
+- A CSV or TSV cell is a string in a comparison, as `type` says: `.a == 1e-400` is false for the cell `1e-400`, and
+  `[.a, 1e-400] | unique` has two members. The library's `core.compare` reads such a cell as the number, boolean or
+  null it is compared with unless it is called with `read_plain = false`, which the filter does.
 - An integer literal of 18 or more digits is rounded to the nearest double. jq 1.8.2 can be one unit in the last
   place off: `712598146987295425 + 0` is `712598146987295500` in stury and `712598146987295400` in jq, and
   `1287579022434948980 % 7` is 5 in stury and 2 in jq. Python's `float()` gives stury's values.

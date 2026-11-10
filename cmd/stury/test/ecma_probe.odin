@@ -1,5 +1,5 @@
 // ecma_diff.py's reader of ECMA patterns: a file of a JSON array of [pattern, text] pairs, and for each a line on stdout,
-// `E` for a pattern core/regex refuses, `-` for no match, or each group's start and length in code points with the
+// `E` for a pattern core/regex refuses, `W` where a search that reads no bounds answers otherwise, `-` for no match, or each group's start and length in code points with the
 // whole match first, -1 -1 for a group that did not take part.
 package main
 
@@ -36,6 +36,11 @@ main :: proc() {
 		found, search_err := regex.search(&re, c[1], 0, caps, &scratch)
 		if search_err != "" {
 			fmt.println("E", search_err)
+			continue
+		}
+		// A search that reads no bounds takes the automaton where there is one, and must find a match as this one does.
+		if whether, _ := regex.search(&re, c[1], 0, nil, &scratch); whether != found {
+			fmt.println("W")
 			continue
 		}
 		if !found {

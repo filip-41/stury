@@ -508,7 +508,7 @@ number :: proc(g: ^Gen, list: []^rules.Rules, whole: bool) -> (v: core.Value, ok
 	if lo > hi || lo == hi && (low_open || high_open) {
 		return
 	}
-	if step != "" {
+	if step != "" && !finer_than_doubles(step) {
 		return stepped(g, step, lo, hi, low_open, high_open, whole)
 	}
 	if whole {
@@ -525,6 +525,14 @@ number :: proc(g: ^Gen, list: []^rules.Rules, whole: bool) -> (v: core.Value, ok
 	return core.number_text(strings.clone(string(digits[:spell.f64_text(&digits[0], math.round(x * 100) / 100 if hi - lo >= 1 else x)]))), true
 }
 
+// Whether `step` is a power of ten below every double's decimal places, which every number spelled as a double is a
+// multiple of.
+@(private = "file")
+finer_than_doubles :: proc(step: string) -> bool {
+	d := spell.decimal_of(step)
+	return d.head == "1" && d.tail == "" && (d.wide_neg if d.wide != "" else d.point <= -339)
+}
+
 // A multiple of `step` between the bounds, spelled exactly: the digits of the step times a whole number, with its
 // exponent.
 @(private = "file")
@@ -532,10 +540,10 @@ stepped :: proc(g: ^Gen, step: string, lo, hi: f64, low_open, high_open, whole: 
 	d := spell.decimal_of(step)
 	digits := strings.concatenate({d.head, d.tail}, context.temp_allocator)
 	mantissa, parsed := strconv.parse_u64(digits)
-	if !parsed || mantissa == 0 || len(digits) > 18 || d.saturated {
+	if !parsed || mantissa == 0 || len(digits) > 18 || d.wide != "" {
 		return
 	}
-	exp := int(d.point) - len(digits)
+	exp := int(clamp(d.point - i128(len(digits)), -100_000, 100_000))
 	unit := f64(mantissa) * math.pow(10, f64(exp))
 	first, last := math.ceil(lo / unit), math.floor(hi / unit)
 	first += 1 if low_open && first * unit == lo else 0

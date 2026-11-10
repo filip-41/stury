@@ -881,6 +881,22 @@ schema_check_verdicts :: proc(t: ^testing.T) {
 		{`{"multipleOf": 0.123456789012345678901}`, `0.246913578024691357803`, false},
 		{`{"multipleOf": 3}`, `1e400`, false},
 		{`{"multipleOf": 2}`, `1e400`, true},
+		{`{"multipleOf": 1}`, `1e1000000000000000000000000000000`, true},
+		{`{"multipleOf": 3}`, `1e1000000000000000000000000000000`, false},
+		{`{"multipleOf": 1}`, `1e-1000000000000000000000000000000`, false},
+		{`{"multipleOf": 1180591620717411303424}`, `1e1000`, true},
+		{`{"multipleOf": 1180591620717411303424}`, `1e1000000000000000000000000000000`, true},
+		{`{"multipleOf": 1e-1000}`, `2`, true},
+		{`{"enum": [1e1000000000000000000000000000000]}`, `1e1000000000000000000000000000000`, true},
+		{`{"enum": [1e1000000000000000000000000000000]}`, `1e1000000000000000000000000000001`, false},
+		{`{"const": 1e1000000000000000000000000000000}`, `0.1e1000000000000000000000000000001`, true},
+		{`{"const": 1e1000000000000000000000000000000}`, `1e1000000000000000000000000000001`, false},
+		{`{"const": 1e9223372036854775807}`, `1e-9223372036854775809`, false},
+		{`{"const": 1e9223372036854775807}`, `1e9223372036854775807`, true},
+		{`{"minimum": 1e1000000000000000000000000000005}`, `1e1000000000000000000000000000006`, true},
+		{`{"minimum": 1e1000000000000000000000000000005}`, `1e1000000000000000000000000000004`, false},
+		{`{"type": "integer"}`, `1e1000000000000000000000000000000`, true},
+		{`{"type": "integer"}`, `1e-1000000000000000000000000000000`, false},
 		{`{"pattern": "^\\/[^\\*\\?\\&\\%]*(\\/\\*)?$"}`, `"/a/*"`, true},
 		{`{"pattern": "^\\/[^\\*\\?\\&\\%]*(\\/\\*)?$"}`, `"/a&"`, false},
 		{`{"propertyNames": {"maxLength": 3}, "required": ["a"]}`, `{"b": 1}`, false},
@@ -908,6 +924,20 @@ schema_check_verdicts :: proc(t: ^testing.T) {
 		from_text, from_node := schema.valid(&ch.bound, transmute([]u8)c.text), schema.check_node(&ch.bound, &doc, core.ROOT) == nil
 		testing.expectf(t, from_text == c.valid && from_node == c.valid, "%s on %s: text %v, node %v", c.schema, c.text, from_text, from_node)
 	}
+}
+
+// A bound with a wide exponent is read from the compiled schema after the temporary allocator is reused.
+@(test)
+a_wide_bound_outlives_the_temporary_allocator :: proc(t: ^testing.T) {
+	ch, err := checked_make(`{"minimum": 1e1000000000000000000000000000005}`)
+	defer checked_destroy(ch)
+	testing.expect(t, err == nil)
+	above := transmute([]u8)string("1e1000000000000000000000000000006")
+	testing.expect(t, schema.valid(&ch.bound, above))
+	free_all(context.temp_allocator)
+	_ = strings.repeat("9", 4096, context.temp_allocator)
+	testing.expect(t, schema.valid(&ch.bound, above))
+	testing.expect(t, !schema.valid(&ch.bound, transmute([]u8)string("1e1000000000000000000000000000004")))
 }
 
 // A schema the check cannot judge exactly is refused at bind, naming the keyword, and a bind of a compile that failed is

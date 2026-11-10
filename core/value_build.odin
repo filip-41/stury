@@ -217,7 +217,7 @@ spells_digits :: proc(f: f64, digits: string) -> bool {
 		return false
 	}
 	buf: [spell.F64_ROOM]u8
-	order, _ := spell.decimal_compare(spell.decimal_of(digits), spell.decimal_of(string(buf[:spell.f64_text(&buf[0], f)])))
+	order := spell.decimal_compare(spell.decimal_of(digits), spell.decimal_of(string(buf[:spell.f64_text(&buf[0], f)])))
 	return order == 0
 }
 

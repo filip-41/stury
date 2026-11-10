@@ -86,6 +86,7 @@ Regex :: struct {
 	slots:    int, // two per group with the whole match, then a mark per loop that can match empty
 	opt:      ^Search_Opt, // what Oniguruma's optimizer would have the search skip by, kept apart since a Regex is copied
 	visited:  ^Visited, // under `linear`, what the visited set needs of the program
+	dfa:      ^Dfa, // under `ecma`, the automaton that answers a search that reads no bounds, or nil (dfa.odin)
 	prefix:   string, // every match starts with these bytes
 	first:     [4]u64, // with has_first, the bytes a match can start with
 	longest:   bool, // ONIG_OPTION_FIND_LONGEST: the longest match of all, not the first
@@ -154,8 +155,29 @@ in_property :: proc(name: string, r: rune) -> bool {
 }
 
 // `pattern` compiled as jq compiles it, or Oniguruma's message for why not. The program, what it was built from and
-// any message are allocated from `allocator`, which is meant to be an arena the caller frees whole.
+// any message are allocated from `allocator`, which is meant to be an arena the caller frees whole. Under `ecma` the
+// build of the automaton borrows its working memory from `context.allocator` and frees it before returning.
 compile :: proc(pattern: string, flags: Flags, allocator := context.allocator) -> (re: Regex, err: string) {
+	scratch := context.allocator
+	if re, err = program(pattern, flags, allocator); err == "" && flags.ecma {
+		re.dfa = build_dfa(&re, allocator, scratch)
+	}
+	return
+}
+
+// Oniguruma's message for why `pattern` does not compile under `flags`, allocated from `allocator`, or "" when it does.
+// It builds no automaton and frees the program it made.
+refusal :: proc(pattern: string, flags: Flags, allocator := context.allocator) -> string {
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena, block_size = 4096, out_band_size = 1024)
+	defer mem.dynamic_arena_destroy(&arena)
+	_, err := program(pattern, flags, mem.dynamic_arena_allocator(&arena))
+	return strings.clone(err, allocator) if err != "" else ""
+}
+
+// `compile` without the automaton.
+@(private = "file")
+program :: proc(pattern: string, flags: Flags, allocator: mem.Allocator) -> (re: Regex, err: string) {
 	context.allocator = allocator
 	if flags.ecma && flags != {ecma = true} {
 		return {}, "ecma takes no other flag"

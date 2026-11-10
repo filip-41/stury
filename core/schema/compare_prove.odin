@@ -300,10 +300,7 @@ some :: proc(an: []^rules.Node, b: ^rules.Node, covers: proc(a, b: ^rules.Node) 
 
 @(private = "file")
 at_least :: proc(x, y: string, strict_x, strict_y, lower: bool) -> bool {
-	order, exact := spell.decimal_compare(spell.decimal_of(x), spell.decimal_of(y))
-	if !exact {
-		return false
-	}
+	order := spell.decimal_compare(spell.decimal_of(x), spell.decimal_of(y))
 	order = order if lower else -order
 	return order > 0 || order == 0 && (strict_x || !strict_y)
 }
@@ -328,7 +325,7 @@ facets_included :: proc(p: ^Prover, an, bn: []^rules.Node, ka: rules.Kinds, dept
 				return refuse(p, "maximum")
 			}
 			if r.multiple_of != "" {
-				order, _ := spell.decimal_compare(spell.decimal_of(r.multiple_of), spell.decimal_of("1"))
+				order := spell.decimal_compare(spell.decimal_of(r.multiple_of), spell.decimal_of("1"))
 				whole := .Number not_in ka && order == 0
 				if !whole && !some(an, b, proc(a, b: ^rules.Node) -> bool {
 						multiple, exact := spell.decimal_multiple_of(spell.decimal_of(a.rules.multiple_of), spell.decimal_of(b.rules.multiple_of))

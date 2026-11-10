@@ -19,13 +19,13 @@ MAX_DEPTH :: 10000
 @(thread_local)
 too_deep: bool
 
-// jq's jv_cmp, or with `eq` its jv_equal.
+// jq's jv_cmp, or with `eq` its jv_equal. A cell of a delimited text is a string, not read as a number or a boolean.
 compare :: #force_inline proc(a, b: Value, depth := 0, eq := false) -> int {
-	return core_pkg.compare(a, b, depth, eq, &too_deep, MAX_DEPTH)
+	return core_pkg.compare(a, b, depth, eq, &too_deep, MAX_DEPTH, read_plain = false)
 }
 
 compare_members :: #force_inline proc(a, b: []Member, depth: int, eq: bool) -> int {
-	return core_pkg.compare_members(a, b, depth, eq, &too_deep, MAX_DEPTH)
+	return core_pkg.compare_members(a, b, depth, eq, &too_deep, MAX_DEPTH, read_plain = false)
 }
 
 equal :: proc(a, b: Value) -> bool {

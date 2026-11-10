@@ -77,12 +77,12 @@ least :: proc(a, b: Maybe(u64)) -> Maybe(u64) {
 // Compiles node `n`'s rules with the rules `edge` of its use added, allocating with `allocator`. A pattern that does
 // not compile, an operand that is a container, and a `multipleOf` or `pattern` that both the node and the use set
 // to different values come back as the keyword the check does not judge.
-leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator) -> (l: Leaf, refused: string) {
+leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator, programs: ^Programs = nil) -> (l: Leaf, refused: string) {
 	r, clash := merged(n, edge)
 	if clash != "" {
 		return {}, clash
 	}
-	l, refused = rules_leaf(r, n.kinds, allocator)
+	l, refused = kept_leaf(r, n.kinds, allocator, programs)
 	l.integer_spelled = n.integer_spelled
 	if edge.assert_format {
 		l.formats += {format_of(edge.format)} - {.None}
@@ -146,11 +146,17 @@ operand_in :: proc(c: core.Value, operands: []core.Value, allocator: runtime.All
 // Compiles the rules `r` on a value of `kinds`, allocating a pattern with `allocator`. A pattern that does not compile
 // comes back as "pattern", and a divisor `spell.decimal_multiple_of` does not judge exactly as "multipleOf".
 rules_leaf :: proc(r: Rules, kinds: Kinds, allocator := context.allocator) -> (l: Leaf, refused: string) {
+	return kept_leaf(r, kinds, allocator, nil)
+}
+
+// `rules_leaf`, with the pattern taken from `programs` when it is there.
+@(private = "file")
+kept_leaf :: proc(r: Rules, kinds: Kinds, allocator: runtime.Allocator, programs: ^Programs) -> (l: Leaf, refused: string) {
 	l.kinds, l.plain = kinds, kinds
 	l.minimum, l.maximum = bound_of(r.minimum, r.exclusive_minimum), bound_of(r.maximum, r.exclusive_maximum)
 	if r.multiple_of != "" {
 		d := spell.decimal_of(r.multiple_of)
-		if d.saturated || len(d.head) + len(d.tail) > spell.LONG_DIVISOR_DIGITS {
+		if d.wide != "" || len(d.head) + len(d.tail) > spell.LONG_DIVISOR_DIGITS {
 			return l, "multipleOf"
 		}
 		l.multiple_of = d
@@ -163,11 +169,34 @@ rules_leaf :: proc(r: Rules, kinds: Kinds, allocator := context.allocator) -> (l
 		l.formats = {format_of(r.format)} - {.None}
 	}
 	if r.pattern != "" {
-		re, err := regex.compile(r.pattern, {ecma = true}, allocator)
-		if err != "" {
+		err: string
+		if l.pattern, err = program_of(programs, r.pattern, allocator); err != "" {
 			return l, "pattern"
 		}
-		l.pattern = new_clone(re, allocator)
+	}
+	return
+}
+
+// The compiled `^regex.Regex` of each ECMA expression a plan reads, by expression, so that each is compiled once
+// however many uses read it.
+Programs :: map[string]rawptr
+
+// The `^regex.Regex` of the ECMA expression `expression`, compiled into `allocator` and kept in `programs`, when it
+// is not nil, the first time it is asked for, or the message for why it does not compile. The build of its automaton
+// borrows from `context.allocator`, as `regex.compile` does.
+program_of :: proc(programs: ^Programs, expression: string, allocator: runtime.Allocator) -> (re: rawptr, err: string) {
+	if programs != nil {
+		if kept, seen := programs[expression]; seen {
+			return kept, ""
+		}
+	}
+	compiled: regex.Regex
+	if compiled, err = regex.compile(expression, {ecma = true}, allocator); err != "" {
+		return nil, err
+	}
+	re = new_clone(compiled, allocator)
+	if programs != nil {
+		programs[expression] = re
 	}
 	return
 }
@@ -189,8 +218,7 @@ judge_string :: proc(l: ^Leaf, text: string, scratch: ^regex.Scratch) -> (fails:
 		}
 	}
 	if l.pattern != nil {
-		caps: [2]int
-		if found, err := regex.search((^regex.Regex)(l.pattern), text, 0, caps[:], scratch); !found || err != "" {
+		if found, err := regex.search((^regex.Regex)(l.pattern), text, 0, nil, scratch); !found || err != "" {
 			fails += {.No_Match}
 		}
 	}
@@ -220,7 +248,7 @@ tighten :: proc(have: ^string, flag: ^bool, text: string, strict, lower: bool) {
 		return
 	}
 	if have^ != "" {
-		order, _ := spell.decimal_compare(spell.decimal_of(text), spell.decimal_of(have^))
+		order := spell.decimal_compare(spell.decimal_of(text), spell.decimal_of(have^))
 		if order == 0 {
 			flag^ = flag^ || strict
 			return
@@ -248,7 +276,7 @@ decimal_i64 :: proc(d: spell.Decimal) -> (v: i64, ok: bool) {
 	if d.head == "" {
 		return 0, true
 	}
-	if d.point < i128(digits) || d.point > 19 {
+	if d.wide != "" || d.point < i128(digits) || d.point > 19 {
 		return 0, false
 	}
 	m := u128(0)
@@ -268,6 +296,9 @@ decimal_i64 :: proc(d: spell.Decimal) -> (v: i64, ok: bool) {
 
 // Whether a number is an integer: zero, or a decimal with no digit past its point.
 integral :: proc(d: spell.Decimal) -> bool {
+	if d.wide != "" {
+		return !d.wide_neg
+	}
 	return d.head == "" || d.point >= i128(len(d.head) + len(d.tail))
 }
 
@@ -303,15 +334,14 @@ bound_order :: proc(b: Bound, small: i64, is_small: bool, d: spell.Decimal) -> i
 	if is_small && b.whole {
 		return -1 if small < b.int else (1 if small > b.int else 0)
 	}
-	order, _ := spell.decimal_compare(d, b.exact)
-	return order
+	return spell.decimal_compare(d, b.exact)
 }
 
-// Whether `x` is a whole multiple of `m`. A number whose exponent saturates is not judged exactly, and is no multiple.
+// Whether `x` is a whole multiple of `m`, a divisor `rules_leaf` took.
 @(private)
 multiple :: proc(x, m: spell.Decimal) -> bool {
-	whole, exact := spell.decimal_multiple_of(x, m)
-	return whole && exact
+	whole, _ := spell.decimal_multiple_of(x, m)
+	return whole
 }
 
 // The code points of the UTF-8 text `s`.
@@ -338,7 +368,11 @@ enum_key :: proc(b: ^strings.Builder, kind: core.Kind, text: string) {
 		strings.write_string(b, d.head)
 		strings.write_string(b, d.tail)
 		strings.write_byte(b, 'e')
-		strings.write_i64(b, i64(d.point) if d.head != "" else 0)
+		if d.head != "" {
+			spell.write_point(b, d)
+		} else {
+			strings.write_byte(b, '0')
+		}
 	case .True:
 		strings.write_byte(b, 't')
 	case .False:
@@ -388,7 +422,8 @@ operand_key :: proc(b: ^strings.Builder, v: core.Value, k: core.Kind, allocator 
 			text, _ = core.text(v, nil)
 		}
 	case .Number:
-		f, digits, _ := core.double_of(v)
+		hex: [core.HEX_ROOM]u8
+		f, digits, _ := core.double_of(v, hex[:])
 		text = digits
 		if digits == "" {
 			buf := make([]u8, spell.F64_ROOM, allocator)

@@ -1,7 +1,6 @@
 package typed
 
 import "base:runtime"
-import regex "../regex"
 import rules "../rules"
 import "core:mem"
 
@@ -326,15 +325,15 @@ inline_patterns :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 			continue
 		}
 		p := o.patterns[0]
-		re, err := regex.compile(p.expression, {ecma = true}, arena)
+		re, err := rules.program_of(&b.programs, p.expression, arena)
 		if err != "" {
 			continue
 		}
 		for m in o.members {
-			if matches(&re, m.name, &scratch) {
+			if matches(re, m.name, &scratch) {
 				continue objects
 			}
 		}
-		b.inline[i32(i)] = Inline_Pattern{p.expression, p.node, new_clone(re, arena)}
+		b.inline[i32(i)] = Inline_Pattern{p.expression, p.node, re}
 	}
 }

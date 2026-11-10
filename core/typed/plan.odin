@@ -389,6 +389,8 @@ Builder :: struct {
 	pairs:         map[[2]rules.Node_Index]rules.Node_Index,
 	// The objects whose one pattern their record reads.
 	inline:        map[i32]Inline_Pattern,
+	// The patterns compiled so far, which every use of one shares.
+	programs:      rules.Programs,
 }
 
 // An object's one pattern, which its record reads: the expression, the node a member it matches passes, and the

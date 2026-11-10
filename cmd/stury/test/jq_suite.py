@@ -617,11 +617,13 @@ def jq_args(args):
     return out
 
 # The jq.test cases whose input or `fromjson` text stury reads by its own grammar, not
-# jq's (docs/cli.md, "Differences from jq"): stury's exit status, its stdout, and how its stderr starts.
+# jq's, or whose numbers it compares by their exact decimals (docs/cli.md, "Differences from jq"): stury's exit status,
+# its stdout, and how its stderr starts.
 NON_FINITE = "Infinity and NaN have no JSON value"
 NAN_ERRORS = "".join(f'"{m} at line 1, column {c} (while parsing \'{t}\')"\n' for t, m, c in [("NaN", NON_FINITE, 1), ("-NaN", NON_FINITE, 2)] + [(f"NaN{n}", NON_FINITE, 1) for n in ("1", "10", "100", "1000", "10000", "100000")])
 DIFFERS = {
     ("jq.test", 1306): (5, "", "stury: parse error: Infinity and NaN have no JSON value at line 1, column 9\n"),  # Infinity, NaN
+    ("jq.test", 2241): (0, '[-9007199254740992,"-9007199254740992",false]\n[-9007199254740992,"-9007199254740992",true]\n[9007199254740992,"9007199254740992",true]\n[9007199254740992,"9007199254740992",false]\n[13911860366432392,"13911860366432392",false]\n', ""),  # a literal and the double it rounds to
     ("jq.test", 2315): (5, "", "stury: error (at <stdin>:1): Invalid literal at line 1, column 2 (while parsing 'nan')\n"),
     ("jq.test", 2319): (5, "", "stury: parse error: Invalid literal at line 1, column 7\n"),  # nan
     ("jq.test", 2324): (0, NAN_ERRORS, ""),

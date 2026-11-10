@@ -1,20 +1,24 @@
 package regex_tests
 
+import "core:mem"
 import "core:mem/virtual"
 import "core:strings"
 import "core:testing"
+import "core:time"
 import regex ".."
 
 // The first match of `pattern` in `text`, its span and group 1's (-1 for none), or the message of why there is none,
-// with the alternatives the search resumed. Under `ecma` the pattern is ECMA's, otherwise jq's.
+// with the alternatives the search resumed. Under `ecma` the pattern is ECMA's, otherwise jq's. Under `whether` the
+// search reads no bounds, and the span is 0..0 for a match.
 Found :: struct {
 	lo, hi, g1, g1_end: int,
 	err:                string,
 	resumes:            int,
+	automaton:          bool, // the pattern has the automaton that answers a search reading no bounds
 }
 
-search :: proc(pattern, text: string, linear := true, flags := regex.Flags{ecma = true}) -> (f: Found) {
-	f = {-1, -1, -1, -1, "", 0}
+search :: proc(pattern, text: string, linear := true, flags := regex.Flags{ecma = true}, whether := false) -> (f: Found) {
+	f = {-1, -1, -1, -1, "", 0, false}
 	arena: virtual.Arena
 	if virtual.arena_init_growing(&arena) != nil {
 		f.err = "no memory"
@@ -27,15 +31,16 @@ search :: proc(pattern, text: string, linear := true, flags := regex.Flags{ecma 
 		return
 	}
 	re.linear &&= linear
+	f.automaton = re.dfa != nil
 	scratch: regex.Scratch
 	defer regex.scratch_destroy(&scratch)
 	caps: [4]int
 	found: bool
-	found, err = regex.search(&re, text, 0, caps[:min(4, 2 * len(re.names))], &scratch)
+	found, err = regex.search(&re, text, 0, caps[:0 if whether else min(4, 2 * len(re.names))], &scratch)
 	f.err, f.resumes = strings.clone(err, context.temp_allocator), scratch.resumes
 	if found {
 		f.lo, f.hi = caps[0], caps[1]
-		if len(re.names) > 1 {
+		if len(re.names) > 1 && !whether {
 			f.g1, f.g1_end = caps[2], caps[3]
 		}
 	}
@@ -277,4 +282,181 @@ test_ecma_visited_set_keeps_the_matches :: proc(t: ^testing.T) {
 		with.resumes, without.resumes = 0, 0
 		testing.expectf(t, with == without, "%q on %q: %v with the set, %v without", pattern, string(text), with, without)
 	}
+}
+
+// The automaton answers each of these on a long text in one pass, where a backtracker without the visited set takes a
+// power of the text's length.
+@(test)
+test_ecma_automaton_is_linear :: proc(t: ^testing.T) {
+	Case :: struct {
+		pattern, tail: string,
+		found:         bool,
+	}
+	cases := [?]Case {
+		{`^(a|a)*$`, "!", false},
+		{`^(a|a)*$`, "", true},
+		{`^a*a*a*b`, "c", false},
+		{`(a*)*b`, "c", false},
+		{`(a|aa)+$`, "!", false},
+		{`^(a+)+$`, "a", true},
+		{`^[^@]+@[^@]+\.[a-z]+$`, "@a.b.c.d!", false},
+		{`^(?:a|ab|b)*c`, "c", true},
+	}
+	text := strings.repeat("a", 200_000, context.temp_allocator)
+	for c in cases {
+		f := search(c.pattern, strings.concatenate({text, c.tail}, context.temp_allocator), whether = true)
+		testing.expectf(t, f.automaton && f.err == "" && (f.lo == 0) == c.found, "%q: automaton %v, %v %s", c.pattern, f.automaton, f.lo == 0, f.err)
+	}
+	// Look-ahead and `\b` leave a pattern to the visited set.
+	for pattern in ([?]string{`(?=a)b`, `(?!a*b)a`, `\ba`, `a\B`}) {
+		testing.expectf(t, !search(pattern, "a").automaton, "%q has an automaton", pattern)
+	}
+}
+
+// Building the automaton of each of these patterns stays within a bound on its working memory, on the bytes it moves
+// and on its time, frees its working memory before it returns and keeps the program and a table of at most a megabyte.
+@(test)
+test_ecma_automaton_build_is_bounded :: proc(t: ^testing.T) {
+	repeat :: proc(piece: string, n: int, sep := "") -> string {
+		b := strings.builder_make(context.temp_allocator)
+		for i in 0 ..< n {
+			strings.write_string(&b, sep if i > 0 else "")
+			strings.write_string(&b, piece)
+		}
+		return strings.to_string(b)
+	}
+	runes :: proc(first: rune, n, step: int, sep: string) -> string {
+		b := strings.builder_make(context.temp_allocator)
+		for i in 0 ..< n {
+			strings.write_string(&b, sep if i > 0 else "")
+			strings.write_rune(&b, first + rune(i * step))
+		}
+		return strings.to_string(b)
+	}
+	cut :: proc(piece: string) -> string {
+		return strings.concatenate({"[^", piece, "]"}, context.temp_allocator)
+	}
+	patterns := [?]string {
+		strings.concatenate({"^(?:[a-z]{0,1700}|", runes(0x100, 250, 1, "|"), ")$"}, context.temp_allocator),
+		strings.concatenate({"(a|b)*a(a|b){9}c|(?:", repeat("$", 300, "|"), ")", repeat("()", 20_000), "b"}, context.temp_allocator),
+		strings.concatenate({"(?:", runes(0x100, 2000, 1, "|"), ")", repeat("()", 20_000), "x"}, context.temp_allocator),
+		repeat(`\p{L}`, 1000),
+		repeat(`[\p{scx=Latn}\p{scx=Grek}\p{scx=Cyrl}\p{scx=Arab}\p{scx=Hani}\p{L}\p{N}\p{P}\p{S}\p{M}\p{Cn}]`, 500),
+		repeat(cut(runes(0x10000, 20_000, 2, "")), 5),
+		`^[a-j]{2046}$`,
+		`(a|b)*a(a|b){20}`,
+		`^[a-z]{0,1000}$`,
+	}
+	for pattern in patterns {
+		program, scratch: mem.Tracking_Allocator
+		arena: virtual.Arena
+		testing.expect(t, virtual.arena_init_growing(&arena) == nil)
+		defer virtual.arena_destroy(&arena)
+		mem.tracking_allocator_init(&program, virtual.arena_allocator(&arena))
+		defer mem.tracking_allocator_destroy(&program)
+		mem.tracking_allocator_init(&scratch, context.allocator)
+		defer mem.tracking_allocator_destroy(&scratch)
+		start := time.tick_now()
+		err: string
+		{
+			context.allocator = mem.tracking_allocator(&scratch)
+			_, err = regex.compile(pattern, {ecma = true}, mem.tracking_allocator(&program))
+		}
+		took := time.tick_since(start)
+		name := pattern[:min(len(pattern), 40)]
+		testing.expectf(t, err == "", "%q: %s", name, err)
+		testing.expectf(t, scratch.current_memory_allocated == 0, "%q keeps %d bytes of scratch", name, scratch.current_memory_allocated)
+		testing.expectf(t, scratch.peak_memory_allocated <= 8 << 20, "%q: %d bytes of scratch at once", name, scratch.peak_memory_allocated)
+		testing.expectf(t, scratch.total_memory_allocated <= 16 << 20, "%q: %d bytes of scratch in all", name, scratch.total_memory_allocated)
+		testing.expectf(t, program.current_memory_allocated <= i64(1 << 20 + 300 * len(pattern)), "%q keeps %d bytes", name, program.current_memory_allocated)
+		testing.expectf(t, took < 2 * time.Second, "%q compiles in %v", name, took)
+	}
+}
+
+// A search from past the end of the text finds nothing, with the automaton and without it.
+@(test)
+test_ecma_search_from_past_the_end :: proc(t: ^testing.T) {
+	arena: virtual.Arena
+	testing.expect(t, virtual.arena_init_growing(&arena) == nil)
+	defer virtual.arena_destroy(&arena)
+	scratch: regex.Scratch
+	defer regex.scratch_destroy(&scratch)
+	for pattern in ([?]string{`a*`, `$`, `(?=a)|`}) {
+		re, err := regex.compile(pattern, {ecma = true}, virtual.arena_allocator(&arena))
+		testing.expect(t, err == "")
+		for start in ([?]int{3, 5}) {
+			found: bool
+			found, err = regex.search(&re, "ab", start, nil, &scratch)
+			testing.expectf(t, !found && err == "", "%q from %d on \"ab\": %v %s", pattern, start, found, err)
+		}
+	}
+}
+
+// A pattern over `a`, `b`, `é` and `😀` drawn from `state`, of the instructions the automaton runs.
+generate_plain :: proc(b: ^strings.Builder, state: ^u64, depth: int) {
+	next :: proc(state: ^u64, n: int) -> int {
+		state^ = state^ * 6364136223846793005 + 1442695040888963407
+		return int(state^ >> 33) % n
+	}
+	for _ in 0 ..< 1 + next(state, 3) {
+		atoms := [?]string{"a", "b", "é", "😀", ".", "[^a]", "[a-cé]", "\\w", "\\d", "\\s", "\\p{L}", "\\P{Ll}", "[^\\p{Lu}b]", "ab", "aé"}
+		k := next(state, len(atoms) + 6)
+		repeatable := true
+		switch {
+		case k < len(atoms):
+			strings.write_string(b, atoms[k])
+		case k == len(atoms):
+			strings.write_string(b, "^" if next(state, 2) == 0 else "$")
+			repeatable = false
+		case depth == 0:
+			strings.write_string(b, "a")
+		case k < len(atoms) + 3:
+			strings.write_string(b, "(")
+			generate_plain(b, state, depth - 1)
+			strings.write_string(b, ")")
+		case:
+			strings.write_string(b, "(?:")
+			generate_plain(b, state, depth - 1)
+			strings.write_string(b, "|")
+			generate_plain(b, state, depth - 1)
+			strings.write_string(b, ")")
+		}
+		if repeatable {
+			quantifiers := [?]string{"", "", "", "*", "+", "?", "*?", "+?", "??", "{2}", "{1,3}", "{2,}", "{0,2}?", "{3}"}
+			strings.write_string(b, quantifiers[next(state, len(quantifiers))])
+		}
+	}
+}
+
+// The automaton finds a match exactly where the visited set's search does, on generated patterns and on texts of up to
+// ten characters, some of them not valid UTF-8.
+@(test)
+test_ecma_automaton_keeps_the_answers :: proc(t: ^testing.T) {
+	state := u64(20261110)
+	built := 0
+	pieces := [?]string{"a", "a", "b", "é", "😀", "A", "1", " ", "\n", "-", "\xff", "\x80"}
+	for i in 0 ..< 20000 {
+		b := strings.builder_make(context.temp_allocator)
+		if i % 2 == 0 {
+			generate_plain(&b, &state, 2)
+		} else {
+			generate(&b, &state, 2)
+		}
+		state = state * 6364136223846793005 + 1442695040888963407
+		text := strings.builder_make(context.temp_allocator)
+		for _ in 0 ..< int(state >> 33) % 11 {
+			state = state * 6364136223846793005 + 1442695040888963407
+			k := int(state >> 33) % len(pieces)
+			if k >= len(pieces) - 2 && state & 7 != 0 {
+				k = 0
+			}
+			strings.write_string(&text, pieces[k])
+		}
+		pattern := strings.to_string(b)
+		whether := search(pattern, strings.to_string(text), whether = true)
+		with := search(pattern, strings.to_string(text))
+		built += int(whether.automaton)
+		testing.expectf(t, whether.err == with.err && (whether.lo >= 0) == (with.lo >= 0), "%q on %q: %v whether, %v with the set", pattern, strings.to_string(text), whether, with)
+	}
+	testing.expectf(t, built > 8000, "%d of 20000 patterns have the automaton", built)
 }

@@ -37,6 +37,7 @@ unicode_escape :: #force_inline proc "contextless" (e: [^]u8, room: int) -> (r: 
 utf8_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: Fault_Kind)
 utf8_lax_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (spelled: [4]u8, size: int, q: [^]u8)
 utf8_subpart :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8
+write_point :: proc(b: ^strings.Builder, d: Decimal, offset: i128 = 0)
 # core/regex
 in_property :: proc(name: string, r: rune) -> bool
 random_below :: proc(s: ^Source, n: int) -> int
@@ -46,6 +47,7 @@ scratch_destroy :: proc(scratch: ^Scratch)
 AT_NO_BYTE :: bit_set[Fault_Kind]{.None, .No_Memory, .Bad_Option}
 COMMENT_ROLES :: bit_set[Role]{.Comment, .Comment_Inline, .Comment_Foot}
 FAULT_REACH :: 16
+HEX_ROOM :: 40
 INDEX_FROM :: 16
 MAX_PATHS :: 64
 Member :: struct { key: string, val: Value, }
@@ -67,8 +69,8 @@ built_value :: proc(r: Node_Ref, dups := Duplicates.Last, borrow := false) -> Va
 children_from :: proc(doc: ^Document, i: Node_Index, k: int) -> Child_Iter
 comment_spelling :: #force_inline proc "contextless" (lead, tail: u8) -> u16
 comment_tail :: #force_inline proc "contextless" (spelling: u16) -> u64
-compare_members :: proc(a, b: []Member, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH) -> int
-double_of :: proc(v: Value) -> (f: f64, digits: string, ok: bool)
+compare_members :: proc(a, b: []Member, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := true) -> int
+double_of :: proc(v: Value, buf: []u8 = nil) -> (f: f64, digits: string, ok: bool)
 element_of :: proc(doc: ^Document, c: Node_Index, k: int) -> (Node_Index, Presence)
 entry_code :: proc(e: Error_Entry) -> string
 fact_next :: proc(it: ^Fact_Iter) -> (body: string, ok: bool)
@@ -172,6 +174,7 @@ result_destroy :: proc(r: ^Result)
 EVERY_KIND :: Kinds{.Null, .Bool, .Integer, .Number, .String, .Array, .Object}
 Failures :: bit_set[core.Typed_Error_Kind; u64]
 NONE :: Node_Index(-1)
+Programs :: map[string]rawptr
 decimal_i64 :: proc(d: spell.Decimal) -> (v: i64, ok: bool)
 description_destroy :: proc(d: ^Description)
 enum_has :: proc(l: ^Leaf, kind: core.Kind, text: string) -> bool
@@ -180,8 +183,9 @@ integral :: proc(d: spell.Decimal) -> bool
 judge_count :: #force_inline proc "contextless" (n, low, high: u64) -> (fails: Failures)
 judge_number :: proc(l: ^Leaf, text: string, small: Maybe(i64)) -> (fails: Failures)
 judge_string :: proc(l: ^Leaf, text: string, scratch: ^regex.Scratch) -> (fails: Failures)
-leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator) -> (l: Leaf, refused: string)
+leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator, programs: ^Programs = nil) -> (l: Leaf, refused: string)
 merged :: proc(n: ^Node, edge: Rules) -> (r: Rules, refused: string)
+program_of :: proc(programs: ^Programs, expression: string, allocator: runtime.Allocator) -> (re: rawptr, err: string)
 ref_only :: proc(n: ^Node) -> bool
 rules_leaf :: proc(r: Rules, kinds: Kinds, allocator := context.allocator) -> (l: Leaf, refused: string)
 trivial :: proc(l: ^Leaf) -> bool

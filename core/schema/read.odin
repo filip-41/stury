@@ -637,7 +637,7 @@ bound :: proc(rl: ^rules.Rules, lower: bool, text: string, strict: bool) {
 		have, flag = &rl.minimum, &rl.exclusive_minimum
 	}
 	if have^ != "" {
-		order, _ := spell.decimal_compare(spell.decimal_of(text), spell.decimal_of(have^))
+		order := spell.decimal_compare(spell.decimal_of(text), spell.decimal_of(have^))
 		if order == 0 {
 			exclusive = exclusive || flag^
 		} else if (order > 0) != lower {
@@ -733,6 +733,9 @@ count_of :: proc(r: ^Reader, doc: ^core.Document, site: Site, name: string) -> (
 	text := number_of(r, doc, site, name) or_return
 	d := spell.decimal_of(text)
 	zeros := d.point - i128(len(d.head))
+	if d.wide != "" {
+		zeros = 1 if !d.wide_neg else -1
+	}
 	if d.neg || d.tail != "" || (d.head != "" && zeros < 0) {
 		fail(r, site, name, "must be a whole number, not below zero")
 		return
@@ -740,7 +743,7 @@ count_of :: proc(r: ^Reader, doc: ^core.Document, site: Site, name: string) -> (
 	if d.head == "" {
 		return 0, true
 	}
-	if zeros > 20 {
+	if zeros > 20 || d.wide != "" {
 		return max(u64), true
 	}
 	count, parsed := strconv.parse_u64(strings.concatenate({d.head, strings.repeat("0", int(zeros))}), 10)
@@ -834,8 +837,7 @@ members_of :: proc(r: ^Reader, sc: Scope, v: core.Node_Index, name: string) -> (
 // Why `expression` does not compile as the ECMA 262 expression a schema's patterns are, "" when it does.
 @(private)
 pattern_refusal :: proc(expression: string) -> string {
-	_, err := regex.compile(expression, {ecma = true})
-	return err
+	return regex.refusal(expression, {ecma = true}, context.temp_allocator)
 }
 
 // Refuses the read at `site`: `keyword` names the keyword and `why` says what its value is missing.

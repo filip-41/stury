@@ -70,12 +70,11 @@ evaluates :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, 
 		}
 		patterns := make([]rawptr, len(o.patterns), arena)
 		for x, i in o.patterns {
-			re, err := regex.compile(x.expression, {ecma = true}, arena)
-			if err != "" {
+			err: string
+			if patterns[i], err = rules.program_of(&b.programs, x.expression, arena); err != "" {
 				refuse_plan(b, .Unsupported, text = "patternProperties")
 				return e
 			}
-			patterns[i] = new_clone(re, arena)
 		}
 		e.names, e.patterns = names[:], patterns
 		e.members ||= o.additional != rules.NONE
