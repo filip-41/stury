@@ -592,6 +592,7 @@ Key_Rule :: struct { at: []core.Step, member: string, }
 Op :: enum u8 { Added, Removed, Changed, Fact, }
 Options :: struct { arrays: Arrays, keys: []Key_Rule, facts: bool, max_edits: int, }
 Result :: struct { changes: []Change, truncated: bool, unused_keys: []int, arena: virtual.Arena, }
+result_destroy :: proc(r: ^Result)
 values :: proc(a, b: core.Value, opts := Options{}) -> (r: Result, err: runtime.Allocator_Error)
 # core/rules
 Anchor :: struct { name: string, resource: Node_Index, node: Node_Index, }
@@ -722,3 +723,4 @@ sample :: proc(d: ^rules.Description, as: core.As, opts := Sample_Options{}, all
 unbind :: proc(b: ^Bound)
 valid :: proc(b: ^Bound, src: []u8, runner: ^core.Runner = nil, checker: ^typed.Checker = nil) -> bool
 write :: proc(d: ^rules.Description, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> (text: []u8, err: core.Error)
+write_odin :: proc(d: ^rules.Description, package_name: string, as: core.As, format_assert := false, allocator := context.allocator) -> (source: string, err: core.Error)

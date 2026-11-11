@@ -11,7 +11,7 @@ directory describe one part each: [document.md](document.md), [paths.md](paths.m
 
 - Odin `dev-2026-11` or later. The collection is named `stury` and points at this directory: `-collection:stury=.`.
   A program imports `stury:json`, `stury:dsv` or both. Those packages export the names of `stury:core`,
-  `stury:core/typed`, `stury:core/write`, `stury:core/records` and `stury:host` that a user calls.
+  `stury:core/typed`, `stury:core/write`, `stury:core/records`, `stury:core/schema` and `stury:host` that a user calls.
 - 64-bit little-endian targets: darwin and linux, on amd64 and arm64. The command line also builds on Windows.
 - On amd64 the floor is x86-64-v2. Long strings are scanned wider on processors that have AVX-512BW, chosen at run
   time.
@@ -26,6 +26,11 @@ directory describe one part each: [document.md](document.md), [paths.md](paths.m
 | `core` | what every format shares, and the interface a format's author or a run-time choice of format uses: `As`, `build` and `validate` over a handle |
 | `core/records` | NDJSON, RFC 7464 and CSV-style text as a sequence of records, reached as `records_check`, `records_open`, `records_open_stream`, `records_next`, `records_each` and the writer |
 | `core/typed` | plans and the options of a typed read |
+| `core/model` | models: rules on an Odin type, `load`, `validate`, `patch`, `dump`, problem documents and the schema of a model, imported as `model "stury:core/model"` |
+| `core/schema` | JSON Schema: `compile`, `bind` and `check`, reached from a format as `load_schema`, `bind_schema` and `check_schema`, and `infer`, `sample`, `compare`, `convert` and `write_odin` |
+| `core/rules` | the `Description` of the values a node allows, which an Odin type, a model, a JSON Schema and inference give, and the string formats |
+| `core/diff` | `values`, the changes between two values of any format |
+| `core/regex` | the regex engine: Oniguruma's syntax for jq's functions, ECMA-262's (`Flags.ecma`) for a schema's `pattern`, with Unicode 17.0 properties and case folds |
 | `host` | `Pool`, the threads that `records_each` borrows |
 
 A format is a `Spec` value passed to each call. `json.Spec` is `.Json`, `.Jsonc` or `.Json5`, and `dsv.Spec` is `.Csv`,
@@ -108,6 +113,9 @@ pattern and the text bound, is not a verdict: the check reports `pattern_undecid
 `schema.infer` takes in values (and `schema.infer_records` the records of a text, on a runner's threads) and
 `schema.inferred` gives the description they all pass, which `schema.write` writes as JSON Schema. `schema.sample(&d, as,
 {count = 3, seed = 1})` writes values that pass a description in the format `as`, and `invalid = true` values that fail it.
+`schema.write_odin(s.description, "user", json.as(.Json))` writes the Odin source of the types a model reads a
+description's values with, and a `register` procedure that adds the rules no tag holds, as `stury schema gen` writes them
+([cli.md](cli.md#schema)).
 
 ## Compare schemas and diff values
 

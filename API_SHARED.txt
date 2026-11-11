@@ -173,8 +173,6 @@ utf8_window :: #force_inline proc "contextless" (prev, v: V) -> V
 # core/compose
 push :: proc(d: ^[dynamic]$T, v: T) -> (int, bool)
 push_all :: proc(d: ^[dynamic]$T, vs: []T) -> (count: int, ok: bool)
-# core/diff
-result_destroy :: proc(r: ^Result)
 # core/rules
 EVERY_KIND :: Kinds{.Null, .Bool, .Integer, .Number, .String, .Array, .Object}
 FORMAT_PATTERNS := #partial [String_Format]string {
@@ -360,7 +358,6 @@ writer_take :: proc(wr: ^Writer) -> []u8
 # core/schema
 check_node :: proc(b: ^Bound, doc: ^core.Document, node: core.Node_Index, sink: ^typed.Sink = nil, readings: ^typed.Readings = nil) -> core.Error
 write_basic :: proc(t: ^write.Tokens, entries: []core.Error_Entry, uri: string, r := write.Report{}, bases: []rules.Base = nil) -> core.Typed_Error_Kind
-write_odin :: proc(d: ^rules.Description, package_name: string, as: core.As, format_assert := false, allocator := context.allocator) -> (source: string, err: core.Error)
 # core/model
 write_problem :: proc(t: ^write.Tokens, entries: []core.Error_Entry, p: Problem, r := write.Report{}) -> core.Typed_Error_Kind
 # json

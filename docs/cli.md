@@ -5,8 +5,12 @@ messages start with `stury:`, and parse errors are worded its own way ([Errors a
 codes](#errors-and-exit-codes)). On top of jq it:
 
 - validates JSON without running a filter (`stury check`);
+- checks each input against a JSON Schema and tells every failure (`check --schema`), and types a filter against
+  the schema of its inputs (`check --filter`);
 - writes each input back in the printer's layout, or transcodes it (`stury fmt`);
 - edits each input with a jq filter, keeping every byte the edit does not touch (`stury edit`);
+- tells what differs between two inputs, two schemas, or a schema and data (`stury diff`);
+- infers a schema from inputs, samples values from one, or writes the Odin types of one (`stury schema`);
 - reads and writes JSONC, NDJSON, CSV and TSV (`--from FORMAT`, `--to FORMAT`, [Formats](#formats));
 - reads input strictly, as RFC 8259 says ([Differences from jq](#differences-from-jq)).
 
@@ -28,6 +32,9 @@ stury diff [--from FORMAT] [--set|--position] [--key [PATH=]MEMBER]... [--facts]
 stury diff --old-schema FILE --new-schema FILE [--compat backward|forward|full] [--json]
 stury diff --old-schema FILE DATA | stury diff DATA --new-schema FILE
 stury diff --shape [--from FORMAT] OLD NEW
+stury schema infer [--from FORMAT] [--ranges] [FILE...]
+stury schema sample [--to FORMAT] [--count N] [--seed N] [--invalid] [--comments] [--schema-ref DIR] [--schema-draft D] SCHEMA
+stury schema gen [--package NAME] [--format-assert] [--schema-ref DIR] [--schema-draft D] SCHEMA
 stury -h | -V | --build-configuration
 ```
 
@@ -273,12 +280,15 @@ keyword path where it nests deepest. Whatever `--max-depth` allows, a value that
 compares whole fails as `Exceeds the depth limit` past 1024 levels, and so does a deep value whose subschemas apply
 arms such as `anyOf` at each level once their checks fill the stack the check is given.
 A `pattern` or `patternProperties` search that runs out of memory on a long string or name is told as `The pattern could not be decided on the string` and exits 2, not 1, since the input is neither valid nor failed. `not` never inverts it.
-The options need `--schema`, and `--schema` is `check`'s alone.
+Under `check` these options need `--schema`, which `check` and [`fmt`](#fmt) take.
 
 `stury check --filter FILTER --schema schema.json` types the filter against the schema of its inputs and reads no
 input. It refuses each step that no input the schema describes can take, on stderr as a compile error is told, and
 writes the JSON Schema that every output of the filter passes on stdout, shaped by the layout options. It exits 1 when
-it refused a step, else 0, and 3 when the filter does not compile.
+it refused a step, else 0, and 3 when the filter does not compile. The schema is written after a refusal too, as
+`--report basic` writes a failing input's report: it still describes what jq gives the filter at run time, null for a
+member the input lacks and no output for a step that fails (`false`), so the refusals judge the filter and the schema
+stays a true description of its outputs. A filter that does not compile writes nothing.
 
 - A member read by name (`.emial`, `.["emial"]`, `{emial}`, `getpath(["emial"])`) that no object of the schema
   describes is refused at the name, with the closest member it does describe: `"emial" is not a member of the object
