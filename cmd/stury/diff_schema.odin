@@ -10,6 +10,7 @@ import core "../../core"
 import "../../core/rules"
 import "../../core/write"
 import "../../core/schema"
+import dsv "../../dsv"
 import json "../../json"
 import "jq"
 import "message"
@@ -49,7 +50,7 @@ diff_schemas :: proc(cli: ^Cli, src: Source) -> ! {
 // Compares the descriptions `old` and `new` and tells the changes, then whether each side takes what the other writes.
 compare_report :: proc(cli: ^Cli, src: Source, old, new: ^rules.Description) -> ! {
 	d := &cli.diff
-	c, err := schema.compare(old, new, {as = src.as, reads = checks_of(src.as, src.spec == nil), format_assert = cli.schema.format_assert})
+	c, err := schema.compare(old, new, {as = src.as, reads = dsv.checks_for(src.as), format_assert = cli.schema.format_assert})
 	if err != nil {
 		out_of_memory()
 	}
@@ -161,7 +162,7 @@ diff_contract :: proc(o: ^Opts, cli: ^Cli, src: Source) -> ! {
 	case .Valid, .Invalid:
 	}
 	seen := infer_data(o, src, path, data)
-	c, err := schema.compare(sc.compiled.description, seen, {as = src.as, reads = checks_of(src.as, src.spec == nil), format_assert = cli.schema.format_assert})
+	c, err := schema.compare(sc.compiled.description, seen, {as = src.as, reads = dsv.checks_for(src.as), format_assert = cli.schema.format_assert})
 	if err != nil {
 		out_of_memory()
 	}

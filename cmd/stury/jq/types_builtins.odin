@@ -17,18 +17,18 @@ builtin_type :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> (Ty, bool) {
 		return type_of(t, n.args[i], dot, f)
 	}
 	kinds :: kinds_node
-	arity := len(n.args)
+	// A builtin the prelude calls is named by the call outside it.
+	named := t.site if t.site != nil else n
+	arity := len(named.args)
 	k, unknown := kinds_of(t, dot)
 	if b.takes != {} && !unknown && k != {} && k & closure(b.takes) == {} {
-		kind_refusal(t, n, "%s/%d takes %s, not %s", n.name, arity, kinds_text(b.takes), kinds_text(k))
+		kind_refusal(t, n, "%s/%d takes %s, not %s", named.name, arity, kinds_text(b.takes), kinds_text(k))
 	}
 	switch n.name {
 	case "select":
 		arg(t, n, 0, dot, f)
-		if kept, test := type_test(n.args[0]); test {
-			return restrict(t, dot, kept), true
-		}
-		return dot, true
+		kept, _ := narrowed(t, n.args[0], dot, f)
+		return kept, true
 	case "type":
 		return type_names(t, dot), true
 	case "length":
@@ -122,7 +122,7 @@ builtin_type :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> (Ty, bool) {
 	for a, i in n.args {
 		at := type_of(t, a, dot, f)
 		if ka, ua := kinds_of(t, at); i == 0 && b.arg_takes != {} && !ua && ka != {} && ka & closure(b.arg_takes) == {} && (n.name != "join" || k == {.Array} && pair_input(t, dot)) {
-			kind_refusal(t, a, "%s/%d takes %s as its argument, not %s", n.name, arity, kinds_text(b.arg_takes), kinds_text(ka))
+			kind_refusal(t, a, "%s/%d takes %s as its argument, not %s", named.name, arity, kinds_text(b.arg_takes), kinds_text(ka))
 		}
 	}
 	switch b.typed {

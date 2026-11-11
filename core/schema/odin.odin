@@ -21,7 +21,7 @@ import "../rules"
 // kinds a union, and a value of any kind `core.Value`. An `allOf` and a `$ref` beside other keywords are one value that
 // passes each. A rule where no tag stands makes a distinct type, and `not`, `if`, `contains`, `propertyNames`,
 // `patternProperties` and the dependents make a named type whose JSON Schema fragment of them, written in `as`, which is
-// JSON's, `register` adds with `model.register_schema`.
+// JSON's, `register` adds with `model.register_schema`. A member's scalar `default` is a `model.register_default` line.
 // Annotations are left out but for `description` and a format that does not assert, which are comments. A keyword no
 // model spells is refused as `.Unsupported`, naming it in `want.text`, at the path of the value. A package name that
 // is no Odin identifier, or that names a package a program holding the source imports, is refused as `.Bad_Option`.
@@ -54,8 +54,8 @@ write_odin :: proc(d: ^rules.Description, package_name: string, as: core.As, for
 	strings.write_string(&b, "// The types of a schema's values, written by stury's schema.write_odin.\npackage ")
 	strings.write_string(&b, package_name)
 	strings.write_string(&b, "\n\n")
-	if s.fragments {
-		s.imports += {.Core, .Json}
+	if s.fragments || s.defaults {
+		s.imports += {.Core, .Json} if s.fragments else {.Core}
 	} else {
 		strings.write_string(&b, "import \"base:runtime\"\n")
 	}
@@ -81,7 +81,7 @@ write_odin :: proc(d: ^rules.Description, package_name: string, as: core.As, for
 	}
 	strings.write_string(&b, "\n// Adds the rules of these types that their tags do not hold to `reg`, before `model.compile`.\n")
 	strings.write_string(&b, "register :: proc(reg: ^model.Registry) -> ")
-	strings.write_string(&b, "core.Error {\n" if s.fragments else "runtime.Allocator_Error {\n")
+	strings.write_string(&b, "core.Error {\n" if s.fragments || s.defaults else "runtime.Allocator_Error {\n")
 	strings.write_string(&b, strings.to_string(s.registers))
 	strings.write_string(&b, "\treturn nil\n}\n")
 	if s.fragments {
@@ -136,6 +136,8 @@ Source :: struct {
 	format_assert: bool,
 	// A judged type's fragment is written, which `register_fragment` adds.
 	fragments:     bool,
+	// A member's default is written, which `register` adds and which may refuse as a `core.Error`.
+	defaults:      bool,
 	decls:         [dynamic]Decl,
 	// The declaration of a node, or of one kind of a node of several kinds.
 	of_node:       map[Part]int,
@@ -869,7 +871,8 @@ first_keyword :: proc(r: rules.Rules) -> string {
 
 // An `i64`, or a `u64` where no bound is negative and one passes `i64`'s range, and `r` with its bounds as the least
 // and the greatest integer they take, left out where the type holds no other. A `multipleOf` of p/q in lowest terms
-// takes the integers that p divides. A bound past both types' range is refused.
+// takes the integers that p divides. A bound past both types' range is refused, and so are two bounds whose range
+// neither type holds whole. With one bound, the type holds what it can of the range.
 @(private = "file")
 integer_spelled :: proc(s: ^Source, r: rules.Rules) -> (type: string, out: rules.Rules) {
 	out = r
@@ -881,9 +884,9 @@ integer_spelled :: proc(s: ^Source, r: rules.Rules) -> (type: string, out: rules
 	least := i128(0) if wide else i128(min(i64))
 	most := i128(max(u64)) if wide else i128(max(i64))
 	switch {
-	case has_low && low > most:
+	case has_low && (low > most || has_high && low < least):
 		refuse(s, "exclusiveMinimum" if r.exclusive_minimum else "minimum")
-	case has_high && high < least:
+	case has_high && (high < least || has_low && high > most):
 		refuse(s, "exclusiveMaximum" if r.exclusive_maximum else "maximum")
 	}
 	if has_low && low > least {
@@ -1053,14 +1056,15 @@ object_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Part, r: rules.Rul
 	fields := make(map[string]bool)
 	n_unset := 0
 	for m in o.members {
-		if m.name == "" {
-			refuse(s, "properties")
-		}
 		if m.only_required && forbids {
 			refuse(s, "required")
 		}
 		node := other if m.only_required else m.node
 		append(&s.path, core.Name(m.name))
+		// A member named "" has no field name, and is refused at its own path.
+		if m.name == "" {
+			refuse(s, "properties")
+		}
 		field_type := spelled_as_is(m.name, true)
 		value := odin_type(s, node, strings.concatenate({name, "_", field_type if field_type != "" else "Member"}), false)
 		clash := ""
@@ -1092,6 +1096,9 @@ object_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Part, r: rules.Rul
 		n_unset += int(unset)
 		member_tag(s, &b, name, m, field, value.rules, (absent || strings.has_prefix(t, "^")) && !takes_null(s, node), absent, unset)
 		strings.write_string(&b, ",\n")
+		if !m.required {
+			default_spelled(s, name, field, node, value)
+		}
 	}
 	if n_unset > 0 {
 		if len(o.members) > 128 {
@@ -1120,6 +1127,98 @@ object_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Part, r: rules.Rul
 		strings.write_string(&s.registers, ", .Forbid) or_return\n")
 	}
 	return {type = name, decl = k}
+}
+
+// Adds to `register` the `default` of node `at`, the value of member `field` of `owner`, which `v` spells: a string, a
+// number or a boolean of a member whose type is that scalar. A null default is the zero of the optional member, and any
+// other default, which no literal of the member's type holds, is refused.
+@(private = "file")
+default_spelled :: proc(s: ^Source, owner, field: string, at: rules.Node_Index, v: Spelled) {
+	x, has := s.d.nodes[at].default_of.?
+	if !has {
+		if found := target(s, at); found != rules.NONE {
+			x, has = s.d.nodes[found].default_of.?
+		}
+	}
+	kind := core.value_kind(x)
+	if !has || kind == .Null {
+		return
+	}
+	base := v.type
+	if v.decl >= 0 {
+		base = strings.trim_space(strings.trim_prefix(s.decls[v.decl].text, strings.concatenate({v.type, " :: distinct "})))
+	}
+	b := strings.builder_make()
+	x = core.plain(x)
+	#partial switch kind {
+	case .String:
+		if base != "string" && base != "model.Email" {
+			refuse(s, "default")
+			return
+		}
+		node, is_node := x.(core.Node_Ref)
+		strings.write_string(&b, v.type)
+		strings.write_byte(&b, '(')
+		literal(&b, core.node_string(node.doc, node.node) if is_node else x.(string) or_else "")
+		strings.write_byte(&b, ')')
+	case .Number:
+		text, held := default_number(x, base)
+		if !held {
+			refuse(s, "default")
+			return
+		}
+		strings.write_string(&b, v.type)
+		strings.write_byte(&b, '(')
+		strings.write_string(&b, text)
+		strings.write_byte(&b, ')')
+	case .True, .False:
+		if base != "bool" {
+			refuse(s, "default")
+			return
+		}
+		strings.write_string(&b, v.type)
+		strings.write_string(&b, "(true)" if kind == .True else "(false)")
+	case:
+		refuse(s, "default")
+		return
+	}
+	s.defaults = true
+	strings.write_string(&s.registers, "\tmodel.register_default(reg, ")
+	strings.write_string(&s.registers, owner)
+	strings.write_string(&s.registers, ", ")
+	strings.write_quoted_string(&s.registers, field)
+	strings.write_string(&s.registers, ", ")
+	strings.write_string(&s.registers, strings.to_string(b))
+	strings.write_string(&s.registers, ") or_return\n")
+}
+
+// The Odin literal of the number `x` as a value of the number type `base`, and whether `base` holds it: an integer of
+// the type's range, or for `f64` any number a double holds.
+@(private = "file")
+default_number :: proc(x: core.Value, base: string) -> (string, bool) {
+	text := ""
+	#partial switch v in x {
+	case core.Node_Ref:
+		text = string(core.span(v.doc, v.node))
+	case ^core.Number_Text:
+		text = v.text
+	case f64:
+		digits: [spell.F64_ROOM]u8
+		text = strings.clone(string(digits[:spell.f64_text(&digits[0], v)]))
+	}
+	text, _ = strings.replace_all(text, "E", "e")
+	n, _ := core.number(x)
+	switch base {
+	case "f64":
+		return text, n.kind != .Wide
+	case "i64", "u64":
+		whole, set := whole_bound(text, false, true)
+		least := i128(0) if base == "u64" else i128(min(i64))
+		most := i128(max(u64)) if base == "u64" else i128(max(i64))
+		floor, _ := whole_bound(text, false, false)
+		return whole_text(whole), set && floor == whole && whole >= least && whole <= most
+	}
+	return "", false
 }
 
 // The tag of member `m`: its JSON name where the field's differs, `omitempty` where a write leaves it out when nil,

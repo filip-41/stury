@@ -366,6 +366,12 @@ os.stat(inplace).st_mode & 0o777 == 0o640 or fail("fmt_in_place_mode", oct(os.st
 deep = file("inplace.deep.json", open(caps["deep1100"]).read())
 check("fmt_in_place_deep", 5, "", "fmt", "--in-place", deep)
 open(deep).read() == open(caps["deep1100"]).read() or fail("fmt_in_place_deep_untouched", "")
+# fmt --schema leaves a file with a failure as it was, whole or a record of it, as it does a fault.
+rule = file("inplace.schema.json", '{"type":"object","properties":{"n":{"type":"integer"}}}')
+for name, held, args in (("whole", '{"n":"x"}', []), ("record", '{"n":1}\n{"n":"x"}\n', ["--from", "ndjson"])):
+    failing = file(f"inplace.{name}.json", held)
+    check(f"fmt_schema_in_place_{name}", 1, "", "fmt", "--schema", rule, *args, "--in-place", failing)
+    open(failing).read() == held or fail(f"fmt_schema_in_place_{name}_untouched", open(failing).read())
 # A bare name's temporary file goes beside it, not to TMPDIR, which may be another device.
 file("bare.json", '{"a":1}')
 subprocess.run([S, "fmt", "--in-place", "bare.json"], cwd=T, env={**os.environ, "TMPDIR": os.path.join(T, "absent")}).returncode == 0 or fail("fmt_in_place_bare_name", "")

@@ -11,8 +11,8 @@ import typed "../typed"
 
 // The rules of the models compiled from it: how members are named, the rules of types and of members beside their
 // `model:` tags, members' defaults, and the structs that forbid members they do not name. It owns copies of what it is
-// given. `destroy` frees it, which leaves the models compiled from it as they are, except that a model's loads take
-// the registry's default constants: destroy the registry after its models.
+// given, and a model copies what it keeps of them, so `destroy` frees the registry and leaves the models compiled from
+// it as they are.
 Registry :: struct {
 	naming: Naming,
 	types:  [dynamic]Type_Rule,
@@ -41,8 +41,9 @@ Naming :: struct {
 Loads :: struct {
 	defaults: [dynamic]Default_Of,
 	forbids:  [dynamic]typeid,
-	// The memory of the constants `defaults` holds and of the fragments `schemas` holds.
-	constants: virtual.Arena,
+	// The memory of the texts the registry copies, of the constants `defaults` holds and of the fragments `schemas`
+	// holds.
+	memory:   virtual.Arena,
 }
 
 @(private)
@@ -95,34 +96,27 @@ register :: proc {
 
 // Sets how models compiled from `reg` spell names, in place of an earlier call's.
 register_naming :: proc(reg: ^Registry, naming: Naming) -> runtime.Allocator_Error {
-	union_tag := strings.clone(naming.union_tag) or_return
-	delete(reg.naming.union_tag)
+	union_tag := kept(reg, naming.union_tag) or_return
 	reg.naming = naming
 	reg.naming.union_tag = union_tag
 	return nil
 }
 
 register_type :: proc(reg: ^Registry, rule: Type_Rule) -> runtime.Allocator_Error {
-	tag := strings.clone(rule.tag) or_return
-	if _, err := append(&reg.types, Type_Rule{rule.type, tag}); err != nil {
-		delete(tag)
-		return err
-	}
-	return nil
+	_, err := append(&reg.types, Type_Rule{rule.type, kept(reg, rule.tag) or_return})
+	return err
 }
 
 // Adds the rules of a member. A struct with no such member is refused by `compile`, not here.
 register_field :: proc(reg: ^Registry, rule: Field_Rule_Of) -> runtime.Allocator_Error {
-	field := strings.clone(rule.field) or_return
-	tag, err := strings.clone(rule.tag)
-	if err == nil {
-		_, err = append(&reg.fields, Field_Rule_Of{rule.type, field, tag})
-	}
-	if err != nil {
-		delete(field)
-		delete(tag)
-	}
+	_, err := append(&reg.fields, Field_Rule_Of{rule.type, kept(reg, rule.field) or_return, kept(reg, rule.tag) or_return})
 	return err
+}
+
+// A copy of `text` in the registry's memory.
+@(private)
+kept :: proc(reg: ^Registry, text: string) -> (string, runtime.Allocator_Error) {
+	return strings.clone(text, virtual.arena_allocator(&reg.loads.memory))
 }
 
 // Makes `value` the default of member `field` of `T`. The load of a text that leaves the member out gives it a copy of
@@ -168,12 +162,9 @@ has_member :: proc(T: typeid, field: string, V: typeid) -> bool {
 @(private)
 add_default :: proc(reg: ^Registry, d: Default_Of) -> runtime.Allocator_Error {
 	d := d
-	d.field = strings.clone(d.field) or_return
-	if _, err := append(&reg.loads.defaults, d); err != nil {
-		delete(d.field)
-		return err
-	}
-	return nil
+	d.field = kept(reg, d.field) or_return
+	_, err := append(&reg.loads.defaults, d)
+	return err
 }
 
 // Sets what loads of `T` do with members it does not name, in place of what an earlier call set.
@@ -202,6 +193,8 @@ Model :: struct($T: typeid) {
 	customs:   []Custom_Of,
 	// The judged types the model holds and their check plans, which only this package reads, nil for none.
 	judging:   ^Applied,
+	// The memory of the default constants the model copied from its registry.
+	constants: virtual.Arena,
 }
 
 // Compiles `T`'s model from `reg`, nil for a plain type, for the format and layout `checks` names, as
@@ -219,16 +212,20 @@ compile :: proc(reg: ^Registry, $T: typeid, checks: typed.Format_Checks, allocat
 	hooks: []typed.Type_Hook
 	m.customs, hooks, err = carriers_of(reg, reads, allocator)
 	defer delete(hooks, allocator)
+	defaults: []Default_Of
 	if err == nil {
-		m.plan, err = plan_of(reg, T, reads, allocator, nil, nil, layout, hooks)
+		defaults, err = copied_defaults(reg, &m.constants)
+	}
+	if err == nil {
+		m.plan, err = plan_of(reg, T, reads, allocator, nil, nil, layout, hooks, defaults)
 	}
 	if err == nil {
 		judging: ^Applied
-		judging, err = judging_of(reg, &m.plan, reads, allocator, layout, hooks)
+		judging, err = judging_of(reg, &m.plan, reads, allocator, layout, hooks, defaults)
 		m.judging = judging
 	}
 	if err == nil {
-		m.load_plan, err = plan_of(reg, T, reads, allocator, .Read_Only, &m.plan, layout, hooks, m.judging)
+		m.load_plan, err = plan_of(reg, T, reads, allocator, .Read_Only, &m.plan, layout, hooks, defaults, m.judging)
 	}
 	if err == nil {
 		err = carrier_plans(&m, reads, hooks[:len(hooks) - len(m.customs)], allocator)
@@ -243,12 +240,12 @@ compile :: proc(reg: ^Registry, $T: typeid, checks: typed.Format_Checks, allocat
 
 // The plan of `T` with `reg`'s rules, read with `reads`.
 @(private)
-plan_of :: proc(reg: ^Registry, T: typeid, reads: ^typed.Format_Reads, allocator: runtime.Allocator, without: Maybe(typed.Access), whole: ^typed.Plan, layout: Maybe(core.As), hooks: []typed.Type_Hook, judging: ^Applied = nil) -> (typed.Plan, core.Error) {
+plan_of :: proc(reg: ^Registry, T: typeid, reads: ^typed.Format_Reads, allocator: runtime.Allocator, without: Maybe(typed.Access), whole: ^typed.Plan, layout: Maybe(core.As), hooks: []typed.Type_Hook, defaults: []Default_Of, judging: ^Applied = nil) -> (typed.Plan, core.Error) {
 	if reads == nil || reads.plan == nil {
 		return {}, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
 	none: Registry
-	c := Compiling{model = {member = member_rule, forbids = forbids, compile = rules.rules_leaf, structs = typed.load_struct, validators = validators_of, enum_names = enum_names, unions = unions}, reg = reg if reg != nil else &none, without = without, judging = judging}
+	c := Compiling{model = {member = member_rule, forbids = forbids, compile = rules.rules_leaf, structs = typed.load_struct, validators = validators_of, enum_names = enum_names, unions = unions}, reg = reg if reg != nil else &none, without = without, judging = judging, defaults = defaults}
 	if judging != nil {
 		c.model.judge = judge_plan
 	}
@@ -287,23 +284,6 @@ destroy :: proc {
 }
 
 registry_destroy :: proc(reg: ^Registry) {
-	delete(reg.naming.union_tag)
-	for x in reg.types {
-		delete(x.tag)
-	}
-	for x in reg.fields {
-		delete(x.field)
-		delete(x.tag)
-	}
-	for x in reg.loads.defaults {
-		delete(x.field)
-	}
-	for x in reg.validators {
-		delete(x.field)
-	}
-	for x in reg.befores {
-		delete(x.field)
-	}
 	delete(reg.validators)
 	delete(reg.befores)
 	delete(reg.types)
@@ -311,22 +291,16 @@ registry_destroy :: proc(reg: ^Registry) {
 	delete(reg.loads.defaults)
 	delete(reg.loads.forbids)
 	delete(reg.customs)
-	for x in reg.enums {
-		enum_rule_destroy(x)
-	}
 	delete(reg.enums)
-	for x in reg.unions {
-		delete(x.tag)
-	}
 	delete(reg.unions)
 	delete(reg.schemas)
-	virtual.arena_destroy(&reg.loads.constants)
+	virtual.arena_destroy(&reg.loads.memory)
 	reg^ = {}
 }
 
 model_destroy :: proc(m: ^Model($T)) {
 	// The load plan's leaves are the other plan's.
-	if raw_data(m.load_plan.leaves) == raw_data(m.plan.leaves) {
+	if m.load_plan.ext != nil && len(m.load_plan.leaves) > 0 && raw_data(m.load_plan.leaves) == raw_data(m.plan.leaves) {
 		m.load_plan.leaves = nil
 	}
 	typed.plan_destroy(&m.load_plan)
@@ -337,14 +311,16 @@ model_destroy :: proc(m: ^Model($T)) {
 	delete(m.customs)
 	judging_destroy(m.judging)
 	m.judging = nil
+	virtual.arena_destroy(&m.constants)
 }
 
 @(private)
 Compiling :: struct {
-	model:   typed.Model_Rules,
-	reg:     ^Registry,
-	without: Maybe(typed.Access), // the access whose members this plan leaves out
-	judging: ^Applied,
+	model:    typed.Model_Rules,
+	reg:      ^Registry,
+	without:  Maybe(typed.Access), // the access whose members this plan leaves out
+	judging:  ^Applied,
+	defaults: []Default_Of, // the registry's, each constant the model's copy
 }
 
 // The rules of a member, or with `owner` nil of a value no member holds: the rules of its type and of the types its
@@ -372,7 +348,7 @@ member_rule :: proc(h: ^typed.Model_Rules, owner: typeid, field: string, type: t
 			return
 		}
 	}
-	for x in c.reg.loads.defaults {
+	for x in c.defaults {
 		if x.type == owner && x.field == field {
 			r.make, r.data = x.make, x.data
 		}
@@ -418,7 +394,7 @@ held :: proc(ti: ^runtime.Type_Info) -> ^runtime.Type_Info {
 
 // Adds hook `x` to `list`, under `replace` in the place of the one of the same struct and member, which keeps its name.
 @(private)
-add_hook :: proc(list: ^[dynamic]$X, x: X, replace: bool) -> runtime.Allocator_Error {
+add_hook :: proc(reg: ^Registry, list: ^[dynamic]$X, x: X, replace: bool) -> runtime.Allocator_Error {
 	if replace {
 		for &y in list {
 			if y.type == x.type && y.field == x.field {
@@ -430,10 +406,7 @@ add_hook :: proc(list: ^[dynamic]$X, x: X, replace: bool) -> runtime.Allocator_E
 		}
 	}
 	x := x
-	x.field = strings.clone(x.field) or_return
-	if _, err := append(list, x); err != nil {
-		delete(x.field)
-		return err
-	}
-	return nil
+	x.field = kept(reg, x.field) or_return
+	_, err := append(list, x)
+	return err
 }

@@ -31,6 +31,9 @@ stury diff --shape [--from FORMAT] OLD NEW
 stury -h | -V | --build-configuration
 ```
 
+An option only some commands take, such as `--report`, `--count` or `--diff`, is a usage error with any other, which
+names the commands that take it and what it does.
+
 ## Quick examples
 
 ```sh
@@ -246,7 +249,9 @@ Exit codes: 0 on success, 5 when any input is invalid, 2 for a usage or file err
 
 `stury check --schema schema.json [FILE...]` reads, compiles and binds the schema once, then judges each input as
 `stury check` does and, if it parses, against the schema. Every failure of an input is told, not only the first, as
-`FILE:LINE:COL: MESSAGE at PATH (KEYWORD-PATH)` on stderr. A text that does not parse is the plain `check`'s fault,
+`FILE:LINE:COL: MESSAGE at PATH (KEYWORD-PATH)` on stderr, the message naming the bound a value misses or the types it
+may have (`Number is below the minimum, at least 0`, `expected null or string`). A quoted CSV cell is placed at its
+opening quote. A text that does not parse is the plain `check`'s fault,
 told as it tells it. NDJSON and `--seq` check each record; a long file, or an array at the root whose rules apply to each
 entry, is checked on all cores and tells what a serial check tells. With `--from csv` or `tsv` the schema describes the
 table, an array of its rows, so `{"type":"array","items":{...}}` judges each row and `minItems` counts them. When the last NDJSON record is cut, the earlier records' failures are told
@@ -258,7 +263,7 @@ before the fault, and the exit is 5.
 | `--schema-draft D` | The draft of a schema with no `$schema`: `4`, `6`, `7`, `2019-09` or `2020-12`, the default. A `$schema` names the draft of its schema whatever this says. |
 | `--format-assert` | `format` fails an input, where it otherwise only annotates. |
 | `--max-errors N` | Keep at most `N` failures of an input (default 100). The basic output and the problem document say `"truncated": true` when more were left out, and the lines end with `NAME: more failures past --max-errors N`. |
-| `--report basic` | Write the JSON Schema basic output of each input on stdout, one line a file that is read (a file that faults or does not open has none), `{"file":NAME,"valid":true}` for a valid one. Each line starts with a `file` member naming its file, and each error unit has `"valid":false`. `keywordLocation`, `absoluteKeywordLocation` (where the schema has an `$id` and the keywords did not pass a `$ref`) and `instanceLocation` are JSON Pointers; with records, a `record` member holds the record's index and the instance location is a pointer into that record. |
+| `--report basic` | Write the JSON Schema basic output of each input on stdout, one line a file that is read (a file that does not open, or faults before any failure, has none), `{"file":NAME,"valid":true}` for a valid one. Each line starts with a `file` member naming its file, and each error unit has `"valid":false`. `keywordLocation`, `absoluteKeywordLocation` (where the schema has an `$id` and the keywords did not pass a `$ref`) and `instanceLocation` are JSON Pointers. A location that passed a `$ref` has no `absoluteKeywordLocation`, which 2020-12 asks for: the compiled schema keeps the place of each keyword in its own schema, not the resource a reference reached, and keeping both would cost every check a second path; with records, a `record` member holds the record's index and the instance location is a pointer into that record. |
 | `--report problem` | Write an RFC 9457 problem document of each failing input on stdout, and nothing for a valid one: `title`, `status` 422 and `errors` of `pointer`, `code` and `message`, and a `record` member in an error of a record input. A missing member is named in its message, and its pointer is the member's. The document starts with a `file` member. |
 | `--report lines` | The default. |
 
@@ -290,12 +295,13 @@ it refused a step, else 0, and 3 when the filter does not compile.
   whose path may be `.` gives what it writes, and arithmetic that may give NaN adds null, as jq writes NaN.
 - `-n` types the filter on null, `-s` on an array of the inputs, `-R` on strings, and `--arg` and `--argjson`
   variables are their values. `input` and `inputs` read what the schema describes.
-- `--from csv` or `tsv` types the filter on the records a table reads: an object of the schema's member names, each
-  a string or null, and under `--infer` a number or a boolean too, or under `--no-header` an array of them. The other
+- `--from csv` or `tsv` types the filter on the records a table reads, the row the table schema's `items` describes (as
+  `check --schema` takes it): an object of its member names, a name it does not describe refused, each a string or null, and under `--infer` a number or a boolean too, or under `--no-header` an array of them. The other
   formats read JSON values, which the schema describes.
 
 FILE operands, `--seq`, `--report` and `--max-errors` are usage errors with `--filter`, as are the options that
-shape a filter run's output (`-r`, `-e`, `--stream`, ...).
+shape a filter run's output (`-r`, `-e`, `--stream`, ...). Under `--from csv` or `tsv` a schema that describes no
+array of rows is a usage error, as no table passes it.
 
 ## `schema`
 
@@ -305,16 +311,21 @@ no enum, format or bound appears. An object with more than 64 names, or with nam
 is a map: `additionalProperties` and no members. A table's schema is an array of row objects, and an empty cell is a
 `null`, so its column is required and its type holds `null`. `--ranges` also keeps the least and greatest number, string length and array length (not a table's row
 count). Members come in the order they first appear. Long files are read on all cores and give the description one
-thread gives, and a record that does not read is exit 5. The layout options (`-c`, `--indent`, `--tab`, `-S`, `-a`) shape
+thread gives, and a record that does not read is exit 5, as is an empty input and an input whose schema would nest past
+the depth a JSON text may have (each object level is two in its schema). The layout options (`-c`, `--indent`, `--tab`, `-S`, `-a`) shape
 the schema's text.
 
 `stury schema sample SCHEMA` writes values that pass the schema, a text a line, in the format `--to` names (CSV and TSV
 texts are a table each). `--count N` (default 1) and `--seed N` choose how many and which. `--invalid` writes values
 that fail the schema, each a valid one changed in one place. `--comments` writes a node's `description` as a comment
 where the format has comments (`--to jsonc`). Each value is a line, compact unless a layout option asks for more, and a
-CSV or TSV value is a table, so those take `--count 1`. A schema that no value passes is exit 1 and names the keyword
-path of the node the search stopped at. `schema sample` and `schema gen` read a schema with no `$schema` in the
-draft `--schema-draft` names, as `check` does.
+CSV or TSV value is a table, so those take `--count 1`. A schema for which the bounded search finds no passing value
+is exit 1 and names the keyword path of the node the search stopped at, and under `--invalid` one for which it finds
+no failing value is. Under `--to csv` or
+`tsv`, `--infer` reads the sample's cells as `check --infer` does, so a column of numbers or booleans can be written,
+and a table with rows is preferred to an empty one. A decimal is spelled plainly (`0.75`, not `75e-2`). `--max-depth`
+is refused, as sample reads no input. `schema sample` and `schema gen` read a schema with no `$schema` in the
+draft `--schema-draft` names, and a file reference from the directory `--schema-ref` names, as `check` does.
 
 `stury schema gen SCHEMA` writes the Odin source of the types a model reads the schema's values with, and a procedure
 `register` that adds the rules no tag holds to a `model.Registry`, as `schema.write_odin` writes them: a struct for an
@@ -336,29 +347,33 @@ members and rules join. `format` only annotates, as `check` reads it: the member
 comment. With `--format-assert` the formats a type reads are `time.Time`, `uuid.Identifier` and `model.Email`, and the
 others a `format=` rule. `contentEncoding: base64` is `model.Base64`. `$defs` are named types. A struct whose optional members take
 null holds `set: model.Fields_Set` and tags each such member `omitunset`, so that a member the text left out stays out
-and a null stays null when the value is written back. Gen refuses such a struct past 128 members.
+and a null stays null when the value is written back. Gen refuses such a struct past 128 members. A member's `default`
+that is a string, a number or a boolean is a `model.register_default` line in `register`, which then returns
+`core.Error`, so a load gives the member that value where the text leaves it out. A `null` default is the zero of the
+optional member.
 
 The package is `--package NAME`, by default the file's name in snake case (`my-types.schema.json` is `my_types`). It
 must be an Odin identifier that is no keyword and no package the types import (`model`, `time`, `core`, ...), since an
 Odin program names each package once. A keyword no type spells (`not` or `if` on a union whose arms take a null
 they refuse, a `oneOf` with two arms that take null or two arms of one type, `prefixItems` beside `items`, ...) is exit 1, told with the path of the node that holds it, and so is an integer enum value past
-2^53 and an integer whose bounds leave no value `i64` or `u64` holds. An integer the schema leaves unbounded is `i64`,
-so a model refuses one past its range, which the schema takes. Every object nested in another is a struct held by value,
+2^53, an integer whose bounds leave no value `i64` or `u64` holds, an integer with both bounds whose range neither
+holds whole (`minimum: -1` with `maximum: 2^64 - 1`), and a `default` of an array or an object, or one the member's
+type does not hold. An integer whose lower bound is at least 0 and whose range passes `i64`'s is `u64`. Any other
+integer the schema bounds on one side only, or not at all, is `i64`, so a model refuses one past `i64`'s range, which the schema takes. Every object nested in another is a struct held by value,
 and Odin's compiler takes time exponential in that depth, so the types of objects nested past about 24 levels compile
 slowly. schema gen takes no layout option and no filter.
 
 ## `fmt`
 
-`fmt --schema FILE` converts each text of the input through a JSON Schema, a record at a time for NDJSON and the
-whole table for CSV: the text must pass it, every member it leaves open is kept, and the output must pass it as the
-output format reads it. A failure is told as `check --schema` tells it, in the input for an input that fails and
-against `NAME (output)` for an output that does, `--max-errors` limiting the failures told of a text, and it gives
-exit 1 while the other texts are still converted. A value the output format cannot spell, such as a nested cell in CSV,
-is told with its path. A CSV output takes the union of the rows' members as its columns, an empty cell is a `null`
-the output check sees, and a row with no member at all is refused. `fmt --schema` converts by the schema on output: where the schema allows a cell to read as a string or as the value
-it spells, the reading the output passes is the one written, whatever `--infer` says of the input. A format with attributes writes each as a member before the
-element's children, a name its children repeat as an array and its text as `#text` when the element has attributes; an
-attribute and a child of one name, and an array with attributes, are refused.
+`fmt --schema FILE` judges each file against a JSON Schema as `check --schema` does, then formats a file that passes
+as plain `fmt` does: comments, spellings and the one table a run writes are plain `fmt`'s. A file that fails is told as
+`check --schema` tells it, `--max-errors` limiting the failures told as in `check`, is not written, and gives exit 1
+while the other files are still formatted. `--in-place` and `--check` leave a file with a failure as it is and do not
+call it unformatted. An input cell is read as `check --schema` reads it, by `--infer`, and the schema never picks its
+kind: `type: integer` takes the cell `5` only with `--infer`, and `07` is the string `"07"` either way. A CSV or TSV
+output is judged again as it reads back, against `NAME (output)`: by `--infer` when the input is no table, which then
+quotes a string whose text reads as a number, `true` or `false` (TSV, which has no quotes, refuses one), so `{"n":"5"}`
+comes back as the string `"5"`. A value the output cannot write is exit 5 with the reason, as in plain `fmt`.
 
 `fmt` writes each input back in the printer's layout, or in another format. It runs no filter, so it takes no
 `FILTER`.
@@ -383,8 +398,8 @@ stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--sch
   where `stury --from csv --to csv . a.csv b.csv` writes one table under the first file's header.
 - A CSV or TSV header that names a column twice is refused (`Duplicate header name`), as `check` and a filter run
   refuse it, whatever `--to` is.
-- `fmt` never colours its output, and it refuses every option that shapes a filter run (`-C`, `-c`, `-r`, ...,
-  `--seq`): exit 2. `--indent N` and `--tab` apply to a JSON-like `--to`, and `--max-depth N` and, with a
+- `fmt` never colours its output, and it refuses every option that shapes a filter run (`-C`, `-r`, ...,
+  `--seq`): exit 2. `-c` is `--indent 0`, and `--indent N` and `--tab` apply to a JSON-like `--to`, and `--max-depth N` and, with a
   CSV-like `--to`, `--grow-header` apply. A JSON-like output is written at every depth `--max-depth` reads.
 
 | Flag | Effect |
@@ -911,7 +926,7 @@ The exit codes are jq's, but the messages are stury's.
 | A directory given as a file | `stury: error: Could not open file NAME: Is a directory`, where jq says `jq: error: Is a directory`. `.` under `check` or `fmt` adds `(check takes no filter)` |
 | An error the filter raises | `stury: error (at FILE:LINE): MSG` as jq, but with no input to name, as under `-n`, `stury: error: MSG`, where jq says `(at <unknown>)`. `input` past the last input says `No more inputs`, where jq prints the `break` that `inputs` catches (`try input catch .` still gives `"break"`) |
 | `--rawfile` or `--slurpfile` naming a file that does not open | `stury: --rawfile NAME FILE: Could not open FILE: REASON`, where jq calls it `Bad JSON in --rawfile ...` |
-| A filter of one word a letter or two from `check` or `fmt` | jq's compile error, then `stury: chek is not a command: did you mean stury check?` |
+| A filter of one word a letter or two from `check` or `fmt` | jq's compile error, then `stury: chek is not a command: did you mean stury check?`, except for a filter `--filter` gives |
 | A JSON text that does not parse, in a filter run on standard input or one file | `stury: parse error: MSG at line L, column C`, as jq |
 | Any other text that does not parse: under `check` and `fmt`, under `--from` another format or `ndjson`, under `--seq`, several files, or `input` under `-n` | `stury: parse error: NAME:L:C: SENTENCE`, NAME `<stdin>` for standard input, counted in that file (a `--seq` text that runs between files has the stream's position instead), such as `<stdin>:1:10: Leading zero in a number` |
 | Output that cannot be written, or a stdout that is closed (as jq, even when nothing was written; not under `check`, `fmt --check` or `fmt --in-place`, which write nothing to it) | `stury: error: writing output failed: REASON`, exit 2 whatever the run came to |

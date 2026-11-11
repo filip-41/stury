@@ -4,14 +4,14 @@ import "base:runtime"
 import "core:io"
 import "core:mem"
 import "core:mem/virtual"
-import "core:reflect"
 import core ".."
 import typed "../typed"
 import write "../write"
 
-// What a dump leaves out besides the write_only members, which it never writes. `exclude_unset` leaves out a member that
-// holds null and that its struct's `Fields_Set` does not hold, in a struct that has one, as the tag `omitunset` does, so
-// a value built in memory, whose set is empty, keeps every member it holds. `exclude_none` leaves out a member that holds null:
+// What a dump leaves out besides the write_only members, which it never writes. `exclude_unset` leaves out every member
+// that its struct's `Fields_Set` does not hold, in a struct that has one: what a load took from a default or never read,
+// and every member of a value built in memory whose set is empty. A read_only member, which no load sets, and the members
+// of a struct with no set are kept. `exclude_none` leaves out a member that holds null:
 // a nil `Maybe`, pointer, union, `any` or cstring, a required one too, so the text may not load back. `exclude_defaults`
 // leaves out a member that is not required and equals its default, its zero where it has none. `check` validates what
 // the dump writes first, and a value that fails is `.Check_Failed` and writes nothing.
@@ -82,29 +82,30 @@ omitted :: proc(o: ^typed.Omits, plan: ^typed.Plan, r: ^typed.Field, at: uintptr
 	if d.opts.exclude_none && write.holds_null(m, r.kind, at) {
 		return true
 	}
-	if d.opts.exclude_unset && write.unset(m, r, at) {
+	x := typed.extra_at(plan, r.meta)
+	if d.opts.exclude_unset && write.unset(x, r, at) {
 		return true
 	}
-	if !d.opts.exclude_defaults || !m.optional {
+	if !d.opts.exclude_defaults || !x.optional {
 		return false
 	}
-	held := default_of(d, m)
-	return held != nil && equal(rawptr(at), held, type_info_of(m.type))
+	held := default_of(d, m, x)
+	return held != nil && equal_values(rawptr(at), held, type_info_of(m.type))
 }
 
 // The default of the member of meta `m`, made once a dump, or a zeroed block for a member with none. Nil when memory ran
 // out, which keeps the member.
 @(private)
-default_of :: proc(d: ^Dumping, m: ^typed.Meta) -> rawptr {
+default_of :: proc(d: ^Dumping, m: ^typed.Meta, e: ^typed.Meta_Extra) -> rawptr {
 	size := type_info_of(m.type).size
 	memory := virtual.arena_allocator(&d.defaults)
-	if m.default == 0 {
+	if e.default == 0 {
 		if len(d.zero) < size {
 			d.zero = make([]u8, size, memory)
 		}
 		return raw_data(d.zero) if len(d.zero) >= size else nil
 	}
-	x := &m.owner.defaults[m.default - 1]
+	x := &e.owner.defaults[e.default - 1]
 	if held, found := d.made[x]; found {
 		return held
 	}
@@ -117,71 +118,4 @@ default_of :: proc(d: ^Dumping, m: ^typed.Meta) -> rawptr {
 	}
 	d.made[x] = held
 	return held
-}
-
-// Whether the values of type `ti` at `a` and `b` are equal: strings, lists, maps, pointers' targets and unions by what
-// they hold, and the rest, floats among them, by their bytes.
-@(private)
-equal :: proc(a, b: rawptr, ti: ^runtime.Type_Info) -> bool {
-	base := runtime.type_info_base(ti)
-	#partial switch v in base.variant {
-	case runtime.Type_Info_String:
-		if v.is_cstring {
-			return string((^cstring)(a)^) == string((^cstring)(b)^) && ((^cstring)(a)^ == nil) == ((^cstring)(b)^ == nil)
-		}
-		return (^string)(a)^ == (^string)(b)^
-	case runtime.Type_Info_Slice:
-		x, y := (^runtime.Raw_Slice)(a)^, (^runtime.Raw_Slice)(b)^
-		return x.len == y.len && equal_elements(x.data, y.data, x.len, v.elem)
-	case runtime.Type_Info_Dynamic_Array:
-		x, y := (^runtime.Raw_Dynamic_Array)(a)^, (^runtime.Raw_Dynamic_Array)(b)^
-		return x.len == y.len && equal_elements(x.data, y.data, x.len, v.elem)
-	case runtime.Type_Info_Array:
-		return equal_elements(a, b, v.count, v.elem)
-	case runtime.Type_Info_Struct:
-		if .raw_union in v.flags {
-			break
-		}
-		for i in 0 ..< int(v.field_count) {
-			if !equal(rawptr(uintptr(a) + v.offsets[i]), rawptr(uintptr(b) + v.offsets[i]), v.types[i]) {
-				return false
-			}
-		}
-		return true
-	case runtime.Type_Info_Pointer:
-		x, y := (^rawptr)(a)^, (^rawptr)(b)^
-		return x == y || x != nil && y != nil && equal(x, y, v.elem)
-	case runtime.Type_Info_Union:
-		x, y := reflect.get_union_variant_raw_tag(any{a, ti.id}), reflect.get_union_variant_raw_tag(any{b, ti.id})
-		if x != y {
-			return false
-		}
-		variant := reflect.get_union_variant(any{a, ti.id})
-		return variant.id == nil || equal(a, b, type_info_of(variant.id))
-	case runtime.Type_Info_Map:
-		x, y := (^runtime.Raw_Map)(a), (^runtime.Raw_Map)(b)
-		if x.len != y.len {
-			return false
-		}
-		it := 0
-		for k, value in reflect.iterate_map(any{a, ti.id}, &it) {
-			hash := v.map_info.key_hasher(k.data, runtime.map_seed(y^))
-			found := runtime.__dynamic_map_get(y, v.map_info, hash, k.data)
-			if found == nil || !equal(value.data, found, v.value) {
-				return false
-			}
-		}
-		return true
-	}
-	return mem.compare_ptrs(a, b, base.size) == 0
-}
-
-@(private)
-equal_elements :: proc(a, b: rawptr, n: int, elem: ^runtime.Type_Info) -> bool {
-	for i in 0 ..< n {
-		if !equal(rawptr(uintptr(a) + uintptr(i * elem.size)), rawptr(uintptr(b) + uintptr(i * elem.size)), elem) {
-			return false
-		}
-	}
-	return true
 }

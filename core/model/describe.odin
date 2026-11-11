@@ -101,7 +101,8 @@ node_of :: proc(r: ^Reading, record: i32, ruled := true, arm := false) -> rules.
 	at, nullable := target(r.plan, record)
 	nullable &&= !arm
 	f, m := r.plan.fields[at], r.plan.meta[at]
-	use := Use{m.type, nullable, m.rule_set if ruled else 0}
+	takes_null := nullable || f.kind == .Union && !m.no_nil
+	use := Use{m.type, takes_null, m.rule_set if ruled else 0}
 	if found, ok := r.nodes[use]; ok {
 		return found
 	}
@@ -125,12 +126,12 @@ node_of :: proc(r: ^Reading, record: i32, ruled := true, arm := false) -> rules.
 		n.object = object_of(r, m, f.kind == .Map)
 	case .Union:
 		n.kinds = rules.EVERY_KIND
-		n.any_of = arms_of(r, m, nullable || !m.no_nil)
+		n.any_of = arms_of(r, m, takes_null)
 		if one_match(r.judging, m.type) {
 			n.one_of, n.any_of = n.any_of, nil
 		}
 	case:
-		n = leaf(r, f.kind, m)
+		n = leaf(r, f.kind, m, typed.extra_at(r.plan, u32(at)).data)
 	}
 	if nullable {
 		n.kinds += {.Null}
@@ -155,7 +156,7 @@ node_of :: proc(r: ^Reading, record: i32, ruled := true, arm := false) -> rules.
 // The node of a value `kind` reads, with the range of an integer, an f32, an enum read as integers and a bit_set's
 // element. `m` is the record's, or a map's for its key.
 @(private)
-leaf :: proc(r: ^Reading, kind: typed.Read_Kind, m: typed.Meta) -> (n: rules.Node) {
+leaf :: proc(r: ^Reading, kind: typed.Read_Kind, m: typed.Meta, hook_data: rawptr) -> (n: rules.Node) {
 	n.array, n.object = -1, -1
 	#partial switch kind {
 	case .String:
@@ -196,8 +197,8 @@ leaf :: proc(r: ^Reading, kind: typed.Read_Kind, m: typed.Meta) -> (n: rules.Nod
 		n.rules.minimum, n.rules.maximum = decimal(r, low), decimal(r, high)
 	case:
 		n.kinds = rules.EVERY_KIND
-		if kind == .Hook && m.data != nil {
-			return carrier_node(r, &(^Custom_Of)(m.data).plan)
+		if kind == .Hook && hook_data != nil {
+			return carrier_node(r, &(^Custom_Of)(hook_data).plan)
 		}
 		if c, is_carrier := carrier_of(m.type); kind == .Hook && is_carrier {
 			n.kinds, n.content_encoding = c.kinds, c.encoding
@@ -225,7 +226,7 @@ array_of :: proc(r: ^Reading, kind: typed.Read_Kind, m: typed.Meta) -> i32 {
 	}
 	items: rules.Node_Index
 	if r.plan.fields[m.block].kind == .Bit_Elem {
-		items = add(r, &r.d.nodes, leaf(r, .Bit_Elem, r.plan.meta[m.block]))
+		items = add(r, &r.d.nodes, leaf(r, .Bit_Elem, r.plan.meta[m.block], nil))
 	} else {
 		items = node_of(r, m.block)
 	}
@@ -265,16 +266,17 @@ object_of :: proc(r: ^Reading, m: typed.Meta, is_map: bool) -> i32 {
 	members, failed := make([dynamic]rules.Member, 0, m.members)
 	r.failed ||= failed != nil
 	required := r.plan.meta[m.block + m.members].required
+	forbids := typed.extra_at(r.plan, u32(m.block + m.members)).forbid
 	for j in 0 ..< m.members {
 		record := m.block + j
-		role := r.plan.meta[record].access
+		role := typed.extra_at(r.plan, u32(record)).access
 		if role == .Write_Only && r.direction == .Dump {
 			continue
 		}
 		x := rules.Member{name = r.plan.meta[record].name}
 		if role == .Read_Only && r.direction == .Load {
 			// A load skips the member, so any value passes, or refuses it where the struct forbids what it does not name.
-			x.node = add(r, &r.d.nodes, rules.Node{kinds = {} if m.forbid else rules.EVERY_KIND, array = -1, object = -1})
+			x.node = add(r, &r.d.nodes, rules.Node{kinds = {} if forbids else rules.EVERY_KIND, array = -1, object = -1})
 		} else {
 			x.node = node_of(r, record, false)
 			folded, _ := target(r.plan, record)
@@ -288,14 +290,14 @@ object_of :: proc(r: ^Reading, m: typed.Meta, is_map: bool) -> i32 {
 		x.rules.read_only, x.rules.write_only = role == .Read_Only, role == .Write_Only
 		// A dump with no option leaves out only what `omitempty` finds empty.
 		if r.direction == .Dump {
-			x.required = !r.plan.meta[record].omit_empty
+			x.required = !typed.extra_at(r.plan, u32(record)).omit_empty
 		}
 		append(&members, x)
 	}
 	r.d.objects[at].members = members[:]
 	if capture := r.plan.meta[m.block + m.members].capture; capture >= 0 {
 		r.d.objects[at].additional = node_of(r, r.plan.meta[capture].block)
-	} else if m.forbid && r.direction == .Load {
+	} else if forbids && r.direction == .Load {
 		r.d.objects[at].additional = add(r, &r.d.nodes, rules.Node{array = -1, object = -1})
 	}
 	return at
@@ -385,7 +387,7 @@ add :: proc(r: ^Reading, list: ^[dynamic]$T, x: T) -> rules.Node_Index {
 // the integers the key reads as, spelled as a key's number reads, by a pattern.
 @(private)
 key_node :: proc(r: ^Reading, m: typed.Meta) -> (n: rules.Node) {
-	n = leaf(r, m.key_kind, m)
+	n = leaf(r, m.key_kind, m, nil)
 	if n.kinds != {.Integer} {
 		return
 	}

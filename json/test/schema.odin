@@ -8,6 +8,7 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:testing"
+import "core:time"
 import regex "../../core/regex"
 import core "../../core"
 import compose "../../core/compose"
@@ -556,7 +557,7 @@ schema_check_reports_each_failure :: proc(t: ^testing.T) {
 		core.render_entry(strings.to_stream(&out), src, e)
 		strings.write_byte(&out, '\n')
 	}
-	testing.expect_value(t, strings.to_string(out), "1:1: Required member \"c\" is missing (.required)\n1:7: Number is below the minimum at .a (.properties.a.minimum)\n1:21: Value is not of the allowed type at .b[1] (.properties.b.items.type)\n1:30: No value is allowed here at .z (.additionalProperties)\n")
+	testing.expect_value(t, strings.to_string(out), "1:1: Required member \"c\" is missing (.required)\n1:7: Number is below the minimum, at least 2 at .a (.properties.a.minimum)\n1:21: Value is not of the allowed type, expected string at .b[1] (.properties.b.items.type)\n1:30: No value is allowed here at .z (.additionalProperties)\n")
 	testing.expect(t, !schema.valid(&b, src))
 	// `c` is only required, so `additionalProperties` refuses it too.
 	testing.expect(t, !schema.valid(&b, transmute([]u8)string(`{"a": 2, "c": null}`)))
@@ -620,7 +621,7 @@ schema_check_reports_arms :: proc(t: ^testing.T) {
 		core.render_entry(strings.to_stream(&out), src, e)
 		strings.write_byte(&out, '\n')
 	}
-	testing.expect_value(t, strings.to_string(out), "1:1: Required member \"q\" is missing (.dependentRequired)\n1:1: No value is allowed here (.not)\n1:7: Number is below the minimum at .a (.properties.a.allOf[0].minimum)\n1:7: Value passes none of the subschemas at .a (.properties.a.anyOf)\n1:16: Value is not of the allowed type at .xy (.patternProperties.\"^x\".type)\n1:26: Elements are not unique at .l (.properties.l.uniqueItems)\n1:26: Too few elements or members at .l (.properties.l.contains)\n")
+	testing.expect_value(t, strings.to_string(out), "1:1: Required member \"q\" is missing (.dependentRequired)\n1:1: Value passes the subschema that not refuses (.not)\n1:7: Number is below the minimum, at least 2 at .a (.properties.a.allOf[0].minimum)\n1:7: Value passes none of the subschemas at .a (.properties.a.anyOf)\n1:16: Value is not of the allowed type, expected integer at .xy (.patternProperties.\"^x\".type)\n1:26: Elements are not unique at .l (.properties.l.uniqueItems)\n1:26: Too few elements or members at .l (.properties.l.contains)\n")
 }
 
 // A fixed evaluated set becomes the node's own additional members or items and a dynamic one stays an arm, and either
@@ -633,13 +634,13 @@ schema_check_reports_unevaluated :: proc(t: ^testing.T) {
 	} {
 		{`{"$defs": {"e": {"patternProperties": {"^x-": true}}}, "properties": {"a": {}}, "$ref": "#/$defs/e", "unevaluatedProperties": false}`, `{"a": 1, "x-y": 2, "b": 3}`, "1:25: No value is allowed here at .b (.unevaluatedProperties)\n"},
 		{`{"properties": {"a": {}}, "anyOf": [{"properties": {"b": {}}}], "unevaluatedProperties": false}`, `{"a": 1, "b": 2, "c": 3}`, "1:23: No value is allowed here at .c (.unevaluatedProperties)\n"},
-		{`{"prefixItems": [{}], "unevaluatedItems": {"type": "string"}}`, `[1, 2]`, "1:5: Value is not of the allowed type at .[1] (.unevaluatedItems.type)\n"},
+		{`{"prefixItems": [{}], "unevaluatedItems": {"type": "string"}}`, `[1, 2]`, "1:5: Value is not of the allowed type, expected string at .[1] (.unevaluatedItems.type)\n"},
 		// A member `allOf` drops into the node's own keeps its place, a settled set its keyword, and a failed kind its members' errors.
 		{`{"allOf": [{"properties": {"a": true}}, {"required": ["b"]}], "unevaluatedProperties": false}`, `{"a": 1}`, "1:1: Required member \"b\" is missing (.allOf[1].required)\n"},
-		{`{"allOf": [{"prefixItems": [true]}, {"minItems": 2}], "unevaluatedItems": false}`, `[1]`, "1:1: Too few elements or members (.allOf[1].minItems)\n"},
-		{`{"patternProperties": {"^x": {"type": "integer"}, "^y": true}, "unevaluatedProperties": {"type": "boolean"}}`, `{"z": 1}`, "1:7: Value is not of the allowed type at .z (.unevaluatedProperties.type)\n"},
-		{`{"type": "string", "unevaluatedProperties": false}`, `{"a": 1}`, "1:1: Value is not of the allowed type (.type)\n1:7: No value is allowed here at .a (.unevaluatedProperties)\n"},
-		{`{"type": "string", "unevaluatedItems": false}`, `[1]`, "1:1: Value is not of the allowed type (.type)\n1:2: No value is allowed here at .[0] (.unevaluatedItems)\n"},
+		{`{"allOf": [{"prefixItems": [true]}, {"minItems": 2}], "unevaluatedItems": false}`, `[1]`, "1:1: Too few elements or members, at least 2 elements (.allOf[1].minItems)\n"},
+		{`{"patternProperties": {"^x": {"type": "integer"}, "^y": true}, "unevaluatedProperties": {"type": "boolean"}}`, `{"z": 1}`, "1:7: Value is not of the allowed type, expected boolean at .z (.unevaluatedProperties.type)\n"},
+		{`{"type": "string", "unevaluatedProperties": false}`, `{"a": 1}`, "1:1: Value is not of the allowed type, expected string (.type)\n1:7: No value is allowed here at .a (.unevaluatedProperties)\n"},
+		{`{"type": "string", "unevaluatedItems": false}`, `[1]`, "1:1: Value is not of the allowed type, expected string (.type)\n1:2: No value is allowed here at .[0] (.unevaluatedItems)\n"},
 	}
 	for c in cases {
 		ch, err := checked_make(c.schema)
@@ -744,6 +745,129 @@ schema_object_enum_memory :: proc(t: ^testing.T) {
 	context.temp_allocator = mem.tracking_allocator(&track)
 	testing.expect(t, schema.valid(&ch.bound, transmute([]u8)items))
 	testing.expectf(t, track.peak_memory_allocated < 16 << 20, "%d bytes", track.peak_memory_allocated)
+}
+
+// The schema of a chain of `levels` definitions, each of whose arms of `kind` names the next one, ending in `leaf`. Each
+// level names its next one twice, so a check that judged each naming apart would take time exponential in the chain.
+@(private = "file")
+shared_chain :: proc(kind, leaf: string, levels: int) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"$ref": "#/$defs/a0", "$defs": {`)
+	for i in 0 ..< levels {
+		r := fmt.tprintf(`{{"$ref": "#/$defs/a%d"}}`, i + 1)
+		switch kind {
+		case "if":
+			fmt.sbprintf(&b, `"a%d": {{"if": %s, "then": %s, "else": %s}}, `, i, r, r, r)
+		case "oneOf":
+			fmt.sbprintf(&b, `"a%d": {{"oneOf": [%s, {{"not": %s}}]}}, `, i, r, r)
+		case "not":
+			fmt.sbprintf(&b, `"a%d": {{"not": %s}}, `, i, r)
+		case:
+			fmt.sbprintf(&b, `"a%d": {{"%s": [%s, %s]}}, `, i, kind, r, r)
+		}
+	}
+	fmt.sbprintf(&b, `"a%d": %s}}}`, levels, leaf)
+	return strings.to_string(b)
+}
+
+// Arms that name one subschema many times judge a value by it once, so a chain of them checks in time linear in its
+// length, with a sink or none, whether the value is a scalar or a container.
+@(test)
+schema_shared_arms_linear :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	cases := [?]struct {
+		kind, leaf, value: string,
+		valid:             bool,
+		levels:            int,
+	} {
+		{"if", `{"type": "string"}`, `1`, false, 40},
+		{"if", `{"type": "array", "items": {"type": "integer"}}`, `[1, "x"]`, false, 40},
+		{"if", `{"type": "array"}`, `[1]`, true, 40},
+		{"anyOf", `{"type": "integer"}`, `1`, true, 40},
+		{"anyOf", `{"type": "string"}`, `1`, false, 40},
+		{"anyOf", `{"type": "array"}`, `[1]`, true, 40},
+		{"oneOf", `{"type": "integer"}`, `1`, true, 40},
+		{"oneOf", `{"type": "array"}`, `[1]`, true, 40},
+		// A plan inlines each `allOf`, so this chain is shorter.
+		{"allOf", `{"type": "string"}`, `1`, false, 17},
+	}
+	for c in cases {
+		ch, err := checked_make(shared_chain(c.kind, c.leaf, c.levels))
+		if !testing.expectf(t, err == nil, "%s: %v", c.kind, err) {
+			continue
+		}
+		for max_errors in ([?]int{-1, 5}) {
+			start := time.tick_now()
+			sink := typed.Sink{max_errors = max(max_errors, 0)}
+			got := schema.check(&ch.bound, transmute([]u8)c.value, &sink if max_errors >= 0 else nil)
+			took := time.tick_since(start)
+			typed.sink_destroy(&sink)
+			testing.expectf(t, (got == nil) == c.valid, "%s %s on %s with %d errors: %v", c.kind, c.leaf, c.value, max_errors, got)
+			testing.expectf(t, took < 40 * time.Millisecond, "%s %s on %s with %d errors: %v", c.kind, c.leaf, c.value, max_errors, took)
+		}
+		checked_destroy(ch)
+	}
+}
+
+// An unevaluated rule over many elements or members that the other arms judge keeps memory that does not grow with
+// them, with a sink or none: each element past the arms' prefixes is judged alike.
+@(test)
+schema_unevaluated_memory :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	COUNT :: 50000
+	items, members: strings.Builder
+	strings.builder_init(&items, context.temp_allocator)
+	strings.builder_init(&members, context.temp_allocator)
+	strings.write_byte(&items, '[')
+	strings.write_byte(&members, '{')
+	for i in 0 ..< COUNT {
+		fmt.sbprintf(&items, "%s%d", ", " if i > 0 else "", i)
+		fmt.sbprintf(&members, `%s"k%d": %d`, ", " if i > 0 else "", i, i)
+	}
+	strings.write_byte(&items, ']')
+	strings.write_byte(&members, '}')
+	peak :: proc(t: ^testing.T, text, value: string, max_errors: int) -> i64 {
+		ch, err := checked_make(text)
+		if !testing.expectf(t, err == nil, "%s: %v", text, err) {
+			return 0
+		}
+		defer checked_destroy(ch)
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.temp_allocator)
+		defer mem.tracking_allocator_destroy(&track)
+		context.temp_allocator = mem.tracking_allocator(&track)
+		sink := typed.Sink{max_errors = max(max_errors, 0)}
+		defer typed.sink_destroy(&sink)
+		_ = schema.check(&ch.bound, transmute([]u8)value, &sink if max_errors >= 0 else nil)
+		return track.peak_memory_allocated
+	}
+	for max_errors in ([?]int{-1, 5}) {
+		passing := peak(t, `{"unevaluatedItems": false, "anyOf": [{"items": {"type": "integer"}}, {"prefixItems": [true]}]}`, strings.to_string(items), max_errors)
+		testing.expectf(t, passing < 2 << 20, "evaluated elements with %d errors: %d bytes", max_errors, passing)
+		failing := peak(t, `{"unevaluatedItems": {"type": "string"}, "anyOf": [{"prefixItems": [true]}, {"contains": {"type": "string"}}]}`, strings.to_string(items), max_errors)
+		testing.expectf(t, failing < 2 << 20, "failing elements with %d errors: %d bytes", max_errors, failing)
+		// A held object keeps its names for the repeats rule, which the unevaluated rule adds nothing to.
+		plain := peak(t, `{"anyOf": [{"additionalProperties": {"type": "string"}}, {"properties": {"a": true}}]}`, strings.to_string(members), max_errors)
+		unevaluated := peak(t, `{"unevaluatedProperties": {"type": "string"}, "anyOf": [{"patternProperties": {"^k1": true}}, {"properties": {"a": true}}]}`, strings.to_string(members), max_errors)
+		testing.expectf(t, unevaluated < plain + 1 << 20, "unevaluated members with %d errors: %d bytes, %d without the rule", max_errors, unevaluated, plain)
+	}
+}
+
+// A check judges one value by up to 256 held records one inside the other: a chain of 100 `not` arms, two records a
+// level, is judged to its end, and one of 300 is refused when bound.
+@(test)
+schema_held_nesting :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	ch, err := checked_make(shared_chain("not", `{"type": "integer"}`, 100))
+	defer checked_destroy(ch)
+	if !testing.expectf(t, err == nil, "%v", err) {
+		return
+	}
+	testing.expect(t, schema.check(&ch.bound, transmute([]u8)string("1")) == nil)
+	testing.expect(t, schema.check(&ch.bound, transmute([]u8)string(`"s"`)) != nil)
+	deep, deep_err := checked_make(shared_chain("not", `{"type": "integer"}`, 300))
+	defer checked_destroy(deep)
+	testing.expectf(t, deep_err != nil, "a chain of 300 bound: %v", deep_err)
 }
 
 // A failing property name reports its keyword under `propertyNames` at the object, a `false` there allows no name, and a

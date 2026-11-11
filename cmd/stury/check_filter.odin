@@ -16,10 +16,11 @@ check_filter_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	switch {
 	case len(cli.files) > 0:
 		usage_error("check --filter reads no input: it types the filter against --schema, and %s is an input", cli.files[0])
-	case s.max_errors != 0 || s.report != .Lines:
+	case s.max_errors != 0 || s.reported:
 		usage_error("%s judges inputs: check --filter reads none", "--max-errors" if s.max_errors != 0 else "--report")
 	}
 	sc := schema_read(s)
+	refuse_unlisted(sc.compiled.description, o.from, "reads")
 	opts := jq.Typing_Input {
 		null_input = o.null_input,
 		slurp      = o.slurp,

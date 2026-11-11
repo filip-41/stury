@@ -49,9 +49,9 @@ load_struct :: proc(b: ^Builder, owner: typeid, at: i32, f: ^Field, m: ^Meta, me
 		return
 	}
 	n, n_after := 0, 0
-	for x in members {
-		n += 1 if !x.required && x.make != nil else 0
-		n_after += len(x.afters)
+	for &x in members {
+		n += 1 if !x.required && rule_of(&x).make != nil else 0
+		n_after += len(rule_of(&x).afters)
 	}
 	checks := b.model.validators(b.model, owner) if b.model.validators != nil else nil
 	validated := n_after > 0 || len(checks) > 0
@@ -74,15 +74,15 @@ load_struct :: proc(b: ^Builder, owner: typeid, at: i32, f: ^Field, m: ^Meta, me
 		return
 	}
 	n = 0
-	for x, i in members {
-		if !x.required && x.make != nil {
-			defaults[n] = {i32(i), x.make, x.data}
+	for &x, i in members {
+		if rule := rule_of(&x); !x.required && rule.make != nil {
+			defaults[n] = {i32(i), rule.make, rule.data}
 			n += 1
 		}
 	}
 	n_after = 0
-	for x, i in members {
-		for v in x.afters {
+	for &x, i in members {
+		for v in rule_of(&x).afters {
 			afters[n_after] = {i32(i), owned_copy(b, x.name), x.offset, 0 if x.required else x.type.size, v}
 			n_after += 1
 		}
@@ -148,9 +148,9 @@ validate_closed :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, ow
 }
 
 // Whether `key` names a read_only member of the struct of `m`, which a load leaves out.
-read_only_key :: proc "contextless" (m: ^Meta, key: string) -> bool {
-	if m.model != nil {
-		for name in m.model.read_only {
+read_only_key :: proc "contextless" (model: ^Struct_Model, key: string) -> bool {
+	if model != nil {
+		for name in model.read_only {
 			if name == key {
 				return true
 			}

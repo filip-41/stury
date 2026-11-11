@@ -32,7 +32,7 @@ Usage:	stury [options] <jq filter> [file...]
 	stury check --filter <jq filter> --schema <schema>
 	stury fmt [--from format] [--to format] [--in-place|--check]
 	          [--indent n|--tab] [--max-depth n] [file...]
-	stury fmt --schema <schema> --to <format> [file...]
+	stury fmt --schema <schema> [--to format] [file...]
 	stury edit [--from format|--seq] [--in-place|--check|--diff] <jq filter> [file...]
 	stury diff [options] <old file> <new file>
 	stury diff --old-schema <schema> --new-schema <schema> [--compat direction]
@@ -109,9 +109,8 @@ stury's own options:
       --check               with fmt or edit, name each file it would
                             change and exit 1;
       --grow-header         with --to csv or tsv, write a header of every key;
-      --schema file         read each input by this JSON Schema, which types
-                            the cells of a table and spells them in the
-                            output, and refuse an input that fails it;
+      --schema file         with check and fmt, judge each input against
+                            this JSON Schema, and refuse one that fails it;
       --schema-ref dir      the directory a file reference may read, the schema's by default;
       --schema-draft d      the draft of a schema with no $schema: 4, 6, 7,
                             2019-09 or 2020-12 (default);
@@ -182,8 +181,8 @@ one holds a fault, 2 for a usage or file error. In full: stury(1), or docs/cli.m
 @(private = "file")
 SCHEMA_HELP :: `Usage:	stury schema infer [--from format] [--ranges] [file...]
 	stury schema sample [--to format] [--count n] [--seed n] [--invalid] [--comments]
-	          [--schema-draft d] schema
-	stury schema gen [--package name] [--format-assert] [--schema-draft d] schema
+	          [--schema-ref dir] [--schema-draft d] schema
+	stury schema gen [--package name] [--format-assert] [--schema-ref dir] [--schema-draft d] schema
 
 infer writes the JSON Schema that every record of the inputs passes. sample
 writes values that pass the schema file, a text a line. gen writes the Odin
@@ -199,6 +198,8 @@ Options:
       --comments            sample: write descriptions as comments;
       --package name        gen: the package of the types, by default the
                             schema file's name;
+      --schema-ref dir      sample and gen: the directory a file reference
+                            may read, the schema's by default;
       --schema-draft d      sample and gen: the draft of a schema with no
                             $schema: 4, 6, 7, 2019-09 or 2020-12 (default);
       --format-assert       gen: spell a format as the type that reads it;
@@ -206,7 +207,7 @@ Options:
                             written;
   -h, --help                show this help.
 
-Exit status: 0, 1 when no value passes the schema or no Odin type spells a
+Exit status: 0, 1 when no value that passes the schema is found or no Odin type spells a
 keyword, 5 when an input holds a fault, 2 for a usage or file error.
 `
 
@@ -214,11 +215,12 @@ keyword, 5 when an input holds a fault, 2 for a usage or file error.
 @(private = "file")
 FMT_HELP :: `Usage:	stury fmt [--from format] [--to format] [--in-place|--check]
 	          [--indent n|--tab] [--max-depth n] [file...]
-	stury fmt --schema file --to format [--schema-ref dir] [--max-errors n] [--format-assert] [file...]
+	stury fmt --schema file [--to format] [--schema-ref dir] [--max-errors n] [--format-assert] [file...]
 
 stury fmt writes each input back in the printer's layout, or transcodes it
 from --from to --to. It runs no filter. Every file is formatted, and each
-file's first fault is reported.
+file's first fault is reported. Under --schema a file that fails the schema is
+not written, and a table written is judged again as it reads back.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson,
@@ -232,6 +234,14 @@ Options:
       --tab                 use tabs for indentation;
       --grow-header         with --to csv or tsv, write a header of every key;
       --max-depth n         refuse nesting past n levels (default 1024);
+      --schema file         judge each input against this JSON Schema as
+                            stury check --schema does, and write only an
+                            input that passes it;
+      --schema-ref dir      the directory a file reference may read, the schema's by default;
+      --schema-draft d      the draft of a schema with no $schema: 4, 6, 7,
+                            2019-09 or 2020-12 (default);
+      --format-assert       make format fail an input;
+      --max-errors n        keep at most n failures of an input;
       --delimiter c, --no-header, --comment c, --infer, --ragged,
       --lazy-quotes, --out-delimiter c, --out-comment c, --out-no-header,
       --crlf                read and write csv or tsv as stury --help says;
@@ -240,8 +250,9 @@ Options:
                             comments when it has a comment character;
   -h, --help                show this help.
 
-Exit status: 0, or 1 under --check when a file is not formatted, 5 when one
-holds a fault, 2 for a usage or file error. In full: stury(1), or docs/cli.md
+Exit status: 0, or 1 under --check when a file is not formatted or under
+--schema when one fails the schema, 5 when one holds a fault or a value the
+output cannot write, 2 for a usage or file error. In full: stury(1), or docs/cli.md
 in stury's source.
 `
 

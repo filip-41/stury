@@ -113,7 +113,7 @@ odin_refusals_name_the_keyword :: proc(t: ^testing.T) {
 		{`{"type": "array", "items": {"type": "null"}}`, "type", 1},
 		{`{"enum": [9007199254740993]}`, "enum", 0},
 		{`{"type": "array", "prefixItems": [{"type": "integer"}]}`, "prefixItems", 0},
-		{`{"type": "object", "properties": {"": {}}}`, "properties", 0},
+		{`{"type": "object", "properties": {"": {}}}`, "properties", 1},
 		{`{"type": "object", "required": ["z"], "additionalProperties": false}`, "required", 0},
 		{`{"type": "object", "properties": {"a": {}}, "additionalProperties": {"type": "string"}, "allOf": [{"properties": {"b": {}}}]}`, "additionalProperties", 0},
 		{`{"$defs": {"a": {"type": "object", "properties": {"x": {"anyOf": [{"type": "number"}, {"type": "null"}], "not": {"const": null}}}}}, "type": "object", "properties": {"p": {"$ref": "#/$defs/a"}}}`, "not", 2},
@@ -226,4 +226,37 @@ odin_pattern_with_a_quote_or_a_comma_is_registered :: proc(t: ^testing.T) {
 	testing.expectf(t, err == nil, "%v", err)
 	want = "\tmodel.register_field(reg, {Root, \"q\", \"pattern=^a+$,len<=3\"}) or_return\n"
 	testing.expectf(t, strings.contains(source, want) && strings.contains(source, "model:\"len<=3\""), "no %q in\n%s", want, source)
+}
+
+@(test)
+odin_registers_a_members_default :: proc(t: ^testing.T) {
+	source, err := odin_of(t, `{"type": "object", "properties": {"name": {"type": "string", "default": "a\"b"},
+		"n": {"type": "integer", "default": 3}, "x": {"type": "number", "default": 1.5E2}, "on": {"type": "boolean", "default": true},
+		"z": {"type": ["string", "null"], "default": null}}}`)
+	testing.expectf(t, err == nil, "%v", err)
+	for want in ([]string{
+		"register :: proc(reg: ^model.Registry) -> core.Error {\n",
+		"\tmodel.register_default(reg, Root, \"name\", string(`a\"b`)) or_return\n",
+		"\tmodel.register_default(reg, Root, \"n\", i64(3)) or_return\n",
+		"\tmodel.register_default(reg, Root, \"x\", f64(1.5e2)) or_return\n",
+		"\tmodel.register_default(reg, Root, \"on\", bool(true)) or_return\n",
+	}) {
+		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
+	}
+	testing.expectf(t, !strings.contains(source, `"z"`), "%s", source)
+}
+
+@(test)
+odin_refuses_a_default_or_a_range_no_member_type_holds :: proc(t: ^testing.T) {
+	for c in ([][2]string{
+		{`{"type": "object", "properties": {"a": {"type": "array", "default": [1]}}}`, "default"},
+		{`{"type": "object", "properties": {"n": {"type": "integer", "default": 1.5}}}`, "default"},
+		{`{"type": "object", "properties": {"n": {"type": "integer", "minimum": -1, "maximum": 18446744073709551615}}}`, "maximum"},
+		{`{"type": "object", "properties": {"n": {"type": "integer", "minimum": -9223372036854775809, "maximum": 0}}}`, "minimum"},
+	}) {
+		keyword, _ := refused_keyword(t, c[0])
+		testing.expectf(t, keyword == c[1], "%s: refused %q", c[0], keyword)
+	}
+	source, err := odin_of(t, `{"type": "object", "properties": {"n": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}}}`)
+	testing.expectf(t, err == nil && strings.contains(source, "Maybe(u64)"), "%v\n%s", err, source)
 }

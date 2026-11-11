@@ -79,6 +79,7 @@ Cli :: struct {
 	// `check`'s schema options, which `diff` takes too.
 	schema: Schema_Options,
 	diff:   Diff_Options,
+	owned:  [dynamic]string, // the options given that only some commands take, in order
 }
 
 // The command line `args` (os.args without the program) into `o`, as jq reads it.
@@ -136,6 +137,9 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		if a[1] != '-' {
 			i = short_options(o, &cli, args, i)
 			continue
+		}
+		if owned_option(a[2:]) != nil {
+			append(&cli.owned, a)
 		}
 		switch name := a[2:]; name {
 		case "tab":
@@ -563,34 +567,109 @@ parse_max_depth :: proc(s: string) -> (n: u64, ok: bool) {
 	return n, ok && 1 <= n && n <= DEPTH_CEILING
 }
 
-// The commands that take the schema option `flag`, as a possessive list.
-schema_option_owners :: proc(flag: string) -> string {
-	switch flag {
-	case "--report", "--filter":
-		return "check's"
-	case "--format-assert":
-		return "check's, fmt's, diff's and schema gen's"
-	case "--schema-draft":
-		return "check's, fmt's, diff's, schema sample's and schema gen's"
-	}
-	return "check's and fmt's"
+// A command, as the owner of the options that only some commands take.
+Command :: enum u8 {
+	Run,
+	Check,
+	Fmt,
+	Edit,
+	Diff,
+	Infer,
+	Sample,
+	Gen,
 }
 
-// The first schema option given that a command which neither checks nor converts has no use for, or "". The schema verbs
-// read a schema, so they take --schema-draft, and schema gen takes --format-assert.
-schema_option_refused :: proc(cli: ^Cli) -> string {
-	if !cli.schema_verb {
-		return cli.schema.flag
+@(rodata)
+COMMAND_NAMES := [Command]string {
+	.Run    = "",
+	.Check  = "check",
+	.Fmt    = "fmt",
+	.Edit   = "edit",
+	.Diff   = "diff",
+	.Infer  = "schema infer",
+	.Sample = "schema sample",
+	.Gen    = "schema gen",
+}
+
+// Options, without their dashes, that only the commands `by` take, and what they do, which is why the others refuse them.
+Owned_Options :: struct {
+	names: []string,
+	by:    bit_set[Command],
+	does:  string,
+}
+
+@(rodata)
+OWNED_OPTIONS := [?]Owned_Options {
+	{{"schema", "max-errors"}, {.Check, .Fmt}, "it judges the inputs against a schema"},
+	{{"report"}, {.Check}, "it sets the layout of a schema check's report"},
+	{{"filter"}, {.Check}, "it types a filter against a schema"},
+	{{"schema-ref", "schema-draft"}, {.Check, .Fmt, .Diff, .Sample, .Gen}, "it says how a schema is read"},
+	{{"format-assert"}, {.Check, .Fmt, .Diff, .Gen}, "it asserts the formats a schema names"},
+	{{"ranges"}, {.Infer}, "it keeps the bounds of the inferred numbers, lengths and counts"},
+	{{"invalid", "comments", "seed", "count"}, {.Sample}, "it shapes the samples"},
+	{{"package"}, {.Gen}, "it names the package of the Odin types"},
+	{{"old-schema", "new-schema", "compat", "key", "set", "position", "facts", "json", "shape"}, {.Diff}, "it shapes what diff compares and tells"},
+	{{"diff"}, {.Edit}, "it previews the changes of an edit"},
+	{{"in-place", "check"}, {.Fmt, .Edit}, "it writes each file back, or tells whether it would change"},
+}
+
+// The entry of `name`, an option without its dashes, when only some commands take it.
+owned_option :: proc(name: string) -> ^Owned_Options {
+	for &o in OWNED_OPTIONS {
+		if slice.contains(o.names, name) {
+			return &o
+		}
 	}
-	if cli.schema.format_assert && !generates_odin(cli) && (cli.schema.judging == "" || cli.schema.flag == "--format-assert") {
-		return "--format-assert"
+	return nil
+}
+
+// Refuses the first option given that only other commands take, naming them and what the option does. A schema verb
+// not named is left for `schema_main` to refuse.
+refuse_unowned :: proc(cli: ^Cli) {
+	command := Command.Run
+	switch {
+	case cli.validating: command = .Check
+	case cli.formatting: command = .Fmt
+	case cli.editing:    command = .Edit
+	case cli.diffing:    command = .Diff
+	case cli.schema_verb:
+		verb := cli.files[0] if len(cli.files) > 0 else ""
+		switch verb {
+		case "infer":  command = .Infer
+		case "sample": command = .Sample
+		case "gen":    command = .Gen
+		case:          return
+		}
 	}
-	return cli.schema.judging
+	for flag in cli.owned {
+		if o := owned_option(flag[2:]); command not_in o.by {
+			owners := make([dynamic]string, context.temp_allocator)
+			for c in o.by {
+				append(&owners, strings.concatenate({COMMAND_NAMES[c], "'s"}, context.temp_allocator))
+			}
+			last := len(owners) - 1
+			listed := strings.join(owners[:last], ", ", context.temp_allocator)
+			usage_error("%s is %s: %s", flag, strings.join({listed, owners[last]}, " and ", context.temp_allocator) if last > 0 else owners[0], o.does)
+		}
+	}
 }
 
 // The command `cli` names, or "" for a filter run.
 command_name :: proc(cli: ^Cli) -> string {
 	return "check" if cli.validating else "fmt" if cli.formatting else "edit" if cli.editing else "diff" if cli.diffing else "schema" if cli.schema_verb else ""
+}
+
+// What the command writes, which is why it refuses an option `command_refused_option` names.
+command_writes :: proc(cli: ^Cli) -> string {
+	switch {
+	case cli.validating && cli.schema.filter != nil: return "it types the filter and writes the schema of its outputs"
+	case cli.validating && cli.schema.reported:      return "it runs no filter and writes its report in one layout"
+	case cli.validating:                             return "it runs no filter and prints nothing"
+	case cli.formatting:                             return "it runs no filter and writes each input in its own format or the one --to names"
+	case generates_odin(cli):                        return "it runs no filter and writes Odin types"
+	case cli.schema_verb:                            return "it runs no filter and writes a schema or samples"
+	}
+	return "it writes each input back in its own bytes"
 }
 
 // The first option given that `check`, `fmt`, `edit` or `schema` has no use for, or "". fmt writes each input's own format,
@@ -605,13 +684,10 @@ command_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
 	editing, schema := cli.editing, cli.schema_verb && !generates_odin(cli) || typing
 	switch {
 	case (editing || cli.diffing) && cli.formats.to != nil: return "--to"
-	case cli.formatting && cli.schema.reported: return "--report"
-	case !cli.validating && cli.schema.filter != nil: return "--filter"
-	case cli.diffing && (o.in_place || o.check): return "--in-place" if o.in_place else "--check"
 	case !cli.formatting && !schema && cli.cells_out_flag != "": return cli.cells_out_flag
 	case o.raw0:                 return "--raw-output0"
 	case o.raw:                  return "-j" if o.join else "-r"
-	case cli.compact_given && !editing && !schema: return "-c"
+	case cli.compact_given && !editing && !schema && !cli.formatting: return "-c"
 	case o.ascii && !editing && !schema: return "-a"
 	case o.sort_keys && !editing && !schema: return "-S"
 	case cli.color_set:          return "-C"

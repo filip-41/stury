@@ -187,8 +187,8 @@ framing_by :: proc(as: core.As, plan: ^typed.Plan) -> ^Framing_Services {
 	if services := services_of(as); services != nil {
 		return services
 	}
-	if plan != nil && plan.docs != nil {
-		if docs := (^Record_Docs)(plan.docs()); docs != nil && docs.framing != nil {
+	if plan != nil && typed.plan_docs(plan) != nil {
+		if docs := (^Record_Docs)(typed.plan_docs(plan)()); docs != nil && docs.framing != nil {
 			return docs.framing()
 		}
 	}
@@ -294,7 +294,7 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 	plan := plan
 	reads := it.docs.read if it.docs != nil else nil
 	if plan != nil && plan.model_plan == .Load {
-		reads = (^Record_Docs)(plan.docs()).check_read if plan.docs != nil else nil
+		reads = (^Record_Docs)(typed.plan_docs(plan)()).check_read if typed.plan_docs(plan) != nil else nil
 	}
 	if reads == nil {
 		it.fault = core.Fault{kind = .Bad_Option}

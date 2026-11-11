@@ -137,7 +137,7 @@ check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, t
 		c.pool, c.fork, c.taken = (^Pool)(rawptr(&k.pool)), nil, nil
 	}
 	if c.pool != nil {
-		c.pool.repeated, c.pool.repeating, c.pool.n_leads, c.pool.begun = nil, nil, 0, c.pool.opened
+		c.pool.repeated, c.pool.repeating, c.pool.leads, c.pool.begun, c.pool.verdicts = nil, nil, nil, c.pool.opened, {}
 	}
 	return
 }
@@ -222,7 +222,7 @@ Key_Met :: enum {
 track_key :: #force_no_inline proc "contextless" (h: ^Check, tr: ^Tracker, t: core.Token, key: string) -> Key_Met {
 	context = h.ctx
 	context.allocator = context.temp_allocator
-	lo, _ := core.scalar_ends(t)
+	lo, _ := check_ends(h, t)
 	if tr.open >= 0 {
 		tr.spans[tr.open][1] = lo
 	}
@@ -277,10 +277,11 @@ noticed :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token) -> cor
 	return .Stop
 }
 
-// Takes back the entries of this read that start inside `span`, the member a later value of its key replaces.
+// Takes back the entries of this read that start inside `span`, or with `member` those whose path starts with it, the
+// member a later value of its key replaces.
 @(cold)
 @(private)
-take_back :: proc "contextless" (h: ^Check, span: [2]u64) {
+take_back :: proc "contextless" (h: ^Check, span: [2]u64, member: []core.Step = nil) {
 	c := h.sink
 	if c == nil {
 		return
@@ -289,7 +290,7 @@ take_back :: proc "contextless" (h: ^Check, span: [2]u64) {
 	kept := h.floor
 	for i in h.floor ..< len(c.entries) {
 		e := &c.entries[i]
-		if e.start >= span[0] && e.start < span[1] {
+		if member == nil && e.start >= span[0] && e.start < span[1] || member != nil && path_within(e.path, member, h.outer) {
 			entry_destroy(e, c.entries.allocator)
 		} else {
 			c.entries[kept] = e^
@@ -305,6 +306,48 @@ take_back :: proc "contextless" (h: ^Check, span: [2]u64) {
 			break
 		}
 	}
+}
+
+// Whether `path`, an entry's, is of the value at `member`, a path below the check's outer one.
+@(private)
+path_within :: proc "contextless" (path, member: []core.Step, outer: ^Outer) -> bool {
+	from := len(outer.path) if outer != nil else 0
+	if len(path) < from + len(member) {
+		return false
+	}
+	for s, i in member {
+		if path[from + i] != s {
+			return false
+		}
+	}
+	return true
+}
+
+// A key that repeats in the open struct of a check that minds repeats, the struct of record `owner` at frame `f`, whose
+// member `i` it names. Noticing, it ends the read for the caller to read again judging. Judging, a repeat under `.First`
+// is skipped, and one under `.Last` takes back the entries of the earlier value and replaces it. Past it the cursor
+// matches no key by its bytes, so each later key of the struct comes here.
+@(cold)
+@(private)
+repeat_member :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token, f: ^Frame, owner: ^Field, i: int) -> (core.Hook_Regs, core.Action) {
+	if h.repeats == .Notice {
+		return regs, noticed(h, t)
+	}
+	regs := regs
+	at := ([^]Field)(owner.first)
+	regs.b = u64(uintptr(&h.plan.solo[2 * (int(uintptr(&at[i]) - uintptr(raw_data(h.plan.fields))) / size_of(Field)) + 1]))
+	if h.first_key {
+		return regs, .Skip
+	}
+	context = h.ctx
+	take_back(h, {}, member_steps(h, {regs.a, u64(uintptr(&at[i + 1])), regs.c}))
+	dest := uintptr(regs.c) + uintptr(at[i].offset)
+	if at[i].kind == .String {
+		release_text(h, dest)
+	} else {
+		mem.zero(rawptr(dest), int(h.plan.meta[at[i].meta].size))
+	}
+	return regs, .Next
 }
 
 // Settles the first refusal of the check `x`, which reads into `c`, after `take_back` took back the entries inside `span`,
@@ -462,7 +505,7 @@ judge_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs
 	if fails == {} {
 		return .Next
 	}
-	lo, hi := core.scalar_ends(t)
+	lo, hi := check_ends(h, t)
 	return check_report(h, regs, l, t.kind, fails, lo, hi)
 }
 
@@ -598,6 +641,16 @@ spill_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: 
 	return context.temp_allocator.procedure(context.temp_allocator.data, mode, size, alignment, old, old_size, loc)
 }
 
+// The first byte and the byte past the scalar `t` as written. A flat format's quoted cell holds its quotes in its span,
+// where a JSON string's leaves them out.
+@(private)
+check_ends :: #force_inline proc "contextless" (h: ^Check, t: core.Token) -> (lo, hi: u64) {
+	if h.plan.readers.flat {
+		return t.lo, t.lo + u64(t.n)
+	}
+	return core.scalar_ends(t)
+}
+
 // The text a decoded string up to this long is decoded into on the stack. A longer one goes to the temp allocator.
 @(private)
 TEXT_ROOM :: 256
@@ -687,7 +740,11 @@ check_report :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_
 @(private)
 rule_operand :: proc "contextless" (h: ^Check, l: ^rules.Leaf, kind: core.Typed_Error_Kind, of: core.Kind) -> string {
 	context = h.ctx
-	return "" if h.plan.checking || h.sink == nil else rules.operand_text(l, kind, of == .Object, context.temp_allocator)
+	// A model names the type it wanted, which the refusal holds.
+	if h.sink == nil || kind == .Wrong_Kind && !h.plan.checking {
+		return ""
+	}
+	return rules.operand_text(l, kind, of == .Object, context.temp_allocator)
 }
 
 // The keyword of `l` that holds the rule a value of kind `of` fails as `kind`, none for a value its use takes nowhere,
@@ -762,7 +819,7 @@ check_key :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token)
 		l := &h.plan.leaves[u.keys - 1]
 		fails := judge_string(h, t, l, key) if .String in l.kinds else ({.Not_Allowed} if l.kinds == {} else {.Wrong_Kind})
 		if fails != {} {
-			lo, hi := core.scalar_ends(t)
+			lo, hi := check_ends(h, t)
 			// The name is judged as the object's, under the keyword path of the names' own node.
 			h.sp -= 1
 			h.after = KEYS[:]
@@ -800,7 +857,7 @@ check_key :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token)
 		found, undecided := key_matches(h, u.regex, key)
 		if undecided {
 			context = h.ctx
-			lo, hi := core.scalar_ends(t)
+			lo, hi := check_ends(h, t)
 			return regs, fork_fault(h, {f.a, f.b, f.c}, .Pattern_Undecided, lo, hi)
 		}
 		if found {
@@ -947,7 +1004,7 @@ check_rules :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_R
 		return .Next
 	}
 	context = h.ctx
-	lo, hi := core.scalar_ends(t)
+	lo, hi := check_ends(h, t)
 	for kind in fails {
 		note(h, regs, {kind = kind, at = lo}, hi, nil, rule_operand(h, l, kind, t.kind))
 		if h.sink == nil {
@@ -1006,7 +1063,13 @@ rejudged :: proc(own: ^Sink, e: core.Typed_Refusal) -> (first: core.Typed_Refusa
 	case e.kind == .Walk || e.kind == .No_Memory:
 		return e
 	case len(own.entries) > 0:
-		return {kind = own.entries[0].kind, at = own.entries[0].start}
+		x := &own.entries[0]
+		first = {kind = x.kind, at = x.start}
+		for s in x.path {
+			path_add(&first, s)
+		}
+		own_names(&first)
+		return
 	case own.truncated:
 		return {kind = .Bad_Option}
 	}
@@ -1020,11 +1083,11 @@ repeat_may_retract :: proc(r: ^Reader) -> bool {
 	return object_open(r) && text_repeats(r)
 }
 
-// Whether `r` has an object open at frame `from` or past it.
+// Whether `r` has an object open at frame `from` or past it, a struct's among them.
 @(private)
 object_open :: proc(r: ^Reader, from := 1) -> bool {
 	for i in from ..< r.sp {
-		if r.frames[i].kind == .Object {
+		if r.frames[i].kind == .Object || is_struct(frame_owner(&r.frames[i])) {
 			return true
 		}
 	}
@@ -1050,9 +1113,9 @@ text_repeats :: proc(r: ^Reader) -> bool {
 // which a plan made with a format's reads or checks has, else by its handle's. False when neither builds it.
 @(private)
 text_built :: proc(r: ^Reader) -> (doc: core.Document, built: bool) {
-	if r.plan.build != nil {
+	if build := plan_text_build(r.plan); build != nil {
 		err: core.Document_Error
-		doc, err = r.plan.build(r.src, r.plan.as, context.temp_allocator)
+		doc, err = build(r.src, r.plan.as, context.temp_allocator)
 		return doc, err.kind == .None && len(doc.nodes) > 0
 	}
 	err: core.Error

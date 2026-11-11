@@ -19,7 +19,7 @@ Frame :: struct {
 	args:   []^Node,
 	values: []Ty,
 	scope:  ^Frame,
-	site:   Maybe(Loc),
+	site:   ^Node,
 }
 
 // A node every output of `n` passes, on an input of `dot`.
@@ -91,8 +91,10 @@ type_of :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> Ty {
 	case .Binary:
 		return binary(t, n, type_of(t, n.a, dot, f), type_of(t, n.b, dot, f))
 	case .And, .Or:
+		// `b` runs only on what `a` lets through: under `and` what it passes, under `or` the rest.
+		yes, no := narrowed(t, n.a, dot, f)
 		type_of(t, n.a, dot, f)
-		type_of(t, n.b, dot, f)
+		type_of(t, n.b, yes if n.kind == .And else no, f)
 		return kinds_node(t, {.Bool})
 	case .Alt:
 		a := type_of(t, n.a, dot, f)
@@ -100,7 +102,7 @@ type_of :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> Ty {
 		kept := a if unknown else restrict(t, a, k - {.Null})
 		return union_of(t, kept, type_of(t, n.b, dot, f))
 	case .If:
-		yes, no := narrowed(t, n.a, dot)
+		yes, no := narrowed(t, n.a, dot, f)
 		type_of(t, n.a, dot, f)
 		return union_of(t, type_of(t, n.b, yes, f), type_of(t, n.c, no, f) if n.c != nil else no)
 	case .Try:
@@ -293,38 +295,64 @@ object_type :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> Ty {
 	return object_of(t, members[:], others)
 }
 
-// What `if c` passes to its branches: under `type == "kind"` the values of that kind, and the rest.
-@(private = "file")
-narrowed :: proc(t: ^Typer, c: ^Node, dot: Ty) -> (yes, no: Ty) {
-	kinds, ok := type_test(c)
-	if !ok {
-		return dot, dot
+// What `if c` and `select(c)` pass to their branches: under `type == "kind"` the values of that kind, and the rest, under `X | type ==
+// "kind"` all of `dot` to the branch the kinds of X decide, and under `and` and `or` what their sides pass in turn.
+@(private)
+narrowed :: proc(t: ^Typer, c: ^Node, dot: Ty, f: ^Frame) -> (yes, no: Ty) {
+	if c != nil && c.kind == .And {
+		a_yes, a_no := narrowed(t, c.a, dot, f)
+		yes, no = narrowed(t, c.b, a_yes, f)
+		return yes, union_of(t, a_no, no)
 	}
-	yes = restrict(t, dot, kinds)
-	no = restrict(t, dot, rules.EVERY_KIND - closure(kinds))
-	return
+	if c != nil && c.kind == .Or {
+		a_yes, a_no := narrowed(t, c.a, dot, f)
+		yes, no = narrowed(t, c.b, a_no, f)
+		return union_of(t, a_yes, yes), no
+	}
+	subject, kinds, ok := kind_test(c)
+	switch {
+	case !ok:
+		return dot, dot
+	case subject == nil:
+		return restrict(t, dot, kinds), restrict(t, dot, rules.EVERY_KIND - closure(kinds))
+	}
+	t.quiet += 1
+	k, unknown := kinds_of(t, type_of(t, subject, dot, f))
+	t.quiet -= 1
+	switch {
+	case unknown || k == {}:
+		return dot, dot
+	case k & closure(kinds) == {}:
+		return t.never, dot
+	case k - closure(kinds) == {}:
+		return dot, t.never
+	}
+	return dot, dot
 }
 
-// The kinds a test `type == "name"` passes, either way round.
-@(private)
-type_test :: proc(c: ^Node) -> (rules.Kinds, bool) {
+// The kinds a test `type == "name"` or `X | type == "name"` passes, either way round, and X, nil for the first.
+@(private = "file")
+kind_test :: proc(c: ^Node) -> (subject: ^Node, kinds: rules.Kinds, ok: bool) {
 	if c == nil || c.kind != .Binary || c.op != .Eq {
-		return {}, false
+		return
 	}
 	call, lit := c.a, c.b
 	if call.kind == .Literal {
 		call, lit = lit, call
 	}
+	if call.kind == .Pipe {
+		subject, call = call.a, call.b
+	}
 	if call.kind != .Call || call.name != "type" || len(call.args) > 0 || call.callee != nil || lit.kind != .Literal {
-		return {}, false
+		return nil, {}, false
 	}
 	name, _ := string_of(lit.value)
 	for k in JQ_KINDS {
 		if k.name == name {
-			return k.kinds, true
+			return subject, k.kinds, true
 		}
 	}
-	return {}, true
+	return subject, {}, true
 }
 
 @(private = "file")
@@ -689,7 +717,7 @@ call :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> Ty {
 	frame := &Frame{parent = base, fn = fn, called = true, args = n.args, values = values, scope = f, site = t.site}
 	site := t.site
 	if prelude && site == nil {
-		t.site = n.loc
+		t.site = n
 	}
 	t.active[fn] += 1
 	out := type_of(t, fn.body, dot, frame)

@@ -30,7 +30,7 @@ register_after :: proc(reg: ^Registry, $T: typeid, field: string, check: proc(va
 		(proc(value: V, r: ^Report))(fn)((^V)(value)^, r)
 	}
 	reg.close = typed.validate_closed
-	return add_hook(&reg.validators, Validator_Of{T, field, {call, rawptr(check)}}, false)
+	return add_hook(reg, &reg.validators, Validator_Of{T, field, {call, rawptr(check)}}, false)
 }
 
 // Judges a whole `T` at its close, in a load and in `validate`, when none of its members failed, innermost struct first.
@@ -40,7 +40,7 @@ register_validator :: proc(reg: ^Registry, $T: typeid, check: proc(value: T, r: 
 		(proc(value: T, r: ^Report))(fn)((^T)(value)^, r)
 	}
 	reg.close = typed.validate_closed
-	return add_hook(&reg.validators, Validator_Of{T, "", {call, rawptr(check)}}, false)
+	return add_hook(reg, &reg.validators, Validator_Of{T, "", {call, rawptr(check)}}, false)
 }
 
 // The validators of struct `owner`, which a plan keeps.

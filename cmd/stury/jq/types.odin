@@ -51,8 +51,8 @@ Typer :: struct {
 	soft:     int,
 	// Inside the rounds of a fixpoint, whose refusals are told on the state it settles on.
 	held:     int,
-	// Where a definition of the prelude is called from, which its refusals are told at.
-	site:     Maybe(Loc),
+	// The call of a definition of the prelude made outside it, which the refusals inside it are told at and named by.
+	site:     ^Node,
 	active:   map[^Func]int,
 	resource: Ty,
 	unknown, any, never, null, empty: Ty,
@@ -130,33 +130,65 @@ type_filter :: proc(prog: ^Node, input: ^rules.Description, opts: Typing_Input) 
 	return {t.d^, t.refusals[:]}
 }
 
-// A record of a table that the description's root describes: an object of the members its objects list, or of any
-// member where one of them takes others, each a cell, or under `no_header` an array of cells.
+// A record of a table, as `check --schema` reads a table: an element of the array the description's root describes. It
+// is an object of the members the root's `items` list, each a cell and required where every row's object requires it.
+// A row object that leaves other members undescribed leaves them so here, one whose other members a schema takes, or a
+// row that may be anything, takes any member as a cell. Under `no_header` a record is an array of cells. A root that
+// takes no array describes no table, and so no record.
 @(private = "file")
 cells_record :: proc(t: ^Typer) -> Ty {
 	cell := kinds_node(t, {.String, .Null} + ({.Number, .Bool} if t.input.infer else {}))
 	if t.input.no_header {
 		return array_of(t, cell)
 	}
-	split := branches(t, t.d.root)
 	members := make([dynamic]rules.Member, context.temp_allocator)
-	open := !split.complete
-	for b in split.of {
-		for id in b {
+	required := make(map[string]int, context.temp_allocator)
+	tables := branches(t, t.d.root)
+	open, undescribed, described, objects := !tables.complete, false, false, 0
+	for table in tables.of {
+		if .Array not_in branch_kinds(t, table[:]) {
+			continue
+		}
+		described = true
+		items := false
+		for id in table {
 			n := &t.d.nodes[id]
-			if n.object < 0 {
+			if n.array < 0 || t.d.arrays[n.array].items == rules.NONE {
 				continue
 			}
-			o := &t.d.objects[n.object]
-			for m in o.members {
-				if !m.only_required && !slice.contains(member_names(members[:]), m.name) {
-					append(&members, rules.Member{name = m.name, node = cell})
+			items = true
+			split := branches(t, t.d.arrays[n.array].items)
+			open ||= !split.complete
+			for b in split.of {
+				for row in b {
+					r := &t.d.nodes[row]
+					if r.object < 0 {
+						continue
+					}
+					o := &t.d.objects[r.object]
+					objects += 1
+					for m in o.members {
+						if m.required {
+							required[m.name] += 1
+						}
+						if !m.only_required && !slice.contains(member_names(members[:]), m.name) {
+							append(&members, rules.Member{name = m.name, node = cell})
+						}
+					}
+					undescribed ||= o.additional == rules.NONE
+					open ||= len(o.patterns) > 0 || o.additional != rules.NONE && t.d.nodes[o.additional].kinds != {}
 				}
 			}
-			open ||= len(o.patterns) > 0 || o.additional == rules.NONE || t.d.nodes[o.additional].kinds != {}
 		}
+		open ||= !items
 	}
-	return object_of(t, members[:], cell if open || len(members) == 0 else t.never)
+	if !described {
+		return t.never
+	}
+	for &m in members {
+		m.required = !open && required[m.name] == objects
+	}
+	return object_of(t, members[:], cell if open || len(members) == 0 else rules.NONE if undescribed else t.never)
 }
 
 @(private = "file")
@@ -768,7 +800,7 @@ read_iterated :: proc(t: ^Typer, id: Ty) -> (r: Read) {
 // rounds nothing is told.
 @(private)
 refuse :: proc(t: ^Typer, at: Loc, format: string, args: ..any) {
-	loc := t.site.? or_else at
+	loc := t.site.loc if t.site != nil else at
 	if t.held > 0 || loc in t.told {
 		return
 	}

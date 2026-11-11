@@ -483,7 +483,7 @@ put_hooked :: proc(w: ^Rows, pl: ^typed.Plan, f: ^typed.Field, v: uintptr, first
 	if hook == nil {
 		return .Unsupported
 	}
-	data := pl.meta[f.meta].data
+	data := typed.extra_at(pl, f.meta).data
 	context.user_ptr = data if data != nil else context.user_ptr
 	a, kind := hook(rawptr(v), runtime.arena_allocator(&w.arena))
 	if kind != .None {

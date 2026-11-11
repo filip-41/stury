@@ -20,9 +20,13 @@ Evaluates :: struct {
 	contains: i32,
 	inner:    []Inner,
 	// For the node that asks, the records the set asks the value to pass and those it asks of each element, and what it
-	// evaluates of every value that passes it, which its arms judge with no run.
+	// evaluates of every value that passes it, which its arms judge with no run. `named` holds the sets in its closure
+	// that evaluate members by name or pattern, and `reach` the longest prefix in it: what the set reads of one member or
+	// element besides the records each element passes.
 	wholes:   []i32,
 	elements: []i32,
+	named:    []^Evaluates,
+	reach:    int,
 	fixed:    ^Evaluates,
 }
 
@@ -45,7 +49,7 @@ evaluates :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, 
 	scope := b.scope
 	defer b.scope = scope
 	enter_scope(b, d, arena, node)
-	key := Block_Key{typeid_of(Evaluates), i32(node), b.scope}
+	key := block_key(typeid_of(Evaluates), i32(node), b.scope)
 	if e, made := b.evaluated[key]; made && !own {
 		return e
 	}
@@ -146,35 +150,32 @@ Evaluating :: struct {
 	undecided: bool, // set when a pattern search ran out of memory
 }
 
-// Marks in `marks` the members, in the object's order, or under `items` the elements of the value that `e` evaluates.
+// Marks the groups of failed members or, under `items`, elements that `e` evaluates, each judged by its place `first`.
+// `ev.passes` asks of an element by the group's index.
 @(private)
-mark_evaluated :: proc(ev: ^Evaluating, e: ^Evaluates, marks: []bool, items: bool, depth := 0) {
+evaluated_groups :: proc(ev: ^Evaluating, e: ^Evaluates, groups: []Group, items: bool, depth := 0) {
 	if depth == MAX_HELD {
 		return
 	}
-	if e.items if items else e.members {
-		for &m in marks {
-			m = true
+	whole := e.items if items else e.members
+	for &g, i in groups {
+		switch {
+		case g.evaluated:
+		case whole:
+			g.evaluated = true
+		case items:
+			g.evaluated = g.first < e.prefix || e.contains >= 0 && ev.passes(ev.data, i, e.contains)
+		case len(e.names) + len(e.patterns) > 0:
+			hit, undecided := evaluates_name(e, ev.names[g.first], ev.scratch)
+			g.evaluated, ev.undecided = hit, ev.undecided || undecided
 		}
-		return
 	}
-	if items {
-		for i in 0 ..< min(e.prefix, len(marks)) {
-			marks[i] = true
-		}
-		for i in 0 ..< len(marks) {
-			marks[i] ||= e.contains >= 0 && ev.passes(ev.data, i, e.contains)
-		}
-	} else if len(e.names) + len(e.patterns) > 0 {
-		for name, i in ev.names {
-			hit, undecided := evaluates_name(e, name, ev.scratch)
-			marks[i] ||= hit
-			ev.undecided ||= undecided
-		}
+	if whole {
+		return
 	}
 	for &x in e.inner {
 		if counts(ev, &x) {
-			mark_evaluated(ev, x.eval, marks, items, depth + 1)
+			evaluated_groups(ev, x.eval, groups, items, depth + 1)
 		}
 	}
 }
@@ -208,11 +209,13 @@ counts :: proc(ev: ^Evaluating, x: ^Inner) -> bool {
 	return x.always || ev.passes(ev.data, -1, x.rec)
 }
 
-// The records the evaluated set of `e` asks the value to be judged by, and those it asks of each element, each once.
+// Sets in `e` the records its evaluated set asks the value to be judged by and those it asks of each element, each once,
+// with the sets that evaluate by name and the longest prefix in its closure.
 @(private)
-evaluated_records :: proc(e: ^Evaluates, arena: runtime.Allocator) -> (wholes, elements: []i32) {
+evaluated_records :: proc(e: ^Evaluates, arena: runtime.Allocator) {
 	seen := make(map[^Evaluates]bool, context.temp_allocator)
 	whole, each := make([dynamic]i32, arena), make([dynamic]i32, arena)
+	named := make([dynamic]^Evaluates, arena)
 	add :: proc(list: ^[dynamic]i32, rec: i32) {
 		for x in list {
 			if x == rec {
@@ -221,7 +224,7 @@ evaluated_records :: proc(e: ^Evaluates, arena: runtime.Allocator) -> (wholes, e
 		}
 		append(list, rec)
 	}
-	walk :: proc(e: ^Evaluates, seen: ^map[^Evaluates]bool, whole, each: ^[dynamic]i32) {
+	walk :: proc(e: ^Evaluates, seen: ^map[^Evaluates]bool, whole, each: ^[dynamic]i32, named: ^[dynamic]^Evaluates, reach: ^int) {
 		if e == nil || e in seen {
 			return
 		}
@@ -229,6 +232,10 @@ evaluated_records :: proc(e: ^Evaluates, arena: runtime.Allocator) -> (wholes, e
 		if e.contains >= 0 {
 			add(each, e.contains)
 		}
+		if len(e.names) + len(e.patterns) > 0 {
+			append(named, e)
+		}
+		reach^ = max(reach^, e.prefix)
 		for x in e.inner {
 			if !x.always {
 				add(whole, x.rec)
@@ -236,11 +243,11 @@ evaluated_records :: proc(e: ^Evaluates, arena: runtime.Allocator) -> (wholes, e
 			if x.test >= 0 {
 				add(whole, x.test)
 			}
-			walk(x.eval, seen, whole, each)
+			walk(x.eval, seen, whole, each, named, reach)
 		}
 	}
-	walk(e, &seen, &whole, &each)
-	return whole[:], each[:]
+	walk(e, &seen, &whole, &each, &named, &e.reach)
+	e.wholes, e.elements, e.named = whole[:], each[:], named[:]
 }
 
 // What the in-place closure of a node evaluates of every value that passes it, through its own keywords, its `$ref` and

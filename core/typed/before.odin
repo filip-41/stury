@@ -36,7 +36,7 @@ keep_before :: proc(b: ^Builder, at: int, x: ^Before) {
 	kept^ = x^
 	kept.field = b.fields[at]
 	_ = owned(b, (cast([^]u8)kept)[:size_of(Before)])
-	b.fields[at].kind, b.meta[at].before = .Before, kept
+	b.fields[at].kind, extra_for(b, at).before = .Before, kept
 }
 
 // Runs the `before` of `b` on `value`, which is the text `lo..hi` of the member at `regs`, and reports what it fails as the
@@ -73,7 +73,7 @@ Before_Read :: #type proc "contextless" (h: ^Check, regs: core.Hook_Regs, m: ^Me
 @(cold)
 before_value :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64) -> (core.Hook_Regs, core.Action) {
 	context = h.ctx
-	b := m.before
+	b := extra_of(h.plan, m).before
 	if b.call == nil && b.first_match {
 		return first_match(h, regs, m, dest, kind, lo, hi)
 	}
@@ -103,8 +103,9 @@ before_value :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_
 // read by the plan's `replace` through `h` at the member's kept record, so its refusals have the member's path, and they
 // name the member's bytes. A judged type then judges the replacement's text.
 read_replacement :: proc(h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, value: core.Value, lo, hi: u64) -> (core.Hook_Regs, core.Action) {
-	b := m.before
-	if h.plan.replace == nil || b.first_match {
+	b := extra_of(h.plan, m).before
+	replace := plan_replace(h.plan)
+	if replace == nil || b.first_match {
 		return refuse(h, regs, {kind = .Unsupported, at = lo}, hi)
 	}
 	out, back, action, failed := run_before(h, regs, b, value, lo, hi)
@@ -126,7 +127,7 @@ read_replacement :: proc(h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintpt
 	frames[sp - 1].seen = 0
 	text: []u8
 	inner: core.Hook_Regs
-	text, inner, action = h.plan.replace(h, {regs.a, u64(uintptr(&b.field)) + size_of(Field), u64(dest) - u64(b.field.offset)}, out, u32(len(frames) - sp - 2))
+	text, inner, action = replace(h, {regs.a, u64(uintptr(&b.field)) + size_of(Field), u64(dest) - u64(b.field.offset)}, out, u32(len(frames) - sp - 2))
 	if h.sp > sp {
 		// A stop inside the replacement gives its open lists to their destinations, as `read_end` does.
 		publish_open(h, inner, sp)
@@ -218,7 +219,7 @@ carry_entries :: proc(h: ^Check, regs: core.Hook_Regs, sub: ^Sink, lo, hi: u64) 
 first_match :: proc(h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64) -> (core.Hook_Regs, core.Action) {
 	if kind == .Null && !m.no_nil {
 		runtime.mem_zero(rawptr(dest), int(m.size))
-		return judge(h, regs, m.before.judge, h.src[lo:hi], lo, hi)
+		return judge(h, regs, extra_of(h.plan, m).before.judge, h.src[lo:hi], lo, hi)
 	}
 	// A load or sink whose allocator is the temporary one keeps what it stores there, so nothing is given back.
 	keep := context.allocator == context.temp_allocator || h.sink != nil && h.sink.entries.allocator == context.temp_allocator
@@ -246,8 +247,8 @@ first_match :: proc(h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, ki
 		if check_text(text, rawptr(dest), view.type, &view, {dups = dups}, context.allocator) != nil {
 			return refuse(h, regs, {kind = .No_Memory, at = lo}, hi)
 		}
-		mark_arm(dest, &m.before.field, m, k)
-		return judge(h, regs, m.before.judge, text, lo, hi)
+		mark_arm(dest, &extra_of(h.plan, m).before.field, m, k)
+		return judge(h, regs, extra_of(h.plan, m).before.judge, text, lo, hi)
 	}
 	back, action := refuse(h, regs, {kind = .No_Arm, at = lo}, hi)
 	for &sub in subs {
@@ -274,15 +275,15 @@ judged_open :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_R
 	// The value is no member of the frame below, whose repeats its own key tracks.
 	seen := parent.seen
 	parent.seen = 0
-	kept := &m.before.field
+	kept := &extra_of(h.plan, m).before.field
 	inner, action := on_token_cold(h, {regs.a, u64(uintptr(kept)) + size_of(Field), regs.c}, t)
 	h.frames[sp - 1].seen = seen
 	if h.sp == sp {
 		back := regs
 		back.c += u64(fld.stride)
 		if action == .Next {
-			lo, hi := core.scalar_ends(t)
-			_, action = m.before.value(h, regs, m, dest, t.kind, lo, hi)
+			lo, hi := check_ends(h, t)
+			_, action = extra_of(h.plan, m).before.value(h, regs, m, dest, t.kind, lo, hi)
 		}
 		return back, action
 	}
@@ -322,7 +323,7 @@ judged_close :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, own, 
 	if action == .Stop || patching {
 		return back, action
 	}
-	_, judged := open.m.before.value(h, at, open.m, 0, .Null, open.lo, t.lo + u64(t.n))
+	_, judged := extra_of(h.plan, open.m).before.value(h, at, open.m, 0, .Null, open.lo, t.lo + u64(t.n))
 	return back, judged if judged == .Stop || action == .Next else action
 }
 

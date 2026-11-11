@@ -17,7 +17,7 @@ Row :: struct {
 	id:   int,
 	name: string `model:"len>=2"`,
 	age:  u8 `model:">=18"`,
-	note: string `model:"optional"`,
+	note: Maybe(string) `model:"optional"`,
 }
 
 // The codes and paths of a sink, one per line.
@@ -66,14 +66,18 @@ csv_model_agrees_with_json :: proc(t: ^testing.T) {
 	testing.expect_value(t, csv, "Too_Short/1/name;Below_Minimum/1/age;Wrong_Kind/2/id;")
 }
 
+// An empty cell is null and a quoted `""` the empty string, as JSON spells them.
 @(test)
-csv_model_empty_cell_is_absent :: proc(t: ^testing.T) {
+csv_model_empty_cell_is_null :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
-	csv, rows, _ := loaded(t, dsv.checks(.Csv), "id,name,age,note\n1,ada,30,\n2,bo,40,\"\"\n3,,50,x\n")
-	testing.expect_value(t, csv, "Missing_Field/2/name;")
+	text := "id,name,age,note\n1,ada,30,\n2,bo,40,\"\"\n3,,50,x\n"
+	csv, rows, _ := loaded(t, dsv.checks(.Csv), text)
+	testing.expect_value(t, csv, "Wrong_Kind/2/name;")
 	testing.expect_value(t, len(rows), 3)
-	testing.expect_value(t, rows[1].note, "")
+	testing.expect(t, rows[0].note == nil && rows[1].note.? == "")
+	js, _, _ := loaded(t, json.checks(.Json), `[{"id":1,"name":"ada","age":30,"note":null},{"id":2,"name":"bo","age":40,"note":""},{"id":3,"name":null,"age":50,"note":"x"}]`)
+	testing.expect_value(t, csv, js)
 }
 
 @(test)
@@ -379,16 +383,18 @@ csv_and_json_collect_the_same_codes :: proc(t: ^testing.T) {
 }
 
 @(test)
-csv_empty_cell_is_a_missing_field_and_json_null_is_a_wrong_kind :: proc(t: ^testing.T) {
+csv_empty_cell_is_judged_as_json_null :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	csv_m, _ := model.compile(&reg, []Law, dsv.checks(.Csv))
 	json_m, _ := model.compile(&reg, []Law, json.checks(.Json))
-	csv, _ := law_row(t, &csv_m, &json_m, {"n", "", "null"})
-	testing.expect_value(t, csv, "Missing_Field/0/n;")
-	csv, _ = law_row(t, &csv_m, &json_m, {"o", "", "null"})
+	csv, js := law_row(t, &csv_m, &json_m, {"n", "", "null"})
+	testing.expect_value(t, csv, "Wrong_Kind/0/n;")
+	testing.expect_value(t, csv, js)
+	csv, js = law_row(t, &csv_m, &json_m, {"o", "", "null"})
 	testing.expect_value(t, csv, "")
+	testing.expect_value(t, csv, js)
 }
 
 @(private = "file")
@@ -509,24 +515,26 @@ Patch_Row :: struct {
 	set:  model.Fields_Set,
 }
 
-// A patch of a record misses no column and no cell, and a table, whose rows hold no set, takes no patch.
+// A patch of a record keeps a member whose column the header lacks and reads an empty cell as null, and a table, whose
+// rows hold no set, takes no patch.
 @(test)
 csv_model_patch_of_a_record_misses_nothing :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	m, e := model.compile(nil, Patch_Row, dsv.checks(.Csv))
 	walktest.expect_nil(t, e)
-	for text in ([]string{"name\nada\n", "id,name\n,ada\n"}) {
-		row := Patch_Row{id = 4}
-		walktest.expect_nil(t, model.patch(&m, &row, transmute([]u8)text))
-		testing.expect(t, row.name == "ada" && row.id == 4 && !model.was_set(&m, Patch_Row, row.set, "id"))
-	}
+	row := Patch_Row{id = 4}
+	walktest.expect_nil(t, model.patch(&m, &row, transmute([]u8)string("name\nada\n")))
+	testing.expect(t, row.name == "ada" && row.id == 4 && !model.was_set(&m, Patch_Row, row.set, "id"))
+	refused, is_typed := model.patch(&m, &row, transmute([]u8)string("id,name\n,bo\n")).(core.Typed_Error)
+	testing.expect(t, is_typed && refused.kind == .Wrong_Kind)
+	testing.expect(t, row.name == "ada" && row.id == 4)
 	table, _ := model.compile(nil, []Patch_Row, dsv.checks(.Csv))
 	rows: []Patch_Row
 	testing.expect(t, model.patch(&table, &rows, transmute([]u8)string("name\nada\n")) != nil)
 }
 
-// A member a dump leaves out writes an empty cell, which a load reads back as absent.
+// A member a dump leaves out writes an empty cell, which a load reads back as null.
 @(test)
 csv_model_dump_leaves_excluded_cells_empty :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -534,12 +542,30 @@ csv_model_dump_leaves_excluded_cells_empty :: proc(t: ^testing.T) {
 	reg: model.Registry
 	m, e := model.compile(&reg, []Row, dsv.checks(.Csv))
 	walktest.expect_nil(t, e)
-	rows := []Row{{1, "ada", 30, ""}, {2, "bo", 40, "x"}}
+	rows := []Row{{1, "ada", 30, nil}, {2, "bo", 40, "x"}}
 	text, err := model.dump(&m, &rows, {exclude_defaults = true})
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, string(text), "id,name,age,note\n1,ada,30,\n2,bo,40,x\n")
 	back: []Row
 	walktest.expect_nil(t, model.load(&m, text, &back))
 	testing.expect_value(t, len(back), 2)
-	testing.expect_value(t, back[0].note, "")
+	testing.expect(t, back[0].note == nil && back[1].note.? == "x")
+}
+
+Strict_Row :: struct {
+	id:   int,
+	note: Maybe(string) `model:"not_null"`,
+}
+
+// A member that refuses null compiles for a row, and its empty cell is the null it refuses.
+@(test)
+csv_model_refuses_an_empty_cell_where_null_is_refused :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	m, e := model.compile(nil, []Strict_Row, dsv.checks(.Csv))
+	walktest.expect_nil(t, e)
+	sink: typed.Sink
+	rows: []Strict_Row
+	_ = model.load(&m, transmute([]u8)string("id,note\n1,x\n2,\n"), &rows, &sink)
+	testing.expect_value(t, spelled(&sink), "Wrong_Kind/1/note;")
 }

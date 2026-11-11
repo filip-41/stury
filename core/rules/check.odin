@@ -262,6 +262,16 @@ operand_text :: proc(l: ^Leaf, kind: core.Typed_Error_Kind, members: bool, alloc
 		}
 	}
 	#partial switch kind {
+	case .Wrong_Kind:
+		// A number takes the integers, so a leaf that takes both is named by its number alone.
+		names := [Kind]string{.Null = "null", .Bool = "boolean", .Integer = "integer", .Number = "number", .String = "string", .Array = "array", .Object = "object"}
+		kinds := l.kinds - ({.Integer} if .Number in l.kinds else {})
+		k := 0
+		for kind in kinds {
+			strings.write_string(&b, (" or " if k == card(kinds) - 1 else ", ") if k > 0 else "")
+			strings.write_string(&b, names[kind])
+			k += 1
+		}
 	case .Too_Short:
 		bound(&b, true, l.min_length, "character")
 	case .Too_Long:

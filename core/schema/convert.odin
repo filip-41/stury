@@ -44,20 +44,22 @@ converter_destroy :: proc(cv: ^Converter) {
 }
 
 // Converts `doc`, a document the schema describes in the format `cv` reads, to the format it writes. The document is
-// checked as it stands, then its data model is written whole, so a member the schema leaves open survives, and the text
-// is checked again as the output format reads it. A Plain node is written as the check read it, by the arm the check
-// decides, and one no rule read as its document reads it. A value the output format cannot spell is a refusal that
-// names its path, and a text that fails the schema is the check's failures, in `sink` when one is given, whose
-// positions are in the text that stage returns with it. A format with attributes writes each as a member before the
-// element's children, a name its children repeat as an array and its text as `#text` when the element has attributes.
-// An attribute and a child of one name, and an array with attributes, are refused. An empty cell of a flat format is a
-// member that is absent.
+// checked as it stands, each cell read as its format reads it and a markup text as the check read it by the arm it
+// decides, then its data model is written whole, so a member the
+// schema leaves open survives, and the text is checked again as the output format reads it, the schema picking the kind
+// of each of its cells. A value the output format cannot spell is a refusal that names its path, and a text that fails
+// the schema is the check's failures, in `sink` when one is given, whose positions are in the text that stage returns
+// with it. A format with attributes writes each as a member before the element's children, a name its children repeat
+// as an array and its text as `#text` when the element has attributes. An attribute and a child of one name, and an
+// array with attributes, are refused.
 convert :: proc(cv: ^Converter, doc: ^core.Document, opts := core.Write_Options{}, sink: ^typed.Sink = nil, allocator := context.allocator) -> (text: []u8, stage: Stage, err: core.Error) {
 	virtual.arena_free_all(&cv.arena)
 	scratch := virtual.arena_allocator(&cv.arena)
+	// A markup text's kind is the one the check read it as, and a flat cell's the one its format reads.
 	readings: typed.Readings
 	readings.read.allocator = scratch
-	if err = check_node(&cv.from, doc, core.ROOT, sink, &readings); err != nil {
+	markup := doc.readers != nil && doc.readers.attribute != nil
+	if err = check_node(&cv.from, doc, core.ROOT, sink, &readings if markup else nil); err != nil {
 		return nil, .Input, err
 	}
 	if readings.short {
@@ -78,21 +80,28 @@ convert :: proc(cv: ^Converter, doc: ^core.Document, opts := core.Write_Options{
 		return nil, .Write, locate(&m, doc, wrote, allocator)
 	}
 	context.allocator = allocator
-	// The text carries the data the schema describes, so the schema picks its cells' kinds again.
-	picked: typed.Readings
-	picked.read.allocator = scratch
-	if err = check_reading(&cv.into, text, sink, nil, nil, &picked); err != nil {
+	if err = output_check(cv, text, sink); err != nil {
 		return text, .Output, err
 	}
 	return text, .Input, nil
 }
 
-// What the data model of a conversion is built with, and the kind the check read each Plain value as, by its first byte.
+// The text carries the data the schema describes, so the schema picks its cells' kinds as the output is read back.
+@(private = "file")
+output_check :: proc(cv: ^Converter, text: []u8, sink: ^typed.Sink) -> core.Error {
+	picked: typed.Readings
+	picked.read.allocator = virtual.arena_allocator(&cv.arena)
+	defer virtual.arena_free_all(&cv.arena)
+	return check_reading(&cv.into, text, sink, nil, nil, &picked)
+}
+
+// What the data model of a conversion is built with.
 @(private = "file")
 Model :: struct {
 	to:      core.As,
 	flat:    bool,
 	steps:   [dynamic]core.Step,
+	// The kind the check read each markup text as, by its first byte.
 	read:    map[u64]core.Kind,
 	refused: bool,
 	kind:    core.Typed_Error_Kind,
@@ -132,10 +141,9 @@ refuse :: proc(m: ^Model, kind: core.Typed_Error_Kind) {
 	m.refused, m.kind = true, kind
 }
 
-// The data model of `v`. A document with attributes or flat rows is rebuilt, so that a node is an object of its
-// attributes, then its children, or its text as `#text` when it has any, a name its children repeat is an array, and a
-// flat row has no member for an empty cell. Any other value is itself, unless the model is probing, which tries each
-// scalar alone against the output format.
+// The data model of `v`. A document with attributes is rebuilt, so that a node is an object of its attributes, then its
+// children, or its text as `#text` when it has any, and a name its children repeat is an array. Any other value is
+// itself, unless the model is probing, which tries each scalar alone against the output format.
 @(private = "file")
 build :: proc(m: ^Model, v: core.Value) -> core.Value {
 	ref, is_node := v.(core.Node_Ref)
@@ -143,8 +151,7 @@ build :: proc(m: ^Model, v: core.Value) -> core.Value {
 		return v
 	}
 	markup := ref.doc.readers != nil && ref.doc.readers.attribute != nil
-	flat := ref.doc.readers != nil && ref.doc.readers.flat
-	if !m.probe && !markup && !flat {
+	if !m.probe && !markup {
 		return v
 	}
 	attributes := core.attributes_of(ref.doc, ref.node)
@@ -169,7 +176,7 @@ build :: proc(m: ^Model, v: core.Value) -> core.Value {
 		}
 		return items
 	case kind == .Object:
-		return object(m, v, members if members != nil else core.new_object(), markup, flat)
+		return object(m, v, members if members != nil else core.new_object(), markup)
 	case members != nil:
 		if kind != .Null && core.node_string(ref.doc, ref.node) != "" {
 			append(&m.steps, core.Name("#text"))
@@ -278,15 +285,12 @@ attribute_members :: proc(m: ^Model, ref: core.Node_Ref, attributes: ^core.Attri
 }
 
 // The children of an object node added to `members`. In a document with attributes a name repeated is an array at the
-// place of its first, and none may share a name with an attribute. A flat row has no member where the cell is empty.
+// place of its first, and none may share a name with an attribute.
 @(private = "file")
-object :: proc(m: ^Model, v: core.Value, members: ^core.Object, markup, flat: bool) -> core.Value {
+object :: proc(m: ^Model, v: core.Value, members: ^core.Object, markup: bool) -> core.Value {
 	it := core.value_pairs(v)
 	if !markup {
 		for key, child in core.value_pair_next(&it) {
-			if flat && core.value_kind(child) == .Null {
-				continue
-			}
 			append(&m.steps, core.Name(key))
 			core.object_append(members, key, build(m, child))
 			leave(m)

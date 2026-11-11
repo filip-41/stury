@@ -456,7 +456,7 @@ Typed_Error_Kind :: enum u8 {
 	Repeated_Tag, // an object for a union that reads by tag has two
 	Duplicate_Key, // a read under `.Refuse` met a key that repeats one of its object's
 	No_Memory,
-	Bad_Option, // a nil target, at no byte
+	Bad_Option, // an option or a target the call cannot take, at no byte, `want.text` saying why where it can
 	Plan_Mismatch, // a plan built for another type or format, at no byte
 	Unsupported, // a type a plan cannot read or write, the last step names the field
 	Ambiguous_Union, // a union whose arms a value's class cannot tell apart
@@ -485,6 +485,7 @@ Typed_Error_Kind :: enum u8 {
 	No_Arm, // a value that passes none of a rule's subschemas
 	Many_Arms, // a value that passes more than one of a rule's subschemas, where it takes one
 	No_Sample, // a description no value passes, or none the bounded search found, `want.text` names the node
+	No_Invalid_Sample, // a description every value passes, or one the bounded search found no failing value of
 	Read_Only, // a key of a read_only member, which a load refuses where its struct forbids the members it does not name
 	Custom, // a value a model's validator refused, `want.text` holds its message
 	Check_Failed, // a value a model's dump checked fails its rules, the steps lead to the first and `want.text` is its code
@@ -567,13 +568,13 @@ Error_Entry :: struct {
 // by the tags.
 Typed_Detail :: struct #raw_union {
 	inner: Fault `raw_union_tag:"kind=Walk"`,
-	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Missing_Field,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema,kind=No_Sample,kind=Custom,kind=Check_Failed"`,
+	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Missing_Field,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema,kind=No_Sample,kind=No_Invalid_Sample,kind=Custom,kind=Check_Failed,kind=Bad_Option"`,
 	plans: Plan_Clash `raw_union_tag:"kind=Plan_Mismatch"`,
 }
 
 // `type` is the type a `.Wrong_Kind`, `.Out_Of_Range` or `.Not_A_Member` read wanted. `text` is the refused scalar's
 // source text for those kinds, which lives as long as `src`, the flag a `.Bad_Tag` names, or why a type is
-// `.Unsupported` or a union `.Ambiguous_Union`. Either may be empty.
+// `.Unsupported`, a union `.Ambiguous_Union` or an option `.Bad_Option`. Either may be empty.
 Typed_Want :: struct {
 	type: typeid,
 	text: string,
@@ -628,7 +629,8 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 	.Not_Allowed   = {"not_allowed", "No value is allowed here"},
 	.No_Arm        = {"no_arm", "Value passes none of the subschemas"},
 	.Many_Arms     = {"many_arms", "Value passes more than one subschema"},
-	.No_Sample     = {"no_sample", "No value passes the description"},
+	.No_Sample     = {"no_sample", "No value passing the description was found"},
+	.No_Invalid_Sample = {"no_invalid_sample", "No value failing the description was found"},
 	.Read_Only     = {"read_only", "Field is read only"},
 	.Custom        = {"custom", "Value is not valid"},
 	.Check_Failed  = {"check_failed", "Value fails its model's rules"},
@@ -644,7 +646,7 @@ SCHEMA_MESSAGES := #partial [Typed_Error_Kind]string {
 }
 
 // The kinds that name no byte of a source.
-TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .No_Sample, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Invalid_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
+TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .No_Sample, .No_Invalid_Sample, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Invalid_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
 
 // Moves the bytes of the source `e` names by `by`, for an error found in a text that starts `by` bytes in.
 move_typed_error :: proc(e: ^Typed_Refusal, by: u64) {
@@ -740,9 +742,6 @@ write_typed_message :: proc(w: io.Writer, e: Typed_Refusal) -> io.Error {
 			reflect.write_typeid(w, p.type) or_return
 			_, err := io.write_string(w, ", not the target's type")
 			return err
-		} else if p.plan != nil && p.read != nil {
-			_, err := io.write_string(w, "Plan is a model's, which reads only through model.load")
-			return err
 		}
 	case .Bad_Tag:
 		if len(e.want.text) > 0 {
@@ -764,7 +763,7 @@ write_typed_message :: proc(w: io.Writer, e: Typed_Refusal) -> io.Error {
 			_, err := io.write_string(w, e.want.text)
 			return err
 		}
-	case .Unsupported, .Ambiguous_Union, .Bad_Schema, .No_Sample:
+	case .Unsupported, .Ambiguous_Union, .Bad_Schema, .No_Sample, .No_Invalid_Sample, .Bad_Option:
 		io.write_string(w, TYPED_KIND_RULES[e.kind].message) or_return
 		if len(e.want.text) > 0 {
 			io.write_string(w, ": ") or_return
@@ -1073,8 +1072,11 @@ write_entry_message :: proc(w: io.Writer, e: Error_Entry) -> io.Error {
 	if len(e.keyword_path) > 0 && SCHEMA_MESSAGES[e.kind] != "" {
 		message = SCHEMA_MESSAGES[e.kind]
 	}
+	if e.kind == .Not_Allowed && len(e.keyword_path) > 0 && e.keyword_path[len(e.keyword_path) - 1] == Step(Name("not")) {
+		message = "Value passes the subschema that not refuses"
+	}
 	io.write_string(w, message) or_return
-	if text, named := e.operand.(string); named && len(e.keyword_path) == 0 && e.kind in ENTRY_OPERAND_KINDS {
+	if text, named := e.operand.(string); named && e.kind in ENTRY_OPERAND_KINDS && !names_member(e) {
 		// What the failed rule asks, after the message: "String is too short, at least 2 characters".
 		io.write_string(w, ", ") or_return
 		if e.kind == .Wrong_Kind {
@@ -1088,6 +1090,17 @@ write_entry_message :: proc(w: io.Writer, e: Error_Entry) -> io.Error {
 		io.write_quoted_string(w, name) or_return
 	}
 	return nil
+}
+
+// Whether the operand of a schema's entry `e` is the member name a `propertyNames` rule failed on.
+@(private)
+names_member :: proc(e: Error_Entry) -> bool {
+	for step in e.keyword_path {
+		if step == Step(Name("propertyNames")) {
+			return true
+		}
+	}
+	return false
 }
 
 // The stable code of a check's entry `e`, which a problem document and a caller match on.

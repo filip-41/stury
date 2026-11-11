@@ -13,14 +13,19 @@ import rules "../rules"
 // keyword in `want.text`.
 plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Error) {
 	context.allocator = allocator
-	b := plan_start(&p, as, opts)
+	b: Builder
+	trail: [TRAIL_MAX]string = ---
+	plan_start(&b, &trail, &p, as, opts)
 	plan_reads(&p, reads)
-	arena: runtime.Allocator
+	arena, made := plan_arena(&p)
+	if made {
+		b.describing = new(Describe_State, arena)
+	}
+	if b.describing == nil {
+		refuse_plan(&b, .No_Memory)
+		return p, core.error_of(plan_finish(&b, 0))
+	}
 	if opts.checking {
-		made: bool
-		if arena, made = plan_arena(&p); !made {
-			refuse_plan(&b, .No_Memory)
-		}
 		b.uses.allocator = arena
 		b.programs = make(rules.Programs, arena)
 	}
@@ -37,9 +42,13 @@ plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, 
 	if opts.checking {
 		choose_arms(&b, arena)
 		judging_ids(&b, arena)
+		held_nesting(&b)
+		shared_uses(&b)
 		for u in b.uses {
 			if len(u.applies) > 0 {
-				p.fork = fork_record(&b)
+				if ext := plan_ext(&p); ext != nil {
+					ext.fork = fork_record(&b)
+				}
 				break
 			}
 		}
@@ -47,7 +56,11 @@ plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, 
 			refuse_plan(&b, .No_Memory)
 		}
 	}
-	p.leaves, p.uses = b.leaves[:], b.uses[:]
+	if ext := plan_ext(&p); ext != nil {
+		ext.leaves, ext.uses = b.leaves[:], b.uses[:]
+	} else {
+		refuse_plan(&b, .No_Memory)
+	}
 	return p, core.error_of(plan_finish(&b, description_stamp(d, as, opts)))
 }
 
@@ -76,15 +89,15 @@ fill_node :: proc(b: ^Builder, d: ^rules.Description, at: int, at_node: rules.No
 		f.kind = .Any
 	case null && .Null in kinds:
 		f.kind = .Maybe
-		node_list(b, d, {typeid_of(Maybe(rules.Node)), i32(at_node), 0}, at_node, &m, false)
+		node_list(b, d, block_key(typeid_of(Maybe(rules.Node)), i32(at_node), 0), at_node, &m, false)
 	case leaf == {.Object} && n.object >= 0 && (len(o.members) > 0 || o.additional == rules.NONE):
-		node_struct(b, d, {typeid_of(rules.Object), n.object, 0}, o, &f, &m)
+		node_struct(b, d, block_key(typeid_of(rules.Object), n.object, 0), o, &f, &m)
 	case leaf == {.Object}:
 		f.kind = .Map
-		node_list(b, d, {typeid_of(rules.Object), n.object, 0}, o.additional, &m)
+		node_list(b, d, block_key(typeid_of(rules.Object), n.object, 0), o.additional, &m)
 	case leaf == {.Array}:
 		f.kind = .Slice
-		node_list(b, d, {typeid_of(rules.Array), n.array, 0}, d.arrays[n.array].items if n.array >= 0 else rules.NONE, &m)
+		node_list(b, d, block_key(typeid_of(rules.Array), n.array, 0), d.arrays[n.array].items if n.array >= 0 else rules.NONE, &m)
 	case leaf == {.Bool}:
 		f.kind = .Bool
 	case leaf == {.Integer}:
@@ -170,15 +183,15 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 				o.additional = rules.NONE
 			}
 			o.members, u.requires = dependent_members(b, arena, o)
-			if !known_struct(b, {typeid_of(rules.Object), n.object, b.scope}, &f, &m) && struct_block(b, {typeid_of(rules.Object), n.object, b.scope}, &f, &m, o.members, false) >= 0 {
+			if !known_struct(b, block_key(typeid_of(rules.Object), n.object, b.scope), &f, &m) && struct_block(b, block_key(typeid_of(rules.Object), n.object, b.scope), &f, &m, o.members, false) >= 0 {
 				checked_members(b, d, arena, m.block, o, UNEVALUATED_PROPERTIES[:] if b.unevaluated[{0, n.object}] else ADDITIONAL[:])
 			}
 			if o.additional != rules.NONE {
-				u.additional = checked_block(b, d, arena, {typeid_of(Maybe(rules.Object)), n.object, b.scope}, nil, o.additional, UNEVALUATED_PROPERTIES[:] if b.unevaluated[{0, n.object}] else ADDITIONAL[:])
+				u.additional = checked_block(b, d, arena, block_key(typeid_of(Maybe(rules.Object)), n.object, b.scope), nil, o.additional, UNEVALUATED_PROPERTIES[:] if b.unevaluated[{0, n.object}] else ADDITIONAL[:])
 			}
 			if p, inline := b.inline[n.object]; inline {
 				site := [2]core.Step{core.Name("patternProperties"), core.Name(p.expression)}
-				u.pattern, u.regex = checked_block(b, d, arena, {typeid_of(rules.Pattern), n.object, b.scope}, nil, p.node, site[:]), p.regex
+				u.pattern, u.regex = checked_block(b, d, arena, block_key(typeid_of(rules.Pattern), n.object, b.scope), nil, p.node, site[:]), p.regex
 			}
 			// A `propertyNames` with arms is the held record's `.Names` arm.
 			if keys, _ := reached(d, o.keys); keys != rules.NONE && !holds(b, d, keys, {}) {
@@ -187,14 +200,14 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 		}
 		if .Array in n.kinds || n.array >= 0 {
 			a := d.arrays[n.array] if n.array >= 0 else rules.Array{items = rules.NONE}
-			u.items = checked_block(b, d, arena, {typeid_of(rules.Array), n.array, b.scope}, a.prefix, a.items, UNEVALUATED_ITEMS[:] if b.unevaluated[{1, n.array}] else ITEMS[:])
+			u.items = checked_block(b, d, arena, block_key(typeid_of(rules.Array), n.array, b.scope), a.prefix, a.items, UNEVALUATED_ITEMS[:] if b.unevaluated[{1, n.array}] else ITEMS[:])
 			items, _ := reached(d, a.items)
 			u.inside = len(a.prefix) > 0 || items != rules.NONE
 		}
 	}
 	// A container of a kind the node reads no block for opens on the block that reads nothing, so its close judges it.
 	if m.block < 0 || u.items == 0 {
-		nothing := checked_block(b, d, arena, {typeid_of(rules.Array), -1, 0}, nil, rules.NONE, ITEMS[:])
+		nothing := checked_block(b, d, arena, block_key(typeid_of(rules.Array), -1, 0), nil, rules.NONE, ITEMS[:])
 		m.block = nothing if m.block < 0 else m.block
 		u.items = nothing if u.items == 0 else u.items
 	}
@@ -456,7 +469,7 @@ node_union :: proc(b: ^Builder, d: ^rules.Description, at_node: rules.Node_Index
 		return -1
 	}
 	m.arms, m.no_nil = made, count == len(all)
-	key := Block_Key{typeid_of(rules.Node), i32(at_node), 0}
+	key := block_key(typeid_of(rules.Node), i32(at_node), 0)
 	at, known := b.blocks[key]
 	if !known {
 		at = reserve_block(b, count + 1, key)

@@ -21,13 +21,18 @@ POOL_WIDTH = 3
 ARENA = 12 << 20
 # The peak over many files may pass the peak over the base run by this many bytes.
 SLACK = 8 << 20
-# A schema check of one file of records holds no memory per record: its peak stays within a few times the file.
-CHECK_PEAK = 64 << 20
+# A schema check of one file of records holds no memory per record, and fmt --schema of a table holds the file and its
+# converted text, not a document of it: the peak of either stays within a few times the file.
+SCHEMA_PEAK = 64 << 20
 # A stream of regex pieces over long strings that need decoding holds the pieces live, not what making them took: the
 # peak of a count or a reduce over every piece of 400 bodies of about 3 KB stays under this.
 PIECES_PEAK = 32 << 20
 PIECE_FILTERS = ('[.[].body | splits(" +")] | length', 'reduce (.[].body | splits(" +")) as $p (0; . + 1)',
                  '[.[].body | scan("[a-z]+")] | length', '[.[].body | . as $s | range(0; length; 3) | $s[.:. + 3]] | length')
+# schema sample holds one value at a time: the peak of a long run stays under this.
+SAMPLE_PEAK = 16 << 20
+SAMPLES = 200000
+TABLE_SCHEMA = '{"type":"array","items":{"properties":{"id":{"type":"integer"},"ok":{"type":"boolean"}}}}'
 SCHEMA = '{"properties":{"id":{"type":"integer"},"level":{"enum":["info","warn"]},"msg":{"type":"string","maxLength":200}}}'
 
 
@@ -69,11 +74,18 @@ def main():
                 os.link(first, path)
         schema = os.path.join(tmp, "schema.json")
         open(schema, "w").write(SCHEMA)
+        table = os.path.join(tmp, "table.json")
+        open(table, "w").write(TABLE_SCHEMA)
         lanes = (("ndjson", ["-c", "."]), ("json", ["-c", "."]), ("csv", ["-c", "--from", "csv", "."]), ("ndjson", ["-R", "."]),
-                 ("ndjson", ["check", "--schema", schema]))
+                 ("ndjson", ["check", "--schema", schema]), ("csv", ["fmt", "--schema", table, "--from", "csv", "--infer", "--to", "ndjson"]))
         pieces = os.path.join(tmp, "pieces.json")
         open(pieces, "w").write(pieces_fixture())
         for threads, (exe, arenas, base) in exes.items():
+            held = peak_over(exe, ["schema", "sample", "-c", "--count", str(SAMPLES)], [schema])
+            ok = held <= SAMPLE_PEAK
+            print(f"{'ok  ' if ok else 'FAIL'} {threads:9} schema sample --count {SAMPLES} {held >> 20:4} MiB")
+            if not ok:
+                failed.append((threads, "schema sample"))
             for filter in PIECE_FILTERS:
                 held = peak_over(exe, ["-c", filter], [pieces])
                 ok = held <= PIECES_PEAK
@@ -82,7 +94,7 @@ def main():
                     failed.append((threads, "pieces", filter))
             for kind, args in lanes:
                 one, many = peak_over(exe, args, paths[kind][:base]), peak_over(exe, args, paths[kind])
-                ok = many <= one + SLACK + arenas and (args[0] != "check" or one <= CHECK_PEAK)
+                ok = many <= one + SLACK + arenas and (args[0] not in ("check", "fmt") or one <= SCHEMA_PEAK)
                 print(f"{'ok  ' if ok else 'FAIL'} {threads:9} {kind:7} {' '.join(args):18} {base} files {one >> 20:4} MiB, {COPIES} files {many >> 20:4} MiB")
                 if not ok:
                     failed.append((threads, kind, args))

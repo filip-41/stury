@@ -112,6 +112,61 @@ a_load_refuses_a_repeated_key_where_the_read_does :: proc(t: ^testing.T) {
 	testing.expect_value(t, p.age, 30)
 }
 
+@(private = "file")
+Repeat_Inner :: struct {
+	k: int `model:">=0"`,
+}
+
+@(private = "file")
+Repeated :: struct {
+	a: Repeat_Inner,
+	b: []Repeat_Inner,
+	n: string `model:"len>=2"`,
+}
+
+// The value a repeat policy keeps is the one judged, with a sink or without one.
+@(test)
+a_load_judges_the_value_its_repeat_policy_keeps :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	reg: model.Registry
+	m, compiled := model.compile(&reg, Repeated, json.checks(.Json))
+	walktest.expect_nil(t, compiled)
+	Case :: struct {
+		dups: core.Duplicates,
+		text: string,
+		fails: []string,
+	}
+	cases := [?]Case {
+		{.Last, `{"a":{"k":-1,"k":1},"b":[],"n":"ab"}`, nil},
+		{.Last, `{"a":{"k":1},"b":[],"n":"a","n":"ab"}`, nil},
+		{.Last, `{"a":{"k":1,"k":-1},"b":[],"n":"ab"}`, {".a.k"}},
+		{.Last, `{"a":{"k":-1},"n":"a","b":[{"k":2,"k":-3}],"a":{"k":1},"n":"ab"}`, {".b[0].k"}},
+		{.First, `{"a":{"k":1,"k":-1},"b":[],"n":"ab"}`, nil},
+		{.First, `{"a":{"k":1},"b":[],"n":"ab","n":"a"}`, nil},
+		{.First, `{"a":{"k":-1,"k":1},"b":[],"n":"ab"}`, {".a.k"}},
+	}
+	for c in cases {
+		v: Repeated
+		sink: typed.Sink
+		err := model.load(&m, transmute([]u8)c.text, &v, &sink, {dups = c.dups})
+		testing.expectf(t, (err == nil) == (len(c.fails) == 0) && len(sink.entries) == len(c.fails), "%v %s: %v %v", c.dups, c.text, err, sink.entries)
+		for want, i in c.fails {
+			if i < len(sink.entries) {
+				testing.expectf(t, steps_text(sink.entries[i].path) == want, "%v %s: %v", c.dups, c.text, sink.entries[i].path)
+			}
+		}
+		alone: Repeated
+		err = model.load(&m, transmute([]u8)c.text, &alone, nil, {dups = c.dups})
+		testing.expectf(t, (err == nil) == (len(c.fails) == 0), "%v %s without a sink: %v", c.dups, c.text, err)
+	}
+	v: Repeated
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"a":{"k":-1,"k":5},"b":[],"n":"x","n":"ab"}`), &v, nil, {dups = .Last}))
+	testing.expect(t, v.a.k == 5 && v.n == "ab")
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"a":{"k":5,"k":-1},"b":[],"n":"ab","n":"x"}`), &v, nil, {dups = .First}))
+	testing.expect(t, v.a.k == 5 && v.n == "ab")
+}
+
 @(test)
 a_load_follows_the_roles_of_its_members :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -327,7 +382,7 @@ Fenced :: struct {
 @(private = "file")
 mismatch :: proc(err: core.Error) -> bool {
 	f, ok := err.(core.Typed_Error)
-	return ok && f.kind == .Plan_Mismatch
+	return ok && f.kind == .Bad_Option && strings.contains(f.want.text, "model.load")
 }
 
 @(test)
@@ -761,4 +816,106 @@ the_registry_copies_the_union_tag :: proc(t: ^testing.T) {
 	testing.expect_value(t, model.register_naming(&reg, {union_tag = string(tag)}), runtime.Allocator_Error.None)
 	tag[0] = 'x'
 	testing.expect_value(t, reg.naming.union_tag, "kind")
+}
+
+@(private = "file")
+Hue :: enum {
+	Red,
+	Deep_Blue,
+}
+
+@(private = "file")
+Kept :: struct {
+	name:  string `model:"optional"`,
+	tags:  []string `model:"optional"`,
+	hue:   Hue `model:"optional"`,
+	code:  string,
+	count: int,
+	set:   model.Fields_Set,
+}
+
+// A model keeps what it takes from its registry, so it loads, dumps, validates and describes after the registry is
+// destroyed.
+@(test)
+a_model_outlives_its_registry :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	reg: model.Registry
+	walktest.expect_nil(t, model.register(&reg, Kept, "name", "member"))
+	walktest.expect_nil(t, model.register(&reg, Kept, "tags", []string{"a", "b"}))
+	walktest.expect_nil(t, model.register(&reg, Kept, "hue", Hue.Deep_Blue))
+	testing.expect_value(t, model.register(&reg, model.Enum_Rule{type = Hue, renames = {{"Deep_Blue", "navy"}}}), runtime.Allocator_Error.None)
+	testing.expect_value(t, model.register(&reg, model.Field_Rule_Of{Kept, "code", "len>=2"}), runtime.Allocator_Error.None)
+	testing.expect_value(t, model.register(&reg, model.Type_Rule{int, ">=0"}), runtime.Allocator_Error.None)
+	testing.expect_value(t, model.register(&reg, model.Naming{fields = .Camel, union_tag = "kind"}), runtime.Allocator_Error.None)
+	m, compiled := model.compile(&reg, Kept, json.checks(.Json))
+	walktest.expect_nil(t, compiled)
+	defer model.destroy(&m)
+	model.destroy(&reg)
+	v: Kept
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"code": "ab", "count": 1}`), &v, allocator = context.temp_allocator))
+	testing.expect(t, v.name == "member" && len(v.tags) == 2 && v.tags[1] == "b" && v.hue == .Deep_Blue)
+	text, err := model.dump(&m, &v, allocator = context.temp_allocator)
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, string(text), `{"name":"member","tags":["a","b"],"hue":"navy","code":"ab","count":1}`)
+	walktest.expect_nil(t, model.validate(&m, &v))
+	v.count = -1
+	testing.expect(t, model.validate(&m, &v) != nil)
+	d, described := model.schema(&m, .Load, context.temp_allocator)
+	walktest.expect_nil(t, described)
+	testing.expect(t, len(d.nodes) > 0)
+}
+
+@(private = "file")
+Sent :: struct {
+	name:  string `model:"len>=2"`,
+	email: Maybe(string),
+	role:  string `model:"optional"`,
+	set:   model.Fields_Set,
+}
+
+// A refused load leaves a missing member's bit clear, so the set names only what the text held.
+@(test)
+a_refused_load_sets_no_bit_of_a_missing_member :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	m, e := model.compile(nil, Sent, json.checks(.Json))
+	walktest.expect_nil(t, e)
+	cases := [?]struct {
+		text:          string,
+		name, email: bool,
+	} {
+		{`{"name":"ada","role":"admin"}`, true, false},
+		{`{"email":null}`, false, true},
+		{`{"role":"admin","name":"ada"}`, true, false},
+	}
+	for c in cases {
+		sent: Sent
+		sink: typed.Sink
+		testing.expect(t, model.load(&m, transmute([]u8)c.text, &sent, &sink) != nil)
+		testing.expectf(t, model.was_set(&m, Sent, sent.set, "name") == c.name && model.was_set(&m, Sent, sent.set, "email") == c.email, "%s: %v", c.text, sent.set)
+	}
+}
+
+// A load that keeps every repeat is refused for why, as no member holds two values.
+@(test)
+a_load_refuses_to_keep_every_repeat_and_says_why :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	m, _ := model.compile(nil, Fenced, json.checks(.Json))
+	v: Fenced
+	refused, is_typed := model.load(&m, transmute([]u8)string(`{"name":"a"}`), &v, opts = {dups = .All}).(core.Typed_Error)
+	testing.expect(t, is_typed && refused.kind == .Bad_Option && strings.contains(refused.want.text, ".All"))
+}
+
+// A repeated key's refusal names the path to the repeat.
+@(test)
+a_repeated_keys_refusal_names_its_path :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	m, _ := model.compile(nil, Repeated, json.checks(.Json))
+	v: Repeated
+	sink: typed.Sink
+	_ = model.load(&m, transmute([]u8)string(`{"a":{"k":1},"b":[{"k":1},{"k":2,"k":3}]}`), &v, &sink)
+	testing.expect_value(t, len(sink.entries), 1)
+	testing.expect_value(t, steps_text(sink.entries[0].path), `.b[1].k`)
 }

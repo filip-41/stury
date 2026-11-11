@@ -312,11 +312,12 @@ owned_steps :: proc(out: ^[]core.Step, steps: []core.Step, reverse: bool) -> boo
 
 // Adds a refusal found before a read starts (a duplicate key, a fault of the text) to `c`, as an entry when `wide`.
 sink_refusal :: proc(c: ^Sink, e: core.Typed_Refusal, $wide: bool) {
+	e := e
 	when wide {
 		if c == nil {
 			return
 		}
-		if sink_room(c, context.allocator) && !sink_entry(c, core.Error_Entry{kind = e.kind, start = e.at, end = e.at, record = c.record}, nil, nil, false) {
+		if sink_room(c, context.allocator) && !sink_entry(c, core.Error_Entry{kind = e.kind, start = e.at, end = e.at, record = c.record}, e.steps[:e.n_steps], nil, false) {
 			c.truncated = true
 		}
 	} else {

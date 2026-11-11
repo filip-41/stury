@@ -60,7 +60,7 @@ value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocato
 // writes, read back as `core.built_value` reads a node. A plan with no build, which its reads give, is `.Unsupported`.
 marshal_value :: proc(v: $T, plan: ^typed.Plan, allocator := context.allocator) -> (core.Value, core.Error) {
 	v := v
-	if plan == nil || plan.build == nil {
+	if plan == nil || typed.plan_text_build(plan) == nil {
 		return nil, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
 	text, merr := marshal(v, plan)
@@ -68,7 +68,7 @@ marshal_value :: proc(v: $T, plan: ^typed.Plan, allocator := context.allocator) 
 	if merr != nil {
 		return nil, merr
 	}
-	doc, err := plan.build(text, plan.as, context.allocator)
+	doc, err := typed.plan_text_build(plan)(text, plan.as, context.allocator)
 	if err.kind != .None {
 		return nil, core.error_of(err)
 	}

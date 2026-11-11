@@ -22,7 +22,7 @@ register_before :: proc(reg: ^Registry, $T: typeid, field: string, rewrite: proc
 	if !has_member(T, field, nil) {
 		return .Invalid_Argument
 	}
-	return add_hook(&reg.befores, Before_Of{T, field, {call = call, fn = rawptr(rewrite), value = typed.before_value}}, true)
+	return add_hook(reg, &reg.befores, Before_Of{T, field, {call = call, fn = rawptr(rewrite), value = typed.before_value}}, true)
 }
 
 // The `before` of member `field` of `owner` in a plan that loads, nil for none, which the registry keeps.

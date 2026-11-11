@@ -88,11 +88,13 @@ sample_each :: proc(d: ^rules.Description, as: core.As, opts: Sample_Options, si
 		comments = opts.comments,
 	}
 	scratch := virtual.arena_allocator(&arena)
+	// What drawing, writing and checking a value takes in the temp allocator goes with the value.
+	context.temp_allocator = scratch
 	for _ in 0 ..< max(opts.count, 1) {
 		virtual.arena_free_all(&arena)
 		text, ok := value_text(&g, &b, as, opts, scratch)
 		if !ok {
-			return no_sample(&g, allocator)
+			return no_sample(&g, .No_Invalid_Sample if opts.invalid else .No_Sample, allocator)
 		}
 		sink(text, user)
 	}
@@ -116,11 +118,12 @@ sample :: proc(d: ^rules.Description, as: core.As, opts := Sample_Options{}, all
 	return list[:], nil
 }
 
-// The `.No_Sample` that names the node `g` stopped at, by its keyword path from the root.
+// The refusal of `kind`, `.No_Sample` or `.No_Invalid_Sample`, that names the node `g` stopped at, by its keyword path
+// from the root.
 @(private = "file")
-no_sample :: proc(g: ^Gen, allocator: runtime.Allocator) -> core.Error {
+no_sample :: proc(g: ^Gen, kind: core.Typed_Error_Kind, allocator: runtime.Allocator) -> core.Error {
 	e := core.Typed_Refusal {
-		kind = .No_Sample,
+		kind = kind,
 	}
 	at := g.culprit if g.culprit != rules.NONE else g.d.root
 	steps := make([dynamic]core.Step, context.temp_allocator)
@@ -236,7 +239,10 @@ through :: proc(s: ^Path_Search, node: rules.Node_Index, steps: ..core.Step) -> 
 value_text :: proc(g: ^Gen, b: ^Bound, as: core.As, opts: Sample_Options, scratch: runtime.Allocator) -> (text: []u8, ok: bool) {
 	context.allocator = scratch
 	depth := opts.depth if opts.depth > 0 else 4
-	for attempt in 0 ..< (opts.tries if opts.tries > 0 else 64) {
+	tries := opts.tries if opts.tries > 0 else 64
+	// An empty table writes no text, so it is given only when no try draws a row.
+	empty := false
+	for attempt in 0 ..< tries {
 		g.extra = attempt / 4
 		g.room = opts.size if opts.size > 0 else 1 << 16
 		g.culprit = rules.NONE
@@ -249,13 +255,16 @@ value_text :: proc(g: ^Gen, b: ^Bound, as: core.As, opts: Sample_Options, scratc
 		} else {
 			refusal: Refusal
 			text, refusal = written(v, as, opts.write, scratch)
-			ok = refusal.kind == .None && len(text) > 0 && valid(b, text)
+			ok = refusal.kind == .None && valid(b, text)
+		}
+		if ok && len(text) == 0 {
+			empty, ok = true, false
 		}
 		if ok {
 			return
 		}
 	}
-	return nil, false
+	return nil, empty
 }
 
 // What a write refused: its kind, and for a flat format the row (-1 for a value that is no array) and the member name.
@@ -327,24 +336,31 @@ emit_rows :: proc(t: ^write.Tokens, v: core.Value) -> Refusal {
 	}
 	slots := make([]core.Value, len(names), context.temp_allocator)
 	for row, i in rows {
-		slice.zero(slots)
-		it := core.value_pairs(row)
-		for name, member in core.value_pair_next(&it) {
-			if kind := core.value_kind(member); kind == .Array || kind == .Object {
-				return {.Unwritable, i if listed else -1, name}
-			}
-			slots[columns[name]] = member
-		}
-		for slot, j in slots {
-			if kind := write.value_of(t, slot, true); kind != .None {
-				return {kind, i if listed else -1, names[j]}
-			}
-		}
-		if kind := write.end_record(t); kind != .None {
-			return {kind, i if listed else -1, ""}
+		if refused := row_written(t, row, columns, names[:], slots, i if listed else -1); refused.kind != .None {
+			return refused
 		}
 	}
 	return {}
+}
+
+// The row `row`, number `i`, of a flat format's table: the value of each of `names` in order, `columns` giving the place
+// of each, and null for one the row lacks. A nested value is not written. `slots` holds a value for each name.
+@(private)
+row_written :: proc(t: ^write.Tokens, row: core.Value, columns: map[string]int, names: []string, slots: []core.Value, i: int) -> Refusal {
+	slice.zero(slots)
+	it := core.value_pairs(row)
+	for name, member in core.value_pair_next(&it) {
+		if kind := core.value_kind(member); kind == .Array || kind == .Object {
+			return {.Unwritable, i, name}
+		}
+		slots[columns[name]] = member
+	}
+	for slot, j in slots {
+		if kind := write.value_of(t, slot, true); kind != .None {
+			return {kind, i, names[j]}
+		}
+	}
+	return {write.end_record(t), i, ""}
 }
 
 // `v` with the `description` `note` written on it as a comment, when comments are asked for.
@@ -614,7 +630,30 @@ stepped :: proc(g: ^Gen, step: string, lo, hi: f64, low_open, high_open, whole: 
 		return
 	}
 	k := (i128(first) + i128(below(g, int(min(last - first, 1e6) + 1)))) * stride
-	return core.number_text(fmt.aprintf("%d", k * i128(mantissa)) if exp == 0 else fmt.aprintf("%de%d", k * i128(mantissa), exp)), true
+	return core.number_text(decimal_text(k * i128(mantissa), exp)), true
+}
+
+// `n` times ten to `exp`, spelled with a point and no exponent, as readers write a decimal. An exponent past twenty
+// places is kept, which spares a text of that many zeros.
+@(private = "file")
+decimal_text :: proc(n: i128, exp: int) -> string {
+	if exp == 0 || abs(exp) > 20 {
+		return fmt.aprintf("%d", n) if exp == 0 else fmt.aprintf("%de%d", n, exp)
+	}
+	digits := fmt.tprintf("%d", abs(n))
+	sign := "-" if n < 0 else ""
+	if exp > 0 {
+		return strings.concatenate({sign, digits, strings.repeat("0", exp, context.temp_allocator)})
+	}
+	places := -exp
+	if len(digits) <= places {
+		digits = strings.concatenate({strings.repeat("0", places - len(digits) + 1, context.temp_allocator), digits}, context.temp_allocator)
+	}
+	whole, fraction := digits[:len(digits) - places], strings.trim_right(digits[len(digits) - places:], "0")
+	if fraction == "" {
+		return strings.concatenate({sign, whole})
+	}
+	return strings.concatenate({sign, whole, ".", fraction})
 }
 
 @(private = "file")
@@ -709,7 +748,7 @@ format_text :: proc(g: ^Gen, name: string) -> string {
 	case "uri-reference", "iri-reference":
 		return fmt.aprintf("/%s/%s", letters(g, 4), letters(g, 4))
 	case "uri-template":
-		return fmt.aprintf("https://example.com/%s/{%s}", letters(g, 4), letters(g, 3))
+		return fmt.aprintf("https://example.com/%s/{{%s}}", letters(g, 4), letters(g, 3))
 	case "regex":
 		return fmt.aprintf("^%s[0-9]+$", letters(g, 3))
 	}

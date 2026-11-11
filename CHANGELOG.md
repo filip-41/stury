@@ -8,6 +8,31 @@
   default) for `check --schema`, `fmt --schema`, `diff --old-schema --new-schema`, `schema sample` and `schema gen`.
 - `stury schema gen` adds a `pattern` that holds a comma or a quote with `model.register_field`, where it wrote it in
   the tag.
+- `fmt --schema` judges each file as `check --schema` does and formats a file that passes as plain `fmt` does, so it
+  keeps comments and spellings, writes one table for a run, writes an array of scalars as rows, and gives exit 5 with
+  the reason for a value the output cannot write. A file that fails is not written, and `--in-place` and `--check`
+  leave it as it is. A CSV or TSV output is judged again as it reads back, by `--infer` when the input is no table,
+  which then quotes a string that reads as a number, `true` or `false`.
+- `fmt` from a JSON array, NDJSON or a table to another format holds one row or record at a time.
+- `check --filter` narrows `if` and `select` through `and`, `or` and `X | type == "kind"`, so `index`, `indices` and
+  `rindex` on an array are typed, and a refusal inside a builtin the prelude defines names the call that was written.
+  Under `--from csv` or `tsv` a schema that describes no table is a usage error, and so is `--report lines`.
+- An option only some commands take names those commands and what it does, and every other command refuses it:
+  `diff` refuses `--report`, `--count` and `--diff`. `schema sample` and `schema gen` take `--schema-ref`.
+- `schema sample` writes valid `uri-template` values, and a schema for which it finds no value says that no value
+  was found. `--report basic` writes a line for an empty NDJSON or `--seq` input. `schema gen` names the path of a
+  member whose name is empty.
+- A relative `$ref` resolves against the schema file's place, and `--schema-ref` bounds only which files are read.
+  A schema that does not compile is told in one form, with the `--schema-ref` hint only for a reference.
+- A failure message names the bound a value misses or the types it may have, and `not` has its own message. A quoted
+  CSV cell's failure is placed at its opening quote. Library: `core.Typed_Error_Kind.No_Invalid_Sample`.
+- `check --filter --from csv` takes the row from a table schema's `items` and refuses a member it does not describe.
+- `schema sample` names the schema file in its errors, says when `--invalid` finds no failing value, takes `--infer`
+  for a CSV or TSV sample, prefers a table with rows, and spells a decimal plainly. `schema infer` of an empty input,
+  and of one whose schema nests too deep, is exit 5. `schema sample` and `schema gen` refuse `--max-depth`, and
+  `schema sample` `--comments` for a format with no comments.
+- `fmt` takes `-c` as `--indent 0`. A "has no use" refusal says what the command writes, and a filter given by
+  `--filter` is not taken for a mistyped command. `--report basic` counts the records before a cut one as records.
 
 - An empty unquoted CSV or TSV cell is a `null` in `check --schema`, `schema infer`, the library's table and document checks and
   the schema conversion's output check, as it is in a filter run, where it was an absent member. `schema infer` puts
@@ -233,13 +258,25 @@
   position: `child_at` on a table with a width is one step whatever the index.
 
 - `model.dump` and `model.dump_stream` write a value by its model: never a `write_only` member, and with `Dump_Opts`
-  leaving out the members that hold null where their `Fields_Set` bit is clear (`exclude_unset`), that hold null
-  (`exclude_none`) or that equal their default (`exclude_defaults`). The field tag `omitunset` leaves out one member
-  as `exclude_unset` does, and a struct with no `Fields_Set` refuses it. A CSV dump writes a member it leaves out as an
+  leaving out the members whose `Fields_Set` bit is clear (`exclude_unset`, pydantic's meaning: what a load defaulted
+  or never read, a `read_only` member kept), that hold null (`exclude_none`) or that equal their default
+  (`exclude_defaults`). The field tag `omitunset` leaves out one member that holds null and is unset, and a struct
+  with no `Fields_Set` refuses it. A CSV dump writes a member it leaves out as an
   empty cell. `check` validates what the dump writes first and refuses a value that fails as `.Check_Failed`.
 - `model.patch(&m, &existing, body)` applies a patch text: the members' rules judge the patch, the members it leaves
   out keep what `existing` holds, struct validators and applicators judge the merged value, and `existing` is written
-  only when nothing failed.
+  only when nothing failed. `existing` holds memory from the patch's allocator: a patch frees the members it replaces,
+  and a failed one frees what it read.
+- A load judges the value its `dups` keeps, the last or the first, and a repeated key it refuses has the repeat's path
+  in the sink. `Load_Opts{dups = .All}` is `.Bad_Option` with its reason. A refused load leaves a missing required
+  member's `Fields_Set` bit clear.
+- A model copies the defaults, names and tags it takes from the registry, which may be destroyed before its models.
+- A CSV or TSV model reads an empty unquoted cell as null, as `check --schema` does: a `Maybe` member holds nil, a
+  `not_null` one and a plain `string` refuse it, and a dump's empty cell reads back as nil. A `not_null` `Maybe`
+  member compiles for a table.
+- `model.schema` describes two `Maybe` members of one type that differ on null as two nodes.
+- `schema.write_odin` and `stury schema gen` register a member's string, number or boolean `default`, and refuse a
+  default no literal of the member's type holds and an integer whose two bounds no `i64` or `u64` holds.
 - The format tag names and shapes a member (a rename, `-`, `omitempty`, `omitunset`, `required`, `unknown`) and
   `model:` holds its rules and roles. `required` with `optional` is refused, and a refusal of `required` with
   `omitempty` or `omitunset` names the tag.
@@ -260,6 +297,8 @@
 ### Errors
 
 - `.Check_Failed` is a value a model's dump checked and found against its rules, with the first failure's code.
+- `.Bad_Option` carries its reason in `want.text`, which render writes. A model's plan given to `unmarshal` or
+  `check` of its own format and type is `.Bad_Option` saying it reads only through `model.load`.
 - `core.render(w, src, e)` writes any error type, and a path or edit error carries the reason it was refused
   (`core.Path_Reason`, `core.Edit_Reason`), which render names.
 - A typed refusal names the type wanted and the value found (`Expected i64, found "lots" at .[0].population`), the tag

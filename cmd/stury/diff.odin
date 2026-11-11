@@ -101,9 +101,8 @@ diff_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	src := input_source(o, cli.json_reading)
 	one_schema := (d.old_schema != "") != (d.new_schema != "")
 	two_schemas := d.old_schema != "" && d.new_schema != ""
-	judges := cli.schema.file != "" || cli.schema.filter != nil || cli.schema.max_errors != 0
-	if judges || (cli.schema.refs != "" || cli.schema.format_assert || cli.schema.draft != nil) && !(one_schema || two_schemas) {
-		usage_error("%s has no use with diff: it judges no input and runs no filter, and --old-schema and --new-schema name the schemas it compares", cli.schema.flag)
+	if cli.schema.flag != "" && !(one_schema || two_schemas) {
+		usage_error("%s has no use with diff without --old-schema or --new-schema: it reads no schema then", cli.schema.flag)
 	}
 	if d.arrays != .Sequence && len(d.keys) > 0 {
 		usage_error("--key pairs elements by a member, and %s pairs them another way: give one", "--set" if d.arrays == .Set else "--position")
@@ -172,15 +171,11 @@ flush_out :: proc(b: ^strings.Builder, all: bool) {
 
 // The bytes of the file `path`, or an exit telling why not.
 operand_bytes :: proc(path: string) -> []byte {
-	f, opened := open_file(path)
-	if !opened {
-		os.exit(EXIT_USAGE)
-	}
-	data, read := read_file(f)
+	d, read := file_bytes(path)
 	if !read {
 		os.exit(EXIT_USAGE)
 	}
-	return data
+	return d.data
 }
 
 // Tells the fault `bad` of the file `path`, whose bytes are `data`, as `check` tells it.

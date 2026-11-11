@@ -126,7 +126,8 @@ check_piece :: proc(job: ^Check_Job, it: ^Reader, k: int) -> bool {
 	checker: typed.Checker
 	defer typed.checker_destroy(&checker)
 	read := typed.Read_Options{sink = sink, outer = job.outer, dups = job.dups, repeats = job.repeats, checker = &checker}
-	docs := (^Record_Docs)(job.plan.docs()) if job.plan.docs != nil else nil
+	make_docs := typed.plan_docs(job.plan)
+	docs := (^Record_Docs)(make_docs()) if make_docs != nil else nil
 	if docs != nil && docs.check_run != nil && it.framing >= .Concatenated {
 		docs.check_run(it, job.plan, read, piece_visit, &run)
 	} else {

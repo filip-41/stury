@@ -36,7 +36,7 @@ indirect :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t
 		reason = .Unsupported
 	case .Raw, .Hook, .Value, .Before:
 		when H == Check {
-			if fld.kind == .Before && m.before.call == nil && !m.before.first_match {
+			if fld.kind == .Before && extra_of(h.plan, m).before.call == nil && !extra_of(h.plan, m).before.first_match {
 				return judged_open(h, regs, t, fld, m, dest)
 			}
 		}
@@ -50,7 +50,7 @@ indirect :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t
 		lo, hi := core.scalar_ends(t)
 		when H == Check {
 			if fld.kind == .Before {
-				back, action := m.before.value(h, regs, m, dest, t.kind, lo, hi)
+				back, action := extra_of(h.plan, m).before.value(h, regs, m, dest, t.kind, lo, hi)
 				back.c += u64(fld.stride)
 				return back, action
 			}
@@ -285,7 +285,7 @@ on_tag_token :: proc "contextless" (s: ^Tag_Scan, regs: core.Hook_Regs, t: core.
 @(private)
 pick_arm :: proc(h: ^Reader, t: core.Token, m: ^Meta) -> (arm: int, reason: core.Typed_Error_Kind, fault: core.Fault) {
 	if t.kind == .Object && m.tagged {
-		s := h.find_tag(h, t.lo, m.union_tag)
+		s := h.find_tag(h, t.lo, extra_of(h.plan, m).union_tag)
 		// A text that breaks past the tag is the walk's to report, not a missing tag's.
 		if f, faulted := s.fault.?; faulted {
 			return 0, .Walk, f
@@ -334,10 +334,11 @@ pick_arm :: proc(h: ^Reader, t: core.Token, m: ^Meta) -> (arm: int, reason: core
 // made with give. A plan with none is `.Unsupported`.
 @(private)
 store_value :: proc(h: ^Reader, lo, hi: u64, dest: ^core.Value) -> core.Typed_Error_Kind {
-	if h.plan.build == nil {
+	build := plan_text_build(h.plan)
+	if build == nil {
 		return .Unsupported
 	}
-	doc, err := h.plan.build(h.src[lo:hi], h.plan.as, context.allocator)
+	doc, err := build(h.src[lo:hi], h.plan.as, context.allocator)
 	#partial switch err.kind {
 	case .None:
 	case .No_Memory:
@@ -379,7 +380,8 @@ store_whole :: proc(h: ^Reader, fld: ^Field, m: ^Meta, dest: uintptr, kind: core
 	if m.read == nil {
 		return .Unsupported
 	}
-	context.user_ptr = m.data if m.data != nil else context.user_ptr
+	data := extra_of(h.plan, m).data
+	context.user_ptr = data if data != nil else context.user_ptr
 	return m.read(v, rawptr(dest), context.allocator).? or_else .None
 }
 
@@ -816,6 +818,12 @@ member_seen :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, regs: c
 		return i < i32((uintptr(regs.b) - uintptr(owner.first)) / size_of(Field))
 	}
 	mark_run(h, f, owner, (^Field)(uintptr(regs.b)))
+	return seen_has(f, int(i))
+}
+
+// Whether member `i`'s bit is set in `f`.
+@(private)
+seen_has :: proc "contextless" (f: ^Frame, i: int) -> bool {
 	if i < 63 {
 		return f.seen & (u64(1) << uint(i)) != 0
 	}
@@ -935,8 +943,9 @@ unknown_cold :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook
 	m := &h.plan.meta[owner.meta]
 	end := &h.plan.meta[int(m.block) + int(m.members)]
 	// A read_only member's key is no unknown member's to capture.
-	if m.model != nil && read_only_key(m, key) {
-		if m.forbid {
+	x := extra_at(h.plan, owner.meta)
+	if m.model != nil && read_only_key(m.model, key) {
+		if x.forbid {
 			return refuse(h, regs, {kind = .Read_Only, at = t.lo, steps = {0 = core.Name(key)}, n_steps = 1}, t.lo + u64(t.n))
 		}
 		return regs, .Skip
@@ -968,7 +977,7 @@ unknown_cold :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook
 		regs.b, regs.c = u64(uintptr(rec.first)), u64(uintptr(slot))
 		return regs, .Next
 	}
-	if (h.refuse_unknown || m.forbid) && !(m.tagged && key == m.union_tag) {
+	if (h.refuse_unknown || x.forbid) && !(m.tagged && key == x.union_tag) {
 		return refuse(h, regs, {kind = .Unknown_Field, at = t.lo, steps = {0 = core.Name(key)}, n_steps = 1}, t.lo + u64(t.n))
 	}
 	return regs, .Skip
@@ -989,6 +998,9 @@ member_found :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.To
 	mark_run(h, f, owner, (^Field)(uintptr(regs.b)))
 	f.seen |= SEEN_ON
 	was := seen_set(h, f, owner, i)
+	if was && h.wide && (^Check)(h).repeats != .Ignore {
+		return repeat_member((^Check)(h), regs, t, f, owner, i)
+	}
 	size := h.plan.meta[at[i].meta].size
 	if h.first_key {
 		regs.b = u64(uintptr(&h.plan.solo[2 * (int(uintptr(&at[i]) - uintptr(raw_data(h.plan.fields))) / size_of(Field)) + 1]))
@@ -1202,7 +1214,7 @@ missing_member :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, regs
 			return -1
 		}
 		for at in end.required {
-			if at >= from && !seen_set(h, f, owner, int(at)) {
+			if at >= from && !seen_has(f, int(at)) {
 				return at
 			}
 		}

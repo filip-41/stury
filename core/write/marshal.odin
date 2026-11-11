@@ -601,7 +601,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					} else if write := w.meta[vf.meta].write; write == nil {
 						k = .Unsupported
 					} else {
-						data := w.meta[vf.meta].data
+						data := typed.extra_at(w.plan, vf.meta).data
 						context.user_ptr = data if data != nil else context.user_ptr
 						a, k = write(rawptr(va), runtime.arena_allocator(&w.arena))
 					}

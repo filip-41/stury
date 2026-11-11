@@ -45,7 +45,6 @@ account_registry :: proc(reg: ^model.Registry) {
 }
 
 // The path of `steps` as `.a[1].b`.
-@(private = "file")
 steps_text :: proc(steps: []core.Step) -> string {
 	b := strings.builder_make(context.temp_allocator)
 	for s in steps {

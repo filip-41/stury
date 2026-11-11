@@ -113,7 +113,8 @@ judged :: proc(j: ^Judging, f: ^typed.Field, at: uintptr) -> rules.Failures {
 // The rules a hooked value fails, judged on what its write hook gives: a string's text, or a number's.
 @(private)
 judged_hooked :: proc(j: ^Judging, l: ^rules.Leaf, m: ^typed.Meta, at: uintptr) -> rules.Failures {
-	context.user_ptr = m.data if m.data != nil else context.user_ptr
+	data := typed.extra_of(j.plan, m).data
+	context.user_ptr = data if data != nil else context.user_ptr
 	given, refused := m.write(rawptr(at), context.temp_allocator)
 	if refused != .None {
 		return {refused}

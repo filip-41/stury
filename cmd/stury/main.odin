@@ -58,6 +58,7 @@ Run :: struct {
 		names:              []string,
 		values, positional: []jq.Value,
 		named:              int, // the first `named` of names are $ARGS.named
+		typed:              bool, // the filter is --filter's, which no mistyped command gives
 	},
 	home_module: bool, // `~/.jq`, or what stands for it, is a module every filter includes
 	route:       Route,
@@ -85,6 +86,7 @@ main :: proc() {
 		refuse_edit(o)
 	}
 	refuse_format_clashes(o, &cli)
+	refuse_unowned(&cli)
 	validating := cli.validating
 	switch {
 	case cli.diffing:
@@ -92,20 +94,9 @@ main :: proc() {
 			usage_error("%s has no use with diff: it runs no filter and prints the changes between its inputs", flag)
 		}
 		diff_main(&run, &cli)
-	case cli.diff.flag != "":
-		usage_error("%s is diff's: only stury diff compares two inputs", cli.diff.flag)
-	case o.diff && !cli.editing:
-		usage_error("--diff is edit's: it previews the changes of an edit")
-	case (o.in_place || o.check) && !cli.formatting && !cli.editing:
-		usage_error("%s is fmt's and edit's: a filter run has no use for it", "--in-place" if o.in_place else "--check")
-	case !validating && !cli.formatting && schema_option_refused(&cli) != "":
-		flag := schema_option_refused(&cli)
-		usage_error("%s is %s: only those commands %s", flag, schema_option_owners(flag), "read a schema" if flag == "--schema-draft" else "judge inputs against a schema")
-	case !cli.schema_verb && cli.verbs.flag != "":
-		usage_error("%s is schema's: stury schema %s takes it", cli.verbs.flag, SCHEMA_VERBS[verb_of_option(cli.verbs.flag)])
 	case validating || cli.formatting || cli.editing || cli.schema_verb:
 		if flag := command_refused_option(o, &cli); flag != "" {
-			usage_error("%s has no use with %s: %s", flag, command_name(&cli), "it types the filter and writes the schema of its outputs" if validating && cli.schema.filter != nil else "it runs no filter and prints nothing" if validating else "it runs no filter and writes each input's own format" if cli.formatting else "it runs no filter and writes Odin types" if generates_odin(&cli) else "it runs no filter and writes a schema or samples" if cli.schema_verb else "it writes each input back in its own bytes")
+			usage_error("%s has no use with %s: %s", flag, command_name(&cli), command_writes(&cli))
 		}
 	}
 	if o.follow {
@@ -128,7 +119,8 @@ main :: proc() {
 	run.ip.debug_layout = output_layout(&run)
 	run.ip.debug_layout.opts.pretty = false
 	text, has := cli.filter.?
-	if typed, typing := cli.schema.filter.?; typing {
+	typed, typing := cli.schema.filter.?
+	if typing {
 		text, has = typed, true
 	}
 	switch {
@@ -146,7 +138,7 @@ main :: proc() {
 		append(&cli.var_names, "JQ_BUILD_CONFIGURATION")
 		append(&cli.var_values, string(BUILD_CONFIGURATION))
 	}
-	run.program = {text, cli.var_names[:], cli.var_values[:], cli.positional[:], named}
+	run.program = {text, cli.var_names[:], cli.var_values[:], cli.positional[:], named, typing}
 	explain_filter(&run)
 	run.home_module = jq.home_module(&run.ip)
 	ready_interpreter(&run)
@@ -186,15 +178,16 @@ main :: proc() {
 	finish(&run, max(code, 0))
 }
 
-// Report the filter's compile errors as jq does and exit, if there are any.
-compile_errors :: proc(text: string, errors: []jq.Compile_Error) {
+// Report the filter's compile errors as jq does and exit, if there are any. A filter that is no --filter's and is a word
+// near a command is told as that command mistyped.
+compile_errors :: proc(text: string, errors: []jq.Compile_Error, typed: bool) {
 	if len(errors) == 0 {
 		return
 	}
 	for e in errors {
 		message.write_stderr("stury: error: %s\n", jq.locate(text, e))
 	}
-	if command := near_command(text); command != "" {
+	if command := "" if typed else near_command(text); command != "" {
 		message.write_stderr("stury: %s is not a command: did you mean stury %s?\n", text, command)
 	}
 	exit_compile(len(errors))
@@ -220,7 +213,7 @@ exit_compile :: proc(count: int) -> ! {
 // Parse and check the filter and bind its globals, before the interpreter first runs.
 ready_interpreter :: proc(run: ^Run) {
 	parsed, errors := jq.parse(run.program.text)
-	compile_errors(run.program.text, errors)
+	compile_errors(run.program.text, errors, run.program.typed)
 	if parsed.body == nil {
 		message.write_stderr("stury: error: Top-level program not given (try \".\")\n")
 		exit_compile(1)
@@ -235,7 +228,7 @@ ready_interpreter :: proc(run: ^Run) {
 		}
 	}
 	prog, check_errors, prelude := jq.check(parsed.body, run.program.names, linked)
-	compile_errors(run.program.text, check_errors)
+	compile_errors(run.program.text, check_errors, run.program.typed)
 	run.prog = prog
 	run.ip.globals = prelude
 	bind_cli_vars(run)

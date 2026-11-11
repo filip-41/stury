@@ -336,10 +336,11 @@ member_key :: proc(w: ^Walker, r: ^typed.Field, $T: Tree, $put: Put) -> core.Typ
 @(private)
 is_empty :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> bool {
 	m := &w.meta[r.meta]
-	if left_out(w, r, v) || m.omit_unset && unset(m, r, v) {
+	x := typed.extra_at(w.plan, r.meta)
+	if left_out(w, r, v) || x.omit_unset && holds_null(m, r.kind, v) && unset(x, r, v) {
 		return true
 	}
-	if !m.omit_empty {
+	if !x.omit_empty {
 		return false
 	}
 	kind := m.key_kind if r.kind == .Hook else r.kind
@@ -376,23 +377,20 @@ is_empty :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> bool {
 	return false
 }
 
-// Whether the member of record `r` and meta `m` at `v` holds null and its struct's `Fields_Set` lacks it, so that no load
-// gave it the null.
-unset :: proc(m: ^typed.Meta, r: ^typed.Field, v: uintptr) -> bool {
-	if m.owner == nil || m.owner.fields_set == 0 || !holds_null(m, r.kind, v) {
+// Whether the member of record `r`, whose model facts are `x`, at `v` is one its struct's `Fields_Set` lacks, so that
+// no load set it. A member of a struct with no set, and a read_only member, which a load never sets, are set.
+unset :: proc(x: ^typed.Meta_Extra, r: ^typed.Field, v: uintptr) -> bool {
+	if x.owner == nil || x.owner.fields_set == 0 || x.bit < 0 {
 		return false
 	}
-	if m.bit < 0 {
-		return true
-	}
-	set := (^typed.Fields_Set)(v - uintptr(r.offset) + uintptr(m.owner.fields_set - 1))
-	return set.bits[m.bit / 64] >> uint(m.bit % 64) & 1 == 0
+	set := (^typed.Fields_Set)(v - uintptr(r.offset) + uintptr(x.owner.fields_set - 1))
+	return set.bits[x.bit / 64] >> uint(x.bit % 64) & 1 == 0
 }
 
 // Whether a model's write leaves the member at `v` out: a write_only member, or one the walker's `omits` leaves out.
 @(private)
 left_out :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> bool {
-	return w.meta[r.meta].access == .Write_Only || w.omits != nil && w.omits.call(w.omits, w.plan, r, v)
+	return typed.extra_at(w.plan, r.meta).access == .Write_Only || w.omits != nil && w.omits.call(w.omits, w.plan, r, v)
 }
 
 // Whether the value at `v` of a record of `kind` and meta `m` is written as null: a nil pointer, `Maybe`, union, `any` or
@@ -619,7 +617,7 @@ list_struct :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, tag: ^string, $put:
 	w.mark = w.keys.cursor
 	first := len(w.entries)
 	if tag != nil {
-		add_entry(w, w.meta[f.meta].union_tag, uintptr(tag), &w.tag_field, put) or_return
+		add_entry(w, typed.extra_at(w.plan, f.meta).union_tag, uintptr(tag), &w.tag_field, put) or_return
 	}
 	r := f.first
 	for ; r.kind != .Never; r = intrinsics.ptr_offset(r, 1) {
@@ -636,7 +634,7 @@ list_struct :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, tag: ^string, $put:
 		// A capture holds what the type does not name, so a key that names a member is no captured member, unless the tag's
 		// `omitempty` left the member out. A member a model's write leaves out keeps its name.
 		for e in w.entries[captured:] {
-			if tag != nil && entry_name(w, e) == w.meta[f.meta].union_tag {
+			if tag != nil && entry_name(w, e) == typed.extra_at(w.plan, f.meta).union_tag {
 				return .Unwritable
 			}
 			for x := f.first; x.kind != .Never; x = intrinsics.ptr_offset(x, 1) {

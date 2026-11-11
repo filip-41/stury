@@ -373,3 +373,50 @@ describe_and_plan_of_free_what_they_allocate :: proc(t: ^testing.T) {
 	_, ambiguous := json.plan_of(&objects)
 	walktest.expect_kind(t, ambiguous, core.Typed_Error_Kind.Ambiguous_Union)
 }
+
+@(private = "file")
+Null_After :: struct {
+	email: Maybe(string),
+	name:  Maybe(string) `model:"optional,not_null"`,
+}
+
+@(private = "file")
+Null_Before :: struct {
+	name:  Maybe(string) `model:"optional,not_null"`,
+	email: Maybe(string),
+}
+
+// Whether node `n` of `d` takes null, itself or through an arm.
+@(private = "file")
+takes_null :: proc(d: ^rules.Description, n: rules.Node_Index) -> bool {
+	node := d.nodes[n]
+	if .Null in node.kinds && node.any_of == nil && node.one_of == nil {
+		return true
+	}
+	for arm in node.any_of {
+		if takes_null(d, arm) {
+			return true
+		}
+	}
+	for arm in node.one_of {
+		if takes_null(d, arm) {
+			return true
+		}
+	}
+	return false
+}
+
+@(test)
+two_maybes_of_one_type_that_differ_on_null_get_two_nodes :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	check :: proc(t: ^testing.T, plan: typed.Plan, name, email: int) {
+		plan := plan
+		d, err := description_of(&plan, context.temp_allocator)
+		walktest.expect_nil(t, err)
+		members := d.objects[d.nodes[d.root].object].members
+		testing.expect(t, !takes_null(&d, members[name].node))
+		testing.expect(t, takes_null(&d, members[email].node))
+	}
+	check(t, ruled_plan(Null_After), 1, 0)
+	check(t, ruled_plan(Null_Before), 0, 1)
+}

@@ -39,6 +39,20 @@ checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Check
 	return {checks_of(S), bound_as(S, opts)}
 }
 
+// The reads `checks` gives for the spec of `as`, a handle `as` made with a spec chosen at run time, or nil for a
+// handle of another format.
+checks_for :: proc "contextless" (as: core.As) -> ^typed.Format_Reads {
+	if as.spec > u8(max(Spec)) || as.readers != &HANDLES[Spec(as.spec)] {
+		return nil
+	}
+	switch Spec(as.spec) {
+	case .Csv:   return checks_of(.Csv)
+	case .Tsv:   return checks_of(.Tsv)
+	case .Plain: return checks_of(.Plain)
+	}
+	return nil
+}
+
 // Builds the plan of `T` for dsv's spelling, as `typed.plan_make` does, and refuses a `T` that is no list of rows and no
 // row. A write by the plan is of spec `spec` with the delimiter, comment byte, `no_header`, `crlf` and `.Ragged` of
 // `opts`, and `.Bad_Option` when the spec cannot spell them. A read takes its spec and options at the call. The plan
@@ -524,7 +538,7 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells_Of($H), regs: core.H
 		at.b = h.past
 		if !h.r.refuse_unknown {
 			// A model's struct that forbids the members it does not name refuses a longer row at its last member.
-			if !is_record(h.row) || !h.r.plan.meta[h.row.meta].forbid {
+			if !is_record(h.row) || !typed.extra_at(h.r.plan, h.row.meta).forbid {
 				return next, .Next
 			}
 			kind, at.b = .Wrong_Length, at.b - size_of(typed.Field)
@@ -534,13 +548,16 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells_Of($H), regs: core.H
 	}
 	map_row := h.row.kind == .Map
 	when H == typed.Check {
+		// A model's row reads an empty unquoted cell as null, as a check of the text sees it.
 		if is_record(h.row) {
-			if t.n == 0 {
-				return next, .Next
-			}
 			typed.mark_member(&h.r, regs, int(uintptr(col.rec) - uintptr(h.row.first)) / size_of(typed.Field) - 1)
-			if fld := typed.field_at(at.b); fld.kind == .Before {
+			fld := typed.field_at(at.b)
+			if fld.kind == .Before {
 				_, action := before_cell(h, at, t, fld, uintptr(regs.c) + uintptr(col.offset))
+				return next, action
+			}
+			if t.n == 0 {
+				_, action := null_cell(&h.r, at, t, fld, uintptr(regs.c) + uintptr(col.offset))
 				return next, action
 			}
 		}
@@ -613,13 +630,15 @@ judge_cell :: proc(c: ^typed.Check, regs: core.Hook_Regs, t: core.Token, fld: ^t
 	return typed.check_rules(c, regs, token, fld, dest)
 }
 
-// Rewrites the cell `t` by the `before` of the member `fld`, then reads the replacement into the member at `dest`.
+// Rewrites the cell `t` by the `before` of the member `fld`, then reads the replacement into the member at `dest`. An
+// empty cell is null.
 @(cold, private)
 before_cell :: proc(h: ^Cells_Of(typed.Check), regs: core.Hook_Regs, t: core.Token, fld: ^typed.Field, dest: uintptr) -> (core.Hook_Regs, core.Action) {
 	c := &h.r
 	m := &c.plan.meta[fld.meta]
+	b := typed.extra_at(c.plan, fld.meta).before
 	hi := t.lo + u64(t.n)
-	if m.before.call == nil || m.before.judge != nil {
+	if b.call == nil || b.judge != nil {
 		return typed.refuse(c, regs, {kind = .Unsupported, at = t.lo}, hi)
 	}
 	// The cell's text, the replacement and its spelling live only for this cell, unless a refusal holds the spelling.
@@ -628,21 +647,30 @@ before_cell :: proc(h: ^Cells_Of(typed.Check), regs: core.Hook_Regs, t: core.Tok
 	guard := runtime.default_temp_allocator_temp_begin()
 	cell := t
 	cell.kind = .String
-	text, read := core.token_text(c.plan.readers, &c.view, cell, context.temp_allocator)
-	if !read {
-		return typed.refuse(c, regs, {kind = .No_Memory, at = t.lo}, hi)
+	value: core.Value
+	if t.n > 0 {
+		text, read := core.token_text(c.plan.readers, &c.view, cell, context.temp_allocator)
+		if !read {
+			return typed.refuse(c, regs, {kind = .No_Memory, at = t.lo}, hi)
+		}
+		value = text
 	}
-	back, action := typed.read_replacement(c, regs, m, dest, text, t.lo, hi)
+	back, action := typed.read_replacement(c, regs, m, dest, value, t.lo, hi)
 	if !own_temp && action == .Next {
 		runtime.default_temp_allocator_temp_end(guard)
 	}
 	return back, action
 }
 
-// The plans' `replace`: reads the scalar `v` as a cell of its own through `c` at `regs`. A string member under
-// `borrow_strings` keeps the cell's text, which is in the read's allocator for that.
+// The plans' `replace`: reads the scalar `v` as a cell of its own through `c` at `regs`, a null as an empty cell. A
+// string member under `borrow_strings` keeps the cell's text, which is in the read's allocator for that.
 @(private)
 replace_cell :: proc(c: ^typed.Check, regs: core.Hook_Regs, v: core.Value, _: u32) -> ([]u8, core.Hook_Regs, core.Action) {
+	if v == nil {
+		fld := typed.field_at(regs.b)
+		back, action := null_cell(c, regs, {kind = .Plain, role = .Value}, fld, uintptr(regs.c) + uintptr(fld.offset))
+		return nil, back, action
+	}
 	buf: [spell.F64_ROOM]u8
 	spelled, ok := scalar_text(v, &buf)
 	if !ok {
@@ -668,6 +696,34 @@ replace_cell :: proc(c: ^typed.Check, regs: core.Hook_Regs, v: core.Value, _: u3
 	}
 	c.src = held
 	return text, regs, action
+}
+
+// A null, the empty cell `t`, read into the member `fld` at `dest`: a `Maybe` or union takes nil where it has one, a
+// cstring nil, a hook reads it, and any other member refuses it. A null has no rules to judge.
+@(private)
+null_cell :: proc(c: ^typed.Check, regs: core.Hook_Regs, t: core.Token, fld: ^typed.Field, dest: uintptr) -> (core.Hook_Regs, core.Action) {
+	m := &c.plan.meta[fld.meta]
+	null := t
+	null.kind = .Null
+	reason := core.Typed_Error_Kind.None
+	#partial switch fld.kind {
+	case .Maybe, .Union:
+		if m.no_nil {
+			reason = .Wrong_Kind
+		} else {
+			runtime.mem_zero(rawptr(dest), int(m.size))
+		}
+	case .Cstring:
+		(^cstring)(dest)^ = nil
+	case .Hook:
+		reason = typed.store_whole(c, fld, m, dest, .Null, t.lo, t.lo, null)
+	case:
+		reason = .Wrong_Kind
+	}
+	if reason != .None {
+		return typed.refuse_value(c, regs, null, reason)
+	}
+	return regs, .Next
 }
 
 // The text of the scalar `v` as a cell, in `buf` when it is a number. A null spells an empty cell.
@@ -896,10 +952,10 @@ columns_of :: proc(h: ^Cells_Of($H), regs: core.Hook_Regs, at: u64, from: int) -
 		}
 		if record && k < 0 && refusing {
 			// A read_only member's name is refused only where the struct forbids the names it does not read.
-			m := &plan.meta[row.meta]
-			kind := core.Typed_Error_Kind.Unknown_Field if h.r.refuse_unknown || m.forbid else .None
-			if typed.read_only_key(m, name) {
-				kind = .Read_Only if m.forbid else .None
+			x := typed.extra_at(plan, row.meta)
+			kind := core.Typed_Error_Kind.Unknown_Field if h.r.refuse_unknown || x.forbid else .None
+			if typed.read_only_key(plan.meta[row.meta].model, name) {
+				kind = .Read_Only if x.forbid else .None
 			}
 			if kind != .None && refuse_header(h, regs, kind, key.lo, spelled) == .Stop {
 				return .Stop
@@ -1017,24 +1073,32 @@ rows_supported :: proc(plan: ^typed.Plan) -> core.Typed_Refusal {
 	case .Struct, .Required:
 		m := &plan.meta[row.meta]
 		if plan.meta[int(m.block) + int(m.members)].capture >= 0 {
-			return {kind = .Unsupported, want = {text = NOT_FLAT}, steps = {0 = core.All{}}, n_steps = 1}
+			return not_flat({core.All{}})
 		}
 		for &f in ([^]typed.Field)(row.first)[:m.members] {
 			if !cell_supported(plan, &f) {
-				return {kind = .Unsupported, want = {text = NOT_FLAT}, steps = {0 = core.All{}, 1 = core.Name(plan.meta[f.meta].name)}, n_steps = 2}
+				return not_flat({core.All{}, core.Name(plan.meta[f.meta].name)})
 			}
 		}
 	case .Slice, .Dynamic, .Map:
 		if row.kind == .Map && plan.meta[row.meta].key_kind != .String {
-			return {kind = .Unsupported, want = {text = NOT_FLAT}, steps = {0 = core.All{}}, n_steps = 1}
+			return not_flat({core.All{}})
 		}
 		if !cell_supported(plan, typed.field_at(u64(uintptr(row.first)))) {
-			return {kind = .Unsupported, want = {text = NOT_FLAT}, steps = {0 = core.All{}, 1 = core.All{}}, n_steps = 2}
+			return not_flat({core.All{}, core.All{}})
 		}
 	case:
-		return {kind = .Unsupported, want = {text = NOT_FLAT}, steps = {0 = core.All{}}, n_steps = 1}
+		return not_flat({core.All{}})
 	}
 	return {}
+}
+
+// The refusal of a type that is no row or holds no cell, at `steps`.
+@(private)
+not_flat :: proc(steps: []core.Step) -> (e: core.Typed_Refusal) {
+	e = {kind = .Unsupported, want = {text = NOT_FLAT}, n_steps = u8(len(steps))}
+	copy(e.steps[:], steps)
+	return
 }
 
 @(private)
@@ -1044,12 +1108,12 @@ cell_supported :: proc(plan: ^typed.Plan, f: ^typed.Field) -> bool {
 	case .String, .Bool, .Bool_Wide, .I8 ..= .U64, .F32, .F64, .Enum, .Cstring, .Hook:
 		return true
 	case .Before:
-		return cell_supported(plan, &plan.meta[f.meta].before.field)
+		return cell_supported(plan, &typed.extra_at(plan, f.meta).before.field)
 	case .Maybe:
 		inner = typed.field_at(u64(uintptr(f.first)))
 	case .Union:
 		m := &plan.meta[f.meta]
-		if len(m.arms) != 1 || m.no_nil {
+		if len(m.arms) != 1 {
 			return false
 		}
 		inner = one_arm(plan, m)

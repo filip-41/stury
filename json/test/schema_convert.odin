@@ -1,6 +1,5 @@
 package json_tests
 
-import "core:strings"
 import "core:testing"
 import core "../../core"
 import "../../core/typed"
@@ -9,7 +8,7 @@ import dsv "../../dsv"
 import json ".."
 
 // Conversion through a schema: the output passes it, a member it leaves open survives, a value the output format
-// cannot spell is refused with its path, and the check of the input decides what is written.
+// cannot spell is refused with its path, and a cell is the kind its format reads, which no schema changes.
 
 @(private = "file")
 Converted :: struct {
@@ -32,16 +31,10 @@ converted :: proc(t: ^testing.T, rules_text, src: string, from, to: core.As, sin
 	return convert_document(t, c, &doc, to, sink)
 }
 
-// The typed reads a handle needs to check a description, those of CSV for a CSV handle and none for a JSON one.
-@(private = "file")
-checks_of :: proc(as: core.As) -> ^typed.Format_Reads {
-	return dsv.checks(.Csv).reads if as.readers == dsv.as(.Csv).readers else nil
-}
-
 @(private = "file")
 convert_document :: proc(t: ^testing.T, c: ^schema.Compiled, doc: ^core.Document, to: core.As, sink: ^typed.Sink = nil) -> Converted {
 	cv: schema.Converter
-	err := schema.converter_init(&cv, c, doc.as, to, checks_of(doc.as), checks_of(to))
+	err := schema.converter_init(&cv, c, doc.as, to, dsv.checks_for(doc.as), dsv.checks_for(to))
 	testing.expectf(t, err == nil, "%v", err)
 	defer schema.converter_destroy(&cv)
 	text, stage, err2 := schema.convert(&cv, doc, sink = sink, allocator = context.temp_allocator)
@@ -111,7 +104,7 @@ convert_checks_the_output_as_its_format_reads_it :: proc(t: ^testing.T) {
 }
 
 @(test)
-convert_reads_a_cell_as_the_arm_the_schema_decides :: proc(t: ^testing.T) {
+convert_judges_an_inferred_cell_by_its_arms :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	s := `{"type": "array", "items": {"type": "object", "properties": {"v": {"oneOf": [{"type": "integer"}, {"type": "string", "pattern": "^[a-z]+$"}]}}, "required": ["v"]}}`
 	got := converted(t, s, "v\n5\nx\n", dsv.as(.Csv, {infer = true}), json.as(.Json))
@@ -122,65 +115,33 @@ convert_reads_a_cell_as_the_arm_the_schema_decides :: proc(t: ^testing.T) {
 	testing.expect_value(t, got.text, "v\nx\n5\n")
 }
 
-// The schema decides the reading of a cell whichever way the format would read it: a number where it asks for an integer
-// and the format reads no number, a string where it asks for one and the format reads a number, and a string where the
-// number the cell spells fails a rule, else the number, which the check tries first.
+// A cell is judged as the format reads it, and the schema picks no reading: without `infer` every cell is a string, so
+// one a schema asks to be an integer fails, and with it a cell that spells a number is one, so one a schema asks to be
+// a string fails.
 @(test)
-convert_writes_the_reading_the_check_takes_for_a_cell :: proc(t: ^testing.T) {
+convert_reads_a_cell_as_the_format_reads_it :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	integer := `{"type": "array", "items": {"type": "object", "properties": {"v": {"type": "integer"}}}}`
 	got := converted(t, integer, "v\n5\n", dsv.as(.Csv), json.as(.Json))
-	testing.expectf(t, got.err == nil, "%v", got.err)
-	testing.expect_value(t, got.text, `[{"v":5}]`)
+	testing.expectf(t, got.stage == .Input && got.err != nil, "%v %v", got.stage, got.err)
 	text := `{"type": "array", "items": {"type": "object", "properties": {"v": {"type": "string"}}}}`
-	got = converted(t, text, "v\n5\ntrue\n", dsv.as(.Csv, {infer = true}), json.as(.Json))
+	got = converted(t, text, "v\n5\ntrue\n", dsv.as(.Csv), json.as(.Json))
 	testing.expectf(t, got.err == nil, "%v", got.err)
 	testing.expect_value(t, got.text, `[{"v":"5"},{"v":"true"}]`)
+	got = converted(t, text, "v\n5\n", dsv.as(.Csv, {infer = true}), json.as(.Json))
+	testing.expectf(t, got.stage == .Input && got.err != nil, "%v %v", got.stage, got.err)
 	either := `{"type": "array", "items": {"type": "object", "properties": {"v": {"type": ["integer", "string"], "minimum": 6}}}}`
-	for infer in ([?]bool{false, true}) {
-		got = converted(t, either, "v\n5\n7\n", dsv.as(.Csv, {infer = infer}), json.as(.Json))
-		testing.expectf(t, got.err == nil, "%v", got.err)
-		testing.expect_value(t, got.text, `[{"v":"5"},{"v":7}]`)
-	}
-}
-
-// Arms that read a cell apart write the reading of the arm the check decides: the one `oneOf` passes, the first `anyOf`
-// passes, the branch `if` picks, alike when the arms judge the cell or its row and when the check reports to a sink or
-// stops at its first failure.
-@(test)
-convert_writes_the_reading_of_the_arm_the_check_decides :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	cases := [?]struct {
-		items, src, want: string,
-	} {
-		{`{"oneOf": [{"properties": {"v": {"type": "integer"}}}, {"properties": {"v": {"type": "string", "pattern": "^[a-z]+$"}}}]}`, "v\n5\nx\n", `[{"v":5},{"v":"x"}]`},
-		{`{"anyOf": [{"properties": {"v": {"type": "integer"}}}, {"properties": {"v": {"type": "string"}}}]}`, "v\n5\n", `[{"v":5}]`},
-		{`{"anyOf": [{"properties": {"v": {"type": "string"}}}, {"properties": {"v": {"type": "integer"}}}]}`, "v\n5\n", `[{"v":"5"}]`},
-		{`{"properties": {"v": {"anyOf": [{"type": "string"}, {"type": "integer"}]}}}`, "v\n5\n", `[{"v":"5"}]`},
-		{`{"properties": {"v": {"anyOf": [{"type": "integer"}, {"type": "string"}]}}}`, "v\n5\n", `[{"v":5}]`},
-		{`{"if": {"properties": {"k": {"const": "a"}}}, "then": {"properties": {"v": {"type": "integer"}}}, "else": {"properties": {"v": {"type": "string"}}}}`, "k,v\na,5\nb,5\n", `[{"k":"a","v":5},{"k":"b","v":"5"}]`},
-	}
-	for c in cases {
-		s := strings.concatenate({`{"type": "array", "items": `, c.items, `}`}, context.temp_allocator)
-		for reporting in ([?]bool{false, true}) {
-			sink: typed.Sink
-			defer typed.sink_destroy(&sink)
-			got := converted(t, s, c.src, dsv.as(.Csv), json.as(.Json), &sink if reporting else nil)
-			testing.expectf(t, got.err == nil, "%s: %v", c.items, got.err)
-			testing.expectf(t, got.text == c.want, "%s: %s, want %s", c.items, got.text, c.want)
-		}
-	}
-}
-
-// A number the cell spells by the loose grammar is written by the strict one.
-@(test)
-convert_writes_a_loose_number_by_the_strict_grammar :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	s := `{"type": "array", "items": {"properties": {"v": {"type": "number"}}}}`
-	got := converted(t, s, "v\n+5\n007\n.5\n5.\n-00.250e+2\n", dsv.as(.Csv), json.as(.Json))
+	got = converted(t, either, "v\n5\n7\n", dsv.as(.Csv), json.as(.Json))
 	testing.expectf(t, got.err == nil, "%v", got.err)
-	testing.expect_value(t, got.text, `[{"v":5},{"v":7},{"v":0.5},{"v":5},{"v":-0.250e+2}]`)
+	testing.expect_value(t, got.text, `[{"v":"5"},{"v":"7"}]`)
+	got = converted(t, either, "v\n5\n7\n", dsv.as(.Csv, {infer = true}), json.as(.Json))
+	testing.expectf(t, got.stage == .Input && got.err != nil, "%v %v", got.stage, got.err)
+	// `infer` reads a number by the strict grammar, so a loose spelling stays a string.
+	number := `{"type": "array", "items": {"properties": {"v": {"type": "number"}}}}`
+	got = converted(t, number, "v\n+5\n", dsv.as(.Csv, {infer = true}), json.as(.Json))
+	testing.expectf(t, got.stage == .Input && got.err != nil, "%v %v", got.stage, got.err)
 }
+
 
 // An element's text and an attribute's value that the format gives no kind are written as the check read them.
 @(test)
@@ -207,13 +168,13 @@ convert_writes_markup_text_as_the_check_reads_it :: proc(t: ^testing.T) {
 	testing.expect_value(t, got.text, `{"price":{"n":3,"id":"7","#text":5}}`)
 }
 
-// An empty cell is a member that is absent.
+// An empty unquoted cell is a null member, which a `required` member may be.
 @(test)
-convert_leaves_out_the_member_of_an_empty_cell :: proc(t: ^testing.T) {
+convert_writes_an_empty_cell_as_null :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	got := converted(t, `{"type": "array"}`, "a,b\n1,\n,2\n", dsv.as(.Csv), json.as(.Json))
+	got := converted(t, `{"type": "array", "items": {"required": ["a", "b"]}}`, "a,b\n1,\n,2\n", dsv.as(.Csv), json.as(.Json))
 	testing.expectf(t, got.err == nil, "%v", got.err)
-	testing.expect_value(t, got.text, `[{"a":"1"},{"b":"2"}]`)
+	testing.expect_value(t, got.text, `[{"a":"1","b":null},{"a":null,"b":"2"}]`)
 }
 
 @(test)

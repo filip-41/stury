@@ -18,7 +18,7 @@ Constant :: struct {
 // refusal for a value the member cannot hold.
 @(private)
 default_constant :: proc(reg: ^Registry, member: ^runtime.Type_Info, field: string, value: any) -> (held: ^Constant, refusal: core.Typed_Refusal, err: runtime.Allocator_Error) {
-	memory := virtual.arena_allocator(&reg.loads.constants)
+	memory := virtual.arena_allocator(&reg.loads.memory)
 	held = new(Constant, memory) or_return
 	held.type = member
 	held.value = mem.alloc(member.size, member.align, memory) or_return
@@ -31,10 +31,40 @@ default_constant :: proc(reg: ^Registry, member: ^runtime.Type_Info, field: stri
 	return
 }
 
+// The defaults of `reg`, none for nil, in the temp allocator, with a copy in `memory` of each constant.
+@(private)
+copied_defaults :: proc(reg: ^Registry, memory: ^virtual.Arena) -> ([]Default_Of, core.Error) {
+	if reg == nil {
+		return nil, nil
+	}
+	out := make([]Default_Of, len(reg.loads.defaults), context.temp_allocator)
+	a := virtual.arena_allocator(memory)
+	for x, i in reg.loads.defaults {
+		out[i] = x
+		if x.make != copied_constant {
+			continue
+		}
+		from := (^Constant)(x.data)
+		c, failed := new(Constant, a)
+		if failed == nil {
+			c.type = from.type
+			c.value, failed = mem.alloc(from.type.size, from.type.align, a)
+		}
+		if failed == nil {
+			failed = copy_value(c.value, from.value, from.type, a)
+		}
+		if failed != nil {
+			return nil, core.error_of(core.Typed_Refusal{kind = .No_Memory})
+		}
+		out[i].data = c
+	}
+	return out, nil
+}
+
 @(private)
 copied_constant :: proc(dest, data: rawptr, allocator: runtime.Allocator) -> runtime.Allocator_Error {
 	c := (^Constant)(data)
-	return clone(dest, c.value, c.type, allocator)
+	return copy_value(dest, c.value, c.type, allocator)
 }
 
 // Stores `value` in `slot`, which holds the zero value of `member`, when `member` can hold it: it has the member's type,
@@ -42,7 +72,7 @@ copied_constant :: proc(dest, data: rawptr, allocator: runtime.Allocator) -> run
 @(private)
 default_into :: proc(slot: rawptr, member: ^runtime.Type_Info, value: any, a: runtime.Allocator) -> (fits: bool, err: runtime.Allocator_Error) {
 	if member.id == value.id {
-		return true, clone(slot, value.data, member, a)
+		return true, copy_value(slot, value.data, member, a)
 	}
 	if store_number(slot, member, value) {
 		return true, nil

@@ -12,7 +12,7 @@ Extra :: enum u8 { Ignore, Forbid, }
 Field_Rule_Of :: struct { type: typeid, field: string, tag: string, }
 Fields_Set :: typed.Fields_Set
 Load_Opts :: struct { dups: core.Duplicates, }
-Model :: struct($T: typeid) { plan: typed.Plan, load_plan: typed.Plan, customs: []Custom_Of, judging: ^Applied, }
+Model :: struct($T: typeid) { plan: typed.Plan, load_plan: typed.Plan, customs: []Custom_Of, judging: ^Applied, constants: virtual.Arena, }
 Naming :: struct { fields: typed.Rename, enums: typed.Enum_Spelling, enum_members: typed.Rename, union_tag: string, }
 Problem :: struct { type: string `stury:"type,omitempty"`, title: string, status: int, errors: []Problem_Error, }
 Problem_Error :: struct { pointer: string, code: string, message: string, }
@@ -39,7 +39,7 @@ register_after :: proc(reg: ^Registry, $T: typeid, field: string, check: proc(va
 register_before :: proc(reg: ^Registry, $T: typeid, field: string, rewrite: proc(value: core.Value, r: ^Report) -> core.Value) -> runtime.Allocator_Error
 register_custom :: proc(reg: ^Registry, custom: Custom($T, $C)) -> runtime.Allocator_Error
 register_default :: proc(reg: ^Registry, $T: typeid, field: string, value: $V) -> core.Error where !intrinsics.type_is_proc(V)
-register_enum :: proc(reg: ^Registry, rule: Enum_Rule) -> (err: runtime.Allocator_Error)
+register_enum :: proc(reg: ^Registry, rule: Enum_Rule) -> runtime.Allocator_Error
 register_extra :: proc(reg: ^Registry, $T: typeid, extra: Extra) -> runtime.Allocator_Error
 register_factory :: proc(reg: ^Registry, $T: typeid, field: string, make: proc(allocator: runtime.Allocator) -> $V) -> runtime.Allocator_Error
 register_field :: proc(reg: ^Registry, rule: Field_Rule_Of) -> runtime.Allocator_Error
@@ -227,7 +227,7 @@ pairs :: core.pairs
 parse_path :: core.parse_path
 parse_pointer :: core.parse_pointer
 plain :: core.plain
-plan_make :: proc(T: typeid, spec := Spec.Json, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
+plan_make :: #force_inline proc(T: typeid, spec := Spec.Json, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 plan_of :: proc(d: ^rules.Description, spec := Spec.Json, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
 query :: proc {query_one, query_many}
@@ -642,10 +642,12 @@ Frame :: struct { a, b, c: u64, data: rawptr, seen: u64, run: ^Field, extra: [^]
 Make_Default :: #type proc(dest, data: rawptr, allocator: runtime.Allocator) -> runtime.Allocator_Error
 Markup_Node :: rules.Markup_Node
 Member_Rule :: struct { rules: rules.Rules, optional: bool, skip: bool, access: Access, not_null: bool, make: Make_Default, data: rawptr, afters: []Validator, before: ^Before, refused: string, }
+Meta_Extra :: struct { before: ^Before, data: rawptr, union_tag: string, access: Access, omit_empty: bool, omit_unset: bool, optional: bool, bit: i8, forbid: bool, owner: ^Struct_Model, default: i32, }
 Model_Rules :: struct { member: proc(m: ^Model_Rules, owner: typeid, field: string, type: typeid, tag: string) -> Member_Rule, forbids: proc(m: ^Model_Rules, owner: typeid) -> bool, compile: Rule_Compiler, structs: proc(b: ^Builder, owner: typeid, at: i32, f: ^Field, m: ^Meta, members: []Member, layout: ^Struct_Layout), validators: proc(m: ^Model_Rules, owner: typeid) -> []Validator, enum_names: proc(m: ^Model_Rules, type: typeid, names: []string) -> (by_name: bool, err: runtime.Allocator_Error), unions: proc(m: ^Model_Rules, type: typeid) -> (tag: string, set: bool, first_match: bool), judge: proc(m: ^Model_Rules, type: typeid, unique: bool) -> ^Plan, close: Close_Validators, loading: bool, rule_sets: []rules.Rules, leaves: []rules.Leaf, }
 Node_Read :: #type proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal
 Omits :: struct { call: proc(o: ^Omits, plan: ^Plan, r: ^Field, at: uintptr) -> bool, }
 Outer :: struct { path, words: []core.Step, }
+Plan_Ext :: struct { extra: []Meta_Extra, rule_sets: []rules.Rules, leaves: []rules.Leaf, uses: []Use, fork: i32, arena: ^virtual.Arena, }
 Plan_Make :: #type proc(T: typeid, as: core.As, opts: Plan_Options, allocator: runtime.Allocator) -> (Plan, core.Typed_Refusal)
 Reader :: struct { expect: ^Field, mant: u64, frames: [^]Frame, home: [^]Frame, sp: int, borrow: bool, first_key: bool, refuse_unknown: bool, wide: bool, partial: bool, wrap_sp: u32, using view: core.Token_View, plan: ^Plan, wrap: ^core.Hook_Regs, ctx: runtime.Context, first: core.Typed_Refusal, sink: ^Sink, find_tag: proc(h: ^Reader, at: u64, name: string) -> Tag_Scan, format: rawptr, }
 Readings :: struct { read: [dynamic]Reading, short: bool, }
@@ -663,6 +665,7 @@ fail :: proc(r: ^Report, message: string)
 fail_at :: proc(r: ^Report, field, message: string)
 plan_destroy :: proc(p: ^Plan)
 plan_make :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (Plan, core.Error)
+plan_replace :: proc "contextless" (p: ^Plan) -> Replacement_Read
 sink_destroy :: proc(c: ^Sink)
 unmarshal :: proc {unmarshal_node, unmarshal_answer, unmarshal_value}
 unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
@@ -675,9 +678,10 @@ comment :: proc(t: ^Tokens, text: string) -> core.Typed_Error_Kind
 destroy :: proc(out: ^Out)
 insert_element :: proc(list: ^core.Edit_List, container: core.Node_Index, at: int, v: $T, plan: ^typed.Plan = nil) -> core.Error
 insert_member :: proc(list: ^core.Edit_List, container: core.Node_Index, at: int, key: string, v: $T, plan: ^typed.Plan = nil) -> core.Error
+loaded :: proc "contextless" (v: uintptr, size: int, signed := false) -> (bits: u64)
 marshal :: proc(value: any, plan: ^typed.Plan, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error)
 marshal_value :: proc(v: $T, plan: ^typed.Plan, allocator := context.allocator) -> (core.Value, core.Error)
-unset :: proc(m: ^typed.Meta, r: ^typed.Field, v: uintptr) -> bool
+unset :: proc(x: ^typed.Meta_Extra, r: ^typed.Field, v: uintptr) -> bool
 # core/records
 Framing_Services :: struct { next: [core.Framing]proc(it: ^Reader) -> (Record, bool), judge: proc(it: ^Reader, rec: Record) -> Maybe(core.Fault), guess: proc(it: ^Reader, to: u64) -> bool, span: proc(it: ^Reader, to: u64) -> (Record, bool), exact: proc(it: ^Reader) -> (kernel.Quotes, bool), piece: proc(it: ^Reader, lo, hi: u64) -> bool, whole: proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64), close: proc(it: ^Reader), ends: [core.Framing]u8, }
 RULES := core.Rules{"records", {{}, {"too_long", "Record is longer than the limit"}}}
@@ -698,12 +702,13 @@ Sample_Sink :: proc(text: []u8, user: rawptr) sample_each :: proc(d: ^rules.Desc
 Stage :: enum u8 { Input, Write, Output, }
 Verdict :: enum u8 { Yes, No, Unknown, }
 bind :: proc(c: ^Compiled, checks: typed.Format_Checks, allocator := context.allocator) -> (b: Bound, err: core.Error)
-check_node :: proc(b: ^Bound, doc: ^core.Document, node: core.Node_Index, sink: ^typed.Sink = nil, readings: ^typed.Readings = nil) -> core.Error
 compare :: proc(old, new: ^rules.Description, opts := Compare_Options{}) -> (r: Comparison, err: runtime.Allocator_Error)
 comparison_destroy :: proc(c: ^Comparison)
 compile :: proc(text: []u8, as: core.As, opts := Options{}, allocator := context.allocator) -> (c: ^Compiled, err: core.Error)
 compile_description :: proc(d: ^rules.Description, opts := Options{}, allocator := context.allocator) -> Compiled
 convert :: proc(cv: ^Converter, doc: ^core.Document, opts := core.Write_Options{}, sink: ^typed.Sink = nil, allocator := context.allocator) -> (text: []u8, stage: Stage, err: core.Error)
+converter_destroy :: proc(cv: ^Converter)
+converter_init :: proc(cv: ^Converter, c: ^Compiled, from, to: core.As, from_reads: ^typed.Format_Reads = nil, to_reads: ^typed.Format_Reads = nil) -> (err: core.Error)
 destroy :: proc(c: ^Compiled)
 infer :: proc(inf: ^Inferred, v: core.Value) -> runtime.Allocator_Error
 infer_records :: proc(inf: ^Inferred, src: []u8, as: core.As, framing := core.Framing.Lines, runner: ^core.Runner = nil) -> core.Error

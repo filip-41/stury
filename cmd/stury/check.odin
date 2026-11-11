@@ -27,24 +27,12 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		sc = schema_open(cli.schema, src)
 	}
 	for path in (cli.files[:] if len(cli.files) > 0 else STDIN_ONLY) {
-		f, read := open_file(path, "check")
-		data: []byte
-		mapped: bool
-		if read {
-			data, _, mapped = map_file(f)
-			if mapped {
-				mapped_input_name = file_name(path)
-				if f != os.stdin {
-					os.close(f)
-				}
-			} else {
-				data, read = read_file(f)
-			}
-		}
+		spent, read := file_bytes(path, "check")
 		if !read {
 			failures += 1
 			continue
 		}
+		data := spent.data
 		runner: ^core.Runner
 		if len(data) >= POOLED_BYTES {
 			runner = run_pool(run)
@@ -68,7 +56,7 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 				faults += 1
 			}
 		}
-		free_spent({data, mapped})
+		free_spent(spent)
 		free_all(context.temp_allocator)
 	}
 	os.exit(EXIT_USAGE if failures > 0 else EXIT_INPUT if faults > 0 else 1 if invalid > 0 else 0)

@@ -27,7 +27,6 @@ Report_Kind :: enum {
 // The options of `check` that name a schema. `flag` is the first one given.
 Schema_Options :: struct {
 	flag:          string,
-	judging:       string, // the first given but --format-assert and --schema-draft, which the schema verbs take too
 	file:          string,
 	refs:          string,
 	draft:         Maybe(schema.Draft), // the draft of a schema with no $schema
@@ -64,9 +63,6 @@ schema_option :: proc(s: ^Schema_Options, args: []string, i: int) {
 		s.format_assert = true
 		return
 	}
-	if s.judging == "" && a != "--schema-draft" {
-		s.judging = a
-	}
 	if i + 1 >= len(args) {
 		usage_error("%s takes one parameter", a)
 	}
@@ -102,7 +98,7 @@ schema_option :: proc(s: ^Schema_Options, args: []string, i: int) {
 schema_open :: proc(s: Schema_Options, src: Source, option := "--schema") -> ^Schema_Check {
 	sc := schema_read(s, option)
 	err: core.Error
-	if sc.bound, err = schema.bind(sc.compiled, {checks_of(src.as, src.spec == nil), src.as}); err != nil {
+	if sc.bound, err = schema.bind(sc.compiled, {dsv.checks_for(src.as), src.as}); err != nil {
 		usage_error("%s %s: %s", option, s.file, edit_error_text(sc.text, err))
 	}
 	return sc
@@ -115,18 +111,17 @@ schema_directory :: proc(path: string) -> string {
 	return dir if dir != "" else "."
 }
 
-// The reads that check a text of the format `as` by a description. A delimited format's spec is chosen at run time, and
-// a JSON-like one has none, whose handle reads them.
-checks_of :: proc(as: core.As, cells: bool) -> ^typed.Format_Reads {
-	if !cells {
-		return nil
-	}
-	switch dsv.Spec(as.spec) {
-	case .Csv:   return dsv.checks(.Csv).reads
-	case .Tsv:   return dsv.checks(.Tsv).reads
-	case .Plain: return dsv.checks(.Plain).reads
-	}
-	return nil
+// The `file:` URI of the schema file `path`, the base its references resolve against.
+schema_file_uri :: proc(path: string) -> string {
+	full, err := os.get_absolute_path(path, context.temp_allocator)
+	return strings.concatenate({"file://", full if err == nil else path}, runtime.heap_allocator())
+}
+
+// The URI the basic output's absolute keyword locations start from: the root's `$id`, and none for a schema known only
+// by its file.
+report_uri :: proc(sc: ^Schema_Check) -> string {
+	uri := sc.compiled.description.uri
+	return "" if uri == sc.compiled.opts.base else uri
 }
 
 // The draft --schema-draft names: 4, 6, 7, 2019-09 or 2020-12.
@@ -158,20 +153,31 @@ schema_read :: proc(s: Schema_Options, option := "--schema") -> ^Schema_Check {
 	if s.refs != "" && !os.is_dir(s.refs) {
 		usage_error("--schema-ref %s is not a directory", s.refs)
 	}
+	// References resolve against the schema file's own place, and --schema-ref bounds only which files they may read.
 	opts := schema.Options {
 		format_assert = s.format_assert,
+		base          = schema_file_uri(s.file),
 		refs          = s.refs if s.refs != "" else schema_directory(s.file),
 		draft         = s.draft,
 	}
 	err: core.Error
 	if sc.compiled, err = schema.compile(sc.text, json.as(.Json), opts); err != nil {
-		if _, faulted := err.(core.Fault); faulted {
-			usage_error("%s %s: %s", option, s.file, edit_error_text(sc.text, err))
-		}
-		message.write_stderr("stury: error: %s %s: %s (--schema-ref names the directory references are read from)\n", option, s.file, edit_error_text(sc.text, err))
+		hint := " (--schema-ref names the directory references are read from)" if refuses_reference(err) else ""
+		message.write_stderr("stury: error: %s %s: %s%s\n", option, s.file, edit_error_text(sc.text, err), hint)
 		os.exit(EXIT_USAGE)
 	}
 	return sc
+}
+
+// Whether a compile refusal is of a reference, the one a directory --schema-ref names may answer.
+@(private = "file")
+refuses_reference :: proc(err: core.Error) -> bool {
+	e, refused := err.(core.Typed_Error)
+	if !refused || e.kind != .Bad_Schema {
+		return false
+	}
+	keyword, _, _ := strings.partition(string(e.want.text), ":")
+	return keyword == "$ref" || keyword == "$dynamicRef" || keyword == "$recursiveRef"
 }
 
 // Judges `data`, the file `name`, against the schema and tells what it finds. A report names the file; a valid file has a basic report and no problem document.
@@ -183,10 +189,13 @@ schema_judge :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, data: [
 	}
 	defer typed.sink_destroy(&sink)
 	records, err := check_input(sc, data, src, runner, &sink)
-	by_record := !table_source(src) && (src.framing != .Concatenated || records > 1)
+	// A fault cuts a text past the records counted, so a fault past one whole record still makes two.
+	_, faulted := err.(core.Fault)
+	by_record := !table_source(src) && (src.framing != .Concatenated || records > 1 || records == 1 && faulted)
 	#partial switch _ in err {
 	case nil:
-		if records == 0 {
+		// No record is a valid file of records, and a text that holds no value is the plain check's to judge.
+		if records == 0 && src.framing == .Concatenated {
 			return .Fault, nil
 		}
 		if s.report == .Basic {
@@ -264,9 +273,11 @@ tell :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, data: []byte, e
 // The bytes of lines `told` holds before it writes them, so a run with many failures holds no more than one chunk of them.
 TOLD_CHUNK :: 1 << 16
 
-// Tells each entry of the file `name` on standard error, one to a line.
-told :: proc(name: string, data: []byte, entries: []core.Error_Entry) {
-	lines: core.Lines
+// Tells each entry of the file `name` on standard error, one to a line. `counted` carries the count of lines from an
+// earlier call on the same text, whose entries came before.
+told :: proc(name: string, data: []byte, entries: []core.Error_Entry, counted: ^core.Lines = nil) {
+	fresh: core.Lines
+	lines := counted if counted != nil else &fresh
 	b := strings.builder_make(context.temp_allocator)
 	defer os.write_string(os.stderr, strings.to_string(b))
 	for e in entries {
@@ -276,7 +287,7 @@ told :: proc(name: string, data: []byte, entries: []core.Error_Entry) {
 		}
 		strings.write_string(&b, name)
 		strings.write_byte(&b, ':')
-		core.render_entry(strings.to_writer(&b), data, e, &lines)
+		core.render_entry(strings.to_writer(&b), data, e, lines)
 		strings.write_byte(&b, '\n')
 	}
 }
@@ -288,7 +299,7 @@ report :: proc(sc: ^Schema_Check, s: Schema_Options, file: string, entries: []co
 	write.tokens_init(&t, json.as(.Json), {}, context.temp_allocator)
 	r := write.Report{file = file, records = records, truncated = truncated}
 	if s.report == .Basic {
-		schema.write_basic(&t, entries, sc.compiled.description.uri, r)
+		schema.write_basic(&t, entries, report_uri(sc), r)
 	} else {
 		model.write_problem(&t, entries, {title = "Invalid input", status = 422}, r)
 	}

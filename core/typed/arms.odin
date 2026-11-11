@@ -161,7 +161,7 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 	}
 	// The record of the node without its arms, which only its uses with no rules of their own share, and none when it
 	// judges nothing.
-	key := Block_Key{typeid_of(rules.Rules), i32(node), b.scope} if edge == {} else Block_Key{typeid_of(Use), i32(len(b.fields)), 0}
+	key := block_key(typeid_of(rules.Rules), i32(node), b.scope) if edge == {} else block_key(typeid_of(Use), i32(len(b.fields)), 0)
 	base, known := b.blocks[key]
 	if !known && bare_judges(b, d, &n, edge) {
 		if base = reserve_block(b, 1, key); base >= 0 {
@@ -259,7 +259,7 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 	}
 	if n.unevaluated_items != nil || n.unevaluated_properties != nil {
 		e := evaluates(b, d, arena, node, own = true)
-		e.wholes, e.elements = evaluated_records(e, arena)
+		evaluated_records(e, arena)
 		if e.fixed = fixed_part(b, d, arena, node); e.fixed == nil {
 			return out[:], nil
 		}
@@ -358,6 +358,112 @@ judging_ids :: proc(b: ^Builder, arena: runtime.Allocator) {
 		}
 		u.judging = intern(&ids, arena, u.verdict if u.verdict != nil else u.applies, false)
 		u.judging_all = intern(&ids, arena, u.applies, true)
+	}
+}
+
+// Refuses the plan as `.Too_Deep` when a check would judge one value by more than `MAX_HELD` held records one inside the
+// other, through arms that read the whole value. A loop of such arms is left to the check, which meets it at `MAX_HELD`.
+@(private)
+held_nesting :: proc(b: ^Builder) {
+	// Each held use's nesting, 0 before it is known and -1 while it is judged.
+	known := make([]i32, len(b.uses), context.temp_allocator)
+	if known == nil && len(b.uses) > 0 {
+		refuse_plan(b, .No_Memory)
+		return
+	}
+	for &u in b.uses {
+		if nesting_of(b, known, &u, 0) > MAX_HELD {
+			refuse_plan(b, .Too_Deep)
+			return
+		}
+	}
+}
+
+// How many held records judge a value one inside the other from the use `u`, past `MAX_HELD` at most by one.
+@(private)
+nesting_of :: proc(b: ^Builder, known: []i32, u: ^Use, depth: int) -> i32 {
+	at := mem.ptr_sub(u, &b.uses[0])
+	if len(u.applies) == 0 || raw_data(u.applies) == &FORKING[0] || known[at] < 0 {
+		return 0
+	}
+	if known[at] > 0 || depth > MAX_HELD {
+		return known[at] if known[at] > 0 else MAX_HELD + 1
+	}
+	known[at] = -1
+	most: i32
+	arm :: proc(b: ^Builder, known: []i32, a: ^Apply, depth: int) -> i32 {
+		most: i32
+		if a.rec >= 0 && (a.kind in WHOLE_ARMS || a.kind == .Names) && int(b.fields[a.rec].meta) < len(b.uses) {
+			most = nesting_of(b, known, &b.uses[b.fields[a.rec].meta], depth + 1)
+		}
+		if a.by != nil {
+			for &c in a.by.choices {
+				most = max(most, arm(b, known, &c, depth))
+			}
+		}
+		if a.eval != nil {
+			for rec in a.eval.wholes {
+				if int(b.fields[rec].meta) < len(b.uses) {
+					most = max(most, nesting_of(b, known, &b.uses[b.fields[rec].meta], depth + 1))
+				}
+			}
+		}
+		return most
+	}
+	for list in ([2][]Apply{u.applies, u.verdict}) {
+		for &a in list {
+			most = max(most, arm(b, known, &a, depth))
+		}
+	}
+	known[at] = most + 1
+	return most + 1
+}
+
+// Marks as `shared` each held use a check can reach twice at one value through arms that read the whole value, from one
+// use's arms with a sink or with none.
+@(private)
+shared_uses :: proc(b: ^Builder) {
+	// The root each use was last reached from, as its place and the arm list, plus one.
+	seen := make([]int, len(b.uses), context.temp_allocator)
+	if seen == nil && len(b.uses) > 0 {
+		refuse_plan(b, .No_Memory)
+		return
+	}
+	reach :: proc(b: ^Builder, seen: []int, u: ^Use, stamp: int, sink: bool, depth: int) {
+		at := mem.ptr_sub(u, &b.uses[0])
+		if len(u.applies) == 0 || raw_data(u.applies) == &FORKING[0] || depth > MAX_HELD {
+			return
+		}
+		if seen[at] == stamp {
+			u.shared = true
+			return
+		}
+		seen[at] = stamp
+		arm :: proc(b: ^Builder, seen: []int, a: ^Apply, stamp: int, sink: bool, depth: int) {
+			if a.rec >= 0 && (a.kind in WHOLE_ARMS || a.kind == .Names) && int(b.fields[a.rec].meta) < len(b.uses) {
+				reach(b, seen, &b.uses[b.fields[a.rec].meta], stamp, sink, depth + 1)
+			}
+			if a.by != nil {
+				for &c in a.by.choices {
+					arm(b, seen, &c, stamp, sink, depth)
+				}
+			}
+			if a.eval != nil {
+				for rec in a.eval.wholes {
+					if int(b.fields[rec].meta) < len(b.uses) {
+						reach(b, seen, &b.uses[b.fields[rec].meta], stamp, sink, depth + 1)
+					}
+				}
+			}
+		}
+		for &a in (u.applies if sink || u.verdict == nil else u.verdict) {
+			arm(b, seen, &a, stamp, sink, depth)
+		}
+	}
+	for &u, i in b.uses {
+		for sink in ([2]bool{false, true}) {
+			reach(b, seen, &u, 2 * i + int(sink) + 1, sink, 0)
+		}
 	}
 }
 
@@ -540,7 +646,7 @@ choice_keys :: proc(b: ^Builder, rec: i32, name: string) -> []string {
 // steps to it are the arm's.
 @(private)
 arm_record :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, node: rules.Node_Index) -> i32 {
-	key := Block_Key{typeid_of(Apply), i32(node), b.scope}
+	key := block_key(typeid_of(Apply), i32(node), b.scope)
 	if at, ok := b.blocks[key]; ok {
 		return at
 	}
@@ -555,7 +661,7 @@ arm_record :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator,
 // after it predicts no key, so each key reaches the fork.
 @(private)
 fork_record :: proc(b: ^Builder) -> i32 {
-	key := Block_Key{typeid_of(Fork), 0, 0}
+	key := block_key(typeid_of(Fork), 0, 0)
 	if at, ok := b.blocks[key]; ok {
 		return at
 	}
@@ -683,12 +789,71 @@ Pool :: struct {
 	// The containers of the text that hold a repeated key, nil until a check judging repeats asks.
 	repeating:  Maybe(Repeating),
 	// The forks of runs opened at the container starting at `leads_at`, in the order the token reached them, which a fork
-	// opened later at it may follow, the count of forks opened, and that count as the check of the current value began.
-	leads:      [8]^Fork,
-	n_leads:    int,
+	// opened later at it may follow, in the temp allocator, the count of forks opened, and that count as the check of the
+	// current value began.
+	leads:      [dynamic]^Fork,
 	leads_at:   u64,
 	opened:     u64,
 	begun:      u64,
+	verdicts:   Verdicts,
+}
+
+// The verdicts records gave the scalar at `at`, which every record and run of the check judging that scalar shares:
+// once `asked` passes `VERDICTS_AFTER`, a record asked again reads its verdict from `known`, so arms that share a
+// subschema judge it once. Each key is a `Verdict_Of` and the record's index, or the held container's judging.
+@(private)
+Verdicts :: struct {
+	at:    u64,
+	asked: int,
+	known: map[[2]u64]Kept_Verdict,
+}
+
+@(private)
+Kept_Verdict :: struct {
+	passed, judged, stopped: bool,
+	reading:                 core.Kind,
+	first:                   core.Typed_Refusal,
+}
+
+// What a verdict is of: a record's passing as `record_passes` judges it, with or without a sink, or a held container with
+// no sink that its open decides.
+@(private)
+Verdict_Of :: enum u64 {
+	Passes,
+	Passes_Sink,
+	Open,
+}
+
+// The records judged at one value past which their verdicts are kept.
+@(private)
+VERDICTS_AFTER :: 32
+
+// The verdict of `key` kept at the scalar starting at `at`, counting the ask, and whether one is kept.
+@(private)
+verdict_find :: proc "contextless" (p: ^Pool, at: u64, key: [2]u64) -> (Kept_Verdict, bool) {
+	v := &p.verdicts
+	if v.at != at {
+		v.at, v.asked, v.known = at, 0, nil
+	}
+	v.asked += 1
+	if v.known == nil {
+		return {}, false
+	}
+	x, known := v.known[key]
+	return x, known
+}
+
+// Keeps the verdict of `key` at the scalar `verdict_find` was last asked of, once that scalar was asked enough.
+@(private)
+verdict_keep :: proc(p: ^Pool, key: [2]u64, x: Kept_Verdict) {
+	v := &p.verdicts
+	if v.asked <= VERDICTS_AFTER {
+		return
+	}
+	if v.known == nil {
+		v.known = make(map[[2]u64]Kept_Verdict, context.temp_allocator)
+	}
+	v.known[key] = x
 }
 
 // What checks keep of their arms' runs and held values from one value to the next, so a check of many values makes
@@ -755,8 +920,8 @@ pool_fork :: proc(p: ^Pool) -> ^Fork {
 @(private)
 fork_fresh :: proc(fk: ^Fork) {
 	t := context.temp_allocator
-	fk.arms, fk.names, fk.marks, fk.spans, fk.seen = {}, {}, {}, {}, {}
-	fk.arms.allocator, fk.names.allocator, fk.marks.allocator, fk.spans.allocator, fk.seen.allocator = t, t, t, t, t
+	fk.arms, fk.names, fk.spans, fk.seen = {}, {}, {}, {}
+	fk.arms.allocator, fk.names.allocator, fk.spans.allocator, fk.seen.allocator = t, t, t, t
 	fk.space, fk.spilled, fk.builder, fk.scratch, fk.open = {}, false, {}, {}, false
 	temp_scratch(&fk.scratch)
 }
@@ -859,8 +1024,9 @@ pool_allocator :: proc(p: ^Pool) -> runtime.Allocator {
 	return p.allocator if p.allocator.procedure != nil else context.temp_allocator
 }
 
-// The held values a check judges one inside the other, past which a schema that applies itself to the same value
-// without end fails as `.Too_Deep`.
+// The held values a check judges one inside the other. A plan that nests more is refused when bound, and a schema that
+// applies itself to the same value without end fails there as `.Too_Deep`. The bind recurses once a nested subschema,
+// which a sanitized build's thread stack holds only to about 1000.
 @(private)
 MAX_HELD :: 256
 
@@ -901,7 +1067,6 @@ Fork :: struct {
 	space:      mem.Arena,
 	// Whether the space ran out since its last growth.
 	spilled:    bool,
-	marks:      [dynamic]bool,
 	// The arms whose runs wait for the object's first member, its open token and first key, and the depth its runs nest at.
 	waiting:    int,
 	opened:     core.Token,
@@ -927,9 +1092,9 @@ Fork :: struct {
 }
 
 // An arm's state in a fork: the run of the whole value, or of the member or element being read, its verdict, and what
-// a member arm keeps of each member: the count that passed, whether each one passed, or each failing one's first failure
-// and its failures in `pending`. `apply` is nil for a record the evaluated set asks of, `.Any` for the whole value and
-// `.Contains` for each element.
+// a member arm keeps of each member: the count that passed, whether the last one passed, or the failing ones the close
+// may deliver, by group. `apply` is nil for a record the evaluated set asks of, `.Any` for the whole value and
+// `.Contains` for each element. A member's failures in `pending` take `space` from `mark` on, given back unless kept.
 @(private)
 Arm_Run :: struct {
 	apply:   ^Apply,
@@ -940,19 +1105,51 @@ Arm_Run :: struct {
 	// An arm the value's kind or its object's first member fails, which takes no run, and one whose run waits for that member.
 	dead:    bool,
 	waiting: bool,
+	last:    bool,
+	holding: bool,
+	marked:  bool,
 	count:   u64,
-	passes:  [dynamic]bool,
 	failed:  [dynamic]Failed,
+	groups:  [dynamic]Group,
 	pending: ^Sink,
+	space:   ^runtime.Arena,
+	mark:    runtime.Arena_Temp,
 }
 
-// A member or element that failed an arm: its place, its first failure, and its failures in the arm's `pending`.
+// A member or element that failed an arm: its place, its first failure, its failures, and its group.
 @(private)
 Failed :: struct {
-	index:    int,
-	first:    core.Typed_Refusal,
-	from, to: int,
+	index:   int,
+	first:   core.Typed_Refusal,
+	entries: []core.Error_Entry,
+	group:   int,
 }
+
+// The failed members or elements of an unevaluated arm that the evaluated set judges alike: those past every prefix it
+// reads, `index` -1, with the same names matched or elements passed in `bits`, or one place. The close judges one of a
+// group for all, so a group keeps the failures delivery can reach: the first with no sink, until `entries` exceeds the
+// sink's limit with one, and all under `.Judge`, which may take one back. A set that asks of more than 64 records makes
+// a group of each place, whose elements passed are in `wide`.
+@(private)
+Group :: struct {
+	index:     int,
+	bits:      u64,
+	wide:      []bool,
+	// A place in the group, which the close judges for all of it.
+	first:     int,
+	kept:      int,
+	entries:   int,
+	evaluated: bool,
+}
+
+// The failures an unevaluated arm groups one to a place before it groups them by what the evaluated set reads of them,
+// since judging a few places is cheaper than matching their names.
+@(private)
+SINGLE_GROUPS :: 64
+
+// The bytes of an unevaluated arm's first block for its members' failures, which a member that is not kept gives back.
+@(private)
+PENDING_SPACE :: 1 << 16
 
 // The bytes of a fork's space, which each held value's names, build and comparisons take from first, at its first use
 // and at most. The temp allocator's reset clears the space, so a small first space keeps a check of small values cheap.
@@ -983,11 +1180,15 @@ BUFFERED :: bit_set[Apply_Kind]{.Then, .Else, .Dependent, .Unevaluated_Members, 
 @(private)
 fork_value :: #force_no_inline proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	if raw_data(u.applies) != &FORKING[0] {
+		if h.sink != nil && h.sink.truncated && h.repeats != .Judge && h.readings == nil {
+			// A full sink takes no more failures, and the check already failed.
+			return next, .Skip if t.kind == .Object || t.kind == .Array else .Next
+		}
 		if t.kind != .Object && t.kind != .Array {
 			passed, judged, reading := scalar_verdict(h, u.verdict if h.sink == nil && u.verdict != nil else u.applies, t, 0)
 			if h.fatal == .Pattern_Undecided {
 				context = h.ctx
-				lo, hi := core.scalar_ends(t)
+				lo, hi := check_ends(h, t)
 				return next, fork_fault(h, regs, h.fatal, lo, hi)
 			}
 			if passed && judged {
@@ -1171,7 +1372,13 @@ record_passes :: proc "contextless" (h: ^Check, rec: i32, t: core.Token, depth: 
 		if depth == MAX_HELD || raw_data(u.applies) == &FORKING[0] {
 			return false, false, .Plain
 		}
-		if passed, judged, reading = scalar_verdict(h, u.verdict if h.sink == nil && u.verdict != nil else u.applies, t, depth + 1); !passed || !judged {
+		applies := u.verdict if h.sink == nil && u.verdict != nil else u.applies
+		if u.shared {
+			passed, judged, reading = record_arms(h, rec, applies, t, depth)
+		} else {
+			passed, judged, reading = scalar_verdict(h, applies, t, depth + 1)
+		}
+		if !passed || !judged {
 			return
 		}
 	}
@@ -1184,6 +1391,41 @@ record_passes :: proc "contextless" (h: ^Check, rec: i32, t: core.Token, depth: 
 		return scalar_fails(h, value, l) == {}, true, reading
 	}
 	return true, true, reading
+}
+
+// `scalar_verdict` of the arms `applies` of record `rec` on the scalar `t`, which the arms that share the record judge
+// once at `t` among the pool's `verdicts`.
+@(private)
+record_arms :: #force_inline proc "contextless" (h: ^Check, rec: i32, applies: []Apply, t: core.Token, depth: int) -> (passed, judged: bool, reading: core.Kind) {
+	if p := h.pool; p != nil {
+		v := &p.verdicts
+		if v.at != t.lo {
+			v.at, v.asked, v.known = t.lo, 0, nil
+		}
+		if v.known == nil && v.asked < VERDICTS_AFTER {
+			v.asked += 1
+			return scalar_verdict(h, applies, t, depth + 1)
+		}
+	}
+	return record_arms_kept(h, rec, applies, t, depth)
+}
+
+// `record_arms` at a scalar asked enough to keep its verdicts.
+@(private)
+record_arms_kept :: #force_no_inline proc "contextless" (h: ^Check, rec: i32, applies: []Apply, t: core.Token, depth: int) -> (passed, judged: bool, reading: core.Kind) {
+	context = h.ctx
+	if h.pool == nil {
+		if h.pool = new(Pool, context.temp_allocator); h.pool == nil {
+			return scalar_verdict(h, applies, t, depth + 1)
+		}
+	}
+	key := [2]u64{u64(Verdict_Of.Passes_Sink if h.sink != nil else Verdict_Of.Passes), u64(rec)}
+	if v, known := verdict_find(h.pool, t.lo, key); known {
+		return v.passed, v.judged, v.reading
+	}
+	passed, judged, reading = scalar_verdict(h, applies, t, depth + 1)
+	verdict_keep(h.pool, key, {passed = passed, judged = judged, reading = reading})
+	return
 }
 
 // The arms `scalar_verdict` judges a scalar by, and those a scalar passes as no object or array.
@@ -1201,7 +1443,7 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 	context = h.ctx
 	// A run at its own root judges the value its parent holds, so only there does the holding nest.
 	level := h.nest if h.sp == 1 else 0
-	lo, hi := core.scalar_ends(t)
+	lo, hi := check_ends(h, t)
 	if level == MAX_HELD {
 		return next, fork_fault(h, regs, .Too_Deep, lo, hi)
 	}
@@ -1230,6 +1472,18 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 	fk.follows, fk.skipped, fk.from, fk.ruled, fk.handed = nil, max(u64), len(h.sink.entries) if h.sink != nil else 0, false, false
 	fk.owner, fk.order, fk.fed = h, h.pool.opened, max(u64)
 	h.pool.opened += 1
+	// A container its open decides is judged alike at every fork of the same arms that opens on it.
+	open_key := [2]u64{u64(Verdict_Of.Open) | u64(h.repeats) << 8, u64(u.judging)}
+	if container && u.shared && h.sink == nil && h.readings == nil {
+		if v, known := verdict_find(h.pool, t.lo, open_key); known {
+			fork_release(h, fk)
+			if !v.passed {
+				h.first = v.first
+				return next, .Stop
+			}
+			return next, .Skip
+		}
+	}
 	if container {
 		if lead := fork_lead(h, u, t, level); lead != nil {
 			fk.follows, fk.depth, fk.takes, fk.waiting, fk.level = lead, lead.c.fork.depth, false, 0, level
@@ -1282,7 +1536,11 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 	}
 	if fk.takes && fk.waiting == 0 && fork_live(fk) == -1 {
 		// Every run is decided at the open, so the container is judged now and passed over.
-		return next, .Skip if fork_finish(h, fk, t.lo) == .Next else .Stop
+		action = fork_finish(h, fk, t.lo)
+		if u.shared && h.readings == nil && h.fatal == .None && h.first.kind != .Duplicate_Key && h.pool.verdicts.at == t.lo {
+			verdict_keep(h.pool, open_key, {passed = h.first.kind == .None, judged = true, first = h.first})
+		}
+		return next, .Skip if action == .Next else .Stop
 	}
 	f := &h.frames[h.sp]
 	h.sp += 1
@@ -1293,12 +1551,14 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 	}
 	if p := h.pool; h.run != nil && (h.sink == nil || h.sink == h.run.buffer) && u.judging != 0 {
 		if p.leads_at != t.lo {
-			p.leads_at, p.n_leads = t.lo, 0
+			p.leads_at = t.lo
+			clear(&p.leads)
 		}
-		if p.n_leads < len(p.leads) {
-			p.leads[p.n_leads] = fk
-			p.n_leads += 1
+		if p.leads.allocator.procedure == nil {
+			p.leads.allocator = context.temp_allocator
 		}
+		// A fork the list has no room for judges by runs of its own, as one with no earlier lead does.
+		append(&p.leads, fk)
 	}
 	return fork_regs(h), .Next
 }
@@ -1344,14 +1604,18 @@ arm_add :: proc(h: ^Check, fk: ^Fork, a: ^Apply, kind: Apply_Kind, rec: i32, lev
 			return
 		}
 		x := &fk.arms[fk.n]
-		x.passes.allocator, x.failed.allocator = context.temp_allocator, context.temp_allocator
+		x.groups.allocator, x.failed.allocator = context.temp_allocator, context.temp_allocator
 	}
 	x := &fk.arms[fk.n]
 	fk.n += 1
 	x.apply, x.kind, x.rec, x.run, x.passed, x.count, x.dead, x.waiting = a, kind, rec, nil, true, 0, false, false
-	clear(&x.passes)
+	x.last, x.holding, x.marked = false, false, false
+	clear(&x.groups)
 	clear(&x.failed)
 	x.pending = nil
+	if x.space != nil {
+		runtime.arena_free_all(x.space)
+	}
 	judge := a.judge if a != nil else .Run
 	switch judge {
 	case .Choice:
@@ -1362,6 +1626,7 @@ arm_add :: proc(h: ^Check, fk: ^Fork, a: ^Apply, kind: Apply_Kind, rec: i32, lev
 		return
 	case .Run, .Never:
 	}
+	scalar := t.kind != .Object && t.kind != .Array
 	if a != nil && kind in VERDICT_ARMS && rec >= 0 {
 		fld := &h.plan.fields[rec]
 		m := &h.plan.meta[fld.meta]
@@ -1373,6 +1638,24 @@ arm_add :: proc(h: ^Check, fk: ^Fork, a: ^Apply, kind: Apply_Kind, rec: i32, lev
 			x.waiting = true
 			fk.waiting += 1
 			return
+		case scalar && (h.readings == nil || kind == .Not || kind == .If):
+			// A scalar's verdict by a record its leaves and arms judge takes no run, and the arms that share the record share it.
+			if passed, judged, _ := record_passes(h, rec, t, level + 1); judged {
+				x.dead = !passed
+				return
+			}
+		}
+	}
+	if a != nil && scalar && (kind == .Then || kind == .Else) {
+		// A branch its `if` did not pick, decided at the open, judges nothing.
+		#reverse for &y in fk.arms[:fk.n - 1] {
+			if y.kind == .If {
+				if y.run == nil && y.dead == (kind == .Then) {
+					x.dead = true
+					return
+				}
+				break
+			}
 		}
 	}
 	if kind in WHOLE_ARMS && rec >= 0 {
@@ -1568,15 +1851,25 @@ run_start :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run, rec: i32, nest: int, step: 
 						h.fatal = .No_Memory
 						return nil
 					}
-					x.pending.entries.allocator = fork_space(fk)
 				}
+				if x.space == nil {
+					if x.space = new(runtime.Arena, context.temp_allocator); x.space == nil || runtime.arena_init(x.space, PENDING_SPACE, context.temp_allocator) != nil {
+						h.fatal = .No_Memory
+						return nil
+					}
+				}
+				x.mark, x.marked = runtime.arena_temp_begin(x.space), true
+				x.pending.entries = nil
+				x.pending.entries.allocator = runtime.arena_allocator(x.space)
+				x.pending.truncated = false
+				clear(&x.pending.errors)
 				c.sink = x.pending
 			}
 			c.sink.max_errors, c.sink.record = h.sink.max_errors, h.sink.record
 			if step != nil {
 				// A candidate's failures wait until close delivers or discards them, so the limit applies there. A candidate
 				// holds what the sink above can still take and one more, which tells the delivery it was cut.
-				c.sink.max_errors = len(c.sink.entries) + sink_limit(h.sink) - len(h.sink.entries) + 1
+				c.sink.max_errors = sink_limit(h.sink) - len(h.sink.entries) + 1
 			}
 		}
 	}
@@ -1694,9 +1987,6 @@ fork_lead :: proc(h: ^Check, u: ^Use, t: core.Token, level: int) -> ^Run {
 	for &x in pf.arms[:pf.n] {
 		y := x.run
 		if y == r {
-			if h.sink != nil && x.kind in BUFFERED {
-				return nil
-			}
 			if lead == nil && x.kind in VERDICT_ARMS {
 				lead = earlier_lead(h, u, t)
 			}
@@ -1709,7 +1999,7 @@ fork_lead :: proc(h: ^Check, u: ^Use, t: core.Token, level: int) -> ^Run {
 		if f == nil || !f.open || f.follows != nil || f.ruled || f.lo != t.lo || f.below != h.sp || f.level != level || f.u.judging != u.judging || h.sink != nil && f.u.judging_all != u.judging_all {
 			continue
 		}
-		if y.c.readings != nil || y.c.taken != nil || y.c.sink != (nil if h.sink == nil else y.buffer) {
+		if y.c.readings != nil || y.c.taken != nil || y.c.sink != (nil if h.sink == nil else y.buffer) || h.sink != nil && y.c.sink == nil {
 			continue
 		}
 		if h.sink != nil || y.c.first.kind == .None {
@@ -1727,7 +2017,7 @@ earlier_lead :: proc(h: ^Check, u: ^Use, t: core.Token) -> ^Run {
 	if p.leads_at != t.lo {
 		return nil
 	}
-	leads: for f in p.leads[:p.n_leads] {
+	leads: for f in p.leads {
 		y := f.owner.run
 		if !f.open || f.follows != nil || f.ruled || f.lo != t.lo || f.u.judging != u.judging || y == nil || y.c.fork != f || y.done {
 			continue
@@ -1914,7 +2204,7 @@ fork_step :: #force_inline proc "contextless" (h: ^Check, t: core.Token) -> core
 	case value && fk.depth == 1 && !open:
 		member_end(h, fk, MEMBER_ARMS)
 	case fk.depth == 0:
-		_, hi := core.scalar_ends(t)
+		_, hi := check_ends(h, t)
 		return fork_finish(h, fk, hi)
 	}
 	if h.fatal != .None {
@@ -1935,6 +2225,11 @@ name_failed :: proc(c: ^Sink, from: int, name: string) {
 		return
 	}
 	for &e in c.entries[min(from, len(c.entries)):] {
+		// A schema's entry names the member in place of the rule's operand, which its keyword path leads to.
+		if text, held := e.operand.(string); held && len(e.keyword_path) > 0 {
+			delete(text, c.entries.allocator)
+			e.operand = nil
+		}
 		if e.operand == nil {
 			e.operand = strings.clone(name, c.entries.allocator)
 		}
@@ -2026,7 +2321,7 @@ fork_key :: proc(h: ^Check, fk: ^Fork, t: core.Token) -> core.Action {
 		h.fatal = .No_Memory
 		return .Stop
 	}
-	lo, _ := core.scalar_ends(t)
+	lo, _ := check_ends(h, t)
 	if h.repeats == .Judge && len(fk.spans) > 0 {
 		slice.last_ptr(fk.spans[:])[1] = lo
 	}
@@ -2043,6 +2338,8 @@ fork_key :: proc(h: ^Check, fk: ^Fork, t: core.Token) -> core.Action {
 				if x.kind == .Unevaluated_Members {
 					#reverse for f, i in x.failed {
 						if f.index == at {
+							x.groups[f.group].kept -= 1
+							x.groups[f.group].entries -= len(f.entries)
 							ordered_remove(&x.failed, i)
 						}
 					}
@@ -2138,6 +2435,9 @@ member_start :: proc(h: ^Check, fk: ^Fork, kinds: bit_set[Apply_Kind], name := c
 		fk.count += 1
 	}
 	for &x in fk.arms[:fk.n] {
+		if x.kind == .Contains && step != nil {
+			x.last = false
+		}
 		if x.kind not_in kinds || x.rec < 0 || step != nil && array != (x.kind == .Contains || x.kind == .Unevaluated_Items) {
 			continue
 		}
@@ -2170,10 +2470,10 @@ member_start :: proc(h: ^Check, fk: ^Fork, kinds: bit_set[Apply_Kind], name := c
 			continue
 		}
 		if x.apply != nil && x.apply.judge == .Never && h.sink == nil {
-			from := slice.last(x.failed[:]).to if len(x.failed) > 0 else 0
-			if _, failed := append(&x.failed, Failed{fk.count - 1, {kind = .Not_Allowed, at = at}, from, from}); failed != nil {
+			if _, failed := append(&x.failed, Failed{index = fk.count - 1, first = {kind = .Not_Allowed, at = at}}); failed != nil {
 				h.fatal = .No_Memory
 			}
+			x.holding = true
 			continue
 		}
 		if x.kind == .Names {
@@ -2185,11 +2485,15 @@ member_start :: proc(h: ^Check, fk: ^Fork, kinds: bit_set[Apply_Kind], name := c
 	}
 }
 
-// Ends the runs of arms of `kinds` of the member or element that closed, keeping what each arm counts of it.
+// Ends the runs of arms of `kinds` of the member or element that closed, keeping what each arm counts of it, then
+// keeps a failure of an unevaluated arm in its group, which needs what each element arm found of it.
 @(private)
 member_end :: proc(h: ^Check, fk: ^Fork, kinds: bit_set[Apply_Kind]) {
+	// Whether an unevaluated arm holds a failure, which a `.Never` arm holds without a run.
+	held := false
 	for &x in fk.arms[:fk.n] {
 		if x.run == nil || x.kind not_in kinds {
+			held |= x.holding
 			continue
 		}
 		first := x.run.c.first
@@ -2199,14 +2503,13 @@ member_end :: proc(h: ^Check, fk: ^Fork, kinds: bit_set[Apply_Kind]) {
 		#partial switch x.kind {
 		case .Contains:
 			x.count += u64(first.kind == .None)
-			for len(x.passes) < fk.count - 1 {
-				append(&x.passes, false)
-			}
-			append(&x.passes, first.kind == .None)
+			x.last = first.kind == .None
 		case .Unevaluated_Members, .Unevaluated_Items:
 			if first.kind != .None {
-				from := slice.last(x.failed[:]).to if len(x.failed) > 0 else 0
-				append(&x.failed, Failed{fk.count - 1, first, from, len(x.pending.entries) if x.pending != nil else from})
+				if _, failed := append(&x.failed, Failed{index = fk.count - 1, first = first, entries = x.pending.entries[:] if x.marked else nil}); failed != nil {
+					h.fatal = .No_Memory
+				}
+				x.holding, held = true, true
 			}
 		case:
 			if first.kind != .None && h.first.kind == .None {
@@ -2215,6 +2518,98 @@ member_end :: proc(h: ^Check, fk: ^Fork, kinds: bit_set[Apply_Kind]) {
 		}
 		run_free(h, x.run)
 		x.run = nil
+		if x.marked && !x.holding {
+			runtime.arena_temp_end(x.mark)
+			x.marked = false
+		}
+	}
+	if held {
+		unevaluated_keep_all(h, fk, kinds)
+	}
+}
+
+// `unevaluated_keep` of each unevaluated arm of `kinds` that holds a failure.
+@(private)
+unevaluated_keep_all :: #force_no_inline proc(h: ^Check, fk: ^Fork, kinds: bit_set[Apply_Kind]) {
+	for &x in fk.arms[:fk.n] {
+		if x.holding && x.kind in kinds {
+			unevaluated_keep(h, fk, &x)
+		}
+	}
+}
+
+// Keeps the failure of the member or element that closed, last in `x.failed`, in its group when delivery can reach it,
+// and drops it otherwise.
+@(private)
+unevaluated_keep :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run) {
+	x.holding = false
+	e := x.apply.eval
+	f := &x.failed[len(x.failed) - 1]
+	g := Group{index = -1, first = f.index}
+	single := len(x.groups) < SINGLE_GROUPS
+	if x.kind == .Unevaluated_Items {
+		g.index = f.index if single || f.index < e.reach || len(e.elements) > 64 else -1
+		if len(e.elements) > 64 {
+			if g.wide = make([]bool, len(e.elements), context.temp_allocator); g.wide == nil {
+				h.fatal = .No_Memory
+				return
+			}
+		}
+		for rec, i in e.elements {
+			for &y in fk.arms[:fk.n] {
+				if y.kind == .Contains && y.rec == rec {
+					if g.wide != nil {
+						g.wide[i] = y.last
+					} else {
+						g.bits |= u64(y.last) << uint(i)
+					}
+					break
+				}
+			}
+		}
+	} else if single || len(e.named) > 64 {
+		g.index = f.index
+	} else {
+		for n, i in e.named {
+			hit, undecided := evaluates_name(n, fk.key, &fk.scratch)
+			if undecided {
+				h.fatal = .Pattern_Undecided
+				return
+			}
+			g.bits |= u64(hit) << uint(i)
+		}
+	}
+	at := len(x.groups)
+	if g.index < 0 {
+		for y, i in x.groups {
+			if y.index < 0 && y.bits == g.bits {
+				at = i
+				break
+			}
+		}
+	}
+	if at == len(x.groups) {
+		if _, failed := append(&x.groups, g); failed != nil {
+			h.fatal = .No_Memory
+			return
+		}
+	}
+	group := &x.groups[at]
+	keep := h.repeats == .Judge || (group.kept == 0 if h.sink == nil else group.entries <= sink_limit(h.sink))
+	if keep {
+		f.group = at
+		group.kept += 1
+		group.entries += len(f.entries)
+	} else {
+		pop(&x.failed)
+	}
+	if x.marked {
+		if keep {
+			runtime.arena_temp_ignore(x.mark)
+		} else {
+			runtime.arena_temp_end(x.mark)
+		}
+		x.marked = false
 	}
 }
 
@@ -2412,37 +2807,41 @@ fork_unevaluated :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run) {
 	if len(x.failed) == 0 {
 		return
 	}
-	resize(&fk.marks, fk.count)
-	slice.fill(fk.marks[:], false)
-	ev := Evaluating{names = fk.names[:], count = fk.count, passes = fork_passes, data = fk, scratch = &fk.scratch}
-	mark_evaluated(&ev, x.apply.eval, fk.marks[:], x.kind == .Unevaluated_Items)
+	Asked :: struct {
+		fk: ^Fork,
+		x:  ^Arm_Run,
+	}
+	// Whether the held value passes record `rec`, or with `index` the elements of that group.
+	passes :: proc(data: rawptr, index: int, rec: i32) -> bool {
+		q := (^Asked)(data)
+		if index >= 0 {
+			g := &q.x.groups[index]
+			for r, i in q.x.apply.eval.elements {
+				if r == rec {
+					return g.wide[i] if g.wide != nil else g.bits & (1 << uint(i)) != 0
+				}
+			}
+			return false
+		}
+		for &x in q.fk.arms[:q.fk.n] {
+			if x.rec == rec && x.kind in WHOLE_ARMS {
+				return x.passed
+			}
+		}
+		return false
+	}
+	q := Asked{fk, x}
+	ev := Evaluating{names = fk.names[:], count = fk.count, passes = passes, data = &q, scratch = &fk.scratch}
+	evaluated_groups(&ev, x.apply.eval, x.groups[:], x.kind == .Unevaluated_Items)
 	if ev.undecided {
 		h.fatal = .Pattern_Undecided
 		return
 	}
 	for f in x.failed {
-		if !fk.marks[f.index] {
-			fork_deliver(h, nil, x.pending.entries[f.from:f.to] if x.pending != nil else nil, f.first)
+		if !x.groups[f.group].evaluated {
+			fork_deliver(h, nil, f.entries, f.first)
 		}
 	}
-}
-
-// Whether the held value, or with `index` its element of that place, passes record `rec`, which the fork judged.
-@(private)
-fork_passes :: proc(data: rawptr, index: int, rec: i32) -> bool {
-	fk := (^Fork)(data)
-	for &x in fk.arms[:fk.n] {
-		if x.rec != rec {
-			continue
-		}
-		if index < 0 && x.kind in WHOLE_ARMS {
-			return x.passed
-		}
-		if index >= 0 && x.kind == .Contains {
-			return index < len(x.passes) && x.passes[index]
-		}
-	}
-	return false
 }
 
 // Notes the fault `e` at the innermost held value open in `c` by the check of the run that reads it, whose frames place

@@ -11,6 +11,7 @@ import "core:strings"
 import core "../../core"
 import "../../core/rules"
 import "../../core/schema"
+import dsv "../../dsv"
 import json "../../json"
 import "message"
 
@@ -22,31 +23,10 @@ Verb_Options :: struct {
 	seed:     u64,
 	count:    int,
 	package_name: string, // gen: the package the types are written in
-	flag:     string, // the first of these given
-	given:    [Schema_Verb]string, // the first option of each verb given
-}
-
-Schema_Verb :: enum u8 {
-	Infer,
-	Sample,
-	Gen,
-}
-
-@(rodata)
-SCHEMA_VERBS := [Schema_Verb]string {
-	.Infer  = "infer",
-	.Sample = "sample",
-	.Gen    = "gen",
 }
 
 // Takes the option `args[i]` and its parameter.
 verb_option :: proc(v: ^Verb_Options, args: []string, i: int) {
-	if v.flag == "" {
-		v.flag = args[i]
-	}
-	if verb := verb_of_option(args[i]); v.given[verb] == "" {
-		v.given[verb] = args[i]
-	}
 	switch a := args[i]; a {
 	case "--ranges":   v.ranges = true
 	case "--invalid":  v.invalid = true
@@ -69,17 +49,6 @@ verb_option :: proc(v: ^Verb_Options, args: []string, i: int) {
 	}
 }
 
-// The schema verb that takes `option`, one of Verb_Options'.
-verb_of_option :: proc(option: string) -> Schema_Verb {
-	switch option {
-	case "--ranges":
-		return .Infer
-	case "--package":
-		return .Gen
-	}
-	return .Sample
-}
-
 // Whether the command is `schema gen`, which writes Odin and takes no layout.
 generates_odin :: proc(cli: ^Cli) -> bool {
 	return cli.schema_verb && len(cli.files) > 0 && cli.files[0] == "gen"
@@ -87,34 +56,26 @@ generates_odin :: proc(cli: ^Cli) -> bool {
 
 // Runs the verb that `cli.files` opens with and exits.
 schema_main :: proc(run: ^Run, cli: ^Cli) -> ! {
-	verb, named := Schema_Verb.Infer, false
-	for name, v in SCHEMA_VERBS {
-		if len(cli.files) > 0 && cli.files[0] == name {
-			verb, named = v, true
-		}
-	}
-	if !named {
+	verb := cli.files[0] if len(cli.files) > 0 else ""
+	if verb != "infer" && verb != "sample" && verb != "gen" {
 		usage_error("schema takes infer, sample or gen")
 	}
-	for flag, other in cli.verbs.given {
-		if other != verb && flag != "" {
-			usage_error("%s is %s's", flag, SCHEMA_VERBS[other])
-		}
+	if verb != "infer" && run.opts.max_depth != 0 {
+		usage_error("--max-depth has no use with schema %s: it reads no input", verb)
 	}
 	files := cli.files[1:]
 	switch verb {
-	case .Infer:
+	case "infer":
 		infer_main(run, cli, files)
-	case .Sample:
+	case "sample":
 		sample_main(run, cli, files)
-	case .Gen:
 	}
 	gen_main(cli, files)
 }
 
-// Refuses a table output when the root of `d` takes no array, so there are no rows to write.
-refuse_unlisted :: proc(o: ^Opts, d: ^rules.Description) {
-	if !writes_cells(o) {
+// Refuses a table that `d` describes no rows of: one written, `format` being --to, or read, `format` being --from.
+refuse_unlisted :: proc(d: ^rules.Description, format: Format, verb: string) {
+	if !FORMATS[format].cells {
 		return
 	}
 	n := d.root
@@ -122,7 +83,7 @@ refuse_unlisted :: proc(o: ^Opts, d: ^rules.Description) {
 		n = d.nodes[n].ref.?
 	}
 	if .Array not_in d.nodes[n].kinds {
-		usage_error("%s writes a table: the schema describes no array of rows", FORMATS[o.to].name)
+		usage_error("%s %s a table: the schema describes no array of rows", FORMATS[format].name, verb)
 	}
 }
 
@@ -160,22 +121,17 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 	}
 	failures, faults := 0, 0
 	for path in (files if len(files) > 0 else STDIN_ONLY) {
-		f, opened := open_file(path, "schema infer")
-		if !opened {
+		spent, read := file_bytes(path, "schema infer")
+		if !read {
 			failures += 1
 			continue
 		}
-		data, _, mapped := map_file(f)
-		read := true
-		if mapped {
-			if f != os.stdin {
-				os.close(f)
-			}
-		} else {
-			data, read = read_file(f)
-		}
-		if !read {
-			failures += 1
+		data := spent.data
+		// A text with no value in it is the fault check calls it, not a value of every kind.
+		if msg := blank_told(file_name(path), data, src, &run.opts); msg != "" {
+			message.write_stderr("stury: parse error: %s", msg)
+			faults += 1
+			free_spent(spent)
 			continue
 		}
 		runner: ^core.Runner
@@ -185,7 +141,7 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 		if !infer_read(&inf, src, path, data, &run.opts, runner) {
 			faults += 1
 		}
-		free_spent({data, mapped})
+		free_spent(spent)
 	}
 	if failures > 0 || faults > 0 {
 		os.exit(EXIT_USAGE if failures > 0 else EXIT_INPUT)
@@ -196,6 +152,11 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 		os.exit(EXIT_INPUT)
 	}
 	text, err := schema.write(&d, json.as(.Json), output_layout(run).opts)
+	if e, refused := err.(core.Typed_Error); refused && e.kind == .Too_Deep {
+		// A schema nests a level or two for each level of its values, so one of a deep input may pass the writer's limit.
+		message.write_stderr("stury: error: schema infer: the schema of the input nests past %d levels, which a schema written as JSON may not\n", core.MAX_DEPTH)
+		os.exit(EXIT_INPUT)
+	}
 	if err != nil {
 		message.write_stderr("stury: error: %s\n", edit_error_text(nil, err))
 		os.exit(EXIT_USAGE)
@@ -214,12 +175,17 @@ sample_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 	if cli.formats.from != nil {
 		usage_error("--from is infer's: a schema is read as JSON")
 	}
-	sc := schema_read({file = files[0], draft = cli.schema.draft}, "schema sample")
+	if cli.verbs.comments && !writes_comments(o) {
+		usage_error("--comments writes a description as a comment, and %s has no comments", FORMATS[o.to].name)
+	}
+	sc := schema_read({file = files[0], refs = cli.schema.refs, draft = cli.schema.draft}, "schema sample")
 	d, text := sc.compiled.description, sc.text
 	if writes_cells(o) && cli.verbs.count > 1 {
 		usage_error("--count above 1 writes one table for each value, which is not one %s: use --count 1", FORMATS[o.to].name)
 	}
-	refuse_unlisted(o, d)
+	refuse_unlisted(d, o.to, "writes")
+	// A table is drawn as --infer reads one, so a column the schema types holds that type's cells.
+	o.cells_out.infer = o.cells_in.infer
 	as := cells_written_as(o) if writes_cells(o) else json.as(FORMATS[FORMATS[o.to].written_as.? or_else o.to].spec)
 	// A value is a line, so the text is compact unless a layout option asks for more.
 	layout := output_layout(run).opts
@@ -233,7 +199,7 @@ sample_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 		text  = strings.builder_make(runtime.heap_allocator()),
 		lines = !writes_cells(o),
 	}
-	serr := schema.sample_each(d, as, {reads = checks_of(as, !out.lines), seed = cli.verbs.seed, count = cli.verbs.count, invalid = cli.verbs.invalid, comments = cli.verbs.comments, write = layout}, proc(text: []u8, user: rawptr) {
+	serr := schema.sample_each(d, as, {reads = dsv.checks_for(as), seed = cli.verbs.seed, count = cli.verbs.count, invalid = cli.verbs.invalid, comments = cli.verbs.comments, write = layout}, proc(text: []u8, user: rawptr) {
 		out := (^Out)(user)
 		strings.write_bytes(&out.text, text)
 		if out.lines {
@@ -243,7 +209,7 @@ sample_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 	}, &out)
 	flush_out(&out.text, true)
 	if serr != nil {
-		message.write_stderr("stury: error: %s\n", edit_error_text(text, serr))
+		message.write_stderr("stury: error: schema sample %s: %s\n", files[0], edit_error_text(text, serr))
 		os.exit(1)
 	}
 	exit_closing_stdout(0)
@@ -264,7 +230,7 @@ gen_main :: proc(cli: ^Cli, files: []string) -> ! {
 	if name == "" {
 		name = strings.to_snake_case(filepath.short_stem(files[0]))
 	}
-	sc := schema_read({file = files[0], draft = cli.schema.draft}, "schema gen")
+	sc := schema_read({file = files[0], refs = cli.schema.refs, draft = cli.schema.draft}, "schema gen")
 	text := sc.text
 	source, err := schema.write_odin(sc.compiled.description, name, json.as(.Json), cli.schema.format_assert)
 	if e, typed := err.(core.Typed_Error); typed && e.kind == .Bad_Option {

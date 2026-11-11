@@ -128,7 +128,8 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 	if o.grow_header && !writes_cells(o) {
 		usage_error("--grow-header applies to --to csv or tsv")
 	}
-	if cli.cells_flag != "" && !reads_cells(o) {
+	// schema sample takes --infer for a table it writes, whose cells it draws as --infer reads them.
+	if cli.cells_flag != "" && !reads_cells(o) && !(cli.schema_verb && cli.cells_flag == "--infer" && writes_cells(o)) {
 		usage_error("%s applies to --from csv or tsv", cli.cells_flag)
 	}
 	// check and edit refuse the options that write a table as options they have no use for.

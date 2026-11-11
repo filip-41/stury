@@ -35,9 +35,9 @@ checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Check
 // Builds the plan of `T` for spec `spec` read with `opts`, as `typed.plan_make` does. A plan of any spec writes JSON.
 // The plan reads only with `reads`, whose reads bind a spec and so the walk of that spec, and with none it reads
 // through `unmarshal`, `check` and the handle's `typed.unmarshal_text`.
-plan_make :: proc(T: typeid, spec := Spec.Json, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error) {
+plan_make :: #force_inline proc(T: typeid, spec := Spec.Json, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error) {
 	made, err := plan_written(T, spec, opts, plan, reads, allocator)
-	if err == nil && made.build == nil && typed.plan_has_value(&made) {
+	if err == nil && typed.plan_text_build(&made) == nil && typed.plan_has_value(&made) {
 		typed.plan_destroy(&made)
 		return {}, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
@@ -46,10 +46,14 @@ plan_make :: proc(T: typeid, spec := Spec.Json, opts := Options{}, plan := typed
 
 // The plan of `plan_make` with no check that its reads build a `core.Value` member, which a write does not need.
 @(private)
-plan_written :: proc(T: typeid, spec: Spec, opts: Options, plan: typed.Plan_Options, reads: ^typed.Format_Reads, allocator: runtime.Allocator) -> (typed.Plan, core.Error) {
-	made, err := typed.plan_build(T, plan_handle(spec, opts), plan, allocator)
+plan_written :: #force_inline proc(T: typeid, spec: Spec, opts: Options, plan: typed.Plan_Options, reads: ^typed.Format_Reads, allocator: runtime.Allocator) -> (typed.Plan, core.Error) {
+	made, refusal := typed.plan_build(T, plan_handle(spec, opts), plan, allocator)
 	plan_bind(&made, reads)
-	return made, core.error_of(err)
+	// A plan that is built holds no refusal to copy.
+	if refusal.kind == .None {
+		return made, nil
+	}
+	return made, core.error_of(refusal)
 }
 
 // Builds the plan that reads values of description `d` as `spec`, as `typed.plan_of` does. The reads are the plan's with
@@ -187,6 +191,70 @@ read_text :: proc(src: []u8, $S: Spec, opts: Options, target: rawptr, T: typeid,
 	return err
 }
 
+// Puts in `e` the path from the root of the document of `src` to the key that starts at `at`, the innermost
+// `MAX_ERROR_STEPS` of it. A name is a slice of `src`, or a decode from `allocator` where the key holds an escape.
+@(private)
+repeat_path :: proc(src: []u8, $S: Spec, opts: Options, at: u64, e: ^core.Typed_Refusal, allocator: runtime.Allocator) {
+	arena := runtime.Arena{backing_allocator = allocator, minimum_block_size = 4096}
+	defer runtime.arena_destroy(&arena)
+	built, failed := build_spec(src, S, bound_as(S, opts), false, runtime.arena_allocator(&arena))
+	if failed.kind != .None {
+		return
+	}
+	doc := &built
+	holds :: proc(doc: ^core.Document, i: core.Node_Index, at: u64) -> bool {
+		s := core.span(doc, i)
+		lo := u64(uintptr(raw_data(s)) - uintptr(raw_data(doc.src)))
+		return at >= lo && at < lo + u64(len(s))
+	}
+	// The innermost steps, the step `n` at `n % MAX_ERROR_STEPS`.
+	ring: [core.MAX_ERROR_STEPS]core.Step
+	n := 0
+	at_node := core.ROOT
+	descend: for {
+		if doc.nodes[at_node].kind == .Object {
+			pairs := core.doc_pairs(doc, at_node)
+			for key, val in core.doc_pair_next(&pairs) {
+				on_key := holds(doc, key, at)
+				if !on_key && !holds(doc, val, at) {
+					continue
+				}
+				name, plain := core.doc_text(doc, key, nil)
+				if plain {
+					// A key with nothing to decode is a slice of the text, which the document reads in place.
+					from := int(uintptr(raw_data(name)) - uintptr(raw_data(doc.src)))
+					name = string(src[from:][:len(name)])
+				} else {
+					name, _ = core.text_clone(doc, key, allocator)
+				}
+				ring[n % len(ring)], n = core.Name(name), n + 1
+				if on_key {
+					break descend
+				}
+				at_node = val
+				continue descend
+			}
+		} else if doc.nodes[at_node].kind == .Array {
+			children := core.doc_children(doc, at_node)
+			k := 0
+			for child in core.doc_child_next(&children) {
+				if holds(doc, child, at) {
+					ring[n % len(ring)], n = core.Index(k), n + 1
+					at_node = child
+					continue descend
+				}
+				k += 1
+			}
+		}
+		break
+	}
+	kept := min(n, len(ring))
+	for i in 0 ..< kept {
+		e.steps[i] = ring[(n - kept + i) % len(ring)]
+	}
+	e.n_steps, e.truncated = u8(kept), n > kept
+}
+
 // Reads the document of `src[lo:cut]` into `target` with `frames`, one more than `opts` lets a text open, and stores
 // its error in `err`, with every offset from `src`'s first byte. A record's read (`LINE`) walks it in place in `src`
 // as `walk_line` does, and `cold` says only a read of `src[:cut]` tells its answer. The error goes out by pointer, as
@@ -201,6 +269,9 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 		core.move_document_error(&built, lo)
 		if built.kind == .Walk || built.kind == .Duplicate_Key {
 			err^ = {kind = .Walk if built.kind == .Walk else .Duplicate_Key, at = built.at, inner = built.inner}
+			if built.kind == .Duplicate_Key {
+				repeat_path(src[lo:cut], S, opts, built.at - lo, err, scratch)
+			}
 			context.allocator = allocator
 			typed.sink_refusal(read.sink, err^, CHECK)
 			return

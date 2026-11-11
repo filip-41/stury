@@ -2,6 +2,7 @@ package json_tests
 
 import "base:runtime"
 import "core:fmt"
+import "core:mem"
 import "core:encoding/uuid"
 import "core:mem/virtual"
 import "core:strings"
@@ -60,8 +61,8 @@ a_dump_leaves_out_what_each_option_excludes :: proc(t: ^testing.T) {
 	a.id = 9
 	testing.expect_value(t, dumped(t, &m, &a, {}), `{"id":9,"name":"ada","level":7,"nick":null,"tags":[],"home":{"city":"x","zip":null},"aa":[2],"zz":1}`)
 	testing.expect_value(t, dumped(t, &m, &a, {exclude_none = true}), `{"id":9,"name":"ada","level":7,"tags":[],"home":{"city":"x"},"aa":[2],"zz":1}`)
-	// Only a null the load did not read is unset.
-	testing.expect_value(t, dumped(t, &m, &a, {exclude_unset = true}), `{"id":9,"name":"ada","level":7,"nick":null,"tags":[],"home":{"city":"x"},"aa":[2],"zz":1}`)
+	// What the load took from a default or never read is unset, and the read_only member is kept.
+	testing.expect_value(t, dumped(t, &m, &a, {exclude_unset = true}), `{"id":9,"name":"ada","nick":null,"home":{"city":"x"},"aa":[2],"zz":1}`)
 	testing.expect_value(t, dumped(t, &m, &a, {exclude_defaults = true}), `{"id":9,"name":"ada","nick":null,"home":{"city":"x"},"aa":[2],"zz":1}`)
 	testing.expect_value(t, dumped(t, &m, &a, {exclude_unset = true, exclude_none = true, exclude_defaults = true}), `{"id":9,"name":"ada","home":{"city":"x"},"aa":[2],"zz":1}`)
 	a.level, a.id = 8, 0
@@ -194,6 +195,58 @@ a_patch_reads_no_default_and_misses_nothing :: proc(t: ^testing.T) {
 	v: Listed
 	testing.expect(t, model.patch(&l, &v, transmute([]u8)string(`{"items": [{"x": 1}]}`)) != nil)
 	walktest.expect_nil(t, model.patch(&l, &v, transmute([]u8)string(`{}`)))
+}
+
+@(private = "file")
+Stock :: struct {
+	name:  string `model:"len>=2"`,
+	qty:   int `model:">=0"`,
+	note:  string `model:"optional"`,
+	tags:  [dynamic]string `model:"optional"`,
+	extra: map[string]string `json:",unknown"`,
+	set:   model.Fields_Set,
+}
+
+// A patch frees what it read when it fails, and what it replaced when it succeeds, so a value it patched holds all the
+// memory it was given.
+@(test)
+a_patch_frees_what_it_read_or_replaced :: proc(t: ^testing.T) {
+	reg: model.Registry
+	defer model.registry_destroy(&reg)
+	m, compiled := model.compile(&reg, Stock, json.checks(.Json))
+	walktest.expect_nil(t, compiled)
+	defer model.model_destroy(&m)
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	a := mem.tracking_allocator(&track)
+	v: Stock
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name":"widget","qty":3,"tags":["x"],"a":"b","c":"d"}`), &v, allocator = a))
+	held := len(track.allocation_map)
+	failing := [?]string {
+		`{"name":"longername","qty":-1,"tags":["y","z"],"e":"f"}`,
+		`{"name":"longername","qty":`,
+		`{"name":"x","a":"q"}`,
+	}
+	for body in failing {
+		testing.expectf(t, model.patch(&m, &v, transmute([]u8)body, allocator = a) != nil, "%s", body)
+		testing.expectf(t, len(track.allocation_map) == held, "%s: %d live, %d before", body, len(track.allocation_map), held)
+	}
+	testing.expect(t, v.name == "widget" && v.qty == 3 && len(v.tags) == 1 && v.extra["a"] == "b")
+	walktest.expect_nil(t, model.patch(&m, &v, transmute([]u8)string(`{"name":"gadget","tags":["p","q"],"a":"z","e":"f"}`), allocator = a))
+	testing.expect(t, v.name == "gadget" && v.qty == 3 && len(v.tags) == 2 && len(v.extra) == 3 && v.extra["a"] == "z" && v.extra["c"] == "d")
+	delete(v.name, a)
+	delete(v.note, a)
+	for x in v.tags {
+		delete(x, a)
+	}
+	delete(v.tags)
+	for k, x in v.extra {
+		delete(k, a)
+		delete(x, a)
+	}
+	delete(v.extra)
+	testing.expectf(t, len(track.allocation_map) == 0 && len(track.bad_free_array) == 0, "%d live, %d bad frees", len(track.allocation_map), len(track.bad_free_array))
 }
 
 @(private = "file")

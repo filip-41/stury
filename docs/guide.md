@@ -182,7 +182,14 @@ err = model.load(&m, body, &user, &sink)
 ```
 
 - `load` refuses a missing required member and reads no `read_only` member. A `Fields_Set` member records what the
-  text held, which `was_set` asks by the member's Odin name. `validate` checks a value built in code by the same rules.
+  text held, which `was_set` asks by the member's Odin name, a refused load too. `validate` checks a value built in
+  code by the same rules.
+- A load refuses a repeated key as `.Duplicate_Key` with the path to the repeat, where `json.unmarshal` takes the last.
+  `Load_Opts{dups = .Last}` or `.First` picks one instead, and only the value that wins is judged. `.All` is
+  `.Bad_Option`, since a member holds one value.
+- A model copies what it keeps of the registry, so the registry may be destroyed once its models are compiled.
+- A CSV or TSV model reads an empty unquoted cell as null, as JSON's `null`: a `Maybe` member holds nil and a plain
+  `string` member refuses it as `.Wrong_Kind`. A quoted `""` is the empty string.
 - The format tag (`json:`, or `stury:` for every format) names a member and shapes it: a rename, `-`, `omitempty`,
   `omitunset`, `required` and `unknown`, which marks the `extra` member. `model:` holds the rules and the roles:
   `optional`, `read_only`, `write_only`, `not_null`, bounds, `format=`, `pattern=` and `unique`. `required` with
@@ -197,13 +204,17 @@ err = model.load(&m, body, &user, &sink)
   rules judge what the patch holds, and a member the patch leaves out, in the root and in the struct members that hold
   a `Fields_Set`, is neither required nor defaulted and keeps what `existing` holds. Struct validators and
   applicators judge the merged value, `existing` is written only when nothing failed, and a failure's path is in the
-  patch.
+  patch. What `existing` holds is from `allocator`, which frees the members the patch replaces, and a failed patch
+  frees what it read.
 - `model.dump(&m, &user, opts)` writes the value as `marshal` does by the model's plan, never a `write_only` member.
   `Dump_Opts` leaves out the members a load did not set (`exclude_unset`), that hold null (`exclude_none`) or that
   equal their default (`exclude_defaults`), and `check` refuses a value whose written members fail its rules as
-  `.Check_Failed`. A member is unset when it holds null and its `Fields_Set` bit is clear, so a value built in code
-  keeps every member it holds. The tag `omitunset` leaves one member out when it is unset, and is refused on a struct
-  with no `Fields_Set`. A CSV dump writes a member it leaves out as an empty cell, which a load reads as nil.
+  `.Check_Failed`. A member is unset when its `Fields_Set` bit is clear, as pydantic's `exclude_unset` means: a member
+  the load took from its default or never read, and every member of a value built in code with an empty set, so
+  dumping a loaded PATCH body writes back what it sent. A `read_only` member, which no load sets, and a struct with
+  no `Fields_Set` keep their members. The tag `omitunset` leaves one member out when it holds null and is unset, and
+  is refused on a struct with no `Fields_Set`. A CSV dump writes a member it leaves out as an empty cell, which a load
+  reads as null.
   `dump_stream` writes to a stream. Map keys and a struct's `extra` members are written in the order of their keys.
 - A struct's `extra` member, `map[string]core.Value` or `map[string]T` tagged `json:",unknown"`, holds the members it
   does not name, each read as its value type. `register(&reg, T, model.Extra.Forbid)` refuses them instead.
@@ -538,6 +549,7 @@ population reports at its own position in each format:
 |---|---|
 | Nesting depth | `json.MAX_DEPTH`, 1024. `Options.max_depth` raises or lowers it per call. A depth beyond `MAX_DEPTH` allocates one byte per level |
 | Children counted in a node | `json.MAX_CHILDREN`, 65535. A larger container is still read in full, and its true count is `json.length_exact` |
+| Schema arms one inside the other | 256 held subschemas (`anyOf`, `oneOf`, `not`, `if`, `unevaluated*` and the like) that judge one value, each inside the last. A schema that nests more is refused with `.Too_Deep` when bound |
 | Numbers | a number too large for binary64 or over the digit and scale caps in `core/spell` comes back as `.Wide`, and the caller reads its span |
 
 A text past a limit gets a fault with a kind, never a crash or a wrong answer.

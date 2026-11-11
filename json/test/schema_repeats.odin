@@ -154,3 +154,31 @@ repeats_recursive_arms :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// A check with no sink that fails inside an object a held value has open keeps its failure when no key of the text
+// repeats, with a plan bound to a format's checks.
+@(test)
+repeats_notice_keeps_failure :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	cases := [?]struct {
+		text, instance: string,
+	} {
+		{`{"patternProperties": {"^a": {"type": "string"}}, "anyOf": [true]}`, `{"a": 1}`},
+		{`{"additionalProperties": {"type": "string"}, "anyOf": [true]}`, `{"a": 1}`},
+		{`{"items": {"patternProperties": {"^a": {"type": "string"}}, "anyOf": [true]}}`, `[{"a": 1}]`},
+	}
+	for c in cases {
+		comp, err := schema.compile(transmute([]u8)c.text, json.as(.Json))
+		if !testing.expectf(t, err == nil, "%s: %v", c.text, err) {
+			continue
+		}
+		defer schema.destroy(comp)
+		b: schema.Bound
+		b, err = schema.bind(comp, json.checks(.Json))
+		defer schema.unbind(&b)
+		got := schema.check(&b, transmute([]u8)c.instance)
+		refusal, typed_error := got.(core.Typed_Error)
+		testing.expectf(t, typed_error && refusal.kind != .Duplicate_Key, "%s with no sink: %v", c.text, got)
+	}
+}

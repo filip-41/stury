@@ -2,8 +2,8 @@ package model
 
 import "base:runtime"
 import "core:reflect"
+import "core:mem/virtual"
 import "core:slice"
-import "core:strings"
 import core ".."
 import typed "../typed"
 
@@ -21,38 +21,19 @@ Enum_Rename :: struct {
 
 // Adds how `rule.type`'s members are spelled, in place of what an earlier rule of the type said. A rename of a member
 // the enum lacks, and two members spelled alike, are refused by `compile`.
-register_enum :: proc(reg: ^Registry, rule: Enum_Rule) -> (err: runtime.Allocator_Error) {
-	kept := Enum_Rule{rule.type, rule.by_number, make([]Enum_Rename, len(rule.renames)) or_return}
-	for x, i in rule.renames {
-		kept.renames[i].member, err = strings.clone(x.member)
-		if err == nil {
-			kept.renames[i].name, err = strings.clone(x.name)
-		}
-		if err != nil {
-			enum_rule_destroy(kept)
-			return
-		}
+register_enum :: proc(reg: ^Registry, rule: Enum_Rule) -> runtime.Allocator_Error {
+	owned := Enum_Rule{rule.type, rule.by_number, slice.clone(rule.renames, virtual.arena_allocator(&reg.loads.memory)) or_return}
+	for &x in owned.renames {
+		x = {kept(reg, x.member) or_return, kept(reg, x.name) or_return}
 	}
 	for &x in reg.enums {
 		if x.type == rule.type {
-			enum_rule_destroy(x)
-			x = kept
-			return
+			x = owned
+			return nil
 		}
 	}
-	if _, err = append(&reg.enums, kept); err != nil {
-		enum_rule_destroy(kept)
-	}
-	return
-}
-
-@(private)
-enum_rule_destroy :: proc(rule: Enum_Rule) {
-	for x in rule.renames {
-		delete(x.member)
-		delete(x.name)
-	}
-	delete(rule.renames)
+	_, err := append(&reg.enums, owned)
+	return err
 }
 
 // The names a model spells enum `type`'s members with, into `names`, which holds their own, or false for their integers.
@@ -121,12 +102,8 @@ Union_Mode :: enum u8 {
 
 // Adds how `rule.type` is read, in place of what an earlier rule of the type said.
 register_union :: proc(reg: ^Registry, rule: Union_Rule) -> runtime.Allocator_Error {
-	tag := strings.clone(rule.tag) or_return
-	if _, err := append(&reg.unions, Union_Rule{rule.type, rule.mode, tag}); err != nil {
-		delete(tag)
-		return err
-	}
-	return nil
+	_, err := append(&reg.unions, Union_Rule{rule.type, rule.mode, kept(reg, rule.tag) or_return})
+	return err
 }
 
 @(private)

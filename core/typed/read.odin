@@ -140,7 +140,7 @@ read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As
 	r.borrow, r.sink = read.borrow_strings, read.sink
 	r.view.as = as
 	if read.dups == .All {
-		err.kind = .Bad_Option
+		err = {kind = .Bad_Option, want = {text = "a field holds one value, so dups = .All reads into no type"}}
 		return
 	}
 	r.first_key = read.dups == .First
@@ -183,8 +183,9 @@ read_release :: proc "contextless" (r: ^Reader, frames: []Frame) {
 }
 
 // The refusal of a read or write given `plan` for a value of `T` in the format `readers` reads, which the plan does not
-// read: the plan's own error when `plan_make` refused it, else `.Plan_Mismatch` naming the two formats, or the plan's
-// type when the formats agree, or nothing more for a model's plan, which only `model.load` reads.
+// read: the plan's own error when `plan_make` refused it, `.Bad_Option` saying so for a model's plan of the format and
+// type, which only `model.load` reads, else `.Plan_Mismatch` naming the two formats, or the plan's type when the formats
+// agree.
 plan_mismatch :: proc "contextless" (plan: ^Plan, readers: ^core.Readers, T: typeid) -> core.Typed_Refusal {
 	e := core.Typed_Refusal{kind = .Plan_Mismatch}
 	if plan == nil {
@@ -194,8 +195,10 @@ plan_mismatch :: proc "contextless" (plan: ^Plan, readers: ^core.Readers, T: typ
 		return plan.err
 	}
 	same := core.same_format(plan.readers, readers)
-	// A model's plan that agrees in format and type is refused for being a model's, which no type in the refusal stands for.
-	e.plans = {plan.readers, readers, plan.type if same && !(plan.model_plan != .None && plan.type == T) else nil}
+	if same && plan.model_plan != .None && plan.type == T {
+		return {kind = .Bad_Option, want = {text = "a model's plan reads only through model.load"}}
+	}
+	e.plans = {plan.readers, readers, plan.type if same else nil}
 	return e
 }
 
@@ -215,7 +218,7 @@ read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> 
 			note(r, regs, e, f.at)
 		}
 	}
-	if r.plan.checking && r.sink == nil && (^Check)(r).repeats == .Notice && r.first.kind != .None && r.first.kind != .Walk && r.first.kind != .No_Memory && r.first.kind != .Duplicate_Key && repeat_may_retract(r) {
+	if r.wide && r.sink == nil && (^Check)(r).repeats == .Notice && r.first.kind != .None && r.first.kind != .Walk && r.first.kind != .No_Memory && r.first.kind != .Duplicate_Key && repeat_may_retract(r) {
 		// With no sink the first refusal ends the read, before a later repeat can take it back.
 		r.first = {kind = .Duplicate_Key, at = r.first.at}
 	}
@@ -561,7 +564,7 @@ close_read :: proc "contextless" (h: ^$H, f: ^Frame, own, owner: ^Field, regs: c
 		when H == Check {
 			if owner.kind == .Before {
 				m := &h.plan.meta[owner.meta]
-				return m.before.value(h, back, m, list_dest(f, owner), f.kind, lo, t.lo + u64(t.n))
+				return extra_of(h.plan, m).before.value(h, back, m, list_dest(f, owner), f.kind, lo, t.lo + u64(t.n))
 			}
 		}
 		if reason := store_whole(h, owner, &h.plan.meta[owner.meta], list_dest(f, owner), f.kind, lo, t.lo + u64(t.n), t); reason != .None {

@@ -63,7 +63,7 @@ SPELLING_DECODE :: u16(1)
 SPELLING_LAX :: u16(4)
 SPELLING_QUOTED :: u16(2)
 STOPPED :: 1
-TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .No_Sample, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Invalid_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
+TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .No_Sample, .No_Invalid_Sample, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Invalid_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
 all_facts :: #force_inline proc(doc: ^Document, i: Node_Index) -> []Fact
 attribute_next :: proc(it: ^Attribute_Iter) -> (name, value: Token, ok: bool)
 attributes_of :: proc(doc: ^Document, i: Node_Index) -> Attribute_Iter
@@ -246,6 +246,8 @@ check_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read
 checker_destroy :: proc(c: ^Checker)
 enum_by_number :: #force_inline proc "contextless" (plan: ^Plan, info: ^runtime.Type_Info_Enum) -> bool
 enum_member :: proc "contextless" (info: ^runtime.Type_Info_Enum, value: i64) -> int
+extra_at :: #force_inline proc "contextless" (plan: ^Plan, at: u32) -> ^Meta_Extra
+extra_of :: #force_inline proc "contextless" (plan: ^Plan, m: ^Meta) -> ^Meta_Extra
 field_at :: #force_inline proc "contextless" (b: u64) -> ^Field
 grow_frames :: #force_no_inline proc "contextless" (h: ^Reader, have, want: int) -> (int, bool)
 grow_list :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs) -> (core.Hook_Regs, core.Typed_Error_Kind)
@@ -264,13 +266,15 @@ own_errors :: proc(e: ^core.Typed_Refusal, c: ^Sink)
 path_add :: proc "contextless" (e: ^core.Typed_Refusal, s: core.Step)
 path_close :: proc "contextless" (e: ^core.Typed_Refusal)
 plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Typed_Refusal)
+plan_docs :: proc "contextless" (p: ^Plan) -> proc "contextless" () -> rawptr
 plan_has_value :: proc(p: ^Plan) -> bool
 plan_mismatch :: proc "contextless" (plan: ^Plan, readers: ^core.Readers, T: typeid) -> core.Typed_Refusal
 plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Error)
 plan_reads :: proc(p: ^Plan, reads: ^Format_Reads)
+plan_text_build :: proc "contextless" (p: ^Plan) -> Text_Build
 pointer_target :: proc "contextless" (target: any) -> (data: rawptr, T: typeid, pointer: bool)
 read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> core.Typed_Refusal
-read_only_key :: proc "contextless" (m: ^Meta, key: string) -> bool
+read_only_key :: proc "contextless" (model: ^Struct_Model, key: string) -> bool
 read_release :: proc "contextless" (r: ^Reader, frames: []Frame)
 read_replacement :: proc(h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, value: core.Value, lo, hi: u64) -> (core.Hook_Regs, core.Action)
 read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator, judged := true) -> (regs: core.Hook_Regs, err: core.Typed_Refusal)
@@ -312,7 +316,6 @@ finish :: proc(out: ^Out, refused := core.Typed_Refusal{}) -> (bytes: []u8, err:
 holds_null :: proc(m: ^typed.Meta, kind: typed.Read_Kind, v: uintptr) -> bool
 init :: proc(out: ^Out, spill: ^[ROOM_MAX]u8, allocator := context.allocator, stream := io.Stream{}, hint := 0)
 int_text :: proc(p: [^]u8, kind: typed.Read_Kind, v: uintptr) -> int
-loaded :: proc "contextless" (v: uintptr, size: int, signed := false) -> (bits: u64)
 marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, $T: Tree, $put, $put_opted: Put, omits: ^typed.Omits) -> ([]u8, core.Typed_Refusal)
 number_text :: proc(p: [^]u8, n: core.Number) -> (size: int, kind: core.Typed_Error_Kind)
 put_byte :: #force_inline proc(out: ^Out, b: u8)
@@ -350,8 +353,7 @@ validate_parallel :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) ->
 write_text :: proc(wr: ^Writer, text: []u8) -> core.Typed_Error_Kind
 writer_take :: proc(wr: ^Writer) -> []u8
 # core/schema
-converter_destroy :: proc(cv: ^Converter)
-converter_init :: proc(cv: ^Converter, c: ^Compiled, from, to: core.As, from_reads: ^typed.Format_Reads = nil, to_reads: ^typed.Format_Reads = nil) -> (err: core.Error)
+check_node :: proc(b: ^Bound, doc: ^core.Document, node: core.Node_Index, sink: ^typed.Sink = nil, readings: ^typed.Readings = nil) -> core.Error
 write_basic :: proc(t: ^write.Tokens, entries: []core.Error_Entry, uri: string, r := write.Report{}) -> core.Typed_Error_Kind
 write_odin :: proc(d: ^rules.Description, package_name: string, as: core.As, format_assert := false, allocator := context.allocator) -> (source: string, err: core.Error)
 # core/model
@@ -363,4 +365,5 @@ blank :: proc "contextless" (src: []u8, spec: Spec) -> bool
 put_string :: proc(out: ^write.Out, s: string, opts := core.Write_Options{}) -> core.Typed_Error_Kind
 spine :: proc(src: []u8, as: core.As) -> (at: u64, levels: int, ok: bool)
 # dsv
+checks_for :: proc "contextless" (as: core.As) -> ^typed.Format_Reads
 header_span :: proc(src: []u8, as: core.As) -> (lo, hi: int)

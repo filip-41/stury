@@ -186,7 +186,7 @@ schema_report_locations :: proc(t: ^testing.T) {
 	}
 	sink: typed.Sink
 	schema.check(&s.b, transmute([]u8)string(`{"a~/b": [1, "x"], "c": 9}`), &sink)
-	want := `{"valid":false,"errors":[{"valid":false,"keywordLocation":"/properties/a~0~1b/items/type","absoluteKeywordLocation":"https://example.com/s#/properties/a~0~1b/items/type","instanceLocation":"/a~0~1b/1","error":"Value is not of the allowed type"},{"valid":false,"keywordLocation":"/properties/c/$ref/maximum","instanceLocation":"/c","error":"Number is above the maximum"}]}`
+	want := `{"valid":false,"errors":[{"valid":false,"keywordLocation":"/properties/a~0~1b/items/type","absoluteKeywordLocation":"https://example.com/s#/properties/a~0~1b/items/type","instanceLocation":"/a~0~1b/1","error":"Value is not of the allowed type, expected integer"},{"valid":false,"keywordLocation":"/properties/c/$ref/maximum","instanceLocation":"/c","error":"Number is above the maximum, at most 3"}]}`
 	testing.expect_value(t, basic_text(sink.entries[:], s.c.description.uri), want)
 	for &e in sink.entries {
 		e.record = 4
@@ -195,7 +195,7 @@ schema_report_locations :: proc(t: ^testing.T) {
 	write.tokens_init(&tw, json.as(.Json), {}, context.temp_allocator)
 	model.write_problem(&tw, sink.entries[:], {title = "Invalid", status = 422}, {records = true, truncated = true})
 	text, _ := write.tokens_finish(&tw)
-	testing.expect_value(t, string(text), `{"title":"Invalid","status":422,"errors":[{"pointer":"/a~0~1b/1","record":4,"code":"wrong_kind","message":"Value is not of the allowed type"},{"pointer":"/c","record":4,"code":"above_maximum","message":"Number is above the maximum"}],"truncated":true}`)
+	testing.expect_value(t, string(text), `{"title":"Invalid","status":422,"errors":[{"pointer":"/a~0~1b/1","record":4,"code":"wrong_kind","message":"Value is not of the allowed type, expected integer"},{"pointer":"/c","record":4,"code":"above_maximum","message":"Number is above the maximum, at most 3"}],"truncated":true}`)
 	testing.expect_value(t, basic_text(nil), `{"valid":true}`)
 	typed.sink_destroy(&sink)
 }

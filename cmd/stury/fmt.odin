@@ -10,6 +10,7 @@ package main
 import "base:runtime"
 import "core:bytes"
 import "core:math/rand"
+import "core:mem/virtual"
 import "core:os"
 import "core:strconv"
 import "core:strings"
@@ -43,52 +44,64 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	case o.in_place:
 		refuse_in_place_inputs(files)
 	}
-	if cli.schema.flag != "" {
-		sc := schema_read(cli.schema)
-		refuse_unlisted(o, sc.compiled.description)
-		run.convert = conversion_open(sc, cli.schema.max_errors)
-	}
-	init_output(&run.output, run)
-	run.output.held = o.check || o.in_place
 	ins := Inputs {
 		source = input_source(o, cli.json_reading),
 		files  = files,
 		run    = run,
 	}
+	if cli.schema.flag != "" {
+		run.convert = conversion_open(run, cli.schema, ins.source)
+	}
+	init_output(&run.output, run)
+	run.output.held = o.check || o.in_place
 	// Past the library's nesting cap the printer recurses, so it runs on the interpreter's stack, as a filter run does.
 	run.output.ret = 0
 	run_deep(run, &ins, fmt_files)
 	finish(run, EXIT_USAGE if ins.failures > 0 else run.output.ret)
 }
 
-// Each of `ins.files` formatted in turn. `ins.failures` counts the files that did not open, read or write, and the
-// output comes to EXIT_INPUT after a file with a fault, else to FMT_EXIT_DIFFERS when --check finds one that differs,
-// which it names.
+// Each of `ins.files` formatted in turn. `ins.failures` counts the files that did not open, read or write or that the
+// schema could not judge, and the output comes to EXIT_INPUT after a file with a fault, else to 1 after one that fails
+// the schema or, under --check, differs, which it names. A file that fails the schema or faults under it is not written.
 @(private = "file")
 fmt_files :: proc(run: ^Run, ins: ^Inputs) {
 	o := &run.opts
 	out := &run.output
-	heap := runtime.heap_allocator()
+	c := run.convert
+	held := out.held
 	for path in ins.files {
-		f, read := open_file(path, "fmt")
-		if read {
-			ins.data, read = read_file(f)
-		}
+		spent, read := file_bytes(path, "fmt")
 		if !read {
 			ins.failures += 1
 			continue
 		}
-		ins.name = file_name(path)
-		formatted := fmt_text(run, ins)
+		ins.data, ins.name = spent.data, file_name(path)
+		judged := conversion_judge(run, ins) if c != nil else .Valid
+		cells := c != nil && c.cells_as.readers != nil
+		if cells {
+			c.table = reads_cells(o)
+		}
+		// A file the schema judged is held until it passes, and one it found a fault in is formatted only to tell the
+		// fault, as fmt tells it.
+		out.held = held || cells || judged == .Fault
+		formatted := (judged == .Valid || judged == .Fault) && fmt_text(run, ins)
 		table_end(out)
 		if out.table != nil {
 			out.table = table_start(run)
 		}
 		text := out.buf.buf[:out.buf.cursor]
+		passes := !formatted || !cells || conversion_cells_pass(c, ins, text)
+		out.held = held
 		switch {
+		case judged == .Refused:
+			ins.failures += 1
+		case judged == .Invalid || !passes:
+			out.ret = max(out.ret, 1)
 		case !formatted:
 			out.ret = EXIT_INPUT
-			flush_some(out, force = true)
+			if judged == .Valid {
+				flush_some(out, force = true)
+			}
 		case o.check:
 			if !bytes.equal(text, ins.data) {
 				message.write_stderr("stury: %s is not formatted\n", ins.name)
@@ -102,7 +115,7 @@ fmt_files :: proc(run: ^Run, ins: ^Inputs) {
 			flush_some(out, force = true)
 		}
 		out.buf.cursor = 0
-		delete(ins.data, heap)
+		free_spent(spent)
 		free_all(context.temp_allocator)
 	}
 }
@@ -122,20 +135,18 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 		return false
 	}
 	heap := runtime.heap_allocator()
-	if !cells && ins.framing == .Concatenated && run.convert == nil && spine_print(ins, put_fmt) {
+	if !cells && ins.framing == .Concatenated && spine_print(ins, put_fmt) {
 		return true
 	}
-	converting := run.convert != nil
-	if (converting || cells == writes_cells(o) || !cells) && (cells || ins.framing == .Concatenated) {
+	if (cells == writes_cells(o) || !cells) && (cells || ins.framing == .Concatenated) {
 		doc, fault, texts := build_whole(data, ins.source, heap)
-		// A delimited text's fault is told at the record it is in, which the records below reach, but a conversion
-		// reads the table whole.
-		if f, bad := fault.?; bad && (!cells || converting) {
+		// A delimited text's fault is told at the record it is in, which the records below reach.
+		if f, bad := fault.?; bad && !cells {
 			tell_fault(ins, f)
 			return false
 		} else if !bad && !texts {
 			written := true
-			if converting || cells == writes_cells(o) {
+			if cells == writes_cells(o) {
 				written = put_document(run, ins, &doc)
 			} else {
 				emit_rows(run, ins, jq.document_value(doc))
@@ -161,9 +172,9 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 			tell_fault(ins, f)
 			return false
 		}
+		// What an output holds past its write lives as long as its record.
+		context.allocator = context.temp_allocator
 		switch {
-		case converting:
-			put_document(run, ins, &doc, rec.at) or_return
 		case cells && writes_cells(o):
 			cut = int(rec.at) + len(rec.text)
 		case cells == writes_cells(o):
@@ -191,9 +202,21 @@ emit_rows :: proc(run: ^Run, ins: ^Inputs, v: jq.Value) {
 		return
 	}
 	table_root(&run.output, v)
+	if run.convert != nil {
+		run.convert.table = true
+	}
+	// A row's cells are temporary and written before the next row, so a large array runs in one row's memory.
+	rows: virtual.Arena
+	if virtual.arena_init_growing(&rows) != nil {
+		message.write_stderr("stury: error: out of memory\n")
+		finish(run, EXIT_INPUT)
+	}
+	defer virtual.arena_destroy(&rows)
+	context.temp_allocator = jq.arena_allocator(&rows)
 	it := jq.iterate(v)
 	for _, row in jq.next_member(&it) {
 		emit(&run.output, row)
+		free_all(context.temp_allocator)
 	}
 }
 
@@ -201,7 +224,7 @@ emit_rows :: proc(run: ^Run, ins: ^Inputs, v: jq.Value) {
 // own format: what a CSV file holds before a fault.
 @(private = "file")
 cells_cut :: proc(run: ^Run, ins: ^Inputs, cut: int) {
-	if !reads_cells(&run.opts) || !writes_cells(&run.opts) || run.convert != nil {
+	if !reads_cells(&run.opts) || !writes_cells(&run.opts) {
 		return
 	}
 	end := cut
@@ -216,13 +239,9 @@ cells_cut :: proc(run: ^Run, ins: ^Inputs, cut: int) {
 // The document `doc` of the open file written by the library's writer in the output's format and layout, and a
 // newline after it unless it ends with one or is empty, as a CSV file with no header is. False, told, when it cannot be.
 @(private = "file")
-put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document, at: u64 = 0) -> bool {
-	o := &run.opts
-	as := cells_written_as(o) if writes_cells(o) else json.as(.Jsonc if writes_comments(o) else .Json, {max_depth = o.max_depth})
+put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
+	as := fmt_written_as(&run.opts)
 	out := &run.output
-	if run.convert != nil {
-		return convert_put(run, ins, doc, as, at)
-	}
 	text, _, err := core.write(doc, out.layout.opts, as, allocator = context.temp_allocator)
 	if err != nil {
 		flush_some(out, force = true)
@@ -240,6 +259,12 @@ put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document, at: u64 = 0) 
 	}
 	flush_some(out)
 	return true
+}
+
+// The format fmt writes in, as --to and the output options say.
+@(private = "file")
+fmt_written_as :: proc(o: ^Opts) -> core.As {
+	return cells_written_as(o) if writes_cells(o) else json.as(.Jsonc if writes_comments(o) else .Json, {max_depth = o.max_depth})
 }
 
 // Refuses an input `--in-place` cannot rewrite. A temporary file and a rename replace a name with a regular file, so

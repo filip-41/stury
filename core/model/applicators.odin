@@ -23,7 +23,7 @@ Schema_Of :: struct {
 // would judge a member the pattern names by the map's type, which the fragment does not say.
 register_schema :: proc(reg: ^Registry, T: typeid, fragment: ^rules.Description) -> runtime.Allocator_Error {
 	x := Schema_Of{type = T}
-	x.fragment.allocator = virtual.arena_allocator(&reg.loads.constants)
+	x.fragment.allocator = virtual.arena_allocator(&reg.loads.memory)
 	if _, err := graft(&x.fragment, fragment, true); err != nil {
 		return err
 	}
@@ -196,7 +196,7 @@ Own_Plan :: struct {
 
 // The judging of the model whose plan is `whole`, nil when no value of it is judged past its read.
 @(private)
-judging_of :: proc(reg: ^Registry, whole: ^typed.Plan, reads: ^typed.Format_Reads, allocator: runtime.Allocator, layout: Maybe(core.As), hooks: []typed.Type_Hook) -> (j: ^Applied, err: core.Error) {
+judging_of :: proc(reg: ^Registry, whole: ^typed.Plan, reads: ^typed.Format_Reads, allocator: runtime.Allocator, layout: Maybe(core.As), hooks: []typed.Type_Hook, defaults: []Default_Of) -> (j: ^Applied, err: core.Error) {
 	if reg == nil {
 		return
 	}
@@ -232,7 +232,7 @@ judging_of :: proc(reg: ^Registry, whole: ^typed.Plan, reads: ^typed.Format_Read
 		if own_plan(j, k.type) == nil {
 			p := new(typed.Plan) or_return
 			append(&j.plans, Own_Plan{k.type, p}) or_return
-			p^ = plan_of(reg, k.type, reads, allocator, nil, nil, layout, hooks) or_return
+			p^ = plan_of(reg, k.type, reads, allocator, nil, nil, layout, hooks, defaults) or_return
 		}
 		x := new(Judged) or_return
 		append(&j.judged, x) or_return
@@ -410,9 +410,9 @@ judged_refused :: proc(p: ^typed.Plan) -> core.Typed_Refusal {
 	if p.value_text != nil {
 		return {}
 	}
-	for &m in p.meta {
-		if m.before != nil && (m.before.first_match || m.before.judge != nil) {
-			return {kind = .Unsupported, want = {m.type, "first match" if m.before.first_match else "applicator"}}
+	for &m, at in p.meta {
+		if before := typed.extra_at(p, u32(at)).before; before != nil && (before.first_match || before.judge != nil) {
+			return {kind = .Unsupported, want = {m.type, "first match" if before.first_match else "applicator"}}
 		}
 	}
 	return {}
