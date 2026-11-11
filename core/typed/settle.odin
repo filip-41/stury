@@ -30,7 +30,7 @@ count_rules :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, owner:
 	}
 	context = h.ctx
 	for kind in fails {
-		note(h, {f.a, f.b, f.c}, {kind = kind, at = t.lo}, t.lo + u64(t.n))
+		note(h, {f.a, f.b, f.c}, {kind = kind, at = t.lo}, t.lo + u64(t.n), nil, rule_operand(h, l, kind, .Object if owner.kind == .Map else .Array))
 		if h.sink == nil {
 			return .Stop
 		}
@@ -118,7 +118,7 @@ settle :: #force_no_inline proc "contextless" (h: ^Check, sm: ^Struct_Model, f: 
 			}
 		}
 	}
-	patch := partial(h, owner)
+	patch := partial(h, f, owner)
 	for d in sm.defaults {
 		if !patch && !member_seen(h, f, owner, regs, d.member) && d.make(rawptr(base + uintptr(fields[d.member].offset)), d.data, context.allocator) != nil {
 			return .No_Memory, false
@@ -143,7 +143,7 @@ validate_closed :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, ow
 		seen[k] = member_seen(h, f, owner, regs, a.member)
 	}
 	// A patch's struct is judged whole once it is merged.
-	failed, _ := close_struct(sm, base, path[:], seen, &h.first, h.sink, h.floor, at, !partial(h, owner))
+	failed, _ := close_struct(sm, base, path[:], seen, &h.first, h.sink, h.floor, at, !partial(h, f, owner))
 	return failed
 }
 

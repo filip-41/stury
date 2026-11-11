@@ -70,6 +70,8 @@ Change :: struct {
 Result :: struct {
 	changes:   []Change,
 	truncated: bool,
+	// The indexes of the `Options.keys` that named no array present in both values.
+	unused_keys: []int,
 	arena:     virtual.Arena,
 }
 
@@ -88,6 +90,8 @@ Differ :: struct {
 	memos:    [dynamic]Memo,
 	// The steps left for matching arrays.
 	work:      int,
+	// Whether each of `opts.keys` has named an array.
+	named:     []bool,
 }
 
 // The changes from `a` to `b`, any values: nodes of documents, a built array among them. The scratch of the search is
@@ -108,6 +112,7 @@ values :: proc(a, b: core.Value, opts := Options{}) -> (r: Result, err: runtime.
 		new       = make([dynamic]core.Step, context.temp_allocator),
 		memos    = make([dynamic]Memo, context.temp_allocator),
 		work      = MAX_WORK,
+		named     = make([]bool, len(opts.keys), context.temp_allocator),
 	}
 	d.changes = make([dynamic]Change, d.allocator)
 	if d.opts.max_edits <= 0 {
@@ -115,6 +120,13 @@ values :: proc(a, b: core.Value, opts := Options{}) -> (r: Result, err: runtime.
 	}
 	walk(&d, a, b, 0)
 	r.changes, r.truncated = d.changes[:], d.truncated
+	unused := make([dynamic]int, d.allocator)
+	for named, i in d.named {
+		if !named {
+			append(&unused, i)
+		}
+	}
+	r.unused_keys = unused[:]
 	return
 }
 
@@ -160,6 +172,7 @@ walk :: proc(d: ^Differ, a, b: core.Value, depth: int) {
 		}
 		objects(d, a, b, depth)
 	case ca == .Array && depth < core.MAX_DEPTH:
+		key_rule(d, a)
 		if equal(d, a, b) && (!d.opts.facts || quiet(a, b)) {
 			return
 		}
@@ -280,7 +293,7 @@ pair :: proc(d: ^Differ, xs, ys: []core.Value, i, j, depth: int) {
 // The rule that names the key of the array `a` stands at: the path of the new value so far.
 @(private)
 key_rule :: proc(d: ^Differ, a: core.Value) -> (rule: Key_Rule, ok: bool) {
-	for r in d.opts.keys {
+	for r, n in d.opts.keys {
 		if len(r.at) != len(d.new) {
 			continue
 		}
@@ -301,44 +314,55 @@ key_rule :: proc(d: ^Differ, a: core.Value) -> (rule: Key_Rule, ok: bool) {
 			}
 		}
 		if matches {
+			d.named[n] = true
 			return r, true
 		}
 	}
 	return
 }
 
-// Elements pair up by their `member`, a missing member being null, or by themselves when `member` is "", the first
-// unpaired of the old array that equals first. A pair of keyed elements is compared in depth, and a pair of equal
-// elements only where facts are told. An order different between the arrays is no change.
+// Elements pair up by their `member`, or by themselves when `member` is "", the first unpaired of the old array that
+// equals first. A pair of keyed elements is compared in depth, and a pair of equal elements only where facts are told. An
+// element that has no `member` is paired like the rest of its kind: with an equal one first, and then the keyless that
+// are left with each other by position. An order different between the arrays is no change.
 @(private)
 matched :: proc(d: ^Differ, xs, ys: []core.Value, member: string, depth: int) {
-	key_of :: proc(e: core.Value, member: string) -> core.Value {
+	// An element's key, and whether it has one: a missing member or an element that is no object has the element itself.
+	key_of :: proc(e: core.Value, member: string) -> (key: core.Value, keyed: bool) {
 		if member == "" {
-			return e
+			return e, false
 		}
-		v, _ := core.member(e, member)
-		return v
+		v, found := core.member(e, member)
+		return v if found else e, found
 	}
+	kx, ky := make([]core.Value, len(xs), context.temp_allocator), make([]core.Value, len(ys), context.temp_allocator)
+	hx, hy := make([]bool, len(xs), context.temp_allocator), make([]bool, len(ys), context.temp_allocator)
 	// The elements of one hash form a chain in order, from the head in `first` through `next`, and a taken one leaves it.
-	first := make(map[u64]int, len(xs), context.temp_allocator)
+	// The keyed and the keyless chain apart.
+	first := [2]map[u64]int{make(map[u64]int, len(xs), context.temp_allocator), make(map[u64]int, context.temp_allocator)}
 	next := make([]int, len(xs), context.temp_allocator)
 	for i := len(xs) - 1; i >= 0; i -= 1 {
-		h := hash_of(d, key_of(xs[i], member))
-		next[i] = first[h] if h in first else -1
-		first[h] = i
+		kx[i], hx[i] = key_of(xs[i], member)
+		chain := &first[int(hx[i])]
+		h := hash_of(d, kx[i])
+		next[i] = chain[h] if h in chain else -1
+		chain[h] = i
 	}
 	taken := make([]bool, len(xs), context.temp_allocator)
+	partner := make([]int, len(ys), context.temp_allocator)
+	exact := make([]bool, len(ys), context.temp_allocator)
 	for y, j in ys {
-		key := key_of(y, member)
-		h := hash_of(d, key)
-		partner, prev := -1, -1
-		head, listed := first[h]
-		for i := head if listed else -1; i >= 0 && partner < 0; i = next[i] {
-			if !taken[i] && equal(d, key_of(xs[i], member), key) {
-				partner = i
-				taken[i] = true
+		ky[j], hy[j] = key_of(y, member)
+		h := hash_of(d, ky[j])
+		chain := &first[int(hy[j])]
+		partner[j] = -1
+		prev := -1
+		head, listed := chain[h]
+		for i := head if listed else -1; i >= 0 && partner[j] < 0; i = next[i] {
+			if !taken[i] && equal(d, kx[i], ky[j]) {
+				partner[j], exact[j], taken[i] = i, !hy[j], true
 				if prev < 0 {
-					first[h] = next[i]
+					chain[h] = next[i]
 				} else {
 					next[prev] = next[i]
 				}
@@ -346,10 +370,27 @@ matched :: proc(d: ^Differ, xs, ys: []core.Value, member: string, depth: int) {
 				prev = i
 			}
 		}
-		if partner >= 0 && member == "" && !(d.opts.facts && !quiet(xs[partner], y)) {
+	}
+	if member != "" {
+		left := 0
+		for j in 0 ..< len(ys) {
+			if partner[j] >= 0 || hy[j] {
+				continue
+			}
+			for left < len(xs) && (taken[left] || hx[left]) {
+				left += 1
+			}
+			if left == len(xs) {
+				break
+			}
+			partner[j], taken[left] = left, true
+		}
+	}
+	for y, j in ys {
+		if partner[j] >= 0 && exact[j] && !(d.opts.facts && !quiet(xs[partner[j]], y)) {
 			continue
 		}
-		pair(d, xs, ys, partner, j, depth)
+		pair(d, xs, ys, partner[j], j, depth)
 	}
 	for _, i in xs {
 		if !taken[i] {

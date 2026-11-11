@@ -17,7 +17,7 @@ import write "../write"
 // the first. It allocates nothing for a value that passes but where it lists a map or a captured struct's members, or
 // matches a pattern.
 validate :: proc(m: ^Model($T), v: ^T, sink: ^typed.Sink = nil) -> core.Error {
-	return validate_value(&m.plan, v, sink, judging_in(m))
+	return validate_value(&m.plan, v, sink, m.judging)
 }
 
 @(private)
@@ -60,7 +60,8 @@ judge :: proc(v: ^write.Visitor, f: ^typed.Field, at: uintptr, kind: core.Typed_
 		return false
 	}
 	for k in fails {
-		if !report(j, k) {
+		operand := rules.operand_text(&j.plan.leaves[m.rule_set - 1], k, f.kind == .Map, context.temp_allocator) if m.rule_set > 0 && j.sink != nil else ""
+		if !report(j, k, nil, operand) {
 			return false
 		}
 	}

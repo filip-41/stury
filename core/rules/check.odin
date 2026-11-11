@@ -206,7 +206,8 @@ trivial :: proc(l: ^Leaf) -> bool {
 	return l.kinds == EVERY_KIND && !l.has_enum && !l.minimum.set && !l.maximum.set && l.multiple_of == nil && l.pattern == nil && l.formats == {} && l.min_length == 0 && l.max_length == max(u64) && l.min_items == 0 && l.max_items == max(u64) && l.min_members == 0 && l.max_members == max(u64)
 }
 
-// The rules of `l` a string of `text`, decoded, fails. A pattern the regex gives up on fails it.
+// The rules of `l` a string of `text`, decoded, fails. A pattern the regex gives up on fails `.Pattern_Undecided`, which
+// is no verdict on the pattern.
 judge_string :: proc(l: ^Leaf, text: string, scratch: ^regex.Scratch) -> (fails: Failures) {
 	if l.min_length > 0 || l.max_length < max(u64) {
 		n := code_points(text)
@@ -218,7 +219,10 @@ judge_string :: proc(l: ^Leaf, text: string, scratch: ^regex.Scratch) -> (fails:
 		}
 	}
 	if l.pattern != nil {
-		if found, err := regex.search((^regex.Regex)(l.pattern), text, 0, nil, scratch); !found || err != "" {
+		found, err := regex.search((^regex.Regex)(l.pattern), text, 0, nil, scratch)
+		if err != "" {
+			fails += {.Pattern_Undecided}
+		} else if !found {
 			fails += {.No_Match}
 		}
 	}
@@ -239,6 +243,43 @@ judge_count :: #force_inline proc "contextless" (n, low, high: u64) -> (fails: F
 		fails += {.Too_Many}
 	}
 	return
+}
+
+// What a value that fails as `kind` should have met of `l`, spelled for a message after the kind's own: "at least 2
+// characters". `members` says a count is an object's. Empty for a kind with no bound to name, and for a bound that is not a whole
+// number. The text is allocated with `allocator`.
+operand_text :: proc(l: ^Leaf, kind: core.Typed_Error_Kind, members: bool, allocator: runtime.Allocator) -> string {
+	b := strings.builder_make(allocator)
+	bound :: proc(b: ^strings.Builder, least: bool, n: u64, noun: string) {
+		strings.write_string(b, "at least " if least else "at most ")
+		strings.write_u64(b, n)
+		if noun != "" {
+			strings.write_byte(b, ' ')
+			strings.write_string(b, noun)
+			if n != 1 {
+				strings.write_byte(b, 's')
+			}
+		}
+	}
+	#partial switch kind {
+	case .Too_Short:
+		bound(&b, true, l.min_length, "character")
+	case .Too_Long:
+		bound(&b, false, l.max_length, "character")
+	case .Too_Few:
+		bound(&b, true, l.min_members if members else l.min_items, "member" if members else "element")
+	case .Too_Many:
+		bound(&b, false, l.max_members if members else l.max_items, "member" if members else "element")
+	case .Below_Minimum, .Above_Maximum:
+		low := kind == .Below_Minimum
+		x := l.minimum if low else l.maximum
+		if !x.whole {
+			return ""
+		}
+		strings.write_string(&b, ("greater than " if low else "less than ") if x.exclusive else "at least " if low else "at most ")
+		strings.write_i64(&b, x.int)
+	}
+	return strings.to_string(b)
 }
 
 // Narrows a bound in `have` to `text` where that is tighter, as two lower bounds or two upper bounds combine.

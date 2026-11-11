@@ -64,10 +64,13 @@ Gen :: struct {
 	comments: bool,
 }
 
-// Writes values that pass `d` in the format `as`, as many as `opts.count` says. A description that no value passes
-// is `.No_Sample` naming the node the search stopped at by its keyword path, which `allocator` holds, and one the check
-// cannot judge is the check's own refusal.
-sample :: proc(d: ^rules.Description, as: core.As, opts := Sample_Options{}, allocator := context.allocator) -> (out: [][]u8, err: core.Error) {
+// Takes each value `sample_each` writes. `text` is valid until the sink returns.
+Sample_Sink :: proc(text: []u8, user: rawptr)
+
+// Writes values that pass `d` in the format `as`, as many as `opts.count` says, each to `sink` as it is made. A
+// description that no value passes is `.No_Sample` naming the node the search stopped at by its keyword path, which
+// `allocator` holds, and one the check cannot judge is the check's own refusal.
+sample_each :: proc(d: ^rules.Description, as: core.As, opts: Sample_Options, sink: Sample_Sink, user: rawptr, allocator := context.allocator) -> (err: core.Error) {
 	asserted := asserting(d, opts.format_assert)
 	defer asserted_restore(d, asserted)
 	c := compile_description(d)
@@ -76,7 +79,7 @@ sample :: proc(d: ^rules.Description, as: core.As, opts := Sample_Options{}, all
 	defer unbind(&b)
 	arena: virtual.Arena
 	if virtual.arena_init_growing(&arena) != nil {
-		return nil, core.error_of(core.Typed_Refusal{kind = .No_Memory})
+		return core.error_of(core.Typed_Refusal{kind = .No_Memory})
 	}
 	defer virtual.arena_destroy(&arena)
 	g := Gen {
@@ -84,18 +87,31 @@ sample :: proc(d: ^rules.Description, as: core.As, opts := Sample_Options{}, all
 		source   = {opts.seed},
 		comments = opts.comments,
 	}
-	list := make([dynamic][]u8, allocator)
-	for len(list) < max(opts.count, 1) {
+	scratch := virtual.arena_allocator(&arena)
+	for _ in 0 ..< max(opts.count, 1) {
 		virtual.arena_free_all(&arena)
-		text, ok := value_text(&g, &b, as, opts, virtual.arena_allocator(&arena), allocator)
+		text, ok := value_text(&g, &b, as, opts, scratch)
 		if !ok {
-			for t in list {
-				delete(t, allocator)
-			}
-			delete(list)
-			return nil, no_sample(&g, allocator)
+			return no_sample(&g, allocator)
 		}
-		append(&list, text)
+		sink(text, user)
+	}
+	return nil
+}
+
+// `sample_each` with the values kept, in `allocator`.
+sample :: proc(d: ^rules.Description, as: core.As, opts := Sample_Options{}, allocator := context.allocator) -> (out: [][]u8, err: core.Error) {
+	list := make([dynamic][]u8, allocator)
+	err = sample_each(d, as, opts, proc(text: []u8, user: rawptr) {
+			list := (^[dynamic][]u8)(user)
+			append(list, slice.clone(text, list.allocator))
+		}, &list, allocator)
+	if err != nil {
+		for t in list {
+			delete(t, allocator)
+		}
+		delete(list)
+		return nil, err
 	}
 	return list[:], nil
 }
@@ -217,7 +233,7 @@ through :: proc(s: ^Path_Search, node: rules.Node_Index, steps: ..core.Step) -> 
 // The text of one value: drawn, or for an invalid one, drawn and broken, and written. `ok` is false when no draw in
 // the tries passed.
 @(private = "file")
-value_text :: proc(g: ^Gen, b: ^Bound, as: core.As, opts: Sample_Options, scratch, allocator: runtime.Allocator) -> (text: []u8, ok: bool) {
+value_text :: proc(g: ^Gen, b: ^Bound, as: core.As, opts: Sample_Options, scratch: runtime.Allocator) -> (text: []u8, ok: bool) {
 	context.allocator = scratch
 	depth := opts.depth if opts.depth > 0 else 4
 	for attempt in 0 ..< (opts.tries if opts.tries > 0 else 64) {
@@ -229,13 +245,11 @@ value_text :: proc(g: ^Gen, b: ^Bound, as: core.As, opts: Sample_Options, scratc
 			continue
 		}
 		if opts.invalid {
-			text, ok = broken(g, b, as, &v, opts, allocator)
+			text, ok = broken(g, b, as, &v, opts, scratch)
 		} else {
 			refusal: Refusal
-			text, refusal = written(v, as, opts.write, allocator)
-			if ok = refusal.kind == .None && len(text) > 0 && valid(b, text); !ok {
-				delete(text, allocator)
-			}
+			text, refusal = written(v, as, opts.write, scratch)
+			ok = refusal.kind == .None && len(text) > 0 && valid(b, text)
 		}
 		if ok {
 			return

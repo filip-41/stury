@@ -560,7 +560,7 @@ fork_record :: proc(b: ^Builder) -> i32 {
 		return at
 	}
 	at := reserve_block(b, 2, key)
-	if at >= 0 && resize(&b.uses, len(b.meta)) == nil {
+	if at >= 0 && cover_uses(b) {
 		never(b, int(at))
 		never(b, int(at) + 1)
 		b.fields[at].kind, b.fields[at].meta = .Checked, u32(at)
@@ -802,10 +802,10 @@ holds_repeats :: proc(h: ^Check, lo: u64) -> bool {
 @(cold)
 @(private)
 repeating_containers :: proc(r: ^Reader) -> Repeating {
-	doc, err := core.build(r.src, r.plan.as, .Last, context.temp_allocator)
+	doc, built := text_built(r)
 	defer core.destroy(&doc)
 	at := make([dynamic]u64, context.temp_allocator)
-	if err != nil || len(doc.nodes) == 0 {
+	if !built {
 		return {every = true}
 	}
 	if _, kept := repeats_inside(&doc, core.ROOT, &at); !kept {
@@ -984,7 +984,13 @@ BUFFERED :: bit_set[Apply_Kind]{.Then, .Else, .Dependent, .Unevaluated_Members, 
 fork_value :: #force_no_inline proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	if raw_data(u.applies) != &FORKING[0] {
 		if t.kind != .Object && t.kind != .Array {
-			if passed, judged, reading := scalar_verdict(h, u.verdict if h.sink == nil && u.verdict != nil else u.applies, t, 0); passed && judged {
+			passed, judged, reading := scalar_verdict(h, u.verdict if h.sink == nil && u.verdict != nil else u.applies, t, 0)
+			if h.fatal == .Pattern_Undecided {
+				context = h.ctx
+				lo, hi := core.scalar_ends(t)
+				return next, fork_fault(h, regs, h.fatal, lo, hi)
+			}
+			if passed && judged {
 				if h.readings != nil && reading != .Plain {
 					reading_keep(h, t.lo, reading)
 				}
@@ -2135,10 +2141,32 @@ member_start :: proc(h: ^Check, fk: ^Fork, kinds: bit_set[Apply_Kind], name := c
 		if x.kind not_in kinds || x.rec < 0 || step != nil && array != (x.kind == .Contains || x.kind == .Unevaluated_Items) {
 			continue
 		}
-		if x.kind == .Pattern && !matches(x.apply.pattern, fk.key, &fk.scratch) || x.kind == .Additional && !additional(fk, x.apply, fk.key) {
-			continue
+		if x.kind == .Pattern {
+			hit, undecided := matches(x.apply.pattern, fk.key, &fk.scratch)
+			if undecided {
+				h.fatal = .Pattern_Undecided
+			}
+			if !hit {
+				continue
+			}
+		} else if x.kind == .Additional {
+			extra, undecided := additional(fk, x.apply, fk.key)
+			if undecided {
+				h.fatal = .Pattern_Undecided
+			}
+			if !extra {
+				continue
+			}
 		}
-		if x.kind == .Unevaluated_Members && evaluates_name(x.apply.eval.fixed, fk.key, &fk.scratch) || x.kind == .Unevaluated_Items && fk.count <= x.apply.eval.fixed.prefix {
+		if x.kind == .Unevaluated_Members {
+			evaluated, undecided := evaluates_name(x.apply.eval.fixed, fk.key, &fk.scratch)
+			if undecided {
+				h.fatal = .Pattern_Undecided
+			}
+			if evaluated {
+				continue
+			}
+		} else if x.kind == .Unevaluated_Items && fk.count <= x.apply.eval.fixed.prefix {
 			continue
 		}
 		if x.apply != nil && x.apply.judge == .Never && h.sink == nil {
@@ -2192,17 +2220,18 @@ member_end :: proc(h: ^Check, fk: ^Fork, kinds: bit_set[Apply_Kind]) {
 
 // Whether the member `name` of the held object is one no name of `a.names` and no pattern of the held record matches.
 @(private)
-additional :: proc(fk: ^Fork, a: ^Apply, name: string) -> bool {
-	if named(a.names, name) {
-		return false
+additional :: proc(fk: ^Fork, a: ^Apply, name: string) -> (free, undecided: bool) {
+	if slice.contains(a.names, name) {
+		return false, false
 	}
 	// The patterns are the arms before this one.
 	for p := ([^]Apply)(a)[-1:]; p[0].kind == .Pattern; p = p[-1:] {
-		if matches(p[0].pattern, name, &fk.scratch) {
-			return false
+		hit, gave_up := matches(p[0].pattern, name, &fk.scratch)
+		if hit || gave_up {
+			return false, gave_up
 		}
 	}
-	return true
+	return true, false
 }
 
 // Judges the held value by its arms' verdicts, as it closes at `hi`, and gives back the fork's runs.
@@ -2222,7 +2251,7 @@ fork_finish :: proc(h: ^Check, fk: ^Fork, hi: u64) -> core.Action {
 		x.passed = !x.dead && (x.run == nil || x.run.c.first.kind == .None)
 		if a := x.apply; a != nil && a.judge == .Presence && fk.kind == .Object {
 			for name in a.by.present {
-				x.passed &&= named(fk.names[:], name)
+				x.passed &&= slice.contains(fk.names[:], name)
 			}
 		}
 	}
@@ -2265,7 +2294,7 @@ fork_finish :: proc(h: ^Check, fk: ^Fork, hi: u64) -> core.Action {
 				h.first = {kind = .Missing_Field, at = fk.lo}
 			}
 		case .Dependent:
-			if fk.kind == .Object && x.run != nil && named(fk.names[:], a.name) {
+			if fk.kind == .Object && x.run != nil && slice.contains(fk.names[:], a.name) {
 				fork_deliver(h, x.run, buffered(x.run))
 				readings_take(h, x.run)
 			}
@@ -2387,6 +2416,10 @@ fork_unevaluated :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run) {
 	slice.fill(fk.marks[:], false)
 	ev := Evaluating{names = fk.names[:], count = fk.count, passes = fork_passes, data = fk, scratch = &fk.scratch}
 	mark_evaluated(&ev, x.apply.eval, fk.marks[:], x.kind == .Unevaluated_Items)
+	if ev.undecided {
+		h.fatal = .Pattern_Undecided
+		return
+	}
 	for f in x.failed {
 		if !fk.marks[f.index] {
 			fork_deliver(h, nil, x.pending.entries[f.from:f.to] if x.pending != nil else nil, f.first)
@@ -2530,22 +2563,11 @@ unique :: proc(doc: ^core.Document, allocator: runtime.Allocator, read_plain: bo
 	return true
 }
 
-// Whether the compiled `^regex.Regex` at `p` matches in `name`.
+// Whether the compiled `^regex.Regex` at `p` matches in `name`, and whether the search could not decide.
 @(private)
-matches :: proc(p: rawptr, name: string, scratch: ^regex.Scratch) -> bool {
-	found, err := regex.search((^regex.Regex)(p), name, 0, nil, scratch)
-	return found && err == ""
-}
-
-// Whether `names` holds `name`.
-@(private)
-named :: proc(names: []string, name: string) -> bool {
-	for x in names {
-		if x == name {
-			return true
-		}
-	}
-	return false
+matches :: proc(p: rawptr, name: string, scratch: ^regex.Scratch) -> (found, undecided: bool) {
+	hit, err := regex.search((^regex.Regex)(p), name, 0, nil, scratch)
+	return hit && err == "", err != ""
 }
 
 // Points each of the scratch's buffers at the temp allocator.

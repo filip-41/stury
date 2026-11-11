@@ -234,7 +234,7 @@ def cli_suites(absent, odin):
     out = [
         suite("cli jq suite", 5, f"{test}/jq_suite.py", CLI_BINARY),
         suite("cli smoke", 5, f"{test}/smoke.py", CLI_BINARY),
-        suite("cli types law", 5, f"{test}/types_law.py", CLI_BINARY, f"--odin={odin}"),
+        suite("cli types law", 5, f"{test}/types_law.py", CLI_BINARY),
         suite("cli gen law", 5, f"{test}/gen_law.py", CLI_BINARY, f"--odin={odin}"),
     ]
     has_jq = shutil.which("jq") and subprocess.run(["jq", "--version"], capture_output=True, text=True).stdout.strip() == "jq-1.8.2"

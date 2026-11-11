@@ -11,59 +11,79 @@ Options :: struct {
 	format_assert: bool,
 	// The retrieval URI of the schema, "" for none.
 	base:          string,
-	// Where file references lead and how they are read, see `Resolver`.
-	resolver:      Resolver,
+	// The directory a reference to a `file:` URI may read from, "" for none. Absolute, or relative to the working
+	// directory.
+	refs:          string,
+	// The draft of a schema with no `$schema`, 2020-12 when nil.
+	draft:         Maybe(Draft),
 	// How a key that repeats in an object is judged: the instance has the members `dups` reads, so a count, a rule for
 	// the key and a `required` see one member under `.Last` or `.First`, and `.Refuse` refuses every repeat. `.All` is
 	// `.Bad_Option` at a check.
 	dups:          core.Duplicates,
 }
 
-// A schema read once and frozen: share it across threads and bind it to each format. It owns its description, unless
-// it was made from one, and the documents its references loaded.
+// A schema read once and frozen: share it across threads and bind it to each format. One that `compile` made owns its
+// description, the document of its text and the documents its references loaded, and `destroy` frees them with it. One
+// that `compile_description` made borrows its description.
 Compiled :: struct {
 	description: ^rules.Description,
 	opts:        Options,
+	doc:         core.Document,
+	res:         Resolver,
 	owned:       bool,
 	allocator:   runtime.Allocator,
 }
 
-// Reads the schema at `node` of `doc` and indexes every container of the documents it borrows from, since a lazy index
-// writes to a document a bind shares across threads. `doc` outlives the result.
-compile :: proc(doc: ^core.Document, node: core.Node_Index, opts := Options{}, allocator := context.allocator) -> (c: Compiled, err: core.Error) {
-	c = Compiled {
+// Reads the schema `text` in the format `as`, which the files its references name are read in too, and compiles it.
+// Every container of the documents it reads is indexed, since a lazy index writes to a document a bind shares across
+// threads. `text` outlives the result. A schema the reader refuses answers a `Bad_Schema` error that names the keyword.
+compile :: proc(text: []u8, as: core.As, opts := Options{}, allocator := context.allocator) -> (c: ^Compiled, err: core.Error) {
+	c = new(Compiled, allocator) or_return
+	c^ = {
 		opts      = opts,
+		res       = {root = opts.refs, as = as, draft = opts.draft},
 		owned     = true,
 		allocator = allocator,
 	}
-	c.description = new(rules.Description, allocator)
-	c.description^, err = read(doc, node, opts.base, &c.opts.resolver, allocator)
-	if err != nil {
-		destroy(&c)
-		return {}, err
+	if err = compile_text(c, text, as, allocator); err != nil {
+		destroy(c)
+		return nil, err
 	}
 	for &n in c.description.nodes {
 		n.rules.assert_format ||= opts.format_assert
 	}
-	index_all(doc)
-	for d in c.opts.resolver.documents {
+	index_all(&c.doc)
+	for d in c.res.documents {
 		index_all(d)
 	}
 	return
 }
 
-// A compiled schema of a description `d` made without a schema document. It borrows `d`, which outlives it.
+@(private = "file")
+compile_text :: proc(c: ^Compiled, text: []u8, as: core.As, allocator: runtime.Allocator) -> core.Error {
+	c.doc = core.build(text, as, allocator = allocator) or_return
+	c.description = new(rules.Description, allocator) or_return
+	c.description^ = read(&c.doc, core.ROOT, c.opts.base, &c.res, allocator) or_return
+	return nil
+}
+
+// A compiled schema of a description `d` made without a schema text. It borrows `d`, which outlives it.
 compile_description :: proc(d: ^rules.Description, opts := Options{}, allocator := context.allocator) -> Compiled {
 	return {description = d, opts = opts, allocator = allocator}
 }
 
+// Frees what `compile` made, `c` with it. A compile of a description owns nothing.
 destroy :: proc(c: ^Compiled) {
-	if c.owned && c.description != nil {
+	if c == nil || !c.owned {
+		return
+	}
+	if c.description != nil {
 		rules.description_destroy(c.description)
 		free(c.description, c.allocator)
 	}
-	resolver_destroy(&c.opts.resolver)
-	c^ = {}
+	resolver_destroy(&c.res)
+	core.destroy(&c.doc)
+	free(c, c.allocator)
 }
 
 @(private)

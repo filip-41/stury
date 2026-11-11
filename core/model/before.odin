@@ -25,32 +25,16 @@ register_before :: proc(reg: ^Registry, $T: typeid, field: string, rewrite: proc
 	return add_hook(&reg.befores, Before_Of{T, field, {call = call, fn = rawptr(rewrite), value = typed.before_value}}, true)
 }
 
-// A copy of the `before` of member `field` of `owner` in a plan that loads, nil for none.
+// The `before` of member `field` of `owner` in a plan that loads, nil for none, which the registry keeps.
 @(private)
 before_of :: proc(c: ^Compiling, owner: typeid, field: string) -> ^typed.Before {
 	if !c.model.loading {
 		return nil
 	}
-	for x in c.reg.befores {
+	for &x in c.reg.befores {
 		if x.type == owner && x.field == field {
-			b := new_clone(x.b, context.temp_allocator)
-			return b
+			return &x.b
 		}
 	}
 	return nil
-}
-
-// The refusal of a load plan `p` whose format holds no value alone, a table's, and so reads no text whole, for a member
-// read by its first matching arm or judged by applicators.
-@(private)
-judged_refused :: proc(p: ^typed.Plan) -> core.Typed_Refusal {
-	if p.value_text != nil {
-		return {}
-	}
-	for &m in p.meta {
-		if m.before != nil && (m.before.first_match || m.before.judge != nil) {
-			return {kind = .Unsupported, want = {m.type, "first match" if m.before.first_match else "applicator"}}
-		}
-	}
-	return {}
 }

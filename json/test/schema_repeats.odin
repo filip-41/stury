@@ -22,19 +22,13 @@ Repeat_Verdict :: struct {
 
 @(private = "file")
 judge :: proc(t: ^testing.T, text, instance: string, dups: core.Duplicates) -> (v: Repeat_Verdict) {
-	doc, err := core.build(transmute([]u8)text, json.as(.Json))
+	c, err := schema.compile(transmute([]u8)text, json.as(.Json), {dups = dups})
 	if !testing.expectf(t, err == nil, "%s: %v", text, err) {
 		return
 	}
-	defer core.destroy(&doc)
-	c: schema.Compiled
-	c, err = schema.compile(&doc, core.ROOT, {dups = dups})
-	if !testing.expectf(t, err == nil, "%s: %v", text, err) {
-		return
-	}
-	defer schema.destroy(&c)
+	defer schema.destroy(c)
 	b: schema.Bound
-	b, err = schema.bind(&c, json.checks(.Json))
+	b, err = schema.bind(c, json.checks(.Json))
 	if !testing.expectf(t, err == nil, "%s: %v", text, err) {
 		return
 	}
@@ -115,9 +109,9 @@ repeats_records :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	doc, err := core.build(transmute([]u8)string(`{"properties": {"a": {"type": "string"}}}`), json.as(.Json))
 	testing.expect(t, err == nil)
-	c, compiled := schema.compile(&doc, core.ROOT)
+	c, compiled := schema.compile(core.span(&doc, core.ROOT), json.as(.Json))
 	testing.expect(t, compiled == nil)
-	b, bound := schema.bind(&c, json.checks(.Json))
+	b, bound := schema.bind(c, json.checks(.Json))
 	testing.expect(t, bound == nil)
 	src := transmute([]u8)string("{\"a\":1,\"a\":\"x\"}\n{\"a\":2}\n{\"a\":\"y\",\"a\":3}\n")
 	for framing in ([]core.Framing{.Lines, .Concatenated}) {

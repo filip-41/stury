@@ -44,7 +44,9 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		refuse_in_place_inputs(files)
 	}
 	if cli.schema.flag != "" {
-		run.convert = conversion_open(schema_read(cli.schema), cli.schema.max_errors)
+		sc := schema_read(cli.schema)
+		refuse_unlisted(o, sc.compiled.description)
+		run.convert = conversion_open(sc, cli.schema.max_errors)
 	}
 	init_output(&run.output, run)
 	run.output.held = o.check || o.in_place

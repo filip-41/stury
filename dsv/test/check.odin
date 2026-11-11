@@ -16,9 +16,9 @@ import json "../../json"
 failures :: proc(schema_text: string, text: string, handle: core.As, read := typed.Read_Options{}, reads: ^typed.Format_Reads = nil) -> (out: string, err: core.Error) {
 	doc, _ := core.build(transmute([]u8)schema_text, json.as(.Json))
 	defer core.destroy(&doc)
-	c, _ := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
-	defer schema.destroy(&c)
-	b, berr := schema.bind(&c, {reads, handle})
+	c, _ := schema.compile(core.span(&doc, core.ROOT), json.as(.Json), {})
+	defer schema.destroy(c)
+	b, berr := schema.bind(c, {reads, handle})
 	defer schema.unbind(&b)
 	if berr != nil {
 		return "", berr
@@ -52,7 +52,7 @@ check_one_schema_over_every_format :: proc(t: ^testing.T) {
 		json, json5, csv: string,
 	} {
 		{`[{"id": 1, "name": "abc", "ok": true, "score": 2.5}, {"id": 2, "name": "x", "ok": false, "score": 10}]`, `[{id: 1, name: 'abc', ok: true, score: 2.5}, {id: 2, name: 'x', ok: false, score: 10}]`, "id,name,ok,score\n1,abc,true,2.5\n2,x,false,10\n"},
-		{`[{"id": 0, "name": "abcd", "ok": "maybe", "score": 11}, {"id": 3, "ok": true}]`, `[{id: 0, name: 'abcd', ok: 'maybe', score: 11}, {id: 3, ok: true}]`, "id,name,ok,score\n0,abcd,maybe,11\n3,,true,\n"},
+		{`[{"id": 0, "name": "abcd", "ok": "maybe", "score": 11}, {"id": 3, "name": null, "ok": true, "score": null}]`, `[{id: 0, name: 'abcd', ok: 'maybe', score: 11}, {id: 3, name: null, ok: true, score: null}]`, "id,name,ok,score\n0,abcd,maybe,11\n3,,true,\n"},
 		{`[{"name": "abc"}]`, `[{name: 'abc'}]`, "name\nabc\n"},
 		{`[{"id": 1, "extra": 5}]`, `[{id: 1, extra: 5}]`, "id,extra\n1,5\n"},
 		{`[{"id": 1.5}]`, `[{id: 1.5}]`, "id\n1.5\n"},
@@ -128,7 +128,7 @@ check_cell_rule :: proc(t: ^testing.T) {
 	}
 }
 
-// An empty unquoted cell is an absent member, and a quoted one a string. Rows, `required` and counts see the difference.
+// An empty unquoted cell is a null, and a quoted one a string. Types see the difference, and `required` and counts do not.
 @(test)
 check_empty_cells :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -136,12 +136,14 @@ check_empty_cells :: proc(t: ^testing.T) {
 		property, text: string,
 		valid:          bool,
 	} {
-		{`{"required": ["a"]}`, "a,b\n,1\n", false},
+		{`{"required": ["a"]}`, "a,b\n,1\n", true},
 		{`{"required": ["a"]}`, "a,b\n\"\",1\n", true},
-		{`{"minProperties": 2}`, "a,b\n,1\n", false},
+		{`{"minProperties": 2}`, "a,b\n,1\n", true},
 		{`{"minProperties": 2}`, "a,b\n\"\",1\n", true},
-		{`{"properties": {"a": {"type": "integer"}}}`, "a,b\n,1\n", true},
+		{`{"properties": {"a": {"type": "integer"}}}`, "a,b\n,1\n", false},
 		{`{"properties": {"a": {"type": "integer"}}}`, "a,b\n\"\",1\n", false},
+		{`{"properties": {"a": {"type": "null"}}}`, "a,b\n,1\n", true},
+		{`{"properties": {"a": {"type": "null"}}}`, "a,b\n\"\",1\n", false},
 		{`{"additionalProperties": false}`, "a\n\n", true},
 	}
 	for c in cases {
@@ -190,11 +192,11 @@ check_document_agrees_with_text :: proc(t: ^testing.T) {
 	cases := [?]string{"id,name,ok,score\n1,abc,true,2.5\n2,x,false,10\n", "id,name,ok,score\n0,abcd,maybe,11\n3,,true,\n", "id\n+5\n007\n", "name\nabc\n", "id,extra\n1,5\n"}
 	doc, _ := core.build(transmute([]u8)string(ROWS), json.as(.Json))
 	defer core.destroy(&doc)
-	c, _ := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
-	defer schema.destroy(&c)
+	c, _ := schema.compile(core.span(&doc, core.ROOT), json.as(.Json), {})
+	defer schema.destroy(c)
 	for infer in ([?]bool{false, true}) {
 		handle := dsv.as(.Csv, {infer = infer})
-		b, berr := schema.bind(&c, {dsv.checks(.Csv).reads, handle})
+		b, berr := schema.bind(c, {dsv.checks(.Csv).reads, handle})
 		defer schema.unbind(&b)
 		testing.expect(t, berr == nil)
 		for text in cases {
@@ -220,8 +222,8 @@ check_document_agrees_with_text :: proc(t: ^testing.T) {
 @(private = "file")
 verdicts :: proc(schema_text, text: string, handle: core.As, reads: ^typed.Format_Reads) -> (by_text, by_doc: bool) {
 	schema_doc, _ := core.build(transmute([]u8)schema_text, json.as(.Json), allocator = context.temp_allocator)
-	c, _ := schema.compile(&schema_doc, core.ROOT, {resolver = {as = json.as(.Json)}}, context.temp_allocator)
-	b, berr := schema.bind(&c, {reads, handle})
+	c, _ := schema.compile(core.span(&schema_doc, core.ROOT), json.as(.Json), {}, context.temp_allocator)
+	b, berr := schema.bind(c, {reads, handle})
 	defer schema.unbind(&b)
 	if berr != nil {
 		return false, false
@@ -258,7 +260,7 @@ check_applicators :: proc(t: ^testing.T) {
 		{`{"anyOf": [{"required": ["a"]}, {"required": ["b"]}]}`, "c\n1\n", false},
 		{`{"properties": {"a": {"anyOf": [{"type": "integer"}, {"type": "boolean"}]}}}`, "a\ntrue\n", true},
 		{`{"properties": {"a": {"anyOf": [{"type": "integer"}, {"type": "boolean"}]}}}`, "a\nx\n", false},
-		{`{"oneOf": [{"required": ["a"]}, {"required": ["b"]}]}`, "a,b\n1,\n", true},
+		{`{"oneOf": [{"required": ["a"]}, {"required": ["b"]}]}`, "a,b\n1,\n", false},
 		{`{"oneOf": [{"required": ["a"]}, {"required": ["b"]}]}`, "a,b\n1,2\n", false},
 		{`{"properties": {"a": {"oneOf": [{"type": "integer"}, {"minimum": 3}]}}}`, "a\n5\n", false},
 		{`{"properties": {"a": {"oneOf": [{"type": "integer"}, {"minimum": 3}]}}}`, "a\n3.5\n", true},
@@ -266,8 +268,8 @@ check_applicators :: proc(t: ^testing.T) {
 		{`{"not": {"required": ["b"]}}`, "a,b\n1,2\n", false},
 		{`{"properties": {"a": {"not": {"type": "boolean"}}}}`, "a\ntrue\n", false},
 		{`{"if": {"required": ["a"]}, "then": {"required": ["b"]}, "else": {"required": ["c"]}}`, "a,b\n1,2\n", true},
-		{`{"if": {"required": ["a"]}, "then": {"required": ["b"]}, "else": {"required": ["c"]}}`, "a,b\n1,\n", false},
-		{`{"if": {"required": ["a"]}, "then": {"required": ["b"]}, "else": {"required": ["c"]}}`, "a,c\n,3\n", true},
+		{`{"if": {"required": ["a"]}, "then": {"required": ["b"]}, "else": {"required": ["c"]}}`, "a,b\n1,\n", true},
+		{`{"if": {"required": ["a"]}, "then": {"required": ["b"]}, "else": {"required": ["c"]}}`, "a,c\n,3\n", false},
 		{`{"if": {"required": ["a"]}, "then": {"required": ["b"]}, "else": {"required": ["c"]}}`, "a\n,\n", false},
 		{`{"properties": {"a": {"$ref": "#/$defs/n", "minimum": 3}}, "$defs": {"n": {"type": "integer"}}}`, "a\n5\n", true},
 		{`{"properties": {"a": {"$ref": "#/$defs/n", "minimum": 3}}, "$defs": {"n": {"type": "integer"}}}`, "a\n1\n", false},
@@ -349,8 +351,8 @@ check_partial_document :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	judge :: proc(schema_text, text, path: string, opts := dsv.Options{infer = true}) -> bool {
 		schema_doc, _ := core.build(transmute([]u8)schema_text, json.as(.Json), allocator = context.temp_allocator)
-		c, _ := schema.compile(&schema_doc, core.ROOT, {resolver = {as = json.as(.Json)}}, context.temp_allocator)
-		b, berr := schema.bind(&c, {dsv.checks(.Csv).reads, dsv.as(.Csv, opts)})
+		c, _ := schema.compile(core.span(&schema_doc, core.ROOT), json.as(.Json), {}, context.temp_allocator)
+		b, berr := schema.bind(c, {dsv.checks(.Csv).reads, dsv.as(.Csv, opts)})
 		defer schema.unbind(&b)
 		parsed, _ := core.parse_path(path)
 		defer core.path_destroy(&parsed)
@@ -362,13 +364,13 @@ check_partial_document :: proc(t: ^testing.T) {
 	each_a := `{"type": "array", "items": {"properties": {"a": {"const": 5}}, "required": ["a"]}}`
 	testing.expect(t, judge(each_a, table, ".[1].a"))
 	testing.expect(t, !judge(each_a, table, ".[0].a"))
-	// A record kept whole keeps its empty cell absent.
+	// A record kept whole keeps its empty cell as a null.
 	any_of := `{"type": "array", "items": {"anyOf": [{"required": ["a"]}, {"required": ["b"]}], "oneOf": [{"required": ["b"]}, {"not": {"required": ["b"]}}]}}`
 	testing.expect(t, judge(any_of, table, ".[1]"))
 	only_b := `{"type": "array", "items": {"required": ["b"]}}`
-	testing.expect(t, !judge(only_b, table, ".[1]"))
+	testing.expect(t, judge(only_b, table, ".[1]"))
 	testing.expect(t, judge(only_b, table, ".[0]"))
-	testing.expect(t, !judge(only_b, table, ".[]"))
+	testing.expect(t, judge(only_b, table, ".[]"))
 	// A record kept by position reads the cells before it as empty ones.
 	rows := `{"type": "array", "items": {"type": "array", "prefixItems": [{"type": "null"}, {"const": "bob"}]}}`
 	testing.expect(t, judge(rows, "1,ann\n2,bob\n", ".[1][1]", {no_header = true, infer = true}))
@@ -415,7 +417,7 @@ check_from_dsv_names :: proc(t: ^testing.T) {
 		defer dsv.destroy(&b)
 		testing.expect_value(t, dsv.check_schema(&b, transmute([]u8)string("a\n1\n")) == nil, infer)
 	}
-	_, unbound := schema.bind(&s.compiled, {layout = dsv.as(.Csv)})
+	_, unbound := schema.bind(s, {layout = dsv.as(.Csv)})
 	e, refused := unbound.(core.Typed_Error)
 	testing.expect_value(t, refused && e.kind == .Plan_Mismatch, true)
 }

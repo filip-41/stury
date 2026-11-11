@@ -3,7 +3,7 @@ package dsv
 // The check of a delimited text or document against a description's plan, `Format_Reads.check` and `node_check` of a plan
 // made with `checking`. The check is `typed.Check`, the one the other formats read with, and this file feeds it what a
 // JSON text of the same records gives it: a text is an array of objects keyed by the header, or of arrays under
-// `no_header`, and an empty unquoted cell is an absent member. A cell is one kind for the whole verdict, the one
+// `no_header`, and an empty unquoted cell is a `null`. A cell is one kind for the whole verdict, the one
 // `spelling_resolve` reads it as: a string, or under `infer` a number, `true` or `false` when its text is exactly one.
 // A check that keeps `readings`, which the schema-directed conversion runs, lets the leaf a cell lands on pick its kind
 // instead (`plain_token` of `core/typed`). A column whose name another column repeats is judged
@@ -50,7 +50,7 @@ cell_token :: #force_inline proc "contextless" (h: ^Check_Cells, t: core.Token) 
 	return t
 }
 
-// The hook of a check. A column key waits for its cell, so an empty cell drops both and a dropped column drops both.
+// The hook of a check. A column key waits for its cell, so a dropped column drops both.
 @(private)
 on_check_cell :: #force_inline proc "contextless" (h: ^Check_Cells, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	if t.kind != .Plain {
@@ -82,7 +82,7 @@ on_check_cell :: #force_inline proc "contextless" (h: ^Check_Cells, regs: core.H
 	case:
 		column := h.col
 		h.col, h.held = column + 1, false
-		if empty || column < len(h.drop) && h.drop[column] {
+		if column < len(h.drop) && h.drop[column] {
 			break
 		}
 		out, action := typed.on_token_check(&h.c, regs, h.key)
@@ -90,7 +90,13 @@ on_check_cell :: #force_inline proc "contextless" (h: ^Check_Cells, regs: core.H
 			// A key the check passed over takes its cell with it.
 			return out, .Stop if action == .Stop else .Next
 		}
-		return typed.on_token_check(&h.c, out, cell_token(h, t))
+		t := t
+		if empty {
+			t.kind = .Null
+		} else {
+			t = cell_token(h, t)
+		}
+		return typed.on_token_check(&h.c, out, t)
 	}
 	return regs, .Next
 }

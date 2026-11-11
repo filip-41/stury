@@ -16,16 +16,15 @@ import "../../../core/regex"
 import "../../../core/rules"
 
 // How the run reads its inputs: on null under `null_input`, as one array of them under `slurp`, as strings under
-// `raw`. `bytes` is whether the input's format reads byte strings, which a string of `contentEncoding: base64` then is.
-// Under `cells` an input is a record of a table, whose cells are strings or null, and numbers and booleans too under
+// `raw`. Under `cells` an input is a record of a table, whose cells are strings or null, and numbers and booleans too under
 // `infer`, and which is an array of its cells under `no_header`. `names` and `values` are the command line's
 // variables, and `text` the filter's text, which a refusal points into.
 Typing_Input :: struct {
-	null_input, slurp, raw, bytes: bool,
-	cells, infer, no_header:       bool,
-	names:                         []string,
-	values:                        []Value,
-	text:                          string,
+	null_input, slurp, raw:  bool,
+	cells, infer, no_header: bool,
+	names:                   []string,
+	values:                  []Value,
+	text:                    string,
 }
 
 // The typing of a filter: `d` holds the input's nodes and the typing's, with `root` the node every output passes.
@@ -46,7 +45,7 @@ Typer :: struct {
 	told:     map[Loc]struct{},
 	steps:    int,
 	nesting:  int,
-	// Inside `try`, `?` and the left of `//`, where a step that fails is the filter's own choice, and inside a path
+	// Inside `try` and `?`, where a step that fails is the filter's own choice, and inside a path
 	// that an update or `path` reads, where a member that is not there is made.
 	quiet:    int,
 	soft:     int,

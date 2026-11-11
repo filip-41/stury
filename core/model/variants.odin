@@ -33,6 +33,13 @@ register_enum :: proc(reg: ^Registry, rule: Enum_Rule) -> (err: runtime.Allocato
 			return
 		}
 	}
+	for &x in reg.enums {
+		if x.type == rule.type {
+			enum_rule_destroy(x)
+			x = kept
+			return
+		}
+	}
 	if _, err = append(&reg.enums, kept); err != nil {
 		enum_rule_destroy(kept)
 	}

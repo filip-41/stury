@@ -67,38 +67,103 @@ resolve_all :: proc(r: ^Reader) {
 			r.d.nodes[p.node].ref = target
 		}
 	}
-	seen := make([]bool, len(r.d.nodes), context.temp_allocator)
-	todo := make([dynamic]rules.Node_Index, context.temp_allocator)
+	looping := loop_nodes(r.d)
 	reached: []bool
 	for p in r.pending {
 		n := &r.d.nodes[p.node]
-		if n.ref == nil && n.dynamic_ref == nil {
+		if n.ref == nil && n.dynamic_ref == nil || !looping[p.node] {
 			continue
 		}
-		slice.fill(seen, false)
-		clear(&todo)
-		in_place(r.d, p.node, &todo)
-		for len(todo) > 0 {
-			at := pop(&todo)
-			if at == p.node {
-				// A loop nothing reaches from the root is never judged.
-				if reached == nil {
-					reached = reachable(r.d)
+		// A loop nothing reaches from the root is never judged.
+		if reached == nil {
+			reached = reachable(r.d)
+		}
+		if !reached[p.node] {
+			continue
+		}
+		resize(&r.path, 0)
+		append(&r.path, ..p.path)
+		fail(r, p.site, p.keyword, "leads back to itself through references and in-place subschemas alone")
+		return
+	}
+}
+
+// Which nodes of `d` lie on a loop of in-place edges: those in a strongly connected set of two or more nodes, and those
+// with an edge to themselves.
+@(private)
+loop_nodes :: proc(d: ^rules.Description) -> []bool {
+	count := len(d.nodes)
+	starts := make([]int, count + 1, context.temp_allocator)
+	edges := make([dynamic]rules.Node_Index, context.temp_allocator)
+	for i in 0 ..< count {
+		starts[i] = len(edges)
+		in_place(d, rules.Node_Index(i), &edges)
+	}
+	starts[count] = len(edges)
+	looping := make([]bool, count, context.temp_allocator)
+	order := make([]int, count, context.temp_allocator) // visit order + 1, 0 before the visit
+	low := make([]int, count, context.temp_allocator)
+	open := make([]bool, count, context.temp_allocator)
+	Visit :: struct {
+		node, edge: int,
+	}
+	calls := make([dynamic]Visit, context.temp_allocator)
+	members := make([dynamic]int, context.temp_allocator)
+	visited := 0
+	for root in 0 ..< count {
+		if order[root] != 0 {
+			continue
+		}
+		append(&calls, Visit{root, starts[root]})
+		visited += 1
+		order[root], low[root], open[root] = visited, visited, true
+		append(&members, root)
+		for len(calls) > 0 {
+			top := &calls[len(calls) - 1]
+			v := top.node
+			if top.edge < starts[v + 1] {
+				w := int(edges[top.edge])
+				top.edge += 1
+				switch {
+				case w < 0:
+				case w == v:
+					looping[v] = true
+				case order[w] == 0:
+					visited += 1
+					order[w], low[w], open[w] = visited, visited, true
+					append(&members, w)
+					append(&calls, Visit{w, starts[w]})
+				case open[w]:
+					low[v] = min(low[v], order[w])
 				}
-				if !reached[p.node] {
-					break
-				}
-				resize(&r.path, 0)
-				append(&r.path, ..p.path)
-				fail(r, p.site, p.keyword, "leads back to itself through references and in-place subschemas alone")
-				return
+				continue
 			}
-			if !seen[at] {
-				seen[at] = true
-				in_place(r.d, at, &todo)
+			if low[v] == order[v] {
+				// `v` is the first node of its set, which the stack holds from `v` on.
+				size := 0
+				for from := len(members) - 1; ; from -= 1 {
+					size += 1
+					if members[from] == v {
+						break
+					}
+				}
+				for len(members) > 0 {
+					w := pop(&members)
+					open[w] = false
+					looping[w] ||= size > 1
+					if w == v {
+						break
+					}
+				}
+			}
+			pop(&calls)
+			if len(calls) > 0 {
+				parent := calls[len(calls) - 1].node
+				low[parent] = min(low[parent], low[v])
 			}
 		}
 	}
+	return looping
 }
 
 // Which nodes the root of `d` reaches through any subschema or reference.
@@ -186,7 +251,10 @@ target_of :: proc(r: ^Reader, p: Pending) -> (node: rules.Node_Index, late: bool
 	}
 	sc, found := fetch(r, uri)
 	if !found {
-		return 0, false, r.res.root == "" ? "names a resource that is not in the schema" : "names a resource that is neither in the schema nor a readable file under the root, and a file outside it is not read"
+		if r.res.root == "" {
+			return 0, false, strings.concatenate({"names ", uri, ", which is not in the schema"}, context.temp_allocator)
+		}
+		return 0, false, strings.concatenate({"names ", uri, ", which is neither in the schema nor a readable file under the root ", r.res.root, ", and a file outside it is not read"}, context.temp_allocator)
 	}
 	switch {
 	case fragment == "":
@@ -205,12 +273,12 @@ target_of :: proc(r: ^Reader, p: Pending) -> (node: rules.Node_Index, late: bool
 			ok := false
 			#partial switch s in step {
 			case core.Name:
-				at, ok = core.member(doc, at, string(s))
+				at, ok = member_named(r, sc.source, doc, at, string(s))
 			case core.Index_Or_Name:
 				if core.kind(doc, at) == .Array {
 					at, ok = core.child_at(doc, at, s.index)
 				} else {
-					at, ok = core.member(doc, at, s.name)
+					at, ok = member_named(r, sc.source, doc, at, s.name)
 				}
 			}
 			if !ok {
@@ -225,6 +293,31 @@ target_of :: proc(r: ^Reader, p: Pending) -> (node: rules.Node_Index, late: bool
 		return 0, false, "names an anchor its resource does not have"
 	}
 	return r.memo[anchor.site], anchor.late && p.late, ""
+}
+
+// The most members an object scans for a name before it is indexed.
+@(private)
+INDEX_FROM :: 32
+
+// The member `name` of the object `at` of source `source`, as `core.member` finds it. A large object is indexed once, so
+// that a schema of many references into one `$defs` reads in linear time.
+@(private)
+member_named :: proc(r: ^Reader, source: int, doc: ^core.Document, at: core.Node_Index, name: string) -> (core.Node_Index, bool) {
+	if core.kind(doc, at) != .Object || core.length(doc, at) < INDEX_FROM {
+		return core.member(doc, at, name)
+	}
+	index, built := r.indexes[{source, int(at)}]
+	if !built {
+		index = make(map[string]core.Node_Index)
+		it := core.pairs(doc, at)
+		for k, v in core.pair_next(&it) {
+			key, _ := core.text_clone(doc, k)
+			index[key] = v
+		}
+		r.indexes[{source, int(at)}] = index
+	}
+	v, found := index[name]
+	return v, found
 }
 
 // What a place on a pointer's way is: a schema, an object or an array that holds schemas, or no schema at all, as `const`
@@ -314,7 +407,11 @@ load :: proc(r: ^Reader, uri: string) -> (source: int, found: bool) {
 	}
 	if text == "" {
 		u: rules.Uri = rules.uri_split(uri)
-		if r.res.root == "" || u.scheme != "file" || u.authority != "" {
+		if r.res.root == "" || !strings.equal_fold(u.scheme, "file") || u.authority != "" {
+			return
+		}
+		// An escaped `/` is part of a file's name and not a separator, and no file name holds one.
+		if strings.contains(u.path, "%2f") || strings.contains(u.path, "%2F") {
 			return
 		}
 		// The real path decides: it has no dot segments and no link that leads out of the root.

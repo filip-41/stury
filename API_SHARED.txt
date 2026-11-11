@@ -39,6 +39,7 @@ utf8_lax_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (spelled: [
 utf8_subpart :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8
 write_point :: proc(b: ^strings.Builder, d: Decimal, offset: i128 = 0)
 # core/regex
+group_names :: proc "contextless" (re: ^Regex) -> []string
 in_property :: proc(name: string, r: rune) -> bool
 random_below :: proc(s: ^Source, n: int) -> int
 random_next :: proc(s: ^Source) -> u64
@@ -193,6 +194,7 @@ judge_number :: proc(l: ^Leaf, text: string, small: Maybe(i64)) -> (fails: Failu
 judge_string :: proc(l: ^Leaf, text: string, scratch: ^regex.Scratch) -> (fails: Failures)
 kinds_of :: proc(d: ^Description, ids: []Node_Index) -> Kinds
 leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator, programs: ^Programs = nil) -> (l: Leaf, refused: string)
+operand_text :: proc(l: ^Leaf, kind: core.Typed_Error_Kind, members: bool, allocator: runtime.Allocator) -> string
 program_of :: proc(programs: ^Programs, expression: string, allocator: runtime.Allocator) -> (re: rawptr, err: string)
 ref_only :: proc(n: ^Node) -> bool
 rules_leaf :: proc(r: Rules, kinds: Kinds, allocator := context.allocator) -> (l: Leaf, refused: string)
@@ -322,6 +324,7 @@ release_sides :: proc(side: ^map[typeid]^typed.Plan)
 report_file :: proc(t: ^Tokens, r: Report)
 report_location :: proc(t: ^Tokens, name: string, steps: []core.Step)
 report_message :: proc(e: core.Error_Entry) -> string
+report_pointer :: proc(e: core.Error_Entry) -> string
 report_record :: proc(t: ^Tokens, r: Report, e: core.Error_Entry)
 room :: #force_inline proc(out: ^Out, n: int) -> [^]u8 #no_bounds_check
 scratch_destroy :: proc(s: ^Scratch)
@@ -336,7 +339,6 @@ value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocato
 visit :: proc(plan: ^typed.Plan, value: rawptr, v: ^Visitor, omits: ^typed.Omits = nil) -> core.Typed_Refusal
 visit_path :: proc(v: ^Visitor, steps: ^[dynamic]core.Step) -> bool
 write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator) -> (text: []u8, err: core.Typed_Refusal)
-write_problem :: proc(t: ^Tokens, entries: []core.Error_Entry, p: Problem, r := Report{}) -> core.Typed_Error_Kind
 # core/records
 check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, outer: ^typed.Outer, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0, dups := core.Duplicates.Default, repeats := typed.Repeats.Ignore) -> (records: i64, failure: core.Typed_Refusal, fatal: core.Typed_Refusal, failed: i64)
 entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64, services: ^Framing_Services = nil) -> bool
@@ -350,9 +352,10 @@ writer_take :: proc(wr: ^Writer) -> []u8
 # core/schema
 converter_destroy :: proc(cv: ^Converter)
 converter_init :: proc(cv: ^Converter, c: ^Compiled, from, to: core.As, from_reads: ^typed.Format_Reads = nil, to_reads: ^typed.Format_Reads = nil) -> (err: core.Error)
-open :: proc(text: []u8, as: core.As, refs := "", format_assert := false, allocator := context.allocator) -> (l: ^Loaded, err: core.Error)
 write_basic :: proc(t: ^write.Tokens, entries: []core.Error_Entry, uri: string, r := write.Report{}) -> core.Typed_Error_Kind
 write_odin :: proc(d: ^rules.Description, package_name: string, as: core.As, format_assert := false, allocator := context.allocator) -> (source: string, err: core.Error)
+# core/model
+write_problem :: proc(t: ^write.Tokens, entries: []core.Error_Entry, p: Problem, r := write.Report{}) -> core.Typed_Error_Kind
 # json
 Detail :: enum u8 { None, Literal, Identifier, Colon, Trailing, Unframed, Cut_Number, Non_Finite, Array_Separator, Member_Separator, Trailing_Comma, Lone_Comma, Unmatched_Bracket, Unmatched_Brace, Single_Quote, Control_Char, Invalid_Utf8, Leading_Zero, Leading_Dot, Leading_Plus, Key_Not_String, Expected_Value, }
 RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", "Invalid unquoted key"}, {"colon", "Missing colon after key"}, {"trailing", "Unexpected text after the value"}, {"unframed", "Text before the first RS"}, {"cut_number", "Potentially truncated top-level numeric value"}, {"non_finite", "Infinity and NaN have no JSON value"}, {"array_separator", "Expected ',' or ']' after an array element"}, {"member_separator", "Expected ',' or '}' after an object member"}, {"trailing_comma", "Trailing comma before the closing bracket"}, {"lone_comma", "Expected value before ','"}, {"unmatched_bracket", "Unmatched ']'"}, {"unmatched_brace", "Unmatched '}'"}, {"single_quote", "Invalid string literal; expected \", but got '"}, {"control_char", "Unescaped control character"}, {"invalid_utf8", "Invalid UTF-8"}, {"leading_zero", "Leading zero in a number"}, {"leading_dot", "A number cannot start with '.'"}, {"leading_plus", "A number cannot start with '+'"}, {"key_not_string", "Object keys must be strings"}, {"expected_value", "Expected a value"}}}

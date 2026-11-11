@@ -49,14 +49,29 @@ changes_of :: proc(old, new: ^Side, allocator: mem.Allocator) -> (changes: []Cha
 	return w.out[:], w.truncated || w.forward.exhausted || w.backward.exhausted
 }
 
+// Records a change whose sides are spelled `old` and `new`, "" for none.
 @(private = "file")
 emit :: proc(w: ^Walk, keyword: string, old, new: string, effect: Effect) {
+	emit_values(w, keyword, strings.clone(old, w.allocator) if old != "" else nil, strings.clone(new, w.allocator) if new != "" else nil, effect)
+}
+
+// Records a change whose sides are the numbers `old` and `new`, JSON numbers, "" for none.
+@(private = "file")
+emit_numbers :: proc(w: ^Walk, keyword: string, old, new: string, effect: Effect) {
+	number :: proc(w: ^Walk, text: string) -> Maybe(core.Value) {
+		return core.Value(core.number_text(strings.clone(text, w.allocator), w.allocator)) if text != "" else nil
+	}
+	emit_values(w, keyword, number(w, old), number(w, new), effect)
+}
+
+@(private = "file")
+emit_values :: proc(w: ^Walk, keyword: string, old, new: Maybe(core.Value), effect: Effect) {
 	told := Effect.Unknown if w.forward.exhausted || w.backward.exhausted else effect
 	named := keyword
 	if len(w.via) > 0 {
 		named = strings.join({strings.join(w.via[:], "/", context.temp_allocator), keyword}, "/", context.temp_allocator)
 	}
-	append(&w.out, Change{path = core.steps_clone(w.path[:], w.allocator), keyword = strings.clone(named, w.allocator), old = strings.clone(old, w.allocator), new = strings.clone(new, w.allocator), effect = told})
+	append(&w.out, Change{path = core.steps_clone(w.path[:], w.allocator), keyword = strings.clone(named, w.allocator), old = old, new = new, effect = told})
 }
 
 // What replacing the conjunction `x` of the old description by `y` of the new one does to the values taken.
@@ -151,9 +166,9 @@ bound_changed :: proc(w: ^Walk, keyword: string, x, y: string, strict_x, strict_
 	switch {
 	case x == y && strict_x == strict_y:
 	case x == "":
-		emit(w, keyword, "", y, .Narrows)
+		emit_numbers(w, keyword, "", y, .Narrows)
 	case y == "":
-		emit(w, keyword, x, "", .Widens)
+		emit_numbers(w, keyword, x, "", .Widens)
 	case:
 		effect := Effect.Unknown
 		switch order := rules.tighter(y, x, strict_y, strict_x, lower); {
@@ -162,14 +177,14 @@ bound_changed :: proc(w: ^Walk, keyword: string, x, y: string, strict_x, strict_
 		case order < 0:
 			effect = .Widens
 		}
-		emit(w, keyword, x, y, effect)
+		emit_numbers(w, keyword, x, y, effect)
 	}
 }
 
 @(private = "file")
 count_changed :: proc(w: ^Walk, keyword: string, x, y: u64, lower: bool) {
 	if x != y {
-		emit(w, keyword, fmt.tprint(x), fmt.tprint(y), .Narrows if (y > x) == lower else .Widens)
+		emit_numbers(w, keyword, fmt.tprint(x), fmt.tprint(y), .Narrows if (y > x) == lower else .Widens)
 	}
 }
 
@@ -178,11 +193,11 @@ limit_changed :: proc(w: ^Walk, keyword: string, x, y: Maybe(u64)) {
 	switch {
 	case x == y:
 	case x == nil:
-		emit(w, keyword, "", fmt.tprint(y.?), .Narrows)
+		emit_numbers(w, keyword, "", fmt.tprint(y.?), .Narrows)
 	case y == nil:
-		emit(w, keyword, fmt.tprint(x.?), "", .Widens)
+		emit_numbers(w, keyword, fmt.tprint(x.?), "", .Widens)
 	case:
-		emit(w, keyword, fmt.tprint(x.?), fmt.tprint(y.?), .Narrows if y.? < x.? else .Widens)
+		emit_numbers(w, keyword, fmt.tprint(x.?), fmt.tprint(y.?), .Narrows if y.? < x.? else .Widens)
 	}
 }
 
@@ -218,7 +233,7 @@ rules_changed :: proc(w: ^Walk, x, y: rules.Rules) {
 				effect = .Widens
 			}
 		}
-		emit(w, "multipleOf", x.multiple_of, y.multiple_of, effect)
+		emit_numbers(w, "multipleOf", x.multiple_of, y.multiple_of, effect)
 	}
 	count_changed(w, "minLength", x.min_length, y.min_length, true)
 	limit_changed(w, "maxLength", x.max_length, y.max_length)
@@ -229,14 +244,8 @@ rules_changed :: proc(w: ^Walk, x, y: rules.Rules) {
 	count_changed(w, "minProperties", x.min_members, y.min_members, true)
 	limit_changed(w, "maxProperties", x.max_members, y.max_members)
 	if x.unique != y.unique {
-		emit(w, "uniqueItems", fmt.tprint(x.unique), fmt.tprint(y.unique), .Narrows if y.unique else .Widens)
+		emit_values(w, "uniqueItems", x.unique, y.unique, .Narrows if y.unique else .Widens)
 	}
-}
-
-@(private = "file")
-value_text :: proc(w: ^Walk, v: core.Value) -> string {
-	text, ok := text_of(w.old, v)
-	return string(text) if ok else "?"
 }
 
 @(private = "file")
@@ -247,18 +256,18 @@ enum_changed :: proc(w: ^Walk, a, b: ^rules.Node) {
 		in_a, in_b := value_index(a.enum_of), value_index(b.enum_of)
 		for v in a.enum_of {
 			if !has_value(in_b, v) {
-				emit(w, "enum", value_text(w, v), "", .Narrows)
+				emit_values(w, "enum", v, nil, .Narrows)
 			}
 		}
 		for v in b.enum_of {
 			if !has_value(in_a, v) {
-				emit(w, "enum", "", value_text(w, v), .Widens)
+				emit_values(w, "enum", nil, v, .Widens)
 			}
 		}
 	}
 	x, y := a.const_of, b.const_of
 	if (x == nil) != (y == nil) || x != nil && !core.equal(x.?, y.?) {
-		emit(w, "const", "" if x == nil else value_text(w, x.?), "" if y == nil else value_text(w, y.?), .Both if x != nil && y != nil else (.Narrows if y != nil else .Widens))
+		emit_values(w, "const", x, y, .Both if x != nil && y != nil else (.Narrows if y != nil else .Widens))
 	}
 }
 
@@ -373,7 +382,7 @@ array_changed :: proc(w: ^Walk, x, y: i32) {
 		step_into(w, core.All{}, a.contains.?, b.contains.?, "contains")
 	}
 	if a.min_contains != b.min_contains {
-		emit(w, "minContains", fmt.tprint(a.min_contains.? or_else 1), fmt.tprint(b.min_contains.? or_else 1), .Unknown)
+		emit_numbers(w, "minContains", fmt.tprint(a.min_contains.? or_else 1), fmt.tprint(b.min_contains.? or_else 1), .Unknown)
 	}
 	limit_changed(w, "maxContains", a.max_contains, b.max_contains)
 }
@@ -417,10 +426,10 @@ object_changed :: proc(w: ^Walk, x, y: i32) {
 		emit(w, "propertyNames", "set" if a.keys != rules.NONE else "", "set" if b.keys != rules.NONE else "", relation(w, nodes_or_none(a.keys), nodes_or_none(b.keys)))
 	}
 	if len(a.patterns) + len(b.patterns) > 0 && !same_object(&w.forward, a, b) {
-		emit(w, "patternProperties", fmt.tprint(len(a.patterns)), fmt.tprint(len(b.patterns)), .Unknown)
+		emit_numbers(w, "patternProperties", fmt.tprint(len(a.patterns)), fmt.tprint(len(b.patterns)), .Unknown)
 	}
 	if len(a.dependents) + len(b.dependents) > 0 && !same_object(&w.forward, a, b) {
-		emit(w, "dependentRequired", fmt.tprint(len(a.dependents)), fmt.tprint(len(b.dependents)), .Unknown)
+		emit_numbers(w, "dependentRequired", fmt.tprint(len(a.dependents)), fmt.tprint(len(b.dependents)), .Unknown)
 	}
 }
 

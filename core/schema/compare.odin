@@ -38,12 +38,15 @@ Effect :: enum u8 {
 }
 
 // One difference between the descriptions at a place in a value: `path` names the place by member names and `All` for
-// every element, `keyword` the part of the schema that differs, and `old` and `new` its two spellings, "" for none.
+// every element, `keyword` the part of the schema that differs, and `old` and `new` its two values, nil for none: a
+// number for a bound or a count, a bool for `uniqueItems`, a `const` or an `enum` member as the schema holds it, and
+// otherwise a word for the part, as `restricted` or `required`. The values of a `const` and an `enum` are the
+// descriptions', and the rest the comparison's.
 Change :: struct {
 	path:    []core.Step,
 	keyword: string,
-	old:     string,
-	new:     string,
+	old:     Maybe(core.Value),
+	new:     Maybe(core.Value),
 	effect:  Effect,
 }
 

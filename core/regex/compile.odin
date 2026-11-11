@@ -24,9 +24,11 @@ MAX_BYTES :: 1 << 28
 @(private)
 MEMORY_ERROR :: "fail to memory allocation"
 
-// The pattern's options: jq's `i`, `x` and `s` flags, or `ecma` alone for a JSON Schema pattern (parse.odin).
+// The pattern's options: jq's `i`, `x` and `s` flags, or `ecma` alone for a JSON Schema pattern (parse.odin). `longest`
+// and `not_empty` change only the search: ONIG_OPTION_FIND_LONGEST takes the longest match of all, not the first, and
+// ONIG_OPTION_FIND_NOT_EMPTY takes no empty match.
 Flags :: struct {
-	fold, extend, dotall, multiline, ecma: bool,
+	fold, extend, dotall, multiline, ecma, longest, not_empty: bool,
 }
 
 @(private)
@@ -77,7 +79,13 @@ Inst :: struct {
 	a, b: i32,
 }
 
+// A compiled pattern, which `search` runs.
 Regex :: struct {
+	using program: Program,
+}
+
+@(private)
+Program :: struct {
 	insts:    []Inst,
 	bytes:    string,
 	classes:  []^Class,
@@ -90,8 +98,8 @@ Regex :: struct {
 	dfa:      ^Dfa, // the automaton that answers a search that reads no bounds, or nil (dfa.odin)
 	prefix:   string, // every match starts with these bytes
 	first:     [4]u64, // with has_first, the bytes a match can start with
-	longest:   bool, // ONIG_OPTION_FIND_LONGEST: the longest match of all, not the first
-	not_empty: bool, // ONIG_OPTION_FIND_NOT_EMPTY: an empty match is no match
+	longest:   bool, // Flags.longest
+	not_empty: bool, // Flags.not_empty
 	has_first: bool,
 	calls_or_limits: bool, // holds a subexpression call or an absent operator, whose tracking the match then runs
 	narrowed:  bool, // `opt` bounds the starts the search tries
@@ -235,7 +243,7 @@ program :: proc(pattern: string, flags: Flags, allocator: mem.Allocator) -> (re:
 	if c.err != "" {
 		return {}, c.err
 	}
-	re = Regex {
+	re.program = Program {
 		insts    = c.insts[:],
 		bytes    = string(c.bytes[:]),
 		classes  = c.classes[:],
@@ -279,6 +287,7 @@ program :: proc(pattern: string, flags: Flags, allocator: mem.Allocator) -> (re:
 		re.calls_or_limits ||= ins.op >= .Call
 	}
 	re.ecma, re.linear = flags.ecma, linear_ops(re.insts, flags.ecma, re.opt.anchored)
+	re.longest, re.not_empty = flags.longest, flags.not_empty
 	if re.linear {
 		v := new(Visited)
 		re.visited = v

@@ -9,6 +9,7 @@ import core "../../core"
 import "../../core/typed"
 import "../../core/write"
 import "../../core/schema"
+import json "../../json"
 import "jq"
 import "message"
 
@@ -42,7 +43,7 @@ convert_put :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document, as: core.As, a
 			schema.converter_destroy(&c.converter)
 		}
 		c.bound = false
-		if err := schema.converter_init(&c.converter, &c.check.compiled, ins.as, as, checks_of(ins.as, ins.spec == nil), checks_of(as, writes_cells(&run.opts))); err != nil {
+		if err := schema.converter_init(&c.converter, c.check.compiled, ins.as, as, checks_of(ins.as, ins.spec == nil), checks_of(as, writes_cells(&run.opts))); err != nil {
 			message.write_stderr("stury: error: %s: %s\n", ins.name, edit_error_text(ins.data, err))
 			return false
 		}
@@ -51,9 +52,13 @@ convert_put :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document, as: core.As, a
 	typed.sink_restore(&c.sink, {})
 	text, stage, err := schema.convert(&c.converter, doc, out.layout.opts, &c.sink, context.temp_allocator)
 	if err == nil {
-		write.put_text(&out.buf, string(text))
-		if !strings.has_suffix(string(text), "\n") {
-			jq.put_byte(&out.buf, '\n')
+		if reads_cells(&run.opts) && writes_lines(&run.opts) {
+			put_rows(out, text)
+		} else {
+			write.put_text(&out.buf, string(text))
+			if !strings.has_suffix(string(text), "\n") {
+				jq.put_byte(&out.buf, '\n')
+			}
 		}
 		flush_some(out)
 		return true
@@ -72,4 +77,19 @@ convert_put :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document, as: core.As, a
 		told(strings.concatenate({ins.name, " (output)"}, context.temp_allocator), text, c.sink.entries[:])
 	}
 	return true
+}
+
+// The converted table `text`, an array of rows, written a line to a row as the lines output writes a table.
+@(private = "file")
+put_rows :: proc(out: ^Output, text: []u8) {
+	doc, _ := jq.build_text(text, json.as(.Json), context.temp_allocator)
+	table := jq.document_value(doc)
+	if jq.kind(table) != .Array {
+		emit(out, table)
+		return
+	}
+	it := jq.iterate(table)
+	for _, row in jq.next_member(&it) {
+		emit(out, row)
+	}
 }

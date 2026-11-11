@@ -8,7 +8,6 @@ import "core:strings"
 import core ".."
 import rules "../rules"
 import typed "../typed"
-import write "../write"
 
 // The rules of the models compiled from it: how members are named, the rules of types and of members beside their
 // `model:` tags, members' defaults, and the structs that forbid members they do not name. It owns copies of what it is
@@ -78,12 +77,6 @@ Extra :: enum u8 {
 // most 128 members.
 Fields_Set :: typed.Fields_Set
 
-// The problem document (RFC 9457) of a load's or a check's entries, for any format to write.
-Problem :: write.Problem
-Problem_Error :: write.Problem_Error
-problem :: write.problem
-problem_destroy :: write.problem_destroy
-
 register :: proc {
 	register_naming,
 	register_type,
@@ -100,9 +93,13 @@ register :: proc {
 	register_schema,
 }
 
-// Sets how models compiled from `reg` spell names. `union_tag` must outlive the registry.
-register_naming :: proc(reg: ^Registry, naming: Naming) {
+// Sets how models compiled from `reg` spell names, in place of an earlier call's.
+register_naming :: proc(reg: ^Registry, naming: Naming) -> runtime.Allocator_Error {
+	union_tag := strings.clone(naming.union_tag) or_return
+	delete(reg.naming.union_tag)
 	reg.naming = naming
+	reg.naming.union_tag = union_tag
+	return nil
 }
 
 register_type :: proc(reg: ^Registry, rule: Type_Rule) -> runtime.Allocator_Error {
@@ -128,21 +125,23 @@ register_field :: proc(reg: ^Registry, rule: Field_Rule_Of) -> runtime.Allocator
 	return err
 }
 
-// Makes `value` the default of member `field` of `T`, which must have the type of `value`. The load of a text that
-// leaves the member out gives it a copy of `value`. A member with a default is not required. Refuses as
-// `.Invalid_Argument` a member `T` lacks or one of another type. A proc value is a factory's, so a proc member has none.
-register_default :: proc(reg: ^Registry, $T: typeid, field: string, value: $V) -> runtime.Allocator_Error where !intrinsics.type_is_proc(V) {
-	if !has_member(T, field, V) {
-		return .Invalid_Argument
+// Makes `value` the default of member `field` of `T`. The load of a text that leaves the member out gives it a copy of
+// `value`. A member with a default is not required. `value` has the member's type, or is a number the member's number
+// type holds exactly, or has the type a `Maybe` member holds. Refuses as `.Invalid_Argument` a member `T` lacks, and as
+// `.Wrong_Kind` naming the member's type any other value. A proc value is a factory's, so a proc member has none.
+register_default :: proc(reg: ^Registry, $T: typeid, field: string, value: $V) -> core.Error where !intrinsics.type_is_proc(V) {
+	if !has_member(T, field, nil) {
+		return runtime.Allocator_Error.Invalid_Argument
 	}
-	memory := virtual.arena_allocator(&reg.loads.constants)
-	held := new(V, memory) or_return
 	value := value
-	clone(held, &value, type_info_of(V), memory) or_return
-	copied :: proc(dest, data: rawptr, allocator: runtime.Allocator) -> runtime.Allocator_Error {
-		return clone(dest, data, type_info_of(V), allocator)
+	held, refusal := default_constant(reg, reflect.struct_field_by_name(T, field).type, field, any{&value, typeid_of(V)}) or_return
+	if refusal.kind != .None {
+		return core.error_of(refusal)
 	}
-	return add_default(reg, {T, field, copied, held})
+	if err := add_default(reg, {T, field, copied_constant, held}); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Makes what `make` returns the default of member `field` of `T`, for a default that is not a constant: a fresh map,
@@ -202,12 +201,7 @@ Model :: struct($T: typeid) {
 	// The registry's customs with their carriers' plans, which the plans' hooks point at.
 	customs:   []Custom_Of,
 	// The judged types the model holds and their check plans, which only this package reads, nil for none.
-	judging:   rawptr,
-}
-
-@(private)
-judging_in :: proc(m: ^Model($T)) -> ^Applied {
-	return (^Applied)(m.judging)
+	judging:   ^Applied,
 }
 
 // Compiles `T`'s model from `reg`, nil for a plain type, for the format and layout `checks` names, as
@@ -234,7 +228,7 @@ compile :: proc(reg: ^Registry, $T: typeid, checks: typed.Format_Checks, allocat
 		m.judging = judging
 	}
 	if err == nil {
-		m.load_plan, err = plan_of(reg, T, reads, allocator, .Read_Only, &m.plan, layout, hooks, judging_in(&m))
+		m.load_plan, err = plan_of(reg, T, reads, allocator, .Read_Only, &m.plan, layout, hooks, m.judging)
 	}
 	if err == nil {
 		err = carrier_plans(&m, reads, hooks[:len(hooks) - len(m.customs)], allocator)
@@ -293,6 +287,7 @@ destroy :: proc {
 }
 
 registry_destroy :: proc(reg: ^Registry) {
+	delete(reg.naming.union_tag)
 	for x in reg.types {
 		delete(x.tag)
 	}
@@ -340,7 +335,7 @@ model_destroy :: proc(m: ^Model($T)) {
 		typed.plan_destroy(&x.plan)
 	}
 	delete(m.customs)
-	judging_destroy(judging_in(m))
+	judging_destroy(m.judging)
 	m.judging = nil
 }
 
@@ -390,7 +385,7 @@ member_rule :: proc(h: ^typed.Model_Rules, owner: typeid, field: string, type: t
 	}
 	r.afters = afters[:]
 	if value, found := reflect.struct_tag_lookup(reflect.Struct_Tag(tag), "model"); found {
-		read_tag(value, subject, true, &r)
+		read_tag(value, subject, true, &r, swallows = true)
 	}
 	r.before = before_of(c, owner, field)
 	r.skip ||= r.access != .Read_Write && c.without == r.access

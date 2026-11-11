@@ -1,6 +1,7 @@
 package json_tests
 
 import "base:runtime"
+import "core:strings"
 import "core:testing"
 import core "../../core"
 import typed "../../core/typed"
@@ -359,8 +360,10 @@ a_default_names_a_member_of_its_type :: proc(t: ^testing.T) {
 	}
 	reg: model.Registry
 	defer model.destroy(&reg)
-	testing.expect_value(t, model.register(&reg, Two, "nope", 1), runtime.Allocator_Error.Invalid_Argument)
-	testing.expect_value(t, model.register(&reg, Two, "b", "s"), runtime.Allocator_Error.Invalid_Argument)
+	missing, _ := model.register(&reg, Two, "nope", 1).(runtime.Allocator_Error)
+	testing.expect_value(t, missing, runtime.Allocator_Error.Invalid_Argument)
+	e, wrong := model.register(&reg, Two, "b", "s").(core.Typed_Error)
+	testing.expect(t, wrong && e.kind == .Wrong_Kind && e.want.type == int)
 	testing.expect_value(t, model.register(&reg, Two, "nope", proc(allocator: runtime.Allocator) -> int {return 1}), runtime.Allocator_Error.Invalid_Argument)
 	made := model.register(&reg, Two, "c", proc(allocator: runtime.Allocator) -> []int {
 		return make([]int, 2, allocator)
@@ -475,7 +478,6 @@ was_set_asks_the_struct_that_holds_the_set :: proc(t: ^testing.T) {
 	o: Outer
 	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"inner": {"y": 2, "x": 1}}`), &o))
 	testing.expect(t, model.was_set(&m, Inner, o.inner.set, "x") && model.was_set(&m, Outer, o.set, "inner"))
-	testing.expect(t, !model.was_set(&m, Inner, o.inner.set, "nope"))
 }
 
 @(private = "file")
@@ -715,4 +717,48 @@ a_member_named_dash_is_read_through_an_escaped_tag :: proc(t: ^testing.T) {
 	v: Dashed
 	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"-": 3}`), &v))
 	testing.expect_value(t, v.member, 3)
+}
+
+@(private = "file")
+Aliased :: struct {
+	full_name: string `json:"fullName"`,
+	set:       model.Fields_Set,
+}
+
+// `was_set` takes the name Odin gives the member, not the format's alias.
+@(test)
+was_set_takes_the_odin_name :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	reg: model.Registry
+	m, _ := model.compile(&reg, Aliased, json.checks(.Json))
+	a: Aliased
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"fullName": "ada"}`), &a))
+	testing.expect(t, model.was_set(&m, Aliased, a.set, "full_name"))
+}
+
+// A model's plan read by `unmarshal` is refused with the way to read it.
+@(test)
+a_models_plan_refusal_names_load :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	reg: model.Registry
+	m, _ := model.compile(&reg, Aliased, json.checks(.Json))
+	a: Aliased
+	err := json.unmarshal(transmute([]u8)string(`{"fullName": "ada"}`), .Json, &a, &m.load_plan)
+	b := strings.builder_make()
+	core.render(strings.to_writer(&b), nil, err)
+	testing.expect(t, strings.contains(strings.to_string(b), "model.load"), strings.to_string(b))
+}
+
+// The registry keeps its own copy of the union tag.
+@(test)
+the_registry_copies_the_union_tag :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	reg: model.Registry
+	tag := []u8{'k', 'i', 'n', 'd'}
+	testing.expect_value(t, model.register_naming(&reg, {union_tag = string(tag)}), runtime.Allocator_Error.None)
+	tag[0] = 'x'
+	testing.expect_value(t, reg.naming.union_tag, "kind")
 }

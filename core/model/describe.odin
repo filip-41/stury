@@ -54,7 +54,7 @@ Direction :: enum {
 
 // The description of `m`'s values in `direction`, as `describe` reads it.
 schema :: proc(m: ^Model($T), direction: Direction, allocator := context.allocator) -> (rules.Description, core.Error) {
-	return describe(&m.plan, direction, allocator, judging_in(m))
+	return describe(&m.plan, direction, allocator, m.judging)
 }
 
 @(private)

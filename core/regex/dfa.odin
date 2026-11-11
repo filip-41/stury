@@ -548,6 +548,24 @@ build_dfa :: proc(re: ^Regex, spans: bool, allocator, scratch: mem.Allocator) ->
 	return d
 }
 
+// Sets `bucket` to the threads the items `reached` go on to after reading the symbol `sym`, in their order.
+@(private = "file")
+step_bucket :: proc(b: ^Builder, bucket: ^[dynamic]u32, reached: []u32, sym: int, atom_syms: [][4]u64) -> bool {
+	charge(b, 1 + len(reached)) or_return
+	b.stamp += 1
+	clear(bucket)
+	for it in reached {
+		if atom_syms[b.atom_of[it]][sym >> 6] & (1 << (u64(sym) & 63)) == 0 {
+			continue
+		}
+		charge(b, len(b.after[it])) or_return
+		for x in b.after[it] {
+			add_item(b, bucket, x)
+		}
+	}
+	return true
+}
+
 // The whether automaton from one thread at `start`, with a thread at the program's start added past each character
 // under `restart`. The rows before `start_end` are those of `start` alone.
 @(private = "file")
@@ -560,7 +578,7 @@ build_whether :: proc(b: ^Builder, start: u32, restart: bool, classes: []u8, fin
 		st.table[int(stride) + k] = MATCHED * stride
 	}
 	for c in 0 ..< CLASSES {
-		starts[c] = state_row(b, &st, {start}, c) or_return
+		starts[c] = first_row(b, &st, {start}, c, false) or_return
 	}
 	start_end = u32(len(st.table))
 	bucket := make([dynamic]u32)
@@ -574,7 +592,7 @@ build_whether :: proc(b: ^Builder, start: u32, restart: bool, classes: []u8, fin
 			if !b.used[c] {
 				continue
 			}
-			reached[c], matched[c] = expand(b, threads, before, c) or_return
+			reached[c], matched[c] = expand(b, threads, before, c, false) or_return
 		}
 		for col in 0 ..= syms {
 			sym, c := col, int(classes[col]) if col < syms else int(final)
@@ -585,23 +603,12 @@ build_whether :: proc(b: ^Builder, start: u32, restart: bool, classes: []u8, fin
 				st.table[at + col] = MATCHED * stride
 				continue
 			}
-			charge(b, 1 + len(reached[c])) or_return
-			b.stamp += 1
-			clear(&bucket)
-			for it in reached[c] {
-				if atom_syms[b.atom_of[it]][sym >> 6] & (1 << (u64(sym) & 63)) == 0 {
-					continue
-				}
-				charge(b, len(b.after[it])) or_return
-				for x in b.after[it] {
-					add_item(b, &bucket, x)
-				}
-			}
+			step_bucket(b, &bucket, reached[c], sym, atom_syms) or_return
 			if restart {
 				add_item(b, &bucket, u32(n))
 			}
 			sort_keys(bucket[:])
-			target := state_row(b, &st, bucket[:], c) or_return
+			target := first_row(b, &st, bucket[:], c, false) or_return
 			st.table[at + col] = target
 		}
 		st.table[at + syms + 1] = MATCHED * stride if matched[EDGE] else DEAD
@@ -649,6 +656,29 @@ build_product :: proc(b: ^Builder, main: States, main_starts: [CLASSES]u32, clas
 	return st, starts, true
 }
 
+// The row of the state whose sorted `key` is given, a new state queued for its transitions when none has it, or false
+// past a cap.
+@(private = "file")
+intern_row :: proc(b: ^Builder, st: ^States, key: []u32) -> (row: u32, ok: bool) {
+	if known, seen := st.ids[string(slice.to_bytes(key))]; seen {
+		return known, true
+	}
+	stride := int(st.stride)
+	if len(st.sets) >= DFA_MAX_STATES || len(st.table) + stride > DFA_MAX_TABLE || !charge(b, len(key) + stride) {
+		return 0, false
+	}
+	owned := slice.clone(key)
+	row = u32(len(st.table))
+	st.ids[string(slice.to_bytes(owned))] = row
+	append(&st.sets, owned)
+	// The table grows by doubling, so the copies it leaves in the arena add up to no more than its final size.
+	if len(st.table) + stride > cap(st.table) {
+		reserve(&st.table, max(2 * cap(st.table), len(st.table) + stride))
+	}
+	resize(&st.table, len(st.table) + stride)
+	return row, true
+}
+
 // The row of the state whose parts are in `rows`, a new state queued when none has them, or false past a cap.
 @(private = "file")
 product_row :: proc(b: ^Builder, st: ^States, rows: []u32) -> (row: u32, ok: bool) {
@@ -667,22 +697,7 @@ product_row :: proc(b: ^Builder, st: ^States, rows: []u32) -> (row: u32, ok: boo
 	if done {
 		return matched, true
 	}
-	if known, seen := st.ids[string(slice.to_bytes(rows))]; seen {
-		return known, true
-	}
-	stride := int(st.stride)
-	if len(st.sets) >= DFA_MAX_STATES || len(st.table) + stride > DFA_MAX_TABLE || !charge(b, len(rows) + stride) {
-		return 0, false
-	}
-	owned := slice.clone(rows)
-	row = u32(len(st.table))
-	st.ids[string(slice.to_bytes(owned))] = row
-	append(&st.sets, owned)
-	if len(st.table) + stride > cap(st.table) {
-		reserve(&st.table, max(2 * cap(st.table), len(st.table) + stride))
-	}
-	resize(&st.table, len(st.table) + stride)
-	return row, true
+	return intern_row(b, st, rows)
 }
 
 // Whether a backtracker's search of `d`'s program over `left` bytes stays within `limit` retries at each start.
@@ -732,25 +747,14 @@ build_first :: proc(b: ^Builder, classes: []u8, final: u8, syms, newline_sym: in
 			if !b.used[c] {
 				continue
 			}
-			reached[c], matched[c] = expand_first(b, threads, before, c) or_return
+			reached[c], matched[c] = expand(b, threads, before, c, true) or_return
 		}
 		for col in 0 ..= syms {
 			sym, c := col, int(classes[col]) if col < syms else int(final)
 			if col == syms {
 				sym = newline_sym
 			}
-			charge(b, 1 + len(reached[c])) or_return
-			b.stamp += 1
-			clear(&bucket)
-			for it in reached[c] {
-				if atom_syms[b.atom_of[it]][sym >> 6] & (1 << (u64(sym) & 63)) == 0 {
-					continue
-				}
-				charge(b, len(b.after[it])) or_return
-				for x in b.after[it] {
-					add_item(b, &bucket, x)
-				}
-			}
+			step_bucket(b, &bucket, reached[c], sym, atom_syms) or_return
 			now_ended := ended || matched[c]
 			if !now_ended {
 				add_item(b, &bucket, restart)
@@ -763,8 +767,8 @@ build_first :: proc(b: ^Builder, classes: []u8, final: u8, syms, newline_sym: in
 	return st, starts, first_end, true
 }
 
-// The row of the state of `threads` in their order after a character of class `read`, with whether a match has ended,
-// a new state queued when none has it, or false past a cap. A thread whose closure reaches nothing whatever comes next
+// The row of the state of `threads` in their order after a character of class `read`, with whether a match has ended
+// (never, for the whether automaton), a new state queued when none has it, or false past a cap. A thread whose closure reaches nothing whatever comes next
 // is left out, and so is the thread at the program's start when it reaches nothing past the text's start, so a state
 // with no thread left is the dead row.
 @(private = "file")
@@ -790,22 +794,7 @@ first_row :: proc(b: ^Builder, st: ^States, threads: []u32, read: int, ended: bo
 	}
 	append(&b.row_key, u32(before) | u32(ended) << 8)
 	key := b.row_key[:]
-	if known, seen := st.ids[string(slice.to_bytes(key))]; seen {
-		return known, true
-	}
-	stride := int(st.stride)
-	if len(st.sets) >= DFA_MAX_STATES || len(st.table) + stride > DFA_MAX_TABLE || !charge(b, len(key) + stride) {
-		return 0, false
-	}
-	owned := slice.clone(key)
-	row = u32(len(st.table))
-	st.ids[string(slice.to_bytes(owned))] = row
-	append(&st.sets, owned)
-	if len(st.table) + stride > cap(st.table) {
-		reserve(&st.table, max(2 * cap(st.table), len(st.table) + stride))
-	}
-	resize(&st.table, len(st.table) + stride)
-	return row, true
+	return intern_row(b, st, key)
 }
 
 // The automaton read back from a match's end. A state is the items that, at the place it has read back to, read on to
@@ -909,47 +898,7 @@ last_row :: proc(b: ^Builder, st: ^States, items: []u32, after: int) -> (row: u3
 	append(&b.row_key, ..items)
 	append(&b.row_key, u32(after))
 	key := b.row_key[:]
-	if known, seen := st.ids[string(slice.to_bytes(key))]; seen {
-		return known, true
-	}
-	stride := int(st.stride)
-	if len(st.sets) >= DFA_MAX_STATES || len(st.table) + stride > DFA_MAX_TABLE || !charge(b, len(key) + stride) {
-		return 0, false
-	}
-	owned := slice.clone(key)
-	row = u32(len(st.table))
-	st.ids[string(slice.to_bytes(owned))] = row
-	append(&st.sets, owned)
-	if len(st.table) + stride > cap(st.table) {
-		reserve(&st.table, max(2 * cap(st.table), len(st.table) + stride))
-	}
-	resize(&st.table, len(st.table) + stride)
-	return row, true
-}
-
-// The reading items `threads` reach in their order between a character of class `before` and one of class `after`, up
-// to the first that reaches Match, and whether one does.
-@(private = "file")
-expand_first :: proc(b: ^Builder, threads: []u32, before, after: int) -> (items: []u32, matched: bool, ok: bool) {
-	n := len(b.atom_of)
-	b.stamp += 1
-	set := make([dynamic]u32)
-	walk: for x in threads {
-		if int(x) < n {
-			add_item(b, &set, x)
-			continue
-		}
-		reach := closure_of(b, int(x) - n, before, after) or_return
-		charge(b, len(reach)) or_return
-		for it in reach {
-			if b.atom_of[it] == MATCH_ITEM {
-				matched = true
-				break walk
-			}
-			add_item(b, &set, it)
-		}
-	}
-	return set[:], matched, true
+	return intern_row(b, st, key)
 }
 
 // The class of the character before a place as the program's assertions tell it from the others.
@@ -962,52 +911,6 @@ seen_class :: proc(b: ^Builder, c: int) -> int {
 		return OTHER
 	}
 	return c
-}
-
-// The row of the state of `threads` after a character of class `read`, a new state queued for its transitions when
-// none has them, or false past a cap. A thread at an instruction whose closure reaches nothing whatever comes next is
-// left out, and the thread at the program's start that each character adds is left out only when it reaches nothing
-// anywhere past the text's start, so a state with no thread left is the dead row.
-@(private = "file")
-state_row :: proc(b: ^Builder, st: ^States, threads: []u32, read: int) -> (row: u32, ok: bool) {
-	before := seen_class(b, read)
-	n := len(b.atom_of)
-	clear(&b.row_key)
-	for x in threads {
-		if int(x) >= n && (int(x) > n || b.restart_dies) {
-			live := false
-			for c := 0; !live && c < CLASSES; c += 1 {
-				reach := closure_of(b, int(x) - n, before, c) or_return
-				live = len(reach) > 0
-			}
-			if !live {
-				continue
-			}
-		}
-		append(&b.row_key, x)
-	}
-	if len(b.row_key) == 0 {
-		return DEAD, true
-	}
-	append(&b.row_key, u32(before))
-	key := b.row_key[:]
-	if known, seen := st.ids[string(slice.to_bytes(key))]; seen {
-		return known, true
-	}
-	stride := int(st.stride)
-	if len(st.sets) >= DFA_MAX_STATES || len(st.table) + stride > DFA_MAX_TABLE || !charge(b, len(key) + stride) {
-		return 0, false
-	}
-	owned := slice.clone(key)
-	row = u32(len(st.table))
-	st.ids[string(slice.to_bytes(owned))] = row
-	append(&st.sets, owned)
-	// The table grows by doubling, so the copies it leaves in the arena add up to no more than its final size.
-	if len(st.table) + stride > cap(st.table) {
-		reserve(&st.table, max(2 * cap(st.table), len(st.table) + stride))
-	}
-	resize(&st.table, len(st.table) + stride)
-	return row, true
 }
 
 // Takes the look-aheads an ECMA program begins with after `^` into `b.looks`, false for a program with a look-around
@@ -1596,14 +1499,15 @@ closure_of :: proc(b: ^Builder, pc, before, after: int) -> ([]u32, bool) {
 	return set[:], true
 }
 
-// The reading items `threads` reach between a character of class `before` and one of class `after`, and whether
-// Match is among what they reach.
+// The reading items `threads` reach in their order between a character of class `before` and one of class `after`, and
+// whether Match is among what they reach. With `stop` the reach ends at the first Match, the threads after it being
+// ones the backtracker would try only had that match failed.
 @(private = "file")
-expand :: proc(b: ^Builder, threads: []u32, before, after: int) -> (items: []u32, matched: bool, ok: bool) {
+expand :: proc(b: ^Builder, threads: []u32, before, after: int, $stop: bool) -> (items: []u32, matched: bool, ok: bool) {
 	n := len(b.atom_of)
 	b.stamp += 1
 	set := make([dynamic]u32)
-	for x in threads {
+	walk: for x in threads {
 		if int(x) < n {
 			add_item(b, &set, x)
 			continue
@@ -1613,6 +1517,9 @@ expand :: proc(b: ^Builder, threads: []u32, before, after: int) -> (items: []u32
 		for it in reach {
 			if b.atom_of[it] == MATCH_ITEM {
 				matched = true
+				when stop {
+					break walk
+				}
 			} else {
 				add_item(b, &set, it)
 			}

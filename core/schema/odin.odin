@@ -101,7 +101,7 @@ REGISTER_FRAGMENT ::
 	"register_fragment :: proc(reg: ^model.Registry, T: typeid, text: string) -> core.Error {\n" +
 	"\ts := json.load_schema(transmute([]u8)text) or_return\n" +
 	"\tdefer json.destroy(s)\n" +
-	"\tmodel.register_schema(reg, T, s.compiled.description) or_return\n" +
+	"\tmodel.register_schema(reg, T, s.description) or_return\n" +
 	"\treturn nil\n" +
 	"}\n"
 
@@ -1090,7 +1090,7 @@ object_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Part, r: rules.Rul
 		// A nullable optional member tells absent from null by its struct's `Fields_Set`.
 		unset := !m.required && takes_null(s, node)
 		n_unset += int(unset)
-		member_tag(s, &b, m, field, value.rules, (absent || strings.has_prefix(t, "^")) && !takes_null(s, node), absent, unset)
+		member_tag(s, &b, name, m, field, value.rules, (absent || strings.has_prefix(t, "^")) && !takes_null(s, node), absent, unset)
 		strings.write_string(&b, ",\n")
 	}
 	if n_unset > 0 {
@@ -1126,7 +1126,20 @@ object_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Part, r: rules.Rul
 // `optional` where it is not required, `not_null` on a `Maybe` or a pointer that does not take null, and its rules. A tag Odin's raw
 // string cannot hold is a quoted one.
 @(private = "file")
-member_tag :: proc(s: ^Source, b: ^strings.Builder, m: rules.Member, field: string, r: rules.Rules, not_null: bool, omit := false, unset := false) {
+member_tag :: proc(s: ^Source, b: ^strings.Builder, owner: string, m: rules.Member, field: string, r: rules.Rules, not_null: bool, omit := false, unset := false) {
+	r := r
+	if strings.contains_any(r.pattern, "\",") {
+		// A struct tag cannot hold a quote, and a `pattern=` item, which takes the rest of the tag, refuses text after a
+		// comma that reads as another item, so `register` adds such a pattern as the member's rule.
+		strings.write_string(&s.registers, "\tmodel.register_field(reg, {")
+		strings.write_string(&s.registers, owner)
+		strings.write_string(&s.registers, ", ")
+		strings.write_quoted_string(&s.registers, field)
+		strings.write_string(&s.registers, ", ")
+		strings.write_quoted_string(&s.registers, strings.concatenate({"pattern=", r.pattern}))
+		strings.write_string(&s.registers, "}) or_return\n")
+		r.pattern = ""
+	}
 	tag := strings.builder_make()
 	named := field != m.name || omit || unset
 	if named {
@@ -1215,9 +1228,6 @@ tag_items :: proc(s: ^Source, r: rules.Rules, optional := false, not_null := fal
 		item(&b, "format=", r.format)
 	}
 	if r.pattern != "" {
-		if strings.contains_rune(r.pattern, '"') {
-			refuse(s, "pattern")
-		}
 		item(&b, "pattern=", r.pattern)
 	}
 	return strings.to_string(b)

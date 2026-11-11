@@ -25,7 +25,7 @@ spelled :: proc(s: ^typed.Sink) -> string {
 	b: strings.Builder
 	for e in s.entries {
 		fmt.sbprintf(&b, "%v", e.kind)
-		if m, custom := e.operand.(string); custom {
+		if m, custom := e.operand.(string); custom && e.kind == .Custom {
 			fmt.sbprintf(&b, "(%s)", m)
 		}
 		for st in e.path {

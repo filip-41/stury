@@ -45,10 +45,8 @@ judge :: proc(line: string) -> string {
 	if e := json.unmarshal(transmute([]u8)line, .Json, &c); e != nil {
 		return fmt.tprint("E", e)
 	}
-	doc, _ := json.build(transmute([]u8)c.schema, .Json)
-	defer core.destroy(&doc)
-	compiled, cerr := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
-	defer schema.destroy(&compiled)
+	compiled, cerr := schema.compile(transmute([]u8)c.schema, json.as(.Json))
+	defer schema.destroy(compiled)
 	if cerr != nil {
 		return fmt.tprint("E", cerr)
 	}
@@ -58,7 +56,7 @@ judge :: proc(line: string) -> string {
 	if c.ragged {
 		opts.tolerate = {.Ragged}
 	}
-	bound, berr := schema.bind(&compiled, {reads, dsv.as(spec, opts)})
+	bound, berr := schema.bind(compiled, {reads, dsv.as(spec, opts)})
 	defer schema.unbind(&bound)
 	if berr != nil {
 		return fmt.tprint("U", berr)

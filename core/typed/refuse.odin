@@ -1,6 +1,7 @@
 package typed
 
 import "base:runtime"
+import "core:reflect"
 import "core:strings"
 import core ".."
 
@@ -188,7 +189,7 @@ refuse_element :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Ho
 // ending at `end`, with the path of any depth and its names copied, and under a `keyword` of a description's plan the
 // keyword path to it.
 @(private)
-note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Refusal, end: u64, keyword: Maybe(string) = nil) {
+note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Refusal, end: u64, keyword: Maybe(string) = nil, operand := "") {
 	e := e
 	held := e.n_steps > 0
 	held_step := e.steps[0]
@@ -204,7 +205,7 @@ note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Refusal, end: u64, 
 	if c == nil || !sink_room(c, h.ctx.allocator) {
 		return
 	}
-	if !entry_add(c, e, h, regs, held, held_step, end, keyword) {
+	if !entry_add(c, e, h, regs, held, held_step, end, keyword, operand) {
 		c.truncated = true
 	}
 }
@@ -212,7 +213,7 @@ note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Refusal, end: u64, 
 // Appends the entry of `e`, whose paths are copied to exactly the size they free at, and says whether it fit in memory.
 // The keyword path is each open record's use site, then the value's, then `keyword`, for a description's plan.
 @(private)
-entry_add :: proc(c: ^Sink, e: core.Typed_Refusal, h: ^Reader, regs: core.Hook_Regs, held: bool, held_step: core.Step, end: u64, keyword: Maybe(string)) -> bool {
+entry_add :: proc(c: ^Sink, e: core.Typed_Refusal, h: ^Reader, regs: core.Hook_Regs, held: bool, held_step: core.Step, end: u64, keyword: Maybe(string), operand: string) -> bool {
 	context.allocator = c.entries.allocator
 	// The paths are built in the sink's allocator and freed, so a sink a held value drops costs nothing that stays.
 	steps, words := make([dynamic]core.Step), make([dynamic]core.Step)
@@ -243,6 +244,12 @@ entry_add :: proc(c: ^Sink, e: core.Typed_Refusal, h: ^Reader, regs: core.Hook_R
 	entry := core.Error_Entry{kind = e.kind, start = e.at, end = max(end, e.at), record = c.record}
 	if (e.kind == .Missing_Field || e.kind == .Custom) && h.wide && e.want.text != "" {
 		entry.operand = strings.clone(e.want.text)
+	} else if operand != "" {
+		entry.operand = strings.clone(operand)
+	} else if e.kind == .Wrong_Kind && e.want.type != nil && !h.plan.checking {
+		b := strings.builder_make(context.temp_allocator)
+		reflect.write_typeid(strings.to_writer(&b), e.want.type)
+		entry.operand = strings.clone(strings.to_string(b))
 	}
 	return sink_entry(c, entry, steps[:], words[:], true)
 }

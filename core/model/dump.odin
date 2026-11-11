@@ -27,12 +27,12 @@ Dump_Opts :: struct {
 // of their keys. Under `check`, every failure `validate` finds in what is written goes to `sink`, and the returned
 // `.Check_Failed` has the first's path and its code as `want.text`, the sink alone its message.
 dump :: proc(m: ^Model($T), v: ^T, opts := Dump_Opts{}, write := core.Write_Options{}, sink: ^typed.Sink = nil, allocator := context.allocator) -> ([]u8, core.Error) {
-	return dump_to(&m.plan, judging_in(m), v, opts, write, {}, sink, allocator)
+	return dump_to(&m.plan, m.judging, v, opts, write, {}, sink, allocator)
 }
 
 // `dump` to `w`, as the text is made. On a refusal of the write `w` may hold a prefix of the text.
 dump_stream :: proc(w: io.Stream, m: ^Model($T), v: ^T, opts := Dump_Opts{}, write := core.Write_Options{}, sink: ^typed.Sink = nil) -> core.Error {
-	_, err := dump_to(&m.plan, judging_in(m), v, opts, write, w, sink, context.allocator)
+	_, err := dump_to(&m.plan, m.judging, v, opts, write, w, sink, context.allocator)
 	return err
 }
 

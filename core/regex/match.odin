@@ -98,6 +98,11 @@ Matcher :: struct {
 	lo, width, first_start, last_start: int,
 }
 
+// Each group's name at its number, "" for a group with none. The whole match is group 0.
+group_names :: proc "contextless" (re: ^Regex) -> []string {
+	return re.names
+}
+
 // The first match of `re` in `s` at or after byte `start`, with its groups' byte bounds in `caps` (2 per group with
 // the whole match; -1 for a group that did not take part), or Oniguruma's message when the search gave up. With no
 // `caps` it answers only whether there is one.

@@ -128,6 +128,7 @@ Meta :: struct {
 // `Hook_Regs.b` its array's elements start at, `additional` that of the record of the members no record names, and
 // `keys` 1 + the leaf of its member names, each 0 for none. `inside` says a rule reads an element. `site` is the keyword
 // steps from the record that holds it to its own rules, `$ref`s included.
+@(private)
 Use :: struct {
 	items, additional, keys: i32,
 	site:                    []core.Step,
@@ -320,6 +321,7 @@ Model_Rules :: struct {
 
 // What a model's plan serves. `Whole` holds every member and serves validate, the schemas and writes, and reads nothing.
 // `Load` leaves out the read_only members and reads only as a check, into a zeroed target, as a model's load does.
+@(private)
 Model_Plan :: enum u8 {
 	None,
 	Whole,
@@ -464,6 +466,11 @@ Value_Text :: #type proc(plan: ^Plan, v: core.Value, allocator: runtime.Allocato
 @(private)
 TRAIL_MAX :: 32
 
+// The most `fill_checked` calls open at once: a schema nests as deep as a value can (`core.MAX_DEPTH`) in its members, and
+// again in the references and `allOf` arms between them.
+@(private)
+MAX_FILL :: 2 * core.MAX_DEPTH
+
 @(private)
 Builder :: struct {
 	using options: ^Plan_Options, // the plan's, which own their strings
@@ -477,6 +484,8 @@ Builder :: struct {
 	// The names of the members being filled, outermost first, which a refusal reports as its path.
 	trail:         [TRAIL_MAX]string,
 	depth:         int,
+	// How many `fill_checked` calls are open, which `MAX_FILL` bounds so that the recursion stays on the stack.
+	nest:          int,
 	rule_sets:     [dynamic]rules.Rules,
 	leaves:        [dynamic]rules.Leaf,
 	uses:          [dynamic]Use,
@@ -487,6 +496,9 @@ Builder :: struct {
 	// The conjoined node of each holder whose `allOf` and `$ref` arms conjoin, and the node each pair conjoins into.
 	conjoined:     map[rules.Node_Index]Conjoined,
 	pairs:         map[[2]rules.Node_Index]rules.Node_Index,
+	// The node of each node's own keywords past its arms that a conjoining appended, `NONE` for a node with none.
+	stripped:      map[rules.Node_Index]rules.Node_Index,
+	chain_ends:    map[rules.Node_Index]rules.Node_Index,
 	// The objects whose one pattern their record reads.
 	inline:        map[i32]Inline_Pattern,
 	// The patterns compiled so far, which every use of one shares.
@@ -1585,7 +1597,7 @@ lay_out :: proc(b: ^Builder, owner: typeid, v: runtime.Type_Info_Struct, base: u
 			tag.required ||= !tag.unknown && !model.optional && model.make == nil && model.access != .Read_Only
 		}
 		// A flattened or capturing member is no value of its own for rules to hold.
-		rule_set := rule_set_of(b, model.rules) if model.rules != {} else 0
+		rule_set := rule_set_of(b, model.rules) if b.model != nil && model.rules != {} else 0
 		if inner, is_struct := runtime.type_info_base(v.types[i]).variant.(runtime.Type_Info_Struct); is_struct && v.usings[i] && !tag.named && !hooked && .raw_union not_in inner.flags && inner.soa_kind == .None {
 			if rule_set > 0 {
 				refuse_plan(b, .Bad_Tag, tag.name, "model")

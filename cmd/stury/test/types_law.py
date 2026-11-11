@@ -10,10 +10,9 @@ on samples of each schema and a fixture's own instances:
   fails with a kind error fails.
 - What a filter writes on the samples passes the schema the typing writes for it, on every filter of FILTERS and the
   reads of the members the samples have.
-- `type` on a string of `contentEncoding: base64` is "bytes" where the input format reads byte strings (types_probe.odin).
 - A recursive schema and a recursive filter end inside a fixed budget.
 
-    types_law.py BINARY [--odin PATH] [--fixtures DIR] [--count N]
+    types_law.py BINARY [--fixtures DIR] [--count N]
 """
 
 import argparse
@@ -202,22 +201,6 @@ def judge(stury, case, scratch, count):
     return ("refused" if refused else "accepted"), failures
 
 
-def bytes_cases(odin, scratch):
-    probe = os.path.join(scratch, "types_probe")
-    subprocess.run([odin, "build", "cmd/stury/test/types_probe.odin", "-file", "-o:minimal", f"-out:{probe}"], cwd=ROOT, check=True)
-    schema = os.path.join(scratch, "bytes.schema.json")
-    with open(schema, "w") as f:
-        json.dump({"type": "object", "properties": {"photo": {"type": "string", "contentEncoding": "base64"}, "name": {"type": "string"}}, "required": ["photo", "name"]}, f)
-    cases = [(".photo | type", "bytes"), (".name | type", "string"), ("type", "object")]
-    failures = []
-    for filter, want in cases:
-        status, out, err = run([probe, schema, filter])
-        got = json.loads(out) if status == 0 else None
-        if got is None or got.get("const") != want:
-            failures.append(f"bytes: {filter} types as {out.decode().strip()} {err.decode().strip()}, not the constant {want!r}")
-    return len(cases), failures
-
-
 # A schema of itself, with filters that walk it without end: each must end with the outputs unknown, not run on.
 RECURSIVE = {"$defs": {"t": {"type": "object", "properties": {"c": {"type": "array", "items": {"$ref": "#/$defs/t"}}, "v": {"type": "integer"}}}}, "$ref": "#/$defs/t"}
 ENDLESS = [
@@ -246,7 +229,6 @@ def budget_cases(stury, scratch):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("binary")
-    parser.add_argument("--odin", default=os.environ.get("ODIN", "odin"))
     parser.add_argument("--fixtures", help="bench/fixtures, by default the main checkout's, where it is present")
     parser.add_argument("--count", type=int, default=12)
     args = parser.parse_args()
@@ -262,15 +244,13 @@ def main():
             for verdict, found in pool.map(lambda c: judge(stury, c, scratch, args.count), cases):
                 counts[verdict] += 1
                 failures += found
-        n_bytes, found = bytes_cases(args.odin, scratch)
-        failures += found
         n_budget, found = budget_cases(stury, scratch)
         failures += found
     for f in failures:
         print(f)
     print(f"types law: {suite_count} suite and {len(cases) - suite_count} fixture schemas: .emial refused on {counts['refused']}, "
           f"accepted on {counts['accepted']}, {counts['skipped']} unread, {len(FILTERS)} filters and the member reads sampled on each; "
-          f"{n_bytes} bytes cases, {n_budget} budget cases; {len(failures)} failures")
+          f"{n_budget} budget cases; {len(failures)} failures")
     sys.exit(1 if failures else 0)
 
 

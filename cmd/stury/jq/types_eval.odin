@@ -95,9 +95,7 @@ type_of :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> Ty {
 		type_of(t, n.b, dot, f)
 		return kinds_node(t, {.Bool})
 	case .Alt:
-		t.quiet += 1
 		a := type_of(t, n.a, dot, f)
-		t.quiet -= 1
 		k, unknown := kinds_of(t, a)
 		kept := a if unknown else restrict(t, a, k - {.Null})
 		return union_of(t, kept, type_of(t, n.b, dot, f))
@@ -303,8 +301,7 @@ narrowed :: proc(t: ^Typer, c: ^Node, dot: Ty) -> (yes, no: Ty) {
 		return dot, dot
 	}
 	yes = restrict(t, dot, kinds)
-	// A byte string is a string of the description that `type` names "bytes".
-	no = dot if t.input.bytes && .String in kinds else restrict(t, dot, rules.EVERY_KIND - closure(kinds))
+	no = restrict(t, dot, rules.EVERY_KIND - closure(kinds))
 	return
 }
 
@@ -323,7 +320,7 @@ type_test :: proc(c: ^Node) -> (rules.Kinds, bool) {
 	}
 	name, _ := string_of(lit.value)
 	for k in JQ_KINDS {
-		if k.name == name || k.name == "string" && name == "bytes" {
+		if k.name == name {
 			return k.kinds, true
 		}
 	}

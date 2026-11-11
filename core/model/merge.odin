@@ -26,7 +26,7 @@ patch :: proc(m: ^Model($T), existing: ^T, body: []u8, sink: ^typed.Sink = nil, 
 	typed.check_text(body, &changes, T, &m.load_plan, read, allocator) or_return
 	merged := existing^
 	merge_struct(&m.load_plan, root, uintptr(&merged), uintptr(&changes), allocator) or_return
-	validate_value(&m.plan, &merged, sink, judging_in(m)) or_return
+	validate_value(&m.plan, &merged, sink, m.judging) or_return
 	existing^ = merged
 	return nil
 }

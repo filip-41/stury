@@ -312,10 +312,6 @@ object :: proc(inf: ^Inferred, p: ^Summary, v: core.Value, ref: core.Node_Ref) {
 				break
 			}
 		}
-		// An empty value of a flat row is an absent member.
-		if inf.rows && core.kind(core.plain(value)) == .Null {
-			continue
-		}
 		take(inf, member(inf, p, key, markup, .Any), value)
 	}
 }

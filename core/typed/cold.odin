@@ -1159,19 +1159,27 @@ store_integer :: proc(n: core.Number, kind: Read_Kind, dest: uintptr) -> core.Ty
 	return store_int(u64(-i64(n.bits)) if neg else n.bits, neg, kind, dest)
 }
 
-// Whether the struct of record `owner`, which closes, is one a partial load reads as a patch: it and each container
-// open around it are structs that hold a `Fields_Set`, the root's included.
+// Whether the struct of record `owner`, which closes in frame `f`, is one a partial load reads as a patch: it and each
+// container open around it are structs that hold a `Fields_Set`, the root's included, and none is held behind a pointer,
+// a `Maybe` or a union, which a patch replaces whole.
 @(private)
-partial :: proc "contextless" (h: ^Reader, owner: ^Field) -> bool {
-	if !h.partial || !holds_set(h.plan, owner) {
+partial :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field) -> bool {
+	if !h.partial || !holds_set(h.plan, owner) || behind_wrapper(f) {
 		return false
 	}
 	for i in 1 ..< h.sp {
-		if !holds_set(h.plan, frame_owner(&h.frames[i])) {
+		if behind_wrapper(&h.frames[i]) || !holds_set(h.plan, frame_owner(&h.frames[i])) {
 			return false
 		}
 	}
 	return true
+}
+
+// Whether the container of frame `f` is held by a pointer, a `Maybe` or a union.
+@(private)
+behind_wrapper :: proc "contextless" (f: ^Frame) -> bool {
+	k := field_at(f.b).kind
+	return k == .Ptr || k == .Maybe || k == .Union
 }
 
 // Whether `f` is a struct's record whose struct holds a `Fields_Set`.
@@ -1190,7 +1198,7 @@ missing_member :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, regs
 		if from == 0 {
 			mark_run(h, f, owner, (^Field)(uintptr(regs.b)))
 		}
-		if partial(h, owner) {
+		if partial(h, f, owner) {
 			return -1
 		}
 		for at in end.required {
@@ -1200,7 +1208,7 @@ missing_member :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, regs
 		}
 		return -1
 	}
-	if partial(h, owner) {
+	if partial(h, f, owner) {
 		return -1
 	}
 	done := max(from, i32((uintptr(regs.b) - uintptr(owner.first)) / size_of(Field)))

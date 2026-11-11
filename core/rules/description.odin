@@ -96,13 +96,15 @@ Conditional :: struct {
 }
 
 // An array's elements: the first take the nodes of `prefix` in order, and the rest `items`. `contains` takes between
-// `min_contains` (1 when nil) and `max_contains` of the elements.
+// `min_contains` (1 when nil) and `max_contains` of the elements. `evaluates_contains` says the elements it takes count
+// as evaluated for `unevaluatedItems`, which holds from draft 2020-12 on.
 Array :: struct {
-	prefix:       []Node_Index,
-	items:        Node_Index,
-	contains:     Maybe(Node_Index),
-	min_contains: Maybe(u64),
-	max_contains: Maybe(u64),
+	prefix:             []Node_Index,
+	items:              Node_Index,
+	contains:           Maybe(Node_Index),
+	evaluates_contains: bool,
+	min_contains:       Maybe(u64),
+	max_contains:       Maybe(u64),
 }
 
 // An object's named members, the node every other member's value passes, and the node each member's name passes as a

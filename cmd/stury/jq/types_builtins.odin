@@ -119,7 +119,12 @@ builtin_type :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> (Ty, bool) {
 	case "env":
 		return object_of(t, nil, kinds(t, {.String})), true
 	}
-	arg_all(t, n, dot, f)
+	for a, i in n.args {
+		at := type_of(t, a, dot, f)
+		if ka, ua := kinds_of(t, at); i == 0 && b.arg_takes != {} && !ua && ka != {} && ka & closure(b.arg_takes) == {} && (n.name != "join" || k == {.Array} && pair_input(t, dot)) {
+			kind_refusal(t, a, "%s/%d takes %s as its argument, not %s", n.name, arity, kinds_text(b.arg_takes), kinds_text(ka))
+		}
+	}
 	switch b.typed {
 	case .Kinds:
 		return kinds(t, b.gives), true
@@ -130,6 +135,25 @@ builtin_type :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> (Ty, bool) {
 	case .Unknown:
 	}
 	return t.unknown, true
+}
+
+// Whether every array `dot` takes holds at least two elements, so that `join` adds its separator to a string.
+@(private = "file")
+pair_input :: proc(t: ^Typer, dot: Ty) -> bool {
+	split := branches(t, dot)
+	if !split.complete || len(split.of) == 0 {
+		return false
+	}
+	for b in split.of {
+		pair := false
+		for id in b {
+			pair ||= id != t.unknown && t.d.nodes[id].rules.min_items >= 2
+		}
+		if !pair {
+			return false
+		}
+	}
+	return true
 }
 
 // Whether `p` gives only paths that are not empty: a literal of them, or `[e]` with one output of `e`.
@@ -182,8 +206,7 @@ entries :: proc(t: ^Typer, dot: Ty) -> Ty {
 	return object_of(t, members, t.never)
 }
 
-// What `type` names a value of `dot`: in a format that reads byte strings, a string of `contentEncoding: base64` is
-// "bytes".
+// What `type` names a value of `dot`.
 @(private = "file")
 type_names :: proc(t: ^Typer, dot: Ty) -> Ty {
 	names: [dynamic]string
@@ -209,22 +232,8 @@ type_names :: proc(t: ^Typer, dot: Ty) -> Ty {
 			if kind.kinds & k == {} {
 				continue
 			}
-			if kind.name == "string" && t.input.bytes && encoded(t, b[:]) {
-				add(&names, "bytes")
-			} else {
-				add(&names, kind.name)
-			}
+			add(&names, kind.name)
 		}
 	}
 	return names_node(t, names[:]) if len(names) > 0 else t.never
-}
-
-@(private = "file")
-encoded :: proc(t: ^Typer, b: []Ty) -> bool {
-	for id in b {
-		if t.d.nodes[id].content_encoding == "base64" {
-			return true
-		}
-	}
-	return false
 }

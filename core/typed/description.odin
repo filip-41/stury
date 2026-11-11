@@ -119,8 +119,16 @@ node_struct :: proc(b: ^Builder, d: ^rules.Description, key: Block_Key, o: rules
 // an array's prefix and items records a block its uses share.
 @(private)
 fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, at: int, use: rules.Node_Index, name: string, edge: rules.Rules, site: []core.Step, bare := false) {
+	if b.nest == MAX_FILL {
+		refuse_plan(b, .Too_Deep)
+		return
+	}
+	b.nest += 1
 	depth, scope := enter(b, name), b.scope
-	defer b.depth, b.scope = depth, scope
+	defer {
+		b.nest -= 1
+		b.depth, b.scope = depth, scope
+	}
 	node, refs := reached(d, use)
 	for x, hop := use, 0; x != rules.NONE && hop <= refs; hop += 1 {
 		enter_scope(b, d, arena, x)
@@ -191,11 +199,20 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 		u.items = nothing if u.items == 0 else u.items
 	}
 	f.kind = .Checked
-	if resize(&b.uses, len(b.meta)) != nil {
+	if !cover_uses(b) {
 		refuse_plan(b, .No_Memory)
 		return
 	}
 	b.fields[at], b.meta[at], b.uses[at] = f, m, u
+}
+
+// Grows `b.uses` to one `Use` per record, with room for the records to come, since an arena keeps the copy a resize leaves.
+@(private)
+cover_uses :: proc(b: ^Builder) -> bool {
+	if cap(b.uses) < len(b.meta) && reserve(&b.uses, 2 * len(b.meta)) != nil {
+		return false
+	}
+	return resize(&b.uses, len(b.meta)) == nil
 }
 
 // The markup node a member's record reads: what the used node, the node it reaches or the rules the use adds name

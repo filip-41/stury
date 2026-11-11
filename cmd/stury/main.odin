@@ -98,8 +98,9 @@ main :: proc() {
 		usage_error("--diff is edit's: it previews the changes of an edit")
 	case (o.in_place || o.check) && !cli.formatting && !cli.editing:
 		usage_error("%s is fmt's and edit's: a filter run has no use for it", "--in-place" if o.in_place else "--check")
-	case !validating && !cli.formatting && (cli.schema.judging if generates_odin(&cli) else cli.schema.flag) != "":
-		usage_error("%s is check's: a schema judges the inputs of stury check", cli.schema.judging if generates_odin(&cli) else cli.schema.flag)
+	case !validating && !cli.formatting && schema_option_refused(&cli) != "":
+		flag := schema_option_refused(&cli)
+		usage_error("%s is %s: only those commands %s", flag, schema_option_owners(flag), "read a schema" if flag == "--schema-draft" else "judge inputs against a schema")
 	case !cli.schema_verb && cli.verbs.flag != "":
 		usage_error("%s is schema's: stury schema %s takes it", cli.verbs.flag, SCHEMA_VERBS[verb_of_option(cli.verbs.flag)])
 	case validating || cli.formatting || cli.editing || cli.schema_verb:
@@ -207,7 +208,7 @@ near_command :: proc(text: string) -> string {
 			return ""
 		}
 	}
-	return message.nearest({"check", "fmt", "edit", "diff"}, text)
+	return message.nearest({"check", "fmt", "edit", "diff", "schema"}, text)
 }
 
 // jq's count of compile errors, then exit as it does.

@@ -182,7 +182,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			i = lib_dir_arg(&cli, args, i)
 		case "from", "to":
 			i += option_arity(a)
-		case "schema", "schema-ref", "max-errors", "report", "format-assert", "filter":
+		case "schema", "schema-ref", "schema-draft", "max-errors", "report", "format-assert", "filter":
 			schema_option(&cli.schema, args, i)
 			i += option_arity(a)
 		case "ranges", "invalid", "comments", "seed", "count", "package":
@@ -423,7 +423,7 @@ subcommand_index :: proc(args: []string) -> int {
 @(private = "file")
 option_arity :: proc(a: string) -> int {
 	switch a {
-	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--max-errors", "--report", "--filter", "--seed", "--count", "--package", "--old-schema", "--new-schema", "--compat", "--key":
+	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--filter", "--seed", "--count", "--package", "--old-schema", "--new-schema", "--compat", "--key":
 		return 1
 	case "--arg", "--argjson", "--slurpfile", "--rawfile":
 		return 2
@@ -563,6 +563,31 @@ parse_max_depth :: proc(s: string) -> (n: u64, ok: bool) {
 	return n, ok && 1 <= n && n <= DEPTH_CEILING
 }
 
+// The commands that take the schema option `flag`, as a possessive list.
+schema_option_owners :: proc(flag: string) -> string {
+	switch flag {
+	case "--report", "--filter":
+		return "check's"
+	case "--format-assert":
+		return "check's, fmt's, diff's and schema gen's"
+	case "--schema-draft":
+		return "check's, fmt's, diff's, schema sample's and schema gen's"
+	}
+	return "check's and fmt's"
+}
+
+// The first schema option given that a command which neither checks nor converts has no use for, or "". The schema verbs
+// read a schema, so they take --schema-draft, and schema gen takes --format-assert.
+schema_option_refused :: proc(cli: ^Cli) -> string {
+	if !cli.schema_verb {
+		return cli.schema.flag
+	}
+	if cli.schema.format_assert && !generates_odin(cli) && (cli.schema.judging == "" || cli.schema.flag == "--format-assert") {
+		return "--format-assert"
+	}
+	return cli.schema.judging
+}
+
 // The command `cli` names, or "" for a filter run.
 command_name :: proc(cli: ^Cli) -> string {
 	return "check" if cli.validating else "fmt" if cli.formatting else "edit" if cli.editing else "diff" if cli.diffing else "schema" if cli.schema_verb else ""
@@ -581,6 +606,7 @@ command_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
 	switch {
 	case (editing || cli.diffing) && cli.formats.to != nil: return "--to"
 	case cli.formatting && cli.schema.reported: return "--report"
+	case !cli.validating && cli.schema.filter != nil: return "--filter"
 	case cli.diffing && (o.in_place || o.check): return "--in-place" if o.in_place else "--check"
 	case !cli.formatting && !schema && cli.cells_out_flag != "": return cli.cells_out_flag
 	case o.raw0:                 return "--raw-output0"

@@ -32,7 +32,7 @@ main :: proc() {
 			fmt.println("E")
 			continue
 		}
-		caps := make([]int, 2 * len(re.names), virtual.arena_allocator(&arena))
+		caps := make([]int, 2 * len(regex.group_names(&re)), virtual.arena_allocator(&arena))
 		found, search_err := regex.search(&re, c[1], 0, caps, &scratch)
 		if search_err != "" {
 			fmt.println("E", search_err)

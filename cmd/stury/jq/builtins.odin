@@ -38,9 +38,9 @@ Builtin :: struct {
 	math2:  proc "c" (x, y: f64) -> f64, // of the two arguments
 	// One jq 1.8.2 writes in jq, where its arguments are subfunctions, which `check` reads them as.
 	in_jq:  bool,
-	// What the typing (types.odin) knows of a call: the kinds of input it takes, none for any, and its outputs, which
-	// `typed` makes of the kinds `gives`.
-	takes, gives: rules.Kinds,
+	// What the typing (types.odin) knows of a call: the kinds of input it takes, none for any, the kinds its first
+	// argument takes, none for any, and its outputs, which `typed` makes of the kinds `gives`.
+	takes, arg_takes, gives: rules.Kinds,
 	typed:  Typed,
 }
 
@@ -125,11 +125,11 @@ fill_table :: proc() {
 	put("halt", {0}, {native = native_halt, typed = .Kinds})
 	put("halt_error", {1}, {gen = gen_halt_error, typed = .Kinds})
 	put("sub gsub", {2, 3}, {native = native_sub, takes = {.String}})
-	put("match", {1, 2}, {gen = each_match(false), in_jq = true, takes = {.String}, gives = {.Object}, typed = .Kinds})
-	put("capture", {1, 2}, {gen = each_match(true), in_jq = true, takes = {.String}, gives = {.Object}, typed = .Kinds})
+	put("match", {1, 2}, {gen = each_match(false), in_jq = true, takes = {.String}, arg_takes = {.String, .Array}, gives = {.Object}, typed = .Kinds})
+	put("capture", {1, 2}, {gen = each_match(true), in_jq = true, takes = {.String}, arg_takes = {.String, .Array}, gives = {.Object}, typed = .Kinds})
 	put("scan", {1, 2}, {gen = each_scan, in_jq = true, takes = {.String}, gives = {.String, .Array}, typed = .Kinds})
 	put("splits", {1, 2}, {gen = each_splits, in_jq = true, takes = {.String}, gives = {.String}, typed = .Kinds})
-	put("test", {1, 2}, {fn = fn_test, in_jq = true, takes = {.String}, gives = {.Bool}, typed = .Kinds})
+	put("test", {1, 2}, {fn = fn_test, in_jq = true, takes = {.String}, arg_takes = {.String, .Array}, gives = {.Bool}, typed = .Kinds})
 	put("split", {2}, {fn = fn_split_regex, in_jq = true, takes = {.String}, gives = {.String}, typed = .Array})
 
 	put("input_filename", {0}, {fn = fn_input_position, gives = {.String, .Null}, typed = .Kinds})
@@ -165,11 +165,11 @@ fill_table :: proc() {
 	put("ascii_downcase ascii_upcase", {0}, {fn = fn_ascii_case, takes = {.String}, gives = {.String}, typed = .Kinds})
 	put("explode", {0}, {fn = fn_explode, takes = {.String}, gives = {.Integer}, typed = .Array})
 	put("implode", {0}, {fn = fn_implode, takes = {.Array}, gives = {.String}, typed = .Kinds})
-	put("ltrimstr rtrimstr", {1}, {fn = fn_affix, in_jq = true, takes = {.String}, gives = {.String}, typed = .Kinds})
-	put("startswith endswith", {1}, {fn = fn_affix, takes = {.String}, gives = {.Bool}, typed = .Kinds})
+	put("ltrimstr rtrimstr", {1}, {fn = fn_affix, in_jq = true, takes = {.String}, arg_takes = {.String}, gives = {.String}, typed = .Kinds})
+	put("startswith endswith", {1}, {fn = fn_affix, takes = {.String}, arg_takes = {.String}, gives = {.Bool}, typed = .Kinds})
 	put("trim ltrim rtrim", {0}, {fn = fn_trim, takes = {.String}, gives = {.String}, typed = .Kinds})
-	put("split", {1}, {fn = fn_split, takes = {.String}, gives = {.String}, typed = .Array})
-	put("join", {1}, {fn = fn_join, in_jq = true, takes = {.Array, .Object}, gives = {.String}, typed = .Kinds})
+	put("split", {1}, {fn = fn_split, takes = {.String}, arg_takes = {.String}, gives = {.String}, typed = .Array})
+	put("join", {1}, {fn = fn_join, in_jq = true, takes = {.Array, .Object}, arg_takes = {.String, .Null}, gives = {.String}, typed = .Kinds})
 	put("sort unique", {0}, {fn = fn_sort, takes = {.Array}})
 	put("sort_by", {1}, {native = sort_by(.Sorted), takes = {.Array}})
 	put("group_by", {1}, {native = sort_by(.Grouped), takes = {.Array}})

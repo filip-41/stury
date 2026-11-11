@@ -7,12 +7,13 @@ import schema "../core/schema"
 // to the spec the inputs are read as with `bind_schema`, and `check_schema` or `check_schema_records` judge a text or its
 // records, each failure going to a `Sink`. See `docs/guide.md`.
 
-// Reads and compiles the schema `text`, a JSON text that outlives the result. A reference to a file leads below `refs`.
-load_schema :: proc(text: []u8, refs := "", format_assert := false, allocator := context.allocator) -> (^Schema, core.Error) {
-	return schema.open(text, as(.Json), refs, format_assert, allocator)
+// Reads and compiles the schema `text`, a JSON text that outlives the result, with `opts`: where file references lead,
+// the draft of a schema with no `$schema`, whether `format` asserts and how a repeated key is judged.
+load_schema :: proc(text: []u8, opts := Schema_Options{}, allocator := context.allocator) -> (^Schema, core.Error) {
+	return schema.compile(text, as(.Json), opts, allocator)
 }
 
 // Binds `s` to texts of `spec`.
 bind_schema :: proc(s: ^Schema, spec: Spec, allocator := context.allocator) -> (Bound_Schema, core.Error) {
-	return schema.bind(&s.compiled, {layout = as(spec)}, allocator)
+	return schema.bind(s, {layout = as(spec)}, allocator)
 }

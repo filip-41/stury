@@ -16,11 +16,11 @@ odin_of :: proc(t: ^testing.T, text: string, p := "p", format_assert := false) -
 		return "", berr
 	}
 	defer core.destroy(&doc)
-	c, cerr := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
+	c, cerr := schema.compile(core.span(&doc, core.ROOT), json.as(.Json), {})
 	if !testing.expectf(t, cerr == nil, "%s: %v", text, cerr) {
 		return "", cerr
 	}
-	defer schema.destroy(&c)
+	defer schema.destroy(c)
 	return schema.write_odin(c.description, p, json.as(.Json), format_assert, context.temp_allocator)
 }
 
@@ -183,7 +183,7 @@ odin_applicators_are_registered_as_fragments_on_a_named_type :: proc(t: ^testing
 		"model.register_union(reg, {Root_N, .One_Match, \"\"}) or_return",
 		`"if":{"required":["a"]},"then":{"required":["c"]},"patternProperties":{"^x-":{"type":"integer"}},"propertyNames":{"maxLength":4},"dependentRequired":{"a":["b"]}`,
 		"register_fragment :: proc(reg: ^model.Registry, T: typeid, text: string) -> core.Error {\n",
-		"\tmodel.register_schema(reg, T, s.compiled.description) or_return\n",
+		"\tmodel.register_schema(reg, T, s.description) or_return\n",
 	}) {
 		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
 	}
@@ -212,4 +212,18 @@ odin_spells_a_judged_value_as_it_reads :: proc(t: ^testing.T) {
 			testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
 		}
 	}
+}
+
+// A pattern with a double quote cannot stand in a struct tag, and one with a comma may hold text a tag reads as another
+// item, so `register` holds it as the member's rule.
+@(test)
+odin_pattern_with_a_quote_or_a_comma_is_registered :: proc(t: ^testing.T) {
+	source, err := odin_of(t, `{"type": "object", "required": ["q"], "properties": {"q": {"type": "string", "pattern": "^\"a\"$"}}}`)
+	testing.expectf(t, err == nil, "%v", err)
+	want := "\tmodel.register_field(reg, {Root, \"q\", \"pattern=^\\\"a\\\"$\"}) or_return\n"
+	testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
+	source, err = odin_of(t, `{"type": "object", "required": ["q"], "properties": {"q": {"type": "string", "maxLength": 3, "pattern": "^a+$,len<=3"}}}`)
+	testing.expectf(t, err == nil, "%v", err)
+	want = "\tmodel.register_field(reg, {Root, \"q\", \"pattern=^a+$,len<=3\"}) or_return\n"
+	testing.expectf(t, strings.contains(source, want) && strings.contains(source, "model:\"len<=3\""), "no %q in\n%s", want, source)
 }

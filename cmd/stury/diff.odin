@@ -46,8 +46,11 @@ diff_option :: proc(d: ^Diff_Options, args: []string, i: int) {
 	case "--json":     d.json = true
 	case "--facts":    d.facts = true
 	case "--shape":    d.shape = true
-	case "--set":      d.arrays = .Set
-	case "--position": d.arrays = .Position
+	case "--set", "--position":
+		if d.arrays != .Sequence && d.arrays != (.Set if a == "--set" else .Position) {
+			usage_error("--set and --position are two ways to match elements: give one")
+		}
+		d.arrays = .Set if a == "--set" else .Position
 	case:
 		if i + 1 >= len(args) {
 			usage_error("%s takes one parameter", a)
@@ -98,6 +101,13 @@ diff_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	src := input_source(o, cli.json_reading)
 	one_schema := (d.old_schema != "") != (d.new_schema != "")
 	two_schemas := d.old_schema != "" && d.new_schema != ""
+	judges := cli.schema.file != "" || cli.schema.filter != nil || cli.schema.max_errors != 0
+	if judges || (cli.schema.refs != "" || cli.schema.format_assert || cli.schema.draft != nil) && !(one_schema || two_schemas) {
+		usage_error("%s has no use with diff: it judges no input and runs no filter, and --old-schema and --new-schema name the schemas it compares", cli.schema.flag)
+	}
+	if d.arrays != .Sequence && len(d.keys) > 0 {
+		usage_error("--key pairs elements by a member, and %s pairs them another way: give one", "--set" if d.arrays == .Set else "--position")
+	}
 	if d.compat != .None && !(d.shape || two_schemas) {
 		usage_error("--compat compares two schemas, --old-schema and --new-schema, or two shapes with --shape")
 	}
@@ -122,11 +132,16 @@ diff_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		diff_contract(o, cli, src)
 	case len(cli.files) != 2:
 		usage_error("diff takes two files, OLD and NEW")
+	case cli.files[0] == "-" && cli.files[1] == "-":
+		usage_error("diff reads standard input once, and - names it twice")
 	}
 	a, b := read_operand(o, src, cli.files[0]), read_operand(o, src, cli.files[1])
 	r, err := diff.values(core.Node_Ref{&a, core.ROOT}, core.Node_Ref{&b, core.ROOT}, diff_options(d))
 	if err != nil {
 		out_of_memory()
+	}
+	for unused in r.unused_keys {
+		usage_error("--key %s matches no array in both files; a bare MEMBER keys the root array, and PATH=MEMBER the array at PATH", d.keys[unused].member)
 	}
 	out := strings.builder_make(runtime.heap_allocator())
 	write_value_changes(&out, d.json, r.changes, "")
@@ -168,18 +183,17 @@ operand_bytes :: proc(path: string) -> []byte {
 	return data
 }
 
-// The exit for the fault `bad` of the file `path`, whose bytes are `data`.
-@(private = "file")
-operand_fault :: proc(o: ^Opts, src: Source, path: string, data: []byte, bad: core.Fault) -> ! {
+// Tells the fault `bad` of the file `path`, whose bytes are `data`, as `check` tells it.
+tell_operand_fault :: proc(o: ^Opts, src: Source, path: string, data: []byte, bad: core.Fault) {
 	name := file_name(path)
 	message.write_stderr("stury: parse error: %s\n%s", fault_told(name, data, bad), fault_note(name, data, bad, src.spec, o))
-	os.exit(EXIT_INPUT)
 }
 
 // Exits telling the first fault of `data`, the file `path`, read as the records of `src`.
 exit_on_fault :: proc(o: ^Opts, src: Source, path: string, data: []byte) {
 	if bad, is_fault := first_fault(data, src.as, src.framing, nil, 0).?; is_fault {
-		operand_fault(o, src, path, data, bad)
+		tell_operand_fault(o, src, path, data, bad)
+		os.exit(EXIT_INPUT)
 	}
 }
 
@@ -212,6 +226,10 @@ by_records :: proc(src: Source) -> bool {
 @(private = "file")
 read_operand :: proc(o: ^Opts, src: Source, path: string) -> core.Document {
 	data := operand_bytes(path)
+	if msg := blank_told(file_name(path), data, src, o); msg != "" {
+		message.write_stderr("stury: parse error: %s", msg)
+		os.exit(EXIT_INPUT)
+	}
 	text := data
 	if by_records(src) {
 		exit_on_fault(o, src, path, data)
@@ -224,7 +242,8 @@ read_operand :: proc(o: ^Opts, src: Source, path: string) -> core.Document {
 		doc, fault = jq.build_text(records_array(data, src), src.as, heap)
 	}
 	if bad, is_fault := fault.?; is_fault {
-		operand_fault(o, src, path, data, bad)
+		tell_operand_fault(o, src, path, data, bad)
+		os.exit(EXIT_INPUT)
 	}
 	return doc
 }
@@ -233,19 +252,16 @@ read_operand :: proc(o: ^Opts, src: Source, path: string) -> core.Document {
 put_value :: proc(b: ^strings.Builder, v: core.Value) {
 	heap := runtime.heap_allocator()
 	text, err := write.write_value(v, json.as(.Json), allocator = heap)
+	if err != nil {
+		out_of_memory()
+	}
 	defer delete(text, heap)
-	strings.write_string(b, string(text) if err == nil else "?")
+	strings.write_string(b, string(text))
 }
 
 // The name of the enum value `e` in lower case.
 word :: proc(e: $T) -> string {
 	return strings.to_lower(reflect.enum_string(e), context.temp_allocator)
-}
-
-// Writes `,"name":` and `v` as JSON.
-put_field :: proc(b: ^strings.Builder, name: string, v: core.Value) {
-	fmt.sbprintf(b, `,"%s":`, name)
-	put_value(b, v)
 }
 
 put_path :: proc(b: ^strings.Builder, steps: []core.Step) {
@@ -255,37 +271,53 @@ put_path :: proc(b: ^strings.Builder, steps: []core.Step) {
 	core.write_steps(strings.to_writer(b), steps, true)
 }
 
-// Writes the steps as a JSON array in the form `getpath` takes, null for a step that stands for every element.
-put_path_array :: proc(b: ^strings.Builder, steps: []core.Step) {
-	strings.write_byte(b, '[')
-	for s, i in steps {
-		if i > 0 {
-			strings.write_byte(b, ',')
-		}
+// A line of `--json`: one compact object, made member by member and then added to the output with its newline.
+Json_Line :: struct {
+	t: write.Tokens,
+}
+
+json_line_open :: proc(l: ^Json_Line) {
+	write.tokens_init(&l.t, json.as(.Json), {}, runtime.heap_allocator())
+	write.open_object(&l.t)
+}
+
+json_line_close :: proc(l: ^Json_Line, b: ^strings.Builder) {
+	write.close(&l.t)
+	text, err := write.tokens_finish(&l.t)
+	if err.kind != .None {
+		out_of_memory()
+	}
+	defer delete(text, runtime.heap_allocator())
+	strings.write_string(b, string(text))
+	strings.write_byte(b, '\n')
+}
+
+json_member :: proc(l: ^Json_Line, name: string, v: core.Value) {
+	write.key(&l.t, name)
+	write.value_of(&l.t, v)
+}
+
+json_word :: proc(l: ^Json_Line, name, text: string) {
+	write.key(&l.t, name)
+	write.value_string(&l.t, text)
+}
+
+// Writes the member `name` as the steps in the form `getpath` takes, null for a step that stands for every element.
+json_path :: proc(l: ^Json_Line, name: string, steps: []core.Step) {
+	write.key(&l.t, name)
+	write.open_array(&l.t)
+	for s in steps {
 		#partial switch v in s {
-		case core.Name:  put_value(b, string(v))
-		case core.Index: fmt.sbprintf(b, "%d", int(v))
-		case:            strings.write_string(b, "null")
+		case core.Name:  write.value_string(&l.t, string(v))
+		case core.Index: write.value_int(&l.t, i64(v))
+		case:            write.value_null(&l.t)
 		}
 	}
-	strings.write_byte(b, ']')
+	write.close(&l.t)
 }
 
 @(private = "file", rodata)
 OP_MARKS := [diff.Op]u8{.Added = '+', .Removed = '-', .Changed = '~', .Fact = '~'}
-
-// The kind of `v` as JSON names it.
-@(private = "file")
-kind_word :: proc(v: core.Value) -> string {
-	#partial switch core.kind(v) {
-	case .False, .True:   return "boolean"
-	case .Number:         return "number"
-	case .String, .Plain: return "string"
-	case .Array:          return "array"
-	case .Object:         return "object"
-	}
-	return "null"
-}
 
 // Writes `changes`, a line each or a record each under `--json`, after the `--- file` line when `file` is not "". The
 // output goes out as it fills.
@@ -297,26 +329,26 @@ write_value_changes :: proc(b: ^strings.Builder, as_json: bool, changes: []diff.
 	for c in changes {
 		was := c.op != .Added && c.op != .Removed && !slice.equal(c.path, c.old_path)
 		if as_json {
-			strings.write_string(b, `{"path":`)
-			put_path_array(b, c.path)
+			l: Json_Line
+			json_line_open(&l)
+			json_path(&l, "path", c.path)
 			if was {
-				strings.write_string(b, `,"old_path":`)
-				put_path_array(b, c.old_path)
+				json_path(&l, "old_path", c.old_path)
 			}
-			fmt.sbprintf(b, `,"op":"%s"`, word(c.op))
+			json_word(&l, "op", word(c.op))
 			if c.op == .Fact {
-				fmt.sbprintf(b, `,"role":"%s"`, word(c.role))
+				json_word(&l, "role", word(c.role))
 			}
 			if c.op != .Added {
-				put_field(b, "old", c.old)
+				json_member(&l, "old", c.old)
 			}
 			if c.op != .Removed {
-				put_field(b, "new", c.new)
+				json_member(&l, "new", c.new)
 			}
 			if file != "" {
-				put_field(b, "file", file)
+				json_word(&l, "file", file)
 			}
-			strings.write_string(b, "}\n")
+			json_line_close(&l, b)
 			flush_out(b, false)
 			continue
 		}
@@ -340,7 +372,7 @@ write_value_changes :: proc(b: ^strings.Builder, as_json: bool, changes: []diff.
 			put_value(b, c.new)
 		}
 		if c.kind_changed {
-			fmt.sbprintf(b, "  (%s -> %s)", kind_word(c.old), kind_word(c.new))
+			fmt.sbprintf(b, "  (%s -> %s)", jq.type_name(c.old), jq.type_name(c.new))
 		}
 		if was {
 			strings.write_string(b, "  (was ")

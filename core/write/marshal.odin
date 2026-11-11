@@ -563,13 +563,17 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 						vf = elem_of(vf)
 						continue value
 					}
-					when !V {
+					when V {
+						k = .Wrong_Kind if w.meta[vf.meta].no_nil else .None
+					} else {
 						out.cursor += put_word(p, T[.Null])
 					}
 				case .Union:
 					arm := union_arm(&w.meta[vf.meta], va)
 					if arm == nil {
-						when !V {
+						when V {
+							k = .Wrong_Kind if w.meta[vf.meta].no_nil else .None
+						} else {
 							out.cursor += put_word(p, T[.Null])
 						}
 					} else if len(arm.name) == 0 {

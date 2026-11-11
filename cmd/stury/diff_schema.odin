@@ -6,8 +6,12 @@ import "base:runtime"
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import core "../../core"
 import "../../core/rules"
+import "../../core/write"
 import "../../core/schema"
+import json "../../json"
+import "jq"
 import "message"
 
 // The description that every record of the file `path` passes, or an exit telling why not.
@@ -19,7 +23,7 @@ infer_file :: proc(o: ^Opts, src: Source, path: string) -> ^rules.Description {
 infer_data :: proc(o: ^Opts, src: Source, path: string, data: []byte) -> ^rules.Description {
 	heap := runtime.heap_allocator()
 	inf := new(schema.Inferred, heap)
-	if !infer_read(inf, src, path, data, told_by = o) {
+	if !infer_read(inf, src, path, data, o) {
 		os.exit(EXIT_INPUT)
 	}
 	d, derr := schema.inferred(inf, heap)
@@ -52,15 +56,17 @@ compare_report :: proc(cli: ^Cli, src: Source, old, new: ^rules.Description) -> 
 	out := strings.builder_make(runtime.heap_allocator())
 	for ch in c.changes {
 		if d.json {
-			strings.write_string(&out, `{"path":`)
-			put_path_array(&out, ch.path)
-			put_field(&out, "keyword", ch.keyword)
-			put_field(&out, "old", ch.old)
-			put_field(&out, "new", ch.new)
-			fmt.sbprintf(&out, `,"effect":"%s"}}`+"\n", word(ch.effect))
+			l: Json_Line
+			json_line_open(&l)
+			json_path(&l, "path", ch.path)
+			json_word(&l, "keyword", ch.keyword)
+			json_side(&l, "old", ch.old)
+			json_side(&l, "new", ch.new)
+			json_word(&l, "effect", word(ch.effect))
+			json_line_close(&l, &out)
 		} else {
 			put_path(&out, ch.path)
-			fmt.sbprintf(&out, "  %s: %s -> %s  %s\n", ch.keyword, ch.old if ch.old != "" else "none", ch.new if ch.new != "" else "none", word(ch.effect))
+			fmt.sbprintf(&out, "  %s: %s -> %s  %s\n", ch.keyword, side_text(ch.keyword, ch.old), side_text(ch.keyword, ch.new), word(ch.effect))
 		}
 		flush_out(&out, false)
 	}
@@ -80,17 +86,51 @@ compare_report :: proc(cli: ^Cli, src: Source, old, new: ^rules.Description) -> 
 	os.exit(1)
 }
 
-// Tells whether the schema `from` takes only values `to` takes. `name` is the direction.
+// One side of a schema change as `--json` writes it: the value, or null for none.
+@(private = "file")
+json_side :: proc(l: ^Json_Line, name: string, side: Maybe(core.Value)) {
+	json_member(l, name, side.? or_else nil)
+}
+
+// One side of a schema change as a line tells it: `none`, a word as it is, any other value as JSON. The members of an
+// `enum` and a `const` are values, so a string among them is quoted.
+@(private = "file")
+side_text :: proc(keyword: string, side: Maybe(core.Value)) -> string {
+	v, present := side.?
+	if !present {
+		return "none"
+	}
+	if s, is_word := v.(string); is_word && !strings.has_suffix(keyword, "enum") && !strings.has_suffix(keyword, "const") {
+		return s
+	}
+	b := strings.builder_make(context.temp_allocator)
+	put_value(&b, v)
+	return strings.to_string(b)
+}
+
+// Tells whether the schema `from` takes only values `to` takes. `name` is the direction. A witness of the JSON the
+// comparison is made in is written as the value it spells.
 write_inclusion :: proc(b: ^strings.Builder, as_json: bool, name: string, in_: schema.Inclusion, from, to: string) {
 	if as_json {
-		fmt.sbprintf(b, `{{"%s":{{"verdict":"%s"`, name, word(in_.verdict))
+		l: Json_Line
+		json_line_open(&l)
+		write.key(&l.t, name)
+		write.open_object(&l.t)
+		json_word(&l, "verdict", word(in_.verdict))
 		if in_.witness != "" {
-			put_field(b, "witness", in_.witness)
+			write.key(&l.t, "witness")
+			witness, fault := jq.build_text(transmute([]u8)in_.witness, json.as(.Json), context.temp_allocator)
+			if fault == nil {
+				write.value_of(&l.t, core.Node_Ref{&witness, core.ROOT})
+			} else {
+				write.value_string(&l.t, in_.witness)
+			}
 		}
 		if in_.reason != "" {
-			put_field(b, "reason", in_.reason)
+			json_word(&l, "reason", in_.reason)
 		}
-		strings.write_string(b, "}}\n")
+		write.close(&l.t)
+		json_line_close(&l, b)
 		return
 	}
 	fmt.sbprintf(b, "%s: %s", name, word(in_.verdict))
@@ -111,7 +151,7 @@ diff_contract :: proc(o: ^Opts, cli: ^Cli, src: Source) -> ! {
 	sc := schema_open(options, src, flag)
 	path := cli.files[0]
 	data := operand_bytes(path)
-	verdict, why := schema_judge(sc, options, file_name(path), false, data, src, nil)
+	verdict, why := schema_judge(sc, options, file_name(path), data, src, nil)
 	switch verdict {
 	case .Refused: os.exit(EXIT_USAGE)
 	case .Fault:
@@ -129,14 +169,17 @@ diff_contract :: proc(o: ^Opts, cli: ^Cli, src: Source) -> ! {
 	drifted := false
 	for ch in c.changes {
 		// Only a member that no keyword of the schema takes up is undescribed: where a pattern may describe it the effect is unknown.
-		if ch.keyword != "properties" || ch.old != "" || ch.effect != .Narrows {
+		if ch.keyword != "properties" || ch.old != nil || ch.effect != .Narrows {
 			continue
 		}
 		drifted = true
 		if cli.diff.json {
-			strings.write_string(&out, `{"path":`)
-			put_path_array(&out, ch.path)
-			strings.write_string(&out, ",\"undescribed\":true}\n")
+			l: Json_Line
+			json_line_open(&l)
+			json_path(&l, "path", ch.path)
+			write.key(&l.t, "undescribed")
+			write.value_bool(&l.t, true)
+			json_line_close(&l, &out)
 		} else {
 			strings.write_string(&out, "+ ")
 			put_path(&out, ch.path)

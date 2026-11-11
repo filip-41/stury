@@ -4,6 +4,21 @@
 
 ### Command line
 
+- `--schema-draft D` names the draft of a schema with no `$schema` (`4`, `6`, `7`, `2019-09` or `2020-12`, the
+  default) for `check --schema`, `fmt --schema`, `diff --old-schema --new-schema`, `schema sample` and `schema gen`.
+- `stury schema gen` adds a `pattern` that holds a comma or a quote with `model.register_field`, where it wrote it in
+  the tag.
+
+- An empty unquoted CSV or TSV cell is a `null` in `check --schema`, `schema infer`, the library's table and document checks and
+  the schema conversion's output check, as it is in a filter run, where it was an absent member. `schema infer` puts
+  `null` in the type of a column with empty cells and requires the column. A quoted `""` stays a string.
+  `check --schema` reads the other cells as `--infer` says, as `schema infer --infer` does.
+
+- `stury schema sample` streams its values, so the memory it holds does not grow with `--count`. Library:
+  `schema.sample_each` hands each value to a sink. `schema.Change.old` and `.new` are values, so `stury diff --json` on
+  schemas writes them as JSON. `--report basic` and `--report problem` always name the file. `stury diff` refuses an
+  empty file, a `--key` that names no array, and options it ignores.
+
 - `stury fmt --schema FILE` converts through a JSON Schema: the input passes it, the members it leaves open are kept, and
   the output passes it as the output format reads it. Library: `schema.Converter` and `schema.convert`.
 
@@ -25,8 +40,7 @@
 
 - `stury check --filter F --schema S` types the jq filter F against the schema S of its inputs: a member no object of
   S lists (`.emial`) and a step on kinds that never take it are refused, exit 1, and the schema every output of F
-  passes is written. `--from csv` and `tsv` type F on the records a table reads. `type` on a string of
-  `contentEncoding: base64` is `"bytes"` in a format that reads byte strings.
+  passes is written. `--from csv` and `tsv` type F on the records a table reads.
 
 - `stury diff OLD NEW` tells the value changes of two inputs a line each, exit 1 when they differ. Arrays match as
   sequences, as sets (`--set`), by position (`--position`) or by a member (`--key`). `--old-schema S1 --new-schema S2`
@@ -123,6 +137,20 @@
 
 ### Library API
 
+- `json.load_schema(text, opts)` takes `json.Schema_Options`: the default draft (`json.Schema_Draft`), the directory
+  references are read from (`refs`), `format_assert`, `base` and `dups`. `json.Schema` is `schema.Compiled`, so a
+  loaded schema's description is `s.description`.
+- `schema.compile` reads a schema from its text in a format and returns the compiled schema it owns, which
+  `schema.destroy` frees. `schema.open`, `schema.Loaded`, `schema.loaded_destroy`, `schema.read`, `schema.Resolver` and
+  `schema.resolver_destroy` are gone: `Options.refs` and `Options.draft` replace `Options.resolver`.
+- A `pattern=` tag item takes the rest of the tag, commas included, so it comes last. A model whose `pattern=` is
+  followed by another tag item is refused at compile, naming the item, and a pattern that holds such text is added with
+  `model.register_field`.
+- `model.Problem`, `model.problem`, `model.problem_destroy` and `model.write_problem` hold the problem document, which
+  was `write.Problem`.
+- `regex.Regex` keeps its program private: `regex.group_names` gives the groups' names, and `regex.Flags.longest` and
+  `.not_empty` are set at compile. `typed.store_integral_enum`, `typed.Use`, `typed.Model_Plan`, `typed.Reading`,
+  `typed.Failure` and `typed.Before_Read` are private.
 - `schema.infer`, `schema.merge`, `schema.inferred` and `schema.infer_records` build a description from values and
   records, which `schema.write` writes as JSON Schema. `schema.sample` writes values that pass a description, or fail it,
   and is `.No_Sample` for a description that no value passes. A node has a `description` and a markup node
@@ -226,7 +254,7 @@
   `extra` member may be a `map[string]T`, which judges each member it captures as a `T`, and the Load schema describes
   it as `additionalProperties`. A struct registered with `.Forbid` refuses an unknown member when it has no required
   member too. A `union {}` member reads only null.
-- `model.problem` (`write.problem`) makes an RFC 9457 problem document of a sink's entries, for any format to write.
+- `model.problem` makes an RFC 9457 problem document of a sink's entries, for any format to write.
   `load`, `load_value` and `read` take `Load_Opts` in place of `dups`.
 
 ### Errors

@@ -66,6 +66,7 @@ run_before :: proc(h: ^Check, regs: core.Hook_Regs, b: ^Before, value: core.Valu
 	return out, back, action, len(r.failures) > 0
 }
 
+@(private)
 Before_Read :: #type proc "contextless" (h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64) -> (core.Hook_Regs, core.Action)
 
 // Reads the member at `dest`, whose value is the text `lo..hi` of a format that builds values, as its `before` rewrote it.
@@ -316,7 +317,7 @@ judged_close :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, own, 
 	open := pop(&h.opens)
 	// The value's frame holds the registers it opened at, which name its path. A patch's struct is judged once merged.
 	at := core.Hook_Regs{f.a, f.b, f.c}
-	patching := partial(h, owner)
+	patching := partial(h, f, owner)
 	back, action := close_read(h, f, own, owner, regs, t)
 	if action == .Stop || patching {
 		return back, action

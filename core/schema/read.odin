@@ -13,6 +13,7 @@ import core "../"
 import "../rules"
 
 // Where a schema's references may lead and how a file they name is read.
+@(private)
 Resolver :: struct {
 	// The directory a reference to a `file:` URI may read from, "" for none. Absolute, or relative to the working
 	// directory.
@@ -28,6 +29,7 @@ Resolver :: struct {
 }
 
 // Frees what the reads through `res` loaded.
+@(private)
 resolver_destroy :: proc(res: ^Resolver) {
 	context.allocator = res.allocator
 	for d in res.documents {
@@ -91,6 +93,8 @@ Reader :: struct {
 	resources: map[string]Scope,
 	anchors:   map[string]Anchor_Site,
 	pending:   [dynamic]Pending,
+	// The members of each large object a pointer steps into, by name, since a document finds a member by a scan.
+	indexes:   map[[2]int]map[string]core.Node_Index,
 	anything:  Maybe(rules.Node_Index),
 	path:      [dynamic]core.Step,
 	// The base a root directory gives a schema that has no retrieval URI, which names no resource.
@@ -105,6 +109,7 @@ RECURSIVE :: "$recursive"
 // Reads the schema at `node` of `doc`, whose retrieval URI is `base` ("" for none), into a description allocated with
 // `allocator`. The description borrows number texts and `const` and `enum` values from `doc` and from the documents
 // `res` loads, so both outlive it. A schema the reader refuses answers a `Bad_Schema` error that names the keyword.
+@(private)
 read :: proc(doc: ^core.Document, node: core.Node_Index, base: string, res: ^Resolver, allocator := context.allocator) -> (d: rules.Description, err: core.Error) {
 	if res.allocator.procedure == nil {
 		res.allocator = allocator
@@ -401,6 +406,7 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 	case "contains":
 		sh.is_array = true
 		sh.array.contains = read_schema(r, sc, v)
+		sh.array.evaluates_contains = sc.draft >= .D2020_12
 	case "maxContains":
 		sh.array.max_contains, _ = count_of(r, doc, site, name)
 	case "minContains":

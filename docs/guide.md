@@ -75,7 +75,8 @@ shows that `.Json` refuses a comment that `.Jsonc` takes:
 ## Check against a schema
 
 `json.load_schema` reads and compiles a JSON Schema (drafts 4 to 2020-12) once, and `json.bind_schema(s, .Json)` binds it
-to the spec the inputs are read as. `json.check_schema` judges a text and puts every failure in a `json.Sink`, each with its
+to the spec the inputs are read as. `json.load_schema(text, {draft = .D07, refs = dir})` takes `json.Schema_Options`: the draft
+of a schema with no `$schema`, the directory `$ref`s are read from, `format_assert` and `dups`. `json.check_schema` judges a text and puts every failure in a `json.Sink`, each with its
 position, its path and the keywords that failed it. `json.check_schema_records` checks a text of records (`.Lines`, `.Seq`) one by one and, with a `json.Runner`, on its
 threads, with the entries a serial check gives. Set the sink's `max_errors`: a sink without one keeps the first 100 failures. A check of
 many records holds no memory per record, but a failure is kept until the sink is destroyed. A table is bound with
@@ -98,7 +99,10 @@ if json.check_schema(&b, src, &sink) != nil {
 
 A `pattern` and a `patternProperties` name are read as ECMA-262 regular expressions with the `u` flag, so an escape outside a
 class names only a syntax character (`^$\.*+?()[]{}|`) or `/`, and inside a class also `-`. An escape such as `\&` or `\%`
-refuses the schema at bind: `invalid escape \& at offset 1`.
+refuses the schema at bind: `invalid escape \& at offset 1`. Look-behind (`(?<=`, `(?<!`) and back references (`\1`) are refused
+there too: the search does not backtrack, which both need. `format: "regex"` accepts them, as it
+asks only that the text is a regular expression, and the jq functions run them. A search that runs out of memory on a very long
+string is not a verdict: the check reports `pattern_undecided` and `stury check` exits 2.
 
 `schema.infer` takes in values (and `schema.infer_records` the records of a text, on a runner's threads) and
 `schema.inferred` gives the description they all pass, which `schema.write` writes as JSON Schema. `schema.sample(&d, as,
@@ -178,11 +182,13 @@ err = model.load(&m, body, &user, &sink)
 ```
 
 - `load` refuses a missing required member and reads no `read_only` member. A `Fields_Set` member records what the
-  text held, which `was_set` asks by name. `validate` checks a value built in code by the same rules.
+  text held, which `was_set` asks by the member's Odin name. `validate` checks a value built in code by the same rules.
 - The format tag (`json:`, or `stury:` for every format) names a member and shapes it: a rename, `-`, `omitempty`,
   `omitunset`, `required` and `unknown`, which marks the `extra` member. `model:` holds the rules and the roles:
   `optional`, `read_only`, `write_only`, `not_null`, bounds, `format=`, `pattern=` and `unique`. `required` with
-  `optional` is refused.
+  `optional` is refused. `pattern=` takes the rest of the tag, commas included, so it comes last: a pattern followed
+  by an item that reads as one (`pattern=^a+$,len<=3`) is refused, and a pattern that holds such text is added with
+  `register_field`.
 - `load`, `validate` and `stury check` list the failures in one order: by the value's path, a value before what it
   holds, and the members of one value in the order of the text.
 - `model.problem(sink.entries[:], "Invalid body", 422)` makes an RFC 9457 problem document of every refusal, a struct
@@ -197,7 +203,7 @@ err = model.load(&m, body, &user, &sink)
   equal their default (`exclude_defaults`), and `check` refuses a value whose written members fail its rules as
   `.Check_Failed`. A member is unset when it holds null and its `Fields_Set` bit is clear, so a value built in code
   keeps every member it holds. The tag `omitunset` leaves one member out when it is unset, and is refused on a struct
-  with no `Fields_Set`. A CSV dump writes a member it leaves out as an empty cell, which a load reads as absent.
+  with no `Fields_Set`. A CSV dump writes a member it leaves out as an empty cell, which a load reads as nil.
   `dump_stream` writes to a stream. Map keys and a struct's `extra` members are written in the order of their keys.
 - A struct's `extra` member, `map[string]core.Value` or `map[string]T` tagged `json:",unknown"`, holds the members it
   does not name, each read as its value type. `register(&reg, T, model.Extra.Forbid)` refuses them instead.
@@ -461,7 +467,7 @@ out, _ := dsv.marshal(cities)
 
 - The first record is the header and names the columns. A field matches the column named by its `csv` tag or its own
   name. With `Options{no_header = true}`, column k is the struct's field k.
-- An empty cell is an absent value for `Maybe(T)`, and writes back as an empty cell.
+- An empty unquoted cell is a `null` to every check and read, and a `Maybe(T)` holds nil for it, which writes back as an empty cell.
 - A cell the field cannot hold is an error at that cell:
   `2:6: Expected i64, found "lots" at .[0].population`.
 - A number field reads its cell as a loose number: a leading `+`, leading zeros and a point with no digits on one side

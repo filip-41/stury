@@ -32,8 +32,6 @@ sort_atom :: proc(v: Value) -> Sort_Atom {
 	// A number of a document is read from its literal, so it is not made anew.
 	if r, is_ref := plain(v).(Ref); is_ref && node_kind(r.doc, r.node) == .Number {
 		if node := r.doc.nodes[r.node]; node.kind == .Number && node.spelling & core_pkg.NUMBER_KIND_MASK != 0 {
-			// A number a format spells its own way keeps the digits and the double that the library compares by.
-			// the digits of a hex integer are written in a block that the atom keeps
 			f, digits, _ := core_pkg.double_of(v, make([]u8, core_pkg.HEX_ROOM))
 			return {kind = .Number, f = f, s = digits, v = v}
 		}

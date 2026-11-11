@@ -3,10 +3,13 @@ package json_tests
 import "base:runtime"
 import "core:fmt"
 import "core:encoding/uuid"
+import "core:mem/virtual"
+import "core:strings"
 import "core:testing"
 import "core:time"
 import core "../../core"
 import typed "../../core/typed"
+import write "../../core/write"
 import json ".."
 import model "../../core/model"
 import walktest "../../walktest"
@@ -321,5 +324,169 @@ a_problem_document_is_written_by_marshal :: proc(t: ^testing.T) {
 	p, err := model.problem(sink.entries[:], "Invalid body", 422)
 	testing.expect(t, err == nil)
 	text, _ := json.marshal(p, allocator = context.temp_allocator)
-	testing.expect_value(t, string(text), `{"title":"Invalid body","status":422,"errors":[{"pointer":"/name","code":"too_short","message":"String is too short"},{"pointer":"/level","code":"wrong_kind","message":"Value does not fit the field's type"},{"pointer":"/nick","code":"missing_field","message":"Required field is missing"}]}`)
+	testing.expect_value(t, string(text), `{"title":"Invalid body","status":422,"errors":[{"pointer":"/name","code":"too_short","message":"String is too short, at least 2 characters"},{"pointer":"/level","code":"wrong_kind","message":"Value does not fit the field's type, expected int"},{"pointer":"/nick","code":"missing_field","message":"Required field is missing"}]}`)
+}
+
+@(private = "file")
+Sized :: struct {
+	x:   int,
+	y:   int `model:"optional"`,
+	set: model.Fields_Set,
+}
+
+@(private = "file")
+Held :: struct {
+	by_ptr:   ^Sized `model:"optional"`,
+	by_maybe: Maybe(Sized) `model:"optional"`,
+	set:      model.Fields_Set,
+}
+
+// A struct behind a pointer or a `Maybe` is read in full by a patch, so its required members are enforced.
+@(test)
+a_patch_reads_a_struct_behind_a_pointer_or_maybe_in_full :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	reg: model.Registry
+	m, err := model.compile(&reg, Held, json.checks(.Json))
+	walktest.expect_nil(t, err)
+	v: Held
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"by_ptr": {"x": 1, "y": 2}, "by_maybe": {"x": 3, "y": 4}}`), &v))
+	for body in ([]string{`{"by_ptr": {"y": 5}}`, `{"by_maybe": {"y": 5}}`}) {
+		testing.expect_value(t, refused_as(model.patch(&m, &v, transmute([]u8)body)), core.Typed_Error_Kind.Missing_Field)
+		testing.expect(t, v.by_ptr.x == 1 && v.by_ptr.y == 2 && v.by_maybe.?.x == 3 && v.by_maybe.?.y == 4)
+	}
+	walktest.expect_nil(t, model.patch(&m, &v, transmute([]u8)string(`{"by_ptr": {"x": 7}}`)))
+	testing.expect(t, v.by_ptr.x == 7 && v.by_ptr.y == 0)
+}
+
+@(private = "file")
+Tagged :: struct {
+	tags: []string `model:"len>=1,unique"`,
+}
+
+// An error `validate` returns holds the names of its path, which a later allocation must not overwrite.
+@(test)
+validate_returns_a_path_that_outlives_the_applicator_judge :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	// The region the judge opens in the temp allocator is given back unless the caller's allocator is that one.
+	arena: virtual.Arena
+	testing.expect_value(t, virtual.arena_init_growing(&arena), runtime.Allocator_Error.None)
+	defer virtual.arena_destroy(&arena)
+	context.allocator = virtual.arena_allocator(&arena)
+	reg: model.Registry
+	m, err := model.compile(&reg, Tagged, json.checks(.Json))
+	walktest.expect_nil(t, err)
+	v := Tagged{[]string{"a", "a"}}
+	failed := model.validate(&m, &v)
+	e, typed_error := failed.(core.Typed_Error)
+	testing.expect(t, typed_error && e.kind == .Not_Unique)
+	junk := make([]u8, 4096, context.temp_allocator)
+	for &b in junk {
+		b = 0xAA
+	}
+	name, named := e.steps[0].(core.Name)
+	testing.expect(t, named && string(name) == "tags")
+}
+
+@(private = "file")
+Nullable :: struct {
+	a: Maybe(string) `model:"not_null"`,
+	p: int,
+}
+
+// `not_null` on a `Maybe` is judged by `validate` and by a dump's `check`, as a load of the dumped text judges it.
+@(test)
+not_null_on_a_maybe_is_judged_by_validate_and_dump :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	reg: model.Registry
+	m, err := model.compile(&reg, Nullable, json.checks(.Json))
+	walktest.expect_nil(t, err)
+	v := Nullable{p = 1}
+	testing.expect_value(t, refused_as(model.validate(&m, &v)), core.Typed_Error_Kind.Wrong_Kind)
+	_, dumped := model.dump(&m, &v, {check = true})
+	testing.expect_value(t, refused_as(dumped), core.Typed_Error_Kind.Check_Failed)
+	v.a = "x"
+	walktest.expect_nil(t, model.validate(&m, &v))
+}
+
+// `dump_stream` writes the text `dump` returns, and refuses what `check` refuses.
+@(test)
+dump_stream_writes_what_dump_returns :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	reg: model.Registry
+	m := account_model(&reg)
+	a: Account
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "nick": null, "level": 2}`), &a))
+	b := strings.builder_make()
+	walktest.expect_nil(t, model.dump_stream(strings.to_stream(&b), &m, &a, {exclude_none = true}))
+	text, _ := model.dump(&m, &a, {exclude_none = true})
+	testing.expect_value(t, strings.to_string(b), string(text))
+	testing.expect(t, len(text) > 0)
+	bad := Account{name = "a"}
+	b2 := strings.builder_make()
+	testing.expect_value(t, refused_as(model.dump_stream(strings.to_stream(&b2), &m, &bad, {check = true})), core.Typed_Error_Kind.Check_Failed)
+}
+
+@(private = "file")
+Counter :: struct {
+	count: i32,
+	ratio: f64,
+	nick:  Maybe(string),
+	name:  string,
+	small: u8,
+}
+
+// A default may be a literal the member's number type holds exactly, or the type a `Maybe` member holds.
+@(test)
+a_default_converts_a_number_or_a_maybe_element :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	reg: model.Registry
+	walktest.expect_nil(t, model.register(&reg, Counter, "count", 5))
+	walktest.expect_nil(t, model.register(&reg, Counter, "ratio", 1))
+	walktest.expect_nil(t, model.register(&reg, Counter, "nick", "x"))
+	walktest.expect_nil(t, model.register(&reg, Counter, "small", 200))
+	m, err := model.compile(&reg, Counter, json.checks(.Json))
+	walktest.expect_nil(t, err)
+	v: Counter
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "n"}`), &v))
+	testing.expect(t, v.count == 5 && v.ratio == 1 && v.nick.? == "x" && v.small == 200)
+	for refusal in ([]core.Error{
+		model.register(&reg, Counter, "small", 300),
+		model.register(&reg, Counter, "count", 1.5),
+		model.register(&reg, Counter, "name", 5),
+	}) {
+		e, typed_error := refusal.(core.Typed_Error)
+		testing.expect(t, typed_error && e.kind == .Wrong_Kind)
+	}
+	e := model.register(&reg, Counter, "name", 5).(core.Typed_Error)
+	b := strings.builder_make()
+	core.render(strings.to_writer(&b), nil, e)
+	testing.expect(t, strings.contains(strings.to_string(b), "Expected string, found number"), strings.to_string(b))
+	missing, _ := model.register(&reg, Counter, "nope", 1).(runtime.Allocator_Error)
+	testing.expect_value(t, missing, runtime.Allocator_Error.Invalid_Argument)
+}
+
+// A failed rule's message says what the value should have been.
+@(test)
+a_message_says_what_to_fix :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	reg: model.Registry
+	m := account_model(&reg)
+	sink: typed.Sink
+	a: Account
+	_ = model.load(&m, transmute([]u8)string(`{"name": "a", "level": "x"}`), &a, &sink)
+	messages := make([dynamic]string)
+	for e in sink.entries {
+		append(&messages, write.report_message(e))
+	}
+	testing.expect_value(t, messages[0], "String is too short, at least 2 characters")
+	testing.expect_value(t, messages[1], "Value does not fit the field's type, expected int")
+	bad := Account{name = "a"}
+	sink2: typed.Sink
+	_ = model.validate(&m, &bad, &sink2)
+	testing.expect_value(t, write.report_message(sink2.entries[0]), "String is too short, at least 2 characters")
 }

@@ -5,6 +5,7 @@ import "core:strings"
 import "../rules"
 
 // `ref` resolved against `base` as RFC 3986 section 5.2 says, in the context's allocator. `base` is absolute or empty.
+// The scheme is written in lower case, since schemes compare without regard to case.
 @(private)
 uri_resolve :: proc(base, ref: string) -> string {
 	r, b := rules.uri_split(ref), rules.uri_split(base)
@@ -30,7 +31,7 @@ uri_resolve :: proc(base, ref: string) -> string {
 	}
 	return strings.concatenate(
 		{
-			t.scheme,
+			strings.to_lower(t.scheme),
 			":" if t.has_scheme else "",
 			"//" if t.has_authority else "",
 			t.authority,

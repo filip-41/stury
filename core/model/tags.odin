@@ -86,20 +86,26 @@ subject_of :: proc(ti: ^runtime.Type_Info, reg: ^Registry) -> (s: Subject) {
 // each a role (`optional`, `read_only`, `write_only`, `not_null` on a pointer or a `Maybe`), a bound (`>=N`, `>N`, `<=N`,
 // `<N`, a range `A..=B` or `A..<B`), `multiple_of=` and a divisor, the same bounds after `len` on a count of code points,
 // elements or members (`len=N` for one count), `unique` on a list, which refuses two equal elements, `format=` and a
-// format's name, or `pattern=` and an ECMA-262 pattern, which takes the rest of the tag, commas included. Spaces around
-// an item, an operator and an operand are dropped. A rule tightens the rules `r` holds. The roles are a member's, and
-// its name and shape are its format tag's. A bound on an integer is integral, and no rule may leave a value that passes.
-// Returns false with the item it cannot read in `r.refused`.
+// format's name, or `pattern=` and an ECMA-262 pattern, which takes the rest of the tag, commas included, so it comes
+// last. Under `swallows`, a struct tag's, a pattern is refused when the text after one of its commas reads as an item,
+// which a pattern placed before other items takes. Spaces around an item, an operator and an operand are dropped. A rule
+// tightens the rules `r` holds. The roles are a member's, and its name and shape are its format tag's. A bound on an
+// integer is integral, and no rule may leave a value that passes. Returns false with the item it cannot read in
+// `r.refused`.
 @(private)
-read_tag :: proc(tag: string, subject: Subject, member: bool, r: ^typed.Member_Rule) -> bool {
+read_tag :: proc(tag: string, subject: Subject, member: bool, r: ^typed.Member_Rule, swallows := false) -> bool {
 	rest := tag
 	for len(rest) > 0 {
 		item := rest
-		if _, is_pattern := keyed(strings.trim_left_space(rest), "pattern"); !is_pattern {
+		if pattern, is_pattern := keyed(strings.trim_left_space(rest), "pattern"); !is_pattern {
 			comma := strings.index_byte(rest, ',')
 			item, rest = rest[:comma] if comma >= 0 else rest, rest[comma + 1:] if comma >= 0 else ""
 		} else {
 			rest = ""
+			if swallows && holds_item(pattern) {
+				r.refused = strings.trim_space(item)
+				return false
+			}
 		}
 		item = strings.trim_space(item)
 		if len(item) == 0 {
@@ -111,6 +117,23 @@ read_tag :: proc(tag: string, subject: Subject, member: bool, r: ^typed.Member_R
 		}
 	}
 	return true
+}
+
+// Whether the text after one of `pattern`'s commas, up to the next, reads as a tag item on a value of any kind.
+@(private)
+holds_item :: proc(pattern: string) -> bool {
+	any_value := Subject{kinds = {.Text, .Integer, .Float, .List, .Map}, nilable = true}
+	rest := pattern
+	for comma := strings.index_byte(rest, ','); comma >= 0; comma = strings.index_byte(rest, ',') {
+		rest = rest[comma + 1:]
+		next := strings.index_byte(rest, ',')
+		item := strings.trim_space(rest[:next] if next >= 0 else rest)
+		scratch: typed.Member_Rule
+		if len(item) > 0 && read_item(item, any_value, true, &scratch) {
+			return true
+		}
+	}
+	return false
 }
 
 // The value of `item` when it is `key`, spaces, `=` and the value.

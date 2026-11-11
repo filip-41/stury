@@ -403,6 +403,21 @@ judge_plan :: proc(h: ^typed.Model_Rules, type: typeid, unique: bool) -> ^typed.
 	return nil
 }
 
+// The refusal of a load plan `p` whose format holds no value alone, a table's, and so reads no text whole, for a member
+// read by its first matching arm or judged by applicators.
+@(private)
+judged_refused :: proc(p: ^typed.Plan) -> core.Typed_Refusal {
+	if p.value_text != nil {
+		return {}
+	}
+	for &m in p.meta {
+		if m.before != nil && (m.before.first_match || m.before.judge != nil) {
+			return {kind = .Unsupported, want = {m.type, "first match" if m.before.first_match else "applicator"}}
+		}
+	}
+	return {}
+}
+
 @(private)
 judged_of :: proc(j: ^Applied, type: typeid, unique: bool) -> ^Judged {
 	for x in j.judged {
@@ -421,10 +436,11 @@ judge_written :: proc(j: ^Judging, m: ^typed.Meta, at: uintptr) -> bool {
 	x := judged_of(j.judging, m.type, m.rule_set > 0 && j.plan.rule_sets[m.rule_set - 1].unique)
 	w := own_plan(j.judging, m.type)
 	// What the write and the judge take of the temporary allocator is given back, unless the call or sink keeps what it
-	// reports there.
+	// reports there, or the first refusal this call sets names its path there.
 	keep := context.allocator == context.temp_allocator || j.sink != nil && j.sink.entries.allocator == context.temp_allocator
+	first_open := j.first.kind == .None
 	guard := runtime.default_temp_allocator_temp_begin()
-	defer if !keep {
+	defer if !keep && !(first_open && j.first.kind != .None) {
 		runtime.default_temp_allocator_temp_end(guard)
 	}
 	text, refused := w.marshal(w, rawptr(at), {}, {}, context.temp_allocator, nil)

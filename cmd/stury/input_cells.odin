@@ -186,15 +186,12 @@ repeated_header :: proc(name: string, data: []byte, doc: ^core.Document) -> (msg
 }
 
 // A header that names a column twice, told with a newline, or "". A header the format refuses is `validate`'s to tell.
-// A text of a header alone has no record to key by it, so its header is read again as the one row of a second copy.
+// A text of a header alone, which is short, has no record to key by it, so its header is read again as the one row of a
+// second copy.
 header_fault :: proc(name: string, data: []byte, as: core.As) -> string {
 	msg, more := header_repeat(name, data, as)
 	if !more && len(data) > 0 {
-		doubled := make([dynamic]u8, 0, 2 * len(data) + 1, context.temp_allocator)
-		append(&doubled, ..data)
-		append(&doubled, '\n')
-		append(&doubled, ..data)
-		msg, _ = header_repeat(name, doubled[:], as)
+		msg, _ = header_repeat(name, transmute([]u8)strings.concatenate({string(data), "\n", string(data)}, context.temp_allocator), as)
 	}
 	return msg
 }

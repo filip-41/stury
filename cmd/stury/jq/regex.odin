@@ -21,7 +21,6 @@ Match :: []int
 
 compile_regex :: proc(ip: ^Interp, pattern: string, flags: Value) -> (r: Regex, sig: Signal) {
 	opts: regex.Flags
-	longest, not_empty := false, false
 	if kind(flags) != .Null {
 		f, ok := string_of(flags)
 		if !ok {
@@ -36,11 +35,11 @@ compile_regex :: proc(ip: ^Interp, pattern: string, flags: Value) -> (r: Regex, 
 			case 'x':
 				opts.extend = true
 			case 'n':
-				not_empty = true
+				opts.not_empty = true
 			case 'm', 'p':
 				opts.dotall = true
 			case 'l':
-				longest = true
+				opts.longest = true
 			case 's':
 			case:
 				return r, fail(ip, "%s is not a valid modifier string", f)
@@ -51,7 +50,6 @@ compile_regex :: proc(ip: ^Interp, pattern: string, flags: Value) -> (r: Regex, 
 	if r.re, err = cached_compile(pattern, opts); err != "" {
 		return r, fail(ip, "Regex failure: %s", err)
 	}
-	r.re.longest, r.re.not_empty = longest, not_empty
 	return r, .Go
 }
 
@@ -135,7 +133,7 @@ search :: proc(re: ^regex.Regex, s: string, at: int, found: []int) -> (bool, str
 // Every match of `r` in `s`, or the first when `r` is not global. Under `whether`, for a regex that is not global, the
 // first holds no bounds, only that there is one.
 matches :: proc(ip: ^Interp, r: ^Regex, s: string, whether := false) -> (out: []Match, sig: Signal) {
-	width := 0 if whether && !r.global else 2 * len(r.re.names)
+	width := 0 if whether && !r.global else 2 * len(regex.group_names(&r.re))
 	buf: [16]int
 	found := buf[:width] if width <= len(buf) else make(Match, width, context.temp_allocator)
 	bounds: [dynamic]int
@@ -273,7 +271,7 @@ match_object :: proc(r: ^Regex, s: string, m: Match, w: ^Char_Walk) -> Value {
 	object_put(o, "length", num(f64(length)))
 	object_put(o, "string", span_text(s, m[0], m[1]))
 	caps := new_array()
-	for g in 1 ..< len(r.re.names) {
+	for g in 1 ..< len(regex.group_names(&r.re)) {
 		c := new_object()
 		lo, hi := m[2 * g], m[2 * g + 1]
 		switch {
@@ -291,7 +289,7 @@ match_object :: proc(r: ^Regex, s: string, m: Match, w: ^Char_Walk) -> Value {
 			object_put(c, "length", num(f64(n)))
 			object_put(c, "string", span_text(s, lo, hi))
 		}
-		name := r.re.names[g]
+		name := regex.group_names(&r.re)[g]
 		object_put(c, "name", name if name != "" else nil)
 		append(&caps.items, c)
 	}
@@ -314,7 +312,7 @@ group_text :: proc(s: string, m: Match, g: int) -> Value {
 // A match's named groups as `capture` gives them, `{name: string}`, a later group of a name winning.
 capture_object :: proc(r: ^Regex, s: string, m: Match) -> ^Object {
 	o := new_object()
-	for name, g in r.re.names {
+	for name, g in regex.group_names(&r.re) {
 		if g == 0 || name == "" {
 			continue
 		}

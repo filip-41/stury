@@ -199,8 +199,10 @@ write_cells :: records.write_cells
 writer_end :: records.writer_end
 
 Bound_Schema :: schema.Bound
-Schema :: schema.Loaded
+Schema :: schema.Compiled
+Schema_Draft :: schema.Draft
+Schema_Options :: schema.Options
 check_schema :: schema.check
 check_schema_records :: schema.check_records
 
-destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.loaded_destroy, schema.unbind}
+destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind}

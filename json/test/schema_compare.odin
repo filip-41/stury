@@ -6,6 +6,7 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import typed "../../core/typed"
+import write "../../core/write"
 import schema "../../core/schema"
 import dsv "../../dsv"
 import json ".."
@@ -14,25 +15,19 @@ import json ".."
 
 @(private = "file")
 Read_Schema :: struct {
-	doc: core.Document,
-	c:   schema.Compiled,
+	c: ^schema.Compiled,
 }
 
 @(private = "file")
 read_schema :: proc(t: ^testing.T, s: ^Read_Schema, text: string) -> bool {
 	err: core.Error
-	s.doc, err = core.build(transmute([]u8)text, json.as(.Json))
-	if !testing.expectf(t, err == nil, "%s: %v", text, err) {
-		return false
-	}
-	s.c, err = schema.compile(&s.doc, core.ROOT, {resolver = {as = json.as(.Json)}})
+	s.c, err = schema.compile(transmute([]u8)text, json.as(.Json))
 	return testing.expectf(t, err == nil, "%s: %v", text, err)
 }
 
 @(private = "file")
 release :: proc(s: ^Read_Schema) {
-	schema.destroy(&s.c)
-	core.destroy(&s.doc)
+	schema.destroy(s.c)
 }
 
 @(private = "file")
@@ -110,6 +105,19 @@ compare_arrays_and_objects :: proc(t: ^testing.T) {
 	expect_verdicts(t, `{"type":"object","properties":{"a":{"type":"integer"}},"required":["a"]}`, `{"type":"object","properties":{"a":{"type":"number"},"b":{"type":"string"}},"required":["a"]}`, .No, .No)
 }
 
+// One side of a change as JSON, or `none` when the change has no such side.
+side_json :: proc(side: Maybe(core.Value)) -> string {
+	v, present := side.?
+	if !present {
+		return "none"
+	}
+	tokens: write.Tokens
+	write.tokens_init(&tokens, json.as(.Json), {}, context.temp_allocator)
+	write.value_of(&tokens, v)
+	text, _ := write.tokens_finish(&tokens)
+	return string(text)
+}
+
 // The changes name the keyword and the place, and the effect each has on the values taken.
 @(test)
 compare_changes :: proc(t: ^testing.T) {
@@ -131,9 +139,9 @@ compare_changes :: proc(t: ^testing.T) {
 				strings.write_string(&sb, "[]")
 			}
 		}
-		fmt.sbprintf(&sb, " %s %q>%q %v;", ch.keyword, ch.old, ch.new, ch.effect)
+		fmt.sbprintf(&sb, " %s %s>%s %v;", ch.keyword, side_json(ch.old), side_json(ch.new), ch.effect)
 	}
-	want := `.id minimum "0">"1" Narrows;.mail required "required">"optional" Widens;.tel properties "">"defined" Narrows;`
+	want := `.id minimum 0>1 Narrows;.mail required "required">"optional" Widens;.tel properties none>"defined" Narrows;`
 	testing.expectf(t, strings.to_string(sb) == want, "got %s", strings.to_string(sb))
 	free_all(context.temp_allocator)
 }
@@ -193,8 +201,8 @@ compare_yes_is_never_refuted :: proc(t: ^testing.T) {
 				if !read_schema(t, &a, from) || !read_schema(t, &b, to) {
 					return
 				}
-				ba, ea := schema.bind(&a.c, json.checks(.Json))
-				bb, eb := schema.bind(&b.c, json.checks(.Json))
+				ba, ea := schema.bind(a.c, json.checks(.Json))
+				bb, eb := schema.bind(b.c, json.checks(.Json))
 				defer schema.unbind(&ba)
 				defer schema.unbind(&bb)
 				if !testing.expect(t, ea == nil && eb == nil) {

@@ -19,10 +19,10 @@ stury [-c] [-r] [-j] [--raw-output0] [-a] [-S] [-C|-M] [--tab|--indent N] [--unb
       [--max-depth N] [--follow] [--explain]
       [--arg NAME VALUE] [--argjson NAME JSON] [--slurpfile NAME FILE] [--rawfile NAME FILE]
       [FILTER] [FILE...] [--args STRING...|--jsonargs JSON...]
-stury check [--from FORMAT|--seq] [--max-depth N] [--schema FILE [--schema-ref DIR] [--format-assert]
+stury check [--from FORMAT|--seq] [--max-depth N] [--schema FILE [--schema-ref DIR] [--schema-draft D] [--format-assert]
             [--max-errors N] [--report lines|basic|problem]] [FILE...]
 stury check --filter FILTER --schema FILE [--from FORMAT] [-n] [-s] [-R] [--arg...] [-c]
-stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--format-assert] [--max-errors N]] [--in-place|--check] [--indent N|--tab] [--max-depth N] [FILE...]
+stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--schema-draft D] [--format-assert] [--max-errors N]] [--in-place|--check] [--indent N|--tab] [--max-depth N] [FILE...]
 stury edit [--from FORMAT|--seq] [--in-place|--check|--diff] [--max-depth N] [-f FILE] [-L DIR] [--arg...] FILTER [FILE...]
 stury diff [--from FORMAT] [--set|--position] [--key [PATH=]MEMBER]... [--facts] [--json] OLD NEW
 stury diff --old-schema FILE --new-schema FILE [--compat backward|forward|full] [--json]
@@ -232,7 +232,7 @@ usage error.
 | `--from ndjson`, `--seq` | Validate one record per line or per `0x1E` separator, each record being one text. `--seq` uses `check`'s records, not jq's text sequence; each `FILE` is read alone, so a text cut at a file's end is a fault. |
 | `--from jsonc` | Validate JSONC as `stury --from jsonc .` reads it, to the same limits. A comment's text holds no escape. |
 | `--from json5` | Validate JSON5 as `stury --from json5 .` reads it, to the same limits. `Infinity` and `NaN` fail, since jq has no value for them. |
-| `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. A fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An empty input is valid, as the library takes it, and so is a header alone. A cell is one kind: a string, or under `--infer` a number, `true` or `false` when its text is exactly one, so `type: integer` takes the cell `1` only with `--infer`, and `oneOf: [string, integer]` takes it either way. |
+| `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. A fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An empty input is valid, as the library takes it, and so is a header alone. A cell is read as a filter run reads it: a string, or under `--infer` a number, `true` or `false` when its text is exactly one, so `type: integer` takes the cell `1` only with `--infer`, and `oneOf: [string, integer]` takes it either way. An empty unquoted cell is a `null`, and a quoted `""` is the empty string. `schema infer` reads cells the same way, so a schema it writes with `--infer` is checked with `--infer`. |
 | `--max-depth N` | As [above](#sturys-own-options). |
 | `--schema FILE` | Also check each input against the JSON Schema in `FILE` (drafts 4 to 2020-12). See [Schema check](#schema-check). |
 | `FILE...` | One file per argument, read as the filter reads them. |
@@ -255,13 +255,15 @@ before the fault, and the exit is 5.
 | Flag | Effect |
 | --- | --- |
 | `--schema-ref DIR` | The directory a reference to a `file:` URI may read from. The default is the schema file's directory. A schema with an `$id` resolves a relative reference against that `$id`, so its `file:` references need an `$id` that is one. |
+| `--schema-draft D` | The draft of a schema with no `$schema`: `4`, `6`, `7`, `2019-09` or `2020-12`, the default. A `$schema` names the draft of its schema whatever this says. |
 | `--format-assert` | `format` fails an input, where it otherwise only annotates. |
 | `--max-errors N` | Keep at most `N` failures of an input (default 100). The basic output and the problem document say `"truncated": true` when more were left out, and the lines end with `NAME: more failures past --max-errors N`. |
-| `--report basic` | Write the JSON Schema basic output of each input on stdout, one line a file that is read (a file that faults or does not open has none), `{"valid":true}` for a valid one. Each error unit has `"valid":false`. With several files each line starts with a `file` member naming its file. `keywordLocation`, `absoluteKeywordLocation` (where the schema has an `$id` and the keywords did not pass a `$ref`) and `instanceLocation` are JSON Pointers; with records, a `record` member holds the record's index and the instance location is a pointer into that record. |
-| `--report problem` | Write an RFC 9457 problem document of each failing input on stdout: `title`, `status` 422 and `errors` of `pointer`, `code` and `message`, and a `record` member in an error of a record input. A missing member is named in its message, and its pointer is the member's. With several files the document starts with a `file` member. |
+| `--report basic` | Write the JSON Schema basic output of each input on stdout, one line a file that is read (a file that faults or does not open has none), `{"file":NAME,"valid":true}` for a valid one. Each line starts with a `file` member naming its file, and each error unit has `"valid":false`. `keywordLocation`, `absoluteKeywordLocation` (where the schema has an `$id` and the keywords did not pass a `$ref`) and `instanceLocation` are JSON Pointers; with records, a `record` member holds the record's index and the instance location is a pointer into that record. |
+| `--report problem` | Write an RFC 9457 problem document of each failing input on stdout, and nothing for a valid one: `title`, `status` 422 and `errors` of `pointer`, `code` and `message`, and a `record` member in an error of a record input. A missing member is named in its message, and its pointer is the member's. The document starts with a `file` member. |
 | `--report lines` | The default. |
 
 A schema that does not read, compile or bind, or a keyword the check does not judge, is a usage error (exit 2) naming it.
+A `pattern` or `patternProperties` search that runs out of memory on a long string or name is told as `The pattern could not be decided on the string` and exits 2, not 1, since the input is neither valid nor failed. `not` never inverts it.
 The options need `--schema`, and `--schema` is `check`'s alone.
 
 `stury check --filter FILTER --schema schema.json` types the filter against the schema of its inputs and reads no
@@ -291,8 +293,6 @@ it refused a step, else 0, and 3 when the filter does not compile.
 - `--from csv` or `tsv` types the filter on the records a table reads: an object of the schema's member names, each
   a string or null, and under `--infer` a number or a boolean too, or under `--no-header` an array of them. The other
   formats read JSON values, which the schema describes.
-- In a format that reads byte strings, `type` on a string of `contentEncoding: base64` is `"bytes"`. No format of the
-  command line reads byte strings yet.
 
 FILE operands, `--seq`, `--report` and `--max-errors` are usage errors with `--filter`, as are the options that
 shape a filter run's output (`-r`, `-e`, `--stream`, ...).
@@ -302,8 +302,8 @@ shape a filter run's output (`-r`, `-e`, `--stream`, ...).
 `stury schema infer [FILE...]` writes the JSON Schema that every record of the inputs passes: the kinds met at each
 position, a member required when every object there had it, and the elements of arrays as `items`. Nothing is guessed, so
 no enum, format or bound appears. An object with more than 64 names, or with names that are all integers or all UUIDs,
-is a map: `additionalProperties` and no members. A table's schema is an array of row objects, and an empty cell is an
-absent member. `--ranges` also keeps the least and greatest number, string length and array length (not a table's row
+is a map: `additionalProperties` and no members. A table's schema is an array of row objects, and an empty cell is a
+`null`, so its column is required and its type holds `null`. `--ranges` also keeps the least and greatest number, string length and array length (not a table's row
 count). Members come in the order they first appear. Long files are read on all cores and give the description one
 thread gives, and a record that does not read is exit 5. The layout options (`-c`, `--indent`, `--tab`, `-S`, `-a`) shape
 the schema's text.
@@ -313,7 +313,8 @@ texts are a table each). `--count N` (default 1) and `--seed N` choose how many 
 that fail the schema, each a valid one changed in one place. `--comments` writes a node's `description` as a comment
 where the format has comments (`--to jsonc`). Each value is a line, compact unless a layout option asks for more, and a
 CSV or TSV value is a table, so those take `--count 1`. A schema that no value passes is exit 1 and names the keyword
-path of the node the search stopped at.
+path of the node the search stopped at. `schema sample` and `schema gen` read a schema with no `$schema` in the
+draft `--schema-draft` names, as `check` does.
 
 `stury schema gen SCHEMA` writes the Odin source of the types a model reads the schema's values with, and a procedure
 `register` that adds the rules no tag holds to a `model.Registry`, as `schema.write_odin` writes them: a struct for an
@@ -353,9 +354,9 @@ whole table for CSV: the text must pass it, every member it leaves open is kept,
 output format reads it. A failure is told as `check --schema` tells it, in the input for an input that fails and
 against `NAME (output)` for an output that does, `--max-errors` limiting the failures told of a text, and it gives
 exit 1 while the other texts are still converted. A value the output format cannot spell, such as a nested cell in CSV,
-is told with its path. A CSV output takes the union of the rows' members as its columns, an empty cell is a member that
-is absent, and a row with no member at all is refused. Where the schema allows a cell to read as a string or as the value
-it spells, the reading the output passes is the one written. A format with attributes writes each as a member before the
+is told with its path. A CSV output takes the union of the rows' members as its columns, an empty cell is a `null`
+the output check sees, and a row with no member at all is refused. `fmt --schema` converts by the schema on output: where the schema allows a cell to read as a string or as the value
+it spells, the reading the output passes is the one written, whatever `--infer` says of the input. A format with attributes writes each as a member before the
 element's children, a name its children repeat as an array and its text as `#text` when the element has attributes; an
 attribute and a child of one name, and an array with attributes, are refused.
 
@@ -363,7 +364,7 @@ attribute and a child of one name, and an array with attributes, are refused.
 `FILTER`.
 
 ```sh
-stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--format-assert] [--max-errors N]] [--in-place|--check] [--indent N|--tab] [--max-depth N] [FILE...]
+stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--schema-draft D] [--format-assert] [--max-errors N]] [--in-place|--check] [--indent N|--tab] [--max-depth N] [FILE...]
 ```
 
 | Format | What `fmt` writes |
@@ -548,7 +549,7 @@ schemas and take no file: each change names the place, the keyword and what it d
 `narrows`, `both`, `unknown`), then `backward` says whether the new schema takes everything the old one takes and
 `forward` the reverse. A verdict is `yes` with a proof, `no` with a value one schema takes and the other refuses, or
 `unknown` with the keyword the proof stopped at. `--compat backward|forward|full` exits 1 unless that direction is
-proven, and without it the exit is 1 for any change. `--format-assert` and `--schema-ref` read as `check` reads them.
+proven, and without it the exit is 1 for any change. `--format-assert`, `--schema-ref` and `--schema-draft` read as `check` reads them.
 A schema with one data file judges the data by the schema, as `check --schema` does (exit 1 for a failure), then tells each
 member the data has that the schema does not describe, `+ .z  not described by the schema`, which is also exit 1.
 `--shape` compares the shapes of two data files: each is described as `schema infer` describes it, and the two

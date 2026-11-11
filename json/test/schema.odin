@@ -61,16 +61,11 @@ refused_keyword :: proc(err: core.Error) -> string {
 	return ""
 }
 
-@(private = "file")
-read_text :: proc(text: string, draft := schema.Draft.D2020_12, root := "") -> (d: rules.Description, res: schema.Resolver, doc: core.Document, err: core.Error) {
-	res = {
-		as    = json.as(.Json),
-		draft = draft,
-		root  = root,
-	}
-	doc = core.build(transmute([]u8)text, json.as(.Json)) or_return
-	d, err = schema.read(&doc, core.ROOT, "", &res)
-	return
+// The description of the schema `text`, read in `draft` where it has no `$schema` with file references under `root`, and
+// the compile that owns it, nil when the read refused the schema.
+read_text :: proc(text: string, draft := schema.Draft.D2020_12, root := "") -> (d: rules.Description, c: ^schema.Compiled, err: core.Error) {
+	c = schema.compile(transmute([]u8)text, json.as(.Json), {draft = draft, refs = root}) or_return
+	return c.description^, c, nil
 }
 
 // Every schema of the suite reads, or is refused naming a keyword.
@@ -93,11 +88,7 @@ schema_suite_reads :: proc(t: ^testing.T) {
 			groups := core.children(&doc, core.ROOT)
 			for group in core.child_next(&groups) {
 				node, _ := core.member(&doc, group, "schema")
-				res := schema.Resolver {
-					as    = json.as(.Json),
-					draft = entry.draft,
-				}
-				d, err := schema.read(&doc, node, "", &res)
+				d, _, err := read_text(string(core.span(&doc, node)), entry.draft)
 				switch {
 				case err == nil:
 					read += 1
@@ -149,9 +140,8 @@ schema_refusals :: proc(t: ^testing.T) {
 		{`{"$defs": {"a": {"$id": "http://x/a"}, "b": {"$id": "http://x/a"}}}`, "$id", "$defs"},
 	}
 	for c in cases {
-		d, res, doc, err := read_text(c.text)
-		defer core.destroy(&doc)
-		defer schema.resolver_destroy(&res)
+		d, res, err := read_text(c.text)
+		defer schema.destroy(res)
 		testing.expectf(t, refused_keyword(err) == c.keyword, "%s: %v", c.text, err)
 		if f, ok := err.(core.Typed_Error); ok && c.step != "" {
 			name, _ := f.steps[0].(core.Name)
@@ -164,20 +154,16 @@ schema_refusals :: proc(t: ^testing.T) {
 // A loop of references nothing reaches from the root is never judged, so it is read.
 @(test)
 schema_reads_a_loop_nothing_reaches :: proc(t: ^testing.T) {
-	d, res, doc, err := read_text(`{"type": "integer", "$defs": {"a": {"$ref": "#/$defs/a"}, "b": {"$ref": "#/$defs/c"}, "c": {"allOf": [{"$ref": "#/$defs/b"}]}}}`)
-	defer core.destroy(&doc)
-	defer schema.resolver_destroy(&res)
-	defer rules.description_destroy(&d)
+	_, res, err := read_text(`{"type": "integer", "$defs": {"a": {"$ref": "#/$defs/a"}, "b": {"$ref": "#/$defs/c"}, "c": {"allOf": [{"$ref": "#/$defs/b"}]}}}`)
+	defer schema.destroy(res)
 	testing.expect(t, err == nil)
 }
 
 // A `$vocabulary` outside a meta-schema is ignored, whatever vocabularies it names.
 @(test)
 schema_vocabulary_outside_a_meta_schema_is_ignored :: proc(t: ^testing.T) {
-	d, res, doc, err := read_text(`{"$vocabulary": {"https://example.com/vocab/geo": true}, "type": "string"}`)
-	defer core.destroy(&doc)
-	defer schema.resolver_destroy(&res)
-	defer rules.description_destroy(&d)
+	d, res, err := read_text(`{"$vocabulary": {"https://example.com/vocab/geo": true}, "type": "string"}`)
+	defer schema.destroy(res)
 	testing.expect_value(t, refused_keyword(err), "")
 	testing.expect(t, len(d.nodes) > 0)
 }
@@ -195,10 +181,8 @@ schema_refuses_draft_4_forms :: proc(t: ^testing.T) {
 		{`{"items": [{}], "additionalItems": false}`, "", false},
 	}
 	for c in cases {
-		d, res, doc, err := read_text(c.text, .D04)
-		defer rules.description_destroy(&d)
-		defer core.destroy(&doc)
-		defer schema.resolver_destroy(&res)
+		_, res, err := read_text(c.text, .D04)
+		defer schema.destroy(res)
 		testing.expectf(t, (err != nil) == c.refused && refused_keyword(err) == c.keyword, "%s: %v", c.text, err)
 	}
 }
@@ -208,10 +192,8 @@ schema_refuses_draft_4_forms :: proc(t: ^testing.T) {
 @(test)
 schema_reaches_anchors_and_nested_ids :: proc(t: ^testing.T) {
 	anchored := `{"$defs": {"x": {"$anchor": "m", "type": "null"}}, "properties": {"p": {"$ref": "#m"}}}`
-	d, res, doc, err := read_text(anchored)
-	defer rules.description_destroy(&d)
-	defer schema.resolver_destroy(&res)
-	defer core.destroy(&doc)
+	d, res, err := read_text(anchored)
+	defer schema.destroy(res)
 	testing.expect(t, err == nil)
 	p := d.nodes[d.objects[d.nodes[d.root].object].members[0].node]
 	testing.expect_value(t, d.nodes[p.ref.? or_else 0].kinds, rules.Kinds{.Null})
@@ -219,20 +201,16 @@ schema_reaches_anchors_and_nested_ids :: proc(t: ^testing.T) {
 	nested := `{"$id": "http://x/root", "$defs": {"a": {"$id": "http://x/a/", "unk": {"$ref": "b.json"}},
 		"b": {"$id": "http://x/a/b.json", "type": "null"}, "c": {"$id": "http://x/b.json", "type": "string"}},
 		"$ref": "#/$defs/a/unk"}`
-	d2, res2, doc2, err2 := read_text(nested)
-	defer rules.description_destroy(&d2)
-	defer schema.resolver_destroy(&res2)
-	defer core.destroy(&doc2)
+	d2, res2, err2 := read_text(nested)
+	defer schema.destroy(res2)
 	testing.expect(t, err2 == nil)
 	unk := d2.nodes[d2.nodes[d2.root].ref.? or_else 0]
 	testing.expect_value(t, d2.nodes[unk.ref.? or_else 0].kinds, rules.Kinds{.Null})
 	testing.expect(t, unk.resource != d2.root)
 
 	// `$schema` below a resource root is not a dialect.
-	d3, res3, doc3, err3 := read_text(`{"properties": {"a": {"$schema": "https://example.com/unknown"}}}`)
-	defer rules.description_destroy(&d3)
-	defer core.destroy(&doc3)
-	defer schema.resolver_destroy(&res3)
+	_, res3, err3 := read_text(`{"properties": {"a": {"$schema": "https://example.com/unknown"}}}`)
+	defer schema.destroy(res3)
 	testing.expect(t, err3 == nil)
 }
 
@@ -242,10 +220,8 @@ schema_translates_drafts :: proc(t: ^testing.T) {
 	text := `{"definitions": {"n": {"type": "integer", "minimum": 5, "exclusiveMinimum": true}},
 		"items": [{"$ref": "#/definitions/n"}], "additionalItems": false,
 		"dependencies": {"a": ["b"], "c": {"required": ["d"]}}}`
-	d, res, doc, err := read_text(text, .D04)
-	defer rules.description_destroy(&d)
-	defer schema.resolver_destroy(&res)
-	defer core.destroy(&doc)
+	d, res, err := read_text(text, .D04)
+	defer schema.destroy(res)
 	testing.expect(t, err == nil)
 	root := d.nodes[d.root]
 	array := d.arrays[root.array]
@@ -266,10 +242,8 @@ schema_translates_drafts :: proc(t: ^testing.T) {
 schema_resolves_references :: proc(t: ^testing.T) {
 	text := `{"$id": "https://example.com/tree", "$dynamicAnchor": "node", "type": "object",
 		"properties": {"kids": {"items": {"$dynamicRef": "#node"}}, "up": {"$ref": "#", "minProperties": 1}}}`
-	d, res, doc, err := read_text(text)
-	defer rules.description_destroy(&d)
-	defer schema.resolver_destroy(&res)
-	defer core.destroy(&doc)
+	d, res, err := read_text(text)
+	defer schema.destroy(res)
 	testing.expect(t, err == nil)
 	testing.expect_value(t, len(d.anchors), 1)
 	testing.expect_value(t, d.anchors[0].name, "node")
@@ -282,10 +256,8 @@ schema_resolves_references :: proc(t: ^testing.T) {
 
 	recursive := `{"$schema": "https://json-schema.org/draft/2019-09/schema", "$recursiveAnchor": true,
 		"properties": {"next": {"$recursiveRef": "#"}}}`
-	d2, res2, doc2, err2 := read_text(recursive)
-	defer rules.description_destroy(&d2)
-	defer schema.resolver_destroy(&res2)
-	defer core.destroy(&doc2)
+	d2, res2, err2 := read_text(recursive)
+	defer schema.destroy(res2)
 	testing.expect(t, err2 == nil)
 	next := d2.nodes[d2.objects[d2.nodes[d2.root].object].members[0].node]
 	testing.expect_value(t, next.dynamic_ref, rules.Node_Index(0))
@@ -298,59 +270,47 @@ schema_reads_files_and_dialects :: proc(t: ^testing.T) {
 	root, _ := os.read_entire_file_from_path(strings.concatenate({FIXTURES, "/root.json"}, context.temp_allocator), context.allocator)
 	defer delete(root)
 	defer free_all(context.temp_allocator)
-	doc, _ := core.build(root, json.as(.Json))
-	defer core.destroy(&doc)
-	opts := schema.Options {
-		resolver = {as = json.as(.Json), root = FIXTURES},
-	}
-	c, err := schema.compile(&doc, core.ROOT, opts)
-	defer schema.destroy(&c)
+	c, err := schema.compile(root, json.as(.Json), {refs = FIXTURES})
+	defer schema.destroy(c)
 	testing.expect(t, err == nil)
 	d := c.description
 	name := d.nodes[d.objects[d.nodes[d.root].object].members[0].node]
 	testing.expect_value(t, d.nodes[name.ref.? or_else 0].rules.min_length, 1)
 
 	// A reference with nothing beside it is judged as the node it reaches.
-	b, bind_err := schema.bind(&c, json.checks(.Json))
+	b, bind_err := schema.bind(c, json.checks(.Json))
 	defer schema.unbind(&b)
 	testing.expect(t, bind_err == nil)
 
 	// Under no root the same reference is refused.
-	_, res, doc2, err2 := read_text(string(root))
-	defer core.destroy(&doc2)
-	defer schema.resolver_destroy(&res)
+	_, res, err2 := read_text(string(root))
+	defer schema.destroy(res)
 	testing.expect_value(t, refused_keyword(err2), "$ref")
 
 	// A file outside the root is not read.
-	_, res3, doc3, err3 := read_text(`{"$ref": "file:///etc/hosts"}`, root = FIXTURES)
-	defer core.destroy(&doc3)
-	defer schema.resolver_destroy(&res3)
+	_, res3, err3 := read_text(`{"$ref": "file:///etc/hosts"}`, root = FIXTURES)
+	defer schema.destroy(res3)
 	testing.expect_value(t, refused_keyword(err3), "$ref")
 
 	// Dots written as escapes lead out of the root as plain ones do.
-	_, res6, doc6, err6 := read_text(`{"$ref": "%2e%2e/conformance/JSON-Schema-Test-Suite/remotes/integer.json"}`, root = FIXTURES)
-	defer core.destroy(&doc6)
-	defer schema.resolver_destroy(&res6)
+	_, res6, err6 := read_text(`{"$ref": "%2e%2e/conformance/JSON-Schema-Test-Suite/remotes/integer.json"}`, root = FIXTURES)
+	defer schema.destroy(res6)
 	testing.expect_value(t, refused_keyword(err6), "$ref")
 
 	// A vocabulary counts by its standard URI, not by the name that ends it.
-	_, res7, doc7, err7 := read_text(`{"$schema": "meta-evil.json"}`, root = FIXTURES)
-	defer core.destroy(&doc7)
-	defer schema.resolver_destroy(&res7)
+	_, res7, err7 := read_text(`{"$schema": "meta-evil.json"}`, root = FIXTURES)
+	defer schema.destroy(res7)
 	testing.expect_value(t, refused_keyword(err7), "$schema")
 
 	// The narrow meta-schema has no applicator vocabulary, so `properties` is an annotation. One that requires an unknown vocabulary is refused.
 	narrow := `{"$schema": "meta-narrow.json", "properties": {"a": 5}, "minimum": 1}`
-	d4, res4, doc4, err4 := read_text(narrow, root = FIXTURES)
-	defer rules.description_destroy(&d4)
-	defer core.destroy(&doc4)
-	defer schema.resolver_destroy(&res4)
+	d4, res4, err4 := read_text(narrow, root = FIXTURES)
+	defer schema.destroy(res4)
 	testing.expect(t, err4 == nil)
 	testing.expect_value(t, d4.nodes[d4.root].object, -1)
 	testing.expect_value(t, d4.nodes[d4.root].rules.minimum, "1")
-	_, res5, doc5, err5 := read_text(`{"$schema": "meta-unknown.json"}`, root = FIXTURES)
-	defer core.destroy(&doc5)
-	defer schema.resolver_destroy(&res5)
+	_, res5, err5 := read_text(`{"$schema": "meta-unknown.json"}`, root = FIXTURES)
+	defer schema.destroy(res5)
 	testing.expect_value(t, refused_keyword(err5), "$schema")
 }
 
@@ -358,15 +318,13 @@ schema_reads_files_and_dialects :: proc(t: ^testing.T) {
 @(test)
 schema_binds_shapes :: proc(t: ^testing.T) {
 	text := `{"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n", "m"]}`
-	d, res, doc, err := read_text(text)
-	defer rules.description_destroy(&d)
-	defer core.destroy(&doc)
-	defer schema.resolver_destroy(&res)
+	d, res, err := read_text(text)
+	defer schema.destroy(res)
 	testing.expect(t, err == nil)
-	c, cerr := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
-	defer schema.destroy(&c)
+	c, cerr := schema.compile(transmute([]u8)text, json.as(.Json))
+	defer schema.destroy(c)
 	testing.expect(t, cerr == nil)
-	b, berr := schema.bind(&c, json.checks(.Json))
+	b, berr := schema.bind(c, json.checks(.Json))
 	defer schema.unbind(&b)
 	testing.expect(t, berr == nil)
 	c2 := schema.compile_description(&d)
@@ -403,12 +361,12 @@ schema_suite_checks :: proc(t: ^testing.T) {
 			for group in core.child_next(&groups) {
 				node, _ := core.member(&doc, group, "schema")
 				read_total += 1
-				c, err := schema.compile(&doc, node, {format_assert = in_formats, resolver = {as = json.as(.Json), draft = entry.draft, root = REMOTES}})
+				c, err := schema.compile(core.span(&doc, node), json.as(.Json), {format_assert = in_formats, draft = entry.draft, refs = REMOTES})
 				if err != nil {
 					unread[strings.clone(refused_keyword(err), context.temp_allocator)] += 1
 					continue
 				}
-				b, berr := schema.bind(&c, json.checks(.Json))
+				b, berr := schema.bind(c, json.checks(.Json))
 				if berr != nil {
 					f, _ := berr.(core.Typed_Error)
 					refused[strings.clone(f.want.text, context.temp_allocator)] += 1
@@ -557,9 +515,9 @@ schema_format_asserts_on_request :: proc(t: ^testing.T) {
 	for c in cases {
 		doc, built := core.build(transmute([]u8)c.schema, json.as(.Json))
 		testing.expect(t, built == nil)
-		compiled, err := schema.compile(&doc, core.ROOT, {format_assert = c.assert_, resolver = {as = json.as(.Json), root = FIXTURES}})
+		compiled, err := schema.compile(core.span(&doc, core.ROOT), json.as(.Json), {format_assert = c.assert_, refs = FIXTURES})
 		testing.expectf(t, err == nil, "%s: %v", c.schema, err)
-		b, bound := schema.bind(&compiled, json.checks(.Json))
+		b, bound := schema.bind(compiled, json.checks(.Json))
 		testing.expectf(t, bound == nil, "%s: %v", c.schema, bound)
 		testing.expectf(t, schema.valid(&b, transmute([]u8)c.text) == c.valid, "%s asserting %v: %s", c.schema, c.assert_, c.text)
 	}
@@ -571,7 +529,7 @@ schema_unknown_format_refused_under_assertion_vocabulary :: proc(t: ^testing.T) 
 	defer free_all(context.temp_allocator)
 	doc, built := core.build(transmute([]u8)string(`{"$schema": "meta-format-assertion.json", "format": "no-such-format"}`), json.as(.Json))
 	testing.expect(t, built == nil)
-	_, err := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json), root = FIXTURES}})
+	_, err := schema.compile(core.span(&doc, core.ROOT), json.as(.Json), {refs = FIXTURES})
 	testing.expect(t, err != nil)
 }
 
@@ -582,10 +540,10 @@ schema_check_reports_each_failure :: proc(t: ^testing.T) {
 	text := `{"properties": {"a": {"type": "integer", "minimum": 2}, "b": {"type": "array", "items": {"type": "string"}}}, "required": ["a", "c"], "additionalProperties": false}`
 	doc, _ := core.build(transmute([]u8)text, json.as(.Json))
 	defer core.destroy(&doc)
-	c, err := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
-	defer schema.destroy(&c)
+	c, err := schema.compile(core.span(&doc, core.ROOT), json.as(.Json), {})
+	defer schema.destroy(c)
 	testing.expect(t, err == nil)
-	b, berr := schema.bind(&c, json.checks(.Json))
+	b, berr := schema.bind(c, json.checks(.Json))
 	defer schema.unbind(&b)
 	testing.expect(t, berr == nil)
 	src := transmute([]u8)string(`{"a": 1, "b": ["x", 3], "z": 0}`)
@@ -958,16 +916,13 @@ schema_resolves_file_links :: proc(t: ^testing.T) {
 	testing.expect(t, os.symlink(inside, strings.concatenate({root, "/stays.json"}, context.temp_allocator)) == nil)
 	testing.expect(t, os.symlink(outside, strings.concatenate({root, "/leaves.json"}, context.temp_allocator)) == nil)
 
-	d, res, doc, err := read_text(`{"$ref": "stays.json"}`, root = root)
-	defer rules.description_destroy(&d)
-	defer core.destroy(&doc)
-	defer schema.resolver_destroy(&res)
+	d, res, err := read_text(`{"$ref": "stays.json"}`, root = root)
+	defer schema.destroy(res)
 	testing.expect(t, err == nil)
 	testing.expect_value(t, d.nodes[d.nodes[d.root].ref.? or_else 0].rules.min_length, 3)
 
-	_, res2, doc2, err2 := read_text(`{"$ref": "leaves.json"}`, root = root)
-	defer core.destroy(&doc2)
-	defer schema.resolver_destroy(&res2)
+	_, res2, err2 := read_text(`{"$ref": "leaves.json"}`, root = root)
+	defer schema.destroy(res2)
 	testing.expect_value(t, refused_keyword(err2), "$ref")
 }
 
@@ -978,46 +933,39 @@ schema_pointer_ignores_ids_outside_schemas :: proc(t: ^testing.T) {
 		"const": {"$id": "http://other.example/c", "inner": {"$ref": "#/definitions/z"}},
 		"x-extra": {"$id": "http://other.example/d", "inner": {"$ref": "#/definitions/z"}},
 		"allOf": [{"$ref": "#/const/inner"}, {"$ref": "#/x-extra/inner"}]}`
-	d, res, doc, err := read_text(text)
-	defer rules.description_destroy(&d)
-	defer core.destroy(&doc)
-	defer schema.resolver_destroy(&res)
+	_, res, err := read_text(text)
+	defer schema.destroy(res)
 	testing.expect(t, err == nil)
 }
 
 // A count may be written as `-0` or with an exponent. It is read by value, and a value past 64 bits is the greatest count.
 @(test)
 schema_reads_counts_by_value :: proc(t: ^testing.T) {
-	d, res, doc, err := read_text(`{"minLength": -0, "maxLength": 1e400, "maxItems": 2.0e1, "minItems": 1E1}`)
-	defer rules.description_destroy(&d)
-	defer core.destroy(&doc)
-	defer schema.resolver_destroy(&res)
+	d, res, err := read_text(`{"minLength": -0, "maxLength": 1e400, "maxItems": 2.0e1, "minItems": 1E1}`)
+	defer schema.destroy(res)
 	testing.expect(t, err == nil)
 	n := d.nodes[d.root].rules
 	testing.expect_value(t, n.min_length, 0)
 	testing.expect_value(t, n.max_length, Maybe(u64)(max(u64)))
 	testing.expect_value(t, n.max_items, Maybe(u64)(20))
 	testing.expect_value(t, n.min_items, 10)
-	_, res2, doc2, err2 := read_text(`{"minLength": -1}`)
-	defer core.destroy(&doc2)
-	defer schema.resolver_destroy(&res2)
+	_, res2, err2 := read_text(`{"minLength": -1}`)
+	defer schema.destroy(res2)
 	testing.expect_value(t, refused_keyword(err2), "minLength")
 }
 
 // A schema read from `text` in the format `spec` and bound to it. `checked` frees what it holds.
 @(private = "file")
 Checked :: struct {
-	doc:      core.Document,
-	compiled: schema.Compiled,
+	compiled: ^schema.Compiled,
 	bound:    schema.Bound,
 }
 
 @(private = "file")
 checked_make :: proc(text: string, spec := json.Spec.Json, allocator := context.allocator, dups := core.Duplicates.Default) -> (c: ^Checked, err: core.Error) {
 	c = new(Checked)
-	c.doc, _ = core.build(transmute([]u8)text, json.as(.Json))
-	if c.compiled, err = schema.compile(&c.doc, core.ROOT, {resolver = {as = json.as(.Json)}, dups = dups}); err == nil {
-		c.bound, err = schema.bind(&c.compiled, {layout = json.as(spec)}, allocator = allocator)
+	if c.compiled, err = schema.compile(transmute([]u8)text, json.as(.Json), {dups = dups}); err == nil {
+		c.bound, err = schema.bind(c.compiled, {layout = json.as(spec)}, allocator = allocator)
 	}
 	return
 }
@@ -1025,8 +973,7 @@ checked_make :: proc(text: string, spec := json.Spec.Json, allocator := context.
 @(private = "file")
 checked_destroy :: proc(c: ^Checked) {
 	schema.unbind(&c.bound)
-	schema.destroy(&c.compiled)
-	core.destroy(&c.doc)
+	schema.destroy(c.compiled)
 	free(c)
 }
 
@@ -1274,12 +1221,10 @@ schema_bind_refusals :: proc(t: ^testing.T) {
 		f, _ := err.(core.Typed_Error)
 		testing.expectf(t, f.kind == .Unsupported && f.want.text == "multipleOf", "%s: %v", text, err)
 	}
-	doc, _ := core.build(transmute([]u8)string(`{"pattern": "["}`), json.as(.Json))
-	defer core.destroy(&doc)
-	c, cerr := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
-	defer schema.destroy(&c)
+	c, cerr := schema.compile(transmute([]u8)string(`{"pattern": "["}`), json.as(.Json))
+	defer schema.destroy(c)
 	testing.expect(t, cerr != nil)
-	_, berr := schema.bind(&c, json.checks(.Json))
+	_, berr := schema.bind(c, json.checks(.Json))
 	testing.expect_value(t, berr.(core.Typed_Error).kind, core.Typed_Error_Kind.Bad_Option)
 }
 
@@ -1562,21 +1507,18 @@ followed :: proc(d: ^rules.Description, i: rules.Node_Index, extra: ^rules.Rules
 // Writes `d` and compiles the text back as 2020-12, asserting formats when `d` does. A description the write refuses
 // comes back with the keyword it names.
 @(private = "file")
-written_back :: proc(t: ^testing.T, d: ^rules.Description, doc: ^core.Document) -> (back: schema.Compiled, text: []u8, refused: string) {
+written_back :: proc(t: ^testing.T, d: ^rules.Description) -> (back: ^schema.Compiled, text: []u8, refused: string) {
 	werr: core.Error
 	text, werr = schema.write(d, json.as(.Json))
 	if f, is_typed := werr.(core.Typed_Error); is_typed && f.kind == .Unsupported {
-		return {}, nil, f.want.text
+		return nil, nil, f.want.text
 	}
 	testing.expectf(t, werr == nil, "write: %v", werr)
-	built, berr := core.build(text, json.as(.Json))
-	testing.expectf(t, berr == nil, "built %s: %v", text, berr)
-	doc^ = built
 	cerr: core.Error
-	back, cerr = schema.compile(doc, core.ROOT, {resolver = {as = json.as(.Json)}})
+	back, cerr = schema.compile(text, json.as(.Json))
 	testing.expectf(t, cerr == nil, "read %s: %v", text, cerr)
 	if cerr != nil {
-		return {}, text, "compile"
+		return nil, text, "compile"
 	}
 	return back, text, ""
 }
@@ -1606,13 +1548,12 @@ schema_write_reads_back_to_the_suite_schemas :: proc(t: ^testing.T) {
 			in_formats := strings.contains(info.fullpath, "optional/format/")
 			for group in core.child_next(&groups) {
 				node, _ := core.member(&doc, group, "schema")
-				c, err := schema.compile(&doc, node, {format_assert = in_formats, resolver = {as = json.as(.Json), draft = entry.draft, root = REMOTES}})
+				c, err := schema.compile(core.span(&doc, node), json.as(.Json), {format_assert = in_formats, draft = entry.draft, refs = REMOTES})
 				if err != nil {
 					skips["read"] += 1
 					continue
 				}
-				back_doc: core.Document
-				back, text, refused := written_back(t, c.description, &back_doc)
+				back, text, refused := written_back(t, c.description)
 				if refused != "" {
 					skips[refused] += 1
 					testing.expectf(t, refused == "integer", "%s: refused %s", info.fullpath[len(SUITE):], refused)
@@ -1624,8 +1565,8 @@ schema_write_reads_back_to_the_suite_schemas :: proc(t: ^testing.T) {
 					differ += 1
 					log.warnf("%s: written back differs: %s", info.fullpath[len(SUITE):], text)
 				}
-				b, berr := schema.bind(&c, json.checks(.Json))
-				b2, b2err := schema.bind(&back, json.checks(.Json))
+				b, berr := schema.bind(c, json.checks(.Json))
+				b2, b2err := schema.bind(back, json.checks(.Json))
 				if berr != nil || b2err != nil {
 					skips["bind"] += 1
 					continue
@@ -1693,17 +1634,15 @@ schema_write_reads_back_to_described_types :: proc(t: ^testing.T) {
 	for key, &plan in plans {
 		d, described := description_of(&plan)
 		testing.expect(t, described == nil)
-		doc: core.Document
-		back, text, refused := written_back(t, &d, &doc)
+		back, text, refused := written_back(t, &d)
 		testing.expectf(t, refused == "", "%v: %s", key.type, refused)
 		seen: Pairs
 		testing.expectf(t, same_schema(&d, back.description, d.root, back.description.root, &seen, true), "%v %v: %s", key.type, key.enums, text)
 	}
 	plan := ruled_plan(Written_Merge)
 	d, _ := description_of(&plan)
-	doc: core.Document
-	back, text, _ := written_back(t, &d, &doc)
-	b, bound := schema.bind(&back, json.checks(.Json))
+	back, text, _ := written_back(t, &d)
+	b, bound := schema.bind(back, json.checks(.Json))
 	testing.expect(t, bound == nil)
 	cases := [?]struct {
 		text:  string,
@@ -1750,7 +1689,7 @@ schema_write_refuses_what_it_cannot_spell :: proc(t: ^testing.T) {
 		{`{"type": "integer"}`, "integer", .D04},
 	}
 	for c in cases {
-		d, _, _, err := read_text(c.text, c.draft)
+		d, _, err := read_text(c.text, c.draft)
 		testing.expectf(t, err == nil, "%s: %v", c.text, err)
 		_, werr := schema.write(&d, json.as(.Json))
 		f, _ := werr.(core.Typed_Error)
@@ -1765,12 +1704,9 @@ schema_write_spells_dynamic_references :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
 	text := `{"$id": "https://x/ext", "$dynamicAnchor": "n", "$ref": "base", "maxProperties": 1, "$defs": {"base": {"$id": "base", "$dynamicAnchor": "n", "properties": {"kid": {"$dynamicRef": "#n"}}}}}`
-	d, _, doc, err := read_text(text)
-	defer core.destroy(&doc)
+	d, _, err := read_text(text)
 	testing.expect(t, err == nil)
-	back_doc: core.Document
-	back, written, refused := written_back(t, &d, &back_doc)
-	defer core.destroy(&back_doc)
+	back, written, refused := written_back(t, &d)
 	testing.expect_value(t, refused, "")
 	testing.expect(t, strings.contains(string(written), "\"$dynamicRef\":\"https://schema.invalid/r"))
 	seen: Pairs
@@ -1789,14 +1725,9 @@ schema_write_spells_json5_numbers_as_json :: proc(t: ^testing.T) {
 		{`{minimum: Infinity}`, "", "minimum"},
 	}
 	for c in cases {
-		doc, derr := core.build(transmute([]u8)c.text, json.as(.Json5))
-		testing.expect(t, derr == nil)
-		res := schema.Resolver {
-			as = json.as(.Json5),
-		}
-		d, rerr := schema.read(&doc, core.ROOT, "", &res)
+		sc, rerr := schema.compile(transmute([]u8)c.text, json.as(.Json5))
 		testing.expectf(t, rerr == nil, "%s: %v", c.text, rerr)
-		text, werr := schema.write(&d, json.as(.Json))
+		text, werr := schema.write(sc.description, json.as(.Json))
 		f, _ := werr.(core.Typed_Error)
 		testing.expectf(t, f.want.text == c.keyword && strings.contains(string(text), c.written), "%s: %s, %v", c.text, text, werr)
 	}
@@ -1899,7 +1830,7 @@ schema_check_reads_markup :: proc(t: ^testing.T) {
 		ch, err := checked_make(c.schema)
 		defer checked_destroy(ch)
 		testing.expectf(t, err == nil, "%s: %v", c.schema, err)
-		bound, _ := schema.bind(&ch.compiled, {layout = markup})
+		bound, _ := schema.bind(ch.compiled, {layout = markup})
 		defer schema.unbind(&bound)
 		for m, i in bound.plan.meta {
 			if c.bind != "" && m.name == c.bind {
@@ -2079,20 +2010,18 @@ schema_check_holds_deep_values :: proc(t: ^testing.T) {
 	testing.expect(t, schema.valid(&ch.bound, transmute([]u8)strings.to_string(many)))
 	checked_destroy(ch)
 	// An applicator that reaches its own node with no member or element between is refused when it compiles.
-	doc, _ := core.build(transmute([]u8)string(`{"$defs": {"a": {"allOf": [{"$ref": "#/$defs/a"}]}}, "$ref": "#/$defs/a"}`), json.as(.Json))
-	defer core.destroy(&doc)
-	c, cerr := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
+	c, cerr := schema.compile(transmute([]u8)string(`{"$defs": {"a": {"allOf": [{"$ref": "#/$defs/a"}]}}, "$ref": "#/$defs/a"}`), json.as(.Json))
 	testing.expect(t, cerr != nil)
 	if cerr == nil {
-		schema.destroy(&c)
+		schema.destroy(c)
 	}
 	// So is one that reaches it through a `$dynamicRef`.
 	for text in ([?]string{`{"$dynamicAnchor": "a", "allOf": [{"$dynamicRef": "#a"}]}`, `{"$dynamicAnchor": "a", "if": true, "else": {"$dynamicRef": "#a"}}`}) {
 		dyn, _ := core.build(transmute([]u8)text, json.as(.Json))
-		dc, derr := schema.compile(&dyn, core.ROOT, {resolver = {as = json.as(.Json)}})
+		dc, derr := schema.compile(core.span(&dyn, core.ROOT), json.as(.Json), {})
 		testing.expect(t, derr != nil, text)
 		if derr == nil {
-			schema.destroy(&dc)
+			schema.destroy(dc)
 		}
 		core.destroy(&dyn)
 	}
@@ -2128,25 +2057,20 @@ schema_keeps_annotations :: proc(t: ^testing.T) {
 	doc, derr := core.build(transmute([]u8)text, json.as(.Json))
 	defer core.destroy(&doc)
 	testing.expect(t, derr == nil)
-	res := schema.Resolver{as = json.as(.Json), draft = .D2020_12}
-	d, err := schema.read(&doc, core.ROOT, "", &res)
+	d, _, err := read_text(string(core.span(&doc, core.ROOT)), .D2020_12)
 	testing.expect(t, err == nil)
 	n := d.nodes[d.root]
 	testing.expect_value(t, n.title, "T")
 	testing.expect_value(t, n.content_encoding, "base64")
 	testing.expect_value(t, n.content_media_type, "text/plain")
 	testing.expect(t, n.deprecated && n.default_of != nil && len(n.examples) == 2)
-	back_doc: core.Document
-	back, written, refused := written_back(t, &d, &back_doc)
-	defer core.destroy(&back_doc)
+	back, written, refused := written_back(t, &d)
 	testing.expect_value(t, refused, "")
 	for part in ([?]string{`"title":"T"`, `"default":"x"`, `"examples":["a","b"]`, `"deprecated":true`, `"contentEncoding":"base64"`, `"contentMediaType":"text/plain"`}) {
 		testing.expectf(t, strings.contains(string(written), part), "%s in %s", part, written)
 	}
 	m := back.description.nodes[back.description.root]
 	testing.expect(t, m.title == "T" && m.deprecated && len(m.examples) == 2 && m.default_of != nil)
-	bad, _, bdoc, berr := read_text(`{"title": 1}`)
-	defer core.destroy(&bdoc)
-	_ = bad
+	_, _, berr := read_text(`{"title": 1}`)
 	testing.expect(t, berr != nil)
 }

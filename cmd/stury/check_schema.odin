@@ -15,6 +15,7 @@ import "../../core/write"
 import "../../core/schema"
 import dsv "../../dsv"
 import json "../../json"
+import "../../core/model"
 import "message"
 
 Report_Kind :: enum {
@@ -26,9 +27,10 @@ Report_Kind :: enum {
 // The options of `check` that name a schema. `flag` is the first one given.
 Schema_Options :: struct {
 	flag:          string,
-	judging:       string, // the first given but --format-assert, which schema gen takes too
+	judging:       string, // the first given but --format-assert and --schema-draft, which the schema verbs take too
 	file:          string,
 	refs:          string,
+	draft:         Maybe(schema.Draft), // the draft of a schema with no $schema
 	max_errors:    int,
 	report:        Report_Kind,
 	reported:      bool,
@@ -36,11 +38,10 @@ Schema_Options :: struct {
 	filter:        Maybe(string), // a filter to type against the schema, which judges no input then
 }
 
-// A schema compiled and bound to the format the inputs are read as. `doc` is the schema's text, which `compiled` borrows.
+// A schema compiled and bound to the format the inputs are read as. `text` is the schema's, which `compiled` borrows.
 Schema_Check :: struct {
-	doc:      core.Document,
 	text:     []byte,
-	compiled: schema.Compiled,
+	compiled: ^schema.Compiled,
 	bound:    schema.Bound,
 }
 
@@ -63,7 +64,7 @@ schema_option :: proc(s: ^Schema_Options, args: []string, i: int) {
 		s.format_assert = true
 		return
 	}
-	if s.judging == "" {
+	if s.judging == "" && a != "--schema-draft" {
 		s.judging = a
 	}
 	if i + 1 >= len(args) {
@@ -71,6 +72,8 @@ schema_option :: proc(s: ^Schema_Options, args: []string, i: int) {
 	}
 	value := args[i + 1]
 	switch a {
+	case "--schema-draft":
+		s.draft = draft_named(value)
 	case "--schema":
 		s.file = value
 	case "--schema-ref":
@@ -99,7 +102,7 @@ schema_option :: proc(s: ^Schema_Options, args: []string, i: int) {
 schema_open :: proc(s: Schema_Options, src: Source, option := "--schema") -> ^Schema_Check {
 	sc := schema_read(s, option)
 	err: core.Error
-	if sc.bound, err = schema.bind(&sc.compiled, {checks_of(src.as, src.spec == nil), src.as}); err != nil {
+	if sc.bound, err = schema.bind(sc.compiled, {checks_of(src.as, src.spec == nil), src.as}); err != nil {
 		usage_error("%s %s: %s", option, s.file, edit_error_text(sc.text, err))
 	}
 	return sc
@@ -126,6 +129,18 @@ checks_of :: proc(as: core.As, cells: bool) -> ^typed.Format_Reads {
 	return nil
 }
 
+// The draft --schema-draft names: 4, 6, 7, 2019-09 or 2020-12.
+draft_named :: proc(value: string) -> schema.Draft {
+	switch value {
+	case "4":       return .D04
+	case "6":       return .D06
+	case "7":       return .D07
+	case "2019-09": return .D2019_09
+	case "2020-12": return .D2020_12
+	}
+	usage_error("--schema-draft takes 4, 6, 7, 2019-09 or 2020-12, not %s", value)
+}
+
 // The schema `s` names, read and compiled but not bound, or a usage error telling why not under the name `option`.
 schema_read :: proc(s: Schema_Options, option := "--schema") -> ^Schema_Check {
 	if s.file == "" {
@@ -140,28 +155,28 @@ schema_read :: proc(s: Schema_Options, option := "--schema") -> ^Schema_Check {
 	if sc.text, read = read_file(f); !read {
 		os.exit(EXIT_USAGE)
 	}
-	err: core.Error
-	sc.doc, err = core.build(sc.text, json.as(.Json))
-	if err != nil {
-		usage_error("%s %s: %s", option, s.file, edit_error_text(sc.text, err))
-	}
 	if s.refs != "" && !os.is_dir(s.refs) {
 		usage_error("--schema-ref %s is not a directory", s.refs)
 	}
-	refs := s.refs if s.refs != "" else schema_directory(s.file)
 	opts := schema.Options {
 		format_assert = s.format_assert,
-		resolver = {root = refs, as = json.as(.Json)},
+		refs          = s.refs if s.refs != "" else schema_directory(s.file),
+		draft         = s.draft,
 	}
-	if sc.compiled, err = schema.compile(&sc.doc, core.ROOT, opts); err != nil {
-		usage_error("%s %s: %s", option, s.file, edit_error_text(sc.text, err))
+	err: core.Error
+	if sc.compiled, err = schema.compile(sc.text, json.as(.Json), opts); err != nil {
+		if _, faulted := err.(core.Fault); faulted {
+			usage_error("%s %s: %s", option, s.file, edit_error_text(sc.text, err))
+		}
+		message.write_stderr("stury: error: %s %s: %s (--schema-ref names the directory references are read from)\n", option, s.file, edit_error_text(sc.text, err))
+		os.exit(EXIT_USAGE)
 	}
 	return sc
 }
 
-// Judges `data`, the file `name`, against the schema and tells what it finds. `named` puts the file's name in a report.
+// Judges `data`, the file `name`, against the schema and tells what it finds. A report names the file; a valid file has a basic report and no problem document.
 // A fault is left for the plain check to tell, and is returned for the case it finds nothing.
-schema_judge :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, named: bool, data: []byte, src: Source, runner: ^core.Runner) -> (Verdict, core.Error) {
+schema_judge :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, data: []byte, src: Source, runner: ^core.Runner) -> (Verdict, core.Error) {
 	sink := typed.Sink {
 		max_errors = s.max_errors,
 		entries    = make([dynamic]core.Error_Entry, runtime.heap_allocator()),
@@ -169,25 +184,30 @@ schema_judge :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, named: 
 	defer typed.sink_destroy(&sink)
 	records, err := check_input(sc, data, src, runner, &sink)
 	by_record := !table_source(src) && (src.framing != .Concatenated || records > 1)
-	file := name if named else ""
 	#partial switch _ in err {
 	case nil:
 		if records == 0 {
 			return .Fault, nil
 		}
 		if s.report == .Basic {
-			report(sc, s, file, sink.entries[:], false)
+			report(sc, s, name, sink.entries[:], false)
 		}
 		return .Valid, nil
 	case core.Fault:
 		// The failures of the records before a cut one are told before the fault, which the plain check tells.
 		if told_before := failures_before(sink.entries[:]); len(told_before) > 0 && (src.framing != .Concatenated || records > 0) {
-			tell(sc, s, name, file, data, told_before, by_record, &sink)
+			tell(sc, s, name, data, told_before, by_record, &sink)
 		}
 		return .Fault, err
 	case core.Typed_Error:
 		if len(sink.entries) > 0 {
-			tell(sc, s, name, file, data, sink.entries[:], by_record, &sink)
+			tell(sc, s, name, data, sink.entries[:], by_record, &sink)
+			// A pattern the search could not decide leaves the input unjudged, which is no failure of it.
+			for e in sink.entries {
+				if e.kind == .Pattern_Undecided {
+					return .Refused, err
+				}
+			}
 			return .Invalid, nil
 		}
 	}
@@ -230,14 +250,14 @@ failures_before :: proc(entries: []core.Error_Entry) -> []core.Error_Entry {
 
 // Tells `entries` of the file `name` as the report says: lines on standard error, or the basic output or problem document.
 @(private = "file")
-tell :: proc(sc: ^Schema_Check, s: Schema_Options, name, file: string, data: []byte, entries: []core.Error_Entry, by_record: bool, sink: ^typed.Sink) {
+tell :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, data: []byte, entries: []core.Error_Entry, by_record: bool, sink: ^typed.Sink) {
 	if s.report == .Lines {
 		told(name, data, entries)
 		if sink.truncated {
 			message.write_stderr("%s: more failures past --max-errors %d\n", name, len(sink.entries))
 		}
 	} else {
-		report(sc, s, file, entries, by_record, sink.truncated)
+		report(sc, s, name, entries, by_record, sink.truncated)
 	}
 }
 
@@ -270,7 +290,7 @@ report :: proc(sc: ^Schema_Check, s: Schema_Options, file: string, entries: []co
 	if s.report == .Basic {
 		schema.write_basic(&t, entries, sc.compiled.description.uri, r)
 	} else {
-		write.write_problem(&t, entries, {title = "Invalid input", status = 422}, r)
+		model.write_problem(&t, entries, {title = "Invalid input", status = 422}, r)
 	}
 	text, _ := write.tokens_finish(&t)
 	os.write(os.stdout, text)

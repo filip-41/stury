@@ -4,6 +4,7 @@ package main
 // SCHEMA` writes values that pass a schema, or with --invalid values that do not, and `stury schema gen SCHEMA` writes
 // the Odin types of its values. The inputs are read as `stury check` reads them, and a sample is written as --to says.
 
+import "base:runtime"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
@@ -111,17 +112,32 @@ schema_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	gen_main(cli, files)
 }
 
-// Reads the records of `data`, the file `path`, into `inf`. A fault is told on stderr and gives false, after the line of
-// the first fault of the bytes when `told_by` is given, which exits.
-infer_read :: proc(inf: ^schema.Inferred, src: Source, path: string, data: []byte, runner: ^core.Runner = nil, told_by: ^Opts = nil) -> bool {
+// Refuses a table output when the root of `d` takes no array, so there are no rows to write.
+refuse_unlisted :: proc(o: ^Opts, d: ^rules.Description) {
+	if !writes_cells(o) {
+		return
+	}
+	n := d.root
+	for hops := 0; hops <= len(d.nodes) && rules.ref_only(&d.nodes[n]); hops += 1 {
+		n = d.nodes[n].ref.?
+	}
+	if .Array not_in d.nodes[n].kinds {
+		usage_error("%s writes a table: the schema describes no array of rows", FORMATS[o.to].name)
+	}
+}
+
+// Reads the records of `data`, the file `path`, into `inf`. A fault is told on stderr as the plain check tells it, and
+// gives false.
+infer_read :: proc(inf: ^schema.Inferred, src: Source, path: string, data: []byte, o: ^Opts, runner: ^core.Runner = nil) -> bool {
 	err := schema.infer_records(inf, data, src.as, src.framing, runner)
 	if err == nil {
 		return true
 	}
-	if told_by != nil {
-		exit_on_fault(told_by, src, path, data)
+	if bad, is_fault := first_fault(data, src.as, src.framing, nil, 0).?; is_fault {
+		tell_operand_fault(o, src, path, data, bad)
+	} else {
+		message.write_stderr("stury: parse error: %s: %s\n", file_name(path), edit_error_text(data, err))
 	}
-	message.write_stderr("stury: parse error: %s: %s\n", file_name(path), edit_error_text(data, err))
 	return false
 }
 
@@ -131,6 +147,9 @@ infer_read :: proc(inf: ^schema.Inferred, src: Source, path: string, data: []byt
 infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 	if cli.formats.to != nil {
 		usage_error("--to is sample's: schema infer writes JSON Schema")
+	}
+	if cli.schema.draft != nil {
+		usage_error("--schema-draft is schema sample's and schema gen's: schema infer reads no schema")
 	}
 	if len(files) == 0 && is_terminal(os.stdin) && is_terminal(os.stdout) {
 		usage(EXIT_USAGE, true)
@@ -163,7 +182,7 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 		if len(data) >= POOLED_BYTES {
 			runner = run_pool(run)
 		}
-		if !infer_read(&inf, src, path, data, runner) {
+		if !infer_read(&inf, src, path, data, &run.opts, runner) {
 			faults += 1
 		}
 		free_spent({data, mapped})
@@ -195,53 +214,39 @@ sample_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 	if cli.formats.from != nil {
 		usage_error("--from is infer's: a schema is read as JSON")
 	}
-	d, text := read_schema_file(files[0], "schema sample")
+	sc := schema_read({file = files[0], draft = cli.schema.draft}, "schema sample")
+	d, text := sc.compiled.description, sc.text
 	if writes_cells(o) && cli.verbs.count > 1 {
 		usage_error("--count above 1 writes one table for each value, which is not one %s: use --count 1", FORMATS[o.to].name)
 	}
+	refuse_unlisted(o, d)
 	as := cells_written_as(o) if writes_cells(o) else json.as(FORMATS[FORMATS[o.to].written_as.? or_else o.to].spec)
 	// A value is a line, so the text is compact unless a layout option asks for more.
 	layout := output_layout(run).opts
 	layout.pretty = layout.pretty && cli.layout_flag != ""
-	values, serr := schema.sample(&d, as, {reads = checks_of(as, writes_cells(o)), seed = cli.verbs.seed, count = cli.verbs.count, invalid = cli.verbs.invalid, comments = cli.verbs.comments, write = layout})
+	// A value is written as it is made, so the run holds one value and one chunk of output.
+	Out :: struct {
+		text:  strings.Builder,
+		lines: bool,
+	}
+	out := Out {
+		text  = strings.builder_make(runtime.heap_allocator()),
+		lines = !writes_cells(o),
+	}
+	serr := schema.sample_each(d, as, {reads = checks_of(as, !out.lines), seed = cli.verbs.seed, count = cli.verbs.count, invalid = cli.verbs.invalid, comments = cli.verbs.comments, write = layout}, proc(text: []u8, user: rawptr) {
+		out := (^Out)(user)
+		strings.write_bytes(&out.text, text)
+		if out.lines {
+			strings.write_byte(&out.text, '\n')
+		}
+		flush_out(&out.text, false)
+	}, &out)
+	flush_out(&out.text, true)
 	if serr != nil {
 		message.write_stderr("stury: error: %s\n", edit_error_text(text, serr))
 		os.exit(1)
 	}
-	for v in values {
-		message.write_stdout("%s%s", string(v), "" if writes_cells(o) else "\n")
-	}
 	exit_closing_stdout(0)
-}
-
-// The description of the schema in the file `path`, and the file's text. A file that does not open, read or describe
-// is a usage error.
-@(private = "file")
-read_schema_file :: proc(path, verb: string) -> (rules.Description, []byte) {
-	f, opened := open_file(path, verb)
-	if !opened {
-		os.exit(EXIT_USAGE)
-	}
-	text, read := read_file(f)
-	if !read {
-		os.exit(EXIT_USAGE)
-	}
-	// The description's values are nodes of the document, which outlives this call.
-	doc := new(core.Document)
-	err: core.Error
-	doc^, err = core.build(text, json.as(.Json))
-	if err != nil {
-		usage_error("%s: %s", path, edit_error_text(text, err))
-	}
-	res := schema.Resolver {
-		as   = json.as(.Json),
-		root = schema_directory(path),
-	}
-	d, rerr := schema.read(doc, core.ROOT, "", &res)
-	if rerr != nil {
-		usage_error("%s: %s", path, edit_error_text(text, rerr))
-	}
-	return d, text
 }
 
 // The Odin types of the values of the schema in the one file `files` names, in the package --package names or else the
@@ -259,8 +264,9 @@ gen_main :: proc(cli: ^Cli, files: []string) -> ! {
 	if name == "" {
 		name = strings.to_snake_case(filepath.short_stem(files[0]))
 	}
-	d, text := read_schema_file(files[0], "schema gen")
-	source, err := schema.write_odin(&d, name, json.as(.Json), cli.schema.format_assert)
+	sc := schema_read({file = files[0], draft = cli.schema.draft}, "schema gen")
+	text := sc.text
+	source, err := schema.write_odin(sc.compiled.description, name, json.as(.Json), cli.schema.format_assert)
 	if e, typed := err.(core.Typed_Error); typed && e.kind == .Bad_Option {
 		usage_error("%q cannot name the package: it is no Odin identifier, or a package the types import%s", name, "" if cli.verbs.package_name != "" else ": name one with --package")
 	}

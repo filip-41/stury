@@ -14,7 +14,7 @@ import typed "../core/typed"
 // A full document binds its columns once, from the header row of `Document.tables`. A list of rows reads the header
 // row as its first row, as `unmarshal` does. A partial document has no shared keys: a headed record holds a key beside
 // each cell it kept, which binds that record's columns, and a record kept by position reads a cell it did not keep as an
-// empty unquoted one, which is absent.
+// empty unquoted one, which is `null`.
 
 @(private)
 Document_Cells :: struct {

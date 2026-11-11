@@ -3,6 +3,7 @@ package typed
 import "base:runtime"
 import regex "../regex"
 import rules "../rules"
+import "core:slice"
 
 // What a node evaluates of a value that passes it, which `unevaluatedProperties` and `unevaluatedItems` leave to their
 // own subschema: the members `names` name and `patterns` match, every member under `members`, the first `prefix`
@@ -84,7 +85,7 @@ evaluates :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, 
 	if n.array >= 0 {
 		a := d.arrays[n.array]
 		e.prefix, e.items = len(a.prefix), e.items || a.items != rules.NONE
-		if x, has := a.contains.?; has {
+		if x, has := a.contains.?; has && a.evaluates_contains {
 			e.contains = arm_record(b, d, arena, x)
 		}
 	}
@@ -142,6 +143,7 @@ Evaluating :: struct {
 	passes:  Passes,
 	data:    rawptr,
 	scratch: ^regex.Scratch,
+	undecided: bool, // set when a pattern search ran out of memory
 }
 
 // Marks in `marks` the members, in the object's order, or under `items` the elements of the value that `e` evaluates.
@@ -165,7 +167,9 @@ mark_evaluated :: proc(ev: ^Evaluating, e: ^Evaluates, marks: []bool, items: boo
 		}
 	} else if len(e.names) + len(e.patterns) > 0 {
 		for name, i in ev.names {
-			marks[i] ||= evaluates_name(e, name, ev.scratch)
+			hit, undecided := evaluates_name(e, name, ev.scratch)
+			marks[i] ||= hit
+			ev.undecided ||= undecided
 		}
 	}
 	for &x in e.inner {
@@ -177,24 +181,25 @@ mark_evaluated :: proc(ev: ^Evaluating, e: ^Evaluates, marks: []bool, items: boo
 
 // Whether `e` names the member `name` or a pattern of it matches it.
 @(private)
-evaluates_name :: proc(e: ^Evaluates, name: string, scratch: ^regex.Scratch) -> bool {
+evaluates_name :: proc(e: ^Evaluates, name: string, scratch: ^regex.Scratch) -> (found, undecided: bool) {
 	for x in e.names {
 		if x == name {
-			return true
+			return true, false
 		}
 	}
 	for p in e.patterns {
-		if matches(p, name, scratch) {
-			return true
+		hit, gave_up := matches(p, name, scratch)
+		if hit || gave_up {
+			return hit, gave_up
 		}
 	}
-	return false
+	return false, false
 }
 
 // Whether the in-place subschema `x` counts for the value.
 @(private)
 counts :: proc(ev: ^Evaluating, x: ^Inner) -> bool {
-	if name, keyed := x.name.?; keyed && !named(ev.names, name) {
+	if name, keyed := x.name.?; keyed && !slice.contains(ev.names, name) {
 		return false
 	}
 	if x.test >= 0 && ev.passes(ev.data, -1, x.test) != x.on {
@@ -272,7 +277,7 @@ static_set :: proc(d: ^rules.Description, node: rules.Node_Index, s: ^Static_Set
 		o := &d.objects[n.object]
 		s.varies ||= dependent_schemas(o)
 		for x in o.members {
-			if !x.only_required && !named(s.names[:], x.name) {
+			if !x.only_required && !slice.contains(s.names[:], x.name) {
 				append(&s.names, x.name)
 			}
 		}
@@ -283,7 +288,7 @@ static_set :: proc(d: ^rules.Description, node: rules.Node_Index, s: ^Static_Set
 	}
 	if n.array >= 0 {
 		a := &d.arrays[n.array]
-		s.varies ||= items && a.contains != nil
+		s.varies ||= items && a.contains != nil && a.evaluates_contains
 		s.prefix = max(s.prefix, len(a.prefix))
 		s.all_items ||= a.items != rules.NONE
 	}

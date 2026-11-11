@@ -14,6 +14,7 @@ import write "../../core/write"
 import records "../../core/records"
 import schema "../../core/schema"
 import json ".."
+import model "../../core/model"
 
 // A check on the threads of a pool against the check on one, and the reports of a check's entries.
 
@@ -22,24 +23,19 @@ OUTPUT_TESTS :: #directory + "conformance/JSON-Schema-Test-Suite/output-tests/"
 
 @(private = "file")
 Bound_Schema :: struct {
-	doc: core.Document,
-	c:   schema.Compiled,
-	b:   schema.Bound,
+	c: ^schema.Compiled,
+	b: schema.Bound,
 }
 
 // The schema in `text` compiled and bound to JSON, from the context allocator.
 @(private = "file")
 bind_text :: proc(t: ^testing.T, s: ^Bound_Schema, text: string, draft := schema.Draft.D2020_12) -> bool {
 	err: core.Error
-	s.doc, err = core.build(transmute([]u8)text, json.as(.Json))
+	s.c, err = schema.compile(transmute([]u8)text, json.as(.Json), {draft = draft})
 	if !testing.expectf(t, err == nil, "%s: %v", text, err) {
 		return false
 	}
-	s.c, err = schema.compile(&s.doc, core.ROOT, {resolver = {as = json.as(.Json), draft = draft}})
-	if !testing.expectf(t, err == nil, "%s: %v", text, err) {
-		return false
-	}
-	s.b, err = schema.bind(&s.c, json.checks(.Json))
+	s.b, err = schema.bind(s.c, json.checks(.Json))
 	return testing.expectf(t, err == nil, "%s: %v", text, err)
 }
 
@@ -143,11 +139,11 @@ schema_output_tests :: proc(t: ^testing.T) {
 			g := 0
 			for group in core.child_next(&groups) {
 				node, _ := core.member(&doc, group, "schema")
-				c, cerr := schema.compile(&doc, node, {resolver = {as = json.as(.Json), draft = entry.draft}})
+				c, cerr := schema.compile(core.span(&doc, node), json.as(.Json), {draft = entry.draft})
 				b: schema.Bound
 				berr := cerr
 				if cerr == nil {
-					b, berr = schema.bind(&c, json.checks(.Json))
+					b, berr = schema.bind(c, json.checks(.Json))
 				}
 				if berr != nil {
 					refused += 1
@@ -170,7 +166,7 @@ schema_output_tests :: proc(t: ^testing.T) {
 					j += 1
 				}
 				schema.unbind(&b)
-				schema.destroy(&c)
+				schema.destroy(c)
 				g += 1
 			}
 		}
@@ -197,7 +193,7 @@ schema_report_locations :: proc(t: ^testing.T) {
 	}
 	tw: write.Tokens
 	write.tokens_init(&tw, json.as(.Json), {}, context.temp_allocator)
-	write.write_problem(&tw, sink.entries[:], {title = "Invalid", status = 422}, {records = true, truncated = true})
+	model.write_problem(&tw, sink.entries[:], {title = "Invalid", status = 422}, {records = true, truncated = true})
 	text, _ := write.tokens_finish(&tw)
 	testing.expect_value(t, string(text), `{"title":"Invalid","status":422,"errors":[{"pointer":"/a~0~1b/1","record":4,"code":"wrong_kind","message":"Value is not of the allowed type"},{"pointer":"/c","record":4,"code":"above_maximum","message":"Number is above the maximum"}],"truncated":true}`)
 	testing.expect_value(t, basic_text(nil), `{"valid":true}`)

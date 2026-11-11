@@ -3,6 +3,7 @@ package core
 import "base:runtime"
 import "core:io"
 import "core:reflect"
+import "core:strings"
 import spell "./spell"
 
 // The error types of the layers that walk and build a text. `Fault` is the walk's error and `Document_Error` the
@@ -475,6 +476,7 @@ Typed_Error_Kind :: enum u8 {
 	Too_Short, // a string with fewer code points than a rule allows
 	Too_Long, // a string with more code points than a rule allows
 	No_Match, // a string a rule's pattern does not match
+	Pattern_Undecided, // a string a rule's pattern was not searched through, for the search ran out of memory
 	Bad_Format, // a string that is no value of a rule's format
 	Too_Few, // an array or object with fewer elements or members than a rule allows
 	Too_Many, // an array or object with more elements or members than a rule allows
@@ -549,7 +551,7 @@ typed_refusal_of :: proc "contextless" (f: Typed_Error) -> Typed_Refusal {
 // One error a check or a load reports. `start` and `end` are the failing value's first byte and the byte past it in the
 // source (a container the read skips ends at its open token, since the walk passes its close unseen), `record` is the index of the record the read was in
 // (0 for a read of one text), `path` the steps to the value from the root, any depth, and `keyword_path` the steps through
-// the rules that failed it. `operand` is the rule's operand, the limit or the enum. The steps' names are the sink's own
+// the rules that failed it. `operand` is the rule's operand: what a model's failed rule asks, a member's name for `.Missing_Field` and a name rule. The steps' names are the sink's own
 // copies, freed by `sink_destroy`.
 Error_Entry :: struct {
 	kind:         Typed_Error_Kind,
@@ -618,6 +620,7 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 	.Too_Short     = {"too_short", "String is too short"},
 	.Too_Long      = {"too_long", "String is too long"},
 	.No_Match      = {"no_match", "String does not match the pattern"},
+	.Pattern_Undecided = {"pattern_undecided", "The pattern could not be decided on the string"},
 	.Bad_Format    = {"bad_format", "String is not in the format"},
 	.Too_Few       = {"too_few", "Too few elements or members"},
 	.Too_Many      = {"too_many", "Too many elements or members"},
@@ -737,6 +740,9 @@ write_typed_message :: proc(w: io.Writer, e: Typed_Refusal) -> io.Error {
 			reflect.write_typeid(w, p.type) or_return
 			_, err := io.write_string(w, ", not the target's type")
 			return err
+		} else if p.plan != nil && p.read != nil {
+			_, err := io.write_string(w, "Plan is a model's, which reads only through model.load")
+			return err
 		}
 	case .Bad_Tag:
 		if len(e.want.text) > 0 {
@@ -745,7 +751,10 @@ write_typed_message :: proc(w: io.Writer, e: Typed_Refusal) -> io.Error {
 			io.write_string(w, "\" is not one the field takes") or_return
 			if e.want.type != nil {
 				io.write_string(w, " in ") or_return
-				_, err := reflect.write_typeid(w, e.want.type)
+				reflect.write_typeid(w, e.want.type) or_return
+			}
+			if strings.has_prefix(e.want.text, "pattern") && strings.contains_rune(e.want.text, ',') {
+				_, err := io.write_string(w, ": pattern= takes the rest of the tag, commas included, so put it last or add the rule with register_field")
 				return err
 			}
 			return nil
@@ -1043,6 +1052,10 @@ render :: proc(w: io.Writer, src: []u8, err: Error, lines: ^Lines = nil) -> io.E
 	return nil
 }
 
+// The kinds whose entry, outside a keyword path, holds in its operand what the failed rule asks.
+@(private)
+ENTRY_OPERAND_KINDS :: bit_set[Typed_Error_Kind]{.Wrong_Kind, .Below_Minimum, .Above_Maximum, .Too_Short, .Too_Long, .Too_Few, .Too_Many}
+
 // The message of a check's entry `e`, in a schema's words where the entry has a keyword path and the kind has such words.
 // A missing member is named, which only the entry's operand does, and so is the member whose name failed a name rule.
 write_entry_message :: proc(w: io.Writer, e: Error_Entry) -> io.Error {
@@ -1061,6 +1074,15 @@ write_entry_message :: proc(w: io.Writer, e: Error_Entry) -> io.Error {
 		message = SCHEMA_MESSAGES[e.kind]
 	}
 	io.write_string(w, message) or_return
+	if text, named := e.operand.(string); named && len(e.keyword_path) == 0 && e.kind in ENTRY_OPERAND_KINDS {
+		// What the failed rule asks, after the message: "String is too short, at least 2 characters".
+		io.write_string(w, ", ") or_return
+		if e.kind == .Wrong_Kind {
+			io.write_string(w, "expected ") or_return
+		}
+		_, err := io.write_string(w, text)
+		return err
+	}
 	if name, named := e.operand.(string); named {
 		io.write_string(w, " in the member name ") or_return
 		io.write_quoted_string(w, name) or_return

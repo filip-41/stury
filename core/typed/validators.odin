@@ -28,6 +28,7 @@ Report :: struct {
 	failures: [dynamic]Failure,
 }
 
+@(private)
 Failure :: struct {
 	field:   string,
 	message: string,

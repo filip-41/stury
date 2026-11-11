@@ -23,13 +23,13 @@ converted :: proc(t: ^testing.T, rules_text, src: string, from, to: core.As, sin
 	schema_doc, serr := core.build(transmute([]u8)rules_text, json.as(.Json))
 	testing.expectf(t, serr == nil, "%s: %v", rules_text, serr)
 	defer core.destroy(&schema_doc)
-	c, cerr := schema.compile(&schema_doc, core.ROOT, {resolver = {as = json.as(.Json)}})
+	c, cerr := schema.compile(core.span(&schema_doc, core.ROOT), json.as(.Json), {})
 	testing.expectf(t, cerr == nil, "%s: %v", rules_text, cerr)
-	defer schema.destroy(&c)
+	defer schema.destroy(c)
 	doc, derr := core.build(transmute([]u8)src, from)
 	testing.expectf(t, derr == nil, "%s: %v", src, derr)
 	defer core.destroy(&doc)
-	return convert_document(t, &c, &doc, to, sink)
+	return convert_document(t, c, &doc, to, sink)
 }
 
 // The typed reads a handle needs to check a description, those of CSV for a CSV handle and none for a JSON one.
@@ -101,15 +101,13 @@ convert_to_a_table_joins_the_columns_of_every_row :: proc(t: ^testing.T) {
 	testing.expect_value(t, got.text, "n,a,b\n1,x,\n2,,true\n3,,\n")
 }
 
-// The output is checked as its format reads it: a null the table writes as an empty cell is a member that is absent.
+// The output is checked as its format reads it: a null the table writes as an empty cell reads back as a null.
 @(test)
 convert_checks_the_output_as_its_format_reads_it :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	s := `{"type": "array", "items": {"type": "object", "required": ["b"]}}`
+	s := `{"type": "array", "items": {"type": "object", "required": ["b"], "properties": {"b": {"type": "null"}}}}`
 	got := converted(t, s, `[{"a": 1, "b": null}]`, json.as(.Json), dsv.as(.Csv))
-	testing.expect_value(t, got.stage, schema.Stage.Output)
-	testing.expect(t, got.err != nil)
-	testing.expect_value(t, got.text, "a,b\n1,\n")
+	testing.expectf(t, got.err == nil, "%v", got.err)
 }
 
 @(test)
@@ -197,14 +195,14 @@ convert_writes_markup_text_as_the_check_reads_it :: proc(t: ^testing.T) {
 	s := `{"type": "object", "properties": {"price": {"type": "object", "properties": {"n": {"type": "integer"}, "id": {"type": "string"}, "#text": {"type": "number"}}}}}`
 	schema_doc, _ := core.build(transmute([]u8)s, json.as(.Json))
 	defer core.destroy(&schema_doc)
-	c, cerr := schema.compile(&schema_doc, core.ROOT, {resolver = {as = json.as(.Json)}})
+	c, cerr := schema.compile(core.span(&schema_doc, core.ROOT), json.as(.Json), {})
 	testing.expect(t, cerr == nil)
-	defer schema.destroy(&c)
+	defer schema.destroy(c)
 	doc := markup_doc(`{"price": "5"}`, {{2, `n="3"`}, {2, `id="7"`}}, &readers)
 	defer core.destroy(&doc)
 	doc.as.readers = &readers
 	doc.nodes[2].kind = .Plain
-	got := convert_document(t, &c, &doc, json.as(.Json))
+	got := convert_document(t, c, &doc, json.as(.Json))
 	testing.expectf(t, got.err == nil, "%v", got.err)
 	testing.expect_value(t, got.text, `{"price":{"n":3,"id":"7","#text":5}}`)
 }
@@ -235,18 +233,18 @@ convert_writes_attributes_as_members :: proc(t: ^testing.T) {
 	s := `{"type": "object", "properties": {"price": {"type": "object", "properties": {"currency": {"enum": ["EUR", "USD"]}, "#text": {"maxLength": 3}}, "required": ["currency"], "additionalProperties": false}}}`
 	schema_doc, _ := core.build(transmute([]u8)s, json.as(.Json))
 	defer core.destroy(&schema_doc)
-	c, cerr := schema.compile(&schema_doc, core.ROOT, {resolver = {as = json.as(.Json)}})
+	c, cerr := schema.compile(core.span(&schema_doc, core.ROOT), json.as(.Json), {})
 	testing.expect(t, cerr == nil)
-	defer schema.destroy(&c)
+	defer schema.destroy(c)
 	doc := markup_doc(`{"price": "5"}`, {{2, `currency="EUR"`}}, &readers)
 	doc.as.readers = &readers
-	got := convert_document(t, &c, &doc, json.as(.Json))
+	got := convert_document(t, c, &doc, json.as(.Json))
 	testing.expectf(t, got.err == nil, "%v", got.err)
 	testing.expect_value(t, got.text, `{"price":{"currency":"EUR","#text":"5"}}`)
 	core.destroy(&doc)
 	doc = markup_doc(`{"price": "5"}`, {{2, `currency="GBP"`}}, &readers)
 	doc.as.readers = &readers
-	got = convert_document(t, &c, &doc, json.as(.Json))
+	got = convert_document(t, c, &doc, json.as(.Json))
 	testing.expect_value(t, got.stage, schema.Stage.Input)
 	core.destroy(&doc)
 }
@@ -257,13 +255,13 @@ markup_converted :: proc(t: ^testing.T, model: string, attributes: []Markup_Attr
 	readers.attribute = markup_attribute
 	schema_doc, _ := core.build(transmute([]u8)string(`{"type": "object"}`), json.as(.Json))
 	defer core.destroy(&schema_doc)
-	c, cerr := schema.compile(&schema_doc, core.ROOT, {resolver = {as = json.as(.Json)}})
+	c, cerr := schema.compile(core.span(&schema_doc, core.ROOT), json.as(.Json), {})
 	testing.expect(t, cerr == nil)
-	defer schema.destroy(&c)
+	defer schema.destroy(c)
 	doc := markup_doc(model, attributes, &readers, .All)
 	doc.as.readers = &readers
 	defer core.destroy(&doc)
-	return convert_document(t, &c, &doc, json.as(.Json))
+	return convert_document(t, c, &doc, json.as(.Json))
 }
 
 // A markup document loses nothing to the JSON model: a name its children repeat is an array, and the runs of text of a

@@ -51,7 +51,7 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		}
 		verdict, why := Verdict.Fault, core.Error(nil)
 		if sc != nil && !(reads_cells(o) && header_fault(file_name(path), data, src.as) != "") {
-			verdict, why = schema_judge(sc, cli.schema, file_name(path), len(cli.files) > 1, data, src, runner)
+			verdict, why = schema_judge(sc, cli.schema, file_name(path), data, src, runner)
 		}
 		switch verdict {
 		case .Valid:
@@ -77,14 +77,12 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 // The first fault of the text `data` of file `name`, read as `src` reads it, told with its note and a newline, or "".
 @(private = "file")
 check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^core.Runner) -> string {
-	cells := reads_cells(o)
-	if !cells && !o.seq && json.blank(data, src.spec.?) {
-		line, col := core.locate(data, u64(len(data)))
-		return message.build_temp("%s:%d:%d: No JSON text\n", name, line, col)
+	if msg := blank_told(name, data, src, o); msg != "" {
+		return msg
 	}
 	fault: Maybe(core.Fault)
 	switch {
-	case cells:
+	case reads_cells(o):
 		if msg := header_fault(name, data, src.as); msg != "" {
 			return msg
 		}
@@ -108,6 +106,15 @@ check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^c
 	}
 	f = literal_cut(data, f, src.framing)
 	return message.build_temp("%s\n%s", fault_told(name, data, f), fault_note(name, data, f, src.spec, o))
+}
+
+// The fault of a JSON input with no text in it, `data` of file `name`, told with a newline, or "".
+blank_told :: proc(name: string, data: []byte, src: Source, o: ^Opts) -> string {
+	if reads_cells(o) || o.seq || !json.blank(data, src.spec.?) {
+		return ""
+	}
+	line, col := core.locate(data, u64(len(data)))
+	return message.build_temp("%s:%d:%d: No JSON text\n", name, line, col)
 }
 
 // Whether the first text of `data` is a container or a string, which no byte after its close runs on from.

@@ -44,15 +44,18 @@ load_value :: proc(m: ^Model($T), v: core.Value, out: ^T, sink: ^typed.Sink = ni
 	return typed.check_text(text, out, T, &m.load_plan, read_options(opts, sink), allocator)
 }
 
-// Whether the load that filled `set`, a member of a struct of type `S` in `T`, read the member the text names `name`,
-// its alias when it has one. A read_only member is never read.
+// Whether the load that filled `set`, a member of a struct of type `S` in `T`, read the member `S` declares as `name`, by
+// the name Odin gives it and not the format's alias. A read_only member is never read. Asserts that `S` has a member
+// `name`.
 was_set :: proc(m: ^Model($T), $S: typeid, set: Fields_Set, name: string) -> bool {
+	member := reflect.struct_field_by_name(S, name)
+	assert(len(name) > 0 && member.name == name, "was_set: the struct has no member of that name")
 	for x in m.load_plan.meta {
 		if x.type != S || x.members == 0 || x.list {
 			continue
 		}
 		for i in 0 ..< x.members {
-			if m.load_plan.meta[x.block + i].name == name {
+			if uintptr(m.load_plan.fields[x.block + i].offset) == member.offset {
 				return set.bits[i / 64] >> uint(i % 64) & 1 != 0
 			}
 		}

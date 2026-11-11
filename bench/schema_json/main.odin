@@ -7,7 +7,6 @@ import "base:runtime"
 import "core:fmt"
 import "core:os"
 import "core:strings"
-import core "../../core"
 import schema "../../core/schema"
 import json "../../json"
 
@@ -40,14 +39,12 @@ judge :: proc(line: string) -> string {
 	if e := json.unmarshal(transmute([]u8)line, .Json, &c); e != nil {
 		return fmt.tprint("E", e)
 	}
-	doc, _ := json.build(transmute([]u8)c.schema, .Json)
-	defer core.destroy(&doc)
-	compiled, cerr := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
-	defer schema.destroy(&compiled)
+	compiled, cerr := schema.compile(transmute([]u8)c.schema, json.as(.Json))
+	defer schema.destroy(compiled)
 	if cerr != nil {
 		return fmt.tprint("E", cerr)
 	}
-	bound, berr := schema.bind(&compiled, json.checks(.Json))
+	bound, berr := schema.bind(compiled, json.checks(.Json))
 	defer schema.unbind(&bound)
 	if berr != nil {
 		return fmt.tprint("U", berr)

@@ -119,10 +119,7 @@ infer_round_trips_through_json_schema :: proc(t: ^testing.T) {
 			text, werr := schema.write(&d, json.as(.Json))
 			testing.expect(t, werr == nil)
 			doc, _ := core.build(text, json.as(.Json))
-			res := schema.Resolver {
-				as = json.as(.Json),
-			}
-			back, rerr := schema.read(&doc, core.ROOT, "", &res)
+			back, _, rerr := read_text(string(core.span(&doc, core.ROOT)))
 			testing.expectf(t, rerr == nil, "%s: %v", text, rerr)
 			again, _ := schema.write(&back, json.as(.Json))
 			testing.expect_value(t, string(again), string(text))
@@ -134,10 +131,7 @@ infer_round_trips_through_json_schema :: proc(t: ^testing.T) {
 	// A node's description and its markup node survive.
 	text := `{"description": "a note", "type": "object", "properties": {"id": {"type": "string", "xml": {"nodeType": "attribute"}}}}`
 	doc, _ := core.build(transmute([]u8)text, json.as(.Json))
-	res := schema.Resolver {
-		as = json.as(.Json),
-	}
-	d, err := schema.read(&doc, core.ROOT, "", &res)
+	d, _, err := read_text(string(core.span(&doc, core.ROOT)))
 	testing.expect(t, err == nil)
 	testing.expect_value(t, d.nodes[d.root].description, "a note")
 	out, _ := schema.write(&d, json.as(.Json))
@@ -318,10 +312,7 @@ sample_passes_its_check :: proc(t: ^testing.T) {
 	}
 	for text in schemas {
 		doc, _ := core.build(transmute([]u8)text, json.as(.Json))
-		res := schema.Resolver {
-			as = json.as(.Json),
-		}
-		d, rerr := schema.read(&doc, core.ROOT, "", &res)
+		d, _, rerr := read_text(string(core.span(&doc, core.ROOT)))
 		testing.expectf(t, rerr == nil, "%s: %v", text, rerr)
 		for spec in ([?]json.Spec{.Json, .Jsonc, .Json5}) {
 			for invalid in ([2]bool{false, true}) {
@@ -358,10 +349,7 @@ sample_gives_no_sample :: proc(t: ^testing.T) {
 			`{"exclusiveMinimum": 2, "exclusiveMaximum": 2, "type": "number"}`,
 		}) {
 		doc, _ := core.build(transmute([]u8)text, json.as(.Json))
-		res := schema.Resolver {
-			as = json.as(.Json),
-		}
-		d, rerr := schema.read(&doc, core.ROOT, "", &res)
+		d, _, rerr := read_text(string(core.span(&doc, core.ROOT)))
 		testing.expectf(t, rerr == nil, "%s: %v", text, rerr)
 		_, err := schema.sample(&d, json.as(.Json), {tries = 16})
 		f, _ := err.(core.Typed_Error)
@@ -382,10 +370,7 @@ sample_is_bounded_and_takes_the_other_branch :: proc(t: ^testing.T) {
 	}
 	for text in refused {
 		doc, _ := core.build(transmute([]u8)text, json.as(.Json))
-		res := schema.Resolver {
-			as = json.as(.Json),
-		}
-		d, rerr := schema.read(&doc, core.ROOT, "", &res)
+		d, _, rerr := read_text(string(core.span(&doc, core.ROOT)))
 		testing.expectf(t, rerr == nil, "%s: %v", text, rerr)
 		_, err := schema.sample(&d, json.as(.Json), {size = 1000})
 		f, _ := err.(core.Typed_Error)
@@ -399,10 +384,7 @@ sample_is_bounded_and_takes_the_other_branch :: proc(t: ^testing.T) {
 	}
 	for text in others {
 		doc, _ := core.build(transmute([]u8)text, json.as(.Json))
-		res := schema.Resolver {
-			as = json.as(.Json),
-		}
-		d, _ := schema.read(&doc, core.ROOT, "", &res)
+		d, _, _ := read_text(string(core.span(&doc, core.ROOT)))
 		got, err := schema.sample(&d, json.as(.Json), {count = 4, format_assert = true})
 		testing.expectf(t, err == nil, "%s: %v", text, err)
 		c := schema.compile_description(&d)
@@ -421,10 +403,7 @@ sample_names_the_node :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	text := `{"type": "object", "properties": {"a": {"type": "string", "minLength": 3, "maxLength": 2}}, "required": ["a"]}`
 	doc, _ := core.build(transmute([]u8)text, json.as(.Json))
-	res := schema.Resolver {
-		as = json.as(.Json),
-	}
-	d, _ := schema.read(&doc, core.ROOT, "", &res)
+	d, _, _ := read_text(string(core.span(&doc, core.ROOT)))
 	_, err := schema.sample(&d, json.as(.Json))
 	f, _ := err.(core.Typed_Error)
 	testing.expectf(t, f.kind == .No_Sample, "%v", err)

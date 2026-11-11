@@ -19,7 +19,7 @@ import walktest "../../walktest"
 fragment :: proc(text: string) -> ^rules.Description {
 	s, err := json.load_schema(transmute([]u8)text)
 	assert(err == nil)
-	return s.compiled.description
+	return s.description
 }
 
 @(private = "file")
@@ -48,7 +48,7 @@ Contact :: struct {
 }
 
 // The kind of `err`'s refusal, `.None` for nil.
-@(private = "file")
+@(private)
 refused_as :: proc(err: core.Error) -> core.Typed_Error_Kind {
 	#partial switch e in err {
 	case core.Typed_Error:
@@ -848,4 +848,17 @@ a_patch_is_judged_by_its_applicators_once_merged :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, model.patch(&m, &p, transmute([]u8)string(`{"zip": "1"}`)))
 	walktest.expect_nil(t, model.patch(&m, &p, transmute([]u8)string(`{"kind": "post"}`)))
 	testing.expect(t, p.kind == "post" && p.zip.? == "1")
+}
+
+// A later enum rule of a type replaces the earlier one, which no longer judges.
+@(test)
+a_later_enum_rule_replaces_the_earlier :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	reg: model.Registry
+	model.register(&reg, model.Enum_Rule{type = Shade, renames = {{"Purple", "p"}}})
+	model.register(&reg, model.Enum_Rule{type = Shade, renames = {{"Green", "verde"}}})
+	testing.expect_value(t, len(reg.enums), 1)
+	_, compiled := model.compile(&reg, Paint, json.checks(.Json))
+	walktest.expect_nil(t, compiled)
 }

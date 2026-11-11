@@ -286,7 +286,7 @@ a_model_has_a_load_schema_and_a_dump_schema :: proc(t: ^testing.T) {
 	load, _ := model.schema(&m, .Load)
 	doc, built := core.build(transmute([]u8)texts[.Load], json.as(.Json))
 	walktest.expect_nil(t, built)
-	read, read_err := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
+	read, read_err := schema.compile(core.span(&doc, core.ROOT), json.as(.Json), {})
 	walktest.expect_nil(t, read_err)
 	for member in read.description.objects[0].members {
 		node := read.description.nodes[member.node].rules
@@ -401,6 +401,53 @@ a_rule_no_value_can_satisfy_refuses_the_model :: proc(t: ^testing.T) {
 	testing.expectf(t, f.kind == .Bad_Tag && f.want.text == ">=5" && f.want.type == Registry_Clash, "%v", clashed)
 	message := fmt.tprint(refusal(Past_Type))
 	testing.expectf(t, strings.contains(message, "Past_Type"), "%s", message)
+}
+
+@(private = "file")
+Pattern_First :: struct {
+	s: string `model:"pattern=^a+$,len<=3"`,
+}
+
+@(private = "file")
+Pattern_Last :: struct {
+	s: string `model:"len<=3,pattern=^a{1,3}$|^b,c$"`,
+}
+
+// `pattern=` takes the rest of the tag, so a struct tag refuses one that would take an item after it, and a pattern
+// registered with `register_field` takes the same text whole.
+@(test)
+a_pattern_before_another_tag_item_refuses_the_model :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	_, first := model.compile(nil, Pattern_First, json.checks(.Json), context.temp_allocator)
+	f, _ := first.(core.Typed_Error)
+	testing.expectf(t, f.kind == .Bad_Tag && f.want.text == "pattern=^a+$,len<=3" && steps_text(f.steps) == ".s", "%v", first)
+	b := strings.builder_make(context.temp_allocator)
+	core.render(strings.to_writer(&b), nil, first)
+	message := strings.to_string(b)
+	testing.expectf(t, strings.contains(message, "put it last") && strings.contains(message, "register_field"), "%s", message)
+	last, compiled := model.compile(nil, Pattern_Last, json.checks(.Json), context.temp_allocator)
+	walktest.expect_nil(t, compiled)
+	for c in ([?]struct {
+			s:  string,
+			ok: bool,
+		}{{"aaa", true}, {"b,c", true}, {"aaaa", false}, {"b", false}}) {
+		v := Pattern_Last{c.s}
+		testing.expectf(t, (model.validate(&last, &v) == nil) == c.ok, "%q", c.s)
+	}
+	reg: model.Registry
+	defer model.destroy(&reg)
+	model.register(&reg, model.Field_Rule_Of{Pattern_Plain, "s", "pattern=^a+,len<=3$"})
+	registered, err := model.compile(&reg, Pattern_Plain, json.checks(.Json), context.temp_allocator)
+	walktest.expect_nil(t, err)
+	v := Pattern_Plain{"aa,len<=3"}
+	walktest.expect_nil(t, model.validate(&registered, &v))
+	v.s = "aa"
+	testing.expect(t, model.validate(&registered, &v) != nil)
+}
+
+@(private = "file")
+Pattern_Plain :: struct {
+	s: string,
 }
 
 @(test)

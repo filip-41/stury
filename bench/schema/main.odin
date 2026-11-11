@@ -14,7 +14,6 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 import "../timing"
-import core "../../core"
 import typed "../../core/typed"
 import records "../../core/records"
 import schema "../../core/schema"
@@ -65,17 +64,12 @@ main :: proc() {
 		fmt.eprintln(os.args[2], terr)
 		os.exit(1)
 	}
-	doc, berr := json.build(text, .Json)
-	if berr != nil {
-		fmt.eprintln(os.args[2], berr)
-		os.exit(1)
-	}
-	compiled, cerr := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
+	compiled, cerr := schema.compile(text, json.as(.Json))
 	if cerr != nil {
 		fmt.eprintln(os.args[2], cerr)
 		os.exit(1)
 	}
-	if bound, cerr = schema.bind(&compiled, json.checks(.Json)); cerr != nil {
+	if bound, cerr = schema.bind(compiled, json.checks(.Json)); cerr != nil {
 		fmt.eprintln(os.args[2], cerr)
 		os.exit(3)
 	}

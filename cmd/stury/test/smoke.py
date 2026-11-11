@@ -369,24 +369,31 @@ open(deep).read() == open(caps["deep1100"]).read() or fail("fmt_in_place_deep_un
 # A bare name's temporary file goes beside it, not to TMPDIR, which may be another device.
 file("bare.json", '{"a":1}')
 subprocess.run([S, "fmt", "--in-place", "bare.json"], cwd=T, env={**os.environ, "TMPDIR": os.path.join(T, "absent")}).returncode == 0 or fail("fmt_in_place_bare_name", "")
-# The temporary file is the owner's alone while it is written: a file size limit ends the run in the middle of the
-# write and leaves it behind.
+# The temporary file is the owner's alone while it is written: it is watched from its creation until the run ends, under
+# a umask that allows everything, while a large text is written and synced.
 if os.name == "posix":
-    import resource
-
     private = os.path.join(T, "private")
     os.mkdir(private)
     secret = os.path.join(private, "secret.json")
-    with open(secret, "w") as f:
-        f.write("[" + ",".join(['{"a":1}'] * 4096) + "]")
-    os.chmod(secret, 0o600)
+    big = "[" + ",".join(['{"a":1}'] * 1000000) + "]"
     for name, args in (("fmt_in_place_temp_private", ["fmt", "--in-place"]), ("edit_in_place_temp_private", ["edit", "--in-place", ".[0].a = 2"])):
-        subprocess.run([S, *args, secret], preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (4096, 4096)))
-        temps = [os.path.join(private, t) for t in os.listdir(private) if t != "secret.json"]
-        modes = [os.stat(t).st_mode & 0o777 for t in temps]
-        temps and all(m == 0o600 for m in modes) or fail(name, [oct(m) for m in modes])
-        for t in temps:
-            os.remove(t)
+        modes = []
+        for _ in range(8):
+            with open(secret, "w") as f:
+                f.write(big)
+            os.chmod(secret, 0o600)
+            proc = subprocess.Popen([S, *args, secret], preexec_fn=lambda: os.umask(0))
+            while proc.poll() is None:
+                for t in os.listdir(private):
+                    if t != "secret.json":
+                        try:
+                            modes.append(os.stat(os.path.join(private, t)).st_mode & 0o777)
+                        except FileNotFoundError:
+                            pass
+            if modes:
+                break
+        modes and all(m == 0o600 for m in modes) or fail(name, [oct(m) for m in modes])
+        os.listdir(private) == ["secret.json"] or fail(name + "_removed", os.listdir(private))
 
 # edit --in-place changes only the edited bytes: comments, spacing and the spelling of every other value stay, the
 # file keeps its mode, and --check agrees.

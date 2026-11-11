@@ -56,6 +56,7 @@ Readings :: struct {
 	short: bool,
 }
 
+@(private)
 Reading :: struct {
 	lo:   u64,
 	kind: core.Kind,
@@ -536,12 +537,16 @@ judge_string :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token, l
 	room: [SCRATCH_ROOM]u8 = ---
 	stack: mem.Arena
 	scratch := stack_scratch(&stack, room[:])
-	return fails + rules.judge_string(l, text, &scratch)
+	fails += rules.judge_string(l, text, &scratch)
+	if .Pattern_Undecided in fails {
+		h.fatal = .Pattern_Undecided
+	}
+	return fails
 }
 
-// Whether the compiled `^regex.Regex` at `re` matches in the member name `name`.
+// Whether the compiled `^regex.Regex` at `re` matches in the member name `name`, and whether the search is undecided.
 @(private)
-key_matches :: #force_no_inline proc "contextless" (h: ^Check, re: rawptr, name: string) -> bool {
+key_matches :: #force_no_inline proc "contextless" (h: ^Check, re: rawptr, name: string) -> (found, undecided: bool) {
 	context = h.ctx
 	room: [SCRATCH_ROOM]u8 = ---
 	stack: mem.Arena
@@ -669,12 +674,20 @@ judge_number :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token, l
 check_report :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, l: ^rules.Leaf, of: core.Kind, fails: rules.Failures, lo, hi: u64, keyword := "") -> core.Action {
 	context = h.ctx
 	for kind in fails {
-		note(h, regs, {kind = kind, at = lo}, hi, keyword if keyword != "" else keyword_of(l, kind, of))
+		note(h, regs, {kind = kind, at = lo, found = of if kind == .Wrong_Kind else .Null}, hi, keyword if keyword != "" else keyword_of(l, kind, of), rule_operand(h, l, kind, of))
 		if h.sink == nil {
 			return .Stop
 		}
 	}
 	return .Next
+}
+
+// What an entry for the rule `l` holds that a value of kind `of` failed as `kind` says the value should have met, "" for
+// a schema's entries, whose messages name keywords, and for a read with no sink.
+@(private)
+rule_operand :: proc "contextless" (h: ^Check, l: ^rules.Leaf, kind: core.Typed_Error_Kind, of: core.Kind) -> string {
+	context = h.ctx
+	return "" if h.plan.checking || h.sink == nil else rules.operand_text(l, kind, of == .Object, context.temp_allocator)
 }
 
 // The keyword of `l` that holds the rule a value of kind `of` fails as `kind`, none for a value its use takes nowhere,
@@ -704,6 +717,7 @@ KEYWORDS := #partial [core.Typed_Error_Kind]string {
 	.Too_Short     = "minLength",
 	.Too_Long      = "maxLength",
 	.No_Match      = "pattern",
+	.Pattern_Undecided = "pattern",
 	.Bad_Format    = "format",
 	.Missing_Field = "required",
 }
@@ -782,9 +796,17 @@ check_key :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token)
 			}
 		}
 	}
-	if u.pattern != 0 && key_matches(h, u.regex, key) {
-		regs.b = u64(uintptr(&h.plan.fields[u.pattern]))
-		return regs, .Next
+	if u.pattern != 0 {
+		found, undecided := key_matches(h, u.regex, key)
+		if undecided {
+			context = h.ctx
+			lo, hi := core.scalar_ends(t)
+			return regs, fork_fault(h, {f.a, f.b, f.c}, .Pattern_Undecided, lo, hi)
+		}
+		if found {
+			regs.b = u64(uintptr(&h.plan.fields[u.pattern]))
+			return regs, .Next
+		}
 	}
 	if u.additional != 0 {
 		regs.b = u64(uintptr(&h.plan.fields[u.additional]))
@@ -891,7 +913,7 @@ store_integral :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token,
 
 // Stores into an enum read by number a number spelled with a fraction or an exponent that is an integer, as
 // `store_integral` stores one into an integer.
-@(cold)
+@(private, cold)
 store_integral_enum :: proc(h: ^Check, t: core.Token, info: ^runtime.Type_Info_Enum, dest: uintptr, size: u32) -> core.Typed_Error_Kind {
 	if t.spelling & core.NUMBER_KIND_MASK != 0 {
 		return .Wrong_Kind
@@ -927,7 +949,7 @@ check_rules :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_R
 	context = h.ctx
 	lo, hi := core.scalar_ends(t)
 	for kind in fails {
-		note(h, regs, {kind = kind, at = lo}, hi)
+		note(h, regs, {kind = kind, at = lo}, hi, nil, rule_operand(h, l, kind, t.kind))
 		if h.sink == nil {
 			return .Stop
 		}
@@ -1014,7 +1036,26 @@ object_open :: proc(r: ^Reader, from := 1) -> bool {
 @(cold)
 @(private)
 text_repeats :: proc(r: ^Reader) -> bool {
-	doc, err := core.build(r.src, r.plan.as, .Refuse, context.temp_allocator)
-	core.destroy(&doc)
-	return err != nil
+	doc, built := text_built(r)
+	defer core.destroy(&doc)
+	if !built {
+		return true
+	}
+	at := make([dynamic]u64, context.temp_allocator)
+	holds, kept := repeats_inside(&doc, core.ROOT, &at)
+	return holds || !kept
+}
+
+// The document of the text a check reads, keeping every member, in the temp allocator: built by the plan's own build,
+// which a plan made with a format's reads or checks has, else by its handle's. False when neither builds it.
+@(private)
+text_built :: proc(r: ^Reader) -> (doc: core.Document, built: bool) {
+	if r.plan.build != nil {
+		err: core.Document_Error
+		doc, err = r.plan.build(r.src, r.plan.as, context.temp_allocator)
+		return doc, err.kind == .None && len(doc.nodes) > 0
+	}
+	err: core.Error
+	doc, err = core.build(r.src, r.plan.as, .Last, context.temp_allocator)
+	return doc, err == nil && len(doc.nodes) > 0
 }

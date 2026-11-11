@@ -70,7 +70,7 @@ visit_record :: proc(w: ^Walker, open: Frame, top: int, f: ^typed.Field, at: uin
 	w.open, w.top = open, top
 	more := w.visitor.call(w.visitor, f, at, kind)
 	#partial switch f.kind {
-	case .F32, .F64, .Enum, .Hook, .Ptr:
+	case .F32, .F64, .Enum, .Hook, .Ptr, .Maybe, .Union:
 		return more
 	}
 	return more && kind == .None

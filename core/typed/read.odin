@@ -184,7 +184,7 @@ read_release :: proc "contextless" (r: ^Reader, frames: []Frame) {
 
 // The refusal of a read or write given `plan` for a value of `T` in the format `readers` reads, which the plan does not
 // read: the plan's own error when `plan_make` refused it, else `.Plan_Mismatch` naming the two formats, or the plan's
-// type when the formats agree.
+// type when the formats agree, or nothing more for a model's plan, which only `model.load` reads.
 plan_mismatch :: proc "contextless" (plan: ^Plan, readers: ^core.Readers, T: typeid) -> core.Typed_Refusal {
 	e := core.Typed_Refusal{kind = .Plan_Mismatch}
 	if plan == nil {
@@ -193,7 +193,9 @@ plan_mismatch :: proc "contextless" (plan: ^Plan, readers: ^core.Readers, T: typ
 	if plan.err.kind != .None {
 		return plan.err
 	}
-	e.plans = {plan.readers, readers, plan.type if core.same_format(plan.readers, readers) else nil}
+	same := core.same_format(plan.readers, readers)
+	// A model's plan that agrees in format and type is refused for being a model's, which no type in the refusal stands for.
+	e.plans = {plan.readers, readers, plan.type if same && !(plan.model_plan != .None && plan.type == T) else nil}
 	return e
 }
 
