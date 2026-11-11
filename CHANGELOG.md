@@ -7,8 +7,8 @@
 - `stury fmt --schema FILE` converts through a JSON Schema: the input passes it, the members it leaves open are kept, and
   the output passes it as the output format reads it. Library: `schema.Converter` and `schema.convert`.
 
-- `stury schema gen SCHEMA [--package NAME]` writes the Odin types a model reads a schema's values with, and exits 1
-  naming the keyword where no type spells one. Library: `schema.write_odin`.
+- `stury schema gen SCHEMA [--package NAME] [--format-assert]` writes the Odin types a model reads a schema's values
+  with, and exits 1 naming the keyword where no type spells one. Library: `schema.write_odin`.
 
 - `stury schema sample --to csv` writes the union of the rows' members as its columns, an absent member as an empty cell,
   and refuses a nested cell.
@@ -208,6 +208,10 @@
   members with their own set member by member.
 - `schema.write_odin` writes the Odin source of the types of a description's values, with a `register` procedure for
   the rules no tag holds, and refuses a keyword no type spells as `.Unsupported`, naming it.
+- A model's `not_null` tag item keeps null out of a pointer member, which otherwise reads null as nil. A struct's
+  `extra` member may be a `map[string]T`, which judges each member it captures as a `T`, and the Load schema describes
+  it as `additionalProperties`. A struct registered with `.Forbid` refuses an unknown member when it has no required
+  member too. A `union {}` member reads only null.
 - `model.problem` (`write.problem`) makes an RFC 9457 problem document of a sink's entries, for any format to write.
   `load`, `load_value` and `read` take `Load_Opts` in place of `dups`.
 

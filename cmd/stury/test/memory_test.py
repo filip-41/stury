@@ -16,6 +16,9 @@ RECORDS = 100000
 # The peak over many files may pass the peak over one by this share and this many bytes: threads that join in later
 # files take arenas of their own.
 SHARE, SLACK = 1.5, 8 << 20
+# A schema check of one file of records holds no memory per record: its peak stays within a few times the file.
+CHECK_PEAK = 64 << 20
+SCHEMA = '{"properties":{"id":{"type":"integer"},"level":{"enum":["info","warn"]},"msg":{"type":"string","maxLength":200}}}'
 
 
 def fixtures():
@@ -46,11 +49,14 @@ def main():
             paths[kind] = [first] + [os.path.join(tmp, f"{kind}-{i}") for i in range(1, COPIES)]
             for path in paths[kind][1:]:
                 os.link(first, path)
-        lanes = (("ndjson", ["-c", "."]), ("json", ["-c", "."]), ("csv", ["-c", "--from", "csv", "."]), ("ndjson", ["-R", "."]))
+        schema = os.path.join(tmp, "schema.json")
+        open(schema, "w").write(SCHEMA)
+        lanes = (("ndjson", ["-c", "."]), ("json", ["-c", "."]), ("csv", ["-c", "--from", "csv", "."]), ("ndjson", ["-R", "."]),
+                 ("ndjson", ["check", "--schema", schema]))
         for threads, exe in exes.items():
             for kind, args in lanes:
                 one, many = peak_over(exe, args, paths[kind][:1]), peak_over(exe, args, paths[kind])
-                ok = many <= one * SHARE + SLACK
+                ok = many <= one * SHARE + SLACK and (args[0] != "check" or one <= CHECK_PEAK)
                 print(f"{'ok  ' if ok else 'FAIL'} {threads:9} {kind:7} {' '.join(args):18} 1 file {one >> 20:4} MiB, {COPIES} files {many >> 20:4} MiB")
                 if not ok:
                     failed.append((threads, kind, args))

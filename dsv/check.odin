@@ -3,8 +3,10 @@ package dsv
 // The check of a delimited text or document against a description's plan, `Format_Reads.check` and `node_check` of a plan
 // made with `checking`. The check is `typed.Check`, the one the other formats read with, and this file feeds it what a
 // JSON text of the same records gives it: a text is an array of objects keyed by the header, or of arrays under
-// `no_header`, and an empty unquoted cell is an absent member. A cell has no kind, so it reaches the check as `Plain`
-// and the leaf it lands on reads it (`plain_token` of `core/typed`). A column whose name another column repeats is judged
+// `no_header`, and an empty unquoted cell is an absent member. A cell is one kind for the whole verdict, the one
+// `spelling_resolve` reads it as: a string, or under `infer` a number, `true` or `false` when its text is exactly one.
+// A check that keeps `readings`, which the schema-directed conversion runs, lets the leaf a cell lands on pick its kind
+// instead (`plain_token` of `core/typed`). A column whose name another column repeats is judged
 // by the read's `Duplicates`: the earlier one is dropped under `.Last`, the later under `.First`, and a repeat is
 // refused under `.Refuse`, where the dropped cell is not judged and does not count as a member.
 
@@ -23,6 +25,29 @@ Check_Cells :: struct {
 	dups:  core.Duplicates,
 	held:  bool,
 	bound: bool,
+	infer: bool, // a cell that is exactly a JSON number, `true` or `false` is that kind
+}
+
+// The token of the value cell `t` as the check judges it: its one kind, unless the check keeps readings.
+@(private)
+cell_token :: #force_inline proc "contextless" (h: ^Check_Cells, t: core.Token) -> core.Token {
+	t := t
+	if h.c.readings != nil {
+		return t
+	}
+	t.kind = .String
+	if h.infer && t.spelling == 0 && t.n != 0 && t.role == .Value {
+		context = h.c.ctx
+		// A number is spelled as the generic decimal, which the check judges by its text.
+		kind, integer := core.plain_kind(h.c.src, t.lo, t.lo + u64(t.n), true, true)
+		if kind != .String {
+			t.kind = kind
+		}
+		if kind == .Number {
+			t.spelling = core.number_spelling(core.NUMBER_DECIMAL, 1, 0 if integer else 1)
+		}
+	}
+	return t
 }
 
 // The hook of a check. A column key waits for its cell, so an empty cell drops both and a dropped column drops both.
@@ -50,6 +75,8 @@ on_check_cell :: #force_inline proc "contextless" (h: ^Check_Cells, regs: core.H
 		t := t
 		if empty {
 			t.kind = .Null
+		} else {
+			t = cell_token(h, t)
 		}
 		return typed.on_token_check(&h.c, regs, t)
 	case:
@@ -63,7 +90,7 @@ on_check_cell :: #force_inline proc "contextless" (h: ^Check_Cells, regs: core.H
 			// A key the check passed over takes its cell with it.
 			return out, .Stop if action == .Stop else .Next
 		}
-		return typed.on_token_check(&h.c, out, t)
+		return typed.on_token_check(&h.c, out, cell_token(h, t))
 	}
 	return regs, .Next
 }
@@ -119,7 +146,7 @@ untracked_frames :: #force_inline proc "contextless" (f: []typed.Frame) -> []typ
 // Checks `src`, a text of spec `S`, as the plan's description says.
 @(private)
 check_cells :: proc(src: []u8, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
-	h := Check_Cells{dups = read.dups}
+	h := Check_Cells{dups = read.dups, infer = opts.infer}
 	frames: [ROW_FRAMES]typed.Frame = ---
 	regs, err := typed.check_start(&h.c, src, untracked(plan), bound_as(S, opts), T, target, read, untracked_frames(frames[:]), allocator)
 	if err.kind != .None {
@@ -162,7 +189,7 @@ document_check :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, ta
 	if node != core.ROOT && doc.nodes[node].kind <= .Plain {
 		return {kind = .Unsupported}
 	}
-	d := Check_Document{doc = doc, cells = {dups = read.dups}, positional = options_of(doc.as).no_header}
+	d := Check_Document{doc = doc, cells = {dups = read.dups, infer = options_of(doc.as).infer}, positional = options_of(doc.as).no_header}
 	h := &d.cells
 	frames: [ROW_FRAMES]typed.Frame = ---
 	regs, err := typed.check_start(&h.c, doc.src, untracked(plan), doc.as, T, target, read, untracked_frames(frames[:]), allocator)

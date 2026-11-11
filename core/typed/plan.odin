@@ -107,12 +107,13 @@ Meta :: struct {
 	zeroed:     bool, // a list's new elements must start zeroed, since their readers may leave bytes unwritten
 	tagged:     bool, // a `Union` that reads objects by `union_tag`, or such a union's named struct arm
 	union_tag:  string, // the member a tagged `Union` and its named struct arms name the arm by
-	no_nil:     bool, // a `Union` that has no nil
+	no_nil:     bool, // a `Union` that has no nil, or a pointer member that refuses null
 	access:     Access, // a struct member's, under a model
 	omit_empty: bool, // a member the tag's `omitempty` leaves out when it is empty, where `Field.omit` may be a model's
 	optional:   bool, // a model's member that a load does not require
 	bit:        i8, // a model's member's bit in its struct's `Fields_Set`, -1 for one the load does not read
 	forbid:     bool, // a struct whose model refuses the members it does not name
+	counted:    bool, // on a checked object's record, its leaf bounds how many members the object holds
 	model:      ^Struct_Model, // on a struct's records, what a load does with it, nil for none
 	owner:      ^Struct_Model, // on a model's member's record, its struct's model, nil for none
 	rule_set:   i32, // 1 + the record's leaf in `Plan.leaves`, and for a type's plan its set in `Plan.rule_sets`, 0 for none
@@ -136,6 +137,10 @@ Use :: struct {
 	applies:                 []Apply,
 	// The arms a check with no sink reads in their place, with the `allOf` and `$ref` arms conjoined, nil for the same.
 	verdict:                 []Apply,
+	// The ids the held uses a check with no sink, and one with a sink, judges alike share, by arms that read the same
+	// records the same way, 0 for a use with no arms.
+	judging:                 u32,
+	judging_all:             u32,
 	// An object record's `dependentRequired`, which its close judges by the members seen.
 	requires:                []Requires,
 }
@@ -357,6 +362,7 @@ Member_Rule :: struct {
 	skip:     bool, // the member is no part of the model
 	access:   Access,
 	extra:    bool, // the member takes the members the struct does not name
+	not_null: bool, // a pointer member that refuses null
 	// What writes the member's default from `data`, nil for none.
 	make:     Make_Default,
 	data:     rawptr,
@@ -1143,7 +1149,8 @@ list :: proc(b: ^Builder, m: ^Meta, ti, elem: ^runtime.Type_Info, stride: u32, r
 fill_union :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: runtime.Type_Info_Union) {
 	f.kind = .Union
 	m.tag, m.no_nil = u32(v.tag_offset), v.no_nil
-	m.tag_size = 0 if reflect.type_info_union_is_pure_maybe(v) else u8(v.tag_type.size)
+	// A union of no arms has no tag, and holds only its nil.
+	m.tag_size = 0 if v.tag_type == nil || reflect.type_info_union_is_pure_maybe(v) else u8(v.tag_type.size)
 	// A `Maybe`, the one arm reads on the hot kinds' own path.
 	if len(v.variants) == 1 && !v.no_nil {
 		elem := runtime.type_info_base(v.variants[0])
@@ -1324,6 +1331,7 @@ Member :: struct {
 	data:     rawptr,
 	after:    Validator,
 	before:   ^Before,
+	not_null: bool,
 }
 
 // What `lay_out` found of a struct besides its members: the member that captures unknown members, 1 + the offset of
@@ -1382,6 +1390,10 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 			return
 		}
 		b.meta[int(at) + n].forbid, m.forbid = forbid, forbid
+		// The read judges a key it does not name only in a struct that requires members.
+		if forbid {
+			f.kind = .Required
+		}
 		if b.model.structs != nil {
 			b.model.structs(b, ti.id, at, f, m, members[:], &layout)
 		}
@@ -1396,6 +1408,7 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 	for x, i in members {
 		fill(b, int(at) + i, x.type, x.name, u32(x.offset), 0, x.rule_set)
 		b.meta[int(at) + i].access = x.access
+		b.meta[int(at) + i].no_nil ||= x.not_null
 		if x.before != nil {
 			keep_before(b, int(at) + i, x.before)
 		}
@@ -1440,7 +1453,7 @@ known_struct :: proc(b: ^Builder, key: Block_Key, f: ^Field, m: ^Meta) -> bool {
 	m.block, m.members = at, b.ends[at] - at
 	end := &b.meta[b.ends[at]]
 	m.required_end, m.model, m.forbid = end.required_end, end.model, end.forbid
-	f.kind = .Required if len(end.required) > 0 || end.capture >= 0 || end.model != nil && end.model.settle != nil else .Struct
+	f.kind = .Required if len(end.required) > 0 || end.capture >= 0 || end.forbid || end.model != nil && end.model.settle != nil else .Struct
 	f.lists = end.capture >= 0
 	return true
 }
@@ -1551,12 +1564,12 @@ lay_out :: proc(b: ^Builder, owner: typeid, v: runtime.Type_Info_Struct, base: u
 			lay_out(b, v.types[i].id, inner, base + v.offsets[i], out, layout)
 			continue
 		}
-		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required, tag.omit || model.access == .Write_Only, rule_set, model.access, model.alias, model.make, model.data, model.after, model.before}
+		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required, tag.omit || model.access == .Write_Only, rule_set, model.access, model.alias, model.make, model.data, model.after, model.before, model.not_null}
 		if tag.unknown {
 			if tag.required || rule_set > 0 {
 				refuse_plan(b, .Bad_Tag, tag.name, "required" if tag.required else "model")
 			}
-			if v.types[i].id != typeid_of(map[string]Raw) && v.types[i].id != typeid_of(map[string]core.Value) || layout.capture != nil {
+			if captures, is_map := runtime.type_info_base(v.types[i]).variant.(runtime.Type_Info_Map); !is_map || runtime.type_info_base(captures.key).id != typeid_of(string) || layout.capture != nil {
 				refuse_plan(b, .Unsupported, tag.name)
 			}
 			layout.capture = x

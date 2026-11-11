@@ -2,7 +2,7 @@ package core
 
 // The order, equality and hash of values, in either form. The order is jq's: null < false < true < numbers < strings
 // < arrays < objects, arrays member by member, objects by their sorted key sets and then their values in key order.
-// An object's repeated key counts once, with its last value. A number literal is the decimal it spells at any size, so
+// An object's repeated key counts once, with its last value, or its first where `dups` is `.First`. A number literal is the decimal it spells at any size, so
 // `1.0` equals `1`, `100000000000000000001` is above `100000000000000000000`, `1e400` is below `1e401` and `1e-400` is
 // above `0`. A double is its shortest decimal, and an infinity is no decimal: it is above every literal, `-inf` below.
 // A trail is the array of its keys.
@@ -156,7 +156,7 @@ text_f64_slow :: #force_no_inline proc(text: string) -> f64 {
 // deep `a` is. Past `max_depth` levels the comparison stops: it sets `too_deep`, when given, and the levels below
 // compare equal. A plain node of a delimited text is the string its format gives it, as it is in the command line, unless
 // `read_plain` reads it as the number, boolean or null it is compared with, by a schema's plain rule.
-compare :: proc(a, b: Value, depth := 0, eq := false, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false) -> int {
+compare :: proc(a, b: Value, depth := 0, eq := false, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false, dups := Duplicates.Last) -> int {
 	if depth > max_depth {
 		if too_deep != nil {
 			too_deep^ = true
@@ -193,7 +193,7 @@ compare :: proc(a, b: Value, depth := 0, eq := false, too_deep: ^bool = nil, max
 	case .Array:
 		if x, a_arr := plain(a).(^Array); a_arr {
 			if y, b_arr := plain(b).(^Array); b_arr {
-				return compare_items(x.items[:], y.items[:], depth, eq, too_deep, max_depth, read_plain)
+				return compare_items(x.items[:], y.items[:], depth, eq, too_deep, max_depth, read_plain, dups)
 			}
 		}
 		_, a_trail := a.(Trail)
@@ -206,17 +206,17 @@ compare :: proc(a, b: Value, depth := 0, eq := false, too_deep: ^bool = nil, max
 		for _ in 0 ..< min(na, nb) {
 			x, _ := value_child_next(&ia)
 			y, _ := value_child_next(&ib)
-			if c := compare(x, y, depth + 1, eq, too_deep, max_depth, read_plain); c != 0 {
+			if c := compare(x, y, depth + 1, eq, too_deep, max_depth, read_plain, dups); c != 0 {
 				return c
 			}
 		}
 		return -1 if na < nb else (1 if na > nb else 0)
 	case .Object:
 		if is_wide(a) && is_wide(b) {
-			ma, mb := sorted_members(a), sorted_members(b)
+			ma, mb := sorted_members(a, dups), sorted_members(b, dups)
 			defer delete(ma)
 			defer delete(mb)
-			return compare_members(ma, mb, depth, eq, too_deep, max_depth, read_plain)
+			return compare_members(ma, mb, depth, eq, too_deep, max_depth, read_plain, dups)
 		}
 		ka, kb := sorted_keys(a), sorted_keys(b)
 		defer delete(ka)
@@ -230,9 +230,9 @@ compare :: proc(a, b: Value, depth := 0, eq := false, too_deep: ^bool = nil, max
 			return -1 if len(ka) < len(kb) else 1
 		}
 		for k in ka {
-			x, _ := value_member(a, k)
-			y, _ := value_member(b, k)
-			if c := compare(x, y, depth + 1, eq, too_deep, max_depth, read_plain); c != 0 {
+			x, _ := value_member(a, k, dups)
+			y, _ := value_member(b, k, dups)
+			if c := compare(x, y, depth + 1, eq, too_deep, max_depth, read_plain, dups); c != 0 {
 				return c
 			}
 		}
@@ -327,8 +327,8 @@ compare_numbers :: proc(x: f64, lx_in: string, y: f64, ly_in: string) -> int {
 }
 
 // Whether `a` and `b` are equal: `compare` with `eq` gives 0.
-equal :: proc(a, b: Value, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false) -> bool {
-	return compare(a, b, eq = true, too_deep = too_deep, max_depth = max_depth, read_plain = read_plain) == 0
+equal :: proc(a, b: Value, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false, dups := Duplicates.Last) -> bool {
+	return compare(a, b, eq = true, too_deep = too_deep, max_depth = max_depth, read_plain = read_plain, dups = dups) == 0
 }
 
 // Whether `a` and `b` are one container or one document node, not two alike.
@@ -363,9 +363,9 @@ text_order :: proc(a, b: string) -> int {
 
 // `compare` of two arrays' members, then of their lengths.
 @(private = "file")
-compare_items :: proc(xs, ys: []Value, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false) -> int {
+compare_items :: proc(xs, ys: []Value, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false, dups := Duplicates.Last) -> int {
 	for i in 0 ..< min(len(xs), len(ys)) {
-		if c := compare(xs[i], ys[i], depth + 1, eq, too_deep, max_depth, read_plain); c != 0 {
+		if c := compare(xs[i], ys[i], depth + 1, eq, too_deep, max_depth, read_plain, dups); c != 0 {
 			return c
 		}
 	}
@@ -452,19 +452,19 @@ Member :: struct {
 	val: Value,
 }
 
-// An object's members sorted by their keys' bytes, each key once with its last value, in a slice made in the context
-// allocator.
-sorted_members :: proc(v: Value) -> []Member {
+// An object's members sorted by their keys' bytes, each key once with its last value, or its first under `.First`, in a
+// slice made in the context allocator.
+sorted_members :: proc(v: Value, dups := Duplicates.Last) -> []Member {
 	ms := make([dynamic]Member, 0, value_length(v))
 	it := value_pairs(v)
 	for k, m in value_pair_next(&it) {
 		append(&ms, Member{k, m})
 	}
 	slice.stable_sort_by(ms[:], proc(a, b: Member) -> bool {return a.key < b.key})
-	// Of a run of one key, the last is the member that was added last.
+	// Of a run of one key, the first is the member that was added first and the last the member added last.
 	kept := 0
 	for m, i in ms {
-		if i + 1 < len(ms) && ms[i + 1].key == m.key {
+		if dups == .First && i > 0 && ms[i - 1].key == m.key || dups != .First && i + 1 < len(ms) && ms[i + 1].key == m.key {
 			continue
 		}
 		ms[kept] = m
@@ -493,7 +493,7 @@ sorted_keys :: proc(v: Value) -> []string {
 }
 
 // The order of two objects from their sorted members: the key sets, then the values in key order.
-compare_members :: proc(a, b: []Member, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false) -> int {
+compare_members :: proc(a, b: []Member, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false, dups := Duplicates.Last) -> int {
 	for i in 0 ..< min(len(a), len(b)) {
 		if c := text_order(a[i].key, b[i].key); c != 0 {
 			return c
@@ -503,7 +503,7 @@ compare_members :: proc(a, b: []Member, depth: int, eq: bool, too_deep: ^bool = 
 		return -1 if len(a) < len(b) else 1
 	}
 	for m, i in a {
-		if c := compare(m.val, b[i].val, depth + 1, eq, too_deep, max_depth, read_plain); c != 0 {
+		if c := compare(m.val, b[i].val, depth + 1, eq, too_deep, max_depth, read_plain, dups); c != 0 {
 			return c
 		}
 	}
@@ -526,7 +526,7 @@ string_text :: proc(v: Value) -> string {
 // its exact decimal otherwise. With `like`
 // the value `v` is to be equal to, a cell reads as `like`'s kind as `compare` reads it, and a container's members read as
 // the members of `like` at their keys or positions.
-hash :: proc(v: Value, seed := u64(0xcbf29ce484222325), like: Value = nil) -> u64 {
+hash :: proc(v: Value, seed := u64(0xcbf29ce484222325), like: Value = nil, dups := Duplicates.Last) -> u64 {
 	h := seed
 	k := value_kind(v)
 	f: f64
@@ -562,19 +562,19 @@ hash :: proc(v: Value, seed := u64(0xcbf29ce484222325), like: Value = nil) -> u6
 		it, other := value_children(v), value_children(like) if value_kind(like) == .Array else Value_Iter{}
 		for m in value_child_next(&it) {
 			twin, _ := value_child_next(&other)
-			h = mix(h, hash(m, seed, twin))
+			h = mix(h, hash(m, seed, twin, dups))
 		}
 	case .Object:
-		// The members are summed, so their order does not count. A repeated key counts once, with its last value.
+		// The members are summed, so their order does not count. A repeated key counts once, with the value `dups` keeps.
 		sum: u64
-		members := sorted_members(v)
+		members := sorted_members(v, dups)
 		defer delete(members)
 		for m in members {
 			twin: Value
 			if value_kind(like) == .Object {
-				twin, _ = value_member(like, m.key)
+				twin, _ = value_member(like, m.key, dups)
 			}
-			sum += mix(hash(m.key, seed), hash(m.val, seed, twin))
+			sum += mix(hash(m.key, seed), hash(m.val, seed, twin, dups))
 		}
 		h = mix(h, sum)
 	}

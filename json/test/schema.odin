@@ -1,5 +1,6 @@
 package json_tests
 
+import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:mem/virtual"
@@ -144,7 +145,7 @@ schema_refusals :: proc(t: ^testing.T) {
 		{`{"type": []}`, "type", ""},
 		{`{"type": ["string", "string"]}`, "type", ""},
 		{`{"$ref": "#"}`, "$ref", ""},
-		{`{"$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"$ref": "#/$defs/a"}}}`, "$ref", "$defs"},
+		{`{"$ref": "#/$defs/a", "$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"$ref": "#/$defs/a"}}}`, "$ref", "$defs"},
 		{`{"$defs": {"a": {"$id": "http://x/a"}, "b": {"$id": "http://x/a"}}}`, "$id", "$defs"},
 	}
 	for c in cases {
@@ -158,6 +159,16 @@ schema_refusals :: proc(t: ^testing.T) {
 		}
 		testing.expect_value(t, len(d.nodes), 0)
 	}
+}
+
+// A loop of references nothing reaches from the root is never judged, so it is read.
+@(test)
+schema_reads_a_loop_nothing_reaches :: proc(t: ^testing.T) {
+	d, res, doc, err := read_text(`{"type": "integer", "$defs": {"a": {"$ref": "#/$defs/a"}, "b": {"$ref": "#/$defs/c"}, "c": {"allOf": [{"$ref": "#/$defs/b"}]}}}`)
+	defer core.destroy(&doc)
+	defer schema.resolver_destroy(&res)
+	defer rules.description_destroy(&d)
+	testing.expect(t, err == nil)
 }
 
 // A `$vocabulary` outside a meta-schema is ignored, whatever vocabularies it names.
@@ -593,6 +604,46 @@ schema_check_reports_each_failure :: proc(t: ^testing.T) {
 	testing.expect(t, !schema.valid(&b, transmute([]u8)string(`{"a": 2, "c": null}`)))
 }
 
+// A value whose type fails reports its schema's other failures on it too, and a `const` beside an `enum` each its own.
+@(test)
+schema_check_reports_past_a_failed_type :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	cases := [?]struct {
+		schema, text, want: string,
+	} {
+		{`{"type": "boolean", "required": ["a"]}`, `{}`, ".required .type"},
+		{`{"type": "string", "properties": {"a": {"type": "integer"}}, "items": {"minimum": 2}}`, `{"a": "x"}`, ".properties.a.type .type"},
+		{`{"type": "string", "properties": {"a": {"type": "integer"}}, "items": {"minimum": 2}}`, `[1]`, ".items.minimum .type"},
+		{`{"enum": [1, 2], "const": 1}`, `3`, ".const .enum"},
+		{`{"enum": [1, 2], "const": 1}`, `2`, ".const"},
+		{`{"enum": [], "const": {"x": 1}}`, `null`, ".const .enum"},
+		{`{"enum": [], "const": {"x": 1}}`, `{"x": 1}`, ".enum"},
+	}
+	for c in cases {
+		ch, err := checked_make(c.schema)
+		defer checked_destroy(ch)
+		testing.expectf(t, err == nil, "%s: %v", c.schema, err)
+		sink: typed.Sink
+		defer typed.sink_destroy(&sink)
+		src := transmute([]u8)c.text
+		_ = schema.check(&ch.bound, src, &sink)
+		out := strings.builder_make(context.temp_allocator)
+		for e, i in sink.entries {
+			if i > 0 {
+				strings.write_byte(&out, ' ')
+			}
+			for w in e.keyword_path {
+				strings.write_byte(&out, '.')
+				if name, named := w.(core.Name); named {
+					strings.write_string(&out, string(name))
+				}
+			}
+		}
+		testing.expectf(t, strings.to_string(out) == c.want, "%s on %s: %s", c.schema, c.text, strings.to_string(out))
+		testing.expect(t, !schema.valid(&ch.bound, src))
+	}
+}
+
 // A failure under an applicator reports the value's path and the keywords through the applicator to the rule.
 @(test)
 schema_check_reports_arms :: proc(t: ^testing.T) {
@@ -646,6 +697,41 @@ schema_check_reports_unevaluated :: proc(t: ^testing.T) {
 		testing.expectf(t, strings.to_string(out) == c.want, "%s on %s: %q", c.schema, c.text, strings.to_string(out))
 		typed.sink_destroy(&sink)
 		checked_destroy(ch)
+	}
+}
+
+// The members an arm evaluates are candidates of `unevaluatedProperties` and `unevaluatedItems`, and past the limit of
+// failures only the failures delivered count: the two real ones come out beside any number of candidates.
+@(test)
+schema_check_counts_delivered_failures_only :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	cases := [?]struct {
+		schema, head: string,
+	} {
+		{`{"oneOf": [{"type": "object", "patternProperties": {"^k": {"type": "integer"}}}, {"type": "array"}], "unevaluatedProperties": false}`, "{"},
+		{`{"oneOf": [{"type": "array", "contains": {"type": "integer"}}, {"type": "object"}], "unevaluatedItems": false}`, "["},
+	}
+	for c, k in cases {
+		ch, err := checked_make(c.schema)
+		defer checked_destroy(ch)
+		testing.expectf(t, err == nil, "%s: %v", c.schema, err)
+		for count in ([?]int{20, 99, 100, 101, 300}) {
+			text := strings.builder_make(context.temp_allocator)
+			strings.write_string(&text, c.head)
+			for i in 0 ..< count {
+				if k == 0 {
+					fmt.sbprintf(&text, `"k%d": %d, `, i, i)
+				} else {
+					fmt.sbprintf(&text, "%d, ", i)
+				}
+			}
+			strings.write_string(&text, `"zz": 1, "zy": 2}` if k == 0 else `"s", "t"]`)
+			src := transmute([]u8)strings.to_string(text)
+			sink: typed.Sink
+			defer typed.sink_destroy(&sink)
+			schema.check(&ch.bound, src, &sink)
+			testing.expectf(t, len(sink.entries) == 2 && !sink.truncated, "%d members: %d failures", count, len(sink.entries))
+		}
 	}
 }
 
@@ -710,9 +796,12 @@ schema_check_reports_names_and_required :: proc(t: ^testing.T) {
 	cases := [?]struct {
 		schema, text, want: string,
 	} {
-		{`{"propertyNames": {"maxLength": 1}}`, `{"ab": 1}`, "1:2: String is too long (.propertyNames.maxLength)\n"},
-		{`{"propertyNames": false}`, `{"a": 1}`, "1:2: No value is allowed here (.propertyNames)\n"},
-		{`{"propertyNames": {"anyOf": [{"maxLength": 1}]}}`, `{"ab": 1}`, "1:2: Value passes none of the subschemas (.propertyNames.anyOf)\n"},
+		{`{"propertyNames": {"maxLength": 1}}`, `{"ab": 1}`, "1:2: String is too long in the member name \"ab\" (.propertyNames.maxLength)\n"},
+		{`{"propertyNames": {"anyOf": [{"maxLength": 1}, {"pattern": "^c"}]}}`, `{"ab": 1}`, "1:2: Value passes none of the subschemas in the member name \"ab\" (.propertyNames.anyOf)\n"},
+		{`{"propertyNames": false}`, `{"a": 1}`, "1:2: No value is allowed here in the member name \"a\" (.propertyNames)\n"},
+		{`{"propertyNames": {"anyOf": [{"maxLength": 1}]}}`, `{"ab": 1}`, "1:2: Value passes none of the subschemas in the member name \"ab\" (.propertyNames.anyOf)\n"},
+		{`{"contains": {"type": "integer"}, "minContains": 2}`, `["a"]`, "1:1: Too few elements or members (.contains)\n"},
+		{`{"contains": {"type": "integer"}, "minContains": 2}`, `[1]`, "1:1: Too few elements or members (.minContains)\n"},
 		{`{"properties": {"o": {"required": ["k"]}}}`, `{"o": {}}`, "1:7: Required member \"k\" is missing at .o (.properties.o.required)\n"},
 	}
 	for c in cases {
@@ -1018,6 +1107,9 @@ schema_check_verdicts :: proc(t: ^testing.T) {
 		{`{"not": {"oneOf": [{"properties": {"t": {"const": "a"}}}, {"properties": {"t": {"const": "b"}}}]}}`, {{`1`, true}, {`{"t": "a"}`, false}, {`{"t": "c"}`, true}}},
 		{`{"if": {"oneOf": [{"properties": {"t": {"const": "a"}}}, {"properties": {"t": {"const": "b"}}}]}, "then": {"type": "object"}, "else": {"type": "string"}}`, {{`1`, false}, {`"s"`, true}, {`{"t": "c"}`, false}}},
 		{`{"oneOf": [{"oneOf": [{"properties": {"t": {"const": "a"}}}, {"properties": {"t": {"const": "b"}}}]}, {"type": "integer"}]}`, {{`1`, true}, {`1.5`, false}, {`{"t": "c"}`, false}}},
+		// Arms told apart by the value's kind, through a `$ref` to arms of their own.
+		{`{"anyOf": [{"type": "string"}, {"type": "object", "required": ["a"], "properties": {"a": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/n"}]}}}], "$defs": {"n": {"oneOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "boolean"}]}}}`, {{`{"a": [1]}`, true}, {`{"a": ["x"]}`, false}, {`{"a": null}`, true}, {`{"a": {}}`, false}, {`{}`, false}, {`"s"`, true}, {`[1]`, false}, {`{"a": [1], "a": ["x"]}`, false}}},
+		{`{"allOf": [{"$ref": "#/$defs/o"}], "$defs": {"o": {"anyOf": [{"type": "array", "maxItems": 1}, {"type": "object", "maxProperties": 1}]}}}`, {{`[1]`, true}, {`[1, 2]`, false}, {`{"a": 1}`, true}, {`{"a": 1, "b": 2}`, false}, {`1`, false}}},
 	}
 	// One checker serves every check, past the temp allocator's reset after each value.
 	checker: typed.Checker
@@ -1038,6 +1130,32 @@ schema_check_verdicts :: proc(t: ^testing.T) {
 			testing.expectf(t, kept == x.valid && kept_sink == x.valid, "%s on %s with a checker: valid %v, with a sink %v", c.schema, x.text, kept, kept_sink)
 			free_all(context.temp_allocator)
 		}
+	}
+}
+
+// A checker's runs take their readings afresh for each value, as the temp allocator they lived in was reset after the
+// last: nothing a check of the next value does writes into what the reset gave back.
+@(test)
+schema_check_checker_readings_fresh :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	ch, err := checked_make(`{"anyOf": [{"properties": {"a": {"type": "integer"}}}, {"properties": {"a": {"type": "string"}}}]}`)
+	defer checked_destroy(ch)
+	testing.expect(t, err == nil)
+	checker: typed.Checker
+	defer typed.checker_destroy(&checker)
+	for text, i in ([]string{`{"a": 1}`, `{"a": "x"}`}) {
+		free_all(context.temp_allocator)
+		// The first value's runs took their parts from where the second value's guard now lies.
+		guard := make([]u8, 1 << 14 if i > 0 else 0, context.temp_allocator)
+		slice.fill(guard, 0xAA)
+		doc, _ := core.build(transmute([]u8)text, json.as(.Json))
+		defer core.destroy(&doc)
+		readings: typed.Readings
+		defer delete(readings.read)
+		target: u8
+		got := typed.check_document(&doc, core.ROOT, &target, nil, &ch.bound.plan, {readings = &readings, checker = &checker})
+		testing.expectf(t, got == nil, "%s: %v", text, got)
+		testing.expectf(t, i == 0 || slice.all_of(guard, 0xAA), "%s: a run wrote into the temp space an earlier value had", text)
 	}
 }
 
@@ -1072,8 +1190,27 @@ schema_check_arms_keep_the_member_dups_keeps :: proc(t: ^testing.T) {
 		{`{"patternProperties": {"^a": {"minLength": 3}}, "dependentRequired": {"ab": []}}`, `{"a": "", "a": "abcd"}`, .First, false},
 		{`{"patternProperties": {"^a": {"minLength": 3}}, "minProperties": 1}`, `{"a": "abcd", "a": ""}`, .First, true},
 		{`{"patternProperties": {"^a": {"minLength": 3}}, "minProperties": 1}`, `{"a": "", "a": "abcd"}`, .Last, true},
+		// A repeat of a member read out of order, which the cursor would match by its bytes, near the text's end or not.
+		{`{"maxProperties": 2, "dependentRequired": {"a": ["c"]}}`, `{"c": 1, "a": 1, "c": {"x": 1, "y": 2}}`, .Last, true},
+		{`{"maxProperties": 2, "dependentRequired": {"a": ["c"]}}`, `{"c": 1, "a": 1, "c": {"x": 1, "y": 2}, "c": 3}`, .First, true},
+		{`{"maxProperties": 2, "dependentRequired": {"a": ["c"]}, "allOf": [{}]}`, `{"c": 1, "a": 1, "c": {"x": 1, "y": 2}}`, .Last, true},
+		{`{"allOf": [{"minProperties": 3, "required": ["c", "b"]}]}`, `{"b": {}, "c": "s", "b": {"a": null, "b": 1.5}}`, .Last, false},
+		{`{"allOf": [{"minProperties": 3, "required": ["c", "b"]}]}`, `{"b": {}, "c": "s", "b": {"a": null, "b": 1.5}}`, .First, false},
+		{`{"properties": {"a": {}, "b": {"type": "string"}, "c": {}}}`, `{"b": [1], "a": 1, "b": "s", "q": "a tail that keeps the key off the end"}`, .Last, true},
+		{`{"properties": {"a": {}, "b": {"type": "string"}, "c": {}}}`, `{"b": "s", "a": 1, "b": [1], "q": "a tail that keeps the key off the end"}`, .First, true},
+		// A member of a held value's own record, failed by a value a later repeat replaces.
+		{`{"allOf": [{}], "properties": {"o": {"properties": {"b": {"type": "integer"}}}}}`, `{"o": {"b": [1], "b": 1}}`, .Last, true},
+		{`{"oneOf": [{"type": "integer"}, {"maxProperties": 2, "type": "object"}], "properties": {"o": {"properties": {"b": {"type": "integer"}}, "$ref": "#/$defs/d"}}, "$defs": {"d": {}}}`, `{"o": {"b": [1], "b": 10E-1}, "b": [1]}`, .Last, true},
 		{`{"anyOf": [{"additionalProperties": false, "propertyNames": {"anyOf": [{}]}}]}`, `{"o": 1}`, .Refuse, false},
 		{`{"anyOf": [{"additionalProperties": false, "propertyNames": {"anyOf": [{}]}}, {"type": "object"}]}`, `{"o": 1}`, .Refuse, true},
+		// A held container's comparisons read the member each nested repeat keeps.
+		{`{"uniqueItems": true}`, `[{"a": 1}, {"a": 1, "a": 2}]`, .First, false},
+		{`{"uniqueItems": true}`, `[{"a": 2, "a": 1}, {"a": 1}]`, .First, true},
+		{`{"uniqueItems": true}`, `[{"a": 2, "a": 1}, {"a": 1}]`, .Last, false},
+		{`{"const": [{"a": 1}]}`, `[{"a": 1, "a": 2}]`, .First, true},
+		{`{"const": {"o": {"a": 1}}}`, `{"o": {"a": 2, "a": 1}}`, .First, false},
+		{`{"enum": [[{"a": 1}], 5]}`, `[{"a": 2, "a": 1}]`, .First, false},
+		{`{"not": {"uniqueItems": true}}`, `[[{"a": 1, "a": 2}], [{"a": 1}]]`, .First, true},
 	}
 	for c in cases {
 		ch, err := checked_make(c.schema, dups = c.dups)
@@ -1084,6 +1221,31 @@ schema_check_arms_keep_the_member_dups_keeps :: proc(t: ^testing.T) {
 		src := transmute([]u8)c.text
 		from_valid, from_sink := schema.valid(&ch.bound, src), schema.check(&ch.bound, src, &sink) == nil && len(sink.entries) == 0
 		testing.expectf(t, from_valid == c.valid && from_sink == c.valid, "%s on %s under %v: valid %v, with a sink %v", c.schema, c.text, c.dups, from_valid, from_sink)
+	}
+}
+
+// A refusal met inside a held value, by the run of an arm or of the value's own record, has the path from the root.
+@(test)
+schema_check_held_refusal_path :: proc(t: ^testing.T) {
+	cases := []struct {
+		schema: string,
+		text:   string,
+	} {
+		{`{"properties": {"o": {"properties": {"b": {"type": "integer"}}, "$ref": "#/$defs/d"}}, "$defs": {"d": {}}}`, `{"o": {"b": [1]}}`},
+		{`{"allOf": [{"type": "object"}], "properties": {"o": {"properties": {"b": {"type": "integer"}}, "$ref": "#/$defs/d"}}, "$defs": {"d": {}}}`, `{"o": {"b": [1]}}`},
+		{`{"properties": {"o": {"allOf": [{"properties": {"b": {"type": "integer"}}}]}}}`, `{"o": {"b": [1]}}`},
+	}
+	for c in cases {
+		ch, err := checked_make(c.schema)
+		defer checked_destroy(ch)
+		testing.expectf(t, err == nil, "%s: %v", c.schema, err)
+		for with_sink in ([]bool{false, true}) {
+			sink: typed.Sink
+			defer typed.sink_destroy(&sink)
+			f, _ := schema.check(&ch.bound, transmute([]u8)c.text, &sink if with_sink else nil).(core.Typed_Error)
+			path_ok := len(f.steps) == 2 && f.steps[0] == core.Step(core.Name("o")) && f.steps[1] == core.Step(core.Name("b"))
+			testing.expectf(t, f.kind == .Wrong_Kind && path_ok, "%s, sink %v: %v at %v", c.schema, with_sink, f.kind, f.steps)
+		}
 	}
 }
 
@@ -1810,6 +1972,32 @@ schema_check_holds_deep_values :: proc(t: ^testing.T) {
 	pages :: `{"properties": {"app": {"properties": {"pages": {"oneOf": [{"items": {"$ref": "#/$defs/p"}}]}}}}, "$defs": {"p": {"properties": {"pages": {"items": {"$ref": "#/$defs/p"}}}}}}`
 	// Each level's `unevaluatedProperties` reads the in-place `allOf` once, whatever the depth below it.
 	children :: `{"$defs": {"n": {"allOf": [{"$ref": "#/$defs/t"}], "unevaluatedProperties": false}, "t": {"type": "object", "properties": {"data": true, "children": {"type": "array", "items": {"$ref": "#/$defs/n"}}}}}, "$ref": "#/$defs/n"}`
+	// Each arm reads `children`, the member before the tag that tells the arms apart, so every level's arms read the
+	// same value at once.
+	tagged :: `{"$defs": {"node": {"oneOf": [{"properties": {"kind": {"const": "seq"}, "children": {"type": "array", "items": {"$ref": "#/$defs/node"}}}, "required": ["kind"]}, {"properties": {"kind": {"const": "par"}, "children": {"type": "array", "items": {"$ref": "#/$defs/node"}}}, "required": ["kind"]}, {"properties": {"kind": {"const": "leaf"}, "value": {"type": "integer"}}, "required": ["kind", "value"]}]}}, "$ref": "#/$defs/node"}`
+	either :: `{"$defs": {"n": {"anyOf": [{"properties": {"a": {"$ref": "#/$defs/n"}}, "required": ["a"]}, {"properties": {"a": {"$ref": "#/$defs/n"}}, "required": ["b"]}, {"type": "integer"}]}}, "$ref": "#/$defs/n"}`
+	tagged_tree :: proc(depth: int, leaf: string) -> string {
+		b := strings.builder_make(context.temp_allocator)
+		for _ in 0 ..< depth {
+			strings.write_string(&b, `{"children": [`)
+		}
+		strings.write_string(&b, leaf)
+		for _ in 0 ..< depth {
+			strings.write_string(&b, `], "kind": "seq"}`)
+		}
+		return strings.to_string(b)
+	}
+	members :: proc(depth: int, inner: string) -> string {
+		b := strings.builder_make(context.temp_allocator)
+		for _ in 0 ..< depth {
+			strings.write_string(&b, `{"a": `)
+		}
+		strings.write_string(&b, inner)
+		for _ in 0 ..< depth {
+			strings.write_byte(&b, '}')
+		}
+		return strings.to_string(b)
+	}
 	tree :: proc(depth: int, leaf: string) -> string {
 		b := strings.builder_make(context.temp_allocator)
 		for _ in 0 ..< depth {
@@ -1838,10 +2026,14 @@ schema_check_holds_deep_values :: proc(t: ^testing.T) {
 		{gateway, `{"e": [{"b": [{"x": {"m": {"g": {"l": [{"r": {"q": {"h": {}}}}]}}}}]}]}`, true, ""},
 		{pages, `{"app": {"pages": [{"pages": [{"pages": [{"pages": [{}]}]}]}]}}`, true, ""},
 		{`{"allOf": [{"minimum": 3}], "properties": {"a": {"$ref": "#/allOf/0", "type": "integer"}}}`, `1`, false, "minimum"},
-		{`{"enum": [[1]], "const": [2]}`, `[1]`, false, "enum"},
+		{`{"enum": [[1]], "const": [2]}`, `[1]`, false, "const"},
 		{`{"enum": [[1]], "const": [2]}`, `[2]`, false, "enum"},
 		{`{"uniqueItems": true}`, `[{"a": 1, "b": [2]}, {"b": [2.0], "a": 1}]`, false, "uniqueItems"},
 		{`{"uniqueItems": true}`, `[{"a": 1}, {"a": 2}, [1], 1, "1", true]`, true, ""},
+		{tagged, tagged_tree(40, `{"kind": "leaf", "value": 1}`), true, ""},
+		{tagged, tagged_tree(40, `{"kind": "leaf", "value": "x"}`), false, "oneOf"},
+		{either, members(40, "1"), true, ""},
+		{either, members(40, "{}"), false, "anyOf"},
 		{children, tree(8, `{"data": 1}`), true, ""},
 		{children, tree(64, `{"data": 1}`), true, ""},
 		{children, tree(64, `{"data": 1, "x": 2}`), false, "unevaluatedProperties"},

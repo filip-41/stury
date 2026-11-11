@@ -35,22 +35,34 @@ Check :: struct {
 	// trackers and what they hold are in the temp allocator and are reused, so a long text does not grow them.
 	trackers:     [dynamic]Tracker,
 	tracked:      int,
+	// Where the check keeps the reading of each `Plain` value, nil for a check that keeps none.
+	readings:     ^Readings,
+}
+
+// The kinds a check read its `Plain` values as, each by the value's first byte: where arms read a value apart, the reading
+// of the arm the check decides. A later reading of a byte replaces an earlier one. `short` says one could not be kept.
+Readings :: struct {
+	read:  [dynamic]Reading,
+	short: bool,
+}
+
+Reading :: struct {
+	lo:   u64,
+	kind: core.Kind,
 }
 
 // The keys an open object has met, for a check that meets repeats. `sp` is the object's frame.
 @(private)
 Tracker :: struct {
 	sp:      int,
-	// Each key's text and the index of its span.
+	// Each key's text in the order met, and past `SEEN_SCAN` keys the index of each by its text.
+	names:   [dynamic]string,
 	keys:    map[string]int,
 	// The source span of each key's latest member, from its key to the next key, whose end is `open`'s until the next key.
 	spans:   [dynamic][2]u64,
 	open:    int,
 	// How many of the object's members repeat an earlier key.
 	repeats: u64,
-	// The names a held object met before a run that does not track it took it over, whose repeats a check that notices
-	// them looks for alone.
-	met:     []string,
 }
 
 // The path to a value inside a larger one and the keyword steps to the subschema it is judged by, which a check of that
@@ -88,7 +100,7 @@ Text_Build :: #type proc(src: []u8, as: core.As, allocator: runtime.Allocator) -
 // Starts a `Check` read, as `read_start` starts a read of the plan's own type. Its sink takes `core.Error_Entry`s.
 check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Refusal) {
 	regs, err = read_start(&c.reader, src, plan, as, T, target, read, frames, allocator)
-	c.wide, c.outer = true, read.outer
+	c.wide, c.outer, c.readings = true, read.outer, read.readings
 	// A text read under `.Refuse` was refused whole for any repeat, so the check meets none.
 	c.repeats, c.tracked, c.floor = .Ignore if read.dups == .Refuse else read.repeats, 0, len(read.sink.entries) if read.sink != nil else 0
 	// A check started again over its own pool gives back the held value an earlier record stopped in.
@@ -105,7 +117,7 @@ check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, t
 		c.pool, c.fork, c.taken = (^Pool)(rawptr(&k.pool)), nil, nil
 	}
 	if c.pool != nil {
-		c.pool.repeated = nil
+		c.pool.repeated, c.pool.n_leads, c.pool.begun = nil, 0, c.pool.opened
 	}
 	return
 }
@@ -151,6 +163,9 @@ track_open :: #force_no_inline proc "contextless" (h: ^Check, m: ^Meta, u: ^Use,
 		}
 	} else if u.additional == 0 && (u.pattern == 0 || h.sink == nil) && u.keys == 0 && !(l != nil && (l.min_members > 0 || l.max_members < max(u64))) {
 		return
+	} else if h.sp == 2 && h.run != nil && h.run.step == nil {
+		// A run of a whole held object leaves its keys to the fork, which notices a repeat among them.
+		return
 	}
 	context = h.ctx
 	context.allocator = context.temp_allocator
@@ -161,9 +176,12 @@ track_open :: #force_no_inline proc "contextless" (h: ^Check, m: ^Meta, u: ^Use,
 	}
 	t := &h.trackers[h.tracked]
 	h.tracked += 1
-	clear(&t.keys)
+	clear(&t.names)
+	if len(t.keys) > 0 {
+		clear(&t.keys)
+	}
 	clear(&t.spans)
-	t.sp, t.open, t.repeats, t.met = h.sp - 1, -1, 0, nil
+	t.sp, t.open, t.repeats = h.sp - 1, -1, 0
 }
 
 // What a key met by a tracker leaves to do.
@@ -181,27 +199,26 @@ Key_Met :: enum {
 track_key :: #force_no_inline proc "contextless" (h: ^Check, tr: ^Tracker, t: core.Token, key: string) -> Key_Met {
 	context = h.ctx
 	context.allocator = context.temp_allocator
-	if tr.met != nil {
-		for name in tr.met {
-			if name == key {
-				noticed(h, t)
-				return .Stop
-			}
-		}
-		return .New
-	}
 	lo, _ := core.scalar_ends(t)
 	if tr.open >= 0 {
 		tr.spans[tr.open][1] = lo
 	}
-	at, repeated := tr.keys[key]
-	if !repeated {
-		text, cloned := strings.clone(key)
+	at := names_find(tr.names[:], &tr.keys, key)
+	if at < 0 {
+		text := key
+		// A key decoded into the caller's buffer outlives it here, one read from the source stays a view of it.
+		if !within(h.src, key) {
+			cloned: runtime.Allocator_Error
+			if text, cloned = strings.clone(key); cloned != nil {
+				return .Stop
+			}
+		}
+		_, named := append(&tr.names, text)
 		_, grown := append(&tr.spans, [2]u64{lo, 0})
-		if cloned != nil || grown != nil {
+		if named != nil || grown != nil {
 			return .Stop
 		}
-		tr.keys[text] = len(tr.spans) - 1
+		names_index(tr.names[:], &tr.keys)
 		tr.open = len(tr.spans) - 1
 		return .New
 	}
@@ -218,6 +235,15 @@ track_key :: #force_no_inline proc "contextless" (h: ^Check, tr: ^Tracker, t: co
 	tr.spans[at] = {lo, 0}
 	tr.open = at
 	return .New
+}
+
+// Whether a check that notices repeats must see one of a member read before that a later key of the object at `m` could
+// bring by its bytes, which the cursor matches without a call: the object's count, or a sink's entries, which a repeat under
+// `.First` skips and one under `.Last` takes back from those already there. The value of a repeat failing in a read with no
+// sink ends it with the object open, which reads again judging repeats, and a check judging them sees every key.
+@(private)
+repeat_may_count :: #force_inline proc "contextless" (h: ^Check, m: ^Meta) -> bool {
+	return m.counted || h.sink != nil && (h.first_key || len(h.sink.entries) > h.floor)
 }
 
 // Ends the read at the repeated key `t` with the refusal a caller that reads again with `.Judge` looks for.
@@ -247,16 +273,30 @@ take_back :: proc "contextless" (h: ^Check, span: [2]u64) {
 			kept += 1
 		}
 	}
-	// A read that shares its sink finds the entries another took back gone, and its first refusal with them.
-	if kept == len(c.entries) && (h.first.kind == .None || h.first.at < span[0] || h.first.at >= span[1]) {
+	taken := kept < len(c.entries)
+	resize(&c.entries, kept)
+	// A check whose run reports to its sink holds the run's first refusal as its own, which goes back with the run's.
+	for x := h; ; x = x.run.parent {
+		first_taken_back(x, c, span, taken)
+		if x.run == nil || x.run.parent.sink != c {
+			break
+		}
+	}
+}
+
+// Settles the first refusal of the check `x`, which reads into `c`, after `take_back` took back the entries inside `span`,
+// `taken` saying whether there were any. A read that shares its sink finds the entries another took back gone, and its
+// first refusal with them.
+@(private)
+first_taken_back :: proc "contextless" (x: ^Check, c: ^Sink, span: [2]u64, taken: bool) {
+	if !taken && (x.first.kind == .None || x.first.at < span[0] || x.first.at >= span[1]) {
 		return
 	}
-	resize(&c.entries, kept)
 	// What the read first refused is taken back with it, unless a limit left an entry out.
-	if kept == h.floor && !c.truncated {
-		h.first = {}
-	} else if kept > h.floor {
-		h.first = {kind = c.entries[h.floor].kind, at = c.entries[h.floor].start}
+	if len(c.entries) == x.floor && !c.truncated {
+		x.first = {}
+	} else if len(c.entries) > x.floor {
+		x.first = {kind = c.entries[x.floor].kind, at = c.entries[x.floor].start}
 	}
 }
 
@@ -286,7 +326,14 @@ check_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs
 		}
 	case:
 		if l != nil {
-			if judge_value(h, regs, plain_token(h, t, l) if t.kind == .Plain else t, l) == .Stop {
+			value := t
+			if t.kind == .Plain {
+				value = plain_token(h, t, l)
+				if h.readings != nil {
+					reading_keep(h, t.lo, value.kind)
+				}
+			}
+			if judge_value(h, regs, value, l) == .Stop {
 				return next, .Stop
 			}
 		} else if len(u.applies) > 0 {
@@ -361,6 +408,16 @@ plain_token :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token, l:
 		value.lo, value.n = lo, u32(hi - lo)
 	}
 	return value
+}
+
+// Keeps `kind` as the reading of the `Plain` value at byte `lo`.
+@(cold)
+@(private)
+reading_keep :: #force_no_inline proc "contextless" (h: ^Check, lo: u64, kind: core.Kind) {
+	context = h.ctx
+	if _, failed := append(&h.readings.read, Reading{lo, kind}); failed != nil {
+		h.readings.short = true
+	}
 }
 
 // Whether `value`, one reading of a text, passes the enum and the rules of its kind.
@@ -673,7 +730,10 @@ check_key :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token)
 			// The name is judged as the object's, under the keyword path of the names' own node.
 			h.sp -= 1
 			h.after = KEYS[:]
+			before := len(h.sink.entries) if h.sink != nil else 0
 			action := check_report(h, {f.a, f.b, f.c}, l, .String, fails, lo, hi)
+			context = h.ctx
+			name_failed(h.sink, before, key)
 			h.after = nil
 			h.sp += 1
 			if action == .Stop {
@@ -692,7 +752,7 @@ check_key :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token)
 					return regs, noticed(h, t)
 				}
 				next := &at[i + 1]
-				if keyed(h, m, u) {
+				if keyed(h, m, u) || h.repeats == .Notice && repeat_may_count(h, m) && seen_past(h, f, owner, i) {
 					next = &h.plan.solo[2 * (int(uintptr(&at[i]) - uintptr(raw_data(h.plan.fields))) / size_of(Field)) + 1]
 				}
 				regs.b, f.run = u64(uintptr(next)), &at[i + 1]
@@ -916,10 +976,10 @@ repeat_may_retract :: proc(r: ^Reader) -> bool {
 	return object_open(r) && text_repeats(r)
 }
 
-// Whether `r` has an object open.
+// Whether `r` has an object open at frame `from` or past it.
 @(private)
-object_open :: proc(r: ^Reader) -> bool {
-	for i in 1 ..< r.sp {
+object_open :: proc(r: ^Reader, from := 1) -> bool {
+	for i in from ..< r.sp {
 		if r.frames[i].kind == .Object {
 			return true
 		}

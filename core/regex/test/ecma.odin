@@ -175,7 +175,7 @@ test_ecma_refusals :: proc(t: ^testing.T) {
 	refused := [?]string {
 		`(a)\1`, `\k<x>`, `(?<x>a)\k<x>`, `(?<=a)b`, `(?<!a)b`, `a{`, `a{2,1}`, `]`, `}`, `\q`, `[b-a]`, `[\d-z]`,
 		`\u{110000}`, `\p{Nope}`, `\p{scx=Nope}`, `\p{scx}`, `\p{letter}`, `\p{Greek}`, `\p{Word}`, `\p{gc=Greek}`, `(?<1>a)`,
-		`(?<n>a)(?<n>b)`, `(?=a)*`, `^*`, `a**`, `(a`, `a)`, `(?x)`, `\c1`, `\00`,
+		`(?<n>a)(?<n>b)`, `(?=a)*`, `^*`, `a**`, `(a`, `a)`, `(?x)`, `\c1`, `\00`, `\-?`, `a+?\-`,
 	}
 	for pattern in refused {
 		testing.expectf(t, search(pattern, "").err != "", "%q compiled", pattern)

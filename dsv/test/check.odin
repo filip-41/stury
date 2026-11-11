@@ -62,9 +62,9 @@ check_one_schema_over_every_format :: proc(t: ^testing.T) {
 		want, werr := failures(ROWS, c.json, json.as(.Json))
 		testing.expect(t, werr == nil || len(want) > 0)
 		json5, _ := failures(ROWS, c.json5, json.as(.Json5))
-		csv, _ := failures(ROWS, c.csv, dsv.as(.Csv), reads = dsv.checks(.Csv))
+		csv, _ := failures(ROWS, c.csv, dsv.as(.Csv, {infer = true}), reads = dsv.checks(.Csv))
 		tabs, _ := strings.replace_all(c.csv, ",", "\t", context.temp_allocator)
-		tsv, _ := failures(ROWS, tabs, dsv.as(.Tsv), reads = dsv.checks(.Tsv))
+		tsv, _ := failures(ROWS, tabs, dsv.as(.Tsv, {infer = true}), reads = dsv.checks(.Tsv))
 		testing.expect_value(t, json5, want)
 		testing.expect_value(t, csv, want)
 		// A quoted cell has no TSV spelling.
@@ -74,65 +74,57 @@ check_one_schema_over_every_format :: proc(t: ^testing.T) {
 	}
 }
 
-// A leaf reads a cell as the kinds it allows: numbers alone by the loose grammar, booleans alone by their words, and any
-// other leaf an unquoted cell by the strict grammar.
+// A cell is one kind for the whole verdict: a string, or under `infer` a number, `true` or `false` when it is exactly one.
 @(test)
 check_cell_rule :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	cases := [?]struct {
-		property, cell: string,
-		valid:          bool,
+		property, cell:        string,
+		as_string, as_inferred: bool,
 	} {
-		{`{"type": "integer"}`, "+5", true},
-		{`{"type": "integer"}`, "007", true},
-		{`{"type": "integer"}`, "5.", true},
-		{`{"type": "integer"}`, "5.5", false},
-		{`{"type": "integer"}`, `"7"`, true},
-		{`{"type": "number"}`, ".5", true},
-		{`{"type": "number"}`, "x", false},
-		{`{"type": "string"}`, "5", true},
-		{`{"type": "string", "maxLength": 1}`, "55", false},
-		{`{"type": ["integer", "string"]}`, "+5", true},
-		{`{"type": ["integer", "string"], "maxLength": 1}`, "+5", false},
-		{`{"type": ["integer", "string"], "maxLength": 1}`, "5", true},
-		{`{"type": ["integer", "string"], "minimum": 6}`, "5", true},
-		{`{"type": ["integer", "null"]}`, "007", true},
-		{`{"type": ["integer", "null"]}`, "+5", true},
-		{`{"type": ["integer", "null"]}`, "null", true},
-		{`{"type": ["integer", "null"]}`, "x", false},
-		{`{"type": ["boolean", "null"]}`, `"true"`, true},
-		{`{"enum": [null, 7]}`, "007", true},
-		{`{"enum": [null, true]}`, `"true"`, true},
-		{`{"enum": ["1", 2]}`, "1", true},
-		{`{"enum": ["1", 2]}`, "2", true},
-		{`{"enum": ["1", 2]}`, "3", false},
-		{`{"const": "1"}`, "1", true},
-		{`{"type": ["integer", "string"], "minimum": 6, "maxLength": 0}`, "5", false},
-		{`{"type": ["integer", "string"], "minimum": 6}`, "+5", true},
-		{`{"type": ["integer", "string"], "minimum": 6}`, `"5"`, true},
-		{`{"type": "boolean"}`, "true", true},
-		{`{"type": "boolean"}`, "TRUE", false},
-		{`{"type": "boolean"}`, `"false"`, true},
-		{`{"type": ["boolean", "string"], "maxLength": 3}`, "true", true},
-		{`{"type": "null"}`, "null", true},
-		{`{"type": "string"}`, "null", true},
-		{`{"enum": ["1", "2"]}`, "1", true},
-		{`{"enum": [1, 2]}`, "1", true},
-		{`{"enum": [1, 2]}`, "1.0", true},
-		{`{"enum": [1, 2]}`, "3", false},
-		{`{"enum": [true, "x"]}`, "true", true},
-		{`{"const": 5}`, "+5", true},
-		{`{"const": 5}`, "5.0", true},
-		{`{"const": "5"}`, "5", true},
-		{`{"minimum": 3}`, "2", false},
-		{`{"minimum": 3}`, "x", true},
-		{`{"minLength": 3}`, "55", true},
+		{`{"type": "integer"}`, "+5", false, false},
+		{`{"type": "integer"}`, "007", false, false},
+		{`{"type": "integer"}`, "5.", false, false},
+		{`{"type": "integer"}`, "5", false, true},
+		{`{"type": "integer"}`, "5.5", false, false},
+		{`{"type": "integer"}`, `"7"`, false, false},
+		{`{"type": "number"}`, ".5", false, false},
+		{`{"type": "string"}`, "5", true, false},
+		{`{"type": "string"}`, "true", true, false},
+		{`{"type": "string", "maxLength": 1}`, "55", false, false},
+		{`{"type": ["integer", "string"]}`, "+5", true, true},
+		{`{"type": ["integer", "string"], "maxLength": 1}`, "5", true, true},
+		{`{"type": ["integer", "string"], "minimum": 6}`, "5", true, false},
+		{`{"type": ["integer", "null"]}`, "null", false, false},
+		{`{"type": ["boolean", "null"]}`, `"true"`, false, false},
+		{`{"enum": ["1", 2]}`, "1", true, false},
+		{`{"enum": ["1", 2]}`, "2", false, true},
+		{`{"enum": ["1", 2]}`, "3", false, false},
+		{`{"const": "1"}`, "1", true, false},
+		{`{"type": "boolean"}`, "true", false, true},
+		{`{"type": "boolean"}`, "TRUE", false, false},
+		{`{"type": ["boolean", "string"], "maxLength": 3}`, "true", false, true},
+		{`{"type": "null"}`, "null", false, false},
+		{`{"type": "string"}`, "null", true, true},
+		{`{"enum": [1, 2]}`, "1", false, true},
+		{`{"enum": [1, 2]}`, "1.0", false, true},
+		{`{"enum": [true, "x"]}`, "true", false, true},
+		{`{"const": 5}`, "+5", false, false},
+		{`{"const": 5}`, "5.0", false, true},
+		{`{"minimum": 3}`, "2", true, false},
+		{`{"minimum": 3}`, "x", true, true},
+		{`{"minLength": 3}`, "55", false, true},
+		{`{"oneOf": [{"type": "string"}, {"type": "integer"}]}`, "1", true, true},
+		{`{"type": "integer", "not": {"type": "string"}}`, "1", false, true},
+		{`{"type": "string", "not": {"type": "integer"}}`, "1", true, false},
 	}
 	for c in cases {
 		schema_text := strings.concatenate({`{"type": "array", "items": {"type": "object", "properties": {"a": `, c.property, `}}}`}, context.temp_allocator)
 		text := strings.concatenate({"a\n", c.cell, "\n"}, context.temp_allocator)
-		out, err := failures(schema_text, text, dsv.as(.Csv), reads = dsv.checks(.Csv))
-		testing.expect(t, err == nil == c.valid && (out == "") == c.valid, strings.concatenate({c.property, " ", c.cell, " ", out}, context.temp_allocator))
+		for valid, i in ([2]bool{c.as_string, c.as_inferred}) {
+			out, err := failures(schema_text, text, dsv.as(.Csv, {infer = i == 1}), reads = dsv.checks(.Csv))
+			testing.expect(t, err == nil == valid && (out == "") == valid, strings.concatenate({c.property, " ", c.cell, " ", out}, context.temp_allocator))
+		}
 	}
 }
 
@@ -165,12 +157,12 @@ check_empty_cells :: proc(t: ^testing.T) {
 check_repeated_columns :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	schema_text := `{"type": "array", "items": {"properties": {"a": {"type": "integer"}}, "maxProperties": 1}}`
-	_, last := failures(schema_text, "a,a\nx,1\n", dsv.as(.Csv), {dups = .Last}, reads = dsv.checks(.Csv))
-	_, first := failures(schema_text, "a,a\nx,1\n", dsv.as(.Csv), {dups = .First}, reads = dsv.checks(.Csv))
-	_, refuse := failures(schema_text, "a,a\n1,1\n", dsv.as(.Csv), {dups = .Refuse}, reads = dsv.checks(.Csv))
-	_, alone := failures(schema_text, "a,a\n", dsv.as(.Csv), {dups = .Refuse}, reads = dsv.checks(.Csv))
-	_, alone_last := failures(schema_text, "a,a\n", dsv.as(.Csv), {dups = .Last}, reads = dsv.checks(.Csv))
-	_, all := failures(schema_text, "a,a\n1,1\n", dsv.as(.Csv), {dups = .All}, reads = dsv.checks(.Csv))
+	_, last := failures(schema_text, "a,a\nx,1\n", dsv.as(.Csv, {infer = true}), {dups = .Last}, reads = dsv.checks(.Csv))
+	_, first := failures(schema_text, "a,a\nx,1\n", dsv.as(.Csv, {infer = true}), {dups = .First}, reads = dsv.checks(.Csv))
+	_, refuse := failures(schema_text, "a,a\n1,1\n", dsv.as(.Csv, {infer = true}), {dups = .Refuse}, reads = dsv.checks(.Csv))
+	_, alone := failures(schema_text, "a,a\n", dsv.as(.Csv, {infer = true}), {dups = .Refuse}, reads = dsv.checks(.Csv))
+	_, alone_last := failures(schema_text, "a,a\n", dsv.as(.Csv, {infer = true}), {dups = .Last}, reads = dsv.checks(.Csv))
+	_, all := failures(schema_text, "a,a\n1,1\n", dsv.as(.Csv, {infer = true}), {dups = .All}, reads = dsv.checks(.Csv))
 	testing.expect(t, last == nil)
 	testing.expect(t, first != nil)
 	testing.expect_value(t, refuse.(core.Fault).kind, core.Fault_Kind.Duplicate_Key)
@@ -240,9 +232,9 @@ verdicts :: proc(schema_text, text: string, handle: core.As, reads: ^typed.Forma
 
 // Whether the four ways to judge `csv` agree on `valid`: as CSV and as TSV, by text and by document.
 @(private = "file")
-expect_verdict :: proc(t: ^testing.T, schema_text, csv: string, valid: bool, loc := #caller_location) {
+expect_verdict :: proc(t: ^testing.T, schema_text, csv: string, valid: bool, infer := true, loc := #caller_location) {
 	tabs, _ := strings.replace_all(csv, ",", "\t", context.temp_allocator)
-	for handle, i in ([2]core.As{dsv.as(.Csv), dsv.as(.Tsv)}) {
+	for handle, i in ([2]core.As{dsv.as(.Csv, {infer = infer}), dsv.as(.Tsv, {infer = infer})}) {
 		reads := dsv.checks(.Csv) if i == 0 else dsv.checks(.Tsv)
 		by_text, by_doc := verdicts(schema_text, csv if i == 0 else tabs, handle, reads)
 		testing.expectf(t, by_text == valid && by_doc == valid, "%s over %q: text %v, document %v, want %v", schema_text, csv, by_text, by_doc, valid, loc = loc)
@@ -260,7 +252,7 @@ check_applicators :: proc(t: ^testing.T) {
 		{`{"allOf": [{"required": ["a"]}, {"properties": {"a": {"type": "integer"}}}]}`, "a\n1\n", true},
 		{`{"allOf": [{"required": ["a"]}, {"properties": {"a": {"type": "integer"}}}]}`, "a\nx\n", false},
 		{`{"allOf": [{"required": ["a"]}, {"properties": {"a": {"type": "integer"}}}]}`, "b\n1\n", false},
-		{`{"properties": {"a": {"allOf": [{"minimum": 3}, {"maximum": 9}]}}}`, "a\n+5\n", true},
+		{`{"properties": {"a": {"allOf": [{"minimum": 3}, {"maximum": 9}]}}}`, "a\n5\n", true},
 		{`{"properties": {"a": {"allOf": [{"minimum": 3}, {"maximum": 9}]}}}`, "a\n10\n", false},
 		{`{"anyOf": [{"required": ["a"]}, {"required": ["b"]}]}`, "a,b\n,2\n", true},
 		{`{"anyOf": [{"required": ["a"]}, {"required": ["b"]}]}`, "c\n1\n", false},
@@ -277,10 +269,10 @@ check_applicators :: proc(t: ^testing.T) {
 		{`{"if": {"required": ["a"]}, "then": {"required": ["b"]}, "else": {"required": ["c"]}}`, "a,b\n1,\n", false},
 		{`{"if": {"required": ["a"]}, "then": {"required": ["b"]}, "else": {"required": ["c"]}}`, "a,c\n,3\n", true},
 		{`{"if": {"required": ["a"]}, "then": {"required": ["b"]}, "else": {"required": ["c"]}}`, "a\n,\n", false},
-		{`{"properties": {"a": {"$ref": "#/$defs/n", "minimum": 3}}, "$defs": {"n": {"type": "integer"}}}`, "a\n+5\n", true},
+		{`{"properties": {"a": {"$ref": "#/$defs/n", "minimum": 3}}, "$defs": {"n": {"type": "integer"}}}`, "a\n5\n", true},
 		{`{"properties": {"a": {"$ref": "#/$defs/n", "minimum": 3}}, "$defs": {"n": {"type": "integer"}}}`, "a\n1\n", false},
 		{`{"properties": {"a": {"$ref": "#/$defs/n", "minimum": 3}}, "$defs": {"n": {"type": "integer"}}}`, "a\nx\n", false},
-		{`{"enum": [{"a": 1}, {"a": 2}]}`, "a\n+1\n", true},
+		{`{"enum": [{"a": 1}, {"a": 2}]}`, "a\n1\n", true},
 		{`{"enum": [{"a": 1}, {"a": 2}]}`, "a\n3\n", false},
 		{`{"properties": {"a": {"const": 1}}, "unevaluatedProperties": false}`, "a\n1\n", true},
 		{`{"properties": {"a": {"const": 1}}, "unevaluatedProperties": false}`, "a,b\n1,2\n", false},
@@ -295,7 +287,7 @@ check_applicators :: proc(t: ^testing.T) {
 	// An applicator on the whole table sees its records.
 	expect_verdict(t, `{"allOf": [{"type": "array", "minItems": 2}, {"type": "array", "items": {"required": ["a"]}}]}`, "a\n1\n2\n", true)
 	expect_verdict(t, `{"allOf": [{"type": "array", "minItems": 2}]}`, "a\n1\n", false)
-	expect_verdict(t, `{"const": [{"a": 1}, {"a": 2}]}`, "a\n1\n+2\n", true)
+	expect_verdict(t, `{"const": [{"a": 1}, {"a": 2}]}`, "a\n1\n2\n", true)
 	expect_verdict(t, `{"const": [{"a": 1}, {"a": 2}]}`, "a\n1\n3\n", false)
 }
 
@@ -323,7 +315,7 @@ check_scalar_and_wrapped_const_agree :: proc(t: ^testing.T) {
 	cases := [?]struct {
 		cell:  string,
 		valid: bool,
-	}{{"5", true}, {"+5", true}, {"5.0", true}, {"007", false}, {"x", false}, {"6", false}}
+	}{{"5", true}, {"+5", false}, {"5.0", true}, {"007", false}, {"x", false}, {"6", false}}
 	for c in cases {
 		csv := strings.concatenate({"a\n", c.cell, "\n"}, context.temp_allocator)
 		expect_verdict(t, `{"type": "array", "items": {"properties": {"a": {"const": 5}}}}`, csv, c.valid)
@@ -339,23 +331,23 @@ check_scalar_and_wrapped_const_agree :: proc(t: ^testing.T) {
 		expect_verdict(t, `{"type": "array", "items": {"properties": {"a": {"const": true}}}}`, csv, c.valid)
 		expect_verdict(t, `{"type": "array", "items": {"const": {"a": true}}}`, csv, c.valid)
 	}
-	// A quoted cell has no TSV spelling, and reads as the number its operand's kind asks for.
+	// A quoted cell is a string, so a number operand does not take it.
 	for schema_text in ([?]string{`{"type": "array", "items": {"properties": {"a": {"const": 5}}}}`, `{"type": "array", "items": {"const": {"a": 5}}}`}) {
-		by_text, by_doc := verdicts(schema_text, "a\n\"5\"\n", dsv.as(.Csv), dsv.checks(.Csv))
-		testing.expectf(t, by_text && by_doc, "%s: text %v document %v", schema_text, by_text, by_doc)
+		by_text, by_doc := verdicts(schema_text, "a\n\"5\"\n", dsv.as(.Csv, {infer = true}), dsv.checks(.Csv))
+		testing.expectf(t, !by_text && !by_doc, "%s: text %v document %v", schema_text, by_text, by_doc)
 	}
-	// A string operand keeps the cell a string, a null one reads an unquoted `null`.
-	expect_verdict(t, `{"type": "array", "items": {"const": {"a": "5"}}}`, "a\n5\n", true)
+	// A string operand takes the cell as the string it is unless the read infers a number, and no cell is a null.
+	expect_verdict(t, `{"type": "array", "items": {"const": {"a": "5"}}}`, "a\n5\n", true, infer = false)
+	expect_verdict(t, `{"type": "array", "items": {"const": {"a": "5"}}}`, "a\n5\n", false)
 	expect_verdict(t, `{"type": "array", "items": {"const": {"a": "5"}}}`, "a\n+5\n", false)
-	expect_verdict(t, `{"type": "array", "items": {"const": {"a": null}}}`, "a\nnull\n", true)
-	expect_verdict(t, `{"type": "array", "items": {"const": {"a": null}}}`, "a\n\"null\"\n", false)
+	expect_verdict(t, `{"type": "array", "items": {"const": {"a": null}}}`, "a\nnull\n", false)
 }
 
 // A document a path left partial is judged by the records it kept, as the text of those records is.
 @(test)
 check_partial_document :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	judge :: proc(schema_text, text, path: string, opts := dsv.Options{}) -> bool {
+	judge :: proc(schema_text, text, path: string, opts := dsv.Options{infer = true}) -> bool {
 		schema_doc, _ := core.build(transmute([]u8)schema_text, json.as(.Json), allocator = context.temp_allocator)
 		c, _ := schema.compile(&schema_doc, core.ROOT, {resolver = {as = json.as(.Json)}}, context.temp_allocator)
 		b, berr := schema.bind(&c, dsv.as(.Csv, opts), dsv.checks(.Csv))
@@ -379,8 +371,8 @@ check_partial_document :: proc(t: ^testing.T) {
 	testing.expect(t, !judge(only_b, table, ".[]"))
 	// A record kept by position reads the cells before it as empty ones.
 	rows := `{"type": "array", "items": {"type": "array", "prefixItems": [{"type": "null"}, {"const": "bob"}]}}`
-	testing.expect(t, judge(rows, "1,ann\n2,bob\n", ".[1][1]", {no_header = true}))
-	testing.expect(t, !judge(rows, "1,ann\n2,bob\n", ".[0][1]", {no_header = true}))
+	testing.expect(t, judge(rows, "1,ann\n2,bob\n", ".[1][1]", {no_header = true, infer = true}))
+	testing.expect(t, !judge(rows, "1,ann\n2,bob\n", ".[0][1]", {no_header = true, infer = true}))
 }
 
 // `core.equal` with `read_plain` and `core.hash` with `like` read a cell as the kind of the value it is set against, so equal
@@ -408,4 +400,22 @@ check_equal_and_hash_retype_cells :: proc(t: ^testing.T) {
 			testing.expectf(t, core.hash(cell, like = operand) == core.hash(operand), "%q", c.cells)
 		}
 	}
+}
+
+// A table is checked from the names of `dsv`, and a bind that lacks the delimited checks is refused.
+@(test)
+check_from_dsv_names :: proc(t: ^testing.T) {
+	text := `{"type": "array", "items": {"properties": {"a": {"type": "integer"}}}}`
+	s, err := json.load_schema(transmute([]u8)text)
+	testing.expect(t, err == nil)
+	defer json.destroy(s)
+	for infer in ([2]bool{false, true}) {
+		b, berr := dsv.bind_schema(s, .Csv, {infer = infer})
+		testing.expect(t, berr == nil)
+		defer dsv.destroy(&b)
+		testing.expect_value(t, dsv.check_schema(&b, transmute([]u8)string("a\n1\n")) == nil, infer)
+	}
+	_, unbound := schema.bind(&s.compiled, dsv.as(.Csv))
+	e, refused := unbound.(core.Typed_Error)
+	testing.expect_value(t, refused && e.kind == .Plan_Mismatch, true)
 }

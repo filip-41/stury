@@ -56,15 +56,17 @@ value_kinds :: proc(ti: ^runtime.Type_Info, reg: ^Registry) -> (k: Value_Kinds) 
 // an integer type, each where the type is exactly one.
 @(private)
 Subject :: struct {
-	kinds:  Value_Kinds,
-	length: Maybe(u64),
-	limits: Maybe([2]string),
+	kinds:   Value_Kinds,
+	length:  Maybe(u64),
+	limits:  Maybe([2]string),
+	pointer: bool,
 }
 
 // The subject of a value of `ti`, through its `Maybe`s and pointers.
 @(private)
 subject_of :: proc(ti: ^runtime.Type_Info, reg: ^Registry) -> (s: Subject) {
 	s.kinds = value_kinds(ti, reg)
+	_, s.pointer = runtime.type_info_base(ti).variant.(runtime.Type_Info_Pointer)
 	base := ti
 	for next := held(base); next != nil; next = held(base) {
 		base = next
@@ -81,7 +83,7 @@ subject_of :: proc(ti: ^runtime.Type_Info, reg: ^Registry) -> (s: Subject) {
 }
 
 // Reads a `model:` tag into `r`, for a value of `subject`, and for a member when `member`: items separated by commas,
-// each a flag (`optional`, `extra`, `read_only`, `write_only`, or `-` alone), `alias=` and a name, a bound (`>=N`, `>N`, `<=N`,
+// each a flag (`optional`, `extra`, `read_only`, `write_only`, `not_null` on a pointer, or `-` alone), `alias=` and a name, a bound (`>=N`, `>N`, `<=N`,
 // `<N`, a range `A..=B` or `A..<B`), `multiple_of=` and a divisor, the same bounds after `len` on a count of code points,
 // elements or members (`len=N` for one count), `format=` and a format's name, or `pattern=` and an ECMA-262 pattern,
 // which takes the rest of the tag, commas included. Spaces around an item, an operator and an operand are dropped. A
@@ -146,6 +148,9 @@ read_item :: proc(item: string, subject: Subject, member: bool, r: ^typed.Member
 	case item == "extra" && member:
 		r.extra = true
 		return true
+	case item == "not_null" && member:
+		r.not_null = true
+		return subject.pointer
 	case (item == "read_only" || item == "write_only") && member:
 		role := typed.Access.Read_Only if item == "read_only" else .Write_Only
 		if r.access != .Read_Write && r.access != role {

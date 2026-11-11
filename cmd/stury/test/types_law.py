@@ -26,7 +26,7 @@ import subprocess
 import sys
 import tempfile
 
-from harness import ROOT, run_capped
+from harness import ROOT, fixtures_dir, passing, run_capped
 
 SUITE = os.path.join(ROOT, "json/test/conformance/JSON-Schema-Test-Suite/tests/draft2020-12")
 # Keywords that list the members of an object, or reach a schema that may, where `.emial` is refused although an object
@@ -94,15 +94,6 @@ def fixture_schemas(root):
     return out
 
 
-def passing(stury, schema, values, path):
-    """The indices of `values` that pass `schema`."""
-    with open(path, "w") as f:
-        f.write("".join(json.dumps(v) + "\n" for v in values))
-    _, _, err = run([stury, "check", "--schema", schema, path])
-    failed = {int(m) - 1 for m in re.findall(rf"^{re.escape(path)}:(\d+):", err.decode(errors="replace"), re.M)}
-    return [i for i in range(len(values)) if i not in failed]
-
-
 def member_filters(values):
     """Reads of up to two members the first sample object has, by name."""
     first = next((v for v in values if isinstance(v, dict) and v), None)
@@ -157,7 +148,9 @@ def judge(stury, case, scratch, count):
     objects = [v for v in values if isinstance(v, dict)][:4]
     if objects:
         probes = [{**o, "emial": e} for o in objects for e in EMIAL]
-        taken = passing(stury, schema, probes, base + ".emial.ndjson")
+        with open(base + ".emial.ndjson", "w") as f:
+            f.write("".join(json.dumps(v) + "\n" for v in probes))
+        taken = passing(stury, schema, base + ".emial.ndjson", len(probes), cap_mb=CAP_MB)
         if refused and taken and not any(word in text for word in LISTS):
             failures.append(f"{name}: .emial is refused on a schema that lists no member, and {json.dumps(probes[taken[0]])[:160]} passes it")
         if not refused and not taken and not any(word in text for word in NAMES) and name not in UNTRACED:
@@ -258,10 +251,7 @@ def main():
     parser.add_argument("--count", type=int, default=12)
     args = parser.parse_args()
     stury = os.path.abspath(args.binary)
-    fixtures = args.fixtures
-    if fixtures is None:
-        common = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
-        fixtures = os.path.join(os.path.dirname(os.path.abspath(os.path.join(ROOT, common))), "bench/fixtures")
+    fixtures = args.fixtures or fixtures_dir()
     cases = suite_schemas()
     suite_count = len(cases)
     if os.path.isdir(fixtures):

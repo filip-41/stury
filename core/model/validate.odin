@@ -133,6 +133,8 @@ report :: proc(j: ^Judging, k: core.Typed_Error_Kind) -> bool {
 			typed.path_add(&j.first, s)
 		}
 		typed.path_close(&j.first)
+		// A map key's name is the walker's, which the walk frees.
+		typed.own_names(&j.first)
 	}
 	c := j.sink
 	if c == nil || !typed.sink_room(c, context.allocator) {

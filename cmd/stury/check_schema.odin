@@ -26,6 +26,7 @@ Report_Kind :: enum {
 // The options of `check` that name a schema. `flag` is the first one given.
 Schema_Options :: struct {
 	flag:          string,
+	judging:       string, // the first given but --format-assert, which schema gen takes too
 	file:          string,
 	refs:          string,
 	max_errors:    int,
@@ -61,6 +62,9 @@ schema_option :: proc(s: ^Schema_Options, args: []string, i: int) {
 	if a == "--format-assert" {
 		s.format_assert = true
 		return
+	}
+	if s.judging == "" {
+		s.judging = a
 	}
 	if i + 1 >= len(args) {
 		usage_error("%s takes one parameter", a)
@@ -101,6 +105,13 @@ schema_open :: proc(s: Schema_Options, src: Source, option := "--schema") -> ^Sc
 	return sc
 }
 
+// The directory of the schema file `path`, where its references are read from: `.` for a bare name, which `filepath.dir`
+// gives as empty and a resolver reads as no files at all.
+schema_directory :: proc(path: string) -> string {
+	dir := filepath.dir(path)
+	return dir if dir != "" else "."
+}
+
 // The reads that check a text of the format `as` by a description. A delimited format's spec is chosen at run time, and
 // a JSON-like one has none, whose handle reads them.
 checks_of :: proc(as: core.As, cells: bool) -> ^typed.Format_Reads {
@@ -134,7 +145,10 @@ schema_read :: proc(s: Schema_Options, option := "--schema") -> ^Schema_Check {
 	if err != nil {
 		usage_error("%s %s: %s", option, s.file, edit_error_text(sc.text, err))
 	}
-	refs := s.refs if s.refs != "" else filepath.dir(s.file)
+	if s.refs != "" && !os.is_dir(s.refs) {
+		usage_error("--schema-ref %s is not a directory", s.refs)
+	}
+	refs := s.refs if s.refs != "" else schema_directory(s.file)
 	opts := schema.Options {
 		format_assert = s.format_assert,
 		resolver = {root = refs, as = json.as(.Json)},
@@ -227,17 +241,24 @@ tell :: proc(sc: ^Schema_Check, s: Schema_Options, name, file: string, data: []b
 	}
 }
 
+// The bytes of lines `told` holds before it writes them, so a run with many failures holds no more than one chunk of them.
+TOLD_CHUNK :: 1 << 16
+
 // Tells each entry of the file `name` on standard error, one to a line.
 told :: proc(name: string, data: []byte, entries: []core.Error_Entry) {
 	lines: core.Lines
 	b := strings.builder_make(context.temp_allocator)
+	defer os.write_string(os.stderr, strings.to_string(b))
 	for e in entries {
+		if strings.builder_len(b) >= TOLD_CHUNK {
+			os.write_string(os.stderr, strings.to_string(b))
+			strings.builder_reset(&b)
+		}
 		strings.write_string(&b, name)
 		strings.write_byte(&b, ':')
 		core.render_entry(strings.to_writer(&b), data, e, &lines)
 		strings.write_byte(&b, '\n')
 	}
-	os.write_string(os.stderr, strings.to_string(b))
 }
 
 // Writes the basic output or the problem document of `entries` and a newline to standard output.

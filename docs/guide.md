@@ -74,20 +74,23 @@ shows that `.Json` refuses a comment that `.Jsonc` takes:
 
 ## Check against a schema
 
-`core/schema` compiles a JSON Schema (drafts 4 to 2020-12) once and binds it to a format. `schema.check` judges a text
-and puts every failure in a `typed.Sink`, each with its position, its path and the keywords that failed it. With a
-`core.Runner`, a long text of records (`schema.check_records`) or an array at the root whose rules apply to each entry
-is checked on its threads, with the entries a serial check gives. `schema.write_basic` and `write.write_problem` write the
-entries as the JSON Schema basic output or an RFC 9457 problem document.
+`json.load_schema` reads and compiles a JSON Schema (drafts 4 to 2020-12) once, and `json.bind_schema(s, .Json)` binds it
+to the spec the inputs are read as. `json.check_schema` judges a text and puts every failure in a `json.Sink`, each with its
+position, its path and the keywords that failed it. `json.check_schema_records` checks a text of records (`.Lines`, `.Seq`) one by one and, with a `json.Runner`, on its
+threads, with the entries a serial check gives. Set the sink's `max_errors`: a sink without one keeps the first 100 failures. A check of
+many records holds no memory per record, but a failure is kept until the sink is destroyed. A table is bound with
+`dsv.bind_schema(s, .Csv, {infer = true})` and checked with the same calls. A cell is one kind: a string, or under `infer`
+a number, `true` or `false` when its text is exactly one, as `dsv.unmarshal` reads it.
 
 ```odin
-doc, _ := core.build(schema_text, json.as(.Json))
-c, _ := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
-b, _ := schema.bind(&c, json.as(.Json))
-sink := typed.Sink{}
-defer typed.sink_destroy(&sink)
-if schema.check(&b, src, &sink) != nil {
-	for e in sink.entries { core.render_entry(w, src, e) }
+s, _ := json.load_schema(schema_text)
+defer json.destroy(s)
+b, _ := json.bind_schema(s, .Json)
+defer json.destroy(&b)
+sink := json.Sink{max_errors = 20}
+defer json.destroy(&sink)
+if json.check_schema(&b, src, &sink) != nil {
+	for e in sink.entries { fmt.println(e.start, e.kind) }
 }
 ```
 
@@ -183,6 +186,9 @@ err = model.load(&m, body, &user, &sink)
   equal their default (`exclude_defaults`), and `check` refuses a value whose written members fail its rules as
   `.Check_Failed`.
   `dump_stream` writes to a stream. Map keys and a struct's `extra` members are written in the order of their keys.
+- A struct's `extra` member, `map[string]core.Value` or `map[string]T`, holds the members it does not name, each read
+  as its value type. `register(&reg, T, model.Extra.Forbid)` refuses them instead.
+- A pointer member reads null as nil, and with the `not_null` tag item refuses it.
 - `model.schema(&m, .Load)` and `.Dump` describe what a load takes and what a dump with no option writes.
 
 ## Scan by path
@@ -293,8 +299,7 @@ for key, member in json.pair_next(&it) {
 ```
 
 `json.equal`, `json.compare` and `json.hash` order values as jq does. A cell of a CSV or TSV document is a string unless the document was read with `infer`, in `compare` and `equal`
-as in the CLI, and `read_plain = true` reads it as the value it is set against, as a schema's rules (`enum`, `const`,
-`uniqueItems`) do, so `type: integer` takes the cell `1`. Two numbers compare by their doubles, and when
+as in the CLI, and `read_plain = true` reads it as the value it is set against, as the schema-directed conversion (`stury fmt --schema`) does. Two numbers compare by their doubles, and when
 both keep their digits and the doubles are equal, by the digits. `json.write_value(v, json.as(.Json))` writes a value
 in any format with a token writer. `json.marshal_value(x, &plan)` makes the value of a typed `x`, and
 `json.unmarshal_value(v, &target, &plan)` reads a value into a typed target, an integer field from a double that holds

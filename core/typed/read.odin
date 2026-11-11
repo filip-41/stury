@@ -48,6 +48,8 @@ Read_Options :: struct {
 	partial:     bool,
 	// What a `Check` keeps for the next value it checks, nil for nothing.
 	checker:     ^Checker,
+	// Where a `Check` keeps the kind it reads each `Plain` value as, nil for none.
+	readings:    ^Readings,
 }
 
 // How a `Check` meets a key that repeats inside one object. `.Ignore` judges every value as it comes, which is the

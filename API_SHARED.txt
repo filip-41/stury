@@ -70,7 +70,7 @@ built_value :: proc(r: Node_Ref, dups := Duplicates.Last, borrow := false) -> Va
 children_from :: proc(doc: ^Document, i: Node_Index, k: int) -> Child_Iter
 comment_spelling :: #force_inline proc "contextless" (lead, tail: u8) -> u16
 comment_tail :: #force_inline proc "contextless" (spelling: u16) -> u64
-compare_members :: proc(a, b: []Member, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false) -> int
+compare_members :: proc(a, b: []Member, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false, dups := Duplicates.Last) -> int
 double_of :: proc(v: Value, buf: []u8 = nil) -> (f: f64, digits: string, ok: bool)
 element_of :: proc(doc: ^Document, c: Node_Index, k: int) -> (Node_Index, Presence)
 entry_code :: proc(e: Error_Entry) -> string
@@ -108,6 +108,7 @@ owns_tables :: #force_inline proc "contextless" (doc: ^Document) -> bool
 path_error :: proc(e: Document_Error) -> Path_Error
 plain_kind :: proc (src: []u8, lo, hi: u64, bools, numbers: bool) -> (kind: Kind, integer: bool)
 reindex :: proc(o: ^Object)
+render_entry :: proc(w: io.Writer, src: []u8, e: Error_Entry, lines: ^Lines = nil) -> io.Error
 reorder :: proc(list: ^Edit_List, container: Node_Index, order: []u32) -> Error
 reserve_depth :: #force_inline proc "contextless" (max_depth: u32, n: int) -> int
 result_of :: #force_inline proc "contextless" (r: u64, rules: ^Rules) -> (hi: u64, fault: Maybe(Fault), stopped: bool)
@@ -123,7 +124,7 @@ set_tables :: #force_inline proc "contextless" (doc: ^Document, tables: []Table)
 set_text :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Error
 set_value :: proc(list: ^Edit_List, node: Node_Index, v: Value) -> Error
 sorted_keys :: proc(v: Value) -> []string
-sorted_members :: proc(v: Value) -> []Member
+sorted_members :: proc(v: Value, dups := Duplicates.Last) -> []Member
 steps_clone :: proc(steps: []Step, allocator := context.allocator) -> []Step
 subtree_facts :: proc(doc: ^Document, i: Node_Index) -> []Fact
 tables_of :: #force_inline proc "contextless" (doc: ^Document) -> []Table
@@ -294,11 +295,14 @@ store_integral :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token,
 store_number :: proc(n: core.Number, integer: bool, h: ^Reader, t: core.Token, fld: ^Field, dest: uintptr) -> core.Typed_Error_Kind
 store_string :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, dest: ^string) -> core.Typed_Error_Kind
 store_whole :: proc(h: ^Reader, fld: ^Field, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64, t: core.Token) -> core.Typed_Error_Kind
+temp_mark :: proc(c: ^Sink) -> runtime.Arena_Temp
+temp_release :: proc(m: runtime.Arena_Temp, keep := false) -> bool
 unmarshal_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator := context.allocator) -> core.Error
 validate_closed :: #force_no_inline proc "contextless" (h: ^Reader, sm: ^Struct_Model, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64, base: uintptr) -> bool
 verdict_path :: proc(path: []core.Step, v: Verdict, allocator: runtime.Allocator) -> []core.Step
 # core/write
 LINE_ROOM :: 1024
+Report :: struct { file: string, records: bool, truncated: bool, }
 Scratch :: runtime.Arena
 Visit :: #type proc(v: ^Visitor, f: ^typed.Field, at: uintptr, kind: core.Typed_Error_Kind) -> bool
 Visitor :: struct { call: Visit, close: proc(v: ^Visitor, sm: ^typed.Struct_Model, base: uintptr) -> bool, walker: rawptr, }
@@ -336,6 +340,7 @@ value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocato
 visit :: proc(plan: ^typed.Plan, value: rawptr, v: ^Visitor, omits: ^typed.Omits = nil) -> core.Typed_Refusal
 visit_path :: proc(v: ^Visitor, steps: ^[dynamic]core.Step) -> bool
 write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator) -> (text: []u8, err: core.Typed_Refusal)
+write_problem :: proc(t: ^Tokens, entries: []core.Error_Entry, p: Problem, r := Report{}) -> core.Typed_Error_Kind
 # core/records
 check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, outer: ^typed.Outer, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0, dups := core.Duplicates.Default, repeats := typed.Repeats.Ignore) -> (records: i64, failure: core.Typed_Refusal, fatal: core.Typed_Refusal, failed: i64)
 entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64) -> bool
@@ -347,9 +352,12 @@ validate_parallel :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) ->
 write_text :: proc(wr: ^Writer, text: []u8) -> core.Typed_Error_Kind
 writer_take :: proc(wr: ^Writer) -> []u8
 # core/schema
+bind :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (b: Bound, err: core.Error)
 converter_destroy :: proc(cv: ^Converter)
 converter_init :: proc(cv: ^Converter, c: ^Compiled, from, to: core.As, from_reads: ^typed.Format_Reads = nil, to_reads: ^typed.Format_Reads = nil) -> (err: core.Error)
-write_odin :: proc(d: ^rules.Description, package_name: string, allocator := context.allocator) -> (source: string, err: core.Error)
+open :: proc(text: []u8, as: core.As, refs := "", format_assert := false, allocator := context.allocator) -> (l: ^Loaded, err: core.Error)
+write_basic :: proc(t: ^write.Tokens, entries: []core.Error_Entry, uri: string, r := write.Report{}) -> core.Typed_Error_Kind
+write_odin :: proc(d: ^rules.Description, package_name: string, format_assert := false, allocator := context.allocator) -> (source: string, err: core.Error)
 # json
 Detail :: enum u8 { None, Literal, Identifier, Colon, Trailing, Unframed, Cut_Number, Non_Finite, Array_Separator, Member_Separator, Trailing_Comma, Lone_Comma, Unmatched_Bracket, Unmatched_Brace, Single_Quote, Control_Char, Invalid_Utf8, Leading_Zero, Leading_Dot, Leading_Plus, Key_Not_String, Expected_Value, }
 RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", "Invalid unquoted key"}, {"colon", "Missing colon after key"}, {"trailing", "Unexpected text after the value"}, {"unframed", "Text before the first RS"}, {"cut_number", "Potentially truncated top-level numeric value"}, {"non_finite", "Infinity and NaN have no JSON value"}, {"array_separator", "Expected ',' or ']' after an array element"}, {"member_separator", "Expected ',' or '}' after an object member"}, {"trailing_comma", "Trailing comma before the closing bracket"}, {"lone_comma", "Expected value before ','"}, {"unmatched_bracket", "Unmatched ']'"}, {"unmatched_brace", "Unmatched '}'"}, {"single_quote", "Invalid string literal; expected \", but got '"}, {"control_char", "Unescaped control character"}, {"invalid_utf8", "Invalid UTF-8"}, {"leading_zero", "Leading zero in a number"}, {"leading_dot", "A number cannot start with '.'"}, {"leading_plus", "A number cannot start with '+'"}, {"key_not_string", "Object keys must be strings"}, {"expected_value", "Expected a value"}}}

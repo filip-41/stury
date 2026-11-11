@@ -552,7 +552,15 @@ check_run_spec :: proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_
 	h: typed.Check
 	regs, start: core.Hook_Regs
 	renew, held := true, plan.fork != 0
+	failed := false
 	for {
+		// Each record gives back what its check took from the temp allocator, except that of the run's first failure,
+		// whose path may name a key held there. The keys the check tracks are in it too.
+		mark := typed.temp_mark(read.sink)
+		keep := false
+		defer if typed.temp_release(mark, keep) {
+			h.trackers = {}
+		}
 		if renew {
 			// The pool's runs and forks keep no entry's state, so each entry takes them over and temp does not grow per
 			// entry.
@@ -612,6 +620,7 @@ check_run_spec :: proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_
 		if own.entries.allocator.procedure != nil {
 			first = typed.rejudged(&own, first)
 		}
+		keep, failed = first.kind != .None && !failed, failed || first.kind != .None
 		if held {
 			typed.read_release(&h, frames)
 		}

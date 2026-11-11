@@ -349,14 +349,19 @@ schema_check_records_equal_each_record :: proc(t: ^testing.T) {
 			one: typed.Sink
 			one.record = i64(i)
 			err := schema.check(&s.b, transmute([]u8)l, &one)
+			cut_record := len(one.entries) > 0 && one.entries[len(one.entries) - 1].kind == .Walk
 			for e in one.entries {
+				// A record the fault cut tells only the fault.
+				if cut_record && e.kind != .Walk {
+					continue
+				}
 				x := e
 				x.start += u64(at)
 				x.end += u64(at)
 				x.record = i64(i)
 				append(&want.entries, x)
 			}
-			if len(one.entries) > 0 && one.entries[len(one.entries) - 1].kind == .Walk {
+			if cut_record {
 				break
 			}
 			_ = err

@@ -1,5 +1,6 @@
 package json_tests
 
+import "core:strings"
 import "core:testing"
 import core "../../core"
 import "../../core/typed"
@@ -18,7 +19,7 @@ Converted :: struct {
 }
 
 @(private = "file")
-converted :: proc(t: ^testing.T, rules_text, src: string, from, to: core.As) -> Converted {
+converted :: proc(t: ^testing.T, rules_text, src: string, from, to: core.As, sink: ^typed.Sink = nil) -> Converted {
 	schema_doc, serr := core.build(transmute([]u8)rules_text, json.as(.Json))
 	testing.expectf(t, serr == nil, "%s: %v", rules_text, serr)
 	defer core.destroy(&schema_doc)
@@ -28,7 +29,7 @@ converted :: proc(t: ^testing.T, rules_text, src: string, from, to: core.As) -> 
 	doc, derr := core.build(transmute([]u8)src, from)
 	testing.expectf(t, derr == nil, "%s: %v", src, derr)
 	defer core.destroy(&doc)
-	return convert_document(t, &c, &doc, to)
+	return convert_document(t, &c, &doc, to, sink)
 }
 
 // The typed reads a handle needs to check a description, those of CSV for a CSV handle and none for a JSON one.
@@ -38,12 +39,12 @@ checks_of :: proc(as: core.As) -> ^typed.Format_Reads {
 }
 
 @(private = "file")
-convert_document :: proc(t: ^testing.T, c: ^schema.Compiled, doc: ^core.Document, to: core.As) -> Converted {
+convert_document :: proc(t: ^testing.T, c: ^schema.Compiled, doc: ^core.Document, to: core.As, sink: ^typed.Sink = nil) -> Converted {
 	cv: schema.Converter
 	err := schema.converter_init(&cv, c, doc.as, to, checks_of(doc.as), checks_of(to))
 	testing.expectf(t, err == nil, "%v", err)
 	defer schema.converter_destroy(&cv)
-	text, stage, err2 := schema.convert(&cv, doc, allocator = context.temp_allocator)
+	text, stage, err2 := schema.convert(&cv, doc, sink = sink, allocator = context.temp_allocator)
 	return {string(text), stage, err2}
 }
 
@@ -125,7 +126,7 @@ convert_reads_a_cell_as_the_arm_the_schema_decides :: proc(t: ^testing.T) {
 
 // The schema decides the reading of a cell whichever way the format would read it: a number where it asks for an integer
 // and the format reads no number, a string where it asks for one and the format reads a number, and a string where the
-// number the cell spells fails a rule.
+// number the cell spells fails a rule, else the number, which the check tries first.
 @(test)
 convert_writes_the_reading_the_check_takes_for_a_cell :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -138,12 +139,74 @@ convert_writes_the_reading_the_check_takes_for_a_cell :: proc(t: ^testing.T) {
 	testing.expectf(t, got.err == nil, "%v", got.err)
 	testing.expect_value(t, got.text, `[{"v":"5"},{"v":"true"}]`)
 	either := `{"type": "array", "items": {"type": "object", "properties": {"v": {"type": ["integer", "string"], "minimum": 6}}}}`
-	got = converted(t, either, "v\n5\n7\n", dsv.as(.Csv), json.as(.Json))
+	for infer in ([?]bool{false, true}) {
+		got = converted(t, either, "v\n5\n7\n", dsv.as(.Csv, {infer = infer}), json.as(.Json))
+		testing.expectf(t, got.err == nil, "%v", got.err)
+		testing.expect_value(t, got.text, `[{"v":"5"},{"v":7}]`)
+	}
+}
+
+// Arms that read a cell apart write the reading of the arm the check decides: the one `oneOf` passes, the first `anyOf`
+// passes, the branch `if` picks, alike when the arms judge the cell or its row and when the check reports to a sink or
+// stops at its first failure.
+@(test)
+convert_writes_the_reading_of_the_arm_the_check_decides :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	cases := [?]struct {
+		items, src, want: string,
+	} {
+		{`{"oneOf": [{"properties": {"v": {"type": "integer"}}}, {"properties": {"v": {"type": "string", "pattern": "^[a-z]+$"}}}]}`, "v\n5\nx\n", `[{"v":5},{"v":"x"}]`},
+		{`{"anyOf": [{"properties": {"v": {"type": "integer"}}}, {"properties": {"v": {"type": "string"}}}]}`, "v\n5\n", `[{"v":5}]`},
+		{`{"anyOf": [{"properties": {"v": {"type": "string"}}}, {"properties": {"v": {"type": "integer"}}}]}`, "v\n5\n", `[{"v":"5"}]`},
+		{`{"properties": {"v": {"anyOf": [{"type": "string"}, {"type": "integer"}]}}}`, "v\n5\n", `[{"v":"5"}]`},
+		{`{"properties": {"v": {"anyOf": [{"type": "integer"}, {"type": "string"}]}}}`, "v\n5\n", `[{"v":5}]`},
+		{`{"if": {"properties": {"k": {"const": "a"}}}, "then": {"properties": {"v": {"type": "integer"}}}, "else": {"properties": {"v": {"type": "string"}}}}`, "k,v\na,5\nb,5\n", `[{"k":"a","v":5},{"k":"b","v":"5"}]`},
+	}
+	for c in cases {
+		s := strings.concatenate({`{"type": "array", "items": `, c.items, `}`}, context.temp_allocator)
+		for reporting in ([?]bool{false, true}) {
+			sink: typed.Sink
+			defer typed.sink_destroy(&sink)
+			got := converted(t, s, c.src, dsv.as(.Csv), json.as(.Json), &sink if reporting else nil)
+			testing.expectf(t, got.err == nil, "%s: %v", c.items, got.err)
+			testing.expectf(t, got.text == c.want, "%s: %s, want %s", c.items, got.text, c.want)
+		}
+	}
+}
+
+// A number the cell spells by the loose grammar is written by the strict one.
+@(test)
+convert_writes_a_loose_number_by_the_strict_grammar :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	s := `{"type": "array", "items": {"properties": {"v": {"type": "number"}}}}`
+	got := converted(t, s, "v\n+5\n007\n.5\n5.\n-00.250e+2\n", dsv.as(.Csv), json.as(.Json))
 	testing.expectf(t, got.err == nil, "%v", got.err)
-	testing.expect_value(t, got.text, `[{"v":"5"},{"v":"7"}]`)
-	got = converted(t, either, "v\n5\n7\n", dsv.as(.Csv, {infer = true}), json.as(.Json))
+	testing.expect_value(t, got.text, `[{"v":5},{"v":7},{"v":0.5},{"v":5},{"v":-0.250e+2}]`)
+}
+
+// An element's text and an attribute's value that the format gives no kind are written as the check read them.
+@(test)
+convert_writes_markup_text_as_the_check_reads_it :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	readers := json.as(.Json).readers^
+	readers.attribute = proc "contextless" (doc: ^core.Document, f: core.Fact) -> (name, value: core.Token) {
+		name, value = markup_attribute(doc, f)
+		value.kind = .Plain
+		return
+	}
+	s := `{"type": "object", "properties": {"price": {"type": "object", "properties": {"n": {"type": "integer"}, "id": {"type": "string"}, "#text": {"type": "number"}}}}}`
+	schema_doc, _ := core.build(transmute([]u8)s, json.as(.Json))
+	defer core.destroy(&schema_doc)
+	c, cerr := schema.compile(&schema_doc, core.ROOT, {resolver = {as = json.as(.Json)}})
+	testing.expect(t, cerr == nil)
+	defer schema.destroy(&c)
+	doc := markup_doc(`{"price": "5"}`, {{2, `n="3"`}, {2, `id="7"`}}, &readers)
+	defer core.destroy(&doc)
+	doc.as.readers = &readers
+	doc.nodes[2].kind = .Plain
+	got := convert_document(t, &c, &doc, json.as(.Json))
 	testing.expectf(t, got.err == nil, "%v", got.err)
-	testing.expect_value(t, got.text, `[{"v":"5"},{"v":7}]`)
+	testing.expect_value(t, got.text, `{"price":{"n":3,"id":"7","#text":5}}`)
 }
 
 // An empty cell is a member that is absent.

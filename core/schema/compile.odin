@@ -91,6 +91,11 @@ bind :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads = nil, alloca
 	b.compiled = c
 	b.allocator = allocator
 	b.plan, err = typed.plan_of(c.description, as, reads, {checking = true}, allocator)
+	if err == nil && (b.plan.check == nil || b.plan.node_check == nil && as.readers != nil && as.readers.flat) {
+		// The format's checks are not given: a delimited format's come from its package, `dsv.bind_schema`.
+		typed.plan_destroy(&b.plan)
+		err = core.error_of(typed.plan_mismatch(&b.plan, nil, nil))
+	}
 	if err == nil {
 		b.elements = elements_of(c, as, reads, allocator)
 	}
@@ -103,6 +108,13 @@ bind :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads = nil, alloca
 // in `checker` for the next check when one is given. A root array whose rules are per entry is checked on the threads of
 // `runner` when one is given, with the same entries.
 check :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, checker: ^typed.Checker = nil) -> core.Error {
+	return check_reading(b, src, sink, runner, checker, nil)
+}
+
+// `check` that keeps the kind each `Plain` value reads as in `readings` when it is given, which also lets the schema pick the
+// kind of a cell of a delimited text in place of reading it as a string or, under `infer`, as its text spells.
+@(private)
+check_reading :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink, runner: ^core.Runner, checker: ^typed.Checker, readings: ^typed.Readings) -> core.Error {
 	if b.plan.check == nil {
 		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
 	}
@@ -113,7 +125,7 @@ check :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink = nil, runner: ^core.Runne
 	}
 	target: u8
 	read := read_of(b, sink)
-	read.checker = checker
+	read.checker, read.readings = checker, readings
 	return outcome(typed.check_text(src, &target, nil, &b.plan, read), sink)
 }
 
@@ -158,10 +170,11 @@ parallel :: proc(b: ^Bound, runner: ^core.Runner) -> bool {
 	return b.elements != nil && runner != nil && runner.threads > 0
 }
 
-// Checks the value at `node` of `doc`, a document of the format `b` is bound to, as `check` checks a text.
-check_node :: proc(b: ^Bound, doc: ^core.Document, node: core.Node_Index, sink: ^typed.Sink = nil) -> core.Error {
+// Checks the value at `node` of `doc`, a document of the format `b` is bound to, as `check` checks a text, keeping the
+// kind each `Plain` value reads as in `readings` when it is given.
+check_node :: proc(b: ^Bound, doc: ^core.Document, node: core.Node_Index, sink: ^typed.Sink = nil, readings: ^typed.Readings = nil) -> core.Error {
 	target: u8
-	return typed.check_document(doc, node, &target, nil, &b.plan, {sink = sink})
+	return typed.check_document(doc, node, &target, nil, &b.plan, {sink = sink, readings = readings})
 }
 
 unbind :: proc(b: ^Bound) {

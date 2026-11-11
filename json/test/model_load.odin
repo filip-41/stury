@@ -642,3 +642,77 @@ Wide :: struct {
 	m128: int,
 	set: model.Fields_Set,
 }
+
+@(private = "file")
+Chain :: struct {
+	n:    int `model:"optional"`,
+	next: ^Chain `model:"optional,not_null"`,
+	none: union {} `model:"optional"`,
+	rest: map[string]int `model:"extra"`,
+}
+
+@(test)
+a_forbidding_struct_with_no_required_member_refuses_an_unknown_key :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	Loose :: struct {
+		a: int `model:"optional"`,
+	}
+	Empty :: struct {}
+	reg: model.Registry
+	model.register(&reg, Loose, model.Extra.Forbid)
+	model.register(&reg, Empty, model.Extra.Forbid)
+	l, _ := model.compile(&reg, Loose, json.reads(.Json))
+	e, _ := model.compile(&reg, Empty, json.reads(.Json))
+	lv: Loose
+	ev: Empty
+	testing.expect(t, model.load(&l, transmute([]u8)string(`{"b": 2}`), &lv) != nil)
+	testing.expect(t, model.load(&e, transmute([]u8)string(`{"b": 2}`), &ev) != nil)
+	walktest.expect_nil(t, model.load(&l, transmute([]u8)string(`{}`), &lv))
+	walktest.expect_nil(t, model.load(&e, transmute([]u8)string(`{}`), &ev))
+}
+
+@(test)
+a_not_null_pointer_a_typed_capture_and_an_empty_union_load_as_their_schema_says :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	reg: model.Registry
+	m, err := model.compile(&reg, Chain, json.reads(.Json))
+	walktest.expect_nil(t, err)
+	d, _ := model.schema(&m, .Load)
+	c := schema.compile_description(&d)
+	b, _ := schema.bind(&c, json.as(.Json))
+	Case :: struct {
+		text:  string,
+		loads: bool,
+	}
+	for x in ([]Case{
+		{`{"n": 1, "next": {"n": 2}, "none": null, "z": 3}`, true},
+		{`{"next": null}`, false},
+		{`{"z": "s"}`, false},
+		{`{"none": 1}`, false},
+		{`{"next": {"next": {"y": 4}}}`, true},
+	}) {
+		v: Chain
+		loaded := model.load(&m, transmute([]u8)x.text, &v) == nil
+		testing.expectf(t, loaded == x.loads, "%s: load %v", x.text, loaded)
+		testing.expectf(t, schema.valid(&b, transmute([]u8)x.text) == x.loads, "%s: the Load schema disagrees", x.text)
+	}
+	v: Chain
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"next": {"n": 2}, "z": 3}`), &v))
+	testing.expect(t, v.next != nil && v.next.n == 2 && v.rest["z"] == 3)
+}
+
+@(test)
+a_member_named_dash_is_read_through_an_escaped_tag :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	Dashed :: struct {
+		member: int `json:"\-"`,
+	}
+	reg: model.Registry
+	m, _ := model.compile(&reg, Dashed, json.reads(.Json))
+	v: Dashed
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"-": 3}`), &v))
+	testing.expect_value(t, v.member, 3)
+}

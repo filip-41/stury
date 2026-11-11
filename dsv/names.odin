@@ -8,6 +8,7 @@ import build "../core/build"
 import typed "../core/typed"
 import write "../core/write"
 import records "../core/records"
+import schema "../core/schema"
 
 Action :: core.Action
 All :: core.All
@@ -197,4 +198,9 @@ column :: records.column
 write_cells :: records.write_cells
 writer_end :: records.writer_end
 
-destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy}
+Bound_Schema :: schema.Bound
+Schema :: schema.Loaded
+check_schema :: schema.check
+check_schema_records :: schema.check_records
+
+destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.loaded_destroy, schema.unbind}

@@ -115,7 +115,7 @@ indirect :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t
 wrapped :: proc(h: ^$H, regs: core.Hook_Regs, t: core.Token, fld: ^Field, m: ^Meta, dest: uintptr) -> (core.Hook_Regs, core.Action) {
 	regs := regs
 	if t.kind == .Null {
-		if fld.kind != .Union || !m.no_nil {
+		if !m.no_nil {
 			mem.zero(rawptr(dest), int(m.size))
 			regs.c += u64(fld.stride)
 			return regs, .Next
@@ -834,6 +834,13 @@ mark_run :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, upto: ^Fie
 		seen_set(h, f, owner, i)
 	}
 	f.run = upto
+}
+
+// Whether a member of the object at frame `f` past member `i` was read, which a member past the 62nd or of an object with
+// more than 63 members is taken to be.
+@(private)
+seen_past :: #force_inline proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, i: int) -> bool {
+	return i >= 62 || h.plan.meta[owner.meta].members > 63 || (f.seen &~ SEEN_ON) >> uint(i + 1) != 0
 }
 
 // A struct, map or fixed array about to be read into a member the cursor matched after a key arrived out of order. A

@@ -154,8 +154,8 @@ Options:
       --filter f            read no input: type the jq filter f against
                             --schema, refuse each step no input takes, exit
                             1, and write the schema of its outputs;
-      --delimiter c, --no-header, --comment c, --ragged, --lazy-quotes
-                            read csv or tsv as stury --help says;
+      --delimiter c, --no-header, --comment c, --infer, --ragged,
+      --lazy-quotes         read csv or tsv as stury --help says;
   -h, --help                show this help.
 
 Exit status: 0 when every input is valid, 1 when one fails the schema, 5 when
@@ -166,7 +166,7 @@ one holds a fault, 2 for a usage or file error. In full: stury(1), or docs/cli.m
 @(private = "file")
 SCHEMA_HELP :: `Usage:	stury schema infer [--from format] [--ranges] [file...]
 	stury schema sample [--to format] [--count n] [--seed n] [--invalid] [--comments] schema
-	stury schema gen [--package name] schema
+	stury schema gen [--package name] [--format-assert] schema
 
 infer writes the JSON Schema that every record of the inputs passes. sample
 writes values that pass the schema file, a text a line. gen writes the Odin
@@ -182,7 +182,9 @@ Options:
       --comments            sample: write descriptions as comments;
       --package name        gen: the package of the types, by default the
                             schema file's name;
-      -c, --indent n, --tab, -S, -a   the layout of the text written;
+      --format-assert       gen: spell a format as the type that reads it;
+      -c, --indent n, --tab, -S, -a   infer and sample: the layout of the text
+                            written;
   -h, --help                show this help.
 
 Exit status: 0, 1 when no value passes the schema or no Odin type spells a

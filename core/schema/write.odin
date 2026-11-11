@@ -448,10 +448,10 @@ put_node :: proc(w: ^Writer, name: string, c: Maybe(rules.Node_Index)) {
 @(private = "file", rodata)
 BOUND_KEYS := [?]string{"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"}
 
-@(private = "file", rodata)
+@(private, rodata)
 MIN_KEYS := [?]string{"minLength", "minItems", "minProperties"}
 
-@(private = "file", rodata)
+@(private, rodata)
 MAX_KEYS := [?]string{"maxLength", "maxItems", "maxProperties"}
 
 // Writes `rl`, and answers the pattern of its asserted format when `rl` has a pattern of its own, for an `allOf`.
@@ -646,7 +646,7 @@ put_number :: proc(w: ^Writer, name, text: string) {
 	write.value_of(&w.t, &core.Number_Text{text = spelled})
 }
 
-@(private = "file")
+@(private)
 int_text :: proc(n: int) -> string {
 	return string(strconv.write_int(make([]u8, 24, context.temp_allocator), i64(n), 10))
 }

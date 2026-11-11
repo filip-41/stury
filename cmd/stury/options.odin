@@ -570,13 +570,14 @@ command_name :: proc(cli: ^Cli) -> string {
 
 // The first option given that `check`, `fmt`, `edit` or `schema` has no use for, or "". fmt writes each input's own format,
 // and check prints nothing, so neither takes a layout or reshapes its input, but check takes --seq, which frames the records
-// it judges. schema writes a description or samples, so it takes the layout options and, for sample, --to. edit writes each input back in its own format, so it takes no output format and no option that respells
+// it judges. schema writes a description or samples, so it takes the layout options and, for sample, --to, but schema gen
+// writes Odin and takes none. edit writes each input back in its own format, so it takes no output format and no option that respells
 // the output as a whole, but its filter takes the options of a filter run's input and its bindings, and a built value
 // is written with -a, -S, --indent and --tab.
 command_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
 	// check --filter runs no filter but types one, on the inputs the input options describe, and writes a schema.
 	typing := cli.validating && cli.schema.filter != nil
-	editing, schema := cli.editing, cli.schema_verb || typing
+	editing, schema := cli.editing, cli.schema_verb && !generates_odin(cli) || typing
 	switch {
 	case (editing || cli.diffing) && cli.formats.to != nil: return "--to"
 	case cli.formatting && cli.schema.reported: return "--report"

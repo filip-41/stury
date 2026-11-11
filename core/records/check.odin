@@ -68,7 +68,8 @@ check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.P
 	}
 	for &p in job.pieces {
 		for &e in p.sink.entries {
-			if e.start >= cut {
+			// A record the fault cut tells only the fault: its other failures are not among the records before it.
+			if e.start >= cut || p.fatal.kind != .None && e.kind != .Walk && e.record == p.records - 1 {
 				continue
 			}
 			e.record += records
@@ -135,7 +136,10 @@ check_piece :: proc(job: ^Check_Job, it: ^Reader, k: int) -> bool {
 			first := len(p.sink.entries)
 			p.sink.record = p.records
 			target: u8
+			mark := typed.temp_mark(&p.sink)
 			e := job.plan.check(rec.text, job.plan.as, &target, nil, job.plan, read, context.allocator)
+			// The piece keeps only its first failure's path, which may name a key held in the temp allocator.
+			typed.temp_release(mark, e.kind != .None && p.failure.kind == .None)
 			for &x in p.sink.entries[first:] {
 				x.start += rec.at
 				x.end += rec.at

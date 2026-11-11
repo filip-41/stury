@@ -217,7 +217,7 @@ conjoin_part :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index,
 // judges beside them.
 @(private = "file")
 own_plain :: proc(b: ^Builder, d: ^rules.Description, n: ^rules.Node) -> bool {
-	if n.rules.unique || container_operands(n) {
+	if n.rules.unique || arm_operands(n) {
 		return false
 	}
 	if n.object >= 0 && (len(d.objects[n.object].patterns) > 0 && n.object not_in b.inline || dependent_schemas(&d.objects[n.object])) {

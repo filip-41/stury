@@ -81,20 +81,24 @@ LIMITS := [8][2]string {
 @(private)
 F32_PAST :: "340282356779733661637539395458142568448"
 
-// The record a value at record `at` is read by once its `Maybe`s and pointers are passed, and whether one was.
+// The record a value at record `at` is read by once its `Maybe`s and pointers are passed, and whether one of them
+// takes null.
 @(private)
 target :: proc(plan: ^typed.Plan, at: i32) -> (i32, bool) {
 	at, nullable := at, false
 	for plan.fields[at].kind == .Maybe || plan.fields[at].kind == .Ptr {
-		at, nullable = plan.meta[at].block, true
+		nullable ||= !plan.meta[at].no_nil
+		at = plan.meta[at].block
 	}
 	return at, nullable
 }
 
-// The node of the value at `record`, with the record's rules unless they sit on the edge of the member it is.
+// The node of the value at `record`, with the record's rules unless they sit on the edge of the member it is. An arm
+// takes no null of its own: the union reads null.
 @(private)
-node_of :: proc(r: ^Reading, record: i32, ruled := true) -> rules.Node_Index {
+node_of :: proc(r: ^Reading, record: i32, ruled := true, arm := false) -> rules.Node_Index {
 	at, nullable := target(r.plan, record)
+	nullable &&= !arm
 	f, m := r.plan.fields[at], r.plan.meta[at]
 	use := Use{m.type, nullable, m.rule_set if ruled else 0}
 	if found, ok := r.nodes[use]; ok {
@@ -278,7 +282,9 @@ object_of :: proc(r: ^Reading, m: typed.Meta, is_map: bool) -> i32 {
 		append(&members, x)
 	}
 	r.d.objects[at].members = members[:]
-	if m.forbid && r.direction == .Load {
+	if capture := r.plan.meta[m.block + m.members].capture; capture >= 0 {
+		r.d.objects[at].additional = node_of(r, r.plan.meta[capture].block)
+	} else if m.forbid && r.direction == .Load {
 		r.d.objects[at].additional = add(r, &r.d.nodes, rules.Node{array = -1, object = -1})
 	}
 	return at
@@ -290,7 +296,7 @@ arms_of :: proc(r: ^Reading, m: typed.Meta, null: bool) -> []rules.Node_Index {
 	r.failed ||= failed != nil
 	for arm, k in m.arms {
 		// An arm's record holds the union's rules, with the arm type's own merged in when it has some.
-		arms[k] = node_of(r, arm.fields, r.plan.meta[arm.fields].rule_set != m.rule_set)
+		arms[k] = node_of(r, arm.fields, r.plan.meta[arm.fields].rule_set != m.rule_set, true)
 	}
 	if null && !r.failed {
 		arms[len(m.arms)] = add(r, &r.d.nodes, rules.Node{kinds = {.Null}, array = -1, object = -1})

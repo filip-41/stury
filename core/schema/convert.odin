@@ -22,12 +22,6 @@ Converter :: struct {
 	arena:      virtual.Arena,
 }
 
-// The most times a conversion rewrites a text to settle which reading each Plain node takes.
-READING_ROUNDS :: 16
-
-// The most failures of the output a round reads the readings from.
-READING_FAILURES :: 4096
-
 // Binds `c` to `from` and `to`, each with the typed reads of its format as `bind` takes them. A schema `to` cannot bind is a `.Write` refusal of the caller's.
 converter_init :: proc(cv: ^Converter, c: ^Compiled, from, to: core.As, from_reads: ^typed.Format_Reads = nil, to_reads: ^typed.Format_Reads = nil) -> (err: core.Error) {
 	cv.to = to
@@ -50,82 +44,59 @@ converter_destroy :: proc(cv: ^Converter) {
 }
 
 // Converts `doc`, a document the schema describes in the format `cv` reads, to the format it writes. The document is
-// checked as it stands, then its data model is written whole, so a member the schema leaves open survives, and the
-// text is checked again as the output format reads it. A text that fails there is written again with the other reading
-// for each Plain node the failures name, a string or the value its text spells, so the arm the schema decides is the
-// one written. A value the output format cannot spell is a refusal that names its path, and a text that fails the
-// schema is the check's failures, in `sink` when one is given, whose positions are in the text that stage returns with
-// it. A format with attributes writes each as a member before the element's children, a name its children repeat as
-// an array and its text as `#text` when the element has attributes. An attribute and a child of one name, and an
-// array with attributes, are refused. An empty cell of a flat format is a member that is absent.
+// checked as it stands, then its data model is written whole, so a member the schema leaves open survives, and the text
+// is checked again as the output format reads it. A Plain node is written as the check read it, by the arm the check
+// decides, and one no rule read as its document reads it. A value the output format cannot spell is a refusal that
+// names its path, and a text that fails the schema is the check's failures, in `sink` when one is given, whose
+// positions are in the text that stage returns with it. A format with attributes writes each as a member before the
+// element's children, a name its children repeat as an array and its text as `#text` when the element has attributes.
+// An attribute and a child of one name, and an array with attributes, are refused. An empty cell of a flat format is a
+// member that is absent.
 convert :: proc(cv: ^Converter, doc: ^core.Document, opts := core.Write_Options{}, sink: ^typed.Sink = nil, allocator := context.allocator) -> (text: []u8, stage: Stage, err: core.Error) {
-	if err = check_node(&cv.from, doc, core.ROOT, sink); err != nil {
-		return nil, .Input, err
-	}
 	virtual.arena_free_all(&cv.arena)
 	scratch := virtual.arena_allocator(&cv.arena)
+	readings: typed.Readings
+	readings.read.allocator = scratch
+	if err = check_node(&cv.from, doc, core.ROOT, sink, &readings); err != nil {
+		return nil, .Input, err
+	}
+	if readings.short {
+		return nil, .Input, core.error_of(core.Typed_Refusal{kind = .No_Memory}, allocator)
+	}
 	context.allocator = scratch
-	m := Model{to = cv.to, flat = cv.to.readers != nil && cv.to.readers.flat}
-	trial := typed.Sink{max_errors = READING_FAILURES}
-	for round := 0; ; round += 1 {
-		m.applied, m.refused, m.steps = 0, false, make([dynamic]core.Step)
-		v := build(&m, core.Node_Ref{doc, core.ROOT})
-		if m.refused {
-			return nil, .Write, refusal(m.kind, m.steps[:], allocator)
-		}
-		written_text, wrote := written(v, cv.to, opts, allocator)
-		if wrote.kind != .None {
-			delete(written_text, allocator)
-			return nil, .Write, locate(&m, doc, wrote, allocator)
-		}
-		text = written_text
-		if err = check(&cv.into, text, &trial); err == nil {
-			return text, .Input, nil
-		}
-		if round == READING_ROUNDS || !flip_failures(&m, &trial) {
-			break
-		}
+	m := Model{to = cv.to, flat = cv.to.readers != nil && cv.to.readers.flat, read = make(map[u64]core.Kind, len(readings.read))}
+	for r in readings.read {
+		m.read[r.lo] = r.kind
+	}
+	v := build(&m, core.Node_Ref{doc, core.ROOT})
+	if m.refused {
+		return nil, .Write, refusal(m.kind, m.steps[:], allocator)
+	}
+	wrote: Refusal
+	if text, wrote = written(v, cv.to, opts, allocator); wrote.kind != .None {
 		delete(text, allocator)
-		typed.sink_restore(&trial, {})
+		return nil, .Write, locate(&m, doc, wrote, allocator)
 	}
 	context.allocator = allocator
-	if again := check(&cv.into, text, sink); again != nil {
-		err = again
+	// The text carries the data the schema describes, so the schema picks its cells' kinds again.
+	picked: typed.Readings
+	picked.read.allocator = scratch
+	if err = check_reading(&cv.into, text, sink, nil, nil, &picked); err != nil {
+		return text, .Output, err
 	}
-	return text, .Output, err
+	return text, .Input, nil
 }
 
-// What the data model of a conversion is built with, and the Plain nodes it reads the other way.
+// What the data model of a conversion is built with, and the kind the check read each Plain value as, by its first byte.
 @(private = "file")
 Model :: struct {
 	to:      core.As,
 	flat:    bool,
 	steps:   [dynamic]core.Step,
-	flips:   map[string]struct{},
-	applied: int,
+	read:    map[u64]core.Kind,
 	refused: bool,
 	kind:    core.Typed_Error_Kind,
 	probe:   bool,
-}
-
-// Records the pointers of the nodes the failures of `trial` name, and says whether it learned a new one.
-@(private = "file")
-flip_failures :: proc(m: ^Model, trial: ^typed.Sink) -> (learned: bool) {
-	for e in trial.entries {
-		key := pointer(e.path)
-		if key not_in m.flips {
-			m.flips[key] = {}
-			learned = true
-		}
-	}
-	return
-}
-
-@(private = "file")
-pointer :: proc(steps: []core.Step) -> string {
-	b := strings.builder_make()
-	core.write_pointer(strings.to_writer(&b), steps)
-	return strings.to_string(b)
 }
 
 // The refusal `wrote` made, found at a path: of a flat format by its row and member, of any other by building the
@@ -177,7 +148,7 @@ build :: proc(m: ^Model, v: core.Value) -> core.Value {
 		return v
 	}
 	attributes := core.attributes_of(ref.doc, ref.node)
-	members := attribute_members(ref, &attributes)
+	members := attribute_members(m, ref, &attributes)
 	kind := core.value_kind(v)
 	switch {
 	case kind == .Array:
@@ -218,8 +189,7 @@ leave :: proc(m: ^Model) {
 	}
 }
 
-// A scalar of the model: tried alone against the output format when probing, and read the other way when the failures
-// of the output name it.
+// A scalar of the model: tried alone against the output format when probing, else as the check read it.
 @(private = "file")
 scalar :: proc(m: ^Model, v: core.Value) -> core.Value {
 	if m.probe {
@@ -229,31 +199,70 @@ scalar :: proc(m: ^Model, v: core.Value) -> core.Value {
 		return v
 	}
 	ref, is_node := v.(core.Node_Ref)
-	if !is_node || len(m.flips) == 0 || !(ref.doc.nodes[ref.node].kind == .Plain || ref.doc.readers != nil && ref.doc.readers.flat) {
+	if !is_node {
 		return v
 	}
-	if pointer(m.steps[:]) not_in m.flips {
-		return v
+	if kind, read := m.read[ref.doc.nodes[ref.node].lo]; read {
+		return read_as(core.node_string(ref.doc, ref.node), kind)
 	}
-	m.applied += 1
-	text := core.node_string(ref.doc, ref.node)
-	if core.value_kind(v) != .String {
-		return text
-	}
-	#partial switch kind, _ := core.plain_kind(transmute([]u8)text, 0, u64(len(text)), true, true); kind {
-	case .True:
-		return true
-	case .False:
-		return false
-	case .Number:
-		return core.number_text(text)
-	}
-	return nil if text == "null" else v
+	return v
 }
 
-// The attributes of an element as an object, nil for an element with none.
+// The value of `text` as the check read it, as `kind`.
 @(private = "file")
-attribute_members :: proc(ref: core.Node_Ref, attributes: ^core.Attribute_Iter) -> ^core.Object {
+read_as :: proc(text: string, kind: core.Kind) -> core.Value {
+	#partial switch kind {
+	case .Null:
+		return nil
+	case .True, .False:
+		return kind == .True
+	case .Number:
+		return core.number_text(strict_spelling(text))
+	}
+	return text
+}
+
+// `text`, a number by the loose grammar, spelled by the strict one: no `+`, no leading zero, and a digit on each side of
+// a point.
+@(private = "file")
+strict_spelling :: proc(text: string) -> string {
+	if kind, _ := core.plain_kind(transmute([]u8)text, 0, u64(len(text)), false, true); kind == .Number {
+		return text
+	}
+	b := strings.builder_make()
+	s := text
+	if s[0] == '-' {
+		strings.write_byte(&b, '-')
+	}
+	if s[0] == '-' || s[0] == '+' {
+		s = s[1:]
+	}
+	point := strings.index_any(s, ".eE")
+	if point < 0 {
+		point = len(s)
+	}
+	whole := strings.trim_left(s[:point], "0")
+	strings.write_string(&b, whole if whole != "" else "0")
+	s = s[point:]
+	if len(s) > 0 && s[0] == '.' {
+		s = s[1:]
+		exponent := strings.index_any(s, "eE")
+		if exponent < 0 {
+			exponent = len(s)
+		}
+		if exponent > 0 {
+			strings.write_byte(&b, '.')
+			strings.write_string(&b, s[:exponent])
+		}
+		s = s[exponent:]
+	}
+	strings.write_string(&b, s)
+	return strings.to_string(b)
+}
+
+// The attributes of an element as an object, each value as the check read it, nil for an element with none.
+@(private = "file")
+attribute_members :: proc(m: ^Model, ref: core.Node_Ref, attributes: ^core.Attribute_Iter) -> ^core.Object {
 	name, value, held := core.attribute_next(attributes)
 	if !held {
 		return nil
@@ -262,7 +271,8 @@ attribute_members :: proc(ref: core.Node_Ref, attributes: ^core.Attribute_Iter) 
 	for ; held; name, value, held = core.attribute_next(attributes) {
 		key, _ := core.token_text(ref.doc.readers, &ref.doc.view, name, context.allocator)
 		text, _ := core.token_text(ref.doc.readers, &ref.doc.view, value, context.allocator)
-		core.object_put(members, key, text)
+		kind, read := m.read[value.lo]
+		core.object_put(members, key, read_as(text, kind) if read else text)
 	}
 	return members
 }

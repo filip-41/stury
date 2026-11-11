@@ -10,7 +10,7 @@ import json ".."
 
 // The source `write_odin` writes for `text` in package `p`, or its error.
 @(private = "file")
-odin_of :: proc(t: ^testing.T, text: string, p := "p") -> (source: string, err: core.Error) {
+odin_of :: proc(t: ^testing.T, text: string, p := "p", format_assert := false) -> (source: string, err: core.Error) {
 	doc, berr := core.build(transmute([]u8)text, json.as(.Json))
 	if !testing.expectf(t, berr == nil, "%s: %v", text, berr) {
 		return "", berr
@@ -21,7 +21,7 @@ odin_of :: proc(t: ^testing.T, text: string, p := "p") -> (source: string, err: 
 		return "", cerr
 	}
 	defer schema.destroy(&c)
-	return schema.write_odin(c.description, p, context.temp_allocator)
+	return schema.write_odin(c.description, p, format_assert, context.temp_allocator)
 }
 
 // The keyword `write_odin`'s refusal of `text` names, and the path it stands at.
@@ -44,13 +44,12 @@ odin_struct_members :: proc(t: ^testing.T) {
 	testing.expectf(t, err == nil, "%v", err)
 	for want in ([]string{
 		"package people\n",
-		"import \"core:time\"\n",
 		"Person :: struct {\n",
 		"\tfull_name: string `json:\"full name\" model:\"len>=1\"`,\n",
 		"\tage: i64 `model:\"optional,>=0,<=150\"`,\n",
 		"\ttags: []Person_Tags_Item `model:\"optional\"`,\n",
-		"\tboss: ^Person `model:\"optional\"`,\n",
-		"\tborn: time.Time `model:\"optional\"`,\n",
+		"\tboss: ^Person `model:\"optional,not_null\"`,\n",
+		"\t// format: date-time\n\tborn: string `model:\"optional\"`,\n",
 		"\tnote: Maybe(string) `model:\"optional\"`,\n",
 		"Person_Tags_Item :: distinct string\n",
 		"\tmodel.register_type(reg, {Person_Tags_Item, \"len<=8\"}) or_return\n",
@@ -64,7 +63,7 @@ odin_struct_members :: proc(t: ^testing.T) {
 odin_enums_unions_and_defs :: proc(t: ^testing.T) {
 	source, err := odin_of(t, `{"type": "object", "properties": {"kind": {"enum": ["read-only", "admin", ""]}, "level": {"enum": [1, -2]},
 		"id": {"anyOf": [{"type": "string", "format": "uuid"}, {"type": "integer"}]}, "at": {"$ref": "#/$defs/Point"}},
-		"$defs": {"Point": {"type": "object", "properties": {"x": {"type": "number"}}}}}`)
+		"$defs": {"Point": {"type": "object", "properties": {"x": {"type": "number"}}}}}`, format_assert = true)
 	testing.expectf(t, err == nil, "%v", err)
 	for want in ([]string{
 		"Root :: struct {\n",
@@ -83,14 +82,14 @@ odin_enums_unions_and_defs :: proc(t: ^testing.T) {
 @(test)
 odin_names_are_unique_identifiers :: proc(t: ^testing.T) {
 	source, err := odin_of(t, `{"type": "object", "properties": {"a-b": {"type": "string"}, "a_b": {"type": "string"},
-		"proc": {"type": "string"}, "1st": {"type": "string"}, "": {"type": "string"}}}`)
+		"proc": {"type": "string"}, "1st": {"type": "string"}, "-": {"type": "string"}}}`)
 	testing.expectf(t, err == nil, "%v", err)
 	for want in ([]string{
 		"\ta_b: string `json:\"a-b\" model:\"optional\"`,\n",
 		"\ta_b_2: string `json:\"a_b\" model:\"optional\"`,\n",
 		"\tproc_: string `json:\"proc\" model:\"optional\"`,\n",
 		"\t_1st: string `json:\"1st\" model:\"optional\"`,\n",
-		"\tmember: string `json:\"\" model:\"optional\"`,\n",
+		"\tmember: string `json:\"\\-\" model:\"optional\"`,\n",
 	}) {
 		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
 	}
@@ -103,13 +102,19 @@ odin_refusals_name_the_keyword :: proc(t: ^testing.T) {
 		steps:         int,
 	}
 	for c in ([]Case{
-		{`{"allOf": [{"type": "integer"}]}`, "allOf", 0},
+		{`{"allOf": [{"type": "integer"}, {"type": "string"}]}`, "false", 0},
 		{`{"type": "object", "properties": {"a": {"type": "array", "items": {"if": {"type": "string"}}}}}`, "if", 2},
 		{`{"oneOf": [{"type": "integer"}, {"minimum": 2}]}`, "oneOf", 0},
 		{`{"type": "array", "uniqueItems": true}`, "uniqueItems", 0},
 		{`{"type": "object", "patternProperties": {"^x": {}}}`, "patternProperties", 0},
-		{`{"type": "null"}`, "type", 0},
-		{`{"enum": [1, "a"]}`, "enum", 0},
+		{`{"type": "array", "items": {"type": "null"}}`, "type", 1},
+		{`{"enum": [9007199254740993]}`, "enum", 0},
+		{`{"type": "array", "prefixItems": [{"type": "integer"}]}`, "prefixItems", 0},
+		{`{"type": "array", "contains": {"type": "integer"}}`, "contains", 0},
+		{`{"type": "object", "properties": {"": {}}}`, "properties", 0},
+		{`{"type": "object", "required": ["z"], "additionalProperties": false}`, "required", 0},
+		{`{"type": "object", "properties": {"a": {}}, "additionalProperties": {"type": "string"}, "allOf": [{"properties": {"b": {}}}]}`, "additionalProperties", 0},
+		{`{"$defs": {"a": {"type": "object", "properties": {"x": {"not": {"minimum": 1}}}}}, "type": "object", "properties": {"p": {"$ref": "#/$defs/a"}}}`, "not", 2},
 		{`{"$defs": {"t": {"type": "array", "items": {"$ref": "#/$defs/t"}}}, "$ref": "#/$defs/t"}`, "$ref", 1},
 	}) {
 		keyword, steps := refused_keyword(t, c.text)
@@ -119,12 +124,42 @@ odin_refusals_name_the_keyword :: proc(t: ^testing.T) {
 
 @(test)
 odin_package_name :: proc(t: ^testing.T) {
-	for p in ([]string{"", "9lives", "Pkg", "a-b", "proc"}) {
+	for p in ([]string{"", "_", "9lives", "a-b", "proc", "model", "time"}) {
 		_, err := odin_of(t, `{"type": "string"}`, p)
 		e, typed := err.(core.Typed_Error)
 		testing.expectf(t, typed && e.kind == .Bad_Option, "%q: %v", p, err)
 	}
-	source, err := odin_of(t, `{"type": "string"}`, "my_types")
+	for p in ([]string{"my_types", "Pkg", "a__b"}) {
+		source, err := odin_of(t, `{"type": "string"}`, p)
+		testing.expectf(t, err == nil, "%q: %v", p, err)
+		testing.expectf(t, strings.contains(source, strings.concatenate({"package ", p, "\n"}, context.temp_allocator)) && strings.contains(source, "Root :: string\n"), "%s", source)
+	}
+}
+
+@(test)
+odin_null_tuples_merges_and_other_members :: proc(t: ^testing.T) {
+	source, err := odin_of(t, `{"type": "object", "properties": {"extra": {"type": "integer"}, "n": {"type": "null"},
+		"pair": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}], "minItems": 2, "maxItems": 2},
+		"e": {"enum": [1, "a", null]}, "when": {"type": "string", "format": "date-time"}}, "additionalProperties": {"type": "string"},
+		"required": ["b"]}`)
 	testing.expectf(t, err == nil, "%v", err)
-	testing.expectf(t, strings.contains(source, "package my_types\n") && strings.contains(source, "Root :: string\n"), "%s", source)
+	for want in ([]string{
+		"\textra: i64 `model:\"optional\"`,\n",
+		"\tn: Null `model:\"optional\"`,\n",
+		"\tpair: [2]f64 `model:\"optional\"`,\n",
+		"\te: Root_E `model:\"optional\"`,\n",
+		"\tb: string,\n",
+		"\textra_2: map[string]string `model:\"extra\"`,\n",
+		"Null :: union {}\n",
+		"Root_E :: union {Root_E_String, Root_E_Integer}\n",
+	}) {
+		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
+	}
+	source, err = odin_of(t, `{"type": "object", "properties": {"a": {"type": "integer"}}, "allOf": [{"properties": {"b": {"type": "boolean"}}, "required": ["b"]}]}`)
+	testing.expectf(t, err == nil, "%v", err)
+	testing.expectf(t, strings.contains(source, "\ta: i64 `model:\"optional\"`,\n\tb: bool,\n"), "%s", source)
+	source, err = odin_of(t, `{"$defs": {"Root": {"type": "object", "properties": {"x": {"type": "integer"}}}}, "type": ["array", "null"],
+		"items": {"$ref": "#/$defs/Root"}}`)
+	testing.expectf(t, err == nil, "%v", err)
+	testing.expectf(t, strings.contains(source, "Root_2 :: Maybe([]Root)\n") && strings.contains(source, "Root :: struct {\n"), "%s", source)
 }

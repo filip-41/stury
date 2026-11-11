@@ -69,6 +69,7 @@ resolve_all :: proc(r: ^Reader) {
 	}
 	seen := make([]bool, len(r.d.nodes), context.temp_allocator)
 	todo := make([dynamic]rules.Node_Index, context.temp_allocator)
+	reached: []bool
 	for p in r.pending {
 		n := &r.d.nodes[p.node]
 		if n.ref == nil && n.dynamic_ref == nil {
@@ -80,6 +81,13 @@ resolve_all :: proc(r: ^Reader) {
 		for len(todo) > 0 {
 			at := pop(&todo)
 			if at == p.node {
+				// A loop nothing reaches from the root is never judged.
+				if reached == nil {
+					reached = reachable(r.d)
+				}
+				if !reached[p.node] {
+					break
+				}
 				resize(&r.path, 0)
 				append(&r.path, ..p.path)
 				fail(r, p.site, p.keyword, "leads back to itself through references and in-place subschemas alone")
@@ -91,6 +99,47 @@ resolve_all :: proc(r: ^Reader) {
 			}
 		}
 	}
+}
+
+// Which nodes the root of `d` reaches through any subschema or reference.
+@(private)
+reachable :: proc(d: ^rules.Description) -> []bool {
+	seen := make([]bool, len(d.nodes), context.temp_allocator)
+	todo := make([dynamic]rules.Node_Index, context.temp_allocator)
+	append(&todo, d.root)
+	for len(todo) > 0 {
+		at := pop(&todo)
+		if at == rules.NONE || seen[at] {
+			continue
+		}
+		seen[at] = true
+		in_place(d, at, &todo)
+		n := &d.nodes[at]
+		for x in ([?]Maybe(rules.Node_Index){n.unevaluated_items, n.unevaluated_properties}) {
+			if y, has := x.?; has {
+				append(&todo, y)
+			}
+		}
+		if n.array >= 0 {
+			a := &d.arrays[n.array]
+			append(&todo, ..a.prefix)
+			append(&todo, a.items)
+			if y, has := a.contains.?; has {
+				append(&todo, y)
+			}
+		}
+		if n.object >= 0 {
+			o := &d.objects[n.object]
+			for m in o.members {
+				append(&todo, m.node)
+			}
+			for pat in o.patterns {
+				append(&todo, pat.node)
+			}
+			append(&todo, o.additional, o.keys)
+		}
+	}
+	return seen
 }
 
 // Adds to `out` the subschemas that judge the value `node` judges: its references and its in-place applicators. A
@@ -137,7 +186,7 @@ target_of :: proc(r: ^Reader, p: Pending) -> (node: rules.Node_Index, late: bool
 	}
 	sc, found := fetch(r, uri)
 	if !found {
-		return 0, false, r.res.root == "" ? "names a resource that is not in the schema" : "names a resource that is neither in the schema nor a file under the root"
+		return 0, false, r.res.root == "" ? "names a resource that is not in the schema" : "names a resource that is neither in the schema nor a readable file under the root, and a file outside it is not read"
 	}
 	switch {
 	case fragment == "":

@@ -543,7 +543,10 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 				case .Ptr:
 					target := (^rawptr)(va)^
 					if target == nil {
-						when !V {
+						when V {
+							// A pointer that refuses null.
+							k = .Wrong_Kind if w.meta[vf.meta].no_nil else .None
+						} else {
 							out.cursor += put_word(p, T[.Null])
 						}
 					} else {

@@ -1044,7 +1044,7 @@ render :: proc(w: io.Writer, src: []u8, err: Error, lines: ^Lines = nil) -> io.E
 }
 
 // The message of a check's entry `e`, in a schema's words where the entry has a keyword path and the kind has such words.
-// A missing member is named, which only the entry's operand does.
+// A missing member is named, which only the entry's operand does, and so is the member whose name failed a name rule.
 write_entry_message :: proc(w: io.Writer, e: Error_Entry) -> io.Error {
 	if text, named := e.operand.(string); named && e.kind == .Custom {
 		_, err := io.write_string(w, text)
@@ -1056,12 +1056,16 @@ write_entry_message :: proc(w: io.Writer, e: Error_Entry) -> io.Error {
 		io.write_string(w, " is missing") or_return
 		return nil
 	}
+	message := TYPED_KIND_RULES[e.kind].message
 	if len(e.keyword_path) > 0 && SCHEMA_MESSAGES[e.kind] != "" {
-		_, err := io.write_string(w, SCHEMA_MESSAGES[e.kind])
-		return err
+		message = SCHEMA_MESSAGES[e.kind]
 	}
-	_, err := io.write_string(w, TYPED_KIND_RULES[e.kind].message)
-	return err
+	io.write_string(w, message) or_return
+	if name, named := e.operand.(string); named {
+		io.write_string(w, " in the member name ") or_return
+		io.write_quoted_string(w, name) or_return
+	}
+	return nil
 }
 
 // The stable code of a check's entry `e`, which a problem document and a caller match on.

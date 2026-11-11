@@ -232,7 +232,7 @@ usage error.
 | `--from ndjson`, `--seq` | Validate one record per line or per `0x1E` separator, each record being one text. `--seq` uses `check`'s records, not jq's text sequence; each `FILE` is read alone, so a text cut at a file's end is a fault. |
 | `--from jsonc` | Validate JSONC as `stury --from jsonc .` reads it, to the same limits. A comment's text holds no escape. |
 | `--from json5` | Validate JSON5 as `stury --from json5 .` reads it, to the same limits. `Infinity` and `NaN` fail, since jq has no value for them. |
-| `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. A fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An empty input is valid, as the library takes it, and so is a header alone. |
+| `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. A fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An empty input is valid, as the library takes it, and so is a header alone. A cell is one kind: a string, or under `--infer` a number, `true` or `false` when its text is exactly one, so `type: integer` takes the cell `1` only with `--infer`, and `oneOf: [string, integer]` takes it either way. |
 | `--max-depth N` | As [above](#sturys-own-options). |
 | `--schema FILE` | Also check each input against the JSON Schema in `FILE` (drafts 4 to 2020-12). See [Schema check](#schema-check). |
 | `FILE...` | One file per argument, read as the filter reads them. |
@@ -257,7 +257,7 @@ before the fault, and the exit is 5.
 | `--schema-ref DIR` | The directory a reference to a `file:` URI may read from. The default is the schema file's directory. A schema with an `$id` resolves a relative reference against that `$id`, so its `file:` references need an `$id` that is one. |
 | `--format-assert` | `format` fails an input, where it otherwise only annotates. |
 | `--max-errors N` | Keep at most `N` failures of an input (default 100). The basic output and the problem document say `"truncated": true` when more were left out, and the lines end with `NAME: more failures past --max-errors N`. |
-| `--report basic` | Write the JSON Schema basic output of each input on stdout, one line a file, `{"valid":true}` for a valid one. Each error unit has `"valid":false`. With several files each line starts with a `file` member naming its file. `keywordLocation`, `absoluteKeywordLocation` (where the schema has an `$id` and the keywords did not pass a `$ref`) and `instanceLocation` are JSON Pointers; with records, a `record` member holds the record's index and the instance location is a pointer into that record. |
+| `--report basic` | Write the JSON Schema basic output of each input on stdout, one line a file that is read (a file that faults or does not open has none), `{"valid":true}` for a valid one. Each error unit has `"valid":false`. With several files each line starts with a `file` member naming its file. `keywordLocation`, `absoluteKeywordLocation` (where the schema has an `$id` and the keywords did not pass a `$ref`) and `instanceLocation` are JSON Pointers; with records, a `record` member holds the record's index and the instance location is a pointer into that record. |
 | `--report problem` | Write an RFC 9457 problem document of each failing input on stdout: `title`, `status` 422 and `errors` of `pointer`, `code` and `message`, and a `record` member in an error of a record input. A missing member is named in its message, and its pointer is the member's. With several files the document starts with a `file` member. |
 | `--report lines` | The default. |
 
@@ -318,12 +318,23 @@ path of the node the search stopped at.
 `stury schema gen SCHEMA` writes the Odin source of the types a model reads the schema's values with, and a procedure
 `register` that adds the rules no tag holds to a `model.Registry`, as `schema.write_odin` writes them: a struct for an
 object with members, its tags naming each member (`json:`), saying it may be left out and holding its rules (`model:`),
-a map for one with none, an enum for `enum` and `const`, a union for `anyOf`, a `oneOf` of disjoint arms and a list of
-kinds, a pointer where a struct holds itself, and `time.Time`, `uuid.Identifier`, `model.Email` and `model.Base64` for
-the formats and the encoding they read. `$defs` are named types. The package is `--package NAME`, by default the file's
-name with each run of other bytes than letters and digits an underscore (`my-types.schema.json` is `my_types`). A
-keyword no type spells (`allOf`, `if`, `patternProperties`, `oneOf` with overlapping arms, ...) is exit 1, told with the
-path of the node that holds it.
+an `extra: map[string]T` member for the members an `additionalProperties` schema judges, a map for an object with no
+members, an enum for `enum` and `const` (a union of a string enum, an integer enum and `bool` where the values are of
+several kinds), a union for `anyOf`, a `oneOf` of disjoint arms and a list of kinds, `Null :: union {}` for `type:
+null`, a fixed array for `prefixItems` of one type and that length, and a pointer where a struct holds itself, tagged
+`not_null` where the schema takes no null. `allOf` and a `$ref` with siblings are merged into one node where their
+members and rules join. `format` only annotates, as `check` reads it: the member is a string with a `// format:`
+comment. With `--format-assert` the formats a type reads are `time.Time`, `uuid.Identifier` and `model.Email`, and the
+others a `format=` rule. `contentEncoding: base64` is `model.Base64`. `$defs` are named types.
+
+The package is `--package NAME`, by default the file's name in snake case (`my-types.schema.json` is `my_types`). It
+must be an Odin identifier that is no keyword and no package the types import (`model`, `time`, `core`, ...), since an
+Odin program names each package once. A keyword no type spells (`if`, `patternProperties`, `contains`, `oneOf` with
+overlapping arms, ...) is exit 1, told with the path of the node that holds it, and so is an integer enum value past
+2^53 and an integer whose bounds leave no value `i64` or `u64` holds. An integer the schema leaves unbounded is `i64`,
+so a model refuses one past its range, which the schema takes. Every object nested in another is a struct held by value,
+and Odin's compiler takes time exponential in that depth, so the types of objects nested past about 24 levels compile
+slowly. schema gen takes no layout option and no filter.
 
 ## `fmt`
 
@@ -1111,7 +1122,7 @@ line and column in the stream, without a file's name.
   (`0x20000000000001` equals `9007199254740993`), and a longer one is compared as its double.
 - A CSV or TSV cell is a string in a comparison, as `type` says: `.a == 1e-400` is false for the cell `1e-400`, and
   `[.a, 1e-400] | unique` has two members. The library's `core.compare` and `core.equal` do the same: a cell is a string
-  unless the document was read with `infer`, and only `read_plain = true`, which a schema's rules use, reads it as the number,
+  unless the document was read with `infer`, and only `read_plain = true`, which the schema-directed conversion uses, reads it as the number,
   boolean or null it is compared with.
 - An integer literal of 18 or more digits is rounded to the nearest double. jq 1.8.2 can be one unit in the last
   place off: `712598146987295425 + 0` is `712598146987295500` in stury and `712598146987295400` in jq, and

@@ -22,12 +22,29 @@ Verb_Options :: struct {
 	count:    int,
 	package_name: string, // gen: the package the types are written in
 	flag:     string, // the first of these given
+	given:    [Schema_Verb]string, // the first option of each verb given
+}
+
+Schema_Verb :: enum u8 {
+	Infer,
+	Sample,
+	Gen,
+}
+
+@(rodata)
+SCHEMA_VERBS := [Schema_Verb]string {
+	.Infer  = "infer",
+	.Sample = "sample",
+	.Gen    = "gen",
 }
 
 // Takes the option `args[i]` and its parameter.
 verb_option :: proc(v: ^Verb_Options, args: []string, i: int) {
 	if v.flag == "" {
 		v.flag = args[i]
+	}
+	if verb := verb_of_option(args[i]); v.given[verb] == "" {
+		v.given[verb] = args[i]
 	}
 	switch a := args[i]; a {
 	case "--ranges":   v.ranges = true
@@ -52,31 +69,44 @@ verb_option :: proc(v: ^Verb_Options, args: []string, i: int) {
 }
 
 // The schema verb that takes `option`, one of Verb_Options'.
-verb_of_option :: proc(option: string) -> string {
+verb_of_option :: proc(option: string) -> Schema_Verb {
 	switch option {
 	case "--ranges":
-		return "infer"
+		return .Infer
 	case "--package":
-		return "gen"
+		return .Gen
 	}
-	return "sample"
+	return .Sample
+}
+
+// Whether the command is `schema gen`, which writes Odin and takes no layout.
+generates_odin :: proc(cli: ^Cli) -> bool {
+	return cli.schema_verb && len(cli.files) > 0 && cli.files[0] == "gen"
 }
 
 // Runs the verb that `cli.files` opens with and exits.
 schema_main :: proc(run: ^Run, cli: ^Cli) -> ! {
-	verb := cli.files[0] if len(cli.files) > 0 else ""
-	if verb != "infer" && verb != "sample" && verb != "gen" {
+	verb, named := Schema_Verb.Infer, false
+	for name, v in SCHEMA_VERBS {
+		if len(cli.files) > 0 && cli.files[0] == name {
+			verb, named = v, true
+		}
+	}
+	if !named {
 		usage_error("schema takes infer, sample or gen")
 	}
-	if verb != "gen" && cli.verbs.package_name != "" {
-		usage_error("--package is gen's")
+	for flag, other in cli.verbs.given {
+		if other != verb && flag != "" {
+			usage_error("%s is %s's", flag, SCHEMA_VERBS[other])
+		}
 	}
 	files := cli.files[1:]
 	switch verb {
-	case "infer":
+	case .Infer:
 		infer_main(run, cli, files)
-	case "sample":
+	case .Sample:
 		sample_main(run, cli, files)
+	case .Gen:
 	}
 	gen_main(cli, files)
 }
@@ -99,9 +129,6 @@ infer_read :: proc(inf: ^schema.Inferred, src: Source, path: string, data: []byt
 // after a text that does not read or runs out of memory, and 2 after a file that does not open.
 @(private = "file")
 infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
-	if cli.verbs.invalid || cli.verbs.comments || cli.verbs.seed != 0 || cli.verbs.count != 0 {
-		usage_error("--invalid, --comments, --seed and --count are sample's")
-	}
 	if cli.formats.to != nil {
 		usage_error("--to is sample's: schema infer writes JSON Schema")
 	}
@@ -165,9 +192,6 @@ sample_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 	if len(files) != 1 {
 		usage_error("schema sample takes one schema file")
 	}
-	if cli.verbs.ranges {
-		usage_error("--ranges is infer's")
-	}
 	if cli.formats.from != nil {
 		usage_error("--from is infer's: a schema is read as JSON")
 	}
@@ -211,7 +235,7 @@ read_schema_file :: proc(path, verb: string) -> (rules.Description, []byte) {
 	}
 	res := schema.Resolver {
 		as   = json.as(.Json),
-		root = filepath.dir(path),
+		root = schema_directory(path),
 	}
 	d, rerr := schema.read(doc, core.ROOT, "", &res)
 	if rerr != nil {
@@ -221,26 +245,24 @@ read_schema_file :: proc(path, verb: string) -> (rules.Description, []byte) {
 }
 
 // The Odin types of the values of the schema in the one file `files` names, in the package --package names or else the
-// one the file's name spells. Exits 1 when the schema holds a keyword no Odin type spells.
+// one the file's stem spells in snake case, with formats asserting under --format-assert. Exits 1 when the schema holds
+// a keyword no Odin type spells.
 @(private = "file")
 gen_main :: proc(cli: ^Cli, files: []string) -> ! {
 	if len(files) != 1 {
 		usage_error("schema gen takes one schema file")
-	}
-	if v := cli.verbs; v.ranges || v.invalid || v.comments || v.seed != 0 || v.count != 0 {
-		usage_error("--ranges is infer's, --invalid, --comments, --seed and --count are sample's")
 	}
 	if cli.formats.from != nil || cli.formats.to != nil {
 		usage_error("--%s has no use with schema gen: a schema is read as JSON and the types are written as Odin", "from" if cli.formats.from != nil else "to")
 	}
 	name := cli.verbs.package_name
 	if name == "" {
-		name = package_named(filepath.short_stem(files[0]))
+		name = strings.to_snake_case(filepath.short_stem(files[0]))
 	}
 	d, text := read_schema_file(files[0], "schema gen")
-	source, err := schema.write_odin(&d, name)
+	source, err := schema.write_odin(&d, name, cli.schema.format_assert)
 	if e, typed := err.(core.Typed_Error); typed && e.kind == .Bad_Option {
-		usage_error("%q is not an Odin package name%s", name, "" if cli.verbs.package_name != "" else ": name one with --package")
+		usage_error("%q cannot name the package: it is no Odin identifier, or a package the types import%s", name, "" if cli.verbs.package_name != "" else ": name one with --package")
 	}
 	if err != nil {
 		message.write_stderr("stury: error: %s\n", edit_error_text(text, err))
@@ -248,23 +270,4 @@ gen_main :: proc(cli: ^Cli, files: []string) -> ! {
 	}
 	message.write_stdout("%s", source)
 	exit_closing_stdout(0)
-}
-
-// The package name a file's stem spells: its letters lower-cased and digits, each other run of bytes an underscore.
-@(private = "file")
-package_named :: proc(stem: string) -> string {
-	b := strings.builder_make()
-	for c in transmute([]byte)stem {
-		switch c {
-		case 'a' ..= 'z', '0' ..= '9':
-			strings.write_byte(&b, c)
-		case 'A' ..= 'Z':
-			strings.write_byte(&b, c + 'a' - 'A')
-		case:
-			if n := strings.builder_len(b); n > 0 && b.buf[n - 1] != '_' {
-				strings.write_byte(&b, '_')
-			}
-		}
-	}
-	return strings.trim_right(strings.to_string(b), "_")
 }

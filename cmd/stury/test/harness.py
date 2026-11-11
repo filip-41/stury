@@ -142,3 +142,16 @@ def run_capped(argv, input, timeout, cap_mb=MEM_CAP_MB, **kw):
     if over.is_set():
         raise subprocess.TimeoutExpired(argv, timeout)
     return subprocess.CompletedProcess(argv, p.returncode, out, err)
+
+
+def passing(stury, schema, path, count, flags=(), timeout=60, cap_mb=1024):
+    """The indices of the first `count` lines of `path` that pass `schema` under `stury check` with `flags`."""
+    p = run_capped([stury, "check", *flags, "--schema", schema, path], None, timeout, cap_mb=cap_mb)
+    failed = {int(m) - 1 for m in re.findall(rf"^{re.escape(path)}:(\d+):", p.stderr.decode(errors="replace"), re.M)}
+    return [i for i in range(count) if i not in failed]
+
+
+def fixtures_dir():
+    """bench/fixtures of the main checkout, which its worktrees share."""
+    common = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    return os.path.join(os.path.dirname(os.path.abspath(os.path.join(ROOT, common))), "bench/fixtures")

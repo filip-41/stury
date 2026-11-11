@@ -62,6 +62,30 @@ sink_restore :: proc(c: ^Sink, m: Sink_Mark) {
 	}
 }
 
+// Marks the default temp allocator before the check of one record, for `temp_release` to give back what that check took
+// from it, so a check of many records does not grow the temp allocator. A sink whose entries are in the temp allocator
+// takes no mark, since the release would free them.
+temp_mark :: proc(c: ^Sink) -> runtime.Arena_Temp {
+	if c != nil && c.entries.allocator.procedure == context.temp_allocator.procedure {
+		return {}
+	}
+	return runtime.default_temp_allocator_temp_begin()
+}
+
+// Gives back what the temp allocator gave since `m`, unless `keep`, which a record whose first failure is kept past it
+// says, since that failure's path may name a key decoded into the temp allocator. Says whether it was given back.
+temp_release :: proc(m: runtime.Arena_Temp, keep := false) -> bool {
+	if m.arena == nil {
+		return false
+	}
+	if keep {
+		runtime.arena_temp_ignore(m)
+		return false
+	}
+	runtime.default_temp_allocator_temp_end(m)
+	return true
+}
+
 // Frees the paths and names of the entries `c` holds and the arrays.
 sink_destroy :: proc(c: ^Sink) {
 	for &e in c.entries {

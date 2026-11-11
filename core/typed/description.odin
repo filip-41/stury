@@ -36,6 +36,7 @@ plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, 
 	}
 	if opts.checking {
 		choose_arms(&b, arena)
+		judging_ids(&b, arena)
 		for u in b.uses {
 			if len(u.applies) > 0 {
 				p.fork = fork_record(&b)
@@ -145,11 +146,16 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 	} else if node != rules.NONE {
 		n := &d.nodes[node]
 		judged := n^
-		if container_operands(n) {
+		if arm_operands(n) {
 			judged.has_enum, judged.enum_of, judged.const_of = false, nil, nil
 		}
 		m.rule_set = checked_leaf(b, &judged, edge, arena)
-		if .Object in n.kinds {
+		if m.rule_set > 0 {
+			l := &b.leaves[m.rule_set - 1]
+			m.counted = l.min_members > 0 || l.max_members < max(u64)
+		}
+		// An object or array the node's type refuses is read by its members' records too, so each failure is reported.
+		if .Object in n.kinds || n.object >= 0 {
 			o := d.objects[n.object] if n.object >= 0 else rules.Object{additional = rules.NONE, keys = rules.NONE}
 			// The members a pattern matches are judged by the held record's arms, and so are the others with them.
 			if len(o.patterns) > 0 && n.object not_in b.inline {
@@ -171,7 +177,7 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 				u.keys = checked_leaf(b, &d.nodes[keys], {}, arena)
 			}
 		}
-		if .Array in n.kinds {
+		if .Array in n.kinds || n.array >= 0 {
 			a := d.arrays[n.array] if n.array >= 0 else rules.Array{items = rules.NONE}
 			u.items = checked_block(b, d, arena, {typeid_of(rules.Array), n.array, b.scope}, a.prefix, a.items, UNEVALUATED_ITEMS[:] if b.unevaluated[{1, n.array}] else ITEMS[:])
 			items, _ := reached(d, a.items)
