@@ -84,6 +84,9 @@ ecma_prop :: proc(name: string) -> (it: Prop_Item, ok: bool) {
 	kind, value := "", name
 	if eq := strings.index_byte(name, '='); eq >= 0 {
 		kind, value = name[:eq], name[eq + 1:]
+		if kind == "" || value == "" {
+			return
+		}
 		switch kind {
 		case "General_Category":
 			kind = "gc"
@@ -106,8 +109,8 @@ ecma_prop :: proc(name: string) -> (it: Prop_Item, ok: bool) {
 
 // A group name ECMA takes: an identifier, of ID_Start, `$` and `_`, then ID_Continue, `$`, ZWNJ and ZWJ.
 ecma_identifier :: proc(name: string) -> bool {
-	start, _ := named_prop("ID_Start")
-	part, _ := named_prop("ID_Continue")
+	start, _ := ecma_prop("ID_Start")
+	part, _ := ecma_prop("ID_Continue")
 	for r, i in name {
 		if r != '$' && r != '_' && !in_table(int(start.table if i == 0 else part.table), r) && (i == 0 || r != 0x200C && r != 0x200D) {
 			return false

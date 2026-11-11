@@ -20,10 +20,10 @@ Validator_Of :: struct {
 
 // Judges member `field` of `T`, of type `V`, once it is read and has passed its type and rules, in a load and in
 // `validate`. It runs only for a member the load read, and only if nothing under the member failed. A member may have
-// several, which run in the order they were registered. Refuses as `.Invalid_Argument` a member `T` lacks or one of
-// another type.
+// several, which run in the order they were registered. Refuses as `.Invalid_Argument` a member of another type, and a
+// member `T` lacks is refused by `compile`.
 register_after :: proc(reg: ^Registry, $T: typeid, field: string, check: proc(value: $V, r: ^Report)) -> runtime.Allocator_Error {
-	if !has_member(T, field, V) {
+	if has_member(T, field, nil) && !has_member(T, field, V) {
 		return .Invalid_Argument
 	}
 	call :: proc(value, fn: rawptr, r: ^Report) {

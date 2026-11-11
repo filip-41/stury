@@ -30,6 +30,8 @@ value_kinds :: proc(ti: ^runtime.Type_Info, reg: ^Registry) -> (k: Value_Kinds) 
 		return c.subject
 	} else if id != ti.id {
 		return value_kinds(type_info_of(id), reg)
+	} else if typed.number_text(ti) {
+		return {.Float}
 	}
 	#partial switch v in runtime.type_info_base(ti).variant {
 	case runtime.Type_Info_String:
@@ -66,7 +68,8 @@ Subject :: struct {
 @(private)
 subject_of :: proc(ti: ^runtime.Type_Info, reg: ^Registry) -> (s: Subject) {
 	s.kinds = value_kinds(ti, reg)
-	s.nilable = held(ti) != nil
+	// A `core.Number_Text` reads null as its empty text.
+	s.nilable = held(ti) != nil || typed.number_text(ti)
 	base := ti
 	for next := held(base); next != nil; next = held(base) {
 		base = next
@@ -83,7 +86,7 @@ subject_of :: proc(ti: ^runtime.Type_Info, reg: ^Registry) -> (s: Subject) {
 }
 
 // Reads a `model:` tag into `r`, for a value of `subject`, and for a member when `member`: items separated by commas,
-// each a role (`optional`, `read_only`, `write_only`, `not_null` on a pointer or a `Maybe`), a bound (`>=N`, `>N`, `<=N`,
+// each a role (`optional`, `read_only`, `write_only`, `not_null` on a pointer, a `Maybe` or a `core.Number_Text`), a bound (`>=N`, `>N`, `<=N`,
 // `<N`, a range `A..=B` or `A..<B`), `multiple_of=` and a divisor, the same bounds after `len` on a count of code points,
 // elements or members (`len=N` for one count), `unique` on a list, which refuses two equal elements, `format=` and a
 // format's name, or `pattern=` and an ECMA-262 pattern, which takes the rest of the tag, commas included, so it comes

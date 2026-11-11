@@ -1,6 +1,7 @@
 package typed
 
 import "base:runtime"
+import "core:slice"
 import "core:strings"
 import core ".."
 
@@ -163,13 +164,10 @@ Replacement_Frames :: [core.MAX_DEPTH + 2]Frame
 // The path of the member at `regs`, outermost step first.
 @(private)
 member_steps :: proc(h: ^Check, regs: core.Hook_Regs) -> []core.Step {
-	inner := make([dynamic]core.Step, context.temp_allocator)
-	steps_of(h, regs, false, &inner)
-	member := make([dynamic]core.Step, context.temp_allocator)
-	#reverse for s in inner {
-		append(&member, s)
-	}
-	return member[:]
+	steps := make([dynamic]core.Step, context.temp_allocator)
+	steps_of(h, regs, false, &steps)
+	slice.reverse(steps[:])
+	return steps[:]
 }
 
 // Reports the entries `sub` collected judging a value as the member's at `regs`, with the member's path in front of each

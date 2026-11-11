@@ -33,10 +33,24 @@ tune_behind :: proc(body: ^Node, negative: bool) -> (^Node, string) {
 		out^ = body^
 		out.kids = branches
 	}
-	if least, sure := min_length(out); least == 0 && sure && !keeps {
+	// A look-behind within is measured even so, as Oniguruma tunes the body before it, so one of no fixed length fails.
+	if least, sure := min_length(out); least == 0 && sure && !keeps && !holds_behind(out) {
 		return new_node(.Empty), ""
 	}
 	return out, ""
+}
+
+@(private = "file")
+holds_behind :: proc(n: ^Node) -> bool {
+	if n.kind == .Look && (n.look == .Behind || n.look == .Not_Behind) {
+		return true
+	}
+	for k in n.kids {
+		if holds_behind(k) {
+			return true
+		}
+	}
+	return false
 }
 
 // Oniguruma's check_node_in_look_behind: no end of text, look-ahead, or negative look-behind in a positive

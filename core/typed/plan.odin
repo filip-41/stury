@@ -183,11 +183,13 @@ Use :: struct {
 	requires:                []Requires,
 }
 
-// A member of an object record's block whose presence asks for the members `wants`, as places in the block.
+// A member of an object record's block whose presence asks for the members `wants`, as places in the block, under the
+// keyword the schema wrote.
 @(private)
 Requires :: struct {
 	trigger: i32,
 	wants:   []i32,
+	keyword: string,
 }
 
 // A union's arm: the value classes it takes, its tag value, and its tag name when the tag names it.
@@ -523,8 +525,8 @@ Value_Text :: #type proc(plan: ^Plan, v: core.Value, allocator: runtime.Allocato
 @(private)
 TRAIL_MAX :: 32
 
-// The most `fill_checked` calls open at once: a schema nests as deep as a value can (`core.MAX_DEPTH`) in its members, and
-// again in the references and `allOf` arms between them.
+// The most records a check's plan fills one inside the other: a schema nests as deep as a value can (`core.MAX_DEPTH`) in
+// its members, and again in the references and `allOf` arms between them.
 @(private)
 MAX_FILL :: 2 * core.MAX_DEPTH
 
@@ -543,7 +545,7 @@ Builder :: struct {
 	// The names of the members being filled, outermost first, which a refusal reports as its path.
 	trail:         ^[TRAIL_MAX]string, // the caller's, which only its first `depth` entries are read from
 	depth:         int,
-	// How many `fill_checked` calls are open, which `MAX_FILL` bounds so that the recursion stays on the stack.
+	// How many records hold the one being filled, which `MAX_FILL` bounds.
 	nest:          int,
 	rule_sets:     [dynamic]rules.Rules,
 	// What only a description's plan builds, which lives in the plan's arena.
@@ -574,6 +576,14 @@ Describe_State :: struct {
 	unevaluated:   map[[2]i32]bool,
 	// The place in its `allOf` of each member `settle_unevaluated` kept, of a node it dropped one of.
 	all_of_at:     map[rules.Node_Index][]int,
+	// What `judges_nothing` knows of each node, which `presence` asks of every arm.
+	nothing:       map[rules.Node_Index]Nothing,
+	// The records `fill_checked` was asked for and not yet filled, the member names of those filled, the name of the
+	// record being filled and the name `trail` holds the path to, each an index of `fill_names`, -1 for none.
+	fills:         [dynamic]Fill,
+	fill_names:    [dynamic]Fill_Name,
+	filling:       i32,
+	trail_at:      i32,
 }
 
 // An object's one pattern, which its record reads: the expression, the node a member it matches passes, and the
@@ -1057,13 +1067,15 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset,
 		b.fields[at], b.meta[at] = f, m
 		return
 	}
-	switch ti.id {
+	switch typeid_of(core.Number_Text) if number_text(ti) else ti.id {
 	case typeid_of(Raw):
 		f.kind = .Raw
 	case typeid_of(core.Value):
 		f.kind = .Value
 	case typeid_of(core.Number_Text):
-		f.kind = .Number_Text
+		// A model's number text reads null as its empty text only as a member, which `not_null` refuses too. Held by a
+		// list, a map, a `Maybe` or a union, it takes a number alone, as its schema says.
+		f.kind, m.no_nil = .Number_Text, b.model != nil && name == ""
 	case typeid_of(core.Number):
 		f.kind = .Number
 	case typeid_of(Scalar):
@@ -1431,8 +1443,9 @@ refuse_overlap :: proc(b: ^Builder, m: ^Meta) {
 	}
 }
 
-// Refuses a struct arm of a union read by its tag that has a member keyed as the tag, which the tag's value would fill.
-// The pass runs once the type is filled, since an arm that holds the union has its members filled after the union.
+// Refuses a struct arm of a union read by its tag that has a member keyed as the tag, which the tag's value would fill, as
+// `.Bad_Tag` naming the key, at the member, with the arm as `want.type`. The pass runs once the type is filled, since an arm that holds the
+// union has its members filled after the union.
 @(private)
 refuse_tag_members :: proc(b: ^Builder) {
 	for &m, at in b.meta {
@@ -1442,8 +1455,9 @@ refuse_tag_members :: proc(b: ^Builder) {
 			}
 			s := &b.meta[arm.fields]
 			for j in 0 ..< int(s.members) {
-				if name := b.meta[int(s.block) + j].name; name == b.extra[at].union_tag {
-					refuse_plan(b, .Unsupported, name)
+				if name := b.meta[int(s.block) + j].name; name == b.extra[at].union_tag && b.err.kind == .None {
+					refuse_plan(b, .Bad_Tag, name, name)
+					b.err.want.type = s.type
 				}
 			}
 		}
@@ -1451,6 +1465,11 @@ refuse_tag_members :: proc(b: ^Builder) {
 }
 
 // The classes of value `ti` reads. `depth` bounds a union that holds a pointer to itself.
+// Whether `ti` is `core.Number_Text` or a distinct type of it, which shares its struct.
+number_text :: proc(ti: ^runtime.Type_Info) -> bool {
+	return runtime.type_info_base(ti) == runtime.type_info_base(type_info_of(core.Number_Text))
+}
+
 @(private)
 classes_of :: proc(b: ^Builder, ti: ^runtime.Type_Info, depth: int) -> (c: bit_set[Value_Class]) {
 	if depth > 16 {
@@ -1459,7 +1478,7 @@ classes_of :: proc(b: ^Builder, ti: ^runtime.Type_Info, depth: int) -> (c: bit_s
 	if hook, hooked := hook_of(b, ti.id); hooked {
 		return classes_of(b, type_info_of(hook.carrier), depth + 1) if hook.carrier != nil else EVERY_CLASS
 	}
-	switch ti.id {
+	switch typeid_of(core.Number_Text) if number_text(ti) else ti.id {
 	case typeid_of(Raw), typeid_of(any), typeid_of(core.Value):
 		return EVERY_CLASS
 	case typeid_of(core.Number_Text), typeid_of(core.Number):

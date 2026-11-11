@@ -126,9 +126,14 @@ walk :: proc(s: ^Sampler, n: ^Node) -> bool {
 		return walk(s, n.kids[0])
 	case .Repeat:
 		span := s.extra if n.max < 0 else min(n.max - n.min, s.extra)
-		for _ in 0 ..< n.min + random_below(s.src, max(span, 0) + 1) {
+		// An iteration that wrote nothing can be taken for each one left, so a repeat of an empty body ends at once.
+		for _ in 0 ..< min(n.min + random_below(s.src, max(span, 0) + 1), SAMPLE_MAX) {
+			at := strings.builder_len(s.out)
 			if !walk(s, n.kids[0]) {
 				return false
+			}
+			if strings.builder_len(s.out) == at {
+				break
 			}
 		}
 	case .Backref, .Cond, .Linebreak, .Grapheme, .Call, .Absent:

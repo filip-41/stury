@@ -1,5 +1,6 @@
 package typed
 
+import "base:intrinsics"
 import "base:runtime"
 import regex "../regex"
 import core ".."
@@ -100,7 +101,7 @@ holds :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index, edge: 
 // the walk.
 @(private)
 names_hold :: proc(b: ^Builder, d: ^rules.Description, o: ^rules.Object) -> bool {
-	keys, _ := reached(d, o.keys)
+	keys, _ := rules.ref_end(d, o.keys)
 	return keys != rules.NONE && holds(b, d, keys, {})
 }
 
@@ -153,7 +154,7 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 	arm :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, out: ^[dynamic]Apply, kind: Apply_Kind, node: rules.Node_Index, site: ..core.Step) -> ^Apply {
 		steps := make([]core.Step, len(site), arena)
 		copy(steps, site)
-		if _, failed := append(out, Apply{kind = kind, rec = arm_record(b, d, arena, node), site = steps, by = presence(d, node, arena)}); failed != nil {
+		if _, failed := append(out, Apply{kind = kind, rec = arm_record(b, d, arena, node), site = steps, by = presence(b, d, node, arena)}); failed != nil {
 			refuse_plan(b, .No_Memory)
 			return nil
 		}
@@ -172,10 +173,10 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 	}
 	append(&out, Apply{kind = .All, rec = base})
 	if x, has := n.ref.?; has {
-		arm(b, d, arena, &out, .All, x, core.Name("$ref"))
+		arm(b, d, arena, &out, .All, x, core.Name(rules.ref_keyword(&n)))
 	}
 	if x, has := n.dynamic_ref.?; has {
-		arm(b, d, arena, &out, .All, dynamic_target(b, d, x), core.Name("$dynamicRef"))
+		arm(b, d, arena, &out, .All, dynamic_target(b, d, &n, x), core.Name(rules.dynamic_keyword(&n)))
 	}
 	places := b.all_of_at[node]
 	for x, i in n.all_of {
@@ -213,7 +214,7 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 		append(&out, Apply{kind = .Unique, rec = -1})
 	}
 	if n.object >= 0 && names_hold(b, d, &d.objects[n.object]) {
-		keys, _ := reached(d, d.objects[n.object].keys)
+		keys, _ := rules.ref_end(d, d.objects[n.object].keys)
 		arm(b, d, arena, &out, .Names, keys, core.Name("propertyNames"))
 	}
 	if n.object >= 0 {
@@ -243,7 +244,7 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 		}
 		for x in o.dependents {
 			if y, has := x.node.?; has {
-				if a := arm(b, d, arena, &out, .Dependent, y, core.Name("dependentSchemas"), core.Name(x.name)); a != nil {
+				if a := arm(b, d, arena, &out, .Dependent, y, core.Name("dependencies" if o.dependencies else "dependentSchemas"), core.Name(x.name)); a != nil {
 					a.name = x.name
 				}
 			}
@@ -282,7 +283,7 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 	if c.arms != nil {
 		kind := Apply_Kind.Any if len(n.any_of) > 0 else .One
 		for x in c.arms {
-			append(&v, Apply{kind = kind, rec = verdict_record(b, d, arena, x), by = presence(d, x, arena)})
+			append(&v, Apply{kind = kind, rec = verdict_record(b, d, arena, x), by = presence(b, d, x, arena)})
 		}
 		return out[:], v[:]
 	}
@@ -293,15 +294,15 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 	for x in c.lifted {
 		y := d.nodes[x]
 		if z, has := y.not.?; has {
-			append(&v, Apply{kind = .Not, rec = arm_record(b, d, arena, z), by = presence(d, z, arena)})
+			append(&v, Apply{kind = .Not, rec = arm_record(b, d, arena, z), by = presence(b, d, z, arena)})
 		}
 		if z, has := y.cond.test.?; has && (y.cond.then != nil || y.cond.other != nil) {
-			append(&v, Apply{kind = .If, rec = arm_record(b, d, arena, z), by = presence(d, z, arena)})
+			append(&v, Apply{kind = .If, rec = arm_record(b, d, arena, z), by = presence(b, d, z, arena)})
 			if w, then := y.cond.then.?; then {
-				append(&v, Apply{kind = .Then, rec = arm_record(b, d, arena, w), by = presence(d, w, arena)})
+				append(&v, Apply{kind = .Then, rec = arm_record(b, d, arena, w), by = presence(b, d, w, arena)})
 			}
 			if w, other := y.cond.other.?; other {
-				append(&v, Apply{kind = .Else, rec = arm_record(b, d, arena, w), by = presence(d, w, arena)})
+				append(&v, Apply{kind = .Else, rec = arm_record(b, d, arena, w), by = presence(b, d, w, arena)})
 			}
 		}
 	}
@@ -373,10 +374,68 @@ held_nesting :: proc(b: ^Builder) {
 	}
 	for &u in b.uses {
 		if nesting_of(b, known, &u, 0) > MAX_HELD {
-			refuse_plan(b, .Too_Deep)
+			refuse_plan(b, .Too_Deep, text = "the schema applies more than 256 subschemas to one value one inside the other")
+			steps := held_path(b, known, &u)
+			b.err.n_steps, b.err.truncated = 0, false
+			#reverse for x in steps {
+				path_add(&b.err, x)
+			}
+			path_close(&b.err)
 			return
 		}
 	}
+}
+
+// The keyword steps from the use `u` along the held records that nest deepest under it, by the nesting `nesting_of` left
+// in `known`.
+@(private)
+held_path :: proc(b: ^Builder, known: []i32, u: ^Use) -> []core.Step {
+	Next :: struct {
+		use:   ^Use,
+		site:  []core.Step,
+		depth: i32,
+	}
+	deeper :: proc(b: ^Builder, known: []i32, a: ^Apply, best: ^Next) {
+		follow :: proc(b: ^Builder, known: []i32, rec: i32, site: []core.Step, best: ^Next) {
+			if int(b.fields[rec].meta) < len(b.uses) {
+				x := &b.uses[b.fields[rec].meta]
+				if d := known[mem.ptr_sub(x, &b.uses[0])]; d > best.depth {
+					best^ = {x, site, d}
+				}
+			}
+		}
+		if a.rec >= 0 && (a.kind in WHOLE_ARMS || a.kind == .Names) {
+			follow(b, known, a.rec, a.site, best)
+		}
+		if a.by != nil {
+			for &c in a.by.choices {
+				deeper(b, known, &c, best)
+			}
+		}
+		if a.eval != nil {
+			for rec in a.eval.wholes {
+				follow(b, known, rec, a.site, best)
+			}
+		}
+	}
+	steps := make([dynamic]core.Step, context.temp_allocator)
+	append(&steps, ..u.site)
+	at := u
+	for _ in 0 ..= MAX_HELD {
+		best: Next
+		for list in ([2][]Apply{at.applies, at.verdict}) {
+			for &a in list {
+				deeper(b, known, &a, &best)
+			}
+		}
+		if best.use == nil {
+			break
+		}
+		append(&steps, ..best.site)
+		append(&steps, ..best.use.site)
+		at = best.use
+	}
+	return steps[:]
 }
 
 // How many held records judge a value one inside the other from the use `u`, past `MAX_HELD` at most by one.
@@ -536,9 +595,12 @@ by_presence :: proc(list: []Apply, arena: runtime.Allocator) -> []Apply {
 // The members an object must have to pass `node` when that is all the node judges, nil otherwise. A value that is no
 // object passes it.
 @(private)
-presence :: proc(d: ^rules.Description, node: rules.Node_Index, arena: runtime.Allocator) -> ^Judging {
+presence :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index, arena: runtime.Allocator) -> ^Judging {
 	names := make([dynamic]string, arena)
-	if node == rules.NONE || !judges_nothing(d, node, 0, &names) || len(names) == 0 {
+	if b.nothing.allocator.procedure == nil {
+		b.nothing.allocator = arena
+	}
+	if node == rules.NONE || !judges_nothing(d, node, &b.nothing, 0, &names) || len(names) == 0 {
 		return nil
 	}
 	return new_clone(Judging{present = names[:]}, arena)
@@ -857,8 +919,8 @@ verdict_keep :: proc(p: ^Pool, key: [2]u64, x: Kept_Verdict) {
 }
 
 // What checks keep of their arms' runs and held values from one value to the next, so a check of many values makes
-// them once. It serves one check at a time, makes them with the context allocator of its first check, and is freed by
-// `checker_destroy`.
+// them once. It serves one check at a time, makes them with the context allocator of its first check, or the heap
+// allocator when that is the temp allocator, and is freed by `checker_destroy`.
 Checker :: struct {
 	pool: Pool,
 }
@@ -1030,6 +1092,13 @@ pool_allocator :: proc(p: ^Pool) -> runtime.Allocator {
 @(private)
 MAX_HELD :: 256
 
+// The bytes of machine stack the runs of a check may take below its outermost held value, past which a held value that
+// opens in a run fails as `.Too_Deep`. Each run that holds a value calls the next one in, so a check of a deep text whose
+// arms recurse through each level nests as deep as the text. What is left of an 8 MiB stack holds the comparison of a
+// held value `core.MAX_DEPTH` deep. The frame address is the machine stack's also where a sanitizer keeps locals apart.
+@(private)
+STACK_BUDGET :: 6 << 20
+
 // The runs a check makes, past which it stops as `.No_Memory`.
 @(private)
 MAX_RUNS :: 1 << 16
@@ -1108,6 +1177,10 @@ Arm_Run :: struct {
 	last:    bool,
 	holding: bool,
 	marked:  bool,
+	// Under a sink, the earlier arm of the same record whose run this arm shares, -1 for none, and for that arm whether
+	// its run buffers its failures for each arm that shares it.
+	twin:    i32,
+	shared:  bool,
 	count:   u64,
 	failed:  [dynamic]Failed,
 	groups:  [dynamic]Group,
@@ -1444,7 +1517,10 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 	// A run at its own root judges the value its parent holds, so only there does the holding nest.
 	level := h.nest if h.sp == 1 else 0
 	lo, hi := check_ends(h, t)
-	if level == MAX_HELD {
+	here := uintptr(intrinsics.frame_address())
+	if h.run == nil {
+		h.stack = here
+	} else if level == MAX_HELD || int(h.stack) - int(here) > STACK_BUDGET {
 		return next, fork_fault(h, regs, .Too_Deep, lo, hi)
 	}
 	// A markup element reads as its record says, which a run of another record cannot follow.
@@ -1489,10 +1565,7 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 			fk.follows, fk.depth, fk.takes, fk.waiting, fk.level = lead, lead.c.fork.depth, false, 0, level
 			lead.c.fork.takes = false
 			lead.followers += 1
-			f := &h.frames[h.sp]
-			h.sp += 1
-			f.a, f.b, f.c, f.seen, f.run, f.extra = regs.a, regs.b, regs.c, 0, nil, nil
-			f.data, f.kind, f.owner, f.target = rawptr(uintptr(t.lo)), t.kind, nil, 0
+			frame_push(h, regs, t)
 			return fork_regs(h), .Next
 		}
 	}
@@ -1542,10 +1615,7 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 		}
 		return next, .Skip if action == .Next else .Stop
 	}
-	f := &h.frames[h.sp]
-	h.sp += 1
-	f.a, f.b, f.c, f.seen, f.run, f.extra = regs.a, regs.b, regs.c, 0, nil, nil
-	f.data, f.kind, f.owner, f.target = rawptr(uintptr(t.lo)), t.kind, nil, 0
+	frame_push(h, regs, t)
 	if taken, took := fork_take(h, fk); took {
 		return taken, .Next
 	}
@@ -1575,6 +1645,26 @@ fork_fault :: proc(h: ^Check, regs: core.Hook_Regs, kind: core.Typed_Error_Kind,
 	note(h, regs, {kind = kind, at = lo}, hi)
 	h.fatal = kind
 	return .Stop
+}
+
+// Refuses the container `t` opens in the held value of `fk` as too deep, since the comparison of a held value recurses
+// through it and reads no deeper than `core.MAX_DEPTH`.
+@(cold)
+@(private)
+held_too_deep :: proc(h: ^Check, fk: ^Fork, t: core.Token) -> core.Action {
+	lo, hi := check_ends(h, t)
+	return held_fault(h, fk, .Too_Deep, lo, hi)
+}
+
+// Gives back the runs of the held value of `fk`, whose frame is open, and reports `kind` at it as `fork_fault` does.
+@(private)
+held_fault :: proc(h: ^Check, fk: ^Fork, kind: core.Typed_Error_Kind, lo, hi: u64) -> core.Action {
+	fork_release(h, fk)
+	sp := h.sp
+	h.sp = fk.below
+	action := fork_fault(h, fk.regs, kind, lo, hi)
+	h.sp = sp
+	return action
 }
 
 // Adds the arm `a` of kind `kind` with record `rec` to the fork of the value `t`, with a run of the value when it judges
@@ -1609,7 +1699,7 @@ arm_add :: proc(h: ^Check, fk: ^Fork, a: ^Apply, kind: Apply_Kind, rec: i32, lev
 	x := &fk.arms[fk.n]
 	fk.n += 1
 	x.apply, x.kind, x.rec, x.run, x.passed, x.count, x.dead, x.waiting = a, kind, rec, nil, true, 0, false, false
-	x.last, x.holding, x.marked = false, false, false
+	x.last, x.holding, x.marked, x.twin, x.shared = false, false, false, -1, false
 	clear(&x.groups)
 	clear(&x.failed)
 	x.pending = nil
@@ -1658,9 +1748,109 @@ arm_add :: proc(h: ^Check, fk: ^Fork, a: ^Apply, kind: Apply_Kind, rec: i32, lev
 			}
 		}
 	}
-	if kind in WHOLE_ARMS && rec >= 0 {
+	if kind in WHOLE_ARMS && rec >= 0 && !twin_found(h, fk, x) {
 		x.run = run_start(h, fk, x, rec, level + 1, nil, fk.lo)
 	}
+}
+
+// The arms that may share a run of their record over the whole value under a sink: those reading the run's verdict and
+// those delivering its failures, each under its own keyword steps.
+@(private)
+TWIN_ARMS :: bit_set[Apply_Kind]{.All, .Any, .One, .Not, .If, .Then, .Else}
+
+// The earlier arms `twin_found` compares an arm with, which bounds its cost on a value with many arms.
+@(private)
+TWIN_SCAN :: 64
+
+// Whether the arm `x` shares the run of an earlier arm of the fork with the same record, as it does under a sink with no
+// readings and repeats not judged: arms that name one subschema then judge the value once, so a schema that names one
+// subschema twice at each level checks in time linear in its levels. The earlier arm's run then buffers its failures,
+// which each arm that delivers them delivers under its own keyword steps.
+@(private)
+twin_found :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run) -> bool {
+	if h.sink == nil || h.readings != nil || x.apply == nil || x.kind not_in TWIN_ARMS {
+		return false
+	}
+	at := fk.n - 1
+	for i := at - 1; i >= max(0, at - TWIN_SCAN); i -= 1 {
+		y := &fk.arms[i]
+		r := y.run
+		if y.apply == nil || y.twin >= 0 || y.kind not_in TWIN_ARMS || r == nil || r.step != nil || r.c.repeats == .Judge || !judged_alike(h.plan, x.rec, y.rec) {
+			continue
+		}
+		if r.c.sink != r.buffer || r.buffer == nil {
+			// The run has read nothing yet, so it starts buffering here.
+			if r.buffer == nil {
+				if r.buffer = new(Sink, context.temp_allocator); r.buffer == nil {
+					return false
+				}
+			}
+			r.buffer.entries = nil
+			r.buffer.entries.allocator = fork_space(fk)
+			r.buffer.truncated = false
+			r.buffer.max_errors, r.buffer.record = h.sink.max_errors, h.sink.record
+			r.c.sink, r.c.floor = r.buffer, 0
+		}
+		y.shared = true
+		x.twin = i32(i)
+		return true
+	}
+	return false
+}
+
+// Whether the records `x` and `y` judge a value alike under the same keyword steps: one record, or held records whose
+// arms read the same records the same way under the same steps.
+@(private)
+judged_alike :: proc(plan: ^Plan, x, y: i32) -> bool {
+	if x == y {
+		return true
+	}
+	if x < 0 || y < 0 {
+		return false
+	}
+	ux, uy := &plan.uses[plan.fields[x].meta], &plan.uses[plan.fields[y].meta]
+	if ux.judging_all == 0 || ux.judging_all != uy.judging_all || ux.node != uy.node || !slice.equal(ux.site, uy.site) {
+		return false
+	}
+	for &a, i in ux.applies {
+		if !slice.equal(a.site, uy.applies[i].site) {
+			return false
+		}
+	}
+	return true
+}
+
+// The run that judges the arm `x`: its own or, for a twin, the run it shares.
+@(private)
+arm_run :: #force_inline proc(fk: ^Fork, x: ^Arm_Run) -> ^Run {
+	return x.run if x.twin < 0 else fk.arms[x.twin].run
+}
+
+// Makes the failures that the shared run `r` buffered the held value's under the keyword steps `site` of the arm that
+// delivers them, in place of the steps of the arm that owns the run.
+@(private)
+twin_deliver :: proc(h: ^Check, r: ^Run, site: []core.Step) {
+	entries := buffered(r)
+	if len(entries) == 0 || slice.equal(site, r.site) {
+		fork_deliver(h, r, entries)
+		return
+	}
+	steps, words := make([dynamic]core.Step, context.temp_allocator), make([dynamic]core.Step, context.temp_allocator)
+	run_outer(r, &steps, &words)
+	from := len(words) - len(r.site)
+	moved := make([]core.Error_Entry, len(entries), context.temp_allocator)
+	for e, i in entries {
+		moved[i] = e
+		if from < 0 || len(e.keyword_path) < from + len(r.site) {
+			continue
+		}
+		path := make([dynamic]core.Step, 0, len(e.keyword_path) - len(r.site) + len(site), context.temp_allocator)
+		append(&path, ..e.keyword_path[:from])
+		append(&path, ..site)
+		append(&path, ..e.keyword_path[from + len(r.site):])
+		moved[i].keyword_path = path[:]
+	}
+	fork_deliver(h, r, moved)
 }
 
 // Whether `a` is a `.Choice` arm that stands for an arm of record `rec`.
@@ -1822,7 +2012,7 @@ run_start :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run, rec: i32, nest: int, step: 
 	c.frames[0].seen = 0
 	c.expect, c.borrow, c.first_key, c.refuse_unknown, c.wide, c.wrap_sp, c.wrap = h.expect, h.borrow, h.first_key, h.refuse_unknown, true, 0, nil
 	c.view, c.plan, c.ctx, c.find_tag, c.format = h.view, h.plan, h.ctx, h.find_tag, h.format
-	c.first, c.fatal, c.nest, c.pool, c.run, c.after, c.taken = {}, .None, nest, p, r, nil, nil
+	c.first, c.fatal, c.nest, c.pool, c.run, c.after, c.taken, c.stack = {}, .None, nest, p, r, nil, nil, h.stack
 	// An arm's structs sit below a union, which `model.patch` replaces whole, so a patch reads them in full.
 	c.partial = false
 	c.sink, c.repeats, c.tracked = nil, h.repeats, 0
@@ -2161,8 +2351,11 @@ fork_step :: #force_inline proc "contextless" (h: ^Check, t: core.Token) -> core
 	if t.role == .Key && fk.depth == 1 {
 		#partial switch fork_key(h, fk, t) {
 		case .Stop:
+			if h.fatal != .None {
+				return held_fault(h, fk, h.fatal, fk.lo, fk.lo)
+			}
 			fork_release(h, fk)
-			return fork_fault(h, fk.regs, h.fatal, fk.lo, fk.lo) if h.fatal != .None else .Stop
+			return .Stop
 		case .Skip:
 			fk.skipped = t.lo
 			return .Skip
@@ -2183,14 +2376,16 @@ fork_step :: #force_inline proc "contextless" (h: ^Check, t: core.Token) -> core
 		}
 	}
 	if fk.holds && t.role <= .Key && !fork_hold(fk, t) {
-		fork_release(h, fk)
-		return fork_fault(h, fk.regs, .No_Memory, fk.lo, fk.lo)
+		return held_fault(h, fk, .No_Memory, fk.lo, fk.lo)
 	}
 	if open && fk.depth > 0 && fork_passes_over(fk, t) {
 		fk.skipped = t.lo
 		return .Skip
 	}
 	if open {
+		if fk.depth == core.MAX_DEPTH && fk.holds {
+			return held_too_deep(h, fk, t)
+		}
 		fk.depth += 1
 	} else if end {
 		fk.depth -= 1
@@ -2208,8 +2403,7 @@ fork_step :: #force_inline proc "contextless" (h: ^Check, t: core.Token) -> core
 		return fork_finish(h, fk, hi)
 	}
 	if h.fatal != .None {
-		fork_release(h, fk)
-		return fork_fault(h, fk.regs, h.fatal, fk.lo, fk.lo)
+		return held_fault(h, fk, h.fatal, fk.lo, fk.lo)
 	}
 	if t.role == .Key && fork_passes_over(fk, t) {
 		fk.skipped = t.lo
@@ -2644,6 +2838,9 @@ fork_finish :: proc(h: ^Check, fk: ^Fork, hi: u64) -> core.Action {
 	}
 	for &x in fk.arms[:fk.n] {
 		x.passed = !x.dead && (x.run == nil || x.run.c.first.kind == .None)
+		if x.twin >= 0 {
+			x.passed = fk.arms[x.twin].passed
+		}
 		if a := x.apply; a != nil && a.judge == .Presence && fk.kind == .Object {
 			for name in a.by.present {
 				x.passed &&= slice.contains(fk.names[:], name)
@@ -2661,7 +2858,12 @@ fork_finish :: proc(h: ^Check, fk: ^Fork, hi: u64) -> core.Action {
 		}
 		switch a.kind {
 		case .All:
-			if !x.passed && h.first.kind == .None {
+			switch {
+			case x.twin >= 0:
+				twin_deliver(h, arm_run(fk, &x), a.site)
+			case x.shared:
+				fork_deliver(h, x.run, buffered(x.run))
+			case !x.passed && h.first.kind == .None:
 				h.first = run_first(x.run)
 			}
 			readings_take(h, x.run)
@@ -2682,8 +2884,8 @@ fork_finish :: proc(h: ^Check, fk: ^Fork, hi: u64) -> core.Action {
 		case .If:
 			if_passed = x.passed
 		case .Then, .Else:
-			if if_passed == (a.kind == .Then) && x.run != nil {
-				fork_deliver(h, x.run, buffered(x.run))
+			if r := arm_run(fk, &x); if_passed == (a.kind == .Then) && r != nil {
+				twin_deliver(h, r, a.site)
 				readings_take(h, x.run)
 			} else if if_passed == (a.kind == .Then) && !x.passed && h.first.kind == .None {
 				h.first = {kind = .Missing_Field, at = fk.lo}
@@ -2705,10 +2907,13 @@ fork_finish :: proc(h: ^Check, fk: ^Fork, hi: u64) -> core.Action {
 		case .Contains:
 			switch {
 			case fk.kind != .Array:
-			case x.count < a.min:
-				fork_note(h, fk, .Too_Few, hi, "contains" if x.count == 0 else "minContains")
-			case x.count > a.max:
-				fork_note(h, fk, .Too_Many, hi, "maxContains")
+			case x.count < a.min, x.count > a.max:
+				few := x.count < a.min
+				bound := strings.builder_make(context.temp_allocator)
+				strings.write_string(&bound, "at least " if few else "at most ")
+				strings.write_u64(&bound, a.min if few else a.max)
+				word := ("contains" if x.count == 0 else "minContains") if few else "maxContains"
+				fork_note(h, fk, .Too_Few if few else .Too_Many, hi, word, strings.to_string(bound))
 			}
 		case .Unevaluated_Members, .Unevaluated_Items:
 			if fk.kind == (.Array if a.kind == .Unevaluated_Items else .Object) {
@@ -2731,9 +2936,7 @@ fork_finish :: proc(h: ^Check, fk: ^Fork, hi: u64) -> core.Action {
 // Adds a failure of kind `kind` under the keyword `word` of the held record to the sink.
 @(private)
 fork_note :: proc(h: ^Check, fk: ^Fork, kind: core.Typed_Error_Kind, hi: u64, word: string, operand := "") {
-	e := core.Typed_Refusal{kind = kind, at = fk.lo}
-	e.want.text = operand
-	note(h, fk.regs, e, hi, word)
+	note(h, fk.regs, {kind = kind, at = fk.lo}, hi, word, operand)
 }
 
 // Makes the failures `entries` of the chosen run `r` the held value's.
@@ -2832,7 +3035,10 @@ fork_unevaluated :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run) {
 	}
 	q := Asked{fk, x}
 	ev := Evaluating{names = fk.names[:], count = fk.count, passes = passes, data = &q, scratch = &fk.scratch}
-	evaluated_groups(&ev, x.apply.eval, x.groups[:], x.kind == .Unevaluated_Items)
+	if !evaluated_groups(&ev, x.apply.eval, x.groups[:], x.kind == .Unevaluated_Items) {
+		h.fatal = .No_Memory
+		return
+	}
 	if ev.undecided {
 		h.fatal = .Pattern_Undecided
 		return

@@ -1,7 +1,6 @@
 package typed
 
 import "base:runtime"
-import "core:slice"
 import core ".."
 import rules "../rules"
 
@@ -135,15 +134,13 @@ settle :: #force_no_inline proc "contextless" (h: ^Check, sm: ^Struct_Model, f: 
 validate_closed :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64, base: uintptr) -> bool {
 	context = h.ctx
 	sm := h.plan.meta[owner.meta].model
-	path := make([dynamic]core.Step, context.temp_allocator)
-	steps_of(h, {f.a, f.b, f.c}, false, &path)
-	slice.reverse(path[:])
+	path := member_steps(h, {f.a, f.b, f.c})
 	seen := make([]bool, len(sm.afters), context.temp_allocator)
 	for a, k in sm.afters {
 		seen[k] = member_seen(h, f, owner, regs, a.member)
 	}
 	// A patch's struct is judged whole once it is merged.
-	failed, _ := close_struct(sm, base, path[:], seen, &h.first, h.sink, h.floor, at, !partial(h, f, owner))
+	failed, _ := close_struct(sm, base, path, seen, &h.first, h.sink, h.floor, at, !partial(h, f, owner))
 	return failed
 }
 

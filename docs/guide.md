@@ -100,9 +100,10 @@ if json.check_schema(&b, src, &sink) != nil {
 A `pattern` and a `patternProperties` name are read as ECMA-262 regular expressions with the `u` flag, so an escape outside a
 class names only a syntax character (`^$\.*+?()[]{}|`) or `/`, and inside a class also `-`. An escape such as `\&` or `\%`
 refuses the schema at bind: `invalid escape \& at offset 1`. Look-behind (`(?<=`, `(?<!`) and back references (`\1`) are refused
-there too: the search does not backtrack, which both need. `format: "regex"` accepts them, as it
-asks only that the text is a regular expression, and the jq functions run them. A search that runs out of memory on a very long
-string is not a verdict: the check reports `pattern_undecided` and `stury check` exits 2.
+there too: the search does not backtrack, which both need. `format: "regex"` accepts them when a back reference names a group
+the pattern has, as it asks only that the text is a regular expression, and the jq functions run them. `\p{...}` holds the
+characters of Unicode 17.0. A search that runs out of memory on a very long string, or whose counted repeats nest past what the
+pattern and the text bound, is not a verdict: the check reports `pattern_undecided` and `stury check` exits 2.
 
 `schema.infer` takes in values (and `schema.infer_records` the records of a text, on a runner's threads) and
 `schema.inferred` gives the description they all pass, which `schema.write` writes as JSON Schema. `schema.sample(&d, as,
@@ -169,7 +170,7 @@ defaults, records which members a text held, and writes the value back by the sa
 User :: struct {
 	id:    i64 `model:"read_only"`,
 	name:  string `model:"len>=2"`,
-	email: Maybe(string),
+	email: Maybe(string) `model:"optional"`,
 	role:  string `model:"optional"`,
 	set:   model.Fields_Set,
 }
@@ -182,8 +183,9 @@ err = model.load(&m, body, &user, &sink)
 ```
 
 - `load` refuses a missing required member and reads no `read_only` member. A `Fields_Set` member records what the
-  text held, which `was_set` asks by the member's Odin name, a refused load too. `validate` checks a value built in
-  code by the same rules.
+  text held, which `was_set` asks by the member's Odin name, a load refused with a sink too. A load without a sink
+  stops at its first refusal, before any struct it is in closes, and leaves their sets as they were. `validate`
+  checks a value built in code by the same rules.
 - A load refuses a repeated key as `.Duplicate_Key` with the path to the repeat, where `json.unmarshal` takes the last.
   `Load_Opts{dups = .Last}` or `.First` picks one instead, and only the value that wins is judged. `.All` is
   `.Bad_Option`, since a member holds one value.
@@ -209,18 +211,23 @@ err = model.load(&m, body, &user, &sink)
 - `model.dump(&m, &user, opts)` writes the value as `marshal` does by the model's plan, never a `write_only` member.
   `Dump_Opts` leaves out the members a load did not set (`exclude_unset`), that hold null (`exclude_none`) or that
   equal their default (`exclude_defaults`), and `check` refuses a value whose written members fail its rules as
-  `.Check_Failed`. A member is unset when its `Fields_Set` bit is clear, as pydantic's `exclude_unset` means: a member
-  the load took from its default or never read, and every member of a value built in code with an empty set, so
-  dumping a loaded PATCH body writes back what it sent. A `read_only` member, which no load sets, and a struct with
-  no `Fields_Set` keep their members. The tag `omitunset` leaves one member out when it holds null and is unset, and
-  is refused on a struct with no `Fields_Set`. A CSV dump writes a member it leaves out as an empty cell, which a load
-  reads as null.
+  `.Check_Failed`. An option leaves out only a member a load does not require, so every dump of a valid value loads
+  back. A member is unset when its `Fields_Set` bit is clear, as pydantic's `exclude_unset` means: a member the load
+  took from its default or never read, and every member of a value built in code with an empty set, so dumping a
+  loaded PATCH body writes back what it sent. A `read_only` member, which no load sets, and a struct with no
+  `Fields_Set` keep their members. A dump writes a `read_only` member, which a load under `Extra.Forbid` refuses as
+  `.Not_Allowed`, so such a dump is for the reader of the text and does not load back through the same model. The
+  tag `omitunset` leaves one member out when it holds null and is unset, and is refused on a struct with no
+  `Fields_Set`. A CSV or TSV row keeps every column and an empty cell reads back as null, so there the options leave
+  nothing out: a member that holds null is an empty cell, and every other member's value is written.
   `dump_stream` writes to a stream. Map keys and a struct's `extra` members are written in the order of their keys.
 - A struct's `extra` member, `map[string]core.Value` or `map[string]T` tagged `json:",unknown"`, holds the members it
   does not name, each read as its value type. `register(&reg, T, model.Extra.Forbid)` refuses them instead.
 - A pointer or `Maybe` member reads null as nil, and with the `not_null` tag item refuses it. A nil `Maybe` with
   neither `omitempty` nor `omitunset` writes null, so `validate` counts it as present: it meets `required` and a
   dependent's `requires`. Tag it to have it absent.
+- A `core.Number_Text` member keeps a number's digits at any size and reads null as the empty text, unless tagged
+  `not_null`. One held by a list, a map, a `Maybe` or a union takes no null.
 - `register_after(&reg, T, "name", check)` adds a validator a member's value meets once it is read. A member takes
   several, run in the order they were registered.
 - `Naming.union_tag` is the member every union of the registry is tagged by, and `register(&reg, Union_Rule{type = U,

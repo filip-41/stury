@@ -245,7 +245,7 @@ a_custom_carrier_reads_its_type_through_another :: proc(t: ^testing.T) {
 	_, kind = load_one(&m, `{"total": "1", "codes": [[2, 1]]}`)
 	testing.expect_value(t, kind, core.Typed_Error_Kind.Custom)
 	_, kind = load_one(&m, `{"total": "1", "codes": [[1, 2, 3]]}`)
-	testing.expect_value(t, kind, core.Typed_Error_Kind.Wrong_Length)
+	testing.expect_value(t, kind, core.Typed_Error_Kind.Too_Many)
 	bad := Bill{total = 5}
 	walktest.expect_nil(t, model.validate(&m, &bad))
 	bad.codes = {""}
@@ -275,7 +275,7 @@ a_schema_with_an_asserted_format_names_sturys_dialect :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, described)
 	text, written := schema.write(&d, json.as(.Json))
 	walktest.expect_nil(t, written)
-	testing.expect_value(t, string(text), `{"$schema":"https://raw.githubusercontent.com/filip-41/stury/main/core/schema/meta/stury/format-assertion.json","type":"object","properties":{"at":{"type":"string","format":"date-time"},"blob":{"type":"string","contentEncoding":"base64","pattern":"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$"},"name":{"type":"string","pattern":"^a","format":"email"}},"required":["at","blob","name"]}`)
+	testing.expect_value(t, string(text), `{"$schema":"https://raw.githubusercontent.com/filip-41/stury/main/core/schema/meta/stury/format-assertion.json","type":"object","properties":{"at":{"type":"string","pattern":"^(?![0-9]{4}-)|^(?:16(?:7[89]|[89][0-9])|1[7-9][0-9]{2}|2[01][0-9]{2}|22(?:[0-5][0-9]|6[01]))-","format":"date-time"},"blob":{"type":"string","contentEncoding":"base64","pattern":"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$"},"name":{"type":"string","pattern":"^a","format":"email"}},"required":["at","blob","name"]}`)
 	Dated :: struct {
 		day: string `model:"format=date,pattern=^2"`,
 	}
@@ -395,8 +395,8 @@ a_union_rule_names_the_member_that_tags_its_arm :: proc(t: ^testing.T) {
 		text: string,
 		kind: core.Typed_Error_Kind,
 	} {
-		{`{"shapes":[{"type":"Circle","r":1}],"main":{"kind":"Square","side":3}}`, .Missing_Tag},
-		{`{"shapes":[],"main":{"kind":"Triangle"}}`, .Not_A_Member},
+		{`{"shapes":[{"type":"Circle","r":1}],"main":{"kind":"Square","side":3}}`, .No_Arm},
+		{`{"shapes":[],"main":{"kind":"Triangle"}}`, .No_Arm},
 	}
 	for r in refusals {
 		_, kind = load_one(&m, r.text)
@@ -410,7 +410,7 @@ a_union_rule_names_the_member_that_tags_its_arm :: proc(t: ^testing.T) {
 	model.register(&reg, model.Union_Rule{type = Loose, tag = "kind"})
 	loose, _ := model.compile(&reg, struct{ s: Loose }, json.checks(.Json))
 	_, kind = load_one(&loose, `{"s":{"kind":"","r":1}}`)
-	testing.expect_value(t, kind, core.Typed_Error_Kind.Not_A_Member)
+	testing.expect_value(t, kind, core.Typed_Error_Kind.No_Arm)
 	Kind_Member :: struct {
 		kind: int,
 	}
@@ -421,7 +421,8 @@ a_union_rule_names_the_member_that_tags_its_arm :: proc(t: ^testing.T) {
 	}
 	model.register(&reg, model.Union_Rule{type = Clash, tag = "kind"})
 	_, refused := model.compile(&reg, struct{ c: Clash }, json.checks(.Json))
-	testing.expect_value(t, refused_as(refused), core.Typed_Error_Kind.Unsupported)
+	clash, _ := refused.(core.Typed_Error)
+	testing.expectf(t, clash.kind == .Bad_Tag && clash.want.type == Kind_Member && clash.want.text == "kind", "%v", refused)
 }
 
 @(private = "file")
@@ -526,7 +527,7 @@ a_carrier_arm_reads_by_its_carriers_kind :: proc(t: ^testing.T) {
 	testing.expect_value(t, kind, core.Typed_Error_Kind.Bad_Format)
 	d, _ := model.schema(&m, .Load)
 	text, _ := schema.write(&d, json.as(.Json))
-	testing.expect(t, strings.contains(string(text), `"anyOf":[{"type":"string","format":"date-time"},{"type":"integer"`), string(text))
+	testing.expect(t, strings.contains(string(text), `"anyOf":[{"type":"string","pattern":"^(?![0-9]{4}-)|^(?:16(?:7[89]|[89][0-9])|1[7-9][0-9]{2}|2[01][0-9]{2}|22(?:[0-5][0-9]|6[01]))-","format":"date-time"},{"type":"integer"`), string(text))
 }
 
 @(private = "file")
@@ -861,4 +862,23 @@ a_later_enum_rule_replaces_the_earlier :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(reg.enums), 1)
 	_, compiled := model.compile(&reg, Paint, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
+}
+
+Bounded_Text :: distinct core.Number_Text
+Text_Or_Object :: union {Bounded_Text, string, map[string]core.Value}
+
+// `schema gen` writes a number with a bound and no double range as a distinct `core.Number_Text`.
+@(test)
+a_distinct_number_text_reads_as_a_number :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	reg: model.Registry
+	model.register_type(&reg, {Bounded_Text, ">=2"})
+	m, err := model.compile(&reg, Text_Or_Object, json.checks(.Json))
+	walktest.expect_nil(t, err)
+	v: Text_Or_Object
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`1e400`), &v))
+	n, is_number := v.(Bounded_Text)
+	testing.expectf(t, is_number && n.text == "1e400", "%v", v)
+	testing.expect(t, model.load(&m, transmute([]u8)string(`1.5`), &v) != nil)
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"a": 1}`), &v))
 }

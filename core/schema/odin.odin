@@ -15,16 +15,17 @@ import "../rules"
 // rules (`model:`), with an `extra` map for the other members where a schema judges them, and one with none is a map.
 // A member that may be left out and takes no null is a `Maybe` that a write leaves out when nil. A value that may be
 // null is a `Maybe`, null alone the empty union `Null`, a struct that holds itself a pointer, a format that asserts
-// (under `format_assert`, or the schema's vocabulary) a carrier where the model has one (`time.Time`, `uuid.Identifier`,
-// `model.Email`) or a `format=` rule, an integer an `i64` (a `u64` past its range), a number an `f64`, an `enum` or
-// `const` an Odin enum or `bool` (a union of them for operands of several kinds), an `anyOf`, a `oneOf` and a list of
-// kinds a union, and a value of any kind `core.Value`. An `allOf` and a `$ref` beside other keywords are one value that
-// passes each. A rule where no tag stands makes a distinct type, and `not`, `if`, `contains`, `propertyNames`,
-// `patternProperties` and the dependents make a named type whose JSON Schema fragment of them, written in `as`, which is
-// JSON's, `register` adds with `model.register_schema`. A member's scalar `default` is a `model.register_default` line.
-// Annotations are left out but for `description` and a format that does not assert, which are comments. A keyword no
-// model spells is refused as `.Unsupported`, naming it in `want.text`, at the path of the value. A package name that
-// is no Odin identifier, or that names a package a program holding the source imports, is refused as `.Bad_Option`.
+// (under `format_assert`, or the schema's vocabulary) a carrier where the model has one (`time.Time`,
+// `uuid.Identifier`, `model.Email`) or a `format=` rule, an integer an `i64` (a `u64` past its range), a number an
+// `f64` when both bounds are finite doubles and `core.Number_Text` otherwise, an `enum` or `const` an Odin enum or
+// `bool` (a union of them for operands of several kinds), an `anyOf`, a `oneOf` and a list of kinds a union, and a
+// value of any kind `core.Value`. An `allOf` and a `$ref` beside other keywords are one value that passes each. A rule
+// where no tag stands makes a distinct type, and `not`, `if`, `contains`, `propertyNames`, `patternProperties` and the
+// dependents make a named type whose JSON Schema fragment of them, written in `as`, which is JSON's, `register` adds
+// with `model.register_schema`. A member's scalar `default` is a `model.register_default` line. Annotations are left
+// out but for `description` and a format that does not assert, which are comments. A keyword no model spells is
+// refused as `.Unsupported`, naming it in `want.text`, at the path of the value. A package name that is no Odin
+// identifier, or that names a package a program holding the source imports, is refused as `.Bad_Option`.
 write_odin :: proc(d: ^rules.Description, package_name: string, as: core.As, format_assert := false, allocator := context.allocator) -> (source: string, err: core.Error) {
 	arena: virtual.Arena
 	virtual.arena_init_growing(&arena) or_return
@@ -270,15 +271,11 @@ node_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string, held: bool) 
 // The node `i` reaches through references, NONE for a loop of them, which is refused.
 @(private = "file")
 target :: proc(s: ^Source, i: rules.Node_Index) -> rules.Node_Index {
-	i := i
-	for hops := 0; i != rules.NONE && rules.ref_only(&s.d.nodes[i]); hops += 1 {
-		if hops > len(s.d.nodes) {
-			refuse(s, "$ref")
-			return rules.NONE
-		}
-		i = s.d.nodes[i].ref.?
+	end, _ := rules.ref_end(s.d, i)
+	if end == rules.NONE && i != rules.NONE {
+		refuse(s, "$ref")
 	}
-	return i
+	return end
 }
 
 // The kinds of `n` but null, `Integer` inside `Number` where the node takes numbers.
@@ -773,12 +770,14 @@ kind_spelled :: proc(s: ^Source, i: rules.Node_Index, kind: rules.Kind, hint: st
 	case .Integer:
 		out.type, out.rules = integer_spelled(s, out.rules)
 	case .Number:
-		out.type = "f64"
+		// A number whose bounds a double may not hold keeps its text, so a number past a double is not refused.
+		out.type = "f64" if f64_holds(out.rules) else NUMBER_TEXT
+		s.imports += {} if out.type == "f64" else {.Core}
 	case .String:
 		format := rules.format_of(out.rules.format)
 		out.type = "string"
 		switch {
-		case !out.rules.assert_format && !s.format_assert || format == .None:
+		case !out.rules.assert_format && (!s.format_assert || out.rules.format_foreign) || format == .None:
 			out.note = out.rules.format
 			out.rules.format, out.rules.assert_format = "", false
 		case CARRIED[format] != "":
@@ -1094,7 +1093,7 @@ object_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Part, r: rules.Rul
 		// A nullable optional member tells absent from null by its struct's `Fields_Set`.
 		unset := !m.required && takes_null(s, node)
 		n_unset += int(unset)
-		member_tag(s, &b, name, m, field, value.rules, (absent || strings.has_prefix(t, "^")) && !takes_null(s, node), absent, unset)
+		member_tag(s, &b, name, m, field, value.rules, (absent || strings.has_prefix(t, "^") || t == NUMBER_TEXT) && !takes_null(s, node), absent, unset)
 		strings.write_string(&b, ",\n")
 		if !m.required {
 			default_spelled(s, name, field, node, value)
@@ -1167,10 +1166,14 @@ default_spelled :: proc(s: ^Source, owner, field: string, at: rules.Node_Index, 
 			refuse(s, "default")
 			return
 		}
-		strings.write_string(&b, v.type)
-		strings.write_byte(&b, '(')
-		strings.write_string(&b, text)
-		strings.write_byte(&b, ')')
+		if base == NUMBER_TEXT {
+			strings.write_string(&b, text)
+		} else {
+			strings.write_string(&b, v.type)
+			strings.write_byte(&b, '(')
+			strings.write_string(&b, text)
+			strings.write_byte(&b, ')')
+		}
 	case .True, .False:
 		if base != "bool" {
 			refuse(s, "default")
@@ -1192,8 +1195,20 @@ default_spelled :: proc(s: ^Source, owner, field: string, at: rules.Node_Index, 
 	strings.write_string(&s.registers, ") or_return\n")
 }
 
+// The type of a member's number that a double may not hold, which keeps the number's text.
+@(private = "file")
+NUMBER_TEXT :: "core.Number_Text"
+
+// Whether every number rules `r` take is one a double holds: both bounds are set and finite.
+@(private = "file")
+f64_holds :: proc(r: rules.Rules) -> bool {
+	low, low_ok := strconv.parse_f64(r.minimum)
+	high, high_ok := strconv.parse_f64(r.maximum)
+	return low_ok && high_ok && abs(low) <= max(f64) && abs(high) <= max(f64)
+}
+
 // The Odin literal of the number `x` as a value of the number type `base`, and whether `base` holds it: an integer of
-// the type's range, or for `f64` any number a double holds.
+// the type's range, for `f64` any number a double holds, and for a number text any number.
 @(private = "file")
 default_number :: proc(x: core.Value, base: string) -> (string, bool) {
 	text := ""
@@ -1209,6 +1224,8 @@ default_number :: proc(x: core.Value, base: string) -> (string, bool) {
 	text, _ = strings.replace_all(text, "E", "e")
 	n, _ := core.number(x)
 	switch base {
+	case NUMBER_TEXT:
+		return strings.concatenate({NUMBER_TEXT, "{\"", text, "\", core.text_f64(\"", text, "\")}"}), true
 	case "f64":
 		return text, n.kind != .Wide
 	case "i64", "u64":
@@ -1347,7 +1364,7 @@ enum_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 	}
 	kinds := n.kinds + ({.Integer} if .Number in n.kinds else {})
 	judged := rules.Node{kinds = n.kinds, rules = n.rules, array = -1, object = -1}
-	judged.rules.assert_format ||= s.format_assert
+	judged.rules.assert_format ||= s.format_assert && !n.rules.format_foreign
 	leaf, refused := rules.leaf_of(&judged, {})
 	if refused != "" {
 		refuse(s, refused)

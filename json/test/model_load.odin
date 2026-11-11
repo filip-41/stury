@@ -1,8 +1,10 @@
 package json_tests
 
 import "base:runtime"
+import "core:fmt"
 import "core:strings"
 import "core:testing"
+import "core:time"
 import core "../../core"
 import typed "../../core/typed"
 import write "../../core/write"
@@ -202,7 +204,7 @@ a_load_takes_or_refuses_the_members_a_struct_does_not_name :: proc(t: ^testing.T
 	v: Strict
 	sink: typed.Sink
 	testing.expect(t, model.load(&s, transmute([]u8)string(`{"a": 1, "b": 2}`), &v, &sink) != nil)
-	testing.expect_value(t, sink.entries[0].kind, core.Typed_Error_Kind.Unknown_Field)
+	testing.expect_value(t, sink.entries[0].kind, core.Typed_Error_Kind.Not_Allowed)
 	walktest.expect_nil(t, model.load(&s, transmute([]u8)string(`{"a": 1}`), &v))
 	Loose :: struct {
 		a: int,
@@ -234,8 +236,8 @@ four_way :: proc(t: ^testing.T, v: $T, valid: bool, loc := #caller_location) {
 	checks: [model.Direction]bool
 	for direction in model.Direction {
 		d, _ := model.schema(&m, direction, context.temp_allocator)
-		c := schema.compile_description(&d, allocator = context.temp_allocator)
-		b, _ := schema.bind(&c, {layout = json.as(.Json)}, allocator = context.temp_allocator)
+		c, _ := schema.compile_description(&d, allocator = context.temp_allocator)
+		b, _ := schema.bind(c, {layout = json.as(.Json)}, allocator = context.temp_allocator)
 		checks[direction] = schema.valid(&b, text)
 	}
 	testing.expectf(t, validated == valid && loaded == valid && checks[.Load] == valid && checks[.Dump] == valid, "%s: validate %v, load %v, schemas %v", text, validated, loaded, checks, loc = loc)
@@ -415,11 +417,22 @@ a_default_names_a_member_of_its_type :: proc(t: ^testing.T) {
 	}
 	reg: model.Registry
 	defer model.destroy(&reg)
-	missing, _ := model.register(&reg, Two, "nope", 1).(runtime.Allocator_Error)
-	testing.expect_value(t, missing, runtime.Allocator_Error.Invalid_Argument)
 	e, wrong := model.register(&reg, Two, "b", "s").(core.Typed_Error)
 	testing.expect(t, wrong && e.kind == .Wrong_Kind && e.want.type == int)
-	testing.expect_value(t, model.register(&reg, Two, "nope", proc(allocator: runtime.Allocator) -> int {return 1}), runtime.Allocator_Error.Invalid_Argument)
+	testing.expect_value(t, model.register(&reg, Two, "a", proc(allocator: runtime.Allocator) -> string {return ""}), runtime.Allocator_Error.Invalid_Argument)
+	// A member the struct lacks is refused by compile, as a rule's is, whichever registrar named it.
+	for item in ([]string{"default", "factory"}) {
+		lacking: model.Registry
+		defer model.destroy(&lacking)
+		if item == "default" {
+			walktest.expect_nil(t, model.register(&lacking, Two, "nope", 1))
+		} else {
+			testing.expect_value(t, model.register(&lacking, Two, "nope", proc(allocator: runtime.Allocator) -> int {return 1}), runtime.Allocator_Error.None)
+		}
+		_, refused := model.compile(&lacking, Two, json.checks(.Json))
+		bad, is_typed := refused.(core.Typed_Error)
+		testing.expectf(t, is_typed && bad.kind == .Bad_Tag && bad.want.type == Two && len(bad.steps) == 1 && bad.steps[0] == core.Name("nope"), "%v: %v", item, refused)
+	}
 	made := model.register(&reg, Two, "c", proc(allocator: runtime.Allocator) -> []int {
 		return make([]int, 2, allocator)
 	})
@@ -486,10 +499,11 @@ a_read_only_key_never_lands_in_the_members_a_struct_does_not_name :: proc(t: ^te
 	sink: typed.Sink
 	v: Fenced
 	testing.expect(t, model.load(&f, transmute([]u8)string(`{"id": 5, "name": "a"}`), &v, &sink) != nil)
-	testing.expect(t, len(sink.entries) == 1 && sink.entries[0].kind == .Read_Only)
+	testing.expect(t, len(sink.entries) == 1 && sink.entries[0].kind == .Not_Allowed)
 	d, _ := model.schema(&f, .Load)
-	c := schema.compile_description(&d)
-	b, _ := schema.bind(&c, json.checks(.Json))
+	c, _ := schema.compile_description(&d)
+	defer schema.destroy(c)
+	b, _ := schema.bind(c, json.checks(.Json))
 	testing.expect(t, !schema.valid(&b, transmute([]u8)string(`{"id": 5, "name": "a"}`)))
 	testing.expect(t, schema.valid(&b, transmute([]u8)string(`{"name": "a"}`)))
 	model.register(&reg, Fenced, model.Extra.Ignore)
@@ -737,8 +751,9 @@ a_not_null_pointer_a_typed_capture_and_an_empty_union_load_as_their_schema_says 
 	m, err := model.compile(&reg, Chain, json.checks(.Json))
 	walktest.expect_nil(t, err)
 	d, _ := model.schema(&m, .Load)
-	c := schema.compile_description(&d)
-	b, _ := schema.bind(&c, json.checks(.Json))
+	c, _ := schema.compile_description(&d)
+	defer schema.destroy(c)
+	b, _ := schema.bind(c, json.checks(.Json))
 	Case :: struct {
 		text:  string,
 		loads: bool,
@@ -758,6 +773,101 @@ a_not_null_pointer_a_typed_capture_and_an_empty_union_load_as_their_schema_says 
 	v: Chain
 	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"next": {"n": 2}, "z": 3}`), &v))
 	testing.expect(t, v.next != nil && v.next.n == 2 && v.rest["z"] == 3)
+}
+
+@(private = "file")
+Kinds_Pet :: union {
+	Arm_Cat,
+	Arm_Dog,
+}
+
+@(private = "file")
+Arm_Cat :: struct {
+	meow: int,
+}
+
+@(private = "file")
+Arm_Dog :: struct {
+	bark: bool,
+}
+
+@(private = "file")
+Kinds :: struct {
+	a:    i8,
+	b:    u64 `model:"optional"`,
+	f:    f32 `model:"optional,<1"`,
+	keys: map[i8]int `model:"optional"`,
+	ro:   int `model:"read_only"`,
+	pet:  Kinds_Pet `model:"optional"`,
+	arr:  [2]int `model:"optional"`,
+	w:    time.Time `model:"optional"`,
+	mb:   Maybe(int) `model:"optional,not_null"`,
+	big:  core.Number_Text `model:"optional,not_null"`,
+	nums: []core.Number_Text `model:"optional"`,
+}
+
+// The kinds and paths of a sink's entries, one per entry.
+@(private = "file")
+refusals_of :: proc(s: ^typed.Sink) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	for e in s.entries {
+		fmt.sbprint(&b, e.kind)
+		core.write_pointer(strings.to_writer(&b), e.path)
+		strings.write_byte(&b, ';')
+	}
+	return strings.to_string(b)
+}
+
+// A model's load and a check by the Load schema it writes refuse a text with the same kinds at the same paths, and
+// a tagged union's schema names its tag in both schemas.
+@(test)
+a_model_and_its_schema_refuse_with_one_kind :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	reg: model.Registry
+	model.register(&reg, model.Union_Rule{Kinds_Pet, .Tag, "kind"})
+	model.register(&reg, Kinds, model.Extra.Forbid)
+	m, err := model.compile(&reg, Kinds, json.checks(.Json))
+	walktest.expect_nil(t, err)
+	for view in ([]model.Direction{.Load, .Dump}) {
+		d, _ := model.schema(&m, view)
+		text, _ := schema.write(&d, json.as(.Json))
+		testing.expectf(t, strings.contains(string(text), `"kind":{"const":"Arm_Cat"}`) && strings.contains(string(text), `"required":["kind","meow"]`), "%v: %s", view, text)
+	}
+	d, _ := model.schema(&m, .Load)
+	text, _ := schema.write(&d, json.as(.Json))
+	// One arm is the value itself, and a fixed array's length bounds its items.
+	testing.expectf(t, strings.contains(string(text), `"mb":{"$ref":`) && strings.contains(string(text), `"arr":{"type":"array","minItems":2,"maxItems":2,"items":{"$ref":`), "%s", text)
+	c, cerr := schema.compile(text, json.as(.Json), {format_assert = true})
+	walktest.expect_nil(t, cerr)
+	b, _ := schema.bind(c, json.checks(.Json))
+	for x in ([][2]string{
+		{`{"a":5}`, ""},
+		{`{"a":300}`, "Above_Maximum/a;"},
+		{`{"a":-129}`, "Below_Minimum/a;"},
+		{`{"a":1,"b":18446744073709551616}`, "Above_Maximum/b;"},
+		{`{"a":1,"f":1e39}`, "Above_Maximum/f;"},
+		{`{"a":1,"keys":{"300":1}}`, "No_Match/keys;"},
+		{`{"a":1,"ro":3}`, "Not_Allowed/ro;"},
+		{`{"a":1,"zz":1}`, "Not_Allowed/zz;"},
+		{`{"a":1,"pet":{"kind":"Cow"}}`, "No_Arm/pet;"},
+		{`{"a":1,"pet":{"meow":1}}`, "No_Arm/pet;"},
+		{`{"a":1,"pet":{"kind":"Arm_Cat","meow":1}}`, ""},
+		{`{"a":1,"arr":[1]}`, "Too_Few/arr;"},
+		{`{"a":1,"arr":[1,2,3]}`, "Too_Many/arr;"},
+		{`{"a":1,"w":"9999-12-31T23:59:59-01:00"}`, "No_Match/w;"},
+		{`{"a":1,"w":"x"}`, "Bad_Format/w;"},
+		{`{"a":1,"mb":null}`, "Wrong_Kind/mb;"},
+		{`{"a":1,"big":1e400,"nums":[1e400]}`, ""},
+		{`{"a":1,"big":null}`, "Wrong_Kind/big;"},
+		{`{"a":1,"nums":[null]}`, "Wrong_Kind/nums/0;"},
+	}) {
+		ms, ss: typed.Sink
+		v: Kinds
+		_ = model.load(&m, transmute([]u8)x[0], &v, &ms)
+		_ = schema.check(&b, transmute([]u8)x[0], &ss)
+		testing.expectf(t, refusals_of(&ms) == x[1] && refusals_of(&ss) == x[1], "%s: model %s, schema %s", x[0], refusals_of(&ms), refusals_of(&ss))
+	}
 }
 
 @(test)
@@ -790,20 +900,6 @@ was_set_takes_the_odin_name :: proc(t: ^testing.T) {
 	a: Aliased
 	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"fullName": "ada"}`), &a))
 	testing.expect(t, model.was_set(&m, Aliased, a.set, "full_name"))
-}
-
-// A model's plan read by `unmarshal` is refused with the way to read it.
-@(test)
-a_models_plan_refusal_names_load :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	context.allocator = context.temp_allocator
-	reg: model.Registry
-	m, _ := model.compile(&reg, Aliased, json.checks(.Json))
-	a: Aliased
-	err := json.unmarshal(transmute([]u8)string(`{"fullName": "ada"}`), .Json, &a, &m.load_plan)
-	b := strings.builder_make()
-	core.render(strings.to_writer(&b), nil, err)
-	testing.expect(t, strings.contains(strings.to_string(b), "model.load"), strings.to_string(b))
 }
 
 // The registry keeps its own copy of the union tag.

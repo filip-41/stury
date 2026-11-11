@@ -158,7 +158,7 @@ refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, regs_in: core.H
 	lo, hi := core.scalar_ends(t)
 	e := core.Typed_Refusal{kind = kind, at = lo}
 	fld := field_at(regs_in.b)
-	if kind == .Wrong_Kind || kind == .Out_Of_Range || kind == .Not_A_Member {
+	if kind == .Wrong_Kind || kind == .Out_Of_Range || kind == .Not_A_Member || kind == .Above_Maximum || kind == .Below_Minimum {
 		e.found = t.kind
 		e.want.type = h.plan.meta[fld.meta].type
 		// A `Maybe` reads its element or null, and a null it takes, so its element is what the value failed.
@@ -178,11 +178,23 @@ refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, regs_in: core.H
 	return regs, action
 }
 
-// Refuses an element no room was made for, which a collecting read does not count.
+// Refuses an element no room was made for, which a collecting read does not count. A list past its fixed length is
+// refused once, as the list's, and its frame's `seen` holds that it was.
 @(cold)
 refuse_element :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action) {
-	lo, _ := core.scalar_ends(t)
-	return refuse(h, regs, {kind = kind, at = lo})
+	lo, hi := core.scalar_ends(t)
+	if kind != .Too_Many {
+		return refuse(h, regs, {kind = kind, at = lo})
+	}
+	f := &h.frames[h.sp - 1]
+	if f.seen == 0 {
+		context = h.ctx
+		f.seen = 1
+		h.sp -= 1
+		note(h, {f.a, f.b, f.c}, {kind = kind, at = lo}, hi)
+		h.sp += 1
+	}
+	return regs, .Stop if h.sink == nil else .Skip
 }
 
 // Adds `e`, with the path to where the read stands, to the sink. A wide reader (a `Check`) adds a `core.Error_Entry`
@@ -444,7 +456,7 @@ goes_after :: proc(a, b: core.Error_Entry) -> bool {
 		return false
 	}
 	for s, i in b.path {
-		if !same_step(a.path[i], s) {
+		if a.path[i] != s {
 			return false
 		}
 	}

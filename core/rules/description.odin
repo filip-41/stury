@@ -44,6 +44,9 @@ Rules :: struct {
 	unique:                               bool,
 	// Whether `format` asserts and does not only annotate.
 	assert_format:                        bool,
+	// Whether `format` names a format a later draft than the schema's defines, which annotates even where format
+	// assertion is asked for.
+	format_foreign:                       bool,
 	exclusive_minimum, exclusive_maximum: bool,
 	// The `readOnly` and `writeOnly` annotations, which no check reads.
 	read_only, write_only:                bool,
@@ -58,7 +61,8 @@ Rules :: struct {
 // each empty or nil for none, and `enum_of` read only under `has_enum`: the value must be one of `enum_of` and the one of `const_of`, pass every node of `all_of`
 // and exactly one of `one_of`, fail `not`, pass `then` when it passes the `if` of `cond` and `other` when it does not,
 // and pass `ref` and `dynamic_ref`, which the schema read resolves to nodes. `dynamic_ref` names the node the
-// reference reaches first, and `anchors` the nodes that may replace it. `unevaluated_items` and
+// reference reaches first, and `anchors` the nodes that may replace it unless `spelled` says it is static. `spelled` keeps
+// the keywords the references were written with. `unevaluated_items` and
 // `unevaluated_properties` judge what no applicator reached. `resource` is the root node of the schema resource that
 // holds the node, the unit a dynamic reference's scope is made of.
 Node :: struct {
@@ -76,6 +80,7 @@ Node :: struct {
 	not:                    Maybe(Node_Index),
 	cond:                   Conditional,
 	ref, dynamic_ref:       Maybe(Node_Index),
+	spelled:                Ref_Spellings,
 	unevaluated_items:      Maybe(Node_Index),
 	unevaluated_properties: Maybe(Node_Index),
 	resource:               Node_Index,
@@ -90,6 +95,33 @@ Node :: struct {
 	examples:               []core.Value,
 }
 
+// How a schema wrote a node's references where `ref` is not a `$ref` or `dynamic_ref` not a `$dynamicRef` that
+// resolves dynamically. A keyword location names the keyword as written.
+Ref_Spelling :: enum u8 {
+	Ref_Dynamic, // `ref` is a `$dynamicRef` that reaches its node statically
+	Ref_Recursive, // `ref` is a `$recursiveRef` whose resource has no recursive anchor
+	Dynamic_Recursive, // `dynamic_ref` is a `$recursiveRef`
+	Dynamic_Static, // `dynamic_ref` reaches its node statically, and `ref` holds the `$ref` beside it
+}
+
+Ref_Spellings :: bit_set[Ref_Spelling; u8]
+
+// The keyword `n.ref` was written with.
+ref_keyword :: proc(n: ^Node) -> string {
+	switch {
+	case .Ref_Dynamic in n.spelled:
+		return "$dynamicRef"
+	case .Ref_Recursive in n.spelled:
+		return "$recursiveRef"
+	}
+	return "$ref"
+}
+
+// The keyword `n.dynamic_ref` was written with.
+dynamic_keyword :: proc(n: ^Node) -> string {
+	return "$recursiveRef" if .Dynamic_Recursive in n.spelled else "$dynamicRef"
+}
+
 // An `if` with its `then` and `else`.
 Conditional :: struct {
 	test, then, other: Maybe(Node_Index),
@@ -97,10 +129,12 @@ Conditional :: struct {
 
 // An array's elements: the first take the nodes of `prefix` in order, and the rest `items`. `contains` takes between
 // `min_contains` (1 when nil) and `max_contains` of the elements. `evaluates_contains` says the elements it takes count
-// as evaluated for `unevaluatedItems`, which holds from draft 2020-12 on.
+// as evaluated for `unevaluatedItems`, which holds from draft 2020-12 on. `tuple` says the schema wrote `prefix` as an
+// array `items` and `items` as `additionalItems`, as the drafts before 2020-12 do.
 Array :: struct {
 	prefix:             []Node_Index,
 	items:              Node_Index,
+	tuple:              bool,
 	contains:           Maybe(Node_Index),
 	evaluates_contains: bool,
 	min_contains:       Maybe(u64),
@@ -110,13 +144,15 @@ Array :: struct {
 // An object's named members, the node every other member's value passes, and the node each member's name passes as a
 // string. `NONE` for any value or name. A member whose name matches a pattern of
 // `patterns` also passes that pattern's node, and is not "other". A member named in `dependents` needs the names of
-// its `required` and passes its `node`.
+// its `required` and passes its `node`. `dependencies` says the schema wrote `dependents` as `dependencies`, as the
+// drafts before 2019-09 do.
 Object :: struct {
-	members:    []Member,
-	additional: Node_Index,
-	keys:       Node_Index,
-	patterns:   []Pattern,
-	dependents: []Dependent,
+	members:      []Member,
+	additional:   Node_Index,
+	keys:         Node_Index,
+	patterns:     []Pattern,
+	dependents:   []Dependent,
+	dependencies: bool,
 }
 
 Pattern :: struct {
@@ -128,6 +164,12 @@ Dependent :: struct {
 	name:     string,
 	required: []string,
 	node:     Maybe(Node_Index),
+}
+
+// An embedded schema resource: the keyword steps from the root to it and its URI.
+Base :: struct {
+	steps: []core.Step,
+	uri:   string,
 }
 
 // A dynamic anchor: the node of schema resource `resource` that `$dynamicAnchor: name` marks.
@@ -160,6 +202,8 @@ Description :: struct {
 	root:      Node_Index,
 	// The URI of the schema's root resource, "" for none: the base of its keyword locations.
 	uri:       string,
+	// The schema resources embedded in the root that it reaches in place, each the base of the keyword locations under it.
+	bases:     [dynamic]Base,
 	allocator: runtime.Allocator,
 }
 
@@ -187,6 +231,10 @@ description_destroy :: proc(d: ^Description) {
 	for t in d.texts {
 		delete(t)
 	}
+	for x in d.bases {
+		delete(x.steps)
+	}
+	delete(d.bases)
 	delete(d.nodes)
 	delete(d.arrays)
 	delete(d.objects)
@@ -199,6 +247,20 @@ description_destroy :: proc(d: ^Description) {
 // Whether `n` is a `$ref` and nothing else, which judges a value as the node it reaches does.
 ref_only :: proc(n: ^Node) -> bool {
 	return n.ref != nil && n.kinds == EVERY_KIND && n.rules == {} && n.array < 0 && n.object < 0 && !n.has_enum && n.const_of == nil && len(n.any_of) == 0 && len(n.all_of) == 0 && len(n.one_of) == 0 && n.not == nil && n.cond == {} && n.dynamic_ref == nil && n.unevaluated_items == nil && n.unevaluated_properties == nil
+}
+
+// The node a use of `node` judges by, past each `$ref` that holds nothing else, and the `$ref`s it passed. `NONE` for
+// one that never reaches a node that judges.
+ref_end :: proc(d: ^Description, node: Node_Index) -> (Node_Index, int) {
+	node := node
+	hops := 0
+	for ; node != NONE && ref_only(&d.nodes[node]); hops += 1 {
+		if hops == len(d.nodes) {
+			return NONE, 0
+		}
+		node = d.nodes[node].ref.?
+	}
+	return node, hops
 }
 
 // The conjunctions that `nodes` alternate between: a `$ref` and an `allOf` join their targets to a conjunction, and an

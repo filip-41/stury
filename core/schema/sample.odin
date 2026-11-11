@@ -73,8 +73,7 @@ Sample_Sink :: proc(text: []u8, user: rawptr)
 sample_each :: proc(d: ^rules.Description, as: core.As, opts: Sample_Options, sink: Sample_Sink, user: rawptr, allocator := context.allocator) -> (err: core.Error) {
 	asserted := asserting(d, opts.format_assert)
 	defer asserted_restore(d, asserted)
-	c := compile_description(d)
-	defer destroy(&c)
+	c := Compiled{description = d}
 	b := bind(&c, {opts.reads, as}) or_return
 	defer unbind(&b)
 	arena: virtual.Arena
@@ -167,10 +166,10 @@ reaches :: proc(s: ^Path_Search, at: rules.Node_Index) -> bool {
 	}
 	s.seen[at] = true
 	n := &s.d.nodes[at]
-	if r, ok := n.ref.?; ok && through(s, r, core.Name("$ref")) {
+	if r, ok := n.ref.?; ok && through(s, r, core.Name(rules.ref_keyword(n))) {
 		return true
 	}
-	if r, ok := n.dynamic_ref.?; ok && through(s, r, core.Name("$dynamicRef")) {
+	if r, ok := n.dynamic_ref.?; ok && through(s, r, core.Name(rules.dynamic_keyword(n))) {
 		return true
 	}
 	for arms, word in ([3][]rules.Node_Index{n.all_of, n.any_of, n.one_of}) {
@@ -188,11 +187,11 @@ reaches :: proc(s: ^Path_Search, at: rules.Node_Index) -> bool {
 	if n.array >= 0 {
 		a := &s.d.arrays[n.array]
 		for x, i in a.prefix {
-			if through(s, x, core.Name("prefixItems"), core.Index(i)) {
+			if through(s, x, core.Name("items" if a.tuple else "prefixItems"), core.Index(i)) {
 				return true
 			}
 		}
-		if through(s, a.items, core.Name("items")) {
+		if through(s, a.items, core.Name("additionalItems" if a.tuple else "items")) {
 			return true
 		}
 		if c, ok := a.contains.?; ok && through(s, c, core.Name("contains")) {

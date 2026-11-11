@@ -475,7 +475,7 @@ build_dfa :: proc(re: ^Regex, spans: bool, allocator, scratch: mem.Allocator) ->
 	starts: [CLASSES]u32
 	start_end: u32
 	if ok {
-		st, starts, start_end, ok = build_whether(&b, restart, true, classes, final, syms, newline_sym, atom_syms)
+		st, starts, start_end, ok = build_rows(&b, restart, true, false, classes, final, syms, newline_sym, atom_syms)
 	}
 	if ok && len(b.looks) > 0 {
 		st, starts, ok = build_product(&b, st, starts, classes, final, syms, newline_sym, atom_syms)
@@ -491,7 +491,7 @@ build_dfa :: proc(re: ^Regex, spans: bool, allocator, scratch: mem.Allocator) ->
 	// hold, and the threads of a leading look-ahead's product are not ordered.
 	has_first := spans && !b.empty_loops && !b.keeps && len(b.looks) == 0
 	if has_first {
-		first, first_starts, first_end, has_first = build_first(&b, classes, final, syms, newline_sym, atom_syms)
+		first, first_starts, first_end, has_first = build_rows(&b, u32(len(b.atom_of)), true, true, classes, final, syms, newline_sym, atom_syms)
 	}
 	if has_first {
 		last, last_starts, has_first = build_last(&b, classes, final, syms, newline_sym, atom_syms)
@@ -568,50 +568,66 @@ step_bucket :: proc(b: ^Builder, bucket: ^[dynamic]u32, reached: []u32, sym: int
 
 // The whether automaton from one thread at `start`, with a thread at the program's start added past each character
 // under `restart`. The rows before `start_end` are those of `start` alone.
+//
+// Under `first` it is the automaton of the first match in the backtracker's order. A state is the threads after the
+// characters read so far in the order the backtracker tries them, with the class of the last character and whether a
+// match has ended, so it runs the backtracker's search on every path at once: a thread that reaches Match ends a match
+// there and drops every thread after it, which the backtracker would try only had that match failed, and the thread at
+// the program's start that each character adds comes last and only until a match has ended. The match the search last
+// sees end is the backtracker's: at the earliest start that has one, the first in its order to end.
 @(private = "file")
-build_whether :: proc(b: ^Builder, start: u32, restart: bool, classes: []u8, final: u8, syms, newline_sym: int, atom_syms: [][4]u64) -> (st: States, starts: [CLASSES]u32, start_end: u32, ok: bool) {
+build_rows :: proc(b: ^Builder, start: u32, restart: bool, $first: bool, classes: []u8, final: u8, syms, newline_sym: int, atom_syms: [][4]u64) -> (st: States, starts: [CLASSES]u32, start_end: u32, ok: bool) {
 	n := len(b.atom_of)
 	stride := u32(syms + 2)
 	st.stride = stride
-	resize(&st.table, 2 * int(stride))
-	for k in 0 ..< int(stride) {
-		st.table[int(stride) + k] = MATCHED * stride
+	// Row 0 is the dead state. The whether automaton's row 1 has matched, which every character keeps.
+	head := 1 if first else 2
+	resize(&st.table, head * int(stride))
+	if !first {
+		for k in 0 ..< int(stride) {
+			st.table[int(stride) + k] = MATCHED * stride
+		}
 	}
 	for c in 0 ..< CLASSES {
 		starts[c] = first_row(b, &st, {start}, c, false) or_return
 	}
 	start_end = u32(len(st.table))
+	matched_row := FIRST_ENDS if first else MATCHED * stride
 	bucket := make([dynamic]u32)
 	for k := 0; k < len(st.sets); k += 1 {
 		set := st.sets[k]
-		threads, before := set[:len(set) - 1], int(set[len(set) - 1])
-		at := (2 + k) * int(stride)
+		threads, before, ended := set[:len(set) - 1], int(set[len(set) - 1] & 0xFF), set[len(set) - 1] >> 8 != 0
+		at := (head + k) * int(stride)
 		reached: [CLASSES][]u32
 		matched: [CLASSES]bool
 		for c in 0 ..< CLASSES {
 			if !b.used[c] {
 				continue
 			}
-			reached[c], matched[c] = expand(b, threads, before, c, false) or_return
+			reached[c], matched[c] = expand(b, threads, before, c, first) or_return
 		}
 		for col in 0 ..= syms {
 			sym, c := col, int(classes[col]) if col < syms else int(final)
 			if col == syms {
 				sym = newline_sym
 			}
-			if matched[c] {
-				st.table[at + col] = MATCHED * stride
+			if matched[c] && !first {
+				st.table[at + col] = matched_row
 				continue
 			}
 			step_bucket(b, &bucket, reached[c], sym, atom_syms) or_return
-			if restart {
+			now_ended := ended || matched[c]
+			if restart && !now_ended {
 				add_item(b, &bucket, u32(n))
 			}
-			sort_keys(bucket[:])
-			target := first_row(b, &st, bucket[:], c, false) or_return
-			st.table[at + col] = target
+			// The first match's threads keep the backtracker's order, the whether automaton's are a set.
+			if !first {
+				sort_keys(bucket[:])
+			}
+			target := first_row(b, &st, bucket[:], c, now_ended) or_return
+			st.table[at + col] = target | (FIRST_ENDS if matched[c] else 0)
 		}
-		st.table[at + syms + 1] = MATCHED * stride if matched[EDGE] else DEAD
+		st.table[at + syms + 1] = matched_row if matched[EDGE] else DEAD
 	}
 	return st, starts, start_end, true
 }
@@ -627,7 +643,7 @@ build_product :: proc(b: ^Builder, main: States, main_starts: [CLASSES]u32, clas
 	part_starts := make([][CLASSES]u32, len(parts))
 	parts[0], part_starts[0] = main, main_starts
 	for look, k in b.looks {
-		parts[1 + k], part_starts[1 + k], _ = build_whether(b, u32(n + int(look.body)), false, classes, final, syms, newline_sym, atom_syms) or_return
+		parts[1 + k], part_starts[1 + k], _ = build_rows(b, u32(n + int(look.body)), false, false, classes, final, syms, newline_sym, atom_syms) or_return
 	}
 	stride := main.stride
 	st.stride = stride
@@ -717,54 +733,6 @@ retries_bounded :: proc(d: ^Dfa, left, limit: int) -> bool {
 		}
 	}
 	return true
-}
-
-// The automaton of the first match in the backtracker's order. A state is the threads after the characters read so far
-// in the order the backtracker tries them, with the class of the last character and whether a match has ended, so it
-// runs the backtracker's search on every path at once: a thread that reaches Match ends a match there and drops every
-// thread after it, which the backtracker would try only had that match failed, and the thread at the program's start
-// that each character adds comes last and only until a match has ended. The match the search last sees end is the
-// backtracker's: at the earliest start that has one, the first in its order to end.
-@(private = "file")
-build_first :: proc(b: ^Builder, classes: []u8, final: u8, syms, newline_sym: int, atom_syms: [][4]u64) -> (st: States, starts: [CLASSES]u32, first_end: u32, ok: bool) {
-	n := len(b.atom_of)
-	stride := u32(syms + 2)
-	st.stride = stride
-	resize(&st.table, int(stride))
-	restart := u32(n)
-	for c in 0 ..< CLASSES {
-		starts[c] = first_row(b, &st, {restart}, c, false) or_return
-	}
-	first_end = u32(len(st.table))
-	bucket := make([dynamic]u32)
-	for k := 0; k < len(st.sets); k += 1 {
-		set := st.sets[k]
-		threads, before, ended := set[:len(set) - 1], int(set[len(set) - 1] & 0xFF), set[len(set) - 1] >> 8 != 0
-		at := (1 + k) * int(stride)
-		reached: [CLASSES][]u32
-		matched: [CLASSES]bool
-		for c in 0 ..< CLASSES {
-			if !b.used[c] {
-				continue
-			}
-			reached[c], matched[c] = expand(b, threads, before, c, true) or_return
-		}
-		for col in 0 ..= syms {
-			sym, c := col, int(classes[col]) if col < syms else int(final)
-			if col == syms {
-				sym = newline_sym
-			}
-			step_bucket(b, &bucket, reached[c], sym, atom_syms) or_return
-			now_ended := ended || matched[c]
-			if !now_ended {
-				add_item(b, &bucket, restart)
-			}
-			target := first_row(b, &st, bucket[:], c, now_ended) or_return
-			st.table[at + col] = target | (FIRST_ENDS if matched[c] else 0)
-		}
-		st.table[at + syms + 1] = FIRST_ENDS if matched[EDGE] else DEAD
-	}
-	return st, starts, first_end, true
 }
 
 // The row of the state of `threads` in their order after a character of class `read`, with whether a match has ended

@@ -246,8 +246,8 @@ judge_count :: #force_inline proc "contextless" (n, low, high: u64) -> (fails: F
 }
 
 // What a value that fails as `kind` should have met of `l`, spelled for a message after the kind's own: "at least 2
-// characters". `members` says a count is an object's. Empty for a kind with no bound to name, and for a bound that is not a whole
-// number. The text is allocated with `allocator`.
+// characters". `members` says a count is an object's. Empty for a kind with no bound to name. The text is allocated with
+// `allocator`.
 operand_text :: proc(l: ^Leaf, kind: core.Typed_Error_Kind, members: bool, allocator: runtime.Allocator) -> string {
 	b := strings.builder_make(allocator)
 	bound :: proc(b: ^strings.Builder, least: bool, n: u64, noun: string) {
@@ -283,11 +283,12 @@ operand_text :: proc(l: ^Leaf, kind: core.Typed_Error_Kind, members: bool, alloc
 	case .Below_Minimum, .Above_Maximum:
 		low := kind == .Below_Minimum
 		x := l.minimum if low else l.maximum
-		if !x.whole {
-			return ""
-		}
 		strings.write_string(&b, ("greater than " if low else "less than ") if x.exclusive else "at least " if low else "at most ")
-		strings.write_i64(&b, x.int)
+		if x.whole {
+			strings.write_i64(&b, x.int)
+		} else {
+			spell.write_decimal(&b, x.exact)
+		}
 	}
 	return strings.to_string(b)
 }

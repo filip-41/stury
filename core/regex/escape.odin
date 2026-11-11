@@ -100,15 +100,25 @@ ecma_escape :: proc(p: ^Parser, c: byte) -> ^Node {
 		if !p.syntax_only {
 			return fail(p, "back references are not supported")
 		}
+		// Judged as syntax, a reference names a group the pattern has, which `resolve_refs` checks at the end.
+		n := new_node(.Backref)
 		if c != 'k' {
-			for !at_end(p) && peek(p) >= '0' && peek(p) <= '9' {
-				p.i += 1
-			}
-		} else if end := strings.index_byte(p.src[p.i:], '>'); !strings.has_prefix(p.src[p.i:], "<") || end < 2 {
+			p.i -= 1
+			num, _ := number(p.src, &p.i, MAX_CAPTURES + 1)
+			append(&n.refs, num)
+		} else if at_end(p) || peek(p) != '<' {
 			return fail(p, "invalid named reference")
 		} else {
-			p.i += end + 1
+			p.i += 1
+			ok: bool
+			if n.name, ok = ecma_name(p, '>'); !ok {
+				return nil
+			}
+			if !ecma_identifier(n.name) {
+				return fail(p, "invalid named reference")
+			}
 		}
+		append(&p.refs, n)
 		return char_node(p, 0)
 	}
 	r, ok := ecma_char(p, c)

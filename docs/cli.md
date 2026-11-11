@@ -261,13 +261,17 @@ before the fault, and the exit is 5.
 | --- | --- |
 | `--schema-ref DIR` | The directory a reference to a `file:` URI may read from. The default is the schema file's directory. A schema with an `$id` resolves a relative reference against that `$id`, so its `file:` references need an `$id` that is one. |
 | `--schema-draft D` | The draft of a schema with no `$schema`: `4`, `6`, `7`, `2019-09` or `2020-12`, the default. A `$schema` names the draft of its schema whatever this says. |
-| `--format-assert` | `format` fails an input, where it otherwise only annotates. |
+| `--format-assert` | `format` fails an input, where it otherwise only annotates, for the formats the schema's draft defines. A format a later draft defines (`date` in draft 4, `uuid` in draft 7) and a format no check judges still only annotate. A meta-schema that requires the 2020-12 format-assertion vocabulary asserts the same formats and refuses a schema that names a format no check judges. |
 | `--max-errors N` | Keep at most `N` failures of an input (default 100). The basic output and the problem document say `"truncated": true` when more were left out, and the lines end with `NAME: more failures past --max-errors N`. |
-| `--report basic` | Write the JSON Schema basic output of each input on stdout, one line a file that is read (a file that does not open, or faults before any failure, has none), `{"file":NAME,"valid":true}` for a valid one. Each line starts with a `file` member naming its file, and each error unit has `"valid":false`. `keywordLocation`, `absoluteKeywordLocation` (where the schema has an `$id` and the keywords did not pass a `$ref`) and `instanceLocation` are JSON Pointers. A location that passed a `$ref` has no `absoluteKeywordLocation`, which 2020-12 asks for: the compiled schema keeps the place of each keyword in its own schema, not the resource a reference reached, and keeping both would cost every check a second path; with records, a `record` member holds the record's index and the instance location is a pointer into that record. |
+| `--report basic` | Write the JSON Schema basic output of each input on stdout, one line a file that is read (a file that does not open, or faults before any failure, has none), `{"file":NAME,"valid":true}` for a valid one. Each line starts with a `file` member naming its file, and each error unit has `"valid":false`. `keywordLocation`, `absoluteKeywordLocation` (where the schema or the resource holding the keyword has an `$id` and the keywords did not pass a reference) and `instanceLocation` are JSON Pointers. A keyword location names each keyword as the schema wrote it, whatever its draft: `$recursiveRef`, `dependencies`, a tuple `items` and `additionalItems`. An absolute keyword location starts at the innermost resource with an `$id` that holds the keyword. A location that passed a `$ref`, `$dynamicRef` or `$recursiveRef` has no `absoluteKeywordLocation`, which 2020-12 asks for: the compiled schema keeps the place of each keyword in its own schema, not the resource a reference reached, and keeping both would cost every check a second path; with records, a `record` member holds the record's index and the instance location is a pointer into that record. |
 | `--report problem` | Write an RFC 9457 problem document of each failing input on stdout, and nothing for a valid one: `title`, `status` 422 and `errors` of `pointer`, `code` and `message`, and a `record` member in an error of a record input. A missing member is named in its message, and its pointer is the member's. The document starts with a `file` member. |
 | `--report lines` | The default. |
 
 A schema that does not read, compile or bind, or a keyword the check does not judge, is a usage error (exit 2) naming it.
+A schema that applies more than 256 subschemas to one value one inside the other does not bind, and the error names the
+keyword path where it nests deepest. Whatever `--max-depth` allows, a value that `uniqueItems`, `const` or `enum`
+compares whole fails as `Exceeds the depth limit` past 1024 levels, and so does a deep value whose subschemas apply
+arms such as `anyOf` at each level once their checks fill the stack the check is given.
 A `pattern` or `patternProperties` search that runs out of memory on a long string or name is told as `The pattern could not be decided on the string` and exits 2, not 1, since the input is neither valid nor failed. `not` never inverts it.
 The options need `--schema`, and `--schema` is `check`'s alone.
 
@@ -1182,6 +1186,10 @@ change a text's length, and the script, emoji and other Unicode properties. Two 
 - a lazy `{n,}?` with n of 2 or more over a body that can match the empty string and holds a capture;
 - a callout that reads which start positions are tried (`(*ERROR)` with a code other than -1, `(*TOTAL_COUNT)` read
   back), since Oniguruma's choice of starts depends on its optimizer.
+
+The properties and case folds are Unicode 17.0's where jq 1.8.2's Oniguruma holds Unicode 16.0's, so a character
+Unicode 17 assigned or reclassified answers by 17.0: `"\u0c5c" | test("\\p{L}")` is `true`, `false` in jq. The
+names are Oniguruma's, so a script Unicode 17 added has none.
 
 A choice inside a loop, as in `(a+)+$` or `(a|aa)*b`, runs in time linear in the text, so where jq stops with
 `retry-limit-in-match over`, stury answers. A counted repeat around a choice, as in `(a|aa){30,60}c`, still meets

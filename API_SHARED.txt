@@ -37,6 +37,7 @@ unicode_escape :: #force_inline proc "contextless" (e: [^]u8, room: int) -> (r: 
 utf8_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: Fault_Kind)
 utf8_lax_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (spelled: [4]u8, size: int, q: [^]u8)
 utf8_subpart :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8
+write_decimal :: proc(b: ^strings.Builder, d: Decimal)
 write_point :: proc(b: ^strings.Builder, d: Decimal, offset: i128 = 0)
 # core/regex
 group_names :: proc "contextless" (re: ^Regex) -> []string
@@ -184,6 +185,7 @@ branches :: proc(d: ^Description, nodes: []Node_Index, choices: bool, limit: int
 date_time_of :: proc(s: string) -> (p: Date_Time_Parts, ok: bool)
 decimal_i64 :: proc(d: spell.Decimal) -> (v: i64, ok: bool)
 description_destroy :: proc(d: ^Description)
+dynamic_keyword :: proc(n: ^Node) -> string
 enum_find :: proc(keys: []string, kind: core.Kind, text: string) -> (int, bool)
 enum_has :: proc(l: ^Leaf, kind: core.Kind, text: string) -> bool
 enum_sort :: proc(keys: []string)
@@ -196,6 +198,8 @@ kinds_of :: proc(d: ^Description, ids: []Node_Index) -> Kinds
 leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator, programs: ^Programs = nil) -> (l: Leaf, refused: string)
 operand_text :: proc(l: ^Leaf, kind: core.Typed_Error_Kind, members: bool, allocator: runtime.Allocator) -> string
 program_of :: proc(programs: ^Programs, expression: string, allocator: runtime.Allocator) -> (re: rawptr, err: string)
+ref_end :: proc(d: ^Description, node: Node_Index) -> (Node_Index, int)
+ref_keyword :: proc(n: ^Node) -> string
 ref_only :: proc(n: ^Node) -> bool
 rules_leaf :: proc(r: Rules, kinds: Kinds, allocator := context.allocator) -> (l: Leaf, refused: string)
 tighter :: proc(x, y: string, strict_x, strict_y, lower: bool) -> int
@@ -256,6 +260,7 @@ load_struct :: proc(b: ^Builder, owner: typeid, at: i32, f: ^Field, m: ^Meta, me
 map_slot :: proc(h: ^Reader, m: ^Meta, raw: ^runtime.Raw_Map, key: string, t: core.Token, value: ^Field, fresh: bool) -> (slot: rawptr, reason: core.Typed_Error_Kind)
 mark_arm :: proc(dest: uintptr, fld: ^Field, m: ^Meta, arm: int)
 mark_member :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, i: int)
+number_text :: proc(ti: ^runtime.Type_Info) -> bool
 on_tag_token :: proc "contextless" (s: ^Tag_Scan, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
 on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
 on_token_check :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
@@ -354,7 +359,7 @@ write_text :: proc(wr: ^Writer, text: []u8) -> core.Typed_Error_Kind
 writer_take :: proc(wr: ^Writer) -> []u8
 # core/schema
 check_node :: proc(b: ^Bound, doc: ^core.Document, node: core.Node_Index, sink: ^typed.Sink = nil, readings: ^typed.Readings = nil) -> core.Error
-write_basic :: proc(t: ^write.Tokens, entries: []core.Error_Entry, uri: string, r := write.Report{}) -> core.Typed_Error_Kind
+write_basic :: proc(t: ^write.Tokens, entries: []core.Error_Entry, uri: string, r := write.Report{}, bases: []rules.Base = nil) -> core.Typed_Error_Kind
 write_odin :: proc(d: ^rules.Description, package_name: string, as: core.As, format_assert := false, allocator := context.allocator) -> (source: string, err: core.Error)
 # core/model
 write_problem :: proc(t: ^write.Tokens, entries: []core.Error_Entry, p: Problem, r := write.Report{}) -> core.Typed_Error_Kind

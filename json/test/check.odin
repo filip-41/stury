@@ -313,7 +313,7 @@ a_check_refuses_an_enum_a_bit_set_a_maybe_and_a_pointer_as_unmarshal_does :: pro
 	defer free_all(context.temp_allocator)
 	refuses(t, `{"e":"Pink","f":[{"e":"Red"},{"e":"Blue"}]}`, struct{ e: Hue, f: []struct{ e: Hue } }, .Not_A_Member, {"/e", "/f/1/e"})
 	refuses(t, `{"b":["Red",3,"Green"]}`, struct{ b: bit_set[Hue; u8] }, .Wrong_Kind, {"/b"})
-	refuses(t, `{"b":[10,1]}`, struct{ b: bit_set[0 ..< 10] }, .Out_Of_Range, {"/b"})
+	refuses(t, `{"b":[10,1]}`, struct{ b: bit_set[0 ..< 10] }, .Above_Maximum, {"/b"})
 	refuses(t, `{"m":"x","n":{"x":"y"}}`, struct{ m: Maybe(i32), n: Maybe(Arm_A) }, .Wrong_Kind, {"/m", "/n/x"})
 	refuses(t, `{"p":{"x":"x"},"q":[1,"z"]}`, struct{ p: ^Arm_A, q: ^[]i32 }, .Wrong_Kind, {"/p/x", "/q/1"})
 }

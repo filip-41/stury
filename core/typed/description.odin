@@ -35,6 +35,7 @@ plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, 
 		if opts.checking {
 			x := conjoin_description(&b, d, arena)
 			fill_checked(&b, &x, arena, 0, d.root, "", {}, {})
+			fill_pending(&b, &x, arena)
 		} else {
 			fill_node(&b, d, 0, d.root, "")
 		}
@@ -129,38 +130,112 @@ node_struct :: proc(b: ^Builder, d: ^rules.Description, key: Block_Key, o: rules
 // Fills record `at` as a check reads a use of node `use` named `name`, with `edge` the rules the use adds and `site` the
 // keyword steps to it from the record that holds it, which `arena` holds with its leaf. A `$ref` that holds nothing
 // else adds its step and reads the node it reaches. An object's members are a struct block that its uses share, and
-// an array's prefix and items records a block its uses share.
+// an array's prefix and items records a block its uses share. `step` marks a prefix record. The record is filled when
+// `fill_pending` reaches it, so a schema that nests deep holds its depth in `b.fills` and not on the stack.
 @(private)
-fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, at: int, use: rules.Node_Index, name: string, edge: rules.Rules, site: []core.Step, bare := false) {
-	if b.nest == MAX_FILL {
-		refuse_plan(b, .Too_Deep)
-		return
-	}
-	b.nest += 1
-	depth, scope := enter(b, name), b.scope
-	defer {
-		b.nest -= 1
-		b.depth, b.scope = depth, scope
-	}
-	node, refs := reached(d, use)
-	for x, hop := use, 0; x != rules.NONE && hop <= refs; hop += 1 {
-		enter_scope(b, d, arena, x)
-		x = d.nodes[x].ref.? or_else node
-	}
-	f := Field{meta = u32(at)}
-	m := Meta{name = name, block = -1, capture = -1}
-	u: Use
-	expect_name(b, &f, name)
+fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, at: int, use: rules.Node_Index, name: string, edge: rules.Rules, site: []core.Step, bare := false, step := false) {
+	_, refs := rules.ref_end(d, use)
 	steps, failed := make([]core.Step, len(site) + refs, arena)
 	if failed != nil {
 		refuse_plan(b, .No_Memory)
 		return
 	}
 	copy(steps, site)
+	hop := use
 	for &s in steps[len(site):] {
-		s = core.Name("$ref")
+		s = core.Name(rules.ref_keyword(&d.nodes[hop]))
+		hop = d.nodes[hop].ref.?
 	}
-	u.site = steps
+	if b.fills.allocator.procedure == nil {
+		b.fills.allocator, b.fill_names.allocator, b.trail_at = arena, arena, -1
+		b.filling = -1
+	}
+	x := Fill{at = i32(at), use = use, name = name, edge = edge, steps = steps, scope = b.scope, nest = i32(b.nest), named = b.filling, bare = bare, step = step}
+	if _, e := append(&b.fills, x); e != nil {
+		refuse_plan(b, .No_Memory)
+	}
+}
+
+// A record `fill_checked` was asked for: what it was given, the dynamic scope and the count of records it was asked from
+// one inside the other, and the innermost of those with a member name, an index of `b.fill_names`, -1 for none.
+@(private)
+Fill :: struct {
+	at:         i32,
+	use:        rules.Node_Index,
+	name:       string,
+	edge:       rules.Rules,
+	steps:      []core.Step,
+	scope:      i32,
+	nest:       i32,
+	named:      i32,
+	bare, step: bool,
+}
+
+// A member name of a record being filled, and the index of the record's holder's name, -1 for none.
+@(private)
+Fill_Name :: struct {
+	name:  string,
+	outer: i32,
+}
+
+// Fills the records `fill_checked` was asked for, the last asked first, until none is left or the plan is refused.
+@(private)
+fill_pending :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator) {
+	for len(b.fills) > 0 && b.err.kind == .None {
+		fill_one(b, d, arena, pop(&b.fills))
+	}
+	clear(&b.fills)
+	b.nest, b.depth, b.scope = 0, 0, 0
+}
+
+// Sets the member names a refusal reports to those of the holders of name `named`, outermost first.
+@(private = "file")
+trail_of :: proc(b: ^Builder, named: i32) {
+	if named == b.trail_at {
+		return
+	}
+	n := 0
+	for x := named; x >= 0; x = b.fill_names[x].outer {
+		n += 1
+	}
+	b.depth, b.trail_at = n, named
+	for x := named; x >= 0; x = b.fill_names[x].outer {
+		n -= 1
+		if n < TRAIL_MAX {
+			b.trail[n] = b.fill_names[x].name
+		}
+	}
+}
+
+// Fills the record `x` asks for.
+@(private = "file")
+fill_one :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, x: Fill) {
+	trail_of(b, x.named)
+	b.scope, b.nest, b.filling = x.scope, int(x.nest), x.named
+	if b.nest == MAX_FILL {
+		refuse_plan(b, .Too_Deep)
+		return
+	}
+	b.nest += 1
+	at, use, name, edge, bare := int(x.at), x.use, x.name, x.edge, x.bare
+	if len(name) > 0 {
+		enter(b, name)
+		if _, failed := append(&b.fill_names, Fill_Name{name, x.named}); failed != nil {
+			refuse_plan(b, .No_Memory)
+			return
+		}
+		b.filling = i32(len(b.fill_names) - 1)
+		b.trail_at = b.filling
+	}
+	node, refs := rules.ref_end(d, use)
+	for y, hop := use, 0; y != rules.NONE && hop <= refs; hop += 1 {
+		enter_scope(b, d, arena, y)
+		y = d.nodes[y].ref.? or_else node
+	}
+	f := Field{meta = u32(at)}
+	m := Meta{name = name, block = -1, capture = -1}
+	u := Use{site = x.steps, step = x.step}
+	expect_name(b, &f, name)
 	u.node = markup_of(d, use, node, edge)
 	if node != rules.NONE && !bare && holds(b, d, node, edge) {
 		u.applies, u.verdict = checked_applies(b, d, arena, node, edge)
@@ -194,14 +269,15 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 				u.pattern, u.regex = checked_block(b, d, arena, block_key(typeid_of(rules.Pattern), n.object, b.scope), nil, p.node, site[:]), p.regex
 			}
 			// A `propertyNames` with arms is the held record's `.Names` arm.
-			if keys, _ := reached(d, o.keys); keys != rules.NONE && !holds(b, d, keys, {}) {
+			if keys, _ := rules.ref_end(d, o.keys); keys != rules.NONE && !holds(b, d, keys, {}) {
 				u.keys = checked_leaf(b, &d.nodes[keys], {}, arena)
 			}
 		}
 		if .Array in n.kinds || n.array >= 0 {
 			a := d.arrays[n.array] if n.array >= 0 else rules.Array{items = rules.NONE}
-			u.items = checked_block(b, d, arena, block_key(typeid_of(rules.Array), n.array, b.scope), a.prefix, a.items, UNEVALUATED_ITEMS[:] if b.unevaluated[{1, n.array}] else ITEMS[:])
-			items, _ := reached(d, a.items)
+			rest := UNEVALUATED_ITEMS[:] if b.unevaluated[{1, n.array}] else ADDITIONAL_ITEMS[:] if a.tuple else ITEMS[:]
+			u.items = checked_block(b, d, arena, block_key(typeid_of(rules.Array), n.array, b.scope), a.prefix, a.items, rest, "items" if a.tuple else "prefixItems")
+			items, _ := rules.ref_end(d, a.items)
 			u.inside = len(a.prefix) > 0 || items != rules.NONE
 		}
 	}
@@ -251,6 +327,10 @@ ITEMS := [1]core.Step{core.Name("items")}
 
 @(private)
 @(rodata)
+ADDITIONAL_ITEMS := [1]core.Step{core.Name("additionalItems")}
+
+@(private)
+@(rodata)
 UNEVALUATED_PROPERTIES := [1]core.Step{core.Name("unevaluatedProperties")}
 
 @(private)
@@ -279,7 +359,7 @@ dependent_members :: proc(b: ^Builder, arena: runtime.Allocator, o: rules.Object
 		if len(members) == 0 {
 			append(&members, ..o.members)
 		}
-		r := Requires{trigger = place(&members, x.name), wants = make([]i32, len(x.required), arena)}
+		r := Requires{trigger = place(&members, x.name), wants = make([]i32, len(x.required), arena), keyword = "dependencies" if o.dependencies else "dependentRequired"}
 		for name, i in x.required {
 			r.wants[i] = place(&members, name)
 		}
@@ -305,21 +385,6 @@ checked_members :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 		site := [2]core.Step{core.Name("properties"), core.Name(x.name)}
 		fill_checked(b, d, arena, int(at) + i, x.node, x.name, x.rules, site[:])
 	}
-}
-
-// The node a use of `node` judges by, past each `$ref` that holds nothing else, and the `$ref`s it passed. `NONE` for
-// one that never reaches a node that judges.
-@(private)
-reached :: proc(d: ^rules.Description, node: rules.Node_Index) -> (rules.Node_Index, int) {
-	node := node
-	hops := 0
-	for ; node != rules.NONE && rules.ref_only(&d.nodes[node]); hops += 1 {
-		if hops == len(d.nodes) {
-			return rules.NONE, 0
-		}
-		node = d.nodes[node].ref.?
-	}
-	return node, hops
 }
 
 // A dynamic scope: the resource with dynamic anchors entered last, under the scope `outer`, 0 for the scope of none.
@@ -373,13 +438,13 @@ bound :: proc(b: ^Builder, d: ^rules.Description, name: string) -> bool {
 	return false
 }
 
-// The node a `$dynamicRef` that first reaches `node` judges by in the current scope: the dynamic anchor of the same name in
-// the outermost resource that has one, else `node`.
+// The node the `$dynamicRef` of `n` that first reaches `node` judges by in the current scope: the dynamic anchor of the
+// same name in the outermost resource that has one, else `node`, which a static one always judges by.
 @(private)
-dynamic_target :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index) -> rules.Node_Index {
+dynamic_target :: proc(b: ^Builder, d: ^rules.Description, n: ^rules.Node, node: rules.Node_Index) -> rules.Node_Index {
 	name, named := "", false
 	for x in d.anchors {
-		if x.node == node {
+		if x.node == node && .Dynamic_Static not_in n.spelled {
 			name, named = x.name, true
 		}
 	}
@@ -415,7 +480,7 @@ checked_leaf :: proc(b: ^Builder, n: ^rules.Node, edge: rules.Rules, arena: runt
 // A block of a record per node of `prefix`, each moving the cursor on, then the record of `rest` under `site`, then a
 // `Never` record. Returns 1 past its first record, where the cursor of its first value stands.
 @(private)
-checked_block :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, key: Block_Key, prefix: []rules.Node_Index, rest: rules.Node_Index, site: []core.Step) -> i32 {
+checked_block :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, key: Block_Key, prefix: []rules.Node_Index, rest: rules.Node_Index, site: []core.Step, word := "prefixItems") -> i32 {
 	if at, ok := b.blocks[key]; ok {
 		return at + 1
 	}
@@ -425,9 +490,8 @@ checked_block :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocat
 	}
 	never(b, int(at) + len(prefix) + 1)
 	for x, i in prefix {
-		steps := [2]core.Step{core.Name("prefixItems"), core.Index(i)}
-		fill_checked(b, d, arena, int(at) + i, x, "", {}, steps[:])
-		b.uses[int(at) + i].step = true
+		steps := [2]core.Step{core.Name(word), core.Index(i)}
+		fill_checked(b, d, arena, int(at) + i, x, "", {}, steps[:], step = true)
 	}
 	fill_checked(b, d, arena, int(at) + len(prefix), rest, "", {}, site)
 	return at + 1

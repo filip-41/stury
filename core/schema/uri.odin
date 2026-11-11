@@ -5,7 +5,8 @@ import "core:strings"
 import "../rules"
 
 // `ref` resolved against `base` as RFC 3986 section 5.2 says, in the context's allocator. `base` is absolute or empty.
-// The scheme is written in lower case, since schemes compare without regard to case.
+// The result is in the normal form of section 6.2.2, so that two spellings of one URI name one resource: the scheme and
+// the host in lower case, each escape of an unreserved character undone and the other escapes in upper case.
 @(private)
 uri_resolve :: proc(base, ref: string) -> string {
 	r, b := rules.uri_split(ref), rules.uri_split(base)
@@ -29,19 +30,54 @@ uri_resolve :: proc(base, ref: string) -> string {
 			}
 		}
 	}
+	authority := normal_escapes(t.authority)
+	host := strings.last_index_byte(authority, '@') + 1
 	return strings.concatenate(
 		{
 			strings.to_lower(t.scheme),
 			":" if t.has_scheme else "",
 			"//" if t.has_authority else "",
-			t.authority,
-			remove_dots(t.path),
+			authority[:host],
+			strings.to_lower(authority[host:]),
+			remove_dots(normal_escapes(t.path)),
 			"?" if t.has_query else "",
-			t.query,
+			normal_escapes(t.query),
 			"#" if t.fragment != "" else "",
-			t.fragment,
+			normal_escapes(t.fragment),
 		},
 	)
+}
+
+// `part` with each `%XX` escape of an unreserved character undone and the hex digits of the other escapes in upper case.
+// A `%` not followed by two hex digits stays as it is.
+@(private)
+normal_escapes :: proc(part: string) -> string {
+	if strings.index_byte(part, '%') < 0 {
+		return part
+	}
+	out := make([dynamic]u8, 0, len(part))
+	for i := 0; i < len(part); i += 1 {
+		b, ok := u8(0), false
+		if part[i] == '%' && i + 2 < len(part) {
+			b, ok = hex.decode_sequence(part[i + 1:i + 3])
+		}
+		switch {
+		case !ok:
+			append(&out, part[i])
+			continue
+		case 'A' <= b && b <= 'Z', 'a' <= b && b <= 'z', '0' <= b && b <= '9', b == '-', b == '.', b == '_', b == '~':
+			append(&out, b)
+		case:
+			append(&out, '%', upper_hex(part[i + 1]), upper_hex(part[i + 2]))
+		}
+		i += 2
+	}
+	return string(out[:])
+}
+
+@(private)
+upper_hex :: proc(c: u8) -> u8 {
+	return c - 'a' + 'A' if 'a' <= c && c <= 'f' else c
 }
 
 // RFC 3986 section 5.2.4: drops the `.` segments and each `..` with the segment before it.

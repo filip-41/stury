@@ -60,11 +60,12 @@ a_dump_leaves_out_what_each_option_excludes :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "pass": "s", "nick": null, "home": {"city": "x"}, "zz": 1, "aa": [2]}`), &a))
 	a.id = 9
 	testing.expect_value(t, dumped(t, &m, &a, {}), `{"id":9,"name":"ada","level":7,"nick":null,"tags":[],"home":{"city":"x","zip":null},"aa":[2],"zz":1}`)
-	testing.expect_value(t, dumped(t, &m, &a, {exclude_none = true}), `{"id":9,"name":"ada","level":7,"tags":[],"home":{"city":"x"},"aa":[2],"zz":1}`)
+	// A required member is written though it holds null, so the text loads back.
+	testing.expect_value(t, dumped(t, &m, &a, {exclude_none = true}), `{"id":9,"name":"ada","level":7,"nick":null,"tags":[],"home":{"city":"x"},"aa":[2],"zz":1}`)
 	// What the load took from a default or never read is unset, and the read_only member is kept.
 	testing.expect_value(t, dumped(t, &m, &a, {exclude_unset = true}), `{"id":9,"name":"ada","nick":null,"home":{"city":"x"},"aa":[2],"zz":1}`)
 	testing.expect_value(t, dumped(t, &m, &a, {exclude_defaults = true}), `{"id":9,"name":"ada","nick":null,"home":{"city":"x"},"aa":[2],"zz":1}`)
-	testing.expect_value(t, dumped(t, &m, &a, {exclude_unset = true, exclude_none = true, exclude_defaults = true}), `{"id":9,"name":"ada","home":{"city":"x"},"aa":[2],"zz":1}`)
+	testing.expect_value(t, dumped(t, &m, &a, {exclude_unset = true, exclude_none = true, exclude_defaults = true}), `{"id":9,"name":"ada","nick":null,"home":{"city":"x"},"aa":[2],"zz":1}`)
 	a.level, a.id = 8, 0
 	testing.expect_value(t, dumped(t, &m, &a, {exclude_defaults = true}), `{"name":"ada","level":8,"nick":null,"home":{"city":"x"},"aa":[2],"zz":1}`)
 	// A plain write by the model's plan leaves out only the write_only member.
@@ -318,7 +319,7 @@ a_patch_takes_the_members_it_holds :: proc(t: ^testing.T) {
 	testing.expect(t, model.was_set(&m, Account, existing.set, "level") && model.was_set(&m, Account, existing.set, "name"))
 	testing.expect_value(t, len(existing.extra), 2)
 	text, _ := model.dump(&m, &existing, {exclude_none = true})
-	testing.expect_value(t, string(text), `{"id":0,"name":"ada","level":4,"tags":["p","q"],"home":{"city":"c","zip":2},"aa":1,"zz":"patched"}`)
+	testing.expect_value(t, string(text), `{"id":0,"name":"ada","level":4,"nick":null,"tags":["p","q"],"home":{"city":"c","zip":2},"aa":1,"zz":"patched"}`)
 	// The value the patch replaced keeps its own memory, its captured map among it.
 	testing.expect(t, len(before.tags) == 1 && len(before.extra) == 2 && before.nick.? == "a")
 	_, kept := before.extra["zz"]
@@ -518,8 +519,6 @@ a_default_converts_a_number_or_a_maybe_element :: proc(t: ^testing.T) {
 	b := strings.builder_make()
 	core.render(strings.to_writer(&b), nil, e)
 	testing.expect(t, strings.contains(strings.to_string(b), "Expected string, found number"), strings.to_string(b))
-	missing, _ := model.register(&reg, Counter, "nope", 1).(runtime.Allocator_Error)
-	testing.expect_value(t, missing, runtime.Allocator_Error.Invalid_Argument)
 }
 
 // A failed rule's message says what the value should have been.

@@ -87,7 +87,7 @@ csv_model_header_judged_once :: proc(t: ^testing.T) {
 	out, _, _ := loaded(t, dsv.checks(.Csv), "id,name\n1,ada\n2,bob\n")
 	testing.expect_value(t, out, "Missing_Field/age;")
 	out, _, _ = loaded(t, dsv.checks(.Csv), "id,name,age,zip\n1,ada,30,x\n2,bob,40,y\n", .Forbid)
-	testing.expect_value(t, out, "Unknown_Field/zip;")
+	testing.expect_value(t, out, "Not_Allowed/zip;")
 	out, _, _ = loaded(t, dsv.checks(.Csv), "id,name,age,zip\n1,ada,30,x\n2,b,40,y\n")
 	testing.expect_value(t, out, "Too_Short/1/name;")
 }
@@ -297,6 +297,7 @@ Law :: struct {
 	e: string `model:"format=email"`,
 	d: string `model:"format=date-time"`,
 	o: string `model:"optional,len>=1"`,
+	q: string `model:"len<=1"`,
 }
 
 // A cell of a row of `Law`: its column, its text as CSV spells it, and as JSON spells it.
@@ -306,7 +307,7 @@ Cell :: struct {
 }
 
 @(private = "file")
-LAW_BASE := [?]Cell{{"f", "0.1", "0.1"}, {"g", "1.5", "1.5"}, {"i", "7", "7"}, {"u", "7", "7"}, {"n", "3", "3"}, {"e", "a@b.c", `"a@b.c"`}, {"d", "2020-01-01T00:00:00Z", `"2020-01-01T00:00:00Z"`}}
+LAW_BASE := [?]Cell{{"f", "0.1", "0.1"}, {"g", "1.5", "1.5"}, {"i", "7", "7"}, {"u", "7", "7"}, {"n", "3", "3"}, {"e", "a@b.c", `"a@b.c"`}, {"d", "2020-01-01T00:00:00Z", `"2020-01-01T00:00:00Z"`}, {"q", "x", `"x"`}}
 
 // Loads one row of `Law` with `change` in place of its column, as a CSV text and as a JSON array, and returns what each
 // collected.
@@ -375,11 +376,28 @@ csv_and_json_collect_the_same_codes :: proc(t: ^testing.T) {
 		{"d", "2016-12-31T23:59:60Z", `"2016-12-31T23:59:60Z"`},
 		{"d", "2020-02-30T00:00:00Z", `"2020-02-30T00:00:00Z"`},
 		{"d", "2020-01-01T00:00:00+24:00", `"2020-01-01T00:00:00+24:00"`},
+		{"q", `""""`, `"\""`},
+		{"q", `"xx"""`, `"xx\""`},
 	}
 	for c in cases {
 		csv, js := law_row(t, &csv_m, &json_m, c)
 		testing.expectf(t, csv == js, "%s=%q: csv %q, json %q", c.column, c.csv, csv, js)
 	}
+}
+
+// A string that holds a quote, which a CSV text doubles, is dumped and loaded back as it was.
+@(test)
+csv_model_round_trips_a_quote :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	m, e := model.compile(nil, []Patch_Row, dsv.checks(.Csv))
+	walktest.expect_nil(t, e)
+	rows := []Patch_Row{{id = 1, name = `say "hi"`}}
+	text, err := model.dump(&m, &rows)
+	walktest.expect_nil(t, err)
+	back: []Patch_Row
+	walktest.expect_nil(t, model.load(&m, text, &back))
+	testing.expect(t, len(back) == 1 && back[0].name == `say "hi"` && model.was_set(&m, Patch_Row, back[0].set, "name"))
 }
 
 @(test)
@@ -402,6 +420,7 @@ Keyed :: struct {
 	by: map[i8]int,
 }
 
+// A key the map's key type does not hold fails the object's member names, as its schema's `propertyNames` does.
 @(test)
 json_map_keys_out_of_range_refuse :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -412,7 +431,7 @@ json_map_keys_out_of_range_refuse :: proc(t: ^testing.T) {
 	sink: typed.Sink
 	v: Keyed
 	_ = model.load(&m, transmute([]u8)string(`{"by":{"1":1,"300":2,"x":3}}`), &v, &sink)
-	testing.expect_value(t, spelled(&sink), "Out_Of_Range/by/300;Out_Of_Range/by/x;")
+	testing.expect_value(t, spelled(&sink), "No_Match/by;No_Match/by;")
 }
 
 @(test)
@@ -534,22 +553,52 @@ csv_model_patch_of_a_record_misses_nothing :: proc(t: ^testing.T) {
 	testing.expect(t, model.patch(&table, &rows, transmute([]u8)string("name\nada\n")) != nil)
 }
 
-// A member a dump leaves out writes an empty cell, which a load reads back as null.
+@(private = "file")
+Law_Row :: struct {
+	id:   int,
+	kind: Maybe(string),
+	role: string `model:"optional"`,
+	n:    int `model:"optional"`,
+	note: Maybe(string) `model:"optional"`,
+	set:  model.Fields_Set,
+}
+
+// Every dump of a valid value loads back, under every option and in every format: an option leaves out only a member a
+// load does not require, and a CSV or TSV row, whose empty cell reads back as null, keeps every other member's value.
 @(test)
-csv_model_dump_leaves_excluded_cells_empty :: proc(t: ^testing.T) {
+model_dump_under_every_option_loads_back :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	reg: model.Registry
-	m, e := model.compile(&reg, []Row, dsv.checks(.Csv))
-	walktest.expect_nil(t, e)
-	rows := []Row{{1, "ada", 30, nil}, {2, "bo", 40, "x"}}
-	text, err := model.dump(&m, &rows, {exclude_defaults = true})
-	walktest.expect_nil(t, err)
-	testing.expect_value(t, string(text), "id,name,age,note\n1,ada,30,\n2,bo,40,x\n")
-	back: []Row
-	walktest.expect_nil(t, model.load(&m, text, &back))
-	testing.expect_value(t, len(back), 2)
-	testing.expect(t, back[0].note == nil && back[1].note.? == "x")
+	model.register(&reg, Law_Row, "role", "member")
+	model.register(&reg, Law_Row, "n", 7)
+	formats := [?]typed.Format_Checks{json.checks(.Json), dsv.checks(.Csv), dsv.checks(.Tsv)}
+	names := [?]string{"JSON", "CSV", "TSV"}
+	for checks, f in formats {
+		m, e := model.compile(&reg, []Law_Row, checks)
+		walktest.expect_nil(t, e)
+		source := []Law_Row{{id = 9, kind = "k", role = "boss", n = 3}}
+		source_text, _ := model.dump(&m, &source)
+		loaded_rows: []Law_Row
+		walktest.expect_nil(t, model.load(&m, source_text, &loaded_rows))
+		values := [?][]Law_Row{{{id = 1, role = "member", n = 7}, {id = 2, kind = "k", role = "boss", n = 3, note = "x"}}, loaded_rows}
+		for &rows in values {
+			plain, _ := model.dump(&m, &rows)
+			for bits in 0 ..< 8 {
+				opts := model.Dump_Opts{exclude_unset = bits & 1 != 0, exclude_none = bits & 2 != 0, exclude_defaults = bits & 4 != 0}
+				text, err := model.dump(&m, &rows, opts)
+				walktest.expect_nil(t, err)
+				back: []Law_Row
+				if !testing.expectf(t, model.load(&m, text, &back) == nil, "%v under %v does not load back: %s", names[f], opts, text) {
+					continue
+				}
+				if !opts.exclude_unset {
+					again, _ := model.dump(&m, &back)
+					testing.expectf(t, string(again) == string(plain), "%v under %v loads back as %s", names[f], opts, again)
+				}
+			}
+		}
+	}
 }
 
 Strict_Row :: struct {

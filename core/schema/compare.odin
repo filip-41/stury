@@ -104,8 +104,8 @@ compare :: proc(old, new: ^rules.Description, opts := Compare_Options{}) -> (r: 
 	old_on, new_on := asserting(old, opts.format_assert), asserting(new, opts.format_assert)
 	defer asserted_restore(old, old_on)
 	defer asserted_restore(new, new_on)
-	a := Side{d = old, c = compile_description(old), as = opts.as, reads = opts.reads}
-	b := Side{d = new, c = compile_description(new), as = opts.as, reads = opts.reads}
+	a := Side{d = old, c = {description = old}, as = opts.as, reads = opts.reads}
+	b := Side{d = new, c = {description = new}, as = opts.as, reads = opts.reads}
 	defer side_destroy(&a)
 	defer side_destroy(&b)
 	arena := virtual.arena_allocator(&r.arena)

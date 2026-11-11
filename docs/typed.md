@@ -92,8 +92,8 @@ Item :: struct {
 | Target | Takes |
 |---|---|
 | `bool`, `b8`..`b64` | a bool |
-| `i8`..`i64`, `u8`..`u64` | a number spelled as an integer, in range, else `.Out_Of_Range`. A fraction or exponent is `.Wrong_Kind` |
-| `f32`, `f64` | any number, and JSON5's `Infinity` and `NaN` unless the walk refuses them with `refuse_non_finite`. A decimal past the type's range is `.Out_Of_Range`, and any other reads as the nearest value, however many digits or however large an exponent it has |
+| `i8`..`i64`, `u8`..`u64` | a number spelled as an integer, in range, else `.Above_Maximum` or `.Below_Minimum`. A fraction or exponent is `.Wrong_Kind` |
+| `f32`, `f64` | any number, and JSON5's `Infinity` and `NaN` unless the walk refuses them with `refuse_non_finite`. A decimal past the type's range is `.Above_Maximum` or `.Below_Minimum`, and any other reads as the nearest value, however many digits or however large an exponent it has |
 | `string`, `cstring` | a string |
 | `Raw` | any value, as the format spells it |
 | `core.Value` | any value, built: a number past a double keeps its digits. The plan needs the reads of its format (`json.reads`), else `.Unsupported` |
@@ -102,7 +102,7 @@ Item :: struct {
 | `Scalar` | a scalar: `Null`, `bool`, `i64`, `u64`, `f64`, `Number_Text` or `string` |
 | `any` | any value. A container is boxed as `map[string]any` or `[dynamic]any`, a scalar as its `Scalar` arm, `null` as nil |
 | struct | an object, its members by name |
-| `[]T`, `[dynamic]T`, `[N]T`, `[E]T`, `[dynamic; N]T` | an array. A fixed length that differs is `.Wrong_Length`, and a fixed capacity passed is too |
+| `[]T`, `[dynamic]T`, `[N]T`, `[E]T`, `[dynamic; N]T` | an array. A fixed length that differs is `.Too_Few` or `.Too_Many`, and a fixed capacity passed is `.Too_Many` |
 | `map[K]V` | an object. `K` is a string, an integer read from the key's text, or an enum |
 | enum | a member's name, or its integer under `.Int`. Neither is `.Not_A_Member` |
 | `bit_set` | an array of its element's names or numbers |
@@ -118,7 +118,8 @@ fixed array whose element has no size, a type of 4 GiB or more, and the rest of 
   other target refuses it as `.Wrong_Kind`, a struct, a list and a map included.
 - Two arms of a union may not take one class of value. Named struct arms share objects only under `union_tag`, and no
   member of an arm may have its key, by tag, `rename` or a `using` member. An object with no tag member is `.Missing_Tag`, with two `.Repeated_Tag`, and a name
-  no arm has `.Not_A_Member`.
+  no arm has `.Not_A_Member`. A model's union of several arms refuses each of these, and a value of a kind no arm takes,
+  as `.No_Arm`, the kind its schema's `anyOf` gives.
 - A repeated member follows `Read_Options.dups`: `.Last` by default, `.First`, or `.Refuse`. `.All` is `.Bad_Option`.
   Under `.Last` a repeat that opens a struct, map or array, or fills a pointer, `Maybe`, union or `any`, resets the
   member first. Any other repeat is stored over the earlier value, so a hook's `dest` holds it and a refused repeat
@@ -168,7 +169,7 @@ memory for a record read in a loop, where it lasts until the next call on the re
 innermost `MAX_ERROR_STEPS` (8) when `truncated` says more were cut. A step's name lives as long as `src` or the plan,
 or, for a decoded key, as long as `context.temp_allocator`'s block. `detail` holds one of three by kind: `.Walk`'s fault
 in `inner`, the two formats or the plan's type a `.Plan_Mismatch` met in `plans`, and `want` for the rest. `want.type`
-is the type a `.Wrong_Kind`, `.Out_Of_Range` or `.Not_A_Member` read wanted, `found` the kind of the value, and
+is the type a `.Wrong_Kind`, `.Above_Maximum`, `.Below_Minimum`, `.Out_Of_Range` or `.Not_A_Member` read wanted, `found` the kind of the value, and
 `want.text` the scalar's source text. `want.text` is also the flag a `.Bad_Tag` names and why a type is
 `.Unsupported` or a union `.Ambiguous_Union`. `core.render` and `core.write_code` take the error, as they do every other
 error of the library, and the path renders as path text, `.[0].population`. A write returns the same type, see
@@ -185,9 +186,10 @@ Plan is for json, the read is csv
 |---|---|
 | `.Walk` | the text does not parse |
 | `.Wrong_Kind` | a value the target's type does not read |
-| `.Out_Of_Range` | a value past what the target holds |
+| `.Above_Maximum`, `.Below_Minimum` | a number past the greatest or the least value the target holds |
+| `.Out_Of_Range` | a value other than a number past what the target holds: a map key that spells no integer, a cstring with a NUL |
 | `.Not_A_Member` | a name or number no enum or union arm has |
-| `.Wrong_Length` | an element count a fixed array or capacity does not take |
+| `.Too_Few`, `.Too_Many` | an element count a fixed array or capacity does not take |
 | `.Missing_Field` | a `required` member is absent, the last step names it |
 | `.Unknown_Field` | a key the type does not name under `.Refuse` |
 | `.Missing_Tag`, `.Repeated_Tag` | a union's tag member absent or repeated |
@@ -324,7 +326,7 @@ columns are bound once, when the walk reaches the first record, or the text's en
 |---|---|
 | unquoted and empty | absent: the field stays zero, a list keeps a zero element, a map has no entry, and a `required` field is `.Missing_Field` |
 | quoted and empty | present: an empty string, or a refused number or bool |
-| integer | `[+-]?digits`, quoted or not. Past the field's range is `.Out_Of_Range`, other text `.Wrong_Kind` |
+| integer | `[+-]?digits`, quoted or not. Past the field's range is `.Above_Maximum` or `.Below_Minimum`, other text `.Wrong_Kind` |
 | float | `[+-]?(digits(.digits?)?\|.digits)([eE][+-]?digits)?` |
 | bool | `true` or `false` |
 | enum | its name, or with `enums = .Int` its value |

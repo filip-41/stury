@@ -382,7 +382,10 @@ body :: proc(w: ^Writer, i: rules.Node_Index, n: ^rules.Node, rl: rules.Rules) {
 	if ref, ok := n.ref.?; ok {
 		put(w, "$ref", ref_to(w, ref))
 	}
-	if target, ok := n.dynamic_ref.?; ok {
+	if target, ok := n.dynamic_ref.?; ok && .Dynamic_Static in n.spelled {
+		// A `$dynamicRef` whose fragment is no dynamic anchor's name resolves statically.
+		put(w, "$dynamicRef", ref_to(w, target))
+	} else if ok {
 		for x in w.d.anchors {
 			if x.node == target {
 				put(w, "$dynamicRef", strings.concatenate({id_of(x.resource), "#", anchor_name(x.name)}, context.temp_allocator))

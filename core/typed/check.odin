@@ -21,8 +21,10 @@ Check :: struct {
 	pool:         ^Pool,
 	// The held containers a run took over, innermost first.
 	taken:        ^Fork,
-	// The held values this check's value is judged by one inside the other, which `MAX_HELD` bounds.
+	// The held values this check's value is judged by one inside the other, which `MAX_HELD` bounds, and where the
+	// outermost check's held value opened on the machine stack, which `STACK_BUDGET` bounds the runs below.
 	nest:         int,
+	stack:        uintptr,
 	// What stopped the check past its sink, which stops the checks it is an arm of.
 	fatal:        core.Typed_Error_Kind,
 	// What the path and the keyword path of the outermost check's entries start with, nil for none.
@@ -123,18 +125,21 @@ check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, t
 	c.wide, c.outer, c.readings = true, read.outer, read.readings
 	// A text read under `.Refuse` was refused whole for any repeat, so the check meets none.
 	c.repeats, c.tracked, c.floor = .Ignore if read.dups == .Refuse else read.repeats, 0, len(read.sink.entries) if read.sink != nil else 0
-	// A check started again over its own pool gives back the held value an earlier record stopped in.
-	if c.fork != nil && c.fork.open {
-		fork_release(c, c.fork)
-	}
 	if k := read.checker; k != nil {
+		// A check of records gives back what each record took from the temp allocator, and the checker's runs and
+		// forks serve every record, so they are never made with the temp allocator.
 		if k.pool.allocator.procedure == nil {
-			k.pool.allocator = context.allocator
+			k.pool.allocator = context.allocator if context.allocator.procedure != context.temp_allocator.procedure else runtime.heap_allocator()
 		}
+		// `pool_begin` gives back every run and fork, so the held value an earlier record stopped in, whose arms that
+		// record's temp memory held, is not read.
 		pool_begin(&k.pool)
 		// The checker outlives the check and its pool holds only the runs and forks it made, never the check's own
 		// memory. The cast keeps the compiler's escape check from taking a store into the pool for an escape.
 		c.pool, c.fork, c.taken = (^Pool)(rawptr(&k.pool)), nil, nil
+	} else if c.fork != nil && c.fork.open {
+		// A check started again over its own pool gives back the held value it stopped in.
+		fork_release(c, c.fork)
 	}
 	if c.pool != nil {
 		c.pool.repeated, c.pool.repeating, c.pool.leads, c.pool.begun, c.pool.verdicts = nil, nil, nil, c.pool.opened, {}
@@ -413,10 +418,7 @@ check_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs
 		}
 		return next, .Skip
 	}
-	f := &h.frames[h.sp]
-	h.sp += 1
-	f.a, f.b, f.c, f.seen, f.run, f.extra = regs.a, regs.b, regs.c, 0, nil, nil
-	f.data, f.kind, f.owner, f.target = rawptr(uintptr(t.lo)), t.kind, nil, 0
+	f := frame_push(h, regs, t)
 	if t.kind == .Object {
 		if keyed(h, m, u) {
 			// The cursor starts past every member, which it passed unread, so the members are tracked from here by their keys.
@@ -427,6 +429,16 @@ check_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs
 		}
 	}
 	return {NO_LIMIT, u64(uintptr(first)), 0}, .Next
+}
+
+// Opens the frame of the container `t` opens, which the value at the registers `regs` holds.
+@(private)
+frame_push :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> ^Frame {
+	f := &h.frames[h.sp]
+	h.sp += 1
+	f.a, f.b, f.c, f.seen, f.run, f.extra = regs.a, regs.b, regs.c, 0, nil, nil
+	f.data, f.kind, f.owner, f.target = rawptr(uintptr(t.lo)), t.kind, nil, 0
+	return f
 }
 
 // A `Plain` token, text a format gives no kind, as the kind `l` allows reads it. A leaf that allows numbers alone reads the
@@ -939,7 +951,7 @@ dependent_missing :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, 
 			if !member_seen(h, f, owner, regs, want) {
 				e := core.Typed_Refusal{kind = .Missing_Field, at = lo}
 				e.want.text = h.plan.meta[m.block + want].name
-				note(h, at, e, hi, "dependentRequired")
+				note(h, at, e, hi, r.keyword)
 				if h.sink == nil {
 					return .Stop
 				}
@@ -963,7 +975,7 @@ store_integral :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token,
 	}
 	v, fits := rules.decimal_i64(d)
 	if !fits {
-		return .Out_Of_Range
+		return past_limit(raw_data(h.src)[t.lo] == '-')
 	}
 	return store_int(u64(v) if v >= 0 else u64(-(v + 1)) + 1, v < 0, fld.kind, dest)
 }

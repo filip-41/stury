@@ -232,8 +232,8 @@ float_law :: proc(t: ^testing.T, v: $T, valid: bool, loc := #caller_location) {
 	back: T
 	loaded := model.load(&m, text, &back, nil, {dups = .Refuse}, context.temp_allocator) == nil
 	d, _ := model.schema(&m, .Dump, context.temp_allocator)
-	c := schema.compile_description(&d, allocator = context.temp_allocator)
-	b, _ := schema.bind(&c, {layout = json.as(.Json)}, allocator = context.temp_allocator)
+	c, _ := schema.compile_description(&d, allocator = context.temp_allocator)
+	b, _ := schema.bind(c, {layout = json.as(.Json)}, allocator = context.temp_allocator)
 	checked := schema.valid(&b, text)
 	testing.expectf(t, validated == valid && loaded == valid && checked == valid, "%v %s: validate %v, load %v, check %v", typeid_of(T), text, validated, loaded, checked, loc = loc)
 }
@@ -291,8 +291,9 @@ a_model_has_a_load_schema_and_a_dump_schema :: proc(t: ^testing.T) {
 		node := read.description.nodes[member.node].rules
 		testing.expectf(t, node.read_only == (member.name == "id") && node.write_only == (member.name == "password"), "%s", member.name)
 	}
-	c := schema.compile_description(&load)
-	b, _ := schema.bind(&c, json.checks(.Json))
+	c, _ := schema.compile_description(&load)
+	defer schema.destroy(c)
+	b, _ := schema.bind(c, json.checks(.Json))
 	testing.expect(t, schema.valid(&b, transmute([]u8)string(`{"id": "any", "user": "a", "password": "p"}`)))
 	testing.expect(t, !schema.valid(&b, transmute([]u8)string(`{"id": 1, "user": "a"}`)))
 }

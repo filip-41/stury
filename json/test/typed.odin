@@ -270,14 +270,14 @@ refusal_names_the_value :: proc(t: ^testing.T) {
 	src := `{"m":{"key":{"x":300000000000}}}`
 	s = {}
 	e = read(t, src, &s)
-	walktest.expect_kind(t, e, core.Typed_Error_Kind.Out_Of_Range)
+	walktest.expect_kind(t, e, core.Typed_Error_Kind.Above_Maximum)
 	testing.expect_value(t, string(walktest.typed_of(e).steps[1].(core.Name)), "key")
 	b := strings.builder_make(context.temp_allocator)
 	testing.expect(t, core.render(strings.to_writer(&b), transmute([]u8)src, e) == nil)
 	testing.expect_value(t, strings.to_string(b), "1:18: 300000000000 is out of range for i32 at .m.key.x")
 	b2 := strings.builder_make(context.temp_allocator)
 	testing.expect(t, core.write_code(strings.to_writer(&b2), e) == nil)
-	testing.expect_value(t, strings.to_string(b2), "typed.out_of_range")
+	testing.expect_value(t, strings.to_string(b2), "typed.above_maximum")
 }
 
 @(test)
@@ -322,7 +322,7 @@ numbers_at_each_width :: proc(t: ^testing.T) {
 	testing.expect_value(t, transmute(u64)s.f, u64(1) << 63)
 	for text in ([]string{`{"a":128}`, `{"b":-1}`, `{"c":9223372036854775808}`, `{"d":18446744073709551616}`, `{"f":1e400}`, `{"e":1e39}`}) {
 		kind := walktest.typed_kind(read(t, text, &s))
-		testing.expectf(t, kind == .Out_Of_Range, "%s: %v", text, kind)
+		testing.expectf(t, kind == (.Below_Minimum if text == `{"b":-1}` else .Above_Maximum), "%s: %v", text, kind)
 	}
 	walktest.expect_kind(t, read(t, `{"a":1.0}`, &s), core.Typed_Error_Kind.Wrong_Kind)
 	walktest.expect_kind(t, read(t, `{"a":null}`, &s), core.Typed_Error_Kind.Wrong_Kind)
@@ -347,7 +347,7 @@ json5_non_finite_numbers_fill_floats :: proc(t: ^testing.T) {
 	walktest.expect_kind(t, e, core.Typed_Error_Kind.Walk)
 	for text in ([]string{`{f: 1e400}`, `{g: 1e39}`, `{g: 0xffffffffffffffffffffffffffffffffffff}`}) {
 		kind := walktest.typed_kind(json.unmarshal(transmute([]u8)text, json.Spec.Json5, &s, read = {}, opts = {}, allocator = context.temp_allocator))
-		testing.expectf(t, kind == .Out_Of_Range, "%s: %v", text, kind)
+		testing.expectf(t, kind == .Above_Maximum, "%s: %v", text, kind)
 	}
 }
 
@@ -366,9 +366,9 @@ lists_arrays_and_their_lengths :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(s.f), 1)
 	testing.expect_value(t, s.f[0], 3)
 	testing.expect_value(t, s.d[1], "y")
-	walktest.expect_kind(t, read(t, `{"a":[1]}`, &s), core.Typed_Error_Kind.Wrong_Length)
-	walktest.expect_kind(t, read(t, `{"a":[1,2,3]}`, &s), core.Typed_Error_Kind.Wrong_Length)
-	walktest.expect_kind(t, read(t, `{"f":[1,2,3]}`, &s), core.Typed_Error_Kind.Wrong_Length)
+	walktest.expect_kind(t, read(t, `{"a":[1]}`, &s), core.Typed_Error_Kind.Too_Few)
+	walktest.expect_kind(t, read(t, `{"a":[1,2,3]}`, &s), core.Typed_Error_Kind.Too_Many)
+	walktest.expect_kind(t, read(t, `{"f":[1,2,3]}`, &s), core.Typed_Error_Kind.Too_Many)
 	one: [1]string
 	testing.expect_value(t, walktest.at_of(read(t, `["a","b"]`, &one)), 5)
 }
@@ -392,13 +392,13 @@ enums_bit_sets_and_map_keys :: proc(t: ^testing.T) {
 	testing.expect(t, s.mi[-3])
 	testing.expect(t, s.me[.Green])
 	walktest.expect_kind(t, read(t, `{"e":"Pink"}`, &s), core.Typed_Error_Kind.Not_A_Member)
-	walktest.expect_kind(t, read(t, `{"b":[10]}`, &s), core.Typed_Error_Kind.Out_Of_Range)
-	// An integer past `i64` is out of range, as it is for an integer field, and a fraction is no integer.
-	walktest.expect_kind(t, read(t, `{"b":[99999999999999999999]}`, &s), core.Typed_Error_Kind.Out_Of_Range)
+	walktest.expect_kind(t, read(t, `{"b":[10]}`, &s), core.Typed_Error_Kind.Above_Maximum)
+	// An integer past `i64` is past the maximum, as it is for an integer field, and a fraction is no integer.
+	walktest.expect_kind(t, read(t, `{"b":[99999999999999999999]}`, &s), core.Typed_Error_Kind.Above_Maximum)
 	walktest.expect_kind(t, read(t, `{"b":[1.0]}`, &s), core.Typed_Error_Kind.Wrong_Kind)
 	walktest.expect_kind(t, read(t, `{"mi":{"x":true}}`, &s), core.Typed_Error_Kind.Out_Of_Range)
 	narrow: map[i8]i32
-	walktest.expect_kind(t, read(t, `{"300":1}`, &narrow), core.Typed_Error_Kind.Out_Of_Range)
+	walktest.expect_kind(t, read(t, `{"300":1}`, &narrow), core.Typed_Error_Kind.Above_Maximum)
 	ints, err := json.plan_make(Color, plan = {enums = .Int})
 	walktest.expect_nil(t, err)
 	defer typed.plan_destroy(&ints)
@@ -539,7 +539,7 @@ a_tagged_arm_may_not_key_a_member_as_the_tag :: proc(t: ^testing.T) {
 	}
 	for c in refused {
 		_, err := json.plan_make(c.T, plan = {union_tag = c.tag, rename = c.rename}, allocator = context.temp_allocator)
-		walktest.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
+		walktest.expect_kind(t, err, core.Typed_Error_Kind.Bad_Tag)
 	}
 	for T in ([]typeid{union {Keyed_Apart, B}, union {Left_Out, B}}) {
 		_, err := json.plan_make(T, plan = {union_tag = "type"}, allocator = context.temp_allocator)
@@ -1250,7 +1250,7 @@ f32_rounds_once :: proc(t: ^testing.T) {
 		e2 := typed.unmarshal(&doc, core.ROOT, &built, &plan, allocator = context.temp_allocator)
 		for got in ([]struct {v: []f32, e: core.Error} {{streamed, e}, {built, e2}}) {
 			if c.want == OUT {
-				testing.expectf(t, walktest.typed_kind(got.e) == .Out_Of_Range, "%s: %v, want Out_Of_Range", c.text, got.e)
+				testing.expectf(t, walktest.typed_kind(got.e) == .Above_Maximum, "%s: %v, want Above_Maximum", c.text, got.e)
 			} else {
 				ok := got.e == nil && len(got.v) == 1 && transmute(u32)got.v[0] == c.want
 				testing.expectf(t, ok, "%s: %v %v, want %08x", c.text, got.v, got.e, c.want)

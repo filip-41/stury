@@ -71,7 +71,7 @@ odin_enums_unions_and_defs :: proc(t: ^testing.T) {
 		"Root_Kind :: enum {\n\tRead_Only,\n\tAdmin,\n\tEmpty,\n}\n",
 		"Root_Level :: enum i64 {\n\tV1 = 1,\n\tVM2 = -2,\n}\n",
 		"Root_Id :: union #no_nil {uuid.Identifier, i64}\n",
-		"Point :: struct {\n\tx: Maybe(f64) `json:\",omitempty\" model:\"optional,not_null\"`,\n}\n",
+		"Point :: struct {\n\tx: Maybe(core.Number_Text) `json:\",omitempty\" model:\"optional,not_null\"`,\n}\n",
 		"\tat: Maybe(Point) `json:\",omitempty\" model:\"optional,not_null\"`,\n",
 		"[]model.Enum_Rename{{\"Read_Only\", \"read-only\"}, {\"Admin\", \"admin\"}, {\"Empty\", \"\"}}",
 		"model.register_enum(reg, {Root_Level, true, nil})",
@@ -148,7 +148,7 @@ odin_null_tuples_merges_and_other_members :: proc(t: ^testing.T) {
 	for want in ([]string{
 		"\textra: Maybe(i64) `json:\",omitempty\" model:\"optional,not_null\"`,\n",
 		"\tn: Null `json:\",omitunset\" model:\"optional\"`,\n",
-		"\tpair: Maybe([2]f64) `json:\",omitempty\" model:\"optional,not_null\"`,\n",
+		"\tpair: Maybe([2]core.Number_Text) `json:\",omitempty\" model:\"optional,not_null\"`,\n",
 		"\te: Root_E `json:\",omitunset\" model:\"optional\"`,\n",
 		"\tb: string,\n",
 		"\textra_2: map[string]string `json:\",unknown\"`,\n",
@@ -228,6 +228,18 @@ odin_pattern_with_a_quote_or_a_comma_is_registered :: proc(t: ^testing.T) {
 	testing.expectf(t, strings.contains(source, want) && strings.contains(source, "model:\"len<=3\""), "no %q in\n%s", want, source)
 }
 
+// A number whose bounds a double holds is an `f64`, and any other keeps its text, so no number its schema takes is
+// refused: a member's text refuses null by its tag, and a list's element by being held.
+@(test)
+odin_keeps_the_text_of_a_number_a_double_may_not_hold :: proc(t: ^testing.T) {
+	source, err := odin_of(t, `{"type": "object", "required": ["a", "b", "l"], "properties": {"a": {"type": "number"},
+		"b": {"type": "number", "minimum": 0, "maximum": 1}, "l": {"type": "array", "items": {"type": "number"}}}}`)
+	testing.expectf(t, err == nil, "%v", err)
+	for want in ([]string{"\ta: core.Number_Text `model:\"not_null\"`,\n", "\tb: f64 `model:\">=0,<=1\"`,\n", "\tl: []core.Number_Text,\n"}) {
+		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
+	}
+}
+
 @(test)
 odin_registers_a_members_default :: proc(t: ^testing.T) {
 	source, err := odin_of(t, `{"type": "object", "properties": {"name": {"type": "string", "default": "a\"b"},
@@ -238,7 +250,7 @@ odin_registers_a_members_default :: proc(t: ^testing.T) {
 		"register :: proc(reg: ^model.Registry) -> core.Error {\n",
 		"\tmodel.register_default(reg, Root, \"name\", string(`a\"b`)) or_return\n",
 		"\tmodel.register_default(reg, Root, \"n\", i64(3)) or_return\n",
-		"\tmodel.register_default(reg, Root, \"x\", f64(1.5e2)) or_return\n",
+		"\tmodel.register_default(reg, Root, \"x\", core.Number_Text{\"1.5e2\", core.text_f64(\"1.5e2\")}) or_return\n",
 		"\tmodel.register_default(reg, Root, \"on\", bool(true)) or_return\n",
 	}) {
 		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)

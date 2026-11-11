@@ -22,6 +22,8 @@ Resolver :: struct {
 	as:        core.As,
 	// The draft of a schema with no `$schema`, 2020-12 when nil.
 	draft:     Maybe(Draft),
+	// Whether `format` asserts whatever the schema's vocabularies say.
+	format_assert: bool,
 	// The documents the references loaded and the texts they read, freed by `resolver_destroy`.
 	documents: [dynamic]^core.Document,
 	texts:     [dynamic][]u8,
@@ -136,6 +138,9 @@ read :: proc(doc: ^core.Document, node: core.Node_Index, base: string, res: ^Res
 	defer virtual.arena_destroy(&r.arena)
 	context.allocator = virtual.arena_allocator(&r.arena)
 	base := base
+	if base != "" {
+		base = uri_resolve(base, "")
+	}
 	if base == "" && res.root != "" {
 		base = strings.concatenate({"file://", root_path(res), "/"})
 		r.local = base
@@ -321,7 +326,26 @@ read_id :: proc(r: ^Reader, sc: ^Scope, at: core.Node_Index, i: rules.Node_Index
 	}
 	if text != "" && text[0] != '#' {
 		sc.base, sc.root, sc.resource = resource, at, i
+		if sc.source == 0 && len(r.path) > 0 && !through_ref(r.path[:]) {
+			add_base(r, resource)
+		}
 	}
+}
+
+// Files the resource `uri` that the root reaches in place at `r.path` as the base of the keyword locations under it.
+@(private)
+add_base :: proc(r: ^Reader, uri: string) {
+	steps := make([]core.Step, len(r.path), r.d.allocator)
+	for s, k in r.path {
+		steps[k] = s
+		if name, named := s.(core.Name); named {
+			steps[k] = core.Name(keep(r, string(name)))
+		}
+	}
+	if r.d.bases == nil {
+		r.d.bases = make([dynamic]rules.Base, r.d.allocator)
+	}
+	append(&r.d.bases, rules.Base{steps, keep(r, uri)})
 }
 
 // Names node `i` `name` unless it has a name.
@@ -391,6 +415,7 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 	case "prefixItems", "items":
 		sh.is_array = true
 		if name == "prefixItems" || kind == .Array && sc.draft != .D2020_12 {
+			sh.array.tuple = name == "items"
 			append(&sh.prefix, ..schemas_of(r, sc, v, name))
 		} else {
 			sh.array.items = read_schema(r, sc, v)
@@ -436,6 +461,7 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 	case "dependentSchemas", "dependentRequired", "dependencies":
 		// An array of names or a schema, as the keyword allows.
 		sh.is_object = true
+		sh.object.dependencies = name == "dependencies"
 		for e in members_of(r, sc, v, name) {
 			names := core.kind(doc, e.v) == .Array
 			switch {
@@ -579,10 +605,15 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 		}
 	case "format":
 		if text, ok := string_of(r, doc, v); ok {
-			if .Format_Assert in sc.vocab && rules.format_of(text) == .None {
+			format := rules.format_of(text)
+			asserts := .Format_Assert in sc.vocab || r.res.format_assert
+			// Only the 2020-12 format-assertion vocabulary refuses a format it cannot judge. The option and the
+			// 2019-09 format vocabulary leave it an annotation, as the suite's optional format tests ask.
+			if format == .None && .Format_Assert in sc.vocab && sc.draft >= .D2020_12 {
 				fail(r, site, name, "is a format no check judges, which the format-assertion vocabulary refuses")
 			}
-			n.rules.format, n.rules.assert_format = keep(r, text), .Format_Assert in sc.vocab
+			n.rules.format, n.rules.format_foreign = keep(r, text), FORMAT_DRAFTS[format] > sc.draft
+			n.rules.assert_format = asserts && !n.rules.format_foreign
 		} else {
 			fail(r, site, name, "must be a string")
 		}

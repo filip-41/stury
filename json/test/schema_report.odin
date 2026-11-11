@@ -1,5 +1,6 @@
 package json_tests
 
+import "base:runtime"
 import "core:fmt"
 import enc "core:encoding/json"
 import "core:log"
@@ -9,6 +10,7 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import host "../../host"
+import rules "../../core/rules"
 import typed "../../core/typed"
 import write "../../core/write"
 import records "../../core/records"
@@ -41,10 +43,10 @@ bind_text :: proc(t: ^testing.T, s: ^Bound_Schema, text: string, draft := schema
 
 // The basic output of `entries` as JSON text.
 @(private = "file")
-basic_text :: proc(entries: []core.Error_Entry, uri := "", r := write.Report{}) -> string {
+basic_text :: proc(entries: []core.Error_Entry, uri := "", r := write.Report{}, bases: []rules.Base = nil) -> string {
 	tw: write.Tokens
 	write.tokens_init(&tw, json.as(.Json), {}, context.temp_allocator)
-	schema.write_basic(&tw, entries, uri, r)
+	schema.write_basic(&tw, entries, uri, r, bases)
 	text, _ := write.tokens_finish(&tw)
 	return string(text)
 }
@@ -198,6 +200,41 @@ schema_report_locations :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(text), `{"title":"Invalid","status":422,"errors":[{"pointer":"/a~0~1b/1","record":4,"code":"wrong_kind","message":"Value is not of the allowed type, expected integer"},{"pointer":"/c","record":4,"code":"above_maximum","message":"Number is above the maximum, at most 3"}],"truncated":true}`)
 	testing.expect_value(t, basic_text(nil), `{"valid":true}`)
 	typed.sink_destroy(&sink)
+}
+
+// A keyword location names each keyword as the schema wrote it, whatever its draft, and an absolute one starts at the
+// innermost resource that holds the keyword and is left out past a reference.
+@(test)
+schema_report_locations_as_written :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	cases := [?]struct {
+		draft:          schema.Draft,
+		schema_, value: string,
+		want:           string,
+	} {
+		{.D2020_12, `{"$defs": {"a": {"type": "string"}}, "$dynamicRef": "#/$defs/a"}`, `1`, `[{"valid":false,"keywordLocation":"/$dynamicRef/type","instanceLocation":"","error":"Value is not of the allowed type, expected string"}]`},
+		{.D2019_09, `{"$recursiveAnchor": true, "type": "object", "properties": {"c": {"$recursiveRef": "#"}}}`, `{"c": 1}`, `[{"valid":false,"keywordLocation":"/properties/c/$recursiveRef/type","instanceLocation":"/c","error":"Value is not of the allowed type, expected object"}]`},
+		{.D2019_09, `{"type": "object", "properties": {"c": {"$recursiveRef": "#"}}}`, `{"c": 1}`, `[{"valid":false,"keywordLocation":"/properties/c/$recursiveRef/type","instanceLocation":"/c","error":"Value is not of the allowed type, expected object"}]`},
+		{.D07, `{"dependencies": {"a": ["b"], "c": {"required": ["d"]}}}`, `{"a": 1, "c": 1}`, `[{"valid":false,"keywordLocation":"/dependencies","instanceLocation":"","error":"Required member \"b\" is missing"},{"valid":false,"keywordLocation":"/dependencies/c/required","instanceLocation":"","error":"Required member \"d\" is missing"}]`},
+		{.D04, `{"items": [{"type": "string"}], "additionalItems": false}`, `[1, 2]`, `[{"valid":false,"keywordLocation":"/items/0/type","instanceLocation":"/0","error":"Value is not of the allowed type, expected string"},{"valid":false,"keywordLocation":"/additionalItems","instanceLocation":"/1","error":"No value is allowed here"}]`},
+		{.D2020_12, `{"$id": "https://ex.com/r", "$defs": {"t": {"$dynamicAnchor": "T", "type": "string"}}, "items": {"$dynamicRef": "#T"}}`, `[1]`, `[{"valid":false,"keywordLocation":"/items/$dynamicRef/type","instanceLocation":"/0","error":"Value is not of the allowed type, expected string"}]`},
+		{.D07, `{"$id": "http://ex.com/r", "dependencies": {"a": ["b"]}, "items": [{"type": "string"}]}`, `[1]`, `[{"valid":false,"keywordLocation":"/items/0/type","absoluteKeywordLocation":"http://ex.com/r#/items/0/type","instanceLocation":"/0","error":"Value is not of the allowed type, expected string"}]`},
+		{.D2020_12, `{"$id": "https://ex.com/r", "properties": {"n": {"$id": "inner", "properties": {"x": {"type": "string"}}}, "m": {"type": "string"}}}`, `{"n": {"x": 1}, "m": 1}`, `[{"valid":false,"keywordLocation":"/properties/n/properties/x/type","absoluteKeywordLocation":"https://ex.com/inner#/properties/x/type","instanceLocation":"/n/x","error":"Value is not of the allowed type, expected string"},{"valid":false,"keywordLocation":"/properties/m/type","absoluteKeywordLocation":"https://ex.com/r#/properties/m/type","instanceLocation":"/m","error":"Value is not of the allowed type, expected string"}]`},
+	}
+	for c in cases {
+		s: Bound_Schema
+		if !bind_text(t, &s, c.schema_, c.draft) {
+			continue
+		}
+		sink: typed.Sink
+		schema.check(&s.b, transmute([]u8)c.value, &sink)
+		want := strings.concatenate({`{"valid":false,"errors":`, c.want, "}"})
+		testing.expect_value(t, basic_text(sink.entries[:], s.c.description.uri, {}, s.c.description.bases[:]), want)
+		typed.sink_destroy(&sink)
+		schema.unbind(&s.b)
+		schema.destroy(s.c)
+	}
 }
 
 @(private = "file")
@@ -378,6 +415,36 @@ schema_check_records_equal_each_record :: proc(t: ^testing.T) {
 			testing.expectf(t, is_fault == (upto >= 7), "%d lines, one entry, at width %d: %v", upto, pool.runner.threads + 1, err)
 			typed.sink_destroy(&limited)
 		}
+	}
+}
+
+// A check of records in the temp allocator gives back what each record took from it, while the runs and forks of the
+// check serve every record. The temp allocator's block is filled before each check, so what a record takes is in a
+// block of its own that the release frees, which the sanitizer then sees read.
+@(test)
+schema_check_records_forks_outlive_each_record :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	s: Bound_Schema
+	if !bind_text(t, &s, `{"anyOf": [{"type": "object", "required": ["a"]}, {"type": "array", "items": {"anyOf": [{"type": "integer"}, {"type": "object"}]}}]}`) {
+		return
+	}
+	for framing in ([]core.Framing{.Lines, .Concatenated}) {
+		temp_block_fill()
+		count, err := schema.check_records(&s.b, transmute([]u8)string("{\"a\": 1}\n[1, {}]\n{\"a\": [2]}\n[{\"b\": 3}]\n"), framing)
+		testing.expectf(t, count == 4 && err == nil, "%v: %d records, %v", framing, count, err)
+	}
+}
+
+// Takes what is left of the temp allocator's current block, so its next allocation starts a block.
+@(private = "file")
+temp_block_fill :: proc() {
+	arena := &(^runtime.Default_Temp_Allocator)(context.temp_allocator.data).arena
+	if arena.curr_block == nil {
+		_, _ = runtime.mem_alloc_non_zeroed(1, 1, context.temp_allocator)
+	}
+	if left := arena.curr_block.capacity - arena.curr_block.used; left > 0 {
+		_, _ = runtime.mem_alloc_non_zeroed(int(left), 1, context.temp_allocator)
 	}
 }
 

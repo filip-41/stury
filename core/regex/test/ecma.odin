@@ -111,6 +111,13 @@ test_ecma_rules :: proc(t: ^testing.T) {
 		{`\p{sc=Tai_Yo}`, "\U0001e6bf\U0001e700", -1, -1, -1, -1},
 		{`^\p{sc=Tolong_Siki}+$`, "\U00011db0\U00011de9", 0, 8, -1, -1},
 		{`\p{sc=Tolong_Siki}`, "\U00011daf\U00011dea", -1, -1, -1, -1},
+		{`\p{L}`, "\u0c5c", 0, 3, -1, -1}, // the property tables are Unicode 17's
+		{`\p{sc=Han}`, "\U000323b0", 0, 4, -1, -1},
+		{`\p{Ll}`, "\u0295", -1, -1, -1, -1},
+		{`\p{Lo}`, "\u0295", 0, 2, -1, -1},
+		{`\p{Extended_Pictographic}`, "\u2388", -1, -1, -1, -1},
+		{`\p{Extended_Pictographic}`, "\U0001f600", 0, 4, -1, -1},
+		{`(?<\u0c5c>x)`, "x", 0, 1, 0, 1},
 	}
 	for c in cases {
 		f := search(c.pattern, c.text)
@@ -150,6 +157,69 @@ test_ecma_group_names :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_jq_matches_where_oniguruma_does :: proc(t: ^testing.T) {
+	Case :: struct {
+		pattern, text: string,
+		flags:         regex.Flags,
+		lo, hi:        int,
+	}
+	cases := [?]Case {
+		{`$`, "\n", {}, 0, 0}, // a newline that is the whole text ends a line at 0
+		{`\Z`, "\n", {}, 0, 0},
+		{`(?:)\Z`, "\n", {}, 0, 0},
+		{`$`, "\n\n", {}, 1, 1},
+		{`ss$`, "s\u017f", {fold = true}, 0, 3},
+		{`ss$`, "\u017f\u017f", {fold = true}, 0, 4},
+		{`ss\z`, "Ss\u017f", {fold = true}, 1, 4},
+		{"\u00df$", "x\u017fs", {fold = true}, 1, 4},
+	}
+	for c in cases {
+		f := search(c.pattern, c.text, flags = c.flags)
+		testing.expectf(t, f.lo == c.lo && f.hi == c.hi, "%q on %q: %d..%d %s, want %d..%d", c.pattern, c.text, f.lo, f.hi, f.err, c.lo, c.hi)
+	}
+	for pattern in ([?]string{`(?)`, `(?<=(?<=ab?)|)`, `(?<!(?<=ab?)|)`}) {
+		testing.expectf(t, search(pattern, "", flags = {}).err != "", "%q compiled", pattern)
+	}
+	testing.expect(t, search(`(?<=(?<=a+)|)`, "", flags = {}).err == "")
+}
+
+@(test)
+test_jq_reads_unicode_17 :: proc(t: ^testing.T) {
+	// jq 1.8.2 holds Oniguruma's Unicode 16.0, stury Unicode 17.0 under the same names.
+	Case :: struct {
+		pattern, text: string,
+		flags:         regex.Flags,
+		lo, hi:        int,
+	}
+	cases := [?]Case {
+		{`\p{L}`, "\u0c5c", {}, 0, 3},
+		{`\w`, "\u0c5c", {}, 0, 3},
+		{`\p{Lo}`, "\u0295", {}, 0, 2},
+		{`\p{Ll}`, "\u0295", {}, -1, -1},
+		{`\p{Extended_Pictographic}`, "\u2388", {}, -1, -1},
+		{`\p{Unknown}`, "\U00010940", {}, -1, -1}, // Sidetic, a script with no name in Oniguruma 6.9.10
+		{`\x{a7d2}`, "\ua7d3", {fold = true}, 0, 3},
+	}
+	for c in cases {
+		f := search(c.pattern, c.text, flags = c.flags)
+		testing.expectf(t, f.lo == c.lo && f.hi == c.hi, "%q on %q: %d..%d %s, want %d..%d", c.pattern, c.text, f.lo, f.hi, f.err, c.lo, c.hi)
+	}
+}
+
+@(test)
+test_sample_ends_an_empty_repeat :: proc(t: ^testing.T) {
+	arena: virtual.Arena
+	testing.expect(t, virtual.arena_init_growing(&arena) == nil)
+	defer virtual.arena_destroy(&arena)
+	context.allocator = virtual.arena_allocator(&arena)
+	src := regex.Source{state = 1}
+	for pattern in ([?]string{`(?:){2000000000}`, `(?:){9007199254740991}`, `(?:(?:){100000}){100000}`}) {
+		text, ok := regex.sample(pattern, &src, 3, 0)
+		testing.expectf(t, ok && text == "", "%q: %v %q", pattern, ok, text)
+	}
+}
+
+@(test)
 test_regex_jq_group_names :: proc(t: ^testing.T) {
 	// Oniguruma's: a name starts with a word character, and a backslash in it is a backslash.
 	Case :: struct {
@@ -177,6 +247,7 @@ test_ecma_refusals :: proc(t: ^testing.T) {
 		`\u{110000}`, `\p{Nope}`, `\p{scx=Nope}`, `\p{scx}`, `\p{letter}`, `\p{Greek}`, `\p{Word}`, `\p{gc=Greek}`, `(?<1>a)`,
 		`(?<n>a)(?<n>b)`, `(?=a)*`, `^*`, `a**`, `(a`, `a)`, `(?x)`, `\c1`, `\00`, `\-?`, `a+?\-`,
 		`\&`, `\%`, `[\&]`, `[\%]`, `\#`, `\ `, `\!`, `\"`, `\,`, `\:`, `\;`, `\<`, `\=`, `\>`, `\@`, `\~`, `\_`, `\'`, `[\_]`,
+		`\p{=L}`, `\p{gc=}`,
 	}
 	for pattern in refused {
 		testing.expectf(t, search(pattern, "").err != "", "%q compiled", pattern)
@@ -185,6 +256,19 @@ test_ecma_refusals :: proc(t: ^testing.T) {
 	testing.expect_value(t, search(`a\&b`, "").err, "invalid escape \\& at offset 1")
 	testing.expect_value(t, search(`[a\%]`, "").err, "invalid escape \\% at offset 2")
 	testing.expect(t, search(`\&\%[\&\%]`, "", flags = {}).err == "") // jq's Oniguruma keeps them
+}
+
+@(test)
+test_ecma_valid_back_references :: proc(t: ^testing.T) {
+	// As syntax, a back reference names a group the pattern has, before or after it, and a name is an identifier.
+	refused := [?]string{`\1`, `\5`, `(a)\2`, `(a)\10`, `\8`, `\k<a>`, `(?<a>x)\k<b>`, `\k<1>`, `\k<a>x`, `\k`, `\k<>`, `\ka`}
+	for pattern in refused {
+		testing.expectf(t, !regex.valid(pattern, {ecma = true}), "%q is valid", pattern)
+	}
+	accepted := [?]string{`(a)\1`, `\1(a)`, `\k<a>(?<a>x)`, `(?<a>x)\k<a>`, `(?<a>x)\k<\u0061>`, `(?<=a)b`, `(?<!a)b`}
+	for pattern in accepted {
+		testing.expectf(t, regex.valid(pattern, {ecma = true}), "%q is not valid", pattern)
+	}
 }
 
 @(test)
@@ -219,6 +303,21 @@ test_ecma_search_is_linear :: proc(t: ^testing.T) {
 test_ecma_search_is_capped_by_memory :: proc(t: ^testing.T) {
 	text := strings.repeat("x", 1 << 20, context.temp_allocator)
 	testing.expect_value(t, search(`(?:a|b){1000}`, text).err, "fail to memory allocation")
+}
+
+@(test)
+test_ecma_counted_search_is_bounded :: proc(t: ^testing.T) {
+	// Counted repeats that nest multiply the pairs a search visits, and the search gives up within a bound linear in
+	// the program and the text rather than run on.
+	letters := strings.repeat("a", 3_000, context.temp_allocator)
+	text := strings.concatenate({letters, "cbx"}, context.temp_allocator)
+	for pattern in ([?]string{`^(a{1,1000}){1,1000}b`, `^(a{1,1000}?){1,1000}b`, `((a{1,100}){1,100}){1,100}b`, `(?=(?:a{1,200}){1,200})x`}) {
+		for whether in ([?]bool{false, true}) {
+			f := search(pattern, text, whether = whether)
+			testing.expectf(t, f.err == "fail to memory allocation" && f.resumes <= 1 << 27, "%q: %q after %d", pattern, f.err, f.resumes)
+		}
+	}
+	testing.expect_value(t, search(`^(a{1,1000}){1,1000}b`, strings.concatenate({letters[:500], "b"}, context.temp_allocator)).hi, 501)
 }
 
 // A pattern over `a` and `b` drawn from `state`.
@@ -682,6 +781,10 @@ test_jq_automaton_assertions :: proc(t: ^testing.T) {
 		{".", "\n", {}, false},
 		{".", "\n", {dotall = true}, true},
 		{"a b", "ab", {extend = true}, true},
+		{"$", "\n", {}, true},
+		{"ss$", "s\u017f", {fold = true}, true}, // a folded character may be longer than the one it folds to
+		{"ss\\z", "x\u017f\u017f", {fold = true}, true},
+		{"\u00df$", "x\u017fs", {fold = true}, true},
 	}
 	for c in cases {
 		whether := search(c.pattern, c.text, flags = c.flags, whether = true)

@@ -121,16 +121,17 @@ kept :: proc(reg: ^Registry, text: string) -> (string, runtime.Allocator_Error) 
 
 // Makes `value` the default of member `field` of `T`. The load of a text that leaves the member out gives it a copy of
 // `value`. A member with a default is not required. `value` has the member's type, or is a number the member's number
-// type holds exactly, or has the type a `Maybe` member holds. Refuses as `.Invalid_Argument` a member `T` lacks, and as
-// `.Wrong_Kind` naming the member's type any other value. A proc value is a factory's, so a proc member has none.
+// type holds exactly, or has the type a `Maybe` member holds. Refuses as `.Wrong_Kind` naming the member's type any
+// other value. A proc value is a factory's, so a proc member has none. A member `T` lacks is refused by `compile`.
 register_default :: proc(reg: ^Registry, $T: typeid, field: string, value: $V) -> core.Error where !intrinsics.type_is_proc(V) {
-	if !has_member(T, field, nil) {
-		return runtime.Allocator_Error.Invalid_Argument
-	}
-	value := value
-	held, refusal := default_constant(reg, reflect.struct_field_by_name(T, field).type, field, any{&value, typeid_of(V)}) or_return
-	if refusal.kind != .None {
-		return core.error_of(refusal)
+	held: rawptr
+	if has_member(T, field, nil) {
+		value := value
+		refusal: core.Typed_Refusal
+		held, refusal = default_constant(reg, reflect.struct_field_by_name(T, field).type, field, any{&value, typeid_of(V)}) or_return
+		if refusal.kind != .None {
+			return core.error_of(refusal)
+		}
 	}
 	if err := add_default(reg, {T, field, copied_constant, held}); err != nil {
 		return err
@@ -139,10 +140,10 @@ register_default :: proc(reg: ^Registry, $T: typeid, field: string, value: $V) -
 }
 
 // Makes what `make` returns the default of member `field` of `T`, for a default that is not a constant: a fresh map,
-// the time, an id. `make` allocates with the load's allocator. Refuses as `.Invalid_Argument` a member `T` lacks or one
-// of another type.
+// the time, an id. `make` allocates with the load's allocator. Refuses as `.Invalid_Argument` a member of another type,
+// and a member `T` lacks is refused by `compile`.
 register_factory :: proc(reg: ^Registry, $T: typeid, field: string, make: proc(allocator: runtime.Allocator) -> $V) -> runtime.Allocator_Error {
-	if !has_member(T, field, V) {
+	if has_member(T, field, nil) && !has_member(T, field, V) {
 		return .Invalid_Argument
 	}
 	made :: proc(dest, data: rawptr, allocator: runtime.Allocator) -> runtime.Allocator_Error {
@@ -213,6 +214,9 @@ compile :: proc(reg: ^Registry, $T: typeid, checks: typed.Format_Checks, allocat
 	m.customs, hooks, err = carriers_of(reg, reads, allocator)
 	defer delete(hooks, allocator)
 	defaults: []Default_Of
+	if err == nil && reg != nil {
+		err = unknown_member(reg)
+	}
 	if err == nil {
 		defaults, err = copied_defaults(reg, &m.constants)
 	}
@@ -238,6 +242,39 @@ compile :: proc(reg: ^Registry, $T: typeid, checks: typed.Format_Checks, allocat
 	return
 }
 
+// The refusal of the first member a rule, a default, a before or an after of `reg` names that its struct does not have.
+@(private)
+unknown_member :: proc(reg: ^Registry) -> core.Error {
+	refused :: proc(type: typeid, field, item: string) -> core.Error {
+		unknown := core.Typed_Refusal{kind = .Bad_Tag, n_steps = 1}
+		unknown.want = {type, item}
+		unknown.steps[0] = core.Name(field)
+		typed.own_names(&unknown)
+		return core.error_of(unknown)
+	}
+	for x in reg.fields {
+		if !has_member(x.type, x.field, nil) {
+			return refused(x.type, x.field, x.tag)
+		}
+	}
+	for x in reg.loads.defaults {
+		if !has_member(x.type, x.field, nil) {
+			return refused(x.type, x.field, "default")
+		}
+	}
+	for x in reg.befores {
+		if !has_member(x.type, x.field, nil) {
+			return refused(x.type, x.field, "before")
+		}
+	}
+	for x in reg.validators {
+		if len(x.field) > 0 && !has_member(x.type, x.field, nil) {
+			return refused(x.type, x.field, "after")
+		}
+	}
+	return nil
+}
+
 // The plan of `T` with `reg`'s rules, read with `reads`.
 @(private)
 plan_of :: proc(reg: ^Registry, T: typeid, reads: ^typed.Format_Reads, allocator: runtime.Allocator, without: Maybe(typed.Access), whole: ^typed.Plan, layout: Maybe(core.As), hooks: []typed.Type_Hook, defaults: []Default_Of, judging: ^Applied = nil) -> (typed.Plan, core.Error) {
@@ -253,15 +290,6 @@ plan_of :: proc(reg: ^Registry, T: typeid, reads: ^typed.Format_Reads, allocator
 	if whole != nil {
 		// A load's plan settles its structs, and takes the leaves of the plan of every member.
 		c.model.loading, c.model.rule_sets, c.model.leaves = true, whole.rule_sets, whole.leaves
-	}
-	for x in c.reg.fields {
-		if len(x.field) == 0 || reflect.struct_field_by_name(x.type, x.field).name != x.field {
-			unknown := core.Typed_Refusal{kind = .Bad_Tag, n_steps = 1}
-			unknown.want = {x.type, x.tag}
-			unknown.steps[0] = core.Name(x.field)
-			typed.own_names(&unknown)
-			return {}, core.error_of(unknown)
-		}
 	}
 	if refused := enum_rules_refused(c.reg); refused.kind != .None {
 		return {}, core.error_of(refused)

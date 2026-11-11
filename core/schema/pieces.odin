@@ -25,12 +25,8 @@ Elements :: struct {
 @(private)
 elements_of :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads, allocator: runtime.Allocator) -> ^Elements {
 	d := c.description
-	node, hops := d.root, 0
-	for node != rules.NONE && rules.ref_only(&d.nodes[node]) && hops <= len(d.nodes) {
-		node = d.nodes[node].ref.?
-		hops += 1
-	}
-	if node == rules.NONE || hops > len(d.nodes) {
+	node, hops := rules.ref_end(d, d.root)
+	if node == rules.NONE {
 		return nil
 	}
 	n := d.nodes[node]
@@ -85,8 +81,10 @@ elements_of :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads, alloc
 		return nil
 	}
 	path[0] = core.Index(0)
+	hop := d.root
 	for i in 0 ..< hops {
-		words[i] = core.Name("$ref")
+		words[i] = core.Name(rules.ref_keyword(&d.nodes[hop]))
+		hop = d.nodes[hop].ref.?
 	}
 	words[hops] = core.Name("items")
 	e.outer = {path, words}

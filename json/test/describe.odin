@@ -390,7 +390,10 @@ Null_Before :: struct {
 @(private = "file")
 takes_null :: proc(d: ^rules.Description, n: rules.Node_Index) -> bool {
 	node := d.nodes[n]
-	if .Null in node.kinds && node.any_of == nil && node.one_of == nil {
+	if ref, has := node.ref.?; .Null not_in node.kinds || has && !takes_null(d, ref) {
+		return false
+	}
+	if node.any_of == nil && node.one_of == nil {
 		return true
 	}
 	for arm in node.any_of {

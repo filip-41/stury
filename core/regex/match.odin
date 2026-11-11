@@ -90,6 +90,7 @@ Matcher :: struct {
 	seen, good: []u64, // under `Regex.linear`, good for a program with a look-ahead
 	rows:     []int, // under `Regex.linear`, each instruction's first row of the visited set, nil for one row each
 	radix:    []int, // under counter loops, the counts each loop's count is held to
+	budget:   int, // under `Regex.linear`, the alternatives the search may resume (`SEARCH_WORK`)
 	log:      ^[dynamic]u32,
 	looking:  int, // the look-aheads being matched, under `Regex.linear`
 	room:     int, // under `Regex.linear`, the bytes the stack and the log may take beside the sets
@@ -164,12 +165,15 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 	words: int
 	if linear {
 		m.rows, m.radix = re.visited.rows, nil
+		plain, most := total_rows(re, m.rows), MAX_BYTES
 		if re.visited.counters != nil {
-			m.rows, m.radix = counted_rows(re, len(s) + 1, scratch)
+			m.rows, m.radix, plain = counted_rows(re, len(s) + 1, scratch)
+			most = COUNTED_BYTES
 		}
+		m.budget = max(SEARCH_RESUMES, SEARCH_WORK * plain * width) if re.ecma else max(int)
 		rows := total_rows(re, m.rows)
 		words = (rows * width + 63) / 64
-		m.room = visited_room(re, rows, len(s) + 1)
+		m.room = visited_room(re, rows, len(s) + 1, most)
 		if m.room < 0 && re.ecma {
 			return false, MEMORY_ERROR
 		}
@@ -209,9 +213,10 @@ total_rows :: proc(re: ^Regex, rows: []int) -> int {
 }
 
 // The rows of a program with counter loops over `places` places, each loop's count held to what it can reach there:
-// past its least count an iteration that reads nothing fails, so each reads a character.
+// past its least count an iteration that reads nothing fails, so each reads a character. And the rows it would have
+// with one count of each loop.
 @(private = "file")
-counted_rows :: proc(re: ^Regex, places: int, scratch: ^Scratch) -> (rows, radix: []int) {
+counted_rows :: proc(re: ^Regex, places: int, scratch: ^Scratch) -> (rows, radix: []int, plain: int) {
 	v := re.visited
 	n := len(re.insts)
 	resize(&scratch.rows, n + 1 + len(v.counters))
@@ -220,15 +225,30 @@ counted_rows :: proc(re: ^Regex, places: int, scratch: ^Scratch) -> (rows, radix
 		radix[k] = min(c.most, c.least + places) + 1
 	}
 	lay_out_rows(v, rows, radix)
+	for block in v.block {
+		plain += block
+	}
 	return
 }
 
-// The bytes a linear search of `re` with `rows` over `places` places may take beside its sets, negative when the sets
-// alone pass the cap. A jq search past it runs Oniguruma's way, with its retry limit, so the automaton answers a jq
-// search only within it.
+// An ECMA linear search resumes at most SEARCH_WORK alternatives for each pair of its rows, with one count of each
+// counter loop, over its places, and no fewer than SEARCH_RESUMES. Each count of a counter loop multiplies the pairs,
+// and each pair may resume a bounded repeat's every stop, so past this the search ends with MEMORY_ERROR, undecided,
+// and its time stays linear in the program and the text. Its sets under counter loops take at most COUNTED_BYTES with
+// the stack.
 @(private = "file")
-visited_room :: proc(re: ^Regex, rows, places: int) -> int {
-	return MAX_BYTES - (rows * places + 63) / 64 * 8 * (2 if re.visited.owner != nil else 1)
+SEARCH_WORK :: 4
+@(private = "file")
+SEARCH_RESUMES :: 1 << 25
+@(private = "file")
+COUNTED_BYTES :: 1 << 25
+
+// The bytes a linear search of `re` with `rows` over `places` places may take beside its sets within `most`, negative
+// when the sets alone pass it. A jq search past MAX_BYTES runs Oniguruma's way, with its retry limit, so the automaton
+// answers a jq search only within it.
+@(private = "file")
+visited_room :: proc(re: ^Regex, rows, places: int, most := MAX_BYTES) -> int {
+	return most - (rows * places + 63) / 64 * 8 * (2 if re.visited.owner != nil else 1)
 }
 
 // Frees a deep search's array rather than keep it for the next.
@@ -918,6 +938,14 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 			}
 			pc^, pos^ = int(e.pc), e.a
 		case .Give_Back:
+			// Every other entry was pushed at a pair's first visit, so only a bounded repeat's stops, given back or
+			// taken lazily, can outnumber the pairs and spend the budget.
+			when SET {
+				if m.retries >= m.budget {
+					m.err = MEMORY_ERROR
+					return false
+				}
+			}
 			// Back a character, but a repeat that began inside a character stepped a byte at a time until the next
 			// one began, as Oniguruma steps.
 			p := e.a - 1
@@ -933,6 +961,12 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 			}
 			pc^, pos^ = int(e.pc) + 2, p
 		case .Take_More:
+			when SET {
+				if m.retries >= m.budget {
+					m.err = MEMORY_ERROR
+					return false
+				}
+			}
 			rep := m.re.insts[e.pc]
 			next := step(m.re, m.re.insts[e.pc + 1], m.s[:m.limit], e.a)
 			if next < 0 {

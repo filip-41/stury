@@ -8,13 +8,15 @@ import core ".."
 import typed "../typed"
 import write "../write"
 
-// What a dump leaves out besides the write_only members, which it never writes. `exclude_unset` leaves out every member
-// that its struct's `Fields_Set` does not hold, in a struct that has one: what a load took from a default or never read,
-// and every member of a value built in memory whose set is empty. A read_only member, which no load sets, and the members
-// of a struct with no set are kept. `exclude_none` leaves out a member that holds null:
-// a nil `Maybe`, pointer, union, `any` or cstring, a required one too, so the text may not load back. `exclude_defaults`
-// leaves out a member that is not required and equals its default, its zero where it has none. `check` validates what
-// the dump writes first, and a value that fails is `.Check_Failed` and writes nothing.
+// What a dump leaves out besides the write_only members, which it never writes. Each option leaves out only a member a
+// load does not require, so every dump of a valid value loads back. `exclude_unset` leaves out a member that its
+// struct's `Fields_Set` does not hold, in a struct that has one: what a load took from a default or never read, and
+// every such member of a value built in memory whose set is empty. A read_only member, which no load sets, and the
+// members of a struct with no set are kept. `exclude_none` leaves out a member that holds null: a nil `Maybe`, pointer,
+// union, `any` or cstring. `exclude_defaults` leaves out a member that equals its default, its zero where it has none.
+// A CSV or TSV row keeps every column and an empty cell reads back as null, so there the options leave nothing out: a
+// member that holds null is an empty cell, and every other member's value is written. `check` validates
+// what the dump writes first, and a value that fails is `.Check_Failed` and writes nothing.
 Dump_Opts :: struct {
 	exclude_unset:    bool,
 	exclude_none:     bool,
@@ -43,7 +45,8 @@ dump_to :: proc(plan: ^typed.Plan, judging: ^Applied, v: rawptr, opts: Dump_Opts
 	}
 	d := Dumping{omits = {call = omitted}, opts = opts, plan = plan}
 	defer virtual.arena_destroy(&d.defaults)
-	omits := &d.omits if opts.exclude_unset || opts.exclude_none || opts.exclude_defaults else nil
+	flat := plan.as.readers != nil && plan.as.readers.flat
+	omits := &d.omits if !flat && (opts.exclude_unset || opts.exclude_none || opts.exclude_defaults) else nil
 	if opts.check {
 		err := validate_value(plan, v, sink, judging, omits)
 		if f, failed := err.(core.Typed_Error); failed {
@@ -79,14 +82,14 @@ omitted :: proc(o: ^typed.Omits, plan: ^typed.Plan, r: ^typed.Field, at: uintptr
 	if plan != d.plan {
 		return false
 	}
-	if d.opts.exclude_none && write.holds_null(m, r.kind, at) {
-		return true
-	}
 	x := typed.extra_at(plan, r.meta)
-	if d.opts.exclude_unset && write.unset(x, r, at) {
+	if !x.optional {
+		return false
+	}
+	if d.opts.exclude_none && write.holds_null(m, r.kind, at) || d.opts.exclude_unset && write.unset(x, r, at) {
 		return true
 	}
-	if !d.opts.exclude_defaults || !x.optional {
+	if !d.opts.exclude_defaults {
 		return false
 	}
 	held := default_of(d, m, x)

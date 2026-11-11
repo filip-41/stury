@@ -771,7 +771,7 @@ group_name :: proc(p: ^Parser, close: byte) -> (string, bool) {
 }
 
 // An ECMA group name up to `close`, with its `\u` escapes decoded.
-@(private = "file")
+@(private)
 ecma_name :: proc(p: ^Parser, close: byte) -> (string, bool) {
 	b := strings.builder_make()
 	for !at_end(p) && peek(p) != close {
@@ -867,6 +867,7 @@ parse_absent :: proc(p: ^Parser) -> ^Node {
 parse_options :: proc(p: ^Parser) -> ^Node {
 	flags := p.flags
 	neg := false
+	opened := p.i
 	for {
 		if at_end(p) {
 			return fail(p, "end pattern in group")
@@ -885,6 +886,9 @@ parse_options :: proc(p: ^Parser) -> ^Node {
 		case 'm':
 			flags.multiline = !neg
 		case ')':
+			if p.i - 1 == opened {
+				return fail(p, "undefined group option")
+			}
 			p.flags = flags
 			return nil
 		case ':':

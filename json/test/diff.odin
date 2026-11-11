@@ -5,7 +5,6 @@ import "core:math/rand"
 import "core:slice"
 import "core:strings"
 import "core:testing"
-import "core:time"
 import core "../../core"
 import diff "../../core/diff"
 import write "../../core/write"
@@ -661,8 +660,9 @@ diff_keyed_changes_turn_a_into_b :: proc(t: ^testing.T) {
 	}
 }
 
-// Many arrays that each need a long search together stop at the work the diff may spend, report the rest as replaced,
-// and take a bounded time.
+// Many arrays that each need a long search together stop at the work the diff may spend and report the rest as
+// replaced: the first arrays are matched element by element, and every array past the one the work ran out in is one
+// change, so the search ends after a bounded number of arrays whatever their count.
 @(test)
 diff_work_is_bounded_across_arrays :: proc(t: ^testing.T) {
 	sa, sb := strings.builder_make(context.temp_allocator), strings.builder_make(context.temp_allocator)
@@ -692,10 +692,16 @@ diff_work_is_bounded_across_arrays :: proc(t: ^testing.T) {
 	if !a_ok || !b_ok {
 		return
 	}
-	start := time.tick_now()
 	r, _ := diff.values(core.Node_Ref{&a, core.ROOT}, core.Node_Ref{&b, core.ROOT})
 	defer diff.result_destroy(&r)
-	took := time.duration_seconds(time.tick_since(start))
-	testing.expectf(t, r.truncated && len(r.changes) > 0 && took < 10, "truncated %v, %d changes, %v s", r.truncated, len(r.changes), took)
+	matched, replaced := 0, 0
+	for c in r.changes {
+		if len(c.path) == 1 {
+			replaced += 1
+		} else if c.path[1] == core.Index(0) {
+			matched += 1
+		}
+	}
+	testing.expectf(t, r.truncated && matched > 0 && matched + replaced == 120 && replaced > matched, "truncated %v, %d arrays matched, %d replaced", r.truncated, matched, replaced)
 	free_all(context.temp_allocator)
 }

@@ -21,8 +21,9 @@ Email :: distinct string
 Decimal :: distinct core.Number_Text
 
 // A type a model reads from a string, with the rules every value of it has, the kinds and the content encoding its
-// schema names, and its hook. `time.Time` reads RFC 3339 into UTC, a leap second as the second after it, and refuses a
-// time past its range as `.Out_Of_Range`. `uuid.Identifier` writes lowercase.
+// schema names, and its hook. `time.Time` reads RFC 3339 into UTC, a leap second as the second after it. Its pattern
+// refuses a year past 1678 to 2261, in which every offset leaves the time inside the range an `i64` of nanoseconds holds,
+// so the read's own range check never refuses what the pattern passed, and leaves a text with no year to the format. `uuid.Identifier` writes lowercase.
 @(private)
 Carrier :: struct {
 	type:     typeid,
@@ -35,7 +36,7 @@ Carrier :: struct {
 
 @(private, rodata)
 CARRIERS := [?]Carrier {
-	{time.Time, "format=date-time", {.Text}, {.String}, "", {time.Time, time_read, time_write, nil, string}},
+	{time.Time, `format=date-time,pattern=^(?![0-9]{4}-)|^(?:16(?:7[89]|[89][0-9])|1[7-9][0-9]{2}|2[01][0-9]{2}|22(?:[0-5][0-9]|6[01]))-`, {.Text}, {.String}, "", {time.Time, time_read, time_write, nil, string}},
 	{uuid.Identifier, "format=uuid", {.Text}, {.String}, "", {uuid.Identifier, uuid_read, uuid_write, nil, string}},
 	{Email, "format=email", {.Text}, {.String}, "", {}},
 	{Base64, `pattern=^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$`, {.Text}, {.String}, "base64", {Base64, base64_read, base64_write, nil, string}},

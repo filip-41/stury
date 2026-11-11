@@ -218,7 +218,7 @@ read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> 
 			note(r, regs, e, f.at)
 		}
 	}
-	if r.wide && r.sink == nil && (^Check)(r).repeats == .Notice && r.first.kind != .None && r.first.kind != .Walk && r.first.kind != .No_Memory && r.first.kind != .Duplicate_Key && repeat_may_retract(r) {
+	if as_schema(r) && r.sink == nil && (^Check)(r).repeats == .Notice && r.first.kind != .None && r.first.kind != .Walk && r.first.kind != .No_Memory && r.first.kind != .Duplicate_Key && repeat_may_retract(r) {
 		// With no sink the first refusal ends the read, before a later repeat can take it back.
 		r.first = {kind = .Duplicate_Key, at = r.first.at}
 	}
@@ -468,14 +468,14 @@ store_string :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, 
 	return store_span(h, t.lo, u64(t.n), dest)
 }
 
-// Gives the open list room for one more element. A fixed array has no more room.
+// Gives the open list room for one more element. A fixed array or a full fixed list has no more room, which is `.Too_Many`.
 @(cold)
 grow_list :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs) -> (core.Hook_Regs, core.Typed_Error_Kind) {
 	context = h.ctx
 	f := &h.frames[h.sp - 1]
 	owner := frame_owner(f)
 	if owner.kind == .Array || owner.kind == .Fixed_List {
-		return regs, .Wrong_Length
+		return regs, .Too_Many
 	}
 	m := &h.plan.meta[owner.meta]
 	stride := u64(m.elem_size)
@@ -579,7 +579,7 @@ close_read :: proc "contextless" (h: ^$H, f: ^Frame, own, owner: ^Field, regs: c
 		}
 	case .Array:
 		if regs.c != regs.a {
-			return refuse(h, back, core.Typed_Refusal{kind = .Wrong_Length, at = t.lo}, t.lo + u64(t.n))
+			return refuse(h, back, core.Typed_Refusal{kind = .Too_Few, at = t.lo}, t.lo + u64(t.n))
 		}
 	case .Slice, .Dynamic, .Fixed_List:
 		publish_list(h, f, owner, regs.a, regs.c, false)

@@ -162,6 +162,18 @@
 
 ### Library API
 
+- A model's dump options leave out only a member a load does not require, so every dump of a valid value loads back. A
+  CSV or TSV dump writes every member, a null as an empty cell.
+- A CSV or TSV cell `""""` reads as the string `"`, through a model too.
+- A tagged union's arm in `model.schema` holds its tag as a `const` member it requires, in the Load and the Dump
+  schema. A union of one arm is that arm, and a fixed array is `items` with `minItems` and `maxItems`.
+- `model.schema` of a `time.Time` member holds the years the type holds in its `pattern`.
+- `schema.write_odin` writes a `number` whose bounds a double does not hold as `core.Number_Text`, which a model reads
+  at any size, a distinct type of it included. A model's `core.Number_Text` member takes null unless tagged
+  `not_null`.
+- `schema.compile_description` returns a `^Compiled` and an error, as `schema.compile` does, which `schema.destroy`
+  frees.
+
 - `json.load_schema(text, opts)` takes `json.Schema_Options`: the default draft (`json.Schema_Draft`), the directory
   references are read from (`refs`), `format_assert`, `base` and `dups`. `json.Schema` is `schema.Compiled`, so a
   loaded schema's description is `s.description`.
@@ -295,6 +307,17 @@
   `load`, `load_value` and `read` take `Load_Opts` in place of `dups`.
 
 ### Errors
+
+- A model and its schema refuse a value with the same kind, under the schema's names. A number past a bound is
+  `.Above_Maximum` or `.Below_Minimum`, in a plain `unmarshal` too, where it was `.Out_Of_Range`, which stays for a map
+  key that spells no integer and a `cstring` holding NUL. A fixed array or a capacity given too few or too many values
+  is `.Too_Few` or `.Too_Many`, where it was `.Wrong_Length`. A member `read_only` or unknown under `Extra.Forbid` is
+  `.Not_Allowed`, and `.Read_Only` is gone. A model's union that no arm takes is `.No_Arm`, where it was `.Missing_Tag`,
+  `.Not_A_Member` or `.Wrong_Kind`, and a model's map key that fails its rule is `.No_Match` at the map. A tag member a
+  struct of the union also holds is `.Bad_Tag`, where it was `.Unsupported`.
+- `model.register_default`, `register_factory`, `register_before` and `register_after` naming a member the type does
+  not have are refused by `model.compile` as `.Bad_Tag`, naming the type and the member. `register_factory` refuses a
+  factory of another type at once as `.Invalid_Argument`.
 
 - `.Check_Failed` is a value a model's dump checked and found against its rules, with the first failure's code.
 - `.Bad_Option` carries its reason in `want.text`, which render writes. A model's plan given to `unmarshal` or

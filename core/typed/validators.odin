@@ -123,28 +123,13 @@ failed_under :: proc(entries: []core.Error_Entry, path: []core.Step, name: strin
 			break
 		}
 		for s, i in path {
-			if !same_step(p[i], s) {
+			if p[i] != s {
 				return false
 			}
 		}
-		if len(p) > len(path) && (name == "" || same_step(p[len(path)], core.Name(name))) {
+		if len(p) > len(path) && (name == "" || p[len(path)] == core.Name(name)) {
 			return true
 		}
-	}
-	return false
-}
-
-@(private)
-same_step :: proc(a, b: core.Step) -> bool {
-	switch x in a {
-	case core.Name:
-		y, ok := b.(core.Name)
-		return ok && x == y
-	case core.Index:
-		y, ok := b.(core.Index)
-		return ok && x == y
-	case core.All, core.Slice, core.Descend, core.Index_Or_Name:
-		return false
 	}
 	return false
 }

@@ -82,6 +82,10 @@ LIMITS := [8][2]string {
 @(private)
 F32_PAST :: "340282356779733661637539395458142568448"
 
+// The least decimal that rounds to an f64 infinity, `2^1024 - 2^970`.
+@(private)
+F64_PAST :: "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497792"
+
 // The record a value at record `at` is read by once its `Maybe`s and pointers are passed, and whether one of them
 // takes null.
 @(private)
@@ -94,28 +98,39 @@ target :: proc(plan: ^typed.Plan, at: i32) -> (i32, bool) {
 	return at, nullable
 }
 
-// The node of the value at `record`, with the record's rules unless they sit on the edge of the member it is. An arm
-// takes no null of its own: the union reads null.
+// The member a tagged union names a struct arm by, and the arm's name.
 @(private)
-node_of :: proc(r: ^Reading, record: i32, ruled := true, arm := false) -> rules.Node_Index {
+Arm_Tag :: struct {
+	member, name: string,
+}
+
+// The node of the value at `record`, with the record's rules unless they sit on the edge of the member it is. An arm
+// takes no null of its own: the union reads null. A struct arm a union names by `tag` gets a node of its own, whose
+// object requires the tag member and holds the arm's name in it.
+@(private)
+node_of :: proc(r: ^Reading, record: i32, ruled := true, arm := false, tag := Arm_Tag{}) -> rules.Node_Index {
 	at, nullable := target(r.plan, record)
 	nullable &&= !arm
 	f, m := r.plan.fields[at], r.plan.meta[at]
 	takes_null := nullable || f.kind == .Union && !m.no_nil
 	use := Use{m.type, takes_null, m.rule_set if ruled else 0}
-	if found, ok := r.nodes[use]; ok {
+	if found, ok := r.nodes[use]; ok && tag.member == "" {
 		return found
 	}
 	index := add(r, &r.d.nodes, rules.Node{array = -1, object = -1})
-	if _, failed := map_insert(&r.nodes, use, index); failed != nil || r.failed {
-		r.failed = true
+	if tag.member == "" {
+		if _, failed := map_insert(&r.nodes, use, index); failed != nil {
+			r.failed = true
+		}
+	}
+	if r.failed {
 		return 0
 	}
 	n := rules.Node{array = -1, object = -1}
 	#partial switch f.kind {
 	case .Slice, .Dynamic, .Array, .Fixed_List, .Bit_Set:
 		n.kinds = {.Array}
-		n.array = array_of(r, f.kind, m)
+		n.array = array_of(r, m)
 		if f.kind == .Array {
 			n.rules.min_items, n.rules.max_items = u64(m.count), u64(m.count)
 		} else if f.kind == .Fixed_List {
@@ -123,11 +138,16 @@ node_of :: proc(r: ^Reading, record: i32, ruled := true, arm := false) -> rules.
 		}
 	case .Map, .Struct, .Required:
 		n.kinds = {.Object}
-		n.object = object_of(r, m, f.kind == .Map)
+		n.object = object_of(r, m, f.kind == .Map, tag)
 	case .Union:
 		n.kinds = rules.EVERY_KIND
-		n.any_of = arms_of(r, m, takes_null)
-		if one_match(r.judging, m.type) {
+		n.any_of = arms_of(r, at, takes_null)
+		if len(n.any_of) == 1 {
+			// One arm is the union's value itself.
+			n.ref = n.any_of[0]
+			delete(n.any_of)
+			n.any_of = nil
+		} else if one_match(r.judging, m.type) {
 			n.one_of, n.any_of = n.any_of, nil
 		}
 	case:
@@ -173,10 +193,14 @@ leaf :: proc(r: ^Reading, kind: typed.Read_Kind, m: typed.Meta, hook_data: rawpt
 	case .F32:
 		n.kinds = {.Number}
 		n.rules = {minimum = "-" + F32_PAST, maximum = F32_PAST, exclusive_minimum = true, exclusive_maximum = true}
-	case .F64, .Number:
+	case .F64:
+		n.kinds = {.Number}
+		n.rules = {minimum = "-" + F64_PAST, maximum = F64_PAST, exclusive_minimum = true, exclusive_maximum = true}
+	case .Number:
 		n.kinds = {.Number}
 	case .Number_Text:
-		n.kinds = {.Number, .Null}
+		// The empty text reads from null, unless the member is `not_null`.
+		n.kinds = {.Number} if m.no_nil else {.Number, .Null}
 	case .Scalar:
 		n.kinds = {.Null, .Bool, .Number, .String}
 	case .Enum, .Bit_Elem:
@@ -219,7 +243,7 @@ carrier_node :: proc(r: ^Reading, plan: ^typed.Plan) -> rules.Node {
 }
 
 @(private)
-array_of :: proc(r: ^Reading, kind: typed.Read_Kind, m: typed.Meta) -> i32 {
+array_of :: proc(r: ^Reading, m: typed.Meta) -> i32 {
 	at, fresh := shape(r, m.block, &r.d.arrays, rules.Array{})
 	if !fresh {
 		return at
@@ -233,22 +257,19 @@ array_of :: proc(r: ^Reading, kind: typed.Read_Kind, m: typed.Meta) -> i32 {
 	if r.failed {
 		return at
 	}
-	a := &r.d.arrays[at]
-	a.items = items
-	if kind == .Array {
-		prefix, failed := make([]rules.Node_Index, m.count)
-		a.prefix = prefix
-		r.failed ||= failed != nil
-		for &x in prefix {
-			x = items
-		}
-	}
+	r.d.arrays[at].items = items
 	return at
 }
 
 @(private)
-object_of :: proc(r: ^Reading, m: typed.Meta, is_map: bool) -> i32 {
-	at, fresh := shape(r, m.block, &r.d.objects, rules.Object{additional = rules.NONE, keys = rules.NONE})
+object_of :: proc(r: ^Reading, m: typed.Meta, is_map: bool, tag := Arm_Tag{}) -> i32 {
+	empty := rules.Object{additional = rules.NONE, keys = rules.NONE}
+	at, fresh := i32(0), false
+	if tag.member == "" {
+		at, fresh = shape(r, m.block, &r.d.objects, empty)
+	} else {
+		at, fresh = i32(add(r, &r.d.objects, empty)), !r.failed
+	}
 	if !fresh {
 		return at
 	}
@@ -263,8 +284,12 @@ object_of :: proc(r: ^Reading, m: typed.Meta, is_map: bool) -> i32 {
 		}
 		return at
 	}
-	members, failed := make([dynamic]rules.Member, 0, m.members)
+	members, failed := make([dynamic]rules.Member, 0, m.members + (1 if tag.member != "" else 0))
 	r.failed ||= failed != nil
+	if tag.member != "" {
+		named := add(r, &r.d.nodes, rules.Node{kinds = rules.EVERY_KIND, const_of = tag.name, array = -1, object = -1})
+		append(&members, rules.Member{name = tag.member, node = named, required = true})
+	}
 	required := r.plan.meta[m.block + m.members].required
 	forbids := typed.extra_at(r.plan, u32(m.block + m.members)).forbid
 	for j in 0 ..< m.members {
@@ -276,7 +301,10 @@ object_of :: proc(r: ^Reading, m: typed.Meta, is_map: bool) -> i32 {
 		x := rules.Member{name = r.plan.meta[record].name}
 		if role == .Read_Only && r.direction == .Load {
 			// A load skips the member, so any value passes, or refuses it where the struct forbids what it does not name.
-			x.node = add(r, &r.d.nodes, rules.Node{kinds = {} if forbids else rules.EVERY_KIND, array = -1, object = -1})
+			x.node = add(r, &r.d.nodes, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1})
+			if forbids {
+				x.node = add(r, &r.d.nodes, rules.Node{kinds = rules.EVERY_KIND, not = x.node, array = -1, object = -1})
+			}
 		} else {
 			x.node = node_of(r, record, false)
 			folded, _ := target(r.plan, record)
@@ -304,12 +332,14 @@ object_of :: proc(r: ^Reading, m: typed.Meta, is_map: bool) -> i32 {
 }
 
 @(private)
-arms_of :: proc(r: ^Reading, m: typed.Meta, null: bool) -> []rules.Node_Index {
+arms_of :: proc(r: ^Reading, union_at: i32, null: bool) -> []rules.Node_Index {
+	m := r.plan.meta[union_at]
 	arms, failed := make([]rules.Node_Index, len(m.arms) + (1 if null else 0))
 	r.failed ||= failed != nil
 	for arm, k in m.arms {
+		tag := Arm_Tag{typed.extra_at(r.plan, u32(union_at)).union_tag, arm.name} if m.tagged && arm.name != "" else {}
 		// An arm's record holds the union's rules, with the arm type's own merged in when it has some.
-		arms[k] = node_of(r, arm.fields, r.plan.meta[arm.fields].rule_set != m.rule_set, true)
+		arms[k] = node_of(r, arm.fields, r.plan.meta[arm.fields].rule_set != m.rule_set, true, tag)
 	}
 	if null && !r.failed {
 		arms[len(m.arms)] = add(r, &r.d.nodes, rules.Node{kinds = {.Null}, array = -1, object = -1})

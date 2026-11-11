@@ -504,12 +504,6 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells_Of($H), regs: core.H
 	context = h.r.ctx
 	next := regs
 	next.b += u64(col.step)
-	if col.kind == .String && t.spelling == core.SPELLING_DECODE | core.SPELLING_QUOTED | SPELLING_DOUBLED && regs.c < regs.a {
-		if store_undoubled(&h.r, t, uintptr(regs.c) + uintptr(col.offset)) {
-			next.c += u64(col.stride)
-			return next, .Next
-		}
-	}
 	at := core.Hook_Regs{regs.a, u64(uintptr(col.rec)), regs.c}
 	#partial switch col.kind {
 	case .Inside:
@@ -621,7 +615,7 @@ judge_cell :: proc(c: ^typed.Check, regs: core.Hook_Regs, t: core.Token, fld: ^t
 	}
 	token := t
 	token.kind = .String
-	if leaf.kind >= .I8 && leaf.kind <= .F64 {
+	if leaf.kind >= .I8 && leaf.kind <= .F64 || leaf.kind == .Number_Text {
 		text := inner_text(c, t)
 		lo := u64(uintptr(raw_data(text)) - uintptr(raw_data(c.src)))
 		_, integer, _, _ := spell.number_loose(c.src, lo, lo + u64(len(text)))
@@ -816,6 +810,15 @@ read_cell :: proc(r: ^$R, fld: ^typed.Field, t: core.Token, dest: uintptr) -> co
 		return reason
 	case .Cstring:
 		return typed.store_cstring(r, cell, dest)
+	case .Number_Text:
+		text := inner_text(r, t)
+		lo := u64(uintptr(raw_data(text)) - uintptr(raw_data(r.src)))
+		if _, _, _, ok := spell.number_loose(r.src, lo, lo + u64(len(text))); !ok {
+			return .Wrong_Kind
+		}
+		n := (^core.Number_Text)(dest)
+		typed.store_string(r, {lo = lo, n = u32(len(text))}, &n.text) or_return
+		n.double = core.text_f64(n.text)
 	case .Hook:
 		return typed.store_whole(r, fld, m, dest, .String, t.lo, t.lo + u64(t.n), cell)
 	case .Maybe, .Union:
@@ -953,9 +956,10 @@ columns_of :: proc(h: ^Cells_Of($H), regs: core.Hook_Regs, at: u64, from: int) -
 		if record && k < 0 && refusing {
 			// A read_only member's name is refused only where the struct forbids the names it does not read.
 			x := typed.extra_at(plan, row.meta)
-			kind := core.Typed_Error_Kind.Unknown_Field if h.r.refuse_unknown || x.forbid else .None
+			// A model's struct that forbids them refuses them as its schema does.
+			kind := core.Typed_Error_Kind.Not_Allowed if x.forbid else .Unknown_Field if h.r.refuse_unknown else .None
 			if typed.read_only_key(plan.meta[row.meta].model, name) {
-				kind = .Read_Only if x.forbid else .None
+				kind = .Not_Allowed if x.forbid else .None
 			}
 			if kind != .None && refuse_header(h, regs, kind, key.lo, spelled) == .Stop {
 				return .Stop
@@ -1105,7 +1109,7 @@ not_flat :: proc(steps: []core.Step) -> (e: core.Typed_Refusal) {
 cell_supported :: proc(plan: ^typed.Plan, f: ^typed.Field) -> bool {
 	inner: ^typed.Field
 	#partial switch f.kind {
-	case .String, .Bool, .Bool_Wide, .I8 ..= .U64, .F32, .F64, .Enum, .Cstring, .Hook:
+	case .String, .Bool, .Bool_Wide, .I8 ..= .U64, .F32, .F64, .Enum, .Cstring, .Number_Text, .Hook:
 		return true
 	case .Before:
 		return cell_supported(plan, &typed.extra_at(plan, f.meta).before.field)

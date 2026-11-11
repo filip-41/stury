@@ -99,7 +99,8 @@ schema_open :: proc(s: Schema_Options, src: Source, option := "--schema") -> ^Sc
 	sc := schema_read(s, option)
 	err: core.Error
 	if sc.bound, err = schema.bind(sc.compiled, {dsv.checks_for(src.as), src.as}); err != nil {
-		usage_error("%s %s: %s", option, s.file, edit_error_text(sc.text, err))
+		message.write_stderr("stury: error: %s %s: %s\n", option, s.file, edit_error_text(sc.text, err))
+		os.exit(EXIT_USAGE)
 	}
 	return sc
 }
@@ -299,7 +300,7 @@ report :: proc(sc: ^Schema_Check, s: Schema_Options, file: string, entries: []co
 	write.tokens_init(&t, json.as(.Json), {}, context.temp_allocator)
 	r := write.Report{file = file, records = records, truncated = truncated}
 	if s.report == .Basic {
-		schema.write_basic(&t, entries, report_uri(sc), r)
+		schema.write_basic(&t, entries, report_uri(sc), r, sc.compiled.description.bases[:])
 	} else {
 		model.write_problem(&t, entries, {title = "Invalid input", status = 422}, r)
 	}

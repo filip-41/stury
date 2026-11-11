@@ -1,6 +1,7 @@
 package schema
 
 import "core:strings"
+import "../rules"
 
 // The drafts the reader takes, oldest first. A schema is read into one form whatever its draft: `definitions` is
 // `$defs`, a tuple `items` is `prefixItems`, `additionalItems` is `items`, `dependencies` is `dependentRequired` and
@@ -82,6 +83,31 @@ vocabulary_of :: proc(uri: string) -> (set: Vocabs, known: bool) {
 		}
 	}
 	return
+}
+
+// The first draft that defines each format.
+@(private, rodata)
+FORMAT_DRAFTS := [rules.String_Format]Draft {
+	.None                  = .D04,
+	.Date_Time             = .D04,
+	.Date                  = .D07,
+	.Time                  = .D07,
+	.Duration              = .D2019_09,
+	.Email                 = .D04,
+	.Idn_Email             = .D07,
+	.Hostname              = .D04,
+	.Idn_Hostname          = .D07,
+	.Ipv4                  = .D04,
+	.Ipv6                  = .D04,
+	.Uri                   = .D04,
+	.Uri_Reference         = .D06,
+	.Iri                   = .D07,
+	.Iri_Reference         = .D07,
+	.Uri_Template          = .D06,
+	.Uuid                  = .D2019_09,
+	.Json_Pointer          = .D06,
+	.Relative_Json_Pointer = .D07,
+	.Regex                 = .D07,
 }
 
 // A keyword of the drafts from `first` to `last`, and the vocabulary it belongs to. A keyword in a draft that has no

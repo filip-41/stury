@@ -67,6 +67,9 @@ resolve_refs :: proc(p: ^Parser, referenced: []bool) {
 				fail(p, "invalid backref number/name")
 				return
 			}
+		} else if p.flags.ecma && !slice.contains(p.names[1:], n.name) {
+			fail(p, "invalid named reference")
+			return
 		}
 		if n.kind == .Cond {
 			referenced[n.group] = true

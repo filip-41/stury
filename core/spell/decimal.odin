@@ -128,6 +128,47 @@ write_point :: proc(b: ^strings.Builder, d: Decimal, offset: i128 = 0) {
 	}
 }
 
+// The most zeros a decimal writes beside its digits before it takes an exponent.
+@(private)
+PLAIN_ZEROS :: 20
+
+// Writes `d` as a JSON number: in plain digits when that takes at most `PLAIN_ZEROS` zeros beside them, else as one digit,
+// the rest after a point, and an exponent.
+write_decimal :: proc(b: ^strings.Builder, d: Decimal) {
+	if d.head == "" {
+		strings.write_byte(b, '0')
+		return
+	}
+	if d.neg {
+		strings.write_byte(b, '-')
+	}
+	digits := strings.concatenate({d.head, d.tail}, context.temp_allocator)
+	n := i128(len(digits))
+	if d.wide == "" && -PLAIN_ZEROS <= d.point && d.point <= n + PLAIN_ZEROS {
+		switch {
+		case d.point <= 0:
+			strings.write_string(b, "0.")
+			strings.write_string(b, strings.repeat("0", int(-d.point), context.temp_allocator))
+			strings.write_string(b, digits)
+		case d.point >= n:
+			strings.write_string(b, digits)
+			strings.write_string(b, strings.repeat("0", int(d.point - n), context.temp_allocator))
+		case:
+			strings.write_string(b, digits[:d.point])
+			strings.write_byte(b, '.')
+			strings.write_string(b, digits[d.point:])
+		}
+		return
+	}
+	strings.write_byte(b, digits[0])
+	if n > 1 {
+		strings.write_byte(b, '.')
+		strings.write_string(b, digits[1:])
+	}
+	strings.write_byte(b, 'e')
+	write_point(b, d, -1)
+}
+
 @(private)
 write_i128 :: proc(b: ^strings.Builder, n: i128) {
 	buf: [41]u8

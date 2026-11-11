@@ -8,7 +8,6 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:testing"
-import "core:time"
 import regex "../../core/regex"
 import core "../../core"
 import compose "../../core/compose"
@@ -328,8 +327,9 @@ schema_binds_shapes :: proc(t: ^testing.T) {
 	b, berr := schema.bind(c, json.checks(.Json))
 	defer schema.unbind(&b)
 	testing.expect(t, berr == nil)
-	c2 := schema.compile_description(&d)
-	b2, berr2 := schema.bind(&c2, json.checks(.Json))
+	c2, _ := schema.compile_description(&d)
+	defer schema.destroy(c2)
+	b2, berr2 := schema.bind(c2, json.checks(.Json))
 	defer schema.unbind(&b2)
 	testing.expect(t, berr2 == nil)
 }
@@ -465,8 +465,8 @@ format_patterns_agree_with_their_checks :: proc(t: ^testing.T) {
 	log.infof("format patterns: %d strings judged alike", judged)
 }
 
-// `format` annotates unless the compile asks for it or the schema's meta-schema holds the format-assertion vocabulary,
-// and a name no checker knows annotates under the option and is a schema error under the vocabulary.
+// `format` annotates unless the compile asks for it or the schema's meta-schema requires format assertion: the
+// format-assertion vocabulary, or in 2019-09 the format vocabulary. A format of a later draft than the schema's annotates.
 @(test)
 schema_format_asserts_on_request :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
@@ -481,8 +481,11 @@ schema_format_asserts_on_request :: proc(t: ^testing.T) {
 		{`{"format": "ipv4"}`, true, `"nope"`, false},
 		{`{"format": "ipv4"}`, true, `"10.0.0.1"`, true},
 		{`{"format": "ipv4"}`, true, `7`, true},
-		{`{"format": "no-such-format"}`, true, `"nope"`, true},
 		{`{"$schema": "meta-format-assertion.json", "format": "ipv4"}`, false, `"nope"`, false},
+		{`{"$schema": "meta-format-2019.json", "format": "ipv4"}`, false, `"nope"`, false},
+		{`{"$schema": "http://json-schema.org/draft-04/schema#", "format": "date"}`, true, `"nope"`, true},
+		{`{"$schema": "http://json-schema.org/draft-07/schema#", "format": "date"}`, true, `"nope"`, false},
+		{`{"$schema": "http://json-schema.org/draft-07/schema#", "format": "duration"}`, true, `"nope"`, true},
 		{`{"$schema": "meta-format-assertion.json", "format": "ipv4"}`, false, `"10.0.0.1"`, true},
 		{`{"properties": {"a": {"format": "date-time"}}}`, true, `{"a": "1985-04-12T23:20:50.123456789012Z"}`, true},
 		{`{"properties": {"a": {"format": "uuid"}}}`, true, `{"a": "2eb8aa08-aa98-11ea-b4aa-73b441d16380"}`, true},
@@ -524,14 +527,27 @@ schema_format_asserts_on_request :: proc(t: ^testing.T) {
 	}
 }
 
+// A format no check judges is refused by the format-assertion vocabulary, and only annotates under the option.
 @(test)
-schema_unknown_format_refused_under_assertion_vocabulary :: proc(t: ^testing.T) {
+schema_unknown_format_refused_by_the_vocabulary :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
-	doc, built := core.build(transmute([]u8)string(`{"$schema": "meta-format-assertion.json", "format": "no-such-format"}`), json.as(.Json))
-	testing.expect(t, built == nil)
-	_, err := schema.compile(core.span(&doc, core.ROOT), json.as(.Json), {refs = FIXTURES})
-	testing.expect(t, err != nil)
+	for c in ([?]struct {
+		text:    string,
+		assert_: bool,
+		refused: bool,
+	}{{`{"$schema": "meta-format-assertion.json", "format": "no-such-format"}`, false, true}, {`{"format": "no-such-format"}`, true, false}}) {
+		doc, built := core.build(transmute([]u8)c.text, json.as(.Json))
+		testing.expect(t, built == nil)
+		compiled, err := schema.compile(core.span(&doc, core.ROOT), json.as(.Json), {refs = FIXTURES, format_assert = c.assert_})
+		testing.expectf(t, (err != nil) == c.refused, "%s", c.text)
+		if err != nil {
+			continue
+		}
+		b, bound := schema.bind(compiled, json.checks(.Json))
+		testing.expectf(t, bound == nil, "%s: %v", c.text, bound)
+		testing.expectf(t, schema.valid(&b, transmute([]u8)string(`"x"`)), "%s", c.text)
+	}
 }
 
 // A failure's entry holds where it is, the path to its value, and the keywords that lead to its rule.
@@ -621,7 +637,7 @@ schema_check_reports_arms :: proc(t: ^testing.T) {
 		core.render_entry(strings.to_stream(&out), src, e)
 		strings.write_byte(&out, '\n')
 	}
-	testing.expect_value(t, strings.to_string(out), "1:1: Required member \"q\" is missing (.dependentRequired)\n1:1: Value passes the subschema that not refuses (.not)\n1:7: Number is below the minimum, at least 2 at .a (.properties.a.allOf[0].minimum)\n1:7: Value passes none of the subschemas at .a (.properties.a.anyOf)\n1:16: Value is not of the allowed type, expected integer at .xy (.patternProperties.\"^x\".type)\n1:26: Elements are not unique at .l (.properties.l.uniqueItems)\n1:26: Too few elements or members at .l (.properties.l.contains)\n")
+	testing.expect_value(t, strings.to_string(out), "1:1: Required member \"q\" is missing (.dependentRequired)\n1:1: Value passes the subschema that not refuses (.not)\n1:7: Number is below the minimum, at least 2 at .a (.properties.a.allOf[0].minimum)\n1:7: Value passes none of the subschemas at .a (.properties.a.anyOf)\n1:16: Value is not of the allowed type, expected integer at .xy (.patternProperties.\"^x\".type)\n1:26: Elements are not unique at .l (.properties.l.uniqueItems)\n1:26: Too few elements pass contains, at least 1 at .l (.properties.l.contains)\n")
 }
 
 // A fixed evaluated set becomes the node's own additional members or items and a dynamic one stays an arm, and either
@@ -770,40 +786,48 @@ shared_chain :: proc(kind, leaf: string, levels: int) -> string {
 	return strings.to_string(b)
 }
 
-// Arms that name one subschema many times judge a value by it once, so a chain of them checks in time linear in its
-// length, with a sink or none, whether the value is a scalar or a container.
+// Arms that name one subschema many times judge a value by it once, so a chain of them checks in runs linear in its
+// length, with a sink or none, whether the value is a scalar or a container. An unevaluated rule over the chain reads
+// each subschema's evaluated members once however many arms reach it, which a chain this long only finishes by.
 @(test)
 schema_shared_arms_linear :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	cases := [?]struct {
 		kind, leaf, value: string,
-		valid:             bool,
+		valid, unevaluated: bool,
 		levels:            int,
 	} {
-		{"if", `{"type": "string"}`, `1`, false, 40},
-		{"if", `{"type": "array", "items": {"type": "integer"}}`, `[1, "x"]`, false, 40},
-		{"if", `{"type": "array"}`, `[1]`, true, 40},
-		{"anyOf", `{"type": "integer"}`, `1`, true, 40},
-		{"anyOf", `{"type": "string"}`, `1`, false, 40},
-		{"anyOf", `{"type": "array"}`, `[1]`, true, 40},
-		{"oneOf", `{"type": "integer"}`, `1`, true, 40},
-		{"oneOf", `{"type": "array"}`, `[1]`, true, 40},
+		{"if", `{"type": "string"}`, `1`, false, false, 40},
+		{"if", `{"type": "array", "items": {"type": "integer"}}`, `[1, "x"]`, false, false, 40},
+		{"if", `{"type": "array"}`, `[1]`, true, false, 40},
+		{"anyOf", `{"type": "integer"}`, `1`, true, false, 40},
+		{"anyOf", `{"type": "string"}`, `1`, false, false, 40},
+		{"anyOf", `{"type": "array"}`, `[1]`, true, false, 40},
+		{"oneOf", `{"type": "integer"}`, `1`, true, false, 40},
+		{"oneOf", `{"type": "array"}`, `[1]`, true, false, 40},
 		// A plan inlines each `allOf`, so this chain is shorter.
-		{"allOf", `{"type": "string"}`, `1`, false, 17},
+		{"allOf", `{"type": "string"}`, `1`, false, false, 17},
+		{"anyOf", `{"properties": {"a": true}}`, `{"a": 1}`, true, true, 60},
+		{"anyOf", `{"properties": {"a": true}}`, `{"a": 1, "b": 2}`, false, true, 60},
 	}
 	for c in cases {
-		ch, err := checked_make(shared_chain(c.kind, c.leaf, c.levels))
+		text := shared_chain(c.kind, c.leaf, c.levels)
+		if c.unevaluated {
+			text = fmt.tprintf(`{{"unevaluatedProperties": false, %s`, text[1:])
+		}
+		ch, err := checked_make(text)
 		if !testing.expectf(t, err == nil, "%s: %v", c.kind, err) {
 			continue
 		}
 		for max_errors in ([?]int{-1, 5}) {
-			start := time.tick_now()
+			checker: typed.Checker
 			sink := typed.Sink{max_errors = max(max_errors, 0)}
-			got := schema.check(&ch.bound, transmute([]u8)c.value, &sink if max_errors >= 0 else nil)
-			took := time.tick_since(start)
+			got := schema.check(&ch.bound, transmute([]u8)c.value, &sink if max_errors >= 0 else nil, checker = &checker)
+			opened, made := checker.pool.opened, checker.pool.made
+			typed.checker_destroy(&checker)
 			typed.sink_destroy(&sink)
 			testing.expectf(t, (got == nil) == c.valid, "%s %s on %s with %d errors: %v", c.kind, c.leaf, c.value, max_errors, got)
-			testing.expectf(t, took < 40 * time.Millisecond, "%s %s on %s with %d errors: %v", c.kind, c.leaf, c.value, max_errors, took)
+			testing.expectf(t, opened <= u64(8 * c.levels) && made <= 8 * c.levels, "%s %s on %s with %d errors: %d held values, %d runs", c.kind, c.leaf, c.value, max_errors, opened, made)
 		}
 		checked_destroy(ch)
 	}
@@ -870,6 +894,83 @@ schema_held_nesting :: proc(t: ^testing.T) {
 	testing.expectf(t, deep_err != nil, "a chain of 300 bound: %v", deep_err)
 }
 
+// A schema nested past what a check judges one inside the other is refused at bind, and the bind holds its depth off
+// the stack.
+@(test)
+schema_deep_bind :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	for kind in ([]string{"not", "if"}) {
+		ch, err := checked_make(shared_chain(kind, `{"type": "integer"}`, 2000))
+		defer checked_destroy(ch)
+		f, typed_err := err.(core.Typed_Error)
+		testing.expectf(t, typed_err && f.kind == .Too_Deep, "%s 2000 links: %v", kind, err)
+	}
+	text := fmt.tprintf("%s%s%s", strings.repeat(`{"contains": `, 400, context.temp_allocator), `{"type": "string"}`, strings.repeat("}", 400, context.temp_allocator))
+	ch, err := checked_make(text)
+	defer checked_destroy(ch)
+	if testing.expectf(t, err == nil, "contains 400 deep: %v", err) {
+		testing.expect(t, schema.check(&ch.bound, transmute([]u8)string("1")) == nil)
+	}
+}
+
+// What a chain of `$ref`s evaluates reaches `unevaluatedProperties` however long the chain, and a chain of `allOf`s past
+// `MAX_HELD` is refused at bind.
+@(test)
+schema_unevaluated_chain :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	chain :: proc(link: string, links: int) -> string {
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_string(&b, `{"$ref": "#/$defs/a0", "unevaluatedProperties": false, "$defs": {`)
+		for i in 0 ..< links {
+			fmt.sbprintf(&b, link, i, i + 1)
+		}
+		fmt.sbprintf(&b, `"a%d": {{"properties": {{"a": true}}}}}}}}`, links)
+		return strings.to_string(b)
+	}
+	for links in ([]int{10, 300, 5000}) {
+		ch, err := checked_make(chain(`"a%d": {{"$ref": "#/$defs/a%d"}}, `, links))
+		defer checked_destroy(ch)
+		if !testing.expectf(t, err == nil, "%d links: %v", links, err) {
+			continue
+		}
+		testing.expectf(t, schema.check(&ch.bound, transmute([]u8)string(`{"a": 1}`)) == nil, "%d links: .a refused", links)
+		testing.expectf(t, schema.check(&ch.bound, transmute([]u8)string(`{"a": 1, "c": 2}`)) != nil, "%d links: .c passed", links)
+	}
+	ch, err := checked_make(chain(`"a%d": {{"allOf": [{{"$ref": "#/$defs/a%d"}}]}}, `, 1000))
+	defer checked_destroy(ch)
+	f, typed_err := err.(core.Typed_Error)
+	testing.expectf(t, typed_err && f.kind == .Too_Deep, "allOf 1000 links: %v", err)
+}
+
+// A subschema many arms share is judged once at bind and once at a value, a sink's entries included.
+@(test)
+schema_shared_arms_dag :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	cases := []struct {
+		leaf, text: string,
+		valid:      bool,
+	}{
+		{`{"properties": {"a": true}}`, `{"a": 1}`, true},
+		{`{"items": true}`, `[1]`, true},
+		{`{"type": "array"}`, `[1]`, true},
+		{`{"type": "array", "items": {"type": "integer"}}`, `[1, "x"]`, false},
+		{`{"required": ["a"]}`, `{"b": 1}`, false},
+	}
+	for c in cases {
+		ch, err := checked_make(shared_chain("allOf", c.leaf, 40))
+		defer checked_destroy(ch)
+		if !testing.expectf(t, err == nil, "%s: %v", c.leaf, err) {
+			continue
+		}
+		sink := typed.Sink{max_errors = 5}
+		defer typed.sink_destroy(&sink)
+		cerr := schema.check(&ch.bound, transmute([]u8)c.text, &sink)
+		f, typed_err := cerr.(core.Typed_Error)
+		testing.expectf(t, !typed_err || f.kind != .No_Memory, "%s: %v", c.leaf, cerr)
+		testing.expectf(t, (cerr == nil) == c.valid && (len(sink.entries) == 0) == c.valid, "%s: %v, %d entries", c.leaf, cerr, len(sink.entries))
+	}
+}
+
 // A failing property name reports its keyword under `propertyNames` at the object, a `false` there allows no name, and a
 // missing member of a nested object is reported at the object.
 @(test)
@@ -882,8 +983,9 @@ schema_check_reports_names_and_required :: proc(t: ^testing.T) {
 		{`{"propertyNames": {"anyOf": [{"maxLength": 1}, {"pattern": "^c"}]}}`, `{"ab": 1}`, "1:2: Value passes none of the subschemas in the member name \"ab\" (.propertyNames.anyOf)\n"},
 		{`{"propertyNames": false}`, `{"a": 1}`, "1:2: No value is allowed here in the member name \"a\" (.propertyNames)\n"},
 		{`{"propertyNames": {"anyOf": [{"maxLength": 1}]}}`, `{"ab": 1}`, "1:2: Value passes none of the subschemas in the member name \"ab\" (.propertyNames.anyOf)\n"},
-		{`{"contains": {"type": "integer"}, "minContains": 2}`, `["a"]`, "1:1: Too few elements or members (.contains)\n"},
-		{`{"contains": {"type": "integer"}, "minContains": 2}`, `[1]`, "1:1: Too few elements or members (.minContains)\n"},
+		{`{"contains": {"type": "integer"}, "minContains": 2}`, `["a"]`, "1:1: Too few elements pass contains, at least 2 (.contains)\n"},
+		{`{"contains": {"type": "integer"}, "minContains": 2}`, `[1]`, "1:1: Too few elements pass contains, at least 2 (.minContains)\n"},
+		{`{"contains": {"type": "integer"}, "maxContains": 1}`, `[1, 2]`, "1:1: Too many elements pass contains, at most 1 (.maxContains)\n"},
 		{`{"properties": {"o": {"required": ["k"]}}}`, `{"o": {}}`, "1:7: Required member \"k\" is missing at .o (.properties.o.required)\n"},
 	}
 	for c in cases {
@@ -1016,8 +1118,9 @@ schema_check_agrees_with_model_load :: proc(t: ^testing.T) {
 		loaded := typed.check_text(transmute([]u8)c.text, raw_data(target), c.type, &plan, {}) == nil
 		d, described := description_of(&plan)
 		testing.expect(t, described == nil)
-		compiled := schema.compile_description(&d)
-		b, bound := schema.bind(&compiled, json.checks(.Json))
+		compiled, _ := schema.compile_description(&d)
+		defer schema.destroy(compiled)
+		b, bound := schema.bind(compiled, json.checks(.Json))
 		testing.expect(t, bound == nil)
 		checked := schema.valid(&b, transmute([]u8)c.text)
 		testing.expectf(t, loaded == c.valid && checked == c.valid, "%v %s: load %v, check %v", c.type, c.text, loaded, checked)
@@ -1114,6 +1217,11 @@ schema_check_verdicts :: proc(t: ^testing.T) {
 		instances: []Instance,
 	} {
 		{`{"type": "integer"}`, {{`1.0`, true}}},
+		{`{"$defs": {"a": {"minimum": 5}, "b": {"maximum": 10}}, "$ref": "#/$defs/a", "$dynamicRef": "#/$defs/b"}`, {{`1`, false}, {`20`, false}, {`7`, true}}},
+		{`{"$defs": {"a": {"minimum": 5}, "b": {"maximum": 10}}, "$dynamicRef": "#/$defs/b", "$ref": "#/$defs/a"}`, {{`1`, false}, {`20`, false}, {`7`, true}}},
+		{`{"$schema": "https://json-schema.org/draft/2019-09/schema", "$defs": {"a": {"minimum": 5}}, "maximum": 10, "items": {"$ref": "#/$defs/a", "$recursiveRef": "#"}}`, {{`[1]`, false}, {`[20]`, false}, {`[6]`, true}}},
+		{`{"$defs": {"a": {"$id": "HTTPS://EX.com/a", "type": "string"}}, "$ref": "https://ex.com/a"}`, {{`1`, false}, {`"s"`, true}}},
+		{`{"$defs": {"a": {"$id": "https://ex.com/%7Efoo", "type": "string"}}, "$ref": "https://ex.com/~foo"}`, {{`1`, false}, {`"s"`, true}}},
 		{`{"required": ["c"], "additionalProperties": false}`, {{`{"c": 1}`, false}}},
 		{`{"required": ["c"], "properties": {"a": {}}, "additionalProperties": false}`, {{`{"c": 1}`, false}}},
 		{`{"required": ["c"], "properties": {"c": {}}, "additionalProperties": false}`, {{`{"c": 1}`, true}}},
@@ -1436,8 +1544,9 @@ schema_check_agrees_on_json5_numbers :: proc(t: ^testing.T) {
 		target := make([]u8, size_of(Json5_Bound))
 		loaded := typed.check_text(transmute([]u8)c.text, raw_data(target), c.type, &plan, {}) == nil
 		d, _ := description_of(&plan)
-		compiled := schema.compile_description(&d)
-		b, bound := schema.bind(&compiled, json.checks(.Json5))
+		compiled, _ := schema.compile_description(&d)
+		defer schema.destroy(compiled)
+		b, bound := schema.bind(compiled, json.checks(.Json5))
 		testing.expect(t, bound == nil)
 		checked := schema.valid(&b, transmute([]u8)c.text)
 		testing.expectf(t, loaded == c.valid && checked == c.valid, "%v %s: load %v, check %v", c.type, c.text, loaded, checked)
@@ -1481,6 +1590,8 @@ same_schema :: proc(a, b: ^rules.Description, from_a, from_b: rules.Node_Index, 
 	ry, _ := rules.merged(&y, eb)
 	for r in ([?]^rules.Rules{&rx, &ry}) {
 		r.assert_format &&= rules.format_of(r.format) != .None
+		// A write spells 2020-12, which defines every format a check judges.
+		r.format_foreign = false
 		// A write adds the pattern that spells an asserted format.
 		if r.assert_format && r.pattern == rules.FORMAT_PATTERNS[rules.format_of(r.format)] {
 			r.pattern = ""
@@ -2064,6 +2175,9 @@ schema_check_holds_deep_values :: proc(t: ^testing.T) {
 		}
 		return strings.to_string(b)
 	}
+	// Each level nests a run on the machine stack, and a sanitizer's frames hold about three times a plain build's, so
+	// under one the check refuses well before a thousand levels.
+	DEEP :: 300 when .Address in ODIN_SANITIZER_FLAGS || .Thread in ODIN_SANITIZER_FLAGS else 1000
 	cases := [?]struct {
 		schema, text: string,
 		valid:        bool,
@@ -2071,10 +2185,10 @@ schema_check_holds_deep_values :: proc(t: ^testing.T) {
 	} {
 		{arrays, nested(8, ""), true, ""},
 		{arrays, nested(64, ""), true, ""},
-		{arrays, nested(1000, ""), true, ""},
+		{arrays, nested(DEEP, ""), true, ""},
 		{recursive, nested(8, ""), true, ""},
 		{recursive, nested(64, ""), true, ""},
-		{recursive, nested(1000, ""), true, ""},
+		{recursive, nested(DEEP, ""), true, ""},
 		{any_tree, nested(256, "1"), false, "not"},
 		{any_tree, nested(600, "1"), false, "not"},
 		{any_tree, nested(600, `"a"`), true, ""},

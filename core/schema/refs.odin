@@ -61,10 +61,9 @@ resolve_all :: proc(r: ^Reader) {
 			fail(r, p.site, p.keyword, why)
 			return
 		}
-		if late {
-			r.d.nodes[p.node].dynamic_ref = target
-		} else {
-			r.d.nodes[p.node].ref = target
+		if !place_reference(&r.d.nodes[p.node], target, p.keyword, late) {
+			fail(r, p.site, p.keyword, "is a second reference of its kind beside another")
+			return
 		}
 	}
 	looping := loop_nodes(r.d)
@@ -86,6 +85,43 @@ resolve_all :: proc(r: ^Reader) {
 		fail(r, p.site, p.keyword, "leads back to itself through references and in-place subschemas alone")
 		return
 	}
+}
+
+// Files the reference `keyword` of `n` that reaches `target`, dynamically under `late`. A `$ref` holds `ref`, a dynamic
+// reference `dynamic_ref`, and a `$dynamicRef` or `$recursiveRef` that resolves statically holds `ref` unless a `$ref`
+// beside it does. A node has at most one `$ref` and one other reference, so false, for a slot taken, means a reference
+// would be lost.
+@(private)
+place_reference :: proc(n: ^rules.Node, target: rules.Node_Index, keyword: string, late: bool) -> bool {
+	recursive := keyword == "$recursiveRef"
+	switch {
+	case late:
+		if n.dynamic_ref != nil {
+			return false
+		}
+		n.dynamic_ref = target
+		n.spelled += {.Dynamic_Recursive} if recursive else {}
+	case keyword == "$ref":
+		if moved, has := n.ref.?; has {
+			if n.spelled & {.Ref_Dynamic, .Ref_Recursive} == {} || n.dynamic_ref != nil {
+				return false
+			}
+			n.dynamic_ref = moved
+			n.spelled += {.Dynamic_Static, .Dynamic_Recursive} if .Ref_Recursive in n.spelled else {.Dynamic_Static}
+			n.spelled -= {.Ref_Dynamic, .Ref_Recursive}
+		}
+		n.ref = target
+	case n.ref == nil:
+		n.ref = target
+		n.spelled += {.Ref_Recursive} if recursive else {.Ref_Dynamic}
+	case:
+		if n.dynamic_ref != nil {
+			return false
+		}
+		n.dynamic_ref = target
+		n.spelled += {.Dynamic_Static, .Dynamic_Recursive} if recursive else {.Dynamic_Static}
+	}
+	return true
 }
 
 // Which nodes of `d` lie on a loop of in-place edges: those in a strongly connected set of two or more nodes, and those
@@ -212,7 +248,7 @@ reachable :: proc(d: ^rules.Description) -> []bool {
 @(private)
 in_place :: proc(d: ^rules.Description, node: rules.Node_Index, out: ^[dynamic]rules.Node_Index) {
 	n := &d.nodes[node]
-	if y, has := n.dynamic_ref.?; has {
+	if y, has := n.dynamic_ref.?; has && .Dynamic_Static not_in n.spelled {
 		for a in d.anchors {
 			if a.node == y {
 				for b in d.anchors {
@@ -472,7 +508,8 @@ dialect :: proc(r: ^Reader, uri: string, depth := 0) -> (draft: Draft, vocab: Vo
 	return
 }
 
-// The vocabularies the `$vocabulary` object at `v` asks for. One it does not know and requires is a refusal.
+// The vocabularies the `$vocabulary` object at `v` asks for. One it does not know and requires is a refusal. In 2019-09
+// a dialect that requires the format vocabulary makes `format` assert, as its standard meta-schema lists it as optional.
 @(private)
 vocabularies_of :: proc(r: ^Reader, doc: ^core.Document, v: core.Node_Index) -> (vocab: Vocabs, why: string) {
 	it := core.pairs(doc, v)
@@ -484,6 +521,9 @@ vocabularies_of :: proc(r: ^Reader, doc: ^core.Document, v: core.Node_Index) -> 
 		uri, _ := core.text_clone(doc, k)
 		if set, known := vocabulary_of(uri); known {
 			vocab += set
+			if uri == VOCAB_URI_2019 + "format" && core.kind(doc, value) == .True {
+				vocab += {.Format_Assert}
+			}
 		} else if core.kind(doc, value) == .True {
 			return {}, "requires a vocabulary the reader does not know"
 		}

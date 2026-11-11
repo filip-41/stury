@@ -33,8 +33,9 @@ inferred_from :: proc(t: ^testing.T, inf: ^schema.Inferred, texts: []string, ran
 
 @(private = "file")
 passes :: proc(t: ^testing.T, d: ^rules.Description, text: string) -> bool {
-	c := schema.compile_description(d)
-	b, err := schema.bind(&c, json.checks(.Json))
+	c, _ := schema.compile_description(d)
+	defer schema.destroy(c)
+	b, err := schema.bind(c, json.checks(.Json))
 	defer schema.unbind(&b)
 	testing.expectf(t, err == nil, "%v", err)
 	return schema.valid(&b, transmute([]u8)text)
@@ -270,8 +271,9 @@ infer_reads_markup :: proc(t: ^testing.T) {
 		testing.expect(t, schema.infer(&inf, core.Node_Ref{&doc, core.ROOT}) == .None)
 		d, _ := schema.inferred(&inf)
 		defer rules.description_destroy(&d)
-		cc := schema.compile_description(&d)
-		bound, err := schema.bind(&cc, {layout = markup})
+		cc, _ := schema.compile_description(&d)
+		defer schema.destroy(cc)
+		bound, err := schema.bind(cc, {layout = markup})
 		defer schema.unbind(&bound)
 		testing.expect(t, err == nil)
 		testing.expectf(t, schema.check_node(&bound, &doc, core.ROOT) == nil, "%s", c.model)
@@ -322,8 +324,9 @@ sample_passes_its_check :: proc(t: ^testing.T) {
 					continue
 				}
 				testing.expectf(t, err == nil, "%s: %v", text, err)
-				c := schema.compile_description(&d)
-				b, _ := schema.bind(&c, {layout = as})
+				c, _ := schema.compile_description(&d)
+				defer schema.destroy(c)
+				b, _ := schema.bind(c, {layout = as})
 				defer schema.unbind(&b)
 				for s in got {
 					testing.expectf(t, schema.valid(&b, s) != invalid, "%s, invalid %v: %s", text, invalid, s)
@@ -387,8 +390,9 @@ sample_is_bounded_and_takes_the_other_branch :: proc(t: ^testing.T) {
 		d, _, _ := read_text(string(core.span(&doc, core.ROOT)))
 		got, err := schema.sample(&d, json.as(.Json), {count = 4, format_assert = true})
 		testing.expectf(t, err == nil, "%s: %v", text, err)
-		c := schema.compile_description(&d)
-		bound, _ := schema.bind(&c, json.checks(.Json))
+		c, _ := schema.compile_description(&d)
+		defer schema.destroy(c)
+		bound, _ := schema.bind(c, json.checks(.Json))
 		defer schema.unbind(&bound)
 		for s in got {
 			testing.expectf(t, schema.valid(&bound, s), "%s: %s", text, s)

@@ -5,8 +5,8 @@ LICENSE beside the files they cover; those are named rather than copied.
 ----------------------------------------------------------------------------------------------------
 Oniguruma — https://github.com/kkos/oniguruma
 
-    core/regex/tables/*.bin and core/regex/unicode_tables.odin hold Oniguruma 6.9.10's
-    character-property and case-folding tables (Unicode 16.0), read out of its library through jq 1.8.2 by
+    core/regex/tables/*.bin and core/regex/unicode_tables.odin hold Oniguruma 6.9.10's character-property
+    names, its blocks' ranges and its POSIX classes' definitions, read out of its library through jq 1.8.2 by
     core/regex/unicode_tables.py.
 
 Oniguruma LICENSE
@@ -39,8 +39,9 @@ SUCH DAMAGE.
 ----------------------------------------------------------------------------------------------------
 Unicode Character Database — https://www.unicode.org/
 
-    The property tables above are the Unicode Character Database's assignments (Unicode 16.0), as
-    Oniguruma reads them.
+    The property and case-folding tables in core/regex/tables/*.bin are the Unicode Character Database's
+    (Unicode 17.0), read from its PropList.txt, DerivedCoreProperties.txt, CaseFolding.txt and
+    PropertyValueAliases.txt and as Node's RegExp reads them.
 
 UNICODE LICENSE V3
 

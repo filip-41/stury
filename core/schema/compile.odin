@@ -41,16 +41,13 @@ compile :: proc(text: []u8, as: core.As, opts := Options{}, allocator := context
 	c = new(Compiled, allocator) or_return
 	c^ = {
 		opts      = opts,
-		res       = {root = opts.refs, as = as, draft = opts.draft},
+		res       = {root = opts.refs, as = as, draft = opts.draft, format_assert = opts.format_assert},
 		owned     = true,
 		allocator = allocator,
 	}
 	if err = compile_text(c, text, as, allocator); err != nil {
 		destroy(c)
 		return nil, err
-	}
-	for &n in c.description.nodes {
-		n.rules.assert_format ||= opts.format_assert
 	}
 	index_all(&c.doc)
 	for d in c.res.documents {
@@ -68,21 +65,25 @@ compile_text :: proc(c: ^Compiled, text: []u8, as: core.As, allocator: runtime.A
 }
 
 // A compiled schema of a description `d` made without a schema text. It borrows `d`, which outlives it.
-compile_description :: proc(d: ^rules.Description, opts := Options{}, allocator := context.allocator) -> Compiled {
-	return {description = d, opts = opts, allocator = allocator}
+compile_description :: proc(d: ^rules.Description, opts := Options{}, allocator := context.allocator) -> (c: ^Compiled, err: core.Error) {
+	c = new(Compiled, allocator) or_return
+	c^ = {description = d, opts = opts, allocator = allocator}
+	return c, nil
 }
 
-// Frees what `compile` made, `c` with it. A compile of a description owns nothing.
+// Frees what `compile` or `compile_description` made, `c` with it. A compile of a description frees no description.
 destroy :: proc(c: ^Compiled) {
-	if c == nil || !c.owned {
+	if c == nil {
 		return
 	}
-	if c.description != nil {
-		rules.description_destroy(c.description)
-		free(c.description, c.allocator)
+	if c.owned {
+		if c.description != nil {
+			rules.description_destroy(c.description)
+			free(c.description, c.allocator)
+		}
+		resolver_destroy(&c.res)
+		core.destroy(&c.doc)
 	}
-	resolver_destroy(&c.res)
-	core.destroy(&c.doc)
 	free(c, c.allocator)
 }
 
@@ -216,7 +217,7 @@ asserting :: proc(d: ^rules.Description, on: bool) -> (switched: [dynamic]rules.
 		return
 	}
 	for &n, i in d.nodes {
-		if !n.rules.assert_format {
+		if !n.rules.assert_format && !n.rules.format_foreign {
 			n.rules.assert_format = true
 			append(&switched, rules.Node_Index(i))
 		}

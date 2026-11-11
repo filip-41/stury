@@ -15,7 +15,7 @@ import "core:os"
 User :: struct {
 	id:    i64 `model:"read_only"`,
 	name:  string `model:"len>=2"`,
-	email: Maybe(string),
+	email: Maybe(string) `model:"optional"`,
 	role:  string `model:"optional"`,
 	set:   model.Fields_Set,
 }
@@ -53,6 +53,6 @@ run :: proc() -> core.Error {
 	// A patch changes only the members it holds, and the merged value is judged whole.
 	model.patch(&m, &user, transmute([]u8)string(`{"email": null, "role": "admin"}`)) or_return
 	fmt.println(string(model.dump(&m, &user, {exclude_none = true}) or_return))
-	fmt.println(string(model.dump(&m, &user, {exclude_unset = true, exclude_defaults = true}) or_return))
+	fmt.println(string(model.dump(&m, &user, {exclude_unset = true}) or_return))
 	return nil
 }

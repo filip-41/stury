@@ -3,6 +3,7 @@ package typed
 import "base:runtime"
 import regex "../regex"
 import rules "../rules"
+import "core:mem"
 import "core:slice"
 
 // What a node evaluates of a value that passes it, which `unevaluatedProperties` and `unevaluatedItems` leave to their
@@ -28,6 +29,8 @@ Evaluates :: struct {
 	named:    []^Evaluates,
 	reach:    int,
 	fixed:    ^Evaluates,
+	// The most sets of `inner` one inside the other below this one, 0 while they are made.
+	height:   int,
 }
 
 // An in-place subschema whose evaluation counts when the value passes record `rec`, has the member `name` when one is
@@ -43,14 +46,23 @@ Inner :: struct {
 }
 
 // What a use of `node` evaluates, a node's own unevaluated keywords included unless `own` says the node is the one that
-// asks. Each in-place subschema gets the record that judges it.
+// asks. Each in-place subschema that counts by its verdict gets the record that judges it. `depth` counts the sets
+// that hold this one, and a plan whose sets nest past `MAX_HELD` is refused, as a check would judge them one inside the
+// other.
 @(private)
-evaluates :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, node: rules.Node_Index, own := false) -> ^Evaluates {
+evaluates :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, node: rules.Node_Index, own := false, depth := 0) -> ^Evaluates {
+	if depth > MAX_HELD {
+		refuse_plan(b, .Too_Deep)
+		return nil
+	}
 	scope := b.scope
 	defer b.scope = scope
 	enter_scope(b, d, arena, node)
 	key := block_key(typeid_of(Evaluates), i32(node), b.scope)
 	if e, made := b.evaluated[key]; made && !own {
+		if depth + e.height > MAX_HELD {
+			refuse_plan(b, .Too_Deep)
+		}
 		return e
 	}
 	e := new(Evaluates, arena)
@@ -94,42 +106,58 @@ evaluates :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, 
 		}
 	}
 	inner := make([dynamic]Inner, arena)
-	add :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, inner: ^[dynamic]Inner, x: rules.Node_Index, test: i32 = -1, on := false, name: Maybe(string) = nil, always := false) -> i32 {
-		rec := arm_record(b, d, arena, x)
-		append(inner, Inner{rec = rec, test = test, on = on, always = always, name = name, eval = evaluates(b, d, arena, x)})
+	// A `$ref` that holds nothing else evaluates what the node it reaches does, so a chain of them is one set.
+	add :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, inner: ^[dynamic]Inner, x: rules.Node_Index, depth: int, test: i32 = -1, on := false, name: Maybe(string) = nil, always := false) -> i32 {
+		rec := i32(-1) if always else arm_record(b, d, arena, x)
+		scope := b.scope
+		defer b.scope = scope
+		y, refs := rules.ref_end(d, x)
+		if y == rules.NONE {
+			y, refs = x, 0
+		}
+		for z, hop := x, 0; hop < refs; hop += 1 {
+			enter_scope(b, d, arena, z)
+			z = d.nodes[z].ref.?
+		}
+		append(inner, Inner{rec = rec, test = test, on = on, always = always, name = name, eval = evaluates(b, d, arena, y, depth = depth + 1)})
 		return rec
 	}
 	if x, has := n.ref.?; has {
-		add(b, d, arena, &inner, x, always = true)
+		add(b, d, arena, &inner, x, depth, always = true)
 	}
 	if x, has := n.dynamic_ref.?; has {
-		add(b, d, arena, &inner, dynamic_target(b, d, x), always = true)
+		add(b, d, arena, &inner, dynamic_target(b, d, n, x), depth, always = true)
 	}
 	for x in n.all_of {
-		add(b, d, arena, &inner, x, always = true)
+		add(b, d, arena, &inner, x, depth, always = true)
 	}
 	for list in ([?][]rules.Node_Index{n.any_of, n.one_of}) {
 		for x in list {
-			add(b, d, arena, &inner, x)
+			add(b, d, arena, &inner, x, depth)
 		}
 	}
 	if x, has := n.cond.test.?; has {
-		test := add(b, d, arena, &inner, x)
+		test := add(b, d, arena, &inner, x, depth)
 		if y, then := n.cond.then.?; then {
-			add(b, d, arena, &inner, y, test, true)
+			add(b, d, arena, &inner, y, depth, test, true)
 		}
 		if y, other := n.cond.other.?; other {
-			add(b, d, arena, &inner, y, test, false)
+			add(b, d, arena, &inner, y, depth, test, false)
 		}
 	}
 	if n.object >= 0 {
 		for x in d.objects[n.object].dependents {
 			if y, has := x.node.?; has {
-				add(b, d, arena, &inner, y, name = x.name)
+				add(b, d, arena, &inner, y, depth, name = x.name)
 			}
 		}
 	}
 	e.inner = inner[:]
+	for x in e.inner {
+		if x.eval != nil {
+			e.height = max(e.height, x.eval.height + 1)
+		}
+	}
 	return e
 }
 
@@ -151,33 +179,81 @@ Evaluating :: struct {
 }
 
 // Marks the groups of failed members or, under `items`, elements that `e` evaluates, each judged by its place `first`.
-// `ev.passes` asks of an element by the group's index.
+// `ev.passes` asks of an element by the group's index. What a set marks depends only on the value, so each set of the
+// closure with sets inside it is read once however many in-place paths reach it, and a set with none once per set that
+// holds it. Says whether the sets read could be kept.
 @(private)
-evaluated_groups :: proc(ev: ^Evaluating, e: ^Evaluates, groups: []Group, items: bool, depth := 0) {
-	if depth == MAX_HELD {
-		return
+evaluated_groups :: proc(ev: ^Evaluating, e: ^Evaluates, groups: []Group, items: bool) -> bool {
+	// Marks the groups `s` evaluates, and says whether it evaluates every one.
+	mark :: proc(ev: ^Evaluating, s: ^Evaluates, groups: []Group, items: bool) -> bool {
+		if s.items if items else s.members {
+			for &g in groups {
+				g.evaluated = true
+			}
+			return true
+		}
+		for &g, k in groups {
+			switch {
+			case g.evaluated:
+			case items:
+				g.evaluated = g.first < s.prefix || s.contains >= 0 && ev.passes(ev.data, k, s.contains)
+			case len(s.names) + len(s.patterns) > 0:
+				hit, undecided := evaluates_name(s, ev.names[g.first], ev.scratch)
+				g.evaluated, ev.undecided = hit, ev.undecided || undecided
+			}
+		}
+		return false
 	}
-	whole := e.items if items else e.members
-	for &g, i in groups {
-		switch {
-		case g.evaluated:
-		case whole:
-			g.evaluated = true
-		case items:
-			g.evaluated = g.first < e.prefix || e.contains >= 0 && ev.passes(ev.data, i, e.contains)
-		case len(e.names) + len(e.patterns) > 0:
-			hit, undecided := evaluates_name(e, ev.names[g.first], ev.scratch)
-			g.evaluated, ev.undecided = hit, ev.undecided || undecided
+	near: [SEEN_SCAN]^Evaluates = ---
+	sets := mem.buffer_from_slice(near[:])
+	index: map[^Evaluates]struct{}
+	index.allocator = context.temp_allocator
+	append(&sets, e)
+	for i := 0; i < len(sets); i += 1 {
+		if mark(ev, sets[i], groups, items) {
+			return true
+		}
+		for &x in sets[i].inner {
+			if !counts(ev, &x) {
+				continue
+			}
+			if len(x.eval.inner) == 0 {
+				if mark(ev, x.eval, groups, items) {
+					return true
+				}
+				continue
+			}
+			if len(sets) <= SEEN_SCAN {
+				if slice.contains(sets[:], x.eval) {
+					continue
+				}
+			} else {
+				if len(index) == 0 {
+					for y in sets {
+						index[y] = {}
+					}
+				}
+				if x.eval in index {
+					continue
+				}
+			}
+			if len(sets) == len(near) && raw_data(sets) == &near[0] {
+				wide, failed := make([dynamic]^Evaluates, len(near), 4 * len(near), context.temp_allocator)
+				if failed != nil {
+					return false
+				}
+				copy(wide[:], near[:])
+				sets = wide
+			}
+			if _, failed := append(&sets, x.eval); failed != nil {
+				return false
+			}
+			if len(index) > 0 {
+				index[x.eval] = {}
+			}
 		}
 	}
-	if whole {
-		return
-	}
-	for &x in e.inner {
-		if counts(ev, &x) {
-			evaluated_groups(ev, x.eval, groups, items, depth + 1)
-		}
-	}
+	return true
 }
 
 // Whether `e` names the member `name` or a pattern of it matches it.
@@ -261,6 +337,8 @@ Static_Set :: struct {
 	prefix:                 int,
 	all_members, all_items: bool,
 	varies:                 bool,
+	// The nodes added, false while their targets are added, so a node reached many ways is added once.
+	added:                  map[rules.Node_Index]bool,
 }
 
 // Adds to `s` what `node` evaluates through its own keywords, its `$ref` and its `allOf`. `own` leaves out the node's
@@ -271,10 +349,20 @@ static_set :: proc(d: ^rules.Description, node: rules.Node_Index, s: ^Static_Set
 		return
 	}
 	n := &d.nodes[node]
+	if done, met := s.added[node]; met {
+		// A node met again inside itself nests without end, which the depth bound holds as varying.
+		s.varies ||= !done
+		return
+	}
 	if depth == MAX_HELD {
 		s.varies = true
 		return
 	}
+	if s.added == nil {
+		s.added = make(map[rules.Node_Index]bool, context.temp_allocator)
+	}
+	s.added[node] = false
+	defer s.added[node] = true
 	s.varies ||= len(n.any_of) > 0 || len(n.one_of) > 0 || n.cond.test != nil || n.dynamic_ref != nil
 	if !own {
 		s.all_members ||= n.unevaluated_properties != nil
@@ -341,13 +429,43 @@ fixed_part :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator,
 }
 
 // Whether `node` judges nothing: every value passes it, and what it evaluates is all it does. With `required`, the
-// node may also require members of an object, whose names it adds there.
+// node may also require members of an object, whose names it adds there. `known` holds each node's answer past the
+// first one asked, `.Asked` while it is judged, so a node reached many ways is judged once.
 @(private)
-judges_nothing :: proc(d: ^rules.Description, node: rules.Node_Index, depth := 0, required: ^[dynamic]string = nil) -> bool {
-	x, _ := reached(d, node)
+judges_nothing :: proc(d: ^rules.Description, node: rules.Node_Index, known: ^map[rules.Node_Index]Nothing, depth := 0, required: ^[dynamic]string = nil) -> bool {
+	x, _ := rules.ref_end(d, node)
 	if x == rules.NONE {
 		return true
 	}
+	if depth > 0 {
+		switch known[x] {
+		case .Unknown:
+		case .Asked, .Judges:
+			// A node met again inside itself nests without end, which the depth bound refuses.
+			return false
+		case .Nothing:
+			return true
+		}
+		known[x] = .Asked
+		answer := own_nothing(d, x, known, depth, required)
+		known[x] = .Nothing if answer else .Judges
+		return answer
+	}
+	return own_nothing(d, x, known, depth, required)
+}
+
+// What `judges_nothing` knows of a node.
+@(private)
+Nothing :: enum u8 {
+	Unknown,
+	Asked,
+	Judges,
+	Nothing,
+}
+
+// Whether the node `x`, past its `$ref`s, judges nothing, as `judges_nothing` asks.
+@(private = "file")
+own_nothing :: proc(d: ^rules.Description, x: rules.Node_Index, known: ^map[rules.Node_Index]Nothing, depth: int, required: ^[dynamic]string) -> bool {
 	n := &d.nodes[x]
 	if depth == MAX_HELD || n.kinds != rules.EVERY_KIND || n.rules != {} || n.has_enum || n.const_of != nil {
 		return false
@@ -357,11 +475,11 @@ judges_nothing :: proc(d: ^rules.Description, node: rules.Node_Index, depth := 0
 	}
 	if n.object >= 0 {
 		o := &d.objects[n.object]
-		if len(o.dependents) > 0 || !judges_nothing(d, o.keys, depth + 1) || !judges_nothing(d, o.additional, depth + 1) {
+		if len(o.dependents) > 0 || !judges_nothing(d, o.keys, known, depth + 1) || !judges_nothing(d, o.additional, known, depth + 1) {
 			return false
 		}
 		for m in o.members {
-			if m.required && (required == nil || depth > 0) || m.rules != {} || !judges_nothing(d, m.node, depth + 1) {
+			if m.required && (required == nil || depth > 0) || m.rules != {} || !judges_nothing(d, m.node, known, depth + 1) {
 				return false
 			}
 			if m.required {
@@ -369,27 +487,27 @@ judges_nothing :: proc(d: ^rules.Description, node: rules.Node_Index, depth := 0
 			}
 		}
 		for p in o.patterns {
-			if !judges_nothing(d, p.node, depth + 1) {
+			if !judges_nothing(d, p.node, known, depth + 1) {
 				return false
 			}
 		}
 	}
 	if n.array >= 0 {
 		a := &d.arrays[n.array]
-		if a.contains != nil || !judges_nothing(d, a.items, depth + 1) {
+		if a.contains != nil || !judges_nothing(d, a.items, known, depth + 1) {
 			return false
 		}
 		for p in a.prefix {
-			if !judges_nothing(d, p, depth + 1) {
+			if !judges_nothing(d, p, known, depth + 1) {
 				return false
 			}
 		}
 	}
-	if r, has := n.ref.?; has && !judges_nothing(d, r, depth + 1) {
+	if r, has := n.ref.?; has && !judges_nothing(d, r, known, depth + 1) {
 		return false
 	}
 	for r in n.all_of {
-		if !judges_nothing(d, r, depth + 1) {
+		if !judges_nothing(d, r, known, depth + 1) {
 			return false
 		}
 	}
@@ -481,7 +599,8 @@ settle_unevaluated :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Al
 // Whether the in-place target `r` of `n` judges nothing and evaluates nothing `n` does not evaluate itself.
 @(private = "file")
 covered :: proc(d: ^rules.Description, n: ^rules.Node, r: rules.Node_Index, arena: runtime.Allocator) -> bool {
-	if !judges_nothing(d, r) {
+	known := make(map[rules.Node_Index]Nothing, context.temp_allocator)
+	if !judges_nothing(d, r, &known) {
 		return false
 	}
 	members := n.object >= 0 && d.objects[n.object].additional != rules.NONE

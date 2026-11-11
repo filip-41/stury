@@ -314,11 +314,17 @@ fold_strings :: proc(n: ^Node, opt: ^Opt_Node) {
 	for k in n.kids {
 		runes := k.kids[:] if k.kind == .Cat else []^Node{k}
 		add_variant_leads(&opt.set, runes[0].r)
-		bytes := 0
+		least, most := 0, 0
 		for r in runes {
-			bytes += utf8.rune_size(r.r)
+			// A folded character matches each of its case variants, whose UTF-8 may be longer or shorter (ſ for s).
+			x := r.r
+			lo, hi := utf8.rune_size(x), utf8.rune_size(x)
+			for x = fold_next(x); x != r.r; x = fold_next(x) {
+				lo, hi = min(lo, utf8.rune_size(x)), max(hi, utf8.rune_size(x))
+			}
+			least, most = least + lo, most + hi
 		}
-		opt.len = {min(opt.len.min, bytes), max(opt.len.max, bytes)}
+		opt.len = {min(opt.len.min, least), max(opt.len.max, most)}
 	}
 }
 
@@ -684,12 +690,16 @@ forward_search :: proc(o: ^Search_Opt, s: string, from, limit: int) -> (low, hig
 }
 
 // The first and last start of a match that ends at the text's end, or before a newline that ends it, as onig_search's
-// end_buf bounds them, first past last for none.
+// end_buf bounds them, first past last for none. A newline that ends the text and is its first byte, or lies before
+// `start`, leaves the starts unbounded, as onig_search then skips end_buf.
 @(private)
 end_bounds :: proc(o: ^Search_Opt, s: string, start: int) -> (first, last: int) {
 	first, last = start, len(s)
 	min_end, max_end := len(s), len(s)
-	if o.end == .Semi_End_Buf && s[len(s) - 1] == '\n' && len(s) > 1 && start <= len(s) - 1 {
+	if o.end == .Semi_End_Buf && s[len(s) - 1] == '\n' {
+		if len(s) == 1 || start > len(s) - 1 {
+			return
+		}
 		min_end = len(s) - 1
 	}
 	if max_end < o.anc_min {

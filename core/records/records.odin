@@ -400,7 +400,7 @@ drop_plan :: proc(it: ^Reader) {
 keep_collected :: proc(it: ^Reader, c: ^typed.Sink, from: int) {
 	for &e in c.errors[from:] {
 		core.move_typed_error(&e, it.base)
-		if it.input.procedure != nil && (e.kind == .Wrong_Kind || e.kind == .Out_Of_Range || e.kind == .Not_A_Member) {
+		if it.input.procedure != nil && (e.kind == .Wrong_Kind || e.kind == .Out_Of_Range || e.kind == .Not_A_Member || e.kind == .Above_Maximum || e.kind == .Below_Minimum) {
 			e.want.text = strings.clone(e.want.text, context.temp_allocator) or_else ""
 		}
 		for &s in e.steps[:e.n_steps] {

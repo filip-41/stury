@@ -447,9 +447,9 @@ Typed_Error_Kind :: enum u8 {
 	None,
 	Walk, // the walk's fault, in `inner`
 	Wrong_Kind, // a value the target's type does not read
-	Out_Of_Range, // a value past what the target holds
+	Out_Of_Range, // a value past what the target holds, other than a number
 	Not_A_Member, // a name or number no enum or union member has
-	Wrong_Length, // an array's element count differs from a fixed array's, or passes a fixed capacity
+	Wrong_Length, // a table's row holds more cells than its type, or a second record where one is read
 	Missing_Field, // a `required` member is absent, the last step names it, or for a check `want.text` with the object's path
 	Unknown_Field, // a key the type does not name, the last step names it
 	Missing_Tag, // an object for a union that reads by tag has no tag member
@@ -470,23 +470,22 @@ Typed_Error_Kind :: enum u8 {
 	Out_Of_Order, // a token call the text's grammar does not allow next, or a text finished before it is whole
 	Write_Failed, // the output stream refused bytes, which may have left a prefix in it
 	Bad_Schema, // a schema the reader refuses, `want.text` names the keyword and why, the steps lead to it
-	Below_Minimum, // a number below a rule's lower bound
-	Above_Maximum, // a number above a rule's upper bound
+	Below_Minimum, // a number below a rule's lower bound or the least value its type holds
+	Above_Maximum, // a number above a rule's upper bound or the greatest value its type holds
 	Not_Multiple, // a number that is no whole multiple of a rule's divisor
 	Too_Short, // a string with fewer code points than a rule allows
 	Too_Long, // a string with more code points than a rule allows
 	No_Match, // a string a rule's pattern does not match
 	Pattern_Undecided, // a string a rule's pattern was not searched through, for the search ran out of memory
 	Bad_Format, // a string that is no value of a rule's format
-	Too_Few, // an array or object with fewer elements or members than a rule allows
-	Too_Many, // an array or object with more elements or members than a rule allows
+	Too_Few, // an array or object with fewer elements or members than a rule or a fixed array allows
+	Too_Many, // an array or object with more elements or members than a rule, a fixed array or a fixed capacity allows
 	Not_Unique, // an array whose elements repeat where a rule wants them unique
-	Not_Allowed, // a value where a rule takes none
-	No_Arm, // a value that passes none of a rule's subschemas
+	Not_Allowed, // a value where a rule takes none, or a key a model's struct forbids: one it does not name or a read_only member
+	No_Arm, // a value that passes none of a rule's subschemas, or no arm of a model's union takes
 	Many_Arms, // a value that passes more than one of a rule's subschemas, where it takes one
 	No_Sample, // a description no value passes, or none the bounded search found, `want.text` names the node
 	No_Invalid_Sample, // a description every value passes, or one the bounded search found no failing value of
-	Read_Only, // a key of a read_only member, which a load refuses where its struct forbids the members it does not name
 	Custom, // a value a model's validator refused, `want.text` holds its message
 	Check_Failed, // a value a model's dump checked fails its rules, the steps lead to the first and `want.text` is its code
 }
@@ -568,11 +567,11 @@ Error_Entry :: struct {
 // by the tags.
 Typed_Detail :: struct #raw_union {
 	inner: Fault `raw_union_tag:"kind=Walk"`,
-	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Missing_Field,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema,kind=No_Sample,kind=No_Invalid_Sample,kind=Custom,kind=Check_Failed,kind=Bad_Option"`,
+	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Below_Minimum,kind=Above_Maximum,kind=Missing_Field,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema,kind=No_Sample,kind=No_Invalid_Sample,kind=Custom,kind=Check_Failed,kind=Bad_Option"`,
 	plans: Plan_Clash `raw_union_tag:"kind=Plan_Mismatch"`,
 }
 
-// `type` is the type a `.Wrong_Kind`, `.Out_Of_Range` or `.Not_A_Member` read wanted. `text` is the refused scalar's
+// `type` is the type a `.Wrong_Kind`, `.Out_Of_Range`, `.Not_A_Member`, `.Below_Minimum` or `.Above_Maximum` read wanted. `text` is the refused scalar's
 // source text for those kinds, which lives as long as `src`, the flag a `.Bad_Tag` names, or why a type is
 // `.Unsupported`, a union `.Ambiguous_Union` or an option `.Bad_Option`. Either may be empty.
 Typed_Want :: struct {
@@ -631,7 +630,6 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 	.Many_Arms     = {"many_arms", "Value passes more than one subschema"},
 	.No_Sample     = {"no_sample", "No value passing the description was found"},
 	.No_Invalid_Sample = {"no_invalid_sample", "No value failing the description was found"},
-	.Read_Only     = {"read_only", "Field is read only"},
 	.Custom        = {"custom", "Value is not valid"},
 	.Check_Failed  = {"check_failed", "Value fails its model's rules"},
 }
@@ -712,7 +710,7 @@ write_typed_message :: proc(w: io.Writer, e: Typed_Refusal) -> io.Error {
 			}
 			return write_kind_word(w, e.found)
 		}
-	case .Out_Of_Range:
+	case .Out_Of_Range, .Below_Minimum, .Above_Maximum:
 		if e.want.type != nil && len(e.want.text) > 0 {
 			write_shown(w, e.want.text) or_return
 			io.write_string(w, " is out of range for ") or_return
@@ -763,7 +761,7 @@ write_typed_message :: proc(w: io.Writer, e: Typed_Refusal) -> io.Error {
 			_, err := io.write_string(w, e.want.text)
 			return err
 		}
-	case .Unsupported, .Ambiguous_Union, .Bad_Schema, .No_Sample, .No_Invalid_Sample, .Bad_Option:
+	case .Unsupported, .Ambiguous_Union, .Bad_Schema, .No_Sample, .No_Invalid_Sample, .Bad_Option, .Too_Deep:
 		io.write_string(w, TYPED_KIND_RULES[e.kind].message) or_return
 		if len(e.want.text) > 0 {
 			io.write_string(w, ": ") or_return
@@ -1072,8 +1070,15 @@ write_entry_message :: proc(w: io.Writer, e: Error_Entry) -> io.Error {
 	if len(e.keyword_path) > 0 && SCHEMA_MESSAGES[e.kind] != "" {
 		message = SCHEMA_MESSAGES[e.kind]
 	}
-	if e.kind == .Not_Allowed && len(e.keyword_path) > 0 && e.keyword_path[len(e.keyword_path) - 1] == Step(Name("not")) {
+	last: Step
+	if len(e.keyword_path) > 0 {
+		last = e.keyword_path[len(e.keyword_path) - 1]
+	}
+	if e.kind == .Not_Allowed && last == Step(Name("not")) {
 		message = "Value passes the subschema that not refuses"
+	}
+	if (e.kind == .Too_Few || e.kind == .Too_Many) && (last == Step(Name("contains")) || last == Step(Name("minContains")) || last == Step(Name("maxContains"))) {
+		message = "Too few elements pass contains" if e.kind == .Too_Few else "Too many elements pass contains"
 	}
 	io.write_string(w, message) or_return
 	if text, named := e.operand.(string); named && e.kind in ENTRY_OPERAND_KINDS && !names_member(e) {

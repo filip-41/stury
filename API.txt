@@ -595,22 +595,25 @@ Result :: struct { changes: []Change, truncated: bool, unused_keys: []int, arena
 values :: proc(a, b: core.Value, opts := Options{}) -> (r: Result, err: runtime.Allocator_Error)
 # core/rules
 Anchor :: struct { name: string, resource: Node_Index, node: Node_Index, }
-Array :: struct { prefix: []Node_Index, items: Node_Index, contains: Maybe(Node_Index), evaluates_contains: bool, min_contains: Maybe(u64), max_contains: Maybe(u64), }
+Array :: struct { prefix: []Node_Index, items: Node_Index, tuple: bool, contains: Maybe(Node_Index), evaluates_contains: bool, min_contains: Maybe(u64), max_contains: Maybe(u64), }
+Base :: struct { steps: []core.Step, uri: string, }
 Bound :: struct { set, exclusive, whole: bool, int: i64, exact: spell.Decimal, }
 Conditional :: struct { test, then, other: Maybe(Node_Index), }
 Date_Time_Parts :: struct { year, month, day, hour, minute, second, nanosecond, offset: int, }
 Dependent :: struct { name: string, required: []string, node: Maybe(Node_Index), }
-Description :: struct { nodes: [dynamic]Node, arrays: [dynamic]Array, objects: [dynamic]Object, texts: [dynamic]string, anchors: [dynamic]Anchor, names: map[Node_Index]string, root: Node_Index, uri: string, allocator: runtime.Allocator, }
+Description :: struct { nodes: [dynamic]Node, arrays: [dynamic]Array, objects: [dynamic]Object, texts: [dynamic]string, anchors: [dynamic]Anchor, names: map[Node_Index]string, root: Node_Index, uri: string, bases: [dynamic]Base, allocator: runtime.Allocator, }
 Kind :: enum u8 { Null, Bool, Integer, Number, String, Array, Object, }
 Kinds :: bit_set[Kind; u8]
 Leaf :: struct { kinds: Kinds, plain: Kinds, integer_spelled: bool, has_enum: bool, constant: bool, fast: bool, minimum, maximum: Bound, multiple_of: Maybe(spell.Decimal), min_length, max_length: u64, min_items, max_items: u64, min_members: u64, max_members: u64, pattern: rawptr, formats: bit_set[String_Format; u32], enum_keys: []string, }
 Markup_Node :: enum u8 { Any, Attribute, Element, Text, }
 Member :: struct { name: string, node: Node_Index, rules: Rules, required: bool, only_required: bool, }
-Node :: struct { kinds: Kinds, integer_spelled: bool, rules: Rules, array: i32, object: i32, any_of: []Node_Index, enum_of: []core.Value, has_enum: bool, const_of: Maybe(core.Value), all_of, one_of: []Node_Index, not: Maybe(Node_Index), cond: Conditional, ref, dynamic_ref: Maybe(Node_Index), unevaluated_items: Maybe(Node_Index), unevaluated_properties: Maybe(Node_Index), resource: Node_Index, description: string, title: string, content_encoding: string, content_media_type: string, deprecated: bool, default_of: Maybe(core.Value), examples: []core.Value, }
+Node :: struct { kinds: Kinds, integer_spelled: bool, rules: Rules, array: i32, object: i32, any_of: []Node_Index, enum_of: []core.Value, has_enum: bool, const_of: Maybe(core.Value), all_of, one_of: []Node_Index, not: Maybe(Node_Index), cond: Conditional, ref, dynamic_ref: Maybe(Node_Index), spelled: Ref_Spellings, unevaluated_items: Maybe(Node_Index), unevaluated_properties: Maybe(Node_Index), resource: Node_Index, description: string, title: string, content_encoding: string, content_media_type: string, deprecated: bool, default_of: Maybe(core.Value), examples: []core.Value, }
 Node_Index :: distinct i32
-Object :: struct { members: []Member, additional: Node_Index, keys: Node_Index, patterns: []Pattern, dependents: []Dependent, }
+Object :: struct { members: []Member, additional: Node_Index, keys: Node_Index, patterns: []Pattern, dependents: []Dependent, dependencies: bool, }
 Pattern :: struct { expression: string, node: Node_Index, }
-Rules :: struct { minimum, maximum: string, multiple_of, pattern, format: string, unique: bool, assert_format: bool, exclusive_minimum, exclusive_maximum: bool, read_only, write_only: bool, min_length, min_items, min_members: u64, max_length, max_items, max_members: Maybe(u64), markup: Markup_Node, }
+Ref_Spelling :: enum u8 { Ref_Dynamic, Ref_Recursive, Dynamic_Recursive, Dynamic_Static, }
+Ref_Spellings :: bit_set[Ref_Spelling; u8]
+Rules :: struct { minimum, maximum: string, multiple_of, pattern, format: string, unique: bool, assert_format: bool, format_foreign: bool, exclusive_minimum, exclusive_maximum: bool, read_only, write_only: bool, min_length, min_items, min_members: u64, max_length, max_items, max_members: Maybe(u64), markup: Markup_Node, }
 String_Format :: enum u8 { None, Date_Time, Date, Time, Duration, Email, Idn_Email, Hostname, Idn_Hostname, Ipv4, Ipv6, Uri, Uri_Reference, Iri, Iri_Reference, Uri_Template, Uuid, Json_Pointer, Relative_Json_Pointer, Regex, }
 Uri :: struct { scheme, authority, path, query, fragment: string, has_scheme, has_authority, has_query: bool, }
 merged :: proc(n: ^Node, edge: Rules) -> (r: Rules, refused: string)
@@ -632,7 +635,7 @@ set :: proc(src: []u8, as: core.As, path: core.Path, in_: core.Edit_Input, read 
 # core/typed
 Access :: enum u8 { Read_Write, Read_Only, Write_Only, }
 Before :: struct { call: proc(value: core.Value, fn: rawptr, r: ^Report) -> core.Value, fn: rawptr, value: Before_Read, field: Field, first_match: bool, judge: ^Plan, }
-Check :: struct { using reader: Reader, after: []core.Step, run: ^Run, fork: ^Fork, pool: ^Pool, taken: ^Fork, nest: int, fatal: core.Typed_Error_Kind, outer: ^Outer, repeats: Repeats, floor: int, trackers: [dynamic]Tracker, tracked: int, readings: ^Readings, opens: [dynamic]Judged_Open, }
+Check :: struct { using reader: Reader, after: []core.Step, run: ^Run, fork: ^Fork, pool: ^Pool, taken: ^Fork, nest: int, stack: uintptr, fatal: core.Typed_Error_Kind, outer: ^Outer, repeats: Repeats, floor: int, trackers: [dynamic]Tracker, tracked: int, readings: ^Readings, opens: [dynamic]Judged_Open, }
 Checker :: struct { pool: Pool, }
 Close_Validators :: #type proc "contextless" (h: ^Check, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64, base: uintptr) -> bool
 Fields_Set :: struct { bits: [2]u64, }
@@ -705,7 +708,7 @@ bind :: proc(c: ^Compiled, checks: typed.Format_Checks, allocator := context.all
 compare :: proc(old, new: ^rules.Description, opts := Compare_Options{}) -> (r: Comparison, err: runtime.Allocator_Error)
 comparison_destroy :: proc(c: ^Comparison)
 compile :: proc(text: []u8, as: core.As, opts := Options{}, allocator := context.allocator) -> (c: ^Compiled, err: core.Error)
-compile_description :: proc(d: ^rules.Description, opts := Options{}, allocator := context.allocator) -> Compiled
+compile_description :: proc(d: ^rules.Description, opts := Options{}, allocator := context.allocator) -> (c: ^Compiled, err: core.Error)
 convert :: proc(cv: ^Converter, doc: ^core.Document, opts := core.Write_Options{}, sink: ^typed.Sink = nil, allocator := context.allocator) -> (text: []u8, stage: Stage, err: core.Error)
 converter_destroy :: proc(cv: ^Converter)
 converter_init :: proc(cv: ^Converter, c: ^Compiled, from, to: core.As, from_reads: ^typed.Format_Reads = nil, to_reads: ^typed.Format_Reads = nil) -> (err: core.Error)

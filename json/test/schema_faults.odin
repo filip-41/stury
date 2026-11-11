@@ -101,20 +101,35 @@ a_shared_allof_chain_binds_in_bounded_memory :: proc(t: ^testing.T) {
 	e := binds(strings.to_string(text)); testing.expectf(t, e == nil, "%v", e)
 }
 
-// A chain of references loads and binds in time linear in its length.
+// A chain of references loads and binds in time linear in its length: a chain eight times as long takes less than 32
+// times as long, where a search along the chain from each link would take 64 times as long. Each length takes its
+// fastest of three runs, and a ratio of two times holds on a machine that runs slow throughout.
 @(test)
 a_long_ref_chain_loads_and_binds :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
-	text := strings.builder_make()
-	strings.write_string(&text, `{"$ref": "#/$defs/r50000", "$defs": {"r0": {"type": "integer"}`)
-	for i in 1 ..= 50000 {
-		fmt.sbprintf(&text, `, "r%d": {{"$ref": "#/$defs/r%d"}}`, i, i - 1)
+	chain :: proc(links: int) -> string {
+		text := strings.builder_make()
+		fmt.sbprintf(&text, `{{"$ref": "#/$defs/r%d", "$defs": {{"r0": {{"type": "integer"}}`, links)
+		for i in 1 ..= links {
+			fmt.sbprintf(&text, `, "r%d": {{"$ref": "#/$defs/r%d"}}`, i, i - 1)
+		}
+		strings.write_string(&text, "}}")
+		return strings.to_string(text)
 	}
-	strings.write_string(&text, "}}")
-	start := time.tick_now()
-	e := binds(strings.to_string(text)); testing.expectf(t, e == nil, "%v", e)
-	testing.expectf(t, time.duration_seconds(time.tick_since(start)) < 5, "took %v", time.tick_since(start))
+	short, long := chain(6250), chain(50000)
+	fastest: [2]time.Duration = max(time.Duration)
+	for _ in 0 ..< 3 {
+		for text, i in ([2]string{short, long}) {
+			start := time.tick_now()
+			e := binds(text)
+			fastest[i] = min(fastest[i], time.tick_since(start))
+			if !testing.expectf(t, e == nil, "%v", e) {
+				return
+			}
+		}
+	}
+	testing.expectf(t, fastest[1] < 32 * fastest[0], "%v for 50000 links, %v for 6250", fastest[1], fastest[0])
 }
 
 // A schema whose references lead 2100 levels down is refused and no recursion runs out of stack.
