@@ -46,6 +46,8 @@ Read_Options :: struct {
 	// A model's patch: the structs `merge` descends into, the root and its struct members whose structs hold a
 	// `Fields_Set`, miss no member and take no default. Every other struct reads as a full load reads it.
 	partial:     bool,
+	// What a `Check` keeps for the next value it checks, nil for nothing.
+	checker:     ^Checker,
 }
 
 // How a `Check` meets a key that repeats inside one object. `.Ignore` judges every value as it comes, which is the

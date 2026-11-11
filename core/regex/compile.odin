@@ -86,7 +86,7 @@ Regex :: struct {
 	slots:    int, // two per group with the whole match, then a mark per loop that can match empty
 	opt:      ^Search_Opt, // what Oniguruma's optimizer would have the search skip by, kept apart since a Regex is copied
 	visited:  ^Visited, // under `linear`, what the visited set needs of the program
-	dfa:      ^Dfa, // under `ecma`, the automaton that answers a search that reads no bounds, or nil (dfa.odin)
+	dfa:      ^Dfa, // the automaton that answers a search that reads no bounds, or nil (dfa.odin)
 	prefix:   string, // every match starts with these bytes
 	first:     [4]u64, // with has_first, the bytes a match can start with
 	longest:   bool, // ONIG_OPTION_FIND_LONGEST: the longest match of all, not the first
@@ -155,11 +155,12 @@ in_property :: proc(name: string, r: rune) -> bool {
 }
 
 // `pattern` compiled as jq compiles it, or Oniguruma's message for why not. The program, what it was built from and
-// any message are allocated from `allocator`, which is meant to be an arena the caller frees whole. Under `ecma` the
-// build of the automaton borrows its working memory from `context.allocator` and frees it before returning.
-compile :: proc(pattern: string, flags: Flags, allocator := context.allocator) -> (re: Regex, err: string) {
+// any message are allocated from `allocator`, which is meant to be an arena the caller frees whole. With `automaton`
+// the automata are built too, which pays for a regex that searches more than a few short texts. Their build borrows
+// its working memory from `context.allocator` and frees it before returning.
+compile :: proc(pattern: string, flags: Flags, allocator := context.allocator, automaton := true) -> (re: Regex, err: string) {
 	scratch := context.allocator
-	if re, err = program(pattern, flags, allocator); err == "" && flags.ecma {
+	if re, err = program(pattern, flags, allocator); err == "" && automaton {
 		re.dfa = build_dfa(&re, allocator, scratch)
 	}
 	return

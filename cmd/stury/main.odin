@@ -101,7 +101,7 @@ main :: proc() {
 	case !validating && !cli.formatting && cli.schema.flag != "":
 		usage_error("%s is check's: a schema judges the inputs of stury check", cli.schema.flag)
 	case !cli.schema_verb && cli.verbs.flag != "":
-		usage_error("%s is schema's: stury schema infer and stury schema sample take it", cli.verbs.flag)
+		usage_error("%s is schema's: stury schema %s takes it", cli.verbs.flag, verb_of_option(cli.verbs.flag))
 	case validating || cli.formatting || cli.editing || cli.schema_verb:
 		if flag := command_refused_option(o, &cli); flag != "" {
 			usage_error("%s has no use with %s: %s", flag, command_name(&cli), "it types the filter and writes the schema of its outputs" if validating && cli.schema.filter != nil else "it runs no filter and prints nothing" if validating else "it runs no filter and writes each input's own format" if cli.formatting else "it runs no filter and writes a schema or samples" if cli.schema_verb else "it writes each input back in its own bytes")

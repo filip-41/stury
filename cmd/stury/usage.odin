@@ -166,9 +166,11 @@ one holds a fault, 2 for a usage or file error. In full: stury(1), or docs/cli.m
 @(private = "file")
 SCHEMA_HELP :: `Usage:	stury schema infer [--from format] [--ranges] [file...]
 	stury schema sample [--to format] [--count n] [--seed n] [--invalid] [--comments] schema
+	stury schema gen [--package name] schema
 
 infer writes the JSON Schema that every record of the inputs passes. sample
-writes values that pass the schema file, a text a line.
+writes values that pass the schema file, a text a line. gen writes the Odin
+types a model reads the schema's values with.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson, csv or tsv;
@@ -178,11 +180,13 @@ Options:
       --count n, --seed n   sample: how many values, and from which seed;
       --invalid             sample: values that fail the schema;
       --comments            sample: write descriptions as comments;
+      --package name        gen: the package of the types, by default the
+                            schema file's name;
       -c, --indent n, --tab, -S, -a   the layout of the text written;
   -h, --help                show this help.
 
-Exit status: 0, 1 when no value passes the schema, 5 when an input holds a
-fault, 2 for a usage or file error.
+Exit status: 0, 1 when no value passes the schema or no Odin type spells a
+keyword, 5 when an input holds a fault, 2 for a usage or file error.
 `
 
 // `stury fmt --help`.

@@ -35,6 +35,7 @@ plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, 
 		}
 	}
 	if opts.checking {
+		choose_arms(&b, arena)
 		for u in b.uses {
 			if len(u.applies) > 0 {
 				p.fork = fork_record(&b)
@@ -156,24 +157,23 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 			}
 			o.members, u.requires = dependent_members(b, arena, o)
 			if !known_struct(b, {typeid_of(rules.Object), n.object, b.scope}, &f, &m) && struct_block(b, {typeid_of(rules.Object), n.object, b.scope}, &f, &m, o.members, false) >= 0 {
-				checked_members(b, d, arena, m.block, o)
+				checked_members(b, d, arena, m.block, o, UNEVALUATED_PROPERTIES[:] if b.unevaluated[{0, n.object}] else ADDITIONAL[:])
 			}
 			if o.additional != rules.NONE {
-				u.additional = checked_block(b, d, arena, {typeid_of(Maybe(rules.Object)), n.object, b.scope}, nil, o.additional, ADDITIONAL[:])
+				u.additional = checked_block(b, d, arena, {typeid_of(Maybe(rules.Object)), n.object, b.scope}, nil, o.additional, UNEVALUATED_PROPERTIES[:] if b.unevaluated[{0, n.object}] else ADDITIONAL[:])
 			}
 			if p, inline := b.inline[n.object]; inline {
 				site := [2]core.Step{core.Name("patternProperties"), core.Name(p.expression)}
 				u.pattern, u.regex = checked_block(b, d, arena, {typeid_of(rules.Pattern), n.object, b.scope}, nil, p.node, site[:]), p.regex
 			}
-			if keys, _ := reached(d, o.keys); keys != rules.NONE && holds(b, d, keys, {}) {
-				refuse_plan(b, .Unsupported, text = "propertyNames")
-			} else if keys != rules.NONE {
+			// A `propertyNames` with arms is the held record's `.Names` arm.
+			if keys, _ := reached(d, o.keys); keys != rules.NONE && !holds(b, d, keys, {}) {
 				u.keys = checked_leaf(b, &d.nodes[keys], {}, arena)
 			}
 		}
 		if .Array in n.kinds {
 			a := d.arrays[n.array] if n.array >= 0 else rules.Array{items = rules.NONE}
-			u.items = checked_block(b, d, arena, {typeid_of(rules.Array), n.array, b.scope}, a.prefix, a.items, ITEMS[:])
+			u.items = checked_block(b, d, arena, {typeid_of(rules.Array), n.array, b.scope}, a.prefix, a.items, UNEVALUATED_ITEMS[:] if b.unevaluated[{1, n.array}] else ITEMS[:])
 			items, _ := reached(d, a.items)
 			u.inside = len(a.prefix) > 0 || items != rules.NONE
 		}
@@ -213,6 +213,14 @@ ADDITIONAL := [1]core.Step{core.Name("additionalProperties")}
 @(rodata)
 ITEMS := [1]core.Step{core.Name("items")}
 
+@(private)
+@(rodata)
+UNEVALUATED_PROPERTIES := [1]core.Step{core.Name("unevaluatedProperties")}
+
+@(private)
+@(rodata)
+UNEVALUATED_ITEMS := [1]core.Step{core.Name("unevaluatedItems")}
+
 // The members of `o` with each name its `dependentRequired` lists and no other member names, which read as the object's
 // other members, and that keyword's members as places among them.
 @(private)
@@ -249,12 +257,13 @@ dependent_members :: proc(b: ^Builder, arena: runtime.Allocator, o: rules.Object
 	return members[:], requires[:]
 }
 
-// Fills the members of struct block `at` of object `o`. A name only `required` lists reads as the object's other members.
+// Fills the members of struct block `at` of object `o`. A name only `required` lists reads as the object's other members,
+// under the keyword steps `other`.
 @(private)
-checked_members :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, at: i32, o: rules.Object) {
+checked_members :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, at: i32, o: rules.Object, other: []core.Step) {
 	for x, i in o.members {
 		if x.only_required {
-			fill_checked(b, d, arena, int(at) + i, o.additional, x.name, {}, ADDITIONAL[:])
+			fill_checked(b, d, arena, int(at) + i, o.additional, x.name, {}, other)
 			continue
 		}
 		site := [2]core.Step{core.Name("properties"), core.Name(x.name)}

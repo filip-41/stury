@@ -7,6 +7,9 @@
 - `stury fmt --schema FILE` converts through a JSON Schema: the input passes it, the members it leaves open are kept, and
   the output passes it as the output format reads it. Library: `schema.Converter` and `schema.convert`.
 
+- `stury schema gen SCHEMA [--package NAME]` writes the Odin types a model reads a schema's values with, and exits 1
+  naming the keyword where no type spells one. Library: `schema.write_odin`.
+
 - `stury schema sample --to csv` writes the union of the rows' members as its columns, an absent member as an empty cell,
   and refuses a nested cell.
 
@@ -101,6 +104,13 @@
 - A regex holds a run of plain characters as one node over the pattern's text, and a sequence of one element as that
   element, so a long literal, alternation or run of groups compiles in about jq's memory. A pattern of more than 32767
   groups fails with `Regex failure: too many captures`, as jq's does.
+- `test` and the other regex functions answer from automata built when the pattern compiles, with the same answers as
+  before: `test` from a deterministic automaton of the whole search, and `match`, `capture`, `sub`, `gsub`, `scan` and
+  `splits` from one that finds where Oniguruma's first match ends and one run back from there that finds where it
+  starts, the groups then read at that start alone. Case folding, `x`, `s`, multiline, `\b`, `\B`, `^`, `$` and `\Z`
+  are in the automata. A pattern with look-around, back-references, calls or absent groups, one whose automaton passes
+  the build's work budget, the `l` and `n` flags and a search that Oniguruma's retry limit could end search as before,
+  and a pattern with an empty loop or `\K` answers only `test` from the automaton.
 - Numbers are equal, ordered and hashed by the exact decimal a literal spells, at any size, in the filter's `==`, `<`,
   `sort`, `unique` and `group_by` as in the library. jq reads a literal past decNumber's range as its double, so it
   calls `1e1000000000` and `1e1000000001` equal and `1e-2000000000` zero. A double that arithmetic made from a longer
@@ -125,6 +135,8 @@
 - A schema `pattern` over a text too long for the regex's visited set gets an answer from the pattern's automaton, where
   the check failed the text before. A schema compiles each distinct pattern once, and its read checks a pattern's syntax
   without building the automaton. `regex.refusal` is that check.
+- `regex.compile` builds the automata for every pattern, not only under `ecma`, unless `automaton` is false.
+  `regex.Scratch.ends` holds where the automaton found the last search's match to end.
 - `core.kind` of a CSV or TSV cell is the kind the cell reads as, in place of `.Plain`: an empty unquoted cell is
   `.Null`, as a typed read and the CLI read it, and with `infer` a boolean or number cell is `.True`, `.False` or
   `.Number`. A JSON write of a dsv document writes an empty cell as `null` without `infer` too. `core.resolve` is gone.
@@ -194,6 +206,8 @@
 - `Load_Opts{partial = true}` reads a patch: the structs `merge` descends into miss no member and take no default.
   `model.merge` copies the members a patch's `Fields_Set` holds and its captured members into an existing value, struct
   members with their own set member by member.
+- `schema.write_odin` writes the Odin source of the types of a description's values, with a `register` procedure for
+  the rules no tag holds, and refuses a keyword no type spells as `.Unsupported`, naming it.
 - `model.problem` (`write.problem`) makes an RFC 9457 problem document of a sink's entries, for any format to write.
   `load`, `load_value` and `read` take `Load_Opts` in place of `dups`.
 
@@ -219,6 +233,7 @@
 - Every runner takes the same arguments and prints the machine it ran on. The stury arm is named `stury`. The typed
   lanes have serde_json and sonic-rs arms, and every write arm writes into one buffer. `gen.py --check` writes
   nothing, and the CLI comparisons take `CASES`. `bench/write dump` writes the typed lanes through `model.dump`. [bench/README.md](bench/README.md) describes the harness.
+- `bench-cli` times the regex functions.
 
 ### Development
 

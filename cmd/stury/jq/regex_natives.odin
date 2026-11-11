@@ -13,9 +13,9 @@ regex_input :: proc(ip: ^Interp, v: Value) -> (string, Signal) {
 }
 
 // The regex `re` with `flags` and its matches in `s`: every one or the first as `global` says, else as the
-// flags say.
+// flags say, and under `whether` only whether there is one (matches).
 @(private = "file")
-regex_run :: proc(ip: ^Interp, re, flags: Value, s: string, global: Maybe(bool)) -> (r: Regex, ms: []Match, sig: Signal) {
+regex_run :: proc(ip: ^Interp, re, flags: Value, s: string, global: Maybe(bool), whether := false) -> (r: Regex, ms: []Match, sig: Signal) {
 	pattern, ok := string_of(re)
 	if !ok {
 		return {}, nil, fail(ip, "%s (%s) is not a string", type_name(re), brief(ip, re))
@@ -26,7 +26,7 @@ regex_run :: proc(ip: ^Interp, re, flags: Value, s: string, global: Maybe(bool))
 	if g, set := global.?; set {
 		r.global = g
 	}
-	ms, sig = matches(ip, &r, s)
+	ms, sig = matches(ip, &r, s, whether)
 	return
 }
 
@@ -34,7 +34,7 @@ regex_run :: proc(ip: ^Interp, re, flags: Value, s: string, global: Maybe(bool))
 // first: a 1-argument call's wrapper on its argument's type (`re` or `[re]` or `[re, flags]`), then
 // `_match_impl` on the input, then on the regex.
 @(private = "file")
-regex_on :: proc(ip: ^Interp, v: Value, args: []Value, global: Maybe(bool) = nil) -> (r: Regex, s: string, ms: []Match, sig: Signal) {
+regex_on :: proc(ip: ^Interp, v: Value, args: []Value, global: Maybe(bool) = nil, whether := false) -> (r: Regex, s: string, ms: []Match, sig: Signal) {
 	re, flags := args[0], args[1] if len(args) > 1 else nil
 	if len(args) == 1 {
 		switch kind(re) {
@@ -52,12 +52,12 @@ regex_on :: proc(ip: ^Interp, v: Value, args: []Value, global: Maybe(bool) = nil
 	if s, sig = regex_input(ip, v); sig != .Go {
 		return
 	}
-	r, ms, sig = regex_run(ip, re, flags, s, global)
+	r, ms, sig = regex_run(ip, re, flags, s, global, whether)
 	return
 }
 
 fn_test :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	_, _, ms, sig := regex_on(ip, v, args, false)
+	_, _, ms, sig := regex_on(ip, v, args, false, whether = true)
 	return len(ms) > 0, sig
 }
 

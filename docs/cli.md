@@ -315,6 +315,16 @@ where the format has comments (`--to jsonc`). Each value is a line, compact unle
 CSV or TSV value is a table, so those take `--count 1`. A schema that no value passes is exit 1 and names the keyword
 path of the node the search stopped at.
 
+`stury schema gen SCHEMA` writes the Odin source of the types a model reads the schema's values with, and a procedure
+`register` that adds the rules no tag holds to a `model.Registry`, as `schema.write_odin` writes them: a struct for an
+object with members, its tags naming each member (`json:`), saying it may be left out and holding its rules (`model:`),
+a map for one with none, an enum for `enum` and `const`, a union for `anyOf`, a `oneOf` of disjoint arms and a list of
+kinds, a pointer where a struct holds itself, and `time.Time`, `uuid.Identifier`, `model.Email` and `model.Base64` for
+the formats and the encoding they read. `$defs` are named types. The package is `--package NAME`, by default the file's
+name with each run of other bytes than letters and digits an underscore (`my-types.schema.json` is `my_types`). A
+keyword no type spells (`allOf`, `if`, `patternProperties`, `oneOf` with overlapping arms, ...) is exit 1, told with the
+path of the node that holds it.
+
 ## `fmt`
 
 `fmt --schema FILE` converts each text of the input through a JSON Schema, a record at a time for NDJSON and the

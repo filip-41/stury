@@ -15,17 +15,18 @@ Found :: struct {
 	err:                string,
 	resumes:            int,
 	automaton:          bool, // the pattern has the automaton that answers a search reading no bounds
+	ends:               int, // where the automaton that finds where a match ends found it to, -1 for none
 }
 
 search :: proc(pattern, text: string, linear := true, flags := regex.Flags{ecma = true}, whether := false) -> (f: Found) {
-	f = {-1, -1, -1, -1, "", 0, false}
+	f = {-1, -1, -1, -1, "", 0, false, -1}
 	arena: virtual.Arena
 	if virtual.arena_init_growing(&arena) != nil {
 		f.err = "no memory"
 		return
 	}
 	defer virtual.arena_destroy(&arena)
-	re, err := regex.compile(pattern, flags, virtual.arena_allocator(&arena))
+	re, err := regex.compile(pattern, flags, virtual.arena_allocator(&arena), automaton = linear)
 	if err != "" {
 		f.err = strings.clone(err, context.temp_allocator)
 		return
@@ -37,7 +38,7 @@ search :: proc(pattern, text: string, linear := true, flags := regex.Flags{ecma 
 	caps: [4]int
 	found: bool
 	found, err = regex.search(&re, text, 0, caps[:0 if whether else min(4, 2 * len(re.names))], &scratch)
-	f.err, f.resumes = strings.clone(err, context.temp_allocator), scratch.resumes
+	f.err, f.resumes, f.ends = strings.clone(err, context.temp_allocator), scratch.resumes, scratch.ends
 	if found {
 		f.lo, f.hi = caps[0], caps[1]
 		if len(re.names) > 1 && !whether {
@@ -279,7 +280,7 @@ test_ecma_visited_set_keeps_the_matches :: proc(t: ^testing.T) {
 		}
 		pattern := strings.to_string(b)
 		with, without := search(pattern, string(text)), search(pattern, string(text), linear = false)
-		with.resumes, without.resumes = 0, 0
+		with.resumes, with.automaton, without.resumes = 0, false, 0
 		testing.expectf(t, with == without, "%q on %q: %v with the set, %v without", pattern, string(text), with, without)
 	}
 }
@@ -307,14 +308,17 @@ test_ecma_automaton_is_linear :: proc(t: ^testing.T) {
 		f := search(c.pattern, strings.concatenate({text, c.tail}, context.temp_allocator), whether = true)
 		testing.expectf(t, f.automaton && f.err == "" && (f.lo == 0) == c.found, "%q: automaton %v, %v %s", c.pattern, f.automaton, f.lo == 0, f.err)
 	}
-	// Look-ahead and `\b` leave a pattern to the visited set.
-	for pattern in ([?]string{`(?=a)b`, `(?!a*b)a`, `\ba`, `a\B`}) {
+	// Look-ahead leaves a pattern to the visited set, and `\b` does not.
+	for pattern in ([?]string{`(?=a)b`, `(?!a*b)a`}) {
 		testing.expectf(t, !search(pattern, "a").automaton, "%q has an automaton", pattern)
+	}
+	for pattern in ([?]string{`\ba`, `a\B`}) {
+		testing.expectf(t, search(pattern, "a").automaton, "%q has no automaton", pattern)
 	}
 }
 
-// Building the automaton of each of these patterns stays within a bound on its working memory, on the bytes it moves
-// and on its time, frees its working memory before it returns and keeps the program and a table of at most a megabyte.
+// Building the automata of each of these patterns stays within a bound on its working memory, on the bytes it moves
+// and on its time, frees its working memory before it returns and keeps the program and a megabyte of table an automaton.
 @(test)
 test_ecma_automaton_build_is_bounded :: proc(t: ^testing.T) {
 	repeat :: proc(piece: string, n: int, sep := "") -> string {
@@ -347,7 +351,11 @@ test_ecma_automaton_build_is_bounded :: proc(t: ^testing.T) {
 		`(a|b)*a(a|b){20}`,
 		`^[a-z]{0,1000}$`,
 	}
-	for pattern in patterns {
+	// Under jq's syntax the build makes three automata within the one budget, and a pattern of ECMA's syntax alone can
+	// fail to compile.
+	for k in 0 ..< 2 * len(patterns) {
+		pattern, flags := patterns[k / 2], regex.Flags{ecma = k % 2 == 0}
+		automata := 1 if flags.ecma else 3
 		program, scratch: mem.Tracking_Allocator
 		arena: virtual.Arena
 		testing.expect(t, virtual.arena_init_growing(&arena) == nil)
@@ -360,15 +368,15 @@ test_ecma_automaton_build_is_bounded :: proc(t: ^testing.T) {
 		err: string
 		{
 			context.allocator = mem.tracking_allocator(&scratch)
-			_, err = regex.compile(pattern, {ecma = true}, mem.tracking_allocator(&program))
+			_, err = regex.compile(pattern, flags, mem.tracking_allocator(&program))
 		}
 		took := time.tick_since(start)
 		name := pattern[:min(len(pattern), 40)]
-		testing.expectf(t, err == "", "%q: %s", name, err)
+		testing.expectf(t, err == "" || !flags.ecma, "%q: %s", name, err)
 		testing.expectf(t, scratch.current_memory_allocated == 0, "%q keeps %d bytes of scratch", name, scratch.current_memory_allocated)
 		testing.expectf(t, scratch.peak_memory_allocated <= 8 << 20, "%q: %d bytes of scratch at once", name, scratch.peak_memory_allocated)
 		testing.expectf(t, scratch.total_memory_allocated <= 16 << 20, "%q: %d bytes of scratch in all", name, scratch.total_memory_allocated)
-		testing.expectf(t, program.current_memory_allocated <= i64(1 << 20 + 300 * len(pattern)), "%q keeps %d bytes", name, program.current_memory_allocated)
+		testing.expectf(t, program.current_memory_allocated <= i64(automata << 20 + 300 * len(pattern)), "%q keeps %d bytes", name, program.current_memory_allocated)
 		testing.expectf(t, took < 2 * time.Second, "%q compiles in %v", name, took)
 	}
 }
@@ -459,4 +467,109 @@ test_ecma_automaton_keeps_the_answers :: proc(t: ^testing.T) {
 		testing.expectf(t, whether.err == with.err && (whether.lo >= 0) == (with.lo >= 0), "%q on %q: %v whether, %v with the set", pattern, strings.to_string(text), whether, with)
 	}
 	testing.expectf(t, built > 8000, "%d of 20000 patterns have the automaton", built)
+}
+
+// A jq pattern drawn from `state`, of the instructions and assertions the automaton runs and some it does not.
+generate_jq :: proc(b: ^strings.Builder, state: ^u64, depth: int) {
+	next :: proc(state: ^u64, n: int) -> int {
+		state^ = state^ * 6364136223846793005 + 1442695040888963407
+		return int(state^ >> 33) % n
+	}
+	for _ in 0 ..< 1 + next(state, 3) {
+		atoms := [?]string{"a", "A", "b", "k", "é", "É", "ß", "_", " ", "1", ".", "[a-c]", "[^a]", "[K\\d]", "\\w", "\\W", "\\d", "\\s", "\\p{L}", "[\\w-]", "\\b", "\\B", "^", "$", "\\A", "\\z", "\\Z", "\\n", "ab", "(?i:a)", "(?i:[k-m])", "(?i:é)", "(?=a)"}
+		k := next(state, len(atoms) + 4)
+		switch {
+		case k < len(atoms):
+			strings.write_string(b, atoms[k])
+		case depth == 0:
+			strings.write_string(b, "a")
+		case k < len(atoms) + 2:
+			strings.write_string(b, "(")
+			generate_jq(b, state, depth - 1)
+			strings.write_string(b, ")")
+		case:
+			strings.write_string(b, "(?:")
+			generate_jq(b, state, depth - 1)
+			strings.write_string(b, "|")
+			generate_jq(b, state, depth - 1)
+			strings.write_string(b, ")")
+		}
+		quantifiers := [?]string{"", "", "", "*", "+", "?", "*?", "+?", "{2}", "{1,3}", "{2,}"}
+		strings.write_string(b, quantifiers[next(state, len(quantifiers))])
+	}
+}
+
+// Under jq's syntax the automaton answers the assertions as Oniguruma does at a text's edges and its lines.
+@(test)
+test_jq_automaton_assertions :: proc(t: ^testing.T) {
+	Case :: struct {
+		pattern, text: string,
+		flags:         regex.Flags,
+		found:         bool,
+	}
+	lines :: regex.Flags{multiline = true}
+	cases := [?]Case {
+		{"\\n^", "a\n", lines, false}, // `^` does not hold after a newline that ends the text
+		{"\\n^", "a\nb", lines, true},
+		{"\\n^", "a\nb", {}, false},
+		{"a$", "a\nb", lines, true},
+		{"a$\\n", "a\n", lines, true},
+		{"a$", "a\nb", {}, false},
+		{"a$", "a\n", {}, true},
+		{"a$", "a\n\n", {}, false},
+		{"\\n$", "a\n\n", {}, true},
+		{"$", "", {}, true},
+		{"a\\z", "a\n", {}, false},
+		{"a\\Z", "a\n", {}, true},
+		{"a\\Z\\n", "a\n", {}, true},
+		{"\\Aa", "ba", {}, false},
+		{"^$", "", {}, true},
+		{"\\ba\\b", "b a_", {}, false},
+		{"\\ba\\b", "b a-", {}, true},
+		{"\\Ba", "ba", {}, true},
+		{"\\bé", " é", {}, true}, // a letter past ASCII is a word character
+		{"k", "\u212a", {fold = true}, true},
+		{"[^k]", "\u212a", {fold = true}, false},
+		{"ss", "ß", {fold = true}, true},
+		{".", "\n", {}, false},
+		{".", "\n", {dotall = true}, true},
+		{"a b", "ab", {extend = true}, true},
+	}
+	for c in cases {
+		whether := search(c.pattern, c.text, flags = c.flags, whether = true)
+		with := search(c.pattern, c.text, flags = c.flags)
+		testing.expectf(t, whether.automaton, "%q has no automaton", c.pattern)
+		testing.expectf(t, (whether.lo >= 0) == c.found && (with.lo >= 0) == c.found, "%q %v on %q: %v whether, %v with the set", c.pattern, c.flags, c.text, whether, with)
+	}
+}
+
+// Under jq's syntax and flags the automata find a match exactly where the backtracker does, with its groups' bounds,
+// on generated patterns and on texts of up to ten characters across words, lines and case.
+@(test)
+test_jq_automaton_keeps_the_answers :: proc(t: ^testing.T) {
+	state := u64(20261111)
+	built, first := 0, 0
+	pieces := [?]string{"a", "a", "A", "b", "k", "K", "\u212a", "é", "É", "ß", "s", "_", "1", " ", "\n", "-", "😀"}
+	for _ in 0 ..< 20000 {
+		b := strings.builder_make(context.temp_allocator)
+		generate_jq(&b, &state, 2)
+		state = state * 6364136223846793005 + 1442695040888963407
+		flags := regex.Flags{fold = state & 8 != 0, dotall = state & 16 != 0, extend = state & 32 != 0, multiline = state & 64 != 0}
+		text := strings.builder_make(context.temp_allocator)
+		for _ in 0 ..< int(state >> 33) % 11 {
+			state = state * 6364136223846793005 + 1442695040888963407
+			strings.write_string(&text, pieces[int(state >> 33) % len(pieces)])
+		}
+		pattern := strings.to_string(b)
+		whether := search(pattern, strings.to_string(text), flags = flags, whether = true)
+		with := search(pattern, strings.to_string(text), flags = flags)
+		plain := search(pattern, strings.to_string(text), linear = false, flags = flags)
+		built += int(whether.automaton)
+		first += int(with.ends >= 0)
+		testing.expectf(t, whether.err == plain.err && (whether.lo >= 0) == (plain.lo >= 0), "%q %v on %q: %v whether, %v backtracking", pattern, flags, strings.to_string(text), whether, plain)
+		testing.expectf(t, with.ends < 0 || with.ends == with.hi, "%q %v on %q: the automaton ends the match at %d, the backtracker at %d", pattern, flags, strings.to_string(text), with.ends, with.hi)
+		with.resumes, with.ends, with.automaton, plain.resumes = 0, -1, false, 0
+		testing.expectf(t, with == plain, "%q %v on %q: %v with the automata, %v backtracking", pattern, flags, strings.to_string(text), with, plain)
+	}
+	testing.expectf(t, built > 8000 && first > 3000, "%d of 20000 patterns have the automaton, %d searches found a match's end with it", built, first)
 }

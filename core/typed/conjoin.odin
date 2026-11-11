@@ -18,19 +18,10 @@ Conjoined :: struct {
 	arms:   []rules.Node_Index,
 }
 
-// The description `d` with the conjoined node of each holder whose arms conjoin, in `arena`, recorded in `b.conjoined`.
-// `d` itself is returned unchanged when a node judges by a dynamic scope or by what was evaluated, which conjoining
-// would move.
+// The description `d` with its fixed evaluated sets settled and the conjoined node of each holder whose arms conjoin, in
+// `arena`, recorded in `b.conjoined`. A node `kept_apart` names is not conjoined.
 @(private)
 conjoin_description :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator) -> rules.Description {
-	if len(d.anchors) > 0 {
-		return d^
-	}
-	for &n in d.nodes {
-		if n.dynamic_ref != nil || n.unevaluated_items != nil || n.unevaluated_properties != nil {
-			return d^
-		}
-	}
 	x := d^
 	x.nodes, x.objects, x.arrays = make([dynamic]rules.Node, arena), make([dynamic]rules.Object, arena), make([dynamic]rules.Array, arena)
 	append(&x.nodes, ..d.nodes[:])
@@ -38,9 +29,14 @@ conjoin_description :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.A
 	append(&x.arrays, ..d.arrays[:])
 	x.allocator = arena
 	b.conjoined.allocator, b.pairs.allocator, b.inline.allocator = arena, arena, arena
+	settle_unevaluated(b, &x, arena)
 	inline_patterns(b, &x, arena)
+	kept := kept_apart(&x, arena)
 	// Conjoining appends the nodes that two members' values make, which the loop reaches in turn.
 	for i := 0; i < len(x.nodes); i += 1 {
+		if i < len(kept) && kept[i] {
+			continue
+		}
 		n := x.nodes[i]
 		// A value passes the parts and one arm of a run exactly when it passes one arm conjoined with the parts.
 		group := n.any_of if len(n.one_of) == 0 else n.one_of if len(n.any_of) == 0 else nil
@@ -68,6 +64,97 @@ conjoin_description :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.A
 		b.conjoined[rules.Node_Index(i)] = Conjoined{node, c.held[:], c.lifted[:], arms}
 	}
 	return x
+}
+
+// The nodes of `d` whose conjoining would move what a dynamic scope or an evaluated set holds: each node that reaches a
+// `$dynamicRef` or an unevaluated keyword by any keyword, and each node the holder of an unevaluated keyword reaches in
+// place.
+@(private = "file")
+kept_apart :: proc(d: ^rules.Description, arena: runtime.Allocator) -> []bool {
+	kept := make([]bool, len(d.nodes), arena)
+	next := make([dynamic]rules.Node_Index, arena)
+	for &n, i in d.nodes {
+		kept[i] = n.dynamic_ref != nil || n.unevaluated_items != nil || n.unevaluated_properties != nil
+	}
+	// A node that reaches a kept node is kept, which each pass carries one keyword up.
+	for changed := true; changed; {
+		changed = false
+		for &n, i in d.nodes {
+			if kept[i] {
+				continue
+			}
+			clear(&next)
+			node_children(d, &n, &next, false)
+			for x in next {
+				if x != rules.NONE && kept[x] {
+					kept[i], changed = true, true
+					break
+				}
+			}
+		}
+	}
+	reached := make([]bool, len(d.nodes), arena)
+	clear(&next)
+	for &n, i in d.nodes {
+		if n.unevaluated_items != nil || n.unevaluated_properties != nil {
+			append(&next, rules.Node_Index(i))
+		}
+	}
+	for len(next) > 0 {
+		x := pop(&next)
+		if x == rules.NONE || reached[x] {
+			continue
+		}
+		reached[x], kept[x] = true, true
+		node_children(d, &d.nodes[x], &next, true)
+	}
+	return kept
+}
+
+// Appends to `out` the nodes `n` applies, those that judge its value itself when `in_place`, and else every node it holds.
+@(private = "file")
+node_children :: proc(d: ^rules.Description, n: ^rules.Node, out: ^[dynamic]rules.Node_Index, in_place: bool) {
+	append(out, ..n.all_of)
+	append(out, ..n.any_of)
+	append(out, ..n.one_of)
+	for x in ([?]Maybe(rules.Node_Index){n.not, n.cond.test, n.cond.then, n.cond.other, n.ref, n.dynamic_ref}) {
+		if r, has := x.?; has {
+			append(out, r)
+		}
+	}
+	if n.object >= 0 {
+		o := &d.objects[n.object]
+		for x in o.dependents {
+			if r, has := x.node.?; has {
+				append(out, r)
+			}
+		}
+		if !in_place {
+			for x in o.members {
+				append(out, x.node)
+			}
+			for x in o.patterns {
+				append(out, x.node)
+			}
+			append(out, o.additional, o.keys)
+		}
+	}
+	if in_place {
+		return
+	}
+	for x in ([?]Maybe(rules.Node_Index){n.unevaluated_items, n.unevaluated_properties}) {
+		if r, has := x.?; has {
+			append(out, r)
+		}
+	}
+	if n.array >= 0 {
+		a := &d.arrays[n.array]
+		append(out, ..a.prefix)
+		append(out, a.items)
+		if r, has := a.contains.?; has {
+			append(out, r)
+		}
+	}
 }
 
 // The record of an arm that judges by `node` in a check with no sink: that of its conjoined node when it has one and
@@ -313,7 +400,7 @@ takes_all :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index) ->
 	return n.kinds == rules.EVERY_KIND && n.object < 0 && n.array < 0 && !bare_judges(b, d, n, {}) && !holds(b, d, x, {})
 }
 
-// Records in `b.inline` each object of `d` with one pattern that names none of its members, which its record then reads
+// Records in `b.inline` each object of `d` with one pattern that matches none of its members' names, which its record then reads
 // as it reads its other members, with no arm.
 @(private = "file")
 inline_patterns :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator) {
@@ -332,6 +419,17 @@ inline_patterns :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 		for m in o.members {
 			if matches(re, m.name, &scratch) {
 				continue objects
+			}
+		}
+		// The names `dependentRequired` lists are members of the record too.
+		for x in o.dependents {
+			if matches(re, x.name, &scratch) {
+				continue objects
+			}
+			for name in x.required {
+				if matches(re, name, &scratch) {
+					continue objects
+				}
 			}
 		}
 		b.inline[i32(i)] = Inline_Pattern{p.expression, p.node, re}

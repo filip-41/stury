@@ -48,6 +48,9 @@ Tracker :: struct {
 	open:    int,
 	// How many of the object's members repeat an earlier key.
 	repeats: u64,
+	// The names a held object met before a run that does not track it took it over, whose repeats a check that notices
+	// them looks for alone.
+	met:     []string,
 }
 
 // The path to a value inside a larger one and the keyword steps to the subschema it is judged by, which a check of that
@@ -86,10 +89,23 @@ Text_Build :: #type proc(src: []u8, as: core.As, allocator: runtime.Allocator) -
 check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Refusal) {
 	regs, err = read_start(&c.reader, src, plan, as, T, target, read, frames, allocator)
 	c.wide, c.outer = true, read.outer
-	c.repeats, c.tracked, c.floor = read.repeats, 0, len(read.sink.entries) if read.sink != nil else 0
+	// A text read under `.Refuse` was refused whole for any repeat, so the check meets none.
+	c.repeats, c.tracked, c.floor = .Ignore if read.dups == .Refuse else read.repeats, 0, len(read.sink.entries) if read.sink != nil else 0
 	// A check started again over its own pool gives back the held value an earlier record stopped in.
 	if c.fork != nil && c.fork.open {
 		fork_release(c, c.fork)
+	}
+	if k := read.checker; k != nil {
+		if k.pool.allocator.procedure == nil {
+			k.pool.allocator = context.allocator
+		}
+		pool_begin(&k.pool)
+		// The checker outlives the check and its pool holds only the runs and forks it made, never the check's own
+		// memory. The cast keeps the compiler's escape check from taking a store into the pool for an escape.
+		c.pool, c.fork, c.taken = (^Pool)(rawptr(&k.pool)), nil, nil
+	}
+	if c.pool != nil {
+		c.pool.repeated = nil
 	}
 	return
 }
@@ -125,6 +141,7 @@ tracks :: #force_inline proc "contextless" (h: ^Check, f: ^Frame) -> bool {
 
 // Starts tracking the keys of the object just opened at frame `h.sp - 1`. A check that notices tracks only an object
 // whose verdict a repeat of an unnamed key can change: a count, a rule for the members no record names, or names to judge.
+// A pattern's member needs it only with a sink, as with none its failure ends the read, which then reads again judging.
 @(cold)
 @(private)
 track_open :: #force_no_inline proc "contextless" (h: ^Check, m: ^Meta, u: ^Use, l: ^rules.Leaf) {
@@ -132,7 +149,7 @@ track_open :: #force_no_inline proc "contextless" (h: ^Check, m: ^Meta, u: ^Use,
 		if !keyed(h, m, u) {
 			return
 		}
-	} else if u.additional == 0 && u.keys == 0 && !(l != nil && (l.min_members > 0 || l.max_members < max(u64))) {
+	} else if u.additional == 0 && (u.pattern == 0 || h.sink == nil) && u.keys == 0 && !(l != nil && (l.min_members > 0 || l.max_members < max(u64))) {
 		return
 	}
 	context = h.ctx
@@ -146,7 +163,7 @@ track_open :: #force_no_inline proc "contextless" (h: ^Check, m: ^Meta, u: ^Use,
 	h.tracked += 1
 	clear(&t.keys)
 	clear(&t.spans)
-	t.sp, t.open, t.repeats = h.sp - 1, -1, 0
+	t.sp, t.open, t.repeats, t.met = h.sp - 1, -1, 0, nil
 }
 
 // What a key met by a tracker leaves to do.
@@ -164,6 +181,15 @@ Key_Met :: enum {
 track_key :: #force_no_inline proc "contextless" (h: ^Check, tr: ^Tracker, t: core.Token, key: string) -> Key_Met {
 	context = h.ctx
 	context.allocator = context.temp_allocator
+	if tr.met != nil {
+		for name in tr.met {
+			if name == key {
+				noticed(h, t)
+				return .Stop
+			}
+		}
+		return .New
+	}
 	lo, _ := core.scalar_ends(t)
 	if tr.open >= 0 {
 		tr.spans[tr.open][1] = lo
@@ -221,7 +247,8 @@ take_back :: proc "contextless" (h: ^Check, span: [2]u64) {
 			kept += 1
 		}
 	}
-	if kept == len(c.entries) {
+	// A read that shares its sink finds the entries another took back gone, and its first refusal with them.
+	if kept == len(c.entries) && (h.first.kind == .None || h.first.at < span[0] || h.first.at >= span[1]) {
 		return
 	}
 	resize(&c.entries, kept)
@@ -886,10 +913,26 @@ rejudged :: proc(own: ^Sink, e: core.Typed_Refusal) -> (first: core.Typed_Refusa
 // refusal back, so the caller reads again judging repeats.
 @(private)
 repeat_may_retract :: proc(r: ^Reader) -> bool {
+	return object_open(r) && text_repeats(r)
+}
+
+// Whether `r` has an object open.
+@(private)
+object_open :: proc(r: ^Reader) -> bool {
 	for i in 1 ..< r.sp {
 		if r.frames[i].kind == .Object {
 			return true
 		}
 	}
 	return false
+}
+
+// Whether a key repeats in an object of the text a check reads, or a build that refuses repeats could not tell, as for a
+// text that holds more than one value.
+@(cold)
+@(private)
+text_repeats :: proc(r: ^Reader) -> bool {
+	doc, err := core.build(r.src, r.plan.as, .Refuse, context.temp_allocator)
+	core.destroy(&doc)
+	return err != nil
 }

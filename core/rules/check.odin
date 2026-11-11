@@ -118,7 +118,7 @@ leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator, programs:
 		append(&keys, strings.to_string(b))
 	}
 	l.enum_keys, l.plain = keys[:], l.kinds & held
-	slice.sort_by(l.enum_keys, key_less)
+	enum_sort(l.enum_keys)
 	return
 }
 
@@ -399,8 +399,15 @@ enum_key :: proc(b: ^strings.Builder, kind: core.Kind, text: string) {
 
 // Whether a scalar of kind `kind` and text `text`, a string's decoded, is in `l`'s enum index.
 enum_has :: proc(l: ^Leaf, kind: core.Kind, text: string) -> bool {
+	_, found := enum_find(l.enum_keys, kind, text)
+	return found
+}
+
+// The place among `keys`, sorted by `enum_sort`, of the key a scalar of kind `kind` and text `text`, a string's
+// decoded, has in an enum index, and whether it is there.
+enum_find :: proc(keys: []string, kind: core.Kind, text: string) -> (int, bool) {
 	if kind == .Object || kind == .Array {
-		return false
+		return 0, false
 	}
 	// A number's key is at most its text, its sign, the point's digits and a letter.
 	buf: [96]u8
@@ -409,13 +416,14 @@ enum_has :: proc(l: ^Leaf, kind: core.Kind, text: string) -> bool {
 		b = strings.builder_make(context.temp_allocator)
 	}
 	enum_key(&b, kind, text)
-	_, found := slice.binary_search_by(l.enum_keys, strings.to_string(b), key_order)
-	return found
+	return slice.binary_search_by(keys, strings.to_string(b), key_order)
 }
 
-@(private)
-key_less :: proc(a, b: string) -> bool {
-	return key_order(a, b) == .Less
+// Sorts `keys`, an enum index's keys, in the index's order.
+enum_sort :: proc(keys: []string) {
+	slice.sort_by(keys, proc(a, b: string) -> bool {
+		return key_order(a, b) == .Less
+	})
 }
 
 @(private)

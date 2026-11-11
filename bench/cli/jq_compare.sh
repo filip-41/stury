@@ -118,6 +118,15 @@ ask filter_group -c '.logs | group_by(.service) | map([.[0].service, length])' l
 ask filter_reduce -c 'reduce .logs[] as $l (0; . + $l.bytes)' logs.json
 ask filter_string_raw -r '.logs[] | "\(.level): \(.msg | ascii_upcase)"' logs.json
 
+# Regex functions in Oniguruma's syntax: a yes or no answer, bounds, groups, and replacing every match.
+ask regex_test -c '[.logs[].msg | select(test("timeout"))] | length' logs.json
+ask regex_test_fold -c '[.logs[].msg | select(test("ROLLBACK"; "i"))] | length' logs.json
+ask regex_test_word -c '[.logs[].msg | select(test("\\bcommit\\b"))] | length' logs.json
+ask regex_match -c '[.logs[].msg | match("[0-9]+").offset] | add' logs.json
+ask regex_capture -c '[.logs[].msg | capture("(?<w>[a-z]+) (?<n>[0-9]+)$").n] | length' logs.json
+ask regex_gsub_raw -r '.logs[].msg | gsub("\\b(?<w>[a-z])"; "\(.w | ascii_upcase)")' logs.json
+ask regex_splits -c '[.logs[].msg | splits(" +")] | length' logs.json
+
 # The real documents (bench/fetch.py corpus) are small and mixed, so process start and setup take a larger
 # share of the time. twitter is string-heavy with non-ASCII text, citm has wide objects, canada float arrays.
 ask twitter_names -c '.statuses[].user.screen_name' corpus/twitter.json -I0

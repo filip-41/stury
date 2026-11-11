@@ -478,6 +478,11 @@ Builder :: struct {
 	inline:        map[i32]Inline_Pattern,
 	// The patterns compiled so far, which every use of one shares.
 	programs:      rules.Programs,
+	// The objects and arrays whose `additionalProperties` or `items` is an `unevaluatedProperties` or
+	// `unevaluatedItems` that `settle_unevaluated` placed there.
+	unevaluated:   map[[2]i32]bool,
+	// The place in its `allOf` of each member `settle_unevaluated` kept, of a node it dropped one of.
+	all_of_at:     map[rules.Node_Index][]int,
 }
 
 // An object's one pattern, which its record reads: the expression, the node a member it matches passes, and the

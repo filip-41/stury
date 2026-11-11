@@ -185,7 +185,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		case "schema", "schema-ref", "max-errors", "report", "format-assert", "filter":
 			schema_option(&cli.schema, args, i)
 			i += option_arity(a)
-		case "ranges", "invalid", "comments", "seed", "count":
+		case "ranges", "invalid", "comments", "seed", "count", "package":
 			verb_option(&cli.verbs, args, i)
 			i += option_arity(a)
 		case "old-schema", "new-schema", "compat", "key", "set", "position", "facts", "json", "shape":
@@ -423,7 +423,7 @@ subcommand_index :: proc(args: []string) -> int {
 @(private = "file")
 option_arity :: proc(a: string) -> int {
 	switch a {
-	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--max-errors", "--report", "--filter", "--seed", "--count", "--old-schema", "--new-schema", "--compat", "--key":
+	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--max-errors", "--report", "--filter", "--seed", "--count", "--package", "--old-schema", "--new-schema", "--compat", "--key":
 		return 1
 	case "--arg", "--argjson", "--slurpfile", "--rawfile":
 		return 2

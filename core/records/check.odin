@@ -121,8 +121,11 @@ check_piece :: proc(job: ^Check_Job, it: ^Reader, k: int) -> bool {
 	p.sink.max_errors = job.max
 	p.sink.entries.allocator = job.allocator
 	sink := &p.sink if job.collect else nil
+	checker: typed.Checker
+	defer typed.checker_destroy(&checker)
+	read := typed.Read_Options{sink = sink, outer = job.outer, dups = job.dups, repeats = job.repeats, checker = &checker}
 	if it.docs != nil && it.docs.check_run != nil && it.framing >= .Concatenated {
-		it.docs.check_run(it, job.plan, {sink = sink, outer = job.outer, dups = job.dups, repeats = job.repeats}, piece_visit, &run)
+		it.docs.check_run(it, job.plan, read, piece_visit, &run)
 	} else {
 		for {
 			rec, more := next(it)
@@ -132,7 +135,7 @@ check_piece :: proc(job: ^Check_Job, it: ^Reader, k: int) -> bool {
 			first := len(p.sink.entries)
 			p.sink.record = p.records
 			target: u8
-			e := job.plan.check(rec.text, job.plan.as, &target, nil, job.plan, {sink = sink, outer = job.outer, dups = job.dups, repeats = job.repeats}, context.allocator)
+			e := job.plan.check(rec.text, job.plan.as, &target, nil, job.plan, read, context.allocator)
 			for &x in p.sink.entries[first:] {
 				x.start += rec.at
 				x.end += rec.at

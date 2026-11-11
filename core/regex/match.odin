@@ -55,6 +55,7 @@ Scratch :: struct {
 	good:   [dynamic]u64, // the pairs inside a look-ahead whose body is known to match from there
 	log:    [dynamic]u32, // the pairs first visited on the way through the look-aheads being matched
 	resumes: int, // the alternatives the last linear search resumed, which its program and text bound
+	ends:    int, // where the automaton found the last search's match to end, -1 when it did not or found none
 }
 
 scratch_destroy :: proc(scratch: ^Scratch) {
@@ -88,22 +89,62 @@ Matcher :: struct {
 	log:      ^[dynamic]u32,
 	looking:  int, // the look-aheads being matched, under `Regex.linear`
 	room:     int, // under `Regex.linear`, the bytes the stack and the log may take beside the sets
+	// Under `Regex.linear`, the places the sets hold, from `lo` on, `width` a row. And the first and last start a match
+	// can have.
+	lo, width, first_start, last_start: int,
 }
 
 // The first match of `re` in `s` at or after byte `start`, with its groups' byte bounds in `caps` (2 per group with
 // the whole match; -1 for a group that did not take part), or Oniguruma's message when the search gave up. With no
 // `caps` it answers only whether there is one.
 search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch) -> (found: bool, err: string) {
-	if len(caps) == 0 && re.dfa != nil {
-		if hit, judged := dfa_search(re.dfa, s, start); judged {
+	scratch.ends = -1
+	// Oniguruma's search gives up past its retries where the automata would answer, so they answer a jq search only where
+	// the visited set runs it, which never gives up, or where no start can take that many.
+	jq_automaton := !re.ecma && re.dfa != nil && !re.longest && !re.not_empty && !re.calls_or_limits
+	jq_automaton &&= visited_room(re, s) >= 0 if re.linear else retries_bounded(re.dfa, len(s) - min(start, len(s)), MAX_RETRIES)
+	// Under jq the automata start where Oniguruma's first start is, which its optimizer can put past a match. Each later
+	// start it skips can have no match, but one in a window of starts it looks for in turn is left to the backtracker.
+	from := start
+	if re.narrowed && start <= len(s) && jq_automaton {
+		first, last, _, high, ok := search_starts(re.opt, s, start)
+		if !ok {
+			scratch.resumes = 0
+			return false, ""
+		}
+		from = first if high >= last else -1
+	}
+	if len(caps) == 0 && re.dfa != nil && (re.ecma || jq_automaton) && from >= 0 {
+		if hit, judged := dfa_search(re.dfa, s, from); judged {
 			scratch.resumes = 0
 			return hit, ""
+		}
+	}
+	// The automata tell where the match ends and starts, and how far a search reads, so the backtracker runs only at
+	// that start for the groups, and its visited set covers only that.
+	lo, width, first_start, last_start := 0, len(s) + 1, 0, len(s)
+	if len(caps) > 0 && jq_automaton && re.dfa.first != nil && from >= 0 {
+		if end, reach, judged := dfa_first(re.dfa, s, from); judged {
+			if end < 0 {
+				scratch.resumes = 0
+				return false, ""
+			}
+			lo, width, last_start = from, reach - from + 1, end
+			scratch.ends = end
+			if begin, known := dfa_start(re.dfa, s, from, end); known {
+				if len(caps) == 2 {
+					caps[0], caps[1] = begin, end
+					scratch.resumes = 0
+					return true, ""
+				}
+				lo, width, first_start, last_start = begin, reach - begin + 1, begin, begin
+			}
 		}
 	}
 	defer shrink(&scratch.stack)
 	resize(&scratch.slots, re.slots)
 	resize(&scratch.counts, len(re.callouts))
-	m := Matcher{re = re, s = s, start = start, slots = scratch.slots[:], counts = scratch.counts[:], stack = &scratch.stack, caps = caps, best_len = -1, limit = len(s)}
+	m := Matcher{re = re, s = s, start = start, slots = scratch.slots[:], counts = scratch.counts[:], stack = &scratch.stack, caps = caps, best_len = -1, limit = len(s), lo = lo, width = width, first_start = first_start, last_start = last_start}
 	for &n in m.counts {
 		n = 0
 	}
@@ -113,8 +154,8 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 	linear := re.linear && !re.longest && !re.not_empty
 	words: int
 	if linear {
-		words = ((int(re.visited.rows[len(re.insts)]) if re.visited.rows != nil else len(re.insts)) * (len(s) + 1) + 63) / 64
-		m.room = MAX_BYTES - words * 8 * (2 if re.visited.owner != nil else 1)
+		words = visited_words(re, width)
+		m.room = visited_room(re, s)
 		if m.room < 0 && re.ecma {
 			return false, MEMORY_ERROR
 		}
@@ -147,6 +188,19 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 	return try_starts(&m, false, false)
 }
 
+// The words of the visited set of a search of `re` over `width` places.
+@(private = "file")
+visited_words :: proc(re: ^Regex, width: int) -> int {
+	return ((int(re.visited.rows[len(re.insts)]) if re.visited.rows != nil else len(re.insts)) * width + 63) / 64
+}
+
+// The bytes a linear search of `re` in `s` may take beside its sets, negative when the sets alone pass the cap. A jq
+// search past it runs Oniguruma's way, with its retry limit, so the automaton answers a jq search only within it.
+@(private = "file")
+visited_room :: proc(re: ^Regex, s: string) -> int {
+	return MAX_BYTES - visited_words(re, len(s) + 1) * 8 * (2 if re.visited.owner != nil else 1)
+}
+
 // Frees a deep search's array rather than keep it for the next.
 @(private = "file")
 shrink :: proc(a: ^[dynamic]$T) {
@@ -168,6 +222,7 @@ try_starts :: proc(m: ^Matcher, $EXT, $SET: bool) -> (found: bool, err: string) 
 			return false, ""
 		}
 	}
+	first, last = max(first, m.first_start), min(last, m.last_start)
 	// A string or map the optimizer finds at a bounded distance gives each window of starts, low to high, a match
 	// holding it there can have. Other searches take one window of every start.
 	windowed := high < last
@@ -321,7 +376,7 @@ stop_row :: #force_inline proc(re: ^Regex, pc: int) -> int {
 // look-ahead is logged, for `settle`.
 @(private = "file")
 first_visit :: #force_inline proc(m: ^Matcher, row, pos: int) -> bool {
-	bit := row * (len(m.s) + 1) + pos
+	bit := row * m.width + pos - m.lo
 	word, mask := bit >> 6, u64(1) << (u64(bit) & 63)
 	if m.seen[word] & mask != 0 {
 		return false
@@ -335,7 +390,7 @@ first_visit :: #force_inline proc(m: ^Matcher, row, pos: int) -> bool {
 
 @(private = "file")
 in_good :: #force_inline proc(m: ^Matcher, row, pos: int) -> bool {
-	bit := row * (len(m.s) + 1) + pos
+	bit := row * m.width + pos - m.lo
 	return m.good[bit >> 6] & (1 << (u64(bit) & 63)) != 0
 }
 

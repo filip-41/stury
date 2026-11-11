@@ -18,9 +18,11 @@ Evaluates :: struct {
 	prefix:   int,
 	contains: i32,
 	inner:    []Inner,
-	// For the node that asks, the records the set asks the value to pass and those it asks of each element.
+	// For the node that asks, the records the set asks the value to pass and those it asks of each element, and what it
+	// evaluates of every value that passes it, which its arms judge with no run.
 	wholes:   []i32,
 	elements: []i32,
+	fixed:    ^Evaluates,
 }
 
 // An in-place subschema whose evaluation counts when the value passes record `rec`, has the member `name` when one is
@@ -234,4 +236,245 @@ evaluated_records :: proc(e: ^Evaluates, arena: runtime.Allocator) -> (wholes, e
 	}
 	walk(e, &seen, &whole, &each)
 	return whole[:], each[:]
+}
+
+// What the in-place closure of a node evaluates of every value that passes it, through its own keywords, its `$ref` and
+// its `allOf`: the names and patterns, the prefix length, whether every member or element is evaluated, and whether an
+// `anyOf`, `oneOf`, `if`, `dependentSchemas` or `$dynamicRef` in it, or a `contains` when `items` asks, makes the whole
+// set depend on the value.
+@(private)
+Static_Set :: struct {
+	names:                  [dynamic]string,
+	patterns:               [dynamic]rules.Pattern,
+	prefix:                 int,
+	all_members, all_items: bool,
+	varies:                 bool,
+}
+
+// Adds to `s` what `node` evaluates through its own keywords, its `$ref` and its `allOf`. `own` leaves out the node's
+// own unevaluated keywords.
+@(private)
+static_set :: proc(d: ^rules.Description, node: rules.Node_Index, s: ^Static_Set, items: bool, own: bool, depth := 0) {
+	if node == rules.NONE {
+		return
+	}
+	n := &d.nodes[node]
+	if depth == MAX_HELD {
+		s.varies = true
+		return
+	}
+	s.varies ||= len(n.any_of) > 0 || len(n.one_of) > 0 || n.cond.test != nil || n.dynamic_ref != nil
+	if !own {
+		s.all_members ||= n.unevaluated_properties != nil
+		s.all_items ||= n.unevaluated_items != nil
+	}
+	if n.object >= 0 {
+		o := &d.objects[n.object]
+		s.varies ||= dependent_schemas(o)
+		for x in o.members {
+			if !x.only_required && !named(s.names[:], x.name) {
+				append(&s.names, x.name)
+			}
+		}
+		for x in o.patterns {
+			pattern_add(&s.patterns, {x.expression, rules.NONE})
+		}
+		s.all_members ||= o.additional != rules.NONE
+	}
+	if n.array >= 0 {
+		a := &d.arrays[n.array]
+		s.varies ||= items && a.contains != nil
+		s.prefix = max(s.prefix, len(a.prefix))
+		s.all_items ||= a.items != rules.NONE
+	}
+	if x, has := n.ref.?; has {
+		static_set(d, x, s, items, false, depth + 1)
+	}
+	for x in n.all_of {
+		static_set(d, x, s, items, false, depth + 1)
+	}
+}
+
+// Adds `p` to `list` unless a pattern of its expression is there.
+@(private = "file")
+pattern_add :: proc(list: ^[dynamic]rules.Pattern, p: rules.Pattern) {
+	for x in list {
+		if x.expression == p.expression {
+			return
+		}
+	}
+	append(list, p)
+}
+
+// What `node` evaluates of every value that passes it, past its own unevaluated keywords, with each pattern compiled.
+@(private)
+fixed_part :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, node: rules.Node_Index) -> ^Evaluates {
+	s := Static_Set{names = make([dynamic]string, arena), patterns = make([dynamic]rules.Pattern, arena)}
+	static_set(d, node, &s, false, true)
+	f := new(Evaluates, arena)
+	if f == nil {
+		refuse_plan(b, .No_Memory)
+		return nil
+	}
+	patterns := make([]rawptr, len(s.patterns), arena)
+	for x, i in s.patterns {
+		err: string
+		if patterns[i], err = rules.program_of(&b.programs, x.expression, arena); err != "" {
+			refuse_plan(b, .Unsupported, text = "patternProperties")
+			return f
+		}
+	}
+	f.names, f.patterns, f.prefix, f.members, f.items, f.contains = s.names[:], patterns, s.prefix, s.all_members, s.all_items, -1
+	return f
+}
+
+// Whether `node` judges nothing: every value passes it, and what it evaluates is all it does. With `required`, the
+// node may also require members of an object, whose names it adds there.
+@(private)
+judges_nothing :: proc(d: ^rules.Description, node: rules.Node_Index, depth := 0, required: ^[dynamic]string = nil) -> bool {
+	x, _ := reached(d, node)
+	if x == rules.NONE {
+		return true
+	}
+	n := &d.nodes[x]
+	if depth == MAX_HELD || n.kinds != rules.EVERY_KIND || n.rules != {} || n.has_enum || n.const_of != nil {
+		return false
+	}
+	if len(n.any_of) > 0 || len(n.one_of) > 0 || n.not != nil || n.cond != {} || n.dynamic_ref != nil || n.unevaluated_items != nil || n.unevaluated_properties != nil {
+		return false
+	}
+	if n.object >= 0 {
+		o := &d.objects[n.object]
+		if len(o.dependents) > 0 || !judges_nothing(d, o.keys, depth + 1) || !judges_nothing(d, o.additional, depth + 1) {
+			return false
+		}
+		for m in o.members {
+			if m.required && (required == nil || depth > 0) || m.rules != {} || !judges_nothing(d, m.node, depth + 1) {
+				return false
+			}
+			if m.required {
+				append(required, m.name)
+			}
+		}
+		for p in o.patterns {
+			if !judges_nothing(d, p.node, depth + 1) {
+				return false
+			}
+		}
+	}
+	if n.array >= 0 {
+		a := &d.arrays[n.array]
+		if a.contains != nil || !judges_nothing(d, a.items, depth + 1) {
+			return false
+		}
+		for p in a.prefix {
+			if !judges_nothing(d, p, depth + 1) {
+				return false
+			}
+		}
+	}
+	if r, has := n.ref.?; has && !judges_nothing(d, r, depth + 1) {
+		return false
+	}
+	for r in n.all_of {
+		if !judges_nothing(d, r, depth + 1) {
+			return false
+		}
+	}
+	return true
+}
+
+// Rewrites in `d` each `unevaluatedProperties` and `unevaluatedItems` whose evaluated set is fixed by the schema alone
+// as the `additionalProperties` or `items` of its node, with each name, pattern and place the set holds added to the
+// node as one that takes any value, so the node's record judges it with no arm. A set that holds every member or
+// element drops the keyword. The node then evaluates every member or element, as it did, and the `$ref` and `allOf`
+// targets that judge nothing past what they evaluate are dropped, the places of the `allOf` members kept recorded in
+// `b.all_of_at`. The objects and arrays rewritten are recorded in `b.unevaluated`, whose records spell the keyword. A
+// node whose kinds leave out objects or arrays keeps its keyword, which reports beside the kind.
+@(private)
+settle_unevaluated :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator) {
+	b.unevaluated.allocator, b.all_of_at.allocator = arena, arena
+	for i in 0 ..< len(d.nodes) {
+		n := &d.nodes[i]
+		settled := false
+		if u, has := n.unevaluated_properties.?; has && .Object in n.kinds {
+			s := Static_Set{names = make([dynamic]string, arena), patterns = make([dynamic]rules.Pattern, arena)}
+			if static_set(d, rules.Node_Index(i), &s, false, true); !s.varies {
+				n.unevaluated_properties, settled = nil, true
+				if !s.all_members {
+					o := d.objects[n.object] if n.object >= 0 else rules.Object{additional = rules.NONE, keys = rules.NONE}
+					members := make([dynamic]rules.Member, arena)
+					append(&members, ..o.members)
+					names: for name in s.names {
+						for &x in members {
+							if x.name == name {
+								if x.only_required {
+									x.only_required, x.node = false, rules.NONE
+								}
+								continue names
+							}
+						}
+						append(&members, rules.Member{name = name, node = rules.NONE})
+					}
+					patterns := make([dynamic]rules.Pattern, arena)
+					append(&patterns, ..o.patterns)
+					for x in s.patterns {
+						pattern_add(&patterns, x)
+					}
+					o.members, o.patterns, o.additional = members[:], patterns[:], u
+					n.object = i32(len(d.objects))
+					append(&d.objects, o)
+					b.unevaluated[{0, n.object}] = true
+				}
+			}
+		}
+		if u, has := n.unevaluated_items.?; has && .Array in n.kinds {
+			s := Static_Set{names = make([dynamic]string, arena), patterns = make([dynamic]rules.Pattern, arena)}
+			if static_set(d, rules.Node_Index(i), &s, true, true); !s.varies {
+				n.unevaluated_items, settled = nil, true
+				if !s.all_items {
+					a := d.arrays[n.array] if n.array >= 0 else rules.Array{items = rules.NONE}
+					prefix := make([]rules.Node_Index, max(s.prefix, len(a.prefix)), arena)
+					copy(prefix, a.prefix)
+					for &x in prefix[len(a.prefix):] {
+						x = rules.NONE
+					}
+					a.prefix, a.items = prefix, u
+					n.array = i32(len(d.arrays))
+					append(&d.arrays, a)
+					b.unevaluated[{1, n.array}] = true
+				}
+			}
+		}
+		if !settled || n.unevaluated_items != nil || n.unevaluated_properties != nil {
+			continue
+		}
+		if r, has := n.ref.?; has && covered(d, n, r, arena) {
+			n.ref = nil
+		}
+		kept, at := make([dynamic]rules.Node_Index, arena), make([dynamic]int, arena)
+		for r, j in n.all_of {
+			if !covered(d, n, r, arena) {
+				append(&kept, r)
+				append(&at, j)
+			}
+		}
+		if len(kept) < len(n.all_of) {
+			n.all_of = kept[:]
+			b.all_of_at[rules.Node_Index(i)] = at[:]
+		}
+	}
+}
+
+// Whether the in-place target `r` of `n` judges nothing and evaluates nothing `n` does not evaluate itself.
+@(private = "file")
+covered :: proc(d: ^rules.Description, n: ^rules.Node, r: rules.Node_Index, arena: runtime.Allocator) -> bool {
+	if !judges_nothing(d, r) {
+		return false
+	}
+	members := n.object >= 0 && d.objects[n.object].additional != rules.NONE
+	items := n.array >= 0 && d.arrays[n.array].items != rules.NONE
+	s := Static_Set{names = make([dynamic]string, arena), patterns = make([dynamic]rules.Pattern, arena)}
+	static_set(d, r, &s, true, false)
+	return !s.varies && (members || len(s.names) == 0 && len(s.patterns) == 0 && !s.all_members) && (items || s.prefix == 0 && !s.all_items)
 }

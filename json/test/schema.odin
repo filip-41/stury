@@ -614,6 +614,41 @@ schema_check_reports_arms :: proc(t: ^testing.T) {
 	testing.expect_value(t, strings.to_string(out), "1:7: Number is below the minimum at .a (.properties.a.allOf[0].minimum)\n1:7: Value passes none of the subschemas at .a (.properties.a.anyOf)\n1:16: Value is not of the allowed type at .xy (.patternProperties.\"^x\".type)\n1:26: Elements are not unique at .l (.properties.l.uniqueItems)\n1:26: Too few elements or members at .l (.properties.l.contains)\n1:1: Required member \"q\" is missing (.dependentRequired)\n1:1: No value is allowed here (.not)\n")
 }
 
+// A fixed evaluated set becomes the node's own additional members or items and a dynamic one stays an arm, and either
+// reports under the unevaluated keyword.
+@(test)
+schema_check_reports_unevaluated :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	cases := [?]struct {
+		schema, text, want: string,
+	} {
+		{`{"$defs": {"e": {"patternProperties": {"^x-": true}}}, "properties": {"a": {}}, "$ref": "#/$defs/e", "unevaluatedProperties": false}`, `{"a": 1, "x-y": 2, "b": 3}`, "1:25: No value is allowed here at .b (.unevaluatedProperties)\n"},
+		{`{"properties": {"a": {}}, "anyOf": [{"properties": {"b": {}}}], "unevaluatedProperties": false}`, `{"a": 1, "b": 2, "c": 3}`, "1:23: No value is allowed here at .c (.unevaluatedProperties)\n"},
+		{`{"prefixItems": [{}], "unevaluatedItems": {"type": "string"}}`, `[1, 2]`, "1:5: Value is not of the allowed type at .[1] (.unevaluatedItems.type)\n"},
+		// A member `allOf` drops into the node's own keeps its place, a settled set its keyword, and a failed kind its members' errors.
+		{`{"allOf": [{"properties": {"a": true}}, {"required": ["b"]}], "unevaluatedProperties": false}`, `{"a": 1}`, "1:1: Required member \"b\" is missing (.allOf[1].required)\n"},
+		{`{"allOf": [{"prefixItems": [true]}, {"minItems": 2}], "unevaluatedItems": false}`, `[1]`, "1:1: Too few elements or members (.allOf[1].minItems)\n"},
+		{`{"patternProperties": {"^x": {"type": "integer"}, "^y": true}, "unevaluatedProperties": {"type": "boolean"}}`, `{"z": 1}`, "1:7: Value is not of the allowed type at .z (.unevaluatedProperties.type)\n"},
+		{`{"type": "string", "unevaluatedProperties": false}`, `{"a": 1}`, "1:1: Value is not of the allowed type (.type)\n1:7: No value is allowed here at .a (.unevaluatedProperties)\n"},
+		{`{"type": "string", "unevaluatedItems": false}`, `[1]`, "1:1: Value is not of the allowed type (.type)\n1:2: No value is allowed here at .[0] (.unevaluatedItems)\n"},
+	}
+	for c in cases {
+		ch, err := checked_make(c.schema)
+		testing.expectf(t, err == nil, "%s: %v", c.schema, err)
+		src := transmute([]u8)c.text
+		sink: typed.Sink
+		schema.check(&ch.bound, src, &sink)
+		out := strings.builder_make(context.temp_allocator)
+		for e in sink.entries {
+			core.render_entry(strings.to_stream(&out), src, e)
+			strings.write_byte(&out, '\n')
+		}
+		testing.expectf(t, strings.to_string(out) == c.want, "%s on %s: %q", c.schema, c.text, strings.to_string(out))
+		typed.sink_destroy(&sink)
+		checked_destroy(ch)
+	}
+}
+
 // A check with no sink reads `allOf` and `$ref` arms conjoined into one, and the parts beside a lone `anyOf` or `oneOf`
 // spread into each of its arms, and its verdicts are those of a check with a sink, which reads each arm.
 @(test)
@@ -677,6 +712,7 @@ schema_check_reports_names_and_required :: proc(t: ^testing.T) {
 	} {
 		{`{"propertyNames": {"maxLength": 1}}`, `{"ab": 1}`, "1:2: String is too long (.propertyNames.maxLength)\n"},
 		{`{"propertyNames": false}`, `{"a": 1}`, "1:2: No value is allowed here (.propertyNames)\n"},
+		{`{"propertyNames": {"anyOf": [{"maxLength": 1}]}}`, `{"ab": 1}`, "1:2: Value passes none of the subschemas (.propertyNames.anyOf)\n"},
 		{`{"properties": {"o": {"required": ["k"]}}}`, `{"o": {}}`, "1:7: Required member \"k\" is missing at .o (.properties.o.required)\n"},
 	}
 	for c in cases {
@@ -888,10 +924,10 @@ Checked :: struct {
 }
 
 @(private = "file")
-checked_make :: proc(text: string, spec := json.Spec.Json, allocator := context.allocator) -> (c: ^Checked, err: core.Error) {
+checked_make :: proc(text: string, spec := json.Spec.Json, allocator := context.allocator, dups := core.Duplicates.Default) -> (c: ^Checked, err: core.Error) {
 	c = new(Checked)
 	c.doc, _ = core.build(transmute([]u8)text, json.as(.Json))
-	if c.compiled, err = schema.compile(&c.doc, core.ROOT, {resolver = {as = json.as(.Json)}}); err == nil {
+	if c.compiled, err = schema.compile(&c.doc, core.ROOT, {resolver = {as = json.as(.Json)}, dups = dups}); err == nil {
 		c.bound, err = schema.bind(&c.compiled, json.as(spec), allocator = allocator)
 	}
 	return
@@ -909,74 +945,145 @@ checked_destroy :: proc(c: ^Checked) {
 @(test)
 schema_check_verdicts :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	cases := [?]struct {
-		schema, text: string,
-		valid:        bool,
-	} {
-		{`{"type": "integer"}`, `1.0`, true},
-		{`{"required": ["c"], "additionalProperties": false}`, `{"c": 1}`, false},
-		{`{"required": ["c"], "properties": {"a": {}}, "additionalProperties": false}`, `{"c": 1}`, false},
-		{`{"required": ["c"], "properties": {"c": {}}, "additionalProperties": false}`, `{"c": 1}`, true},
-		{`{"required": ["c"], "additionalProperties": {"type": "string"}}`, `{"c": "x", "d": "y"}`, true},
-		{`{"required": ["c"], "additionalProperties": {"type": "string"}}`, `{"c": 1}`, false},
-		{`{"propertyNames": {"type": "integer"}}`, `{"1": 1}`, false},
-		{`{"propertyNames": {"type": "number"}}`, `{"1": 1}`, false},
-		{`{"propertyNames": {"const": 1}}`, `{"1": 1}`, false},
-		{`{"propertyNames": {"const": "1"}}`, `{"1": 1}`, true},
-		{`{"propertyNames": {"maxLength": 1}}`, `{"1": 1}`, true},
-		{`{"multipleOf": 0.1}`, `0.3`, true},
-		{`{"multipleOf": 1234567890123456789}`, `2469135780246913578`, true},
-		{`{"multipleOf": 1234567890123456789}`, `2469135780246913579`, false},
-		{`{"multipleOf": 3.0000000000000000001}`, `6.0000000000000000002`, true},
-		{`{"multipleOf": 3.0000000000000000001}`, `6.0000000000000000003`, false},
-		{`{"multipleOf": 3.0000000000000000001}`, `6`, false},
-		{`{"multipleOf": 0.123456789012345678901}`, `0.246913578024691357802`, true},
-		{`{"multipleOf": 0.123456789012345678901}`, `123456789012345678901e-21`, true},
-		{`{"multipleOf": 0.123456789012345678901}`, `0.246913578024691357803`, false},
-		{`{"multipleOf": 3}`, `1e400`, false},
-		{`{"multipleOf": 2}`, `1e400`, true},
-		{`{"multipleOf": 1}`, `1e1000000000000000000000000000000`, true},
-		{`{"multipleOf": 3}`, `1e1000000000000000000000000000000`, false},
-		{`{"multipleOf": 1}`, `1e-1000000000000000000000000000000`, false},
-		{`{"multipleOf": 1180591620717411303424}`, `1e1000`, true},
-		{`{"multipleOf": 1180591620717411303424}`, `1e1000000000000000000000000000000`, true},
-		{`{"multipleOf": 1e-1000}`, `2`, true},
-		{`{"enum": [1e1000000000000000000000000000000]}`, `1e1000000000000000000000000000000`, true},
-		{`{"enum": [1e1000000000000000000000000000000]}`, `1e1000000000000000000000000000001`, false},
-		{`{"const": 1e1000000000000000000000000000000}`, `0.1e1000000000000000000000000000001`, true},
-		{`{"const": 1e1000000000000000000000000000000}`, `1e1000000000000000000000000000001`, false},
-		{`{"const": 1e9223372036854775807}`, `1e-9223372036854775809`, false},
-		{`{"const": 1e9223372036854775807}`, `1e9223372036854775807`, true},
-		{`{"minimum": 1e1000000000000000000000000000005}`, `1e1000000000000000000000000000006`, true},
-		{`{"minimum": 1e1000000000000000000000000000005}`, `1e1000000000000000000000000000004`, false},
-		{`{"type": "integer"}`, `1e1000000000000000000000000000000`, true},
-		{`{"type": "integer"}`, `1e-1000000000000000000000000000000`, false},
-		{`{"pattern": "^\\/[^\\*\\?\\&\\%]*(\\/\\*)?$"}`, `"/a/*"`, true},
-		{`{"pattern": "^\\/[^\\*\\?\\&\\%]*(\\/\\*)?$"}`, `"/a&"`, false},
-		{`{"propertyNames": {"maxLength": 3}, "required": ["a"]}`, `{"b": 1}`, false},
-		{`{"propertyNames": {"maxLength": 3}, "required": ["a"]}`, `{"a": 1}`, true},
-		{`{"propertyNames": {"maxLength": 3}, "properties": {"a": {}}, "required": ["a"]}`, `{"b": 1}`, false},
-		{`{"propertyNames": {"maxLength": 3}, "properties": {"a": {}}, "required": ["a"]}`, `{"a": 1, "b": 2}`, true},
-		{`{"const": "x", "enum": ["y"]}`, `"x"`, false},
-		{`{"const": "x", "enum": ["y"]}`, `"y"`, false},
-		{`{"const": "x", "enum": ["x", "y"]}`, `"x"`, true},
-		{`{"const": "x", "enum": ["x", "y"]}`, `"y"`, false},
-		{`{"patternProperties": {"^a": {"type": "string"}}, "properties": {"ab": {"maxLength": 1}}, "additionalProperties": false}`, `{"ab": "x"}`, true},
-		{`{"patternProperties": {"^a": {"type": "string"}}, "properties": {"ab": {"maxLength": 1}}, "additionalProperties": false}`, `{"ab": 1}`, false},
-		{`{"patternProperties": {"^a": {"type": "string"}}, "properties": {"ab": {"maxLength": 1}}, "additionalProperties": false}`, `{"ac": "xy", "b": 1}`, false},
-		{`{"patternProperties": {"^a": {"type": "string"}}, "required": ["b"], "additionalProperties": {"type": "integer"}}`, `{"b": 1}`, true},
-		{`{"patternProperties": {"^a": {"type": "string"}}, "required": ["b"], "additionalProperties": {"type": "integer"}}`, `{"b": "x"}`, false},
-		{`{"items": {"anyOf": [{"type": "integer"}, {"enum": [[1]]}]}}`, `[1, [1], [1.0]]`, true},
-		{`{"items": {"anyOf": [{"type": "integer"}, {"enum": [[1]]}]}}`, `[[2]]`, false},
+	Instance :: struct {
+		text:  string,
+		valid: bool,
 	}
+	cases := [?]struct {
+		schema:    string,
+		instances: []Instance,
+	} {
+		{`{"type": "integer"}`, {{`1.0`, true}}},
+		{`{"required": ["c"], "additionalProperties": false}`, {{`{"c": 1}`, false}}},
+		{`{"required": ["c"], "properties": {"a": {}}, "additionalProperties": false}`, {{`{"c": 1}`, false}}},
+		{`{"required": ["c"], "properties": {"c": {}}, "additionalProperties": false}`, {{`{"c": 1}`, true}}},
+		{`{"required": ["c"], "additionalProperties": {"type": "string"}}`, {{`{"c": "x", "d": "y"}`, true}, {`{"c": 1}`, false}}},
+		{`{"propertyNames": {"type": "integer"}}`, {{`{"1": 1}`, false}}},
+		{`{"propertyNames": {"type": "number"}}`, {{`{"1": 1}`, false}}},
+		{`{"propertyNames": {"const": 1}}`, {{`{"1": 1}`, false}}},
+		{`{"propertyNames": {"const": "1"}}`, {{`{"1": 1}`, true}}},
+		{`{"propertyNames": {"maxLength": 1}}`, {{`{"1": 1}`, true}}},
+		{`{"propertyNames": {"anyOf": [{"maxLength": 1}]}}`, {{`{"a": 1}`, true}, {`{"ab": 1}`, false}}},
+		{`{"propertyNames": {"anyOf": [{"maxLength": 1}, {"pattern": "^x"}]}}`, {{`{"xy": 1, "b": 2}`, true}, {`{"xy": 1, "bc": 2}`, false}}},
+		{`{"$defs": {"n": {"maxLength": 2}}, "propertyNames": {"$ref": "#/$defs/n"}}`, {{`{"abc": 1}`, false}, {`{"ab": {"abc": 1}}`, true}}},
+		{`{"propertyNames": {"not": {"const": "x"}}, "properties": {"a": {"type": "integer"}}}`, {{`{"a": 1, "x": 2}`, false}, {`{"a": "s"}`, false}, {`{"a": 1, "y": 2}`, true}}},
+		{`{"oneOf": [{"properties": {"v": {"const": 1}, "a": {"type": "string"}}}, {"properties": {"v": {"const": 2.5}, "a": {"type": "integer"}}}]}`, {{`{"v": 1.0, "a": "x"}`, true}, {`{"v": 10e-1, "a": 1}`, false}, {`{"v": 25e-1, "a": 1}`, true}, {`{"v": 2.50, "a": "x"}`, false}, {`{"v": 3, "a": 1}`, false}, {`{"a": 1}`, true}}},
+		{`{"anyOf": [{"properties": {"v": {"enum": [0, "0"]}}, "required": ["w"]}]}`, {{`{"v": -0, "w": 1}`, true}, {`{"v": 0e5, "w": 1}`, true}, {`{"v": 1, "w": 1}`, false}}},
+		{`{"multipleOf": 0.1}`, {{`0.3`, true}}},
+		{`{"multipleOf": 1234567890123456789}`, {{`2469135780246913578`, true}, {`2469135780246913579`, false}}},
+		{`{"multipleOf": 3.0000000000000000001}`, {{`6.0000000000000000002`, true}, {`6.0000000000000000003`, false}, {`6`, false}}},
+		{`{"multipleOf": 0.123456789012345678901}`, {{`0.246913578024691357802`, true}, {`123456789012345678901e-21`, true}, {`0.246913578024691357803`, false}}},
+		{`{"multipleOf": 3}`, {{`1e400`, false}}},
+		{`{"multipleOf": 2}`, {{`1e400`, true}}},
+		{`{"multipleOf": 1}`, {{`1e1000000000000000000000000000000`, true}, {`1e-1000000000000000000000000000000`, false}}},
+		{`{"multipleOf": 3}`, {{`1e1000000000000000000000000000000`, false}}},
+		{`{"multipleOf": 1180591620717411303424}`, {{`1e1000`, true}, {`1e1000000000000000000000000000000`, true}}},
+		{`{"multipleOf": 1e-1000}`, {{`2`, true}}},
+		{`{"enum": [1e1000000000000000000000000000000]}`, {{`1e1000000000000000000000000000000`, true}, {`1e1000000000000000000000000000001`, false}}},
+		{`{"const": 1e1000000000000000000000000000000}`, {{`0.1e1000000000000000000000000000001`, true}, {`1e1000000000000000000000000000001`, false}}},
+		{`{"const": 1e9223372036854775807}`, {{`1e-9223372036854775809`, false}, {`1e9223372036854775807`, true}}},
+		{`{"minimum": 1e1000000000000000000000000000005}`, {{`1e1000000000000000000000000000006`, true}, {`1e1000000000000000000000000000004`, false}}},
+		{`{"type": "integer"}`, {{`1e1000000000000000000000000000000`, true}, {`1e-1000000000000000000000000000000`, false}}},
+		{`{"pattern": "^\\/[^\\*\\?\\&\\%]*(\\/\\*)?$"}`, {{`"/a/*"`, true}, {`"/a&"`, false}}},
+		{`{"propertyNames": {"maxLength": 3}, "required": ["a"]}`, {{`{"b": 1}`, false}, {`{"a": 1}`, true}}},
+		{`{"propertyNames": {"maxLength": 3}, "properties": {"a": {}}, "required": ["a"]}`, {{`{"b": 1}`, false}, {`{"a": 1, "b": 2}`, true}}},
+		{`{"const": "x", "enum": ["y"]}`, {{`"x"`, false}, {`"y"`, false}}},
+		{`{"const": "x", "enum": ["x", "y"]}`, {{`"x"`, true}, {`"y"`, false}}},
+		{`{"patternProperties": {"^a": {"type": "string"}}, "properties": {"ab": {"maxLength": 1}}, "additionalProperties": false}`, {{`{"ab": "x"}`, true}, {`{"ab": 1}`, false}, {`{"ac": "xy", "b": 1}`, false}}},
+		{`{"patternProperties": {"^a": {"type": "string"}}, "required": ["b"], "additionalProperties": {"type": "integer"}}`, {{`{"b": 1}`, true}, {`{"b": "x"}`, false}}},
+		{`{"items": {"anyOf": [{"type": "integer"}, {"enum": [[1]]}]}}`, {{`[1, [1], [1.0]]`, true}, {`[[2]]`, false}}},
+		{`{"patternProperties": {"^a": false}, "dependentRequired": {"b": ["ab"]}}`, {{`{"ab": 1}`, false}}},
+		// An evaluated set the schema fixes, through `$ref` and `allOf`, and one an `anyOf`, a `contains` or an `if` makes depend on the value.
+		{`{"$defs": {"e": {"patternProperties": {"^x-": true}}}, "properties": {"a": {}}, "$ref": "#/$defs/e", "unevaluatedProperties": false}`, {{`{"a": 1, "x-y": 2}`, true}, {`{"a": 1, "b": 2}`, false}}},
+		{`{"allOf": [{"properties": {"b": {"type": "string"}}}], "properties": {"a": {}}, "unevaluatedProperties": false}`, {{`{"a": 1, "b": "s"}`, true}, {`{"b": 1}`, false}, {`{"c": 1}`, false}}},
+		{`{"required": ["b"], "allOf": [{"properties": {"b": true}}], "unevaluatedProperties": {"type": "integer"}}`, {{`{"b": "s", "c": 1}`, true}, {`{"b": 1, "c": "s"}`, false}}},
+		{`{"$defs": {"in": {"$ref": "#/$defs/any", "unevaluatedProperties": false}, "any": {"additionalProperties": true}}, "$ref": "#/$defs/in", "unevaluatedProperties": false}`, {{`{"z": 1}`, true}}},
+		{`{"$defs": {"in": {"$ref": "#/$defs/e", "unevaluatedProperties": false}, "e": {"properties": {"a": true}}}, "$ref": "#/$defs/in", "unevaluatedProperties": false}`, {{`{"a": 1}`, true}, {`{"a": 1, "b": 1}`, false}}},
+		{`{"properties": {"a": {}}, "anyOf": [{"properties": {"b": {}}}, {"properties": {"c": {}}}], "unevaluatedProperties": false}`, {{`{"a": 1, "b": 1}`, true}, {`{"b": 1, "c": 1}`, true}, {`{"a": 1, "d": 1}`, false}}},
+		{`{"properties": {"a": {}}, "if": {"required": ["a"]}, "then": {"properties": {"b": {}}}, "unevaluatedProperties": false}`, {{`{"a": 1, "b": 1}`, true}, {`{"b": 1}`, false}}},
+		{`{"prefixItems": [{}], "allOf": [{"prefixItems": [{}, {}]}], "unevaluatedItems": false}`, {{`[1, 2]`, true}, {`[1, 2, 3]`, false}}},
+		{`{"allOf": [{"items": true}], "unevaluatedItems": false}`, {{`[1, 2, 3]`, true}}},
+		{`{"contains": {"type": "string"}, "unevaluatedItems": {"type": "integer"}}`, {{`[1, "a"]`, true}, {`[1.5, "a"]`, false}}},
+		{`{"if": {"properties": {"s": {"const": true}}}, "then": {"required": ["a", "b"]}, "else": {"required": ["c"]}}`, {{`{"s": true, "a": 1, "b": 2}`, true}, {`{"s": true, "a": 1}`, false}, {`{"a": 1, "b": 2}`, true}, {`{"s": false, "c": 1}`, true}, {`{"s": false}`, false}, {`1`, true}}},
+		{`{"anyOf": [{"required": ["role"]}, {"required": ["src"]}]}`, {{`{"src": 1}`, true}, {`{"x": 1}`, false}, {`"x"`, true}}},
+		{`{"not": {"required": ["a", "b"]}}`, {{`{"a": 1}`, true}, {`{"a": 1, "b": 1}`, false}, {`[]`, false}}},
+		{`{"oneOf": [{"required": ["a"]}, {"required": ["b"]}]}`, {{`{"a": 1, "b": 2}`, false}, {`{"b": 2}`, true}}},
+		{`{"anyOf": [{"properties": {"a": {}}, "required": ["a"]}, {"required": ["b"]}]}`, {{`{"b": 1}`, true}, {`{"c": 1}`, false}}},
+		{`{"anyOf": [{"type": "object", "properties": {"k": {"const": "a"}, "v": {"type": "integer"}}}, {"type": "object", "properties": {"k": {"const": "b"}, "v": {"type": "string"}}}, {"type": "object", "properties": {"k": {"enum": ["c", "d"]}, "v": {"type": "boolean"}}}]}`, {{`{"k": "a", "v": 1}`, true}, {`{"k": "a", "v": "x"}`, false}, {`{"k": "d", "v": true}`, true}, {`{"k": "e", "v": 1}`, false}, {`{"v": 1, "k": "a"}`, true}, {`{"v": 1, "k": "b"}`, false}, {`{"v": 1.5}`, false}, {`{"v": "x"}`, true}, {`{}`, true}, {`{"k": 1}`, false}, {`{"k": {"a": 1}}`, false}, {`"x"`, false}, {`[1]`, false}, {`1`, false}, {`null`, false}}},
+		{`{"oneOf": [{"properties": {"k": {"const": "a"}}, "required": ["k"]}, {"properties": {"k": {"const": "b"}}, "required": ["k"]}]}`, {{`{"k": "a"}`, true}, {`{"k": "c"}`, false}, {`"x"`, false}, {`{}`, false}, {`2`, false}, {`null`, false}, {`[]`, false}}},
+		{`{"items": {"anyOf": [{"type": "object", "properties": {"k": {"const": "a"}, "v": {"type": "integer"}}}, {"type": "object", "properties": {"k": {"const": "b"}, "v": {"type": "string"}}}, {"type": "object", "properties": {"k": {"enum": ["c", "d"]}, "v": {"type": "boolean"}}}]}}`, {{`[{"k": "b", "v": "x"}, {"k": "a", "v": 2}]`, true}, {`[{"k": "b", "v": 1}]`, false}}},
+		{`{"anyOf": [{"properties": {"k": {"const": "a"}, "v": {"type": "integer"}}}, {"properties": {"k": {"enum": ["a", "b"]}, "v": {"type": "string"}}}]}`, {{`{"k": "a", "v": "x"}`, true}, {`{"k": "b", "v": 1}`, false}}},
+		{`{"oneOf": [{"properties": {"t": {"const": "a"}}}, {"properties": {"t": {"const": "b"}}}, {"minimum": 0}]}`, {{`2`, false}, {`"s"`, false}, {`null`, false}, {`-1`, false}, {`{"t": "a"}`, false}, {`{"t": "c"}`, true}, {`[]`, false}}},
+		{`{"anyOf": [{"properties": {"t": {"const": "a"}}, "type": "object"}, {"properties": {"t": {"const": "b"}}, "type": "object"}, {"type": "string"}]}`, {{`"s"`, true}, {`1`, false}, {`null`, false}, {`{"t": "b"}`, true}, {`{"t": "c"}`, false}}},
+		{`{"not": {"oneOf": [{"properties": {"t": {"const": "a"}}}, {"properties": {"t": {"const": "b"}}}]}}`, {{`1`, true}, {`{"t": "a"}`, false}, {`{"t": "c"}`, true}}},
+		{`{"if": {"oneOf": [{"properties": {"t": {"const": "a"}}}, {"properties": {"t": {"const": "b"}}}]}, "then": {"type": "object"}, "else": {"type": "string"}}`, {{`1`, false}, {`"s"`, true}, {`{"t": "c"}`, false}}},
+		{`{"oneOf": [{"oneOf": [{"properties": {"t": {"const": "a"}}}, {"properties": {"t": {"const": "b"}}}]}, {"type": "integer"}]}`, {{`1`, true}, {`1.5`, false}, {`{"t": "c"}`, false}}},
+	}
+	// One checker serves every check, past the temp allocator's reset after each value.
+	checker: typed.Checker
+	defer typed.checker_destroy(&checker)
 	for c in cases {
 		ch, err := checked_make(c.schema)
 		defer checked_destroy(ch)
 		testing.expectf(t, err == nil, "%s: %v", c.schema, err)
-		doc, _ := core.build(transmute([]u8)c.text, json.as(.Json))
-		defer core.destroy(&doc)
-		from_text, from_node := schema.valid(&ch.bound, transmute([]u8)c.text), schema.check_node(&ch.bound, &doc, core.ROOT) == nil
-		testing.expectf(t, from_text == c.valid && from_node == c.valid, "%s on %s: text %v, node %v", c.schema, c.text, from_text, from_node)
+		for x in c.instances {
+			doc, _ := core.build(transmute([]u8)x.text, json.as(.Json))
+			defer core.destroy(&doc)
+			src := transmute([]u8)x.text
+			from_text, from_node := schema.valid(&ch.bound, src), schema.check_node(&ch.bound, &doc, core.ROOT) == nil
+			testing.expectf(t, from_text == x.valid && from_node == x.valid, "%s on %s: text %v, node %v", c.schema, x.text, from_text, from_node)
+			sink: typed.Sink
+			defer typed.sink_destroy(&sink)
+			kept, kept_sink := schema.valid(&ch.bound, src, checker = &checker), schema.check(&ch.bound, src, &sink, checker = &checker) == nil && len(sink.entries) == 0
+			testing.expectf(t, kept == x.valid && kept_sink == x.valid, "%s on %s with a checker: valid %v, with a sink %v", c.schema, x.text, kept, kept_sink)
+			free_all(context.temp_allocator)
+		}
+	}
+}
+
+// Under `.Last` and `.First` the arms of a held object judge the member the policy keeps, and with no sink as with one.
+@(test)
+schema_check_arms_keep_the_member_dups_keeps :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	cases := [?]struct {
+		schema, text: string,
+		dups:         core.Duplicates,
+		valid:        bool,
+	} {
+		{`{"anyOf": [{"properties": {"k": {"enum": ["z"]}}}]}`, `{"k": "", "k": "z"}`, .Last, true},
+		{`{"anyOf": [{"properties": {"k": {"enum": ["z"]}}}]}`, `{"k": "z", "k": ""}`, .Last, false},
+		{`{"anyOf": [{"properties": {"k": {"enum": ["z"]}}, "minimum": 1}, {"type": "string"}]}`, `{"k": "z", "k": ""}`, .First, true},
+		{`{"anyOf": [{"properties": {"k": {"enum": ["z"]}}, "minimum": 1}, {"type": "string"}]}`, `{"k": "", "k": "z"}`, .First, false},
+		{`{"anyOf": [{"maxProperties": 1}]}`, `{"k": "", "k": "z"}`, .Last, true},
+		{`{"anyOf": [{"maxProperties": 1}, {"type": "string"}]}`, `{"k": "", "k": "z"}`, .First, true},
+		{`{"properties": {"k": {"const": "y"}}, "anyOf": [{"required": ["v"]}, {"minimum": 1}]}`, `{"k": true, "k": "y"}`, .Last, true},
+		{`{"not": {"required": ["c"]}, "properties": {"a": {"type": "integer"}}}`, `{"a": [1], "b": 1, "a": 1}`, .Last, true},
+		{`{"oneOf": [{"properties": {"t": {"enum": ["1"]}}}, {"required": ["w"]}], "type": "object"}`, `{"t": true, "w": 1, "t": "1"}`, .Last, false},
+		{`{"oneOf": [{"properties": {"t": {"const": "a"}, "v": {"type": "integer"}}}, {"properties": {"t": {"const": "b"}}}]}`, `{"t": "a", "v": 1, "t": "b"}`, .Last, true},
+		{`{"patternProperties": {"^a": {"minLength": 3}}}`, `{"a": "abcd", "a": ""}`, .First, true},
+		{`{"patternProperties": {"^a": {"minLength": 3}}}`, `{"a": "abcd", "a": ""}`, .Last, false},
+		{`{"patternProperties": {"^a": {"minLength": 3}}}`, `{"a": "", "a": "abcd"}`, .Last, true},
+		{`{"patternProperties": {"^a": {"minLength": 3}, "^z": true}}`, `{"a": "", "a": "abcd"}`, .Last, true},
+		{`{"patternProperties": {"^a": {"minLength": 3}}, "dependentRequired": {"ab": []}}`, `{"a": "", "a": "abcd"}`, .Last, true},
+		{`{"patternProperties": {"^a": {"minLength": 3}}, "dependentRequired": {"ab": []}}`, `{"a": "abcd", "a": ""}`, .Last, false},
+		{`{"patternProperties": {"^a": {"type": "number"}, "^z": true}}`, `{"a": [], "a": 5}`, .Last, true},
+		{`{"patternProperties": {"^a": {"type": "number"}, "^z": true}}`, `{"a": 5, "a": []}`, .Last, false},
+		{`{"patternProperties": {"^a": {"minLength": 3}}, "dependentRequired": {"ab": []}}`, `{"a": "abcd", "a": ""}`, .First, true},
+		{`{"patternProperties": {"^a": {"minLength": 3}}, "dependentRequired": {"ab": []}}`, `{"a": "", "a": "abcd"}`, .First, false},
+		{`{"patternProperties": {"^a": {"minLength": 3}}, "minProperties": 1}`, `{"a": "abcd", "a": ""}`, .First, true},
+		{`{"patternProperties": {"^a": {"minLength": 3}}, "minProperties": 1}`, `{"a": "", "a": "abcd"}`, .Last, true},
+		{`{"anyOf": [{"additionalProperties": false, "propertyNames": {"anyOf": [{}]}}]}`, `{"o": 1}`, .Refuse, false},
+		{`{"anyOf": [{"additionalProperties": false, "propertyNames": {"anyOf": [{}]}}, {"type": "object"}]}`, `{"o": 1}`, .Refuse, true},
+	}
+	for c in cases {
+		ch, err := checked_make(c.schema, dups = c.dups)
+		defer checked_destroy(ch)
+		testing.expectf(t, err == nil, "%s: %v", c.schema, err)
+		sink: typed.Sink
+		defer typed.sink_destroy(&sink)
+		src := transmute([]u8)c.text
+		from_valid, from_sink := schema.valid(&ch.bound, src), schema.check(&ch.bound, src, &sink) == nil && len(sink.entries) == 0
+		testing.expectf(t, from_valid == c.valid && from_sink == c.valid, "%s on %s under %v: valid %v, with a sink %v", c.schema, c.text, c.dups, from_valid, from_sink)
 	}
 }
 
@@ -1005,10 +1112,6 @@ schema_bind_refusals :: proc(t: ^testing.T) {
 		f, _ := err.(core.Typed_Error)
 		testing.expectf(t, f.kind == .Unsupported && f.want.text == "multipleOf", "%s: %v", text, err)
 	}
-	names, nerr := checked_make(`{"propertyNames": {"anyOf": [{"maxLength": 1}]}}`)
-	defer checked_destroy(names)
-	nf, _ := nerr.(core.Typed_Error)
-	testing.expect(t, nf.kind == .Unsupported && nf.want.text == "propertyNames")
 	doc, _ := core.build(transmute([]u8)string(`{"pattern": "["}`), json.as(.Json))
 	defer core.destroy(&doc)
 	c, cerr := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})

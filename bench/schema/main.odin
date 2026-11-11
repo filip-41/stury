@@ -23,6 +23,7 @@ import json "../../json"
 lines: bool
 errors: bool
 bound: schema.Bound
+checker: typed.Checker
 
 // Judges every instance of `src`, writing one 0 or 1 per instance to `marks` when it is not nil, and returns the number
 // of instances and the number refused.
@@ -32,10 +33,10 @@ pass :: proc(src: []u8, marks: ^strings.Builder = nil) -> (n, refused: int) {
 		bad: int
 		if errors {
 			sink: typed.Sink
-			bad = int(schema.check(&bound, text, &sink) != nil)
+			bad = int(schema.check(&bound, text, &sink, checker = &checker) != nil)
 			typed.sink_destroy(&sink)
 		} else {
-			bad = int(!schema.valid(&bound, text))
+			bad = int(!schema.valid(&bound, text, checker = &checker))
 		}
 		if marks != nil {
 			strings.write_byte(marks, '0' if bad == 1 else '1')

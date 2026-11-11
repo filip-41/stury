@@ -57,8 +57,8 @@ compile_regex :: proc(ip: ^Interp, pattern: string, flags: Value) -> (r: Regex, 
 
 // The regexes the thread compiled, kept for later calls since a filter compiles its patterns for every input. An
 // entry is never replaced, so a regex stays whole while a caller reads it. Past the caps, and for long patterns, a
-// regex is compiled for its call alone, and so is one whose program would take the arena past CACHED_BYTES, which
-// its entry remembers.
+// regex is compiled for its call alone, without the automata, and so is one whose program would take the arena past
+// CACHED_BYTES, which its entry remembers.
 @(private = "file")
 CACHED_REGEXES :: 64
 @(private = "file")
@@ -87,17 +87,17 @@ cached_compile :: proc(pattern: string, opts: regex.Flags) -> (regex.Regex, stri
 	for &e in c.entries {
 		if e.pattern == pattern && e.opts == opts {
 			if e.big {
-				return regex.compile(pattern, opts)
+				return regex.compile(pattern, opts, automaton = false)
 			}
 			return e.re, ""
 		}
 	}
 	if len(c.entries) >= CACHED_REGEXES || len(pattern) > CACHED_PATTERN_BYTES {
-		return regex.compile(pattern, opts)
+		return regex.compile(pattern, opts, automaton = false)
 	}
 	if !c.ready {
 		if virtual.arena_init_growing(&c.arena) != nil {
-			return regex.compile(pattern, opts)
+			return regex.compile(pattern, opts, automaton = false)
 		}
 		c.ready = true
 	}
@@ -115,7 +115,7 @@ cached_compile :: proc(pattern: string, opts: regex.Flags) -> (regex.Regex, stri
 		virtual.arena_temp_end(mark)
 		append(&c.entries, Cached_Regex{strings.clone(pattern), opts, {}, true})
 		context.allocator = caller
-		return regex.compile(pattern, opts)
+		return regex.compile(pattern, opts, automaton = false)
 	}
 	virtual.arena_temp_ignore(mark)
 	append(&c.entries, Cached_Regex{strings.clone(pattern), opts, re, false})
@@ -132,9 +132,10 @@ search :: proc(re: ^regex.Regex, s: string, at: int, found: []int) -> (bool, str
 	return regex.search(re, s, at, found, &regex_scratch)
 }
 
-// Every match of `r` in `s`, or the first when `r` is not global.
-matches :: proc(ip: ^Interp, r: ^Regex, s: string) -> (out: []Match, sig: Signal) {
-	width := 2 * len(r.re.names)
+// Every match of `r` in `s`, or the first when `r` is not global. Under `whether`, for a regex that is not global, the
+// first holds no bounds, only that there is one.
+matches :: proc(ip: ^Interp, r: ^Regex, s: string, whether := false) -> (out: []Match, sig: Signal) {
+	width := 0 if whether && !r.global else 2 * len(r.re.names)
 	buf: [16]int
 	found := buf[:width] if width <= len(buf) else make(Match, width, context.temp_allocator)
 	bounds: [dynamic]int
