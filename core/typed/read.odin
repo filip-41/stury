@@ -97,7 +97,9 @@ Reader :: struct {
 	borrow:    bool,
 	first_key: bool, // `.First`
 	refuse_unknown: bool,
-	wide:      bool, // a `Check`: the sink takes `core.Error_Entry`s
+	// A check, whose sink takes `core.Error_Entry`s: a `Check` when `as_schema` holds, else a `Reader` that checks a text
+	// against a type.
+	wide:      bool,
 	partial:   bool, // as `Read_Options.partial`
 	wrap_sp:   u32, // the depth `wrap`'s element is read at, 0 for none
 	// The source, the format and its read, which a token's text and number read through.

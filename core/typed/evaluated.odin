@@ -2,6 +2,7 @@ package typed
 
 import "base:runtime"
 import regex "../regex"
+import core ".."
 import rules "../rules"
 import "core:mem"
 import "core:slice"
@@ -47,12 +48,17 @@ Inner :: struct {
 
 // What a use of `node` evaluates, a node's own unevaluated keywords included unless `own` says the node is the one that
 // asks. Each in-place subschema that counts by its verdict gets the record that judges it. `depth` counts the sets
-// that hold this one, and a plan whose sets nest past `MAX_HELD` is refused, as a check would judge them one inside the
-// other.
+// that hold this one, and `site` holds the keyword steps to `node` from the node that asks. A plan whose sets nest past
+// `MAX_HELD` is refused, as a check would judge them one inside the other.
 @(private)
-evaluates :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, node: rules.Node_Index, own := false, depth := 0) -> ^Evaluates {
+evaluates :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, node: rules.Node_Index, own := false, depth := 0, site: ^[dynamic]core.Step = nil) -> ^Evaluates {
+	site := site
+	if site == nil {
+		steps := make([dynamic]core.Step, context.temp_allocator)
+		site = &steps
+	}
 	if depth > MAX_HELD {
-		refuse_plan(b, .Too_Deep)
+		evaluated_too_deep(b, site[:])
 		return nil
 	}
 	scope := b.scope
@@ -61,7 +67,7 @@ evaluates :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, 
 	key := block_key(typeid_of(Evaluates), i32(node), b.scope)
 	if e, made := b.evaluated[key]; made && !own {
 		if depth + e.height > MAX_HELD {
-			refuse_plan(b, .Too_Deep)
+			evaluated_too_deep(b, site[:])
 		}
 		return e
 	}
@@ -107,7 +113,7 @@ evaluates :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, 
 	}
 	inner := make([dynamic]Inner, arena)
 	// A `$ref` that holds nothing else evaluates what the node it reaches does, so a chain of them is one set.
-	add :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, inner: ^[dynamic]Inner, x: rules.Node_Index, depth: int, test: i32 = -1, on := false, name: Maybe(string) = nil, always := false) -> i32 {
+	add :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, inner: ^[dynamic]Inner, x: rules.Node_Index, depth: int, site: ^[dynamic]core.Step, steps: []core.Step, test: i32 = -1, on := false, name: Maybe(string) = nil, always := false) -> i32 {
 		rec := i32(-1) if always else arm_record(b, d, arena, x)
 		scope := b.scope
 		defer b.scope = scope
@@ -115,40 +121,46 @@ evaluates :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, 
 		if y == rules.NONE {
 			y, refs = x, 0
 		}
+		depth_at := len(site)
+		defer resize(site, depth_at)
+		append(site, ..steps)
 		for z, hop := x, 0; hop < refs; hop += 1 {
 			enter_scope(b, d, arena, z)
+			append(site, core.Name(rules.ref_keyword(&d.nodes[z])))
 			z = d.nodes[z].ref.?
 		}
-		append(inner, Inner{rec = rec, test = test, on = on, always = always, name = name, eval = evaluates(b, d, arena, y, depth = depth + 1)})
+		append(inner, Inner{rec = rec, test = test, on = on, always = always, name = name, eval = evaluates(b, d, arena, y, depth = depth + 1, site = site)})
 		return rec
 	}
 	if x, has := n.ref.?; has {
-		add(b, d, arena, &inner, x, depth, always = true)
+		add(b, d, arena, &inner, x, depth, site, {core.Name(rules.ref_keyword(n))}, always = true)
 	}
 	if x, has := n.dynamic_ref.?; has {
-		add(b, d, arena, &inner, dynamic_target(b, d, n, x), depth, always = true)
+		add(b, d, arena, &inner, dynamic_target(b, d, n, x), depth, site, {core.Name(rules.dynamic_keyword(n))}, always = true)
 	}
-	for x in n.all_of {
-		add(b, d, arena, &inner, x, depth, always = true)
+	places := b.all_of_at[node]
+	for x, i in n.all_of {
+		add(b, d, arena, &inner, x, depth, site, {core.Name("allOf"), core.Index(places[i] if places != nil else i)}, always = true)
 	}
-	for list in ([?][]rules.Node_Index{n.any_of, n.one_of}) {
-		for x in list {
-			add(b, d, arena, &inner, x, depth)
+	for list, k in ([?][]rules.Node_Index{n.any_of, n.one_of}) {
+		for x, i in list {
+			add(b, d, arena, &inner, x, depth, site, {core.Name("anyOf" if k == 0 else "oneOf"), core.Index(i)})
 		}
 	}
 	if x, has := n.cond.test.?; has {
-		test := add(b, d, arena, &inner, x, depth)
+		test := add(b, d, arena, &inner, x, depth, site, {core.Name("if")})
 		if y, then := n.cond.then.?; then {
-			add(b, d, arena, &inner, y, depth, test, true)
+			add(b, d, arena, &inner, y, depth, site, {core.Name("then")}, test, true)
 		}
 		if y, other := n.cond.other.?; other {
-			add(b, d, arena, &inner, y, depth, test, false)
+			add(b, d, arena, &inner, y, depth, site, {core.Name("else")}, test, false)
 		}
 	}
 	if n.object >= 0 {
-		for x in d.objects[n.object].dependents {
+		o := &d.objects[n.object]
+		for x in o.dependents {
 			if y, has := x.node.?; has {
-				add(b, d, arena, &inner, y, depth, name = x.name)
+				add(b, d, arena, &inner, y, depth, site, {core.Name("dependencies" if o.dependencies else "dependentSchemas"), core.Name(x.name)}, name = x.name)
 			}
 		}
 	}
@@ -159,6 +171,24 @@ evaluates :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, 
 		}
 	}
 	return e
+}
+
+// Refuses the plan as `.Too_Deep` for evaluated sets that nest past `MAX_HELD` at the keyword steps `site` from the node
+// that asks, which the path names after the members that lead to that node, its innermost steps kept.
+@(private = "file")
+evaluated_too_deep :: proc(b: ^Builder, site: []core.Step) {
+	if b.err.kind != .None {
+		return
+	}
+	refuse_plan(b, .Too_Deep, text = "an unevaluated keyword reads what more than 256 subschemas evaluate one inside the other")
+	steps := make([dynamic]core.Step, context.temp_allocator)
+	append(&steps, ..b.err.steps[:b.err.n_steps])
+	append(&steps, ..site)
+	b.err.n_steps = 0
+	#reverse for x in steps {
+		path_add(&b.err, x)
+	}
+	path_close(&b.err)
 }
 
 // Whether the value being judged, or under `index` its member or element of that place, passes record `rec`, which

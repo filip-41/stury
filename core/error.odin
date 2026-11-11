@@ -567,13 +567,13 @@ Error_Entry :: struct {
 // by the tags.
 Typed_Detail :: struct #raw_union {
 	inner: Fault `raw_union_tag:"kind=Walk"`,
-	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Below_Minimum,kind=Above_Maximum,kind=Missing_Field,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema,kind=No_Sample,kind=No_Invalid_Sample,kind=Custom,kind=Check_Failed,kind=Bad_Option"`,
+	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Below_Minimum,kind=Above_Maximum,kind=Missing_Field,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema,kind=No_Sample,kind=No_Invalid_Sample,kind=Custom,kind=Check_Failed,kind=Bad_Option,kind=Too_Deep"`,
 	plans: Plan_Clash `raw_union_tag:"kind=Plan_Mismatch"`,
 }
 
 // `type` is the type a `.Wrong_Kind`, `.Out_Of_Range`, `.Not_A_Member`, `.Below_Minimum` or `.Above_Maximum` read wanted. `text` is the refused scalar's
-// source text for those kinds, which lives as long as `src`, the flag a `.Bad_Tag` names, or why a type is
-// `.Unsupported`, a union `.Ambiguous_Union` or an option `.Bad_Option`. Either may be empty.
+// source text for those kinds, which lives as long as `src`, the flag a `.Bad_Tag` names, why a type is
+// `.Unsupported`, a union `.Ambiguous_Union` or an option `.Bad_Option`, or what a `.Too_Deep` limit bounds. Either may be empty.
 Typed_Want :: struct {
 	type: typeid,
 	text: string,
@@ -1051,7 +1051,7 @@ render :: proc(w: io.Writer, src: []u8, err: Error, lines: ^Lines = nil) -> io.E
 
 // The kinds whose entry, outside a keyword path, holds in its operand what the failed rule asks.
 @(private)
-ENTRY_OPERAND_KINDS :: bit_set[Typed_Error_Kind]{.Wrong_Kind, .Below_Minimum, .Above_Maximum, .Too_Short, .Too_Long, .Too_Few, .Too_Many}
+ENTRY_OPERAND_KINDS :: bit_set[Typed_Error_Kind]{.Wrong_Kind, .Below_Minimum, .Above_Maximum, .Too_Short, .Too_Long, .Too_Few, .Too_Many, .Too_Deep}
 
 // The message of a check's entry `e`, in a schema's words where the entry has a keyword path and the kind has such words.
 // A missing member is named, which only the entry's operand does, and so is the member whose name failed a name rule.

@@ -1520,8 +1520,10 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 	here := uintptr(intrinsics.frame_address())
 	if h.run == nil {
 		h.stack = here
-	} else if level == MAX_HELD || int(h.stack) - int(here) > STACK_BUDGET {
-		return next, fork_fault(h, regs, .Too_Deep, lo, hi)
+	} else if level == MAX_HELD {
+		return next, fork_fault(h, regs, .Too_Deep, lo, hi, "more than 256 subschemas judge the value one inside the other")
+	} else if int(h.stack) - int(here) > STACK_BUDGET {
+		return next, fork_fault(h, regs, .Too_Deep, lo, hi, "the subschemas that judge the value nest deeper than the check's stack holds")
 	}
 	// A markup element reads as its record says, which a run of another record cannot follow.
 	if h.find_tag == document_tag && (^Document_Read(Check))(h.format).doc.readers.attribute != nil {
@@ -1639,10 +1641,11 @@ fork_regs :: #force_inline proc "contextless" (h: ^Check) -> core.Hook_Regs {
 	return {NO_LIMIT, u64(uintptr(&h.plan.fields[h.plan.fork + 1])), 0}
 }
 
-// Reports `kind` at the held value at `regs` and stops the check and every check it is an arm of.
+// Reports `kind` at the held value at `regs` and stops the check and every check it is an arm of. `text` says what the
+// limit a `.Too_Deep` passes bounds.
 @(private)
-fork_fault :: proc(h: ^Check, regs: core.Hook_Regs, kind: core.Typed_Error_Kind, lo, hi: u64) -> core.Action {
-	note(h, regs, {kind = kind, at = lo}, hi)
+fork_fault :: proc(h: ^Check, regs: core.Hook_Regs, kind: core.Typed_Error_Kind, lo, hi: u64, text := "") -> core.Action {
+	note(h, regs, {kind = kind, at = lo, want = {text = text}}, hi, operand = text)
 	h.fatal = kind
 	return .Stop
 }
@@ -1653,16 +1656,16 @@ fork_fault :: proc(h: ^Check, regs: core.Hook_Regs, kind: core.Typed_Error_Kind,
 @(private)
 held_too_deep :: proc(h: ^Check, fk: ^Fork, t: core.Token) -> core.Action {
 	lo, hi := check_ends(h, t)
-	return held_fault(h, fk, .Too_Deep, lo, hi)
+	return held_fault(h, fk, .Too_Deep, lo, hi, "a comparison by const, enum or uniqueItems reads no deeper than 1024 levels")
 }
 
 // Gives back the runs of the held value of `fk`, whose frame is open, and reports `kind` at it as `fork_fault` does.
 @(private)
-held_fault :: proc(h: ^Check, fk: ^Fork, kind: core.Typed_Error_Kind, lo, hi: u64) -> core.Action {
+held_fault :: proc(h: ^Check, fk: ^Fork, kind: core.Typed_Error_Kind, lo, hi: u64, text := "") -> core.Action {
 	fork_release(h, fk)
 	sp := h.sp
 	h.sp = fk.below
-	action := fork_fault(h, fk.regs, kind, lo, hi)
+	action := fork_fault(h, fk.regs, kind, lo, hi, text)
 	h.sp = sp
 	return action
 }
@@ -2212,7 +2215,7 @@ earlier_lead :: proc(h: ^Check, u: ^Use, t: core.Token) -> ^Run {
 		if !f.open || f.follows != nil || f.ruled || f.lo != t.lo || f.u.judging != u.judging || y == nil || y.c.fork != f || y.done {
 			continue
 		}
-		if y.c.sink != (nil if h.sink == nil else y.buffer) || h.sink != nil && f.u.judging_all != u.judging_all {
+		if y.c.sink != (nil if h.sink == nil else y.buffer) || h.sink != nil && (y.c.sink == nil || f.u.judging_all != u.judging_all) {
 			continue
 		}
 		if y.c.readings != nil || y.c.taken != nil || h.sink == nil && y.c.first.kind != .None {
@@ -2258,7 +2261,14 @@ lead_free :: proc(r: ^Run) {
 		r.followers = 0
 		return
 	}
-	hc := heir.owner
+	fork_hand(r, heir)
+}
+
+// Hands the open fork of `r`'s check to the check of `heir`, a fork that follows it, which then reads on in its place, and
+// makes the other forks that follow `r` follow that check's run. `heir` is closed and becomes `r`'s check's fork.
+@(private)
+fork_hand :: proc "contextless" (r: ^Run, heir: ^Fork) {
+	f, p, hc := r.c.fork, r.c.pool, heir.owner
 	f.u, f.regs, f.next, f.below, f.level, f.owner, f.order = heir.u, heir.regs, heir.next, heir.below, heir.level, hc, heir.order
 	heir.follows, heir.open = nil, false
 	f.ruled, f.handed = true, true
@@ -2275,6 +2285,20 @@ lead_free :: proc(r: ^Run) {
 		}
 	}
 	r.followers = 0
+}
+
+// Swaps the lead `r` and the check of `fk`, a fork that follows it and has no sink, for a token `r`'s fork has not read
+// yet: the check of `fk` takes the fork over and reads the token, and `r`'s check follows it with `fk`. A lead reads a
+// token after its follower when a check holding it stopped before handing it the token, or when its fork was handed to a
+// check the token reaches later.
+@(private)
+lead_swap :: proc "contextless" (r: ^Run, fk: ^Fork) {
+	f, hc := r.c.fork, fk.owner
+	u, regs, next, below, level, order := f.u, f.regs, f.next, f.below, f.level, f.order
+	fork_hand(r, fk)
+	fk.u, fk.regs, fk.next, fk.below, fk.level, fk.owner, fk.order = u, regs, next, below, level, &r.c, order
+	fk.follows, fk.open, fk.depth, fk.ruled, fk.handed = hc.run, true, f.depth, false, false
+	hc.run.followers += 1
 }
 
 // The token `t` the fork `fk` follows its lead's fork on: what the lead gave for it, and, as the lead closes, its
@@ -2304,6 +2328,10 @@ fork_follow :: proc "contextless" (h: ^Check, fk: ^Fork, t: core.Token) -> core.
 	lead := fk.follows
 	f := lead.c.fork
 	if f != nil && f.open && !lead.done {
+		if f.fed != t.lo && h.sink == nil {
+			lead_swap(lead, fk)
+			return fork_token(h, t)
+		}
 		fk.depth = f.depth
 		return .Skip if f.skipped == t.lo else .Next
 	}

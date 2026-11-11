@@ -197,7 +197,7 @@ refuse_element :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Ho
 	return regs, .Stop if h.sink == nil else .Skip
 }
 
-// Adds `e`, with the path to where the read stands, to the sink. A wide reader (a `Check`) adds a `core.Error_Entry`
+// Adds `e`, with the path to where the read stands, to the sink. A wide reader, a check, adds a `core.Error_Entry`
 // ending at `end`, with the path of any depth and its names copied, and under a `keyword` of a description's plan the
 // keyword path to it.
 @(private)

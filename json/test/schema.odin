@@ -939,7 +939,9 @@ schema_unevaluated_chain :: proc(t: ^testing.T) {
 	ch, err := checked_make(chain(`"a%d": {{"allOf": [{{"$ref": "#/$defs/a%d"}}]}}, `, 1000))
 	defer checked_destroy(ch)
 	f, typed_err := err.(core.Typed_Error)
-	testing.expectf(t, typed_err && f.kind == .Too_Deep, "allOf 1000 links: %v", err)
+	// The refusal says what nests and names the keyword path it nests along.
+	testing.expectf(t, typed_err && f.kind == .Too_Deep && f.detail.want.text != "", "allOf 1000 links: %v", err)
+	testing.expectf(t, typed_err && len(f.steps) > 2 && f.steps[len(f.steps) - 1] == core.Name("$ref") && f.steps[len(f.steps) - 2] == core.Index(0), "allOf 1000 links: %v", err)
 }
 
 // A subschema many arms share is judged once at bind and once at a value, a sink's entries included.
@@ -968,6 +970,33 @@ schema_shared_arms_dag :: proc(t: ^testing.T) {
 		f, typed_err := cerr.(core.Typed_Error)
 		testing.expectf(t, !typed_err || f.kind != .No_Memory, "%s: %v", c.leaf, cerr)
 		testing.expectf(t, (cerr == nil) == c.valid && (len(sink.entries) == 0) == c.valid, "%s: %v, %d entries", c.leaf, cerr, len(sink.entries))
+	}
+}
+
+// A run that follows another's judging of a value takes its verdict whatever order the token reaches them in: a lead
+// whose holder stopped before handing it the token, and a lead with no sink for a follower with one.
+@(test)
+schema_shared_runs_follow :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	cases := []struct {
+		schema, text: string,
+		valid:        bool,
+		failures:     int,
+	}{
+		{`{"$defs": {"d0": {"dependentSchemas": {"a": {"$ref": "#/$defs/d2"}}, "oneOf": [{}, {"$ref": "#/$defs/d1"}]}, "d1": {"allOf": [{"$ref": "#/$defs/d2", "type": "integer"}]}, "d2": {"oneOf": [{}, {"$ref": "#/$defs/d3", "required": ["c"]}]}, "d3": {"if": {}, "else": {}}}, "$ref": "#/$defs/d0", "unevaluatedItems": {}}`, `{"a": 0}`, true, 0},
+		{`{"$defs": {"d0": {"anyOf": [{"$ref": "#/$defs/d1"}, {"$ref": "#/$defs/d2"}, {"$ref": "#/$defs/d2"}]}, "d1": {"anyOf": [{"$ref": "#/$defs/d2"}], "allOf": [{"$ref": "#/$defs/d3"}]}, "d2": {"oneOf": [{"required": ["a"]}]}, "d3": {"additionalProperties": {"type": "string"}}}, "$ref": "#/$defs/d0", "unevaluatedProperties": {}}`, `{"c": []}`, false, 1},
+	}
+	for c in cases {
+		ch, err := checked_make(c.schema)
+		defer checked_destroy(ch)
+		if !testing.expectf(t, err == nil, "%s: %v", c.text, err) {
+			continue
+		}
+		testing.expectf(t, (schema.check(&ch.bound, transmute([]u8)c.text) == nil) == c.valid, "%s: no sink", c.text)
+		sink := typed.Sink{max_errors = 5}
+		defer typed.sink_destroy(&sink)
+		cerr := schema.check(&ch.bound, transmute([]u8)c.text, &sink)
+		testing.expectf(t, (cerr == nil) == c.valid && len(sink.entries) == c.failures, "%s: %v, %d entries", c.text, cerr, len(sink.entries))
 	}
 }
 
