@@ -107,9 +107,8 @@ emit :: proc(p: ^Printer, v: Value) {
 	case k <= .True:
 		token(p, int(k), "null" if k == .Null else ("true" if k == .True else "false"))
 	case k == .Number:
-		n, _ := number_of(v)
 		paint(p, int(k))
-		put_number(p, n)
+		put_number(p, plain(v))
 		unpaint(p)
 	case k == .String:
 		s, _ := string_of(v)
@@ -162,7 +161,7 @@ emit :: proc(p: ^Printer, v: Value) {
 @(private = "file")
 write_node :: proc(p: ^Printer, v: Value) -> bool {
 	r, is_ref := v.(Ref)
-	if !is_ref || p.colors != nil || p.opts.pretty && p.depth > 0 || len(p.colon) > 0 || r.doc.spelling != json.as(.Json).spelling ||
+	if !is_ref || p.colors != nil || p.opts.pretty && p.depth > 0 || len(p.colon) > 0 || r.doc.readers.format != json.as(.Json).readers.format ||
 	   p.depth + max(int(r.doc.as.max_depth), core_pkg.MAX_DEPTH) > MAX_DEPTH || repeats_key(r) {
 		return false
 	}
@@ -180,7 +179,7 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 		mem.arena_init(&arena, frame[:])
 		on_heap := size + write.ROOM_MAX > FRAME_TEXT
 		text, _, err := core_pkg.write(r.doc, opts, as, r.node, heap if on_heap else mem.arena_allocator(&arena))
-		if !on_heap && err.kind != .None {
+		if !on_heap && err != nil {
 			on_heap = true
 			text, _, err = core_pkg.write(r.doc, opts, as, r.node, heap)
 		}
@@ -189,7 +188,7 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 		}
 		write.put_text(p.out, string(text))
 		spill(p)
-		return err.kind == .None
+		return err == nil
 	}
 	p.streamed = false
 	to_out := io.Stream {
@@ -207,7 +206,7 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 	}
 	_, err := core_pkg.write_stream(to_out, r.doc, opts, as, r.node, heap)
 	// Only an allocation fails, and the printer walks the value when the writer handed it nothing.
-	return err.kind == .None || p.streamed
+	return err == nil || p.streamed
 }
 
 // `text` in the colour `color`.
@@ -270,16 +269,30 @@ close :: proc(p: ^Printer, k: Kind, bracket: u8) {
 // A number as its literal, or computed: a NaN as `null` in the null colour inside the number's, an infinity as the
 // largest finite number of its sign.
 @(private = "file")
-put_number :: proc(p: ^Printer, n: Number) {
-	switch {
-	case n.lit != "":
-		write.put_text(p.out, n.lit)
-	case math.is_nan(n.f):
-		token(p, int(Kind.Null), "null")
+put_number :: proc(p: ^Printer, v: Value) {
+	f: f64
+	#partial switch n in v {
+	case ^Number_Text:
+		write.put_text(p.out, n.text)
+		return
+	case Ref:
+		lit, double, is_literal := node_literal(n.doc, n.node)
+		if is_literal {
+			write.put_text(p.out, lit)
+			return
+		}
+		f = double
+	case f64:
+		f = n
 	case:
-		f := math.copy_sign(math.F64_MAX, n.f) if math.is_inf(n.f) else n.f
-		p.out.cursor += spell.f64_text(write.room(p.out, spell.F64_ROOM), f)
+		return
 	}
+	if math.is_nan(f) {
+		token(p, int(Kind.Null), "null")
+		return
+	}
+	f = math.copy_sign(math.F64_MAX, f) if math.is_inf(f) else f
+	p.out.cursor += spell.f64_text(write.room(p.out, spell.F64_ROOM), f)
 }
 
 // `s` as jq prints a string, with `opts.ascii` every character past U+007F as `\u` escapes. A jq string is UTF-8, as

@@ -57,7 +57,7 @@ init_output :: proc(o: ^Output, run: ^Run) {
 		// never after all of the run's output.
 		jq.flush_messages(o.ip)
 		if !emit(o, it.v) {
-			o.ip.err = "Cannot dump a string containing NUL with --raw-output0 option"
+			o.ip.err = string("Cannot dump a string containing NUL with --raw-output0 option")
 			return .Fail
 		}
 		return .Go

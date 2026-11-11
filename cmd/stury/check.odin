@@ -13,7 +13,7 @@ import json "../../json"
 import "jq"
 import "message"
 
-// Each file in turn. Exits 0, 2 after a file that did not open or read, or else 5 after a fault.
+// Each file in turn. Exits 0, 2 after a file that did not open or read, or else 5 after a fault, or else 1 after a schema failure.
 check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	o := &run.opts
 	if len(cli.files) == 0 && is_terminal(os.stdin) && is_terminal(os.stdout) {
@@ -21,51 +21,56 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		usage(EXIT_USAGE, true)
 	}
 	src := input_source(o, cli.json_reading)
-	failures, faults := 0, 0
+	failures, faults, invalid := 0, 0, 0
+	sc: ^Schema_Check
+	if cli.schema.flag != "" {
+		sc = schema_open(cli.schema, src)
+	}
 	for path in (cli.files[:] if len(cli.files) > 0 else STDIN_ONLY) {
-		f, read := open_file(path, "check")
-		data: []byte
-		mapped: bool
-		if read {
-			data, _, mapped = map_file(f)
-			if mapped {
-				mapped_input_name = file_name(path)
-				if f != os.stdin {
-					os.close(f)
-				}
-			} else {
-				data, read = read_file(f)
-			}
-		}
+		spent, read := file_bytes(path, "check")
 		if !read {
 			failures += 1
 			continue
 		}
+		data := spent.data
 		runner: ^core.Runner
 		if len(data) >= POOLED_BYTES {
 			runner = run_pool(run)
 		}
-		if msg := check_text(file_name(path), data, src, o, runner); msg != "" {
-			message.write_stderr("stury: parse error: %s", msg)
-			faults += 1
+		verdict, why := Verdict.Fault, core.Error(nil)
+		if sc != nil && !(reads_cells(o) && header_fault(file_name(path), data, src.as) != "") {
+			verdict, why = schema_judge(sc, cli.schema, file_name(path), data, src, runner)
 		}
-		free_spent({data, mapped})
+		switch verdict {
+		case .Valid:
+		case .Invalid:
+			invalid += 1
+		case .Refused:
+			failures += 1
+		case .Fault:
+			if msg := check_text(file_name(path), data, src, o, runner); msg != "" {
+				message.write_stderr("stury: parse error: %s", msg)
+				faults += 1
+			} else if why != nil {
+				message.write_stderr("stury: parse error: %s: %s\n", file_name(path), edit_error_text(data, why))
+				faults += 1
+			}
+		}
+		free_spent(spent)
 		free_all(context.temp_allocator)
 	}
-	os.exit(EXIT_USAGE if failures > 0 else EXIT_INPUT if faults > 0 else 0)
+	os.exit(EXIT_USAGE if failures > 0 else EXIT_INPUT if faults > 0 else 1 if invalid > 0 else 0)
 }
 
 // The first fault of the text `data` of file `name`, read as `src` reads it, told with its note and a newline, or "".
 @(private = "file")
 check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^core.Runner) -> string {
-	cells := reads_cells(o)
-	if !cells && !o.seq && json.blank(data, src.spec.?) {
-		line, col := core.locate(data, u64(len(data)))
-		return message.build_temp("%s:%d:%d: No JSON text\n", name, line, col)
+	if msg := blank_told(name, data, src, o); msg != "" {
+		return msg
 	}
 	fault: Maybe(core.Fault)
 	switch {
-	case cells:
+	case reads_cells(o):
 		if msg := header_fault(name, data, src.as); msg != "" {
 			return msg
 		}
@@ -91,6 +96,15 @@ check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^c
 	return message.build_temp("%s\n%s", fault_told(name, data, f), fault_note(name, data, f, src.spec, o))
 }
 
+// The fault of a JSON input with no text in it, `data` of file `name`, told with a newline, or "".
+blank_told :: proc(name: string, data: []byte, src: Source, o: ^Opts) -> string {
+	if reads_cells(o) || o.seq || !json.blank(data, src.spec.?) {
+		return ""
+	}
+	line, col := core.locate(data, u64(len(data)))
+	return message.build_temp("%s:%d:%d: No JSON text\n", name, line, col)
+}
+
 // Whether the first text of `data` is a container or a string, which no byte after its close runs on from.
 @(private = "file")
 closed_first :: proc(data: []byte) -> bool {
@@ -103,7 +117,6 @@ closed_first :: proc(data: []byte) -> bool {
 }
 
 // The first fault of the records of `data` from byte `at`, framed by `framing`.
-@(private = "file")
 first_fault :: proc(data: []byte, as: core.As, framing: core.Framing, runner: ^core.Runner, at: u64) -> Maybe(core.Fault) {
 	heap := runtime.heap_allocator()
 	faults, err := records.check(data, as, framing, heap, runner, at)

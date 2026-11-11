@@ -58,6 +58,7 @@ Plan :: struct {
 	dropped:   []bool,
 	width:     int, // the longest line's cell count
 	allocator: runtime.Allocator,
+	record_at: Record_Check, // reads a recorded text as the document's spec
 }
 
 refuse :: proc(p: ^Plan, err: core.Document_Error) -> bool {
@@ -65,9 +66,9 @@ refuse :: proc(p: ^Plan, err: core.Document_Error) -> bool {
 	return false
 }
 
-// dsv's `Edit_Spelling.plan`.
+// dsv's `Edit_Services.plan`.
 @(private = "package")
-edit_plan :: proc(doc: ^core.Document, list: ^core.Edit_List, out: ^[dynamic]core.Edit, allocator: runtime.Allocator) -> (changed: bool, err: core.Document_Error) {
+edit_plan :: proc(doc: ^core.Document, list: ^core.Edit_List, out: ^[dynamic]core.Edit, allocator: runtime.Allocator, record_at: Record_Check) -> (changed: bool, err: core.Document_Error) {
 	cells, records, lone_empty := false, false, false
 	for e in list.edits {
 		#partial switch e.op {
@@ -87,13 +88,13 @@ edit_plan :: proc(doc: ^core.Document, list: ^core.Edit_List, out: ^[dynamic]cor
 		if lone_empty {
 			return false, {kind = .Bad_Width}
 		}
-		return false, record_widths(doc, list, dsv_width(doc), allocator) if records else {}
+		return false, record_widths(doc, list, dsv_width(doc), allocator, record_at) if records else {}
 	}
-	p := Plan{doc = doc, list = list, out = out, allocator = allocator, err = {kind = .No_Memory}}
+	p := Plan{doc = doc, list = list, out = out, allocator = allocator, record_at = record_at, err = {kind = .No_Memory}}
 	if !plan_columns(&p) {
 		return false, p.err
 	}
-	return true, record_widths(doc, list, planned_width(&p), allocator)
+	return true, record_widths(doc, list, planned_width(&p), allocator, record_at)
 }
 
 // Whether `node` is a header cell `.Ragged` named by its position, which the header's line does not hold.
@@ -106,13 +107,13 @@ is_line :: #force_inline proc(doc: ^core.Document, node: core.Node_Index) -> boo
 }
 
 // Refuses an inserted record that does not hold `width` cells. An empty table has no width, so its records must agree.
-record_widths :: proc(doc: ^core.Document, list: ^core.Edit_List, width: int, allocator: runtime.Allocator) -> core.Document_Error {
+record_widths :: proc(doc: ^core.Document, list: ^core.Edit_List, width: int, allocator: runtime.Allocator, record_at: Record_Check) -> core.Document_Error {
 	want := width
 	for e in list.edits {
 		if e.op != .Insert || e.node != core.ROOT {
 			continue
 		}
-		cells, err := edit_record_at(doc, e.text)
+		cells, err := record_at(doc, e.text)
 		if err.kind != .None {
 			return err
 		}
@@ -172,9 +173,9 @@ plan_columns :: proc(p: ^Plan) -> bool {
 
 plan_lines :: proc(p: ^Plan) -> bool {
 	doc := p.doc
-	if doc.shared_keys != 0 {
-		p.width = core.length(doc, doc.shared_keys)
-		compose.push(&p.lines, Line{node = doc.shared_keys, n = len(header_keys(doc)), header = true}) or_return
+	if keys := core.header_of(doc); keys != 0 {
+		p.width = core.length(doc, keys)
+		compose.push(&p.lines, Line{node = keys, n = len(header_keys(doc)), header = true}) or_return
 	}
 	it := core.children(doc, core.ROOT)
 	for rec in core.child_next(&it) {
@@ -276,9 +277,9 @@ plan_cuts :: proc(p: ^Plan) -> bool {
 // Sorts the list's cell inserts into new columns and the cells each record writes.
 plan_fills :: proc(p: ^Plan) -> bool {
 	doc := p.doc
-	if doc.shared_keys != 0 {
+	if keys := core.header_of(doc); keys != 0 {
 		for e in p.list.edits {
-			if e.op == .Insert && e.node == doc.shared_keys {
+			if e.op == .Insert && e.node == keys {
 				compose.push(&p.added, Column{id = len(p.added), p = int(e.at), order = len(p.added), cell = e.text}) or_return
 			}
 		}
@@ -332,8 +333,9 @@ plan_named :: proc(p: ^Plan, e: core.Edit) -> bool {
 	doc := p.doc
 	line := line_at(p.lines[:], e.node)
 	l := p.lines[line]
-	for c in 0 ..< core.length(doc, doc.shared_keys) {
-		cell := doc.shared_keys + 1 + core.Node_Index(c)
+	keys := core.header_of(doc)
+	for c in 0 ..< core.length(doc, keys) {
+		cell := keys + 1 + core.Node_Index(c)
 		if !core.key_equals(doc, cell, string(e.key)) {
 			continue
 		}
@@ -353,7 +355,7 @@ plan_named :: proc(p: ^Plan, e: core.Edit) -> bool {
 		}
 	}
 	if col < 0 {
-		if bad := edit_cells(doc, spelled[:], false); bad.kind != .None {
+		if bad := edit_cells(doc, spelled[:], false, p.record_at); bad.kind != .None {
 			return refuse(p, bad)
 		}
 		col = len(p.added)

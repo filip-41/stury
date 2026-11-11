@@ -24,23 +24,30 @@ import write "../core/write"
 marshal :: proc {marshal_once, write.marshal}
 
 @(private)
-marshal_once :: proc(value: any, spec := Spec.Csv, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
+marshal_once :: proc(value: any, spec := Spec.Csv, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
 	if value.id == nil || value.data == nil {
-		return nil, {kind = .Plan_Mismatch}
+		return nil, core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
 	}
-	plan, err := plan_make(value.id, spec, opts)
-	if err.kind != .None {
-		return nil, err
+	plan, refusal := plan_make(value.id, spec, opts)
+	if refusal != nil {
+		return nil, refusal
 	}
 	defer typed.plan_destroy(&plan)
-	return plan.marshal(&plan, value.data, write, {}, allocator)
+	text, err := plan.marshal(&plan, value.data, write, {}, allocator, nil)
+	return text, core.error_of(err)
 }
 
 // The handle of a delimited text of `spec` read or written with `opts`, which holds the delimiter `spec` reads when
 // `opts` leaves it 0. See the file's header for what a document may hold.
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
+	return as_of(&HANDLES[spec] if spec <= max(Spec) else nil, spec, opts)
+}
+
+// The handle of `spec` read or written with `opts` over `readers`.
+@(private)
+as_of :: proc "contextless" (readers: ^core.Readers, spec: Spec, opts: Options) -> core.As {
 	bytes := [10]u8{0 = spec_delimiter(spec, opts.delimiter), 1 = opts.comment, 2 = u8(opts.no_header), 3 = u8(opts.crlf), 4 = u8(opts.infer)}
-	return {spelling = &SPELLING, spec = u8(spec), tolerate = opts.tolerate, opts = bytes}
+	return {readers = readers, spec = u8(spec), tolerate = opts.tolerate, opts = bytes}
 }
 
 // The options a handle `as` made holds. The spec's own delimiter reads as 0, so a default handle's options are `{}`,
@@ -52,7 +59,7 @@ options_of :: #force_inline proc "contextless" (as: core.As) -> Options {
 
 // The spelling's `write`: `doc` as the handle `as` says.
 @(private)
-document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Error) {
+document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Refusal) {
 	spec, layout := Spec(as.spec), options_of(as)
 	if !layout_ok(spec, layout) {
 		return nil, 0, {kind = .Bad_Option}
@@ -62,7 +69,7 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 	}
 	spill: [write.ROOM_MAX]u8 = ---
 	w: Rows
-	hint := len(doc.src) + write.ROOM_MAX if doc.spelling == &SPELLING else 0
+	hint := len(doc.src) + write.ROOM_MAX if doc.readers.format == rules_of else 0
 	rows_start(&w, &spill, layout, spec, opts, stream, allocator, hint)
 	written := write_records(&w, doc, node, true) if layout.infer else write_records(&w, doc, node, false)
 	text, err = rows_end((^Rows)(rawptr(&w)), written)
@@ -81,9 +88,10 @@ write_records :: #force_inline proc(w: ^Rows, doc: ^core.Document, list: core.No
 	header := make([dynamic]string, scratch)
 	column := make(map[string]int, scratch)
 	buf: [512]u8
-	keyed := doc.shared_keys != 0
+	keys := core.header_of(doc)
+	keyed := keys != 0
 	if keyed {
-		it := core.children(doc, doc.shared_keys)
+		it := core.children(doc, keys)
 		for key, more := core.child_next(&it); more; key, more = core.child_next(&it) {
 			name, whole := core.text_clone(doc, key, scratch)
 			if _, failed := append(&header, name); !whole || failed != nil {

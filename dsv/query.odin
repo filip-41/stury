@@ -5,19 +5,9 @@ import "base:runtime"
 import core "../core"
 import engine "../core/build"
 
-// dsv's `Spelling.scan` walk, which `core/build`'s path reads run. `.[i]` is a record, `.[i].name` a cell by its header
+// dsv's `Services.scan` walk, which `core/build`'s path reads run. `.[i]` is a record, `.[i].name` a cell by its header
 // name, and `.[i][j]` a cell by position. A partial document keeps a kept cell's key beside it, so it holds no shared
 // keys.
-
-// The spelling's `scan`: the walk compiled for the handle's spec.
-scan_as :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
-	switch Spec(handle.spec) {
-	case .Csv:   return scan_spec(src, .Csv, handle, paths, read, state, on, allocator)
-	case .Tsv:   return scan_spec(src, .Tsv, handle, paths, read, state, on, allocator)
-	case .Plain: return scan_spec(src, .Plain, handle, paths, read, state, on, allocator)
-	}
-	return {}, {kind = .Unsupported}
-}
 
 // Walks `src` as spec `S` with the scan's hook, the stream's when `on` is set, and ends the read.
 scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (doc: core.Document, err: core.Path_Error) {
@@ -68,6 +58,12 @@ walk_many :: proc(src: []u8, $S: Spec, opts: Options, h: ^engine.Scan, read: ^Re
 	if _, bad := option_fault(S, opts).?; bad {
 		return walk(src, 0, S, opts, h, regs, on)
 	}
+	read_records(h, read, S, opts, keys, on)
+	return walk_keys(src, 0, S, opts, h, regs, on, read.keys)
+}
+
+// Sets the scan's `rewalk` to give `on` one record again, its cells named by the header's cells `keys`.
+read_records :: proc "contextless" (h: ^engine.Scan, read: ^Record_Read, $S: Spec, opts: Options, keys: []core.Token, $on: proc "contextless" (h: ^engine.Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) {
 	read^ = {h = h, opts = opts, keys = keys, on = on}
 	h.opts = read
 	h.rewalk = proc "contextless" (h: ^engine.Scan, s: ^core.Hook_Regs, lo: u64, _: core.Node_Index) {
@@ -75,7 +71,6 @@ walk_many :: proc(src: []u8, $S: Spec, opts: Options, h: ^engine.Scan, read: ^Re
 		one.opts.no_header = true
 		walk(h.b.doc.src, lo, S, one.opts, &one, s, record_hook)
 	}
-	return walk_keys(src, 0, S, opts, h, regs, on, read.keys)
 }
 
 // Gives the hook one record as the text's own walk gave it: a walk from a record's first byte reads it as a headerless
@@ -110,4 +105,81 @@ record_hook :: proc "contextless" (r: ^Record_Read, s: core.Hook_Regs, t: core.T
 		}
 	}
 	return r.on(r.h, s, t)
+}
+
+// An iterator over the answers of `paths`, or of `one` when `paths` is nil, that `fill` reads.
+answers_of :: proc(src: []u8, handle: core.As, paths: []core.Path, one: core.Path, read: core.Path_Options, allocator: runtime.Allocator, fill: proc(it: ^engine.Answer_Iter)) -> engine.Answer_Iter {
+	return {src = src, as = handle, paths = paths, one = one, read = read, allocator = allocator, fill = fill, max_batch = engine.ANSWER_BATCH}
+}
+
+answers_fill_of :: proc(spec: Spec) -> proc(it: ^engine.Answer_Iter) {
+	switch spec {
+	case .Csv:   return answers_fill(.Csv)
+	case .Tsv:   return answers_fill(.Tsv)
+	case .Plain: return answers_fill(.Plain)
+	}
+	return answers_fill(.Csv)
+}
+
+// The fill of an iterator over a text of spec `S`: the stream's walk with a cursor, which stops on the first record's
+// end once the buffer holds a batch, and ends the read as `scan_spec` does. The header's cells are the iterator's.
+answers_fill :: proc "contextless" ($S: Spec) -> proc(it: ^engine.Answer_Iter) {
+	return proc(it: ^engine.Answer_Iter) {
+		#assert(size_of(Cursor) <= size_of(it.cursor))
+		cursor := (^Cursor)(&it.cursor)
+		h := &it.scan
+		src := it.src
+		opts := options_of(it.as)
+		hi: u64
+		fault: Maybe(core.Fault)
+		if it.state == .Fresh {
+			if it.read.dups == .Refuse {
+				built, e := build_bound(src, S, opts, .Refuse, it.allocator)
+				core.destroy(&built)
+				if e != nil {
+					engine.answers_fail(it, e)
+					return
+				}
+			}
+			if _, bad := option_fault(S, opts).?; !bad && !opts.no_header {
+				keys, failed := make([]core.Token, header_cells(src, int(core.text_start(src, 0)), S, opts), it.allocator)
+				if failed != nil {
+					engine.answers_fail(it, core.error_of(core.Path_Error{kind = .No_Memory}))
+					return
+				}
+				it.held = keys
+			}
+			// A record is a container inside the document's array, so a dsv text nests at most two containers.
+			if !engine.answers_start(it, true, 8) {
+				return
+			}
+			cursor^ = {keys = it.held}
+			it.regs = engine.BUILDER_REGS
+		}
+		hi, fault = answers_walk(it, cursor, S, opts)
+		if !h.stopped && can_resume(cursor) {
+			return
+		}
+		engine.answers_end(it, hi, fault)
+	}
+}
+
+// Walks an iterator's text from its start, or from its cursor once a walk has begun.
+answers_walk :: proc(it: ^engine.Answer_Iter, cursor: ^Cursor, $S: Spec, opts: Options) -> (hi: u64, fault: Maybe(core.Fault)) {
+	h := &it.scan
+	// The scan holds `records` only while the walk runs.
+	records: Record_Read
+	read_records(h, (^Record_Read)(rawptr(&records)), S, opts, it.held, engine.scan_hook_stream)
+	defer h.opts = nil
+	if can_resume(cursor) {
+		return walk_resume(it.src, cursor, S, opts, h, &it.regs, pause_at_record)
+	}
+	return walk(it.src, 0, S, opts, h, &it.regs, pause_at_record, cursor)
+}
+
+// `engine.scan_hook_stream`, stopping on the first record's end the logic passes once the iterator's buffer holds a batch,
+// the one place a dsv cursor resumes from.
+pause_at_record :: #force_inline proc "contextless" (h: ^engine.Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	r, a := engine.scan_hook_stream(h, s, t)
+	return r, .Stop if a == .Next && h.paused && t.kind == .End else a
 }

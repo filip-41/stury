@@ -5,8 +5,9 @@ Usage: python3 bench/paths.py [--rounds N]
 The lanes and their fixtures (wide.json, twitter.json, logs.json) are fixed, so it takes no file.
 A `get` lane reads one root key early, in the middle, late and absent from the text: stury's scan, stopped scan and a
 build then query, and sonic-rs `get` and simdjson On-Demand `find_field` when their binaries are present. A `logs` lane
-has stury's scan and a query of a document built outside the clock. Arms that read one lane must agree on its checksum
-over the answers' bytes. Rounds interleave the arms.
+has stury's scan and a query of a document built outside the clock. A `stream` lane takes every answer of a scan as it
+comes, through `each_answer` and through the iterator `answers`, whose largest batch is $ANSWER_BATCH when it is set.
+Arms that read one lane must agree on its checksum over the answers' bytes. Rounds interleave the arms.
 
 Each table holds the arms that read the same amount of the text, named in its title:
   scan          judges every byte of the text
@@ -16,6 +17,8 @@ Each table holds the arms that read the same amount of the text, named in its ti
   stop          judges every byte up to the answer and leaves the rest unread
   sonic         reads to the key and skips values without judging them, and leaves the rest unread
   query         queries a document built outside the clock, and reads only the nodes the path reaches
+  each          judges every byte of the text and gives each answer to a callback
+  iter          judges every byte of the text and gives the answers through `next`, a batch a walk
 """
 import json, os, sys
 
@@ -55,6 +58,8 @@ LOG_LANES = [(".logs[].id", ".logs[].id"), (".logs[][]", ".logs[][]"), (".logs[-
 GET_TABLES = [("get, the whole text read", ["scan", "build_query", "simd"], True),
               ("get, the text read up to the answer", ["stop", "sonic"], False)]
 LOG_TABLES = [("logs, the whole text judged", ["scan"], True), ("logs, a document built outside the clock", ["query"], True)]
+STREAM_LANES = [("stream .logs[]", ".logs[]"), ("stream .logs[].id", ".logs[].id")]
+STREAM_TABLES = [("stream, every answer taken as it comes", ["each", "iter"], True)]
 
 
 def race(label, arms, rounds):
@@ -108,8 +113,13 @@ def main(argv):
         logs = fixture("logs.json")
         log_rows = [(label, os.path.getsize(logs), race(label, {a: [PROBE, a, paths, logs] for a in ("scan", "query")}, rounds))
                     for label, paths in LOG_LANES]
+        largest = [os.environ["ANSWER_BATCH"]] if os.environ.get("ANSWER_BATCH") else []
+        stream_rows = [(label, os.path.getsize(logs),
+                        race(label, {a: [PROBE, a, paths, logs, "1"] + largest for a in ("each", "iter")}, rounds))
+                       for label, paths in STREAM_LANES]
     show(GET_TABLES, rows)
     show(LOG_TABLES, log_rows)
+    show(STREAM_TABLES, stream_rows)
 
 
 if __name__ == "__main__":

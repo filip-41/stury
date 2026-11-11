@@ -18,14 +18,15 @@ fn_length :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value,
 	case .Number:
 		// jq's jv_number_abs: a literal without its sign, a negative zero's (`-0.0`) too, else fabs. Either is a new
 		// number, not the input (`1 | path(length)` fails).
-		n, _ := number_of(v)
-		switch {
-		case len(n.lit) == 0:
-			return num(abs(n.f)), .Go
-		case n.lit[0] == '-':
-			return Number{f = abs(n.f), lit = n.lit[1:]}, .Go
+		#partial switch n in scalar(v) {
+		case f64:
+			return abs(n), .Go
+		case ^Number_Text:
+			if n.text[0] == '-' {
+				return number_text(n.text[1:]), .Go
+			}
+			return number_text(strings.clone(n.text)), .Go
 		}
-		return Number{f = n.f, lit = strings.clone(n.lit)}, .Go
 	case .String:
 		s, _ := string_of(v)
 		return num(f64(owned_codepoints(ip, s))), .Go

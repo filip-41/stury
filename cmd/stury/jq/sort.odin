@@ -5,13 +5,14 @@ package jq
 
 import "core:math"
 import "core:slice"
+import core_pkg "../../../core"
 
 // One element of a sort key, resolved once: a document string or number is read out of its row before
 // the sort rather than at each of its comparisons. An object atom's `f` is set by `sort_object_keys`,
 // which must run before any key is compared.
 Sort_Atom :: struct {
 	kind: Kind,
-	s:    string, // a string, or a number's literal
+	s:    string, // a string, or a `Number_Text`'s digits
 	f:    f64, // a number's double; an object's place in `object_members`
 	v:    Value,
 }
@@ -28,13 +29,24 @@ Keyed :: struct {
 atom_depth: int
 
 sort_atom :: proc(v: Value) -> Sort_Atom {
+	// A number of a document is read from its literal, so it is not made anew.
+	if r, is_ref := plain(v).(Ref); is_ref && node_kind(r.doc, r.node) == .Number {
+		if node := r.doc.nodes[r.node]; node.kind == .Number && node.spelling & core_pkg.NUMBER_KIND_MASK != 0 {
+			f, digits, _ := core_pkg.double_of(v, make([]u8, core_pkg.HEX_ROOM))
+			return {kind = .Number, f = f, s = digits, v = v}
+		}
+		lit := string(core_pkg.span(r.doc, r.node))
+		return {kind = .Number, f = text_f64(lit), s = lit, v = v}
+	}
 	x := scalar(v)
 	a := Sort_Atom{kind = kind(x), v = x}
 	#partial switch y in x {
 	case string:
 		a.s = y
-	case Number:
-		a.f, a.s = y.f, y.lit
+	case f64:
+		a.f = y
+	case ^Number_Text:
+		a.f, a.s = y.double, y.text
 	}
 	return a
 }
@@ -58,8 +70,8 @@ compare_atoms :: proc(a, b: Sort_Atom) -> int {
 		if a.f > b.f {
 			return 1
 		}
-		if a.f == b.f && (a.s == b.s || a.s == "" || b.s == "") {
-			return 0 // only two literals that differ are compared as decimals
+		if a.f == b.f && a.s == b.s {
+			return 0 // only two numbers that differ in digits are compared as decimals
 		}
 	}
 	return compare(a.v, b.v, atom_depth)
@@ -107,9 +119,8 @@ sorted_order :: proc(ks: []Keyed) -> []int {
 }
 
 // sorted_order() of keys that are each one null, boolean or number, none nan: an LSD radix sort of the numbers' bits,
-// as stable as the merge. It is nil when a key is anything else, or when two equal numbers are literals
-// compare_decimals() may tell apart. The keys are `ks`', or with `items` the items themselves, read without making
-// their atoms. `ties` marks each place whose key is the one before it.
+// as stable as the merge. It is nil when a key is anything else, or when two numbers of one double differ as decimals. The keys are `ks`', or with `items` the items
+// themselves, read without making their atoms. `ties` marks each place whose key is the one before it.
 @(private = "file")
 number_key_order :: proc(ks: []Keyed, items: []Value = nil) -> (order: []int, ties: []bool) {
 	n := len(items) if items != nil else len(ks)
@@ -176,7 +187,7 @@ number_key_order :: proc(ks: []Keyed, items: []Value = nil) -> (order: []int, ti
 		a, b = b, a
 	}
 	order, ties = make([]int, n), make([]bool, n)
-	lit, first := -1, Sort_Atom{} // the first literal of the current run of equal numbers, and its key
+	lit, first := -1, Sort_Atom{} // the first number of the current run of one double, and its key
 	for p, i in a {
 		order[i] = p.at
 		ties[i] = i > 0 && a[i - 1].bits == p.bits
@@ -188,7 +199,6 @@ number_key_order :: proc(ks: []Keyed, items: []Value = nil) -> (order: []int, ti
 		}
 		key, _ := key_atom(ks, items, p.at)
 		switch {
-		case key.s == "":
 		case lit < 0:
 			lit, first = p.at, key
 		case compare_atoms(first, key) != 0:

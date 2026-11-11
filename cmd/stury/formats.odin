@@ -128,7 +128,8 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 	if o.grow_header && !writes_cells(o) {
 		usage_error("--grow-header applies to --to csv or tsv")
 	}
-	if cli.cells_flag != "" && !reads_cells(o) {
+	// schema sample takes --infer for a table it writes, whose cells it draws as --infer reads them.
+	if cli.cells_flag != "" && !reads_cells(o) && !(cli.schema_verb && cli.cells_flag == "--infer" && writes_cells(o)) {
 		usage_error("%s applies to --from csv or tsv", cli.cells_flag)
 	}
 	// check and edit refuse the options that write a table as options they have no use for.
@@ -146,10 +147,10 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 // Refuses a delimiter or comment character that `format` cannot read, as the library's walk refuses it.
 @(private = "file")
 refuse_cell_bytes :: proc(spec: dsv.Spec, opts: dsv.Options, format, delimiter_flag, comment_flag: string) {
-	if _, bad := core.validate(nil, dsv.as(spec, {delimiter = opts.delimiter})).?; bad {
+	if core.validate(nil, dsv.as(spec, {delimiter = opts.delimiter})) != nil {
 		usage_error("%s %q is not a byte %s can separate cells with", delimiter_flag, string([]byte{opts.delimiter}), format)
 	}
-	if _, bad := core.validate(nil, dsv.as(spec, opts)).?; bad {
+	if core.validate(nil, dsv.as(spec, opts)) != nil {
 		usage_error("%s %q is not a byte %s can start a comment line with", comment_flag, string([]byte{opts.comment}), format)
 	}
 }

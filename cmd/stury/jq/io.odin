@@ -84,7 +84,7 @@ native_debug :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool,
 	heap := runtime.heap_allocator()
 	msg := new(Array, heap)
 	msg.items = make([dynamic]Value, 0, 2, heap)
-	append(&msg.items, "DEBUG:", input.v)
+	append(&msg.items, string("DEBUG:"), input.v)
 	text := to_json(msg, ip.debug_layout, heap)
 	append(&ip.messages, text)
 	append(&ip.messages, '\n')

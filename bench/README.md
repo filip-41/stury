@@ -1,7 +1,7 @@
 # Benchmarks
 
-One probe per library lane (`doc/`, `paths/`, `typed/`, `records/`, `write/`), one runner beside it (`doc.py`,
-`paths.py`, `typed.py`, `records.py`, `write.py`) that times the probe against the other libraries' drivers in
+One probe per library lane (`doc/`, `paths/`, `typed/`, `records/`, `schema/`, `write/`), one runner beside it (`doc.py`,
+`paths.py`, `typed.py`, `records.py`, `schema.py`, `write.py`) that times the probe against the other libraries' drivers in
 `peers/`, and the command line comparisons in `cli/`. Run every command below from the repository root.
 
 | Target | Runner | Takes | Default |
@@ -10,6 +10,8 @@ One probe per library lane (`doc/`, `paths/`, `typed/`, `records/`, `write/`), o
 | `make bench-paths` | `paths.py` | nothing: its lanes and fixtures are fixed | |
 | `make bench-typed` | `typed.py` | lanes (`LANES`), each bound to a struct, so no other file | all five |
 | `make bench-records` | `records.py` | fixtures from the list below (`RECORD_FILES`) | all of them |
+| `make bench-schema` | `schema.py` | fixtures (`SCHEMA_FIXTURES`) | all 19 |
+| `make diff-schema` | `schema_oracle.py` | fixtures (`SCHEMA_FIXTURES`) | all 19 |
 | `make bench-write` | `write.py` | lanes (`LANES`), each with its own fixtures | all four |
 | `make bench` | `run.py` | `CASES`, a regex of case names | all |
 | `make bench-cli` | `cli/jq_compare.sh` | `CASES`, a regex of case names | all |
@@ -36,7 +38,9 @@ make fixtures
 ```
 
 `bench/fetch.py` downloads the pinned corpus (`twitter.json`, `citm_catalog.json`, `canada.json`) into
-`bench/fixtures/corpus/` and the peers' sources into `build/bench/deps/`, checking each SHA-256. `bench/gen.py` writes
+`bench/fixtures/corpus/` and the peers' sources into `build/bench/deps/`, checking each SHA-256. `fetch.py schema` adds the
+schema lane's 15 schemas and instances (`bench/fixtures/jsonschema-benchmark/`, with each `schema-noformat.json`) and
+`fetch.py archive` Blaze's source. `bench/gen.py` writes
 the synthetic fixtures into `bench/fixtures/` and exits non-zero when one `manifest.toml` pins has other bytes.
 `gen.py --check` writes nothing. A runner looks for a fixture in `bench/fixtures/`, then `bench/fixtures/corpus/`, then
 as a path.
@@ -102,6 +106,34 @@ types, in an arena, with strings borrowed and with strings copied. `bench/typed.
 best of `ROUNDS` rounds, each string mode a program of its own, beside serde_json's and sonic-rs's derived readers into
 the same structs on the JSON lanes (`peers/rust/src/bin/typed.rs`). Every arm prints a fold of the value it read, and
 the runner times nothing until the folds agree. `make bench-typed LANES="logs table"` runs the lanes named.
+
+## Schema lane
+
+```sh
+make bench-schema ROUNDS=1
+make diff-schema
+```
+
+`bench/schema.py` judges the instances of 19 schemas on one thread: 15 from sourcemeta-research/jsonschema-benchmark
+(geojson, openapi, draft-04, cmake-presets, ui5-manifest, helm-chart-lock, cspell, deno, code-climate, pulumi, aws-cdk,
+ansible-meta, clang-format, babelrc, krakend) and four from `gen.py` (logs, twitter and citm with a schema inferred from
+the data and closed, and applicator, tagged events under `oneOf`, `if`/`then` and `unevaluatedProperties`). The schema is
+the benchmark's `schema-noformat.json`, so no arm asserts a format. Each arm parses every instance of the text with its
+own parser, judges it and drops it, in two forms:
+
+| Form | stury | Blaze | jsonschema-rs | boon |
+|---|---|---|---|---|
+| `verdict` | `json.validate` for now | FastValidation | `is_valid` | `validate().is_ok()` |
+| `errors` | `json.validate` for now | Exhaustive and `SimpleOutput` | `iter_errors` | `basic_output` leaves |
+
+It prints, per form, GB/s of the instance text, µs per call and instructions per call. Instructions per call are the
+difference between two counted runs of different pass counts (`BENCH_PASSES`), over the instances in the extra passes.
+The arms that judge a schema must give the same verdict on every instance before a fixture is timed (each driver
+writes a 0 or 1 per instance to the path in `BENCH_VERDICTS`). The peers' drivers are `peers/blaze/main.cc` (cmake) and
+`peers/rust-schema/src/main.rs` (a package of its own, so the crates parse with serde_json's default features), with
+jsonschema 0.60.2 and boon 0.6.1 pinned in `peers/rust-schema/Cargo.toml`. `schema_oracle.py` runs the same instances
+through the pinned Python `jsonschema` package and compares each instance's verdict; `make diff-schema ORACLE_ARGS=--suite`
+also holds the package to the vendored JSON-Schema-Test-Suite (`json/test/conformance/`).
 
 ## Record lanes
 

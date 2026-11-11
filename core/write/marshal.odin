@@ -124,30 +124,36 @@ Walker :: struct {
 	side:      map[typeid]^typed.Plan,
 	arena:     runtime.Arena, // what hooks allocate
 	tag_field: typed.Field, // the record of a union's tag, a string
-	err:       core.Typed_Error,
+	omits:     ^typed.Omits, // what a model's dump leaves out, nil for none
+	err:       core.Typed_Refusal,
+	// A visit's visitor, and the open frame and depth of the record it is called at, which `visit_path` reads.
+	visitor:   ^Visitor,
+	open:      Frame,
+	top:       int,
 }
 
 // Writes `value` by `plan`, which a format built, as `write` says. `plan` must be of `value`'s type, and the bytes are
 // the caller's. A nil `value` writes the format's null only through a plan of its type. Each format's `marshal` takes
 // this form beside the one that builds a plan for the call.
-marshal :: proc(value: any, plan: ^typed.Plan, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
+marshal :: proc(value: any, plan: ^typed.Plan, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
 	if err := check_value(value, plan); err.kind != .None {
-		return nil, err
+		return nil, core.error_of(err)
 	}
-	return plan.marshal(plan, value.data, write, {}, allocator)
+	text, err := plan.marshal(plan, value.data, write, {}, allocator, nil)
+	return text, core.error_of(err)
 }
 
 // `marshal` to `w`, as the text is made. On a refusal `w` may hold a prefix of the text.
-marshal_stream :: proc(w: io.Stream, value: any, plan: ^typed.Plan, write := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error {
+marshal_stream :: proc(w: io.Stream, value: any, plan: ^typed.Plan, write := core.Write_Options{}, allocator := context.allocator) -> core.Error {
 	if err := check_value(value, plan); err.kind != .None {
-		return err
+		return core.error_of(err)
 	}
-	_, err := plan.marshal(plan, value.data, write, w, allocator)
-	return err
+	_, err := plan.marshal(plan, value.data, write, w, allocator, nil)
+	return core.error_of(err)
 }
 
 @(private)
-check_value :: proc(value: any, plan: ^typed.Plan) -> core.Typed_Error {
+check_value :: proc(value: any, plan: ^typed.Plan) -> core.Typed_Refusal {
 	if plan != nil && plan.err.kind != .None {
 		return plan.err
 	}
@@ -158,21 +164,23 @@ check_value :: proc(value: any, plan: ^typed.Plan) -> core.Typed_Error {
 		return {kind = .Plan_Mismatch}
 	}
 	if value.id != plan.type {
-		return typed.plan_mismatch(plan, plan.spelling, value.id)
+		return typed.plan_mismatch(plan, plan.readers, value.id)
 	}
 	return {}
 }
 
 // The compact and pretty instances of a format's walk, each with the plain string writer `put` and with `put_opted`, the
 // one a call with `ascii` or `escape_html` takes. `Plan.marshal` is a format's one call of this. The text comes from
-// `allocator`, and what lasts only the call from `context.allocator`.
-marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, $T: Tree, $put, $put_opted: Put) -> ([]u8, core.Typed_Error) {
+// `allocator`, and what lasts only the call from `context.allocator`. `omits`, nil for none, is asked at each member the
+// plan marks `omit`.
+marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, $T: Tree, $put, $put_opted: Put, omits: ^typed.Omits) -> ([]u8, core.Typed_Refusal) {
 	frames: [FRAMES]Frame = ---
 	ptrs: [core.MAX_DEPTH]Target = ---
 	spill: [ROOM_MAX]u8 = ---
 	w: Walker
 	init(&w.out, &spill, allocator, stream)
 	walker_init(&w, opts, raw_data(frames[:]), raw_data(ptrs[:]))
+	w.omits = omits
 	kind := walker_value(&w, plan, uintptr(value), T, put, put_opted)
 	release_walker(&w)
 	w.err.kind = kind
@@ -201,13 +209,13 @@ walker_value :: proc(w: ^Walker, plan: ^typed.Plan, value: uintptr, $T: Tree, $p
 	w.plan, w.meta = plan, raw_data(plan.meta)
 	switch {
 	case w.opts.pretty && (w.opts.ascii || w.opts.escape_del || w.opts.escape_html):
-		return walk(w, value, true, T, put_opted)
+		return walk(w, value, true, T, put_opted, false)
 	case w.opts.pretty:
-		return walk(w, value, true, T, put)
+		return walk(w, value, true, T, put, false)
 	case w.opts.ascii || w.opts.escape_del || w.opts.escape_html:
-		return walk(w, value, false, T, put_opted)
+		return walk(w, value, false, T, put_opted, false)
 	}
-	return walk(w, value, false, T, put)
+	return walk(w, value, false, T, put, false)
 }
 
 // A walker that outlives one value, with its stacks, which a token write keeps in `Tokens.state`.
@@ -222,7 +230,7 @@ Held_Walker :: struct {
 // walker is made at the first value and kept until `tokens_release`, so a run of values sets it up once, and the token
 // write's output moves into it, so `t.out` points into the walker from then on. A refusal's
 // kind and path go to `err`, and the kind is returned.
-tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind {
+tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Refusal, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind {
 	h := (^Held_Walker)(t.state)
 	if h == nil {
 		// The stacks are written before they are read, so only the walker is zeroed.
@@ -266,14 +274,18 @@ tokens_release :: proc(t: ^Tokens) {
 
 // The walk. `cur` is the open frame, kept out of `frames` so its fields stay in registers, so `refused` gets a copy, since
 // the proc takes a by-value struct's address. Each pass through the loop
-// writes what comes before one value, then the value, which is written in the switch or opens a frame.
+// writes what comes before one value, then the value, which is written in the switch or opens a frame. A visit (`V`)
+// writes nothing and enters no `any` or hook: it calls `w.visitor` at each record with a rule set and at each refusal.
 @(private)
-walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $put: Put) -> core.Typed_Error_Kind #no_bounds_check {
+walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $put: Put, $V: bool) -> core.Typed_Error_Kind #no_bounds_check {
 	out := &w.out
 	cur := Frame{r = &w.plan.fields[0], at = value, left = 1, mode = .Target}
 	// `top` counts the open pointers' and `any`s' frames besides the containers', which `too_deep` takes away, so a
 	// container past `MAX_DEPTH` is refused as a read refuses it.
 	top, nest := 0, 0
+	when V {
+		_ = nest
+	}
 	next: for {
 		vf: ^typed.Field
 		va: uintptr
@@ -285,18 +297,25 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					r = intrinsics.ptr_offset(r, 1)
 				}
 				if r.kind == .Never {
-					p = room(out, CLOSE_ROOM)
-					if cur.lead == u32(T[.Open_Object][0]) {
-						p[0] = T[.Open_Object][0]
-						out.cursor += 1
-						p = p[1:]
-					} else {
-						when P {
-							p = line(w, p, nest - 1)
+					when V {
+						if w.meta[r.meta].model != nil && w.visitor.close != nil && !visit_close(w, cur, top, r) {
+							return .None
 						}
 					}
-					p[0] = T[.Close_Object][0]
-					out.cursor += 1
+					when !V {
+						p = room(out, CLOSE_ROOM)
+						if cur.lead == u32(T[.Open_Object][0]) {
+							p[0] = T[.Open_Object][0]
+							out.cursor += 1
+							p = p[1:]
+						} else {
+							when P {
+								p = line(w, p, nest - 1)
+							}
+						}
+						p[0] = T[.Close_Object][0]
+						out.cursor += 1
+					}
 					when P {
 						nest -= 1
 					}
@@ -306,8 +325,10 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					up := &w.frames[top]
 					if up.mode == .Elements && up.left > 0 && up.r.kind == .Struct && out.err == .None {
 						up.left -= 1
-						p[1] = T[.Comma][0]
-						out.cursor += 1
+						when !V {
+							p[1] = T[.Comma][0]
+							out.cursor += 1
+						}
 						when P {
 							line(w, p[2:], nest)
 							nest += 1
@@ -324,49 +345,56 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					continue
 				}
 			}
-			p = room(out, PRETTY_ROOM when P else MEMBER_ROOM)
-			p[0] = u8(cur.lead)
-			cur.lead = u32(T[.Comma][0])
-			p = p[1:]
-			when P {
-				out.cursor += 1
-				p = line(w, p, nest)
-				start := out.cursor
+			when V {
+				cur.r = intrinsics.ptr_offset(r, 1)
+				vf, va = r, cur.at + uintptr(r.offset)
 			} else {
-				start := out.cursor + 1
-			}
-			cur.r = intrinsics.ptr_offset(r, 1)
-			n := uintptr(r.key_size)
-			if n == 0 {
-				out.cursor = start
-				if k := member_key(w, r, T, put); k != .None {
-					open := cur
-					return refused(w, open, top, k)
-				}
-				p = room(out, LEAF_ROOM + 1)
-				start = out.cursor
-			} else {
-				intrinsics.unaligned_store((^[2]u64)(p), r.word)
-				if n > 16 {
-					intrinsics.mem_copy_non_overlapping(p[16:], r.rest, n - 16)
-				}
-				start += int(n)
-				p = p[n:]
-			}
-			when P {
-				p[0] = T[.After_Colon][0]
+				p = room(out, PRETTY_ROOM when P else MEMBER_ROOM)
+				p[0] = u8(cur.lead)
+				cur.lead = u32(T[.Comma][0])
 				p = p[1:]
-				start += 1
+				when P {
+					out.cursor += 1
+					p = line(w, p, nest)
+					start := out.cursor
+				} else {
+					start := out.cursor + 1
+				}
+				cur.r = intrinsics.ptr_offset(r, 1)
+				n := uintptr(r.key_size)
+				if n == 0 {
+					out.cursor = start
+					if k := member_key(w, r, T, put); k != .None {
+						open := cur
+						return refused(w, open, top, k)
+					}
+					p = room(out, LEAF_ROOM + 1)
+					start = out.cursor
+				} else {
+					intrinsics.unaligned_store((^[2]u64)(p), r.word)
+					if n > 16 {
+						intrinsics.mem_copy_non_overlapping(p[16:], r.rest, n - 16)
+					}
+					start += int(n)
+					p = p[n:]
+				}
+				when P {
+					p[0] = T[.After_Colon][0]
+					p = p[1:]
+					start += 1
+				}
+				// One store of the cursor per member: the value's text reads it next, through memory.
+				out.cursor = start
+				vf, va = r, cur.at + uintptr(r.offset)
 			}
-			// One store of the cursor per member: the value's text reads it next, through memory.
-			out.cursor = start
-			vf, va = r, cur.at + uintptr(r.offset)
 		} else if cur.left == 0 {
 			if top == 0 {
 				return out.err
 			}
 			if cur.mode >= .Elements {
-				p = room(out, 1 + LINE_ROOM + 16)
+				when !V {
+					p = room(out, 1 + LINE_ROOM + 16)
+				}
 				when P {
 					if cur.total > 0 {
 						p = line(w, p, nest - 1)
@@ -374,13 +402,19 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					nest -= 1
 				}
 				if cur.mode == .Elements {
-					p[0] = T[.Close_Array][0]
+					when !V {
+						p[0] = T[.Close_Array][0]
+					}
 				} else {
-					p[0] = T[.Close_Object][0]
+					when !V {
+						p[0] = T[.Close_Object][0]
+					}
 					resize(&w.entries, int(cur.at) - cur.total)
 					w.keys.cursor = cur.step
 				}
-				out.cursor += 1
+				when !V {
+					out.cursor += 1
+				}
 			} else {
 				w.n_ptrs -= 1
 				if cur.mode == .Side {
@@ -395,10 +429,12 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 			continue
 		} else if cur.mode == .Elements {
 			cur.left -= 1
-			p = room(out, 1 + 1 + LINE_ROOM + 16 + LEAF_ROOM when P else 1 + LEAF_ROOM)
-			p[0] = T[.Comma][0]
-			p = p[cur.lead:]
-			out.cursor += int(cur.lead)
+			when !V {
+				p = room(out, 1 + 1 + LINE_ROOM + 16 + LEAF_ROOM when P else 1 + LEAF_ROOM)
+				p[0] = T[.Comma][0]
+				p = p[cur.lead:]
+				out.cursor += int(cur.lead)
+			}
 			cur.lead = 1
 			when P {
 				p = line(w, p, nest)
@@ -406,37 +442,56 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 			vf, va = cur.r, cur.at
 			cur.at += uintptr(cur.step)
 		} else if cur.mode == .Entries {
-			vf, va = entry_key(w, int(cur.at), cur.left == cur.total, nest, T)
+			when V {
+				vf, va = w.entries[cur.at].rec, w.entries[cur.at].value
+			} else {
+				vf, va = entry_key(w, int(cur.at), cur.left == cur.total, nest, T)
+			}
 			cur.at += 1
 			cur.left -= 1
-			p = out.buf[out.cursor:]
+			when !V {
+				p = out.buf[out.cursor:]
+			}
 		} else {
 			cur.left = 0
-			p = room(out, LEAF_ROOM)
+			when !V {
+				p = room(out, LEAF_ROOM)
+			}
 			vf, va = cur.r, cur.at
 		}
 		k := core.Typed_Error_Kind.None
 		value: for {
+			when V {
+				if (w.meta[vf.meta].rule_set > 0 || w.meta[vf.meta].judged) && !visit_record(w, cur, top, vf, va, .None) {
+					return .None
+				}
+			}
 			// Before the switch: a string is most of a text, and a compare costs less than a jump through a table.
 			if vf.kind == .String {
 				k = put(out, p, (^string)(va)^, &w.opts)
 			} else {
 				#partial switch vf.kind {
 				case .I64:
-					out.cursor += spell.i64_text(p, (^i64)(va)^)
+					when !V {
+						out.cursor += spell.i64_text(p, (^i64)(va)^)
+					}
 				case .F64:
 					x := (^f64)(va)^
 					if x - x != 0 {
 						k = .Non_Finite
 					} else {
-						out.cursor += spell.f64_text(p, x)
+						when !V {
+							out.cursor += spell.f64_text(p, x)
+						}
 					}
 				case .Bool:
-					out.cursor += put_bool(p, (^bool)(va)^, T)
+					when !V {
+						out.cursor += put_bool(p, (^bool)(va)^, T)
+					}
 				case .Struct, .Required:
 					if too_deep(w, top) {
 						k = .Too_Deep
-					} else if w.opts.sort_keys || vf.kind == .Required && w.meta[w.meta[vf.meta].block + w.meta[vf.meta].members].capture >= 0 {
+					} else if w.opts.sort_keys || vf.lists {
 						k = list_struct(w, vf, va, nil, put)
 						if k == .None {
 							break value
@@ -471,8 +526,10 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 						when P {
 							nest += 1
 						}
-						p[0] = T[.Open_Array][0]
-						out.cursor += 1
+						when !V {
+							p[0] = T[.Open_Array][0]
+							out.cursor += 1
+						}
 					}
 				case .Map:
 					if too_deep(w, top) {
@@ -486,7 +543,12 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 				case .Ptr:
 					target := (^rawptr)(va)^
 					if target == nil {
-						out.cursor += put_word(p, T[.Null])
+						when V {
+							// A pointer that refuses null.
+							k = .Wrong_Kind if w.meta[vf.meta].no_nil else .None
+						} else {
+							out.cursor += put_word(p, T[.Null])
+						}
 					} else {
 						e := elem_of(vf)
 						k = enter_target(w, target, e)
@@ -501,11 +563,19 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 						vf = elem_of(vf)
 						continue value
 					}
-					out.cursor += put_word(p, T[.Null])
+					when V {
+						k = .Wrong_Kind if w.meta[vf.meta].no_nil else .None
+					} else {
+						out.cursor += put_word(p, T[.Null])
+					}
 				case .Union:
 					arm := union_arm(&w.meta[vf.meta], va)
 					if arm == nil {
-						out.cursor += put_word(p, T[.Null])
+						when V {
+							k = .Wrong_Kind if w.meta[vf.meta].no_nil else .None
+						} else {
+							out.cursor += put_word(p, T[.Null])
+						}
 					} else if len(arm.name) == 0 {
 						vf = &w.plan.fields[arm.fields]
 						continue value
@@ -518,6 +588,12 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 						}
 					}
 				case .Any, .Hook:
+					// A visit judges what a hook with no rules refuses, which a hook with rules has judged.
+					when V {
+						if vf.kind == .Any || w.meta[vf.meta].rule_set > 0 {
+							continue next
+						}
+					}
 					a: any
 					// A hook's stand-in may come from `Walker.arena`, which lasts the call. A hook with no write proc refuses the value.
 					if vf.kind == .Any {
@@ -525,22 +601,39 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					} else if write := w.meta[vf.meta].write; write == nil {
 						k = .Unsupported
 					} else {
+						data := typed.extra_at(w.plan, vf.meta).data
+						context.user_ptr = data if data != nil else context.user_ptr
 						a, k = write(rawptr(va), runtime.arena_allocator(&w.arena))
 					}
-					if k == .None {
-						rec, e := any_value(w, a, T, put)
-						k = e
-						if rec != nil {
-							top += 1
-							w.frames[top] = cur
-							cur = Frame{r = rec, at = uintptr(a.data), left = 1, mode = .Side}
+					when V {
+						if k == .None {
+							continue next
+						}
+					} else {
+						if k == .None {
+							rec, e := any_value(w, a, T, put)
+							k = e
+							if rec != nil {
+								top += 1
+								w.frames[top] = cur
+								cur = Frame{r = rec, at = uintptr(a.data), left = 1, mode = .Side}
+							}
 						}
 					}
 				case:
-					k = leaf(w, vf, va, top, nest, P, T, put)
+					when V {
+						k = visit_leaf(w, vf, va)
+					} else {
+						k = leaf(w, vf, va, top, nest, P, T, put)
+					}
 				}
 			}
 			if k != .None {
+				when V {
+					if visit_record(w, cur, top, vf, va, k) {
+						continue next
+					}
+				}
 				open := cur
 				return refused(w, open, top, k)
 			}
@@ -548,7 +641,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 		}
 		top += 1
 		w.frames[top] = cur
-		cur = open_entries(w, T)
+		cur = open_entries(w, T, V)
 		when P {
 			nest += 1
 		}

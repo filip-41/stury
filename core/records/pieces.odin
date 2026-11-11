@@ -10,10 +10,11 @@ import engine "../build"
 
 // Returns the fault of each refused record of `src` read from byte `at`, in source order, and last the fault that ended
 // the records, if any. The slice is allocated with `allocator`. An allocation that fails returns its error and no
-// faults. With a `runner`, a long text is read in pieces on its threads, with the same answer.
-check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> (faults: []core.Fault, err: runtime.Allocator_Error) {
+// faults. With a `runner`, a long text is read in pieces on its threads, with the same answer. A format that binds its
+// framing at compile time gives it as `services`, and then `as` need hold none.
+check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0, services: ^Framing_Services = nil) -> (faults: []core.Fault, err: runtime.Allocator_Error) {
 	out := make([dynamic]core.Fault, allocator)
-	if err = judge_all(src, as, framing, at, runner, &out); err != nil {
+	if err = judge_all(src, as, services, framing, at, runner, &out); err != nil {
 		delete(out)
 		return nil, err
 	}
@@ -24,7 +25,7 @@ check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator :
 // read in pieces on the threads of `runner`. A format that does not take it answers `.Bad_Option`. With no runner, or
 // for a short text, it reads on the caller alone.
 validate_parallel :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault) {
-	services := (^Services)(as.spelling.records) if as.spelling != nil else nil
+	services := services_of(as)
 	if services == nil || services.whole == nil {
 		return core.Fault{kind = .Bad_Option}
 	}
@@ -32,7 +33,7 @@ validate_parallel :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) ->
 	// A whole text's records are judged by the walk that frames them, so only the fault that ends them is given.
 	first: [1]core.Fault
 	out := slice.into_dynamic(first[:])
-	if judge_all(src, whole, framing, at, runner, &out) != nil {
+	if judge_all(src, whole, services, framing, at, runner, &out) != nil {
 		return core.Fault{kind = .No_Memory}
 	}
 	return Maybe(core.Fault)(first[0]) if len(out) > 0 else nil
@@ -72,8 +73,8 @@ Chain :: struct {
 // place its chain arrived at, which the reading jumps to. So a guess counts only where a chain from a true start
 // reached it, and the answer is the one a serial read gives.
 @(private)
-judge_all :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64, runner: ^core.Runner, out: ^[dynamic]core.Fault) -> runtime.Allocator_Error {
-	it := open(src, as, framing, at)
+judge_all :: proc(src: []u8, as: core.As, services: ^Framing_Services, framing: core.Framing, at: u64, runner: ^core.Runner, out: ^[dynamic]core.Fault) -> runtime.Allocator_Error {
+	it := open_with(src, as, services if services != nil else services_of(as), docs_of(as), framing, at)
 	defer close(&it)
 	// The first record comes alone, so the pieces can start past it.
 	to := it.pos + 1
@@ -205,8 +206,8 @@ fan :: proc(runner: ^core.Runner, task: proc(arg: rawptr), arg: rawptr) {
 // fault's `at`, which a thread started before the fault was found, may give records that are no records of the text.
 // The caller drops what tasks found at or past that byte. What they found before it is each record `next` gives there,
 // once.
-each :: #force_inline proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: ^$D, piece: ^Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0) -> Maybe(core.Fault) {
-	return each_piece(src, as, framing, cast(proc(data: rawptr, piece: ^Reader, k: int) -> bool)task, data, runner, at)
+each :: #force_inline proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: ^$D, piece: ^Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0, services: ^Framing_Services = nil) -> core.Error {
+	return core.error_of(each_piece(src, as, services, framing, cast(proc(data: rawptr, piece: ^Reader, k: int) -> bool)task, data, runner, at))
 }
 
 // `each`'s pieces: piece 0 runs from the text's start and piece k past it from the first cut in slice k - 1 of the text
@@ -239,8 +240,8 @@ Cut :: struct {
 }
 
 @(private)
-each_piece :: proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: rawptr, piece: ^Reader, k: int) -> bool, data: rawptr, runner: ^core.Runner, at: u64) -> Maybe(core.Fault) {
-	e := Each{start = open(src, as, framing, at, runtime.heap_allocator()), task = task, data = data, fault_piece = max(int)}
+each_piece :: proc(src: []u8, as: core.As, services: ^Framing_Services, framing: core.Framing, task: proc(data: rawptr, piece: ^Reader, k: int) -> bool, data: rawptr, runner: ^core.Runner, at: u64) -> Maybe(core.Fault) {
+	e := Each{start = open_with(src, as, services if services != nil else services_of(as), docs_of(as), framing, at, runtime.heap_allocator()), task = task, data = data, fault_piece = max(int)}
 	defer close(&e.start)
 	if e.start.fault != nil {
 		return e.start.fault
@@ -345,7 +346,7 @@ run_pieces :: proc(arg: rawptr) {
 		if k < e.slices {
 			hi = cut_from(e, k, true) or_else hi
 		}
-		piece := e.start if k > 0 else open(e.start.src, e.start.as, e.start.framing, e.start.from, runtime.heap_allocator())
+		piece := e.start if k > 0 else open_with(e.start.src, e.start.as, e.start.services, e.start.docs, e.start.framing, e.start.from, runtime.heap_allocator())
 		if e.slices > 0 && !piece.services.piece(&piece, lo, hi) {
 			piece.fault = core.Fault{kind = .No_Memory}
 		}
@@ -371,9 +372,9 @@ build :: proc {build_record, build_whole}
 // calling thread, which gives its refusal. `pieces`, when given, is set to the pieces a joined build cut, and left
 // alone by a build on the calling thread.
 @(private)
-build_whole :: proc(src: []u8, as: core.As, dups := core.Duplicates.Last, allocator := context.allocator, runner: ^core.Runner = nil, pieces: ^int = nil) -> (core.Document, core.Document_Error) {
-	services := (^Services)(as.spelling.records) if as.spelling != nil else nil
-	if runner != nil && runner.threads > 0 && services != nil && services.build_next != nil && u64(len(src)) >= 4 * SLICE {
+build_whole :: proc(src: []u8, as: core.As, dups := core.Duplicates.Last, allocator := context.allocator, runner: ^core.Runner = nil, pieces: ^int = nil) -> (core.Document, core.Error) {
+	services, docs := services_of(as), docs_of(as)
+	if runner != nil && runner.threads > 0 && services != nil && docs != nil && docs.build_next != nil && u64(len(src)) >= 4 * SLICE {
 		whole, framing, at := services.whole(src, as)
 		if !entries_cut(src, whole, framing, at) {
 			return core.build(src, as, dups, allocator)
@@ -398,7 +399,7 @@ build_whole :: proc(src: []u8, as: core.As, dups := core.Duplicates.Last, alloca
 				if pieces != nil {
 					pieces^ = len(job.pieces)
 				}
-				return doc, {}
+				return doc, nil
 			}
 		}
 		delete(job.nodes, allocator)
@@ -409,11 +410,12 @@ build_whole :: proc(src: []u8, as: core.As, dups := core.Duplicates.Last, alloca
 // Whether the records at `at` are cut exactly, the first ends in the first quarter of the bytes past `at`, and it is
 // an array's entry, not an object's member, which no piece of a whole text's build joins. A text whose bulk is no
 // array, or is the array's first entry, is built on one thread without a run of pieces, or a walk of that entry,
-// before it. A caller that cuts a whole text's spine array into pieces asks it first.
-entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64) -> bool {
-	it := open(src, as, framing, at, runtime.heap_allocator())
+// before it. A caller that cuts a whole text's spine array into pieces asks it first. The records are framed by
+// `services`, the handle's when nil.
+entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64, services: ^Framing_Services = nil) -> bool {
+	it := open_with(src, as, services if services != nil else services_of(as), nil, framing, at, runtime.heap_allocator())
 	defer close(&it)
-	if it.services.exact == nil {
+	if it.services == nil || it.services.exact == nil {
 		return false
 	}
 	rule, exact := it.services.exact(&it)
@@ -465,7 +467,7 @@ build_piece :: proc(job: ^Build_Job, it: ^Reader, k: int) -> bool {
 	p: Built
 	ok := len(b.doc.nodes) > 0
 	for ok {
-		rec, more := it.services.build_next(it, &b, &regs)
+		rec, more := it.docs.build_next(it, &b, &regs)
 		if !more {
 			break
 		}
@@ -542,7 +544,7 @@ join :: proc(src: []u8, as: core.As, job: ^Build_Job, allocator: runtime.Allocat
 		array += 1
 	}
 	array -= 1
-	if err.kind != .None || array < 0 || frame.nodes[array].kind != .Array || frame.nodes[array].n != 1 || len(frame.facts) > 0 {
+	if err != nil || array < 0 || frame.nodes[array].kind != .Array || frame.nodes[array].n != 1 || len(frame.facts) > 0 {
 		return
 	}
 	if len(frame.nodes) + n > len(job.nodes) {

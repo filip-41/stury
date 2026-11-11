@@ -31,7 +31,7 @@ TOKEN_ROWS := [?]Token_Row {
 	{8, "\\back;slash", false, 6, 5},
 }
 
-token_rows :: proc(rows: []Token_Row, spec: dsv.Spec, layout: dsv.Options, stream := io.Stream{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
+token_rows :: proc(rows: []Token_Row, spec: dsv.Spec, layout: dsv.Options, stream := io.Stream{}, allocator := context.allocator) -> ([]u8, core.Typed_Refusal) {
 	tw: write.Tokens
 	write.tokens_init(&tw, dsv.as(spec, layout), {}, allocator, stream)
 	if !layout.no_header {
@@ -74,20 +74,20 @@ tokens_equal_marshal :: proc(t: ^testing.T) {
 		want, werr := dsv.marshal(rows, c.spec, c.layout, write = {}, allocator = context.temp_allocator)
 		got, err := token_rows(rows, c.spec, c.layout)
 		defer delete(got)
-		testing.expect_value(t, err.kind, werr.kind)
+		testing.expect_value(t, err.kind, walktest.typed_kind(werr))
 		testing.expectf(t, string(got) == string(want), "%v %v: %q, want %q", c.spec, c.layout, got, want)
-		if werr.kind == .None {
+		if werr == nil {
 			doc: core.Document
-			derr: core.Document_Error
+			derr: core.Error
 			switch c.spec {
 			case .Csv:
-				doc, derr = dsv.build(got, .Csv, c.layout)
+				doc, derr = core.build(got, dsv.as(.Csv, c.layout))
 			case .Tsv:
-				doc, derr = dsv.build(got, .Tsv, c.layout)
+				doc, derr = core.build(got, dsv.as(.Tsv, c.layout))
 			case .Plain:
-				doc, derr = dsv.build(got, .Plain, c.layout)
+				doc, derr = core.build(got, dsv.as(.Plain, c.layout))
 			}
-			testing.expect_value(t, derr.kind, core.Document_Error_Kind.None)
+			walktest.expect_nil(t, derr)
 			core.destroy(&doc)
 		}
 	}

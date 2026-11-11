@@ -8,6 +8,7 @@ import "core:testing"
 import spell "../../core/spell"
 import core "../../core"
 import json ".."
+import walktest "../../walktest"
 
 // Decoding a document's text and numbers: JSON5 forms, tolerances, the decoder's block edges, and number spellings.
 
@@ -55,8 +56,8 @@ number_digit_count :: proc(t: ^testing.T) {
 			}
 			src := string(text[:k])
 			doc, err := build(src, .Json)
-			testing.expectf(t, err.kind == .None, "%q: %v", src, err)
-			if err.kind == .None {
+			testing.expectf(t, err == nil, "%q: %v", src, err)
+			if err == nil {
 				got, got_ok := core.number(&doc, 0)
 				testing.expect(t, got_ok)
 				want, ok := strconv.parse_f64(src)
@@ -74,7 +75,7 @@ json5 :: proc(t: ^testing.T) {
 	src := `{'a': 'x', b: 'y', \u0063: 0x10}`
 	doc, err := build(src, .Json5)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	for w in ([]struct {
 		name: string,
 		text: string,
@@ -97,7 +98,7 @@ json5 :: proc(t: ^testing.T) {
 	core.destroy(&doc)
 
 	doc, err = build(`['\x41\0\n\'\\', "\uD83D\uDE00"]`, .Json5)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	buf: [256]u8
 	for want, i in ([]string{"A\x00\n'\\", "\U0001F600"}) {
 		s, ok := core.text(&doc, core.Node_Index(i + 1), buf[:])
@@ -106,7 +107,7 @@ json5 :: proc(t: ^testing.T) {
 	core.destroy(&doc)
 
 	doc, err = build(`[+1, .5, 5., Infinity, -Infinity, NaN, -NaN, 0x10, -0x10]`, .Json5)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	want := []struct {
 		kind: core.Number_Kind,
 		bits: u64,
@@ -148,7 +149,7 @@ tolerated :: proc(t: ^testing.T) {
 		}) {
 		doc, err := json.build(transmute([]u8)c.src, c.spec, c.opts)
 		defer core.destroy(&doc)
-		testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, err)
 		buf: [64]u8
 		s, ok := core.text(&doc, 0, buf[:])
 		testing.expectf(t, ok && s == c.want, "%q: got %x want %x", c.src, transmute([]u8)s, transmute([]u8)c.want)
@@ -188,8 +189,8 @@ numbers :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		doc, err := build(c.text, .Json)
-		testing.expectf(t, err.kind == .None, "%q: %v", c.text, err)
-		if err.kind != .None {
+		testing.expectf(t, err == nil, "%q: %v", c.text, err)
+		if err != nil {
 			continue
 		}
 		n, n_ok := core.number(&doc, 0)
@@ -204,8 +205,8 @@ numbers :: proc(t: ^testing.T) {
 		long[i] = '0'
 	}
 	long_doc, long_err := build(string(long[:]), .Json)
-	testing.expect_value(t, long_err.kind, core.Document_Error_Kind.None)
-	if long_err.kind == .None {
+	walktest.expect_nil(t, long_err)
+	if long_err == nil {
 		long, long_ok := core.number(&long_doc, 0)
 		testing.expect(t, long_ok && long.kind == .Wide)
 		core.destroy(&long_doc)
@@ -249,8 +250,8 @@ numbers :: proc(t: ^testing.T) {
 		}
 		src := string(text[:k])
 		doc, err := build(src, .Json)
-		testing.expectf(t, err.kind == .None, "%q: %v", src, err)
-		if err.kind != .None {
+		testing.expectf(t, err == nil, "%q: %v", src, err)
+		if err != nil {
 			return
 		}
 		got, got_ok := core.number(&doc, 0)
@@ -272,7 +273,7 @@ numbers :: proc(t: ^testing.T) {
 number_spelling_bits :: proc(t: ^testing.T) {
 	doc, err := build(`[0, 1.5, 1e2, 0x10, Infinity, NaN, +1, .5, 5.]`, .Json5)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	want := []json.Number_Spelling{.Json, .Json, .Json, .Hex, .Infinity, .Nan, .Decimal, .Decimal, .Decimal}
 	it := core.children(&doc, 0)
 	i := 0
@@ -296,7 +297,7 @@ number_spelling_bits :: proc(t: ^testing.T) {
 text_lax_buffer_bound :: proc(t: ^testing.T) {
 	doc, err := build("\"a\xffb\"", .Json, json.Options{tolerate = {.Invalid_Utf8}})
 	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
 	}
 	buf: [16]u8
@@ -314,7 +315,7 @@ text_lax_buffer_bound :: proc(t: ^testing.T) {
 text_owned :: proc(t: ^testing.T) {
 	doc, err := build(`"\u0041"`, .Json)
 	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
 	}
 	buf: [8]u8
@@ -335,7 +336,7 @@ text_owned :: proc(t: ^testing.T) {
 
 	plain, perr := build(`"abc"`, .Json)
 	defer core.destroy(&plain)
-	if !testing.expectf(t, perr.kind == .None, "build: %v", perr) {
+	if !testing.expectf(t, perr == nil, "build: %v", perr) {
 		return
 	}
 	s, ok = core.text(&plain, 0, nil)
@@ -402,7 +403,7 @@ decode_edges :: proc(t: ^testing.T) {
 		}) {
 		doc, err := build(c.src, .Json)
 		defer core.destroy(&doc)
-		if !testing.expectf(t, err.kind == .None, "%q: %v", c.src, err) {
+		if !testing.expectf(t, err == nil, "%q: %v", c.src, err) {
 			continue
 		}
 		s, ok := core.text(&doc, 0, buf[:])
@@ -422,7 +423,7 @@ key_equals_escaped :: proc(t: ^testing.T) {
 	copy(src[66:], `\n":1}`)
 	doc, err := build(string(src[:72]), .Json)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	name: [65]u8
 	for i in 0 ..< 64 {
 		name[i] = 'k'
@@ -438,7 +439,7 @@ tolerated_key :: proc(t: ^testing.T) {
 	src := "{\"a\xffb\":0}"
 	doc, err := build(src, .Json, {tolerate = {.Invalid_Utf8}})
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	buf: [16]u8
 	k, ok := core.text(&doc, 1, buf[:])
 	testing.expect(t, ok)
@@ -461,7 +462,7 @@ decode_into_token_sized_buffer :: proc(t: ^testing.T) {
 	texts := []string{`"\u0041"`, `"\uD800"`}
 	for src in texts {
 		doc, err := json.build(transmute([]u8)src, .Json, {tolerate = {.Lone_Surrogate}}, .Last, alloc)
-		if !testing.expectf(t, err.kind == .None, "%q: %v", src, err) {
+		if !testing.expectf(t, err == nil, "%q: %v", src, err) {
 			continue
 		}
 		before := arena.offset
@@ -486,7 +487,7 @@ decode_into_token_sized_buffer :: proc(t: ^testing.T) {
 	src := strings.to_string(b)
 	doc, err := json.build(transmute([]u8)src, .Json, {}, .Last, alloc)
 	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "long: %v", err) {
+	if !testing.expectf(t, err == nil, "long: %v", err) {
 		return
 	}
 	before := arena.offset

@@ -48,7 +48,7 @@ room :: #force_inline proc(out: ^Out, n: int) -> [^]u8 #no_bounds_check {
 // Ends the output and returns its error. A buffer output also returns its bytes, which the caller owns, or nil when it
 // failed. A stream output flushes what it holds and returns no bytes. Neither is usable afterwards. A `refused` write
 // frees the output and returns `refused` with the stream's cause.
-finish :: proc(out: ^Out, refused := core.Typed_Error{}) -> (bytes: []u8, err: core.Typed_Error) {
+finish :: proc(out: ^Out, refused := core.Typed_Refusal{}) -> (bytes: []u8, err: core.Typed_Refusal) {
 	if refused.kind != .None {
 		destroy(out)
 		err = refused
@@ -62,13 +62,13 @@ finish :: proc(out: ^Out, refused := core.Typed_Error{}) -> (bytes: []u8, err: c
 			}
 		}
 		destroy(out)
-		return nil, core.Typed_Error{kind = out.err, cause = out.cause}
+		return nil, core.Typed_Refusal{kind = out.err, cause = out.cause}
 	}
 	bytes = out.buf[:out.cursor] if out.err == .None else nil
 	if out.err == .None {
 		out.buf, out.size, out.cursor = nil, 0, 0
 	}
-	return bytes, core.Typed_Error{kind = out.err}
+	return bytes, core.Typed_Refusal{kind = out.err}
 }
 
 // Frees what an output holds that `finish` did not hand over.

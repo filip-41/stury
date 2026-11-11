@@ -11,6 +11,7 @@ import "core:bytes"
 import "core:mem/virtual"
 import "core:os"
 import core "../../core"
+import compose "../../core/compose"
 import records "../../core/records"
 import "jq"
 import "message"
@@ -62,6 +63,9 @@ edit_reader_position :: proc(data: rawptr) -> (string, int) {
 refuse_edit :: proc(o: ^Opts) {
 	if o.in_place && o.check {
 		usage_error("--in-place rewrites each file; --check only reads it")
+	}
+	if o.diff && (o.check || o.raw_input || o.seq || reads_lines(o)) {
+		usage_error("--diff previews the changes of a whole document: it takes neither --check nor records")
 	}
 	o.to = o.from
 }
@@ -187,7 +191,13 @@ edit_slurped :: proc(er: ^Edit_Run, w: ^Edit_State, input: jq.Value) -> (items, 
 }
 
 edit_state :: proc(er: ^Edit_Run, doc: ^core.Document, list: ^core.Edit_List) -> Edit_State {
-	return {doc = doc, list = list, name = er.ins.name, layout = er.layout, shown = er.run.opts.layout_shown, sorted = er.run.opts.sort_keys}
+	// A built value is written in the CLI's layout and numbers, and in the container's where that shows one.
+	if list != nil {
+		list.write = er.layout.opts
+		list.write.escape_del, list.write.jq_numbers = true, true
+		list.fixed = !er.run.opts.layout_shown
+	}
+	return {doc = doc, list = list, name = er.ins.name, sorted = er.run.opts.sort_keys}
 }
 
 // A whole text, which holds one document, so the filter makes one output. Under `-s` it is the one record of an array.
@@ -275,9 +285,9 @@ edit_commit :: proc(w: ^Edit_State, src, text: []u8, base: u64) -> (out: []u8, o
 	if len(w.list.edits) == 0 {
 		return text, false, true
 	}
-	committed, dropped, cerr := core.commit(w.list, allocator = runtime.heap_allocator())
-	if cerr.kind != .None {
-		core.move_document_error(&cerr, base)
+	committed, dropped, cerr := compose.commit(w.list, allocator = runtime.heap_allocator())
+	if cerr != nil {
+		cerr = moved_error(cerr, base)
 		message.write_stderr("stury: error: %s: %s\n", w.name, edit_error_text(src, cerr))
 		return nil, false, false
 	}
@@ -285,7 +295,7 @@ edit_commit :: proc(w: ^Edit_State, src, text: []u8, base: u64) -> (out: []u8, o
 		delete(committed, runtime.heap_allocator())
 		flat, style := core.is_flat(w.doc), core.Comment_Spelling.None
 		if flat {
-			style, _ = w.doc.spelling.edit.comment(w.doc, w.doc.as.spec)
+			style, _ = w.doc.readers.services.edit.comment(w.doc, w.doc.as.spec)
 		}
 		switch {
 		case flat && style == .None:
@@ -313,6 +323,14 @@ edit_writes_fact :: proc(list: ^core.Edit_List) -> bool {
 // Writes the edited text, or under `--check` names the file when it differs, or under `--in-place` replaces the file
 // with it.
 edit_publish :: proc(run: ^Run, path: string, src, out: []u8) -> int {
+	if run.opts.diff {
+		if !diff_preview(run, path, src, out) {
+			return EXIT_INPUT
+		}
+		if !run.opts.in_place {
+			return 0
+		}
+	}
 	switch {
 	case run.opts.check:
 		if bytes.equal(out, src) {
@@ -579,7 +597,6 @@ edit_read :: proc(r: ^Edit_Reader) -> (doc: ^core.Document, more: bool) {
 	}
 	doc = new(core.Document, heap)
 	doc^ = d
-	jq.store_inferred_kinds(doc)
 	append(&r.docs, doc)
 	full := rec.at + u64(len(rec.text))
 	end := full
@@ -672,7 +689,7 @@ edit_record_text :: proc(er: ^Edit_Run, doc: ^core.Document, src: []u8, span: Ed
 	defer core.edit_list_destroy(&list)
 	w := edit_state(er, doc, &list)
 	w.line = line
-	w.layout.opts.pretty = w.layout.opts.pretty && er.ins.framing == .Seq
+	list.write.pretty = list.write.pretty && er.ins.framing == .Seq
 	if !edit_tree(&w, core.ROOT, v) {
 		message.write_stderr("stury: error: %s: %s\n", edit_place(&w), w.err)
 		return nil, false, false
@@ -730,4 +747,21 @@ edit_lines :: proc(er: ^Edit_Run, path: string) -> int {
 		}
 	}
 	return edit_publish(er.run, path, src, edit_join_end(&join, r.spans[:]))
+}
+
+// The refusal `err` of an edit in a text that starts `by` bytes into the file.
+moved_error :: proc(err: core.Error, by: u64) -> core.Error {
+	switch e in err {
+	case core.Document_Error:
+		moved := e
+		core.move_document_error(&moved, by)
+		return moved
+	case core.Fault:
+		moved := e
+		moved.at += by
+		return moved
+	case core.Path_Error, core.Typed_Error, core.Typed_Error_Kind, runtime.Allocator_Error:
+	case nil:
+	}
+	return err
 }

@@ -2,7 +2,7 @@
 derived readers into the same structs. The best round of each arm's median counts.
 
 Usage: python3 bench/typed.py [--rounds N] [LANE...]
-LANE is one of logs, twitter, citm, table and text, each bound to the struct its probe reads, so no other file is
+LANE is one of logs, logs_required, twitter, citm, table and text, each bound to the struct its probe reads, so no other file is
 read. `ARMS=stury,serde` keeps a subset.
 Arms: stury (the probe `build/bench/typed`, on an arena), and serde and sonic when `build/bench/rust/release/typed` is
 present, on the JSON lanes. A copied string is a `String` in the Rust arms and a borrowed one a `Text`, borrowed from
@@ -16,7 +16,7 @@ from doc import parse_args, path as fixture, preamble, run, select_arms
 
 PROBE = os.path.join(BUILD, "typed")
 RUST = os.path.join(BUILD, "rust", "release", "typed")
-LANES = [("logs", "logs.json"), ("twitter", "twitter.json"), ("citm", "citm_catalog.json"), ("table", "table.csv"), ("text", "text.csv")]
+LANES = [("logs", "logs.json"), ("logs_required", "logs.json"), ("twitter", "twitter.json"), ("citm", "citm_catalog.json"), ("table", "table.csv"), ("text", "text.csv")]
 MODES = ["borrow", "copy"]
 
 
@@ -24,7 +24,7 @@ def command(arm, lane, mode, path):
     """The arm's command line, or None where the arm reads no such lane."""
     if arm == "stury":
         return [PROBE, lane, mode, path]
-    if path.endswith(".json") and os.path.exists(RUST):
+    if path.endswith(".json") and os.path.exists(RUST) and lane != "logs_required":
         return [RUST, arm, lane, mode, path]
     return None
 

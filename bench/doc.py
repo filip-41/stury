@@ -135,26 +135,41 @@ def peak_mib(ru_maxrss):
     return peak_bytes / (1024 * 1024)
 
 
-def run(cmdline):
-    """Runs one arm once under the RSS cap and returns (gb_per_s, check, peak MiB, ns) or exits. ns is the arm's
-    median nanoseconds, None from an arm that prints none."""
-    p = subprocess.Popen(cmdline, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=HERE)
+class Failed(Exception):
+    """A child that exited non-zero, passed the memory cap, or ran past its time limit."""
+
+
+def spawn(cmdline, env=None, timeout=None):
+    """Runs one command under the RSS cap and returns (stdout, stderr, rusage), or raises Failed with why."""
+    p = subprocess.Popen(cmdline, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=HERE,
+                         env={**os.environ, **(env or {})})
+    start = time.monotonic()
     while True:
         pid, status, usage = os.wait4(p.pid, os.WNOHANG)
         if pid == p.pid:
             break
-        if over_cap(p.pid):
+        why = "over the memory cap" if over_cap(p.pid) else f"over {timeout} s" if timeout and time.monotonic() - start > timeout else ""
+        if why:
             p.kill()
-            _, killed, _ = os.wait4(p.pid, 0)
-            p.returncode = os.waitstatus_to_exitcode(killed)
+            os.wait4(p.pid, 0)
             p.communicate()
-            sys.exit(f"over the memory cap: {cmdline}")
+            raise Failed(why)
         time.sleep(0.005)
     # wait4 reaped the child, so Popen must not wait again; its pipes still hold the output.
     p.returncode = os.waitstatus_to_exitcode(status)
     out, err = p.communicate()
     if p.returncode != 0:
-        sys.exit(f"failed {cmdline}: {err.strip()}")
+        raise Failed((err.strip().splitlines() or ["exit %d" % p.returncode])[-1][:100])
+    return out, err, usage
+
+
+def run(cmdline):
+    """Runs one arm once under the RSS cap and returns (gb_per_s, check, peak MiB, ns) or exits. ns is the arm's
+    median nanoseconds, None from an arm that prints none."""
+    try:
+        out, _, usage = spawn(cmdline)
+    except Failed as e:
+        sys.exit(f"failed {cmdline}: {e}")
     g = re.search(r"gb_per_s=([\d.]+)", out)
     c = re.search(r"check=(\d+)", out)
     if not g or not c:

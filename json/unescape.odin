@@ -132,7 +132,7 @@ decoded_escape_other :: proc "contextless" (src: []u8, p, end: u64, e: u8) -> (s
 	}
 }
 
-// JSON's `Spelling.text`, exported so a caller that knows the format calls it without the table. A scalar with
+// JSON's `Readers.text`, exported so a caller that knows the format calls it without the table. A scalar with
 // `SPELLING_DECODE` clear returns its span. A node that needs decoding is written into `buf`, and the call returns false
 // when `buf` is too short. A container returns false, as `core.text` does. `doc.view` and `doc.nodes[i]` are its arguments
 // for node `i` of a document.
@@ -323,7 +323,7 @@ copy_up_to :: #force_inline proc(dst: []u8, w: int, src: [^]u8, p, n: int) {
 	}
 }
 
-// `Spelling.key_equals` for a key with `SPELLING_DECODE` set. Compares its decoded bytes against `name` with no
+// `Readers.key_equals` for a key with `SPELLING_DECODE` set. Compares its decoded bytes against `name` with no
 // allocation, through `decoded_next`, so it matches what `text` returns.
 @(private)
 key_equals_decode :: #force_inline proc "contextless" (doc: ^core.Token_View, n: core.Node, name: string) -> bool {

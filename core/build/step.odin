@@ -141,9 +141,11 @@ scan_known :: #force_inline proc "contextless" ($MANY: bool, h: ^Scan, path: ^Sc
 scan_left :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, s: core.Hook_Regs, set: u64, d: int) -> (core.Hook_Regs, core.Action) {
 	when MANY {
 		m := h.many
+		pause := false
 		when SINK == .Stream {
 			if d <= h.flush {
 				many_flush(h)
+				pause = h.paused && h.pause_on_flush
 			}
 		}
 		if h.stop_early && !h.stopped {
@@ -157,7 +159,7 @@ scan_left :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Sca
 				h.stopped = true
 			}
 		}
-		return s, .Stop if h.stopped else .Next
+		return s, .Stop if h.stopped || pause else .Next
 	} else {
 		if scan_known(false, h, &h.path, d) {
 			h.stopped = true

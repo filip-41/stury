@@ -15,6 +15,7 @@
 //
 // `write typed <file> [pretty]`: `json.marshal` of the file's struct type, chosen by its name, the fields the other
 // libraries' lanes use. One buffer is reused, so a pass counts neither growth nor page faults. GB/s counts output bytes.
+// `write dump <file> [pretty]` is the same lane through `model.dump` by a model of the type with no rules.
 package write_bench
 
 import "core:fmt"
@@ -31,8 +32,8 @@ CHECK_OFFSET :: u64(14695981039346656037)
 CHECK_PRIME :: u64(1099511628211)
 
 main :: proc() {
-	if len(os.args) < 3 || (os.args[1] != "string" && os.args[1] != "typed" && os.args[1] != "doc" && os.args[1] != "format" && os.args[1] != "dsv" && os.args[1] != "dsvdoc" && os.args[1] != "records") {
-		fmt.eprintln("usage: write string <file> | write typed|doc|format <file> [pretty] | write dsv|dsvdoc <file> | write records logs.json")
+	if len(os.args) < 3 || (os.args[1] != "string" && os.args[1] != "typed" && os.args[1] != "dump" && os.args[1] != "doc" && os.args[1] != "format" && os.args[1] != "dsv" && os.args[1] != "dsvdoc" && os.args[1] != "records") {
+		fmt.eprintln("usage: write string <file> | write typed|dump|doc|format <file> [pretty] | write dsv|dsvdoc <file> | write records logs.json")
 		os.exit(2)
 	}
 	src, err := os.read_entire_file(os.args[2], context.allocator)
@@ -48,8 +49,8 @@ main :: proc() {
 		records_lane(src)
 		return
 	}
-	if os.args[1] == "typed" {
-		typed_lane(src, filepath.stem(os.args[2]), len(os.args) > 3 && os.args[3] == "pretty")
+	if os.args[1] == "typed" || os.args[1] == "dump" {
+		typed_lane(src, filepath.stem(os.args[2]), len(os.args) > 3 && os.args[3] == "pretty", os.args[1] == "dump")
 		return
 	}
 	if os.args[1] == "doc" || os.args[1] == "format" {
@@ -110,7 +111,7 @@ put_all :: #force_no_inline proc(out: ^write.Out, strs: []string) -> core.Typed_
 // The decoded value of every string in the file, in document order, and their total size.
 strings_of :: proc(src: []u8) -> (strs: []string, total: int) {
 	doc, derr := json.build(src, .Json, {}, .Last, context.allocator)
-	if derr.kind != .None {
+	if derr != nil {
 		fmt.eprintln("document error:", derr)
 		os.exit(1)
 	}

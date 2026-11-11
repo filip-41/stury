@@ -239,7 +239,7 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 	case 162, 164:
 		r = {nodes = list(literal(v[1].text, l[1]), index(node(.Identity, at = at), literal(v[1].text, l[1]), false, at))}
 	case 163:
-		r = {nodes = list(literal("__loc__", at), loc_literal(p, at))}
+		r = {nodes = list(literal(string("__loc__"), at), loc_literal(p, at))}
 	case 165:
 		check_object_key(p, v[2].node, l[2])
 		r = {nodes = list(v[2].node, v[5].node)}
@@ -409,7 +409,7 @@ object_node :: proc(entries: []^Node, at: Loc) -> ^Node {
 @(private = "file")
 loc_literal :: proc(p: ^Parser, at: Loc) -> ^Node {
 	o := new_object()
-	object_put(o, "file", p.file if p.file != "" else "<top-level>")
+	object_put(o, "file", p.file if p.file != "" else string("<top-level>"))
 	object_put(o, "line", num(f64(strings.count(p.src[:at.start], "\n") + 1)))
 	return literal(o, at)
 }

@@ -34,8 +34,9 @@ Kind :: enum u8 {
 // change its meaning. A comment's role and node follow its position, by the same rule in every format. On the line
 // where the previous value ends it is that value's `Comment_Inline`. Before a value the grammar allows it above, it is
 // that value's `Comment`. Any other comment is a `Comment_Foot` of the innermost open container, or of the root at
-// depth 0. A consumer that wants values only tests `t.role <= .Key`. `Partial` is no token's role: a read by paths writes
-// it on a container it kept only some children of.
+// depth 0. An `Attribute` is a markup element's attribute, a fact of the element's value node, which a walk gives after
+// the element's key and before its value. A consumer that wants values only tests `t.role <= .Key`. `Partial` is no
+// token's role: a read by paths writes it on a container it kept only some children of.
 Role :: enum u8 {
 	Value, // json, dsv
 	Key, // json: a member's name, always a `String`, in JSON5 quoted or not, dsv: the header cell of a cell's column
@@ -43,6 +44,7 @@ Role :: enum u8 {
 	Comment_Inline, // json (JSONC, JSON5): a comment on the line where the value before it ends, `Plain`
 	Comment_Foot, // json, dsv: after the last value or in an empty container, on the innermost open container
 	// or the root at depth 0, `Plain`
+	Attribute, // markup: an element's attribute, `name="value"` through the closing quote, `spelling` as `Fact` says
 	Partial, // a document's container whose children were not all kept, in place of `Value`
 }
 
@@ -52,8 +54,8 @@ Role :: enum u8 {
 // format's detail. Core reads bits 0 to 2 of a value or key and a comment's marker lengths, and the rest is the
 // format's own. json sets bit 0 for a string or key that needs decoding, bit 1 when it is quoted, bit 2 for a
 // tolerated ill-formed sequence, and a number's packed shape. dsv sets bit 0 for a cell that needs decoding, bit 1 for
-// a quoted CSV cell, bits 0 and 2 for a tolerated ill-formed sequence, bit 3 for a quoted cell holding a `""` on a walk
-// for `Cells` or `Batch`, and bit 4 for the key of a column past the header's last cell.
+// a quoted CSV cell, bits 0 and 2 for a tolerated ill-formed sequence, bit 15 for a quoted cell holding a `""` on a walk
+// for `Cells` or `Batch`, and bit 14 for the key of a column past the header's last cell.
 Token :: struct {
 	lo:       u64,
 	n:        u32,

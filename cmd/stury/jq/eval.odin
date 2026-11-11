@@ -24,16 +24,12 @@ Item :: struct {
 	path: ^Path_Step,
 }
 
-// One step of a path read from the root, linked back toward it: `key` is the object key or array index.
-Path_Step :: struct {
-	parent: ^Path_Step,
-	key:    Value,
-	depth:  int, // steps from the root to this one
-}
+// One step of a path read from the root, linked back toward it.
+Path_Step :: core_pkg.Trail_Step
 
 // A path as a value, read as an array of its keys from the root: the array is made when something reads
 // it. Never the root itself, whose path is an empty array.
-Path :: distinct ^Path_Step
+Path :: core_pkg.Trail
 
 // Where an evaluation's outputs go: `emit` takes one, and its `Signal` steers the generator.
 Sink :: struct {
@@ -458,28 +454,29 @@ Neg_Sink :: struct {
 
 neg_emit :: proc(s: ^Sink, it: Item) -> Signal {
 	x := (^Neg_Sink)(s)
-	n, ok := number_of(it.v)
-	if !ok {
+	if kind(it.v) != .Number {
 		return fail(x.ip, "%s (%s) cannot be negated", type_name(it.v), brief(x.ip, it.v))
 	}
-	return emit_made(x.out, it, negate(n), x.track)
+	return emit_made(x.out, it, negate(scalar(it.v)), x.track)
 }
 
-negate :: proc(n: Number) -> Number {
-	if n.lit == "" {
-		return {f = -n.f}
-	}
-	if n.lit[0] == '-' {
-		return {f = -n.f, lit = n.lit[1:]}
-	}
-	// decNumberMinus makes a zero +0, but a literal that underflows to 0.0 (1e-400) is no zero to it.
-	if n.f == 0 {
-		digits := strings.trim_left(n.lit, "0.")
+// The negation of number `v`.
+negate :: proc(v: Value) -> Value {
+	#partial switch n in v {
+	case f64:
+		return -n
+	case ^Number_Text:
+		if n.text[0] == '-' {
+			return number_text(n.text[1:])
+		}
+		// decNumberMinus makes a zero +0, but a literal that underflows to 0.0 (1e-400) is no zero to it.
+		digits := strings.trim_left(n.text, "0.")
 		if digits == "" || digits[0] | 0x20 == 'e' {
 			return n
 		}
+		return number_text(strings.concatenate({"-", n.text}))
 	}
-	return {f = -n.f, lit = strings.concatenate({"-", n.lit})}
+	return v
 }
 
 Binary_Sink :: struct {

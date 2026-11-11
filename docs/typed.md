@@ -10,24 +10,24 @@ format gives. `core/typed` holds everything format-neutral and names no format.
 - **Record**: the `Field` that reads one member or element.
 - **Target**: the value a read fills.
 - **Refusal**: a value the target does not take, or a text the walk faults on.
-- **Sink**: where a refusal goes. The default stops at the first, and a `Collected` reads on.
+- **Sink**: where a refusal goes. The default stops at the first, and a `Sink` reads on.
 
 ## Entries
 
 ```odin
 json.unmarshal :: proc {unmarshal_once, unmarshal_plan}
-unmarshal_once :: proc(src: []u8, spec: json.Spec, target: ^$T, opts := json.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error
-unmarshal_plan :: proc(src: []u8, spec: json.Spec, target: ^$T, plan: ^typed.Plan, opts := json.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error
+unmarshal_once :: proc(src: []u8, spec: json.Spec, target: ^$T, opts := json.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
+unmarshal_plan :: proc(src: []u8, spec: json.Spec, target: ^$T, plan: ^typed.Plan, opts := json.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
 
-json.plan_make  :: proc(T: typeid, spec := json.Spec.Json, opts := json.Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error)
-typed.plan_make :: proc(T: typeid, as: core.As, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error)
+json.plan_make  :: proc(T: typeid, spec := json.Spec.Json, opts := json.Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error)
+typed.plan_make :: proc(T: typeid, as: core.As, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error)
 typed.plan_destroy :: proc(p: ^typed.Plan)
 
 dsv.unmarshal :: proc {unmarshal_once, unmarshal_plan}
-unmarshal_once :: proc(src: []u8, spec: dsv.Spec, target: ^$T, opts := dsv.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error
-unmarshal_plan :: proc(src: []u8, spec: dsv.Spec, target: ^$T, plan: ^typed.Plan, opts := dsv.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error
+unmarshal_once :: proc(src: []u8, spec: dsv.Spec, target: ^$T, opts := dsv.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
+unmarshal_plan :: proc(src: []u8, spec: dsv.Spec, target: ^$T, plan: ^typed.Plan, opts := dsv.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
 
-dsv.plan_make :: proc(T: typeid, spec := dsv.Spec.Csv, opts := dsv.Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error)
+dsv.plan_make :: proc(T: typeid, spec := dsv.Spec.Csv, opts := dsv.Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error)
 ```
 
 `S` is `.Json`, `.Jsonc` or `.Json5`, or for dsv `.Csv`, `.Tsv` or `.Plain`, and `opts` the walk's own options, as for
@@ -37,8 +37,8 @@ A built document is read by one call for every format, in `core/typed`:
 
 ```odin
 typed.unmarshal :: proc {unmarshal_node, unmarshal_answer}
-unmarshal_node   :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Typed_Error
-unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Typed_Error
+unmarshal_node   :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
+unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
 ```
 
 See From a document below.
@@ -92,16 +92,17 @@ Item :: struct {
 | Target | Takes |
 |---|---|
 | `bool`, `b8`..`b64` | a bool |
-| `i8`..`i64`, `u8`..`u64` | a number spelled as an integer, in range, else `.Out_Of_Range`. A fraction or exponent is `.Wrong_Kind` |
-| `f32`, `f64` | any number, and JSON5's `Infinity` and `NaN` unless the walk refuses them with `refuse_non_finite`. A decimal past the type's range is `.Out_Of_Range`, and any other reads as the nearest value, however many digits or however large an exponent it has |
+| `i8`..`i64`, `u8`..`u64` | a number spelled as an integer, in range, else `.Above_Maximum` or `.Below_Minimum`. A fraction or exponent is `.Wrong_Kind` |
+| `f32`, `f64` | any number, and JSON5's `Infinity` and `NaN` unless the walk refuses them with `refuse_non_finite`. A decimal past the type's range is `.Above_Maximum` or `.Below_Minimum`, and any other reads as the nearest value, however many digits or however large an exponent it has |
 | `string`, `cstring` | a string |
 | `Raw` | any value, as the format spells it |
+| `core.Value` | any value, built: a number past a double keeps its digits. The plan needs the reads of its format (`json.reads`), else `.Unsupported` |
 | `Number_Text` | a number's text |
 | `core.Number` | a number |
 | `Scalar` | a scalar: `Null`, `bool`, `i64`, `u64`, `f64`, `Number_Text` or `string` |
 | `any` | any value. A container is boxed as `map[string]any` or `[dynamic]any`, a scalar as its `Scalar` arm, `null` as nil |
 | struct | an object, its members by name |
-| `[]T`, `[dynamic]T`, `[N]T`, `[E]T`, `[dynamic; N]T` | an array. A fixed length that differs is `.Wrong_Length`, and a fixed capacity passed is too |
+| `[]T`, `[dynamic]T`, `[N]T`, `[E]T`, `[dynamic; N]T` | an array. A fixed length that differs is `.Too_Few` or `.Too_Many`, and a fixed capacity passed is `.Too_Many` |
 | `map[K]V` | an object. `K` is a string, an integer read from the key's text, or an enum |
 | enum | a member's name, or its integer under `.Int`. Neither is `.Not_A_Member` |
 | `bit_set` | an array of its element's names or numbers |
@@ -117,7 +118,8 @@ fixed array whose element has no size, a type of 4 GiB or more, and the rest of 
   other target refuses it as `.Wrong_Kind`, a struct, a list and a map included.
 - Two arms of a union may not take one class of value. Named struct arms share objects only under `union_tag`, and no
   member of an arm may have its key, by tag, `rename` or a `using` member. An object with no tag member is `.Missing_Tag`, with two `.Repeated_Tag`, and a name
-  no arm has `.Not_A_Member`.
+  no arm has `.Not_A_Member`. A model's union of several arms refuses each of these, and a value of a kind no arm takes,
+  as `.No_Arm`, the kind its schema's `anyOf` gives.
 - A repeated member follows `Read_Options.dups`: `.Last` by default, `.First`, or `.Refuse`. `.All` is `.Bad_Option`.
   Under `.Last` a repeat that opens a struct, map or array, or fills a pointer, `Maybe`, union or `any`, resets the
   member first. Any other repeat is stored over the earlier value, so a hook's `dest` holds it and a refused repeat
@@ -150,20 +152,24 @@ when the read returns.
 Typed_Error :: struct {
 	kind:         Typed_Error_Kind,
 	truncated:    bool,
-	n_steps:      u8,
 	found:        Kind,
 	cause:        io.Error,
 	at:           u64,
 	using detail: Typed_Detail, // inner: Fault, want: Typed_Want, plans: Plan_Clash, by kind
-	steps:        [MAX_ERROR_STEPS]Step,
+	steps:        []Step,
 }
 ```
 
-`at` is the value's byte, a string's opening quote for a string. `steps[:n_steps]` is the path from the target, the
+`Typed_Error` is the arm of `core.Error` a read or a write returns. A reader, a writer and a sink hold the same fields
+as a `Typed_Refusal`, whose path is in line (`steps[:n_steps]` of `[MAX_ERROR_STEPS]Step`), so a refusal allocates
+nothing until `core.error_of` copies the path for the caller, to `context.temp_allocator`, or to the reader's own
+memory for a record read in a loop, where it lasts until the next call on the reader.
+
+`at` is the value's byte, a string's opening quote for a string. `steps` is the path from the target, the
 innermost `MAX_ERROR_STEPS` (8) when `truncated` says more were cut. A step's name lives as long as `src` or the plan,
 or, for a decoded key, as long as `context.temp_allocator`'s block. `detail` holds one of three by kind: `.Walk`'s fault
 in `inner`, the two formats or the plan's type a `.Plan_Mismatch` met in `plans`, and `want` for the rest. `want.type`
-is the type a `.Wrong_Kind`, `.Out_Of_Range` or `.Not_A_Member` read wanted, `found` the kind of the value, and
+is the type a `.Wrong_Kind`, `.Above_Maximum`, `.Below_Minimum`, `.Out_Of_Range` or `.Not_A_Member` read wanted, `found` the kind of the value, and
 `want.text` the scalar's source text. `want.text` is also the flag a `.Bad_Tag` names and why a type is
 `.Unsupported` or a union `.Ambiguous_Union`. `core.render` and `core.write_code` take the error, as they do every other
 error of the library, and the path renders as path text, `.[0].population`. A write returns the same type, see
@@ -180,9 +186,10 @@ Plan is for json, the read is csv
 |---|---|
 | `.Walk` | the text does not parse |
 | `.Wrong_Kind` | a value the target's type does not read |
-| `.Out_Of_Range` | a value past what the target holds |
+| `.Above_Maximum`, `.Below_Minimum` | a number past the greatest or the least value the target holds |
+| `.Out_Of_Range` | a value other than a number past what the target holds: a map key that spells no integer, a cstring with a NUL |
 | `.Not_A_Member` | a name or number no enum or union arm has |
-| `.Wrong_Length` | an element count a fixed array or capacity does not take |
+| `.Too_Few`, `.Too_Many` | an element count a fixed array or capacity does not take |
 | `.Missing_Field` | a `required` member is absent, the last step names it |
 | `.Unknown_Field` | a key the type does not name under `.Refuse` |
 | `.Missing_Tag`, `.Repeated_Tag` | a union's tag member absent or repeated |
@@ -196,16 +203,22 @@ refusal holds its elements so far, so all the read allocated is reachable from t
 otherwise not a contract.
 
 ```odin
-Collected :: struct {
-	errors:     [dynamic]core.Typed_Error,
+Sink :: struct {
+	errors:     [dynamic]core.Typed_Refusal,
+	entries:    [dynamic]core.Error_Entry, // what a `check_text` read reports
 	max_errors: int,  // 100 for 0
+	record:     i64,  // the record index an entry takes
 	truncated:  bool, // set past max_errors
 }
 ```
 
-`Read_Options.collect` reads past a refusal. Each goes into `errors`, and the walk passes over the refused value and
+`Read_Options.sink` reads past a refusal. Each goes into `errors`, and the walk passes over the refused value and
 still judges it. A member keeps what it held, and a list's element is zero. A `.Walk` fault ends the read. The returned
-error is the first refusal. The caller frees `errors`, which uses its own allocator, the read's when it has none.
+error is the first refusal. The caller frees the arrays with `sink_destroy`, which use their own allocator, the read's
+when they have none.
+
+`check_text` reads the same way and adds a `core.Error_Entry` to `entries` for each refusal: its byte span, the record,
+and the path of any depth with its names copied. It needs a plan of a format that has a check read.
 
 ## From a document
 
@@ -239,7 +252,7 @@ kept, so a field no kept cell names keeps its value. A record kept by position r
 unquoted one, which is absent, and a list row holds it as an empty string.
 
 For a plan without `node_read`, the read is the hook of a read of a text, fed by `build.feed_nodes` from `doc.nodes`. The replay restores each `End` from a
-stack of container ends and each key a record shares from `doc.shared_keys`, which is how a path query over a document
+stack of container ends and each key a record shares from the table's header, which is how a path query over a document
 is fed too. The read gives the hook what the walk would have: a partial container is a value, a close has its bracket's
 byte where a refusal, a `required` check or a value read whole reads it, and a plain number has its digits folded in
 `Reader.mant`. A union that reads by its tag finds the member by replaying the object alone.
@@ -313,7 +326,7 @@ columns are bound once, when the walk reaches the first record, or the text's en
 |---|---|
 | unquoted and empty | absent: the field stays zero, a list keeps a zero element, a map has no entry, and a `required` field is `.Missing_Field` |
 | quoted and empty | present: an empty string, or a refused number or bool |
-| integer | `[+-]?digits`, quoted or not. Past the field's range is `.Out_Of_Range`, other text `.Wrong_Kind` |
+| integer | `[+-]?digits`, quoted or not. Past the field's range is `.Above_Maximum` or `.Below_Minimum`, other text `.Wrong_Kind` |
 | float | `[+-]?(digits(.digits?)?\|.digits)([eE][+-]?digits)?` |
 | bool | `true` or `false` |
 | enum | its name, or with `enums = .Int` its value |

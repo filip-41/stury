@@ -128,7 +128,7 @@ home_dep :: proc() -> (Value, bool) {
 	object_put(dep, "optional", true)
 	object_put(dep, "search", strings.clone_from_cstring(home))
 	object_put(dep, "is_data", false)
-	object_put(dep, "relpath", "")
+	object_put(dep, "relpath", string(""))
 	return dep, true
 }
 
@@ -227,7 +227,7 @@ parse_library :: proc(src, path: string, messages: ^[dynamic]byte) -> (Program, 
 @(private = "file")
 default_search :: proc(ip: ^Interp) -> Value {
 	a := new_array()
-	append(&a.items, ".")
+	append(&a.items, string("."))
 	dirs := lib_dirs(ip)
 	append(&a.items, ..dirs.(^Array).items[:])
 	return a
@@ -237,7 +237,7 @@ default_search :: proc(ip: ^Interp) -> Value {
 lib_dirs :: proc(ip: ^Interp) -> Value {
 	if ip.search_list == nil {
 		a := new_array(3)
-		append(&a.items, "~/.jq", "$ORIGIN/../lib/jq", "$ORIGIN/../lib")
+		append(&a.items, string("~/.jq"), string("$ORIGIN/../lib/jq"), string("$ORIGIN/../lib"))
 		return a
 	}
 	a := new_array(len(ip.search_list))

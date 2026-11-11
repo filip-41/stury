@@ -9,55 +9,48 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:hash"
 import "core:slice"
-import "core:strconv"
 import core_pkg "../../../core"
 import json "../../../json"
 
-// `nil` is jq's null.
-Value :: union {
-	bool,
-	Number,
-	string,
-	^Array,
-	^Object,
-	Ref,
-	Path,
-	^Commented,
-}
+// The library's value, with the readers and builders the interpreter uses from it under their own names.
+Value :: core_pkg.Value
+Number_Text :: core_pkg.Number_Text
+Array :: core_pkg.Array
+Object :: core_pkg.Object
+Ref :: core_pkg.Node_Ref
+Commented :: core_pkg.Commented
+Comment_From :: core_pkg.Comment_From
+INDEX_FROM :: core_pkg.INDEX_FROM
+new_array :: core_pkg.new_array
+new_object :: core_pkg.new_object
+lent :: core_pkg.lent
+object_slot :: core_pkg.object_slot
+object_put :: core_pkg.object_put
+object_set :: core_pkg.object_set
+object_delete :: core_pkg.object_delete
+object_delete_all :: core_pkg.object_delete_all
+reindex :: core_pkg.reindex
+make_room :: core_pkg.make_room
+plain :: core_pkg.plain
+number_text :: core_pkg.number_text
+comments :: core_pkg.comments
+noted :: core_pkg.noted
+keep_comments :: core_pkg.keep_comments
+rewrap :: core_pkg.rewrap
+node_string :: core_pkg.node_string
+number_f64 :: core_pkg.number_f64
+text_f64 :: core_pkg.text_f64
 
-// `lit` is the number as written, for a number read from input or the program and not yet computed on. It prints as
-// written and a computed number prints from `f`.
-Number :: struct {
+// A number as jq reads it: its double, and the digits it keeps (`core.double_of`).
+Num :: struct {
 	f:   f64,
 	lit: string,
-}
-
-// A slice of an array shares its items (`array_slice`), and the array is then lent: an update that owns it copies it
-// before changing it, as the slice would see the change.
-Array :: struct {
-	items: [dynamic]Value,
-	lent:  bool,
-}
-
-// Keys keep their insertion order. `index` maps a key to its slot once the object is wide.
-Object :: struct {
-	keys:  [dynamic]string,
-	vals:  [dynamic]Value,
-	index: map[string]int,
-}
-
-// A value of an input document: a node of a text in any format, read by core's readers, which decode a node the
-// document's format spells.
-Ref :: struct {
-	doc:  ^core_pkg.Document,
-	node: core_pkg.Node_Index,
 }
 
 // A built document as a value: its root, the document moved to the heap.
 document_value :: proc(d: core_pkg.Document) -> Value {
 	doc := new(core_pkg.Document)
 	doc^ = d
-	store_inferred_kinds(doc)
 	return Ref{doc, core_pkg.ROOT}
 }
 
@@ -72,8 +65,8 @@ Kind :: enum u8 {
 	Object,
 }
 
-num :: proc(f: f64) -> Value {
-	return Number{f = f}
+num :: #force_inline proc(f: f64) -> Value {
+	return f
 }
 
 // The readers of a value's data see through a `^Commented`, which never wraps another, in a case of their own, so a
@@ -84,7 +77,7 @@ kind :: proc(v: Value) -> Kind {
 		return .Null
 	case bool:
 		return .True if x else .False
-	case Number:
+	case f64, ^Number_Text:
 		return .Number
 	case string:
 		return .String
@@ -95,13 +88,28 @@ kind :: proc(v: Value) -> Kind {
 	case Ref:
 		return node_kind(x.doc, x.node)
 	case ^Commented:
-		return x.kind
+		return jq_kind(x.kind)
 	}
 	return .Null
 }
 
-// A document node's jq kind. A dsv cell is a string. The stored kind is read, which reads a cell as `core.kind` does
-// without `infer` and asks no format.
+// jq's kind of a kind of the library's other than `.Plain`, which jq reads as its node does.
+@(private = "file")
+jq_kind :: #force_inline proc(k: core_pkg.Kind) -> Kind {
+	#partial switch k {
+	case .Array:
+		return .Array
+	case .Object:
+		return .Object
+	case .End:
+		return .Null
+	}
+	return Kind(k)
+}
+
+// A document node's jq kind. A build with `infer` stores a cell's kind in its node. A cell left `Plain` is a string or
+// null, unless its document was not made by a build (a record, a partial read) and its first byte could start a number,
+// `true` or `false`, which the document's format then resolves.
 node_kind :: #force_inline proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Kind {
 	#partial switch k := doc.nodes[i].kind if int(i) < len(doc.nodes) else core_pkg.Kind.Null; k {
 	case .Array:
@@ -110,10 +118,26 @@ node_kind :: #force_inline proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index)
 		return .Object
 	case .Plain:
 		// A delimited cell: an empty unquoted one is null, a quoted one keeps its quotes in its span.
-		return .Null if doc.nodes[i].n == 0 && doc.nodes[i].role == .Value else .String
+		if doc.nodes[i].n == 0 && doc.nodes[i].role == .Value {
+			return .Null
+		}
+		return .String if doc.kinds_stored else unstored_kind(doc, i)
 	case:
 		return Kind(k)
 	}
+}
+
+// The kind of a `Plain` cell of a document that did not store kinds: a partial read. Its first byte decides whether the
+// format has anything to resolve.
+@(cold)
+unstored_kind :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Kind {
+	n := doc.nodes[i]
+	if n.role == .Value && n.spelling == 0 {
+		if c := doc.src[n.lo]; c == 't' || c == 'f' || c == '-' || c - '0' < 10 {
+			return Kind(core_pkg.kind(doc, i))
+		}
+	}
+	return .String
 }
 
 type_name :: #force_inline proc(v: Value) -> string {
@@ -165,53 +189,47 @@ scalar :: proc(v: Value) -> Value {
 	return v
 }
 
-// Number node `i`. Its literal is its text, but for a spelling other than its format's plain decimal (JSON5's `+1.5`,
+// Number node `i`: its literal, its text but for a spelling other than its format's plain decimal (JSON5's `+1.5`,
 // `0x10`), where it is the JSON text the library writes for it.
-node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Number {
-	lit := string(core_pkg.span(doc, i))
-	n, _ := core_pkg.number(doc, i)
-	f := number_f64(n, lit)
+node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Value {
+	lit, f, is_literal := node_literal(doc, i)
+	if !is_literal {
+		return num(f)
+	}
+	return number_text(lit)
+}
+
+// The literal of number node `i` as `node_number` reads it, or its double when JSON cannot write it.
+node_literal :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> (lit: string, f: f64, is_literal: bool) {
+	lit = string(core_pkg.span(doc, i))
 	// The `NUMBER_*` layout holds only for a `.Number` token. A dsv cell is `.Plain`, its spelling bits mean other things.
 	if doc.nodes[i].kind == .Number && doc.nodes[i].spelling & core_pkg.NUMBER_KIND_MASK != 0 {
-		// A number JSON cannot write has no literal and prints as computed.
 		text, _, err := core_pkg.write(doc, {}, json.as(.Json), i)
-		lit = string(text) if err.kind == .None else ""
+		if err != nil {
+			// A number JSON cannot write is computed.
+			n, _ := core_pkg.number(doc, i)
+			return "", number_f64(n, lit), false
+		}
+		lit = string(text)
 	}
-	return Number{f = f, lit = lit}
+	return lit, 0, true
 }
 
-// The binary64 of `n`, a number spelled `lit`.
-number_f64 :: proc(n: core_pkg.Number, lit: string) -> f64 {
-	switch n.kind {
-	case .Int:
-		// `-0` is an integer whose bits carry no sign
-		return -0.0 if n.bits == 0 && lit[0] == '-' else f64(i64(n.bits))
-	case .Uint:
-		return f64(n.bits)
-	case .Float:
-		return transmute(f64)n.bits
-	case .Wide:
+// A double or a literal is read here, a number of any other form by the library's `double_of`.
+number_of :: #force_inline proc(v: Value) -> (Num, bool) {
+	#partial switch x in v {
+	case f64:
+		return {f = x}, true
+	case ^Number_Text:
+		return {x.double, x.text}, true
 	}
-	// past binary64's digits or range, `1e400` among them, which strconv reads as infinity
-	f, _ := strconv.parse_f64(lit)
-	return f
+	return other_number(v)
 }
 
-// The decoded text of string or key node `i`: a slice of the source, or a decode made in the context allocator.
-node_string :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> string {
-	if s, ok := core_pkg.text(doc, i, nil); ok {
-		return s
-	}
-	s, _ := core_pkg.text_clone(doc, i)
-	return s
-}
-
-number_of :: proc(v: Value) -> (Number, bool) {
-	if n, is_number := v.(Number); is_number {
-		return n, true
-	}
-	n, ok := scalar(v).(Number)
-	return n, ok
+@(private = "file")
+other_number :: #force_no_inline proc(v: Value) -> (Num, bool) {
+	f, digits, ok := core_pkg.double_of(v)
+	return {f, digits}, ok
 }
 
 string_of :: #force_inline proc(value: Value) -> (string, bool) {
@@ -242,7 +260,7 @@ length_of :: proc(v: Value) -> int {
 		return n
 	case ^Commented:
 		return length_of(x.v)
-	case nil, bool, Number, string:
+	case nil, bool, f64, ^Number_Text, string:
 	}
 	return 0
 }
@@ -303,7 +321,7 @@ index_shared :: proc(v: Value) {
 		}
 	case ^Commented:
 		index_shared(x.v)
-	case nil, bool, Number, string, Path:
+	case nil, bool, f64, ^Number_Text, string, Path:
 	}
 }
 
@@ -332,7 +350,7 @@ array_at :: proc(v: Value, i: int) -> Value {
 		return s.key
 	case ^Commented:
 		return array_at(x.v, i)
-	case nil, bool, Number, string, ^Object:
+	case nil, bool, f64, ^Number_Text, string, ^Object:
 	}
 	return nil
 }
@@ -354,7 +372,7 @@ object_get :: proc(v: Value, k: string) -> (Value, bool) {
 		return Ref{x.doc, node}, true
 	case ^Commented:
 		return object_get(x.v, k)
-	case nil, bool, Number, string, ^Array, Path:
+	case nil, bool, f64, ^Number_Text, string, ^Array, Path:
 	}
 	return nil, false
 }
@@ -388,20 +406,6 @@ array_slice :: proc(value: Value, lo, hi: int) -> ^Array {
 		append(&a.items, Ref{r.doc, node})
 	}
 	return a
-}
-
-lent :: #force_inline proc(a: ^Array) -> bool {
-	return intrinsics.atomic_load_explicit(&a.lent, .Relaxed)
-}
-
-new_array :: proc(n := 0) -> ^Array {
-	a := new(Array)
-	a.items = make([dynamic]Value, 0, n)
-	return a
-}
-
-new_object :: proc() -> ^Object {
-	return new(Object)
 }
 
 // A container's own copy, one level deep: its members are shared. Scalars are returned as they are.
@@ -591,19 +595,8 @@ next_member :: #force_inline proc(it: ^Members) -> (key: string, v: Value, ok: b
 			vn = it.last[k]
 			it.last[k] = 0
 			return k, Ref{x.doc, vn}, true
-		case nil, bool, Number, string, ^Commented: // `iterate` takes off a `^Commented`
+		case nil, bool, f64, ^Number_Text, string, ^Commented: // `iterate` takes off a `^Commented`
 		}
 	}
 	return "", nil, false
-}
-
-// An object's keys, sorted by codepoint as `keys` lists them.
-sorted_keys :: proc(v: Value) -> []string {
-	it := iterate(v)
-	ks := make([dynamic]string, 0, it.n)
-	for k in next_member(&it) {
-		append(&ks, k)
-	}
-	slice.sort(ks[:])
-	return ks[:]
 }

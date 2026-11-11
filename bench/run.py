@@ -8,12 +8,14 @@ perf counters).
 Counts come from `/usr/bin/time -l` on macOS and `perf stat` on Linux."""
 import os, re, statistics, subprocess, sys, time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from guard import count_prefix, counted as count_of
+
 CAP_MB = 512
 BINS = sys.argv[1:]
 ROUNDS = int(os.environ.get("ROUNDS") or 7)
 COUNT = os.environ.get("COUNT", "1") != "0"
 KEEP = re.compile(os.environ.get("CASES", "."))
-LINUX = sys.platform.startswith("linux")
 
 # (name, case, reps, arg)
 CASES = [("pack 16/256", "pack", 20000, 16), ("json 16/256", "json", 20000, 16), ("csv 16/256", "csv", 20000, 16)]
@@ -47,13 +49,8 @@ def timed(exe, case, reps, arg):
 
 
 def counted(exe, case, reps, arg):
-    prefix = ["perf", "stat", "-x,", "-e", "instructions,cycles"] if LINUX else ["/usr/bin/time", "-l"]
-    _, err = run_capped(prefix + [exe, case, str(reps), str(arg)])
-    if LINUX:
-        get = lambda key: int(re.search(r"^(\d+),[^,]*," + key, err, re.M).group(1))
-        return get("instructions"), get("cycles")
-    get = lambda key: int(re.search(r"(\d+)\s+" + key, err).group(1))
-    return get("instructions retired"), get("cycles elapsed")
+    _, err = run_capped(count_prefix(["instructions", "cycles"]) + [exe, case, str(reps), str(arg)])
+    return count_of(err, "instructions"), count_of(err, "cycles")
 
 
 ns = {(exe, c[0]): [] for exe in BINS for c in CASES}

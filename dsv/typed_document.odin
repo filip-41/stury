@@ -11,10 +11,10 @@ import typed "../core/typed"
 // The node read is the root, which reads as the list of rows, or a record, which reads as a list of that one row. A
 // cell reads in no plan, since `plan_make` refuses a type that is no list of rows.
 //
-// A full document binds its columns once, from the header row in `Document.shared_keys`. A list of rows reads the header
+// A full document binds its columns once, from the header row of `Document.tables`. A list of rows reads the header
 // row as its first row, as `unmarshal` does. A partial document has no shared keys: a headed record holds a key beside
 // each cell it kept, which binds that record's columns, and a record kept by position reads a cell it did not keep as an
-// empty unquoted one, which is absent.
+// empty unquoted one, which is `null`.
 
 @(private)
 Document_Cells :: struct {
@@ -28,7 +28,10 @@ Document_Cells :: struct {
 }
 
 @(private)
-document_read :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
+document_read :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
+	if foreign_plan(plan) {
+		return {kind = .Plan_Mismatch}
+	}
 	root := node == core.ROOT
 	if !root && doc.nodes[node].kind <= .Plain {
 		return {kind = .Unsupported}
@@ -37,11 +40,10 @@ document_read :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	d := Document_Cells{doc = doc}
 	h := &d.cells
 	frames: [ROW_FRAMES]typed.Frame = ---
-	regs, err := typed.read_start(&h.r, doc.src, plan, doc.spelling, T, target, read, frames[:], allocator)
+	regs, err := typed.read_start(&h.r, doc.src, plan, doc.as, T, target, read, frames[:], allocator, false)
 	if err.kind != .None {
 		return err
 	}
-	h.r.as.spec = doc.as.spec
 	// A node says less of a quoted cell than the walk's token, so every cell takes the cold read.
 	rows_of(h, plan, 0)
 	if h.row.kind == .Map && headless {
@@ -50,20 +52,20 @@ document_read :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	h.no_header = headless || h.opens == .Array
 	d.positional = h.no_header
 	// With no header line there is no list of rows to give the target, so it keeps what it held.
-	if !h.no_header && doc.shared_keys == 0 && !doc.partial && core.length(doc, core.ROOT) == 0 {
+	if !h.no_header && core.header_of(doc) == 0 && !doc.partial && core.length(doc, core.ROOT) == 0 {
 		return {}
 	}
-	d.per_record = !h.no_header && doc.shared_keys == 0
+	d.per_record = !h.no_header && core.header_of(doc) == 0
 	defer if d.per_record {
 		delete(h.keys, context.temp_allocator)
 	}
 	defer delete(h.cols, context.temp_allocator)
-	if !h.no_header && doc.shared_keys != 0 {
+	if !h.no_header && core.header_of(doc) != 0 {
 		h.keys = header_keys(doc)
 	}
 	action: core.Action
 	regs, action = row_token(h, regs, {kind = .Array, role = .Value, lo = doc.nodes[0].lo if root else 0})
-	if root && h.opens == .Array && doc.shared_keys != 0 && action == .Next {
+	if root && h.opens == .Array && core.header_of(doc) != 0 && action == .Next {
 		regs, action = header_row(&d, regs)
 	}
 	to := u32(node) + doc.nodes[node].n
@@ -162,7 +164,7 @@ document_cell :: proc(d: ^Document_Cells, regs: core.Hook_Regs, t: core.Token, a
 	}
 	out, action := regs, core.Action.Next
 	if d.fill {
-		k := kept_position(d, at)
+		k := kept_position(d.doc, &d.kept, at)
 		for ; d.pos < k; d.pos += 1 {
 			out, action = on_cell(h, out, {kind = .Plain, role = .Value, lo = t.lo})
 			if action != .Next {
@@ -177,13 +179,13 @@ document_cell :: proc(d: ^Document_Cells, regs: core.Hook_Regs, t: core.Token, a
 // The true position `Document.kept` gives the child at `at` of a record, or -1 for a cell kept by name. The nodes of a
 // replay come in order, so one cursor serves them all.
 @(private)
-kept_position :: proc "contextless" (d: ^Document_Cells, at: core.Node_Index) -> int {
-	kept := d.doc.kept
-	for d.kept < len(kept) && kept[d.kept].node < at {
-		d.kept += 1
+kept_position :: proc "contextless" (doc: ^core.Document, cursor: ^int, at: core.Node_Index) -> int {
+	kept := doc.kept
+	for cursor^ < len(kept) && kept[cursor^].node < at {
+		cursor^ += 1
 	}
-	if d.kept < len(kept) && kept[d.kept].node == at {
-		return int(kept[d.kept].index)
+	if cursor^ < len(kept) && kept[cursor^].node == at {
+		return int(kept[cursor^].index)
 	}
 	return -1
 }
@@ -193,7 +195,7 @@ kept_position :: proc "contextless" (d: ^Document_Cells, at: core.Node_Index) ->
 document_close :: proc(d: ^Document_Cells, regs: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
 	t := t
 	if (^Column)(uintptr(regs.b)).must {
-		end := close_end(d.doc, at)
+		end := d.doc.readers.close_end(d.doc, at)
 		t.lo = end - u64(len(line_end_before(d.doc.src, end)))
 		t.n = u32(end - t.lo)
 	}

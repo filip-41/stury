@@ -301,7 +301,7 @@ non_finite_refused :: proc(t: ^testing.T) {
 		if c.kind != nil {
 			want = core.Fault{c.offset, &json.RULES, .Bad_Char, u8(c.detail)}
 		}
-		verdict := core.validate(src, json.as(.Json5, refuse))
+		verdict := walktest.fault_of(core.validate(src, json.as(.Json5, refuse)))
 		testing.expectf(t, verdict == want, "%q: validate %v, want %v", c.text, verdict, want)
 		log := new(walktest.Log)
 		defer free(log)
@@ -362,7 +362,7 @@ byte_after_skipped_close :: proc(t: ^testing.T) {
 		{"{\"x\":{\"y\":1}\xfd}", 2, 12, .Member_Separator},
 	}) {
 		f := core.Fault{want.at, &json.RULES, .Bad_Char, u8(want.detail)}
-		testing.expectf(t, json.validate(transmute([]u8)want.text, .Json) == f, "%q: validate", want.text)
+		testing.expectf(t, walktest.fault_of(json.validate(transmute([]u8)want.text, .Json)) == f, "%q: validate", want.text)
 		for spec in json.Spec {
 			fault := walk_skipping(want.text, spec, want.token)
 			testing.expectf(t, fault == f, "%v %q, token %d skipped: %v, want %v", spec, want.text, want.token, fault, f)
@@ -374,7 +374,7 @@ byte_after_skipped_close :: proc(t: ^testing.T) {
 // which only `validate` reports, and a text with no value, where the walk returns no fault.
 expect_fault :: proc(t: ^testing.T, c: Case, $S: json.Spec) {
 	src := transmute([]u8)c.text
-	verdict := json.validate(src, S)
+	verdict := walktest.fault_of(json.validate(src, S))
 	f, bad := verdict.?
 	if c.kind == nil {
 		testing.expectf(t, !bad, "%v %q: %v", S, c.text, f)
@@ -395,7 +395,7 @@ expect_fault :: proc(t: ^testing.T, c: Case, $S: json.Spec) {
 // Validates `src` from a copy at the end of `fence`'s readable page, with the page after it unreadable, so a read past
 // the end faults in every build.
 validate_fenced :: proc(fence: ^walktest.Fence, src: []u8, $S: json.Spec, opts := json.Options{}) -> Maybe(core.Fault) {
-	return json.validate(walktest.fence_copy(fence, src), S, opts)
+	return walktest.fault_of(json.validate(walktest.fence_copy(fence, src), S, opts))
 }
 
 // Validates every prefix of 900 seeded texts, compact and pretty, from a copy that ends at a guard page: each prefix
@@ -420,11 +420,11 @@ prefixes_fenced :: proc(t: ^testing.T) {
 			same: bool
 			switch spec {
 			case .Json:
-				same = validate_fenced(&fence, text[:n], .Json) == json.validate(text[:n], .Json)
+				same = validate_fenced(&fence, text[:n], .Json) == walktest.fault_of(json.validate(text[:n], .Json))
 			case .Jsonc:
-				same = validate_fenced(&fence, text[:n], .Jsonc) == json.validate(text[:n], .Jsonc)
+				same = validate_fenced(&fence, text[:n], .Jsonc) == walktest.fault_of(json.validate(text[:n], .Jsonc))
 			case .Json5:
-				same = validate_fenced(&fence, text[:n], .Json5) == json.validate(text[:n], .Json5)
+				same = validate_fenced(&fence, text[:n], .Json5) == walktest.fault_of(json.validate(text[:n], .Json5))
 			}
 			if !testing.expectf(t, same, "%v %q", spec, text[:n]) {
 				return
@@ -451,15 +451,15 @@ max_depth_option :: proc(t: ^testing.T) {
 	for depth in ([]u32{1, 3, core.MAX_DEPTH, core.MAX_DEPTH + 1, 5000}) {
 		n := int(depth)
 		fits := strings.concatenate({strings.repeat("[", n, context.temp_allocator), strings.repeat("]", n, context.temp_allocator)}, context.temp_allocator)
-		testing.expectf(t, json.validate(transmute([]u8)fits, .Json, {max_depth = depth}) == nil, "%d levels", n)
+		testing.expectf(t, walktest.fault_of(json.validate(transmute([]u8)fits, .Json, {max_depth = depth})) == nil, "%d levels", n)
 		over := strings.concatenate({strings.repeat("[{\"a\":", n / 2, context.temp_allocator), strings.repeat("[", n % 2 + 1, context.temp_allocator)}, context.temp_allocator)
-		f, bad := json.validate(transmute([]u8)over, .Json, {max_depth = depth}).?
+		f, bad := walktest.fault_of(json.validate(transmute([]u8)over, .Json, {max_depth = depth})).?
 		testing.expectf(t, bad && f.kind == .Too_Deep && f.at == u64(len(over) - 1), "%d levels: %v", n, f)
 		log^ = {}
 		_, fault := json.walk(transmute([]u8)over, 0, .Json, {max_depth = depth}, log, &core.Hook_Regs{}, walktest.log_hook)
 		testing.expectf(t, fault == f && log.n == n + n / 2, "%d levels, walked: %v, %d tokens", n, fault, log.n)
 		maps := strings.concatenate({strings.repeat("{\"a\":", n, context.temp_allocator), "{"}, context.temp_allocator)
-		f, bad = json.validate(transmute([]u8)maps, .Json, {max_depth = depth}).?
+		f, bad = walktest.fault_of(json.validate(transmute([]u8)maps, .Json, {max_depth = depth})).?
 		testing.expectf(t, bad && f.kind == .Too_Deep && f.at == u64(len(maps) - 1), "%d objects: %v", n, f)
 		for skip in ([]int{0, 1}) {
 			k := skip
@@ -562,7 +562,7 @@ tolerance_offsets_in :: proc(t: ^testing.T, $S: json.Spec) {
 				if !testing.expectf(t, !bad, "%v %q: %v", S, text[:], f) {
 					return
 				}
-				strict, strict_bad := json.validate(text[:], S).?
+				strict, strict_bad := walktest.fault_of(json.validate(text[:], S)).?
 				if !testing.expectf(t, strict_bad, "%v %q: strict %v", S, text[:], strict) {
 					return
 				}
@@ -573,8 +573,8 @@ tolerance_offsets_in :: proc(t: ^testing.T, $S: json.Spec) {
 
 expect_tolerated :: proc(t: ^testing.T, c: Tolerated, $S: json.Spec) {
 	src := transmute([]u8)c.text
-	strict := json.validate(src, S)
-	f, bad := json.validate(src, S, {tolerate = c.tol}).?
+	strict := walktest.fault_of(json.validate(src, S))
+	f, bad := walktest.fault_of(json.validate(src, S, {tolerate = c.tol})).?
 	if c.kind == nil {
 		testing.expectf(t, !bad && strict != nil, "%v %q: %v, strict %v", S, c.text, f, strict)
 	} else {
@@ -596,7 +596,7 @@ expect_tolerated :: proc(t: ^testing.T, c: Tolerated, $S: json.Spec) {
 rendered_faults :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(json.RULES.details), len(json.Detail))
 	src := transmute([]u8)string("{\n  \"a\": tru\n}")
-	f, bad := json.validate(src, .Json).?
+	f, bad := walktest.fault_of(json.validate(src, .Json)).?
 	testing.expect(t, bad)
 	b := strings.builder_make(context.temp_allocator)
 	core.render(strings.to_writer(&b), src, f)
@@ -650,7 +650,7 @@ json_test_suite :: proc(t: ^testing.T) {
 	suite := #load_directory("conformance/JSONTestSuite/test_parsing")
 	n: int
 	for file in suite {
-		_, bad := json.validate(file.data, .Json).?
+		_, bad := walktest.fault_of(json.validate(file.data, .Json)).?
 		switch file.name[0] {
 		case 'y':
 			testing.expectf(t, !bad, "%s", file.name)
@@ -670,7 +670,7 @@ json5_tests :: proc(t: ^testing.T) {
 	n: int
 	for dir in walktest.JSON5_TESTS {
 		for file in dir {
-			f, bad := json.validate(file.data, .Json5).?
+			f, bad := walktest.fault_of(json.validate(file.data, .Json5)).?
 			switch filepath.ext(file.name) {
 			case ".json", ".json5":
 				testing.expectf(t, !bad, "%s: %v", file.name, f)

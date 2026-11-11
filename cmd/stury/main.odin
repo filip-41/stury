@@ -5,7 +5,9 @@ package main
 //	stury [OPTIONS] [FILTER] [FILE...]
 //	stury check [--from format|--seq] [--max-depth n] [FILE...]
 //	stury fmt [--from format] [--to format] [--in-place|--check] [--indent n|--tab] [--max-depth n] [FILE...]
-//	stury edit [--from format|--seq] [--in-place|--check] FILTER [FILE...]
+//	stury edit [--from format|--seq] [--in-place|--check|--diff] FILTER [FILE...]
+//	stury diff [--set|--position|--key K] [--facts] [--json] OLD NEW
+//	stury diff --old-schema S1 --new-schema S2 [--compat backward|forward|full]
 //
 // FILTER is a jq program, and the output is what jq 1.8 prints for it. The options are listed in HELP_OPTIONS
 // (usage.odin). With no FILE it reads stdin, and with no FILTER it runs `.` unless stdin and stdout are both a
@@ -26,6 +28,8 @@ package main
 //	check.odin                       `stury check`, which judges the inputs
 //	fmt.odin                         `stury fmt`, which writes the inputs back in the printer's layout
 //	edit.odin                        `stury edit`, which splices the filter's value into the input's bytes
+//	diff.odin                        `stury diff` over two data files, and the preview of `edit --diff`
+//	diff_schema.odin                 `stury diff` over schemas: two compared, or one against a data file
 //	filter.odin                      the jq interpreter over each input
 //	print.odin                       output as jq prints it, and what it comes to (`Output`)
 //	message/                         the text of every message, built from a format and its values (package `message`)
@@ -36,7 +40,6 @@ package main
 
 import "core:os"
 import "core:slice"
-import "core:strings"
 import host "../../host"
 import "jq"
 import "message"
@@ -55,6 +58,7 @@ Run :: struct {
 		names:              []string,
 		values, positional: []jq.Value,
 		named:              int, // the first `named` of names are $ARGS.named
+		typed:              bool, // the filter is --filter's, which no mistyped command gives
 	},
 	home_module: bool, // `~/.jq`, or what stands for it, is a module every filter includes
 	route:       Route,
@@ -66,6 +70,7 @@ Run :: struct {
 	spares:      Spare_Outs, // the pieces' output buffers, kept from one file to the next
 	parallel:    Maybe(bool), // whether the filter runs on pieces, once `parallel` has decided it
 	collects:    int, // the collect jobs started, which number them from 1
+	convert:     ^Conversion, // fmt --schema: the schema a conversion follows
 }
 
 main :: proc() {
@@ -81,23 +86,30 @@ main :: proc() {
 		refuse_edit(o)
 	}
 	refuse_format_clashes(o, &cli)
+	refuse_unowned(&cli)
 	validating := cli.validating
 	switch {
-	case (o.in_place || o.check) && !cli.formatting && !cli.editing:
-		usage_error("%s is fmt's and edit's: a filter run has no use for it", "--in-place" if o.in_place else "--check")
-	case validating || cli.formatting || cli.editing:
+	case cli.diffing:
 		if flag := command_refused_option(o, &cli); flag != "" {
-			usage_error("%s has no use with %s: %s", flag, command_name(&cli), "it runs no filter and prints nothing" if validating else "it runs no filter and writes each input's own format" if cli.formatting else "it writes each input back in its own bytes")
+			usage_error("%s has no use with diff: it runs no filter and prints the changes between its inputs", flag)
+		}
+		diff_main(&run, &cli)
+	case validating || cli.formatting || cli.editing || cli.schema_verb:
+		if flag := command_refused_option(o, &cli); flag != "" {
+			usage_error("%s has no use with %s: %s", flag, command_name(&cli), command_writes(&cli))
 		}
 	}
 	if o.follow {
 		refuse_follow(o, &cli)
 	}
-	if validating {
+	if validating && cli.schema.filter == nil {
 		check_main(&run, &cli)
 	}
 	if cli.formatting {
 		fmt_main(&run, &cli)
+	}
+	if cli.schema_verb {
+		schema_main(&run, &cli)
 	}
 	if dirs, given := cli.lib_dirs.?; given {
 		run.ip.search_list = dirs[:]
@@ -107,6 +119,10 @@ main :: proc() {
 	run.ip.debug_layout = output_layout(&run)
 	run.ip.debug_layout.opts.pretty = false
 	text, has := cli.filter.?
+	typed, typing := cli.schema.filter.?
+	if typing {
+		text, has = typed, true
+	}
 	switch {
 	case has && o.from_file:
 		text = program_file(&run.ip, text)
@@ -120,14 +136,17 @@ main :: proc() {
 	named := len(cli.var_names)
 	if !slice.contains(cli.var_names[:], "JQ_BUILD_CONFIGURATION") {
 		append(&cli.var_names, "JQ_BUILD_CONFIGURATION")
-		append(&cli.var_values, BUILD_CONFIGURATION)
+		append(&cli.var_values, string(BUILD_CONFIGURATION))
 	}
-	run.program = {text, cli.var_names[:], cli.var_values[:], cli.positional[:], named}
+	run.program = {text, cli.var_names[:], cli.var_values[:], cli.positional[:], named, typing}
 	explain_filter(&run)
 	run.home_module = jq.home_module(&run.ip)
 	ready_interpreter(&run)
 	if cli.editing {
 		edit_main(&run, &cli)
+	}
+	if validating {
+		check_filter_main(&run, &cli)
 	}
 	choose_route(&run, text)
 	ins := Inputs {
@@ -159,15 +178,16 @@ main :: proc() {
 	finish(&run, max(code, 0))
 }
 
-// Report the filter's compile errors as jq does and exit, if there are any.
-compile_errors :: proc(text: string, errors: []jq.Compile_Error) {
+// Report the filter's compile errors as jq does and exit, if there are any. A filter that is no --filter's and is a word
+// near a command is told as that command mistyped.
+compile_errors :: proc(text: string, errors: []jq.Compile_Error, typed: bool) {
 	if len(errors) == 0 {
 		return
 	}
 	for e in errors {
 		message.write_stderr("stury: error: %s\n", jq.locate(text, e))
 	}
-	if command := near_command(text); command != "" {
+	if command := "" if typed else near_command(text); command != "" {
 		message.write_stderr("stury: %s is not a command: did you mean stury %s?\n", text, command)
 	}
 	exit_compile(len(errors))
@@ -181,12 +201,7 @@ near_command :: proc(text: string) -> string {
 			return ""
 		}
 	}
-	for command in ([]string{"check", "fmt", "edit"}) {
-		if d := strings.levenshtein_distance(text, command, context.temp_allocator); d <= (len(command) - 1) / 2 {
-			return command
-		}
-	}
-	return ""
+	return message.nearest({"check", "fmt", "edit", "diff", "schema"}, text)
 }
 
 // jq's count of compile errors, then exit as it does.
@@ -198,7 +213,7 @@ exit_compile :: proc(count: int) -> ! {
 // Parse and check the filter and bind its globals, before the interpreter first runs.
 ready_interpreter :: proc(run: ^Run) {
 	parsed, errors := jq.parse(run.program.text)
-	compile_errors(run.program.text, errors)
+	compile_errors(run.program.text, errors, run.program.typed)
 	if parsed.body == nil {
 		message.write_stderr("stury: error: Top-level program not given (try \".\")\n")
 		exit_compile(1)
@@ -213,7 +228,7 @@ ready_interpreter :: proc(run: ^Run) {
 		}
 	}
 	prog, check_errors, prelude := jq.check(parsed.body, run.program.names, linked)
-	compile_errors(run.program.text, check_errors)
+	compile_errors(run.program.text, check_errors, run.program.typed)
 	run.prog = prog
 	run.ip.globals = prelude
 	bind_cli_vars(run)

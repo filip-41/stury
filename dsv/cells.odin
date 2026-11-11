@@ -3,7 +3,6 @@ package dsv
 
 import "base:intrinsics"
 import "core:strconv"
-import spell "../core/spell"
 import core "../core"
 import kernel "../core/kernel"
 import write "../core/write"
@@ -12,10 +11,10 @@ import records "../core/records"
 // Splits `row` into `b.cells`, which grows to hold them all, or its first `upto` cells. Returns the cell count, whether
 // it is the row's, or false when they do not fit in memory.
 @(private)
-split_all :: #force_inline proc(it: ^records.Reader, b: ^Batch, src: []u8, row: Batch_Row, spec: Spec, opts: Options, role: core.Role, upto := max(int)) -> (n: int, whole, ok: bool) {
+split_all :: #force_inline proc(it: ^records.Reader, b: ^Batch, src: []u8, row: Batch_Row, $S: Spec, opts: Options, role: core.Role, upto := max(int)) -> (n: int, whole, ok: bool) {
 	for {
 		sp := Split{out = b.cells[:min(len(b.cells), upto)]}
-		if _, a := split_any(src, row, spec, opts, role, &sp, {}, on_split); a != .Stop || sp.n == upto {
+		if _, a := split_cells(src, row, S, opts, role, &sp, {}, on_split); a != .Stop || sp.n == upto {
 			return sp.n, a != .Stop, true
 		}
 		b.cells.allocator = it.allocator
@@ -23,17 +22,6 @@ split_all :: #force_inline proc(it: ^records.Reader, b: ^Batch, src: []u8, row: 
 			return
 		}
 	}
-}
-
-// `split_cells` for a spelling known at run time, for the cold readers.
-@(private)
-split_any :: proc "contextless" (src: []u8, row: Batch_Row, spec: Spec, opts: Options, role: core.Role, h: ^$H, regs: core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (core.Hook_Regs, core.Action) {
-	switch spec {
-	case .Csv:   return split_cells(src, row, .Csv, opts, role, h, regs, on)
-	case .Tsv:   return split_cells(src, row, .Tsv, opts, role, h, regs, on)
-	case .Plain: return split_cells(src, row, .Plain, opts, role, h, regs, on)
-	}
-	return regs, .Stop
 }
 
 // A split's buffer: the first `n` tokens of `out` are the row's cells.
@@ -153,16 +141,15 @@ held_row :: #force_inline proc(it: ^records.Reader, rec: records.Record) -> (Bat
 // The value tokens of `rec`, the row `next` gave last, or its first `upto`, or false for another or when they do not fit
 // in memory, which ends the records with `.No_Memory`.
 @(private)
-cells_of :: proc(it: ^records.Reader, rec: records.Record, upto := max(int)) -> ([]core.Token, bool) {
+cells_of :: proc(it: ^records.Reader, rec: records.Record, $S: Spec, upto := max(int)) -> ([]core.Token, bool) {
 	row, held := held_row(it, rec)
 	if !held {
 		return nil, false
 	}
 	b := (^Batch)(it.format)
 	if b.split_row != b.at || upto > b.split_cap {
-		spec, opts := Spec(it.as.spec), options_of(it.as)
 		whole, ok: bool
-		if b.split, whole, ok = split_all(it, b, it.src, row, spec, opts, .Value, upto); !ok {
+		if b.split, whole, ok = split_all(it, b, it.src, row, S, options_of(it.as), .Value, upto); !ok {
 			it.fault = core.Fault{rules = &RULES, kind = .No_Memory}
 			return nil, false
 		}
@@ -205,11 +192,11 @@ column_of :: proc(it: ^records.Reader, name: string) -> int {
 // The row is split only up to the cell. A quoted cell with a `""` the split marked, read strictly, is undoubled with no
 // general decode.
 @(private)
-cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool) {
+cell_of_spec :: #force_inline proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8, $S: Spec) -> (string, bool) {
 	if column < 0 {
 		return "", false
 	}
-	cells, ok := cells_of(it, rec, column + 1)
+	cells, ok := cells_of(it, rec, S, column + 1)
 	if !ok || column >= len(cells) {
 		return "", false
 	}
@@ -220,7 +207,7 @@ cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8
 	if t.spelling & (SPELLING_DOUBLED | core.SPELLING_LAX) == SPELLING_DOUBLED && len(buf) >= int(t.n) {
 		return undoubled(buf, string(it.src[t.lo + 1:t.lo + u64(t.n) - 1])), true
 	}
-	return cell_text(it.src, t, Spec(it.as.spec), buf)
+	return cell_text(it.src, t, S, buf)
 }
 
 // Makes each unquoted cell of `texts`, the texts of `cells`, the kind `infer` reads it as: a number, true or false.
@@ -231,15 +218,13 @@ infer_cells :: proc(cells: []core.Token, texts: []write.Scalar) {
 		if !is_text || t.spelling & (core.SPELLING_QUOTED | core.SPELLING_DECODE) != 0 {
 			continue
 		}
-		switch s {
-		case "true":
+		#partial switch kind, _ := core.plain_kind(transmute([]u8)s, 0, u64(len(s)), true, true); kind {
+		case .True:
 			texts[i] = write.Tree_Part.True
-		case "false":
+		case .False:
 			texts[i] = write.Tree_Part.False
-		case:
-			if _, is_number := spell.number_strict(transmute([]u8)s, 0, u64(len(s))); is_number {
-				texts[i] = write.Number_Literal{s}
-			}
+		case .Number:
+			texts[i] = write.Number_Literal{s}
 		}
 	}
 }
@@ -247,8 +232,8 @@ infer_cells :: proc(cells: []core.Token, texts: []write.Scalar) {
 // The first `upto` cells of `rec`, the row `next` gave last, in `b.texts`, nil for an empty unquoted cell. Under `infer`
 // an unquoted cell that is a number, `true` or `false` is that kind.
 @(private)
-cells_texts :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto: int) -> ([]write.Scalar, bool) #no_bounds_check {
-	cells, ok := cells_of(it, rec, upto)
+cells_texts_spec :: #force_inline proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto: int, $S: Spec) -> ([]write.Scalar, bool) #no_bounds_check {
+	cells, ok := cells_of(it, rec, S, upto)
 	b := (^Batch)(it.format)
 	if !ok {
 		return nil, false
@@ -268,7 +253,7 @@ cells_texts :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto: i
 		case t.spelling & (core.SPELLING_QUOTED | core.SPELLING_DECODE) == 0:
 			b.texts[i] = string(it.src[t.lo:t.lo + u64(t.n)])
 		case:
-			s, decoded := cell_of(it, rec, i, buf)
+			s, decoded := cell_of_spec(it, rec, i, buf, S)
 			if !decoded {
 				return nil, false
 			}

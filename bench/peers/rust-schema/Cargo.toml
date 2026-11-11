@@ -1,0 +1,22 @@
+[package]
+name = "schema_bench"
+version = "0.1.0"
+edition = "2024"
+
+# Its own package so that jsonschema and boon parse with serde_json's default features, as their users do: Cargo unifies
+# a dependency's features across a package, and rust_bench needs preserve_order and float_roundtrip for its other lanes.
+[dependencies]
+# The schema validators of schema.py. jsonschema is built without its HTTP and file resolvers: every reference in the
+# lanes' schemas is local.
+jsonschema = { version = "=0.60.2", default-features = false }
+boon = "=0.6.1"
+serde_json = "1"
+
+[[bin]]
+name = "schema"
+path = "src/main.rs"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"

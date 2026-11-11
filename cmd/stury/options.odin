@@ -41,6 +41,7 @@ Opts :: struct {
 	in_place:         bool,
 	check:            bool,
 	follow:           bool, // --follow: the one file is read on as it grows
+	diff:             bool, // edit --diff: tell the value changes of the edit
 }
 
 // What the command line gives besides the options.
@@ -48,6 +49,10 @@ Cli :: struct {
 	validating: bool,
 	formatting: bool,
 	editing:    bool,
+	// `schema`: the verb (`infer` or `sample`) is the first of `files`, and these are its options.
+	schema_verb: bool,
+	verbs:      Verb_Options,
+	diffing:    bool,
 	filter:     Maybe(string), // the filter, or under -f the file it is in
 	files:      [dynamic]string,
 	// --arg, --argjson, --slurpfile and --rawfile, the first of a name standing.
@@ -71,6 +76,10 @@ Cli :: struct {
 	// The first option given that reads a delimited text (--delimiter...), and the first that writes one (--crlf...).
 	cells_flag, cells_out_flag: string,
 	out_delimiter, out_comment: Maybe(byte),
+	// `check`'s schema options, which `diff` takes too.
+	schema: Schema_Options,
+	diff:   Diff_Options,
+	owned:  [dynamic]string, // the options given that only some commands take, in order
 }
 
 // The command line `args` (os.args without the program) into `o`, as jq reads it.
@@ -81,6 +90,8 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		switch args[subcommand] {
 		case "fmt":  cli.formatting = true
 		case "edit": cli.editing = true
+		case "schema": cli.schema_verb = true
+		case "diff": cli.diffing = true
 		case:        cli.validating = true
 		}
 	}
@@ -108,7 +119,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		}
 		if args_done || !is_option(a) {
 			switch {
-			case !cli.validating && !cli.formatting && cli.filter == nil:
+			case !cli.validating && !cli.formatting && !cli.schema_verb && !cli.diffing && cli.filter == nil:
 				cli.filter = a
 			case rest_as == .Args:
 				append(&cli.positional, jq.valid_utf8(a))
@@ -126,6 +137,9 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		if a[1] != '-' {
 			i = short_options(o, &cli, args, i)
 			continue
+		}
+		if owned_option(a[2:]) != nil {
+			append(&cli.owned, a)
 		}
 		switch name := a[2:]; name {
 		case "tab":
@@ -172,6 +186,17 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			i = lib_dir_arg(&cli, args, i)
 		case "from", "to":
 			i += option_arity(a)
+		case "schema", "schema-ref", "schema-draft", "max-errors", "report", "format-assert", "filter":
+			schema_option(&cli.schema, args, i)
+			i += option_arity(a)
+		case "ranges", "invalid", "comments", "seed", "count", "package":
+			verb_option(&cli.verbs, args, i)
+			i += option_arity(a)
+		case "old-schema", "new-schema", "compat", "key", "set", "position", "facts", "json", "shape":
+			diff_option(&cli.diff, args, i)
+			i += option_arity(a)
+		case "diff":
+			o.diff = true
 		case "grow-header":
 			o.grow_header = true
 		case "delimiter", "comment", "out-delimiter", "out-comment":
@@ -377,7 +402,7 @@ is_option :: proc(a: string) -> bool {
 	return len(a) >= 2 && a[0] == '-' && (a[1] == '-' || ('a' <= a[1] && a[1] <= 'z') || ('A' <= a[1] && a[1] <= 'Z'))
 }
 
-// Where `check` (or `validate`), `fmt` or `edit` stands in `args`, or -1: the first argument that is not an option, before
+// Where `check` (or `validate`), `fmt`, `edit` or `schema` stands in `args`, or -1: the first argument that is not an option, before
 // `--`. Under -f that argument is the program file's name, which stays a file. Short options hold -f when an `f` comes
 // before any `L`, whose rest is a directory (`-Lfoo`).
 @(private = "file")
@@ -391,7 +416,7 @@ subcommand_index :: proc(args: []string) -> int {
 		case is_option(a):
 			i += option_arity(a)
 		case:
-			return i if a == "check" || a == "validate" || a == "fmt" || a == "edit" else -1
+			return i if a == "schema" || a == "check" || a == "validate" || a == "fmt" || a == "edit" || a == "diff" else -1
 		}
 	}
 	return -1
@@ -402,7 +427,7 @@ subcommand_index :: proc(args: []string) -> int {
 @(private = "file")
 option_arity :: proc(a: string) -> int {
 	switch a {
-	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment":
+	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--filter", "--seed", "--count", "--package", "--old-schema", "--new-schema", "--compat", "--key":
 		return 1
 	case "--arg", "--argjson", "--slurpfile", "--rawfile":
 		return 2
@@ -518,7 +543,6 @@ parse_indent :: proc(s: string) -> (n: i8, ok: bool) {
 }
 
 // `s` as decimal digits only, and at least one, to `cap` at most. The cap keeps a long run from overflowing.
-@(private = "file")
 parse_digits :: proc(s: string, cap: u64) -> (n: u64, ok: bool) {
 	if len(s) == 0 {
 		return
@@ -543,39 +567,142 @@ parse_max_depth :: proc(s: string) -> (n: u64, ok: bool) {
 	return n, ok && 1 <= n && n <= DEPTH_CEILING
 }
 
-// The command `cli` names, or "" for a filter run.
-command_name :: proc(cli: ^Cli) -> string {
-	return "check" if cli.validating else "fmt" if cli.formatting else "edit" if cli.editing else ""
+// A command, as the owner of the options that only some commands take.
+Command :: enum u8 {
+	Run,
+	Check,
+	Fmt,
+	Edit,
+	Diff,
+	Infer,
+	Sample,
+	Gen,
 }
 
-// The first option given that `check`, `fmt` or `edit` has no use for, or "". fmt writes each input's own format, and
-// check prints nothing, so neither takes a layout or reshapes its input, but check takes --seq, which frames the records
-// it judges. edit writes each input back in its own format, so it takes no output format and no option that respells
+@(rodata)
+COMMAND_NAMES := [Command]string {
+	.Run    = "",
+	.Check  = "check",
+	.Fmt    = "fmt",
+	.Edit   = "edit",
+	.Diff   = "diff",
+	.Infer  = "schema infer",
+	.Sample = "schema sample",
+	.Gen    = "schema gen",
+}
+
+// Options, without their dashes, that only the commands `by` take, and what they do, which is why the others refuse them.
+Owned_Options :: struct {
+	names: []string,
+	by:    bit_set[Command],
+	does:  string,
+}
+
+@(rodata)
+OWNED_OPTIONS := [?]Owned_Options {
+	{{"schema", "max-errors"}, {.Check, .Fmt}, "it judges the inputs against a schema"},
+	{{"report"}, {.Check}, "it sets the layout of a schema check's report"},
+	{{"filter"}, {.Check}, "it types a filter against a schema"},
+	{{"schema-ref", "schema-draft"}, {.Check, .Fmt, .Diff, .Sample, .Gen}, "it says how a schema is read"},
+	{{"format-assert"}, {.Check, .Fmt, .Diff, .Gen}, "it asserts the formats a schema names"},
+	{{"ranges"}, {.Infer}, "it keeps the bounds of the inferred numbers, lengths and counts"},
+	{{"invalid", "comments", "seed", "count"}, {.Sample}, "it shapes the samples"},
+	{{"package"}, {.Gen}, "it names the package of the Odin types"},
+	{{"old-schema", "new-schema", "compat", "key", "set", "position", "facts", "json", "shape"}, {.Diff}, "it shapes what diff compares and tells"},
+	{{"diff"}, {.Edit}, "it previews the changes of an edit"},
+	{{"in-place", "check"}, {.Fmt, .Edit}, "it writes each file back, or tells whether it would change"},
+}
+
+// The entry of `name`, an option without its dashes, when only some commands take it.
+owned_option :: proc(name: string) -> ^Owned_Options {
+	for &o in OWNED_OPTIONS {
+		if slice.contains(o.names, name) {
+			return &o
+		}
+	}
+	return nil
+}
+
+// Refuses the first option given that only other commands take, naming them and what the option does. A schema verb
+// not named is left for `schema_main` to refuse.
+refuse_unowned :: proc(cli: ^Cli) {
+	command := Command.Run
+	switch {
+	case cli.validating: command = .Check
+	case cli.formatting: command = .Fmt
+	case cli.editing:    command = .Edit
+	case cli.diffing:    command = .Diff
+	case cli.schema_verb:
+		verb := cli.files[0] if len(cli.files) > 0 else ""
+		switch verb {
+		case "infer":  command = .Infer
+		case "sample": command = .Sample
+		case "gen":    command = .Gen
+		case:          return
+		}
+	}
+	for flag in cli.owned {
+		if o := owned_option(flag[2:]); command not_in o.by {
+			owners := make([dynamic]string, context.temp_allocator)
+			for c in o.by {
+				append(&owners, strings.concatenate({COMMAND_NAMES[c], "'s"}, context.temp_allocator))
+			}
+			last := len(owners) - 1
+			listed := strings.join(owners[:last], ", ", context.temp_allocator)
+			usage_error("%s is %s: %s", flag, strings.join({listed, owners[last]}, " and ", context.temp_allocator) if last > 0 else owners[0], o.does)
+		}
+	}
+}
+
+// The command `cli` names, or "" for a filter run.
+command_name :: proc(cli: ^Cli) -> string {
+	return "check" if cli.validating else "fmt" if cli.formatting else "edit" if cli.editing else "diff" if cli.diffing else "schema" if cli.schema_verb else ""
+}
+
+// What the command writes, which is why it refuses an option `command_refused_option` names.
+command_writes :: proc(cli: ^Cli) -> string {
+	switch {
+	case cli.validating && cli.schema.filter != nil: return "it types the filter and writes the schema of its outputs"
+	case cli.validating && cli.schema.reported:      return "it runs no filter and writes its report in one layout"
+	case cli.validating:                             return "it runs no filter and prints nothing"
+	case cli.formatting:                             return "it runs no filter and writes each input in its own format or the one --to names"
+	case generates_odin(cli):                        return "it runs no filter and writes Odin types"
+	case cli.schema_verb:                            return "it runs no filter and writes a schema or samples"
+	}
+	return "it writes each input back in its own bytes"
+}
+
+// The first option given that `check`, `fmt`, `edit` or `schema` has no use for, or "". fmt writes each input's own format,
+// and check prints nothing, so neither takes a layout or reshapes its input, but check takes --seq, which frames the records
+// it judges. schema writes a description or samples, so it takes the layout options and, for sample, --to, but schema gen
+// writes Odin and takes none. edit writes each input back in its own format, so it takes no output format and no option that respells
 // the output as a whole, but its filter takes the options of a filter run's input and its bindings, and a built value
 // is written with -a, -S, --indent and --tab.
 command_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
-	editing := cli.editing
+	// check --filter runs no filter but types one, on the inputs the input options describe, and writes a schema.
+	typing := cli.validating && cli.schema.filter != nil
+	editing, schema := cli.editing, cli.schema_verb && !generates_odin(cli) || typing
 	switch {
-	case editing && cli.formats.to != nil: return "--to"
-	case !cli.formatting && cli.cells_out_flag != "": return cli.cells_out_flag
+	case (editing || cli.diffing) && cli.formats.to != nil: return "--to"
+	case !cli.formatting && !schema && cli.cells_out_flag != "": return cli.cells_out_flag
 	case o.raw0:                 return "--raw-output0"
 	case o.raw:                  return "-j" if o.join else "-r"
-	case cli.compact_given && !editing: return "-c"
-	case o.ascii && !editing:    return "-a"
-	case o.sort_keys && !editing: return "-S"
+	case cli.compact_given && !editing && !schema && !cli.formatting: return "-c"
+	case o.ascii && !editing && !schema: return "-a"
+	case o.sort_keys && !editing && !schema: return "-S"
 	case cli.color_set:          return "-C"
-	case o.raw_input && !editing: return "-R"
-	case o.null_input:           return "-n"
-	case o.slurp && !editing:    return "-s"
-	case o.from_file && !editing: return "-f"
-	case o.seq && cli.formatting: return "--seq"
+	case o.raw_input && !editing && !typing: return "-R"
+	case o.null_input && !typing: return "-n"
+	case o.slurp && !editing && !typing: return "-s"
+	case o.from_file && !editing && !typing: return "-f"
+	case o.seq && (cli.formatting || typing): return "--seq"
 	case o.stream_errors:        return "--stream-errors"
 	case o.stream:               return "--stream"
 	case o.exit_status && !editing: return "-e"
 	case o.explain && !editing:  return "--explain"
-	case cli.binding_flag != "" && !editing: return cli.binding_flag
-	case !cli.formatting && !editing && cli.layout_flag != "": return cli.layout_flag
-	case cli.lib_dirs != nil && !editing: return "-L"
+	case cli.binding_flag != "" && !editing && !typing: return cli.binding_flag
+	case !cli.formatting && !editing && !schema && cli.layout_flag != "": return cli.layout_flag
+	case cli.lib_dirs != nil && !editing && !typing: return "-L"
 	}
 	return ""
 }

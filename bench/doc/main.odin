@@ -118,8 +118,10 @@ run_lane :: proc(a: ^Arena, lane: string, src: []u8, tsv: bool, dsv_text: bool, 
 			lane_read(a, src, tsv, dsv_text, spec)
 		case "key":
 			lane_key(a, src, tsv, dsv_text, spec)
+		case "infer":
+			lane_infer(a, src, tsv, dsv_text, spec)
 		case:
-			fmt.eprintln("lane: build, read or key")
+			fmt.eprintln("lane: build, read, key or infer")
 			os.exit(2)
 		}
 		d := i64(time.tick_since(start))
@@ -134,6 +136,11 @@ lane_build :: #force_no_inline proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, s
 	_ = build(a, src, tsv, dsv_text, spec)
 }
 
+// A dsv text built with `infer`, which stores each cell's kind. A text of another format builds as `build` does.
+lane_infer :: #force_no_inline proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
+	_ = build(a, src, tsv, dsv_text, spec, true)
+}
+
 lane_read :: #force_no_inline proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
 	read_all(a, src, tsv, dsv_text, spec, false)
 }
@@ -142,14 +149,14 @@ lane_key :: #force_no_inline proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spe
 	key_lookup(a, src, tsv, dsv_text, spec)
 }
 
-build :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) -> core.Document {
+build :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec, infer := false) -> core.Document {
 	doc: core.Document
-	err: core.Document_Error
+	err: core.Error
 	if dsv_text {
 		if tsv {
-			doc, err = dsv.build(src, .Tsv, {}, .Last, a.alloc)
+			doc, err = dsv.build(src, .Tsv, {infer = infer}, .Last, a.alloc)
 		} else {
-			doc, err = dsv.build(src, .Csv, {}, .Last, a.alloc)
+			doc, err = dsv.build(src, .Csv, {infer = infer}, .Last, a.alloc)
 		}
 	} else {
 		switch spec {
@@ -161,7 +168,7 @@ build :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) -> cor
 			doc, err = json.build(src, .Json5, {}, .Last, a.alloc)
 		}
 	}
-	if err.kind != .None {
+	if err != nil {
 		core.render(os.to_writer(os.stderr), src, err)
 		fmt.eprintln()
 		os.exit(1)

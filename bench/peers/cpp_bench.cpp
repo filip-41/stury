@@ -11,6 +11,8 @@
 
 #include <simdjson.h>
 
+#include "bench_common.h"
+
 // Timing jobs for doc.py. Each job makes WARMUP + TIMED calls on one input and prints the median as key=value
 // tokens. Parsers and output buffers persist across calls; file I/O is outside the clock.
 //   simd_dom               simdjson DOM
@@ -34,9 +36,6 @@ using simdjson::SUCCESS;
     do {                                                         \
         if (error_code e_ = (x); e_ != SUCCESS) return e_;       \
     } while (0)
-
-static const int WARMUP = 2;
-static const int TIMED = 10;
 
 // The checksum every arm of a lane prints, so the runner can refuse a fixture whose arms disagree.
 static const uint64_t CHECK_OFFSET = 14695981039346656037ULL;
@@ -174,21 +173,6 @@ static error_code dom_visit(simdjson::dom::element v, VisitCounts& c) {
         break;
     }
     return SUCCESS;
-}
-
-// Returns the median nanoseconds of TIMED timed calls after WARMUP calls, or -1 when a call fails. `once`
-// returns one call's nanoseconds, or -1.
-template <class F>
-static int64_t median_ns(F&& once) {
-    std::vector<int64_t> times;
-    for (int i = 0; i < WARMUP + TIMED; i++) {
-        int64_t ns = once();
-        if (ns < 0) return -1;
-        if (i >= WARMUP) times.push_back(ns);
-    }
-    std::sort(times.begin(), times.end());
-    // The mean of the two middle samples.
-    return (times[(TIMED - 1) / 2] + times[TIMED / 2]) / 2;
 }
 
 static int report(size_t len, int64_t ns, const std::string& extra) {
@@ -560,17 +544,11 @@ int main(int argc, char* argv[]) {
     std::string fixture_path = argv[1];
     std::string mode = argv[2];
 
-    std::ifstream file(fixture_path, std::ios::binary | std::ios::ate);
-    if (!file) {
-        std::cerr << "Could not open file: " << fixture_path << std::endl;
-        return 1;
-    }
-    std::streamsize size = file.tellg();
-    file.seekg(0, std::ios::beg);
-
-    std::string buffer(size, '\0');
-    if (!file.read(&buffer[0], size)) {
-        std::cerr << "Could not read file: " << fixture_path << std::endl;
+    std::string buffer;
+    try {
+        buffer = slurp(fixture_path.c_str());
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << std::endl;
         return 1;
     }
 

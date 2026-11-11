@@ -129,7 +129,7 @@ table_root :: proc(o: ^Output, root: jq.Value) {
 		write.put_text(&o.buf, string(records.writer_take(&t.wr)))
 		flush_some(o)
 	}
-	for n in table_comments(o, root, .Foot) {
+	for n in table_comments(o, root, .Comment_Foot) {
 		append(&t.foot, strings.clone(n, runtime.heap_allocator()))
 	}
 }
@@ -137,7 +137,7 @@ table_root :: proc(o: ^Output, root: jq.Value) {
 // The comments of `role` on `v` that the table holds as whole lines: none when it has no comment character, and none
 // that hold a line end.
 @(private = "file")
-table_comments :: proc(o: ^Output, v: jq.Value, role: jq.Comment_Role) -> []string {
+table_comments :: proc(o: ^Output, v: jq.Value, role: core.Role) -> []string {
 	if o.opts.cells_out.comment == 0 {
 		return nil
 	}

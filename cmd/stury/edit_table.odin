@@ -10,6 +10,8 @@ import "base:runtime"
 import "core:slice"
 import "core:strings"
 import core "../../core"
+import typed "../../core/typed"
+import write "../../core/write"
 import "jq"
 import "message"
 
@@ -62,7 +64,7 @@ edit_table :: proc(er: ^Edit_Run, path: string) -> int {
 		}
 		// The table's own comments are the ones an output array writes, above the header and after the last record.
 		for v in outs {
-			for role in jq.Comment_Role {
+			for role in core.COMMENT_ROLES {
 				if bodies, from := jq.comments(v, role); from == .Written && !edit_role(&w, core.ROOT, role, bodies) {
 					message.write_stderr("stury: error: %s: %s\n", w.name, w.err)
 					return EXIT_INPUT
@@ -114,7 +116,7 @@ edit_table :: proc(er: ^Edit_Run, path: string) -> int {
 	}
 	#reverse for rec, i in recs {
 		if !used[i] {
-			if e := core.remove(&list, rec); e.kind != .None {
+			if e := core.remove(&list, rec); e != nil {
 				message.write_stderr("stury: error: %s: %s\n", w.name, edit_error_text(src, e))
 				return EXIT_INPUT
 			}
@@ -154,7 +156,7 @@ new_comments :: proc(placed: []Edit_Placed) -> bool {
 		if p.rec >= 0 {
 			continue
 		}
-		for role in jq.Comment_Role {
+		for role in core.COMMENT_ROLES {
 			if bodies, _ := jq.comments(p.value, role); len(bodies) > 0 {
 				return true
 			}
@@ -221,7 +223,7 @@ edit_row_input :: proc(data: rawptr) -> (jq.Value, string, jq.Parse_Status) {
 // The header's decoded names, or nil for a table without one.
 @(private = "file")
 edit_header :: proc(w: ^Edit_State) -> (names: []string, ok: bool) {
-	keys := w.doc.shared_keys
+	keys := core.header_of(w.doc)
 	if keys == 0 {
 		return nil, true
 	}
@@ -240,7 +242,7 @@ edit_header :: proc(w: ^Edit_State) -> (names: []string, ok: bool) {
 @(private = "file")
 edit_row_value :: proc(w: ^Edit_State, v: jq.Value, names: []string) -> (jq.Value, bool) {
 	k := jq.kind(v)
-	headed := w.doc.shared_keys != 0
+	headed := core.header_of(w.doc) != 0
 	if headed && k == .Object || !headed && k == .Array {
 		return v, true
 	}
@@ -354,7 +356,7 @@ edit_table_place :: proc(er: ^Edit_Run, w0: ^Edit_State, text: []u8, placed: []E
 		it := core.children(&doc, core.ROOT)
 		for row in core.child_next(&it) {
 			for k := core.length(&doc, row); k < len(names); k += 1 {
-				core.insert(&short, row, core.length(&doc, row), "")
+				write.insert(&short, row, core.length(&doc, row), typed.Raw(""))
 			}
 		}
 		if len(short.edits) == 0 {
@@ -378,7 +380,7 @@ edit_table_place :: proc(er: ^Edit_Run, w0: ^Edit_State, text: []u8, placed: []E
 		for p, i in perm {
 			final[i] = names[p]
 		}
-		edit_reorder(&w, doc.shared_keys, perm) or_return
+		edit_reorder(&w, core.header_of(&doc), perm) or_return
 		it := core.children(&doc, core.ROOT)
 		for row in core.child_next(&it) {
 			edit_reorder(&w, row, perm) or_return
@@ -449,40 +451,47 @@ edit_table_records :: proc(w0, w: ^Edit_State, placed: []Edit_Placed, final: []s
 
 @(private = "file")
 edit_record_insert :: proc(w: ^Edit_State, at: int, text: string) -> bool {
-	if e := core.insert(w.list, core.ROOT, at, text); e.kind != .None {
+	if e := write.insert(w.list, core.ROOT, at, typed.Raw(text)); e != nil {
 		message.write_stderr("stury: error: %s: %s\n", w.name, edit_error_text(w.doc.src, e))
 		return false
 	}
 	return true
 }
 
-// A new record's line: its cells in the `final` columns, or in its own order for a table without a header, each
-// spelled as an edit spells a cell, a cell taken from the table keeping its bytes.
+// A new record's line: its cells in the `final` columns, or in its own order for a table without a header, each spelled
+// as the library spells a record, a cell taken from the table keeping its bytes.
 @(private = "file")
 edit_row_text :: proc(w: ^Edit_State, v: jq.Value, final: []string) -> (text: string, ok: bool) {
-	b := strings.builder_make(context.temp_allocator)
-	delimiter := w.doc.as.opts[0]
-	at := u64(len(w.doc.src))
+	row := edit_row_cells(w, v, final) or_return
+	spelled, owned, e := core.insert_text(w.list, core.ROOT, row)
+	if !edit_check(w, e, row, true) {
+		return "", false
+	}
+	text = strings.clone(string(spelled), context.temp_allocator)
+	if owned {
+		delete(spelled, w.list.allocator)
+	}
+	return text, true
+}
+
+// A new record's cells.
+@(private = "file")
+edit_row_cells :: proc(w: ^Edit_State, v: jq.Value, final: []string) -> (row: jq.Value, ok: bool) {
+	cells := jq.new_array(len(final))
 	if jq.kind(v) == .Object && final != nil {
-		for name, i in final {
-			if i > 0 {
-				strings.write_byte(&b, delimiter)
-			}
+		for name in final {
 			cell, _ := jq.object_get(v, name)
-			strings.write_string(&b, edit_text_of(w, cell, at) or_return)
+			edit_note_comments(w, cell) or_return
+			append(&cells.items, cell)
 		}
-		return strings.to_string(b), true
+		return cells, true
 	}
 	it := jq.iterate(v)
-	i := 0
 	for _, cell in jq.next_member(&it) {
-		if i > 0 {
-			strings.write_byte(&b, delimiter)
-		}
-		strings.write_string(&b, edit_text_of(w, cell, at) or_return)
-		i += 1
+		edit_note_comments(w, cell) or_return
+		append(&cells.items, cell)
 	}
-	return strings.to_string(b), true
+	return cells, true
 }
 
 // An object output's keys in its order, none for another value.
@@ -501,7 +510,7 @@ edit_keys :: proc(v: jq.Value) -> []string {
 
 @(private = "file")
 edit_reorder :: proc(w: ^Edit_State, node: core.Node_Index, perm: []u32) -> bool {
-	if e := core.reorder(w.list, node, perm); e.kind != .None {
+	if e := core.reorder(w.list, node, perm); e != nil {
 		message.write_stderr("stury: error: %s: %s\n", w.name, edit_error_text(w.doc.src, e))
 		return false
 	}

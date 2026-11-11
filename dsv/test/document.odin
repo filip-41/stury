@@ -5,16 +5,19 @@ import "core:mem"
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import compose "../../core/compose"
+import typed "../../core/typed"
+import write "../../core/write"
 import gen "gen"
 import walktest "../../walktest"
 import dsv ".."
 
-build :: proc(src: string, $S: dsv.Spec, opts := dsv.Options{}, dups := core.Duplicates.Last) -> (core.Document, core.Document_Error) {
-	return dsv.build(transmute([]u8)src, S, opts, dups)
+build :: proc(src: string, $S: dsv.Spec, opts := dsv.Options{}, dups := core.Duplicates.Last) -> (core.Document, core.Error) {
+	return core.build(transmute([]u8)src, dsv.as(S, opts), dups)
 }
 
 // `build` with the spec chosen at run time.
-build_any :: proc(src: string, spec: dsv.Spec, opts := dsv.Options{}, dups := core.Duplicates.Last) -> (core.Document, core.Document_Error) {
+build_any :: proc(src: string, spec: dsv.Spec, opts := dsv.Options{}, dups := core.Duplicates.Last) -> (core.Document, core.Error) {
 	switch spec {
 	case .Csv:
 		return build(src, .Csv, opts, dups)
@@ -40,7 +43,7 @@ node_layout :: proc(t: ^testing.T) {
 	src := "a,b\n1,2\n"
 	doc, err := build(src, .Csv)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	testing.expect_value(t, len(doc.nodes), 7)
 	if len(doc.nodes) != 7 {
 		return
@@ -57,7 +60,7 @@ node_layout :: proc(t: ^testing.T) {
 	if !walktest.expect_nodes(t, &doc, want) {
 		return
 	}
-	testing.expect_value(t, doc.shared_keys, 1)
+	testing.expect_value(t, core.header_of(&doc), 1)
 	testing.expect_value(t, doc.root_close, u64(len(src)))
 	testing.expect_value(t, core.length(&doc, 0), 1)
 	testing.expect_value(t, core.length(&doc, 1), 2)
@@ -76,7 +79,7 @@ node_layout :: proc(t: ^testing.T) {
 child_at_reader :: proc(t: ^testing.T) {
 	doc, err := build("a,b,c\n1,2,3\n", .Csv)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	rec := core.Node_Index(5)
 	for i in 0 ..< 3 {
 		v, ok := core.child_at(&doc, rec, i)
@@ -94,15 +97,15 @@ child_at_reader :: proc(t: ^testing.T) {
 	_, has = core.child_at(&doc, 0, 1)
 	testing.expect(t, !has)
 	for i in 0 ..< 3 {
-		key, ok := core.child_at(&doc, doc.shared_keys, i)
-		testing.expect(t, ok && key == doc.shared_keys + 1 + core.Node_Index(i))
+		key, ok := core.child_at(&doc, core.header_of(&doc), i)
+		testing.expect(t, ok && key == core.header_of(&doc) + 1 + core.Node_Index(i))
 	}
-	_, has = core.child_at(&doc, doc.shared_keys, 3)
+	_, has = core.child_at(&doc, core.header_of(&doc), 3)
 	testing.expect(t, !has)
 
 	ragged, rerr := build("a,b,c\n1,2\n", .Csv, {tolerate = {.Ragged}})
 	defer core.destroy(&ragged)
-	testing.expect_value(t, rerr.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, rerr)
 	_, has = core.child_at(&ragged, rec, 1)
 	testing.expect(t, has)
 	_, has = core.child_at(&ragged, rec, 2)
@@ -112,7 +115,7 @@ child_at_reader :: proc(t: ^testing.T) {
 
 	plain, perr := build("1,2\n3,4\n", .Csv, {no_header = true})
 	defer core.destroy(&plain)
-	testing.expect_value(t, perr.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, perr)
 	r, _ := core.child_at(&plain, 0, 0)
 	testing.expect_value(t, plain.nodes[r].kind, core.Kind.Array)
 	testing.expect_value(t, core.length(&plain, 0), 2)
@@ -153,10 +156,10 @@ check_table :: proc(t: ^testing.T, text: string, $S: dsv.Spec, no_header: bool) 
 	_, fault := dsv.walk(src, 0, S, {no_header = no_header}, log, &regs, walktest.log_hook)
 	doc, err := dsv.build(src, S, {no_header = no_header})
 	defer core.destroy(&doc)
-	if !testing.expectf(t, (fault == nil) == (err.kind == .None), "%q %v %v: walk %v, build %v", text, S, no_header, fault, err) {
+	if !testing.expectf(t, (fault == nil) == (err == nil), "%q %v %v: walk %v, build %v", text, S, no_header, fault, err) {
 		return
 	}
-	if err.kind == .None {
+	if err == nil {
 		walktest.check_containers(t, &doc, log.tokens[:log.n])
 	}
 }
@@ -224,7 +227,7 @@ cell_reads :: proc(t: ^testing.T) {
 	}) {
 		doc, err := build_any(c.src, c.spec, c.opts)
 		defer core.destroy(&doc)
-		if !testing.expectf(t, err.kind == .None, "%q: %v", c.src, err) {
+		if !testing.expectf(t, err == nil, "%q: %v", c.src, err) {
 			return
 		}
 		node := cell_node(&doc, c.rec, c.cell)
@@ -247,7 +250,7 @@ cell_reads :: proc(t: ^testing.T) {
 text_owned :: proc(t: ^testing.T) {
 	doc, err := build("a\n\"\"\nx\\ty\nxy\n", .Tsv)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	for want, i in ([]string{"\"\"", "x\ty", "xy"}) {
 		cell := cell_node(&doc, i, 0)
 		_, ok := core.text(&doc, cell, nil)
@@ -262,7 +265,7 @@ text_owned :: proc(t: ^testing.T) {
 
 	quoted, qerr := build("a\n\"\"\n", .Csv)
 	defer core.destroy(&quoted)
-	testing.expect_value(t, qerr.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, qerr)
 	arena: mem.Arena
 	backing: [64]u8
 	mem.arena_init(&arena, backing[:])
@@ -278,7 +281,7 @@ text_owned :: proc(t: ^testing.T) {
 	mem.arena_init(&arena, big)
 	rd, rerr := dsv.build(transmute([]u8)long, .Csv, {infer = true}, .Last, mem.arena_allocator(&arena))
 	defer core.destroy(&rd)
-	testing.expect_value(t, rerr.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, rerr)
 	before := arena.offset
 	_, _ = core.number(&rd, cell_node(&rd, 0, 0))
 	_ = core.kind(&rd, cell_node(&rd, 0, 0))
@@ -314,10 +317,10 @@ key_reads :: proc(t: ^testing.T) {
 	}) {
 		doc, err := build_any(c.src, c.spec, c.opts)
 		defer core.destroy(&doc)
-		if !testing.expectf(t, err.kind == .None, "%q: %v", c.src, err) {
+		if !testing.expectf(t, err == nil, "%q: %v", c.src, err) {
 			return
 		}
-		key := doc.shared_keys + 1 + core.Node_Index(c.key)
+		key := core.header_of(&doc) + 1 + core.Node_Index(c.key)
 		buf: [16]u8
 		s, ok := core.text(&doc, key, buf[:])
 		_, is_num := core.number(&doc, key)
@@ -332,7 +335,7 @@ key_reads :: proc(t: ^testing.T) {
 	}
 	doc, _ := build("a\nx\xffy\n", .Csv, {tolerate = {.Invalid_Utf8}})
 	defer core.destroy(&doc)
-	testing.expect(t, !core.key_equals(&doc, doc.shared_keys + 1, "x\uFFFdy"))
+	testing.expect(t, !core.key_equals(&doc, core.header_of(&doc) + 1, "x\uFFFdy"))
 }
 
 Dup_Case :: struct {
@@ -367,7 +370,11 @@ refuse_duplicates :: proc(t: ^testing.T) {
 	}) {
 		doc, err := build_any(c.src, c.spec, c.opts, .Refuse)
 		defer core.destroy(&doc)
-		testing.expectf(t, err.kind == c.kind && (c.kind == .None || int(err.at) == c.at && len(doc.nodes) == 0), "%q: %v at %d, want %v at %d", c.src, err.kind, err.at, c.kind, c.at)
+		if c.kind == .None {
+			walktest.expect_nil(t, err)
+		} else if walktest.expect_kind(t, err, c.kind) {
+			testing.expectf(t, int(walktest.at_of(err)) == c.at && len(doc.nodes) == 0, "%q: %v, want at %d", c.src, err, c.at)
+		}
 	}
 }
 
@@ -400,7 +407,7 @@ wide_headers :: proc(t: ^testing.T) {
 				line(&b, count, ones)
 			}
 			doc, err := build(strings.to_string(b), .Csv, {}, .Refuse)
-			testing.expectf(t, err.kind == .None, "%d cells, record %v: %v", count, with_record, err)
+			testing.expectf(t, err == nil, "%d cells, record %v: %v", count, with_record, err)
 			core.destroy(&doc)
 		}
 	}
@@ -415,7 +422,7 @@ wide_headers :: proc(t: ^testing.T) {
 		}
 		doc, err := build(strings.to_string(b), .Csv)
 		defer core.destroy(&doc)
-		testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, err)
 		testing.expect_value(t, core.length(&doc, core.ROOT), 2)
 		for k in 0 ..< 2 {
 			rec, ok := core.child_at(&doc, core.ROOT, k)
@@ -435,7 +442,7 @@ wide_headers :: proc(t: ^testing.T) {
 	// cells need. Every later one fails too, so the build's second try fails as well.
 	f := walktest.Failing_Alloc{inner = context.allocator, fail_at = 3, fail_on = true}
 	doc, err := dsv.build(transmute([]u8)strings.to_string(b), .Csv, {}, .Refuse, walktest.failing_allocator(&f))
-	testing.expectf(t, err.kind == core.Document_Error_Kind.No_Memory, "fail_at 3: %v at %d", err.kind, err.at)
+	walktest.expect_kind(t, err, core.Document_Error_Kind.No_Memory)
 	core.destroy(&doc)
 }
 
@@ -443,17 +450,19 @@ wide_headers :: proc(t: ^testing.T) {
 @(test)
 errors :: proc(t: ^testing.T) {
 	doc, err := build("a,b\n1,2,3\n", .Csv)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.Walk)
-	testing.expect_value(t, err.inner.kind, core.Fault_Kind.Bad_Width)
-	testing.expect_value(t, err.inner.at, 7)
+	walktest.expect_kind(t, err, core.Document_Error_Kind.Walk)
+	fault, _ := walktest.fault_of(err).?
+	testing.expect_value(t, fault.kind, core.Fault_Kind.Bad_Width)
+	testing.expect_value(t, fault.at, 7)
 	testing.expect_value(t, len(doc.nodes), 0)
 	b := strings.builder_make(context.temp_allocator)
 	core.render(strings.to_writer(&b), transmute([]u8)string("a,b\n1,2,3\n"), err)
 	testing.expect_value(t, strings.to_string(b), "2:4: Record has more fields than the first record")
 
 	_, err = build("a,b\n1\n", .Csv)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.Walk)
-	testing.expect_value(t, err.inner.kind, core.Fault_Kind.Bad_Width)
+	walktest.expect_kind(t, err, core.Document_Error_Kind.Walk)
+	fault, _ = walktest.fault_of(err).?
+	testing.expect_value(t, fault.kind, core.Fault_Kind.Bad_Width)
 }
 
 // `number` refuses a container and a key, and `text` and `key_equals` give no text or false for a container.
@@ -461,7 +470,7 @@ errors :: proc(t: ^testing.T) {
 readers_refuse_containers :: proc(t: ^testing.T) {
 	doc, err := build(",,\n,,\n", .Csv, {no_header = true})
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	rec, _ := core.child_at(&doc, 0, 0)
 	for node in ([]core.Node_Index{0, rec}) {
 		_, is_num := core.number(&doc, node)
@@ -495,7 +504,7 @@ duplicate_names :: proc(t: ^testing.T) {
 	}) {
 		doc, err := build(c.src, .Csv, c.opts)
 		defer core.destroy(&doc)
-		testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, err)
 		rec, _ := core.child_at(&doc, 0, 0)
 		v, ok := core.member(&doc, rec, c.name, .First)
 		testing.expectf(t, ok == (c.first != 0) && (!ok || v == rec + core.Node_Index(c.first)), "%q %q first: %v %v", c.src, c.name, v, ok)
@@ -511,7 +520,7 @@ duplicate_names :: proc(t: ^testing.T) {
 	doc, _ := build("a,b\n1,2,3,4\n5\n", .Csv, {tolerate = {.Ragged}})
 	defer core.destroy(&doc)
 	buf: [8]u8
-	text, _ := core.text(&doc, doc.shared_keys + 3, buf[:])
+	text, _ := core.text(&doc, core.header_of(&doc) + 3, buf[:])
 	testing.expect_value(t, text, "3")
 	testing.expect_value(t, core.length(&doc, cell_node(&doc, 0, 0) - 1), 4)
 }
@@ -540,7 +549,7 @@ document_shapes :: proc(t: ^testing.T) {
 	}) {
 		doc, err := build(c.src, .Csv, c.opts)
 		defer core.destroy(&doc)
-		testing.expectf(t, err.kind == .None && doc.shared_keys == c.keys && core.length(&doc, 0) == c.records, "%q: %v, header %d, %d records", c.src, err, doc.shared_keys, core.length(&doc, 0))
+		testing.expectf(t, err == nil && core.header_of(&doc) == c.keys && core.length(&doc, 0) == c.records, "%q: %v, header %d, %d records", c.src, err, core.header_of(&doc), core.length(&doc, 0))
 		if c.keys == 0 {
 			testing.expect_value(t, len(doc.nodes), 1)
 		}
@@ -551,12 +560,12 @@ document_shapes :: proc(t: ^testing.T) {
 	doc, _ := build("a,b\n", .Csv)
 	defer core.destroy(&doc)
 	testing.expect_value(t, string(core.span(&doc, 1)), "a,b\n")
-	testing.expect_value(t, core.length(&doc, doc.shared_keys), 2)
+	testing.expect_value(t, core.length(&doc, core.header_of(&doc)), 2)
 
 	// With a BOM, CRLF and no final line end, a header row and each record span their source bytes after the BOM.
 	bom, _ := build("\xef\xbb\xbfa,b\r\n1,2\r\n3,4", .Csv)
 	defer core.destroy(&bom)
-	testing.expect_value(t, string(core.span(&bom, bom.shared_keys)), "a,b\r\n")
+	testing.expect_value(t, string(core.span(&bom, core.header_of(&bom))), "a,b\r\n")
 	testing.expect_value(t, bom.nodes[0].spelling, u16(2))
 	for rec, i in ([]string{"1,2\r\n", "3,4"}) {
 		node, _ := core.child_at(&bom, 0, i)
@@ -579,15 +588,15 @@ generated_keys_agree :: proc(t: ^testing.T) {
 		gen.text(&text, tsv)
 		no_header := round % 3 == 0
 		doc, err := build_any(string(text[:]), .Tsv if tsv else .Csv, {no_header = no_header})
-		if err.kind != .None {
+		if err != nil {
 			core.destroy(&doc)
 			continue
 		}
 		// Each header cell's text is found by `key_equals`, and `member` returns a cell of the record whose header cell
 		// decodes to that text, at or before this column.
-		root: if !no_header && doc.shared_keys != 0 {
+		root: if !no_header && core.header_of(&doc) != 0 {
 			col := 0
-			it := core.children(&doc, doc.shared_keys)
+			it := core.children(&doc, core.header_of(&doc))
 			for {
 				key, more := core.child_next(&it)
 				if !more {
@@ -612,7 +621,7 @@ generated_keys_agree :: proc(t: ^testing.T) {
 					}
 					mv, mok := core.member(&doc, rec, kt, .First)
 					// A repeated name returns the first column, whose header cell decodes to the same text.
-					ok := mok && mv > rec && mv <= rec + 1 + core.Node_Index(col) && core.key_equals(&doc, doc.shared_keys + 1 + (mv - rec - 1), kt)
+					ok := mok && mv > rec && mv <= rec + 1 + core.Node_Index(col) && core.key_equals(&doc, core.header_of(&doc) + 1 + (mv - rec - 1), kt)
 					if !testing.expectf(t, ok, "round %d: member %q -> %v %v, column %d of record %d", round, kt, mv, mok, col, rec) {
 						break root
 					}
@@ -630,15 +639,15 @@ generated_keys_agree :: proc(t: ^testing.T) {
 commit_refuses_another_spec :: proc(t: ^testing.T) {
 	doc, err := build("a\nx\\ty\n", .Tsv)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.set(&list, cell_node(&doc, 0, 0), "z").kind, core.Document_Error_Kind.None)
-	out, _, cerr := core.commit(&list)
-	testing.expectf(t, cerr.kind == .None && string(out) == "a\nz\n", "commit: %v %q", cerr, out)
+	walktest.expect_nil(t, write.set(&list, cell_node(&doc, 0, 0), typed.Raw("z")))
+	out, _, cerr := compose.commit(&list)
+	testing.expectf(t, cerr == nil && string(out) == "a\nz\n", "commit: %v %q", cerr, out)
 	delete(out)
-	_, _, bad := doc.spelling.edit.commit(&list, u8(dsv.Spec.Csv), context.allocator)
-	testing.expect_value(t, bad.kind, core.Document_Error_Kind.Bad_Spec)
+	_, _, bad := compose.commit(&list, dsv.as(.Csv))
+	walktest.expect_kind(t, bad, core.Document_Error_Kind.Bad_Spec)
 }
 
 // A bad option is refused by `validate` and `build` for each spec: CSV refuses a quote as delimiter or comment, CR, LF or
@@ -668,12 +677,13 @@ bad_options :: proc(t: ^testing.T) {
 @(private)
 check_bad_option :: proc(t: ^testing.T, opts: dsv.Options, $S: dsv.Spec) {
 	src := transmute([]u8)string("a,b\n1,2\n")
-	if f, is_bad := dsv.validate(src, S, opts).?; testing.expectf(t, is_bad && f.kind == .Bad_Option && f.at == 0, "%v %v: validate %v", S, opts, f) {
+	if f, is_bad := walktest.fault_of(dsv.validate(src, S, opts)).?; testing.expectf(t, is_bad && f.kind == .Bad_Option && f.at == 0, "%v %v: validate %v", S, opts, f) {
 		// A bad option is in `AT_NO_BYTE`, so it names no byte.
 		testing.expect(t, f.kind in core.AT_NO_BYTE)
 	}
 	doc, err := dsv.build(src, S, opts)
-	testing.expectf(t, err.kind == .Walk && err.inner.kind == .Bad_Option, "%v %v: build %v", S, opts, err)
+	fault, _ := walktest.fault_of(err).?
+	testing.expectf(t, fault.kind == .Bad_Option, "%v %v: build %v", S, opts, err)
 	testing.expect_value(t, len(doc.nodes), 0)
 }
 
@@ -685,8 +695,8 @@ caller_key_buffer :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("a,b\n1,2\n")
 	doc, err := dsv.build(src, .Csv)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, doc.shared_keys, core.Node_Index(1))
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, core.header_of(&doc), core.Node_Index(1))
 	testing.expect_value(t, doc.nodes[2], core.Node{0, 1, .Plain, .Key, 0})
 	testing.expect_value(t, doc.nodes[3], core.Node{2, 1, .Plain, .Key, 0})
 	log := new(walktest.Log)
@@ -710,7 +720,7 @@ caller_key_buffer :: proc(t: ^testing.T) {
 	}) {
 		d, derr := build_any("a\n", c.spec, c.opts)
 		defer core.destroy(&d)
-		testing.expect_value(t, derr.kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, derr)
 		testing.expect_value(t, d.as.opts[0], c.want[0])
 		testing.expect_value(t, d.as.opts[1], c.want[1])
 	}
@@ -745,7 +755,7 @@ pairs_iteration :: proc(t: ^testing.T) {
 
 	only, _ := build("a,b,c\n", .Csv)
 	defer core.destroy(&only)
-	for node in ([]core.Node_Index{only.shared_keys, core.ROOT}) {
+	for node in ([]core.Node_Index{core.header_of(&only), core.ROOT}) {
 		n, _ = count(&only, node)
 		testing.expect_value(t, n, 0)
 	}
@@ -767,7 +777,7 @@ smallest_arena :: proc(t: ^testing.T) {
 	for src in texts {
 		first, err := dsv.build(transmute([]u8)src, .Csv)
 		defer core.destroy(&first)
-		testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, err)
 		need := len(first.nodes) * size_of(core.Node) + 512
 		backing := make([]u8, need, context.allocator)
 		defer delete(backing)
@@ -775,7 +785,7 @@ smallest_arena :: proc(t: ^testing.T) {
 		mem.arena_init(&arena, backing)
 		doc, derr := dsv.build(transmute([]u8)src, .Csv, {}, .Last, mem.arena_allocator(&arena))
 		defer core.destroy(&doc)
-		testing.expectf(t, derr.kind == .None, "%d bytes: %v", need, derr)
+		testing.expectf(t, derr == nil, "%d bytes: %v", need, derr)
 		testing.expect_value(t, len(doc.nodes), len(first.nodes))
 	}
 }
@@ -786,9 +796,104 @@ spelling_complete :: proc(t: ^testing.T) {
 	for spec in dsv.Spec {
 		doc, err := build_any("a\n", spec)
 		defer core.destroy(&doc)
-		s := doc.spelling
-		testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-		testing.expect(t, s.text != nil && s.key_equals != nil && s.number != nil && s.build != nil && s.validate != nil && s.resolve != nil && s.resolves != nil && s.close_end != nil)
-		testing.expect(t, s.edit != nil && s.edit.flat && s.edit.commit != nil && s.edit.interior != nil)
+		s := doc.readers
+		walktest.expect_nil(t, err)
+		testing.expect(t, s.text != nil && s.key_equals != nil && s.number != nil && s.resolve != nil && s.resolves != nil && s.close_end != nil && s.format != nil)
+		testing.expect(t, s.flat && s.services != nil && s.services.build != nil && s.services.validate != nil)
+		testing.expect(t, s.services.edit != nil && s.services.edit.interior != nil)
+	}
+}
+
+// `child_at` of the root agrees with a walk over its children for every position and one past the last, and the table
+// says the width the rows have.
+expect_rows_by_position :: proc(t: ^testing.T, src: string, opts: dsv.Options, width: u32, rows: int) {
+	doc, err := build(src, .Csv, opts)
+	defer core.destroy(&doc)
+	walktest.expect_nil(t, err)
+	table, has := core.table_of(&doc, core.ROOT)
+	testing.expectf(t, has && table.width == width, "%q: table %v, width %d wanted", src, table, width)
+	testing.expectf(t, core.length(&doc, core.ROOT) == rows, "%q: %d rows", src, core.length(&doc, core.ROOT))
+	it := core.children(&doc, core.ROOT)
+	for k in 0 ..< rows + 1 {
+		want, more := core.child_next(&it)
+		got, found := core.child_at(&doc, core.ROOT, k)
+		testing.expectf(t, found == more && (!found || got == want), "%q: row %d is %d, %v, a walk gives %d, %v", src, k, got, found, want, more)
+	}
+}
+
+@(test)
+table_rows :: proc(t: ^testing.T) {
+	expect_rows_by_position(t, "a,b\n1,2\n3,4\n5,6\n", {}, 2, 3)
+	expect_rows_by_position(t, "a\n1\n2\n3\n", {}, 1, 3)
+	expect_rows_by_position(t, "a,b\n", {}, 0, 0)
+	expect_rows_by_position(t, "", {}, 0, 0)
+	expect_rows_by_position(t, "1,2\n3,4\n", {no_header = true}, 2, 2)
+	expect_rows_by_position(t, "a,b\n1\n2,3,4\n5,6\n", {tolerate = {.Ragged}}, 0, 3)
+	expect_rows_by_position(t, "1\n2,3\n", {no_header = true, tolerate = {.Ragged}}, 0, 2)
+}
+
+// A table is the root's only, and JSON has none.
+@(test)
+table_of_node :: proc(t: ^testing.T) {
+	doc, _ := build("a,b\n1,2\n", .Csv)
+	defer core.destroy(&doc)
+	table, has := core.table_of(&doc, core.ROOT)
+	testing.expect(t, has && table.header == 1 && table.first_row == 4 && table.width == 2)
+	_, has = core.table_of(&doc, 4)
+	testing.expect(t, !has)
+}
+
+// A build with `infer` stores the kind `Readers.resolve` gives a cell of the same text, for every spelling of a cell
+// that is or is not a number, `true` or `false`. A quoted cell, a doubled quote among them, is a string whatever it
+// holds.
+@(test)
+leaf_kinds_match_resolve :: proc(t: ^testing.T) {
+	cells := [?]string{
+		"0", "-0", "1", "-12", "1.5", "-1.5e3", "1E+2", "123456789012345678901234567890", "0.000001",
+		"01", "1.", ".5", "+1", "-", "1e", "1e+", "0x10", "1_0", " 1", "1 ", "NaN", "Infinity",
+		"true", "false", "True", "truex", "tru", "f", "t",
+		"abc", "é", "\"1\"", "\"1\"\"2\"", "\"\"\"1\"\"\"", "\"true\"", "\"1.5\"", "\"a\"\"b\"",
+	}
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, "c\n")
+	for c in cells {
+		strings.write_string(&b, c)
+		strings.write_byte(&b, '\n')
+	}
+	src := strings.to_string(b)
+	doc, err := build(src, .Csv, {infer = true})
+	defer core.destroy(&doc)
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, core.length(&doc, core.ROOT), len(cells))
+	for c, i in cells {
+		cell := cell_node(&doc, i, 0)
+		stored := core.kind(&doc, cell)
+		saved := doc.nodes[cell]
+		doc.nodes[cell].kind = .Plain
+		resolved := core.kind(&doc, cell)
+		doc.nodes[cell] = saved
+		testing.expectf(t, stored == resolved, "%q: stored %v, resolved %v", c, stored, resolved)
+		testing.expectf(t, (saved.kind == .Plain) == (stored == .String || stored == .Null), "%q: node kind %v for %v", c, saved.kind, stored)
+		if c[0] == '"' {
+			testing.expectf(t, stored == .String && saved.kind == .Plain, "%q: %v", c, stored)
+		}
+	}
+	// A number node's digit counts are the ones JSON's walk gives it.
+	number := doc.nodes[cell_node(&doc, 5, 0)]
+	int_digits, frac_digits := core.number_digit_counts(number.spelling)
+	testing.expectf(t, number.kind == .Number && int_digits == 1 && frac_digits == 1 && number.spelling & core.NUMBER_EXP != 0, "-1.5e3: %v", number)
+	big := doc.nodes[cell_node(&doc, 7, 0)]
+	int_digits, frac_digits = core.number_digit_counts(big.spelling)
+	testing.expectf(t, big.kind == .Number && int_digits == 30 && frac_digits == 0, "30 digits: %v", big)
+}
+
+// Without `infer` no cell is stored as anything but `.Plain`.
+@(test)
+leaf_kinds_off :: proc(t: ^testing.T) {
+	doc, err := build("a,b,c\n1,true,x\n", .Csv)
+	defer core.destroy(&doc)
+	walktest.expect_nil(t, err)
+	for c in 0 ..< 3 {
+		testing.expect_value(t, doc.nodes[cell_node(&doc, 0, c)].kind, core.Kind.Plain)
 	}
 }

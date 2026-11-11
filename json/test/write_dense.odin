@@ -6,21 +6,22 @@ import "core:testing"
 import core "../../core"
 import json ".."
 import gen "gen"
+import walktest "../../walktest"
 
 // Writes `src` as a JSON document, which the dense path writes when its tokens are short, and as a JSONC document, which
 // the rows path writes, and checks that the two and `format` give the same text. A `bound` above zero also checks that
 // the source has fewer bytes per node than that.
 check_dense :: proc(t: ^testing.T, src: []u8, bound := 26) -> bool {
-	doc, err := json.build(src, .Json)
-	if !testing.expectf(t, err.kind == .None, "build %q: %v", src, err) {
+	doc, err := core.build(src, json.as(.Json))
+	if !testing.expectf(t, err == nil, "build %q: %v", src, err) {
 		return false
 	}
 	defer core.destroy(&doc)
 	if !testing.expectf(t, bound == 0 || len(src) < bound * len(doc.nodes), "%d bytes in %d nodes is not a dense text", len(src), len(doc.nodes)) {
 		return false
 	}
-	rows_doc, rerr := json.build(src, .Jsonc)
-	if !testing.expectf(t, rerr.kind == .None, "build as JSONC %q: %v", src, rerr) {
+	rows_doc, rerr := core.build(src, json.as(.Jsonc))
+	if !testing.expectf(t, rerr == nil, "build as JSONC %q: %v", src, rerr) {
 		return false
 	}
 	defer core.destroy(&rows_doc)
@@ -30,7 +31,7 @@ check_dense :: proc(t: ^testing.T, src: []u8, bound := 26) -> bool {
 	defer delete(rows)
 	direct, ferr := core.format(src, json.as(.Json))
 	defer delete(direct)
-	ok := derr.kind == .None && wrerr.kind == .None && ferr.kind == .None
+	ok := derr == nil && wrerr == nil && ferr == nil
 	if !testing.expectf(t, ok, "write %q: %v %v %v", src, derr, wrerr, ferr) {
 		return false
 	}
@@ -133,14 +134,14 @@ write_dense_segment_edges :: proc(t: ^testing.T) {
 @(test)
 write_dense_tolerant_read :: proc(t: ^testing.T) {
 	src := []u8{'[', '"', 'a', 0xFF, 'b', '"', ',', '0', ',', '0', ',', '0', ',', '0', ']'}
-	doc, err := json.build(src, .Json, {tolerate = {.Invalid_Utf8}})
+	doc, err := core.build(src, json.as(.Json, {tolerate = {.Invalid_Utf8}}))
 	defer core.destroy(&doc)
-	if !testing.expect_value(t, err.kind, core.Document_Error_Kind.None) {
+	if !walktest.expect_nil(t, err) {
 		return
 	}
 	text, _, werr := core.write(&doc)
 	defer delete(text)
-	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, werr)
 	testing.expect_value(t, string(text), "[\"a\xef\xbf\xbdb\",0,0,0,0]")
 }
 
@@ -148,20 +149,20 @@ write_dense_tolerant_read :: proc(t: ^testing.T) {
 @(test)
 write_dense_leaves_other_options_to_rows :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`[ "<é>" , 1 , 2 , 3 , 4 , 5 , 6 , 7 ]`)
-	doc, _ := json.build(src, .Json)
+	doc, _ := core.build(src, json.as(.Json))
 	defer core.destroy(&doc)
 	for opts in ([?]core.Write_Options{{ascii = true}, {escape_html = true}}) {
 		text, _, err := core.write(&doc, opts)
 		defer delete(text)
-		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+		walktest.expect_nil(t, err)
 		testing.expect(t, string(text) != `["<é>",1,2,3,4,5,6,7]`)
 	}
 	trailing := transmute([]u8)string(`[1,2,3,4,5,6,7,8,]`)
-	jsonc, _ := json.build(trailing, .Jsonc)
+	jsonc, _ := core.build(trailing, json.as(.Jsonc))
 	defer core.destroy(&jsonc)
 	text, _, err := core.write(&jsonc)
 	defer delete(text)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	testing.expect_value(t, string(text), `[1,2,3,4,5,6,7,8]`)
 }
 

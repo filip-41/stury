@@ -46,9 +46,9 @@ Open :: struct {
 	close: u32,
 }
 
-// Where a write stands. A loop that holds a `Cursor` as a local keeps all of it in registers.
+// Where a write stands. A loop that holds a `Out_Cursor` as a local keeps all of it in registers.
 @(private)
-Cursor :: struct {
+Out_Cursor :: struct {
 	p:     [^]u8, // the next byte of the output
 	safe:  uintptr, // a token of `n` bytes fits when `p + n` is not past this. 0 while every token takes the rare path
 	src:   [^]u8,
@@ -68,7 +68,7 @@ Cursor :: struct {
 // What a written text is made of. Only `c` changes while it is written.
 @(private)
 Emit :: struct {
-	c:       Cursor,
+	c:       Out_Cursor,
 	out:     ^write.Out,
 	src:     []u8,
 	doc:     ^core.Document,
@@ -146,7 +146,7 @@ settle :: proc(e: ^Emit) {
 
 // Writes a line break and `n - 1` bytes of indent, and stores up to 15 more bytes past them.
 @(private)
-put_line :: #force_inline proc "contextless" (c: ^Cursor, p: [^]u8, n: int) -> [^]u8 #no_bounds_check {
+put_line :: #force_inline proc "contextless" (c: ^Out_Cursor, p: [^]u8, n: int) -> [^]u8 #no_bounds_check {
 	intrinsics.unaligned_store((^V)(p), c.head)
 	for k := 16; k < n; k += 16 {
 		intrinsics.unaligned_store((^V)(p[k:]), c.fill)
@@ -236,7 +236,7 @@ open_bracket :: #force_inline proc "contextless" (k: core.Kind) -> u8 {
 
 // Enters the container `t` at row `i` once its open bracket is written, the byte `open`.
 @(private)
-push :: #force_inline proc "contextless" (c: ^Cursor, t: ^core.Token, i: u32, open: u8) #no_bounds_check {
+push :: #force_inline proc "contextless" (c: ^Out_Cursor, t: ^core.Token, i: u32, open: u8) #no_bounds_check {
 	c.top += 1
 	c.end = i + t.n
 	c.stack[c.top] = {c.end, u32(open) + 2}
@@ -245,7 +245,7 @@ push :: #force_inline proc "contextless" (c: ^Cursor, t: ^core.Token, i: u32, op
 
 // Leaves the innermost container.
 @(private)
-pop :: #force_inline proc "contextless" (c: ^Cursor) #no_bounds_check {
+pop :: #force_inline proc "contextless" (c: ^Out_Cursor) #no_bounds_check {
 	c.top -= 1
 	c.end = c.stack[c.top].end
 	c.after = 2
@@ -354,13 +354,13 @@ copies_strings :: #force_inline proc "contextless" (opts: core.Write_Options) ->
 // once for each. A partial document keeps no comments. A document nested past `MAX_DEPTH` was built under a raised
 // `max_depth` and is written.
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
-	return {spelling = &SPELLING, max_depth = opts.max_depth, spec = u8(spec), tolerate = opts.tolerate, opts = {0 = u8(opts.refuse_non_finite)}}
+	return {readers = &HANDLES[spec] if spec <= max(Spec) else nil, max_depth = opts.max_depth, spec = u8(spec), tolerate = opts.tolerate, opts = {0 = u8(opts.refuse_non_finite)}}
 }
 
 // The spelling's `write`: node `node` of `doc`, which `core.write` checked is a value the document holds, as the spec
 // `as` names.
 @(private)
-write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Error) {
+write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Refusal) {
 	// The source bytes and the nodes the write covers. A partial document's node holds no span of its own text, so its
 	// output grows from the least room.
 	src, count := doc.src, len(doc.nodes)
@@ -379,7 +379,7 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, n
 	kind: core.Typed_Error_Kind
 	switch {
 	// The tree writes what the row walk does not: a partial document, another format's, comments, sorted keys and JSON5.
-	case doc.partial || doc.spelling != &SPELLING || len(core.subtree_facts(doc, node)) != 0 || opts.sort_keys || Spec(doc.as.spec) == .Json5:
+	case doc.partial || doc.readers.format != rules_of || len(core.subtree_facts(doc, node)) != 0 || opts.sort_keys || Spec(doc.as.spec) == .Json5:
 		dropped, kind = write_tree(doc, opts, &out, Spec(as.spec), node)
 	case dense_route(doc, opts, src, count):
 		write_dense(&out, src)
@@ -498,7 +498,7 @@ rows :: proc(e: ^Emit, doc: ^core.Document, node: u32) -> core.Typed_Error_Kind 
 // Closes every container that ends before row `i` and writes what comes before that row. Returns false with `after` set
 // when `i` is where the chunk stops. `c.end` is held at `c.stop`, so this is the one test a row takes.
 @(private)
-past_value :: #force_inline proc "contextless" (c: ^Cursor, i: u32, $P: bool) -> bool #no_bounds_check {
+past_value :: #force_inline proc "contextless" (c: ^Out_Cursor, i: u32, $P: bool) -> bool #no_bounds_check {
 	p := c.p
 	for c.end == i {
 		if i >= c.stop {

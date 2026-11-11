@@ -1,14 +1,15 @@
 package jq
 
-// jq's regular expressions (`test`, `match`, `capture`, `scan`, `split/2`, `sub`, `gsub`) on cmd/stury/regex,
+// jq's regular expressions (`test`, `match`, `capture`, `scan`, `split/2`, `sub`, `gsub`) on core/regex,
 // which matches as Oniguruma does under jq's options. Offsets and lengths count characters as jq 1.8.2
 // counts them, which a global search makes odd: after an empty match it goes on one byte later, which may
 // be inside a character.
 
+import "base:runtime"
 import "core:mem/virtual"
 import "core:slice"
 import "core:strings"
-import "../regex"
+import "../../../core/regex"
 
 Regex :: struct {
 	re:     regex.Regex,
@@ -20,7 +21,6 @@ Match :: []int
 
 compile_regex :: proc(ip: ^Interp, pattern: string, flags: Value) -> (r: Regex, sig: Signal) {
 	opts: regex.Flags
-	longest, not_empty := false, false
 	if kind(flags) != .Null {
 		f, ok := string_of(flags)
 		if !ok {
@@ -35,11 +35,11 @@ compile_regex :: proc(ip: ^Interp, pattern: string, flags: Value) -> (r: Regex, 
 			case 'x':
 				opts.extend = true
 			case 'n':
-				not_empty = true
+				opts.not_empty = true
 			case 'm', 'p':
 				opts.dotall = true
 			case 'l':
-				longest = true
+				opts.longest = true
 			case 's':
 			case:
 				return r, fail(ip, "%s is not a valid modifier string", f)
@@ -50,23 +50,26 @@ compile_regex :: proc(ip: ^Interp, pattern: string, flags: Value) -> (r: Regex, 
 	if r.re, err = cached_compile(pattern, opts); err != "" {
 		return r, fail(ip, "Regex failure: %s", err)
 	}
-	r.re.longest, r.re.not_empty = longest, not_empty
 	return r, .Go
 }
 
 // The regexes the thread compiled, kept for later calls since a filter compiles its patterns for every input. An
-// entry is never replaced, so a regex stays whole while a caller reads it. Past the cap, and for long patterns, a
-// regex is compiled for its call alone.
+// entry is never replaced, so a regex stays whole while a caller reads it. Past the caps, and for long patterns, a
+// regex is compiled for its call alone, without the automata, and so is one whose program would take the arena past
+// CACHED_BYTES, which its entry remembers.
 @(private = "file")
 CACHED_REGEXES :: 64
 @(private = "file")
 CACHED_PATTERN_BYTES :: 1024
+@(private = "file")
+CACHED_BYTES :: 64 << 20
 
 @(private = "file")
 Cached_Regex :: struct {
 	pattern: string,
 	opts:    regex.Flags,
 	re:      regex.Regex,
+	big:     bool,
 }
 
 @(private = "file", thread_local)
@@ -81,41 +84,61 @@ cached_compile :: proc(pattern: string, opts: regex.Flags) -> (regex.Regex, stri
 	c := &regex_cache
 	for &e in c.entries {
 		if e.pattern == pattern && e.opts == opts {
+			if e.big {
+				return regex.compile(pattern, opts, automaton = false)
+			}
 			return e.re, ""
 		}
 	}
 	if len(c.entries) >= CACHED_REGEXES || len(pattern) > CACHED_PATTERN_BYTES {
-		return regex.compile(pattern, opts)
+		return regex.compile(pattern, opts, automaton = false)
 	}
 	if !c.ready {
 		if virtual.arena_init_growing(&c.arena) != nil {
-			return regex.compile(pattern, opts)
+			return regex.compile(pattern, opts, automaton = false)
 		}
 		c.ready = true
 	}
+	// A pattern that does not compile leaves nothing in the arena. Its message is the caller's.
 	caller := context.allocator
 	context.allocator = virtual.arena_allocator(&c.arena)
-	// A pattern that does not compile leaves nothing in the arena. Its message is the caller's.
 	mark := virtual.arena_temp_begin(&c.arena)
-	re, err := regex.compile(pattern, opts)
+	re, err := regex.compile(pattern, opts, spans = true)
 	if err != "" {
 		err = strings.clone(err, caller)
 		virtual.arena_temp_end(mark)
 		return {}, err
 	}
+	if c.arena.total_used > CACHED_BYTES {
+		virtual.arena_temp_end(mark)
+		append(&c.entries, Cached_Regex{strings.clone(pattern), opts, {}, true})
+		context.allocator = caller
+		return regex.compile(pattern, opts, automaton = false)
+	}
 	virtual.arena_temp_ignore(mark)
-	append(&c.entries, Cached_Regex{strings.clone(pattern), opts, re})
+	append(&c.entries, Cached_Regex{strings.clone(pattern), opts, re, false})
 	return re, ""
 }
 
-// Every match of `r` in `s`, or the first when `r` is not global.
-matches :: proc(ip: ^Interp, r: ^Regex, s: string) -> (out: []Match, sig: Signal) {
-	width := 2 * len(r.re.names)
+// The matcher's stack and slots, kept for the thread's next search and held in the heap, which no input's arena frees.
+@(private = "file", thread_local)
+regex_scratch: regex.Scratch
+
+@(private = "file")
+search :: proc(re: ^regex.Regex, s: string, at: int, found: []int) -> (bool, string) {
+	context.allocator = runtime.heap_allocator()
+	return regex.search(re, s, at, found, &regex_scratch)
+}
+
+// Every match of `r` in `s`, or the first when `r` is not global. Under `whether`, for a regex that is not global, the
+// first holds no bounds, only that there is one.
+matches :: proc(ip: ^Interp, r: ^Regex, s: string, whether := false) -> (out: []Match, sig: Signal) {
+	width := 0 if whether && !r.global else 2 * len(regex.group_names(&r.re))
 	buf: [16]int
 	found := buf[:width] if width <= len(buf) else make(Match, width, context.temp_allocator)
 	bounds: [dynamic]int
 	for at := 0; at <= len(s); {
-		ok, err := regex.search(&r.re, s, at, found)
+		ok, err := search(&r.re, s, at, found)
 		if err != "" {
 			delete(bounds)
 			return nil, fail(ip, "Regex failure: %s", err)
@@ -248,7 +271,7 @@ match_object :: proc(r: ^Regex, s: string, m: Match, w: ^Char_Walk) -> Value {
 	object_put(o, "length", num(f64(length)))
 	object_put(o, "string", span_text(s, m[0], m[1]))
 	caps := new_array()
-	for g in 1 ..< len(r.re.names) {
+	for g in 1 ..< len(regex.group_names(&r.re)) {
 		c := new_object()
 		lo, hi := m[2 * g], m[2 * g + 1]
 		switch {
@@ -258,7 +281,7 @@ match_object :: proc(r: ^Regex, s: string, m: Match, w: ^Char_Walk) -> Value {
 			object_put(c, "length", num(0))
 		case lo == hi || m[0] == m[1]: // jq's own key order for an empty capture
 			object_put(c, "offset", num(f64(off if m[0] == m[1] else chars_before(w, s, lo))))
-			object_put(c, "string", "")
+			object_put(c, "string", string(""))
 			object_put(c, "length", num(0))
 		case:
 			at, n := span(w, s, lo, hi)
@@ -266,7 +289,7 @@ match_object :: proc(r: ^Regex, s: string, m: Match, w: ^Char_Walk) -> Value {
 			object_put(c, "length", num(f64(n)))
 			object_put(c, "string", span_text(s, lo, hi))
 		}
-		name := r.re.names[g]
+		name := regex.group_names(&r.re)[g]
 		object_put(c, "name", name if name != "" else nil)
 		append(&caps.items, c)
 	}
@@ -274,17 +297,29 @@ match_object :: proc(r: ^Regex, s: string, m: Match, w: ^Char_Walk) -> Value {
 	return o
 }
 
+// The string `match` gives group `g` of match `m`: null for a group that did not take part.
+group_text :: proc(s: string, m: Match, g: int) -> Value {
+	lo, hi := m[2 * g], m[2 * g + 1]
+	switch {
+	case lo < 0:
+		return nil
+	case lo == hi || m[0] == m[1]:
+		return string("")
+	}
+	return span_text(s, lo, hi)
+}
+
 // A match's named groups as `capture` gives them, `{name: string}`, a later group of a name winning.
 capture_object :: proc(r: ^Regex, s: string, m: Match) -> ^Object {
 	o := new_object()
-	for name, g in r.re.names {
+	for name, g in regex.group_names(&r.re) {
 		if g == 0 || name == "" {
 			continue
 		}
 		lo, hi := m[2 * g], m[2 * g + 1]
 		text: Value = nil
 		if lo >= 0 {
-			text = span_text(s, lo, hi) if m[0] < m[1] else ""
+			text = span_text(s, lo, hi) if m[0] < m[1] else string("")
 		}
 		object_put(o, name, text)
 	}

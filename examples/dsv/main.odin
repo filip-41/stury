@@ -5,10 +5,7 @@
 // Run from the repository root: odin run examples/dsv -collection:stury=.
 package main
 
-import "stury:core"
-import "stury:core/records"
 import "stury:dsv"
-import "stury:host"
 import "core:fmt"
 import "core:io"
 import "core:os"
@@ -22,10 +19,10 @@ City :: struct {
 }
 
 // An error renders as `line:col: message at path`.
-report :: proc(src: []u8, e: $E) {
+report :: proc(src: []u8, e: dsv.Error) {
 	b: strings.Builder
 	defer strings.builder_destroy(&b)
-	core.render(strings.to_writer(&b), src, e)
+	dsv.render(strings.to_writer(&b), src, e)
 	fmt.println(strings.to_string(b))
 }
 
@@ -33,183 +30,139 @@ main :: proc() {
 	// What the reads allocate, freed at once.
 	defer free_all(context.temp_allocator)
 	src := transmute([]byte)string("City,population,lat,lon\nOslo,709000,59.91,10.75\n\"Ho, Chi Minh\",,10.82,106.63\n")
-	cities: []City
-	if err := dsv.unmarshal(src, .Csv, &cities, allocator = context.temp_allocator); err.kind != .None {
+	if err := run(src); err != nil {
 		report(src, err)
 		os.exit(1)
 	}
+}
+
+run :: proc(src: []byte) -> dsv.Error {
+	cities: []City
+	dsv.unmarshal(src, .Csv, &cities, allocator = context.temp_allocator) or_return
 	fmt.println(cities[1].name, cities[1].population) // Ho, Chi Minh nil
 
-	out, err := dsv.marshal(cities)
-	if err.kind != .None {
-		report(nil, err)
-		os.exit(1)
-	}
+	out := dsv.marshal(cities) or_return
 	fmt.print(string(out)) // src again: "Ho, Chi Minh" keeps its quotes and the absent population stays empty
 
 	bad := transmute([]byte)string("City,population,lat,lon\nOslo,lots,59.91,10.75\n")
-	if err := dsv.unmarshal(bad, .Csv, &cities, allocator = context.temp_allocator); err.kind != .None {
-		report(bad, err) // 2:6: Expected i64, found "lots" at .[0].population
+	if bad_err := dsv.unmarshal(bad, .Csv, &cities, allocator = context.temp_allocator); bad_err != nil {
+		report(bad, bad_err) // 2:6: Expected i64, found "lots" at .[0].population
 	}
 
-	dialects(&cities)
-	document_and_edits(src)
-	streaming(src)
+	dialects(&cities) or_return
+	document_and_edits(src) or_return
+	streaming(src) or_return
+	return nil
 }
 
 // A Spec and Options read other delimited text through the same calls.
-dialects :: proc(cities: ^[]City) {
+dialects :: proc(cities: ^[]City) -> dsv.Error {
 	tsv := transmute([]byte)string("City\tpopulation\tlat\tlon\nOslo\t709000\t59.91\t10.75\n")
-	if err := dsv.unmarshal(tsv, .Tsv, cities, allocator = context.temp_allocator); err.kind != .None {
-		report(tsv, err)
-		os.exit(1)
-	}
+	dsv.unmarshal(tsv, .Tsv, cities, allocator = context.temp_allocator) or_return
 	fmt.println(cities[0].name, cities[0].population) // Oslo 709000
 
 	// No header: column k is the struct's field k. A semicolon delimiter, and lines starting with # skipped.
 	plain := transmute([]byte)string("# name;population;lat;lon\nOslo;709000;59.91;10.75\n")
 	layout := dsv.Options{no_header = true, delimiter = ';', comment = '#'}
-	if err := dsv.unmarshal(plain, .Csv, cities, opts = layout, allocator = context.temp_allocator); err.kind != .None {
-		report(plain, err)
-		os.exit(1)
-	}
+	dsv.unmarshal(plain, .Csv, cities, opts = layout, allocator = context.temp_allocator) or_return
 	fmt.println(len(cities^), cities[0].lat) // 1 59.91
+	return nil
 }
 
-// A Document is the text as core's rows: an array of objects keyed by the header. `find` reads one cell without
+// A Document is the text as rows: an array of objects keyed by the header. `find` reads one cell without
 // building a document. An edit returns the text with only the targeted bytes changed.
-document_and_edits :: proc(src: []byte) {
-	doc, derr := dsv.build(src, .Csv)
-	if derr.kind != .None {
-		report(src, derr)
-		os.exit(1)
-	}
-	defer core.destroy(&doc)
-	oslo, _ := core.child_at(&doc, core.ROOT, 0)
-	lat, _ := core.member(&doc, oslo, "lat")
+document_and_edits :: proc(src: []byte) -> dsv.Error {
+	doc := dsv.build(src, .Csv) or_return
+	defer dsv.destroy(&doc)
+	oslo, _ := dsv.child_at(&doc, dsv.ROOT, 0)
+	lat, _ := dsv.member(&doc, oslo, "lat")
 	buf: [32]u8
-	text, _ := core.text(&doc, lat, buf[:])
-	fmt.println(core.length(&doc, core.ROOT), text) // 2 59.91
+	text, _ := dsv.text(&doc, lat, buf[:])
+	fmt.println(dsv.length(&doc, dsv.ROOT), text) // 2 59.91
 
-	city, _ := core.parse_path(".[1].City")
-	defer core.path_destroy(&city)
-	fdoc, answer, ferr := dsv.find(src, .Csv, city)
-	if ferr.kind != .None {
-		report(src, ferr)
-		os.exit(1)
-	}
+	city, _ := dsv.parse_path(".[1].City")
+	defer dsv.destroy(&city)
+	fdoc, answer := dsv.find(src, .Csv, city) or_return
 	if answer.outcome != .Found {
 		fmt.println("not found")
 		os.exit(1)
 	}
-	defer core.destroy(&fdoc)
-	text, _ = core.text(&fdoc, answer.node, buf[:])
+	defer dsv.destroy(&fdoc)
+	text, _ = dsv.text(&fdoc, answer.node, buf[:])
 	fmt.println(text) // Ho, Chi Minh
 
-	population, _ := core.parse_path(".[0].population")
-	defer core.path_destroy(&population)
-	edited, eerr := dsv.set(src, .Csv, population, "710000")
-	if eerr.kind != .None {
-		report(src, eerr)
-		os.exit(1)
-	}
+	population, _ := dsv.parse_path(".[0].population")
+	defer dsv.destroy(&population)
+	edited := dsv.set(src, .Csv, population, 710000) or_return
 	defer delete(edited)
 	fmt.print(string(edited)) // City,population,lat,lon
 	//                           Oslo,710000,59.91,10.75
 	//                           "Ho, Chi Minh",,10.82,106.63
 
 	// Edits on a document are recorded on a list and applied by one commit.
-	list := core.edit_list_init(&doc)
-	defer core.edit_list_destroy(&list)
-	if ierr := core.insert(&list, core.ROOT, 2, "Bergen,,60.39,5.32"); ierr.kind != .None {
-		report(src, ierr)
-		os.exit(1)
-	}
-	added, _, aerr := core.commit(&list)
-	if aerr.kind != .None {
-		report(src, aerr)
-		os.exit(1)
-	}
+	list := dsv.edit_list_init(&doc, .Csv)
+	defer dsv.destroy(&list)
+	plan := dsv.plan_make(City, reads = dsv.reads(.Csv)) or_return
+	defer dsv.destroy(&plan)
+	dsv.insert(&list, dsv.ROOT, 2, City{name = "Bergen", lat = 60.39, lon = 5.32}, &plan) or_return
+	added, _ := dsv.commit(&list) or_return
 	defer delete(added)
 	fmt.print(string(added)[len(src):]) // Bergen,,60.39,5.32
 
 	// A cell removed from every row drops its column, header included.
-	every, _ := core.parse_path(".[].population")
-	defer core.path_destroy(&every)
-	cells, qerr := core.query(&doc, every)
-	if qerr.kind != .None {
-		report(src, qerr)
-		os.exit(1)
-	}
+	every, _ := dsv.parse_path(".[].population")
+	defer dsv.destroy(&every)
+	cells := dsv.query(&doc, every) or_return
 	defer delete(cells)
-	dropping := core.edit_list_init(&doc)
-	defer core.edit_list_destroy(&dropping)
+	dropping := dsv.edit_list_init(&doc, .Csv)
+	defer dsv.destroy(&dropping)
 	for c in cells {
-		if rerr := core.remove(&dropping, c.node); rerr.kind != .None {
-			report(src, rerr)
-			os.exit(1)
-		}
+		dsv.remove(&dropping, c.node) or_return
 	}
-	trimmed, _, rerr := core.commit(&dropping)
-	if rerr.kind != .None {
-		report(src, rerr)
-		os.exit(1)
-	}
+	trimmed, _ := dsv.commit(&dropping) or_return
 	defer delete(trimmed)
 	fmt.print(string(trimmed)) // City,lat,lon
 	//                            Oslo,59.91,10.75
 	//                            "Ho, Chi Minh",10.82,106.63
+	return nil
 }
 
 // Records read from an io.Reader and on threads, and one row written with `write_cells`.
-streaming :: proc(src: []byte) {
-	as := dsv.as(.Csv)
+streaming :: proc(src: []byte) -> dsv.Error {
 	r: strings.Reader
 	strings.reader_init(&r, string(src))
-	rr := records.open_stream(io.to_reader(strings.reader_to_stream(&r)), as)
-	defer records.close(&rr)
-	for rec in records.next(&rr) {
+	rr := dsv.records_open_stream(io.to_reader(strings.reader_to_stream(&r)), .Csv)
+	defer dsv.records_close(&rr)
+	for rec in dsv.records_next(&rr) {
 		fmt.println(rec.at, len(rec.text), string(rec.text)) // 24 and Oslo's row, then 48: the header is no record
 	}
 	if fault, bad := rr.fault.?; bad {
-		report(src, fault)
-		os.exit(1)
+		return fault
 	}
 
-	pool: host.Pool
-	if perr := host.pool_init(&pool); perr != nil { // one worker per core
-		fmt.eprintln(perr)
-		os.exit(1)
-	}
-	defer host.pool_destroy(&pool)
+	pool: dsv.Pool
+	dsv.pool_init(&pool) or_return // one worker per core
+	defer dsv.destroy(&pool)
 	rows: int
-	count := proc(n: ^int, piece: ^records.Reader, _: int) -> bool {
-		for _ in records.next(piece) {
+	count := proc(n: ^int, piece: ^dsv.Record_Reader, _: int) -> bool {
+		for _ in dsv.records_next(piece) {
 			sync.atomic_add(n, 1)
 		}
 		return true
 	}
-	if fault, bad := records.each(src, as, .Lines, count, &rows, &pool.runner).?; bad {
-		report(src, fault)
-		os.exit(1)
-	}
+	dsv.records_each(src, .Csv, .Lines, count, &rows, &pool.runner) or_return
 	fmt.println(rows) // 2: the header is no record
 
-	wr: records.Writer
-	if kind := records.writer_init(&wr, {}, as); kind != .None {
-		report(nil, core.Typed_Error{kind = kind})
-		os.exit(1)
+	wr: dsv.Record_Writer
+	if kind := dsv.writer_init(&wr, {}, .Csv); kind != .None {
+		return kind
 	}
-	defer records.writer_destroy(&wr)
-	if kind := records.write_cells(&wr, {"Tromsø", nil, "69.65", "18.96"}); kind != .None {
-		report(nil, core.Typed_Error{kind = kind})
-		os.exit(1)
+	defer dsv.destroy(&wr)
+	if kind := dsv.write_cells(&wr, {"Tromsø", nil, "69.65", "18.96"}); kind != .None {
+		return kind
 	}
-	line, werr := records.writer_end(&wr)
-	if werr.kind != .None {
-		report(nil, werr)
-		os.exit(1)
-	}
+	line := dsv.writer_end(&wr) or_return
 	defer delete(line)
 	fmt.print(string(line)) // Tromsø,,69.65,18.96
+	return nil
 }

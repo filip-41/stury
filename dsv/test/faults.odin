@@ -74,10 +74,10 @@ TSV_CASES := []Case {
 @(test)
 faults_at_their_byte :: proc(t: ^testing.T) {
 	for c in CSV_CASES {
-		expect_fault(t, c, dsv.validate(transmute([]u8)c.text, .Csv), tsv = false)
+		expect_fault(t, c, walktest.fault_of(dsv.validate(transmute([]u8)c.text, .Csv)), tsv = false)
 	}
 	for c in TSV_CASES {
-		expect_fault(t, c, dsv.validate(transmute([]u8)c.text, .Tsv), tsv = true)
+		expect_fault(t, c, walktest.fault_of(dsv.validate(transmute([]u8)c.text, .Tsv)), tsv = true)
 	}
 }
 
@@ -96,7 +96,7 @@ escapes_at_every_block_byte :: proc(t: ^testing.T) {
 				append(&b, 'a')
 			}
 			append(&b, '\\', escape, '\n')
-			got := dsv.validate(b[:], .Tsv)
+			got := walktest.fault_of(dsv.validate(b[:], .Tsv))
 			fault, bad := got.?
 			if valid < 5 {
 				testing.expectf(t, !bad, "backslash at %d escapes %#x: %v", 2 + k, escape, fault)
@@ -112,12 +112,12 @@ escapes_at_every_block_byte :: proc(t: ^testing.T) {
 		append(&b, 'a')
 	}
 	append(&b, '\\', 't', '\n')
-	if fault, bad := dsv.validate(b[:], .Tsv).?; bad {
+	if fault, bad := walktest.fault_of(dsv.validate(b[:], .Tsv)).?; bad {
 		testing.expectf(t, false, "escape split across a block: %v", fault)
 	}
 	// A backslash in a comment line is text.
 	comment := "h\n#a\\xb\n1\n"
-	if fault, bad := dsv.validate(transmute([]u8)comment, .Tsv, {comment = '#'}).?; bad {
+	if fault, bad := walktest.fault_of(dsv.validate(transmute([]u8)comment, .Tsv, {comment = '#'})).?; bad {
 		testing.expectf(t, false, "backslash in a comment line: %v", fault)
 	}
 }
@@ -180,7 +180,7 @@ faults_at_every_offset :: proc(t: ^testing.T) {
 }
 
 validate :: proc(src: []u8, tsv: bool) -> Maybe(core.Fault) {
-	return dsv.validate(src, .Tsv) if tsv else dsv.validate(src, .Csv)
+	return walktest.fault_of(dsv.validate(src, .Tsv)) if tsv else walktest.fault_of(dsv.validate(src, .Csv))
 }
 
 // Runs `validate` and `walk` on `src` from a copy at the end of `fence`'s readable page, with the page after it
@@ -293,12 +293,12 @@ tolerances :: proc(t: ^testing.T) {
 				strict, got, fault: Maybe(core.Fault)
 				hi: u64
 				if c.tsv {
-					strict = dsv.validate(buf[:], .Tsv, {no_header = c.no_header, comment = comment})
-					got = dsv.validate(buf[:], .Tsv, opts)
+					strict = walktest.fault_of(dsv.validate(buf[:], .Tsv, {no_header = c.no_header, comment = comment}))
+					got = walktest.fault_of(dsv.validate(buf[:], .Tsv, opts))
 					hi, fault = dsv.walk(buf[:], 0, .Tsv, opts, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook)
 				} else {
-					strict = dsv.validate(buf[:], .Csv, {no_header = c.no_header, comment = comment})
-					got = dsv.validate(buf[:], .Csv, opts)
+					strict = walktest.fault_of(dsv.validate(buf[:], .Csv, {no_header = c.no_header, comment = comment}))
+					got = walktest.fault_of(dsv.validate(buf[:], .Csv, opts))
 					hi, fault = dsv.walk(buf[:], 0, .Csv, opts, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook)
 				}
 				if !expect_fault(t, c, got, k, c.tsv) || !expect_fault(t, c, fault, k, c.tsv) || !testing.expectf(t, c.kind != nil || strict != nil, "%q: strict takes it", c.text) {
@@ -325,7 +325,7 @@ tolerated_tokens :: proc(t: ^testing.T) {
 	}
 	for c in ([]Tokens {
 		{"a,b,c\n1,2\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {6, 0, .Object, .Value, 0}, {0, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {8, 1, .Plain, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
-		{"a,b\n1,2,3\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {4, 0, .Object, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {0, 3, .Plain, .Key, core.SPELLING_DECODE | 16}, {8, 1, .Plain, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
+		{"a,b\n1,2,3\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {4, 0, .Object, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {0, 3, .Plain, .Key, core.SPELLING_DECODE | 1 << 14}, {8, 1, .Plain, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
 		{"a\"b,c\n1,\"2\"", {.Bare_Quote}, {{0, 0, .Array, .Value, 0}, {6, 0, .Object, .Value, 0}, {0, 3, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {4, 1, .Plain, .Key, 0}, {8, 3, .Plain, .Value, core.SPELLING_DECODE | core.SPELLING_QUOTED}, {11, 0, .End, .Value, 0}, {11, 0, .End, .Value, 0}}},
 	}) {
 		log^ = {}

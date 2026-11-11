@@ -1,4 +1,4 @@
-.TH STURY 1 "2026-11-05" "stury 0.1.1" "General Commands Manual"
+.TH STURY 1 "2026-11-11" "stury 0.1.1" "General Commands Manual"
 .SH NAME
 stury \- JSON and CSV codec with a jq 1.8.2\-compatible command line
 .SH SYNOPSIS
@@ -10,12 +10,48 @@ stury \- JSON and CSV codec with a jq 1.8.2\-compatible command line
 [\-\-from format|\-\-seq] [\-\-max\-depth n] [file...]
 .br
 .B stury
+.B check
+\-\-schema file [\-\-schema\-ref dir] [\-\-schema\-draft d] [\-\-format\-assert] [\-\-max\-errors n] [\-\-report lines|basic|problem] [file...]
+.br
+.B stury
+.B check
+\-\-filter <jq filter> \-\-schema file [\-\-from format] [\-nsR] [\-\-arg name value] [\-c]
+.br
+.B stury
 fmt
-[\-\-from format] [\-\-to format] [\-\-in\-place|\-\-check] [\-\-indent n|\-\-tab] [\-\-max\-depth n] [file...]
+[\-\-from format] [\-\-to format] [\-\-in\-place|\-\-check] [\-c|\-\-indent n|\-\-tab] [\-\-max\-depth n] [file...]
+.br
+.B stury
+fmt
+\-\-schema file [\-\-to format] [\-\-schema\-ref dir] [\-\-schema\-draft d] [\-\-max\-errors n] [\-\-format\-assert] [file...]
 .br
 .B stury
 edit
-[\-\-from format|\-\-seq] [\-\-in\-place|\-\-check] [\-\-max\-depth n] [\-f file] [\-L dir] [\-\-arg name value] <jq filter> [file...]
+[\-\-from format|\-\-seq] [\-\-in\-place|\-\-check|\-\-diff] [\-\-max\-depth n] [\-f file] [\-L dir] [\-\-arg name value] <jq filter> [file...]
+.br
+.B stury
+diff
+[\-\-from format] [\-\-set|\-\-position] [\-\-key [path=]member] [\-\-facts] [\-\-json] old new
+.br
+.B stury
+diff
+\-\-old\-schema file \-\-new\-schema file [\-\-compat backward|forward|full] [\-\-json]
+.br
+.B stury
+diff
+\-\-shape [\-\-from format] old new
+.br
+.B stury
+schema infer
+[\-\-from format] [\-\-infer] [\-\-ranges] [layout options] [file...]
+.br
+.B stury
+schema sample
+[\-\-to format] [\-\-count n] [\-\-seed n] [\-\-invalid] [\-\-comments] [\-\-schema\-ref dir] [\-\-schema\-draft d] [layout options] schema
+.br
+.B stury
+schema gen
+[\-\-package name] [\-\-format\-assert] [\-\-schema\-ref dir] [\-\-schema\-draft d] schema
 .br
 .B stury
 \-h | \-V | \-\-build\-configuration
@@ -29,7 +65,11 @@ This page covers stury's own options and how its input handling differs from jq'
 .BR validate )
 validates its inputs, accepting any input that
 .B stury .
-reads without error, and prints nothing when they are valid. Every file is judged, and each file's first fault is reported. It requires at least one JSON text: an empty or whitespace-only input is "No JSON text" and exits 5. It refuses the options fmt refuses, and \-\-indent and \-\-tab. It is the subcommand when it is the first argument that is not an option. With no file on a terminal it prints the short usage and exits 2. \fBstury check \-\-help\fR lists its options.
+reads without error, and prints nothing when they are valid. Every file is judged, and each file's first fault is reported. It requires at least one JSON text: an empty or whitespace-only input is "No JSON text" and exits 5, except under \-\-seq, where it is no records and passes. It refuses the options fmt refuses, and \-\-indent and \-\-tab. It is the subcommand when it is the first argument that is not an option. With no file on a terminal it prints the short usage and exits 2. \fBstury check \-\-help\fR lists its options.
+.PP
+With \fB\-\-schema\fR \fIfile\fR, check also judges each input against the JSON Schema in \fIfile\fR (drafts 4 to 2020\-12) and tells every failure as file:line:col: message at path, on stderr, exiting 1 when an input parses and fails the schema. \fB\-\-schema\-ref\fR \fIdir\fR sets the directory a file reference may read, \fB\-\-schema\-draft\fR \fId\fR names the draft of a schema with no $schema (4, 6, 7, 2019\-09 or 2020\-12, the default; diff and schema sample and gen take it and \-\-schema\-ref too), \fB\-\-format\-assert\fR makes format fail, \fB\-\-max\-errors\fR \fIn\fR keeps at most n failures of an input, and \fB\-\-report\fR \fIlines|basic|problem\fR writes the JSON Schema basic output or an RFC 9457 problem document on standard output instead. NDJSON and \-\-seq records are checked one by one, and for csv and tsv the schema describes the table, an array of rows. docs/cli.md has the details.
+.PP
+With \fB\-\-filter\fR \fIfilter\fR, check types the jq filter against the schema of its inputs and reads no input. It refuses each step no input the schema describes can take, a member no object of the schema describes among them, as a compile error is told, and writes the JSON Schema every output of the filter passes on standard output. It exits 1 after a refusal, else 0. \-n, \-s, \-R, \-\-from csv or tsv and the variables shape what the filter is typed on. docs/cli.md has the details.
 .PP
 .B stury fmt
 writes each input back in the printer's layout, or in another format: it runs no filter, reads each file as
@@ -38,7 +78,18 @@ one compact value per line. Between these formats only the layout changes: each 
 as it was, and every member of an object is kept, a repeated key included. csv and tsv are a header and one record
 per row, re-spelled by the cell writer, each file a table of its own. A leading byte order mark is not written. A JSON text whose root is an array is
 written to csv or tsv as a list of rows. Every file is formatted, and each file's first fault is reported. The run is
-idempotent, and a file already in that layout comes back byte for byte. \fBstury fmt \-\-help\fR lists its options.
+idempotent, and a file already in that layout comes back byte for byte. \-c is \-\-indent 0. \fBstury fmt \-\-help\fR lists its options.
+.PP
+With \fB\-\-schema\fR \fIfile\fR, fmt judges each file against the JSON Schema as check \-\-schema does (a csv or tsv cell by \-\-infer, never by the schema) and formats a file that passes as plain fmt does. A file that fails is told as check \-\-schema tells it, with at most \-\-max\-errors n failures, is not written, and makes the exit 1. A table written is judged again as it reads back, under \-\-infer when the input is no table, which quotes a text that reads as a number, true or false, and a failure there is told against \fIname\fR (output). \-\-in\-place and \-\-check leave a file with a failure as it is.
+.PP
+.B stury schema infer
+writes the JSON Schema every record of its inputs passes: the kinds met at each position, a member required where every object had it, an empty csv cell a null. \-\-ranges also keeps the least and greatest number and length. An input that does not parse, an empty one, and one whose schema would nest past the depth a JSON text may have exit 5.
+.PP
+.B stury schema sample
+writes \-\-count n values (default 1) that pass the schema, chosen by \-\-seed n, a text a line in the format \-\-to names; \-\-invalid writes values that fail it, \-\-comments writes descriptions as comments where the format has them, and under \-\-to csv or tsv \-\-infer reads the sample's cells as check \-\-infer does. A schema for which no passing value is found, or under \-\-invalid no failing one, exits 1 with the file named.
+.PP
+.B stury schema gen
+writes the Odin source of the types a model reads the schema's values with, and a register procedure for the rules no tag holds; \-\-package names the package. A keyword no Odin type spells exits 1, told with the path of the node that holds it.
 .PP
 .B stury edit
 runs the filter on each input and splices its outputs into the input's own bytes: every byte the edit does not touch
@@ -131,7 +182,7 @@ A number prints as it was written (1E2 stays 1E2), where jq prints 1E+2. A file 
 .PP
 stury reads strict RFC 8259 JSON. It rejects, with exit 5, these inputs that jq accepts: 01, 1., NaN, nan, Infinity, invalid UTF\-8 in a string, a lone low surrogate escape, a NUL after a value, and nesting past \-\-max\-depth. A parse error names the fault and the position of the byte where it was found. Each file ends its texts, except under \-\-seq. The full list is in docs/cli.md, "Differences from jq".
 .SH EXIT STATUS
-As jq: 1 under \-e when the last output is false or null, 2 for a usage or file error or output that cannot be written (a closed stdout included, except under check, fmt \-\-check and fmt \-\-in\-place), 3 for a filter that does not compile, 4 under \-e when there is no output, 5 for invalid input or an error on the last input. \fBfmt \-\-check\fR and \fBedit \-\-check\fR exit 1 when a file would change.
+As jq: 1 under \-e when the last output is false or null, 2 for a usage or file error or output that cannot be written (a closed stdout included, except under check, fmt \-\-check and fmt \-\-in\-place), 3 for a filter that does not compile, 4 under \-e when there is no output, 5 for invalid input or an error on the last input. \fBfmt \-\-check\fR and \fBedit \-\-check\fR exit 1 when a file would change, and \fBdiff\fR when the inputs differ or compatibility is not proven. \fBcheck \-\-schema\fR and \fBfmt \-\-schema\fR exit 1 when an input parses and fails the schema, and 5 when one does not parse; \fBcheck \-\-filter\fR exits 1 after a refusal. \fBschema sample\fR and \fBschema gen\fR exit 1 for a schema they cannot answer, and \fBschema infer\fR 5 for an input it cannot describe. A schema that does not compile is exit 2.
 .SH SEE ALSO
 .BR jq (1),
 docs/cli.md in stury's source.

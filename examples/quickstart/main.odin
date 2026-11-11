@@ -4,7 +4,6 @@
 // With a file argument it reads that file in place of the built-in text.
 package main
 
-import "stury:core"
 import "stury:json"
 import "core:fmt"
 import "core:mem/virtual"
@@ -17,10 +16,10 @@ Person :: struct {
 }
 
 // A fault or an error renders as `line:col: message`, with the path when it has one.
-report :: proc(src: []u8, e: $E) {
+report :: proc(src: []u8, e: json.Error) {
 	b: strings.Builder
 	defer strings.builder_destroy(&b)
-	core.render(strings.to_writer(&b), src, e)
+	json.render(strings.to_writer(&b), src, e)
 	fmt.eprintln(strings.to_string(b))
 }
 
@@ -34,28 +33,24 @@ main :: proc() {
 		}
 		src = data
 	}
-	if fault, bad := json.validate(src, .Json).?; bad {
-		report(src, fault)
+	if err := run(src); err != nil {
+		report(src, err)
 		os.exit(1)
 	}
+}
+
+run :: proc(src: []u8) -> json.Error {
+	json.validate(src, .Json) or_return
 
 	// What the read and the write allocate, freed at once.
 	arena: virtual.Arena
-	if virtual.arena_init_growing(&arena) != nil {
-		os.exit(1)
-	}
+	virtual.arena_init_growing(&arena) or_return
 	defer virtual.arena_destroy(&arena)
 	alloc := virtual.arena_allocator(&arena)
 
 	person: Person
-	if err := json.unmarshal(src, .Json, &person, allocator = alloc); err.kind != .None {
-		report(src, err)
-		os.exit(1)
-	}
-	out, err := json.marshal(person, allocator = alloc)
-	if err.kind != .None {
-		report(nil, err)
-		os.exit(1)
-	}
+	json.unmarshal(src, .Json, &person, allocator = alloc) or_return
+	out := json.marshal(person, allocator = alloc) or_return
 	fmt.println(string(out)) // {"name":"ada","n":1}
+	return nil
 }

@@ -1,4 +1,4 @@
-// `records <frame|check|build|stream|read|write|cells|rows|text|threads|validate|each> <file> [width]`: reads the
+// `records <frame|check|build|stream|read|refuse|write|cells|rows|text|threads|validate|each> <file> [width]`: reads the
 // records of the file and prints best and median GB/s. A `.csv` file is read as CSV by `frame`, `check`, `threads`,
 // `validate` and `each`. `frame` frames each record and reads no value, `check` judges each one, `build` builds the
 // document of each, `threads` is `check` on a pool of `width` threads (6 by default), `stream` judges each one through a
@@ -61,7 +61,7 @@ build :: proc(src: []u8) -> int {
 	n := 0
 	for rec in records.next(&it) {
 		doc, err := records.build(&it, rec)
-		n += int(err.kind != .None)
+		n += int(err != nil)
 		core.destroy(&doc)
 	}
 	return n
@@ -132,6 +132,11 @@ read :: proc(src: []u8) -> int {
 	return load(src, json.as(.Json), &log_plan, (^[dynamic]Log_Record)(nil))
 }
 
+// `read` with a repeated key refused, which builds each record before it reads it.
+refuse :: proc(src: []u8) -> int {
+	return load(src, json.as(.Json), &log_plan, (^[dynamic]Log_Record)(nil), .Refuse)
+}
+
 cells :: proc(src: []u8) -> int {
 	it := records.open(src, dsv.as(.Csv))
 	defer records.close(&it)
@@ -175,13 +180,13 @@ read_rows :: proc(src: []u8, $T: typeid, plan: ^typed.Plan) -> int {
 
 // Reads every record of `src` into a `T`, strings borrowed, appending to `list` when it is not nil. The result is the
 // number of refused records.
-load :: proc(src: []u8, as: core.As, plan: ^typed.Plan, list: ^[dynamic]$T) -> int {
+load :: proc(src: []u8, as: core.As, plan: ^typed.Plan, list: ^[dynamic]$T, dups := core.Duplicates.Default) -> int {
 	it := records.open(src, as)
 	defer records.close(&it)
 	n := 0
 	v: T
-	for err in records.read(&it, &v, plan, {borrow_strings = true}) {
-		n += int(err.kind != .None)
+	for err in records.read(&it, &v, plan, {borrow_strings = true, dups = dups}) {
+		n += int(err != nil)
 		if list != nil {
 			append(list, v)
 		}
@@ -204,7 +209,7 @@ write :: proc(list: []$T, plan: ^typed.Plan) -> int {
 	text, err := records.marshal(list, plan, handle, allocator = virtual.arena_allocator(&output))
 	written = len(text)
 	virtual.arena_free_all(&output)
-	return int(err.kind != .None)
+	return int(err != nil)
 }
 
 write_logs :: proc(_: []u8) -> int { return write(logs_list[:], &log_plan) }
@@ -213,7 +218,7 @@ write_text :: proc(_: []u8) -> int { return write(text_list[:], &text_plan) }
 
 main :: proc() {
 	if len(os.args) != 3 && len(os.args) != 4 {
-		fmt.eprintln("usage: records <frame|check|build|stream|read|write|cells|rows|text|threads|validate|each> <file> [width]")
+		fmt.eprintln("usage: records <frame|check|build|stream|read|refuse|write|cells|rows|text|threads|validate|each> <file> [width]")
 		os.exit(2)
 	}
 	src, err := os.read_entire_file(os.args[2], runtime.default_allocator())
@@ -239,8 +244,8 @@ main :: proc() {
 		}
 		host.pool_init(&pool, width)
 	case "stream": lane = stream
-	case "read":
-		lane = read
+	case "read", "refuse":
+		lane = read if os.args[1] == "read" else refuse
 		log_plan, _ = json.plan_make(Log_Record)
 	case "cells": lane = cells
 	case "rows":
@@ -270,7 +275,7 @@ main :: proc() {
 			os.exit(2)
 		}
 	case:
-		fmt.eprintln("no lane", os.args[1], "(lanes: frame, check, build, stream, read, write, cells, rows, text, threads, validate, each)")
+		fmt.eprintln("no lane", os.args[1], "(lanes: frame, check, build, stream, read, refuse, write, cells, rows, text, threads, validate, each)")
 		os.exit(2)
 	}
 	ts: [timing.TIMED]i64

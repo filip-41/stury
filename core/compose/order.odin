@@ -46,7 +46,7 @@ compose_order :: proc(cx: ^Compose, c: core.Node_Index, lo, hi: u64, removed: []
 		}
 	}
 	flat := core.is_flat(doc)
-	sep := transmute([]u8)doc.spelling.edit.member_sep(doc, c)
+	sep := transmute([]u8)cx.edit.member_sep(doc, c)
 	// Where each member's own bytes start: its first head comment, unless a separator lies between it and the member.
 	starts, aerr := make([]u64, n, cx.allocator)
 	if aerr != nil {
@@ -145,7 +145,7 @@ order_gap :: proc(cx: ^Compose, c: core.Node_Index, lo, hi: u64, g: int, starts:
 			add_items(cx, c, glo, ghi) or_return
 		}
 		sort_items(cx)
-		sep := doc.spelling.edit.member_sep(doc, c)
+		sep := cx.edit.member_sep(doc, c)
 		from := glo
 		if comma := gap_comma(cx, glo, ghi, sep[0]); comma != NO_BYTE {
 			from = comma + u64(len(sep))

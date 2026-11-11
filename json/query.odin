@@ -6,17 +6,7 @@ import core "../core"
 import engine "../core/build"
 import records "../core/records"
 
-// JSON's `Spelling.scan` walk and its record service, which `core/build`'s path reads run.
-
-// The spelling's `scan`: the walk compiled for the handle's spec.
-scan_as :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
-	switch Spec(handle.spec) {
-	case .Json:  return scan_spec(src, .Json, handle, paths, read, state, on, allocator)
-	case .Jsonc: return scan_spec(src, .Jsonc, handle, paths, read, state, on, allocator)
-	case .Json5: return scan_spec(src, .Json5, handle, paths, read, state, on, allocator)
-	}
-	return {}, {kind = .Unsupported}
-}
+// JSON's `Services.scan` walk and its record service, which `core/build`'s path reads run.
 
 // Walks `src` as spec `S` with the scan's hook, the stream's when `on` is set, judges what the walk leaves and ends the
 // read.
@@ -80,16 +70,7 @@ rewalk :: proc "contextless" ($S: Spec, $on: proc "contextless" (h: ^engine.Scan
 
 // The record service `scan`. A text of concatenated strict JSON is framed by the walk that reads it, and any other
 // record is framed first and then read in place.
-scan_record :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options) -> (records.Record, core.Path_Error, bool) {
-	switch Spec(it.as.spec) {
-	case .Json:  return scan_record_spec(it, h, last, path, read, .Json)
-	case .Jsonc: return scan_record_spec(it, h, last, path, read, .Jsonc)
-	case .Json5: return scan_record_spec(it, h, last, path, read, .Json5)
-	}
-	return {}, {}, false
-}
-
-scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options, $S: Spec) -> (rec: records.Record, err: core.Path_Error, ok: bool) {
+scan_record_spec :: #force_inline proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options, $S: Spec) -> (rec: records.Record, err: core.Path_Error, ok: bool) {
 	opts := options_of(it.as)
 	walked := it.framing == .Concatenated && S == .Json
 	src := it.src
@@ -114,7 +95,7 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 	room := ([^]u64)(rawptr(&frames))[:core.MAX_DEPTH]
 	if started := scan_begin(h, it, src, last, path, read, opts, room); started.kind != .None {
 		if walked {
-			rec, ok = RECORDS.next[it.framing](it)
+			rec, ok = it.services.next[it.framing](it)
 		}
 		return rec, started, ok || !walked
 	}
@@ -141,7 +122,7 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 	// A stop leaves the record's end to a walk with no hook.
 	if stopped {
 		it.pos, it.state = pos, state
-		rec, ok = RECORDS.next[it.framing](it)
+		rec, ok = it.services.next[it.framing](it)
 	}
 	// The input's end, which ends the records with no fault, ends the read with one and is no error.
 	fault := it.fault
@@ -165,4 +146,82 @@ scan_begin :: proc(h: ^engine.Scan, it: ^records.Reader, src: []u8, last: ^core.
 	started := engine.scan_start(h, src, it.as, []core.Path{path}, read, false, it.allocator, depth, room)
 	h.again = started.kind == .None && h.many == nil
 	return started
+}
+
+// An iterator over the answers of `paths`, or of `one` when `paths` is nil, that `fill` reads.
+answers_of :: proc(src: []u8, handle: core.As, paths: []core.Path, one: core.Path, read: core.Path_Options, allocator: runtime.Allocator, fill: proc(it: ^engine.Answer_Iter)) -> engine.Answer_Iter {
+	return {src = src, as = handle, paths = paths, one = one, read = read, allocator = allocator, fill = fill, max_batch = engine.ANSWER_BATCH}
+}
+
+answers_fill_of :: proc(spec: Spec) -> proc(it: ^engine.Answer_Iter) {
+	switch spec {
+	case .Json:  return answers_fill(.Json)
+	case .Jsonc: return answers_fill(.Jsonc)
+	case .Json5: return answers_fill(.Json5)
+	}
+	return answers_fill(.Json)
+}
+
+// The fill of an iterator over a text of spec `S`: the stream's walk with a cursor, which stops once the buffer holds a
+// batch. It judges what the walk leaves and ends the read as `scan_walk` does.
+answers_fill :: proc "contextless" ($S: Spec) -> proc(it: ^engine.Answer_Iter) {
+	return proc(it: ^engine.Answer_Iter) {
+		#assert(size_of(Cursor) <= size_of(it.cursor))
+		cursor := (^Cursor)(&it.cursor)
+		h := &it.scan
+		src := it.src
+		opts := options_of(it.as)
+		hi: u64
+		fault: Maybe(core.Fault)
+		if it.state == .Fresh {
+			if _, sep := document_start(src, 0, S); sep != nil {
+				engine.answers_fail(it, core.error_of(core.path_error(sep_error(src, sep))))
+				return
+			}
+			if it.read.dups == .Refuse {
+				built, e := build_bound(src, S, opts, .Refuse, it.allocator)
+				core.destroy(&built)
+				if e != nil {
+					engine.answers_fail(it, e)
+					return
+				}
+			}
+			it.stack = it.stack_room[:]
+			if opts.max_depth > core.MAX_DEPTH {
+				stack, e := make([]u8, opts.max_depth, it.allocator)
+				if e != nil {
+					engine.answers_fail(it, e)
+					return
+				}
+				it.stack = stack
+			}
+			if !engine.answers_start(it, false, min(core.reserve_depth(opts.max_depth, len(src)), core.MAX_DEPTH)) {
+				return
+			}
+			cursor^ = {stack = it.stack}
+			it.regs = engine.BUILDER_REGS
+			h.opts = &opts
+			h.rewalk = rewalk(S, engine.scan_hook_stream)
+			h.pause_on_flush = true
+			hi, fault = walk(src, 0, S, opts, h, &it.regs, engine.scan_hook_stream, cursor)
+		} else {
+			h.opts = &opts
+			hi, fault = walk_resume(src, cursor, S, opts, h, &it.regs, engine.scan_hook_stream)
+		}
+		h.opts = nil
+		if !h.stopped && can_resume(cursor) {
+			return
+		}
+		if fault == nil && !h.stopped {
+			fault = tail_fault(src, hi, S)
+		}
+		// The root is counted whether it was kept or not. A text with no value is no document.
+		if fault == nil && !h.stopped && u32(it.regs.b) == 0 {
+			fault = core.Fault{at = u64(len(src)), rules = &RULES, kind = .Truncated}
+		}
+		when .Comments in FEATURES[S] {
+			hi = 0
+		}
+		engine.answers_end(it, hi, fault)
+	}
 }

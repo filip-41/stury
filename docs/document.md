@@ -14,12 +14,12 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 |---|---|
 | `core/document.odin` | `Node`, `Document`, the readers, `Fact`, `destroy`, `clone`, the spelling tables |
 | `core/build/build.odin` | `Builder`, the hooks, `builder_start`, `builder_end`, the header row, the duplicate-key check |
-| `core/edit.odin` | `Edit_List`, `Edit`, `set`, `insert`, `remove`, `set_fact`, `remove_fact`, `commit` |
+| `core/edit.odin` | `Edit_List`, `Edit`, `set`, `insert`, `remove`, `set_fact`, `remove_fact` |
 | `core/compose/compose.odin` | a commit's container composition: members, junctions and the placement of facts |
-| `core/compose/commit.odin` | the commit a format's table points at: plan, compose, splice, the read of the result |
+| `core/compose/commit.odin` | the commit, `commit` in a format package: plan, compose, splice, the read of the result |
 | `core/path.odin` | `Path`, its steps and spellings, `Answer`, `Token_Answer`, `Presence`, `member_of`, `element_of` and `length_exact` |
 | `core/path_text.odin` | the readers of a path's jq text and JSON Pointer spellings |
-| `core/build/scan.odin` | the one engine's entries: the hooks a format's `scan` walks with, the partial document, the query behind `core.query`, `scan`, `find`, `each_answer` and `set` over a handle |
+| `core/build/scan.odin` | the one engine's entries: the hooks a format's `scan` walks with, the partial document, the query behind `json.query` and `dsv.query`, `scan`, `find`, `each_answer` and `set` over a handle |
 | `core/build/step.odin` | the step logic every hook and the replay run |
 | `core/build/many.odin` | what only `$MANY` reads hold: armed path sets, rings of negative indexes, answers placed in text order, the stream |
 | `json/query.odin`, `dsv/query.odin` | each format's `Spelling.scan` walk, whose forwarders `scan`, `find`, `each_answer` and `set` sit in its `walk.odin` beside `validate` and `build` |
@@ -88,8 +88,10 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
   received. `destroy` frees the allocations, the child index with them, and sets the document to zero. `clone` copies
   the nodes, facts, counts and a read's answers block into another allocator, so the original may go while the copy
   lives, and the copy borrows the same `src` and holds no child index. A reader that allocates takes its own allocator.
-- `shared_keys` is the dsv header row's node, 0 for a text read without a header, for a partial document and for every
-  JSON document.
+- `tables` is empty for every JSON document. A dsv text has one `Table`, `table_of(doc, ROOT)`: `header` is the header
+  row's node (0 for a text read without a header and for a partial document), `first_row` the first record's node, and
+  `width` the cell count every record has, 0 when records differ (`Ragged`) or none exists. A record is its own node and
+  its cells, so with a `width` record `k` is at `first_row + k * (width + 1)` and `child_at` of the root computes it.
 - `root_close` is one past the root value's authored bytes: the close of a root container, or the last byte of a root
   scalar, quotes included. It is 0 when the build did not record it. `span(ROOT)` and a whole-document writer use it
   instead of the format's `close_end`.
@@ -107,7 +109,7 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
 ```odin
 core.build :: proc(src: []u8, as: As, dups := Duplicates.Last,
 	allocator := context.allocator) -> (Document, Document_Error)
-core.validate :: proc "contextless" (src: []u8, as: As) -> Maybe(Fault)
+core.validate :: proc "contextless" (src: []u8, as: As) -> Error
 json.build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last,
 	allocator := context.allocator) -> (core.Document, core.Document_Error)
 dsv.build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last,
@@ -239,7 +241,7 @@ no members, so a later call gives false and writes nothing, and `child_at` walks
 
 `pairs` starts a `Pair_Iter` over an `Object` container's key/value member pairs and `pair_next` yields `(key, val, ok)` in
 source order. For an inline-key `Object`, key and value alternate in preorder. For a shared-key `Object`, keys come from
-`doc.shared_keys` while values step through the record's cells. A non-`Object` container, scalar, or out of range index yields
+the table's header while values step through the record's cells. A non-`Object` container, scalar, or out of range index yields
 an empty iterator.
 
 `member(doc, obj, name, dups := .Last)` returns the value of the member whose key decodes to `name`: `.First` the
@@ -299,10 +301,13 @@ quoted or escaped cell, and `.Null` for an empty value cell, as a typed read and
 `.False`, and a cell that is exactly a JSON number is `.Number`. A quoted cell, a TSV escape and a cell holding an
 ill-formed sequence answer `.String`, since their span holds a quote, a backslash or a byte no JSON number holds.
 
+A build with `infer` writes that kind into the node as it makes the cell, with a number's digit counts in its `spelling`,
+so `kind` reads the node and `resolve` is asked only of an empty cell. A document not made by a build, such as a record or
+a partial read, keeps its cells `Plain` and `kind` resolves them.
+
 ## The spelling services
 
-A `Spelling` holds eight services, `text`, `key_equals`, `number`, `build`, `validate`, `resolve`, `resolves` and `close_end`, the `query` engine `core.query`
-dispatches through, which each format points at `core/build`'s, and a pointer to the format's `Edit_Spelling`. A document points at its format's table in rodata,
+A `Spelling` holds eight services, `text`, `key_equals`, `number`, `build`, `validate`, `resolve`, `resolves` and `close_end`, and a pointer to the format's `Edit_Spelling`. A document points at its format's table in rodata,
 one table for every spec of the format: a JSON token holds no form that only JSON5 reads, so `text` reads any JSON
 string, and dsv's `text` and `key_equals` read `Document.as.spec`, since a CSV backslash is a byte, a TSV
 backslash is an escape, and a `Plain` cell has neither. `text`, `key_equals` and `number` take a `Token_View`, the
@@ -371,7 +376,7 @@ keeps the earliest repeat in the build's error and which a format's `build` may 
 A delimited text is an `Array` of records whose first child may be the header row.
 
 - The root is an `Array` of role `Value`, and its readers step over the header row as over a member's key, so `length`
-  counts records and `children` returns the records. `Document.shared_keys` is the header row's node, 0 for a text read
+  counts records and `children` returns the records. The root's `Table` names the header row's node, 0 for a text read
   without one.
 - A record with a header is stored as a `Kind.Object` with no inline key nodes. Its cells are its children, each
   a `Plain` token of role `Value`. No record stores a key node, so it holds one node per cell.
@@ -387,7 +392,7 @@ A delimited text is an `Array` of records whose first child may be the header ro
   remove a wide record's cells and drop a positional column. It may not set a positional header cell (`.Bad_Index`),
   and a column added or dropped before the positional ones, which would rename them, is `.Bad_Width`.
 - A header cell reads as a key node, so `key_equals`, `text`, `number` and `kind` answer for it as for a JSON key.
-- A headerless text (`no_header` true) has no header row (`doc.shared_keys == 0`), making the first record data and every
+- A headerless text (`no_header` true) has no header row (the table's `header` is 0), making the first record data and every
   record an `Array` of `Plain` value cells, with no key node at all.
 
 ## Facts
@@ -462,10 +467,10 @@ JSON's key check reads the text as the only member of `{text:0}` and requires th
 ### A commit
 
 ```odin
-commit :: proc(list: ^Edit_List, as: Maybe(As) = nil, allocator := context.allocator) -> (out: []u8, dropped: int, err: Document_Error)
+commit :: proc(list: ^Edit_List, as: Maybe(As) = nil, allocator := context.allocator) -> (out: []u8, dropped: int, err: Error)
 ```
 
-`core.commit` writes the output in the document's own spec, or in the spec of `as`, such as `json.as(.Json)` for a
+`compose.commit`, which a format package exports as `commit`, writes the output in the document's own spec, or in the spec of `as`, such as `json.as(.Json)` for a
 JSON5 document. A text of another spec must read strictly, since the source's own reading is no evidence. A handle of
 another format is `.Bad_Spec`, and a delimited text refuses a spec change as `.Bad_Spec` before the splice, since it
 would respell every cell. The commit builds the output in one allocation with the format's separators, the caller frees `out`, and reading after edits is

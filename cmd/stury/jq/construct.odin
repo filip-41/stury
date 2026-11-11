@@ -41,7 +41,12 @@ eval_count :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^En
 				return .Go
 			}}}
 	if n.a != nil {
-		if sig := eval(ip, n.a, input, env, false, &s); sig != .Go {
+		// The count keeps nothing of an output, as a printer does, so a pipe's outputs are made in a scope emptied between them.
+		printer := ip.printer
+		ip.printer = &s
+		sig := eval(ip, n.a, input, env, false, &s)
+		ip.printer = printer
+		if sig != .Go {
 			return sig
 		}
 	}
@@ -109,7 +114,7 @@ column_into :: proc(n: ^Node, v: Value, into: ^[dynamic]Value) -> bool {
 			}
 		}
 		return true
-	case nil, bool, Number, string, ^Object, Path, ^Commented:
+	case nil, bool, f64, ^Number_Text, string, ^Object, Path, ^Commented:
 	}
 	return false
 }
@@ -136,7 +141,7 @@ append_field :: #force_inline proc(into: ^[dynamic]Value, e: Value, name: string
 	case nil:
 		append(into, nil)
 		return true
-	case bool, Number, string, ^Array, Path, ^Commented:
+	case bool, f64, ^Number_Text, string, ^Array, Path, ^Commented:
 	}
 	return false
 }

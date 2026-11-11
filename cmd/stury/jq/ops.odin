@@ -4,6 +4,7 @@ package jq
 
 import "core:math"
 import "core:strings"
+import core_pkg "../../../core"
 
 // Whether `compare`'s result `c` on two values holds the comparison `op` between them.
 compared :: proc(op: Op, c: int) -> bool {
@@ -32,15 +33,58 @@ compare_failed :: proc(ip: ^Interp, eq: bool) -> Signal {
 
 // With `owned`, `+` and `*` change `a` in place where `a` is or holds a container the set names (modify.odin).
 binary_op :: proc(ip: ^Interp, op: Op, a, b: Value, owned: ^Owned = nil) -> (Value, Signal) {
-	if x, is_number := a.(Number); is_number {
-		if y, both := b.(Number); both {
+	if x, is_number := built_f64(a); is_number {
+		if y, both := built_f64(b); both {
 			#partial switch op {
 			case .Add:
-				return num(x.f + y.f), .Go
+				return x + y, .Go
 			case .Sub:
-				return num(x.f - y.f), .Go
+				return x - y, .Go
 			case .Mul:
-				return num(x.f * y.f), .Go
+				return x * y, .Go
+			case .Eq, .Ne, .Lt, .Le, .Gt, .Ge:
+				// Rounding keeps order, so doubles that differ order their numbers, as do two computed ones. Others
+				// of one double are told apart by their digits (core's `compare`).
+				_, a_computed := a.(f64)
+				_, b_computed := b.(f64)
+				if x != y || a_computed && b_computed {
+					return compared(op, double_order(x, y)), .Go
+				}
+			}
+		}
+	}
+	return other_binary_op(ip, op, a, b, owned)
+}
+
+// The order of two doubles as core's `compare` orders numbers: nan below every number, itself included.
+@(private = "file")
+double_order :: #force_inline proc(x, y: f64) -> int {
+	switch {
+	case math.is_nan(x):
+		return -1
+	case math.is_nan(y):
+		return 1
+	}
+	return -1 if x < y else (1 if x > y else 0)
+}
+
+// `binary_op` of operands that are not both doubles, or of an operator other than `+`, `-` and `*`.
+@(private = "file")
+other_binary_op :: #force_no_inline proc(ip: ^Interp, op: Op, a, b: Value, owned: ^Owned) -> (Value, Signal) {
+	if x, is_number := operand_f64(a); is_number {
+		if y, both := operand_f64(b); both {
+			#partial switch op {
+			case .Add:
+				return num(x + y), .Go
+			case .Sub:
+				return num(x - y), .Go
+			case .Mul:
+				return num(x * y), .Go
+			case .Eq, .Ne, .Lt, .Le, .Gt, .Ge:
+				// Rounding keeps order, so unequal doubles order their numbers, and only equal ones need the digits.
+				if x != y {
+					return compared(op, double_order(x, y)), .Go
+				}
 			}
 		}
 	}
@@ -64,6 +108,36 @@ binary_op :: proc(ip: ^Interp, op: Op, a, b: Value, owned: ^Owned = nil) -> (Val
 		return modulo(ip, a, b)
 	}
 	return nil, fail(ip, "unknown operator")
+}
+
+// The double of a number that is no node of a document.
+@(private = "file")
+built_f64 :: #force_inline proc(v: Value) -> (f64, bool) {
+	#partial switch n in v {
+	case f64:
+		return n, true
+	case ^Number_Text:
+		return n.double, true
+	}
+	return 0, false
+}
+
+// The double of a built number or of a number node in its format's plain spelling, read by the document's reader.
+@(private = "file")
+operand_f64 :: #force_inline proc(v: Value) -> (f64, bool) {
+	#partial switch n in v {
+	case f64:
+		return n, true
+	case ^Number_Text:
+		return n.double, true
+	case Ref:
+		node := n.doc.nodes[n.node]
+		if node.kind == .Number && node.spelling & core_pkg.NUMBER_KIND_MASK == 0 {
+			x, _ := core_pkg.number(n.doc, n.node)
+			return number_f64(x, string(core_pkg.span(n.doc, n.node))), true
+		}
+	}
+	return 0, false
 }
 
 @(private = "file")

@@ -259,7 +259,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 				}
 				// A quote that opens right after a closing one is a `""`'s second. The typed read keeps a cell free of
 				// them from a second scan, through the mask TSV's backslashes use.
-				when H == Cells {
+				when intrinsics.type_is_specialization_of(H, Cells_Of) {
 					bs = (closing << 1 | w.close) & q
 				}
 				if carried {

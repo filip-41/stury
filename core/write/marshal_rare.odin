@@ -40,14 +40,20 @@ leaf :: #force_no_inline proc(w: ^Walker, f: ^typed.Field, v: uintptr, top, nest
 		return put_enum(w, m.enum_info, enum_value(m.enum_info, v), put)
 	case .Raw:
 		return put_raw(w, string((^typed.Raw)(v)^), top - w.n_ptrs, T)
+	case .Value:
+		text, err := value_text(w.plan, (^core.Value)(v)^, context.temp_allocator)
+		if err.kind == .None {
+			put_text(&w.out, string(text))
+		}
+		return err.kind
 	case .Number_Text:
-		return put_number_text(w, string((^typed.Number_Text)(v)^), top - w.n_ptrs, T)
+		return put_number_text(w, (^core.Number_Text)(v).text, top - w.n_ptrs, T)
 	case .Number:
 		return put_number(&w.out, (^core.Number)(v)^)
 	case .Scalar:
 		s := (^typed.Scalar)(v)^
-		if text, is_text := s.(typed.Number_Text); is_text {
-			return put_number_text(w, string(text), top - w.n_ptrs, T)
+		if text, is_text := s.(core.Number_Text); is_text {
+			return put_number_text(w, text.text, top - w.n_ptrs, T)
 		}
 		// Every other arm is written as an `any` of its type.
 		_, k := any_value(w, any{rawptr(v), scalar_type(s)}, T, put)
@@ -84,14 +90,14 @@ enum_value :: proc "contextless" (info: ^runtime.Type_Info_Enum, v: uintptr) -> 
 	return i64(loaded(v, info.base.size, base.signed))
 }
 
-// The enum value `value` as `plan` writes it: its member's name, or under `Plan.enums == .Int` its integer, written at
+// The enum value `value` as `plan` writes it: its member's name, or under `typed.enum_by_number` its integer, written at
 // `p`, which holds `spell.INT_ROOM` bytes. A value no member has is refused either way, as a read refuses it.
 enum_spelled :: proc(plan: ^typed.Plan, info: ^runtime.Type_Info_Enum, value: i64, p: [^]u8) -> (string, core.Typed_Error_Kind) {
 	k := typed.enum_member(info, value)
 	if k < 0 {
 		return "", .Not_A_Member
 	}
-	if plan.enums != .Int {
+	if !typed.enum_by_number(plan, info) {
 		return info.names[k], .None
 	}
 	if base, ok := runtime.type_info_base(info.base).variant.(runtime.Type_Info_Integer); ok && !base.signed {
@@ -105,7 +111,7 @@ enum_spelled :: proc(plan: ^typed.Plan, info: ^runtime.Type_Info_Enum, value: i6
 put_enum :: proc(w: ^Walker, info: ^runtime.Type_Info_Enum, value: i64, $put: Put) -> core.Typed_Error_Kind {
 	p := room(&w.out, LEAF_ROOM)
 	name := enum_spelled(w.plan, info, value, p) or_return
-	if w.plan.enums == .Int {
+	if typed.enum_by_number(w.plan, info) {
 		w.out.cursor += len(name)
 		return .None
 	}
@@ -206,8 +212,8 @@ put_raw :: proc(w: ^Walker, s: string, top: int, $T: Tree) -> core.Typed_Error_K
 	case ' ', '\t', '\n', '\r':
 		return .Bad_Raw
 	}
-	view := core.Token_View{as = {spelling = w.plan.spelling, max_depth = u32(core.MAX_DEPTH - top)}}
-	if e := w.plan.spelling.edit.value(&view, transmute([]u8)s, context.allocator); e.kind != .None {
+	view := core.Token_View{as = {readers = w.plan.readers, max_depth = u32(core.MAX_DEPTH - top)}}
+	if e := w.plan.raw(&view, transmute([]u8)s, context.allocator); e.kind != .None {
 		return .Too_Deep if e.inner.kind == .Too_Deep else .Bad_Raw
 	}
 	put_text(&w.out, s)
@@ -323,12 +329,20 @@ member_key :: proc(w: ^Walker, r: ^typed.Field, $T: Tree, $put: Put) -> core.Typ
 	return .None
 }
 
-// Whether a read or write leaves the member at `v` out under `omitempty`: a zero number, false, an empty string, a nil, an
-// empty list or map or bit set. An enum, a struct and a fixed array are kept whatever they hold.
+// Whether a write leaves the member at `v` out: always for a model's write-only member, where the walker's `omits` says
+// so, under `omitunset` for a null its struct's `Fields_Set` lacks, and under `omitempty` for a zero number, false, an
+// empty string, a nil, an empty list or map or bit set. An enum, a struct and a fixed array are kept whatever they hold.
 @(cold)
 @(private)
 is_empty :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> bool {
 	m := &w.meta[r.meta]
+	x := typed.extra_at(w.plan, r.meta)
+	if left_out(w, r, v) || x.omit_unset && holds_null(m, r.kind, v) && unset(x, r, v) {
+		return true
+	}
+	if !x.omit_empty {
+		return false
+	}
 	kind := m.key_kind if r.kind == .Hook else r.kind
 	#partial switch kind {
 	case .Bool, .Bool_Wide, .I8, .I16, .I32, .I64, .U8, .U16, .U32, .U64:
@@ -355,17 +369,43 @@ is_empty :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> bool {
 		bits: u128
 		runtime.mem_copy_non_overlapping(&bits, rawptr(v), int(m.size))
 		return bits == 0
-	case .Ptr:
+	case .Ptr, .Maybe, .Union, .Any:
+		return holds_null(m, kind, v)
+	case .Scalar:
+		return scalar_type((^typed.Scalar)(v)^) == nil
+	}
+	return false
+}
+
+// Whether the member of record `r`, whose model facts are `x`, at `v` is one its struct's `Fields_Set` lacks, so that
+// no load set it. A member of a struct with no set, and a read_only member, which a load never sets, are set.
+unset :: proc(x: ^typed.Meta_Extra, r: ^typed.Field, v: uintptr) -> bool {
+	if x.owner == nil || x.owner.fields_set == 0 || x.bit < 0 {
+		return false
+	}
+	set := (^typed.Fields_Set)(v - uintptr(r.offset) + uintptr(x.owner.fields_set - 1))
+	return set.bits[x.bit / 64] >> uint(x.bit % 64) & 1 == 0
+}
+
+// Whether a model's write leaves the member at `v` out: a write_only member, or one the walker's `omits` leaves out.
+@(private)
+left_out :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> bool {
+	return typed.extra_at(w.plan, r.meta).access == .Write_Only || w.omits != nil && w.omits.call(w.omits, w.plan, r, v)
+}
+
+// Whether the value at `v` of a record of `kind` and meta `m` is written as null: a nil pointer, `Maybe`, union, `any` or
+// cstring.
+holds_null :: proc(m: ^typed.Meta, kind: typed.Read_Kind, v: uintptr) -> bool {
+	#partial switch kind {
+	case .Ptr, .Cstring:
 		return (^rawptr)(v)^ == nil
 	case .Maybe:
 		return !(^bool)(v + uintptr(m.tag))^
 	case .Union:
-		return union_arm(&w.meta[r.meta], v) == nil
+		return union_arm(m, v) == nil
 	case .Any:
 		a := (^any)(v)^
 		return a.id == nil || a.data == nil
-	case .Scalar:
-		return scalar_type((^typed.Scalar)(v)^) == nil
 	}
 	return false
 }
@@ -577,7 +617,7 @@ list_struct :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, tag: ^string, $put:
 	w.mark = w.keys.cursor
 	first := len(w.entries)
 	if tag != nil {
-		add_entry(w, w.plan.union_tag, uintptr(tag), &w.tag_field, put) or_return
+		add_entry(w, typed.extra_at(w.plan, f.meta).union_tag, uintptr(tag), &w.tag_field, put) or_return
 	}
 	r := f.first
 	for ; r.kind != .Never; r = intrinsics.ptr_offset(r, 1) {
@@ -591,10 +631,15 @@ list_struct :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, tag: ^string, $put:
 		rec := &w.plan.fields[capture]
 		captured := len(w.entries)
 		add_map_entries(w, rec, &w.meta[rec.meta], v + uintptr(rec.offset), put) or_return
-		// A capture holds what the type does not name, so a key that also has a written member is no captured member.
+		// A capture holds what the type does not name, so a key that names a member is no captured member, unless the tag's
+		// `omitempty` left the member out. A member a model's write leaves out keeps its name.
 		for e in w.entries[captured:] {
-			for named in w.entries[first:captured] {
-				if entry_name(w, e) == entry_name(w, named) {
+			if tag != nil && entry_name(w, e) == typed.extra_at(w.plan, f.meta).union_tag {
+				return .Unwritable
+			}
+			for x := f.first; x.kind != .Never; x = intrinsics.ptr_offset(x, 1) {
+				at := v + uintptr(x.offset)
+				if entry_name(w, e) == w.meta[x.meta].name && (left_out(w, x, at) || !x.omit || !is_empty(w, x, at)) {
 					return .Unwritable
 				}
 			}
@@ -610,10 +655,12 @@ list_struct :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, tag: ^string, $put:
 	return .None
 }
 
-// The frame of the object just listed, with its opening byte written.
+// The frame of the object just listed, with its opening byte written unless the walk is a visit.
 @(private)
-open_entries :: proc(w: ^Walker, $T: Tree) -> Frame {
-	put_byte(&w.out, T[.Open_Object][0])
+open_entries :: proc(w: ^Walker, $T: Tree, $V: bool) -> Frame {
+	when !V {
+		put_byte(&w.out, T[.Open_Object][0])
+	}
 	return {at = uintptr(len(w.entries) - w.listed), left = w.listed, total = w.listed, step = w.mark, mode = .Entries}
 }
 
@@ -703,6 +750,7 @@ side_plan :: proc(side: ^map[typeid]^typed.Plan, parent: ^typed.Plan, T: typeid)
 		return nil, err.kind
 	}
 	p^ = made
+	p.raw, p.tokens = parent.raw, parent.tokens
 	_, slot, _, no_slot := map_entry(side, T)
 	if no_slot != nil {
 		typed.plan_destroy(p)
@@ -752,19 +800,13 @@ refused :: proc(w: ^Walker, open: Frame, top: int, kind: core.Typed_Error_Kind) 
 	w.err.n_steps, w.err.truncated = 0, false
 	for i := top + 1; i >= 1; i -= 1 {
 		f := &open if i == top + 1 else &w.frames[i]
-		#partial switch f.mode {
-		case .Members:
-			r := intrinsics.ptr_offset(f.r, -1)
-			typed.path_add(&w.err, core.Name(strings.clone(w.meta[r.meta].name, context.temp_allocator)))
-		case .Elements:
-			if f.left < f.total {
-				typed.path_add(&w.err, core.Index(f.total - f.left - 1))
+		if step, ok := frame_step(w, f); ok {
+			if name, named := step.(core.Name); named {
+				step = core.Name(strings.clone(string(name), context.temp_allocator))
 			}
-		case .Entries:
-			if f.left < f.total {
-				typed.path_add(&w.err, core.Name(strings.clone(entry_name(w, w.entries[f.at - 1]), context.temp_allocator)))
-			}
-		case .Side:
+			typed.path_add(&w.err, step)
+		}
+		if f.mode == .Side {
 			leave_side(w)
 		}
 	}

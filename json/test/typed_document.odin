@@ -10,6 +10,7 @@ import "core:testing"
 import core "../../core"
 import typed "../../core/typed"
 import json ".."
+import walktest "../../walktest"
 
 // The typed read of a document: for each shape, a read of the document is the read of its text, in the value stored and
 // in the refusal, and the ownership rules of a read from a document.
@@ -71,7 +72,7 @@ Checked :: struct {
 Whole :: struct {
 	a: typed.Raw,
 	b: []typed.Raw,
-	c: typed.Number_Text,
+	c: core.Number_Text,
 	d: typed.Scalar,
 	e: any,
 	f: Pt,
@@ -109,7 +110,7 @@ value_text :: proc(v: any) -> string {
 	return fmt.tprintf("%v", v)
 }
 
-errors_agree :: proc(t: ^testing.T, want_in, got_in: core.Typed_Error, text: string, loc: runtime.Source_Code_Location, shift := u64(0)) {
+errors_agree :: proc(t: ^testing.T, want_in, got_in: core.Typed_Refusal, text: string, loc: runtime.Source_Code_Location, shift := u64(0)) {
 	want, got := want_in, got_in
 	testing.expectf(t, want.kind == got.kind, "%s: kind %v, a document gives %v", text, want.kind, got.kind, loc = loc)
 	testing.expectf(t, want.at + (shift if want.kind != .None else 0) == got.at, "%s: at %v, a document gives %v", text, want.at, got.at, loc = loc)
@@ -123,21 +124,21 @@ errors_agree :: proc(t: ^testing.T, want_in, got_in: core.Typed_Error, text: str
 agree_as :: proc(t: ^testing.T, text: string, $S: json.Spec, init: $T, read := typed.Read_Options{}, plan_opts := typed.Plan_Options{}, loc := #caller_location) {
 	src := transmute([]u8)text
 	plan, perr := json.plan_make(T, plan = plan_opts, allocator = context.temp_allocator)
-	testing.expect_value(t, perr.kind, core.Typed_Error_Kind.None, loc = loc)
-	doc, built := json.build(src, S, {}, .Last, context.temp_allocator)
-	testing.expectf(t, built.kind == .None, "%s: build %v", text, built.kind, loc = loc)
+	walktest.expect_nil(t, perr, loc = loc)
+	doc, built := core.build(src, json.as(S, {}), .Last, context.temp_allocator)
+	testing.expectf(t, built == nil, "%s: build %v", text, built, loc = loc)
 	a, b := init, init
 	by_text, by_doc := read, read
-	sink_a := typed.Collected{errors = make([dynamic]core.Typed_Error, context.temp_allocator)}
-	sink_b := typed.Collected{errors = make([dynamic]core.Typed_Error, context.temp_allocator)}
-	if read.collect != nil {
-		by_text.collect, by_doc.collect = &sink_a, &sink_b
+	sink_a := typed.Sink{errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)}
+	sink_b := typed.Sink{errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)}
+	if read.sink != nil {
+		by_text.sink, by_doc.sink = &sink_a, &sink_b
 	}
 	want := json.unmarshal(src, S, &a, &plan, read = by_text, opts = {}, allocator = context.temp_allocator)
 	got := typed.unmarshal(&doc, core.ROOT, &b, &plan, by_doc, context.temp_allocator)
-	errors_agree(t, want, got, text, loc)
+	errors_agree(t, walktest.typed_of(want), walktest.typed_of(got), text, loc)
 	testing.expectf(t, value_text(a) == value_text(b), "%s: value %v, a document gives %v", text, value_text(a), value_text(b), loc = loc)
-	if read.collect != nil {
+	if read.sink != nil {
 		testing.expectf(t, len(sink_a.errors) == len(sink_b.errors) && sink_a.truncated == sink_b.truncated, "%s: %d errors, a document gives %d", text, len(sink_a.errors), len(sink_b.errors), loc = loc)
 		for i in 0 ..< min(len(sink_a.errors), len(sink_b.errors)) {
 			errors_agree(t, sink_a.errors[i], sink_b.errors[i], text, loc)
@@ -163,7 +164,7 @@ numbers_read_alike_at_each_width :: proc(t: ^testing.T) {
 		d: u64,
 		e: f32,
 		f: f64,
-		g: typed.Number_Text,
+		g: core.Number_Text,
 		h: core.Number,
 	}
 	agree(t, `{"a":-128,"b":255,"c":-9223372036854775808,"d":18446744073709551615,"e":0.1,"f":-0,"g":1e400,"h":12.5}`, N{})
@@ -180,9 +181,9 @@ number_field_holds_the_number :: proc(t: ^testing.T) {
 		h: core.Number,
 	}
 	n: N
-	testing.expect_value(t, json.unmarshal(transmute([]u8)string(`{"h":12.5}`), .Json, &n).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, json.unmarshal(transmute([]u8)string(`{"h":12.5}`), .Json, &n))
 	testing.expect_value(t, n.h, core.Number{transmute(u64)f64(12.5), .Float})
-	testing.expect_value(t, json.unmarshal(transmute([]u8)string(`{"h":"5"}`), .Json, &n).kind, core.Typed_Error_Kind.Wrong_Kind)
+	walktest.expect_kind(t, json.unmarshal(transmute([]u8)string(`{"h":"5"}`), .Json, &n), core.Typed_Error_Kind.Wrong_Kind)
 }
 
 @(test)
@@ -266,23 +267,23 @@ a_collecting_read_reads_past_each_refusal :: proc(t: ^testing.T) {
 		n: string `json:"n,required"`,
 	}
 	collect := typed.Read_Options {
-		collect = &typed.Collected{},
+		sink = &typed.Sink{},
 	}
 	agree(t, `{"a":"no","l":[1,"x",3],"p":{"x":"y","y":2},"q":1}`, S{a = 7}, collect)
-	agree(t, `["a","b","c","d"]`, []i32{}, {collect = &typed.Collected{max_errors = 2}})
+	agree(t, `["a","b","c","d"]`, []i32{}, {sink = &typed.Sink{max_errors = 2}})
 	agree(t, `{"a":1,"l":[1,2],"n":"x"}`, S{}, collect)
 	agree(t, `[{"x":"a"},{"y":"b"},{"x":1}]`, []Pt{}, collect)
 
 	// The sink's errors are the read's, in order, and the read's own result is the first.
-	doc, built := json.build(transmute([]u8)string(`{"a":"no","l":[1,"x"]}`), json.Spec.Json, allocator = context.temp_allocator)
-	testing.expect_value(t, built.kind, core.Document_Error_Kind.None)
+	doc, built := core.build(transmute([]u8)string(`{"a":"no","l":[1,"x"]}`), json.as(json.Spec.Json), allocator = context.temp_allocator)
+	walktest.expect_nil(t, built)
 	plan, _ := json.plan_make(S, allocator = context.temp_allocator)
-	sink := typed.Collected {
-		errors = make([dynamic]core.Typed_Error, context.temp_allocator),
+	sink := typed.Sink {
+		errors = make([dynamic]core.Typed_Refusal, context.temp_allocator),
 	}
 	s: S
-	e := typed.unmarshal(&doc, core.ROOT, &s, &plan, {collect = &sink}, context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
+	e := typed.unmarshal(&doc, core.ROOT, &s, &plan, {sink = &sink}, context.temp_allocator)
+	walktest.expect_kind(t, e, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, len(sink.errors), 3)
 	testing.expect_value(t, sink.errors[0].at, 5)
 	testing.expect_value(t, sink.errors[2].kind, core.Typed_Error_Kind.Missing_Field)
@@ -295,20 +296,20 @@ a_node_inside_a_document_reads_as_its_span :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	text := `{"a":[{"x":1,"y":2},{"x":3},"no"],"b":{"k":{"x":4,"y":5}},"c":"s\n","d":7.5}`
 	src := transmute([]u8)text
-	doc, built := json.build(src, json.Spec.Json, allocator = context.temp_allocator)
-	testing.expect_value(t, built.kind, core.Document_Error_Kind.None)
+	doc, built := core.build(src, json.as(json.Spec.Json), allocator = context.temp_allocator)
+	walktest.expect_nil(t, built)
 	plan, _ := json.plan_make(Pt, allocator = context.temp_allocator)
 	for node in 0 ..< core.Node_Index(len(doc.nodes)) {
 		a, b: Pt
 		if doc.nodes[node].role == .Key {
-			testing.expect_value(t, typed.unmarshal(&doc, node, &b, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
+			walktest.expect_kind(t, typed.unmarshal(&doc, node, &b, &plan, {}, context.temp_allocator), core.Typed_Error_Kind.Bad_Option)
 			continue
 		}
 		span := core.span(&doc, node)
 		want := json.unmarshal(span, json.Spec.Json, &a, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
 		got := typed.unmarshal(&doc, node, &b, &plan, {}, context.temp_allocator)
 		// A refusal's byte is the document's, whichever node was read.
-		errors_agree(t, want, got, string(span), #location(), u64(uintptr(raw_data(span)) - uintptr(raw_data(src))))
+		errors_agree(t, walktest.typed_of(want), walktest.typed_of(got), string(span), #location(), u64(uintptr(raw_data(span)) - uintptr(raw_data(src))))
 		testing.expect_value(t, a, b)
 	}
 }
@@ -321,7 +322,7 @@ an_answer_reads_as_its_value :: proc(t: ^testing.T) {
 	plan, _ := json.plan_make(Checked, allocator = context.temp_allocator)
 	path := core.Path{steps = []core.Step{core.Name("items"), core.All{}}}
 	doc, err := json.scan(src, json.Spec.Json, path, allocator = context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	testing.expect(t, doc.partial)
 	testing.expect_value(t, len(doc.answers), 3)
 	for a in doc.answers {
@@ -329,7 +330,7 @@ an_answer_reads_as_its_value :: proc(t: ^testing.T) {
 		span := core.span(&doc, a.node)
 		want := json.unmarshal(span, json.Spec.Json, &want_v, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
 		got := typed.unmarshal(&doc, a, &got_v, &plan, {}, context.temp_allocator)
-		errors_agree(t, want, got, string(span), #location(), u64(uintptr(raw_data(span)) - uintptr(raw_data(src))))
+		errors_agree(t, walktest.typed_of(want), walktest.typed_of(got), string(span), #location(), u64(uintptr(raw_data(span)) - uintptr(raw_data(src))))
 		testing.expect_value(t, want_v.id, got_v.id)
 		testing.expect_value(t, len(want_v.rest), len(got_v.rest))
 	}
@@ -340,49 +341,49 @@ an_answer_reads_as_its_value :: proc(t: ^testing.T) {
 	}
 	good := `{"skip":[1,[2]],"items":[{"item_id":1,"x":{"k":[1,2]}},{"item_id":2},{"x":null,"item_id":3}],"tail":{"a":1}}`
 	kept, kerr := json.scan(transmute([]u8)good, json.Spec.Json, path, allocator = context.temp_allocator)
-	testing.expect_value(t, kerr.kind, core.Path_Error_Kind.None)
+	walktest.expect_nil(t, kerr)
 	root_plan, _ := json.plan_make(Root, allocator = context.temp_allocator)
 	whole: Root
-	testing.expect_value(t, typed.unmarshal(&kept, core.ROOT, &whole, &root_plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, typed.unmarshal(&kept, core.ROOT, &whole, &root_plan, {}, context.temp_allocator))
 	testing.expect_value(t, len(whole.items), 3)
 	testing.expect_value(t, whole.items[0].id, 1)
 	testing.expect_value(t, whole.items[2].id, 3)
 
 	// A path that found nothing holds no value.
 	miss, merr := json.scan(src, json.Spec.Json, core.Path{steps = []core.Step{core.Name("absent")}}, allocator = context.temp_allocator)
-	testing.expect_value(t, merr.kind, core.Path_Error_Kind.None)
+	walktest.expect_nil(t, merr)
 	v: Checked
 	testing.expect_value(t, len(miss.answers), 1)
-	testing.expect_value(t, typed.unmarshal(&miss, miss.answers[0], &v, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
+	walktest.expect_kind(t, typed.unmarshal(&miss, miss.answers[0], &v, &plan, {}, context.temp_allocator), core.Typed_Error_Kind.Bad_Option)
 }
 
 @(test)
 a_document_read_refuses_what_a_text_read_refuses :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	text := `{"x":1,"y":2}`
-	doc, _ := json.build(transmute([]u8)text, json.Spec.Json, allocator = context.temp_allocator)
+	doc, _ := core.build(transmute([]u8)text, json.as(json.Spec.Json), allocator = context.temp_allocator)
 	plan, _ := json.plan_make(Pt, allocator = context.temp_allocator)
 	other, _ := json.plan_make(Rich, allocator = context.temp_allocator)
 	p: Pt
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, &other, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Plan_Mismatch)
+	walktest.expect_kind(t, typed.unmarshal(&doc, core.ROOT, &p, &other, {}, context.temp_allocator), core.Typed_Error_Kind.Plan_Mismatch)
 	r: Rich
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &r, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Plan_Mismatch)
-	other_format := core.Spelling{}
-	elsewhere, _ := typed.plan_build(Pt, {spelling = &other_format}, allocator = context.temp_allocator)
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, &elsewhere, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Plan_Mismatch)
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, (^Pt)(nil), &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, nil, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	walktest.expect_kind(t, typed.unmarshal(&doc, core.ROOT, &r, &plan, {}, context.temp_allocator), core.Typed_Error_Kind.Plan_Mismatch)
+	other_format := core.Readers{}
+	elsewhere, _ := typed.plan_build(Pt, {readers = &other_format}, allocator = context.temp_allocator)
+	walktest.expect_kind(t, typed.unmarshal(&doc, core.ROOT, &p, &elsewhere, {}, context.temp_allocator), core.Typed_Error_Kind.Plan_Mismatch)
+	walktest.expect_kind(t, typed.unmarshal(&doc, core.ROOT, (^Pt)(nil), &plan, {}, context.temp_allocator), core.Typed_Error_Kind.Bad_Option)
+	walktest.expect_nil(t, typed.unmarshal(&doc, core.ROOT, &p, nil, {}, context.temp_allocator))
 	testing.expect_value(t, p, Pt{1, 2})
 	p = {}
-	testing.expect_value(t, typed.unmarshal(&doc, core.Node_Index(len(doc.nodes)), &p, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
-	testing.expect_value(t, typed.unmarshal(&doc, core.NO_NODE, &p, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, &plan, {dups = .Refuse}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
-	testing.expect_value(t, typed.unmarshal(nil, core.ROOT, &p, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
+	walktest.expect_kind(t, typed.unmarshal(&doc, core.Node_Index(len(doc.nodes)), &p, &plan, {}, context.temp_allocator), core.Typed_Error_Kind.Bad_Option)
+	walktest.expect_kind(t, typed.unmarshal(&doc, core.NO_NODE, &p, &plan, {}, context.temp_allocator), core.Typed_Error_Kind.Bad_Option)
+	walktest.expect_kind(t, typed.unmarshal(&doc, core.ROOT, &p, &plan, {dups = .Refuse}, context.temp_allocator), core.Typed_Error_Kind.Bad_Option)
+	walktest.expect_kind(t, typed.unmarshal(nil, core.ROOT, &p, &plan, {}, context.temp_allocator), core.Typed_Error_Kind.Bad_Option)
 	empty: core.Document
-	testing.expect_value(t, typed.unmarshal(&empty, core.ROOT, &p, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
+	walktest.expect_kind(t, typed.unmarshal(&empty, core.ROOT, &p, &plan, {}, context.temp_allocator), core.Typed_Error_Kind.Bad_Option)
 	// Nothing was stored by a refusal at the start.
 	testing.expect_value(t, p, Pt{})
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, typed.unmarshal(&doc, core.ROOT, &p, &plan, {}, context.temp_allocator))
 	testing.expect_value(t, p, Pt{1, 2})
 }
 
@@ -401,12 +402,12 @@ a_deep_document_uses_the_wide_stacks :: proc(t: ^testing.T) {
 	for _ in 0 ..< depth {
 		append(&text, '}')
 	}
-	doc, built := json.build(text[:], json.Spec.Json, json.Options{max_depth = u32(depth)}, allocator = context.temp_allocator)
-	testing.expect_value(t, built.kind, core.Document_Error_Kind.None)
+	doc, built := core.build(text[:], json.as(json.Spec.Json, json.Options{max_depth = u32(depth)}), allocator = context.temp_allocator)
+	walktest.expect_nil(t, built)
 	plan, _ := json.plan_make(Deep, allocator = context.temp_allocator)
 	d: Deep
 	e := typed.unmarshal(&doc, core.ROOT, &d, &plan, {}, context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, e)
 	n := 0
 	for p := &d; p != nil; p = p.d {
 		n += 1
@@ -428,7 +429,7 @@ a_read_borrows_the_source_and_not_the_document :: proc(t: ^testing.T) {
 		s:    string,
 		m:    map[string]string,
 		r:    typed.Raw,
-		n:    typed.Number_Text,
+		n:    core.Number_Text,
 	}
 	arena: mem.Dynamic_Arena
 	mem.dynamic_arena_init(&arena)
@@ -438,15 +439,15 @@ a_read_borrows_the_source_and_not_the_document :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 
 	// Without `borrow_strings` nothing the target holds is the source's or the document's.
-	doc, _ := json.build(src, json.Spec.Json, allocator = context.temp_allocator)
+	doc, _ := core.build(src, json.as(json.Spec.Json), allocator = context.temp_allocator)
 	copied: Holder
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &copied, &plan, {}, scratch).kind, core.Typed_Error_Kind.None)
-	testing.expect(t, !inside(raw_data(copied.keys[0]), src) && !inside(raw_data(copied.s), src) && !inside(raw_data(string(copied.r)), src) && !inside(raw_data(string(copied.n)), src))
+	walktest.expect_nil(t, typed.unmarshal(&doc, core.ROOT, &copied, &plan, {}, scratch))
+	testing.expect(t, !inside(raw_data(copied.keys[0]), src) && !inside(raw_data(copied.s), src) && !inside(raw_data(string(copied.r)), src) && !inside(raw_data(copied.n.text), src))
 
 	// With it, a string with nothing to decode is a slice of the source, and a decoded one is the read's.
 	borrowed: Holder
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &borrowed, &plan, {borrow_strings = true}, scratch).kind, core.Typed_Error_Kind.None)
-	testing.expect(t, inside(raw_data(borrowed.keys[0]), src) && inside(raw_data(borrowed.s), src) && inside(raw_data(string(borrowed.r)), src) && inside(raw_data(string(borrowed.n)), src))
+	walktest.expect_nil(t, typed.unmarshal(&doc, core.ROOT, &borrowed, &plan, {borrow_strings = true}, scratch))
+	testing.expect(t, inside(raw_data(borrowed.keys[0]), src) && inside(raw_data(borrowed.s), src) && inside(raw_data(string(borrowed.r)), src) && inside(raw_data(borrowed.n.text), src))
 	testing.expect(t, !inside(raw_data(borrowed.keys[1]), src))
 	for k, v in borrowed.m {
 		testing.expect(t, inside(raw_data(v), src))
@@ -462,6 +463,6 @@ a_read_borrows_the_source_and_not_the_document :: proc(t: ^testing.T) {
 	testing.expect_value(t, borrowed.s, "also plain")
 	testing.expect_value(t, borrowed.m["e\t"], "w")
 	testing.expect_value(t, borrowed.r, typed.Raw(`{"a":1}`))
-	testing.expect_value(t, string(borrowed.n), "12345678901234567890123")
+	testing.expect_value(t, borrowed.n.text, "12345678901234567890123")
 	testing.expect_value(t, copied.keys[1], "esc\n")
 }

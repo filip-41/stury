@@ -251,7 +251,7 @@ values_run :: #force_inline proc "contextless" ($ESC, $KEYS, $PAST: bool, h: ^$H
 		dm &= dm - 1
 		esc, lax := false, false
 		when ESC {
-			when S == .Tsv || H == Cells {
+			when S == .Tsv || intrinsics.type_is_specialization_of(H, Cells_Of) {
 				esc = span_esc(bs, pos, field_lo2, at, carry)
 			}
 			lax = span_esc(ill, pos, field_lo2, at, ill_carry)
@@ -332,7 +332,7 @@ read_tokens :: #force_inline proc "contextless" ($LAX, $COMMENTS: bool, w: ^Pass
 				dm &= dm - 1
 				esc, lax := false, false
 				if !plain_block {
-					when S == .Tsv || H == Cells {
+					when S == .Tsv || intrinsics.type_is_specialization_of(H, Cells_Of) {
 						esc = span_esc(bs, pos, field_lo, at, carry)
 					}
 					lax = span_esc(ill, pos, field_lo, at, ill_carry)
@@ -419,7 +419,7 @@ read_tokens :: #force_inline proc "contextless" ($LAX, $COMMENTS: bool, w: ^Pass
 		}
 		esc, lax := false, false
 		if !plain_block {
-			when S == .Tsv || H == Cells {
+			when S == .Tsv || intrinsics.type_is_specialization_of(H, Cells_Of) {
 				esc = span_esc(bs, pos, field_lo, at, carry)
 			}
 			lax = span_esc(ill, pos, field_lo, at, ill_carry)
@@ -458,7 +458,7 @@ read_tokens :: #force_inline proc "contextless" ($LAX, $COMMENTS: bool, w: ^Pass
 		w.open_ill = false
 	}
 	if !plain_block {
-		when S == .Tsv || H == Cells {
+		when S == .Tsv || intrinsics.type_is_specialization_of(H, Cells_Of) {
 			w.field_esc = span_esc(bs, pos, field_lo, pos + 64, carry)
 		}
 		when LAX {

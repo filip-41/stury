@@ -4,13 +4,13 @@ import "base:runtime"
 import core ".."
 
 // Feeds a hook the tokens of nodes `from ..< to` of `doc` as the walk gave them: each close comes back from a stack of
-// container ends, each key of a headed record from `doc.shared_keys`, and a `Skip` steps over the value's subtree. A
+// container ends, each key of a headed record from the table's header, and a `Skip` steps over the value's subtree. A
 // `Stop` ends the replay at once, and `out` holds the registers either way. A container's token keeps its node's subtree
 // size and child count, where the walk gives zeros, and an `End` carries its container's last node in `lo`.
 //
 // `step` gets a token and the node it came from. With `$OPEN` false an `End` carries `core.NO_NODE` and `ends` holds a frame
 // per depth. With it true an `End` carries the container's node, and `ends` holds two words per depth. `keyed` says
-// whether the value at node `i` of the container `open` has a key in `doc.shared_keys` and which, and is called only for
+// whether the value at node `i` of the container `open` has a key in the table's header and which, and is called only for
 // a document that has them. `open` is `core.NO_NODE` unless `$OPEN`.
 //
 // The hook's stacks hold at least the depths `ends` holds. A container that leaves `ends` room for no deeper level
@@ -40,7 +40,7 @@ feed_nodes :: proc "contextless" (
 	}
 	// No step writes the document, so its nodes and header row are read once.
 	nodes := doc.nodes
-	headed := doc.shared_keys != 0
+	headed := core.header_of(doc) != 0
 	depth := 0
 	i := from
 	action: core.Action

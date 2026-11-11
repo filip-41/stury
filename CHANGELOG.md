@@ -4,6 +4,76 @@
 
 ### Command line
 
+- `--schema-draft D` names the draft of a schema with no `$schema` (`4`, `6`, `7`, `2019-09` or `2020-12`, the
+  default) for `check --schema`, `fmt --schema`, `diff --old-schema --new-schema`, `schema sample` and `schema gen`.
+- `stury schema gen` adds a `pattern` that holds a comma or a quote with `model.register_field`, where it wrote it in
+  the tag.
+- `fmt --schema` judges each file as `check --schema` does and formats a file that passes as plain `fmt` does, so it
+  keeps comments and spellings, writes one table for a run, writes an array of scalars as rows, and gives exit 5 with
+  the reason for a value the output cannot write. A file that fails is not written, and `--in-place` and `--check`
+  leave it as it is. A CSV or TSV output is judged again as it reads back, by `--infer` when the input is no table,
+  which then quotes a string that reads as a number, `true` or `false`.
+- `fmt` from a JSON array, NDJSON or a table to another format holds one row or record at a time.
+- `check --filter` narrows `if` and `select` through `and`, `or` and `X | type == "kind"`, so `index`, `indices` and
+  `rindex` on an array are typed, and a refusal inside a builtin the prelude defines names the call that was written.
+  Under `--from csv` or `tsv` a schema that describes no table is a usage error, and so is `--report lines`.
+- An option only some commands take names those commands and what it does, and every other command refuses it:
+  `diff` refuses `--report`, `--count` and `--diff`. `schema sample` and `schema gen` take `--schema-ref`.
+- `schema sample` writes valid `uri-template` values, and a schema for which it finds no value says that no value
+  was found. `--report basic` writes a line for an empty NDJSON or `--seq` input. `schema gen` names the path of a
+  member whose name is empty.
+- A relative `$ref` resolves against the schema file's place, and `--schema-ref` bounds only which files are read.
+  A schema that does not compile is told in one form, with the `--schema-ref` hint only for a reference.
+- A failure message names the bound a value misses or the types it may have, and `not` has its own message. A quoted
+  CSV cell's failure is placed at its opening quote. Library: `core.Typed_Error_Kind.No_Invalid_Sample`.
+- `check --filter --from csv` takes the row from a table schema's `items` and refuses a member it does not describe.
+- `schema sample` names the schema file in its errors, says when `--invalid` finds no failing value, takes `--infer`
+  for a CSV or TSV sample, prefers a table with rows, and spells a decimal plainly. `schema infer` of an empty input,
+  and of one whose schema nests too deep, is exit 5. `schema sample` and `schema gen` refuse `--max-depth`, and
+  `schema sample` `--comments` for a format with no comments.
+- `fmt` takes `-c` as `--indent 0`. A "has no use" refusal says what the command writes, and a filter given by
+  `--filter` is not taken for a mistyped command. `--report basic` counts the records before a cut one as records.
+
+- An empty unquoted CSV or TSV cell is a `null` in `check --schema`, `schema infer`, the library's table and document checks and
+  the schema conversion's output check, as it is in a filter run, where it was an absent member. `schema infer` puts
+  `null` in the type of a column with empty cells and requires the column. A quoted `""` stays a string.
+  `check --schema` reads the other cells as `--infer` says, as `schema infer --infer` does.
+
+- `stury schema sample` streams its values, so the memory it holds does not grow with `--count`. Library:
+  `schema.sample_each` hands each value to a sink. `schema.Change.old` and `.new` are values, so `stury diff --json` on
+  schemas writes them as JSON. `--report basic` and `--report problem` always name the file. `stury diff` refuses an
+  empty file, a `--key` that names no array, and options it ignores.
+
+- `stury fmt --schema FILE` converts through a JSON Schema: the input passes it, the members it leaves open are kept, and
+  the output passes it as the output format reads it. Library: `schema.Converter` and `schema.convert`.
+
+- `stury schema gen SCHEMA [--package NAME] [--format-assert]` writes the Odin types a model reads a schema's values
+  with, and exits 1 naming the keyword where no type spells one. Library: `schema.write_odin`. `oneOf`, `uniqueItems`,
+  `not`, `if`, `contains`, `propertyNames`, `patternProperties` and the dependents are spelled as model rules:
+  `model.Union_Mode.One_Match`, the tag item `unique` and `model.register_schema`, which takes a JSON Schema fragment
+  for a type.
+
+- `stury schema sample --to csv` writes the union of the rows' members as its columns, an absent member as an empty cell,
+  and refuses a nested cell.
+
+- `stury schema infer [FILE...]` writes the JSON Schema that every record of the inputs passes, and `stury schema sample
+  SCHEMA` writes values that pass a schema, or with `--invalid` values that fail it. Both take the layout options.
+
+- `stury check --schema FILE` also checks each input against a JSON Schema and tells every failure, exit 1.
+  `--report basic` and `--report problem` write the JSON Schema basic output or an RFC 9457 problem document,
+  `--max-errors`, `--format-assert` and `--schema-ref` shape the check. Long files and records are checked on all cores.
+
+- `stury check --filter F --schema S` types the jq filter F against the schema S of its inputs: a member no object of
+  S lists (`.emial`) and a step on kinds that never take it are refused, exit 1, and the schema every output of F
+  passes is written. `--from csv` and `tsv` type F on the records a table reads.
+
+- `stury diff OLD NEW` tells the value changes of two inputs a line each, exit 1 when they differ. Arrays match as
+  sequences, as sets (`--set`), by position (`--position`) or by a member (`--key`). `--old-schema S1 --new-schema S2`
+  compares two schemas, telling each change and whether each schema takes what the other does, with a value that breaks it
+  when not; `--compat` exits 1 unless that direction is proven. A schema with one data file judges the data by it and tells the members the data has that it does not describe.
+  `--shape` compares the shapes two data files infer to, and a file of records is one array of them.
+  `edit --diff` tells the value changes an edit makes.
+
 - `stury edit FILTER [FILE...]` writes each input back with the filter's one output spliced into its bytes: every byte
   the filter does not change is kept, comments and line ends included, and an insert follows its container's layout. A built object or array is laid out
   as the container it lands in: one member a line in its indent and colon spacing, or compact.
@@ -76,9 +146,67 @@
 - A regex holds a run of plain characters as one node over the pattern's text, and a sequence of one element as that
   element, so a long literal, alternation or run of groups compiles in about jq's memory. A pattern of more than 32767
   groups fails with `Regex failure: too many captures`, as jq's does.
+- `test` and the other regex functions answer from automata built when the pattern compiles, with the same answers as
+  before: `test` from a deterministic automaton of the whole search, and `match`, `capture`, `sub`, `gsub`, `scan` and
+  `splits` from one that finds where Oniguruma's first match ends and one run back from there that finds where it
+  starts, the groups then read at that start alone. Case folding, `x`, `s`, multiline, `\b`, `\B`, `^`, `$` and `\Z`
+  are in the automata. A pattern with look-around, back-references, calls or absent groups, one whose automaton passes
+  the build's work budget, the `l` and `n` flags and a search that Oniguruma's retry limit could end search as before,
+  and a pattern with an empty loop or `\K` answers only `test` from the automaton.
+- Numbers are equal, ordered and hashed by the exact decimal a literal spells, at any size, in the filter's `==`, `<`,
+  `sort`, `unique` and `group_by` as in the library. jq reads a literal past decNumber's range as its double, so it
+  calls `1e1000000000` and `1e1000000001` equal and `1e-2000000000` zero. A double that arithmetic made from a longer
+  literal, and an infinity, are no longer equal to a literal they round to.
+  A JSON5 decimal written with a sign or a point is compared by its digits, and a CSV or TSV cell is a string in these
+  comparisons.
 
 ### Library API
 
+- A model's dump options leave out only a member a load does not require, so every dump of a valid value loads back. A
+  CSV or TSV dump writes every member, a null as an empty cell.
+- A CSV or TSV cell `""""` reads as the string `"`, through a model too.
+- A tagged union's arm in `model.schema` holds its tag as a `const` member it requires, in the Load and the Dump
+  schema. A union of one arm is that arm, and a fixed array is `items` with `minItems` and `maxItems`.
+- `model.schema` of a `time.Time` member holds the years the type holds in its `pattern`.
+- `schema.write_odin` writes a `number` whose bounds a double does not hold as `core.Number_Text`, which a model reads
+  at any size, a distinct type of it included. A model's `core.Number_Text` member takes null unless tagged
+  `not_null`.
+- `schema.compile_description` returns a `^Compiled` and an error, as `schema.compile` does, which `schema.destroy`
+  frees.
+
+- `json.load_schema(text, opts)` takes `json.Schema_Options`: the default draft (`json.Schema_Draft`), the directory
+  references are read from (`refs`), `format_assert`, `base` and `dups`. `json.Schema` is `schema.Compiled`, so a
+  loaded schema's description is `s.description`.
+- `schema.compile` reads a schema from its text in a format and returns the compiled schema it owns, which
+  `schema.destroy` frees. `schema.open`, `schema.Loaded`, `schema.loaded_destroy`, `schema.read`, `schema.Resolver` and
+  `schema.resolver_destroy` are gone: `Options.refs` and `Options.draft` replace `Options.resolver`.
+- A `pattern=` tag item takes the rest of the tag, commas included, so it comes last. A model whose `pattern=` is
+  followed by another tag item is refused at compile, naming the item, and a pattern that holds such text is added with
+  `model.register_field`.
+- `model.Problem`, `model.problem`, `model.problem_destroy` and `model.write_problem` hold the problem document, which
+  was `write.Problem`.
+- `regex.Regex` keeps its program private: `regex.group_names` gives the groups' names, and `regex.Flags.longest` and
+  `.not_empty` are set at compile. `typed.store_integral_enum`, `typed.Use`, `typed.Model_Plan`, `typed.Reading`,
+  `typed.Failure` and `typed.Before_Read` are private.
+- `schema.infer`, `schema.merge`, `schema.inferred` and `schema.infer_records` build a description from values and
+  records, which `schema.write` writes as JSON Schema. `schema.sample` writes values that pass a description, or fail it,
+  and is `.No_Sample` for a description that no value passes. A node has a `description` and a markup node
+  (`xml.nodeType`), and `write.comment` writes a comment in a format that has them.
+- `schema.compare` tells whether one description takes every value another does, with a proof, a witness or the keyword
+  the proof stopped at, and the changes between them. `core/diff` lists the changes between two values of any format.
+  `core.write_steps` writes a path.
+- `core.equal`, `core.compare` and `core.hash` take a number literal at its exact decimal at any size, an exponent of
+  any width included, where they read one past decNumber's range as its double. `spell.Decimal` holds an exponent of more
+  than 30 digits in `wide` and `wide_neg`, with the shift of its digits in `point`, in place of `saturated`, and
+  `spell.write_point` writes the point either way. `core.compare` takes `read_plain`, false for a plain node that is to
+  stay a string. `spell.decimal_compare` has one result.
+- A schema `pattern` over a text too long for the regex's visited set gets an answer from the pattern's automaton, where
+  the check failed the text before. A schema compiles each distinct pattern once, and its read checks a pattern's syntax
+  without building the automaton. `regex.refusal` is that check.
+- An ECMA pattern that begins with look-aheads after `^` (`^(?=...)(?!...)...`) answers a schema's `pattern` from one
+  automaton, the product of the pattern's own and one per look-ahead.
+- `regex.compile` builds the automata for every pattern, not only under `ecma`, unless `automaton` is false.
+  `regex.Scratch.ends` holds where the automaton found the last search's match to end.
 - `core.kind` of a CSV or TSV cell is the kind the cell reads as, in place of `.Plain`: an empty unquoted cell is
   `.Null`, as a typed read and the CLI read it, and with `infer` a boolean or number cell is `.True`, `.False` or
   `.Number`. A JSON write of a dsv document writes an empty cell as `null` without `infer` too. `core.resolve` is gone.
@@ -114,19 +242,106 @@
   unless the options hold `.Ragged`, so what they write reads back with the same options.
 - `core.commit` of a JSONC document as JSON5 respells a U+2028 or U+2029 in an untouched `//` comment as `\u2028` or
   `\u2029`, as the tree writer does, instead of refusing the result with `.Bad_Result`.
+- Each `json` and `dsv` entry point is a group of a form that takes its spec as a constant (`json.validate(src, .Json)`)
+  and a form that takes it at run time (a variable, or an `As`). A program that names its specs links only the walks it
+  reaches. A document built through a constant form holds
+  no run-time services, so its `query`, `write` and `edit_list_init` are the format package's, with the spec named.
+- `json` and `dsv` export the names of `core`, `core/typed`, `core/write`, `core/records` and `host` that a program
+  calls, so a program imports one package (`json.Document`, `json.Error`, `json.render`, `json.parse_path`,
+  `json.records_check`, `json.Pool`). `destroy` is one group over a document, a path, an edit list, a plan, a sink, a
+  record writer and a pool. tools/names.txt lists the exports and `make api-write` writes `json/names.odin` and
+  `dsv/names.odin`.
+- `json.query`, `dsv.query`, `json.commit` and `dsv.commit` replace `core.query` and `core.commit`. `commit` returns
+  `Error`. The `query` and `commit` slots of the format tables are gone.
+- `core.Value` is the one value of the library, a union a built value and a node of a document both fit: null, a
+  `bool`, an `f64`, a `^Number_Text` that keeps a number's digits, a `string`, an `^Array`, an `^Object` and a
+  `Node_Ref`, the `{doc, node}` struct that was `core.Value`. `kind`, `length`, `member`, `children`, `pairs`, `text`
+  and `number` read a value as they read a node, `equal`, `compare` and `hash` order values as jq does, and
+  `write_value`, `marshal_value` and `unmarshal_value` write one, make one from an Odin value and read one into an
+  Odin value.
+- `set`, `set_member` and `insert` take an Odin value, which the document's format spells in the layout of the place it
+  goes: a string, a number, a bool, a `Value`, or a struct, a slice or a map with its plan. `typed.Raw(text)` is the
+  text of a value as it is. A string that is not UTF-8 is refused. `set` on an edit list is `set_node` in `json` and
+  `dsv`, where `set` takes a path.
+- `json.answers` and `dsv.answers` give a path's answers one at a time through `next`, with no document.
+  `json.walk` and `dsv.walk` take a `^Cursor`, which holds where a hook's `.Stop` left the walk, and `walk_resume`
+  goes on from there.
+- A dsv build with `Options.infer` writes each cell's kind into its node, and a table's row is reached by its
+  position: `child_at` on a table with a width is one step whatever the index.
+
+- `model.dump` and `model.dump_stream` write a value by its model: never a `write_only` member, and with `Dump_Opts`
+  leaving out the members whose `Fields_Set` bit is clear (`exclude_unset`, pydantic's meaning: what a load defaulted
+  or never read, a `read_only` member kept), that hold null (`exclude_none`) or that equal their default
+  (`exclude_defaults`). The field tag `omitunset` leaves out one member that holds null and is unset, and a struct
+  with no `Fields_Set` refuses it. A CSV dump writes a member it leaves out as an
+  empty cell. `check` validates what the dump writes first and refuses a value that fails as `.Check_Failed`.
+- `model.patch(&m, &existing, body)` applies a patch text: the members' rules judge the patch, the members it leaves
+  out keep what `existing` holds, struct validators and applicators judge the merged value, and `existing` is written
+  only when nothing failed. `existing` holds memory from the patch's allocator: a patch frees the members it replaces,
+  and a failed one frees what it read.
+- A load judges the value its `dups` keeps, the last or the first, and a repeated key it refuses has the repeat's path
+  in the sink. `Load_Opts{dups = .All}` is `.Bad_Option` with its reason. A refused load leaves a missing required
+  member's `Fields_Set` bit clear.
+- A model copies the defaults, names and tags it takes from the registry, which may be destroyed before its models.
+- A CSV or TSV model reads an empty unquoted cell as null, as `check --schema` does: a `Maybe` member holds nil, a
+  `not_null` one and a plain `string` refuse it, and a dump's empty cell reads back as nil. A `not_null` `Maybe`
+  member compiles for a table.
+- `model.schema` describes two `Maybe` members of one type that differ on null as two nodes.
+- `schema.write_odin` and `stury schema gen` register a member's string, number or boolean `default`, and refuse a
+  default no literal of the member's type holds and an integer whose two bounds no `i64` or `u64` holds.
+- The format tag names and shapes a member (a rename, `-`, `omitempty`, `omitunset`, `required`, `unknown`) and
+  `model:` holds its rules and roles. `required` with `optional` is refused, and a refusal of `required` with
+  `omitempty` or `omitunset` names the tag.
+- `load`, `validate` and a schema's check list failures in one order: by the value's path, a value before what it
+  holds. An applicator runs when a member failed.
+- `model.compile` and `schema.bind` take `json.checks(spec, opts)` or `dsv.checks(spec, opts)`, the checks of a format
+  and the layout they read by. `json.reads` and `dsv.reads` serve a plan made from a type and link no model check.
+- `register_after` takes several validators for one member, run in the order they were registered.
+- `schema.write_odin` writes the Odin source of the types of a description's values, with a `register` procedure for
+  the rules no tag holds, and refuses a keyword no type spells as `.Unsupported`, naming it.
+- A model's `not_null` tag item keeps null out of a pointer or `Maybe` member, which otherwise reads null as nil. A struct's
+  `extra` member may be a `map[string]T`, which judges each member it captures as a `T`, and the Load schema describes
+  it as `additionalProperties`. A struct registered with `.Forbid` refuses an unknown member when it has no required
+  member too. A `union {}` member reads only null.
+- `model.problem` makes an RFC 9457 problem document of a sink's entries, for any format to write.
+  `load`, `load_value` and `read` take `Load_Opts` in place of `dups`.
 
 ### Errors
 
+- A model and its schema refuse a value with the same kind, under the schema's names. A number past a bound is
+  `.Above_Maximum` or `.Below_Minimum`, in a plain `unmarshal` too, where it was `.Out_Of_Range`, which stays for a map
+  key that spells no integer and a `cstring` holding NUL. A fixed array or a capacity given too few or too many values
+  is `.Too_Few` or `.Too_Many`, where it was `.Wrong_Length`. A member `read_only` or unknown under `Extra.Forbid` is
+  `.Not_Allowed`, and `.Read_Only` is gone. A model's union that no arm takes is `.No_Arm`, where it was `.Missing_Tag`,
+  `.Not_A_Member` or `.Wrong_Kind`, and a model's map key that fails its rule is `.No_Match` at the map. A tag member a
+  struct of the union also holds is `.Bad_Tag`, where it was `.Unsupported`.
+- `model.register_default`, `register_factory`, `register_before` and `register_after` naming a member the type does
+  not have are refused by `model.compile` as `.Bad_Tag`, naming the type and the member. `register_factory` refuses a
+  factory of another type at once as `.Invalid_Argument`.
+
+- `.Check_Failed` is a value a model's dump checked and found against its rules, with the first failure's code.
+- `.Bad_Option` carries its reason in `want.text`, which render writes. A model's plan given to `unmarshal` or
+  `check` of its own format and type is `.Bad_Option` saying it reads only through `model.load`.
 - `core.render(w, src, e)` writes any error type, and a path or edit error carries the reason it was refused
   (`core.Path_Reason`, `core.Edit_Reason`), which render names.
 - A typed refusal names the type wanted and the value found (`Expected i64, found "lots" at .[0].population`), the tag
   flag a field does not take, and the formats of a plan that does not match its read.
+- Every public call that returned a `Fault`, `Document_Error`, `Path_Error`, `Path_Edit_Error` or `Typed_Error` returns
+  `core.Error`, a union of those types, `runtime.Allocator_Error` and `Typed_Error_Kind`, so `or_return` passes any of
+  them up and `err != nil` is the test. `core.error_of` makes the union from a concrete error. A refused allocation is
+  `runtime.Allocator_Error.Out_Of_Memory`, a walk's fault is the `Fault` arm, and a repeated key met by a build, read
+  or scan is `Fault{kind = .Duplicate_Key}`. A `Typed_Error`'s path is `steps: []Step`, copied to
+  `context.temp_allocator`, and the type with the path in line, which a sink's `errors` hold, is `Typed_Refusal`.
+  `core.render` and `core.write_code` take an `Error`, and `Path_Edit_Error`,
+  `render_edit` and `write_edit_code` are gone. A repeated key under `.Refuse` in a path edit has the code
+  `duplicate_key`.
 
 ### Bench
 
 - Every runner takes the same arguments and prints the machine it ran on. The stury arm is named `stury`. The typed
   lanes have serde_json and sonic-rs arms, and every write arm writes into one buffer. `gen.py --check` writes
-  nothing, and the CLI comparisons take `CASES`. [bench/README.md](bench/README.md) describes the harness.
+  nothing, and the CLI comparisons take `CASES`. `bench/write dump` writes the typed lanes through `model.dump`. [bench/README.md](bench/README.md) describes the harness.
+- `bench-cli` times the regex functions.
 
 ### Development
 

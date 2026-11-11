@@ -8,6 +8,9 @@ import "core:fmt"
 import "core:os"
 import "core:time"
 import core "../../core"
+import compose "../../core/compose"
+import typed "../../core/typed"
+import write "../../core/write"
 import dsv "../../dsv"
 import json "../../json"
 
@@ -29,21 +32,21 @@ main :: proc() {
 	suffix := os.args[1]
 	dsv_text := has_suffix(suffix, ".csv") || has_suffix(suffix, ".tsv")
 	doc: core.Document
-	derr: core.Document_Error
+	derr: core.Error
 	switch {
 	case has_suffix(suffix, ".tsv"):
-		doc, derr = dsv.build(src, .Tsv)
+		doc, derr = core.build(src, dsv.as(.Tsv))
 	case has_suffix(suffix, ".csv"):
-		doc, derr = dsv.build(src, .Csv)
+		doc, derr = core.build(src, dsv.as(.Csv))
 	case has_suffix(suffix, ".json5"):
-		doc, derr = json.build(src, .Json5)
+		doc, derr = core.build(src, json.as(.Json5))
 	case has_suffix(suffix, ".jsonc"):
-		doc, derr = json.build(src, .Jsonc)
+		doc, derr = core.build(src, json.as(.Jsonc))
 	case:
-		doc, derr = json.build(src, .Json)
+		doc, derr = core.build(src, json.as(.Json))
 	}
 	defer core.destroy(&doc)
-	if derr.kind != .None {
+	if derr != nil {
 		fmt.eprintln("build:", derr)
 		os.exit(1)
 	}
@@ -67,7 +70,7 @@ main :: proc() {
 	for k in 0 ..< n {
 		// Spreads the edits over the whole file, so their order in the log is not their order in the source.
 		node := nodes[k * len(nodes) / max(n, 1)]
-		if e := core.set(&list, node, text); e.kind != .None {
+		if e := write.set(&list, node, typed.Raw(text)); e != nil {
 			fmt.eprintln("set:", e)
 			os.exit(1)
 		}
@@ -77,9 +80,9 @@ main :: proc() {
 	out: []u8
 	for _ in 0 ..< 3 {
 		start = time.tick_now()
-		next, _, cerr := core.commit(&list)
+		next, _, cerr := compose.commit(&list)
 		d := time.tick_since(start)
-		if cerr.kind != .None {
+		if cerr != nil {
 			fmt.eprintln("commit:", cerr)
 			os.exit(1)
 		}

@@ -14,7 +14,7 @@ import json "../../json"
 // `direct` `core.format` of `src`, whose document and text come from an arena emptied after each pass.
 doc_lane :: proc(src: []u8, direct: bool, pretty: bool) {
 	doc, derr := json.build(src, .Json, {}, .Last, context.allocator)
-	if derr.kind != .None {
+	if derr != nil {
 		fmt.eprintln("document error:", derr)
 		os.exit(1)
 	}
@@ -29,15 +29,15 @@ doc_lane :: proc(src: []u8, direct: bool, pretty: bool) {
 	for i in 0 ..< timing.WARMUP + timing.TIMED {
 		context.allocator = virtual.arena_allocator(&scratch)
 		text: []u8
-		err: core.Typed_Error
+		err: core.Error
 		start := time.tick_now()
 		if direct {
 			text, err = core.format(src, json.as(.Json), opts)
 		} else {
-			text, _, err = core.write(&doc, opts, allocator = fixed)
+			text, _, err = json.write(&doc, .Json, opts, allocator = fixed)
 		}
 		d := i64(time.tick_since(start))
-		if err.kind != .None {
+		if err != nil {
 			fmt.eprintln("write:", err)
 			os.exit(1)
 		}

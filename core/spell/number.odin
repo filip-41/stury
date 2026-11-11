@@ -192,6 +192,13 @@ number_strict :: proc(src: []u8, lo, hi: u64) -> (Number, bool) {
 	return number_of_lex(src, lo, hi, n), true
 }
 
+// Returns the integer and fraction digit counts of `src[lo:hi]` and whether it has an exponent, or false if the span is
+// not a number in RFC 8259's grammar. It decodes no value.
+number_shape_strict :: proc "contextless" (src: []u8, lo, hi: u64) -> (int_digits, frac_digits: u64, has_exp, ok: bool) {
+	n := lex_decimal(src, lo, hi, true)
+	return n.int_digits, n.frac_digits, n.has_exp, n.ok
+}
+
 // Decodes `src[lo:hi]` with the loose grammar, and also returns whether the span is a plain integer, whether it is a
 // valid number with the strict grammar, and whether it is a valid number. The loose grammar is the strict one plus a
 // leading `+`, leading zeros, and a point with no digits on one side.
@@ -326,7 +333,7 @@ hex_significand :: proc(src: []u8, lo, hi: u64) -> (top: u64, shift: int, neg: b
 
 // Lexes `src[lo:hi]` with the strict or loose grammar. `n.ok` is false if the span is not a number.
 @(private)
-lex_decimal :: proc(src: []u8, lo, hi: u64, strict: bool) -> (n: Number_Lex) {
+lex_decimal :: proc "contextless" (src: []u8, lo, hi: u64, strict: bool) -> (n: Number_Lex) {
 	if lo >= hi || hi > u64(len(src)) {
 		return
 	}

@@ -1,15 +1,17 @@
 # Library guide
 
-How to use `stury:core`, `stury:json` and `stury:dsv`, with snippets from the programs in [examples/](../examples).
-Each public name's doc comment is its contract, and [API.txt](../API.txt) lists the user surface. [API_SHARED.txt](../API_SHARED.txt) lists the public names that only the
-packages of this repository use. The files in this
+How to use `stury:json` and `stury:dsv`, with snippets from the programs in [examples/](../examples). A program imports the
+package of its format and calls everything through it. Each public name's doc comment is its contract, and
+[API.txt](../API.txt) lists the names of the format packages, then the names a format's author reads.
+[API_SHARED.txt](../API_SHARED.txt) lists the public names that only the packages of this repository use. The files in this
 directory describe one part each: [document.md](document.md), [paths.md](paths.md), [typed.md](typed.md),
 [writer.md](writer.md) and [records.md](records.md).
 
 ## Requirements
 
 - Odin `dev-2026-11` or later. The collection is named `stury` and points at this directory: `-collection:stury=.`.
-  The imports are `stury:core`, `stury:json`, `stury:dsv`, `stury:core/records`, `stury:core/typed` and `stury:host`.
+  A program imports `stury:json`, `stury:dsv` or both. Those packages export the names of `stury:core`,
+  `stury:core/typed`, `stury:core/write`, `stury:core/records`, `stury:core/schema` and `stury:host` that a user calls.
 - 64-bit little-endian targets: darwin and linux, on amd64 and arm64. The command line also builds on Windows.
 - On amd64 the floor is x86-64-v2. Long strings are scanned wider on processors that have AVX-512BW, chosen at run
   time.
@@ -19,12 +21,17 @@ directory describe one part each: [document.md](document.md), [paths.md](paths.m
 
 | Package | Holds |
 |---|---|
-| `core` | what every format shares: `Document`, paths, `query`, readers, edits, `Write_Options`, errors and `render` |
-| `json` | the JSON formats: `validate`, `build`, `find`, `scan`, `set`, `commit`, `unmarshal`, `marshal` |
-| `dsv` | the delimited formats, the same calls |
-| `core/records` | NDJSON, RFC 7464 and CSV-style text as a sequence of records: `check`, `open`, `open_stream`, `next`, `each`, the writer |
+| `json` | the JSON formats: `validate`, `build`, `find`, `scan`, `set`, `query`, `commit`, `unmarshal`, `marshal`, and the names of the packages below that a user calls: `Document`, `Error`, `render`, `parse_path`, `destroy` and the rest |
+| `dsv` | the delimited formats, the same calls and names |
+| `core` | what every format shares, and the interface a format's author or a run-time choice of format uses: `As`, `build` and `validate` over a handle |
+| `core/records` | NDJSON, RFC 7464 and CSV-style text as a sequence of records, reached as `records_check`, `records_open`, `records_open_stream`, `records_next`, `records_each` and the writer |
 | `core/typed` | plans and the options of a typed read |
-| `host` | `Pool`, the threads that `records.each` borrows |
+| `core/model` | models: rules on an Odin type, `load`, `validate`, `patch`, `dump`, problem documents and the schema of a model, imported as `model "stury:core/model"` |
+| `core/schema` | JSON Schema: `compile`, `bind` and `check`, reached from a format as `load_schema`, `bind_schema` and `check_schema`, and `infer`, `sample`, `compare`, `convert` and `write_odin` |
+| `core/rules` | the `Description` of the values a node allows, which an Odin type, a model, a JSON Schema and inference give, and the string formats |
+| `core/diff` | `values`, the changes between two values of any format |
+| `core/regex` | the regex engine: Oniguruma's syntax for jq's functions, ECMA-262's (`Flags.ecma`) for a schema's `pattern`, with Unicode 17.0 properties and case folds |
+| `host` | `Pool`, the threads that `records_each` borrows |
 
 A format is a `Spec` value passed to each call. `json.Spec` is `.Json`, `.Jsonc` or `.Json5`, and `dsv.Spec` is `.Csv`,
 `.Tsv` or `.Plain`. `.Json` is strict RFC 8259. `.Jsonc` also takes comments and trailing commas, and `.Json5` takes the
@@ -33,11 +40,14 @@ JSON are `max_depth`, `tolerate` and `refuse_non_finite`, and for dsv `no_header
 
 ## Errors
 
-An error is a value with a `kind` and the byte it concerns, allocated nowhere: a text it names is a view of the input,
-the path's text or the plan. `err.kind != .None` is the test. The types are `core.Fault` (a text broke the grammar, from `validate`), `core.Document_Error`,
-`core.Path_Error`, `core.Typed_Error` (a read or write of an Odin value) and the path edit errors.
+An error is a value with a `kind` and the byte it concerns. A text it names is a view of the input, the path's text or
+the plan, and the one thing allocated is a typed error's path, `steps`, by `context.temp_allocator`. `err != nil` is the test, and `or_return` passes it up. Every call of the
+library returns one union, `json.Error`, whose arms are `json.Fault` (a text broke the grammar, from `validate`, a build, a
+scan or a read), `runtime.Allocator_Error` (an allocation was refused), `json.Document_Error` (an edit or a commit was
+refused), `json.Path_Error`, `json.Typed_Error` (a read or write of an Odin value) and `json.Typed_Error_Kind` (a write
+refused with no position). `core.error_of` is the one place a concrete error becomes the union.
 
-`core.render(writer, src, err)` writes any of them as `line:col: message`, with `at path` for a typed error. A path
+`json.render(writer, src, err)` writes any of them as `line:col: message`, with `at path` for a typed error. A path
 error's position is in the path's text, which it holds. Pass `nil` for `src` when the error has no text, such as a
 `marshal` refusal. A fault rendered with `nil` names its byte offset, `at byte 5: message`, in place of a line.
 
@@ -45,14 +55,14 @@ error's position is in the path's text, which it holds. Pass `nil` for `src` whe
 report :: proc(src: []u8, e: $E) {
 	b: strings.Builder
 	defer strings.builder_destroy(&b)
-	core.render(strings.to_writer(&b), src, e)
+	json.render(strings.to_writer(&b), src, e)
 	fmt.eprintln(strings.to_string(b))
 }
 ```
 
 ## Validate
 
-`json.validate(src, .Json)` judges a text without allocating and returns `Maybe(core.Fault)`.
+`json.validate(src, .Json)` judges a text without allocating and returns a `json.Error`, a `json.Fault` or nil.
 
 ```odin
 if fault, bad := json.validate(src, .Json).?; bad {
@@ -67,13 +77,73 @@ shows that `.Json` refuses a comment that `.Jsonc` takes:
 2:9: Expected ',' or '}' after an object member
 ```
 
+## Check against a schema
+
+`json.load_schema` reads and compiles a JSON Schema (drafts 4 to 2020-12) once, and `json.bind_schema(s, .Json)` binds it
+to the spec the inputs are read as. `json.load_schema(text, {draft = .D07, refs = dir})` takes `json.Schema_Options`: the draft
+of a schema with no `$schema`, the directory `$ref`s are read from, `format_assert` and `dups`. `json.check_schema` judges a text and puts every failure in a `json.Sink`, each with its
+position, its path and the keywords that failed it. `json.check_schema_records` checks a text of records (`.Lines`, `.Seq`) one by one and, with a `json.Runner`, on its
+threads, with the entries a serial check gives. Set the sink's `max_errors`: a sink without one keeps the first 100 failures. A check of
+many records holds no memory per record, but a failure is kept until the sink is destroyed. A table is bound with
+`dsv.bind_schema(s, .Csv, {infer = true})` and checked with the same calls. A cell is one kind: a string, or under `infer`
+a number, `true` or `false` when its text is exactly one, as `dsv.unmarshal` reads it.
+
+```odin
+s, _ := json.load_schema(schema_text)
+defer json.destroy(s)
+b, _ := json.bind_schema(s, .Json)
+defer json.destroy(&b)
+sink := json.Sink{max_errors = 20}
+defer json.destroy(&sink)
+if json.check_schema(&b, src, &sink) != nil {
+	for e in sink.entries { fmt.println(e.start, e.kind) }
+}
+```
+
+`stury check --schema` is the same check on the command line ([cli.md](cli.md#schema-check)).
+
+A `pattern` and a `patternProperties` name are read as ECMA-262 regular expressions with the `u` flag, so an escape outside a
+class names only a syntax character (`^$\.*+?()[]{}|`) or `/`, and inside a class also `-`. An escape such as `\&` or `\%`
+refuses the schema at bind: `invalid escape \& at offset 1`. Look-behind (`(?<=`, `(?<!`) and back references (`\1`) are refused
+there too: the search does not backtrack, which both need. `format: "regex"` accepts them when a back reference names a group
+the pattern has, as it asks only that the text is a regular expression, and the jq functions run them. `\p{...}` holds the
+characters of Unicode 17.0. A search that runs out of memory on a very long string, or whose counted repeats nest past what the
+pattern and the text bound, is not a verdict: the check reports `pattern_undecided` and `stury check` exits 2.
+
+`schema.infer` takes in values (and `schema.infer_records` the records of a text, on a runner's threads) and
+`schema.inferred` gives the description they all pass, which `schema.write` writes as JSON Schema. `schema.sample(&d, as,
+{count = 3, seed = 1})` writes values that pass a description in the format `as`, and `invalid = true` values that fail it.
+`schema.write_odin(s.description, "user", json.as(.Json))` writes the Odin source of the types a model reads a
+description's values with, and a `register` procedure that adds the rules no tag holds, as `stury schema gen` writes them
+([cli.md](cli.md#schema)).
+
+## Compare schemas and diff values
+
+`schema.compare(old, new)` takes two compiled schemas' `description`s and answers, in each direction, whether one takes
+every value the other does: `Yes` by a proof over the descriptions, `No` with a `witness` value that the check of both
+confirmed, or `Unknown` with the keyword the proof stopped at. `changes` lists the keywords that differ by place in a
+value and what each does to the values taken. The search for a witness and the walk for changes have fixed bounds, and
+`truncated` says a bound ended the proof or the walk, and a proof that does is `Unknown` with the reason `budget`, never a
+`Yes` or a `No` it did not find a value for.
+
+```odin
+c, err := schema.compare(old.description, new.description, {as = json.as(.Json)})
+if err != nil { return err }
+defer schema.comparison_destroy(&c)
+if c.old_in_new.verdict != .Yes { fmt.println("a reader of the new schema may refuse old data:", c.old_in_new.witness) }
+```
+
+`core/diff` is the changes between two values of any format: `diff.values(a, b, opts)` of two values (nodes of documents, `core.Node_Ref{&doc, core.ROOT}`) lists each
+change with its path, `diff.Options` choosing how arrays match (`Sequence`, `Set`, `Position` or a `Key_Rule` by member).
+`stury diff` is the same on the command line ([cli.md](cli.md#diff)).
+
 ## Read into Odin values
 
 `unmarshal` fills a value from a text during the scan, with no document between them.
 
 ```odin
 person: Person
-if err := json.unmarshal(src, .Json, &person, allocator = alloc); err.kind != .None {
+if err := json.unmarshal(src, .Json, &person, allocator = alloc); err != nil {
 	report(src, err)
 }
 out, err := json.marshal(person, allocator = alloc)  // {"name":"ada","n":1}
@@ -82,14 +152,14 @@ out, err := json.marshal(person, allocator = alloc)  // {"name":"ada","n":1}
 - A field's tag is looked up under the format's key (`json`, `csv`), then under the shared key `stury`:
   `` `json:"item_id,required"` ``. A field with no name in its tag keeps its own.
 - A member the struct does not have is skipped, and `Read_Options{unknown = .Refuse}` makes it an error. A field
-  tagged `unknown` on a `map[string]typed.Raw` captures them.
+  tagged `unknown` on a `map[string]json.Raw` captures them.
 - A member absent from the text keeps the value the target already holds, so defaults are written before the read.
 - A repeated key follows `Read_Options.dups`: `.Last` by default, `.First`, or `.Refuse` for an error.
 - `Maybe(T)` and pointers take `null`. Enums read by name, unions by the arm their value picks, and a type in
   `Plan_Options.hooks` is read by your procedure.
-- `Read_Options.collect` reads on after a refused value and gathers every refusal instead of stopping at the first.
+- `Read_Options.sink` reads on after a refused value and gathers every refusal instead of stopping at the first.
 - A program that reads one type many times builds the plan once with `json.plan_make` or `dsv.plan_make`, passes it to
-  `unmarshal`, and frees it with `typed.plan_destroy`. There is no global cache.
+  `unmarshal`, and frees it with `json.destroy`. There is no global cache.
 
 [typed.md](typed.md) holds the full type table, the tag flags and the refusal kinds.
 
@@ -99,26 +169,99 @@ out, err := json.marshal(person, allocator = alloc)  // {"name":"ada","n":1}
 &target, &plan)` reads the node a `find` or `scan` answer reached. A path's value is read from the answer, never from a
 text.
 
+## Models
+
+`core/model` adds rules to a type: a model checks members' values as they are read, gives absent members their
+defaults, records which members a text held, and writes the value back by the same rules.
+
+```odin
+User :: struct {
+	id:    i64 `model:"read_only"`,
+	name:  string `model:"len>=2"`,
+	email: Maybe(string) `model:"optional"`,
+	role:  string `model:"optional"`,
+	set:   model.Fields_Set,
+}
+
+reg: model.Registry
+model.register(&reg, User, "role", "member")
+m, err := model.compile(&reg, User, json.checks(.Json))
+user: User
+err = model.load(&m, body, &user, &sink)
+```
+
+- `load` refuses a missing required member and reads no `read_only` member. A `Fields_Set` member records what the
+  text held, which `was_set` asks by the member's Odin name, a load refused with a sink too. A load without a sink
+  stops at its first refusal, before any struct it is in closes, and leaves their sets as they were. `validate`
+  checks a value built in code by the same rules.
+- A load refuses a repeated key as `.Duplicate_Key` with the path to the repeat, where `json.unmarshal` takes the last.
+  `Load_Opts{dups = .Last}` or `.First` picks one instead, and only the value that wins is judged. `.All` is
+  `.Bad_Option`, since a member holds one value.
+- A model copies what it keeps of the registry, so the registry may be destroyed once its models are compiled.
+- A CSV or TSV model reads an empty unquoted cell as null, as JSON's `null`: a `Maybe` member holds nil and a plain
+  `string` member refuses it as `.Wrong_Kind`. A quoted `""` is the empty string.
+- The format tag (`json:`, or `stury:` for every format) names a member and shapes it: a rename, `-`, `omitempty`,
+  `omitunset`, `required` and `unknown`, which marks the `extra` member. `model:` holds the rules and the roles:
+  `optional`, `read_only`, `write_only`, `not_null`, bounds, `format=`, `pattern=` and `unique`. `required` with
+  `optional` is refused. `pattern=` takes the rest of the tag, commas included, so it comes last: a pattern followed
+  by an item that reads as one (`pattern=^a+$,len<=3`) is refused, and a pattern that holds such text is added with
+  `register_field`.
+- `load`, `validate` and `stury check` list the failures in one order: by the value's path, a value before what it
+  holds, and the members of one value in the order of the text.
+- `model.problem(sink.entries[:], "Invalid body", 422)` makes an RFC 9457 problem document of every refusal, a struct
+  that `marshal` writes in any format.
+- `model.patch(&m, &existing, body)` applies a patch text to a value whose struct has a `Fields_Set`. Each member's
+  rules judge what the patch holds, and a member the patch leaves out, in the root and in the struct members that hold
+  a `Fields_Set`, is neither required nor defaulted and keeps what `existing` holds. Struct validators and
+  applicators judge the merged value, `existing` is written only when nothing failed, and a failure's path is in the
+  patch. What `existing` holds is from `allocator`, which frees the members the patch replaces, and a failed patch
+  frees what it read.
+- `model.dump(&m, &user, opts)` writes the value as `marshal` does by the model's plan, never a `write_only` member.
+  `Dump_Opts` leaves out the members a load did not set (`exclude_unset`), that hold null (`exclude_none`) or that
+  equal their default (`exclude_defaults`), and `check` refuses a value whose written members fail its rules as
+  `.Check_Failed`. An option leaves out only a member a load does not require, so every dump of a valid value loads
+  back. A member is unset when its `Fields_Set` bit is clear, as pydantic's `exclude_unset` means: a member the load
+  took from its default or never read, and every member of a value built in code with an empty set, so dumping a
+  loaded PATCH body writes back what it sent. A `read_only` member, which no load sets, and a struct with no
+  `Fields_Set` keep their members. A dump writes a `read_only` member, which a load under `Extra.Forbid` refuses as
+  `.Not_Allowed`, so such a dump is for the reader of the text and does not load back through the same model. The
+  tag `omitunset` leaves one member out when it holds null and is unset, and is refused on a struct with no
+  `Fields_Set`. A CSV or TSV row keeps every column and an empty cell reads back as null, so there the options leave
+  nothing out: a member that holds null is an empty cell, and every other member's value is written.
+  `dump_stream` writes to a stream. Map keys and a struct's `extra` members are written in the order of their keys.
+- A struct's `extra` member, `map[string]core.Value` or `map[string]T` tagged `json:",unknown"`, holds the members it
+  does not name, each read as its value type. `register(&reg, T, model.Extra.Forbid)` refuses them instead.
+- A pointer or `Maybe` member reads null as nil, and with the `not_null` tag item refuses it. A nil `Maybe` with
+  neither `omitempty` nor `omitunset` writes null, so `validate` counts it as present: it meets `required` and a
+  dependent's `requires`. Tag it to have it absent.
+- A `core.Number_Text` member keeps a number's digits at any size and reads null as the empty text, unless tagged
+  `not_null`. One held by a list, a map, a `Maybe` or a union takes no null.
+- `register_after(&reg, T, "name", check)` adds a validator a member's value meets once it is read. A member takes
+  several, run in the order they were registered.
+- `Naming.union_tag` is the member every union of the registry is tagged by, and `register(&reg, Union_Rule{type = U,
+  tag = "kind"})` sets the tag of one union.
+- `model.schema(&m, .Load)` and `.Dump` describe what a load takes and what a dump with no option writes.
+
 ## Scan by path
 
 `json.find` answers one path and stops at the answer, and `json.scan` answers every value a path with `[]` reaches.
 Neither builds more than the nodes it needs. [examples/scan](../examples/scan/main.odin):
 
 ```odin
-second_tag, _ := core.parse_path(".tags[1]")
-defer core.path_destroy(&second_tag)
+second_tag, _ := json.parse_path(".tags[1]")
+defer json.destroy(&second_tag)
 doc, answer, err := json.find(src, .Json, second_tag)
-defer core.destroy(&doc)
+defer json.destroy(&doc)
 if answer.outcome == .Found {
-	fmt.println(string(core.span(&doc, answer.node))) // "engines", quotes and all
+	fmt.println(string(json.span(&doc, answer.node))) // "engines", quotes and all
 	buf: [32]u8
-	text, _ := core.text(&doc, answer.node, buf[:])    // engines, decoded into the caller's buffer
+	text, _ := json.text(&doc, doc.nodes[answer.node], buf[:]) // engines, decoded into the caller's buffer
 }
 
-every_tag, _ := core.parse_path(".tags[]")
+every_tag, _ := json.parse_path(".tags[]")
 tags, serr := json.scan(src, .Json, every_tag)
 for a in tags.answers {
-	fmt.println(string(core.span(&tags, a.node))) // "math", then "engines"
+	fmt.println(string(json.span(&tags, a.node))) // "math", then "engines"
 }
 ```
 
@@ -134,65 +277,123 @@ engines
 A path is parsed once and owns its steps. [paths.md](paths.md) holds the grammar, the answer outcomes and what a partial
 document is.
 
+### One answer at a time
+
+`json.answers` and `dsv.answers` read a path's answers as the scan reaches them, with no document, and `next` gives
+them in a loop. Each answer is a `Token_Answer` whose `lo` and `hi` bound its value in the text. The read starts at the
+first `next` and walks a batch of answers at a time, from 1 doubling up to `max_batch`, so a loop that ends early has
+read little past what it took. A fault comes after every answer read before it, in `it.err` once the loop ends. A loop
+that breaks frees the read with `destroy`:
+
+```odin
+it := json.answers(src, .Json, every_tag)
+for a in json.next(&it) {
+	fmt.println(string(src[a.lo:a.hi]))         // "math", then "engines"
+	if done(a) {
+		break
+	}
+}
+json.destroy(&it)                                // only needed when the loop broke
+if it.err != nil {
+	// the text faulted past the last answer given
+}
+```
+
+`json.each_answer` and `dsv.each_answer` give the same answers to a callback instead.
+
+The iterator rides on a walk cursor. `json.walk` and `dsv.walk` take a `^Cursor`: a hook that returns `.Stop` saves
+where the walk stood, and `walk_resume` continues from there over the same text, with every token after the stop
+delivered as an unbroken walk delivers it. A json cursor resumes after any token. A dsv cursor resumes after a record's
+end and holds the header's cells in `cursor.keys`, the caller's storage. `can_resume` says whether a cursor holds a stop, and a resume
+on another text is refused with `.Bad_Option`.
+
 ## Build a document
 
-`json.build` or `dsv.build` returns a `core.Document`: a table of nodes that borrows the input. Strings are not
-decoded until `core.text` is called, and numbers not until `core.number` or `int_value`.
+`json.build` or `dsv.build` returns a `Document`: a table of nodes that borrows the input. Strings are not
+decoded until `text` is called, and numbers not until `number` or `int_value`.
 [examples/roundtrip](../examples/roundtrip/main.odin):
 
 ```odin
 doc, _ := json.build(src, .Json)
-defer core.destroy(&doc)
-path, _ := core.parse_path(".skip[]")
-defer core.path_destroy(&path)
-answers, _ := core.query(&doc, path)
+defer json.destroy(&doc)
+path, _ := json.parse_path(".skip[]")
+defer json.destroy(&path)
+answers, _ := json.query(&doc, path)
 defer delete(answers)
 for a in answers {
-	if v, ok := core.int_value(&doc, a.node); ok {
+	if v, ok := json.int_value(&doc, a.node); ok {
 		fmt.println(v)               // 1, then 2, then 3
 	}
 }
-n, _ := core.member(&doc, core.ROOT, "n")   // a member by name, without a path
+n, _ := json.member(&doc, json.ROOT, "n")   // a member by name, without a path
 ```
 
-`core.children`, `core.pairs`, `core.child_at`, `core.member`, `core.members_named` and `core.length` walk a container.
+`json.children`, `json.pairs`, `json.child_at`, `json.member`, `json.members_named` and `json.length` walk a container.
 A reader given a node of the wrong kind, or an index no node holds, returns its miss value and never faults.
 [document.md](document.md) lists each reader's miss value.
 
-## Edit and keep every other byte
+### Values
 
-`set` replaces the value at a path with JSON text. The text is checked before it is spliced in, and every byte outside
-the edit, spacing and comments included, is kept. [examples/edit](../examples/edit/main.odin):
+A `Value` is null (`nil`), a `bool`, a `f64`, a `Number_Text`, a `string`, an `^Array`, an `^Object` or a node of a
+document (`Node_Ref`). A `Number_Text` keeps a number's digits: a number read and not computed on, or an integer no
+double holds exactly. `json.new_array`, `json.new_object`, `json.array_append` and `json.object_put` build one in the
+context allocator. `spell.decimal_of` reads a number's text as an exact decimal, `spell.decimal_compare` orders two of
+them and `spell.decimal_multiple_of` divides one by another, with no limit on the digits or the exponent. The readers
+above take a value as they take a node, so one loop reads both:
 
 ```odin
-name, _ := core.parse_path(".name")
-out, err := json.set(src, .Json, name, `"grace"`)
+v := json.Value(json.Node_Ref{&doc, json.ROOT})
+it := json.pairs(v)
+for key, member in json.pair_next(&it) {
+	fmt.println(key, json.kind(member))
+}
+```
+
+`json.equal`, `json.compare` and `json.hash` order values as jq does. A cell of a CSV or TSV document is a string unless the document was read with `infer`, in `compare` and `equal`
+as in the CLI, and `read_plain = true` reads it as the value it is set against, as the schema-directed conversion (`stury fmt --schema`) does. Two numbers compare by their doubles, and when
+both keep their digits and the doubles are equal, by the digits. `json.write_value(v, json.as(.Json))` writes a value
+in any format with a token writer. `json.marshal_value(x, &plan)` makes the value of a typed `x`, and
+`json.unmarshal_value(v, &target, &plan)` reads a value into a typed target, an integer field from a double that holds
+it exactly or from the digits. Both take a plan made with `reads = json.reads(.Json)`, which gives it the read and build
+of that spec.
+
+## Edit and keep every other byte
+
+`set` replaces the value at a path with an Odin value, which the document's format spells: a string, a number, a bool, a
+`core.Value`, or a struct, a slice or a map with the `plan` that `plan_make` built with `reads` for its type. A value over
+lines takes the layout of the container it goes in, its indent and its colon spacing. Every byte outside the edit,
+spacing and comments included, is kept. [examples/edit](../examples/edit/main.odin):
+
+```odin
+name, _ := json.parse_path(".name")
+out, err := json.set(src, .Json, name, "grace")
 defer delete(out)
 // {"name": "grace",  "tags": ["math"]}
 ```
 
-Several edits on one document go on an `Edit_List`, each checked as it is recorded, and one commit applies them:
+Several edits on one document go on an `Edit_List`, and one commit applies them. A value is spelled where it is
+recorded, and a `typed.Raw` is the text of a value, which is checked as it is recorded:
 
 ```odin
-list := core.edit_list_init(&doc)
-defer core.edit_list_destroy(&list)
-tags, _ := core.member(&doc, core.ROOT, "tags")
-core.set_member(&list, core.ROOT, "n", "1")
-core.remove(&list, tags)
-committed, _, cerr := core.commit(&list)
+list := json.edit_list_init(&doc, .Json)
+defer json.destroy(&list)
+tags, _ := json.member(&doc, json.ROOT, "tags")
+json.set_member(&list, json.ROOT, "n", 1)
+json.remove(&list, tags)
+committed, _, cerr := json.commit(&list)
 defer delete(committed)
 // {"name": "ada",  "n": 1}
 ```
 
-`core.insert` adds an element, `core.set` replaces a node, and `core.remove` drops one. In a dsv document,
-removing a cell from every row drops its column, header included. `dsv.set` and `core.commit` edit a table the same
-way.
+`insert` adds an element or a member, `set_node` replaces a node of a list (`set` takes a path), and `remove` drops one. In a delimited table `insert` takes a record as a struct, an array or an object of cells.
+In a dsv document, removing a cell from every row drops its column, header included. `dsv.set` and `dsv.commit` edit a
+table the same way.
 
 ### Comments
 
 Comments are facts attached to a node, with a role of `Comment`, `Comment_Inline` or `Comment_Foot`. `.Jsonc` and
-`.Json5` documents carry them and a commit keeps them. `core.facts_of(&doc, node, role)` reads a node's facts of one role, and `core.set_fact` and
-`core.remove_fact` edit them. `json.set(src, .Jsonc, ...)` leaves the comments of the text as they are:
+`.Json5` documents carry them and a commit keeps them. `json.facts_of(&doc, node, role)` reads a node's facts of one role, and `json.set_fact` and
+`json.remove_fact` edit them. `json.set(src, .Jsonc, ...)` leaves the comments of the text as they are:
 
 ```
 {
@@ -203,11 +404,11 @@ Comments are facts attached to a node, with a role of `Comment`, `Comment_Inline
 ## Write
 
 `json.marshal(value)` and `dsv.marshal(list)` return the text, and `marshal_stream` writes to an `io.Stream`.
-`core.write(&doc)` writes a document, and `core.write_stream` streams it. `core.Write_Options` sets the layout:
+`json.write(&doc, .Json)` writes a document, and `json.write_stream` streams it. `json.Write_Options` sets the layout:
 
 | Field | Effect |
 |---|---|
-| `pretty`, `indent`, `tab` | one member a line, with `indent` spaces or a tab per level, and no indent at `indent` 0 as jq's `--indent 0`. `core.PRETTY` is two spaces |
+| `pretty`, `indent`, `tab` | one member a line, with `indent` spaces or a tab per level, and no indent at `indent` 0 as jq's `--indent 0`. `json.PRETTY` is two spaces |
 | `ascii` | a rune past U+007F is written as `\uXXXX` |
 | `escape_html` | `<`, `>`, `&`, U+2028 and U+2029 are escaped |
 | `escape_del` | DEL is written as `\u007f` |
@@ -219,12 +420,12 @@ A document written back keeps each string and number as its source spelled it un
 
 ### Format a text
 
-`core.format` reads a text and writes it again in the layout `Write_Options` names, judging it on the way. `stury fmt`
+`json.format` reads a text and writes it again in the layout `Write_Options` names, judging it on the way. `stury fmt`
 is this call.
 
 ```odin
-out, err := core.format(src, json.as(.Json), core.PRETTY)
-if err.kind != .None {
+out, err := json.format(src, json.as(.Json), json.PRETTY)
+if err != nil {
 	report(src, err)
 	return
 }
@@ -232,9 +433,10 @@ defer delete(out)
 ```
 
 `json.as(.Json)` is an `As`, the handle of a format. The calls in `core` and `core/records` that work on any format
-(`core.validate`, `core.build`, `core.format`, `records.check`, `records.open` and the rest) take one where a `json` or
-`dsv` call takes a `Spec`, and `core.write` and `core.commit` take one to change the format. `json.as(spec, opts)` and
-`dsv.as(spec, opts)` make it, and a document holds the one it was read with.
+(`core.validate`, `core.build`, `json.format`, `json.records_check`, `json.records_open` and the rest) take one where a
+`json` or `dsv` call takes a `Spec`, and `core.write` and `json.commit` take one to change the format. `json.as(spec, opts)` and
+`dsv.as(spec, opts)` make it, and a document holds the one it was read with. A program that names a `Spec` in each
+call links only the walks it reaches. A handle reaches every walk of its format, since it serves a choice made at run time.
 
 ## Records and threads
 
@@ -242,8 +444,7 @@ defer delete(out)
 the bytes of one line and the offset it starts at. [examples/records](../examples/records/main.odin):
 
 ```odin
-as := json.as(.Json)
-faults, _ := records.check(src, as, .Lines)   // one fault per invalid record, positions in the whole text
+faults, _ := json.records_check(src, .Json, framing = .Lines)   // one fault per invalid record, positions in the whole text
 defer delete(faults)
 ```
 
@@ -252,25 +453,26 @@ defer delete(faults)
 1 refused
 ```
 
-`records.open` frames a text and `records.open_stream` frames an `io.Reader` through a window. `records.next` yields
+`json.records_open` frames a text and `json.records_open_stream` frames an `io.Reader` through a window. `json.records_next` yields
 each record without judging it, so a caller who needs a verdict calls `check` or reads the record. A stream that ends
-on a broken frame sets `it.fault`.
+on a broken frame sets `it.fault`. A reader opened with a constant spec reads, builds and scans no record until
+`it.docs = json.record_docs(.Json)` is set, so a program that only frames or judges links no read.
 
-`records.each(src, as, .Lines, task, &data, &pool.runner)` hands every piece of the text to a task on `host.Pool`
-threads, each piece an independent `records.Reader`:
+`json.records_each(src, .Json, .Lines, task, &data, &pool.runner)` hands every piece of the text to a task on `json.Pool`
+threads, each piece an independent `json.Record_Reader`:
 
 ```odin
-pool: host.Pool
-host.pool_init(&pool)
-defer host.pool_destroy(&pool)
-count := proc(n: ^int, piece: ^records.Reader, _: int) -> bool {
-	for _ in records.next(piece) { sync.atomic_add(n, 1) }
+pool: json.Pool
+json.pool_init(&pool)
+defer json.destroy(&pool)
+count := proc(n: ^int, piece: ^json.Record_Reader, _: int) -> bool {
+	for _ in json.records_next(piece) { sync.atomic_add(n, 1) }
 	return true
 }
-records.each(lines, as, .Lines, count, &total, &pool.runner)
+json.records_each(lines, .Json, .Lines, count, &total, &pool.runner)
 ```
 
-`records.writer_init`, `write_cells` and `writer_end` write one row or line. [records.md](records.md) holds the framing
+`json.writer_init`, `write_cells` and `writer_end` write one row or line. [records.md](records.md) holds the framing
 rules and the Reader contract.
 
 ## Delimited text
@@ -291,17 +493,17 @@ out, _ := dsv.marshal(cities)
 
 - The first record is the header and names the columns. A field matches the column named by its `csv` tag or its own
   name. With `Options{no_header = true}`, column k is the struct's field k.
-- An empty cell is an absent value for `Maybe(T)`, and writes back as an empty cell.
+- An empty unquoted cell is a `null` to every check and read, and a `Maybe(T)` holds nil for it, which writes back as an empty cell.
 - A cell the field cannot hold is an error at that cell:
   `2:6: Expected i64, found "lots" at .[0].population`.
 - A number field reads its cell as a loose number: a leading `+`, leading zeros and a point with no digits on one side
   are allowed, so `007` reads as 7 and `.5` as 0.5. `infer`, below, takes only an exact JSON number, so a document
   keeps `007` as the text it is.
 - `Options{delimiter = ';', comment = '#'}` reads other delimiters and skips lines starting with `#`.
-- A dsv document is an array of objects keyed by the header. `core.length(&doc, core.ROOT)` is the row count, since the
+- A dsv document is an array of objects keyed by the header. `dsv.length(&doc, dsv.ROOT)` is the row count, since the
   header is no record. `dsv.find` reads one cell by `.[1].City` without building the table, `dsv.set` replaces a cell and
   keeps every other byte, and an edit list can insert a row or remove a cell.
-- `core.kind` reads an empty unquoted cell as `.Null`, as a typed read and the CLI do, and any other cell as
+- `dsv.kind` reads an empty unquoted cell as `.Null`, as a typed read and the CLI do, and any other cell as
   `.String`. `Options.infer` also reads `true` and `false` as booleans and an exact JSON number as a number. A JSON
   write of the document writes each cell as the kind it reads as.
 
@@ -313,7 +515,7 @@ cell added on write would read back as data the list did not hold.
 
 ## One program, several formats
 
-A struct can carry both a `csv` and a `json` tag, and both formats return `core.Typed_Error`, so one procedure handles
+A struct can carry both a `csv` and a `json` tag, and both formats return the same `Error`, so one procedure handles
 either ([examples/crossformat](../examples/crossformat/main.odin)):
 
 ```odin
@@ -323,7 +525,7 @@ City :: struct {
 	lat, lon:   f64,
 }
 
-load :: proc(format: Format, src: []byte, cities: ^[]City) -> core.Typed_Error {
+load :: proc(format: Format, src: []byte, cities: ^[]City) -> json.Error {
 	switch format {
 	case .Csv:  return dsv.unmarshal(src, .Csv, cities, allocator = context.temp_allocator)
 	case .Json: return json.unmarshal(src, .Json, cities, allocator = context.temp_allocator)
@@ -343,8 +545,8 @@ population reports at its own position in each format:
 ## Memory and ownership
 
 - A document, a find or scan result and a record borrow the input. Keep the input alive while they are used.
-- `core.destroy(&doc)` frees a document, including a result from `find` or `scan`. `core.path_destroy` frees a path,
-  `core.edit_list_destroy` a list, `typed.plan_destroy` a plan, and `records.close` a record iterator.
+- `destroy` frees a document, including a result from `find` or `scan`, and a path, an edit list, a plan, a record
+  writer and a pool. `records_close` frees a record iterator.
 - A slice returned by `query`, `check`, `commit`, `set`, `marshal` or `write` is the caller's, freed with `delete` and
   the allocator it was made with.
 - `unmarshal` allocates strings, lists and maps with the allocator it is given and frees none of them, not even when it
@@ -360,22 +562,23 @@ population reports at its own position in each format:
 
 | Limit | Value |
 |---|---|
-| Nesting depth | `core.MAX_DEPTH`, 1024. `Options.max_depth` raises or lowers it per call. A depth beyond `MAX_DEPTH` allocates one byte per level |
-| Children counted in a node | `core.MAX_CHILDREN`, 65535. A larger container is still read in full, and its true count is `core.length_exact` |
+| Nesting depth | `json.MAX_DEPTH`, 1024. `Options.max_depth` raises or lowers it per call. A depth beyond `MAX_DEPTH` allocates one byte per level |
+| Children counted in a node | `json.MAX_CHILDREN`, 65535. A larger container is still read in full, and its true count is `json.length_exact` |
+| Schema arms one inside the other | 256 held subschemas (`anyOf`, `oneOf`, `not`, `if`, `unevaluated*` and the like) that judge one value, each inside the last. A schema that nests more is refused with `.Too_Deep` when bound |
 | Numbers | a number too large for binary64 or over the digit and scale caps in `core/spell` comes back as `.Wide`, and the caller reads its span |
 
 A text past a limit gets a fault with a kind, never a crash or a wrong answer.
 
 ## Numbers
 
-`core.number(&doc, node)` returns a `Number` of kind `Int`, `Uint`, `Float` or `Wide`, decoded when read, and false
+`number(&doc, node)` returns a `Number` of kind `Int`, `Uint`, `Float` or `Wide`, decoded when read, and false
 for a node that is no number. `int_value` returns an `Int`'s `i64`, and false for any other node. A `Wide` number is read from its span. A number is judged when the text is validated, and converted only when it is read.
 
 ## Strictness
 
 `.Json` is RFC 8259 with nothing extra: no leading zero, no `NaN`, no invalid UTF-8 and no lone surrogate. `.Jsonc`
 and `.Json5` accept their own additions and nothing else. `Options.tolerate` lets a text break a named rule, a
-`core.Tolerance`, with a fixed reading: `Invalid_Utf8` reads each ill-formed sequence in a string or a cell as U+FFFD,
+`json.Tolerance`, with a fixed reading: `Invalid_Utf8` reads each ill-formed sequence in a string or a cell as U+FFFD,
 `Lone_Surrogate` does the same for an unpaired `\u` escape, `Ragged` takes a dsv record of any width, and `Bare_Quote`
 a quote inside an unquoted CSV cell. A rule a format has no instance of changes nothing there. A tolerated text is
 never reported as valid under strict rules. `json.Options.refuse_non_finite` refuses JSON5's `Infinity` and `NaN`, for
@@ -393,5 +596,6 @@ a reader that has no value for them.
 | [jsonc](../examples/jsonc/main.odin) | comments and edits that keep them |
 | [dsv](../examples/dsv/main.odin) | CSV into structs, dialects, documents, edits, records, writer |
 | [crossformat](../examples/crossformat/main.odin) | one struct and one procedure for CSV and JSON |
+| [model](../examples/model/main.odin) | a model's load, problem document, `patch` and `dump` |
 
-Each prints a fixed answer, kept in its `expected.txt`, and `make test-examples` builds and runs all eight.
+Each prints a fixed answer, kept in its `expected.txt`, and `make test-examples` builds and runs all nine.

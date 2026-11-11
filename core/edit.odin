@@ -10,7 +10,7 @@ import "core:slice"
 //
 // `set`, `insert` and `remove` append an edit, checked when it is recorded, in O(its text). A commit resolves every
 // edit to a source range, refuses the colliding ones, and splices the edits into the source. Every byte no edit
-// touched stays, and the format's `Edit_Spelling` supplies the separators.
+// touched stays, and the format's `Edit_Services` supplies the separators.
 //
 // A fact edit names a node and a role, and a set also a body. The commit writes the body where the role reads it, or
 // drops it and counts it when the output cannot hold it, and refuses a second fact edit of one node and role. A fact
@@ -53,12 +53,27 @@ Edit_List :: struct {
 	doc:       ^Document,
 	edits:     [dynamic]Edit,
 	allocator: runtime.Allocator,
+	// The edit services of the document's format, nil for a format that accepts no edits.
+	edit:      ^Edit_Services,
+	// How a value the caller builds is spelled: `write` is the layout, escapes and number spelling of the base. Unless
+	// `fixed`, a container's value takes the layout of the container it goes in, where that shows one, and `write` is
+	// the layout where none does.
+	write:     Write_Options,
+	fixed:     bool,
+	// The container of each node, made when a value is first spelled in a layout of the site.
+	parents:   []Node_Index,
 }
 
 // Returns an edit list over `doc`. It allocates nothing until the first edit is recorded.
 edit_list_init :: proc(doc: ^Document, allocator := context.allocator) -> Edit_List {
 	edits, _ := make([dynamic]Edit, allocator)
-	return {doc = doc, edits = edits, allocator = allocator}
+	list := Edit_List{doc = doc, edits = edits, allocator = allocator}
+	if doc != nil {
+		if services := services_of(doc.as); services != nil {
+			list.edit = services.edit
+		}
+	}
+	return list
 }
 
 // Frees every edit's copies and the log, and sets the list to the zero value. The document is the caller's.
@@ -68,6 +83,7 @@ edit_list_destroy :: proc(list: ^Edit_List) {
 		if e.key != nil { delete(e.key, list.allocator) } else if e.text != nil { delete(e.text, list.allocator) }
 	}
 	delete(list.edits)
+	delete(list.parents, list.allocator)
 	list^ = {}
 }
 
@@ -75,14 +91,14 @@ edit_list_destroy :: proc(list: ^Edit_List) {
 // are lines the format composes itself. A flat format writes the spec it was read as, since another
 // spec would respell every member.
 is_flat :: #force_inline proc(doc: ^Document) -> bool {
-	return doc.spelling.edit != nil && doc.spelling.edit.flat
+	return doc.readers.flat
 }
 
 // Checks a recorded text as a value. A member's key is a decoded name, so no text is judged as a key.
 @(private)
-judge :: proc(doc: ^Document, text: string, allocator: runtime.Allocator) -> Document_Error {
-	if doc.spelling.edit != nil && doc.spelling.edit.value != nil {
-		return doc.spelling.edit.value(doc, transmute([]u8)text, allocator)
+judge :: proc(doc: ^Document, edit: ^Edit_Services, text: string, allocator: runtime.Allocator) -> Document_Error {
+	if edit != nil && edit.value != nil {
+		return edit.value(doc, transmute([]u8)text, allocator)
 	}
 	return {}
 }
@@ -101,132 +117,151 @@ node_of :: proc(list: ^Edit_List, node: Node_Index) -> (doc: ^Document, n: Node,
 	return doc, doc.nodes[node], {}
 }
 
-// Makes `text` the source bytes of node `node`, a value or a key. A key's text is its decoded name, which the commit
-// writes in the format's own spelling, a value's text is source text and must read as one value, and in a flat text a
-// key is a member like any other, so its text is checked as a value. A fact node or a flat text's container returns
-// `.Bad_Index`.
-// Runs in O(len(text)), checking the text once and copying it once.
-set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Document_Error {
-	doc, n, err := node_of(list, node)
-	if err.kind != .None {
-		return err
-	}
-	flat := is_flat(doc)
-	if n.role > .Key {
-		return {kind = .Bad_Index, reason = .Fact_Node}
-	}
-	if flat && (n.kind == .Array || n.kind == .Object) {
-		return {kind = .Bad_Index, reason = .Flat_Container}
-	}
-	if n.role == .Key && !flat {
-		return edit_add(list, node, .Set, .Key, 0, "", text)
-	}
-	if e := judge(doc, text, list.allocator); e.kind != .None {
-		return e
-	}
-	return edit_add(list, node, .Set, .Value, 0, "", text)
+// Returns the `Error` of an edit's refusal.
+@(private)
+refused :: proc(kind: Document_Error_Kind, reason := Edit_Reason.None) -> Error {
+	return error_of(Document_Error{kind = kind, reason = reason})
 }
 
-// Makes `text` the value of the member of `obj` named `name`: a set of the member the document holds, or an insert after
+// What an edit writes: a value's source text as the caller spelled it when `raw`, else a value the format spells.
+Edit_Input :: struct {
+	text:  string,
+	value: Value,
+	raw:   bool,
+}
+
+// Makes `in_` the value or the key of node `node`. A key's text is its decoded name, which the commit writes in the
+// format's own spelling, a text is source text and must read as one value, and in a flat text a key is a member like any
+// other, so its text is checked as a value. A fact node or a flat text's container returns `.Bad_Index`.
+// A text runs in O(len(text)), checking it once and copying it once.
+set_input :: proc(list: ^Edit_List, node: Node_Index, in_: Edit_Input) -> Error {
+	if in_.raw {
+		return set_text(list, node, in_.text)
+	}
+	_, n, err := settable(list, node)
+	if err != nil {
+		return err
+	}
+	return set_spelled(list, node, n, in_.value)
+}
+
+// `set_input` of a text: the text of a value as the caller spelled it.
+set_text :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Error {
+	doc, n, err := settable(list, node)
+	if err != nil {
+		return err
+	}
+	if n.role == .Key && !is_flat(doc) {
+		return error_of(edit_add(list, node, .Set, .Key, 0, "", text))
+	}
+	if e := judge(doc, list.edit, text, list.allocator); e.kind != .None {
+		return error_of(e)
+	}
+	return error_of(edit_add(list, node, .Set, .Value, 0, "", text))
+}
+
+// Node `node` of `list`'s document, when an edit can set it.
+@(private)
+settable :: proc(list: ^Edit_List, node: Node_Index) -> (doc: ^Document, n: Node, err: Error) {
+	derr: Document_Error
+	doc, n, derr = node_of(list, node)
+	if derr.kind != .None {
+		return doc, n, error_of(derr)
+	}
+	if n.role > .Key {
+		return doc, n, refused(.Bad_Index, .Fact_Node)
+	}
+	if is_flat(doc) && (n.kind == .Array || n.kind == .Object) {
+		return doc, n, refused(.Bad_Index, .Flat_Container)
+	}
+	return doc, n, nil
+}
+
+// Makes `in_` the value of the member of `obj` named `name`: a set of the member the document holds, or an insert after
 // `obj`'s last member when it has none. `dups` picks the member of a repeated key, and `.All` sets each.
-set_member :: proc(list: ^Edit_List, obj: Node_Index, name, text: string, dups := Duplicates.Last) -> Document_Error {
+set_member_input :: proc(list: ^Edit_List, obj: Node_Index, name: string, in_: Edit_Input, dups: Duplicates) -> Error {
 	doc := list.doc
 	if doc == nil {
-		return {kind = .Bad_Index, reason = .No_Document}
+		return refused(.Bad_Index, .No_Document)
 	}
 	if dups == .All && int(obj) < len(doc.nodes) && doc.nodes[obj].kind == .Object {
 		found := false
 		it := members_named(doc, obj, name)
 		for v in member_next(&it) {
 			found = true
-			if e := set(list, v, text); e.kind != .None {
+			if e := set_input(list, v, in_); e != nil {
 				return e
 			}
 		}
 		if found {
-			return {}
+			return nil
 		}
 	}
 	v, presence := member_of(doc, obj, name, dups)
 	switch presence {
 	case .Found:
-		return set(list, v, text)
+		return set_input(list, v, in_)
 	case .Missing:
-		return insert_member(list, obj, length(doc, obj), name, text)
+		return insert_input(list, obj, length(doc, obj), name, true, in_)
 	case .Wrong_Kind:
-		return {kind = .Bad_Index, reason = .Not_Object}
+		return refused(.Bad_Index, .Not_Object)
 	case .Not_Loaded:
 	}
-	return {kind = .Bad_Index, reason = .Not_Loaded}
+	return refused(.Bad_Index, .Not_Loaded)
 }
 
-// Inserts `text` into the array `container` before its element `at`, or after its last when `at` is its length.
-@(private)
-insert_value :: proc(list: ^Edit_List, container: Node_Index, at: int, text: string) -> Document_Error {
-	return insert_at(list, container, at, "", false, text)
-}
-
-// Inserts `key` and `text` as a member of the object `container` before its member `at`, or after its last when
-// `at` is its length.
-@(private)
-insert_member :: proc(list: ^Edit_List, container: Node_Index, at: int, key, text: string) -> Document_Error {
-	return insert_at(list, container, at, key, true, text)
-}
-
-// `insert` is `insert_value` for an array and `insert_member` for an object.
-insert :: proc {
-	insert_value,
-	insert_member,
-}
-
-@(private)
-insert_at :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string, member: bool, text: string) -> Document_Error {
+// Inserts `in_` before member or element `at` of `container`, as a member named `key` when `member`.
+insert_input :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string, member: bool, in_: Edit_Input) -> Error {
 	doc := list.doc
 	if doc == nil {
-		return {kind = .Bad_Index, reason = .No_Document}
+		return refused(.Bad_Index, .No_Document)
 	}
 	if int(container) >= len(doc.nodes) {
-		return {kind = .Bad_Index, reason = .No_Node}
+		return refused(.Bad_Index, .No_Node)
 	}
 	if doc.nodes[container].kind != (Kind.Object if member else .Array) {
-		return {kind = .Wrong_Container}
+		return refused(.Wrong_Container)
 	}
 	n_members := length(doc, container)
 	if at < 0 || at > n_members {
-		return {kind = .Bad_Position}
+		return refused(.Bad_Position)
 	}
-	if member && doc.spelling.edit.key_text == nil {
-		return {kind = .Wrong_Container}
+	if member && list.edit.key_text == nil {
+		return refused(.Wrong_Container)
 	}
+	if !in_.raw {
+		return insert_spelled(list, container, at, key, member, in_.value)
+	}
+	text := in_.text
 	e: Document_Error
-	if !member && doc.spelling.edit != nil && doc.spelling.edit.insert_check != nil {
-		e = doc.spelling.edit.insert_check(doc, container, text, list.allocator)
+	if !member && list.edit != nil && list.edit.insert_check != nil {
+		e = list.edit.insert_check(doc, container, text, list.allocator)
 	} else {
-		e = judge(doc, text, list.allocator)
+		e = judge(doc, list.edit, text, list.allocator)
 	}
 	if e.kind != .None {
-		return e
+		return error_of(e)
 	}
-	return edit_add(list, container, .Insert, .Key if member else .Value, u32(at), key, text)
+	return error_of(edit_add(list, container, .Insert, .Key if member else .Value, u32(at), key, text))
 }
 
 // Appends the removal edit. The commit removes the member with its key and one adjacent separator. A delimited
 // text's record is removed with its line end, and a header cell or a record's cell by the format's column rules.
-remove :: proc(list: ^Edit_List, node: Node_Index) -> Document_Error {
+remove :: proc(list: ^Edit_List, node: Node_Index) -> Error {
 	doc, n, err := node_of(list, node)
 	// A key is removed with its value and a header row is no member of its own, but a flat text's key is a cell.
 	flat_key := n.role == .Key && is_flat(doc) && n.kind != .Array
 	switch {
 	case err.kind != .None:
-		return err
+		return error_of(err)
 	case node == ROOT:
-		return {kind = .Bad_Index, reason = .Root}
+		return refused(.Bad_Index, .Root)
 	case n.role > .Key:
-		return {kind = .Bad_Index, reason = .Fact_Node}
+		return refused(.Bad_Index, .Fact_Node)
 	case n.role == .Key && !flat_key:
-		return {kind = .Bad_Index, reason = .Key_Node}
+		return refused(.Bad_Index, .Key_Node)
 	}
-	return edit_add(list, node, .Remove, .Value, 0, "", "")
+	return error_of(edit_add(list, node, .Remove, .Value, 0, "", ""))
 }
 
 // Puts the members of the container `container` in `order`. Entry `i` below the container's length is its member `i`,
@@ -234,32 +269,32 @@ remove :: proc(list: ^Edit_List, node: Node_Index) -> Document_Error {
 // leaves out is one a removal edit names. Each member keeps its bytes and the comments that go with it, an edit inside
 // it still applies, and the gaps between members stay in their places, so the container keeps its separators, lines
 // and indent. The commit checks that the order names each surviving member and each insert once.
-reorder :: proc(list: ^Edit_List, container: Node_Index, order: []u32) -> Document_Error {
+reorder :: proc(list: ^Edit_List, container: Node_Index, order: []u32) -> Error {
 	_, n, err := node_of(list, container)
 	switch {
 	case err.kind != .None:
-		return err
+		return error_of(err)
 	case n.kind != .Array && n.kind != .Object:
-		return {kind = .Wrong_Container}
+		return refused(.Wrong_Container)
 	}
-	return edit_add(list, container, .Reorder, .Value, 0, "", string(slice.to_bytes(order)))
+	return error_of(edit_add(list, container, .Reorder, .Value, 0, "", string(slice.to_bytes(order))))
 }
 
 // Makes `text` the body of the facts of node `node` and `role`, which it replaces. A `Comment_Inline` body holds no LF
 // or CR. A `Comment` or `Comment_Foot` body may. A `padded` body is written with one space inside each marker, `// text`
 // and `/* text */`, the way a comment's text is read without them. Runs in O(len(text)), checking the shape once and
 // copying the text once.
-set_fact :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string, padded := false) -> Document_Error {
+set_fact :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string, padded := false) -> Error {
 	if e := fact_node(list, node, role, text); e.kind != .None {
-		return e
+		return error_of(e)
 	}
-	return edit_add(list, node, .Set_Fact, role, 0, "", text, padded)
+	return error_of(edit_add(list, node, .Set_Fact, role, 0, "", text, padded))
 }
 
 // Makes `texts`, in order, the bodies of the facts of node `node` and `role`, which they replace, as `set_fact` makes
 // one: the first takes the place of the first fact, and each other follows on a line of its own, or on the value's line
 // for an inline fact. No texts removes the facts, as `remove_fact` does.
-set_facts :: proc(list: ^Edit_List, node: Node_Index, role: Role, texts: []string, padded := false) -> Document_Error {
+set_facts :: proc(list: ^Edit_List, node: Node_Index, role: Role, texts: []string, padded := false) -> Error {
 	switch len(texts) {
 	case 0:
 		return remove_fact(list, node, role)
@@ -269,14 +304,14 @@ set_facts :: proc(list: ^Edit_List, node: Node_Index, role: Role, texts: []strin
 	size := 4 * len(texts)
 	for t in texts {
 		if e := fact_node(list, node, role, t); e.kind != .None {
-			return e
+			return error_of(e)
 		}
 		size += len(t)
 	}
 	// The lengths and the bodies share one allocation, the lengths first, as an edit's key and text do.
 	fresh, err := make([]u8, size, list.allocator)
 	if err != nil {
-		return {kind = .No_Memory}
+		return err
 	}
 	at := 4 * len(texts)
 	for t, i in texts {
@@ -286,17 +321,17 @@ set_facts :: proc(list: ^Edit_List, node: Node_Index, role: Role, texts: []strin
 	e := Edit{node = node, op = .Set_Fact, role = role, padded = padded, key = fresh[:4 * len(texts)], text = fresh[4 * len(texts):]}
 	if _, aerr := append(&list.edits, e); aerr != nil {
 		delete(fresh, list.allocator)
-		return {kind = .No_Memory}
+		return aerr
 	}
-	return {}
+	return nil
 }
 
 // Removes every fact of node `node` and `role`, with its source bytes.
-remove_fact :: proc(list: ^Edit_List, node: Node_Index, role: Role) -> Document_Error {
+remove_fact :: proc(list: ^Edit_List, node: Node_Index, role: Role) -> Error {
 	if e := fact_node(list, node, role, ""); e.kind != .None {
-		return e
+		return error_of(e)
 	}
-	return edit_add(list, node, .Remove_Fact, role, 0, "", "")
+	return error_of(edit_add(list, node, .Remove_Fact, role, 0, "", ""))
 }
 
 // The checks every fact edit makes: the node accepts a fact and the role has a body shape. A role at or below `.Key`
@@ -323,25 +358,6 @@ fact_node :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string) 
 		return {kind = .Bad_Fact}
 	}
 	return {}
-}
-
-// Returns the source bytes `list`'s edits make, in the spec of `as`, through the format's commit. A nil `as` is the
-// document's own spec, `as` of another format is `.Bad_Spec`, and only its spec counts. A text of another spec must
-// read strictly, since the source's reading under its own spec is no evidence, and a delimited text refuses a spec
-// change as `.Bad_Spec`, since it would respell every cell. The caller frees the result with `allocator`. An edit that
-// another covers, a second edit of one node, and a second fact edit of one node and role are `.Conflicting_Edits` at
-// the byte where the two meet. A result that reads less strictly than the source is `.Bad_Result`. `dropped` counts the
-// source facts and fact edits the output cannot hold.
-commit :: proc(list: ^Edit_List, as: Maybe(As) = nil, allocator := context.allocator) -> (out: []u8, dropped: int, err: Document_Error) {
-	doc := list.doc
-	if doc == nil || doc.spelling == nil || doc.spelling.edit == nil {
-		return nil, 0, {kind = .Bad_Index, reason = .No_Document}
-	}
-	target := as.? or_else doc.as
-	if target.spelling != doc.spelling {
-		return nil, 0, {kind = .Bad_Spec}
-	}
-	return doc.spelling.edit.commit(list, target.spec, allocator)
 }
 
 // Whether `body` holds LF or CR, the only line ends a delimited text's comment line ends at. U+2028 is a byte in its

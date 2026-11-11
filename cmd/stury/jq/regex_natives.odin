@@ -1,6 +1,6 @@
 package jq
 
-// The regular-expression builtins (`test`, `match`, `capture`, `split/2`, `sub`, `gsub`). Compiling a pattern and
+// The regular-expression builtins (`test`, `match`, `capture`, `scan`, `splits`, `split/2`, `sub`, `gsub`). Compiling a pattern and
 // finding its matches is regex.odin's.
 
 @(private = "file")
@@ -13,9 +13,9 @@ regex_input :: proc(ip: ^Interp, v: Value) -> (string, Signal) {
 }
 
 // The regex `re` with `flags` and its matches in `s`: every one or the first as `global` says, else as the
-// flags say.
+// flags say, and under `whether` only whether there is one (matches).
 @(private = "file")
-regex_run :: proc(ip: ^Interp, re, flags: Value, s: string, global: Maybe(bool)) -> (r: Regex, ms: []Match, sig: Signal) {
+regex_run :: proc(ip: ^Interp, re, flags: Value, s: string, global: Maybe(bool), whether := false) -> (r: Regex, ms: []Match, sig: Signal) {
 	pattern, ok := string_of(re)
 	if !ok {
 		return {}, nil, fail(ip, "%s (%s) is not a string", type_name(re), brief(ip, re))
@@ -26,7 +26,7 @@ regex_run :: proc(ip: ^Interp, re, flags: Value, s: string, global: Maybe(bool))
 	if g, set := global.?; set {
 		r.global = g
 	}
-	ms, sig = matches(ip, &r, s)
+	ms, sig = matches(ip, &r, s, whether)
 	return
 }
 
@@ -34,7 +34,7 @@ regex_run :: proc(ip: ^Interp, re, flags: Value, s: string, global: Maybe(bool))
 // first: a 1-argument call's wrapper on its argument's type (`re` or `[re]` or `[re, flags]`), then
 // `_match_impl` on the input, then on the regex.
 @(private = "file")
-regex_on :: proc(ip: ^Interp, v: Value, args: []Value, global: Maybe(bool) = nil) -> (r: Regex, s: string, ms: []Match, sig: Signal) {
+regex_on :: proc(ip: ^Interp, v: Value, args: []Value, global: Maybe(bool) = nil, whether := false) -> (r: Regex, s: string, ms: []Match, sig: Signal) {
 	re, flags := args[0], args[1] if len(args) > 1 else nil
 	if len(args) == 1 {
 		switch kind(re) {
@@ -52,12 +52,12 @@ regex_on :: proc(ip: ^Interp, v: Value, args: []Value, global: Maybe(bool) = nil
 	if s, sig = regex_input(ip, v); sig != .Go {
 		return
 	}
-	r, ms, sig = regex_run(ip, re, flags, s, global)
+	r, ms, sig = regex_run(ip, re, flags, s, global, whether)
 	return
 }
 
 fn_test :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	_, _, ms, sig := regex_on(ip, v, args, false)
+	_, _, ms, sig := regex_on(ip, v, args, false, whether = true)
 	return len(ms) > 0, sig
 }
 
@@ -82,6 +82,83 @@ each_match :: proc($capture: bool) -> Generator {
 	}
 }
 
+// `scan` as jq defines it, `match($re; "g" + $flags)` and then each match's string, or its captures' strings when the
+// regex has groups, with no match object made for it.
+each_scan :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal {
+	flags, sig := add(ip, string("g"), args[1] if len(args) > 1 else nil)
+	if sig != .Go {
+		return sig
+	}
+	r, s, ms, rsig := regex_on(ip, input.v, {args[0], flags})
+	if rsig != .Go {
+		return rsig
+	}
+	if track {
+		return match_path_error(ip, &r, s, ms)
+	}
+	for m in ms {
+		v: Value
+		if groups := len(r.re.names) - 1; groups > 0 {
+			a := new_array(groups)
+			for g in 1 ..= groups {
+				append(&a.items, group_text(s, m, g))
+			}
+			v = a
+		} else {
+			v = span_text(s, m[0], m[1])
+		}
+		if sig = emit_made(out, input, v, track); sig != .Go {
+			return sig
+		}
+	}
+	return .Go
+}
+
+// `splits` as jq defines it, the slices `.[start:end]` between the matches of `match($re; flags + "g")` and after the
+// last, with no match object, fold state or slice key made for a piece. A path expression steps by the slice key jq's
+// definition makes, `{start, end, next}`.
+each_splits :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal {
+	flags, sig := add(ip, args[1] if len(args) > 1 else nil, string("g"))
+	if sig != .Go {
+		return sig
+	}
+	_, s, ms, rsig := regex_on(ip, input.v, {args[0], flags})
+	if rsig != .Go {
+		return rsig
+	}
+	if track {
+		return split_steps(ip, input, s, ms, out)
+	}
+	cuts := Cuts{bytes = on_boundaries(s, ms)}
+	for m in ms {
+		if sig = emit_made(out, input, cut_before(&cuts, s, m), false); sig != .Go {
+			return sig
+		}
+	}
+	return emit_made(out, input, cut_rest(&cuts, s), false)
+}
+
+@(private = "file")
+split_steps :: proc(ip: ^Interp, input: Item, s: string, ms: []Match, out: ^Sink) -> Signal {
+	walk: Char_Walk
+	key :: proc(start, end, next: Value) -> Value {
+		k := new_object()
+		object_put(k, "start", start)
+		object_put(k, "end", end)
+		object_put(k, "next", next)
+		return k
+	}
+	next: Value
+	for m in ms {
+		off, length := span(&walk, s, m[0], m[1])
+		if sig := index_and_emit(ip, input, key(next, num(f64(off)), num(f64(off + length))), true, out); sig != .Go {
+			return sig
+		}
+		next = num(f64(off + length))
+	}
+	return index_and_emit(ip, input, key(next, nil, nil), true, out)
+}
+
 // jq's `match` is `_match_impl(...) | .[]`: under `path(...)` that `.[]` meets an array no path leads to.
 @(private = "file")
 match_path_error :: proc(ip: ^Interp, r: ^Regex, s: string, ms: []Match) -> Signal {
@@ -96,7 +173,7 @@ match_path_error :: proc(ip: ^Interp, r: ^Regex, s: string, ms: []Match) -> Sign
 // `split/2` as jq defines it, cutting at its matches' character offsets. jq's `match($re; flags + "g")`
 // adds the flags first, so a non-string fails as that addition before the input is validated.
 fn_split_regex :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	flags, sig := add(ip, args[1], "g")
+	flags, sig := add(ip, args[1], string("g"))
 	if sig != .Go {
 		return nil, sig
 	}
@@ -169,7 +246,7 @@ native_sub :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, o
 			}
 			tail := cut_rest(&cuts, s)
 			if len(results) == 0 {
-				append(&results, "")
+				append(&results, string(""))
 				tail = s
 			}
 			for v in results {

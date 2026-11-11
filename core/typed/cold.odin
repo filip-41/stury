@@ -2,19 +2,24 @@ package typed
 
 import "base:runtime"
 import "core:mem"
-import "core:reflect"
 import "core:strconv"
 import "core:strings"
 import spell "../spell"
 import core ".."
 
 // A value whose token the record's kind does not read at once. The element of a `Ptr`, a `Maybe`, a `Union` or an `Any`
-// reads through the hook with registers of its own, and a container it opens returns to this record.
+// reads through the hook with registers of its own, and a container it opens returns to this record. A `Check` judges a
+// scalar at a `Checked` record here, so the hook a type's plan reads by is the one it was.
 @(cold)
 @(private)
-indirect :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+indirect :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	context = h.ctx
 	fld := field_at(regs.b)
+	when H == Check {
+		if fld.kind == .Checked {
+			return check_value(h, regs, t)
+		}
+	}
 	dest := uintptr(regs.c) + uintptr(fld.offset)
 	m := &h.plan.meta[fld.meta]
 	reason: core.Typed_Error_Kind
@@ -24,33 +29,72 @@ indirect :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Reg
 			h.frames[h.sp - 1].seen += 1
 		}
 		return regs, .Next
-	case .Ptr, .Maybe, .Union, .Any:
+	case .Ptr, .Maybe, .Union:
 		return wrapped(h, regs, t, fld, m, dest)
-	case .Raw, .Hook:
+	case .Any:
+		// An `any` is written, never read: a read takes a `core.Value` for a value of any kind.
+		reason = .Unsupported
+	case .Raw, .Hook, .Value, .Before:
+		when H == Check {
+			if fld.kind == .Before && extra_of(h.plan, m).before.call == nil && !extra_of(h.plan, m).before.first_match {
+				return judged_open(h, regs, t, fld, m, dest)
+			}
+		}
 		if t.kind == .Object || t.kind == .Array {
 			f := &h.frames[h.sp]
 			h.sp += 1
 			f.a, f.b, f.c, f.data, f.seen, f.kind = regs.a, regs.b, regs.c, rawptr(uintptr(t.lo)), 0, t.kind
+			f.owner, f.target = fld, dest
 			return {NO_LIMIT, u64(uintptr(&h.plan.fields[3])), 0}, .Next
 		}
 		lo, hi := core.scalar_ends(t)
+		when H == Check {
+			if fld.kind == .Before {
+				back, action := extra_of(h.plan, m).before.value(h, regs, m, dest, t.kind, lo, hi)
+				back.c += u64(fld.stride)
+				return back, action
+			}
+			// A hooked value's rules judge its text, and one that fails them is not read.
+			if fld.kind == .Hook && m.rule_set > 0 {
+				if action := check_rules(h, regs, t, fld, dest); action != .Next {
+					return regs, .Stop if action == .Stop else .Next
+				}
+			}
+		}
 		reason = store_whole(h, fld, m, dest, t.kind, lo, hi, t)
 	case .Enum:
 		reason = store_enum(h, t, m.enum_info, dest, m.size)
+		when H == Check {
+			if reason == .Wrong_Kind && t.kind == .Number && enum_by_number(h.plan, m.enum_info) {
+				reason = store_integral_enum(h, t, m.enum_info, dest, m.size)
+			}
+		}
 	case .Cstring:
 		reason = store_cstring(h, t, dest)
+		when H == Check {
+			if reason == .None && m.rule_set > 0 && check_rules(h, regs, t, fld, dest) == .Stop {
+				return regs, .Stop
+			}
+		}
 	case .Number_Text:
 		reason = .Wrong_Kind
+		n := (^core.Number_Text)(dest)
 		if t.kind == .Number {
-			reason = store_span(h, t.lo, u64(t.n), (^string)(dest))
-		} else if t.kind == .Null {
+			reason = store_span(h, t.lo, u64(t.n), &n.text)
+			n.double = core.text_f64(n.text)
+			when H == Check {
+				if reason == .None && m.rule_set > 0 && check_rules(h, regs, t, fld, dest) == .Stop {
+					return regs, .Stop
+				}
+			}
+		} else if t.kind == .Null && !m.no_nil {
 			// The empty text, which a write spells `null`.
-			(^string)(dest)^, reason = "", .None
+			n^, reason = {}, .None
 		}
 	case .Number:
 		reason = .Wrong_Kind
 		if t.kind == .Number {
-			if n, ok := h.plan.spelling.number(&h.view, t); ok {
+			if n, ok := h.plan.readers.number(&h.view, t); ok {
 				(^core.Number)(dest)^ = n
 				reason = .None
 			}
@@ -79,15 +123,15 @@ indirect :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Reg
 
 // Reads the element of the wrapper `fld`, and sets the frame the element opens, if any, to return to this record.
 @(private)
-wrapped :: proc(h: ^Reader, regs: core.Hook_Regs, t: core.Token, fld: ^Field, m: ^Meta, dest: uintptr) -> (core.Hook_Regs, core.Action) {
+wrapped :: proc(h: ^$H, regs: core.Hook_Regs, t: core.Token, fld: ^Field, m: ^Meta, dest: uintptr) -> (core.Hook_Regs, core.Action) {
 	regs := regs
 	if t.kind == .Null {
-		if fld.kind != .Union || !m.no_nil {
+		if !m.no_nil {
 			mem.zero(rawptr(dest), int(m.size))
 			regs.c += u64(fld.stride)
 			return regs, .Next
 		}
-		return refuse_value(h, regs, t, .Wrong_Kind)
+		return refuse_value(h, regs, t, .No_Arm if fld.kind == .Union && len(m.arms) > 1 && as_schema(h) else .Wrong_Kind)
 	}
 	sp := h.sp
 	parent := &h.frames[sp - 1]
@@ -109,7 +153,7 @@ wrapped :: proc(h: ^Reader, regs: core.Hook_Regs, t: core.Token, fld: ^Field, m:
 			fault: core.Fault
 			if arm, reason, fault = pick_arm(h, t, m); reason == .Walk {
 				// A fault ends the read, so a collecting read does not pass over the object to fault on it again.
-				note(h, regs, {kind = .Walk, at = fault.at, inner = fault})
+				note(h, regs, {kind = .Walk, at = fault.at, inner = fault}, fault.at)
 				return regs, .Stop
 			}
 			if reason != .None {
@@ -138,25 +182,6 @@ wrapped :: proc(h: ^Reader, regs: core.Hook_Regs, t: core.Token, fld: ^Field, m:
 			}
 			at = uintptr(raw_data(mem_))
 			(^uintptr)(dest)^ = at
-		}
-	case .Any:
-		if scalar {
-			reason := store_any(h, t, (^any)(dest))
-			if reason != .None {
-				return refuse_value(h, regs, t, reason)
-			}
-			regs.c += u64(fld.stride)
-			return regs, .Next
-		}
-		ti := type_info_of(map[string]any) if t.kind == .Object else type_info_of([dynamic]any)
-		box, err := runtime.mem_alloc(ti.size, ti.align)
-		if err != nil {
-			return refuse_value(h, regs, t, .No_Memory)
-		}
-		at = uintptr(raw_data(box))
-		(^any)(dest)^ = any{rawptr(at), ti.id}
-		if t.kind == .Array {
-			rec = ([^]Field)(fld.first)[2:]
 		}
 	}
 	// The element is no member of the frame below, whose repeats its own key tracks.
@@ -235,7 +260,7 @@ Tag_Scan :: struct {
 on_tag_token :: proc "contextless" (s: ^Tag_Scan, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	if t.role == .Key {
 		if s.depth == 1 {
-			s.on_tag = s.view.spelling.key_equals(&s.view, t, s.name)
+			s.on_tag = s.view.readers.key_equals(&s.view, t, s.name)
 			if s.on_tag {
 				s.found += 1
 				if s.found == 2 {
@@ -261,33 +286,41 @@ on_tag_token :: proc "contextless" (s: ^Tag_Scan, regs: core.Hook_Regs, t: core.
 	return regs, .Next
 }
 
-// The arm a value picks: an object's by its tag member, any value's by its class.
+// Whether a read refuses as a schema does: a check of a model or of a description, where a read of a type names why.
+@(private)
+as_schema :: #force_inline proc "contextless" (h: ^Reader) -> bool {
+	return h.wide && (h.plan.model_plan != .None || h.plan.checking)
+}
+
+// The arm a value picks: an object's by its tag member, any value's by its class. A model refuses a value no arm takes
+// as `.No_Arm`, as its schema's `anyOf` does, where a read names why.
 @(private)
 pick_arm :: proc(h: ^Reader, t: core.Token, m: ^Meta) -> (arm: int, reason: core.Typed_Error_Kind, fault: core.Fault) {
+	no_arm := len(m.arms) > 1 && as_schema(h)
 	if t.kind == .Object && m.tagged {
-		s := h.find_tag(h, t.lo)
+		s := h.find_tag(h, t.lo, extra_of(h.plan, m).union_tag)
 		// A text that breaks past the tag is the walk's to report, not a missing tag's.
 		if f, faulted := s.fault.?; faulted {
 			return 0, .Walk, f
 		}
 		if s.found == 0 {
-			return 0, .Missing_Tag, {}
+			return 0, .No_Arm if no_arm else .Missing_Tag, {}
 		}
 		if s.found > 1 {
 			return 0, .Repeated_Tag, {}
 		}
 		if s.value.kind == .String {
-			name, ok := core.token_text(h.plan.spelling, &h.view, s.value, context.temp_allocator)
+			name, ok := core.token_text(h.plan.readers, &h.view, s.value, context.temp_allocator)
 			if !ok {
 				return 0, .No_Memory, {}
 			}
 			for &a, k in m.arms {
-				if a.name == name {
+				if a.name != "" && a.name == name {
 					return k, .None, {}
 				}
 			}
 		}
-		return 0, .Not_A_Member, {}
+		return 0, .No_Arm if no_arm else .Not_A_Member, {}
 	}
 	class: Value_Class
 	#partial switch t.kind {
@@ -307,25 +340,61 @@ pick_arm :: proc(h: ^Reader, t: core.Token, m: ^Meta) -> (arm: int, reason: core
 			return k, .None, {}
 		}
 	}
-	return 0, .Wrong_Kind, {}
+	return 0, .No_Arm if no_arm else .Wrong_Kind, {}
+}
+
+// A value read whole, built from the text `lo..hi` in the read's allocator by the plan's `build`, which the reads it was
+// made with give. A plan with none is `.Unsupported`.
+@(private)
+store_value :: proc(h: ^Reader, lo, hi: u64, dest: ^core.Value) -> core.Typed_Error_Kind {
+	build := plan_text_build(h.plan)
+	if build == nil {
+		return .Unsupported
+	}
+	doc, err := build(h.src[lo:hi], h.plan.as, context.allocator)
+	#partial switch err.kind {
+	case .None:
+	case .No_Memory:
+		return .No_Memory
+	case .Duplicate_Key:
+		return .Duplicate_Key
+	case .Walk:
+		#partial switch err.inner.kind {
+		case .Too_Deep:
+			return .Too_Deep
+		case .No_Memory:
+			return .No_Memory
+		}
+		return .Walk
+	case:
+		return .Unsupported
+	}
+	defer core.destroy(&doc)
+	dest^ = core.built_value({&doc, core.ROOT}, .First if h.first_key else .Last, h.borrow)
+	return .None
 }
 
 // Stores a value read whole, `lo..hi` of the text.
 store_whole :: proc(h: ^Reader, fld: ^Field, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64, t: core.Token) -> core.Typed_Error_Kind {
-	if fld.kind == .Raw {
+	#partial switch fld.kind {
+	case .Raw:
 		return store_span(h, lo, hi - lo, (^string)(dest))
+	case .Value:
+		return store_value(h, lo, hi, (^core.Value)(dest))
 	}
 	v := Hook_Value{kind = kind, text = string(h.src[lo:hi])}
 	v.decoded = v.text
 	if kind == .String {
 		ok: bool
-		if v.decoded, ok = core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator); !ok {
+		if v.decoded, ok = core.token_text(h.plan.readers, &h.view, t, context.temp_allocator); !ok {
 			return .No_Memory
 		}
 	}
 	if m.read == nil {
 		return .Unsupported
 	}
+	data := extra_of(h.plan, m).data
+	context.user_ptr = data if data != nil else context.user_ptr
 	return m.read(v, rawptr(dest), context.allocator).? or_else .None
 }
 
@@ -364,7 +433,7 @@ store_cstring :: proc(h: ^Reader, t: core.Token, dest: uintptr) -> core.Typed_Er
 	if t.kind != .String {
 		return .Wrong_Kind
 	}
-	s, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
+	s, ok := core.token_text(h.plan.readers, &h.view, t, context.temp_allocator)
 	if !ok {
 		return .No_Memory
 	}
@@ -398,7 +467,7 @@ store_decoded :: proc(h: ^Reader, t: core.Token, dest: ^Scalar) -> core.Typed_Er
 		}
 		dest^ = s
 	case .Number:
-		n, ok := h.plan.spelling.number(&h.view, t)
+		n, ok := h.plan.readers.number(&h.view, t)
 		if !ok {
 			return .Wrong_Kind
 		}
@@ -415,7 +484,7 @@ store_decoded :: proc(h: ^Reader, t: core.Token, dest: ^Scalar) -> core.Typed_Er
 		case .Float:
 			x := transmute(f64)n.bits
 			if past_binary64(x, t.spelling) {
-				return .Out_Of_Range
+				return past_limit(x < 0)
 			}
 			dest^ = x
 		case .Wide:
@@ -423,7 +492,7 @@ store_decoded :: proc(h: ^Reader, t: core.Token, dest: ^Scalar) -> core.Typed_Er
 			if reason := store_span(h, t.lo, u64(t.n), &s); reason != .None {
 				return reason
 			}
-			dest^ = Number_Text(s)
+			dest^ = core.Number_Text{s, core.text_f64(s)}
 		}
 	case:
 		return .Wrong_Kind
@@ -431,31 +500,9 @@ store_decoded :: proc(h: ^Reader, t: core.Token, dest: ^Scalar) -> core.Typed_Er
 	return .None
 }
 
-// A scalar into an `any`: a null as nil, any other as its `Scalar` arm, boxed.
-@(private)
-store_any :: proc(h: ^Reader, t: core.Token, dest: ^any) -> core.Typed_Error_Kind {
-	if t.kind == .Null {
-		dest^ = nil
-		return .None
-	}
-	d: Scalar
-	if reason := store_decoded(h, t, &d); reason != .None {
-		return reason
-	}
-	id := reflect.union_variant_typeid(d)
-	ti := type_info_of(id)
-	box, err := runtime.mem_alloc(ti.size, ti.align)
-	if err != nil {
-		return .No_Memory
-	}
-	mem.copy_non_overlapping(raw_data(box), &d, ti.size)
-	dest^ = any{raw_data(box), id}
-	return .None
-}
-
 // A name or, under `.Int`, a backing integer into an enum of `size` bytes.
 store_enum :: proc(h: ^Reader, t: core.Token, info: ^runtime.Type_Info_Enum, dest: uintptr, size: u32) -> core.Typed_Error_Kind {
-	if h.plan.enums == .Int {
+	if enum_by_number(h.plan, info) {
 		if t.kind != .Number {
 			return .Wrong_Kind
 		}
@@ -465,7 +512,7 @@ store_enum :: proc(h: ^Reader, t: core.Token, info: ^runtime.Type_Info_Enum, des
 	if t.kind != .String {
 		return .Wrong_Kind
 	}
-	name, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
+	name, ok := core.token_text(h.plan.readers, &h.view, t, context.temp_allocator)
 	if !ok {
 		return .No_Memory
 	}
@@ -483,10 +530,10 @@ enum_name_store :: proc(info: ^runtime.Type_Info_Enum, name: string, dest: uintp
 	return .Not_A_Member
 }
 
-// An integer into an enum of `size` bytes. One past `i64` is out of range.
+// An integer into an enum of `size` bytes. One past `i64` is no member.
 store_enum_value :: proc(info: ^runtime.Type_Info_Enum, n: core.Number, dest: uintptr, size: u32) -> core.Typed_Error_Kind {
 	if n.kind != .Int {
-		return .Out_Of_Range
+		return .Not_A_Member
 	}
 	if enum_member(info, i64(n.bits)) < 0 {
 		return .Not_A_Member
@@ -518,7 +565,7 @@ write_uint :: proc "contextless" (dest: uintptr, v: u64, size: u32) {
 // An integer token as an i64.
 @(private)
 number_i64 :: proc(h: ^Reader, t: core.Token) -> (v: i64, reason: core.Typed_Error_Kind) {
-	n, ok := h.plan.spelling.number(&h.view, t)
+	n, ok := h.plan.readers.number(&h.view, t)
 	if !ok {
 		return 0, .Wrong_Kind
 	}
@@ -526,7 +573,7 @@ number_i64 :: proc(h: ^Reader, t: core.Token) -> (v: i64, reason: core.Typed_Err
 		return i64(n.bits), .None
 	}
 	// An integer past `i64` reads as `.Uint`, a float or wide, as `store_number` judges it.
-	return 0, .Out_Of_Range if core.number_shape(t.spelling) < 32 else .Wrong_Kind
+	return 0, past_limit(raw_data(h.src)[t.lo] == '-') if core.number_shape(t.spelling) < 32 else .Wrong_Kind
 }
 
 // One element of a bit_set: a member's name, or an integer of its range or a member's.
@@ -546,7 +593,7 @@ store_bit :: proc(h: ^Reader, t: core.Token, m: ^Meta, dest: uintptr) -> core.Ty
 	}
 	bit := v - m.lower
 	if bit < 0 || bit >= i64(m.count) {
-		return .Out_Of_Range
+		return past_limit(bit < 0)
 	}
 	(^u8)(dest + uintptr(bit / 8))^ |= 1 << uint(bit % 8)
 	return .None
@@ -559,17 +606,23 @@ store_int :: #force_no_inline proc "contextless" (mag: u64, neg: bool, kind: Rea
 	if signed {
 		limit := u64(1) << (bits - 1)
 		if mag > limit || (!neg && mag == limit) {
-			return .Out_Of_Range
+			return past_limit(neg)
 		}
 	} else if neg {
 		if mag != 0 {
-			return .Out_Of_Range
+			return .Below_Minimum
 		}
 	} else if bits < 64 && mag >> bits != 0 {
-		return .Out_Of_Range
+		return .Above_Maximum
 	}
 	write_uint(dest, 0 - mag if neg else mag, bits / 8)
 	return .None
+}
+
+// The refusal of a number past what its type holds, below it when `neg`.
+@(private)
+past_limit :: #force_inline proc "contextless" (neg: bool) -> core.Typed_Error_Kind {
+	return .Below_Minimum if neg else .Above_Maximum
 }
 
 // Numbers the hot cases do not take.
@@ -581,7 +634,7 @@ number_cold :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, f
 		// `mant` holds all the digits of a plain decimal, the one kind the walk folds.
 		return store_number(spell.number_significand(h.mant, -i64(frac), raw_data(h.src)[t.lo] == '-', sum <= 15), false, h, t, fld, dest)
 	}
-	n, ok := h.plan.spelling.number(&h.view, t)
+	n, ok := h.plan.readers.number(&h.view, t)
 	if !ok {
 		return .Wrong_Kind
 	}
@@ -595,7 +648,7 @@ store_number :: proc(n: core.Number, integer: bool, h: ^Reader, t: core.Token, f
 			return .Wrong_Kind
 		}
 		// An integer past `u64` reads as a float or as wide.
-		return store_integer(n, fld.kind, dest)
+		return store_integer(n, raw_data(h.src)[t.lo] == '-', fld.kind, dest)
 	}
 	if fld.kind != .F64 && fld.kind != .F32 {
 		return .Wrong_Kind
@@ -616,12 +669,12 @@ store_number :: proc(n: core.Number, integer: bool, h: ^Reader, t: core.Token, f
 		// Past the digit and scale caps the double may still exist, as for `1e-5000`, which is zero.
 		parsed, ok := strconv.parse_f64(string(raw_data(h.src)[t.lo:][:t.n]))
 		if !ok {
-			return .Out_Of_Range
+			return past_limit(raw_data(h.src)[t.lo] == '-')
 		}
 		x = parsed
 	}
 	if past_binary64(x, t.spelling) {
-		return .Out_Of_Range
+		return past_limit(x < 0)
 	}
 	if fld.kind == .F32 {
 		// Every case rounds the exact value once.
@@ -638,14 +691,14 @@ store_number :: proc(n: core.Number, integer: bool, h: ^Reader, t: core.Token, f
 					// Rounds the decimal once. Past `max(f32)` it is infinity, refused below.
 					v, _ = strconv.parse_f32(string(raw_data(h.src)[t.lo:][:t.n]))
 				}
-			} else if read := h.plan.spelling.number_f32; read != nil {
+			} else if read := h.plan.readers.number_f32; read != nil {
 				if exact, ok := read(&h.view, t); ok {
 					v = exact
 				}
 			}
 		}
 		if abs(v) > max(f32) && !spells_non_finite(x, t.spelling) {
-			return .Out_Of_Range
+			return past_limit(v < 0)
 		}
 		(^f32)(dest)^ = v
 	} else {
@@ -670,7 +723,7 @@ past_binary64 :: #force_inline proc "contextless" (x: f64, spelling: u16) -> boo
 // A number whose spelling the walk does not fold: `+5` and `5.` spell an integer a plain decimal writes as `5`.
 @(cold)
 @(private)
-spelled_number :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+spelled_number :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	regs := regs
 	if regs.c >= regs.a {
 		reason: core.Typed_Error_Kind
@@ -683,8 +736,14 @@ spelled_number :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Ho
 	if fld.kind < .I8 || fld.kind > .F64 {
 		return indirect(h, regs, t)
 	}
-	if reason := number_cold(h, t, fld, uintptr(regs.c) + uintptr(fld.offset)); reason != .None {
+	dest := uintptr(regs.c) + uintptr(fld.offset)
+	if reason := number_cold(h, t, fld, dest); reason != .None {
 		return refuse_value(h, regs, t, reason)
+	}
+	when H == Check {
+		if h.plan.meta[fld.meta].rule_set > 0 && check_rules(h, regs, t, fld, dest) == .Stop {
+			return regs, .Stop
+		}
 	}
 	regs.c += u64(fld.stride)
 	return regs, .Next
@@ -692,14 +751,11 @@ spelled_number :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Ho
 
 @(cold)
 @(private)
-open_map :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, fld: ^Field, dest: uintptr, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	if fld.kind != .Map && fld.kind != .Required {
+open_map :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, fld: ^Field, dest: uintptr, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	if fld.kind != .Map {
 		return indirect(h, regs, t)
 	}
 	f := push_member(h, regs, fld, dest)
-	if fld.kind == .Required {
-		return {NO_LIMIT, u64(uintptr(fld.first)), u64(dest)}, .Next
-	}
 	// A map that held no entry at its open holds only this read's, which a repeated key may free.
 	f.extra, f.run, f.kind = nil, nil, .Object if (^runtime.Raw_Map)(dest).len == 0 else .Null
 	return {NO_LIMIT, u64(uintptr(fld.first)), 0}, .Next
@@ -707,7 +763,7 @@ open_map :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Reg
 
 @(cold)
 @(private)
-open_array :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, fld: ^Field, dest: uintptr, t: core.Token) -> (core.Hook_Regs, core.Action) {
+open_array :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, fld: ^Field, dest: uintptr, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	m := &h.plan.meta[fld.meta]
 	limit := u64(dest)
 	#partial switch fld.kind {
@@ -744,9 +800,10 @@ is_struct :: #force_inline proc "contextless" (f: ^Field) -> bool {
 	return f.kind == .Struct || f.kind == .Required
 }
 
+// Whether the frames of record `f`'s containers hold the record that reads them in `Frame.owner`.
 @(private)
 wrapper :: #force_inline proc "contextless" (f: ^Field) -> bool {
-	return f.kind >= .Ptr && f.kind <= .Any
+	return f.kind >= .Ptr && f.kind <= .Before
 }
 
 // Sets member `i`'s bit in `f` and says whether it was set.
@@ -773,6 +830,26 @@ seen_set :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, i: int) ->
 	return was
 }
 
+// Whether the object of frame `f` with its cursor at `regs` has its member `i`.
+@(private)
+member_seen :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, i: i32) -> bool {
+	if f.seen == 0 {
+		return i < i32((uintptr(regs.b) - uintptr(owner.first)) / size_of(Field))
+	}
+	mark_run(h, f, owner, (^Field)(uintptr(regs.b)))
+	return seen_has(f, int(i))
+}
+
+// Whether member `i`'s bit is set in `f`.
+@(private)
+seen_has :: proc "contextless" (f: ^Frame, i: int) -> bool {
+	if i < 63 {
+		return f.seen & (u64(1) << uint(i)) != 0
+	}
+	past := i - 63
+	return f.extra != nil && f.extra[past / 64] & (u64(1) << uint(past % 64)) != 0
+}
+
 // Marks the members the cursor read since `f.run`, each once. A cursor outside the block read nothing by its keys.
 @(private)
 mark_run :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, upto: ^Field) {
@@ -791,6 +868,13 @@ mark_run :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, upto: ^Fie
 		seen_set(h, f, owner, i)
 	}
 	f.run = upto
+}
+
+// Whether a member of the object at frame `f` past member `i` was read, which a member past the 62nd or of an object with
+// more than 63 members is taken to be.
+@(private)
+seen_past :: #force_inline proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, i: int) -> bool {
+	return i >= 62 || h.plan.meta[owner.meta].members > 63 || (f.seen &~ SEEN_ON) >> uint(i + 1) != 0
 }
 
 // A struct, map or fixed array about to be read into a member the cursor matched after a key arrived out of order. A
@@ -826,6 +910,9 @@ on_key :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs,
 		return regs, .Next
 	}
 	if t.spelling & core.SPELLING_DECODE != 0 {
+		if t.spelling == TEXT_KEY {
+			return find_member(h, regs, t, f, owner, TEXT_NAME)
+		}
 		return key_decoded(h, regs, t, f, owner)
 	}
 	return find_member(h, regs, t, f, owner, string(raw_data(h.src)[t.lo:][:t.n]))
@@ -838,15 +925,24 @@ find_member :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Reg
 	if len(key) != 0 && m.names & name_bit(key) == 0 {
 		return unknown_key(h, regs, t, f, owner, key)
 	}
-	// A record that compares its name holds its length, so most members cost one compare.
+	if i := member_index(h, owner, m, key); i >= 0 {
+		return member_found(h, regs, t, f, owner, i)
+	}
+	return unknown_key(h, regs, t, f, owner, key)
+}
+
+// The member of the struct `owner` named `key`, -1 for none. A record that compares its name holds its length, so most
+// members cost one compare.
+@(private)
+member_index :: #force_inline proc "contextless" (h: ^Reader, owner: ^Field, m: ^Meta, key: string) -> int #no_bounds_check {
 	want := u32(len(key)) + h.plan.key_frame
 	at := ([^]Field)(owner.first)
 	for i in 0 ..< int(m.members) {
 		if (at[i].n == want || at[i].n == 0) && h.plan.meta[at[i].meta].name == key {
-			return member_found(h, regs, t, f, owner, i)
+			return i
 		}
 	}
-	return unknown_key(h, regs, t, f, owner, key)
+	return -1
 }
 
 // A key the type does not name.
@@ -865,6 +961,14 @@ unknown_cold :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook
 	regs := regs
 	m := &h.plan.meta[owner.meta]
 	end := &h.plan.meta[int(m.block) + int(m.members)]
+	// A read_only member's key is no unknown member's to capture.
+	x := extra_at(h.plan, owner.meta)
+	if m.model != nil && read_only_key(m.model, key) {
+		if x.forbid {
+			return refuse(h, regs, {kind = .Not_Allowed, at = t.lo, steps = {0 = core.Name(key)}, n_steps = 1}, t.lo + u64(t.n))
+		}
+		return regs, .Skip
+	}
 	if end.capture >= 0 {
 		rec := &h.plan.fields[end.capture]
 		if f.seen == 0 {
@@ -875,23 +979,26 @@ unknown_cold :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook
 		slot: rawptr
 		reason: core.Typed_Error_Kind
 		// Under `.First` a repeat of a captured key is read into a scratch value, so it is judged and leaves the first.
-		if captured := (^map[string]Raw)(base + uintptr(rec.offset)); h.first_key && key in captured^ {
-			scratch, no_scratch := runtime.mem_alloc(size_of(Raw), align_of(Raw), context.temp_allocator)
+		captured, info := (^runtime.Raw_Map)(base + uintptr(rec.offset)), h.plan.meta[rec.meta].map_info
+		k := key
+		if h.first_key && runtime.__dynamic_map_get(captured, info, info.key_hasher(&k, runtime.map_seed(captured^)), &k) != nil {
+			scratch, no_scratch := runtime.mem_alloc(int(info.vs.size_of_type), 16, context.temp_allocator)
 			if no_scratch != nil {
-				return refuse(h, regs, {kind = .No_Memory, at = t.lo})
+				return refuse(h, regs, {kind = .No_Memory, at = t.lo}, t.lo + u64(t.n))
 			}
 			slot = raw_data(scratch)
 		} else {
-			slot, reason = map_slot(h, &h.plan.meta[rec.meta], (^runtime.Raw_Map)(captured), key, t, field_at(u64(uintptr(rec.first))), false)
+			slot, reason = map_slot(h, &h.plan.meta[rec.meta], captured, key, t, field_at(u64(uintptr(rec.first))), false)
 		}
 		if reason != .None {
-			return refuse(h, regs, {kind = reason, at = t.lo})
+			return refuse(h, regs, {kind = reason, at = t.lo, steps = {0 = core.Name(key)}, n_steps = 1}, t.lo + u64(t.n))
 		}
 		regs.b, regs.c = u64(uintptr(rec.first)), u64(uintptr(slot))
 		return regs, .Next
 	}
-	if h.refuse_unknown && !(m.tagged && key == h.plan.union_tag) {
-		return refuse(h, regs, {kind = .Unknown_Field, at = t.lo, steps = {0 = core.Name(key)}, n_steps = 1})
+	if (h.refuse_unknown || x.forbid) && !(m.tagged && key == x.union_tag) {
+		// A model's struct that forbids them refuses them as its schema does.
+		return refuse(h, regs, {kind = .Not_Allowed if x.forbid else .Unknown_Field, at = t.lo, steps = {0 = core.Name(key)}, n_steps = 1}, t.lo + u64(t.n))
 	}
 	return regs, .Skip
 }
@@ -911,6 +1018,9 @@ member_found :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.To
 	mark_run(h, f, owner, (^Field)(uintptr(regs.b)))
 	f.seen |= SEEN_ON
 	was := seen_set(h, f, owner, i)
+	if was && as_schema(h) && (^Check)(h).repeats != .Ignore {
+		return repeat_member((^Check)(h), regs, t, f, owner, i)
+	}
 	size := h.plan.meta[at[i].meta].size
 	if h.first_key {
 		regs.b = u64(uintptr(&h.plan.solo[2 * (int(uintptr(&at[i]) - uintptr(raw_data(h.plan.fields))) / size_of(Field)) + 1]))
@@ -918,7 +1028,7 @@ member_found :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.To
 			context = h.ctx
 			scratch, err := runtime.mem_alloc(max(int(size), 1), 16, context.temp_allocator)
 			if err != nil {
-				return refuse(h, regs, {kind = .No_Memory, at = t.lo})
+				return refuse(h, regs, {kind = .No_Memory, at = t.lo}, t.lo + u64(t.n))
 			}
 			regs.c = u64(uintptr(raw_data(scratch))) - u64(at[i].offset)
 		}
@@ -934,13 +1044,25 @@ member_found :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.To
 	return regs, .Next
 }
 
+// Marks member `i` of the open struct read, for a format that moves the cursor over its own table, at a struct
+// whose value starts at `regs.c`.
+mark_member :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, i: int) {
+	f := &h.frames[h.sp - 1]
+	owner := frame_owner(f)
+	if f.seen == 0 {
+		f.data, f.run, f.extra = rawptr(uintptr(regs.c)), owner.first, nil
+	}
+	f.seen |= SEEN_ON
+	seen_set(h, f, owner, i)
+}
+
 @(cold)
 @(private)
 key_decoded :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, f: ^Frame, owner: ^Field) -> (core.Hook_Regs, core.Action) {
 	context = h.ctx
-	key, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
+	key, ok := core.token_text(h.plan.readers, &h.view, t, context.temp_allocator)
 	if !ok {
-		return refuse(h, regs, {kind = .No_Memory, at = t.lo})
+		return refuse(h, regs, {kind = .No_Memory, at = t.lo}, t.lo + u64(t.n))
 	}
 	return find_member(h, regs, t, f, owner, key)
 }
@@ -950,9 +1072,9 @@ map_key :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, 
 	context = h.ctx
 	regs := regs
 	f.extra, f.run = cast([^]u64)raw_data(h.src)[t.lo:], (^Field)(uintptr(t.n))
-	key, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
+	key, ok := core.token_text(h.plan.readers, &h.view, t, context.temp_allocator)
 	if !ok {
-		return refuse(h, regs, {kind = .No_Memory, at = t.lo})
+		return refuse(h, regs, {kind = .No_Memory, at = t.lo}, t.lo + u64(t.n))
 	}
 	m := &h.plan.meta[owner.meta]
 	if h.first_key {
@@ -965,7 +1087,7 @@ map_key :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, 
 		if keys := (^map[string]struct {})(uintptr(f.seen)); key in keys^ {
 			scratch, err := runtime.mem_alloc(max(int(m.elem_size), 1), 16, context.temp_allocator)
 			if err != nil {
-				return refuse(h, regs, {kind = .No_Memory, at = t.lo})
+				return refuse(h, regs, {kind = .No_Memory, at = t.lo}, t.lo + u64(t.n))
 			}
 			regs.c = u64(uintptr(raw_data(scratch)))
 			return regs, .Next
@@ -974,8 +1096,18 @@ map_key :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, 
 		}
 	}
 	slot, reason := map_slot(h, m, (^runtime.Raw_Map)(f.data), key, t, field_at(regs.b), f.kind == .Object)
+	if reason != .None && as_schema(h) && m.key_kind != .String && m.key_kind != .Cstring {
+		// A model's key is judged as its schema's member names are, as the object's: an integer key by its pattern.
+		if m.key_kind != .Enum || enum_by_number(h.plan, m.enum_info) {
+			reason = .No_Match
+		}
+		h.sp -= 1
+		note(h, {f.a, f.b, f.c}, {kind = reason, at = t.lo}, t.lo + u64(t.n), nil, key)
+		h.sp += 1
+		return regs, .Stop if h.sink == nil else .Skip
+	}
 	if reason != .None {
-		return refuse(h, regs, {kind = reason, at = t.lo})
+		return refuse(h, regs, {kind = reason, at = t.lo}, t.lo + u64(t.n))
 	}
 	regs.c = u64(uintptr(slot))
 	return regs, .Next
@@ -1000,7 +1132,7 @@ map_slot :: proc(h: ^Reader, m: ^Meta, raw: ^runtime.Raw_Map, key: string, t: co
 			return
 		}
 	case .Enum:
-		if h.plan.enums == .Name {
+		if !enum_by_number(h.plan, m.enum_info) {
 			reason = enum_name_store(m.enum_info, key, uintptr(&k), 8)
 		} else {
 			reason = store_enum_value(m.enum_info, key_number(key), uintptr(&k), 8)
@@ -1009,7 +1141,8 @@ map_slot :: proc(h: ^Reader, m: ^Meta, raw: ^runtime.Raw_Map, key: string, t: co
 			return
 		}
 	case:
-		if reason = store_integer(key_number(key), m.key_kind, uintptr(&k)); reason != .None {
+		n := key_number(key)
+		if reason = .Out_Of_Range if n.kind == .Wide else store_integer(n, key[0] == '-', m.key_kind, uintptr(&k)); reason != .None {
 			return
 		}
 	}
@@ -1049,18 +1182,20 @@ release_text :: proc(h: ^Reader, dest: uintptr, kind := Read_Kind.String) {
 	(^runtime.Raw_String)(dest)^ = {}
 }
 
-// A map key's integer, `.Wide` for a key that spells none.
+// A map key's integer, `.Float` for a key of digits past every integer type, and `.Wide` for a key that spells no
+// integer.
 @(private)
 key_number :: proc(key: string) -> core.Number {
 	n, ok := spell.number_strict(transmute([]u8)key, 0, u64(len(key)))
-	return n if ok && (n.kind == .Int || n.kind == .Uint) else {0, .Wide}
+	return n if ok && (n.kind <= .Uint || !strings.contains_any(key, ".eE")) else {0, .Wide}
 }
 
-// Stores a number that reads as `.Int` or `.Uint`, and refuses any other as out of range.
+// Stores a number that reads as `.Int` or `.Uint`, and refuses any other as past the limit on the side of its sign,
+// `minus` for a text that starts with `-`.
 @(private)
-store_integer :: proc(n: core.Number, kind: Read_Kind, dest: uintptr) -> core.Typed_Error_Kind {
+store_integer :: proc(n: core.Number, minus: bool, kind: Read_Kind, dest: uintptr) -> core.Typed_Error_Kind {
 	if n.kind > .Uint {
-		return .Out_Of_Range
+		return past_limit(minus)
 	}
 	if n.kind == .Uint {
 		return store_int(n.bits, false, kind, dest)
@@ -1069,21 +1204,59 @@ store_integer :: proc(n: core.Number, kind: Read_Kind, dest: uintptr) -> core.Ty
 	return store_int(u64(-i64(n.bits)) if neg else n.bits, neg, kind, dest)
 }
 
-// The index of a member `required` names that is absent, or -1.
+// Whether the struct of record `owner`, which closes in frame `f`, is one a partial load reads as a patch: it and each
+// container open around it are structs that hold a `Fields_Set`, the root's included, and none is held behind a pointer,
+// a `Maybe` or a union, which a patch replaces whole.
 @(private)
-missing_member :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, regs: core.Hook_Regs) -> i32 {
+partial :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field) -> bool {
+	if !h.partial || !holds_set(h.plan, owner) || behind_wrapper(f) {
+		return false
+	}
+	for i in 1 ..< h.sp {
+		if behind_wrapper(&h.frames[i]) || !holds_set(h.plan, frame_owner(&h.frames[i])) {
+			return false
+		}
+	}
+	return true
+}
+
+// Whether the container of frame `f` is held by a pointer, a `Maybe` or a union.
+@(private)
+behind_wrapper :: proc "contextless" (f: ^Frame) -> bool {
+	k := field_at(f.b).kind
+	return k == .Ptr || k == .Maybe || k == .Union
+}
+
+// Whether `f` is a struct's record whose struct holds a `Fields_Set`.
+holds_set :: proc "contextless" (plan: ^Plan, f: ^Field) -> bool {
+	sm := plan.meta[f.meta].model
+	return (f.kind == .Struct || f.kind == .Required) && sm != nil && sm.fields_set != 0
+}
+
+// The index of the first member from `from` on that `required` names and is absent, or -1. The first call passes 0, and a
+// read that reports every absent member passes the index after the one it reported, with `regs` as before.
+@(private)
+missing_member :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, from: i32) -> i32 {
 	m := &h.plan.meta[owner.meta]
 	end := &h.plan.meta[int(m.block) + int(m.members)]
 	if f.seen != 0 {
-		mark_run(h, f, owner, (^Field)(uintptr(regs.b)))
+		if from == 0 {
+			mark_run(h, f, owner, (^Field)(uintptr(regs.b)))
+		}
+		if partial(h, f, owner) {
+			return -1
+		}
 		for at in end.required {
-			if !seen_set(h, f, owner, int(at)) {
+			if at >= from && !seen_has(f, int(at)) {
 				return at
 			}
 		}
 		return -1
 	}
-	done := i32((uintptr(regs.b) - uintptr(owner.first)) / size_of(Field))
+	if partial(h, f, owner) {
+		return -1
+	}
+	done := max(from, i32((uintptr(regs.b) - uintptr(owner.first)) / size_of(Field)))
 	for at in end.required {
 		if at >= done {
 			return at

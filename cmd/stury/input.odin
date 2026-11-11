@@ -232,7 +232,7 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 		rec: records.Record
 		ok: bool
 		part: core.Document
-		read: core.Path_Error
+		read: core.Error
 		if scanned {
 			rec, part, read, ok = records.scan(&ins.texts, route.path)
 		} else {
@@ -573,6 +573,22 @@ open_file :: proc(path: string, command := "") -> (f: ^os.File, ok: bool) {
 		return nil, false
 	}
 	return f, true
+}
+
+// The bytes of the file `path` names, "-" being stdin, as `open_file` opens it: its mapping where it maps, else all of
+// it on the heap, and the file closed but for stdin. False, told, when it does not open or read.
+file_bytes :: proc(path: string, command := "") -> (d: Spent, ok: bool) {
+	f := open_file(path, command) or_return
+	mapped: bool
+	if d.data, _, mapped = map_file(f); !mapped {
+		d.data = read_file(f) or_return
+		return d, true
+	}
+	mapped_input_name = file_name(path)
+	if f != os.stdin {
+		os.close(f)
+	}
+	return {d.data, true}, true
 }
 
 // All of `f`, on the heap, and `f` closed but for stdin, or false, told, when it does not read.

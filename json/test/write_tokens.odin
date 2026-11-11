@@ -93,7 +93,7 @@ token_sample :: proc() -> Token_Sample {
 	}
 }
 
-token_text :: proc(v: Token_Sample, opts: core.Write_Options, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
+token_text :: proc(v: Token_Sample, opts: core.Write_Options, allocator := context.allocator) -> ([]u8, core.Typed_Refusal) {
 	tw: write.Tokens
 	write.tokens_init(&tw, json.as(.Json), opts, allocator)
 	write_sample(&tw, v)
@@ -114,13 +114,13 @@ tokens_equal_marshal :: proc(t: ^testing.T) {
 			{ascii = true, escape_html = true},
 		}) {
 		want, werr := json.marshal(v, write = opts, allocator = context.temp_allocator)
-		testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
+		walktest.expect_nil(t, werr)
 		got, err := token_text(v, opts)
 		defer delete(got)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 		testing.expectf(t, string(got) == string(want), "%v: %q, want %q", opts, got, want)
-		doc, derr := json.build(got, .Json)
-		testing.expect_value(t, derr.kind, core.Document_Error_Kind.None)
+		doc, derr := core.build(got, json.as(.Json))
+		walktest.expect_nil(t, derr)
 		core.destroy(&doc)
 	}
 }
@@ -316,4 +316,40 @@ tokens_under_failing_allocators :: proc(t: ^testing.T) {
 		want, _ := json.marshal(v, write = opts, allocator = context.temp_allocator)
 		walktest.sweep_write(t, token_try, &try, string(want))
 	}
+}
+
+@(test)
+write_value_of_built_value_and_node :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	src := `{"k": [1, "A", 2.50]}`
+	doc, err := json.build(transmute([]u8)src, .Json, {}, .Last, context.temp_allocator)
+	testing.expect(t, err == nil)
+	items := core.new_array()
+	core.array_append(items, f64(1))
+	core.array_append(items, f64(2.5))
+	core.array_append(items, core.number_text("1234567890123456789012345678901234567890"))
+	core.array_append(items, string("x"))
+	core.array_append(items, nil)
+	core.array_append(items, true)
+	core.array_append(items, core.Node_Ref{&doc, core.ROOT})
+	root := core.Trail_Step{key = string("k")}
+	step := core.Trail_Step{parent = &root, key = f64(0), depth = 2}
+	root.depth = 1
+	core.array_append(items, core.Trail(&step))
+	o := core.new_object()
+	core.object_put(o, "a", items)
+	// A repeated key, which only a read under `Duplicates.All` makes: the writer writes each member.
+	append(&o.keys, "a")
+	append(&o.vals, string("again"))
+	text, werr := write.write_value(o, json.as(.Json))
+	walktest.expect_nil(t, werr)
+	testing.expect_value(t, string(text), `{"a":[1,2.5,1234567890123456789012345678901234567890,"x",null,true,{"k":[1,"A",2.50]},["k",0]],"a":"again"}`)
+	deep: core.Value
+	for _ in 0 ..= core.MAX_DEPTH {
+		a := core.new_array()
+		core.array_append(a, deep)
+		deep = a
+	}
+	_, derr := write.write_value(deep, json.as(.Json))
+	walktest.expect_kind(t, derr, core.Typed_Error_Kind.Too_Deep)
 }

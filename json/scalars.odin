@@ -180,13 +180,13 @@ literal_fault :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u
 	return q, .Truncated if q >= end else .Bad_Char
 }
 
-// JSON's `Spelling.resolve` returns the node's kind, which is its value's kind.
+// JSON's `Readers.resolve` returns the node's kind, which is its value's kind.
 @(private)
 spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 	return doc.nodes[i].kind
 }
 
-// JSON's `Spelling.number`, false for a token that is not a number. A decimal of at most 19 digits is decoded from the
+// JSON's `Readers.number`, false for a token that is not a number. A decimal of at most 19 digits is decoded from the
 // walk's digit counts, and the rest go to `number_slow`.
 number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> (core.Number, bool) {
 	if n.kind == .Number {
@@ -209,7 +209,7 @@ number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> (core.Numbe
 	return {}, false
 }
 
-// JSON's `Spelling.number_f32`. Hex past `u64` has rounded once into binary64, so it is read again from its digits.
+// JSON's `Readers.number_f32`. Hex past `u64` has rounded once into binary64, so it is read again from its digits.
 @(private)
 number_f32 :: proc(doc: ^core.Token_View, n: core.Node) -> (f32, bool) {
 	if number_spelling_of(n.spelling) != .Hex {

@@ -495,7 +495,7 @@ _DOC_KEY_POOL = ["id", "ts", "level", "msg", "src", "dur_ms", "user", "ip",
 def gen_ndjson(target: int, values) -> bytes:
     """Returns NDJSON of the records `values()` gives, one compact record per line, repeated in order up to `target`
     bytes."""
-    lines = [json.dumps(v, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n" for v in values()]
+    lines = [_dump(v) + b"\n" for v in values()]
     out = bytearray()
     while len(out) < target:
         for line in lines:
@@ -505,10 +505,166 @@ def gen_ndjson(target: int, values) -> bytes:
     return bytes(out)
 
 
-def _twitter_statuses():
-    """The statuses of the corpus's twitter.json, which fetch.py writes."""
-    with open(os.path.join(OUT, "corpus", "twitter.json"), "rb") as f:
-        return json.load(f)["statuses"]
+# The schema lanes' fixtures (bench/schema.py). Each schema is inferred from the data it judges and closed, so every
+# fixture passes its own schema, and the mutations are seeded.
+
+# Past this many distinct keys at one position an object is a map, not a record.
+MAP_KEYS = 64
+
+
+def _kind(v):
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "boolean"
+    if isinstance(v, int):
+        return "integer"
+    if isinstance(v, float):
+        return "number"
+    return {str: "string", list: "array", dict: "object"}[type(v)]
+
+
+def infer_closed(values):
+    """Returns the schema all of `values` satisfy and nothing more: each position's types, objects closed over the
+    members seen (required where every sample has them), and an object with more than MAP_KEYS distinct keys, or only
+    integer-like ones, a map of its merged members."""
+    groups = {}
+    for v in values:
+        groups.setdefault(_kind(v), []).append(v)
+    if "integer" in groups and "number" in groups:
+        groups["number"] += groups.pop("integer")
+    alts = []
+    for kind in sorted(groups):
+        vs = groups[kind]
+        if kind == "array":
+            items = [x for v in vs for x in v]
+            alt = {"type": "array"}
+            if items:
+                alt["items"] = infer_closed(items)
+        elif kind == "object":
+            keys = {}
+            for v in vs:
+                for k, x in v.items():
+                    keys.setdefault(k, []).append(x)
+            as_map = len(keys) > MAP_KEYS or len(keys) > 1 and all(k.isdigit() for k in keys)
+            alt = {"type": "object"}
+            if as_map:
+                alt["additionalProperties"] = infer_closed([x for xs in keys.values() for x in xs])
+            else:
+                alt["properties"] = {k: infer_closed(xs) for k, xs in sorted(keys.items())}
+                required = sorted(k for k, xs in keys.items() if len(xs) == len(vs))
+                if required:
+                    alt["required"] = required
+                alt["additionalProperties"] = False
+        else:
+            alt = {"type": kind}
+        alts.append(alt)
+    return alts[0] if len(alts) == 1 else {"anyOf": alts}
+
+
+def _dump(v) -> bytes:
+    return json.dumps(v, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _corpus_json(name):
+    with open(os.path.join(OUT, "corpus", name), "rb") as f:
+        return json.load(f)
+
+
+def _logs_records():
+    with open(os.path.join(OUT, "logs.ndjson"), "rb") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def _logs_document():
+    with open(os.path.join(OUT, "logs.json"), "rb") as f:
+        return json.load(f)
+
+
+def gen_closed_schema(source) -> bytes:
+    schema = {"$schema": "https://json-schema.org/draft/2020-12/schema"}
+    schema.update(infer_closed(source()))
+    return _dump(schema)
+
+
+def _applicator_schema():
+    """Tagged events under oneOf on `kind`, each variant allOf a shared base, closed by unevaluatedProperties, with an
+    if/then on `region`, a pattern on `id` and unique tags."""
+    base = {"type": "object", "properties": {"id": {"type": "string", "pattern": "^ev-[0-9a-f]{8}$"},
+            "ts": {"type": "integer", "minimum": 0}, "region": {"enum": ["eu", "us", "ap"]}},
+            "required": ["id", "ts", "kind"]}
+
+    def variant(kind, props, required):
+        return {"properties": {"kind": {"const": kind}, **props}, "required": required}
+
+    purchase_item = {"type": "object", "properties": {"sku": {"type": "string"}, "qty": {"type": "integer", "minimum": 1},
+                     "price": {"type": "number", "exclusiveMinimum": 0}}, "required": ["sku", "qty", "price"],
+                     "additionalProperties": False}
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+            "base": base,
+            "tags": {"type": "array", "items": {"type": "string", "maxLength": 16}, "uniqueItems": True, "maxItems": 6},
+        },
+        "type": "object",
+        "allOf": [{"$ref": "#/$defs/base"}],
+        "oneOf": [
+            variant("click", {"x": {"type": "integer", "minimum": 0}, "y": {"type": "integer", "minimum": 0},
+                              "target": {"type": "string"}}, ["x", "y"]),
+            variant("view", {"page": {"type": "string"}, "ms": {"type": "number", "minimum": 0},
+                             "tags": {"$ref": "#/$defs/tags"}}, ["page"]),
+            variant("purchase", {"items": {"type": "array", "minItems": 1, "items": purchase_item},
+                                 "total": {"type": "number"}}, ["items", "total"]),
+            variant("error", {"code": {"type": "integer"}, "message": {"type": "string"}}, ["code"]),
+        ],
+        "if": {"properties": {"region": {"const": "eu"}}, "required": ["region"]},
+        "then": {"required": ["consent"], "properties": {"consent": {"type": "boolean"}}},
+        "unevaluatedProperties": False,
+    }
+
+
+def gen_applicator_schema() -> bytes:
+    return _dump(_applicator_schema())
+
+
+def gen_applicator_events(target: int) -> bytes:
+    rng = random.Random(9137)
+
+    def event():
+        kind = rng.choice(["click", "view", "purchase", "error"])
+        e = {"kind": kind, "id": "ev-%08x" % rng.getrandbits(32), "ts": rng.randrange(1 << 31)}
+        if rng.random() < 0.6:
+            e["region"] = rng.choice(["eu", "us", "ap"])
+            if e["region"] == "eu":
+                e["consent"] = bool(rng.getrandbits(1))
+        if kind == "click":
+            e.update(x=rng.randrange(4000), y=rng.randrange(4000))
+            if rng.random() < 0.5:
+                e["target"] = "button-%d" % rng.randrange(100)
+        elif kind == "view":
+            e["page"] = "/p/%d" % rng.randrange(10000)
+            if rng.random() < 0.7:
+                e["ms"] = round(rng.random() * 5000, 3)
+            if rng.random() < 0.5:
+                e["tags"] = ["t%d" % t for t in rng.sample(range(100), rng.randrange(0, 5))]
+        elif kind == "purchase":
+            items = [{"sku": "sku-%d" % rng.randrange(1000), "qty": 1 + rng.randrange(5),
+                      "price": round(1 + rng.random() * 99, 2)} for _ in range(1 + rng.randrange(4))]
+            e.update(items=items, total=round(sum(x["qty"] * x["price"] for x in items), 2))
+        else:
+            e["code"] = 400 + rng.randrange(200)
+            if rng.random() < 0.8:
+                e["message"] = "error %d in %s" % (rng.randrange(1000), rng.choice(["db", "cache", "queue"]))
+        return e
+
+    out = bytearray()
+    while len(out) < target:
+        out += _dump(event()) + b"\n"
+    return bytes(out)
+
+
+def gen_compact(source) -> bytes:
+    return _dump(source())
 
 
 FIXTURES = {
@@ -529,7 +685,15 @@ FIXTURES = {
     "documents.json": (gen_documents_json, [8 * MIB]),
     "logs.ndjson": (gen_ndjson, [8 * MIB, lambda: json.loads(gen_logs_json(8 * MIB))["logs"]]),
     "docs.ndjson": (gen_ndjson, [8 * MIB, lambda: json.loads(gen_documents_json(8 * MIB))]),
-    "twitter.ndjson": (gen_ndjson, [16 * MIB, _twitter_statuses]),
+    "twitter.ndjson": (gen_ndjson, [16 * MIB, lambda: _corpus_json("twitter.json")["statuses"]]),
+    "schema/logs.schema.json": (gen_closed_schema, [_logs_records]),
+    "schema/twitter.schema.json": (gen_closed_schema, [lambda: [_corpus_json("twitter.json")]]),
+    "schema/citm.schema.json": (gen_closed_schema, [lambda: [_corpus_json("citm_catalog.json")]]),
+    "schema/applicator.schema.json": (gen_applicator_schema, []),
+    "schema/applicator.ndjson": (gen_applicator_events, [8 * MIB]),
+    "schema/twitter.json": (gen_compact, [lambda: _corpus_json("twitter.json")]),
+    "schema/citm.json": (gen_compact, [lambda: _corpus_json("citm_catalog.json")]),
+    "schema/logs.json": (gen_compact, [_logs_document]),
 }
 
 
@@ -551,6 +715,7 @@ def main() -> int:
         gen, args = FIXTURES[name]
         data = gen(*args)
         if not a.check:
+            os.makedirs(os.path.dirname(os.path.join(OUT, name)), exist_ok=True)
             with open(os.path.join(OUT, name), "wb") as f:
                 f.write(data)
         digest = hashlib.sha256(data).hexdigest()

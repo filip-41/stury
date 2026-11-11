@@ -66,7 +66,8 @@ Rows :: struct {
 	cols:    []Named, // a struct row's columns, in the order written
 	keys:    []string, // a map row's columns, sorted
 	headed:  bool, // the columns are bound
-	err:     core.Typed_Error,
+	omits:   ^typed.Omits, // a model's dump's, whose left-out members write empty cells
+	err:     core.Typed_Refusal,
 }
 
 @(private)
@@ -79,16 +80,21 @@ Named :: struct {
 // faults only on its options.
 @(private)
 layout_ok :: proc(spec: Spec, layout: Options) -> bool {
-	return validate(nil, spec, layout) == nil
+	switch spec {
+	case .Csv:   return option_fault(.Csv, layout) == nil
+	case .Tsv:   return option_fault(.Tsv, layout) == nil
+	case .Plain: return option_fault(.Plain, layout) == nil
+	}
+	return false
 }
 
 // The plan's `marshal`: the value is the list of rows.
 @(private)
-marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error) {
+marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, omits: ^typed.Omits) -> ([]u8, core.Typed_Refusal) {
 	spill: [write.ROOM_MAX]u8 = ---
 	w: Rows
 	rows_start(&w, &spill, options_of(plan.as), Spec(plan.spec), opts, stream, allocator, 0)
-	w.plan = plan
+	w.plan, w.omits = plan, omits
 	return rows_end((^Rows)(rawptr(&w)), write_rows(&w, uintptr(value)))
 }
 
@@ -96,7 +102,7 @@ marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options,
 // `.Ragged`.
 @(private)
 layout_as :: proc(spec: Spec, layout: Options) -> core.As {
-	return as(spec, {delimiter = layout.delimiter, comment = layout.comment, no_header = layout.no_header, crlf = layout.crlf, tolerate = layout.tolerate & {.Ragged}})
+	return as_of(&PLAN_READERS, spec, {delimiter = layout.delimiter, comment = layout.comment, no_header = layout.no_header, crlf = layout.crlf, tolerate = layout.tolerate & {.Ragged}})
 }
 
 @(private)
@@ -134,7 +140,7 @@ rows_free :: proc(w: ^Rows) {
 
 // Ends a write: the text, or the refusal `kind` with the path `w.err` holds.
 @(private)
-rows_end :: proc(w: ^Rows, kind: core.Typed_Error_Kind) -> ([]u8, core.Typed_Error) {
+rows_end :: proc(w: ^Rows, kind: core.Typed_Error_Kind) -> ([]u8, core.Typed_Refusal) {
 	rows_free(w)
 	w.err.kind = kind
 	return write.finish(&w.out, w.err)
@@ -288,7 +294,8 @@ write_header :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, named
 }
 
 // Writes the rows of `list` by the columns `write_header` bound, as records `0 ..< list.len`, or as no record a path
-// names when `indexed` is false, as a record write's row is. A map row writes a cell per header key, an empty one where
+// names when `indexed` is false, as a record write's row is. A member a dump's `omits` leaves out writes an empty cell,
+// so the row keeps the header's columns. A map row writes a cell per header key, an empty one where
 // the row lacks it, and refuses a key the header lacks. A cell that is present and empty would read back as no entry, so
 // it is refused too. A list row whose cell count differs from the first row's is `.Wrong_Length` unless `.Ragged`, since
 // a read without it refuses the row.
@@ -303,7 +310,11 @@ write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed
 			e := uintptr(list.data) + uintptr(i) * uintptr(row.stride)
 			for c, k in cols {
 				put_sep(w, k > 0)
-				if kind := write_cell(w, pl, c.f, e + uintptr(c.f.offset), k == 0, false); kind != .None {
+				at := e + uintptr(c.f.offset)
+				if c.f.omit && w.omits != nil && w.omits.call(w.omits, pl, c.f, at) {
+					continue
+				}
+				if kind := write_cell(w, pl, c.f, at, k == 0, false); kind != .None {
 					return refuse_in(w, kind, i if indexed else -1, core.Name(c.name))
 				}
 			}
@@ -362,7 +373,7 @@ write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed
 // columns and writes the header, unless the caller already wrote the head of the text, and every row after it takes the
 // same plan. What hooks allocate lasts the row.
 @(private)
-token_record :: proc(t: ^write.Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error) -> core.Typed_Error_Kind {
+token_record :: proc(t: ^write.Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Refusal) -> core.Typed_Error_Kind {
 	w := (^Rows)(t.state)
 	row, listed := row_of(plan)
 	if listed || w.plan != nil && w.plan != plan || plan.as != layout_as(w.spec, w.opts) {
@@ -439,7 +450,7 @@ write_other :: #force_no_inline proc(w: ^Rows, pl: ^typed.Plan, f: ^typed.Field,
 		info := pl.meta[f.meta].enum_info
 		p := write.room(out, CELL_ROOM)
 		name := write.enum_spelled(pl, info, write.enum_value(info, v), p) or_return
-		if pl.enums == .Int {
+		if typed.enum_by_number(pl, info) {
 			return put_number(w, p, len(name), first)
 		}
 		return put_string(w, name, first, inner)
@@ -453,6 +464,12 @@ write_other :: #force_no_inline proc(w: ^Rows, pl: ^typed.Plan, f: ^typed.Field,
 		}
 	case .Hook:
 		return put_hooked(w, pl, f, v, first, inner)
+	case .Number_Text:
+		// The empty text, a null, is an empty cell.
+		text := (^core.Number_Text)(v).text
+		p := write.room(out, len(text) + 2)
+		intrinsics.mem_copy(p, raw_data(text), len(text))
+		return put_number(w, p, len(text), first)
 	case:
 		return .Unsupported
 	}
@@ -466,6 +483,8 @@ put_hooked :: proc(w: ^Rows, pl: ^typed.Plan, f: ^typed.Field, v: uintptr, first
 	if hook == nil {
 		return .Unsupported
 	}
+	data := typed.extra_at(pl, f.meta).data
+	context.user_ptr = data if data != nil else context.user_ptr
 	a, kind := hook(rawptr(v), runtime.arena_allocator(&w.arena))
 	if kind != .None {
 		return kind

@@ -11,6 +11,7 @@ import "../timing"
 import write "../../core/write"
 import records "../../core/records"
 import json "../../json"
+import model "../../core/model"
 
 Log_Record :: struct {
 	ts, level, service, msg: string,
@@ -91,20 +92,20 @@ Nested_Record :: struct {
 	ok:     bool,
 }
 
-typed_lane :: proc(src: []u8, name: string, pretty: bool) {
+typed_lane :: proc(src: []u8, name: string, pretty, dump: bool) {
 	switch name {
 	case "logs":
-		lane(Logs, src, pretty)
+		lane(Logs, src, pretty, dump)
 	case "twitter":
-		lane(Twitter, src, pretty)
+		lane(Twitter, src, pretty, dump)
 	case "citm_catalog":
-		lane(Citm, src, pretty)
+		lane(Citm, src, pretty, dump)
 	case "canada":
-		lane(Canada, src, pretty)
+		lane(Canada, src, pretty, dump)
 	case "nested":
-		lane([]Nested_Record, src, pretty)
+		lane([]Nested_Record, src, pretty, dump)
 	case "wide":
-		lane(map[string]i64, src, pretty)
+		lane(map[string]i64, src, pretty, dump)
 	case:
 		fmt.eprintln("no type for", name)
 		os.exit(2)
@@ -128,15 +129,21 @@ fixed_output_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alig
 	return nil, nil
 }
 
-lane :: proc($T: typeid, src: []u8, pretty: bool) {
+// With `dump`, the pass is `model.dump` of the value by a model of `T` with no rules, in place of `write.marshal`.
+lane :: proc($T: typeid, src: []u8, pretty, dump: bool) {
 	value: T
-	if err := json.unmarshal(src, .Json, &value); err.kind != .None {
+	if err := json.unmarshal(src, .Json, &value); err != nil {
 		fmt.eprintln("read:", err)
 		os.exit(1)
 	}
 	plan, perr := json.plan_make(T, plan = {}, allocator = context.allocator)
-	if perr.kind != .None {
+	if perr != nil {
 		fmt.eprintln("plan:", perr)
+		os.exit(1)
+	}
+	m, merr := model.compile(nil, T, json.checks(.Json))
+	if merr != nil {
+		fmt.eprintln("model:", merr)
 		os.exit(1)
 	}
 	output := Fixed_Output{make([]u8, 16 * len(src) + 64 * mem.Kilobyte)}
@@ -151,10 +158,16 @@ lane :: proc($T: typeid, src: []u8, pretty: bool) {
 	for i in 0 ..< timing.WARMUP + timing.TIMED {
 		context.allocator = virtual.arena_allocator(&scratch)
 		start := time.tick_now()
-		out, err := write.marshal(value, &plan, opts, fixed)
+		out: []u8
+		err: core.Error
+		if dump {
+			out, err = model.dump(&m, &value, write = opts, allocator = fixed)
+		} else {
+			out, err = write.marshal(value, &plan, opts, fixed)
+		}
 		d := i64(time.tick_since(start))
 		virtual.arena_free_all(&scratch)
-		if err.kind != .None {
+		if err != nil {
 			fmt.eprintln("write:", err)
 			os.exit(1)
 		}
@@ -175,7 +188,7 @@ lane :: proc($T: typeid, src: []u8, pretty: bool) {
 // the same list, which writes it as one array, under `list_`. GB/s counts output bytes.
 records_lane :: proc(src: []u8) {
 	value: Logs
-	if err := json.unmarshal(src, .Json, &value); err.kind != .None {
+	if err := json.unmarshal(src, .Json, &value); err != nil {
 		fmt.eprintln("read:", err)
 		os.exit(1)
 	}
@@ -199,7 +212,7 @@ records_lane :: proc(src: []u8) {
 		start = time.tick_now()
 		list, lerr := write.marshal(value.logs, &list_plan, {}, fixed)
 		ld := i64(time.tick_since(start))
-		if err.kind != .None || lerr.kind != .None {
+		if err != nil || lerr != nil {
 			fmt.eprintln("write:", err, lerr)
 			os.exit(1)
 		}

@@ -24,6 +24,7 @@ import "core:sync"
 import "core:time"
 import "core:unicode/utf8"
 import "../message"
+import "../../../core/rules"
 
 Native :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal
 Generator :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal
@@ -37,6 +38,19 @@ Builtin :: struct {
 	math2:  proc "c" (x, y: f64) -> f64, // of the two arguments
 	// One jq 1.8.2 writes in jq, where its arguments are subfunctions, which `check` reads them as.
 	in_jq:  bool,
+	// What the typing (types.odin) knows of a call: the kinds of input it takes, none for any, the kinds its first
+	// argument takes, none for any, and its outputs, which `typed` makes of the kinds `gives`.
+	takes, arg_takes, gives: rules.Kinds,
+	typed:  Typed,
+}
+
+// How the typing makes a builtin's outputs of its `gives`: values of those kinds (none for no output), the input's
+// values of them, or arrays of them. One the table leaves `Unknown` is typed by types_builtins.odin or is not known.
+Typed :: enum u8 {
+	Unknown,
+	Kinds,
+	Kept,
+	Array,
 }
 
 MAX_ARITY :: 4
@@ -76,23 +90,23 @@ put :: proc(names: string, arities: bit_set[0 ..< MAX_ARITY], b: Builtin) {
 fill_table :: proc() {
 	// Room for 256 names at once, so the table never grows.
 	table = make(map[string][MAX_ARITY]Builtin, 256, runtime.heap_allocator())
-	put("empty", {0}, {native = native_empty})
+	put("empty", {0}, {native = native_empty, typed = .Kinds})
 	put("select", {1}, {native = native_select})
-	put("values", {0}, {native = kept_by_kind(~{.Null})})
-	put("nulls", {0}, {native = kept_by_kind({.Null})})
-	put("booleans", {0}, {native = kept_by_kind({.False, .True})})
-	put("numbers", {0}, {native = kept_by_kind({.Number})})
-	put("strings", {0}, {native = kept_by_kind({.String})})
-	put("arrays", {0}, {native = kept_by_kind({.Array})})
-	put("objects", {0}, {native = kept_by_kind({.Object})})
-	put("iterables", {0}, {native = kept_by_kind({.Array, .Object})})
-	put("scalars", {0}, {native = kept_by_kind(~{.Array, .Object})})
-	put("error", {0}, {native = native_error})
+	put("values", {0}, {native = kept_by_kind(~{.Null}), gives = rules.EVERY_KIND - {.Null}, typed = .Kept})
+	put("nulls", {0}, {native = kept_by_kind({.Null}), gives = {.Null}, typed = .Kept})
+	put("booleans", {0}, {native = kept_by_kind({.False, .True}), gives = {.Bool}, typed = .Kept})
+	put("numbers", {0}, {native = kept_by_kind({.Number}), gives = {.Integer, .Number}, typed = .Kept})
+	put("strings", {0}, {native = kept_by_kind({.String}), gives = {.String}, typed = .Kept})
+	put("arrays", {0}, {native = kept_by_kind({.Array}), gives = {.Array}, typed = .Kept})
+	put("objects", {0}, {native = kept_by_kind({.Object}), gives = {.Object}, typed = .Kept})
+	put("iterables", {0}, {native = kept_by_kind({.Array, .Object}), gives = {.Array, .Object}, typed = .Kept})
+	put("scalars", {0}, {native = kept_by_kind(~{.Array, .Object}), gives = rules.EVERY_KIND - {.Array, .Object}, typed = .Kept})
+	put("error", {0}, {native = native_error, typed = .Kinds})
 	put("error", {1}, {gen = proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal {
 			ip.err = args[0]
 			ip.raised += 1
 			return .Fail
-		}, in_jq = true})
+		}, in_jq = true, typed = .Kinds})
 	put("path", {1}, {native = native_path})
 	put("getpath", {1}, {gen = gen_getpath})
 	put("setpath", {2}, {fn = fn_setpath})
@@ -100,84 +114,88 @@ fill_table :: proc() {
 	put("limit skip", {2}, {native = native_count})
 	put("first", {1}, {native = native_first})
 	put("last", {1}, {native = native_last})
-	put("isempty", {1}, {native = native_isempty})
+	put("isempty", {1}, {native = native_isempty, gives = {.Bool}, typed = .Kinds})
 	put("range", {1, 2, 3}, {gen = gen_range, in_jq = true})
 	put("recurse", {0}, {native = native_recurse})
 	put("recurse", {1}, {native = native_recurse_f})
 	put("input", {0}, {native = native_input})
 	put("inputs", {0}, {native = native_inputs})
-	put("debug", {0}, {native = native_debug})
-	put("stderr", {0}, {native = native_stderr})
-	put("halt", {0}, {native = native_halt})
-	put("halt_error", {1}, {gen = gen_halt_error})
-	put("sub gsub", {2, 3}, {native = native_sub})
-	put("match", {1, 2}, {gen = each_match(false), in_jq = true})
-	put("capture", {1, 2}, {gen = each_match(true), in_jq = true})
-	put("test", {1, 2}, {fn = fn_test, in_jq = true})
-	put("split", {2}, {fn = fn_split_regex, in_jq = true})
+	put("debug", {0}, {native = native_debug, gives = rules.EVERY_KIND, typed = .Kept})
+	put("stderr", {0}, {native = native_stderr, gives = rules.EVERY_KIND, typed = .Kept})
+	put("halt", {0}, {native = native_halt, typed = .Kinds})
+	put("halt_error", {1}, {gen = gen_halt_error, typed = .Kinds})
+	put("sub gsub", {2, 3}, {native = native_sub, takes = {.String}})
+	put("match", {1, 2}, {gen = each_match(false), in_jq = true, takes = {.String}, arg_takes = {.String, .Array}, gives = {.Object}, typed = .Kinds})
+	put("capture", {1, 2}, {gen = each_match(true), in_jq = true, takes = {.String}, arg_takes = {.String, .Array}, gives = {.Object}, typed = .Kinds})
+	put("scan", {1, 2}, {gen = each_scan, in_jq = true, takes = {.String}, gives = {.String, .Array}, typed = .Kinds})
+	put("splits", {1, 2}, {gen = each_splits, in_jq = true, takes = {.String}, gives = {.String}, typed = .Kinds})
+	put("test", {1, 2}, {fn = fn_test, in_jq = true, takes = {.String}, arg_takes = {.String, .Array}, gives = {.Bool}, typed = .Kinds})
+	put("split", {2}, {fn = fn_split_regex, in_jq = true, takes = {.String}, gives = {.String}, typed = .Array})
 
-	put("input_filename input_line_number", {0}, {fn = fn_input_position})
+	put("input_filename", {0}, {fn = fn_input_position, gives = {.String, .Null}, typed = .Kinds})
+	put("input_line_number", {0}, {fn = fn_input_position, gives = {.Integer}, typed = .Kinds})
 	put("env", {0}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {return env_value(ip)}})
-	put("builtins", {0}, {fn = fn_builtins})
+	put("builtins", {0}, {fn = fn_builtins, gives = {.String}, typed = .Array})
 	put("now", {0}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 			return num(f64(time.time_to_unix_nano(time.now())) / 1e9), .Go
-		}})
-	put("have_literal_numbers have_decnum", {0}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {return true, .Go}})
-	put("get_search_list get_jq_origin get_prog_origin", {0}, {fn = fn_origin})
+		}, gives = {.Number}, typed = .Kinds})
+	put("have_literal_numbers have_decnum", {0}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {return true, .Go}, gives = {.Bool}, typed = .Kinds})
+	put("get_search_list", {0}, {fn = fn_origin, gives = {.String}, typed = .Array})
+	put("get_jq_origin get_prog_origin", {0}, {fn = fn_origin, gives = {.String, .Null}, typed = .Kinds})
 	put("modulemeta", {0}, {fn = fn_modulemeta})
-	put("infinite", {0}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {return num(math.inf_f64(1)), .Go}})
-	put("nan", {0}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {return num(math.nan_f64()), .Go}})
-	put("not", {0}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {return !truthy(v), .Go}})
+	put("infinite", {0}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {return num(math.inf_f64(1)), .Go}, gives = {.Number}, typed = .Kinds})
+	put("nan", {0}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {return num(math.nan_f64()), .Go}, gives = {.Number, .Null}, typed = .Kinds})
+	put("not", {0}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {return !truthy(v), .Go}, gives = {.Bool}, typed = .Kinds})
 	put("type", {0}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {return type_name(v), .Go}})
 	put("length", {0}, {fn = fn_length})
-	put("utf8bytelength", {0}, {fn = fn_utf8bytelength})
-	put("keys", {0}, {fn = fn_keys})
-	put("keys_unsorted", {0}, {fn = fn_keys_unsorted})
-	put("has", {1}, {fn = fn_has})
-	put("contains", {1}, {fn = fn_contains})
+	put("utf8bytelength", {0}, {fn = fn_utf8bytelength, takes = {.String}, gives = {.Integer}, typed = .Kinds})
+	put("keys", {0}, {fn = fn_keys, takes = {.Object, .Array}, gives = {.String, .Integer}, typed = .Array})
+	put("keys_unsorted", {0}, {fn = fn_keys_unsorted, takes = {.Object, .Array}, gives = {.String, .Integer}, typed = .Array})
+	put("has", {1}, {fn = fn_has, takes = {.Object, .Array}, gives = {.Bool}, typed = .Kinds})
+	put("contains", {1}, {fn = fn_contains, gives = {.Bool}, typed = .Kinds})
 	put("tostring", {0}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 			if kind(v) == .String {
 				return v, .Go
 			}
 			return to_json(v), .Go
-		}})
-	put("tojson", {0}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {return to_json(v), .Go}})
-	put("tonumber", {0}, {fn = fn_tonumber})
-	put("fromjson", {0}, {fn = fn_fromjson})
-	put("ascii_downcase ascii_upcase", {0}, {fn = fn_ascii_case})
-	put("explode", {0}, {fn = fn_explode})
-	put("implode", {0}, {fn = fn_implode})
-	put("ltrimstr rtrimstr", {1}, {fn = fn_affix, in_jq = true})
-	put("startswith endswith", {1}, {fn = fn_affix})
-	put("trim ltrim rtrim", {0}, {fn = fn_trim})
-	put("split", {1}, {fn = fn_split})
-	put("join", {1}, {fn = fn_join, in_jq = true})
-	put("sort unique", {0}, {fn = fn_sort})
-	put("sort_by", {1}, {native = sort_by(.Sorted)})
-	put("group_by", {1}, {native = sort_by(.Grouped)})
-	put("unique_by", {1}, {native = sort_by(.Unique)})
-	put("min_by", {1}, {native = extreme_by(false)})
-	put("max_by", {1}, {native = extreme_by(true)})
-	put("min max", {0}, {fn = fn_extreme})
-	put("reverse", {0}, {fn = fn_reverse})
-	put("flatten", {0, 1}, {fn = fn_flatten, in_jq = true})
-	put("_strindices", {1}, {fn = fn_strindices})
-	put("add", {0}, {fn = fn_add})
-	put("to_entries", {0}, {fn = fn_to_entries})
+		}, gives = {.String}, typed = .Kinds})
+	put("tojson", {0}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {return to_json(v), .Go}, gives = {.String}, typed = .Kinds})
+	put("tonumber", {0}, {fn = fn_tonumber, takes = {.Number, .String}, gives = {.Number, .Null}, typed = .Kinds})
+	put("fromjson", {0}, {fn = fn_fromjson, takes = {.String}})
+	put("ascii_downcase ascii_upcase", {0}, {fn = fn_ascii_case, takes = {.String}, gives = {.String}, typed = .Kinds})
+	put("explode", {0}, {fn = fn_explode, takes = {.String}, gives = {.Integer}, typed = .Array})
+	put("implode", {0}, {fn = fn_implode, takes = {.Array}, gives = {.String}, typed = .Kinds})
+	put("ltrimstr rtrimstr", {1}, {fn = fn_affix, in_jq = true, takes = {.String}, arg_takes = {.String}, gives = {.String}, typed = .Kinds})
+	put("startswith endswith", {1}, {fn = fn_affix, takes = {.String}, arg_takes = {.String}, gives = {.Bool}, typed = .Kinds})
+	put("trim ltrim rtrim", {0}, {fn = fn_trim, takes = {.String}, gives = {.String}, typed = .Kinds})
+	put("split", {1}, {fn = fn_split, takes = {.String}, arg_takes = {.String}, gives = {.String}, typed = .Array})
+	put("join", {1}, {fn = fn_join, in_jq = true, takes = {.Array, .Object}, arg_takes = {.String, .Null}, gives = {.String}, typed = .Kinds})
+	put("sort unique", {0}, {fn = fn_sort, takes = {.Array}})
+	put("sort_by", {1}, {native = sort_by(.Sorted), takes = {.Array}})
+	put("group_by", {1}, {native = sort_by(.Grouped), takes = {.Array}})
+	put("unique_by", {1}, {native = sort_by(.Unique), takes = {.Array}})
+	put("min_by", {1}, {native = extreme_by(false), takes = {.Array}})
+	put("max_by", {1}, {native = extreme_by(true), takes = {.Array}})
+	put("min max", {0}, {fn = fn_extreme, takes = {.Array}})
+	put("reverse", {0}, {fn = fn_reverse, takes = rules.EVERY_KIND - {.Bool}})
+	put("flatten", {0, 1}, {fn = fn_flatten, in_jq = true, takes = {.Array, .Object}, gives = {.Array}, typed = .Kinds})
+	put("_strindices", {1}, {fn = fn_strindices, takes = {.String}, gives = {.Integer}, typed = .Array})
+	put("add", {0}, {fn = fn_add, takes = {.Array, .Object}})
+	put("to_entries", {0}, {fn = fn_to_entries, takes = {.Object, .Array}})
 	put("format", {1}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 			f, ok := string_of(args[0])
 			if !ok {
 				return nil, fail(ip, "%s (%s) is not a valid format", type_name(args[0]), brief(ip, args[0]))
 			}
 			return format(ip, f, v)
-		}})
-	put("bsearch", {1}, {fn = fn_bsearch})
-	put("isinfinite isnan isnormal", {0}, {fn = fn_float_class})
-	put("gmtime localtime", {0}, {fn = fn_gmtime})
-	put("mktime", {0}, {fn = fn_mktime})
-	put("strftime strflocaltime", {1}, {fn = fn_strftime})
-	put("strptime", {1}, {fn = fn_strptime})
-	put("frexp modf lgamma_r", {0}, {fn = fn_number_pair})
+		}, gives = {.String}, typed = .Kinds})
+	put("bsearch", {1}, {fn = fn_bsearch, takes = {.Array}, gives = {.Integer}, typed = .Kinds})
+	put("isinfinite isnan isnormal", {0}, {fn = fn_float_class, takes = {.Number}, gives = {.Bool}, typed = .Kinds})
+	put("gmtime localtime", {0}, {fn = fn_gmtime, takes = {.Number}, gives = {.Number}, typed = .Array})
+	put("mktime", {0}, {fn = fn_mktime, takes = {.Array}, gives = {.Number}, typed = .Kinds})
+	put("strftime strflocaltime", {1}, {fn = fn_strftime, takes = {.Number, .Array}, gives = {.String}, typed = .Kinds})
+	put("strptime", {1}, {fn = fn_strptime, takes = {.String}, gives = {.Number}, typed = .Array})
+	put("frexp modf lgamma_r", {0}, {fn = fn_number_pair, takes = {.Number}, gives = {.Number}, typed = .Array})
 
 	// libm, as jq calls it, so results agree to the last digit.
 	math1 := [?]struct {
@@ -198,7 +216,8 @@ fill_table :: proc() {
 		{"significand", proc "c" (x: f64) -> f64 {return libc.scalbn(x, -libc.ilogb(x)) if x != 0 && !math.is_inf(x) else x}},
 	}
 	for m in math1 {
-		put(m.name, {0}, {math1 = m.f})
+		// A result that is not a number, as `nan`, is written null.
+		put(m.name, {0}, {math1 = m.f, takes = {.Number}, gives = {.Number, .Null}, typed = .Kinds})
 	}
 	math2 := [?]struct {
 		name: string,
@@ -216,7 +235,7 @@ fill_table :: proc() {
 		{"yn", proc "c" (x, y: f64) -> f64 {return bessel_yn(i32(x), y)}},
 	}
 	for m in math2 {
-		put(m.name, {2}, {math2 = m.f})
+		put(m.name, {2}, {math2 = m.f, gives = {.Number, .Null}, typed = .Kinds})
 	}
 	put("fma", {3}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 			xs: [3]f64
@@ -228,7 +247,7 @@ fill_table :: proc() {
 				xs[i] = n.f
 			}
 			return num(libc.fma(xs[0], xs[1], xs[2])), .Go
-		}})
+		}, gives = {.Number, .Null}, typed = .Kinds})
 }
 
 when ODIN_OS == .Darwin {
@@ -322,11 +341,6 @@ def indices($i): if type == "array" and ($i | type) == "array" then .[$i] elif t
 def index($i): indices($i) | .[0];
 def rindex($i): indices($i) | .[-1:][0];
 def debug(msg): (msg | debug | empty), .;
-def scan($re; $flags): match($re; "g" + $flags) | if (.captures | length > 0) then [.captures | .[] | .string] else .string end;
-def scan($re): scan($re; null);
-def splits($re; flags): .[foreach (match($re; flags + "g"), null) as {$offset, $length}
-    (null; {start: .next, end: $offset, next: ($offset + $length)})];
-def splits($re): splits($re; null);
 def halt_error: halt_error(5);
 def todateiso8601: strftime("%Y-%m-%dT%H:%M:%SZ");
 def todate: todateiso8601;

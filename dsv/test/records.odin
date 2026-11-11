@@ -29,9 +29,9 @@ Model_Row :: struct {
 @(private = "file")
 validate_as :: proc(src: string, spec: dsv.Spec, opts: dsv.Options) -> Maybe(core.Fault) {
 	switch spec {
-	case .Csv:   return dsv.validate(transmute([]u8)src, .Csv, opts)
-	case .Tsv:   return dsv.validate(transmute([]u8)src, .Tsv, opts)
-	case .Plain: return dsv.validate(transmute([]u8)src, .Plain, opts)
+	case .Csv:   return walktest.fault_of(dsv.validate(transmute([]u8)src, .Csv, opts))
+	case .Tsv:   return walktest.fault_of(dsv.validate(transmute([]u8)src, .Tsv, opts))
+	case .Plain: return walktest.fault_of(dsv.validate(transmute([]u8)src, .Plain, opts))
 	}
 	return nil
 }
@@ -232,7 +232,7 @@ rows_across_batches :: proc(t: ^testing.T) {
 expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, spec: dsv.Spec, opts: dsv.Options) -> bool {
 	text, as := transmute([]u8)src, dsv.as(spec, opts)
 	serial, _ := records.check(text, as, .Lines, context.temp_allocator)
-	whole := dsv.validate(text, spec, opts)
+	whole := walktest.fault_of(dsv.validate(text, spec, opts))
 	if v := records.validate_parallel(text, as); !testing.expectf(t, v == whole, "%v %v %q: validate %v, want %v", spec, opts, src, v, whole) {
 		return false
 	}
@@ -311,10 +311,10 @@ rows_name_wide_cells_by_position :: proc(t: ^testing.T) {
 		s, got := records.cell(&it, rec, 3, buf[:])
 		testing.expect(t, got && s == "7")
 		doc, err := records.build(&it, rec, context.temp_allocator)
-		testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, err)
 		want := []string{"7", "6"}
 		for p, i in ([]core.Path{path, same}) {
-			answers, _ := core.query(&doc, p, allocator = context.temp_allocator)
+			answers, _ := dsv.query(&doc, p, allocator = context.temp_allocator)
 			text: string
 			if len(answers) == 1 {
 				text, _ = core.text(&doc, answers[0].node, buf[:])
@@ -376,7 +376,7 @@ cells_take_the_inferred_kinds :: proc(t: ^testing.T) {
 	records.writer_init(&wr, {}, as, allocator = context.temp_allocator)
 	records.write_cells(&wr, cells)
 	text, err := records.writer_end(&wr)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	testing.expect_value(t, string(text), "1,\"2\",true,\"false\",\n")
 }
 
@@ -430,9 +430,9 @@ rows_columns_cells_and_documents :: proc(t: ^testing.T) {
 	testing.expect(t, !got)
 
 	doc, err := records.build(&it, rec, context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	path, _ := core.parse_path(".note", context.temp_allocator)
-	answers, _ := core.query(&doc, path, allocator = context.temp_allocator)
+	answers, _ := dsv.query(&doc, path, allocator = context.temp_allocator)
 	testing.expect(t, len(answers) == 1)
 	text, _ := core.text(&doc, answers[0].node, buf[:])
 	testing.expect_value(t, text, "a\"b")
@@ -443,7 +443,7 @@ rows_columns_cells_and_documents :: proc(t: ^testing.T) {
 	_, got = records.cell(&it, first, 0, buf[:])
 	testing.expect(t, !got)
 	_, err = records.build(&it, first, context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.Bad_Index)
+	walktest.expect_kind(t, err, core.Document_Error_Kind.Bad_Index)
 	_, ok = records.next(&it)
 	testing.expect(t, !ok && it.fault == nil)
 
@@ -484,19 +484,26 @@ Required_Record_Row :: struct {
 
 // A typed error with the offsets past `from` moved by `by`, and its steps as text.
 @(private = "file")
-moved_error :: proc(e: core.Typed_Error, from, by: u64) -> string {
-	e := e
-	if e.kind != .None && e.at >= from {
-		e.at += by
+moved_error :: proc(err: core.Error, from, by: u64) -> string {
+	#partial switch e in err {
+	case core.Typed_Error:
+		moved := e
+		if moved.at >= from {
+			moved.at += by
+		}
+		return fmt.tprint(moved)
+	case core.Fault:
+		moved := e
+		if moved.at >= from {
+			moved.at += by
+		}
+		return fmt.tprint(moved)
 	}
-	if e.kind == .Walk && e.inner.at >= from {
-		e.inner.at += by
-	}
-	return fmt.tprint(e)
+	return fmt.tprint(err)
 }
 
 @(private = "file")
-unmarshal_as :: proc(src: string, spec: dsv.Spec, target: ^$T, plan: ^typed.Plan, read: typed.Read_Options, opts: dsv.Options) -> core.Typed_Error {
+unmarshal_as :: proc(src: string, spec: dsv.Spec, target: ^$T, plan: ^typed.Plan, read: typed.Read_Options, opts: dsv.Options) -> core.Error {
 	switch spec {
 	case .Csv:   return dsv.unmarshal(transmute([]u8)src, .Csv, target, plan, read = read, opts = opts, allocator = context.temp_allocator)
 	case .Tsv:   return dsv.unmarshal(transmute([]u8)src, .Tsv, target, plan, read = read, opts = opts, allocator = context.temp_allocator)
@@ -510,18 +517,18 @@ unmarshal_as :: proc(src: string, spec: dsv.Spec, target: ^$T, plan: ^typed.Plan
 @(private = "file")
 expect_read :: proc(t: ^testing.T, src: string, spec: dsv.Spec, opts: dsv.Options, read: typed.Read_Options, $T: typeid) -> bool {
 	plan, perr := dsv.plan_make(T, spec, allocator = context.temp_allocator)
-	if !testing.expect_value(t, perr.kind, core.Typed_Error_Kind.None) {
+	if !walktest.expect_nil(t, perr) {
 		return false
 	}
 	want, header_end, fault := model_rows(src, spec, opts)
 	listed := T == []string
 	it := records.open(transmute([]u8)src, dsv.as(spec, opts))
 	defer records.close(&it)
-	got_sink, want_sink: typed.Collected
+	got_sink, want_sink: typed.Sink
 	got_read, want_read := read, read
-	if read.collect != nil {
-		got_read.collect = &got_sink
-		want_read.collect = &want_sink
+	if read.sink != nil {
+		got_read.sink = &got_sink
+		want_read.sink = &want_sink
 	}
 	n := 0
 	for {
@@ -531,7 +538,7 @@ expect_read :: proc(t: ^testing.T, src: string, spec: dsv.Spec, opts: dsv.Option
 			break
 		}
 		if T == map[string]string && opts.no_header {
-			return testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
+			return walktest.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
 		}
 		if n >= len(want) {
 			return testing.expectf(t, false, "%v %q: row %d past the model's", spec, src, n)
@@ -578,8 +585,8 @@ rows_read_as_unmarshal :: proc(t: ^testing.T) {
 	gen := rand.default_random_generator(&state)
 	headers := []string{"a,b,c", "b,a,x", "a,a,c", "c,b,\"a\"", "x,y,z", "4,a,b"}
 	breakers := "\",\n1x"
-	sink: typed.Collected
-	reads := []typed.Read_Options{{borrow_strings = true}, {collect = &sink}, {dups = .Refuse}, {unknown = .Refuse}}
+	sink: typed.Sink
+	reads := []typed.Read_Options{{borrow_strings = true}, {sink = &sink}, {dups = .Refuse}, {unknown = .Refuse}}
 	for round in 0 ..< 30 {
 		spec := dsv.Spec(round % 3)
 		header := rand.choice(headers, gen)
@@ -663,10 +670,10 @@ drain :: proc(it: ^records.Reader) -> (g: Got) {
 		}
 		named: string
 		doc, err := records.build(it, rec, context.temp_allocator)
-		if answers, _ := core.query(&doc, path, allocator = context.temp_allocator); len(answers) == 1 {
+		if answers, _ := dsv.query(&doc, path, allocator = context.temp_allocator); len(answers) == 1 {
 			named, _ = core.text(&doc, answers[0].node, buf[:])
 		}
-		append(&g.rows, fmt.tprint(rec.at, string(rec.text), col, cells[:], err.kind, named))
+		append(&g.rows, fmt.tprint(rec.at, string(rec.text), col, cells[:], err == nil, named))
 	}
 	g.fault, g.held, g.at = it.fault, strings.clone(string(it.held), context.temp_allocator), it.held_at
 	return
@@ -785,7 +792,7 @@ rows_read_rebinds_a_new_plan :: proc(t: ^testing.T) {
 	plan, _ = dsv.plan_make(B, .Csv)
 	y: B
 	err, _ = records.read(&it, &y, &plan)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	testing.expect_value(t, y, B{b = 4, a = 3})
 	typed.plan_destroy(&plan)
 
@@ -819,13 +826,13 @@ rows_stream_read_as_in_memory :: proc(t: ^testing.T) {
 		mem := records.open(transmute([]u8)src, dsv.as(spec, opts))
 		c := Chunked{src = transmute([]u8)src, sizes = {1 + round % 7}}
 		st := records.open_stream(chunked(&c), dsv.as(spec, opts))
-		ms, ss: typed.Collected
-		ms.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
-		ss.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
+		ms, ss: typed.Sink
+		ms.errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)
+		ss.errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)
 		for {
 			v, w: Required_Record_Row
-			err, more := records.read(&st, &v, &plan, {collect = &ss, unknown = .Refuse}, context.temp_allocator)
-			werr, wmore := records.read(&mem, &w, &plan, {collect = &ms, unknown = .Refuse}, context.temp_allocator)
+			err, more := records.read(&st, &v, &plan, {sink = &ss, unknown = .Refuse}, context.temp_allocator)
+			werr, wmore := records.read(&mem, &w, &plan, {sink = &ms, unknown = .Refuse}, context.temp_allocator)
 			if !more {
 				break
 			}
@@ -916,7 +923,7 @@ gather :: proc(g: ^Gathered, it: ^records.Reader, _: int) -> bool {
 				return it.fault == nil
 			}
 			doc, err := records.build(it, rec, context.temp_allocator)
-			if answers, _ := core.query(&doc, g.path, allocator = context.temp_allocator); err.kind == .None && len(answers) == 1 {
+			if answers, _ := dsv.query(&doc, g.path, allocator = context.temp_allocator); err == nil && len(answers) == 1 {
 				text, _ = core.text(&doc, answers[0].node, buf[:])
 			}
 		case .Read:

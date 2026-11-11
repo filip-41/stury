@@ -1,0 +1,4 @@
+{"title":"Invalid body","status":422,"errors":[{"pointer":"/name","code":"too_short","message":"String is too short, at least 2 characters"},{"pointer":"/email","code":"wrong_kind","message":"Value does not fit the field's type, expected string"}]}
+{"id":1,"name":"ada","email":"ada@example.org","role":"member"}
+{"id":1,"name":"ada","role":"admin"}
+{"id":1,"name":"ada","email":null,"role":"admin"}

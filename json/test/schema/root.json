@@ -1,0 +1,1 @@
+{"type": "object", "properties": {"name": {"$ref": "defs.json#/$defs/name"}}, "required": ["name"]}

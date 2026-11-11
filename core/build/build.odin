@@ -189,6 +189,9 @@ builder_free :: proc(b: ^Builder) {
 	if !b.borrowed {
 		release(b.doc.allocator, b.stack)
 	}
+	if core.owns_tables(&b.doc) {
+		release(b.doc.allocator, core.tables_of(&b.doc))
+	}
 	b^ = {}
 }
 
@@ -204,6 +207,11 @@ builder_hook :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs
 // fill.
 builder_hook_plain :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	return builder_step(false, false, false, false, h, s, t)
+}
+
+// Stores tokens with no facts and a capacity test, for a build fed tokens one at a time with no reservation.
+builder_hook_grow :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	return builder_step(false, true, false, false, h, s, t)
 }
 
 // Stores tokens with no facts, with the duplicate-key test compiled in, for a build that refuses repeats.
