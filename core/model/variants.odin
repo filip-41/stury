@@ -98,7 +98,8 @@ enum_rules_refused :: proc(reg: ^Registry) -> core.Typed_Refusal {
 // `Naming.union_tag` unless it is "", and the rest by their kind. Under `.First_Match` a load reads a value of the type
 // wherever it is by the first arm that reads its text with no refusal, in the arms' order, a null as nil where the union
 // has one, and refuses it as `.No_Arm` with each arm's refusals after it where none does. A format that holds no value
-// alone, a table's, refuses the rule at compile as `.Unsupported`.
+// alone, a table's, refuses the rule at compile as `.Unsupported`. `.One_Match` reads as `.First_Match` does and then
+// refuses a value that more than one arm reads with no refusal, as JSON Schema's `oneOf`.
 Union_Rule :: struct {
 	type: typeid,
 	mode: Union_Mode,
@@ -108,6 +109,7 @@ Union_Rule :: struct {
 Union_Mode :: enum u8 {
 	Tag,
 	First_Match,
+	One_Match,
 }
 
 // Adds how `rule.type` is read, in place of what an earlier rule of the type said.
@@ -124,7 +126,7 @@ register_union :: proc(reg: ^Registry, rule: Union_Rule) -> runtime.Allocator_Er
 unions :: proc(h: ^typed.Model_Rules, type: typeid) -> (tag: string, set: bool, first_match: bool) {
 	for x in (^Compiling)(h).reg.unions {
 		if x.type == type {
-			tag, set, first_match = x.tag, x.mode == .Tag && x.tag != "", x.mode == .First_Match
+			tag, set, first_match = x.tag, x.mode == .Tag && x.tag != "", x.mode != .Tag
 		}
 	}
 	return

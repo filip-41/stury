@@ -320,8 +320,10 @@ path of the node the search stopped at.
 object with members, its tags naming each member (`json:`), saying it may be left out and holding its rules (`model:`),
 an `extra: map[string]T` member for the members an `additionalProperties` schema judges, a map for an object with no
 members, an enum for `enum` and `const` (a union of a string enum, an integer enum and `bool` where the values are of
-several kinds), a union for `anyOf`, a `oneOf` of disjoint arms and a list of kinds, `Null :: union {}` for `type:
-null`, a fixed array for `prefixItems` of one type and that length, and a pointer where a struct holds itself, tagged
+several kinds), a union for `anyOf`, `oneOf` and a list of kinds (read by the first arm that reads a value where arms
+overlap, and under `oneOf` refusing a value two arms read), `Null :: union {}` for `type: null`, a `unique` tag for
+`uniqueItems`, a named type with `model.register_applies` lines for `not`, `if`, `contains`, `propertyNames`,
+`patternProperties`, `dependentRequired` and `dependentSchemas`, each operand a type of its own, a fixed array for `prefixItems` of one type and that length, and a pointer where a struct holds itself, tagged
 `not_null` where the schema takes no null. `allOf` and a `$ref` with siblings are merged into one node where their
 members and rules join. `format` only annotates, as `check` reads it: the member is a string with a `// format:`
 comment. With `--format-assert` the formats a type reads are `time.Time`, `uuid.Identifier` and `model.Email`, and the
@@ -329,8 +331,8 @@ others a `format=` rule. `contentEncoding: base64` is `model.Base64`. `$defs` ar
 
 The package is `--package NAME`, by default the file's name in snake case (`my-types.schema.json` is `my_types`). It
 must be an Odin identifier that is no keyword and no package the types import (`model`, `time`, `core`, ...), since an
-Odin program names each package once. A keyword no type spells (`if`, `patternProperties`, `contains`, `oneOf` with
-overlapping arms, ...) is exit 1, told with the path of the node that holds it, and so is an integer enum value past
+Odin program names each package once. A keyword no type spells (`not` or `if` on a value that may be null, a `oneOf`
+with two arms that take null, `prefixItems` beside `items`, ...) is exit 1, told with the path of the node that holds it, and so is an integer enum value past
 2^53 and an integer whose bounds leave no value `i64` or `u64` holds. An integer the schema leaves unbounded is `i64`,
 so a model refuses one past its range, which the schema takes. Every object nested in another is a struct held by value,
 and Odin's compiler takes time exponential in that depth, so the types of objects nested past about 24 levels compile
@@ -1160,6 +1162,10 @@ change a text's length, and the script, emoji and other Unicode properties. Two 
 A choice inside a loop, as in `(a+)+$` or `(a|aa)*b`, runs in time linear in the text, so where jq stops with
 `retry-limit-in-match over`, stury answers. A counted repeat around a choice, as in `(a|aa){30,60}c`, still meets
 jq's limit.
+
+A JSON Schema `pattern` is not Oniguruma but ECMA-262 with the `u` flag: an escape outside a class names only a syntax
+character (`^$\.*+?()[]{}|`) or `/`, and inside a class also `-`, and any other (`\&`, `\%`, `\-` outside a class) is
+refused with the escape and its offset.
 
 ## For library users
 

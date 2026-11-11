@@ -96,6 +96,10 @@ if json.check_schema(&b, src, &sink) != nil {
 
 `stury check --schema` is the same check on the command line ([cli.md](cli.md#schema-check)).
 
+A `pattern` and a `patternProperties` name are read as ECMA-262 regular expressions with the `u` flag, so an escape outside a
+class names only a syntax character (`^$\.*+?()[]{}|`) or `/`, and inside a class also `-`. An escape such as `\&` or `\%`
+refuses the schema at bind: `invalid escape \& at offset 1`.
+
 `schema.infer` takes in values (and `schema.infer_records` the records of a text, on a runner's threads) and
 `schema.inferred` gives the description they all pass, which `schema.write` writes as JSON Schema. `schema.sample(&d, as,
 {count = 3, seed = 1})` writes values that pass a description in the format `as`, and `invalid = true` values that fail it.

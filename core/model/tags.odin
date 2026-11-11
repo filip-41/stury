@@ -85,10 +85,11 @@ subject_of :: proc(ti: ^runtime.Type_Info, reg: ^Registry) -> (s: Subject) {
 // Reads a `model:` tag into `r`, for a value of `subject`, and for a member when `member`: items separated by commas,
 // each a flag (`optional`, `extra`, `read_only`, `write_only`, `not_null` on a pointer, or `-` alone), `alias=` and a name, a bound (`>=N`, `>N`, `<=N`,
 // `<N`, a range `A..=B` or `A..<B`), `multiple_of=` and a divisor, the same bounds after `len` on a count of code points,
-// elements or members (`len=N` for one count), `format=` and a format's name, or `pattern=` and an ECMA-262 pattern,
-// which takes the rest of the tag, commas included. Spaces around an item, an operator and an operand are dropped. A
-// rule tightens the rules `r` holds. The flags and `alias` are a member's. A bound on an integer is integral, and no
-// rule may leave a value that passes. Returns false with the item it cannot read in `r.refused`.
+// elements or members (`len=N` for one count), `unique` on a list, which refuses two equal elements, `format=` and a
+// format's name, or `pattern=` and an ECMA-262 pattern, which takes the rest of the tag, commas included. Spaces around
+// an item, an operator and an operand are dropped. A rule tightens the rules `r` holds. The flags and `alias` are a
+// member's. A bound on an integer is integral, and no rule may leave a value that passes. Returns false with the item it
+// cannot read in `r.refused`.
 @(private)
 read_tag :: proc(tag: string, subject: Subject, member: bool, r: ^typed.Member_Rule) -> bool {
 	rest := tag
@@ -167,6 +168,11 @@ read_item :: proc(item: string, subject: Subject, member: bool, r: ^typed.Member
 	pattern, is_pattern := keyed(item, "pattern")
 	divisor, is_divisor := keyed(item, "multiple_of")
 	switch {
+	case item == "unique":
+		one.unique = true
+		if .List not_in kinds {
+			return false
+		}
 	case is_format:
 		one.format, one.assert_format = format, true
 		if .Text not_in kinds || rules.format_of(format) == .None {

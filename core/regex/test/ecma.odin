@@ -91,8 +91,8 @@ test_ecma_rules :: proc(t: ^testing.T) {
 		{`(?=(a+))a\d`, "aaa1", 2, 4, 2, 3}, // a group in a look-ahead keeps its span past the visited set's shortcut
 		{`(?=(a|aa)*(b))a.*c`, "aabc", 0, 4, 1, 2},
 		{`(?<\u0061b>x)`, "x", 0, 1, 0, 1}, // a group name may be written with escapes
-		{`\&\%[\&\%]`, "x&%%", 1, 4, -1, -1}, // an escaped ASCII punctuation character is itself
-		{`^\/[^\*\?\&\%]*$`, "/a&", -1, -1, -1, -1},
+		{`\.\/[\/\-\.]`, "x./-", 1, 4, -1, -1}, // a syntax character and `/` are themselves, and `-` in a class
+		{`^\/[^\*\?]*$`, "/a?", -1, -1, -1, -1},
 		{`\p{Bidi_M}`, "(", 0, 1, -1, -1},
 		{`\p{Bidi_M}`, "a", -1, -1, -1, -1},
 		{`\p{Bidi_Mirrored}`, "\u2208", 0, 3, -1, -1},
@@ -176,11 +176,15 @@ test_ecma_refusals :: proc(t: ^testing.T) {
 		`(a)\1`, `\k<x>`, `(?<x>a)\k<x>`, `(?<=a)b`, `(?<!a)b`, `a{`, `a{2,1}`, `]`, `}`, `\q`, `[b-a]`, `[\d-z]`,
 		`\u{110000}`, `\p{Nope}`, `\p{scx=Nope}`, `\p{scx}`, `\p{letter}`, `\p{Greek}`, `\p{Word}`, `\p{gc=Greek}`, `(?<1>a)`,
 		`(?<n>a)(?<n>b)`, `(?=a)*`, `^*`, `a**`, `(a`, `a)`, `(?x)`, `\c1`, `\00`, `\-?`, `a+?\-`,
+		`\&`, `\%`, `[\&]`, `[\%]`, `\#`, `\ `, `\!`, `\"`, `\,`, `\:`, `\;`, `\<`, `\=`, `\>`, `\@`, `\~`, `\_`, `\'`, `[\_]`,
 	}
 	for pattern in refused {
 		testing.expectf(t, search(pattern, "").err != "", "%q compiled", pattern)
 	}
 	testing.expect(t, search(`a`, "", flags = {ecma = true, fold = true}).err != "")
+	testing.expect_value(t, search(`a\&b`, "").err, "invalid escape \\& at offset 1")
+	testing.expect_value(t, search(`[a\%]`, "").err, "invalid escape \\% at offset 2")
+	testing.expect(t, search(`\&\%[\&\%]`, "", flags = {}).err == "") // jq's Oniguruma keeps them
 }
 
 @(test)
@@ -302,14 +306,18 @@ test_ecma_automaton_is_linear :: proc(t: ^testing.T) {
 		{`^(a+)+$`, "a", true},
 		{`^[^@]+@[^@]+\.[a-z]+$`, "@a.b.c.d!", false},
 		{`^(?:a|ab|b)*c`, "c", true},
+		{`^(?=[^!*,;{}[\]~\n]+$)(?=(.*\w)).+$`, "", true},
+		{`^(?=[^!*,;{}[\]~\n]+$)(?=(.*\w)).+$`, "!", false},
+		{`^(?!(a|aa)*b)(?=a*$)(a|a)*$`, "", true},
+		{`^(?!(a|aa)*b)a*`, "b", false},
 	}
 	text := strings.repeat("a", 200_000, context.temp_allocator)
 	for c in cases {
 		f := search(c.pattern, strings.concatenate({text, c.tail}, context.temp_allocator), whether = true)
 		testing.expectf(t, f.automaton && f.err == "" && (f.lo == 0) == c.found, "%q: automaton %v, %v %s", c.pattern, f.automaton, f.lo == 0, f.err)
 	}
-	// Look-ahead leaves a pattern to the visited set, and `\b` does not.
-	for pattern in ([?]string{`(?=a)b`, `(?!a*b)a`}) {
+	// Look-ahead past the text's start leaves a pattern to the visited set, and `\b` does not.
+	for pattern in ([?]string{`(?=a)b`, `(?!a*b)a`, `^a(?=a)`, `^(?=a(?=b))`, `^(?<=a)b`}) {
 		testing.expectf(t, !search(pattern, "a").automaton, "%q has an automaton", pattern)
 	}
 	for pattern in ([?]string{`\ba`, `a\B`}) {
@@ -467,6 +475,51 @@ test_ecma_automaton_keeps_the_answers :: proc(t: ^testing.T) {
 		testing.expectf(t, whether.err == with.err && (whether.lo >= 0) == (with.lo >= 0), "%q on %q: %v whether, %v with the set", pattern, strings.to_string(text), whether, with)
 	}
 	testing.expectf(t, built > 8000, "%d of 20000 patterns have the automaton", built)
+}
+
+// The automaton of a pattern that begins with look-aheads after `^` finds a match exactly where a backtracker without
+// the visited set does, on texts of up to ten characters, some of them not valid UTF-8.
+@(test)
+test_ecma_leading_look_aheads_keep_the_answers :: proc(t: ^testing.T) {
+	state := u64(20261111)
+	built := 0
+	pieces := [?]string{"a", "a", "b", "é", "😀", "A", "1", " ", "\n", "-", "\xff", "\x80"}
+	for i in 0 ..< 20000 {
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_string(&b, "^")
+		state = state * 6364136223846793005 + 1442695040888963407
+		for _ in 0 ..< 1 + int(state >> 33) % 3 {
+			state = state * 6364136223846793005 + 1442695040888963407
+			strings.write_string(&b, "(?!" if state >> 62 == 0 else "(?=")
+			if i % 4 == 3 {
+				generate(&b, &state, 1)
+			} else {
+				generate_plain(&b, &state, 2)
+			}
+			strings.write_string(&b, ")")
+		}
+		generate_plain(&b, &state, 2)
+		state = state * 6364136223846793005 + 1442695040888963407
+		text := strings.builder_make(context.temp_allocator)
+		for _ in 0 ..< int(state >> 33) % 11 {
+			state = state * 6364136223846793005 + 1442695040888963407
+			k := int(state >> 33) % len(pieces)
+			if k >= len(pieces) - 2 && state & 7 != 0 {
+				k = 0
+			}
+			strings.write_string(&text, pieces[k])
+		}
+		pattern := strings.to_string(b)
+		whether := search(pattern, strings.to_string(text), whether = true)
+		plain := search(pattern, strings.to_string(text), linear = false)
+		if plain.err != "" {
+			// The backtracker gave up at its retry limit, where the visited set does not.
+			plain = search(pattern, strings.to_string(text))
+		}
+		built += int(whether.automaton)
+		testing.expectf(t, whether.err == plain.err && (whether.lo >= 0) == (plain.lo >= 0), "%q on %q: %v whether, %v backtracking", pattern, strings.to_string(text), whether, plain)
+	}
+	testing.expectf(t, built > 12000, "%d of 20000 patterns have the automaton", built)
 }
 
 // A jq pattern drawn from `state`, of the instructions and assertions the automaton runs and some it does not.

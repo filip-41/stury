@@ -343,17 +343,18 @@ plain_run :: proc(p: ^Parser) -> ^Node {
 }
 
 // Whether `\c` is the character c itself, as an escaped ASCII character other than a letter or digit is, and under
-// ECMA an ASCII punctuation character, as Annex B's identity escapes take, but for `-`, which ECMA's `u` flag escapes
-// only in a class, whose parse takes it first.
+// ECMA's `u` flag only a syntax character or `/`, which no escape outside a class otherwise names. `-` is escaped only
+// in a class, whose parse takes it first.
 @(private)
 escaped_punctuation :: proc(c: byte, ecma: bool) -> bool {
+	if ecma {
+		return c == '/' || strings.index_byte("^$\\.*+?()[]{}|", c) >= 0
+	}
 	switch c {
 	case 'a' ..= 'z', 'A' ..= 'Z', '0' ..= '9':
 		return false
-	case '-':
-		return !ecma
 	}
-	return c > ' ' && c < 0x7F if ecma else c < 0x80
+	return c < 0x80
 }
 
 // Under (?x), white space and `#` comments between tokens.

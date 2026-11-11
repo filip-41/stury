@@ -18,6 +18,9 @@ Before :: struct {
 	field: Field, // the member's record as it was before it became `.Before`, for a format that reads a cell by it
 	// With a nil `call`, a union read by its first arm that reads its text whole, each arm by its own record.
 	first_match: bool,
+	// The check plan that judges the text of a value read with no refusal, the applicators of a model's type, nil for
+	// none. With a nil `call` and no `first_match`, the value is read by `field` and then judged.
+	judge:       ^Plan,
 }
 
 // Makes record `at`, which `fill` has filled for its member's type, a `.Before` record that keeps the first.
@@ -90,8 +93,11 @@ Before_Read :: #type proc "contextless" (h: ^Check, regs: core.Hook_Regs, m: ^Me
 before_value :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64) -> (core.Hook_Regs, core.Action) {
 	context = h.ctx
 	b := m.before
-	if b.call == nil {
+	if b.call == nil && b.first_match {
 		return first_match(h, regs, m, dest, kind, lo, hi)
+	}
+	if b.call == nil {
+		return judged_value(h, regs, m, dest, lo, hi)
 	}
 	if h.plan.value_text == nil || b.plan == nil {
 		return refuse(h, regs, {kind = .Unsupported, at = lo}, hi)
@@ -188,7 +194,7 @@ carry_entries :: proc(h: ^Check, regs: core.Hook_Regs, sub: ^Sink, lo, hi: u64) 
 first_match :: proc(h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64) -> (core.Hook_Regs, core.Action) {
 	if kind == .Null && !m.no_nil {
 		runtime.mem_zero(rawptr(dest), int(m.size))
-		return regs, .Next
+		return judge(h, regs, m.before.judge, h.src[lo:hi], lo, hi)
 	}
 	// A load or sink whose allocator is the temporary one keeps what it stores there, so nothing is given back.
 	keep := context.allocator == context.temp_allocator || h.sink != nil && h.sink.entries.allocator == context.temp_allocator
@@ -217,7 +223,7 @@ first_match :: proc(h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, ki
 			return refuse(h, regs, {kind = .No_Memory, at = lo}, hi)
 		}
 		mark_arm(dest, &m.before.field, m, k)
-		return regs, .Next
+		return judge(h, regs, m.before.judge, text, lo, hi)
 	}
 	back, action := refuse(h, regs, {kind = .No_Arm, at = lo}, hi)
 	for &sub in subs {
@@ -229,4 +235,45 @@ first_match :: proc(h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, ki
 		}
 	}
 	return back, action
+}
+
+// Reads the text `lo..hi` of the value at `dest` by the record its `.Before` keeps, then judges it by `judge`.
+@(private)
+judged_value :: proc(h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, lo, hi: u64) -> (core.Hook_Regs, core.Action) {
+	text := h.src[lo:hi]
+	// What the read and the judge take of the temporary allocator is given back, unless the load or sink keeps it there.
+	keep := context.allocator == context.temp_allocator || h.sink != nil && h.sink.entries.allocator == context.temp_allocator
+	guard := runtime.default_temp_allocator_temp_begin()
+	defer if !keep {
+		runtime.default_temp_allocator_temp_end(guard)
+	}
+	// The kept record read as the root of a plan, at the value's own address. A read's root names the record after its own.
+	root := [2]Field{m.before.field, {}}
+	root[0].offset = 0
+	view := h.plan^
+	view.root, view.type = &root[1], m.type
+	sub := Sink{max_errors = h.sink.max_errors if h.sink != nil else 1}
+	sub.entries.allocator = context.temp_allocator
+	dups := core.Duplicates.First if h.first_key else .Last
+	if check_text(text, rawptr(dest), m.type, &view, {dups = dups, sink = &sub}, context.allocator) != nil {
+		return carry_entries(h, regs, &sub, lo, hi)
+	}
+	return judge(h, regs, m.before.judge, text, lo, hi)
+}
+
+// Judges `text`, the value `lo..hi` read with no refusal, by the check plan `plan`, nil for none, and reports what it fails
+// as the value's refusals.
+@(private)
+judge :: proc(h: ^Check, regs: core.Hook_Regs, plan: ^Plan, text: []u8, lo, hi: u64) -> (core.Hook_Regs, core.Action) {
+	if plan == nil {
+		return regs, .Next
+	}
+	sub := Sink{max_errors = h.sink.max_errors if h.sink != nil else 1}
+	sub.entries.allocator = context.temp_allocator
+	target: u8
+	dups := core.Duplicates.First if h.first_key else .Last
+	if check_text(text, &target, nil, plan, {dups = dups, sink = &sub, repeats = .Ignore}, context.temp_allocator) == nil {
+		return regs, .Next
+	}
+	return carry_entries(h, regs, &sub, lo, hi)
 }

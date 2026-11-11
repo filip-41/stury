@@ -3,6 +3,7 @@ package regex
 
 // Escapes at `\` outside a class and the single-character escapes a class shares.
 
+import "core:strconv"
 import "core:strings"
 import "core:unicode/utf8"
 
@@ -156,6 +157,10 @@ ecma_char :: proc(p: ^Parser, c: byte) -> (r: rune, ok: bool) {
 		if escaped_punctuation(c, true) {
 			return rune(c), true
 		}
+		_, w := utf8.decode_rune_in_string(p.src[p.i - 1:])
+		buf: [20]byte
+		fail(p, strings.concatenate({"invalid escape \\", p.src[p.i - 1:][:w], " at offset ", strconv.write_int(buf[:], i64(p.i - 2), 10)}))
+		return
 	}
 	fail(p, "invalid escape")
 	return

@@ -1,6 +1,6 @@
 package jq
 
-// The regular-expression builtins (`test`, `match`, `capture`, `split/2`, `sub`, `gsub`). Compiling a pattern and
+// The regular-expression builtins (`test`, `match`, `capture`, `scan`, `splits`, `split/2`, `sub`, `gsub`). Compiling a pattern and
 // finding its matches is regex.odin's.
 
 @(private = "file")
@@ -80,6 +80,83 @@ each_match :: proc($capture: bool) -> Generator {
 		}
 		return .Go
 	}
+}
+
+// `scan` as jq defines it, `match($re; "g" + $flags)` and then each match's string, or its captures' strings when the
+// regex has groups, with no match object made for it.
+each_scan :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal {
+	flags, sig := add(ip, string("g"), args[1] if len(args) > 1 else nil)
+	if sig != .Go {
+		return sig
+	}
+	r, s, ms, rsig := regex_on(ip, input.v, {args[0], flags})
+	if rsig != .Go {
+		return rsig
+	}
+	if track {
+		return match_path_error(ip, &r, s, ms)
+	}
+	for m in ms {
+		v: Value
+		if groups := len(r.re.names) - 1; groups > 0 {
+			a := new_array(groups)
+			for g in 1 ..= groups {
+				append(&a.items, group_text(s, m, g))
+			}
+			v = a
+		} else {
+			v = span_text(s, m[0], m[1])
+		}
+		if sig = emit_made(out, input, v, track); sig != .Go {
+			return sig
+		}
+	}
+	return .Go
+}
+
+// `splits` as jq defines it, the slices `.[start:end]` between the matches of `match($re; flags + "g")` and after the
+// last, with no match object, fold state or slice key made for a piece. A path expression steps by the slice key jq's
+// definition makes, `{start, end, next}`.
+each_splits :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal {
+	flags, sig := add(ip, args[1] if len(args) > 1 else nil, string("g"))
+	if sig != .Go {
+		return sig
+	}
+	_, s, ms, rsig := regex_on(ip, input.v, {args[0], flags})
+	if rsig != .Go {
+		return rsig
+	}
+	if track {
+		return split_steps(ip, input, s, ms, out)
+	}
+	cuts := Cuts{bytes = on_boundaries(s, ms)}
+	for m in ms {
+		if sig = emit_made(out, input, cut_before(&cuts, s, m), false); sig != .Go {
+			return sig
+		}
+	}
+	return emit_made(out, input, cut_rest(&cuts, s), false)
+}
+
+@(private = "file")
+split_steps :: proc(ip: ^Interp, input: Item, s: string, ms: []Match, out: ^Sink) -> Signal {
+	walk: Char_Walk
+	key :: proc(start, end, next: Value) -> Value {
+		k := new_object()
+		object_put(k, "start", start)
+		object_put(k, "end", end)
+		object_put(k, "next", next)
+		return k
+	}
+	next: Value
+	for m in ms {
+		off, length := span(&walk, s, m[0], m[1])
+		if sig := index_and_emit(ip, input, key(next, num(f64(off)), num(f64(off + length))), true, out); sig != .Go {
+			return sig
+		}
+		next = num(f64(off + length))
+	}
+	return index_and_emit(ip, input, key(next, nil, nil), true, out)
 }
 
 // jq's `match` is `_match_impl(...) | .[]`: under `path(...)` that `.[]` meets an array no path leads to.

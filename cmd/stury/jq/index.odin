@@ -2,7 +2,10 @@ package jq
 
 // Indexing: `.name`, `.[e]`, `.[e:f]` and `.[]`, and the index and slice of a value.
 
+import "base:runtime"
 import "core:math"
+import "core:strings"
+import core_pkg "../../../core"
 
 // `.name`, `.[e]`, `.[e:f]` and `.[]`: `n.a`'s outputs indexed. As in jq, `e` and `f` run first, on the input of the
 // whole term, and `n.a` runs for each key they give: `(t1, t2)[0, 1]` is `t1[0], t2[0], t1[1], t2[1]`.
@@ -233,23 +236,49 @@ slice_bounds :: proc(ip: ^Interp, n: int, key: Value) -> (lo, hi: int, sig: Sign
 	return lo, max(hi, lo), .Go
 }
 
+// The buffer a slice decodes a string that needs decoding into: the piece a slice keeps is copied out, so a loop over
+// slices of one long string holds the pieces, not a decode of the whole string for each.
+@(private = "file", thread_local)
+slice_scratch: [dynamic]byte
+
+// The text of string `t`, and whether it lies in the buffer slices share (valid until the next slice).
+@(private = "file")
+slice_source :: proc(t: Value) -> (s: string, decoded: bool) {
+	if r, is_ref := plain(t).(Ref); is_ref {
+		if room := core_pkg.text_room(r.doc, r.node); room > 0 {
+			if slice_scratch.allocator.procedure == nil {
+				slice_scratch = make([dynamic]byte, runtime.heap_allocator())
+			}
+			resize(&slice_scratch, room)
+			if text, ok := core_pkg.doc_text(r.doc, r.node, slice_scratch[:]); ok {
+				return text, true
+			}
+		}
+	}
+	s, _ = string_of(t)
+	return s, false
+}
+
 slice_value :: proc(ip: ^Interp, t: Value, key: Value) -> (v: Value, sig: Signal) {
 	switch kind(t) {
 	case .Array:
 		lo, hi := slice_bounds(ip, length_of(t), key) or_return
 		return array_slice(t, lo, hi), .Go
 	case .String:
-		s, _ := string_of(t)
+		s, decoded := slice_source(t)
 		runes := codepoints(s)
 		lo, hi := slice_bounds(ip, runes, key) or_return
+		piece: string
 		if runes == len(s) { // all ASCII: character indices are byte offsets
-			return s[lo:hi], .Go
+			piece = s[lo:hi]
+		} else {
+			w := Char_Walk{}
+			if lo > runes / 2 { // walk from the nearer end
+				w = {len(s), runes}
+			}
+			piece = char_slice(&w, s, lo, hi)
 		}
-		w := Char_Walk{}
-		if lo > runes / 2 { // walk from the nearer end
-			w = {len(s), runes}
-		}
-		return char_slice(&w, s, lo, hi), .Go
+		return strings.clone(piece) if decoded else piece, .Go
 	case .Null, .False, .True, .Number, .Object:
 	}
 	return nil, fail(ip, "Cannot index %s with object (%s)", type_name(t), brief(ip, key))

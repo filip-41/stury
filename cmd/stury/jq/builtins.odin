@@ -127,6 +127,8 @@ fill_table :: proc() {
 	put("sub gsub", {2, 3}, {native = native_sub, takes = {.String}})
 	put("match", {1, 2}, {gen = each_match(false), in_jq = true, takes = {.String}, gives = {.Object}, typed = .Kinds})
 	put("capture", {1, 2}, {gen = each_match(true), in_jq = true, takes = {.String}, gives = {.Object}, typed = .Kinds})
+	put("scan", {1, 2}, {gen = each_scan, in_jq = true, takes = {.String}, gives = {.String, .Array}, typed = .Kinds})
+	put("splits", {1, 2}, {gen = each_splits, in_jq = true, takes = {.String}, gives = {.String}, typed = .Kinds})
 	put("test", {1, 2}, {fn = fn_test, in_jq = true, takes = {.String}, gives = {.Bool}, typed = .Kinds})
 	put("split", {2}, {fn = fn_split_regex, in_jq = true, takes = {.String}, gives = {.String}, typed = .Array})
 
@@ -339,11 +341,6 @@ def indices($i): if type == "array" and ($i | type) == "array" then .[$i] elif t
 def index($i): indices($i) | .[0];
 def rindex($i): indices($i) | .[-1:][0];
 def debug(msg): (msg | debug | empty), .;
-def scan($re; $flags): match($re; "g" + $flags) | if (.captures | length > 0) then [.captures | .[] | .string] else .string end;
-def scan($re): scan($re; null);
-def splits($re; flags): .[foreach (match($re; flags + "g"), null) as {$offset, $length}
-    (null; {start: .next, end: $offset, next: ($offset + $length)})];
-def splits($re): splits($re; null);
 def halt_error: halt_error(5);
 def todateiso8601: strftime("%Y-%m-%dT%H:%M:%SZ");
 def todate: todateiso8601;

@@ -519,3 +519,121 @@ a_carrier_arm_reads_by_its_carriers_kind :: proc(t: ^testing.T) {
 	text, _ := schema.write(&d, json.as(.Json))
 	testing.expect(t, strings.contains(string(text), `"anyOf":[{"type":"string","format":"date-time"},{"type":"integer"`), string(text))
 }
+
+@(private = "file")
+Tags :: distinct []string
+
+@(private = "file")
+Long :: distinct string
+
+@(private = "file")
+Shipping :: struct {
+	kind:    string,
+	card:    Maybe(string) `model:"optional"`,
+	billing: Maybe(string) `model:"optional"`,
+	tags:    Tags,
+	codes:   []i64 `model:"unique"`,
+	extra:   map[string]core.Value `model:"extra"`,
+}
+
+@(private = "file")
+Postal :: struct {
+	kind: Postal_Kind,
+}
+
+@(private = "file")
+Postal_Kind :: enum {
+	post,
+}
+
+@(private = "file")
+Has_Zip :: struct {
+	zip: string,
+}
+
+@(test)
+applicators_judge_a_load_and_describe_as_their_keywords :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	reg: model.Registry
+	model.register(&reg, model.Type_Rule{Long, "len>=3"})
+	model.register(&reg, model.Applies_Rule{Tags, model.Contains{of = Long, max = 1}})
+	model.register(&reg, model.Applies_Rule{Shipping, model.Dependent{name = "card", requires = {"billing"}}})
+	model.register(&reg, model.Applies_Rule{Shipping, model.Pattern{expression = "^x-", of = i64}})
+	model.register(&reg, model.Applies_Rule{Shipping, model.Names{of = Long}})
+	model.register(&reg, model.Applies_Rule{Shipping, model.Conditional{test = Postal, then = Has_Zip}})
+	m, compiled := model.compile(&reg, Shipping, json.reads(.Json))
+	walktest.expect_nil(t, compiled)
+	Case :: struct {
+		text: string,
+		want: core.Typed_Error_Kind,
+	}
+	cases := [?]Case {
+		{`{"kind": "air", "tags": ["ab", "abc"], "codes": [1, 2]}`, .None},
+		{`{"kind": "air", "tags": ["ab"], "codes": []}`, .Too_Few},
+		{`{"kind": "air", "tags": ["abc", "abcd"], "codes": []}`, .Too_Many},
+		{`{"kind": "air", "tags": ["abc"], "codes": [1, 1]}`, .Not_Unique},
+		{`{"kind": "air", "card": "1", "tags": ["abc"], "codes": []}`, .Missing_Field},
+		{`{"kind": "air", "tags": ["abc"], "codes": [], "x-a": "s"}`, .Wrong_Kind},
+		{`{"kind": "air", "tags": ["abc"], "codes": [], "x-a": 1}`, .None},
+		{`{"kind": "post", "tags": ["abc"], "codes": []}`, .Missing_Field},
+		{`{"kind": "post", "tags": ["abc"], "codes": [], "zip": "1"}`, .None},
+	}
+	for c in cases {
+		_, kind := load_one(&m, c.text)
+		testing.expectf(t, kind == c.want, "%s: %v", c.text, kind)
+	}
+	d, _ := model.schema(&m, .Load)
+	text, _ := schema.write(&d, json.as(.Json))
+	for word in ([?]string{`"contains":`, `"maxContains":1`, `"uniqueItems":true`, `"dependentRequired":{"card":["billing"]}`, `"patternProperties":{"^x-":`, `"propertyNames":`, `"if":`, `"then":`}) {
+		testing.expectf(t, strings.contains(string(text), word), "%s in %s", word, text)
+	}
+}
+
+@(private = "file")
+Either :: union {
+	i64,
+	f64,
+}
+
+@(test)
+a_one_match_union_refuses_a_value_two_arms_read :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	reg: model.Registry
+	model.register(&reg, model.Union_Rule{type = Either, mode = .One_Match})
+	m, compiled := model.compile(&reg, Either, json.reads(.Json))
+	walktest.expect_nil(t, compiled)
+	v, kind := load_one(&m, `1.5`)
+	testing.expectf(t, kind == .None && v == f64(1.5), "%v %v", kind, v)
+	_, kind = load_one(&m, `1`)
+	testing.expect(t, kind != .None)
+	d, _ := model.schema(&m, .Load)
+	text, _ := schema.write(&d, json.as(.Json))
+	testing.expect(t, strings.contains(string(text), `"oneOf"`), string(text))
+}
+
+@(private = "file")
+Boxes :: distinct [][]string
+
+@(private = "file")
+Loop :: distinct string
+
+@(test)
+an_operand_judged_by_its_own_rules_judges_them_and_one_that_reaches_itself_is_refused :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	reg: model.Registry
+	model.register(&reg, model.Type_Rule{Long, "len>=3"})
+	model.register(&reg, model.Applies_Rule{Tags, model.Contains{of = Long}})
+	model.register(&reg, model.Applies_Rule{Boxes, model.Contains{of = Tags, min = 2}})
+	m, compiled := model.compile(&reg, Boxes, json.reads(.Json))
+	walktest.expect_nil(t, compiled)
+	_, kind := load_one(&m, `[["abc"], ["a", "abcd"]]`)
+	testing.expect_value(t, kind, core.Typed_Error_Kind.None)
+	_, kind = load_one(&m, `[["abc"], ["a"]]`)
+	testing.expect_value(t, kind, core.Typed_Error_Kind.Too_Few)
+	model.register(&reg, model.Applies_Rule{Loop, model.Not{of = Loop}})
+	_, refused := model.compile(&reg, Loop, json.reads(.Json))
+	testing.expect_value(t, refused_as(refused), core.Typed_Error_Kind.Unsupported)
+}

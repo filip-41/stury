@@ -24,6 +24,7 @@ Registry :: struct {
 	customs: [dynamic]Custom_Of,
 	enums:   [dynamic]Enum_Rule,
 	unions:  [dynamic]Union_Rule,
+	applies: [dynamic]Applies_Rule,
 	close:      typed.Close_Validators, // `typed.validate_closed` once a validator is registered
 }
 
@@ -96,6 +97,7 @@ register :: proc {
 	register_custom,
 	register_enum,
 	register_union,
+	register_applies,
 }
 
 // Sets how models compiled from `reg` spell names. `union_tag` must outlive the registry.
@@ -199,6 +201,8 @@ Model :: struct($T: typeid) {
 	load_plan: typed.Plan,
 	// The registry's customs with their carriers' plans, which the plans' hooks point at.
 	customs:   []Custom_Of,
+	// The judged types the model holds, nil for none.
+	judging:   ^Applied,
 }
 
 // Compiles `T`'s model from `reg`, nil for a plain type, for the format whose typed reads are `reads`, as
@@ -215,7 +219,10 @@ compile :: proc(reg: ^Registry, $T: typeid, reads: ^typed.Format_Reads, allocato
 		m.plan, err = plan_of(reg, T, reads, allocator, nil, nil, layout, hooks)
 	}
 	if err == nil {
-		m.load_plan, err = plan_of(reg, T, reads, allocator, .Read_Only, &m.plan, layout, hooks)
+		m.judging, err = judging_of(reg, &m.plan, reads, allocator, layout, hooks)
+	}
+	if err == nil {
+		m.load_plan, err = plan_of(reg, T, reads, allocator, .Read_Only, &m.plan, layout, hooks, m.judging)
 	}
 	if err == nil {
 		err = carrier_plans(&m, reads, hooks[:len(hooks) - len(m.customs)], allocator)
@@ -230,12 +237,15 @@ compile :: proc(reg: ^Registry, $T: typeid, reads: ^typed.Format_Reads, allocato
 
 // The plan of `T` with `reg`'s rules, read with `reads`.
 @(private)
-plan_of :: proc(reg: ^Registry, T: typeid, reads: ^typed.Format_Reads, allocator: runtime.Allocator, without: Maybe(typed.Access), whole: ^typed.Plan, layout: Maybe(core.As), hooks: []typed.Type_Hook) -> (typed.Plan, core.Error) {
+plan_of :: proc(reg: ^Registry, T: typeid, reads: ^typed.Format_Reads, allocator: runtime.Allocator, without: Maybe(typed.Access), whole: ^typed.Plan, layout: Maybe(core.As), hooks: []typed.Type_Hook, judging: ^Applied = nil) -> (typed.Plan, core.Error) {
 	if reads == nil || reads.plan == nil {
 		return {}, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
 	none: Registry
-	c := Compiling{model = {member = member_rule, forbids = forbids, compile = rules.rules_leaf, structs = typed.load_struct, validators = validators_of, enum_names = enum_names, unions = unions}, reg = reg if reg != nil else &none, without = without}
+	c := Compiling{model = {member = member_rule, forbids = forbids, compile = rules.rules_leaf, structs = typed.load_struct, validators = validators_of, enum_names = enum_names, unions = unions}, reg = reg if reg != nil else &none, without = without, judging = judging}
+	if judging != nil {
+		c.model.judge = judge_plan
+	}
 	c.model.close = c.reg.close
 	if whole != nil {
 		// A load's plan settles its structs, and takes the leaves of the plan of every member.
@@ -304,6 +314,10 @@ registry_destroy :: proc(reg: ^Registry) {
 		delete(x.tag)
 	}
 	delete(reg.unions)
+	for x in reg.applies {
+		applies_destroy(x.applies, context.allocator)
+	}
+	delete(reg.applies)
 	virtual.arena_destroy(&reg.loads.constants)
 	reg^ = {}
 }
@@ -320,6 +334,8 @@ model_destroy :: proc(m: ^Model($T)) {
 		typed.plan_destroy(&x.plan)
 	}
 	delete(m.customs)
+	judging_destroy(m.judging)
+	m.judging = nil
 }
 
 @(private)
@@ -327,6 +343,7 @@ Compiling :: struct {
 	model:   typed.Model_Rules,
 	reg:     ^Registry,
 	without: Maybe(typed.Access), // the access whose members this plan leaves out
+	judging: ^Applied,
 }
 
 // The rules of a member, or with `owner` nil of a value no member holds: the rules of its type and of the types its

@@ -299,6 +299,18 @@ match_object :: proc(r: ^Regex, s: string, m: Match, w: ^Char_Walk) -> Value {
 	return o
 }
 
+// The string `match` gives group `g` of match `m`: null for a group that did not take part.
+group_text :: proc(s: string, m: Match, g: int) -> Value {
+	lo, hi := m[2 * g], m[2 * g + 1]
+	switch {
+	case lo < 0:
+		return nil
+	case lo == hi || m[0] == m[1]:
+		return string("")
+	}
+	return span_text(s, lo, hi)
+}
+
 // A match's named groups as `capture` gives them, `{name: string}`, a later group of a name winning.
 capture_object :: proc(r: ^Regex, s: string, m: Match) -> ^Object {
 	o := new_object()

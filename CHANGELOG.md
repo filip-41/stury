@@ -8,7 +8,9 @@
   the output passes it as the output format reads it. Library: `schema.Converter` and `schema.convert`.
 
 - `stury schema gen SCHEMA [--package NAME] [--format-assert]` writes the Odin types a model reads a schema's values
-  with, and exits 1 naming the keyword where no type spells one. Library: `schema.write_odin`.
+  with, and exits 1 naming the keyword where no type spells one. Library: `schema.write_odin`. `oneOf`, `uniqueItems`,
+  `not`, `if`, `contains`, `propertyNames`, `patternProperties` and the dependents are spelled as model rules:
+  `model.Union_Mode.One_Match`, the tag item `unique` and `model.register_applies`.
 
 - `stury schema sample --to csv` writes the union of the rows' members as its columns, an absent member as an empty cell,
   and refuses a nested cell.
@@ -135,6 +137,8 @@
 - A schema `pattern` over a text too long for the regex's visited set gets an answer from the pattern's automaton, where
   the check failed the text before. A schema compiles each distinct pattern once, and its read checks a pattern's syntax
   without building the automaton. `regex.refusal` is that check.
+- An ECMA pattern that begins with look-aheads after `^` (`^(?=...)(?!...)...`) answers a schema's `pattern` from one
+  automaton, the product of the pattern's own and one per look-ahead.
 - `regex.compile` builds the automata for every pattern, not only under `ecma`, unless `automaton` is false.
   `regex.Scratch.ends` holds where the automaton found the last search's match to end.
 - `core.kind` of a CSV or TSV cell is the kind the cell reads as, in place of `.Plain`: an empty unquoted cell is

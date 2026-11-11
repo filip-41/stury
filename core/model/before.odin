@@ -64,10 +64,10 @@ replacement_rule :: proc(h: ^typed.Model_Rules, owner: typeid, field: string, ty
 @(private)
 replacement_plans :: proc(c: ^Compiling, reads: ^typed.Format_Reads, p: ^typed.Plan, allocator: runtime.Allocator) -> core.Typed_Refusal {
 	for &m in p.meta {
-		if m.before != nil && m.before.first_match {
+		if m.before != nil && (m.before.first_match || m.before.judge != nil) {
 			if p.value_text == nil {
 				// A format that holds no value alone, a table's, reads no text whole.
-				return {kind = .Unsupported, want = {m.type, "first match"}}
+				return {kind = .Unsupported, want = {m.type, "first match" if m.before.first_match else "applies"}}
 			}
 			continue
 		}

@@ -103,18 +103,17 @@ odin_refusals_name_the_keyword :: proc(t: ^testing.T) {
 	}
 	for c in ([]Case{
 		{`{"allOf": [{"type": "integer"}, {"type": "string"}]}`, "false", 0},
-		{`{"type": "object", "properties": {"a": {"type": "array", "items": {"if": {"type": "string"}}}}}`, "if", 2},
-		{`{"oneOf": [{"type": "integer"}, {"minimum": 2}]}`, "oneOf", 0},
-		{`{"type": "array", "uniqueItems": true}`, "uniqueItems", 0},
-		{`{"type": "object", "patternProperties": {"^x": {}}}`, "patternProperties", 0},
+		{`{"type": "object", "properties": {"a": {"type": "array", "items": {"type": ["string", "null"], "if": {"minLength": 2}}}}}`, "if", 2},
+		{`{"oneOf": [{"type": ["integer", "null"]}, {"type": "null"}]}`, "oneOf", 0},
+		{`{"type": ["integer", "null"], "not": {"minimum": 3}}`, "not", 0},
+		{`{"type": "object", "patternProperties": {"^x": {}}, "additionalProperties": {"type": "string"}}`, "patternProperties", 0},
 		{`{"type": "array", "items": {"type": "null"}}`, "type", 1},
 		{`{"enum": [9007199254740993]}`, "enum", 0},
 		{`{"type": "array", "prefixItems": [{"type": "integer"}]}`, "prefixItems", 0},
-		{`{"type": "array", "contains": {"type": "integer"}}`, "contains", 0},
 		{`{"type": "object", "properties": {"": {}}}`, "properties", 0},
 		{`{"type": "object", "required": ["z"], "additionalProperties": false}`, "required", 0},
 		{`{"type": "object", "properties": {"a": {}}, "additionalProperties": {"type": "string"}, "allOf": [{"properties": {"b": {}}}]}`, "additionalProperties", 0},
-		{`{"$defs": {"a": {"type": "object", "properties": {"x": {"not": {"minimum": 1}}}}}, "type": "object", "properties": {"p": {"$ref": "#/$defs/a"}}}`, "not", 2},
+		{`{"$defs": {"a": {"type": "object", "properties": {"x": {"type": ["number", "null"], "not": {"minimum": 1}}}}}, "type": "object", "properties": {"p": {"$ref": "#/$defs/a"}}}`, "not", 2},
 		{`{"$defs": {"t": {"type": "array", "items": {"$ref": "#/$defs/t"}}}, "$ref": "#/$defs/t"}`, "$ref", 1},
 	}) {
 		keyword, steps := refused_keyword(t, c.text)
@@ -162,4 +161,26 @@ odin_null_tuples_merges_and_other_members :: proc(t: ^testing.T) {
 		"items": {"$ref": "#/$defs/Root"}}`)
 	testing.expectf(t, err == nil, "%v", err)
 	testing.expectf(t, strings.contains(source, "Root_2 :: Maybe([]Root)\n") && strings.contains(source, "Root :: struct {\n"), "%s", source)
+}
+
+@(test)
+odin_applicators_are_registered_on_a_named_type :: proc(t: ^testing.T) {
+	source, err := odin_of(t, `{"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}, "uniqueItems": true,
+		"contains": {"const": "a"}, "maxContains": 2}, "n": {"oneOf": [{"type": "integer"}, {"type": "number", "minimum": 2}]}},
+		"patternProperties": {"^x-": {"type": "integer"}}, "propertyNames": {"maxLength": 4}, "dependentRequired": {"a": ["b"]},
+		"if": {"required": ["a"]}, "then": {"required": ["c"]}}`)
+	testing.expectf(t, err == nil, "%v", err)
+	for want in ([]string{
+		"Root :: struct {\n",
+		"\ttags: Root_Tags `model:\"optional,unique\"`,\n",
+		"Root_Tags :: distinct []string\n",
+		"model.register_applies(reg, {Root_Tags, model.Contains{of = typeid_of(Root_Tags_Contains), max = 2}}) or_return",
+		"model.register_union(reg, {Root_N, .One_Match, \"\"}) or_return",
+		"model.register_applies(reg, {Root, model.Conditional{test = typeid_of(Root_If), then = typeid_of(Root_Then), other = nil}}) or_return",
+		"model.register_applies(reg, {Root, model.Names{of = typeid_of(Root_Name)}}) or_return",
+		"model.register_applies(reg, {Root, model.Pattern{\"^x-\", typeid_of(i64)}}) or_return",
+		"model.register_applies(reg, {Root, model.Dependent{name = \"a\", requires = {\"b\"}}}) or_return",
+	}) {
+		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
+	}
 }

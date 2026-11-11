@@ -41,7 +41,12 @@ eval_count :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^En
 				return .Go
 			}}}
 	if n.a != nil {
-		if sig := eval(ip, n.a, input, env, false, &s); sig != .Go {
+		// The count keeps nothing of an output, as a printer does, so a pipe's outputs are made in a scope emptied between them.
+		printer := ip.printer
+		ip.printer = &s
+		sig := eval(ip, n.a, input, env, false, &s)
+		ip.printer = printer
+		if sig != .Go {
 			return sig
 		}
 	}

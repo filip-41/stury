@@ -15,14 +15,14 @@ import typed "../typed"
 // description borrows the plan's names, so the plan must outlive it. It describes what a load reads, or under `.Dump`
 // what a write writes: a member is required unless it may be left out.
 @(private)
-describe :: proc(plan: ^typed.Plan, direction: Direction, allocator: runtime.Allocator) -> (d: rules.Description, err: core.Error) {
+describe :: proc(plan: ^typed.Plan, direction: Direction, allocator: runtime.Allocator, judging: ^Applied = nil) -> (d: rules.Description, err: core.Error) {
 	context.allocator = allocator
 	d.allocator = allocator
 	d.names = make(map[rules.Node_Index]string, allocator)
 	if plan.type == nil {
 		return d, core.error_of(core.Typed_Refusal{kind = .Bad_Option})
 	}
-	r := Reading{plan = plan, d = &d, direction = direction}
+	r := Reading{plan = plan, d = &d, direction = direction, judging = judging}
 	defer delete(r.nodes)
 	defer delete(r.shapes)
 	d.root = node_of(&r, 0)
@@ -41,6 +41,9 @@ Reading :: struct {
 	shapes: map[i32]i32, // a list or struct block's array or object block in the description
 	failed: bool,
 	direction: Direction,
+	judging: ^Applied, // the judged types whose applicators a node holds, nil for none
+	depth:   int, // the operands this description is inside
+	deep:    bool, // an operand nested past `OPERAND_DEPTH`
 }
 
 // What a description of a model describes: what a load reads or what a write writes. A load skips a read-only member,
@@ -53,7 +56,7 @@ Direction :: enum {
 
 // The description of `m`'s values in `direction`, as `describe` reads it.
 schema :: proc(m: ^Model($T), direction: Direction, allocator := context.allocator) -> (rules.Description, core.Error) {
-	return describe(&m.plan, direction, allocator)
+	return describe(&m.plan, direction, allocator, m.judging)
 }
 
 @(private)
@@ -125,6 +128,9 @@ node_of :: proc(r: ^Reading, record: i32, ruled := true, arm := false) -> rules.
 	case .Union:
 		n.kinds = rules.EVERY_KIND
 		n.any_of = arms_of(r, m, nullable || !m.no_nil)
+		if one_match(r.judging, m.type) {
+			n.one_of, n.any_of = n.any_of, nil
+		}
 	case:
 		n = leaf(r, f.kind, m)
 	}
@@ -133,6 +139,9 @@ node_of :: proc(r: ^Reading, record: i32, ruled := true, arm := false) -> rules.
 	}
 	if use.rule_set > 0 {
 		n.rules, _ = rules.merged(&n, r.plan.rule_sets[use.rule_set - 1])
+	}
+	if r.judging != nil {
+		applies_into(r, &n, r.judging.rules, m.type)
 	}
 	r.d.nodes[index] = n
 	if named, ok := type_info_of(m.type).variant.(runtime.Type_Info_Named); ok && f.kind == .Struct {

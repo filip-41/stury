@@ -302,6 +302,8 @@ Model_Rules :: struct {
 	// How union `type` is read: by the member `tag` that names its struct arms where `set`, in place of
 	// `Plan_Options.union_tag`, or by its first arm that reads a value, which takes arms that read one kind alike.
 	unions:     proc(m: ^Model_Rules, type: typeid) -> (tag: string, set: bool, first_match: bool),
+	// The check plan that judges a value of `type`, its rules `unique` when they say so, once a load read it, nil for none.
+	judge:      proc(m: ^Model_Rules, type: typeid, unique: bool) -> ^Plan,
 	// How a load runs them, `validate_closed`, which a registered validator names, so a load with none links none of it.
 	close:      Close_Validators,
 	// Whether the plan is a load's, whose structs settle at their close. Any other model plan holds only the validators.
@@ -693,6 +695,10 @@ plan_finish :: proc(b: ^Builder, stamp: u64) -> core.Typed_Refusal {
 		m := &b.meta[i]
 		if m.block >= 0 {
 			b.fields[i].first = &b.fields[int(m.block) + (1 if m.list else 0)]
+			// The record a `.Before` keeps reads the same block.
+			if m.before != nil && m.before.field.meta == u32(i) {
+				m.before.field.first = b.fields[i].first
+			}
 		}
 		if m.members > 0 {
 			for &f, j in b.fields[m.block:][:m.members] {
@@ -935,7 +941,12 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset,
 	case typeid_of(any):
 		f.kind = .Any
 	case:
-		fill_base(b, &f, &m, ti, base)
+		// A distinct `core.Value` reads as one.
+		if base == runtime.type_info_base(type_info_of(core.Value)) {
+			f.kind = .Value
+		} else {
+			fill_base(b, &f, &m, ti, base)
+		}
 	}
 	b.fields[at], b.meta[at] = f, m
 	// A load reads a first-match union wherever it is, as a `.Before` with no call.
@@ -943,6 +954,17 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset,
 		if _, _, first_match := b.model.unions(b.model, ti.id); first_match {
 			fm := Before{first_match = true, value = before_value}
 			keep_before(b, at, &fm)
+		}
+	}
+	if b.model != nil && b.model.loading && b.model.judge != nil {
+		unique := rule_set > 0 && b.rule_sets[rule_set - 1].unique
+		if j := b.model.judge(b.model, ti.id, unique); j != nil {
+			if b.fields[at].kind == .Before {
+				b.meta[at].before.judge = j
+			} else {
+				x := Before{value = before_value, judge = j}
+				keep_before(b, at, &x)
+			}
 		}
 	}
 }

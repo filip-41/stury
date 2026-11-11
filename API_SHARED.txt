@@ -352,7 +352,6 @@ validate_parallel :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) ->
 write_text :: proc(wr: ^Writer, text: []u8) -> core.Typed_Error_Kind
 writer_take :: proc(wr: ^Writer) -> []u8
 # core/schema
-bind :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (b: Bound, err: core.Error)
 converter_destroy :: proc(cv: ^Converter)
 converter_init :: proc(cv: ^Converter, c: ^Compiled, from, to: core.As, from_reads: ^typed.Format_Reads = nil, to_reads: ^typed.Format_Reads = nil) -> (err: core.Error)
 open :: proc(text: []u8, as: core.As, refs := "", format_assert := false, allocator := context.allocator) -> (l: ^Loaded, err: core.Error)

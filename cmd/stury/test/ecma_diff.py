@@ -6,7 +6,7 @@ reporting where the verdict, the match or a group's bounds differ.
 
 A seeded grammar makes each pattern from what a JSON Schema's `pattern` uses: characters, `.`, classes and the class
 escapes, anchors and \\b, groups with and without names, alternatives, look-aheads, and every quantifier, lazy or
-not, over bodies that can match empty or not. Texts are short, over the characters the patterns name. Without node
+not, over bodies that can match empty or not, and look-aheads after `^`. Texts are short, over the characters the patterns name. Without node
 on PATH nothing is compared.
 """
 
@@ -66,6 +66,14 @@ def pattern(rng, depth):
     return "".join(out)
 
 
+def case_pattern(rng):
+    """A pattern, one in four of them beginning with look-aheads after `^`, which the automaton runs as a product."""
+    if rng.randrange(4):
+        return pattern(rng, 2)
+    looks = "".join(rng.choice(["(?=", "(?!"]) + pattern(rng, 1) + ")" for _ in range(rng.randint(1, 3)))
+    return "^" + looks + pattern(rng, 2)
+
+
 def text(rng):
     return "".join(rng.choice("aaabbcé😀A1 ") for _ in range(rng.randrange(11)))
 
@@ -88,7 +96,7 @@ def main():
         print("ecma_diff: node is not on PATH, so nothing was compared")
         return 0
     rng = random.Random(args.seed)
-    cases = [[pattern(rng, 2), text(rng)] for _ in range(args.cases)]
+    cases = [[case_pattern(rng), text(rng)] for _ in range(args.cases)]
     corpus = json.dumps(cases).encode()
     with tempfile.TemporaryDirectory() as scratch:
         probe = os.path.join(scratch, "ecma_probe")
