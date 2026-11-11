@@ -41,9 +41,7 @@ Reading :: struct {
 	shapes: map[i32]i32, // a list or struct block's array or object block in the description
 	failed: bool,
 	direction: Direction,
-	judging: ^Applied, // the judged types whose applicators a node holds, nil for none
-	depth:   int, // the operands this description is inside
-	deep:    bool, // an operand nested past `OPERAND_DEPTH`
+	judging: ^Applied, // the judged types whose fragments a node holds, nil for none
 }
 
 // What a description of a model describes: what a load reads or what a write writes. A load skips a read-only member,
@@ -56,7 +54,7 @@ Direction :: enum {
 
 // The description of `m`'s values in `direction`, as `describe` reads it.
 schema :: proc(m: ^Model($T), direction: Direction, allocator := context.allocator) -> (rules.Description, core.Error) {
-	return describe(&m.plan, direction, allocator, m.judging)
+	return describe(&m.plan, direction, allocator, judging_in(m))
 }
 
 @(private)
@@ -141,7 +139,11 @@ node_of :: proc(r: ^Reading, record: i32, ruled := true, arm := false) -> rules.
 		n.rules, _ = rules.merged(&n, r.plan.rule_sets[use.rule_set - 1])
 	}
 	if r.judging != nil {
-		applies_into(r, &n, r.judging.rules, m.type)
+		fragments, failed := fragments_of(r.judging, r.d, m.type)
+		r.failed ||= failed != nil
+		if len(fragments) > 0 {
+			n.all_of = fragments
+		}
 	}
 	r.d.nodes[index] = n
 	if named, ok := type_info_of(m.type).variant.(runtime.Type_Info_Named); ok && f.kind == .Struct {

@@ -82,9 +82,11 @@ Bound :: struct {
 	allocator: runtime.Allocator,
 }
 
-// Binds `c` to the format `as`, whose check `reads` gives when it is set, as `typed.plan_of` takes it. A schema keyword
-// the check does not judge is refused as `.Unsupported`, naming it, and a compile that failed as `.Bad_Option`.
-bind :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (b: Bound, err: core.Error) {
+// Binds `c` to the format and layout `checks` names, as `json.checks(.Json)` and `dsv.checks(.Csv, opts)` give them. A
+// layout chosen at run time, a handle, with no reads checks by the handle's reads. A schema keyword the check does not
+// judge is refused as `.Unsupported`, naming it, and a compile that failed as `.Bad_Option`.
+bind :: proc(c: ^Compiled, checks: typed.Format_Checks, allocator := context.allocator) -> (b: Bound, err: core.Error) {
+	as, reads := checks.layout, checks.reads
 	if c == nil || c.description == nil {
 		return {}, core.error_of(core.Typed_Refusal{kind = .Bad_Option})
 	}
@@ -119,7 +121,9 @@ check_reading :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink, runner: ^core.Run
 		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
 	}
 	if parallel(b, runner) {
+		from := len(sink.entries) if sink != nil else 0
 		if err, done := check_elements(b, src, sink, runner); done {
+			typed.order_entries(sink, from)
 			return err
 		}
 	}

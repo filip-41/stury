@@ -30,14 +30,11 @@ framing_of :: proc "contextless" ($S: Spec) -> ^records.Framing_Services {
 	return &f
 }
 
-// The reads of a record's row as spec `S`: its typed read, its document and its cells.
+// The reads of a record's row as spec `S`: its typed read, its document and its cells. Its check read is the plan's.
 record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
 	@(static, rodata) d := records.Record_Docs {
 		read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
 			return read_row_spec(it, target, T, plan, read, allocator, err, S, typed.Reader)
-		},
-		check_read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
-			return read_row_spec(it, target, T, plan, read, allocator, err, S, typed.Check)
 		},
 		build = proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 			return build_row_spec(it, rec, allocator, S)
@@ -49,6 +46,18 @@ record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
 		cells = proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto: int) -> ([]write.Scalar, bool) {
 			return cells_texts_spec(it, rec, buf, upto, S)
 		},
+	}
+	return &d
+}
+
+// The check read of a record as spec `S`, which a plan made with `checks(S)` holds in `typed.Plan.docs`.
+@(private)
+check_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
+	@(static, rodata) d := records.Record_Docs {
+		check_read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
+			return read_row_spec(it, target, T, plan, read, allocator, err, S, typed.Check)
+		},
+		framing = proc "contextless" () -> ^records.Framing_Services {return framing_of(S)},
 	}
 	return &d
 }

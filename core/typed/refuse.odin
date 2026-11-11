@@ -406,3 +406,39 @@ step_at :: proc(h: ^Reader, f: ^Frame, at: core.Hook_Regs) -> (s: core.Step, ok:
 	}
 	return
 }
+
+// Puts the entries of `c` from `from` on in the order a load, a check and a `validate` share: an entry before those of the
+// same record that lie inside its value, and at one path a validator's `.Custom` after the rules' failures. Every other
+// pair keeps the order it was reported in, which is the text's for a load or a check and the order a write of the value
+// spells for `validate`, so a validate of a value and a load of its written text list the same entries alike. An entry of
+// the fault that ended a walk stays where it is.
+order_entries :: proc(c: ^Sink, from: int) {
+	if c == nil {
+		return
+	}
+	entries := c.entries[:]
+	for i in from + 1 ..< len(entries) {
+		e := entries[i]
+		k := i
+		for k > from && e.kind != .Walk && entries[k - 1].kind != .Walk && goes_after(entries[k - 1], e) {
+			k -= 1
+		}
+		copy(entries[k + 1:i + 1], entries[k:i])
+		entries[k] = e
+	}
+}
+
+// Whether entry `a`, reported before `b`, is listed after it: it lies inside `b`'s value, or it is a validator's at
+// `b`'s path and `b` is not.
+@(private)
+goes_after :: proc(a, b: core.Error_Entry) -> bool {
+	if a.record != b.record || len(a.path) < len(b.path) {
+		return false
+	}
+	for s, i in b.path {
+		if !same_step(a.path[i], s) {
+			return false
+		}
+	}
+	return len(a.path) > len(b.path) || a.kind == .Custom && b.kind != .Custom
+}

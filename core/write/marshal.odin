@@ -298,7 +298,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 				}
 				if r.kind == .Never {
 					when V {
-						if sm := w.meta[r.meta].model; sm != nil && w.visitor.close != nil && !visit_close(w, cur, top, sm) {
+						if w.meta[r.meta].model != nil && w.visitor.close != nil && !visit_close(w, cur, top, r) {
 							return .None
 						}
 					}
@@ -462,7 +462,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 		k := core.Typed_Error_Kind.None
 		value: for {
 			when V {
-				if w.meta[vf.meta].rule_set > 0 && !visit_record(w, cur, top, vf, va, .None) {
+				if (w.meta[vf.meta].rule_set > 0 || w.meta[vf.meta].judged) && !visit_record(w, cur, top, vf, va, .None) {
 					return .None
 				}
 			}

@@ -111,7 +111,7 @@ elements_destroy :: proc(e: ^Elements, allocator: runtime.Allocator) {
 @(private)
 check_elements :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink, runner: ^core.Runner) -> (err: core.Error, done: bool) {
 	e := b.elements
-	whole, at, cut := records.entries_of(src, b.plan.as)
+	whole, at, cut := records.entries_of(src, b.plan.as, &b.plan)
 	if !cut || at != 0 {
 		return
 	}

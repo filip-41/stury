@@ -43,8 +43,8 @@ Read_Options :: struct {
 	outer:       ^Outer,
 	// How a `Check` meets a key that repeats in its object.
 	repeats:     Repeats,
-	// A model's patch: the structs `merge` descends into, the root and its struct members whose structs hold a
-	// `Fields_Set`, miss no member and take no default. Every other struct reads as a full load reads it.
+	// A model's patch: the structs `model.patch` merges member by member, the root and its struct members whose
+	// structs hold a `Fields_Set`, miss no member and take no default. Every other struct reads as a full load reads it.
 	partial:     bool,
 	// What a `Check` keeps for the next value it checks, nil for nothing.
 	checker:     ^Checker,
@@ -217,16 +217,24 @@ read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> 
 		// With no sink the first refusal ends the read, before a later repeat can take it back.
 		r.first = {kind = .Duplicate_Key, at = r.first.at}
 	}
-	// A read ended early gives each open list to its destination.
+	if r.first.kind != .None {
+		publish_open(r, regs, 1)
+	}
+	return r.first
+}
+
+// Gives each list open in the frames from `r.sp` less one down to `floor`, innermost first, to its destination, so what a
+// read ended early allocated is reachable from the target. `regs` are the registers of the innermost frame's next value.
+@(private)
+publish_open :: proc(r: ^Reader, regs: core.Hook_Regs, floor: int) {
 	top, child := regs, false
-	for i := r.sp - 1; r.first.kind != .None && i >= 1; i -= 1 {
+	for i := r.sp - 1; i >= floor; i -= 1 {
 		f := &r.frames[i]
 		if owner := frame_owner(f); owner.kind == .Slice || owner.kind == .Dynamic || owner.kind == .Fixed_List {
 			publish_list(r, f, owner, top.a, top.c, child)
 		}
 		top, child = {f.a, f.b, f.c}, true
 	}
-	return r.first
 }
 
 field_at :: #force_inline proc "contextless" (b: u64) -> ^Field {
@@ -259,8 +267,10 @@ on_token_check :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_R
 @(cold, private)
 refuse_missing_settled :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame, owner: ^Field, back, regs: core.Hook_Regs, t: core.Token, at: i32) -> (core.Hook_Regs, core.Action) {
 	out, action := refuse_missing(h, f, owner, back, regs, t, at)
-	if sm := h.plan.meta[owner.meta].model; action != .Stop && sm != nil && sm.settle != nil {
-		sm.settle(h, sm, f, owner, regs, t.lo)
+	when H == Check {
+		if sm := h.plan.meta[owner.meta].model; action != .Stop && sm != nil && sm.settle != nil {
+			sm.settle(h, sm, f, owner, regs, t.lo)
+		}
 	}
 	return out, action
 }
@@ -268,12 +278,15 @@ refuse_missing_settled :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame
 // Settles the struct that closes at `t` by its model: a validator's failure has been recorded and skips the struct.
 @(cold, private)
 settle_close :: #force_no_inline proc "contextless" (h: ^$H, sm: ^Struct_Model, f: ^Frame, owner: ^Field, back, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	kind, reported := sm.settle(h, sm, f, owner, regs, t.lo)
-	switch {
-	case kind != .None:
-		return refuse(h, back, {kind = kind, at = t.lo}, t.lo + u64(t.n))
-	case reported:
-		return back, .Stop if h.sink == nil else .Skip
+	// Only a `Check` reads a load's plan, whose structs settle.
+	when H == Check {
+		kind, reported := sm.settle(h, sm, f, owner, regs, t.lo)
+		switch {
+		case kind != .None:
+			return refuse(h, back, {kind = kind, at = t.lo}, t.lo + u64(t.n))
+		case reported:
+			return back, .Stop if h.sink == nil else .Skip
+		}
 	}
 	return back, .Next
 }
@@ -517,7 +530,16 @@ close_container :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame, own: 
 		if owner.kind == .Checked {
 			return check_close(h, f, owner, regs, t)
 		}
+		if n := len(h.opens); n > 0 && h.opens[n - 1].sp == h.sp {
+			return judged_close(h, f, own, owner, regs, t)
+		}
 	}
+	return #force_inline close_read(h, f, own, owner, regs, t)
+}
+
+// The close of the container `f` holds, which record `owner` reads and `own` returns to.
+@(private)
+close_read :: proc "contextless" (h: ^$H, f: ^Frame, own, owner: ^Field, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
 	back := core.Hook_Regs{f.a, f.b, f.c + u64(own.stride)}
 	when H == Check {
 		if h.plan.meta[owner.meta].rule_set > 0 && count_rules(h, f, owner, regs, t) == .Stop {

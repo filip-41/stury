@@ -49,7 +49,7 @@ handle_services :: proc "contextless" ($S: Spec) -> core.Services {
 		write    = write_text,
 		edit     = edit_of(S),
 		plans    = rawptr(plan_as),
-		reads    = reads_of(S),
+		reads    = checks_of(S),
 		tokens   = &TOKENS,
 		records  = framing_of(S),
 		docs     = record_docs(S),

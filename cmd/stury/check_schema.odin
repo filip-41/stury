@@ -99,7 +99,7 @@ schema_option :: proc(s: ^Schema_Options, args: []string, i: int) {
 schema_open :: proc(s: Schema_Options, src: Source, option := "--schema") -> ^Schema_Check {
 	sc := schema_read(s, option)
 	err: core.Error
-	if sc.bound, err = schema.bind(&sc.compiled, src.as, checks_of(src.as, src.spec == nil)); err != nil {
+	if sc.bound, err = schema.bind(&sc.compiled, {checks_of(src.as, src.spec == nil), src.as}); err != nil {
 		usage_error("%s %s: %s", option, s.file, edit_error_text(sc.text, err))
 	}
 	return sc
@@ -119,9 +119,9 @@ checks_of :: proc(as: core.As, cells: bool) -> ^typed.Format_Reads {
 		return nil
 	}
 	switch dsv.Spec(as.spec) {
-	case .Csv:   return dsv.checks(.Csv)
-	case .Tsv:   return dsv.checks(.Tsv)
-	case .Plain: return dsv.checks(.Plain)
+	case .Csv:   return dsv.checks(.Csv).reads
+	case .Tsv:   return dsv.checks(.Tsv).reads
+	case .Plain: return dsv.checks(.Plain).reads
 	}
 	return nil
 }

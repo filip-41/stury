@@ -410,9 +410,10 @@ build_whole :: proc(src: []u8, as: core.As, dups := core.Duplicates.Last, alloca
 // Whether the records at `at` are cut exactly, the first ends in the first quarter of the bytes past `at`, and it is
 // an array's entry, not an object's member, which no piece of a whole text's build joins. A text whose bulk is no
 // array, or is the array's first entry, is built on one thread without a run of pieces, or a walk of that entry,
-// before it. A caller that cuts a whole text's spine array into pieces asks it first.
-entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64) -> bool {
-	it := open(src, as, framing, at, runtime.heap_allocator())
+// before it. A caller that cuts a whole text's spine array into pieces asks it first. The records are framed by
+// `services`, the handle's when nil.
+entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64, services: ^Framing_Services = nil) -> bool {
+	it := open_with(src, as, services if services != nil else services_of(as), nil, framing, at, runtime.heap_allocator())
 	defer close(&it)
 	if it.services == nil || it.services.exact == nil {
 		return false

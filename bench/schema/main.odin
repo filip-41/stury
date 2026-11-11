@@ -75,7 +75,7 @@ main :: proc() {
 		fmt.eprintln(os.args[2], cerr)
 		os.exit(1)
 	}
-	if bound, cerr = schema.bind(&compiled, json.as(.Json)); cerr != nil {
+	if bound, cerr = schema.bind(&compiled, json.checks(.Json)); cerr != nil {
 		fmt.eprintln(os.args[2], cerr)
 		os.exit(3)
 	}

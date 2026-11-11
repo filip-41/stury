@@ -21,7 +21,7 @@ odin_of :: proc(t: ^testing.T, text: string, p := "p", format_assert := false) -
 		return "", cerr
 	}
 	defer schema.destroy(&c)
-	return schema.write_odin(c.description, p, format_assert, context.temp_allocator)
+	return schema.write_odin(c.description, p, json.as(.Json), format_assert, context.temp_allocator)
 }
 
 // The keyword `write_odin`'s refusal of `text` names, and the path it stands at.
@@ -46,11 +46,12 @@ odin_struct_members :: proc(t: ^testing.T) {
 		"package people\n",
 		"Person :: struct {\n",
 		"\tfull_name: string `json:\"full name\" model:\"len>=1\"`,\n",
-		"\tage: i64 `model:\"optional,>=0,<=150\"`,\n",
-		"\ttags: []Person_Tags_Item `model:\"optional\"`,\n",
-		"\tboss: ^Person `model:\"optional,not_null\"`,\n",
-		"\t// format: date-time\n\tborn: string `model:\"optional\"`,\n",
-		"\tnote: Maybe(string) `model:\"optional\"`,\n",
+		"\tage: Maybe(i64) `json:\",omitempty\" model:\"optional,not_null,>=0,<=150\"`,\n",
+		"\ttags: Maybe([]Person_Tags_Item) `json:\",omitempty\" model:\"optional,not_null\"`,\n",
+		"\tboss: ^Person `json:\",omitempty\" model:\"optional,not_null\"`,\n",
+		"\t// format: date-time\n\tborn: Maybe(string) `json:\",omitempty\" model:\"optional,not_null\"`,\n",
+		"\tnote: Maybe(string) `json:\",omitunset\" model:\"optional\"`,\n",
+		"\tset: model.Fields_Set,\n",
 		"Person_Tags_Item :: distinct string\n",
 		"\tmodel.register_type(reg, {Person_Tags_Item, \"len<=8\"}) or_return\n",
 		"\tmodel.register_extra(reg, Person, .Forbid) or_return\n",
@@ -70,8 +71,8 @@ odin_enums_unions_and_defs :: proc(t: ^testing.T) {
 		"Root_Kind :: enum {\n\tRead_Only,\n\tAdmin,\n\tEmpty,\n}\n",
 		"Root_Level :: enum i64 {\n\tV1 = 1,\n\tVM2 = -2,\n}\n",
 		"Root_Id :: union #no_nil {uuid.Identifier, i64}\n",
-		"Point :: struct {\n\tx: f64 `model:\"optional\"`,\n}\n",
-		"\tat: Point `model:\"optional\"`,\n",
+		"Point :: struct {\n\tx: Maybe(f64) `json:\",omitempty\" model:\"optional,not_null\"`,\n}\n",
+		"\tat: Maybe(Point) `json:\",omitempty\" model:\"optional,not_null\"`,\n",
 		"[]model.Enum_Rename{{\"Read_Only\", \"read-only\"}, {\"Admin\", \"admin\"}, {\"Empty\", \"\"}}",
 		"model.register_enum(reg, {Root_Level, true, nil})",
 	}) {
@@ -85,11 +86,11 @@ odin_names_are_unique_identifiers :: proc(t: ^testing.T) {
 		"proc": {"type": "string"}, "1st": {"type": "string"}, "-": {"type": "string"}}}`)
 	testing.expectf(t, err == nil, "%v", err)
 	for want in ([]string{
-		"\ta_b: string `json:\"a-b\" model:\"optional\"`,\n",
-		"\ta_b_2: string `json:\"a_b\" model:\"optional\"`,\n",
-		"\tproc_: string `json:\"proc\" model:\"optional\"`,\n",
-		"\t_1st: string `json:\"1st\" model:\"optional\"`,\n",
-		"\tmember: string `json:\"\\-\" model:\"optional\"`,\n",
+		"\ta_b: Maybe(string) `json:\"a-b,omitempty\" model:\"optional,not_null\"`,\n",
+		"\ta_b_2: Maybe(string) `json:\"a_b,omitempty\" model:\"optional,not_null\"`,\n",
+		"\tproc_: Maybe(string) `json:\"proc,omitempty\" model:\"optional,not_null\"`,\n",
+		"\t_1st: Maybe(string) `json:\"1st,omitempty\" model:\"optional,not_null\"`,\n",
+		"\tmember: Maybe(string) `json:\"\\-,omitempty\" model:\"optional,not_null\"`,\n",
 	}) {
 		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
 	}
@@ -103,9 +104,11 @@ odin_refusals_name_the_keyword :: proc(t: ^testing.T) {
 	}
 	for c in ([]Case{
 		{`{"allOf": [{"type": "integer"}, {"type": "string"}]}`, "false", 0},
-		{`{"type": "object", "properties": {"a": {"type": "array", "items": {"type": ["string", "null"], "if": {"minLength": 2}}}}}`, "if", 2},
+		{`{"type": "object", "properties": {"a": {"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "null"}], "if": {"type": "null"}, "then": {"type": "string"}}}}}`, "if", 2},
 		{`{"oneOf": [{"type": ["integer", "null"]}, {"type": "null"}]}`, "oneOf", 0},
-		{`{"type": ["integer", "null"], "not": {"minimum": 3}}`, "not", 0},
+		{`{"oneOf": [{"type": "integer"}, {"type": "integer"}, {"type": "string"}]}`, "oneOf", 0},
+		{`{"oneOf": [{"type": "integer"}, {"type": "integer"}]}`, "oneOf", 0},
+		{`{"oneOf": [{"type": "integer"}, {"type": "null"}], "not": {"const": null}}`, "not", 0},
 		{`{"type": "object", "patternProperties": {"^x": {}}, "additionalProperties": {"type": "string"}}`, "patternProperties", 0},
 		{`{"type": "array", "items": {"type": "null"}}`, "type", 1},
 		{`{"enum": [9007199254740993]}`, "enum", 0},
@@ -113,7 +116,7 @@ odin_refusals_name_the_keyword :: proc(t: ^testing.T) {
 		{`{"type": "object", "properties": {"": {}}}`, "properties", 0},
 		{`{"type": "object", "required": ["z"], "additionalProperties": false}`, "required", 0},
 		{`{"type": "object", "properties": {"a": {}}, "additionalProperties": {"type": "string"}, "allOf": [{"properties": {"b": {}}}]}`, "additionalProperties", 0},
-		{`{"$defs": {"a": {"type": "object", "properties": {"x": {"type": ["number", "null"], "not": {"minimum": 1}}}}}, "type": "object", "properties": {"p": {"$ref": "#/$defs/a"}}}`, "not", 2},
+		{`{"$defs": {"a": {"type": "object", "properties": {"x": {"anyOf": [{"type": "number"}, {"type": "null"}], "not": {"const": null}}}}}, "type": "object", "properties": {"p": {"$ref": "#/$defs/a"}}}`, "not", 2},
 		{`{"$defs": {"t": {"type": "array", "items": {"$ref": "#/$defs/t"}}}, "$ref": "#/$defs/t"}`, "$ref", 1},
 	}) {
 		keyword, steps := refused_keyword(t, c.text)
@@ -143,12 +146,12 @@ odin_null_tuples_merges_and_other_members :: proc(t: ^testing.T) {
 		"required": ["b"]}`)
 	testing.expectf(t, err == nil, "%v", err)
 	for want in ([]string{
-		"\textra: i64 `model:\"optional\"`,\n",
-		"\tn: Null `model:\"optional\"`,\n",
-		"\tpair: [2]f64 `model:\"optional\"`,\n",
-		"\te: Root_E `model:\"optional\"`,\n",
+		"\textra: Maybe(i64) `json:\",omitempty\" model:\"optional,not_null\"`,\n",
+		"\tn: Null `json:\",omitunset\" model:\"optional\"`,\n",
+		"\tpair: Maybe([2]f64) `json:\",omitempty\" model:\"optional,not_null\"`,\n",
+		"\te: Root_E `json:\",omitunset\" model:\"optional\"`,\n",
 		"\tb: string,\n",
-		"\textra_2: map[string]string `model:\"extra\"`,\n",
+		"\textra_2: map[string]string `json:\",unknown\"`,\n",
 		"Null :: union {}\n",
 		"Root_E :: union {Root_E_String, Root_E_Integer}\n",
 	}) {
@@ -156,7 +159,7 @@ odin_null_tuples_merges_and_other_members :: proc(t: ^testing.T) {
 	}
 	source, err = odin_of(t, `{"type": "object", "properties": {"a": {"type": "integer"}}, "allOf": [{"properties": {"b": {"type": "boolean"}}, "required": ["b"]}]}`)
 	testing.expectf(t, err == nil, "%v", err)
-	testing.expectf(t, strings.contains(source, "\ta: i64 `model:\"optional\"`,\n\tb: bool,\n"), "%s", source)
+	testing.expectf(t, strings.contains(source, "\ta: Maybe(i64) `json:\",omitempty\" model:\"optional,not_null\"`,\n\tb: bool,\n"), "%s", source)
 	source, err = odin_of(t, `{"$defs": {"Root": {"type": "object", "properties": {"x": {"type": "integer"}}}}, "type": ["array", "null"],
 		"items": {"$ref": "#/$defs/Root"}}`)
 	testing.expectf(t, err == nil, "%v", err)
@@ -164,7 +167,7 @@ odin_null_tuples_merges_and_other_members :: proc(t: ^testing.T) {
 }
 
 @(test)
-odin_applicators_are_registered_on_a_named_type :: proc(t: ^testing.T) {
+odin_applicators_are_registered_as_fragments_on_a_named_type :: proc(t: ^testing.T) {
 	source, err := odin_of(t, `{"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}, "uniqueItems": true,
 		"contains": {"const": "a"}, "maxContains": 2}, "n": {"oneOf": [{"type": "integer"}, {"type": "number", "minimum": 2}]}},
 		"patternProperties": {"^x-": {"type": "integer"}}, "propertyNames": {"maxLength": 4}, "dependentRequired": {"a": ["b"]},
@@ -172,15 +175,41 @@ odin_applicators_are_registered_on_a_named_type :: proc(t: ^testing.T) {
 	testing.expectf(t, err == nil, "%v", err)
 	for want in ([]string{
 		"Root :: struct {\n",
-		"\ttags: Root_Tags `model:\"optional,unique\"`,\n",
+		"\ttags: Maybe(Root_Tags) `json:\",omitempty\" model:\"optional,not_null,unique\"`,\n",
+		"\textra: map[string]core.Value `json:\",unknown\"`,\n",
 		"Root_Tags :: distinct []string\n",
-		"model.register_applies(reg, {Root_Tags, model.Contains{of = typeid_of(Root_Tags_Contains), max = 2}}) or_return",
+		"register :: proc(reg: ^model.Registry) -> core.Error {\n",
+		"\tregister_fragment(reg, Root_Tags, `{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"contains\":{\"const\":\"a\"},\"maxContains\":2}`) or_return\n",
 		"model.register_union(reg, {Root_N, .One_Match, \"\"}) or_return",
-		"model.register_applies(reg, {Root, model.Conditional{test = typeid_of(Root_If), then = typeid_of(Root_Then), other = nil}}) or_return",
-		"model.register_applies(reg, {Root, model.Names{of = typeid_of(Root_Name)}}) or_return",
-		"model.register_applies(reg, {Root, model.Pattern{\"^x-\", typeid_of(i64)}}) or_return",
-		"model.register_applies(reg, {Root, model.Dependent{name = \"a\", requires = {\"b\"}}}) or_return",
+		`"if":{"required":["a"]},"then":{"required":["c"]},"patternProperties":{"^x-":{"type":"integer"}},"propertyNames":{"maxLength":4},"dependentRequired":{"a":["b"]}`,
+		"register_fragment :: proc(reg: ^model.Registry, T: typeid, text: string) -> core.Error {\n",
+		"\tmodel.register_schema(reg, T, s.compiled.description) or_return\n",
 	}) {
 		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
+	}
+}
+
+@(test)
+odin_spells_a_judged_value_as_it_reads :: proc(t: ^testing.T) {
+	Case :: struct {
+		text:  string,
+		wants: []string,
+	}
+	for c in ([]Case{
+		{`{"type": "array", "uniqueItems": true, "items": {"type": "object", "properties": {"a": {"type": "integer"}}}}`,
+			{"\ta: Maybe(i64) `json:\",omitempty\" model:\"optional,not_null\"`,\n", "\textra: map[string]core.Value `json:\",unknown\"`,\n"}},
+		{`{"type": "object", "properties": {"a": {"type": "integer"}}, "patternProperties": {"^a": {"minimum": 5}}}`,
+			{"\ta: Maybe(i64) `json:\",omitempty\" model:\"optional,not_null\"`,\n", `"patternProperties":{"^a":{"minimum":5}}`}},
+		{`{"type": ["integer", "null"], "not": {"const": 3}}`, {"Root :: Maybe(Root_Value)\n", "Root_Value :: distinct i64\n", `register_fragment(reg, Root_Value, `}},
+		{`{"type": ["integer", "null"], "not": {"enum": [3, null]}}`, {"Root :: distinct i64\n"}},
+		{`{"type": "object", "properties": {"a.b": {"type": "string"}}, "patternProperties": {"^x-": {"type": "integer"}}, "additionalProperties": false}`,
+			{"\textra: map[string]i64 `json:\",unknown\"`,\n", `"propertyNames":{"type":"string","pattern":"^(?:a\\.b)$|(?:^x-)"}`}},
+		{`{"anyOf": [{"type": "integer"}, {"type": "integer"}]}`, {"Root :: i64\n"}},
+	}) {
+		source, err := odin_of(t, c.text)
+		testing.expectf(t, err == nil, "%s: %v", c.text, err)
+		for want in c.wants {
+			testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
+		}
 	}
 }

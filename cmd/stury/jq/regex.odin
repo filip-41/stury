@@ -105,7 +105,7 @@ cached_compile :: proc(pattern: string, opts: regex.Flags) -> (regex.Regex, stri
 	caller := context.allocator
 	context.allocator = virtual.arena_allocator(&c.arena)
 	mark := virtual.arena_temp_begin(&c.arena)
-	re, err := regex.compile(pattern, opts)
+	re, err := regex.compile(pattern, opts, spans = true)
 	if err != "" {
 		err = strings.clone(err, caller)
 		virtual.arena_temp_end(mark)

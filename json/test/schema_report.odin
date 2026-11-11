@@ -39,7 +39,7 @@ bind_text :: proc(t: ^testing.T, s: ^Bound_Schema, text: string, draft := schema
 	if !testing.expectf(t, err == nil, "%s: %v", text, err) {
 		return false
 	}
-	s.b, err = schema.bind(&s.c, json.as(.Json))
+	s.b, err = schema.bind(&s.c, json.checks(.Json))
 	return testing.expectf(t, err == nil, "%s: %v", text, err)
 }
 
@@ -147,7 +147,7 @@ schema_output_tests :: proc(t: ^testing.T) {
 				b: schema.Bound
 				berr := cerr
 				if cerr == nil {
-					b, berr = schema.bind(&c, json.as(.Json))
+					b, berr = schema.bind(&c, json.checks(.Json))
 				}
 				if berr != nil {
 					refused += 1
@@ -301,7 +301,7 @@ schema_check_pieces_equal_one_pass :: proc(t: ^testing.T) {
 			// The same entries in an array that an object holds, which is no root array.
 			for src in ([]string{strings.to_string(b), fmt.tprintf(`{{"a": %s}}`, strings.to_string(b))}) {
 				for cut in 0 ..= len(src) {
-					_, _, pooled := records.entries_of(transmute([]u8)src[:cut], s.b.plan.as)
+					_, _, pooled := records.entries_of(transmute([]u8)src[:cut], s.b.plan.as, &s.b.plan)
 					engaged += int(pooled)
 					if !expect_pieces_law(t, pools[:], &s.b, src[:cut]) {
 						return

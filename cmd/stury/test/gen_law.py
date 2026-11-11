@@ -94,7 +94,6 @@ def samples(stury, schema, path):
 
 DRIVER = """package main
 
-import "base:runtime"
 import "core:fmt"
 import "core:os"
 import "core:strings"
@@ -104,7 +103,9 @@ import schema "stury:core/schema"
 {imports}
 
 // Writes the Load schema of the model of `T` to `out` and, for each line of `values`, whether it loads to `verdicts`.
-emit :: proc(register: proc(^model.Registry) -> runtime.Allocator_Error, $T: typeid, out, values, verdicts: string) {{
+// `register` is a generated package's, which answers a `core.Error` where it compiles a fragment and an allocator error
+// where it does not.
+emit :: proc(register: $R, $T: typeid, out, values, verdicts: string) {{
 	defer free_all(context.temp_allocator)
 	reg: model.Registry
 	defer model.registry_destroy(&reg)
@@ -112,7 +113,7 @@ emit :: proc(register: proc(^model.Registry) -> runtime.Allocator_Error, $T: typ
 		fmt.printfln("%s: register: %v", out, err)
 		return
 	}}
-	m, err := model.compile(&reg, T, json.reads(.Json), context.temp_allocator)
+	m, err := model.compile(&reg, T, json.checks(.Json), context.temp_allocator)
 	if err != nil {{
 		fmt.printfln("%s: compile: %v", out, err)
 		return

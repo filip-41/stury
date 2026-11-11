@@ -66,7 +66,7 @@ main :: proc() {
 	}
 	model.register(&reg, Address, model.Extra.Forbid)
 	model.register(&reg, Profile, "level", 7)
-	m, err := model.compile(&reg, Profile, json.reads(.Json))
+	m, err := model.compile(&reg, Profile, json.checks(.Json))
 	if err != nil {
 		fmt.eprintln("compile:", err)
 		os.exit(2)

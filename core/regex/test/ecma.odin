@@ -26,7 +26,7 @@ search :: proc(pattern, text: string, linear := true, flags := regex.Flags{ecma 
 		return
 	}
 	defer virtual.arena_destroy(&arena)
-	re, err := regex.compile(pattern, flags, virtual.arena_allocator(&arena), automaton = linear)
+	re, err := regex.compile(pattern, flags, virtual.arena_allocator(&arena), automaton = linear, spans = linear)
 	if err != "" {
 		f.err = strings.clone(err, context.temp_allocator)
 		return
@@ -284,7 +284,7 @@ test_ecma_visited_set_keeps_the_matches :: proc(t: ^testing.T) {
 		}
 		pattern := strings.to_string(b)
 		with, without := search(pattern, string(text)), search(pattern, string(text), linear = false)
-		with.resumes, with.automaton, without.resumes = 0, false, 0
+		with.resumes, with.automaton, with.ends, without.resumes = 0, false, -1, 0
 		testing.expectf(t, with == without, "%q on %q: %v with the set, %v without", pattern, string(text), with, without)
 	}
 }
@@ -444,12 +444,13 @@ generate_plain :: proc(b: ^strings.Builder, state: ^u64, depth: int) {
 	}
 }
 
-// The automaton finds a match exactly where the visited set's search does, on generated patterns and on texts of up to
-// ten characters, some of them not valid UTF-8.
+// The automaton finds a match exactly where the visited set's search does, and the automata that find where it ends and
+// starts find the match and groups a backtracker without them does, on generated patterns and on texts of up to ten
+// characters, some of them not valid UTF-8.
 @(test)
 test_ecma_automaton_keeps_the_answers :: proc(t: ^testing.T) {
 	state := u64(20261110)
-	built := 0
+	built, first := 0, 0
 	pieces := [?]string{"a", "a", "b", "é", "😀", "A", "1", " ", "\n", "-", "\xff", "\x80"}
 	for i in 0 ..< 20000 {
 		b := strings.builder_make(context.temp_allocator)
@@ -471,10 +472,104 @@ test_ecma_automaton_keeps_the_answers :: proc(t: ^testing.T) {
 		pattern := strings.to_string(b)
 		whether := search(pattern, strings.to_string(text), whether = true)
 		with := search(pattern, strings.to_string(text))
+		plain := search(pattern, strings.to_string(text), linear = false)
 		built += int(whether.automaton)
+		first += int(with.ends >= 0)
 		testing.expectf(t, whether.err == with.err && (whether.lo >= 0) == (with.lo >= 0), "%q on %q: %v whether, %v with the set", pattern, strings.to_string(text), whether, with)
+		with.resumes, with.ends, with.automaton, plain.resumes = 0, -1, false, 0
+		testing.expectf(t, plain.err != "" || with == plain, "%q on %q: %v with the automata, %v backtracking", pattern, strings.to_string(text), with, plain)
 	}
-	testing.expectf(t, built > 8000, "%d of 20000 patterns have the automaton", built)
+	testing.expectf(t, built > 8000 && first > 3000, "%d of 20000 patterns have the automaton, %d searches found a match's end with it", built, first)
+}
+
+// A counted repeat too long to write out runs as a counter loop and finds the match and groups the same repeat written
+// out finds. A body grows past the bound by alternatives of characters no text holds, which change no match, and a
+// repeat around a counter loop grows the same way. The counter loop's search keeps the answers without the visited set
+// too.
+@(test)
+test_ecma_counter_loops_keep_the_answers :: proc(t: ^testing.T) {
+	fill := strings.builder_make(context.temp_allocator)
+	for k in 0 ..< 700 {
+		strings.write_string(&fill, "|")
+		strings.write_rune(&fill, 0xE000 + rune(k))
+	}
+	counts := [?]string{"{4}", "{1,4}", "{0,4}", "{0,4}?", "{4,}", "{4,}?", "{4}?", "{2,5}", "{3,6}?"}
+	state := u64(20261111)
+	next :: proc(state: ^u64, n: int) -> int {
+		state^ = state^ * 6364136223846793005 + 1442695040888963407
+		return int(state^ >> 33) % n
+	}
+	for i in 0 ..< 2000 {
+		g := strings.builder_make(context.temp_allocator)
+		if i % 2 == 0 {
+			generate_plain(&g, &state, 2)
+		} else {
+			generate(&g, &state, 1)
+		}
+		inner, outer := counts[next(&state, len(counts))], counts[next(&state, len(counts))]
+		written, looped: string
+		if i % 3 == 0 {
+			written = strings.concatenate({"(?:(?:", strings.to_string(g), ")", inner, ")", outer}, context.temp_allocator)
+			looped = strings.concatenate({"(?:(?:", strings.to_string(g), strings.to_string(fill), ")", inner, strings.to_string(fill), ")", outer}, context.temp_allocator)
+		} else {
+			written = strings.concatenate({"(?:", strings.to_string(g), ")", inner}, context.temp_allocator)
+			looped = strings.concatenate({"(?:", strings.to_string(g), strings.to_string(fill), ")", inner}, context.temp_allocator)
+		}
+		text := make([]byte, next(&state, 11), context.temp_allocator)
+		letters := "aaabbc"
+		for &c in text {
+			c = letters[next(&state, 6)]
+		}
+		want, got := search(written, string(text)), search(looped, string(text))
+		want.resumes, want.automaton, want.ends, got.resumes = 0, false, -1, 0
+		testing.expectf(t, got == want, "%q%s on %q: %v as a counter loop, %v written out", strings.to_string(g), inner, string(text), got, want)
+		if i % 4 == 0 {
+			plain := search(looped, string(text), linear = false)
+			plain.resumes = 0
+			testing.expectf(t, plain.err != "" || plain == got, "%q%s on %q: %v without the visited set, %v with it", strings.to_string(g), inner, string(text), plain, got)
+		}
+	}
+}
+
+// Nested counted repeats compile to a program the size of their bodies, a count past what the text can hold costs
+// nothing, and a search whose visited set would pass the memory bound refuses before it takes any.
+@(test)
+test_ecma_nested_counts_are_bounded :: proc(t: ^testing.T) {
+	Case :: struct {
+		pattern, text: string,
+		found:         bool,
+		refused:       bool,
+	}
+	text := strings.concatenate({strings.repeat("ab", 2_000, context.temp_allocator), "c"}, context.temp_allocator)
+	cases := [?]Case {
+		{`^(?:(?:ab){1,100}){1,100}d`, text, false, false},
+		{`(?:(?:ab){1,100}){1,100}c`, text, true, false},
+		{`((((a|b){1,100}){1,100}){1,100}){1,100}c`, text, false, true},
+		{`((((a|b){1,100}){1,100}){1,100}){1,100}c`, "abc", true, false},
+		{`(?:ab){0,2000000000}c`, text, true, false},
+		{`((?:ab){0,2000000000}){0,2000000000}c`, "ababc", true, false},
+		{`^(?:(?:ab){2000,})c`, text, true, false},
+		{`^(?:(?:ab){2001,})c`, text, false, false},
+	}
+	for c in cases {
+		program: mem.Tracking_Allocator
+		arena: virtual.Arena
+		testing.expect(t, virtual.arena_init_growing(&arena) == nil)
+		defer virtual.arena_destroy(&arena)
+		mem.tracking_allocator_init(&program, virtual.arena_allocator(&arena))
+		defer mem.tracking_allocator_destroy(&program)
+		re, err := regex.compile(c.pattern, {ecma = true}, mem.tracking_allocator(&program))
+		testing.expectf(t, err == "" && program.peak_memory_allocated < 4 << 20, "%q: %s, %d bytes", c.pattern, err, program.peak_memory_allocated)
+		scratch: regex.Scratch
+		defer regex.scratch_destroy(&scratch)
+		caps: [2]int
+		found, search_err := regex.search(&re, c.text, 0, caps[:], &scratch)
+		if c.refused {
+			testing.expectf(t, search_err == "fail to memory allocation" && cap(scratch.seen) == 0, "%q: %v %q", c.pattern, found, search_err)
+		} else {
+			testing.expectf(t, search_err == "" && found == c.found, "%q: %v %q", c.pattern, found, search_err)
+		}
+	}
 }
 
 // The automaton of a pattern that begins with look-aheads after `^` finds a match exactly where a backtracker without

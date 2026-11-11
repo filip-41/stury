@@ -14,5 +14,5 @@ load_schema :: proc(text: []u8, refs := "", format_assert := false, allocator :=
 
 // Binds `s` to texts of `spec`.
 bind_schema :: proc(s: ^Schema, spec: Spec, allocator := context.allocator) -> (Bound_Schema, core.Error) {
-	return schema.bind(&s.compiled, as(spec), nil, allocator)
+	return schema.bind(&s.compiled, {layout = as(spec)}, allocator)
 }

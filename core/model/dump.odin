@@ -9,8 +9,9 @@ import core ".."
 import typed "../typed"
 import write "../write"
 
-// What a dump leaves out besides the write_only members, which it never writes. `exclude_unset` leaves out a member
-// its struct's `Fields_Set` does not hold, in a struct that has one. `exclude_none` leaves out a member that holds null:
+// What a dump leaves out besides the write_only members, which it never writes. `exclude_unset` leaves out a member that
+// holds null and that its struct's `Fields_Set` does not hold, in a struct that has one, as the tag `omitunset` does, so
+// a value built in memory, whose set is empty, keeps every member it holds. `exclude_none` leaves out a member that holds null:
 // a nil `Maybe`, pointer, union, `any` or cstring, a required one too, so the text may not load back. `exclude_defaults`
 // leaves out a member that is not required and equals its default, its zero where it has none. `check` validates what
 // the dump writes first, and a value that fails is `.Check_Failed` and writes nothing.
@@ -26,17 +27,17 @@ Dump_Opts :: struct {
 // of their keys. Under `check`, every failure `validate` finds in what is written goes to `sink`, and the returned
 // `.Check_Failed` has the first's path and its code as `want.text`, the sink alone its message.
 dump :: proc(m: ^Model($T), v: ^T, opts := Dump_Opts{}, write := core.Write_Options{}, sink: ^typed.Sink = nil, allocator := context.allocator) -> ([]u8, core.Error) {
-	return dump_to(&m.plan, v, opts, write, {}, sink, allocator)
+	return dump_to(&m.plan, judging_in(m), v, opts, write, {}, sink, allocator)
 }
 
 // `dump` to `w`, as the text is made. On a refusal of the write `w` may hold a prefix of the text.
 dump_stream :: proc(w: io.Stream, m: ^Model($T), v: ^T, opts := Dump_Opts{}, write := core.Write_Options{}, sink: ^typed.Sink = nil) -> core.Error {
-	_, err := dump_to(&m.plan, v, opts, write, w, sink, context.allocator)
+	_, err := dump_to(&m.plan, judging_in(m), v, opts, write, w, sink, context.allocator)
 	return err
 }
 
 @(private)
-dump_to :: proc(plan: ^typed.Plan, v: rawptr, opts: Dump_Opts, write: core.Write_Options, stream: io.Stream, sink: ^typed.Sink, allocator: runtime.Allocator) -> ([]u8, core.Error) {
+dump_to :: proc(plan: ^typed.Plan, judging: ^Applied, v: rawptr, opts: Dump_Opts, write: core.Write_Options, stream: io.Stream, sink: ^typed.Sink, allocator: runtime.Allocator) -> ([]u8, core.Error) {
 	if plan.marshal == nil {
 		return nil, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
@@ -44,7 +45,7 @@ dump_to :: proc(plan: ^typed.Plan, v: rawptr, opts: Dump_Opts, write: core.Write
 	defer virtual.arena_destroy(&d.defaults)
 	omits := &d.omits if opts.exclude_unset || opts.exclude_none || opts.exclude_defaults else nil
 	if opts.check {
-		err := validate_value(plan, v, sink, omits)
+		err := validate_value(plan, v, sink, judging, omits)
 		if f, failed := err.(core.Typed_Error); failed {
 			f.want = {text = core.entry_code({kind = f.kind})}
 			f.kind = .Check_Failed
@@ -81,11 +82,8 @@ omitted :: proc(o: ^typed.Omits, plan: ^typed.Plan, r: ^typed.Field, at: uintptr
 	if d.opts.exclude_none && write.holds_null(m, r.kind, at) {
 		return true
 	}
-	if sm := m.owner; d.opts.exclude_unset && sm != nil && sm.fields_set != 0 && m.bit >= 0 {
-		set := (^Fields_Set)(at - uintptr(r.offset) + uintptr(sm.fields_set - 1))
-		if set.bits[m.bit / 64] >> uint(m.bit % 64) & 1 == 0 {
-			return true
-		}
+	if d.opts.exclude_unset && write.unset(m, r, at) {
+		return true
 	}
 	if !d.opts.exclude_defaults || !m.optional {
 		return false

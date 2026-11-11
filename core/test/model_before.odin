@@ -57,10 +57,10 @@ unchanged :: proc(v: core.Value, r: ^model.Report) -> core.Value {
 }
 
 @(private = "file")
-named :: proc(t: ^testing.T, reg: ^model.Registry, reads: ^typed.Format_Reads, $T: typeid, $E: typeid) -> model.Model(T) {
+named :: proc(t: ^testing.T, reg: ^model.Registry, checks: typed.Format_Checks, $T: typeid, $E: typeid) -> model.Model(T) {
 	_ = model.register(reg, E, "name", trimmed)
 	_ = model.register(reg, E, "age", counted)
-	m, err := model.compile(reg, T, reads)
+	m, err := model.compile(reg, T, checks)
 	walktest.expect_nil(t, err)
 	return m
 }
@@ -78,7 +78,7 @@ before_rewrites_a_json_member_before_it_is_read :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	_ = model.register(&reg, Person, "tags", unchanged)
-	m := named(t, &reg, json.reads(.Json), Person, Person)
+	m := named(t, &reg, json.checks(.Json), Person, Person)
 	v, found := loaded_person(&m, `{"name":"  ada ","age":"42","tags":["a","b"]}`)
 	testing.expect_value(t, found, "")
 	testing.expect_value(t, v.name, "ada")
@@ -94,6 +94,12 @@ before_rewrites_a_json_member_before_it_is_read :: proc(t: ^testing.T) {
 	// A container is judged under the member's path.
 	_, found = loaded_person(&m, `{"name":"ada","age":1,"tags":["a",1]}`)
 	testing.expect_value(t, found, "Wrong_Kind/tags/1;")
+	// A read stopped inside the replacement names the path under the member.
+	v = {}
+	failure := model.load(&m, transmute([]u8)string(`{"name":"ada","age":1,"tags":["a",1]}`), &v)
+	typed_error, is_typed := failure.(core.Typed_Error)
+	testing.expect(t, is_typed && typed_error.kind == .Wrong_Kind && len(typed_error.steps) == 2 && typed_error.at == 29)
+	testing.expect(t, len(v.tags) > 0)
 }
 
 // A member's built value, the replacement and its text are given back, so a load leaves only what it stores.
@@ -102,7 +108,7 @@ before_gives_back_what_it_builds :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	reg: model.Registry
 	_ = model.register(&reg, Person, "tags", unchanged)
-	m := named(t, &reg, json.reads(.Json), Person, Person)
+	m := named(t, &reg, json.checks(.Json), Person, Person)
 	defer model.registry_destroy(&reg)
 	defer model.model_destroy(&m)
 	track: mem.Tracking_Allocator
@@ -132,7 +138,7 @@ before_failures_are_the_members :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	_ = model.register(&reg, Person, "name", no_forbidden)
-	m, err := model.compile(&reg, Person, json.reads(.Json))
+	m, err := model.compile(&reg, Person, json.checks(.Json))
 	walktest.expect_nil(t, err)
 	_, found := loaded_person(&m, `{"name":"root","age":1}`)
 	testing.expect_value(t, found, "Custom(no root)/name;")
@@ -158,7 +164,7 @@ before_refusal_keeps_its_path_with_a_sink :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	_ = model.register(&reg, Short, "name", widened)
-	m, err := model.compile(&reg, Short, json.reads(.Json))
+	m, err := model.compile(&reg, Short, json.checks(.Json))
 	walktest.expect_nil(t, err)
 	v: Short
 	sink: typed.Sink
@@ -166,6 +172,10 @@ before_refusal_keeps_its_path_with_a_sink :: proc(t: ^testing.T) {
 	typed_error, is_typed := failure.(core.Typed_Error)
 	testing.expect(t, is_typed && typed_error.kind == .Too_Long)
 	testing.expect_value(t, len(typed_error.steps), 1)
+	// With no sink the refusal keeps its path and the member's bytes.
+	failure = model.load(&m, transmute([]u8)string(`{"name":"a"}`), &v)
+	typed_error, is_typed = failure.(core.Typed_Error)
+	testing.expect(t, is_typed && typed_error.kind == .Too_Long && len(typed_error.steps) == 1 && typed_error.at == 8)
 }
 
 @(private = "file")
@@ -180,7 +190,7 @@ before_failure_names_the_part_it_fails :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	_ = model.register(&reg, Person, "name", fails_a_part)
-	m, err := model.compile(&reg, Person, json.reads(.Json))
+	m, err := model.compile(&reg, Person, json.checks(.Json))
 	walktest.expect_nil(t, err)
 	_, found := loaded_person(&m, `{"name":"x","age":1}`)
 	testing.expect_value(t, found, "Custom(nope)/name/sub;")
@@ -192,7 +202,7 @@ validate_judges_the_value_a_before_would_have_made :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	_ = model.register(&reg, Person, "tags", unchanged)
-	m := named(t, &reg, json.reads(.Json), Person, Person)
+	m := named(t, &reg, json.checks(.Json), Person, Person)
 	// `validate` judges a value already read, so a `before` has nothing to rewrite there.
 	sink: typed.Sink
 	_ = model.validate(&m, &Person{name = "ada", age = 4}, &sink)

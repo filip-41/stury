@@ -11,18 +11,19 @@ SHARED_TAG_KEY :: "stury"
 
 @(private)
 Field_Tag :: struct {
-	name:     string,
-	named:    bool,
-	keep:     bool,
-	required: bool,
-	unknown:  bool,
-	omit:     bool,
+	name:       string,
+	named:      bool,
+	keep:       bool,
+	required:   bool,
+	unknown:    bool,
+	omit:       bool,
+	omit_unset: bool,
 }
 
 // Reads a field's tag: `name,flag,flag`, or `-` to leave the field out. An empty name keeps the field's own, renamed by
 // `Plan_Options.rename`. In the name a backslash makes the byte after it literal, so a comma or a backslash is written
-// `\,` or `\\`. The flags are `omitempty`, which only a writer reads, `required` and `unknown`. Any other is returned in
-// `bad_flag`.
+// `\,` or `\\`. The flags are `omitempty` and `omitunset`, which only a writer reads, `required` and `unknown`. Any other
+// is returned in `bad_flag`.
 @(private)
 field_tag :: proc(b: ^Builder, name, tag: string) -> (t: Field_Tag, bad_flag: string) {
 	value, found := reflect.struct_tag_lookup(reflect.Struct_Tag(tag), b.p.readers.tag_key)
@@ -61,6 +62,8 @@ field_tag :: proc(b: ^Builder, name, tag: string) -> (t: Field_Tag, bad_flag: st
 			case "":
 			case "omitempty":
 				t.omit = true
+			case "omitunset":
+				t.omit_unset = true
 			case "required":
 				t.required = true
 			case "unknown":

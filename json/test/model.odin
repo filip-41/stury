@@ -30,9 +30,9 @@ Account :: struct {
 	score:  f64 `model:"0..<1,optional"`,
 	step:   i32 `model:"multiple_of=5,optional"`,
 	tags:   []string `model:"len<=2,optional"`,
-	mail:   string `model:"format=email,alias=email"`,
+	mail:   string `json:"email" model:"format=email"`,
 	secret: string `model:"write_only"`,
-	note:   string `model:"-"`,
+	note:   string `json:"-"`,
 	rooms:  []Room `model:"optional"`,
 	temps:  map[string]Celsius `model:"optional"`,
 }
@@ -65,7 +65,7 @@ a_model_validates_its_rules_with_paths :: proc(t: ^testing.T) {
 	reg: model.Registry
 	defer model.destroy(&reg)
 	account_registry(&reg)
-	m, compiled := model.compile(&reg, Account, json.reads(.Json))
+	m, compiled := model.compile(&reg, Account, json.checks(.Json))
 	defer model.destroy(&m)
 	walktest.expect_nil(t, compiled)
 	good := Account{id = 1, name = "ada", age = 36, score = 0.5, step = 10, tags = {"a"}, mail = "ada@example.org", secret = "s", rooms = {{"lab", 20}}}
@@ -125,7 +125,7 @@ a_model_validates_what_a_write_refuses :: proc(t: ^testing.T) {
 		n: i32 `model:">=0"`,
 	}
 	reg: model.Registry
-	m, _ := model.compile(&reg, Picked, json.reads(.Json))
+	m, _ := model.compile(&reg, Picked, json.checks(.Json))
 	defer model.destroy(&m)
 	v := Picked{x = math.inf_f32(1), e = transmute(type_of(Picked{}.e))u8(7), n = -1}
 	sink: typed.Sink
@@ -183,16 +183,16 @@ a_rule_that_does_not_fit_refuses_the_model :: proc(t: ^testing.T) {
 	reg: model.Registry
 	defer model.destroy(&reg)
 	model.register(&reg, model.Type_Rule{Celsius, "optional"})
-	_, flagged := model.compile(&reg, Flag_On_Type, json.reads(.Json), context.temp_allocator)
+	_, flagged := model.compile(&reg, Flag_On_Type, json.checks(.Json), context.temp_allocator)
 	testing.expect_value(t, walktest.typed_kind(flagged), core.Typed_Error_Kind.Bad_Tag)
 	testing.expect_value(t, model.register(&reg, model.Field_Rule_Of{Room, "nope", ">=1"}), runtime.Allocator_Error.None)
-	_, unknown := model.compile(&reg, Room, json.reads(.Json), context.temp_allocator)
+	_, unknown := model.compile(&reg, Room, json.checks(.Json), context.temp_allocator)
 	f, _ := unknown.(core.Typed_Error)
 	testing.expectf(t, f.kind == .Bad_Tag && f.want.type == Room && steps_text(f.steps) == ".nope", "%v", unknown)
 	clash: model.Registry
 	defer model.destroy(&clash)
 	model.register(&clash, model.Field_Rule_Of{Account, "name", "pattern=^a"})
-	_, clashed := model.compile(&clash, Account, json.reads(.Json), context.temp_allocator)
+	_, clashed := model.compile(&clash, Account, json.checks(.Json), context.temp_allocator)
 	testing.expect_value(t, walktest.typed_kind(clashed), core.Typed_Error_Kind.Bad_Tag)
 }
 
@@ -226,7 +226,7 @@ Float_Step :: struct {
 @(private = "file")
 float_law :: proc(t: ^testing.T, v: $T, valid: bool, loc := #caller_location) {
 	reg: model.Registry
-	m, _ := model.compile(&reg, T, json.reads(.Json), context.temp_allocator)
+	m, _ := model.compile(&reg, T, json.checks(.Json), context.temp_allocator)
 	v := v
 	validated := model.validate(&m, &v) == nil
 	text, _ := write.marshal(v, &m.plan, allocator = context.temp_allocator)
@@ -234,7 +234,7 @@ float_law :: proc(t: ^testing.T, v: $T, valid: bool, loc := #caller_location) {
 	loaded := model.load(&m, text, &back, nil, {dups = .Refuse}, context.temp_allocator) == nil
 	d, _ := model.schema(&m, .Dump, context.temp_allocator)
 	c := schema.compile_description(&d, allocator = context.temp_allocator)
-	b, _ := schema.bind(&c, json.as(.Json), allocator = context.temp_allocator)
+	b, _ := schema.bind(&c, {layout = json.as(.Json)}, allocator = context.temp_allocator)
 	checked := schema.valid(&b, text)
 	testing.expectf(t, validated == valid && loaded == valid && checked == valid, "%v %s: validate %v, load %v, check %v", typeid_of(T), text, validated, loaded, checked, loc = loc)
 }
@@ -271,7 +271,7 @@ a_model_has_a_load_schema_and_a_dump_schema :: proc(t: ^testing.T) {
 		hint:     string `json:",omitempty" model:"optional"`,
 	}
 	reg: model.Registry
-	m, compiled := model.compile(&reg, Login, json.reads(.Json))
+	m, compiled := model.compile(&reg, Login, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	texts: [model.Direction]string
 	for direction in model.Direction {
@@ -293,7 +293,7 @@ a_model_has_a_load_schema_and_a_dump_schema :: proc(t: ^testing.T) {
 		testing.expectf(t, node.read_only == (member.name == "id") && node.write_only == (member.name == "password"), "%s", member.name)
 	}
 	c := schema.compile_description(&load)
-	b, _ := schema.bind(&c, json.as(.Json))
+	b, _ := schema.bind(&c, json.checks(.Json))
 	testing.expect(t, schema.valid(&b, transmute([]u8)string(`{"id": "any", "user": "a", "password": "p"}`)))
 	testing.expect(t, !schema.valid(&b, transmute([]u8)string(`{"id": 1, "user": "a"}`)))
 }
@@ -301,7 +301,7 @@ a_model_has_a_load_schema_and_a_dump_schema :: proc(t: ^testing.T) {
 @(test)
 a_nil_registry_compiles_a_plain_type :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	m, compiled := model.compile(nil, Room, json.reads(.Json), context.temp_allocator)
+	m, compiled := model.compile(nil, Room, json.checks(.Json), context.temp_allocator)
 	walktest.expect_nil(t, compiled)
 	v := Room{"lab", 20}
 	walktest.expect_nil(t, model.validate(&m, &v))
@@ -353,19 +353,18 @@ Bad_Pattern :: struct {
 }
 
 @(private = "file")
-Alias_Clash :: struct {
-	x: int,
-	y: int `model:"alias=x"`,
+Required_And_Optional :: struct {
+	x: int `json:",required" model:"optional"`,
 }
 
 @(private = "file")
 Skipped_With_Rules :: struct {
-	x: int `model:"-,>=5"`,
+	x: int `json:"-" model:">=5"`,
 }
 
 @(private = "file")
 Spaced :: struct {
-	x: int `model:" >= 3 , alias = ex , <= 9"`,
+	x: int `json:"ex" model:" >= 3 , <= 9"`,
 	s: string `model:"len >= 2"`,
 	r: int `model:"1 ..= 4"`,
 }
@@ -387,8 +386,8 @@ a_rule_no_value_can_satisfy_refuses_the_model :: proc(t: ^testing.T) {
 		{refusal(Past_Type), ">=1e999", Past_Type, ".x"},
 		{refusal(Below_Type), "<0", Below_Type, ".x"},
 		{refusal(Bad_Pattern), "pattern=((", Bad_Pattern, ".name"},
-		{refusal(Alias_Clash), "alias=x", Alias_Clash, ".x"},
-		{refusal(Skipped_With_Rules), ">=5", Skipped_With_Rules, ".x"},
+		{refusal(Required_And_Optional), "required", Required_And_Optional, ".x"},
+		{refusal(Skipped_With_Rules), "-", Skipped_With_Rules, ".x"},
 	}
 	for c, i in cases {
 		f, _ := c.err.(core.Typed_Error)
@@ -397,7 +396,7 @@ a_rule_no_value_can_satisfy_refuses_the_model :: proc(t: ^testing.T) {
 	reg: model.Registry
 	defer model.destroy(&reg)
 	model.register(&reg, model.Field_Rule_Of{Registry_Clash, "x", "<=3"})
-	_, clashed := model.compile(&reg, Registry_Clash, json.reads(.Json), context.temp_allocator)
+	_, clashed := model.compile(&reg, Registry_Clash, json.checks(.Json), context.temp_allocator)
 	f, _ := clashed.(core.Typed_Error)
 	testing.expectf(t, f.kind == .Bad_Tag && f.want.text == ">=5" && f.want.type == Registry_Clash, "%v", clashed)
 	message := fmt.tprint(refusal(Past_Type))
@@ -407,7 +406,7 @@ a_rule_no_value_can_satisfy_refuses_the_model :: proc(t: ^testing.T) {
 @(test)
 a_tag_item_may_hold_spaces :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	m, compiled := model.compile(nil, Spaced, json.reads(.Json), context.temp_allocator)
+	m, compiled := model.compile(nil, Spaced, json.checks(.Json), context.temp_allocator)
 	walktest.expect_nil(t, compiled)
 	v := Spaced{4, "ab", 2}
 	walktest.expect_nil(t, model.validate(&m, &v))
@@ -429,7 +428,7 @@ Secret :: struct {
 @(test)
 a_write_leaves_out_write_only_members :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	m, compiled := model.compile(nil, Secret, json.reads(.Json), context.temp_allocator)
+	m, compiled := model.compile(nil, Secret, json.checks(.Json), context.temp_allocator)
 	walktest.expect_nil(t, compiled)
 	v := Secret{"a", "k", 7, 0}
 	text, written := write.marshal(v, &m.plan, allocator = context.temp_allocator)
@@ -452,10 +451,10 @@ Stamped :: struct {
 @(test)
 a_plan_stamp_tells_required_members_apart :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	required, _ := model.compile(nil, Stamped, json.reads(.Json), context.temp_allocator)
+	required, _ := model.compile(nil, Stamped, json.checks(.Json), context.temp_allocator)
 	reg: model.Registry
 	defer model.destroy(&reg)
 	model.register(&reg, model.Field_Rule_Of{Stamped, "b", "optional"})
-	optional, _ := model.compile(&reg, Stamped, json.reads(.Json), context.temp_allocator)
+	optional, _ := model.compile(&reg, Stamped, json.checks(.Json), context.temp_allocator)
 	testing.expect(t, required.plan.stamp != optional.plan.stamp)
 }

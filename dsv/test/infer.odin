@@ -21,11 +21,11 @@ infer_and_sample_a_table :: proc(t: ^testing.T) {
 		testing.expect(t, derr == nil)
 		testing.expect_value(t, d.nodes[d.root].kinds, rules.Kinds{.Array})
 		c := schema.compile_description(&d)
-		b, err := schema.bind(&c, as, dsv.checks(.Csv) if spec == .Csv else dsv.checks(.Tsv))
+		b, err := schema.bind(&c, {dsv.checks(.Csv).reads if spec == .Csv else dsv.checks(.Tsv).reads, as})
 		defer schema.unbind(&b)
 		testing.expect(t, err == nil)
 		testing.expect(t, schema.valid(&b, transmute([]u8)src))
-		got, serr := schema.sample(&d, as, {reads = dsv.checks(.Csv) if spec == .Csv else dsv.checks(.Tsv), count = 5, seed = 1})
+		got, serr := schema.sample(&d, as, {reads = dsv.checks(.Csv).reads if spec == .Csv else dsv.checks(.Tsv).reads, count = 5, seed = 1})
 		testing.expect(t, serr == nil)
 		for s in got {
 			testing.expectf(t, schema.valid(&b, s), "%s", s)

@@ -1,4 +1,4 @@
-// Read request bodies into a model, answer a refused one with a problem document, apply a partial patch with `merge`,
+// Read request bodies into a model, answer a refused one with a problem document, apply a patch with `patch`,
 // and write the result with `dump`.
 //
 // Run from the repository root: odin run examples/model -collection:stury=.
@@ -35,7 +35,7 @@ run :: proc() -> core.Error {
 
 	reg: model.Registry
 	model.register(&reg, User, "role", "member") or_return
-	m := model.compile(&reg, User, json.reads(.Json)) or_return
+	m := model.compile(&reg, User, json.checks(.Json)) or_return
 
 	// Every refusal of a body, gathered by the sink, as one RFC 9457 document.
 	bad: User
@@ -50,10 +50,8 @@ run :: proc() -> core.Error {
 	user.id = 1
 	fmt.println(string(model.dump(&m, &user) or_return))
 
-	// A patch reads only what it holds, and `merge` takes what its `Fields_Set` holds.
-	patch: User
-	model.load(&m, transmute([]u8)string(`{"email": null, "role": "admin"}`), &patch, opts = {partial = true}) or_return
-	model.merge(&m, &user, &patch) or_return
+	// A patch changes only the members it holds, and the merged value is judged whole.
+	model.patch(&m, &user, transmute([]u8)string(`{"email": null, "role": "admin"}`)) or_return
 	fmt.println(string(model.dump(&m, &user, {exclude_none = true}) or_return))
 	fmt.println(string(model.dump(&m, &user, {exclude_unset = true, exclude_defaults = true}) or_return))
 	return nil

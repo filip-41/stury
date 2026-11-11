@@ -39,6 +39,9 @@ Read_Kind :: enum u8 {
 	Ptr, // `Meta.whole` for a `Maybe` of a pointer, whose element is replaced where a pointer's is read into
 	Maybe, // holds its element in place, then a tag
 	Union,
+	// A model's member whose value a `before` procedure rewrites first, or a judged type's, which only a `Check` reads. A
+	// judged value's frame holds the record it returns to as a wrapper's does.
+	Before,
 	Any,
 	Hook,
 	Raw,
@@ -53,7 +56,6 @@ Read_Kind :: enum u8 {
 	Fixed_List,
 	Inside, // a token of a value read whole
 	Checked, // a description's node, judged by a `Check` and stored nowhere
-	Before, // a model's member whose value a `before` procedure rewrites first, which only a `Check` reads
 }
 
 // The hook's number arm tests `U8 ..= U64` as one aligned block and `I8 ..= I32` and `F32 ..= F64` as ranges.
@@ -110,6 +112,7 @@ Meta :: struct {
 	no_nil:     bool, // a `Union` that has no nil, or a pointer member that refuses null
 	access:     Access, // a struct member's, under a model
 	omit_empty: bool, // a member the tag's `omitempty` leaves out when it is empty, where `Field.omit` may be a model's
+	omit_unset: bool, // a member the tag's `omitunset` leaves out when it is null and its struct's `Fields_Set` lacks it
 	optional:   bool, // a model's member that a load does not require
 	bit:        i8, // a model's member's bit in its struct's `Fields_Set`, -1 for one the load does not read
 	forbid:     bool, // a struct whose model refuses the members it does not name
@@ -118,6 +121,7 @@ Meta :: struct {
 	owner:      ^Struct_Model, // on a model's member's record, its struct's model, nil for none
 	rule_set:   i32, // 1 + the record's leaf in `Plan.leaves`, and for a type's plan its set in `Plan.rule_sets`, 0 for none
 	default:    i32, // on a model's member's record, 1 + its default in `owner.defaults`, 0 for none
+	judged:     bool, // a model's record of a type it judges past its rules, which a visit calls its visitor at
 }
 
 // A `Checked` record's use of its node, beside its `Meta`, so a type plan's records stay as they are. `items` is the
@@ -326,8 +330,9 @@ Model_Plan :: enum u8 {
 // that is not zero, and gives each member of `defaults` the input left out its default. A key of `read_only` is a
 // read_only member's, which the load skips, or refuses under the struct's `forbid`. `afters` and `checks` are the
 // validators of its members and of the struct, which run at its close.
+@(private)
 Struct_Model :: struct {
-	settle:     proc "contextless" (h: ^Reader, sm: ^Struct_Model, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64) -> (core.Typed_Error_Kind, bool),
+	settle:     proc "contextless" (h: ^Check, sm: ^Struct_Model, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64) -> (core.Typed_Error_Kind, bool),
 	validate:   Close_Validators, // a load's, nil when the struct has no validator
 	fields_set: u32,
 	defaults:   []Default,
@@ -336,7 +341,9 @@ Struct_Model :: struct {
 	checks:     []Validator,
 }
 
-Close_Validators :: #type proc "contextless" (h: ^Reader, sm: ^Struct_Model, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64, base: uintptr) -> bool
+// Runs the validators of the struct of record `owner` that closes at `at` in frame `f`, whose members start at `base`.
+// Returns whether one reported a failure, which has been recorded.
+Close_Validators :: #type proc "contextless" (h: ^Check, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64, base: uintptr) -> bool
 
 @(private)
 Default :: struct {
@@ -354,21 +361,18 @@ Fields_Set :: struct {
 	bits: [2]u64,
 }
 
-// What a model says of a member or a value. `name` replaces the member's name, "" for none, and `refused` is the item
-// the model refuses the member for, "" for none. A member that is not `optional` is required, unless it is read only.
+// What a model says of a member or a value. `refused` is the item the model refuses the member for, "" for none. A
+// member that is not `optional` is required, unless it is read only.
 Member_Rule :: struct {
 	rules:    rules.Rules,
-	name:     string,
-	alias:    string, // the item that gave `name`, "" for none
 	optional: bool,
-	skip:     bool, // the member is no part of the model
+	skip:     bool, // the member is no part of this plan, for its role
 	access:   Access,
-	extra:    bool, // the member takes the members the struct does not name
-	not_null: bool, // a pointer member that refuses null
+	not_null: bool, // a pointer or `Maybe` member that refuses null
 	// What writes the member's default from `data`, nil for none.
 	make:     Make_Default,
 	data:     rawptr,
-	after:    Validator, // judges the member's value once it is read and has passed its rules
+	afters:   []Validator, // judge the member's value once it is read and has passed its rules, in this order
 	before:   ^Before, // rewrites the member's value before it is read, nil for none
 	refused:  string,
 }
@@ -408,6 +412,7 @@ Plan :: struct {
 	// The format's text reads and the check of a node, copied from its `Format_Reads` by `plan_build`.
 	read, check: Text_Read,
 	node_check: Node_Read,
+	replace:    Replacement_Read,
 	docs:       proc "contextless" () -> rawptr,
 	// The format's value writer, which holds its spelling compiled in, where its plan maker sets it.
 	marshal:   Marshal_Text,
@@ -616,7 +621,7 @@ plan_arena :: proc(p: ^Plan) -> (runtime.Allocator, bool) {
 plan_reads :: proc(p: ^Plan, reads: ^Format_Reads) {
 	if reads != nil {
 		p.read, p.check, p.node_read, p.node_check = reads.read, reads.check, reads.node_read, reads.node_check
-		p.build, p.docs = reads.build, reads.docs
+		p.build, p.docs, p.replace = reads.build, reads.docs, reads.replace
 	}
 }
 
@@ -638,7 +643,7 @@ plan_start :: proc(p: ^Plan, as: core.As, opts: Plan_Options) -> Builder {
 	if services := readers.services; services != nil {
 		if reads := (^Format_Reads)(services.reads); reads != nil {
 			p.read, p.check, p.node_read, p.node_check = reads.read, reads.check, reads.node_read, reads.node_check
-			p.build, p.docs = reads.build, reads.docs
+			p.build, p.docs, p.replace = reads.build, reads.docs, reads.replace
 		}
 		if services.edit != nil {
 			p.raw = services.edit.value
@@ -1344,16 +1349,16 @@ Member :: struct {
 	name:     string,
 	type:     ^runtime.Type_Info,
 	offset:   uintptr,
-	required: bool,
-	omit:     bool,
-	rule_set: i32,
-	access:   Access,
-	alias:    string,
-	make:     Make_Default,
-	data:     rawptr,
-	after:    Validator,
-	before:   ^Before,
-	not_null: bool,
+	required:   bool,
+	omit:       bool,
+	omit_unset: bool,
+	rule_set:   i32,
+	access:     Access,
+	make:       Make_Default,
+	data:       rawptr,
+	afters:     []Validator,
+	before:     ^Before,
+	not_null:   bool,
 }
 
 // What `lay_out` found of a struct besides its members: the member that captures unknown members, 1 + the offset of
@@ -1382,20 +1387,18 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 	capture := layout.capture
 	for x, i in members {
 		for y in members[:i] {
-			if x.name != y.name {
-				continue
-			}
-			alias := x.alias if len(x.alias) > 0 else y.alias
-			if len(alias) > 0 && b.err.kind == .None {
-				refuse_plan(b, .Bad_Tag, x.name, alias)
-				b.err.want.type = ti.id
-			} else {
+			if x.name == y.name {
 				refuse_plan(b, .Unsupported, x.name)
 			}
 		}
 		// A write would leave out what the read then finds missing.
-		if x.required && x.omit && x.access != .Write_Only {
-			refuse_plan(b, .Unsupported, x.name)
+		if x.required && (x.omit || x.omit_unset) && x.access != .Write_Only {
+			refuse_plan(b, .Unsupported, x.name, "omitunset" if x.omit_unset else "omitempty")
+		}
+		// A member the struct records no read of is never unset.
+		if x.omit_unset && layout.fields_set == 0 {
+			refuse_plan(b, .Bad_Tag, x.name, "omitunset")
+			b.err.want.type = ti.id
 		}
 	}
 	n := len(members)
@@ -1436,7 +1439,7 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 		}
 		r := &b.fields[int(at) + i]
 		mm := &b.meta[int(at) + i]
-		mm.omit_empty, mm.optional, mm.bit, mm.owner = x.omit, !x.required, -1 if x.access == .Read_Only else bit, sm
+		mm.omit_empty, mm.omit_unset, mm.optional, mm.bit, mm.owner = x.omit, x.omit_unset, !x.required, -1 if x.access == .Read_Only else bit, sm
 		bit += 0 if x.access == .Read_Only else 1
 		if sm != nil {
 			for d, j in sm.defaults {
@@ -1444,7 +1447,7 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 			}
 		}
 		// A model's write may leave out a member that can be null, has a default or whose struct records its loaded members.
-		r.omit = x.omit || b.model != nil && !b.model.loading && (!x.required || layout.fields_set != 0 || nullable(x.type))
+		r.omit = x.omit || x.omit_unset || b.model != nil && !b.model.loading && (!x.required || layout.fields_set != 0 || nullable(x.type))
 		if !r.omit && r.n <= KEY_SIZE_MAX && plain_name(x.name) {
 			r.key_size = u8(r.n)
 		}
@@ -1543,6 +1546,12 @@ lay_out :: proc(b: ^Builder, owner: typeid, v: runtime.Type_Info_Struct, base: u
 			return
 		}
 		if !tag.keep {
+			// A member the format tag leaves out has no value for a model's rules to judge.
+			if _, ruled := reflect.struct_tag_lookup(reflect.Struct_Tag(v.tags[i]), "model"); ruled && b.model != nil {
+				refuse_plan(b, .Bad_Tag, v.names[i], "-")
+				b.err.want.type = owner
+				return
+			}
 			continue
 		}
 		if b.model != nil && v.types[i].id == typeid_of(Fields_Set) {
@@ -1563,18 +1572,16 @@ lay_out :: proc(b: ^Builder, owner: typeid, v: runtime.Type_Info_Struct, base: u
 			if model.skip {
 				// A member `-` leaves out is read_write, so this is one the plan leaves out for its role.
 				if model.access == .Read_Only {
-					for name in ([2]string{model.name if len(model.name) > 0 else tag.name, model.alias}) {
-						if len(name) > 0 {
-							append(&layout.read_only, owned_copy(b, name))
-						}
-					}
+					append(&layout.read_only, owned_copy(b, tag.name))
 				}
 				continue
 			}
-			if len(model.name) > 0 {
-				tag.name = owned_copy(b, model.name)
+			// The format tag requires what the model's role leaves optional.
+			if tag.required && model.optional {
+				refuse_plan(b, .Bad_Tag, v.names[i], "required")
+				b.err.want.type = owner
+				return
 			}
-			tag.unknown ||= model.extra
 			tag.required ||= !tag.unknown && !model.optional && model.make == nil && model.access != .Read_Only
 		}
 		// A flattened or capturing member is no value of its own for rules to hold.
@@ -1586,7 +1593,7 @@ lay_out :: proc(b: ^Builder, owner: typeid, v: runtime.Type_Info_Struct, base: u
 			lay_out(b, v.types[i].id, inner, base + v.offsets[i], out, layout)
 			continue
 		}
-		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required, tag.omit || model.access == .Write_Only, rule_set, model.access, model.alias, model.make, model.data, model.after, model.before, model.not_null}
+		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required, tag.omit || model.access == .Write_Only, tag.omit_unset, rule_set, model.access, model.make, model.data, model.afters, model.before, model.not_null}
 		if tag.unknown {
 			if tag.required || rule_set > 0 {
 				refuse_plan(b, .Bad_Tag, tag.name, "required" if tag.required else "model")

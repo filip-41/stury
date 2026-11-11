@@ -150,8 +150,11 @@ Record_Docs :: struct {
 	// allocator.
 	read:   proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool,
 	// `read` for a model's load plan, which reads only as a check: the record is judged by the model's rules, into a zeroed
-	// `target`, with each refusal collected in `read.sink`. nil for a format that has no model.
+	// `target`, with each refusal collected in `read.sink`. It and `check_run` are held only by the docs of a plan's
+	// `typed.Plan.docs`, so a program that checks no record links neither.
 	check_read: proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool,
+	// The framing of the records `check_read` checks, which a check by a plan whose handle holds no services frames with.
+	framing:    proc "contextless" () -> ^Framing_Services,
 	// Builds a record's document.
 	build:  proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),
 	// `next`, and the record's nodes written to `b` by the walk that frames it, with the offsets of `it.src`. nil for a
@@ -173,6 +176,21 @@ Record_Docs :: struct {
 services_of :: proc(as: core.As) -> ^Framing_Services {
 	if services := core.services_of(as); services != nil {
 		return (^Framing_Services)(services.records)
+	}
+	return nil
+}
+
+// Returns the framing services of `as`'s format, or for a handle with none those the record docs of `plan` name, nil for
+// neither.
+@(private)
+framing_by :: proc(as: core.As, plan: ^typed.Plan) -> ^Framing_Services {
+	if services := services_of(as); services != nil {
+		return services
+	}
+	if plan != nil && plan.docs != nil {
+		if docs := (^Record_Docs)(plan.docs()); docs != nil && docs.framing != nil {
+			return docs.framing()
+		}
 	}
 	return nil
 }
@@ -275,8 +293,8 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 	}
 	plan := plan
 	reads := it.docs.read if it.docs != nil else nil
-	if plan != nil && plan.model_plan == .Load && it.docs != nil {
-		reads = it.docs.check_read
+	if plan != nil && plan.model_plan == .Load {
+		reads = (^Record_Docs)(plan.docs()).check_read if plan.docs != nil else nil
 	}
 	if reads == nil {
 		it.fault = core.Fault{kind = .Bad_Option}

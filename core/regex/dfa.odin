@@ -79,6 +79,7 @@ Dfa :: struct {
 	prefix:    string,
 	leads:     bool,
 	lead:      [4]u64,
+	anchored:  bool, // a start row is read only where a search starts, so a skip tests that byte and goes no further
 	// The automaton that finds where the first match in the backtracker's order ends, in rows of the same stride, with
 	// FIRST_ENDS on an entry when a match ends before the character it reads. Nil for a program it does not run.
 	first:        []u32,
@@ -284,6 +285,10 @@ dfa_start :: proc(d: ^Dfa, s: string, from, end: int) -> (start: int, judged: bo
 // cannot match empty has a prefix or lead bytes.
 @(private = "file")
 skip_to_lead :: #force_inline proc(d: ^Dfa, s: string, i: int) -> int {
+	if d.anchored {
+		lead := d.prefix[0] == s[i] if d.prefix != "" else !d.leads || d.lead[s[i] >> 6] & (1 << (u64(s[i]) & 63)) != 0
+		return i if lead else -1
+	}
 	if d.prefix != "" {
 		k := strings.index_byte(s[i:], d.prefix[0])
 		return i + k if k >= 0 else -1
@@ -396,7 +401,7 @@ States :: struct {
 
 // The automaton for `re`, in `allocator`, or nil when the program has an instruction it does not run or a cap is passed.
 // The build's working memory comes from `scratch` and is freed before it returns.
-build_dfa :: proc(re: ^Regex, allocator, scratch: mem.Allocator) -> ^Dfa {
+build_dfa :: proc(re: ^Regex, spans: bool, allocator, scratch: mem.Allocator) -> ^Dfa {
 	arena: mem.Dynamic_Arena
 	mem.dynamic_arena_init(&arena, scratch, scratch, block_size = 8192, out_band_size = 2048)
 	defer mem.dynamic_arena_destroy(&arena)
@@ -482,8 +487,9 @@ build_dfa :: proc(re: ^Regex, allocator, scratch: mem.Allocator) -> ^Dfa {
 	first, last: States
 	first_starts, last_starts: [CLASSES]u32
 	first_end: u32
-	// Oniguruma ends an empty iteration by where it began, which the threads of a position do not hold.
-	has_first := !re.ecma && !b.empty_loops && !b.keeps
+	// Oniguruma ends an empty iteration by where it began and ECMA fails it, which the threads of a position do not
+	// hold, and the threads of a leading look-ahead's product are not ordered.
+	has_first := spans && !b.empty_loops && !b.keeps && len(b.looks) == 0
 	if has_first {
 		first, first_starts, first_end, has_first = build_first(&b, classes, final, syms, newline_sym, atom_syms)
 	}
@@ -506,6 +512,7 @@ build_dfa :: proc(re: ^Regex, allocator, scratch: mem.Allocator) -> ^Dfa {
 		prefix  = re.prefix,
 		leads   = re.has_first,
 		lead    = re.first,
+		anchored = b.restart_dies,
 	}
 	if has_first {
 		d.first, d.first_starts, d.first_end = slice.clone(first.table[:]), first_starts, first_end

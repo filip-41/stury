@@ -1,5 +1,6 @@
 package json_tests
 
+import "core:strings"
 import "core:testing"
 import core "../../core"
 import typed "../../core/typed"
@@ -33,7 +34,7 @@ judge :: proc(t: ^testing.T, text, instance: string, dups: core.Duplicates) -> (
 	}
 	defer schema.destroy(&c)
 	b: schema.Bound
-	b, err = schema.bind(&c, json.as(.Json))
+	b, err = schema.bind(&c, json.checks(.Json))
 	if !testing.expectf(t, err == nil, "%s: %v", text, err) {
 		return
 	}
@@ -116,7 +117,7 @@ repeats_records :: proc(t: ^testing.T) {
 	testing.expect(t, err == nil)
 	c, compiled := schema.compile(&doc, core.ROOT)
 	testing.expect(t, compiled == nil)
-	b, bound := schema.bind(&c, json.as(.Json))
+	b, bound := schema.bind(&c, json.checks(.Json))
 	testing.expect(t, bound == nil)
 	src := transmute([]u8)string("{\"a\":1,\"a\":\"x\"}\n{\"a\":2}\n{\"a\":\"y\",\"a\":3}\n")
 	for framing in ([]core.Framing{.Lines, .Concatenated}) {
@@ -131,5 +132,31 @@ repeats_records :: proc(t: ^testing.T) {
 	for framing in ([]core.Framing{.Lines, .Concatenated}) {
 		_, passes := schema.check_records(&b, valid, framing)
 		testing.expectf(t, passes == nil, "%v: valid records: %v", framing, passes)
+	}
+}
+
+// A recursive `oneOf` whose arms reach one child alike, read again for its repeats: the arms that read one child share
+// one judging of it, so the work stays linear in the depth.
+@(test)
+repeats_recursive_arms :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	node := `{"$defs": {"node": {"oneOf": [` +
+		`{"properties": {"kind": {"const": "t0"}, "child": {"$ref": "#/$defs/node"}}, "required": ["kind"]},` +
+		`{"properties": {"kind": {"const": "t1"}, "child": {"$ref": "#/$defs/node"}}, "required": ["kind"]},` +
+		`{"properties": {"kind": {"const": "t2"}, "child": {"$ref": "#/$defs/node", "type": "object"}}, "required": ["kind"]},` +
+		`{"properties": {"kind": {"const": "leaf"}, "value": {"type": "integer"}}, "required": ["kind", "value"]},` +
+		`{"type": "integer"}]}}, "$ref": "#/$defs/node"}`
+	kinds := [3]string{"t0", "t1", "t2"}
+	for every in ([]bool{false, true}) {
+		for last in ([]string{"t1", "zz"}) {
+			text := `{"kind": "leaf", "value": 1}`
+			for i in 0 ..< 40 {
+				lead := `{"kind": "zz", ` if every || i == 39 else `{`
+				text = strings.concatenate({lead, `"child": `, text, `, "kind": "`, last if i == 39 else kinds[i % 3], `"}`})
+			}
+			expect_verdict(t, node, text, .Last, 0 if last == "t1" else 1)
+			expect_verdict(t, node, text, .First, 1)
+		}
 	}
 }

@@ -19,7 +19,7 @@ Profile :: struct {
 	secret: string `model:"write_only,optional"`,
 	level:  int,
 	tags:   []string,
-	extra:  map[string]core.Value `model:"extra"`,
+	extra:  map[string]core.Value `json:",unknown"`,
 	set:    model.Fields_Set,
 }
 
@@ -45,7 +45,7 @@ a_load_reports_every_failing_rule_of_a_member :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	profile_registry(&reg)
-	m, compiled := model.compile(&reg, Profile, json.reads(.Json))
+	m, compiled := model.compile(&reg, Profile, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	sink: typed.Sink
 	p: Profile
@@ -65,7 +65,7 @@ a_load_gives_absent_members_their_defaults_and_records_what_it_read :: proc(t: ^
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	profile_registry(&reg)
-	m, _ := model.compile(&reg, Profile, json.reads(.Json))
+	m, _ := model.compile(&reg, Profile, json.checks(.Json))
 	first, second: Profile
 	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "age": 30}`), &first))
 	testing.expect_value(t, first.level, 7)
@@ -90,7 +90,7 @@ a_load_refuses_a_repeated_key_where_the_read_does :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	profile_registry(&reg)
-	m, _ := model.compile(&reg, Profile, json.reads(.Json))
+	m, _ := model.compile(&reg, Profile, json.checks(.Json))
 	repeats := [?]string {
 		`{"name": "ada", "age": 30, "name": "bob"}`,
 		`{"name": "ada", "age": 30, "age": 31}`,
@@ -117,7 +117,7 @@ a_load_follows_the_roles_of_its_members :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	profile_registry(&reg)
-	m, _ := model.compile(&reg, Profile, json.reads(.Json))
+	m, _ := model.compile(&reg, Profile, json.checks(.Json))
 	p: Profile
 	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"id": 5, "name": "ada", "age": 30, "secret": "s"}`), &p))
 	testing.expect_value(t, p.id, 0)
@@ -134,7 +134,7 @@ a_load_takes_or_refuses_the_members_a_struct_does_not_name :: proc(t: ^testing.T
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	profile_registry(&reg)
-	m, _ := model.compile(&reg, Profile, json.reads(.Json))
+	m, _ := model.compile(&reg, Profile, json.checks(.Json))
 	p: Profile
 	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "age": 30, "zip": 9, "city": "x"}`), &p))
 	testing.expect_value(t, len(p.extra), 2)
@@ -142,7 +142,7 @@ a_load_takes_or_refuses_the_members_a_struct_does_not_name :: proc(t: ^testing.T
 		a: int,
 	}
 	model.register(&reg, Strict, model.Extra.Forbid)
-	s, _ := model.compile(&reg, Strict, json.reads(.Json))
+	s, _ := model.compile(&reg, Strict, json.checks(.Json))
 	v: Strict
 	sink: typed.Sink
 	testing.expect(t, model.load(&s, transmute([]u8)string(`{"a": 1, "b": 2}`), &v, &sink) != nil)
@@ -151,7 +151,7 @@ a_load_takes_or_refuses_the_members_a_struct_does_not_name :: proc(t: ^testing.T
 	Loose :: struct {
 		a: int,
 	}
-	l, _ := model.compile(&reg, Loose, json.reads(.Json))
+	l, _ := model.compile(&reg, Loose, json.checks(.Json))
 	lv: Loose
 	walktest.expect_nil(t, model.load(&l, transmute([]u8)string(`{"a": 1, "b": 2}`), &lv))
 	testing.expect(t, model.load(&l, transmute([]u8)string(`{"a": 1, "b": 2, "b": 3}`), &lv, &sink) != nil)
@@ -169,7 +169,7 @@ Counted :: struct {
 @(private = "file")
 four_way :: proc(t: ^testing.T, v: $T, valid: bool, loc := #caller_location) {
 	reg: model.Registry
-	m, _ := model.compile(&reg, T, json.reads(.Json), context.temp_allocator)
+	m, _ := model.compile(&reg, T, json.checks(.Json), context.temp_allocator)
 	v := v
 	validated := model.validate(&m, &v) == nil
 	text, _ := write.marshal(v, &m.plan, allocator = context.temp_allocator)
@@ -179,7 +179,7 @@ four_way :: proc(t: ^testing.T, v: $T, valid: bool, loc := #caller_location) {
 	for direction in model.Direction {
 		d, _ := model.schema(&m, direction, context.temp_allocator)
 		c := schema.compile_description(&d, allocator = context.temp_allocator)
-		b, _ := schema.bind(&c, json.as(.Json), allocator = context.temp_allocator)
+		b, _ := schema.bind(&c, {layout = json.as(.Json)}, allocator = context.temp_allocator)
 		checks[direction] = schema.valid(&b, text)
 	}
 	testing.expectf(t, validated == valid && loaded == valid && checks[.Load] == valid && checks[.Dump] == valid, "%s: validate %v, load %v, schemas %v", text, validated, loaded, checks, loc = loc)
@@ -248,7 +248,7 @@ a_scalar_rule_is_judged_the_same_by_validate_load_and_both_schemas :: proc(t: ^t
 @(private = "file")
 Price :: struct {
 	currency: string `model:"pattern=^[a-z]+$"`,
-	amount:   string `model:"alias=#text,len<=0,optional"`,
+	amount:   string `json:"#text" model:"len<=0,optional"`,
 }
 
 @(private = "file")
@@ -267,8 +267,8 @@ a_load_reads_markup_as_it_reads_its_json_form :: proc(t: ^testing.T) {
 	readers := json.as(.Json).readers^
 	readers.attribute = markup_attribute
 	reg: model.Registry
-	prices, _ := model.compile(&reg, struct{ price: Price }, json.reads(.Json))
-	items, _ := model.compile(&reg, struct{ a: Item }, json.reads(.Json))
+	prices, _ := model.compile(&reg, struct{ price: Price }, json.checks(.Json))
+	items, _ := model.compile(&reg, struct{ a: Item }, json.checks(.Json))
 	cases := [?]struct {
 		is_price:   bool,
 		model, form: string,
@@ -314,7 +314,7 @@ a_load_reads_markup_as_it_reads_its_json_form :: proc(t: ^testing.T) {
 Roles :: struct {
 	id:    i64 `model:"read_only"`,
 	name:  string,
-	extra: map[string]core.Value `model:"extra"`,
+	extra: map[string]core.Value `json:",unknown"`,
 }
 
 @(private = "file")
@@ -334,7 +334,7 @@ a_models_plans_read_only_as_its_load :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	reg: model.Registry
-	m, _ := model.compile(&reg, Fenced, json.reads(.Json))
+	m, _ := model.compile(&reg, Fenced, json.checks(.Json))
 	text := transmute([]u8)string(`{"id": 5, "name": "a"}`)
 	for plan in ([?]^typed.Plan{&m.plan, &m.load_plan}) {
 		v: Fenced
@@ -366,7 +366,7 @@ a_default_names_a_member_of_its_type :: proc(t: ^testing.T) {
 		return make([]int, 2, allocator)
 	})
 	testing.expect_value(t, made, runtime.Allocator_Error.None)
-	m, _ := model.compile(&reg, Two, json.reads(.Json))
+	m, _ := model.compile(&reg, Two, json.checks(.Json))
 	v: Two
 	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"a": 1}`), &v))
 	testing.expect_value(t, len(v.c), 2)
@@ -377,7 +377,7 @@ a_load_captures_into_a_map_of_values_by_the_repeat_policy :: proc(t: ^testing.T)
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	reg: model.Registry
-	m, _ := model.compile(&reg, Roles, json.reads(.Json))
+	m, _ := model.compile(&reg, Roles, json.checks(.Json))
 	text := transmute([]u8)string(`{"name": "a", "z": 1, "z": [2]}`)
 	first, last: Roles
 	walktest.expect_nil(t, model.load(&m, text, &first, nil, {dups = .First}))
@@ -397,7 +397,7 @@ a_load_refuses_a_repeat_inside_a_value_it_does_not_type :: proc(t: ^testing.T) {
 		n: int,
 	}
 	reg: model.Registry
-	m, _ := model.compile(&reg, Held, json.reads(.Json))
+	m, _ := model.compile(&reg, Held, json.checks(.Json))
 	for text in ([?]string{`{"v": {"a": 1, "a": 2}, "n": 0}`, `{"n": 0, "q": {"a": 1, "a": 2}}`}) {
 		h: Held
 		f, ok := model.load(&m, transmute([]u8)text, &h).(core.Fault)
@@ -417,25 +417,25 @@ a_read_only_key_never_lands_in_the_members_a_struct_does_not_name :: proc(t: ^te
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	reg: model.Registry
-	m, _ := model.compile(&reg, Roles, json.reads(.Json))
+	m, _ := model.compile(&reg, Roles, json.checks(.Json))
 	text := transmute([]u8)string(`{"id": 5, "name": "a", "q": 1}`)
 	r: Roles
 	walktest.expect_nil(t, model.load(&m, text, &r))
 	_, held := r.extra["id"]
 	testing.expect(t, r.id == 0 && len(r.extra) == 1 && !held)
 	model.register(&reg, Fenced, model.Extra.Forbid)
-	f, _ := model.compile(&reg, Fenced, json.reads(.Json))
+	f, _ := model.compile(&reg, Fenced, json.checks(.Json))
 	sink: typed.Sink
 	v: Fenced
 	testing.expect(t, model.load(&f, transmute([]u8)string(`{"id": 5, "name": "a"}`), &v, &sink) != nil)
 	testing.expect(t, len(sink.entries) == 1 && sink.entries[0].kind == .Read_Only)
 	d, _ := model.schema(&f, .Load)
 	c := schema.compile_description(&d)
-	b, _ := schema.bind(&c, json.as(.Json))
+	b, _ := schema.bind(&c, json.checks(.Json))
 	testing.expect(t, !schema.valid(&b, transmute([]u8)string(`{"id": 5, "name": "a"}`)))
 	testing.expect(t, schema.valid(&b, transmute([]u8)string(`{"name": "a"}`)))
 	model.register(&reg, Fenced, model.Extra.Ignore)
-	l, _ := model.compile(&reg, Fenced, json.reads(.Json))
+	l, _ := model.compile(&reg, Fenced, json.checks(.Json))
 	walktest.expect_nil(t, model.load(&l, transmute([]u8)string(`{"id": 5, "name": "a", "q": 1}`), &v))
 }
 
@@ -445,10 +445,10 @@ a_model_refuses_what_it_cannot_load_at_compile :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	model.register(&reg, Roles, model.Extra.Forbid)
-	_, forbidden := model.compile(&reg, Roles, json.reads(.Json))
+	_, forbidden := model.compile(&reg, Roles, json.checks(.Json))
 	f, ok := forbidden.(core.Typed_Error)
 	testing.expect(t, ok && f.kind == .Bad_Tag)
-	_, wide := model.compile(&reg, Wide, json.reads(.Json))
+	_, wide := model.compile(&reg, Wide, json.checks(.Json))
 	w, wide_ok := wide.(core.Typed_Error)
 	testing.expect(t, wide_ok && w.kind == .Bad_Tag)
 }
@@ -471,7 +471,7 @@ was_set_asks_the_struct_that_holds_the_set :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	reg: model.Registry
-	m, _ := model.compile(&reg, Outer, json.reads(.Json))
+	m, _ := model.compile(&reg, Outer, json.checks(.Json))
 	o: Outer
 	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"inner": {"y": 2, "x": 1}}`), &o))
 	testing.expect(t, model.was_set(&m, Inner, o.inner.set, "x") && model.was_set(&m, Outer, o.set, "inner"))
@@ -501,7 +501,7 @@ a_model_loads_a_union_of_structs_by_its_naming_tag :: proc(t: ^testing.T) {
 	reg := model.Registry {
 		naming = {union_tag = "type"},
 	}
-	m, compiled := model.compile(&reg, Holds, json.reads(.Json))
+	m, compiled := model.compile(&reg, Holds, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	h: Holds
 	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"u": {"type": "Arm_B", "b": "x"}}`), &h))
@@ -648,7 +648,7 @@ Chain :: struct {
 	n:    int `model:"optional"`,
 	next: ^Chain `model:"optional,not_null"`,
 	none: union {} `model:"optional"`,
-	rest: map[string]int `model:"extra"`,
+	rest: map[string]int `json:",unknown"`,
 }
 
 @(test)
@@ -662,8 +662,8 @@ a_forbidding_struct_with_no_required_member_refuses_an_unknown_key :: proc(t: ^t
 	reg: model.Registry
 	model.register(&reg, Loose, model.Extra.Forbid)
 	model.register(&reg, Empty, model.Extra.Forbid)
-	l, _ := model.compile(&reg, Loose, json.reads(.Json))
-	e, _ := model.compile(&reg, Empty, json.reads(.Json))
+	l, _ := model.compile(&reg, Loose, json.checks(.Json))
+	e, _ := model.compile(&reg, Empty, json.checks(.Json))
 	lv: Loose
 	ev: Empty
 	testing.expect(t, model.load(&l, transmute([]u8)string(`{"b": 2}`), &lv) != nil)
@@ -677,11 +677,11 @@ a_not_null_pointer_a_typed_capture_and_an_empty_union_load_as_their_schema_says 
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	reg: model.Registry
-	m, err := model.compile(&reg, Chain, json.reads(.Json))
+	m, err := model.compile(&reg, Chain, json.checks(.Json))
 	walktest.expect_nil(t, err)
 	d, _ := model.schema(&m, .Load)
 	c := schema.compile_description(&d)
-	b, _ := schema.bind(&c, json.as(.Json))
+	b, _ := schema.bind(&c, json.checks(.Json))
 	Case :: struct {
 		text:  string,
 		loads: bool,
@@ -711,7 +711,7 @@ a_member_named_dash_is_read_through_an_escaped_tag :: proc(t: ^testing.T) {
 		member: int `json:"\-"`,
 	}
 	reg: model.Registry
-	m, _ := model.compile(&reg, Dashed, json.reads(.Json))
+	m, _ := model.compile(&reg, Dashed, json.checks(.Json))
 	v: Dashed
 	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"-": 3}`), &v))
 	testing.expect_value(t, v.member, 3)

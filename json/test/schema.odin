@@ -311,7 +311,7 @@ schema_reads_files_and_dialects :: proc(t: ^testing.T) {
 	testing.expect_value(t, d.nodes[name.ref.? or_else 0].rules.min_length, 1)
 
 	// A reference with nothing beside it is judged as the node it reaches.
-	b, bind_err := schema.bind(&c, json.as(.Json))
+	b, bind_err := schema.bind(&c, json.checks(.Json))
 	defer schema.unbind(&b)
 	testing.expect(t, bind_err == nil)
 
@@ -366,11 +366,11 @@ schema_binds_shapes :: proc(t: ^testing.T) {
 	c, cerr := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
 	defer schema.destroy(&c)
 	testing.expect(t, cerr == nil)
-	b, berr := schema.bind(&c, json.as(.Json))
+	b, berr := schema.bind(&c, json.checks(.Json))
 	defer schema.unbind(&b)
 	testing.expect(t, berr == nil)
 	c2 := schema.compile_description(&d)
-	b2, berr2 := schema.bind(&c2, json.as(.Json))
+	b2, berr2 := schema.bind(&c2, json.checks(.Json))
 	defer schema.unbind(&b2)
 	testing.expect(t, berr2 == nil)
 }
@@ -408,7 +408,7 @@ schema_suite_checks :: proc(t: ^testing.T) {
 					unread[strings.clone(refused_keyword(err), context.temp_allocator)] += 1
 					continue
 				}
-				b, berr := schema.bind(&c, json.as(.Json))
+				b, berr := schema.bind(&c, json.checks(.Json))
 				if berr != nil {
 					f, _ := berr.(core.Typed_Error)
 					refused[strings.clone(f.want.text, context.temp_allocator)] += 1
@@ -559,7 +559,7 @@ schema_format_asserts_on_request :: proc(t: ^testing.T) {
 		testing.expect(t, built == nil)
 		compiled, err := schema.compile(&doc, core.ROOT, {format_assert = c.assert_, resolver = {as = json.as(.Json), root = FIXTURES}})
 		testing.expectf(t, err == nil, "%s: %v", c.schema, err)
-		b, bound := schema.bind(&compiled, json.as(.Json))
+		b, bound := schema.bind(&compiled, json.checks(.Json))
 		testing.expectf(t, bound == nil, "%s: %v", c.schema, bound)
 		testing.expectf(t, schema.valid(&b, transmute([]u8)c.text) == c.valid, "%s asserting %v: %s", c.schema, c.assert_, c.text)
 	}
@@ -585,7 +585,7 @@ schema_check_reports_each_failure :: proc(t: ^testing.T) {
 	c, err := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
 	defer schema.destroy(&c)
 	testing.expect(t, err == nil)
-	b, berr := schema.bind(&c, json.as(.Json))
+	b, berr := schema.bind(&c, json.checks(.Json))
 	defer schema.unbind(&b)
 	testing.expect(t, berr == nil)
 	src := transmute([]u8)string(`{"a": 1, "b": ["x", 3], "z": 0}`)
@@ -598,7 +598,7 @@ schema_check_reports_each_failure :: proc(t: ^testing.T) {
 		core.render_entry(strings.to_stream(&out), src, e)
 		strings.write_byte(&out, '\n')
 	}
-	testing.expect_value(t, strings.to_string(out), "1:7: Number is below the minimum at .a (.properties.a.minimum)\n1:21: Value is not of the allowed type at .b[1] (.properties.b.items.type)\n1:30: No value is allowed here at .z (.additionalProperties)\n1:1: Required member \"c\" is missing (.required)\n")
+	testing.expect_value(t, strings.to_string(out), "1:1: Required member \"c\" is missing (.required)\n1:7: Number is below the minimum at .a (.properties.a.minimum)\n1:21: Value is not of the allowed type at .b[1] (.properties.b.items.type)\n1:30: No value is allowed here at .z (.additionalProperties)\n")
 	testing.expect(t, !schema.valid(&b, src))
 	// `c` is only required, so `additionalProperties` refuses it too.
 	testing.expect(t, !schema.valid(&b, transmute([]u8)string(`{"a": 2, "c": null}`)))
@@ -612,8 +612,8 @@ schema_check_reports_past_a_failed_type :: proc(t: ^testing.T) {
 		schema, text, want: string,
 	} {
 		{`{"type": "boolean", "required": ["a"]}`, `{}`, ".required .type"},
-		{`{"type": "string", "properties": {"a": {"type": "integer"}}, "items": {"minimum": 2}}`, `{"a": "x"}`, ".properties.a.type .type"},
-		{`{"type": "string", "properties": {"a": {"type": "integer"}}, "items": {"minimum": 2}}`, `[1]`, ".items.minimum .type"},
+		{`{"type": "string", "properties": {"a": {"type": "integer"}}, "items": {"minimum": 2}}`, `{"a": "x"}`, ".type .properties.a.type"},
+		{`{"type": "string", "properties": {"a": {"type": "integer"}}, "items": {"minimum": 2}}`, `[1]`, ".type .items.minimum"},
 		{`{"enum": [1, 2], "const": 1}`, `3`, ".const .enum"},
 		{`{"enum": [1, 2], "const": 1}`, `2`, ".const"},
 		{`{"enum": [], "const": {"x": 1}}`, `null`, ".const .enum"},
@@ -662,7 +662,7 @@ schema_check_reports_arms :: proc(t: ^testing.T) {
 		core.render_entry(strings.to_stream(&out), src, e)
 		strings.write_byte(&out, '\n')
 	}
-	testing.expect_value(t, strings.to_string(out), "1:7: Number is below the minimum at .a (.properties.a.allOf[0].minimum)\n1:7: Value passes none of the subschemas at .a (.properties.a.anyOf)\n1:16: Value is not of the allowed type at .xy (.patternProperties.\"^x\".type)\n1:26: Elements are not unique at .l (.properties.l.uniqueItems)\n1:26: Too few elements or members at .l (.properties.l.contains)\n1:1: Required member \"q\" is missing (.dependentRequired)\n1:1: No value is allowed here (.not)\n")
+	testing.expect_value(t, strings.to_string(out), "1:1: Required member \"q\" is missing (.dependentRequired)\n1:1: No value is allowed here (.not)\n1:7: Number is below the minimum at .a (.properties.a.allOf[0].minimum)\n1:7: Value passes none of the subschemas at .a (.properties.a.anyOf)\n1:16: Value is not of the allowed type at .xy (.patternProperties.\"^x\".type)\n1:26: Elements are not unique at .l (.properties.l.uniqueItems)\n1:26: Too few elements or members at .l (.properties.l.contains)\n")
 }
 
 // A fixed evaluated set becomes the node's own additional members or items and a dynamic one stays an arm, and either
@@ -935,7 +935,7 @@ schema_check_agrees_with_model_load :: proc(t: ^testing.T) {
 		d, described := description_of(&plan)
 		testing.expect(t, described == nil)
 		compiled := schema.compile_description(&d)
-		b, bound := schema.bind(&compiled, json.as(.Json))
+		b, bound := schema.bind(&compiled, json.checks(.Json))
 		testing.expect(t, bound == nil)
 		checked := schema.valid(&b, transmute([]u8)c.text)
 		testing.expectf(t, loaded == c.valid && checked == c.valid, "%v %s: load %v, check %v", c.type, c.text, loaded, checked)
@@ -1017,7 +1017,7 @@ checked_make :: proc(text: string, spec := json.Spec.Json, allocator := context.
 	c = new(Checked)
 	c.doc, _ = core.build(transmute([]u8)text, json.as(.Json))
 	if c.compiled, err = schema.compile(&c.doc, core.ROOT, {resolver = {as = json.as(.Json)}, dups = dups}); err == nil {
-		c.bound, err = schema.bind(&c.compiled, json.as(spec), allocator = allocator)
+		c.bound, err = schema.bind(&c.compiled, {layout = json.as(spec)}, allocator = allocator)
 	}
 	return
 }
@@ -1279,7 +1279,7 @@ schema_bind_refusals :: proc(t: ^testing.T) {
 	c, cerr := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
 	defer schema.destroy(&c)
 	testing.expect(t, cerr != nil)
-	_, berr := schema.bind(&c, json.as(.Json))
+	_, berr := schema.bind(&c, json.checks(.Json))
 	testing.expect_value(t, berr.(core.Typed_Error).kind, core.Typed_Error_Kind.Bad_Option)
 }
 
@@ -1361,14 +1361,14 @@ schema_check_agrees_on_json5_numbers :: proc(t: ^testing.T) {
 		{Json5_Count, `{n: -0x1}`, false},
 		{Json5_Count, `{n: 0x1}`, true},
 	}
-	plans := [?]typed.Plan{ruled_plan(Json5_Bound, reads = json.reads(.Json5)), ruled_plan(Json5_Count, reads = json.reads(.Json5))}
+	plans := [?]typed.Plan{ruled_plan(Json5_Bound, checks = json.checks(.Json5)), ruled_plan(Json5_Count, checks = json.checks(.Json5))}
 	for c in cases {
 		plan := plans[0 if c.type == Json5_Bound else 1]
 		target := make([]u8, size_of(Json5_Bound))
 		loaded := typed.check_text(transmute([]u8)c.text, raw_data(target), c.type, &plan, {}) == nil
 		d, _ := description_of(&plan)
 		compiled := schema.compile_description(&d)
-		b, bound := schema.bind(&compiled, json.as(.Json5))
+		b, bound := schema.bind(&compiled, json.checks(.Json5))
 		testing.expect(t, bound == nil)
 		checked := schema.valid(&b, transmute([]u8)c.text)
 		testing.expectf(t, loaded == c.valid && checked == c.valid, "%v %s: load %v, check %v", c.type, c.text, loaded, checked)
@@ -1624,8 +1624,8 @@ schema_write_reads_back_to_the_suite_schemas :: proc(t: ^testing.T) {
 					differ += 1
 					log.warnf("%s: written back differs: %s", info.fullpath[len(SUITE):], text)
 				}
-				b, berr := schema.bind(&c, json.as(.Json))
-				b2, b2err := schema.bind(&back, json.as(.Json))
+				b, berr := schema.bind(&c, json.checks(.Json))
+				b2, b2err := schema.bind(&back, json.checks(.Json))
 				if berr != nil || b2err != nil {
 					skips["bind"] += 1
 					continue
@@ -1703,7 +1703,7 @@ schema_write_reads_back_to_described_types :: proc(t: ^testing.T) {
 	d, _ := description_of(&plan)
 	doc: core.Document
 	back, text, _ := written_back(t, &d, &doc)
-	b, bound := schema.bind(&back, json.as(.Json))
+	b, bound := schema.bind(&back, json.checks(.Json))
 	testing.expect(t, bound == nil)
 	cases := [?]struct {
 		text:  string,
@@ -1899,7 +1899,7 @@ schema_check_reads_markup :: proc(t: ^testing.T) {
 		ch, err := checked_make(c.schema)
 		defer checked_destroy(ch)
 		testing.expectf(t, err == nil, "%s: %v", c.schema, err)
-		bound, _ := schema.bind(&ch.compiled, markup)
+		bound, _ := schema.bind(&ch.compiled, {layout = markup})
 		defer schema.unbind(&bound)
 		for m, i in bound.plan.meta {
 			if c.bind != "" && m.name == c.bind {

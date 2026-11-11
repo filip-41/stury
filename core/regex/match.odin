@@ -54,6 +54,7 @@ Scratch :: struct {
 	seen:   [dynamic]u64, // a linear search's visited pairs, one bit per instruction and position
 	good:   [dynamic]u64, // the pairs inside a look-ahead whose body is known to match from there
 	log:    [dynamic]u32, // the pairs first visited on the way through the look-aheads being matched
+	rows:   [dynamic]int, // under counter loops, the visited set's rows and then each loop's counts (`counted_rows`)
 	resumes: int, // the alternatives the last linear search resumed, which its program and text bound
 	ends:    int, // where the automaton found the last search's match to end, -1 when it did not or found none
 }
@@ -65,6 +66,7 @@ scratch_destroy :: proc(scratch: ^Scratch) {
 	delete(scratch.seen)
 	delete(scratch.good)
 	delete(scratch.log)
+	delete(scratch.rows)
 	scratch^ = {}
 }
 
@@ -86,6 +88,8 @@ Matcher :: struct {
 	depth:    int, // calls not returned from
 	behind:   Grapheme_Behind,
 	seen, good: []u64, // under `Regex.linear`, good for a program with a look-ahead
+	rows:     []int, // under `Regex.linear`, each instruction's first row of the visited set, nil for one row each
+	radix:    []int, // under counter loops, the counts each loop's count is held to
 	log:      ^[dynamic]u32,
 	looking:  int, // the look-aheads being matched, under `Regex.linear`
 	room:     int, // under `Regex.linear`, the bytes the stack and the log may take beside the sets
@@ -102,7 +106,7 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 	// Oniguruma's search gives up past its retries where the automata would answer, so they answer a jq search only where
 	// the visited set runs it, which never gives up, or where no start can take that many.
 	jq_automaton := !re.ecma && re.dfa != nil && !re.longest && !re.not_empty && !re.calls_or_limits
-	jq_automaton &&= visited_room(re, s) >= 0 if re.linear else retries_bounded(re.dfa, len(s) - min(start, len(s)), MAX_RETRIES)
+	jq_automaton &&= visited_room(re, total_rows(re, re.visited.rows), len(s) + 1) >= 0 if re.linear else retries_bounded(re.dfa, len(s) - min(start, len(s)), MAX_RETRIES)
 	// Under jq the automata start where Oniguruma's first start is, which its optimizer can put past a match. Each later
 	// start it skips can have no match, but one in a window of starts it looks for in turn is left to the backtracker.
 	from := start
@@ -123,7 +127,7 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 	// The automata tell where the match ends and starts, and how far a search reads, so the backtracker runs only at
 	// that start for the groups, and its visited set covers only that.
 	lo, width, first_start, last_start := 0, len(s) + 1, 0, len(s)
-	if len(caps) > 0 && jq_automaton && re.dfa.first != nil && from >= 0 {
+	if len(caps) > 0 && (jq_automaton || re.ecma && re.dfa != nil) && re.dfa.first != nil && from >= 0 {
 		if end, reach, judged := dfa_first(re.dfa, s, from); judged {
 			if end < 0 {
 				scratch.resumes = 0
@@ -154,8 +158,13 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 	linear := re.linear && !re.longest && !re.not_empty
 	words: int
 	if linear {
-		words = visited_words(re, width)
-		m.room = visited_room(re, s)
+		m.rows, m.radix = re.visited.rows, nil
+		if re.visited.counters != nil {
+			m.rows, m.radix = counted_rows(re, len(s) + 1, scratch)
+		}
+		rows := total_rows(re, m.rows)
+		words = (rows * width + 63) / 64
+		m.room = visited_room(re, rows, len(s) + 1)
 		if m.room < 0 && re.ecma {
 			return false, MEMORY_ERROR
 		}
@@ -188,17 +197,33 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 	return try_starts(&m, false, false)
 }
 
-// The words of the visited set of a search of `re` over `width` places.
+// The visited set's rows of `re`'s program laid out with `rows`, one an instruction for nil.
 @(private = "file")
-visited_words :: proc(re: ^Regex, width: int) -> int {
-	return ((int(re.visited.rows[len(re.insts)]) if re.visited.rows != nil else len(re.insts)) * width + 63) / 64
+total_rows :: proc(re: ^Regex, rows: []int) -> int {
+	return rows[len(re.insts)] if rows != nil else len(re.insts)
 }
 
-// The bytes a linear search of `re` in `s` may take beside its sets, negative when the sets alone pass the cap. A jq
-// search past it runs Oniguruma's way, with its retry limit, so the automaton answers a jq search only within it.
+// The rows of a program with counter loops over `places` places, each loop's count held to what it can reach there:
+// past its least count an iteration that reads nothing fails, so each reads a character.
 @(private = "file")
-visited_room :: proc(re: ^Regex, s: string) -> int {
-	return MAX_BYTES - visited_words(re, len(s) + 1) * 8 * (2 if re.visited.owner != nil else 1)
+counted_rows :: proc(re: ^Regex, places: int, scratch: ^Scratch) -> (rows, radix: []int) {
+	v := re.visited
+	n := len(re.insts)
+	resize(&scratch.rows, n + 1 + len(v.counters))
+	rows, radix = scratch.rows[:n + 1], scratch.rows[n + 1:]
+	for c, k in v.counters {
+		radix[k] = min(c.most, c.least + places) + 1
+	}
+	lay_out_rows(v, rows, radix)
+	return
+}
+
+// The bytes a linear search of `re` with `rows` over `places` places may take beside its sets, negative when the sets
+// alone pass the cap. A jq search past it runs Oniguruma's way, with its retry limit, so the automaton answers a jq
+// search only within it.
+@(private = "file")
+visited_room :: proc(re: ^Regex, rows, places: int) -> int {
+	return MAX_BYTES - (rows * places + 63) / 64 * 8 * (2 if re.visited.owner != nil else 1)
 }
 
 // Frees a deep search's array rather than keep it for the next.
@@ -350,26 +375,45 @@ step :: #force_inline proc(re: ^Regex, ins: Inst, s: string, pos: int) -> int {
 }
 
 // The visited set's row of instruction `pc` at `pos`, past its first one for each loop around it whose iteration has
-// matched nothing up to `pos` (`Visited.rows`). Those loops are the innermost ones, since an iteration began no earlier
-// than the one around it.
+// matched nothing up to `pos` (`Visited.rows`), in the block of the counts of the counter loops around it. Those loops
+// are the innermost ones, since an iteration began no earlier than the one around it.
 @(private = "file")
 row_of :: #force_inline proc(m: ^Matcher, pc, pos: int) -> int {
-	v := m.re.visited
-	if v.rows == nil {
+	if m.rows == nil {
 		return pc
 	}
-	row := int(v.rows[pc])
+	v := m.re.visited
+	row := m.rows[pc]
 	for l := v.loop_of[pc]; l >= 0 && m.slots[v.loops[l][0]] == pos; l = v.loops[l][1] {
 		row += 1
+	}
+	if m.radix != nil {
+		row += v.block[pc] * counts_block(m, v, pc)
 	}
 	return row
 }
 
+// Which block of rows the counts of the counter loops around `pc` give it, the innermost count the lowest digit.
+@(private = "file")
+counts_block :: proc(m: ^Matcher, v: ^Visited, pc: int) -> int {
+	block, times := 0, 1
+	for l := int(v.counter_of[pc]); l >= 0; l = v.counters[l].outer {
+		block += m.slots[v.counters[l].slot] * times
+		times *= m.radix[l]
+	}
+	return block
+}
+
 // The row of a Rep's body past where the Rep began, where no loop's iteration has matched nothing.
 @(private = "file")
-stop_row :: #force_inline proc(re: ^Regex, pc: int) -> int {
-	rows := re.visited.rows
-	return int(rows[pc + 1]) if rows != nil else pc + 1
+stop_row :: #force_inline proc(m: ^Matcher, pc: int) -> int {
+	if m.rows == nil {
+		return pc + 1
+	}
+	if m.radix != nil {
+		return m.rows[pc + 1] + m.re.visited.block[pc + 1] * counts_block(m, m.re.visited, pc + 1)
+	}
+	return m.rows[pc + 1]
 }
 
 // Marks the pair of `row` at `pos` as visited, or returns false when it already was. A pair visited inside a
@@ -668,7 +712,7 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 				// Under the set an unbounded repeat marks the stops past where it began in its body's row, which `run`
 				// never visits, and walks no further than a stop an earlier walk marked: that walk tries the stops from
 				// there. Past where it began, no loop's iteration has matched nothing, so the row is the first.
-				row := stop_row(re, pc) if SET else 0
+				row := stop_row(m, pc) if SET else 0
 				_ = row
 				when SET {
 					if ins.b < 0 && p > pos && !first_visit(m, row, p) {
@@ -714,12 +758,19 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 				pc = int(ins.b)
 				break
 			}
-			push_branch(m, {kind = .Branch, pc = ins.b if ins.op == .Count else i32(pc + 2), a = pos}, SET) or_return
+			push_branch(m, {kind = .Branch, pc = ins.b if ins.op == .Count else i32(pc + 2), a = pos, b = len(m.log) when SET else 0}, SET) or_return
 			pc = pc + 2 if ins.op == .Count else int(ins.b)
 		case .Count_Next:
 			push(m, {kind = .Restore, a = int(ins.a), b = slots[ins.a]})
 			slots[ins.a] += 1
 			pc = int(ins.b)
+		case .Count_Check:
+			loop := insts[ins.b]
+			if slots[ins.a] != pos || slots[loop.a] < int(insts[ins.b + 1].a) {
+				pc += 1
+			} else {
+				ok = false
+			}
 		case .Call, .Return, .Mem_Start, .Mem_End, .Limit_Save, .Limit_Cut, .Limit_Restore, .Limit_Clear:
 			when EXT {
 				ok = call_or_limit(m, ins, &pc, pos)

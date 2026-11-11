@@ -10,7 +10,8 @@
 - `stury schema gen SCHEMA [--package NAME] [--format-assert]` writes the Odin types a model reads a schema's values
   with, and exits 1 naming the keyword where no type spells one. Library: `schema.write_odin`. `oneOf`, `uniqueItems`,
   `not`, `if`, `contains`, `propertyNames`, `patternProperties` and the dependents are spelled as model rules:
-  `model.Union_Mode.One_Match`, the tag item `unique` and `model.register_applies`.
+  `model.Union_Mode.One_Match`, the tag item `unique` and `model.register_schema`, which takes a JSON Schema fragment
+  for a type.
 
 - `stury schema sample --to csv` writes the union of the rows' members as its columns, an absent member as an empty cell,
   and refuses a nested cell.
@@ -204,15 +205,24 @@
   position: `child_at` on a table with a width is one step whatever the index.
 
 - `model.dump` and `model.dump_stream` write a value by its model: never a `write_only` member, and with `Dump_Opts`
-  leaving out the members its `Fields_Set` does not hold (`exclude_unset`), that hold null (`exclude_none`) or that
-  equal their default (`exclude_defaults`). `check` validates what the dump writes first and refuses a value that
-  fails as `.Check_Failed`.
-- `Load_Opts{partial = true}` reads a patch: the structs `merge` descends into miss no member and take no default.
-  `model.merge` copies the members a patch's `Fields_Set` holds and its captured members into an existing value, struct
-  members with their own set member by member.
+  leaving out the members that hold null where their `Fields_Set` bit is clear (`exclude_unset`), that hold null
+  (`exclude_none`) or that equal their default (`exclude_defaults`). The field tag `omitunset` leaves out one member
+  as `exclude_unset` does, and a struct with no `Fields_Set` refuses it. A CSV dump writes a member it leaves out as an
+  empty cell. `check` validates what the dump writes first and refuses a value that fails as `.Check_Failed`.
+- `model.patch(&m, &existing, body)` applies a patch text: the members' rules judge the patch, the members it leaves
+  out keep what `existing` holds, struct validators and applicators judge the merged value, and `existing` is written
+  only when nothing failed.
+- The format tag names and shapes a member (a rename, `-`, `omitempty`, `omitunset`, `required`, `unknown`) and
+  `model:` holds its rules and roles. `required` with `optional` is refused, and a refusal of `required` with
+  `omitempty` or `omitunset` names the tag.
+- `load`, `validate` and a schema's check list failures in one order: by the value's path, a value before what it
+  holds. An applicator runs when a member failed.
+- `model.compile` and `schema.bind` take `json.checks(spec, opts)` or `dsv.checks(spec, opts)`, the checks of a format
+  and the layout they read by. `json.reads` and `dsv.reads` serve a plan made from a type and link no model check.
+- `register_after` takes several validators for one member, run in the order they were registered.
 - `schema.write_odin` writes the Odin source of the types of a description's values, with a `register` procedure for
   the rules no tag holds, and refuses a keyword no type spells as `.Unsupported`, naming it.
-- A model's `not_null` tag item keeps null out of a pointer member, which otherwise reads null as nil. A struct's
+- A model's `not_null` tag item keeps null out of a pointer or `Maybe` member, which otherwise reads null as nil. A struct's
   `extra` member may be a `map[string]T`, which judges each member it captures as a `T`, and the Load schema describes
   it as `additionalProperties`. A struct registered with `.Forbid` refuses an unknown member when it has no required
   member too. A `union {}` member reads only null.

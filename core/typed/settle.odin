@@ -51,7 +51,7 @@ load_struct :: proc(b: ^Builder, owner: typeid, at: i32, f: ^Field, m: ^Meta, me
 	n, n_after := 0, 0
 	for x in members {
 		n += 1 if !x.required && x.make != nil else 0
-		n_after += 1 if x.after.call != nil else 0
+		n_after += len(x.afters)
 	}
 	checks := b.model.validators(b.model, owner) if b.model.validators != nil else nil
 	validated := n_after > 0 || len(checks) > 0
@@ -82,8 +82,8 @@ load_struct :: proc(b: ^Builder, owner: typeid, at: i32, f: ^Field, m: ^Meta, me
 	}
 	n_after = 0
 	for x, i in members {
-		if x.after.call != nil {
-			afters[n_after] = {i32(i), owned_copy(b, x.name), x.offset, x.after}
+		for v in x.afters {
+			afters[n_after] = {i32(i), owned_copy(b, x.name), x.offset, 0 if x.required else x.type.size, v}
 			n_after += 1
 		}
 	}
@@ -106,7 +106,7 @@ load_struct :: proc(b: ^Builder, owner: typeid, at: i32, f: ^Field, m: ^Meta, me
 // Closes a struct of model `sm`: fills its `Fields_Set` and its defaults. Returns the refusal, if memory ran out.
 @(cold)
 @(private)
-settle :: #force_no_inline proc "contextless" (h: ^Reader, sm: ^Struct_Model, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64) -> (kind: core.Typed_Error_Kind, reported: bool) {
+settle :: #force_no_inline proc "contextless" (h: ^Check, sm: ^Struct_Model, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64) -> (kind: core.Typed_Error_Kind, reported: bool) {
 	context = h.ctx
 	base := uintptr(f.data) if f.seen != 0 else uintptr(regs.c)
 	fields := ([^]Field)(owner.first)
@@ -125,16 +125,16 @@ settle :: #force_no_inline proc "contextless" (h: ^Reader, sm: ^Struct_Model, f:
 		}
 	}
 	if sm.validate != nil {
-		return .None, sm.validate(h, sm, f, owner, regs, at, base)
+		return .None, sm.validate(h, f, owner, regs, at, base)
 	}
 	return .None, false
 }
 
-// Runs the validators of the struct that closes at `at`, whose members start at `base`. Returns whether one reported a
-// failure, which has been recorded.
+// The load's `Close_Validators`: a member's validator runs when the input had the member.
 @(cold)
-validate_closed :: #force_no_inline proc "contextless" (h: ^Reader, sm: ^Struct_Model, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64, base: uintptr) -> bool {
+validate_closed :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64, base: uintptr) -> bool {
 	context = h.ctx
+	sm := h.plan.meta[owner.meta].model
 	path := make([dynamic]core.Step, context.temp_allocator)
 	steps_of(h, {f.a, f.b, f.c}, false, &path)
 	slice.reverse(path[:])
@@ -142,16 +142,9 @@ validate_closed :: #force_no_inline proc "contextless" (h: ^Reader, sm: ^Struct_
 	for a, k in sm.afters {
 		seen[k] = member_seen(h, f, owner, regs, a.member)
 	}
-	entries: []core.Error_Entry
-	if c := (^Check)(h); c.sink != nil {
-		entries = c.sink.entries[c.floor:]
-	}
-	verdicts := make([dynamic]Verdict, context.temp_allocator)
-	judge_struct(sm, base, path[:], entries, seen, &verdicts)
-	for v in verdicts {
-		report_verdict(h, path[:], v, at)
-	}
-	return len(verdicts) > 0
+	// A patch's struct is judged whole once it is merged.
+	failed, _ := close_struct(sm, base, path[:], seen, &h.first, h.sink, h.floor, at, !partial(h, owner))
+	return failed
 }
 
 // Whether `key` names a read_only member of the struct of `m`, which a load leaves out.

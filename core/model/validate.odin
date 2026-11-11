@@ -1,6 +1,7 @@
 package model
 
 import "base:runtime"
+import "core:strings"
 import regex "../regex"
 import spell "../spell"
 import core ".."
@@ -8,23 +9,25 @@ import rules "../rules"
 import typed "../typed"
 import write "../write"
 
-// Judges `v` by its model's rules as a load of `marshal(v)` judges that text: each value's rules, and what a write
-// refuses, a float that is not finite and an enum value no member has. A number is judged as its text, the shortest
+// Judges `v` by its model's rules as a load of `marshal(v)` judges that text: each value's rules, its applicators, and
+// what a write refuses, a float that is not finite and an enum value no member has. An applicator judges the text a
+// write of its value gives, and reports before what fails under the value. A number is judged as its text, the shortest
 // spelling that reads back as its value. Every refusal goes to `sink` as a `core.Error_Entry` with its path, up to the
 // sink's limit, and with no sink the first ends the walk. A write-only member is not walked, as a write skips it. Returns
 // the first. It allocates nothing for a value that passes but where it lists a map or a captured struct's members, or
 // matches a pattern.
 validate :: proc(m: ^Model($T), v: ^T, sink: ^typed.Sink = nil) -> core.Error {
-	return validate_value(&m.plan, v, sink)
+	return validate_value(&m.plan, v, sink, judging_in(m))
 }
 
 @(private)
-validate_value :: proc(plan: ^typed.Plan, v: rawptr, sink: ^typed.Sink, omits: ^typed.Omits = nil) -> core.Error {
-	j := Judging{visitor = {call = write.Visit(judge), close = close_struct}, plan = plan, sink = sink}
+validate_value :: proc(plan: ^typed.Plan, v: rawptr, sink: ^typed.Sink, judging: ^Applied, omits: ^typed.Omits = nil) -> core.Error {
+	j := Judging{visitor = {call = write.Visit(judge), close = close_struct}, plan = plan, sink = sink, judging = judging}
 	if sink != nil {
 		j.floor = len(sink.entries)
 	}
 	ended := write.visit(plan, v, &j.visitor, omits)
+	typed.order_entries(sink, j.floor)
 	regex.scratch_destroy(&j.scratch)
 	delete(j.steps)
 	if j.first.kind == .None {
@@ -43,13 +46,15 @@ Judging :: struct {
 	first:         core.Typed_Refusal,
 	steps:         [dynamic]core.Step,
 	scratch:       regex.Scratch,
+	judging:       ^Applied,
 }
 
 // The visitor of `validate`: judges the value `at` of record `f` by its rules, or reports the walk's refusal `kind`.
 @(private)
 judge :: proc(v: ^write.Visitor, f: ^typed.Field, at: uintptr, kind: core.Typed_Error_Kind) -> bool {
 	j := (^Judging)(v)
-	fails := rules.Failures{kind} if kind != .None else judged(j, f, at)
+	m := &j.plan.meta[f.meta]
+	fails := rules.Failures{kind} if kind != .None else judged(j, f, at) if m.rule_set > 0 else {}
 	if .No_Memory in fails {
 		j.first = {kind = .No_Memory}
 		return false
@@ -59,7 +64,7 @@ judge :: proc(v: ^write.Visitor, f: ^typed.Field, at: uintptr, kind: core.Typed_
 			return false
 		}
 	}
-	return true
+	return kind != .None || !m.judged || judge_written(j, m, at)
 }
 
 // The rules of record `f`'s leaf that the value at `at` fails.
@@ -119,11 +124,16 @@ judged_hooked :: proc(j: ^Judging, l: ^rules.Leaf, m: ^typed.Meta, at: uintptr) 
 	return {}
 }
 
-// Records a refusal of kind `k` at the record the visitor is called at, and says whether the walk goes on.
+// Records a refusal of kind `k` at the record the visitor is called at, or at `under` inside its value, naming `operand`,
+// and says whether the walk goes on.
 @(private)
-report :: proc(j: ^Judging, k: core.Typed_Error_Kind) -> bool {
+report :: proc(j: ^Judging, k: core.Typed_Error_Kind, under: []core.Step = nil, operand := "") -> bool {
 	clear(&j.steps)
 	if !write.visit_path(&j.visitor, &j.steps) {
+		j.first = {kind = .No_Memory}
+		return false
+	}
+	if _, failed := append(&j.steps, ..under); failed != nil {
 		j.first = {kind = .No_Memory}
 		return false
 	}
@@ -140,7 +150,11 @@ report :: proc(j: ^Judging, k: core.Typed_Error_Kind) -> bool {
 	if c == nil || !typed.sink_room(c, context.allocator) {
 		return false
 	}
-	if !typed.sink_entry(c, core.Error_Entry{kind = k, record = c.record}, j.steps[:], nil, false) {
+	entry := core.Error_Entry{kind = k, record = c.record}
+	if operand != "" {
+		entry.operand = strings.clone(operand, c.entries.allocator)
+	}
+	if !typed.sink_entry(c, entry, j.steps[:], nil, false) {
 		j.first = {kind = .No_Memory}
 		return false
 	}

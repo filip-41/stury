@@ -172,27 +172,42 @@ User :: struct {
 
 reg: model.Registry
 model.register(&reg, User, "role", "member")
-m, err := model.compile(&reg, User, json.reads(.Json))
+m, err := model.compile(&reg, User, json.checks(.Json))
 user: User
 err = model.load(&m, body, &user, &sink)
 ```
 
 - `load` refuses a missing required member and reads no `read_only` member. A `Fields_Set` member records what the
   text held, which `was_set` asks by name. `validate` checks a value built in code by the same rules.
+- The format tag (`json:`, or `stury:` for every format) names a member and shapes it: a rename, `-`, `omitempty`,
+  `omitunset`, `required` and `unknown`, which marks the `extra` member. `model:` holds the rules and the roles:
+  `optional`, `read_only`, `write_only`, `not_null`, bounds, `format=`, `pattern=` and `unique`. `required` with
+  `optional` is refused.
+- `load`, `validate` and `stury check` list the failures in one order: by the value's path, a value before what it
+  holds, and the members of one value in the order of the text.
 - `model.problem(sink.entries[:], "Invalid body", 422)` makes an RFC 9457 problem document of every refusal, a struct
   that `marshal` writes in any format.
-- `load` with `Load_Opts{partial = true}` reads a patch: the root and its struct members that hold a `Fields_Set`
-  miss no member and give none its default, and every other struct reads in full.
-  `model.merge(&m, &existing, &patch)` then copies what the patch's `Fields_Set` holds, and its captured members, into
-  `existing`, from the allocator given, so the patch can be freed.
+- `model.patch(&m, &existing, body)` applies a patch text to a value whose struct has a `Fields_Set`. Each member's
+  rules judge what the patch holds, and a member the patch leaves out, in the root and in the struct members that hold
+  a `Fields_Set`, is neither required nor defaulted and keeps what `existing` holds. Struct validators and
+  applicators judge the merged value, `existing` is written only when nothing failed, and a failure's path is in the
+  patch.
 - `model.dump(&m, &user, opts)` writes the value as `marshal` does by the model's plan, never a `write_only` member.
   `Dump_Opts` leaves out the members a load did not set (`exclude_unset`), that hold null (`exclude_none`) or that
   equal their default (`exclude_defaults`), and `check` refuses a value whose written members fail its rules as
-  `.Check_Failed`.
+  `.Check_Failed`. A member is unset when it holds null and its `Fields_Set` bit is clear, so a value built in code
+  keeps every member it holds. The tag `omitunset` leaves one member out when it is unset, and is refused on a struct
+  with no `Fields_Set`. A CSV dump writes a member it leaves out as an empty cell, which a load reads as absent.
   `dump_stream` writes to a stream. Map keys and a struct's `extra` members are written in the order of their keys.
-- A struct's `extra` member, `map[string]core.Value` or `map[string]T`, holds the members it does not name, each read
-  as its value type. `register(&reg, T, model.Extra.Forbid)` refuses them instead.
-- A pointer member reads null as nil, and with the `not_null` tag item refuses it.
+- A struct's `extra` member, `map[string]core.Value` or `map[string]T` tagged `json:",unknown"`, holds the members it
+  does not name, each read as its value type. `register(&reg, T, model.Extra.Forbid)` refuses them instead.
+- A pointer or `Maybe` member reads null as nil, and with the `not_null` tag item refuses it. A nil `Maybe` with
+  neither `omitempty` nor `omitunset` writes null, so `validate` counts it as present: it meets `required` and a
+  dependent's `requires`. Tag it to have it absent.
+- `register_after(&reg, T, "name", check)` adds a validator a member's value meets once it is read. A member takes
+  several, run in the order they were registered.
+- `Naming.union_tag` is the member every union of the registry is tagged by, and `register(&reg, Union_Rule{type = U,
+  tag = "kind"})` sets the tag of one union.
 - `model.schema(&m, .Load)` and `.Dump` describe what a load takes and what a dump with no option writes.
 
 ## Scan by path
@@ -548,6 +563,6 @@ a reader that has no value for them.
 | [jsonc](../examples/jsonc/main.odin) | comments and edits that keep them |
 | [dsv](../examples/dsv/main.odin) | CSV into structs, dialects, documents, edits, records, writer |
 | [crossformat](../examples/crossformat/main.odin) | one struct and one procedure for CSV and JSON |
-| [model](../examples/model/main.odin) | a model's load, problem document, partial patch, `merge` and `dump` |
+| [model](../examples/model/main.odin) | a model's load, problem document, `patch` and `dump` |
 
 Each prints a fixed answer, kept in its `expected.txt`, and `make test-examples` builds and runs all nine.

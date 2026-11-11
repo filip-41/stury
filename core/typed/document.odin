@@ -70,7 +70,10 @@ Document_Read :: struct($H: typeid) {
 // Checks the value at `node` of `doc` into `target`, a value of `T`, with `plan`, as `unmarshal_node` reads it, with
 // every refusal in `read.sink.entries`. A description's plan takes a nil `T` and any target, which it does not write.
 check_document :: proc(doc: ^core.Document, node: core.Node_Index, target: rawptr, T: typeid, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error {
-	return core.error_of(read_document(doc, node, T, target, plan, read, allocator, true))
+	from := len(read.sink.entries) if read.sink != nil else 0
+	refused := read_document(doc, node, T, target, plan, read, allocator, true)
+	order_entries(read.sink, from)
+	return core.error_of(refused)
 }
 
 @(private)

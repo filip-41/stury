@@ -149,7 +149,7 @@ carriers_of :: proc(reg: ^Registry, reads: ^typed.Format_Reads, allocator: runti
 carrier_plans :: proc(m: ^Model($T), reads: ^typed.Format_Reads, carriers: []typed.Type_Hook, allocator: runtime.Allocator) -> core.Error {
 	uses :: proc(p: ^typed.Plan, x: rawptr) -> bool {
 		for &r in p.meta {
-			if r.data == x || r.before != nil && r.before.plan != nil && uses(r.before.plan, x) {
+			if r.data == x {
 				return true
 			}
 		}

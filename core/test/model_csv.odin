@@ -44,12 +44,12 @@ spelled :: proc(s: ^typed.Sink) -> string {
 }
 
 @(private = "file")
-loaded :: proc(t: ^testing.T, reads: ^typed.Format_Reads, text: string, extra: Maybe(model.Extra) = nil, layout: Maybe(core.As) = nil) -> (out: string, rows: []Row, err: core.Error) {
+loaded :: proc(t: ^testing.T, checks: typed.Format_Checks, text: string, extra: Maybe(model.Extra) = nil) -> (out: string, rows: []Row, err: core.Error) {
 	reg: model.Registry
 	if x, ok := extra.?; ok {
 		_ = model.register_extra(&reg, Row, x)
 	}
-	m, e := model.compile(&reg, []Row, reads, layout = layout)
+	m, e := model.compile(&reg, []Row, checks)
 	walktest.expect_nil(t, e)
 	sink: typed.Sink
 	err = model.load(&m, transmute([]u8)text, &rows, &sink)
@@ -61,7 +61,7 @@ csv_model_agrees_with_json :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	csv, _, _ := loaded(t, dsv.checks(.Csv), "id,name,age\n1,ada,30\n2,b,10\nx,cy,20\n")
-	js, _, _ := loaded(t, json.reads(.Json), `[{"id":1,"name":"ada","age":30},{"id":2,"name":"b","age":10},{"id":"x","name":"cy","age":20}]`)
+	js, _, _ := loaded(t, json.checks(.Json), `[{"id":1,"name":"ada","age":30},{"id":2,"name":"b","age":10},{"id":"x","name":"cy","age":20}]`)
 	testing.expect_value(t, csv, js)
 	testing.expect_value(t, csv, "Too_Short/1/name;Below_Minimum/1/age;Wrong_Kind/2/id;")
 }
@@ -120,7 +120,7 @@ model_loads_a_built_value_as_its_text :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	reg: model.Registry
-	m, e := model.compile(&reg, Row, json.reads(.Json))
+	m, e := model.compile(&reg, Row, json.checks(.Json))
 	walktest.expect_nil(t, e)
 	doc, err := core.build(transmute([]u8)string(`{"id":1,"name":"a","age":10}`), json.as(.Json))
 	walktest.expect_nil(t, err)
@@ -135,11 +135,11 @@ model_loads_a_built_value_as_its_text :: proc(t: ^testing.T) {
 csv_model_without_a_header_binds_by_position :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
-	by_position := dsv.layout(.Csv, {no_header = true})
-	out, rows, _ := loaded(t, dsv.checks(.Csv), "1,ada,30\n2,b,10\nx,cy,20\n", layout = by_position)
+	by_position := dsv.checks(.Csv, {no_header = true})
+	out, rows, _ := loaded(t, by_position, "1,ada,30\n2,b,10\nx,cy,20\n")
 	testing.expect_value(t, out, "Too_Short/1/name;Below_Minimum/1/age;Wrong_Kind/2/id;")
 	testing.expect_value(t, rows[0].name, "ada")
-	out, _, _ = loaded(t, dsv.checks(.Csv), "1,ada\n", layout = by_position)
+	out, _, _ = loaded(t, by_position, "1,ada\n")
 	testing.expect_value(t, out, "Missing_Field/0/age;")
 }
 
@@ -148,7 +148,7 @@ csv_model_of_rows_that_are_no_structs_reads_plainly :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	reg: model.Registry
-	m, e := model.compile(&reg, [][]string, dsv.checks(.Csv), layout = dsv.layout(.Csv, {no_header = true}))
+	m, e := model.compile(&reg, [][]string, dsv.checks(.Csv, {no_header = true}))
 	walktest.expect_nil(t, e)
 	sink: typed.Sink
 	rows: [][]string
@@ -156,7 +156,7 @@ csv_model_of_rows_that_are_no_structs_reads_plainly :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, len(sink.entries), 0)
 	testing.expect_value(t, rows[1][1], "d")
-	numbers_model, ne := model.compile(&reg, [][]int, dsv.checks(.Csv), layout = dsv.layout(.Csv, {no_header = true}))
+	numbers_model, ne := model.compile(&reg, [][]int, dsv.checks(.Csv, {no_header = true}))
 	walktest.expect_nil(t, ne)
 	numbers: [][]int
 	sink2: typed.Sink
@@ -268,7 +268,7 @@ model_reads_ndjson_records_whole_or_streamed :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	reg: model.Registry
-	m, e := model.compile(&reg, Row, json.reads(.Json))
+	m, e := model.compile(&reg, Row, json.checks(.Json))
 	walktest.expect_nil(t, e)
 	text := `{"id":1,"name":"ada","age":30}` + "\n" + `{"id":2,"name":"b","age":10}` + "\n" + `{"id":"x","name":"cy","age":20}` + "\n"
 	spec := json.Spec.Json
@@ -339,7 +339,7 @@ csv_and_json_collect_the_same_codes :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	csv_m, e1 := model.compile(&reg, []Law, dsv.checks(.Csv))
-	json_m, e2 := model.compile(&reg, []Law, json.reads(.Json))
+	json_m, e2 := model.compile(&reg, []Law, json.checks(.Json))
 	walktest.expect_nil(t, e1)
 	walktest.expect_nil(t, e2)
 	cases := [?]Cell{
@@ -384,7 +384,7 @@ csv_empty_cell_is_a_missing_field_and_json_null_is_a_wrong_kind :: proc(t: ^test
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	csv_m, _ := model.compile(&reg, []Law, dsv.checks(.Csv))
-	json_m, _ := model.compile(&reg, []Law, json.reads(.Json))
+	json_m, _ := model.compile(&reg, []Law, json.checks(.Json))
 	csv, _ := law_row(t, &csv_m, &json_m, {"n", "", "null"})
 	testing.expect_value(t, csv, "Missing_Field/0/n;")
 	csv, _ = law_row(t, &csv_m, &json_m, {"o", "", "null"})
@@ -401,7 +401,7 @@ json_map_keys_out_of_range_refuse :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	reg: model.Registry
-	m, e := model.compile(&reg, Keyed, json.reads(.Json))
+	m, e := model.compile(&reg, Keyed, json.checks(.Json))
 	walktest.expect_nil(t, e)
 	sink: typed.Sink
 	v: Keyed
@@ -422,14 +422,14 @@ csv_model_reads_map_rows_and_plain_elements :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(rows), 2)
 	testing.expect_value(t, rows[0]["b"], 2)
 	testing.expect_value(t, spelled(&sink), "Wrong_Kind/1/b;")
-	flags, fe := model.compile(&reg, [][]bool, dsv.checks(.Csv), layout = dsv.layout(.Csv, {no_header = true}))
+	flags, fe := model.compile(&reg, [][]bool, dsv.checks(.Csv, {no_header = true}))
 	walktest.expect_nil(t, fe)
 	bools: [][]bool
 	sink2: typed.Sink
 	_ = model.load(&flags, transmute([]u8)string("true,x\n"), &bools, &sink2)
 	testing.expect_value(t, spelled(&sink2), "Wrong_Kind/0/1;")
 	testing.expect_value(t, bools[0][0], true)
-	whole, we := model.compile(&reg, [][]int, dsv.checks(.Csv), layout = dsv.layout(.Csv, {no_header = true}))
+	whole, we := model.compile(&reg, [][]int, dsv.checks(.Csv, {no_header = true}))
 	walktest.expect_nil(t, we)
 	ints: [][]int
 	sink3: typed.Sink
@@ -495,10 +495,10 @@ csv_model_judges_the_header_once_whole_or_streamed :: proc(t: ^testing.T) {
 csv_model_forbids_a_cell_past_the_last_column_of_a_headerless_row :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
-	by_position := dsv.layout(.Csv, {no_header = true})
-	out, _, _ := loaded(t, dsv.checks(.Csv), "1,ada,30,n,EXTRA\n", extra = model.Extra.Forbid, layout = by_position)
+	by_position := dsv.checks(.Csv, {no_header = true})
+	out, _, _ := loaded(t, by_position, "1,ada,30,n,EXTRA\n", extra = model.Extra.Forbid)
 	testing.expect_value(t, out, "Wrong_Length/0/note;")
-	out, _, _ = loaded(t, dsv.checks(.Csv), "1,ada,30,n,EXTRA\n", layout = by_position)
+	out, _, _ = loaded(t, by_position, "1,ada,30,n,EXTRA\n")
 	testing.expect_value(t, out, "")
 }
 
@@ -509,22 +509,37 @@ Patch_Row :: struct {
 	set:  model.Fields_Set,
 }
 
-// A partial read of a record misses no column and no cell, and a table's rows, which no merge descends into, read in full.
+// A patch of a record misses no column and no cell, and a table, whose rows hold no set, takes no patch.
 @(test)
-csv_model_partial_record_misses_nothing :: proc(t: ^testing.T) {
+csv_model_patch_of_a_record_misses_nothing :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	m, e := model.compile(nil, Patch_Row, dsv.checks(.Csv))
 	walktest.expect_nil(t, e)
 	for text in ([]string{"name\nada\n", "id,name\n,ada\n"}) {
-		it := dsv.records_open(transmute([]u8)text, dsv.Spec.Csv)
-		defer records.close(&it)
-		row: Patch_Row
-		err, _ := model.read(&it, &m, &row, opts = {partial = true})
-		walktest.expect_nil(t, err)
-		testing.expect(t, row.name == "ada" && !model.was_set(&m, Patch_Row, row.set, "id"))
+		row := Patch_Row{id = 4}
+		walktest.expect_nil(t, model.patch(&m, &row, transmute([]u8)text))
+		testing.expect(t, row.name == "ada" && row.id == 4 && !model.was_set(&m, Patch_Row, row.set, "id"))
 	}
 	table, _ := model.compile(nil, []Patch_Row, dsv.checks(.Csv))
 	rows: []Patch_Row
-	testing.expect(t, model.load(&table, transmute([]u8)string("name\nada\n"), &rows, opts = {partial = true}) != nil)
+	testing.expect(t, model.patch(&table, &rows, transmute([]u8)string("name\nada\n")) != nil)
+}
+
+// A member a dump leaves out writes an empty cell, which a load reads back as absent.
+@(test)
+csv_model_dump_leaves_excluded_cells_empty :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	reg: model.Registry
+	m, e := model.compile(&reg, []Row, dsv.checks(.Csv))
+	walktest.expect_nil(t, e)
+	rows := []Row{{1, "ada", 30, ""}, {2, "bo", 40, "x"}}
+	text, err := model.dump(&m, &rows, {exclude_defaults = true})
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, string(text), "id,name,age,note\n1,ada,30,\n2,bo,40,x\n")
+	back: []Row
+	walktest.expect_nil(t, model.load(&m, text, &back))
+	testing.expect_value(t, len(back), 2)
+	testing.expect_value(t, back[0].note, "")
 }

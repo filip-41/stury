@@ -53,7 +53,7 @@ compiled :: proc(t: ^testing.T) -> (m: model.Model(Outer), reg: model.Registry) 
 	_ = model.register(&reg, Pair, ordered)
 	_ = model.register(&reg, Outer, outer_named)
 	err: core.Error
-	m, err = model.compile(&reg, Outer, json.reads(.Json))
+	m, err = model.compile(&reg, Outer, json.checks(.Json))
 	walktest.expect_nil(t, err)
 	return
 }
@@ -145,7 +145,7 @@ csv_rows_run_the_validators_as_json_objects_do :: proc(t: ^testing.T) {
 	_ = model.register(&reg, Account, "user", short_user)
 	_ = model.register(&reg, Account, no_user_name_password)
 	csv_m, e1 := model.compile(&reg, []Account, dsv.checks(.Csv))
-	json_m, e2 := model.compile(&reg, []Account, json.reads(.Json))
+	json_m, e2 := model.compile(&reg, []Account, json.checks(.Json))
 	walktest.expect_nil(t, e1)
 	walktest.expect_nil(t, e2)
 	sink: typed.Sink
@@ -201,7 +201,7 @@ a_missing_member_does_not_hide_the_validators_of_the_others :: proc(t: ^testing.
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	_ = model.register(&reg, Req, "b", b_not_x)
-	m, err := model.compile(&reg, Req, json.reads(.Json))
+	m, err := model.compile(&reg, Req, json.checks(.Json))
 	walktest.expect_nil(t, err)
 	v: Req
 	sink: typed.Sink
@@ -210,4 +210,36 @@ a_missing_member_does_not_hide_the_validators_of_the_others :: proc(t: ^testing.
 	validated: typed.Sink
 	_ = model.validate(&m, &v, &validated)
 	testing.expect_value(t, spelled(&validated), "Custom(b is x)/b;")
+}
+
+@(private = "file")
+Optional :: struct {
+	a: int `model:"optional"`,
+	b: int,
+}
+
+@(private = "file")
+ran :: proc(v: int, r: ^model.Report) {
+	model.fail(r, "ran")
+}
+
+// An optional member the input left out is not judged by its validator, in a load and in `validate`.
+@(test)
+an_absent_optional_member_runs_no_validator :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	reg: model.Registry
+	_ = model.register(&reg, Optional, "a", ran)
+	m, err := model.compile(&reg, Optional, json.checks(.Json))
+	walktest.expect_nil(t, err)
+	cases := [2][2]string{{`{"b":1}`, ""}, {`{"a":2,"b":1}`, "Custom(ran)/a;"}}
+	for c in cases {
+		text, want := c[0], c[1]
+		v: Optional
+		loaded, validated: typed.Sink
+		_ = model.load(&m, transmute([]u8)text, &v, &loaded)
+		testing.expect_value(t, spelled(&loaded), want)
+		_ = model.validate(&m, &v, &validated)
+		testing.expect_value(t, spelled(&validated), want)
+	}
 }

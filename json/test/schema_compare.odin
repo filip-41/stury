@@ -193,8 +193,8 @@ compare_yes_is_never_refuted :: proc(t: ^testing.T) {
 				if !read_schema(t, &a, from) || !read_schema(t, &b, to) {
 					return
 				}
-				ba, ea := schema.bind(&a.c, json.as(.Json))
-				bb, eb := schema.bind(&b.c, json.as(.Json))
+				ba, ea := schema.bind(&a.c, json.checks(.Json))
+				bb, eb := schema.bind(&b.c, json.checks(.Json))
 				defer schema.unbind(&ba)
 				defer schema.unbind(&bb)
 				if !testing.expect(t, ea == nil && eb == nil) {
@@ -318,7 +318,7 @@ compare_long_reference_chain :: proc(t: ^testing.T) {
 compare_witness_under_csv_is_a_table :: proc(t: ^testing.T) {
 	old := `{"type":"array","items":{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string"}},"required":["a","b"]}}`
 	new := `{"type":"array","items":{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string"},"c":{"type":"string"}},"required":["a","b","c"]}}`
-	c, ok := compare_texts(t, old, new, as = dsv.as(.Csv), reads = dsv.checks(.Csv))
+	c, ok := compare_texts(t, old, new, as = dsv.as(.Csv), reads = dsv.checks(.Csv).reads)
 	if !ok {
 		return
 	}

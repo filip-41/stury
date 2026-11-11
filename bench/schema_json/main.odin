@@ -47,7 +47,7 @@ judge :: proc(line: string) -> string {
 	if cerr != nil {
 		return fmt.tprint("E", cerr)
 	}
-	bound, berr := schema.bind(&compiled, json.as(.Json))
+	bound, berr := schema.bind(&compiled, json.checks(.Json))
 	defer schema.unbind(&bound)
 	if berr != nil {
 		return fmt.tprint("U", berr)

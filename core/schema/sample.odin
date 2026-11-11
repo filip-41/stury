@@ -72,7 +72,7 @@ sample :: proc(d: ^rules.Description, as: core.As, opts := Sample_Options{}, all
 	defer asserted_restore(d, asserted)
 	c := compile_description(d)
 	defer destroy(&c)
-	b := bind(&c, as, opts.reads) or_return
+	b := bind(&c, {opts.reads, as}) or_return
 	defer unbind(&b)
 	arena: virtual.Arena
 	if virtual.arena_init_growing(&arena) != nil {

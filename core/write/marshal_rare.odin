@@ -330,13 +330,13 @@ member_key :: proc(w: ^Walker, r: ^typed.Field, $T: Tree, $put: Put) -> core.Typ
 }
 
 // Whether a write leaves the member at `v` out: always for a model's write-only member, where the walker's `omits` says
-// so, and under `omitempty` for a zero number, false, an empty string, a nil, an empty list or map or bit set. An enum, a
-// struct and a fixed array are kept whatever they hold.
+// so, under `omitunset` for a null its struct's `Fields_Set` lacks, and under `omitempty` for a zero number, false, an
+// empty string, a nil, an empty list or map or bit set. An enum, a struct and a fixed array are kept whatever they hold.
 @(cold)
 @(private)
 is_empty :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> bool {
 	m := &w.meta[r.meta]
-	if left_out(w, r, v) {
+	if left_out(w, r, v) || m.omit_unset && unset(m, r, v) {
 		return true
 	}
 	if !m.omit_empty {
@@ -374,6 +374,19 @@ is_empty :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> bool {
 		return scalar_type((^typed.Scalar)(v)^) == nil
 	}
 	return false
+}
+
+// Whether the member of record `r` and meta `m` at `v` holds null and its struct's `Fields_Set` lacks it, so that no load
+// gave it the null.
+unset :: proc(m: ^typed.Meta, r: ^typed.Field, v: uintptr) -> bool {
+	if m.owner == nil || m.owner.fields_set == 0 || !holds_null(m, r.kind, v) {
+		return false
+	}
+	if m.bit < 0 {
+		return true
+	}
+	set := (^typed.Fields_Set)(v - uintptr(r.offset) + uintptr(m.owner.fields_set - 1))
+	return set.bits[m.bit / 64] >> uint(m.bit % 64) & 1 == 0
 }
 
 // Whether a model's write leaves the member at `v` out: a write_only member, or one the walker's `omits` leaves out.

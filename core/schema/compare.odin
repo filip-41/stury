@@ -157,7 +157,7 @@ judge_of :: proc(s: ^Side, n: rules.Node_Index) -> ^Bound {
 	defer s.d.root = root
 	j := new(Bound)
 	err: core.Error
-	j^, err = bind(&s.c, s.as, s.reads)
+	j^, err = bind(&s.c, {s.reads, s.as})
 	if err != nil {
 		free(j)
 		j = nil

@@ -6,12 +6,21 @@ import "core:strings"
 import "core:testing"
 import "core:time"
 import core "../../core"
+import rules "../../core/rules"
 import typed "../../core/typed"
 import write "../../core/write"
 import schema "../../core/schema"
 import json ".."
 import model "../../core/model"
 import walktest "../../walktest"
+
+// The description of the JSON Schema `text`, in the context allocator.
+@(private = "file")
+fragment :: proc(text: string) -> ^rules.Description {
+	s, err := json.load_schema(transmute([]u8)text)
+	assert(err == nil)
+	return s.compiled.description
+}
 
 @(private = "file")
 Stamped :: struct {
@@ -62,7 +71,7 @@ load_one :: proc(m: ^model.Model($T), text: string) -> (v: T, kind: core.Typed_E
 a_time_reads_rfc_3339_into_utc :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
-	m, compiled := model.compile(nil, Stamped, json.reads(.Json))
+	m, compiled := model.compile(nil, Stamped, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	Case :: struct {
 		text: string,
@@ -102,7 +111,7 @@ a_time_reads_rfc_3339_into_utc :: proc(t: ^testing.T) {
 a_uuid_reads_either_case_and_writes_lowercase :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
-	m, compiled := model.compile(nil, Tagged, json.reads(.Json))
+	m, compiled := model.compile(nil, Tagged, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	v, kind := load_one(&m, `{"id": "F81D4FAE-7DEC-11D0-A765-00a0c91e6bf6"}`)
 	testing.expect_value(t, kind, core.Typed_Error_Kind.None)
@@ -116,7 +125,7 @@ a_uuid_reads_either_case_and_writes_lowercase :: proc(t: ^testing.T) {
 base64_reads_the_rfc_4648_vectors_and_refuses_other_spellings :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
-	m, compiled := model.compile(nil, Blob, json.reads(.Json))
+	m, compiled := model.compile(nil, Blob, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	vectors := [?][2]string{{"", ""}, {"f", "Zg=="}, {"fo", "Zm8="}, {"foo", "Zm9v"}, {"foob", "Zm9vYg=="}, {"fooba", "Zm9vYmE="}, {"foobar", "Zm9vYmFy"}}
 	for x in vectors {
@@ -135,7 +144,7 @@ base64_reads_the_rfc_4648_vectors_and_refuses_other_spellings :: proc(t: ^testin
 a_decimal_keeps_every_digit :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
-	m, compiled := model.compile(nil, Priced, json.reads(.Json))
+	m, compiled := model.compile(nil, Priced, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	digits := strings.concatenate({"-", strings.repeat("9", 300), ".5e-7"})
 	v, kind := load_one(&m, strings.concatenate({`{"price": `, digits, `}`}))
@@ -156,7 +165,7 @@ a_decimal_keeps_every_digit :: proc(t: ^testing.T) {
 an_email_is_judged_by_its_format :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
-	m, compiled := model.compile(nil, Contact, json.reads(.Json))
+	m, compiled := model.compile(nil, Contact, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	_, kind := load_one(&m, `{"mail": "ada@example.com"}`)
 	testing.expect_value(t, kind, core.Typed_Error_Kind.None)
@@ -224,7 +233,7 @@ a_custom_carrier_reads_its_type_through_another :: proc(t: ^testing.T) {
 	model.register(&reg, model.Custom(Cents, string){cents_from, cents_to})
 	model.register(&reg, model.Custom(Code, [2]i32){code_from, code_to})
 	model.register(&reg, model.Type_Rule{Cents, `pattern=^[0-9]+(?:\.[0-9]{1,2})?$`})
-	m, compiled := model.compile(&reg, Bill, json.reads(.Json))
+	m, compiled := model.compile(&reg, Bill, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	v, kind := load_one(&m, `{"total": "12.5", "codes": [[1, 2]]}`)
 	testing.expect_value(t, kind, core.Typed_Error_Kind.None)
@@ -260,7 +269,7 @@ Event :: struct {
 a_schema_with_an_asserted_format_names_sturys_dialect :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
-	m, compiled := model.compile(nil, Event, json.reads(.Json))
+	m, compiled := model.compile(nil, Event, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	d, described := model.schema(&m, .Load)
 	walktest.expect_nil(t, described)
@@ -270,7 +279,7 @@ a_schema_with_an_asserted_format_names_sturys_dialect :: proc(t: ^testing.T) {
 	Dated :: struct {
 		day: string `model:"format=date,pattern=^2"`,
 	}
-	n, _ := model.compile(nil, Dated, json.reads(.Json))
+	n, _ := model.compile(nil, Dated, json.checks(.Json))
 	e, _ := model.schema(&n, .Load)
 	text, _ = schema.write(&e, json.as(.Json))
 	testing.expect(t, strings.contains(string(text), `"pattern":"^2","format":"date","allOf":[{"pattern":"^(?:\\d{4}-`), string(text))
@@ -305,7 +314,7 @@ an_enum_rule_renames_members_or_spells_integers :: proc(t: ^testing.T) {
 	model.register_naming(&reg, {enum_members = .Kebab})
 	model.register(&reg, model.Enum_Rule{type = Shade, renames = {{"Green", "verde"}}})
 	model.register(&reg, model.Enum_Rule{type = Size, by_number = true})
-	m, compiled := model.compile(&reg, Paint, json.reads(.Json))
+	m, compiled := model.compile(&reg, Paint, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	text := `{"shade":"light-blue","size":-1,"by":{"verde":2},"shades":["dark-red","verde"]}`
 	v, kind := load_one(&m, text)
@@ -329,11 +338,11 @@ an_enum_rule_renames_members_or_spells_integers :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(string(schema_text), `"enum":[-1,7]`), string(schema_text))
 	clash: model.Registry
 	model.register(&clash, model.Enum_Rule{type = Shade, renames = {{"Green", "Dark_Red"}}})
-	_, refused := model.compile(&clash, Paint, json.reads(.Json))
+	_, refused := model.compile(&clash, Paint, json.checks(.Json))
 	testing.expect_value(t, refused_as(refused), core.Typed_Error_Kind.Bad_Tag)
 	unknown: model.Registry
 	model.register(&unknown, model.Enum_Rule{type = Shade, renames = {{"Purple", "p"}}})
-	_, refused = model.compile(&unknown, Paint, json.reads(.Json))
+	_, refused = model.compile(&unknown, Paint, json.checks(.Json))
 	testing.expect_value(t, refused_as(refused), core.Typed_Error_Kind.Bad_Tag)
 	Twin :: enum {
 		Ab,
@@ -341,7 +350,7 @@ an_enum_rule_renames_members_or_spells_integers :: proc(t: ^testing.T) {
 	}
 	kebab: model.Registry
 	model.register_naming(&kebab, {enum_members = .Kebab})
-	_, refused = model.compile(&kebab, struct{ twin: Twin }, json.reads(.Json))
+	_, refused = model.compile(&kebab, struct{ twin: Twin }, json.checks(.Json))
 	testing.expect_value(t, refused_as(refused), core.Typed_Error_Kind.Bad_Tag)
 }
 
@@ -374,7 +383,7 @@ a_union_rule_names_the_member_that_tags_its_arm :: proc(t: ^testing.T) {
 	reg: model.Registry
 	model.register_naming(&reg, {union_tag = "type"})
 	model.register(&reg, model.Union_Rule{type = Shape, tag = "kind"})
-	m, compiled := model.compile(&reg, Drawing, json.reads(.Json))
+	m, compiled := model.compile(&reg, Drawing, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	text := `{"shapes":[{"kind":"Circle","r":1},{"side":2,"kind":"Square"}],"main":{"kind":"Square","side":3}}`
 	v, kind := load_one(&m, text)
@@ -399,7 +408,7 @@ a_union_rule_names_the_member_that_tags_its_arm :: proc(t: ^testing.T) {
 		f64,
 	}
 	model.register(&reg, model.Union_Rule{type = Loose, tag = "kind"})
-	loose, _ := model.compile(&reg, struct{ s: Loose }, json.reads(.Json))
+	loose, _ := model.compile(&reg, struct{ s: Loose }, json.checks(.Json))
 	_, kind = load_one(&loose, `{"s":{"kind":"","r":1}}`)
 	testing.expect_value(t, kind, core.Typed_Error_Kind.Not_A_Member)
 	Kind_Member :: struct {
@@ -411,7 +420,7 @@ a_union_rule_names_the_member_that_tags_its_arm :: proc(t: ^testing.T) {
 		Kind_Member,
 	}
 	model.register(&reg, model.Union_Rule{type = Clash, tag = "kind"})
-	_, refused := model.compile(&reg, struct{ c: Clash }, json.reads(.Json))
+	_, refused := model.compile(&reg, struct{ c: Clash }, json.checks(.Json))
 	testing.expect_value(t, refused_as(refused), core.Typed_Error_Kind.Unsupported)
 }
 
@@ -436,7 +445,7 @@ a_first_match_union_reads_the_first_arm_that_reads_its_text :: proc(t: ^testing.
 	model.register_naming(&reg, {union_tag = "kind"})
 	model.register(&reg, model.Union_Rule{type = Port, mode = .First_Match})
 	model.register(&reg, model.Type_Rule{u16, ">=1"})
-	m, compiled := model.compile(&reg, Endpoint, json.reads(.Json))
+	m, compiled := model.compile(&reg, Endpoint, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	Case :: struct {
 		text: string,
@@ -479,13 +488,13 @@ a_first_match_union_reads_alike_wherever_it_is :: proc(t: ^testing.T) {
 	reg: model.Registry
 	model.register(&reg, model.Union_Rule{type = Reading, mode = .First_Match})
 	model.register(&reg, model.Type_Rule{u8, ">=10"})
-	m, compiled := model.compile(&reg, Readings, json.reads(.Json))
+	m, compiled := model.compile(&reg, Readings, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	v, kind := load_one(&m, `{"list": [5, 20, 300], "maybe": 5, "by": {"a": 20, "b": 5}, "none": null}`)
 	testing.expect_value(t, kind, core.Typed_Error_Kind.None)
 	testing.expectf(t, len(v.list) == 3 && v.list[0] == i64(5) && v.list[1] == u8(20) && v.list[2] == i64(300), "%v", v.list)
 	testing.expectf(t, v.maybe.? == i64(5) && v.by["a"] == u8(20) && v.by["b"] == i64(5) && v.none == nil, "%v %v %v", v.maybe, v.by, v.none)
-	root, rooted := model.compile(&reg, Reading, json.reads(.Json))
+	root, rooted := model.compile(&reg, Reading, json.checks(.Json))
 	walktest.expect_nil(t, rooted)
 	r, read := load_one(&root, `5`)
 	testing.expect(t, read == .None && r == i64(5))
@@ -493,7 +502,7 @@ a_first_match_union_reads_alike_wherever_it_is :: proc(t: ^testing.T) {
 	text, _ := schema.write(&d, json.as(.Json))
 	testing.expect(t, strings.contains(string(text), `{"type":"integer","minimum":10,"maximum":255}`), string(text))
 	plain: model.Registry
-	_, refused := model.compile(&plain, Readings, json.reads(.Json))
+	_, refused := model.compile(&plain, Readings, json.checks(.Json))
 	testing.expect_value(t, refused_as(refused), core.Typed_Error_Kind.Ambiguous_Union)
 }
 
@@ -507,7 +516,7 @@ Moment :: union {
 a_carrier_arm_reads_by_its_carriers_kind :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
-	m, compiled := model.compile(nil, struct{ at: Moment }, json.reads(.Json))
+	m, compiled := model.compile(nil, struct{ at: Moment }, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	v, kind := load_one(&m, `{"at": "2020-01-01T00:00:00Z"}`)
 	testing.expect(t, kind == .None && v.at.(time.Time) == time.unix(1577836800, 0))
@@ -524,45 +533,25 @@ a_carrier_arm_reads_by_its_carriers_kind :: proc(t: ^testing.T) {
 Tags :: distinct []string
 
 @(private = "file")
-Long :: distinct string
-
-@(private = "file")
 Shipping :: struct {
 	kind:    string,
 	card:    Maybe(string) `model:"optional"`,
 	billing: Maybe(string) `model:"optional"`,
 	tags:    Tags,
 	codes:   []i64 `model:"unique"`,
-	extra:   map[string]core.Value `model:"extra"`,
-}
-
-@(private = "file")
-Postal :: struct {
-	kind: Postal_Kind,
-}
-
-@(private = "file")
-Postal_Kind :: enum {
-	post,
-}
-
-@(private = "file")
-Has_Zip :: struct {
-	zip: string,
+	extra:   map[string]core.Value `json:",unknown"`,
 }
 
 @(test)
-applicators_judge_a_load_and_describe_as_their_keywords :: proc(t: ^testing.T) {
+fragments_judge_a_load_and_describe_as_their_keywords :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
 	reg: model.Registry
-	model.register(&reg, model.Type_Rule{Long, "len>=3"})
-	model.register(&reg, model.Applies_Rule{Tags, model.Contains{of = Long, max = 1}})
-	model.register(&reg, model.Applies_Rule{Shipping, model.Dependent{name = "card", requires = {"billing"}}})
-	model.register(&reg, model.Applies_Rule{Shipping, model.Pattern{expression = "^x-", of = i64}})
-	model.register(&reg, model.Applies_Rule{Shipping, model.Names{of = Long}})
-	model.register(&reg, model.Applies_Rule{Shipping, model.Conditional{test = Postal, then = Has_Zip}})
-	m, compiled := model.compile(&reg, Shipping, json.reads(.Json))
+	model.register(&reg, Tags, fragment(`{"contains": {"minLength": 3}, "maxContains": 1}`))
+	model.register(&reg, Shipping, fragment(`{"dependentRequired": {"card": ["billing"]}, "patternProperties": {"^x-": {"type": "integer"}}}`))
+	model.register(&reg, Shipping, fragment(`{"propertyNames": {"minLength": 3}}`))
+	model.register(&reg, Shipping, fragment(`{"if": {"properties": {"kind": {"const": "post"}}, "required": ["kind"]}, "then": {"required": ["zip"]}}`))
+	m, compiled := model.compile(&reg, Shipping, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	Case :: struct {
 		text: string,
@@ -591,6 +580,33 @@ applicators_judge_a_load_and_describe_as_their_keywords :: proc(t: ^testing.T) {
 }
 
 @(private = "file")
+Unique_Inside :: struct {
+	tags: Maybe([]string) `model:"optional,unique"`,
+}
+
+@(private = "file")
+Unique_Then :: struct {
+	inside: Unique_Inside,
+	names:  []string `model:"optional"`,
+	flag:   bool `model:"optional"`,
+}
+
+@(test)
+a_unique_list_held_by_a_maybe_is_judged_once :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	reg: model.Registry
+	m, compiled := model.compile(&reg, Unique_Then, json.checks(.Json))
+	walktest.expect_nil(t, compiled)
+	_, kind := load_one(&m, `{"inside": {"tags": ["a"]}, "names": ["b"], "flag": 1}`)
+	testing.expect_value(t, kind, core.Typed_Error_Kind.Wrong_Kind)
+	_, kind = load_one(&m, `{"inside": {"tags": ["a", "a"]}, "names": ["b"]}`)
+	testing.expect_value(t, kind, core.Typed_Error_Kind.Not_Unique)
+	_, kind = load_one(&m, `{"inside": {"tags": ["a"]}, "names": ["b"], "flag": true}`)
+	testing.expect_value(t, kind, core.Typed_Error_Kind.None)
+}
+
+@(private = "file")
 Either :: union {
 	i64,
 	f64,
@@ -602,7 +618,7 @@ a_one_match_union_refuses_a_value_two_arms_read :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	reg: model.Registry
 	model.register(&reg, model.Union_Rule{type = Either, mode = .One_Match})
-	m, compiled := model.compile(&reg, Either, json.reads(.Json))
+	m, compiled := model.compile(&reg, Either, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	v, kind := load_one(&m, `1.5`)
 	testing.expectf(t, kind == .None && v == f64(1.5), "%v %v", kind, v)
@@ -616,24 +632,220 @@ a_one_match_union_refuses_a_value_two_arms_read :: proc(t: ^testing.T) {
 @(private = "file")
 Boxes :: distinct [][]string
 
-@(private = "file")
-Loop :: distinct string
-
 @(test)
-an_operand_judged_by_its_own_rules_judges_them_and_one_that_reaches_itself_is_refused :: proc(t: ^testing.T) {
+a_judged_value_inside_a_judged_value_is_judged_by_each_fragment :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
 	reg: model.Registry
-	model.register(&reg, model.Type_Rule{Long, "len>=3"})
-	model.register(&reg, model.Applies_Rule{Tags, model.Contains{of = Long}})
-	model.register(&reg, model.Applies_Rule{Boxes, model.Contains{of = Tags, min = 2}})
-	m, compiled := model.compile(&reg, Boxes, json.reads(.Json))
+	model.register(&reg, Tags, fragment(`{"contains": {"minLength": 3}}`))
+	model.register(&reg, Boxes, fragment(`{"contains": {"contains": {"minLength": 3}}, "minContains": 2}`))
+	m, compiled := model.compile(&reg, Boxes, json.checks(.Json))
 	walktest.expect_nil(t, compiled)
 	_, kind := load_one(&m, `[["abc"], ["a", "abcd"]]`)
 	testing.expect_value(t, kind, core.Typed_Error_Kind.None)
 	_, kind = load_one(&m, `[["abc"], ["a"]]`)
 	testing.expect_value(t, kind, core.Typed_Error_Kind.Too_Few)
-	model.register(&reg, model.Applies_Rule{Loop, model.Not{of = Loop}})
-	_, refused := model.compile(&reg, Loop, json.reads(.Json))
+}
+
+@(test)
+validate_and_a_checked_dump_judge_applicators_as_a_load_does :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	reg: model.Registry
+	model.register(&reg, Tags, fragment(`{"contains": {"minLength": 3}, "maxContains": 1}`))
+	model.register(&reg, Shipping, fragment(`{"dependentRequired": {"card": ["billing"]}, "patternProperties": {"^x-": {"type": "integer"}}}`))
+	model.register(&reg, Shipping, fragment(`{"if": {"properties": {"kind": {"const": "post"}}, "required": ["kind"]}, "then": {"required": ["zip"]}}`))
+	m, compiled := model.compile(&reg, Shipping, json.checks(.Json))
+	walktest.expect_nil(t, compiled)
+	pattern_failed := make(map[string]core.Value)
+	pattern_failed["x-a"] = "s"
+	Case :: struct {
+		v:    Shipping,
+		want: core.Typed_Error_Kind,
+	}
+	cases := [?]Case {
+		{{kind = "air", tags = {"ab", "abc"}, codes = {1, 2}}, .None},
+		{{kind = "air", tags = {"ab"}}, .Too_Few},
+		{{kind = "air", tags = {"abc", "abcd"}}, .Too_Many},
+		{{kind = "air", tags = {"abc"}, codes = {1, 1}}, .Not_Unique},
+		// A nil member is written as null, which names it for the dependent.
+		{{kind = "air", card = "1", tags = {"abc"}}, .None},
+		{{kind = "air", tags = {"abc"}, extra = pattern_failed}, .Wrong_Kind},
+		{{kind = "post", tags = {"abc"}}, .Missing_Field},
+	}
+	for &c in cases {
+		testing.expectf(t, refused_as(model.validate(&m, &c.v)) == c.want, "%v: %v", c.v, model.validate(&m, &c.v))
+		text, dumped := model.dump(&m, &c.v, {check = true})
+		testing.expectf(t, refused_as(dumped) == (.None if c.want == .None else .Check_Failed), "%v: %v", c.v, dumped)
+		if c.want == .None {
+			_, kind := load_one(&m, string(text))
+			testing.expectf(t, kind == .None, "%s: %v", text, kind)
+		}
+	}
+	one: model.Registry
+	model.register(&one, model.Union_Rule{type = Either, mode = .One_Match})
+	e, either := model.compile(&one, Either, json.checks(.Json))
+	walktest.expect_nil(t, either)
+	read_twice, read_once := Either(i64(1)), Either(f64(1.5))
+	testing.expect_value(t, refused_as(model.validate(&e, &read_twice)), core.Typed_Error_Kind.Many_Arms)
+	walktest.expect_nil(t, model.validate(&e, &read_once))
+}
+
+// A load and a validate of what it read list the same failures in one order: a value's before those inside it, its
+// applicator's among them, whatever failed beneath it.
+@(test)
+a_load_and_validate_list_failures_in_one_order :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	reg: model.Registry
+	model.register(&reg, Tags, fragment(`{"contains": {"minLength": 3}, "maxContains": 1}`))
+	model.register(&reg, Shipping, fragment(`{"if": {"properties": {"kind": {"const": "post"}}, "required": ["kind"]}, "then": {"required": ["zip"]}}`))
+	m, compiled := model.compile(&reg, Shipping, json.checks(.Json))
+	walktest.expect_nil(t, compiled)
+	listed :: proc(sink: ^typed.Sink) -> string {
+		b := strings.builder_make()
+		for e in sink.entries {
+			strings.write_string(&b, core.entry_code({kind = e.kind}))
+			for s in e.path {
+				name, _ := s.(core.Name)
+				strings.write_byte(&b, '.')
+				strings.write_string(&b, string(name))
+			}
+			strings.write_byte(&b, ' ')
+		}
+		return strings.to_string(b)
+	}
+	v: Shipping
+	loaded, validated: typed.Sink
+	testing.expect(t, model.load(&m, transmute([]u8)string(`{"kind": "post", "card": null, "billing": null, "tags": ["ab"], "codes": [1, 1]}`), &v, &loaded) != nil)
+	testing.expect(t, model.validate(&m, &v, &validated) != nil)
+	testing.expect_value(t, listed(&loaded), listed(&validated))
+	testing.expect_value(t, len(loaded.entries), 3)
+	testing.expect(t, len(loaded.entries[0].path) == 0 && loaded.entries[0].kind == .Missing_Field)
+}
+
+@(private = "file")
+Packed :: struct {
+	xs: []Tags,
+}
+
+@(test)
+a_judged_failure_names_the_path_of_the_value_judged :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	reg: model.Registry
+	model.register(&reg, Tags, fragment(`{"contains": {"minLength": 3}}`))
+	m, compiled := model.compile(&reg, Packed, json.checks(.Json))
+	walktest.expect_nil(t, compiled)
+	at_xs_1 :: proc(t: ^testing.T, err: core.Error, loc := #caller_location) {
+		e, typed_error := err.(core.Typed_Error)
+		testing.expectf(t, typed_error && e.kind == .Too_Few, "%v", err, loc = loc)
+		testing.expectf(t, len(e.steps) == 2 && e.steps[0] == core.Name("xs") && e.steps[1] == core.Index(1), "%v", e.steps, loc = loc)
+	}
+	v: Packed
+	at_xs_1(t, model.load(&m, transmute([]u8)string(`{"xs": [["abc"], ["a"]]}`), &v))
+	v = {xs = {{"abc"}, {"a"}}}
+	at_xs_1(t, model.validate(&m, &v))
+}
+
+@(test)
+a_keyword_registered_twice_judges_both :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	reg: model.Registry
+	model.register(&reg, Tags, fragment(`{"contains": {"minLength": 3}}`))
+	model.register(&reg, Tags, fragment(`{"contains": {"enum": ["a", "b"]}, "minContains": 0, "maxContains": 0}`))
+	m, compiled := model.compile(&reg, Tags, json.checks(.Json))
+	walktest.expect_nil(t, compiled)
+	for c in ([?]struct {
+			text: string,
+			want: core.Typed_Error_Kind,
+		}{{`["abc"]`, .None}, {`[]`, .Too_Few}, {`["ab"]`, .Too_Few}, {`["abc", "a"]`, .Too_Many}}) {
+		_, kind := load_one(&m, c.text)
+		testing.expectf(t, kind == c.want, "%s: %v", c.text, kind)
+	}
+	d, _ := model.schema(&m, .Load)
+	text, _ := schema.write(&d, json.as(.Json))
+	testing.expectf(t, strings.count(string(text), `"contains":`) == 2, "%s", text)
+}
+
+@(private = "file")
+Tree :: struct {
+	k: [dynamic]Tree `model:"optional"`,
+}
+
+@(test)
+a_judged_type_that_holds_itself_judges_each_value_once_at_any_depth :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	reg: model.Registry
+	model.register(&reg, Tree, fragment(`{"propertyNames": {"maxLength": 1}}`))
+	m, compiled := model.compile(&reg, Tree, json.checks(.Json))
+	walktest.expect_nil(t, compiled)
+	DEPTH :: 200
+	b := strings.builder_make()
+	for _ in 0 ..< DEPTH {
+		strings.write_string(&b, `{"k": [`)
+	}
+	strings.write_string(&b, `{"kk": []}`)
+	for _ in 0 ..< DEPTH {
+		strings.write_string(&b, `]}`)
+	}
+	_, kind := load_one(&m, strings.to_string(b))
+	testing.expect_value(t, kind, core.Typed_Error_Kind.Too_Long)
+	_, kind = load_one(&m, strings.to_string(b)[:len(b.buf) - DEPTH * 2 - len(`{"kk": []}`)])
+	testing.expect_value(t, kind, core.Typed_Error_Kind.Walk)
+	text, _ := strings.replace_all(strings.to_string(b), `"kk"`, `"k"`)
+	v, passed := load_one(&m, text)
+	testing.expect_value(t, passed, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, model.validate(&m, &v))
+}
+
+@(private = "file")
+Codes :: struct {
+	extra: map[string]string `json:",unknown"`,
+}
+
+@(private = "file")
+Open_Codes :: struct {
+	extra: map[string]core.Value `json:",unknown"`,
+}
+
+@(test)
+a_pattern_beside_an_extra_map_of_a_type_is_refused :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	reg: model.Registry
+	model.register(&reg, Codes, fragment(`{"patternProperties": {"^x-": {"type": "integer"}}}`))
+	_, refused := model.compile(&reg, Codes, json.checks(.Json))
 	testing.expect_value(t, refused_as(refused), core.Typed_Error_Kind.Unsupported)
+	kept: model.Registry
+	model.register(&kept, Open_Codes, fragment(`{"patternProperties": {"^x-": {"type": "integer"}}}`))
+	_, compiled := model.compile(&kept, Open_Codes, json.checks(.Json))
+	walktest.expect_nil(t, compiled)
+}
+
+@(private = "file")
+Parcel :: struct {
+	kind: string,
+	zip:  Maybe(string) `json:",omitempty" model:"optional,not_null"`,
+	set:  model.Fields_Set,
+}
+
+// An applicator judges the value a patch makes, not the patch alone.
+@(test)
+a_patch_is_judged_by_its_applicators_once_merged :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	reg: model.Registry
+	model.register(&reg, Parcel, fragment(`{"if": {"properties": {"kind": {"const": "post"}}, "required": ["kind"]}, "then": {"required": ["zip"]}}`))
+	m, compiled := model.compile(&reg, Parcel, json.checks(.Json))
+	walktest.expect_nil(t, compiled)
+	p: Parcel
+	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"kind": "air"}`), &p))
+	testing.expect_value(t, refused_as(model.patch(&m, &p, transmute([]u8)string(`{"kind": "post"}`))), core.Typed_Error_Kind.Missing_Field)
+	testing.expect_value(t, p.kind, "air")
+	walktest.expect_nil(t, model.patch(&m, &p, transmute([]u8)string(`{"zip": "1"}`)))
+	walktest.expect_nil(t, model.patch(&m, &p, transmute([]u8)string(`{"kind": "post"}`)))
+	testing.expect(t, p.kind == "post" && p.zip.? == "1")
 }

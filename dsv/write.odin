@@ -66,6 +66,7 @@ Rows :: struct {
 	cols:    []Named, // a struct row's columns, in the order written
 	keys:    []string, // a map row's columns, sorted
 	headed:  bool, // the columns are bound
+	omits:   ^typed.Omits, // a model's dump's, whose left-out members write empty cells
 	err:     core.Typed_Refusal,
 }
 
@@ -89,11 +90,11 @@ layout_ok :: proc(spec: Spec, layout: Options) -> bool {
 
 // The plan's `marshal`: the value is the list of rows.
 @(private)
-marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, _: ^typed.Omits) -> ([]u8, core.Typed_Refusal) {
+marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, omits: ^typed.Omits) -> ([]u8, core.Typed_Refusal) {
 	spill: [write.ROOM_MAX]u8 = ---
 	w: Rows
 	rows_start(&w, &spill, options_of(plan.as), Spec(plan.spec), opts, stream, allocator, 0)
-	w.plan = plan
+	w.plan, w.omits = plan, omits
 	return rows_end((^Rows)(rawptr(&w)), write_rows(&w, uintptr(value)))
 }
 
@@ -293,7 +294,8 @@ write_header :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, named
 }
 
 // Writes the rows of `list` by the columns `write_header` bound, as records `0 ..< list.len`, or as no record a path
-// names when `indexed` is false, as a record write's row is. A map row writes a cell per header key, an empty one where
+// names when `indexed` is false, as a record write's row is. A member a dump's `omits` leaves out writes an empty cell,
+// so the row keeps the header's columns. A map row writes a cell per header key, an empty one where
 // the row lacks it, and refuses a key the header lacks. A cell that is present and empty would read back as no entry, so
 // it is refused too. A list row whose cell count differs from the first row's is `.Wrong_Length` unless `.Ragged`, since
 // a read without it refuses the row.
@@ -308,7 +310,11 @@ write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed
 			e := uintptr(list.data) + uintptr(i) * uintptr(row.stride)
 			for c, k in cols {
 				put_sep(w, k > 0)
-				if kind := write_cell(w, pl, c.f, e + uintptr(c.f.offset), k == 0, false); kind != .None {
+				at := e + uintptr(c.f.offset)
+				if c.f.omit && w.omits != nil && w.omits.call(w.omits, pl, c.f, at) {
+					continue
+				}
+				if kind := write_cell(w, pl, c.f, at, k == 0, false); kind != .None {
 					return refuse_in(w, kind, i if indexed else -1, core.Name(c.name))
 				}
 			}

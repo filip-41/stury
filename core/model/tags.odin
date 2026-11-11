@@ -59,14 +59,14 @@ Subject :: struct {
 	kinds:   Value_Kinds,
 	length:  Maybe(u64),
 	limits:  Maybe([2]string),
-	pointer: bool,
+	nilable: bool, // a pointer or a `Maybe`, whose nil reads null
 }
 
 // The subject of a value of `ti`, through its `Maybe`s and pointers.
 @(private)
 subject_of :: proc(ti: ^runtime.Type_Info, reg: ^Registry) -> (s: Subject) {
 	s.kinds = value_kinds(ti, reg)
-	_, s.pointer = runtime.type_info_base(ti).variant.(runtime.Type_Info_Pointer)
+	s.nilable = held(ti) != nil
 	base := ti
 	for next := held(base); next != nil; next = held(base) {
 		base = next
@@ -83,17 +83,16 @@ subject_of :: proc(ti: ^runtime.Type_Info, reg: ^Registry) -> (s: Subject) {
 }
 
 // Reads a `model:` tag into `r`, for a value of `subject`, and for a member when `member`: items separated by commas,
-// each a flag (`optional`, `extra`, `read_only`, `write_only`, `not_null` on a pointer, or `-` alone), `alias=` and a name, a bound (`>=N`, `>N`, `<=N`,
+// each a role (`optional`, `read_only`, `write_only`, `not_null` on a pointer or a `Maybe`), a bound (`>=N`, `>N`, `<=N`,
 // `<N`, a range `A..=B` or `A..<B`), `multiple_of=` and a divisor, the same bounds after `len` on a count of code points,
 // elements or members (`len=N` for one count), `unique` on a list, which refuses two equal elements, `format=` and a
 // format's name, or `pattern=` and an ECMA-262 pattern, which takes the rest of the tag, commas included. Spaces around
-// an item, an operator and an operand are dropped. A rule tightens the rules `r` holds. The flags and `alias` are a
-// member's. A bound on an integer is integral, and no rule may leave a value that passes. Returns false with the item it
-// cannot read in `r.refused`.
+// an item, an operator and an operand are dropped. A rule tightens the rules `r` holds. The roles are a member's, and
+// its name and shape are its format tag's. A bound on an integer is integral, and no rule may leave a value that passes.
+// Returns false with the item it cannot read in `r.refused`.
 @(private)
 read_tag :: proc(tag: string, subject: Subject, member: bool, r: ^typed.Member_Rule) -> bool {
 	rest := tag
-	items, dashed := 0, false
 	for len(rest) > 0 {
 		item := rest
 		if _, is_pattern := keyed(strings.trim_left_space(rest), "pattern"); !is_pattern {
@@ -106,16 +105,10 @@ read_tag :: proc(tag: string, subject: Subject, member: bool, r: ^typed.Member_R
 		if len(item) == 0 {
 			continue
 		}
-		items += 1
-		dashed ||= item == "-"
 		if !read_item(item, subject, member, r) {
 			r.refused = item
 			return false
 		}
-	}
-	if dashed && items > 1 {
-		r.refused = "-"
-		return false
 	}
 	return true
 }
@@ -136,22 +129,13 @@ keyed :: proc(item, key: string) -> (value: string, ok: bool) {
 @(private)
 read_item :: proc(item: string, subject: Subject, member: bool, r: ^typed.Member_Rule) -> bool {
 	kinds := subject.kinds
-	alias, is_alias := keyed(item, "alias")
 	switch {
-	case r.skip && item != "-":
-		return false
 	case item == "optional" && member:
 		r.optional = true
 		return true
-	case item == "-" && member:
-		r.skip = true
-		return !r.optional && r.name == "" && r.access == .Read_Write
-	case item == "extra" && member:
-		r.extra = true
-		return true
 	case item == "not_null" && member:
 		r.not_null = true
-		return subject.pointer
+		return subject.nilable
 	case (item == "read_only" || item == "write_only") && member:
 		role := typed.Access.Read_Only if item == "read_only" else .Write_Only
 		if r.access != .Read_Write && r.access != role {
@@ -159,9 +143,6 @@ read_item :: proc(item: string, subject: Subject, member: bool, r: ^typed.Member
 		}
 		r.access = role
 		return true
-	case is_alias && member:
-		r.name, r.alias = alias, item
-		return len(alias) > 0
 	}
 	one: rules.Rules
 	format, is_format := keyed(item, "format")

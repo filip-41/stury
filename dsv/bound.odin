@@ -93,7 +93,8 @@ checks_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 		node_check = document_check,
 		build      = proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_spec(src, S, as.readers, options_of(as), false, allocator)},
 		plan       = proc(T: typeid, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Refusal) {return plan_built(T, S, {}, opts, checks_of(S), allocator)},
-		docs       = proc "contextless" () -> rawptr {return record_docs(S)},
+		docs       = proc "contextless" () -> rawptr {return check_docs(S)},
+		replace    = replace_cell,
 	}
 	return &r
 }

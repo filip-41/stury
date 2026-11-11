@@ -40,68 +40,17 @@ before_of :: proc(c: ^Compiling, owner: typeid, field: string) -> ^typed.Before 
 	return nil
 }
 
-// The rules a plan that reads a replacement takes: the member's, at its root, and the load's elsewhere.
+// The refusal of a load plan `p` whose format holds no value alone, a table's, and so reads no text whole, for a member
+// read by its first matching arm or judged by applicators.
 @(private)
-Replacement_Rules :: struct {
-	using c: Compiling,
-	root:    typed.Member_Rule,
-	type:    typeid,
-	rooted:  bool,
-}
-
-@(private)
-replacement_rule :: proc(h: ^typed.Model_Rules, owner: typeid, field: string, type: typeid, tag: string) -> typed.Member_Rule {
-	s := (^Replacement_Rules)(h)
-	if owner == nil && !s.rooted && type == s.type {
-		s.rooted = true
-		return s.root
+judged_refused :: proc(p: ^typed.Plan) -> core.Typed_Refusal {
+	if p.value_text != nil {
+		return {}
 	}
-	return member_rule(&s.c.model, owner, field, type, tag)
-}
-
-// Gives each `before` member of the load plan `p` the plan that reads its replacement, as the member's type with the
-// member's rules at its root.
-@(private)
-replacement_plans :: proc(c: ^Compiling, reads: ^typed.Format_Reads, p: ^typed.Plan, allocator: runtime.Allocator) -> core.Typed_Refusal {
 	for &m in p.meta {
 		if m.before != nil && (m.before.first_match || m.before.judge != nil) {
-			if p.value_text == nil {
-				// A format that holds no value alone, a table's, reads no text whole.
-				return {kind = .Unsupported, want = {m.type, "first match" if m.before.first_match else "applies"}}
-			}
-			continue
+			return {kind = .Unsupported, want = {m.type, "first match" if m.before.first_match else "applicator"}}
 		}
-		if m.before == nil || p.value_text == nil {
-			continue
-		}
-		s := Replacement_Rules{c = c^, root = {rules = m.before.rules}, type = m.type}
-		s.model.member, s.model.rule_sets, s.model.leaves = replacement_rule, nil, nil
-		sub, refused := reads.plan(m.type, {rename = c.reg.naming.fields, union_tag = c.reg.naming.union_tag, model = &s.model, hooks = p.options.hooks}, allocator)
-		if refused.kind == .Unsupported {
-			// A format that holds a type only inside a record, a table's, reads a replacement as a cell of its own.
-			continue
-		}
-		if refused.kind != .None {
-			return refused
-		}
-		kept, failed := new_clone(sub, allocator)
-		if failed != nil {
-			typed.plan_destroy(&sub)
-			return {kind = .No_Memory}
-		}
-		m.before.plan = kept
 	}
 	return {}
-}
-
-// Frees the plans that read the replacements of the load plan `p`'s members.
-@(private)
-replacement_destroy :: proc(p: ^typed.Plan) {
-	for &m in p.meta {
-		if m.before != nil && m.before.plan != nil {
-			typed.plan_destroy(m.before.plan)
-			free(m.before.plan, p.allocator)
-			m.before.plan = nil
-		}
-	}
 }

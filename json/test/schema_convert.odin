@@ -35,7 +35,7 @@ converted :: proc(t: ^testing.T, rules_text, src: string, from, to: core.As, sin
 // The typed reads a handle needs to check a description, those of CSV for a CSV handle and none for a JSON one.
 @(private = "file")
 checks_of :: proc(as: core.As) -> ^typed.Format_Reads {
-	return dsv.checks(.Csv) if as.readers == dsv.as(.Csv).readers else nil
+	return dsv.checks(.Csv).reads if as.readers == dsv.as(.Csv).readers else nil
 }
 
 @(private = "file")

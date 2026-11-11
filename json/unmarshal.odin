@@ -20,9 +20,16 @@ unmarshal :: proc {unmarshal_bound, unmarshal_bound_plan, unmarshal_chosen, unma
 // first. The options are the plan's, and any plan of the format reads.
 check :: proc {check_bound, check_chosen}
 
-// Returns the typed reads of spec `S`, which `plan_make` takes to read and check by that spec.
+// Returns the typed reads of spec `S`, which `plan_make` takes to read and check a plan made from a type by that spec.
 reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	return reads_of(S)
+}
+
+// Returns the checks of spec `S` read with `opts`, which `model.compile` and `schema.bind` take: the reads of a plan made
+// from a model or a description, and the handle of `S` its plans read by, as `as(S, opts)` gives it, which reaches the
+// walk of `S` alone.
+checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Checks {
+	return {checks_of(S), bound_as(S, opts)}
 }
 
 // Builds the plan of `T` for spec `spec` read with `opts`, as `typed.plan_make` does. A plan of any spec writes JSON.
@@ -236,6 +243,37 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 	// `read_end` only reports, so a read with no fault and no refusal leaves `err` as it is.
 	if fault != nil || h.first.kind != .None {
 		err^ = typed.read_end(&h, regs, fault)
+	}
+	return
+}
+
+// The plans' `replace`: reads `v`, spelled as JSON, through `h` at `regs`, with the spelling as the source and JSON's
+// walk of that text in `h.find_tag`, nesting at most `depth` levels.
+@(private)
+read_replacement :: proc(h: ^typed.Check, regs: core.Hook_Regs, v: core.Value, depth: u32, $S: Spec) -> (text: []u8, back: core.Hook_Regs, action: core.Action) {
+	err: core.Typed_Refusal
+	if text, err = write.value_text(h.plan, v, context.temp_allocator); err.kind != .None {
+		back, action = typed.refuse(h, regs, {kind = err.kind})
+		return
+	}
+	opts := options_of(h.plan.as)
+	opts.max_depth = min(opts.max_depth if opts.max_depth != 0 else core.MAX_DEPTH, depth)
+	held, format, find_tag := h.src, h.format, h.find_tag
+	json_reader(&h.reader, untracked(&opts), S)
+	h.src = text
+	on :: typed.on_token_check_spelled when S == .Json5 else typed.on_token_check
+	back = regs
+	q, _ := document_start(text, 0, S)
+	_, fault, stopped := walk_from(text, q, S, opts, h, &back, on)
+	h.src, h.format, h.find_tag = held, format, find_tag
+	switch f, faulted := fault.?; {
+	case faulted:
+		// A text the writer spelled faults only past its depth.
+		back, action = typed.refuse(h, regs, {kind = .Too_Deep if f.kind == .Too_Deep else .Walk, at = f.at})
+	case stopped:
+		action = .Stop
+	case:
+		back, action = regs, .Next
 	}
 	return
 }

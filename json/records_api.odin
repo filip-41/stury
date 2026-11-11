@@ -14,7 +14,7 @@ import typed "../core/typed"
 import write "../core/write"
 import records "../core/records"
 
-// The reads of a record's value as spec `S`: its typed read, its build and its scan.
+// The reads of a record's value as spec `S`: its typed read, its build and its scan. Its checks are the plan's.
 record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
 	@(static, rodata) d := records.Record_Docs {
 		scan = proc(it: ^records.Reader, h: ^build.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options) -> (records.Record, core.Path_Error, bool) {
@@ -23,18 +23,27 @@ record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
 		read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
 			return read_spec(it, target, T, plan, read, allocator, err, S, false)
 		},
-		check_read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
-			return read_spec(it, target, T, plan, read, allocator, err, S, true)
-		},
-		check_run = proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_Options, visit: records.Record_Visit, data: rawptr) {
-			check_run_spec(it, plan, read, visit, data, S)
-		},
 		build = proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 			return build_record_spec(it, rec, allocator, S)
 		},
 		build_next = proc(it: ^records.Reader, b: ^build.Builder, regs: ^core.Hook_Regs) -> (records.Record, bool) {
 			return build_next_spec(it, b, regs, S)
 		},
+	}
+	return &d
+}
+
+// The checks of records as spec `S`, which a plan made with `checks_of(S)` holds in `typed.Plan.docs`.
+@(private)
+check_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
+	@(static, rodata) d := records.Record_Docs {
+		check_read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
+			return read_spec(it, target, T, plan, read, allocator, err, S, true)
+		},
+		check_run = proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_Options, visit: records.Record_Visit, data: rawptr) {
+			check_run_spec(it, plan, read, visit, data, S)
+		},
+		framing = proc "contextless" () -> ^records.Framing_Services {return framing_of(S)},
 	}
 	return &d
 }

@@ -260,7 +260,7 @@ gen_main :: proc(cli: ^Cli, files: []string) -> ! {
 		name = strings.to_snake_case(filepath.short_stem(files[0]))
 	}
 	d, text := read_schema_file(files[0], "schema gen")
-	source, err := schema.write_odin(&d, name, cli.schema.format_assert)
+	source, err := schema.write_odin(&d, name, json.as(.Json), cli.schema.format_assert)
 	if e, typed := err.(core.Typed_Error); typed && e.kind == .Bad_Option {
 		usage_error("%q cannot name the package: it is no Odin identifier, or a package the types import%s", name, "" if cli.verbs.package_name != "" else ": name one with --package")
 	}

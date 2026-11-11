@@ -61,12 +61,13 @@ check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.P
 		}
 		delete(job.pieces)
 	}
-	fault := each_piece(src, as, nil, framing, cast(proc(data: rawptr, piece: ^Reader, k: int) -> bool)check_piece, &job, runner, at)
+	fault := each_piece(src, as, framing_by(as, plan), framing, cast(proc(data: rawptr, piece: ^Reader, k: int) -> bool)check_piece, &job, runner, at)
 	cut := max(u64)
 	if f, bad := fault.?; bad {
 		cut = f.at
 	}
 	for &p in job.pieces {
+		typed.order_entries(&p.sink, 0)
 		for &e in p.sink.entries {
 			// A record the fault cut tells only the fault: its other failures are not among the records before it.
 			if e.start >= cut || p.fatal.kind != .None && e.kind != .Walk && e.record == p.records - 1 {
@@ -125,8 +126,9 @@ check_piece :: proc(job: ^Check_Job, it: ^Reader, k: int) -> bool {
 	checker: typed.Checker
 	defer typed.checker_destroy(&checker)
 	read := typed.Read_Options{sink = sink, outer = job.outer, dups = job.dups, repeats = job.repeats, checker = &checker}
-	if it.docs != nil && it.docs.check_run != nil && it.framing >= .Concatenated {
-		it.docs.check_run(it, job.plan, read, piece_visit, &run)
+	docs := (^Record_Docs)(job.plan.docs()) if job.plan.docs != nil else nil
+	if docs != nil && docs.check_run != nil && it.framing >= .Concatenated {
+		docs.check_run(it, job.plan, read, piece_visit, &run)
 	} else {
 		for {
 			rec, more := next(it)
@@ -195,12 +197,13 @@ piece_note :: proc(job: ^Check_Job, p: ^Checked, e: core.Typed_Refusal) -> bool 
 
 // The entries of the root array of `src` as `check_each` reads them, when the array's bulk is cut exactly so that its
 // entries can be checked in pieces: the handle to check them with and the byte they start from. False for any other text.
-entries_of :: proc(src: []u8, as: core.As) -> (whole: core.As, at: u64, ok: bool) {
-	services := services_of(as)
+// A handle with no services is framed as `plan`'s record docs say.
+entries_of :: proc(src: []u8, as: core.As, plan: ^typed.Plan = nil) -> (whole: core.As, at: u64, ok: bool) {
+	services := framing_by(as, plan)
 	if services == nil || services.whole == nil {
 		return
 	}
 	framing: core.Framing
 	whole, framing, at = services.whole(src, as)
-	return whole, at, framing == .Entries && entries_cut(src, whole, framing, at)
+	return whole, at, framing == .Entries && entries_cut(src, whole, framing, at, services)
 }

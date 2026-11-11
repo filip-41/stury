@@ -141,7 +141,7 @@ lane :: proc($T: typeid, src: []u8, pretty, dump: bool) {
 		fmt.eprintln("plan:", perr)
 		os.exit(1)
 	}
-	m, merr := model.compile(nil, T, json.reads(.Json))
+	m, merr := model.compile(nil, T, json.checks(.Json))
 	if merr != nil {
 		fmt.eprintln("model:", merr)
 		os.exit(1)

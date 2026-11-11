@@ -37,6 +37,16 @@ Check :: struct {
 	tracked:      int,
 	// Where the check keeps the reading of each `Plain` value, nil for a check that keeps none.
 	readings:     ^Readings,
+	// The open containers of judged types, outermost first, in the temp allocator.
+	opens:        [dynamic]Judged_Open,
+}
+
+// A judged type's container open at frame `sp`, whose text starts at `lo` and whose record's `Meta` is `m`.
+@(private)
+Judged_Open :: struct {
+	sp: int,
+	lo: u64,
+	m:  ^Meta,
 }
 
 // The kinds a check read its `Plain` values as, each by the value's first byte: where arms read a value apart, the reading
@@ -89,9 +99,18 @@ Format_Reads :: struct {
 	node_read, node_check: Node_Read,
 	build:                 Text_Build,
 	plan:                  proc(T: typeid, opts: Plan_Options, allocator: runtime.Allocator) -> (Plan, core.Typed_Refusal),
-	// The format's `^records.Record_Docs` for a spec named at compile time, which a model's read of records installs in a
-	// reader that has none. Nil for reads that give none.
+	// The read of a replacement a member's `before` answered, nil for a format that reads none.
+	replace:               Replacement_Read,
+	// The format's `^records.Record_Docs` holding the checks of records, which a model's read of records and a check of
+	// records take. Nil for reads that give none.
 	docs:                  proc "contextless" () -> rawptr,
+}
+
+// A format's typed reads with the checks of a model and of a description, and the layout their plans read and write by,
+// as `json.checks(.Json)` and `dsv.checks(.Csv, opts)` give them. A layout with no readers is the plan's own.
+Format_Checks :: struct {
+	reads:  ^Format_Reads,
+	layout: core.As,
 }
 
 // Builds `src` as a document of the format `as` names, as a format's `Format_Reads` does for `write.marshal_value`.
@@ -117,7 +136,7 @@ check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, t
 		c.pool, c.fork, c.taken = (^Pool)(rawptr(&k.pool)), nil, nil
 	}
 	if c.pool != nil {
-		c.pool.repeated, c.pool.n_leads, c.pool.begun = nil, 0, c.pool.opened
+		c.pool.repeated, c.pool.repeating, c.pool.n_leads, c.pool.begun = nil, nil, 0, c.pool.opened
 	}
 	return
 }
@@ -135,7 +154,10 @@ check_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read
 	if plan == nil || plan.check == nil {
 		return core.error_of(plan_mismatch(plan, nil, T))
 	}
-	return core.error_of(plan.check(src, plan.as, target, T, plan, read, allocator))
+	from := len(read.sink.entries) if read.sink != nil else 0
+	refused := plan.check(src, plan.as, target, T, plan, read, allocator)
+	order_entries(read.sink, from)
+	return core.error_of(refused)
 }
 
 // Whether the keys of an object at record `owner`'s use reach `check_key` whatever the cursor predicts: the object's names are

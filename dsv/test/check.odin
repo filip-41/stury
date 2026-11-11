@@ -18,7 +18,7 @@ failures :: proc(schema_text: string, text: string, handle: core.As, read := typ
 	defer core.destroy(&doc)
 	c, _ := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
 	defer schema.destroy(&c)
-	b, berr := schema.bind(&c, handle, reads)
+	b, berr := schema.bind(&c, {reads, handle})
 	defer schema.unbind(&b)
 	if berr != nil {
 		return "", berr
@@ -62,9 +62,9 @@ check_one_schema_over_every_format :: proc(t: ^testing.T) {
 		want, werr := failures(ROWS, c.json, json.as(.Json))
 		testing.expect(t, werr == nil || len(want) > 0)
 		json5, _ := failures(ROWS, c.json5, json.as(.Json5))
-		csv, _ := failures(ROWS, c.csv, dsv.as(.Csv, {infer = true}), reads = dsv.checks(.Csv))
+		csv, _ := failures(ROWS, c.csv, dsv.as(.Csv, {infer = true}), reads = dsv.checks(.Csv).reads)
 		tabs, _ := strings.replace_all(c.csv, ",", "\t", context.temp_allocator)
-		tsv, _ := failures(ROWS, tabs, dsv.as(.Tsv, {infer = true}), reads = dsv.checks(.Tsv))
+		tsv, _ := failures(ROWS, tabs, dsv.as(.Tsv, {infer = true}), reads = dsv.checks(.Tsv).reads)
 		testing.expect_value(t, json5, want)
 		testing.expect_value(t, csv, want)
 		// A quoted cell has no TSV spelling.
@@ -122,7 +122,7 @@ check_cell_rule :: proc(t: ^testing.T) {
 		schema_text := strings.concatenate({`{"type": "array", "items": {"type": "object", "properties": {"a": `, c.property, `}}}`}, context.temp_allocator)
 		text := strings.concatenate({"a\n", c.cell, "\n"}, context.temp_allocator)
 		for valid, i in ([2]bool{c.as_string, c.as_inferred}) {
-			out, err := failures(schema_text, text, dsv.as(.Csv, {infer = i == 1}), reads = dsv.checks(.Csv))
+			out, err := failures(schema_text, text, dsv.as(.Csv, {infer = i == 1}), reads = dsv.checks(.Csv).reads)
 			testing.expect(t, err == nil == valid && (out == "") == valid, strings.concatenate({c.property, " ", c.cell, " ", out}, context.temp_allocator))
 		}
 	}
@@ -146,7 +146,7 @@ check_empty_cells :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		schema_text := strings.concatenate({`{"type": "array", "items": `, c.property, `}`}, context.temp_allocator)
-		_, err := failures(schema_text, c.text, dsv.as(.Csv), reads = dsv.checks(.Csv))
+		_, err := failures(schema_text, c.text, dsv.as(.Csv), reads = dsv.checks(.Csv).reads)
 		testing.expect_value(t, err == nil, c.valid)
 	}
 }
@@ -157,12 +157,12 @@ check_empty_cells :: proc(t: ^testing.T) {
 check_repeated_columns :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	schema_text := `{"type": "array", "items": {"properties": {"a": {"type": "integer"}}, "maxProperties": 1}}`
-	_, last := failures(schema_text, "a,a\nx,1\n", dsv.as(.Csv, {infer = true}), {dups = .Last}, reads = dsv.checks(.Csv))
-	_, first := failures(schema_text, "a,a\nx,1\n", dsv.as(.Csv, {infer = true}), {dups = .First}, reads = dsv.checks(.Csv))
-	_, refuse := failures(schema_text, "a,a\n1,1\n", dsv.as(.Csv, {infer = true}), {dups = .Refuse}, reads = dsv.checks(.Csv))
-	_, alone := failures(schema_text, "a,a\n", dsv.as(.Csv, {infer = true}), {dups = .Refuse}, reads = dsv.checks(.Csv))
-	_, alone_last := failures(schema_text, "a,a\n", dsv.as(.Csv, {infer = true}), {dups = .Last}, reads = dsv.checks(.Csv))
-	_, all := failures(schema_text, "a,a\n1,1\n", dsv.as(.Csv, {infer = true}), {dups = .All}, reads = dsv.checks(.Csv))
+	_, last := failures(schema_text, "a,a\nx,1\n", dsv.as(.Csv, {infer = true}), {dups = .Last}, reads = dsv.checks(.Csv).reads)
+	_, first := failures(schema_text, "a,a\nx,1\n", dsv.as(.Csv, {infer = true}), {dups = .First}, reads = dsv.checks(.Csv).reads)
+	_, refuse := failures(schema_text, "a,a\n1,1\n", dsv.as(.Csv, {infer = true}), {dups = .Refuse}, reads = dsv.checks(.Csv).reads)
+	_, alone := failures(schema_text, "a,a\n", dsv.as(.Csv, {infer = true}), {dups = .Refuse}, reads = dsv.checks(.Csv).reads)
+	_, alone_last := failures(schema_text, "a,a\n", dsv.as(.Csv, {infer = true}), {dups = .Last}, reads = dsv.checks(.Csv).reads)
+	_, all := failures(schema_text, "a,a\n1,1\n", dsv.as(.Csv, {infer = true}), {dups = .All}, reads = dsv.checks(.Csv).reads)
 	testing.expect(t, last == nil)
 	testing.expect(t, first != nil)
 	testing.expect_value(t, refuse.(core.Fault).kind, core.Fault_Kind.Duplicate_Key)
@@ -176,11 +176,11 @@ check_repeated_columns :: proc(t: ^testing.T) {
 check_ragged_rows :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	schema_text := `{"type": "array", "items": {"required": ["b"], "properties": {"3": {"type": "string"}}, "additionalProperties": false}}`
-	_, strict := failures(schema_text, "a,b\n1\n", dsv.as(.Csv), reads = dsv.checks(.Csv))
+	_, strict := failures(schema_text, "a,b\n1\n", dsv.as(.Csv), reads = dsv.checks(.Csv).reads)
 	testing.expect(t, strict != nil)
-	out, ragged := failures(schema_text, "a,b\n1\n1,2,3\n", dsv.as(.Csv, {tolerate = {.Ragged}}), reads = dsv.checks(.Csv))
+	out, ragged := failures(schema_text, "a,b\n1\n1,2,3\n", dsv.as(.Csv, {tolerate = {.Ragged}}), reads = dsv.checks(.Csv).reads)
 	testing.expect(t, ragged != nil)
-	testing.expect_value(t, out, "No value is allowed here at .[0].a (.items.additionalProperties)\nRequired member \"b\" is missing at .[0] (.items.required)\nNo value is allowed here at .[1].a (.items.additionalProperties)\nNo value is allowed here at .[1].b (.items.additionalProperties)\n")
+	testing.expect_value(t, out, "Required member \"b\" is missing at .[0] (.items.required)\nNo value is allowed here at .[0].a (.items.additionalProperties)\nNo value is allowed here at .[1].a (.items.additionalProperties)\nNo value is allowed here at .[1].b (.items.additionalProperties)\n")
 }
 
 // A document built from the text is judged as the text is, with the cell kinds `infer` stored put back to text.
@@ -194,7 +194,7 @@ check_document_agrees_with_text :: proc(t: ^testing.T) {
 	defer schema.destroy(&c)
 	for infer in ([?]bool{false, true}) {
 		handle := dsv.as(.Csv, {infer = infer})
-		b, berr := schema.bind(&c, handle, dsv.checks(.Csv))
+		b, berr := schema.bind(&c, {dsv.checks(.Csv).reads, handle})
 		defer schema.unbind(&b)
 		testing.expect(t, berr == nil)
 		for text in cases {
@@ -221,7 +221,7 @@ check_document_agrees_with_text :: proc(t: ^testing.T) {
 verdicts :: proc(schema_text, text: string, handle: core.As, reads: ^typed.Format_Reads) -> (by_text, by_doc: bool) {
 	schema_doc, _ := core.build(transmute([]u8)schema_text, json.as(.Json), allocator = context.temp_allocator)
 	c, _ := schema.compile(&schema_doc, core.ROOT, {resolver = {as = json.as(.Json)}}, context.temp_allocator)
-	b, berr := schema.bind(&c, handle, reads)
+	b, berr := schema.bind(&c, {reads, handle})
 	defer schema.unbind(&b)
 	if berr != nil {
 		return false, false
@@ -235,7 +235,7 @@ verdicts :: proc(schema_text, text: string, handle: core.As, reads: ^typed.Forma
 expect_verdict :: proc(t: ^testing.T, schema_text, csv: string, valid: bool, infer := true, loc := #caller_location) {
 	tabs, _ := strings.replace_all(csv, ",", "\t", context.temp_allocator)
 	for handle, i in ([2]core.As{dsv.as(.Csv, {infer = infer}), dsv.as(.Tsv, {infer = infer})}) {
-		reads := dsv.checks(.Csv) if i == 0 else dsv.checks(.Tsv)
+		reads := dsv.checks(.Csv).reads if i == 0 else dsv.checks(.Tsv).reads
 		by_text, by_doc := verdicts(schema_text, csv if i == 0 else tabs, handle, reads)
 		testing.expectf(t, by_text == valid && by_doc == valid, "%s over %q: text %v, document %v, want %v", schema_text, csv, by_text, by_doc, valid, loc = loc)
 	}
@@ -333,7 +333,7 @@ check_scalar_and_wrapped_const_agree :: proc(t: ^testing.T) {
 	}
 	// A quoted cell is a string, so a number operand does not take it.
 	for schema_text in ([?]string{`{"type": "array", "items": {"properties": {"a": {"const": 5}}}}`, `{"type": "array", "items": {"const": {"a": 5}}}`}) {
-		by_text, by_doc := verdicts(schema_text, "a\n\"5\"\n", dsv.as(.Csv, {infer = true}), dsv.checks(.Csv))
+		by_text, by_doc := verdicts(schema_text, "a\n\"5\"\n", dsv.as(.Csv, {infer = true}), dsv.checks(.Csv).reads)
 		testing.expectf(t, !by_text && !by_doc, "%s: text %v document %v", schema_text, by_text, by_doc)
 	}
 	// A string operand takes the cell as the string it is unless the read infers a number, and no cell is a null.
@@ -350,7 +350,7 @@ check_partial_document :: proc(t: ^testing.T) {
 	judge :: proc(schema_text, text, path: string, opts := dsv.Options{infer = true}) -> bool {
 		schema_doc, _ := core.build(transmute([]u8)schema_text, json.as(.Json), allocator = context.temp_allocator)
 		c, _ := schema.compile(&schema_doc, core.ROOT, {resolver = {as = json.as(.Json)}}, context.temp_allocator)
-		b, berr := schema.bind(&c, dsv.as(.Csv, opts), dsv.checks(.Csv))
+		b, berr := schema.bind(&c, {dsv.checks(.Csv).reads, dsv.as(.Csv, opts)})
 		defer schema.unbind(&b)
 		parsed, _ := core.parse_path(path)
 		defer core.path_destroy(&parsed)
@@ -415,7 +415,7 @@ check_from_dsv_names :: proc(t: ^testing.T) {
 		defer dsv.destroy(&b)
 		testing.expect_value(t, dsv.check_schema(&b, transmute([]u8)string("a\n1\n")) == nil, infer)
 	}
-	_, unbound := schema.bind(&s.compiled, dsv.as(.Csv))
+	_, unbound := schema.bind(&s.compiled, {layout = dsv.as(.Csv)})
 	e, refused := unbound.(core.Typed_Error)
 	testing.expect_value(t, refused && e.kind == .Plan_Mismatch, true)
 }

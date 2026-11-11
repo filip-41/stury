@@ -19,19 +19,14 @@ load :: proc(m: ^Model($T), src: []u8, v: ^T, sink: ^typed.Sink = nil, opts := L
 	return typed.check_text(src, v, T, &m.load_plan, read_options(opts, sink), allocator)
 }
 
-// How a load reads. `dups` says which of a repeated key's values wins, and its zero refuses a repeat. A `partial` load
-// reads a patch for `merge`: in the structs merge descends into, the root and its struct members whose structs hold a
-// `Fields_Set`, it refuses no missing member and gives none its default, so a member the text leaves out is zero and
-// unset. A struct below a list, a map, a pointer or a union, or one without a set, which merge replaces whole, is read
-// in full.
+// How a load reads. `dups` says which of a repeated key's values wins, and its zero refuses a repeat.
 Load_Opts :: struct {
-	dups:    core.Duplicates,
-	partial: bool,
+	dups: core.Duplicates,
 }
 
 @(private)
 read_options :: proc(opts: Load_Opts, sink: ^typed.Sink) -> typed.Read_Options {
-	return {dups = .Refuse if opts.dups == .Default else opts.dups, sink = sink, partial = opts.partial}
+	return {dups = .Refuse if opts.dups == .Default else opts.dups, sink = sink}
 }
 
 // Loads the value `v` as `load` loads the text of the model's format that spells it, so a value built in memory is judged
@@ -169,13 +164,13 @@ clone_map :: proc(dst, src: rawptr, ti: ^runtime.Type_Info, v: runtime.Type_Info
 	return nil
 }
 
-// Loads the next record of `it` into `v` as `load` loads a text of one record, and returns whether `it` has more. A reader
-// opened with a spec named at compile time takes the check read of the model's format. The
-// records may be of a stream, and each is judged and defaulted alone: a header is judged with the first record of a table.
-// A refused record returns its error and true, and the next call goes on after it. Every offset is from the input's first byte.
+// Loads the next record of `it` into `v` as `load` loads a text of one record, and returns whether `it` has more, by the
+// check read the model's load plan holds. The records may be of a stream, and each is judged and defaulted alone: a
+// header is judged with the first record of a table. A refused record returns its error and true, and the next call goes
+// on after it. Every offset is from the input's first byte.
 read :: proc(it: ^records.Reader, m: ^Model($T), v: ^T, sink: ^typed.Sink = nil, opts := Load_Opts{}, allocator := context.allocator) -> (err: core.Error, more: bool) {
-	if it.docs == nil && m.load_plan.docs != nil {
-		it.docs = (^records.Record_Docs)(m.load_plan.docs())
-	}
-	return records.read(it, v, &m.load_plan, read_options(opts, sink), allocator)
+	from := len(sink.entries) if sink != nil else 0
+	err, more = records.read(it, v, &m.load_plan, read_options(opts, sink), allocator)
+	typed.order_entries(sink, from)
+	return
 }

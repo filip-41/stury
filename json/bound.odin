@@ -43,7 +43,8 @@ edit_of :: proc "contextless" ($S: Spec) -> ^core.Edit_Services {
 	return &e
 }
 
-// The typed reads of a plan read as spec `S`.
+// The typed reads of a plan made from a type, read as spec `S`. A program that only reads into types does not name
+// `checks_of`, so it does not link a model's or a description's check.
 reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	@(static, rodata) r := typed.Format_Reads {
 		read  = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, S, options_of(as), target, T, plan, read, allocator, false)},
@@ -54,6 +55,24 @@ reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 			plan_bind(&p, reads_of(S))
 			return p, err
 		},
+	}
+	return &r
+}
+
+// The reads of a plan made from a description or from a model, read as spec `S`: `reads_of` with the read of a
+// replacement a member's `before` answered and the checks of records.
+checks_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
+	@(static, rodata) r := typed.Format_Reads {
+		read    = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, S, options_of(as), target, T, plan, read, allocator, false)},
+		check   = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, S, options_of(as), target, T, plan, read, allocator, true)},
+		build   = proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_spec(src, S, as, false, allocator)},
+		plan    = proc(T: typeid, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Refusal) {
+			p, err := typed.plan_build(T, plan_handle(S, {}), opts, allocator)
+			plan_bind(&p, checks_of(S))
+			return p, err
+		},
+		replace = proc(h: ^typed.Check, regs: core.Hook_Regs, v: core.Value, depth: u32) -> ([]u8, core.Hook_Regs, core.Action) {return read_replacement(h, regs, v, depth, S)},
+		docs    = proc "contextless" () -> rawptr {return check_docs(S)},
 	}
 	return &r
 }

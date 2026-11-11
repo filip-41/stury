@@ -6,7 +6,8 @@ reporting where the verdict, the match or a group's bounds differ.
 
 A seeded grammar makes each pattern from what a JSON Schema's `pattern` uses: characters, `.`, classes and the class
 escapes, anchors and \\b, groups with and without names, alternatives, look-aheads, and every quantifier, lazy or
-not, over bodies that can match empty or not, and look-aheads after `^`. Texts are short, over the characters the patterns name. Without node
+not, over bodies that can match empty or not, counts over bodies long enough to run as counter loops, and look-aheads
+after `^`. Texts are short, over the characters the patterns name. Without node
 on PATH nothing is compared.
 """
 
@@ -41,6 +42,10 @@ ATOMS = ["a", "b", "c", ".", "[^a]", "[a-c]", "[\\d\\s]", "\\w", "\\W", "Ã©", "ð
          "\\x61", "[\\u0061-b]"]
 ASSERTIONS = ["^", "$", "\\b", "\\B"]
 QUANTIFIERS = ["", "", "", "*", "+", "?", "*?", "+?", "??", "{2}", "{1,3}", "{2,}", "{0,2}?", "{0}", "{3}?"]
+# Alternatives of characters no text holds, which change no match but make a group's body long enough that a count
+# of it runs as a counter loop rather than written out.
+FILL = "".join("|" + chr(0xE000 + k) for k in range(700))
+COUNTED = ["{4}", "{1,4}", "{0,4}?", "{4,}", "{2,5}", "{3,6}?"]
 
 
 def pattern(rng, depth):
@@ -62,7 +67,10 @@ def pattern(rng, depth):
             atom = "(?:" + pattern(rng, depth - 1) + "|)"
         else:
             atom, repeatable = rng.choice(["(?=", "(?!"]) + pattern(rng, depth - 1) + ")", False
-        out.append(atom + (rng.choice(QUANTIFIERS) if repeatable else ""))
+        if repeatable and atom.startswith("(") and rng.randrange(8) == 0:
+            out.append(atom[:-1] + FILL + ")" + rng.choice(COUNTED))
+        else:
+            out.append(atom + (rng.choice(QUANTIFIERS) if repeatable else ""))
     return "".join(out)
 
 

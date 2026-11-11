@@ -322,17 +322,25 @@ an `extra: map[string]T` member for the members an `additionalProperties` schema
 members, an enum for `enum` and `const` (a union of a string enum, an integer enum and `bool` where the values are of
 several kinds), a union for `anyOf`, `oneOf` and a list of kinds (read by the first arm that reads a value where arms
 overlap, and under `oneOf` refusing a value two arms read), `Null :: union {}` for `type: null`, a `unique` tag for
-`uniqueItems`, a named type with `model.register_applies` lines for `not`, `if`, `contains`, `propertyNames`,
-`patternProperties`, `dependentRequired` and `dependentSchemas`, each operand a type of its own, a fixed array for `prefixItems` of one type and that length, and a pointer where a struct holds itself, tagged
-`not_null` where the schema takes no null. `allOf` and a `$ref` with siblings are merged into one node where their
+`uniqueItems`, a named type with a `register_fragment` line for `not`, `if`, `contains`, `propertyNames`,
+`patternProperties`, `dependentRequired` and `dependentSchemas`, which hands `model.register_schema` those keywords as
+a JSON Schema fragment (the type a `Maybe` where null passes them, and null left out where it fails them), a struct of
+such a type or of a `uniqueItems` element that keeps the members it does not name in `extra: map[string]core.Value`
+(tagged `json:",unknown"`), so that what the type writes is what it read, `extra: map[string]T` for the members of one
+`patternProperties` beside `additionalProperties: false` with a `propertyNames` fragment on the names it takes, a
+fixed array for `prefixItems` of one type and that length. A member that may be left out and takes no null is a `Maybe`
+tagged `omitempty` and `not_null`, so a write leaves it out where the read found none, and a pointer where a struct
+holds itself. `allOf` and a `$ref` with siblings are merged into one node where their
 members and rules join. `format` only annotates, as `check` reads it: the member is a string with a `// format:`
 comment. With `--format-assert` the formats a type reads are `time.Time`, `uuid.Identifier` and `model.Email`, and the
-others a `format=` rule. `contentEncoding: base64` is `model.Base64`. `$defs` are named types.
+others a `format=` rule. `contentEncoding: base64` is `model.Base64`. `$defs` are named types. A struct whose optional members take
+null holds `set: model.Fields_Set` and tags each such member `omitunset`, so that a member the text left out stays out
+and a null stays null when the value is written back. Gen refuses such a struct past 128 members.
 
 The package is `--package NAME`, by default the file's name in snake case (`my-types.schema.json` is `my_types`). It
 must be an Odin identifier that is no keyword and no package the types import (`model`, `time`, `core`, ...), since an
-Odin program names each package once. A keyword no type spells (`not` or `if` on a value that may be null, a `oneOf`
-with two arms that take null, `prefixItems` beside `items`, ...) is exit 1, told with the path of the node that holds it, and so is an integer enum value past
+Odin program names each package once. A keyword no type spells (`not` or `if` on a union whose arms take a null
+they refuse, a `oneOf` with two arms that take null or two arms of one type, `prefixItems` beside `items`, ...) is exit 1, told with the path of the node that holds it, and so is an integer enum value past
 2^53 and an integer whose bounds leave no value `i64` or `u64` holds. An integer the schema leaves unbounded is `i64`,
 so a model refuses one past its range, which the schema takes. Every object nested in another is a struct held by value,
 and Odin's compiler takes time exponential in that depth, so the types of objects nested past about 24 levels compile

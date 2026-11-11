@@ -1,6 +1,7 @@
 package typed
 
 import "base:runtime"
+import "core:mem"
 import "core:strings"
 import core ".."
 
@@ -11,11 +12,14 @@ Validator :: struct {
 	fn:   rawptr,
 }
 
-// A member's validator: `member` is the member's place among its struct's members, `offset` its place in the struct.
+// A member's validator: `member` is the member's place among its struct's members, `offset` its place in the struct and
+// `size` its size, 0 for a required member, which a value always has.
+@(private)
 After :: struct {
 	member: i32,
 	name:   string,
 	offset: uintptr,
+	size:   int,
 	v:      Validator,
 }
 
@@ -40,15 +44,20 @@ fail_at :: proc(r: ^Report, field, message: string) {
 }
 
 // A failure with the member that holds the value it judges, "" for a struct's own validator.
+@(private)
 Verdict :: struct {
 	member:  string,
 	failure: Failure,
 }
 
-// Runs the validators of the struct of `sm` that is at `base`, whose path from the root is `path`. `entries` holds what
-// this read or visit has reported. A member's validator runs when `seen` says the member was read and nothing under it
-// failed, and the struct's own when no member failed. Each failure is appended to `out`.
-judge_struct :: proc(sm: ^Struct_Model, base: uintptr, path: []core.Step, entries: []core.Error_Entry, seen: []bool, out: ^[dynamic]Verdict) {
+// Runs the validators of the struct of `sm` at `base`, whose path from the root is `path`, and reports each failure at
+// byte `at` to `first`, when it holds none, and to `sink`, whose entries from `floor` are what this read or visit
+// reported. A member's validator runs when `seen` says the member was read and nothing under it failed, and under
+// `whole` the struct's own when no member failed. Returns whether one failed and whether the sink takes more.
+@(private)
+close_struct :: proc(sm: ^Struct_Model, base: uintptr, path: []core.Step, seen: []bool, first: ^core.Typed_Refusal, sink: ^Sink, floor: int, at: u64, whole := true) -> (failed, more: bool) {
+	entries := sink.entries[floor:] if sink != nil else nil
+	verdicts := make([dynamic]Verdict, context.temp_allocator)
 	r := Report{make([dynamic]Failure, context.temp_allocator)}
 	for a, k in sm.afters {
 		if !seen[k] || failed_under(entries, path, a.name) {
@@ -57,19 +66,50 @@ judge_struct :: proc(sm: ^Struct_Model, base: uintptr, path: []core.Step, entrie
 		clear(&r.failures)
 		a.v.call(rawptr(base + a.offset), a.v.fn, &r)
 		for x in r.failures {
-			append(out, Verdict{a.name, x})
+			append(&verdicts, Verdict{a.name, x})
 		}
 	}
-	if len(sm.checks) == 0 || len(out) > 0 || failed_under(entries, path, "") {
-		return
-	}
-	for c in sm.checks {
-		clear(&r.failures)
-		c.call(rawptr(base), c.fn, &r)
-		for x in r.failures {
-			append(out, Verdict{"", x})
+	if whole && len(verdicts) == 0 && !failed_under(entries, path, "") {
+		for c in sm.checks {
+			clear(&r.failures)
+			c.call(rawptr(base), c.fn, &r)
+			for x in r.failures {
+				append(&verdicts, Verdict{"", x})
+			}
 		}
 	}
+	more = sink != nil
+	for v in verdicts {
+		more = report_verdict(first, sink, path, v, at)
+		if !more {
+			break
+		}
+	}
+	return len(verdicts) > 0, more
+}
+
+// The close of a struct a visit of a value reaches at its record `end` past the members, as a load closes it. A member
+// counts as read when it is required, when the struct's `Fields_Set` holds it, or with no set when it is not zero.
+// Returns whether the visit goes on.
+visit_closed :: proc(plan: ^Plan, end: ^Field, base: uintptr, path: []core.Step, first: ^core.Typed_Refusal, sink: ^Sink, floor: int) -> bool {
+	sm := plan.meta[end.meta].model
+	if len(sm.afters) == 0 && len(sm.checks) == 0 {
+		return true
+	}
+	seen := make([]bool, len(sm.afters), context.temp_allocator)
+	for a, k in sm.afters {
+		switch {
+		case a.size == 0:
+			seen[k] = true
+		case sm.fields_set != 0:
+			set := (^Fields_Set)(base + uintptr(sm.fields_set - 1))
+			seen[k] = set.bits[a.member / 64] >> uint(a.member % 64) & 1 != 0
+		case:
+			seen[k] = !mem.check_zero(([^]u8)(rawptr(base + a.offset))[:a.size])
+		}
+	}
+	_, more := close_struct(sm, base, path, seen, first, sink, floor, 0)
+	return more
 }
 
 // Whether an entry lies under `path`, under its member `name` when that is not "". The entries of a subtree are the last
@@ -109,6 +149,7 @@ same_step :: proc(a, b: core.Step) -> bool {
 }
 
 // The steps of a verdict's path under the struct at `path`: its member, then the member of that value `fail_at` named.
+@(private)
 verdict_path :: proc(path: []core.Step, v: Verdict, allocator: runtime.Allocator) -> []core.Step {
 	steps := make([dynamic]core.Step, 0, len(path) + 2, allocator)
 	append(&steps, ..path)
@@ -122,6 +163,7 @@ verdict_path :: proc(path: []core.Step, v: Verdict, allocator: runtime.Allocator
 }
 
 // The refusal of `kind` at byte `at` whose path is `steps`, outermost first, and whose wanted text is `message`.
+@(private)
 refusal_at :: proc(kind: core.Typed_Error_Kind, steps: []core.Step, message: string, at: u64) -> core.Typed_Refusal {
 	e := core.Typed_Refusal{kind = kind, at = at}
 	e.want.text = message
@@ -132,28 +174,25 @@ refusal_at :: proc(kind: core.Typed_Error_Kind, steps: []core.Step, message: str
 	return e
 }
 
-// Reports `v`, found at the close of a struct at `path`, to the read `h` as a `.Custom` refusal at byte `at`.
-@(cold, private)
-report_verdict :: proc(h: ^Reader, path: []core.Step, v: Verdict, at: u64) {
+// Reports `v`, found at the close of a struct at `path`, as a `.Custom` refusal at byte `at`: to `first`, when it holds
+// none, and to `sink` as an entry. Returns whether the sink takes more.
+@(private)
+report_verdict :: proc(first: ^core.Typed_Refusal, sink: ^Sink, path: []core.Step, v: Verdict, at: u64) -> bool {
 	steps := verdict_path(path, v, context.temp_allocator)
-	e := refusal_at(.Custom, steps, v.failure.message, at)
-	if h.first.kind == .None {
-		h.first = e
+	if first.kind == .None {
+		first^ = refusal_at(.Custom, steps, v.failure.message, at)
 	}
-	if !h.wide {
-		sink_error(h.sink, e)
-		return
+	if sink == nil || !sink_room(sink, context.allocator) {
+		return false
 	}
-	c := h.sink
-	if c == nil || !sink_room(c, h.ctx.allocator) {
-		return
-	}
-	context.allocator = c.entries.allocator
-	entry := core.Error_Entry{kind = .Custom, start = at, end = at, record = c.record}
+	context.allocator = sink.entries.allocator
+	entry := core.Error_Entry{kind = .Custom, start = at, end = at, record = sink.record}
 	if v.failure.message != "" {
 		entry.operand = strings.clone(v.failure.message)
 	}
-	if !sink_entry(c, entry, steps, nil, false) {
-		c.truncated = true
+	if !sink_entry(sink, entry, steps, nil, false) {
+		sink.truncated = true
+		return false
 	}
+	return true
 }

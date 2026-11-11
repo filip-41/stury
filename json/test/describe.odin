@@ -198,10 +198,10 @@ project_block :: proc(p: ^Projection, m: typed.Meta, union_block: bool) -> strin
 	return fmt.tprintf("#%d", k)
 }
 
-// The plan of `T`'s model with no registered rules, in the temp allocator, read as `reads` reads, JSON's for nil.
-ruled_plan :: proc($T: typeid, enums := typed.Enum_Spelling.Name, reads: ^typed.Format_Reads = nil) -> typed.Plan {
+// The plan of `T`'s model with no registered rules, in the temp allocator, checked as `checks` names, JSON's for nil.
+ruled_plan :: proc($T: typeid, enums := typed.Enum_Spelling.Name, checks: Maybe(typed.Format_Checks) = nil) -> typed.Plan {
 	reg := model.Registry{naming = {enums = enums}}
-	m, _ := model.compile(&reg, T, reads if reads != nil else json.reads(.Json), context.temp_allocator)
+	m, _ := model.compile(&reg, T, checks.? or_else json.checks(.Json), context.temp_allocator)
 	// The model's plan refuses reads, and these tests read by it to compare the read with the schema.
 	plan := m.plan
 	plan.model_plan = .None
@@ -217,7 +217,7 @@ description_of :: proc(plan: ^typed.Plan, allocator := context.allocator) -> (ru
 // Why `T`'s model does not compile.
 refusal :: proc($T: typeid) -> core.Error {
 	reg: model.Registry
-	_, err := model.compile(&reg, T, json.reads(.Json), context.temp_allocator)
+	_, err := model.compile(&reg, T, json.checks(.Json), context.temp_allocator)
 	return err
 }
 

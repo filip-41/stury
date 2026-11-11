@@ -680,6 +680,8 @@ Pool :: struct {
 	allocator:  runtime.Allocator,
 	// Whether a key repeats in the text of the value checked, nil until a refusal asks.
 	repeated:   Maybe(bool),
+	// The containers of the text that hold a repeated key, nil until a check judging repeats asks.
+	repeating:  Maybe(Repeating),
 	// The forks of runs opened at the container starting at `leads_at`, in the order the token reached them, which a fork
 	// opened later at it may follow, the count of forks opened, and that count as the check of the current value began.
 	leads:      [8]^Fork,
@@ -768,6 +770,87 @@ pool_text_repeats :: proc(h: ^Check) -> bool {
 	repeated := text_repeats((^Reader)(h))
 	h.pool.repeated = repeated
 	return repeated
+}
+
+// The containers of a text that hold an object in which a key repeats, the object itself included, by their first
+// byte in ascending order. `every` stands for every container, for a text a build could not tell apart so.
+@(private)
+Repeating :: struct {
+	at:    []u64,
+	every: bool,
+}
+
+// Whether the value starting at `lo` holds a key that repeats, which only then reads as `.Judge` says: a value that
+// holds none judges as under `.Ignore`, so its runs need no failures kept to take back and share their forks as such
+// runs do. A repeat outside the value takes back what the value failed from the sink of the check that holds it.
+@(private)
+holds_repeats :: proc(h: ^Check, lo: u64) -> bool {
+	p := h.pool
+	known, asked := p.repeating.?
+	if !asked {
+		known = repeating_containers((^Reader)(h))
+		p.repeating = known
+	}
+	if known.every {
+		return true
+	}
+	_, found := slice.binary_search(known.at, lo)
+	return found
+}
+
+// The containers of the text `r` reads that hold a repeated key, in the temp allocator.
+@(cold)
+@(private)
+repeating_containers :: proc(r: ^Reader) -> Repeating {
+	doc, err := core.build(r.src, r.plan.as, .Last, context.temp_allocator)
+	defer core.destroy(&doc)
+	at := make([dynamic]u64, context.temp_allocator)
+	if err != nil || len(doc.nodes) == 0 {
+		return {every = true}
+	}
+	if _, kept := repeats_inside(&doc, core.ROOT, &at); !kept {
+		return {every = true}
+	}
+	slice.sort(at[:])
+	return {at = at[:]}
+}
+
+// Whether the container `i` holds an object in which a key repeats, the object itself included, adding the first byte of
+// each such container to `at`. `kept` is false when a name or an entry could not be kept.
+@(private)
+repeats_inside :: proc(doc: ^core.Document, i: core.Node_Index, at: ^[dynamic]u64) -> (holds, kept: bool) {
+	n := doc.nodes[i]
+	#partial switch n.kind {
+	case .Object:
+		names := make([dynamic]string, context.temp_allocator)
+		it := core.doc_pairs(doc, i)
+		for k, v in core.doc_pair_next(&it) {
+			inner := repeats_inside(doc, v, at) or_return
+			name, ok := core.text_clone(doc, k, context.temp_allocator)
+			if _, failed := append(&names, name); !ok || failed != nil {
+				return
+			}
+			holds ||= inner
+		}
+		slice.sort(names[:])
+		for j in 1 ..< len(names) {
+			holds ||= names[j] == names[j - 1]
+		}
+	case .Array:
+		it := core.doc_children(doc, i)
+		for v in core.doc_child_next(&it) {
+			inner := repeats_inside(doc, v, at) or_return
+			holds ||= inner
+		}
+	case:
+		return false, true
+	}
+	if holds {
+		if _, failed := append(at, core.node_start(n)); failed != nil {
+			return
+		}
+	}
+	return holds, true
 }
 
 // The allocator `p` makes its runs and forks with.
@@ -1202,7 +1285,7 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 	if taken, took := fork_take(h, fk); took {
 		return taken, .Next
 	}
-	if p := h.pool; h.run != nil && h.sink == nil && u.judging != 0 {
+	if p := h.pool; h.run != nil && (h.sink == nil || h.sink == h.run.buffer) && u.judging != 0 {
 		if p.leads_at != t.lo {
 			p.leads_at, p.n_leads = t.lo, 0
 		}
@@ -1242,7 +1325,7 @@ arm_add :: proc(h: ^Check, fk: ^Fork, a: ^Apply, kind: Apply_Kind, rec: i32, lev
 		}
 	}
 	// An object's first member decides an arm only when the first of its repeated keys is the one kept.
-	first := t.kind == .Object && (h.repeats != .Judge || h.first_key)
+	first := t.kind == .Object && (h.repeats != .Judge || h.first_key || !holds_repeats(h, t.lo))
 	if a != nil && a.judge == .Choice && !first {
 		for &c in a.by.choices {
 			arm_add(h, fk, &c, c.kind, c.rec, level, t)
@@ -1287,7 +1370,7 @@ arm_add :: proc(h: ^Check, fk: ^Fork, a: ^Apply, kind: Apply_Kind, rec: i32, lev
 		}
 	}
 	if kind in WHOLE_ARMS && rec >= 0 {
-		x.run = run_start(h, fk, x, rec, level + 1, nil)
+		x.run = run_start(h, fk, x, rec, level + 1, nil, fk.lo)
 	}
 }
 
@@ -1369,7 +1452,7 @@ fork_wake :: proc(h: ^Check, fk: ^Fork, t: core.Token) -> core.Action {
 			x.dead = true
 			continue
 		}
-		if x.run = run_start(h, fk, x, x.rec, fk.level + 1, nil); x.run == nil {
+		if x.run = run_start(h, fk, x, x.rec, fk.level + 1, nil, fk.lo); x.run == nil {
 			return .Stop
 		}
 		stopped := run_feed(h, x.run, fk.opened)
@@ -1426,9 +1509,10 @@ member_fails :: proc(h: ^Check, rec: i32, key: string, t: core.Token, text: stri
 	return !rules.enum_has(l, t.kind, text)
 }
 
-// Starts a run of record `rec` for the arm `x` of the fork, of the held value or, under `step`, of its member or element.
+// Starts a run of record `rec` for the arm `x` of the fork, of the held value or, under `step`, of its member or element,
+// whose first byte is `lo`.
 @(private)
-run_start :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run, rec: i32, nest: int, step: Maybe(core.Step)) -> ^Run {
+run_start :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run, rec: i32, nest: int, step: Maybe(core.Step), lo: u64) -> ^Run {
 	p := h.pool
 	r := pool_run(p)
 	if r == nil {
@@ -1450,15 +1534,18 @@ run_start :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run, rec: i32, nest: int, step: 
 	c.expect, c.borrow, c.first_key, c.refuse_unknown, c.wide, c.wrap_sp, c.wrap = h.expect, h.borrow, h.first_key, h.refuse_unknown, true, 0, nil
 	c.view, c.plan, c.ctx, c.find_tag, c.format = h.view, h.plan, h.ctx, h.find_tag, h.format
 	c.first, c.fatal, c.nest, c.pool, c.run, c.after, c.taken = {}, .None, nest, p, r, nil, nil
-	// An arm's structs sit below a union, which `merge` replaces whole, so a partial load reads them in full.
+	// An arm's structs sit below a union, which `model.patch` replaces whole, so a patch reads them in full.
 	c.partial = false
 	c.sink, c.repeats, c.tracked = nil, h.repeats, 0
+	if c.repeats == .Judge && !holds_repeats(h, lo) {
+		c.repeats = .Ignore
+	}
 	// A run that judges repeats takes back what a replaced member failed, so it keeps its failures even when no arm reports them.
-	if h.sink != nil && (x.apply != nil || h.repeats == .Judge) {
+	if h.sink != nil && (x.apply != nil || c.repeats == .Judge) {
 		switch {
 		case x.kind in REPORTING && x.apply != nil:
 			c.sink = h.sink
-		case x.kind in BUFFERED || h.repeats == .Judge:
+		case x.kind in BUFFERED || c.repeats == .Judge:
 			if step == nil {
 				if r.buffer == nil {
 					if r.buffer = new(Sink, context.temp_allocator); r.buffer == nil {
@@ -1584,8 +1671,9 @@ fork_token :: #force_no_inline proc "contextless" (h: ^Check, t: core.Token) -> 
 // which keeps arms that recurse through the same member from multiplying their runs at each level. Only checks with no
 // readings follow. A sibling run's fork from the same frame leads a check with no sink, as then only the verdict and
 // refusal count, or with a sink of the run's own that no chosen arm delivers, as then only the failures' kinds and places
-// count, which the follower copies. Any earlier run's fork with no sink that does not hold this check leads one with no
-// sink whose arm counts only by its verdict, as the refusal's steps are the lead's.
+// count, which the follower copies. Any earlier run's fork that does not hold this check leads one whose arm counts only
+// by its verdict, as the refusal's steps and the failures' keyword steps are the lead's: with no sink when the follower
+// has none, else with a sink of the lead's own.
 @(private)
 fork_lead :: proc(h: ^Check, u: ^Use, t: core.Token, level: int) -> ^Run {
 	r := h.run
@@ -1603,7 +1691,7 @@ fork_lead :: proc(h: ^Check, u: ^Use, t: core.Token, level: int) -> ^Run {
 			if h.sink != nil && x.kind in BUFFERED {
 				return nil
 			}
-			if lead == nil && h.sink == nil && x.kind in VERDICT_ARMS {
+			if lead == nil && x.kind in VERDICT_ARMS {
 				lead = earlier_lead(h, u, t)
 			}
 			return lead
@@ -1625,8 +1713,8 @@ fork_lead :: proc(h: ^Check, u: ^Use, t: core.Token, level: int) -> ^Run {
 	return nil
 }
 
-// The run of a fork the token opening `t` reached before this check, judging alike at `u` with no sink, that no check
-// holding this one holds, nil for none.
+// The run of a fork the token opening `t` reached before this check, judging alike at `u` with no sink when `h` has none
+// and else with a sink of its own, that no check holding this one holds, nil for none.
 @(private)
 earlier_lead :: proc(h: ^Check, u: ^Use, t: core.Token) -> ^Run {
 	p := h.pool
@@ -1638,7 +1726,10 @@ earlier_lead :: proc(h: ^Check, u: ^Use, t: core.Token) -> ^Run {
 		if !f.open || f.follows != nil || f.ruled || f.lo != t.lo || f.u.judging != u.judging || y == nil || y.c.fork != f || y.done {
 			continue
 		}
-		if y.c.sink != nil || y.c.readings != nil || y.c.taken != nil || y.c.first.kind != .None {
+		if y.c.sink != (nil if h.sink == nil else y.buffer) || h.sink != nil && f.u.judging_all != u.judging_all {
+			continue
+		}
+		if y.c.readings != nil || y.c.taken != nil || h.sink == nil && y.c.first.kind != .None {
 			continue
 		}
 		for c := h; c.run != nil; c = c.run.parent {
@@ -2062,7 +2153,7 @@ member_start :: proc(h: ^Check, fk: ^Fork, kinds: bit_set[Apply_Kind], name := c
 				continue
 			}
 		}
-		x.run = run_start(h, fk, &x, x.rec, nest, step)
+		x.run = run_start(h, fk, &x, x.rec, nest, step, at if kinds != NAME_ARMS else name.lo)
 	}
 }
 

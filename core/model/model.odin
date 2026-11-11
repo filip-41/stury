@@ -24,7 +24,7 @@ Registry :: struct {
 	customs: [dynamic]Custom_Of,
 	enums:   [dynamic]Enum_Rule,
 	unions:  [dynamic]Union_Rule,
-	applies: [dynamic]Applies_Rule,
+	schemas:    [dynamic]Schema_Of,
 	close:      typed.Close_Validators, // `typed.validate_closed` once a validator is registered
 }
 
@@ -42,7 +42,7 @@ Naming :: struct {
 Loads :: struct {
 	defaults: [dynamic]Default_Of,
 	forbids:  [dynamic]typeid,
-	// The memory of the constants `defaults` holds.
+	// The memory of the constants `defaults` holds and of the fragments `schemas` holds.
 	constants: virtual.Arena,
 }
 
@@ -67,8 +67,8 @@ Field_Rule_Of :: struct {
 	tag:   string,
 }
 
-// How a model loads a member its struct does not name: `Ignore` skips it and `Forbid` refuses it. A member tagged
-// `model:"extra"` takes such members, and a struct that has one cannot forbid them.
+// How a model loads a member its struct does not name: `Ignore` skips it and `Forbid` refuses it. A member whose format
+// tag says `unknown` takes such members, and a struct that has one cannot forbid them.
 Extra :: enum u8 {
 	Ignore,
 	Forbid,
@@ -97,7 +97,7 @@ register :: proc {
 	register_custom,
 	register_enum,
 	register_union,
-	register_applies,
+	register_schema,
 }
 
 // Sets how models compiled from `reg` spell names. `union_tag` must outlive the registry.
@@ -201,17 +201,27 @@ Model :: struct($T: typeid) {
 	load_plan: typed.Plan,
 	// The registry's customs with their carriers' plans, which the plans' hooks point at.
 	customs:   []Custom_Of,
-	// The judged types the model holds, nil for none.
-	judging:   ^Applied,
+	// The judged types the model holds and their check plans, which only this package reads, nil for none.
+	judging:   rawptr,
 }
 
-// Compiles `T`'s model from `reg`, nil for a plain type, for the format whose typed reads are `reads`, as
-// `json.reads(.Json)` gives them. A rule that does not fit its member, and a registered rule of a member its struct does
-// not have, refuse the model as `.Bad_Tag`, at the member's path, with the struct as `want.type` and the item as
-// `want.text`, and so does an `extra` member of a struct that forbids the members it does not name, and a `Fields_Set`
-// in a struct that loads more than 128 members. `layout` is the layout a format's options make, such as
-// `dsv.layout(.Csv, {no_header = true})`, which both plans read and write by.
-compile :: proc(reg: ^Registry, $T: typeid, reads: ^typed.Format_Reads, allocator := context.allocator, layout: Maybe(core.As) = nil) -> (m: Model(T), err: core.Error) {
+@(private)
+judging_in :: proc(m: ^Model($T)) -> ^Applied {
+	return (^Applied)(m.judging)
+}
+
+// Compiles `T`'s model from `reg`, nil for a plain type, for the format and layout `checks` names, as
+// `json.checks(.Json)` and `dsv.checks(.Csv, {no_header = true})` give them, which both plans read and write by. A rule
+// that does not fit its member, and a registered rule of a member its struct does not have, refuse the model as
+// `.Bad_Tag`, at the member's path, with the struct as `want.type` and the item as `want.text`, and so does an `extra`
+// member of a struct that forbids the members it does not name, and a `Fields_Set` in a struct that loads more than 128
+// members.
+compile :: proc(reg: ^Registry, $T: typeid, checks: typed.Format_Checks, allocator := context.allocator) -> (m: Model(T), err: core.Error) {
+	reads := checks.reads
+	layout: Maybe(core.As)
+	if checks.layout.readers != nil {
+		layout = checks.layout
+	}
 	hooks: []typed.Type_Hook
 	m.customs, hooks, err = carriers_of(reg, reads, allocator)
 	defer delete(hooks, allocator)
@@ -219,10 +229,12 @@ compile :: proc(reg: ^Registry, $T: typeid, reads: ^typed.Format_Reads, allocato
 		m.plan, err = plan_of(reg, T, reads, allocator, nil, nil, layout, hooks)
 	}
 	if err == nil {
-		m.judging, err = judging_of(reg, &m.plan, reads, allocator, layout, hooks)
+		judging: ^Applied
+		judging, err = judging_of(reg, &m.plan, reads, allocator, layout, hooks)
+		m.judging = judging
 	}
 	if err == nil {
-		m.load_plan, err = plan_of(reg, T, reads, allocator, .Read_Only, &m.plan, layout, hooks, m.judging)
+		m.load_plan, err = plan_of(reg, T, reads, allocator, .Read_Only, &m.plan, layout, hooks, judging_in(&m))
 	}
 	if err == nil {
 		err = carrier_plans(&m, reads, hooks[:len(hooks) - len(m.customs)], allocator)
@@ -268,9 +280,7 @@ plan_of :: proc(reg: ^Registry, T: typeid, reads: ^typed.Format_Reads, allocator
 		plan.as = as
 	}
 	if whole != nil && refused.kind == .None {
-		refused = replacement_plans(&c, reads, &plan, allocator)
-		if refused.kind != .None {
-			replacement_destroy(&plan)
+		if refused = judged_refused(&plan); refused.kind != .None {
 			typed.plan_destroy(&plan)
 		}
 	}
@@ -314,10 +324,7 @@ registry_destroy :: proc(reg: ^Registry) {
 		delete(x.tag)
 	}
 	delete(reg.unions)
-	for x in reg.applies {
-		applies_destroy(x.applies, context.allocator)
-	}
-	delete(reg.applies)
+	delete(reg.schemas)
 	virtual.arena_destroy(&reg.loads.constants)
 	reg^ = {}
 }
@@ -327,14 +334,13 @@ model_destroy :: proc(m: ^Model($T)) {
 	if raw_data(m.load_plan.leaves) == raw_data(m.plan.leaves) {
 		m.load_plan.leaves = nil
 	}
-	replacement_destroy(&m.load_plan)
 	typed.plan_destroy(&m.load_plan)
 	typed.plan_destroy(&m.plan)
 	for &x in m.customs {
 		typed.plan_destroy(&x.plan)
 	}
 	delete(m.customs)
-	judging_destroy(m.judging)
+	judging_destroy(judging_in(m))
 	m.judging = nil
 }
 
@@ -376,17 +382,17 @@ member_rule :: proc(h: ^typed.Model_Rules, owner: typeid, field: string, type: t
 			r.make, r.data = x.make, x.data
 		}
 	}
+	afters := make([dynamic]typed.Validator, context.temp_allocator)
 	for x in c.reg.validators {
 		if x.type == owner && x.field == field {
-			r.after = x.v
+			append(&afters, x.v)
 		}
 	}
+	r.afters = afters[:]
 	if value, found := reflect.struct_tag_lookup(reflect.Struct_Tag(tag), "model"); found {
 		read_tag(value, subject, true, &r)
 	}
-	if r.before = before_of(c, owner, field); r.before != nil {
-		r.before.rules = r.rules
-	}
+	r.before = before_of(c, owner, field)
 	r.skip ||= r.access != .Read_Write && c.without == r.access
 	return
 }
@@ -411,6 +417,28 @@ held :: proc(ti: ^runtime.Type_Info) -> ^runtime.Type_Info {
 		if len(v.variants) == 1 && !v.no_nil {
 			return v.variants[0]
 		}
+	}
+	return nil
+}
+
+// Adds hook `x` to `list`, under `replace` in the place of the one of the same struct and member, which keeps its name.
+@(private)
+add_hook :: proc(list: ^[dynamic]$X, x: X, replace: bool) -> runtime.Allocator_Error {
+	if replace {
+		for &y in list {
+			if y.type == x.type && y.field == x.field {
+				field := y.field
+				y = x
+				y.field = field
+				return nil
+			}
+		}
+	}
+	x := x
+	x.field = strings.clone(x.field) or_return
+	if _, err := append(list, x); err != nil {
+		delete(x.field)
+		return err
 	}
 	return nil
 }

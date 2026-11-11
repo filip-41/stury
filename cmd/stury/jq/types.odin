@@ -742,8 +742,7 @@ matches :: proc(t: ^Typer, expression, name: string) -> bool {
 	if re == nil {
 		return true
 	}
-	caps: [2]int
-	found, err := regex.search(re, name, 0, caps[:], &t.scratch)
+	found, err := regex.search(re, name, 0, nil, &t.scratch)
 	return found || err != ""
 }
 

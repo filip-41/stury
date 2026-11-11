@@ -35,10 +35,16 @@ indirect :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t
 		// An `any` is written, never read: a read takes a `core.Value` for a value of any kind.
 		reason = .Unsupported
 	case .Raw, .Hook, .Value, .Before:
+		when H == Check {
+			if fld.kind == .Before && m.before.call == nil && !m.before.first_match {
+				return judged_open(h, regs, t, fld, m, dest)
+			}
+		}
 		if t.kind == .Object || t.kind == .Array {
 			f := &h.frames[h.sp]
 			h.sp += 1
 			f.a, f.b, f.c, f.data, f.seen, f.kind = regs.a, regs.b, regs.c, rawptr(uintptr(t.lo)), 0, t.kind
+			f.owner, f.target = fld, dest
 			return {NO_LIMIT, u64(uintptr(&h.plan.fields[3])), 0}, .Next
 		}
 		lo, hi := core.scalar_ends(t)
@@ -773,9 +779,10 @@ is_struct :: #force_inline proc "contextless" (f: ^Field) -> bool {
 	return f.kind == .Struct || f.kind == .Required
 }
 
+// Whether the frames of record `f`'s containers hold the record that reads them in `Frame.owner`.
 @(private)
 wrapper :: #force_inline proc "contextless" (f: ^Field) -> bool {
-	return f.kind >= .Ptr && f.kind <= .Union
+	return f.kind >= .Ptr && f.kind <= .Before
 }
 
 // Sets member `i`'s bit in `f` and says whether it was set.

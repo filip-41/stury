@@ -5,6 +5,7 @@ import "core:mem"
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import rules "../../core/rules"
 import typed "../../core/typed"
 import write "../../core/write"
 import dsv ".."
@@ -428,5 +429,13 @@ a_model_reads_and_writes_carriers_in_cells :: proc(t: ^testing.T) {
 	first: model.Registry
 	model.register(&first, model.Union_Rule{type = Either, mode = .First_Match})
 	_, refused = model.compile(&first, []struct{ e: Either }, dsv.checks(.Csv))
+	walktest.expect_kind(t, refused, core.Typed_Error_Kind.Unsupported)
+	Small :: distinct i64
+	judged: model.Registry
+	not_integer := rules.Description{allocator = context.allocator}
+	defer rules.description_destroy(&not_integer)
+	append(&not_integer.nodes, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1, not = 1}, rules.Node{kinds = {.Integer}, array = -1, object = -1})
+	model.register(&judged, Small, &not_integer)
+	_, refused = model.compile(&judged, []struct{ s: Small }, dsv.checks(.Csv))
 	walktest.expect_kind(t, refused, core.Typed_Error_Kind.Unsupported)
 }

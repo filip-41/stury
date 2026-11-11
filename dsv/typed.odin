@@ -31,16 +31,12 @@ reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	return reads_of(S)
 }
 
-// Returns the reads of spec `S` for a plan made from a description, which `plan_of` and `schema.bind` take to check a text
-// or a document by that spec, and for a model, which `model.compile` takes. `reads` serves a plan made from a type.
-checks :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
-	return checks_of(S)
-}
-
-// Returns the layout of spec `S` read and written with `opts`, which `model.compile` takes. It reaches only the passes of
-// `S`, where `as(spec, opts)` reaches every spec's.
-layout :: proc "contextless" ($S: Spec, opts := Options{}) -> core.As {
-	return bound_as(S, opts)
+// Returns the checks of spec `S` read and written with `opts`, which `model.compile` and `schema.bind` take: the reads of
+// a plan made from a description or a model, which check a text or a document by that spec, and the layout its plans
+// read and write by. It reaches only the passes of `S`, where `as(spec, opts)` reaches every spec's. `reads` serves a
+// plan made from a type.
+checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Checks {
+	return {checks_of(S), bound_as(S, opts)}
 }
 
 // Builds the plan of `T` for dsv's spelling, as `typed.plan_make` does, and refuses a `T` that is no list of rows and no
@@ -617,58 +613,83 @@ judge_cell :: proc(c: ^typed.Check, regs: core.Hook_Regs, t: core.Token, fld: ^t
 	return typed.check_rules(c, regs, token, fld, dest)
 }
 
-// Rewrites the cell `t` by the `before` of the member `fld`, then reads the replacement as a cell of its own into the
-// member at `dest`. A refusal names the cell's bytes.
+// Rewrites the cell `t` by the `before` of the member `fld`, then reads the replacement into the member at `dest`.
 @(cold, private)
 before_cell :: proc(h: ^Cells_Of(typed.Check), regs: core.Hook_Regs, t: core.Token, fld: ^typed.Field, dest: uintptr) -> (core.Hook_Regs, core.Action) {
 	c := &h.r
-	b := c.plan.meta[fld.meta].before
+	m := &c.plan.meta[fld.meta]
 	hi := t.lo + u64(t.n)
-	if b.call == nil {
+	if m.before.call == nil || m.before.judge != nil {
 		return typed.refuse(c, regs, {kind = .Unsupported, at = t.lo}, hi)
 	}
+	// The cell's text, the replacement and its spelling live only for this cell, unless a refusal holds the spelling.
+	context = c.ctx
+	own_temp := context.allocator == context.temp_allocator
+	guard := runtime.default_temp_allocator_temp_begin()
 	cell := t
 	cell.kind = .String
 	text, read := core.token_text(c.plan.readers, &c.view, cell, context.temp_allocator)
 	if !read {
 		return typed.refuse(c, regs, {kind = .No_Memory, at = t.lo}, hi)
 	}
-	out, back, action, failed := typed.run_before(c, regs, b, text, t.lo, hi)
-	if failed {
-		return back, action
+	back, action := typed.read_replacement(c, regs, m, dest, text, t.lo, hi)
+	if !own_temp && action == .Next {
+		runtime.default_temp_allocator_temp_end(guard)
 	}
+	return back, action
+}
+
+// The plans' `replace`: reads the scalar `v` as a cell of its own through `c` at `regs`. A string member under
+// `borrow_strings` keeps the cell's text, which is in the read's allocator for that.
+@(private)
+replace_cell :: proc(c: ^typed.Check, regs: core.Hook_Regs, v: core.Value, _: u32) -> ([]u8, core.Hook_Regs, core.Action) {
 	buf: [spell.F64_ROOM]u8
-	replaced, spelled := typed.scalar_text(out, &buf)
-	if !spelled {
-		return typed.refuse(c, regs, {kind = .Unsupported, at = t.lo}, hi)
+	spelled, ok := scalar_text(v, &buf)
+	if !ok {
+		back, action := typed.refuse(c, regs, {kind = .Unsupported})
+		return nil, back, action
 	}
-	// The replacement is read from a text of its own, a string member under `borrow_strings` keeping it.
-	own := make([]u8, len(replaced))
-	copy(own, replaced)
-	defer if !c.borrow {
-		delete(own)
+	text, failed := make([]u8, len(spelled), c.ctx.allocator if c.borrow else context.temp_allocator)
+	if failed != nil {
+		back, action := typed.refuse(c, regs, {kind = .No_Memory})
+		return nil, back, action
 	}
-	sink := c.sink
-	entries := len(sink.entries) if sink != nil else 0
-	failed_before := c.first.kind != .None
+	copy(text, spelled)
+	fld := typed.field_at(regs.b)
+	dest := uintptr(regs.c) + uintptr(fld.offset)
 	held := c.src
-	c.src = own
-	replacement := core.Token{n = u32(len(own)), kind = t.kind, role = t.role}
-	reason := read_cell(c, &b.field, replacement, dest)
-	action = judge_cell(c, regs, replacement, &b.field, dest) if reason == .None else .Next
+	c.src = text
+	cell := core.Token{n = u32(len(text)), kind = .Plain, role = .Value}
+	action := core.Action.Next
+	if reason := read_cell(c, fld, cell, dest); reason != .None {
+		_, action = typed.refuse_value(c, regs, cell, reason)
+	} else {
+		action = judge_cell(c, regs, cell, fld, dest)
+	}
 	c.src = held
-	if sink != nil {
-		for &e in sink.entries[entries:] {
-			e.start, e.end = t.lo, hi
+	return text, regs, action
+}
+
+// The text of the scalar `v` as a cell, in `buf` when it is a number. A null spells an empty cell.
+@(private)
+scalar_text :: proc "contextless" (v: core.Value, buf: ^[spell.F64_ROOM]u8) -> (text: string, ok: bool) {
+	switch x in v {
+	case nil:
+		return "", true
+	case string:
+		return x, true
+	case bool:
+		return "true" if x else "false", true
+	case ^core.Number_Text:
+		return x.text, true
+	case f64:
+		if x != x || abs(x) > max(f64) {
+			return "", false
 		}
+		return string(buf[:spell.f64_text(&buf[0], x)]), true
+	case ^core.Array, ^core.Object, core.Node_Ref, ^core.Commented, core.Trail:
 	}
-	if !failed_before && c.first.kind != .None {
-		c.first.at = t.lo
-	}
-	if reason != .None {
-		return typed.refuse_value(c, regs, t, reason)
-	}
-	return regs, action
+	return "", false
 }
 
 // Stores the text of a quoted cell holding a `""` into the string at `dest`, in memory of the read's allocator.

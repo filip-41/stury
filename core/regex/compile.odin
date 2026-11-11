@@ -58,6 +58,7 @@ Op :: enum u8 {
 	Count, // a counted loop at slot a: its body at pc+2 runs while slot a is short of insts[pc+1].a, may run while short of insts[pc+1].b, as many times as can; then on to b
 	Count_Lazy, // the same, as few times as can
 	Count_Next, // slot a += 1, then to the loop's Count at b
+	Count_Check, // as Check under ECMA, failing only once the loop whose Count is at b has run its least count
 	Seen, // a pair a linear search has been to: fails (match.odin)
 	// Call and the ops after it are a call's or an absent operator's, which `Regex.calls_or_limits` tells of.
 	Call, // the group at a, which returns to pc+1; b: its number
@@ -110,7 +111,20 @@ Visited :: struct {
 	// nothing yet fails where one that has goes on (`row_of`). Nil when no such loop.
 	loops:   [][2]i32,
 	loop_of: []i32,
-	rows:    []i32,
+	// The ECMA counter loops, the innermost each instruction lies in (-1 for none, nil for no loop), and each
+	// instruction's rows for one count of the loops around it (`block`). An instruction has a block of rows for each
+	// count of each loop around it, since what follows depends on the count. A program with counter loops has its
+	// rows laid out for each search (`counted_rows`), the others here.
+	counters:   []Counter,
+	counter_of: []i32,
+	block:      []int,
+	rows:       []int,
+}
+
+// An ECMA counter loop's slot, its least and most counts, and the loop around it, -1 for none.
+@(private)
+Counter :: struct {
+	slot, least, most, outer: int,
 }
 
 @(private)
@@ -128,6 +142,10 @@ Compiler :: struct {
 	loops:      [dynamic][2]i32, // `Regex.loops`
 	loop_of:    [dynamic]i32, // under ECMA
 	loop:       int, // the loop being emitted, -1 for none
+	counters:   [dynamic]Counter, // `Visited.counters`
+	counter_of: [dynamic]i32, // under ECMA
+	counter:    int, // the counter loop being emitted, -1 for none
+	looped:     [dynamic]^Node, // the ECMA repeats run as counter loops, which a repeat around them emits again
 	tuned:      int, // the last group Oniguruma's tune_tree has reached, as a look-behind measures one
 	slots:      int,
 	err:        string,
@@ -156,12 +174,13 @@ in_property :: proc(name: string, r: rune) -> bool {
 
 // `pattern` compiled as jq compiles it, or Oniguruma's message for why not. The program, what it was built from and
 // any message are allocated from `allocator`, which is meant to be an arena the caller frees whole. With `automaton`
-// the automata are built too, which pays for a regex that searches more than a few short texts. Their build borrows
-// its working memory from `context.allocator` and frees it before returning.
-compile :: proc(pattern: string, flags: Flags, allocator := context.allocator, automaton := true) -> (re: Regex, err: string) {
+// the automaton that answers whether there is a match is built too, which pays for a regex that searches more than a
+// few short texts, and with `spans` also the two that find where a match ends and starts, which pay for a regex whose
+// searches read bounds. Their build borrows its working memory from `context.allocator` and frees it before returning.
+compile :: proc(pattern: string, flags: Flags, allocator := context.allocator, automaton := true, spans := false) -> (re: Regex, err: string) {
 	scratch := context.allocator
 	if re, err = program(pattern, flags, allocator); err == "" && automaton {
-		re.dfa = build_dfa(&re, allocator, scratch)
+		re.dfa = build_dfa(&re, spans, allocator, scratch)
 	}
 	return
 }
@@ -189,7 +208,7 @@ program :: proc(pattern: string, flags: Flags, allocator: mem.Allocator) -> (re:
 	}
 	names := pat.names
 	root := expand_folds(pat.root)
-	c := Compiler{slots = 2 * len(names), groups = pat.groups, referenced = pat.referenced, ecma = flags.ecma, loop = -1}
+	c := Compiler{slots = 2 * len(names), groups = pat.groups, referenced = pat.referenced, ecma = flags.ecma, loop = -1, counter = -1}
 	c.called = make([]bool, len(names))
 	c.recursive = make([]bool, len(names))
 	c.undone = slice.clone(c.referenced)
@@ -266,19 +285,45 @@ program :: proc(pattern: string, flags: Flags, allocator: mem.Allocator) -> (re:
 		if flags.ecma {
 			v.owner = look_owners(re.insts)
 		}
-		if len(c.loops) > 0 {
+		if len(c.loops) > 0 || len(c.counters) > 0 {
 			v.loops, v.loop_of = c.loops[:], c.loop_of[:]
-			v.rows = make([]i32, len(re.insts) + 1)
+			v.block = make([]int, len(re.insts))
 			for l, pc in v.loop_of {
-				v.rows[pc + 1] = v.rows[pc] + 1
+				v.block[pc] = 1
 				for k := l; k >= 0; k = v.loops[k][1] {
-					v.rows[pc + 1] += 1
+					v.block[pc] += 1
 				}
+			}
+			if len(c.counters) > 0 {
+				v.counters, v.counter_of = c.counters[:], c.counter_of[:]
+			} else {
+				v.rows = make([]int, len(re.insts) + 1)
+				lay_out_rows(v, v.rows, nil)
 			}
 		}
 	}
 	return re, ""
 }
+
+// Each instruction's first row of the visited set into `rows`, the total last: its block, times the counts
+// `radix` gives each counter loop around it. A total past MAX_ROWS is held at it.
+@(private)
+lay_out_rows :: proc(v: ^Visited, rows: []int, radix: []int) {
+	rows[0] = 0
+	for block, pc in v.block {
+		times := 1
+		if radix != nil {
+			for k := int(v.counter_of[pc]); k >= 0; k = v.counters[k].outer {
+				times = min(times * radix[k], MAX_ROWS)
+			}
+		}
+		rows[pc + 1] = min(rows[pc] + block * times, MAX_ROWS)
+	}
+}
+
+// More rows than a visited set within MAX_BYTES holds over one place.
+@(private)
+MAX_ROWS :: MAX_BYTES * 8 + 1
 
 // Whether the visited set pays and holds for a program. Under ECMA it does with a loop, a look-ahead, two choices, or one
 // choice in a search that tries more than one start. Under jq it does with a
@@ -307,7 +352,7 @@ linear_ops :: proc(insts: []Inst, ecma: bool, anchored: bool) -> bool {
 			// A program that starts at one place and has one choice and no loop or look-ahead tries each alternative
 			// of it along a straight line, so the set would only cost.
 			choices += int(is_choice(ins))
-			if ins.op == .Look || ins.op == .Jmp && int(ins.a) < i {
+			if ins.op == .Look || ins.op == .Count_Next || ins.op == .Jmp && int(ins.a) < i {
 				return true
 			}
 		} else if ins.op == .Jmp && int(ins.a) < i && slice.any_of_proc(insts[ins.a + 1:i], is_choice) {
@@ -474,6 +519,7 @@ add :: proc(c: ^Compiler, op: Op, a: int = 0, b: int = 0) -> int {
 	append(&c.insts, Inst{op, i32(a), i32(b)})
 	if c.ecma {
 		append(&c.loop_of, i32(c.loop))
+		append(&c.counter_of, i32(c.counter))
 	}
 	return len(c.insts) - 1
 }
@@ -732,10 +778,21 @@ emit_repeat :: proc(c: ^Compiler, n: ^Node) {
 	// One least iteration of a body that cannot match empty enters the loop past its Split, as Oniguruma's OP_JUMP
 	// does, rather than as a copy, which nested repeats would double at every level.
 	enter := add(c, .Jmp) if n.min == 1 && !empty else -1
-	for _ in 0 ..< (n.min if enter < 0 else 0) {
-		emit_body(c, x, -1)
-		if c.err != "" {
-			return
+	if enter < 0 && n.min > 1 && c.ecma && looped(c, n) {
+		emit_counter_loop(c, x, n.min, n.min, true, -1)
+	} else {
+		for i in 0 ..< (n.min if enter < 0 else 0) {
+			at := emitted(c)
+			emit_body(c, x, -1)
+			if c.err != "" {
+				return
+			}
+			if i == 0 && n.min > 1 && c.ecma && (len(c.insts) - at.insts) * n.min > ECMA_WRITTEN_OUT {
+				take_back(c, at)
+				append(&c.looped, n)
+				emit_counter_loop(c, x, n.min, n.min, true, -1)
+				break
+			}
 		}
 	}
 	loop := add(c, .Split)
@@ -764,10 +821,23 @@ emit_repeat :: proc(c: ^Compiler, n: ^Node) {
 emit_counted :: proc(c: ^Compiler, n: ^Node) {
 	x := n.kids[0]
 	mark := new_slot(c) if (n.max > n.min if c.ecma else n.max > 1) && can_be_empty(x) else -1
+	if c.ecma && n.max > 1 && looped(c, n) {
+		emit_counter_loop(c, x, n.min, n.max, n.greedy, mark)
+		return
+	}
 	splits := make([dynamic]int)
 	checks := make([dynamic]int)
 	start := len(c.insts)
+	at := emitted(c)
 	for i in 0 ..< n.max {
+		// Under ECMA a repeat written out past ECMA_WRITTEN_OUT runs as a counter loop instead, whose one body holds
+		// the empty-iteration rule by its count.
+		if i == 1 && c.ecma && (len(c.insts) - start) * n.max > ECMA_WRITTEN_OUT {
+			take_back(c, at)
+			append(&c.looped, n)
+			emit_counter_loop(c, x, n.min, n.max, n.greedy, mark)
+			return
+		}
 		// A call reuses the slots, so a counter is only kept where no group can be entered again.
 		if i == 1 && c.addr == nil && !c.ecma && (len(c.insts) - start) * n.max > COUNTED_WRITTEN_OUT {
 			// The rest in a counter loop: its Count is an exit, as a Split is.
@@ -839,6 +909,62 @@ new_slot :: proc(c: ^Compiler) -> int {
 // Oniguruma's OP_REPEAT does.
 @(private = "file")
 COUNTED_WRITTEN_OUT :: 1024
+
+// The most instructions an ECMA counted repeat is written out to, which the automaton needs, and few programs past it
+// fit the automaton's caps. A longer one runs its body once in a counter loop, so nested repeats add their bodies
+// rather than multiply them.
+@(private = "file")
+ECMA_WRITTEN_OUT :: 1 << 13
+
+// Whether the ECMA repeat `n` runs as a counter loop, which a repeat around it emitting its body again finds.
+@(private = "file")
+looped :: proc(c: ^Compiler, n: ^Node) -> bool {
+	return slice.contains(c.looped[:], n)
+}
+
+// How much of each of the compiler's lists has been emitted, for `take_back`.
+@(private = "file")
+Emitted :: struct {
+	insts, bytes, classes, refs, loops, counters: int,
+}
+
+@(private = "file")
+emitted :: proc(c: ^Compiler) -> Emitted {
+	return {len(c.insts), len(c.bytes), len(c.classes), len(c.refs), len(c.loops), len(c.counters)}
+}
+
+// Drops what was emitted since `at`. Its slots stay allocated and unread.
+@(private = "file")
+take_back :: proc(c: ^Compiler, at: Emitted) {
+	resize(&c.insts, at.insts)
+	resize(&c.loop_of, at.insts)
+	resize(&c.counter_of, at.insts)
+	resize(&c.bytes, at.bytes)
+	resize(&c.classes, at.classes)
+	resize(&c.refs, at.refs)
+	resize(&c.loops, at.loops)
+	resize(&c.counters, at.counters)
+}
+
+// An ECMA repeat of `x` from `least` to `most` times as one body in a loop whose count is in a slot of its own. With a
+// `mark`, an iteration past the least count that matches nothing fails, and one short of it goes on.
+@(private = "file")
+emit_counter_loop :: proc(c: ^Compiler, x: ^Node, least, most: int, greedy: bool, mark: int) {
+	slot := new_slot(c)
+	add(c, .Count_Reset, slot)
+	outer := c.counter
+	append(&c.counters, Counter{slot, least, most, outer})
+	c.counter = len(c.counters) - 1
+	loop := add(c, .Count if greedy else .Count_Lazy, slot)
+	add(c, .Count, least, most)
+	check := emit_body(c, x, mark)
+	add(c, .Count_Next, slot, loop)
+	c.counter = outer
+	patch(c, loop, slot, len(c.insts))
+	if check >= 0 && check < len(c.insts) {
+		c.insts[check] = {.Count_Check, i32(mark), i32(loop)}
+	}
+}
 
 @(private = "file")
 emit_look :: proc(c: ^Compiler, n: ^Node) {

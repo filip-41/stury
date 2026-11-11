@@ -7,15 +7,16 @@ import "base:intrinsics"
 import core ".."
 import "../typed"
 
-// What a visit calls at each record whose `Meta.rule_set` is set, with `kind` `.None`, and at each refusal of the walk,
+// What a visit calls at each record whose `Meta.rule_set` or `Meta.judged` is set, with `kind` `.None`, and at each refusal of the walk,
 // with its kind. `f` is the record and `at` its value. It returns whether the visit goes on. The walk goes on past a
 // refused number, enum or hooked value when it does, and ends at any other refusal.
 Visit :: #type proc(v: ^Visitor, f: ^typed.Field, at: uintptr, kind: core.Typed_Error_Kind) -> bool
 
 Visitor :: struct {
 	call:   Visit,
-	// Called at the close of a struct that has validators, with its model and the address of its first byte, nil for none.
-	close:  proc(v: ^Visitor, sm: ^typed.Struct_Model, base: uintptr) -> bool,
+	// Called at the close of a struct that has validators, with its record past the members and the address of its first
+	// byte, nil for none.
+	close:  proc(v: ^Visitor, end: ^typed.Field, base: uintptr) -> bool,
 	// The walk being visited, which `visit_path` reads during a call.
 	walker: rawptr,
 }
@@ -78,11 +79,11 @@ visit_record :: proc(w: ^Walker, open: Frame, top: int, f: ^typed.Field, at: uin
 // Calls the visitor's close at the struct of frame `cur`, whose path is that of the frames below it, and says whether the
 // walk goes on.
 @(private)
-visit_close :: proc(w: ^Walker, cur: Frame, top: int, sm: ^typed.Struct_Model) -> bool {
+visit_close :: proc(w: ^Walker, cur: Frame, top: int, end: ^typed.Field) -> bool {
 	open := cur
 	open.mode = .Target
 	w.open, w.top = open, top
-	return w.visitor.close(w.visitor, sm, cur.at)
+	return w.visitor.close(w.visitor, end, cur.at)
 }
 
 // What a visit refuses of a value with no frame: a float that is not finite and an enum value no member has.

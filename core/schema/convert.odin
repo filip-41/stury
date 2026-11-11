@@ -25,11 +25,11 @@ Converter :: struct {
 // Binds `c` to `from` and `to`, each with the typed reads of its format as `bind` takes them. A schema `to` cannot bind is a `.Write` refusal of the caller's.
 converter_init :: proc(cv: ^Converter, c: ^Compiled, from, to: core.As, from_reads: ^typed.Format_Reads = nil, to_reads: ^typed.Format_Reads = nil) -> (err: core.Error) {
 	cv.to = to
-	cv.from = bind(c, from, from_reads) or_return
+	cv.from = bind(c, {from_reads, from}) or_return
 	defer if err != nil {
 		unbind(&cv.from)
 	}
-	cv.into = bind(c, to, to_reads) or_return
+	cv.into = bind(c, {to_reads, to}) or_return
 	if virtual.arena_init_growing(&cv.arena) != nil {
 		unbind(&cv.into)
 		return core.error_of(core.Typed_Refusal{kind = .No_Memory})
