@@ -135,7 +135,7 @@ diff_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		usage_error("diff reads standard input once, and - names it twice")
 	}
 	a, b := read_operand(o, src, cli.files[0]), read_operand(o, src, cli.files[1])
-	r, err := diff.values(core.Node_Ref{&a, core.ROOT}, core.Node_Ref{&b, core.ROOT}, diff_options(d))
+	r, err := diff.values(a, b, diff_options(d))
 	if err != nil {
 		out_of_memory()
 	}
@@ -216,23 +216,34 @@ by_records :: proc(src: Source) -> bool {
 	return src.framing != .Concatenated && !table_source(src)
 }
 
-// The document of the file `path`, or an exit telling why not. A file of records is one array of them, and so is a
-// concatenated text that is not one value, which every other command reads value by value.
+// The value of the file `path`, the root of its document, or an exit telling why not. A file of records is one array
+// of them, and so is a concatenated text that is not one value, which every other command reads value by value.
 @(private = "file")
-read_operand :: proc(o: ^Opts, src: Source, path: string) -> core.Document {
+read_operand :: proc(o: ^Opts, src: Source, path: string) -> core.Value {
 	data := operand_bytes(path)
 	if msg := blank_told(file_name(path), data, src, o); msg != "" {
 		message.write_stderr("stury: parse error: %s", msg)
 		os.exit(EXIT_INPUT)
 	}
+	own := FORMATS[src.format].whole_as != nil
 	text := data
 	if by_records(src) {
 		exit_on_fault(o, src, path, data)
+		if own {
+			return records_value(o, src, path, data)
+		}
 		text = records_array(data, src)
 	}
 	heap := runtime.heap_allocator()
 	doc, fault := jq.build_text(text, src.as, heap)
-	if _, is_fault := fault.?; is_fault && src.framing == .Concatenated && !table_source(src) {
+	if f, is_fault := fault.?; is_fault && src.framing == .Concatenated && !table_source(src) {
+		if own {
+			if !texts_follow(f, src.format) {
+				tell_operand_fault(o, src, path, data, f)
+				os.exit(EXIT_INPUT)
+			}
+			return records_value(o, src, path, data)
+		}
 		exit_on_fault(o, src, path, data)
 		doc, fault = jq.build_text(records_array(data, src), src.as, heap)
 	}
@@ -240,7 +251,31 @@ read_operand :: proc(o: ^Opts, src: Source, path: string) -> core.Document {
 		tell_operand_fault(o, src, path, data, bad)
 		os.exit(EXIT_INPUT)
 	}
-	return doc
+	return core.Node_Ref{new_clone(doc, heap), core.ROOT}
+}
+
+// The records of `data`, the file `path`, in a format read with a handle of its own, as the array of their documents'
+// roots, which keeps what each document spells beyond JSON. Exits telling the fault of a record that does not build.
+@(private = "file")
+records_value :: proc(o: ^Opts, src: Source, path: string, data: []byte) -> core.Value {
+	heap := runtime.heap_allocator()
+	context.allocator = heap
+	all := core.new_array()
+	it := records.open(data, src.as, src.framing, allocator = heap)
+	for rec in records.next(&it) {
+		built, err := records.build(&it, rec, heap)
+		doc, fault := jq.judge_build(built, err)
+		if bad, is_fault := fault.?; is_fault {
+			tell_operand_fault(o, src, path, data, bad)
+			os.exit(EXIT_INPUT)
+		}
+		append(&all.items, core.Node_Ref{new_clone(doc, heap), core.ROOT})
+	}
+	if bad, is_fault := it.fault.?; is_fault {
+		tell_operand_fault(o, src, path, data, bad)
+		os.exit(EXIT_INPUT)
+	}
+	return all
 }
 
 // Writes `v` as JSON.

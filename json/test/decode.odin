@@ -300,7 +300,7 @@ text_lax_buffer_bound :: proc(t: ^testing.T) {
 	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
 	}
-	buf: [16]u8
+	buf: [32]u8
 	room := core.text_room(&doc, 0)
 	s, ok := core.text(&doc, 0, buf[:4])
 	testing.expect(t, !ok)

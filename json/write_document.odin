@@ -311,6 +311,18 @@ put_token :: proc(out: ^write.Out, src: []u8, doc: ^core.Document, i: core.Node_
 	case .True:
 		write.put_text(out, "true")
 	case .Number:
+		if doc != nil && doc.readers.number_text != nil {
+			stack: [64]u8
+			text, ok := write.node_number_text(doc, i, stack[:])
+			if !ok {
+				return .No_Memory
+			}
+			if text == "" {
+				return .Non_Finite
+			}
+			write.put_text(out, text)
+			return .None
+		}
 		write.put_text(out, string(src[t.lo:t.lo + u64(t.n)]))
 	case:
 		return put_token_string(out, src, doc, i, t, opts, own, copy)

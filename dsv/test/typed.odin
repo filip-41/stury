@@ -439,3 +439,30 @@ a_model_reads_and_writes_carriers_in_cells :: proc(t: ^testing.T) {
 	_, refused = model.compile(&judged, []struct{ s: Small }, dsv.checks(.Csv))
 	walktest.expect_kind(t, refused, core.Typed_Error_Kind.Unsupported)
 }
+
+Blob_Row :: struct {
+	name: string,
+	data: typed.Bytes,
+}
+
+// A `typed.Bytes` column reads a cell of RFC 4648 base64, quoted or not, and writes one back as a string field is written.
+@(test)
+bytes_column_round_trips :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	rows: []Blob_Row
+	src := "name,data\na,Zm9vYmFy\nb,\"Zg==\"\nc,\n"
+	e := read_rows(src, &rows)
+	walktest.expect_nil(t, e)
+	testing.expect_value(t, len(rows), 3)
+	testing.expect_value(t, string(rows[0].data), "foobar")
+	testing.expect_value(t, string(rows[1].data), "f")
+	testing.expect_value(t, len(rows[2].data), 0)
+
+	text, err := dsv.marshal(rows, .Csv, {}, write = {}, allocator = context.temp_allocator)
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, string(text), "name,data\na,Zm9vYmFy\nb,Zg==\nc,\"\"\n")
+
+	bad: []Blob_Row
+	bad_err := read_rows("name,data\na,Zh==\n", &bad)
+	walktest.expect_kind(t, bad_err, core.Typed_Error_Kind.Wrong_Kind)
+}

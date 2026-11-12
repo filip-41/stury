@@ -72,6 +72,8 @@ Unknown_Fields :: enum u8 {
 // A value's text, kept as the format spells it: a struct field's or a captured unknown member's whole value.
 Raw :: distinct string
 
+// A byte string, read from a string of RFC 4648 base64 with padding into bytes from `context.allocator`.
+Bytes :: distinct []u8
 // The arm of `Scalar` for a null.
 Null :: struct {}
 

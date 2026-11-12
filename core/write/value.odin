@@ -20,8 +20,9 @@ write_value :: proc(v: core.Value, as: core.As, opts := core.Write_Options{}, al
 }
 
 // `write_value` with the bytes between a member's key and its value given as `colon`, unless empty, and a format
-// that binds its spelling at compile time giving it as `spelling`. The refusal is the writer's own.
-write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator) -> (text: []u8, err: core.Typed_Refusal) {
+// that binds its spelling at compile time giving it as `spelling`. `site` is where the text will stand, as
+// `tokens_init` takes it. The refusal is the writer's own.
+write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator, site := core.Site{}) -> (text: []u8, err: core.Typed_Refusal) {
 	spelling := spelling
 	if spelling == nil && colon != "" {
 		services := core.services_of(as)
@@ -37,7 +38,7 @@ write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: 
 		spelling = &laid
 	}
 	t: Tokens = ---
-	if kind := tokens_init(&t, as, opts, allocator, {}, spelling); kind != .None {
+	if kind := tokens_init(&t, as, opts, allocator, {}, spelling, site); kind != .None {
 		tokens_finish(&t)
 		return nil, {kind = kind}
 	}
@@ -159,7 +160,9 @@ put_node :: proc(t: ^Tokens, r: core.Node_Ref) -> core.Typed_Error_Kind {
 	case .True:
 		return value_bool(t, true)
 	case .Number:
-		if _, digits, _ := core.double_of(r); digits != "" {
+		// The digits a format spells for a number whose span is not its text are read into `spelled`.
+		spelled: [core.HEX_ROOM]u8
+		if _, digits, _ := core.double_of(r, spelled[:] if r.doc.readers.number_text != nil else nil); digits != "" {
 			return value(t, Number_Literal{digits})
 		}
 		n, _ := core.number(r)

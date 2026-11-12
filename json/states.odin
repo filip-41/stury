@@ -984,7 +984,7 @@ st_member_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 
 // The class of a value's first byte, which `st_value` branches on.
 @(private)
-Value_Class :: enum u8 {
+Byte_Class :: enum u8 {
 	Bad,
 	String,
 	Number,
@@ -994,7 +994,7 @@ Value_Class :: enum u8 {
 }
 
 @(private, rodata)
-VALUE_CLASS := [256]Value_Class {
+VALUE_CLASS := [256]Byte_Class {
 	'"' = .String,
 	'-' = .Number,
 	'0' ..= '9' = .Number,

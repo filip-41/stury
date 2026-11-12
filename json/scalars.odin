@@ -188,23 +188,23 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 
 // JSON's `Readers.number`, false for a token that is not a number. A decimal of at most 19 digits is decoded from the
 // walk's digit counts, and the rest go to `number_slow`.
-number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> (core.Number, bool) {
-	if n.kind == .Number {
-		sp := n.spelling
+number :: #force_inline proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) {
+	if t.kind == .Number {
+		sp := t.spelling
 		if sp & core.NUMBER_KIND_MASK <= u16(Number_Spelling.Decimal) {
-			lo, hi := n.lo, n.lo + u64(n.n)
+			lo, hi := t.lo, t.lo + u64(t.n)
 			int_digits, frac_digits := core.number_digit_counts(sp)
 			if core.number_shape(sp) < 32 {
-				if num, ok := spell.number_int(doc.src, lo, hi, int_digits); ok {
+				if num, ok := spell.number_int(v.src, lo, hi, int_digits); ok {
 					return num, true
 				}
 			} else if sp & core.NUMBER_EXP != 0 {
-				return spell.number_exponent(doc.src, lo, hi, int_digits, frac_digits), true
+				return spell.number_exponent(v.src, lo, hi, int_digits, frac_digits), true
 			} else {
-				return spell.number_fraction(doc.src, lo, hi, int_digits, frac_digits), true
+				return spell.number_fraction(v.src, lo, hi, int_digits, frac_digits), true
 			}
 		}
-		return number_slow(doc, n), true
+		return number_slow(v, t), true
 	}
 	return {}, false
 }

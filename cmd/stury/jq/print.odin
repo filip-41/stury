@@ -276,7 +276,8 @@ put_number :: proc(p: ^Printer, v: Value) {
 		write.put_text(p.out, n.text)
 		return
 	case Ref:
-		lit, double, is_literal := node_literal(n.doc, n.node)
+		room: [core_pkg.HEX_ROOM]u8 = ---
+		lit, double, is_literal := node_literal(n.doc, n.node, room[:])
 		if is_literal {
 			write.put_text(p.out, lit)
 			return

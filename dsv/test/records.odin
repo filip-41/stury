@@ -367,10 +367,10 @@ cells_take_the_inferred_kinds :: proc(t: ^testing.T) {
 	buf: [16]u8
 	cells, ok := records.cells(&it, rec, buf[:])
 	testing.expect(t, ok && len(cells) == 5)
-	testing.expect_value(t, cells[0], write.Scalar(write.Number_Literal{"1"}))
-	testing.expect_value(t, cells[1], write.Scalar("2"))
-	testing.expect_value(t, cells[2], write.Scalar(write.Tree_Part.True))
-	testing.expect_value(t, cells[3], write.Scalar("false"))
+	testing.expect_value(t, fmt.tprint(cells[0]), fmt.tprint(write.Scalar(write.Number_Literal{"1"})))
+	testing.expect_value(t, fmt.tprint(cells[1]), fmt.tprint(write.Scalar("2")))
+	testing.expect_value(t, fmt.tprint(cells[2]), fmt.tprint(write.Scalar(write.Tree_Part.True)))
+	testing.expect_value(t, fmt.tprint(cells[3]), fmt.tprint(write.Scalar("false")))
 	testing.expect(t, cells[4] == nil)
 	wr: records.Writer
 	records.writer_init(&wr, {}, as, allocator = context.temp_allocator)

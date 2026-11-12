@@ -73,12 +73,47 @@ edit_tree :: proc(w: ^Edit_State, node: core.Node_Index, value: jq.Value) -> boo
 	return edit_set(w, node, v)
 }
 
-// The comment edits of `node` for the roles `c` writes: a role's comments replaced by its bodies, or removed, and no
-// edit where they are the node's own. A comment written is spelled `// body`, or `/* body */` where a line comment
-// cannot end.
+// The fact edits of `node` for the roles `c` writes: a comment role's comments replaced by its bodies, or removed, and
+// no edit where they are the node's own, and a property's value set or removed. A comment written is spelled
+// `// body`, or `/* body */` where a line comment cannot end.
 @(private = "file")
 edit_comments :: proc(w: ^Edit_State, node: core.Node_Index, c: ^jq.Commented) -> bool {
-	return edit_check(w, core.set_comments(w.list, node, c))
+	for role in c.written {
+		if core.is_property(role) {
+			edit_property(w, node, role, c.bodies[role]) or_return
+		} else {
+			edit_role(w, node, role, c.bodies[role]) or_return
+		}
+	}
+	return true
+}
+
+// The edit that makes `bodies`, one text or none, the tag, anchor or alias `role` of `node`, none when it already is.
+// The format must spell a property before its node.
+@(private = "file")
+edit_property :: proc(w: ^Edit_State, node: core.Node_Index, role: core.Role, bodies: []string) -> bool {
+	name := core.Fact_Name.Tag
+	#partial switch role {
+	case .Anchor:
+		name = .Anchor
+	case .Alias:
+		name = .Alias
+	}
+	have, held := core.fact_value(w.doc, node, name)
+	if len(bodies) == 0 {
+		if !held {
+			return true
+		}
+		return edit_check(w, core.remove_fact(w.list, node, role))
+	}
+	if edit := w.list.edit; edit == nil || edit.prefix == nil {
+		w.err = "the format cannot hold a tag, an anchor or an alias"
+		return false
+	}
+	if held && have.text == bodies[0] {
+		return true
+	}
+	return edit_check(w, core.set_fact(w.list, node, role, bodies[0]))
 }
 
 // The edit that makes `bodies` the comments of `node` with `role`, none when they already are.
@@ -167,12 +202,19 @@ writes_comment :: proc(v: jq.Value) -> bool {
 	if !is_commented {
 		return false
 	}
-	for role in c.written {
+	for role in c.written & core.COMMENT_ROLES {
 		if len(c.bodies[role]) > 0 {
 			return true
 		}
 	}
 	return false
+}
+
+// Whether `v` carries a tag, an anchor or an alias the filter wrote or kept from the value it replaced.
+@(private = "file")
+writes_property :: proc(v: jq.Value) -> bool {
+	c, is_commented := v.(^jq.Commented)
+	return is_commented && c.written - core.COMMENT_ROLES != {}
 }
 
 // A copy of the container `v` whose members are `v`'s own values.
@@ -541,8 +583,12 @@ edit_same :: proc(a, b: jq.Value) -> bool {
 }
 
 // Notes the comments a value written new carries. A value written new has no node to hold its comments until the second
-// pass.
+// pass, and none to hold a property.
 edit_note_comments :: proc(w: ^Edit_State, value: jq.Value) -> bool {
+	if writes_property(value) {
+		w.err = "cannot write a tag, an anchor or an alias on a value the file does not hold"
+		return false
+	}
 	if w.defers {
 		w.later = w.later || carries_comments(w, value, true)
 	} else if writes_comment(value) {
@@ -568,6 +614,10 @@ edit_refusal_text :: proc(w: ^Edit_State, e: core.Error, v: jq.Value, record: bo
 		return edit_error_text(w.doc.src, e)
 	}
 	refusal := e.(core.Document_Error)
+	// Only a table's value is a cell.
+	if !core.is_flat(w.doc) {
+		return "the format cannot spell the value" if refusal.reason == .No_Spelling else edit_error_text(w.doc.src, e)
+	}
 	cell := jq.plain(v)
 	if items, is_array := cell.(^jq.Array); record && is_array && int(refusal.at) < len(items.items) {
 		cell = jq.plain(items.items[refusal.at])
@@ -600,14 +650,17 @@ edit_refusal_text :: proc(w: ^Edit_State, e: core.Error, v: jq.Value, record: bo
 	return message.build_temp("cannot write the cell %q: %s", text, why)
 }
 
-// Whether the container `node` is empty with nothing but blanks inside, so a value built for it is written whole in the
-// layout it takes, as it shows none for its members.
+// Whether the container `node` is empty brackets with nothing but blanks inside, so a value built for it is written
+// whole in the layout it takes, as it shows none for its members.
 @(private = "file")
 edit_bare :: proc(w: ^Edit_State, node: core.Node_Index) -> bool {
 	if core.length(w.doc, node) > 0 || core.is_flat(w.doc) {
 		return false
 	}
 	text := core.span(w.doc, node)
+	if len(text) < 2 || text[0] != '{' && text[0] != '[' {
+		return false
+	}
 	for b in text[1:len(text) - 1] {
 		if b != ' ' && b != '\t' && b != '\n' && b != '\r' {
 			return false

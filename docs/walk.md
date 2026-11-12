@@ -5,15 +5,15 @@ ends, a fault stops it, or the hook returns `.Stop`. Every format has a walk, an
 through the same hook, so a consumer written against `core` reads any format. `validate` is the same walk with no
 hook.
 
-This document describes what the walks share, how the JSON walk and the delimited-text (dsv) walk are built, and the
-Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector code both walks use.
+This document describes what the walks share, how the JSON walk, the delimited-text (dsv) walk and the YAML walk are
+built, and the Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector code the walks use.
 
 ## Files
 
 | File | Holds |
 |---|---|
 | `core/walk.odin` | `Kind`, `Role`, `Token`, `Action`, `Hook_Regs`, `text_start` |
-| `core/document.odin` | `Node`, `Document`, the readers, `Duplicates`, `Spelling`, `Edit_Spelling`, `destroy` |
+| `core/document.odin` | `Node`, `Document`, the readers, `Duplicates`, `Readers`, `Services`, `Edit_Services`, `destroy` |
 | `core/result.odin` | the result word: `fault_at`, `STOPPED`, `result_of`, and the empty hook `No_Hooks`/`no_hook` |
 | `core/build/build.odin` | `Builder`, the hooks a format's `build` passes its walk, the header row, the duplicate-key check |
 | `core/spell/number.odin` | `Number`, `Number_Kind`, the decimal and hex decoders, the digit reader |
@@ -23,9 +23,9 @@ Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector
 | `core/compose/` | the commit the format tables point at, and the composition a format's root junctions share |
 | `core/error.odin` | core's alias for `Fault_Kind`, `Fault`, `Rules`, `Rule`, the codes, line and column, the renderer |
 | `json/walk.odin` | JSON's interface, the result word, `Walk`, `walk_document`, the hook calls |
-| `json/document.odin` | JSON's `build` and its spelling table |
+| `json/document.odin` | JSON's `build` and its handle tables |
 | `json/unescape.odin` | JSON's string decoder, its key compare and its number reader |
-| `dsv/document.odin` | dsv's `build`, its spelling table and its header rule |
+| `dsv/document.odin` | dsv's `build`, its handle tables and its header rule |
 | `json/states.odin` | the grammar states, one procedure each, and the value classes |
 | `json/strings.odin` | the string readers, from a two-load probe to a block reader per x86 tier |
 | `json/scalars.odin` | numbers and literals |
@@ -37,6 +37,10 @@ Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector
 | `dsv/pass.odin` | the pass over 64-byte blocks and its state between blocks |
 | `dsv/records.odin` | what a block's separators end: cells and widths for `validate`, tokens for `walk` |
 | `dsv/text.odin` | the byte-at-a-time readers the masks cannot replace |
+| `yaml/walk.odin` | YAML's interface, `Detail` and `RULES`, `walk` and `validate` |
+| `yaml/parser.odin`, `block.odin`, `flow.odin`, `scalar.odin`, `props.odin` | the parser: block and flow collections, scalars, tags and anchors, comments held for their node |
+| `yaml/runs.odin`, `lines.odin` | the byte classes of a 64-byte block, the runs the readers find from them, and the document markers |
+| `yaml/keys.odin`, `merge.odin`, `stream.odin` | the repeat test of a mapping's keys, merge keys, and a stream's documents |
 
 ## The interface
 
@@ -115,8 +119,8 @@ and a reader uses it to decode a string or number without running a second walk.
 ### The document
 
 `build` runs the walk and returns one `core.Document`, or a `core.Error`: the walk's tokens as 16-byte
-`core.Node`s in preorder, the facts beside them, and a `core.Spelling` table. `document.md` describes the node, the
-document, the readers, the spelling services, the duplicate-key rule, a delimited text as a document, facts, the edit
+`core.Node`s in preorder, the facts beside them, and the format's `core.Readers` table. `document.md` describes the
+node, the document, the readers, the readers and services tables, the duplicate-key rule, a delimited text as a document, facts, the edit
 list and its commit, and the value layer's errors.
 
 Two things here are the walk's. The walk gives an `End` token for every container and a `Plain` token of a comment
@@ -133,9 +137,10 @@ Token :: struct { lo: u64, n: u32, kind: Kind, role: Role, spelling: u16 }
 A token is 16 bytes and crosses a call in two registers. `lo` and `n` are its span in the text. Tokens come in the
 order the walk reads them, which is text order except for a dsv `Key`, whose span is its column's header cell, before
 the record that names it. `kind` says what the token is: a scalar (`Null`, `False`, `True`, `Number`, `String`,
-`Plain`), a container's opening (`Array`, `Object`), or its `End`. `role` is `Key` for a JSON member's name and for the
+`Plain`), a container's opening (`Array`, `Object`), or its `End`. `role` is `Key` for a member's name and for the
 header cell that names a dsv cell's column, and past `Key` a fact: a comment, `Plain`, as `Comment`, `Comment_Inline`
-or `Comment_Foot`. A consumer that wants values only tests `role <= .Key`. `spelling` is a detail the format writes
+or `Comment_Foot`, a node property, `Tag`, `Anchor` or `Alias`, which stands just before its node on the node's line,
+and an `Attribute`, which a markup walk gives after the element's key and before its value. A consumer that wants values only tests `role <= .Key`, and `role <= .Comment_Foot` is a comment. `spelling` is a detail the format writes
 and core reads through three bits: bit 0 says `text` must be decoded, bit 1 says the token is quoted (a JSON string,
 whose token span leaves its quotes out, or a quoted dsv cell, whose span holds them), and bit 2 says the decode may
 grow past the span (a JSON string or a dsv cell with a tolerated ill-formed UTF-8 sequence). For a comment token, the low byte of `spelling` holds the lead marker's length and the next byte the
@@ -244,12 +249,21 @@ lives in `core`, so a format adds no reader, no `query` and no `commit` of its o
    walk emits `core.Token`s to a hook and returns a `core.Fault` through `core.fault_at` and `core.result_of`.
 2. **The build.** `build` runs a count walk over `build.builder_hook_count`, reserves with `build.builder_start`, walks
    again with `build.builder_hook` and finishes the document. It is a thin entry that instantiates the walk for a spec.
-3. **The spelling.** One `core.Spelling` table in rodata, stored in the document, carries the services that need the
-   grammar: `text`, `key_equals`, `number`, `resolve` and `close_end`, plus `tag_key`, `key_open` and `key_close`. Set `edit` to one `core.Edit_Spelling` table.
+3. **The readers and services.** A `core.Readers` table in rodata, stored in the document, carries the leaves that
+   need the grammar: `text`, `key_equals`, `number`, `resolve` and `close_end`, plus `tag_key`, `key_open` and
+   `key_close`, and the slots a format needs past JSON's (`fact`, `attribute`, `number_text`, `resolves`, `flat`). The package keeps `HANDLES := [Spec]core.Readers{...}` and
+   `SERVICES := [Spec]core.Services{...}`, the two mutable globals `tools/checks.py` allows a format, for the handle
+   `as` returns, and constant-spec entry points that bind one spec's tables (`readers_of($S)`, `bound_as`,
+   `reads_of`), so a program links only the passes it names. `Services.edit` points at one `core.Edit_Services`
+   table, nil for a format with no edits. `names.odin`, which `tools/checks.py api --write` generates, exports the
+   names of `core` a user of the format calls, so that user never imports `core`.
 4. **The paths.** `set` and the path walk instantiate `build.Scan` over the format's `walk`, and `Scan.rewalk` walks one
    value again for a ring's element. See `paths.md`.
 5. **The edits.** `compose.commit` is the format package's `commit`. A format whose root has no brackets sets `flat`,
-   gives the root's line end as its `member_sep` and supplies `interior`, `fact_slot`, `emptied` and `plan`.
+   gives the root's line end as its `member_sep` and supplies `interior`, `fact_slot`, `emptied` and `plan`. A format
+   whose containers are not one range of bytes (YAML) supplies its own `Edit_Services.commit`, which refuses an edit it may not make, and
+   `relocate` and `prefix` say how a kept node is respelled at another place and how a tag, an anchor or an alias is
+   written.
 6. **The typed read.** `unmarshal` runs the format's `walk` over `typed.Reader`'s hook. A format that reads its values
    as JSON does needs no more. A format with its own value reader, as dsv has for a cell, stores through `core.token_text`,
    `store_whole`, `store_cstring`, `store_enum`, `store_number`, `store_enum_value` and `map_slot`, and reads the
@@ -540,6 +554,31 @@ saves no registers for them.
 A TSV block's escapes are judged in masks. `kernel.escaped` marks the bytes an odd run of backslashes escapes, and one
 class mask of `t`, `n`, `r`, `0` and `\` drops the valid ones, so a block with no bad escape runs no byte loop. A
 backslash at the block's last byte carries into the next block, and a fault is at the backslash.
+
+## The YAML walk
+
+A YAML document is read by one pass that judges every byte and sends its tokens to the hook as it goes. `runs.odin`
+sorts a 64-byte block's bytes into classes once, and the readers find where a run ends from the block's masks; a byte
+past ASCII or a control byte goes through `step`, which judges it. The parser predicts each line's indentation and
+reads block collections (`block.odin`), flow collections (`flow.odin`), the four scalar styles and block scalars
+(`scalar.odin`), and a node's tag and anchor (`props.odin`), which it gives as `Tag` and `Anchor` facts just before the
+node's first token. A comment is held until the node it belongs to is known, and then takes the role the position rule
+gives it.
+
+A scalar is a `Plain` token: its type is what `resolve` reads from its text and its tag under the core schema, and a
+scalar its tag does not hold (`!!int yes`) is the fault `Tag_Mismatch`. Bit 0 of its spelling says the text needs
+decoding, bit 2 that a double-quoted scalar holds a `\L` or `\P`, bits 3 and 4 the style, and bits 8 to 15 a block
+scalar's explicit indentation.
+
+An alias is not a token kind: the walk sends the `Alias` fact and then the tokens of the node its anchor names, read
+back from a log of the anchored node's tokens, so a consumer sees the value. The bytes each alias reads again, its anchor's node with
+the aliases in it, count toward `Options.alias_limit`, and an alias inside its own anchor's node is `Alias_Cycle`. `keys.odin` tests each mapping's keys
+for a repeat by decoded text, since a repeat is a fault of the text in every read, and `merge.odin` holds a `<<`
+member's tokens under `merge_keys` and sends the members its sources add at the mapping's close.
+
+A text is one document for `validate`, `build` and the path reads, and a second document there is `Extra_Document`.
+`stream.odin` reads a stream's documents one after another for the record reader, which frames each document by the
+walk and cuts a stream for threads before a `---` line or after a `...` line at column 0.
 
 ## The two walks compared
 

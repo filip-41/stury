@@ -179,7 +179,7 @@ node_of :: proc(r: ^Reading, record: i32, ruled := true, arm := false, tag := Ar
 leaf :: proc(r: ^Reading, kind: typed.Read_Kind, m: typed.Meta, hook_data: rawptr) -> (n: rules.Node) {
 	n.array, n.object = -1, -1
 	#partial switch kind {
-	case .String:
+	case .String, .Bytes:
 		n.kinds = {.String}
 	case .Cstring:
 		// A nil cstring reads from null and writes as null.

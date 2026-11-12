@@ -34,6 +34,8 @@ Error_Entry :: core.Error_Entry
 Expected_Key :: core.Expected_Key
 Fact :: core.Fact
 Fact_Iter :: core.Fact_Iter
+Fact_Name :: core.Fact_Name
+Fact_Value :: core.Fact_Value
 Fault :: core.Fault
 Fault_Kind :: core.Fault_Kind
 Framing :: core.Framing
@@ -71,6 +73,7 @@ ROOT :: core.ROOT
 Role :: core.Role
 Rules :: core.Rules
 Runner :: core.Runner
+Site :: core.Site
 Slice :: core.Slice
 Step :: core.Step
 Token :: core.Token
@@ -92,11 +95,13 @@ clone :: core.clone
 comment_lead :: core.comment_lead
 comments :: core.comments
 compare :: core.compare
+doc_number_text :: core.doc_number_text
 equal :: core.equal
-hash :: core.hash
+fact_value :: core.fact_value
 facts_of :: core.facts_of
 float_value :: core.float_value
 format :: core.format
+hash :: core.hash
 int_value :: core.int_value
 key_equals :: core.key_equals
 kind :: core.kind
@@ -121,8 +126,8 @@ render :: core.render
 rule_of :: core.rule_of
 set_fact :: core.set_fact
 span :: core.span
-text :: core.text
 text_room :: core.text_room
+token_text :: core.token_text
 write_code :: core.write_code
 write_pointer :: core.write_pointer
 write_stream :: core.write_stream
@@ -136,6 +141,7 @@ Answer_Iter :: build.Answer_Iter
 next :: build.answers_next
 
 Arm :: typed.Arm
+Bytes :: typed.Bytes
 Enum_Spelling :: typed.Enum_Spelling
 Field :: typed.Field
 Hook_Value :: typed.Hook_Value
@@ -143,6 +149,7 @@ Marshal_Hook :: typed.Marshal_Hook
 Marshal_Text :: typed.Marshal_Text
 Meta :: typed.Meta
 Null :: typed.Null
+Plan :: typed.Plan
 Plan_Options :: typed.Plan_Options
 Raw :: typed.Raw
 Read_Kind :: typed.Read_Kind
@@ -156,6 +163,7 @@ Unknown_Fields :: typed.Unknown_Fields
 Unmarshal_Hook :: typed.Unmarshal_Hook
 Value_Class :: typed.Value_Class
 own_names :: typed.own_names
+refuse :: typed.refuse
 
 Number_Literal :: write.Number_Literal
 Out :: write.Out
@@ -168,6 +176,7 @@ key :: write.key
 open_array :: write.open_array
 open_object :: write.open_object
 value_bool :: write.value_bool
+value_bytes :: write.value_bytes
 value_float :: write.value_float
 value_int :: write.value_int
 value_null :: write.value_null

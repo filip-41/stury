@@ -56,6 +56,7 @@ Read_Kind :: enum u8 {
 	Fixed_List,
 	Inside, // a token of a value read whole
 	Checked, // a description's node, judged by a `Check` and stored nowhere
+	Bytes, // a byte string, read cold
 }
 
 // The hook's number arm tests `U8 ..= U64` as one aligned block and `I8 ..= I32` and `F32 ..= F64` as ranges.
@@ -1076,6 +1077,8 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset,
 		// A model's number text reads null as its empty text only as a member, which `not_null` refuses too. Held by a
 		// list, a map, a `Maybe` or a union, it takes a number alone, as its schema says.
 		f.kind, m.no_nil = .Number_Text, b.model != nil && name == ""
+	case typeid_of(Bytes):
+		f.kind = .Bytes
 	case typeid_of(core.Number):
 		f.kind = .Number
 	case typeid_of(Scalar):
@@ -1483,6 +1486,8 @@ classes_of :: proc(b: ^Builder, ti: ^runtime.Type_Info, depth: int) -> (c: bit_s
 		return EVERY_CLASS
 	case typeid_of(core.Number_Text), typeid_of(core.Number):
 		return {.Number}
+	case typeid_of(Bytes):
+		return {.String}
 	case typeid_of(Scalar):
 		return {.String, .Bool, .Number}
 	}

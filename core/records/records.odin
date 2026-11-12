@@ -41,6 +41,9 @@ Reader :: struct {
 	frames:    []typed.Frame,
 	// The plan of the last type a read with no plan took, built with `allocator`.
 	plan:      ^typed.Plan,
+	// Under `.Entries`, the member names that lead from the root to the container whose members are the records, and
+	// none for the root itself. Borrowed.
+	entries:   []string,
 	// The memory a format keeps for its framing.
 	format:    rawptr,
 	allocator: runtime.Allocator,
@@ -87,9 +90,13 @@ Scanned :: struct {
 }
 
 // `max_bytes` is the most bytes past the last whole record a stream's window holds, 0 for no limit. When they hold no
-// whole record, the records end with the fault `.Too_Wide` and code `records.too_long`.
+// whole record, the records end with the fault `.Too_Wide` and code `records.too_long`. `entries` names the container
+// whose members are the records under `.Entries`, as `open` takes it. Under `.Entries` the window holds the text before
+// the container up to its first member, and a window past it holds whole members, until the container ends and the
+// text around it is read to the input's end.
 Stream_Options :: struct {
 	max_bytes: int,
+	entries:   []string,
 }
 
 // The `core.Fault.detail` values the records' faults use.
@@ -134,6 +141,10 @@ Framing_Services :: struct {
 	// The byte that ends a record under each framing where a backward scan for it finds the end of a whole record, and 0
 	// where only a walk of the records does.
 	ends:   [core.Framing]u8,
+	// The byte past the first separator in `it.src[lo:hi]` that ends a record and starts the next, as if the text before
+	// it were well-formed, for a format whose cuts no `exact` scan finds. A separator's verdict depends on the text alone,
+	// not on `lo` or `hi`, and the call only reads `it`, from any thread. nil for a format with `exact`.
+	cut:    proc(it: ^Reader, lo, hi: u64) -> (u64, bool),
 }
 
 // What `Record_Docs.check_run` calls after each record it checks.
@@ -207,15 +218,17 @@ docs_of :: proc(as: core.As) -> ^Record_Docs {
 // Opens the records of `src` in format `as` under `framing`, from byte `at` of `src`, with every offset from `src[0]`.
 // The reader's own memory comes from `allocator`. A UTF-8 byte order mark at the input's first byte is passed over. A
 // format with no record reader, or one that does not take `framing`, ends the records with the fault `.Bad_Option`
-// before any is read.
-open :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator) -> Reader {
-	return open_with(src, as, services_of(as), docs_of(as), framing, at, allocator)
+// before any is read. Under `.Entries`, `entries` names the members to follow from the root, each the value of a
+// member of the one before, to the container whose members are the records, and a text with no such container has no
+// records. Without `entries` the root is the container.
+open :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator, entries: []string = nil) -> Reader {
+	return open_with(src, as, services_of(as), docs_of(as), framing, at, allocator, entries)
 }
 
 // Opens the records as `open` does, with the framing `services` and the `docs` a format gives for a spec named at
 // compile time. `docs` may be nil, and then a read, a build, a scan or a cell of a record is refused.
-open_with :: proc(src: []u8, as: core.As, services: ^Framing_Services, docs: ^Record_Docs, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator) -> Reader {
-	it := Reader{src = src, pos = core.text_start(src, at), from = at, as = as, framing = framing, allocator = allocator, services = services, docs = docs}
+open_with :: proc(src: []u8, as: core.As, services: ^Framing_Services, docs: ^Record_Docs, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator, entries: []string = nil) -> Reader {
+	it := Reader{src = src, pos = core.text_start(src, at), from = at, as = as, framing = framing, allocator = allocator, services = services, docs = docs, entries = entries}
 	if it.services == nil || it.services.next[framing] == nil || at > u64(len(src)) {
 		it.fault = core.Fault{kind = .Bad_Option}
 	}
@@ -224,14 +237,14 @@ open_with :: proc(src: []u8, as: core.As, services: ^Framing_Services, docs: ^Re
 
 // Opens the records `input` gives, as `open` opens them in memory, through a window that grows by doubling up to
 // `opts.max_bytes`. `input`'s first byte is the input's byte `at`. A record's text lasts until the next call on the
-// reader. Under `.Entries` the whole input is read first.
+// reader.
 open_stream :: proc(input: io.Reader, as: core.As, framing := core.Framing.Lines, opts := Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> Reader {
 	return open_stream_with(input, as, services_of(as), docs_of(as), framing, opts, at, allocator)
 }
 
 // Opens the records of a stream as `open_stream` does, with the `services` and `docs` of `open_with`.
 open_stream_with :: proc(input: io.Reader, as: core.As, services: ^Framing_Services, docs: ^Record_Docs, framing := core.Framing.Lines, opts := Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> Reader {
-	it := open_with(nil, as, services, docs, framing, 0, allocator)
+	it := open_with(nil, as, services, docs, framing, 0, allocator, opts.entries)
 	it.input, it.base = input, at
 	it.max_bytes = opts.max_bytes if opts.max_bytes > 0 else max(int) - 1
 	return it
@@ -515,8 +528,7 @@ close :: proc(it: ^Reader) {
 }
 
 // Returns the next window of whole records, with the gaps between them, and the input offset of its first byte, or
-// false when the records end. A reader on text in memory gives the text past `pos` as one window. Under `.Entries` the
-// window is the whole input. Under a framing with an end byte, the last window holds the bytes past the last end byte,
+// false when the records end. A reader on text in memory gives the text past `pos` as one window. Under a framing with an end byte, the last window holds the bytes past the last end byte,
 // whole or not, as the window's reader judges them.
 next_window :: proc(it: ^Reader) -> (window: []u8, base: u64, ok: bool) {
 	stream := it.input.procedure != nil
@@ -525,7 +537,7 @@ next_window :: proc(it: ^Reader) -> (window: []u8, base: u64, ok: bool) {
 			return
 		}
 		lo := it.pos
-		if !stream || it.services.ends[it.framing] != 0 || it.framing == .Entries {
+		if !stream || it.services.ends[it.framing] != 0 {
 			it.pos = u64(len(it.src))
 		} else {
 			for {
@@ -627,7 +639,7 @@ window_move :: proc(it: ^Reader, hold_cut := true) -> bool {
 	stop := it.services.ends[it.framing]
 	for {
 		gained := fill(it) or_return
-		if !it.eof && (gained == 0 || it.framing == .Entries) {
+		if !it.eof && gained == 0 {
 			if it.cause != nil {
 				it.held, it.held_at, it.eof = it.buf[1:it.filled], at, true
 			} else {
@@ -666,12 +678,12 @@ window_move :: proc(it: ^Reader, hold_cut := true) -> bool {
 }
 
 // Reads into a stream's buffer until it gains as many bytes as it held, or a read gains the framing's end byte, so a
-// record a slow input ends is given once its end comes, or under `.Entries` the whole input, or the input ends or
+// record a slow input ends is given once its end comes, or the input ends or
 // fails, or the buffer holds `max_bytes` unread bytes. The buffer doubles as it fills. Returns the bytes gained, or
 // false with the fault `.No_Memory` when the buffer cannot grow.
 @(private)
 fill :: proc(it: ^Reader) -> (gained: int, ok: bool) {
-	want := it.filled + max(it.filled - 1, 1) if it.framing != .Entries else max(int)
+	want := it.filled + max(it.filled - 1, 1)
 	stop := it.services.ends[it.framing]
 	for !it.eof && it.cause == nil && it.filled < want {
 		if it.filled == len(it.buf) {

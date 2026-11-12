@@ -324,20 +324,15 @@ index :: proc(target, key: ^Node, opt: bool, at: Loc) -> ^Node {
 	return new_clone(Node{kind = .Index, a = target, b = key, opt = opt, loc = at})
 }
 
-// `target.name`. A fact accessor, which the lexer reads as a field named `@...` (`fact_accessor`), is `target`
-// indexed by the path step of that comment role.
+// `target.name`. A fact accessor, which the lexer reads as a field named `@...` (`fact_accessor`) and only for a name of
+// the catalogue, is `target` indexed by the path step of that fact.
 @(private = "file")
 field :: proc(target: ^Node, name: string, name_at: Loc, opt: bool, at: Loc) -> ^Node {
 	if name[0] != '@' {
 		return index(target, literal(name, name_at), opt, at)
 	}
-	names := COMMENT_ROLE_NAMES
-	for role_name, role in names {
-		if role_name == name[1:] {
-			return index(target, literal(fact_key(role), name_at), opt, at)
-		}
-	}
-	unreachable()
+	fact, _ := fact_named(name[1:])
+	return index(target, literal(fact_key(fact), name_at), opt, at)
 }
 
 // `a op b`, computed now when both are constants and the operation succeeds (jq's constant_fold).

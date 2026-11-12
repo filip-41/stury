@@ -47,8 +47,8 @@ def odin_problem(odin):
 
 # The library packages, and the order imports of them take. json and dsv share a rank, under core/model.
 PACKAGES = makefile_list("LIB_PKGS")
-RANK = {"core/spell": 0, "core/regex": 0, "core": 1, "host": 2, "core/kernel": 2, "core/compose": 2, "core/diff": 2, "core/rules": 2, "core/build": 3, "core/typed": 4, "core/write": 5, "core/records": 6, "core/schema": 7, "json": 8, "dsv": 8, "core/model": 9}
-FORMATS = {"json", "dsv"}
+RANK = {"core/spell": 0, "core/regex": 0, "core": 1, "host": 2, "core/kernel": 2, "core/compose": 2, "core/diff": 2, "core/rules": 2, "core/build": 3, "core/typed": 4, "core/write": 5, "core/records": 6, "core/schema": 7, "json": 8, "dsv": 8, "core/model": 9, "yaml": 8}
+FORMATS = {"json", "dsv", "yaml"}
 
 # core's format-neutral packages name no format's concept in their code. core/kernel is left out: its tables are a byte
 # shuffle's.
@@ -261,7 +261,8 @@ def declarations(path):
                 pending_private = False
             elif stripped and not stripped.startswith("@"):
                 pending_private = False
-            when = re.match(r"^(when|else)\b", stripped) is not None
+            # A block built only for tests (`when ODIN_TEST ...`) holds no surface.
+            when = re.match(r"^(when|else)\b", stripped) is not None and "ODIN_TEST" not in stripped
             for c in code:
                 if c == "{":
                     open_braces.append(when and all(open_braces))
@@ -428,8 +429,12 @@ def names_files():
     found = {package: declared(package) for package in {package for package, _, _ in exports}}
     problems = [f"names: {package} declares no {name}" for package, name, _ in exports if name not in found[package]]
     for owner, name in destroy:
-        if owner not in by_name or name not in declared(by_name[owner]):
+        if owner in FORMATS:
+            if name not in declared(owner, skip_names=True):
+                problems.append(f"names: {owner} declares no {name}")
+        elif owner not in by_name or name not in declared(by_name[owner]):
             problems.append(f"names: {owner}.{name} is not a public name")
+    shared = [(owner, name) for owner, name in destroy if owner not in FORMATS]
     files = {}
     for fmt in sorted(FORMATS):
         own = declared(fmt, skip_names=True)
@@ -441,8 +446,9 @@ def names_files():
                 problems.append(f"names: {fmt}: {alias} is exported from {taken[alias]} and from {package}")
             taken[alias] = package
             lines.append((package, f"{alias} :: {package_name(package)}.{name}"))
-        members = [f"{owner}.{name}" for owner, name in destroy] if "destroy" not in own else []
-        used = {package for package, _ in lines} | {by_name[owner] for owner, _ in destroy if members}
+        # A format's own member, which may be private to it, joins only its own group, by its bare name.
+        members = [f"{owner}.{name}" for owner, name in shared] + [name for owner, name in destroy if owner == fmt] if "destroy" not in own else []
+        used = {package for package, _ in lines} | {by_name[owner] for owner, _ in shared if members}
         text = [NAMES_HEADER, f"package {fmt}", ""]
         text += [f'import {package_name(package)} "../{package}"' for package in sorted(used, key=PACKAGES.index)]
         text.append("")
@@ -546,7 +552,7 @@ LEADING_ATTRIBUTE = re.compile(r"@(?:\(([^)]*)\)|([A-Za-z_]\w*))\s*")
 SAFE_ATTRIBUTES = {"rodata"}
 # A format's `HANDLE` and `SERVICES` point at its other tables, and `@(rodata)` refuses an address in its initializer. It is set once
 # by the compiler's static initialization and no code writes it.
-POINTING_TABLES = {"json/document.odin": {"HANDLES", "SERVICES"}, "dsv/document.odin": {"HANDLES", "SERVICES"}}
+POINTING_TABLES = {"json/document.odin": {"HANDLES", "SERVICES"}, "dsv/document.odin": {"HANDLES", "SERVICES"}, "yaml/document.odin": {"HANDLES", "SERVICES"}}
 
 
 def is_variable(rest):

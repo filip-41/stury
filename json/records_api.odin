@@ -48,17 +48,18 @@ check_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
 	return &d
 }
 
-// Opens the records of `src` under `framing` from byte `at`, as `records.open` does with `as(spec, opts)`.
+// Opens the records of `src` under `framing` from byte `at`, as `records.open` does with `as(spec, opts)`. Under
+// `.Entries`, `entries` names the members that lead from the root to the container whose members are the records.
 records_open :: proc {records_open_bound, records_open_chosen}
 
 @(private)
-records_open_bound :: proc(src: []u8, $S: Spec, opts := Options{}, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator) -> records.Reader {
-	return records.open_with(src, bound_as(S, opts), framing_of(S), nil, framing, at, allocator)
+records_open_bound :: proc(src: []u8, $S: Spec, opts := Options{}, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator, entries: []string = nil) -> records.Reader {
+	return records.open_with(src, bound_as(S, opts), framing_of(S), nil, framing, at, allocator, entries)
 }
 
 @(private)
-records_open_chosen :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator) -> records.Reader {
-	return records.open(src, as(spec, opts), framing, at, allocator)
+records_open_chosen :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator, entries: []string = nil) -> records.Reader {
+	return records.open(src, as(spec, opts), framing, at, allocator, entries)
 }
 
 // Opens the records `input` gives, as `records.open_stream` does with `as(spec, opts)`.

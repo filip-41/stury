@@ -261,7 +261,7 @@ A query over a full document, a scan of the text and a value-tree model give the
 
 ## What a format calls
 
-A format gives the engine its walk through `Spelling.scan`, which switches once on the handle's spec and runs the walk
+A format gives the engine its walk through `Services.scan`, which switches once on the handle's spec and runs the walk
 compiled for it with the hook the read needs, the stream's when `on` is set. `core/build`'s `scan`, `find`,
 `each_answer` and `set` call it, and `json.query` and `dsv.query` call the engine over a built document. A format writes no
 step logic.

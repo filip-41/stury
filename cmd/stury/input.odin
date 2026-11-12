@@ -54,7 +54,8 @@ mapped_input_name: string
 Source :: struct {
 	as:      core.As,
 	framing: core.Framing,
-	spec:    Maybe(json.Spec), // the JSON-like format's, none for a delimited one
+	spec:    Maybe(json.Spec), // the JSON-like format's, none for any other
+	format:  Format,
 }
 
 Inputs :: struct {
@@ -244,6 +245,13 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 		// A delimited record's open quote is a fault at the quote, where the record starts.
 		f, bad := ins.texts.fault.?
 		cut_short := !bad || f.kind == .Truncated && (int(f.at) >= len(ins.data) || reads_cells(&ins.run.opts))
+		// A document that ends its window may run on in the next, unless its format says it is closed.
+		if ok && !ins.last && int(rec.at) + len(rec.text) == len(ins.data) {
+			if ended := FORMATS[ins.format].ended; ended != nil && !ended(rec.text) {
+				next_window(ins, int(rec.at))
+				continue
+			}
+		}
 		if unended || !ok && !ins.last && cut_short {
 			// The reader has passed the record's separator, which the next window must start with.
 			if ok {
@@ -369,7 +377,7 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	if ins.framing != .Concatenated || !ins.last {
 		return
 	}
-	if json.blank(data, ins.spec.?) {
+	if blank_input(data, ins.spec) {
 		close_file(ins)
 		return
 	}
@@ -417,16 +425,17 @@ build_whole :: proc(data: []byte, src: Source, allocator: runtime.Allocator, poo
 	if pieces != nil {
 		pieces^ += cut
 	}
-	if f, bad := fault.?; bad && texts_follow(f, src.spec) {
+	if f, bad := fault.?; bad && texts_follow(f, src.format) {
 		return {}, nil, true
 	}
 	return
 }
 
-// Whether the fault `f` of a text read as `spec` is a text after the first, which strict JSON reads as the next text,
-// where `validate` and a build, judging one, refuse it as trailing text.
-texts_follow :: proc(f: core.Fault, spec: Maybe(json.Spec)) -> bool {
-	return spec == .Json && f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing)
+// Whether the fault `f` of a text of `format` read whole is a text after the first, which the format reads as the next
+// text of the input.
+texts_follow :: proc(f: core.Fault, format: Format) -> bool {
+	follows := FORMATS[format].follows
+	return follows != nil && follows(f)
 }
 
 // The value of the document `doc` of a text at data[at:], or its first --stream event.

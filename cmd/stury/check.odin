@@ -9,7 +9,6 @@ import "base:runtime"
 import "core:os"
 import core "../../core"
 import records "../../core/records"
-import json "../../json"
 import "jq"
 import "message"
 
@@ -75,11 +74,13 @@ check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^c
 			return msg
 		}
 		fault = records.validate_parallel(data, src.as, runner)
+	case reads_own(o):
+		fault = records.validate_parallel(data, src.as, runner)
 	case src.framing == .Concatenated:
 		fault = records.validate_parallel(data, src.as, runner)
 		// A byte no text starts with, right after a text, stays trailing text, as the reader of the texts from the first
 		// tells it. So does a text that runs on into the next, which only the reader from a scalar first text sees.
-		if f, bad := fault.?; bad && texts_follow(f, src.spec) {
+		if f, bad := fault.?; bad && texts_follow(f, src.format) {
 			from := f.at if closed_first(data) else 0
 			if next, more := first_fault(data, src.as, .Concatenated, runner, from).?; !more || next.at != f.at || jq.is_space(data[f.at - 1]) {
 				fault = next if more else nil
@@ -98,7 +99,7 @@ check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^c
 
 // The fault of a JSON input with no text in it, `data` of file `name`, told with a newline, or "".
 blank_told :: proc(name: string, data: []byte, src: Source, o: ^Opts) -> string {
-	if reads_cells(o) || o.seq || !json.blank(data, src.spec.?) {
+	if reads_cells(o) || o.seq || !blank_input(data, src.spec) {
 		return ""
 	}
 	line, col := core.locate(data, u64(len(data)))

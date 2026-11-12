@@ -277,6 +277,11 @@ put_node :: proc(w: ^Rows, doc: ^core.Document, node: core.Node_Index, buf: []u8
 	case .False:
 		return put_word(w, false, first)
 	case .Number:
+		if doc.readers.number_text != nil {
+			stack: [64]u8
+			text, ok := write.node_number_text(doc, node, stack[:])
+			return put_string(w, text, first, false) if ok else .No_Memory
+		}
 		if t := doc.nodes[node]; t.kind == .Number && t.spelling & core.NUMBER_KIND_MASK != 0 {
 			return put_respelled(w, string(core.span(doc, node)), t.spelling, first)
 		}

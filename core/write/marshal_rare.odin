@@ -49,7 +49,18 @@ leaf :: #force_no_inline proc(w: ^Walker, f: ^typed.Field, v: uintptr, top, nest
 	case .Number_Text:
 		return put_number_text(w, (^core.Number_Text)(v).text, top - w.n_ptrs, T)
 	case .Number:
-		return put_number(&w.out, (^core.Number)(v)^)
+		return put_number_as(&w.out, (^core.Number)(v)^, T)
+	case .Bytes:
+		stack: [512]u8
+		text, ok := bytes_text(cast([]u8)(^typed.Bytes)(v)^, stack[:])
+		if !ok {
+			return .No_Memory
+		}
+		when len(T[.Bytes_Tag]) != 0 {
+			out.cursor += put_word(p, T[.Bytes_Tag])
+			p = room(out, LEAF_ROOM)
+		}
+		return put(out, p, text, &w.opts)
 	case .Scalar:
 		s := (^typed.Scalar)(v)^
 		if text, is_text := s.(core.Number_Text); is_text {
@@ -229,19 +240,46 @@ put_number_text :: proc(w: ^Walker, s: string, top: int, $T: Tree) -> core.Typed
 	return put_raw(w, s, top, T)
 }
 
+// The text of float `x` at `p` as the tree spells it: JSON's layout, a `Point_Zero` after text that reads as an integer, and
+// the tree's words for an infinity and a NaN where it has them, else `.Non_Finite`.
+@(private)
+f64_value :: #force_inline proc "contextless" (p: [^]u8, x: f64, $T: Tree) -> (size: int, kind: core.Typed_Error_Kind) {
+	if x - x != 0 {
+		when T[.Nan] != "" {
+			if x != x {
+				return put_word(p, T[.Nan]), .None
+			}
+			return put_word(p, T[.Inf] if x > 0 else T[.Neg_Inf]), .None
+		} else {
+			return 0, .Non_Finite
+		}
+	}
+	size = spell.f64_text(p, x)
+	when T[.Point_Zero] != "" {
+		for i in 0 ..< size {
+			if p[i] == '.' || p[i] == 'e' {
+				return size, .None
+			}
+		}
+		size += put_word(p[size:], T[.Point_Zero])
+	}
+	return size, .None
+}
+
 // The text of `n` at `p`, under a reservation of `LEAF_ROOM`, and its length. A `.Wide` number holds no value to write.
 number_text :: proc(p: [^]u8, n: core.Number) -> (size: int, kind: core.Typed_Error_Kind) {
+	return number_text_as(p, n, #partial Tree{})
+}
+
+// `number_text` for a float as the tree `T` spells it.
+number_text_as :: proc(p: [^]u8, n: core.Number, $T: Tree) -> (size: int, kind: core.Typed_Error_Kind) {
 	switch n.kind {
 	case .Int:
 		return spell.i64_text(p, i64(n.bits)), .None
 	case .Uint:
 		return spell.u64_text(p, n.bits), .None
 	case .Float:
-		x := transmute(f64)n.bits
-		if x - x != 0 {
-			return 0, .Non_Finite
-		}
-		return spell.f64_text(p, x), .None
+		return f64_value(p, transmute(f64)n.bits, T)
 	case .Wide:
 	}
 	return 0, .Non_Finite
@@ -249,31 +287,57 @@ number_text :: proc(p: [^]u8, n: core.Number) -> (size: int, kind: core.Typed_Er
 
 // A `core.Number` by its value.
 put_number :: proc(out: ^Out, n: core.Number) -> core.Typed_Error_Kind {
-	size, kind := number_text(room(out, LEAF_ROOM), n)
+	return put_number_as(out, n, #partial Tree{})
+}
+
+// `put_number` for a float as the tree `T` spells it.
+put_number_as :: proc(out: ^Out, n: core.Number, $T: Tree) -> core.Typed_Error_Kind {
+	size, kind := number_text_as(room(out, LEAF_ROOM), n, T)
 	out.cursor += size
 	return kind
 }
 
 // Number token text `lit`, of token spelling `spelling`, whose kind is not the format's plain decimal, as a JSON number:
-// a decimal with a sign or a point of its own as JSON writes it (`+1` as `1`, `.5` as `0.5`, `5.` as `5`), and a hex
+// a decimal with a sign, a point of its own, leading zeros or underscores as JSON writes it (`+1` as `1`, `.5` as
+// `0.5`, `5.` as `5`, `007` as `7`, `1_0` as `10`, `-0` as `0` when it is an integer), and a hex, octal or binary
 // integer as the exact decimal it spells. Any other text, an infinity or a NaN, is `.Non_Finite`.
 put_decimal :: proc(out: ^Out, lit: string, spelling: u16) -> core.Typed_Error_Kind {
 	kind := spelling & core.NUMBER_KIND_MASK
 	p := 1 if lit[0] == '+' || lit[0] == '-' else 0
-	hex := kind != core.NUMBER_DECIMAL && p + 1 < len(lit) && lit[p] == '0' && lit[p + 1] | 0x20 == 'x'
-	if kind != core.NUMBER_DECIMAL && !hex {
+	base := u64(0)
+	if kind != core.NUMBER_DECIMAL && p + 1 < len(lit) && lit[p] == '0' {
+		switch lit[p + 1] | 0x20 {
+		case 'x': base = 16
+		case 'o': base = 8
+		case 'b': base = 2
+		}
+	}
+	if kind != core.NUMBER_DECIMAL && base == 0 {
 		return .Non_Finite
 	}
-	if lit[0] == '-' {
+	if lit[0] == '-' && !integer_zero(lit[p:]) {
 		put_byte(out, '-')
 	}
-	if hex {
-		return .None if put_hex_decimal(out, lit[p + 2:]) else .No_Memory
+	if base != 0 {
+		return .None if put_prefixed_decimal(out, lit[p + 2:], base) else .No_Memory
 	}
 	if lit[p] == '.' {
 		put_byte(out, '0')
 	}
+	leading := true
 	for k in p ..< len(lit) {
+		if lit[k] == '_' {
+			continue
+		}
+		// A zero is leading while a digit follows it, past any underscores.
+		next := k + 1
+		for next < len(lit) && lit[next] == '_' {
+			next += 1
+		}
+		if leading && lit[k] == '0' && next < len(lit) && lit[next] - '0' < 10 {
+			continue
+		}
+		leading = false
 		if lit[k] != '.' || k + 1 < len(lit) && lit[k + 1] - '0' < 10 {
 			put_byte(out, lit[k])
 		}
@@ -281,20 +345,35 @@ put_decimal :: proc(out: ^Out, lit: string, spelling: u16) -> core.Typed_Error_K
 	return .None
 }
 
-// Writes the hex digits `hex` as the exact decimal integer they spell, at any length, kept in base 10^9 words with the
-// least significant first. Returns false when the words cannot be held.
+// Whether `digits` is an integer zero: zeros and underscores, which a sign does not make negative.
 @(private)
-put_hex_decimal :: proc(out: ^Out, hex: string) -> bool {
+integer_zero :: proc(digits: string) -> bool {
+	for c in transmute([]u8)digits {
+		if c != '0' && c != '_' {
+			return false
+		}
+	}
+	return len(digits) > 0
+}
+
+// Writes the digits `digits` of base 16, 8 or 2 as the exact decimal integer they spell, at any length, kept in base
+// 10^9 words with the least significant first. An underscore between digits is skipped. Returns false when the words
+// cannot be held.
+@(private)
+put_prefixed_decimal :: proc(out: ^Out, digits: string, base: u64) -> bool {
 	BASE :: 1_000_000_000
-	words, failed := make([dynamic]u32, 0, len(hex) / 7 + 1)
+	words, failed := make([dynamic]u32, 0, len(digits) / 7 + 1)
 	if failed != nil {
 		return false
 	}
 	defer delete(words)
-	for c in transmute([]u8)hex {
+	for c in transmute([]u8)digits {
+		if c == '_' {
+			continue
+		}
 		carry := u64(spell.HEX_NIBBLE[c])
 		for &w in words {
-			x := u64(w) * 16 + carry
+			x := u64(w) * base + carry
 			w, carry = u32(x % BASE), x / BASE
 		}
 		if carry > 0 {
@@ -359,7 +438,7 @@ is_empty :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> bool {
 	case .Cstring:
 		cs := (^cstring)(v)^
 		return cs == nil || len(cs) == 0
-	case .Slice, .Dynamic:
+	case .Slice, .Dynamic, .Bytes:
 		return (^runtime.Raw_Slice)(v).len == 0
 	case .Fixed_List:
 		return (^int)(v + uintptr(m.tag))^ == 0
@@ -721,7 +800,7 @@ any_value :: proc(w: ^Walker, a: any, $T: Tree, $put: Put) -> (rec: ^typed.Field
 		out.cursor += spell.u64_text(p, (^u64)(a.data)^)
 		return nil, .None
 	case typeid_of(f64):
-		return nil, put_number(out, {transmute(u64)(^f64)(a.data)^, .Float})
+		return nil, put_number_as(out, {transmute(u64)(^f64)(a.data)^, .Float}, T)
 	}
 	side := side_plan(&w.side, w.plan, a.id) or_return
 	first := &side.fields[0]

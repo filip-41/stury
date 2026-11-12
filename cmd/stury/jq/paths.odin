@@ -194,18 +194,18 @@ MAX_PATH_DEPTH :: 10000
 // `v` with `path` set to `nv`, as jq's jv_setpath: each step reads what is there, then sets it.
 setpath :: proc(ip: ^Interp, v: Value, path: []Value, nv: Value, owned: ^Owned) -> (Value, Signal) {
 	if len(path) == 0 {
-		return keep_comments(v, nv), .Go
+		return keep_facts(v, nv), .Go
 	}
 	key := scalar(path[0])
 	if len(path) == 1 && indexes_without_error(v, key) {
 		return set_key(ip, v, key, nv, owned)
 	}
 	if kind(key) == .Object {
-		if role, is_fact := fact_step(key); is_fact {
+		if fact, is_fact := fact_step(key); is_fact {
 			if len(path) > 1 {
 				return nil, fact_step_not_last(ip)
 			}
-			return write_comments(ip, v, role, nv)
+			return write_fact(ip, v, fact, nv)
 		}
 	}
 	child, sig := index_value(ip, v, key)
@@ -275,8 +275,8 @@ array_set_index :: proc(ip: ^Interp, size: int, key: Value) -> (int, Signal) {
 }
 
 // `t` with `key` set to `v`, as jq's jv_set: null becomes an object under a key and an array under an
-// index or a slice, and an array grows with nulls to reach an index. A member or element replaced keeps the comments
-// `v` does not bring (`keep_comments`), and `t` keeps its own.
+// index or a slice, and an array grows with nulls to reach an index. A member or element replaced keeps the facts
+// `v` does not bring (`keep_facts`), and `t` keeps its own.
 @(private = "file")
 set_key :: proc(ip: ^Interp, t: Value, key: Value, v: Value, owned: ^Owned) -> (Value, Signal) {
 	if c, is_commented := t.(^Commented); is_commented {
@@ -298,7 +298,11 @@ set_key :: proc(ip: ^Interp, t: Value, key: Value, v: Value, owned: ^Owned) -> (
 			} else {
 				o = owned_copy(t, owned).(^Object)
 			}
-			object_set(o, k, v)
+			if i := object_slot(o, k); i >= 0 {
+				o.vals[i] = keep_facts(o.vals[i], v)
+			} else {
+				object_append(o, k, v)
+			}
 			return o, .Go
 		}
 	case .Number:
@@ -323,7 +327,7 @@ set_key :: proc(ip: ^Interp, t: Value, key: Value, v: Value, owned: ^Owned) -> (
 			for len(a.items) <= i {
 				append(&a.items, nil)
 			}
-			a.items[i] = keep_comments(a.items[i], v)
+			a.items[i] = keep_facts(a.items[i], v)
 			return a, .Go
 		}
 	case .Object:
@@ -427,15 +431,15 @@ delpaths_sorted :: proc(ip: ^Interp, v: Value, paths: [][]Value, start: int, own
 	return delete_keys(ip, cur, gone[:], owned)
 }
 
-// `t` without the members `keys` name, as jq's jv_dels, and without the comments of the roles they name.
+// `t` without the members `keys` name, as jq's jv_dels, and without the facts they name.
 @(private = "file")
 delete_keys :: proc(ip: ^Interp, t: Value, keys: []Value, owned: ^Owned) -> (Value, Signal) {
-	if rest, roles := split_fact_steps(keys); roles != {} {
+	if rest, facts := split_fact_steps(keys); facts != {} {
 		v, sig := delete_keys(ip, t, rest, owned)
 		if sig != .Go {
 			return nil, sig
 		}
-		return remove_comments(ip, v, roles)
+		return remove_facts(ip, v, facts)
 	}
 	if c, is_commented := t.(^Commented); is_commented && len(keys) > 0 {
 		inner, sig := delete_keys(ip, c.v, keys, owned)

@@ -161,6 +161,11 @@ JSON-Schema-Test-Suite — https://github.com/json-schema-org/JSON-Schema-Test-S
     json/test/conformance/JSON-Schema-Test-Suite (the schema conformance corpus, MIT, Copyright (c) 2012
     Julian Berman). Its LICENSE and UPSTREAM files ship in that directory.
 
+yaml-test-suite — https://github.com/yaml/yaml-test-suite
+
+    yaml/test/suite (the data-2022-01-17 release: each case's text, its event listing and, where it has one, its JSON
+    value). Its LICENSE and UPSTREAM files ship in that directory.
+
 Schema benchmark peers — the bench/ harness builds these on the developer's machine; stury carries none of their
 code and its binaries link none of it. bench/fetch.py and bench/peers/rust-schema/Cargo.lock pin them.
 

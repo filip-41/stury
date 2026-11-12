@@ -810,6 +810,8 @@ read_cell :: proc(r: ^$R, fld: ^typed.Field, t: core.Token, dest: uintptr) -> co
 		return reason
 	case .Cstring:
 		return typed.store_cstring(r, cell, dest)
+	case .Bytes:
+		return typed.store_bytes(r, cell, (^typed.Bytes)(dest))
 	case .Number_Text:
 		text := inner_text(r, t)
 		lo := u64(uintptr(raw_data(text)) - uintptr(raw_data(r.src)))
@@ -1109,7 +1111,7 @@ not_flat :: proc(steps: []core.Step) -> (e: core.Typed_Refusal) {
 cell_supported :: proc(plan: ^typed.Plan, f: ^typed.Field) -> bool {
 	inner: ^typed.Field
 	#partial switch f.kind {
-	case .String, .Bool, .Bool_Wide, .I8 ..= .U64, .F32, .F64, .Enum, .Cstring, .Number_Text, .Hook:
+	case .String, .Bool, .Bool_Wide, .I8 ..= .U64, .F32, .F64, .Enum, .Cstring, .Number_Text, .Bytes, .Hook:
 		return true
 	case .Before:
 		return cell_supported(plan, &typed.extra_at(plan, f.meta).before.field)

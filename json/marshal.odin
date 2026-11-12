@@ -21,6 +21,11 @@ TREE :: write.Tree {
 	.Null         = "null",
 	.True         = "true",
 	.False        = "false",
+	.Point_Zero   = "",
+	.Inf          = "",
+	.Neg_Inf      = "",
+	.Nan          = "",
+	.Bytes_Tag    = "",
 }
 
 // The token write of every JSON spec: a key and a string go through `put_string`.
@@ -31,6 +36,10 @@ TOKENS := write.Token_Spelling {
 		switch x in v {
 		case string:
 			return put_string(t.out, x, t.opts)
+		case typed.Bytes:
+			stack: [512]u8
+			text, ok := write.bytes_text(cast([]u8)x, stack[:])
+			return put_string(t.out, text, t.opts) if ok else .No_Memory
 		case core.Number:
 			return write.put_number(t.out, x)
 		case write.Number_Literal:

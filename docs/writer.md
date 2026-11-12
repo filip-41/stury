@@ -127,13 +127,15 @@ core.write_stream    :: proc(w: io.Stream, doc: ^core.Document, opts := core.Wri
 core.subtree_facts   :: proc(doc: ^core.Document, i: core.Node_Index) -> []core.Fact
 json.as              :: proc(spec: json.Spec, opts := json.Options{}) -> core.As
 dsv.as               :: proc(spec: dsv.Spec, opts := dsv.Options{}) -> core.As
+yaml.as              :: proc(spec: yaml.Spec, opts := yaml.Options{}) -> core.As
 core.format          :: proc(src: []u8, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error)
 ```
 
-`core.write` writes a document through the `write` slot of the `Spelling` in `as`. A nil `as` is the format and layout the
+`core.write` writes a document through the `write` service of the handle `as`. A nil `as` is the format and layout the
 document was read in. `json.as(.Jsonc)` and `dsv.as(.Tsv, opts)` name another target, in the same format or in another,
-so a JSON document is written as a table and a table as JSON by the target's writer. A target with no spelling or no writer
-is `.Unsupported`. `core.As` is the handle a `Document` holds in `as`.
+so a JSON document is written as a table and a table as JSON by the target's writer. A target with no writer is
+`.Unsupported`. A document of a constant-spec build holds no services, so `json.write` and `yaml.write` write it in
+their format. `core.As` is the handle a `Document` holds in `as`.
 
 `node` writes one value of the document as a text of its own, the root by default: a subtree with the comments inside
 its span, which `core.subtree_facts` returns, in the spelling and layout the root would have. A key, a node the document
@@ -231,9 +233,14 @@ write.close(&t)
 text, err := write.tokens_finish(&t)
 ```
 
+`tokens_init` takes a `core.Site` last, where the text will stand in a document: its column, whether a flow collection
+surrounds it, whether it follows a key, and `placed` for a value an edit writes. A format's `start` and `value` read it
+from `t.site` to indent and style the text for that place, and the zero site is a whole text.
+
 `Tokens` holds `core.MAX_DEPTH` levels in itself and allocates nothing for depth, and it is not copied after `tokens_init`.
 The calls are `open_object`, `open_array`, `close`, `key`, `value_string`, `value_int`, `value_uint`, `value_float`,
-`value_bool` and `value_null`, and `end_record` for a flat format. Each returns the kind that refused it, `.None` for a
+`value_bytes` (a byte string, written as its format spells one: JSON and CSV as the string of its base64), `value_bool`
+and `value_null`, and `end_record` for a flat format. Each returns the kind that refused it, `.None` for a
 written one. The first refusal sticks: later calls write nothing and return it, and `tokens_finish` returns it with no
 bytes, as `finish` does for an output that failed. A stream that failed leaves a prefix in the stream.
 
@@ -247,9 +254,11 @@ bytes, as `finish` does for an output that failed. A stream that failed leaves a
   null is an empty cell. `end_record` writes the layout's line end, and a record that wrote no byte is `.Unwritable`.
   `open_object`, `open_array`, `close` and `key` are `.Unsupported`. `tokens_finish` with cells waiting for `end_record` is
   `.Out_Of_Order`. A header is a record of strings the caller writes.
-- A format supplies a `write.Token_Spelling` through `core.Spelling.tokens`: its tree, one `value` procedure that writes a
-  string, a number or a word, `record`, which writes a typed value with no frame, `stop`, and for a flat format `start` and
-  `line`.
+- A format supplies a `write.Token_Spelling` through `core.Services.tokens`: its tree, one `value` procedure that writes a
+  string, a number or a word, `record`, which writes a typed value with no frame, `stop`, `comment`, and for a flat format
+  `start` and `line`. `layout`, called at each `Layout_Step`, lays the text out while the format's state is set (YAML's
+  block style), in place of the tree's punctuation.
+- A token write of YAML drops a comment, since its `comment` is nil.
 
 ## Records
 
@@ -337,6 +346,26 @@ format whose root is an array of objects or of arrays is written through its `te
 order are the header, null is an empty cell, a number is its source spelling, and a container is `.Unsupported`. A JSON5 number JSON does not spell so is written as JSON writes it, `0x10` as `16` and `.5` as `0.5`, and an infinity or NaN is `.Non_Finite`. A partial
 document is `.Unsupported`. `sort_keys` puts the columns in byte order of their names, stable, as the JSON writer orders an
 object's members.
+
+## YAML
+
+`yaml.marshal`, `yaml.write(&doc, .Yaml_1_2)` (or `core.write` with `yaml.as(.Yaml_1_2)`) and the token write
+(`yaml.tokens_init`) write YAML. Pretty text is block style, one member or element a line with `indent` spaces a level,
+laid out by `yaml/write_block.odin` as the calls arrive, and ends with a line end. Compact text is flow style on one
+line. A collection read from a flow collection stays one.
+
+A string is plain when its text reads back as the same string under the 1.2 core schema and under a 1.1 reader, so
+`yes`, `~`, `0123`, `.inf` and a date are quoted. It is single-quoted when it holds nothing a single quote cannot, a
+literal block when it has line ends and its place takes one, and double-quoted otherwise. A scalar read from YAML keeps
+its style unless `respell_strings` is set. A float is written so that it reads back as one (`1.0`, `.inf`, `.nan`),
+null is `null` or the spelling a YAML source had, and a byte string of the typed write is `!!binary` and its base64.
+A key an object repeats is `.Unwritable`.
+
+Tags and anchors are written back from the facts, and an alias where its anchor stands before it. A comment is written
+when the document holds it: above the line it heads, after the value it ends, and at the end of a block collection. A
+comment the output has no place for, and one with a line end in its body, is dropped and counted. A token write that
+stands at a site of a document is block text at column 0, which the edit indents to the site or turns to flow inside a
+flow collection.
 
 ## Number text
 

@@ -3,13 +3,15 @@
 package write
 
 import "core:io"
+import "../spell"
 import core ".."
 import "../typed"
 
-// One value of a token write: a string, a number by its value or by its text, or `.Null`, `.False` or `.True` of the
-// tree. A nil value is `.Null`.
+// One value of a token write: a string, a byte string, a number by its value or by its text, or `.Null`, `.False` or
+// `.True` of the tree. A nil value is `.Null`. A text format writes a byte string as the string of its RFC 4648 base64.
 Scalar :: union {
 	string,
+	typed.Bytes,
 	core.Number,
 	Number_Literal,
 	Tree_Part,
@@ -31,9 +33,21 @@ Token_Spelling :: struct {
 	// Writes a value by a plan the format built as one record, with no frame: a value, or a row with its line end and,
 	// for the first, the header. A refusal's kind and path go to `err`, and the kind is returned.
 	record: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Refusal) -> core.Typed_Error_Kind,
+	// Lays the text out itself while `state` is set: the container, key and comma punctuation of `tree` is not written,
+	// `layout` is called at each step instead, and `value` writes the scalars and the keys, whose separators it writes
+	// too. A `state` that stays nil writes `tree` as it is.
+	layout: proc(t: ^Tokens, step: Layout_Step) -> core.Typed_Error_Kind,
 	// Writes `text` as a comment to `out`. It writes nothing and answers false where the spec `spec` of the format has no
 	// comments, and with a nil `out` only says whether it has.
 	comment: proc(out: ^Out, spec: u8, text: string) -> bool,
+}
+
+// The steps of a laid-out write. `Close` comes after the level is popped, and `Key` before `value` writes the name.
+Layout_Step :: enum u8 {
+	Open_Object,
+	Open_Array,
+	Close,
+	Key,
 }
 
 // A token write's state. It holds `core.MAX_DEPTH` levels with no allocation and is not copied after `tokens_init`. A
@@ -43,6 +57,7 @@ Tokens :: struct {
 	opts:   core.Write_Options,
 	spell:  ^Token_Spelling,
 	state:  rawptr, // a format's own, set by `start`
+	site:   core.Site, // where the text will stand in a document, for a format that indents or styles by place
 	base:   Out,
 	spill:  [ROOM_MAX]u8,
 	object: [core.MAX_DEPTH]bool, // per open level, whether it is an object
@@ -58,11 +73,13 @@ Tokens :: struct {
 
 // Starts a write in the format `as` names, as `opts` says, into a buffer from `allocator` or to `stream`. A format with no
 // token writer is `.Unsupported`, and an `as` the format cannot write is its own refusal. The kind is also kept in `t`.
-// A format that binds its spelling at compile time gives it as `spell`, and then `as` need hold no services.
-tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}, spell: ^Token_Spelling = nil) -> core.Typed_Error_Kind {
+// A format that binds its spelling at compile time gives it as `spell`, and then `as` need hold no services. `site` says
+// where the text will stand, which a format's `start` and `value` read from `t.site`: a text that stands at a column,
+// in a flow collection or after a key is laid out for that place. The zero site is a whole text.
+tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}, spell: ^Token_Spelling = nil, site := core.Site{}) -> core.Typed_Error_Kind {
 	// The spill and the levels are not zeroed: a level is read only below `top`.
 	t.opts, t.spell, t.state, t.top, t.mark, t.first, t.keyed, t.done, t.err = opts, nil, nil, 0, 0, true, false, false, .None
-	t.spec, t.led = as.spec, false
+	t.spec, t.led, t.site = as.spec, false, site
 	init(&t.base, &t.spill, allocator, stream)
 	t.out = &t.base
 	t.spell = spell
@@ -105,22 +122,34 @@ close :: proc(t: ^Tokens) -> core.Typed_Error_Kind {
 		return refuse(t, .Out_Of_Order)
 	}
 	t.top -= 1
-	if !t.first {
-		put_line(t.out, t.opts, t.top)
+	if laid(t) {
+		refuse(t, t.spell.layout(t, .Close))
+	} else {
+		if !t.first {
+			put_line(t.out, t.opts, t.top)
+		}
+		put_text(t.out, t.spell.tree[.Close_Object if t.object[t.top] else .Close_Array])
 	}
-	put_text(t.out, t.spell.tree[.Close_Object if t.object[t.top] else .Close_Array])
 	t.first, t.done = false, t.top == 0
 	return refuse(t, t.out.err)
 }
 
 // Writes a member's name and its colon. Only an object that owes a key takes it.
 key :: proc(t: ^Tokens, name: string) -> core.Typed_Error_Kind {
-	if !lead(t, .Key) || refuse(t, t.spell.value(t, name)) != .None {
+	if !lead(t, .Key) {
 		return t.err
 	}
-	put_text(t.out, t.spell.tree[.Colon])
-	if t.opts.pretty {
-		put_text(t.out, t.spell.tree[.After_Colon])
+	if laid(t) {
+		refuse(t, t.spell.layout(t, .Key))
+	}
+	if refuse(t, t.spell.value(t, name)) != .None {
+		return t.err
+	}
+	if !laid(t) {
+		put_text(t.out, t.spell.tree[.Colon])
+		if t.opts.pretty {
+			put_text(t.out, t.spell.tree[.After_Colon])
+		}
 	}
 	t.keyed = true
 	return refuse(t, t.out.err)
@@ -160,6 +189,9 @@ value_bool :: proc(t: ^Tokens, b: bool) -> core.Typed_Error_Kind {return value(t
 
 value_null :: proc(t: ^Tokens) -> core.Typed_Error_Kind {return value(t, Tree_Part.Null)}
 
+// A byte string, written as the format spells one: a text format writes the string of its base64, see `bytes_text`.
+value_bytes :: proc(t: ^Tokens, b: []u8) -> core.Typed_Error_Kind {return value(t, typed.Bytes(b))}
+
 // Ends the record of a flat format with the layout's line end. A JSON write is `.Unsupported`, and a record that wrote
 // no byte is `.Unwritable` as `marshal` refuses it.
 end_record :: proc(t: ^Tokens) -> core.Typed_Error_Kind {
@@ -185,7 +217,11 @@ open :: proc(t: ^Tokens, object: bool) -> core.Typed_Error_Kind {
 	if !lead(t, .Container) {
 		return t.err
 	}
-	put_text(t.out, t.spell.tree[.Open_Object if object else .Open_Array])
+	if laid(t) {
+		refuse(t, t.spell.layout(t, .Open_Object if object else .Open_Array))
+	} else {
+		put_text(t.out, t.spell.tree[.Open_Object if object else .Open_Array])
+	}
 	t.object[t.top] = object
 	t.top += 1
 	t.first = true
@@ -221,7 +257,7 @@ lead :: proc(t: ^Tokens, item: Item) -> bool {
 	case t.keyed:
 		t.keyed = false
 	case:
-		if t.top > 0 {
+		if t.top > 0 && !laid(t) {
 			if !t.first && !t.led {
 				put_text(t.out, t.spell.tree[.Comma])
 			}
@@ -232,6 +268,12 @@ lead :: proc(t: ^Tokens, item: Item) -> bool {
 	return t.err == .None
 }
 
+// Whether the format lays the text out itself.
+@(private)
+laid :: #force_inline proc "contextless" (t: ^Tokens) -> bool {
+	return t.state != nil && t.spell.layout != nil
+}
+
 // Keeps the first refusal and returns it.
 @(private)
 refuse :: proc(t: ^Tokens, kind: core.Typed_Error_Kind) -> core.Typed_Error_Kind {
@@ -240,3 +282,42 @@ refuse :: proc(t: ^Tokens, kind: core.Typed_Error_Kind) -> core.Typed_Error_Kind
 	}
 	return t.err
 }
+
+// Returns the RFC 4648 base64 text of `b`, in `stack` when it fits and else in `context.temp_allocator`, with false when
+// that is refused.
+bytes_text :: proc(b: []u8, stack: []u8) -> (text: string, ok: bool) {
+	n := spell.base64_len(len(b))
+	buf := stack
+	if n > len(stack) {
+		made, err := make([]u8, n, context.temp_allocator)
+		if err != nil {
+			return "", false
+		}
+		buf = made
+	}
+	return string(buf[:spell.base64_put(buf, b)]), true
+}
+
+// Returns the decimal digits of number `node` as its format spells them, in `stack` when they fit and else in
+// `context.temp_allocator`, with false when the node is no number or an allocation is refused.
+node_number_text :: proc(doc: ^core.Document, node: core.Node_Index, stack: []u8) -> (text: string, ok: bool) {
+	if s, fit := core.doc_number_text(doc, node, stack); fit {
+		return s, true
+	}
+	if core.kind(doc, node) != .Number {
+		return "", false
+	}
+	for room := 4 * len(stack); room <= NUMBER_TEXT_MAX; room *= 2 {
+		buf, err := make([]u8, room, context.temp_allocator)
+		if err != nil {
+			return "", false
+		}
+		if s, fit := core.doc_number_text(doc, node, buf); fit {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+@(private)
+NUMBER_TEXT_MAX :: 1 << 26

@@ -127,12 +127,87 @@ object_delete_all :: proc(o: ^Object, gone: map[string]bool) {
 // The value of node `r` as a built value of its own, which outlives the document: a number is a double, but a number
 // whose digits the double does not spell keeps them as a `Number_Text`. An object follows `dups`: `.All` keeps a
 // repeated key in order, `.First` the first and the others the last. With `borrow` a string or key that lies in the
-// document's text stays a slice of it. A node that has comments in its document carries them, as `Commented` does.
+// document's text stays a slice of it. A node that has comments in its document carries them, as `Commented` does. The
+// containers being filled are frames of a stack in the context allocator, so the native stack does not grow with the
+// node's depth.
 built_value :: proc(r: Node_Ref, dups := Duplicates.Last, borrow := false) -> Value {
-	v := built_data(r, dups, borrow)
+	// A container being filled, from `it`. `key` is the key of the member whose value is being built.
+	Filling :: struct {
+		r:   Node_Ref,
+		v:   Value,
+		it:  Value_Iter,
+		key: string,
+	}
+	v := built_data(r, borrow)
+	#partial switch _ in v {
+	case ^Array, ^Object:
+	case:
+		return built_comments(r, v, borrow)
+	}
+	stack := make([dynamic]Filling, 0, 16)
+	defer delete(stack)
+	append(&stack, Filling{r = r, v = v, it = children(r) if doc_kind(r.doc, r.node) == .Array else pairs(r)})
+	for {
+		top := len(stack) - 1
+		f := &stack[top]
+		m: Value
+		more: bool
+		if _, is_array := f.v.(^Array); is_array {
+			m, more = child_next(&f.it)
+		} else {
+			k: string
+			k, m, more = pair_next(&f.it)
+			if more {
+				f.key = text_kept(r.doc, k, borrow)
+			}
+		}
+		if more {
+			child := m.(Node_Ref)
+			cv := built_data(child, borrow)
+			#partial switch _ in cv {
+			case ^Array:
+				append(&stack, Filling{r = child, v = cv, it = children(child)})
+				continue
+			case ^Object:
+				append(&stack, Filling{r = child, v = cv, it = pairs(child)})
+				continue
+			}
+			built_put(f, built_comments(child, cv, borrow), dups)
+			continue
+		}
+		done := pop(&stack)
+		filled := built_comments(done.r, done.v, borrow)
+		if top == 0 {
+			return filled
+		}
+		built_put(&stack[top - 1], filled, dups)
+	}
+}
+
+// `v` made the next item of the array `f` fills, or the value of its object's member `f.key` under `dups`.
+@(private = "file")
+built_put :: proc(f: ^$F, v: Value, dups: Duplicates) {
+	if a, is_array := f.v.(^Array); is_array {
+		append(&a.items, v)
+		return
+	}
+	o := f.v.(^Object)
+	switch {
+	case dups == .All:
+		object_append(o, f.key, v)
+	case dups == .First && object_slot(o, f.key) >= 0:
+	case:
+		object_put(o, f.key, v)
+	}
+}
+
+// `v`, the value of node `r`, with the comments `r` has in its document.
+@(private = "file")
+built_comments :: proc(r: Node_Ref, v: Value, borrow: bool) -> Value {
 	if len(r.doc.facts) == 0 {
 		return v
 	}
+	noted_v := v
 	for role in COMMENT_ROLES {
 		bodies, from := comments(r, role)
 		if from == .None {
@@ -143,13 +218,14 @@ built_value :: proc(r: Node_Ref, dups := Duplicates.Last, borrow := false) -> Va
 			kept[i] = text_kept(r.doc, body, borrow)
 		}
 		delete(bodies)
-		v = noted(v, role, kept)
+		noted_v = noted(noted_v, role, kept)
 	}
-	return v
+	return noted_v
 }
 
+// The value of a scalar node, or a new empty array or object for a container, which `built_value` fills.
 @(private = "file")
-built_data :: proc(r: Node_Ref, dups: Duplicates, borrow: bool) -> Value {
+built_data :: proc(r: Node_Ref, borrow: bool) -> Value {
 	#partial switch doc_kind(r.doc, r.node) {
 	case .False:
 		return false
@@ -163,7 +239,9 @@ built_data :: proc(r: Node_Ref, dups: Duplicates, borrow: bool) -> Value {
 			size := spell.i64_text(&digits[0], i64(n.bits)) if n.kind == .Int else spell.u64_text(&digits[0], n.bits)
 			return number_text(strings.clone(string(digits[:size])))
 		}
-		f, digits, _ := double_of(r)
+		// The digits a format spells for a number whose span is not its text are read into `spelled`.
+		spelled: [HEX_ROOM]u8
+		f, digits, _ := double_of(r, spelled[:] if r.doc.readers.number_text != nil else nil)
 		if digits != "" && (n.kind == .Float || n.kind == .Wide) && !spells_digits(f, digits) {
 			return number_text(strings.clone(digits))
 		}
@@ -171,26 +249,9 @@ built_data :: proc(r: Node_Ref, dups: Duplicates, borrow: bool) -> Value {
 	case .String:
 		return text_kept(r.doc, node_string(r.doc, r.node), borrow)
 	case .Array:
-		a := new_array(length(r))
-		it := children(r)
-		for m in child_next(&it) {
-			append(&a.items, built_value(m.(Node_Ref), dups, borrow))
-		}
-		return a
+		return new_array(length(r))
 	case .Object:
-		o := new_object()
-		it := pairs(r)
-		for k, m in pair_next(&it) {
-			key, v := text_kept(r.doc, k, borrow), built_value(m.(Node_Ref), dups, borrow)
-			switch {
-			case dups == .All:
-				object_append(o, key, v)
-			case dups == .First && object_slot(o, key) >= 0:
-			case:
-				object_put(o, key, v)
-			}
-		}
-		return o
+		return new_object()
 	}
 	return nil
 }

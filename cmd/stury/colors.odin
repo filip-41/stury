@@ -46,7 +46,7 @@ parse_colors :: proc(spec: string) -> (colors: [8]string, ok: bool) {
 // for fmt, which ignores $JQ_COLORS too, and never under --to jsonc, whose comments only the uncoloured writer keeps.
 set_colors :: proc(run: ^Run, cli: Cli) {
 	no_color := posix.getenv("NO_COLOR")
-	run.opts.color = (cli.color_set || is_terminal(os.stdout) && (no_color == nil || no_color == "")) && !cli.mono && !cli.formatting && !writes_comments(&run.opts)
+	run.opts.color = (cli.color_set || is_terminal(os.stdout) && (no_color == nil || no_color == "")) && !cli.mono && !cli.formatting && !writes_comments(&run.opts) && !writes_texts(&run.opts)
 	if run.opts.color {
 		enable_color()
 	}

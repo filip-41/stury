@@ -383,12 +383,12 @@ drain :: proc(it: ^records.Reader) -> (g: Got) {
 // A stream of `src` read in chunks gives the records and faults `src` in memory gives, but for a last record the input
 // ends inside, which it holds.
 @(private = "file")
-expect_window_law :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: json.Spec, sizes: []int, gen: rand.Generator) -> bool {
-	mem := records.open(transmute([]u8)src, json.as(spec), framing)
+expect_window_law :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: json.Spec, sizes: []int, gen: rand.Generator, entries: []string = nil) -> bool {
+	mem := records.open(transmute([]u8)src, json.as(spec), framing, entries = entries)
 	defer records.close(&mem)
 	want := drain(&mem)
 	c := Chunked{src = transmute([]u8)src, sizes = sizes, gen = gen, fail_at = -1}
-	st := records.open_stream(chunked(&c), json.as(spec), framing)
+	st := records.open_stream(chunked(&c), json.as(spec), framing, {entries = entries})
 	defer records.close(&st)
 	got := drain(&st)
 	n := len(got.recs)
@@ -440,6 +440,80 @@ records_stream_as_in_memory :: proc(t: ^testing.T) {
 		for spec in json.Spec {
 			for s in sizes {
 				if !expect_window_law(t, src, framing, spec, s, gen) {
+					return
+				}
+			}
+		}
+		free_all(context.temp_allocator)
+	}
+}
+
+// What each text gives under `.Entries` at a path: the texts of its records.
+@(private = "file")
+Entries_Case :: struct {
+	src:   string,
+	names: []string,
+	want:  []string,
+}
+
+@(private = "file", rodata)
+ENTRIES_CASES := []Entries_Case {
+	{`{"meta":{"x":[1,2]},"data":[1,{"a":2},"x"],"tail":true}`, {"data"}, {"1", `{"a":2}`, `"x"`}},
+	{`{"a":{"n":1,"b":[10,20,30]},"z":0}`, {"a", "b"}, {"10", "20", "30"}},
+	{`{"data":{"k1":1,"k2":[2]}}`, {"data"}, {"1", "[2]"}},
+	{`{"data":[1],"data":[2,3]}`, {"data"}, {"1"}},
+	{`{"a":{"b":5,"b":[7]}}`, {"a", "b"}, {"7"}},
+	{`{"a":[{"b":[1]}],"b":[9]}`, {"b"}, {"9"}},
+	{`{"data":5}`, {"data"}, {}},
+	{`[1,2]`, {"data"}, {}},
+	{`{"x":[1]}`, {"data"}, {}},
+	{`{"data":[]}`, {"data"}, {}},
+	{"\xef\xbb\xbf {\"q\" : { \"r\" : [ 1 , 2 ] } , \"s\" : 1 } ", {"q", "r"}, {"1", "2"}},
+}
+
+// Records at a path are the members of the container it names, in memory and on a stream, and a fault anywhere in the
+// text is the one `validate` gives, as at the root.
+@(test)
+records_entries_at_a_path :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	state := rand.create(6)
+	gen := rand.default_random_generator(&state)
+	sizes := [][]int{{1}, {2}, {3}, {5}, {64}, {}}
+	breakers := "x\"}],:\n\r \x00\\{["
+	for c in ENTRIES_CASES {
+		mem := records.open(transmute([]u8)c.src, json.as(.Json), .Entries, entries = c.names)
+		got := drain(&mem)
+		records.close(&mem)
+		texts := make([dynamic]string, context.temp_allocator)
+		for r in got.recs {
+			append(&texts, string(r.text))
+		}
+		testing.expectf(t, fmt.tprint(texts[:]) == fmt.tprint(c.want) && got.fault == nil, "%q at %v: %v %v, want %v", c.src, c.names, texts[:], got.fault, c.want)
+		for r in got.recs {
+			testing.expectf(t, c.src[r.at:][:len(r.text)] == string(r.text), "%q at %v: record at %d", c.src, c.names, r.at)
+		}
+		for s in sizes {
+			if !expect_window_law(t, c.src, .Entries, .Json, s, gen, c.names) {
+				return
+			}
+		}
+		for round in 0 ..< 300 {
+			buf := slice.clone(transmute([]u8)c.src, context.temp_allocator)
+			switch round % 3 {
+			case 0: buf[rand.int_max(len(buf), gen)] = breakers[rand.int_max(len(breakers), gen)]
+			case 1: buf = buf[:rand.int_max(len(buf), gen)]
+			case 2: buf = slice.concatenate([][]u8{buf[:round % len(buf)], buf[round % len(buf) + 1:]}, context.temp_allocator)
+			}
+			src := string(buf)
+			mem = records.open(buf, json.as(.Json), .Entries, entries = c.names)
+			got = drain(&mem)
+			records.close(&mem)
+			valid := walktest.fault_of(json.validate(buf, .Json))
+			if !testing.expectf(t, got.fault == valid, "%q at %v: fault %v, validate %v", src, c.names, got.fault, valid) {
+				return
+			}
+			for s in sizes {
+				if !expect_window_law(t, src, .Entries, .Json, s, gen, c.names) {
 					return
 				}
 			}
@@ -563,6 +637,8 @@ records_stream_limits_and_failures :: proc(t: ^testing.T) {
 			want, held = {"1", "22", "333", "4444", "55555"}, text[20:24]
 		case .Concatenated:
 			want, held = {"1", "22", "333", "4444", "55555"}, text[19:24]
+		case .Entries:
+			want, held = {"1", "22", "333", "4444", "55555"}, text[20:24]
 		}
 		testing.expectf(t, fmt.tprint(got[:]) == fmt.tprint(want) && it.fault == nil && it.cause == .Unknown && string(it.held) == held, "%v: %v, %v %v, held %q", framing, got[:], it.fault, it.cause, it.held)
 		records.close(&it)

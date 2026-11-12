@@ -15,6 +15,10 @@ import records "../core/records"
 @(private)
 LEVELS :: 2
 
+// The byte of `Reader.state` that is 1 once an `.Entries` reader has found the container `Reader.entries` names.
+@(private)
+LOCATED :: 3
+
 // Under `.Lines` and `.Seq` the end byte, and in strict JSON the LF between texts and the comma between entries, outside
 // strings at the level of the first record. Comments and single quotes would hide brackets from the count.
 @(private)
@@ -174,16 +178,20 @@ frame_document :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, reg
 // fault in the root's own bytes depends on what came before. `state[0]` is the root's open bracket once it is read and
 // 1 after its close, and `state[1]` is 1 after an entry. The entries of the array `spine` finds, when the records start
 // at its `[`, sit `levels` objects deeper, and at its close the text with them cut out is walked whole. A piece's
-// reader ends on a fault whose place is not looked for.
+// reader ends on a fault whose place is not looked for. Out of line, so the `.Lines` readers that share
+// `frame_walked` keep their code to themselves.
 @(private)
-frame_entry :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (rec: records.Record, ok: bool, stopped: bool) {
+frame_entry :: #force_no_inline proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (rec: records.Record, ok: bool, stopped: bool) {
 	src := it.src
 	p := raw_data(src)
 	end := p[len(src):]
 	if it.state[0] == 1 {
 		return
 	}
-	if it.state[0] == 0 && it.from > 0 {
+	if len(it.entries) > 0 && it.state[LOCATED] == 0 && !entries_locate(it, S, opts) {
+		return
+	}
+	if it.state[0] == 0 && it.from > 0 && it.state[LOCATED] == 0 {
 		if at, levels, found := spine_of(src, opts, S); found && at == it.from {
 			it.state[LEVELS] = u8(levels)
 		}
@@ -193,6 +201,7 @@ frame_entry :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 	levels := u32(it.state[LEVELS])
 	value.max_depth = (opts.max_depth if opts.max_depth != 0 else core.MAX_DEPTH) - 1 - levels
 	piece := it.guessed
+	fresh := false
 	key: []u8
 	none: core.No_Hooks
 	zero: core.Hook_Regs
@@ -201,7 +210,7 @@ frame_entry :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 			if q == end || q[0] != '[' && q[0] != '{' {
 				break whole
 			}
-			it.state[0] = q[0]
+			it.state[0], fresh = q[0], true
 			q = gap_end(q[1:], end, S)
 		}
 		// `]` and `}` are 2 past their open brackets.
@@ -221,6 +230,11 @@ frame_entry :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 			it.state[0] = 1
 			if levels == 0 {
 				it.fault = tail_fault(src, u64(intrinsics.ptr_sub(q, p)) + 1, S)
+			} else if it.input.procedure != nil {
+				// The text past the container is judged with the objects around it in front of it, once it is all read.
+				if it.last {
+					it.fault = shell_fault(it, levels, "{}", u64(intrinsics.ptr_sub(q, p)) + 1, S, opts)
+				}
 			} else if piece || !shell_valid(it, u64(intrinsics.ptr_sub(q, p)), S, opts) {
 				break whole
 			}
@@ -264,13 +278,142 @@ frame_entry :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 		it.state[1] = 1
 		return {text = src[at:hi], at = at, key = key}, true, stop
 	}
+	bracket := it.state[0]
 	it.state[0] = 1
 	if piece {
 		it.fault = core.Fault{at = u64(intrinsics.ptr_sub(q, p)), rules = &RULES, kind = .Bad_Char}
+	} else if it.input.procedure != nil {
+		// The window holds no text before the entries, so the walk the fault comes from starts in front of the place
+		// they stopped at, behind a stand-in for what came before it.
+		head, from := "", u64(intrinsics.ptr_sub(gap_end(p[it.pos:], end, S), p))
+		if bracket != 0 && !fresh {
+			head, from = entry_head(bracket, src[it.pos - 1]), it.pos
+		}
+		it.fault = shell_fault(it, levels, head, from, S, opts)
 	} else {
 		it.fault = walk_text(src, 0 if levels > 0 else it.from, S, opts, &none, &zero, core.no_hook)
 	}
 	return
+}
+
+// The open bracket of an `.Entries` container and a last entry that ends in byte `last`, as a short text of the same
+// kind of value, so a walk of the text that follows it starts in the state the entry left.
+@(private)
+entry_head :: proc "contextless" (bracket, last: u8) -> string {
+	if bracket == '[' {
+		switch last {
+		case '}':           return "[{}"
+		case ']':           return "[[]"
+		case '"', '\'':     return "[\"\""
+		case 'a' ..= 'z', 'A' ..= 'Z': return "[null"
+		}
+		return "[0"
+	}
+	switch last {
+	case '}':           return "{\"\":{}"
+	case ']':           return "{\"\":[]"
+	case '"', '\'':     return "{\"\":\"\""
+	case 'a' ..= 'z', 'A' ..= 'Z': return "{\"\":null"
+	}
+	return "{\"\":0"
+}
+
+// The fault of the text of a streamed `.Entries` reader that starts at `from` in its window, found by a walk of it
+// behind `levels` objects and a `head` that stand for the text before it: the open bracket and last entry of the
+// container, or the value the objects around it hold. The fault's place is mapped back into the window. A text with no
+// fault is nil.
+@(private)
+shell_fault :: proc(it: ^records.Reader, levels: u32, head: string, from: u64, $S: Spec, opts: Options) -> Maybe(core.Fault) {
+	OPEN :: "{\"\":"
+	src := it.src
+	lead := int(levels) * len(OPEN) + len(head)
+	text, err := make([]u8, lead + len(src) - int(from), it.allocator)
+	if err != nil {
+		return core.Fault{kind = .No_Memory}
+	}
+	defer delete(text, it.allocator)
+	w := 0
+	for _ in 0 ..< levels {
+		w += copy(text[w:], OPEN)
+	}
+	w += copy(text[w:], head)
+	copy(text[w:], src[from:])
+	none: core.No_Hooks
+	zero: core.Hook_Regs
+	f, bad := walk_text(text, 0, S, opts, &none, &zero, core.no_hook).?
+	if !bad {
+		return nil
+	}
+	f.at = f.at - u64(lead) + from if f.at >= u64(lead) else from
+	return f
+}
+
+// The hook of `entries_locate`: it follows `names` from the root through object members, skipping every value off the
+// path, and stops the walk at the container the last name has as its value.
+@(private)
+Locate :: struct {
+	view:  core.Token_View,
+	names: []string,
+	// The names followed so far, which is the depth of the object whose members come next.
+	depth: int,
+	// Whether the last key matched its name, so the value that comes next is on the path.
+	armed: bool,
+	at:    u64,
+	found: bool,
+}
+
+@(private)
+locate_hook :: proc "contextless" (h: ^Locate, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	if t.role > .Key {
+		return s, .Next
+	}
+	if t.role == .Key {
+		if h.view.readers.key_equals(&h.view, t, h.names[h.depth]) {
+			h.armed = true
+			return s, .Next
+		}
+		return s, .Skip
+	}
+	armed := h.armed
+	h.armed = false
+	#partial switch t.kind {
+	case .Array, .Object:
+		switch {
+		case !armed:
+			// The root.
+			return s, .Next if t.kind == .Object else .Skip
+		case h.depth + 1 == len(h.names):
+			h.at, h.found = t.lo, true
+			return s, .Stop
+		case t.kind == .Object:
+			h.depth += 1
+			return s, .Next
+		}
+		return s, .Skip
+	case .End:
+		h.depth = max(h.depth - 1, 0)
+	}
+	return s, .Next
+}
+
+// Finds the container `it.entries` names, by a walk of the text from its start, and moves the reader to it, with the
+// objects around it in `state[LEVELS]`. Returns false when the records end here: on a fault the walk found, which the
+// reader keeps, or on a text with no such container, which has no records. On a stream a window that does not yet
+// reach the container is a `Truncated` fault, which the window's retry settles.
+@(private)
+entries_locate :: proc(it: ^records.Reader, $S: Spec, opts: Options) -> bool {
+	loc := Locate{view = {src = it.src, as = it.as}, names = it.entries}
+	zero: core.Hook_Regs
+	fault := walk_text(it.src, it.from if it.input.procedure == nil else it.pos, S, opts, &loc, &zero, locate_hook)
+	if loc.found {
+		it.pos, it.state[LEVELS], it.state[LOCATED] = loc.at, u8(len(it.entries)), 1
+		if it.input.procedure == nil {
+			it.from = loc.at
+		}
+		return true
+	}
+	it.state[0], it.fault = 1, fault
+	return false
 }
 
 // Whether the text around a spine's array, closed at `close`, is valid with the array's elements cut out, so that with

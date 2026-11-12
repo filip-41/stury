@@ -268,7 +268,7 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 	case .Object:
 		l := o.layout
 		switch {
-		case !l.opts.pretty && l.colors == nil && !l.opts.ascii && !l.comments && o.table == nil:
+		case !l.opts.pretty && l.colors == nil && !l.opts.ascii && !l.comments && o.table == nil && !writes_texts(o.opts):
 			// Compact JSON, written as the printer writes the object. A cell the walk judged is UTF-8.
 			for m in cols.members {
 				put_lead(&o.buf, m.lead)

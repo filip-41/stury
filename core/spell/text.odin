@@ -253,3 +253,89 @@ utf8_lax_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (spelled: [
 	}
 	return spelled, size, q
 }
+
+// The text spelling of bytes in every format that holds them as text: RFC 4648 section 4's standard alphabet with `=`
+// padding.
+@(private, rodata)
+BASE64_ALPHABET := [64]u8{
+	'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+	'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+	'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '/',
+}
+
+// Returns the length of the base64 text of `n` bytes.
+base64_len :: #force_inline proc "contextless" (n: int) -> int {
+	return (n + 2) / 3 * 4
+}
+
+// Writes the base64 text of `src` into `dst`, which holds `base64_len(len(src))` bytes, and returns its length.
+base64_put :: proc "contextless" (dst: []u8, src: []u8) -> int {
+	w := 0
+	i := 0
+	for ; i + 3 <= len(src); i += 3 {
+		x := u32(src[i]) << 16 | u32(src[i + 1]) << 8 | u32(src[i + 2])
+		dst[w], dst[w + 1], dst[w + 2], dst[w + 3] = BASE64_ALPHABET[x >> 18], BASE64_ALPHABET[x >> 12 & 63], BASE64_ALPHABET[x >> 6 & 63], BASE64_ALPHABET[x & 63]
+		w += 4
+	}
+	switch len(src) - i {
+	case 1:
+		x := u32(src[i]) << 16
+		dst[w], dst[w + 1], dst[w + 2], dst[w + 3] = BASE64_ALPHABET[x >> 18], BASE64_ALPHABET[x >> 12 & 63], '=', '='
+		w += 4
+	case 2:
+		x := u32(src[i]) << 16 | u32(src[i + 1]) << 8
+		dst[w], dst[w + 1], dst[w + 2], dst[w + 3] = BASE64_ALPHABET[x >> 18], BASE64_ALPHABET[x >> 12 & 63], BASE64_ALPHABET[x >> 6 & 63], '='
+		w += 4
+	}
+	return w
+}
+
+// Returns the bytes `text` spells, or false when it is not base64 text: its length is not a multiple of 4, it holds a byte
+// outside the alphabet, padding is anywhere but the last one or two bytes, or the unused bits of the last character are not
+// zero, so a text decodes to one byte string and a byte string has one text. `dst` holds `len(text) / 4 * 3` bytes.
+base64_decode :: proc "contextless" (dst: []u8, text: []u8) -> (decoded: []u8, ok: bool) {
+	if len(text) % 4 != 0 {
+		return nil, false
+	}
+	pad := 0
+	if len(text) > 0 && text[len(text) - 1] == '=' {
+		pad = 2 if text[len(text) - 2] == '=' else 1
+	}
+	w := 0
+	for i := 0; i < len(text); i += 4 {
+		x: u32
+		for j in 0 ..< 4 {
+			c := text[i + j]
+			v, valid := base64_value(c)
+			if !valid && !(c == '=' && i + j >= len(text) - pad) {
+				return nil, false
+			}
+			x = x << 6 | u32(v)
+		}
+		dst[w], dst[w + 1], dst[w + 2] = u8(x >> 16), u8(x >> 8), u8(x)
+		w += 3
+	}
+	w -= pad
+	// The bits past the last byte are the zeros the encoder's padding stands for.
+	if pad > 0 && dst[w] != 0 {
+		return nil, false
+	}
+	return dst[:w], true
+}
+
+@(private)
+base64_value :: #force_inline proc "contextless" (c: u8) -> (v: u8, ok: bool) {
+	switch {
+	case c >= 'A' && c <= 'Z':
+		return c - 'A', true
+	case c >= 'a' && c <= 'z':
+		return c - 'a' + 26, true
+	case c >= '0' && c <= '9':
+		return c - '0' + 52, true
+	case c == '+':
+		return 62, true
+	case c == '/':
+		return 63, true
+	}
+	return 0, false
+}

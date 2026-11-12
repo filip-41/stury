@@ -390,15 +390,6 @@ spelling_key_equals :: proc "contextless" (doc: ^core.Token_View, n: core.Node, 
 
 
 
-// dsv's `Readers.number`. It returns the JSON number a value cell spells, and false for any other cell. A quoted cell,
-// a TSV escape and a key cell are never numbers, since no JSON number holds a quote, a backslash or a byte past 0x7F. A
-// header cell names a column and answers as a JSON key node does.
-spelling_number :: proc(doc: ^core.Token_View, n: core.Node) -> (core.Number, bool) {
-	if n.role != .Value {
-		return {}, false
-	}
-	return spell.number_strict(doc.src, n.lo, n.lo + u64(n.n))
-}
 
 // dsv's `Readers.resolve` of a cell. An empty value cell, which holds no quotes, is `.Null`, as a typed read and the
 // CLI read it, and any other cell is `.String`. With the document's `infer`, a `true` or `false` value cell is `.True`

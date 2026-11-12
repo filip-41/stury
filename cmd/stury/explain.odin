@@ -37,6 +37,7 @@ WHY_WORDS := [Route_Why]string {
 	.Ascii            = "-a writes ASCII only",
 	.Cells_Out        = "--to csv or tsv writes each output as a record",
 	.Comments_Out     = "--to jsonc prints a value's comments, which reading a path does not keep",
+	.Text_Out         = "--to writes each output as a text of its format, which the format's writer makes of a built document",
 	.Not_Path         = "the filter is not a path, and not select(PATH op LITERAL)",
 	.Dialect_Select   = "--from jsonc reads only a plain path without building, as a text prints with its comments",
 	.Select_Redefined = "select is redefined, by the filter or by ~/.jq",
@@ -60,16 +61,6 @@ FALLBACK_WORDS := [Fallback]string {
 	.Object_Members = "a [] met an object, whose repeated keys jq gives once",
 }
 
-@(rodata, private = "file")
-FORMAT_WORDS := [Format]string {
-	.Json   = "JSON",
-	.Jsonc  = "JSON with comments",
-	.Json5  = "JSON5",
-	.Ndjson = "NDJSON",
-	.Csv    = "CSV",
-	.Tsv    = "TSV",
-}
-
 @(private = "file")
 explain_line :: proc(format: string, args: ..any) {
 	message.write_stderr("stury: explain: %s\n", message.build_temp(format, ..args))
@@ -91,7 +82,7 @@ explain_route :: proc(run: ^Run, framing: core.Framing) {
 		return
 	}
 	o := &run.opts
-	format := FORMAT_WORDS[o.from]
+	format := FORMATS[o.from].title
 	switch {
 	case o.null_input:
 		explain_line("input: none")
@@ -99,6 +90,8 @@ explain_route :: proc(run: ^Run, framing: core.Framing) {
 		explain_line("input: lines of text, each a string")
 	case reads_cells(o):
 		explain_line("input: %s, each record %s", format, "an array of its cells" if o.cells_in.no_header else "an object keyed by the header")
+	case reads_own(o):
+		explain_line("input: %s, each document of a stream", format)
 	case:
 		texts := "in RFC 7464 records" if framing == .Seq else "one per line" if framing == .Lines else "one after another"
 		explain_line("input: %s texts %s, a repeated key keeping its last value", format, texts)

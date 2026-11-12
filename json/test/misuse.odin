@@ -24,6 +24,17 @@ a_zero_document_is_refused :: proc(t: ^testing.T) {
 }
 
 @(test)
+a_member_insert_without_edit_services_is_refused :: proc(t: ^testing.T) {
+	doc, err := json.build(transmute([]u8)string(`{"a":1}`), .Json)
+	walktest.expect_nil(t, err)
+	defer core.destroy(&doc)
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	list.edit = nil
+	walktest.expect_kind(t, cw.insert(&list, core.ROOT, 1, "b", typed.Raw("2")), core.Document_Error_Kind.Wrong_Container)
+}
+
+@(test)
 a_nil_plan_is_refused :: proc(t: ^testing.T) {
 	_, err := cw.marshal(1, nil)
 	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)

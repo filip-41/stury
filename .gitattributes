@@ -2,3 +2,5 @@
 # examples, the test suites, the tools, the benchmark harness, the docs, the Makefile and the licences. From it
 # `make lint test` and `make build-cli` run.
 /.github/ export-ignore
+# The yaml-test-suite cases are compared byte for byte, so a checkout keeps their line ends as committed.
+/yaml/test/suite/** -text

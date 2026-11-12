@@ -1427,3 +1427,61 @@ value_member_borrows_strings_and_reports_its_fault :: proc(t: ^testing.T) {
 	err := json.unmarshal(transmute([]u8)string(`{"a": [[[[1]]]]}`), json.Spec.Json, &z, json.Options{max_depth = 3})
 	testing.expect(t, err != nil)
 }
+
+@(private = "file")
+Blob :: struct {
+	id:   i32,
+	data: typed.Bytes,
+	more: []typed.Bytes,
+}
+
+// A `typed.Bytes` reads the string of RFC 4648 base64 with padding, in a field, a list and the root document, and writes
+// it back as the same string.
+@(test)
+bytes_read_and_write_as_base64 :: proc(t: ^testing.T) {
+	text := `{"id":1,"data":"Zm9vYmFy","more":["","Zg==","Zm9vYg=="]}`
+	blob: Blob
+	walktest.expect_nil(t, read(t, text, &blob))
+	testing.expect_value(t, string(blob.data), "foobar")
+	testing.expect_value(t, len(blob.more), 3)
+	testing.expect_value(t, len(blob.more[0]), 0)
+	testing.expect_value(t, string(blob.more[1]), "f")
+	testing.expect_value(t, string(blob.more[2]), "foob")
+
+	written, err := json.marshal(blob, write = {}, allocator = context.temp_allocator)
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, string(written), text)
+
+	raw: typed.Bytes = {0, 255, 254, 1}
+	out, raw_err := json.marshal(raw, write = {}, allocator = context.temp_allocator)
+	walktest.expect_nil(t, raw_err)
+	testing.expect_value(t, string(out), `"AP/+AQ=="`)
+}
+
+// A string that is not the one canonical base64 of some bytes, and a value that is no string, are refused as the wrong
+// kind at the value.
+@(test)
+bytes_refuse_other_values :: proc(t: ^testing.T) {
+	for text in ([?]string{`{"data":"Zg"}`, `{"data":"Zh=="}`, `{"data":"Zm9v\n"}`, `{"data":1}`, `{"data":[1]}`, `{"data":null}`}) {
+		blob: Blob
+		e := read(t, text, &blob)
+		testing.expectf(t, walktest.expect_kind(t, e, core.Typed_Error_Kind.Wrong_Kind), "%s: read gives %v", text, e)
+	}
+}
+
+// Decoded bytes are one allocation the caller frees, whether or not the read borrows strings.
+@(test)
+bytes_own_their_allocation :: proc(t: ^testing.T) {
+	tracker: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&tracker, context.allocator)
+	defer mem.tracking_allocator_destroy(&tracker)
+	alloc := mem.tracking_allocator(&tracker)
+
+	blob: Blob
+	e := json.unmarshal(transmute([]u8)string(`{"data":"Zm9vYmFy"}`), json.Spec.Json, &blob, read = {borrow_strings = true}, opts = {}, allocator = alloc)
+	walktest.expect_nil(t, e)
+	testing.expect_value(t, string(blob.data), "foobar")
+	testing.expect_value(t, len(tracker.allocation_map), 1)
+	delete(blob.data, alloc)
+	testing.expect_value(t, len(tracker.allocation_map), 0)
+}

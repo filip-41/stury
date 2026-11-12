@@ -17,7 +17,7 @@ readers_of :: proc "contextless" ($S: Spec) -> ^core.Readers {
 	@(static, rodata) r := core.Readers {
 		text       = proc(v: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool) {return cell_text(v.src, n, S, buf)},
 		key_equals = spelling_key_equals,
-		number     = spelling_number,
+		number     = number,
 		resolve    = spelling_resolve,
 		resolves   = proc "contextless" (as: core.As) -> bool {return options_of(as).infer},
 		close_end  = proc(doc: ^core.Document, i: core.Node_Index) -> u64 {return close_end_spec(doc, i, S)},
@@ -37,9 +37,9 @@ bound_as :: proc "contextless" ($S: Spec, opts := Options{}) -> core.As {
 // and the option bytes in `As`.
 @(rodata)
 PLAN_READERS := core.Readers {
-	text       = proc(v: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool) {return cell_text(v.src, n, Spec(v.spec), buf)},
+	text       = text,
 	key_equals = spelling_key_equals,
-	number     = spelling_number,
+	number     = number,
 	resolve    = spelling_resolve,
 	resolves   = proc "contextless" (as: core.As) -> bool {return options_of(as).infer},
 	format     = rules_of,

@@ -103,8 +103,9 @@ Command options:
 
 stury's own options:
       --from format         read json (default), jsonc, json5, ndjson,
-                            csv or tsv;
-      --to format           write json (default), jsonc, ndjson, csv or tsv;
+                            csv, tsv or yaml;
+      --to format           write json (default), jsonc, ndjson, csv, tsv
+                            or yaml;
       --in-place            with fmt or edit, rewrite each file in place;
       --check               with fmt or edit, name each file it would
                             change and exit 1;
@@ -117,6 +118,9 @@ stury's own options:
       --format-assert       make format fail an input;
       --max-errors n        keep at most n failures of an input;
       --max-depth n         refuse nesting past n levels (default 1024);
+      --alias-limit n       with --from yaml, refuse aliases that read
+                            more than n bytes again;
+      --merge-keys          with --from yaml, read << as a merge key;
       --follow              with one file, answer each record as it is
                             appended, like tail -f FILE | stury;
       --explain             write how the filter runs and what the run did
@@ -152,7 +156,7 @@ is valid. Every file is judged, and each file's first fault is reported.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson,
-                            csv or tsv;
+                            csv, tsv or yaml;
       --seq                 judge each record after a 0x1E separator as
                             one text;
       --max-depth n         refuse nesting past n levels (default 1024);
@@ -171,6 +175,8 @@ Options:
                             exit 1 only after refusing a step no input takes;
       --delimiter c, --no-header, --comment c, --infer, --ragged,
       --lazy-quotes         read csv or tsv as stury --help says;
+      --alias-limit n, --merge-keys
+                            read yaml as stury --help says;
   -h, --help                show this help.
 
 Exit status: 0 when every input is valid, 1 when one fails the schema, 5 when
@@ -189,7 +195,8 @@ writes values that pass the schema file, a text a line. gen writes the Odin
 types a model reads the schema's values with.
 
 Options:
-      --from format         read json (default), jsonc, json5, ndjson, csv or tsv;
+      --from format         read json (default), jsonc, json5, ndjson, csv, tsv
+                            or yaml;
       --ranges              infer: keep the least and greatest number, string
                             length and array length;
       --to format           sample: write json (default), jsonc, ndjson, csv or tsv;
@@ -224,9 +231,9 @@ not written, and a table written is judged again as it reads back.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson,
-                            csv or tsv;
-      --to format           write json, jsonc, ndjson, csv or tsv (default
-                            the --from format);
+                            csv, tsv or yaml;
+      --to format           write json, jsonc, ndjson, csv, tsv or yaml
+                            (default the --from format);
       --in-place            rewrite each file in place;
       --check               write nothing, name each file that is not
                             already formatted, and exit 1;
@@ -248,6 +255,8 @@ Options:
                             a table written as the format read keeps its
                             delimiter and comment character, and its
                             comments when it has a comment character;
+      --alias-limit n, --merge-keys
+                            read yaml as stury --help says;
   -h, --help                show this help.
 
 Exit status: 0, or 1 under --check when a file is not formatted or under
@@ -271,7 +280,7 @@ edited. Every file is edited, and each file's first fault is reported.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson,
-                            csv or tsv;
+                            csv, tsv or yaml;
       --seq                 edit each record after a 0x1E separator;
   -R, --raw-input           edit each line as a string;
   -s, --slurp               run the filter once on the array of records;
@@ -295,6 +304,8 @@ Options:
                             stury --help;
       --delimiter c, --no-header, --comment c, --infer, --ragged,
       --lazy-quotes         read csv or tsv as stury --help says;
+      --alias-limit n, --merge-keys
+                            read yaml as stury --help says;
   -h, --help                show this help.
 
 Exit status: 0, or 1 under --check when a file would change, 5 when one holds
@@ -321,7 +332,8 @@ members the data has that the schema does not describe. A file of records is
 one array of them. --shape compares the shapes of two data files.
 
 Options:
-      --from format         read json (default), jsonc, json5, ndjson or csv, tsv;
+      --from format         read json (default), jsonc, json5, ndjson, csv,
+                            tsv or yaml;
       --key member          match array elements by the value of member, or
                             PATH=member for the array at PATH (.a[].b=id);
       --set                 match equal elements wherever they stand;

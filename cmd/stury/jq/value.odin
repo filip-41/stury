@@ -9,6 +9,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:hash"
 import "core:slice"
+import "core:strings"
 import core_pkg "../../../core"
 import json "../../../json"
 
@@ -26,7 +27,7 @@ new_object :: core_pkg.new_object
 lent :: core_pkg.lent
 object_slot :: core_pkg.object_slot
 object_put :: core_pkg.object_put
-object_set :: core_pkg.object_set
+object_append :: core_pkg.object_append
 object_delete :: core_pkg.object_delete
 object_delete_all :: core_pkg.object_delete_all
 reindex :: core_pkg.reindex
@@ -35,7 +36,6 @@ plain :: core_pkg.plain
 number_text :: core_pkg.number_text
 comments :: core_pkg.comments
 noted :: core_pkg.noted
-keep_comments :: core_pkg.keep_comments
 rewrap :: core_pkg.rewrap
 node_string :: core_pkg.node_string
 number_f64 :: core_pkg.number_f64
@@ -107,9 +107,8 @@ jq_kind :: #force_inline proc(k: core_pkg.Kind) -> Kind {
 	return Kind(k)
 }
 
-// A document node's jq kind. A build with `infer` stores a cell's kind in its node. A cell left `Plain` is a string or
-// null, unless its document was not made by a build (a record, a partial read) and its first byte could start a number,
-// `true` or `false`, which the document's format then resolves.
+// A document node's jq kind. A build with `infer` stores a cell's kind in its node, and a cell it left `Plain` is a
+// string or null. A `Plain` value of a document that stored no kinds is the kind its format resolves.
 node_kind :: #force_inline proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Kind {
 	#partial switch k := doc.nodes[i].kind if int(i) < len(doc.nodes) else core_pkg.Kind.Null; k {
 	case .Array:
@@ -117,24 +116,33 @@ node_kind :: #force_inline proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index)
 	case .Object:
 		return .Object
 	case .Plain:
-		// A delimited cell: an empty unquoted one is null, a quoted one keeps its quotes in its span.
-		if doc.nodes[i].n == 0 && doc.nodes[i].role == .Value {
-			return .Null
+		if !doc.kinds_stored {
+			return unstored_kind(doc, i)
 		}
-		return .String if doc.kinds_stored else unstored_kind(doc, i)
+		// A delimited cell: an empty unquoted one is null, a quoted one keeps its quotes in its span.
+		return .Null if doc.nodes[i].n == 0 && doc.nodes[i].role == .Value else .String
 	case:
 		return Kind(k)
 	}
 }
 
-// The kind of a `Plain` cell of a document that did not store kinds: a partial read. Its first byte decides whether the
-// format has anything to resolve.
+// The kind of a `Plain` value of a document that did not store kinds. In a delimited text, a record or a partial read,
+// an empty unquoted cell is null and the first byte of another decides whether the format has anything to resolve. Any
+// other format resolves its own.
 @(cold)
 unstored_kind :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Kind {
 	n := doc.nodes[i]
-	if n.role == .Value && n.spelling == 0 {
+	switch {
+	case n.role != .Value:
+		return .String
+	case !doc.readers.flat:
+		k := core_pkg.kind(doc, i)
+		return .String if k == .Plain else jq_kind(k)
+	case n.n == 0:
+		return .Null
+	case n.spelling == 0:
 		if c := doc.src[n.lo]; c == 't' || c == 'f' || c == '-' || c - '0' < 10 {
-			return Kind(core_pkg.kind(doc, i))
+			return jq_kind(core_pkg.kind(doc, i))
 		}
 	}
 	return .String
@@ -190,17 +198,30 @@ scalar :: proc(v: Value) -> Value {
 }
 
 // Number node `i`: its literal, its text but for a spelling other than its format's plain decimal (JSON5's `+1.5`,
-// `0x10`), where it is the JSON text the library writes for it.
+// `0x10`), where it is the JSON text the library writes for it, and for a format whose number span is not its text,
+// where it is the digits the format spells.
 node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Value {
-	lit, f, is_literal := node_literal(doc, i)
+	room: [core_pkg.HEX_ROOM]u8 = ---
+	lit, f, is_literal := node_literal(doc, i, room[:])
 	if !is_literal {
 		return num(f)
+	}
+	// Digits the format spelled into `room` are kept in a copy.
+	if at := uintptr(raw_data(lit)); at >= uintptr(&room[0]) && at < uintptr(&room[0]) + len(room) {
+		lit = strings.clone(lit)
 	}
 	return number_text(lit)
 }
 
-// The literal of number node `i` as `node_number` reads it, or its double when JSON cannot write it.
-node_literal :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> (lit: string, f: f64, is_literal: bool) {
+// The literal of number node `i` as `node_number` reads it, or its double when JSON cannot write it. The digits of a
+// format whose number span is not its text lie in the source or in `room`, which holds `core.HEX_ROOM` bytes.
+node_literal :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index, room: []u8) -> (lit: string, f: f64, is_literal: bool) {
+	if doc.readers.number_text != nil {
+		// A number with no digits, an infinity or a NaN, is its double.
+		digits: string
+		f, digits, _ = core_pkg.double_of(Ref{doc, i}, room)
+		return digits, f, digits != ""
+	}
 	lit = string(core_pkg.span(doc, i))
 	// The `NUMBER_*` layout holds only for a `.Number` token. A dsv cell is `.Plain`, its spelling bits mean other things.
 	if doc.nodes[i].kind == .Number && doc.nodes[i].spelling & core_pkg.NUMBER_KIND_MASK != 0 {

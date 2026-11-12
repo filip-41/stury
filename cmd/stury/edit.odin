@@ -1,10 +1,10 @@
 package main
 
 // `stury edit`: run the filter on each input and write the input back with its outputs spliced into its own bytes. A
-// whole JSON text takes one output. A table, NDJSON, `--seq` and `-R` lines run the filter on each record, or under
-// `-s` once on the array of them, and the outputs are the records written back: a record with no output is dropped, and
-// each output past a record's first is a new record after it. `--in-place` rewrites each file, and `--check` names
-// each one that would change.
+// whole JSON text takes one output. A table, NDJSON, `--seq`, `-R` lines and a stream of documents (YAML) run the
+// filter on each record, or under `-s` once on the array of them, and the outputs are the records written back: a
+// record with no output is dropped, and each output past a record's first is a new record after it. `--in-place`
+// rewrites each file, and `--check` names each one that would change.
 
 import "base:runtime"
 import "core:bytes"
@@ -13,6 +13,7 @@ import "core:os"
 import core "../../core"
 import compose "../../core/compose"
 import records "../../core/records"
+import json "../../json"
 import "jq"
 import "message"
 
@@ -201,13 +202,17 @@ edit_state :: proc(er: ^Edit_Run, doc: ^core.Document, list: ^core.Edit_List) ->
 }
 
 // A whole text, which holds one document, so the filter makes one output. Under `-s` it is the one record of an array.
+// A text of a format with a handle of its own whose fault is of a text after its first, a YAML stream, has each document
+// edited as a record.
 @(private = "file")
 edit_document :: proc(er: ^Edit_Run, path: string) -> int {
 	ins := er.ins
 	src := ins.data
 	heap := runtime.heap_allocator()
 	doc, fault := jq.build_text(src, ins.as, heap)
-	if f, bad := fault.?; bad {
+	if f, bad := fault.?; bad && FORMATS[ins.format].whole_as != nil && FORMATS[ins.format].follows != nil && FORMATS[ins.format].follows(f) {
+		return edit_records(er, path)
+	} else if bad {
 		tell_fault(ins, f)
 		return EXIT_INPUT
 	}
@@ -360,10 +365,14 @@ Edit_Span :: struct {
 // gaps the file has at those places, so its line ends and separators stay. Output `j` takes the gap before record `j`,
 // which is known once that record is read, so an output past the records read so far waits. A gap past the file's own
 // is its last gap between records, or past a file's one record its line end and a record separator under `--seq`.
+// A stream's document starts on a line of its own, after a line end the joiner adds when the text before it lacks one,
+// and one after the first starts with a `---` line, which the joiner adds when the document has none. A stream of no
+// document, a text of comments, is kept as it is.
 @(private = "file")
 Edit_Joiner :: struct {
 	src:     []u8,
 	seq:     bool,
+	stream:  bool,
 	out:     [dynamic]u8,
 	written: int,
 	waiting: [dynamic]Edit_Text,
@@ -377,9 +386,9 @@ Edit_Text :: struct {
 }
 
 @(private = "file")
-edit_joiner :: proc(src: []u8, seq: bool) -> Edit_Joiner {
+edit_joiner :: proc(src: []u8, framing: core.Framing) -> Edit_Joiner {
 	heap := runtime.heap_allocator()
-	return {src = src, seq = seq, out = make([dynamic]u8, 0, len(src), heap), waiting = make([dynamic]Edit_Text, heap)}
+	return {src = src, seq = framing == .Seq, stream = framing == .Concatenated, out = make([dynamic]u8, 0, len(src), heap), waiting = make([dynamic]Edit_Text, heap)}
 }
 
 @(private = "file")
@@ -424,6 +433,14 @@ edit_join_flush :: proc(j: ^Edit_Joiner, spans: []Edit_Span) {
 @(private = "file")
 edit_join_write :: proc(j: ^Edit_Joiner, gap: []u8, t: Edit_Text) {
 	append(&j.out, ..gap)
+	if j.stream && len(t.text) > 0 && len(j.out) > 0 {
+		if j.out[len(j.out) - 1] != '\n' {
+			append(&j.out, '\n')
+		}
+		if j.written > 0 && !edit_marked(t.text) {
+			append(&j.out, "---\n")
+		}
+	}
 	append(&j.out, ..t.text)
 	if t.owned {
 		delete(t.text, runtime.heap_allocator())
@@ -435,6 +452,9 @@ edit_join_write :: proc(j: ^Edit_Joiner, gap: []u8, t: Edit_Text) {
 @(private = "file")
 edit_join_end :: proc(j: ^Edit_Joiner, spans: []Edit_Span) -> []u8 {
 	n := len(spans)
+	if j.stream && n == 0 {
+		return j.src
+	}
 	if j.written == 0 && len(j.waiting) == 0 || n == 0 {
 		return j.out[:0]
 	}
@@ -478,7 +498,7 @@ edit_records :: proc(er: ^Edit_Run, path: string) -> int {
 		delete(r.spans)
 		delete(r.lines_at)
 	}
-	join := edit_joiner(src, ins.framing == .Seq)
+	join := edit_joiner(src, ins.framing)
 	defer edit_joiner_destroy(&join)
 	slurp := er.run.opts.slurp
 	if !slurp {
@@ -676,8 +696,15 @@ edit_read_failed :: proc(r: ^Edit_Reader) -> bool {
 edit_record_text :: proc(er: ^Edit_Run, doc: ^core.Document, src: []u8, span: Edit_Span, line: int, v: jq.Value, kept: bool) -> (text: []u8, fresh, ok: bool) {
 	heap := runtime.heap_allocator()
 	// A record read with `input` keeps its bytes wherever it goes.
+	stream := er.ins.framing == .Concatenated
 	if r, is_ref := v.(jq.Ref); is_ref && (!kept || r.doc != doc) && !er.run.opts.sort_keys {
+		if stream {
+			return edit_moved_document(er, r)
+		}
 		return core.span(r.doc, r.node), false, true
+	}
+	if !kept && stream {
+		return edit_new_document(er, v)
 	}
 	if !kept {
 		layout := er.layout
@@ -698,6 +725,65 @@ edit_record_text :: proc(er: ^Edit_Run, doc: ^core.Document, src: []u8, span: Ed
 	return out[:len(out) - int(span.full - span.end)], owned, true
 }
 
+// A stream's document made of value `r` of a record: the whole record, or the value's bytes moved to column 0. The
+// joiner starts it with a marker line when it has none.
+@(private = "file")
+edit_moved_document :: proc(er: ^Edit_Run, r: jq.Ref) -> (text: []u8, fresh, ok: bool) {
+	if r.node == core.ROOT {
+		return r.doc.src, false, true
+	}
+	services := r.doc.readers.services if r.doc.readers != nil else nil
+	if services == nil || services.edit == nil || services.edit.relocate == nil {
+		return edit_new_document(er, r)
+	}
+	moved, fits := services.edit.relocate(r.doc, r.node, {placed = true}, runtime.heap_allocator())
+	if !fits {
+		message.write_stderr("stury: error: %s: the format cannot spell the value as a document\n", er.ins.name)
+		return nil, false, false
+	}
+	return moved, true, true
+}
+
+// Whether the stream document `text` starts with a `---` or directive line, after its blank and comment lines.
+@(private = "file")
+edit_marked :: proc(text: []u8) -> bool {
+	for ls := 0; ls < len(text); {
+		nl := bytes.index_byte(text[ls:], '\n')
+		line := text[ls:] if nl < 0 else text[ls:ls + nl]
+		lead := bytes.trim_left(line, {' ', '\t', '\r'})
+		switch {
+		case len(lead) == 0 || lead[0] == '#':
+		case line[0] == '%':
+			return true
+		case:
+			return bytes.has_prefix(line, transmute([]u8)string("---")) && (len(line) == 3 || jq.is_space(line[3]))
+		}
+		if nl < 0 {
+			break
+		}
+		ls += nl + 1
+	}
+	return false
+}
+
+// A document a stream's filter adds: the value as the format's document writer writes it, in block style.
+@(private = "file")
+edit_new_document :: proc(er: ^Edit_Run, v: jq.Value) -> (text: []u8, fresh, ok: bool) {
+	built, fault := jq.build_text(transmute([]u8)jq.to_json(v, {}, context.temp_allocator), json.as(.Json), context.temp_allocator)
+	body: []u8
+	err: core.Error
+	if fault == nil {
+		opts := er.layout.opts
+		opts.pretty = true
+		body, _, err = core.write(&built, opts, er.ins.as, core.ROOT, runtime.heap_allocator())
+	}
+	if fault != nil || err != nil {
+		message.write_stderr("stury: error: %s: the format cannot spell the value\n", er.ins.name)
+		return nil, false, false
+	}
+	return body, true, true
+}
+
 // `-R`: each line is a string, and each output is written back as a line, a string raw and any other value as JSON. A
 // line the filter reads with `input` is consumed. Under `-s` the file is one string and its outputs, written raw, are
 // the file.
@@ -707,7 +793,7 @@ edit_lines :: proc(er: ^Edit_Run, path: string) -> int {
 	src := ins.data
 	heap := runtime.heap_allocator()
 	r := Edit_Line_Reader{ins = ins, spans = make([dynamic]Edit_Span, heap)}
-	join := edit_joiner(src, false)
+	join := edit_joiner(src, .Lines)
 	defer {
 		delete(r.spans)
 		edit_joiner_destroy(&join)

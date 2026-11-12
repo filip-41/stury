@@ -167,8 +167,8 @@ index_value :: proc(ip: ^Interp, t: Value, key: Value) -> (Value, Signal) {
 	case ^Object, ^Array, Ref, Path, ^Commented:
 		switch kind(key) {
 		case .Object:
-			if role, is_fact := fact_step(key); is_fact {
-				return comments_value(t, role), .Go
+			if fact, is_fact := fact_step(key); is_fact {
+				return fact_value(t, fact), .Go
 			}
 			if tk == .Null {
 				return nil, .Go

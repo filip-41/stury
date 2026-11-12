@@ -176,7 +176,7 @@ put_header :: proc(w: ^Rows, names: []string) -> core.Typed_Error_Kind {
 @(private)
 end_record :: proc(w: ^Rows, start, i: int) -> core.Typed_Error_Kind {
 	if total(w) == start {
-		return refuse(w, .Unwritable, i)
+		return rows_refuse(w, .Unwritable, i)
 	}
 	return end_line(w)
 }
@@ -197,7 +197,7 @@ end_line :: proc(w: ^Rows) -> core.Typed_Error_Kind {
 
 // The path of a refusal in record `i`, none for -1.
 @(cold, private)
-refuse :: proc(w: ^Rows, kind: core.Typed_Error_Kind, i: int) -> core.Typed_Error_Kind {
+rows_refuse :: proc(w: ^Rows, kind: core.Typed_Error_Kind, i: int) -> core.Typed_Error_Kind {
 	w.err.n_steps = 0
 	if i >= 0 {
 		w.err.n_steps = 1
@@ -213,7 +213,7 @@ refuse_in :: proc(w: ^Rows, kind: core.Typed_Error_Kind, i: int, step: core.Step
 	if name, named := step.(core.Name); named {
 		step = core.Name(strings.clone(string(name), context.temp_allocator))
 	}
-	refuse(w, kind, i)
+	rows_refuse(w, kind, i)
 	w.err.steps[w.err.n_steps] = step
 	w.err.n_steps += 1
 	return kind
@@ -326,7 +326,7 @@ write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed
 			start := total(w)
 			inner := (^runtime.Raw_Slice)(uintptr(list.data) + uintptr(i) * uintptr(row.stride))^
 			if w.width != 0 && inner.len != w.width && .Ragged not_in w.opts.tolerate {
-				return refuse(w, .Wrong_Length, i if indexed else -1)
+				return rows_refuse(w, .Wrong_Length, i if indexed else -1)
 			}
 			for k in 0 ..< inner.len {
 				put_sep(w, k > 0)
@@ -361,7 +361,7 @@ write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed
 				}
 			}
 			if found < int(m.len) {
-				return refuse(w, .Unwritable, i if indexed else -1)
+				return rows_refuse(w, .Unwritable, i if indexed else -1)
 			}
 			end_record(w, start, i if indexed else -1) or_return
 		}
@@ -446,6 +446,10 @@ write_other :: #force_no_inline proc(w: ^Rows, pl: ^typed.Plan, f: ^typed.Field,
 		if cs := (^cstring)(v)^; cs != nil {
 			return put_string(w, string(cs), first, inner)
 		}
+	case .Bytes:
+		stack: [512]u8
+		text, ok := write.bytes_text(cast([]u8)(^typed.Bytes)(v)^, stack[:])
+		return put_string(w, text, first, inner) if ok else .No_Memory
 	case .Enum:
 		info := pl.meta[f.meta].enum_info
 		p := write.room(out, CELL_ROOM)
@@ -817,6 +821,10 @@ token_cell :: proc(t: ^write.Tokens, v: write.Scalar) -> core.Typed_Error_Kind {
 			return put_inferred_string(w, x, t.first)
 		}
 		return put_string(w, x, t.first, false)
+	case typed.Bytes:
+		stack: [512]u8
+		text, ok := write.bytes_text(cast([]u8)x, stack[:])
+		return put_string(w, text, t.first, false) if ok else .No_Memory
 	case core.Number:
 		p := write.room(&w.out, CELL_ROOM)
 		size, kind := write.number_text(p, x)

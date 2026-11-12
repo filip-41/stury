@@ -9,6 +9,7 @@ import "core:strings"
 import core "../../core"
 import "../../core/write"
 import records "../../core/records"
+import json "../../json"
 import "jq"
 import "message"
 
@@ -57,7 +58,6 @@ init_output :: proc(o: ^Output, run: ^Run) {
 		// never after all of the run's output.
 		jq.flush_messages(o.ip)
 		if !emit(o, it.v) {
-			o.ip.err = string("Cannot dump a string containing NUL with --raw-output0 option")
 			return .Fail
 		}
 		return .Go
@@ -69,7 +69,8 @@ init_output :: proc(o: ^Output, run: ^Run) {
 
 // One output: jq's JSON, after a record separator under --seq, or under -r and -j a string's own text (with -a, its
 // JSON in ASCII). After it a newline, but under -j, and a NUL under --raw-output0, which refuses a string that holds
-// one: false then, with nothing printed.
+// one: false then, with nothing printed and the reason in the interpreter's error. Under a `--to` format with a writer
+// of its own the output is a text of that format.
 emit :: proc(o: ^Output, v: jq.Value) -> bool {
 	v := v
 	if o.whole.it != nil {
@@ -83,6 +84,9 @@ emit :: proc(o: ^Output, v: jq.Value) -> bool {
 	opts := o.opts
 	out := &o.buf
 	o.result = JQ_OK if jq.truthy(v) else JQ_OK_NULL_KIND
+	if writes_texts(opts) {
+		return emit_text(o, v)
+	}
 	s: string
 	is_str, ended: bool
 	if opts.raw {
@@ -93,6 +97,7 @@ emit :: proc(o: ^Output, v: jq.Value) -> bool {
 		jq.put_string(out, s, {ascii = true})
 	case is_str:
 		if opts.raw0 && strings.index_byte(s, 0) >= 0 {
+			o.ip.err = "Cannot dump a string containing NUL with --raw-output0 option"
 			return false
 		}
 		write.put_text(out, s)
@@ -106,6 +111,60 @@ emit :: proc(o: ^Output, v: jq.Value) -> bool {
 	}
 	end_output(o, ended)
 	return true
+}
+
+// One output as a text of the output format, which the format's document writer makes: of a value that is a node of a
+// document, which keeps what the document spells beyond JSON, and of any other value written as JSON and read back as
+// a document. A value the format has no spelling for fails the run, with the reason.
+@(private = "file")
+emit_text :: proc(o: ^Output, v: jq.Value) -> bool {
+	as := text_written_as(o.opts)
+	built: core.Document
+	doc, node := &built, core.ROOT
+	if ref, is_ref := v.(jq.Ref); is_ref {
+		doc, node = ref.doc, ref.node
+	} else {
+		frame: write.Out
+		spare: [write.ROOM_MAX]u8
+		write.init(&frame, &spare, context.temp_allocator)
+		jq.write_value(&frame, v, jq.Layout{})
+		json_text, _ := write.finish(&frame)
+		fault: Maybe(core.Fault)
+		if built, fault = jq.build_text(json_text, json.as(.Json), context.temp_allocator); fault != nil {
+			o.ip.err = text_refusal(o.opts.to, nil)
+			return false
+		}
+	}
+	text, _, err := core.write(doc, o.layout.opts, as, node, context.temp_allocator)
+	if err != nil {
+		o.ip.err = text_refusal(o.opts.to, err)
+		return false
+	}
+	put_format_text(o, text, true)
+	return true
+}
+
+// Why the writer of format `to` refused a value, in the format's own words where its row has them.
+text_refusal :: proc(to: Format, err: core.Error) -> string {
+	if refusal := FORMATS[to].refusal; refusal != nil {
+		if why := refusal(write_refusal_kind(err)); why != "" {
+			return why
+		}
+	}
+	return strings.concatenate({"cannot write the value as ", FORMATS[to].name}, context.temp_allocator)
+}
+
+// A `text` the writer of the output format made, written after what parts it from the text before it when `parted` and
+// it is not the output's first, and a newline after it unless it ends with one or is empty.
+put_format_text :: proc(o: ^Output, text: []u8, parted: bool) {
+	if between := FORMATS[o.opts.to].parted; parted && between != nil && o.written + o.buf.cursor > 0 {
+		write.put_text(&o.buf, between(text))
+	}
+	write.put_text(&o.buf, string(text))
+	if len(text) > 0 && text[len(text) - 1] != '\n' {
+		jq.put_byte(&o.buf, '\n')
+	}
+	flush_some(o)
 }
 
 // Ends an output written into `o.buf`: a newline but under -j or when a line comment `ended` its line, and a NUL

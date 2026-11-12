@@ -6,7 +6,7 @@ import core ".."
 
 @(rodata)
 @(private)
-FACT_ROLES := [?]core.Role{.Comment, .Comment_Inline, .Comment_Foot, .Attribute}
+FACT_ROLES := [?]core.Role{.Comment, .Comment_Inline, .Comment_Foot, .Attribute, .Tag, .Anchor}
 
 // Whether neither value holds a fact below it, so equal values have nothing left to tell.
 @(private)
@@ -19,8 +19,8 @@ quiet :: proc(a, b: core.Value) -> bool {
 	return true
 }
 
-// Whether the format of `doc` can hold a fact of `role`, which a comment needs the format to spell and an attribute
-// needs it to read.
+// Whether the format of `doc` can hold a fact of `role`: a comment needs the format to spell one, an attribute needs it
+// to read, and a tag or an anchor needs the edit services to write property facts.
 @(private)
 carries :: proc(doc: ^core.Document, role: core.Role) -> bool {
 	if doc.readers == nil {
@@ -29,7 +29,14 @@ carries :: proc(doc: ^core.Document, role: core.Role) -> bool {
 	if role == .Attribute {
 		return doc.readers.attribute != nil
 	}
-	if s := doc.readers.services; s != nil && s.edit != nil && s.edit.comment != nil {
+	s := doc.readers.services
+	if s == nil || s.edit == nil {
+		return false
+	}
+	if core.is_property(role) {
+		return s.edit.prefix != nil
+	}
+	if s.edit.comment != nil {
 		style, _ := s.edit.comment(doc, doc.spec)
 		return style != .None
 	}
@@ -57,9 +64,18 @@ facts :: proc(d: ^Differ, a, b: core.Value) {
 	}
 }
 
-// The facts of `role` on a node as texts: a comment's body in source order, an attribute as `name=value` in name order.
+// The facts of `role` on a node as texts: a comment's, tag's or anchor's body in source order, an attribute as
+// `name=value` in name order.
 @(private)
 fact_texts :: proc(r: core.Node_Ref, role: core.Role) -> []string {
+	if core.is_property(role) {
+		out := make([dynamic]string, context.temp_allocator)
+		it := core.facts_of(r.doc, r.node, role)
+		for body in core.fact_next(&it) {
+			append(&out, body)
+		}
+		return out[:]
+	}
 	if role != .Attribute {
 		context.allocator = context.temp_allocator
 		bodies, _ := core.comments(r, role)

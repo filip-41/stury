@@ -183,6 +183,9 @@ sample_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 	if writes_cells(o) && cli.verbs.count > 1 {
 		usage_error("--count above 1 writes one table for each value, which is not one %s: use --count 1", FORMATS[o.to].name)
 	}
+	if writes_texts(o) {
+		usage_error("schema sample writes json, jsonc, ndjson, csv or tsv, not %s", FORMATS[o.to].name)
+	}
 	refuse_unlisted(d, o.to, "writes")
 	// A table is drawn as --infer reads one, so a column the schema types holds that type's cells.
 	o.cells_out.infer = o.cells_in.infer

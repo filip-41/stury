@@ -1,6 +1,6 @@
 // The walk tests share this harness. It holds a hook that logs every token and hashes it, the rule that picks `Skip`
-// and `Stop`, a mutation of a seeded text, the json5-tests suites, the law of `records.each`, and the bound on a
-// reader's memory.
+// and `Stop`, a mutation of a seeded text, the json5-tests suites, the law of `records.each`, the bound on a
+// reader's memory, and a thread with a small stack.
 package walktest
 
 import "base:runtime"
@@ -18,6 +18,17 @@ import compose "../core/compose"
 import host "../host"
 import typed "../core/typed"
 import records "../core/records"
+
+// The stack of the thread `on_small_stack` runs its work on: a quarter of the 1 MB a Windows thread has by default.
+SMALL_STACK :: 256 * 1024
+
+// The work `on_small_stack` hands its thread: the test, its context and the procedure.
+@(private)
+Small_Stack_Work :: struct {
+	t:    ^testing.T,
+	ctx:  runtime.Context,
+	work: proc(t: ^testing.T),
+}
 
 // The capacity of `Log.tokens` is the most tokens a test text may hold.
 MAX_TOKENS :: 1 << 14

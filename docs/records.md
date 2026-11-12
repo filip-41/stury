@@ -5,7 +5,7 @@ format once, through the `core.As` value it opens with, and the calls after that
 `io.Reader`, and both give the records the same calls do.
 
 ```odin
-records.open  :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator) -> records.Reader
+records.open  :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator, entries: []string = nil) -> records.Reader
 records.open_stream :: proc(input: io.Reader, as: core.As, framing := core.Framing.Lines, opts := records.Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> records.Reader
 records.next  :: proc(it: ^records.Reader) -> (records.Record, bool)
 records.read  :: proc(it: ^records.Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (more: bool, err: core.Error)
@@ -119,6 +119,10 @@ A record whose text does not read returns true and its error, and the next `scan
   comment may start, is one bad token and no record. Both are as jq reads its input.
 - Under `.Entries`, a scalar root has no entries and is judged whole. A value is judged one level below the root, so
   under a root at the deepest level an entry may be no container.
+- `entries` names a path of object keys, as `records.open(src, as, .Entries, entries = {"data"})` or
+  `Stream_Options{entries = {"data"}}`. The records are then the elements or members of the container at that path, and
+  text outside it is judged but gives no record. A path that is absent or names a scalar gives no records.
+- A YAML stream's documents are records under `.Concatenated`, the one framing YAML takes.
 - A format with no record reader, or one that does not take the framing, ends the records with `.Bad_Option` before
   any is read.
 
@@ -213,7 +217,8 @@ for rec in records.next(&it) {
 - The window always ends on a whole record. Under `.Lines` and `.Seq` it ends at the last LF or 0x1E it holds. Under
   `.Concatenated` a record whose walk faults within 12 bytes of the window's end, or ends at it, while more input may
   come, is walked again once more is read, since the bytes after it may make it whole. A record with a byte after it,
-  such as the LF a pipe's writer ends a text with, is given at once. Under `.Entries` the whole input is read first.
+  such as the LF a pipe's writer ends a text with, is given at once. Under `.Entries` the window holds the text before the container up to its first member, then whole
+  members, at the root or at the path `Stream_Options.entries` names, so a record is given as it is read.
 - When the input ends inside a record that a longer input could finish, a `Truncated` fault at the input's end, the
   records end with no fault and the bytes past the last whole record in `it.held`, at offset `it.held_at`. Under
   `.Concatenated` those bytes start after the last record, gap included. The same text in memory ends on the
@@ -251,7 +256,9 @@ pieces are cut exactly, since a task may act on what it reads: past the first re
 the byte past each separator at the first record's level and outside strings or quoted cells, and the first such cut
 in each slice of the text starts a piece. Under `.Lines` and `.Seq` the separator is the LF or 0x1E, and a dsv text's
 is the LF, outside quoted cells in CSV. A strict JSON text under `.Concatenated` is cut at an LF and under `.Entries`
-at a comma, both outside strings and nested values. Strings and levels are counted in each slice on the threads from
+at a comma, both outside strings and nested values. A YAML stream is cut before a `---` line and after a `...` line at
+column 0, and a piece's text runs on past its last cut, so a document that is not well-formed meets the fault the
+in-order reading meets. Strings and levels are counted in each slice on the threads from
 both guesses of whether the slice starts in a string, then settled in order. A text with comments or single quotes
 under those two framings, and a CSV text with comment lines or tolerated bare quotes, is one piece. Pieces are
 numbered in source order, with gaps where a slice holds no cut. A first record that no cut ends before the text's last
@@ -289,12 +296,14 @@ record is framed as the reader reads it under the same `framing`. The calls and 
 
 ## The format's services
 
-A format gives its record reader as a `records.Services` table in its rodata, which its `core.Spelling.records` points
-at. `next` holds one procedure per framing, nil for a framing the format does not take, which frames the next record
+A format gives its record reader as a `records.Framing_Services` table in its rodata, which its `core.Services.records`
+points at, and the reads of a record's value as a `records.Record_Docs`, which `Services.docs` points at and a reader
+opened with a constant spec takes from the caller (`it.docs = json.record_docs(.Json)`). `next` holds one procedure per framing, nil for a framing the format does not take, which frames the next record
 and stores the fault that ends the records in `it.fault`. `judge` returns a record's fault, `read`, `build` and `scan` read
 one, and `build_next` frames the next record by the walk that writes its nodes to a builder (nil where the format
 builds whole texts on one thread). `guess` moves a piece's reader to where a record may start, and marks it so that a fault ends its records
-without the cost of finding the whole text's fault. `exact` gives the scan whose cuts `each` starts pieces at, and `piece` turns a copy of a reader past its
+without the cost of finding the whole text's fault. `exact` gives the scan whose cuts `each` starts pieces at, `cut` finds a cut in a range of the text for a format
+whose separators no quote scan finds (YAML's `---` and `...` lines), and `piece` turns a copy of a reader past its
 first record into a piece's reader. `whole` names the framing and offset `validate_parallel` reads a whole
 text by. `column`, `cell` and `cells` are a format's with named columns, and `close` frees the memory the format keeps in
 `Reader.format`. `ends` names, per framing, the byte a backward scan finds a whole record's end by (JSON's LF and 0x1E),

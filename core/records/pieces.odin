@@ -246,12 +246,19 @@ each_piece :: proc(src: []u8, as: core.As, services: ^Framing_Services, framing:
 	if e.start.fault != nil {
 		return e.start.fault
 	}
-	if runner != nil && runner.threads > 0 && e.start.services.exact != nil {
-		exact: bool
-		e.rule, exact = e.start.services.exact(&e.start)
+	framed := e.start.services
+	if runner != nil && runner.threads > 0 && u64(len(src)) >= at + 2 * SLICE && (framed.exact != nil || framed.cut != nil) {
+		cut := false
+		if framed.cut != nil {
+			_, cut = framed.cut(&e.start, at, u64(len(src)) - 2 * SLICE)
+		} else {
+			exact: bool
+			e.rule, exact = framed.exact(&e.start)
+			cut = exact && kernel.quote_cut(src[at:u64(len(src)) - 2 * SLICE], e.rule) >= 0
+		}
 		// The slices start past the first record, where the reader knows the framing's state. A first record that no cut
 		// ends before the last two slices is not walked here, as piece 0 walks it.
-		if exact && u64(len(src)) >= at + 2 * SLICE && kernel.quote_cut(src[at:u64(len(src)) - 2 * SLICE], e.rule) >= 0 {
+		if cut {
 			if rec, ok := next(&e.start); ok && u64(len(src)) >= rec.at + u64(len(rec.text)) + 2 * SLICE {
 				e.base = rec.at + u64(len(rec.text))
 				e.slices = int((u64(len(src)) - e.base + SLICE - 1) / SLICE)
@@ -311,6 +318,9 @@ fold :: proc(e: ^Each, k: int, raw: kernel.Quotes) {
 @(private)
 cut_from :: proc(e: ^Each, k: int, on: bool) -> (u64, bool) {
 	lo := e.base + u64(k) * SLICE
+	if cut := e.start.services.cut; cut != nil {
+		return cut(&e.start, lo, u64(len(e.start.src)) if on else min(lo + SLICE, u64(len(e.start.src))))
+	}
 	i := kernel.quote_cut(e.start.src[lo:] if on else slice_of(e, k), e.cuts[k].quotes if e.cuts != nil else e.rule)
 	return lo + u64(i) + 1, i >= 0
 }

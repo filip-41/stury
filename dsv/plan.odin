@@ -46,7 +46,7 @@ Slot :: struct {
 }
 
 // A procedure that returns false leaves its refusal in `err`, `.No_Memory` until one sets it.
-Plan :: struct {
+Edit_Plan :: struct {
 	doc:       ^core.Document,
 	list:      ^core.Edit_List,
 	out:       ^[dynamic]core.Edit,
@@ -61,7 +61,7 @@ Plan :: struct {
 	record_at: Record_Check, // reads a recorded text as the document's spec
 }
 
-refuse :: proc(p: ^Plan, err: core.Document_Error) -> bool {
+plan_refuse :: proc(p: ^Edit_Plan, err: core.Document_Error) -> bool {
 	p.err = err
 	return false
 }
@@ -90,7 +90,7 @@ edit_plan :: proc(doc: ^core.Document, list: ^core.Edit_List, out: ^[dynamic]cor
 		}
 		return false, record_widths(doc, list, dsv_width(doc), allocator, record_at) if records else {}
 	}
-	p := Plan{doc = doc, list = list, out = out, allocator = allocator, record_at = record_at, err = {kind = .No_Memory}}
+	p := Edit_Plan{doc = doc, list = list, out = out, allocator = allocator, record_at = record_at, err = {kind = .No_Memory}}
 	if !plan_columns(&p) {
 		return false, p.err
 	}
@@ -128,7 +128,7 @@ record_widths :: proc(doc: ^core.Document, list: ^core.Edit_List, width: int, al
 }
 
 // Returns the table's width once the plan's columns are gone and added.
-planned_width :: proc(p: ^Plan) -> int {
+planned_width :: proc(p: ^Edit_Plan) -> int {
 	old := dsv_width(p.doc)
 	width := old
 	for c in 0 ..< old {
@@ -140,7 +140,7 @@ planned_width :: proc(p: ^Plan) -> int {
 	return width
 }
 
-plan_columns :: proc(p: ^Plan) -> bool {
+plan_columns :: proc(p: ^Edit_Plan) -> bool {
 	p.lines, _ = make([dynamic]Line, 0, core.length(p.doc, core.ROOT) + 1, p.allocator)
 	p.added, _ = make([dynamic]Column, p.allocator)
 	p.fills, _ = make([dynamic]Fill, p.allocator)
@@ -150,7 +150,7 @@ plan_columns :: proc(p: ^Plan) -> bool {
 		case .Reorder:
 			// A reordered line's cells are its own, so a column the plan adds or drops would not be in its order.
 			if e.node != core.ROOT {
-				return refuse(p, {kind = .Conflicting_Edits, at = core.node_start(p.doc.nodes[e.node])})
+				return plan_refuse(p, {kind = .Conflicting_Edits, at = core.node_start(p.doc.nodes[e.node])})
 			}
 			compose.push(p.out, e) or_return
 		case .Set, .Set_Fact, .Remove_Fact:
@@ -171,7 +171,7 @@ plan_columns :: proc(p: ^Plan) -> bool {
 	return true
 }
 
-plan_lines :: proc(p: ^Plan) -> bool {
+plan_lines :: proc(p: ^Edit_Plan) -> bool {
 	doc := p.doc
 	if keys := core.header_of(doc); keys != 0 {
 		p.width = core.length(doc, keys)
@@ -209,7 +209,7 @@ line_at :: proc(lines: []Line, node: core.Node_Index) -> int {
 }
 
 // Decides which columns the removed cells drop, and empties the cells of the columns that stay.
-plan_cuts :: proc(p: ^Plan) -> bool {
+plan_cuts :: proc(p: ^Edit_Plan) -> bool {
 	doc, lines := p.doc, p.lines[:]
 	cuts, _ := make([dynamic]core.Node_Index, p.allocator)
 	for e in p.list.edits {
@@ -246,7 +246,7 @@ plan_cuts :: proc(p: ^Plan) -> bool {
 	for node, i in cuts {
 		_, written := slice.binary_search(writes[:], node)
 		if written || i > 0 && cuts[i - 1] == node {
-			return refuse(p, {kind = .Conflicting_Edits, at = core.node_start(doc.nodes[node])})
+			return plan_refuse(p, {kind = .Conflicting_Edits, at = core.node_start(doc.nodes[node])})
 		}
 		at = line_from(lines, at, node)
 		l := lines[at]
@@ -275,7 +275,7 @@ plan_cuts :: proc(p: ^Plan) -> bool {
 }
 
 // Sorts the list's cell inserts into new columns and the cells each record writes.
-plan_fills :: proc(p: ^Plan) -> bool {
+plan_fills :: proc(p: ^Edit_Plan) -> bool {
 	doc := p.doc
 	if keys := core.header_of(doc); keys != 0 {
 		for e in p.list.edits {
@@ -329,7 +329,7 @@ plan_fills :: proc(p: ^Plan) -> bool {
 
 // Places a named insert: in the column that holds its name when its record lacks that cell, else in a new column, which
 // every insert of that name must place alike.
-plan_named :: proc(p: ^Plan, e: core.Edit) -> bool {
+plan_named :: proc(p: ^Edit_Plan, e: core.Edit) -> bool {
 	doc := p.doc
 	line := line_at(p.lines[:], e.node)
 	l := p.lines[line]
@@ -340,7 +340,7 @@ plan_named :: proc(p: ^Plan, e: core.Edit) -> bool {
 			continue
 		}
 		if c < l.n || p.dropped[c] {
-			return refuse(p, {kind = .Duplicate_Key, at = core.node_start(doc.nodes[cell])})
+			return plan_refuse(p, {kind = .Duplicate_Key, at = core.node_start(doc.nodes[cell])})
 		}
 		return plan_fill(p, line, c, e.text)
 	}
@@ -356,26 +356,26 @@ plan_named :: proc(p: ^Plan, e: core.Edit) -> bool {
 	}
 	if col < 0 {
 		if bad := edit_cells(doc, spelled[:], false, p.record_at); bad.kind != .None {
-			return refuse(p, bad)
+			return plan_refuse(p, bad)
 		}
 		col = len(p.added)
 		compose.push(&p.added, Column{id = col, p = at, order = col, cell = spelled[:]}) or_return
 	} else if p.added[col].p != at {
-		return refuse(p, {kind = .Bad_Position})
+		return plan_refuse(p, {kind = .Bad_Position})
 	}
 	return plan_fill(p, line, -1 - col, e.text)
 }
 
-plan_fill :: proc(p: ^Plan, line, slot: int, text: []u8) -> bool {
+plan_fill :: proc(p: ^Edit_Plan, line, slot: int, text: []u8) -> bool {
 	if slot >= 0 && p.dropped[slot] {
-		return refuse(p, {kind = .Conflicting_Edits, at = core.node_start(p.doc.nodes[p.lines[line].node])})
+		return plan_refuse(p, {kind = .Conflicting_Edits, at = core.node_start(p.doc.nodes[p.lines[line].node])})
 	}
 	_, ok := compose.push(&p.fills, Fill{line = line, slot = slot, text = text})
 	return ok
 }
 
 // Writes each line's edits, walking the row of all columns.
-plan_write :: proc(p: ^Plan) -> bool {
+plan_write :: proc(p: ^Edit_Plan) -> bool {
 	p.sets, _ = make([dynamic]core.Edit, p.allocator)
 	for e in p.out {
 		if e.op == .Set {
@@ -423,7 +423,7 @@ plan_write :: proc(p: ^Plan) -> bool {
 	})
 	for f, i in p.fills {
 		if i > 0 && p.fills[i - 1].line == f.line && p.fills[i - 1].slot == f.slot {
-			return refuse(p, {kind = .Conflicting_Edits, at = core.node_start(p.doc.nodes[p.lines[f.line].node])})
+			return plan_refuse(p, {kind = .Conflicting_Edits, at = core.node_start(p.doc.nodes[p.lines[f.line].node])})
 		}
 	}
 	lo := 0
@@ -443,13 +443,13 @@ plan_write :: proc(p: ^Plan) -> bool {
 // Writes one line's edits. A cell before one of the line's own always goes in, and one past its end goes in when a
 // later cell needs it or the line holds every old column. A removed line keeps only the cells the list wrote, which the
 // commit refuses as a conflict.
-plan_line :: proc(p: ^Plan, l: Line, slots: []Slot, fills: []Fill) -> bool {
+plan_line :: proc(p: ^Edit_Plan, l: Line, slots: []Slot, fills: []Fill) -> bool {
 	if l.header && l.n < p.width {
 		// The header's line names the table's last columns by position, which a column added or dropped before them
 		// would change.
 		for slot in slots {
 			if slot.old < 0 || slot.old < l.n && p.dropped[slot.old] {
-				return refuse(p, {kind = .Bad_Width})
+				return plan_refuse(p, {kind = .Bad_Width})
 			}
 		}
 	}
@@ -497,7 +497,7 @@ plan_line :: proc(p: ^Plan, l: Line, slots: []Slot, fills: []Fill) -> bool {
 		}
 	}
 	if !l.gone && !line_reads(p.doc, l, kept, first, moved) {
-		return refuse(p, {kind = .Bad_Width})
+		return plan_refuse(p, {kind = .Bad_Width})
 	}
 	return true
 }

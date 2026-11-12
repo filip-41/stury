@@ -127,24 +127,35 @@ member_start :: proc(doc: ^Document, c: Node_Index) -> u64 {
 }
 
 // The text of `v` for the site `target`, a node the value replaces or with `into` the container it goes in. The text
-// is the source bytes of a node of the list's document when `v` is one, else a new allocation, which `owned` says.
+// is the source bytes of a node of the list's document when `v` is one, or the bytes its format gives the node at
+// `at`, else a new allocation, which `owned` says.
 @(private)
 spell :: proc(list: ^Edit_List, v: Value, target: Node_Index, into: bool, at: u64, record: bool) -> (text: []u8, owned: bool, err: Error) {
 	doc := list.doc
 	p := plain(v)
 	if r, is_ref := p.(Node_Ref); is_ref && r.doc == doc && !(list.write.sort_keys && value_kind(p) == .Object) {
-		return span(doc, r.node), false, nil
+		if list.edit == nil || list.edit.relocate == nil {
+			return span(doc, r.node), false, nil
+		}
+		moved, fits := list.edit.relocate(doc, r.node, site_at(doc.src, at), list.allocator)
+		if !fits {
+			return nil, false, refused(.Bad_Value, .No_Spelling)
+		}
+		return moved, true, nil
 	}
 	if list.edit == nil || list.edit.spell == nil {
 		return nil, false, refused(.Bad_Spec)
 	}
 	opts, colon := list.write, ""
 	flat := is_flat(doc)
-	if k := value_kind(p); !flat && !list.fixed && (k == .Array || k == .Object) {
+	// A format that commits its own edits, whose containers need no bracket, places and indents the text itself, so the
+	// value keeps the list's base layout.
+	placed := list.edit.commit != nil
+	if k := value_kind(p); !flat && !placed && !list.fixed && (k == .Array || k == .Object) {
 		opts, colon = site_layout(list, target, into)
 	}
 	text = list.edit.spell(doc, p, opts, colon, record, at, list.allocator) or_return
-	if flat || !opts.pretty || bytes.index_byte(text, '\n') < 0 {
+	if flat || placed || !opts.pretty || bytes.index_byte(text, '\n') < 0 {
 		return text, true, nil
 	}
 	indent := line_indent(doc.src, at)
@@ -217,7 +228,8 @@ site_layout :: proc(list: ^Edit_List, target: Node_Index, into: bool) -> (opts: 
 
 // The layout of the values container `c` holds: one member or element a line, in the indent and colon spacing `c`
 // shows, when its first member starts a line, and compact when it shares the bracket's line. A container with no
-// members, or with an indent the writer cannot repeat, shows none and takes `opts` and `colon`.
+// members, or with an indent the writer cannot repeat, shows none and takes `opts` and `colon`. A format whose
+// containers need no bracket commits its own edits, and `spell` reads no layout for it.
 @(private)
 shown_layout :: proc(doc: ^Document, c: Node_Index, opts: Write_Options, colon: string) -> (Write_Options, string) {
 	first, has := child_at(doc, c, 0)

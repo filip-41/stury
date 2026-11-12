@@ -7,8 +7,9 @@ import core ".."
 // A commit runs the format's plan, composes the junctions, splices the chunks into the source and has the format read the
 // result.
 
-// Returns the source bytes `list`'s edits make, in the spec of `as`, through the format's edit services. A nil `as` is the
-// document's own spec, `as` of another format is `.Bad_Spec`, and only its spec counts. A text of another spec must
+// Returns the source bytes `list`'s edits make, in the spec of `as`, through the format's edit services, or by the
+// format's own `commit` where it has one. A nil `as` is the document's own spec, `as` of another format is
+// `.Bad_Spec`, and only its spec counts. A text of another spec must
 // read strictly, since the source's reading under its own spec is no evidence, and a delimited text refuses a spec
 // change as `.Bad_Spec`, since it would respell every cell. The caller frees the result with `allocator`. An edit that
 // another covers, a second edit of one node, and a second fact edit of one node and role are `.Conflicting_Edits` at
@@ -24,6 +25,10 @@ commit :: proc(list: ^core.Edit_List, as: Maybe(core.As) = nil, allocator := con
 	target := as.? or_else doc.as
 	if target.readers == nil || target.readers.format != doc.readers.format {
 		return nil, 0, core.error_of(core.Document_Error{kind = .Bad_Spec})
+	}
+	if list.edit.commit != nil {
+		made, cut, refusal := list.edit.commit(list, target.spec, allocator)
+		return made, cut, core.error_of(refusal, edit = true)
 	}
 	made, cut, refusal := commit_spec(list, target, allocator)
 	return made, cut, core.error_of(refusal, edit = true)
@@ -251,4 +256,48 @@ push_src :: proc(out: ^[dynamic]u8, doc: ^core.Document, seps: []u64, lo, hi: u6
 	}
 	_, ok := push_all(out, doc.src[at:hi])
 	return ok
+}
+
+// A replacement of the source bytes `lo` through `hi` by `text`, for a format that commits its edits itself. A splice
+// with `lo` equal to `hi` is an insert, and splices at one byte apply in the order of `seq`.
+Splice :: struct {
+	lo, hi: u64,
+	text:   []u8,
+	seq:    int,
+}
+
+// Returns `src` with `splices` applied, in one allocation of `allocator`. Two splices that overlap are
+// `.Conflicting_Edits` at the later one's first byte. The splices are sorted in place.
+apply_splices :: proc(src: []u8, splices: []Splice, allocator: runtime.Allocator) -> (out: []u8, err: core.Document_Error) {
+	slice.sort_by(splices, proc(a, b: Splice) -> bool {
+		if a.lo != b.lo {
+			return a.lo < b.lo
+		}
+		if a.hi != b.hi {
+			return a.hi < b.hi
+		}
+		return a.seq < b.seq
+	})
+	reach := u64(0)
+	size := len(src)
+	for s in splices {
+		if s.lo < reach {
+			return nil, {kind = .Conflicting_Edits, at = s.lo}
+		}
+		reach = max(reach, s.hi)
+		size += len(s.text) - int(s.hi - s.lo)
+	}
+	failed: runtime.Allocator_Error
+	out, failed = make([]u8, size, allocator)
+	if failed != nil {
+		return nil, {kind = .No_Memory}
+	}
+	w, at := 0, u64(0)
+	for s in splices {
+		w += copy(out[w:], src[at:s.lo])
+		w += copy(out[w:], s.text)
+		at = s.hi
+	}
+	copy(out[w:], src[at:])
+	return out, {}
 }

@@ -11,8 +11,10 @@ import "../spell"
 import core ".."
 import "../typed"
 
-// The text of a tree, which belongs to its format. All but the last three parts are one byte, and `After_Colon` follows a
-// colon in pretty text.
+// The text of a tree, which belongs to its format. The first seven parts are one byte, and `After_Colon` follows a
+// colon in pretty text. The four float parts are empty for a format whose floats are JSON's: `Point_Zero` ends a float
+// whose text has neither a point nor an exponent, and the others spell what JSON cannot (an infinity, a NaN). `Bytes_Tag`
+// is written before the base64 string of a byte string, empty for a format that writes none.
 Tree_Part :: enum {
 	Open_Object,
 	Close_Object,
@@ -24,6 +26,11 @@ Tree_Part :: enum {
 	Null,
 	True,
 	False,
+	Point_Zero,
+	Inf,
+	Neg_Inf,
+	Nan,
+	Bytes_Tag,
 }
 Tree :: [Tree_Part]string
 
@@ -477,11 +484,17 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					}
 				case .F64:
 					x := (^f64)(va)^
-					if x - x != 0 {
-						k = .Non_Finite
+					when T[.Nan] != "" || T[.Point_Zero] != "" {
+						n: int
+						n, k = f64_value(p, x, T)
+						out.cursor += n
 					} else {
-						when !V {
-							out.cursor += spell.f64_text(p, x)
+						if x - x != 0 {
+							k = .Non_Finite
+						} else {
+							when !V {
+								out.cursor += spell.f64_text(p, x)
+							}
 						}
 					}
 				case .Bool:

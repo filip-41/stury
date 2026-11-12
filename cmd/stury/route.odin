@@ -22,6 +22,7 @@ Route_Why :: enum u8 {
 	Ascii,
 	Cells_Out,
 	Comments_Out, // a scan's document keeps no comments
+	Text_Out, // an output is a text the output format's writer makes
 	Not_Path,
 	Dialect_Select,
 	Select_Redefined,
@@ -78,6 +79,7 @@ choose_route :: proc(run: ^Run, text: string) {
 	if o.ascii {stops += {.Ascii}}
 	if writes_cells(o) {stops += {.Cells_Out}}
 	if writes_comments(o) {stops += {.Comments_Out}}
+	if writes_texts(o) {stops += {.Text_Out}}
 	if FORMATS[o.from].spec == .Json5 {stops += {.Own_Spelling}}
 	r.whys = stops
 	if stops != {} && !r.on {

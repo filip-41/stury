@@ -102,7 +102,7 @@ parallel :: proc(run: ^Run) -> bool {
 	defer delete(walk.done)
 	// A piece builds its records alone, without the comment lines above them that the interpreter's filter may read.
 	comments := reads_cells(o) && o.cells_in.comment != 0 && run.route.columns == nil
-	p := !(o.null_input || o.slurp || o.raw_input || o.stream || o.stream_errors || o.unbuffered || o.grow_header || comments) && o.max_depth <= core.MAX_DEPTH && !serial_node(&run.prog, &walk)
+	p := !(o.null_input || o.slurp || o.raw_input || o.stream || o.stream_errors || o.unbuffered || o.grow_header || comments || writes_texts(o)) && o.max_depth <= core.MAX_DEPTH && !serial_node(&run.prog, &walk)
 	run.parallel = p
 	return p
 }
@@ -422,7 +422,8 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 	context.allocator, context.temp_allocator = values, temp
 	it.framing = ps.framing
 	lo, end := it.pos, it.pos
-	stop := u64(len(it.src))
+	// A piece's records end at its text's end, or at `to` for a format that reads past it.
+	stop := min(it.to, u64(len(it.src))) if it.to != 0 else u64(len(it.src))
 	scanned := r.route.scanning && scans(r.route.path) && !reads_cells(&r.opts)
 	n, before_at, stopped, crossed := 0, lo, failed, false
 	before := piece_sum(&r, n)
@@ -868,7 +869,7 @@ collect_pieces :: proc(ins: ^Inputs) -> bool {
 	layout := run.output.layout
 	run.collects += 1
 	job := Spine_Job{ip = run.ip, id = run.collects, f = f, levels = len(names) + 1}
-	job.print = tail == nil && layout.colors == nil && !layout.comments && run.output.table == nil
+	job.print = tail == nil && layout.colors == nil && !layout.comments && run.output.table == nil && !writes_texts(&run.opts)
 	jq.detach_memory(&job.ip)
 	defer {
 		free_slots(run, job.slots)
@@ -1018,7 +1019,7 @@ collect_entries :: proc(job: ^Spine_Job, text: []u8, s: ^Piece_Slot) -> bool {
 // `.` as jq prints it, without the trailing newline.
 put_dot :: proc(run: ^Run, doc: ^core.Document, out: ^write.Out) -> bool {
 	layout := run.output.layout
-	if layout.colors != nil || layout.comments || run.output.table != nil {
+	if layout.colors != nil || layout.comments || run.output.table != nil || writes_texts(&run.opts) {
 		return false
 	}
 	layout.spill = nil
@@ -1028,7 +1029,7 @@ put_dot :: proc(run: ^Run, doc: ^core.Document, out: ^write.Out) -> bool {
 
 // The document as `fmt` writes it, without the trailing newline.
 put_fmt :: proc(run: ^Run, doc: ^core.Document, out: ^write.Out) -> bool {
-	if writes_cells(&run.opts) || writes_comments(&run.opts) {
+	if writes_cells(&run.opts) || writes_comments(&run.opts) || writes_texts(&run.opts) {
 		return false
 	}
 	text, _, err := core.write(doc, run.output.layout.opts, json.as(.Json, {max_depth = run.opts.max_depth}), allocator = context.temp_allocator)

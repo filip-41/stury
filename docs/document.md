@@ -1,10 +1,10 @@
 # The document
 
-A build turns one walk's tokens into a document: the tokens as 16-byte nodes in preorder, the comments beside them as
-facts, and a table of services the format supplies to read a node's text, number and kind. The readers walk the node
+A build turns one walk's tokens into a document: the tokens as 16-byte nodes in preorder, the comments and properties
+beside them as facts, and a table of readers the format supplies to read a node's text, number and kind. The readers walk the node
 array and call a service where a node's `spelling` says its value is not its own bytes.
 
-This document describes the node, the document and its builder, the readers, the spelling services, the duplicate-key
+This document describes the node, the document and its builder, the readers, the readers and services tables, the duplicate-key
 rule, a delimited text, facts, the edit list and its commit, the value layer's errors and its bounds. `walk.md`
 describes the walks that make the tokens and `kernel.md` the vector code behind them.
 
@@ -12,7 +12,7 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 
 | File | Holds |
 |---|---|
-| `core/document.odin` | `Node`, `Document`, the readers, `Fact`, `destroy`, `clone`, the spelling tables |
+| `core/document.odin` | `Node`, `Document`, the readers, `Fact`, `Fact_Name`, `fact_value`, `Site`, `destroy`, `clone`, `Readers`, `Services` and `Edit_Services` |
 | `core/build/build.odin` | `Builder`, the hooks, `builder_start`, `builder_end`, the header row, the duplicate-key check |
 | `core/edit.odin` | `Edit_List`, `Edit`, `set`, `insert`, `remove`, `set_fact`, `remove_fact` |
 | `core/compose/compose.odin` | a commit's container composition: members, junctions and the placement of facts |
@@ -27,11 +27,15 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `core/spell/text.odin` | `decode_text`, `decoded_equals`, `bytes_equal`, `Pending`, the escape table and `utf8_lax_char`, the decoders' and readers' byte helpers |
 | `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |
 | `core/error.odin` | `Document_Error`, its kinds and rules, `inner`, `render`, `write_code` |
-| `json/document.odin` | JSON's `build`, `Spelling` and `Edit_Spelling` tables, `close_end`, the edit checks |
+| `json/document.odin` | JSON's `build`, `HANDLES`, `SERVICES` and edit tables, `close_end`, the edit checks |
 | `core/compose/lines.odin` | a flat text's root junctions and the comments above its header |
 | `json/unescape.odin` | JSON's `text` and `number` readers and the decoder behind them |
-| `dsv/document.odin` | dsv's `build`, its `Spelling` table, its edit table, `close_end`, the record check |
+| `dsv/document.odin` | dsv's `build`, its handle tables, its edit table, `close_end`, the record check |
 | `dsv/plan.odin` | a commit's column changes, turned into plain cell edits before core composes the list |
+| `yaml/build.odin` | YAML's entry points and its `build`, which holds a key's properties back from its value and types the plain scalars |
+| `yaml/resolve.odin` | YAML's core schema: `resolve`, `number`, the `Style` fact |
+| `yaml/keys.odin` | the repeat test of a mapping's keys, by decoded text |
+| `yaml/edit.odin`, `edit_place.odin`, `edit_facts.odin` | YAML's edit services and its own commit, the sites of new lines, and property and comment edits |
 
 ## The node
 
@@ -44,8 +48,8 @@ A node is a 16-byte `Token` from `core/walk.odin`: `lo`, `n`, `kind`, `role` and
   node more than the value's subtree holds.
 - A container's `spelling` is its child count, where a member counts once, not its key and its value. The count
   saturates at `MAX_CHILDREN`, and `Document.counts` holds the true count of every container that does.
-- A JSON key is a node of its own, kind `String` and role `Key`, directly before its value. A dsv record stores no key
-  node: its columns' keys are the cells of the header row.
+- A JSON key is a node of its own, kind `String` and role `Key`, directly before its value, and so is a YAML key. A
+  dsv record stores no key node: its columns' keys are the cells of the header row.
 - `Node_Index` is a node's index in `nodes`, distinct from `u32` so an index cannot be passed where a count or a byte
   offset goes. Readers, iterators, `Fact.node`, `Child_Count.node` and `Edit.node` take it. `ROOT` is node 0, the root
   value's node. `NO_NODE` is `Node_Index(max(u32))` and answers a miss, and every reader treats an index at or past
@@ -190,6 +194,8 @@ A reader given an index no node holds answers as it does for a node of the wrong
 | Reader | Returns | Miss | Wrong kind |
 |---|---|---|---|
 | `kind` | the node's `Kind`, a `Plain` cell's as the format reads it | `.Null` | its own kind |
+| `doc_number_text` | the decimal digits of a number node | "", false | "", false |
+| `fact_value` | a named fact of the node | false | false |
 | `span` | the node's source bytes | nil | its own bytes |
 | `length` | the member count | 0 | 0 |
 | `children`, `children_from`, `members_named`, `pairs`, `facts_of`, `fact_next` | a walk, or a body | an empty walk | an empty walk |
@@ -273,6 +279,14 @@ caller that knows the format.
 is its source is copied, and a decode's over-long buffer is trimmed, so `len(s)` is the allocation's length. A caller
 that has a buffer reads through `text` first and falls back to `text_clone` only for a text too long for it.
 
+```odin
+doc_number_text :: proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool)
+```
+
+`doc_number_text` returns a number node's decimal digits, a `Plain` node the format resolves to a number included: its
+span for a format whose number span is the text, else what the format's `Readers.number_text` writes into `buf`, as
+YAML does for a number whose text is not a decimal. An infinity or a NaN gives an empty text.
+
 `number(doc, i)` returns a 16-byte `Number`, `bits` and `kind`, decoded from the node's span when it is read, and
 whether the node is a number. The
 node holds the token's bytes and the format's packed shape, never a value. `Number_Kind` is `Int`, `Uint`, `Float` or
@@ -305,16 +319,16 @@ A build with `infer` writes that kind into the node as it makes the cell, with a
 so `kind` reads the node and `resolve` is asked only of an empty cell. A document not made by a build, such as a record or
 a partial read, keeps its cells `Plain` and `kind` resolves them.
 
-## The spelling services
+## The readers and services
 
-A `Spelling` holds eight services, `text`, `key_equals`, `number`, `build`, `validate`, `resolve`, `resolves` and `close_end`, and a pointer to the format's `Edit_Spelling`. A document points at its format's table in rodata,
-one table for every spec of the format: a JSON token holds no form that only JSON5 reads, so `text` reads any JSON
-string, and dsv's `text` and `key_equals` read `Document.as.spec`, since a CSV backslash is a byte, a TSV
-backslash is an escape, and a `Plain` cell has neither. `text`, `key_equals` and `number` take a `Token_View`, the
-source and the handle, and the token by value, so a typed read hands them a walk's token with no document.
-`Document` starts with `using view: Token_View`, and `Edit_Spelling.value` takes one too.
+A document points at its format's `Readers` table in rodata, one table for every spec of a format whose tokens read
+alike under each: a JSON token holds no form that only JSON5 reads, so `text` reads any JSON string, and dsv's `text`
+and `key_equals` read `Document.as.spec`, since a CSV backslash is a byte, a TSV backslash is an escape, and a `Plain`
+cell has neither. `text`, `key_equals` and `number` take a `Token_View`, the source and the handle, and the token by
+value, so a typed read hands them a walk's token with no document. `Document` starts with `using view: Token_View`,
+and `Edit_Services.value` takes one too.
 
-| Service | JSON | dsv |
+| Reader | JSON | dsv |
 |---|---|---|
 | `text` | unescape, JSON5 quotes and identifiers | a quoted cell's inner span, `""` to `"`, a TSV escape, U+FFFD |
 | `key_equals` | compare an escaped key without decoding | the same over a quoted or escaped cell |
@@ -323,33 +337,64 @@ source and the handle, and the token by value, so a typed read hands them a walk
 | `resolves` | nil, no `Plain` nodes | the handle's `infer`: without it a cell with bytes is `.String`, so a writer asks `resolve` only of an empty cell |
 | `close_end` | forward over trivia and inner closes | a record's line end, the text's end for the root |
 
+The slots past these are nil in JSON and serve the formats that need them:
+
+| Reader | Says | Set by |
+|---|---|---|
+| `fact` | a named fact the node's spelling carries instead of a span: a scalar's `Style` | yaml |
+| `number_text` | the decimal digits of a number token whose span is not its text, empty for an infinity or a NaN | yaml |
+| `flat` | the text has no brackets, so no container has bytes of its own | dsv |
+
+A handle's table also points at the format's `Services`, the passes a call that chooses its format at run time reaches:
+`build`, `validate`, `scan`, `write`, `edit`, and the typed reads, token writer and record framing as `rawptr` slots. A
+document a constant-spec entry point builds holds a table with no services, so a program links only the passes it names,
+and the format package's `query`, `edit_list_init` and `write` serve such a document where `core`'s serve a handle's.
+
 ```odin
-Edit_Spelling :: struct {
+Edit_Services :: struct {
 	value:        proc(v: ^Token_View, src: []u8, allocator: runtime.Allocator) -> Document_Error,
 	key_text:     proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
-	comment:       proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
-	member_sep:    proc(doc: ^Document) -> string,
-	key_sep:       string,
-	insert_check:  proc(doc: ^Document, container: Node_Index, text: string, allocator: runtime.Allocator) -> Document_Error,
-	interior:      proc(doc: ^Document, c: Node_Index) -> (lo, hi: u64),
-	fact_slot:     proc(doc: ^Document, node: Node_Index, role: Role, emptied: bool) -> bool,
-	emptied:       proc(doc: ^Document, list: ^Edit_List) -> bool,
-	plan:          proc(doc: ^Document, list: ^Edit_List, out: ^[dynamic]Edit, allocator: runtime.Allocator) -> (changed: bool, err: Document_Error),
-	commit:        proc(list: ^Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: Document_Error),
-	flat:          bool,
+	comment:      proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
+	separators:   proc(doc: ^Document, spec: u8) -> bool,
+	member_sep:   proc(doc: ^Document, c: Node_Index) -> string,
+	key_sep:      string,
+	insert_check: proc(doc: ^Document, container: Node_Index, text: string, allocator: runtime.Allocator) -> Document_Error,
+	interior:     proc(doc: ^Document, c: Node_Index) -> (lo, hi: u64),
+	fact_slot:    proc(doc: ^Document, node: Node_Index, role: Role, emptied: bool) -> bool,
+	emptied:      proc(doc: ^Document, list: ^Edit_List) -> bool,
+	plan:         proc(doc: ^Document, list: ^Edit_List, out: ^[dynamic]Edit, allocator: runtime.Allocator) -> (changed: bool, err: Document_Error),
+	validate:     proc "contextless" (src: []u8, as: As) -> Maybe(Fault),
+	spell:        proc(doc: ^Document, v: Value, opts: Write_Options, colon: string, record: bool, at: u64, allocator: runtime.Allocator) -> ([]u8, Error),
+	prefix:       proc(doc: ^Document, role: Role, body: []u8, text: ^[dynamic]u8) -> bool,
+	relocate:     proc(doc: ^Document, node: Node_Index, site: Site, allocator: runtime.Allocator) -> (text: []u8, ok: bool),
+	commit:       proc(list: ^Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: Document_Error),
 }
 ```
 
 `Comment_Spelling` is `None`, `Line` or `Byte`: no marker, a JSON line or block comment, or a delimited text's comment
 line. Under `Line` a body holding a line end is written as `/* */`, so a line comment cannot end its line early. JSON's
-table supplies `value`, `key_text`, `comment` and `member_sep`, with `key_sep` `":"`, and its `comment` is
-`.Line` for `Jsonc` and `Json5` and `.None` for `Json`. dsv's table supplies `value`, `key_text`, `comment`,
-`member_sep`, `insert_check` and `plan`, which turns a list's column changes into plain edits. Each table's `commit` is
-`compose.commit`, which `core/compose` holds, so core reads no composing state. A format with `flat` set has no brackets
-in its text, so `interior` says where a container's members lie, the root's members are lines that
-`core/compose/lines.odin` composes, and `fact_slot` and `emptied` say which facts the output holds. dsv's `member_sep` is the
-delimiter, and for the root the line end: the first one the text has for a record, else its header's, else LF. A record's cells
-take the junction a tree's members do, in `core/compose/compose.odin`.
+table supplies `value`, `key_text`, `comment`, `separators`, `member_sep`, `spell` and `validate`, with `key_sep` `":"`,
+and its `comment` is `.Line` for `Jsonc` and `Json5` and `.None` for `Json`. dsv's table supplies `value`, `key_text`,
+`comment`, `member_sep`, `insert_check` and `plan`, which turns a list's column changes into plain edits. A format with
+`Readers.flat` set has no brackets in its text, so `interior` says where a container's members lie, the root's members
+are lines that `core/compose/lines.odin` composes, and `fact_slot` and `emptied` say which facts the output holds. dsv's
+`member_sep` is the delimiter, and for the root the line end: the first one the text has for a record, else its
+header's, else LF. A record's cells take the junction a tree's members do, in `core/compose/compose.odin`.
+
+`spell` writes a value an edit records in the format and at the place it goes: a format computes its `Site` with
+`site_at(doc.src, at)`, the column of `at` in its line with `placed` set, and passes it to the token writer, so a YAML
+value is indented and styled for its line. The last three slots serve formats whose edits do not fit one range per
+container:
+
+- `prefix` spells a `Tag`, `Anchor` or `Alias` fact as the text before its node, a marker and the body. Nil means the
+  format holds no property, and a commit counts a set of one in `dropped`. YAML fills it.
+- `relocate` gives the bytes a node has at another place, when an edit's value is a `Node_Ref` of the list's own
+  document, as a member moved into another table or another block's indentation. `ok` false is refused as
+  `.Bad_Value`. Nil keeps the node's span. YAML fills it.
+- `commit` returns the output in place of `core/compose`'s commit, for a format whose containers are not one range of
+  bytes to compose around, as a YAML block collection of lines at an indentation. It places each edit's text at its
+  site itself and counts the facts the output cannot hold. When it is set, the value `spell` writes is recorded as it
+  is, with no layout taken from a bracket. YAML fills it, and reads its output again with `validate`.
 
 A reader reaches the table only where it must: `text` and `key_equals` for a marked node, `number` for every scalar,
 `resolve` for every node, `close_end` for a container whose span is read, and the edit services for every recorded or
@@ -397,9 +442,13 @@ A delimited text is an `Array` of records whose first child may be the header ro
 
 ## Facts
 
-A `Fact` holds `lo`, `node`, `n`, `role` and `spelling`: a comment token, the node it belongs to and its role. The
-list is sorted by node, keeps source order within a node, and is empty for a strict JSON document and a dsv text with
-no comment byte. `lo` and `n` span the comment's bytes, markers included.
+A `Fact` holds `lo`, `node`, `n`, `role` and `spelling`: a comment or property token, the node it belongs to and its
+role. The list is sorted by node, keeps source order within a node, and is empty for a strict JSON document and a dsv
+text with no comment byte. `lo` and `n` span the fact's bytes, markers included, and `spelling` holds the lead and tail
+marker lengths. `Tag`, `Anchor` and `Alias` facts stand just before their node, on its line.
+
+`fact_value(doc, i, name)` reads a `Fact_Name`: `Tag`, `Anchor` and `Alias` are the body of the node's span fact of
+that role when it has one, and otherwise, with `Style`, what `Readers.fact` reads from the node's spelling.
 
 A comment's node follows the walk's `Role` rule: a comment on the line where the value before it ends is that value's
 `Comment_Inline`, else one before a value the grammar allows it above is that value's `Comment`, else it is the
@@ -457,8 +506,10 @@ judges the text as one value, one key or one record of the document's spec, and 
 - `remove` takes any value that is a member of a container, and a delimited text's header cell. It refuses the root and
   any other node whose role is not `Value`, so a key goes with its value.
 - A fact edit takes any node that is not a key and a role past `Key`. `Comment_Inline` refuses a body holding LF or CR
-  with `.Bad_Fact`, and a role at or below `Key` is `.Bad_Index`. A second edit of one node and role is recorded and
-  `commit` refuses it with `.Conflicting_Edits`.
+  with `.Bad_Fact`, and a role at or below `Key` is `.Bad_Index`. A `Tag`, `Anchor` or `Alias` body is one non-empty
+  line, and `set_facts` with more than one body of such a role is `.Bad_Fact`.
+- An edit a format's own `commit` may not make is `.Frozen`, with the reason in `inner.rules` and `inner.detail`. A
+  second edit of one node and role is recorded and `commit` refuses it with `.Conflicting_Edits`.
 
 JSON's value check walks the text as exactly one value of `doc.as.spec` at `doc.as.max_depth`, refusing one that
 begins with a byte-order mark or holds a comment after its value, since a splice would put the next bytes inside it.
@@ -547,6 +598,9 @@ The output decides which facts it keeps.
 - `set_fact` replaces the first fact of that node and role in place and removes the rest, or writes a new comment
   where the role reads it: a head before the node's first byte, an inline after the value, a foot before the close. A
   fact edit on a node the list removes, or on one below a set's node, is `.Conflicting_Edits`.
+- A property edit, a `Tag`, `Anchor` or `Alias`, is spelled by `Edit_Services.prefix` and gets its own chunk just
+  before the node's first byte, several at one byte in the order they were recorded. A kept property fact is never cut
+  for want of a slot: only comments are.
 - A body is written as `//body` when a line end follows its place or the text ends there and the body holds no line
   end. It is written as `/*body*/` otherwise, and anything written after a `//` comment starts on the next line. A dsv body is the document's comment byte
   and the body, on a line of its own. A head or foot the source held mid-line gets a line of its own with that line's
@@ -573,9 +627,10 @@ Document_Error :: struct { kind: Document_Error_Kind, at: u64, inner: Fault }
 | `Bad_Spec` | a commit asks for another format family's spec, or a dsv spec change | none |
 | `Conflicting_Edits` | two edits meet, or one lies inside another's range | where they meet |
 | `Bad_Result` | a committed text does not read | none, the fault in `inner` |
+| `Frozen` | a format's own `commit` may not make an edit | the node, the reason in `inner.rules` and `inner.detail` |
 
 `inner` holds a `Fault` by value for `.Walk`, `.Bad_Value` and `.Bad_Result`, and for the last two its `at` names a
-byte of the recorded text or of the commit's output, so it renders as an offset in that text. A `Bad_Index` says why in
+byte of the recorded text or of the commit's output, so it renders as an offset in that text. A `Frozen` error renders as "The node cannot be edited: " and the format's message, with the code `document.frozen`. A `Bad_Index` says why in
 `reason`, an `Edit_Reason` such as `.No_Node`, `.Root` or `.Not_Object`. The kinds that name no byte
 have an `at` that is not read.
 

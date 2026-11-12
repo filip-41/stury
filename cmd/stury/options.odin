@@ -42,6 +42,8 @@ Opts :: struct {
 	check:            bool,
 	follow:           bool, // --follow: the one file is read on as it grows
 	diff:             bool, // edit --diff: tell the value changes of the edit
+	alias_limit:      u64, // --alias-limit, 0 for the YAML reader's own
+	merge_keys:       bool, // --merge-keys
 }
 
 // What the command line gives besides the options.
@@ -71,10 +73,13 @@ Cli :: struct {
 	formats:    struct {
 		from, to: Maybe(Format),
 	},
-	// The first JSON-output-only option given (-r, -c, --indent...), and the first JSON layout option given.
-	json_flag, layout_flag: string,
+	// The first JSON-output-only option given (-r, -c, --indent...), the first of them that no text of another format
+	// takes (-r, --seq, --tab...), and the first JSON layout option given.
+	json_flag, text_flag, layout_flag: string,
 	// The first option given that reads a delimited text (--delimiter...), and the first that writes one (--crlf...).
 	cells_flag, cells_out_flag: string,
+	// The first option given that reads a YAML text (--alias-limit, --merge-keys).
+	yaml_flag: string,
 	out_delimiter, out_comment: Maybe(byte),
 	// `check`'s schema options, which `diff` takes too.
 	schema: Schema_Options,
@@ -154,7 +159,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 				usage_error("--indent takes a number between -1 and 7")
 			}
 			o.compact, o.indent = false, n
-			note_json_flag(&cli, "--indent", layout = true)
+			note_json_flag(&cli, "--indent", layout = true, laid = true)
 			i += option_arity(a)
 		case "max-depth":
 			if i + 1 >= len(args) {
@@ -220,6 +225,20 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			case "lazy-quotes": o.cells_in.tolerate += {.Bare_Quote}
 			}
 			note_cells_flag(&cli, a, false)
+		case "alias-limit":
+			if i + 1 >= len(args) {
+				usage_error("%s takes one parameter", a)
+			}
+			n, ok := parse_digits(args[i + 1], 1 << 62)
+			if !ok || n < 1 {
+				usage_error("%s takes a number of bytes, 1 or more", a)
+			}
+			o.alias_limit = n
+			note_first(&cli.yaml_flag, a)
+			i += option_arity(a)
+		case "merge-keys":
+			o.merge_keys = true
+			note_first(&cli.yaml_flag, a)
 		case "out-no-header":
 			o.cells_out.no_header = true
 			note_cells_flag(&cli, a, true)
@@ -297,6 +316,14 @@ note_cells_flag :: proc(cli: ^Cli, flag: string, out: bool) {
 	}
 }
 
+// Records `flag` in `first` unless an earlier option is there.
+@(private = "file")
+note_first :: proc(first: ^string, flag: string) {
+	if first^ == "" {
+		first^ = flag
+	}
+}
+
 // Records a `--from NAME` or `--to NAME` option at `args[i]` in `cli.formats`. A later one overrides an earlier one.
 @(private = "file")
 format_option :: proc(cli: ^Cli, args: []string, i: int) {
@@ -320,11 +347,15 @@ format_option :: proc(cli: ^Cli, args: []string, i: int) {
 	}
 }
 
-// Records `flag` as the first JSON-output-only option, and as the first layout option when `layout` is set.
+// Records `flag` as the first JSON-output-only option, as the first one a format written with a layout of its own
+// refuses unless `laid` is set, and as the first layout option when `layout` is set.
 @(private = "file")
-note_json_flag :: proc(cli: ^Cli, flag: string, layout := false) {
+note_json_flag :: proc(cli: ^Cli, flag: string, layout := false, laid := false) {
 	if cli.json_flag == "" {
 		cli.json_flag = flag
+	}
+	if !laid && cli.text_flag == "" {
+		cli.text_flag = flag
 	}
 	if layout && cli.layout_flag == "" {
 		cli.layout_flag = flag
@@ -427,7 +458,7 @@ subcommand_index :: proc(args: []string) -> int {
 @(private = "file")
 option_arity :: proc(a: string) -> int {
 	switch a {
-	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--filter", "--seed", "--count", "--package", "--old-schema", "--new-schema", "--compat", "--key":
+	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--filter", "--seed", "--count", "--package", "--old-schema", "--new-schema", "--compat", "--key", "--alias-limit":
 		return 1
 	case "--arg", "--argjson", "--slurpfile", "--rawfile":
 		return 2
@@ -473,7 +504,7 @@ letter_option :: proc(o: ^Opts, cli: ^Cli, c: byte) -> bool {
 	case 'c':
 		o.compact = true
 		cli.compact_given = true
-		note_json_flag(cli, "-c")
+		note_json_flag(cli, "-c", laid = true)
 	case 'C':
 		cli.color_set = true
 		note_json_flag(cli, "-C")
@@ -481,7 +512,7 @@ letter_option :: proc(o: ^Opts, cli: ^Cli, c: byte) -> bool {
 		cli.mono = true
 	case 'a':
 		o.ascii = true
-		note_json_flag(cli, "-a")
+		note_json_flag(cli, "-a", laid = true)
 	case 'S':
 		o.sort_keys = true
 	case 'R':

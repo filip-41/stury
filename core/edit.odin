@@ -226,7 +226,7 @@ insert_input :: proc(list: ^Edit_List, container: Node_Index, at: int, key: stri
 	if at < 0 || at > n_members {
 		return refused(.Bad_Position)
 	}
-	if member && list.edit.key_text == nil {
+	if member && (list.edit == nil || list.edit.key_text == nil) {
 		return refused(.Wrong_Container)
 	}
 	if !in_.raw {
@@ -281,7 +281,8 @@ reorder :: proc(list: ^Edit_List, container: Node_Index, order: []u32) -> Error 
 }
 
 // Makes `text` the body of the facts of node `node` and `role`, which it replaces. A `Comment_Inline` body holds no LF
-// or CR. A `Comment` or `Comment_Foot` body may. A `padded` body is written with one space inside each marker, `// text`
+// or CR. A `Comment` or `Comment_Foot` body may. A `Tag`, `Anchor` or `Alias` body is one non-empty line, and the commit
+// writes it just before the node, spelled by the format. A `padded` body is written with one space inside each marker, `// text`
 // and `/* text */`, the way a comment's text is read without them. Runs in O(len(text)), checking the shape once and
 // copying the text once.
 set_fact :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string, padded := false) -> Error {
@@ -300,6 +301,9 @@ set_facts :: proc(list: ^Edit_List, node: Node_Index, role: Role, texts: []strin
 		return remove_fact(list, node, role)
 	case 1:
 		return set_fact(list, node, role, texts[0], padded)
+	}
+	if is_property(role) {
+		return error_of(Document_Error{kind = .Bad_Fact})
 	}
 	size := 4 * len(texts)
 	for t in texts {
@@ -328,7 +332,7 @@ set_facts :: proc(list: ^Edit_List, node: Node_Index, role: Role, texts: []strin
 
 // Removes every fact of node `node` and `role`, with its source bytes.
 remove_fact :: proc(list: ^Edit_List, node: Node_Index, role: Role) -> Error {
-	if e := fact_node(list, node, role, ""); e.kind != .None {
+	if e := fact_node(list, node, role, "", true); e.kind != .None {
 		return error_of(e)
 	}
 	return error_of(edit_add(list, node, .Remove_Fact, role, 0, "", ""))
@@ -338,7 +342,7 @@ remove_fact :: proc(list: ^Edit_List, node: Node_Index, role: Role) -> Error {
 // is refused with `.Bad_Index`, and an unhandled role past `.Key` with `.Bad_Fact`. A commit refuses a second edit of
 // one node and role.
 @(private)
-fact_node :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string) -> Document_Error {
+fact_node :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string, removal := false) -> Document_Error {
 	_, n, err := node_of(list, node)
 	switch {
 	case err.kind != .None:
@@ -354,6 +358,10 @@ fact_node :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string) 
 			return {kind = .Bad_Fact}
 		}
 	case .Comment, .Comment_Foot:
+	case .Tag, .Anchor, .Alias:
+		if len(text) == 0 && !removal || has_line_end(transmute([]u8)text) {
+			return {kind = .Bad_Fact}
+		}
 	case:
 		return {kind = .Bad_Fact}
 	}

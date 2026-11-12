@@ -32,6 +32,8 @@ Answer_Iter :: struct {
 	state:      Answer_State,
 	regs:       core.Hook_Regs,
 	held:       []core.Token, // tokens the format's walk keeps across fills, from `allocator`
+	// Frees what else the format's walk keeps across fills, nil when it keeps nothing else.
+	release:    proc(it: ^Answer_Iter),
 	stack:      []u8, // the walk's depth stack, `stack_room` or from `allocator`
 	cursor:     [16]u64, // the format's cursor
 	scan:       Scan,
@@ -144,6 +146,10 @@ answers_on :: proc(state: rawptr, a: core.Token_Answer) -> bool {
 answers_free :: proc(it: ^Answer_Iter) {
 	delete(it.held, it.allocator)
 	it.held = nil
+	if it.release != nil {
+		it.release(it)
+		it.release = nil
+	}
 	if raw_data(it.stack) != &it.stack_room[0] {
 		delete(it.stack, it.allocator)
 	}

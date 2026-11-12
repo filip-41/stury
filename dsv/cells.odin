@@ -3,10 +3,28 @@ package dsv
 
 import "base:intrinsics"
 import "core:strconv"
+import spell "../core/spell"
 import core "../core"
 import kernel "../core/kernel"
 import write "../core/write"
 import records "../core/records"
+
+// dsv's `Readers.number`, exported so a caller that knows the format calls it without the table. It returns the JSON
+// number a value cell spells, and false for any other cell. A quoted cell, a TSV escape and a key cell are never numbers,
+// since no JSON number holds a quote, a backslash or a byte past 0x7F. A header cell names a column and answers as a JSON
+// key node does.
+number :: proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) {
+	if t.role != .Value {
+		return {}, false
+	}
+	return spell.number_strict(v.src, t.lo, t.lo + u64(t.n))
+}
+
+// dsv's `Readers.text`, exported so a caller that knows the format calls it without the table: a cell's text as the
+// spec the view was read as decodes it, into `buf` when it needs decoding. A container returns false.
+text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
+	return cell_text(v.src, t, Spec(v.spec), buf)
+}
 
 // Splits `row` into `b.cells`, which grows to hold them all, or its first `upto` cells. Returns the cell count, whether
 // it is the row's, or false when they do not fit in memory.

@@ -184,11 +184,12 @@ Document_Error_Kind :: enum u8 {
 	Bad_Spec, // a commit asks for a spec of another format family, or one a delimited text cannot write
 	Conflicting_Edits, // two edits of one node, or an edit inside what another replaces or removes, at the first byte of the node or span they share
 	Bad_Result, // a committed text does not read, the walk's fault in `inner`
+	Frozen, // the format does not let an edit touch the node, at no byte: `at` is the node, and `inner.rules` and `inner.detail` give the reason
 }
 
 // The document error kinds that name no byte of the text. Their `at` is not read.
 @(private)
-DOCUMENT_AT_NO_BYTE :: bit_set[Document_Error_Kind]{.None, .No_Memory, .Bad_Index, .Bad_Position, .Wrong_Container, .Bad_Value, .Bad_Fact, .Bad_Width, .Bad_Spec, .Bad_Result}
+DOCUMENT_AT_NO_BYTE :: bit_set[Document_Error_Kind]{.None, .No_Memory, .Bad_Index, .Bad_Position, .Wrong_Container, .Bad_Value, .Bad_Fact, .Bad_Width, .Bad_Spec, .Bad_Result, .Frozen}
 
 // Whether `e` names a byte of the source: its kind does, and for `.Walk` its fault does too, as a bad option is found
 // before any byte is read.
@@ -254,6 +255,7 @@ DOCUMENT_KIND_RULES := [Document_Error_Kind]Rule {
 	.Bad_Spec          = {"bad_spec", "The commit cannot write that spec"},
 	.Conflicting_Edits = {"conflicting_edits", "Edits conflict"},
 	.Bad_Result        = {"bad_result", "The edited text does not read"},
+	.Frozen            = {"frozen", "The node cannot be edited"},
 }
 
 @(private, rodata)
@@ -306,6 +308,14 @@ render_document :: proc(w: io.Writer, src: []u8, e: Document_Error, lines: ^Line
 	if e.reason != .None {
 		io.write_string(w, ": ") or_return
 		io.write_string(w, EDIT_REASONS[e.reason]) or_return
+	}
+	if e.kind == .Frozen {
+		if e.inner.rules == nil || int(e.inner.detail) >= len(e.inner.rules.details) {
+			return nil
+		}
+		io.write_string(w, ": ") or_return
+		_, err := io.write_string(w, e.inner.rules.details[e.inner.detail].message)
+		return err
 	}
 	if e.inner.kind == .None {
 		return nil

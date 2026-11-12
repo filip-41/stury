@@ -26,7 +26,9 @@ HEX_ROOM :: 40
 // The double of number `v` and the digits it keeps: a `Number_Text`'s or a number node's text, none for a double or a
 // number whose text is no decimal. A decimal a format spells with a sign or a point of its own, `+1e400` or `.5`, keeps
 // its text, and a hex integer of at most 128 bits (JSON5's `0x10`) keeps its decimal digits in `buf` when that holds
-// `HEX_ROOM` bytes. A hex integer past 128 bits, and without a `buf`, has none and is its double.
+// `HEX_ROOM` bytes. A hex integer past 128 bits, and without a `buf`, has none and is its double. A number of a format
+// whose span is not its text, which has a `number_text`, keeps the digits that spells when they lie in the source or
+// `buf` holds them, and is its double otherwise.
 double_of :: proc(v: Value, buf: []u8 = nil) -> (f: f64, digits: string, ok: bool) {
 	#partial switch x in plain(v) {
 	case f64:
@@ -40,6 +42,9 @@ double_of :: proc(v: Value, buf: []u8 = nil) -> (f: f64, digits: string, ok: boo
 		node := x.doc.nodes[x.node]
 		if node.kind != .Number && doc_kind(x.doc, x.node) != .Number {
 			return 0, "", false
+		}
+		if x.doc.readers.number_text != nil {
+			return spelled_double(x.doc, x.node, buf)
 		}
 		// A number node is read by its document's reader, which its spelling makes cheaper than reading its text again.
 		text := string(span(x.doc, x.node))
@@ -57,6 +62,48 @@ double_of :: proc(v: Value, buf: []u8 = nil) -> (f: f64, digits: string, ok: boo
 		return f, text, true
 	}
 	return 0, "", false
+}
+
+// The room in which `spelled_double` reads a number's digits before it grows: every format's integer, float and hex
+// integer fits.
+@(private = "file")
+SPELLED_ROOM :: 64
+
+// The most digits `spelled_double` reads to round a number no binary64 holds.
+@(private = "file")
+SPELLED_MAX :: 1 << 26
+
+// `double_of` of number node `i` of a document whose format spells its digits with `number_text`. The digits are kept
+// when they are a decimal that lies in the source or fits `buf`. A number too wide for binary64 is rounded from its
+// digits, read into the temp allocator past `SPELLED_ROOM` bytes, and `ok` is false when they cannot be read.
+@(private = "file")
+spelled_double :: proc(doc: ^Document, i: Node_Index, buf: []u8) -> (f: f64, digits: string, ok: bool) {
+	n, _ := doc_number(doc, i)
+	room: [SPELLED_ROOM]u8
+	text, fit := doc_number_text(doc, i, room[:])
+	for size := 4 * SPELLED_ROOM; !fit && n.kind == .Wide && size <= SPELLED_MAX; size *= 4 {
+		grown, err := make([]u8, size, context.temp_allocator)
+		if err != nil {
+			return 0, "", false
+		}
+		text, fit = doc_number_text(doc, i, grown)
+	}
+	if !fit || len(text) == 0 {
+		// An integer or a binary64 is its bits, and a number with no digits is the infinity or NaN its bits hold.
+		return number_f64(n, "0"), "", n.kind != .Wide
+	}
+	f = number_f64(n, text)
+	if c := text[1] if text[0] == '-' && len(text) > 1 else text[0]; c < '0' || c > '9' {
+		return f, "", true
+	}
+	lo, at := uintptr(raw_data(doc.src)), uintptr(raw_data(text))
+	switch {
+	case at >= lo && at + uintptr(len(text)) <= lo + uintptr(len(doc.src)):
+		digits = text
+	case len(text) <= len(buf):
+		digits = string(buf[:copy(buf, text)])
+	}
+	return f, digits, true
 }
 
 // The decimal digits of the hex integer `text`, with a sign when it is negative, written at the end of `buf`. `ok` is false

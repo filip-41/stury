@@ -136,22 +136,22 @@ decoded_escape_other :: proc "contextless" (src: []u8, p, end: u64, e: u8) -> (s
 // `SPELLING_DECODE` clear returns its span. A node that needs decoding is written into `buf`, and the call returns false
 // when `buf` is too short. A container returns false, as `core.text` does. `doc.view` and `doc.nodes[i]` are its arguments
 // for node `i` of a document.
-text :: #force_inline proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool) {
+text :: #force_inline proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
 	// A container's `n` is a node count and its `spelling` a child count, not a span and a decode bit.
-	if n.kind > .Plain {
+	if t.kind > .Plain {
 		return "", false
 	}
-	if n.spelling & core.SPELLING_DECODE == 0 {
-		return string(doc.src[n.lo:n.lo + u64(n.n)]), true
+	if t.spelling & core.SPELLING_DECODE == 0 {
+		return string(v.src[t.lo:t.lo + u64(t.n)]), true
 	}
-	if n.spelling & core.SPELLING_LAX != 0 {
-		return spell.decode_text(buf, decoded_init(doc.src, n), decoded_next)
+	if t.spelling & core.SPELLING_LAX != 0 {
+		return spell.decode_text(buf, decoded_init(v.src, t), decoded_next)
 	}
 	// A token under 256 bytes is decoded byte by byte, a longer one by blocks.
-	if n.n < 256 {
-		return decode_scalar(doc, n, buf)
+	if t.n < 256 {
+		return decode_scalar(v, t, buf)
 	}
-	return decode_block(doc, n, buf)
+	return decode_block(v, t, buf)
 }
 
 // Decodes a short token byte by byte with one 32-bit store per escape. `text` picks it for a token under

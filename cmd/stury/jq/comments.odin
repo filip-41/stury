@@ -1,17 +1,99 @@
 package jq
 
-// Comments as a filter reads and writes them, over the library's comments on values (`core.Commented`).
+// Facts as a filter reads and writes them: the comments, over the library's comments on values (`core.Commented`), and
+// the properties, a tag, an anchor, an alias and a style. A property is one value, a string or null. A property the
+// filter wrote is held as a comment role's bodies are, one body under its role, and a style, which no format spells as
+// an edit, is never held.
 //
-// In a path a comment role is a step of its own, the object `{"fact": "comment"}` (or `"comment_inline"`,
-// `"comment_foot"`), and only the last step: `.a.@comment` is the path `["a", {"fact": "comment"}]`.
+// In a path a fact is a step of its own, the object `{"fact": "comment"}` (or any other name in `FACT_NAMES`), and only
+// the last step: `.a.@comment` is the path `["a", {"fact": "comment"}]`. `.@` reads only the names in the catalogue.
 
 import core_pkg "../../../core"
 
-// The name of each comment role as a path step spells it, and as `.@` reads it after its `@`.
-COMMENT_ROLE_NAMES :: #partial [core_pkg.Role]string {
+// Every fact `.@` names: the three comment roles, then the properties of `core.Fact_Name`.
+Fact :: enum u8 {
+	Comment,
+	Comment_Inline,
+	Comment_Foot,
+	Tag,
+	Anchor,
+	Alias,
+	Style,
+}
+
+// The name of each fact as a path step spells it, and as `.@` reads it after its `@`.
+FACT_NAMES :: [Fact]string {
 	.Comment        = "comment",
 	.Comment_Inline = "comment_inline",
 	.Comment_Foot   = "comment_foot",
+	.Tag            = "tag",
+	.Anchor         = "anchor",
+	.Alias          = "alias",
+	.Style          = "style",
+}
+
+// The other names `.@` reads, each for the fact it names. A path step always spells the fact by its `FACT_NAMES` name.
+FACT_ALIASES :: [?]struct {
+	name: string,
+	fact: Fact,
+}{{"comment_head", .Comment}}
+
+// The fact `.@name` names, `name` without its `@`, and whether the catalogue holds it.
+fact_named :: proc(name: string) -> (Fact, bool) {
+	names := FACT_NAMES
+	for n, f in names {
+		if n == name {
+			return f, true
+		}
+	}
+	for a in FACT_ALIASES {
+		if a.name == name {
+			return a.fact, true
+		}
+	}
+	return .Comment, false
+}
+
+// The comment role of fact `f`, when it is one.
+comment_role :: proc(f: Fact) -> (core_pkg.Role, bool) {
+	#partial switch f {
+	case .Comment:
+		return .Comment, true
+	case .Comment_Inline:
+		return .Comment_Inline, true
+	case .Comment_Foot:
+		return .Comment_Foot, true
+	}
+	return .Value, false
+}
+
+// The property fact `f` names, when it is one.
+property_name :: proc(f: Fact) -> (core_pkg.Fact_Name, bool) {
+	#partial switch f {
+	case .Tag:
+		return .Tag, true
+	case .Anchor:
+		return .Anchor, true
+	case .Alias:
+		return .Alias, true
+	case .Style:
+		return .Style, true
+	}
+	return .Tag, false
+}
+
+// The role property `name` is written under, which a style, held in a node's spelling alone, has none of.
+property_role :: proc(name: core_pkg.Fact_Name) -> (core_pkg.Role, bool) {
+	switch name {
+	case .Tag:
+		return .Tag, true
+	case .Anchor:
+		return .Anchor, true
+	case .Alias:
+		return .Alias, true
+	case .Style:
+	}
+	return .Value, false
 }
 
 // `.@role` of `v`: its comments of `role` as an array of strings, or null when it has none.
@@ -60,8 +142,8 @@ bad_comment :: proc(ip: ^Interp) -> Signal {
 	return fail(ip, "a comment is a string, an array of strings, or null")
 }
 
-// The role path step `key` names, when it is one: an object whose one member `fact` names a role.
-fact_step :: proc(key: Value) -> (role: core_pkg.Role, ok: bool) {
+// The fact path step `key` names, when it is one: an object whose one member `fact` names a fact.
+fact_step :: proc(key: Value) -> (fact: Fact, ok: bool) {
 	if kind(key) != .Object || length_of(key) != 1 {
 		return
 	}
@@ -70,56 +152,165 @@ fact_step :: proc(key: Value) -> (role: core_pkg.Role, ok: bool) {
 	if !is_str {
 		return
 	}
-	names := COMMENT_ROLE_NAMES
-	for r in core_pkg.COMMENT_ROLES {
-		if names[r] == s {
-			return r, true
+	names := FACT_NAMES
+	for n, f in names {
+		if n == s {
+			return f, true
 		}
 	}
 	return
 }
 
-// The path step of `role`.
-fact_key :: proc(role: core_pkg.Role) -> Value {
+// The path step of `fact`.
+fact_key :: proc(fact: Fact) -> Value {
 	o := new_object()
-	names := COMMENT_ROLE_NAMES
-	object_put(o, "fact", names[role])
+	names := FACT_NAMES
+	object_put(o, "fact", names[fact])
 	return o
+}
+
+// `.@fact` of `v`: a comment role's bodies as an array of strings, or a property's value, null when it has none.
+fact_value :: proc(v: Value, fact: Fact) -> Value {
+	if role, is_comment := comment_role(fact); is_comment {
+		return comments_value(v, role)
+	}
+	name, _ := property_name(fact)
+	return property_value(v, name)
+}
+
+// `v`'s property `name`: the filter's write, else the value of its node's fact.
+property_value :: proc(v: Value, name: core_pkg.Fact_Name) -> Value {
+	inner := v
+	if c, is_commented := v.(^Commented); is_commented {
+		if role, spanned := property_role(name); spanned && role in c.written {
+			return c.bodies[role][0] if len(c.bodies[role]) > 0 else nil
+		}
+		inner = c.v
+	}
+	r, is_ref := inner.(Ref)
+	if !is_ref {
+		return nil
+	}
+	fv, held := core_pkg.fact_value(r.doc, r.node, name)
+	if !held {
+		return nil
+	}
+	return fv.text
+}
+
+// `v` with fact `fact` written as `nv`: the comment bodies of `write_comments`, or for a property a string or null. A
+// style is written only as the one `v` has.
+write_fact :: proc(ip: ^Interp, v: Value, fact: Fact, nv: Value) -> (Value, Signal) {
+	if role, is_comment := comment_role(fact); is_comment {
+		return write_comments(ip, v, role, nv)
+	}
+	name, _ := property_name(fact)
+	text: string
+	switch kind(nv) {
+	case .Null:
+	case .String:
+		text, _ = string_of(nv)
+	case .False, .True, .Number, .Array, .Object:
+		return nil, bad_property(ip)
+	}
+	role, spanned := property_role(name)
+	if !spanned {
+		if compare(property_value(v, name), plain(nv)) == 0 {
+			return v, .Go
+		}
+		return nil, fail(ip, "cannot write a style: the format has no spelling for it")
+	}
+	if kind(nv) == .Null {
+		return noted(v, role, nil), .Go
+	}
+	bodies := make([]string, 1)
+	bodies[0] = text
+	return noted(v, role, bodies), .Go
+}
+
+@(private = "file")
+bad_property :: proc(ip: ^Interp) -> Signal {
+	return fail(ip, "a tag, an anchor, an alias or a style is a string or null")
 }
 
 fact_step_not_last :: proc(ip: ^Interp) -> Signal {
 	return fail(ip, "A comment step must be the last step of a path")
 }
 
-// The keys of a deletion that are not role steps, in an order of their own, and the roles the others name.
-split_fact_steps :: proc(keys: []Value) -> ([]Value, bit_set[core_pkg.Role]) {
+// The keys of a deletion that are not fact steps, in an order of their own, and the facts the others name.
+split_fact_steps :: proc(keys: []Value) -> ([]Value, bit_set[Fact]) {
 	keys := keys
-	roles: bit_set[core_pkg.Role]
+	facts: bit_set[Fact]
 	for i := 0; i < len(keys); {
-		if role, is_fact := fact_step(keys[i]); is_fact {
-			roles += {role}
+		if fact, is_fact := fact_step(keys[i]); is_fact {
+			facts += {fact}
 			keys[i] = keys[len(keys) - 1]
 			keys = keys[:len(keys) - 1]
 		} else {
 			i += 1
 		}
 	}
-	return keys, roles
+	return keys, facts
 }
 
-// `v` without its comments of `roles`.
-remove_comments :: proc(ip: ^Interp, v: Value, roles: bit_set[core_pkg.Role]) -> (Value, Signal) {
+// `v` without its facts `facts`.
+remove_facts :: proc(ip: ^Interp, v: Value, facts: bit_set[Fact]) -> (Value, Signal) {
 	v := v
-	for role in roles {
+	for fact in facts {
 		sig: Signal
-		if v, sig = write_comments(ip, v, role, nil); sig != .Go {
+		if v, sig = write_fact(ip, v, fact, nil); sig != .Go {
 			return nil, sig
 		}
 	}
 	return v, .Go
 }
 
-// Whether path `p` ends in a role step. Only the step `.@role` makes, an object of the program, is looked at, so the
+// `nv` put where `old` was: it keeps `old`'s facts that `nv` does not bring, the comments of each role
+// (`core.keep_comments`) and each property, written or from the source.
+keep_facts :: #force_inline proc(old, nv: Value) -> Value {
+	#partial switch x in old {
+	case ^Commented:
+		return merge_facts(old, nv)
+	case Ref:
+		if len(x.doc.facts) > 0 || x.doc.readers != nil && x.doc.readers.fact != nil {
+			return merge_facts(old, nv)
+		}
+	}
+	return nv
+}
+
+@(private = "file")
+merge_facts :: #force_no_inline proc(old, nv: Value) -> Value {
+	if r, is_ref := old.(Ref); is_ref {
+		if s, same := nv.(Ref); same && s == r {
+			return nv
+		}
+	}
+	kept := core_pkg.keep_comments(old, nv)
+	for name in core_pkg.Fact_Name {
+		role := property_role(name) or_continue
+		if property_value(nv, name) != nil {
+			continue
+		}
+		if c, is_commented := nv.(^Commented); is_commented && role in c.written {
+			continue
+		}
+		have := property_value(old, name)
+		if have == nil {
+			continue
+		}
+		text, is_text := string_of(have)
+		if !is_text {
+			text = to_json(have, {}, context.allocator)
+		}
+		bodies := make([]string, 1)
+		bodies[0] = text
+		kept = noted(kept, role, bodies)
+	}
+	return kept
+}
+
+// Whether path `p` ends in a fact step. Only the step `.@fact` makes, an object of the program, is looked at, so the
 // test costs a path step a type check.
 ends_in_fact :: #force_inline proc(p: ^Path_Step) -> bool {
 	if p == nil {

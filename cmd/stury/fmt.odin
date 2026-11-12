@@ -15,7 +15,6 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import core "../../core"
-import "../../core/write"
 import records "../../core/records"
 import json "../../json"
 import "jq"
@@ -36,9 +35,9 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	case o.in_place && o.check:
 		usage_error("--in-place rewrites each file; --check only reads it")
 	case o.in_place && FORMATS[o.from].written_as != nil:
-		usage_error("--in-place writes each file back as its own format, and json5 is read only")
+		usage_error("--in-place writes each file back as its own format, and %s is read only", FORMATS[o.from].name)
 	case o.check && FORMATS[o.from].written_as != nil:
-		usage_error("--check compares each file with its own format, and json5 is read only")
+		usage_error("--check compares each file with its own format, and %s is read only", FORMATS[o.from].name)
 	case o.in_place && o.to != o.from:
 		usage_error("--in-place writes each file back as its own format: --from %s and --to %s differ", FORMATS[o.from].name, FORMATS[o.to].name)
 	case o.in_place:
@@ -127,7 +126,7 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 	o := &run.opts
 	data := ins.data
 	cells := reads_cells(o)
-	if !cells && json.blank(data, ins.spec.?) {
+	if !cells && blank_input(data, ins.spec) {
 		return true
 	}
 	if msg := header_fault(ins.name, data, ins.as) if cells else ""; msg != "" {
@@ -237,7 +236,9 @@ cells_cut :: proc(run: ^Run, ins: ^Inputs, cut: int) {
 }
 
 // The document `doc` of the open file written by the library's writer in the output's format and layout, and a
-// newline after it unless it ends with one or is empty, as a CSV file with no header is. False, told, when it cannot be.
+// newline after it unless it ends with one or is empty, as a CSV file with no header is. A text of a format whose input
+// is a stream of texts is parted from the one before it, so the output reads back as that stream. False, told, when it
+// cannot be.
 @(private = "file")
 put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
 	as := fmt_written_as(&run.opts)
@@ -253,18 +254,20 @@ put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
 		}
 		return false
 	}
-	write.put_text(&out.buf, string(text))
-	if len(text) > 0 && text[len(text) - 1] != '\n' {
-		jq.put_byte(&out.buf, '\n')
-	}
-	flush_some(out)
+	put_format_text(out, text, FORMATS[run.opts.to].follows != nil)
 	return true
 }
 
 // The format fmt writes in, as --to and the output options say.
 @(private = "file")
 fmt_written_as :: proc(o: ^Opts) -> core.As {
-	return cells_written_as(o) if writes_cells(o) else json.as(.Jsonc if writes_comments(o) else .Json, {max_depth = o.max_depth})
+	switch {
+	case writes_cells(o):
+		return cells_written_as(o)
+	case writes_texts(o):
+		return text_written_as(o)
+	}
+	return json.as(.Jsonc if writes_comments(o) else .Json, {max_depth = o.max_depth})
 }
 
 // Refuses an input `--in-place` cannot rewrite. A temporary file and a rename replace a name with a regular file, so

@@ -17,8 +17,8 @@ endif
 .DEFAULT_GOAL := gate
 
 # The library packages, and the test packages that read them.
-LIB_PKGS  := core/spell core/regex core host core/kernel core/compose core/diff core/rules core/build core/typed core/write core/records core/schema core/model json dsv
-TEST_PKGS := core/spell/test core/regex/test host/test core/kernel/test core/test core/write/test core/records/test json/test dsv/test
+LIB_PKGS  := core/spell core/regex core host core/kernel core/compose core/diff core/rules core/build core/typed core/write core/records core/schema core/model json dsv yaml
+TEST_PKGS := core/spell/test core/regex/test host/test core/kernel/test core/test core/write/test core/records/test json/test dsv/test yaml/test
 # The packages the tests share, checked by `lint` and built through their imports.
 SUPPORT_PKGS := walktest bench/timing
 # The benchmark programs, which `lint` and the gate compile.
@@ -135,6 +135,7 @@ test-one:
 test-cli: build-cli
 	@echo "== cmd/stury"
 	python3 cmd/stury/test/smoke.py $(BUILD)/stury
+	python3 cmd/stury/test/yaml_suite.py $(BUILD)/stury
 
 # jq 1.8.2's corpus and cli.tsv, every row passing.
 test-jq: build-cli

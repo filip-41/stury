@@ -214,6 +214,21 @@ builder_hook_grow :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook
 	return builder_step(false, true, false, false, h, s, t)
 }
 
+// Stores tokens with facts, growing the node buffer and the open stack as they fill, for a walk whose nodes and depth
+// no bound covers. It runs no duplicate-key test, so a walk that takes it refuses repeated keys itself. A refused
+// growth stops the walk with `err` `.No_Memory`.
+builder_hook_growing :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	if (t.kind == .Array || t.kind == .Object) && int(s.c) == len(h.stack) {
+		if !builder_deepen(h, max(len(h.stack), 16)) {
+			if h.err.kind == .None {
+				h.err = {kind = .No_Memory}
+			}
+			return s, .Stop
+		}
+	}
+	return builder_step(true, true, false, false, h, s, t)
+}
+
 // Stores tokens with no facts, with the duplicate-key test compiled in, for a build that refuses repeats.
 // `builder_hook_plain` compiles the test out.
 builder_hook_plain_refuse :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {

@@ -80,7 +80,7 @@ indirect :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t
 		reason = .Wrong_Kind
 		n := (^core.Number_Text)(dest)
 		if t.kind == .Number {
-			reason = store_span(h, t.lo, u64(t.n), &n.text)
+			reason = store_number_text(h, t, &n.text)
 			n.double = core.text_f64(n.text)
 			when H == Check {
 				if reason == .None && m.rule_set > 0 && check_rules(h, regs, t, fld, dest) == .Stop {
@@ -101,6 +101,8 @@ indirect :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t
 		}
 	case .Scalar:
 		reason = store_decoded(h, t, (^Scalar)(dest))
+	case .Bytes:
+		reason = store_bytes(h, t, (^Bytes)(dest))
 	case .Bool_Wide:
 		reason = .Wrong_Kind
 		if t.kind == .True || t.kind == .False {
@@ -398,6 +400,43 @@ store_whole :: proc(h: ^Reader, fld: ^Field, m: ^Meta, dest: uintptr, kind: core
 	return m.read(v, rawptr(dest), context.allocator).? or_else .None
 }
 
+// The decimal digits of number token `t`: its span, or what the format spells for a span that is not its text, in
+// `stack` when they fit and else in the temp allocator. False when they cannot be read.
+@(private)
+number_digits :: proc(h: ^Reader, t: core.Token, stack: []u8) -> (text: string, ok: bool) {
+	spelled := h.plan.readers.number_text
+	if spelled == nil {
+		return string(raw_data(h.src)[t.lo:][:t.n]), true
+	}
+	if s, fit := spelled(&h.view, t, stack); fit {
+		return s, true
+	}
+	// A bignum's digits are at most two and a half per byte of its span.
+	buf, err := make([]u8, 3 * int(t.n) + 64, context.temp_allocator)
+	if err != nil {
+		return "", false
+	}
+	return spelled(&h.view, t, buf)
+}
+
+// Stores the decimal digits of number token `t`: its span, or a copy of the digits the format spells for a span that is
+// not its text. An infinity or a NaN of such a format has no digits and is `.Non_Finite`.
+@(private)
+store_number_text :: proc(h: ^Reader, t: core.Token, dest: ^string) -> core.Typed_Error_Kind {
+	if h.plan.readers.number_text == nil {
+		return store_span(h, t.lo, u64(t.n), dest)
+	}
+	stack: [128]u8
+	s, read := number_digits(h, t, stack[:])
+	switch {
+	case !read:
+		return .Out_Of_Range
+	case len(s) == 0:
+		return .Non_Finite
+	}
+	return store_copy(s, dest)
+}
+
 // A slice of `src`, or its copy when the read copies.
 @(private)
 store_span :: #force_inline proc(h: ^Reader, lo, n: u64, dest: ^string) -> core.Typed_Error_Kind {
@@ -489,7 +528,7 @@ store_decoded :: proc(h: ^Reader, t: core.Token, dest: ^Scalar) -> core.Typed_Er
 			dest^ = x
 		case .Wide:
 			s: string
-			if reason := store_span(h, t.lo, u64(t.n), &s); reason != .None {
+			if reason := store_number_text(h, t, &s); reason != .None {
 				return reason
 			}
 			dest^ = core.Number_Text{s, core.text_f64(s)}
@@ -648,7 +687,13 @@ store_number :: proc(n: core.Number, integer: bool, h: ^Reader, t: core.Token, f
 			return .Wrong_Kind
 		}
 		// An integer past `u64` reads as a float or as wide.
-		return store_integer(n, raw_data(h.src)[t.lo] == '-', fld.kind, dest)
+		minus := raw_data(h.src)[t.lo] == '-'
+		if n.kind > .Uint && h.plan.readers.number_text != nil {
+			stack: [128]u8
+			text, _ := number_digits(h, t, stack[:])
+			minus = len(text) > 0 && text[0] == '-'
+		}
+		return store_integer(n, minus, fld.kind, dest)
 	}
 	if fld.kind != .F64 && fld.kind != .F32 {
 		return .Wrong_Kind
@@ -667,9 +712,12 @@ store_number :: proc(n: core.Number, integer: bool, h: ^Reader, t: core.Token, f
 		x = transmute(f64)n.bits
 	case .Wide:
 		// Past the digit and scale caps the double may still exist, as for `1e-5000`, which is zero.
-		parsed, ok := strconv.parse_f64(string(raw_data(h.src)[t.lo:][:t.n]))
-		if !ok {
-			return past_limit(raw_data(h.src)[t.lo] == '-')
+		stack: [128]u8
+		text, read := number_digits(h, t, stack[:])
+		parsed, ok := strconv.parse_f64(text)
+		// The digits a format spells for its number name no infinity, so one they round to is past the limit.
+		if !read || !ok || h.plan.readers.number_text != nil && abs(parsed) > max(f64) {
+			return past_limit(len(text) > 0 && text[0] == '-')
 		}
 		x = parsed
 	}
@@ -1167,11 +1215,46 @@ map_slot :: proc(h: ^Reader, m: ^Meta, raw: ^runtime.Raw_Map, key: string, t: co
 	return s, .None
 }
 
+// Stores a byte string: a string token's base64 text decoded.
+@(cold)
+store_bytes :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, dest: ^Bytes) -> core.Typed_Error_Kind {
+	context = h.ctx
+	payload: []u8
+	#partial switch t.kind {
+	case .String:
+		text, ok := core.token_text(h.plan.readers, &h.view, t, context.temp_allocator)
+		if !ok {
+			return .No_Memory
+		}
+		room, err := runtime.mem_alloc_non_zeroed(len(text) / 4 * 3, 1, context.temp_allocator)
+		if err != nil {
+			return .No_Memory
+		}
+		payload, ok = spell.base64_decode(room, transmute([]u8)text)
+		if !ok {
+			return .Wrong_Kind
+		}
+	case:
+		return .Wrong_Kind
+	}
+	if len(payload) == 0 {
+		dest^ = Bytes{}
+		return .None
+	}
+	buf, err := runtime.mem_alloc_non_zeroed(len(payload), 1)
+	if err != nil {
+		return .No_Memory
+	}
+	mem.copy_non_overlapping(raw_data(buf), raw_data(payload), len(payload))
+	dest^ = Bytes(buf)
+	return .None
+}
+
 // Frees the text at `dest` this read copied, when `kind` is a kind stored as a string, for a repeat that replaces it.
 // A text the read borrowed from `src` stays.
 @(private)
 release_text :: proc(h: ^Reader, dest: uintptr, kind := Read_Kind.String) {
-	if kind != .String && kind != .Raw && kind != .Number_Text {
+	if kind != .String && kind != .Raw && kind != .Number_Text && kind != .Bytes {
 		return
 	}
 	text := (^runtime.Raw_String)(dest)^

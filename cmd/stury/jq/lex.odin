@@ -76,20 +76,43 @@ OPERATORS := [?]struct {
 	sym:  Sym,
 }{{"?//", .Alternation}, {"//=", .Set_Alt}, {"!=", .Neq}, {"==", .Eq}, {"//", .Alt}, {"|=", .Set_Pipe}, {"+=", .Set_Plus}, {"-=", .Set_Minus}, {"*=", .Set_Mult}, {"/=", .Set_Div}, {"%=", .Set_Mod}, {"<=", .Less_Eq}, {">=", .Greater_Eq}, {"..", .Rec}, {"?", .Question}, {"=", .Assign}, {";", .Semi}, {",", .Comma}, {":", .Colon}, {"|", .Pipe}, {"+", .Plus}, {"-", .Minus}, {"*", .Star}, {"/", .Slash}, {"%", .Percent}, {"<", .Less}, {">", .Greater}}
 
-// stury's comment accessors, which `rest`, the program after a `.`, starts with: `@comment`, `@comment_inline` or
-// `@comment_foot`, "" for anything else. jq reads `.@name` only as `.@name "string"`, a format applied to a string
-// key, which stays so: no jq program has one of these.
+// stury's fact accessors, which `rest`, the program after a `.`, starts with: `@` and a name of the catalogue
+// (`fact_named`). jq reads `.@name` only as `.@name "string"`, a format applied to a string key, which stays so: no jq
+// program has one of these, and "" is returned for it. A name the catalogue lacks that no string follows is returned
+// with `known` false, and the lexer reports it.
 @(private = "file")
-fact_accessor :: proc(rest: string) -> string {
+fact_accessor :: proc(rest: string) -> (name: string, known: bool) {
 	end := run_end(rest, 1, ident_byte)
-	name := rest[:end]
-	if name != "@comment" && name != "@comment_inline" && name != "@comment_foot" {
-		return ""
+	name = rest[:end]
+	if len(name) == 1 {
+		return "", true
 	}
+	_, known = fact_named(name[1:])
 	for end < len(rest) && is_space(rest[end]) {
 		end += 1
 	}
-	return "" if end < len(rest) && rest[end] == '"' else name
+	if end < len(rest) && rest[end] == '"' {
+		return "", true
+	}
+	return name, known
+}
+
+// The names `.@` reads, for the message of an unknown one.
+@(private = "file")
+fact_list :: proc() -> string {
+	b := strings.builder_make()
+	names := FACT_NAMES
+	for n, f in names {
+		if f != .Comment {
+			strings.write_string(&b, ", ")
+		}
+		strings.write_string(&b, n)
+	}
+	for a in FACT_ALIASES {
+		strings.write_string(&b, ", ")
+		strings.write_string(&b, a.name)
+	}
+	return strings.to_string(b)
 }
 
 @(private = "file")
@@ -98,10 +121,17 @@ lex_token :: proc(p: ^Parser) -> (Sym, Sem) {
 	start := p.pos
 	c := s[start]
 	next: u8 = s[start + 1] if start + 1 < len(s) else 0
-	fact := fact_accessor(s[start + 1:]) if c == '.' && next == '@' else ""
+	fact, known := "", true
+	if c == '.' && next == '@' {
+		fact, known = fact_accessor(s[start + 1:])
+	}
 	switch {
 	case is_digit(c) || (c == '.' && is_digit(next)):
 		return .Literal, {value = lex_number(p)}
+	case !known && len(fact) > 1:
+		p.pos += 1 + len(fact)
+		report(p, {start, p.pos}, message.build("unknown fact .%s, the facts are %s", fact, fact_list()))
+		return .Field, {text = "@comment"}
 	case fact != "":
 		p.pos += 1 + len(fact)
 		return .Field, {text = fact}

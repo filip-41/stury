@@ -13,7 +13,7 @@ load_schema :: proc(text: []u8, opts := Schema_Options{}, allocator := context.a
 	return schema.compile(text, as(.Json), opts, allocator)
 }
 
-// Binds `s` to texts of `spec`.
-bind_schema :: proc(s: ^Schema, spec: Spec, allocator := context.allocator) -> (Bound_Schema, core.Error) {
-	return schema.bind(s, {layout = as(spec)}, allocator)
+// Binds `s` to texts of `spec` read with `opts`.
+bind_schema :: proc(s: ^Schema, spec: Spec, opts := Options{}, allocator := context.allocator) -> (Bound_Schema, core.Error) {
+	return schema.bind(s, {layout = as(spec, opts)}, allocator)
 }

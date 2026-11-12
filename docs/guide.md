@@ -1,7 +1,7 @@
 # Library guide
 
-How to use `stury:json` and `stury:dsv`, with snippets from the programs in [examples/](../examples). A program imports the
-package of its format and calls everything through it. Each public name's doc comment is its contract, and
+How to use `stury:json`, `stury:dsv` and `stury:yaml`, with snippets from the programs in [examples/](../examples). A
+program imports the package of its format and calls everything through it. Each public name's doc comment is its contract, and
 [API.txt](../API.txt) lists the names of the format packages, then the names a format's author reads.
 [API_SHARED.txt](../API_SHARED.txt) lists the public names that only the packages of this repository use. The files in this
 directory describe one part each: [document.md](document.md), [paths.md](paths.md), [typed.md](typed.md),
@@ -10,7 +10,8 @@ directory describe one part each: [document.md](document.md), [paths.md](paths.m
 ## Requirements
 
 - Odin `dev-2026-11` or later. The collection is named `stury` and points at this directory: `-collection:stury=.`.
-  A program imports `stury:json`, `stury:dsv` or both. Those packages export the names of `stury:core`,
+  A program imports the package of each format it reads, `stury:json`, `stury:dsv` or `stury:yaml`. Each exports the
+  names of `stury:core`,
   `stury:core/typed`, `stury:core/write`, `stury:core/records`, `stury:core/schema` and `stury:host` that a user calls.
 - 64-bit little-endian targets: darwin and linux, on amd64 and arm64. The command line also builds on Windows.
 - On amd64 the floor is x86-64-v2. Long strings are scanned wider on processors that have AVX-512BW, chosen at run
@@ -23,6 +24,7 @@ directory describe one part each: [document.md](document.md), [paths.md](paths.m
 |---|---|
 | `json` | the JSON formats: `validate`, `build`, `find`, `scan`, `set`, `query`, `commit`, `unmarshal`, `marshal`, and the names of the packages below that a user calls: `Document`, `Error`, `render`, `parse_path`, `destroy` and the rest |
 | `dsv` | the delimited formats, the same calls and names |
+| `yaml` | YAML 1.2 with the core schema: the same calls, edits, a stream's documents as records, and a writer that keeps comments, tags, anchors and scalar styles |
 | `core` | what every format shares, and the interface a format's author or a run-time choice of format uses: `As`, `build` and `validate` over a handle |
 | `core/records` | NDJSON, RFC 7464 and CSV-style text as a sequence of records, reached as `records_check`, `records_open`, `records_open_stream`, `records_next`, `records_each` and the writer |
 | `core/typed` | plans and the options of a typed read |
@@ -37,6 +39,7 @@ A format is a `Spec` value passed to each call. `json.Spec` is `.Json`, `.Jsonc`
 `.Tsv` or `.Plain`. `.Json` is strict RFC 8259. `.Jsonc` also takes comments and trailing commas, and `.Json5` takes the
 JSON5 grammar. A call that takes both a `Spec` and `Options` reads `Options` for the format's own settings, which for
 JSON are `max_depth`, `tolerate` and `refuse_non_finite`, and for dsv `no_header`, `delimiter`, `comment`, `tolerate`, `crlf` and `infer`.
+`yaml.Spec` is `.Yaml_1_2`.
 
 ## Errors
 
@@ -158,7 +161,7 @@ out, err := json.marshal(person, allocator = alloc)  // {"name":"ada","n":1}
 - `Maybe(T)` and pointers take `null`. Enums read by name, unions by the arm their value picks, and a type in
   `Plan_Options.hooks` is read by your procedure.
 - `Read_Options.sink` reads on after a refused value and gathers every refusal instead of stopping at the first.
-- A program that reads one type many times builds the plan once with `json.plan_make` or `dsv.plan_make`, passes it to
+- A program that reads one type many times builds the plan once with `json.plan_make`, `dsv.plan_make` or `yaml.plan_make`, passes it to
   `unmarshal`, and frees it with `json.destroy`. There is no global cache.
 
 [typed.md](typed.md) holds the full type table, the tag flags and the refusal kinds.
@@ -279,7 +282,7 @@ document is.
 
 ### One answer at a time
 
-`json.answers` and `dsv.answers` read a path's answers as the scan reaches them, with no document, and `next` gives
+`json.answers`, `dsv.answers` and `yaml.answers` read a path's answers as the scan reaches them, with no document, and `next` gives
 them in a loop. Each answer is a `Token_Answer` whose `lo` and `hi` bound its value in the text. The read starts at the
 first `next` and walks a batch of answers at a time, from 1 doubling up to `max_batch`, so a loop that ends early has
 read little past what it took. A fault comes after every answer read before it, in `it.err` once the loop ends. A loop
@@ -299,13 +302,16 @@ if it.err != nil {
 }
 ```
 
-`json.each_answer` and `dsv.each_answer` give the same answers to a callback instead.
+`json.each_answer`, `dsv.each_answer` and `yaml.each_answer` give the same answers to a callback instead.
 
-The iterator rides on a walk cursor. `json.walk` and `dsv.walk` take a `^Cursor`: a hook that returns `.Stop` saves
-where the walk stood, and `walk_resume` continues from there over the same text, with every token after the stop
-delivered as an unbroken walk delivers it. A json cursor resumes after any token. A dsv cursor resumes after a record's
-end and holds the header's cells in `cursor.keys`, the caller's storage. `can_resume` says whether a cursor holds a stop, and a resume
-on another text is refused with `.Bad_Option`.
+The iterator rides on a walk cursor. `json.walk`, `dsv.walk` and `yaml.walk` take a `^Cursor`: a hook that returns
+`.Stop` saves where the walk stood, and `walk_resume` continues from there over the same text, with every token after
+the stop delivered as an unbroken walk delivers it. A json cursor resumes after any token. A dsv cursor resumes after a
+record's end and holds the header's cells in `cursor.keys`, the caller's storage. A yaml cursor resumes after any token
+of a document: its walk reads on past the stop to the end of the block node or flow entry it stopped in, and the resume
+gives the tokens it held first, a fault met on the way after them. It keeps that state on the heap until a walk ends,
+so `yaml.destroy(&cursor)` frees a cursor left holding a stop. `can_resume` says whether a cursor holds a stop, and a
+resume on another text is refused with `.Bad_Option`.
 
 ## Build a document
 
@@ -389,6 +395,15 @@ defer delete(committed)
 In a dsv document, removing a cell from every row drops its column, header included. `dsv.set` and `dsv.commit` edit a
 table the same way.
 
+`yaml.set` and its edit list edit YAML the same way, and commit their edits themselves, since a YAML block collection
+is not one range of bytes. The result is read again by YAML's walk, so an edit that breaks a rule of the language is
+`.Bad_Result`, and an edit YAML cannot make is a `.Frozen` error whose message names the reason. A member or element
+added to a block collection is a line at its column, one removed goes with its lines and the comments above it, and in
+a flow collection either goes with one separator. A value is written by YAML's writer at the indentation of its place,
+a block scalar is replaced whole, and tags and anchors are facts. An edit inside a value an alias reads, of an anchored
+node an alias reads, a change of member order, and any edit of a text with a `<<` merge key read with `merge_keys` are
+refused.
+
 ### Comments
 
 Comments are facts attached to a node, with a role of `Comment`, `Comment_Inline` or `Comment_Foot`. `.Jsonc` and
@@ -400,6 +415,14 @@ Comments are facts attached to a node, with a role of `Comment`, `Comment_Inline
 	"a": 2 // one
 }
 ```
+
+### Facts
+
+YAML holds a node's type tag, anchor and alias (`!!str`, `&a` and `*a`) as facts of the roles `Tag`, `Anchor` and
+`Alias`, which stand just before the node. `set_fact` and `remove_fact` take them, one non-empty line a body, and a
+commit in a format that holds none counts one in `dropped`. A fact the node's spelling carries instead of a span is read
+by name: `fact_value(&doc, node, .Style)` gives how a scalar or a collection is written (`plain`, `double`, `folded` or
+`flow`), and `.Tag` a node's tag.
 
 ## Write
 
@@ -475,6 +498,11 @@ json.records_each(lines, .Json, .Lines, count, &total, &pool.runner)
 `json.writer_init`, `write_cells` and `writer_end` write one row or line. [records.md](records.md) holds the framing
 rules and the Reader contract.
 
+Under `.Entries` the records are the elements or members of the root, or of the container the `entries` path of object
+keys names: `json.records_open(src, .Json, framing = .Entries, entries = {"data"})` reads the items of `{"data": [...]}`,
+and `Record_Stream_Options.entries` does the same on a stream, which gives each record as it reads it. A YAML stream's
+documents are its records, read with `yaml.records_open` under `.Concatenated`.
+
 ## Delimited text
 
 `dsv` reads and writes CSV, TSV and plain delimited text through the same calls as `json`.
@@ -512,6 +540,49 @@ cell per element, and a row whose length differs from the first row's is refused
 index, since a read without `.Ragged` refuses it. With `Options{tolerate = {.Ragged}}`, given to the write as to the
 read, rows of any length are written as they are and read back as they were written. No row is padded, since an empty
 cell added on write would read back as data the list did not hold.
+
+## YAML
+
+`yaml` reads YAML 1.2 with the core schema through the calls of `json`, one document a text. A plain scalar resolves by
+its text and its tag to null, a boolean, a number or a string, and one its core tag does not hold (`!!int yes`) is a
+fault. A key is its text, and a key that is a collection is refused. An alias reads as the node of its anchor, while
+the bytes the aliases of a document read again stay within `Options.alias_limit` (by default ten times the text, at
+least `ALIAS_FLOOR`). `Options.merge_keys` reads `<<` as a merge key. `%YAML 1.1` reads with the 1.2 rules.
+
+```odin
+Service :: struct {
+	name:     string,
+	replicas: i64,
+	ports:    []i64,
+}
+
+src := transmute([]u8)string("# the web service\nname: web\nreplicas: 3 # scaled by hand\nports: [80, 443]\n")
+svc: Service
+yaml.unmarshal(src, .Yaml_1_2, &svc, allocator = context.temp_allocator) or_return
+text := yaml.marshal(svc, write = yaml.PRETTY, allocator = context.temp_allocator) or_return
+fmt.print(string(text)) // name: web, replicas: 3, then ports as a block sequence
+
+replicas := yaml.parse_path(".replicas") or_return
+defer yaml.destroy(&replicas)
+out := yaml.set(src, .Yaml_1_2, replicas, 5) or_return
+defer delete(out)
+fmt.print(string(out)) // replicas: 5 # scaled by hand, and the rest as it was
+```
+
+- A repeated key is a fault of the text in every read: `.Refuse` is YAML's one duplicate policy, and a read asked for
+  `.Last`, `.First` or `.All` is `.Bad_Option`.
+- `yaml.find`, `scan` and `each_answer` read a document in one pass without a build, and build it when the read
+  reaches an alias.
+- A stream of several documents is read as records under `.Concatenated` (`yaml.records_open`, `records_check`,
+  `records_each`), each document one record. A text with more than one document is a fault of `build`.
+- `core.write` with `yaml.as(.Yaml_1_2)`, and `yaml.marshal`, write block style when the layout is pretty and flow
+  style on one line when it is compact. A string is plain unless a YAML 1.1 or 1.2 reader would read it as another
+  type (`yes`, `~`, `0123`, `.inf`, a date), and a string with a line end is a literal block. A document read from YAML
+  writes back its comments, tags, anchors, aliases, scalar styles and flow collections. A `typed.Bytes` is written as
+  `!!binary` and its base64, which `yaml.unmarshal` reads back.
+- `yaml.plan_of` builds the plan of a `rules.Description`, as `json.plan_of` does.
+- `yaml.checks(.Yaml_1_2)` gives a model the format, `yaml.bind_schema` binds a JSON Schema, and a typed read of a
+  built node reads its plain scalars as the core schema types them.
 
 ## One program, several formats
 

@@ -103,6 +103,37 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 		}
 		return node_read(doc, node, T, target, plan, read, allocator)
 	}
+	return feed_document(doc, node, T, target, plan, read, allocator, CHECK)
+}
+
+// The read of a built document by the generic route: the document's nodes fed to the reader as the walk would give them,
+// a markup document's elements read as their records read them (see markup.odin). A format whose keys the reader
+// compares as text, or whose attribute keys have no frame, sets it as its plans' `node_read`.
+read_nodes :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
+	if !nodes_readable(doc, node, plan) {
+		return {kind = .Bad_Option}
+	}
+	return feed_document(doc, node, T, target, plan, read, allocator, false)
+}
+
+// `read_nodes` as a check, with every refusal in `read.sink.entries`, which such a format sets as its `node_check`, since
+// no other check of the document reads its tokens.
+check_nodes :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
+	if !nodes_readable(doc, node, plan) {
+		return {kind = .Bad_Option}
+	}
+	return feed_document(doc, node, T, target, plan, read, allocator, true)
+}
+
+// Whether `node` of `doc` is a value that a plan can be fed from.
+@(private)
+nodes_readable :: proc "contextless" (doc: ^core.Document, node: core.Node_Index, plan: ^Plan) -> bool {
+	return doc != nil && doc.readers != nil && plan != nil && int(node) < len(doc.nodes) && doc.nodes[node].role != .Key
+}
+
+// The read of `read_document` by the hook, fed the nodes from `node` on.
+@(private)
+feed_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Refusal {
 	// The frames and the replay's two words a level grow as the value nests past them.
 	frames: [core.MAX_DEPTH + 2]Frame = ---
 	ends: [2 * core.MAX_DEPTH]u32 = ---

@@ -227,13 +227,14 @@ def rosetta():
 
 def cli_suites(absent, odin):
     """The command line's suites against jq: every jq and cli.tsv case passes, the smoke cases fail only where
-    smoke.floor names them, the random cases of regex_diff and jq_diff hold none different, and the types and gen laws hold. They run on the binary `build-cli` makes,
+    smoke.floor names them, every yaml-test-suite case reads as its JSON, the random cases of regex_diff and jq_diff hold none different, and the types and gen laws hold. They run on the binary `build-cli` makes,
     after every other stage so that a loaded host does not time them out."""
     test = at(f"{CLI}/test")
     suite = lambda name, stage, *argv, tier=1: Check(name, stage, tier, [at(CLI)], ["python3", *argv], trees=[test], cli=True)
     out = [
         suite("cli jq suite", 5, f"{test}/jq_suite.py", CLI_BINARY),
         suite("cli smoke", 5, f"{test}/smoke.py", CLI_BINARY),
+        suite("cli yaml suite", 5, f"{test}/yaml_suite.py", CLI_BINARY),
         suite("cli types law", 5, f"{test}/types_law.py", CLI_BINARY),
         suite("cli gen law", 5, f"{test}/gen_law.py", CLI_BINARY, f"--odin={odin}"),
     ]

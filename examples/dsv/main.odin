@@ -77,7 +77,7 @@ document_and_edits :: proc(src: []byte) -> dsv.Error {
 	oslo, _ := dsv.child_at(&doc, dsv.ROOT, 0)
 	lat, _ := dsv.member(&doc, oslo, "lat")
 	buf: [32]u8
-	text, _ := dsv.text(&doc, lat, buf[:])
+	text, _ := dsv.text(&doc, doc.nodes[lat], buf[:])
 	fmt.println(dsv.length(&doc, dsv.ROOT), text) // 2 59.91
 
 	city, _ := dsv.parse_path(".[1].City")
@@ -88,7 +88,7 @@ document_and_edits :: proc(src: []byte) -> dsv.Error {
 		os.exit(1)
 	}
 	defer dsv.destroy(&fdoc)
-	text, _ = dsv.text(&fdoc, answer.node, buf[:])
+	text, _ = dsv.text(&fdoc, fdoc.nodes[answer.node], buf[:])
 	fmt.println(text) // Ho, Chi Minh
 
 	population, _ := dsv.parse_path(".[0].population")

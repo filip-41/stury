@@ -11,7 +11,7 @@ codes](#errors-and-exit-codes)). On top of jq it:
 - edits each input with a jq filter, keeping every byte the edit does not touch (`stury edit`);
 - tells what differs between two inputs, two schemas, or a schema and data (`stury diff`);
 - infers a schema from inputs, samples values from one, or writes the Odin types of one (`stury schema`);
-- reads and writes JSONC, NDJSON, CSV and TSV (`--from FORMAT`, `--to FORMAT`, [Formats](#formats));
+- reads and writes JSONC, NDJSON, CSV, TSV and YAML (`--from FORMAT`, `--to FORMAT`, [Formats](#formats));
 - reads input strictly, as RFC 8259 says ([Differences from jq](#differences-from-jq)).
 
 The examples below assume `stury` is on your `PATH`; otherwise use `build/stury` (`make build-cli`).
@@ -21,6 +21,7 @@ stury [-c] [-r] [-j] [--raw-output0] [-a] [-S] [-C|-M] [--tab|--indent N] [--unb
       [-n] [-R] [-s] [-e] [-f FILE] [-L DIR] [--seq] [--stream|--stream-errors]
       [--from FORMAT] [--to FORMAT] [--grow-header]
       [--max-depth N] [--follow] [--explain]
+      [--alias-limit N] [--merge-keys]
       [--arg NAME VALUE] [--argjson NAME JSON] [--slurpfile NAME FILE] [--rawfile NAME FILE]
       [FILTER] [FILE...] [--args STRING...|--jsonargs JSON...]
 stury check [--from FORMAT|--seq] [--max-depth N] [--schema FILE [--schema-ref DIR] [--schema-draft D] [--format-assert]
@@ -98,13 +99,14 @@ runner and its bytecode listings, which stury does not have) and adds its own. E
 | `check`, `validate` | A subcommand, recognised when it is the first argument that is not an option, before any `--` (`stury -c check FILE`); under `-f` that argument is the program file. See [`check`](#check). |
 | `fmt` | A subcommand, recognised as `check` is: writes each input back in the printer's layout, or in another format, and runs no filter. See [`fmt`](#fmt). |
 | `edit` | A subcommand, recognised as `check` is: runs the filter on each input and splices its one output into the input's bytes. See [`edit`](#edit). |
-| `--from FORMAT` | Read `json` (the default), `jsonc`, `json5`, `ndjson`, `csv` or `tsv` ([Formats](#formats)). |
-| `--to FORMAT` | Write `json` (the default), `jsonc`, `ndjson`, `csv` or `tsv` ([Formats](#formats), [CSV and TSV output](#csv-and-tsv-output)). `fmt` writes the `--from` format when `--to` is not given. |
+| `--from FORMAT` | Read `json` (the default), `jsonc`, `json5`, `ndjson`, `csv`, `tsv` or `yaml` ([Formats](#formats)). |
+| `--to FORMAT` | Write `json` (the default), `jsonc`, `ndjson`, `csv`, `tsv` or `yaml` ([Formats](#formats), [CSV and TSV output](#csv-and-tsv-output), [YAML output](#yaml-output)). `fmt` writes the `--from` format when `--to` is not given. |
 | `--in-place` | `fmt` and `edit` only: rewrite each file through a temporary one and a rename, when `--to` is `--from` ([`fmt`](#fmt), [`edit`](#edit)). |
 | `--check` | `fmt` and `edit` only: write nothing, name each file that would change on stderr, and exit 1 ([`fmt`](#fmt), [`edit`](#edit)). |
 | `--grow-header` | With `--to csv` or `--to tsv`, write a header of every key of every object output ([CSV and TSV output](#csv-and-tsv-output)). |
 | `--delimiter C`, `--no-header`, `--comment C`, `--infer`, `--ragged`, `--lazy-quotes` | How `--from csv` or `--from tsv` reads ([CSV and TSV options](#csv-and-tsv-options)). |
 | `--out-delimiter C`, `--out-comment C`, `--out-no-header`, `--crlf` | How `--to csv` or `--to tsv` writes ([CSV and TSV options](#csv-and-tsv-options)). |
+| `--alias-limit N`, `--merge-keys` | How `--from yaml` reads: the bytes aliases may read again (1 or more), and `<<` as a merge key ([Formats](#formats)). With another `--from`, a usage error: `--merge-keys applies to --from yaml`. |
 | `--max-depth N` | Refuse nesting past N levels (1024 by default, up to 2^20, where jq's limit is 10000). A value deeper than the default also runs on one thread. |
 | `--follow` | With one named file, answer each record as it is appended, like `tail -f FILE | stury FILTER` without the pipe ([`--follow`](#--follow)). |
 | `--explain` | Write the plan the filter runs under and what the run did to stderr ([`--explain`](#--explain)), and run the filter as without it. |
@@ -121,7 +123,7 @@ runner and its bytecode listings, which stury does not have) and adds its own. E
 
 ### Behaviour notes
 
-- Plain paths such as `.a.b[]` are answered without building the document. These options switch to the
+- Plain paths such as `.a.b[]` are answered without building the document, a YAML document's included. These options switch to the
   general interpreter, which may be slower on large inputs: `-n`, `-s`, `-S`, `-a`, `-e`, `-R`,
   `--raw-output0`, `--seq`, `--stream`.
 - Under `--from csv` or `--from tsv`, a filter that only picks columns (`.name`, `.a, .b`, `[.a, .b]`,
@@ -171,7 +173,7 @@ The keys come in this order, each line once unless said:
 | Key | Says |
 | --- | --- |
 | `filter` | The filter, quoted. Written as soon as it is known, so a compile error follows it. A `-f` file that cannot be read has no line. |
-| `input` | The format and how it is cut into inputs: JSON texts one after another (as jq reads them), one per line (`ndjson`), in RFC 7464 records (`--seq`), lines of text (`-R`), CSV or TSV records as objects or, under `--no-header`, arrays, or none (`-n`). |
+| `input` | The format and how it is cut into inputs: JSON texts one after another (as jq reads them), one per line (`ndjson`), in RFC 7464 records (`--seq`), lines of text (`-R`), CSV or TSV records as objects or, under `--no-header`, arrays, each document of a stream (`yaml`), or none (`-n`). |
 | `plan` | How each input is answered, one of three ways. Reading only a path, `select(PATH op LITERAL)` or `first`/`limit` of a path from the text, without building the values the path passes by, with a second `plan` line when the read stops after the first answers. Reading only the named columns of each CSV or TSV record, straight from its text. Or building each input whole (the whole input under `-s`, nothing under `-n`) and running the filter on it. |
 | `because` | Under a built plan, one line per reason the filter needs it, every one that holds, in the order of the table below. |
 | `decides` | What the speed and the memory follow under this plan. |
@@ -196,6 +198,7 @@ The reasons on `because` lines:
 | -a writes ASCII only | `-a` |
 | --to csv or tsv writes each output as a record | `--to csv` or `--to tsv` |
 | --to jsonc prints a value's comments, which reading a path does not keep | `--to jsonc` |
+| --to writes each output as a text of its format, which the format's writer makes of a built document | `--to yaml` |
 | the filter is not a path, and not select(PATH op LITERAL) | any other filter |
 | --from jsonc reads only a plain path without building, as a text prints with its comments | `select` or `first`/`limit` under `--from jsonc` |
 | select is redefined, by the filter or by ~/.jq | a `def select` |
@@ -242,6 +245,7 @@ usage error.
 | `--from ndjson`, `--seq` | Validate one record per line or per `0x1E` separator, each record being one text. `--seq` uses `check`'s records, not jq's text sequence; each `FILE` is read alone, so a text cut at a file's end is a fault. |
 | `--from jsonc` | Validate JSONC as `stury --from jsonc .` reads it, to the same limits. A comment's text holds no escape. |
 | `--from json5` | Validate JSON5 as `stury --from json5 .` reads it, to the same limits. `Infinity` and `NaN` fail, since jq has no value for them. |
+| `--from yaml` | Validate YAML as `stury --from yaml .` reads it, every document of the stream. A repeated key is a fault, and so is an alias to an anchor that is not defined. A collection as a key is valid YAML and a fault to read. A text of comments alone is valid. |
 | `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. A fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An empty input is valid, as the library takes it, and so is a header alone. A cell is read as a filter run reads it: a string, or under `--infer` a number, `true` or `false` when its text is exactly one, so `type: integer` takes the cell `1` only with `--infer`, and `oneOf: [string, integer]` takes it either way. An empty unquoted cell is a `null`, and a quoted `""` is the empty string. `schema infer` reads cells the same way, so a schema it writes with `--infer` is checked with `--infer`. |
 | `--max-depth N` | As [above](#sturys-own-options). |
 | `--schema FILE` | Also check each input against the JSON Schema in `FILE` (drafts 4 to 2020-12). See [Schema check](#schema-check). |
@@ -261,7 +265,8 @@ may have (`Number is below the minimum, at least 0`, `expected null or string`).
 opening quote. A text that does not parse is the plain `check`'s fault,
 told as it tells it. NDJSON and `--seq` check each record; a long file, or an array at the root whose rules apply to each
 entry, is checked on all cores and tells what a serial check tells. With `--from csv` or `tsv` the schema describes the
-table, an array of its rows, so `{"type":"array","items":{...}}` judges each row and `minItems` counts them. When the last NDJSON record is cut, the earlier records' failures are told
+table, an array of its rows, so `{"type":"array","items":{...}}` judges each row and `minItems` counts them. A YAML
+input is checked as YAML reads it: each document of a stream is checked and its failures placed in the stream. When the last NDJSON record is cut, the earlier records' failures are told
 before the fault, and the exit is 5.
 
 | Flag | Effect |
@@ -400,6 +405,7 @@ stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--sch
 | --- | --- |
 | `json`, `jsonc` (the default is `json`) | Each text laid out as `stury .` lays it out: pretty by default, `--indent N` (0 to 7) or `--tab` as given, keys in their order. Only the layout changes: every number and string is written as it was (`1e2`, `"\u00e9"`, `"\/"`) and every member of an object is kept, a repeated key included. JSONC keeps its comments where `stury --from jsonc --to jsonc .` puts them and drops its trailing commas, so a file already in that layout comes back byte for byte. |
 | `ndjson` | One compact value per line, as `--to ndjson` writes it, spelled as above. |
+| `yaml` | Each document laid out by the YAML writer ([YAML output](#yaml-output)): comments, tags, anchors, aliases and a scalar's style are kept, and a stream's documents are kept apart by `---`. |
 | `csv`, `tsv` | The header, then one record per row, re-spelled by the CSV writer: a field that needs no quotes loses them, one that does gains them, and `""` and an empty cell stay distinct ([CSV and TSV output](#csv-and-tsv-output)). A header with no records is written. A JSON text whose root is an array is a list of rows, as the library's writer takes it, and any other text, or an NDJSON record, is one row. An object with a key the header lacks ends the run, as `--to csv` does. |
 
 - `--from` chooses how each file is read, and `--to` how it is written; `--to` defaults to `--from`, so a plain
@@ -514,6 +520,15 @@ stury: <stdin> would change
   an f64: a literal that rounds to the filter's value is left as written. `-S` also puts every object of the output in
   key order, moving the members as a reorder does, and puts a table's columns in order.
 - A new member or element follows its container's layout: its line, its indent and the blanks around a key's colon.
+- YAML (`--from yaml`) is edited at the indentation of each site, and each document of a stream is edited as a record:
+  a document with no output is dropped, each output past the first is a new document after it, `-s` runs the filter
+  on the array of the documents, and a new or moved document starts with a `---` line when it has none. A text of
+  comments alone is written back as it is. A kept value keeps its bytes, and a comment stays with its line. A new
+  member or element is a line at its collection's column, and in a flow collection it takes the collection's
+  separator. A built collection is written in block form on the lines under its key, and in flow form inside a flow
+  collection. Scalars take the style YAML's writer picks for them (`"yes"` is `'yes'`), and `.@tag` and `.@anchor`
+  write a tag and an anchor. An edit inside a value an alias reads, or of an anchored node an alias reads, is refused
+  with the reason (exit 5). `--diff` takes no stream of several documents.
 - A repeated key is read as the CLI reads it, the last member winning: the filter edits that member, and the other
   members with that name keep their bytes. Dropping the key removes every member with that name.
 - `-e` sets the exit status by the last output, as for a filter run: 1 when it is false or null, 4 when there is none.
@@ -551,7 +566,8 @@ Errors name `<stdin>` or the file, with the line and column where the input has 
 ## `diff`
 
 `diff` tells what differs between two inputs and exits 1 when something does. Each file is one document, read as
-`--from` says. A file of records (`--from ndjson`, `--seq`) is one array of them, so `.[1]` is its second record.
+`--from` says, one format for both. A file of records (`--from ndjson`, `--seq`, a YAML stream) is one array of them, so
+`.[1]` is its second record.
 
 ```sh
 $ stury diff old.json new.json
@@ -568,7 +584,9 @@ $ stury diff old.json new.json
   `--position` compares the elements at one index, and `--key MEMBER` pairs elements by the value of their member
   (`--key PATH=MEMBER` for the array at PATH, `--key .users=id`) and compares each pair in depth. An array that differs by
   more than 4,096 edits is told as replaced, and `stury: an array differs...` follows on stderr.
-- `--facts` tells changes of comments and attributes too, where both files' formats carry them.
+- `--facts` tells changes of comments, tags and anchors too, where both files' formats carry them: a JSONC, JSON5 or
+  YAML comment, and a YAML tag or anchor (`~ .a @tag: "!!str" -> "!!int"`, `~ .a @anchor: "x" -> "y"`). An alias is not
+  told, since the value it names is compared, and a style is not told.
 - `--json` writes a record a line: `{"path":["port"],"op":"changed","old":8080,"new":9090}`, with the path as
   `getpath` takes it and `op` one of `added`, `removed`, `changed` and `fact`. A change inside an array that
   moved its elements also carries `old_path`, its place in the old value.
@@ -603,6 +621,7 @@ verdict a last record.
 | `json` | One JSON text after another, as jq reads (the default). | Pretty-printed, or as `-c`, `--tab` and `--indent` say (the default). |
 | `jsonc` | JSONC: comments and trailing commas ([Comments in the CLI](#comments-in-the-cli)). | Each value with the comments it was read with. |
 | `json5` | JSON5 1.0.0, one text per input, read as written (comments kept). Numbers print in JSON's spelling. `Infinity` and `NaN` end the run, as they have no JSON value. Positions (`input_line_number`, error lines) count the JSON5 text; nesting follows `--max-depth`; `--argjson`, `--slurpfile`, `--jsonargs` and `fromjson` read JSON5. | Not written: `--to jsonc` writes the values and their comments. `fmt --in-place` and `fmt --check` are refused. |
+| `yaml` | YAML 1.2 with the core schema, one input per document (a stream of several is several inputs, and `-s` slurps them). Plain scalars read as `null`, booleans, integers (decimal, `0x` and `0o`) and floats (`.5`, `1e3`, `.inf`, `.nan`), and every other plain scalar, a quoted one and a block one is a string. A key is its text, so `1` and `"1"` repeat each other, and a repeated key is a parse error. A tag of the core schema forces the type (`!!str 12`, `!!int "12"`), a scalar its core tag does not hold (`!!int yes`) is a parse error, and any other tag makes a string. An alias reads as its anchor's node, up to a limit on the bytes aliases read again: ten times the text's size and at least 1 MiB, or `--alias-limit N`. `--merge-keys` reads a `<<` member as YAML 1.1's merge key: the members of the mapping it names that the host mapping lacks are added after its own. Without it `<<` is an ordinary key. `%YAML 1.1` reads with the 1.2 rules. A key that is a collection is a parse error. A text with no document, only comments, has no input. `.@tag` is the node's tag as written, and `.@style` is `plain`, `single`, `double`, `literal`, `folded`, `flow` or `block`. `--follow` answers each document once a `---` or its `...` line ends it. `--seq`, `-R` and `--stream` are refused. | Each output is one document ([YAML output](#yaml-output)). |
 | `ndjson` | One JSON text per line. A blank line is no text, and a line that is not one text, or holds two, is a parse error where jq would read on. | One compact value per line, as `-c`. |
 | `csv`, `tsv` | The first record names the fields; each later record is one input ([CSV and TSV](#csv-and-tsv)). | Each output is one record ([CSV and TSV output](#csv-and-tsv-output)). |
 
@@ -612,7 +631,8 @@ verdict a last record.
   any but `ndjson` with `--stream` and `--stream-errors`. Writing CSV or TSV is one with `-r`, `-j`, `-a`, `-C`,
   `-c`, `--indent`, `--tab`, `--seq` and `--raw-output0`, which shape JSON text. `-S`, `-e`, `-n`, `-s`, `--arg`
   and the rest still apply to a filter run; `fmt` refuses them ([`fmt`](#fmt)). `--to ndjson` takes the place of
-  `-c`, so it is refused with `--indent`, `--tab` and `--seq`, and `--to jsonc` is refused with `--seq`.
+  `-c`, so it is refused with `--indent`, `--tab` and `--seq`, and `--to jsonc` is refused with `--seq`. Writing YAML
+  is a usage error with `-r`, `-j`, `-C`, `--tab`, `--seq` and `--raw-output0`: YAML takes `-c`, `--indent` and `-a`.
 
 ## Input
 
@@ -665,8 +685,9 @@ the count of pieces in `run`.
 `stury --follow FILTER FILE` answers each record as it is appended to `FILE`, like `tail -f FILE | stury FILTER` with
 no pipe.
 
-- It reads NDJSON, `--seq`, `-R`, several texts per file as jq reads them, CSV and TSV.
-- A record cut short waits for its delimiter. The output is written after each record.
+- It reads NDJSON, `--seq`, `-R`, several texts per file as jq reads them, CSV, TSV and YAML streams.
+- A record cut short waits for its delimiter, and a YAML document for the `---` or `...` line that ends it. The output
+  is written after each record.
 - A file that shrinks is read again from its start, with `stury: FILE: file truncated` on stderr.
 - SIGINT and SIGTERM end the run, a FIFO's or a pipe's included, once the answers so far are written, by the signal,
   as they end jq. Ctrl-C and Ctrl-Break on Windows end it with jq's status for Ctrl-C, `STATUS_CONTROL_C_EXIT`.
@@ -822,6 +843,19 @@ $ stury --from csv --to csv 'select(.n | tonumber > 1)' people.csv
   TSV, a first cell that starts with a byte order mark.
 - **One table.** All the files of a run and all its inputs share one header.
 - **Streaming.** Rows are written as the outputs come, except under `--grow-header`.
+
+### YAML output
+
+`--to yaml` writes each output as a YAML document, and `fmt` writes a file as YAML. The layout is block style, `--indent N`
+spaces a level (2 by default, and a sequence's dashes are indented), and `-c` writes flow style on one line. A string
+is plain when every reader that reads YAML 1.1 or 1.2 reads it back as the same string, and is quoted when it is not:
+`yes`, `no`, `on`, `~`, `null`, a number (`0123`, `0x1F`, `1_000`, `.inf`, `12:30`), and text with a leading space or a
+`: ` or ` #` in it. A string with a line end is a literal block (`|`). `-a` writes a string with any non-ASCII
+character as an escaped double-quoted string.
+
+A value that is a node of a YAML input is written from the document, which keeps its comments, tags, anchors, aliases,
+scalar styles and flow collections. A value a filter built is written from its JSON. Several outputs are several
+documents, each after a `---` line, and a stream written by `fmt` keeps its documents apart the same way.
 
 ### Files and pipes
 
@@ -991,10 +1025,15 @@ these places:
 | `.@comment` | the leading comments and, on a member's value, the inline ones |
 | `.@comment_inline` | the comments after the value, on its line or past its comma (despite its name) |
 | `.@comment_foot` | the footer comments |
+| `.@tag`, `.@anchor`, `.@alias` | the value's tag, anchor or alias, a string |
+| `.@style` | how the format spells the value, read only |
 
-- Each gives a list of texts in source order, each without its `//` or `/* */` and one space inside them
-  (`// a` and `/* a */` read `"a"`), or `null` when there are none, as on a value the filter made and on any
-  value of plain JSON that the filter has written none on.
+`.@comment_head` is `.@comment`. A name that is not in the table is a compile error. The property accessors give
+`null` in a format that holds none, which includes JSON, JSONC and the tables.
+
+- Each comment accessor gives a list of texts in source order, each without its `//` or `/* */` and one space
+  inside them (`// a` and `/* a */` read `"a"`), or `null` when there are none, as on a value the filter made and
+  on any value of plain JSON that the filter has written none on.
 - A document's leading comments lead its root and its trailing ones trail it. On `{"a": 1} // x` the root's
   `.@comment_inline` is `["x"]` and its `.@comment` is `null`, as no comment comes before it.
 - They parse with or without `--from jsonc`, where jq refuses them. jq reads `.@name` only before a string
@@ -1013,6 +1052,9 @@ these places:
 - A value put in place of another keeps the old one's comments for each role the new value brings none of:
   under `--from jsonc`, `.a = 5` leaves `.a.@comment` as the input had it, and `.a = .b` takes `b`'s comments
   for the roles `b` has and keeps `a`'s for the rest. This holds for `=`, every update operator and `setpath`.
+- `.@tag`, `.@anchor` and `.@alias` take a string, or `null` to remove it. They travel with their value and stay on a
+  value put in place of another as comments do. `edit` refuses the write in a format that spells none, and on a value the file does not hold. `.@style` is never
+  written: setting it to anything but the style the value has is the error `cannot write a style`.
 - A write is no side effect: `(.a.@comment = "x") as $_ | .a.@comment` reads the input's comments.
 - Comments are not data. `==`, `<`, `sort`, `unique`, `group_by`, `contains`, `inside`, `has`, `keys`,
   `length`, `tojson`, `tostring`, `paths`, `tostream`, `to_entries` and the `@` formats answer as if there
