@@ -7,7 +7,7 @@ hook.
 
 This document describes what the walks share, how the JSON walk, the delimited-text (dsv) walk, the TOML walk and the
 YAML walk are built, and the Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector code the
-walks use, `markup.md` the XML walk, and `binary.md` the CBOR walk.
+walks use, `markup.md` the XML walk and the HTML tokenizer and tree, and `binary.md` the CBOR walk.
 
 ## Files
 
@@ -272,7 +272,7 @@ lives in `core`, so a format adds no reader, no `query` and no `commit` of its o
    value again for a ring's element. See `paths.md`.
 5. **The edits.** `compose.commit` is the format package's `commit`. A format whose root has no brackets sets `flat`,
    gives the root's line end as its `member_sep` and supplies `interior`, `fact_slot`, `emptied` and `plan`. A format
-   whose containers are not one range of bytes (TOML, YAML, XML) supplies its own `Edit_Services.commit`, and `frozen`,
+   whose containers are not one range of bytes (TOML, YAML, XML, HTML) supplies its own `Edit_Services.commit`, and `frozen`,
    `relocate` and `prefix` say what an edit may not touch, how a kept node is respelled at another place, and how a
    tag, an anchor or an alias is written.
 6. **The typed read.** `unmarshal` runs the format's `walk` over `typed.Reader`'s hook. A format that reads its values

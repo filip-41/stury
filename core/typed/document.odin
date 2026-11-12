@@ -131,6 +131,32 @@ nodes_readable :: proc "contextless" (doc: ^core.Document, node: core.Node_Index
 	return doc != nil && doc.readers != nil && plan != nil && int(node) < len(doc.nodes) && doc.nodes[node].role != .Key
 }
 
+// The read of a markup text, a `Text_Read` once its format binds `build` as for `check_markup_text`: the text is built
+// whole, under `.Refuse` refusing a repeated element, and its root is read by `read_nodes`.
+read_markup_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
+	doc, built := build(src, as, read.dups == .Refuse, context.allocator)
+	defer core.destroy(&doc)
+	#partial switch built.kind {
+	case .None:
+	case .No_Memory:
+		return {kind = .No_Memory}
+	case .Duplicate_Key:
+		return {kind = .Duplicate_Key, at = built.at}
+	case:
+		err := core.Typed_Refusal{kind = .Walk, at = built.at, inner = built.inner}
+		if read.sink != nil {
+			read.sink.fatal = err
+			sink_error(read.sink, err)
+		}
+		return err
+	}
+	read := read
+	if read.dups == .Refuse {
+		read.dups = .Last
+	}
+	return read_nodes(&doc, core.ROOT, T, target, plan, read, allocator)
+}
+
 // The check of a markup text, a `Text_Read` once its format binds `build`, the format's `Services.build` of the
 // handle `as`: builds the document in the temp allocator and checks its root by `check_nodes`. A read under `.Refuse`
 // builds under it, so the document it checks holds no repeat, and a check that noticed a repeat reads again, judging

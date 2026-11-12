@@ -34,9 +34,7 @@ handle_readers :: proc "contextless" ($S: Spec, services: ^core.Services) -> cor
 @(private)
 handle_services :: proc "contextless" ($S: Spec) -> core.Services {
 	return {
-		build    = proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-			return build_spec(src, S, as, refuse_duplicates, allocator)
-		},
+		build    = build_of(S),
 		validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, S, options_of(as))},
 		scan     = proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
 			return scan_spec(src, S, as, paths, read, state, on, allocator)

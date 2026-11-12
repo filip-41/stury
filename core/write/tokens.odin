@@ -2,7 +2,10 @@
 // and values. A flat format (delimited text) takes cells and the end of a record.
 package write
 
+import "base:runtime"
 import "core:io"
+import "core:mem/virtual"
+import "core:strings"
 import "../spell"
 import core ".."
 import "../typed"
@@ -355,3 +358,193 @@ node_number_text :: proc(doc: ^core.Document, node: core.Node_Index, stack: []u8
 
 @(private)
 NUMBER_TEXT_MAX :: 1 << 26
+
+// The tree a markup format's typed write makes a value in, which its element write reads: JSON's punctuation and words,
+// and a float that is a whole number with `.0`.
+MARKUP_TREE :: Tree {
+	.Open_Object  = "{",
+	.Close_Object = "}",
+	.Open_Array   = "[",
+	.Close_Array  = "]",
+	.Comma        = ",",
+	.Colon        = ":",
+	.After_Colon  = " ",
+	.Null         = "null",
+	.True         = "true",
+	.False        = "false",
+	.Point_Zero   = ".0",
+	.Inf          = "",
+	.Neg_Inf      = "",
+	.Nan          = "",
+	.Heads        = "",
+	.Bytes_Tag    = "",
+}
+
+// Returns the text a markup format spells scalar `node` with, in `stack`, at least 64 bytes, when it fits and else in
+// `context.temp_allocator`: a string's text, a number's digits as its format spells them, `true` or `false`, and a byte
+// string's base64. Any other node is `.Unwritable`.
+scalar_text :: proc(doc: ^core.Document, node: core.Node_Index, stack: []u8) -> (string, core.Typed_Error_Kind) {
+	#partial switch core.kind(doc, node) {
+	case .String, .Plain:
+		if text, ok := core.text(doc, node, stack); ok {
+			return text, .None
+		}
+		text, ok := core.text_clone(doc, node, context.temp_allocator)
+		return text, .None if ok else .No_Memory
+	case .Number:
+		t := doc.nodes[node]
+		if doc.readers.number_text != nil {
+			text, ok := node_number_text(doc, node, stack[:64])
+			return text, .None if ok else .No_Memory
+		}
+		if t.kind != .Number || t.spelling & core.NUMBER_KIND_MASK == 0 {
+			return string(core.span(doc, node)), .None
+		}
+		spill: [ROOM_MAX]u8 = ---
+		digits: Out
+		init(&digits, &spill, context.temp_allocator)
+		if kind := put_decimal(&digits, string(core.span(doc, node)), t.spelling); kind != .None {
+			return "", kind
+		}
+		text, err := finish(&digits)
+		return string(text), err.kind
+	case .True:
+		return "true", .None
+	case .False:
+		return "false", .None
+	case .Bytes:
+		text, ok := node_bytes_text(doc, node, stack)
+		return text, .None if ok else .No_Memory
+	}
+	return "", .Unwritable
+}
+
+// Returns the text of scalar value `v` as `scalar_text` does a node's, with a built number as its shortest digits in
+// the spelling of tree `T`.
+value_scalar_text :: proc(v: core.Value, stack: []u8, $T: Tree) -> (text: string, kind: core.Typed_Error_Kind) {
+	#partial switch x in v {
+	case core.Node_Ref:
+		return scalar_text(x.doc, x.node, stack)
+	case string:
+		return x, .None
+	case ^core.Number_Text:
+		return x.text, .None
+	case f64:
+		n, _ := core.value_number(x)
+		size := number_text_as(raw_data(stack), n, T) or_return
+		return string(stack[:size]), .None
+	case bool:
+		return "true" if x else "false", .None
+	}
+	return "", .Unwritable
+}
+
+// Returns the text a markup format spells token scalar `v` with, in `stack`, at least 512 bytes, when it fits and else in
+// `context.temp_allocator`, and whether it is null.
+token_scalar_text :: proc(v: Scalar, stack: []u8) -> (text: string, null: bool, kind: core.Typed_Error_Kind) {
+	switch x in v {
+	case string:
+		return x, false, .None
+	case Tagged_Text:
+		return x.text, false, .None
+	case typed.Bytes:
+		b, ok := bytes_text(cast([]u8)x, stack)
+		return b, false, .None if ok else .No_Memory
+	case core.Number:
+		n := number_text_as(raw_data(stack), x, MARKUP_TREE) or_return
+		return string(stack[:n]), false, .None
+	case Number_Literal:
+		_, is_number := spell.number_strict(transmute([]u8)x.text, 0, u64(len(x.text)))
+		return x.text, false, .None if is_number else .Bad_Raw
+	case Tree_Part:
+		tree := MARKUP_TREE
+		return tree[x], x == .Null, .None
+	}
+	return "", true, .None
+}
+
+// Writes a markup format's typed or token string `s`: a quote, the bytes and a NUL, which no string a markup format
+// spells holds.
+put_marked :: proc(out: ^Out, _: [^]u8, s: string, _: ^core.Write_Options) -> core.Typed_Error_Kind {
+	if strings.index_byte(s, 0) >= 0 {
+		return .Unwritable
+	}
+	put_byte(out, '"')
+	put_text(out, s)
+	put_byte(out, 0)
+	return .None
+}
+
+// A markup format's write of a built value as `opts` say, to `stream` or into new bytes from `allocator`.
+Markup_Put :: proc(v: core.Value, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal)
+
+// A markup format's `marshal`: the typed write makes `value` in `MARKUP_TREE` with `put_marked`'s strings, which `put`
+// writes as `put_markup` reads it.
+marshal_markup :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, omits: ^typed.Omits, put: Markup_Put) -> ([]u8, core.Typed_Refusal) {
+	flat := opts
+	flat.pretty, flat.sort_keys = false, false
+	tree, err := marshal_as(plan, value, flat, {}, context.allocator, MARKUP_TREE, put_marked, put_marked, omits)
+	if err.kind != .None {
+		return nil, err
+	}
+	defer delete(tree)
+	return put_markup(string(tree), opts, stream, allocator, put)
+}
+
+// Reads `s`, made in `MARKUP_TREE` with `put_marked`'s strings, into a built value in an arena of its own and gives it
+// to `put`. A bare scalar is its text, and `null` is nil.
+put_markup :: proc(s: string, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, put: Markup_Put) -> ([]u8, core.Typed_Refusal) {
+	arena: virtual.Arena
+	if virtual.arena_init_growing(&arena) != nil {
+		return nil, {kind = .No_Memory}
+	}
+	defer virtual.arena_destroy(&arena)
+	context.allocator = virtual.arena_allocator(&arena)
+	root: core.Value
+	open: [dynamic]core.Value
+	key: string
+	for i := 0; i < len(s); i += 1 {
+		v: core.Value
+		switch s[i] {
+		case ' ', '\t', '\n', ',', ':':
+			continue
+		case '}', ']':
+			pop(&open)
+			continue
+		case '{':
+			v = core.new_object()
+		case '[':
+			v = core.new_array()
+		case '"':
+			end := i + 1 + strings.index_byte(s[i + 1:], 0)
+			text := s[i + 1:end]
+			i = end
+			if i + 1 < len(s) && s[i + 1] == ':' {
+				key = text
+				continue
+			}
+			v = text
+		case:
+			end := i
+			for end < len(s) && strings.index_byte(",}] \t\n", s[end]) < 0 {
+				end += 1
+			}
+			if s[i:end] != "null" {
+				v = s[i:end]
+			}
+			i = end - 1
+		}
+		if len(open) == 0 {
+			root = v
+		} else if up, is_object := open[len(open) - 1].(^core.Object); is_object {
+			core.object_append(up, key, v)
+		} else {
+			core.array_append(open[len(open) - 1].(^core.Array), v)
+		}
+		#partial switch _ in v {
+		case ^core.Object, ^core.Array:
+			append(&open, v)
+		}
+	}
+	return put(root, opts, stream, allocator)
+}

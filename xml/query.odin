@@ -111,24 +111,10 @@ answers_of :: proc(src: []u8, handle: core.As, paths: []core.Path, one: core.Pat
 	return {src = src, as = handle, paths = paths, one = one, read = read, allocator = allocator, fill = answers_fill, max_batch = engine.ANSWER_BATCH}
 }
 
-// The fill of an iterator: the first builds the text, under `.Refuse` refusing a repeated element, fills the buffer
-// with every answer and ends the read.
+// The fill of an iterator, which builds the text whole.
 @(private)
 answers_fill :: proc(it: ^engine.Answer_Iter) {
-	paths := it.paths if it.paths != nil else ([^]core.Path)(&it.one)[:1]
-	it.buffer = make([dynamic]core.Token_Answer, 0, it.max_batch, it.allocator)
-	doc, built := build_spec(it.src, .Xml, it.as, it.read.dups == .Refuse, it.allocator)
-	if built.kind != .None && it.read.dups == .Refuse {
-		core.destroy(&doc)
-		engine.answers_fail(it, core.error_of(built))
-		return
-	}
-	_, err := engine.scan_built(&doc, built, paths, it.read, &it.buffer, proc(state: rawptr, a: core.Token_Answer) -> bool {
-		_, e := append((^[dynamic]core.Token_Answer)(state), a)
-		return e == nil
-	}, it.allocator)
-	core.destroy(&doc)
-	engine.answers_fail(it, core.error_of(err))
+	engine.answers_built(it, build_of(.Xml))
 }
 
 // Answers `path` or `paths` over a document built whole. A document read as a constant spec holds no services, so

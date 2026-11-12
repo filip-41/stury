@@ -80,7 +80,7 @@ Cli :: struct {
 	json_flag, text_flag, layout_flag: string,
 	// The first option given that reads a delimited text (--delimiter...), and the first that writes one (--crlf...).
 	cells_flag, cells_out_flag: string,
-	// The option --infer, which types a text value of a delimited text or of XML.
+	// The option --infer, which types a text value of a delimited text, of XML or of HTML.
 	infer_flag: string,
 	// The first option given that reads a YAML text (--alias-limit, --merge-keys), and the first that reads an XML
 	// text (--expansion-limit, --unread-entities).

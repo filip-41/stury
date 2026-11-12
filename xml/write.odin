@@ -72,11 +72,7 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 		write.init(&w.out, &spill, allocator, stream, len(doc.src) + write.ROOM_MAX)
 		text, err = write.finish(&w.out, {kind = put_own(&w)})
 	} else {
-		if opts.pretty {
-			write.init(&w.out, &spill)
-		} else {
-			write.init(&w.out, &spill, allocator, stream)
-		}
+		write.init(&w.out, &spill, context.allocator if opts.pretty else allocator, {} if opts.pretty else stream)
 		e: Elements
 		elements_init(&e, &w.out, opts)
 		text, err = elements_finish(&e, put_document(&w, &e, node), opts, stream, allocator)
@@ -85,6 +81,17 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 		return nil, 0, err
 	}
 	return text, len(core.subtree_facts(doc, node)) - w.kept, err
+}
+
+// Built value `v` given to the element write, as `opts` say.
+@(private)
+value_write :: proc(v: core.Value, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
+	spill: [write.ROOM_MAX]u8 = ---
+	w := Writer{opts = opts}
+	write.init(&w.out, &spill, context.allocator if opts.pretty else allocator, {} if opts.pretty else stream)
+	e: Elements
+	elements_init(&e, &w.out, opts)
+	return elements_finish(&e, put_value(&w, &e, v), opts, stream, allocator)
 }
 
 // An XML document: the prolog's facts, the root element, then the facts past it.
@@ -181,7 +188,7 @@ put_own_text :: proc(w: ^Writer, node: core.Node_Index, among: bool) -> core.Typ
 		put_raw(w, core.span(w.doc, node))
 		return .None
 	}
-	return put_text(&w.out, scalar_text(w, node) or_return, among, w.opts.ascii)
+	return put_text(&w.out, write.scalar_text(w.doc, node, w.buf[:]) or_return, among, w.opts.ascii)
 }
 
 // Another document's node: the comments before its object, the one member, then the comments after it.
@@ -256,7 +263,7 @@ put_value :: proc(w: ^Writer, e: ^Elements, value: core.Value) -> core.Typed_Err
 	case .Null:
 		el_value(e, "", true) or_return
 	case:
-		el_value(e, value_text(w, v) or_return) or_return
+		el_value(e, write.value_scalar_text(v, w.buf[:], write.MARKUP_TREE) or_return) or_return
 	}
 	w.doc = doc
 	for f in facts {
@@ -285,66 +292,6 @@ put_members :: proc(w: ^Writer, e: ^Elements, v: core.Value) -> core.Typed_Error
 		put_value(w, e, child) or_return
 	}
 	return .None
-}
-
-// The text of scalar `v`: a node's as `scalar_text` gives it, and a number built as its shortest digits.
-@(private)
-value_text :: proc(w: ^Writer, v: core.Value) -> (text: string, kind: core.Typed_Error_Kind) {
-	#partial switch x in v {
-	case core.Node_Ref:
-		w.doc = x.doc
-		return scalar_text(w, x.node)
-	case string:
-		return x, .None
-	case ^core.Number_Text:
-		return x.text, .None
-	case f64:
-		n, _ := core.value_number(x)
-		size := write.number_text_as(raw_data(w.buf[:]), n, TREE) or_return
-		return string(w.buf[:size]), .None
-	case bool:
-		return "true" if x else "false", .None
-	}
-	return "", .Unwritable
-}
-
-// The text of scalar `node`, in `w.buf` or `context.temp_allocator`. A node that is no scalar XML spells is
-// `.Unwritable`.
-@(private)
-scalar_text :: proc(w: ^Writer, node: core.Node_Index) -> (string, core.Typed_Error_Kind) {
-	#partial switch core.kind(w.doc, node) {
-	case .String, .Plain:
-		if text, ok := core.text(w.doc, node, w.buf[:]); ok {
-			return text, .None
-		}
-		text, ok := core.text_clone(w.doc, node, context.temp_allocator)
-		return text, .None if ok else .No_Memory
-	case .Number:
-		t := w.doc.nodes[node]
-		if w.doc.readers.number_text != nil {
-			text, ok := write.node_number_text(w.doc, node, w.buf[:64])
-			return text, .None if ok else .No_Memory
-		}
-		if t.kind != .Number || t.spelling & core.NUMBER_KIND_MASK == 0 {
-			return string(core.span(w.doc, node)), .None
-		}
-		spill: [write.ROOM_MAX]u8 = ---
-		digits: write.Out
-		write.init(&digits, &spill, context.temp_allocator)
-		if kind := write.put_decimal(&digits, string(core.span(w.doc, node)), t.spelling); kind != .None {
-			return "", kind
-		}
-		text, err := write.finish(&digits)
-		return string(text), err.kind
-	case .True:
-		return "true", .None
-	case .False:
-		return "false", .None
-	case .Bytes:
-		text, ok := write.node_bytes_text(w.doc, node, w.buf[:])
-		return text, .None if ok else .No_Memory
-	}
-	return "", .Unwritable
 }
 
 // Writes the facts of an XML document that stand before byte `upto` and were not written, set apart by `apart`.

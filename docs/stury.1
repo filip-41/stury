@@ -106,10 +106,10 @@ with \-\-to, \-n, \-\-stream, \-\-stream\-errors, \-\-follow, \-r, \-j, \-\-raw\
 .SH OPTIONS
 .TP
 .BI \-\-from " format"
-Read json (the default), jsonc, json5, ndjson, csv, tsv, toml, yaml, xml or cbor. With check, judge the input as that format is read.
+Read json (the default), jsonc, json5, ndjson, csv, tsv, toml, yaml, xml, cbor or html. With check, judge the input as that format is read.
 .TP
 .BI \-\-to " format"
-Write json (the default), jsonc, ndjson (as \-c), csv, tsv, toml, yaml, xml or cbor. toml, yaml and xml write each output as a text of the format, which a node of a toml or yaml input, and an xml document written whole, keeps its comments and spellings in, and cbor each output as one item in preferred serialization with nothing between the items. toml takes an object only and no JSON layout option; yaml takes \-c (flow style), \-\-indent and \-a. xml takes an object of one member, the root element, and \-c, \-\-indent and \-a. A member is an element, an array repeats it, and #text is text. csv and tsv write each output as one record. An object is a row under a header of the first object's keys (sorted under \-S). A missing key is an empty cell, and an extra key ends the run with exit 5. An array or a scalar is a row with no header, and the two kinds do not mix. A string is its text, a number is spelled as it was written, and null is an empty cell. csv writes "" as a quoted empty cell; tsv cannot tell the two apart. An array or object in a cell ends the run (tojson makes text of it). Not with \-r, \-j, \-a, \-C, \-c, \-\-indent, \-\-tab, \-\-seq or \-\-raw\-output0, and not with check.
+Write json (the default), jsonc, ndjson (as \-c), csv, tsv, toml, yaml, xml, cbor or html. toml, yaml and xml write each output as a text of the format, which a node of a toml or yaml input, and an xml document written whole, keeps its comments and spellings in, and cbor each output as one item in preferred serialization with nothing between the items. toml takes an object only and no JSON layout option; yaml takes \-c (flow style), \-\-indent and \-a. xml takes an object of one member, the root element, and \-c, \-\-indent and \-a. html takes an object, one of one html member a document and any other a fragment, and writes it by the WHATWG serialization. A member is an element, an array repeats it, and #text is text. csv and tsv write each output as one record. An object is a row under a header of the first object's keys (sorted under \-S). A missing key is an empty cell, and an extra key ends the run with exit 5. An array or a scalar is a row with no header, and the two kinds do not mix. A string is its text, a number is spelled as it was written, and null is an empty cell. csv writes "" as a quoted empty cell; tsv cannot tell the two apart. An array or object in a cell ends the run (tojson makes text of it). Not with \-r, \-j, \-a, \-C, \-c, \-\-indent, \-\-tab, \-\-seq or \-\-raw\-output0, and not with check.
 .TP
 .B \-\-grow\-header
 With \-\-to csv or tsv, hold the output and write a header of every key in the order first seen (byte order under \-S). Memory holds all the output.
@@ -131,6 +131,9 @@ Read YAML 1.2 with the core schema, each document of a stream one input. A repea
 .TP
 .BI \-\-from " xml"
 Read XML 1.0 with its internal subset, one document per input: an element is a member named as written, its text a string (\-\-infer types it) or a #text member. .&name reads an attribute by its name as written, and .@attrs, .@name, .@namespace, .@content, .@pi and .@doctype the element's attributes, name, namespace and text and the document's instructions and doctype. A name an element repeats is an array of its elements. edit keeps every byte the output does not change. Not with \-R, \-\-seq, \-\-stream or \-\-follow.
+.TP
+.BI \-\-from " html"
+Read HTML as a browser builds its tree, one document per input, in the shape \-\-from xml reads, every element with a .@namespace. check tells the first parse error. \-\-to html and fmt write it by the WHATWG serialization, the doctype, comments and attributes kept. edit keeps every byte it does not change and refuses an edit of what the tree construction made. Not with \-R, \-\-seq, \-\-stream or \-\-follow.
 .TP
 .BI \-\-from " cbor"
 Read CBOR (RFC 8949), each item of an RFC 8742 sequence one input, in any serialization. A byte string reads as its base64, a byte string key as its bytes, an integer key as its decimal text and a tag as its content, whose number .@tag reads. edit edits each item as a record. Not with \-R, \-\-seq, \-\-stream or \-\-follow.
@@ -173,7 +176,7 @@ With \-\-from csv or tsv, read the first record as data: each record is an array
 With \-\-from csv or tsv, a line whose first byte is c is no record.
 .TP
 .B \-\-infer
-With \-\-from csv or tsv, an unquoted cell that is exactly a JSON number, true or false reads as that value. A quoted cell stays a string. With \-\-from xml, a text value reads the same way.
+With \-\-from csv or tsv, an unquoted cell that is exactly a JSON number, true or false reads as that value. A quoted cell stays a string. With \-\-from xml or html, a text value reads the same way.
 .TP
 .B \-\-ragged
 With \-\-from csv or tsv, read records of any width: a narrower one lacks its missing columns, and a wider one's extra cells are named by their position from 1.
@@ -194,7 +197,7 @@ With \-\-to csv or tsv, write no header line.
 With \-\-to csv or tsv, end each written record with CR LF.
 .TP
 .B \-\-follow
-With one named file, answer each record as it is appended, like tail \-f FILE | stury FILTER without the pipe. It reads NDJSON, \-\-seq, \-R, jq's texts per file, CSV, TSV and YAML streams. A record cut short waits for its delimiter, the output is written after each record, and a file that shrinks is read again from its start with a note on stderr. SIGINT and SIGTERM end the run once the answers so far are written, by the signal, as they end jq. Not with standard input, several files, \-s, \-n, \-\-stream, JSONC, JSON5, TOML, XML, CBOR, check or fmt.
+With one named file, answer each record as it is appended, like tail \-f FILE | stury FILTER without the pipe. It reads NDJSON, \-\-seq, \-R, jq's texts per file, CSV, TSV and YAML streams. A record cut short waits for its delimiter, the output is written after each record, and a file that shrinks is read again from its start with a note on stderr. SIGINT and SIGTERM end the run once the answers so far are written, by the signal, as they end jq. Not with standard input, several files, \-s, \-n, \-\-stream, JSONC, JSON5, TOML, XML, CBOR, HTML, check or fmt.
 .TP
 .B \-\-explain
 Write how the filter runs and what the run did to stderr, as lines \fBstury: explain: KEY: SENTENCE\fR, and run the filter as without it. Before the run: filter, input, plan (reading only a path, reading only named columns, or building each input), because (each reason an input is built), decides (what the speed and memory follow). After it: ran (inputs read by path and built), threads, fallback (the first input a path plan built after all, and why), time and used (peak memory, bytes read and written). The keys and reasons are listed in docs/cli.md. Not with check or fmt.

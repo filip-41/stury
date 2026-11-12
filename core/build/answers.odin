@@ -118,6 +118,25 @@ answers_end :: proc(it: ^Answer_Iter, hi: u64, fault: Maybe(core.Fault)) {
 	answers_free(it)
 }
 
+// The fill of an iterator over a text its format reads only whole, once its format binds `build` (`Services.build`):
+// the first fill builds the text, under `.Refuse` refusing a repeated name, buffers every answer and ends the read.
+answers_built :: proc(it: ^Answer_Iter, build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error)) {
+	paths := it.paths if it.paths != nil else ([^]core.Path)(&it.one)[:1]
+	it.buffer = make([dynamic]core.Token_Answer, 0, it.max_batch, it.allocator)
+	doc, built := build(it.src, it.as, it.read.dups == .Refuse, it.allocator)
+	if built.kind != .None && it.read.dups == .Refuse {
+		core.destroy(&doc)
+		answers_fail(it, core.error_of(built))
+		return
+	}
+	_, err := scan_built(&doc, built, paths, it.read, &it.buffer, proc(state: rawptr, a: core.Token_Answer) -> bool {
+		_, e := append((^[dynamic]core.Token_Answer)(state), a)
+		return e == nil
+	}, it.allocator)
+	core.destroy(&doc)
+	answers_fail(it, core.error_of(err))
+}
+
 // Ends a read that could not start with `e`.
 answers_fail :: proc(it: ^Answer_Iter, e: core.Error) {
 	it.err = e

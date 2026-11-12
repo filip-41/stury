@@ -1,19 +1,19 @@
 # Library guide
 
-How to use `stury:json`, `stury:dsv`, `stury:toml`, `stury:yaml`, `stury:xml` and `stury:cbor`, with snippets from the
-programs in [examples/](../examples). A program imports the package of its format and calls everything through it. Each
-public name's doc comment is its contract, and
+How to use `stury:json`, `stury:dsv`, `stury:toml`, `stury:yaml`, `stury:xml`, `stury:html` and `stury:cbor`, with
+snippets from the programs in [examples/](../examples). A program imports the package of its format and calls everything
+through it. Each public name's doc comment is its contract, and
 [API.txt](../API.txt) lists the names of the format packages, then the names a format's author reads.
 [API_SHARED.txt](../API_SHARED.txt) lists the public names that only the packages of this repository use. The files in this
 directory describe one part each: [document.md](document.md), [paths.md](paths.md), [typed.md](typed.md),
-[writer.md](writer.md) and [records.md](records.md), and two describe formats: [markup.md](markup.md) XML, and
+[writer.md](writer.md) and [records.md](records.md), and two describe formats: [markup.md](markup.md) XML and HTML, and
 [binary.md](binary.md) CBOR.
 
 ## Requirements
 
 - Odin `dev-2026-11` or later. The collection is named `stury` and points at this directory: `-collection:stury=.`.
   A program imports the package of each format it reads, `stury:json`, `stury:dsv`, `stury:toml`, `stury:yaml`,
-  `stury:xml` or `stury:cbor`. Each exports the names of `stury:core`,
+  `stury:xml`, `stury:html` or `stury:cbor`. Each exports the names of `stury:core`,
   `stury:core/typed`, `stury:core/write`, `stury:core/records`, `stury:core/schema` and `stury:host` that a user calls.
 - 64-bit little-endian targets: darwin and linux, on amd64 and arm64. The command line also builds on Windows.
 - On amd64 the floor is x86-64-v2. Long strings are scanned wider on processors that have AVX-512BW, chosen at run
@@ -29,6 +29,7 @@ directory describe one part each: [document.md](document.md), [paths.md](paths.m
 | `toml` | TOML 1.0 and 1.1: the same calls, edits that keep every byte they do not reach, and `marshal` and `unmarshal` on the `toml` tag. A datetime is a string whose `Tag` fact names its type |
 | `yaml` | YAML 1.2 with the core schema: the same calls, edits, a stream's documents as records, and a writer that keeps comments, tags, anchors and scalar styles |
 | `xml` | XML 1.0 with the internal subset and namespaces: `validate`, `build`, `find`, `scan`, `query`, `unmarshal`, `marshal`, `write`, records, and checks by a model and a schema |
+| `html` | HTML as the WHATWG standard parses it, built into the document XML builds, with the calls of `xml` |
 | `cbor` | CBOR (RFC 8949): the encoding rules, documents, paths, a sequence's items as records, `marshal`, `unmarshal`, the writer and the checks. A byte string is `Kind.Bytes` |
 | `core` | what every format shares, and the interface a format's author or a run-time choice of format uses: `As`, `build` and `validate` over a handle |
 | `core/records` | NDJSON, RFC 7464 and CSV-style text as a sequence of records, reached as `records_check`, `records_open`, `records_open_stream`, `records_next`, `records_each` and the writer |
@@ -44,8 +45,8 @@ A format is a `Spec` value passed to each call. `json.Spec` is `.Json`, `.Jsonc`
 `.Tsv` or `.Plain`. `.Json` is strict RFC 8259. `.Jsonc` also takes comments and trailing commas, and `.Json5` takes the
 JSON5 grammar. A call that takes both a `Spec` and `Options` reads `Options` for the format's own settings, which for
 JSON are `max_depth`, `tolerate` and `refuse_non_finite`, and for dsv `no_header`, `delimiter`, `comment`, `tolerate`, `crlf` and `infer`.
-`toml.Spec` is `.Toml_1_0` or `.Toml_1_1`, `yaml.Spec` is `.Yaml_1_2` and `xml.Spec` is `.Xml`.
-`cbor.Spec` is `.Cbor`, `.Preferred`, `.Deterministic` or `.Length_First`: `.Cbor` reads
+`toml.Spec` is `.Toml_1_0` or `.Toml_1_1`, `yaml.Spec` is `.Yaml_1_2`, `xml.Spec` is `.Xml` and `html.Spec` is
+`.Document` or `.Fragment`. `cbor.Spec` is `.Cbor`, `.Preferred`, `.Deterministic` or `.Length_First`: `.Cbor` reads
 every well-formed item, and the others also refuse an item not in that serialization.
 
 ## Errors
@@ -413,8 +414,9 @@ table the same way.
 `toml.set`, `yaml.set`, `cbor.set` and their edit lists edit those formats the same way, and each commits its edits
 itself, since a TOML table, a YAML block collection and a CBOR container's count are not one range of bytes. The result
 is read again by the format's walk, so an edit that breaks a rule of the language is `.Bad_Result`, and an edit the
-format cannot make is a `.Frozen` error whose message names the reason. `xml.set` and its edit lists commit the same
-way.
+format cannot make is a `.Frozen` error whose message names the reason. `xml.set`, `html.set` and their edit lists
+commit the same way, and HTML's result is read as a browser reads it: one whose tree is not the edited tree is
+`.Bad_Result`.
 
 - TOML: a scalar or an inline value is replaced in place, a new member is a line after its table's last line and before
   its sub-tables, a built table or array of tables is a section after the last section of the table it joins, and a
@@ -664,12 +666,13 @@ fmt.print(string(out)) // replicas: 5 # scaled by hand, and the rest as it was
 - `yaml.checks(.Yaml_1_2)` gives a model the format, `yaml.bind_schema` binds a JSON Schema, and a typed read of a
   built node reads its plain scalars as the core schema types them.
 
-## XML
+## XML and HTML
 
-`xml` reads XML 1.0 with the internal subset and namespaces into the markup document shape: an element is a member
-under its name, its text is its value, or a `#text` member when it has child elements, and its attributes are facts of
-its value. It validates, builds, answers paths, is checked by models and schemas, reads into typed values, reads records
-and writes, and edits keeping the bytes no edit reaches. [markup.md](markup.md) holds the shape, the DTD and namespaces.
+`xml` reads XML 1.0 with the internal subset and namespaces, and `html` reads HTML as the WHATWG standard's parser
+does, recovering from every parse error. Both build the markup document shape: an element is a member under its name,
+its text is its value, or a `#text` member when it has child elements, and its attributes are facts of its value. Both
+validate, build, answer paths, are checked by models and schemas, read into typed values, read records and write, and
+edit keeping the bytes no edit reaches. [markup.md](markup.md) holds the shape, the DTD, namespaces and the HTML tree.
 
 ```odin
 src := transmute([]u8)string(`<order id="7"><item>pen</item><item>ink</item><note>rush &amp; wrap</note></order>`)
@@ -698,6 +701,9 @@ for a in found.answers {
   items ([markup.md](markup.md)).
 - `attributes_of` walks an element's attributes, and `fact_value` gives an element's `Name`, `Namespace` and `Content`.
   A path step `{uri}local` and `xml.attribute_value` with such a name match by namespace.
+- `html.build(src, .Document)` builds the tree the standard's algorithm builds, implied elements included, so
+  `<p>Pens` is `{"html":{"head":null,"body":{"p":"Pens"}}}` as JSON. `.Fragment` reads a fragment in the context
+  element `Options.context_name`. `html.validate` returns the first parse error, which a build passes over.
 - `xml.unmarshal` reads a text into a struct whose member takes its name from the tag key `xml`: the member of the
   root element's name, and under it a member per attribute, child element or `#text`. A list member collects the
   siblings of its name, and a number, boolean or union member reads the text by its type. `plan_make`, `plan_of` and
@@ -710,8 +716,13 @@ for a in found.answers {
   What XML cannot spell so that it reads back, such as a key that is no XML name, a nested array or an empty string,
   is `.Unwritable`. `xml.tokens_init` starts a token write of the same elements under the same refusals, and a pretty
   one is written whole into a buffer, so with a stream it is `.Unsupported`.
-- A text is one record under `.Concatenated`, so `xml.records_each` and `records_check` read a file as one document.
-- `xml.checks(.Xml)` gives a model the format, which loads an element's attributes and
+- `html.unmarshal`, `check`, `plan_make` and `plan_of` read as `xml`'s do, on the tag key `html`, from the tree the
+  standard builds, implied elements included. `html.write` writes a document as the WHATWG standard serializes a tree,
+  and `html.marshal` and `html.tokens_init` write a typed value and a token write's calls as it writes a built one. A
+  value whose text a browser reads back as another tree is `.Unwritable`.
+- A text is one record under `.Concatenated`, so `xml.records_each`, `html.records_each` and `records_check` read a
+  file as one document.
+- `xml.checks(.Xml)` and `html.checks(.Document)` give a model the format, which loads an element's attributes and
   child elements as members, and `bind_schema` binds a JSON Schema.
 
 ## CBOR

@@ -125,27 +125,7 @@ reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 // The plan's `read`: the text is built whole, under `.Refuse` refusing a repeated element, and its root is read.
 @(private)
 text_read :: proc(src: []u8, $S: Spec, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
-	doc, built := build_spec(src, S, as, read.dups == .Refuse, context.allocator)
-	defer core.destroy(&doc)
-	#partial switch built.kind {
-	case .None:
-	case .No_Memory:
-		return {kind = .No_Memory}
-	case .Duplicate_Key:
-		return {kind = .Duplicate_Key, at = built.at}
-	case:
-		err := core.Typed_Refusal{kind = .Walk, at = built.at, inner = built.inner}
-		if read.sink != nil {
-			read.sink.fatal = err
-			typed.sink_error(read.sink, err)
-		}
-		return err
-	}
-	read := read
-	if read.dups == .Refuse {
-		read.dups = .Last
-	}
-	return typed.read_nodes(&doc, core.ROOT, T, target, plan, read, allocator)
+	return typed.read_markup_text(src, as, build_of(S), target, T, plan, read, allocator)
 }
 
 // Checks the text `src` of spec `S` by `plan`, building its document whole, a handle with no readers read as `S` with
@@ -156,10 +136,7 @@ check_text :: proc(src: []u8, $S: Spec, as: core.As, target: rawptr, T: typeid, 
 	if handle.readers == nil {
 		handle = bound_as(S)
 	}
-	build := proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-		return build_spec(src, S, as, refuse_duplicates, allocator)
-	}
-	return typed.check_markup_text(src, handle, build, target, T, plan, read, allocator)
+	return typed.check_markup_text(src, handle, build_of(S), target, T, plan, read, allocator)
 }
 
 @(private)

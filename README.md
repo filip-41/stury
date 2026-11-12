@@ -1,16 +1,17 @@
 # stury
 
-stury is a JSON, CSV, TOML, YAML, XML and CBOR library for [Odin](https://odin-lang.org), with a command line, `stury`,
-that runs jq filters over JSON, CSV, TOML, YAML, XML and CBOR, checks them against JSON Schema, edits them in place and
-tells what differs between two of them.
+stury is a JSON, CSV, TOML, YAML, XML, HTML and CBOR library for [Odin](https://odin-lang.org), with a command line,
+`stury`, that runs jq filters over JSON, CSV, TOML, YAML, XML, HTML and CBOR, checks them against JSON Schema, edits
+them in place and tells what differs between two of them.
 
 Input is checked strictly by default: JSON against RFC 8259 (no `01`, no `NaN`, no invalid UTF-8, no lone
 surrogate), CSV against RFC 4180, TOML against 1.0 or 1.1, YAML against 1.2 and its test suite, XML against 1.0 and its
-conformance suite, and CBOR against RFC 8949, with its preferred and deterministic encodings on request.
+conformance suite, HTML by the WHATWG parser, and CBOR against RFC 8949, with its preferred and deterministic encodings
+on request.
 
-**Status:** pre-1.0. The API may still change between releases. The TOML, YAML, XML and CBOR packages, models, JSON
-Schema, the value diff, the regex package and the command line's `edit`, `diff` and `schema` are not in a release yet:
-[CHANGELOG.md](CHANGELOG.md) lists them under Unreleased.
+**Status:** pre-1.0. The API may still change between releases. The TOML, YAML, XML, HTML and CBOR packages, models,
+JSON Schema, the value diff, the regex package and the command line's `edit`, `diff` and `schema` are not in a release
+yet: [CHANGELOG.md](CHANGELOG.md) lists them under Unreleased.
 
 ## Features
 
@@ -42,6 +43,9 @@ The library:
 - **XML** through the same calls: an element is a member, its attributes are facts and its text a value. It reads the
   internal subset and namespaces, reads into Odin types, is checked by models and JSON Schema, edits keeping every byte
   it does not reach, and writes a document with its doctype, comments and references as written.
+- **HTML** through the same calls, in XML's shape: the tree is built by the standard's tree construction, with
+  recovery from every parse error. It reads into Odin types, is checked by models and JSON Schema, edits keeping every
+  byte it does not reach, and writes a document by the standard's serialization.
 - **CBOR** through the same calls, edits included, with byte strings, tags as facts, integer keys, the preferred and
   deterministic serializations as specs, a sequence's items as records, and structs written as maps or arrays.
 - **One interface for every format.** A format is a `Spec` passed to the same calls, and every call returns one
@@ -55,9 +59,9 @@ The library:
 The command line:
 
 - It runs jq 1.8 filters with jq's answers and exit codes, and reports faults with their line and column.
-- It reads and writes JSONC, NDJSON, CSV, TSV, TOML, YAML, XML and CBOR, and reads JSON5.
+- It reads and writes JSONC, NDJSON, CSV, TSV, TOML, YAML, XML, CBOR and HTML, and reads JSON5.
 - It reads what a format holds beside the value: a TOML or YAML value's tag, anchor, alias and style (`.@tag`,
-  `.@anchor`, `.@alias`, `.@style`), a CBOR tag as its number, and an XML element's name, namespace, text, attributes, processing
+  `.@anchor`, `.@alias`, `.@style`), a CBOR tag as its number, and an XML or HTML element's name, namespace, text, attributes, processing
   instructions and doctype (`.@name`, `.@namespace`, `.@content`, `.@attrs`, `.&name`, `.@pi`, `.@doctype`).
 - It validates without running a filter (`stury check`), against a JSON Schema too (`check --schema`), and types a
   filter against the schema of its inputs (`check --filter`).
@@ -79,7 +83,7 @@ odin build . -collection:stury=vendor/stury -o:speed
 ```
 
 Then `import "stury:json"`, `import "stury:dsv"` for delimited text, `import "stury:toml"` for TOML,
-`import "stury:yaml"` for YAML, `import "stury:xml"` for XML, and `import "stury:cbor"` for CBOR. Each exports the names of `core`, `typed`,
+`import "stury:yaml"` for YAML, `import "stury:xml"` for XML, `import "stury:html"` for HTML, and `import "stury:cbor"` for CBOR. Each exports the names of `core`, `typed`,
 `write`, `records`, `schema` and `host` that a program calls, the schema check included. Models are
 `import model "stury:core/model"`, and schema inference, sampling and comparison are `stury:core/schema`. Keep the
 package directories together. For the [ols](https://github.com/DanielGavin/ols) language server, add the same
@@ -316,10 +320,10 @@ programs are in [examples/](examples). Each prints a fixed answer, and `make tes
 
 `stury` runs [jq](https://jqlang.org) 1.8 filters with jq's results and exit codes. Input is strict JSON by
 default, so `01`, `NaN` and invalid UTF-8 are errors, reported with their line and column. `--from` reads `json`,
-`jsonc`, `json5`, `ndjson`, `csv`, `tsv`, `toml`, `yaml`, `xml` or `cbor`, and `--to` writes all of them but `json5`.
-`--alias-limit N` and `--merge-keys` set how YAML is read, and `--expansion-limit N` and `--unread-entities` how XML is.
-An XML element is a member, and its attributes, name and namespace are read by `.&name`, `.@attrs`, `.@name` and
-`.@namespace`.
+`jsonc`, `json5`, `ndjson`, `csv`, `tsv`, `toml`, `yaml`, `xml`, `cbor` or `html`, and `--to` writes all of them but
+`json5`. `--alias-limit N` and `--merge-keys` set how YAML is read, and `--expansion-limit N` and `--unread-entities`
+how XML is. An XML or HTML element is a member, and its attributes, name and namespace are read by `.&name`,
+`.@attrs`, `.@name` and `.@namespace`.
 
 ```sh
 $ echo '{"logs":[{"id":1}]}' | stury -c '.logs[].id'
@@ -473,7 +477,7 @@ how a filter is run.
 - Internals, for contributors, one file per part: [walk](docs/walk.md), [document](docs/document.md),
   [paths](docs/paths.md), [typed reads](docs/typed.md), [writer](docs/writer.md), [records](docs/records.md),
   [kernel](docs/kernel.md) and [hot paths](docs/hotpaths.md), and the formats with pages of their own:
-  [XML](docs/markup.md) and [CBOR](docs/binary.md).
+  [XML and HTML](docs/markup.md) and [CBOR](docs/binary.md).
 
 ## Packages
 
@@ -484,6 +488,7 @@ how a filter is run.
 | `toml` | the `Toml_1_0` and `Toml_1_1` specs, with the same calls |
 | `yaml` | the `Yaml_1_2` spec, with the same calls and a stream's documents as records |
 | `xml` | the `Xml` spec: `validate`, `build`, `find`, `scan`, `query`, `unmarshal`, `marshal`, `write`, `records_each`, `checks` |
+| `html` | the `Document` and `Fragment` specs: `validate`, `build`, `find`, `scan`, `query`, `unmarshal`, `marshal`, `write`, `records_each`, `checks` |
 | `cbor` | the `Cbor`, `Preferred`, `Deterministic` and `Length_First` specs, with the same calls |
 | `core/model` | models: rules on an Odin type, `load`, `validate`, `patch`, `dump`, problem documents and the schema of a model |
 | `core/schema` | JSON Schema: compiling, binding and checking a schema, `infer`, `sample`, `compare`, `convert`, and the Odin types of a schema |

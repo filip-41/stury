@@ -1,57 +1,22 @@
 // A walk stopped and resumed through a cursor against an unbroken walk.
 package xml_tests
 
-import "base:runtime"
 import "core:fmt"
 import "core:slice"
 import "core:testing"
 import core "../../core"
 import xml ".."
-
-// A hook that logs every token, skips the element named `skip` at its key or its object, and stops at token `stop`, or
-// at every `every`th one when `every` is not 0. A skipped token is never a stop, so the tokens match those of a walk
-// with no stops.
-@(private)
-Stopping :: struct {
-	src:    []u8,
-	tokens: [dynamic]core.Token,
-	skip:   string,
-	stop:   int,
-	every:  int,
-	// The last element key the hook saw, whose object a skip on the object hides.
-	last:   string,
-}
+import walktest "../../walktest"
 
 @(private)
-stopping_hook :: proc "contextless" (h: ^Stopping, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	context = runtime.default_context()
-	n := len(h.tokens)
-	append(&h.tokens, t)
-	r := core.Hook_Regs{s.a + 1, s.b, s.c}
-	if t.role == .Key && t.n != 0 {
-		h.last = string(h.src[t.lo:t.lo + u64(t.n)])
-		if h.last == h.skip {
-			return r, .Skip
-		}
-	}
-	if t.kind == .Object && t.role == .Value && len(h.skip) > 1 && h.skip[0] == '*' && h.skip[1:] == h.last {
-		return r, .Skip
-	}
-	if h.every != 0 && (n + 1) % h.every == 0 || n + 1 == h.stop {
-		return r, .Stop
-	}
-	return r, .Next
-}
-
-@(private)
-walk_stopping :: proc(src: []u8, skip: string, stop, every: int) -> (h: Stopping, end: string) {
-	h = Stopping{src = src, skip = skip, stop = stop, every = every}
+walk_stopping :: proc(src: []u8, skip: string, stop, every: int) -> (h: walktest.Stopping, end: string) {
+	h = walktest.Stopping{src = src, skip = skip, stop = stop, every = every}
 	h.tokens = make([dynamic]core.Token, 0, 64)
 	regs: core.Hook_Regs
 	cursor: xml.Cursor
-	hi, fault := xml.walk(src, 0, .Xml, {}, &h, &regs, stopping_hook, &cursor)
+	hi, fault := xml.walk(src, 0, .Xml, {}, &h, &regs, walktest.stopping_hook, &cursor)
 	for xml.can_resume(&cursor) {
-		hi, fault = xml.walk_resume(src, &cursor, .Xml, {}, &h, &regs, stopping_hook)
+		hi, fault = xml.walk_resume(src, &cursor, .Xml, {}, &h, &regs, walktest.stopping_hook)
 	}
 	return h, fmt.tprint(hi, fault, regs.a)
 }
@@ -102,19 +67,19 @@ cursor_resumes_after_any_token :: proc(t: ^testing.T) {
 @(test)
 cursor_refuses_another_text :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("<r><a>1</a></r>")
-	h := Stopping{src = src, stop = 2}
+	h := walktest.Stopping{src = src, stop = 2}
 	h.tokens = make([dynamic]core.Token, 0, 16)
 	defer delete(h.tokens)
 	cursor: xml.Cursor
-	_, fault := xml.walk(src, 0, .Xml, {}, &h, nil, stopping_hook, &cursor)
+	_, fault := xml.walk(src, 0, .Xml, {}, &h, nil, walktest.stopping_hook, &cursor)
 	testing.expect(t, fault == nil && xml.can_resume(&cursor))
 	other := transmute([]u8)string("<r><a>2</a></r>")
-	_, fault = xml.walk_resume(other, &cursor, .Xml, {}, &h, nil, stopping_hook)
+	_, fault = xml.walk_resume(other, &cursor, .Xml, {}, &h, nil, walktest.stopping_hook)
 	f, bad := fault.?
 	testing.expect(t, bad && f.kind == .Bad_Option && xml.can_resume(&cursor))
 	xml.destroy(&cursor)
 	testing.expect(t, !xml.can_resume(&cursor))
-	_, fault = xml.walk_resume(src, &cursor, .Xml, {}, &h, nil, stopping_hook)
+	_, fault = xml.walk_resume(src, &cursor, .Xml, {}, &h, nil, walktest.stopping_hook)
 	f, bad = fault.?
 	testing.expect(t, bad && f.kind == .Bad_Option)
 }

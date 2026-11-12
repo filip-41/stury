@@ -59,6 +59,14 @@ keep_state :: proc(doc: ^core.Document, state: []u8, keep: bool, allocator: runt
 	return true
 }
 
+// The build of spec `S`, as `Services.build` takes it.
+@(private)
+build_of :: proc "contextless" ($S: Spec) -> proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+	return proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+		return build_spec(src, S, as, refuse_duplicates, allocator)
+	}
+}
+
 // Reads `src` as spec `S` into a document that holds the handle `handle`: the text is walked to size the document and
 // walked again to write it.
 @(private)

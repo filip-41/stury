@@ -7,5 +7,9 @@
 /xml/test/conformance/cases.tsv -text
 /yaml/test/suite/** -text
 /cbor/test/vectors/** -text
-# The entity table and the source whose digest is checked are read as bytes, so a checkout keeps them as committed.
+/html/test/conformance/html5lib/** -text
+/html/test/conformance/wpt/** -text
+# The entity and encoding tables, and the sources whose digests are checked, are read as bytes, so a checkout keeps
+# them as committed.
 /core/spell/entities/* -text
+/html/encodings/encodings.json -text

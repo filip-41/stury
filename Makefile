@@ -17,12 +17,15 @@ endif
 .DEFAULT_GOAL := gate
 
 # The library packages, and the test packages that read them.
-LIB_PKGS  := core/spell core/regex core host core/kernel core/compose core/diff core/rules core/build core/typed core/write core/records core/schema core/model json dsv toml xml yaml cbor
-TEST_PKGS := core/spell/test core/regex/test host/test core/kernel/test core/test core/write/test core/records/test json/test dsv/test toml/test xml/test yaml/test cbor/test
+LIB_PKGS  := core/spell core/regex core host core/kernel core/compose core/diff core/rules core/build core/typed core/write core/records core/schema core/model json dsv toml xml yaml cbor html
+TEST_PKGS := core/spell/test core/regex/test host/test core/kernel/test core/test core/write/test core/records/test json/test dsv/test toml/test xml/test yaml/test cbor/test html/test
 # The packages the tests share, checked by `lint` and built through their imports.
 SUPPORT_PKGS := walktest bench/timing xml/test/oracle
 # The benchmark programs, which `lint` and the gate compile.
 BENCH_PKGS := bench bench/doc bench/editbench bench/paths bench/typed bench/write bench/records bench/schema bench/schema_csv bench/schema_json
+# html/internal.odin opens the HTML tokenizer and tree to html/test's conformance tests. A test build opens them by
+# itself, and `odin check` needs the define.
+HTML_INTERNALS := -define:STURY_HTML_INTERNALS=true
 # The test packages whose loops are compiled for the tier `-define:TIER` names.
 TIER_PKGS := core/kernel/test
 TEST_OPT  := -o:minimal
@@ -273,13 +276,15 @@ lint:
 	python3 tools/checks.py words
 	python3 tools/checks.py globals
 	python3 tools/checks.py api
-	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS),)
+	$(call odin_each,check,$(LIB_PKGS) $(filter-out html/test,$(TEST_PKGS)) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS),)
+	$(ODIN) check html/test -no-entry-point $(LINT_FLAGS) $(HTML_INTERNALS)
 	$(call odin_each,check,$(BENCH_PKGS),$(LINT_FLAGS),)
 	$(ODIN) check cmd/stury $(LINT_FLAGS)
 	$(ODIN) check cmd/stury $(LINT_FLAGS) -target:linux_amd64
 	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && echo "== cmd/stury (windows_amd64 objects)" && \
 		$(ODIN) build cmd/stury -build-mode:obj -target:windows_amd64 -windows-sdk-root:$$d $(LINT_FLAGS) -out:$$d/stury.obj
-	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_amd64, (linux_amd64))
+	$(call odin_each,check,$(LIB_PKGS) $(filter-out html/test,$(TEST_PKGS)) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_amd64, (linux_amd64))
+	$(ODIN) check html/test -no-entry-point $(LINT_FLAGS) $(HTML_INTERNALS) -target:linux_amd64
 	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && for p in $(TIER_PKGS); do for o in none speed; do \
 		echo "== $$p (linux_amd64 v4 -o:$$o)"; \
 		$(ODIN) test $$p -build-mode:obj -target:linux_amd64 -define:TIER=2 -o:$$o $(LINT_FLAGS) -out:$$d/t.o || exit 1; \

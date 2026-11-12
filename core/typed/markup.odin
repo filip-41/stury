@@ -245,31 +245,23 @@ record_rules :: proc "contextless" (h: ^Check, fld: ^Field) -> (l: ^rules.Leaf, 
 }
 
 // Whether the member record `fld` collects the siblings of its name, and whether it has `prefixItems`, so it collects only
-// a name that repeats. A type's member collects them when it is a list.
+// a name that repeats. A type's member collects them when it is a list, under a check as under a read.
 @(private)
 collects :: proc "contextless" (h: ^$H, fld: ^Field) -> (arrays, prefixed: bool) {
-	when H == Reader {
-		#partial switch fld.kind {
-		case .Slice, .Dynamic, .Array, .Fixed_List:
-			return true, false
+	#partial switch fld.kind {
+	case .Slice, .Dynamic, .Array, .Fixed_List:
+		return true, false
+	case .Checked:
+		when H == Check {
+			l, u, prefixed_ := record_rules(h, fld)
+			if l == nil {
+				return u.inside, prefixed_
+			}
+			untyped := l.kinds == rules.EVERY_KIND && (u.inside || l.min_items > 0 || l.max_items != max(u64))
+			return l.kinds - {.Null} == {.Array} || untyped, prefixed_
 		}
-		return false, false
-	} else {
-		return checked_collects(h, fld)
 	}
-}
-
-@(private)
-checked_collects :: proc "contextless" (h: ^Check, fld: ^Field) -> (arrays, prefixed: bool) {
-	if fld.kind != .Checked {
-		return false, false
-	}
-	l, u, prefixed_ := record_rules(h, fld)
-	if l == nil {
-		return u.inside, prefixed_
-	}
-	untyped := l.kinds == rules.EVERY_KIND && (u.inside || l.min_items > 0 || l.max_items != max(u64))
-	return l.kinds - {.Null} == {.Array} || untyped, prefixed_
+	return false, false
 }
 
 // The member whose key is node `k` of the element `e` reads and its siblings of the same name, as one array, each later

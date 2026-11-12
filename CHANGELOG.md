@@ -4,12 +4,13 @@
 
 ### Command line
 
-- `--from toml`, `yaml` and `xml` read TOML 1.1, YAML 1.2 with the core schema (each document of a stream an input)
-  and XML 1.0 with its internal subset, and `--to toml`, `yaml` and `xml` write TOML 1.0, YAML in block or flow style,
-  and XML. `check`, `check --schema`, `fmt`, `diff`, `schema infer` and `--explain` take each, and `--follow` takes
-  YAML. `--to xml` and `fmt --from xml` keep an XML document's doctype, comments, instructions, attributes and
-  references as written.
-- An XML element's name that repeats among its members reads as one member, an array of each of them in
+- `--from toml`, `yaml`, `xml` and `html` read TOML 1.1, YAML 1.2 with the core schema (each document of a stream an
+  input), XML 1.0 with its internal subset, and HTML as a browser with scripting disabled builds its tree, and
+  `--to toml`, `yaml`, `xml` and `html` write TOML 1.0, YAML in block or flow style, XML, and HTML by the WHATWG
+  serialization. `check`, `check --schema`, `fmt`, `diff`, `schema infer` and `--explain` take each, and `--follow`
+  takes YAML. `--to xml` and `fmt --from xml` keep an XML document's doctype, comments, instructions, attributes and
+  references as written, and `--to html` and `fmt --from html` an HTML document's doctype, comments and attributes.
+- An XML or HTML element's name that repeats among its members reads as one member, an array of each of them in
   document order, and a name that stands once as a single value: `<r>a<b>1</b>c<b>2</b></r>` is
   `{"r":{"#text":["a","c"],"b":["1","2"]}}` to a filter, `--to json`, `--to yaml`, `--to toml`, `--to cbor`, `diff` and
   `schema infer`. `--to xml` writes an array under `#text` as its runs.
@@ -20,16 +21,17 @@
 - `--alias-limit N` and `--merge-keys` set how `--from yaml` reads: the bytes aliases may read again, and `<<` as
   YAML 1.1's merge key. `--expansion-limit N` and `--unread-entities` set how `--from xml` reads: the bytes entity
   references may expand to, and a reference to an entity no declaration stury read names, read as its own text.
-  `--infer` types the text of XML as it types a table's cells. With another `--from` each is a usage error.
+  `--infer` types the text of XML and HTML as it types a table's cells. With another `--from` each is a usage error.
 - `.@tag`, `.@anchor`, `.@alias` and `.@style` read a value's tag, anchor, alias and spelling: a TOML datetime's type,
   a number's form and a string's quoting, and a YAML node's tag, anchor, alias and style. `.@tag`, `.@anchor` and
   `.@alias` take a string or `null`, travel with their value as comments do, and `edit` writes them in YAML.
   `.@style` is read only. A CBOR tag reads as its number, and `.@tag` takes a number too.
-- `.@name`, `.@namespace`, `.@content`, `.@attrs`, `.&name` (or `.&"name"`), `.@pi` and `.@doctype` read an XML
-  element's name as written, its namespace, its text with its descendants', its attributes, one attribute by its name
-  as written, the processing instructions before a node and the document type. They are `null` outside XML, and in a
-  path `.&k` is the step `{"fact": "attribute", "name": "k"}`. `.&k = "v"` and `del(.&k)` write and
-  remove an attribute, which `edit --from xml` writes into the start tag. The others are read only.
+- `.@name`, `.@namespace`, `.@content`, `.@attrs`, `.&name` (or `.&"name"`), `.@pi` and `.@doctype` read an XML or
+  HTML element's name as written, its namespace, its text with its descendants', its attributes, one attribute by its
+  name as written, the processing instructions before a node and the document type. They are `null` outside XML and
+  HTML, and in a path `.&k` is the step `{"fact": "attribute", "name": "k"}`. `.&k = "v"` and `del(.&k)` write and
+  remove an attribute, which `edit --from xml` and `edit --from html` write into the start tag. The others are read
+  only.
 - `edit --from toml` keeps every byte the output does not change: a new member joins its table's lines, a built table
   is a `[section]`, a dropped line goes with the comments above it, and `null` is refused with the reason.
 - `edit --from xml` keeps every byte the output does not change: a value is written between its element's tags, a
@@ -37,6 +39,9 @@
   renamed key respells both tags. A repeated name's array edits its elements one by one, `.r.b[1]` the second `b` and
   `."#text"[1]` the second text run, and the members keep their document order across names. A change of member order
   and a key that is no XML name are refused with the reason.
+- `edit --from html` edits as `edit --from xml` does and writes a changed value as `--to html` does. An end tag the
+  source leaves out stays out. An edit that writes at an element the tree construction implied or moved, content in a
+  void element, markup in a raw text, and a result a browser reads as another tree are refused with the reason.
 - `edit --from yaml` edits each document of a stream as a record: a document with no output is dropped, each output
   past the first is a new document after it, `-s` runs the filter on the array of the documents, and a new or moved
   document starts with a `---` line. A text of comments alone is written back as it is, and `--diff` takes no stream of
@@ -259,6 +264,28 @@
   in a text run are `.Frozen` with the reason.
 - `xml.checks` and `xml.bind_schema` give a model the format and bind a JSON Schema. A model and a schema read an
   element's attributes and child elements as members, and its text as `#text`.
+- New package `html`: HTML as the WHATWG standard parses it, with its tokenizer, tree construction, templates, foreign
+  content, fragments (`html.Spec.Fragment` in a context element) and encoding sniffing, built into the document an XML
+  text with the same markup builds. A build recovers from every parse error, and `html.validate` returns the first. An
+  element's namespace is a fact. A text in an encoding other than UTF-8 is refused. The html5lib-tests tokenizer,
+  tree-construction and encoding cases run against it.
+- `html.unmarshal`, `check`, `reads`, `plan_make`, `plan_of` and `number` read HTML into typed values as `xml`'s do,
+  on the tag key `html`. An HTML text is one record under `.Concatenated` (`html.records_open`, `records_open_stream`,
+  `records_check`, `records_each`, `record_docs`), and `html.answers` gives a path's answers one at a time.
+  `html.walk` takes a `^Cursor` that `walk_resume` continues after any token, and `html.destroy` frees a cursor a stop
+  left.
+- `html.write` writes a document as the WHATWG standard serializes a tree: a void element with no end tag, a raw text
+  as it stands, any other text and attribute value escaped, and an HTML document's implied elements with their tags,
+  its doctype, comments and attributes as written. A value whose text a browser would read back as another tree is
+  `.Unwritable`. `html.marshal` and `html.tokens_init` write a typed value and a token write's calls as `html.write`
+  writes a built one.
+- `html.set`, `html.edit_list_init` and the handle's edit services edit an HTML text as `xml`'s do, writing a value by
+  the serialization's rules. An edit that writes at a node the tree construction made rather than the text, content
+  in a void element and markup in a raw text are `.Frozen`, an object whose elements do not read back as written in a
+  fragment whose context is the element they go in is `.Bad_Value`, and a result whose tree is not the edited tree is
+  `.Bad_Result`.
+- `html.checks` and `html.bind_schema` give a model the format and bind a JSON Schema, which read an HTML element as
+  they read an XML one.
 - New package `cbor`: CBOR (RFC 8949) through the calls of the other formats.
   A byte string is `Kind.Bytes`, a tag is a fact before its content (`fact_value(.., .Tag)` gives the nearest tag's
   number), an integer key reads as its decimal digits and is written back as an integer, and `1` and `"1"` are one key.
@@ -290,6 +317,10 @@ The hooks the formats share:
   format freezes is `Document_Error_Kind.Frozen`. `core.Site` says where an edit's text stands, and `write.tokens_init`
   takes one.
 - `SPELLING_SYNTHETIC` marks a key or text no span of the source spells, as a markup element's `#text`.
+- `core.Token_Cursor` holds the tokens past a markup walk's stop, for XML's cursor and HTML's. `write.scalar_text`,
+  `value_scalar_text`, `token_scalar_text` and `write.MARKUP_TREE` spell a markup scalar, `write.marshal_markup` and
+  `put_markup` read a markup marshal or token write back as a built value, and `compose.markup_commit` splices a markup
+  format's edits, for XML's and HTML's.
 - `write.Tagged_Text` and `write.value_tagged` write a string with its format's type tag, as a TOML datetime, and
   `write.Token_Spelling.end` turns a token write's finished text into the format's own.
 - `records.open`, `Stream_Options` and `json.records_open` take `entries`, a path of keys to the container whose
@@ -504,7 +535,8 @@ The hooks the formats share:
 - `make help` lists the targets. `make api-write`, `lint-man` and `lint-fixtures` are new, `make check` names the rule
   a failure broke, and the Makefile refuses an Odin release older than `MIN_ODIN`, `dev-2026-11`.
 - `make` fetches the W3C XML Conformance Test Suite (`xml/test/conformance/fetch.py`) before it runs `xml/test`, since
-  its files cannot be in the repository.
+  its files cannot be in the repository. `make lint` checks `html/test`, whose conformance tests read the HTML
+  tokenizer and tree, with `-define:STURY_HTML_INTERNALS=true`.
 - `make test-cli` runs `cmd/stury/test/smoke.py`, and `smoke.floor` is empty: every smoke case passes. It also runs
   toml-test and the yaml-test-suite through the command line (`toml_suite.py`, `yaml_suite.py`), and `make diff-xml`
   compares the XML walk with expat on seeded random texts. CI runs the

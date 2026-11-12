@@ -11,7 +11,7 @@ codes](#errors-and-exit-codes)). On top of jq it:
 - edits each input with a jq filter, keeping every byte the edit does not touch (`stury edit`);
 - tells what differs between two inputs, two schemas, or a schema and data (`stury diff`);
 - infers a schema from inputs, samples values from one, or writes the Odin types of one (`stury schema`);
-- reads and writes JSONC, NDJSON, CSV, TSV, TOML, YAML, XML and CBOR (`--from FORMAT`, `--to FORMAT`,
+- reads and writes JSONC, NDJSON, CSV, TSV, TOML, YAML, XML, CBOR and HTML (`--from FORMAT`, `--to FORMAT`,
   [Formats](#formats));
 - reads input strictly, as RFC 8259 says ([Differences from jq](#differences-from-jq)).
 
@@ -100,12 +100,12 @@ runner and its bytecode listings, which stury does not have) and adds its own. E
 | `check`, `validate` | A subcommand, recognised when it is the first argument that is not an option, before any `--` (`stury -c check FILE`); under `-f` that argument is the program file. See [`check`](#check). |
 | `fmt` | A subcommand, recognised as `check` is: writes each input back in the printer's layout, or in another format, and runs no filter. See [`fmt`](#fmt). |
 | `edit` | A subcommand, recognised as `check` is: runs the filter on each input and splices its one output into the input's bytes. See [`edit`](#edit). |
-| `--from FORMAT` | Read `json` (the default), `jsonc`, `json5`, `ndjson`, `csv`, `tsv`, `toml`, `yaml`, `xml` or `cbor` ([Formats](#formats)). |
-| `--to FORMAT` | Write `json` (the default), `jsonc`, `ndjson`, `csv`, `tsv`, `toml`, `yaml`, `xml` or `cbor` ([Formats](#formats), [CSV and TSV output](#csv-and-tsv-output), [TOML output](#toml-output), [YAML output](#yaml-output), [XML output](#xml-output), [CBOR output](#cbor-output)). `fmt` writes the `--from` format when `--to` is not given. |
+| `--from FORMAT` | Read `json` (the default), `jsonc`, `json5`, `ndjson`, `csv`, `tsv`, `toml`, `yaml`, `xml`, `cbor` or `html` ([Formats](#formats)). |
+| `--to FORMAT` | Write `json` (the default), `jsonc`, `ndjson`, `csv`, `tsv`, `toml`, `yaml`, `xml`, `cbor` or `html` ([Formats](#formats), [CSV and TSV output](#csv-and-tsv-output), [TOML output](#toml-output), [YAML output](#yaml-output), [XML output](#xml-output), [CBOR output](#cbor-output), [HTML output](#html-output)). `fmt` writes the `--from` format when `--to` is not given. |
 | `--in-place` | `fmt` and `edit` only: rewrite each file through a temporary one and a rename, when `--to` is `--from` ([`fmt`](#fmt), [`edit`](#edit)). |
 | `--check` | `fmt` and `edit` only: write nothing, name each file that would change on stderr, and exit 1 ([`fmt`](#fmt), [`edit`](#edit)). |
 | `--grow-header` | With `--to csv` or `--to tsv`, write a header of every key of every object output ([CSV and TSV output](#csv-and-tsv-output)). |
-| `--delimiter C`, `--no-header`, `--comment C`, `--infer`, `--ragged`, `--lazy-quotes` | How `--from csv` or `--from tsv` reads ([CSV and TSV options](#csv-and-tsv-options)). `--infer` also types the text of `--from xml`, and with any other `--from` is a usage error: `--infer applies to --from csv, tsv or xml`. |
+| `--delimiter C`, `--no-header`, `--comment C`, `--infer`, `--ragged`, `--lazy-quotes` | How `--from csv` or `--from tsv` reads ([CSV and TSV options](#csv-and-tsv-options)). `--infer` also types the text of `--from xml` and `--from html`, and with any other `--from` is a usage error: `--infer applies to --from csv, tsv, xml or html`. |
 | `--out-delimiter C`, `--out-comment C`, `--out-no-header`, `--crlf` | How `--to csv` or `--to tsv` writes ([CSV and TSV options](#csv-and-tsv-options)). |
 | `--alias-limit N`, `--merge-keys` | How `--from yaml` reads: the bytes aliases may read again (1 or more), and `<<` as a merge key ([Formats](#formats)). With another `--from`, a usage error: `--merge-keys applies to --from yaml`. |
 | `--expansion-limit N`, `--unread-entities` | How `--from xml` reads: the bytes entity references may expand to in all (1 or more), and a reference to an entity no declaration stury read names, read as its own text ([Formats](#formats)). With another `--from`, a usage error: `--unread-entities applies to --from xml`. |
@@ -125,7 +125,7 @@ runner and its bytecode listings, which stury does not have) and adds its own. E
 
 ### Behaviour notes
 
-- Plain paths such as `.a.b[]` are answered without building the document, a YAML document's included. A TOML or XML
+- Plain paths such as `.a.b[]` are answered without building the document, a YAML document's included. A TOML, XML or HTML
   document is built whole, since a table's members may be written apart and a name needs the namespaces around it. These options switch to the
   general interpreter, which may be slower on large inputs: `-n`, `-s`, `-S`, `-a`, `-e`, `-R`,
   `--raw-output0`, `--seq`, `--stream`.
@@ -176,7 +176,7 @@ The keys come in this order, each line once unless said:
 | Key | Says |
 | --- | --- |
 | `filter` | The filter, quoted. Written as soon as it is known, so a compile error follows it. A `-f` file that cannot be read has no line. |
-| `input` | The format and how it is cut into inputs: JSON texts one after another (as jq reads them), one per line (`ndjson`), in RFC 7464 records (`--seq`), lines of text (`-R`), CSV or TSV records as objects or, under `--no-header`, arrays, one document per file (`toml`, `xml`), each document of a stream (`yaml`, `cbor`), or none (`-n`). |
+| `input` | The format and how it is cut into inputs: JSON texts one after another (as jq reads them), one per line (`ndjson`), in RFC 7464 records (`--seq`), lines of text (`-R`), CSV or TSV records as objects or, under `--no-header`, arrays, one document per file (`toml`, `xml`, `html`), each document of a stream (`yaml`, `cbor`), or none (`-n`). |
 | `plan` | How each input is answered, one of three ways. Reading only a path, `select(PATH op LITERAL)` or `first`/`limit` of a path from the text, without building the values the path passes by, with a second `plan` line when the read stops after the first answers. Reading only the named columns of each CSV or TSV record, straight from its text. Or building each input whole (the whole input under `-s`, nothing under `-n`) and running the filter on it. |
 | `because` | Under a built plan, one line per reason the filter needs it, every one that holds, in the order of the table below. |
 | `decides` | What the speed and the memory follow under this plan. |
@@ -215,7 +215,7 @@ The reasons on `because` lines:
 | --infer reads each cell's kind from its text | `--infer` |
 | --comment lines above a record are written with it, which the column route does not hold | `.` or `select(...)` with `--comment` and `--to csv` or `tsv` with a comment character |
 | --from json5 would print a path's answer as written ('a', 0x1F), not as JSON | a path under `--from json5` |
-| --from reads a format whose document is built whole, as it answers no path from the text alone | any filter under `--from toml` or `--from xml` |
+| --from reads a format whose document is built whole, as it answers no path from the text alone | any filter under `--from toml`, `--from xml` or `--from html` |
 
 For `--from csv|tsv` the reasons are the column plan's, for any other input the path plan's.
 
@@ -252,6 +252,7 @@ usage error.
 | `--from toml` | Validate TOML 1.1 as `stury --from toml .` reads it: a repeated key, a table defined twice and a malformed datetime are faults. An empty input is valid. |
 | `--from yaml` | Validate YAML as `stury --from yaml .` reads it, every document of the stream. A repeated key is a fault, and so is an alias to an anchor that is not defined. A collection as a key is valid YAML and a fault to read. A text of comments alone is valid. |
 | `--from xml` | Validate XML as `stury --from xml .` reads it: a mismatched tag, an undeclared prefix, a reference to an entity no declaration names and a repeated attribute are faults. An empty input is a fault. |
+| `--from html` | Validate HTML by the WHATWG parse errors: the first one is the fault (`Document without a DOCTYPE`), though `stury --from html .` reads any text, recovering as a browser does. |
 | `--from cbor` | Validate CBOR as `stury --from cbor .` reads it, every item of the sequence: a truncated item, a reserved head and invalid UTF-8 in a text string are faults. An empty input is valid. |
 | `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. A fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An empty input is valid, as the library takes it, and so is a header alone. A cell is read as a filter run reads it: a string, or under `--infer` a number, `true` or `false` when its text is exactly one, so `type: integer` takes the cell `1` only with `--infer`, and `oneOf: [string, integer]` takes it either way. An empty unquoted cell is a `null`, and a quoted `""` is the empty string. `schema infer` reads cells the same way, so a schema it writes with `--infer` is checked with `--infer`. |
 | `--max-depth N` | As [above](#sturys-own-options). |
@@ -273,8 +274,8 @@ opening quote. A text that does not parse is the plain `check`'s fault,
 told as it tells it. NDJSON and `--seq` check each record; a long file, or an array at the root whose rules apply to each
 entry, is checked on all cores and tells what a serial check tells. With `--from csv` or `tsv` the schema describes the
 table, an array of its rows, so `{"type":"array","items":{...}}` judges each row and `minItems` counts them. A TOML,
-YAML or XML input is checked as its format reads it: each document of a YAML stream is checked and its failures placed in
-the stream, a TOML datetime is a string, and an XML element's attributes and child elements are its members, its text the
+YAML, XML or HTML input is checked as its format reads it: each document of a YAML stream is checked and its failures placed in
+the stream, a TOML datetime is a string, and an XML or HTML element's attributes and child elements are its members, its text the
 member `#text` or the element itself when it has no other. When the last NDJSON record is cut, the earlier records' failures are told
 before the fault, and the exit is 5.
 
@@ -417,6 +418,7 @@ stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--sch
 | `toml` | Each text laid out by the TOML writer ([TOML output](#toml-output)): comments, string quoting and number forms are kept, a datetime stays bare, and only TOML 1.0 forms are written. |
 | `yaml` | Each document laid out by the YAML writer ([YAML output](#yaml-output)): comments, tags, anchors, aliases and a scalar's style are kept, and a stream's documents are kept apart by `---`. |
 | `xml` | Each document laid out by the XML writer ([XML output](#xml-output)): the doctype, comments, processing instructions, attributes, namespace declarations and references are kept as written, the white space between elements is laid out again, and an element that holds text keeps it byte for byte. |
+| `html` | Each document laid out by the HTML writer ([HTML output](#html-output)): the tree the browser builds, its implied elements with their tags, the doctype, comments and attributes kept as written. |
 | `cbor` | Each item in preferred serialization, as `--to cbor` writes it ([CBOR output](#cbor-output)): a head longer than its value needs is written short, and a sequence stays a sequence. `--to json` writes each item as a JSON text. |
 | `csv`, `tsv` | The header, then one record per row, re-spelled by the CSV writer: a field that needs no quotes loses them, one that does gains them, and `""` and an empty cell stay distinct ([CSV and TSV output](#csv-and-tsv-output)). A header with no records is written. A JSON text whose root is an array is a list of rows, as the library's writer takes it, and any other text, or an NDJSON record, is one row. An object with a key the header lacks ends the run, as `--to csv` does. |
 
@@ -566,6 +568,12 @@ stury: <stdin> would change
   start tag, in place of the one of that name or after the others, and `del(.r.c.&k)` removes it. A write of an
   element's attributes respells them all, each `name="value"` or as quoted in the source, one space apart, and writes an
   attribute the internal subset defaults into the tag.
+- HTML (`--from html`) edits as XML does, keeping every byte the output does not change, and writes a changed value
+  as `--to html` writes it: a string escaped, as it stands in `script` and `style`, and an object as elements. An end
+  tag the source leaves out stays out. An edit is refused with the reason (exit 5) where it writes at a node the tree
+  construction made rather than the text, as a set of an implied `body` or a text a moved tag splits, content in a
+  void element, markup in a raw text, an object whose elements the element they go in reads as other elements, as a
+  `tr` set into a `table`, and a result a browser reads as another tree, as a `p` written into a `p`.
 - A repeated key of a format with no attributes is read as the CLI reads it, the last member winning: the filter edits
   that member, and the other members with that name keep their bytes. Dropping the key removes every member with that name.
 - `-e` sets the exit status by the last output, as for a filter run: 1 when it is false or null, 4 when there is none.
@@ -621,7 +629,7 @@ $ stury diff old.json new.json
   `--position` compares the elements at one index, and `--key MEMBER` pairs elements by the value of their member
   (`--key PATH=MEMBER` for the array at PATH, `--key .users=id`) and compares each pair in depth. An array that differs by
   more than 4,096 edits is told as replaced, and `stury: an array differs...` follows on stderr.
-- `--facts` tells changes of comments, attributes, tags and anchors too, where both files' formats carry them: an XML
+- `--facts` tells changes of comments, attributes, tags and anchors too, where both files' formats carry them: an XML or HTML
   element's attributes as `NAME=VALUE` (`~ .a @attribute: "k=1" -> "k=2"`), a JSONC, JSON5, TOML or YAML comment, and a
   YAML tag or anchor (`~ .a @tag: "!!str" -> "!!int"`, `~ .a @anchor: "x" -> "y"`). An alias is not told, since the
   value it names is compared, and a style is not told.
@@ -662,6 +670,7 @@ verdict a last record.
 | `toml` | TOML 1.1, one document per input (an empty input is `{}`). Tables read as objects in document order, a datetime as a string that `.@tag` names (`datetime`, `datetime-local`, `date-local`, `time-local`), and `.@style` tells a string's quoting (`basic`, `literal`, `multiline`, `multiline_literal`, `bare`) and a number's form (`integer`, `float`, `hex`, `octal`, `binary`, `inf`, `nan`). Hex, octal and binary integers print in decimal, `-0` as `0`. `inf` and `nan` have no JSON value: a filter sees jq's spelling. `--follow`, `--seq`, `-R` and `--stream` are refused. | Each output as a TOML text ([TOML output](#toml-output)). |
 | `yaml` | YAML 1.2 with the core schema, one input per document (a stream of several is several inputs, and `-s` slurps them). Plain scalars read as `null`, booleans, integers (decimal, `0x` and `0o`) and floats (`.5`, `1e3`, `.inf`, `.nan`), and every other plain scalar, a quoted one and a block one is a string. A key is its text, so `1` and `"1"` repeat each other, and a repeated key is a parse error. A tag of the core schema forces the type (`!!str 12`, `!!int "12"`), a scalar its core tag does not hold (`!!int yes`) is a parse error, and any other tag makes a string. An alias reads as its anchor's node, up to a limit on the bytes aliases read again: ten times the text's size and at least 1 MiB, or `--alias-limit N`. `--merge-keys` reads a `<<` member as YAML 1.1's merge key: the members of the mapping it names that the host mapping lacks are added after its own. Without it `<<` is an ordinary key. `%YAML 1.1` reads with the 1.2 rules. A key that is a collection is a parse error. A text with no document, only comments, has no input. `.@tag` is the node's tag as written, and `.@style` is `plain`, `single`, `double`, `literal`, `folded`, `flow` or `block`. `--follow` answers each document once a `---` or its `...` line ends it. `--seq`, `-R` and `--stream` are refused. | Each output is one document ([YAML output](#yaml-output)). |
 | `xml` | XML 1.0 with its internal subset, one document per input. An element is an object member named as written (`p:a` keeps its prefix, and a lookup by `{uri}local` finds it too), an element with no child element is its text (null when empty) and one with children is an object whose text runs are `#text` members. A name that repeats among an element's members is one member, an array of each of them in document order, and a name that stands once is a single value, so `<r>a<b>1</b>c<b>2</b></r>` reads as `{"r":{"#text":["a","c"],"b":["1","2"]}}`. `--to json` and every other format without attributes write that value. Text is a string, or with `--infer` a number, boolean or string by its spelling. Attributes are not members: `.&k` reads attribute `k` by its name as written (`.&"x:k"` quoted), `.@attrs` is an object of them all, `.@name` the element's name, `.@namespace` its namespace, `.@content` its text with that of its descendants, `.@pi` the processing instructions and `.@doctype` the document type ([Reading and writing](#reading-and-writing)). A prefix with no declaration, a reserved prefix or namespace, and two attributes with one expanded name are parse errors. The internal subset is read: a declared entity expands where it is referred to, markup included, and an attribute the subset gives a default is an attribute of every element that lacks it. References that expand past 8 MiB in all, or past a hundred times the text's size when that is more, are a parse error, or past `--expansion-limit N` bytes. No external subset or external entity is read: a reference to an entity only one of them could declare is a parse error, or with `--unread-entities` reads as its own text (`&e;`). White space between elements is no text. `--follow`, `--seq`, `-R` and `--stream` are refused. | Each output as an XML text ([XML output](#xml-output)). |
+| `html` | HTML as a browser with scripting disabled builds its tree, one document per input, read in XML's shape: the tree's elements are members named in their canonical case (`<IMAGE>` is `img`), with the elements the tree adds (`html`, `head`, `body`, `tbody`), text as `#text` members or the element itself, a repeated name as an array as for XML, and attributes, a valueless one `""` and a repeated one by its first, read by `.&k` and `.@attrs`. Every element has a `.@namespace` (HTML, SVG or MathML), and `.@name`, `.@content` and `.@doctype` read as for XML. Any text reads: a parse error is recovered from as the tree says, and only `check` tells it. `--infer` types text as for XML. A text in another encoding than UTF-8 is a fault. A fragment, read in a context element, and the scripting flag are not offered. `--follow`, `--seq`, `-R` and `--stream` are refused. | The tree as the WHATWG serialization writes it ([HTML output](#html-output)). |
 | `cbor` | CBOR (RFC 8949), each item of an RFC 8742 sequence one input (an empty input has none). Any well-formed and valid item reads, in any serialization. A byte string reads as the string of its base64 (RFC 4648), as the library writes one as JSON, and a byte string key as its bytes. An integer key reads as its decimal text. A tag reads as its content, and `.@tag` gives its number. A bignum reads as its number, `undefined` and a simple value as `null`, and a NaN or an infinity as jq spells it. A fault is placed by line and column, counting 0x0A bytes as line ends. `--follow`, `--seq`, `-R` and `--stream` are refused. | Each output as one CBOR item ([CBOR output](#cbor-output)). |
 | `ndjson` | One JSON text per line. A blank line is no text, and a line that is not one text, or holds two, is a parse error where jq would read on. | One compact value per line, as `-c`. |
 | `csv`, `tsv` | The first record names the fields; each later record is one input ([CSV and TSV](#csv-and-tsv)). | Each output is one record ([CSV and TSV output](#csv-and-tsv-output)). |
@@ -734,7 +743,7 @@ no pipe.
 - SIGINT and SIGTERM end the run, a FIFO's or a pipe's included, once the answers so far are written, by the signal,
   as they end jq. Ctrl-C and Ctrl-Break on Windows end it with jq's status for Ctrl-C, `STATUS_CONTROL_C_EXIT`.
 - It is a usage error (exit 2) with standard input or more than one file, `-s`, `-n`, `--stream`, JSONC, JSON5, TOML,
-  XML, CBOR, `check` and `fmt`.
+  XML, HTML, CBOR, `check` and `fmt`.
 
 ### Records and events
 
@@ -921,6 +930,23 @@ An output that is no object (`cannot write a value that is no object as XML`) en
 XML cannot spell so that it reads back (`cannot write a value XML has no element or text for`): an object of more or
 less than one member at the root, a key that is no XML name or holds a colon, an array in an array or an empty array, an
 empty string or object, an object of only `#text`, and a character XML 1.0 does not allow.
+
+### HTML output
+
+`--to html` writes each output as HTML, and `fmt` writes a file as HTML, by the WHATWG serialization of a tree. The
+output must be an object: one of one `html` member is a document, any other the children of a `body`, as XML's shape
+reads them. A member is an element, an array one element per item, `#text` the text there, `null` an empty element and a
+scalar its text. A void element (`br`, `img`) has no end tag, a raw text element (`script`, `style`) holds its text as it
+stands, and any other text and attribute value is escaped (`&amp;`, `&nbsp;`, `&lt;`, `&quot;`). The document of an HTML
+input is written as the browser built it, with the elements the tree adds (`tbody`), and keeps its doctype, comments and
+attributes as written. Pretty output, the default, puts an element whose children are all elements on lines of its own,
+and lays nothing into `pre`, `listing`, `textarea` or an element that holds text. `-c` writes no white space between
+elements, `--indent N` sets the indent, and `-a` writes every character past ASCII as a reference (`&#233;`).
+
+An output that is no object (`cannot write a value that is no object as HTML`) ends the run with exit 5, as does one
+whose text a browser reads as another tree (`cannot write a value as HTML whose text reads back as another tree`): a
+`td` outside a table, a `div` in a `p`, a void element with content, a raw text holding its end tag, a name or attribute
+with an upper-case letter, and an array in an array.
 
 ### YAML output
 
@@ -1119,11 +1145,11 @@ these places:
 
 `.@comment_head` is `.@comment`. A name that is not in the table is a compile error. The property accessors give
 `null` in a format that holds none, which includes JSON, JSONC and the tables, and so do the markup accessors outside
-XML. A write of a markup fact other than an attribute, `del` included, is the error `A markup name,
+XML and HTML. A write of a markup fact other than an attribute, `del` included, is the error `A markup name,
 namespace, content, instruction or doctype cannot be written`. A repeated name's array is no element, so its facts
 are `null` (`.r.b.@name`, `.r.b.&k`) and `edit` refuses a write of them: `.r.b[0].&k` is the first `b`'s attribute.
 `.&k = "v"` writes an attribute and `del(.&k)` removes
-it, travelling with the value as a comment does, and `edit --from xml` writes them. In a path `.&k` is the step
+it, travelling with the value as a comment does, and `edit --from xml` and `edit --from html` write them. In a path `.&k` is the step
 `{"fact": "attribute", "name": "k"}`. An attribute's expanded name (`{uri}k`) is not read by `.&`.
 
 - Each comment accessor gives a list of texts in source order, each without its `//` or `/* */` and one space

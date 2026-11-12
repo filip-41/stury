@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Write core/spell/entities.odin and the core/spell/entities/*.bin it loads: the trie of the HTML standard's named
 character references, read from core/spell/entities/entities.json, the standard's own file, vendored with the digest
-below. XML reads it for a document whose public identifier the HTML standard lists.
+below. HTML's tokenizer reads it, and XML for a document whose public identifier the HTML standard lists.
 
 Each node is one character of a name. NODES holds `ch | count << 7 | first << 13`: the node's character, how many
 children it has and the index of the first, the children of a node stored in a row in byte order. Node 0 is the root.
@@ -96,7 +96,6 @@ ENTITY_OFFSETS := #load("entities/offsets.bin", []u16)
 ENTITY_TEXT := #load("entities/text.bin")
 
 // The child of trie node `node` for character `c`, or 0. Children are sorted by character.
-@(private)
 entity_child :: #force_inline proc "contextless" (node: u32, c: u8) -> u32 #no_bounds_check {{
 	w := ENTITY_NODES[node]
 	lo := w >> 13
@@ -118,7 +117,6 @@ entity_child :: #force_inline proc "contextless" (node: u32, c: u8) -> u32 #no_b
 
 // The UTF-8 text of the reference whose name ends at trie node `node`, its `;` included when it has one, and false
 // for a node no name ends at.
-@(private)
 entity_value :: #force_inline proc "contextless" (node: u32) -> (text: []u8, ok: bool) #no_bounds_check {{
 	v := ENTITY_TERMINALS[node]
 	if v == 0 {{

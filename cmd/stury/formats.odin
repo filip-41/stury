@@ -5,6 +5,7 @@ package main
 import core "../../core"
 import cbor "../../cbor"
 import dsv "../../dsv"
+import html "../../html"
 import json "../../json"
 import toml "../../toml"
 import xml "../../xml"
@@ -21,6 +22,7 @@ Format :: enum u8 {
 	Yaml,
 	Xml,
 	Cbor,
+	Html,
 }
 
 Format_Spec :: struct {
@@ -73,6 +75,7 @@ FORMATS := [Format]Format_Spec {
 	.Yaml   = {name = "yaml", title = "YAML", framing = .Concatenated, whole_as = yaml_reading, follows = yaml_follows, ended = yaml_ended, scans = true, written = yaml_written, laid = true, parted = yaml_parted, refusal = yaml_refusal},
 	.Xml    = {name = "xml", title = "XML", framing = .Concatenated, whole_as = xml_reading, written = xml_written, laid = true, refusal = xml_refusal},
 	.Cbor   = {name = "cbor", title = "CBOR", framing = .Concatenated, whole_as = cbor_reading, follows = cbor_follows, scans = true, written = cbor_written},
+	.Html   = {name = "html", title = "HTML", framing = .Concatenated, whole_as = html_reading, written = html_written, laid = true, refusal = html_refusal},
 }
 
 // A text after the first is the next text of strict JSON, where `validate` and a build, judging one, refuse it as
@@ -180,6 +183,28 @@ xml_refusal :: proc "contextless" (kind: core.Typed_Error_Kind) -> string {
 		return "cannot write a value that is no object as XML"
 	case .Unwritable:
 		return "cannot write a value XML has no element or text for"
+	}
+	return ""
+}
+
+// An HTML document, as a browser with scripting disabled reads it. A text value is a string unless --infer.
+@(private = "file")
+html_reading :: proc "contextless" (o: ^Opts) -> core.As {
+	return html.as(.Document, {max_depth = o.max_depth, infer = o.cells_in.infer})
+}
+
+@(private = "file")
+html_written :: proc "contextless" (o: ^Opts) -> core.As {
+	return html.as(.Document, {max_depth = o.max_depth})
+}
+
+@(private = "file")
+html_refusal :: proc "contextless" (kind: core.Typed_Error_Kind) -> string {
+	#partial switch kind {
+	case .Unsupported:
+		return "cannot write a value that is no object as HTML"
+	case .Unwritable:
+		return "cannot write a value as HTML whose text reads back as another tree"
 	}
 	return ""
 }
@@ -337,8 +362,8 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 		usage_error("%s applies to --from csv or tsv", cli.cells_flag)
 	}
 	// schema sample takes --infer for a table it writes, whose cells it draws as --infer reads them.
-	if cli.infer_flag != "" && !reads_cells(o) && o.from != .Xml && !(cli.schema_verb && writes_cells(o)) {
-		usage_error("%s applies to --from csv, tsv or xml", cli.infer_flag)
+	if cli.infer_flag != "" && !reads_cells(o) && o.from != .Xml && o.from != .Html && !(cli.schema_verb && writes_cells(o)) {
+		usage_error("%s applies to --from csv, tsv, xml or html", cli.infer_flag)
 	}
 	if cli.yaml_flag != "" && o.from != .Yaml {
 		usage_error("%s applies to --from yaml", cli.yaml_flag)

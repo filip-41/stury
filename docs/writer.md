@@ -135,7 +135,7 @@ core.format          :: proc(src: []u8, as: core.As, opts := core.Write_Options{
 document was read in. `json.as(.Jsonc)` and `dsv.as(.Tsv, opts)` name another target, in the same format or in another,
 so a JSON document is written as a table and a table as JSON by the target's writer. A target with no writer is
 `.Unsupported`. A document of a constant-spec build holds no services, so `json.write`, `toml.write`, `yaml.write`,
-`xml.write` and `cbor.write` write it in their format. `core.As` is the handle a `Document` holds in `as`.
+`xml.write`, `html.write` and `cbor.write` write it in their format. `core.As` is the handle a `Document` holds in `as`.
 
 `node` writes one value of the document as a text of its own, the root by default: a subtree with the comments inside
 its span, which `core.subtree_facts` returns, in the spelling and layout the root would have. A key, a node the document
@@ -397,6 +397,13 @@ when the document holds it: above the line it heads, after the value it ends, an
 comment the output has no place for, and one with a line end in its body, is dropped and counted. A token write that
 stands at a site of a document is block text at column 0, which the edit indents to the site or turns to flow inside a
 flow collection.
+
+## Markup
+
+`xml.write`, `xml.marshal` and `xml.tokens_init` write XML, and `html.write`, `html.marshal` and `html.tokens_init`
+HTML. A marshal or a token write makes its value in `write.MARKUP_TREE`, whose scalars `value_scalar_text` and
+`token_scalar_text` spell as `write.scalar_text` spells a built node's, and `write.marshal_markup` and `put_markup` read
+that text back as a built value for the format's writer. [markup.md](markup.md) holds each format's rules.
 
 ## CBOR
 

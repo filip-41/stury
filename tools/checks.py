@@ -47,8 +47,8 @@ def odin_problem(odin):
 
 # The library packages, and the order imports of them take. json and dsv share a rank, under core/model.
 PACKAGES = makefile_list("LIB_PKGS")
-RANK = {"core/spell": 0, "core/regex": 0, "core": 1, "host": 2, "core/kernel": 2, "core/compose": 2, "core/diff": 2, "core/rules": 2, "core/build": 3, "core/typed": 4, "core/write": 5, "core/records": 6, "core/schema": 7, "json": 8, "dsv": 8, "core/model": 9, "toml": 8, "xml": 8, "yaml": 8, "cbor": 8}
-FORMATS = {"json", "dsv", "toml", "xml", "yaml", "cbor"}
+RANK = {"core/spell": 0, "core/regex": 0, "core": 1, "host": 2, "core/kernel": 2, "core/compose": 2, "core/diff": 2, "core/rules": 2, "core/build": 3, "core/typed": 4, "core/write": 5, "core/records": 6, "core/schema": 7, "json": 8, "dsv": 8, "core/model": 9, "toml": 8, "xml": 8, "yaml": 8, "cbor": 8, "html": 8}
+FORMATS = {"json", "dsv", "toml", "xml", "yaml", "cbor", "html"}
 
 # core's format-neutral packages name no format's concept in their code. core/kernel is left out: its tables are a byte
 # shuffle's.
@@ -552,7 +552,7 @@ LEADING_ATTRIBUTE = re.compile(r"@(?:\(([^)]*)\)|([A-Za-z_]\w*))\s*")
 SAFE_ATTRIBUTES = {"rodata"}
 # A format's `HANDLE` and `SERVICES` point at its other tables, and `@(rodata)` refuses an address in its initializer. It is set once
 # by the compiler's static initialization and no code writes it.
-POINTING_TABLES = {"json/document.odin": {"HANDLES", "SERVICES"}, "dsv/document.odin": {"HANDLES", "SERVICES"}, "toml/document.odin": {"HANDLES", "SERVICES"}, "xml/document.odin": {"HANDLES", "SERVICES"}, "yaml/document.odin": {"HANDLES", "SERVICES"}, "cbor/document.odin": {"HANDLE", "SERVICES"}}
+POINTING_TABLES = {"json/document.odin": {"HANDLES", "SERVICES"}, "dsv/document.odin": {"HANDLES", "SERVICES"}, "toml/document.odin": {"HANDLES", "SERVICES"}, "xml/document.odin": {"HANDLES", "SERVICES"}, "yaml/document.odin": {"HANDLES", "SERVICES"}, "cbor/document.odin": {"HANDLE", "SERVICES"}, "html/document.odin": {"HANDLES", "SERVICES"}}
 
 
 def is_variable(rest):

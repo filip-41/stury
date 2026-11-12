@@ -103,9 +103,9 @@ Command options:
 
 stury's own options:
       --from format         read json (default), jsonc, json5, ndjson,
-                            csv, tsv, toml, yaml, xml or cbor;
+                            csv, tsv, toml, yaml, xml, cbor or html;
       --to format           write json (default), jsonc, ndjson, csv, tsv,
-                            toml, yaml, xml or cbor;
+                            toml, yaml, xml, cbor or html;
       --in-place            with fmt or edit, rewrite each file in place;
       --check               with fmt or edit, name each file it would
                             change and exit 1;
@@ -136,7 +136,7 @@ CSV and TSV options:
       --comment c           skip lines that start with c;
       --infer               read an unquoted cell that is a number, true or
                             false as one (an empty one is null either way),
-                            and with --from xml a text value;
+                            and with --from xml or html a text value;
       --ragged              read records of any width;
       --lazy-quotes         read a quote inside an unquoted cell as text;
       --out-delimiter c     write cells split at c (default: --delimiter when
@@ -161,7 +161,7 @@ is valid. Every file is judged, and each file's first fault is reported.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson,
-                            csv, tsv, toml, yaml, xml or cbor;
+                            csv, tsv, toml, yaml, xml, cbor or html;
       --seq                 judge each record after a 0x1E separator as
                             one text;
       --max-depth n         refuse nesting past n levels (default 1024);
@@ -201,7 +201,7 @@ types a model reads the schema's values with.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson, csv, tsv,
-                            toml, yaml, xml or cbor;
+                            toml, yaml, xml, cbor or html;
       --ranges              infer: keep the least and greatest number, string
                             length and array length;
       --to format           sample: write json (default), jsonc, ndjson, csv or tsv;
@@ -236,9 +236,9 @@ not written, and a table written is judged again as it reads back.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson,
-                            csv, tsv, toml, yaml, xml or cbor;
+                            csv, tsv, toml, yaml, xml, cbor or html;
       --to format           write json, jsonc, ndjson, csv, tsv, toml, yaml,
-                            xml or cbor (default the --from format);
+                            xml, cbor or html (default the --from format);
       --in-place            rewrite each file in place;
       --check               write nothing, name each file that is not
                             already formatted, and exit 1;
@@ -338,7 +338,7 @@ one array of them. --shape compares the shapes of two data files.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson, csv,
-                            tsv, toml, yaml, xml or cbor;
+                            tsv, toml, yaml, xml, cbor or html;
       --key member          match array elements by the value of member, or
                             PATH=member for the array at PATH (.a[].b=id);
       --set                 match equal elements wherever they stand;

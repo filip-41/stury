@@ -336,7 +336,7 @@ emit :: #force_inline proc "contextless" (w: ^Walk($H), $on: proc "contextless" 
 		if u64(n) > u64(max(u32)) {
 			return .Wide
 		}
-		when intrinsics.type_is_specialization_of(H, Holding) {
+		when intrinsics.type_is_specialization_of(H, core.Holding) {
 			w.hooks.skip_at = skip_at
 		}
 		a: core.Action
@@ -737,9 +737,9 @@ st_closed :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^Wal
 	if w.mute == e {
 		w.mute = 0
 	}
-	when intrinsics.type_is_specialization_of(H, Holding) {
+	when intrinsics.type_is_specialization_of(H, core.Holding) {
 		if w.hooks.held != nil {
-			hold(w.hooks, Held_Token{at = e, close = true})
+			core.hold(w.hooks, core.Held_Token{at = e, close = true})
 		}
 	}
 	for w.ns_len > 0 && w.ns[w.ns_len - 1].depth == e {

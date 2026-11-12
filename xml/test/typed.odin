@@ -164,3 +164,24 @@ unmarshal_reads_what_marshal_writes :: proc(t: ^testing.T) {
 	testing.expect_value(t, back.shelf.book[0].note, 4)
 	testing.expect_value(t, back.shelf.book[1].note, nil)
 }
+
+// A check of a list member over repeated elements takes every element, as `unmarshal` does.
+@(test)
+check_takes_a_list_of_repeated_elements :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	V :: struct {
+		ul: struct {
+			li: [dynamic]int,
+		},
+	}
+	plan, perr := xml.plan_make(V, .Xml)
+	walktest.expect_nil(t, perr)
+	defer typed.plan_destroy(&plan)
+	v: V
+	sink: typed.Sink
+	defer typed.sink_destroy(&sink)
+	walktest.expect_nil(t, xml.check(transmute([]u8)string(`<ul><li>1</li><li>2</li></ul>`), .Xml, &v, &plan, {sink = &sink}))
+	testing.expect_value(t, len(sink.entries), 0)
+	testing.expect_value(t, len(v.ul.li), 2)
+}

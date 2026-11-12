@@ -15,7 +15,6 @@ ENTITY_OFFSETS := #load("entities/offsets.bin", []u16)
 ENTITY_TEXT := #load("entities/text.bin")
 
 // The child of trie node `node` for character `c`, or 0. Children are sorted by character.
-@(private)
 entity_child :: #force_inline proc "contextless" (node: u32, c: u8) -> u32 #no_bounds_check {
 	w := ENTITY_NODES[node]
 	lo := w >> 13
@@ -37,7 +36,6 @@ entity_child :: #force_inline proc "contextless" (node: u32, c: u8) -> u32 #no_b
 
 // The UTF-8 text of the reference whose name ends at trie node `node`, its `;` included when it has one, and false
 // for a node no name ends at.
-@(private)
 entity_value :: #force_inline proc "contextless" (node: u32) -> (text: []u8, ok: bool) #no_bounds_check {
 	v := ENTITY_TERMINALS[node]
 	if v == 0 {

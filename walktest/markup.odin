@@ -6,8 +6,9 @@ import "core:strings"
 import "core:testing"
 import core "../core"
 
-// The reads the markup formats' tests share over a built document: a node's text, a member reached by names and an
-// element's attributes.
+// The reads the markup formats' tests share over a built document: a node's text, a member reached by names, an
+// element's attributes, and the shape of a whole document as one line, which an XML text and an HTML text with the
+// same markup give alike.
 
 // The decoded text of string or plain node `i`, in the temp allocator.
 node_text :: proc(t: ^testing.T, doc: ^core.Document, i: core.Node_Index, loc := #caller_location) -> string {
@@ -47,6 +48,74 @@ attribute_texts :: proc(it: ^core.Attribute_Iter) -> (name, value: string, found
 	name, _ = core.token_text(doc.readers, &doc.view, n, context.temp_allocator)
 	value, _ = core.token_text(doc.readers, &doc.view, v, context.temp_allocator)
 	return name, value, true
+}
+
+// The document as one line, in the temp allocator: each value's facts in source order, an attribute as `@name="value"`,
+// a comment as `<!--body-->` with `^` after it for an inline one and `$` for a foot, an instruction as `<?body?>` and
+// the DOCTYPE as `<!body>`, then an object's members as `"key": value` or a scalar as JSON writes its text.
+markup_shape :: proc(doc: ^core.Document) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	shape_node(&b, doc, core.ROOT)
+	return strings.to_string(b)
+}
+
+@(private = "file")
+shape_node :: proc(b: ^strings.Builder, doc: ^core.Document, i: core.Node_Index) {
+	facts := strings.builder_make(context.temp_allocator)
+	attributes := core.attributes_of(doc, i)
+	for name, value in attribute_texts(&attributes) {
+		fmt.sbprintf(&facts, "@%s=%q ", name, value)
+	}
+	for f in core.all_facts(doc, i) {
+		body := string(doc.src[f.lo + core.comment_lead(f.spelling):f.lo + u64(f.n) - core.comment_tail(f.spelling)])
+		#partial switch f.role {
+		case .Comment:
+			fmt.sbprintf(&facts, "<!--%s--> ", body)
+		case .Comment_Inline:
+			fmt.sbprintf(&facts, "<!--%s-->^ ", body)
+		case .Comment_Foot:
+			fmt.sbprintf(&facts, "<!--%s-->$ ", body)
+		case .Instruction:
+			fmt.sbprintf(&facts, "<?%s?> ", body)
+		case .Doctype:
+			fmt.sbprintf(&facts, "<!%s> ", body)
+		}
+	}
+	if core.kind(doc, i) != .Object {
+		if strings.builder_len(facts) > 0 {
+			fmt.sbprintf(b, "(%s", strings.to_string(facts))
+		}
+		switch core.kind(doc, i) {
+		case .Null:
+			strings.write_string(b, "null")
+		case .True, .False, .Number:
+			buf := make([]u8, max(core.text_room(doc, i), 1), context.temp_allocator)
+			s, _ := core.text(doc, i, buf)
+			strings.write_string(b, s)
+		case .Bytes, .String, .Plain, .Array, .Object, .End:
+			buf := make([]u8, core.text_room(doc, i), context.temp_allocator)
+			s, _ := core.text(doc, i, buf)
+			fmt.sbprintf(b, "%q", s)
+		}
+		if strings.builder_len(facts) > 0 {
+			strings.write_byte(b, ')')
+		}
+		return
+	}
+	fmt.sbprintf(b, "{{%s", strings.to_string(facts))
+	it := core.doc_pairs(doc, i)
+	first := true
+	for k, v in core.doc_pair_next(&it) {
+		if !first {
+			strings.write_string(b, ", ")
+		}
+		first = false
+		buf := make([]u8, core.text_room(doc, k), context.temp_allocator)
+		name, _ := core.text(doc, k, buf)
+		fmt.sbprintf(b, "%q: ", name)
+		shape_node(b, doc, v)
+	}
+	strings.write_byte(b, '}')
 }
 
 // The fault arm of `err`, and whether `err` is one.
@@ -113,4 +182,37 @@ log_token :: proc "contextless" (r: ^Token_Log, s: core.Hook_Regs, t: core.Token
 // The log a walk wrote, without its last space.
 log_line :: proc(r: ^Token_Log) -> string {
 	return strings.trim_space(strings.to_string(r.out))
+}
+
+// A hook of a markup walk with a cursor that logs every token, skips the element named `skip` at its key or its object,
+// and stops at token `stop`, or at every `every`th one when `every` is not 0. A skipped token is never a stop, so the
+// tokens match those of a walk with no stops.
+Stopping :: struct {
+	src:    []u8,
+	tokens: [dynamic]core.Token,
+	skip:   string,
+	stop:   int,
+	every:  int,
+	// The last element key the hook saw, whose object a skip on the object hides.
+	last:   string,
+}
+
+stopping_hook :: proc "contextless" (h: ^Stopping, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	context = runtime.default_context()
+	n := len(h.tokens)
+	append(&h.tokens, t)
+	r := core.Hook_Regs{s.a + 1, s.b, s.c}
+	if t.role == .Key && t.n != 0 {
+		h.last = string(h.src[t.lo:t.lo + u64(t.n)])
+		if h.last == h.skip {
+			return r, .Skip
+		}
+	}
+	if t.kind == .Object && t.role == .Value && len(h.skip) > 1 && h.skip[0] == '*' && h.skip[1:] == h.last {
+		return r, .Skip
+	}
+	if h.every != 0 && (n + 1) % h.every == 0 || n + 1 == h.stop {
+		return r, .Stop
+	}
+	return r, .Next
 }

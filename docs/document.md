@@ -39,7 +39,8 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `yaml/keys.odin` | the repeat test of a mapping's keys, by decoded text |
 | `yaml/edit.odin`, `edit_place.odin`, `edit_facts.odin` | YAML's edit services and its own commit, the sites of new lines, and property and comment edits |
 | `xml/document.odin`, `xml/scope.odin` | XML's handles and readers, the `Name`, `Namespace` and `Content` facts, expanded names and `close_end` |
-| `xml/edit.odin` | XML's edit services and its own commit: splices of contents, tags and facts |
+| `core/compose/markup.odin` | the commit XML and HTML share: splices of contents, tags and facts over the elements a format spells |
+| `xml/edit.odin`, `html/edit.odin` | XML's and HTML's edit services: names, contents, facts, and HTML's read of its output against the edited tree |
 | `cbor/document.odin`, `cbor/bound.odin` | CBOR's handle and its bound readers: `number`, `number_text`, `key_bytes`, the tag fact |
 
 ## The node
@@ -306,8 +307,8 @@ read a string, its payload as a string. A text format spells bytes only as the b
 
 `doc_number_text` returns a number node's decimal digits, a `Plain` node the format resolves to a number included: its
 span for a format whose number span is the text, else what the format's `Readers.number_text` writes into `buf`, as
-YAML does for a number whose text is not a decimal, CBOR for a binary integer, a bignum or a decimal fraction, and XML
-for a number whose text needs decoding. An infinity or a NaN gives an empty text.
+YAML does for a number whose text is not a decimal, CBOR for a binary integer, a bignum or a decimal fraction, and the
+markup formats for a number whose text needs decoding. An infinity or a NaN gives an empty text.
 
 `number(doc, i)` returns a 16-byte `Number`, `bits` and `kind`, decoded from the node's span when it is read, and
 whether the node is a number. The
@@ -349,7 +350,7 @@ and `key_equals` read `Document.as.spec`, since a CSV backslash is a byte, a TSV
 cell has neither. `text`, `key_equals` and `number` take a `Token_View`, the source and the handle, and the token by
 value, so a typed read hands them a walk's token with no document. `Document` starts with `using view: Token_View`,
 and `Edit_Services.value` takes one too. `Token_View.state` holds what a format's readers need past the source and the
-handle, as XML's DTD tables: a document owns it, `destroy` frees it and `clone` copies it.
+handle, as XML's DTD tables and HTML's element ends: a document owns it, `destroy` frees it and `clone` copies it.
 
 | Reader | JSON | dsv |
 |---|---|---|
@@ -364,9 +365,9 @@ The slots past these are nil in JSON and dsv and serve the other formats:
 
 | Reader | Says | Set by |
 |---|---|---|
-| `fact` | a named fact the node's spelling carries instead of a span: a scalar's `Style`, a TOML datetime's `Tag`, a markup element's `Name`, `Namespace` and `Content`, a CBOR tag's digits | toml, yaml, xml, cbor |
-| `attribute` | an `Attribute` fact's name as a `Key` token and its value as a `Value` token, which `attributes_of` walks | xml |
-| `number_text` | the decimal digits of a number token whose span is not its text, empty for an infinity or a NaN | cbor, yaml, xml |
+| `fact` | a named fact the node's spelling carries instead of a span: a scalar's `Style`, a TOML datetime's `Tag`, a markup element's `Name`, `Namespace` and `Content`, a CBOR tag's digits | toml, yaml, xml, html, cbor |
+| `attribute` | an `Attribute` fact's name as a `Key` token and its value as a `Value` token, which `attributes_of` walks | xml, html |
+| `number_text` | the decimal digits of a number token whose span is not its text, empty for an infinity or a NaN | cbor, yaml, xml, html |
 | `key_bytes` | the bytes a member named `name` is written with, which a typed plan compares as it compares `key_open + name + key_close` | cbor |
 | `binary` | the format has a byte string kind, so a `String` token is never bytes | cbor |
 | `key_is` | the key at a node against a name that needs the key's place, an expanded name `{uri}local` | xml |
@@ -419,16 +420,17 @@ container:
   format holds no property, and a commit counts a set of one in `dropped`. YAML fills it.
 - `relocate` gives the bytes a node has at another place, when an edit's value is a `Node_Ref` of the list's own
   document, as a member moved into another table or another block's indentation. `ok` false is refused as
-  `.Bad_Value`. Nil keeps the node's span. TOML, YAML and XML fill it.
+  `.Bad_Value`. Nil keeps the node's span. TOML, YAML, XML and HTML fill it.
 - `frozen` says why an edit may not touch a node, as the message `detail` of the format's `rules`, and nil `rules` for a
   node it may. `set`, `insert`, `remove`, `reorder` and every fact edit ask it, and a frozen node is `.Frozen`.
-  XML holds a private `frozen` that names the nodes a DTD's replacement text or an attribute default made. YAML's
-  commit keeps its own list of frozen nodes.
+  XML holds a private `frozen` that names the nodes a DTD's replacement text or an attribute default made, and HTML
+  one that names the nodes the tree construction made rather than the text. YAML's commit keeps its own list of frozen
+  nodes.
 - `commit` returns the output in place of `core/compose`'s commit, for a format whose containers are not one range of
   bytes to compose around: a TOML table written in sections, a YAML block collection of lines at an indentation. It
   places each edit's text at its site itself and counts the facts the output cannot hold. When it is set, the value
-  `spell` writes is recorded as it is, with no layout taken from a bracket. TOML, YAML and XML fill it, and each reads
-  its output again with `validate`.
+  `spell` writes is recorded as it is, with no layout taken from a bracket. TOML, YAML, XML and HTML fill it, and each
+  reads its output again with `validate`, HTML by building it and comparing the tree with the edited one.
 
 A reader reaches the table only where it must: `text` and `key_equals` for a marked node, `number` for every scalar,
 `resolve` for every node, `close_end` for a container whose span is read, and the edit services for every recorded or

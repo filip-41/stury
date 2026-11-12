@@ -1,17 +1,21 @@
 # Markup
 
-How `xml` reads its texts. It builds the markup document shape: an element is a member under its name, its
-attributes are facts of its value, and its text is the value or a `#text` member. `xml` also reads a text into typed values (`xml.unmarshal`), reads a text as
+How `xml` and `html` read their texts. Both build one document shape: an element is a member under its name,
+its attributes are facts of its value, and its text is the value or a `#text` member, so a reader, a path, a model or a
+schema written for one reads the other. `xml` also reads a text into typed values (`xml.unmarshal`), reads a text as
 one record, writes a document or a typed value as XML (`xml.write`, `xml.marshal`) and edits a text keeping the bytes
-no edit reaches (`xml.set`, an edit list).
+no edit reaches (`xml.set`, an edit list). `html` does all of these for HTML: it reads a text into typed values and as
+one record, writes a document, a typed value or a token write's calls as HTML (`html.write`, `html.marshal`,
+`html.tokens_init`) and edits a text (`html.set`, an edit list).
 
 ## The shape of a markup document
 
-A document is an object with one member, the root element, as in `{"order": ...}`.
+A document is an object with one member, the root element, as in `{"order": ...}`. An HTML fragment's document is an
+object of the nodes of its root, one member each.
 
 | Source | Document |
 |---|---|
-| An element | a member whose key is the element's qualified name as written |
+| An element | a member whose key is the element's name: XML's qualified name as written, HTML's name in canonical case |
 | An element with no child element | a `Plain` value of its text, empty for none, which reads as null |
 | An element with child elements | an `Object`: a `#text` member for each run of text between its children that holds a character other than whitespace, and each child as a member, in document order |
 | An attribute | an `Attribute` fact of the element's value, `name="value"`, read through `core.attributes_of` |
@@ -36,7 +40,8 @@ as a repeated key of JSON does, each `b` under `dups = .All` and the first under
 that element's value. The value's `.r.b[1]` is `core.value_member` then `value_child_at`, or `members_named`'s second
 node. The value keeps no order across names, so a text
 written from it puts each name's elements and runs together at the place of its first: only an XML document written
-whole from its spans keeps how its text and elements interleave.
+whole from its spans keeps how its text and elements interleave. HTML keeps the first of a repeated attribute and drops
+the rest, as its tree does.
 
 `core.attributes_of(&doc, node)` walks the attributes of the element whose value is `node` in source order, and
 `attribute_next` gives each as a `Key` token of its name and a `Plain` token of its value, which `token_text` decodes.
@@ -45,8 +50,9 @@ member read `id="7"`. `core.fact_value` gives an element's `Name` as written and
 descendants' in document order, and `Namespace` its namespace URI.
 
 A model and a schema read a markup document through `core/typed`'s markup layer: an element's attributes and child
-elements are members, and the text of an element with attributes is its `#text` member. `xml.checks(.Xml)` gives
-`model.compile` the format, and `xml.bind_schema` binds a JSON Schema. A check builds the text in the temp allocator and checks its document. `xml.unmarshal` builds the text and reads
+elements are members, and the text of an element with attributes is its `#text` member. `xml.checks(.Xml)` and
+`html.checks(.Document)` give `model.compile` the format, and `xml.bind_schema` and `html.bind_schema` bind a JSON
+Schema. A check builds the text in the temp allocator and checks its document. `xml.unmarshal` builds the text and reads
 its document by the same layer: a struct member reads an attribute, a child element or `#text` by its name, and a `[]T`
 member collects the siblings of its name wherever they stand. A `core.Value` member is the element's value as
 `built_value` builds it, a repeated name an array. A number member cannot read text that needs decoding (`id="&#55;"`). A
@@ -158,7 +164,8 @@ attribute default, with the detail `replacement`, so an edit of such a node is `
 
 ### Edits
 
-`xml.set` and an XML edit list commit their edits as splices of the source, since an element's name stands in two tags
+`xml.set` and an XML edit list commit their edits as splices of the source, through `core/compose/markup.odin`, which
+HTML's commit shares, since an element's name stands in two tags
 and its attributes in the first. Every byte no splice touches stays, and the output is read again: one XML does not
 read is `.Bad_Result`.
 
@@ -215,3 +222,245 @@ own.
   replacement text that spells markup its literal does not.
 - `xml/test/oracle`: the reader the differential against pyexpat drives, seeded random and broken documents, internal
   subsets among them, read with namespaces.
+
+## HTML
+
+`html` reads HTML as the WHATWG HTML standard does: the tokenizer of section 13.2.5, with the input stream's
+preprocessing and character references, the tree construction of section 13.2.6, which builds a document or a fragment,
+templates and foreign content (SVG and MathML) included, and the encoding sniffing of section 13.2.3. The tree is built
+into the document an XML text with the same markup builds, so HTML is a format on the same interface as XML: `validate`,
+`walk` with a cursor that `walk_resume` continues, `build`, `scan`, `find`, `each_answer`, `answers`, `query`, `as`,
+`checks`, `bind_schema`, `unmarshal`, `check`, `plan_make`, `plan_of`, `reads`, `number`, the record calls,
+`record_docs`, `write`, `marshal` and `tokens_init`, bound and chosen. A typed read goes by the tag key `html`, through the markup layer XML's goes through,
+over the tree the standard builds, so `<td>1<td>2` reads into a `[]T` member `td` of the `tr` and `tbody` the tree
+implies. A text is one record, from the reader's position to the input's end, since a browser reads every byte past
+`</html>` into the tree. A walk with a cursor holds the tokens past its first stop in a `core.Token_Cursor`, as XML's
+does, and a `Skip` on an element's key or `Object` there hides the element's remaining tokens. The tokenizer and the
+tree are not public.
+
+`html.Spec` is `.Document` or `.Fragment`. A fragment is read in the context element `Options.context_name` in
+`Options.context_namespace` (`html.Namespace` `.Html`, `.Svg` or `.Math`), `body` when the name is empty, and its
+document is an object of the nodes of the root, as the standard's fragment algorithm gives them. `Options.scripting`
+reads as a browser with scripting enabled reads: `noscript` content is raw text. No script runs either way.
+
+### What an HTML document holds
+
+- Every element's name is in canonical case: ASCII upper case lowered, SVG and MathML mixed case restored, and U+0000
+  read as U+FFFD. A start tag the tree renames, `image` as `img`, is read under the name of the element it makes.
+- An element the tree construction implied, as `html`, `head`, `body` and `tbody`, is a member whose key has no bytes.
+- A text the tree moved (foster parenting) or that a comment split is one value, whose pieces the document's state
+  lists, so `text` reads it whole.
+- `core.fact_value(&doc, node, .Namespace)` gives every element's namespace URI, HTML, SVG or MathML, with no `xmlns`
+  declaration.
+- Character references are decoded by `text` as the tokenizer read them, through the trie `core/spell` holds.
+
+### Write
+
+`html.write` writes a document, or an object node of one, by the standard's serialization of a tree (section 13.3): an
+object of one `html` member is a document and any other a fragment, an element per member, per item of an array, a
+`#text` member the text there, `null` an empty element and a scalar its text, spelled by `write.scalar_text`. A void
+element has no end tag, the text of a raw text element (`script`, `style`) is written as it stands, and any other text
+and attribute value is escaped with `&amp;`, `&nbsp;`, `&lt;` and `&gt;`, or `&quot;` in a value. A `pre`, `listing` or
+`textarea` whose text starts with a line feed gets one more, as the standard's parser drops it. An HTML document is
+written as its tree holds it, the elements the tree implied with their tags, and its doctype, comments and attributes
+are written from their spans. Another format's document writes its comments where they stand and drops a fact HTML has
+no form for, and an attribute name that is no HTML name is `.Unwritable`.
+
+A text is sound when it reads back as the tree it was written from: the write reads its compact text back, as a
+document or a fragment in `body`, writes that again and compares the two, so `{"td": 1}`, a `div` in a `p`, a void
+element with content, a raw text that holds its end tag and an upper-case name are `.Unwritable`. A pretty write puts an
+element whose children are all elements on lines of its own and lays nothing into `pre`, `listing`, `textarea` or an
+element that holds text. A value no object is `.Unsupported`.
+
+`html.marshal` and the token write make their value in `write.MARKUP_TREE`, as XML's do, and `write.put_markup` reads it
+back as a built value that `html.write`'s serialization writes, read back as above. A struct of one member `html` is
+written as a document, so it must hold the `head` and `body` the tree implies. A token write to a stream is
+`.Unsupported`, since the text is read back only once it is whole.
+
+An HTML document does not answer what needs XML's declarations: there is no `{uri}local` path step and no attribute
+lookup by expanded name. `html.scan`, `find` and `each_answer` always build the whole document, since the tree is whole
+before its first token.
+
+### Edits
+
+`html.set` and an HTML edit list commit as XML's do: a set writes an element's content between its tags, an array on
+a name fills its elements in order, an insert is an element laid out by the white space before its neighbour, a removal
+takes that white space, a rename respells both tags, and comments and attributes are facts. An end tag the source
+leaves out stays out, and an element's end is where the tree ends it.
+
+- A value is written as `html.write` writes it: a string escaped, or as it stands in `script`, `style`, `xmp`, `iframe`,
+  `noembed`, `noframes` and `plaintext`, an object as elements, and a line feed more before the text of a `pre`,
+  `listing` or `textarea` that starts with one. An object's elements must read back as written when read as a fragment
+  whose context is the element they go in, else the edit is `.Bad_Value` with the reason `.No_Spelling`: a `table` takes
+  `{"tbody": {"tr": ..}}`, and refuses `{"tr": ..}`, which it reads inside a `tbody`. A `typed.Raw` is markup as it
+  stands, refused in a raw text element when it holds `<` or `&`, and in `title` and `textarea` when it holds `<`.
+- An attribute body is a name in lower case and its value as the tokenizer reads one attribute, and a comment body
+  one the serialization can write.
+- An edit that writes at a node the tree construction made rather than the text, an element it implied, moved or
+  copied or a text it moved, is refused with the detail `constructed`, as is an insert next to one, since no bytes of
+  the source spell it where it stands. An edit between the nodes the source spells inside an implied element, as an
+  insert between two `p` in an implied `body`, or a set of an element whose implied descendants it replaces, is made.
+  A text read across a start tag the tree dropped, as `html` inside a `p`, is refused as `split`, since its span holds
+  the tag's effect.
+- Content in a void element is `void`, an array in an array `nested_array`, and a change of member order `reordered`.
+- The output is built again with the document's options and compared with the source document. A node no edit wrote
+  reads as it did, the content an edit wrote reads in the output as it reads alone as a fragment in its element, or
+  for the document's `ROOT` as its root element reads alone, and an insert, a removal or an array changes the element
+  count by its own. A result that differs is `.Bad_Result` with the
+  detail `reread` at the first byte that differs, so a `div` or `p` in a `p`, a `td` outside a table and a rename of `p`
+  to `table` are refused.
+
+### Validate and faults
+
+A build recovers from every parse error, as the standard does, and fails only for a text it cannot read: `.No_Memory`,
+`.Too_Wide` at a span longer than 4 GiB, `.Too_Deep` where the stack of open elements would pass `Options.max_depth`,
+and `.Bad_Char` with the detail `encoding` for a text in an encoding other than UTF-8. A byte order mark for UTF-8 is
+skipped. Otherwise the prescan reads the first 1024 bytes for a `meta` naming an encoding, and when it finds none, the
+first `meta` the tree inserts in the head may name one. An encoding other than UTF-8 is refused unless every byte of
+the text reads as UTF-8 reads it, as an ASCII text does in an encoding that extends ASCII, and UTF-16 byte order marks
+are refused too.
+
+`html.validate` builds the tree on the default heap and returns its first parse error, in the order the standard's
+algorithm finds them, so it allocates where XML's does not. A parse error of the input stream or the tokenizer is
+`Truncated` for one the standard names after the end of the text, and `Bad_Char` at its byte for any other, and one of
+the tree construction is `Bad_Char` at the token it reads. `Detail` holds the standard's tokenizer parse error codes, `-`
+read as `_`, then the tree construction's, which the standard does not name: `Missing_Doctype`, `Bad_Doctype`,
+`Unexpected_Doctype`, `Unexpected_Start_Tag`, `Unexpected_End_Tag`, `Unexpected_Text`, `Unclosed_Element` and
+`Misnested_Tag`.
+
+### Files
+
+| File | Holds |
+|---|---|
+| `html/tokenize.odin` | `Spec`, `Options`, `Detail`, `RULES`, the token types, the tokenizer's entry, the byte classes and stop sets, the input stream's judge, the tag and attribute builders |
+| `html/states.odin` | the tokenizer's states, one procedure each, in the standard's order |
+| `html/refs.odin` | character references, read alike by the tokenizer and by the decode |
+| `html/tree.odin` | the tree: the node arena, the stack of open elements and its scopes, the list of active formatting elements, insertion, foster parenting, the adoption agency |
+| `html/modes.odin` | the tokenizer's hook, the dispatcher and the insertion modes, one procedure each, and the DOCTYPE's quirks |
+| `html/foreign.odin` | foreign content: the dispatcher's test, its rules, integration points and adjusted names |
+| `html/select.odin` | the `option` step that fills a `selectedcontent` element |
+| `html/input.odin` | encoding sniffing: the byte order mark, the prescan and a `meta` the tree inserts |
+| `html/tags.odin` | the element names the tree construction treats by name, their categories, the names foreign content adjusts, and the tables that find each, generated by `tools/html_tags.py` |
+| `html/encodings.odin`, `html/encodings/` | the Encoding Standard's encodings and labels, generated by `tools/html_encodings.py` from its `encodings.json` |
+| `html/write.odin` | the serialization of a tree and its read-back |
+| `html/edit.odin` | the edit services: content and facts by the serialization's rules, an element's tags in the source, and the read of the output against the edited tree |
+| `html/emit.odin` | the tree's tokens in preorder, which the build reads twice, to size the document and to write it |
+| `html/build.odin`, `query.odin`, `typed.odin`, `records.odin`, `bound.odin`, `document.odin` | the entry points, the paths, the typed reads and checks, the records, the bound tables and the readers |
+| `html/internal.odin` | the tokenizer and the tree, opened to `html/test`'s conformance tests and to a build with `-define:STURY_HTML_INTERNALS=true` |
+| `core/markup.odin` | what XML and HTML share: `MARKUP_TEXT`, the attribute fact's spelling, `resolve`, the numbers and the `Name` and `Content` facts |
+| `core/spell/entities.odin`, `core/spell/entities/` | the named reference trie, generated by `tools/html_entities.py` from the standard's `entities.json` |
+
+### The tokenizer
+
+The tokenizer hands each token to the tree's hook: text, start and end tags, comments, DOCTYPEs, processing
+instructions, and each parse error, with its `Detail` and the byte it was found at, after which the read goes on as the
+standard says. A token holds no text of its own. A name, a text and each attribute's name and value are spans: a source
+range, the `Mode` its characters were read in, and the flags saying what decoding it needs. A span with no flags is its
+source bytes, which is every name and text run in clean lower-case markup. The tokenizer reads a character reference
+once, to report its errors, and the decode reads it again with the same procedure (`read_ref`), so the two cannot part.
+
+| Mode | Spans | U+0000 | References |
+|---|---|---|---|
+| `.Data` | text of the data state | kept | read |
+| `.Text` | text of the data state as the tree reads it in HTML content | dropped | read |
+| `.Rcdata` | text of RCDATA | U+FFFD | read |
+| `.Raw` | RAWTEXT, script data, PLAINTEXT, comments, DOCTYPE identifiers | U+FFFD | no |
+| `.Verbatim` | CDATA sections, instruction data | kept | no |
+| `.Name` | tag, attribute and DOCTYPE names, ASCII upper case lowered | U+FFFD | no |
+| `.Value` | attribute values | U+FFFD | read as in an attribute |
+
+The tokenizer does not know which element it is in. The hook's answer to a start tag switches it: `.Rcdata`,
+`.Rawtext`, `.Script_Data` and `.Plaintext` set the text state the tree construction asks for, and `.Foreign` and
+`.Html` say whether the adjusted current node is outside the HTML namespace, where `<![CDATA[` opens a CDATA section
+and is otherwise a bogus comment with `cdata-in-html-content`.
+
+Every state is a procedure with one signature that ends in `#must_tail` to the next, so the states compile to jumps and
+a state change costs no call or return. The hook is a compile-time parameter and is inlined into the states that emit.
+The standard's states map one to one onto procedures, with three merges: the end tag open and end tag name states of
+RCDATA, RAWTEXT, script data and escaped script data are two procedures that return to the text state they came from,
+the quoted DOCTYPE identifier states read their quote from the tokenizer, and the character reference states are
+`read_ref`. Processing instructions follow the standard's current states: `<?` opens one when the target is a name,
+`xml` in any case is refused as a target, and anything else is a bogus comment.
+
+A state that reads a run (data, RCDATA, RAWTEXT, script data, PLAINTEXT, the escaped script states, comments, CDATA
+sections, bogus comments, quoted attribute values and instruction data) skips it 64 bytes at a time: `stop_at`
+classifies a block by its two nibbles against the state's stop set (`kernel.classes`) and jumps to the first byte the
+state acts on. Each set holds the state's own bytes and every byte the input stream must judge, so a run of ASCII text
+with no markup is a mask and a count of trailing zeros per block.
+
+The standard preprocesses the input before the tokenizer reads it: CR LF and a lone CR become LF, and a control, a
+noncharacter or a surrogate is a parse error. stury does that in place. `C_JUDGE` holds CR, every control but tab, LF
+and FF, DEL and every byte past ASCII. A state that meets one calls `judge`, which reads the character, reports a
+control or noncharacter, and marks the span for the decode. A surrogate cannot be encoded in UTF-8, so its three bytes
+are ill-formed UTF-8 and read as U+FFFD. A character a state reconsumes is reported once.
+
+`entities.json` is the standard's table of 2231 names. `tools/html_entities.py` builds a trie from it, one node per
+character with a node's children in a row in byte order, and writes it as tables and the values' UTF-8 text, checked
+against the file's SHA-256. `read_ref` walks the trie for the longest name that ends at a terminal, applies the
+attribute rule (no match when the next character is `=` or alphanumeric), and reports a missing semicolon or an unknown
+name. A numeric reference is read to its value, with the standard's C1 remapping and its errors for zero, surrogates,
+noncharacters, controls and values past U+10FFFF.
+
+A tag keeps its first 16 attributes inline and compares each new name with them one by one. Past that the attributes
+move to the allocator, with a hash table of their names, so a tag with thousands of attributes stays linear. A
+duplicate is reported and dropped, the first value kept, as the standard says.
+
+### The tree
+
+`build_tree` hands the tokenizer the hook `on_token`, which reads each token in the current insertion mode. A mode is a
+procedure that returns whether the token is to be read again, in the mode it switched to, and a mode that uses
+another's rules calls it. A text token is a run of character tokens: a mode that treats whitespace apart splits the
+run and reads the rest again, so a run costs one call however long it is.
+
+The tree is an arena of nodes linked by index: parent, first and last child, previous and next sibling. The algorithm
+inserts before a table, moves children and clones elements, and a linked arena does each in place. A node keeps the
+source bytes of the token that made it, and the element's name as a span. An element's attributes are a run of the
+tree's attribute list, copied from the token, and a clone shares its original's. A text node is a list of pieces, each
+a span, and a text inserted next to the text it continues in the source grows that text's last piece, so text written
+as one run is one piece. A flag marks an element no tag opened (`.Implied`), a clone (`.Cloned`) and a node placed
+away from where its source sits (`.Moved`).
+
+`tags.odin` gives each name the algorithm treats by name a `Tag`, and every other name is `.Other`, compared by its
+source text. A tag's categories (special, formatting, the elements that bound each scope, the ones implied end tags
+close, the contexts a table clears back to) are a bit set per tag, so a scope check reads the stack and one table.
+
+The stack of open elements and the list of active formatting elements hold node indices. The list keeps the Noah's
+Ark clause, and reconstructing it clones each element not open after the last marker. The adoption agency runs as the
+standard writes it, its outer loop eight times and its inner loop three. Foster parenting places a node before the
+last table when the current node is a table, a table section or a row. `select`, `option`, `optgroup`, `hr` and
+`input` follow the standard's current rules, with no "in select" mode, and when the parser pops the option a `select`
+selects, the select's `selectedcontent` element takes a copy of its children. The DOCTYPE sets the document's quirks
+mode from the standard's lists of public and system identifiers.
+
+A `template` element's contents are its children, and the stack of template insertion modes picks the mode they are
+read in. While the adjusted current node is an SVG or MathML element and not an integration point for the token, the
+token is read by the rules of foreign content, which insert elements in that namespace and break out at the standard's
+HTML tags. A fragment reads through the same builder, its context element picking the tokenizer's first state, the form
+pointer, the template modes and the insertion mode as the standard's fragment algorithm does.
+
+`html/emit.odin` gives the finished tree's tokens in preorder, once to `core/build`'s counting hook to size the document
+and once to the builder hook to write it, then the tree is freed. What the tokens' spans cannot carry, each element's
+close and the pieces of a text that is no one span, goes into the document's `Token_View.state`.
+
+### Tests
+
+- `html/test`: documents and their shapes against XML's, names, paths, attributes, facts, templates, spans, the bound
+  and chosen entry points, duplicates, edits and their refusals, handle options, the walk with skips and stops, validate, faults,
+  models, schemas, `diff` and `equal` against XML, and 1,000 random texts that an HTML fragment and an XML document read
+  alike, checked to build one document shape and one value under both `infer` settings.
+- `html/test/html5lib_test.odin` runs every case of html5lib-tests' `tokenizer/` directory in each of its
+  initial states and compares the tokens and the errors, codes and positions both. `xmlViolation.test` is skipped,
+  since it tests the coercion of output to the XML infoset, and so are the cases whose input holds a lone surrogate,
+  which UTF-8 cannot carry. `tokenize_test.odin` covers the hook's text state switches, CDATA in foreign content, tags
+  with many and duplicate attributes, an allocator that refuses, the decode on each flag, and every special byte at each
+  offset across a block boundary.
+- `html/test/tree_test.odin` reads every case of the tree-construction `.dat` files as the web-platform-tests
+  keep them, builds each as a document or as a fragment of its context, with scripting off and on unless the case
+  names one, compares the tree as the format prints it, and checks each case's document against its tree: element names
+  in preorder, attribute values and element text. A ledger names the cases whose tree differs, with the reason, and a
+  ledger case that passes fails the run. `encoding_test.odin` runs the html5lib-tests encoding cases and checks the
+  fault for each encoding the tree does not read, and `frozen_test.odin` the nodes the tree made otherwise than the
+  source spells them.
+- The conformance tests are in package `html/test`, beside the format tests, and read their cases from
+  `html/test/conformance/html5lib` and `html/test/conformance/wpt`. The package needs
+  `-define:STURY_HTML_INTERNALS=true` for `odin check`, which `make lint` passes, and nothing for `odin test`.
