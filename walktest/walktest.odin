@@ -7,11 +7,11 @@ import "base:runtime"
 import "core:bytes"
 import "core:fmt"
 import "core:mem"
+import "core:mem/virtual"
 import "core:math/rand"
 import "core:slice"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:testing"
 import core "../core"
 import compose "../core/compose"
@@ -36,19 +36,10 @@ fence_init :: proc() -> Fence {
 	return {}
 }
 
-@(private)
-page_size :: #force_inline proc() -> uint {
-	page := uint(posix.sysconf(._PAGESIZE))
-	if page == 0 {
-		page = 1 << 12
-	}
-	return page
-}
-
 // Maps the fence with room for `n` bytes when it holds less, and marks the page after that room as no access.
 @(private)
 fence_reserve :: proc(f: ^Fence, n: uint) {
-	page := page_size()
+	page := uint(mem.PAGE_SIZE)
 	span := (n + page - 1) & ~(page - 1)
 	if span == 0 {
 		span = page
@@ -58,13 +49,14 @@ fence_reserve :: proc(f: ^Fence, n: uint) {
 	}
 	unfence(f)
 	size := span + page
-	base := posix.mmap(nil, size, {.READ, .WRITE}, {.ANONYMOUS, .PRIVATE})
-	if base == nil || base == posix.MAP_FAILED {
-		panic("walktest.fence: mmap failed")
+	mapped, err := virtual.reserve_and_commit(size)
+	if err != nil {
+		panic("walktest.fence: mapping failed")
 	}
-	if posix.mprotect(rawptr(uintptr(base) + uintptr(span)), page, posix.PROT_NONE) != .OK {
-		posix.munmap(base, size)
-		panic("walktest.fence: mprotect failed")
+	base := raw_data(mapped)
+	if !virtual.protect(rawptr(uintptr(base) + uintptr(span)), page, virtual.Protect_No_Access) {
+		virtual.release(base, size)
+		panic("walktest.fence: protect failed")
 	}
 	f^ = {base = base, span = span, size = size}
 }
@@ -81,7 +73,7 @@ fence_copy :: proc(f: ^Fence, src: []u8) -> []u8 {
 // Releases the mapping a fence made.
 unfence :: proc(f: ^Fence) {
 	if f.base != nil {
-		posix.munmap(f.base, f.size)
+		virtual.release(f.base, f.size)
 	}
 	f^ = {}
 }

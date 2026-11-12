@@ -103,13 +103,13 @@ a_shared_allof_chain_binds_in_bounded_memory :: proc(t: ^testing.T) {
 
 // A chain of references loads and binds in time linear in its length: a chain eight times as long takes less than 32
 // times as long, where a search along the chain from each link would take 64 times as long. Each length takes its
-// fastest of three runs, and a ratio of two times holds on a machine that runs slow throughout.
+// fastest of three runs, and a ratio of two times holds on a machine that runs slow throughout. The runs bind on the
+// heap, so a run after the first reuses the pages the one before released rather than faulting in new ones.
 @(test)
 a_long_ref_chain_loads_and_binds :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	context.allocator = context.temp_allocator
 	chain :: proc(links: int) -> string {
-		text := strings.builder_make()
+		text := strings.builder_make(context.temp_allocator)
 		fmt.sbprintf(&text, `{{"$ref": "#/$defs/r%d", "$defs": {{"r0": {{"type": "integer"}}`, links)
 		for i in 1 ..= links {
 			fmt.sbprintf(&text, `, "r%d": {{"$ref": "#/$defs/r%d"}}`, i, i - 1)

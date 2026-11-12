@@ -41,14 +41,40 @@ def as_jq(stderr):
     return re.sub(rb"(?m)^stury: ", b"jq: ", stderr).replace(STURY_FOOTER, JQ_FOOTER)
 
 
+# Linux starts a forked child's peak at the resident size of the process that forked it, and a test script holds its
+# inputs, so there a run is forked from a fresh interpreter, which writes the run's wait status and peak to fd ARGV[1].
+FORK_FRESH = sys.platform == "linux"
+FRESH_FORK = """import os, resource, sys
+report, cpu = int(sys.argv[1]), int(sys.argv[2])
+if cpu:
+    resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
+pid = os.fork()
+if pid == 0:
+    os.close(report)
+    try:
+        os.execvp(sys.argv[3], sys.argv[3:])
+    finally:
+        os._exit(127)
+_, status, usage = os.wait4(pid, 0)
+os.write(report, b"%d %d" % (status, usage.ru_maxrss))
+"""
+
+
 def peak(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, cpu=None):
     """(exit status, stderr, peak resident bytes) of a run, read from its rusage, with at most `cpu` seconds of CPU.
     `stdin` given as bytes is written through a pipe."""
     import resource  # POSIX only
 
-    limit = (lambda: resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))) if cpu else None
     fed = isinstance(stdin, bytes)
-    p = subprocess.Popen(argv, stdin=subprocess.PIPE if fed else stdin, stdout=stdout, stderr=stderr, preexec_fn=limit)
+    source = subprocess.PIPE if fed else stdin
+    if FORK_FRESH:
+        report, written = os.pipe()
+        fresh = [sys.executable, "-I", "-c", FRESH_FORK, str(written), str(cpu or 0), *argv]
+        p = subprocess.Popen(fresh, stdin=source, stdout=stdout, stderr=stderr, pass_fds=(written,))
+        os.close(written)
+    else:
+        limit = (lambda: resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))) if cpu else None
+        p = subprocess.Popen(argv, stdin=source, stdout=stdout, stderr=stderr, preexec_fn=limit)
     err = []
     reader = p.stderr and threading.Thread(target=lambda: err.append(p.stderr.read()))
     reader and reader.start()
@@ -58,11 +84,20 @@ def peak(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subpr
         except BrokenPipeError:
             pass
         p.stdin.close()
-    _, status, usage = os.wait4(p.pid, 0)
+    if FORK_FRESH:
+        p.wait()
+        with os.fdopen(report, "rb") as f:
+            said = f.read().split()
+        if len(said) != 2:
+            raise RuntimeError(f"the fresh fork of {argv[0]} exited {p.returncode} without its report")
+        status, maxrss = map(int, said)
+    else:
+        _, status, usage = os.wait4(p.pid, 0)
+        maxrss = usage.ru_maxrss
     p.returncode = os.waitstatus_to_exitcode(status)
     reader and reader.join()
     # ru_maxrss is in bytes on macOS and in kibibytes elsewhere.
-    return p.returncode, b"".join(err), usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss << 10
+    return p.returncode, b"".join(err), maxrss if sys.platform == "darwin" else maxrss << 10
 
 
 def resident_mb(pid):

@@ -571,14 +571,18 @@ def _corpus_json(name):
         return json.load(f)
 
 
+def _generated(name) -> bytes:
+    """The bytes of fixture NAME, generated again rather than read, so that `--check`, which writes nothing, has them."""
+    gen, args = FIXTURES[name]
+    return gen(*args)
+
+
 def _logs_records():
-    with open(os.path.join(OUT, "logs.ndjson"), "rb") as f:
-        return [json.loads(line) for line in f if line.strip()]
+    return [json.loads(line) for line in _generated("logs.ndjson").splitlines() if line.strip()]
 
 
 def _logs_document():
-    with open(os.path.join(OUT, "logs.json"), "rb") as f:
-        return json.load(f)
+    return json.loads(_generated("logs.json"))
 
 
 def gen_closed_schema(source) -> bytes:

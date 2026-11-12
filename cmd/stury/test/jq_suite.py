@@ -794,6 +794,9 @@ def check_cli(stury, diff, case):
     area, what = f"cli.tsv {case['area']}", f"cli.tsv:{case['line']}: stury {' '.join(case['args'])} <<< {stdin!r}{files}"
     if case["slow"] and SANITIZER == "thread":
         return f"{area} (deep recursion, not run under ThreadSanitizer)", what, None
+    # A sanitizer's runtime opens files as it starts, and a closed fd 1 is the first descriptor such an open takes.
+    if case["closed"] and SANITIZER:
+        return f"{area} (stdout closed, not run under a sanitizer)", what, None
     # cli.tsv is recorded on macOS. A `libc` row's answer is the C library's (libm's last digits, the fields
     # strptime derives, timegm's range), so elsewhere it is checked against this platform's jq.
     on_platform_jq = case["area"] == "libc" and sys.platform != "darwin"
