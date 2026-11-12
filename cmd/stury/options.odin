@@ -754,7 +754,7 @@ refuse_follow :: proc(o: ^Opts, cli: ^Cli) {
 	case cli.files[0] == "-":
 		usage_error("--follow follows one named file, not stdin")
 	}
-	if FORMATS[o.from].spec != .Json {
+	if FORMATS[o.from].spec != .Json || reads_whole(o) {
 		usage_error("--follow reads records: --from %s makes one text of a file", FORMATS[o.from].name)
 	}
 }

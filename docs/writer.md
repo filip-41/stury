@@ -127,6 +127,7 @@ core.write_stream    :: proc(w: io.Stream, doc: ^core.Document, opts := core.Wri
 core.subtree_facts   :: proc(doc: ^core.Document, i: core.Node_Index) -> []core.Fact
 json.as              :: proc(spec: json.Spec, opts := json.Options{}) -> core.As
 dsv.as               :: proc(spec: dsv.Spec, opts := dsv.Options{}) -> core.As
+toml.as              :: proc(spec: toml.Spec, opts := toml.Options{}) -> core.As
 yaml.as              :: proc(spec: yaml.Spec, opts := yaml.Options{}) -> core.As
 core.format          :: proc(src: []u8, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error)
 ```
@@ -134,8 +135,8 @@ core.format          :: proc(src: []u8, as: core.As, opts := core.Write_Options{
 `core.write` writes a document through the `write` service of the handle `as`. A nil `as` is the format and layout the
 document was read in. `json.as(.Jsonc)` and `dsv.as(.Tsv, opts)` name another target, in the same format or in another,
 so a JSON document is written as a table and a table as JSON by the target's writer. A target with no writer is
-`.Unsupported`. A document of a constant-spec build holds no services, so `json.write` and `yaml.write` write it in
-their format. `core.As` is the handle a `Document` holds in `as`.
+`.Unsupported`. A document of a constant-spec build holds no services, so `json.write`, `toml.write` and `yaml.write`
+write it in their format. `core.As` is the handle a `Document` holds in `as`.
 
 `node` writes one value of the document as a text of its own, the root by default: a subtree with the comments inside
 its span, which `core.subtree_facts` returns, in the spelling and layout the root would have. A key, a node the document
@@ -239,8 +240,9 @@ from `t.site` to indent and style the text for that place, and the zero site is 
 
 `Tokens` holds `core.MAX_DEPTH` levels in itself and allocates nothing for depth, and it is not copied after `tokens_init`.
 The calls are `open_object`, `open_array`, `close`, `key`, `value_string`, `value_int`, `value_uint`, `value_float`,
-`value_bytes` (a byte string, written as its format spells one: JSON and CSV as the string of its base64), `value_bool`
-and `value_null`, and `end_record` for a flat format. Each returns the kind that refused it, `.None` for a
+`value_bytes` (a byte string, written as its format spells one: JSON and CSV as the string of its base64),
+`value_tagged` (a string with the type its format tags it with, a TOML datetime written bare, `.Bad_Raw` when the text
+is not one of that type, and a plain string in a format with no tags), `value_bool` and `value_null`, and `end_record` for a flat format. Each returns the kind that refused it, `.None` for a
 written one. The first refusal sticks: later calls write nothing and return it, and `tokens_finish` returns it with no
 bytes, as `finish` does for an output that failed. A stream that failed leaves a prefix in the stream.
 
@@ -256,9 +258,10 @@ bytes, as `finish` does for an output that failed. A stream that failed leaves a
   `.Out_Of_Order`. A header is a record of strings the caller writes.
 - A format supplies a `write.Token_Spelling` through `core.Services.tokens`: its tree, one `value` procedure that writes a
   string, a number or a word, `record`, which writes a typed value with no frame, `stop`, `comment`, and for a flat format
-  `start` and `line`. `layout`, called at each `Layout_Step`, lays the text out while the format's state is set (YAML's
-  block style), in place of the tree's punctuation.
-- A token write of YAML drops a comment, since its `comment` is nil.
+  `start` and `line`. `end` turns the finished text into the format's own, for a format whose grammar fixes an order the
+  calls cannot know (TOML), and so runs only on a buffer. `layout`, called at each `Layout_Step`, lays the text out
+  while the format's state is set (YAML's block style), in place of the tree's punctuation.
+- A token write of TOML or YAML drops a comment, since their `comment` is nil.
 
 ## Records
 
@@ -346,6 +349,35 @@ format whose root is an array of objects or of arrays is written through its `te
 order are the header, null is an empty cell, a number is its source spelling, and a container is `.Unsupported`. A JSON5 number JSON does not spell so is written as JSON writes it, `0x10` as `16` and `.5` as `0.5`, and an infinity or NaN is `.Non_Finite`. A partial
 document is `.Unsupported`. `sort_keys` puts the columns in byte order of their names, stable, as the JSON writer orders an
 object's members.
+
+## TOML
+
+`toml.marshal(value, spec, opts, write, allocator)` writes a struct or a map as a TOML document, and
+`toml.plan_make(T, spec, opts, plan, allocator)` makes the plan for many writes. `toml.write(&doc, spec)`, or
+`core.write` with `toml.as(spec)`, writes a document of any format, and the token write (`write.tokens_init` with
+`toml.as(spec)`) writes a text call by call. All three lay the value out the same way: TOML fixes an order the calls
+cannot know, so the typed write and the token write write the value as one inline table and read it back, and
+`toml/write_document.odin` lays the document out. A token write to a stream is `.Unsupported`, since the layout needs
+the whole text in a buffer.
+
+The root must be an object, else the write is `.Unsupported`. A scalar, an array that is not all tables and an empty
+array are `key = value` lines at the top of their table. A table is a `[header]` section after the lines, and a non-empty
+array of tables is a `[[header]]` section per element, so a table's keys may be written in another order than the
+document holds them. A table that holds only sections has no header of its own. Null has no TOML spelling and a key a
+table repeats cannot be written, both `.Unwritable`. A key is bare when it can be, else a basic string.
+
+A string is a basic string, with the quote, the backslash and the control bytes escaped, DEL always as `\u007f`, and
+under `ascii` every rune past U+007F. A string read from TOML in literal quotes keeps them unless `respell_strings` is
+set. A float is written so that it reads back as a float: `1.0` for 1, `-0.0`, and `inf`, `-inf` and `nan`, in the
+typed and the token write. A number of a document is its source spelling, and a number of another format that TOML
+spells differently is written as JSON spells it. A string node whose `Tag` is a datetime type is written bare, with the
+seconds a time lacks added, since only TOML 1.1 reads a time without them, and `write.value_tagged(t, text, tag)` is the
+token write of one. Only TOML 1.0 forms are written. A byte string is the string of its base64.
+
+Comments are written where TOML reads them back: a head comment above its line or section, an inline comment after its
+value, and a table's foot comments after a blank line, the form that reads back as the head of what follows. A comment
+inside an inline table or array, one whose body holds a control byte, and the head comments of a table whose header is
+omitted and which has no line are dropped and counted in `dropped`. `sort_keys` orders the members of every table.
 
 ## YAML
 

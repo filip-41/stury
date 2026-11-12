@@ -5,6 +5,7 @@ package main
 import core "../../core"
 import dsv "../../dsv"
 import json "../../json"
+import toml "../../toml"
 import yaml "../../yaml"
 
 Format :: enum u8 {
@@ -14,6 +15,7 @@ Format :: enum u8 {
 	Ndjson,
 	Csv,
 	Tsv,
+	Toml,
 	Yaml,
 }
 
@@ -41,9 +43,14 @@ Format_Spec :: struct {
 	// With `whole_as` and `follows`: whether a document that ends a window of a followed file is closed there, so that
 	// no later line continues it. Nil for a format whose document ends where its record is cut.
 	ended:      proc "contextless" (text: []byte) -> bool,
+	// With `whole_as`: a path is answered from a text of the format without building it.
+	scans:      bool,
 	// The handle `--to` writes each output with as a text of the format, through the format's document writer, which
 	// takes a document of any format. Nil for a format written as JSON or as cells.
 	written:    proc "contextless" (o: ^Opts) -> core.As,
+	// With `written`: the format's writer takes -c, --indent and -a, where another refuses every option that lays out
+	// JSON.
+	laid:       bool,
 	// With `written`: what stands between a text of a run and `text`, the next one, and nil for nothing.
 	parted:     proc "contextless" (text: []u8) -> string,
 	// With `written`: why the format's writer refused a value with `kind`, or "" for a kind it has no words for.
@@ -58,7 +65,8 @@ FORMATS := [Format]Format_Spec {
 	.Ndjson = {name = "ndjson", title = "NDJSON", framing = .Lines},
 	.Csv    = {name = "csv", title = "CSV", cells = true, framing = .Lines},
 	.Tsv    = {name = "tsv", title = "TSV", cells = true, framing = .Lines},
-	.Yaml   = {name = "yaml", title = "YAML", framing = .Concatenated, whole_as = yaml_reading, follows = yaml_follows, ended = yaml_ended, written = yaml_written, parted = yaml_parted, refusal = yaml_refusal},
+	.Toml   = {name = "toml", title = "TOML", framing = .Concatenated, whole_as = toml_reading, written = toml_written, parted = toml_parted, refusal = toml_refusal},
+	.Yaml   = {name = "yaml", title = "YAML", framing = .Concatenated, whole_as = yaml_reading, follows = yaml_follows, ended = yaml_ended, scans = true, written = yaml_written, laid = true, parted = yaml_parted, refusal = yaml_refusal},
 }
 
 // A text after the first is the next text of strict JSON, where `validate` and a build, judging one, refuse it as
@@ -66,6 +74,35 @@ FORMATS := [Format]Format_Spec {
 @(private = "file")
 json_follows :: proc "contextless" (f: core.Fault) -> bool {
 	return f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing)
+}
+
+// TOML 1.1 reads every form 1.0 does, and there is no name for strict 1.0.
+@(private = "file")
+toml_reading :: proc "contextless" (o: ^Opts) -> core.As {
+	return toml.as(.Toml_1_1, {max_depth = o.max_depth})
+}
+
+// TOML 1.0, which every reader takes.
+@(private = "file")
+toml_written :: proc "contextless" (o: ^Opts) -> core.As {
+	return toml.as(.Toml_1_0, {max_depth = o.max_depth})
+}
+
+// A TOML text of a run follows a blank line.
+@(private = "file")
+toml_parted :: proc "contextless" (text: []u8) -> string {
+	return "\n"
+}
+
+@(private = "file")
+toml_refusal :: proc "contextless" (kind: core.Typed_Error_Kind) -> string {
+	#partial switch kind {
+	case .Unsupported:
+		return "cannot write a value that is no object as TOML"
+	case .Unwritable:
+		return "cannot write null, or a key a table repeats, as TOML"
+	}
+	return ""
 }
 
 // YAML 1.2 with the core schema. A `%YAML 1.1` directive reads with the same rules.
@@ -176,6 +213,16 @@ reads_own :: #force_inline proc(o: ^Opts) -> bool {
 	return FORMATS[o.from].whole_as != nil
 }
 
+// Reports whether the input format reads one document from each input, with a handle of its own.
+reads_whole :: #force_inline proc(o: ^Opts) -> bool {
+	return source_whole(o.from)
+}
+
+// Reports whether an input of format `f` is one document of a handle of its own.
+source_whole :: #force_inline proc(f: Format) -> bool {
+	return FORMATS[f].whole_as != nil && FORMATS[f].follows == nil
+}
+
 // Whether `data` holds no text of a JSON-like format, which has no value. A format read with a handle of its own
 // judges an empty file itself, and a delimited one has no JSON spec.
 blank_input :: proc(data: []byte, spec: Maybe(json.Spec)) -> bool {
@@ -227,7 +274,8 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 		if cli.validating {
 			usage_error("check writes nothing: --to %s has no use there", to)
 		}
-		other := cli.json_flag if writes_cells(o) else cli.text_flag if writes_texts(o) else "--seq" if o.seq else cli.layout_flag if writes_lines(o) else ""
+		laid := writes_texts(o) && FORMATS[o.to].laid
+		other := cli.json_flag if writes_cells(o) || writes_texts(o) && !laid else cli.text_flag if laid else "--seq" if o.seq else cli.layout_flag if writes_lines(o) else ""
 		if other != "" {
 			usage_error("%s cannot be combined with --to %s", other, to)
 		}

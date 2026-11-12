@@ -166,6 +166,11 @@ yaml-test-suite — https://github.com/yaml/yaml-test-suite
     yaml/test/suite (the data-2022-01-17 release: each case's text, its event listing and, where it has one, its JSON
     value). Its LICENSE and UPSTREAM files ship in that directory.
 
+toml-test — https://github.com/toml-lang/toml-test
+
+    toml/test/conformance/toml-test (the valid and invalid cases and the lists of the cases each TOML version is held
+    to). Its LICENSE and UPSTREAM files ship in that directory.
+
 Schema benchmark peers — the bench/ harness builds these on the developer's machine; stury carries none of their
 code and its binaries link none of it. bench/fetch.py and bench/peers/rust-schema/Cargo.lock pin them.
 

@@ -236,7 +236,7 @@ read_operand :: proc(o: ^Opts, src: Source, path: string) -> core.Value {
 	}
 	heap := runtime.heap_allocator()
 	doc, fault := jq.build_text(text, src.as, heap)
-	if f, is_fault := fault.?; is_fault && src.framing == .Concatenated && !table_source(src) {
+	if f, is_fault := fault.?; is_fault && src.framing == .Concatenated && !table_source(src) && !source_whole(src.format) {
 		if own {
 			if !texts_follow(f, src.format) {
 				tell_operand_fault(o, src, path, data, f)

@@ -1,14 +1,14 @@
 # stury
 
-stury is a JSON, CSV and YAML library for [Odin](https://odin-lang.org), with a command line, `stury`, that runs jq
-filters over JSON, CSV and YAML, checks them against JSON Schema, edits them in place and tells what differs between
-two of them.
+stury is a JSON, CSV, TOML and YAML library for [Odin](https://odin-lang.org), with a command line, `stury`, that
+runs jq filters over JSON, CSV, TOML and YAML, checks them against JSON Schema, edits them in place and tells what
+differs between two of them.
 
 Input is checked strictly by default: JSON against RFC 8259 (no `01`, no `NaN`, no invalid UTF-8, no lone
-surrogate), CSV against RFC 4180, and YAML against 1.2 and its test suite.
+surrogate), CSV against RFC 4180, TOML against 1.0 or 1.1, and YAML against 1.2 and its test suite.
 
-**Status:** pre-1.0. The API may still change between releases. The YAML package, models, JSON Schema, the value
-diff, the regex package and the command line's `edit`, `diff` and `schema` are not in a release yet:
+**Status:** pre-1.0. The API may still change between releases. The TOML and YAML packages, models, JSON Schema,
+the value diff, the regex package and the command line's `edit`, `diff` and `schema` are not in a release yet:
 [CHANGELOG.md](CHANGELOG.md) lists them under Unreleased.
 
 ## Features
@@ -35,9 +35,9 @@ The library:
 - **JSONC, JSON5, NDJSON and RFC 7464** text sequences, with comments kept and written back.
 - **CSV, TSV and other delimited text** through the same struct mapping, models, schema checks, documents and edits
   as JSON, with options for the delimiter, comment lines and files without a header.
-- **YAML 1.2** through the same calls: documents, paths, struct mapping, models and schema checks, edits that keep
-  every byte they do not reach, and a writer that keeps comments. A tag or an anchor is a fact of its node, and a
-  stream's documents are records.
+- **TOML and YAML** through the same calls: documents, paths, struct mapping, models and schema checks, edits that
+  keep every byte they do not reach, and writers that keep comments. A TOML datetime and a YAML tag or anchor are facts
+  of their node, and a YAML stream's documents are records.
 - **One interface for every format.** A format is a `Spec` passed to the same calls, and every call returns one
   error union.
 - **Regular expressions** in Oniguruma's syntax for jq's functions and in ECMA-262's for a schema's `pattern`, with
@@ -49,14 +49,14 @@ The library:
 The command line:
 
 - It runs jq 1.8 filters with jq's answers and exit codes, and reports faults with their line and column.
-- It reads and writes JSONC, NDJSON, CSV, TSV and YAML, and reads JSON5.
-- It reads what YAML holds beside the value: a value's tag, anchor, alias and style (`.@tag`, `.@anchor`, `.@alias`,
-  `.@style`).
+- It reads and writes JSONC, NDJSON, CSV, TSV, TOML and YAML, and reads JSON5.
+- It reads what TOML and YAML hold beside the value: a value's tag, anchor, alias and style (`.@tag`, `.@anchor`,
+  `.@alias`, `.@style`).
 - It validates without running a filter (`stury check`), against a JSON Schema too (`check --schema`), and types a
   filter against the schema of its inputs (`check --filter`).
 - It formats or transcodes files (`stury fmt`), through a schema too (`fmt --schema`).
 - It edits a file with a jq filter and keeps every byte the filter does not change (`stury edit`): JSON, a table,
-  and each document of a YAML stream as a record.
+  TOML, and each document of a YAML stream as a record.
 - It tells the changes between two files or two schemas (`stury diff`).
 - It infers a schema, samples values from one, or writes Odin types for one (`stury schema infer`, `sample`, `gen`).
 
@@ -71,8 +71,8 @@ git clone https://github.com/filip-41/stury vendor/stury
 odin build . -collection:stury=vendor/stury -o:speed
 ```
 
-Then `import "stury:json"`, `import "stury:dsv"` for delimited text, and `import "stury:yaml"` for YAML. Each exports
-the names of `core`, `typed`,
+Then `import "stury:json"`, `import "stury:dsv"` for delimited text, `import "stury:toml"` for TOML, and
+`import "stury:yaml"` for YAML. Each exports the names of `core`, `typed`,
 `write`, `records`, `schema` and `host` that a program calls, the schema check included. Models are
 `import model "stury:core/model"`, and schema inference, sampling and comparison are `stury:core/schema`. Keep the
 package directories together. For the [ols](https://github.com/DanielGavin/ols) language server, add the same
@@ -309,7 +309,7 @@ programs are in [examples/](examples). Each prints a fixed answer, and `make tes
 
 `stury` runs [jq](https://jqlang.org) 1.8 filters with jq's results and exit codes. Input is strict JSON by
 default, so `01`, `NaN` and invalid UTF-8 are errors, reported with their line and column. `--from` reads `json`,
-`jsonc`, `json5`, `ndjson`, `csv`, `tsv` or `yaml`, and `--to` writes all of them but `json5`. `--alias-limit N` and
+`jsonc`, `json5`, `ndjson`, `csv`, `tsv`, `toml` or `yaml`, and `--to` writes all of them but `json5`. `--alias-limit N` and
 `--merge-keys` set how YAML is read.
 
 ```sh
@@ -329,13 +329,18 @@ $ stury --from csv --to csv 'select(.country == "NO") | {city, population}' citi
 city,population
 Oslo,709000
 Bergen,286000
-$ cat server.yaml
+$ cat server.toml
+[server]
+host = "a.example" # primary
+port = 8080
+started = 2026-11-12T09:00:00Z
+$ stury --from toml -c '.server | {port, type: (.started | .@tag)}' server.toml
+{"port":8080,"type":"datetime"}
+$ stury --from toml --to yaml . server.toml
 server:
   host: a.example # primary
   port: 8080
-  tags: [web, edge]
-$ stury --from yaml -c '.server | {port, tags, note: .host.@comment_inline}' server.yaml
-{"port":8080,"tags":["web","edge"],"note":["primary"]}
+  started: '2026-11-12T09:00:00Z'
 ```
 
 `stury check` validates every file without printing and reports each file's first fault. `check --schema` also
@@ -392,7 +397,7 @@ Root :: struct {
 comments, spacing, number spellings and line ends the filter does not change stay as written, and a new value
 follows its container's layout. `--in-place` rewrites the files, `--check` names each file that would change, and
 `--diff` tells the value changes. A table, NDJSON and `--seq` input is edited record by record, and so is each
-document of a YAML stream.
+document of a YAML stream. A TOML file keeps its comments and sections, and a new member joins its table's lines.
 
 ```sh
 $ cat config.jsonc
@@ -462,6 +467,7 @@ how a filter is run.
 |---|---|
 | `json` | the `Json`, `Jsonc` and `Json5` specs: `validate`, `build`, `find`, `scan`, `set`, `unmarshal`, `marshal`, `load_schema`, `check_schema`, `checks` |
 | `dsv` | the `Csv`, `Tsv` and `Plain` specs, with the same calls |
+| `toml` | the `Toml_1_0` and `Toml_1_1` specs, with the same calls |
 | `yaml` | the `Yaml_1_2` spec, with the same calls and a stream's documents as records |
 | `core/model` | models: rules on an Odin type, `load`, `validate`, `patch`, `dump`, problem documents and the schema of a model |
 | `core/schema` | JSON Schema: compiling, binding and checking a schema, `infer`, `sample`, `compare`, `convert`, and the Odin types of a schema |

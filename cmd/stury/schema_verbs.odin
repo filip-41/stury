@@ -13,6 +13,7 @@ import "../../core/rules"
 import "../../core/schema"
 import dsv "../../dsv"
 import json "../../json"
+import "jq"
 import "message"
 
 // The options of the schema verbs.
@@ -87,9 +88,22 @@ refuse_unlisted :: proc(d: ^rules.Description, format: Format, verb: string) {
 	}
 }
 
-// Reads the records of `data`, the file `path`, into `inf`. A fault is told on stderr as the plain check tells it, and
-// gives false.
+// Reads the records of `data`, the file `path`, into `inf`, or its one document when the format reads one from an
+// input. A fault is told on stderr as the plain check tells it, and gives false.
 infer_read :: proc(inf: ^schema.Inferred, src: Source, path: string, data: []byte, o: ^Opts, runner: ^core.Runner = nil) -> bool {
+	if source_whole(src.format) {
+		doc, fault := jq.build_text(data, src.as, runtime.heap_allocator())
+		if bad, is_fault := fault.?; is_fault {
+			tell_operand_fault(o, src, path, data, bad)
+			return false
+		}
+		defer core.destroy(&doc)
+		if schema.infer(inf, core.Node_Ref{&doc, core.ROOT}) != nil {
+			message.write_stderr("stury: error: out of memory\n")
+			return false
+		}
+		return true
+	}
 	err := schema.infer_records(inf, data, src.as, src.framing, runner)
 	if err == nil {
 		return true

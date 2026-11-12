@@ -5,8 +5,9 @@ ends, a fault stops it, or the hook returns `.Stop`. Every format has a walk, an
 through the same hook, so a consumer written against `core` reads any format. `validate` is the same walk with no
 hook.
 
-This document describes what the walks share, how the JSON walk, the delimited-text (dsv) walk and the YAML walk are
-built, and the Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector code the walks use.
+This document describes what the walks share, how the JSON walk, the delimited-text (dsv) walk, the TOML walk and the
+YAML walk are built, and the Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector code the
+walks use.
 
 ## Files
 
@@ -37,6 +38,10 @@ built, and the Odin and LLVM behaviour behind the hot-path shape. `kernel.md` co
 | `dsv/pass.odin` | the pass over 64-byte blocks and its state between blocks |
 | `dsv/records.odin` | what a block's separators end: cells and widths for `validate`, tokens for `walk` |
 | `dsv/text.odin` | the byte-at-a-time readers the masks cannot replace |
+| `toml/walk.odin` | TOML's interface, `Detail` and `RULES`, `walk`, the entry points, and the replay of the tree to the hook |
+| `toml/parse.odin` | the statements, keys and values, with an explicit stack for arrays and inline tables |
+| `toml/tree.odin` | the table tree, and the rules for keys, headers and dotted keys |
+| `toml/strings.odin`, `numbers.odin`, `datetime.odin` | the scanners and the string decoder |
 | `yaml/walk.odin` | YAML's interface, `Detail` and `RULES`, `walk` and `validate` |
 | `yaml/parser.odin`, `block.odin`, `flow.odin`, `scalar.odin`, `props.odin` | the parser: block and flow collections, scalars, tags and anchors, comments held for their node |
 | `yaml/runs.odin`, `lines.odin` | the byte classes of a 64-byte block, the runs the readers find from them, and the document markers |
@@ -261,7 +266,7 @@ lives in `core`, so a format adds no reader, no `query` and no `commit` of its o
    value again for a ring's element. See `paths.md`.
 5. **The edits.** `compose.commit` is the format package's `commit`. A format whose root has no brackets sets `flat`,
    gives the root's line end as its `member_sep` and supplies `interior`, `fact_slot`, `emptied` and `plan`. A format
-   whose containers are not one range of bytes (YAML) supplies its own `Edit_Services.commit`, which refuses an edit it may not make, and
+   whose containers are not one range of bytes (TOML, YAML) supplies its own `Edit_Services.commit`, which refuses an edit it may not make, and
    `relocate` and `prefix` say how a kept node is respelled at another place and how a tag, an anchor or an alias is
    written.
 6. **The typed read.** `unmarshal` runs the format's `walk` over `typed.Reader`'s hook. A format that reads its values
@@ -554,6 +559,38 @@ saves no registers for them.
 A TSV block's escapes are judged in masks. `kernel.escaped` marks the bytes an odd run of backslashes escapes, and one
 class mask of `t`, `n`, `r`, `0` and `\` drops the valid ones, so a block with no bad escape runs no byte loop. A
 backslash at the block's last byte carries into the next block, and a fault is at the backslash.
+
+## The TOML walk
+
+TOML names a member where it is written, and a table's members may be written apart: `[a.b]` can come before `[a]`,
+and an array of tables takes a section each. The tokens of a document are in tree order, so the walk reads the whole
+text first and replays it. `validate` stops after the tree, and makes no tokens.
+
+`parse.odin` reads statements into a table tree (`tree.odin`). A node is a table, an array or a scalar, with its key
+token, its value token, its children as a list, and the comments that belong to it. A table finds a member by the key's
+decoded text along its list, and through an index once it holds more members than the list serves. The rules are in
+the insertion procedures: a dotted key continues only tables dotted keys made, a header continues any table but an
+inline one, a header ends in a table only other headers' paths made, and `[[a]]` ends in an array only `[[a]]` made.
+The tree is built on the default heap.
+
+Arrays and inline tables are read with an explicit stack of the open containers, so the depth a text nests costs heap,
+not call stack, and `Options.max_depth` bounds it. Tables a header names count as nested.
+
+A comment is placed as it is read. One on the line where a value ended is that node's inline comment, any other waits
+for the next node and becomes its head, and one before a closing bracket, or at the text's end, is the container's
+foot. A header's inline comment follows the table's `End`, since the table ends after its sub-tables.
+
+`replay` walks the tree with a stack of frames and gives each node's tokens in the order of the other walks: its head
+comments, its `Key`, its value (a container's children, foot comments and `End`) and its inline comment. A `Skip` on
+a key passes its value, and one on a container its children.
+
+A string or key token's span holds its quotes. Bit 0 of its spelling is set on every token written with quotes, and bits
+3 and 4 give the quoting, and a bare key has no bits set. A datetime is a `String` with bit 0 clear and its type in
+bits 3 to 5, which the `Tag` fact names. A number carries its form in bits 0 to 3 (`toml.Number_Spelling`: a JSON
+number, a decimal with a plus sign or underscores, hex, octal, binary, `inf`, `nan`) and, for decimals, the digit
+counts every number spelling holds. An integer outside 64 bits is `Out_Of_Range` in both versions, as the specification
+asks. TOML 1.1 adds the `\e` and `\xHH` escapes, a time with no seconds, and line ends, comments and a trailing comma
+inside an inline table, and removes nothing, so a 1.0 text reads alike under both.
 
 ## The YAML walk
 

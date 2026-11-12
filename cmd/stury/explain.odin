@@ -51,6 +51,7 @@ WHY_WORDS := [Route_Why]string {
 	.Infer            = "--infer reads each cell's kind from its text",
 	.Comments_In      = "--comment lines above a record are written with it, which the column route does not hold",
 	.Own_Spelling     = "--from json5 would print a path's answer as written ('a', 0x1F), not as JSON",
+	.Own_Format       = "--from reads a format whose document is built whole, as it answers no path from the text alone",
 }
 
 // Why an input that was read by its path was built after all, as `fallback` says it.
@@ -90,6 +91,8 @@ explain_route :: proc(run: ^Run, framing: core.Framing) {
 		explain_line("input: lines of text, each a string")
 	case reads_cells(o):
 		explain_line("input: %s, each record %s", format, "an array of its cells" if o.cells_in.no_header else "an object keyed by the header")
+	case reads_whole(o):
+		explain_line("input: %s, one document per file", format)
 	case reads_own(o):
 		explain_line("input: %s, each document of a stream", format)
 	case:

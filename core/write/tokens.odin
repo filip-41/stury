@@ -15,11 +15,18 @@ Scalar :: union {
 	core.Number,
 	Number_Literal,
 	Tree_Part,
+	Tagged_Text,
 }
 
 // A number by its text, which must be a JSON number, written as it is.
 Number_Literal :: struct {
 	text: string,
+}
+
+// A string by its text and the type its format tags it with, as a TOML datetime is: a format with tags writes it as the
+// type's own literal, and the text must be one of that type, else `.Bad_Raw`. A format with none writes the string.
+Tagged_Text :: struct {
+	text, tag: string,
 }
 
 // A format's token spelling, which `core.Services.tokens` points at. `tree` is the nested format's punctuation. `value`
@@ -30,6 +37,10 @@ Token_Spelling :: struct {
 	value:  proc(t: ^Tokens, v: Scalar) -> core.Typed_Error_Kind,
 	line:   proc(t: ^Tokens) -> core.Typed_Error_Kind, // ends a record
 	stop:   proc(t: ^Tokens), // frees `state`
+	// Turns the finished text into the format's own: a format whose grammar fixes an order the calls cannot know
+	// writes the calls as a text it reads back and lays that out here. It receives the bytes the calls made, which it
+	// frees, and a refusal is `end`'s own. Only a write to a buffer reaches it.
+	end:    proc(t: ^Tokens, bytes: []u8) -> ([]u8, core.Typed_Refusal),
 	// Writes a value by a plan the format built as one record, with no frame: a value, or a row with its line end and,
 	// for the first, the header. A refusal's kind and path go to `err`, and the kind is returned.
 	record: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Refusal) -> core.Typed_Error_Kind,
@@ -105,6 +116,9 @@ tokens_finish :: proc(t: ^Tokens) -> (bytes: []u8, err: core.Typed_Refusal) {
 	bytes, err = finish(t.out, {kind = t.err if t.out.err == .None else .None})
 	if t.spell != nil && t.spell.stop != nil {
 		t.spell.stop(t)
+	}
+	if err.kind == .None && bytes != nil && t.spell != nil && t.spell.end != nil {
+		bytes, err = t.spell.end(t, bytes)
 	}
 	return
 }
@@ -191,6 +205,9 @@ value_null :: proc(t: ^Tokens) -> core.Typed_Error_Kind {return value(t, Tree_Pa
 
 // A byte string, written as the format spells one: a text format writes the string of its base64, see `bytes_text`.
 value_bytes :: proc(t: ^Tokens, b: []u8) -> core.Typed_Error_Kind {return value(t, typed.Bytes(b))}
+
+// A string with the type its format tags it with, see `Tagged_Text`.
+value_tagged :: proc(t: ^Tokens, text, tag: string) -> core.Typed_Error_Kind {return value(t, Tagged_Text{text, tag})}
 
 // Ends the record of a flat format with the layout's line end. A JSON write is `.Unsupported`, and a record that wrote
 // no byte is `.Unwritable` as `marshal` refuses it.

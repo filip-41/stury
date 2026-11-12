@@ -484,6 +484,55 @@ query_built :: proc(doc: ^core.Document, built: core.Error, paths: []core.Path, 
 	return {}, core.error_of(e)
 }
 
+// A format's `Services.scan` for a text it reads by building it whole: answers `paths` over `doc`, which the build gave
+// with the error `built`, gives the document its answers as a read by paths does, and gives each answer to `on` when it
+// is set, until `on` returns false. On an error `doc` is destroyed.
+scan_built :: proc(doc: ^core.Document, built: core.Document_Error, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
+	if built.kind != .None {
+		return {}, core.path_error(built)
+	}
+	answers, err := query(doc, paths, {read.dups}, allocator)
+	if err.kind == .None {
+		doc.answers, doc.kept, doc.missing = answers, nil, nil
+		if core.own_reads(doc) != nil {
+			err = {kind = .No_Memory}
+		}
+		delete(answers, allocator)
+	}
+	if err.kind != .None {
+		core.destroy(doc)
+		return {}, err
+	}
+	if on != nil {
+		for a in doc.answers {
+			if !on(state, built_answer(doc, a)) {
+				break
+			}
+		}
+	}
+	return doc^, {}
+}
+
+// Answer `a` of a built document as a token: a found scalar's bytes, a found container from its open through its
+// close, or for a missing member the close of the container that lacks it.
+@(private)
+built_answer :: proc(doc: ^core.Document, a: core.Answer) -> core.Token_Answer {
+	t := core.Token{kind = .Null}
+	lo, hi: u64
+	if a.node != core.NO_NODE && (a.outcome == .Found || a.outcome == .Wrong_Kind) {
+		t = doc.nodes[a.node]
+		if a.outcome == .Found {
+			lo, hi = core.scalar_ends(t)
+			if t.kind > .Plain {
+				lo, hi = t.lo, doc.readers.close_end(doc, a.node)
+			}
+		}
+	} else if a.owner != core.NO_NODE {
+		t = core.Token{lo = doc.readers.close_end(doc, a.owner), kind = .End}
+	}
+	return {t, lo, hi, a.path, a.outcome}
+}
+
 // Reads `path` over `src` as `as` says, into a partial document holding what the path reached and `Document.answers` in
 // text order, through the format's `Services.scan`. Everything the walk passes is still judged, unless `read.stop_early`
 // ends it. `core.destroy` frees the document, which borrows `src`. Under `.Refuse` the document holds the

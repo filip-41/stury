@@ -32,6 +32,8 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `json/unescape.odin` | JSON's `text` and `number` readers and the decoder behind them |
 | `dsv/document.odin` | dsv's `build`, its handle tables, its edit table, `close_end`, the record check |
 | `dsv/plan.odin` | a commit's column changes, turned into plain cell edits before core composes the list |
+| `toml/document.odin` | TOML's handles and readers, `text`, `number`, `close_end`, the `Tag` and `Style` facts |
+| `toml/edit.odin` | TOML's edit services and its own commit: splices of lines and sections |
 | `yaml/build.odin` | YAML's entry points and its `build`, which holds a key's properties back from its value and types the plain scalars |
 | `yaml/resolve.odin` | YAML's core schema: `resolve`, `number`, the `Style` fact |
 | `yaml/keys.odin` | the repeat test of a mapping's keys, by decoded text |
@@ -48,8 +50,8 @@ A node is a 16-byte `Token` from `core/walk.odin`: `lo`, `n`, `kind`, `role` and
   node more than the value's subtree holds.
 - A container's `spelling` is its child count, where a member counts once, not its key and its value. The count
   saturates at `MAX_CHILDREN`, and `Document.counts` holds the true count of every container that does.
-- A JSON key is a node of its own, kind `String` and role `Key`, directly before its value, and so is a YAML key. A
-  dsv record stores no key node: its columns' keys are the cells of the header row.
+- A JSON key is a node of its own, kind `String` and role `Key`, directly before its value, and so is a TOML or YAML
+  key. A dsv record stores no key node: its columns' keys are the cells of the header row.
 - `Node_Index` is a node's index in `nodes`, distinct from `u32` so an index cannot be passed where a count or a byte
   offset goes. Readers, iterators, `Fact.node`, `Child_Count.node` and `Edit.node` take it. `ROOT` is node 0, the root
   value's node. `NO_NODE` is `Node_Index(max(u32))` and answers a miss, and every reader treats an index at or past
@@ -341,7 +343,7 @@ The slots past these are nil in JSON and serve the formats that need them:
 
 | Reader | Says | Set by |
 |---|---|---|
-| `fact` | a named fact the node's spelling carries instead of a span: a scalar's `Style` | yaml |
+| `fact` | a named fact the node's spelling carries instead of a span: a scalar's `Style`, a TOML datetime's `Tag` | toml, yaml |
 | `number_text` | the decimal digits of a number token whose span is not its text, empty for an infinity or a NaN | yaml |
 | `flat` | the text has no brackets, so no container has bytes of its own | dsv |
 
@@ -390,11 +392,12 @@ container:
   format holds no property, and a commit counts a set of one in `dropped`. YAML fills it.
 - `relocate` gives the bytes a node has at another place, when an edit's value is a `Node_Ref` of the list's own
   document, as a member moved into another table or another block's indentation. `ok` false is refused as
-  `.Bad_Value`. Nil keeps the node's span. YAML fills it.
+  `.Bad_Value`. Nil keeps the node's span. TOML and YAML fill it.
 - `commit` returns the output in place of `core/compose`'s commit, for a format whose containers are not one range of
-  bytes to compose around, as a YAML block collection of lines at an indentation. It places each edit's text at its
-  site itself and counts the facts the output cannot hold. When it is set, the value `spell` writes is recorded as it
-  is, with no layout taken from a bracket. YAML fills it, and reads its output again with `validate`.
+  bytes to compose around: a TOML table written in sections, a YAML block collection of lines at an indentation. It
+  places each edit's text at its site itself and counts the facts the output cannot hold. When it is set, the value
+  `spell` writes is recorded as it is, with no layout taken from a bracket. TOML and YAML fill it, and both read their
+  output again with `validate`.
 
 A reader reaches the table only where it must: `text` and `key_equals` for a marked node, `number` for every scalar,
 `resolve` for every node, `close_end` for a container whose span is read, and the edit services for every recorded or

@@ -103,9 +103,9 @@ Command options:
 
 stury's own options:
       --from format         read json (default), jsonc, json5, ndjson,
-                            csv, tsv or yaml;
-      --to format           write json (default), jsonc, ndjson, csv, tsv
-                            or yaml;
+                            csv, tsv, toml or yaml;
+      --to format           write json (default), jsonc, ndjson, csv, tsv,
+                            toml or yaml;
       --in-place            with fmt or edit, rewrite each file in place;
       --check               with fmt or edit, name each file it would
                             change and exit 1;
@@ -156,7 +156,7 @@ is valid. Every file is judged, and each file's first fault is reported.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson,
-                            csv, tsv or yaml;
+                            csv, tsv, toml or yaml;
       --seq                 judge each record after a 0x1E separator as
                             one text;
       --max-depth n         refuse nesting past n levels (default 1024);
@@ -195,8 +195,8 @@ writes values that pass the schema file, a text a line. gen writes the Odin
 types a model reads the schema's values with.
 
 Options:
-      --from format         read json (default), jsonc, json5, ndjson, csv, tsv
-                            or yaml;
+      --from format         read json (default), jsonc, json5, ndjson, csv, tsv,
+                            toml or yaml;
       --ranges              infer: keep the least and greatest number, string
                             length and array length;
       --to format           sample: write json (default), jsonc, ndjson, csv or tsv;
@@ -231,9 +231,9 @@ not written, and a table written is judged again as it reads back.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson,
-                            csv, tsv or yaml;
-      --to format           write json, jsonc, ndjson, csv, tsv or yaml
-                            (default the --from format);
+                            csv, tsv, toml or yaml;
+      --to format           write json, jsonc, ndjson, csv, tsv, toml or
+                            yaml (default the --from format);
       --in-place            rewrite each file in place;
       --check               write nothing, name each file that is not
                             already formatted, and exit 1;
@@ -280,7 +280,7 @@ edited. Every file is edited, and each file's first fault is reported.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson,
-                            csv, tsv or yaml;
+                            csv, tsv, toml or yaml;
       --seq                 edit each record after a 0x1E separator;
   -R, --raw-input           edit each line as a string;
   -s, --slurp               run the filter once on the array of records;
@@ -333,7 +333,7 @@ one array of them. --shape compares the shapes of two data files.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson, csv,
-                            tsv or yaml;
+                            tsv, toml or yaml;
       --key member          match array elements by the value of member, or
                             PATH=member for the array at PATH (.a[].b=id);
       --set                 match equal elements wherever they stand;

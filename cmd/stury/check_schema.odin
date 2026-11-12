@@ -225,7 +225,8 @@ table_source :: proc(src: Source) -> bool {
 }
 
 // Checks `data` by its records, or as one text when the framing is concatenated and it is one or the source is a table,
-// and returns how many records it read. A concatenated text that does not check as one is read again value by value.
+// and returns how many records it read. A concatenated text that does not check as one is read again value by value,
+// unless its format reads one document from an input.
 @(private = "file")
 check_input :: proc(sc: ^Schema_Check, data: []byte, src: Source, runner: ^core.Runner, sink: ^typed.Sink) -> (records: i64, err: core.Error) {
 	if table_source(src) {
@@ -235,7 +236,7 @@ check_input :: proc(sc: ^Schema_Check, data: []byte, src: Source, runner: ^core.
 		return schema.check_records(&sc.bound, data, src.framing, sink, runner)
 	}
 	err = schema.check(&sc.bound, data, sink, runner)
-	if _, parse := err.(core.Fault); !parse {
+	if _, parse := err.(core.Fault); !parse || source_whole(src.format) {
 		return 1, err
 	}
 	typed.sink_restore(sink, {})

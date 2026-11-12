@@ -36,6 +36,7 @@ Route_Why :: enum u8 {
 	Infer, // a cell's kind is the library's inference
 	Comments_In, // a record's comment lines are written with the record
 	Own_Spelling,
+	Own_Format, // a document of a format with no path scan is built whole
 }
 
 // Why the scan left a text to the interpreter.
@@ -81,6 +82,7 @@ choose_route :: proc(run: ^Run, text: string) {
 	if writes_comments(o) {stops += {.Comments_Out}}
 	if writes_texts(o) {stops += {.Text_Out}}
 	if FORMATS[o.from].spec == .Json5 {stops += {.Own_Spelling}}
+	if reads_own(o) && !FORMATS[o.from].scans {stops += {.Own_Format}}
 	r.whys = stops
 	if stops != {} && !r.on {
 		return

@@ -169,6 +169,7 @@ Number_Literal :: write.Number_Literal
 Out :: write.Out
 ROOM_MAX :: write.ROOM_MAX
 STREAM_BUFFER :: write.STREAM_BUFFER
+Tagged_Text :: write.Tagged_Text
 Tokens :: write.Tokens
 Tree :: write.Tree
 Tree_Part :: write.Tree_Part
@@ -181,6 +182,7 @@ value_float :: write.value_float
 value_int :: write.value_int
 value_null :: write.value_null
 value_string :: write.value_string
+value_tagged :: write.value_tagged
 value_uint :: write.value_uint
 write_value :: write.write_value
 insert :: write.insert

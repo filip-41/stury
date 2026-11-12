@@ -11,7 +11,7 @@ codes](#errors-and-exit-codes)). On top of jq it:
 - edits each input with a jq filter, keeping every byte the edit does not touch (`stury edit`);
 - tells what differs between two inputs, two schemas, or a schema and data (`stury diff`);
 - infers a schema from inputs, samples values from one, or writes the Odin types of one (`stury schema`);
-- reads and writes JSONC, NDJSON, CSV, TSV and YAML (`--from FORMAT`, `--to FORMAT`, [Formats](#formats));
+- reads and writes JSONC, NDJSON, CSV, TSV, TOML and YAML (`--from FORMAT`, `--to FORMAT`, [Formats](#formats));
 - reads input strictly, as RFC 8259 says ([Differences from jq](#differences-from-jq)).
 
 The examples below assume `stury` is on your `PATH`; otherwise use `build/stury` (`make build-cli`).
@@ -99,8 +99,8 @@ runner and its bytecode listings, which stury does not have) and adds its own. E
 | `check`, `validate` | A subcommand, recognised when it is the first argument that is not an option, before any `--` (`stury -c check FILE`); under `-f` that argument is the program file. See [`check`](#check). |
 | `fmt` | A subcommand, recognised as `check` is: writes each input back in the printer's layout, or in another format, and runs no filter. See [`fmt`](#fmt). |
 | `edit` | A subcommand, recognised as `check` is: runs the filter on each input and splices its one output into the input's bytes. See [`edit`](#edit). |
-| `--from FORMAT` | Read `json` (the default), `jsonc`, `json5`, `ndjson`, `csv`, `tsv` or `yaml` ([Formats](#formats)). |
-| `--to FORMAT` | Write `json` (the default), `jsonc`, `ndjson`, `csv`, `tsv` or `yaml` ([Formats](#formats), [CSV and TSV output](#csv-and-tsv-output), [YAML output](#yaml-output)). `fmt` writes the `--from` format when `--to` is not given. |
+| `--from FORMAT` | Read `json` (the default), `jsonc`, `json5`, `ndjson`, `csv`, `tsv`, `toml` or `yaml` ([Formats](#formats)). |
+| `--to FORMAT` | Write `json` (the default), `jsonc`, `ndjson`, `csv`, `tsv`, `toml` or `yaml` ([Formats](#formats), [CSV and TSV output](#csv-and-tsv-output), [TOML output](#toml-output), [YAML output](#yaml-output)). `fmt` writes the `--from` format when `--to` is not given. |
 | `--in-place` | `fmt` and `edit` only: rewrite each file through a temporary one and a rename, when `--to` is `--from` ([`fmt`](#fmt), [`edit`](#edit)). |
 | `--check` | `fmt` and `edit` only: write nothing, name each file that would change on stderr, and exit 1 ([`fmt`](#fmt), [`edit`](#edit)). |
 | `--grow-header` | With `--to csv` or `--to tsv`, write a header of every key of every object output ([CSV and TSV output](#csv-and-tsv-output)). |
@@ -123,7 +123,8 @@ runner and its bytecode listings, which stury does not have) and adds its own. E
 
 ### Behaviour notes
 
-- Plain paths such as `.a.b[]` are answered without building the document, a YAML document's included. These options switch to the
+- Plain paths such as `.a.b[]` are answered without building the document, a YAML document's included. A TOML
+  document is built whole, since a table's members may be written apart. These options switch to the
   general interpreter, which may be slower on large inputs: `-n`, `-s`, `-S`, `-a`, `-e`, `-R`,
   `--raw-output0`, `--seq`, `--stream`.
 - Under `--from csv` or `--from tsv`, a filter that only picks columns (`.name`, `.a, .b`, `[.a, .b]`,
@@ -173,7 +174,7 @@ The keys come in this order, each line once unless said:
 | Key | Says |
 | --- | --- |
 | `filter` | The filter, quoted. Written as soon as it is known, so a compile error follows it. A `-f` file that cannot be read has no line. |
-| `input` | The format and how it is cut into inputs: JSON texts one after another (as jq reads them), one per line (`ndjson`), in RFC 7464 records (`--seq`), lines of text (`-R`), CSV or TSV records as objects or, under `--no-header`, arrays, each document of a stream (`yaml`), or none (`-n`). |
+| `input` | The format and how it is cut into inputs: JSON texts one after another (as jq reads them), one per line (`ndjson`), in RFC 7464 records (`--seq`), lines of text (`-R`), CSV or TSV records as objects or, under `--no-header`, arrays, one document per file (`toml`), each document of a stream (`yaml`), or none (`-n`). |
 | `plan` | How each input is answered, one of three ways. Reading only a path, `select(PATH op LITERAL)` or `first`/`limit` of a path from the text, without building the values the path passes by, with a second `plan` line when the read stops after the first answers. Reading only the named columns of each CSV or TSV record, straight from its text. Or building each input whole (the whole input under `-s`, nothing under `-n`) and running the filter on it. |
 | `because` | Under a built plan, one line per reason the filter needs it, every one that holds, in the order of the table below. |
 | `decides` | What the speed and the memory follow under this plan. |
@@ -198,7 +199,7 @@ The reasons on `because` lines:
 | -a writes ASCII only | `-a` |
 | --to csv or tsv writes each output as a record | `--to csv` or `--to tsv` |
 | --to jsonc prints a value's comments, which reading a path does not keep | `--to jsonc` |
-| --to writes each output as a text of its format, which the format's writer makes of a built document | `--to yaml` |
+| --to writes each output as a text of its format, which the format's writer makes of a built document | `--to toml` or `--to yaml` |
 | the filter is not a path, and not select(PATH op LITERAL) | any other filter |
 | --from jsonc reads only a plain path without building, as a text prints with its comments | `select` or `first`/`limit` under `--from jsonc` |
 | select is redefined, by the filter or by ~/.jq | a `def select` |
@@ -212,6 +213,7 @@ The reasons on `because` lines:
 | --infer reads each cell's kind from its text | `--infer` |
 | --comment lines above a record are written with it, which the column route does not hold | `.` or `select(...)` with `--comment` and `--to csv` or `tsv` with a comment character |
 | --from json5 would print a path's answer as written ('a', 0x1F), not as JSON | a path under `--from json5` |
+| --from reads a format whose document is built whole, as it answers no path from the text alone | any filter under `--from toml` |
 
 For `--from csv|tsv` the reasons are the column plan's, for any other input the path plan's.
 
@@ -245,6 +247,7 @@ usage error.
 | `--from ndjson`, `--seq` | Validate one record per line or per `0x1E` separator, each record being one text. `--seq` uses `check`'s records, not jq's text sequence; each `FILE` is read alone, so a text cut at a file's end is a fault. |
 | `--from jsonc` | Validate JSONC as `stury --from jsonc .` reads it, to the same limits. A comment's text holds no escape. |
 | `--from json5` | Validate JSON5 as `stury --from json5 .` reads it, to the same limits. `Infinity` and `NaN` fail, since jq has no value for them. |
+| `--from toml` | Validate TOML 1.1 as `stury --from toml .` reads it: a repeated key, a table defined twice and a malformed datetime are faults. An empty input is valid. |
 | `--from yaml` | Validate YAML as `stury --from yaml .` reads it, every document of the stream. A repeated key is a fault, and so is an alias to an anchor that is not defined. A collection as a key is valid YAML and a fault to read. A text of comments alone is valid. |
 | `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. A fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An empty input is valid, as the library takes it, and so is a header alone. A cell is read as a filter run reads it: a string, or under `--infer` a number, `true` or `false` when its text is exactly one, so `type: integer` takes the cell `1` only with `--infer`, and `oneOf: [string, integer]` takes it either way. An empty unquoted cell is a `null`, and a quoted `""` is the empty string. `schema infer` reads cells the same way, so a schema it writes with `--infer` is checked with `--infer`. |
 | `--max-depth N` | As [above](#sturys-own-options). |
@@ -265,8 +268,9 @@ may have (`Number is below the minimum, at least 0`, `expected null or string`).
 opening quote. A text that does not parse is the plain `check`'s fault,
 told as it tells it. NDJSON and `--seq` check each record; a long file, or an array at the root whose rules apply to each
 entry, is checked on all cores and tells what a serial check tells. With `--from csv` or `tsv` the schema describes the
-table, an array of its rows, so `{"type":"array","items":{...}}` judges each row and `minItems` counts them. A YAML
-input is checked as YAML reads it: each document of a stream is checked and its failures placed in the stream. When the last NDJSON record is cut, the earlier records' failures are told
+table, an array of its rows, so `{"type":"array","items":{...}}` judges each row and `minItems` counts them. A TOML or
+YAML input is checked as its format reads it: each document of a YAML stream is checked and its failures placed in the
+stream, and a TOML datetime is a string. When the last NDJSON record is cut, the earlier records' failures are told
 before the fault, and the exit is 5.
 
 | Flag | Effect |
@@ -405,6 +409,7 @@ stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--sch
 | --- | --- |
 | `json`, `jsonc` (the default is `json`) | Each text laid out as `stury .` lays it out: pretty by default, `--indent N` (0 to 7) or `--tab` as given, keys in their order. Only the layout changes: every number and string is written as it was (`1e2`, `"\u00e9"`, `"\/"`) and every member of an object is kept, a repeated key included. JSONC keeps its comments where `stury --from jsonc --to jsonc .` puts them and drops its trailing commas, so a file already in that layout comes back byte for byte. |
 | `ndjson` | One compact value per line, as `--to ndjson` writes it, spelled as above. |
+| `toml` | Each text laid out by the TOML writer ([TOML output](#toml-output)): comments, string quoting and number forms are kept, a datetime stays bare, and only TOML 1.0 forms are written. |
 | `yaml` | Each document laid out by the YAML writer ([YAML output](#yaml-output)): comments, tags, anchors, aliases and a scalar's style are kept, and a stream's documents are kept apart by `---`. |
 | `csv`, `tsv` | The header, then one record per row, re-spelled by the CSV writer: a field that needs no quotes loses them, one that does gains them, and `""` and an empty cell stay distinct ([CSV and TSV output](#csv-and-tsv-output)). A header with no records is written. A JSON text whose root is an array is a list of rows, as the library's writer takes it, and any other text, or an NDJSON record, is one row. An object with a key the header lacks ends the run, as `--to csv` does. |
 
@@ -520,6 +525,15 @@ stury: <stdin> would change
   an f64: a literal that rounds to the filter's value is left as written. `-S` also puts every object of the output in
   key order, moving the members as a reorder does, and puts a table's columns in order.
 - A new member or element follows its container's layout: its line, its indent and the blanks around a key's colon.
+- TOML (`--from toml`) is one text, edited as the filter's one output says. A kept value keeps its bytes. A new member
+  is a `key = value` line after the table's last line, before its sub-tables, and a new member of an array of tables'
+  element, a dotted table or an inline table or array is placed in that line. A built table is a `[section]` after the
+  last section of the table it joins, and a built array of tables is a `[[section]]` per element, with their sub-tables
+  as sections. It stays in line (`{ y = 2 }`) in an inline container, a dotted table, a value replaced in place, and
+  when a section there would join another element of an array of tables. A dropped line goes with the comments
+  directly above it, a dropped `[table]` or `[[element]]` with its lines and sub-tables, and `.@comment` and
+  `.@comment_inline` write head and trailing comments. A table is not replaced by a value, since a document is a table,
+  and `null` is refused with the reason (`Value cannot be written in the format`).
 - YAML (`--from yaml`) is edited at the indentation of each site, and each document of a stream is edited as a record:
   a document with no output is dropped, each output past the first is a new document after it, `-s` runs the filter
   on the array of the documents, and a new or moved document starts with a `---` line when it has none. A text of
@@ -584,8 +598,8 @@ $ stury diff old.json new.json
   `--position` compares the elements at one index, and `--key MEMBER` pairs elements by the value of their member
   (`--key PATH=MEMBER` for the array at PATH, `--key .users=id`) and compares each pair in depth. An array that differs by
   more than 4,096 edits is told as replaced, and `stury: an array differs...` follows on stderr.
-- `--facts` tells changes of comments, tags and anchors too, where both files' formats carry them: a JSONC, JSON5 or
-  YAML comment, and a YAML tag or anchor (`~ .a @tag: "!!str" -> "!!int"`, `~ .a @anchor: "x" -> "y"`). An alias is not
+- `--facts` tells changes of comments, tags and anchors too, where both files' formats carry them: a JSONC, JSON5, TOML
+  or YAML comment, and a YAML tag or anchor (`~ .a @tag: "!!str" -> "!!int"`, `~ .a @anchor: "x" -> "y"`). An alias is not
   told, since the value it names is compared, and a style is not told.
 - `--json` writes a record a line: `{"path":["port"],"op":"changed","old":8080,"new":9090}`, with the path as
   `getpath` takes it and `op` one of `added`, `removed`, `changed` and `fact`. A change inside an array that
@@ -621,6 +635,7 @@ verdict a last record.
 | `json` | One JSON text after another, as jq reads (the default). | Pretty-printed, or as `-c`, `--tab` and `--indent` say (the default). |
 | `jsonc` | JSONC: comments and trailing commas ([Comments in the CLI](#comments-in-the-cli)). | Each value with the comments it was read with. |
 | `json5` | JSON5 1.0.0, one text per input, read as written (comments kept). Numbers print in JSON's spelling. `Infinity` and `NaN` end the run, as they have no JSON value. Positions (`input_line_number`, error lines) count the JSON5 text; nesting follows `--max-depth`; `--argjson`, `--slurpfile`, `--jsonargs` and `fromjson` read JSON5. | Not written: `--to jsonc` writes the values and their comments. `fmt --in-place` and `fmt --check` are refused. |
+| `toml` | TOML 1.1, one document per input (an empty input is `{}`). Tables read as objects in document order, a datetime as a string that `.@tag` names (`datetime`, `datetime-local`, `date-local`, `time-local`), and `.@style` tells a string's quoting (`basic`, `literal`, `multiline`, `multiline_literal`, `bare`) and a number's form (`integer`, `float`, `hex`, `octal`, `binary`, `inf`, `nan`). Hex, octal and binary integers print in decimal, `-0` as `0`. `inf` and `nan` have no JSON value: a filter sees jq's spelling. `--follow`, `--seq`, `-R` and `--stream` are refused. | Each output as a TOML text ([TOML output](#toml-output)). |
 | `yaml` | YAML 1.2 with the core schema, one input per document (a stream of several is several inputs, and `-s` slurps them). Plain scalars read as `null`, booleans, integers (decimal, `0x` and `0o`) and floats (`.5`, `1e3`, `.inf`, `.nan`), and every other plain scalar, a quoted one and a block one is a string. A key is its text, so `1` and `"1"` repeat each other, and a repeated key is a parse error. A tag of the core schema forces the type (`!!str 12`, `!!int "12"`), a scalar its core tag does not hold (`!!int yes`) is a parse error, and any other tag makes a string. An alias reads as its anchor's node, up to a limit on the bytes aliases read again: ten times the text's size and at least 1 MiB, or `--alias-limit N`. `--merge-keys` reads a `<<` member as YAML 1.1's merge key: the members of the mapping it names that the host mapping lacks are added after its own. Without it `<<` is an ordinary key. `%YAML 1.1` reads with the 1.2 rules. A key that is a collection is a parse error. A text with no document, only comments, has no input. `.@tag` is the node's tag as written, and `.@style` is `plain`, `single`, `double`, `literal`, `folded`, `flow` or `block`. `--follow` answers each document once a `---` or its `...` line ends it. `--seq`, `-R` and `--stream` are refused. | Each output is one document ([YAML output](#yaml-output)). |
 | `ndjson` | One JSON text per line. A blank line is no text, and a line that is not one text, or holds two, is a parse error where jq would read on. | One compact value per line, as `-c`. |
 | `csv`, `tsv` | The first record names the fields; each later record is one input ([CSV and TSV](#csv-and-tsv)). | Each output is one record ([CSV and TSV output](#csv-and-tsv-output)). |
@@ -631,8 +646,9 @@ verdict a last record.
   any but `ndjson` with `--stream` and `--stream-errors`. Writing CSV or TSV is one with `-r`, `-j`, `-a`, `-C`,
   `-c`, `--indent`, `--tab`, `--seq` and `--raw-output0`, which shape JSON text. `-S`, `-e`, `-n`, `-s`, `--arg`
   and the rest still apply to a filter run; `fmt` refuses them ([`fmt`](#fmt)). `--to ndjson` takes the place of
-  `-c`, so it is refused with `--indent`, `--tab` and `--seq`, and `--to jsonc` is refused with `--seq`. Writing YAML
-  is a usage error with `-r`, `-j`, `-C`, `--tab`, `--seq` and `--raw-output0`: YAML takes `-c`, `--indent` and `-a`.
+  `-c`, so it is refused with `--indent`, `--tab` and `--seq`, and `--to jsonc` is refused with `--seq`. Writing TOML
+  is a usage error with every JSON layout option, and writing YAML with `-r`, `-j`, `-C`, `--tab`, `--seq` and
+  `--raw-output0`: YAML takes `-c`, `--indent` and `-a`.
 
 ## Input
 
@@ -691,7 +707,7 @@ no pipe.
 - A file that shrinks is read again from its start, with `stury: FILE: file truncated` on stderr.
 - SIGINT and SIGTERM end the run, a FIFO's or a pipe's included, once the answers so far are written, by the signal,
   as they end jq. Ctrl-C and Ctrl-Break on Windows end it with jq's status for Ctrl-C, `STATUS_CONTROL_C_EXIT`.
-- It is a usage error (exit 2) with standard input or more than one file, `-s`, `-n`, `--stream`, JSONC, JSON5,
+- It is a usage error (exit 2) with standard input or more than one file, `-s`, `-n`, `--stream`, JSONC, JSON5, TOML,
   `check` and `fmt`.
 
 ### Records and events
@@ -843,6 +859,20 @@ $ stury --from csv --to csv 'select(.n | tonumber > 1)' people.csv
   TSV, a first cell that starts with a byte order mark.
 - **One table.** All the files of a run and all its inputs share one header.
 - **Streaming.** Rows are written as the outputs come, except under `--grow-header`.
+
+### TOML output
+
+`--to toml` writes each output as a TOML text, and `fmt` writes a file as TOML. The output must be an object, which is a
+table. Its scalars, and its arrays that are not all tables, are `key = value` lines at the top of the table, a nested
+object is a `[section]` after them, and an array of objects is a `[[section]]` per element, so a table's keys may come
+out in another order than the input has them. A value that is a node of a TOML input is written from the document,
+which keeps its comments, a string's quoting, a number's form (`0xff` stays `0xff`) and a datetime bare. A value a
+filter built is written from its JSON: a datetime is then a quoted string. Only TOML 1.0 forms are written, so a time
+without seconds gets `:00`. Several outputs are several texts, a blank line between them, which is one TOML file only
+when no key repeats.
+
+An output that is no object (`cannot write a value that is no object as TOML`), or holds `null` or repeats a key
+(`cannot write null, or a key a table repeats, as TOML`), ends the run with exit 5. `-S` sorts the keys of every table.
 
 ### YAML output
 

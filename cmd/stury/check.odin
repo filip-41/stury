@@ -74,6 +74,8 @@ check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^c
 			return msg
 		}
 		fault = records.validate_parallel(data, src.as, runner)
+	case reads_whole(o):
+		fault = whole_fault(data, src.as)
 	case reads_own(o):
 		fault = records.validate_parallel(data, src.as, runner)
 	case src.framing == .Concatenated:
@@ -104,6 +106,18 @@ blank_told :: proc(name: string, data: []byte, src: Source, o: ^Opts) -> string 
 	}
 	line, col := core.locate(data, u64(len(data)))
 	return message.build_temp("%s:%d:%d: No JSON text\n", name, line, col)
+}
+
+// The fault of `data` as one whole text of the format `as` names, or nil.
+whole_fault :: proc(data: []byte, as: core.As) -> Maybe(core.Fault) {
+	switch e in core.validate(data, as) {
+	case nil:
+		return nil
+	case core.Fault:
+		return e
+	case runtime.Allocator_Error, core.Document_Error, core.Path_Error, core.Typed_Error, core.Typed_Error_Kind:
+	}
+	return core.Fault{kind = .No_Memory}
 }
 
 // Whether the first text of `data` is a container or a string, which no byte after its close runs on from.

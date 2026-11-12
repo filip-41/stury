@@ -155,6 +155,7 @@ Slice :: core.Slice
 Spec :: enum u8 { Json, Jsonc, Json5, }
 Step :: core.Step
 Tag_Name :: typed.Tag_Name
+Tagged_Text :: write.Tagged_Text
 Token :: core.Token
 Token_Answer :: core.Token_Answer
 Token_View :: core.Token_View
@@ -277,6 +278,7 @@ value_float :: write.value_float
 value_int :: write.value_int
 value_null :: write.value_null
 value_string :: write.value_string
+value_tagged :: write.value_tagged
 value_uint :: write.value_uint
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault))
 walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
@@ -392,6 +394,7 @@ Slice :: core.Slice
 Spec :: enum u8 { Csv, Tsv, Plain, }
 Step :: core.Step
 Tag_Name :: typed.Tag_Name
+Tagged_Text :: write.Tagged_Text
 Token :: core.Token
 Token_Answer :: core.Token_Answer
 Token_View :: core.Token_View
@@ -512,6 +515,7 @@ value_float :: write.value_float
 value_int :: write.value_int
 value_null :: write.value_null
 value_string :: write.value_string
+value_tagged :: write.value_tagged
 value_uint :: write.value_uint
 walk :: proc {walk_plain, walk_saving}
 walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
@@ -523,6 +527,244 @@ write_stream :: core.write_stream
 write_value :: write.write_value
 writer_end :: records.writer_end
 writer_init :: proc {writer_init_bound, writer_init_chosen}
+# toml
+Action :: core.Action
+All :: core.All
+Answer :: core.Answer
+Answer_Iter :: build.Answer_Iter
+Arm :: typed.Arm
+Array :: core.Array
+As :: core.As
+Bound_Schema :: schema.Bound
+Bytes :: typed.Bytes
+Child_Count :: core.Child_Count
+Child_Index :: core.Child_Index
+Child_Iter :: core.Child_Iter
+Comment_Spelling :: core.Comment_Spelling
+Commented :: core.Commented
+Cursor :: struct { src: [^]u8, n: u64, held: ^Held, }
+Descend :: core.Descend
+Detail :: enum u8 { None, Cut_Utf8, Invalid_Utf8, Control_Char, Lone_Cr, Open_String, Line_End_In_String, Bad_Quotes, Bad_Codepoint, Leading_Zero, Bad_Underscore, Out_Of_Range, Bad_Datetime, Expected_Key, Expected_Equals, Expected_Value, Expected_Line_End, After_Value, Expected_Comma, Expected_Close, Trailing_Comma, Redefined_Table, Duplicate_Key, Extends_Inline, Extends_Array, Not_Table, }
+Document :: core.Document
+Document_Error :: core.Document_Error
+Document_Error_Kind :: core.Document_Error_Kind
+Duplicates :: core.Duplicates
+Edit :: core.Edit
+Edit_List :: core.Edit_List
+Edit_Op :: core.Edit_Op
+Edit_Reason :: core.Edit_Reason
+Enum_Spelling :: typed.Enum_Spelling
+Error :: core.Error
+Error_Entry :: core.Error_Entry
+Expected_Key :: core.Expected_Key
+Fact :: core.Fact
+Fact_Iter :: core.Fact_Iter
+Fact_Name :: core.Fact_Name
+Fact_Value :: core.Fact_Value
+Fault :: core.Fault
+Fault_Kind :: core.Fault_Kind
+Field :: typed.Field
+Framing :: core.Framing
+Hook_Regs :: core.Hook_Regs
+Hook_Value :: typed.Hook_Value
+Index :: core.Index
+Index_Or_Name :: core.Index_Or_Name
+Kept_Child :: core.Kept_Child
+Kind :: core.Kind
+Lines :: core.Lines
+MAX_CHILDREN :: core.MAX_CHILDREN
+MAX_DEPTH :: core.MAX_DEPTH
+MAX_ERROR_STEPS :: core.MAX_ERROR_STEPS
+MAX_STEPS :: core.MAX_STEPS
+Marshal_Hook :: typed.Marshal_Hook
+Marshal_Text :: typed.Marshal_Text
+Member_Iter :: core.Member_Iter
+Meta :: typed.Meta
+Missing_Name :: core.Missing_Name
+Name :: core.Name
+Node :: core.Node
+Node_Index :: core.Node_Index
+Node_Ref :: core.Node_Ref
+Null :: typed.Null
+Number :: core.Number
+Number_Kind :: core.Number_Kind
+Number_Literal :: write.Number_Literal
+Number_Spelling :: enum u16 { Plain = 0, Decimal = 2, Hex = 4, Octal = 6, Binary = 8, Inf = 10, Nan = 12, }
+Number_Text :: core.Number_Text
+Object :: core.Object
+Options :: struct { max_depth: u32, }
+Out :: write.Out
+PRETTY :: core.PRETTY
+Pair_Iter :: core.Pair_Iter
+Path :: core.Path
+Path_Error :: core.Path_Error
+Path_Error_Kind :: core.Path_Error_Kind
+Path_Options :: core.Path_Options
+Path_Reason :: core.Path_Reason
+Plan :: typed.Plan
+Plan_Clash :: core.Plan_Clash
+Plan_Options :: typed.Plan_Options
+Pool :: host.Pool
+Presence :: core.Presence
+Query_Options :: core.Query_Options
+ROOM_MAX :: write.ROOM_MAX
+ROOT :: core.ROOT
+RULES := core.Rules{"toml", {
+Raw :: typed.Raw
+Read_Kind :: typed.Read_Kind
+Read_Options :: typed.Read_Options
+Record :: records.Record
+Record_Reader :: records.Reader
+Record_Stream_Options :: records.Stream_Options
+Record_Writer :: records.Writer
+Rename :: typed.Rename
+Role :: core.Role
+Rules :: core.Rules
+Runner :: core.Runner
+STREAM_BUFFER :: write.STREAM_BUFFER
+Schema :: schema.Compiled
+Schema_Draft :: schema.Draft
+Schema_Options :: schema.Options
+Sink :: typed.Sink
+Sink_Mark :: typed.Sink_Mark
+Site :: core.Site
+Slice :: core.Slice
+Spec :: enum u8 { Toml_1_0, Toml_1_1, }
+Step :: core.Step
+Tag_Name :: typed.Tag_Name
+Tagged_Text :: write.Tagged_Text
+Token :: core.Token
+Token_Answer :: core.Token_Answer
+Token_View :: core.Token_View
+Tokens :: write.Tokens
+Tolerance :: core.Tolerance
+Tree :: write.Tree
+Tree_Part :: write.Tree_Part
+Type_Hook :: typed.Type_Hook
+Typed_Detail :: core.Typed_Detail
+Typed_Error :: core.Typed_Error
+Typed_Error_Kind :: core.Typed_Error_Kind
+Typed_Refusal :: core.Typed_Refusal
+Typed_Want :: core.Typed_Want
+Unknown_Fields :: typed.Unknown_Fields
+Unmarshal_Hook :: typed.Unmarshal_Hook
+Value :: core.Value
+Value_Class :: typed.Value_Class
+Write_Options :: core.Write_Options
+answers :: proc {answers_bound_one, answers_bound_many, answers_chosen_one, answers_chosen_many}
+array_append :: core.array_append
+as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As
+bind_schema :: proc(s: ^Schema, spec: Spec, opts := Options{}, allocator := context.allocator) -> (Bound_Schema, core.Error)
+build :: proc {build_bound, build_chosen}
+can_resume :: #force_inline proc "contextless" (cursor: ^Cursor) -> bool
+cell :: records.cell
+cells :: records.cells
+check :: proc {check_bound, check_chosen}
+check_schema :: schema.check
+check_schema_records :: schema.check_records
+checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Checks
+child_at :: core.child_at
+child_next :: core.child_next
+children :: core.children
+clone :: core.clone
+column :: records.column
+comment_lead :: core.comment_lead
+comments :: core.comments
+commit :: compose.commit
+compare :: core.compare
+destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind, cursor_destroy}
+doc_number_text :: core.doc_number_text
+each_answer :: proc {each_answer_bound_one, each_answer_bound_many, each_answer_chosen_one, each_answer_chosen_many}
+edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
+equal :: core.equal
+fact_value :: core.fact_value
+facts_of :: core.facts_of
+find :: proc {find_bound, find_chosen}
+float_value :: core.float_value
+format :: core.format
+hash :: core.hash
+insert :: write.insert
+int_value :: core.int_value
+key :: write.key
+key_equals :: core.key_equals
+kind :: core.kind
+length :: core.length
+length_exact :: core.length_exact
+marshal :: proc {marshal_once, write.marshal}
+marshal_stream :: write.marshal_stream
+member :: core.member
+member_next :: core.member_next
+member_of :: core.member_of
+members_named :: core.members_named
+new_array :: core.new_array
+new_object :: core.new_object
+next :: build.answers_next
+noted :: core.noted
+number :: proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool)
+number_spelling_of :: #force_inline proc "contextless" (spelling: u16) -> Number_Spelling
+object_put :: core.object_put
+open_array :: write.open_array
+open_object :: write.open_object
+own_names :: typed.own_names
+pair_next :: core.pair_next
+pairs :: core.pairs
+parse_path :: core.parse_path
+parse_pointer :: core.parse_pointer
+plain :: core.plain
+plan_make :: proc(T: typeid, spec := Spec.Toml_1_0, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
+plan_of :: proc(d: ^rules.Description, spec := Spec.Toml_1_0, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
+pool_init :: host.pool_init
+query :: proc {query_one, query_many}
+reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads
+record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs
+records_build :: records.build
+records_check :: proc {records_check_bound, records_check_chosen}
+records_close :: records.close
+records_each :: proc {records_each_bound, records_each_chosen}
+records_marshal :: records.marshal
+records_marshal_stream :: records.marshal_stream
+records_next :: records.next
+records_open :: proc {records_open_bound, records_open_chosen}
+records_open_stream :: proc {records_open_stream_bound, records_open_stream_chosen}
+records_read :: records.read
+records_scan :: records.scan
+records_write :: records.write
+refuse :: typed.refuse
+remove :: core.remove
+remove_fact :: core.remove_fact
+render :: core.render
+rule_of :: core.rule_of
+scan :: proc {scan_bound_one, scan_bound_many, scan_chosen_one, scan_chosen_many}
+set :: proc {set_bound, set_chosen}
+set_fact :: core.set_fact
+set_member :: write.set_member
+set_node :: write.set
+span :: core.span
+text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool)
+text_room :: core.text_room
+token_text :: core.token_text
+tokens_close :: write.close
+tokens_init :: proc {tokens_init_bound, tokens_init_chosen}
+unmarshal :: proc {unmarshal_bound, unmarshal_bound_plan, unmarshal_chosen, unmarshal_chosen_plan}
+validate :: proc {validate_bound, validate_chosen}
+value_bool :: write.value_bool
+value_bytes :: write.value_bytes
+value_float :: write.value_float
+value_int :: write.value_int
+value_null :: write.value_null
+value_string :: write.value_string
+value_tagged :: write.value_tagged
+value_uint :: write.value_uint
+walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault))
+walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
+write :: proc {write_bound, write_chosen}
+write_cells :: records.write_cells
+write_code :: core.write_code
+write_pointer :: core.write_pointer
+write_stream :: core.write_stream
+write_value :: write.write_value
+writer_end :: records.writer_end
+writer_init :: records.writer_init
 # yaml
 ALIAS_FLOOR :: 1 << 20
 ALIAS_RATIO :: 10
@@ -627,6 +869,7 @@ Slice :: core.Slice
 Spec :: enum u8 { Yaml_1_2, }
 Step :: core.Step
 Tag_Name :: typed.Tag_Name
+Tagged_Text :: write.Tagged_Text
 Token :: core.Token
 Token_Answer :: core.Token_Answer
 Token_View :: core.Token_View
@@ -747,6 +990,7 @@ value_float :: write.value_float
 value_int :: write.value_int
 value_null :: write.value_null
 value_string :: write.value_string
+value_tagged :: write.value_tagged
 value_uint :: write.value_uint
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault))
 walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
@@ -937,8 +1181,8 @@ unmarshal_node :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, 
 unmarshal_value :: proc(v: core.Value, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
 # core/write
 Layout_Step :: enum u8 { Open_Object, Open_Array, Close, Key, }
-Scalar :: union { string, typed.Bytes, core.Number, Number_Literal, Tree_Part, }
-Token_Spelling :: struct { tree: Tree, start: proc(t: ^Tokens, as: core.As) -> core.Typed_Error_Kind, value: proc(t: ^Tokens, v: Scalar) -> core.Typed_Error_Kind, line: proc(t: ^Tokens) -> core.Typed_Error_Kind, stop: proc(t: ^Tokens), record: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Refusal) -> core.Typed_Error_Kind, layout: proc(t: ^Tokens, step: Layout_Step) -> core.Typed_Error_Kind, comment: proc(out: ^Out, spec: u8, text: string) -> bool, }
+Scalar :: union { string, typed.Bytes, core.Number, Number_Literal, Tree_Part, Tagged_Text, }
+Token_Spelling :: struct { tree: Tree, start: proc(t: ^Tokens, as: core.As) -> core.Typed_Error_Kind, value: proc(t: ^Tokens, v: Scalar) -> core.Typed_Error_Kind, line: proc(t: ^Tokens) -> core.Typed_Error_Kind, stop: proc(t: ^Tokens), end: proc(t: ^Tokens, bytes: []u8) -> ([]u8, core.Typed_Refusal), record: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Refusal) -> core.Typed_Error_Kind, layout: proc(t: ^Tokens, step: Layout_Step) -> core.Typed_Error_Kind, comment: proc(out: ^Out, spec: u8, text: string) -> bool, }
 comment :: proc(t: ^Tokens, text: string) -> core.Typed_Error_Kind
 destroy :: proc(out: ^Out)
 insert_element :: proc(list: ^core.Edit_List, container: core.Node_Index, at: int, v: $T, plan: ^typed.Plan = nil) -> core.Error

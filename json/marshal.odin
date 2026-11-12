@@ -47,6 +47,8 @@ TOKENS := write.Token_Spelling {
 				return .Bad_Raw
 			}
 			write.put_text(t.out, x.text)
+		case write.Tagged_Text:
+			return put_string(t.out, x.text, t.opts)
 		case write.Tree_Part:
 			write.put_text(t.out, t.spell.tree[x])
 		}

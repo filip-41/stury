@@ -4,13 +4,17 @@
 
 ### Command line
 
-- `--from yaml` reads YAML 1.2 with the core schema, each document of a stream an input, and `--to yaml` writes YAML
-  in block or flow style. `check`, `check --schema`, `fmt`, `diff`, `schema infer`, `--explain` and `--follow` take it.
+- `--from toml` and `yaml` read TOML 1.1 and YAML 1.2 with the core schema (each document of a stream an input), and
+  `--to toml` and `yaml` write TOML 1.0 and YAML in block or flow style. `check`, `check --schema`, `fmt`, `diff`,
+  `schema infer` and `--explain` take both, and `--follow` takes YAML.
 - `--alias-limit N` and `--merge-keys` set how `--from yaml` reads: the bytes aliases may read again, and `<<` as
   YAML 1.1's merge key. With another `--from` each is a usage error.
-- `.@tag`, `.@anchor`, `.@alias` and `.@style` read a YAML node's tag, anchor, alias and style. `.@tag`, `.@anchor` and
-  `.@alias` take a string or `null`, travel with their value as comments do, and `edit` writes them. `.@style` is read
-  only.
+- `.@tag`, `.@anchor`, `.@alias` and `.@style` read a value's tag, anchor, alias and spelling: a TOML datetime's type,
+  a number's form and a string's quoting, and a YAML node's tag, anchor, alias and style. `.@tag`, `.@anchor` and
+  `.@alias` take a string or `null`, travel with their value as comments do, and `edit` writes them in YAML.
+  `.@style` is read only.
+- `edit --from toml` keeps every byte the output does not change: a new member joins its table's lines, a built table
+  is a `[section]`, a dropped line goes with the comments above it, and `null` is refused with the reason.
 - `edit --from yaml` edits each document of a stream as a record: a document with no output is dropped, each output
   past the first is a new document after it, `-s` runs the filter on the array of the documents, and a new or moved
   document starts with a `---` line. A text of comments alone is written back as it is, and `--diff` takes no stream of
@@ -173,6 +177,23 @@
 
 ### Formats
 
+- New package `toml`: TOML 1.0 and 1.1 (`toml.Spec`), read by a walk that builds the table tree and replays it in
+  document order, judged by `toml.validate` and built by `toml.build`, with `find`, `scan`, `each_answer` and `query`.
+  A table is one object whose members are in the order the text first names them, and a repeated key or a table
+  defined twice is a fault. A datetime is a string whose `Tag` fact names its type, and the `Style` fact tells a
+  string's quoting and a number's form (`toml.Number_Spelling`). A hex, octal or binary integer writes as JSON in
+  decimal. The vendored toml-test cases run under both versions.
+- `toml.marshal`, `toml.unmarshal` and `toml.plan_make` write and read a struct or map with the `toml` tag key. The
+  writers lay out lines, `[header]` and `[[header]]` sections and comments where TOML reads them back, write a float
+  so that it reads back as a float (`1.0`, `-0.0`, `inf`, `nan`) and a datetime bare, and refuse null and a repeated
+  key as `.Unwritable`. `toml.write` and `core.write` with `toml.as` write a document of any format whose root is an
+  object.
+- `toml.set` and a TOML edit list edit a text and keep every byte the edits do not reach: a new member is a line after
+  its table's last line, a built table or array of tables a section after the last section of the table it joins, and a
+  removed member goes with the comments above it. An edit TOML cannot make, such as a table replaced by a value, is
+  `.Frozen` with the reason.
+- `toml.checks` and `toml.bind_schema` give a model the format and bind a JSON Schema, so a model loads and a schema
+  judges TOML texts.
 - New package `yaml`: YAML 1.2 with the core schema, read in one pass by `yaml.walk`, judged by `yaml.validate` and
   built by `yaml.build`. A plain scalar resolves by its text and its tag, and one its core tag does not hold is
   `.Tag_Mismatch`. A key is its text, a repeated key is a fault in every read (`.Refuse` is YAML's one duplicate
@@ -203,16 +224,28 @@ The hooks YAML adds to the formats' interface:
 - `Readers` gains `fact` and `number_text`, and `Edit_Services` gains `prefix`, `relocate` and `commit`, for a
   format whose edits do not fit one range per container. An edit a format's commit may not make is
   `Document_Error_Kind.Frozen`. `core.Site` says where an edit's text stands, and `write.tokens_init` takes one.
+- `write.Tagged_Text` and `write.value_tagged` write a string with its format's type tag, as a TOML datetime, and
+  `write.Token_Spelling.end` turns a token write's finished text into the format's own.
 - `records.open`, `Stream_Options` and `json.records_open` take `entries`, a path of keys to the container whose
   members are the records under `.Entries`, and a stream under `.Entries` gives its records as it reads them.
 
 ### Library API
 
 - `yaml.marshal` writes a `typed.Bytes` as `!!binary` and its base64, as the token write and the document write do.
-- `diff --facts` tells a changed YAML comment, tag or anchor, through the facts a format's edit services write.
+- `diff --facts` tells a changed TOML or YAML comment, and a changed YAML tag or anchor, through the facts a format's
+  edit services write.
 - `yaml.plan_of` builds the plan of a `rules.Description`, as `json.plan_of` and `dsv.plan_of` do.
 - `yaml.walk` takes a `^Cursor` that `walk_resume` continues after any token, and `yaml.answers` gives a path's answers
   one at a time, as json's and dsv's do, and `yaml.destroy` frees a cursor a stop left.
+- `toml.walk` takes a `^Cursor` that `walk_resume` continues after any token, `toml.answers` gives a path's answers
+  one at a time, and `toml.destroy` frees a cursor a stop left.
+- `toml.check` reads a text by a plan as a check, `toml.plan_of` builds the plan of a `rules.Description`, and
+  `toml.unmarshal` takes a spec chosen at run time, as yaml's do. `toml.plan_make` takes `reads`, and a plan made
+  without them reads no text, so `toml.set` with a struct and a plan needs a plan made with `reads = toml.reads(spec)`,
+  as json and yaml do.
+- A TOML text is one record under `.Concatenated`: `toml.records_open`, `records_open_stream`, `records_check`,
+  `records_each`, `record_docs` and `tokens_init`, and a handle of `toml.as` holds the framing and the record builds.
+- A path read of TOML ends the answer of a step that meets a scalar where it needs a container at the scalar's end.
 - `json.bind_schema` takes the `Options` the texts are read with, as the other formats' do, `dsv.refuse` is
   `typed.refuse` as in json and yaml, `yaml.number`, `dsv.number` and `dsv.text` read a token without the table, as
   `json.number` and `json.text` do, and json and dsv forward `Value_Class`, `Tree` and `Plan` as the other formats do.
@@ -404,7 +437,7 @@ The hooks YAML adds to the formats' interface:
 - `make help` lists the targets. `make api-write`, `lint-man` and `lint-fixtures` are new, `make check` names the rule
   a failure broke, and the Makefile refuses an Odin release older than `MIN_ODIN`, `dev-2026-11`.
 - `make test-cli` runs `cmd/stury/test/smoke.py`, and `smoke.floor` is empty: every smoke case passes. It also runs
-  the yaml-test-suite through the command line (`yaml_suite.py`). CI runs the
+  toml-test and the yaml-test-suite through the command line (`toml_suite.py`, `yaml_suite.py`). CI runs the
   examples. The tree is pinned to Odin `dev-2026-11a` on LLVM 22.
 
 ## 0.1.1 (2026-11-05)

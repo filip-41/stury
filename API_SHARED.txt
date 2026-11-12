@@ -231,6 +231,7 @@ feed_nodes :: proc "contextless" ( doc: ^core.Document, from, to: u32, h: ^$H, o
 no_deepen :: proc "contextless" (_: ^$H, _: int) -> bool
 query_built :: proc(doc: ^core.Document, built: core.Error, paths: []core.Path, read: core.Path_Options) -> (core.Document, core.Error)
 scan_again :: proc(h: ^Scan, src: []u8, as: core.As, allocator: runtime.Allocator, frames: []u64) -> core.Path_Error
+scan_built :: proc(doc: ^core.Document, built: core.Document_Error, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error)
 scan_deepen :: #force_no_inline proc "contextless" (h: ^Scan, extra: int) -> bool
 scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(core.Fault), doc: ^core.Document) -> core.Path_Error
 scan_free :: proc(h: ^Scan, allocator: runtime.Allocator)

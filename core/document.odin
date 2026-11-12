@@ -341,10 +341,11 @@ Duplicates :: enum u8 {
 // and its value as a `Value` token, each read through `text` and `key_equals` as a node's is: a value with references
 // or one the format normalizes sets `SPELLING_DECODE`, and a valueless attribute's value is an empty `String`. It is
 // nil for a format with no attributes, and `attributes_of` is its one caller. `fact` returns a named fact that the
-// node's spelling carries instead of a span, such as a scalar's style, and is nil for a format with none, see
-// `fact_value`. `number_text` writes the decimal digits of a number token whose span is not its text, a `Plain` token
-// the format resolves to a number, into `buf` and returns false when `buf` is too short. An infinity or a NaN has no
-// digits and gives an empty text. It is nil for a format whose number span is the text, see `doc_number_text`.
+// node's spelling carries instead of a span, such as a scalar's style or a TOML datetime's tag, and is nil for a format
+// with none, see `fact_value`. `number_text` writes the decimal digits of a number token whose span is not its text, a
+// `Plain` token the format resolves to a number, into `buf` and returns false when `buf` is too short. An infinity or
+// a NaN has no digits and gives an empty text. It is nil for a format whose number span is the text, see
+// `doc_number_text`.
 Readers :: struct {
 	text:        proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
 	key_equals:  proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool,
@@ -428,7 +429,8 @@ Edit_Services :: struct {
 	// format whose nodes keep their bytes anywhere.
 	relocate:      proc(doc: ^Document, node: Node_Index, site: Site, allocator: runtime.Allocator) -> (text: []u8, ok: bool),
 	// Returns the source bytes `list`'s edits make, as the spec byte `spec`, in place of `core/compose`'s commit, for a
-	// format whose containers are not one range of bytes to compose around, as a text of lines at an indentation. It places each edit's text at its site itself, so a value `spell` writes is recorded as it
+	// format whose containers are not one range of bytes to compose around, as a table written in sections or a text of
+	// lines at an indentation. It places each edit's text at its site itself, so a value `spell` writes is recorded as it
 	// is, in the list's base layout, and it counts in `dropped` the facts the output cannot hold. It is nil for a format
 	// whose edits `core/compose` commits.
 	commit:        proc(list: ^Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: Document_Error),
@@ -456,7 +458,7 @@ site_at :: proc "contextless" (src: []u8, at: u64) -> Site {
 }
 
 // A fact that a node's spelling carries instead of a span: `Style` is how a scalar or a collection is written (a
-// quoting, a block or flow form), `Tag` a type tag held in the spelling. The three property roles
+// quoting, a block or flow form), `Tag` a type tag held in the spelling, as a TOML datetime's. The three property roles
 // `Tag`, `Anchor` and `Alias` are facts of the same names, which a span may hold.
 Fact_Name :: enum u8 {
 	Tag,
@@ -506,7 +508,7 @@ is_property :: #force_inline proc "contextless" (role: Role) -> bool {
 }
 
 // A `Comment_Spelling` names how a format spells a comment in an output: `//` for a JSON spec that has comments, a
-// byte that starts a comment to its line end, a delimited text's or YAML's `#`, or none. Under `Line`, a body holding a line end is written in the
+// byte that starts a comment to its line end, a delimited text's or TOML's and YAML's `#`, or none. Under `Line`, a body holding a line end is written in the
 // block form `/* */`, so a line comment's body cannot end its line early.
 Comment_Spelling :: enum u8 {
 	None,

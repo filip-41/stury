@@ -831,6 +831,8 @@ token_cell :: proc(t: ^write.Tokens, v: write.Scalar) -> core.Typed_Error_Kind {
 		return kind if kind != .None else put_number(w, p, size, t.first)
 	case write.Number_Literal:
 		return put_number_literal(w, x.text, t.first)
+	case write.Tagged_Text:
+		return put_string(w, x.text, t.first, false)
 	case write.Tree_Part:
 		if x != .Null {
 			return put_word(w, x == .True, t.first)
