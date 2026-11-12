@@ -350,8 +350,9 @@ record_value :: proc(ins: ^Inputs, rec: records.Record, own: bool) -> (jq.Value,
 	if own && !stream {
 		rec.text = bytes.clone(rec.text)
 	}
-	// An own scalar's document is let go once its value is taken, so `[inputs]` of numbers holds only the numbers.
-	own_scalar := own && !stream && len(rec.text) > 0 && rec.text[0] != '[' && rec.text[0] != '{'
+	// An own scalar's document is let go once its value is taken, so `[inputs]` of numbers holds only the numbers. Only
+	// a JSON-like text tells a scalar by its first byte.
+	own_scalar := own && !stream && !reads_own(&ins.run.opts) && len(rec.text) > 0 && rec.text[0] != '[' && rec.text[0] != '{'
 	built, err := records.build(&ins.texts, rec, runtime.heap_allocator() if stream || own_scalar else context.allocator)
 	doc, fault := jq.judge_build(built, err)
 	if f, bad := fault.?; bad {

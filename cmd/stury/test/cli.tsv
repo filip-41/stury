@@ -2685,3 +2685,5 @@ yaml	["edit", "--from", "yaml", ".b // ."]	"a: 1\n---\nb:\n  c: 1\n"	{}	null	nul
 yaml	["edit", "--from", "yaml", "--diff", ".a += 1"]	"a: 1\n---\na: 2\n"	{}	null	null	null	5	""	"stury: error: <stdin>: --diff compares whole documents, which this input is not\n"
 yaml	["edit", "--from", "yaml", ".a += 1"]	"%YAML 1.2\n--- # one\na: 1\n...\n---\na: 2\n"	{}	null	null	null	0	"%YAML 1.2\n--- # one\na: 2\n...\n---\na: 3\n"	""
 yaml	["edit", "--from", "yaml", ".a = 1"]	"# only a comment\n"	{}	null	null	null	0	"# only a comment\n"	""
+yaml	["--from", "yaml", "-c", "-n", "[inputs]"]	"a: 1\n---\nb: 2\n"	{}	null	null	null	0	"[{\"a\":1},{\"b\":2}]\n"	""
+yaml	["--from", "yaml", "-c", "-n", "[inputs]"]	"1\n---\n[2]\n"	{}	null	null	null	0	"[1,[2]]\n"	""
