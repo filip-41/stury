@@ -407,7 +407,7 @@ spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_N
 	switch t.kind {
 	case .Array, .Object:
 		return {text = "flow" if is_flow(doc, t) else "block"}, true
-	case .Plain, .String, .Null, .False, .True, .Number:
+	case .Plain, .String, .Bytes, .Null, .False, .True, .Number:
 		style := style_of(t.spelling)
 		if style == .Block {
 			return {text = "folded" if doc.src[t.lo] == '>' else "literal"}, true

@@ -276,6 +276,10 @@ put_node :: proc(w: ^Rows, doc: ^core.Document, node: core.Node_Index, buf: []u8
 		return put_word(w, true, first)
 	case .False:
 		return put_word(w, false, first)
+	case .Bytes:
+		stack: [512]u8
+		text, ok := write.node_bytes_text(doc, node, stack[:])
+		return put_string(w, text, first, false) if ok else .No_Memory
 	case .Number:
 		if doc.readers.number_text != nil {
 			stack: [64]u8

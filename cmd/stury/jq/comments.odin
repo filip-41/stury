@@ -1,9 +1,9 @@
 package jq
 
 // Facts as a filter reads and writes them: the comments, over the library's comments on values (`core.Commented`), and
-// the properties, a tag, an anchor, an alias and a style. A property is one value, a string or null. A property the
-// filter wrote is held as a comment role's bodies are, one body under its role, and a style, which no format spells as
-// an edit, is never held.
+// the properties, a tag, an anchor, an alias and a style. A property is one value, a string or null, and a tag may be a
+// number. A property the filter wrote is held as a comment role's bodies are, one body under its role, and a style,
+// which no format spells as an edit, is never held.
 //
 // In a path a fact is a step of its own, the object `{"fact": "comment"}` (or any other name in `FACT_NAMES`), and only
 // the last step: `.a.@comment` is the path `["a", {"fact": "comment"}]`. `.@` reads only the names in the catalogue.
@@ -178,7 +178,7 @@ fact_value :: proc(v: Value, fact: Fact) -> Value {
 	return property_value(v, name)
 }
 
-// `v`'s property `name`: the filter's write, else the value of its node's fact.
+// `v`'s property `name`: the filter's write, else the value of its node's fact, a number when the fact spells one.
 property_value :: proc(v: Value, name: core_pkg.Fact_Name) -> Value {
 	inner := v
 	if c, is_commented := v.(^Commented); is_commented {
@@ -195,11 +195,16 @@ property_value :: proc(v: Value, name: core_pkg.Fact_Name) -> Value {
 	if !held {
 		return nil
 	}
+	if fv.numeric {
+		if n, is_number := read_number(fv.text); is_number {
+			return n
+		}
+	}
 	return fv.text
 }
 
-// `v` with fact `fact` written as `nv`: the comment bodies of `write_comments`, or for a property a string or null. A
-// style is written only as the one `v` has.
+// `v` with fact `fact` written as `nv`: the comment bodies of `write_comments`, or for a property a string or null, and
+// a number for a tag, which is held as its digits. A style is written only as the one `v` has.
 write_fact :: proc(ip: ^Interp, v: Value, fact: Fact, nv: Value) -> (Value, Signal) {
 	if role, is_comment := comment_role(fact); is_comment {
 		return write_comments(ip, v, role, nv)
@@ -210,7 +215,12 @@ write_fact :: proc(ip: ^Interp, v: Value, fact: Fact, nv: Value) -> (Value, Sign
 	case .Null:
 	case .String:
 		text, _ = string_of(nv)
-	case .False, .True, .Number, .Array, .Object:
+	case .Number:
+		if name != .Tag {
+			return nil, bad_property(ip)
+		}
+		text = to_json(nv, {}, context.allocator)
+	case .False, .True, .Array, .Object:
 		return nil, bad_property(ip)
 	}
 	role, spanned := property_role(name)
@@ -230,7 +240,7 @@ write_fact :: proc(ip: ^Interp, v: Value, fact: Fact, nv: Value) -> (Value, Sign
 
 @(private = "file")
 bad_property :: proc(ip: ^Interp) -> Signal {
-	return fail(ip, "a tag, an anchor, an alias or a style is a string or null")
+	return fail(ip, "a tag, an anchor, an alias or a style is a string or null, and a tag may be a number")
 }
 
 fact_step_not_last :: proc(ip: ^Interp) -> Signal {

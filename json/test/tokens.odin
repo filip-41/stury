@@ -283,6 +283,8 @@ spans :: proc(src: []u8, t: core.Token) -> bool {
 			spelling = .Decimal
 		}
 		return len(b) > 0 && json.number_spelling_of(t.spelling) == spelling
+	case .Bytes:
+		return false
 	case .Null:
 		return string(b) == "null"
 	case .False:

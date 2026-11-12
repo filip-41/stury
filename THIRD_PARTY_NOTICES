@@ -151,6 +151,12 @@ jq 1.8.2 — https://jqlang.github.io/jq/
     suites, in cmd/stury/test/jq-1.8.2/COPYING. (cmd/stury/test/modules is stury's own, remade from what jq.test's
     module cases require.)
 
+cbor test-vectors — https://github.com/cbor/test-vectors
+
+    cbor/test/vectors/appendix_a.json (the examples of RFC 8949 Appendix A as data: the bytes, the decoded value or
+    diagnostic notation, and whether the example is in preferred serialization). The repository ships no LICENSE
+    file. Its UPSTREAM file names the commit.
+
 JSONTestSuite — https://github.com/nst/JSONTestSuite
 
     json/test/conformance/JSONTestSuite (the conformance corpus). Its LICENSE and UPSTREAM files ship in

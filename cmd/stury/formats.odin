@@ -3,6 +3,7 @@ package main
 // The formats `--from` reads and `--to` writes, one row of FORMATS each, and the options a format refuses.
 
 import core "../../core"
+import cbor "../../cbor"
 import dsv "../../dsv"
 import json "../../json"
 import toml "../../toml"
@@ -17,6 +18,7 @@ Format :: enum u8 {
 	Tsv,
 	Toml,
 	Yaml,
+	Cbor,
 }
 
 Format_Spec :: struct {
@@ -67,6 +69,7 @@ FORMATS := [Format]Format_Spec {
 	.Tsv    = {name = "tsv", title = "TSV", cells = true, framing = .Lines},
 	.Toml   = {name = "toml", title = "TOML", framing = .Concatenated, whole_as = toml_reading, written = toml_written, parted = toml_parted, refusal = toml_refusal},
 	.Yaml   = {name = "yaml", title = "YAML", framing = .Concatenated, whole_as = yaml_reading, follows = yaml_follows, ended = yaml_ended, scans = true, written = yaml_written, laid = true, parted = yaml_parted, refusal = yaml_refusal},
+	.Cbor   = {name = "cbor", title = "CBOR", framing = .Concatenated, whole_as = cbor_reading, follows = cbor_follows, scans = true, written = cbor_written},
 }
 
 // A text after the first is the next text of strict JSON, where `validate` and a build, judging one, refuse it as
@@ -150,6 +153,24 @@ yaml_parted :: proc "contextless" (text: []u8) -> string {
 @(private = "file")
 yaml_refusal :: proc "contextless" (kind: core.Typed_Error_Kind) -> string {
 	return "cannot write a text YAML has no spelling for" if kind == .Unwritable else ""
+}
+
+// Any well-formed and valid item, in whatever serialization.
+@(private = "file")
+cbor_reading :: proc "contextless" (o: ^Opts) -> core.As {
+	return cbor.as(.Cbor, {max_depth = o.max_depth})
+}
+
+// An input is an RFC 8742 sequence: a whole build refuses the bytes after its first item, and a text with none.
+@(private = "file")
+cbor_follows :: proc "contextless" (f: core.Fault) -> bool {
+	return f.rules == &cbor.RULES && (f.detail == u8(cbor.Detail.Trailing) || f.detail == u8(cbor.Detail.No_Item))
+}
+
+// Each output one item in preferred serialization.
+@(private = "file")
+cbor_written :: proc "contextless" (o: ^Opts) -> core.As {
+	return cbor.as(.Preferred, {max_depth = o.max_depth})
 }
 
 format_named :: proc(name: string) -> (f: Format, ok: bool) {

@@ -122,7 +122,9 @@ A record whose text does not read returns true and its error, and the next `scan
 - `entries` names a path of object keys, as `records.open(src, as, .Entries, entries = {"data"})` or
   `Stream_Options{entries = {"data"}}`. The records are then the elements or members of the container at that path, and
   text outside it is judged but gives no record. A path that is absent or names a scalar gives no records.
-- A YAML stream's documents are records under `.Concatenated`, the one framing YAML takes.
+- A YAML stream's documents and a CBOR sequence's items are records under `.Concatenated`, the one framing those
+  formats take. A record reader does not pass over a byte order mark in a binary format's text, whose bytes are not
+  characters.
 - A format with no record reader, or one that does not take the framing, ends the records with `.Bad_Option` before
   any is read.
 

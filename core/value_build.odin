@@ -125,7 +125,8 @@ object_delete_all :: proc(o: ^Object, gone: map[string]bool) {
 }
 
 // The value of node `r` as a built value of its own, which outlives the document: a number is a double, but a number
-// whose digits the double does not spell keeps them as a `Number_Text`. An object follows `dups`: `.All` keeps a
+// whose digits the double does not spell keeps them as a `Number_Text`, and a byte string is the string of its RFC 4648
+// base64, as a text format writes it. An object follows `dups`: `.All` keeps a
 // repeated key in order, `.First` the first and the others the last. With `borrow` a string or key that lies in the
 // document's text stays a slice of it. A node that has comments in its document carries them, as `Commented` does. The
 // containers being filled are frames of a stack in the context allocator, so the native stack does not grow with the
@@ -246,6 +247,10 @@ built_data :: proc(r: Node_Ref, borrow: bool) -> Value {
 			return number_text(strings.clone(digits))
 		}
 		return f
+	case .Bytes:
+		payload := transmute([]u8)node_string(r.doc, r.node)
+		text := make([]u8, spell.base64_len(len(payload)))
+		return string(text[:spell.base64_put(text, payload)])
 	case .String:
 		return text_kept(r.doc, node_string(r.doc, r.node), borrow)
 	case .Array:

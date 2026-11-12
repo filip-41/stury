@@ -245,7 +245,7 @@ slice_scratch: [dynamic]byte
 @(private = "file")
 slice_source :: proc(t: Value) -> (s: string, decoded: bool) {
 	if r, is_ref := plain(t).(Ref); is_ref {
-		if room := core_pkg.text_room(r.doc, r.node); room > 0 {
+		if room := core_pkg.text_room(r.doc, r.node); room > 0 && r.doc.nodes[r.node].kind != .Bytes {
 			if slice_scratch.allocator.procedure == nil {
 				slice_scratch = make([dynamic]byte, runtime.heap_allocator())
 			}

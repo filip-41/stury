@@ -72,8 +72,10 @@ comment_tail :: #force_inline proc "contextless" (spelling: u16) -> u64 {
 
 // A `Fact` holds a comment, property or attribute token, the node it belongs to and its role. Facts are sorted by the
 // node they belong to, and two facts of one node keep their source order. `lo` is the first byte and `n` the span's
-// length, markers included. A comment's `spelling` has the marker's lead length in its low byte and its tail length in
-// the next, so core slices a body without knowing a format's markers. A `//` comment leads with two bytes and trails
+// length, markers included. `kind` is the kind of the token the fact came from: `Plain` for a comment, an attribute and
+// a text tag, and `Number` for a binary format's numeric tag, whose span `fact_token` reads through the format's
+// `number` as a node's is. A `Plain` fact's `spelling` has the marker's lead length in its low byte and its tail length
+// in the next, so core slices a body without knowing a format's markers. A `//` comment leads with two bytes and trails
 // none, a `/* */` comment leads and trails with two, and a delimited text's comment line leads with one. An attribute's
 // `spelling` has the same layout: it leads through the value's opening quote and trails with the closing one, so its
 // body is the value as written, and a valueless attribute leads with its whole span. Only a comment role is a comment:
@@ -83,6 +85,7 @@ Fact :: struct {
 	node:     Node_Index,
 	n:        u32,
 	role:     Role,
+	kind:     Kind,
 	spelling: u16,
 }
 
@@ -343,9 +346,12 @@ Duplicates :: enum u8 {
 // nil for a format with no attributes, and `attributes_of` is its one caller. `fact` returns a named fact that the
 // node's spelling carries instead of a span, such as a scalar's style or a TOML datetime's tag, and is nil for a format
 // with none, see `fact_value`. `number_text` writes the decimal digits of a number token whose span is not its text, a
-// `Plain` token the format resolves to a number, into `buf` and returns false when `buf` is too short. An infinity or
-// a NaN has no digits and gives an empty text. It is nil for a format whose number span is the text, see
-// `doc_number_text`.
+// binary format's integer, bignum or decimal fraction, or a `Plain` token the format resolves to a number, into `buf`
+// and returns false when `buf` is too short. An infinity or a NaN has no digits and gives an empty text. It is nil for
+// a format whose number span is the text, see `doc_number_text`. `key_bytes` returns the bytes a member named `name`
+// is written with, a key head and the name, in `buf` of `len(name) + 16` bytes, which a typed plan compares as a
+// key's text is compared. It is nil for a format whose keys are written between `key_open` and `key_close`. `binary`
+// says the format holds a byte string kind, so a `String` token is text and never bytes.
 Readers :: struct {
 	text:        proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
 	key_equals:  proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool,
@@ -359,10 +365,12 @@ Readers :: struct {
 	key_open:    string,
 	key_close:   string,
 	flat:        bool,
+	binary:      bool,
 	services:    ^Services,
 	attribute:   proc "contextless" (doc: ^Document, f: Fact) -> (name, value: Token),
 	fact:        proc(doc: ^Document, i: Node_Index, name: Fact_Name) -> (Fact_Value, bool),
 	number_text: proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
+	key_bytes:   proc(name: string, buf: []u8) -> []u8,
 }
 
 // The run-time services of a handle, which a call that chooses its format at run time reaches through
@@ -467,14 +475,16 @@ Fact_Name :: enum u8 {
 	Style,
 }
 
-// A named fact's value: its text.
+// A named fact's value: its text, and `numeric` when the text spells a number, as a CBOR tag does.
 Fact_Value :: struct {
-	text: string,
+	text:    string,
+	numeric: bool,
 }
 
 // Returns the value of node `i`'s fact `name`: the body of its span fact of that role when it holds one (`Tag`, `Anchor`
 // and `Alias`), else what the format's `fact` service reads from the node's spelling. Returns false for a node that has
-// none and for a format with no such service.
+// none and for a format with no such service. A `Number` fact, a binary format's tag, is read by the format's `fact`
+// service when it has one, which gives the tag's digits, in the temp allocator.
 fact_value :: proc(doc: ^Document, i: Node_Index, name: Fact_Name) -> (Fact_Value, bool) {
 	if int(i) >= len(doc.nodes) {
 		return {}, false
@@ -492,7 +502,11 @@ fact_value :: proc(doc: ^Document, i: Node_Index, name: Fact_Name) -> (Fact_Valu
 	if role != .Value && len(doc.facts) > 0 {
 		for f in all_facts(doc, i) {
 			if f.role == role {
-				return {text = string(fact_body(doc, f))}, true
+				// A `Number` fact's span is its encoding, which a format with a `fact` service spells as digits.
+				if f.kind == .Number && doc.readers != nil && doc.readers.fact != nil {
+					break
+				}
+				return {text = string(fact_body(doc, f)), numeric = f.kind == .Number}, true
 			}
 		}
 	}
@@ -1019,10 +1033,11 @@ member_next_shared :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool)
 	return NO_NODE, false
 }
 
-// Returns the decoded text of string or plain node `i`. A node whose `SPELLING_DECODE` bit is clear is its span
-// without its quotes. A node that needs decoding is written into `buf`, and the call returns false when `buf` is too short,
-// which `text_room` bytes never are, and its content is then unspecified. It allocates nothing, so a caller that has no buffer long
-// enough uses `text_clone`. Returns false for a container or a node past the last.
+// Returns the decoded text of string or plain node `i`, or the payload of a byte string. A node whose `SPELLING_DECODE`
+// bit is clear is its span without its quotes. A node that needs decoding is written into `buf`, and the call returns
+// false when `buf` is too short, which `text_room` bytes never are, and its content is then unspecified. It allocates
+// nothing, so a caller that has no buffer long enough uses `text_clone`. Returns false for a container or a node past
+// the last.
 doc_text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool) {
 	if int(i) >= len(doc.nodes) {
 		return "", false
@@ -1036,6 +1051,22 @@ doc_text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: 
 		return string(node_text(doc.src, n)), true
 	}
 	return doc.readers.text(&doc.view, n, buf)
+}
+
+// Returns the payload of byte string `i`. A node whose `SPELLING_DECODE` bit is clear is its span, borrowed from the
+// source. A node that needs joining, a binary format's chunked string, is written into `buf` by the format's `text`,
+// which `text_room` bytes always hold, and the call returns false when `buf` is too short. It allocates nothing.
+// Returns false for any node that is not a byte string.
+doc_bytes :: proc(doc: ^Document, i: Node_Index, buf: []u8) -> (b: []u8, ok: bool) {
+	if int(i) >= len(doc.nodes) || doc.nodes[i].kind != .Bytes {
+		return nil, false
+	}
+	n := doc.nodes[i]
+	if n.spelling & SPELLING_DECODE == 0 {
+		return node_text(doc.src, n), true
+	}
+	s, joined := doc.readers.text(&doc.view, n, buf)
+	return transmute([]u8)s, joined
 }
 
 // Returns the decimal digits of number node `i`, a `Plain` node the format resolves to a number among them: its span
@@ -1287,8 +1318,26 @@ fact_next :: proc(it: ^Fact_Iter) -> (body: string, ok: bool) {
 	return "", false
 }
 
+// Returns fact `f` of the document as the token it came from, so the format's `number` and `text` read it as they read
+// a node.
+fact_token :: #force_inline proc "contextless" (f: Fact) -> Token {
+	return {lo = f.lo, n = f.n, kind = f.kind, role = f.role, spelling = f.spelling}
+}
+
+// Returns the number fact `f` writes, which is a `Number` fact like a CBOR tag, and false for any other fact.
+fact_number :: proc(doc: ^Document, f: Fact) -> (Number, bool) {
+	if f.kind != .Number {
+		return {}, false
+	}
+	return doc.readers.number(&doc.view, fact_token(f))
+}
+
+// A fact that is not `Plain` has no markers: its `spelling` is its token's, and its body is the whole span.
 @(private)
 fact_body :: #force_inline proc(doc: ^Document, f: Fact) -> []u8 {
+	if f.kind != .Plain {
+		return doc.src[f.lo:f.lo + u64(f.n)]
+	}
 	return doc.src[f.lo + comment_lead(f.spelling) : f.lo + u64(f.n) - comment_tail(f.spelling)]
 }
 

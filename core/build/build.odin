@@ -554,7 +554,7 @@ builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: core.Hook_R
 		}
 		h.doc.facts_alloc = fresh
 	}
-	h.doc.facts_alloc[h.n_facts] = core.Fact{lo = t.lo, node = node, n = t.n, role = t.role, spelling = t.spelling}
+	h.doc.facts_alloc[h.n_facts] = core.Fact{lo = t.lo, node = node, n = t.n, role = t.role, kind = t.kind, spelling = t.spelling}
 	h.n_facts += 1
 	if pending && h.pending < 0 {
 		h.pending = h.n_facts - 1

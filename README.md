@@ -1,14 +1,15 @@
 # stury
 
-stury is a JSON, CSV, TOML and YAML library for [Odin](https://odin-lang.org), with a command line, `stury`, that
-runs jq filters over JSON, CSV, TOML and YAML, checks them against JSON Schema, edits them in place and tells what
-differs between two of them.
+stury is a JSON, CSV, TOML, YAML and CBOR library for [Odin](https://odin-lang.org), with a command line, `stury`,
+that runs jq filters over JSON, CSV, TOML, YAML and CBOR, checks them against JSON Schema, edits them in place and
+tells what differs between two of them.
 
 Input is checked strictly by default: JSON against RFC 8259 (no `01`, no `NaN`, no invalid UTF-8, no lone
-surrogate), CSV against RFC 4180, TOML against 1.0 or 1.1, and YAML against 1.2 and its test suite.
+surrogate), CSV against RFC 4180, TOML against 1.0 or 1.1, YAML against 1.2 and its test suite, and CBOR against
+RFC 8949, with its preferred and deterministic encodings on request.
 
-**Status:** pre-1.0. The API may still change between releases. The TOML and YAML packages, models, JSON Schema,
-the value diff, the regex package and the command line's `edit`, `diff` and `schema` are not in a release yet:
+**Status:** pre-1.0. The API may still change between releases. The TOML, YAML and CBOR packages, models, JSON
+Schema, the value diff, the regex package and the command line's `edit`, `diff` and `schema` are not in a release yet:
 [CHANGELOG.md](CHANGELOG.md) lists them under Unreleased.
 
 ## Features
@@ -38,6 +39,8 @@ The library:
 - **TOML and YAML** through the same calls: documents, paths, struct mapping, models and schema checks, edits that
   keep every byte they do not reach, and writers that keep comments. A TOML datetime and a YAML tag or anchor are facts
   of their node, and a YAML stream's documents are records.
+- **CBOR** through the same calls, edits included, with byte strings, tags as facts, integer keys, the preferred and
+  deterministic serializations as specs, a sequence's items as records, and structs written as maps or arrays.
 - **One interface for every format.** A format is a `Spec` passed to the same calls, and every call returns one
   error union.
 - **Regular expressions** in Oniguruma's syntax for jq's functions and in ECMA-262's for a schema's `pattern`, with
@@ -49,14 +52,14 @@ The library:
 The command line:
 
 - It runs jq 1.8 filters with jq's answers and exit codes, and reports faults with their line and column.
-- It reads and writes JSONC, NDJSON, CSV, TSV, TOML and YAML, and reads JSON5.
-- It reads what TOML and YAML hold beside the value: a value's tag, anchor, alias and style (`.@tag`, `.@anchor`,
-  `.@alias`, `.@style`).
+- It reads and writes JSONC, NDJSON, CSV, TSV, TOML, YAML and CBOR, and reads JSON5.
+- It reads what TOML, YAML and CBOR hold beside the value: a value's tag, anchor, alias and style (`.@tag`,
+  `.@anchor`, `.@alias`, `.@style`), a CBOR tag as its number.
 - It validates without running a filter (`stury check`), against a JSON Schema too (`check --schema`), and types a
   filter against the schema of its inputs (`check --filter`).
 - It formats or transcodes files (`stury fmt`), through a schema too (`fmt --schema`).
 - It edits a file with a jq filter and keeps every byte the filter does not change (`stury edit`): JSON, a table,
-  TOML, and each document of a YAML stream as a record.
+  TOML, each document of a YAML stream and each item of a CBOR sequence as a record.
 - It tells the changes between two files or two schemas (`stury diff`).
 - It infers a schema, samples values from one, or writes Odin types for one (`stury schema infer`, `sample`, `gen`).
 
@@ -71,8 +74,8 @@ git clone https://github.com/filip-41/stury vendor/stury
 odin build . -collection:stury=vendor/stury -o:speed
 ```
 
-Then `import "stury:json"`, `import "stury:dsv"` for delimited text, `import "stury:toml"` for TOML, and
-`import "stury:yaml"` for YAML. Each exports the names of `core`, `typed`,
+Then `import "stury:json"`, `import "stury:dsv"` for delimited text, `import "stury:toml"` for TOML,
+`import "stury:yaml"` for YAML, and `import "stury:cbor"` for CBOR. Each exports the names of `core`, `typed`,
 `write`, `records`, `schema` and `host` that a program calls, the schema check included. Models are
 `import model "stury:core/model"`, and schema inference, sampling and comparison are `stury:core/schema`. Keep the
 package directories together. For the [ols](https://github.com/DanielGavin/ols) language server, add the same
@@ -309,7 +312,7 @@ programs are in [examples/](examples). Each prints a fixed answer, and `make tes
 
 `stury` runs [jq](https://jqlang.org) 1.8 filters with jq's results and exit codes. Input is strict JSON by
 default, so `01`, `NaN` and invalid UTF-8 are errors, reported with their line and column. `--from` reads `json`,
-`jsonc`, `json5`, `ndjson`, `csv`, `tsv`, `toml` or `yaml`, and `--to` writes all of them but `json5`. `--alias-limit N` and
+`jsonc`, `json5`, `ndjson`, `csv`, `tsv`, `toml`, `yaml` or `cbor`, and `--to` writes all of them but `json5`. `--alias-limit N` and
 `--merge-keys` set how YAML is read.
 
 ```sh
@@ -459,7 +462,8 @@ how a filter is run.
   under since. [bench/README.md](bench/README.md) describes the harness.
 - Internals, for contributors, one file per part: [walk](docs/walk.md), [document](docs/document.md),
   [paths](docs/paths.md), [typed reads](docs/typed.md), [writer](docs/writer.md), [records](docs/records.md),
-  [kernel](docs/kernel.md) and [hot paths](docs/hotpaths.md).
+  [kernel](docs/kernel.md) and [hot paths](docs/hotpaths.md), and [CBOR](docs/binary.md), the format with a page of
+  its own.
 
 ## Packages
 
@@ -469,6 +473,7 @@ how a filter is run.
 | `dsv` | the `Csv`, `Tsv` and `Plain` specs, with the same calls |
 | `toml` | the `Toml_1_0` and `Toml_1_1` specs, with the same calls |
 | `yaml` | the `Yaml_1_2` spec, with the same calls and a stream's documents as records |
+| `cbor` | the `Cbor`, `Preferred`, `Deterministic` and `Length_First` specs, with the same calls |
 | `core/model` | models: rules on an Odin type, `load`, `validate`, `patch`, `dump`, problem documents and the schema of a model |
 | `core/schema` | JSON Schema: compiling, binding and checking a schema, `infer`, `sample`, `compare`, `convert`, and the Odin types of a schema |
 | `core/rules` | the description of the values a node allows, which an Odin type, a model, a JSON Schema and inference give, and the string formats |

@@ -366,7 +366,7 @@ spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_N
 			case .Nan:
 				return {text = "nan"}, true
 			}
-		case .Null, .False, .True, .Plain, .End, .Array, .Object:
+		case .Null, .False, .True, .Bytes, .Plain, .End, .Array, .Object:
 		}
 	case .Anchor, .Alias:
 	}

@@ -313,6 +313,7 @@ unmarshal_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: 
 validate_closed :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, at: u64, base: uintptr) -> bool
 visit_closed :: proc(plan: ^Plan, end: ^Field, base: uintptr, path: []core.Step, first: ^core.Typed_Refusal, sink: ^Sink, floor: int) -> bool
 # core/write
+Binary_Options :: struct { positional: bool, length_first: bool, }
 LINE_ROOM :: 1024
 Report :: struct { file: string, records: bool, truncated: bool, }
 Scratch :: runtime.Arena
@@ -328,10 +329,16 @@ holds_null :: proc(m: ^typed.Meta, kind: typed.Read_Kind, v: uintptr) -> bool
 init :: proc(out: ^Out, spill: ^[ROOM_MAX]u8, allocator := context.allocator, stream := io.Stream{}, hint := 0)
 int_text :: proc(p: [^]u8, kind: typed.Read_Kind, v: uintptr) -> int
 marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, $T: Tree, $put, $put_opted: Put, omits: ^typed.Omits) -> ([]u8, core.Typed_Refusal)
+marshal_binary :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, omits: ^typed.Omits, binary: Binary_Options, $T: Tree, $put: Put) -> ([]u8, core.Typed_Refusal)
+marshal_binary_into :: proc(out: ^Out, plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, omits: ^typed.Omits, binary: Binary_Options, err: ^core.Typed_Refusal, $T: Tree, $put: Put) -> core.Typed_Error_Kind
+node_bytes_text :: proc(doc: ^core.Document, node: core.Node_Index, stack: []u8) -> (text: string, ok: bool)
 node_number_text :: proc(doc: ^core.Document, node: core.Node_Index, stack: []u8) -> (text: string, ok: bool)
 number_text :: proc(p: [^]u8, n: core.Number) -> (size: int, kind: core.Typed_Error_Kind)
+put_binary_number :: proc(out: ^Out, n: core.Number, $T: Tree) -> core.Typed_Error_Kind
+put_binary_number_text :: proc(out: ^Out, s: string, $T: Tree) -> core.Typed_Error_Kind
 put_byte :: #force_inline proc(out: ^Out, b: u8)
 put_decimal :: proc(out: ^Out, lit: string, spelling: u16) -> core.Typed_Error_Kind
+put_head :: #force_inline proc "contextless" (p: [^]u8, n: u64, $T: Tree, $h: Head) -> int #no_bounds_check
 put_line :: proc(out: ^Out, opts: core.Write_Options, depth: int)
 put_number :: proc(out: ^Out, n: core.Number) -> core.Typed_Error_Kind
 put_number_as :: proc(out: ^Out, n: core.Number, $T: Tree) -> core.Typed_Error_Kind
@@ -383,3 +390,6 @@ header_span :: proc(src: []u8, as: core.As) -> (lo, hi: int)
 # yaml
 Detail :: enum u8 { None, Cut_Utf8, Invalid_Utf8, Control_Char, Expected_Line_End, Duplicate_Directive, Bad_Directive, Bad_Version, Expected_Document_Start, Unexpected_Content, Duplicate_Property, Bad_Tag, Undeclared_Handle, Bad_Anchor, Undefined_Alias, Alias_Cycle, Alias_Limit, Open_String, Bad_Codepoint, Marker_In_Scalar, Bad_Indent, Tab_Indent, Bad_Block_Header, Block_In_Line, Multiline_Key, Key_Too_Long, Bad_Start, Expected_Colon, Expected_Value, Expected_Comma, Open_Collection, Alias_Property, Duplicate_Key, Extra_Document, No_Document, Complex_Key, Tag_Mismatch, }
 RULES := core.Rules{"yaml", {
+# cbor
+Detail :: enum u8 { None, Reserved_Info, Bad_Simple, Bad_Break, Bad_Chunk, Invalid_Utf8, Bad_Key, Bad_Tag_Content, Count_Too_Large, Trailing, No_Item, Not_Preferred, Key_Order, Bad_Nan, }
+RULES := core.Rules{"cbor", {

@@ -25,6 +25,7 @@ TREE :: write.Tree {
 	.Inf          = "",
 	.Neg_Inf      = "",
 	.Nan          = "",
+	.Heads        = "",
 	.Bytes_Tag    = "",
 }
 

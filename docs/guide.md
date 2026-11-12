@@ -1,17 +1,18 @@
 # Library guide
 
-How to use `stury:json`, `stury:dsv`, `stury:toml` and `stury:yaml`, with snippets from the programs in [examples/](../examples). A
-program imports the package of its format and calls everything through it. Each public name's doc comment is its contract, and
+How to use `stury:json`, `stury:dsv`, `stury:toml`, `stury:yaml` and `stury:cbor`, with snippets from the programs in
+[examples/](../examples). A program imports the package of its format and calls everything through it. Each public
+name's doc comment is its contract, and
 [API.txt](../API.txt) lists the names of the format packages, then the names a format's author reads.
 [API_SHARED.txt](../API_SHARED.txt) lists the public names that only the packages of this repository use. The files in this
 directory describe one part each: [document.md](document.md), [paths.md](paths.md), [typed.md](typed.md),
-[writer.md](writer.md) and [records.md](records.md).
+[writer.md](writer.md) and [records.md](records.md), and [binary.md](binary.md) describes CBOR.
 
 ## Requirements
 
 - Odin `dev-2026-11` or later. The collection is named `stury` and points at this directory: `-collection:stury=.`.
-  A program imports the package of each format it reads, `stury:json`, `stury:dsv`, `stury:toml` or `stury:yaml`. Each
-  exports the names of `stury:core`,
+  A program imports the package of each format it reads, `stury:json`, `stury:dsv`, `stury:toml`, `stury:yaml` or
+  `stury:cbor`. Each exports the names of `stury:core`,
   `stury:core/typed`, `stury:core/write`, `stury:core/records`, `stury:core/schema` and `stury:host` that a user calls.
 - 64-bit little-endian targets: darwin and linux, on amd64 and arm64. The command line also builds on Windows.
 - On amd64 the floor is x86-64-v2. Long strings are scanned wider on processors that have AVX-512BW, chosen at run
@@ -26,6 +27,7 @@ directory describe one part each: [document.md](document.md), [paths.md](paths.m
 | `dsv` | the delimited formats, the same calls and names |
 | `toml` | TOML 1.0 and 1.1: the same calls, edits that keep every byte they do not reach, and `marshal` and `unmarshal` on the `toml` tag. A datetime is a string whose `Tag` fact names its type |
 | `yaml` | YAML 1.2 with the core schema: the same calls, edits, a stream's documents as records, and a writer that keeps comments, tags, anchors and scalar styles |
+| `cbor` | CBOR (RFC 8949): the encoding rules, documents, paths, a sequence's items as records, `marshal`, `unmarshal`, the writer and the checks. A byte string is `Kind.Bytes` |
 | `core` | what every format shares, and the interface a format's author or a run-time choice of format uses: `As`, `build` and `validate` over a handle |
 | `core/records` | NDJSON, RFC 7464 and CSV-style text as a sequence of records, reached as `records_check`, `records_open`, `records_open_stream`, `records_next`, `records_each` and the writer |
 | `core/typed` | plans and the options of a typed read |
@@ -40,7 +42,9 @@ A format is a `Spec` value passed to each call. `json.Spec` is `.Json`, `.Jsonc`
 `.Tsv` or `.Plain`. `.Json` is strict RFC 8259. `.Jsonc` also takes comments and trailing commas, and `.Json5` takes the
 JSON5 grammar. A call that takes both a `Spec` and `Options` reads `Options` for the format's own settings, which for
 JSON are `max_depth`, `tolerate` and `refuse_non_finite`, and for dsv `no_header`, `delimiter`, `comment`, `tolerate`, `crlf` and `infer`.
-`toml.Spec` is `.Toml_1_0` or `.Toml_1_1`, and `yaml.Spec` is `.Yaml_1_2`.
+`toml.Spec` is `.Toml_1_0` or `.Toml_1_1`, and `yaml.Spec` is `.Yaml_1_2`. `cbor.Spec` is `.Cbor`, `.Preferred`,
+`.Deterministic` or `.Length_First`: `.Cbor` reads every well-formed item, and the others also refuse an item not in
+that serialization.
 
 ## Errors
 
@@ -283,7 +287,7 @@ document is.
 
 ### One answer at a time
 
-`json.answers`, `dsv.answers` and `yaml.answers` read a path's answers as the scan reaches them, with no document, and `next` gives
+`json.answers`, `dsv.answers`, `yaml.answers` and `cbor.answers` read a path's answers as the scan reaches them, with no document, and `next` gives
 them in a loop. Each answer is a `Token_Answer` whose `lo` and `hi` bound its value in the text. The read starts at the
 first `next` and walks a batch of answers at a time, from 1 doubling up to `max_batch`, so a loop that ends early has
 read little past what it took. A fault comes after every answer read before it, in `it.err` once the loop ends. A loop
@@ -303,11 +307,11 @@ if it.err != nil {
 }
 ```
 
-`json.each_answer`, `dsv.each_answer` and `yaml.each_answer` give the same answers to a callback instead. `toml.answers`
+`json.each_answer`, `dsv.each_answer`, `yaml.each_answer` and `cbor.each_answer` give the same answers to a callback instead. `toml.answers`
 takes the same arguments and builds the text at the first `next`, as every path read of TOML does, then gives its
 answers in batches.
 
-The iterator rides on a walk cursor. `json.walk`, `dsv.walk`, `yaml.walk` and `toml.walk` take a `^Cursor`: a hook that returns
+The iterator rides on a walk cursor. `json.walk`, `dsv.walk`, `yaml.walk`, `toml.walk` and `cbor.walk` take a `^Cursor`: a hook that returns
 `.Stop` saves where the walk stood, and `walk_resume` continues from there over the same text, with every token after
 the stop delivered as an unbroken walk delivers it. A json cursor resumes after any token. A dsv cursor resumes after a
 record's end and holds the header's cells in `cursor.keys`, the caller's storage. A yaml cursor resumes after any token
@@ -315,8 +319,9 @@ of a document: its walk reads on past the stop to the end of the block node or f
 gives the tokens it held first, a fault met on the way after them. It keeps that state on the heap until a walk ends,
 so `yaml.destroy(&cursor)` frees a cursor left holding a stop. A toml cursor resumes after any token: the walk reads the
 whole text into its tables before the first token, and a stop keeps those tables and where the walk stood on the heap
-until a resume ends the walk or `toml.destroy(&cursor)` frees them. `can_resume` says whether a cursor holds a stop, and a
-resume on another text is refused with `.Bad_Option`.
+until a resume ends the walk or `toml.destroy(&cursor)` frees them. A cbor cursor resumes after any token: a stop keeps
+the walk's open containers and where it stood on the heap, and `cbor.destroy(&cursor)` frees a cursor left holding one.
+`can_resume` says whether a cursor holds a stop, and a resume on another text is refused with `.Bad_Option`.
 
 ## Build a document
 
@@ -400,10 +405,10 @@ defer delete(committed)
 In a dsv document, removing a cell from every row drops its column, header included. `dsv.set` and `dsv.commit` edit a
 table the same way.
 
-`toml.set`, `yaml.set` and their edit lists edit those formats the same way, and each commits its edits itself, since a
-TOML table and a YAML block collection are not one range of bytes. The result is read again by the format's walk, so an
-edit that breaks a rule of the language is `.Bad_Result`, and an edit the format cannot make is a `.Frozen` error whose
-message names the reason.
+`toml.set`, `yaml.set`, `cbor.set` and their edit lists edit those formats the same way, and each commits its edits
+itself, since a TOML table, a YAML block collection and a CBOR container's count are not one range of bytes. The result
+is read again by the format's walk, so an edit that breaks a rule of the language is `.Bad_Result`, and an edit the
+format cannot make is a `.Frozen` error whose message names the reason.
 
 - TOML: a scalar or an inline value is replaced in place, a new member is a line after its table's last line and before
   its sub-tables, a built table or array of tables is a section after the last section of the table it joins, and a
@@ -429,12 +434,13 @@ Comments are facts attached to a node, with a role of `Comment`, `Comment_Inline
 
 ### Facts
 
-YAML holds a node's type tag, anchor and alias (`!!str`, `&a` and `*a`) as facts of the roles `Tag`, `Anchor` and
-`Alias`, which stand just before the node. `set_fact` and `remove_fact` take them, one non-empty line a body. TOML
-refuses them, and a commit in a format that holds none counts one in `dropped`. A fact the node's spelling carries
-instead of a span is read by name: `fact_value(&doc, node, .Style)` gives how a scalar or a collection is written
-(TOML's `literal` or `hex`, YAML's `plain`, `double`, `folded` or `flow`), and `.Tag` a node's tag or a TOML datetime's
-type (`date-local`, `datetime`).
+A format that marks a node with a type tag, an anchor or an alias (YAML's `!!str`, `&a` and `*a`, CBOR's tags) holds
+them as facts of the roles `Tag`, `Anchor` and `Alias`, which stand just before the node. `set_fact` and `remove_fact`
+take them, one non-empty line a body, in YAML, which spells them. TOML refuses them, and a commit in a format that holds
+none counts one in `dropped`. A fact the node's spelling carries instead of a span is read by name:
+`fact_value(&doc, node, .Style)` gives how a scalar or a collection is written (TOML's `literal` or `hex`, YAML's
+`plain`, `double`, `folded` or `flow`), and `.Tag` a node's tag or a TOML datetime's type (`date-local`,
+`datetime`).
 
 ## Write
 
@@ -513,7 +519,8 @@ rules and the Reader contract.
 Under `.Entries` the records are the elements or members of the root, or of the container the `entries` path of object
 keys names: `json.records_open(src, .Json, framing = .Entries, entries = {"data"})` reads the items of `{"data": [...]}`,
 and `Record_Stream_Options.entries` does the same on a stream, which gives each record as it reads it. A YAML stream's
-documents are its records, read with `yaml.records_open` under `.Concatenated`.
+documents are its records, read with `yaml.records_open`, and so are the items of a CBOR sequence, with
+`cbor.records_open`, both under `.Concatenated`.
 
 ## Delimited text
 
@@ -645,6 +652,42 @@ fmt.print(string(out)) // replicas: 5 # scaled by hand, and the rest as it was
 - `yaml.plan_of` builds the plan of a `rules.Description`, as `json.plan_of` does.
 - `yaml.checks(.Yaml_1_2)` gives a model the format, `yaml.bind_schema` binds a JSON Schema, and a typed read of a
   built node reads its plain scalars as the core schema types them.
+
+## CBOR
+
+`cbor` reads and writes CBOR (RFC 8949) through the calls of the text formats. [binary.md](binary.md) lists what
+differs.
+
+```odin
+Reading :: struct {
+	sensor: string,
+	value:  f64,
+	raw:    cbor.Bytes,
+}
+
+src := cbor.marshal(Reading{sensor = "t1", value = 21.5, raw = {1, 2, 3}}, allocator = context.temp_allocator) or_return
+cbor.validate(src, .Preferred) or_return
+doc := cbor.build(src, .Cbor) or_return
+defer cbor.destroy(&doc)
+raw, _ := cbor.member(&doc, cbor.ROOT, "raw")
+buf: [16]u8
+payload, _ := cbor.doc_bytes(&doc, raw, buf[:])
+fmt.println(cbor.kind(&doc, raw), payload) // Bytes [1, 2, 3]
+as_json, dropped := json.write(&doc, .Json) or_return
+fmt.println(string(as_json), dropped) // {"sensor":"t1","value":21.5,"raw":"AQID"} 0
+```
+
+- `.Preferred`, `.Deterministic` and `.Length_First` refuse an item not encoded as RFC 8949 sections 4.1 and 4.2 ask,
+  and a write in that spec writes it so. The value a read gives does not change.
+- `cbor.set(src, .Preferred, path, 22.0)` writes the item again with the value replaced, copying the bytes of every item
+  the edit does not reach. A container an edit reaches is written with its new count, and its head keeps its width
+  under `.Cbor` where the count fits.
+- A map key is an integer, a text string or a byte string. An integer key reads as its digits, so `.["1"]` reads key 1,
+  and `1` and `"1"` are one key.
+- A tag is a fact: `fact_value(&doc, node, .Tag)` gives the nearest tag's number. A byte string written as JSON is
+  base64 text, and a tag is dropped and counted in `dropped`.
+- `cbor.marshal` writes a struct as a map, or as an array under `Options{structs = .Array}`, and `unmarshal` reads
+  either form.
 
 ## One program, several formats
 

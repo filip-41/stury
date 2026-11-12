@@ -62,7 +62,7 @@ matches :: proc(doc: ^core.Document, i: core.Node_Index, want: json.Value, why: 
 			}
 		}
 		return true
-	case .True, .False, .Null, .String, .Number, .Plain, .End:
+	case .True, .False, .Null, .String, .Number, .Bytes, .Plain, .End:
 		return scalar_matches(doc, i, want, why)
 	}
 	return false
@@ -100,7 +100,7 @@ scalar_matches :: proc(doc: ^core.Document, i: core.Node_Index, want: json.Value
 		return true
 	case .Number:
 		return number_matches(doc, i, type, value, why)
-	case .Null, .Plain, .End, .Array, .Object:
+	case .Null, .Bytes, .Plain, .End, .Array, .Object:
 	}
 	return false
 }

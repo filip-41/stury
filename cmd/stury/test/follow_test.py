@@ -141,6 +141,7 @@ def main():
             (["-n", path], "cannot be combined with --null-input"),
             (["--stream", path], "cannot be combined with --stream"),
             (["--from", "json5", path], "--follow reads records"),
+            (["--from", "cbor", path], "--follow reads lines"),
         ):
             done = subprocess.run([exe, "--follow", ".", *args], capture_output=True, text=True)
             assert done.returncode == 2 and message in done.stderr, (args, done.returncode, done.stderr)

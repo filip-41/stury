@@ -365,9 +365,9 @@ Edit_Span :: struct {
 // gaps the file has at those places, so its line ends and separators stay. Output `j` takes the gap before record `j`,
 // which is known once that record is read, so an output past the records read so far waits. A gap past the file's own
 // is its last gap between records, or past a file's one record its line end and a record separator under `--seq`.
-// A stream's document starts on a line of its own, after a line end the joiner adds when the text before it lacks one,
-// and one after the first starts with a `---` line, which the joiner adds when the document has none. A stream of no
-// document, a text of comments, is kept as it is.
+// A stream of a format that parts its texts, YAML's, has each document start on a line of its own, after a line end the
+// joiner adds when the text before it lacks one, and one after the first start with a `---` line, which the joiner adds
+// when the document has none. A stream of no document, a text of comments, is kept as it is.
 @(private = "file")
 Edit_Joiner :: struct {
 	src:     []u8,
@@ -386,9 +386,9 @@ Edit_Text :: struct {
 }
 
 @(private = "file")
-edit_joiner :: proc(src: []u8, framing: core.Framing) -> Edit_Joiner {
+edit_joiner :: proc(src: []u8, framing: core.Framing, format: Format) -> Edit_Joiner {
 	heap := runtime.heap_allocator()
-	return {src = src, seq = framing == .Seq, stream = framing == .Concatenated, out = make([dynamic]u8, 0, len(src), heap), waiting = make([dynamic]Edit_Text, heap)}
+	return {src = src, seq = framing == .Seq, stream = framing == .Concatenated && FORMATS[format].parted != nil, out = make([dynamic]u8, 0, len(src), heap), waiting = make([dynamic]Edit_Text, heap)}
 }
 
 @(private = "file")
@@ -498,7 +498,7 @@ edit_records :: proc(er: ^Edit_Run, path: string) -> int {
 		delete(r.spans)
 		delete(r.lines_at)
 	}
-	join := edit_joiner(src, ins.framing)
+	join := edit_joiner(src, ins.framing, ins.format)
 	defer edit_joiner_destroy(&join)
 	slurp := er.run.opts.slurp
 	if !slurp {
@@ -793,7 +793,7 @@ edit_lines :: proc(er: ^Edit_Run, path: string) -> int {
 	src := ins.data
 	heap := runtime.heap_allocator()
 	r := Edit_Line_Reader{ins = ins, spans = make([dynamic]Edit_Span, heap)}
-	join := edit_joiner(src, .Lines)
+	join := edit_joiner(src, .Lines, ins.format)
 	defer {
 		delete(r.spans)
 		edit_joiner_destroy(&join)

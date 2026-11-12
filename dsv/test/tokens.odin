@@ -371,7 +371,7 @@ spans :: proc(src: []u8, t: core.Token, tsv: bool, tol := bit_set[core.Tolerance
 		return t.n == 0 && t.role == .Value
 	case .End:
 		return string(b) == "" || string(b) == "\n" || string(b) == "\r\n"
-	case .Null, .False, .True, .Number, .String:
+	case .Null, .False, .True, .Number, .String, .Bytes:
 	}
 	return false
 }

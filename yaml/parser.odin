@@ -364,7 +364,7 @@ emit_raw :: proc(p: ^Parser, t: core.Token) -> bool {
 			complete_anchor(p, pop(&p.open).anchor)
 		}
 		p.tdepth -= 1
-	case .Null, .False, .True, .Number, .String, .Plain:
+	case .Null, .False, .True, .Number, .Bytes, .String, .Plain:
 		if p.tag.n != 0 {
 			check_tag(p, t) or_return
 		}

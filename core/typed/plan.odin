@@ -10,6 +10,7 @@ import "core:mem/virtual"
 import "core:reflect"
 import "core:slice"
 import "core:strings"
+import "core:unicode/utf8"
 import core ".."
 import rules "../rules"
 
@@ -80,6 +81,10 @@ Field :: struct {
 // The longest key text a write stores in line. A longer one is written through the format's string writer.
 KEY_SIZE_MAX :: 240
 
+// The longest head a `Readers.key_bytes` writes before a name.
+@(private)
+KEY_HEAD_MAX :: 9
+
 // What only the cold paths read, indexed like `Plan.fields`.
 Meta :: struct {
 	name:       string,
@@ -114,6 +119,7 @@ Meta :: struct {
 	counted:    bool, // on a checked object's record, its leaf bounds how many members the object holds
 	judged:     bool, // a model's record of a type it judges past its rules, which a visit calls its visitor at
 	rule_set:   i32, // 1 + the record's leaf in `Plan.leaves`, and for a type's plan its set in `Plan.rule_sets`, 0 for none
+	omits:      bool, // on a struct's `Never` record, some member is `omit`, so a head that counts the members written counts them first
 }
 
 // What a model or a check reads of a record, and the hooks, in `Plan_Ext.extra`, which is empty for a plan with none, so a record of
@@ -440,8 +446,10 @@ Plan :: struct {
 	// The format, and for a format whose writer reads them, the spec and option bytes a write by the plan takes.
 	using as:  core.As,
 	type:      typeid,
-	// What a key's writing adds to its name, `Field.n` less the name's length.
+	// What a key's writing adds to its name, `Field.n` less the name's length: at least `key_frame`, and at most
+	// `key_slack` more for a format whose key head grows with the name.
 	key_frame: u32,
+	key_slack: u32,
 	model_plan: Model_Plan,
 	// The name bytes of records and of renamed or unescaped names, and the enums a model renames with their names.
 	strings:   [dynamic]string,
@@ -763,6 +771,9 @@ plan_has_value :: proc(p: ^Plan) -> bool {
 plan_start :: proc(b: ^Builder, trail: ^[TRAIL_MAX]string, p: ^Plan, as: core.As, opts: Plan_Options) {
 	readers := as.readers
 	p^ = {ext = &NO_EXT, as = as, key_frame = u32(len(readers.key_open) + len(readers.key_close)), allocator = context.allocator}
+	if readers.key_bytes != nil {
+		p.key_frame, p.key_slack = 1, KEY_HEAD_MAX - 1
+	}
 	if services := readers.services; services != nil {
 		if reads := (^Format_Reads)(services.reads); reads != nil {
 			p.read, p.check, p.node_read, p.node_check = reads.read, reads.check, reads.node_read, reads.node_check
@@ -974,22 +985,39 @@ owned_copy :: proc(b: ^Builder, s: string) -> string {
 expect_name :: proc(b: ^Builder, f: ^Field, name: string) {
 	f.mask = {max(u64), max(u64)}
 	open, close := b.p.readers.key_open, b.p.readers.key_close
-	if len(open) == 0 || len(name) == 0 {
+	keyed := b.p.readers.key_bytes
+	if (len(open) == 0 && keyed == nil) || len(name) == 0 {
 		return
 	}
-	for i in 0 ..< len(name) {
-		if name[i] < 0x20 || name[i] == '"' || name[i] == '\\' || name[i] >= 0x80 {
+	n: int
+	buf: []u8
+	if keyed != nil {
+		// A name that is no UTF-8 has no key a walk of the format accepts, so the hook's lookup refuses it.
+		if !utf8.valid_string(name) {
 			return
 		}
+		made, failed := make([]u8, len(name) + 16)
+		if failed != nil {
+			refuse_plan(b, .No_Memory)
+			return
+		}
+		buf, n = made, len(keyed(name, made))
+	} else {
+		for i in 0 ..< len(name) {
+			if name[i] < 0x20 || name[i] == '"' || name[i] == '\\' || name[i] >= 0x80 {
+				return
+			}
+		}
+		n = len(open) + len(name) + len(close)
+		made, failed := make([]u8, max(n, 16))
+		if failed != nil {
+			refuse_plan(b, .No_Memory)
+			return
+		}
+		buf = made
+		copy(buf[copy(buf, open):], name)
+		copy(buf[len(open) + len(name):], close)
 	}
-	n := len(open) + len(name) + len(close)
-	buf, failed := make([]u8, max(n, 16))
-	if failed != nil {
-		refuse_plan(b, .No_Memory)
-		return
-	}
-	copy(buf[copy(buf, open):], name)
-	copy(buf[len(open) + len(name):], close)
 	f.word, f.mask = {}, {}
 	for i in 0 ..< min(n, 16) {
 		f.word[i / 8] |= u64(buf[i]) << uint(8 * (i % 8))
@@ -1633,6 +1661,9 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 		bit += 0 if rule.access == .Read_Only else 1
 		// A model's write may leave out a member that can be null, has a default or whose struct records its loaded members.
 		r.omit = x.omit || x.omit_unset || b.model != nil && !b.model.loading && (!x.required || layout.fields_set != 0 || nullable(x.type))
+		if r.omit {
+			b.meta[int(at) + n].omits = true
+		}
 		if !r.omit && r.n <= KEY_SIZE_MAX && plain_name(x.name) {
 			r.key_size = u8(r.n)
 		}

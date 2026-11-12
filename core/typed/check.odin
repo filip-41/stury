@@ -437,7 +437,8 @@ frame_push :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs,
 	f := &h.frames[h.sp]
 	h.sp += 1
 	f.a, f.b, f.c, f.seen, f.run, f.extra = regs.a, regs.b, regs.c, 0, nil, nil
-	f.data, f.kind, f.owner, f.target = rawptr(uintptr(t.lo)), t.kind, nil, 0
+	lo, _ := value_ends(h, t)
+	f.data, f.kind, f.owner, f.target = rawptr(uintptr(lo)), t.kind, nil, 0
 	return f
 }
 
@@ -530,6 +531,9 @@ scalar_fails :: #force_inline proc "contextless" (h: ^Check, t: core.Token, l: ^
 		ok = .Null in l.kinds
 	case .True, .False:
 		ok = .Bool in l.kinds
+	case .Bytes:
+		// A byte string is a string to a description, and no rule of a text judges its payload.
+		ok = .String in l.kinds
 	case .String:
 		ok = .String in l.kinds
 		if l.has_enum || l.min_length > 0 || l.max_length < max(u64) || l.pattern != nil || l.formats != {} {
@@ -660,7 +664,7 @@ check_ends :: #force_inline proc "contextless" (h: ^Check, t: core.Token) -> (lo
 	if h.plan.readers.flat {
 		return t.lo, t.lo + u64(t.n)
 	}
-	return core.scalar_ends(t)
+	return value_ends(h, t)
 }
 
 // The text a decoded string up to this long is decoded into on the stack. A longer one goes to the temp allocator.

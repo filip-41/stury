@@ -315,6 +315,23 @@ bytes_text :: proc(b: []u8, stack: []u8) -> (text: string, ok: bool) {
 	return string(buf[:spell.base64_put(buf, b)]), true
 }
 
+// Returns the base64 text of byte string `node`, as `bytes_text` does for its payload.
+node_bytes_text :: proc(doc: ^core.Document, node: core.Node_Index, stack: []u8) -> (text: string, ok: bool) {
+	joined: []u8
+	if int(node) < len(doc.nodes) && doc.nodes[node].spelling & core.SPELLING_DECODE != 0 {
+		made, err := make([]u8, core.text_room(doc, node), context.temp_allocator)
+		if err != nil {
+			return "", false
+		}
+		joined = made
+	}
+	payload, found := core.doc_bytes(doc, node, joined)
+	if !found {
+		return "", false
+	}
+	return bytes_text(payload, stack)
+}
+
 // Returns the decimal digits of number `node` as its format spells them, in `stack` when they fit and else in
 // `context.temp_allocator`, with false when the node is no number or an allocation is refused.
 node_number_text :: proc(doc: ^core.Document, node: core.Node_Index, stack: []u8) -> (text: string, ok: bool) {

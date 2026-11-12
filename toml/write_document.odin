@@ -296,6 +296,13 @@ inline_start :: proc(l: ^Layout, opens: ^[dynamic]Inline_Open, node: core.Node_I
 	case .False:
 		write.put_text(&l.out, "false")
 		return .None
+	case .Bytes:
+		stack: [512]u8
+		text, ok := write.node_bytes_text(l.doc, node, stack[:])
+		if !ok {
+			return .No_Memory
+		}
+		return put_basic(&l.out, text, l.opts)
 	case .Null, .Plain, .End:
 		return .Unwritable
 	}

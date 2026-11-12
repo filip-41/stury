@@ -167,6 +167,14 @@ put_node :: proc(t: ^Tokens, r: core.Node_Ref) -> core.Typed_Error_Kind {
 		}
 		n, _ := core.number(r)
 		return value(t, n)
+	case .Bytes:
+		// A payload in chunks is joined in the temp allocator.
+		joined: []u8
+		if room := core.text_room(r.doc, r.node); room > 0 {
+			joined = make([]u8, room, context.temp_allocator) or_else nil
+		}
+		payload, held := core.doc_bytes(r.doc, r.node, joined)
+		return value_bytes(t, payload) if held else .No_Memory
 	case .String:
 		return value_string(t, core.node_string(r.doc, r.node))
 	case .Array:

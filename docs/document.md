@@ -38,6 +38,7 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `yaml/resolve.odin` | YAML's core schema: `resolve`, `number`, the `Style` fact |
 | `yaml/keys.odin` | the repeat test of a mapping's keys, by decoded text |
 | `yaml/edit.odin`, `edit_place.odin`, `edit_facts.odin` | YAML's edit services and its own commit, the sites of new lines, and property and comment edits |
+| `cbor/document.odin`, `cbor/bound.odin` | CBOR's handle and its bound readers: `number`, `number_text`, `key_bytes`, the tag fact |
 
 ## The node
 
@@ -50,8 +51,10 @@ A node is a 16-byte `Token` from `core/walk.odin`: `lo`, `n`, `kind`, `role` and
   node more than the value's subtree holds.
 - A container's `spelling` is its child count, where a member counts once, not its key and its value. The count
   saturates at `MAX_CHILDREN`, and `Document.counts` holds the true count of every container that does.
-- A JSON key is a node of its own, kind `String` and role `Key`, directly before its value, and so is a TOML or YAML
-  key. A dsv record stores no key node: its columns' keys are the cells of the header row.
+- A JSON key is a node of its own, kind `String` and role `Key`, directly before its value, and so is a TOML, YAML
+  or CBOR key. A dsv record stores no key node: its columns' keys are the cells of the header row.
+- A `Bytes` node is a binary format's byte string, whose span is its payload, or the chunks of it when
+  `SPELLING_DECODE` is set.
 - `Node_Index` is a node's index in `nodes`, distinct from `u32` so an index cannot be passed where a count or a byte
   offset goes. Readers, iterators, `Fact.node`, `Child_Count.node` and `Edit.node` take it. `ROOT` is node 0, the root
   value's node. `NO_NODE` is `Node_Index(max(u32))` and answers a miss, and every reader treats an index at or past
@@ -196,6 +199,7 @@ A reader given an index no node holds answers as it does for a node of the wrong
 | Reader | Returns | Miss | Wrong kind |
 |---|---|---|---|
 | `kind` | the node's `Kind`, a `Plain` cell's as the format reads it | `.Null` | its own kind |
+| `doc_bytes` | the payload of a `Bytes` node | nil, false | nil, false |
 | `doc_number_text` | the decimal digits of a number node | "", false | "", false |
 | `fact_value` | a named fact of the node | false | false |
 | `span` | the node's source bytes | nil | its own bytes |
@@ -282,12 +286,20 @@ is its source is copied, and a decode's over-long buffer is trimmed, so `len(s)`
 that has a buffer reads through `text` first and falls back to `text_clone` only for a text too long for it.
 
 ```odin
+doc_bytes       :: proc(doc: ^Document, i: Node_Index, buf: []u8) -> (b: []u8, ok: bool)
 doc_number_text :: proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool)
 ```
 
+`doc_bytes` returns the payload of a `Bytes` node, the byte string a binary format gives. A payload that needs no
+joining is its span, borrowed from the source. One a format holds in chunks has `SPELLING_DECODE` set, and the format's
+`text` writes it joined into `buf`, which `text_room` bytes always hold, so the call allocates nothing and returns false
+when `buf` is too short. `doc_bytes` refuses every other kind, and `text` and `text_clone` read a `Bytes` node as they
+read a string, its payload as a string. A text format spells bytes only as the base64 string a writer makes of them.
+
 `doc_number_text` returns a number node's decimal digits, a `Plain` node the format resolves to a number included: its
 span for a format whose number span is the text, else what the format's `Readers.number_text` writes into `buf`, as
-YAML does for a number whose text is not a decimal. An infinity or a NaN gives an empty text.
+YAML does for a number whose text is not a decimal and CBOR for a binary integer, a bignum or a decimal fraction. An
+infinity or a NaN gives an empty text.
 
 `number(doc, i)` returns a 16-byte `Number`, `bits` and `kind`, decoded from the node's span when it is read, and
 whether the node is a number. The
@@ -339,12 +351,14 @@ and `Edit_Services.value` takes one too.
 | `resolves` | nil, no `Plain` nodes | the handle's `infer`: without it a cell with bytes is `.String`, so a writer asks `resolve` only of an empty cell |
 | `close_end` | forward over trivia and inner closes | a record's line end, the text's end for the root |
 
-The slots past these are nil in JSON and serve the formats that need them:
+The slots past these are nil in JSON and dsv and serve the other formats:
 
 | Reader | Says | Set by |
 |---|---|---|
-| `fact` | a named fact the node's spelling carries instead of a span: a scalar's `Style`, a TOML datetime's `Tag` | toml, yaml |
-| `number_text` | the decimal digits of a number token whose span is not its text, empty for an infinity or a NaN | yaml |
+| `fact` | a named fact the node's spelling carries instead of a span: a scalar's `Style`, a TOML datetime's `Tag`, a CBOR tag's digits | toml, yaml, cbor |
+| `number_text` | the decimal digits of a number token whose span is not its text, empty for an infinity or a NaN | yaml, cbor |
+| `key_bytes` | the bytes a member named `name` is written with, which a typed plan compares as it compares `key_open + name + key_close` | cbor |
+| `binary` | the format has a byte string kind, so a `String` token is never bytes | cbor |
 | `flat` | the text has no brackets, so no container has bytes of its own | dsv |
 
 A handle's table also points at the format's `Services`, the passes a call that chooses its format at run time reaches:
@@ -445,13 +459,19 @@ A delimited text is an `Array` of records whose first child may be the header ro
 
 ## Facts
 
-A `Fact` holds `lo`, `node`, `n`, `role` and `spelling`: a comment or property token, the node it belongs to and its
-role. The list is sorted by node, keeps source order within a node, and is empty for a strict JSON document and a dsv
-text with no comment byte. `lo` and `n` span the fact's bytes, markers included, and `spelling` holds the lead and tail
-marker lengths. `Tag`, `Anchor` and `Alias` facts stand just before their node, on its line.
+A `Fact` holds `lo`, `node`, `n`, `role`, `kind` and `spelling`: a comment or property token, the node it belongs to and its role. The list is sorted by node, keeps source order within a node, and is empty for a
+strict JSON document and a dsv text with no comment byte. `lo` and `n` span the fact's bytes, markers included.
+
+`kind` is the kind of the token the fact came from. A comment, a text tag, an anchor and an alias are `Plain`, with the
+lead and tail marker lengths in `spelling`. A tag a binary format spells as a number (a CBOR tag) is `Number`, which
+`fact_token` gives as its token and `fact_number` reads through the format's `number`, as a node's number is read. Any
+kind but `Plain` has no markers, and its body is the whole span. `Tag`, `Anchor` and `Alias` facts stand just before
+their node, on its line.
 
 `fact_value(doc, i, name)` reads a `Fact_Name`: `Tag`, `Anchor` and `Alias` are the body of the node's span fact of
-that role when it has one, and otherwise, with `Style`, what `Readers.fact` reads from the node's spelling.
+that role when it has one, and otherwise, with `Style`, what `Readers.fact` reads from the node's
+spelling. A `Number` fact is left to `Readers.fact` when the format has one, which gives a CBOR tag's
+digits in the temp allocator, with `Fact_Value.numeric` set.
 
 A comment's node follows the walk's `Role` rule: a comment on the line where the value before it ends is that value's
 `Comment_Inline`, else one before a value the grammar allows it above is that value's `Comment`, else it is the

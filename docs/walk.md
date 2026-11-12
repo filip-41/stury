@@ -7,7 +7,7 @@ hook.
 
 This document describes what the walks share, how the JSON walk, the delimited-text (dsv) walk, the TOML walk and the
 YAML walk are built, and the Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector code the
-walks use.
+walks use, and `binary.md` the CBOR walk.
 
 ## Files
 
@@ -46,6 +46,7 @@ walks use.
 | `yaml/parser.odin`, `block.odin`, `flow.odin`, `scalar.odin`, `props.odin` | the parser: block and flow collections, scalars, tags and anchors, comments held for their node |
 | `yaml/runs.odin`, `lines.odin` | the byte classes of a 64-byte block, the runs the readers find from them, and the document markers |
 | `yaml/keys.odin`, `merge.odin`, `stream.odin` | the repeat test of a mapping's keys, merge keys, and a stream's documents |
+| `cbor/walk.odin` | CBOR's walk, see `binary.md` |
 
 ## The interface
 
@@ -141,11 +142,12 @@ Token :: struct { lo: u64, n: u32, kind: Kind, role: Role, spelling: u16 }
 
 A token is 16 bytes and crosses a call in two registers. `lo` and `n` are its span in the text. Tokens come in the
 order the walk reads them, which is text order except for a dsv `Key`, whose span is its column's header cell, before
-the record that names it. `kind` says what the token is: a scalar (`Null`, `False`, `True`, `Number`, `String`,
-`Plain`), a container's opening (`Array`, `Object`), or its `End`. `role` is `Key` for a member's name and for the
-header cell that names a dsv cell's column, and past `Key` a fact: a comment, `Plain`, as `Comment`, `Comment_Inline`
-or `Comment_Foot`, a node property, `Tag`, `Anchor` or `Alias`, which stands just before its node on the node's line,
-and an `Attribute`, which a markup walk gives after the element's key and before its value. A consumer that wants values only tests `role <= .Key`, and `role <= .Comment_Foot` is a comment. `spelling` is a detail the format writes
+the record that names it. `kind` says what the token is: a scalar (`Null`, `False`, `True`, `Number`, `Bytes`,
+`String`, `Plain`), a container's opening (`Array`, `Object`), or its `End`. `Bytes` is a binary format's byte string,
+whose token spans its payload. `role` is `Key` for a member's name and for the header cell that names a dsv cell's
+column, and past `Key` a fact: a comment, `Plain`, as `Comment`, `Comment_Inline` or `Comment_Foot`; a node property,
+`Tag`, `Anchor` or `Alias`, which stands just before its node on the node's line; and an `Attribute`, which a markup walk gives after the element's key and
+before its value. A consumer that wants values only tests `role <= .Key`, and `role <= .Comment_Foot` is a comment. `spelling` is a detail the format writes
 and core reads through three bits: bit 0 says `text` must be decoded, bit 1 says the token is quoted (a JSON string,
 whose token span leaves its quotes out, or a quoted dsv cell, whose span holds them), and bit 2 says the decode may
 grow past the span (a JSON string or a dsv cell with a tolerated ill-formed UTF-8 sequence). For a comment token, the low byte of `spelling` holds the lead marker's length and the next byte the
@@ -256,7 +258,8 @@ lives in `core`, so a format adds no reader, no `query` and no `commit` of its o
    again with `build.builder_hook` and finishes the document. It is a thin entry that instantiates the walk for a spec.
 3. **The readers and services.** A `core.Readers` table in rodata, stored in the document, carries the leaves that
    need the grammar: `text`, `key_equals`, `number`, `resolve` and `close_end`, plus `tag_key`, `key_open` and
-   `key_close`, and the slots a format needs past JSON's (`fact`, `attribute`, `number_text`, `resolves`, `flat`). The package keeps `HANDLES := [Spec]core.Readers{...}` and
+   `key_close`, and the slots a format needs past JSON's (`fact`, `attribute`, `number_text`, `key_bytes`, `binary`,
+   `resolves`, `flat`). The package keeps `HANDLES := [Spec]core.Readers{...}` and
    `SERVICES := [Spec]core.Services{...}`, the two mutable globals `tools/checks.py` allows a format, for the handle
    `as` returns, and constant-spec entry points that bind one spec's tables (`readers_of($S)`, `bound_as`,
    `reads_of`), so a program links only the passes it names. `Services.edit` points at one `core.Edit_Services`

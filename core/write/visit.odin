@@ -23,7 +23,7 @@ Visitor :: struct {
 
 // The tree a visit is instantiated with, whose bytes it writes nowhere.
 @(private)
-VISIT_TREE :: Tree{.Open_Object = "{", .Close_Object = "}", .Open_Array = "[", .Close_Array = "]", .Comma = ",", .Colon = ":", .After_Colon = " ", .Null = "null", .True = "true", .False = "false", .Point_Zero = "", .Inf = "", .Neg_Inf = "", .Nan = "", .Bytes_Tag = ""}
+VISIT_TREE :: Tree{.Open_Object = "{", .Close_Object = "}", .Open_Array = "[", .Close_Array = "]", .Comma = ",", .Colon = ":", .After_Colon = " ", .Null = "null", .True = "true", .False = "false", .Point_Zero = "", .Inf = "", .Neg_Inf = "", .Nan = "", .Heads = "", .Bytes_Tag = ""}
 
 // Walks `value`, of `plan`'s type, as `marshal` would write it, and calls `v.call` as `Visit` says. An `any` and a hooked
 // value are not entered, and a hooked value with no rule set is refused as its write hook refuses it. `omits`, nil for

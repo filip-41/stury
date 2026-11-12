@@ -140,7 +140,7 @@ emit_text :: proc(o: ^Output, v: jq.Value) -> bool {
 		o.ip.err = text_refusal(o.opts.to, err)
 		return false
 	}
-	put_format_text(o, text, true)
+	put_format_text(o, as, text, true)
 	return true
 }
 
@@ -154,14 +154,15 @@ text_refusal :: proc(to: Format, err: core.Error) -> string {
 	return strings.concatenate({"cannot write the value as ", FORMATS[to].name}, context.temp_allocator)
 }
 
-// A `text` the writer of the output format made, written after what parts it from the text before it when `parted` and
-// it is not the output's first, and a newline after it unless it ends with one or is empty.
-put_format_text :: proc(o: ^Output, text: []u8, parted: bool) {
+// A `text` the writer of the output format `as` made, written after what parts it from the text before it when
+// `parted` and it is not the output's first, and a newline after it unless it ends with one, is empty, or is an item of
+// a binary format, which ends itself.
+put_format_text :: proc(o: ^Output, as: core.As, text: []u8, parted: bool) {
 	if between := FORMATS[o.opts.to].parted; parted && between != nil && o.written + o.buf.cursor > 0 {
 		write.put_text(&o.buf, between(text))
 	}
 	write.put_text(&o.buf, string(text))
-	if len(text) > 0 && text[len(text) - 1] != '\n' {
+	if !as.readers.binary && len(text) > 0 && text[len(text) - 1] != '\n' {
 		jq.put_byte(&o.buf, '\n')
 	}
 	flush_some(o)

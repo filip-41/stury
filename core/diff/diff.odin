@@ -147,7 +147,7 @@ class_of :: proc(v: core.Value) -> Class {
 		return .Bool
 	case .Number:
 		return .Number
-	case .String, .Plain:
+	case .String, .Bytes, .Plain:
 		return .String
 	case .Array:
 		return .Array

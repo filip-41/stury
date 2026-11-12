@@ -166,7 +166,8 @@ refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, regs_in: core.H
 		} else if u, maybe := runtime.type_info_base(ti).variant.(runtime.Type_Info_Union); maybe && len(u.variants) == 1 {
 			e.want.type = u.variants[0].id
 		}
-		if t.kind != .Object && t.kind != .Array {
+		// A binary format's bytes are no text to show.
+		if t.kind != .Object && t.kind != .Array && !h.plan.readers.binary {
 			e.want.text = string(h.src[lo:hi])
 		}
 	}

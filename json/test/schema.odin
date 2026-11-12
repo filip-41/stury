@@ -2015,7 +2015,7 @@ markup_doc :: proc(model: string, attributes: []Markup_Attribute, readers: ^core
 	for a, i in attributes {
 		strings.write_byte(&b, ' ')
 		name, _, _ := strings.partition(a.text, "=")
-		facts[i] = {lo = u64(len(b.buf)), node = a.node, n = u32(len(a.text)), role = .Attribute, spelling = core.comment_spelling(u8(len(name) + 2), 1)}
+		facts[i] = {lo = u64(len(b.buf)), node = a.node, n = u32(len(a.text)), role = .Attribute, kind = .Plain, spelling = core.comment_spelling(u8(len(name) + 2), 1)}
 		strings.write_string(&b, a.text)
 	}
 	doc, _ := core.build(b.buf[:len(model)], json.as(.Json), dups)

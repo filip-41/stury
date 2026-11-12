@@ -757,4 +757,8 @@ refuse_follow :: proc(o: ^Opts, cli: ^Cli) {
 	if FORMATS[o.from].spec != .Json || reads_whole(o) {
 		usage_error("--follow reads records: --from %s makes one text of a file", FORMATS[o.from].name)
 	}
+	// A follow window ends at a line end, and a binary sequence has none between its items.
+	if o.from == .Cbor {
+		usage_error("--follow reads lines: --from cbor items are not lines")
+	}
 }

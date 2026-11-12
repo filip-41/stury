@@ -95,8 +95,10 @@ clone :: core.clone
 comment_lead :: core.comment_lead
 comments :: core.comments
 compare :: core.compare
+doc_bytes :: core.doc_bytes
 doc_number_text :: core.doc_number_text
 equal :: core.equal
+fact_number :: core.fact_number
 fact_value :: core.fact_value
 facts_of :: core.facts_of
 float_value :: core.float_value

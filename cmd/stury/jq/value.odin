@@ -11,6 +11,7 @@ import "core:hash"
 import "core:slice"
 import "core:strings"
 import core_pkg "../../../core"
+import "../../../core/write"
 import json "../../../json"
 
 // The library's value, with the readers and builders the interpreter uses from it under their own names.
@@ -37,9 +38,23 @@ number_text :: core_pkg.number_text
 comments :: core_pkg.comments
 noted :: core_pkg.noted
 rewrap :: core_pkg.rewrap
-node_string :: core_pkg.node_string
 number_f64 :: core_pkg.number_f64
 text_f64 :: core_pkg.text_f64
+
+// The string of text node `i`. A byte string value's is its RFC 4648 base64 and a byte string key's its bytes, as the
+// library writes them as JSON.
+node_string :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> string {
+	if int(i) < len(doc.nodes) && doc.nodes[i].kind == .Bytes && doc.nodes[i].role != .Key {
+		return bytes_string(doc, i)
+	}
+	return core_pkg.node_string(doc, i)
+}
+
+@(private = "file", cold)
+bytes_string :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> string {
+	text, _ := write.node_bytes_text(doc, i, nil)
+	return strings.clone(text)
+}
 
 // A number as jq reads it: its double, and the digits it keeps (`core.double_of`).
 Num :: struct {
@@ -97,6 +112,8 @@ kind :: proc(v: Value) -> Kind {
 @(private = "file")
 jq_kind :: #force_inline proc(k: core_pkg.Kind) -> Kind {
 	#partial switch k {
+	case .String, .Bytes:
+		return .String
 	case .Array:
 		return .Array
 	case .Object:
@@ -121,6 +138,8 @@ node_kind :: #force_inline proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index)
 		}
 		// A delimited cell: an empty unquoted one is null, a quoted one keeps its quotes in its span.
 		return .Null if doc.nodes[i].n == 0 && doc.nodes[i].role == .Value else .String
+	case .String, .Bytes:
+		return .String
 	case:
 		return Kind(k)
 	}

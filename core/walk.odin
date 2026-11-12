@@ -15,13 +15,14 @@ reserve_depth :: #force_inline proc "contextless" (max_depth: u32, n: int) -> in
 }
 
 // `Kind` names what a token is: `Array` and `Object` open a container, `End` closes the innermost one, and the other
-// kinds are scalars. `Plain` is text whose type the format resolves for the consumer. Each member names the formats
-// that give it.
+// kinds are scalars. `Bytes` is a byte string, which only a binary format gives, and a token of it holds its payload.
+// `Plain` is text whose type the format resolves for the consumer. Each member names the formats that give it.
 Kind :: enum u8 {
 	Null, // json
 	False, // json
 	True, // json
 	Number, // json
+	Bytes, // a binary format's byte string
 	String, // json
 	Plain, // json: a comment, dsv: every cell and a comment line
 	Array, // json: `[`, dsv: the document, and a record with no header

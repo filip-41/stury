@@ -127,16 +127,15 @@ core.write_stream    :: proc(w: io.Stream, doc: ^core.Document, opts := core.Wri
 core.subtree_facts   :: proc(doc: ^core.Document, i: core.Node_Index) -> []core.Fact
 json.as              :: proc(spec: json.Spec, opts := json.Options{}) -> core.As
 dsv.as               :: proc(spec: dsv.Spec, opts := dsv.Options{}) -> core.As
-toml.as              :: proc(spec: toml.Spec, opts := toml.Options{}) -> core.As
-yaml.as              :: proc(spec: yaml.Spec, opts := yaml.Options{}) -> core.As
+toml.as, yaml.as, cbor.as
 core.format          :: proc(src: []u8, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error)
 ```
 
 `core.write` writes a document through the `write` service of the handle `as`. A nil `as` is the format and layout the
 document was read in. `json.as(.Jsonc)` and `dsv.as(.Tsv, opts)` name another target, in the same format or in another,
 so a JSON document is written as a table and a table as JSON by the target's writer. A target with no writer is
-`.Unsupported`. A document of a constant-spec build holds no services, so `json.write`, `toml.write` and `yaml.write`
-write it in their format. `core.As` is the handle a `Document` holds in `as`.
+`.Unsupported`. A document of a constant-spec build holds no services, so `json.write`, `toml.write`, `yaml.write` and
+`cbor.write` write it in their format. `core.As` is the handle a `Document` holds in `as`.
 
 `node` writes one value of the document as a text of its own, the root by default: a subtree with the comments inside
 its span, which `core.subtree_facts` returns, in the spelling and layout the root would have. A key, a node the document
@@ -240,9 +239,9 @@ from `t.site` to indent and style the text for that place, and the zero site is 
 
 `Tokens` holds `core.MAX_DEPTH` levels in itself and allocates nothing for depth, and it is not copied after `tokens_init`.
 The calls are `open_object`, `open_array`, `close`, `key`, `value_string`, `value_int`, `value_uint`, `value_float`,
-`value_bytes` (a byte string, written as its format spells one: JSON and CSV as the string of its base64),
-`value_tagged` (a string with the type its format tags it with, a TOML datetime written bare, `.Bad_Raw` when the text
-is not one of that type, and a plain string in a format with no tags), `value_bool` and `value_null`, and `end_record` for a flat format. Each returns the kind that refused it, `.None` for a
+`value_bytes` (a byte string: CBOR's own, a text format's base64 string), `value_tagged` (a string with the type its
+format tags it with, a TOML datetime written bare, `.Bad_Raw` when the text is not one of that type, and a plain string
+in a format with no tags), `value_bool` and `value_null`, and `end_record` for a flat format. Each returns the kind that refused it, `.None` for a
 written one. The first refusal sticks: later calls write nothing and return it, and `tokens_finish` returns it with no
 bytes, as `finish` does for an output that failed. A stream that failed leaves a prefix in the stream.
 
@@ -398,6 +397,11 @@ when the document holds it: above the line it heads, after the value it ends, an
 comment the output has no place for, and one with a line end in its body, is dropped and counted. A token write that
 stands at a site of a document is block text at column 0, which the edit indents to the site or turns to flow inside a
 flow collection.
+
+## CBOR
+
+`cbor.write`, `cbor.marshal`, `cbor.tokens_init` and `cbor.writer_init` write CBOR. [binary.md](binary.md) holds the
+encodings, the token write's head patching and the typed write's struct forms.
 
 ## Number text
 

@@ -78,7 +78,7 @@ value_tag :: #force_inline proc(kind: core.Kind) -> u8 {
 		return 'o'
 	case .Array:
 		return 'a'
-	case .String, .Plain:
+	case .String, .Bytes, .Plain:
 		return 's'
 	case .Number:
 		return 'n'

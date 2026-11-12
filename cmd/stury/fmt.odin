@@ -236,9 +236,9 @@ cells_cut :: proc(run: ^Run, ins: ^Inputs, cut: int) {
 }
 
 // The document `doc` of the open file written by the library's writer in the output's format and layout, and a
-// newline after it unless it ends with one or is empty, as a CSV file with no header is. A text of a format whose input
-// is a stream of texts is parted from the one before it, so the output reads back as that stream. False, told, when it
-// cannot be.
+// newline after it unless it ends with one, is empty, as a CSV file with no header is, or is a binary format's item.
+// A text of a format whose input is a stream of texts is parted from the one before it, so the output reads back as
+// that stream. False, told, when it cannot be.
 @(private = "file")
 put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
 	as := fmt_written_as(&run.opts)
@@ -254,7 +254,7 @@ put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
 		}
 		return false
 	}
-	put_format_text(out, text, FORMATS[run.opts.to].follows != nil)
+	put_format_text(out, as, text, FORMATS[run.opts.to].follows != nil)
 	return true
 }
 

@@ -72,7 +72,8 @@ Unknown_Fields :: enum u8 {
 // A value's text, kept as the format spells it: a struct field's or a captured unknown member's whole value.
 Raw :: distinct string
 
-// A byte string, read from a string of RFC 4648 base64 with padding into bytes from `context.allocator`.
+// A byte string. A binary format reads its byte string, and a text format reads a string of RFC 4648 base64 with padding.
+// A read without `borrow_strings` allocates the bytes from `context.allocator`.
 Bytes :: distinct []u8
 // The arm of `Scalar` for a null.
 Null :: struct {}
@@ -117,6 +118,10 @@ Reader :: struct {
 	find_tag:  proc(h: ^Reader, at: u64, name: string) -> Tag_Scan,
 	// The format's own options, for `find_tag`.
 	format:    rawptr,
+	// The first byte and the byte past the value the token `t` gives, a container's open included, for a format whose
+	// token leaves some of them out, as a binary item's head and tags. It is called while the hook holds `t`. Nil for a
+	// format whose tokens `core.scalar_ends` reads.
+	ends:      proc "contextless" (h: ^Reader, t: core.Token) -> (lo, hi: u64),
 }
 
 // Starts a read of `src` into `target`, a value of `plan`'s type. `frames` holds two more than the walk's
@@ -244,6 +249,16 @@ publish_open :: proc(r: ^Reader, regs: core.Hook_Regs, floor: int) {
 		}
 		top, child = {f.a, f.b, f.c}, true
 	}
+}
+
+// The first byte and the byte past the value the token `t` gives, as the format wrote it. A container's `hi` is its open
+// token's.
+@(private)
+value_ends :: #force_inline proc "contextless" (h: ^Reader, t: core.Token) -> (lo, hi: u64) {
+	if h.ends != nil {
+		return h.ends(h, t)
+	}
+	return core.scalar_ends(t)
 }
 
 field_at :: #force_inline proc "contextless" (b: u64) -> ^Field {

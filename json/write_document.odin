@@ -324,6 +324,13 @@ put_token :: proc(out: ^write.Out, src: []u8, doc: ^core.Document, i: core.Node_
 			return .None
 		}
 		write.put_text(out, string(src[t.lo:t.lo + u64(t.n)]))
+	case .Bytes:
+		stack: [512]u8
+		text, ok := write.node_bytes_text(doc, i, stack[:])
+		if !ok {
+			return .No_Memory
+		}
+		return put_string(out, text, opts)
 	case:
 		return put_token_string(out, src, doc, i, t, opts, own, copy)
 	}
@@ -584,10 +591,10 @@ rows_run :: #force_no_inline proc "contextless" (e: ^Emit, i: u32, $P, $O: bool)
 				w = (^u32)(&t.kind)^
 			}
 			// A string's quotes are the bytes around its span. One branch takes a container and a string with an
-			// ill-formed sequence, the kinds past `Plain` being the two with both of these bits.
-			#assert(u8(core.Kind.String) == 4 && u8(core.Kind.Number) < 4 && u8(core.Kind.Plain) == 5 && u8(core.Kind.Array) == 6 && u8(core.Kind.Object) == 7)
+			// ill-formed sequence, the kinds past `Plain` being the ones with both of these bits.
+			#assert(u8(core.Kind.Bytes) == 4 && u8(core.Kind.Number) < 4 && u8(core.Kind.String) == 5 && u8(core.Kind.Plain) == 6 && u8(core.Kind.Array) == 7 && u8(core.Kind.Object) == 8)
 			quoted := (w >> 2) & 1
-			if ((w & 0xFF) + 2) >> 3 | (quoted & (w >> 18)) != 0 {
+			if ((w & 0xFF) + 1) >> 3 | (quoted & (w >> 18)) != 0 {
 				k := t.kind
 				if k < .Array {
 					break

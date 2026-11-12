@@ -216,8 +216,8 @@ docs_of :: proc(as: core.As) -> ^Record_Docs {
 }
 
 // Opens the records of `src` in format `as` under `framing`, from byte `at` of `src`, with every offset from `src[0]`.
-// The reader's own memory comes from `allocator`. A UTF-8 byte order mark at the input's first byte is passed over. A
-// format with no record reader, or one that does not take `framing`, ends the records with the fault `.Bad_Option`
+// The reader's own memory comes from `allocator`. A UTF-8 byte order mark at the input's first byte is passed over,
+// except in a binary format. A format with no record reader, or one that does not take `framing`, ends the records with the fault `.Bad_Option`
 // before any is read. Under `.Entries`, `entries` names the members to follow from the root, each the value of a
 // member of the one before, to the container whose members are the records, and a text with no such container has no
 // records. Without `entries` the root is the container.
@@ -228,7 +228,9 @@ open :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, at: u64 = 0,
 // Opens the records as `open` does, with the framing `services` and the `docs` a format gives for a spec named at
 // compile time. `docs` may be nil, and then a read, a build, a scan or a cell of a record is refused.
 open_with :: proc(src: []u8, as: core.As, services: ^Framing_Services, docs: ^Record_Docs, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator, entries: []string = nil) -> Reader {
-	it := Reader{src = src, pos = core.text_start(src, at), from = at, as = as, framing = framing, allocator = allocator, services = services, docs = docs, entries = entries}
+	// A binary text has no byte order mark.
+	start := at if as.readers != nil && as.readers.binary else core.text_start(src, at)
+	it := Reader{src = src, pos = start, from = at, as = as, framing = framing, allocator = allocator, services = services, docs = docs, entries = entries}
 	if it.services == nil || it.services.next[framing] == nil || at > u64(len(src)) {
 		it.fault = core.Fault{kind = .Bad_Option}
 	}

@@ -36,7 +36,7 @@ merge_take :: proc(p: ^Parser, t: core.Token) {
 		return
 	case .End:
 		p.hold_depth -= 1
-	case .Null, .False, .True, .Number, .String, .Plain:
+	case .Null, .False, .True, .Number, .Bytes, .String, .Plain:
 	}
 	if p.hold_depth == 0 {
 		p.holding = false

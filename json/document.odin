@@ -279,7 +279,7 @@ value_check_hook :: proc "contextless" (h: ^Value_Check, s: core.Hook_Regs, t: c
 		if h.depth == 0 {
 			h.done = true
 		}
-	case .Null, .False, .True, .Number, .String, .Plain:
+	case .Null, .False, .True, .Number, .String, .Bytes, .Plain:
 		if h.depth == 0 {
 			h.done = true
 		}

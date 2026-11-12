@@ -1410,7 +1410,7 @@ enum_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 			case !slice.contains(numbers[:], x):
 				append(&numbers, x)
 			}
-		case .Array, .Object, .Plain, .End:
+		case .Array, .Object, .Bytes, .Plain, .End:
 			refuse(s, keyword)
 			return
 		}

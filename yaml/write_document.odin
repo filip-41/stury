@@ -427,6 +427,14 @@ put_leaf :: proc(l: ^Layout, node: core.Node_Index, flow, key: bool, ind: int, t
 		write.put_text(&l.out, own_text(l, node, "false"))
 	case .Null:
 		write.put_text(&l.out, own_text(l, node, "null"))
+	case .Bytes:
+		stack: [512]u8
+		text, ok := write.node_bytes_text(l.doc, node, stack[:])
+		if !ok {
+			return false, .No_Memory
+		}
+		write.put_text(&l.out, "!!binary ")
+		put_scalar(&l.out, text, .Plain if len(text) > 0 else .Double, false)
 	case:
 		return false, .Unwritable
 	}

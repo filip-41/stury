@@ -404,7 +404,9 @@ put_prefixed_decimal :: proc(out: ^Out, digits: string, base: u64) -> bool {
 member_key :: proc(w: ^Walker, r: ^typed.Field, $T: Tree, $put: Put) -> core.Typed_Error_Kind {
 	out := &w.out
 	put(out, room(out, 18), w.meta[r.meta].name, &w.opts) or_return
-	put_byte(out, T[.Colon][0])
+	when len(T[.Colon]) != 0 {
+		put_byte(out, T[.Colon][0])
+	}
 	return .None
 }
 
@@ -618,6 +620,10 @@ sort_entries :: proc(w: ^Walker, first: int) -> core.Typed_Error_Kind {
 	if n < 2 {
 		return .None
 	}
+	if w.key_order != .Text {
+		sort_written(w, first)
+		return .None
+	}
 	if resize(&w.order, n) != nil {
 		return .No_Memory
 	}
@@ -639,17 +645,17 @@ sort_entries :: proc(w: ^Walker, first: int) -> core.Typed_Error_Kind {
 
 // Lists a map's members in the order of their keys. An integer key is written as text and an enum's by name.
 @(private)
-list_map :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, $put: Put) -> core.Typed_Error_Kind {
+list_map :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, $T: Tree, $put: Put) -> core.Typed_Error_Kind {
 	w.mark = w.keys.cursor
 	first := len(w.entries)
-	add_map_entries(w, f, &w.meta[f.meta], v, put) or_return
+	add_map_entries(w, f, &w.meta[f.meta], v, T, put) or_return
 	sort_entries(w, first) or_return
 	w.listed = len(w.entries) - first
 	return .None
 }
 
 @(private)
-add_map_entries :: proc(w: ^Walker, f: ^typed.Field, m: ^typed.Meta, v: uintptr, $put: Put) -> core.Typed_Error_Kind #no_bounds_check {
+add_map_entries :: proc(w: ^Walker, f: ^typed.Field, m: ^typed.Meta, v: uintptr, $T: Tree, $put: Put) -> core.Typed_Error_Kind #no_bounds_check {
 	raw := (^runtime.Raw_Map)(v)^
 	info := m.map_info
 	if reserve(&w.entries, len(w.entries) + int(raw.len)) != nil {
@@ -666,7 +672,11 @@ add_map_entries :: proc(w: ^Walker, f: ^typed.Field, m: ^typed.Meta, v: uintptr,
 		if m.key_kind == .String {
 			add_entry(w, (^string)(key)^, value, rec, put) or_return
 		} else {
-			add_key_entry(w, m, key, value, rec, put) or_return
+			when len(T[.Heads]) != 0 {
+				binary_key_entry(w, m, key, value, rec, T, put) or_return
+			} else {
+				add_key_entry(w, m, key, value, rec, put) or_return
+			}
 		}
 	}
 	return .None
@@ -692,7 +702,7 @@ add_key_entry :: proc(w: ^Walker, m: ^typed.Meta, key, value: uintptr, rec: ^typ
 // or as the arm of a union with its tag `tag`. The tag comes first and a captured map's members last, in the order of
 // their keys, unless `sort_keys` sorts them all together.
 @(private)
-list_struct :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, tag: ^string, $put: Put) -> core.Typed_Error_Kind #no_bounds_check {
+list_struct :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, tag: ^string, $T: Tree, $put: Put) -> core.Typed_Error_Kind #no_bounds_check {
 	w.mark = w.keys.cursor
 	first := len(w.entries)
 	if tag != nil {
@@ -709,7 +719,7 @@ list_struct :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, tag: ^string, $put:
 	if capture := w.meta[m.block + m.members].capture; capture >= 0 {
 		rec := &w.plan.fields[capture]
 		captured := len(w.entries)
-		add_map_entries(w, rec, &w.meta[rec.meta], v + uintptr(rec.offset), put) or_return
+		add_map_entries(w, rec, &w.meta[rec.meta], v + uintptr(rec.offset), T, put) or_return
 		// A capture holds what the type does not name, so a key that names a member is no captured member, unless the tag's
 		// `omitempty` left the member out. A member a model's write leaves out keeps its name.
 		for e in w.entries[captured:] {
@@ -737,7 +747,9 @@ list_struct :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, tag: ^string, $put:
 // The frame of the object just listed, with its opening byte written unless the walk is a visit.
 @(private)
 open_entries :: proc(w: ^Walker, $T: Tree, $V: bool) -> Frame {
-	when !V {
+	when len(T[.Heads]) != 0 {
+		w.out.cursor += put_head(room(&w.out, 9), u64(w.listed), T, .Map)
+	} else when !V {
 		put_byte(&w.out, T[.Open_Object][0])
 	}
 	return {at = uintptr(len(w.entries) - w.listed), left = w.listed, total = w.listed, step = w.mark, mode = .Entries}
@@ -748,16 +760,21 @@ open_entries :: proc(w: ^Walker, $T: Tree, $V: bool) -> Frame {
 entry_key :: proc(w: ^Walker, at: int, first: bool, nest: int, $T: Tree) -> (^typed.Field, uintptr) #no_bounds_check {
 	out := &w.out
 	e := w.entries[at]
-	if !first {
-		put_byte(out, T[.Comma][0])
+	when len(T[.Heads]) != 0 {
+		put_text(out, string(w.keys.buf[e.at:][:e.size]))
+		room(out, LEAF_ROOM)
+	} else {
+		if !first {
+			put_byte(out, T[.Comma][0])
+		}
+		if w.opts.pretty {
+			line(w, room(out, 1 + LINE_ROOM + 16), nest)
+		}
+		put_text(out, string(w.keys.buf[e.at:][:e.size]))
+		p := room(out, 2 + LEAF_ROOM)
+		p[0], p[1] = T[.Colon][0], T[.After_Colon][0]
+		out.cursor += 2 if w.opts.pretty else 1
 	}
-	if w.opts.pretty {
-		line(w, room(out, 1 + LINE_ROOM + 16), nest)
-	}
-	put_text(out, string(w.keys.buf[e.at:][:e.size]))
-	p := room(out, 2 + LEAF_ROOM)
-	p[0], p[1] = T[.Colon][0], T[.After_Colon][0]
-	out.cursor += 2 if w.opts.pretty else 1
 	return e.rec, e.value
 }
 
@@ -787,20 +804,26 @@ any_value :: proc(w: ^Walker, a: any, $T: Tree, $put: Put) -> (rec: ^typed.Field
 		return nil, .None
 	}
 	p := room(out, LEAF_ROOM)
-	switch a.id {
-	case typeid_of(string):
-		return nil, put(out, p, (^string)(a.data)^, &w.opts)
-	case typeid_of(bool):
-		out.cursor += put_bool(p, (^bool)(a.data)^, T)
-		return nil, .None
-	case typeid_of(i64):
-		out.cursor += spell.i64_text(p, (^i64)(a.data)^)
-		return nil, .None
-	case typeid_of(u64):
-		out.cursor += spell.u64_text(p, (^u64)(a.data)^)
-		return nil, .None
-	case typeid_of(f64):
-		return nil, put_number_as(out, {transmute(u64)(^f64)(a.data)^, .Float}, T)
+	when len(T[.Heads]) != 0 {
+		if k, done := binary_any(w, a, p, T, put); done {
+			return nil, k
+		}
+	} else {
+		switch a.id {
+		case typeid_of(string):
+			return nil, put(out, p, (^string)(a.data)^, &w.opts)
+		case typeid_of(bool):
+			out.cursor += put_bool(p, (^bool)(a.data)^, T)
+			return nil, .None
+		case typeid_of(i64):
+			out.cursor += spell.i64_text(p, (^i64)(a.data)^)
+			return nil, .None
+		case typeid_of(u64):
+			out.cursor += spell.u64_text(p, (^u64)(a.data)^)
+			return nil, .None
+		case typeid_of(f64):
+			return nil, put_number_as(out, {transmute(u64)(^f64)(a.data)^, .Float}, T)
+		}
 	}
 	side := side_plan(&w.side, w.plan, a.id) or_return
 	first := &side.fields[0]

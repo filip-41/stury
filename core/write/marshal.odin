@@ -12,9 +12,10 @@ import core ".."
 import "../typed"
 
 // The text of a tree, which belongs to its format. The first seven parts are one byte, and `After_Colon` follows a
-// colon in pretty text. The four float parts are empty for a format whose floats are JSON's: `Point_Zero` ends a float
-// whose text has neither a point nor an exponent, and the others spell what JSON cannot (an infinity, a NaN). `Bytes_Tag`
-// is written before the base64 string of a byte string, empty for a format that writes none.
+// colon in pretty text. The last four are empty for a format whose floats are JSON's: `Point_Zero` ends a float whose text
+// has neither a point nor an exponent, and the others spell what JSON cannot (an infinity, a NaN). `Heads` is empty for a
+// text and holds a binary tree's head forms, see `Head`. A binary tree's punctuation parts are empty. `Bytes_Tag` is written before the base64 string of a byte string, empty for a
+// format that writes none.
 Tree_Part :: enum {
 	Open_Object,
 	Close_Object,
@@ -30,6 +31,7 @@ Tree_Part :: enum {
 	Inf,
 	Neg_Inf,
 	Nan,
+	Heads,
 	Bytes_Tag,
 }
 Tree :: [Tree_Part]string
@@ -137,6 +139,8 @@ Walker :: struct {
 	visitor:   ^Visitor,
 	open:      Frame,
 	top:       int,
+	positional: bool, // a binary tree's structs are arrays of their members
+	key_order: Key_Order,
 }
 
 // Writes `value` by `plan`, which a format built, as `write` says. `plan` must be of `value`'s type, and the bytes are
@@ -285,6 +289,8 @@ tokens_release :: proc(t: ^Tokens) {
 // writes nothing and enters no `any` or hook: it calls `w.visitor` at each record with a rule set and at each refusal.
 @(private)
 walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $put: Put, $V: bool) -> core.Typed_Error_Kind #no_bounds_check {
+	// A binary tree writes no punctuation, and a container's head holds its count.
+	BIN :: len(T[.Heads]) != 0
 	out := &w.out
 	cur := Frame{r = &w.plan.fields[0], at = value, left = 1, mode = .Target}
 	// `top` counts the open pointers' and `any`s' frames besides the containers', which `too_deep` takes away, so a
@@ -300,7 +306,8 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 		if cur.mode == .Members {
 			r := cur.r
 			if r.key_size == 0 {
-				for r.omit && is_empty(w, r, cur.at + uintptr(r.offset)) {
+				// A positional struct writes every member, so its array head holds its member count.
+				for !(BIN && w.positional) && r.omit && is_empty(w, r, cur.at + uintptr(r.offset)) {
 					r = intrinsics.ptr_offset(r, 1)
 				}
 				if r.kind == .Never {
@@ -309,7 +316,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 							return .None
 						}
 					}
-					when !V {
+					when !V && !BIN {
 						p = room(out, CLOSE_ROOM)
 						if cur.lead == u32(T[.Open_Object][0]) {
 							p[0] = T[.Open_Object][0]
@@ -332,15 +339,20 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					up := &w.frames[top]
 					if up.mode == .Elements && up.left > 0 && up.r.kind == .Struct && out.err == .None {
 						up.left -= 1
-						when !V {
-							p[1] = T[.Comma][0]
-							out.cursor += 1
+						when BIN {
+							out.cursor += struct_head(w, up.r, up.at, room(out, 9), T)
+						} else {
+							when !V {
+								p[1] = T[.Comma][0]
+								out.cursor += 1
+							}
+							when P {
+								line(w, p[2:], nest)
+								nest += 1
+							}
+							cur.lead = u32(T[.Open_Object][0])
 						}
-						when P {
-							line(w, p[2:], nest)
-							nest += 1
-						}
-						cur.r, cur.at, cur.lead = up.r.first, up.at, u32(T[.Open_Object][0])
+						cur.r, cur.at = up.r.first, up.at
 						up.at += uintptr(up.step)
 						continue
 					}
@@ -357,19 +369,29 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 				vf, va = r, cur.at + uintptr(r.offset)
 			} else {
 				p = room(out, PRETTY_ROOM when P else MEMBER_ROOM)
-				p[0] = u8(cur.lead)
-				cur.lead = u32(T[.Comma][0])
-				p = p[1:]
-				when P {
-					out.cursor += 1
-					p = line(w, p, nest)
+				when BIN {
 					start := out.cursor
 				} else {
-					start := out.cursor + 1
+					p[0] = u8(cur.lead)
+					cur.lead = u32(T[.Comma][0])
+					p = p[1:]
+					when P {
+						out.cursor += 1
+						p = line(w, p, nest)
+						start := out.cursor
+					} else {
+						start := out.cursor + 1
+					}
 				}
 				cur.r = intrinsics.ptr_offset(r, 1)
 				n := uintptr(r.key_size)
-				if n == 0 {
+				if BIN && w.positional {
+					// A member a write leaves out keeps its place as a null.
+					if r.omit && left_out(w, r, cur.at + uintptr(r.offset)) {
+						out.cursor = start + put_word(p, T[.Null])
+						continue
+					}
+				} else if n == 0 {
 					out.cursor = start
 					if k := member_key(w, r, T, put); k != .None {
 						open := cur
@@ -399,7 +421,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 				return out.err
 			}
 			if cur.mode >= .Elements {
-				when !V {
+				when !V && !BIN {
 					p = room(out, 1 + LINE_ROOM + 16)
 				}
 				when P {
@@ -409,17 +431,17 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					nest -= 1
 				}
 				if cur.mode == .Elements {
-					when !V {
+					when !V && !BIN {
 						p[0] = T[.Close_Array][0]
 					}
 				} else {
-					when !V {
+					when !V && !BIN {
 						p[0] = T[.Close_Object][0]
 					}
 					resize(&w.entries, int(cur.at) - cur.total)
 					w.keys.cursor = cur.step
 				}
-				when !V {
+				when !V && !BIN {
 					out.cursor += 1
 				}
 			} else {
@@ -436,7 +458,9 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 			continue
 		} else if cur.mode == .Elements {
 			cur.left -= 1
-			when !V {
+			when BIN {
+				p = room(out, LEAF_ROOM)
+			} else when !V {
 				p = room(out, 1 + 1 + LINE_ROOM + 16 + LEAF_ROOM when P else 1 + LEAF_ROOM)
 				p[0] = T[.Comma][0]
 				p = p[cur.lead:]
@@ -479,12 +503,16 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 			} else {
 				#partial switch vf.kind {
 				case .I64:
-					when !V {
+					when BIN {
+						out.cursor += put_int(p, (^i64)(va)^, T)
+					} else when !V {
 						out.cursor += spell.i64_text(p, (^i64)(va)^)
 					}
 				case .F64:
 					x := (^f64)(va)^
-					when T[.Nan] != "" || T[.Point_Zero] != "" {
+					when BIN {
+						out.cursor += put_float(p, x, T)
+					} else when T[.Nan] != "" || T[.Point_Zero] != "" {
 						n: int
 						n, k = f64_value(p, x, T)
 						out.cursor += n
@@ -504,15 +532,20 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 				case .Struct, .Required:
 					if too_deep(w, top) {
 						k = .Too_Deep
-					} else if w.opts.sort_keys || vf.lists {
-						k = list_struct(w, vf, va, nil, put)
+					} else if w.opts.sort_keys && !(BIN && w.positional) || vf.lists {
+						k = list_struct(w, vf, va, nil, T, put)
 						if k == .None {
 							break value
 						}
 					} else {
 						top += 1
 						w.frames[top] = cur
-						cur = Frame{r = vf.first, at = va, lead = u32(T[.Open_Object][0]), mode = .Members}
+						when BIN {
+							out.cursor += struct_head(w, vf, va, p, T)
+							cur = Frame{r = vf.first, at = va, mode = .Members}
+						} else {
+							cur = Frame{r = vf.first, at = va, lead = u32(T[.Open_Object][0]), mode = .Members}
+						}
 						when P {
 							nest += 1
 						}
@@ -539,7 +572,9 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 						when P {
 							nest += 1
 						}
-						when !V {
+						when BIN {
+							out.cursor += put_head(p, u64(n), T, .Array)
+						} else when !V {
 							p[0] = T[.Open_Array][0]
 							out.cursor += 1
 						}
@@ -548,7 +583,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					if too_deep(w, top) {
 						k = .Too_Deep
 					} else {
-						k = list_map(w, vf, va, put)
+						k = list_map(w, vf, va, T, put)
 						if k == .None {
 							break value
 						}
@@ -595,7 +630,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					} else if too_deep(w, top) {
 						k = .Too_Deep
 					} else {
-						k = list_struct(w, &w.plan.fields[arm.fields], va, &arm.name, put)
+						k = list_struct(w, &w.plan.fields[arm.fields], va, &arm.name, T, put)
 						if k == .None {
 							break value
 						}
@@ -636,6 +671,8 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 				case:
 					when V {
 						k = visit_leaf(w, vf, va)
+					} else when BIN {
+						k = binary_leaf(w, vf, va, top, T, put)
 					} else {
 						k = leaf(w, vf, va, top, nest, P, T, put)
 					}

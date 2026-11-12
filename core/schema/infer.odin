@@ -184,6 +184,9 @@ leaf :: proc(inf: ^Inferred, p: ^Summary, v: core.Value, kind: core.Kind) {
 		p.kinds += {.Bool}
 	case .Number:
 		number(inf, p, v)
+	case .Bytes:
+		// A byte string is a string to a schema, and its payload has no length in characters.
+		p.kinds += {.String}
 	case .String:
 		p.kinds += {.String}
 		p.strings += 1

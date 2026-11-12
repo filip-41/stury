@@ -7,12 +7,16 @@
 - `--from toml` and `yaml` read TOML 1.1 and YAML 1.2 with the core schema (each document of a stream an input), and
   `--to toml` and `yaml` write TOML 1.0 and YAML in block or flow style. `check`, `check --schema`, `fmt`, `diff`,
   `schema infer` and `--explain` take both, and `--follow` takes YAML.
+- `--from cbor` reads each item of an RFC 8742 sequence as an input, in any serialization, and `--to cbor` writes CBOR
+  in its preferred serialization. A byte string reads as its base64 and a byte string key as its bytes. `check`,
+  `check --schema`, `fmt`, `edit`, `diff` and `schema infer` take it, an edit keeps the bytes of every item it does not
+  reach, and `--follow` is refused.
 - `--alias-limit N` and `--merge-keys` set how `--from yaml` reads: the bytes aliases may read again, and `<<` as
   YAML 1.1's merge key. With another `--from` each is a usage error.
 - `.@tag`, `.@anchor`, `.@alias` and `.@style` read a value's tag, anchor, alias and spelling: a TOML datetime's type,
   a number's form and a string's quoting, and a YAML node's tag, anchor, alias and style. `.@tag`, `.@anchor` and
   `.@alias` take a string or `null`, travel with their value as comments do, and `edit` writes them in YAML.
-  `.@style` is read only.
+  `.@style` is read only. A CBOR tag reads as its number, and `.@tag` takes a number too.
 - `edit --from toml` keeps every byte the output does not change: a new member joins its table's lines, a built table
   is a `[section]`, a dropped line goes with the comments above it, and `null` is refused with the reason.
 - `edit --from yaml` edits each document of a stream as a record: a document with no output is dropped, each output
@@ -211,23 +215,40 @@
   order, and any edit of a text with a `<<` read under `merge_keys` are `.Frozen`.
 - `yaml.checks` and `yaml.bind_schema` give a model the format and bind a JSON Schema, so a model loads and a schema
   judges YAML texts.
+- New package `cbor`: CBOR (RFC 8949) through the calls of the other formats.
+  A byte string is `Kind.Bytes`, a tag is a fact before its content (`fact_value(.., .Tag)` gives the nearest tag's
+  number), an integer key reads as its decimal digits and is written back as an integer, and `1` and `"1"` are one key.
+  `cbor.Spec` reads any well-formed item (`.Cbor`), or refuses an item not in preferred, deterministic or length-first
+  serialization and writes in it. `cbor.set` and `edit_list_init` edit an item, copying the bytes of every item no edit
+  reaches. `walk` takes a `Cursor` that `walk_resume` continues, `answers` reads a path's answers a batch at a time,
+  `check` reads an item by a plan as a check, and `plan_of` builds the plan of a `rules.Description`.
+  `cbor.marshal` and `unmarshal` take a struct as a map or as an array (`Options.structs`), a sequence's items are
+  records, and `cbor.write` writes a document of any format as one item. A path read skips the values off the paths and
+  judges them as `validate` does. `cbor.checks` and `cbor.bind_schema` give a model the format and bind a JSON Schema.
+  The Appendix A vectors and a differential against `core:encoding/cbor` run against it.
 
-The hooks YAML adds to the formats' interface:
+The hooks the formats share:
+
+- `core.Kind.Bytes` is a byte string, read with `doc_bytes`. A text format writes one as its RFC 4648 base64. Byte
+  strings order and hash by their payload, after every number and before every string, and count as strings in a
+  schema's kind check.
 
 - `typed.Bytes` reads a byte string from a string of RFC 4648 base64, and a format writes one as that string, YAML
   under `!!binary` (`write.value_bytes`).
 - `core.Role` gains `Tag`, `Anchor` and `Alias`, facts beside the comments. `core.fact_value` reads a named fact
   (`Fact_Name`: `Tag`, `Anchor`, `Alias`, `Style`), from a span or from what the node's spelling carries. `set_fact`
-  takes the property roles in a format that spells them.
+  takes the property roles in a format that spells them. `Fact.kind` lets a tag be a number, which `fact_number`
+  reads.
 - `core.doc_number_text` gives a number's decimal digits where its span is not its text, and `equal`, `compare`, `hash`
   and `uniqueItems` take such a number by its digits.
-- `Readers` gains `fact` and `number_text`, and `Edit_Services` gains `prefix`, `relocate` and `commit`, for a
+- `Readers` gains `fact`, `number_text`, `key_bytes` and `binary`, and `Edit_Services` gains `prefix`, `relocate` and `commit`, for a
   format whose edits do not fit one range per container. An edit a format's commit may not make is
   `Document_Error_Kind.Frozen`. `core.Site` says where an edit's text stands, and `write.tokens_init` takes one.
 - `write.Tagged_Text` and `write.value_tagged` write a string with its format's type tag, as a TOML datetime, and
   `write.Token_Spelling.end` turns a token write's finished text into the format's own.
 - `records.open`, `Stream_Options` and `json.records_open` take `entries`, a path of keys to the container whose
   members are the records under `.Entries`, and a stream under `.Entries` gives its records as it reads them.
+- A record reader does not skip a byte order mark at the start of a binary format's text.
 
 ### Library API
 

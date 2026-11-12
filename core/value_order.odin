@@ -1,7 +1,8 @@
 package core
 
 // The order, equality and hash of values, in either form. The order is jq's: null < false < true < numbers < strings
-// < arrays < objects, arrays member by member, objects by their sorted key sets and then their values in key order.
+// < arrays < objects, with a binary format's byte strings between the numbers and the strings, in the order of their
+// payloads, arrays member by member, objects by their sorted key sets and then their values in key order.
 // An object's repeated key counts once, with its last value, or its first where `dups` is `.First`. A number literal is the decimal it spells at any size, so
 // `1.0` equals `1`, `100000000000000000001` is above `100000000000000000000`, `1e400` is below `1e401` and `1e-400` is
 // above `0`. A double is its shortest decimal, and an infinity is no decimal: it is above every literal, `-inf` below.
@@ -235,7 +236,7 @@ compare :: proc(a, b: Value, depth := 0, eq := false, too_deep: ^bool = nil, max
 			return 1
 		}
 		return compare_numbers(x, lx, y, ly)
-	case .String:
+	case .String, .Bytes:
 		return text_order(string_text(a), string_text(b))
 	case .Array:
 		if x, a_arr := plain(a).(^Array); a_arr {
@@ -599,7 +600,7 @@ hash :: proc(v: Value, seed := u64(0xcbf29ce484222325), like: Value = nil, dups 
 			}
 		}
 		h = mix(h, transmute(u64)(f + 0)) // + 0: -0 and 0 are one number
-	case .String:
+	case .String, .Bytes:
 		s := string_text(v)
 		for b in transmute([]u8)s {
 			h = mix(h, u64(b))

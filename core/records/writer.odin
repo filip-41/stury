@@ -189,7 +189,8 @@ begin :: #force_inline proc(wr: ^Writer) {
 @(private)
 end :: #force_inline proc(wr: ^Writer, kind: core.Typed_Error_Kind, pathed: bool) -> core.Typed_Error_Kind {
 	t := &wr.tokens
-	if t.spell.line == nil {
+	// A binary item ends itself, so a sequence of them has nothing between.
+	if t.spell.line == nil && len(t.spell.tree[.Heads]) == 0 {
 		cw.put_byte(t.out, '\n')
 	}
 	if kind != .None || t.out.err != .None {

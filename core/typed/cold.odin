@@ -40,14 +40,14 @@ indirect :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t
 				return judged_open(h, regs, t, fld, m, dest)
 			}
 		}
+		lo, hi := value_ends(h, t)
 		if t.kind == .Object || t.kind == .Array {
 			f := &h.frames[h.sp]
 			h.sp += 1
-			f.a, f.b, f.c, f.data, f.seen, f.kind = regs.a, regs.b, regs.c, rawptr(uintptr(t.lo)), 0, t.kind
+			f.a, f.b, f.c, f.data, f.seen, f.kind = regs.a, regs.b, regs.c, rawptr(uintptr(lo)), 0, t.kind
 			f.owner, f.target = fld, dest
 			return {NO_LIMIT, u64(uintptr(&h.plan.fields[3])), 0}, .Next
 		}
-		lo, hi := core.scalar_ends(t)
 		when H == Check {
 			if fld.kind == .Before {
 				back, action := extra_of(h.plan, m).before.value(h, regs, m, dest, t.kind, lo, hi)
@@ -330,7 +330,7 @@ pick_arm :: proc(h: ^Reader, t: core.Token, m: ^Meta) -> (arm: int, reason: core
 		class = .Bool
 	case .Number:
 		class = .Number
-	case .String:
+	case .String, .Bytes:
 		class = .String
 	case .Object:
 		class = .Object
@@ -985,8 +985,9 @@ find_member :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Reg
 member_index :: #force_inline proc "contextless" (h: ^Reader, owner: ^Field, m: ^Meta, key: string) -> int #no_bounds_check {
 	want := u32(len(key)) + h.plan.key_frame
 	at := ([^]Field)(owner.first)
+	slack := h.plan.key_slack
 	for i in 0 ..< int(m.members) {
-		if (at[i].n == want || at[i].n == 0) && h.plan.meta[at[i].meta].name == key {
+		if (at[i].n - want <= slack || at[i].n == 0) && h.plan.meta[at[i].meta].name == key {
 			return i
 		}
 	}
@@ -1215,13 +1216,30 @@ map_slot :: proc(h: ^Reader, m: ^Meta, raw: ^runtime.Raw_Map, key: string, t: co
 	return s, .None
 }
 
-// Stores a byte string: a string token's base64 text decoded.
+// Stores a byte string: a `Bytes` token's payload, or in a text format a string token's base64 text decoded.
 @(cold)
 store_bytes :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, dest: ^Bytes) -> core.Typed_Error_Kind {
 	context = h.ctx
 	payload: []u8
 	#partial switch t.kind {
+	case .Bytes:
+		if t.spelling & core.SPELLING_DECODE != 0 {
+			s, ok := core.token_text(h.plan.readers, &h.view, t, context.allocator)
+			if !ok {
+				return .No_Memory
+			}
+			dest^ = Bytes(transmute([]u8)s)
+			return .None
+		}
+		payload = raw_data(h.src)[t.lo:][:t.n]
+		if h.borrow {
+			dest^ = Bytes(payload)
+			return .None
+		}
 	case .String:
+		if h.plan.readers.binary {
+			return .Wrong_Kind
+		}
 		text, ok := core.token_text(h.plan.readers, &h.view, t, context.temp_allocator)
 		if !ok {
 			return .No_Memory

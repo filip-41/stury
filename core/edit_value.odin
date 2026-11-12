@@ -65,8 +65,9 @@ set_spelled :: proc(list: ^Edit_List, node: Node_Index, n: Node, v: Value) -> Er
 	if e != nil {
 		return e
 	}
-	// A value spelled as the node already is makes no edit.
-	if bytes.equal(text, span(doc, node)) {
+	// A value spelled as the node already is makes no edit. A binary node's span leaves out its head, so it is no
+	// spelling to compare.
+	if !doc.readers.binary && bytes.equal(text, span(doc, node)) {
 		if owned {
 			delete(text, list.allocator)
 		}

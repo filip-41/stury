@@ -98,7 +98,7 @@ Item :: struct {
 | `Raw` | any value, as the format spells it |
 | `core.Value` | any value, built: a number past a double keeps its digits. The plan needs the reads of its format (`json.reads`), else `.Unsupported` |
 | `Number_Text` | a number's text |
-| `Bytes` | a byte string: a string of RFC 4648 base64 with padding, refused as `.Wrong_Kind` when it is not the one canonical spelling of some bytes |
+| `Bytes` | a byte string: a string of RFC 4648 base64 with padding in a text format, refused as `.Wrong_Kind` when it is not the one canonical spelling of some bytes, and a `Bytes` token's payload in a binary format, where a `String` token is `.Wrong_Kind` |
 | `core.Number` | a number |
 | `Scalar` | a scalar: `Null`, `bool`, `i64`, `u64`, `f64`, `Number_Text` or `string` |
 | `any` | any value. A container is boxed as `map[string]any` or `[dynamic]any`, a scalar as its `Scalar` arm, `null` as nil |
@@ -132,8 +132,8 @@ fixed array whose element has no size, a type of 4 GiB or more, and the rest of 
 ## Strings and who owns them
 
 A string, `Raw`, `Number_Text`, `Bytes` and map key are copied with the read's allocator by default. `borrow_strings` makes a string
-with nothing to decode, and a `Raw` or `Number_Text`, a slice of `src`, so `src` must outlive the target. A string with an
-escape is always decoded into the allocator, and `Bytes` is always a copy, which the caller frees with `delete`.
+with nothing to decode, and a `Raw`, `Number_Text` or a binary format's `Bytes` not in chunks, a slice of `src`, so `src` must outlive the target. A string with an
+escape is always decoded into the allocator, and `Bytes` from base64 text is always a copy, which the caller frees with `delete`.
 
 The fastest form is an arena allocator with `borrow_strings`. To free the input after such a read, or to keep a read's
 strings independent of a large buffer, read without `borrow_strings`, or clone `src` into the same arena first and read
@@ -304,6 +304,8 @@ The read is a walk hook, `on_token`, on the same walks as `build`. Its state is 
 |---|---|
 | `Readers.tag_key` | the format's struct tag key |
 | `Readers.key_open`, `key_close` | what a key is written between, empty for a format whose keys the hook finds itself |
+| `Readers.key_bytes` | the bytes a member's key is written with, for a binary format, which the plan compares in place of `key_open + name + key_close` |
+| `Readers.binary` | that a `String` token is never bytes, so `Bytes` refuses it |
 | a walk calling `$on` with `Hook_Regs` | tokens. `expect` and `mant` on the hook are used when the format's walk has them |
 | `find_tag` on the `Reader` | the member `union_tag` of an object at a byte, by a walk with `on_tag_token` |
 | an entry | builds a stack of `MAX_DEPTH + 2` `Frame`s, calls `read_start`, the walk and `read_end` |

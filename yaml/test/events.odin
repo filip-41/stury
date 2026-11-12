@@ -157,7 +157,7 @@ record :: proc "contextless" (r: ^Recorder, s: core.Hook_Regs, t: core.Token) ->
 			inject_at_elems(&r.out.buf, top.mark, marker[0], marker[1], marker[2])
 		}
 		strings.write_string(&r.out, "-SEQ\n" if top.seq else "-MAP\n")
-	case .Null, .False, .True, .Number, .String, .Plain:
+	case .Null, .False, .True, .Number, .Bytes, .String, .Plain:
 		strings.write_string(&r.out, "=VAL")
 		properties(r, &r.props)
 		style: string
