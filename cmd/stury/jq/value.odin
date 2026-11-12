@@ -7,7 +7,6 @@ package jq
 
 import "base:intrinsics"
 import "base:runtime"
-import "core:hash"
 import "core:slice"
 import "core:strings"
 import core_pkg "../../../core"
@@ -20,6 +19,8 @@ Number_Text :: core_pkg.Number_Text
 Array :: core_pkg.Array
 Object :: core_pkg.Object
 Ref :: core_pkg.Node_Ref
+has_repeated_key :: core_pkg.has_repeated_key
+distinct_keys :: core_pkg.distinct_keys
 Commented :: core_pkg.Commented
 Comment_From :: core_pkg.Comment_From
 INDEX_FROM :: core_pkg.INDEX_FROM
@@ -314,28 +315,6 @@ is_empty :: proc(v: Value) -> bool {
 	return length_of(v) == 0
 }
 
-// The keys of a document object in source order, a repeated one each time.
-@(private = "file")
-next_key :: #force_inline proc(it: ^core_pkg.Pair_Iter) -> (string, bool) {
-	k, _, ok := core_pkg.pair_next(it)
-	if !ok {
-		return "", false
-	}
-	return node_string(it.doc, k), true
-}
-
-// The members of an object with a repeated key, which is one member, as jq reads it. Kept out of
-// length_of, whose frame would otherwise cost every call, the hot ones from compare and iterate too.
-@(private = "file")
-distinct_keys :: #force_no_inline proc(r: Ref) -> int {
-	seen := make(map[string]bool, core_pkg.length(r.doc, r.node), context.temp_allocator)
-	it := core_pkg.pairs(r.doc, r.node)
-	for k in next_key(&it) {
-		seen[k] = true
-	}
-	return len(seen)
-}
-
 // A document array read at or past this position is indexed first, so each read is a lookup and not a walk from the
 // first member. Below it the walk is cheaper than the index.
 INDEX_MEMBERS_FROM :: 256
@@ -405,6 +384,9 @@ object_get :: proc(v: Value, k: string) -> (Value, bool) {
 		}
 		return x.vals[i], true
 	case Ref:
+		if core_pkg.is_markup(x.doc) {
+			return core_pkg.markup_member(x, k)
+		}
 		node, ok := core_pkg.member(x.doc, x.node, k)
 		if !ok {
 			return nil, false
@@ -487,7 +469,8 @@ own :: proc(value: Value) -> Value {
 }
 
 // The members of a container in order: an array's elements, an object's values with their keys. A
-// document object's repeated key yields once, at its first place, with its last value, as jq reads it.
+// document object's repeated key yields once, at its first place, with its last value, as jq reads it, or a markup
+// document's with the array of each of its values (`core.markup_members`).
 Members :: struct {
 	v:     Value,
 	i, n:  int,
@@ -512,6 +495,10 @@ iterate :: proc(value: Value) -> Members {
 		} else {
 			it.pairs = core_pkg.pairs(r.doc, r.node)
 			it.dupes = has_repeated_key(r)
+			if it.dupes && core_pkg.is_markup(r.doc) {
+				members := core_pkg.markup_members(r)
+				return Members{v = members, n = len(members.keys)}
+			}
 			if it.dupes {
 				it.last = new(map[string]core_pkg.Node_Index)
 				all := it.pairs
@@ -524,83 +511,12 @@ iterate :: proc(value: Value) -> Members {
 	return it
 }
 
-has_repeated_key :: proc(r: Ref) -> bool {
-	n := core_pkg.length(r.doc, r.node)
-	if n < 2 {
-		return false
-	}
-	it := core_pkg.pairs(r.doc, r.node)
-	if n <= 16 {
-		keys: [16]string = ---
-		// A key's length and end bytes set a bit, so only a key whose bit is set is compared with the ones before it.
-		seen: [4]u64
-		i := 0
-		for k in next_key(&it) {
-			h := u32(len(k))
-			if len(k) > 0 {
-				h = h * 7 + u32(k[0]) * 31 + u32(k[len(k) - 1]) * 131
-			}
-			bit := u64(1) << (h & 63)
-			if seen[(h >> 6) & 3] & bit != 0 {
-				for prev in keys[:i] {
-					if prev == k {
-						return true
-					}
-				}
-			}
-			seen[(h >> 6) & 3] |= bit
-			keys[i] = k
-			i += 1
-		}
-		return false
-	}
-	if n <= KEY_TABLE / 2 {
-		return repeats_in_table(&it)
-	}
-	seen := make(map[string]bool, n, context.temp_allocator)
-	defer delete(seen)
-	for k in next_key(&it) {
-		if k in seen {
-			return true
-		}
-		seen[k] = true
-	}
-	return false
-}
-
 // Whether an object in the subtree of `r` repeats a key.
 repeats_key :: proc(r: Ref) -> bool {
 	end := r.node + core_pkg.Node_Index(r.doc.nodes[r.node].n)
 	for i := r.node; i < end; i += 1 {
 		if r.doc.nodes[i].kind == .Object && has_repeated_key({r.doc, i}) {
 			return true
-		}
-	}
-	return false
-}
-
-// Slots of `repeats_in_table`'s open-addressed table, kept at most half full.
-@(private = "file")
-KEY_TABLE :: 256
-
-// `has_repeated_key` for an object of up to KEY_TABLE / 2 members, hashed on the stack, not in a map.
-@(private = "file")
-repeats_in_table :: proc(it: ^core_pkg.Pair_Iter) -> bool {
-	slots: [KEY_TABLE]u8 // a key's place in `keys`, plus one, 0 is empty
-	keys: [KEY_TABLE / 2]string = ---
-	i := 0
-	for k in next_key(it) {
-		h := hash.fnv32a(transmute([]byte)k)
-		for s := h % KEY_TABLE;; s = (s + 1) % KEY_TABLE {
-			if slots[s] == 0 {
-				keys[i] = k
-				i += 1
-				slots[s] = u8(i)
-				break
-			}
-			if keys[slots[s] - 1] == k {
-				return true
-			}
 		}
 	}
 	return false

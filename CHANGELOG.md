@@ -4,21 +4,39 @@
 
 ### Command line
 
-- `--from toml` and `yaml` read TOML 1.1 and YAML 1.2 with the core schema (each document of a stream an input), and
-  `--to toml` and `yaml` write TOML 1.0 and YAML in block or flow style. `check`, `check --schema`, `fmt`, `diff`,
-  `schema infer` and `--explain` take both, and `--follow` takes YAML.
+- `--from toml`, `yaml` and `xml` read TOML 1.1, YAML 1.2 with the core schema (each document of a stream an input)
+  and XML 1.0 with its internal subset, and `--to toml`, `yaml` and `xml` write TOML 1.0, YAML in block or flow style,
+  and XML. `check`, `check --schema`, `fmt`, `diff`, `schema infer` and `--explain` take each, and `--follow` takes
+  YAML. `--to xml` and `fmt --from xml` keep an XML document's doctype, comments, instructions, attributes and
+  references as written.
+- An XML element's name that repeats among its members reads as one member, an array of each of them in
+  document order, and a name that stands once as a single value: `<r>a<b>1</b>c<b>2</b></r>` is
+  `{"r":{"#text":["a","c"],"b":["1","2"]}}` to a filter, `--to json`, `--to yaml`, `--to toml`, `--to cbor`, `diff` and
+  `schema infer`. `--to xml` writes an array under `#text` as its runs.
 - `--from cbor` reads each item of an RFC 8742 sequence as an input, in any serialization, and `--to cbor` writes CBOR
   in its preferred serialization. A byte string reads as its base64 and a byte string key as its bytes. `check`,
   `check --schema`, `fmt`, `edit`, `diff` and `schema infer` take it, an edit keeps the bytes of every item it does not
   reach, and `--follow` is refused.
 - `--alias-limit N` and `--merge-keys` set how `--from yaml` reads: the bytes aliases may read again, and `<<` as
-  YAML 1.1's merge key. With another `--from` each is a usage error.
+  YAML 1.1's merge key. `--expansion-limit N` and `--unread-entities` set how `--from xml` reads: the bytes entity
+  references may expand to, and a reference to an entity no declaration stury read names, read as its own text.
+  `--infer` types the text of XML as it types a table's cells. With another `--from` each is a usage error.
 - `.@tag`, `.@anchor`, `.@alias` and `.@style` read a value's tag, anchor, alias and spelling: a TOML datetime's type,
   a number's form and a string's quoting, and a YAML node's tag, anchor, alias and style. `.@tag`, `.@anchor` and
   `.@alias` take a string or `null`, travel with their value as comments do, and `edit` writes them in YAML.
   `.@style` is read only. A CBOR tag reads as its number, and `.@tag` takes a number too.
+- `.@name`, `.@namespace`, `.@content`, `.@attrs`, `.&name` (or `.&"name"`), `.@pi` and `.@doctype` read an XML
+  element's name as written, its namespace, its text with its descendants', its attributes, one attribute by its name
+  as written, the processing instructions before a node and the document type. They are `null` outside XML, and in a
+  path `.&k` is the step `{"fact": "attribute", "name": "k"}`. `.&k = "v"` and `del(.&k)` write and
+  remove an attribute, which `edit --from xml` writes into the start tag. The others are read only.
 - `edit --from toml` keeps every byte the output does not change: a new member joins its table's lines, a built table
   is a `[section]`, a dropped line goes with the comments above it, and `null` is refused with the reason.
+- `edit --from xml` keeps every byte the output does not change: a value is written between its element's tags, a
+  new member is an element laid out as its neighbour, a dropped one goes with the white space before it, and a
+  renamed key respells both tags. A repeated name's array edits its elements one by one, `.r.b[1]` the second `b` and
+  `."#text"[1]` the second text run, and the members keep their document order across names. A change of member order
+  and a key that is no XML name are refused with the reason.
 - `edit --from yaml` edits each document of a stream as a record: a document with no output is dropped, each output
   past the first is a new document after it, `-s` runs the filter on the array of the documents, and a new or moved
   document starts with a `---` line. A text of comments alone is written back as it is, and `--diff` takes no stream of
@@ -215,6 +233,32 @@
   order, and any edit of a text with a `<<` read under `merge_keys` are `.Frozen`.
 - `yaml.checks` and `yaml.bind_schema` give a model the format and bind a JSON Schema, so a model loads and a schema
   judges YAML texts.
+- New package `xml`: XML 1.0 (Fifth Edition) in UTF-8, with namespaces and the internal subset: entities, parameter
+  entities, attribute defaults and normalization, an expansion budget (`Options.max_expansion`), and the
+  `Unread_Entity` tolerance for references a processor that reads no external entity cannot expand. `xml.validate`,
+  `walk`, `build`, `scan`, `find`, `each_answer` and `query` read an element as a member under its name, its text as
+  its value or a `#text` member, and its attributes as facts of the `Attribute` role. A path step and
+  `xml.attribute_value` take an expanded name `{uri}local`. The W3C XML Conformance Test Suite runs against it.
+- `xml.unmarshal`, `check`, `reads`, `plan_make`, `plan_of` and `number` read XML into typed values: a struct member
+  reads an attribute, a child element or the `#text` of an element by its name, a list collects the siblings of its
+  name, and a text reads as a number, a boolean or a union arm by the member's type. `xml.marshal` writes a typed
+  value as the elements `xml.write` writes, and an empty list, text or struct is `.Unwritable` unless `omitempty`
+  leaves it out.
+- An XML text is one record under `.Concatenated`: `xml.records_open`, `records_open_stream`, `records_check`,
+  `records_each` and `record_docs`, and `xml.answers` gives a path's answers one at a time. `xml.walk` takes a
+  `^Cursor` that `walk_resume` continues after any token.
+- `xml.write` and `core.write` with `xml.as` write a document of any format whose root is an object of one member as
+  XML. The document of an XML text is written from its spans, keeping its attributes, namespace declarations,
+  references, doctype, comments and processing instructions where they stood. Any other is escaped with its comments
+  kept, and what XML cannot spell so that it reads back, such as a key that is no XML name or a nested array, is
+  `.Unwritable`. `xml.tokens_init` starts a token write that refuses what `xml.write` refuses.
+- `xml.set`, `xml.edit_list_init` and the handle's edit services edit an XML text keeping every byte the edits do not
+  reach: a set writes an element's content between its tags, keeping its attributes, an array on a name fills its
+  elements in order, an insert is an element laid out by the white space before its neighbour, a removal takes that
+  white space, and comments and attributes are facts. A change of member order, a key that is no XML name and markup
+  in a text run are `.Frozen` with the reason.
+- `xml.checks` and `xml.bind_schema` give a model the format and bind a JSON Schema. A model and a schema read an
+  element's attributes and child elements as members, and its text as `#text`.
 - New package `cbor`: CBOR (RFC 8949) through the calls of the other formats.
   A byte string is `Kind.Bytes`, a tag is a fact before its content (`fact_value(.., .Tag)` gives the nearest tag's
   number), an integer key reads as its decimal digits and is written back as an integer, and `1` and `"1"` are one key.
@@ -235,15 +279,17 @@ The hooks the formats share:
 
 - `typed.Bytes` reads a byte string from a string of RFC 4648 base64, and a format writes one as that string, YAML
   under `!!binary` (`write.value_bytes`).
-- `core.Role` gains `Tag`, `Anchor` and `Alias`, facts beside the comments. `core.fact_value` reads a named fact
-  (`Fact_Name`: `Tag`, `Anchor`, `Alias`, `Style`), from a span or from what the node's spelling carries. `set_fact`
-  takes the property roles in a format that spells them. `Fact.kind` lets a tag be a number, which `fact_number`
-  reads.
+- `core.Role` gains `Tag`, `Anchor`, `Alias`, `Instruction` and `Doctype`, facts beside the comments. `core.fact_value`
+  reads a named fact (`Fact_Name`: `Tag`, `Anchor`, `Alias`, `Style`, `Name`, `Namespace`, `Content`), from a span or
+  from what the node's spelling carries, and `attributes_of` walks a markup element's attributes. `set_fact` takes the
+  property roles in a format that spells them. `Fact.kind` lets a tag be a number, which `fact_number` reads.
 - `core.doc_number_text` gives a number's decimal digits where its span is not its text, and `equal`, `compare`, `hash`
   and `uniqueItems` take such a number by its digits.
-- `Readers` gains `fact`, `number_text`, `key_bytes` and `binary`, and `Edit_Services` gains `prefix`, `relocate` and `commit`, for a
-  format whose edits do not fit one range per container. An edit a format's commit may not make is
-  `Document_Error_Kind.Frozen`. `core.Site` says where an edit's text stands, and `write.tokens_init` takes one.
+- `Readers` gains `fact`, `number_text`, `key_bytes`, `binary`, `key_is` and `room`, and `Edit_Services` gains `prefix`,
+  `relocate`, `frozen` and `commit`, for a format whose edits do not fit one range per container. An edit of a node a
+  format freezes is `Document_Error_Kind.Frozen`. `core.Site` says where an edit's text stands, and `write.tokens_init`
+  takes one.
+- `SPELLING_SYNTHETIC` marks a key or text no span of the source spells, as a markup element's `#text`.
 - `write.Tagged_Text` and `write.value_tagged` write a string with its format's type tag, as a TOML datetime, and
   `write.Token_Spelling.end` turns a token write's finished text into the format's own.
 - `records.open`, `Stream_Options` and `json.records_open` take `entries`, a path of keys to the container whose
@@ -457,8 +503,11 @@ The hooks the formats share:
   and `make lint` checks both. `tools/checks.py` states the rule that splits them.
 - `make help` lists the targets. `make api-write`, `lint-man` and `lint-fixtures` are new, `make check` names the rule
   a failure broke, and the Makefile refuses an Odin release older than `MIN_ODIN`, `dev-2026-11`.
+- `make` fetches the W3C XML Conformance Test Suite (`xml/test/conformance/fetch.py`) before it runs `xml/test`, since
+  its files cannot be in the repository.
 - `make test-cli` runs `cmd/stury/test/smoke.py`, and `smoke.floor` is empty: every smoke case passes. It also runs
-  toml-test and the yaml-test-suite through the command line (`toml_suite.py`, `yaml_suite.py`). CI runs the
+  toml-test and the yaml-test-suite through the command line (`toml_suite.py`, `yaml_suite.py`), and `make diff-xml`
+  compares the XML walk with expat on seeded random texts. CI runs the
   examples. The tree is pinned to Odin `dev-2026-11a` on LLVM 22.
 
 ## 0.1.1 (2026-11-05)

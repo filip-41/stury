@@ -47,6 +47,12 @@ SPELLING_QUOTED :: u16(2)
 // Bit 2 is set on a JSON string or a dsv cell that holds an ill-formed UTF-8 sequence `Invalid_Utf8` reads as U+FFFD,
 // so its decode may grow past its span.
 SPELLING_LAX :: u16(4)
+// A key or text that no span of the source spells: the format's `text` and `key_equals` make it, as a markup format's
+// `#text` member and `@name` attribute keys, whose span is `n` bytes of the name or none. Both bits are set, so the
+// decode may be longer than the span and a writer does not copy the span as authored.
+SPELLING_SYNTHETIC :: SPELLING_DECODE | SPELLING_LAX
+// The bytes a decode of a `SPELLING_LAX` token may hold past three times its span.
+DECODE_SLACK :: 8
 
 // The spelling bits of a text that holds an escape (`escaped`) or a sequence a tolerance accepted (`lax`):
 // `SPELLING_DECODE` for either and `SPELLING_LAX` for the latter.
@@ -78,7 +84,8 @@ comment_tail :: #force_inline proc "contextless" (spelling: u16) -> u64 {
 // in the next, so core slices a body without knowing a format's markers. A `//` comment leads with two bytes and trails
 // none, a `/* */` comment leads and trails with two, and a delimited text's comment line leads with one. An attribute's
 // `spelling` has the same layout: it leads through the value's opening quote and trails with the closing one, so its
-// body is the value as written, and a valueless attribute leads with its whole span. Only a comment role is a comment:
+// body is the value as written, and a valueless attribute leads with its whole span. A lead past 255 bytes is stored
+// as 255, and then only the format's `attribute` finds the value. Only a comment role is a comment:
 // a writer or an edit that walks facts by their markers tests the role first.
 Fact :: struct {
 	lo:       u64,
@@ -172,6 +179,10 @@ doc_pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok
 Token_View :: struct {
 	src:      []u8,
 	using as: As,
+	// The format's own tables for `src`, which a token's text may need past its span and the handle, as an XML text's
+	// entity and attribute declarations are. Empty for a format or a text with none. A document's are in its
+	// allocator: `destroy` frees them and `clone` copies them.
+	state:    []u8,
 }
 
 // A `Document` holds the walk's tokens over the caller's bytes, the facts beside them, and the format's `Readers`
@@ -351,7 +362,11 @@ Duplicates :: enum u8 {
 // a format whose number span is the text, see `doc_number_text`. `key_bytes` returns the bytes a member named `name`
 // is written with, a key head and the name, in `buf` of `len(name) + 16` bytes, which a typed plan compares as a
 // key's text is compared. It is nil for a format whose keys are written between `key_open` and `key_close`. `binary`
-// says the format holds a byte string kind, so a `String` token is text and never bytes.
+// says the format holds a byte string kind, so a `String` token is text and never bytes. `key_is` compares the key at
+// node `i` to a name that needs the key's place in the document, an expanded XML name whose namespace an ancestor
+// declares, and is nil for a format whose `key_equals` needs no more. `room` returns the bytes that hold the decode of
+// a token of `n` source bytes at `lo`, for a format whose decode may outgrow its span past what its spelling bits say,
+// as an XML entity reference does. It is nil for a format whose decodes `text_room` sizes from the bits.
 Readers :: struct {
 	text:        proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
 	key_equals:  proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool,
@@ -371,6 +386,8 @@ Readers :: struct {
 	fact:        proc(doc: ^Document, i: Node_Index, name: Fact_Name) -> (Fact_Value, bool),
 	number_text: proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
 	key_bytes:   proc(name: string, buf: []u8) -> []u8,
+	key_is:      proc "contextless" (doc: ^Document, i: Node_Index, name: string) -> bool,
+	room:        proc(v: ^Token_View, lo: u64, n: u32) -> int,
 }
 
 // The run-time services of a handle, which a call that chooses its format at run time reaches through
@@ -436,6 +453,9 @@ Edit_Services :: struct {
 	// document and writes at another place, and `ok` false when the format cannot spell the node there. It is nil for a
 	// format whose nodes keep their bytes anywhere.
 	relocate:      proc(doc: ^Document, node: Node_Index, site: Site, allocator: runtime.Allocator) -> (text: []u8, ok: bool),
+	// Says why an edit may not touch `node`, as the `rules` and the `detail` of a message in them, and returns nil
+	// `rules` for a node an edit may touch. It is nil for a format whose nodes are all editable.
+	frozen:        proc(doc: ^Document, node: Node_Index) -> (rules: ^Rules, detail: u8),
 	// Returns the source bytes `list`'s edits make, as the spec byte `spec`, in place of `core/compose`'s commit, for a
 	// format whose containers are not one range of bytes to compose around, as a table written in sections or a text of
 	// lines at an indentation. It places each edit's text at its site itself, so a value `spell` writes is recorded as it
@@ -473,6 +493,9 @@ Fact_Name :: enum u8 {
 	Anchor,
 	Alias,
 	Style,
+	Name, // a markup element's name as written
+	Namespace, // a markup element's namespace URI, absent for a name in none
+	Content, // a markup element's string value: its text and its descendants' in document order
 }
 
 // A named fact's value: its text, and `numeric` when the text spells a number, as a CBOR tag does.
@@ -497,7 +520,7 @@ fact_value :: proc(doc: ^Document, i: Node_Index, name: Fact_Name) -> (Fact_Valu
 		role = .Anchor
 	case .Alias:
 		role = .Alias
-	case .Style:
+	case .Style, .Name, .Namespace, .Content:
 	}
 	if role != .Value && len(doc.facts) > 0 {
 		for f in all_facts(doc, i) {
@@ -544,6 +567,7 @@ destroy :: proc(doc: ^Document) {
 	}
 	delete(doc.indexed)
 	delete(doc.reads_block, doc.allocator)
+	delete(doc.state, doc.allocator)
 	doc^ = {}
 }
 
@@ -553,13 +577,18 @@ destroy :: proc(doc: ^Document) {
 clone :: proc(doc: ^Document, allocator := context.allocator) -> (c: Document, err: runtime.Allocator_Error) {
 	c = doc^
 	c.allocator = allocator
-	c.nodes_alloc, c.facts_alloc, c.counts_alloc, c.reads_block = nil, nil, nil, nil
+	c.nodes_alloc, c.facts_alloc, c.counts_alloc, c.reads_block, c.state = nil, nil, nil, nil, nil
 	c.indexed = nil
 	if owns_tables(doc) {
 		c.tables_at, c.n_tables = nil, 0
 	}
 	defer if err != nil {
 		destroy(&c)
+	}
+	if len(doc.state) > 0 {
+		// A format's tables hold words of up to 8 bytes.
+		c.state = runtime.mem_alloc_bytes(len(doc.state), 16, allocator) or_return
+		copy(c.state, doc.state)
 	}
 	c.nodes_alloc = slice.clone(doc.nodes, allocator) or_return
 	c.facts_alloc = slice.clone(doc.facts, allocator) or_return
@@ -727,6 +756,9 @@ key_equals :: #force_inline proc "contextless" (doc: ^Document, i: Node_Index, n
 // Out of line, so the hot loop of `member` passes the document and index as before and holds no token.
 @(private, cold)
 key_equals_decode :: #force_no_inline proc "contextless" (doc: ^Document, i: Node_Index, name: string) -> bool {
+	if doc.readers.key_is != nil {
+		return doc.readers.key_is(doc, i, name)
+	}
 	return doc.readers.key_equals(&doc.view, doc.nodes[i], name)
 }
 
@@ -1090,16 +1122,28 @@ text_room :: proc(doc: ^Document, i: Node_Index) -> int {
 	if int(i) >= len(doc.nodes) || doc.nodes[i].kind > .Plain || doc.nodes[i].spelling & SPELLING_DECODE == 0 {
 		return 0
 	}
-	return decoded_room(doc.nodes[i].spelling, int(doc.nodes[i].n))
+	n := doc.nodes[i]
+	return view_room(doc.readers, &doc.view, n)
+}
+
+// The bytes that hold the decode of token `t` in `view`: the format's `room` when it has one, else what the token's
+// spelling bits say.
+@(private)
+view_room :: #force_inline proc(readers: ^Readers, view: ^Token_View, t: Token) -> int {
+	room := decoded_room(t.spelling, int(t.n))
+	if readers != nil && readers.room != nil {
+		room = max(room, readers.room(view, t.lo, t.n))
+	}
+	return room
 }
 
 // Returns the bytes that hold the decode of a token of `n` span bytes with `spelling`. A decode never yields more
 // bytes than its span, except that a tolerated ill-formed sequence reads as U+FFFD, three bytes for one source byte,
-// and a token that holds one carries `SPELLING_LAX`.
+// and a token that holds one carries `SPELLING_LAX`, as a `SPELLING_SYNTHETIC` token does for its added bytes.
 @(private)
 decoded_room :: #force_inline proc "contextless" (spelling: u16, n: int) -> int {
 	if spelling & (SPELLING_DECODE | SPELLING_LAX) == SPELLING_DECODE | SPELLING_LAX {
-		return 3 * n + 4
+		return 3 * n + DECODE_SLACK
 	}
 	return n
 }
@@ -1110,7 +1154,7 @@ token_text :: proc(readers: ^Readers, view: ^Token_View, t: Token, allocator: ru
 	if t.spelling & SPELLING_DECODE == 0 {
 		return string(node_text(view.src, t)), true
 	}
-	room := decoded_room(t.spelling, int(t.n))
+	room := view_room(readers, view, t)
 	buf, err := runtime.mem_alloc_non_zeroed(room, 1, allocator)
 	if err != nil {
 		return "", false
@@ -1134,7 +1178,7 @@ text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator
 	if n.kind > .Plain {
 		return "", false
 	}
-	size := decoded_room(n.spelling, int(n.n))
+	size := view_room(doc.readers, &doc.view, n)
 	raw, err := runtime.mem_alloc_non_zeroed(size, 1, allocator)
 	if err != nil {
 		return "", false

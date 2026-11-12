@@ -596,7 +596,7 @@ join :: proc(src: []u8, as: core.As, job: ^Build_Job, allocator: runtime.Allocat
 		}
 	}
 	slice.sort_by(counts[:], proc(a, b: core.Child_Count) -> bool { return a.node < b.node })
-	doc = {view = {src, as}, nodes = nodes, nodes_alloc = job.nodes, counts = counts[:], counts_alloc = counts[:], allocator = allocator}
+	doc = {view = {src = src, as = as}, nodes = nodes, nodes_alloc = job.nodes, counts = counts[:], counts_alloc = counts[:], allocator = allocator}
 	doc.root_close = frame.root_close + cut if frame.root_close > lo else frame.root_close
 	return doc, true
 }

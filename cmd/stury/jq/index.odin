@@ -168,6 +168,9 @@ index_value :: proc(ip: ^Interp, t: Value, key: Value) -> (Value, Signal) {
 		switch kind(key) {
 		case .Object:
 			if fact, is_fact := fact_step(key); is_fact {
+				if fact == .Attribute {
+					return attributes_value(t, attribute_step_name(key), true), .Go
+				}
 				return fact_value(t, fact), .Go
 			}
 			if tk == .Null {

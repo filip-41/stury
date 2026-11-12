@@ -345,10 +345,18 @@ pick_arm :: proc(h: ^Reader, t: core.Token, m: ^Meta) -> (arm: int, reason: core
 	return 0, .No_Arm if no_arm else .Wrong_Kind, {}
 }
 
-// A value read whole, built from the text `lo..hi` in the read's allocator by the plan's `build`, which the reads it was
-// made with give. A plan with none is `.Unsupported`.
+// A value read whole in the read's allocator, under `.First` keeping a repeated key's first member and else as
+// `core.built_value` reads a node by default, so a markup document's repeated name is an array. A document's read
+// takes the node the feed is giving, a text's builds `lo..hi` by the plan's `build`, which the reads it was made with
+// give, and a plan with none is `.Unsupported`.
 @(private)
 store_value :: proc(h: ^Reader, lo, hi: u64, dest: ^core.Value) -> core.Typed_Error_Kind {
+	dups := core.Duplicates.First if h.first_key else .Default
+	if h.find_tag == document_tag {
+		d := (^Document_Read(Reader))(h.format)
+		dest^ = core.built_value({d.doc, d.at}, dups, h.borrow)
+		return .None
+	}
 	build := plan_text_build(h.plan)
 	if build == nil {
 		return .Unsupported
@@ -372,7 +380,7 @@ store_value :: proc(h: ^Reader, lo, hi: u64, dest: ^core.Value) -> core.Typed_Er
 		return .Unsupported
 	}
 	defer core.destroy(&doc)
-	dest^ = core.built_value({&doc, core.ROOT}, .First if h.first_key else .Last, h.borrow)
+	dest^ = core.built_value({&doc, core.ROOT}, dups, h.borrow)
 	return .None
 }
 

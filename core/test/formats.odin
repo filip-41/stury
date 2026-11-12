@@ -230,6 +230,49 @@ token_writer_start_reads_the_site :: proc(t: ^testing.T) {
 	}
 }
 
+toy_frozen_a :: proc(doc: ^core.Document, node: core.Node_Index) -> (rules: ^core.Rules, detail: u8) {
+	if a, found := core.member(doc, core.ROOT, "a"); found && a == node {
+		return &TOY_RULES, 1
+	}
+	return nil, 0
+}
+
+@(rodata)
+TOY_RULES := core.Rules {
+	format  = "toy",
+	details = {{}, {code = "toy_alias", message = "the value is an alias"}},
+}
+
+// A node the format freezes is refused by every edit with the format's reason, and the other nodes take their edits.
+@(test)
+frozen_node_refuses_every_edit :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	doc, err := core.build(transmute([]u8)string(`{"a": 1, "b": [2]}`), json.as(.Json))
+	defer core.destroy(&doc)
+	walktest.expect_nil(t, err)
+	edit := core.services_of(doc.as).edit^
+	edit.frozen = toy_frozen_a
+
+	a, _ := core.member(&doc, core.ROOT, "a")
+	b, _ := core.member(&doc, core.ROOT, "b")
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	list.edit = &edit
+	refusal := core.set_text(&list, a, "3")
+	walktest.expect_kind(t, refusal, core.Document_Error_Kind.Frozen)
+	walktest.expect_kind(t, write.set(&list, a, 3), core.Document_Error_Kind.Frozen)
+	walktest.expect_kind(t, core.remove(&list, a), core.Document_Error_Kind.Frozen)
+	walktest.expect_kind(t, core.set_fact(&list, a, .Comment, "x"), core.Document_Error_Kind.Frozen)
+	b_text := strings.builder_make(context.temp_allocator)
+	core.render(strings.to_writer(&b_text), doc.src, refusal)
+	testing.expect_value(t, strings.to_string(b_text), "The node cannot be edited: the value is an alias")
+	walktest.expect_nil(t, core.set_text(&list, b, "[4]"))
+	out, _, cerr := compose.commit(&list)
+	defer delete(out)
+	walktest.expect_nil(t, cerr)
+	testing.expect_value(t, string(out), `{"a": 1, "b": [4]}`)
+}
+
 // A toy relocation: a node moved to another place is written between angle brackets with its column, and an array
 // has no spelling anywhere else.
 toy_relocate :: proc(doc: ^core.Document, node: core.Node_Index, site: core.Site, allocator: runtime.Allocator) -> ([]u8, bool) {

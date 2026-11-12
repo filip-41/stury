@@ -201,11 +201,11 @@ setpath :: proc(ip: ^Interp, v: Value, path: []Value, nv: Value, owned: ^Owned) 
 		return set_key(ip, v, key, nv, owned)
 	}
 	if kind(key) == .Object {
-		if fact, is_fact := fact_step(key); is_fact {
+		if _, is_fact := fact_step(key); is_fact {
 			if len(path) > 1 {
 				return nil, fact_step_not_last(ip)
 			}
-			return write_fact(ip, v, fact, nv)
+			return write_fact(ip, v, key, nv)
 		}
 	}
 	child, sig := index_value(ip, v, key)
@@ -434,7 +434,7 @@ delpaths_sorted :: proc(ip: ^Interp, v: Value, paths: [][]Value, start: int, own
 // `t` without the members `keys` name, as jq's jv_dels, and without the facts they name.
 @(private = "file")
 delete_keys :: proc(ip: ^Interp, t: Value, keys: []Value, owned: ^Owned) -> (Value, Signal) {
-	if rest, facts := split_fact_steps(keys); facts != {} {
+	if rest, facts := split_fact_steps(keys); len(facts) > 0 {
 		v, sig := delete_keys(ip, t, rest, owned)
 		if sig != .Go {
 			return nil, sig

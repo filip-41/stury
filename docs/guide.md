@@ -1,18 +1,19 @@
 # Library guide
 
-How to use `stury:json`, `stury:dsv`, `stury:toml`, `stury:yaml` and `stury:cbor`, with snippets from the programs in
-[examples/](../examples). A program imports the package of its format and calls everything through it. Each public
-name's doc comment is its contract, and
+How to use `stury:json`, `stury:dsv`, `stury:toml`, `stury:yaml`, `stury:xml` and `stury:cbor`, with snippets from the
+programs in [examples/](../examples). A program imports the package of its format and calls everything through it. Each
+public name's doc comment is its contract, and
 [API.txt](../API.txt) lists the names of the format packages, then the names a format's author reads.
 [API_SHARED.txt](../API_SHARED.txt) lists the public names that only the packages of this repository use. The files in this
 directory describe one part each: [document.md](document.md), [paths.md](paths.md), [typed.md](typed.md),
-[writer.md](writer.md) and [records.md](records.md), and [binary.md](binary.md) describes CBOR.
+[writer.md](writer.md) and [records.md](records.md), and two describe formats: [markup.md](markup.md) XML, and
+[binary.md](binary.md) CBOR.
 
 ## Requirements
 
 - Odin `dev-2026-11` or later. The collection is named `stury` and points at this directory: `-collection:stury=.`.
-  A program imports the package of each format it reads, `stury:json`, `stury:dsv`, `stury:toml`, `stury:yaml` or
-  `stury:cbor`. Each exports the names of `stury:core`,
+  A program imports the package of each format it reads, `stury:json`, `stury:dsv`, `stury:toml`, `stury:yaml`,
+  `stury:xml` or `stury:cbor`. Each exports the names of `stury:core`,
   `stury:core/typed`, `stury:core/write`, `stury:core/records`, `stury:core/schema` and `stury:host` that a user calls.
 - 64-bit little-endian targets: darwin and linux, on amd64 and arm64. The command line also builds on Windows.
 - On amd64 the floor is x86-64-v2. Long strings are scanned wider on processors that have AVX-512BW, chosen at run
@@ -27,6 +28,7 @@ directory describe one part each: [document.md](document.md), [paths.md](paths.m
 | `dsv` | the delimited formats, the same calls and names |
 | `toml` | TOML 1.0 and 1.1: the same calls, edits that keep every byte they do not reach, and `marshal` and `unmarshal` on the `toml` tag. A datetime is a string whose `Tag` fact names its type |
 | `yaml` | YAML 1.2 with the core schema: the same calls, edits, a stream's documents as records, and a writer that keeps comments, tags, anchors and scalar styles |
+| `xml` | XML 1.0 with the internal subset and namespaces: `validate`, `build`, `find`, `scan`, `query`, `unmarshal`, `marshal`, `write`, records, and checks by a model and a schema |
 | `cbor` | CBOR (RFC 8949): the encoding rules, documents, paths, a sequence's items as records, `marshal`, `unmarshal`, the writer and the checks. A byte string is `Kind.Bytes` |
 | `core` | what every format shares, and the interface a format's author or a run-time choice of format uses: `As`, `build` and `validate` over a handle |
 | `core/records` | NDJSON, RFC 7464 and CSV-style text as a sequence of records, reached as `records_check`, `records_open`, `records_open_stream`, `records_next`, `records_each` and the writer |
@@ -42,9 +44,9 @@ A format is a `Spec` value passed to each call. `json.Spec` is `.Json`, `.Jsonc`
 `.Tsv` or `.Plain`. `.Json` is strict RFC 8259. `.Jsonc` also takes comments and trailing commas, and `.Json5` takes the
 JSON5 grammar. A call that takes both a `Spec` and `Options` reads `Options` for the format's own settings, which for
 JSON are `max_depth`, `tolerate` and `refuse_non_finite`, and for dsv `no_header`, `delimiter`, `comment`, `tolerate`, `crlf` and `infer`.
-`toml.Spec` is `.Toml_1_0` or `.Toml_1_1`, and `yaml.Spec` is `.Yaml_1_2`. `cbor.Spec` is `.Cbor`, `.Preferred`,
-`.Deterministic` or `.Length_First`: `.Cbor` reads every well-formed item, and the others also refuse an item not in
-that serialization.
+`toml.Spec` is `.Toml_1_0` or `.Toml_1_1`, `yaml.Spec` is `.Yaml_1_2` and `xml.Spec` is `.Xml`.
+`cbor.Spec` is `.Cbor`, `.Preferred`, `.Deterministic` or `.Length_First`: `.Cbor` reads
+every well-formed item, and the others also refuse an item not in that serialization.
 
 ## Errors
 
@@ -311,7 +313,7 @@ if it.err != nil {
 takes the same arguments and builds the text at the first `next`, as every path read of TOML does, then gives its
 answers in batches.
 
-The iterator rides on a walk cursor. `json.walk`, `dsv.walk`, `yaml.walk`, `toml.walk` and `cbor.walk` take a `^Cursor`: a hook that returns
+The iterator rides on a walk cursor. `json.walk`, `dsv.walk`, `yaml.walk`, `toml.walk`, `cbor.walk` and `xml.walk` take a `^Cursor`: a hook that returns
 `.Stop` saves where the walk stood, and `walk_resume` continues from there over the same text, with every token after
 the stop delivered as an unbroken walk delivers it. A json cursor resumes after any token. A dsv cursor resumes after a
 record's end and holds the header's cells in `cursor.keys`, the caller's storage. A yaml cursor resumes after any token
@@ -320,7 +322,10 @@ gives the tokens it held first, a fault met on the way after them. It keeps that
 so `yaml.destroy(&cursor)` frees a cursor left holding a stop. A toml cursor resumes after any token: the walk reads the
 whole text into its tables before the first token, and a stop keeps those tables and where the walk stood on the heap
 until a resume ends the walk or `toml.destroy(&cursor)` frees them. A cbor cursor resumes after any token: a stop keeps
-the walk's open containers and where it stood on the heap, and `cbor.destroy(&cursor)` frees a cursor left holding one.
+the walk's open containers and where it stood on the heap, and `cbor.destroy(&cursor)` frees a cursor left holding one. An xml cursor resumes after any token: at the first stop the
+walk reads on to the text's end and holds the tokens past the stop and the text's verdict on the heap, which the
+resumes give, so a stop's `hi` is the end of the stopped token's span. `xml.destroy(&cursor)` frees a cursor left
+holding a stop.
 `can_resume` says whether a cursor holds a stop, and a resume on another text is refused with `.Bad_Option`.
 
 ## Build a document
@@ -408,7 +413,8 @@ table the same way.
 `toml.set`, `yaml.set`, `cbor.set` and their edit lists edit those formats the same way, and each commits its edits
 itself, since a TOML table, a YAML block collection and a CBOR container's count are not one range of bytes. The result
 is read again by the format's walk, so an edit that breaks a rule of the language is `.Bad_Result`, and an edit the
-format cannot make is a `.Frozen` error whose message names the reason.
+format cannot make is a `.Frozen` error whose message names the reason. `xml.set` and its edit lists commit the same
+way.
 
 - TOML: a scalar or an inline value is replaced in place, a new member is a line after its table's last line and before
   its sub-tables, a built table or array of tables is a section after the last section of the table it joins, and a
@@ -419,6 +425,10 @@ format cannot make is a `.Frozen` error whose message names the reason.
   the indentation of its place, a block scalar is replaced whole, and tags and anchors are facts. An edit inside a value
   an alias reads, of an anchored node an alias reads, a change of member order, and any edit of a text with a `<<` merge key read with
   `merge_keys` are refused.
+- XML: a set writes an element's content between its tags, keeping its attributes, an insert is an element laid out by
+  the white space before its neighbour, a removal takes that white space, and a rename respells both tags. An array
+  on a name fills the name's elements in order. Comments and attributes are facts. A change of member order and a key
+  that is no XML name are refused ([markup.md](markup.md#edits)).
 
 ### Comments
 
@@ -439,8 +449,9 @@ them as facts of the roles `Tag`, `Anchor` and `Alias`, which stand just before 
 take them, one non-empty line a body, in YAML, which spells them. TOML refuses them, and a commit in a format that holds
 none counts one in `dropped`. A fact the node's spelling carries instead of a span is read by name:
 `fact_value(&doc, node, .Style)` gives how a scalar or a collection is written (TOML's `literal` or `hex`, YAML's
-`plain`, `double`, `folded` or `flow`), and `.Tag` a node's tag or a TOML datetime's type (`date-local`,
-`datetime`).
+`plain`, `double`, `folded` or `flow`), `.Tag` a node's tag or a TOML datetime's type (`date-local`, `datetime`), and
+`.Name`, `.Namespace` and `.Content` a markup element's name, namespace and text. A markup element's attributes
+are facts of the role `Attribute`, which `attributes_of` walks.
 
 ## Write
 
@@ -652,6 +663,56 @@ fmt.print(string(out)) // replicas: 5 # scaled by hand, and the rest as it was
 - `yaml.plan_of` builds the plan of a `rules.Description`, as `json.plan_of` does.
 - `yaml.checks(.Yaml_1_2)` gives a model the format, `yaml.bind_schema` binds a JSON Schema, and a typed read of a
   built node reads its plain scalars as the core schema types them.
+
+## XML
+
+`xml` reads XML 1.0 with the internal subset and namespaces into the markup document shape: an element is a member
+under its name, its text is its value, or a `#text` member when it has child elements, and its attributes are facts of
+its value. It validates, builds, answers paths, is checked by models and schemas, reads into typed values, reads records
+and writes, and edits keeping the bytes no edit reaches. [markup.md](markup.md) holds the shape, the DTD and namespaces.
+
+```odin
+src := transmute([]u8)string(`<order id="7"><item>pen</item><item>ink</item><note>rush &amp; wrap</note></order>`)
+doc := xml.build(src, .Xml) or_return
+defer xml.destroy(&doc)
+order, _ := xml.member(&doc, xml.ROOT, "order")
+id_buf, text_buf: [32]u8
+id, _ := xml.attribute_value(&doc, order, "id", id_buf[:])
+note, _ := xml.member(&doc, order, "note")
+text, _ := xml.text(&doc, note, text_buf[:])
+fmt.println(id, text) // 7 rush & wrap
+
+items := xml.parse_path(".order.item") or_return
+defer xml.destroy(&items)
+found := xml.scan(src, .Xml, items, read = {dups = .All}) or_return
+defer xml.destroy(&found)
+for a in found.answers {
+	fmt.println(string(xml.span(&found, a.node))) // pen, then ink
+}
+```
+
+- An element's text is a string, and with `Options.infer` a number or a boolean when it is exactly one. Repeated
+  elements are members of one name in the document, which `members_named` and a path under `dups = .All` give one by
+  one. The node's value, as `value_member`, `built_value` and `core.write` to JSON read it, makes such a name one
+  member, an array of each element in document order, so a path names the document's members and not the array's
+  items ([markup.md](markup.md)).
+- `attributes_of` walks an element's attributes, and `fact_value` gives an element's `Name`, `Namespace` and `Content`.
+  A path step `{uri}local` and `xml.attribute_value` with such a name match by namespace.
+- `xml.unmarshal` reads a text into a struct whose member takes its name from the tag key `xml`: the member of the
+  root element's name, and under it a member per attribute, child element or `#text`. A list member collects the
+  siblings of its name, and a number, boolean or union member reads the text by its type. `plan_make`, `plan_of` and
+  `check` are as json's. `xml.marshal` writes a typed value as `xml.write` writes a document: a struct is an element of
+  its members, and a list one element per item. An empty list, text or struct is `.Unwritable`, which reads back as no
+  member or null, and `omitempty` leaves it out.
+- `xml.write` writes a document of any format whose root is an object of one member as XML: a member is an element, an
+  array one element per item, `#text` text and null an empty element. The document of an XML text is written from its
+  spans, so its attributes, namespace declarations, references, doctype, comments and instructions stay as written.
+  What XML cannot spell so that it reads back, such as a key that is no XML name, a nested array or an empty string,
+  is `.Unwritable`. `xml.tokens_init` starts a token write of the same elements under the same refusals, and a pretty
+  one is written whole into a buffer, so with a stream it is `.Unsupported`.
+- A text is one record under `.Concatenated`, so `xml.records_each` and `records_check` read a file as one document.
+- `xml.checks(.Xml)` gives a model the format, which loads an element's attributes and
+  child elements as members, and `bind_schema` binds a JSON Schema.
 
 ## CBOR
 

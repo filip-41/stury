@@ -19,6 +19,7 @@ __pycache__/
 *.out
 *.bin
 !/core/regex/tables/*.bin
+!/core/spell/entities/*.bin
 *.dmp
 
 # Editor and OS droppings

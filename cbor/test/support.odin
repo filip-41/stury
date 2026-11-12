@@ -135,7 +135,7 @@ record :: proc "contextless" (r: ^Recorder, s: core.Hook_Regs, t: core.Token) ->
 		name = "Key"
 	case .Tag:
 		name = "Tag"
-	case .Comment, .Comment_Inline, .Comment_Foot, .Anchor, .Alias, .Attribute, .Partial:
+	case .Comment, .Comment_Inline, .Comment_Foot, .Anchor, .Alias, .Instruction, .Doctype, .Attribute, .Partial:
 		name = "Other"
 	}
 	fmt.sbprintf(&r.out, "%s ", name)

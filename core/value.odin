@@ -7,8 +7,10 @@ package core
 //
 // The readers have the document readers' names and take either form. An object is its members in the order they were
 // added, repeats allowed: `member`, `equal`, `hash` and the order see the last member of each name, and `pairs`,
-// `length` and the writer see all of them.
+// `length` and the writer see all of them. An object node of a markup document has each name once, a repeated one with
+// an array of each of its elements (`markup_members`), so each of them sees that.
 
+import "core:hash"
 import "spell"
 
 // `nil` is null.
@@ -133,7 +135,11 @@ value_length :: #force_inline proc(v: Value) -> int {
 	case ^Object:
 		return len(x.keys)
 	case Node_Ref:
-		return doc_length(x.doc, x.node)
+		n := doc_length(x.doc, x.node)
+		if n > 1 && is_markup(x.doc) && has_repeated_key(x) {
+			return distinct_keys(x)
+		}
+		return n
 	case Trail:
 		return x.depth
 	}
@@ -163,7 +169,8 @@ value_child_at :: proc(v: Value, k: int) -> (Value, bool) {
 	return nil, false
 }
 
-// The value of the member of object `v` named `name`, the first under `.First` and else the last.
+// The value of the member of object `v` named `name`, the first under `.First` and else the last. A markup node's is
+// its `markup_member`, under any `dups`, whose array is made in the temp allocator.
 value_member :: #force_inline proc(v: Value, name: string, dups := Duplicates.Last) -> (Value, bool) {
 	#partial switch x in plain(v) {
 	case ^Object:
@@ -173,6 +180,10 @@ value_member :: #force_inline proc(v: Value, name: string, dups := Duplicates.La
 		}
 		return x.vals[i], true
 	case Node_Ref:
+		if is_markup(x.doc) {
+			context.allocator = context.temp_allocator
+			return markup_member(x, name)
+		}
 		node, ok := doc_member(x.doc, x.node, name, dups)
 		if !ok {
 			return nil, false
@@ -202,12 +213,16 @@ Value_Iter :: struct {
 }
 
 // Starts a `Value_Iter` over the members of `v`. A scalar has none. A trail's array is made here, in the context
-// allocator.
+// allocator, and a markup node's members in the temp allocator.
 value_children :: proc(v: Value) -> Value_Iter {
 	it := Value_Iter{v = plain(v)}
 	#partial switch x in it.v {
 	case Node_Ref:
 		it.nodes = doc_children(x.doc, x.node)
+		if is_markup(x.doc) && has_repeated_key(x) {
+			context.allocator = context.temp_allocator
+			it.v = markup_members(x)
+		}
 	case Trail:
 		it.v = trail_array(x)
 	}
@@ -234,11 +249,17 @@ value_child_next :: #force_inline proc(it: ^Value_Iter) -> (Value, bool) {
 	return nil, false
 }
 
-// Starts a `Value_Iter` over the keys and values of object `v`. Anything else has none.
+// Starts a `Value_Iter` over the keys and values of object `v`. Anything else has none. A node's `pairs` are its
+// document's own, a repeated key's each time, even where the iterator reads a markup node's `markup_members`, made in
+// the temp allocator.
 value_pairs :: proc(v: Value) -> Value_Iter {
 	it := Value_Iter{v = plain(v)}
 	if r, is_ref := it.v.(Node_Ref); is_ref {
 		it.pairs = doc_pairs(r.doc, r.node)
+		if is_markup(r.doc) && has_repeated_key(r) {
+			context.allocator = context.temp_allocator
+			it.v = markup_members(r)
+		}
 	}
 	return it
 }
@@ -327,4 +348,97 @@ trail_keys :: proc(t: Trail, into: []Value) {
 		n -= 1
 		into[n] = s.key
 	}
+}
+
+// Whether object node `r` has a key that one before it has.
+has_repeated_key :: proc(r: Node_Ref) -> bool {
+	n := doc_length(r.doc, r.node)
+	if n < 2 {
+		return false
+	}
+	it := doc_pairs(r.doc, r.node)
+	if n <= 16 {
+		keys: [16]string = ---
+		// A key's length and end bytes set a bit, so only a key whose bit is set is compared with the ones before it.
+		seen: [4]u64
+		i := 0
+		for k in next_key(&it) {
+			h := u32(len(k))
+			if len(k) > 0 {
+				h = h * 7 + u32(k[0]) * 31 + u32(k[len(k) - 1]) * 131
+			}
+			bit := u64(1) << (h & 63)
+			if seen[(h >> 6) & 3] & bit != 0 {
+				for prev in keys[:i] {
+					if prev == k {
+						return true
+					}
+				}
+			}
+			seen[(h >> 6) & 3] |= bit
+			keys[i] = k
+			i += 1
+		}
+		return false
+	}
+	if n <= KEY_TABLE / 2 {
+		return repeats_in_table(&it)
+	}
+	seen := make(map[string]bool, n, context.temp_allocator)
+	defer delete(seen)
+	for k in next_key(&it) {
+		if k in seen {
+			return true
+		}
+		seen[k] = true
+	}
+	return false
+}
+
+// The number of names of object node `r`, a repeated one once. Kept out of the length readers, whose frames would
+// otherwise cost every call.
+distinct_keys :: #force_no_inline proc(r: Node_Ref) -> int {
+	seen := make(map[string]bool, doc_length(r.doc, r.node), context.temp_allocator)
+	it := doc_pairs(r.doc, r.node)
+	for k in next_key(&it) {
+		seen[k] = true
+	}
+	return len(seen)
+}
+
+// The keys of a document object in source order, a repeated one each time.
+@(private = "file")
+next_key :: #force_inline proc(it: ^Pair_Iter) -> (string, bool) {
+	k, _, ok := doc_pair_next(it)
+	if !ok {
+		return "", false
+	}
+	return node_string(it.doc, k), true
+}
+
+// Slots of `repeats_in_table`'s open-addressed table, kept at most half full.
+@(private = "file")
+KEY_TABLE :: 256
+
+// `has_repeated_key` for an object of up to KEY_TABLE / 2 members, hashed on the stack, not in a map.
+@(private = "file")
+repeats_in_table :: proc(it: ^Pair_Iter) -> bool {
+	slots: [KEY_TABLE]u8 // a key's place in `keys`, plus one, 0 is empty
+	keys: [KEY_TABLE / 2]string = ---
+	i := 0
+	for k in next_key(it) {
+		h := hash.fnv32a(transmute([]byte)k)
+		for s := h % KEY_TABLE;; s = (s + 1) % KEY_TABLE {
+			if slots[s] == 0 {
+				keys[i] = k
+				i += 1
+				slots[s] = u8(i)
+				break
+			}
+			if keys[slots[s] - 1] == k {
+				return true
+			}
+		}
+	}
+	return false
 }

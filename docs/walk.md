@@ -7,7 +7,7 @@ hook.
 
 This document describes what the walks share, how the JSON walk, the delimited-text (dsv) walk, the TOML walk and the
 YAML walk are built, and the Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector code the
-walks use, and `binary.md` the CBOR walk.
+walks use, `markup.md` the XML walk, and `binary.md` the CBOR walk.
 
 ## Files
 
@@ -46,6 +46,7 @@ walks use, and `binary.md` the CBOR walk.
 | `yaml/parser.odin`, `block.odin`, `flow.odin`, `scalar.odin`, `props.odin` | the parser: block and flow collections, scalars, tags and anchors, comments held for their node |
 | `yaml/runs.odin`, `lines.odin` | the byte classes of a 64-byte block, the runs the readers find from them, and the document markers |
 | `yaml/keys.odin`, `merge.odin`, `stream.odin` | the repeat test of a mapping's keys, merge keys, and a stream's documents |
+| `xml/walk.odin`, `text.odin`, `name.odin`, `framing.odin` | XML's walk, see `markup.md` |
 | `cbor/walk.odin` | CBOR's walk, see `binary.md` |
 
 ## The interface
@@ -146,12 +147,14 @@ the record that names it. `kind` says what the token is: a scalar (`Null`, `Fals
 `String`, `Plain`), a container's opening (`Array`, `Object`), or its `End`. `Bytes` is a binary format's byte string,
 whose token spans its payload. `role` is `Key` for a member's name and for the header cell that names a dsv cell's
 column, and past `Key` a fact: a comment, `Plain`, as `Comment`, `Comment_Inline` or `Comment_Foot`; a node property,
-`Tag`, `Anchor` or `Alias`, which stands just before its node on the node's line; and an `Attribute`, which a markup walk gives after the element's key and
+`Tag`, `Anchor` or `Alias`, which stands just before its node on the node's line; an `Instruction`, by the comment
+position rule; the `Doctype`, on the root; and an `Attribute`, which a markup walk gives after the element's key and
 before its value. A consumer that wants values only tests `role <= .Key`, and `role <= .Comment_Foot` is a comment. `spelling` is a detail the format writes
 and core reads through three bits: bit 0 says `text` must be decoded, bit 1 says the token is quoted (a JSON string,
 whose token span leaves its quotes out, or a quoted dsv cell, whose span holds them), and bit 2 says the decode may
 grow past the span (a JSON string or a dsv cell with a tolerated ill-formed UTF-8 sequence). For a comment token, the low byte of `spelling` holds the lead marker's length and the next byte the
-tail's. The other bits are the format's own. A token longer than `n` can hold is the fault `Too_Wide`.
+tail's. The other bits are the format's own. A token longer than `n` can hold is the fault `Too_Wide`. Bits 0 and 2 together, `SPELLING_SYNTHETIC`, mark a key or
+text no span of the source spells, as a markup element's `#text` key, which the format's `text` and `key_equals` make.
 
 ### Hooks
 
@@ -259,7 +262,7 @@ lives in `core`, so a format adds no reader, no `query` and no `commit` of its o
 3. **The readers and services.** A `core.Readers` table in rodata, stored in the document, carries the leaves that
    need the grammar: `text`, `key_equals`, `number`, `resolve` and `close_end`, plus `tag_key`, `key_open` and
    `key_close`, and the slots a format needs past JSON's (`fact`, `attribute`, `number_text`, `key_bytes`, `binary`,
-   `resolves`, `flat`). The package keeps `HANDLES := [Spec]core.Readers{...}` and
+   `key_is`, `room`, `flat`). The package keeps `HANDLES := [Spec]core.Readers{...}` and
    `SERVICES := [Spec]core.Services{...}`, the two mutable globals `tools/checks.py` allows a format, for the handle
    `as` returns, and constant-spec entry points that bind one spec's tables (`readers_of($S)`, `bound_as`,
    `reads_of`), so a program links only the passes it names. `Services.edit` points at one `core.Edit_Services`
@@ -269,9 +272,9 @@ lives in `core`, so a format adds no reader, no `query` and no `commit` of its o
    value again for a ring's element. See `paths.md`.
 5. **The edits.** `compose.commit` is the format package's `commit`. A format whose root has no brackets sets `flat`,
    gives the root's line end as its `member_sep` and supplies `interior`, `fact_slot`, `emptied` and `plan`. A format
-   whose containers are not one range of bytes (TOML, YAML) supplies its own `Edit_Services.commit`, which refuses an edit it may not make, and
-   `relocate` and `prefix` say how a kept node is respelled at another place and how a tag, an anchor or an alias is
-   written.
+   whose containers are not one range of bytes (TOML, YAML, XML) supplies its own `Edit_Services.commit`, and `frozen`,
+   `relocate` and `prefix` say what an edit may not touch, how a kept node is respelled at another place, and how a
+   tag, an anchor or an alias is written.
 6. **The typed read.** `unmarshal` runs the format's `walk` over `typed.Reader`'s hook. A format that reads its values
    as JSON does needs no more. A format with its own value reader, as dsv has for a cell, stores through `core.token_text`,
    `store_whole`, `store_cstring`, `store_enum`, `store_number`, `store_enum_value` and `map_slot`, and reads the

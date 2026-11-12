@@ -94,6 +94,17 @@ is_flat :: #force_inline proc(doc: ^Document) -> bool {
 	return doc.readers.flat
 }
 
+// Returns `.Frozen` with the format's reason when an edit may not touch `node`, else no error.
+@(private)
+frozen_error :: proc(list: ^Edit_List, node: Node_Index) -> Document_Error {
+	if edit := list.edit; edit != nil && edit.frozen != nil {
+		if rules, detail := edit.frozen(list.doc, node); rules != nil {
+			return {kind = .Frozen, at = u64(node), inner = {rules = rules, detail = detail}}
+		}
+	}
+	return {}
+}
+
 // Checks a recorded text as a value. A member's key is a decoded name, so no text is judged as a key.
 @(private)
 judge :: proc(doc: ^Document, edit: ^Edit_Services, text: string, allocator: runtime.Allocator) -> Document_Error {
@@ -168,6 +179,9 @@ settable :: proc(list: ^Edit_List, node: Node_Index) -> (doc: ^Document, n: Node
 	if derr.kind != .None {
 		return doc, n, error_of(derr)
 	}
+	if e := frozen_error(list, node); e.kind != .None {
+		return doc, n, error_of(e)
+	}
 	if n.role > .Key {
 		return doc, n, refused(.Bad_Index, .Fact_Node)
 	}
@@ -229,6 +243,9 @@ insert_input :: proc(list: ^Edit_List, container: Node_Index, at: int, key: stri
 	if member && (list.edit == nil || list.edit.key_text == nil) {
 		return refused(.Wrong_Container)
 	}
+	if e := frozen_error(list, container); e.kind != .None {
+		return error_of(e)
+	}
 	if !in_.raw {
 		return insert_spelled(list, container, at, key, member, in_.value)
 	}
@@ -254,6 +271,8 @@ remove :: proc(list: ^Edit_List, node: Node_Index) -> Error {
 	switch {
 	case err.kind != .None:
 		return error_of(err)
+	case frozen_error(list, node).kind != .None:
+		return error_of(frozen_error(list, node))
 	case node == ROOT:
 		return refused(.Bad_Index, .Root)
 	case n.role > .Key:
@@ -276,13 +295,16 @@ reorder :: proc(list: ^Edit_List, container: Node_Index, order: []u32) -> Error 
 		return error_of(err)
 	case n.kind != .Array && n.kind != .Object:
 		return refused(.Wrong_Container)
+	case frozen_error(list, container).kind != .None:
+		return error_of(frozen_error(list, container))
 	}
 	return error_of(edit_add(list, container, .Reorder, .Value, 0, "", string(slice.to_bytes(order))))
 }
 
 // Makes `text` the body of the facts of node `node` and `role`, which it replaces. A `Comment_Inline` body holds no LF
 // or CR. A `Comment` or `Comment_Foot` body may. A `Tag`, `Anchor` or `Alias` body is one non-empty line, and the commit
-// writes it just before the node, spelled by the format. A `padded` body is written with one space inside each marker, `// text`
+// writes it just before the node, spelled by the format. An `Attribute` body is an attribute as a markup format writes
+// it, for a document whose format holds attributes. A `padded` body is written with one space inside each marker, `// text`
 // and `/* text */`, the way a comment's text is read without them. Runs in O(len(text)), checking the shape once and
 // copying the text once.
 set_fact :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string, padded := false) -> Error {
@@ -351,6 +373,8 @@ fact_node :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string, 
 		return {kind = .Bad_Index, reason = .Key_Node}
 	case role <= .Key:
 		return {kind = .Bad_Index, reason = .Not_Fact_Role}
+	case frozen_error(list, node).kind != .None:
+		return frozen_error(list, node)
 	}
 	#partial switch role {
 	case .Comment_Inline:
@@ -358,6 +382,10 @@ fact_node :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string, 
 			return {kind = .Bad_Fact}
 		}
 	case .Comment, .Comment_Foot:
+	case .Attribute:
+		if list.doc.readers.attribute == nil {
+			return {kind = .Bad_Fact}
+		}
 	case .Tag, .Anchor, .Alias:
 		if len(text) == 0 && !removal || has_line_end(transmute([]u8)text) {
 			return {kind = .Bad_Fact}

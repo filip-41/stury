@@ -75,5 +75,11 @@ write_to :: proc(doc: ^Document, opts: Write_Options, as: Maybe(As), node: Node_
 	if services == nil || services.write == nil || int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
 		return nil, 0, {kind = .Unsupported}
 	}
+	// A markup document is written by a format with no attributes as its value reads, a repeated name as an array.
+	if is_markup(doc) && target.readers.attribute == nil {
+		grouped := markup_grouped(Node_Ref{doc, node}, allocator)
+		defer free_grouped(&grouped)
+		return services.write(&grouped, opts, target, ROOT, stream, allocator)
+	}
 	return services.write(doc, opts, target, node, stream, allocator)
 }

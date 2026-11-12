@@ -34,7 +34,7 @@ record :: proc "contextless" (r: ^Recorder, s: core.Hook_Regs, t: core.Token) ->
 		name = "Inline"
 	case .Comment_Foot:
 		name = "Foot"
-	case .Tag, .Anchor, .Alias, .Attribute, .Partial:
+	case .Tag, .Anchor, .Alias, .Instruction, .Doctype, .Attribute, .Partial:
 		name = "Fact"
 	}
 	if text != "" {

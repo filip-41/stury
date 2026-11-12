@@ -328,6 +328,9 @@ index :: proc(target, key: ^Node, opt: bool, at: Loc) -> ^Node {
 // the catalogue, is `target` indexed by the path step of that fact.
 @(private = "file")
 field :: proc(target: ^Node, name: string, name_at: Loc, opt: bool, at: Loc) -> ^Node {
+	if name[0] == '&' {
+		return index(target, literal(attribute_key(name[1:]), name_at), opt, at)
+	}
 	if name[0] != '@' {
 		return index(target, literal(name, name_at), opt, at)
 	}

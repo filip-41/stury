@@ -188,6 +188,15 @@ code and its binaries link none of it. bench/fetch.py and bench/peers/rust-schem
     The crates' own dependencies are named, with their licences, by that Cargo.lock.
 
 ----------------------------------------------------------------------------------------------------
+HTML Living Standard — https://html.spec.whatwg.org/
+
+    core/spell/entities/entities.json is the HTML standard's table of named character references
+    (https://html.spec.whatwg.org/entities.json), and core/spell/entities/*.bin and core/spell/entities.odin are the
+    trie tools/html_entities.py generates from it. The standard is © WHATWG (Apple, Google, Mozilla, Microsoft),
+    licensed under the Creative Commons Attribution 4.0 International License
+    (https://creativecommons.org/licenses/by/4.0/). stury changed the table's form, not its entries.
+
+----------------------------------------------------------------------------------------------------
 Odin — https://github.com/odin-lang/Odin
 
     stury's command line links Odin's runtime and the core packages it uses from the toolchain that builds

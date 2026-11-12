@@ -7,6 +7,7 @@ import cbor "../../cbor"
 import dsv "../../dsv"
 import json "../../json"
 import toml "../../toml"
+import xml "../../xml"
 import yaml "../../yaml"
 
 Format :: enum u8 {
@@ -18,6 +19,7 @@ Format :: enum u8 {
 	Tsv,
 	Toml,
 	Yaml,
+	Xml,
 	Cbor,
 }
 
@@ -69,6 +71,7 @@ FORMATS := [Format]Format_Spec {
 	.Tsv    = {name = "tsv", title = "TSV", cells = true, framing = .Lines},
 	.Toml   = {name = "toml", title = "TOML", framing = .Concatenated, whole_as = toml_reading, written = toml_written, parted = toml_parted, refusal = toml_refusal},
 	.Yaml   = {name = "yaml", title = "YAML", framing = .Concatenated, whole_as = yaml_reading, follows = yaml_follows, ended = yaml_ended, scans = true, written = yaml_written, laid = true, parted = yaml_parted, refusal = yaml_refusal},
+	.Xml    = {name = "xml", title = "XML", framing = .Concatenated, whole_as = xml_reading, written = xml_written, laid = true, refusal = xml_refusal},
 	.Cbor   = {name = "cbor", title = "CBOR", framing = .Concatenated, whole_as = cbor_reading, follows = cbor_follows, scans = true, written = cbor_written},
 }
 
@@ -153,6 +156,32 @@ yaml_parted :: proc "contextless" (text: []u8) -> string {
 @(private = "file")
 yaml_refusal :: proc "contextless" (kind: core.Typed_Error_Kind) -> string {
 	return "cannot write a text YAML has no spelling for" if kind == .Unwritable else ""
+}
+
+// XML 1.0 with Namespaces and the internal subset. A text value is a string unless --infer.
+@(private = "file")
+xml_reading :: proc "contextless" (o: ^Opts) -> core.As {
+	tolerate: bit_set[core.Tolerance; u8]
+	if o.unread_entities {
+		tolerate = {.Unread_Entity}
+	}
+	return xml.as(.Xml, {max_depth = o.max_depth, infer = o.cells_in.infer, tolerate = tolerate, max_expansion = o.expansion_limit})
+}
+
+@(private = "file")
+xml_written :: proc "contextless" (o: ^Opts) -> core.As {
+	return xml.as(.Xml, {max_depth = o.max_depth})
+}
+
+@(private = "file")
+xml_refusal :: proc "contextless" (kind: core.Typed_Error_Kind) -> string {
+	#partial switch kind {
+	case .Unsupported:
+		return "cannot write a value that is no object as XML"
+	case .Unwritable:
+		return "cannot write a value XML has no element or text for"
+	}
+	return ""
 }
 
 // Any well-formed and valid item, in whatever serialization.
@@ -304,12 +333,18 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 	if o.grow_header && !writes_cells(o) {
 		usage_error("--grow-header applies to --to csv or tsv")
 	}
-	// schema sample takes --infer for a table it writes, whose cells it draws as --infer reads them.
-	if cli.cells_flag != "" && !reads_cells(o) && !(cli.schema_verb && cli.cells_flag == "--infer" && writes_cells(o)) {
+	if cli.cells_flag != "" && !reads_cells(o) {
 		usage_error("%s applies to --from csv or tsv", cli.cells_flag)
+	}
+	// schema sample takes --infer for a table it writes, whose cells it draws as --infer reads them.
+	if cli.infer_flag != "" && !reads_cells(o) && o.from != .Xml && !(cli.schema_verb && writes_cells(o)) {
+		usage_error("%s applies to --from csv, tsv or xml", cli.infer_flag)
 	}
 	if cli.yaml_flag != "" && o.from != .Yaml {
 		usage_error("%s applies to --from yaml", cli.yaml_flag)
+	}
+	if cli.xml_flag != "" && o.from != .Xml {
+		usage_error("%s applies to --from xml", cli.xml_flag)
 	}
 	// check and edit refuse the options that write a table as options they have no use for.
 	if cli.cells_out_flag != "" && !writes_cells(o) && !cli.validating && !cli.editing {

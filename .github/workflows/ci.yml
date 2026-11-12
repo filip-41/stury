@@ -124,6 +124,8 @@ jobs:
       - shell: bash
         run: |
           set -e
+          # xml/test reads the W3C conformance documents, which the Makefile's XML_SUITE rule fetches elsewhere.
+          python xml/test/conformance/fetch.py
           # The Makefile's test packages, but json and dsv, whose tests read the POSIX-only walktest helper.
           for p in $(python tools/checks.py list TEST_PKGS | tr -d '\r' | grep -v -e '^json/' -e '^dsv/'); do
             odin test $p -o:minimal -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:RECORDS_SLICE=1 -define:RECORDS_FAN_AFTER=1 -define:RECORDS_SPARSE=1000000000 -out:test.exe

@@ -15,6 +15,7 @@ bytes_equal :: #force_inline proc "contextless" (a, b: []u8) -> bool
 decode_text :: proc(buf: []u8, d: $D, $next: proc "contextless" (^D) -> (u8, bool)) -> (s: string, ok: bool)
 decoded_equals :: proc "contextless" (d: $D, $next: proc "contextless" (^D) -> (u8, bool), name: string) -> bool
 digit_end :: #force_inline proc "contextless" (p, end: [^]u8, mant: ^u64, $fold: bool) -> [^]u8
+entity_named :: proc "contextless" (name: []u8) -> (text: []u8, ok: bool)
 f32_text :: proc "contextless" (dst: [^]u8, f: f32) -> int #no_bounds_check
 f64_text :: proc "contextless" (dst: [^]u8, f: f64) -> int #no_bounds_check
 hex4 :: #force_inline proc "contextless" (h: [^]u8) -> (unit: u32, ok: bool)
@@ -49,9 +50,10 @@ random_below :: proc(s: ^Source, n: int) -> int
 random_next :: proc(s: ^Source) -> u64
 scratch_destroy :: proc(scratch: ^Scratch)
 # core
+ATTRIBUTE_LEAD_MAX :: 255
 AT_NO_BYTE :: bit_set[Fault_Kind]{.None, .No_Memory, .Bad_Option}
-Attribute_Iter :: struct { doc: ^Document, facts: []Fact, }
 COMMENT_ROLES :: bit_set[Role]{.Comment, .Comment_Inline, .Comment_Foot}
+DECODE_SLACK :: 8
 FAULT_REACH :: 16
 HEX_ROOM :: 40
 INDEX_FROM :: 16
@@ -66,33 +68,40 @@ POSITIONAL_TABLES := [1]Table{{node = ROOT}}
 SPELLING_DECODE :: u16(1)
 SPELLING_LAX :: u16(4)
 SPELLING_QUOTED :: u16(2)
+SPELLING_SYNTHETIC :: SPELLING_DECODE | SPELLING_LAX
 STOPPED :: 1
 TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .No_Sample, .No_Invalid_Sample, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Invalid_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
 all_facts :: #force_inline proc(doc: ^Document, i: Node_Index) -> []Fact
-attribute_next :: proc(it: ^Attribute_Iter) -> (name, value: Token, ok: bool)
-attributes_of :: proc(doc: ^Document, i: Node_Index) -> Attribute_Iter
-built_value :: proc(r: Node_Ref, dups := Duplicates.Last, borrow := false) -> Value
+attribute_spelling :: #force_inline proc "contextless" (lead: int, quoted: bool) -> u16
 children_from :: proc(doc: ^Document, i: Node_Index, k: int) -> Child_Iter
 comment_spelling :: #force_inline proc "contextless" (lead, tail: u8) -> u16
 comment_tail :: #force_inline proc "contextless" (spelling: u16) -> u64
 compare_members :: proc(a, b: []Member, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false, dups := Duplicates.Last) -> int
+distinct_keys :: #force_no_inline proc(r: Node_Ref) -> int
 double_of :: proc(v: Value, buf: []u8 = nil) -> (f: f64, digits: string, ok: bool)
 element_of :: proc(doc: ^Document, c: Node_Index, k: int) -> (Node_Index, Presence)
 entry_code :: proc(e: Error_Entry) -> string
 fact_next :: proc(it: ^Fact_Iter) -> (body: string, ok: bool)
 fault_at :: #force_inline proc "contextless" (pos: u64, kind: Fault_Kind, detail: u8 = 0) -> u64
 has_line_end :: #force_inline proc(body: []u8) -> bool
+has_repeated_key :: proc(r: Node_Ref) -> bool
 header_of :: #force_inline proc "contextless" (doc: ^Document) -> Node_Index
 index_children :: proc(doc: ^Document, i: Node_Index) -> bool
 insert_input :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string, member: bool, in_: Edit_Input) -> Error
 insert_text :: proc(list: ^Edit_List, container: Node_Index, v: Value) -> (text: []u8, owned: bool, err: Error)
 is_flat :: #force_inline proc(doc: ^Document) -> bool
+is_markup :: #force_inline proc "contextless" (doc: ^Document) -> bool
 is_property :: #force_inline proc "contextless" (role: Role) -> bool
 is_wide :: proc(v: Value) -> bool
 keep_comments :: #force_inline proc(old, nv: Value) -> Value
 line_end_len :: proc(src: []u8, pos: u64) -> u64
 locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines = nil) -> (line, col: u64)
 make_room :: #force_inline proc(a: ^[dynamic]$T)
+markup_fact :: proc(doc: ^Document, i: Node_Index, name: Fact_Name) -> (Fact_Value, bool)
+markup_member :: proc(r: Node_Ref, name: string) -> (v: Value, found: bool)
+markup_members :: proc(r: Node_Ref) -> ^Object
+markup_number_text :: proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool)
+markup_resolve :: proc(doc: ^Document, i: Node_Index, infer: bool) -> Kind
 move_document_error :: proc(e: ^Document_Error, by: u64)
 move_typed_error :: proc(e: ^Typed_Refusal, by: u64)
 no_hook :: #force_inline proc "contextless" (h: ^No_Hooks, s: Hook_Regs, t: Token) -> (Hook_Regs, Action)
@@ -174,6 +183,8 @@ utf8_window :: #force_inline proc "contextless" (prev, v: V) -> V
 # core/compose
 Splice :: struct { lo, hi: u64, text: []u8, seq: int, }
 apply_splices :: proc(src: []u8, splices: []Splice, allocator: runtime.Allocator) -> (out: []u8, err: core.Document_Error)
+fact_body :: proc(e: core.Edit, i: int) -> []u8
+fact_count :: #force_inline proc(e: core.Edit) -> int
 push :: proc(d: ^[dynamic]$T, v: T) -> (int, bool)
 push_all :: proc(d: ^[dynamic]$T, vs: []T) -> (count: int, ok: bool)
 # core/rules
@@ -247,6 +258,7 @@ set_answers :: proc(list: ^core.Edit_List, path: core.Path, in_: core.Edit_Input
 KEY_SIZE_MAX :: 240
 before_value :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64) -> (core.Hook_Regs, core.Action)
 check_document :: proc(doc: ^core.Document, node: core.Node_Index, target: rawptr, T: typeid, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
+check_markup_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal
 check_nodes :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal
 check_rules :: #force_no_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token, fld: ^Field, dest: uintptr) -> core.Action
 check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Refusal)
@@ -334,6 +346,7 @@ marshal_binary_into :: proc(out: ^Out, plan: ^typed.Plan, value: rawptr, opts: c
 node_bytes_text :: proc(doc: ^core.Document, node: core.Node_Index, stack: []u8) -> (text: string, ok: bool)
 node_number_text :: proc(doc: ^core.Document, node: core.Node_Index, stack: []u8) -> (text: string, ok: bool)
 number_text :: proc(p: [^]u8, n: core.Number) -> (size: int, kind: core.Typed_Error_Kind)
+number_text_as :: proc(p: [^]u8, n: core.Number, $T: Tree) -> (size: int, kind: core.Typed_Error_Kind)
 put_binary_number :: proc(out: ^Out, n: core.Number, $T: Tree) -> core.Typed_Error_Kind
 put_binary_number_text :: proc(out: ^Out, s: string, $T: Tree) -> core.Typed_Error_Kind
 put_byte :: #force_inline proc(out: ^Out, b: u8)
@@ -353,7 +366,6 @@ room :: #force_inline proc(out: ^Out, n: int) -> [^]u8 #no_bounds_check
 scratch_destroy :: proc(s: ^Scratch)
 side_plan :: proc(side: ^map[typeid]^typed.Plan, parent: ^typed.Plan, T: typeid) -> (^typed.Plan, core.Typed_Error_Kind)
 tokens_finish :: proc(t: ^Tokens) -> (bytes: []u8, err: core.Typed_Refusal)
-tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}, spell: ^Token_Spelling = nil, site := core.Site{}) -> core.Typed_Error_Kind
 tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Refusal, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind
 tokens_release :: proc(t: ^Tokens)
 union_arm :: proc(m: ^typed.Meta, v: uintptr) -> ^typed.Arm

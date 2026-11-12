@@ -179,8 +179,8 @@ build :: proc(m: ^Model, v: core.Value) -> core.Value {
 		return object(m, v, members if members != nil else core.new_object(), markup)
 	case members != nil:
 		if kind != .Null && core.node_string(ref.doc, ref.node) != "" {
-			append(&m.steps, core.Name("#text"))
-			core.object_put(members, "#text", scalar(m, v))
+			append(&m.steps, core.Name(core.MARKUP_TEXT))
+			core.object_put(members, core.MARKUP_TEXT, scalar(m, v))
 			leave(m)
 		}
 		return members
@@ -285,51 +285,29 @@ attribute_members :: proc(m: ^Model, ref: core.Node_Ref, attributes: ^core.Attri
 }
 
 // The children of an object node added to `members`. In a document with attributes a name repeated is an array at the
-// place of its first, and none may share a name with an attribute.
+// place of its first, as the node's pairs read it, and none may share a name with an attribute.
 @(private = "file")
 object :: proc(m: ^Model, v: core.Value, members: ^core.Object, markup: bool) -> core.Value {
 	it := core.value_pairs(v)
-	if !markup {
-		for key, child in core.value_pair_next(&it) {
-			append(&m.steps, core.Name(key))
-			core.object_append(members, key, build(m, child))
-			leave(m)
-		}
-		return members
-	}
-	Group :: struct {
-		key:  string,
-		vals: [dynamic]core.Value,
-	}
-	groups := make([dynamic]Group)
-	at := make(map[string]int)
 	for key, child in core.value_pair_next(&it) {
-		if i, found := at[key]; found {
-			append(&groups[i].vals, child)
-			continue
-		}
-		at[key] = len(groups)
-		g := Group{key = key}
-		append(&g.vals, child)
-		append(&groups, g)
-	}
-	for g in groups {
-		append(&m.steps, core.Name(g.key))
-		if core.object_slot(members, g.key) >= 0 {
+		append(&m.steps, core.Name(key))
+		if markup && core.object_slot(members, key) >= 0 {
 			refuse(m, .Unwritable)
 			return v
 		}
-		if len(g.vals) == 1 {
-			core.object_put(members, g.key, build(m, g.vals[0]))
-		} else {
-			items := core.new_array()
-			for child, i in g.vals {
+		value: core.Value
+		if group, grouped := child.(^core.Array); grouped && markup {
+			items := core.new_array(len(group.items))
+			for item, i in group.items {
 				append(&m.steps, core.Index(i))
-				core.array_append(items, build(m, child))
+				core.array_append(items, build(m, item))
 				leave(m)
 			}
-			core.object_put(members, g.key, items)
+			value = items
+		} else {
+			value = build(m, child)
 		}
+		core.object_append(members, key, value)
 		leave(m)
 	}
 	return members

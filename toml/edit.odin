@@ -1129,7 +1129,7 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 		return block_comment(cx, e, cx.foot_at, nil, lines[:], existing[:])
 	case .Comment:
 		return head_comment(cx, e, node, lines[:], existing[:])
-	case .Key, .Value, .Tag, .Anchor, .Alias, .Attribute, .Partial:
+	case .Key, .Value, .Tag, .Anchor, .Alias, .Instruction, .Doctype, .Attribute, .Partial:
 	}
 	return refuse_edit(cx, e.node, .Tag_Fact)
 }

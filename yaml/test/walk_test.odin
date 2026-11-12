@@ -39,7 +39,7 @@ note :: proc "contextless" (r: ^Tokens, s: core.Hook_Regs, t: core.Token) -> (co
 		name = "Anchor"
 	case .Alias:
 		name = "Alias"
-	case .Attribute:
+	case .Instruction, .Doctype, .Attribute:
 		name = fmt.tprint(t.role)
 	case .Partial:
 		name = "Partial"

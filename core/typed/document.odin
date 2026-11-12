@@ -131,6 +131,41 @@ nodes_readable :: proc "contextless" (doc: ^core.Document, node: core.Node_Index
 	return doc != nil && doc.readers != nil && plan != nil && int(node) < len(doc.nodes) && doc.nodes[node].role != .Key
 }
 
+// The check of a markup text, a `Text_Read` once its format binds `build`, the format's `Services.build` of the
+// handle `as`: builds the document in the temp allocator and checks its root by `check_nodes`. A read under `.Refuse`
+// builds under it, so the document it checks holds no repeat, and a check that noticed a repeat reads again, judging
+// the repeats as `read.dups` says.
+check_markup_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
+	doc, built := build(src, as, read.dups == .Refuse, context.temp_allocator)
+	defer core.destroy(&doc)
+	#partial switch built.kind {
+	case .None:
+	case .No_Memory:
+		return {kind = .No_Memory}
+	case .Duplicate_Key:
+		return {kind = .Duplicate_Key, at = built.at}
+	case:
+		return {kind = .Walk, at = built.at, inner = built.inner}
+	}
+	read := read
+	if read.dups == .Refuse {
+		read.dups = .Last
+	}
+	mark := sink_mark(read.sink)
+	err := check_nodes(&doc, core.ROOT, T, target, plan, read, allocator)
+	if err.kind == .Duplicate_Key && read.repeats == .Notice {
+		own: Sink
+		// The sink is this frame's for the second read alone, which the stack escape check cannot see.
+		kept := (^Sink)(uintptr(&own))
+		judged := rejudge(read, mark, kept, allocator)
+		err = check_nodes(&doc, core.ROOT, T, target, plan, judged, allocator)
+		if judged.sink == kept {
+			err = rejudged(kept, err)
+		}
+	}
+	return err
+}
+
 // The read of `read_document` by the hook, fed the nodes from `node` on.
 @(private)
 feed_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Refusal {
@@ -152,6 +187,8 @@ feed_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 		return err
 	}
 	defer read_release(h, frames[:])
+	// A token's text may need the tables the document holds beside its source.
+	h.state = doc.state
 	h.format = &d
 	h.find_tag = document_tag
 	to := u32(node) + (doc.nodes[node].n if doc.nodes[node].kind > .Plain else 1)
@@ -192,14 +229,10 @@ document_step :: proc "contextless" (d: ^Document_Read($H), regs: core.Hook_Regs
 	} else if t.kind == .Number && t.spelling & core.NUMBER_KIND_MASK == 0 {
 		h.mant = fold_digits(h.src, t)
 	}
-	when H == Check {
-		if d.doc.readers.attribute != nil && t.role == .Value && t.kind != .End {
-			return element_step(d, regs, t, at)
-		}
-		return on_token_check_spelled(h, regs, t)
-	} else {
-		return on_token_spelled(h, regs, t)
+	if d.doc.readers.attribute != nil && t.role == .Value && t.kind != .End {
+		return element_step(d, regs, t, at)
 	}
+	return hook_spelled(h, regs, t)
 }
 
 // Whether the close of the container `f` holds reads the bracket's byte: a fixed array's length, a `required` member, or

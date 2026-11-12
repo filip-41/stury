@@ -249,6 +249,11 @@ def cli_suites(absent, odin):
             out.append(suite(f"cli jq diff seed {seed}", 6, f"{test}/jq_diff.py", CLI_BINARY, f"--seed={seed}", tier=tier))
     if not has_jq:
         absent.append("cli jq diff (no jq 1.8.2 on PATH)")
+    if subprocess.run(["python3", "-c", "import xml.parsers.expat"], capture_output=True).returncode == 0:
+        script = at(f"{CLI}/test/xml_diff.py")
+        out.append(Check("xml expat diff", 6, 1, [at("xml"), at("xml/test/oracle")], make(odin, "diff-xml"), trees=[script]))
+    else:
+        absent.append("xml expat diff (no pyexpat in python3)")
     return out
 
 

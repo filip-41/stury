@@ -103,9 +103,9 @@ Command options:
 
 stury's own options:
       --from format         read json (default), jsonc, json5, ndjson,
-                            csv, tsv, toml, yaml or cbor;
+                            csv, tsv, toml, yaml, xml or cbor;
       --to format           write json (default), jsonc, ndjson, csv, tsv,
-                            toml, yaml or cbor;
+                            toml, yaml, xml or cbor;
       --in-place            with fmt or edit, rewrite each file in place;
       --check               with fmt or edit, name each file it would
                             change and exit 1;
@@ -121,6 +121,10 @@ stury's own options:
       --alias-limit n       with --from yaml, refuse aliases that read
                             more than n bytes again;
       --merge-keys          with --from yaml, read << as a merge key;
+      --expansion-limit n   with --from xml, refuse entity references that
+                            expand to more than n bytes in all;
+      --unread-entities     with --from xml, read a reference to an entity
+                            no DTD read declares as its own text;
       --follow              with one file, answer each record as it is
                             appended, like tail -f FILE | stury;
       --explain             write how the filter runs and what the run did
@@ -131,7 +135,8 @@ CSV and TSV options:
       --no-header           read the first record as data: records are arrays;
       --comment c           skip lines that start with c;
       --infer               read an unquoted cell that is a number, true or
-                            false as one (an empty one is null either way);
+                            false as one (an empty one is null either way),
+                            and with --from xml a text value;
       --ragged              read records of any width;
       --lazy-quotes         read a quote inside an unquoted cell as text;
       --out-delimiter c     write cells split at c (default: --delimiter when
@@ -156,7 +161,7 @@ is valid. Every file is judged, and each file's first fault is reported.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson,
-                            csv, tsv, toml, yaml or cbor;
+                            csv, tsv, toml, yaml, xml or cbor;
       --seq                 judge each record after a 0x1E separator as
                             one text;
       --max-depth n         refuse nesting past n levels (default 1024);
@@ -175,8 +180,8 @@ Options:
                             exit 1 only after refusing a step no input takes;
       --delimiter c, --no-header, --comment c, --infer, --ragged,
       --lazy-quotes         read csv or tsv as stury --help says;
-      --alias-limit n, --merge-keys
-                            read yaml as stury --help says;
+      --alias-limit n, --merge-keys, --expansion-limit n,
+      --unread-entities     read yaml or xml as stury --help says;
   -h, --help                show this help.
 
 Exit status: 0 when every input is valid, 1 when one fails the schema, 5 when
@@ -196,7 +201,7 @@ types a model reads the schema's values with.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson, csv, tsv,
-                            toml, yaml or cbor;
+                            toml, yaml, xml or cbor;
       --ranges              infer: keep the least and greatest number, string
                             length and array length;
       --to format           sample: write json (default), jsonc, ndjson, csv or tsv;
@@ -231,9 +236,9 @@ not written, and a table written is judged again as it reads back.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson,
-                            csv, tsv, toml, yaml or cbor;
-      --to format           write json, jsonc, ndjson, csv, tsv, toml, yaml
-                            or cbor (default the --from format);
+                            csv, tsv, toml, yaml, xml or cbor;
+      --to format           write json, jsonc, ndjson, csv, tsv, toml, yaml,
+                            xml or cbor (default the --from format);
       --in-place            rewrite each file in place;
       --check               write nothing, name each file that is not
                             already formatted, and exit 1;
@@ -255,8 +260,8 @@ Options:
                             a table written as the format read keeps its
                             delimiter and comment character, and its
                             comments when it has a comment character;
-      --alias-limit n, --merge-keys
-                            read yaml as stury --help says;
+      --alias-limit n, --merge-keys, --expansion-limit n,
+      --unread-entities     read yaml or xml as stury --help says;
   -h, --help                show this help.
 
 Exit status: 0, or 1 under --check when a file is not formatted or under
@@ -333,7 +338,7 @@ one array of them. --shape compares the shapes of two data files.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson, csv,
-                            tsv, toml, yaml or cbor;
+                            tsv, toml, yaml, xml or cbor;
       --key member          match array elements by the value of member, or
                             PATH=member for the array at PATH (.a[].b=id);
       --set                 match equal elements wherever they stand;

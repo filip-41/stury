@@ -673,12 +673,13 @@ TEXT_ROOM :: 256
 
 // `t`'s decoded text, into `buf` when it fits there.
 @(private)
-decoded_text :: proc "contextless" (h: ^Check, t: core.Token, buf: []u8) -> (string, bool) {
+decoded_text :: proc "contextless" (h: ^Reader, t: core.Token, buf: []u8) -> (string, bool) {
 	if t.spelling & core.SPELLING_DECODE == 0 {
 		return string(raw_data(h.src)[t.lo:][:t.n]), true
 	}
 	context = h.ctx
-	if 3 * int(t.n) + 4 <= len(buf) {
+	// A format with a `room` may decode a span to more than its spelling bits bound, which `token_text` sizes.
+	if 3 * int(t.n) + core.DECODE_SLACK <= len(buf) && h.plan.readers.room == nil {
 		return h.plan.readers.text(&h.view, t, buf)
 	}
 	return core.token_text(h.plan.readers, &h.view, t, context.temp_allocator)

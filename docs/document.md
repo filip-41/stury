@@ -1,7 +1,7 @@
 # The document
 
-A build turns one walk's tokens into a document: the tokens as 16-byte nodes in preorder, the comments and properties
-beside them as facts, and a table of readers the format supplies to read a node's text, number and kind. The readers walk the node
+A build turns one walk's tokens into a document: the tokens as 16-byte nodes in preorder, the comments, properties and
+attributes beside them as facts, and a table of readers the format supplies to read a node's text, number and kind. The readers walk the node
 array and call a service where a node's `spelling` says its value is not its own bytes.
 
 This document describes the node, the document and its builder, the readers, the readers and services tables, the duplicate-key
@@ -38,6 +38,8 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `yaml/resolve.odin` | YAML's core schema: `resolve`, `number`, the `Style` fact |
 | `yaml/keys.odin` | the repeat test of a mapping's keys, by decoded text |
 | `yaml/edit.odin`, `edit_place.odin`, `edit_facts.odin` | YAML's edit services and its own commit, the sites of new lines, and property and comment edits |
+| `xml/document.odin`, `xml/scope.odin` | XML's handles and readers, the `Name`, `Namespace` and `Content` facts, expanded names and `close_end` |
+| `xml/edit.odin` | XML's edit services and its own commit: splices of contents, tags and facts |
 | `cbor/document.odin`, `cbor/bound.odin` | CBOR's handle and its bound readers: `number`, `number_text`, `key_bytes`, the tag fact |
 
 ## The node
@@ -51,8 +53,8 @@ A node is a 16-byte `Token` from `core/walk.odin`: `lo`, `n`, `kind`, `role` and
   node more than the value's subtree holds.
 - A container's `spelling` is its child count, where a member counts once, not its key and its value. The count
   saturates at `MAX_CHILDREN`, and `Document.counts` holds the true count of every container that does.
-- A JSON key is a node of its own, kind `String` and role `Key`, directly before its value, and so is a TOML, YAML
-  or CBOR key. A dsv record stores no key node: its columns' keys are the cells of the header row.
+- A JSON key is a node of its own, kind `String` and role `Key`, directly before its value, and so is a TOML, YAML,
+  CBOR or markup key. A dsv record stores no key node: its columns' keys are the cells of the header row.
 - A `Bytes` node is a binary format's byte string, whose span is its payload, or the chunks of it when
   `SPELLING_DECODE` is set.
 - `Node_Index` is a node's index in `nodes`, distinct from `u32` so an index cannot be passed where a count or a byte
@@ -73,6 +75,7 @@ Core reads three bits of a node's `spelling`:
 | 0 | `SPELLING_DECODE` | a string, key or dsv cell | the text is read through the format's `text` |
 | 1 | `SPELLING_QUOTED` | a JSON string, a quoted CSV cell | the token is quoted |
 | 2 | `SPELLING_LAX` | a JSON string, a dsv cell | a tolerated ill-formed sequence may grow its decode |
+| 0 and 2 | `SPELLING_SYNTHETIC` | a markup document's `#text` key | no span of the source spells the text, which the format makes |
 
 A node whose decode bit is clear is its own text: a JSON string's span leaves its quote pair out, an unquoted JSON5 key
 is bare, and an unquoted dsv cell is its bytes. The other bits are the format's own: a number's packed shape, and a
@@ -285,6 +288,11 @@ caller that knows the format.
 is its source is copied, and a decode's over-long buffer is trimmed, so `len(s)` is the allocation's length. A caller
 that has a buffer reads through `text` first and falls back to `text_clone` only for a text too long for it.
 
+A token with `SPELLING_SYNTHETIC` (both the decode and the lax bit) is a key or a text no span of the source spells, as a
+markup document's `#text` key: `text` and `key_equals` make it, and its decode may be `DECODE_SLACK` (8) bytes longer
+than three times its span, which `text_room` counts. A format whose decode outgrows its span past what the bits say, as
+an XML entity reference does, sets `Readers.room`, which `text_room` asks.
+
 ```odin
 doc_bytes       :: proc(doc: ^Document, i: Node_Index, buf: []u8) -> (b: []u8, ok: bool)
 doc_number_text :: proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool)
@@ -298,8 +306,8 @@ read a string, its payload as a string. A text format spells bytes only as the b
 
 `doc_number_text` returns a number node's decimal digits, a `Plain` node the format resolves to a number included: its
 span for a format whose number span is the text, else what the format's `Readers.number_text` writes into `buf`, as
-YAML does for a number whose text is not a decimal and CBOR for a binary integer, a bignum or a decimal fraction. An
-infinity or a NaN gives an empty text.
+YAML does for a number whose text is not a decimal, CBOR for a binary integer, a bignum or a decimal fraction, and XML
+for a number whose text needs decoding. An infinity or a NaN gives an empty text.
 
 `number(doc, i)` returns a 16-byte `Number`, `bits` and `kind`, decoded from the node's span when it is read, and
 whether the node is a number. The
@@ -340,7 +348,8 @@ alike under each: a JSON token holds no form that only JSON5 reads, so `text` re
 and `key_equals` read `Document.as.spec`, since a CSV backslash is a byte, a TSV backslash is an escape, and a `Plain`
 cell has neither. `text`, `key_equals` and `number` take a `Token_View`, the source and the handle, and the token by
 value, so a typed read hands them a walk's token with no document. `Document` starts with `using view: Token_View`,
-and `Edit_Services.value` takes one too.
+and `Edit_Services.value` takes one too. `Token_View.state` holds what a format's readers need past the source and the
+handle, as XML's DTD tables: a document owns it, `destroy` frees it and `clone` copies it.
 
 | Reader | JSON | dsv |
 |---|---|---|
@@ -355,10 +364,13 @@ The slots past these are nil in JSON and dsv and serve the other formats:
 
 | Reader | Says | Set by |
 |---|---|---|
-| `fact` | a named fact the node's spelling carries instead of a span: a scalar's `Style`, a TOML datetime's `Tag`, a CBOR tag's digits | toml, yaml, cbor |
-| `number_text` | the decimal digits of a number token whose span is not its text, empty for an infinity or a NaN | yaml, cbor |
+| `fact` | a named fact the node's spelling carries instead of a span: a scalar's `Style`, a TOML datetime's `Tag`, a markup element's `Name`, `Namespace` and `Content`, a CBOR tag's digits | toml, yaml, xml, cbor |
+| `attribute` | an `Attribute` fact's name as a `Key` token and its value as a `Value` token, which `attributes_of` walks | xml |
+| `number_text` | the decimal digits of a number token whose span is not its text, empty for an infinity or a NaN | cbor, yaml, xml |
 | `key_bytes` | the bytes a member named `name` is written with, which a typed plan compares as it compares `key_open + name + key_close` | cbor |
 | `binary` | the format has a byte string kind, so a `String` token is never bytes | cbor |
+| `key_is` | the key at a node against a name that needs the key's place, an expanded name `{uri}local` | xml |
+| `room` | the bytes that hold the decode of a token whose decode outgrows its span past what its bits say | xml |
 | `flat` | the text has no brackets, so no container has bytes of its own | dsv |
 
 A handle's table also points at the format's `Services`, the passes a call that chooses its format at run time reaches:
@@ -383,6 +395,7 @@ Edit_Services :: struct {
 	spell:        proc(doc: ^Document, v: Value, opts: Write_Options, colon: string, record: bool, at: u64, allocator: runtime.Allocator) -> ([]u8, Error),
 	prefix:       proc(doc: ^Document, role: Role, body: []u8, text: ^[dynamic]u8) -> bool,
 	relocate:     proc(doc: ^Document, node: Node_Index, site: Site, allocator: runtime.Allocator) -> (text: []u8, ok: bool),
+	frozen:       proc(doc: ^Document, node: Node_Index) -> (rules: ^Rules, detail: u8),
 	commit:       proc(list: ^Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: Document_Error),
 }
 ```
@@ -399,19 +412,23 @@ header's, else LF. A record's cells take the junction a tree's members do, in `c
 
 `spell` writes a value an edit records in the format and at the place it goes: a format computes its `Site` with
 `site_at(doc.src, at)`, the column of `at` in its line with `placed` set, and passes it to the token writer, so a YAML
-value is indented and styled for its line. The last three slots serve formats whose edits do not fit one range per
+value is indented and styled for its line. The last four slots serve formats whose edits do not fit one range per
 container:
 
 - `prefix` spells a `Tag`, `Anchor` or `Alias` fact as the text before its node, a marker and the body. Nil means the
   format holds no property, and a commit counts a set of one in `dropped`. YAML fills it.
 - `relocate` gives the bytes a node has at another place, when an edit's value is a `Node_Ref` of the list's own
   document, as a member moved into another table or another block's indentation. `ok` false is refused as
-  `.Bad_Value`. Nil keeps the node's span. TOML and YAML fill it.
+  `.Bad_Value`. Nil keeps the node's span. TOML, YAML and XML fill it.
+- `frozen` says why an edit may not touch a node, as the message `detail` of the format's `rules`, and nil `rules` for a
+  node it may. `set`, `insert`, `remove`, `reorder` and every fact edit ask it, and a frozen node is `.Frozen`.
+  XML holds a private `frozen` that names the nodes a DTD's replacement text or an attribute default made. YAML's
+  commit keeps its own list of frozen nodes.
 - `commit` returns the output in place of `core/compose`'s commit, for a format whose containers are not one range of
   bytes to compose around: a TOML table written in sections, a YAML block collection of lines at an indentation. It
   places each edit's text at its site itself and counts the facts the output cannot hold. When it is set, the value
-  `spell` writes is recorded as it is, with no layout taken from a bracket. TOML and YAML fill it, and both read their
-  output again with `validate`.
+  `spell` writes is recorded as it is, with no layout taken from a bracket. TOML, YAML and XML fill it, and each reads
+  its output again with `validate`.
 
 A reader reaches the table only where it must: `text` and `key_equals` for a marked node, `number` for every scalar,
 `resolve` for every node, `close_end` for a container whose span is read, and the edit services for every recorded or
@@ -459,18 +476,21 @@ A delimited text is an `Array` of records whose first child may be the header ro
 
 ## Facts
 
-A `Fact` holds `lo`, `node`, `n`, `role`, `kind` and `spelling`: a comment or property token, the node it belongs to and its role. The list is sorted by node, keeps source order within a node, and is empty for a
+A `Fact` holds `lo`, `node`, `n`, `role`, `kind` and `spelling`: a comment, property, instruction or attribute token,
+the node it belongs to and its role. The list is sorted by node, keeps source order within a node, and is empty for a
 strict JSON document and a dsv text with no comment byte. `lo` and `n` span the fact's bytes, markers included.
 
 `kind` is the kind of the token the fact came from. A comment, a text tag, an anchor and an alias are `Plain`, with the
 lead and tail marker lengths in `spelling`. A tag a binary format spells as a number (a CBOR tag) is `Number`, which
 `fact_token` gives as its token and `fact_number` reads through the format's `number`, as a node's number is read. Any
 kind but `Plain` has no markers, and its body is the whole span. `Tag`, `Anchor` and `Alias` facts stand just before
-their node, on its line.
+their node, on its line. An `Attribute` fact leads through the opening quote of its value and trails with the closing
+one, and a value that starts more than 255 bytes past its name holds a lead of 255, which the markup formats' readers
+pass over by finding the opening quote from the closing one.
 
 `fact_value(doc, i, name)` reads a `Fact_Name`: `Tag`, `Anchor` and `Alias` are the body of the node's span fact of
-that role when it has one, and otherwise, with `Style`, what `Readers.fact` reads from the node's
-spelling. A `Number` fact is left to `Readers.fact` when the format has one, which gives a CBOR tag's
+that role when it has one, and otherwise, with `Style`, `Name`, `Namespace` and `Content`, what `Readers.fact` reads
+from the node's spelling. A `Number` fact is left to `Readers.fact` when the format has one, which gives a CBOR tag's
 digits in the temp allocator, with `Fact_Value.numeric` set.
 
 A comment's node follows the walk's `Role` rule: a comment on the line where the value before it ends is that value's
@@ -531,8 +551,9 @@ judges the text as one value, one key or one record of the document's spec, and 
 - A fact edit takes any node that is not a key and a role past `Key`. `Comment_Inline` refuses a body holding LF or CR
   with `.Bad_Fact`, and a role at or below `Key` is `.Bad_Index`. A `Tag`, `Anchor` or `Alias` body is one non-empty
   line, and `set_facts` with more than one body of such a role is `.Bad_Fact`.
-- An edit a format's own `commit` may not make is `.Frozen`, with the reason in `inner.rules` and `inner.detail`. A
-  second edit of one node and role is recorded and `commit` refuses it with `.Conflicting_Edits`.
+- An edit of a node the format's `frozen` service names is `.Frozen`, with the reason in `inner.rules` and
+  `inner.detail`. A second edit of one node and role is recorded and
+  `commit` refuses it with `.Conflicting_Edits`.
 
 JSON's value check walks the text as exactly one value of `doc.as.spec` at `doc.as.max_depth`, refusing one that
 begins with a byte-order mark or holds a comment after its value, since a splice would put the next bytes inside it.
@@ -650,7 +671,7 @@ Document_Error :: struct { kind: Document_Error_Kind, at: u64, inner: Fault }
 | `Bad_Spec` | a commit asks for another format family's spec, or a dsv spec change | none |
 | `Conflicting_Edits` | two edits meet, or one lies inside another's range | where they meet |
 | `Bad_Result` | a committed text does not read | none, the fault in `inner` |
-| `Frozen` | a format's own `commit` may not make an edit | the node, the reason in `inner.rules` and `inner.detail` |
+| `Frozen` | an edit touches a node the format's `frozen` service names | the node, the reason in `inner.rules` and `inner.detail` |
 
 `inner` holds a `Fault` by value for `.Walk`, `.Bad_Value` and `.Bad_Result`, and for the last two its `at` names a
 byte of the recorded text or of the commit's output, so it renders as an offset in that text. A `Frozen` error renders as "The node cannot be edited: " and the format's message, with the code `document.frozen`. A `Bad_Index` says why in

@@ -368,7 +368,7 @@ spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_N
 			}
 		case .Null, .False, .True, .Bytes, .Plain, .End, .Array, .Object:
 		}
-	case .Anchor, .Alias:
+	case .Anchor, .Alias, .Name, .Namespace, .Content:
 	}
 	return {}, false
 }

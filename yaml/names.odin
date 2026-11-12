@@ -15,6 +15,7 @@ All :: core.All
 Answer :: core.Answer
 Array :: core.Array
 As :: core.As
+Attribute_Iter :: core.Attribute_Iter
 Child_Count :: core.Child_Count
 Child_Index :: core.Child_Index
 Child_Iter :: core.Child_Iter
@@ -88,6 +89,8 @@ Typed_Want :: core.Typed_Want
 Value :: core.Value
 Write_Options :: core.Write_Options
 array_append :: core.array_append
+attribute_next :: core.attribute_next
+attributes_of :: core.attributes_of
 child_at :: core.child_at
 child_next :: core.child_next
 children :: core.children

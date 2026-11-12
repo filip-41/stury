@@ -17,10 +17,10 @@ endif
 .DEFAULT_GOAL := gate
 
 # The library packages, and the test packages that read them.
-LIB_PKGS  := core/spell core/regex core host core/kernel core/compose core/diff core/rules core/build core/typed core/write core/records core/schema core/model json dsv toml yaml cbor
-TEST_PKGS := core/spell/test core/regex/test host/test core/kernel/test core/test core/write/test core/records/test json/test dsv/test toml/test yaml/test cbor/test
+LIB_PKGS  := core/spell core/regex core host core/kernel core/compose core/diff core/rules core/build core/typed core/write core/records core/schema core/model json dsv toml xml yaml cbor
+TEST_PKGS := core/spell/test core/regex/test host/test core/kernel/test core/test core/write/test core/records/test json/test dsv/test toml/test xml/test yaml/test cbor/test
 # The packages the tests share, checked by `lint` and built through their imports.
-SUPPORT_PKGS := walktest bench/timing
+SUPPORT_PKGS := walktest bench/timing xml/test/oracle
 # The benchmark programs, which `lint` and the gate compile.
 BENCH_PKGS := bench bench/doc bench/editbench bench/paths bench/typed bench/write bench/records bench/schema bench/schema_csv bench/schema_json
 # The test packages whose loops are compiled for the tier `-define:TIER` names.
@@ -48,7 +48,7 @@ X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS)
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: help check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite diff-schema diff-schema-csv diff-schema-gen ecma-diff test-x86 test-wide test-asan test-tsan test-f32 test-sweep lint lint-man lint-fixtures api-write bench bench-doc bench-paths bench-typed bench-records bench-schema bench-schema-peers bench-write bench-peers bench-cli fixtures surface \
+.PHONY: help check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite diff-schema diff-schema-csv diff-schema-gen ecma-diff diff-xml test-x86 test-wide test-asan test-tsan test-f32 test-sweep lint lint-man lint-fixtures api-write bench bench-doc bench-paths bench-typed bench-records bench-schema bench-schema-peers bench-write bench-peers bench-cli fixtures surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
 
 # The bench lanes' probes and peers, and the fixtures they read. BENCH_CC, BENCH_CXX and BENCH_CARGO name the compilers
@@ -163,6 +163,21 @@ $(DIFF_SEED_TARGETS): diff-seed-%: build-cli
 ecma-diff:
 	python3 cmd/stury/test/ecma_diff.py --odin $(ODIN)
 
+# The XML walk against expat (pyexpat) on seeded random and broken texts, with xmllint as the third opinion. XML_DIFF_SEEDS
+# and XML_DIFF_CASES set the runs.
+XML_DIFF_SEEDS ?= 1 2 3
+XML_DIFF_CASES ?= 40000
+diff-xml:
+	@mkdir -p $(BUILD)
+	$(ODIN) build xml/test/oracle $(TEST_OPT) -out:$(BUILD)/xml_oracle
+	@for seed in $(XML_DIFF_SEEDS); do python3 cmd/stury/test/xml_diff.py $(BUILD)/xml_oracle --seed=$$seed --cases=$(XML_DIFF_CASES) || exit 1; done
+
+# The XML conformance documents, fetched once, which the package's tests read.
+XML_SUITE := xml/test/conformance/files
+$(XML_SUITE):
+	python3 xml/test/conformance/fetch.py
+$(filter %/xml/test,$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)): | $(XML_SUITE)
+
 $(TEST_MINIMAL): $(BUILD)/test/minimal/%:
 	@mkdir -p $(@D)
 	@echo "== $* (-o:minimal)"
@@ -192,7 +207,7 @@ $(X86_TARGETS): $(BUILD)/test/x86/%:
 # Intel SDE (`SDE=sde64`) emulating a Nehalem for v2 (x86-64-v2, no PCLMULQDQ), a Haswell for v3 and a Sapphire Rapids
 # for v4.
 SDE ?= sde64
-test-wide:
+test-wide: | $(XML_SUITE)
 	@mkdir -p $(BUILD)/wide
 	@for spec in 0:nhm 1:hsw 2:spr; do t=$${spec%%:*}; cpu=$${spec##*:}; for p in $(TEST_PKGS); do \
 		echo "== $$p (tier $$t on $$cpu)"; \

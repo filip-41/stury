@@ -36,7 +36,8 @@ plain :: #force_inline proc(v: Value) -> Value {
 
 // The comments of `role` on `v`, and where they come from. Written bodies are as they were written. Source bodies are a
 // comment's text without its markers and the one space next to each (`// a` and `/* a */` read "a"), sliced from the
-// source or, past one, in a slice made in the context allocator.
+// source or, past one, in a slice made in the context allocator. An attribute's body is `name="value"` as `set_fact`
+// takes it, its name and its quoted value as written, made in the context allocator.
 comments :: proc(v: Value, role: Role) -> (bodies: []string, from: Comment_From) {
 	inner := v
 	if c, is_commented := v.(^Commented); is_commented {
@@ -50,8 +51,17 @@ comments :: proc(v: Value, role: Role) -> (bodies: []string, from: Comment_From)
 		return nil, .None
 	}
 	texts: [dynamic]string
-	it := facts_of(r.doc, r.node, role)
-	for body in fact_next(&it) {
+	for f in all_facts(r.doc, r.node) {
+		if f.role != role {
+			continue
+		}
+		if role == .Attribute {
+			name, value := r.doc.readers.attribute(r.doc, f)
+			quoted := r.doc.src[value.lo - 1:][:value.n + 2]
+			append(&texts, strings.concatenate({string(r.doc.src[name.lo:][:name.n]), "=", string(quoted)}))
+			continue
+		}
+		body := string(fact_body(r.doc, f))
 		text := strings.trim_prefix(body, " ")
 		// A block comment's body follows its `/*`, a line comment's its `//`.
 		if at := uintptr(raw_data(body)) - uintptr(raw_data(r.doc.src)); r.doc.src[at - 1] == '*' {

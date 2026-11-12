@@ -286,7 +286,7 @@ object :: proc(inf: ^Inferred, p: ^Summary, v: core.Value, ref: core.Node_Ref) {
 		}
 		if scalar := core.kind(v); scalar != .Object {
 			if n := ref.doc.nodes[ref.node]; n.kind != .Null && n.n != 0 {
-				leaf(inf, member(inf, p, "#text", markup, .Text), v, scalar)
+				leaf(inf, member(inf, p, core.MARKUP_TEXT, markup, .Text), v, scalar)
 			}
 			return
 		}

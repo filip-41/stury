@@ -44,6 +44,8 @@ Opts :: struct {
 	diff:             bool, // edit --diff: tell the value changes of the edit
 	alias_limit:      u64, // --alias-limit, 0 for the YAML reader's own
 	merge_keys:       bool, // --merge-keys
+	expansion_limit:  u64, // --expansion-limit, 0 for the XML reader's own
+	unread_entities:  bool, // --unread-entities
 }
 
 // What the command line gives besides the options.
@@ -78,8 +80,11 @@ Cli :: struct {
 	json_flag, text_flag, layout_flag: string,
 	// The first option given that reads a delimited text (--delimiter...), and the first that writes one (--crlf...).
 	cells_flag, cells_out_flag: string,
-	// The first option given that reads a YAML text (--alias-limit, --merge-keys).
-	yaml_flag: string,
+	// The option --infer, which types a text value of a delimited text or of XML.
+	infer_flag: string,
+	// The first option given that reads a YAML text (--alias-limit, --merge-keys), and the first that reads an XML
+	// text (--expansion-limit, --unread-entities).
+	yaml_flag, xml_flag: string,
 	out_delimiter, out_comment: Maybe(byte),
 	// `check`'s schema options, which `diff` takes too.
 	schema: Schema_Options,
@@ -217,15 +222,17 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			}
 			note_cells_flag(&cli, a, strings.has_prefix(name, "out-"))
 			i += option_arity(a)
-		case "no-header", "infer", "ragged", "lazy-quotes":
+		case "no-header", "ragged", "lazy-quotes":
 			switch name {
 			case "no-header":   o.cells_in.no_header = true
-			case "infer":       o.cells_in.infer = true
 			case "ragged":      o.cells_in.tolerate += {.Ragged}
 			case "lazy-quotes": o.cells_in.tolerate += {.Bare_Quote}
 			}
 			note_cells_flag(&cli, a, false)
-		case "alias-limit":
+		case "infer":
+			o.cells_in.infer = true
+			cli.infer_flag = a
+		case "alias-limit", "expansion-limit":
 			if i + 1 >= len(args) {
 				usage_error("%s takes one parameter", a)
 			}
@@ -233,12 +240,20 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			if !ok || n < 1 {
 				usage_error("%s takes a number of bytes, 1 or more", a)
 			}
-			o.alias_limit = n
-			note_first(&cli.yaml_flag, a)
+			if name == "alias-limit" {
+				o.alias_limit = n
+				note_first(&cli.yaml_flag, a)
+			} else {
+				o.expansion_limit = n
+				note_first(&cli.xml_flag, a)
+			}
 			i += option_arity(a)
 		case "merge-keys":
 			o.merge_keys = true
 			note_first(&cli.yaml_flag, a)
+		case "unread-entities":
+			o.unread_entities = true
+			note_first(&cli.xml_flag, a)
 		case "out-no-header":
 			o.cells_out.no_header = true
 			note_cells_flag(&cli, a, true)
@@ -458,7 +473,7 @@ subcommand_index :: proc(args: []string) -> int {
 @(private = "file")
 option_arity :: proc(a: string) -> int {
 	switch a {
-	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--filter", "--seed", "--count", "--package", "--old-schema", "--new-schema", "--compat", "--key", "--alias-limit":
+	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--filter", "--seed", "--count", "--package", "--old-schema", "--new-schema", "--compat", "--key", "--alias-limit", "--expansion-limit":
 		return 1
 	case "--arg", "--argjson", "--slurpfile", "--rawfile":
 		return 2

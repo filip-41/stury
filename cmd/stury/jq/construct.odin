@@ -126,8 +126,8 @@ append_field :: #force_inline proc(into: ^[dynamic]Value, e: Value, name: string
 	case Ref:
 		switch node_kind(y.doc, y.node) {
 		case .Object:
-			r, found := core_pkg.member(y.doc, y.node, name)
-			append(into, Value(Ref{y.doc, r}) if found else nil)
+			f, _ := object_get(y, name)
+			append(into, f)
 			return true
 		case .Null:
 			append(into, nil)

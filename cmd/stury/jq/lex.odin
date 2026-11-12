@@ -103,6 +103,9 @@ fact_list :: proc() -> string {
 	b := strings.builder_make()
 	names := FACT_NAMES
 	for n, f in names {
+		if f == .Attribute {
+			continue
+		}
 		if f != .Comment {
 			strings.write_string(&b, ", ")
 		}
@@ -135,6 +138,8 @@ lex_token :: proc(p: ^Parser) -> (Sym, Sem) {
 	case fact != "":
 		p.pos += 1 + len(fact)
 		return .Field, {text = fact}
+	case c == '.' && next == '&' && attribute_start(s, start + 2):
+		return lex_attribute(p)
 	case c == '.' && ident_start(next):
 		p.pos = run_end(s, start + 1, ident_byte)
 		return .Field, {text = s[start + 1:p.pos]}
@@ -179,6 +184,39 @@ lex_token :: proc(p: ^Parser) -> (Sym, Sem) {
 		return .Dollar, {}
 	}
 	return .Invalid, {}
+}
+
+// Whether an attribute accessor's name starts at `at`: a name, or a quoted name.
+@(private = "file")
+attribute_start :: proc(s: string, at: int) -> bool {
+	return at < len(s) && (ident_start(s[at]) || s[at] == '"')
+}
+
+// `.&name` or `.&"name"`, an attribute read by its name as written. A name takes colons and hyphens, a quoted one
+// anything but a quote. jq reads `.&` as no program, so no jq program has one.
+@(private = "file")
+lex_attribute :: proc(p: ^Parser) -> (Sym, Sem) {
+	s := p.src
+	at := p.pos + 2
+	if s[at] == '"' {
+		end := at + 1
+		for end < len(s) && s[end] != '"' {
+			end += 1
+		}
+		if end >= len(s) {
+			p.pos = end
+			report(p, {p.pos - 1, p.pos}, "unterminated attribute name")
+			return .Field, {text = "&"}
+		}
+		p.pos = end + 1
+		return .Field, {text = strings.concatenate({"&", s[at + 1:end]})}
+	}
+	end := at
+	for end < len(s) && (ident_byte(s[end]) || s[end] == ':' || s[end] == '-') {
+		end += 1
+	}
+	p.pos = end
+	return .Field, {text = s[at - 1:end]}
 }
 
 // A closing bracket ends the innermost (), [], {} or interpolation it matches, or is invalid.

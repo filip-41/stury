@@ -127,11 +127,13 @@ object_delete_all :: proc(o: ^Object, gone: map[string]bool) {
 // The value of node `r` as a built value of its own, which outlives the document: a number is a double, but a number
 // whose digits the double does not spell keeps them as a `Number_Text`, and a byte string is the string of its RFC 4648
 // base64, as a text format writes it. An object follows `dups`: `.All` keeps a
-// repeated key in order, `.First` the first and the others the last. With `borrow` a string or key that lies in the
+// repeated key in order, `.First` the first and `.Last` the last. `.Default` is the format's own: a markup document
+// makes a repeated name an array of each of its elements in document order, as `markup_members` reads it, and any other
+// keeps the last. With `borrow` a string or key that lies in the
 // document's text stays a slice of it. A node that has comments in its document carries them, as `Commented` does. The
 // containers being filled are frames of a stack in the context allocator, so the native stack does not grow with the
 // node's depth.
-built_value :: proc(r: Node_Ref, dups := Duplicates.Last, borrow := false) -> Value {
+built_value :: proc(r: Node_Ref, dups := Duplicates.Default, borrow := false) -> Value {
 	// A container being filled, from `it`. `key` is the key of the member whose value is being built.
 	Filling :: struct {
 		r:   Node_Ref,
@@ -145,9 +147,14 @@ built_value :: proc(r: Node_Ref, dups := Duplicates.Last, borrow := false) -> Va
 	case:
 		return built_comments(r, v, borrow)
 	}
+	// `.Default` stands for a markup document's arrays from here, and the pairs are the nodes', each key each time.
+	dups := dups
+	if dups == .Default && !is_markup(r.doc) {
+		dups = .Last
+	}
 	stack := make([dynamic]Filling, 0, 16)
 	defer delete(stack)
-	append(&stack, Filling{r = r, v = v, it = children(r) if doc_kind(r.doc, r.node) == .Array else pairs(r)})
+	append(&stack, Filling{r = r, v = v, it = children(r) if doc_kind(r.doc, r.node) == .Array else node_pairs(r)})
 	for {
 		top := len(stack) - 1
 		f := &stack[top]
@@ -170,7 +177,7 @@ built_value :: proc(r: Node_Ref, dups := Duplicates.Last, borrow := false) -> Va
 				append(&stack, Filling{r = child, v = cv, it = children(child)})
 				continue
 			case ^Object:
-				append(&stack, Filling{r = child, v = cv, it = pairs(child)})
+				append(&stack, Filling{r = child, v = cv, it = node_pairs(child)})
 				continue
 			}
 			built_put(f, built_comments(child, cv, borrow), dups)
@@ -185,7 +192,8 @@ built_value :: proc(r: Node_Ref, dups := Duplicates.Last, borrow := false) -> Va
 	}
 }
 
-// `v` made the next item of the array `f` fills, or the value of its object's member `f.key` under `dups`.
+// `v` made the next item of the array `f` fills, or the value of its object's member `f.key` under `dups`, which is
+// `.Default` only for a markup document.
 @(private = "file")
 built_put :: proc(f: ^$F, v: Value, dups: Duplicates) {
 	if a, is_array := f.v.(^Array); is_array {
@@ -193,13 +201,24 @@ built_put :: proc(f: ^$F, v: Value, dups: Duplicates) {
 		return
 	}
 	o := f.v.(^Object)
-	switch {
-	case dups == .All:
+	#partial switch dups {
+	case .All:
 		object_append(o, f.key, v)
-	case dups == .First && object_slot(o, f.key) >= 0:
+	case .First:
+		if object_slot(o, f.key) < 0 {
+			object_append(o, f.key, v)
+		}
+	case .Default:
+		markup_put(o, f.key, v)
 	case:
 		object_put(o, f.key, v)
 	}
+}
+
+// A `Value_Iter` over the members of object node `r` as its document holds them, a repeated key's each time.
+@(private = "file")
+node_pairs :: proc(r: Node_Ref) -> Value_Iter {
+	return {v = r, pairs = doc_pairs(r.doc, r.node)}
 }
 
 // `v`, the value of node `r`, with the comments `r` has in its document.

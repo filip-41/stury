@@ -4,5 +4,8 @@
 /.github/ export-ignore
 # Conformance cases and test vectors are compared byte for byte, so a checkout keeps their line ends as committed.
 /toml/test/conformance/** -text
+/xml/test/conformance/cases.tsv -text
 /yaml/test/suite/** -text
 /cbor/test/vectors/** -text
+# The entity table and the source whose digest is checked are read as bytes, so a checkout keeps them as committed.
+/core/spell/entities/* -text

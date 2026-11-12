@@ -8,12 +8,23 @@ import core ".."
 @(private)
 FACT_ROLES := [?]core.Role{.Comment, .Comment_Inline, .Comment_Foot, .Attribute, .Tag, .Anchor}
 
-// Whether neither value holds a fact below it, so equal values have nothing left to tell.
+// Whether neither value holds a fact below it, so equal values have nothing left to tell. A built array holds nodes,
+// each of them, only when it is the array of a name a markup node repeats.
 @(private)
 quiet :: proc(a, b: core.Value) -> bool {
 	for v in ([2]core.Value{a, b}) {
-		if r, is_node := core.plain(v).(core.Node_Ref); is_node && len(core.subtree_facts(r.doc, r.node)) > 0 {
-			return false
+		#partial switch x in core.plain(v) {
+		case core.Node_Ref:
+			if len(core.subtree_facts(x.doc, x.node)) > 0 {
+				return false
+			}
+		case ^core.Array:
+			for item in x.items {
+				r := core.plain(item).(core.Node_Ref) or_break
+				if len(core.subtree_facts(r.doc, r.node)) > 0 {
+					return false
+				}
+			}
 		}
 	}
 	return true

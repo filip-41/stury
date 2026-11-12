@@ -1,12 +1,15 @@
 package typed
 
+import spell "../spell"
 import core ".."
 import rules "../rules"
 import build "../build"
 
-// The check of a built markup document, a document whose format reads attributes. An element is an object member whose
-// value is its text, empty when the element is, or an object of its child elements and `#text` runs. The check reads it
-// as its description does:
+// The typed read and the check of a built markup document, a document whose format reads attributes. An element is an
+// object member whose value is its text, empty when the element is, or an object of its child elements and `#text` runs.
+// A read into a type reads an element at a struct as an object of its attributes, its text as the member `#text` and its
+// child elements, and collects the siblings of a name a slice, a dynamic or a fixed array reads, wherever they stand.
+// Any other type reads an element's text by its kind, as `typed_text` says. The check reads it as its description does:
 // - an element with attributes, and a scalar element whose record takes objects and no scalar, is an object of its
 //   attributes, then its text as the member whose record binds the text, else `#text`, none when it is empty;
 // - a member whose record takes arrays and nothing else but null, or has no type and an array keyword, collects the
@@ -27,13 +30,13 @@ TEXT_KEY :: core.SPELLING_DECODE | 1 << 15
 
 // The name of an element's text when no member record binds it.
 @(private)
-TEXT_NAME :: "#text"
+TEXT_NAME :: core.MARKUP_TEXT
 
 // A markup element's children as `child_step` gives them to the check. The values a collection took are marked by their
 // place past `at`, in `small` and past it in `spill`.
 @(private)
-Element_Read :: struct {
-	d:        ^Document_Read(Check),
+Element_Read :: struct($H: typeid) {
+	d:        ^Document_Read(H),
 	at:       core.Node_Index,
 	sequence: bool,
 	stopped:  bool,
@@ -43,24 +46,32 @@ Element_Read :: struct {
 
 // The value `t` at node `at` of a markup document.
 @(private)
-element_step :: proc "contextless" (d: ^Document_Read(Check), regs: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
+element_step :: proc "contextless" (d: ^Document_Read($H), regs: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
 	h := &d.reader
 	fld := field_at(regs.b)
+	when H == Reader {
+		// A pointer or a `Maybe` reads its element's tokens.
+		for (fld.kind == .Ptr || fld.kind == .Maybe) && fld.first != nil {
+			fld = field_at(u64(uintptr(fld.first)))
+		}
+	}
 	// A struct's record reads an element as an object. It collects no repeated child, so a repeat is the struct's.
 	structured := fld.kind == .Struct || fld.kind == .Required
 	if fld.kind != .Checked && !structured {
-		return on_token_check_spelled(h, regs, t)
+		return hook_spelled(h, regs, typed_text(h, fld, t))
 	}
 	l: ^rules.Leaf
-	prefixed: bool
-	if !structured {
-		l, _, prefixed = record_rules(h, fld)
-	}
-	if l != nil && .Object not_in l.kinds && prefixed {
-		return element_children(d, regs, t, at, true)
+	when H == Check {
+		prefixed: bool
+		if !structured {
+			l, _, prefixed = record_rules(h, fld)
+		}
+		if l != nil && .Object not_in l.kinds && prefixed {
+			return element_children(d, regs, t, at, true)
+		}
 	}
 	if t.kind == .Array {
-		return on_token_check_spelled(h, regs, t)
+		return hook_spelled(h, regs, t)
 	}
 	if t.kind == .Object {
 		return element_children(d, regs, t, at, false)
@@ -69,7 +80,7 @@ element_step :: proc "contextless" (d: ^Document_Read(Check), regs: core.Hook_Re
 	attributes := core.attributes_of(d.doc, at)
 	objects := structured || l != nil && l.kinds & (rules.EVERY_KIND - {.Array}) == {.Object}
 	if _, _, held := core.attribute_next(&attributes); !objects && !held {
-		return on_token_check_spelled(h, regs, t)
+		return hook_spelled(h, regs, t)
 	}
 	next, action := element_open(d, regs, {kind = .Object, lo = t.lo})
 	if action != .Next {
@@ -80,8 +91,8 @@ element_step :: proc "contextless" (d: ^Document_Read(Check), regs: core.Hook_Re
 	}
 	if !no_text(t) {
 		key := core.Token{lo = t.lo, kind = .String, role = .Key, spelling = TEXT_KEY}
-		if next, action = on_token_check(h, next, key); action == .Next {
-			next, action = on_token_check_spelled(h, next, t)
+		if next, action = hook(h, next, key); action == .Next {
+			next, action = hook_spelled(h, next, typed_text(h, field_at(next.b), t))
 		}
 		if action == .Stop {
 			return next, action
@@ -91,9 +102,63 @@ element_step :: proc "contextless" (d: ^Document_Read(Check), regs: core.Hook_Re
 	return element_close(h, next, hi)
 }
 
+// The text `t` of an element as the record `fld` reads it. A `Plain` text has no kind, which a `Checked` record's
+// leaf picks. A record of a type reads it by that type, as a delimited cell is read by its column's: a number where the
+// type is a number and the text is exactly a JSON number, `true` and `false` where the type is a boolean, and a string
+// anywhere else. A union reads it as `infer` does, an empty text as null.
+@(private)
+typed_text :: proc "contextless" (h: ^Reader, fld: ^Field, t: core.Token) -> core.Token {
+	t := t
+	if t.kind != .Plain || fld.kind == .Checked {
+		return t
+	}
+	t.kind = .String
+	#partial switch fld.kind {
+	case .I8 ..= .F64:
+		text_number(h, &t)
+	case .Bool:
+		text_bool(h, &t)
+	case .Union:
+		if t.n == 0 {
+			t.kind = .Null
+		} else if !text_number(h, &t) {
+			text_bool(h, &t)
+		}
+	}
+	return t
+}
+
+// Makes the text `t` a number when it is exactly a JSON number. A number's digits are its span, so a text that needs a
+// decode is none.
+@(private)
+text_number :: proc "contextless" (h: ^Reader, t: ^core.Token) -> bool {
+	if t.spelling & core.SPELLING_DECODE != 0 {
+		return false
+	}
+	int_digits, frac_digits, has_exp, ok := spell.number_shape_strict(h.src, t.lo, t.lo + u64(t.n))
+	if ok {
+		t.kind = .Number
+		t.spelling = core.number_spelling(0, int_digits, frac_digits) | (core.NUMBER_EXP if has_exp else 0)
+		h.mant = fold_digits(h.src, t^)
+	}
+	return ok
+}
+
+// Makes the text `t` a boolean when it is `true` or `false`.
+@(private)
+text_bool :: proc "contextless" (h: ^Reader, t: ^core.Token) {
+	buf: [TEXT_ROOM]u8 = ---
+	switch text, _ := decoded_text(h, t^, buf[:]); text {
+	case "true":
+		t.kind, t.spelling = .True, 0
+	case "false":
+		t.kind, t.spelling = .False, 0
+	}
+}
+
 // The children of the element `t` at node `at`, an object or, as `sequence` says, an array of its child values.
 @(private)
-element_children :: proc "contextless" (d: ^Document_Read(Check), regs: core.Hook_Regs, t: core.Token, at: core.Node_Index, sequence: bool) -> (core.Hook_Regs, core.Action) {
+element_children :: proc "contextless" (d: ^Document_Read($H), regs: core.Hook_Regs, t: core.Token, at: core.Node_Index, sequence: bool) -> (core.Hook_Regs, core.Action) {
 	h := &d.reader
 	context = h.ctx
 	open := t
@@ -107,7 +172,7 @@ element_children :: proc "contextless" (d: ^Document_Read(Check), regs: core.Hoo
 	if t.kind <= .Plain {
 		// The sequence of an element with no child element is its text, none when it is empty.
 		if !no_text(t) {
-			if next, action = on_token_check_spelled(h, next, t); action == .Stop {
+			if next, action = hook_spelled(h, next, t); action == .Stop {
 				return next, action
 			}
 		}
@@ -119,7 +184,7 @@ element_children :: proc "contextless" (d: ^Document_Read(Check), regs: core.Hoo
 			return next, action
 		}
 	}
-	e := Element_Read{d = d, at = at, sequence = sequence}
+	e := Element_Read(H){d = d, at = at, sequence = sequence}
 	defer delete(e.spill)
 	// The children open no container but at a record that is not `Checked`, so the ends rarely grow.
 	ends: [4]u32 = ---
@@ -135,7 +200,7 @@ element_children :: proc "contextless" (d: ^Document_Read(Check), regs: core.Hoo
 // A child of the element `e` reads, a key a member and a value a step of the document, a key passed over in a sequence
 // and at a sibling a collection took.
 @(private)
-child_step :: proc "contextless" (e: ^Element_Read, regs: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
+child_step :: proc "contextless" (e: ^Element_Read($H), regs: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
 	h := &e.d.reader
 	context = h.ctx
 	next, action := regs, core.Action.Next
@@ -148,7 +213,7 @@ child_step :: proc "contextless" (e: ^Element_Read, regs: core.Hook_Regs, t: cor
 	case !binds(h, t, .Element):
 		action = .Skip
 	case:
-		if next, action = on_token_check(h, regs, t); action == .Next {
+		if next, action = hook(h, regs, t); action == .Next {
 			if arrays, prefixed := collects(h, field_at(next.b)); arrays {
 				next, action = collect(e, next, at, prefixed)
 			}
@@ -159,12 +224,12 @@ child_step :: proc "contextless" (e: ^Element_Read, regs: core.Hook_Regs, t: cor
 }
 
 @(private)
-child_keyed :: proc "contextless" (e: ^Element_Read, regs: core.Hook_Regs, i, open: core.Node_Index) -> (core.Node_Index, bool) {
+child_keyed :: proc "contextless" (e: ^Element_Read($H), regs: core.Hook_Regs, i, open: core.Node_Index) -> (core.Node_Index, bool) {
 	return document_keyed(e.d, regs, i, open)
 }
 
 @(private)
-child_deepen :: proc "contextless" (e: ^Element_Read, extra: int) -> bool {
+child_deepen :: proc "contextless" (e: ^Element_Read($H), extra: int) -> bool {
 	return document_deepen(e.d, extra)
 }
 
@@ -180,9 +245,22 @@ record_rules :: proc "contextless" (h: ^Check, fld: ^Field) -> (l: ^rules.Leaf, 
 }
 
 // Whether the member record `fld` collects the siblings of its name, and whether it has `prefixItems`, so it collects only
-// a name that repeats.
+// a name that repeats. A type's member collects them when it is a list.
 @(private)
-collects :: proc "contextless" (h: ^Check, fld: ^Field) -> (arrays, prefixed: bool) {
+collects :: proc "contextless" (h: ^$H, fld: ^Field) -> (arrays, prefixed: bool) {
+	when H == Reader {
+		#partial switch fld.kind {
+		case .Slice, .Dynamic, .Array, .Fixed_List:
+			return true, false
+		}
+		return false, false
+	} else {
+		return checked_collects(h, fld)
+	}
+}
+
+@(private)
+checked_collects :: proc "contextless" (h: ^Check, fld: ^Field) -> (arrays, prefixed: bool) {
 	if fld.kind != .Checked {
 		return false, false
 	}
@@ -197,7 +275,7 @@ collects :: proc "contextless" (h: ^Check, fld: ^Field) -> (arrays, prefixed: bo
 // The member whose key is node `k` of the element `e` reads and its siblings of the same name, as one array, each later
 // one marked. A record with `prefixItems` whose name does not repeat reads its element as it stands.
 @(private)
-collect :: proc(e: ^Element_Read, regs: core.Hook_Regs, k: core.Node_Index, prefixed: bool) -> (core.Hook_Regs, core.Action) {
+collect :: proc(e: ^Element_Read($H), regs: core.Hook_Regs, k: core.Node_Index, prefixed: bool) -> (core.Hook_Regs, core.Action) {
 	d := e.d
 	h := &d.reader
 	doc := d.doc
@@ -243,7 +321,7 @@ collect :: proc(e: ^Element_Read, regs: core.Hook_Regs, k: core.Node_Index, pref
 
 // The value of the first sibling past key `k` of the element `e` reads whose key is `name`, `NO_NODE` for none.
 @(private)
-next_named :: proc(e: ^Element_Read, k: core.Node_Index, name: string) -> core.Node_Index {
+next_named :: proc(e: ^Element_Read($H), k: core.Node_Index, name: string) -> core.Node_Index {
 	h := &e.d.reader
 	it := core.doc_pairs(e.d.doc, e.at)
 	for key, v in core.doc_pair_next(&it) {
@@ -256,7 +334,7 @@ next_named :: proc(e: ^Element_Read, k: core.Node_Index, name: string) -> core.N
 
 // The word of the bit of value `v`'s place in the element `e` reads, nil past the spill.
 @(private)
-bit_word :: proc "contextless" (e: ^Element_Read, v: core.Node_Index) -> ^u64 {
+bit_word :: proc "contextless" (e: ^Element_Read($H), v: core.Node_Index) -> ^u64 {
 	bit := int(v - e.at)
 	if bit < 64 * len(e.small) {
 		return &e.small[bit >> 6]
@@ -268,14 +346,14 @@ bit_word :: proc "contextless" (e: ^Element_Read, v: core.Node_Index) -> ^u64 {
 }
 
 @(private)
-marked :: proc "contextless" (e: ^Element_Read, v: core.Node_Index) -> bool {
+marked :: proc "contextless" (e: ^Element_Read($H), v: core.Node_Index) -> bool {
 	w := bit_word(e, v)
 	return w != nil && w^ & (1 << uint(int(v - e.at) & 63)) != 0
 }
 
 // Marks value `v`, false when the spill cannot grow.
 @(private)
-mark :: proc(e: ^Element_Read, v: core.Node_Index) -> bool {
+mark :: proc(e: ^Element_Read($H), v: core.Node_Index) -> bool {
 	if bit_word(e, v) == nil && resize(&e.spill, int(v - e.at) >> 6 - len(e.small) + 1) != nil {
 		return false
 	}
@@ -285,33 +363,33 @@ mark :: proc(e: ^Element_Read, v: core.Node_Index) -> bool {
 
 // Opens the container `t` at `regs`, with room for its frame.
 @(private)
-element_open :: proc "contextless" (d: ^Document_Read(Check), regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+element_open :: proc "contextless" (d: ^Document_Read($H), regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	if d.reader.sp + 2 > d.room && !document_deepen(d, d.room) {
 		d.short = true
 		return regs, .Stop
 	}
-	return on_token_check(&d.reader, regs, t)
+	return hook(&d.reader, regs, t)
 }
 
 // Closes the container `element_open` opened, whose bytes end before `hi`. A replay passes over its nodes.
 @(private)
-element_close :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, hi: u64) -> (core.Hook_Regs, core.Action) {
-	next, action := on_token_check(h, regs, {kind = .End, lo = hi - 1, n = 1})
+element_close :: proc "contextless" (h: ^$H, regs: core.Hook_Regs, hi: u64) -> (core.Hook_Regs, core.Action) {
+	next, action := hook(h, regs, {kind = .End, lo = hi - 1, n = 1})
 	return next, .Stop if action == .Stop else .Skip
 }
 
 // Feeds the attributes of the element whose value is node `at` to the open object at `regs`, as members.
 @(private)
-feed_attributes :: proc(d: ^Document_Read(Check), regs: core.Hook_Regs, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
+feed_attributes :: proc(d: ^Document_Read($H), regs: core.Hook_Regs, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
 	regs := regs
 	it := core.attributes_of(d.doc, at)
 	for name, value in core.attribute_next(&it) {
 		if !binds(&d.reader, name, .Attribute) {
 			continue
 		}
-		next, action := on_token_check(&d.reader, regs, name)
+		next, action := hook(&d.reader, regs, name)
 		if action == .Next {
-			next, action = on_token_check_spelled(&d.reader, next, value)
+			next, action = hook_spelled(&d.reader, next, typed_text(&d.reader, field_at(next.b), value))
 		}
 		if action == .Stop {
 			return next, action
@@ -324,7 +402,7 @@ feed_attributes :: proc(d: ^Document_Read(Check), regs: core.Hook_Regs, at: core
 // Whether the member `key` names in the open object may be read from a `node`: no member record of its name binds
 // another node.
 @(private)
-binds :: proc(h: ^Check, key: core.Token, node: Markup_Node) -> bool {
+binds :: proc(h: ^Reader, key: core.Token, node: Markup_Node) -> bool {
 	owner := field_at(h.frames[h.sp - 1].b)
 	m := &h.plan.meta[owner.meta]
 	if m.members == 0 || len(h.plan.uses) == 0 {

@@ -1,6 +1,7 @@
 package compose
 
 import "base:runtime"
+import "core:encoding/endian"
 import "core:slice"
 import core ".."
 
@@ -300,4 +301,21 @@ apply_splices :: proc(src: []u8, splices: []Splice, allocator: runtime.Allocator
 	}
 	copy(out[w:], src[at:])
 	return out, {}
+}
+
+// The number of bodies a fact set writes.
+fact_count :: #force_inline proc(e: core.Edit) -> int {
+	return max(1, len(e.key) / 4)
+}
+
+// Body `i` of a fact set.
+fact_body :: proc(e: core.Edit, i: int) -> []u8 {
+	if len(e.key) == 0 {
+		return e.text
+	}
+	at := 0
+	for k in 0 ..< i {
+		at += int(endian.unchecked_get_u32le(e.key[4 * k:]))
+	}
+	return e.text[at:][:endian.unchecked_get_u32le(e.key[4 * i:])]
 }

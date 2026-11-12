@@ -96,7 +96,7 @@ Item :: struct {
 | `f32`, `f64` | any number, and JSON5's `Infinity` and `NaN` unless the walk refuses them with `refuse_non_finite`. A decimal past the type's range is `.Above_Maximum` or `.Below_Minimum`, and any other reads as the nearest value, however many digits or however large an exponent it has |
 | `string`, `cstring` | a string |
 | `Raw` | any value, as the format spells it |
-| `core.Value` | any value, built: a number past a double keeps its digits. The plan needs the reads of its format (`json.reads`), else `.Unsupported` |
+| `core.Value` | any value, built as `core.built_value` builds a node, so a markup document's repeated name is an array and `.First` keeps a key's first member: a number past a double keeps its digits. A text's read needs the plan to hold its format's reads (`json.reads`), else `.Unsupported`, and a document's read takes the node |
 | `Number_Text` | a number's text |
 | `Bytes` | a byte string: a string of RFC 4648 base64 with padding in a text format, refused as `.Wrong_Kind` when it is not the one canonical spelling of some bytes, and a `Bytes` token's payload in a binary format, where a `String` token is `.Wrong_Kind` |
 | `core.Number` | a number |

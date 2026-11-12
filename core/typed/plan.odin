@@ -756,7 +756,7 @@ plan_replace :: proc "contextless" (p: ^Plan) -> Replacement_Read {
 	return p.reads.replace if p.reads != nil else nil
 }
 
-// Whether `p` has a `core.Value` member, which reads only with a format's `build`.
+// Whether `p` has a `core.Value` member, which a text's read reads only with a format's `build`.
 plan_has_value :: proc(p: ^Plan) -> bool {
 	for f in p.fields {
 		if f.kind == .Value {

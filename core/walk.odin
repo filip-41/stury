@@ -36,10 +36,11 @@ Kind :: enum u8 {
 // where the previous value ends it is that value's `Comment_Inline`. Before a value the grammar allows it above, it is
 // that value's `Comment`. Any other comment is a `Comment_Foot` of the innermost open container, or of the root at
 // depth 0. `Tag`, `Anchor` and `Alias` are node properties. Each is a fact span that stands just before the node it
-// belongs to, on the node's line, and the span's lead marker length says how much of it is a marker. An `Attribute` is
-// a markup element's attribute, a fact of the element's value node, which a walk gives after the element's key and
-// before its value. A consumer that wants values only tests `t.role <= .Key`. `Partial` is no token's role: a read by
-// paths writes it on a container it kept only some children of.
+// belongs to, on the node's line, and the span's lead marker length says how much of it is a marker. `Instruction`
+// follows the comment position rule, and `Doctype` stands at the root. An `Attribute` is a markup element's attribute,
+// a fact of the element's value node, which a walk gives after the element's key and before its value. A consumer that
+// wants values only tests `t.role <= .Key`. `Partial` is no token's role: a read by paths writes it on a container it
+// kept only some children of.
 Role :: enum u8 {
 	Value, // json, dsv
 	Key, // json: a member's name, always a `String`, in JSON5 quoted or not, dsv: the header cell of a cell's column
@@ -50,6 +51,8 @@ Role :: enum u8 {
 	Tag, // the type tag of the node that follows, `Plain`
 	Anchor, // the name the node that follows is given for aliases to read, `Plain`
 	Alias, // the node that follows is a copy of a named anchor's node, `Plain`
+	Instruction, // a processing instruction, `target data`, by the comment position rule, `Plain`
+	Doctype, // the document type declaration, read only, on the root, `Plain`
 	Attribute, // markup: an element's attribute, `name="value"` through the closing quote, `spelling` as `Fact` says
 	Partial, // a document's container whose children were not all kept, in place of `Value`
 }
@@ -126,6 +129,9 @@ Tolerance :: enum u8 {
 	Ragged,
 	// A quote inside an unquoted CSV cell. It is a byte of the cell, and the block's quotes pair up without it.
 	Bare_Quote,
+	// An XML reference to an entity whose text was not read: an external entity, or an undeclared one in a document
+	// whose DTD was not read whole. It reads as its own text, `&name;`.
+	Unread_Entity,
 }
 
 // `Framing` says how a text holds a list of records. `Lines` is one record per line end, a row in dsv and a value per

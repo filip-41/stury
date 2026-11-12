@@ -255,6 +255,9 @@ edit_object :: proc(w: ^Edit_State, node: core.Node_Index, obj: ^jq.Object) -> b
 		return edit_set(w, node, obj)
 	}
 	members := edit_members(w, node) or_return
+	if core.is_markup(w.doc) {
+		return edit_elements(w, node, members, obj)
+	}
 	// The member a filter reads for a name is its last, as the CLI reads a repeated key.
 	read: map[string]int
 	if len(members) > 8 {
@@ -304,6 +307,109 @@ edit_object :: proc(w: ^Edit_State, node: core.Node_Index, obj: ^jq.Object) -> b
 		}
 	}
 	return edit_place_entries(w, node, len(members), entries[:], news[:])
+}
+
+// The members of a markup element, whose value reads a repeated name as one member, an array of the name's elements in
+// document order. An array on a name edits those elements as `edit_array` edits items, and any other value edits the
+// first and removes the rest. The members keep their document order, which interleaves names, unless the output moves a
+// name before one that stands earlier or an element before another of its name. A new element of a name goes after the
+// one before it in the output's array, or before the name's first, and a new name after every member before it.
+@(private = "file")
+edit_elements :: proc(w: ^Edit_State, node: core.Node_Index, members: []Source_Member, obj: ^jq.Object) -> bool {
+	named := make(map[string][dynamic]int, len(members), context.temp_allocator)
+	for m, i in members {
+		if m.name not_in named {
+			named[m.name] = make([dynamic]int, context.temp_allocator)
+		}
+		append(&named[m.name], i)
+	}
+	// An entry as `edit_place_entries` takes it, and `place` its order in the text: twice a kept member's position, and
+	// one more than twice the position a new one follows.
+	Placed :: struct {
+		place, entry: int,
+	}
+	placed := make([dynamic]Placed, 0, len(members), context.temp_allocator)
+	news := make([dynamic]Edit_New, context.temp_allocator)
+	moved := false
+	prior, high := -1, -1
+	for key in obj.keys {
+		value, _ := jq.object_get(obj, key)
+		group := named[key][:] if key in named else nil
+		if len(group) == 0 {
+			edit_note_comments(w, value) or_return
+			append(&news, Edit_New{key = key, value = value})
+			append(&placed, Placed{2 * high + 1, -len(news)})
+			continue
+		}
+		moved ||= group[0] < prior
+		prior = group[0]
+		items, is_array := jq.plain(value).(^jq.Array)
+		if !is_array {
+			edit_tree(w, members[group[0]].node, value) or_return
+			append(&placed, Placed{2 * group[0], group[0]})
+			high = max(high, group[0])
+			for i in group[1:] {
+				edit_check(w, core.remove(w.list, members[i].node)) or_return
+			}
+			continue
+		}
+		if c, is_commented := value.(^jq.Commented); is_commented && c.written != {} {
+			w.err = "a repeated name's array is no element and holds no attribute or comment: write each element's"
+			return false
+		}
+		nodes := make([]core.Node_Index, len(group), context.temp_allocator)
+		sources := make([]jq.Value, len(group), context.temp_allocator)
+		for i, k in group {
+			nodes[k] = members[i].node
+			sources[k] = jq.Ref{w.doc, nodes[k]}
+		}
+		claims := make([]int, len(items.items), context.temp_allocator)
+		for v, j in items.items {
+			claims[j] = -1
+			if r, is_ref := v.(jq.Ref); is_ref && r.doc == w.doc {
+				if k, found := slice.binary_search(nodes, r.node); found {
+					claims[j] = k
+				}
+			}
+		}
+		pairs := match_items(sources, items.items[:], claims)
+		used := make([]bool, len(group), context.temp_allocator)
+		place := 2 * group[0] - 1
+		last := -1
+		for v, j in items.items {
+			if k := pairs[j]; k >= 0 {
+				used[k] = true
+				moved ||= k < last
+				last = k
+				edit_tree(w, nodes[k], v) or_return
+				append(&placed, Placed{2 * group[k], group[k]})
+				place = 2 * group[k] + 1
+				high = max(high, group[k])
+				continue
+			}
+			edit_note_comments(w, v) or_return
+			append(&news, Edit_New{key = key, value = v})
+			append(&placed, Placed{place, -len(news)})
+		}
+		for u, k in used {
+			if !u {
+				edit_check(w, core.remove(w.list, nodes[k])) or_return
+			}
+		}
+	}
+	for m in members {
+		if _, kept := jq.object_get(obj, m.name); !kept {
+			edit_check(w, core.remove(w.list, m.node)) or_return
+		}
+	}
+	if !moved {
+		slice.stable_sort_by(placed[:], proc(a, b: Placed) -> bool {return a.place < b.place})
+	}
+	entries := make([]int, len(placed), context.temp_allocator)
+	for p, i in placed {
+		entries[i] = p.entry
+	}
+	return edit_place_entries(w, node, len(members), entries, news[:])
 }
 
 // Records the inserts of `news` and, when the kept members are out of their source order, the order `entries` gives:
