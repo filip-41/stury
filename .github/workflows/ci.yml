@@ -52,7 +52,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
-      - run: make -j4 test-x86
+      # One suite per core, each on one test thread, so the timed tests do not share a core under Rosetta.
+      - run: make -j3 test-x86 X86_THREADS=1
 
   # The jq 1.8.2 differential: jq_suite in diff mode, jq_diff and regex_diff over every seed. The test job runs the
   # corpus but cannot compare against jq itself. A seed per runner: each driver keeps every core busy.

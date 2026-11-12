@@ -112,12 +112,6 @@ schema_directory :: proc(path: string) -> string {
 	return dir if dir != "" else "."
 }
 
-// The `file:` URI of the schema file `path`, the base its references resolve against.
-schema_file_uri :: proc(path: string) -> string {
-	full, err := os.get_absolute_path(path, context.temp_allocator)
-	return strings.concatenate({"file://", full if err == nil else path}, runtime.heap_allocator())
-}
-
 // The URI the basic output's absolute keyword locations start from: the root's `$id`, and none for a schema known only
 // by its file.
 report_uri :: proc(sc: ^Schema_Check) -> string {
@@ -157,7 +151,7 @@ schema_read :: proc(s: Schema_Options, option := "--schema") -> ^Schema_Check {
 	// References resolve against the schema file's own place, and --schema-ref bounds only which files they may read.
 	opts := schema.Options {
 		format_assert = s.format_assert,
-		base          = schema_file_uri(s.file),
+		base          = schema.file_uri(s.file, runtime.heap_allocator()),
 		refs          = s.refs if s.refs != "" else schema_directory(s.file),
 		draft         = s.draft,
 	}

@@ -111,12 +111,14 @@ gate:
 test: test-lib test-examples test-cli test-jq
 
 # Each program under examples/ is built and run from here, and its output is the `expected.txt` beside it. The JSON
-# walks and dsv passes it links are the counts in `examples/links.txt`.
+# walks and dsv passes it links are the counts in `examples/links.txt`. On x86-64 each dsv pass is built once per vector
+# tier, and the v2 copies are the count.
+DSV_PASS := $(if $(filter x86_64 amd64,$(shell uname -m)),pass_v2,pass_base)
 test-examples:
 	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && for e in examples/*/; do e=$${e%/}; echo "== $$e"; \
 		$(ODIN) build $$e $(TEST_OPT) -collection:stury=. -out:$$d/x && $$d/x > $$d/out && diff $$d/out $$e/expected.txt || exit 1; \
 		want=$$(awk -v n=$${e#examples/} '$$1 == n {print $$2, $$3}' examples/links.txt); \
-		got="$$(nm $$d/x | grep -c 'json::st_value:') $$(nm $$d/x | grep -c 'dsv::pass_base:')"; \
+		got="$$(nm $$d/x | grep -c 'json::st_value:') $$(nm $$d/x | grep -c 'dsv::$(DSV_PASS):')"; \
 		[ "$$got" = "$$want" ] || { echo "$$e links $$got (walks passes), examples/links.txt says $$want" >&2; exit 1; }; \
 	done
 
@@ -172,6 +174,8 @@ $(TEST_SPEED): $(BUILD)/test/speed/%:
 # The x86-64 tiers v2 and v3 in a build for Odin's default CPU, as a caller's build is, at -o:none, where no kernel
 # is inlined into the tier's procedures, and at -o:speed. TIER picks the tier of the kernel tests' loops and of `tier()`.
 # On Apple silicon they run under Rosetta. v4 runs only on a machine with AVX-512 (TIER=2), and `lint` compiles it.
+# X86_THREADS sets each suite's test threads: on a host with as many cores as `make -j` runs suites, one thread each
+# keeps a timed test from sharing its core.
 test-x86: $(X86_TARGETS)
 
 # `build/test/x86/OPT/TIER/PACKAGE` runs one package at one tier.
@@ -179,7 +183,7 @@ $(X86_TARGETS): $(BUILD)/test/x86/%:
 	@mkdir -p $(@D)
 	@o=$(word 1,$(subst /, ,$*)); t=$(word 2,$(subst /, ,$*)); p=$(patsubst $(word 1,$(subst /, ,$*))/$(word 2,$(subst /, ,$*))/%,%,$*); \
 	echo "== $$p (x86 tier $$t -o:$$o)"; \
-	$(ODIN) test $$p -o:$$o -target:darwin_amd64 -define:TIER=$$t -out:$@ || \
+	$(ODIN) test $$p -o:$$o -target:darwin_amd64 -define:TIER=$$t $(if $(X86_THREADS),-define:ODIN_TEST_THREADS=$(X86_THREADS)) -out:$@ || \
 		{ echo "== $$p (x86 tier $$t -o:$$o) failed"; exit 1; }
 
 # Each x86 tier on a machine that lacks it: each package built for linux_amd64 with the tier forced, and run under

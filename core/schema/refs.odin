@@ -35,11 +35,42 @@ META := [?]struct {
 	{"http://json-schema.org/draft-04/schema", #load("meta/draft4/schema.json", string), .D04},
 }
 
-// The absolute directory references may read files from, without a closing slash. Symbolic links in it are resolved.
+// The `file:` URI of the file `path`, made absolute against the working directory: `file:///dir/s.json`, and on Windows
+// `file:///C:/dir/s.json`. A path that cannot be made absolute is taken as it is.
+file_uri :: proc(path: string, allocator := context.allocator) -> string {
+	full, err := os.get_absolute_path(path, context.temp_allocator)
+	return strings.concatenate({"file://", uri_path(full if err == nil else path, context.temp_allocator)}, allocator)
+}
+
+// The path of the `file:` URI that names the absolute path `full`: on Windows its separators as `/` and a `/` before its
+// drive.
+@(private)
+uri_path :: proc(full: string, allocator := context.allocator) -> string {
+	when ODIN_OS == .Windows {
+		slashed, _ := strings.replace_all(full, `\`, "/", allocator)
+		return slashed if strings.has_prefix(slashed, "/") else strings.concatenate({"/", slashed}, allocator)
+	} else {
+		return full
+	}
+}
+
+// The file the decoded path of a `file:` URI names: on Windows, the path without the `/` before its drive.
+@(private)
+file_path :: proc(path: string) -> string {
+	when ODIN_OS == .Windows {
+		if len(path) >= 3 && path[0] == '/' && path[2] == ':' {
+			return path[1:]
+		}
+	}
+	return path
+}
+
+// The absolute directory references may read files from, spelled as a `file:` URI's path and without a closing slash.
+// Symbolic links in it are resolved.
 @(private)
 root_path :: proc(res: ^Resolver) -> string {
 	full, err := os.get_absolute_path(res.root, context.allocator)
-	return strings.trim_right(full if err == nil else res.root, "/")
+	return strings.trim_right(uri_path(full if err == nil else res.root), "/")
 }
 
 @(private)
@@ -452,8 +483,8 @@ load :: proc(r: ^Reader, uri: string) -> (source: int, found: bool) {
 		}
 		// The real path decides: it has no dot segments and no link that leads out of the root.
 		path, decoded := percent_decode(u.path)
-		real, rerr := os.get_absolute_path(path, context.allocator)
-		if !decoded || rerr != nil || !strings.has_prefix(real, strings.concatenate({root_path(r.res), "/"})) {
+		real, rerr := os.get_absolute_path(file_path(path), context.allocator)
+		if !decoded || rerr != nil || !strings.has_prefix(uri_path(real), strings.concatenate({root_path(r.res), "/"})) {
 			return
 		}
 		bytes, err := os.read_entire_file_from_path(real, r.res.allocator)
