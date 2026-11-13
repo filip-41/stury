@@ -73,8 +73,10 @@ done
 endef
 
 # The command line at $(OPT). STURY_VERSION names the version `-V` prints, the commit's short hash by default.
+# On macOS core:crypto and core:encoding/uuid link Foundation through core:sys/info, and nothing calls it:
+# -dead_strip_dylibs drops a library no symbol is taken from, so a start does not load Foundation.
 ifeq ($(shell uname -s),Darwin)
-CLI_LINK := "-extra-linker-flags:-L$(shell xcrun --show-sdk-path)/usr/lib/system -lsystem_m -lsystem_c -lsystem_kernel -lsystem_pthread -lsystem_malloc"
+CLI_LINK := "-extra-linker-flags:-L$(shell xcrun --show-sdk-path)/usr/lib/system -lsystem_m -lsystem_c -lsystem_kernel -lsystem_pthread -lsystem_malloc -Wl,-dead_strip_dylibs"
 else ifeq ($(shell uname -s),Linux)
 CLI_LINK := -reloc-mode:static
 endif
