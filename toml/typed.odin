@@ -12,13 +12,8 @@ import write "../core/write"
 // Reads `src`, a TOML text of `spec`, into `target`. An absent member keeps what `target` holds. A datetime is read into a
 // string as its text. The form with no plan builds one with `context.allocator` and frees it before it returns, and a plan
 // built once with `plan_make` is the form for many reads. A refusal leaves everything the read allocated reachable from
-// `target`. Both specs share one read, so a `spec` chosen at run time links no more than a constant one. The target of
-// that form is any pointer, and a target that is no pointer is `.Plan_Mismatch`.
-unmarshal :: proc {unmarshal_bound, unmarshal_bound_plan, unmarshal_chosen, unmarshal_chosen_plan}
-
-// Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
-// first. The options are the plan's, and any plan of the format reads.
-check :: proc {check_bound, check_chosen}
+// `target`.
+unmarshal :: proc {unmarshal_once, unmarshal_plan}
 
 // Writes `value` as TOML into new bytes from `allocator`, as `write` says: a struct or map as a table, a nested one as a
 // section, a list of them as an array of tables. The form with no plan builds and frees one for the call, and a plan from
@@ -39,16 +34,16 @@ marshal_once :: proc(value: any, spec := Spec.Toml_1_0, opts := Options{}, write
 	return text, core.error_of(err)
 }
 
-// Returns the typed reads of spec `S`, which a plan `plan_make` builds for that spec holds.
-reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
-	return reads_of(S)
+// Returns the typed reads of `spec`, which a plan `plan_make` builds for that spec holds.
+reads :: proc "contextless" (spec: Spec) -> ^typed.Format_Reads {
+	return reads_of(.Toml_1_1) if spec == .Toml_1_1 else reads_of(.Toml_1_0)
 }
 
-// Returns the checks of spec `S` read with `opts`, which `model.compile` and `schema.bind` take: the reads, which check a
+// Returns the checks of `spec` read with `opts`, which `model.compile` and `schema.bind` take: the reads, which check a
 // text or a document by a plan made from a description or a model, and the handle its plans read by, which reaches no
 // service.
-checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Checks {
-	return {reads_of(S), bound_as(S, opts)}
+checks :: proc "contextless" (spec: Spec, opts := Options{}) -> typed.Format_Checks {
+	return {reads(spec), bound_as(spec, opts)}
 }
 
 // Builds the plan of `T` for TOML, as `typed.plan_make` does. A plan of either spec writes TOML 1.0 forms, and reads a
@@ -155,59 +150,26 @@ text_check :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typ
 }
 
 @(private)
-unmarshal_bound :: proc(src: []u8, $S: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	plan, refusal := plan_make(T, S, opts)
-	if refusal != nil {
-		return refusal
-	}
-	defer typed.plan_destroy(&plan)
-	err := text_read(src, bound_as(S, opts), target, T, &plan, read, allocator)
-	typed.own_errors(&err, read.sink)
-	return core.error_of(err)
-}
-
-@(private)
-unmarshal_bound_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return core.error_of(text_read(src, bound_as(S, opts), target, T, plan, read, allocator))
-}
-
-@(private)
-unmarshal_chosen :: proc(src: []u8, spec: Spec, target: any, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	data, T, pointer := typed.pointer_target(target)
-	if !pointer {
-		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
-	}
+unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	plan, refusal := plan_make(T, spec, opts)
 	if refusal != nil {
 		return refusal
 	}
 	defer typed.plan_destroy(&plan)
-	err := text_read(src, bound_as(spec, opts), data, T, &plan, read, allocator)
+	err := text_read(src, bound_as(spec, opts), target, T, &plan, read, allocator)
 	typed.own_errors(&err, read.sink)
 	return core.error_of(err)
 }
 
 @(private)
-unmarshal_chosen_plan :: proc(src: []u8, spec: Spec, target: any, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	data, T, pointer := typed.pointer_target(target)
-	if !pointer {
-		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
-	}
-	return core.error_of(text_read(src, bound_as(spec, opts), data, T, plan, read, allocator))
+unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	return core.error_of(text_read(src, bound_as(spec, opts), target, T, plan, read, allocator))
 }
 
-@(private)
-check_bound :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return check_ordered(src, bound_as(S, options_of(plan.as)), target, T, plan, read, allocator)
-}
-
-@(private)
-check_chosen :: proc(src: []u8, spec: Spec, target: any, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	data, T, pointer := typed.pointer_target(target)
-	if !pointer {
-		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
-	}
-	return check_ordered(src, bound_as(spec, options_of(plan.as)), data, T, plan, read, allocator)
+// Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
+// first. The options are the plan's, and any plan of the format reads.
+check :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	return check_ordered(src, bound_as(spec, options_of(plan.as)), target, T, plan, read, allocator)
 }
 
 // `text_check` with the entries it adds in the order `typed.check_text` gives them.

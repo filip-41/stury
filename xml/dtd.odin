@@ -384,11 +384,6 @@ entity_text :: #force_inline proc "contextless" (v: ^Dtd_View, src: []u8, e: ^En
 	return src[e.text_lo:][:e.text_n]
 }
 
-@(private)
-entity_name :: #force_inline proc "contextless" (v: ^Dtd_View, e: ^Entity) -> []u8 #no_bounds_check {
-	return v.bytes[e.name_lo:][:e.name_n]
-}
-
 // The declaration of attribute `name` of element `element`, nil for none.
 @(private)
 attr_decl :: proc "contextless" (v: ^Dtd_View, element, name: []u8) -> ^Attr_Decl #no_bounds_check {

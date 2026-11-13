@@ -1,11 +1,16 @@
-// The entry points of the format package: each form of a constant spec and of a spec chosen at run time reads, edits
-// and writes a valid text, and a read asked for a duplicate policy YAML does not have is refused.
+// The entry points of the format package and the calls in `core` with a handle read, edit and write a valid text, and
+// a repeated key follows the duplicate policy of every read.
 package yaml_tests
 
+import "core:fmt"
+import "core:strings"
 import "core:testing"
+import core "../../core"
 import compose "../../core/compose"
+import engine "../../core/build"
 import typed "../../core/typed"
 import write "../../core/write"
+import records "../../core/records"
 import walktest "../../walktest"
 import yaml ".."
 
@@ -234,7 +239,7 @@ every_record_form_reads_a_stream :: proc(t: ^testing.T) {
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, len(faults), 0)
 	delete(faults)
-	it := yaml.records_open(src, spec)
+	it := records.open(src, yaml.as(spec), .Concatenated)
 	defer yaml.records_close(&it)
 	n := 0
 	for rec in yaml.records_next(&it) {
@@ -246,56 +251,163 @@ every_record_form_reads_a_stream :: proc(t: ^testing.T) {
 	testing.expect_value(t, n, 2)
 }
 
-// `.Refuse` is YAML's only duplicate policy: a read takes it or names none, and a read asked for another is refused
-// before it reads a byte.
+// What a text with a repeated key gives under each duplicate policy through every read of the package.
+@(private = "file")
+Policy_Case :: struct {
+	dups:    yaml.Duplicates,
+	answers: string, // the answers of `.a`, comma-joined
+	set:     string, // the text `.a = 7` gives
+	a:       i64, // the member an unmarshal reads, 0 where it is refused
+	refused: core.Fault_Kind, // what a read that takes no answer gives
+}
+
+@(private = "file")
+POLICY_CASES := [?]Policy_Case {
+	{.Default, "2", "a: 1\na: 7\nb: [2, 3]\n", 2, .None},
+	{.Last, "2", "a: 1\na: 7\nb: [2, 3]\n", 2, .None},
+	{.First, "1", "a: 7\na: 2\nb: [2, 3]\n", 1, .None},
+	{.All, "1,2", "a: 7\na: 7\nb: [2, 3]\n", 0, .Bad_Option},
+	{.Refuse, "", "", 0, .Duplicate_Key},
+}
+
+@(private = "file")
+answer_texts :: proc(src: []u8, list: []yaml.Token_Answer) -> string {
+	texts := make([dynamic]string)
+	for a in list {
+		append(&texts, string(src[a.lo:a.hi]))
+	}
+	return strings.join(texts[:], ",")
+}
+
+// A repeated key follows `dups` in the build, the scans, the answers, the typed read and the one-call edit, through the
+// entries of the package and through `core` with a handle.
 @(test)
-a_read_asked_for_another_duplicate_policy_is_refused :: proc(t: ^testing.T) {
-	src := transmute([]u8)string(ENTRY_TEXT)
+a_repeated_key_follows_the_duplicate_policy_of_every_read :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	text := "a: 1\na: 2\nb: [2, 3]\n"
+	src := transmute([]u8)text
 	path, perr := yaml.parse_path(".a")
 	walktest.expect_nil(t, perr)
-	defer yaml.destroy(&path)
 	spec := yaml.Spec.Yaml_1_2
-	for dups in ([?]yaml.Duplicates{.Default, .Refuse}) {
-		doc, err := yaml.scan(src, spec, path, read = {dups = dups})
-		walktest.expect_nil(t, err)
-		testing.expect_value(t, len(doc.answers), 1)
-		yaml.destroy(&doc)
-		bound, berr := yaml.scan(src, .Yaml_1_2, path, read = {dups = dups})
-		walktest.expect_nil(t, berr)
-		yaml.destroy(&bound)
-		out, serr := yaml.set(src, spec, path, typed.Raw("7"), read = {dups = dups})
-		walktest.expect_nil(t, serr)
-		delete(out)
-		v: Entry
-		walktest.expect_nil(t, yaml.unmarshal(src, spec, &v, read = {dups = dups}))
-		delete(v.b)
-	}
-	for dups in ([?]yaml.Duplicates{.Last, .First, .All}) {
-		doc, err := yaml.scan(src, spec, path, read = {dups = dups})
-		testing.expectf(t, walktest.fault_is(err, .Bad_Option, 0), "scan under %v: %v", dups, err)
-		yaml.destroy(&doc)
-		bound, berr := yaml.scan(src, .Yaml_1_2, path, read = {dups = dups})
-		testing.expectf(t, walktest.fault_is(berr, .Bad_Option, 0), "scan under %v: %v", dups, berr)
-		yaml.destroy(&bound)
-		testing.expect(t, walktest.fault_is(yaml.each_answer(src, spec, path, nil, take_first, read = {dups = dups}), .Bad_Option, 0))
-		fdoc, _, ferr := yaml.find(src, spec, path, read = {dups = dups})
-		testing.expect(t, walktest.fault_is(ferr, .Bad_Option, 0))
-		yaml.destroy(&fdoc)
-		out, serr := yaml.set(src, spec, path, typed.Raw("7"), read = {dups = dups})
-		testing.expectf(t, out == nil && walktest.fault_is(serr, .Bad_Option, 0), "set under %v: %v", dups, serr)
-		v: Entry
-		walktest.expect_kind(t, yaml.unmarshal(src, spec, &v, read = {dups = dups}), yaml.Typed_Error_Kind.Bad_Option)
-		built, _ := yaml.build(src, spec)
-		answers, qerr := yaml.query(&built, path, {dups = dups})
-		testing.expect(t, answers == nil && walktest.fault_is(qerr, .Bad_Option, 0))
+	for c in POLICY_CASES {
+		read := core.Path_Options{dups = c.dups}
+		refused := c.dups == .Refuse
+		want := c.answers
+
+		built, berr := yaml.build(src, spec, dups = c.dups)
+		testing.expectf(t, (berr != nil) == refused, "build under %v: %v", c.dups, berr)
+		if !refused {
+			found, qerr := yaml.query(&built, path, {dups = c.dups})
+			walktest.expect_nil(t, qerr)
+			got := make([dynamic]string)
+			for a in found {
+				v, _ := core.int_value(&built, a.node)
+				append(&got, fmt.tprint(v))
+			}
+			testing.expectf(t, strings.join(got[:], ",") == want, "query under %v: %v", c.dups, got)
+		} else {
+			fault, _ := berr.(core.Fault)
+			testing.expect_value(t, fault.kind, core.Fault_Kind.Duplicate_Key)
+		}
 		yaml.destroy(&built)
-	}
-	// A repeated key is a fault of the text under the policy a read names and under none.
-	repeated := transmute([]u8)string("a: 1\na: 2\n")
-	for dups in ([?]yaml.Duplicates{.Default, .Refuse}) {
-		doc, err := yaml.scan(repeated, spec, path, read = {dups = dups})
-		fault, faulted := err.(yaml.Fault)
-		testing.expectf(t, faulted && fault.detail == u8(yaml.Detail.Duplicate_Key), "under %v: %v", dups, err)
+
+		doc, serr := yaml.scan(src, spec, path, read = read)
+		testing.expectf(t, (serr != nil) == refused, "scan under %v: %v", c.dups, serr)
+		if !refused {
+			got := make([dynamic]string)
+			for a in doc.answers {
+				v, _ := core.int_value(&doc, a.node)
+				append(&got, fmt.tprint(v))
+			}
+			testing.expectf(t, strings.join(got[:], ",") == want, "scan under %v: %v", c.dups, got)
+		}
 		yaml.destroy(&doc)
+
+		streamed := make([dynamic]yaml.Token_Answer)
+		eerr := yaml.each_answer(src, spec, path, &streamed, proc(state: rawptr, a: yaml.Token_Answer) -> bool {
+			append((^[dynamic]yaml.Token_Answer)(state), a)
+			return true
+		}, read = read)
+		testing.expectf(t, (eerr != nil) == refused && (refused || answer_texts(src, streamed[:]) == want), "each_answer under %v: %v %s", c.dups, eerr, answer_texts(src, streamed[:]))
+
+		it := yaml.answers(src, spec, path, read = read)
+		pulled := make([dynamic]yaml.Token_Answer)
+		for a in yaml.next(&it) {
+			append(&pulled, a)
+		}
+		testing.expectf(t, (it.err != nil) == refused && (refused || answer_texts(src, pulled[:]) == want), "answers under %v: %v %s", c.dups, it.err, answer_texts(src, pulled[:]))
+
+		fdoc, found, ferr := yaml.find(src, spec, path, read = read)
+		testing.expectf(t, (ferr != nil) == refused, "find under %v: %v", c.dups, ferr)
+		if !refused {
+			v, _ := core.int_value(&fdoc, found.node)
+			testing.expectf(t, c.answers[:1] == fmt.tprint(v), "find under %v: %v", c.dups, v)
+		}
+		yaml.destroy(&fdoc)
+
+		out, oerr := yaml.set(src, spec, path, typed.Raw("7"), read = {dups = c.dups})
+		testing.expectf(t, (oerr != nil) == refused && string(out) == c.set, "set under %v: %v %q", c.dups, oerr, out)
+
+		v: Entry
+		uerr := yaml.unmarshal(src, spec, &v, read = {dups = c.dups})
+		if c.refused == .None {
+			walktest.expect_nil(t, uerr)
+			testing.expect_value(t, v.a, c.a)
+		} else if c.dups == .All {
+			walktest.expect_kind(t, uerr, yaml.Typed_Error_Kind.Bad_Option)
+		} else {
+			walktest.expect_kind(t, uerr, yaml.Typed_Error_Kind.Duplicate_Key)
+		}
+
+		// `core` with a handle reads as the entries do.
+		cdoc, cerr := engine.scan(src, yaml.as(spec), path, read)
+		testing.expectf(t, (cerr != nil) == refused, "core scan under %v: %v", c.dups, cerr)
+		core.destroy(&cdoc)
+	}
+}
+
+// Two keys repeat only when they resolve to one type and value. A read by name refuses two keys of one text and two
+// types, `1` and `"1"`, under every policy but `.First` and `.All`, and a document holds both.
+@(test)
+a_key_is_its_resolved_value :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	spec := yaml.Spec.Yaml_1_2
+	for text in ([]string{"a: 1\na: 2\n", "a: 1\n\"a\": 2\n", "1: x\n0x1: y\n", "~: x\nnull: y\n", "!!str 1: x\n\"1\": y\n", "{a: 1, a: 2}\n", "a: 1\nb:\n  c: 1\n  \"c\": 2\n"}) {
+		_, err := yaml.build(transmute([]u8)text, spec, dups = .Refuse)
+		fault, _ := err.(core.Fault)
+		testing.expectf(t, fault.kind == .Duplicate_Key, "%q is refused: %v", text, err)
+	}
+
+	// A read by name sees two names in `1` and `"1"`, two keys, and in `1` and `0x1`, one repeated.
+	for text in ([]string{"1: x\n\"1\": y\n", "1: x\n0x1: y\n"}) {
+		src := transmute([]u8)text
+		doc, err := yaml.build(src, spec)
+		walktest.expect_nil(t, err)
+		testing.expect_value(t, core.length(&doc, core.ROOT), 2)
+		path, _ := yaml.parse_path(".\"1\"")
+		for dups in core.Duplicates {
+			_, qerr := yaml.query(&doc, path, {dups = dups})
+			_, serr := yaml.scan(src, spec, path, read = {dups = dups})
+			m: map[string]string
+			uerr := yaml.unmarshal(src, spec, &m, read = {dups = dups})
+			switch dups {
+			case .First:
+				walktest.expect_nil(t, qerr)
+				walktest.expect_nil(t, serr)
+				walktest.expect_nil(t, uerr)
+				testing.expect_value(t, m["1"], "x")
+			case .All:
+				walktest.expect_nil(t, qerr)
+				walktest.expect_nil(t, serr)
+			case .Default, .Last, .Refuse:
+				for e in ([]core.Error{qerr, serr}) {
+					fault, _ := e.(core.Fault)
+					testing.expectf(t, fault.kind == .Duplicate_Key && fault.at == 5, "%q under %v: %v", text, dups, e)
+				}
+				walktest.expect_kind(t, uerr, yaml.Typed_Error_Kind.Duplicate_Key)
+			}
+		}
 	}
 }

@@ -291,23 +291,13 @@ decode :: proc "contextless" (src: []u8, t: core.Token, buf: []u8) -> (s: string
 
 // Whether the decoded text of key `t` is `name`. A key longer than the stack buffer decodes on the heap.
 spelling_key_equals :: proc "contextless" (v: ^core.Token_View, t: core.Token, name: string) -> bool {
-	stack: [256]u8
-	buf := stack[:]
-	heap: []u8
-	room := 3 * int(t.n) + 4
-	if room > len(stack) {
-		context = runtime.default_context()
-		heap = make([]u8, room)
-		if heap == nil {
-			return false
-		}
-		buf = heap
+	Key :: struct {
+		v: ^core.Token_View,
+		t: core.Token,
 	}
-	s, ok := decode(v.src, t, buf)
-	equal := ok && s == name
-	if heap != nil {
-		context = runtime.default_context()
-		delete(heap)
-	}
-	return equal
+	key := Key{v, t}
+	return spell.buffered_equals(3 * int(t.n) + 4, name, &key, proc "contextless" (c: rawptr, buf: []u8) -> (string, bool) {
+		k := (^Key)(c)
+		return decode(k.v.src, k.t, buf)
+	})
 }

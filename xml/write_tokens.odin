@@ -11,16 +11,8 @@ import typed "../core/typed"
 import write "../core/write"
 
 // Starts a token write, as `write.tokens_init` does with `as(spec)`. The calls give a value as `write` takes a node.
-tokens_init :: proc {tokens_init_bound, tokens_init_chosen}
-
-@(private)
-tokens_init_bound :: proc(t: ^write.Tokens, $S: Spec, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind {
-	return write.tokens_init(t, bound_as(S), opts, allocator, stream, &TOKENS)
-}
-
-@(private)
-tokens_init_chosen :: #force_inline proc(t: ^write.Tokens, spec: Spec, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind {
-	return write.tokens_init(t, as(spec), opts, allocator, stream)
+tokens_init :: proc(t: ^write.Tokens, spec: Spec, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind {
+	return write.tokens_init(t, bound_as(spec), opts, allocator, stream, &TOKENS)
 }
 
 @(private, rodata)

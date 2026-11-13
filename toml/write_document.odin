@@ -39,20 +39,12 @@ Member :: struct {
 
 // Writes node `node` of `doc` as TOML, as `core.write` does with `as(spec)`. A document of another format is written
 // too, when its root is an object and it holds no null.
-write :: proc {write_bound, write_chosen}
-
-@(private)
-write_bound :: proc(doc: ^core.Document, $S: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
+write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
 	if int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
 		return nil, 0, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
-	out, cut, refusal := document_write(doc, opts, bound_as(S), node, {}, allocator)
+	out, cut, refusal := document_write(doc, opts, bound_as(spec), node, {}, allocator)
 	return out, cut, core.error_of(refusal)
-}
-
-@(private)
-write_chosen :: #force_inline proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
-	return core.write(doc, opts, as(spec), node, allocator)
 }
 
 // The handle's `write`: node `node` of `doc` as TOML.
@@ -184,7 +176,7 @@ put_foot :: proc(l: ^Layout, node: core.Node_Index) {
 	it := core.facts_of(l.doc, node, .Comment_Foot)
 	written := false
 	for body in core.fact_next(&it) {
-		if !comment_ok(body) {
+		if !write.comment_ok(body) {
 			continue
 		}
 		if !written && l.out.cursor + l.out.flushed > 0 {
@@ -480,48 +472,19 @@ put_datetime :: proc(out: ^write.Out, text, tag: string) -> core.Typed_Error_Kin
 	return .None
 }
 
-// Whether a comment body can be written: no line end, and no control byte but tab.
-@(private)
-comment_ok :: proc(body: string) -> bool {
-	for b in transmute([]u8)body {
-		if b < 0x20 && b != '\t' || b == 0x7f {
-			return false
-		}
-	}
-	return true
-}
-
 // Each comment of `role` on `node` as a line of its own.
 @(private)
 put_comments :: proc(l: ^Layout, node: core.Node_Index, role: core.Role) {
-	if !l.commented {
-		return
-	}
-	it := core.facts_of(l.doc, node, role)
-	for body in core.fact_next(&it) {
-		if comment_ok(body) {
-			l.kept += 1
-			write.put_byte(&l.out, '#')
-			write.put_text(&l.out, body)
-			write.put_byte(&l.out, '\n')
-		}
+	if l.commented {
+		l.kept += write.put_comment_lines(&l.out, l.doc, node, role, 0)
 	}
 }
 
 // The first comment of `node` that ends on its line, after the value.
 @(private)
 put_inline_comment :: proc(l: ^Layout, node: core.Node_Index) {
-	if !l.commented {
-		return
-	}
-	it := core.facts_of(l.doc, node, .Comment_Inline)
-	for body in core.fact_next(&it) {
-		if comment_ok(body) {
-			l.kept += 1
-			write.put_text(&l.out, " #")
-			write.put_text(&l.out, body)
-			return
-		}
+	if l.commented && write.put_comment_inline(&l.out, l.doc, node) {
+		l.kept += 1
 	}
 }
 

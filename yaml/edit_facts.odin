@@ -6,8 +6,8 @@ package yaml
 // block collection's last.
 
 import "core:bytes"
-import "core:encoding/endian"
 import core "../core"
+import compose "../core/compose"
 
 @(private)
 fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
@@ -18,19 +18,8 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	if .Flow in cx.flags[v] && (e.role != .Comment_Inline || cx.parent[v] != NIL && .Flow in cx.flags[cx.parent[v]]) {
 		return refuse_edit(cx, v, .Flow_Comment)
 	}
-	lines := make([dynamic][]u8, cx.a)
-	count := 0 if e.op == .Remove_Fact else max(1, len(e.key) / 4)
-	for k in 0 ..< count {
-		for line in bytes.split(fact_body(e, k), []u8{'\n'}, cx.a) {
-			append(&lines, bytes.trim_right(line, []u8{'\r'}))
-		}
-	}
-	existing := make([dynamic]core.Fact, cx.a)
-	for f in core.all_facts(cx.doc, e.node) {
-		if f.role == e.role {
-			append(&existing, f)
-		}
-	}
+	lines := compose.fact_lines(e, cx.a)
+	existing := compose.role_facts(cx.doc, e, cx.a)
 	for f, k in existing {
 		if k > 0 || len(lines) == 0 {
 			cut_comment(cx, f)
@@ -71,7 +60,7 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 		}
 		put_spaces_to(&b, column_of(src, start))
 		put_comment_lines(cx, &b, lines[:], e.padded, column_of(src, start), true)
-		ls := line_start(src, start)
+		ls := compose.line_start(src, start)
 		add(cx, ls, ls, b[:])
 	case .Comment_Foot:
 		if !is_block(cx, v) {
@@ -88,7 +77,7 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 			q = next_line(src, q)
 		}
 		if q == u64(len(src)) && (q == 0 || src[q - 1] != '\n') {
-			puts(&b, cx.eol)
+			compose.puts(&b, cx.eol)
 			put_spaces_to(&b, col)
 			put_comment_lines(cx, &b, lines[:], e.padded, col, false)
 		} else {
@@ -119,7 +108,7 @@ member_start :: proc(cx: ^Cx, v: u32) -> u64 {
 
 @(private = "file")
 put_comment :: proc(b: ^[dynamic]u8, body: []u8, padded: bool) {
-	puts(b, "# " if padded else "#")
+	compose.puts(b, "# " if padded else "#")
 	append(b, ..body)
 }
 
@@ -128,13 +117,13 @@ put_comment :: proc(b: ^[dynamic]u8, body: []u8, padded: bool) {
 put_comment_lines :: proc(cx: ^Cx, b: ^[dynamic]u8, lines: [][]u8, padded: bool, col: int, ended: bool) {
 	for line, k in lines {
 		if k > 0 {
-			puts(b, cx.eol)
+			compose.puts(b, cx.eol)
 			put_spaces_to(b, col)
 		}
 		put_comment(b, line, padded)
 	}
 	if ended {
-		puts(b, cx.eol)
+		compose.puts(b, cx.eol)
 	}
 }
 
@@ -143,23 +132,10 @@ put_comment_lines :: proc(cx: ^Cx, b: ^[dynamic]u8, lines: [][]u8, padded: bool,
 cut_comment :: proc(cx: ^Cx, f: core.Fact) {
 	lo, hi := f.lo, f.lo + u64(f.n)
 	if first_on_line(cx.src, lo) {
-		add(cx, line_start(cx.src, lo), next_line(cx.src, hi), nil)
+		add(cx, compose.line_start(cx.src, lo), next_line(cx.src, hi), nil)
 	} else {
 		add(cx, lead_end(cx.src, lo), hi, nil)
 	}
-}
-
-// Body `i` of a fact set: the whole text, or the slice the u32le lengths in `key` name.
-@(private = "file")
-fact_body :: proc(e: core.Edit, i: int) -> []u8 {
-	if len(e.key) == 0 {
-		return e.text
-	}
-	at := 0
-	for k in 0 ..< i {
-		at += int(endian.unchecked_get_u32le(e.key[4 * k:]))
-	}
-	return e.text[at:][:endian.unchecked_get_u32le(e.key[4 * i:])]
 }
 
 @(private = "file")
@@ -200,7 +176,7 @@ property_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	b := make([dynamic]u8, cx.a)
 	if at := props_lo(cx.doc, v, cx.lo[v]); at < cx.lo[v] {
 		append(&b, ..prefix[:])
-		puts(&b, " ")
+		compose.puts(&b, " ")
 		add(cx, at, at, b[:])
 		return true
 	}
@@ -210,21 +186,21 @@ property_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	case !is_block(cx, v):
 		empty := cx.doc.nodes[v].kind <= .Plain && cx.doc.nodes[v].n == 0
 		if empty && lo > 0 && (src[lo - 1] == ':' || src[lo - 1] == '-') {
-			puts(&b, " ")
+			compose.puts(&b, " ")
 		}
 		append(&b, ..prefix[:])
 		if !empty {
-			puts(&b, " ")
+			compose.puts(&b, " ")
 		}
 		add(cx, lo, lo, b[:])
 	case p != NIL && cx.doc.nodes[p].kind == .Object:
-		puts(&b, " ")
+		compose.puts(&b, " ")
 		append(&b, ..prefix[:])
 		colon := colon_after(src, cx.hi[v - 1])
 		add(cx, colon + 1, colon + 1, b[:])
 	case:
 		append(&b, ..prefix[:])
-		puts(&b, cx.eol)
+		compose.puts(&b, cx.eol)
 		put_spaces_to(&b, column_of(src, lo))
 		add(cx, lo, lo, b[:])
 	}
@@ -244,7 +220,7 @@ cut_property :: proc(cx: ^Cx, f: core.Fact) {
 		return
 	}
 	if first_on_line(src, lo) {
-		add(cx, line_start(src, lo), next_line(src, hi), nil)
+		add(cx, compose.line_start(src, lo), next_line(src, hi), nil)
 		return
 	}
 	add(cx, lead_end(src, lo), hi, nil)

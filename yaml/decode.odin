@@ -1,5 +1,7 @@
 package yaml
 
+import "core:unicode/utf8"
+
 // Writer into the caller's buffer. A write past the buffer's end sets `over` and is dropped.
 @(private)
 Decoded :: struct {
@@ -20,21 +22,9 @@ put :: #force_inline proc "contextless" (o: ^Decoded, b: u8) {
 
 @(private)
 put_rune :: proc "contextless" (o: ^Decoded, cp: u32) {
-	switch {
-	case cp < 0x80:
-		put(o, u8(cp))
-	case cp < 0x800:
-		put(o, u8(0xc0 | cp >> 6))
-		put(o, u8(0x80 | cp & 0x3f))
-	case cp < 0x10000:
-		put(o, u8(0xe0 | cp >> 12))
-		put(o, u8(0x80 | cp >> 6 & 0x3f))
-		put(o, u8(0x80 | cp & 0x3f))
-	case:
-		put(o, u8(0xf0 | cp >> 18))
-		put(o, u8(0x80 | cp >> 12 & 0x3f))
-		put(o, u8(0x80 | cp >> 6 & 0x3f))
-		put(o, u8(0x80 | cp & 0x3f))
+	s, n := utf8.encode_rune(rune(cp))
+	for i in 0 ..< n {
+		put(o, s[i])
 	}
 }
 

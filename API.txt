@@ -175,17 +175,17 @@ Unmarshal_Hook :: typed.Unmarshal_Hook
 Value :: core.Value
 Value_Class :: typed.Value_Class
 Write_Options :: core.Write_Options
-answers :: proc {answers_bound_one, answers_bound_many, answers_chosen_one, answers_chosen_many}
+answers :: proc {answers_one, answers_many}
 array_append :: core.array_append
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As
 attribute_next :: core.attribute_next
 attributes_of :: core.attributes_of
 bind_schema :: proc(s: ^Schema, spec: Spec, opts := Options{}, allocator := context.allocator) -> (Bound_Schema, core.Error)
-build :: proc {build_bound, build_chosen}
+build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error)
 can_resume :: #force_inline proc "contextless" (cursor: ^Cursor) -> bool
 cell :: records.cell
 cells :: records.cells
-check :: proc {check_bound, check_chosen}
+check :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
 check_schema :: schema.check
 check_schema_records :: schema.check_records
 checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Checks
@@ -201,14 +201,14 @@ compare :: core.compare
 destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind}
 doc_bytes :: core.doc_bytes
 doc_number_text :: core.doc_number_text
-each_answer :: proc {each_answer_bound_one, each_answer_bound_many, each_answer_chosen_one, each_answer_chosen_many}
-edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
+each_answer :: proc {each_answer_one, each_answer_many}
+edit_list_init :: proc(doc: ^core.Document, $S: Spec, allocator := context.allocator) -> core.Edit_List
 edit_spell :: proc(doc: ^core.Document, v: core.Value, opts: core.Write_Options, colon: string, _: bool, _: u64, allocator: runtime.Allocator) -> ([]u8, core.Error)
 equal :: core.equal
 fact_number :: core.fact_number
 fact_value :: core.fact_value
 facts_of :: core.facts_of
-find :: proc {find_bound, find_chosen}
+find :: proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error)
 float_value :: core.float_value
 format :: core.format
 hash :: core.hash
@@ -248,14 +248,14 @@ query :: proc {query_one, query_many}
 reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads
 record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs
 records_build :: records.build
-records_check :: proc {records_check_bound, records_check_chosen}
+records_check :: proc(src: []u8, $S: Spec, opts := Options{}, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> ([]core.Fault, runtime.Allocator_Error)
 records_close :: records.close
-records_each :: proc {records_each_bound, records_each_chosen}
+records_each :: #force_inline proc(src: []u8, $S: Spec, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0, opts := Options{}) -> core.Error
 records_marshal :: records.marshal
 records_marshal_stream :: records.marshal_stream
 records_next :: records.next
-records_open :: proc {records_open_bound, records_open_chosen}
-records_open_stream :: proc {records_open_stream_bound, records_open_stream_chosen}
+records_open :: proc(src: []u8, $S: Spec, opts := Options{}, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator, entries: []string = nil) -> records.Reader
+records_open_stream :: proc(input: io.Reader, $S: Spec, opts := Options{}, framing := core.Framing.Lines, stream := records.Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> records.Reader
 records_read :: records.read
 records_scan :: records.scan
 records_write :: records.write
@@ -264,8 +264,8 @@ remove :: core.remove
 remove_fact :: core.remove_fact
 render :: core.render
 rule_of :: core.rule_of
-scan :: proc {scan_bound_one, scan_bound_many, scan_chosen_one, scan_chosen_many}
-set :: proc {set_bound, set_chosen}
+scan :: proc {scan_one, scan_many}
+set :: proc(src: []u8, $S: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
 set_fact :: core.set_fact
 set_member :: write.set_member
 set_node :: write.set
@@ -274,9 +274,8 @@ text :: #force_inline proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s:
 text_room :: core.text_room
 token_text :: core.token_text
 tokens_close :: write.close
-tokens_init :: proc {tokens_init_bound, tokens_init_chosen}
-unmarshal :: proc {unmarshal_bound, unmarshal_bound_plan, unmarshal_chosen, unmarshal_chosen_plan}
-validate :: proc {validate_bound, validate_chosen}
+unmarshal :: proc {unmarshal_once, unmarshal_plan}
+validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error
 value_bool :: write.value_bool
 value_bytes :: write.value_bytes
 value_float :: write.value_float
@@ -287,14 +286,14 @@ value_tagged :: write.value_tagged
 value_uint :: write.value_uint
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault))
 walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
-write :: proc {write_bound, write_chosen}
+write :: proc(doc: ^core.Document, $S: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error)
 write_cells :: records.write_cells
 write_code :: core.write_code
 write_pointer :: core.write_pointer
 write_stream :: core.write_stream
 write_value :: write.write_value
 writer_end :: records.writer_end
-writer_init :: proc {writer_init_bound, writer_init_chosen}
+writer_init :: proc(wr: ^records.Writer, w: io.Stream, $S: Spec, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error_Kind
 # dsv
 Action :: core.Action
 All :: core.All
@@ -419,17 +418,17 @@ Unmarshal_Hook :: typed.Unmarshal_Hook
 Value :: core.Value
 Value_Class :: typed.Value_Class
 Write_Options :: core.Write_Options
-answers :: proc {answers_bound_one, answers_bound_many, answers_chosen_one, answers_chosen_many}
+answers :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter
 array_append :: core.array_append
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As
 attribute_next :: core.attribute_next
 attributes_of :: core.attributes_of
 bind_schema :: proc(s: ^Schema, spec: Spec, opts := Options{}, allocator := context.allocator) -> (Bound_Schema, core.Error)
-build :: proc {build_bound, build_chosen}
+build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error)
 can_resume :: #force_inline proc "contextless" (cursor: ^Cursor) -> bool
 cell :: records.cell
 cells :: records.cells
-check :: proc {check_bound, check_chosen}
+check :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
 check_schema :: schema.check
 check_schema_records :: schema.check_records
 checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Checks
@@ -445,14 +444,14 @@ compare :: core.compare
 destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind}
 doc_bytes :: core.doc_bytes
 doc_number_text :: core.doc_number_text
-each_answer :: proc {each_answer_bound_one, each_answer_bound_many, each_answer_chosen_one, each_answer_chosen_many}
-edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
+each_answer :: proc {each_answer_one, each_answer_many}
+edit_list_init :: proc(doc: ^core.Document, $S: Spec, allocator := context.allocator) -> core.Edit_List
 edit_spell :: proc(doc: ^core.Document, v: core.Value, _: core.Write_Options, _: string, record: bool, at: u64, allocator: runtime.Allocator) -> ([]u8, core.Error)
 equal :: core.equal
 fact_number :: core.fact_number
 fact_value :: core.fact_value
 facts_of :: core.facts_of
-find :: proc {find_bound, find_chosen}
+find :: proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error)
 float_value :: core.float_value
 format :: core.format
 hash :: core.hash
@@ -484,20 +483,19 @@ parse_path :: core.parse_path
 parse_pointer :: core.parse_pointer
 plain :: core.plain
 plan_make :: proc(T: typeid, spec := Spec.Csv, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
-plan_of :: proc(d: ^rules.Description, spec := Spec.Csv, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
 query :: proc {query_one, query_many}
 reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads
 record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs
 records_build :: records.build
-records_check :: proc {records_check_bound, records_check_chosen}
+records_check :: proc(src: []u8, $S: Spec, opts := Options{}, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> ([]core.Fault, runtime.Allocator_Error)
 records_close :: records.close
-records_each :: proc {records_each_bound, records_each_chosen}
+records_each :: #force_inline proc(src: []u8, $S: Spec, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0, opts := Options{}) -> core.Error
 records_marshal :: records.marshal
 records_marshal_stream :: records.marshal_stream
 records_next :: records.next
-records_open :: proc {records_open_bound, records_open_chosen}
-records_open_stream :: proc {records_open_stream_bound, records_open_stream_chosen}
+records_open :: proc(src: []u8, $S: Spec, opts := Options{}, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator) -> records.Reader
+records_open_stream :: proc(input: io.Reader, $S: Spec, opts := Options{}, framing := core.Framing.Lines, stream := records.Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> records.Reader
 records_read :: records.read
 records_scan :: records.scan
 records_write :: records.write
@@ -506,8 +504,8 @@ remove :: core.remove
 remove_fact :: core.remove_fact
 render :: core.render
 rule_of :: core.rule_of
-scan :: proc {scan_bound_one, scan_bound_many, scan_chosen_one, scan_chosen_many}
-set :: proc {set_bound, set_chosen}
+scan :: proc {scan_one, scan_many}
+set :: proc(src: []u8, $S: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
 set_fact :: core.set_fact
 set_member :: write.set_member
 set_node :: write.set
@@ -516,9 +514,8 @@ text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: b
 text_room :: core.text_room
 token_text :: core.token_text
 tokens_close :: write.close
-tokens_init :: proc {tokens_init_bound, tokens_init_chosen}
-unmarshal :: proc {unmarshal_bound, unmarshal_bound_plan, unmarshal_chosen, unmarshal_chosen_plan}
-validate :: proc {validate_bound, validate_chosen}
+unmarshal :: proc {unmarshal_once, unmarshal_plan}
+validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error
 value_bool :: write.value_bool
 value_bytes :: write.value_bytes
 value_float :: write.value_float
@@ -529,14 +526,14 @@ value_tagged :: write.value_tagged
 value_uint :: write.value_uint
 walk :: proc {walk_plain, walk_saving}
 walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
-write :: proc {write_bound, write_chosen}
+write :: proc(doc: ^core.Document, $S: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error)
 write_cells :: records.write_cells
 write_code :: core.write_code
 write_pointer :: core.write_pointer
 write_stream :: core.write_stream
 write_value :: write.write_value
 writer_end :: records.writer_end
-writer_init :: proc {writer_init_bound, writer_init_chosen}
+writer_init :: proc(wr: ^records.Writer, w: io.Stream, $S: Spec, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator, layout := Options{}) -> core.Typed_Error_Kind
 # toml
 Action :: core.Action
 All :: core.All
@@ -662,20 +659,20 @@ Unmarshal_Hook :: typed.Unmarshal_Hook
 Value :: core.Value
 Value_Class :: typed.Value_Class
 Write_Options :: core.Write_Options
-answers :: proc {answers_bound_one, answers_bound_many, answers_chosen_one, answers_chosen_many}
+answers :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter
 array_append :: core.array_append
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As
 attribute_next :: core.attribute_next
 attributes_of :: core.attributes_of
 bind_schema :: proc(s: ^Schema, spec: Spec, opts := Options{}, allocator := context.allocator) -> (Bound_Schema, core.Error)
-build :: proc {build_bound, build_chosen}
+build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error)
 can_resume :: #force_inline proc "contextless" (cursor: ^Cursor) -> bool
 cell :: records.cell
 cells :: records.cells
-check :: proc {check_bound, check_chosen}
+check :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
 check_schema :: schema.check
 check_schema_records :: schema.check_records
-checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Checks
+checks :: proc "contextless" (spec: Spec, opts := Options{}) -> typed.Format_Checks
 child_at :: core.child_at
 child_next :: core.child_next
 children :: core.children
@@ -688,13 +685,13 @@ compare :: core.compare
 destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind, cursor_destroy}
 doc_bytes :: core.doc_bytes
 doc_number_text :: core.doc_number_text
-each_answer :: proc {each_answer_bound_one, each_answer_bound_many, each_answer_chosen_one, each_answer_chosen_many}
-edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
+each_answer :: proc {each_answer_one, each_answer_many}
+edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List
 equal :: core.equal
 fact_number :: core.fact_number
 fact_value :: core.fact_value
 facts_of :: core.facts_of
-find :: proc {find_bound, find_chosen}
+find :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error)
 float_value :: core.float_value
 format :: core.format
 hash :: core.hash
@@ -730,17 +727,17 @@ plan_make :: proc(T: typeid, spec := Spec.Toml_1_0, opts := Options{}, plan := t
 plan_of :: proc(d: ^rules.Description, spec := Spec.Toml_1_0, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
 query :: proc {query_one, query_many}
-reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads
-record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs
+reads :: proc "contextless" (spec: Spec) -> ^typed.Format_Reads
+record_docs :: proc "contextless" (spec: Spec) -> ^records.Record_Docs
 records_build :: records.build
-records_check :: proc {records_check_bound, records_check_chosen}
+records_check :: proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> ([]core.Fault, runtime.Allocator_Error)
 records_close :: records.close
-records_each :: proc {records_each_bound, records_each_chosen}
+records_each :: #force_inline proc(src: []u8, spec: Spec, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0, opts := Options{}) -> core.Error
 records_marshal :: records.marshal
 records_marshal_stream :: records.marshal_stream
 records_next :: records.next
-records_open :: proc {records_open_bound, records_open_chosen}
-records_open_stream :: proc {records_open_stream_bound, records_open_stream_chosen}
+records_open :: proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, at: u64 = 0, allocator := context.allocator) -> records.Reader
+records_open_stream :: proc(input: io.Reader, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, stream := records.Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> records.Reader
 records_read :: records.read
 records_scan :: records.scan
 records_write :: records.write
@@ -749,8 +746,8 @@ remove :: core.remove
 remove_fact :: core.remove_fact
 render :: core.render
 rule_of :: core.rule_of
-scan :: proc {scan_bound_one, scan_bound_many, scan_chosen_one, scan_chosen_many}
-set :: proc {set_bound, set_chosen}
+scan :: proc {scan_one, scan_many}
+set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
 set_fact :: core.set_fact
 set_member :: write.set_member
 set_node :: write.set
@@ -759,9 +756,8 @@ text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: b
 text_room :: core.text_room
 token_text :: core.token_text
 tokens_close :: write.close
-tokens_init :: proc {tokens_init_bound, tokens_init_chosen}
-unmarshal :: proc {unmarshal_bound, unmarshal_bound_plan, unmarshal_chosen, unmarshal_chosen_plan}
-validate :: proc {validate_bound, validate_chosen}
+unmarshal :: proc {unmarshal_once, unmarshal_plan}
+validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error
 value_bool :: write.value_bool
 value_bytes :: write.value_bytes
 value_float :: write.value_float
@@ -772,7 +768,7 @@ value_tagged :: write.value_tagged
 value_uint :: write.value_uint
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault))
 walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
-write :: proc {write_bound, write_chosen}
+write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error)
 write_cells :: records.write_cells
 write_code :: core.write_code
 write_pointer :: core.write_pointer
@@ -905,22 +901,20 @@ Unmarshal_Hook :: typed.Unmarshal_Hook
 Value :: core.Value
 Value_Class :: typed.Value_Class
 Write_Options :: core.Write_Options
-answers :: proc {answers_bound_one, answers_bound_many, answers_chosen_one, answers_chosen_many}
+answers :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter
 array_append :: core.array_append
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As
 attribute_next :: core.attribute_next
-attribute_room :: proc(doc: ^core.Document, i: core.Node_Index) -> int
-attribute_value :: proc(doc: ^core.Document, i: core.Node_Index, name: string, buf: []u8) -> (value: string, ok: bool)
 attributes_of :: core.attributes_of
 bind_schema :: proc(s: ^Schema, spec: Spec, opts := Options{}, allocator := context.allocator) -> (Bound_Schema, core.Error)
-build :: proc {build_bound, build_chosen}
+build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error)
 can_resume :: #force_inline proc "contextless" (cursor: ^Cursor) -> bool
 cell :: records.cell
 cells :: records.cells
-check :: proc {check_bound, check_chosen}
+check :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
 check_schema :: schema.check
 check_schema_records :: schema.check_records
-checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Checks
+checks :: proc "contextless" (spec: Spec, opts := Options{}) -> typed.Format_Checks
 child_at :: core.child_at
 child_next :: core.child_next
 children :: core.children
@@ -934,13 +928,13 @@ cursor_destroy :: core.cursor_free
 destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind, cursor_destroy}
 doc_bytes :: core.doc_bytes
 doc_number_text :: core.doc_number_text
-each_answer :: proc {each_answer_bound_one, each_answer_bound_many, each_answer_chosen_one, each_answer_chosen_many}
-edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
+each_answer :: proc {each_answer_one, each_answer_many}
+edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List
 equal :: core.equal
 fact_number :: core.fact_number
 fact_value :: core.fact_value
 facts_of :: core.facts_of
-find :: proc {find_bound, find_chosen}
+find :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error)
 float_value :: core.float_value
 format :: core.format
 hash :: core.hash
@@ -971,21 +965,19 @@ pairs :: core.pairs
 parse_path :: core.parse_path
 parse_pointer :: core.parse_pointer
 plain :: core.plain
-plan_make :: proc(T: typeid, spec := Spec.Xml, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
-plan_of :: proc(d: ^rules.Description, spec := Spec.Xml, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
+plan_make :: proc(T: typeid, spec := Spec.Xml, opts := Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
 query :: proc {query_one, query_many}
-reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads
-record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs
+record_docs :: proc "contextless" (spec: Spec) -> ^records.Record_Docs
 records_build :: records.build
-records_check :: proc {records_check_bound, records_check_chosen}
+records_check :: proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> ([]core.Fault, runtime.Allocator_Error)
 records_close :: records.close
-records_each :: proc {records_each_bound, records_each_chosen}
+records_each :: #force_inline proc(src: []u8, spec: Spec, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0, opts := Options{}) -> core.Error
 records_marshal :: records.marshal
 records_marshal_stream :: records.marshal_stream
 records_next :: records.next
-records_open :: proc {records_open_bound, records_open_chosen}
-records_open_stream :: proc {records_open_stream_bound, records_open_stream_chosen}
+records_open :: proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, at: u64 = 0, allocator := context.allocator) -> records.Reader
+records_open_stream :: proc(input: io.Reader, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, stream := records.Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> records.Reader
 records_read :: records.read
 records_scan :: records.scan
 records_write :: records.write
@@ -994,8 +986,8 @@ remove :: core.remove
 remove_fact :: core.remove_fact
 render :: core.render
 rule_of :: core.rule_of
-scan :: proc {scan_bound_one, scan_bound_many, scan_chosen_one, scan_chosen_many}
-set :: proc {set_bound, set_chosen}
+scan :: proc {scan_one, scan_many}
+set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
 set_fact :: core.set_fact
 set_member :: write.set_member
 set_node :: write.set
@@ -1004,9 +996,9 @@ text :: core.text
 text_room :: core.text_room
 token_text :: core.token_text
 tokens_close :: write.close
-tokens_init :: proc {tokens_init_bound, tokens_init_chosen}
-unmarshal :: proc {unmarshal_bound, unmarshal_bound_plan, unmarshal_chosen, unmarshal_chosen_plan}
-validate :: proc {validate_bound, validate_chosen}
+tokens_init :: proc(t: ^write.Tokens, spec: Spec, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind
+unmarshal :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
+validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error
 value_bool :: write.value_bool
 value_bytes :: write.value_bytes
 value_float :: write.value_float
@@ -1017,7 +1009,7 @@ value_tagged :: write.value_tagged
 value_uint :: write.value_uint
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault))
 walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
-write :: proc {write_bound, write_chosen}
+write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error)
 write_cells :: records.write_cells
 write_code :: core.write_code
 write_pointer :: core.write_pointer
@@ -1149,21 +1141,21 @@ Unmarshal_Hook :: typed.Unmarshal_Hook
 Value :: core.Value
 Value_Class :: typed.Value_Class
 Write_Options :: core.Write_Options
-answers :: proc {answers_bound_one, answers_bound_many, answers_chosen_one, answers_chosen_many}
+answers :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter
 array_append :: core.array_append
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As
 attribute_next :: core.attribute_next
 attributes_of :: core.attributes_of
 bind_schema :: proc(s: ^Schema, spec: Spec, opts := Options{}, allocator := context.allocator) -> (Bound_Schema, core.Error)
-build :: proc {build_bound, build_chosen}
+build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Default, allocator := context.allocator) -> (core.Document, core.Error)
 build_as :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error)
 can_resume :: #force_inline proc "contextless" (cursor: ^Cursor) -> bool
 cell :: records.cell
 cells :: records.cells
-check :: proc {check_bound, check_chosen}
+check :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
 check_schema :: schema.check
 check_schema_records :: schema.check_records
-checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Checks
+checks :: proc "contextless" (spec: Spec, opts := Options{}) -> typed.Format_Checks
 child_at :: core.child_at
 child_next :: core.child_next
 children :: core.children
@@ -1176,13 +1168,13 @@ compare :: core.compare
 destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind, cursor_destroy}
 doc_bytes :: core.doc_bytes
 doc_number_text :: core.doc_number_text
-each_answer :: proc {each_answer_bound_one, each_answer_bound_many, each_answer_chosen_one, each_answer_chosen_many}
-edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
+each_answer :: proc {each_answer_one, each_answer_many}
+edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List
 equal :: core.equal
 fact_number :: core.fact_number
 fact_value :: core.fact_value
 facts_of :: core.facts_of
-find :: proc {find_bound, find_chosen}
+find :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error)
 float_value :: core.float_value
 format :: core.format
 hash :: core.hash
@@ -1217,17 +1209,17 @@ plan_make :: proc(T: typeid, spec := Spec.Yaml_1_2, opts := Options{}, plan := t
 plan_of :: proc(d: ^rules.Description, spec := Spec.Yaml_1_2, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
 query :: proc {query_one, query_many}
-reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads
-record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs
+reads :: proc "contextless" (spec: Spec) -> ^typed.Format_Reads
+record_docs :: proc "contextless" (spec: Spec) -> ^records.Record_Docs
 records_build :: records.build
-records_check :: proc {records_check_bound, records_check_chosen}
+records_check :: proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> ([]core.Fault, runtime.Allocator_Error)
 records_close :: records.close
-records_each :: proc {records_each_bound, records_each_chosen}
+records_each :: #force_inline proc(src: []u8, spec: Spec, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0, opts := Options{}) -> core.Error
 records_marshal :: records.marshal
 records_marshal_stream :: records.marshal_stream
 records_next :: records.next
-records_open :: proc {records_open_bound, records_open_chosen}
-records_open_stream :: proc {records_open_stream_bound, records_open_stream_chosen}
+records_open :: proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, at: u64 = 0, allocator := context.allocator) -> records.Reader
+records_open_stream :: records.open_stream
 records_read :: records.read
 records_scan :: records.scan
 records_write :: records.write
@@ -1236,8 +1228,8 @@ remove :: core.remove
 remove_fact :: core.remove_fact
 render :: core.render
 rule_of :: core.rule_of
-scan :: proc {scan_bound_one, scan_bound_many, scan_chosen_one, scan_chosen_many}
-set :: proc {set_bound, set_chosen}
+scan :: proc {scan_one, scan_many}
+set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
 set_fact :: core.set_fact
 set_member :: write.set_member
 set_node :: write.set
@@ -1246,9 +1238,9 @@ text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: b
 text_room :: core.text_room
 token_text :: core.token_text
 tokens_close :: write.close
-tokens_init :: proc {tokens_init_bound, tokens_init_chosen}
-unmarshal :: proc {unmarshal_bound, unmarshal_bound_plan, unmarshal_chosen, unmarshal_chosen_plan}
-validate :: proc {validate_bound, validate_chosen}
+tokens_init :: proc(t: ^write.Tokens, spec: Spec, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind
+unmarshal :: proc {unmarshal_once, unmarshal_plan}
+validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error
 value_bool :: write.value_bool
 value_bytes :: write.value_bytes
 value_float :: write.value_float
@@ -1259,7 +1251,7 @@ value_tagged :: write.value_tagged
 value_uint :: write.value_uint
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault))
 walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
-write :: proc {write_bound, write_chosen}
+write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error)
 write_cells :: records.write_cells
 write_code :: core.write_code
 write_pointer :: core.write_pointer
@@ -1390,20 +1382,20 @@ Unmarshal_Hook :: typed.Unmarshal_Hook
 Value :: core.Value
 Value_Class :: typed.Value_Class
 Write_Options :: core.Write_Options
-answers :: proc {answers_bound_one, answers_bound_many, answers_chosen_one, answers_chosen_many}
+answers :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter
 array_append :: core.array_append
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As
 attribute_next :: core.attribute_next
 attributes_of :: core.attributes_of
 bind_schema :: proc(s: ^Schema, spec: Spec, opts := Options{}, allocator := context.allocator) -> (Bound_Schema, core.Error)
-build :: proc {build_bound, build_chosen}
+build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error)
 can_resume :: #force_inline proc "contextless" (cursor: ^Cursor) -> bool
 cell :: records.cell
 cells :: records.cells
-check :: proc {check_bound, check_chosen}
+check :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
 check_schema :: schema.check
 check_schema_records :: schema.check_records
-checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Checks
+checks :: proc "contextless" (spec: Spec, opts := Options{}) -> typed.Format_Checks
 child_at :: core.child_at
 child_next :: core.child_next
 children :: core.children
@@ -1416,13 +1408,13 @@ compare :: core.compare
 destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind, cursor_destroy}
 doc_bytes :: core.doc_bytes
 doc_number_text :: core.doc_number_text
-each_answer :: proc {each_answer_bound_one, each_answer_bound_many, each_answer_chosen_one, each_answer_chosen_many}
-edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
+each_answer :: proc {each_answer_one, each_answer_many}
+edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List
 equal :: core.equal
 fact_number :: core.fact_number
 fact_value :: core.fact_value
 facts_of :: core.facts_of
-find :: proc {find_bound, find_chosen}
+find :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error)
 float_value :: core.float_value
 format :: core.format
 hash :: core.hash
@@ -1458,17 +1450,17 @@ plan_make :: proc(T: typeid, spec := Spec.Cbor, opts := Options{}, plan := typed
 plan_of :: proc(d: ^rules.Description, spec := Spec.Cbor, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
 query :: proc {query_one, query_many}
-reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads
-record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs
+reads :: proc "contextless" (spec: Spec) -> ^typed.Format_Reads
+record_docs :: proc "contextless" (spec: Spec) -> ^records.Record_Docs
 records_build :: records.build
-records_check :: proc {records_check_bound, records_check_chosen}
+records_check :: proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> ([]core.Fault, runtime.Allocator_Error)
 records_close :: records.close
-records_each :: proc {records_each_bound, records_each_chosen}
+records_each :: records.each
 records_marshal :: records.marshal
 records_marshal_stream :: records.marshal_stream
 records_next :: records.next
-records_open :: proc {records_open_bound, records_open_chosen}
-records_open_stream :: proc {records_open_stream_bound, records_open_stream_chosen}
+records_open :: proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, at: u64 = 0, allocator := context.allocator) -> records.Reader
+records_open_stream :: proc(input: io.Reader, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, stream := records.Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> records.Reader
 records_read :: records.read
 records_scan :: records.scan
 records_write :: records.write
@@ -1477,8 +1469,8 @@ remove :: core.remove
 remove_fact :: core.remove_fact
 render :: core.render
 rule_of :: core.rule_of
-scan :: proc {scan_bound_one, scan_bound_many, scan_chosen_one, scan_chosen_many}
-set :: proc {set_bound, set_chosen}
+scan :: proc {scan_one, scan_many}
+set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
 set_fact :: core.set_fact
 set_member :: write.set_member
 set_node :: write.set
@@ -1487,9 +1479,9 @@ text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: b
 text_room :: core.text_room
 token_text :: core.token_text
 tokens_close :: write.close
-tokens_init :: proc {tokens_init_bound, tokens_init_chosen}
-unmarshal :: proc {unmarshal_bound, unmarshal_bound_plan, unmarshal_chosen, unmarshal_chosen_plan}
-validate :: proc {validate_bound, validate_chosen}
+tokens_init :: proc(t: ^write.Tokens, spec: Spec, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind
+unmarshal :: proc {unmarshal_once, unmarshal_plan}
+validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error
 value_bool :: write.value_bool
 value_bytes :: write.value_bytes
 value_float :: write.value_float
@@ -1500,7 +1492,7 @@ value_tagged :: write.value_tagged
 value_uint :: write.value_uint
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault))
 walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
-write :: proc {write_bound, write_chosen}
+write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error)
 write_cells :: records.write_cells
 write_code :: core.write_code
 write_pointer :: core.write_pointer
@@ -1634,20 +1626,20 @@ Unmarshal_Hook :: typed.Unmarshal_Hook
 Value :: core.Value
 Value_Class :: typed.Value_Class
 Write_Options :: core.Write_Options
-answers :: proc {answers_bound_one, answers_bound_many, answers_chosen_one, answers_chosen_many}
+answers :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter
 array_append :: core.array_append
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As
 attribute_next :: core.attribute_next
 attributes_of :: core.attributes_of
 bind_schema :: proc(s: ^Schema, spec: Spec, opts := Options{}, allocator := context.allocator) -> (Bound_Schema, core.Error)
-build :: proc {build_bound, build_chosen}
+build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error)
 can_resume :: #force_inline proc "contextless" (cursor: ^Cursor) -> bool
 cell :: records.cell
 cells :: records.cells
-check :: proc {check_bound, check_chosen}
+check :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
 check_schema :: schema.check
 check_schema_records :: schema.check_records
-checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Checks
+checks :: proc "contextless" (spec: Spec, opts := Options{}) -> typed.Format_Checks
 child_at :: core.child_at
 child_next :: core.child_next
 children :: core.children
@@ -1661,13 +1653,13 @@ cursor_destroy :: core.cursor_free
 destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind, cursor_destroy}
 doc_bytes :: core.doc_bytes
 doc_number_text :: core.doc_number_text
-each_answer :: proc {each_answer_bound_one, each_answer_bound_many, each_answer_chosen_one, each_answer_chosen_many}
-edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
+each_answer :: proc {each_answer_one, each_answer_many}
+edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List
 equal :: core.equal
 fact_number :: core.fact_number
 fact_value :: core.fact_value
 facts_of :: core.facts_of
-find :: proc {find_bound, find_chosen}
+find :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error)
 float_value :: core.float_value
 format :: core.format
 hash :: core.hash
@@ -1698,21 +1690,19 @@ pairs :: core.pairs
 parse_path :: core.parse_path
 parse_pointer :: core.parse_pointer
 plain :: core.plain
-plan_make :: proc(T: typeid, spec := Spec.Document, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
-plan_of :: proc(d: ^rules.Description, spec := Spec.Document, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
+plan_make :: proc(T: typeid, spec := Spec.Document, opts := Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
 query :: proc {query_one, query_many}
-reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads
-record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs
+record_docs :: proc "contextless" (spec: Spec) -> ^records.Record_Docs
 records_build :: records.build
-records_check :: proc {records_check_bound, records_check_chosen}
+records_check :: proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> ([]core.Fault, runtime.Allocator_Error)
 records_close :: records.close
-records_each :: proc {records_each_bound, records_each_chosen}
+records_each :: #force_inline proc(src: []u8, spec: Spec, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0, opts := Options{}) -> core.Error
 records_marshal :: records.marshal
 records_marshal_stream :: records.marshal_stream
 records_next :: records.next
-records_open :: proc {records_open_bound, records_open_chosen}
-records_open_stream :: proc {records_open_stream_bound, records_open_stream_chosen}
+records_open :: proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, at: u64 = 0, allocator := context.allocator) -> records.Reader
+records_open_stream :: proc(input: io.Reader, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, stream := records.Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> records.Reader
 records_read :: records.read
 records_scan :: records.scan
 records_write :: records.write
@@ -1721,8 +1711,8 @@ remove :: core.remove
 remove_fact :: core.remove_fact
 render :: core.render
 rule_of :: core.rule_of
-scan :: proc {scan_bound_one, scan_bound_many, scan_chosen_one, scan_chosen_many}
-set :: proc {set_bound, set_chosen}
+scan :: proc {scan_one, scan_many}
+set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
 set_fact :: core.set_fact
 set_member :: write.set_member
 set_node :: write.set
@@ -1731,9 +1721,9 @@ text :: core.text
 text_room :: core.text_room
 token_text :: core.token_text
 tokens_close :: write.close
-tokens_init :: proc {tokens_init_bound, tokens_init_chosen}
-unmarshal :: proc {unmarshal_bound, unmarshal_bound_plan, unmarshal_chosen, unmarshal_chosen_plan}
-validate :: proc {validate_bound, validate_chosen}
+tokens_init :: proc(t: ^write.Tokens, spec: Spec, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind
+unmarshal :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
+validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error
 value_bool :: write.value_bool
 value_bytes :: write.value_bytes
 value_float :: write.value_float
@@ -1744,7 +1734,7 @@ value_tagged :: write.value_tagged
 value_uint :: write.value_uint
 walk :: proc(src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault))
 walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
-write :: proc {write_bound, write_chosen}
+write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error)
 write_cells :: records.write_cells
 write_code :: core.write_code
 write_pointer :: core.write_pointer
@@ -1808,19 +1798,14 @@ edit_list_init :: proc(doc: ^Document, allocator := context.allocator) -> Edit_L
 error_of :: proc{error_of_untyped, error_of_typed}
 fact_token :: #force_inline proc "contextless" (f: Fact) -> Token
 hold :: proc "contextless" (s: ^Holding($H), e: Held_Token) -> bool
-insert_element_value :: proc(list: ^Edit_List, container: Node_Index, at: int, v: Value) -> Error
-insert_member_value :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string, v: Value) -> Error
-insert_value :: proc { insert_element_value, insert_member_value, }
 lent :: #force_inline proc(a: ^Array) -> bool
 markup_kind :: proc(text: []u8, infer: bool) -> Kind
 markup_number :: proc(v: ^Token_View, t: Token) -> (Number, bool)
 number :: proc { doc_number, value_number, }
 number_text :: proc(text: string, allocator := context.allocator) -> ^Number_Text
-object_set :: proc(o: ^Object, k: string, v: Value)
 path_destroy :: proc(p: ^Path)
 same :: proc(a, b: Value) -> bool
 set_comments :: proc(list: ^Edit_List, node: Node_Index, c: ^Commented) -> Error
-set_member_value :: proc(list: ^Edit_List, obj: Node_Index, name: string, v: Value, dups := Duplicates.Last) -> Error
 table_of :: #force_inline proc "contextless" (doc: ^Document, node: Node_Index) -> (found: Table, ok: bool)
 trail_keys :: proc(t: Trail, into: []Value)
 validate :: proc "contextless" (src: []u8, as: As) -> Error
@@ -1849,6 +1834,7 @@ has :: #force_inline proc "contextless" (c: Block, bits: u8) -> Block
 load :: #force_inline proc "contextless" (p: [^]u8) -> Block
 utf8_block :: #force_inline proc "contextless" ($T: Tier, b: Block, s: ^Utf8_State)
 # core/compose
+puts :: proc(b: ^[dynamic]u8, parts: ..string)
 # core/diff
 Arrays :: enum u8 { Sequence, Set, Position, }
 Change :: struct { path: []core.Step, old_path: []core.Step, op: Op, old, new: core.Value, kind_changed: bool, role: core.Role, }
@@ -1935,6 +1921,7 @@ plan_destroy :: proc(p: ^Plan)
 plan_make :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (Plan, core.Error)
 plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Error)
 plan_replace :: proc "contextless" (p: ^Plan) -> Replacement_Read
+pointer_target :: proc "contextless" (target: any) -> (data: rawptr, T: typeid, pointer: bool)
 sink_destroy :: proc(c: ^Sink)
 unmarshal :: proc {unmarshal_node, unmarshal_answer, unmarshal_value}
 unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
@@ -1976,6 +1963,7 @@ Sample_Sink :: proc(text: []u8, user: rawptr) sample_each :: proc(d: ^rules.Desc
 Stage :: enum u8 { Input, Write, Output, }
 Verdict :: enum u8 { Yes, No, Unknown, }
 bind :: proc(c: ^Compiled, checks: typed.Format_Checks, allocator := context.allocator) -> (b: Bound, err: core.Error)
+check_node :: proc(b: ^Bound, doc: ^core.Document, node: core.Node_Index, sink: ^typed.Sink = nil, readings: ^typed.Readings = nil) -> core.Error
 compare :: proc(old, new: ^rules.Description, opts := Compare_Options{}) -> (r: Comparison, err: runtime.Allocator_Error)
 comparison_destroy :: proc(c: ^Comparison)
 compile :: proc(text: []u8, as: core.As, opts := Options{}, allocator := context.allocator) -> (c: ^Compiled, err: core.Error)

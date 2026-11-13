@@ -637,48 +637,18 @@ members_next :: proc(m: ^Members) -> (Member, bool) {
 	return m.items[m.at - 1], true
 }
 
-// Whether a comment body can be written: no line end, and no control byte but tab.
-@(private)
-comment_ok :: proc(body: string) -> bool {
-	for b in transmute([]u8)body {
-		if b < 0x20 && b != '\t' || b == 0x7f {
-			return false
-		}
-	}
-	return true
-}
-
 // Each comment of `role` on `node` as a line of its own at column `ind`.
 @(private)
 put_comments :: proc(l: ^Layout, node: core.Node_Index, role: core.Role, ind: int) {
-	if !l.commented {
-		return
-	}
-	it := core.facts_of(l.doc, node, role)
-	for body in core.fact_next(&it) {
-		if comment_ok(body) {
-			l.kept += 1
-			put_spaces(&l.out, ind)
-			write.put_byte(&l.out, '#')
-			write.put_text(&l.out, body)
-			write.put_byte(&l.out, '\n')
-		}
+	if l.commented {
+		l.kept += write.put_comment_lines(&l.out, l.doc, node, role, ind)
 	}
 }
 
 // The first comment of `node` that ends on its line, after the value, in pretty text.
 @(private)
 put_inline_comment :: proc(l: ^Layout, node: core.Node_Index) {
-	if !l.commented || !l.opts.pretty {
-		return
-	}
-	it := core.facts_of(l.doc, node, .Comment_Inline)
-	for body in core.fact_next(&it) {
-		if comment_ok(body) {
-			l.kept += 1
-			write.put_text(&l.out, " #")
-			write.put_text(&l.out, body)
-			return
-		}
+	if l.commented && l.opts.pretty && write.put_comment_inline(&l.out, l.doc, node) {
+		l.kept += 1
 	}
 }

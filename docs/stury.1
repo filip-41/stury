@@ -3,11 +3,11 @@
 stury \- JSON and CSV codec with a jq 1.8.2\-compatible command line
 .SH SYNOPSIS
 .B stury
-[\-bcCMnRrsSaejV] [\-\-tab|\-\-indent n] [\-\-arg name value] [\-\-argjson name value] [\-\-slurpfile name file] [\-\-rawfile name file] [\-f file] [\-L dir] [\-\-seq] [\-\-stream|\-\-stream\-errors] [\-\-from format] [\-\-to format] [\-\-grow\-header] [csv options] [\-\-max\-depth n] [\-\-follow] [\-\-explain] [yaml and xml options] [stury options] <jq filter> [file...]
+[\-bcCMnRrsSaejV] [\-\-tab|\-\-indent n] [\-\-arg name value] [\-\-argjson name value] [\-\-slurpfile name file] [\-\-rawfile name file] [\-f file] [\-L dir] [\-\-seq] [\-\-stream|\-\-stream\-errors] [\-\-from format] [\-\-to format] [\-\-grow\-header] [csv options] [\-\-max\-depth n] [\-\-threads n] [\-\-follow] [\-\-explain] [yaml and xml options] [stury options] <jq filter> [file...]
 .br
 .B stury
 .B check
-[\-\-from format|\-\-seq] [\-\-max\-depth n] [file...]
+[\-\-from format|\-\-seq] [\-\-max\-depth n] [\-\-threads n] [file...]
 .br
 .B stury
 .B check
@@ -19,7 +19,7 @@ stury \- JSON and CSV codec with a jq 1.8.2\-compatible command line
 .br
 .B stury
 fmt
-[\-\-from format] [\-\-to format] [\-\-in\-place|\-\-check] [\-c|\-\-indent n|\-\-tab] [\-\-max\-depth n] [file...]
+[\-\-from format] [\-\-to format] [\-\-in\-place|\-\-check] [\-c|\-\-indent n|\-\-tab] [\-\-max\-depth n] [\-\-threads n] [file...]
 .br
 .B stury
 fmt
@@ -43,7 +43,7 @@ diff
 .br
 .B stury
 schema infer
-[\-\-from format] [\-\-infer] [\-\-ranges] [layout options] [file...]
+[\-\-from format] [\-\-infer] [\-\-ranges] [\-\-threads n] [layout options] [file...]
 .br
 .B stury
 schema sample
@@ -127,7 +127,7 @@ Read JSON5 1.0.0: each input is one text, read as written (comments kept), and n
 Read TOML 1.1, one document per input (an empty input is {}). A datetime is a string that .@tag names, and .@style tells a string's quoting and a number's form. Not with \-R, \-\-seq, \-\-stream or \-\-follow.
 .TP
 .BI \-\-from " yaml"
-Read YAML 1.2 with the core schema, each document of a stream one input. A repeated key, an alias to no anchor and a collection as a key are parse errors. .@tag, .@anchor, .@alias and .@style read a node's properties. edit edits each document as a record. Not with \-R, \-\-seq or \-\-stream.
+Read YAML 1.2 with the core schema, each document of a stream one input. An alias to no anchor and a collection as a key are parse errors. .@tag, .@anchor, .@alias and .@style read a node's properties. edit edits each document as a record. Not with \-R, \-\-seq or \-\-stream.
 .TP
 .BI \-\-from " xml"
 Read XML 1.0 with its internal subset, one document per input: an element is a member named as written, its text a string (\-\-infer types it) or a #text member. .&name reads an attribute by its name as written, and .@attrs, .@name, .@namespace, .@content, .@pi and .@doctype the element's attributes, name, namespace and text and the document's instructions and doctype. A name an element repeats is an array of its elements. edit keeps every byte the output does not change. Not with \-R, \-\-seq, \-\-stream or \-\-follow.
@@ -165,6 +165,9 @@ its bytes on stderr and exit 1, or 0 when none would change. A fault exits 5.
 .TP
 .BI \-\-max\-depth " n"
 Refuse nesting past n levels (default 1024; jq's is 10000).
+.TP
+.BI \-\-threads " n"
+With a filter run, check, fmt or schema infer, share a long input among n threads, the calling one counted (default one per core). \-\-threads 1 starts no other thread. The output is the same at every n.
 .TP
 .BI \-\-delimiter " c"
 With \-\-from csv or tsv, split cells at c, one ASCII character (\et for a tab).
@@ -204,10 +207,14 @@ Write how the filter runs and what the run did to stderr, as lines \fBstury: exp
 .TP
 .B \-V
 Print stury\- and the version it was built with: a release version, or the short commit hash from a source build (dev outside a checkout).
+.SH BUILTINS BEYOND JQ
+Besides jq 1.8.2's: fromrfc3339, torfc3339, sha1, sha256, sha512, md5, hmac_sha256(key), hmac_sha512(key), crc32, hex_encode, hex_decode, base64url_encode, base64url_decode, uuid_v4, uuid_v7, parse_url, parse_query_string, parse_logfmt, numfmt(spec), ip_valid, ip_class, ip_canonical, ip_in_cidr(cidr) and json_pointer(ptr). Each is described in docs/cli.md, "Builtins beyond jq".
 .SH INPUT DIFFERENCES FROM JQ
 A number prints as it was written (1E2 stays 1E2), where jq prints 1E+2. A file of 1 MiB or more is answered on every core when the filter works one record or entry at a time, with the output of a serial run.
 .PP
 stury reads strict RFC 8259 JSON. It rejects, with exit 5, these inputs that jq accepts: 01, 1., NaN, nan, Infinity, invalid UTF\-8 in a string, a lone low surrogate escape, a NUL after a value, and nesting past \-\-max\-depth. A parse error names the fault and the position of the byte where it was found. Each file ends its texts, except under \-\-seq. The full list is in docs/cli.md, "Differences from jq".
+.SH BUILTINS BEYOND JQ
+Statistics over an array, or over f of each element: avg, median, quantile(p), variance and stddev (population), each with an f form, null for no numbers, an error for a value that is not a number. frequency(f) gives [{value, count}], the largest count first. union(b), intersect(b) and except(b) give sorted sets. fill_forward replaces a null by the last value before it that was not null, per member for objects. melt($ids; $var; $val) turns wide rows to long and pivot($ids; $var; $val) long to wide. See docs/cli.md, "Builtins beyond jq".
 .SH EXIT STATUS
 As jq: 1 under \-e when the last output is false or null, 2 for a usage or file error or output that cannot be written (a closed stdout included, except under check, fmt \-\-check and fmt \-\-in\-place), 3 for a filter that does not compile, 4 under \-e when there is no output, 5 for invalid input or an error on the last input. \fBfmt \-\-check\fR and \fBedit \-\-check\fR exit 1 when a file would change, and \fBdiff\fR when the inputs differ or compatibility is not proven. \fBcheck \-\-schema\fR and \fBfmt \-\-schema\fR exit 1 when an input parses and fails the schema, and 5 when one does not parse; \fBcheck \-\-filter\fR exits 1 after a refusal. \fBschema sample\fR and \fBschema gen\fR exit 1 for a schema they cannot answer, and \fBschema infer\fR 5 for an input it cannot describe. A schema that does not compile is exit 2.
 .SH SEE ALSO

@@ -88,8 +88,7 @@ markup_in_replacement_text_builds_elements :: proc(t: ^testing.T) {
 	a, _ := core.member(&doc, core.ROOT, "a")
 	c, found := core.member(&doc, a, "c")
 	testing.expect(t, found)
-	buf: [16]u8
-	v, has := xml.attribute_value(&doc, c, "k", buf[:])
+	v, has := walktest.attribute_text(&doc, c, "k")
 	testing.expect_value(t, has, true)
 	testing.expect_value(t, v, "v")
 	testing.expect_value(t, core.length(&doc, a), 3)
@@ -116,8 +115,7 @@ the_first_binding_of_a_name_wins :: proc(t: ^testing.T) {
 	s, _ := walktest.text_at(t, &doc, ".a")
 	testing.expect_value(t, s, "1")
 	a, _ := core.member(&doc, core.ROOT, "a")
-	buf: [16]u8
-	v, has := xml.attribute_value(&doc, a, "k", buf[:])
+	v, has := walktest.attribute_text(&doc, a, "k")
 	testing.expect_value(t, has, true)
 	testing.expect_value(t, v, "x")
 }
@@ -157,12 +155,11 @@ attribute_values_are_normalized_by_their_type :: proc(t: ^testing.T) {
 	}
 	defer core.destroy(&doc)
 	a, _ := core.member(&doc, core.ROOT, "a")
-	buf: [32]u8
 	Want :: struct {
 		name, value: string,
 	}
 	for w in ([]Want{{"t", "one two"}, {"c", " p q\t z"}, {"u", "a\nb"}, {"d", "  x y  "}}) {
-		v, has := xml.attribute_value(&doc, a, w.name, buf[:])
+		v, has := walktest.attribute_text(&doc, a, w.name)
 		testing.expect_value(t, has, true)
 		testing.expect_value(t, v, w.value)
 	}
@@ -229,8 +226,7 @@ an_unread_parameter_entity_stops_the_declarations :: proc(t: ^testing.T) {
 	}
 	defer core.destroy(&doc)
 	a, _ := core.member(&doc, core.ROOT, "a")
-	buf: [16]u8
-	_, has := xml.attribute_value(&doc, a, "k", buf[:])
+	_, has := walktest.attribute_text(&doc, a, "k")
 	testing.expect_value(t, has, false)
 	testing.expect_value(t, walktest.node_text(t, &doc, a), "&e;")
 	testing.expect_value(t, refusal("<!DOCTYPE a [<!ENTITY e 'x'>]><a>&e;</a>"), "")

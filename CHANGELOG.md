@@ -4,6 +4,15 @@
 
 ### Command line
 
+- Builtins beyond jq: `avg`, `median`, `quantile`, `variance` and `stddev` (population) over an array or `f` of each
+  element, `frequency`, `union`, `intersect` and `except`, `fill_forward`, `melt` and `pivot`; `fromrfc3339` and
+  `torfc3339`; the digests `sha1`, `sha256`, `sha512` and `md5`, `hmac_sha256(key)`, `hmac_sha512(key)` and `crc32`;
+  `hex_encode`, `hex_decode`, `base64url_encode` and `base64url_decode`; `uuid_v4` and `uuid_v7`; `parse_url`,
+  `parse_query_string` and `parse_logfmt`; `numfmt(spec)`; `ip_valid`, `ip_class`, `ip_canonical` and
+  `ip_in_cidr(cidr)`; and `json_pointer(ptr)` ([Builtins beyond jq](docs/cli.md#builtins-beyond-jq)).
+- `--threads N` sets how many threads share a long input, the calling thread counted, for a filter run, `check`, `fmt`
+  and `schema infer`. `--threads 1` starts no other thread, and the output is the same at every `N`. The default is one
+  per core, as before, and the `STURY_THREADS` build setting is gone.
 - `--from toml`, `yaml`, `xml` and `html` read TOML 1.1, YAML 1.2 with the core schema (each document of a stream an
   input), XML 1.0 with its internal subset, and HTML as a browser with scripting disabled builds its tree, and
   `--to toml`, `yaml`, `xml` and `html` write TOML 1.0, YAML in block or flow style, XML, and HTML by the WHATWG
@@ -87,7 +96,7 @@
   empty file, a `--key` that names no array, and options it ignores.
 
 - `stury fmt --schema FILE` converts through a JSON Schema: the input passes it, the members it leaves open are kept, and
-  the output passes it as the output format reads it. Library: `schema.Converter` and `schema.convert`.
+  the output passes it as the output format reads it. Library: `schema.Converter`, `schema.convert` and `schema.check_written`, which `fmt` checks a table's output with.
 
 - `stury schema gen SCHEMA [--package NAME] [--format-assert]` writes the Odin types a model reads a schema's values
   with, and exits 1 naming the keyword where no type spells one. Library: `schema.write_odin`. `oneOf`, `uniqueItems`,
@@ -223,8 +232,11 @@
   judges TOML texts.
 - New package `yaml`: YAML 1.2 with the core schema, read in one pass by `yaml.walk`, judged by `yaml.validate` and
   built by `yaml.build`. A plain scalar resolves by its text and its tag, and one its core tag does not hold is
-  `.Tag_Mismatch`. A key is its text, a repeated key is a fault in every read (`.Refuse` is YAML's one duplicate
-  policy, and a read asked for another is `.Bad_Option`), and a key that is a collection is refused. An alias reads as
+  `.Tag_Mismatch`. Two keys repeat when they resolve to one type and value, as `a` and `"a"` or `1` and `0x1`
+  do, and a repeated key follows the read's `dups` as in JSON. `1` and `"1"` are two members. A read by name, a jq
+  object, a map or a struct refuses the second of `1` and `"1"`, or of `1` and `0x1`, as `.Duplicate_Key` under every
+  policy but `.First` and `.All`. A
+  key that is a collection is refused. An alias reads as
   its anchor's node within `Options.alias_limit`, `Options.merge_keys` reads `<<`, and `%YAML 1.1` reads with the 1.2
   rules. `find`, `scan` and `each_answer` read a document without a build until they reach an alias. A stream's
   documents are records under `.Concatenated` (`yaml.records_open`, `records_check`, `records_each`). The vendored
@@ -242,9 +254,9 @@
   entities, attribute defaults and normalization, an expansion budget (`Options.max_expansion`), and the
   `Unread_Entity` tolerance for references a processor that reads no external entity cannot expand. `xml.validate`,
   `walk`, `build`, `scan`, `find`, `each_answer` and `query` read an element as a member under its name, its text as
-  its value or a `#text` member, and its attributes as facts of the `Attribute` role. A path step and
-  `xml.attribute_value` take an expanded name `{uri}local`. The W3C XML Conformance Test Suite runs against it.
-- `xml.unmarshal`, `check`, `reads`, `plan_make`, `plan_of` and `number` read XML into typed values: a struct member
+  its value or a `#text` member, and its attributes as facts of the `Attribute` role. A path step
+  takes an expanded name `{uri}local`. The W3C XML Conformance Test Suite runs against it.
+- `xml.unmarshal`, `check`, `reads`, `plan_make` and `number` read XML into typed values: a struct member
   reads an attribute, a child element or the `#text` of an element by its name, a list collects the siblings of its
   name, and a text reads as a number, a boolean or a union arm by the member's type. `xml.marshal` writes a typed
   value as the elements `xml.write` writes, and an empty list, text or struct is `.Unwritable` unless `omitempty`
@@ -269,7 +281,7 @@
   text with the same markup builds. A build recovers from every parse error, and `html.validate` returns the first. An
   element's namespace is a fact. A text in an encoding other than UTF-8 is refused. The html5lib-tests tokenizer,
   tree-construction and encoding cases run against it.
-- `html.unmarshal`, `check`, `reads`, `plan_make`, `plan_of` and `number` read HTML into typed values as `xml`'s do,
+- `html.unmarshal`, `check`, `reads`, `plan_make` and `number` read HTML into typed values as `xml`'s do,
   on the tag key `html`. An HTML text is one record under `.Concatenated` (`html.records_open`, `records_open_stream`,
   `records_check`, `records_each`, `record_docs`), and `html.answers` gives a path's answers one at a time.
   `html.walk` takes a `^Cursor` that `walk_resume` continues after any token, and `html.destroy` frees a cursor a stop
@@ -332,17 +344,17 @@ The hooks the formats share:
 - `yaml.marshal` writes a `typed.Bytes` as `!!binary` and its base64, as the token write and the document write do.
 - `diff --facts` tells a changed TOML or YAML comment, and a changed YAML tag or anchor, through the facts a format's
   edit services write.
-- `yaml.plan_of` builds the plan of a `rules.Description`, as `json.plan_of` and `dsv.plan_of` do.
+- `yaml.plan_of` builds the plan of a `rules.Description`, as `json.plan_of` does.
 - `yaml.walk` takes a `^Cursor` that `walk_resume` continues after any token, and `yaml.answers` gives a path's answers
   one at a time, as json's and dsv's do, and `yaml.destroy` frees a cursor a stop left.
 - `toml.walk` takes a `^Cursor` that `walk_resume` continues after any token, `toml.answers` gives a path's answers
   one at a time, and `toml.destroy` frees a cursor a stop left.
 - `toml.check` reads a text by a plan as a check, `toml.plan_of` builds the plan of a `rules.Description`, and
-  `toml.unmarshal` takes a spec chosen at run time, as yaml's do. `toml.plan_make` takes `reads`, and a plan made
+  `toml.unmarshal` takes the spec as a value, as yaml's does. `toml.plan_make` takes `reads`, and a plan made
   without them reads no text, so `toml.set` with a struct and a plan needs a plan made with `reads = toml.reads(spec)`,
   as json and yaml do.
 - A TOML text is one record under `.Concatenated`: `toml.records_open`, `records_open_stream`, `records_check`,
-  `records_each`, `record_docs` and `tokens_init`, and a handle of `toml.as` holds the framing and the record builds.
+  `records_each` and `record_docs`, and a handle of `toml.as` holds the framing and the record builds.
 - A path read of TOML ends the answer of a step that meets a scalar where it needs a container at the scalar's end.
 - `json.bind_schema` takes the `Options` the texts are read with, as the other formats' do, `dsv.refuse` is
   `typed.refuse` as in json and yaml, `yaml.number`, `dsv.number` and `dsv.text` read a token without the table, as
@@ -427,10 +439,14 @@ The hooks the formats share:
   unless the options hold `.Ragged`, so what they write reads back with the same options.
 - `core.commit` of a JSONC document as JSON5 respells a U+2028 or U+2029 in an untouched `//` comment as `\u2028` or
   `\u2029`, as the tree writer does, instead of refusing the result with `.Bad_Result`.
-- Each `json` and `dsv` entry point is a group of a form that takes its spec as a constant (`json.validate(src, .Json)`)
-  and a form that takes it at run time (a variable, or an `As`). A program that names its specs links only the walks it
-  reaches. A document built through a constant form holds
-  no run-time services, so its `query`, `write` and `edit_list_init` are the format package's, with the spec named.
+- Each `json` and `dsv` entry point takes its spec as a constant (`json.validate(src, .Json)`), so a program links
+  only the walks it names, and a program that picks its spec at run time calls `core` with a handle
+  (`core.validate(src, json.as(spec))`). The entry points of `toml`, `yaml`, `cbor`, `xml` and `html` take the spec as
+  a value and link only the passes they name. `tokens_init` of `json`, `dsv` and `toml`, the form of `answers` with
+  many paths outside `json`, and the plan form of `xml.unmarshal` and `html.unmarshal` are gone: `write.tokens_init`,
+  `each_answer` and `typed.unmarshal_text` do their work. `yaml.records_open_stream` and `cbor.records_each` are
+  `records.open_stream` and `records.each`, taking a handle. A document built through an entry point holds no run-time services, so its
+  `query`, `write` and `edit_list_init` are the format package's, with the spec named.
 - `json` and `dsv` export the names of `core`, `core/typed`, `core/write`, `core/records` and `host` that a program
   calls, so a program imports one package (`json.Document`, `json.Error`, `json.render`, `json.parse_path`,
   `json.records_check`, `json.Pool`). `destroy` is one group over a document, a path, an edit list, a plan, a sink, a

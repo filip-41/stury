@@ -34,6 +34,12 @@ build_text :: proc(src: []byte, r: core_pkg.As, allocator := context.allocator) 
 judge_build :: proc(doc: core_pkg.Document, err: core_pkg.Error) -> (core_pkg.Document, Maybe(core_pkg.Fault)) {
 	switch e in err {
 	case nil:
+		// A jq object holds one member of a name.
+		if at := doc.clash; at != 0 {
+			doc := doc
+			core_pkg.destroy(&doc)
+			return {}, core_pkg.Fault{at = at, kind = .Duplicate_Key}
+		}
 		return doc, nil
 	case core_pkg.Fault:
 		if e.kind != .Duplicate_Key {

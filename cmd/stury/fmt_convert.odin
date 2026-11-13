@@ -9,7 +9,6 @@ import core "../../core"
 import "../../core/typed"
 import "../../core/schema"
 import dsv "../../dsv"
-import "jq"
 import "message"
 
 // fmt --schema's schema, bound to the inputs' format and, for an output of cells, to the cells as they read back.
@@ -59,19 +58,7 @@ conversion_cells_pass :: proc(c: ^Conversion, ins: ^Inputs, text: []u8) -> bool 
 		entries    = make([dynamic]core.Error_Entry, runtime.heap_allocator()),
 	}
 	defer typed.sink_destroy(&sink)
-	err: core.Error
-	if c.table {
-		err = schema.check(&c.cells, text, &sink)
-	} else if doc, fault := jq.build_text(text, c.cells_as, context.temp_allocator); fault == nil {
-		it := core.value_children(core.Node_Ref{&doc, core.ROOT})
-		for row in core.value_child_next(&it) {
-			if failed := schema.check_node(&c.cells, &doc, row.(core.Node_Ref).node, &sink); err == nil {
-				err = failed
-			}
-		}
-	} else {
-		err = fault.?
-	}
+	err := schema.check_written(&c.cells, text, c.cells_as, !c.table, &sink)
 	if err == nil {
 		return true
 	}

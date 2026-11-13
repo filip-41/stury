@@ -20,8 +20,7 @@ Set_Case :: struct {
 	want: string, // the hex of the result, or the error's kind
 }
 
-// A set through a path, of an item's bytes or of a value CBOR writes, under a spec bound at compile time and one chosen
-// at run time.
+// A set through a path, of an item's bytes or of a value CBOR writes, under each spec.
 @(test)
 set_through_a_path :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
@@ -60,25 +59,9 @@ set_through_a_path :: proc(t: ^testing.T) {
 		if c.raw != "" {
 			v = typed.Raw(string(hex(c.raw)))
 		}
-		got := [2]string{}
-		for chosen, k in ([]bool{false, true}) {
-			out: []u8
-			err: core.Error
-			switch {
-			case chosen:
-				out, err = cbor.set(hex(c.src), c.spec, path, v)
-			case c.spec == .Cbor:
-				out, err = cbor.set(hex(c.src), .Cbor, path, v)
-			case c.spec == .Preferred:
-				out, err = cbor.set(hex(c.src), .Preferred, path, v)
-			case c.spec == .Deterministic:
-				out, err = cbor.set(hex(c.src), .Deterministic, path, v)
-			case:
-				out, err = cbor.set(hex(c.src), .Length_First, path, v)
-			}
-			got[k] = kind_of(err) if err != nil else spaced(out)
-		}
-		testing.expectf(t, got[0] == c.want && got[1] == c.want, "%s %v %s: %v, want %s", c.src, c.spec, c.path, got, c.want)
+		out, err := cbor.set(hex(c.src), c.spec, path, v)
+		got := kind_of(err) if err != nil else spaced(out)
+		testing.expectf(t, got == c.want, "%s %v %s: %s, want %s", c.src, c.spec, c.path, got, c.want)
 	}
 }
 

@@ -10,38 +10,28 @@ import engine "../core/build"
 // repeats among its children. The document borrows `src`, which must outlive it, and `core.destroy` frees the document.
 // A constant `spec` links the reads of that spec alone, and a `spec` chosen at run time is `core.build` with
 // `as(spec, opts)`. The same holds for the other entry points.
-build :: proc {build_bound, build_chosen}
-
-@(private)
-build_bound :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
-	doc, err := build_spec(src, S, bound_as(S, opts), dups == .Refuse, allocator)
+build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
+	doc, err := build_spec(src, spec, bound_as(spec, opts), dups == .Refuse, allocator)
 	return doc, core.error_of(err)
 }
 
+// The build of a handle's spec, as `Services.build` takes it.
 @(private)
-build_chosen :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
-	return core.build(src, as(spec, opts), dups, allocator)
+build_handle :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+	return build_spec(src, Spec(as.spec), as, refuse_duplicates, allocator)
 }
 
-// The build of spec `S`, as `Services.build` takes it.
-@(private)
-build_of :: proc "contextless" ($S: Spec) -> proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-	return proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-		return build_spec(src, S, as, refuse_duplicates, allocator)
-	}
-}
-
-// Reads `src` as spec `S` into a document that holds the handle `handle`: the tree is built on the default heap, its
+// Reads `src` as `spec` into a document that holds the handle `handle`: the tree is built on the default heap, its
 // tokens are given once to size the document and again to write it, and the tree is freed.
 @(private)
-build_spec :: proc(src: []u8, $S: Spec, handle: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-	t, fault := build_tree(src, S, options_of(handle), 0, runtime.default_allocator())
+build_spec :: proc(src: []u8, spec: Spec, handle: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+	t, fault := build_tree(src, spec, options_of(handle), 0, runtime.default_allocator())
 	if f, bad := fault.?; bad {
 		return {}, document_error(f)
 	}
 	defer tree_destroy(&t)
 	c: engine.Count
-	counter := Emitter(engine.Count){t = &t, h = &c, spec = S}
+	counter := Emitter(engine.Count){t = &t, h = &c, spec = spec}
 	defer delete(counter.run)
 	emit_tree(&counter, engine.builder_hook_count)
 	if f, bad := counter.fault.?; bad {
@@ -50,7 +40,7 @@ build_spec :: proc(src: []u8, $S: Spec, handle: core.As, refuse_duplicates: bool
 	b := engine.builder_start(src, handle, refuse_duplicates, allocator, c.nodes, c.deepest, c.facts)
 	kept: Kept
 	defer kept_destroy(&kept)
-	writer := Emitter(engine.Builder){t = &t, h = &b, regs = engine.BUILDER_REGS, spec = S, keep = &kept}
+	writer := Emitter(engine.Builder){t = &t, h = &b, regs = engine.BUILDER_REGS, spec = spec, keep = &kept}
 	defer delete(writer.run)
 	if b.err.kind == .None {
 		emit_tree(&writer, engine.builder_hook)
@@ -77,23 +67,15 @@ document_error :: proc "contextless" (f: core.Fault) -> core.Document_Error {
 // in the order it finds them, or a fault a build would return, or nil. A parse error of the input stream or the
 // tokenizer is `Truncated` for one the standard names after the end of the text, and `Bad_Char` at its byte for any
 // other, and one of the tree construction is `Bad_Char` at the token it reads.
-validate :: proc {validate_bound, validate_chosen}
-
-@(private)
-validate_bound :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error {
-	return core.error_of(validate_spec(src, S, read_of(opts)))
+validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
+	return core.error_of(validate_spec(src, spec, read_of(opts)))
 }
 
+// The verdict on `src` for `spec`: the tree is built on the default heap and freed.
 @(private)
-validate_chosen :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
-	return core.validate(src, as(spec, opts))
-}
-
-// The verdict on `src` for spec `S`: the tree is built on the default heap and freed.
-@(private)
-validate_spec :: proc "contextless" (src: []u8, $S: Spec, opts: Read) -> Maybe(core.Fault) {
+validate_spec :: proc "contextless" (src: []u8, spec: Spec, opts: Read) -> Maybe(core.Fault) {
 	context = runtime.default_context()
-	t, fault := build_tree(src, S, opts, 0)
+	t, fault := build_tree(src, spec, opts, 0)
 	if fault != nil {
 		return fault
 	}
@@ -152,14 +134,14 @@ walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts :=
 cursor_destroy :: core.cursor_free
 
 @(private)
-walk_tree :: proc(src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
+walk_tree :: proc(src: []u8, lo: u64, spec: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
 	t: Html_Tree
-	t, fault = build_tree(src, S, read_of(opts), lo, runtime.default_allocator())
+	t, fault = build_tree(src, spec, read_of(opts), lo, runtime.default_allocator())
 	if fault != nil {
 		return
 	}
 	defer tree_destroy(&t)
-	e := Emitter(H){t = &t, h = h, spec = S}
+	e := Emitter(H){t = &t, h = h, spec = spec}
 	defer delete(e.run)
 	if regs != nil {
 		e.regs = regs^

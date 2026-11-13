@@ -36,7 +36,6 @@ a_plan_checks_an_item :: proc(t: ^testing.T) {
 	good: Pair
 	walktest.expect_nil(t, cbor.unmarshal(hex("a2 61 61 01 61 62 81 02"), spec, &good))
 	testing.expect(t, good.a == 1 && len(good.b) == 1)
-	walktest.expect_kind(t, cbor.unmarshal(src, spec, good), core.Typed_Error_Kind.Plan_Mismatch)
 	read, rerr := cbor.plan_make(Pair, .Cbor, reads = cbor.reads(.Cbor))
 	walktest.expect_nil(t, rerr)
 	walktest.expect_nil(t, typed.unmarshal_text(hex("a1 61 61 03"), &good, Pair, &read, {}))

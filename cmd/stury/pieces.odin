@@ -28,9 +28,6 @@ import records "../../core/records"
 import json "../../json"
 import "jq"
 
-// The pool's width, the calling thread counted, 0 for one thread per core.
-THREADS :: #config(STURY_THREADS, 0)
-
 // The least input read on the pool's threads: on a shorter one, starting them costs more than they save.
 POOLED_BYTES :: #config(STURY_POOLED_BYTES, 1 << 20)
 
@@ -48,7 +45,7 @@ run_pool :: proc(run: ^Run) -> ^core.Runner {
 			jq.index_shared(v)
 		}
 		run.pool = new(host.Pool, runtime.heap_allocator())
-		host.pool_init(run.pool, THREADS)
+		host.pool_init(run.pool, run.opts.threads)
 	}
 	return &run.pool.runner
 }

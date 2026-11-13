@@ -220,7 +220,7 @@ err = model.load(&m, body, &user, &sink)
 - `load`, `validate` and `stury check` list the failures in one order: by the value's path, a value before what it
   holds, and the members of one value in the order of the text.
 - `model.problem(sink.entries[:], "Invalid body", 422)` makes an RFC 9457 problem document of every refusal, a struct
-  that `marshal` writes in any format.
+  that `marshal` writes in any format and `model.problem_destroy` frees.
 - `model.patch(&m, &existing, body)` applies a patch text to a value whose struct has a `Fields_Set`. Each member's
   rules judge what the patch holds, and a member the patch leaves out, in the root and in the struct members that hold
   a `Fields_Set`, is neither required nor defaulted and keeps what `existing` holds. Struct validators and
@@ -509,7 +509,7 @@ defer delete(faults)
 
 `json.records_open` frames a text and `json.records_open_stream` frames an `io.Reader` through a window. `json.records_next` yields
 each record without judging it, so a caller who needs a verdict calls `check` or reads the record. A stream that ends
-on a broken frame sets `it.fault`. A reader opened with a constant spec reads, builds and scans no record until
+on a broken frame sets `it.fault`. A reader an entry point opens reads, builds and scans no record until
 `it.docs = json.record_docs(.Json)` is set, so a program that only frames or judges links no read.
 
 `json.records_each(src, .Json, .Lines, task, &data, &pool.runner)` hands every piece of the text to a task on `json.Pool`
@@ -525,6 +525,9 @@ count := proc(n: ^int, piece: ^json.Record_Reader, _: int) -> bool {
 }
 json.records_each(lines, .Json, .Lines, count, &total, &pool.runner)
 ```
+
+The library starts no thread of its own: a `nil` runner answers on the calling thread, and a `json.Pool` of the width
+you pass to `json.pool_init` (the calling thread counted, 0 for one per core) answers on that many.
 
 `json.writer_init`, `write_cells` and `writer_end` write one row or line. [records.md](records.md) holds the framing
 rules and the Reader contract.
@@ -620,8 +623,8 @@ fmt.print(string(out)) // the text with `port = 9090`, its comment and every oth
   do, and `toml.set` with a struct and a plan writes it through those reads.
 - A TOML text has no mark that ends it, so under `.Concatenated` a record is the whole text from the reader's position
   to the input's end (`toml.records_open`, `records_open_stream`, `records_check`, `records_each`), and an input of no
-  bytes holds none. A stream's text is a record once its input has ended. A reader opened with a constant spec builds
-  or scans a record once it is given `it.docs = toml.record_docs(spec)`.
+  bytes holds none. A stream's text is a record once its input has ended. A reader an entry point opens builds or
+  scans a record once it is given `it.docs = toml.record_docs(spec)`.
 
 ## YAML
 
@@ -651,8 +654,10 @@ defer delete(out)
 fmt.print(string(out)) // replicas: 5 # scaled by hand, and the rest as it was
 ```
 
-- A repeated key is a fault of the text in every read: `.Refuse` is YAML's one duplicate policy, and a read asked for
-  `.Last`, `.First` or `.All` is `.Bad_Option`.
+- A repeated key follows `dups` as in JSON, in every read. Two keys repeat when they resolve to one type and value, so
+  `a` and `"a"` repeat each other, and so do `1` and `0x1`, an explicit tag counting as that type. `1` and `"1"` are two
+  members. A read by name, a query, a scan, a map or a struct, refuses the second of `1` and `"1"`, or of `1` and
+  `0x1`, as `.Duplicate_Key` under every policy but `.First` and `.All`, since it cannot tell which name holds them.
 - `yaml.find`, `scan` and `each_answer` read a document in one pass without a build, and build it when the read
   reaches an alias.
 - A stream of several documents is read as records under `.Concatenated` (`yaml.records_open`, `records_check`,
@@ -679,8 +684,10 @@ src := transmute([]u8)string(`<order id="7"><item>pen</item><item>ink</item><not
 doc := xml.build(src, .Xml) or_return
 defer xml.destroy(&doc)
 order, _ := xml.member(&doc, xml.ROOT, "order")
-id_buf, text_buf: [32]u8
-id, _ := xml.attribute_value(&doc, order, "id", id_buf[:])
+text_buf: [32]u8
+attrs := xml.attributes_of(&doc, order)
+_, id_token, _ := xml.attribute_next(&attrs)
+id, _ := xml.token_text(doc.readers, &doc.view, id_token, context.temp_allocator)
 note, _ := xml.member(&doc, order, "note")
 text, _ := xml.text(&doc, note, text_buf[:])
 fmt.println(id, text) // 7 rush & wrap
@@ -700,13 +707,13 @@ for a in found.answers {
   member, an array of each element in document order, so a path names the document's members and not the array's
   items ([markup.md](markup.md)).
 - `attributes_of` walks an element's attributes, and `fact_value` gives an element's `Name`, `Namespace` and `Content`.
-  A path step `{uri}local` and `xml.attribute_value` with such a name match by namespace.
+  A path step `{uri}local` with such a name matches by namespace.
 - `html.build(src, .Document)` builds the tree the standard's algorithm builds, implied elements included, so
   `<p>Pens` is `{"html":{"head":null,"body":{"p":"Pens"}}}` as JSON. `.Fragment` reads a fragment in the context
   element `Options.context_name`. `html.validate` returns the first parse error, which a build passes over.
 - `xml.unmarshal` reads a text into a struct whose member takes its name from the tag key `xml`: the member of the
   root element's name, and under it a member per attribute, child element or `#text`. A list member collects the
-  siblings of its name, and a number, boolean or union member reads the text by its type. `plan_make`, `plan_of` and
+  siblings of its name, and a number, boolean or union member reads the text by its type. `plan_make` and
   `check` are as json's. `xml.marshal` writes a typed value as `xml.write` writes a document: a struct is an element of
   its members, and a list one element per item. An empty list, text or struct is `.Unwritable`, which reads back as no
   member or null, and `omitempty` leaves it out.
@@ -716,7 +723,7 @@ for a in found.answers {
   What XML cannot spell so that it reads back, such as a key that is no XML name, a nested array or an empty string,
   is `.Unwritable`. `xml.tokens_init` starts a token write of the same elements under the same refusals, and a pretty
   one is written whole into a buffer, so with a stream it is `.Unsupported`.
-- `html.unmarshal`, `check`, `plan_make` and `plan_of` read as `xml`'s do, on the tag key `html`, from the tree the
+- `html.unmarshal`, `check` and `plan_make` read as `xml`'s do, on the tag key `html`, from the tree the
   standard builds, implied elements included. `html.write` writes a document as the WHATWG standard serializes a tree,
   and `html.marshal` and `html.tokens_init` write a typed value and a token write's calls as it writes a built one. A
   value whose text a browser reads back as another tree is `.Unwritable`.

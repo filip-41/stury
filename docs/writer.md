@@ -134,7 +134,7 @@ core.format          :: proc(src: []u8, as: core.As, opts := core.Write_Options{
 `core.write` writes a document through the `write` service of the handle `as`. A nil `as` is the format and layout the
 document was read in. `json.as(.Jsonc)` and `dsv.as(.Tsv, opts)` name another target, in the same format or in another,
 so a JSON document is written as a table and a table as JSON by the target's writer. A target with no writer is
-`.Unsupported`. A document of a constant-spec build holds no services, so `json.write`, `toml.write`, `yaml.write`,
+`.Unsupported`. A document an entry point builds holds no services, so `json.write`, `toml.write`, `yaml.write`,
 `xml.write`, `html.write` and `cbor.write` write it in their format. `core.As` is the handle a `Document` holds in `as`.
 
 `node` writes one value of the document as a text of its own, the root by default: a subtree with the comments inside

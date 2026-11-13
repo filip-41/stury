@@ -41,13 +41,13 @@ handle_services :: proc "contextless" ($S: Spec) -> core.Services {
 		plans    = rawptr(plan_as),
 		reads    = reads_of(S),
 		tokens   = &TOKENS,
-		records  = framing_of(S),
+		records  = &FRAMING,
 		docs     = record_docs(S),
 	}
 }
 
-// The readers of a TOML document of either spec: the leaves, with no services. A document a constant-spec entry point
-// builds holds this table, and so does every plan.
+// The readers of a TOML document of either spec: the leaves, with no services. A document an entry point builds holds
+// this table, and so does every plan.
 @(private, rodata)
 READERS := core.Readers {
 	text       = text,
@@ -111,25 +111,16 @@ text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: b
 // Whether the decoded text of key `t` is `name`. A key longer than the stack buffer decodes on the heap.
 @(private)
 spelling_key_equals :: proc "contextless" (v: ^core.Token_View, t: core.Token, name: string) -> bool {
+	Key :: struct {
+		span:     []u8,
+		spelling: u16,
+	}
 	span := v.src[t.lo:t.lo + u64(t.n)]
-	stack: [256]u8
-	buf := stack[:]
-	heap: []u8
-	if len(span) > len(stack) {
-		context = runtime.default_context()
-		heap = make([]u8, len(span))
-		if heap == nil {
-			return false
-		}
-		buf = heap
-	}
-	text, ok := decode(span, t.spelling, buf)
-	equal := ok && text == name
-	if heap != nil {
-		context = runtime.default_context()
-		delete(heap)
-	}
-	return equal
+	key := Key{span, t.spelling}
+	return spell.buffered_equals(len(span), name, &key, proc "contextless" (c: rawptr, buf: []u8) -> (string, bool) {
+		k := (^Key)(c)
+		return decode(k.span, k.spelling, buf)
+	})
 }
 
 // TOML's `Readers.number`, the value of the number token `t`: a JSON number for a decimal, the digits' value for a hex,

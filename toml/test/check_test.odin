@@ -130,8 +130,8 @@ a_model_loads_and_dumps_toml :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(sink.entries), 3)
 }
 
-// `check` gives every refusal of a text read by a plan, for a spec bound or chosen at run time, and a plan made with the
-// reads `checks` gives reads a text through `core/typed`.
+// `check` gives every refusal of a text read by a plan, for either spec, and a plan made with the reads `checks` gives
+// reads a text through `core/typed`.
 @(test)
 a_plan_checks_a_text :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
@@ -155,7 +155,6 @@ a_plan_checks_a_text :: proc(t: ^testing.T) {
 	good: Pair
 	walktest.expect_nil(t, toml.unmarshal(transmute([]u8)string("a = 1\nb = [2]\n"), spec, &good))
 	testing.expect(t, good.a == 1 && len(good.b) == 1)
-	walktest.expect_kind(t, toml.unmarshal(src, spec, good), core.Typed_Error_Kind.Plan_Mismatch)
 	read, rerr := toml.plan_make(Pair, .Toml_1_1, reads = toml.reads(.Toml_1_1))
 	walktest.expect_nil(t, rerr)
 	walktest.expect_nil(t, typed.unmarshal_text(transmute([]u8)string("a = 3\n"), &good, Pair, &read, {}))

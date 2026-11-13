@@ -705,8 +705,7 @@ Target :: struct {
 
 // Returns the node after `node`'s subtree.
 subtree_end :: #force_inline proc(doc: ^core.Document, node: core.Node_Index) -> core.Node_Index {
-	n := doc.nodes[node]
-	return node + (core.Node_Index(n.n) if n.kind == .Array || n.kind == .Object else 1)
+	return node + core.Node_Index(core.subtree_size(doc, node))
 }
 
 // Returns the parent of `node`, `NO_NODE` for the root. `next` is the first node the walk has not read and `stack` the

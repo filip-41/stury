@@ -248,6 +248,23 @@ fill_table :: proc() {
 			}
 			return num(libc.fma(xs[0], xs[1], xs[2])), .Go
 		}, gives = {.Number, .Null}, typed = .Kinds})
+
+	// Beyond jq: digest.odin, parse_text.odin, ip.odin and math_time.odin.
+	put("fromrfc3339", {0}, {fn = fn_fromrfc3339, takes = {.String}, gives = {.Number}, typed = .Kinds})
+	put("torfc3339", {0}, {fn = fn_torfc3339, takes = {.Number}, gives = {.String}, typed = .Kinds})
+	put("numfmt", {1}, {fn = fn_numfmt, takes = {.Number}, arg_takes = {.String}, gives = {.String}, typed = .Kinds})
+	put("sha1 sha256 sha512 md5", {0}, {fn = fn_digest, takes = {.String}, gives = {.String}, typed = .Kinds})
+	put("hmac_sha256 hmac_sha512", {1}, {fn = fn_hmac, takes = {.String}, arg_takes = {.String}, gives = {.String}, typed = .Kinds})
+	put("crc32", {0}, {fn = fn_crc32, takes = {.String}, gives = {.Integer}, typed = .Kinds})
+	put("hex_encode hex_decode base64url_encode base64url_decode", {0}, {fn = fn_text_encoding, takes = {.String}, gives = {.String}, typed = .Kinds})
+	put("uuid_v4 uuid_v7", {0}, {fn = fn_uuid, gives = {.String}, typed = .Kinds})
+	put("parse_url", {0}, {fn = fn_parse_url, takes = {.String}, gives = {.Object}, typed = .Kinds})
+	put("parse_query_string", {0}, {fn = fn_parse_query_string, takes = {.String}, gives = {.Object}, typed = .Kinds})
+	put("parse_logfmt", {0}, {fn = fn_parse_logfmt, takes = {.String}, gives = {.Object}, typed = .Kinds})
+	put("json_pointer", {1}, {fn = fn_json_pointer, arg_takes = {.String}})
+	put("ip_valid", {0}, {fn = fn_ip_valid, gives = {.Bool}, typed = .Kinds})
+	put("ip_class ip_canonical", {0}, {fn = fn_ip_text, takes = {.String}, gives = {.String}, typed = .Kinds})
+	put("ip_in_cidr", {1}, {fn = fn_ip_in_cidr, takes = {.String}, arg_takes = {.String}, gives = {.Bool}, typed = .Kinds})
 }
 
 when ODIN_OS == .Darwin {
@@ -366,6 +383,37 @@ def fromstream(f): { x: null, e: false } as $init
       if .e then .x else empty end);
 def truncate_stream(stream): . as $n | null | stream | . as $input
   | if (.[0] | length) > $n then setpath([0]; .[0][$n:]) else empty end;
+def _numbers(f): [.[] | f | if type == "number" then . else error("\(type) (\(tojson)) cannot be summarized") end];
+def avg(f): _numbers(f) | if length == 0 then null else add / length end;
+def avg: avg(.);
+def variance(f): _numbers(f) | if length == 0 then null else (add / length) as $m | (map(. - $m | . * .) | add) / length end;
+def variance: variance(.);
+def stddev(f): variance(f) | if . == null then null else sqrt end;
+def stddev: stddev(.);
+def quantile($p; f): if ($p | type) == "number" and $p >= 0 and $p <= 1 then
+      _numbers(f) | sort | if length == 0 then null
+      else ((length - 1) * $p) as $i | ($i | floor) as $lo | .[$lo] + (.[$i | ceil] - .[$lo]) * ($i - $lo) end
+    else error("quantile \($p | tojson) must be a number from 0 to 1") end;
+def quantile($p): quantile($p; .);
+def median(f): quantile(0.5; f);
+def median: median(.);
+def frequency(f): [.[] | f] | group_by(.) | map({value: .[0], count: length}) | sort_by(-.count);
+def frequency: frequency(.);
+def union($b): . + $b | unique;
+def intersect($b): unique as $a | $a - ($a - $b);
+def except($b): unique - $b;
+def fill_forward: [foreach .[] as $x ({v: null, m: {}};
+    if $x | type == "object" then
+      .m as $m | .out = ($x | with_entries(.value = (if .value == null then $m[.key] else .value end)))
+        | .m += ($x | with_entries(select(.value != null)))
+    else .out = (if $x == null then .v else $x end) | .v = .out end; .out)];
+def melt($ids; $var; $val): [.[] | . as $r | ($r | with_entries(select(.key | IN($ids[])))) as $id
+    | $r | to_entries[] | select(.key | IN($ids[]) | not) | $id + {($var): .key, ($val): .value}];
+def melt($ids): melt($ids; "variable"; "value");
+def pivot($ids; $var; $val): ([.[][$var]] | unique) as $cols
+    | group_by(with_entries(select(.key | IN($ids[]))))
+    | map(. as $g | ($g[0] | with_entries(select(.key | IN($ids[]))))
+        + (reduce $cols[] as $c ({}; .[$c] = ([$g[] | select(.[$var] == $c)] | last | .[$val]))));
 `
 
 // Make the prelude's definitions that `calls` reach, by name, through the definitions they call in turn:
@@ -459,6 +507,9 @@ fn_builtins :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Valu
 	}
 	for d in prelude_defs() {
 		def_name, arity := def_signature(d)
+		if def_name[0] == '_' {
+			continue
+		}
 		append(&names, message.build("%s/%d", def_name, arity))
 	}
 	slice.sort(names[:]) // the table is a map: sorted, every run lists the same order

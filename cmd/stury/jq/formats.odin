@@ -41,31 +41,7 @@ format :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 		s := text_of(v)
 		return base64.encode(transmute([]byte)s), .Go
 	case "base64d":
-		// jq's decoder: up to the first `=`, a lone last digit an error, bad UTF-8 replaced.
-		B64 :: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-		s := text_of(v)
-		b := make([dynamic]byte, 0, len(s) * 3 / 4 + 1)
-		code, have := u32(0), 0
-		for i := 0; i < len(s) && s[i] != '='; i += 1 {
-			d := strings.index_byte(B64, s[i])
-			if d < 0 {
-				return nil, fail(ip, "string (%s) is not valid base64 data", brief(ip, s))
-			}
-			code, have = code << 6 | u32(d), have + 1
-			if have == 4 {
-				append(&b, byte(code >> 16), byte(code >> 8), byte(code))
-				code, have = 0, 0
-			}
-		}
-		switch have {
-		case 1:
-			return nil, fail(ip, "string (%s) trailing base64 byte found", brief(ip, s))
-		case 2:
-			append(&b, byte(code >> 4))
-		case 3:
-			append(&b, byte(code >> 10), byte(code >> 2))
-		}
-		return valid_utf8(string(b[:])), .Go
+		return decode_base64(ip, text_of(v), BASE64_STANDARD)
 	case "urid":
 		s := text_of(v)
 		b := make([dynamic]byte, 0, len(s))
@@ -90,6 +66,35 @@ format :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 		return string(b[:]), .Go
 	}
 	return nil, fail(ip, "%s is not a valid format", name)
+}
+
+BASE64_STANDARD :: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+BASE64_URL :: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+// jq's base64 decoder over `alphabet`: up to the first `=`, a lone last digit an error, bad UTF-8 replaced.
+decode_base64 :: proc(ip: ^Interp, s: string, alphabet: string) -> (Value, Signal) {
+	b := make([dynamic]byte, 0, len(s) * 3 / 4 + 1)
+	code, have := u32(0), 0
+	for i := 0; i < len(s) && s[i] != '='; i += 1 {
+		d := strings.index_byte(alphabet, s[i])
+		if d < 0 {
+			return nil, fail(ip, "string (%s) is not valid base64 data", brief(ip, s))
+		}
+		code, have = code << 6 | u32(d), have + 1
+		if have == 4 {
+			append(&b, byte(code >> 16), byte(code >> 8), byte(code))
+			code, have = 0, 0
+		}
+	}
+	switch have {
+	case 1:
+		return nil, fail(ip, "string (%s) trailing base64 byte found", brief(ip, s))
+	case 2:
+		append(&b, byte(code >> 4))
+	case 3:
+		append(&b, byte(code >> 10), byte(code >> 2))
+	}
+	return valid_utf8(string(b[:])), .Go
 }
 
 // `s` written with each byte of `from` written as its `to`. The bytes are ASCII and a value's strings valid

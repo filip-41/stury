@@ -337,6 +337,9 @@ query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Option
 	if doc.partial {
 		return nil, {kind = .Unsupported}
 	}
+	if doc.clash != 0 && read.dups != .First && read.dups != .All {
+		return nil, {kind = .Duplicate_Key, at = doc.clash}
+	}
 	h: Scan
 	h.b.doc = doc^
 	h.b.doc.allocator = allocator

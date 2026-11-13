@@ -62,12 +62,25 @@ when ODIN_TEST || INTERNALS {
 		tree_destroy(t)
 	}
 
+	// The local name an element reads as, ASCII lowered and with SVG's mixed case restored.
 	internal_element_name :: proc(t: ^Html_Tree, n: ^Tree_Node) -> string {
-		return element_name(t, n)
+		if n.ns == .Svg {
+			if f := foreign_name(t.src, n.name); .Svg_Element in f.kinds {
+				return f.name
+			}
+		}
+		return TAG_NAMES[n.tag] if n.tag != .Other else decoded(t, n.name, 0)
 	}
 
+	// The namespace and local name attribute `a` of element `n` reads as, adjusted for SVG and MathML.
 	internal_attribute_name :: proc(t: ^Html_Tree, n: ^Tree_Node, a: ^Attribute) -> (ns: Attribute_Namespace, name: string) {
-		return attribute_name(t, n, a)
+		if n.ns != .Html {
+			f := foreign_name(t.src, a.name)
+			if .Foreign_Attribute in f.kinds || .Svg_Attribute in f.kinds && n.ns == .Svg || .Math_Attribute in f.kinds && n.ns == .Math {
+				return f.ns, f.name
+			}
+		}
+		return .None, decoded(t, a.name, 0)
 	}
 
 	internal_decoded :: proc(t: ^Html_Tree, s: Span) -> string {

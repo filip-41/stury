@@ -36,7 +36,7 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `toml/edit.odin` | TOML's edit services and its own commit: splices of lines and sections |
 | `yaml/build.odin` | YAML's entry points and its `build`, which holds a key's properties back from its value and types the plain scalars |
 | `yaml/resolve.odin` | YAML's core schema: `resolve`, `number`, the `Style` fact |
-| `yaml/keys.odin` | the repeat test of a mapping's keys, by decoded text |
+| `yaml/keys.odin` | the keys a mapping holds, by resolved type and value, which a merge key and a read that judges repeats read |
 | `yaml/edit.odin`, `edit_place.odin`, `edit_facts.odin` | YAML's edit services and its own commit, the sites of new lines, and property and comment edits |
 | `xml/document.odin`, `xml/scope.odin` | XML's handles and readers, the `Name`, `Namespace` and `Content` facts, expanded names and `close_end` |
 | `core/compose/markup.odin` | the commit XML and HTML share: splices of contents, tags and facts over the elements a format spells |
@@ -108,6 +108,9 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
 - `root_close` is one past the root value's authored bytes: the close of a root container, or the last byte of a root
   scalar, quotes included. It is 0 when the build did not record it. `span(ROOT)` and a whole-document writer use it
   instead of the format's `close_end`.
+- `clash` is the first byte of the first YAML key with the text of another key of its mapping, as `1` and `"1"` or `1`
+  and `0x1` are, 0 when none is. A query, a typed read and the CLI refuse from it under every `dups` but `.First` and
+  `.All`.
 - `as: core.As` is the handle the text was read with, in 24 bytes: the `spelling`, the `spec` in one byte, so an edit
   service can dispatch on it when a procedure pointer carries no compile-time spec, the `tolerate` set, `max_depth`, and
   ten format bytes core passes along unread, which dsv uses for its delimiter, comment byte, `no_header`, `crlf` and
@@ -376,7 +379,7 @@ The slots past these are nil in JSON and dsv and serve the other formats:
 
 A handle's table also points at the format's `Services`, the passes a call that chooses its format at run time reaches:
 `build`, `validate`, `scan`, `write`, `edit`, and the typed reads, token writer and record framing as `rawptr` slots. A
-document a constant-spec entry point builds holds a table with no services, so a program links only the passes it names,
+document a format's entry point builds holds a table with no services, so a program links only the passes it names,
 and the format package's `query`, `edit_list_init` and `write` serve such a document where `core`'s serve a handle's.
 
 ```odin
@@ -681,7 +684,7 @@ byte of the recorded text or of the commit's output, so it renders as an offset 
 have an `at` that is not read.
 
 ```odin
-write_code :: proc {write_fault_code, write_document_code}
+write_code :: proc(w: io.Writer, err: Error) -> io.Error
 render     :: proc {render_fault, render_document}
 ```
 

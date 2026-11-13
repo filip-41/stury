@@ -62,6 +62,16 @@ convert_keeps_the_members_a_schema_leaves_open :: proc(t: ^testing.T) {
 	}
 }
 
+// The output is written as core.write writes it: comments and the spelling of strings and numbers stay, and the layout
+// is the one asked for.
+@(test)
+convert_writes_as_core_writes :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	got := converted(t, `{"type": "object"}`, "// note\n{\"a\": 5.0e0 /* five */, \"b\": \"\\u00e9\"}\n", json.as(.Jsonc), json.as(.Jsonc))
+	testing.expectf(t, got.err == nil, "%v", got.err)
+	testing.expect_value(t, got.text, "// note\n{\"a\":5.0e0,/* five */\"b\":\"\\u00e9\"}")
+}
+
 @(test)
 convert_refuses_an_input_that_fails_the_schema :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)

@@ -32,20 +32,12 @@ Writer :: struct {
 
 // Writes node `node` of `doc` as HTML, as `core.write` does with `as(spec)`, and returns the facts it dropped. A
 // document of another format is written too.
-write :: proc {write_bound, write_chosen}
-
-@(private)
-write_bound :: proc(doc: ^core.Document, $S: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
+write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
 	if int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
 		return nil, 0, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
-	out, cut, refusal := document_write(doc, opts, bound_as(S), node, {}, allocator)
+	out, cut, refusal := document_write(doc, opts, bound_as(spec), node, {}, allocator)
 	return out, cut, core.error_of(refusal)
-}
-
-@(private)
-write_chosen :: #force_inline proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
-	return core.write(doc, opts, as(spec), node, allocator)
 }
 
 // The handle's `write`: node `node` of `doc` written compact, read back as the spec its shape names and compared, and
@@ -95,16 +87,8 @@ marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options,
 
 // Starts a token write, as `write.tokens_init` does with `as(spec)`. The calls give a value as `write` takes a node, read
 // back as `write.put_markup` reads a marshal's, so a write to a stream is `.Unsupported`.
-tokens_init :: proc {tokens_init_bound, tokens_init_chosen}
-
-@(private)
-tokens_init_bound :: proc(t: ^write.Tokens, $S: Spec, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind {
-	return write.tokens_init(t, bound_as(S), opts, allocator, stream, &TOKENS)
-}
-
-@(private)
-tokens_init_chosen :: #force_inline proc(t: ^write.Tokens, spec: Spec, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind {
-	return write.tokens_init(t, as(spec), opts, allocator, stream)
+tokens_init :: proc(t: ^write.Tokens, spec: Spec, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind {
+	return write.tokens_init(t, bound_as(spec), opts, allocator, stream, &TOKENS)
 }
 
 // The token spelling: the calls make a value in `write.MARKUP_TREE`, which the end reads back and writes. A scalar that
@@ -223,7 +207,7 @@ put_members :: proc(w: ^Writer, v: core.Value, depth: int, in_foreign: bool, kee
 		}
 	}
 	if laid && n > 0 && depth > 0 {
-		newline(w, depth - 1)
+		write.put_line(&w.out, w.opts, depth - 1)
 	}
 	return .None
 }
@@ -257,7 +241,7 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 		}
 	}
 	if laid && w.out.cursor + w.out.flushed > 0 {
-		newline(w, depth)
+		write.put_line(&w.out, w.opts, depth)
 	}
 	write.put_byte(&w.out, '<')
 	write.put_text(&w.out, name)
@@ -469,19 +453,4 @@ is_raw :: proc(name: string) -> bool {
 @(private)
 keeps_space :: proc(name: string) -> bool {
 	return name == "pre" || name == "listing" || name == "textarea"
-}
-
-// A line end and the indent of `depth` levels.
-@(private)
-newline :: proc(w: ^Writer, depth: int) {
-	write.put_byte(&w.out, '\n')
-	for _ in 0 ..< depth {
-		if w.opts.tab {
-			write.put_byte(&w.out, '\t')
-		} else {
-			for _ in 0 ..< w.opts.indent {
-				write.put_byte(&w.out, ' ')
-			}
-		}
-	}
 }

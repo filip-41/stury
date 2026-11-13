@@ -7,6 +7,7 @@ import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import build "../../core/build"
 import typed "../../core/typed"
 import dsv ".."
 import walktest "../../walktest"
@@ -475,19 +476,19 @@ cold_walks_each_spec :: proc(t: ^testing.T) {
 		sep := "\t" if spec == .Tsv else ","
 		row := strings.concatenate({"1", sep, "2\n"}, context.temp_allocator)
 		src := strings.concatenate({"a", sep, "b\n", strings.repeat(row, 3000, context.temp_allocator)}, context.temp_allocator)
-		whole, werr := dsv.build(transmute([]u8)src, spec)
+		whole, werr := core.build(transmute([]u8)src, dsv.as(spec))
 		walktest.expect_nil(t, werr)
 		backing := make([]u8, len(whole.nodes) * size_of(core.Node) + 512)
 		arena: mem.Arena
 		mem.arena_init(&arena, backing)
-		small, serr := dsv.build(transmute([]u8)src, spec, {}, .Last, mem.arena_allocator(&arena))
+		small, serr := core.build(transmute([]u8)src, dsv.as(spec), .Last, mem.arena_allocator(&arena))
 		walktest.expect_nil(t, serr)
 		testing.expect_value(t, len(small.nodes), len(whole.nodes))
 		core.destroy(&small)
 		delete(backing)
 		core.destroy(&whole)
 
-		many, merr := dsv.scan(transmute([]u8)src, spec, paths[:])
+		many, merr := build.scan(transmute([]u8)src, dsv.as(spec), paths[:])
 		walktest.expect_nil(t, merr)
 		if testing.expect_value(t, len(many.answers), 2) {
 			for a in many.answers {

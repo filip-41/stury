@@ -14,11 +14,6 @@ set_value :: proc(list: ^Edit_List, node: Node_Index, v: Value) -> Error {
 	return set_input(list, node, {value = v})
 }
 
-// Makes `v` the value of the member of `obj` named `name`, as `set_value` does for a node.
-set_member_value :: proc(list: ^Edit_List, obj: Node_Index, name: string, v: Value, dups := Duplicates.Last) -> Error {
-	return set_member_input(list, obj, name, {value = v}, dups)
-}
-
 // Inserts `v` into the array `container` before its element `at`, or after its last when `at` is its length. In a
 // flat text's root `v` is a record: an array or an object of cells.
 insert_element_value :: proc(list: ^Edit_List, container: Node_Index, at: int, v: Value) -> Error {
@@ -29,11 +24,6 @@ insert_element_value :: proc(list: ^Edit_List, container: Node_Index, at: int, v
 // length.
 insert_member_value :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string, v: Value) -> Error {
 	return insert_input(list, container, at, key, true, {value = v})
-}
-
-insert_value :: proc {
-	insert_element_value,
-	insert_member_value,
 }
 
 // Makes the comments `c` writes the comments of node `node`: a role's bodies replace the node's, and a role whose

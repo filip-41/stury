@@ -50,6 +50,17 @@ attribute_texts :: proc(it: ^core.Attribute_Iter) -> (name, value: string, found
 	return name, value, true
 }
 
+// The decoded value of the attribute of node `i` written `name`, in the temp allocator.
+attribute_text :: proc(doc: ^core.Document, i: core.Node_Index, name: string) -> (value: string, found: bool) {
+	it := core.attributes_of(doc, i)
+	for written, v in attribute_texts(&it) {
+		if written == name {
+			return v, true
+		}
+	}
+	return "", false
+}
+
 // The document as one line, in the temp allocator: each value's facts in source order, an attribute as `@name="value"`,
 // a comment as `<!--body-->` with `^` after it for an inline one and `$` for a foot, an instruction as `<?body?>` and
 // the DOCTYPE as `<!body>`, then an object's members as `"key": value` or a scalar as JSON writes its text.

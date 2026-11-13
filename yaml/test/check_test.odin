@@ -114,11 +114,14 @@ a_model_loads_and_dumps_a_text :: proc(t: ^testing.T) {
 	refused := model.load(&m, transmute([]u8)string("name: w\nport: 0\n"), &bad, &sink)
 	testing.expect(t, refused != nil)
 	testing.expect_value(t, spelled(&sink), "Too_Short/name;Below_Minimum/port;")
-	// A load refuses a repeated key under its own default and under `.Refuse`, and any other policy is no YAML read.
-	repeated := transmute([]u8)string("name: web\nname: web\nport: 1\n")
+	// A load refuses a repeated key under its own default and under `.Refuse`, and reads the one `dups` picks.
+	repeated := transmute([]u8)string("name: web\nname: db\nport: 1\n")
 	fault, faulted := model.load(&m, repeated, &bad).(core.Fault)
-	testing.expect(t, faulted && fault.detail == u8(yaml.Detail.Duplicate_Key))
-	walktest.expect_kind(t, model.load(&m, repeated, &bad, opts = {dups = .Last}), core.Typed_Error_Kind.Bad_Option)
+	testing.expect(t, faulted && fault.kind == .Duplicate_Key)
+	walktest.expect_nil(t, model.load(&m, repeated, &bad, opts = {dups = .Last}))
+	testing.expect_value(t, bad.name, "db")
+	walktest.expect_nil(t, model.load(&m, repeated, &bad, opts = {dups = .First}))
+	testing.expect_value(t, bad.name, "web")
 }
 
 @(test)

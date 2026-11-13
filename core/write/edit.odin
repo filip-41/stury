@@ -122,7 +122,7 @@ set :: proc(list: ^core.Edit_List, node: core.Node_Index, v: $T, plan: ^typed.Pl
 	}
 }
 
-// Makes `v` the value of the member of `obj` named `name`, as `core.set_member_value` does for a built value.
+// Makes `v` the value of the member of `obj` named `name`.
 set_member :: proc(list: ^core.Edit_List, obj: core.Node_Index, name: string, v: $T, plan: ^typed.Plan = nil, dups := core.Duplicates.Last) -> core.Error {
 	when T == typed.Raw {
 		return core.set_member_input(list, obj, name, {text = string(v), raw = true}, dups)

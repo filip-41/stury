@@ -1,9 +1,8 @@
 // The records of XML. An XML text is one document whose end the walk finds only at the input's end, past its trailing
 // comments and processing instructions, so under `.Concatenated` the record is the whole text from the reader's
 // position to the input's end, and an input of no bytes holds none. A stream's record is settled once its input has
-// ended. A constant `spec` binds the framing (`framing_of`) at compile time, and a `spec` chosen at run time is the
-// handle's `records.open`. A reader opened with a constant spec holds no record reads: a caller that builds or scans a
-// record sets `it.docs = record_docs(spec)`.
+// ended. A reader the entry points open holds no record reads: a caller that builds or scans a record sets
+// `it.docs = record_docs(spec)`.
 package xml
 
 import "base:runtime"
@@ -11,14 +10,11 @@ import "core:io"
 import core "../core"
 import records "../core/records"
 
-// The framing of spec `S`'s texts, which a handle's `records` and a reader of a constant spec reach.
-@(private)
-framing_of :: proc "contextless" ($S: Spec) -> ^records.Framing_Services {
-	@(static, rodata) f := records.Framing_Services {
-		next  = #partial {.Concatenated = next_text},
-		judge = proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) {return nil},
-	}
-	return &f
+// The framing of XML texts, which a handle's `records` and the readers the entry points open reach.
+@(private, rodata)
+FRAMING := records.Framing_Services {
+	next  = #partial {.Concatenated = next_text},
+	judge = proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) {return nil},
 }
 
 // Frames the text at the reader's position, the rest of the input, judged by the walk from there.
@@ -37,12 +33,14 @@ next_text :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) {
 	return {text = it.src[lo:], at = lo}, true
 }
 
-// The reads of a record's value as spec `S`: its build. A scan of a record builds it.
-record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
-	@(static, rodata) d := records.Record_Docs {
-		build = build_record,
-	}
-	return &d
+// The reads of a record's value as `spec`: its build. A scan of a record builds it.
+record_docs :: proc "contextless" (spec: Spec) -> ^records.Record_Docs {
+	return &RECORD_DOCS
+}
+
+@(private, rodata)
+RECORD_DOCS := records.Record_Docs {
+	build = build_record,
 }
 
 @(private)
@@ -53,55 +51,21 @@ build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtim
 }
 
 // Opens `src` for its records, as `records.open` does with `as(spec, opts)`.
-records_open :: proc {records_open_bound, records_open_chosen}
-
-@(private)
-records_open_bound :: proc(src: []u8, $S: Spec, opts := Options{}, framing := core.Framing.Concatenated, at: u64 = 0, allocator := context.allocator) -> records.Reader {
-	return records.open_with(src, bound_as(S, opts), framing_of(S), nil, framing, at, allocator)
-}
-
-@(private)
-records_open_chosen :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, at: u64 = 0, allocator := context.allocator) -> records.Reader {
-	return records.open(src, as(spec, opts), framing, at, allocator)
+records_open :: proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, at: u64 = 0, allocator := context.allocator) -> records.Reader {
+	return records.open_with(src, bound_as(spec, opts), &FRAMING, nil, framing, at, allocator)
 }
 
 // Opens the text `input` gives, as `records.open_stream` does with `as(spec, opts)`.
-records_open_stream :: proc {records_open_stream_bound, records_open_stream_chosen}
-
-@(private)
-records_open_stream_bound :: proc(input: io.Reader, $S: Spec, opts := Options{}, framing := core.Framing.Concatenated, stream := records.Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> records.Reader {
-	return records.open_stream_with(input, bound_as(S, opts), framing_of(S), nil, framing, stream, at, allocator)
-}
-
-@(private)
-records_open_stream_chosen :: #force_inline proc(input: io.Reader, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, stream := records.Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> records.Reader {
-	return records.open_stream(input, as(spec, opts), framing, stream, at, allocator)
+records_open_stream :: proc(input: io.Reader, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, stream := records.Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> records.Reader {
+	return records.open_stream_with(input, bound_as(spec, opts), &FRAMING, nil, framing, stream, at, allocator)
 }
 
 // Returns the fault of a refused text of `src`, as `records.check` does with `as(spec, opts)`.
-records_check :: proc {records_check_bound, records_check_chosen}
-
-@(private)
-records_check_bound :: proc(src: []u8, $S: Spec, opts := Options{}, framing := core.Framing.Concatenated, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> ([]core.Fault, runtime.Allocator_Error) {
-	return records.check(src, bound_as(S, opts), framing, allocator, runner, at, framing_of(S))
-}
-
-@(private)
-records_check_chosen :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> ([]core.Fault, runtime.Allocator_Error) {
-	return records.check(src, as(spec, opts), framing, allocator, runner, at)
+records_check :: proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> ([]core.Fault, runtime.Allocator_Error) {
+	return records.check(src, bound_as(spec, opts), framing, allocator, runner, at, &FRAMING)
 }
 
 // Hands the text of `src` to `task` as one piece, as `records.each` does with `as(spec, opts)`.
-records_each :: proc {records_each_bound, records_each_chosen}
-
-@(private)
-records_each_bound :: #force_inline proc(src: []u8, $S: Spec, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0, opts := Options{}) -> core.Error {
-	return records.each(src, bound_as(S, opts), framing, task, data, runner, at, framing_of(S))
-}
-
-// A group's two forms may not both be generic over the task's data, so a spec chosen at run time takes the data as a
-// `rawptr`.
-@(private)
-records_each_chosen :: #force_inline proc(src: []u8, spec: Spec, framing: core.Framing, task: proc(data: rawptr, piece: ^records.Reader, k: int) -> bool, data: rawptr, runner: ^core.Runner = nil, at: u64 = 0, opts := Options{}) -> core.Error {
-	return records.each(src, as(spec, opts), framing, cast(proc(data: ^u8, piece: ^records.Reader, k: int) -> bool)task, (^u8)(data), runner, at)
+records_each :: #force_inline proc(src: []u8, spec: Spec, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0, opts := Options{}) -> core.Error {
+	return records.each(src, bound_as(spec, opts), framing, task, data, runner, at, &FRAMING)
 }

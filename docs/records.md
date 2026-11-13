@@ -300,7 +300,7 @@ record is framed as the reader reads it under the same `framing`. The calls and 
 
 A format gives its record reader as a `records.Framing_Services` table in its rodata, which its `core.Services.records`
 points at, and the reads of a record's value as a `records.Record_Docs`, which `Services.docs` points at and a reader
-opened with a constant spec takes from the caller (`it.docs = json.record_docs(.Json)`). `next` holds one procedure per framing, nil for a framing the format does not take, which frames the next record
+an entry point opens takes from the caller (`it.docs = json.record_docs(.Json)`). `next` holds one procedure per framing, nil for a framing the format does not take, which frames the next record
 and stores the fault that ends the records in `it.fault`. `judge` returns a record's fault, `read`, `build` and `scan` read
 one, and `build_next` frames the next record by the walk that writes its nodes to a builder (nil where the format
 builds whole texts on one thread). `guess` moves a piece's reader to where a record may start, and marks it so that a fault ends its records

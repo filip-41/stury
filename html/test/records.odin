@@ -98,8 +98,7 @@ answers_agree_with_each_answer :: proc(t: ^testing.T) {
 			clear(&want)
 			err := html.each_answer(src, .Document, path, &want, collect_answer, {}, read)
 			for batch in ([]int{1, 64}) {
-				spec := html.Spec.Document
-				it := html.answers(src, spec, path, {}, read) if batch == 1 else html.answers(src, .Document, path, {}, read)
+				it := html.answers(src, .Document, path, {}, read)
 				it.max_batch = batch
 				clear(&got)
 				for a in html.next(&it) {

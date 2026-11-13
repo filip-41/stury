@@ -204,20 +204,12 @@ held_free :: proc "contextless" (cursor: ^Cursor, held: ^Held) {
 }
 
 // The walk's verdict on `src` for `spec`, after one leading BOM: nil for a text that reads, else its fault. It reads the
-// text into a tree on the default heap, as `walk` does, and makes no tokens. A constant `spec` links the walk alone. A
-// `spec` chosen at run time is `core.validate` with `as(spec, opts)` and links every service of the format. The same
-// holds for the other entry points below. A document that a constant `spec` builds holds no services, so `query`,
+// text into a tree on the default heap, as `walk` does, and makes no tokens. It links the walk alone, and `core.validate`
+// with `as(spec, opts)` links every service of the format. The same holds for the other entry points below. A document
+// an entry point builds holds no services, so `query`,
 // `edit_list_init` and `write` of this package serve it where the same names of `core` serve a handle's.
-validate :: proc {validate_bound, validate_chosen}
-
-@(private)
-validate_bound :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error {
-	return core.error_of(validate_text(src, S, opts))
-}
-
-@(private)
-validate_chosen :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
-	return core.validate(src, as(spec, opts))
+validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
+	return core.error_of(validate_text(src, spec, opts))
 }
 
 @(private)
@@ -378,110 +370,56 @@ replay :: proc "contextless" (p: ^Parser, s: ^Replay, h: ^$H, hs: ^core.Hook_Reg
 // Reads a text as spec `spec` into a document, allocating its nodes with `allocator`. The document borrows `src`, which
 // must outlive it, and `destroy` frees it. A table is one `Object` whose members are in the order the text first names
 // them, wherever the text writes them. `dups` has no effect, since a repeated key is a fault.
-build :: proc {build_bound, build_chosen}
-
-@(private)
-build_bound :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
-	doc, err := build_text(src, bound_as(S, opts), allocator)
+build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
+	doc, err := build_text(src, bound_as(spec, opts), allocator)
 	return doc, core.error_of(err)
-}
-
-@(private)
-build_chosen :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
-	return core.build(src, as(spec, opts), dups, allocator)
 }
 
 // The path reads of `core/build`. `scan`, `each_answer`, `find` and `set` take `spec` and `opts`. A read builds the whole
 // document and answers from it, since a table's members may be written apart.
-scan :: proc {scan_bound_one, scan_bound_many, scan_chosen_one, scan_chosen_many}
+scan :: proc {scan_one, scan_many}
 
 @(private)
-scan_bound_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
-	return scan_bound_many(src, S, []core.Path{path}, opts, read, allocator)
+scan_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
+	return scan_many(src, spec, []core.Path{path}, opts, read, allocator)
 }
 
 @(private)
-scan_bound_many :: proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
-	doc, err := scan_text(src, bound_as(S, opts), paths, read, nil, nil, allocator)
+scan_many :: proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
+	doc, err := scan_text(src, bound_as(spec, opts), paths, read, nil, nil, allocator)
 	return doc, core.error_of(err)
 }
 
+each_answer :: proc {each_answer_one, each_answer_many}
+
 @(private)
-scan_chosen_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
-	return engine.scan_one(src, as(spec, opts), path, read, allocator)
+each_answer_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
+	return each_answer_many(src, spec, []core.Path{path}, state, on, opts, read, allocator)
 }
 
 @(private)
-scan_chosen_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
-	return engine.scan_many(src, as(spec, opts), paths, read, allocator)
-}
-
-each_answer :: proc {each_answer_bound_one, each_answer_bound_many, each_answer_chosen_one, each_answer_chosen_many}
-
-@(private)
-each_answer_bound_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
-	return each_answer_bound_many(src, S, []core.Path{path}, state, on, opts, read, allocator)
-}
-
-@(private)
-each_answer_bound_many :: proc(src: []u8, $S: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
-	doc, err := scan_text(src, bound_as(S, opts), paths, read, state, on, allocator)
+each_answer_many :: proc(src: []u8, spec: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
+	doc, err := scan_text(src, bound_as(spec, opts), paths, read, state, on, allocator)
 	core.destroy(&doc)
 	return core.error_of(err)
 }
 
-@(private)
-each_answer_chosen_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
-	return engine.each_answer_one(src, as(spec, opts), path, state, on, read, allocator)
-}
-
-@(private)
-each_answer_chosen_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
-	return engine.each_answer_many(src, as(spec, opts), paths, state, on, read, allocator)
-}
-
 // The answers `each_answer` gives, as an iterator that `next` takes them from: `for a in toml.next(&it)`. A loop that
-// ends before `next` returns false frees the read with `destroy(&it)`. `paths` is read at the first `next`, which
+// ends before `next` returns false frees the read with `destroy(&it)`. `path` is read at the first `next`, which
 // builds the whole text, as every path read of TOML does.
-answers :: proc {answers_bound_one, answers_bound_many, answers_chosen_one, answers_chosen_many}
-
-@(private)
-answers_bound_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
-	return answers_of(src, bound_as(S, opts), nil, path, read, allocator)
+answers :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+	return answers_of(src, bound_as(spec, opts), nil, path, read, allocator)
 }
 
-@(private)
-answers_bound_many :: #force_inline proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
-	return answers_of(src, bound_as(S, opts), paths, {}, read, allocator)
-}
-
-@(private)
-answers_chosen_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
-	return answers_of(src, as(spec, opts), nil, path, read, allocator)
-}
-
-@(private)
-answers_chosen_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
-	return answers_of(src, as(spec, opts), paths, {}, read, allocator)
-}
-
-find :: proc {find_bound, find_chosen}
-
-@(private)
-find_bound :: proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
+find :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
 	one := path
 	one.limit = min(path.limit.? or_else 1, 1)
-	doc, err = scan_bound_one(src, S, one, opts, read, allocator)
+	doc, err = scan_one(src, spec, one, opts, read, allocator)
 	answer = doc.answers[0] if len(doc.answers) > 0 else {core.NO_NODE, core.NO_NODE, 0, .Missing}
 	return
 }
 
-@(private)
-find_chosen :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
-	return engine.find(src, as(spec, opts), path, read, allocator)
-}
-
-// Answers `path` or `paths` over a document built whole, as `core.query` does. A document read as a constant spec holds
+// Answers `path` or `paths` over a document built whole, as `core.query` does. A document an entry point reads holds
 // no services, so `core.query` does not answer for it.
 query :: proc {query_one, query_many}
 

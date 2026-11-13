@@ -63,7 +63,6 @@ Detail :: enum u8 {
 	Expected_Comma, // `Bad_Char`, text where a comma or a close was expected
 	Open_Collection, // `Truncated`, a flow collection the text never closes
 	Alias_Property, // `Bad_Char`, a tag or an anchor on an alias
-	Duplicate_Key, // `Bad_Char`, a key the same mapping holds already
 	Extra_Document, // `Bad_Char`, a second document where a text is read as one
 	No_Document, // `Truncated`, a text with no document where one is wanted
 	Complex_Key, // `Bad_Char`, a key that is a collection, which a document does not hold
@@ -105,7 +104,6 @@ RULES := core.Rules{"yaml", {
 	{"expected_comma", "Expected a comma or a close"},
 	{"open_collection", "Unfinished flow collection"},
 	{"alias_property", "Alias with a tag or an anchor"},
-	{"duplicate_key", "Key repeated in a mapping"},
 	{"extra_document", "More than one document"},
 	{"no_document", "No document"},
 	{"complex_key", "A collection as a key is not supported"},
@@ -196,6 +194,12 @@ hook_sink :: proc "contextless" ($H: typeid, $on: proc "contextless" (h: ^H, s: 
 // followed by the tokens of the node it names. `regs` nil starts from zero registers and keeps none. With a `cursor`,
 // a stop saves where the walk stood there for `walk_resume`.
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault)) {
+	return walk_noting(src, lo, opts, h, regs, on, cursor, nil)
+}
+
+// `walk`, which sets `typed^` when a key of the document resolves to no string.
+@(private)
+walk_noting :: proc "contextless" (src: []u8, lo: u64, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor, typed: ^bool) -> (hi: u64, fault: Maybe(core.Fault)) {
 	if cursor != nil {
 		hi, fault, _ = walk_saving(src, lo, opts, h, regs, on, cursor, nil)
 		return
@@ -219,6 +223,9 @@ walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: 
 	}
 	if regs != nil {
 		regs^ = w.regs
+	}
+	if typed != nil {
+		typed^ = p.typed
 	}
 	hi, fault, _ = core.result_of(p.fail, &RULES)
 	return
@@ -393,18 +400,9 @@ resume_document :: proc(p: ^Parser) -> bool {
 	return end_document(p)
 }
 
-// The walk's verdict on `src` for `spec`, after one leading BOM: every document of the stream is read and judged. A
-// `spec` chosen at run time is `core.validate` with `as(spec, opts)`.
-validate :: proc {validate_bound, validate_chosen}
-
-@(private)
-validate_bound :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error {
+// The walk's verdict on `src` for `spec`, after one leading BOM: every document of the stream is read and judged.
+validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
 	return core.error_of(validate_text(src, opts))
-}
-
-@(private)
-validate_chosen :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
-	return core.validate(src, as(spec, opts))
 }
 
 // The handle's `validate`.

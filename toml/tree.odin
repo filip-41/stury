@@ -177,17 +177,6 @@ add_node :: proc "contextless" (t: ^Table_Tree, parent: u32, node: Table_Node, k
 	return id, .None
 }
 
-// A copy of `name` that lives as long as the tree.
-keep_name :: proc "contextless" (t: ^Table_Tree, name: []u8) -> string {
-	context = runtime.default_context()
-	buf, err := runtime.arena_alloc(&t.names, uint(max(len(name), 1)), 1)
-	if err != nil {
-		return ""
-	}
-	copy(buf, name)
-	return string(buf[:len(name)])
-}
-
 // The member a dotted key's part `part` names in table `cur`, which the key creates when it is new. An existing one is
 // reached only when a dotted key made it.
 dotted_step :: proc "contextless" (t: ^Table_Tree, cur: u32, part: Part) -> (id: u32, first: bool, r: Refusal) {

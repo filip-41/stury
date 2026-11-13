@@ -76,52 +76,27 @@ as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
 	return as_of(&HANDLE if spec <= max(Spec) else nil, spec, opts)
 }
 
-// The walk's verdict on `src`, which is exactly one item, judged as `spec` says. Returns the fault, or nil. A constant
-// `spec` links the walk alone. A `spec` chosen at run time is `core.validate` with `as(spec, opts)` and links every
-// service of the format. The same holds for the other entry points of the package. A document that a constant `spec`
-// builds holds no services, so `query`, `edit_list_init` and `write` of this package serve it where the same names of
+// The walk's verdict on `src`, which is exactly one item, judged as `spec` says. Returns the fault, or nil. It links
+// the walk alone, and `core.validate` with `as(spec, opts)` links every service of the format. The same holds for the
+// other entry points of the package. A document an entry point builds holds no services, so `query`, `edit_list_init` and `write` of this package serve it where the same names of
 // `core` serve a handle's.
-validate :: proc {validate_bound, validate_chosen}
-
-@(private)
-validate_bound :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error {
-	return core.error_of(validate_text(src, rules_of(S, opts)))
-}
-
-@(private)
-validate_chosen :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
-	return core.validate(src, as(spec, opts))
+validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
+	return core.error_of(validate_text(src, rules_of(spec, opts)))
 }
 
 // Reads the one item in `src` into a document, as `core.build` does with `as(spec, opts)`.
-build :: proc {build_bound, build_chosen}
-
-@(private)
-build_bound :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
-	doc, err := build_item(src, bound_as(S, opts), dups == .Refuse, allocator)
+build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
+	doc, err := build_item(src, bound_as(spec, opts), dups == .Refuse, allocator)
 	return doc, core.error_of(err)
 }
 
-@(private)
-build_chosen :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
-	return core.build(src, as(spec, opts), dups, allocator)
-}
-
 // Writes node `node` of `doc` as one CBOR item of `spec`, as `core.write` does with `as(spec)`.
-write :: proc {write_bound, write_chosen}
-
-@(private)
-write_bound :: proc(doc: ^core.Document, $S: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
+write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
 	if int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
 		return nil, 0, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
-	out, cut, refusal := document_write(doc, opts, bound_as(S), node, {}, allocator)
+	out, cut, refusal := document_write(doc, opts, bound_as(spec), node, {}, allocator)
 	return out, cut, core.error_of(refusal)
-}
-
-@(private)
-write_chosen :: #force_inline proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
-	return core.write(doc, opts, as(spec), node, allocator)
 }
 
 // Reads the item at `lo` of spec `S` through the hook. Returns one past the item, or the fault. A hook that stops the

@@ -1,10 +1,11 @@
-// The format package's entry points, in the form that binds a constant spec and the form that takes one at run time.
+// The format package's entry points, and the calls in `core` with a handle.
 package html_tests
 
 import "core:strings"
 import "core:testing"
 import core "../../core"
 import compose "../../core/compose"
+import build "../../core/build"
 import typed "../../core/typed"
 import write "../../core/write"
 import html ".."
@@ -23,7 +24,7 @@ count_found :: proc(state: rawptr, a: core.Token_Answer) -> bool {
 	return true
 }
 
-// Every entry point with `spec`, a constant in one caller and a value chosen at run time in the other.
+// Every entry point with `spec`, a constant in one caller, and the core call with the handle of `spec` in the other.
 @(private = "file")
 entry_points :: proc(t: ^testing.T, spec: html.Spec, bound: bool) {
 	src := transmute([]u8)string(`<a><b>1</b><c k="v">2</c><b>3</b></a>`)
@@ -48,13 +49,14 @@ entry_points :: proc(t: ^testing.T, spec: html.Spec, bound: bool) {
 		one = html.each_answer(src, .Fragment, c, &seen_one, count_found)
 		many = html.each_answer(src, .Fragment, paths[:], &seen_many, count_found)
 	} else {
-		verr = html.validate(src, spec)
-		doc, berr = html.build(src, spec)
-		sdoc, serr = html.scan(src, spec, c)
-		mdoc, merr = html.scan(src, spec, paths[:])
-		fdoc, answer, ferr = html.find(src, spec, c)
-		one = html.each_answer(src, spec, c, &seen_one, count_found)
-		many = html.each_answer(src, spec, paths[:], &seen_many, count_found)
+		handle := html.as(spec)
+		verr = core.validate(src, handle)
+		doc, berr = core.build(src, handle)
+		sdoc, serr = build.scan(src, handle, c)
+		mdoc, merr = build.scan(src, handle, paths[:])
+		fdoc, answer, ferr = build.find(src, handle, c)
+		one = build.each_answer(src, handle, c, &seen_one, count_found)
+		many = build.each_answer(src, handle, paths[:], &seen_many, count_found)
 	}
 	defer core.destroy(&doc)
 	defer core.destroy(&sdoc)
@@ -63,7 +65,7 @@ entry_points :: proc(t: ^testing.T, spec: html.Spec, bound: bool) {
 	for err in ([?]core.Error{verr, berr, serr, merr, ferr, one, many}) {
 		walktest.expect_nil(t, err)
 	}
-	// A document read as a constant spec holds no services, and one read through the handle holds them.
+	// A document an entry point reads holds no services, and one read through the handle holds them.
 	testing.expect_value(t, core.services_of(doc.as) == nil, bound)
 	testing.expect_value(t, len(sdoc.answers), 1)
 	testing.expect_value(t, walktest.node_text(t, &sdoc, sdoc.answers[0].node), "2")

@@ -9,44 +9,38 @@ import core "../core"
 // text, a `Plain`, or an `Object` of its child elements and `#text` runs, and its attributes are `Attribute` facts of
 // that value.
 
-// XML's handles, one per spec, which only `as` names. A handle's readers are the readers a constant build of its spec
-// holds, and its services the walks of that spec. The tables hold pointers to the bound tables, so they are set at
+// XML's handles, one per spec, which only `as` names. A handle's readers are the readers an entry point's build holds,
+// and its services the walks of that spec. The tables hold pointers to the bound tables, so they are set at
 // startup and never written after.
 @(private)
 HANDLES := [Spec]core.Readers {
-	.Xml = handle_readers(.Xml, &SERVICES[.Xml]),
+	.Xml = handle_readers(&SERVICES[.Xml]),
 }
 
 @(private)
 SERVICES := [Spec]core.Services {
-	.Xml = handle_services(.Xml),
-}
-
-// The readers of the handle of spec `S`: `readers_of(S)` with the services of `S`.
-@(private)
-handle_readers :: proc "contextless" ($S: Spec, services: ^core.Services) -> core.Readers {
-	r := readers_of(S)^
-	r.services = services
-	return r
-}
-
-// The run-time services of spec `S`, which a handle reaches.
-@(private)
-handle_services :: proc "contextless" ($S: Spec) -> core.Services {
-	return {
-		build    = build_of(S),
-		validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, S, options_of(as))},
+	.Xml = {
+		build    = build_handle,
+		validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, .Xml, options_of(as))},
 		scan     = proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
-			return scan_spec(src, S, as, paths, read, state, on, allocator)
+			return scan_spec(src, .Xml, as, paths, read, state, on, allocator)
 		},
 		write    = document_write,
 		plans    = rawptr(plan_as),
 		edit     = &EDIT,
-		reads    = reads_of(S),
+		reads    = &READS,
 		tokens   = &TOKENS,
-		records  = framing_of(S),
-		docs     = record_docs(S),
-	}
+		records  = &FRAMING,
+		docs     = &RECORD_DOCS,
+	},
+}
+
+// The readers of a handle: `READERS` with `services`.
+@(private)
+handle_readers :: proc "contextless" (services: ^core.Services) -> core.Readers {
+	r := READERS
+	r.services = services
+	return r
 }
 
 // XML's fault table, which names the format whatever the spec.

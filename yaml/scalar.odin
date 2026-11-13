@@ -4,7 +4,8 @@ import core "../core"
 
 // A scalar token's `spelling`: bit 0 (`core.SPELLING_DECODE`) says the text needs `text`, bit 2 (`core.SPELLING_LAX`) that
 // a double-quoted scalar holds a `\L` or `\P`, which decode to three bytes from two. Bits 3 and 4 are the style, bit 5
-// says a block scalar's indentation indicator is explicit, and bits 8 to 15 hold that indentation.
+// says a block scalar's indentation indicator is explicit, bits 6 and 7 hold a key's tag (`KEY_TAG_SHIFT`), and bits 8
+// to 15 hold a block scalar's indentation.
 @(private)
 STYLE_SHIFT :: 3
 @(private)

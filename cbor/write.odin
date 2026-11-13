@@ -91,8 +91,7 @@ item_span :: proc(doc: ^core.Document, i: core.Node_Index) -> (tags, lo, hi: u64
 @(private)
 put_preorder :: proc(e: ^Emit, i: core.Node_Index) -> core.Typed_Error_Kind {
 	doc := e.doc
-	n := doc.nodes[i]
-	end := i + (core.Node_Index(n.n) if n.kind == .Array || n.kind == .Object else 1)
+	end := i + core.Node_Index(core.subtree_size(doc, i))
 	for j in i ..< end {
 		put_tags(e, j)
 		#partial switch k := core.kind(doc, j); k {

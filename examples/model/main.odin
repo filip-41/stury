@@ -42,6 +42,7 @@ run :: proc() -> core.Error {
 	sink: typed.Sink
 	if model.load(&m, transmute([]u8)string(`{"name": "a", "email": 3}`), &bad, &sink) != nil {
 		p := model.problem(sink.entries[:], "Invalid body", 422) or_return
+		defer model.problem_destroy(p)
 		fmt.println(string(json.marshal(p) or_return))
 	}
 

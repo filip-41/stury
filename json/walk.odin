@@ -1,3 +1,5 @@
+// `write` is used only in a generic procedure, which the unused-import check does not read.
+#+vet !unused-imports
 // JSON's walk: each grammar state is a procedure that tail-calls the next with `#must_tail` (states.odin). A state
 // reads the first byte of its token and branches on it. Strings (strings.odin), numbers and literals (scalars.odin)
 // and whitespace (whitespace.odin) are read by leaf procedures.
@@ -220,73 +222,47 @@ describe :: #force_no_inline proc "contextless" (src: []u8, f: core.Fault, $S: S
 // spec with comments, comments up to the text's end. Returns the fault, or nil. A constant `spec` links the walk of that
 // spec alone. A `spec` chosen at run time is `core.validate` with `as(spec, opts)` and links every spec's walk. The same
 // holds for the other entry points below, and the forms that take a `Document` give it the readers of the spec.
-validate :: proc {validate_bound, validate_chosen}
-
-@(private)
-validate_bound :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error {
+validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error {
 	h: core.No_Hooks
 	regs: core.Hook_Regs
 	return core.error_of(walk_text(src, 0, S, opts, &h, &regs, core.no_hook))
 }
 
-@(private)
-validate_chosen :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
-	return core.validate(src, as(spec, opts))
-}
-
 // Reads `src` as spec `spec` into a document, as `core.build` does with `as(spec, opts)`.
-build :: proc {build_bound, build_chosen}
-
-@(private)
-build_bound :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
+build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
 	doc, err := build_spec(src, S, bound_as(S, opts), dups == .Refuse, allocator)
 	return doc, core.error_of(err)
 }
 
-@(private)
-build_chosen :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
-	return core.build(src, as(spec, opts), dups, allocator)
-}
-
 // The path reads of `core/build`. `scan`, `each_answer`, `find` and `set` take `spec` and `opts`.
-scan :: proc {scan_bound_one, scan_bound_many, scan_chosen_one, scan_chosen_many}
+scan :: proc {scan_one, scan_many}
 
 @(private)
-scan_bound_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
-	return scan_bound_many(src, S, []core.Path{path}, opts, read, allocator)
+scan_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
+	return scan_many(src, S, []core.Path{path}, opts, read, allocator)
 }
 
 @(private)
-scan_bound_many :: proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
+scan_many :: proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
 	if read.dups == .Refuse {
-		built, e := build_bound(src, S, opts, .Refuse, allocator)
+		built, e := build(src, S, opts, .Refuse, allocator)
 		return engine.query_built(&built, e, paths, read)
 	}
 	doc, err := scan_spec(src, S, bound_as(S, opts), paths, read, nil, nil, allocator)
 	return doc, core.error_of(err)
 }
 
+each_answer :: proc {each_answer_one, each_answer_many}
+
 @(private)
-scan_chosen_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
-	return engine.scan_one(src, as(spec, opts), path, read, allocator)
+each_answer_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
+	return each_answer_many(src, S, []core.Path{path}, state, on, opts, read, allocator)
 }
 
 @(private)
-scan_chosen_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
-	return engine.scan_many(src, as(spec, opts), paths, read, allocator)
-}
-
-each_answer :: proc {each_answer_bound_one, each_answer_bound_many, each_answer_chosen_one, each_answer_chosen_many}
-
-@(private)
-each_answer_bound_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
-	return each_answer_bound_many(src, S, []core.Path{path}, state, on, opts, read, allocator)
-}
-
-@(private)
-each_answer_bound_many :: proc(src: []u8, $S: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
+each_answer_many :: proc(src: []u8, $S: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
 	if read.dups == .Refuse {
-		built, e := build_bound(src, S, opts, .Refuse, allocator)
+		built, e := build(src, S, opts, .Refuse, allocator)
 		core.destroy(&built)
 		if e != nil {
 			return e
@@ -297,83 +273,44 @@ each_answer_bound_many :: proc(src: []u8, $S: Spec, paths: []core.Path, state: r
 	return core.error_of(err)
 }
 
-@(private)
-each_answer_chosen_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
-	return engine.each_answer_one(src, as(spec, opts), path, state, on, read, allocator)
-}
-
-@(private)
-each_answer_chosen_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
-	return engine.each_answer_many(src, as(spec, opts), paths, state, on, read, allocator)
-}
-
 // The answers `each_answer` gives, as an iterator that `next` takes them from: `for a in json.next(&it)`. A loop that
 // ends before `next` returns false frees the read with `destroy(&it)`. `paths` is read at the first `next`.
-answers :: proc {answers_bound_one, answers_bound_many, answers_chosen_one, answers_chosen_many}
+answers :: proc {answers_one, answers_many}
 
 @(private)
-answers_bound_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+answers_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
 	return answers_of(src, bound_as(S, opts), nil, path, read, allocator, answers_fill(S))
 }
 
 @(private)
-answers_bound_many :: #force_inline proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+answers_many :: #force_inline proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
 	return answers_of(src, bound_as(S, opts), paths, {}, read, allocator, answers_fill(S))
 }
 
-@(private)
-answers_chosen_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
-	return answers_of(src, as(spec, opts), nil, path, read, allocator, answers_fill_of(spec))
-}
-
-@(private)
-answers_chosen_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
-	return answers_of(src, as(spec, opts), paths, {}, read, allocator, answers_fill_of(spec))
-}
-
-find :: proc {find_bound, find_chosen}
-
-@(private)
-find_bound :: proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
+find :: proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
 	one := path
 	one.limit = min(path.limit.? or_else 1, 1)
-	doc, err = scan_bound_one(src, S, one, opts, read, allocator)
+	doc, err = scan_one(src, S, one, opts, read, allocator)
 	answer = doc.answers[0] if len(doc.answers) > 0 else {core.NO_NODE, core.NO_NODE, 0, .Missing}
 	return
-}
-
-@(private)
-find_chosen :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
-	return engine.find(src, as(spec, opts), path, read, allocator)
 }
 
 // Makes `v` the value at every answer of `path` over `src`, in one call, and returns the new text, which the caller frees
 // with `allocator`. A `typed.Raw` is the text of a value, a struct, a slice or a map is built by `plan`, and any other
 // value is spelled by the format. A `Name` the path ends in that its container lacks is inserted after the container's
 // last member. `read.dups` picks among a repeated key as `query` does, and sets each repeat under `.All`.
-set :: proc {set_bound, set_chosen}
-
-@(private)
-set_bound :: proc(src: []u8, $S: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+set :: proc(src: []u8, $S: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
 	scratch: write.Scratch
 	defer write.scratch_destroy(&scratch)
 	in_ := write.edit_input(v, plan, &scratch) or_return
-	doc, berr := build_bound(src, S, opts, read.dups, allocator)
+	doc, berr := build(src, S, opts, read.dups, allocator)
 	defer core.destroy(&doc)
 	if berr != nil {
 		return nil, berr
 	}
-	list := edit_list_init_bound(&doc, S, allocator)
+	list := edit_list_init(&doc, S, allocator)
 	defer core.edit_list_destroy(&list)
 	return engine.set_answers(&list, path, in_, read, allocator)
-}
-
-@(private)
-set_chosen :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	scratch: write.Scratch
-	defer write.scratch_destroy(&scratch)
-	in_ := write.edit_input(v, plan, &scratch) or_return
-	return engine.set(src, as(spec, opts), path, in_, read, allocator)
 }
 
 // Answers `path` or `paths` over a document built whole, as `core.query` does. A document read as a constant spec holds
@@ -396,37 +333,19 @@ query_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_O
 
 // Returns an edit list over `doc`. A document read as a constant spec holds no edit services, so the list takes the
 // spec's.
-edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
-
-@(private)
-edit_list_init_bound :: proc(doc: ^core.Document, $S: Spec, allocator := context.allocator) -> core.Edit_List {
+edit_list_init :: proc(doc: ^core.Document, $S: Spec, allocator := context.allocator) -> core.Edit_List {
 	list := core.edit_list_init(doc, allocator)
 	list.edit = edit_of(S)
 	return list
 }
 
-@(private)
-edit_list_init_chosen :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List {
-	list := core.edit_list_init(doc, allocator)
-	list.edit = core.services_of(as(spec)).edit
-	return list
-}
-
 // Writes node `node` of `doc` as spec `spec`, as `core.write` does with `as(spec)`.
-write :: proc {write_bound, write_chosen}
-
-@(private)
-write_bound :: proc(doc: ^core.Document, $S: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
+write :: proc(doc: ^core.Document, $S: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
 	if int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
 		return nil, 0, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
 	out, cut, refusal := write_text(doc, opts, bound_as(S), node, {}, allocator)
 	return out, cut, core.error_of(refusal)
-}
-
-@(private)
-write_chosen :: #force_inline proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
-	return core.write(doc, opts, as(spec), node, allocator)
 }
 
 // Whether `src` holds no document: past an optional leading BOM, only the spec's whitespace and, in a spec with

@@ -205,6 +205,7 @@ records_close :: records.close
 records_marshal :: records.marshal
 records_marshal_stream :: records.marshal_stream
 records_next :: records.next
+records_open_stream :: records.open_stream
 records_read :: records.read
 records_scan :: records.scan
 records_write :: records.write

@@ -318,7 +318,7 @@ flow_map_entry :: proc(p: ^Parser, n: int) -> (step: Flow_Step, ok: bool) {
 	}
 	c := at(p, p.pos)
 	if flow_colon(p, false) || explicit && (c == ',' || c == '}') {
-		emit(p, core.Token{p.pos, 0, .Plain, .Key, 0}) or_return
+		emit(p, plain_token(p, p.pos, 0, .Key)) or_return
 	} else {
 		p.flows[len(p.flows) - 1].explicit = explicit
 		nested: bool
@@ -352,7 +352,7 @@ flow_seq_entry :: proc(p: ^Parser, n: int) -> (step: Flow_Step, ok: bool) {
 		json_like := false
 		c := at(p, p.pos)
 		if flow_colon(p, false) || c == ',' || c == ']' {
-			emit(p, core.Token{p.pos, 0, .Plain, .Key, 0}) or_return
+			emit(p, plain_token(p, p.pos, 0, .Key)) or_return
 		} else {
 			nested: bool
 			json_like, nested = parse_flow_node(p, n, .Key, .Pair_Key) or_return
@@ -365,7 +365,7 @@ flow_seq_entry :: proc(p: ^Parser, n: int) -> (step: Flow_Step, ok: bool) {
 	}
 	if flow_colon(p, false) {
 		emit(p, core.Token{lo, 0, .Object, .Value, 0}) or_return
-		emit(p, core.Token{p.pos, 0, .Plain, .Key, 0}) or_return
+		emit(p, plain_token(p, p.pos, 0, .Key)) or_return
 		return flow_pair_end(p, n, false)
 	}
 	props: Props
@@ -390,7 +390,7 @@ flow_seq_entry :: proc(p: ^Parser, n: int) -> (step: Flow_Step, ok: bool) {
 		if flow_colon(p, false) {
 			emit(p, core.Token{lo, 0, .Object, .Value, 0}) or_return
 			emit_props(p, &props) or_return
-			emit(p, core.Token{p.pos, 0, .Plain, .Key, 0}) or_return
+			emit(p, plain_token(p, p.pos, 0, .Key)) or_return
 			return flow_pair_end(p, n, false)
 		}
 		emit_props(p, &props) or_return
@@ -452,7 +452,7 @@ parse_flow_node :: proc(p: ^Parser, n: int, role: core.Role, then: Flow_Step) ->
 	}
 	if !props_empty(&props) && (c == ',' || c == ']' || c == '}' || flow_colon(p, false)) {
 		emit_props(p, &props) or_return
-		return false, false, emit(p, core.Token{p.pos, 0, .Plain, role, 0})
+		return false, false, emit(p, plain_token(p, p.pos, 0, role))
 	}
 	emit_props(p, &props) or_return
 	switch c {

@@ -112,43 +112,20 @@ marshal_once :: proc(value: any, spec := Spec.Cbor, opts := Options{}, write := 
 // reads from a map by its members' names or from an array by their positions, whatever `opts.structs` says, and an
 // array's items past the last member are skipped. The form with no plan builds one with `context.allocator` and frees
 // it before it returns, and a plan built once with `plan_make` is the form for many reads. A refusal leaves everything
-// the read allocated reachable from `target`. Every spec shares one read, so a `spec` chosen at run time links no more
-// than a constant one. The target of that form is any pointer, and a target that is no pointer is `.Plan_Mismatch`.
-unmarshal :: proc {unmarshal_bound, unmarshal_bound_plan, unmarshal_chosen, unmarshal_chosen_plan}
-
-// Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
-// first. The options are the plan's, and any plan of the format reads.
-check :: proc {check_bound, check_chosen}
+// the read allocated reachable from `target`.
+unmarshal :: proc {unmarshal_once, unmarshal_plan}
 
 @(private)
-unmarshal_bound :: proc(src: []u8, $S: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return unmarshal_any(src, S, target, T, opts, read, allocator)
+unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	return unmarshal_any(src, spec, target, T, opts, read, allocator)
 }
 
 @(private)
-unmarshal_bound_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	if plan == nil {
 		return core.error_of(typed.plan_mismatch(plan, &PLAN_READERS, T))
 	}
-	return core.error_of(read_text(src, S, opts, target, T, plan, read, allocator, false))
-}
-
-@(private)
-unmarshal_chosen :: proc(src: []u8, spec: Spec, target: any, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	data, T, pointer := typed.pointer_target(target)
-	if !pointer {
-		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
-	}
-	return unmarshal_any(src, spec, data, T, opts, read, allocator)
-}
-
-@(private)
-unmarshal_chosen_plan :: proc(src: []u8, spec: Spec, target: any, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	data, T, pointer := typed.pointer_target(target)
-	if !pointer || plan == nil {
-		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
-	}
-	return core.error_of(read_text(src, spec, opts, data, T, plan, read, allocator, false))
+	return core.error_of(read_text(src, spec, opts, target, T, plan, read, allocator, false))
 }
 
 // A read with a plan made for the call.
@@ -164,18 +141,10 @@ unmarshal_any :: proc(src: []u8, spec: Spec, target: rawptr, T: typeid, opts: Op
 	return core.error_of(err)
 }
 
-@(private)
-check_bound :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return check_ordered(src, S, target, T, plan, read, allocator)
-}
-
-@(private)
-check_chosen :: proc(src: []u8, spec: Spec, target: any, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	data, T, pointer := typed.pointer_target(target)
-	if !pointer {
-		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
-	}
-	return check_ordered(src, spec, data, T, plan, read, allocator)
+// Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
+// first. The options are the plan's, and any plan of the format reads.
+check :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	return check_ordered(src, spec, target, T, plan, read, allocator)
 }
 
 // The check of `read_text` with the entries it adds in the order `typed.check_text` gives them.

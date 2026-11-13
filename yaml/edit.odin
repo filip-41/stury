@@ -298,7 +298,7 @@ mark_frozen :: proc(cx: ^Cx) {
 	read := make(map[[2]u64]struct{}, cx.a)
 	for i := u32(0); i < u32(len(nodes)); i += 1 {
 		if .Alias in cx.flags[i] && cx.frozen[i] == .None {
-			for j in i + 1 ..< i + subtree_size(doc, i) {
+			for j in i + 1 ..< i + u32(core.subtree_size(doc, core.Node_Index(i))) {
 				cx.frozen[j] = .Aliased
 			}
 			read[{nodes[i].lo, u64(nodes[i].kind)}] = {}
@@ -310,18 +310,11 @@ mark_frozen :: proc(cx: ^Cx) {
 	for i := u32(0); i < u32(len(nodes)); i += 1 {
 		key := [2]u64{nodes[i].lo, u64(nodes[i].kind)}
 		if .Alias not_in cx.flags[i] && cx.frozen[i] == .None && key in read {
-			for j in i ..< i + subtree_size(doc, i) {
+			for j in i ..< i + u32(core.subtree_size(doc, core.Node_Index(i))) {
 				cx.frozen[j] = .Anchored
 			}
 		}
 	}
-}
-
-// The nodes node `i` and its descendants take.
-@(private)
-subtree_size :: #force_inline proc(doc: ^core.Document, i: u32) -> u32 {
-	n := doc.nodes[i]
-	return n.n if n.kind == .Array || n.kind == .Object else 1
 }
 
 // The commit's view of the text: each node's parent, last child, first and past-last byte and flags.
@@ -435,7 +428,7 @@ build_geometry :: proc(cx: ^Cx) {
 		switch {
 		case u32(i) < copy_end:
 		case .Alias in cx.flags[i]:
-			copy_end = u32(i) + subtree_size(doc, u32(i))
+			copy_end = u32(i) + u32(core.subtree_size(doc, core.Node_Index(i)))
 			last_end = max(last_end, hi)
 		case nd.role == .Key && (nd.lo < last_lo || nd.lo == last_lo && (last_node != p || u32(i) != p + 1)):
 			cx.flags[i] += {.Alias}
@@ -602,7 +595,7 @@ items_of :: proc(cx: ^Cx, c: u32) -> []Item {
 		}
 		it.end = cx.hi[it.value]
 		append(&list, it)
-		j = it.value + subtree_size(cx.doc, it.value)
+		j = it.value + u32(core.subtree_size(cx.doc, core.Node_Index(it.value)))
 	}
 	cx.items[c] = list[:]
 	return list[:]
@@ -680,27 +673,7 @@ add :: proc(cx: ^Cx, lo, hi: u64, text: []u8) {
 	append(&cx.splices, compose.Splice{lo = lo, hi = hi, text = text, seq = len(cx.splices)})
 }
 
-// Records that an edit names `id`, and refuses a second edit of it.
-@(private)
-claim :: proc(cx: ^Cx, id: u64) -> bool {
-	if id in cx.seen {
-		cx.err = {kind = .Conflicting_Edits}
-		return false
-	}
-	cx.seen[id] = {}
-	return true
-}
-
 // The text's geometry: lines and columns.
-
-@(private)
-line_start :: proc(src: []u8, p: u64) -> u64 {
-	i := min(p, u64(len(src)))
-	for i > 0 && src[i - 1] != '\n' {
-		i -= 1
-	}
-	return i
-}
 
 // The end of the line at `p`, before its line end.
 @(private)
@@ -727,13 +700,13 @@ next_line :: proc(src: []u8, p: u64) -> u64 {
 
 @(private)
 column_of :: proc(src: []u8, p: u64) -> int {
-	return int(p - line_start(src, p))
+	return int(p - compose.line_start(src, p))
 }
 
 // Whether only spaces stand before `p` on its line.
 @(private)
 first_on_line :: proc(src: []u8, p: u64) -> bool {
-	for i := line_start(src, p); i < p; i += 1 {
+	for i := compose.line_start(src, p); i < p; i += 1 {
 		if src[i] != ' ' && src[i] != '\t' {
 			return false
 		}
@@ -786,13 +759,6 @@ blank_line :: proc(src: []u8, ls: u64) -> bool {
 }
 
 @(private)
-puts :: proc(b: ^[dynamic]u8, parts: ..string) {
-	for s in parts {
-		append(b, ..transmute([]u8)s)
-	}
-}
-
-@(private)
 put_spaces_to :: proc(b: ^[dynamic]u8, n: int) {
 	for _ in 0 ..< n {
 		append(b, ' ')
@@ -817,7 +783,7 @@ put_lines :: proc(cx: ^Cx, b: ^[dynamic]u8, text: []u8, n: int) {
 		if nl < 0 {
 			return
 		}
-		puts(b, cx.eol)
+		compose.puts(b, cx.eol)
 		ls += nl + 1
 	}
 }
@@ -870,7 +836,7 @@ apply :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	}
 	switch e.op {
 	case .Set:
-		claim(cx, u64(i) << 8 | 0xff) or_return
+		compose.claim(&cx.seen, &cx.err, u64(i) << 8 | 0xff) or_return
 		if e.role == .Key {
 			return set_key(cx, i, string(e.text))
 		}
@@ -882,7 +848,7 @@ apply :: proc(cx: ^Cx, e: core.Edit) -> bool {
 		g := group_of(cx, i)
 		append(&g.inserts, e)
 	case .Remove:
-		claim(cx, u64(i) << 8 | 0xff) or_return
+		compose.claim(&cx.seen, &cx.err, u64(i) << 8 | 0xff) or_return
 		p := cx.parent[i]
 		for it, k in items_of(cx, p) {
 			if it.value == i {
@@ -893,7 +859,7 @@ apply :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	case .Reorder:
 		return refuse_edit(cx, i, .Reordered)
 	case .Set_Fact, .Remove_Fact:
-		claim(cx, u64(i) << 8 | u64(e.role)) or_return
+		compose.claim(&cx.seen, &cx.err, u64(i) << 8 | u64(e.role)) or_return
 		return fact_edit(cx, e)
 	}
 	return true

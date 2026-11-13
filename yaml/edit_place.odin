@@ -10,6 +10,7 @@ package yaml
 import "core:bytes"
 import "core:slice"
 import core "../core"
+import compose "../core/compose"
 
 // How a text stands: on one line, a scalar or flow collection over lines, a block collection, or a block scalar.
 @(private)
@@ -151,11 +152,11 @@ set_key :: proc(cx: ^Cx, k: u32, name: string) -> bool {
 	}
 	b := make([dynamic]u8, cx.a)
 	if lo == hi && lo > 0 && !is_blank_byte(src[lo - 1]) && bytes.index_byte(transmute([]u8)string(",[{"), src[lo - 1]) < 0 {
-		puts(&b, " ")
+		compose.puts(&b, " ")
 	}
 	append(&b, ..spelled)
 	if hi > lo && src[hi - 1] == '\n' {
-		puts(&b, cx.eol)
+		compose.puts(&b, cx.eol)
 	}
 	add(cx, lo, hi, b[:])
 	return true
@@ -177,7 +178,7 @@ place :: proc(cx: ^Cx, v: u32, t: []u8, sh: Text_Shape) {
 	b := make([dynamic]u8, cx.a)
 	// An empty node after its properties takes a value on their line past a space.
 	if .After_Props in cx.flags[v] && sh.form != .Block {
-		puts(&b, " ")
+		compose.puts(&b, " ")
 	}
 	if p != NIL && .Flow in cx.flags[p] {
 		if pair, ok := pair_text(cx, v, t); ok {
@@ -204,7 +205,7 @@ place :: proc(cx: ^Cx, v: u32, t: []u8, sh: Text_Shape) {
 		}
 		if sh.form == .Block && !first {
 			from = lead_end(src, lo)
-			puts(&b, cx.eol)
+			compose.puts(&b, cx.eol)
 		}
 		put_lines(cx, &b, t, col)
 	case cx.doc.nodes[p].kind == .Object:
@@ -214,7 +215,7 @@ place :: proc(cx: ^Cx, v: u32, t: []u8, sh: Text_Shape) {
 		}
 	case sh.form != .Block:
 		if lo > 0 && src[lo - 1] == '-' {
-			puts(&b, " ")
+			compose.puts(&b, " ")
 		}
 		put_lines(cx, &b, t, column_of(src, cx.lo[p]))
 	case first:
@@ -229,16 +230,16 @@ place :: proc(cx: ^Cx, v: u32, t: []u8, sh: Text_Shape) {
 		from = lead_end(src, lo)
 		col := column_of(src, cx.lo[p]) + 2
 		if from > 0 && src[from - 1] == '-' {
-			puts(&b, " ")
+			compose.puts(&b, " ")
 			col = column_of(src, from) + 1
 		} else {
-			puts(&b, cx.eol)
+			compose.puts(&b, cx.eol)
 			put_spaces_to(&b, col)
 		}
 		put_lines(cx, &b, t, col)
 	}
 	if hi > lo && src[hi - 1] == '\n' {
-		puts(&b, cx.eol)
+		compose.puts(&b, cx.eol)
 	}
 	add(cx, from, hi, b[:])
 }
@@ -247,8 +248,8 @@ place :: proc(cx: ^Cx, v: u32, t: []u8, sh: Text_Shape) {
 // by, or at `p`.
 @(private = "file")
 indent_end :: proc(src: []u8, p: u64) -> u64 {
-	if i := bytes.index_byte(src[line_start(src, p):p], '\t'); i >= 0 {
-		return line_start(src, p) + u64(i)
+	if i := bytes.index_byte(src[compose.line_start(src, p):p], '\t'); i >= 0 {
+		return compose.line_start(src, p) + u64(i)
 	}
 	return p
 }
@@ -296,9 +297,9 @@ place_value :: proc(cx: ^Cx, b: ^[dynamic]u8, v: u32, t: []u8, sh: Text_Shape) -
 	explicit := src[ks] == '?' && (ks + 1 == u64(len(src)) || is_blank_byte(src[ks + 1]))
 	// An explicit key without a value takes one on a line of its own.
 	if explicit && (colon == u64(len(src)) || src[colon] != ':') {
-		puts(b, cx.eol)
+		compose.puts(b, cx.eol)
 		put_spaces_to(b, kcol)
-		puts(b, ": ")
+		compose.puts(b, ": ")
 		put_lines(cx, b, t, kcol + 2)
 		return lo, false
 	}
@@ -310,7 +311,7 @@ place_value :: proc(cx: ^Cx, b: ^[dynamic]u8, v: u32, t: []u8, sh: Text_Shape) -
 			put_lines(cx, b, t, column_of(src, lo))
 			return from, false
 		}
-		if explicit && first_on_line(src, colon) && line_start(src, colon) == line_start(src, lo) && lead_end(src, lo) == colon + 1 {
+		if explicit && first_on_line(src, colon) && compose.line_start(src, colon) == compose.line_start(src, lo) && lead_end(src, lo) == colon + 1 {
 			put_lines(cx, b, t, column_of(src, lo))
 			return lo, false
 		}
@@ -318,7 +319,7 @@ place_value :: proc(cx: ^Cx, b: ^[dynamic]u8, v: u32, t: []u8, sh: Text_Shape) -
 		bcol := kcol + (cx.seq_off if sh.seq else cx.step)
 		body := t
 		if sh.head > 0 {
-			puts(b, " ")
+			compose.puts(b, " ")
 			append(b, ..t[:sh.head])
 			body = t[min(len(t), bytes.index_byte(t, '\n') + 1):]
 		}
@@ -328,24 +329,24 @@ place_value :: proc(cx: ^Cx, b: ^[dynamic]u8, v: u32, t: []u8, sh: Text_Shape) -
 			nl := next_line(src, hi)
 			lines := make([dynamic]u8, cx.a)
 			if nl == u64(len(src)) && src[nl - 1] != '\n' {
-				puts(&lines, cx.eol)
+				compose.puts(&lines, cx.eol)
 			}
 			put_spaces_to(&lines, bcol)
 			put_lines(cx, &lines, body, bcol)
 			if nl < u64(len(src)) || src[nl - 1] == '\n' {
-				puts(&lines, cx.eol)
+				compose.puts(&lines, cx.eol)
 			}
 			add(cx, nl, nl, lines[:])
 			return hi, true
 		}
-		puts(b, cx.eol)
+		compose.puts(b, cx.eol)
 		put_spaces_to(b, bcol)
 		put_lines(cx, b, body, bcol)
 		return lead_end(src, lo), false
 	}
 	if !is_block(cx, v) {
 		if lo == colon + 1 {
-			puts(b, " ")
+			compose.puts(b, " ")
 		}
 		put_lines(cx, b, t, kcol)
 		return lo, false
@@ -354,7 +355,7 @@ place_value :: proc(cx: ^Cx, b: ^[dynamic]u8, v: u32, t: []u8, sh: Text_Shape) -
 	from = colon + 1
 	comment: []u8
 	for f in core.all_facts(cx.doc, core.Node_Index(v)) {
-		if line_start(src, f.lo) != line_start(src, colon) {
+		if compose.line_start(src, f.lo) != compose.line_start(src, colon) {
 			continue
 		}
 		#partial switch f.role {
@@ -364,16 +365,16 @@ place_value :: proc(cx: ^Cx, b: ^[dynamic]u8, v: u32, t: []u8, sh: Text_Shape) -
 			comment = src[f.lo:f.lo + u64(f.n)]
 		}
 	}
-	puts(b, " ")
+	compose.puts(b, " ")
 	if nl := bytes.index_byte(t, '\n'); sh.form == .Literal && comment != nil && nl >= 0 {
 		append(b, ..trim_break(t[:nl + 1]))
-		puts(b, " ", string(comment))
+		compose.puts(b, " ", string(comment))
 		put_lines(cx, b, t[nl:], kcol)
 		return from, false
 	}
 	put_lines(cx, b, t, kcol)
 	if comment != nil {
-		puts(b, " ", string(comment))
+		compose.puts(b, " ", string(comment))
 	}
 	return from, false
 }
@@ -445,7 +446,7 @@ regroup_block :: proc(cx: ^Cx, c: u32, items: []Item, removed: []bool, inserts: 
 		at := int(e.at)
 		if at == 0 && compact && (!removed[0] || joined) {
 			append(&b, ..m)
-			puts(&b, cx.eol)
+			compose.puts(&b, cx.eol)
 			put_spaces_to(&b, col)
 			add(cx, items[0].start, items[0].start, b[:])
 			continue
@@ -455,13 +456,13 @@ regroup_block :: proc(cx: ^Cx, c: u32, items: []Item, removed: []bool, inserts: 
 		}
 		pos := slot_at(cx, items, at, compact)
 		if pos == u64(len(src)) && (pos == 0 || src[pos - 1] != '\n') {
-			puts(&b, cx.eol)
+			compose.puts(&b, cx.eol)
 			put_spaces_to(&b, col)
 			append(&b, ..m)
 		} else {
 			put_spaces_to(&b, col)
 			append(&b, ..m)
-			puts(&b, cx.eol)
+			compose.puts(&b, cx.eol)
 		}
 		add(cx, pos, pos, b[:])
 	}
@@ -484,9 +485,9 @@ inserts_at :: proc(inserts: []core.Edit, at: u32) -> bool {
 slot_at :: proc(cx: ^Cx, items: []Item, j: int, compact: bool) -> u64 {
 	switch {
 	case j == 0:
-		return items[0].start if compact else line_start(cx.src, items[0].start)
+		return items[0].start if compact else compose.line_start(cx.src, items[0].start)
 	case j < len(items):
-		return line_start(cx.src, head_of(cx, items, j))
+		return compose.line_start(cx.src, head_of(cx, items, j))
 	}
 	return member_end(cx, items[len(items) - 1], column_of(cx.src, items[0].start))
 }
@@ -532,7 +533,7 @@ member_text :: proc(cx: ^Cx, e: core.Edit, object: bool, col: int) -> ([]u8, boo
 	sh := shape_text(cx, t)
 	b := make([dynamic]u8, cx.a)
 	if !object {
-		puts(&b, "- ")
+		compose.puts(&b, "- ")
 		put_lines(cx, &b, t, col + 2 if sh.form == .Block else col)
 		return b[:], true
 	}
@@ -542,7 +543,7 @@ member_text :: proc(cx: ^Cx, e: core.Edit, object: bool, col: int) -> ([]u8, boo
 	}
 	append(&b, ..k)
 	if sh.form != .Block {
-		puts(&b, ": ")
+		compose.puts(&b, ": ")
 		put_lines(cx, &b, t, col)
 		return b[:], true
 	}
@@ -550,13 +551,13 @@ member_text :: proc(cx: ^Cx, e: core.Edit, object: bool, col: int) -> ([]u8, boo
 	bcol := col + (cx.seq_off if sh.seq else cx.step)
 	body := t
 	if sh.head > 0 {
-		puts(&b, ": ")
+		compose.puts(&b, ": ")
 		append(&b, ..t[:sh.head])
 		body = t[bytes.index_byte(t, '\n') + 1:]
 	} else {
-		puts(&b, ":")
+		compose.puts(&b, ":")
 	}
-	puts(&b, cx.eol)
+	compose.puts(&b, cx.eol)
 	put_spaces_to(&b, bcol)
 	put_lines(cx, &b, body, bcol)
 	return b[:], true
@@ -627,22 +628,22 @@ regroup_flow :: proc(cx: ^Cx, c: u32, items: []Item, removed: []bool, inserts: [
 				return refuse_edit(cx, c, .Long_Key)
 			}
 			append(&m, ..key)
-			puts(&m, ": ")
+			compose.puts(&m, ": ")
 		}
 		append(&m, ..flow_text(cx, t, shape_text(cx, t)))
 		b := make([dynamic]u8, cx.a)
 		switch {
 		case empty:
 			if k > 0 {
-				puts(&b, sep)
+				compose.puts(&b, sep)
 			}
 			append(&b, ..m[:])
 		case follows[e.at]:
-			puts(&b, sep)
+			compose.puts(&b, sep)
 			append(&b, ..m[:])
 		case:
 			append(&b, ..m[:])
-			puts(&b, sep)
+			compose.puts(&b, sep)
 		}
 		add(cx, pos[e.at], pos[e.at], b[:])
 	}

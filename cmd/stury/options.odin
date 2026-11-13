@@ -38,6 +38,7 @@ Opts :: struct {
 	cells_out:        dsv.Options, // how a --to csv or tsv text is written
 	explain:          bool, // --explain: write the filter's plan and what the run did to stderr
 	max_depth:        u32, // --max-depth, 0 when it was not given
+	threads:          int, // --threads, 0 for one per core
 	in_place:         bool,
 	check:            bool,
 	follow:           bool, // --follow: the one file is read on as it grows
@@ -232,6 +233,16 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		case "infer":
 			o.cells_in.infer = true
 			cli.infer_flag = a
+		case "threads":
+			if i + 1 >= len(args) {
+				usage_error("--threads takes one parameter")
+			}
+			n, ok := parse_digits(args[i + 1], 1 << 16)
+			if !ok || n < 1 {
+				usage_error("--threads takes a number from 1")
+			}
+			o.threads = int(n)
+			i += option_arity(a)
 		case "alias-limit", "expansion-limit":
 			if i + 1 >= len(args) {
 				usage_error("%s takes one parameter", a)
@@ -473,7 +484,7 @@ subcommand_index :: proc(args: []string) -> int {
 @(private = "file")
 option_arity :: proc(a: string) -> int {
 	switch a {
-	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--filter", "--seed", "--count", "--package", "--old-schema", "--new-schema", "--compat", "--key", "--alias-limit", "--expansion-limit":
+	case "--indent", "--max-depth", "--threads", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--filter", "--seed", "--count", "--package", "--old-schema", "--new-schema", "--compat", "--key", "--alias-limit", "--expansion-limit":
 		return 1
 	case "--arg", "--argjson", "--slurpfile", "--rawfile":
 		return 2
@@ -627,7 +638,7 @@ Command :: enum u8 {
 
 @(rodata)
 COMMAND_NAMES := [Command]string {
-	.Run    = "",
+	.Run    = "a filter run",
 	.Check  = "check",
 	.Fmt    = "fmt",
 	.Edit   = "edit",
@@ -655,6 +666,7 @@ OWNED_OPTIONS := [?]Owned_Options {
 	{{"invalid", "comments", "seed", "count"}, {.Sample}, "it shapes the samples"},
 	{{"package"}, {.Gen}, "it names the package of the Odin types"},
 	{{"old-schema", "new-schema", "compat", "key", "set", "position", "facts", "json", "shape"}, {.Diff}, "it shapes what diff compares and tells"},
+	{{"threads"}, {.Run, .Check, .Fmt, .Infer}, "it sets the threads that share a long input"},
 	{{"diff"}, {.Edit}, "it previews the changes of an edit"},
 	{{"in-place", "check"}, {.Fmt, .Edit}, "it writes each file back, or tells whether it would change"},
 }

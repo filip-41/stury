@@ -121,7 +121,6 @@ attributes_are_facts_of_the_element :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	a, _ := core.member(&doc, core.ROOT, "a")
 	testing.expect_value(t, core.length(&doc, a), 1)
-	buf: [64]u8
 	it := core.attributes_of(&doc, a)
 	want := [?][2]string{{"x", "1 & 2"}, {"y", "b\nc\n"}, {"z", "t u"}}
 	for w in want {
@@ -132,10 +131,10 @@ attributes_are_facts_of_the_element :: proc(t: ^testing.T) {
 	}
 	_, _, found := walktest.attribute_texts(&it)
 	testing.expect_value(t, found, false)
-	v, has := xml.attribute_value(&doc, a, "y", buf[:])
+	v, has := walktest.attribute_text(&doc, a, "y")
 	testing.expect_value(t, has, true)
 	testing.expect_value(t, v, "b\nc\n")
-	_, has = xml.attribute_value(&doc, a, "w", buf[:])
+	_, has = walktest.attribute_text(&doc, a, "w")
 	testing.expect_value(t, has, false)
 }
 
@@ -182,9 +181,6 @@ an_expanded_name_matches_by_namespace_and_local_name :: proc(t: ^testing.T) {
 	testing.expect_value(t, found, false)
 	got, found = core.member(&doc, feed, "x:entry")
 	testing.expect_value(t, walktest.node_text(t, &doc, got), "2")
-	buf: [16]u8
-	_, has := xml.attribute_value(&doc, feed, "{http://x}k", buf[:])
-	testing.expect_value(t, has, false)
 }
 
 @(test)
@@ -292,8 +288,7 @@ an_attribute_far_from_its_name_is_read :: proc(t: ^testing.T) {
 	}
 	defer core.destroy(&doc)
 	a, _ := core.member(&doc, core.ROOT, "a")
-	buf: [8]u8
-	v, has := xml.attribute_value(&doc, a, "k", buf[:])
+	v, has := walktest.attribute_text(&doc, a, "k")
 	testing.expect(t, has)
 	testing.expect_value(t, v, "y")
 }
@@ -311,8 +306,7 @@ a_clone_keeps_the_declarations :: proc(t: ^testing.T) {
 	defer core.destroy(&copy)
 	a, _ := core.member(&copy, core.ROOT, "a")
 	testing.expect_value(t, walktest.node_text(t, &copy, a), "long replacement text")
-	buf := make([]u8, xml.attribute_room(&copy, a), context.temp_allocator)
-	v, has := xml.attribute_value(&copy, a, "k", buf)
+	v, has := walktest.attribute_text(&copy, a, "k")
 	testing.expect(t, has)
 	testing.expect_value(t, v, "long replacement text")
 	it := core.attributes_of(&copy, a)

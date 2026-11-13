@@ -28,7 +28,7 @@ content_text :: proc "contextless" (span: []u8, buf: []u8, dtd: ^Dtd_View = nil,
 				copy(buf[w:], span[i:i + n])
 				w += n
 			} else {
-				w += put_rune(buf[w:], r)
+				w += spell.put_rune(buf[w:], r)
 			}
 			i += n
 		case '\r':
@@ -108,7 +108,7 @@ attribute_text :: proc "contextless" (span: []u8, buf: []u8, dtd: ^Dtd_View = ni
 				copy(buf[w:], span[i:i + n])
 				w += n
 			} else {
-				w += put_rune(buf[w:], r)
+				w += spell.put_rune(buf[w:], r)
 			}
 			i += n
 		case '\r':
@@ -153,7 +153,7 @@ expand :: proc "contextless" (x: ^Expander, span: []u8, top, attr: bool, nest: i
 				if x.w + rune_size(r) > len(x.buf) {
 					return false
 				}
-				x.w += put_rune(x.buf[x.w:], r)
+				x.w += spell.put_rune(x.buf[x.w:], r)
 				continue
 			}
 			name := span[i - n + 1:i - 1]
@@ -279,28 +279,4 @@ decode_reference :: proc "contextless" (p: []u8) -> (n: int, r: rune, named: boo
 		n += 1
 	}
 	return n + 1, r, false
-}
-
-// Writes `r` as UTF-8 at the start of `buf`, which holds room for it. Returns its length.
-@(private)
-put_rune :: proc "contextless" (buf: []u8, r: rune) -> int #no_bounds_check {
-	switch {
-	case r < 0x80:
-		buf[0] = u8(r)
-		return 1
-	case r < 0x800:
-		buf[0] = 0xc0 | u8(r >> 6)
-		buf[1] = 0x80 | u8(r & 0x3f)
-		return 2
-	case r < 0x10000:
-		buf[0] = 0xe0 | u8(r >> 12)
-		buf[1] = 0x80 | u8(r >> 6 & 0x3f)
-		buf[2] = 0x80 | u8(r & 0x3f)
-		return 3
-	}
-	buf[0] = 0xf0 | u8(r >> 18)
-	buf[1] = 0x80 | u8(r >> 12 & 0x3f)
-	buf[2] = 0x80 | u8(r >> 6 & 0x3f)
-	buf[3] = 0x80 | u8(r & 0x3f)
-	return 4
 }

@@ -31,19 +31,9 @@ EDIT := core.Edit_Services {
 }
 
 // Returns an edit list over `doc`. A document read as a constant spec holds no edit services, so the list takes CBOR's.
-edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
-
-@(private)
-edit_list_init_bound :: proc(doc: ^core.Document, $S: Spec, allocator := context.allocator) -> core.Edit_List {
+edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List {
 	list := core.edit_list_init(doc, allocator)
 	list.edit = &EDIT
-	return list
-}
-
-@(private)
-edit_list_init_chosen :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List {
-	list := core.edit_list_init(doc, allocator)
-	list.edit = core.services_of(as(spec)).edit
 	return list
 }
 
@@ -51,29 +41,18 @@ edit_list_init_chosen :: proc(doc: ^core.Document, spec: Spec, allocator := cont
 // frees with `allocator`, keeping every byte the edit does not reach. A `typed.Raw` is the bytes of a CBOR item, a
 // struct, a slice or a map is built by `plan`, and any other value is written as a CBOR item. A `Name` the path ends in
 // that its map lacks is inserted after the map's last member.
-set :: proc {set_bound, set_chosen}
-
-@(private)
-set_bound :: proc(src: []u8, $S: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
 	scratch: write.Scratch
 	defer write.scratch_destroy(&scratch)
 	in_ := write.edit_input(v, plan, &scratch) or_return
-	doc, berr := build_bound(src, S, opts, read.dups, allocator)
+	doc, berr := build(src, spec, opts, read.dups, allocator)
 	defer core.destroy(&doc)
 	if berr != nil {
 		return nil, berr
 	}
-	list := edit_list_init_bound(&doc, S, allocator)
+	list := edit_list_init(&doc, spec, allocator)
 	defer core.edit_list_destroy(&list)
 	return engine.set_answers(&list, path, in_, read, allocator)
-}
-
-@(private)
-set_chosen :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	scratch: write.Scratch
-	defer write.scratch_destroy(&scratch)
-	in_ := write.edit_input(v, plan, &scratch) or_return
-	return engine.set(src, as(spec, opts), path, in_, read, allocator)
 }
 
 // Checks `src` as exactly one item of the document's spec.
@@ -185,13 +164,6 @@ first_at :: proc(c: ^Commit, node: core.Node_Index) -> int {
 	return lo
 }
 
-// The node after `node`'s subtree.
-@(private = "file")
-subtree_end :: proc(doc: ^core.Document, node: core.Node_Index) -> core.Node_Index {
-	n := doc.nodes[node]
-	return node + (core.Node_Index(n.n) if n.kind == .Array || n.kind == .Object else 1)
-}
-
 @(private = "file")
 conflict :: proc(c: ^Commit, at: u64) -> bool {
 	c.err = {kind = .Conflicting_Edits, at = at}
@@ -215,7 +187,7 @@ push :: proc(d: ^[dynamic]$T, v: T) -> bool {
 put_item :: proc(c: ^Commit, out: ^[dynamic]u8, i: core.Node_Index) -> bool {
 	doc := c.doc
 	tags, lo, hi := item_span(doc, i)
-	own, inside, end := first_at(c, i), first_at(c, i + 1), first_at(c, subtree_end(doc, i))
+	own, inside, end := first_at(c, i), first_at(c, i + 1), first_at(c, i + core.Node_Index(core.subtree_size(doc, i)))
 	set, tag := -1, -1
 	shaped := false
 	for k in own ..< inside {
@@ -445,7 +417,7 @@ removals :: proc(c: ^Commit, members: []Member) -> ([]bool, bool) {
 		if !removed[k] {
 			continue
 		}
-		if first_at(c, first) < own || first_at(c, subtree_end(c.doc, m.value)) > inside {
+		if first_at(c, first) < own || first_at(c, m.value + core.Node_Index(core.subtree_size(c.doc, m.value))) > inside {
 			return nil, conflict(c, lo)
 		}
 		for j in own ..< inside {

@@ -55,15 +55,6 @@ object_put :: proc(o: ^Object, k: string, v: Value) {
 	object_append(o, k, v)
 }
 
-// Set `k` in an object being changed, in place: a member replaced keeps the comments `v` does not bring.
-object_set :: proc(o: ^Object, k: string, v: Value) {
-	if i := object_slot(o, k); i >= 0 {
-		o.vals[i] = keep_comments(o.vals[i], v)
-		return
-	}
-	object_append(o, k, v)
-}
-
 // `k` added to `o` as a member of its own, set to `v`, whether `o` has the name or not.
 object_append :: #force_inline proc(o: ^Object, k: string, v: Value) {
 	make_room(&o.keys)

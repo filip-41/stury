@@ -732,7 +732,7 @@ replacement_text :: proc "contextless" (d: ^Dtd, value: []u8) -> (lo: u64, n: u3
 		switch {
 		case c == '&' && value[i + 1] == '#':
 			k, r, _ := decode_reference(value[i:])
-			w += put_rune(out[w:][:4], r)
+			w += spell.put_rune(out[w:][:4], r)
 			i += k
 		case c == '\r':
 			out[w] = '\n'

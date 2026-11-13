@@ -14,11 +14,6 @@ import yaml ".."
 @(private)
 SUITE_DIR :: #directory + "suite"
 
-// Cases the walk refuses where the suite accepts them: a repeated key is a fault here, empty keys included. A name in
-// this list that passes fails the test.
-@(private)
-SKIP := [?]string{"2JQS"}
-
 @(private)
 Frame :: struct {
 	seq:     bool,
@@ -316,17 +311,9 @@ suite_cases :: proc(t: ^testing.T) {
 	failures := 0
 	for &c in list {
 		c.failed = check(c)
-		skipped := false
-		for s in SKIP {
-			skipped ||= s == c.name
-		}
-		if (c.failed != "") != skipped {
+		if c.failed != "" {
 			failures += 1
-			if skipped {
-				fmt.eprintfln("%s: in the skip list and passes", c.name)
-			} else {
-				fmt.eprintfln("%s: %s", c.name, c.failed)
-			}
+			fmt.eprintfln("%s: %s", c.name, c.failed)
 		}
 	}
 	testing.expectf(t, failures == 0, "%d cases", failures)

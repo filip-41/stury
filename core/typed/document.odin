@@ -131,9 +131,9 @@ nodes_readable :: proc "contextless" (doc: ^core.Document, node: core.Node_Index
 	return doc != nil && doc.readers != nil && plan != nil && int(node) < len(doc.nodes) && doc.nodes[node].role != .Key
 }
 
-// The read of a markup text, a `Text_Read` once its format binds `build` as for `check_markup_text`: the text is built
+// The read of a markup text, a `Text_Read` once its format binds `build` as for `check_built_text`: the text is built
 // whole, under `.Refuse` refusing a repeated element, and its root is read by `read_nodes`.
-read_markup_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
+read_built_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
 	doc, built := build(src, as, read.dups == .Refuse, context.allocator)
 	defer core.destroy(&doc)
 	#partial switch built.kind {
@@ -150,6 +150,9 @@ read_markup_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core
 		}
 		return err
 	}
+	if doc.clash != 0 && read.dups != .First && read.dups != .All {
+		return {kind = .Duplicate_Key, at = doc.clash}
+	}
 	read := read
 	if read.dups == .Refuse {
 		read.dups = .Last
@@ -161,7 +164,7 @@ read_markup_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core
 // handle `as`: builds the document in the temp allocator and checks its root by `check_nodes`. A read under `.Refuse`
 // builds under it, so the document it checks holds no repeat, and a check that noticed a repeat reads again, judging
 // the repeats as `read.dups` says.
-check_markup_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
+check_built_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
 	doc, built := build(src, as, read.dups == .Refuse, context.temp_allocator)
 	defer core.destroy(&doc)
 	#partial switch built.kind {
@@ -172,6 +175,9 @@ check_markup_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: cor
 		return {kind = .Duplicate_Key, at = built.at}
 	case:
 		return {kind = .Walk, at = built.at, inner = built.inner}
+	}
+	if doc.clash != 0 && read.dups != .First && read.dups != .All {
+		return {kind = .Duplicate_Key, at = doc.clash}
 	}
 	read := read
 	if read.dups == .Refuse {

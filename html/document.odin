@@ -2,50 +2,52 @@ package html
 
 import "base:runtime"
 import core "../core"
+import typed "../core/typed"
 
 // HTML's document holds the tokens of the tree a text builds (emit.odin), over the caller's bytes, read through core's
 // readers, core's markup readers and HTML's handles, in the shape XML's document has for the same markup. The state
 // holds what the tokens' spans do not: each element's close and the pieces of a text that is no one span.
 
-// HTML's handles, one per spec, which only `as` names. A handle's readers are the readers a constant build of its spec
-// holds, and its services the reads of that spec. The tables hold pointers to the bound tables, so they are set at
+// HTML's handles, one per spec, which only `as` names. A handle's readers are the readers an entry point's build holds,
+// and its services the reads of that spec. The tables hold pointers to the bound tables, so they are set at
 // startup and never written after.
 @(private)
 HANDLES := [Spec]core.Readers {
-	.Document = handle_readers(.Document, &SERVICES[.Document]),
-	.Fragment = handle_readers(.Fragment, &SERVICES[.Fragment]),
+	.Document = handle_readers(&SERVICES[.Document]),
+	.Fragment = handle_readers(&SERVICES[.Fragment]),
 }
 
 @(private)
 SERVICES := [Spec]core.Services {
-	.Document = handle_services(.Document),
-	.Fragment = handle_services(.Fragment),
+	.Document = handle_services(reads_of(.Document)),
+	.Fragment = handle_services(reads_of(.Fragment)),
 }
 
-// The readers of the handle of spec `S`: `readers_of(S)` with the services of `S`.
+// The readers of a handle: `READERS` with `services`.
 @(private)
-handle_readers :: proc "contextless" ($S: Spec, services: ^core.Services) -> core.Readers {
-	r := readers_of(S)^
+handle_readers :: proc "contextless" (services: ^core.Services) -> core.Readers {
+	r := READERS
 	r.services = services
 	return r
 }
 
-// The run-time services of spec `S`, which a handle reaches. A read by paths builds the document whole.
+// The run-time services of a spec whose typed reads are `reads`, which a handle reaches. A read by paths builds the
+// document whole.
 @(private)
-handle_services :: proc "contextless" ($S: Spec) -> core.Services {
+handle_services :: proc "contextless" (reads: ^typed.Format_Reads) -> core.Services {
 	return {
-		build    = build_of(S),
-		validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, S, options_of(as))},
+		build    = build_handle,
+		validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, Spec(as.spec), options_of(as))},
 		scan     = proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
-			return scan_spec(src, S, as, paths, read, state, on, allocator)
+			return scan_spec(src, Spec(as.spec), as, paths, read, state, on, allocator)
 		},
 		write    = document_write,
 		plans    = rawptr(plan_as),
 		edit     = &EDIT,
-		reads    = reads_of(S),
+		reads    = reads,
 		tokens   = &TOKENS,
-		records  = framing_of(S),
-		docs     = record_docs(S),
+		records  = &FRAMING,
+		docs     = &RECORD_DOCS,
 	}
 }
 

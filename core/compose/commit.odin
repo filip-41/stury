@@ -1,6 +1,7 @@
 package compose
 
 import "base:runtime"
+import "core:bytes"
 import "core:encoding/endian"
 import "core:slice"
 import core ".."
@@ -320,4 +321,54 @@ fact_body :: proc(e: core.Edit, i: int) -> []u8 {
 		at += int(endian.unchecked_get_u32le(e.key[4 * k:]))
 	}
 	return e.text[at:][:endian.unchecked_get_u32le(e.key[4 * i:])]
+}
+
+// The lines the fact set `e` writes: each body split at line feeds, with a carriage return trimmed from each line. A
+// removal writes none.
+fact_lines :: proc(e: core.Edit, allocator: runtime.Allocator) -> [dynamic][]u8 {
+	lines := make([dynamic][]u8, allocator)
+	for k in 0 ..< (0 if e.op == .Remove_Fact else fact_count(e)) {
+		for line in bytes.split(fact_body(e, k), []u8{'\n'}, allocator) {
+			append(&lines, bytes.trim_right(line, []u8{'\r'}))
+		}
+	}
+	return lines
+}
+
+// The facts of `e.node` that carry `e.role`.
+role_facts :: proc(doc: ^core.Document, e: core.Edit, allocator: runtime.Allocator) -> [dynamic]core.Fact {
+	facts := make([dynamic]core.Fact, allocator)
+	for f in core.all_facts(doc, e.node) {
+		if f.role == e.role {
+			append(&facts, f)
+		}
+	}
+	return facts
+}
+
+// Appends the strings `parts` to `b`.
+puts :: proc(b: ^[dynamic]u8, parts: ..string) {
+	for s in parts {
+		append(b, s)
+	}
+}
+
+// Records that an edit names `id` in `seen`, and sets `err` to `.Conflicting_Edits` and returns false for a second edit
+// of it.
+claim :: proc(seen: ^map[u64]struct{}, err: ^core.Document_Error, id: u64) -> bool {
+	if id in seen {
+		err^ = {kind = .Conflicting_Edits}
+		return false
+	}
+	seen[id] = {}
+	return true
+}
+
+// The start of the line holding `p`.
+line_start :: proc(src: []u8, p: u64) -> u64 {
+	i := min(p, u64(len(src)))
+	for i > 0 && src[i - 1] != '\n' {
+		i -= 1
+	}
+	return i
 }

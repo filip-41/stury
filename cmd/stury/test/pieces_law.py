@@ -147,7 +147,7 @@ def main():
     odin = odin_flag()
     with tempfile.TemporaryDirectory() as directory:
         serial = {"STURY_POOLED_BYTES": 1 << 62}
-        builds = {"serial": serial} | {w: {"STURY_THREADS": w, "STURY_POOLED_BYTES": 0, "RECORDS_SLICE": SLICE} | ({} if w == DENSITY_RULE else FAN_ALWAYS) for w in WIDTHS}
+        builds = {"serial": serial} | {w: {"STURY_POOLED_BYTES": 0, "RECORDS_SLICE": SLICE} | ({} if w == DENSITY_RULE else FAN_ALWAYS) for w in WIDTHS}
         with concurrent.futures.ThreadPoolExecutor(2) as pool:
             binaries = dict(zip(builds, pool.map(lambda kv: build(odin, os.path.join(directory, f"stury-{kv[0]}"), kv[1]), builds.items())))
         failures = 0
@@ -155,13 +155,13 @@ def main():
         for case in runs:
             want = run(binaries["serial"], case)
             for w in WIDTHS:
-                got = run(binaries[w], case)
+                got = run(binaries[w], ["--threads", str(w)] + case)
                 if got != want:
                     failures += 1
                     what = [name for name, a, b in zip(("stdout", "stderr", "status"), got, want) if a != b]
                     print(f"FAIL threads={w} {' '.join(what)}: stury {' '.join(os.path.basename(a) for a in case)}")
             if "--explain" in case and case[-1].endswith("-none" + os.path.splitext(case[-1])[1]):
-                stderr = subprocess.run([binaries[WIDTHS[-1]]] + case, capture_output=True).stderr.decode()
+                stderr = subprocess.run([binaries[WIDTHS[-1]], "--threads", str(WIDTHS[-1])] + case, capture_output=True).stderr.decode()
                 if not POOLED.search(stderr):
                     failures += 1
                     print(f"FAIL no pieces: stury {' '.join(os.path.basename(a) for a in case)}")

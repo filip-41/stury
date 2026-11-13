@@ -147,7 +147,7 @@ tolerated :: proc(t: ^testing.T) {
 			// `E1 80 41` is U+FFFD for the maximal subpart `E1 80`, then `A`.
 			{"'\xe1\x80A'", .Json5, {tolerate = {.Invalid_Utf8}}, "\uFFFDA"},
 		}) {
-		doc, err := json.build(transmute([]u8)c.src, c.spec, c.opts)
+		doc, err := core.build(transmute([]u8)c.src, json.as(c.spec, c.opts))
 		defer core.destroy(&doc)
 		walktest.expect_nil(t, err)
 		buf: [64]u8

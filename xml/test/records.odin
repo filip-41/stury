@@ -7,6 +7,7 @@ import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import records "../../core/records"
 import xml ".."
 import walktest "../../walktest"
 
@@ -40,7 +41,7 @@ every_record_form_reads_a_text :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, perr)
 	defer xml.destroy(&path)
 	spec := xml.Spec.Xml
-	scanned := xml.records_open(src, spec)
+	scanned := records.open(src, xml.as(spec), .Concatenated)
 	defer xml.records_close(&scanned)
 	found := 0
 	for {

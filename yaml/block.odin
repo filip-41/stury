@@ -81,7 +81,7 @@ parse_node :: proc(p: ^Parser, n: int, compact, seq_same: bool, role: core.Role)
 			return parse_block_at(p, l.ind, n, role, &props, seq_same)
 		}
 		emit_props(p, &props) or_return
-		return emit(p, core.Token{after, 0, .Plain, role, 0})
+		return emit(p, plain_token(p, after, 0, role))
 	}
 	return parse_same_line(p, n, col_of(p.ls, start), start, compact, role, &props)
 }
@@ -169,7 +169,7 @@ parse_block_at :: proc(p: ^Parser, ind, n: int, role: core.Role, outer: ^Props, 
 			return parse_block_at(p, l.ind, n, role, outer, seq_same)
 		}
 		emit_props(p, outer) or_return
-		return emit(p, core.Token{p.last_end, 0, .Plain, role, 0})
+		return emit(p, plain_token(p, p.last_end, 0, role))
 	}
 	if c := at(p, p.pos); c == '|' || c == '>' {
 		props_merge(p, outer, &inner) or_return
@@ -270,7 +270,7 @@ parse_scalar_node :: proc(p: ^Parser, n: int, role: core.Role, flow, multiline: 
 	}
 	multi := scan_plain(p, n, flow, multiline) or_return
 	spelling := core.SPELLING_DECODE if multi else u16(0)
-	return multi, emit(p, core.Token{start, u32(p.pos - start), .Plain, role, spelling})
+	return multi, emit(p, plain_token(p, start, u32(p.pos - start), role, p.src[start], spelling))
 }
 
 
@@ -349,7 +349,7 @@ map_entry :: proc(p: ^Parser) -> bool {
 		return parse_flow(p, ind, .Key, .Known_Key)
 	case .Empty_Key:
 		emit_props(p, &lead) or_return
-		emit(p, core.Token{p.pos, 0, .Plain, .Key, 0}) or_return
+		emit(p, plain_token(p, p.pos, 0, .Key)) or_return
 	case .Explicit:
 		p.pos += 1
 		f.key_done = true
@@ -366,7 +366,7 @@ map_entry :: proc(p: ^Parser) -> bool {
 		}
 		start := p.pos
 		if at_eol(p) || comment_here(p) || at(p, p.pos) == ':' && indicator_at(p, p.pos) {
-			emit(p, core.Token{start, 0, .Plain, .Key, 0}) or_return
+			emit(p, plain_token(p, start, 0, .Key)) or_return
 		} else {
 			line := p.ls
 			parse_scalar_node(p, ind, .Key, false, false) or_return
@@ -455,7 +455,7 @@ map_entry_line :: proc(p: ^Parser, ind: int) -> bool {
 		p.next = .Map_Entry
 		return true
 	}
-	emit(p, core.Token{lo, u32(last - lo), .Plain, .Key, 0}) or_return
+	emit(p, plain_token(p, lo, u32(last - lo), .Key, src[lo])) or_return
 	v := colon + 1
 	for v < n && is_white(src[v]) {
 		v += 1

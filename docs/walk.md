@@ -45,7 +45,7 @@ walks use, `markup.md` the XML walk and the HTML tokenizer and tree, and `binary
 | `yaml/walk.odin` | YAML's interface, `Detail` and `RULES`, `walk` and `validate` |
 | `yaml/parser.odin`, `block.odin`, `flow.odin`, `scalar.odin`, `props.odin` | the parser: block and flow collections, scalars, tags and anchors, comments held for their node |
 | `yaml/runs.odin`, `lines.odin` | the byte classes of a 64-byte block, the runs the readers find from them, and the document markers |
-| `yaml/keys.odin`, `merge.odin`, `stream.odin` | the repeat test of a mapping's keys, merge keys, and a stream's documents |
+| `yaml/keys.odin`, `merge.odin`, `stream.odin` | a mapping's keys, merge keys, and a stream's documents |
 | `xml/walk.odin`, `text.odin`, `name.odin`, `framing.odin` | XML's walk, see `markup.md` |
 | `cbor/walk.odin` | CBOR's walk, see `binary.md` |
 
@@ -264,8 +264,9 @@ lives in `core`, so a format adds no reader, no `query` and no `commit` of its o
    `key_close`, and the slots a format needs past JSON's (`fact`, `attribute`, `number_text`, `key_bytes`, `binary`,
    `key_is`, `room`, `flat`). The package keeps `HANDLES := [Spec]core.Readers{...}` and
    `SERVICES := [Spec]core.Services{...}`, the two mutable globals `tools/checks.py` allows a format, for the handle
-   `as` returns, and constant-spec entry points that bind one spec's tables (`readers_of($S)`, `bound_as`,
-   `reads_of`), so a program links only the passes it names. `Services.edit` points at one `core.Edit_Services`
+   `as` returns. The entry points bind tables with no services (`READERS` through `bound_as`, the typed reads), json's
+   and dsv's for a constant spec and the other formats' for the spec passed, so a program links only the passes it
+   names. `Services.edit` points at one `core.Edit_Services`
    table, nil for a format with no edits. `names.odin`, which `tools/checks.py api --write` generates, exports the
    names of `core` a user of the format calls, so that user never imports `core`.
 4. **The paths.** `set` and the path walk instantiate `build.Scan` over the format's `walk`, and `Scan.rewalk` walks one

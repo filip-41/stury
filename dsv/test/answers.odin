@@ -80,23 +80,32 @@ answers_agree :: proc(t: ^testing.T) {
 			walktest.mutate(&broken, text[:], gen.SHARP)
 			src = broken[:]
 		}
-		spec := dsv.Spec.Tsv if tsv else .Csv
-		for path, i in paths {
-			clear(&want)
-			err := dsv.each_answer(src, spec, path, &want, collect, opts)
-			for batch in ([]int{1, 3, 64}) {
-				it := dsv.answers(src, spec, path, opts)
-				it.max_batch = batch
-				clear(&got)
-				for a in dsv.next(&it) {
-					append(&got, a)
-				}
-				ok := testing.expectf(t, slice.equal(got[:], want[:]), "%v %q %s batch %d: %d answers, want %d", spec, src, texts[i], batch, len(got), len(want))
-				ok &&= testing.expectf(t, fmt.tprint(it.err) == fmt.tprint(err), "%v %q %s batch %d: %v, want %v", spec, src, texts[i], batch, it.err, err)
-				if !ok {
-					return
-				}
+		agreed := agree(t, src, .Tsv, paths[:], texts[:], opts, &want, &got) if tsv else agree(t, src, .Csv, paths[:], texts[:], opts, &want, &got)
+		if !agreed {
+			return
+		}
+	}
+}
+
+// Whether the iterator over each of `paths` gives what `each_answer` gives at every batch size, as `answers_agree` says.
+@(private = "file")
+agree :: proc(t: ^testing.T, src: []u8, $S: dsv.Spec, paths: []core.Path, texts: []string, opts: dsv.Options, want, got: ^[dynamic]core.Token_Answer) -> bool {
+	for path, i in paths {
+		clear(want)
+		err := dsv.each_answer(src, S, path, want, collect, opts)
+		for batch in ([]int{1, 3, 64}) {
+			it := dsv.answers(src, S, path, opts)
+			it.max_batch = batch
+			clear(got)
+			for a in dsv.next(&it) {
+				append(got, a)
+			}
+			ok := testing.expectf(t, slice.equal(got[:], want[:]), "%v %q %s batch %d: %d answers, want %d", S, src, texts[i], batch, len(got), len(want))
+			ok &&= testing.expectf(t, fmt.tprint(it.err) == fmt.tprint(err), "%v %q %s batch %d: %v, want %v", S, src, texts[i], batch, it.err, err)
+			if !ok {
+				return false
 			}
 		}
 	}
+	return true
 }

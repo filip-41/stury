@@ -241,30 +241,6 @@ check_containers :: proc(t: ^testing.T, doc: ^core.Document, tokens: []core.Toke
 	return testing.expectf(t, depth == 0 && node == core.Node_Index(len(doc.nodes)), "depth %d, %d nodes, doc %d", depth, node, len(doc.nodes))
 }
 
-// Checks that the two trees give container `oi` the same child count.
-count_agrees :: proc(t: ^testing.T, src: []u8, oi: core.Node_Index, ours, theirs: int) -> bool {
-	return testing.expectf(t, ours == theirs, "%q node %d: %d children, current tree %d", src, oi, ours, theirs)
-}
-
-// Checks that `child_at` returns every member `child_next` walks, in order, and fails past the last.
-child_at_agrees :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core.Node_Index) -> bool {
-	it := core.children(ours, oi)
-	k := 0
-	for {
-		want, more := core.child_next(&it)
-		if !more {
-			break
-		}
-		got, ok := core.child_at(ours, oi, k)
-		if !testing.expectf(t, ok && got == want, "%q node %d child %d: %v %v, walk gives %v", src, oi, k, got, ok, want) {
-			return false
-		}
-		k += 1
-	}
-	_, ok := core.child_at(ours, oi, k)
-	return testing.expectf(t, !ok, "%q node %d: child %d exists", src, oi, k)
-}
-
 // `JSON_TEST_SUITE` holds the JSONTestSuite parsing files and `JSON5_TESTS` the json5-tests suites, used by the walk's
 // conformance tests and by tests outside this tree.
 JSON_TEST_SUITE := #load_directory("../json/test/conformance/JSONTestSuite/test_parsing")

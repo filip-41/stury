@@ -119,9 +119,7 @@ the faults `qualified_name`, `unbound_prefix`, `reserved_prefix`, `reserved_name
 declaration pays one flag test.
 
 A text that declares a namespace marks its keys, so a member lookup and a path step compare a name as written, or as
-`{uri}local` against the declarations in scope, through `Readers.key_is`. `xml.attribute_value(&doc, node, name, buf)`
-reads one attribute by its name as written or as `{uri}local` (an attribute with no prefix has no namespace), into a
-`buf` of `xml.attribute_room(&doc, node)` bytes.
+`{uri}local` against the declarations in scope, through `Readers.key_is`.
 
 ### The DTD
 
@@ -210,8 +208,8 @@ own.
   and the stop rule, defaults and normalization, the expansion budget against billion laughs and the quadratic blowup,
   the unread-entity tolerance and the character names under an XHTML public identifier.
 - `xml/test/model.odin`: a model with attribute members, a `#text` member, child elements, a DTD default and an
-  entity, and a schema with required members and repeated children. `entry_points.odin`: every bound and chosen entry
-  point.
+  entity, and a schema with required members and repeated children. `entry_points.odin`: every entry point, and the
+  calls in `core` with a handle.
 - `xml/test/conformance.odin`: the XML 1.0 cases of the W3C XML Conformance Test Suite. A valid case's document must
   hold what its canonical form holds, elements, attributes and text, and the test writes both through one writer, so
   processing instructions and white space between elements, which a document does not hold, are left out on both
@@ -230,8 +228,8 @@ preprocessing and character references, the tree construction of section 13.2.6,
 templates and foreign content (SVG and MathML) included, and the encoding sniffing of section 13.2.3. The tree is built
 into the document an XML text with the same markup builds, so HTML is a format on the same interface as XML: `validate`,
 `walk` with a cursor that `walk_resume` continues, `build`, `scan`, `find`, `each_answer`, `answers`, `query`, `as`,
-`checks`, `bind_schema`, `unmarshal`, `check`, `plan_make`, `plan_of`, `reads`, `number`, the record calls,
-`record_docs`, `write`, `marshal` and `tokens_init`, bound and chosen. A typed read goes by the tag key `html`, through the markup layer XML's goes through,
+`checks`, `bind_schema`, `unmarshal`, `check`, `plan_make`, `reads`, `number`, the record calls,
+`record_docs`, `write`, `marshal` and `tokens_init`. A typed read goes by the tag key `html`, through the markup layer XML's goes through,
 over the tree the standard builds, so `<td>1<td>2` reads into a `[]T` member `td` of the `tr` and `tbody` the tree
 implies. A text is one record, from the reader's position to the input's end, since a browser reads every byte past
 `</html>` into the tree. A walk with a cursor holds the tokens past its first stop in a `core.Token_Cursor`, as XML's
@@ -444,8 +442,8 @@ close and the pieces of a text that is no one span, goes into the document's `To
 
 ### Tests
 
-- `html/test`: documents and their shapes against XML's, names, paths, attributes, facts, templates, spans, the bound
-  and chosen entry points, duplicates, edits and their refusals, handle options, the walk with skips and stops, validate, faults,
+- `html/test`: documents and their shapes against XML's, names, paths, attributes, facts, templates, spans, the entry
+  points and the calls in `core` with a handle, duplicates, edits and their refusals, handle options, the walk with skips and stops, validate, faults,
   models, schemas, `diff` and `equal` against XML, and 1,000 random texts that an HTML fragment and an XML document read
   alike, checked to build one document shape and one value under both `infer` settings.
 - `html/test/html5lib_test.odin` runs every case of html5lib-tests' `tokenizer/` directory in each of its

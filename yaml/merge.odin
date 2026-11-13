@@ -16,7 +16,7 @@ merge_starts :: #force_inline proc "contextless" (p: ^Parser, t: core.Token) -> 
 // Starts holding the `<<` key `t` and the value after it for the innermost mapping.
 @(private)
 merge_hold :: proc(p: ^Parser, t: core.Token) {
-	f := &p.frames[len(p.frames) - 1]
+	f := &p.keys.frames[len(p.keys.frames) - 1]
 	f.merge_lo = u32(len(p.merges))
 	append(&p.merges, t)
 	p.holding = true
@@ -40,7 +40,7 @@ merge_take :: proc(p: ^Parser, t: core.Token) {
 	}
 	if p.hold_depth == 0 {
 		p.holding = false
-		p.frames[len(p.frames) - 1].merge_hi = u32(len(p.merges))
+		p.keys.frames[len(p.keys.frames) - 1].merge_hi = u32(len(p.merges))
 	}
 }
 
@@ -89,7 +89,7 @@ merge_members :: proc(p: ^Parser, held: []core.Token, open: int) -> bool {
 		}
 		key := i
 		end := subtree_end(held, past_facts(held, key + 1))
-		if !key_enter(p, held[key]) {
+		if .Repeat not_in key_enter(&p.keys, held[key], p.src) {
 			for t in held[lo:end] {
 				call_sink(p, t) or_return
 			}

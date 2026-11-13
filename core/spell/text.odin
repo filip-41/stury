@@ -1,6 +1,8 @@
 package spell
 
 import "base:intrinsics"
+import "base:runtime"
+import "core:unicode/utf8"
 
 // The byte helpers the readers and decoders share: a decode into a caller's buffer, a byte-for-byte compare, and
 // stepping over a UTF-8 character.
@@ -37,6 +39,29 @@ decoded_equals :: proc "contextless" (d: $D, $next: proc "contextless" (^D) -> (
 		}
 		at += 1
 	}
+}
+
+// Returns whether the text `decode` writes for `c` into a buffer of `room` bytes is `name`. A room past the stack buffer is
+// allocated on the heap, and an allocation that fails is false.
+buffered_equals :: proc "contextless" (room: int, name: string, c: rawptr, decode: proc "contextless" (rawptr, []u8) -> (string, bool)) -> bool {
+	stack: [256]u8 = ---
+	buf := stack[:]
+	heap: []u8
+	if room > len(stack) {
+		context = runtime.default_context()
+		heap = make([]u8, room)
+		if heap == nil {
+			return false
+		}
+		buf = heap
+	}
+	s, ok := decode(c, buf)
+	equal := ok && s == name
+	if heap != nil {
+		context = runtime.default_context()
+		delete(heap)
+	}
+	return equal
 }
 
 // The bytes of a decoded character that a decoder has returned the first of. `n` of them remain from `at`.
@@ -338,4 +363,12 @@ base64_value :: #force_inline proc "contextless" (c: u8) -> (v: u8, ok: bool) {
 		return 63, true
 	}
 	return 0, false
+}
+
+// Writes the code point `r` as UTF-8 at the start of `buf`, which holds room for it. Returns its length. A surrogate or
+// a value past U+10FFFF writes U+FFFD.
+put_rune :: #force_inline proc "contextless" (buf: []u8, r: rune) -> int {
+	s, n := utf8.encode_rune(r)
+	copy(buf, s[:n])
+	return n
 }

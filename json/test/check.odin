@@ -30,6 +30,17 @@ Shape :: struct {
 	p:     ^Inner,
 }
 
+// `json.check` into `mine` and `json.unmarshal` into `theirs` of `src` by `plan` as `spec`, a spec taken from `SPECS`.
+@(private = "file")
+check_and_read :: proc(src: []u8, spec: json.Spec, mine, theirs: ^$T, plan: ^typed.Plan, sink: ^typed.Sink) -> (checked, want: core.Error) {
+	switch spec {
+	case .Json:  return json.check(src, .Json, mine, plan, {sink = sink}, context.temp_allocator), json.unmarshal(src, .Json, theirs, plan, read = {}, opts = {}, allocator = context.temp_allocator)
+	case .Jsonc: return json.check(src, .Jsonc, mine, plan, {sink = sink}, context.temp_allocator), json.unmarshal(src, .Jsonc, theirs, plan, read = {}, opts = {}, allocator = context.temp_allocator)
+	case .Json5: return json.check(src, .Json5, mine, plan, {sink = sink}, context.temp_allocator), json.unmarshal(src, .Json5, theirs, plan, read = {}, opts = {}, allocator = context.temp_allocator)
+	}
+	return nil, nil
+}
+
 // Reads `text` by `plan.check` and by `json.unmarshal` into two values of `T`, which must agree on the value and the
 // first refusal. Returns the sink of the check.
 @(private = "file")
@@ -40,9 +51,9 @@ both :: proc(t: ^testing.T, text: string, $T: typeid, spec: json.Spec, loc := #c
 	mine, theirs := new(T, context.temp_allocator), T{}
 	sink.entries.allocator = context.temp_allocator
 	sink.errors.allocator = context.temp_allocator
-	checked := walktest.typed_of(json.check(src, spec, mine, &plan, {sink = &sink}, context.temp_allocator))
+	check, want := check_and_read(src, spec, mine, &theirs, &plan, &sink)
+	checked := walktest.typed_of(check)
 	first.kind, first.at = checked.kind, checked.at
-	want := json.unmarshal(src, spec, &theirs, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
 	testing.expectf(t, first.kind == walktest.typed_kind(want) && first.at == walktest.at_of(want), "%s: check gave %v at %d, unmarshal %v at %d", text, first.kind, first.at, want, walktest.at_of(want), loc = loc)
 	if first.kind == .None {
 		testing.expectf(t, fmt.tprint(mine^) == fmt.tprint(theirs), "%s: check read %v, unmarshal %v", text, mine^, theirs, loc = loc)
@@ -296,8 +307,8 @@ a_check_refuses_a_union_as_unmarshal_does :: proc(t: ^testing.T) {
 			v: struct{ u: Tagged }
 			sink: typed.Sink
 			sink.entries.allocator = context.temp_allocator
-			want := json.unmarshal(transmute([]u8)c.text, spec, &v, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
-			first := json.check(transmute([]u8)c.text, spec, &v, &plan, {sink = &sink}, context.temp_allocator)
+			checked: struct{ u: Tagged }
+			first, want := check_and_read(transmute([]u8)c.text, spec, &checked, &v, &plan, &sink)
 			testing.expectf(t, walktest.typed_kind(first) == c.kind && walktest.typed_kind(want) == c.kind && walktest.at_of(first) == walktest.at_of(want), "%s: check %v at %d, unmarshal %v at %d", c.text, first, walktest.at_of(first), want, walktest.at_of(want))
 			if testing.expect(t, len(sink.entries) >= 1, c.text) {
 				testing.expect_value(t, sink.entries[0].kind, c.kind)

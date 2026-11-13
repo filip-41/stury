@@ -26,19 +26,9 @@ EDIT := core.Edit_Services {
 }
 
 // Returns an edit list over `doc`. A document read as a constant spec holds no edit services, so the list takes XML's.
-edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
-
-@(private)
-edit_list_init_bound :: proc(doc: ^core.Document, $S: Spec, allocator := context.allocator) -> core.Edit_List {
+edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List {
 	list := core.edit_list_init(doc, allocator)
 	list.edit = &EDIT
-	return list
-}
-
-@(private)
-edit_list_init_chosen :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List {
-	list := core.edit_list_init(doc, allocator)
-	list.edit = core.services_of(as(spec)).edit
 	return list
 }
 
@@ -46,29 +36,18 @@ edit_list_init_chosen :: proc(doc: ^core.Document, spec: Spec, allocator := cont
 // with `allocator`, keeping every byte the edit does not reach. A `typed.Raw` is an element's content as XML, a struct, a
 // slice or a map is built by `plan`, and any other value is written as an element's content. A `Name` the path ends in
 // that its element lacks is inserted as its last child.
-set :: proc {set_bound, set_chosen}
-
-@(private)
-set_bound :: proc(src: []u8, $S: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
 	scratch: write.Scratch
 	defer write.scratch_destroy(&scratch)
 	in_ := write.edit_input(v, plan, &scratch) or_return
-	doc, berr := build_bound(src, S, opts, read.dups, allocator)
+	doc, berr := build(src, spec, opts, read.dups, allocator)
 	defer core.destroy(&doc)
 	if berr != nil {
 		return nil, berr
 	}
-	list := edit_list_init_bound(&doc, S, allocator)
+	list := edit_list_init(&doc, spec, allocator)
 	defer core.edit_list_destroy(&list)
 	return engine.set_answers(&list, path, in_, read, allocator)
-}
-
-@(private)
-set_chosen :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	scratch: write.Scratch
-	defer write.scratch_destroy(&scratch)
-	in_ := write.edit_input(v, plan, &scratch) or_return
-	return engine.set(src, as(spec, opts), path, in_, read, allocator)
 }
 
 // Checks `src` as an element's content.

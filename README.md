@@ -1,8 +1,13 @@
 # stury
 
-stury is a JSON, CSV, TOML, YAML, XML, HTML and CBOR library for [Odin](https://odin-lang.org), with a command line,
-`stury`, that runs jq filters over JSON, CSV, TOML, YAML, XML, HTML and CBOR, checks them against JSON Schema, edits
-them in place and tells what differs between two of them.
+stury is a jq-compatible command line for JSON, YAML, TOML, XML, HTML, CSV and CBOR. It runs jq filters, checks
+input against JSON Schema, edits a file in place while keeping every byte the edit does not change, and tells what
+differs between two values. It gives jq 1.8.2's answers, messages and exit codes, and [docs/cli.md](docs/cli.md#differences-from-jq)
+lists where it differs. It is built for large inputs: a path is answered without parsing the rest of the input, and
+validation allocates nothing.
+
+Under it is a library for [Odin](https://odin-lang.org) that gives the same answers: validate, read a value by path,
+build a queryable document, read straight into Odin structs, and edit a text.
 
 Input is checked strictly by default: JSON against RFC 8259 (no `01`, no `NaN`, no invalid UTF-8, no lone
 surrogate), CSV against RFC 4180, TOML against 1.0 or 1.1, YAML against 1.2 and its test suite, XML against 1.0 and its
@@ -235,6 +240,7 @@ bad: User
 sink: typed.Sink
 if model.load(&m, transmute([]u8)string(`{"name": "a", "email": 3}`), &bad, &sink) != nil {
 	p := model.problem(sink.entries[:], "Invalid body", 422) or_return
+	defer model.problem_destroy(p)
 	fmt.println(string(json.marshal(p) or_return))
 }
 

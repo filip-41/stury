@@ -202,6 +202,7 @@ Record_Stream_Options :: records.Stream_Options
 Record_Writer :: records.Writer
 records_build :: records.build
 records_close :: records.close
+records_each :: records.each
 records_marshal :: records.marshal
 records_marshal_stream :: records.marshal_stream
 records_next :: records.next

@@ -1,44 +1,39 @@
 #+private
 package yaml
 
-import "base:runtime"
+import spell "../core/spell"
 import core "../core"
 
 // YAML's document holds the walk's tokens over the caller's bytes, read through core's readers and YAML's handles. A
 // scalar is a `Plain` node that `resolve` types, and a block collection has no bytes of its own.
 
-// YAML's handles, one per spec, which only `as` names. A handle's readers are the readers a constant build of its spec
-// holds, and its services the walks of that spec. The tables hold pointers to the bound tables, so they are set at
+// YAML's handles, one per spec, which only `as` names. A handle's readers are the readers an entry point's build holds,
+// and its services the walks of that spec. The tables hold pointers to the bound tables, so they are set at
 // startup and never written after.
 HANDLES := [Spec]core.Readers {
-	.Yaml_1_2 = handle_readers(.Yaml_1_2, &SERVICES[.Yaml_1_2]),
+	.Yaml_1_2 = handle_readers(&SERVICES[.Yaml_1_2]),
 }
 
 SERVICES := [Spec]core.Services {
-	.Yaml_1_2 = handle_services(.Yaml_1_2),
-}
-
-// The readers of the handle of spec `S`: `readers_of(S)` with the services of `S`.
-handle_readers :: proc "contextless" ($S: Spec, services: ^core.Services) -> core.Readers {
-	r := readers_of(S)^
-	r.services = services
-	return r
-}
-
-// The run-time services of spec `S`, which a handle reaches.
-handle_services :: proc "contextless" ($S: Spec) -> core.Services {
-	return {
+	.Yaml_1_2 = {
 		build    = build_as,
 		validate = validate_as,
 		scan     = scan_as,
 		write    = document_write,
-		edit     = edit_of(S),
+		edit     = &EDIT,
 		plans    = rawptr(plan_as),
-		reads    = checks_of(S),
+		reads    = &CHECKS,
 		tokens   = &TOKENS,
-		records  = framing_of(S),
-		docs     = record_docs(S),
-	}
+		records  = &FRAMING,
+		docs     = &RECORD_DOCS,
+	},
+}
+
+// The readers of a handle: `READERS` with `services`.
+handle_readers :: proc "contextless" (services: ^core.Services) -> core.Readers {
+	r := READERS
+	r.services = services
+	return r
 }
 
 // YAML's fault table, which names the format whatever the spec.
@@ -72,27 +67,17 @@ is_yaml :: #force_inline proc "contextless" (doc: ^core.Document) -> bool {
 
 // Whether the decoded text of key `t` is `name`. A key longer than the stack buffer decodes on the heap.
 spelling_key_equals :: proc "contextless" (v: ^core.Token_View, t: core.Token, name: string) -> bool {
+	Key :: struct {
+		span:     []u8,
+		spelling: u16,
+	}
 	span := v.src[t.lo:t.lo + u64(t.n)]
 	if t.spelling & core.SPELLING_DECODE == 0 {
 		return string(span) == name
 	}
-	stack: [256]u8 = ---
-	buf := stack[:]
-	heap: []u8
-	room := len(span) * 3 + 4
-	if room > len(stack) {
-		context = runtime.default_context()
-		heap = make([]u8, room)
-		if heap == nil {
-			return false
-		}
-		buf = heap
-	}
-	s, ok := decode(span, t.spelling, buf)
-	equal := ok && s == name
-	if heap != nil {
-		context = runtime.default_context()
-		delete(heap)
-	}
-	return equal
+	key := Key{span, t.spelling}
+	return spell.buffered_equals(len(span) * 3 + 4, name, &key, proc "contextless" (c: rawptr, buf: []u8) -> (string, bool) {
+		k := (^Key)(c)
+		return decode(k.span, k.spelling, buf)
+	})
 }

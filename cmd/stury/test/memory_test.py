@@ -61,10 +61,9 @@ def main():
     odin = odin_flag()
     failed = []
     with tempfile.TemporaryDirectory() as tmp:
-        exes = {}
-        # Per lane: the binary, the slack that the threads' arenas may add, and the file count of the base run.
-        for threads, width in (("1 thread", 1), ("pool", POOL_WIDTH)):
-            exes[threads] = (build(odin, os.path.join(tmp, "stury-" + threads.split()[0]), {"STURY_THREADS": width}), (width - 1) * ARENA, 2 * width - 1)
+        exe = build(odin, os.path.join(tmp, "stury"))
+        # Per lane: the --threads option, the slack that the threads' arenas may add, and the file count of the base run.
+        lanes_by_width = {threads: (["--threads", str(width)], (width - 1) * ARENA, 2 * width - 1) for threads, width in (("1 thread", 1), ("pool", POOL_WIDTH))}
         paths = {}
         for kind, text in fixtures().items():
             first = os.path.join(tmp, f"{kind}-0")
@@ -80,20 +79,20 @@ def main():
                  ("ndjson", ["check", "--schema", schema]), ("csv", ["fmt", "--schema", table, "--from", "csv", "--infer", "--to", "ndjson"]))
         pieces = os.path.join(tmp, "pieces.json")
         open(pieces, "w").write(pieces_fixture())
-        for threads, (exe, arenas, base) in exes.items():
+        for threads, (width, arenas, base) in lanes_by_width.items():
             held = peak_over(exe, ["schema", "sample", "-c", "--count", str(SAMPLES)], [schema])
             ok = held <= SAMPLE_PEAK
             print(f"{'ok  ' if ok else 'FAIL'} {threads:9} schema sample --count {SAMPLES} {held >> 20:4} MiB")
             if not ok:
                 failed.append((threads, "schema sample"))
             for filter in PIECE_FILTERS:
-                held = peak_over(exe, ["-c", filter], [pieces])
+                held = peak_over(exe, width + ["-c", filter], [pieces])
                 ok = held <= PIECES_PEAK
                 print(f"{'ok  ' if ok else 'FAIL'} {threads:9} pieces  {filter[:40]:40} {held >> 20:4} MiB")
                 if not ok:
                     failed.append((threads, "pieces", filter))
             for kind, args in lanes:
-                one, many = peak_over(exe, args, paths[kind][:base]), peak_over(exe, args, paths[kind])
+                one, many = peak_over(exe, width + args, paths[kind][:base]), peak_over(exe, width + args, paths[kind])
                 ok = many <= one + SLACK + arenas and (args[0] not in ("check", "fmt") or one <= SCHEMA_PEAK)
                 print(f"{'ok  ' if ok else 'FAIL'} {threads:9} {kind:7} {' '.join(args):18} {base} files {one >> 20:4} MiB, {COPIES} files {many >> 20:4} MiB")
                 if not ok:

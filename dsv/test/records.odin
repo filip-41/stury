@@ -232,7 +232,7 @@ rows_across_batches :: proc(t: ^testing.T) {
 expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, spec: dsv.Spec, opts: dsv.Options) -> bool {
 	text, as := transmute([]u8)src, dsv.as(spec, opts)
 	serial, _ := records.check(text, as, .Lines, context.temp_allocator)
-	whole := walktest.fault_of(dsv.validate(text, spec, opts))
+	whole := walktest.fault_of(core.validate(text, as))
 	if v := records.validate_parallel(text, as); !testing.expectf(t, v == whole, "%v %v %q: validate %v, want %v", spec, opts, src, v, whole) {
 		return false
 	}

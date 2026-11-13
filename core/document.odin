@@ -218,6 +218,9 @@ Document :: struct {
 	kept:         []Kept_Child,
 	missing:      []Missing_Name,
 	reads_block:  []u8,
+	// The first byte of the first key with the text of another key of its object, as YAML's `1` and `"1"` are, which a
+	// read by name refuses under every `dups` but `.First` and `.All`. 0 when no key is.
+	clash:        u64,
 	partial:      bool,
 	stopped:      bool,
 	// Set by a build that gave every cell its kind, so a `Plain` cell is a string or null and resolves no further.
@@ -719,8 +722,7 @@ wide_length :: #force_no_inline proc(doc: ^Document, i: Node_Index) -> int {
 
 // Returns the distance from node `i` to the next node in preorder: its subtree size for a container, 1 for a
 // scalar.
-@(private)
-skip :: #force_inline proc(doc: ^Document, i: Node_Index) -> int {
+subtree_size :: #force_inline proc(doc: ^Document, i: Node_Index) -> int {
 	n := doc.nodes[i]
 	return int(n.n) if n.kind == .Array || n.kind == .Object else 1
 }
@@ -936,7 +938,7 @@ doc_children :: proc(doc: ^Document, i: Node_Index) -> Child_Iter {
 	} else if n.role != .Key && j < int(it.end) && doc.nodes[j].role == .Key {
 		// The dsv header row a root holds first. The key-role `Array` is that row, and it holds key cells, not
 		// members.
-		j += skip(doc, Node_Index(j))
+		j += subtree_size(doc, Node_Index(j))
 	}
 	if j >= int(it.end) {
 		it.done = true
@@ -1037,7 +1039,7 @@ member_next :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool) {
 		// An object's children alternate key and value, and a key is one node, so the value follows the key
 		// directly and the next member's key follows the value's own span.
 		v := j + 1
-		it.at = Node_Index(v + skip(it.doc, Node_Index(v)))
+		it.at = Node_Index(v + subtree_size(it.doc, Node_Index(v)))
 		if key_equals(it.doc, Node_Index(j), it.name) {
 			return Node_Index(v), true
 		}

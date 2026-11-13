@@ -234,47 +234,6 @@ collapsed :: proc "contextless" (value: []u8) -> bool {
 	return true
 }
 
-// Returns the decoded value of the attribute `name` of the element whose value is node `i`, in `buf` or a span of the
-// source, and false for no such attribute or a `buf` too short, which the length of `attribute_room` never is. A name
-// is the attribute's qualified name as written, or an expanded name `{uri}local`, which an attribute with no prefix
-// never has a namespace for.
-attribute_value :: proc(doc: ^core.Document, i: core.Node_Index, name: string, buf: []u8) -> (value: string, ok: bool) {
-	if doc.readers == nil || doc.readers.format != rules_of || int(i) >= len(doc.nodes) {
-		return "", false
-	}
-	uri, local, clark := expanded(name)
-	for f in core.all_facts(doc, i) {
-		if f.role != .Attribute {
-			continue
-		}
-		written, raw := attribute_parts(doc.src, f)
-		if clark && string(written) != "xmlns" && !(len(written) > 6 && string(written[:6]) == "xmlns:") {
-			if !name_is(doc, i, written, uri, local, false) {
-				continue
-			}
-		} else if string(written) != name {
-			continue
-		}
-		return attribute_decode(doc, f, raw, buf)
-	}
-	return "", false
-}
-
-// Returns a length of `buf` that holds the decoded value of every attribute of the element whose value is node `i`.
-attribute_room :: proc(doc: ^core.Document, i: core.Node_Index) -> int {
-	room := 0
-	if doc.readers == nil || doc.readers.format != rules_of || int(i) >= len(doc.nodes) {
-		return 0
-	}
-	for f in core.all_facts(doc, i) {
-		if f.role == .Attribute {
-			_, raw := attribute_parts(doc.src, f)
-			room = max(room, value_room(doc, raw))
-		}
-	}
-	return room
-}
-
 // The facts XML names for node `i`, the value of an element or the document. The name is the key before the value.
 @(private)
 spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Name) -> (core.Fact_Value, bool) {

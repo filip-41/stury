@@ -17,16 +17,16 @@ Struct_Form :: enum u8 {
 	Array,
 }
 
-// Returns the typed reads of spec `S`, which `plan_make` takes to read a plan made from a type. Every spec shares them,
+// Returns the typed reads of `spec`, which `plan_make` takes to read a plan made from a type. Every spec shares them,
 // since a plan's handle holds its spec.
-reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
+reads :: proc "contextless" (spec: Spec) -> ^typed.Format_Reads {
 	return &READS
 }
 
-// Returns the checks of spec `S` read and written with `opts`, which `model.compile` and `schema.bind` take: the reads
+// Returns the checks of `spec` read and written with `opts`, which `model.compile` and `schema.bind` take: the reads
 // of a plan made from a model or a description, and the handle its plans read by.
-checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Checks {
-	return {&CHECKS, bound_as(S, opts)}
+checks :: proc "contextless" (spec: Spec, opts := Options{}) -> typed.Format_Checks {
+	return {&CHECKS, bound_as(spec, opts)}
 }
 
 // Builds the plan of `T` for CBOR of `spec` read and written with `opts`, as `typed.plan_make` does. The plan reads only

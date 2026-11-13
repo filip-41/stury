@@ -11,14 +11,8 @@ import write "../core/write"
 // `plan_make` is the form for many reads. A refusal leaves everything the read allocated reachable from `target`. A
 // repeated key frees the text this read stored for a string member or a map entry, and leaves allocated any other
 // value it replaces, a list, map, pointer or `any`, so a text not trusted to be free of repeats reads into an arena.
-// A decoded key's text goes to `context.temp_allocator`. A constant `spec` links the walk of that spec alone, and a
-// `spec` chosen at run time links the walks of every spec. The target of that form is any pointer, and a target that
-// is no pointer is `.Plan_Mismatch`.
-unmarshal :: proc {unmarshal_bound, unmarshal_bound_plan, unmarshal_chosen, unmarshal_chosen_plan}
-
-// Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
-// first. The options are the plan's, and any plan of the format reads.
-check :: proc {check_bound, check_chosen}
+// A decoded key's text goes to `context.temp_allocator`. `spec` links the walk of that spec alone.
+unmarshal :: proc {unmarshal_once, unmarshal_plan}
 
 // Returns the typed reads of spec `S`, which `plan_make` takes to read and check a plan made from a type by that spec.
 reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
@@ -89,7 +83,7 @@ plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: run
 }
 
 @(private)
-unmarshal_bound :: proc(src: []u8, $S: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	plan, refusal := plan_make(T, S, opts, reads = build_of(S))
 	if refusal != nil {
 		return refusal
@@ -101,69 +95,14 @@ unmarshal_bound :: proc(src: []u8, $S: Spec, target: ^$T, opts := Options{}, rea
 }
 
 @(private)
-unmarshal_bound_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	return core.error_of(read_text(src, S, opts, target, T, plan, read, allocator, false))
 }
 
-@(private)
-unmarshal_chosen :: proc(src: []u8, spec: Spec, target: any, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	data, T, pointer := typed.pointer_target(target)
-	if !pointer {
-		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
-	}
-	plan, refusal := plan_make(T, spec, opts, reads = reads_chosen(spec))
-	if refusal != nil {
-		return refusal
-	}
-	defer typed.plan_destroy(&plan)
-	err := read_chosen(src, spec, opts, data, T, &plan, read, allocator, false)
-	typed.own_errors(&err, read.sink)
-	return core.error_of(err)
-}
-
-@(private)
-unmarshal_chosen_plan :: proc(src: []u8, spec: Spec, target: any, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	data, T, pointer := typed.pointer_target(target)
-	if !pointer {
-		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
-	}
-	return core.error_of(read_chosen(src, spec, opts, data, T, plan, read, allocator, false))
-}
-
-@(private)
-check_bound :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+// Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
+// first. The options are the plan's, and any plan of the format reads.
+check :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	return core.error_of(read_text(src, S, options_of(plan.as), target, T, plan, read, allocator, true))
-}
-
-@(private)
-check_chosen :: proc(src: []u8, spec: Spec, target: any, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	data, T, pointer := typed.pointer_target(target)
-	if !pointer {
-		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
-	}
-	return core.error_of(read_chosen(src, spec, options_of(plan.as), data, T, plan, read, allocator, true))
-}
-
-// The reads `build_of` gives for the spec `spec`, chosen at run time.
-@(private)
-reads_chosen :: proc(spec: Spec) -> ^typed.Format_Reads {
-	switch spec {
-	case .Json:  return build_of(.Json)
-	case .Jsonc: return build_of(.Jsonc)
-	case .Json5: return build_of(.Json5)
-	}
-	return nil
-}
-
-// Reads a whole text as the spec `spec`, which is chosen at run time and so links the read of every spec.
-@(private)
-read_chosen :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Refusal {
-	switch spec {
-	case .Json:  return read_text(src, .Json, opts, target, T, plan, read, allocator, CHECK)
-	case .Jsonc: return read_text(src, .Jsonc, opts, target, T, plan, read, allocator, CHECK)
-	case .Json5: return read_text(src, .Json5, opts, target, T, plan, read, allocator, CHECK)
-	}
-	return {kind = .Bad_Option}
 }
 
 // Reads a whole text as the constant spec `S`.

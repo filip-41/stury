@@ -139,13 +139,6 @@ extent :: proc(cx: ^Cx, v: core.Node_Index) -> (lead, lo, hi: u64) {
 }
 
 @(private = "file")
-puts :: proc(b: ^[dynamic]u8, parts: ..string) {
-	for s in parts {
-		append(b, s)
-	}
-}
-
-@(private = "file")
 add :: proc(cx: ^Cx, lo, hi: u64, text: string) {
 	append(&cx.splices, Splice{lo = lo, hi = hi, text = transmute([]u8)text, seq = len(cx.splices)})
 }
@@ -361,11 +354,7 @@ insert_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	v := e.node
 	id := u64(v) << 8 | u64(e.role)
-	if id in cx.seen {
-		cx.err = {kind = .Conflicting_Edits}
-		return false
-	}
-	cx.seen[id] = {}
+	claim(&cx.seen, &cx.err, id) or_return
 	if is_run(cx.doc, v) {
 		return refuse_edit(cx, v, .No_Place)
 	}

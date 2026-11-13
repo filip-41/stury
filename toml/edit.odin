@@ -2,7 +2,7 @@ package toml
 
 // TOML's edit services. A table is not one range of bytes: its lines stand under its header, its sub-tables are
 // sections elsewhere, and a dotted key spreads its lines over a section. So the format commits its edits itself
-// instead of through `core/compose`, which composes one range per container. Each edit becomes splices of source
+// instead of through `compose.commit`, which composes one range per container. Each edit becomes splices of source
 // bytes: a scalar or inline value is replaced in place, a member of a table is a line placed after the table's last
 // line and before its sections, a table or an array of tables is removed section by section, and a comment is a
 // line above a statement or a comment after its value. Every byte no splice touches stays. The result is read again
@@ -10,9 +10,9 @@ package toml
 
 import "base:runtime"
 import "core:bytes"
-import "core:encoding/endian"
 import "core:slice"
 import core "../core"
+import compose "../core/compose"
 import engine "../core/build"
 import typed "../core/typed"
 import write "../core/write"
@@ -64,20 +64,10 @@ EDIT := core.Edit_Services {
 	commit   = edit_commit,
 }
 
-// Returns an edit list over `doc`. A document read as a constant spec holds no edit services, so the list takes TOML's.
-edit_list_init :: proc {edit_list_init_bound, edit_list_init_chosen}
-
-@(private)
-edit_list_init_bound :: proc(doc: ^core.Document, $S: Spec, allocator := context.allocator) -> core.Edit_List {
+// Returns an edit list over `doc`. A document an entry point reads holds no edit services, so the list takes TOML's.
+edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List {
 	list := core.edit_list_init(doc, allocator)
 	list.edit = &EDIT
-	return list
-}
-
-@(private)
-edit_list_init_chosen :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List {
-	list := core.edit_list_init(doc, allocator)
-	list.edit = core.services_of(as(spec)).edit
 	return list
 }
 
@@ -85,29 +75,18 @@ edit_list_init_chosen :: proc(doc: ^core.Document, spec: Spec, allocator := cont
 // with `allocator`, keeping every byte the edit does not reach. A `typed.Raw` is the text of a TOML value, a struct, a
 // slice or a map is built by `plan`, and any other value is spelled as an inline TOML value. A `Name` the path ends in
 // that its table lacks is inserted as the TOML commit places it.
-set :: proc {set_bound, set_chosen}
-
-@(private)
-set_bound :: proc(src: []u8, $S: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
 	scratch: write.Scratch
 	defer write.scratch_destroy(&scratch)
 	in_ := write.edit_input(v, plan, &scratch) or_return
-	doc, berr := build_bound(src, S, opts, read.dups, allocator)
+	doc, berr := build(src, spec, opts, read.dups, allocator)
 	defer core.destroy(&doc)
 	if berr != nil {
 		return nil, berr
 	}
-	list := edit_list_init_bound(&doc, S, allocator)
+	list := edit_list_init(&doc, spec, allocator)
 	defer core.edit_list_destroy(&list)
 	return engine.set_answers(&list, path, in_, read, allocator)
-}
-
-@(private)
-set_chosen :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	scratch: write.Scratch
-	defer write.scratch_destroy(&scratch)
-	in_ := write.edit_input(v, plan, &scratch) or_return
-	return engine.set(src, as(spec, opts), path, in_, read, allocator)
 }
 
 // A value an edit writes, spelled as the inline value a line holds: the token write at a site of the document.
@@ -217,14 +196,6 @@ Section :: struct {
 	node:     u32,
 }
 
-// A replacement of the source bytes `lo` through `hi` by `text`. A splice with `lo` equal to `hi` is an insert.
-@(private = "file")
-Splice :: struct {
-	lo, hi: u64,
-	text:   []u8,
-	seq:    int,
-}
-
 @(private = "file")
 Open :: struct {
 	id, end: u32,
@@ -240,7 +211,7 @@ Cx :: struct {
 	sections: [dynamic]Section,
 	sec_of:   []i32,
 	comments: [dynamic]u64, // where each comment starts, sorted
-	splices:  [dynamic]Splice,
+	splices:  [dynamic]compose.Splice,
 	seen:     map[u64]struct{},
 	removed:  map[u32]int, // the members or elements an inline container loses
 	refill:   map[u32][dynamic]Refill, // what a container that loses all of them gets in their place
@@ -293,7 +264,7 @@ form_of :: proc(cx: ^Cx, i: u32) -> Form {
 			return .Header
 		}
 		key := cx.doc.nodes[i - 1]
-		if first_byte(cx.src, line_start(cx.src, key.lo)) == '[' {
+		if first_byte(cx.src, compose.line_start(cx.src, key.lo)) == '[' {
 			return .Implicit
 		}
 		return .Dotted
@@ -310,15 +281,6 @@ form_of :: proc(cx: ^Cx, i: u32) -> Form {
 }
 
 // The text's geometry: lines, comment lines and the comments directly above a line.
-
-@(private = "file")
-line_start :: proc(src: []u8, p: u64) -> u64 {
-	i := min(p, u64(len(src)))
-	for i > 0 && src[i - 1] != '\n' {
-		i -= 1
-	}
-	return i
-}
 
 // One past the line feed that ends the line holding `p`, or the end of the text.
 @(private = "file")
@@ -350,7 +312,7 @@ blank_line :: proc(src: []u8, ls: u64) -> bool {
 
 @(private = "file")
 indent_of :: proc(src: []u8, p: u64) -> []u8 {
-	ls := line_start(src, p)
+	ls := compose.line_start(src, p)
 	end := ls
 	for end < u64(len(src)) && (src[end] == ' ' || src[end] == '\t') {
 		end += 1
@@ -375,7 +337,7 @@ comment_line :: proc(cx: ^Cx, ls: u64) -> bool {
 head_start :: proc(cx: ^Cx, ls: u64) -> u64 {
 	at := ls
 	for at > 0 {
-		prev := line_start(cx.src, at - 1)
+		prev := compose.line_start(cx.src, at - 1)
 		if !comment_line(cx, prev) {
 			break
 		}
@@ -452,10 +414,10 @@ statement_end :: proc(cx: ^Cx, i: u32) -> u64 {
 lines_of :: proc(cx: ^Cx, v: u32) -> (head, end: u64, ok: bool) {
 	#partial switch form_of(cx, v) {
 	case .Scalar, .Inline:
-		head = head_start(cx, line_start(cx.src, cx.doc.nodes[v - 1].lo))
+		head = head_start(cx, compose.line_start(cx.src, cx.doc.nodes[v - 1].lo))
 		return head, statement_end(cx, v), true
 	case .Dotted:
-		head = head_start(cx, line_start(cx.src, cx.doc.nodes[v - 1].lo))
+		head = head_start(cx, compose.line_start(cx.src, cx.doc.nodes[v - 1].lo))
 		it := core.pairs(cx.doc, core.Node_Index(v))
 		for _, w in core.pair_next(&it) {
 			_, e, _ := lines_of(cx, u32(w))
@@ -473,7 +435,7 @@ build_sections :: proc(cx: ^Cx) {
 	for i in 1 ..< len(nodes) {
 		cx.sec_of[i] = -1
 		if nodes[i].kind == .Object && form_of(cx, u32(i)) == .Header {
-			ls := line_start(cx.src, nodes[i].lo)
+			ls := compose.line_start(cx.src, nodes[i].lo)
 			append(&cx.sections, Section{ls = ls, head = head_start(cx, ls), node = u32(i)})
 		}
 	}
@@ -495,19 +457,12 @@ section_end :: proc(cx: ^Cx, k: int) -> u64 {
 
 @(private = "file")
 add :: proc(cx: ^Cx, lo, hi: u64, text: []u8) {
-	append(&cx.splices, Splice{lo = lo, hi = hi, text = slice.clone(text, cx.a), seq = len(cx.splices)})
+	append(&cx.splices, compose.Splice{lo = lo, hi = hi, text = slice.clone(text, cx.a), seq = len(cx.splices)})
 }
 
 @(private = "file")
 add_text :: proc(cx: ^Cx, lo, hi: u64, text: string) {
 	add(cx, lo, hi, transmute([]u8)text)
-}
-
-@(private = "file")
-puts :: proc(b: ^[dynamic]u8, parts: ..string) {
-	for s in parts {
-		append(b, ..transmute([]u8)s)
-	}
 }
 
 @(private = "file")
@@ -523,7 +478,7 @@ member_text :: proc(cx: ^Cx, e: core.Edit, keyed: bool) -> string {
 		return string(e.text)
 	}
 	b := make([dynamic]u8, cx.a)
-	puts(&b, string(spell_key(e.key, cx.a)), " = ", string(e.text))
+	compose.puts(&b, string(spell_key(e.key, cx.a)), " = ", string(e.text))
 	return string(b[:])
 }
 
@@ -604,7 +559,7 @@ items_of :: proc(cx: ^Cx, c: u32) -> []Item {
 
 @(private = "file")
 starts_line :: proc(cx: ^Cx, p: u64) -> bool {
-	for b in cx.src[line_start(cx.src, p):p] {
+	for b in cx.src[compose.line_start(cx.src, p):p] {
 		if b != ' ' && b != '\t' {
 			return false
 		}
@@ -651,10 +606,10 @@ refill_cleared :: proc(cx: ^Cx) {
 		keyed := cx.doc.nodes[c].kind == .Object
 		b := make([dynamic]u8, cx.a)
 		for r, i in list {
-			puts(&b, ", " if i > 0 else " " if keyed else "", r.text)
+			compose.puts(&b, ", " if i > 0 else " " if keyed else "", r.text)
 		}
 		if keyed && len(list) > 0 {
-			puts(&b, " ")
+			compose.puts(&b, " ")
 		}
 		add(cx, cx.doc.nodes[c].lo + 1, node_end(cx, c) - 1, b[:])
 	}
@@ -683,7 +638,7 @@ insert_inline :: proc(cx: ^Cx, e: core.Edit, c: u32) -> bool {
 			return refuse_edit(cx, e.node, .Inline_Comment)
 		}
 		b := make([dynamic]u8, cx.a)
-		puts(&b, " " if keyed else "", item, " " if keyed else "")
+		compose.puts(&b, " " if keyed else "", item, " " if keyed else "")
 		add(cx, cx.doc.nodes[c].lo + 1, closer, b[:])
 		return true
 	}
@@ -699,11 +654,11 @@ insert_inline :: proc(cx: ^Cx, e: core.Edit, c: u32) -> bool {
 				add_text(cx, last.end, last.end, ",")
 			}
 			b := make([dynamic]u8, cx.a)
-			puts(&b, string(indent_of(src, last.start)), item, ",", cx.eol)
+			compose.puts(&b, string(indent_of(src, last.start)), item, ",", cx.eol)
 			add(cx, pos, pos, b[:])
 		} else {
 			b := make([dynamic]u8, cx.a)
-			puts(&b, ", ", item)
+			compose.puts(&b, ", ", item)
 			add(cx, last.end, last.end, b[:])
 		}
 		return true
@@ -711,11 +666,11 @@ insert_inline :: proc(cx: ^Cx, e: core.Edit, c: u32) -> bool {
 	t := items[at]
 	b := make([dynamic]u8, cx.a)
 	if starts_line(cx, t.start) {
-		puts(&b, string(indent_of(src, t.start)), item, ",", cx.eol)
-		ls := line_start(src, t.start)
+		compose.puts(&b, string(indent_of(src, t.start)), item, ",", cx.eol)
+		ls := compose.line_start(src, t.start)
 		add(cx, ls, ls, b[:])
 	} else {
-		puts(&b, item, ", ")
+		compose.puts(&b, item, ", ")
 		add(cx, t.start, t.start, b[:])
 	}
 	return true
@@ -726,11 +681,11 @@ insert_inline :: proc(cx: ^Cx, e: core.Edit, c: u32) -> bool {
 put_line_at :: proc(cx: ^Cx, pos: u64, line: string, blank_after: bool) {
 	b := make([dynamic]u8, cx.a)
 	if pos > 0 && cx.src[pos - 1] != '\n' {
-		puts(&b, cx.eol)
+		compose.puts(&b, cx.eol)
 	}
-	puts(&b, line, cx.eol)
+	compose.puts(&b, line, cx.eol)
 	if blank_after && pos < u64(len(cx.src)) && !blank_line(cx.src, pos) {
-		puts(&b, cx.eol)
+		compose.puts(&b, cx.eol)
 	}
 	add(cx, pos, pos, b[:])
 }
@@ -787,13 +742,13 @@ insert_dotted :: proc(cx: ^Cx, e: core.Edit, d: u32) -> bool {
 		}
 	}
 	key := cx.doc.nodes[d - 1]
-	ls := line_start(src, key.lo)
+	ls := compose.line_start(src, key.lo)
 	lead := ls
 	for lead < u64(len(src)) && (src[lead] == ' ' || src[lead] == '\t') {
 		lead += 1
 	}
 	b := make([dynamic]u8, cx.a)
-	puts(&b, string(src[lead:key.lo + u64(key.n)]), ".", member_text(cx, e, true))
+	compose.puts(&b, string(src[lead:key.lo + u64(key.n)]), ".", member_text(cx, e, true))
 	_, end, _ := lines_of(cx, d)
 	at, k := int(e.at), 0
 	it := core.pairs(cx.doc, core.Node_Index(d))
@@ -835,9 +790,9 @@ header_path :: proc(cx: ^Cx, i: u32) -> (path: string, ok: bool) {
 	b := make([dynamic]u8, cx.a)
 	#reverse for part, k in parts {
 		if k != len(parts) - 1 {
-			puts(&b, ".")
+			compose.puts(&b, ".")
 		}
-		puts(&b, part)
+		compose.puts(&b, part)
 	}
 	return string(b[:]), true
 }
@@ -850,7 +805,7 @@ insert_section :: proc(cx: ^Cx, e: core.Edit, t: u32, line: string) -> bool {
 		return refuse_edit(cx, e.node, .Misplaced)
 	}
 	b := make([dynamic]u8, cx.a)
-	puts(&b, "[", path, "]", cx.eol, line)
+	compose.puts(&b, "[", path, "]", cx.eol, line)
 	put_section_at(cx, cx.foot_at, b[:])
 	return true
 }
@@ -862,15 +817,15 @@ put_section_at :: proc(cx: ^Cx, pos: u64, body: []u8) {
 	src := cx.src
 	b := make([dynamic]u8, cx.a)
 	if pos > 0 && src[pos - 1] != '\n' {
-		puts(&b, cx.eol)
+		compose.puts(&b, cx.eol)
 	}
-	if pos > 0 && !blank_line(src, line_start(src, pos - 1)) {
-		puts(&b, cx.eol)
+	if pos > 0 && !blank_line(src, compose.line_start(src, pos - 1)) {
+		compose.puts(&b, cx.eol)
 	}
 	append(&b, ..body)
-	puts(&b, cx.eol)
+	compose.puts(&b, cx.eol)
 	if pos < u64(len(src)) && !blank_line(src, pos) {
-		puts(&b, cx.eol)
+		compose.puts(&b, cx.eol)
 	}
 	add(cx, pos, pos, b[:])
 }
@@ -928,7 +883,7 @@ value_sections :: proc(cx: ^Cx, text: []u8, prefix: string, name: []u8, element:
 	b := make([dynamic]u8, cx.a)
 	for c in laid[:len(laid) - 1] {
 		if c == '\n' {
-			puts(&b, cx.eol)
+			compose.puts(&b, cx.eol)
 		} else {
 			append(&b, c)
 		}
@@ -1049,7 +1004,7 @@ remove_lines :: proc(cx: ^Cx, v: u32) {
 		}
 		return
 	}
-	ls := line_start(cx.src, cx.doc.nodes[v - 1].lo)
+	ls := compose.line_start(cx.src, cx.doc.nodes[v - 1].lo)
 	add(cx, head_start(cx, ls), statement_end(cx, v), nil)
 }
 
@@ -1077,8 +1032,8 @@ remove_sections :: proc(cx: ^Cx, v: u32) {
 	}
 	// The sections end the text: the blank lines before the first go with them.
 	lo := first
-	for lo > 0 && blank_line(cx.src, line_start(cx.src, lo - 1)) {
-		lo = line_start(cx.src, lo - 1)
+	for lo > 0 && blank_line(cx.src, compose.line_start(cx.src, lo - 1)) {
+		lo = compose.line_start(cx.src, lo - 1)
 	}
 	if lo < first {
 		add(cx, lo, first, nil)
@@ -1091,34 +1046,20 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 		return refuse_edit(cx, e.node, .Tag_Fact)
 	}
 	id := u64(e.node) << 8 | u64(e.role)
-	if id in cx.seen {
-		cx.err = {kind = .Conflicting_Edits}
-		return false
-	}
-	cx.seen[id] = {}
+	compose.claim(&cx.seen, &cx.err, id) or_return
 	node := u32(e.node)
 	for p := cx.parent[node]; p != NIL; p = cx.parent[p] {
 		if form_of(cx, p) == .Inline {
 			return refuse_edit(cx, e.node, .Inline_Comment)
 		}
 	}
-	lines := make([dynamic][]u8, cx.a)
-	count := 0 if e.op == .Remove_Fact else max(1, len(e.key) / 4)
-	for k in 0 ..< count {
-		for raw in bytes.split(fact_body(e, k), []u8{'\n'}, cx.a) {
-			line := bytes.trim_right(raw, []u8{'\r'})
-			if !comment_ok(string(line)) {
-				return refuse_edit(cx, e.node, .Comment_Body)
-			}
-			append(&lines, line)
+	lines := compose.fact_lines(e, cx.a)
+	for line in lines {
+		if !write.comment_ok(string(line)) {
+			return refuse_edit(cx, e.node, .Comment_Body)
 		}
 	}
-	existing := make([dynamic]core.Fact, cx.a)
-	for f in core.all_facts(cx.doc, e.node) {
-		if f.role == e.role {
-			append(&existing, f)
-		}
-	}
+	existing := compose.role_facts(cx.doc, e, cx.a)
 	switch e.role {
 	case .Comment_Inline:
 		return inline_comment(cx, e, node, lines[:], existing[:])
@@ -1139,9 +1080,9 @@ head_comment :: proc(cx: ^Cx, e: core.Edit, node: u32, lines: [][]u8, existing: 
 	ls: u64
 	switch form_of(cx, node) {
 	case .Scalar, .Inline:
-		ls = line_start(cx.src, cx.doc.nodes[node - 1].lo)
+		ls = compose.line_start(cx.src, cx.doc.nodes[node - 1].lo)
 	case .Dotted, .Header:
-		ls = line_start(cx.src, cx.doc.nodes[node].lo if form_of(cx, node) == .Header else cx.doc.nodes[node - 1].lo)
+		ls = compose.line_start(cx.src, cx.doc.nodes[node].lo if form_of(cx, node) == .Header else cx.doc.nodes[node - 1].lo)
 	case .Root, .Implicit, .Tables:
 		return refuse_edit(cx, e.node, .No_Statement)
 	}
@@ -1153,10 +1094,10 @@ head_comment :: proc(cx: ^Cx, e: core.Edit, node: u32, lines: [][]u8, existing: 
 block_comment :: proc(cx: ^Cx, e: core.Edit, ls: u64, indent: []u8, lines: [][]u8, existing: []core.Fact) -> bool {
 	b := make([dynamic]u8, cx.a)
 	if len(existing) == 0 && ls > 0 && cx.src[ls - 1] != '\n' {
-		puts(&b, cx.eol)
+		compose.puts(&b, cx.eol)
 	}
 	for line in lines {
-		puts(&b, string(indent), "#", " " if e.padded else "", string(line), cx.eol)
+		compose.puts(&b, string(indent), "#", " " if e.padded else "", string(line), cx.eol)
 	}
 	if len(existing) == 0 {
 		if len(lines) > 0 {
@@ -1165,7 +1106,7 @@ block_comment :: proc(cx: ^Cx, e: core.Edit, ls: u64, indent: []u8, lines: [][]u
 		return true
 	}
 	for f, k in existing {
-		lo, hi := line_start(cx.src, f.lo), line_end(cx.src, f.lo)
+		lo, hi := compose.line_start(cx.src, f.lo), line_end(cx.src, f.lo)
 		add(cx, lo, hi, b[:] if k == 0 else nil)
 	}
 	return true
@@ -1190,7 +1131,7 @@ inline_comment :: proc(cx: ^Cx, e: core.Edit, node: u32, lines: [][]u8, existing
 	}
 	text := make([dynamic]u8, cx.a)
 	if len(lines) == 1 {
-		puts(&text, "#", " " if e.padded else "", string(lines[0]))
+		compose.puts(&text, "#", " " if e.padded else "", string(lines[0]))
 	}
 	if len(existing) == 1 {
 		f := existing[0]
@@ -1207,7 +1148,7 @@ inline_comment :: proc(cx: ^Cx, e: core.Edit, node: u32, lines: [][]u8, existing
 	}
 	if len(lines) == 1 {
 		b := make([dynamic]u8, cx.a)
-		puts(&b, " ", string(text[:]))
+		compose.puts(&b, " ", string(text[:]))
 		add(cx, pos, pos, b[:])
 	}
 	return true
@@ -1226,7 +1167,7 @@ edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocato
 	cx.eol = "\r\n" if bytes.contains(doc.src, []u8{'\r', '\n'}) else "\n"
 	cx.sections = make([dynamic]Section, cx.a)
 	cx.comments = make([dynamic]u64, cx.a)
-	cx.splices = make([dynamic]Splice, cx.a)
+	cx.splices = make([dynamic]compose.Splice, cx.a)
 	cx.seen = make(map[u64]struct{}, cx.a)
 	for f in doc.facts {
 		if f.role <= .Key {
@@ -1237,7 +1178,7 @@ edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocato
 	slice.sort(cx.comments[:])
 	for f in core.all_facts(doc, 0) {
 		if f.role == .Comment_Foot {
-			cx.foot_at = min(cx.foot_at, line_start(doc.src, f.lo))
+			cx.foot_at = min(cx.foot_at, compose.line_start(doc.src, f.lo))
 		}
 	}
 	build_parents(&cx)
@@ -1255,52 +1196,13 @@ edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocato
 		}
 	}
 	refill_cleared(&cx)
-	slice.sort_by(cx.splices[:], proc(a, b: Splice) -> bool {
-		if a.lo != b.lo {
-			return a.lo < b.lo
-		}
-		if a.hi != b.hi {
-			return a.hi < b.hi
-		}
-		return a.seq < b.seq
-	})
-	reach := u64(0)
-	size := len(doc.src)
-	for s in cx.splices {
-		if s.lo < reach {
-			return nil, 0, {kind = .Conflicting_Edits, at = s.lo}
-		}
-		reach = max(reach, s.hi)
-		size += len(s.text) - int(s.hi - s.lo)
+	out, err = compose.apply_splices(doc.src, cx.splices[:], allocator)
+	if err.kind != .None {
+		return nil, 0, err
 	}
-	failed: runtime.Allocator_Error
-	out, failed = make([]u8, size, allocator)
-	if failed != nil {
-		return nil, 0, {kind = .No_Memory}
-	}
-	w, at := 0, u64(0)
-	for s in cx.splices {
-		w += copy(out[w:], doc.src[at:s.lo])
-		w += copy(out[w:], s.text)
-		at = s.hi
-	}
-	copy(out[w:], doc.src[at:])
 	if fault, bad := validate_text(out, Spec(spec), options_of(doc.as)).?; bad {
 		delete(out, allocator)
 		return nil, 0, {kind = .Bad_Result, inner = fault}
 	}
 	return out, 0, {}
-}
-
-// Body `i` of a fact set: the whole text, or the slice the u32le lengths in `key` name.
-@(private = "file")
-fact_body :: proc(e: core.Edit, i: int) -> []u8 {
-	if len(e.key) == 0 {
-		return e.text
-	}
-	at := 0
-	for k in 0 ..< i {
-		at += int(endian.unchecked_get_u32le(e.key[4 * k:]))
-	}
-	return e.text[at:][:endian.unchecked_get_u32le(e.key[4 * i:])]
 }

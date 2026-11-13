@@ -203,6 +203,46 @@ put_text :: proc(out: ^Out, s: string) {
 	}
 }
 
+// Whether a comment body can be written: no line end, and no control byte but tab.
+comment_ok :: proc(body: string) -> bool {
+	for b in transmute([]u8)body {
+		if b < 0x20 && b != '\t' || b == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// Writes each comment of `role` on `node` as a `#` line of its own at column `ind`, and returns how many it wrote.
+put_comment_lines :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index, role: core.Role, ind: int) -> (written: int) {
+	it := core.facts_of(doc, node, role)
+	for body in core.fact_next(&it) {
+		if comment_ok(body) {
+			written += 1
+			for _ in 0 ..< ind {
+				put_byte(out, ' ')
+			}
+			put_byte(out, '#')
+			put_text(out, body)
+			put_byte(out, '\n')
+		}
+	}
+	return
+}
+
+// Writes the first comment of `node` that ends on its line as ` #` and its body, and returns whether it wrote one.
+put_comment_inline :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index) -> bool {
+	it := core.facts_of(doc, node, .Comment_Inline)
+	for body in core.fact_next(&it) {
+		if comment_ok(body) {
+			put_text(out, " #")
+			put_text(out, body)
+			return true
+		}
+	}
+	return false
+}
+
 // A `Raw`, the text of one value of the format, checked and written as it is. An empty one is null. Text around the value
 // is refused, since it is no part of one value. Its containers nest inside the `top` frames open.
 @(private)

@@ -4,7 +4,9 @@ package jq
 // dates (`gmtime`, `localtime`, `mktime`, `strftime`, `strflocaltime`, `strptime`).
 
 import "core:c/libc"
+import "core:fmt"
 import "core:math"
+import "core:strconv"
 import "core:strings"
 import "core:sync"
 
@@ -214,3 +216,241 @@ days_from_civil :: proc(y, m, d: i64) -> i64 {
 	return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468
 }
 
+
+// ---- RFC 3339
+
+// fromrfc3339: `YYYY-MM-DDThh:mm:ss[.fraction](Z|+hh:mm|-hh:mm)` as seconds since the epoch, the fraction kept. The
+// ABNF's `t` and `z` are read, a space for the `T` is not, and second 60 only at the end of a UTC day.
+fn_fromrfc3339 :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
+	s, is_str := string_of(v)
+	if !is_str {
+		return nil, fail(ip, "%s requires string inputs", name)
+	}
+	seconds, ok := rfc3339_seconds(s)
+	if !ok {
+		return nil, fail(ip, "date \"%s\" is not an RFC 3339 date-time", s)
+	}
+	return num(seconds), .Go
+}
+
+@(private = "file")
+rfc3339_seconds :: proc(s: string) -> (seconds: f64, ok: bool) {
+	digits :: proc(s: string, at, n: int) -> (v: i64, ok: bool) {
+		for c in transmute([]byte)s[at:at + n] {
+			if c < '0' || c > '9' {
+				return 0, false
+			}
+			v = v * 10 + i64(c - '0')
+		}
+		return v, true
+	}
+	if len(s) < 20 || s[4] != '-' || s[7] != '-' || s[10] != 'T' && s[10] != 't' || s[13] != ':' || s[16] != ':' {
+		return 0, false
+	}
+	year := digits(s, 0, 4) or_return
+	month := digits(s, 5, 2) or_return
+	day := digits(s, 8, 2) or_return
+	hour := digits(s, 11, 2) or_return
+	minute := digits(s, 14, 2) or_return
+	second := digits(s, 17, 2) or_return
+	leap_year := year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+	days_in_month := [12]i64{31, 29 if leap_year else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+	if month < 1 || month > 12 || day < 1 || day > days_in_month[month - 1] || hour > 23 || minute > 59 || second > 60 {
+		return 0, false
+	}
+	at := 19
+	fraction := 0.0
+	if s[at] == '.' {
+		end := at + 1
+		for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+			end += 1
+		}
+		if end == at + 1 {
+			return 0, false
+		}
+		fraction, _ = strconv.parse_f64(s[at:end])
+		at = end
+	}
+	offset: i64
+	switch {
+	case at == len(s) - 1 && (s[at] == 'Z' || s[at] == 'z'):
+	case at == len(s) - 6 && (s[at] == '+' || s[at] == '-') && s[at + 3] == ':':
+		hours := digits(s, at + 1, 2) or_return
+		minutes := digits(s, at + 4, 2) or_return
+		if hours > 23 || minutes > 59 {
+			return 0, false
+		}
+		offset = hours * 3600 + minutes * 60
+		if s[at] == '-' {
+			offset = -offset
+		}
+	case:
+		return 0, false
+	}
+	utc := days_from_civil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second - offset
+	if second == 60 && utc %% 86400 != 0 {
+		return 0, false
+	}
+	return f64(utc) + fraction, true
+}
+
+// torfc3339: seconds since the epoch as an RFC 3339 date-time in UTC, years 0000 to 9999. The fraction is written
+// only when there is one, with the digits of the number's shortest spelling.
+fn_torfc3339 :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
+	n, ok := number_of(v)
+	if !ok || math.is_nan(n.f) {
+		return nil, fail(ip, "%s() requires numeric inputs", name)
+	}
+	if n.f < -62167219200 || n.f >= 253402300800 {
+		return nil, fail(ip, "%s() input is outside the years 0000 to 9999", name)
+	}
+	spelled: [64]byte
+	text := strconv.write_float(spelled[:], math.abs(n.f), 'f', -1, 64)
+	text = text[1:] // past the sign
+	whole, _, fraction := strings.partition(text, ".")
+	secs, _ := strconv.parse_i64(whole)
+	if n.f < 0 {
+		// Floor: the fraction is what the negative number lacks to the next whole second.
+		secs = -secs
+		if fraction != "" {
+			secs -= 1
+			complement := make([]byte, len(fraction), context.temp_allocator)
+			for c, i in transmute([]byte)fraction {
+				complement[i] = '0' + (9 if i < len(fraction) - 1 else 10) - (c - '0')
+			}
+			fraction = string(complement)
+		}
+	}
+	days := math.floor_div(secs, 86400)
+	rest := secs - days * 86400
+	tm: libc.tm
+	utc_time(libc.time_t(secs), &tm)
+	b := strings.builder_make()
+	fmt.sbprintf(&b, "%04d-%02d-%02dT%02d:%02d:%02d", int(tm.tm_year) + 1900, int(tm.tm_mon) + 1, int(tm.tm_mday), rest / 3600, rest % 3600 / 60, rest % 60)
+	if fraction != "" {
+		strings.write_byte(&b, '.')
+		strings.write_string(&b, fraction)
+	}
+	strings.write_byte(&b, 'Z')
+	return strings.to_string(b), .Go
+}
+
+// ---- Number format
+
+// numfmt(spec): a number as text by a printf-like spec, `%[flags][width][.precision]conversion` between literal text
+// (`%%` is a percent sign). The conversions are `d` (the number cut toward zero), `f` and `e`; the flags are `,`
+// (thousands separators), `0` (pad with zeros) and `-` (pad on the right).
+fn_numfmt :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
+	n, ok := number_of(v)
+	if !ok {
+		return nil, fail(ip, "%s (%s) number required", type_name(v), brief(ip, v))
+	}
+	spec, is_str := string_of(args[0])
+	if !is_str {
+		return nil, fail(ip, "numfmt format must be a string")
+	}
+	if math.is_nan(n.f) || math.is_inf(n.f) {
+		return nil, fail(ip, "numfmt requires a finite number")
+	}
+	b := strings.builder_make()
+	converted := false
+	for i := 0; i < len(spec); i += 1 {
+		if spec[i] != '%' {
+			strings.write_byte(&b, spec[i])
+			continue
+		}
+		if i + 1 < len(spec) && spec[i + 1] == '%' {
+			strings.write_byte(&b, '%')
+			i += 1
+			continue
+		}
+		used, valid := write_number_conversion(&b, spec[i + 1:], n.f)
+		if !valid || converted {
+			return nil, fail(ip, "numfmt: invalid format \"%s\"", spec)
+		}
+		converted = true
+		i += used
+	}
+	if !converted {
+		return nil, fail(ip, "numfmt: invalid format \"%s\"", spec)
+	}
+	return strings.to_string(b), .Go
+}
+
+// The conversion `spec` starts with, after its `%`, written for `x` onto `b`, and the bytes it took.
+@(private = "file")
+write_number_conversion :: proc(b: ^strings.Builder, spec: string, x: f64) -> (used: int, ok: bool) {
+	thousands, zero_pad, left := false, false, false
+	flags: for ; used < len(spec); used += 1 {
+		switch spec[used] {
+		case ',':
+			thousands = true
+		case '0':
+			zero_pad = true
+		case '-':
+			left = true
+		case:
+			break flags
+		}
+	}
+	width, precision := 0, 6
+	for ; used < len(spec) && spec[used] >= '0' && spec[used] <= '9'; used += 1 {
+		width = width * 10 + int(spec[used] - '0')
+	}
+	if used < len(spec) && spec[used] == '.' {
+		used += 1
+		precision = 0
+		for ; used < len(spec) && spec[used] >= '0' && spec[used] <= '9'; used += 1 {
+			precision = precision * 10 + int(spec[used] - '0')
+		}
+	}
+	if used >= len(spec) || width > 1000 || precision > 100 {
+		return 0, false
+	}
+	conversion := spec[used]
+	used += 1
+	spelled: [512]byte
+	text: string
+	switch conversion {
+	case 'd':
+		text = strconv.write_float(spelled[:], math.trunc(x), 'f', 0, 64)
+	case 'f':
+		text = strconv.write_float(spelled[:], x, 'f', precision, 64)
+	case 'e':
+		text = strconv.write_float(spelled[:], x, 'e', precision, 64)
+	case:
+		return 0, false
+	}
+	sign := "-" if text[0] == '-' else ""
+	text = text[1:]
+	if conversion == 'd' && text == "0" {
+		sign = "" // a truncated -0.5 is 0
+	}
+	if thousands && conversion != 'e' {
+		whole := text[:strings.index_byte(text, '.')] if strings.contains_rune(text, '.') else text
+		grouped := strings.builder_make(context.temp_allocator)
+		for c, k in transmute([]byte)whole {
+			if k > 0 && (len(whole) - k) % 3 == 0 {
+				strings.write_byte(&grouped, ',')
+			}
+			strings.write_byte(&grouped, c)
+		}
+		text = strings.concatenate({strings.to_string(grouped), text[len(whole):]}, context.temp_allocator)
+	}
+	pad := max(0, width - len(sign) - len(text))
+	switch {
+	case left:
+		strings.write_string(b, sign)
+		strings.write_string(b, text)
+		strings.write_string(b, strings.repeat(" ", pad, context.temp_allocator))
+	case zero_pad:
+		strings.write_string(b, sign)
+		strings.write_string(b, strings.repeat("0", pad, context.temp_allocator))
+		strings.write_string(b, text)
+	case:
+		strings.write_string(b, strings.repeat(" ", pad, context.temp_allocator))
+		strings.write_string(b, sign)
+		strings.write_string(b, text)
+	}
+	return used, true
+}

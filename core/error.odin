@@ -173,7 +173,7 @@ write_fault_message :: proc(w: io.Writer, src: []u8, f: Fault) -> io.Error {
 Document_Error_Kind :: enum u8 {
 	None,
 	Walk, // the walk's fault, in `inner`
-	Duplicate_Key, // a build under `.Refuse` met a key that repeats one of its object's, at the second key's first byte, or a commit's named cell is one its record holds, at the header cell
+	Duplicate_Key, // a build under `.Refuse` met a key that repeats one of its object's, or a YAML read by name one of the same text and another type, at the second key's first byte, or a commit's named cell is one its record holds, at the header cell
 	No_Memory, // an allocation the document or the edit list owns was refused, at no byte
 	Bad_Index, // an edit names no node it may change: no such node, a key of a member, the root, a table's record
 	Bad_Position, // an insert position is past the container's length
@@ -279,11 +279,6 @@ EDIT_REASONS := [Edit_Reason]string {
 	.No_Spelling = "the format has no spelling for the value",
 }
 
-// Writes `e`'s code: `document.` then the kind's code, as in `document.walk` or `document.duplicate_key`. The
-// `write_code` overload below exposes it beside the fault's code.
-@(private)
-write_document_code :: proc(w: io.Writer, e: Document_Error) -> io.Error {return write_coded(w, "document.", DOCUMENT_KIND_RULES[e.kind].code)}
-
 // Writes `prefix` then `code`.
 @(private)
 write_coded :: proc(w: io.Writer, prefix, code: string) -> io.Error {
@@ -335,7 +330,7 @@ Path_Error_Kind :: enum u8 {
 	Over_Capacity, // a read past `MAX_PATHS` paths, a path past `MAX_STEPS` steps or of `MAX_STEPS` with a `Descend`, at no byte
 	No_Memory, // an allocation the read owns was refused, at no byte
 	Walk, // the walk's fault, in `inner`
-	Duplicate_Key, // a read under `.Refuse` met a key that repeats one of its object's, at the second key's first byte
+	Duplicate_Key, // a read under `.Refuse` met a key that repeats one of its object's, or a YAML read by name one of the same text and another type, at the second key's first byte
 	Unsupported, // a query of a partial document, or a read through a handle with no format, at no byte
 }
 
@@ -418,9 +413,6 @@ path_error :: proc(e: Document_Error) -> Path_Error {
 	return {kind = .No_Memory}
 }
 
-@(private)
-write_path_code :: proc(w: io.Writer, e: Path_Error) -> io.Error {return write_coded(w, "path.", PATH_KIND_RULES[e.kind].code)}
-
 // Writes `line:col: message` for `e`, the position in the path's text for a `.Bad_Path` that holds it and in `src` for
 // a `.Duplicate_Key`. A `.Bad_Path` names its text and its reason. `.Walk` writes its fault. `lines` is as in
 // `render_fault`.
@@ -464,7 +456,7 @@ Typed_Error_Kind :: enum u8 {
 	Unknown_Field, // a key the type does not name, the last step names it
 	Missing_Tag, // an object for a union that reads by tag has no tag member
 	Repeated_Tag, // an object for a union that reads by tag has two
-	Duplicate_Key, // a read under `.Refuse` met a key that repeats one of its object's
+	Duplicate_Key, // a read under `.Refuse` met a key that repeats one of its object's, or a YAML read by name one of the same text and another type
 	No_Memory,
 	Bad_Option, // an option or a target the call cannot take, at no byte, `want.text` saying why where it can
 	Plan_Mismatch, // a plan built for another type or format, at no byte
@@ -665,9 +657,6 @@ move_typed_error :: proc(e: ^Typed_Refusal, by: u64) {
 		}
 	}
 }
-
-@(private)
-write_typed_code :: proc(w: io.Writer, e: Typed_Refusal) -> io.Error {return write_coded(w, "typed.", TYPED_KIND_RULES[e.kind].code)}
 
 // Writes `line:col: message at path` for `e`, the position left out where the kind has no byte. `.Walk` writes its
 // fault. `lines` is as in `render_fault`.
@@ -1021,13 +1010,13 @@ write_code :: proc(w: io.Writer, err: Error) -> io.Error {
 	case runtime.Allocator_Error:
 		return write_coded(w, "", KIND_RULES[.No_Memory].code if e == .Out_Of_Memory else "allocator_error")
 	case Document_Error:
-		return write_document_code(w, e)
+		return write_coded(w, "document.", DOCUMENT_KIND_RULES[e.kind].code)
 	case Path_Error:
-		return write_path_code(w, e)
+		return write_coded(w, "path.", PATH_KIND_RULES[e.kind].code)
 	case Typed_Error:
-		return write_typed_code(w, typed_refusal_of(e))
+		return write_coded(w, "typed.", TYPED_KIND_RULES[typed_refusal_of(e).kind].code)
 	case Typed_Error_Kind:
-		return write_typed_code(w, Typed_Refusal{kind = e})
+		return write_coded(w, "typed.", TYPED_KIND_RULES[e].code)
 	}
 	return nil
 }

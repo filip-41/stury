@@ -207,7 +207,7 @@ model_reads_records_as_a_whole_text_loads :: proc(t: ^testing.T) {
 	text := "id,name,age,note\n1,ada,30,\n2,b,10,x\nx,cy,20,\n"
 	spec := dsv.Spec.Csv
 	sink: typed.Sink
-	testing.expect_value(t, reading(t, &m, dsv.records_open(transmute([]u8)text, spec), &sink), 3)
+	testing.expect_value(t, reading(t, &m, records.open(transmute([]u8)text, dsv.as(spec)), &sink), 3)
 	testing.expect_value(t, spelled(&sink), "Too_Short/name;Below_Minimum/age;Wrong_Kind/id;")
 	whole: typed.Sink
 	whole_model, _ := model.compile(&reg, []Row, dsv.checks(.Csv))
@@ -217,7 +217,7 @@ model_reads_records_as_a_whole_text_loads :: proc(t: ^testing.T) {
 	streamed: typed.Sink
 	reader := strings.Reader{}
 	strings.reader_init(&reader, text)
-	testing.expect_value(t, reading(t, &m, dsv.records_open_stream(strings.reader_to_stream(&reader), spec), &streamed), 3)
+	testing.expect_value(t, reading(t, &m, records.open_stream(strings.reader_to_stream(&reader), dsv.as(spec)), &streamed), 3)
 	testing.expect_value(t, spelled(&streamed), spelled(&sink))
 	testing.expect_value(t, offsets(&streamed), offsets(&sink))
 }
@@ -250,7 +250,7 @@ model_reports_the_header_of_a_table_with_no_row :: proc(t: ^testing.T) {
 	_ = model.load(&whole_model, transmute([]u8)text, &listed, &whole)
 	testing.expect_value(t, spelled(&whole), "Missing_Field/age;")
 	sink: typed.Sink
-	testing.expect_value(t, reading(t, &m, dsv.records_open(transmute([]u8)text, spec), &sink), 1)
+	testing.expect_value(t, reading(t, &m, records.open(transmute([]u8)text, dsv.as(spec)), &sink), 1)
 	testing.expect_value(t, spelled(&sink), "Missing_Field/age;")
 }
 
@@ -277,12 +277,12 @@ model_reads_ndjson_records_whole_or_streamed :: proc(t: ^testing.T) {
 	text := `{"id":1,"name":"ada","age":30}` + "\n" + `{"id":2,"name":"b","age":10}` + "\n" + `{"id":"x","name":"cy","age":20}` + "\n"
 	spec := json.Spec.Json
 	whole: typed.Sink
-	testing.expect_value(t, reading(t, &m, json.records_open(transmute([]u8)text, spec), &whole), 3)
+	testing.expect_value(t, reading(t, &m, records.open(transmute([]u8)text, json.as(spec)), &whole), 3)
 	testing.expect_value(t, spelled(&whole), "Too_Short/name;Below_Minimum/age;Wrong_Kind/id;")
 	streamed: typed.Sink
 	reader := strings.Reader{}
 	strings.reader_init(&reader, text)
-	testing.expect_value(t, reading(t, &m, json.records_open_stream(strings.reader_to_stream(&reader), spec), &streamed), 3)
+	testing.expect_value(t, reading(t, &m, records.open_stream(strings.reader_to_stream(&reader), json.as(spec)), &streamed), 3)
 	testing.expect_value(t, spelled(&streamed), spelled(&whole))
 	testing.expect_value(t, offsets(&streamed), offsets(&whole))
 }
@@ -503,14 +503,14 @@ csv_model_judges_the_header_once_whole_or_streamed :: proc(t: ^testing.T) {
 	texts := [?]string{"id,name,age,name\n1,ada,30,bo\n", "id,name\n1,ada\n2,bob\n", "id,name,age,zip\n1,ada,30,x\n2,b,40,y\n", "id,name\n", "id,name,age,name\n"}
 	for text in texts {
 		whole: typed.Sink
-		reading(t, &m, dsv.records_open(transmute([]u8)text, spec), &whole)
+		reading(t, &m, records.open(transmute([]u8)text, dsv.as(spec)), &whole)
 		if text == texts[0] {
 			testing.expect_value(t, spelled(&whole), "Duplicate_Key/name;")
 		}
 		for step in ([?]int{1, 3, 7}) {
 			d := Drip{text, 0, step}
 			streamed: typed.Sink
-			reading(t, &m, dsv.records_open_stream(io.Stream{drip_proc, &d}, spec), &streamed)
+			reading(t, &m, records.open_stream(io.Stream{drip_proc, &d}, dsv.as(spec)), &streamed)
 			testing.expectf(t, spelled(&streamed) == spelled(&whole), "step %d, %q: %q, want %q", step, text, spelled(&streamed), spelled(&whole))
 		}
 	}

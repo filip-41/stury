@@ -21,20 +21,20 @@ The examples below assume `stury` is on your `PATH`; otherwise use `build/stury`
 stury [-c] [-r] [-j] [--raw-output0] [-a] [-S] [-C|-M] [--tab|--indent N] [--unbuffered] [-b]
       [-n] [-R] [-s] [-e] [-f FILE] [-L DIR] [--seq] [--stream|--stream-errors]
       [--from FORMAT] [--to FORMAT] [--grow-header]
-      [--max-depth N] [--follow] [--explain]
+      [--max-depth N] [--threads N] [--follow] [--explain]
       [--alias-limit N] [--merge-keys] [--expansion-limit N] [--unread-entities]
       [--arg NAME VALUE] [--argjson NAME JSON] [--slurpfile NAME FILE] [--rawfile NAME FILE]
       [FILTER] [FILE...] [--args STRING...|--jsonargs JSON...]
-stury check [--from FORMAT|--seq] [--max-depth N] [--schema FILE [--schema-ref DIR] [--schema-draft D] [--format-assert]
+stury check [--from FORMAT|--seq] [--max-depth N] [--threads N] [--schema FILE [--schema-ref DIR] [--schema-draft D] [--format-assert]
             [--max-errors N] [--report lines|basic|problem]] [FILE...]
 stury check --filter FILTER --schema FILE [--from FORMAT] [-n] [-s] [-R] [--arg...] [-c]
-stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--schema-draft D] [--format-assert] [--max-errors N]] [--in-place|--check] [--indent N|--tab] [--max-depth N] [FILE...]
+stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--schema-draft D] [--format-assert] [--max-errors N]] [--in-place|--check] [--indent N|--tab] [--max-depth N] [--threads N] [FILE...]
 stury edit [--from FORMAT|--seq] [--in-place|--check|--diff] [--max-depth N] [-f FILE] [-L DIR] [--arg...] FILTER [FILE...]
 stury diff [--from FORMAT] [--set|--position] [--key [PATH=]MEMBER]... [--facts] [--json] OLD NEW
 stury diff --old-schema FILE --new-schema FILE [--compat backward|forward|full] [--json]
 stury diff --old-schema FILE DATA | stury diff DATA --new-schema FILE
 stury diff --shape [--from FORMAT] OLD NEW
-stury schema infer [--from FORMAT] [--ranges] [FILE...]
+stury schema infer [--from FORMAT] [--ranges] [--threads N] [FILE...]
 stury schema sample [--to FORMAT] [--count N] [--seed N] [--invalid] [--comments] [--schema-ref DIR] [--schema-draft D] SCHEMA
 stury schema gen [--package NAME] [--format-assert] [--schema-ref DIR] [--schema-draft D] SCHEMA
 stury -h | -V | --build-configuration
@@ -110,6 +110,7 @@ runner and its bytecode listings, which stury does not have) and adds its own. E
 | `--alias-limit N`, `--merge-keys` | How `--from yaml` reads: the bytes aliases may read again (1 or more), and `<<` as a merge key ([Formats](#formats)). With another `--from`, a usage error: `--merge-keys applies to --from yaml`. |
 | `--expansion-limit N`, `--unread-entities` | How `--from xml` reads: the bytes entity references may expand to in all (1 or more), and a reference to an entity no declaration stury read names, read as its own text ([Formats](#formats)). With another `--from`, a usage error: `--unread-entities applies to --from xml`. |
 | `--max-depth N` | Refuse nesting past N levels (1024 by default, up to 2^20, where jq's limit is 10000). A value deeper than the default also runs on one thread. |
+| `--threads N` | `N` threads share a long input, the calling thread counted (`N` is 1 or more; one per core by default). `--threads 1` starts no other thread. It applies to a filter run, `check`, `fmt` and `schema infer`, and the output, the exit status and `--explain`'s counts are the same at every `N`. A run that starts a thread for stack depth (`--max-depth` past 1024) starts it whatever `N` is: `N` counts the threads that share the work, not that one. |
 | `--follow` | With one named file, answer each record as it is appended, like `tail -f FILE | stury FILTER` without the pipe ([`--follow`](#--follow)). |
 | `--explain` | Write the plan the filter runs under and what the run did to stderr ([`--explain`](#--explain)), and run the filter as without it. |
 
@@ -250,12 +251,13 @@ usage error.
 | `--from jsonc` | Validate JSONC as `stury --from jsonc .` reads it, to the same limits. A comment's text holds no escape. |
 | `--from json5` | Validate JSON5 as `stury --from json5 .` reads it, to the same limits. `Infinity` and `NaN` fail, since jq has no value for them. |
 | `--from toml` | Validate TOML 1.1 as `stury --from toml .` reads it: a repeated key, a table defined twice and a malformed datetime are faults. An empty input is valid. |
-| `--from yaml` | Validate YAML as `stury --from yaml .` reads it, every document of the stream. A repeated key is a fault, and so is an alias to an anchor that is not defined. A collection as a key is valid YAML and a fault to read. A text of comments alone is valid. |
+| `--from yaml` | Validate YAML as `stury --from yaml .` reads it, every document of the stream. A repeated key is valid, and an alias to an anchor that is not defined is a fault. A collection as a key is valid YAML and a fault to read. A text of comments alone is valid. |
 | `--from xml` | Validate XML as `stury --from xml .` reads it: a mismatched tag, an undeclared prefix, a reference to an entity no declaration names and a repeated attribute are faults. An empty input is a fault. |
 | `--from html` | Validate HTML by the WHATWG parse errors: the first one is the fault (`Document without a DOCTYPE`), though `stury --from html .` reads any text, recovering as a browser does. |
 | `--from cbor` | Validate CBOR as `stury --from cbor .` reads it, every item of the sequence: a truncated item, a reserved head and invalid UTF-8 in a text string are faults. An empty input is valid. |
 | `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. A fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An empty input is valid, as the library takes it, and so is a header alone. A cell is read as a filter run reads it: a string, or under `--infer` a number, `true` or `false` when its text is exactly one, so `type: integer` takes the cell `1` only with `--infer`, and `oneOf: [string, integer]` takes it either way. An empty unquoted cell is a `null`, and a quoted `""` is the empty string. `schema infer` reads cells the same way, so a schema it writes with `--infer` is checked with `--infer`. |
 | `--max-depth N` | As [above](#sturys-own-options). |
+| `--threads N` | As [above](#sturys-own-options). |
 | `--schema FILE` | Also check each input against the JSON Schema in `FILE` (drafts 4 to 2020-12). See [Schema check](#schema-check). |
 | `FILE...` | One file per argument, read as the filter reads them. |
 
@@ -408,7 +410,7 @@ comes back as the string `"5"`. A value the output cannot write is exit 5 with t
 `FILTER`.
 
 ```sh
-stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--schema-draft D] [--format-assert] [--max-errors N]] [--in-place|--check] [--indent N|--tab] [--max-depth N] [FILE...]
+stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--schema-draft D] [--format-assert] [--max-errors N]] [--in-place|--check] [--indent N|--tab] [--max-depth N] [--threads N] [FILE...]
 ```
 
 | Format | What `fmt` writes |
@@ -433,7 +435,7 @@ stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--sch
 - A CSV or TSV header that names a column twice is refused (`Duplicate header name`), as `check` and a filter run
   refuse it, whatever `--to` is.
 - `fmt` never colours its output, and it refuses every option that shapes a filter run (`-C`, `-r`, ...,
-  `--seq`): exit 2. `-c` is `--indent 0`, and `--indent N` and `--tab` apply to a JSON-like `--to`, and `--max-depth N` and, with a
+  `--seq`): exit 2. `-c` is `--indent 0`, and `--indent N` and `--tab` apply to a JSON-like `--to`, and `--max-depth N`, `--threads N` and, with a
   CSV-like `--to`, `--grow-header` apply. A JSON-like output is written at every depth `--max-depth` reads.
 
 | Flag | Effect |
@@ -668,7 +670,7 @@ verdict a last record.
 | `jsonc` | JSONC: comments and trailing commas ([Comments in the CLI](#comments-in-the-cli)). | Each value with the comments it was read with. |
 | `json5` | JSON5 1.0.0, one text per input, read as written (comments kept). Numbers print in JSON's spelling. `Infinity` and `NaN` end the run, as they have no JSON value. Positions (`input_line_number`, error lines) count the JSON5 text; nesting follows `--max-depth`; `--argjson`, `--slurpfile`, `--jsonargs` and `fromjson` read JSON5. | Not written: `--to jsonc` writes the values and their comments. `fmt --in-place` and `fmt --check` are refused. |
 | `toml` | TOML 1.1, one document per input (an empty input is `{}`). Tables read as objects in document order, a datetime as a string that `.@tag` names (`datetime`, `datetime-local`, `date-local`, `time-local`), and `.@style` tells a string's quoting (`basic`, `literal`, `multiline`, `multiline_literal`, `bare`) and a number's form (`integer`, `float`, `hex`, `octal`, `binary`, `inf`, `nan`). Hex, octal and binary integers print in decimal, `-0` as `0`. `inf` and `nan` have no JSON value: a filter sees jq's spelling. `--follow`, `--seq`, `-R` and `--stream` are refused. | Each output as a TOML text ([TOML output](#toml-output)). |
-| `yaml` | YAML 1.2 with the core schema, one input per document (a stream of several is several inputs, and `-s` slurps them). Plain scalars read as `null`, booleans, integers (decimal, `0x` and `0o`) and floats (`.5`, `1e3`, `.inf`, `.nan`), and every other plain scalar, a quoted one and a block one is a string. A key is its text, so `1` and `"1"` repeat each other, and a repeated key is a parse error. A tag of the core schema forces the type (`!!str 12`, `!!int "12"`), a scalar its core tag does not hold (`!!int yes`) is a parse error, and any other tag makes a string. An alias reads as its anchor's node, up to a limit on the bytes aliases read again: ten times the text's size and at least 1 MiB, or `--alias-limit N`. `--merge-keys` reads a `<<` member as YAML 1.1's merge key: the members of the mapping it names that the host mapping lacks are added after its own. Without it `<<` is an ordinary key. `%YAML 1.1` reads with the 1.2 rules. A key that is a collection is a parse error. A text with no document, only comments, has no input. `.@tag` is the node's tag as written, and `.@style` is `plain`, `single`, `double`, `literal`, `folded`, `flow` or `block`. `--follow` answers each document once a `---` or its `...` line ends it. `--seq`, `-R` and `--stream` are refused. | Each output is one document ([YAML output](#yaml-output)). |
+| `yaml` | YAML 1.2 with the core schema, one input per document (a stream of several is several inputs, and `-s` slurps them). Plain scalars read as `null`, booleans, integers (decimal, `0x` and `0o`) and floats (`.5`, `1e3`, `.inf`, `.nan`), and every other plain scalar, a quoted one and a block one is a string. A repeated key keeps its last value as in JSON, and two keys repeat when they resolve to one type and value, so `a` and `"a"` do, and `1` and `0x1`. `1` and `"1"` are two keys, and a jq object, which names members by text, holds neither them nor `1` and `0x1`, so the second is a parse error, `Duplicate key`. A tag of the core schema forces the type (`!!str 12`, `!!int "12"`), a scalar its core tag does not hold (`!!int yes`) is a parse error, and any other tag makes a string. An alias reads as its anchor's node, up to a limit on the bytes aliases read again: ten times the text's size and at least 1 MiB, or `--alias-limit N`. `--merge-keys` reads a `<<` member as YAML 1.1's merge key: the members of the mapping it names that the host mapping lacks are added after its own. Without it `<<` is an ordinary key. `%YAML 1.1` reads with the 1.2 rules. A key that is a collection is a parse error. A text with no document, only comments, has no input. `.@tag` is the node's tag as written, and `.@style` is `plain`, `single`, `double`, `literal`, `folded`, `flow` or `block`. `--follow` answers each document once a `---` or its `...` line ends it. `--seq`, `-R` and `--stream` are refused. | Each output is one document ([YAML output](#yaml-output)). |
 | `xml` | XML 1.0 with its internal subset, one document per input. An element is an object member named as written (`p:a` keeps its prefix, and a lookup by `{uri}local` finds it too), an element with no child element is its text (null when empty) and one with children is an object whose text runs are `#text` members. A name that repeats among an element's members is one member, an array of each of them in document order, and a name that stands once is a single value, so `<r>a<b>1</b>c<b>2</b></r>` reads as `{"r":{"#text":["a","c"],"b":["1","2"]}}`. `--to json` and every other format without attributes write that value. Text is a string, or with `--infer` a number, boolean or string by its spelling. Attributes are not members: `.&k` reads attribute `k` by its name as written (`.&"x:k"` quoted), `.@attrs` is an object of them all, `.@name` the element's name, `.@namespace` its namespace, `.@content` its text with that of its descendants, `.@pi` the processing instructions and `.@doctype` the document type ([Reading and writing](#reading-and-writing)). A prefix with no declaration, a reserved prefix or namespace, and two attributes with one expanded name are parse errors. The internal subset is read: a declared entity expands where it is referred to, markup included, and an attribute the subset gives a default is an attribute of every element that lacks it. References that expand past 8 MiB in all, or past a hundred times the text's size when that is more, are a parse error, or past `--expansion-limit N` bytes. No external subset or external entity is read: a reference to an entity only one of them could declare is a parse error, or with `--unread-entities` reads as its own text (`&e;`). White space between elements is no text. `--follow`, `--seq`, `-R` and `--stream` are refused. | Each output as an XML text ([XML output](#xml-output)). |
 | `html` | HTML as a browser with scripting disabled builds its tree, one document per input, read in XML's shape: the tree's elements are members named in their canonical case (`<IMAGE>` is `img`), with the elements the tree adds (`html`, `head`, `body`, `tbody`), text as `#text` members or the element itself, a repeated name as an array as for XML, and attributes, a valueless one `""` and a repeated one by its first, read by `.&k` and `.@attrs`. Every element has a `.@namespace` (HTML, SVG or MathML), and `.@name`, `.@content` and `.@doctype` read as for XML. Any text reads: a parse error is recovered from as the tree says, and only `check` tells it. `--infer` types text as for XML. A text in another encoding than UTF-8 is a fault. A fragment, read in a context element, and the scripting flag are not offered. `--follow`, `--seq`, `-R` and `--stream` are refused. | The tree as the WHATWG serialization writes it ([HTML output](#html-output)). |
 | `cbor` | CBOR (RFC 8949), each item of an RFC 8742 sequence one input (an empty input has none). Any well-formed and valid item reads, in any serialization. A byte string reads as the string of its base64 (RFC 4648), as the library writes one as JSON, and a byte string key as its bytes. An integer key reads as its decimal text. A tag reads as its content, and `.@tag` gives its number. A bignum reads as its number, `undefined` and a simple value as `null`, and a NaN or an infinity as jq spells it. A fault is placed by line and column, counting 0x0A bytes as line ends. `--follow`, `--seq`, `-R` and `--stream` are refused. | Each output as one CBOR item ([CBOR output](#cbor-output)). |
@@ -712,7 +714,7 @@ Every input is read by one grammar, the library's: `json.validate` with `.Json`,
 
 ### Long input
 
-A file of 1 MiB or more is answered on all cores when the filter works on one record, or one entry, at a time. The
+A file of 1 MiB or more is answered on all cores, or on the `--threads N` given, when the filter works on one record, or one entry, at a time. The
 output, the exit status and the errors are those of a serial run: each piece's output is written in source order. The
 pieces are:
 
@@ -1182,6 +1184,47 @@ it, travelling with the value as a comment does, and `edit --from xml` and `edit
   `length`, `tojson`, `tostring`, `paths`, `tostream`, `to_entries` and the `@` formats answer as if there
   were none, and `paths` yields no comment step.
 
+## Builtins beyond jq
+
+These are stury's own, not in jq 1.8.2, and `builtins` lists them. Each takes the input and arguments as values,
+gives one output for each combination, and refuses a wrong kind with exit 5. A statistic reads the numbers of an
+array, `f` of each element for the form with `f`, and gives `null` for none. A value that is not a number is an error,
+`string ("a") cannot be summarized`.
+
+| Builtin | Gives | Example |
+| --- | --- | --- |
+| `avg`, `avg(f)` | the mean | `[1,2,3,4] \| avg` is `2.5` |
+| `variance`, `variance(f)` | the population variance, over `n` | `[1,2,3,4] \| variance` is `1.25` |
+| `stddev`, `stddev(f)` | the population standard deviation | `[1,2,3,4] \| stddev` is `1.118033988749895` |
+| `median`, `median(f)` | `quantile(0.5)` | `[1,2,3,4] \| median` is `2.5` |
+| `quantile(p)`, `quantile(p; f)` | the value at `p` from 0 to 1, interpolated linearly between neighbours (numpy's and R's type 7); another `p` is an error | `[1,2,3,4] \| quantile(0.25)` is `1.75` |
+| `frequency`, `frequency(f)` | `[{value, count}]` of `f` of each element, the largest count first, equal counts in `sort` order of the value | `["a","b","a"] \| frequency` is `[{"value":"a","count":2},{"value":"b","count":1}]` |
+| `union(b)`, `intersect(b)`, `except(b)` | the elements in either, in both, or only in the input, sorted and without repeats as `unique` gives them | `[1,2,2] \| union([3])` is `[1,2,3]` |
+| `fill_forward` | each `null` replaced by the last value before it that was not `null`, per member for an array of objects and per element otherwise; leading nulls stay | `[1,null,2] \| fill_forward` is `[1,1,2]` |
+| `melt($ids)`, `melt($ids; $var; $val)` | wide to long: an object per member of a row that is not in `$ids`, holding the row's `$ids` members and `{($var): name, ($val): value}`; the names default to `"variable"` and `"value"` | `[{"id":1,"x":5}] \| melt(["id"])` is `[{"id":1,"variable":"x","value":5}]` |
+| `pivot($ids; $var; $val)` | long to wide: an object per distinct `$ids` members, sorted, with a member for each value of `$var` anywhere, sorted, holding `$val` of the last row with it, or `null` | `[{"id":1,"k":"x","v":5},{"id":2,"k":"y","v":6}] \| pivot(["id"]; "k"; "v")` is `[{"id":1,"x":5,"y":null},{"id":2,"x":null,"y":6}]` |
+| `fromrfc3339` | Seconds since the epoch of an RFC 3339 date-time with any offset, the fraction kept. `T` or `t`, `Z` or `z`; a space for the `T`, no offset and a day the month lacks are refused; second 60 only at the end of a UTC day. | `"2024-06-01T12:34:56.123+02:00" \| fromrfc3339` is `1717238096.123` |
+| `torfc3339` | A number of seconds as an RFC 3339 date-time in UTC, years 0000 to 9999, `Z`, the fraction only when there is one. | `1717238096.123 \| torfc3339` is `"2024-06-01T10:34:56.123Z"` |
+| `sha1`, `sha256`, `sha512`, `md5` | The digest of a string's UTF-8 bytes as lowercase hex. | `"abc" \| sha256` is `"ba7816bf...15ad"` |
+| `hmac_sha256(key)`, `hmac_sha512(key)` | The HMAC (RFC 2104) of the string under the key's bytes, as lowercase hex. | `"what do ya want for nothing?" \| hmac_sha256("Jefe")` is `"5bdcc146...3843"` |
+| `crc32` | The IEEE CRC-32 of the string's bytes, a number. | `"123456789" \| crc32` is `3421780262` |
+| `hex_encode`, `hex_decode` | A string's bytes as lowercase hex, and back (either case). | `"abc" \| hex_encode` is `"616263"` |
+| `base64url_encode`, `base64url_decode` | RFC 4648 section 5, without padding on output, with or without it on input. | `"?>?>" \| base64url_encode` is `"Pz4_Pg"` |
+| `uuid_v4`, `uuid_v7` | A new RFC 9562 identifier for each call, from the system's random source. A version 7 one starts with the Unix time in milliseconds. | `uuid_v4` is `"6db2dbb1-2e2f-4683-9f38-bb7920921ae0"` |
+| `parse_url` | `{scheme, user, host, port, path, query, fragment}` of a URL reference by RFC 3986. What the URL leaves out is `null`, but `path` is `""` when empty. `user` is the userinfo as written, `host` has no brackets, `port` is a number up to 65535, and nothing is percent-decoded. | `"https://u@h:8080/a?x=1#f" \| parse_url` is `{"scheme":"https","user":"u","host":"h","port":8080,"path":"/a","query":"x=1","fragment":"f"}` |
+| `parse_query_string` | The pairs of a query as an object of strings, read as the WHATWG URL standard reads application/x-www-form-urlencoded: a leading `?` skipped, `+` a space, `%XX` a byte, a name without `=` has `""`, a name that repeats becomes an array of its values in order. | `"a=1&a=2&b=x+y" \| parse_query_string` is `{"a":["1","2"],"b":"x y"}` |
+| `parse_logfmt` | A line of logfmt (Heroku's, as go-logfmt reads it) as an object of strings. A bare key is `true`, `key=` is `""`, a value in double quotes may hold white space and the escapes `\"`, `\\`, `\n`, `\r` and `\t`, and a repeated key keeps its last value. | `"ok msg=\"a b\"" \| parse_logfmt` is `{"ok":true,"msg":"a b"}` |
+| `numfmt(spec)` | A number as text by a printf-like spec, `%[flags][width][.precision]conversion` among literal text (`%%` is a percent sign). Conversions: `d` (cut toward zero), `f` and `e` (precision 6 by default, rounded as C's printf). Flags: `,` thousands separators on `d` and `f`, `0` zero padding, `-` left alignment. One conversion per spec; a spec without one, with another conversion, or a number that is not finite is refused. | `1234567.891 \| numfmt("%,.2f")` is `"1,234,567.89"` |
+| `ip_valid` | Whether the input is a string that is an IPv4 address (four decimal octets, none with a leading zero) or an IPv6 one (RFC 4291, no zone or brackets). Any other input is `false`. | `"::ffff:1.2.3.4" \| ip_valid` is `true` |
+| `ip_class` | `"loopback"`, `"private"` (RFC 1918 and `fc00::/7`), `"link-local"`, `"multicast"`, `"unspecified"` or `"global"`, which is every other address: the other reserved ranges are not told apart. An IPv4-mapped IPv6 address is classed as its IPv4. | `"172.16.0.1" \| ip_class` is `"private"` |
+| `ip_canonical` | The address in its canonical text: dotted decimal, or for IPv6 RFC 5952 (lowercase, no leading zeros, the first longest run of two or more zero groups as `::`, an IPv4-mapped address with a dotted tail). | `"2001:0DB8:0:0:0:0:0:1" \| ip_canonical` is `"2001:db8::1"` |
+| `ip_in_cidr(cidr)` | Whether the address is in the network `address/length`; an address of the other family is not. | `"10.1.2.3" \| ip_in_cidr("10.0.0.0/8")` is `true` |
+| `json_pointer(ptr)` | The value RFC 6901's pointer names in the input: `""` is the input, `~1` is `/` and `~0` is `~` in a token, a token of an array is its index. What is not there (`-`, an index past the end or with a leading zero, a missing member) is `null`, as `getpath` gives. | `{"a":[10]} \| json_pointer("/a/0")` is `10` |
+
+A string that is not valid for its decoder, a digest of a number and the like are errors (`"x" | hex_decode` is
+`string ("x") is not valid hex data`). A decoded text that is not UTF-8 is read as `@base64d` reads it, each bad
+sequence one U+FFFD.
+
 ## Differences from jq
 
 stury reads strict RFC 8259 JSON and reports faults its own way. The rest of the language and the options are
@@ -1343,7 +1386,7 @@ line and column in the stream, without a file's name.
 - `scalb` and `scalbln` cut a fractional exponent toward zero and saturate a huge one on every OS, as jq on
   macOS does: `[scalb(1;2.5), scalbln(1;1e30)]` is `[4,1.7976931348623157e+308]`. glibc's jq gives
   `[null,0]`.
-- `builtins` lists the same names as jq, sorted. jq lists them in the order of its own tables.
+- `builtins` lists the names of jq's, with [stury's own](#builtins-beyond-jq), sorted. jq lists them in the order of its own tables.
 - `gamma` is log-gamma on every OS, as glibc's `gamma` is (so jq on Linux): `[1, 2] | map(gamma)` is `[0,0]`.
   macOS has no `gamma` in libm, and jq there answers `tgamma`, `[1,1]`.
 - `strptime` gives, on every OS, the weekday and yearday as the calendar's values for the array's own year,

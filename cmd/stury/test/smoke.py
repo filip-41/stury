@@ -186,6 +186,21 @@ small = file("small.json", '{"a":1}\n')
 explained("explain_small_file", "stury: explain: ran: 1 input, 1 read by path and 0 built\nstury: explain: threads: one", "-c", ".a", small)
 explained("explain_small_interpreter", "stury: explain: ran: 1 input, each built\nstury: explain: threads: one", "-c", ".a | tostring", small)
 
+# --threads sets the pool's width and nothing else: a long input answers the same at every width, for a filter run,
+# check, fmt and schema infer, and --explain tells the width.
+for name, args, path in (("records", ("-c", ".a"), many), ("root_entries", ("-c", ".u[].a"), wide), ("interpreter", ("-c", ".u | length"), wide),
+                         ("check", ("check", "--from", "ndjson"), many), ("fmt", ("fmt", "--from", "ndjson", "-c"), many),
+                         ("infer", ("schema", "infer", "--from", "ndjson"), many)):
+    want = run(*args, path)[:3]
+    for n in ("1", "3"):
+        got = run(args[0], "--threads", n, *args[1:], path)[:3] if args[0] in ("check", "fmt", "schema") else run("--threads", n, *args, path)[:3]
+        if got != want:
+            fail(f"threads_{name}_{n}", f"exit {got[0]} (want {want[0]})")
+if POOL:
+    for n in ("1", "3"):
+        err = run("--threads", n, "--explain", "-c", ".a", many)[2].decode()
+        re.search(rf"threads: [1-9][0-9]* pieces? over {n} threads", err) or fail(f"threads_explain_{n}", err)
+
 # Recursion jq runs in constant memory, a million levels deep, and a string or object built by repeated `+` or `*`,
 # which grows in place: each under 30 MB. Then idioms that build, take apart or loop over something big, each under
 # about four times jq's own peak at the same size (a floor of 9 MB): any of them going quadratic lands far past its cap.

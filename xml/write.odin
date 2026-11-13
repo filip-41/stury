@@ -43,20 +43,12 @@ Apart :: enum u8 {
 
 // Writes node `node` of `doc` as XML, as `core.write` does with `as(spec)`, and returns the facts it dropped. A
 // document of another format is written too.
-write :: proc {write_bound, write_chosen}
-
-@(private)
-write_bound :: proc(doc: ^core.Document, $S: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
+write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
 	if int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
 		return nil, 0, core.error_of(core.Typed_Refusal{kind = .Unsupported})
 	}
-	out, cut, refusal := document_write(doc, opts, bound_as(S), node, {}, allocator)
+	out, cut, refusal := document_write(doc, opts, bound_as(spec), node, {}, allocator)
 	return out, cut, core.error_of(refusal)
-}
-
-@(private)
-write_chosen :: #force_inline proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
-	return core.write(doc, opts, as(spec), node, allocator)
 }
 
 // The handle's `write`: node `node` of `doc` as XML, the root of an XML document from its spans and any other node by
@@ -300,7 +292,7 @@ flush :: proc(w: ^Writer, upto: u64, depth: int, apart: Apart) -> core.Typed_Err
 	for ; w.next < len(w.facts) && w.facts[w.next].lo < upto; w.next += 1 {
 		#partial switch apart {
 		case .Indent:
-			newline(w, depth)
+			write.put_line(&w.out, w.opts, depth)
 		case .Before:
 			write.put_byte(&w.out, '\n')
 		}
@@ -501,24 +493,6 @@ only_whitespace :: proc(s: string) -> bool {
 @(private)
 indent :: #force_inline proc(w: ^Writer, laid: bool, depth: int) {
 	if laid {
-		newline(w, depth)
-	}
-}
-
-// A line end and the indent of `depth` levels, when the output is pretty.
-@(private)
-newline :: proc(w: ^Writer, depth: int) {
-	if !w.opts.pretty {
-		return
-	}
-	write.put_byte(&w.out, '\n')
-	for _ in 0 ..< depth {
-		if w.opts.tab {
-			write.put_byte(&w.out, '\t')
-		} else {
-			for _ in 0 ..< w.opts.indent {
-				write.put_byte(&w.out, ' ')
-			}
-		}
+		write.put_line(&w.out, w.opts, depth)
 	}
 }

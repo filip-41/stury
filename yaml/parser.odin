@@ -100,9 +100,8 @@ Parser :: struct {
 	flow_then:  Flow_Then,
 	// A hook stopped a walk that saves a cursor: the walk returns at the next place `read_blocks` can resume from.
 	pause:      bool,
-	frames:     [dynamic]Key_Frame,
-	keys:       [dynamic]Key,
-	heads:      [dynamic]u32,
+	keys:       Key_Table,
+	typed:      bool, // a key of the text resolves to no string
 	masks:      Masks,
 }
 
@@ -127,9 +126,7 @@ parser_destroy :: proc(p: ^Parser) {
 	delete(p.handles)
 	delete(p.blocks)
 	delete(p.flows)
-	delete(p.frames)
-	delete(p.keys)
-	delete(p.heads)
+	keys_destroy(&p.keys)
 	delete(p.merges)
 }
 
@@ -349,27 +346,34 @@ emit_raw :: proc(p: ^Parser, t: core.Token) -> bool {
 	switch t.kind {
 	case .Array, .Object:
 		p.tag.n = 0
-		keys_open(p, t.kind == .Object)
+		if p.merge_keys {
+			keys_open(&p.keys, t.kind == .Object)
+		}
 		p.tdepth += 1
 		if p.pend_anch >= 0 {
 			append(&p.open, Open_Anchor{p.pend_anch, p.tdepth})
 			p.pend_anch = -1
 		}
 	case .End:
-		if f := p.frames[len(p.frames) - 1]; f.merge_hi > f.merge_lo {
-			merge_apply(p, f) or_return
+		if p.merge_keys {
+			if f := p.keys.frames[len(p.keys.frames) - 1]; f.merge_hi > f.merge_lo {
+				merge_apply(p, f) or_return
+			}
+			keys_close(&p.keys)
 		}
-		keys_close(p)
 		if len(p.open) > 0 && p.open[len(p.open) - 1].depth == p.tdepth {
 			complete_anchor(p, pop(&p.open).anchor)
 		}
 		p.tdepth -= 1
 	case .Null, .False, .True, .Number, .Bytes, .String, .Plain:
 		if p.tag.n != 0 {
-			check_tag(p, t) or_return
+			ct := check_tag(p, t) or_return
+			if t.role == .Key {
+				return emit_key(p, t, key_tag_bits(ct))
+			}
 		}
-		if t.role == .Key && (!p.replaying || p.merge_keys) {
-			keys_add(p, t) or_return
+		if t.role == .Key && p.merge_keys {
+			key_enter(&p.keys, t, p.src)
 		}
 		if p.pend_anch >= 0 {
 			complete_anchor(p, p.pend_anch)
@@ -384,10 +388,22 @@ emit_raw :: proc(p: ^Parser, t: core.Token) -> bool {
 	return call_sink(p, t)
 }
 
-// Judges scalar `t` against the core type its tag names, under the document's `%TAG` directives: a text the type does
-// not hold is a fault.
+// Sends key `t` again with `bits` in its tag bits, noting a key that resolves to no string in `Parser.typed`.
 @(private)
-check_tag :: proc(p: ^Parser, t: core.Token) -> bool {
+emit_key :: #force_no_inline proc(p: ^Parser, t: core.Token, bits: u16) -> bool {
+	if p.sink != nil && (p.pend_anch >= 0 || len(p.open) > 0) {
+		pop(&p.log)
+	}
+	t := t
+	t.spelling = t.spelling &~ KEY_TAGS | bits
+	p.typed ||= bits > u16(Key_Tag.Text) << KEY_TAG_SHIFT
+	return emit_raw(p, t)
+}
+
+// Judges scalar `t` against the core type its tag names, under the document's `%TAG` directives, and returns that type:
+// a text the type does not hold is a fault.
+@(private)
+check_tag :: proc(p: ^Parser, t: core.Token) -> (ct: Core_Type, ok: bool) {
 	tag := string(p.src[p.tag.lo:p.tag.lo + u64(p.tag.n)])
 	p.tag.n = 0
 	handle, suffix := tag_parts(tag)
@@ -398,17 +414,17 @@ check_tag :: proc(p: ^Parser, t: core.Token) -> bool {
 			prefix, declared = string(p.src[h.plo:h.phi]), true
 		}
 	}
-	ct := core_type(handle, suffix, prefix, declared)
+	ct = core_type(handle, suffix, prefix, declared)
 	if ct == .None || ct == .Str {
-		return true
+		return ct, true
 	}
 	stack: [64]u8 = ---
 	text := transmute([]u8)scalar_text(p.src, t, stack[:])
 	class, _, integer, _ := classify_number(text)
 	if !holds(ct, class, integer) {
-		return fault(p, t.lo, .Bad_Char, .Tag_Mismatch)
+		return ct, fault(p, t.lo, .Bad_Char, .Tag_Mismatch)
 	}
-	return true
+	return ct, true
 }
 
 @(private)
@@ -442,6 +458,9 @@ flush_stage :: proc(p: ^Parser, key: int, role := core.Role.Value) -> bool {
 		x := t
 		if !patched && i >= max(key, 0) && x.role <= .Key {
 			x.role = .Key if key >= 0 else role
+			if x.kind == .Plain && x.role == .Key {
+				x = plain_token(p, x.lo, x.n, .Key, at(p, x.lo), x.spelling)
+			}
 			patched = true
 		}
 		emit_now(p, x) or_return

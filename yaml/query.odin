@@ -33,22 +33,9 @@ count_answer :: proc(state: rawptr, a: core.Token_Answer) -> bool {
 	return c.on(c.state, a)
 }
 
-// How the scan picks among the matches of a name. A text that reads holds no repeated key, so the first match is the
-// only one: a read that stops early answers at it, and any other read answers at its container's close, in the order a
-// query of the built document gives.
-@(private)
-scan_policy :: #force_inline proc "contextless" (read: core.Path_Options) -> core.Duplicates {
-	return .First if read.stop_early else .Last
-}
-
 // The handle's `scan`: the text's one document, and the fault of any later one.
 @(private)
 scan_as :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (doc: core.Document, err: core.Path_Error) {
-	if f, bad := policy_fault(read.dups).?; bad {
-		return {}, {kind = .Walk, inner = f}
-	}
-	read := read
-	read.dups = scan_policy(read)
 	opts := options_of(handle)
 	// The scan's room as words, which an uninitialized declaration leaves unwritten where a struct's padding would not.
 	room: [size_of(engine.Scan) / 8]u64 = ---
@@ -77,11 +64,11 @@ scan_as :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_
 // Answers `paths` over the built document of `src`, and gives a stream the answers past those it was given.
 @(private)
 answer_built :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_Options, counted: ^Counted, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
-	built, berr := build_as(src, handle, true, allocator)
+	built, berr := build_as(src, handle, false, allocator)
 	if berr.kind != .None {
 		return {}, core.path_error(berr)
 	}
-	doc, err := built_answers(&built, paths)
+	doc, err := built_answers(&built, paths, read.dups)
 	if err.kind != .None || counted.on == nil {
 		return doc, err
 	}
@@ -95,8 +82,8 @@ answer_built :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.
 
 // Answers `paths` over the document `built`, which it returns with the answers, or destroys on an error.
 @(private)
-built_answers :: proc(built: ^core.Document, paths: []core.Path) -> (core.Document, core.Path_Error) {
-	answers, e := engine.query(built, paths, {}, built.allocator)
+built_answers :: proc(built: ^core.Document, paths: []core.Path, dups: core.Duplicates) -> (core.Document, core.Path_Error) {
+	answers, e := engine.query(built, paths, {dups}, built.allocator)
 	if e.kind == .None {
 		defer delete(answers, built.allocator)
 		built.answers, built.kept, built.missing = answers, nil, nil
@@ -156,7 +143,8 @@ scan_document :: proc(h: ^engine.Scan, src: []u8, lo: u64, opts: Options, stream
 	}
 	regs^ = w.regs
 	hi, fault, stopped = core.result_of(p.fail, &RULES)
-	if sc.filter.aliased {
+	// A read by name that keeps the last of a repeat answers from a build, which marks a clash.
+	if sc.filter.aliased || p.typed && h.last {
 		return hi, nil, false, found, true
 	}
 	if sc.filter.found {
@@ -194,11 +182,14 @@ answers_fill :: proc(it: ^engine.Answer_Iter) {
 	fault: Maybe(core.Fault)
 	found := true
 	if it.state == .Fresh {
-		if f, bad := policy_fault(it.read.dups).?; bad {
-			engine.answers_fail(it, core.error_of(core.Path_Error{kind = .Walk, inner = f}))
-			return
+		if it.read.dups == .Refuse {
+			built, e := build_as(src, it.as, true, it.allocator)
+			core.destroy(&built)
+			if e.kind != .None {
+				engine.answers_fail(it, core.error_of(core.path_error(e)))
+				return
+			}
 		}
-		it.read.dups = scan_policy(it.read)
 		if !engine.answers_start(it, false, min(core.reserve_depth(opts.max_depth, len(src)), core.MAX_DEPTH)) {
 			return
 		}
@@ -251,13 +242,13 @@ answers_built :: proc(it: ^engine.Answer_Iter, given: int, hi: u64) {
 	doc: core.Document
 	_ = engine.scan_end(&it.scan, it.regs, 0, core.Fault{at = hi, rules = &RULES, kind = .Truncated}, &doc)
 	core.destroy(&doc)
-	built, berr := build_as(it.src, it.as, true, it.allocator)
+	built, berr := build_as(it.src, it.as, false, it.allocator)
 	if berr.kind != .None {
 		engine.answers_fail(it, core.error_of(core.path_error(berr)))
 		return
 	}
 	paths := it.paths if it.paths != nil else ([^]core.Path)(&it.one)[:1]
-	answered, err := built_answers(&built, paths)
+	answered, err := built_answers(&built, paths, it.read.dups)
 	defer core.destroy(&answered)
 	if err.kind == .None {
 		for a in answered.answers[min(given, len(answered.answers)):] {
@@ -341,12 +332,6 @@ scan_record :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Document, 
 	if lo >= u64(len(it.src)) || it.to != 0 && lo >= it.to {
 		return
 	}
-	if f, bad := policy_fault(read.dups).?; bad {
-		it.fault = f
-		return rec, {kind = .Walk, inner = f}, false
-	}
-	read := read
-	read.dups = scan_policy(read)
 	opts := options_of(it.as)
 	frames: [core.MAX_DEPTH]u64 = ---
 	// The builder keeps `room` past the read, unread until `scan_again` replaces it.
@@ -410,6 +395,6 @@ built_record :: proc(it: ^records.Reader, h: ^engine.Scan, regs: core.Hook_Regs,
 	if berr.kind != .None {
 		return rec, core.path_error(berr), true
 	}
-	last^, err = built_answers(&built, paths)
+	last^, err = built_answers(&built, paths, read.dups)
 	return rec, err, true
 }

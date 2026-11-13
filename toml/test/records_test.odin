@@ -70,7 +70,7 @@ every_record_form_reads_a_text :: proc(t: ^testing.T) {
 	record_forms(t, .Toml_1_1)
 	src := transmute([]u8)string(RECORD_TEXT)
 	spec := toml.Spec.Toml_1_1
-	it := toml.records_open(src, spec)
+	it := records.open(src, toml.as(spec), .Concatenated)
 	defer toml.records_close(&it)
 	n := 0
 	for rec in toml.records_next(&it) {

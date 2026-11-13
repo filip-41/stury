@@ -112,15 +112,6 @@ answers_of :: proc(src: []u8, handle: core.As, paths: []core.Path, one: core.Pat
 	return {src = src, as = handle, paths = paths, one = one, read = read, allocator = allocator, fill = fill, max_batch = engine.ANSWER_BATCH}
 }
 
-answers_fill_of :: proc(spec: Spec) -> proc(it: ^engine.Answer_Iter) {
-	switch spec {
-	case .Csv:   return answers_fill(.Csv)
-	case .Tsv:   return answers_fill(.Tsv)
-	case .Plain: return answers_fill(.Plain)
-	}
-	return answers_fill(.Csv)
-}
-
 // The fill of an iterator over a text of spec `S`: the stream's walk with a cursor, which stops on the first record's
 // end once the buffer holds a batch, and ends the read as `scan_spec` does. The header's cells are the iterator's.
 answers_fill :: proc "contextless" ($S: Spec) -> proc(it: ^engine.Answer_Iter) {
@@ -134,7 +125,7 @@ answers_fill :: proc "contextless" ($S: Spec) -> proc(it: ^engine.Answer_Iter) {
 		fault: Maybe(core.Fault)
 		if it.state == .Fresh {
 			if it.read.dups == .Refuse {
-				built, e := build_bound(src, S, opts, .Refuse, it.allocator)
+				built, e := build(src, S, opts, .Refuse, it.allocator)
 				core.destroy(&built)
 				if e != nil {
 					engine.answers_fail(it, e)

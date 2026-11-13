@@ -162,7 +162,7 @@ answers_agree_with_each_answer :: proc(t: ^testing.T) {
 	}
 }
 
-// A loop that ends after the first answer frees the read with `destroy`, and the spec chosen at run time answers alike.
+// A loop that ends after the first answer frees the read with `destroy`.
 @(test)
 answers_break_early :: proc(t: ^testing.T) {
 	path, _ := core.parse_path(".[]")

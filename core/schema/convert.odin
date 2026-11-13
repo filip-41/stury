@@ -45,8 +45,8 @@ converter_destroy :: proc(cv: ^Converter) {
 
 // Converts `doc`, a document the schema describes in the format `cv` reads, to the format it writes. The document is
 // checked as it stands, each cell read as its format reads it and a markup text as the check read it by the arm it
-// decides, then its data model is written whole, so a member the
-// schema leaves open survives, and the text is checked again as the output format reads it, the schema picking the kind
+// decides, then it is written as `core.write` writes it, with its comments, the spelling of its numbers and strings
+// and a member the schema leaves open, but a markup document as its data model, and the text is checked again as the output format reads it, the schema picking the kind
 // of each of its cells. A value the output format cannot spell is a refusal that names its path, and a text that fails
 // the schema is the check's failures, in `sink` when one is given, whose positions are in the text that stage returns
 // with it. A format with attributes writes each as a member before the element's children, a name its children repeat
@@ -75,24 +75,44 @@ convert :: proc(cv: ^Converter, doc: ^core.Document, opts := core.Write_Options{
 		return nil, .Write, refusal(m.kind, m.steps[:], allocator)
 	}
 	wrote: Refusal
-	if text, wrote = written(v, cv.to, opts, allocator); wrote.kind != .None {
+	if markup {
+		text, wrote = written(v, cv.to, opts, allocator)
+	} else if text, _, err = core.write(doc, opts, cv.to, allocator = allocator); err != nil {
+		// The model finds where the refusal is.
+		_, wrote = written(v, cv.to, opts, context.temp_allocator)
+		wrote.kind = .No_Memory
+		if refused, typed := err.(core.Typed_Error); typed {
+			wrote.kind = refused.kind
+		}
+	}
+	if wrote.kind != .None {
 		delete(text, allocator)
 		return nil, .Write, locate(&m, doc, wrote, allocator)
 	}
 	context.allocator = allocator
-	if err = output_check(cv, text, sink); err != nil {
+	if err = check_written(&cv.into, text, cv.to, false, sink); err != nil {
 		return text, .Output, err
 	}
 	return text, .Input, nil
 }
 
-// The text carries the data the schema describes, so the schema picks its cells' kinds as the output is read back.
-@(private = "file")
-output_check :: proc(cv: ^Converter, text: []u8, sink: ^typed.Sink) -> core.Error {
-	picked: typed.Readings
-	picked.read.allocator = virtual.arena_allocator(&cv.arena)
-	defer virtual.arena_free_all(&cv.arena)
-	return check_reading(&cv.into, text, sink, nil, nil, &picked)
+// The text of a conversion's output checked as its format reads it, as one document, or, when `rows`, each element of its
+// root array as a document of its own: the check of an output a reader takes row by row.
+check_written :: proc(b: ^Bound, text: []u8, as: core.As, rows: bool, sink: ^typed.Sink = nil) -> (err: core.Error) {
+	if !rows {
+		return check(b, text, sink)
+	}
+	doc, built := core.build(text, as, allocator = context.temp_allocator)
+	if fault, faulted := built.(core.Fault); faulted && fault.kind != .Duplicate_Key {
+		return built
+	}
+	it := core.value_children(core.Node_Ref{&doc, core.ROOT})
+	for row in core.value_child_next(&it) {
+		if failed := check_node(b, &doc, row.(core.Node_Ref).node, sink); err == nil {
+			err = failed
+		}
+	}
+	return
 }
 
 // What the data model of a conversion is built with.

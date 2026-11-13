@@ -278,25 +278,31 @@ number :: proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) {
 		return {}, false
 	}
 	stack: [64]u8 = ---
-	text := transmute([]u8)scalar_text(v.src, t, stack[:])
-	class, n, integer, _ := classify_number(text)
+	class, n, _ := scalar_value(transmute([]u8)scalar_text(v.src, t, stack[:]))
+	return n, class != .Text && class != .Null && class != .False && class != .True
+}
+
+// `classify` of `text`, with the value of a text that is a number and whether a `Decimal` is a plain integer.
+@(private)
+scalar_value :: proc(text: []u8) -> (class: Class, n: core.Number, integer: bool) {
+	class, n, integer, _ = classify_number(text)
 	switch class {
 	case .Decimal:
 		if integer && n.kind == .Float && n.bits == 1 << 63 {
-			return {0, .Int}, true
+			n = {0, .Int}
 		}
-		return n, true
 	case .Hex:
-		return radix_number(text[2:], 16), true
+		n = radix_number(text[2:], 16)
 	case .Octal:
-		return radix_number(text[2:], 8), true
+		n = radix_number(text[2:], 8)
 	case .Inf:
-		return {transmute(u64)math.inf_f64(-1 if text[0] == '-' else 1), .Float}, true
+		n = {transmute(u64)math.inf_f64(-1 if text[0] == '-' else 1), .Float}
 	case .Nan:
-		return {transmute(u64)math.nan_f64(), .Float}, true
+		n = {transmute(u64)math.nan_f64(), .Float}
 	case .Text, .Null, .False, .True:
+		n = {}
 	}
-	return {}, false
+	return
 }
 
 // YAML's `Readers.number_text`: the JSON digits of a plain scalar that resolves to a number. A decimal JSON reads

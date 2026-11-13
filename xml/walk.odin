@@ -225,16 +225,8 @@ Walk :: struct($H: typeid) {
 // Checks that `src` holds exactly one XML document in UTF-8, with no hook and after one leading BOM. Returns the fault,
 // or nil. A constant `spec` links the walk of that spec alone, and a `spec` chosen at run time is `core.validate` with
 // `as(spec, opts)`. The same holds for the other entry points.
-validate :: proc {validate_bound, validate_chosen}
-
-@(private)
-validate_bound :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error {
-	return core.error_of(validate_spec(src, S, opts))
-}
-
-@(private)
-validate_chosen :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
-	return core.validate(src, as(spec, opts))
+validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
+	return core.error_of(validate_spec(src, spec, opts))
 }
 
 // Reads `src` as one document from `lo` through the hook, as `validate` checks it. A BOM is passed over only at the
@@ -269,9 +261,9 @@ walk_keeping :: proc "contextless" (src: []u8, opts: Options, h: ^$H, regs: ^cor
 	return
 }
 
-// The walk's verdict on `src` for spec `S`, with no hook.
+// The walk's verdict on `src` for `spec`, with no hook.
 @(private)
-validate_spec :: proc "contextless" (src: []u8, $S: Spec, opts: Options) -> Maybe(core.Fault) {
+validate_spec :: proc "contextless" (src: []u8, spec: Spec, opts: Options) -> Maybe(core.Fault) {
 	h: core.No_Hooks
 	regs: core.Hook_Regs
 	_, fault, _ := core.result_of(walk_document(src, 0, opts, &h, &regs, core.no_hook, nil), &RULES)

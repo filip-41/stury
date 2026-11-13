@@ -6,19 +6,11 @@ import engine "../core/build"
 
 // Reads `src`, an XML text, into a document, allocating its nodes with `allocator`. The document is an `Object` of one
 // member, the root element, and `.Refuse` fails at a name an element repeats among its children. The document borrows
-// `src`, which must outlive it, and `core.destroy` frees the document. A constant `spec` links the walk of that spec
-// alone, and a `spec` chosen at run time is `core.build` with `as(spec, opts)`.
-build :: proc {build_bound, build_chosen}
-
-@(private)
-build_bound :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
-	doc, err := build_spec(src, S, bound_as(S, opts), dups == .Refuse, allocator)
+// `src`, which must outlive it, and `core.destroy` frees the document. It links the walk alone, and `core.build` with
+// `as(spec, opts)` links every pass.
+build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
+	doc, err := build_spec(src, spec, bound_as(spec, opts), dups == .Refuse, allocator)
 	return doc, core.error_of(err)
-}
-
-@(private)
-build_chosen :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
-	return core.build(src, as(spec, opts), dups, allocator)
 }
 
 // What the first walk of a build counts, and whether the text declares a namespace, in which case a key is compared
@@ -59,24 +51,22 @@ keep_state :: proc(doc: ^core.Document, state: []u8, keep: bool, allocator: runt
 	return true
 }
 
-// The build of spec `S`, as `Services.build` takes it.
+// The build of a handle's spec, as `Services.build` takes it.
 @(private)
-build_of :: proc "contextless" ($S: Spec) -> proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-	return proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-		return build_spec(src, S, as, refuse_duplicates, allocator)
-	}
+build_handle :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+	return build_spec(src, Spec(as.spec), as, refuse_duplicates, allocator)
 }
 
-// Reads `src` as spec `S` into a document that holds the handle `handle`: the text is walked to size the document and
+// Reads `src` as `spec` into a document that holds the handle `handle`: the text is walked to size the document and
 // walked again to write it.
 @(private)
-build_spec :: proc(src: []u8, $S: Spec, handle: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+build_spec :: proc(src: []u8, spec: Spec, handle: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	opts := options_of(handle)
 	c := Counter {
 		src = src,
 	}
 	counted: core.Hook_Regs
-	_, fault := walk(src, 0, S, opts, &c, &counted, count_hook)
+	_, fault := walk(src, 0, .Xml, opts, &c, &counted, count_hook)
 	if f, bad := fault.?; bad {
 		if f.kind == .No_Memory {
 			return {}, {kind = .No_Memory}

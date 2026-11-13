@@ -1,8 +1,9 @@
 package yaml
 
 // The typed read of YAML: `unmarshal` reads a document into a value through the document route of `core/typed`, since
-// an alias repeats its anchor's node. A key is compared by its decoded text, and a plain scalar is read as the core
-// schema resolves it.
+// an alias repeats its anchor's node. A field or a map key is named by a key's decoded text, two keys
+// of one text and two types are refused but under `.First` and `.All`, and a plain scalar is read as the core schema
+// resolves it.
 
 import "base:runtime"
 import "core:slice"
@@ -14,24 +15,19 @@ import cw "../core/write"
 
 // Reads `src`, a YAML text of one document, into `target`. An absent member keeps what `target` holds. The form with
 // no plan builds one with `context.allocator` and frees it before it returns, and a plan built once with `plan_make` is
-// the form for many reads. A refusal leaves everything the read allocated reachable from `target`. `read.dups` is
-// `.Default` or `.Refuse`, and any other policy is `.Bad_Option`. The target of the form whose `spec` is chosen at run
-// time is any pointer, and a target that is no pointer is `.Plan_Mismatch`.
-unmarshal :: proc {unmarshal_bound, unmarshal_bound_plan, unmarshal_chosen, unmarshal_chosen_plan}
+// the form for many reads. A refusal leaves everything the read allocated reachable from `target`. `read.dups` picks
+// among a repeated key as `json.unmarshal` does.
+unmarshal :: proc {unmarshal_once, unmarshal_plan}
 
-// Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
-// first. The options are the plan's, and any plan of the format reads.
-check :: proc {check_bound, check_chosen}
-
-// Returns the typed reads of spec `S`, which `plan_make` takes for a plan that reads through `typed.unmarshal_text`.
-reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
-	return reads_of(S)
+// Returns the typed reads of `spec`, which `plan_make` takes for a plan that reads through `typed.unmarshal_text`.
+reads :: proc "contextless" (spec: Spec) -> ^typed.Format_Reads {
+	return &READS
 }
 
-// Returns the checks of spec `S` read with `opts`, which `model.compile` and `schema.bind` take: the reads of a plan made
-// from a model or a description, and the handle of `S` its plans read by.
-checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Checks {
-	return {checks_of(S), bound_as(S, opts)}
+// Returns the checks of `spec` read with `opts`, which `model.compile` and `schema.bind` take: the reads of a plan made
+// from a model or a description, and the handle of `spec` its plans read by.
+checks :: proc "contextless" (spec: Spec, opts := Options{}) -> typed.Format_Checks {
+	return {&CHECKS, bound_as(spec, opts)}
 }
 
 // Builds the plan of `T` for YAML, as `typed.plan_make` does. The plan reads a text only with `reads`, and with none it
@@ -75,41 +71,27 @@ plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: run
 	return p, err
 }
 
-// The read of a text: its document is built, a repeated key refused, and read as `typed.read_nodes` reads it.
+// The read of a text: its document is built, under `.Refuse` refusing a repeated key, and read as `typed.read_nodes`
+// reads it.
 @(private)
 text_read :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
-	return read_built(src, as, target, T, plan, read, allocator, false)
+	return typed.read_built_text(src, as, typed_build, target, T, plan, read, allocator)
 }
 
 // The check of a text: `text_read` with every refusal in `read.sink.entries`.
 @(private)
 text_check :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
-	return read_built(src, as, target, T, plan, read, allocator, true)
+	return typed.check_built_text(src, as, typed_build, target, T, plan, read, allocator)
 }
 
+// The build of a text whose scalars hold the kinds the reader takes.
 @(private)
-read_built :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Refusal {
-	if policy_fault(read.dups) != nil {
-		return {kind = .Bad_Option, want = {text = "a YAML text refuses a repeated key, so dups is .Default or .Refuse"}}
+typed_build :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+	doc, err := build_as(src, as, refuse_duplicates, allocator)
+	if err.kind == .None {
+		type_scalars(&doc, core.ROOT, doc.nodes)
 	}
-	doc, built := build_as(src, as, true, context.allocator)
-	defer core.destroy(&doc)
-	#partial switch built.kind {
-	case .None:
-	case .Walk:
-		return {kind = .Walk, at = built.at, inner = built.inner}
-	case:
-		return {kind = .No_Memory}
-	}
-	type_scalars(&doc, core.ROOT, doc.nodes)
-	// The document holds no repeated key, and a read of a document takes no policy of its own.
-	read := read
-	read.dups = .Default
-	when CHECK {
-		return typed.check_nodes(&doc, core.ROOT, T, target, plan, read, allocator)
-	} else {
-		return typed.read_nodes(&doc, core.ROOT, T, target, plan, read, allocator)
-	}
+	return doc, err
 }
 
 // The read of a node of a built document, a plan's `node_read`. The document's scalars are `Plain` until `resolve`
@@ -128,8 +110,7 @@ node_check :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target
 
 @(private)
 read_node :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Refusal {
-	n := doc.nodes[node]
-	size := int(n.n) if n.kind == .Array || n.kind == .Object else 1
+	size := core.subtree_size(doc, node)
 	nodes, failed := slice.clone(doc.nodes[node:][:size])
 	if failed != nil {
 		return {kind = .No_Memory}
@@ -177,59 +158,26 @@ type_scalars :: proc(doc: ^core.Document, first: core.Node_Index, nodes: []core.
 }
 
 @(private)
-unmarshal_bound :: proc(src: []u8, $S: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	plan, refusal := plan_make(T, S, opts)
-	if refusal != nil {
-		return refusal
-	}
-	defer typed.plan_destroy(&plan)
-	err := text_read(src, bound_as(S, opts), target, T, &plan, read, allocator)
-	typed.own_errors(&err, read.sink)
-	return core.error_of(err)
-}
-
-@(private)
-unmarshal_bound_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return core.error_of(text_read(src, bound_as(S, opts), target, T, plan, read, allocator))
-}
-
-@(private)
-unmarshal_chosen :: proc(src: []u8, spec: Spec, target: any, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	data, T, pointer := typed.pointer_target(target)
-	if !pointer {
-		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
-	}
+unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	plan, refusal := plan_make(T, spec, opts)
 	if refusal != nil {
 		return refusal
 	}
 	defer typed.plan_destroy(&plan)
-	err := text_read(src, as(spec, opts), data, T, &plan, read, allocator)
+	err := text_read(src, bound_as(spec, opts), target, T, &plan, read, allocator)
 	typed.own_errors(&err, read.sink)
 	return core.error_of(err)
 }
 
 @(private)
-unmarshal_chosen_plan :: proc(src: []u8, spec: Spec, target: any, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	data, T, pointer := typed.pointer_target(target)
-	if !pointer {
-		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
-	}
-	return core.error_of(text_read(src, as(spec, opts), data, T, plan, read, allocator))
+unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	return core.error_of(text_read(src, bound_as(spec, opts), target, T, plan, read, allocator))
 }
 
-@(private)
-check_bound :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return check_ordered(src, bound_as(S, options_of(plan.as)), target, T, plan, read, allocator)
-}
-
-@(private)
-check_chosen :: proc(src: []u8, spec: Spec, target: any, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	data, T, pointer := typed.pointer_target(target)
-	if !pointer {
-		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
-	}
-	return check_ordered(src, as(spec, options_of(plan.as)), data, T, plan, read, allocator)
+// Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
+// first. The options are the plan's, and any plan of the format reads.
+check :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	return check_ordered(src, bound_as(spec, options_of(plan.as)), target, T, plan, read, allocator)
 }
 
 // `text_check` with the entries it adds in the order `typed.check_text` gives them.

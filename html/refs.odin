@@ -129,7 +129,7 @@ read_numeric :: proc "contextless" (p, end: [^]u8) -> (r: Ref) {
 	if d != .None {
 		r.errors[k], r.err_at[k] = d, q
 	}
-	r.n = encode(r.value[:], code)
+	r.n = spell.put_rune(r.value[:], rune(code))
 	return
 }
 
@@ -138,24 +138,6 @@ read_numeric :: proc "contextless" (p, end: [^]u8) -> (r: Ref) {
 C1_REMAP := [32]u16 {
 	0x20AC, 0, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0, 0x017D, 0,
 	0, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0, 0x017E, 0x0178,
-}
-
-// Writes `cp` in UTF-8 to `out` and returns its length.
-@(private)
-encode :: #force_inline proc "contextless" (out: []u8, cp: u32) -> int #no_bounds_check {
-	switch {
-	case cp < 0x80:
-		out[0] = u8(cp)
-		return 1
-	case cp < 0x800:
-		out[0], out[1] = u8(0xC0 | cp >> 6), u8(0x80 | cp & 0x3F)
-		return 2
-	case cp < 0x10000:
-		out[0], out[1], out[2] = u8(0xE0 | cp >> 12), u8(0x80 | cp >> 6 & 0x3F), u8(0x80 | cp & 0x3F)
-		return 3
-	}
-	out[0], out[1], out[2], out[3] = u8(0xF0 | cp >> 18), u8(0x80 | cp >> 12 & 0x3F), u8(0x80 | cp >> 6 & 0x3F), u8(0x80 | cp & 0x3F)
-	return 4
 }
 
 // Writes the characters span `s` of `src` reads as to `buf` and returns them. A span with no flags is its source

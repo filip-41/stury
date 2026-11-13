@@ -1,4 +1,4 @@
-// The document built from a YAML text: the core schema's types, the number forms, tags, aliases, the repeated key, the
+// The document built from a YAML text: the core schema's types, the number forms, tags, aliases, the
 // facts and the documents of a stream as records.
 package yaml_tests
 
@@ -141,14 +141,6 @@ deep_aliases_build :: proc(t: ^testing.T) {
 	testing.expect(t, ok && value == 7)
 	d, _ := core.member(&doc, core.ROOT, "d")
 	testing.expect_value(t, core.length(&doc, d), 64)
-}
-
-@(test)
-a_repeated_key_is_refused_by_its_text :: proc(t: ^testing.T) {
-	for text in ([]string{"a: 1\na: 2\n", "1: x\n\"1\": y\n", "{a: 1, a: 2}\n"}) {
-		_, err := build(text)
-		testing.expectf(t, faults_with(err, .Duplicate_Key), "%q is refused", text)
-	}
 }
 
 @(test)

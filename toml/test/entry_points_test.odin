@@ -1,5 +1,5 @@
-// The entry points of the package: a constant spec and a spec chosen at run time give the same answers, a document of
-// either is queried, edited and written, and an edit takes a built value, which the format spells.
+// The entry points of the package: a constant spec and a handle of a spec chosen at run time give the same answers, a
+// document of either is queried, edited and written, and an edit takes a built value, which the format spells.
 package toml_tests
 
 import "core:strings"
@@ -21,7 +21,7 @@ a_constant_and_a_chosen_spec_agree :: proc(t: ^testing.T) {
 	path := core.Path{steps = {core.Name("t"), core.Name("k"), core.Index(2)}}
 	for spec in toml.Spec {
 		walktest.expect_nil(t, toml.validate(src, spec))
-		chosen, built := toml.build(src, spec, allocator = context.temp_allocator)
+		chosen, built := core.build(src, toml.as(spec), allocator = context.temp_allocator)
 		walktest.expect_nil(t, built)
 		testing.expect(t, core.services_of(chosen.as) != nil)
 		found, answer, err := toml.find(src, spec, path, allocator = context.temp_allocator)
@@ -58,14 +58,14 @@ a_document_of_either_form_is_written_and_edited :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, werr)
 	testing.expect_value(t, string(text), TEXT)
 	spec := toml.Spec.Toml_1_0
-	chosen, _ := toml.build(src, spec, allocator = context.temp_allocator)
+	chosen, _ := core.build(src, toml.as(spec), allocator = context.temp_allocator)
 	again, _, aerr := toml.write(&chosen, spec, allocator = context.temp_allocator)
 	walktest.expect_nil(t, aerr)
 	testing.expect_value(t, string(again), TEXT)
 	_, _, kerr := toml.write(&bound, .Toml_1_0, node = 1, allocator = context.temp_allocator)
 	walktest.expect_kind(t, kerr, core.Typed_Error_Kind.Unsupported)
 
-	// The list of a document read by a handle takes the handle's edit services, and one of a constant spec the spec's.
+	// The list of a document read by a handle takes the handle's edit services, and one an entry point reads TOML's.
 	lists := [?]core.Edit_List{core.edit_list_init(&chosen, context.temp_allocator), toml.edit_list_init(&chosen, spec, context.temp_allocator), toml.edit_list_init(&bound, .Toml_1_0, context.temp_allocator)}
 	for &list in lists {
 		a, _ := core.member(list.doc, core.ROOT, "a")
@@ -172,7 +172,7 @@ a_plan_reads_a_text_and_a_node :: proc(t: ^testing.T) {
 	defer typed.plan_destroy(&inner)
 	walktest.expect_nil(t, ierr)
 	for spec in toml.Spec {
-		doc, _ := toml.build(src, spec, allocator = context.temp_allocator)
+		doc, _ := core.build(src, toml.as(spec), allocator = context.temp_allocator)
 		node, _ := core.member(&doc, core.ROOT, "t")
 		table: Table
 		walktest.expect_nil(t, typed.unmarshal(&doc, node, &table, &inner, allocator = context.temp_allocator))

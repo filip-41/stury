@@ -23,20 +23,20 @@ is bytes rather than characters. The format is CBOR (RFC 8949), in package `cbor
 ## CBOR
 
 ```odin
-cbor.validate    :: proc "contextless" (src: []u8, $S: cbor.Spec, opts := cbor.Options{}) -> core.Error
+cbor.validate    :: proc "contextless" (src: []u8, spec: cbor.Spec, opts := cbor.Options{}) -> core.Error
 cbor.walk        :: proc "contextless" (src: []u8, lo: u64, $S: cbor.Spec, opts := cbor.Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^cbor.Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault))
 cbor.walk_resume :: proc "contextless" (src: []u8, cursor: ^cbor.Cursor, $S: cbor.Spec, opts := cbor.Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
-cbor.build       :: proc(src: []u8, $S: cbor.Spec, opts := cbor.Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error)
-cbor.set         :: proc(src: []u8, $S: cbor.Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := cbor.Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
-cbor.write       :: proc(doc: ^core.Document, $S: cbor.Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error)
+cbor.build       :: proc(src: []u8, spec: cbor.Spec, opts := cbor.Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error)
+cbor.set         :: proc(src: []u8, spec: cbor.Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := cbor.Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
+cbor.write       :: proc(doc: ^core.Document, spec: cbor.Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error)
 cbor.as          :: proc "contextless" (spec: cbor.Spec, opts := cbor.Options{}) -> core.As
 cbor.find, cbor.scan, cbor.answers, cbor.each_answer, cbor.query, cbor.can_resume, cbor.edit_list_init
 cbor.marshal, cbor.unmarshal, cbor.check, cbor.plan_make, cbor.plan_of, cbor.tokens_init, cbor.checks, cbor.bind_schema
-cbor.records_open, cbor.records_open_stream, cbor.records_check, cbor.records_each, cbor.writer_init
+cbor.records_open, cbor.records_open_stream, cbor.records_check, cbor.writer_init
 ```
 
-Each entry point takes a `cbor.Spec`, the rules an item is judged and written by, as a constant or chosen at run time,
-and `cbor.as(spec, opts)` is the handle that reaches every pass. `src` is exactly one data item. A sequence of items (RFC 8742) reads as records under `.Concatenated`, the one framing the
+Each entry point takes a `cbor.Spec`, the rules an item is judged and written by, and links only the passes it names.
+`cbor.as(spec, opts)` is the handle that reaches every pass, which the calls in `core` take. `src` is exactly one data item. A sequence of items (RFC 8742) reads as records under `.Concatenated`, the one framing the
 record entry points take.
 
 `cbor.scan`, `find` and `each_answer` build no document. They walk the item, skip every value off the paths, and judge

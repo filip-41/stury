@@ -118,6 +118,8 @@ stury's own options:
       --format-assert       make format fail an input;
       --max-errors n        keep at most n failures of an input;
       --max-depth n         refuse nesting past n levels (default 1024);
+      --threads n           share a long input among n threads, this one
+                            counted (default: one per core);
       --alias-limit n       with --from yaml, refuse aliases that read
                             more than n bytes again;
       --merge-keys          with --from yaml, read << as a merge key;
@@ -165,6 +167,8 @@ Options:
       --seq                 judge each record after a 0x1E separator as
                             one text;
       --max-depth n         refuse nesting past n levels (default 1024);
+      --threads n           share a long input among n threads, this one
+                            counted (default: one per core);
       --schema file         also check each input against a JSON Schema and
                             tell every failure, exit 1. For csv and tsv the
                             schema describes the table, an array of rows;
@@ -204,6 +208,8 @@ Options:
                             toml, yaml, xml, cbor or html;
       --ranges              infer: keep the least and greatest number, string
                             length and array length;
+      --threads n           infer: the threads that share a long input
+                            (default: one per core);
       --to format           sample: write json (default), jsonc, ndjson, csv or tsv;
       --count n, --seed n   sample: how many values, and from which seed;
       --invalid             sample: values that fail the schema;
@@ -246,6 +252,8 @@ Options:
       --tab                 use tabs for indentation;
       --grow-header         with --to csv or tsv, write a header of every key;
       --max-depth n         refuse nesting past n levels (default 1024);
+      --threads n           share a long input among n threads, this one
+                            counted (default: one per core);
       --schema file         judge each input against this JSON Schema as
                             stury check --schema does, and write only an
                             input that passes it;
