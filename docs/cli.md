@@ -904,8 +904,10 @@ table. Its scalars, and its arrays that are not all tables, are `key = value` li
 object is a `[section]` after them, and an array of objects is a `[[section]]` per element, so a table's keys may come
 out in another order than the input has them. A value that is a node of a TOML input is written from the document,
 which keeps its comments, a string's quoting, a number's form (`0xff` stays `0xff`) and a datetime bare. A value a
-filter built is written from its JSON: a datetime is then a quoted string. Only TOML 1.0 forms are written, so a time
-without seconds gets `:00`. Several outputs are several texts, a blank line between them, which is one TOML file only
+filter built is a new text, with no comments, inline tables or number forms, but its strings keep their tags: a datetime
+stays bare, and `"2020-01-01" | .@tag = "date-local"` writes one. A text that is not of its tag's type ends the run,
+`"2020-13-01" is not a TOML date-local`. `stury edit` keeps every byte the filter does not reach. Only TOML 1.0 forms
+are written, so a time without seconds gets `:00`. Several outputs are several texts, a blank line between them, which is one TOML file only
 when no key repeats.
 
 An output that is no object (`cannot write a value that is no object as TOML`), or holds `null` or repeats a key
@@ -960,7 +962,8 @@ is plain when every reader that reads YAML 1.1 or 1.2 reads it back as the same 
 character as an escaped double-quoted string.
 
 A value that is a node of a YAML input is written from the document, which keeps its comments, tags, anchors, aliases,
-scalar styles and flow collections. A value a filter built is written from its JSON. Several outputs are several
+scalar styles and flow collections. A value a filter built is a new text, with no comments, and keeps the tags of
+its values. `stury edit` keeps every byte the filter does not reach. Several outputs are several
 documents, each after a `---` line, and a stream written by `fmt` keeps its documents apart the same way.
 
 ### CBOR output
@@ -1176,7 +1179,10 @@ it, travelling with the value as a comment does, and `edit --from xml` and `edit
   under `--from jsonc`, `.a = 5` leaves `.a.@comment` as the input had it, and `.a = .b` takes `b`'s comments
   for the roles `b` has and keeps `a`'s for the rest. This holds for `=`, every update operator and `setpath`.
 - `.@tag`, `.@anchor` and `.@alias` take a string, or `null` to remove it, and `.@tag` a number too, which reads
-  back as its digits. They travel with their value and stay on a value put in place of another as comments do.
+  back as its digits. They travel with their value and stay on a value put in place of another as comments do,
+  except a tag the new value is no type of: under `--from toml`, `.a = "soon"` over a datetime writes a string and
+  `.a = "2020-01-01"` a `date-local`, and under `--from yaml`, `.a = 5` over `!!str 1` drops the `!!str`. A TOML
+  string takes a datetime's tag as its type, which `edit` writes bare.
   `edit` refuses the write in a format that spells none, and on a value the file does not hold. `.@style` is never
   written: setting it to anything but the style the value has is the error `cannot write a style`.
 - A write is no side effect: `(.a.@comment = "x") as $_ | .a.@comment` reads the input's comments.

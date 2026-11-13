@@ -9,7 +9,6 @@ import "core:strings"
 import core "../../core"
 import "../../core/write"
 import records "../../core/records"
-import json "../../json"
 import "jq"
 import "message"
 
@@ -113,31 +112,22 @@ emit :: proc(o: ^Output, v: jq.Value) -> bool {
 	return true
 }
 
-// One output as a text of the output format, which the format's document writer makes: of a value that is a node of a
-// document, which keeps what the document spells beyond JSON, and of any other value written as JSON and read back as
-// a document. A value the format has no spelling for fails the run, with the reason.
+// One output as a text of the output format: a value that is a node of a document by the format's document writer,
+// which keeps what the document spells beyond JSON, and any other value by its token writer, which keeps the tags of
+// its strings. A value the format has no spelling for fails the run, with the reason.
 @(private = "file")
 emit_text :: proc(o: ^Output, v: jq.Value) -> bool {
 	as := text_written_as(o.opts)
-	built: core.Document
-	doc, node := &built, core.ROOT
+	text: []u8
+	err: core.Error
 	if ref, is_ref := v.(jq.Ref); is_ref {
-		doc, node = ref.doc, ref.node
+		text, _, err = core.write(ref.doc, o.layout.opts, as, ref.node, context.temp_allocator)
 	} else {
-		frame: write.Out
-		spare: [write.ROOM_MAX]u8
-		write.init(&frame, &spare, context.temp_allocator)
-		jq.write_value(&frame, v, jq.Layout{})
-		json_text, _ := write.finish(&frame)
-		fault: Maybe(core.Fault)
-		if built, fault = jq.build_text(json_text, json.as(.Json), context.temp_allocator); fault != nil {
-			o.ip.err = text_refusal(o.opts.to, nil)
-			return false
-		}
+		text, err = write.write_value(v, as, o.layout.opts, context.temp_allocator)
 	}
-	text, _, err := core.write(doc, o.layout.opts, as, node, context.temp_allocator)
 	if err != nil {
-		o.ip.err = text_refusal(o.opts.to, err)
+		why := mistag_text(as.readers, FORMATS[o.opts.to].title, v) if write_refusal_kind(err) == .Bad_Raw else ""
+		o.ip.err = why if why != "" else text_refusal(o.opts.to, err)
 		return false
 	}
 	put_format_text(o, as, text, true)
@@ -152,6 +142,31 @@ text_refusal :: proc(to: Format, err: core.Error) -> string {
 		}
 	}
 	return strings.concatenate({"cannot write the value as ", FORMATS[to].name}, context.temp_allocator)
+}
+
+// Why a writer refused `v` as `.Bad_Raw` where a string in it holds a tag its text is no type of by `readers`, as
+// `"text" is not a TOML date-local`, and "" where none does.
+mistag_text :: proc(readers: ^core.Readers, title: string, v: jq.Value) -> string {
+	if readers == nil || readers.tag_fits == nil {
+		return ""
+	}
+	p := jq.plain(v)
+	#partial switch jq.kind(p) {
+	case .String:
+		tag, tagged := jq.string_of(jq.property_value(v, .Tag))
+		if kept, fits := readers.tag_fits(tag, p); tagged && (!fits || kept != tag) {
+			text, _ := jq.string_of(p)
+			return message.build_temp("%q is not a %s %s", text, title, tag)
+		}
+	case .Array, .Object:
+		it := jq.iterate(p)
+		for _, m in jq.next_member(&it) {
+			if why := mistag_text(readers, title, m); why != "" {
+				return why
+			}
+		}
+	}
+	return ""
 }
 
 // A `text` the writer of the output format `as` made, written after what parts it from the text before it when

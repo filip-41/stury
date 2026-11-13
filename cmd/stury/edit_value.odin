@@ -15,15 +15,16 @@ import "jq"
 import "message"
 
 // One document's edit: the edit list the filter's output is recorded on, why it stopped when it fails, the file it is
-// told in and the line of the record being edited, 0 for a whole document. `sorted` puts every object's members in key
-// order. A table's column order is the whole table's, so its records' members are not moved here. `defers` says the
-// caller writes the comments of values written new in a second pass, and `later` that one carries comments for it. The
-// layout a built value is written in is the list's.
+// told in, its format's title and the line of the record being edited, 0 for a whole document. `sorted` puts every
+// object's members in key order. A table's column order is the whole table's, so its records' members are not moved
+// here. `defers` says the caller writes the comments of values written new in a second pass, and `later` that one
+// carries comments for it. The layout a built value is written in is the list's.
 Edit_State :: struct {
 	doc:    ^core.Document,
 	list:   ^core.Edit_List,
 	err:    string,
 	name:   string,
+	title:  string,
 	line:   int,
 	sorted: bool,
 	defers: bool,
@@ -37,12 +38,23 @@ edit_place :: proc(w: ^Edit_State) -> string {
 
 // `node` as `v`, in place where the source has the same kind of container, and as one replacement otherwise.
 edit_tree :: proc(w: ^Edit_State, node: core.Node_Index, value: jq.Value) -> bool {
-	if c, is_commented := value.(^jq.Commented); is_commented {
-		edit_comments(w, node, c) or_return
-	}
 	v := jq.plain(value)
-	if r, is_ref := v.(jq.Ref); is_ref {
-		if r.doc == w.doc && r.node == node {
+	r, is_ref := v.(jq.Ref)
+	same := is_ref && r.doc == w.doc && r.node == node
+	c, is_commented := value.(^jq.Commented)
+	if is_commented {
+		edit_comments(w, node, c, same) or_return
+		// A tag the text of a value written new spells goes with it.
+		if !same && .Tag in c.written && core.tags_in_text(w.list) {
+			return edit_set(w, node, jq.noted(v, .Tag, c.bodies[.Tag]))
+		}
+	}
+	// A tag spelled before its node is no part of the value's text, so a value written new that brings none drops it.
+	if !same && !(is_commented && .Tag in c.written) && !core.tags_in_text(w.list) {
+		edit_property(w, node, .Tag, nil) or_return
+	}
+	if is_ref {
+		if same {
 			return !w.sorted || edit_sort(w, node)
 		}
 		// A value taken from another node brings that node's comments.
@@ -54,7 +66,7 @@ edit_tree :: proc(w: ^Edit_State, node: core.Node_Index, value: jq.Value) -> boo
 			v = edit_members_of(v)
 		}
 	}
-	if _, is_ref := v.(jq.Ref); !is_ref {
+	if _, still_ref := v.(jq.Ref); !still_ref {
 		switch jq.kind(v) {
 		case .Object:
 			if core.kind(w.doc, node) == .Object {
@@ -75,10 +87,14 @@ edit_tree :: proc(w: ^Edit_State, node: core.Node_Index, value: jq.Value) -> boo
 
 // The fact edits of `node` for the roles `c` writes: a comment role's comments replaced by its bodies, or removed, and
 // no edit where they are the node's own, and a property's value set or removed. A comment written is spelled
-// `// body`, or `/* body */` where a line comment cannot end.
+// `// body`, or `/* body */` where a line comment cannot end. A tag that the text spells is written with the text
+// unless `same` says the value is the node.
 @(private = "file")
-edit_comments :: proc(w: ^Edit_State, node: core.Node_Index, c: ^jq.Commented) -> bool {
+edit_comments :: proc(w: ^Edit_State, node: core.Node_Index, c: ^jq.Commented, same: bool) -> bool {
 	for role in c.written {
+		if role == .Tag && !same && core.tags_in_text(w.list) {
+			continue
+		}
 		if core.is_property(role) {
 			edit_property(w, node, role, c.bodies[role]) or_return
 		} else {
@@ -89,7 +105,7 @@ edit_comments :: proc(w: ^Edit_State, node: core.Node_Index, c: ^jq.Commented) -
 }
 
 // The edit that makes `bodies`, one text or none, the tag, anchor or alias `role` of `node`, none when it already is.
-// The format must spell a property before its node.
+// The format must spell a property before its node, or a tag in the node's text.
 @(private = "file")
 edit_property :: proc(w: ^Edit_State, node: core.Node_Index, role: core.Role, bodies: []string) -> bool {
 	name := core.Fact_Name.Tag
@@ -106,12 +122,12 @@ edit_property :: proc(w: ^Edit_State, node: core.Node_Index, role: core.Role, bo
 		}
 		return edit_check(w, core.remove_fact(w.list, node, role))
 	}
-	if edit := w.list.edit; edit == nil || edit.prefix == nil {
-		w.err = "the format cannot hold a tag, an anchor or an alias"
-		return false
-	}
 	if held && have.text == bodies[0] {
 		return true
+	}
+	if edit := w.list.edit; edit == nil || edit.prefix == nil && (role != .Tag || !core.tags_in_text(w.list)) {
+		w.err = "the format cannot hold a tag, an anchor or an alias"
+		return false
 	}
 	return edit_check(w, core.set_fact(w.list, node, role, bodies[0]))
 }
@@ -210,11 +226,23 @@ writes_comment :: proc(v: jq.Value) -> bool {
 	return false
 }
 
-// Whether `v` carries a tag, an anchor or an alias the filter wrote or kept from the value it replaced.
+// Whether `v` carries a tag, an anchor or an alias the filter wrote or kept from the value it replaced, other than a tag
+// its text spells.
 @(private = "file")
-writes_property :: proc(v: jq.Value) -> bool {
+writes_property :: proc(w: ^Edit_State, v: jq.Value) -> bool {
 	c, is_commented := v.(^jq.Commented)
-	return is_commented && c.written - core.COMMENT_ROLES != {}
+	spelled := bit_set[core.Role]{.Tag} if core.tags_in_text(w.list) else {}
+	return is_commented && c.written - core.COMMENT_ROLES - spelled != {}
+}
+
+// `v` as a value written new: each string made UTF-8 (`edit_valid`), with the tag it writes where its text spells one.
+@(private = "file")
+edit_written :: proc(w: ^Edit_State, v: jq.Value) -> jq.Value {
+	fixed := edit_valid(jq.plain(v))
+	if c, is_commented := v.(^jq.Commented); is_commented && .Tag in c.written && core.tags_in_text(w.list) {
+		return jq.noted(fixed, .Tag, c.bodies[.Tag])
+	}
+	return fixed
 }
 
 // A copy of the container `v` whose members are `v`'s own values.
@@ -452,7 +480,7 @@ edit_place_entries :: proc(w: ^Edit_State, node: core.Node_Index, length: int, e
 
 @(private = "file")
 edit_insert :: proc(w: ^Edit_State, node: core.Node_Index, at: int, n: Edit_New) -> bool {
-	v := edit_valid(jq.plain(n.value))
+	v := edit_written(w, n.value)
 	if core.kind(w.doc, node) == .Object {
 		return edit_check(w, core.insert_member_value(w.list, node, at, n.key, v), v)
 	}
@@ -621,7 +649,7 @@ edit_check :: proc(w: ^Edit_State, e: core.Error, v: jq.Value = nil, record := f
 @(private = "file")
 edit_set :: proc(w: ^Edit_State, node: core.Node_Index, v: jq.Value) -> bool {
 	edit_note_comments(w, v) or_return
-	return edit_check(w, core.set_value(w.list, node, edit_valid(jq.plain(v))), v)
+	return edit_check(w, core.set_value(w.list, node, edit_written(w, v)), v)
 }
 
 // `v` with each string that is not UTF-8 made one as jq makes it, U+FFFD for each bad sequence: the library refuses such
@@ -691,7 +719,7 @@ edit_same :: proc(a, b: jq.Value) -> bool {
 // Notes the comments a value written new carries. A value written new has no node to hold its comments until the second
 // pass, and none to hold a property.
 edit_note_comments :: proc(w: ^Edit_State, value: jq.Value) -> bool {
-	if writes_property(value) {
+	if writes_property(w, value) {
 		w.err = "cannot write a tag, an anchor or an alias on a value the file does not hold"
 		return false
 	}
@@ -716,6 +744,9 @@ edit_cell_refused :: proc(e: core.Error) -> bool {
 
 // Why `e` refused an edit of `v`, in the words of the command line.
 edit_refusal_text :: proc(w: ^Edit_State, e: core.Error, v: jq.Value, record: bool) -> string {
+	if why := mistag_text(w.doc.readers, w.title, v); why != "" && write_refusal_kind(e) == .Bad_Raw {
+		return why
+	}
 	if !edit_cell_refused(e) {
 		return edit_error_text(w.doc.src, e)
 	}

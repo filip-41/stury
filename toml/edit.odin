@@ -27,7 +27,8 @@ Edit_Detail :: enum u8 {
 	Inline_Comment, // a comment inside an inline table or array
 	Foot_Comment, // a foot comment of a table
 	No_Statement, // a comment on a node that has no line of its own
-	Tag_Fact, // a tag, an anchor or an alias
+	Tag_Fact, // an anchor, an alias, or a tag of a value that is no string
+	Not_Datetime, // a datetime tag on a text that is no datetime of its type
 	Many_Comments, // several inline comments
 	Element_Not_Table, // an element of an array of tables that is no table
 	Misplaced, // a section that would join another element of an array of tables
@@ -44,7 +45,8 @@ EDIT_RULES := core.Rules{"toml_edit", {
 	{"inline_comment", "A comment inside an inline table or array is not edited"},
 	{"foot_comment", "A TOML table has no foot comment: a comment after its last line is the head of what follows"},
 	{"no_statement", "This node has no line of its own to hold a comment"},
-	{"tag_fact", "A TOML datetime is written by its text: a tag, an anchor or an alias is not an edit"},
+	{"tag_fact", "TOML holds no anchor or alias, and a tag only on a string, as a datetime's type"},
+	{"not_datetime", "The text is not a TOML datetime of the type its tag names"},
 	{"many_comments", "A line holds one comment after its value"},
 	{"element_not_table", "An array of tables takes a table"},
 	{"misplaced", "The new section would join the last element of an array of tables, not the one holding this table"},
@@ -1042,6 +1044,9 @@ remove_sections :: proc(cx: ^Cx, v: u32) {
 
 @(private = "file")
 fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
+	if n := cx.doc.nodes[e.node]; e.role == .Tag && n.kind == .String && n.role == .Value {
+		return retag(cx, e)
+	}
 	if core.is_property(e.role) {
 		return refuse_edit(cx, e.node, .Tag_Fact)
 	}
@@ -1073,6 +1078,23 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	case .Key, .Value, .Tag, .Anchor, .Alias, .Instruction, .Doctype, .Attribute, .Partial:
 	}
 	return refuse_edit(cx, e.node, .Tag_Fact)
+}
+
+// A tag set or removed on a string respells it: bare as a datetime of the tag's type, or quoted with no tag.
+@(private = "file")
+retag :: proc(cx: ^Cx, e: core.Edit) -> bool {
+	text, _ := core.text_clone(cx.doc, e.node, cx.a)
+	out: write.Out
+	spare: [write.ROOM_MAX]u8
+	write.init(&out, &spare, cx.a)
+	kind := put_datetime(&out, text, string(e.text)) if e.op == .Set_Fact else put_basic(&out, text, {})
+	spelled, _ := write.finish(&out)
+	if kind != .None {
+		return refuse_edit(cx, e.node, .Not_Datetime)
+	}
+	lo, hi := core.scalar_ends(cx.doc.nodes[e.node])
+	add(cx, lo, hi, spelled)
+	return true
 }
 
 @(private = "file")

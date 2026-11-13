@@ -103,6 +103,7 @@ is_markup :: #force_inline proc "contextless" (doc: ^Document) -> bool
 is_property :: #force_inline proc "contextless" (role: Role) -> bool
 is_wide :: proc(v: Value) -> bool
 keep_comments :: #force_inline proc(old, nv: Value) -> Value
+kept_tag :: proc(doc: ^Document, tag: string, nv: Value) -> (string, bool)
 line_end_len :: proc(src: []u8, pos: u64) -> u64
 locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines = nil) -> (line, col: u64)
 make_room :: #force_inline proc(a: ^[dynamic]$T)
@@ -151,6 +152,7 @@ steps_clone :: proc(steps: []Step, allocator := context.allocator) -> []Step
 subtree_facts :: proc(doc: ^Document, i: Node_Index) -> []Fact
 subtree_size :: #force_inline proc(doc: ^Document, i: Node_Index) -> int
 tables_of :: #force_inline proc "contextless" (doc: ^Document) -> []Table
+tags_in_text :: proc(list: ^Edit_List) -> bool
 text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator) -> (s: string, ok: bool)
 text_f64 :: proc(text: string) -> f64
 text_order :: proc(a, b: string) -> int

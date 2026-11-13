@@ -1,6 +1,5 @@
 package model
 
-import "base:intrinsics"
 import "base:runtime"
 import "core:encoding/base64"
 import "core:encoding/uuid"
@@ -21,7 +20,7 @@ Email :: distinct string
 Decimal :: distinct core.Number_Text
 
 // A type a model reads from a string, with the rules every value of it has, the kinds and the content encoding its
-// schema names, and its hook. `time.Time` reads RFC 3339 into UTC, a leap second as the second after it. Its pattern
+// schema names, and its hook, none for a type every plan reads by its own (`time.Time`). The `time.Time` pattern
 // refuses a year past 1678 to 2261, in which every offset leaves the time inside the range an `i64` of nanoseconds holds,
 // so the read's own range check never refuses what the pattern passed, and leaves a text with no year to the format. `uuid.Identifier` writes lowercase.
 @(private)
@@ -36,7 +35,7 @@ Carrier :: struct {
 
 @(private, rodata)
 CARRIERS := [?]Carrier {
-	{time.Time, `format=date-time,pattern=^(?![0-9]{4}-)|^(?:16(?:7[89]|[89][0-9])|1[7-9][0-9]{2}|2[01][0-9]{2}|22(?:[0-5][0-9]|6[01]))-`, {.Text}, {.String}, "", {time.Time, time_read, time_write, nil, string}},
+	{time.Time, `format=date-time,pattern=^(?![0-9]{4}-)|^(?:16(?:7[89]|[89][0-9])|1[7-9][0-9]{2}|2[01][0-9]{2}|22(?:[0-5][0-9]|6[01]))-`, {.Text}, {.String}, "", {}},
 	{uuid.Identifier, "format=uuid", {.Text}, {.String}, "", {uuid.Identifier, uuid_read, uuid_write, nil, string}},
 	{Email, "format=email", {.Text}, {.String}, "", {}},
 	{Base64, `pattern=^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$`, {.Text}, {.String}, "base64", {Base64, base64_read, base64_write, nil, string}},
@@ -166,30 +165,6 @@ carrier_plans :: proc(m: ^Model($T), reads: ^typed.Format_Reads, carriers: []typ
 		}
 	}
 	return nil
-}
-
-@(private)
-time_read :: proc(v: typed.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Typed_Error_Kind) {
-	p, ok := rules.date_time_of(v.decoded)
-	if v.kind != .String || !ok {
-		return .Wrong_Kind if v.kind != .String else .Bad_Format
-	}
-	t, in_range := time.components_to_time(p.year, p.month, p.day, p.hour, p.minute, min(p.second, 59), p.nanosecond)
-	utc, past := intrinsics.overflow_sub(t._nsec, i64(p.offset) * i64(time.Minute))
-	if p.second == 60 && !past {
-		utc, past = intrinsics.overflow_add(utc, i64(time.Second))
-	}
-	if !in_range || past {
-		return .Out_Of_Range
-	}
-	(^time.Time)(dest)^ = {utc}
-	return nil
-}
-
-@(private)
-time_write :: proc(v: rawptr, allocator: runtime.Allocator) -> (any, core.Typed_Error_Kind) {
-	text, ok := time.time_to_rfc3339((^time.Time)(v)^, 0, true, allocator)
-	return stand_in(text, allocator, .None if ok else .Out_Of_Range)
 }
 
 @(private)

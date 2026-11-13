@@ -66,6 +66,10 @@ TOKENS := write.Token_Spelling {
 			}
 			write.put_text(t.out, x.text)
 		case write.Tagged_Text:
+			// A tag that is no TOML type, as another format's, leaves a string.
+			if x.tag != "" && tag_datetime(x.tag) == .None {
+				return put_basic(t.out, x.text, t.opts)
+			}
 			return put_datetime(t.out, x.text, x.tag)
 		case write.Tree_Part:
 			write.put_text(t.out, t.spell.tree[x])

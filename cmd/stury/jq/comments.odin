@@ -480,7 +480,8 @@ remove_facts :: proc(ip: ^Interp, v: Value, facts: []Value) -> (Value, Signal) {
 }
 
 // `nv` put where `old` was: it keeps `old`'s facts that `nv` does not bring, the comments of each role
-// (`core.keep_comments`) and each property, written or from the source.
+// (`core.keep_comments`) and each property, written or from the source, a tag only where `nv` still fits it
+// (`core.kept_tag`).
 keep_facts :: #force_inline proc(old, nv: Value) -> Value {
 	#partial switch x in old {
 	case ^Commented:
@@ -516,6 +517,9 @@ merge_facts :: #force_no_inline proc(old, nv: Value) -> Value {
 		text, is_text := string_of(have)
 		if !is_text {
 			text = to_json(have, {}, context.allocator)
+		}
+		if r, is_ref := plain(old).(Ref); is_ref && name == .Tag {
+			text = core_pkg.kept_tag(r.doc, text, nv) or_continue
 		}
 		bodies := make([]string, 1)
 		bodies[0] = text

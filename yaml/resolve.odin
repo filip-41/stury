@@ -141,6 +141,16 @@ core_type :: proc "contextless" (handle, suffix, prefix: string, declared: bool)
 	return .None
 }
 
+// The readers' `tag_fits`: a core schema tag, as written with no `%TAG` directive, stays on a value of its type, and any
+// other tag on any value.
+@(private)
+tag_fits :: proc(tag: string, v: core.Value) -> (string, bool) {
+	@(static, rodata)
+	kinds := [Core_Type]bit_set[core.Kind]{.None = ~{}, .Str = {.String}, .Int = {.Number}, .Float = {.Number}, .Bool = {.True, .False}, .Null = {.Null}}
+	handle, suffix := tag_parts(tag)
+	return tag, core.value_kind(v) in kinds[core_type(handle, suffix, "", false)]
+}
+
 // The prefix the `%TAG` directive of `src`'s document gives `handle`. The directives are the lines starting with `%`
 // before the document's first other content line.
 @(private)

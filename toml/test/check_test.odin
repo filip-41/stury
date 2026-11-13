@@ -3,6 +3,7 @@ package toml_tests
 
 import "core:strings"
 import "core:testing"
+import "core:time"
 import core "../../core"
 import rules "../../core/rules"
 import typed "../../core/typed"
@@ -128,6 +129,40 @@ a_model_loads_and_dumps_toml :: proc(t: ^testing.T) {
 	refused := model.load(&m, transmute([]u8)string("title = \"\"\nratio = 2.0\n\n[[peer]]\nname = \"a\"\nport = 80\n"), &bad, &sink)
 	testing.expect(t, refused != nil)
 	testing.expect_value(t, len(sink.entries), 3)
+}
+
+@(private = "file")
+Stamped :: struct {
+	at:   time.Time,
+	day:  typed.Datetime,
+	note: typed.Datetime,
+}
+
+// A `time.Time` reads an offset datetime and writes one bare, a `typed.Datetime` holds any kind and writes it bare when
+// its text is a datetime, and a local datetime is no `time.Time`.
+@(test)
+datetimes_read_and_write_bare :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	v: Stamped
+	walktest.expect_nil(t, toml.unmarshal(transmute([]u8)string("at = 1979-05-27 07:32:00-01:00\nday = 07:32:00\nnote = \"soon\"\n"), .Toml_1_0, &v))
+	testing.expect_value(t, v.at, time.Time{296641920 * 1e9})
+	testing.expect_value(t, v.day, "07:32:00")
+	want := "at = 1979-05-27T08:32:00Z\nday = 07:32:00\nnote = \"soon\"\n"
+	text, written := toml.marshal(v)
+	walktest.expect_nil(t, written)
+	testing.expect_value(t, string(text), want)
+	reg: model.Registry
+	m, compiled := model.compile(&reg, Stamped, toml.checks(.Toml_1_0))
+	walktest.expect_nil(t, compiled)
+	dumped, dump_err := model.dump(&m, &v)
+	walktest.expect_nil(t, dump_err)
+	testing.expect_value(t, string(dumped), want)
+	json_text, _ := json_pkg.marshal(v)
+	testing.expect_value(t, string(json_text), `{"at":"1979-05-27T08:32:00Z","day":"07:32:00","note":"soon"}`)
+	local: Stamped
+	refused := toml.unmarshal(transmute([]u8)string("at = 1979-05-27T07:32:00\n"), .Toml_1_0, &local)
+	testing.expect(t, refused != nil)
 }
 
 // `check` gives every refusal of a text read by a plan, for either spec, and a plan made with the reads `checks` gives

@@ -370,7 +370,9 @@ Duplicates :: enum u8 {
 // node `i` to a name that needs the key's place in the document, an expanded XML name whose namespace an ancestor
 // declares, and is nil for a format whose `key_equals` needs no more. `room` returns the bytes that hold the decode of
 // a token of `n` source bytes at `lo`, for a format whose decode may outgrow its span past what its spelling bits say,
-// as an XML entity reference does. It is nil for a format whose decodes `text_room` sizes from the bits.
+// as an XML entity reference does. It is nil for a format whose decodes `text_room` sizes from the bits. `tag_fits`
+// says whether a value `v` put in place of a node tagged `tag` keeps a tag, and which, for a format whose tags state a
+// type, see `kept_tag`. It is nil for a format whose tags stay on any value.
 Readers :: struct {
 	text:        proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
 	key_equals:  proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool,
@@ -393,6 +395,7 @@ Readers :: struct {
 	key_bytes:   proc(name: string, buf: []u8) -> []u8,
 	key_is:      proc "contextless" (doc: ^Document, i: Node_Index, name: string) -> bool,
 	room:        proc(v: ^Token_View, lo: u64, n: u32) -> int,
+	tag_fits:    proc(tag: string, v: Value) -> (kept: string, fits: bool),
 }
 
 // The run-time services of a handle, which a call that chooses its format at run time reaches through

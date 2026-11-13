@@ -57,6 +57,7 @@ READERS := core.Readers {
 	format     = rules_of,
 	tag_key    = "toml",
 	fact       = spelling_fact,
+	tag_fits   = tag_fits,
 }
 
 // TOML's fault table, which names the format whatever the spec.
@@ -306,6 +307,38 @@ DATETIME_TAGS := [Datetime]string {
 	.Local  = "datetime-local",
 	.Date   = "date-local",
 	.Time   = "time-local",
+}
+
+// The datetime type tag `tag` names, `.None` for a tag that is no TOML type.
+@(private)
+tag_datetime :: proc(tag: string) -> Datetime {
+	for name, d in DATETIME_TAGS {
+		if d != .None && name == tag {
+			return d
+		}
+	}
+	return .None
+}
+
+// The datetime type `text` is, whole, `.None` for a text that is no datetime.
+@(private)
+text_datetime :: proc(text: string) -> Datetime {
+	src := transmute([]u8)text
+	if len(src) < 5 || !datetime_starts(src, 0) {
+		return .None
+	}
+	end, kind, verdict := scan_datetime(src, 0, true)
+	return kind if verdict == 0 && end == len(src) else .None
+}
+
+// The readers' `tag_fits`: a value keeps a datetime's tag when it is a string whose text is a datetime, as the type
+// that text is.
+@(private)
+tag_fits :: proc(_: string, v: core.Value) -> (string, bool) {
+	buf: [64]u8
+	text, is_text := core.value_text(v, buf[:])
+	d := text_datetime(text) if is_text && core.value_kind(v) == .String else .None
+	return DATETIME_TAGS[d], d != .None
 }
 
 @(private, rodata)

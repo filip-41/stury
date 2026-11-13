@@ -22,6 +22,7 @@ READERS := core.Readers {
 	tag_key     = "yaml",
 	fact        = spelling_fact,
 	number_text = number_text,
+	tag_fits    = tag_fits,
 }
 
 // The handle of `spec` read with `opts`, over `READERS`.

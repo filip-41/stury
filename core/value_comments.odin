@@ -124,6 +124,15 @@ merge_comments :: #force_no_inline proc(old, nv: Value) -> Value {
 	return c
 }
 
+// The tag a value `nv` put in place of a node of `doc` tagged `tag` keeps, and false for none: the one the format judges
+// `nv` to fit where its tags state a type, else `tag`.
+kept_tag :: proc(doc: ^Document, tag: string, nv: Value) -> (string, bool) {
+	if doc.readers == nil || doc.readers.tag_fits == nil {
+		return tag, true
+	}
+	return doc.readers.tag_fits(tag, nv)
+}
+
 // `inner`, the value `c` wraps after a change to its data, with `c`'s comments.
 rewrap :: proc(c: ^Commented, inner: Value) -> Value {
 	w := new(Commented)

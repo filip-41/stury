@@ -443,26 +443,17 @@ put_basic :: proc(out: ^write.Out, s: string, opts: core.Write_Options) -> core.
 	return .None
 }
 
-// Writes `text` as a bare datetime of the type `tag` names. A text that is not a datetime of that type is `.Bad_Raw`. A
-// time with no seconds, which only TOML 1.1 reads, gets `:00`.
+// Writes `text` as a bare datetime of the type `tag` names, or of any type under an empty `tag`. A text that is not a
+// datetime of that type is `.Bad_Raw`. A time with no seconds, which only TOML 1.1 reads, gets `:00`.
 @(private)
 put_datetime :: proc(out: ^write.Out, text, tag: string) -> core.Typed_Error_Kind {
-	want := Datetime.None
-	for name, d in DATETIME_TAGS {
-		if d != .None && name == tag {
-			want = d
-		}
+	kind := text_datetime(text)
+	if kind == .None || tag != "" && kind != tag_datetime(tag) {
+		return .Bad_Raw
 	}
 	src := transmute([]u8)text
-	if want == .None || len(src) < 5 || !datetime_starts(src, 0) {
-		return .Bad_Raw
-	}
-	end, kind, verdict := scan_datetime(src, 0, true)
-	if verdict != 0 || end != len(src) || kind != want {
-		return .Bad_Raw
-	}
 	if _, _, v10 := scan_datetime(src, 0, false); v10 != 0 {
-		at := 0 if want == .Time else 11
+		at := 0 if kind == .Time else 11
 		write.put_text(out, text[:at + 5])
 		write.put_text(out, ":00")
 		write.put_text(out, text[at + 5:])

@@ -835,13 +835,23 @@ enter_target :: proc(w: ^Walker, target: rawptr, rec: ^typed.Field) -> core.Type
 }
 
 // Writes an `any`, or a hook's stand-in, that holds a nil or a scalar, and returns nil. Any other value is left to a frame,
-// and this enters the side plan of its type and returns the record to write it by.
+// and this enters the side plan of its type and returns the record to write it by. A `typed.Datetime` shaped as a date
+// or a time is written bare where the format reads that text as one value, as a string elsewhere.
 @(private)
 any_value :: proc(w: ^Walker, a: any, $T: Tree, $put: Put) -> (rec: ^typed.Field, kind: core.Typed_Error_Kind) {
 	out := &w.out
 	if a.id == nil || a.data == nil {
 		put_text(out, T[.Null])
 		return nil, .None
+	}
+	if a.id == typeid_of(typed.Datetime) {
+		text := string((^typed.Datetime)(a.data)^)
+		when len(T[.Heads]) == 0 {
+			if len(text) >= 5 && text[0] >= '0' && text[0] <= '9' && (text[4] == '-' || text[2] == ':') && put_raw(w, text, 0, T) == .None {
+				return nil, .None
+			}
+		}
+		return nil, put(out, room(out, LEAF_ROOM), text, &w.opts)
 	}
 	p := room(out, LEAF_ROOM)
 	when len(T[.Heads]) != 0 {

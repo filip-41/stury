@@ -9,13 +9,14 @@ import core ".."
 FACT_ROLES := [?]core.Role{.Comment, .Comment_Inline, .Comment_Foot, .Attribute, .Tag, .Anchor}
 
 // Whether neither value holds a fact below it, so equal values have nothing left to tell. A built array holds nodes,
-// each of them, only when it is the array of a name a markup node repeats.
+// each of them, only when it is the array of a name a markup node repeats. A node of a format that spells facts may
+// hold one.
 @(private)
 quiet :: proc(a, b: core.Value) -> bool {
 	for v in ([2]core.Value{a, b}) {
 		#partial switch x in core.plain(v) {
 		case core.Node_Ref:
-			if len(core.subtree_facts(x.doc, x.node)) > 0 {
+			if spells_facts(x.doc) || len(core.subtree_facts(x.doc, x.node)) > 0 {
 				return false
 			}
 		case ^core.Array:
@@ -31,7 +32,8 @@ quiet :: proc(a, b: core.Value) -> bool {
 }
 
 // Whether the format of `doc` can hold a fact of `role`: a comment needs the format to spell one, an attribute needs it
-// to read, and a tag or an anchor needs the edit services to write property facts.
+// to read, a tag needs the edit services to write property facts or the format to spell it in a value's text, and an
+// anchor needs the edit services.
 @(private)
 carries :: proc(doc: ^core.Document, role: core.Role) -> bool {
 	if doc.readers == nil {
@@ -39,6 +41,9 @@ carries :: proc(doc: ^core.Document, role: core.Role) -> bool {
 	}
 	if role == .Attribute {
 		return doc.readers.attribute != nil
+	}
+	if role == .Tag && doc.readers.fact != nil {
+		return true
 	}
 	s := doc.readers.services
 	if s == nil || s.edit == nil {
@@ -59,7 +64,7 @@ carries :: proc(doc: ^core.Document, role: core.Role) -> bool {
 facts :: proc(d: ^Differ, a, b: core.Value) {
 	ra, a_node := core.plain(a).(core.Node_Ref)
 	rb, b_node := core.plain(b).(core.Node_Ref)
-	if !a_node || !b_node || len(ra.doc.facts) + len(rb.doc.facts) == 0 {
+	if !a_node || !b_node || len(ra.doc.facts) + len(rb.doc.facts) == 0 && !spells_facts(ra.doc) && !spells_facts(rb.doc) {
 		return
 	}
 	ai, bi := memo_of(d, ra.doc), memo_of(d, rb.doc)
@@ -75,10 +80,22 @@ facts :: proc(d: ^Differ, a, b: core.Value) {
 	}
 }
 
+// Whether the format of `doc` spells facts its document holds no span of.
+@(private = "file")
+spells_facts :: proc(doc: ^core.Document) -> bool {
+	return doc.readers != nil && doc.readers.fact != nil
+}
+
 // The facts of `role` on a node as texts: a comment's, tag's or anchor's body in source order, an attribute as
 // `name=value` in name order.
 @(private)
 fact_texts :: proc(r: core.Node_Ref, role: core.Role) -> []string {
+	if role == .Tag {
+		tag, held := core.fact_value(r.doc, r.node, .Tag)
+		out := make([]string, 1 if held else 0, context.temp_allocator)
+		copy(out, []string{tag.text})
+		return out
+	}
 	if core.is_property(role) {
 		out := make([dynamic]string, context.temp_allocator)
 		it := core.facts_of(r.doc, r.node, role)

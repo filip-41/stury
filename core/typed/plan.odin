@@ -1843,6 +1843,11 @@ hook_of :: proc(b: ^Builder, T: typeid) -> (hook: Type_Hook, ok: bool) {
 			return h, true
 		}
 	}
+	for h in BUILT_IN_HOOKS {
+		if h.type == T {
+			return h, true
+		}
+	}
 	return
 }
 

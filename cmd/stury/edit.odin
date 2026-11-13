@@ -198,7 +198,7 @@ edit_state :: proc(er: ^Edit_Run, doc: ^core.Document, list: ^core.Edit_List) ->
 		list.write.escape_del, list.write.jq_numbers = true, true
 		list.fixed = !er.run.opts.layout_shown
 	}
-	return {doc = doc, list = list, name = er.ins.name, sorted = er.run.opts.sort_keys}
+	return {doc = doc, list = list, name = er.ins.name, title = FORMATS[er.ins.format].title, sorted = er.run.opts.sort_keys}
 }
 
 // A whole text, which holds one document, so the filter makes one output. Under `-s` it is the one record of an array.

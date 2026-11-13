@@ -611,7 +611,8 @@ fmt.print(string(out)) // the text with `port = 9090`, its comment and every oth
 ```
 
 - A datetime is a string whose `Tag` fact names its type: `datetime`, `datetime-local`, `date-local` or
-  `time-local`. A hex, octal or binary integer is a number, and `Style` tells its form.
+  `time-local`. A `typed.Datetime` field reads any of them and writes its text bare when it is one, and a `time.Time`
+  reads an offset datetime and writes one bare. A local kind is no `time.Time`: the read refuses it as `.Bad_Format`. A hex, octal or binary integer is a number, and `Style` tells its form.
 - `toml.marshal(cfg)` writes a struct or a map as a document: the scalars and the arrays that are not of tables as
   `key = value` lines, each table as a `[header]` section after them, and an array of tables as a `[[header]]` section
   per element. A float is written so that it reads back as a float (`1.0`, `-0.0`, `inf`, `nan`). Null has no TOML

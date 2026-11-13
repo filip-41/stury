@@ -27,7 +27,8 @@ Number_Literal :: struct {
 }
 
 // A string by its text and the type its format tags it with, as a TOML datetime is: a format with tags writes it as the
-// type's own literal, and the text must be one of that type, else `.Bad_Raw`. A format with none writes the string.
+// type's own literal, and the text must be one of that type, else `.Bad_Raw`. An empty tag is the type the text spells,
+// a `typed.Datetime`'s. A format with none, or a tag the format has no type of, writes the string.
 Tagged_Text :: struct {
 	text, tag: string,
 }

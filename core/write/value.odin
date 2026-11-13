@@ -2,7 +2,7 @@ package write
 
 // A value written in any format with a token writer. A node is written by the readers, as a built value is, so its
 // text is spelled new. A value's comments are not written, and an object's members are written in order, a repeated
-// key each time.
+// key each time. A string with a tag, written on it or its node's, is a `Tagged_Text`.
 
 import "base:runtime"
 import "core:math"
@@ -114,6 +114,9 @@ value_plain :: proc(t: ^Tokens, v: core.Value, comments: bool) -> core.Typed_Err
 	case ^core.Number_Text:
 		return value(t, Number_Literal{x.text})
 	case string:
+		if tag, tagged := string_tag(v); tagged {
+			return value(t, Tagged_Text{x, tag})
+		}
 		return value_string(t, x)
 	case ^core.Array:
 		open_array(t) or_return
@@ -142,7 +145,7 @@ value_plain :: proc(t: ^Tokens, v: core.Value, comments: bool) -> core.Typed_Err
 		}
 		return close(t)
 	case core.Node_Ref:
-		return put_node(t, x)
+		return put_node(t, x, v)
 	case core.Trail:
 		return value_of(t, core.trail_array(x), comments)
 	case ^core.Commented:
@@ -150,8 +153,24 @@ value_plain :: proc(t: ^Tokens, v: core.Value, comments: bool) -> core.Typed_Err
 	return .None
 }
 
+// The tag string `v` is written with: the one written on it, else its node's, and false for none.
 @(private = "file")
-put_node :: proc(t: ^Tokens, r: core.Node_Ref) -> core.Typed_Error_Kind {
+string_tag :: proc(v: core.Value) -> (string, bool) {
+	if c, is_commented := v.(^core.Commented); is_commented && .Tag in c.written {
+		bodies := c.bodies[.Tag]
+		return bodies[0] if len(bodies) > 0 else "", len(bodies) > 0
+	}
+	r, is_ref := core.plain(v).(core.Node_Ref)
+	if !is_ref || len(r.doc.facts) == 0 && r.doc.readers.fact == nil {
+		return "", false
+	}
+	tag, tagged := core.fact_value(r.doc, r.node, .Tag)
+	return tag.text, tagged
+}
+
+// Node `r` of `v`, which may write a tag on it.
+@(private = "file")
+put_node :: proc(t: ^Tokens, r: core.Node_Ref, v: core.Value) -> core.Typed_Error_Kind {
 	#partial switch core.kind(r) {
 	case .Null:
 		return value_null(t)
@@ -176,6 +195,9 @@ put_node :: proc(t: ^Tokens, r: core.Node_Ref) -> core.Typed_Error_Kind {
 		payload, held := core.doc_bytes(r.doc, r.node, joined)
 		return value_bytes(t, payload) if held else .No_Memory
 	case .String:
+		if tag, tagged := string_tag(v); tagged {
+			return value(t, Tagged_Text{core.node_string(r.doc, r.node), tag})
+		}
 		return value_string(t, core.node_string(r.doc, r.node))
 	case .Array:
 		open_array(t) or_return

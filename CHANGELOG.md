@@ -13,6 +13,11 @@
   `hex_encode`, `hex_decode`, `base64url_encode` and `base64url_decode`; `uuid_v4` and `uuid_v7`; `parse_url`,
   `parse_query_string` and `parse_logfmt`; `numfmt(spec)`; `ip_valid`, `ip_class`, `ip_canonical` and
   `ip_in_cidr(cidr)`; and `json_pointer(ptr)` ([Builtins beyond jq](docs/cli.md#builtins-beyond-jq)).
+- A TOML datetime and a YAML tag survive a filter and an edit: `--to toml` writes every datetime bare, an edit that
+  sets a datetime to a text of a datetime writes it bare and to any other a string, `.@tag` set to a datetime type
+  makes a string one, a text that is no datetime of its tag's type is an error, a YAML `!!str` goes when its value is
+  set to a number, and `diff --facts` sees a string become a datetime. A `typed.Datetime` field and `time.Time` read
+  and write a datetime in every format, bare where the format has them.
 - `--threads N` sets how many threads share a long input, the calling thread counted, for a filter run, `check`, `fmt`
   and `schema infer`. `--threads 1` starts no other thread, and the output is the same at every `N`. The default is one
   per core, as before, and the `STURY_THREADS` build setting is gone.

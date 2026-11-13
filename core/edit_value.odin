@@ -26,10 +26,19 @@ insert_member_value :: proc(list: ^Edit_List, container: Node_Index, at: int, ke
 	return insert_input(list, container, at, key, true, {value = v})
 }
 
+// Whether the format of `list`'s document spells a tag in its value's text, as TOML's datetime is, so a value written
+// with a tag is spelled by it and no fact edit writes it.
+tags_in_text :: proc(list: ^Edit_List) -> bool {
+	return list.doc.readers.tag_fits != nil && (list.edit == nil || list.edit.prefix == nil)
+}
+
 // Makes the comments `c` writes the comments of node `node`: a role's bodies replace the node's, and a role whose
-// bodies are the node's own makes no edit.
+// bodies are the node's own makes no edit. A tag the value's text spells is no fact edit.
 set_comments :: proc(list: ^Edit_List, node: Node_Index, c: ^Commented) -> Error {
 	for role in c.written {
+		if role == .Tag && tags_in_text(list) {
+			continue
+		}
 		have, _ := comments(Node_Ref{list.doc, node}, role)
 		if slice.equal(c.bodies[role], have) {
 			continue
@@ -124,7 +133,10 @@ member_start :: proc(doc: ^Document, c: Node_Index) -> u64 {
 spell :: proc(list: ^Edit_List, v: Value, target: Node_Index, into: bool, at: u64, record: bool) -> (text: []u8, owned: bool, err: Error) {
 	doc := list.doc
 	p := plain(v)
-	if r, is_ref := p.(Node_Ref); is_ref && r.doc == doc && !(list.write.sort_keys && value_kind(p) == .Object) {
+	// A tag written on the value that its text spells is written with it, so its node's bytes are not its text.
+	c, is_commented := v.(^Commented)
+	retagged := is_commented && .Tag in c.written && tags_in_text(list)
+	if r, is_ref := p.(Node_Ref); is_ref && r.doc == doc && !retagged && !(list.write.sort_keys && value_kind(p) == .Object) {
 		if list.edit == nil || list.edit.relocate == nil {
 			return span(doc, r.node), false, nil
 		}
@@ -145,7 +157,7 @@ spell :: proc(list: ^Edit_List, v: Value, target: Node_Index, into: bool, at: u6
 	if k := value_kind(p); !flat && !placed && !list.fixed && (k == .Array || k == .Object) {
 		opts, colon = site_layout(list, target, into)
 	}
-	text = list.edit.spell(doc, p, opts, colon, record, at, list.allocator) or_return
+	text = list.edit.spell(doc, v if retagged else p, opts, colon, record, at, list.allocator) or_return
 	if flat || placed || !opts.pretty || bytes.index_byte(text, '\n') < 0 {
 		return text, true, nil
 	}
