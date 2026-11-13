@@ -139,6 +139,12 @@ members_are_removed_inserted_and_reordered :: proc(t: ^testing.T) {
 		core.remove(l, element(d, core.ROOT, 0)) or_return
 		return core.reorder(l, core.ROOT, {1})
 	}), "81 02")
+	// An order with no entries is refused, as compose refuses it, even when every member is removed.
+	testing.expect_value(t, edited("82 01 02", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+		core.remove(l, element(d, core.ROOT, 0)) or_return
+		core.remove(l, element(d, core.ROOT, 1)) or_return
+		return core.reorder(l, core.ROOT, {})
+	}), "Bad_Index")
 	// A member's key takes a new name, and a member is inserted with a key.
 	testing.expect_value(t, edited("a1 01 02", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
 		core.set_text(l, element(d, core.ROOT, 0) - 1, "k") or_return

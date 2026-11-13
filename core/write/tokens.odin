@@ -5,6 +5,7 @@ package write
 import "base:runtime"
 import "core:io"
 import "core:mem/virtual"
+import "core:slice"
 import "core:strings"
 import "../spell"
 import core ".."
@@ -34,7 +35,8 @@ Tagged_Text :: struct {
 }
 
 // A format's token spelling, which `core.Services.tokens` points at. `tree` is the nested format's punctuation. `value`
-// writes one scalar, or one cell of a flat format, and a key is a string. A format with a `line` is flat.
+// writes one scalar, or one cell of a flat format, and a key is a string. A `Number_Literal` that reaches it through
+// `value` is a JSON number. A format with a `line` is flat.
 Token_Spelling :: struct {
 	tree:   Tree,
 	start:  proc(t: ^Tokens, as: core.As) -> core.Typed_Error_Kind, // sets `state` and `out`
@@ -254,6 +256,11 @@ value :: proc(t: ^Tokens, v: Scalar) -> core.Typed_Error_Kind {
 	if !lead(t, .Scalar) {
 		return t.err
 	}
+	if x, literal := v.(Number_Literal); literal {
+		if _, is_number := number_of_text(x.text); !is_number {
+			return refuse(t, .Bad_Raw)
+		}
+	}
 	refuse(t, t.spell.value(t, v))
 	t.first, t.done = false, t.top == 0
 	return refuse(t, t.out.err)
@@ -360,6 +367,96 @@ node_number_text :: proc(doc: ^core.Document, node: core.Node_Index, stack: []u8
 @(private)
 NUMBER_TEXT_MAX :: 1 << 26
 
+// Writes number node `node` as its decimal digits as JSON spells them, or as its span when `own` says the writing
+// format reads it. An infinity or a NaN is written with tree `T`'s word, and is `.Non_Finite` when `T` has none.
+put_number_node :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index, $T: Tree, own := false) -> core.Typed_Error_Kind {
+	t := doc.nodes[node]
+	span := string(core.span(doc, node))
+	if own || doc.readers.number_text == nil && (t.kind != .Number || t.spelling & core.NUMBER_KIND_MASK == 0) {
+		put_text(out, span)
+		return .None
+	}
+	kind: core.Typed_Error_Kind
+	if doc.readers.number_text != nil {
+		stack: [64]u8
+		text, ok := node_number_text(doc, node, stack[:])
+		if !ok {
+			return .No_Memory
+		}
+		put_text(out, text)
+		kind = .None if text != "" else .Non_Finite
+	} else {
+		kind = put_decimal(out, span, t.spelling)
+	}
+	if kind != .Non_Finite || T[.Nan] == "" {
+		return kind
+	}
+	f, is_float := core.float_value(doc, node)
+	if !is_float {
+		return .Non_Finite
+	}
+	put_text(out, T[.Nan] if f != f else T[.Inf] if f > 0 else T[.Neg_Inf])
+	return .None
+}
+
+// Returns the text of node `node`, in `buf` when it fits and else in a copy made with `allocator`.
+node_text :: #force_inline proc(doc: ^core.Document, node: core.Node_Index, buf: []u8, allocator: runtime.Allocator) -> (string, core.Typed_Error_Kind) {
+	if text, ok := core.text(doc, node, buf); ok {
+		return text, .None
+	}
+	text, ok := core.text_clone(doc, node, allocator)
+	return text, .None if ok else .No_Memory
+}
+
+// A member of an object node as a document writer lays it out: its key, its value and the key's text.
+Node_Member :: struct {
+	key, value: core.Node_Index,
+	name:       string,
+}
+
+// Returns the members of the object at `node`, each name decoded in place or copied with `allocator`, in name order when
+// `sort` says so, a repeated name keeping its place. A name the object repeats is `.Unwritable` when `unique` says so.
+node_members :: proc(doc: ^core.Document, node: core.Node_Index, sort, unique: bool, allocator: runtime.Allocator) -> ([]Node_Member, core.Typed_Error_Kind) {
+	members := make([dynamic]Node_Member, allocator)
+	seen: map[string]struct{}
+	it := core.pairs(doc, node)
+	for key, value in core.pair_next(&it) {
+		name, failed := node_text(doc, key, nil, allocator)
+		if failed != .None {
+			return nil, failed
+		}
+		if unique && len(members) < LINEAR_KEYS {
+			for m in members {
+				if m.name == name {
+					return nil, .Unwritable
+				}
+			}
+		} else if unique {
+			if seen == nil {
+				seen = make(map[string]struct{}, allocator)
+				for m in members {
+					seen[m.name] = {}
+				}
+			}
+			if name in seen {
+				return nil, .Unwritable
+			}
+			seen[name] = {}
+		}
+		if _, failed := append(&members, Node_Member{key, value, name}); failed != nil {
+			return nil, .No_Memory
+		}
+	}
+	if sort {
+		slice.stable_sort_by(members[:], proc(a, b: Node_Member) -> bool {return a.name < b.name})
+	}
+	return members[:], .None
+}
+
+// Objects with fewer members than this check for a repeated name by comparing names in turn.
+@(private)
+LINEAR_KEYS :: 16
+
 // The tree a markup format's typed write makes a value in, which its element write reads: JSON's punctuation and words,
 // and a float that is a whole number with `.0`.
 MARKUP_TREE :: Tree {
@@ -387,27 +484,12 @@ MARKUP_TREE :: Tree {
 scalar_text :: proc(doc: ^core.Document, node: core.Node_Index, stack: []u8) -> (string, core.Typed_Error_Kind) {
 	#partial switch core.kind(doc, node) {
 	case .String, .Plain:
-		if text, ok := core.text(doc, node, stack); ok {
-			return text, .None
-		}
-		text, ok := core.text_clone(doc, node, context.temp_allocator)
-		return text, .None if ok else .No_Memory
+		return node_text(doc, node, stack, context.temp_allocator)
 	case .Number:
-		t := doc.nodes[node]
-		if doc.readers.number_text != nil {
-			text, ok := node_number_text(doc, node, stack[:64])
-			return text, .None if ok else .No_Memory
-		}
-		if t.kind != .Number || t.spelling & core.NUMBER_KIND_MASK == 0 {
-			return string(core.span(doc, node)), .None
-		}
 		spill: [ROOM_MAX]u8 = ---
 		digits: Out
 		init(&digits, &spill, context.temp_allocator)
-		if kind := put_decimal(&digits, string(core.span(doc, node)), t.spelling); kind != .None {
-			return "", kind
-		}
-		text, err := finish(&digits)
+		text, err := finish(&digits, {kind = put_number_node(&digits, doc, node, MARKUP_TREE)})
 		return string(text), err.kind
 	case .True:
 		return "true", .None
@@ -455,8 +537,7 @@ token_scalar_text :: proc(v: Scalar, stack: []u8) -> (text: string, null: bool, 
 		n := number_text_as(raw_data(stack), x, MARKUP_TREE) or_return
 		return string(stack[:n]), false, .None
 	case Number_Literal:
-		_, is_number := spell.number_strict(transmute([]u8)x.text, 0, u64(len(x.text)))
-		return x.text, false, .None if is_number else .Bad_Raw
+		return x.text, false, .None
 	case Tree_Part:
 		tree := MARKUP_TREE
 		return tree[x], x == .Null, .None

@@ -133,6 +133,23 @@ remove_from_an_inline_array :: proc(t: ^testing.T) {
 	testing.expect_value(t, out, "a = [1, 3]\n")
 }
 
+// Removed elements that end an inline array go with the separators before them, and a new element takes the
+// separator of the first gap, or a line of its own after an element that starts a line.
+@(test)
+inline_arrays_keep_their_separators :: proc(t: ^testing.T) {
+	out, err := edited("a = [1, 2, 3]\nb = [1,2]\nc = [\n  1,\n  2\n]\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+		a := member(d, core.ROOT, "a")
+		for k in 1 ..= 2 {
+			v, _ := core.child_at(d, a, k)
+			core.remove(l, v) or_return
+		}
+		write.insert(l, member(d, core.ROOT, "b"), 2, typed.Raw("3")) or_return
+		return write.insert(l, member(d, core.ROOT, "c"), 2, typed.Raw("3"))
+	})
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, out, "a = [1]\nb = [1,2,3]\nc = [\n  1,\n  2,\n  3\n]\n")
+}
+
 @(test)
 rename_a_key :: proc(t: ^testing.T) {
 	out, err := edited("a = 1 # n\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {

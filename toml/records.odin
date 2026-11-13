@@ -13,7 +13,7 @@ import records "../core/records"
 @(private, rodata)
 FRAMING := records.Framing_Services {
 	next  = #partial {.Concatenated = next_text},
-	judge = proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) {return nil},
+	judge = records.no_judge,
 }
 
 // Frames the text at the reader's position, the rest of the input, judged by the read of its table tree.

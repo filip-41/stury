@@ -12,7 +12,6 @@ package toml
 
 import "base:runtime"
 import "core:io"
-import "core:slice"
 import "core:unicode/utf8"
 import core "../core"
 import write "../core/write"
@@ -29,12 +28,6 @@ Layout :: struct {
 	commented: bool, // the document holds a comment
 	kept:      int, // the comments written
 	glue:      bool, // comments of an omitted header were written, which the next header follows without a blank line
-}
-
-@(private)
-Member :: struct {
-	name:  string,
-	value: core.Node_Index,
 }
 
 // Writes node `node` of `doc` as TOML, as `core.write` does with `as(spec)`. A document of another format is written
@@ -68,32 +61,6 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 	return text, len(core.subtree_facts(doc, node)) - l.kept, err
 }
 
-// The members of the object at `node`, in key order when the output sorts. A key the object repeats is `.Unwritable`.
-@(private)
-members_of :: proc(l: ^Layout, node: core.Node_Index) -> ([]Member, core.Typed_Error_Kind) {
-	scratch := runtime.arena_allocator(&l.arena)
-	members := make([dynamic]Member, scratch)
-	seen := make(map[string]struct{}, scratch)
-	it := core.pairs(l.doc, node)
-	for key, value in core.pair_next(&it) {
-		name, whole := core.text_clone(l.doc, key, scratch)
-		if !whole {
-			return nil, .No_Memory
-		}
-		if name in seen {
-			return nil, .Unwritable
-		}
-		seen[name] = {}
-		if _, failed := append(&members, Member{name, value}); failed != nil {
-			return nil, .No_Memory
-		}
-	}
-	if l.opts.sort_keys {
-		slice.stable_sort_by(members[:], proc(a, b: Member) -> bool {return a.name < b.name})
-	}
-	return members[:], .None
-}
-
 // Whether `value` is written as a section of its own: a table, or a non-empty array of tables.
 @(private)
 is_section :: proc(l: ^Layout, value: core.Node_Index) -> bool {
@@ -119,7 +86,7 @@ is_section :: proc(l: ^Layout, value: core.Node_Index) -> bool {
 // sections. An element of an array of tables always has its header.
 @(private)
 put_table :: proc(l: ^Layout, node: core.Node_Index, element: bool) -> core.Typed_Error_Kind {
-	members := members_of(l, node) or_return
+	members := write.node_members(l.doc, node, l.opts.sort_keys, true, runtime.arena_allocator(&l.arena)) or_return
 	lines, sections := 0, 0
 	for m in members {
 		if is_section(l, m.value) {
@@ -136,6 +103,8 @@ put_table :: proc(l: ^Layout, node: core.Node_Index, element: bool) -> core.Type
 			put_comments(l, node, .Comment)
 			l.glue = l.kept > before
 		}
+	} else {
+		put_comments(l, node, .Comment)
 	}
 	for m in members {
 		if !is_section(l, m.value) {
@@ -214,7 +183,7 @@ put_header :: proc(l: ^Layout, node: core.Node_Index, element: bool) {
 // An array or inline table `put_inline` has open: the members or elements still to write.
 @(private)
 Inline_Open :: struct {
-	members:  []Member,
+	members:  []write.Node_Member,
 	at:       int,
 	elements: core.Child_Iter,
 	object:   bool,
@@ -268,7 +237,7 @@ inline_start :: proc(l: ^Layout, opens: ^[dynamic]Inline_Open, node: core.Node_I
 	o: Inline_Open
 	switch core.kind(l.doc, node) {
 	case .Object:
-		o.members = members_of(l, node) or_return
+		o.members = write.node_members(l.doc, node, l.opts.sort_keys, true, runtime.arena_allocator(&l.arena)) or_return
 		if len(o.members) == 0 {
 			write.put_text(&l.out, "{}")
 			return .None
@@ -281,7 +250,7 @@ inline_start :: proc(l: ^Layout, opens: ^[dynamic]Inline_Open, node: core.Node_I
 	case .String:
 		return put_string_node(l, node)
 	case .Number:
-		return put_number_node(l, node)
+		return write.put_number_node(&l.out, l.doc, node, TREE, l.own)
 	case .True:
 		write.put_text(&l.out, "true")
 		return .None
@@ -305,35 +274,9 @@ inline_start :: proc(l: ^Layout, opens: ^[dynamic]Inline_Open, node: core.Node_I
 }
 
 @(private)
-put_number_node :: proc(l: ^Layout, node: core.Node_Index) -> core.Typed_Error_Kind {
-	t := l.doc.nodes[node]
-	span := core.span(l.doc, node)
-	if l.doc.readers.number_text != nil {
-		stack: [64]u8
-		text, ok := write.node_number_text(l.doc, node, stack[:])
-		if !ok {
-			return .No_Memory
-		}
-		write.put_text(&l.out, text)
-		return .None
-	}
-	if l.own || t.kind != .Number || t.spelling & core.NUMBER_KIND_MASK == 0 {
-		write.put_text(&l.out, string(span))
-		return .None
-	}
-	return write.put_decimal(&l.out, string(span), t.spelling)
-}
-
-@(private)
 put_string_node :: proc(l: ^Layout, node: core.Node_Index) -> core.Typed_Error_Kind {
 	buf: [512]u8
-	text, ok := core.text(l.doc, node, buf[:])
-	if !ok {
-		text, ok = core.text_clone(l.doc, node, runtime.arena_allocator(&l.arena))
-		if !ok {
-			return .No_Memory
-		}
-	}
+	text := write.node_text(l.doc, node, buf[:], runtime.arena_allocator(&l.arena)) or_return
 	if l.own {
 		t := l.doc.nodes[node]
 		if tag, tagged := core.fact_value(l.doc, node, .Tag); tagged {
@@ -381,7 +324,6 @@ put_key :: proc(out: ^write.Out, name: string) {
 // rune past U+007F too. Bytes that are no UTF-8 are `.Invalid_Utf8`.
 @(private)
 put_basic :: proc(out: ^write.Out, s: string, opts: core.Write_Options) -> core.Typed_Error_Kind {
-	HEX := "0123456789abcdef"
 	write.put_byte(out, '"')
 	run := 0
 	for i := 0; i < len(s); {
@@ -404,8 +346,7 @@ put_basic :: proc(out: ^write.Out, s: string, opts: core.Write_Options) -> core.
 			escape = `\r`
 		case c < 0x20 || c == 0x7f:
 			write.put_text(out, s[run:i])
-			buf := [6]u8{'\\', 'u', '0', '0', HEX[c >> 4], HEX[c & 15]}
-			write.put_text(out, string(buf[:]))
+			write.put_hex(out, `\u`, u32(c), 4)
 			i += 1
 			run = i
 			continue
@@ -422,13 +363,7 @@ put_basic :: proc(out: ^write.Out, s: string, opts: core.Write_Options) -> core.
 				continue
 			}
 			write.put_text(out, s[run:i])
-			if r > 0xffff {
-				buf := [10]u8{'\\', 'U', HEX[(r >> 28) & 15], HEX[(r >> 24) & 15], HEX[(r >> 20) & 15], HEX[(r >> 16) & 15], HEX[(r >> 12) & 15], HEX[(r >> 8) & 15], HEX[(r >> 4) & 15], HEX[r & 15]}
-				write.put_text(out, string(buf[:]))
-			} else {
-				buf := [6]u8{'\\', 'u', HEX[(r >> 12) & 15], HEX[(r >> 8) & 15], HEX[(r >> 4) & 15], HEX[r & 15]}
-				write.put_text(out, string(buf[:]))
-			}
+			write.put_hex(out, `\U` if r > 0xffff else `\u`, u32(r), 8 if r > 0xffff else 4)
 			i += width
 			run = i
 			continue

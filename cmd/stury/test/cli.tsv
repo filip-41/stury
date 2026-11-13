@@ -2597,6 +2597,8 @@ toml	["fmt", "--from", "toml", "d.toml"]	""	{"d.toml": "a = 07:32\n"}	null	null	
 toml	["--from", "toml", "--to", "toml", ".tbl", "d.toml"]	""	{"d.toml": "# note\ntitle = \"t\" # why\nwhen = 1979-05-27T07:32:00Z\nhex = 0xff\nlit = 'a\\b'\n[tbl]\nk = [1, 2]\n[[arr]]\nx = 1\n[[arr]]\nx = 2\n"}	null	null	null	0	"k = [1, 2]\n"	""
 toml	["--from", "toml", "--to", "toml", ".when, .tbl", "d.toml"]	""	{"d.toml": "# note\ntitle = \"t\" # why\nwhen = 1979-05-27T07:32:00Z\nhex = 0xff\nlit = 'a\\b'\n[tbl]\nk = [1, 2]\n[[arr]]\nx = 1\n[[arr]]\nx = 2\n"}	null	null	null	5	""	"stury: error (at d.toml:11): cannot write a value that is no object as TOML\n"
 toml	["--from", "toml", "--to", "toml", ".", "d.toml"]	""	{"d.toml": "# note\ntitle = \"t\" # why\nwhen = 1979-05-27T07:32:00Z\nhex = 0xff\nlit = 'a\\b'\n[tbl]\nk = [1, 2]\n[[arr]]\nx = 1\n[[arr]]\nx = 2\n"}	null	null	null	0	"# note\ntitle = \"t\" # why\nwhen = 1979-05-27T07:32:00Z\nhex = 0xff\nlit = 'a\\b'\n\n[tbl]\nk = [1, 2]\n\n[[arr]]\nx = 1\n\n[[arr]]\nx = 2\n"	""
+toml	["--from", "yaml", "--to", "toml", "."]	"a: .inf\nb: -.inf\nc: .nan\n"	{}	null	null	null	0	"a = inf\nb = -inf\nc = nan\n"	""
+toml	["fmt", "--from", "yaml", "--to", "toml"]	"# head\n\n# before a\na: 1 # tail a\n"	{}	null	null	null	0	"# head\n# before a\na = 1 # tail a\n"	""
 toml	["--to", "toml", "."]	"{\"z\":1,\"a\":{\"x\":[{\"k\":1},{\"k\":2}],\"y\":\"é\"},\"m\":[]}"	{}	null	null	null	0	"z = 1\nm = []\n\n[a]\ny = \"é\"\n\n[[a.x]]\nk = 1\n\n[[a.x]]\nk = 2\n"	""
 toml	["--to", "toml", "-S", "."]	"{\"z\":1,\"b\":2}"	{}	null	null	null	0	"b = 2\nz = 1\n"	""
 toml	["--to", "toml", ".a, .b"]	"{\"a\":{\"x\":1},\"b\":{\"y\":2}}"	{}	null	null	null	0	"x = 1\n\ny = 2\n"	""
@@ -2809,6 +2811,8 @@ xml	["check", "--from", "xml", "--schema", "s.json", "d.xml"]	""	{"s.json": "{\"
 xml	["schema", "infer", "--from", "xml", "-c", "d.xml"]	""	{"d.xml": "<r k=\"1\"><a>x</a></r>"}	null	null	null	0	"{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"r\":{\"type\":\"object\",\"properties\":{\"k\":{\"type\":\"string\",\"xml\":{\"nodeType\":\"attribute\"}},\"a\":{\"type\":\"string\"}},\"required\":[\"k\",\"a\"]}},\"required\":[\"r\"]}\n"	""
 xml	["--from", "xml", "--follow", ".", "d.xml"]	""	{"d.xml": "<a/>"}	null	null	null	2	""	"stury: --follow reads records: --from xml makes one text of a file\nUse stury --help for help with command-line options,\nor see stury(1), or docs/cli.md at https://github.com/filip-41/stury\n"
 jsonc	["-c", "[.&k, .a.@attrs, .@name, .a.@content]"]	"{\"a\": 1}"	{}	null	null	null	0	"[null,null,null,null]\n"	""
+jsonc	["fmt", "--from", "yaml", "--to", "jsonc"]	"# head\n\n# before a\na: 1 # tail a\nb:\n  c: 2\n# end\n"	{}	null	null	null	0	"// head\n// before a\n{\n  \"a\": 1, // tail a\n  \"b\": {\n    \"c\": 2\n  }\n}\n// end\n"	""
+jsonc	["--from", "yaml", "--to", "jsonc", "."]	"# head\n\n# before a\na: 1 # tail a\nb:\n  c: 2\n# end\n"	{}	null	null	null	0	"// head\n// before a\n{\n  \"a\": 1, // tail a\n  \"b\": {\n    \"c\": 2\n  }\n}\n// end\n"	""
 # edit of a YAML stream: each document is a record, a kept one keeps its bytes, a new or moved one starts with ---, and a
 # text of comments alone is kept.
 yaml	["edit", "--from", "yaml", ".a += 10"]	"a: 1\n---\na: 2\n"	{}	null	null	null	0	"a: 11\n---\na: 12\n"	""
@@ -2868,6 +2872,7 @@ html	["--from", "html", "--to", "yaml", ".html.body", "d.html"]	""	{"d.html": "<
 html	["--from", "html", "--to", "yaml", ".html.body", "d.html"]	""	{"d.html": "<p>x</p><p>y"}	null	null	null	0	"p:\n  - x\n  - 'y'\n"	""
 html	["check", "--from", "html", "--schema", "s.json", "d.html"]	""	{"s.json": "{\"type\":\"object\",\"properties\":{\"html\":{\"type\":\"object\",\"required\":[\"head\",\"body\"]}}}", "d.html": "<p>x"}	null	null	null	0	""	""
 html	["diff", "--from", "html", "--facts", "a.html", "b.html"]	""	{"a.html": "<p id=1>x", "b.html": "<p id=2>x"}	null	null	null	1	"~ .html.body.p @attribute: \"id=1\" -> \"id=2\"\n"	""
+html	["fmt", "--from", "html", "-c"]	"<div><!--c--><p>x</p></div>"	{}	null	null	null	0	"<html><head></head><body><div><!--c--><p>x</p></div></body></html>\n"	""
 explain	["--explain", "--from", "html", "-c", ".html.head", "-"]	"<title>t</title>"	{}	null	null	null	0	"{\"title\":\"t\"}\n"	"stury: explain: filter: \".html.head\"\nstury: explain: input: HTML, one document per file\nstury: explain: plan: builds each text whole and runs the filter on it\nstury: explain: because: --from reads a format whose document is built whole, as it answers no path from the text alone\nstury: explain: decides: the filter's work on each built value decides the speed, and memory holds one built input at a time\nstury: explain: ran: 1 input, each built\n"
 # --threads: a positive count of the threads that share a long input, and the answer is the same at every count.
 threads	["--threads", "1", "-c", "."]	"{\"a\":[1,2]}"	{}	null	null	null	0	"{\"a\":[1,2]}\n"	""

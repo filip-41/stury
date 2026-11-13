@@ -33,10 +33,6 @@ checks :: proc "contextless" (spec: Spec, opts := Options{}) -> typed.Format_Che
 // with `reads`, and with none it reads through `unmarshal`.
 plan_make :: proc(T: typeid, spec := Spec.Cbor, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error) {
 	made, refusal := plan_bound(T, spec, opts, plan, reads, allocator)
-	// A plan that is built holds no refusal to copy.
-	if refusal.kind == .None {
-		return made, nil
-	}
 	return made, core.error_of(refusal)
 }
 

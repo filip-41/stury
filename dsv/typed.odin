@@ -113,26 +113,8 @@ foreign_plan :: proc "contextless" (plan: ^typed.Plan) -> bool {
 	return plan != nil && plan.marshal == nil && plan.err.kind == .None
 }
 
-@(private)
-read_spec :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, check: bool) -> core.Typed_Refusal {
-	switch spec {
-	case .Csv:   return read_one(src, .Csv, T, target, plan, opts, read, allocator, check)
-	case .Tsv:   return read_one(src, .Tsv, T, target, plan, opts, read, allocator, check)
-	case .Plain: return read_one(src, .Plain, T, target, plan, opts, read, allocator, check)
-	}
-	return {kind = .Bad_Option}
-}
-
-// A read or a check of spec `S`, a check being the description's when the plan has one.
-@(private)
-read_one :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator, check: bool) -> core.Typed_Refusal {
-	if !check {
-		return read_text(src, S, T, target, plan, opts, read, allocator, false, typed.Reader)
-	}
-	return check_one(src, S, T, target, plan, opts, read, allocator)
-}
-
-// The check of a text of spec `S`: the description's when the plan has one, else the typed read's.
+// The check of a text of spec `S`: the description's when the plan has one, the `typed.Check` read for a plan a model
+// loads with, else the typed read's.
 @(private)
 check_one :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
 	if plan != nil && plan.checking {
@@ -192,7 +174,7 @@ read_text :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.P
 @(private)
 start_cells :: proc(h: ^Cells_Of($H), src: []u8, plan: ^typed.Plan, as: core.As, T: typeid, target: rawptr, read: typed.Read_Options, frames: []typed.Frame, allocator: runtime.Allocator) -> (core.Hook_Regs, core.Typed_Refusal) {
 	when H == typed.Check {
-		return typed.check_start(&h.r, src, untracked(plan), as, T, target, read, untracked_frames(frames), allocator)
+		return typed.check_start(&h.r, src, typed.untracked(plan), as, T, target, read, typed.untracked_frames(frames), allocator)
 	} else {
 		return typed.read_start(&h.r, src, plan, as, T, target, read, frames, allocator, false)
 	}
@@ -219,7 +201,6 @@ rows_of :: proc(h: ^Cells_Of($H), plan: ^typed.Plan, text_len: int) {
 @(private)
 ROW_FRAMES :: 4
 
-// The read's depth inside a row.
 @(private)
 row_depth :: #force_inline proc "contextless" (h: ^Cells_Of($H)) -> int {
 	return ROW_FRAMES - 1 - int(h.single)
@@ -248,8 +229,8 @@ Column :: struct {
 
 // `Hook_Regs` inside a row: `b` is the column of the next cell, and `c` the row or, in a list row, the next cell's
 // element. A map row keeps `a` and `c` 0, so the room test sends each cell to the read that makes its entry. `single`
-// says the target is one row, which reads the text's first record, and `opens` counts the text's open and the rows a
-// single read has met. `H` is `typed.Reader`, or `typed.Check` for a model's load, which judges each cell by its
+// says the target is one row, which reads the text's first record, `opens` is the kind of the token that opens a row,
+// and `met` counts the text's open and the rows a single read has met. `H` is `typed.Reader`, or `typed.Check` for a model's load, which judges each cell by its
 // member's rules and leaves an empty cell of a struct row absent for the row's close to judge.
 @(private)
 Cells_Of :: struct($H: typeid) {

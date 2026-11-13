@@ -14,7 +14,7 @@ import records "../core/records"
 @(private, rodata)
 FRAMING := records.Framing_Services {
 	next  = #partial {.Concatenated = next_text},
-	judge = proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) {return nil},
+	judge = records.no_judge,
 }
 
 // Frames the text at the reader's position, the rest of the input, judged by the walk from there.
@@ -33,7 +33,7 @@ next_text :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) {
 	return {text = it.src[lo:], at = lo}, true
 }
 
-// The reads of a record's value as `spec`: its build. A scan of a record builds it.
+// The reads of a record's value: its build, which every spec shares. A scan of a record builds it.
 record_docs :: proc "contextless" (spec: Spec) -> ^records.Record_Docs {
 	return &RECORD_DOCS
 }

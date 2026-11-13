@@ -3,7 +3,6 @@ package json
 import "base:runtime"
 import "core:io"
 import "core:strings"
-import spell "../core/spell"
 import core "../core"
 import typed "../core/typed"
 import write "../core/write"
@@ -44,9 +43,6 @@ TOKENS := write.Token_Spelling {
 		case core.Number:
 			return write.put_number(t.out, x)
 		case write.Number_Literal:
-			if _, is_number := spell.number_strict(transmute([]u8)x.text, 0, u64(len(x.text))); !is_number {
-				return .Bad_Raw
-			}
 			write.put_text(t.out, x.text)
 		case write.Tagged_Text:
 			return put_string(t.out, x.text, t.opts)

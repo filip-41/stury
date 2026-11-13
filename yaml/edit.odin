@@ -107,11 +107,12 @@ build_value :: proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (do
 	}
 }
 
-// The anchors and tag handles a value's judge declares: an alias to another anchor reads a null, and a tag with
-// another handle a tag of its own.
+// The most anchors and tag handles a value's judge declares before it refuses the value.
 @(private = "file")
 NAMES_MAX :: 64
 
+// The anchors and tag handles a value's judge declares: an alias to another anchor reads a null, and a tag with
+// another handle a tag of its own.
 @(private = "file")
 Judged_Names :: struct {
 	anchors: [dynamic]u8, // the sequence elements before the value, `- &name ~` lines
@@ -574,7 +575,6 @@ key_start :: proc(doc: ^core.Document, src: []u8, j: u32, lo: u64) -> u64 {
 	}
 }
 
-// The members of container `c`, in order.
 @(private)
 items_of :: proc(cx: ^Cx, c: u32) -> []Item {
 	if cached, ok := cx.items[c]; ok {
@@ -673,8 +673,6 @@ add :: proc(cx: ^Cx, lo, hi: u64, text: []u8) {
 	append(&cx.splices, compose.Splice{lo = lo, hi = hi, text = text, seq = len(cx.splices)})
 }
 
-// The text's geometry: lines and columns.
-
 // The end of the line at `p`, before its line end.
 @(private)
 content_end :: proc(src: []u8, p: u64) -> u64 {
@@ -688,33 +686,12 @@ content_end :: proc(src: []u8, p: u64) -> u64 {
 	return i
 }
 
-// The start of the line after the one at `p`, or the text's end.
-@(private)
-next_line :: proc(src: []u8, p: u64) -> u64 {
-	i := p
-	for i < u64(len(src)) && src[i] != '\n' {
-		i += 1
-	}
-	return min(i + 1, u64(len(src)))
-}
-
 @(private)
 column_of :: proc(src: []u8, p: u64) -> int {
 	return int(p - compose.line_start(src, p))
 }
 
-// Whether only spaces stand before `p` on its line.
-@(private)
-first_on_line :: proc(src: []u8, p: u64) -> bool {
-	for i := compose.line_start(src, p); i < p; i += 1 {
-		if src[i] != ' ' && src[i] != '\t' {
-			return false
-		}
-	}
-	return true
-}
-
-// The byte past the last that is no space before `p` on its line.
+// The byte past the last that is no space or tab before `p` on its line.
 @(private)
 lead_end :: proc(src: []u8, p: u64) -> u64 {
 	i := p
@@ -748,7 +725,7 @@ comment_line :: proc(src: []u8, ls: u64) -> (col: int, ok: bool) {
 	return int(i - ls), i < u64(len(src)) && src[i] == '#'
 }
 
-// Whether the line at `ls` holds only spaces.
+// Whether the line at `ls` holds only spaces, tabs and a carriage return.
 @(private)
 blank_line :: proc(src: []u8, ls: u64) -> bool {
 	i := ls
@@ -788,14 +765,10 @@ put_lines :: proc(cx: ^Cx, b: ^[dynamic]u8, text: []u8, n: int) {
 	}
 }
 
-// Returns the source bytes the edits make. Each edit becomes splices, refused ones end the commit, and the result must
-// read as YAML.
+// Returns the source bytes the edits make. Each edit becomes splices, and refused ones end the commit.
 @(private)
 edit_commit :: proc(list: ^core.Edit_List, _: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 	doc := list.doc
-	if doc == nil || doc.partial {
-		return nil, 0, {kind = .Bad_Index}
-	}
 	arena := runtime.Arena{backing_allocator = allocator, minimum_block_size = 64 * 1024}
 	defer runtime.arena_destroy(&arena)
 	cx := Cx{doc = doc, src = doc.src, a = runtime.arena_allocator(&arena)}
@@ -817,14 +790,7 @@ edit_commit :: proc(list: ^core.Edit_List, _: u8, allocator: runtime.Allocator) 
 		}
 	}
 	out, err = compose.apply_splices(doc.src, cx.splices[:], allocator)
-	if err.kind != .None {
-		return nil, 0, err
-	}
-	if fault, bad := validate_text(out, options_of(doc.as)).?; bad {
-		delete(out, allocator)
-		return nil, 0, {kind = .Bad_Result, inner = fault}
-	}
-	return out, 0, {}
+	return out, 0, err
 }
 
 // Applies one edit as splices, or for a member added or removed records it with its container's.

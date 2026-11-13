@@ -132,8 +132,12 @@ nodes_readable :: proc "contextless" (doc: ^core.Document, node: core.Node_Index
 }
 
 // The read of a markup text, a `Text_Read` once its format binds `build` as for `check_built_text`: the text is built
-// whole, under `.Refuse` refusing a repeated element, and its root is read by `read_nodes`.
+// whole, under `.Refuse` refusing a repeated element, and its root is read by `read_nodes`. A nil plan is refused as
+// `.Plan_Mismatch` before the build.
 read_built_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
+	if plan == nil {
+		return plan_mismatch(nil, nil, T)
+	}
 	doc, built := build(src, as, read.dups == .Refuse, context.allocator)
 	defer core.destroy(&doc)
 	#partial switch built.kind {
@@ -158,6 +162,18 @@ read_built_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core.
 		read.dups = .Last
 	}
 	return read_nodes(&doc, core.ROOT, T, target, plan, read, allocator)
+}
+
+// A format's one-call read of a text it builds whole: `plan` is the plan its `plan_make` made with the refusal
+// `refusal`, which the read frees, and a refusal it makes owns its errors.
+unmarshal_planned :: proc(plan: ^Plan, refusal: core.Error, src: []u8, as: core.As, build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), target: rawptr, T: typeid, read: Read_Options, allocator: runtime.Allocator) -> core.Error {
+	if refusal != nil {
+		return refusal
+	}
+	defer plan_destroy(plan)
+	err := read_built_text(src, as, build, target, T, plan, read, allocator)
+	own_errors(&err, read.sink)
+	return core.error_of(err)
 }
 
 // The check of a markup text, a `Text_Read` once its format binds `build`, the format's `Services.build` of the

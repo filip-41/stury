@@ -149,8 +149,6 @@ spell_key :: proc(name: []u8, allocator: runtime.Allocator) -> []u8 {
 @(private)
 edit_relocate :: proc(doc: ^core.Document, node: core.Node_Index, _: core.Site, allocator: runtime.Allocator) -> ([]u8, bool) {
 	cx := Cx{doc = doc, src = doc.src, a = allocator}
-	build_parents(&cx)
-	defer delete(cx.parent, allocator)
 	switch form_of(&cx, u32(node)) {
 	case .Scalar, .Inline:
 		lo, _ := core.scalar_ends(doc.nodes[node])
@@ -168,7 +166,6 @@ edit_relocate :: proc(doc: ^core.Document, node: core.Node_Index, _: core.Site, 
 	return text, err.kind == .None
 }
 
-// How a node stands in the text.
 @(private = "file")
 Form :: enum u8 {
 	Root, // the document
@@ -188,11 +185,6 @@ Section :: struct {
 }
 
 @(private = "file")
-Open :: struct {
-	id, end: u32,
-}
-
-@(private = "file")
 Cx :: struct {
 	doc:      ^core.Document,
 	src:      []u8,
@@ -204,40 +196,22 @@ Cx :: struct {
 	comments: [dynamic]u64, // where each comment starts, sorted
 	splices:  [dynamic]compose.Splice,
 	seen:     map[u64]struct{},
-	removed:  map[u32]int, // the members or elements an inline container loses
-	refill:   map[u32][dynamic]Refill, // what a container that loses all of them gets in their place
+	inline:   map[u32]Inline_Edits,
 	foot_at:  u64, // where the root's foot comments start, or the end of the text
 	err:      core.Document_Error,
 }
 
-// A member or element inserted into an inline container that is left with only what it is given.
+// The members or elements an inline container loses and gets, spliced once its edits are all recorded.
 @(private = "file")
-Refill :: struct {
-	at:   u32,
-	text: string,
+Inline_Edits :: struct {
+	removed: [dynamic]u32,
+	inserts: [dynamic]compose.Flow_Insert,
 }
 
 @(private = "file")
 refuse_edit :: proc(cx: ^Cx, node: core.Node_Index, detail: Edit_Detail) -> bool {
 	cx.err = {kind = .Frozen, at = u64(node), inner = {rules = &EDIT_RULES, detail = u8(detail)}}
 	return false
-}
-
-@(private = "file")
-build_parents :: proc(cx: ^Cx) {
-	nodes := cx.doc.nodes
-	cx.parent = make([]u32, len(nodes), cx.a)
-	stack := make([dynamic]Open, cx.a)
-	defer delete(stack)
-	for i in 0 ..< len(nodes) {
-		for len(stack) > 0 && u32(i) >= stack[len(stack) - 1].end {
-			pop(&stack)
-		}
-		cx.parent[i] = stack[len(stack) - 1].id if len(stack) > 0 else NIL
-		if n := nodes[i]; n.kind == .Object || n.kind == .Array {
-			append(&stack, Open{u32(i), u32(i) + n.n})
-		}
-	}
 }
 
 @(private = "file")
@@ -269,18 +243,6 @@ form_of :: proc(cx: ^Cx, i: u32) -> Form {
 		return .Inline
 	}
 	return .Scalar
-}
-
-// The text's geometry: lines, comment lines and the comments directly above a line.
-
-// One past the line feed that ends the line holding `p`, or the end of the text.
-@(private = "file")
-line_end :: proc(src: []u8, p: u64) -> u64 {
-	i := min(p, u64(len(src)))
-	for i < u64(len(src)) && src[i] != '\n' {
-		i += 1
-	}
-	return min(i + 1, u64(len(src)))
 }
 
 // The first byte on the line at `ls` that is no blank, or 0.
@@ -396,7 +358,7 @@ node_end :: proc(cx: ^Cx, i: u32) -> u64 {
 // The end of the last line of a statement: the line that holds the end of a value, its comment included.
 @(private = "file")
 statement_end :: proc(cx: ^Cx, i: u32) -> u64 {
-	return line_end(cx.src, node_end(cx, i))
+	return compose.next_line(cx.src, node_end(cx, i))
 }
 
 // The first and last line of a member of a table that is written as lines: the start of the comments above it and the
@@ -443,7 +405,7 @@ section_end :: proc(cx: ^Cx, k: int) -> u64 {
 	if k + 1 < len(cx.sections) {
 		hi = cx.sections[k + 1].head
 	}
-	return max(hi, line_end(cx.src, cx.sections[k].ls))
+	return max(hi, compose.next_line(cx.src, cx.sections[k].ls))
 }
 
 @(private = "file")
@@ -462,7 +424,6 @@ key_source :: proc(cx: ^Cx, key: u32) -> string {
 	return string(cx.src[k.lo:k.lo + u64(k.n)])
 }
 
-// The text of an inserted member or element.
 @(private = "file")
 member_text :: proc(cx: ^Cx, e: core.Edit, keyed: bool) -> string {
 	if !keyed {
@@ -473,7 +434,6 @@ member_text :: proc(cx: ^Cx, e: core.Edit, keyed: bool) -> string {
 	return string(b[:])
 }
 
-// Applies one edit as splices.
 @(private = "file")
 apply :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	switch e.op {
@@ -549,16 +509,6 @@ items_of :: proc(cx: ^Cx, c: u32) -> []Item {
 }
 
 @(private = "file")
-starts_line :: proc(cx: ^Cx, p: u64) -> bool {
-	for b in cx.src[compose.line_start(cx.src, p):p] {
-		if b != ' ' && b != '\t' {
-			return false
-		}
-	}
-	return true
-}
-
-@(private = "file")
 insert_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	c := u32(e.node)
 	switch form_of(cx, c) {
@@ -575,99 +525,41 @@ insert_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	return true
 }
 
-// Whether the `n` members of inline container `c` are all removed and the container holds no comment, so what is left
-// is written in one piece.
 @(private = "file")
-cleared :: proc(cx: ^Cx, c: u32, n: int) -> bool {
-	if n == 0 || cx.removed[c] != n {
-		return false
+inline_edits :: proc(cx: ^Cx, c: u32) -> ^Inline_Edits {
+	if c not_in cx.inline {
+		cx.inline[c] = {make([dynamic]u32, cx.a), make([dynamic]compose.Flow_Insert, cx.a)}
 	}
-	return bytes.index_byte(cx.src[cx.doc.nodes[c].lo:node_end(cx, c)], '#') < 0
-}
-
-// The interior of every container `cleared` found, now its refill: the inserts in their order, or nothing.
-@(private = "file")
-refill_cleared :: proc(cx: ^Cx) {
-	for c, count in cx.removed {
-		if !cleared(cx, c, count) || len(items_of(cx, c)) != count {
-			continue
-		}
-		list := cx.refill[c]
-		slice.stable_sort_by(list[:], proc(a, b: Refill) -> bool {return a.at < b.at})
-		keyed := cx.doc.nodes[c].kind == .Object
-		b := make([dynamic]u8, cx.a)
-		for r, i in list {
-			compose.puts(&b, ", " if i > 0 else " " if keyed else "", r.text)
-		}
-		if keyed && len(list) > 0 {
-			compose.puts(&b, " ")
-		}
-		add(cx, cx.doc.nodes[c].lo + 1, node_end(cx, c) - 1, b[:])
-	}
+	return &cx.inline[c]
 }
 
 @(private = "file")
 insert_inline :: proc(cx: ^Cx, e: core.Edit, c: u32) -> bool {
-	src := cx.src
-	items := items_of(cx, c)
-	keyed := cx.doc.nodes[c].kind == .Object
-	item := member_text(cx, e, keyed)
-	closer := node_end(cx, c) - 1
-	at := int(e.at)
-	n := len(items)
-	if cleared(cx, c, n) {
-		list := cx.refill[c]
-		if list == nil {
-			list = make([dynamic]Refill, cx.a)
+	append(&inline_edits(cx, c).inserts, compose.Flow_Insert{int(e.at), transmute([]u8)member_text(cx, e, cx.doc.nodes[c].kind == .Object)})
+	return true
+}
+
+// Splices the edits of every inline container. An insert into an empty one that holds a comment is refused.
+@(private = "file")
+splice_inline :: proc(cx: ^Cx) -> bool {
+	for c, &g in cx.inline {
+		items := items_of(cx, c)
+		removed := make([]bool, len(items), cx.a)
+		for it, k in items {
+			removed[k] = slice.contains(g.removed[:], it.node)
 		}
-		append(&list, Refill{e.at, item})
-		cx.refill[c] = list
-		return true
-	}
-	if n == 0 {
-		if bytes.index_byte(src[cx.doc.nodes[c].lo + 1:closer], '#') >= 0 {
-			return refuse_edit(cx, e.node, .Inline_Comment)
+		lo, hi := cx.doc.nodes[c].lo + 1, node_end(cx, c) - 1
+		if len(g.inserts) > 0 && len(items) == 0 && bytes.index_byte(cx.src[lo:hi], '#') >= 0 {
+			return refuse_edit(cx, core.Node_Index(c), .Inline_Comment)
 		}
-		b := make([dynamic]u8, cx.a)
-		compose.puts(&b, " " if keyed else "", item, " " if keyed else "")
-		add(cx, cx.doc.nodes[c].lo + 1, closer, b[:])
-		return true
-	}
-	if at >= n {
-		last := items[n - 1]
-		if starts_line(cx, last.start) && closer >= line_end(src, last.end) {
-			pos := line_end(src, last.end)
-			p := last.end
-			for p < u64(len(src)) && (src[p] == ' ' || src[p] == '\t') {
-				p += 1
-			}
-			if src[p] != ',' {
-				add_text(cx, last.end, last.end, ",")
-			}
-			b := make([dynamic]u8, cx.a)
-			compose.puts(&b, string(indent_of(src, last.start)), item, ",", cx.eol)
-			add(cx, pos, pos, b[:])
-		} else {
-			b := make([dynamic]u8, cx.a)
-			compose.puts(&b, ", ", item)
-			add(cx, last.end, last.end, b[:])
-		}
-		return true
-	}
-	t := items[at]
-	b := make([dynamic]u8, cx.a)
-	if starts_line(cx, t.start) {
-		compose.puts(&b, string(indent_of(src, t.start)), item, ",", cx.eol)
-		ls := compose.line_start(src, t.start)
-		add(cx, ls, ls, b[:])
-	} else {
-		compose.puts(&b, item, ", ")
-		add(cx, t.start, t.start, b[:])
+		slice.stable_sort_by(g.inserts[:], proc(a, b: compose.Flow_Insert) -> bool {return a.at < b.at})
+		compose.flow_splices(&cx.splices, cx.src, items, removed, g.inserts[:], lo, hi, cx.eol, cx.doc.nodes[c].kind == .Object, cx.a)
 	}
 	return true
 }
 
-// A line `text` placed at `pos`, with a line end first when the text ends without one.
+// Places `line` at `pos`, after a line end when the byte before `pos` is none, and with a blank line after it when
+// `blank_after` and the line at `pos` holds text.
 @(private = "file")
 put_line_at :: proc(cx: ^Cx, pos: u64, line: string, blank_after: bool) {
 	b := make([dynamic]u8, cx.a)
@@ -714,7 +606,7 @@ insert_line :: proc(cx: ^Cx, e: core.Edit, t: u32) -> bool {
 	}
 	switch {
 	case t != 0:
-		put_line_at(cx, line_end(src, cx.doc.nodes[t].lo), line, true)
+		put_line_at(cx, compose.next_line(src, cx.doc.nodes[t].lo), line, true)
 	case len(cx.sections) > 0:
 		put_line_at(cx, cx.sections[0].head, line, true)
 	case:
@@ -960,28 +852,7 @@ remove_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 
 @(private = "file")
 remove_inline :: proc(cx: ^Cx, c, v: u32) -> bool {
-	items := items_of(cx, c)
-	idx := 0
-	for it, k in items {
-		if it.node == v {
-			idx = k
-		}
-	}
-	if cleared(cx, c, len(items)) {
-		return true
-	}
-	closer := node_end(cx, c) - 1
-	lo := cx.doc.nodes[c].lo
-	switch {
-	case len(items) == 1 && bytes.index_byte(cx.src[lo + 1:closer], '#') < 0:
-		add(cx, lo + 1, closer, nil)
-	case idx + 1 < len(items):
-		add(cx, items[idx].start, items[idx + 1].start, nil)
-	case idx > 0:
-		add(cx, items[idx - 1].end, items[idx].end, nil)
-	case:
-		add(cx, items[idx].start, items[idx].end, nil)
-	}
+	append(&inline_edits(cx, c).removed, v)
 	return true
 }
 
@@ -1021,7 +892,6 @@ remove_sections :: proc(cx: ^Cx, v: u32) {
 	if count == 0 || last < cx.foot_at {
 		return
 	}
-	// The sections end the text: the blank lines before the first go with them.
 	lo := first
 	for lo > 0 && blank_line(cx.src, compose.line_start(cx.src, lo - 1)) {
 		lo = compose.line_start(cx.src, lo - 1)
@@ -1117,7 +987,7 @@ block_comment :: proc(cx: ^Cx, e: core.Edit, ls: u64, indent: []u8, lines: [][]u
 		return true
 	}
 	for f, k in existing {
-		lo, hi := compose.line_start(cx.src, f.lo), line_end(cx.src, f.lo)
+		lo, hi := compose.line_start(cx.src, f.lo), compose.next_line(cx.src, f.lo)
 		add(cx, lo, hi, b[:] if k == 0 else nil)
 	}
 	return true
@@ -1133,7 +1003,7 @@ inline_comment :: proc(cx: ^Cx, e: core.Edit, node: u32, lines: [][]u8, existing
 	case .Scalar, .Inline, .Dotted:
 		pos = node_end(cx, node)
 	case .Header:
-		pos = line_end(cx.src, cx.doc.nodes[node].lo)
+		pos = compose.next_line(cx.src, cx.doc.nodes[node].lo)
 		for pos > 0 && (cx.src[pos - 1] == '\n' || cx.src[pos - 1] == '\r' || cx.src[pos - 1] == ' ' || cx.src[pos - 1] == '\t') {
 			pos -= 1
 		}
@@ -1165,13 +1035,10 @@ inline_comment :: proc(cx: ^Cx, e: core.Edit, node: u32, lines: [][]u8, existing
 	return true
 }
 
-// Returns the source bytes `list`'s edits make, each a splice of the source, then reads them again.
+// Returns the source bytes `list`'s edits make, each a splice of the source.
 @(private)
-edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
+edit_commit :: proc(list: ^core.Edit_List, _: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 	doc := list.doc
-	if doc == nil || doc.partial {
-		return nil, 0, {kind = .Bad_Index}
-	}
 	arena := runtime.Arena{backing_allocator = allocator, minimum_block_size = 64 * 1024}
 	defer runtime.arena_destroy(&arena)
 	cx := Cx{doc = doc, src = doc.src, a = runtime.arena_allocator(&arena), foot_at = u64(len(doc.src))}
@@ -1192,28 +1059,20 @@ edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocato
 			cx.foot_at = min(cx.foot_at, compose.line_start(doc.src, f.lo))
 		}
 	}
-	build_parents(&cx)
-	build_sections(&cx)
-	cx.removed = make(map[u32]int, cx.a)
-	cx.refill = make(map[u32][dynamic]Refill, cx.a)
-	for e in list.edits {
-		if e.op == .Remove && form_of(&cx, cx.parent[e.node]) == .Inline {
-			cx.removed[cx.parent[e.node]] += 1
-		}
+	cx.parent = transmute([]u32)core.parents_of(list)
+	if cx.parent == nil {
+		return nil, 0, {kind = .No_Memory}
 	}
+	build_sections(&cx)
+	cx.inline = make(map[u32]Inline_Edits, cx.a)
 	for e in list.edits {
 		if !apply(&cx, e) {
 			return nil, 0, cx.err
 		}
 	}
-	refill_cleared(&cx)
+	if !splice_inline(&cx) {
+		return nil, 0, cx.err
+	}
 	out, err = compose.apply_splices(doc.src, cx.splices[:], allocator)
-	if err.kind != .None {
-		return nil, 0, err
-	}
-	if fault, bad := validate_text(out, Spec(spec), options_of(doc.as)).?; bad {
-		delete(out, allocator)
-		return nil, 0, {kind = .Bad_Result, inner = fault}
-	}
-	return out, 0, {}
+	return out, 0, err
 }

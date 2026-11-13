@@ -64,10 +64,10 @@ block_lead :: proc(b: ^Block_Writer, container: bool) -> (literal_at: int) {
 		if !b.ended {
 			write.put_byte(b.out, '\n')
 		}
-		put_spaces(b.out, int(l.col))
+		write.put_run(b.out, int(l.col), ' ')
 	case l.reach == .Key:
 		write.put_byte(b.out, '\n')
-		put_spaces(b.out, int(l.col))
+		write.put_run(b.out, int(l.col), ' ')
 	}
 	l.n += 1
 	b.ended = false
@@ -141,7 +141,7 @@ block_key :: proc(b: ^Block_Writer, name: string) -> core.Typed_Error_Kind {
 	put_scalar(b.out, name, shape, b.ascii)
 	if explicit {
 		write.put_byte(b.out, '\n')
-		put_spaces(b.out, int(l.col))
+		write.put_run(b.out, int(l.col), ' ')
 	}
 	write.put_byte(b.out, ':')
 	l.keyed = true

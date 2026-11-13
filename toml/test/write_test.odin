@@ -11,6 +11,7 @@ import write "../../core/write"
 import json_pkg "../../json"
 import toml ".."
 import walktest "../../walktest"
+import yaml "../../yaml"
 
 @(private)
 written :: proc(doc: ^core.Document, opts := core.Write_Options{}) -> (string, core.Error) {
@@ -139,6 +140,30 @@ other_formats_are_written_as_toml :: proc(t: ^testing.T) {
 	got, werr := written(&doc)
 	walktest.expect_nil(t, werr)
 	testing.expect_value(t, got, "b = [1, 2.5, \"x\"]\ns = \"é\\n\"\n\n[a]\nk = true\n\n[[a.e]]\ni = 1\n")
+}
+
+@(test)
+infinities_and_nans_of_other_formats_are_written_as_toml :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "a: .inf\nb: -.inf\nc: .nan\n"
+	doc, err := yaml.build(transmute([]u8)src, .Yaml_1_2)
+	walktest.expect_nil(t, err)
+	defer core.destroy(&doc)
+	got, werr := written(&doc)
+	walktest.expect_nil(t, werr)
+	testing.expect_value(t, got, "a = inf\nb = -inf\nc = nan\n")
+}
+
+@(test)
+the_head_comment_of_another_format_is_written_as_toml :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "# head\n\n# before a\na: 1 # tail a\n"
+	doc, err := yaml.build(transmute([]u8)src, .Yaml_1_2)
+	walktest.expect_nil(t, err)
+	defer core.destroy(&doc)
+	got, werr := written(&doc)
+	walktest.expect_nil(t, werr)
+	testing.expect_value(t, got, "# head\n# before a\na = 1 # tail a\n")
 }
 
 @(test)

@@ -2,6 +2,7 @@
 package compose
 
 import "core:bytes"
+import "core:encoding/endian"
 import core ".."
 
 // A reordered container, composed as one chunk of segments. A survivor is its bytes from its first head comment through
@@ -18,8 +19,7 @@ Segment :: struct {
 
 // Returns entry `i` of a reorder edit's order.
 order_at :: #force_inline proc(order: []u8, i: int) -> int {
-	b := order[4 * i:]
-	return int(u32(b[0]) | u32(b[1]) << 8 | u32(b[2]) << 16 | u32(b[3]) << 24)
+	return int(endian.unchecked_get_u32le(order[4 * i:]))
 }
 
 // Composes container `c`, whose members lie in `lo` through `hi`, in the order `order` gives its survivors and
@@ -29,21 +29,8 @@ compose_order :: proc(cx: ^Compose, c: core.Node_Index, lo, hi: u64, removed: []
 	members := cx.members[:]
 	n := len(members)
 	count := len(order) / 4
-	seen, serr := make([]bool, n + len(inserts), cx.allocator)
-	if serr != nil {
-		return false
-	}
-	for i in 0 ..< count {
-		k := order_at(order, i)
-		if k >= len(seen) || seen[k] || k < n && removed[k] {
-			return refuse(cx, {kind = .Bad_Index})
-		}
-		seen[k] = true
-	}
-	for k in 0 ..< len(seen) {
-		if !seen[k] && (k >= n || !removed[k]) || count == 0 {
-			return refuse(cx, {kind = .Bad_Index})
-		}
+	if e := order_check(order, removed, len(inserts), cx.allocator); e.kind != .None {
+		return refuse(cx, e)
 	}
 	flat := core.is_flat(doc)
 	sep := transmute([]u8)cx.edit.member_sep(doc, c)

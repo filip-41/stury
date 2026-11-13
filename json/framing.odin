@@ -689,7 +689,7 @@ check_run_spec :: proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_
 	}
 	on :: typed.on_token_check_spelled when S == .Json5 else typed.on_token_check
 	stack: [core.MAX_DEPTH + 2]typed.Frame = ---
-	frames := untracked_frames(stack[:])
+	frames := typed.untracked_frames(stack[:])
 	walk_opts := opts
 	target: u8
 	h: typed.Check
@@ -710,7 +710,7 @@ check_run_spec :: proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_
 			pool, fork := h.pool, h.fork
 			h = {}
 			h.pool, h.fork = pool, fork
-			json_reader(&h.reader, untracked(&walk_opts), S)
+			json_reader(&h.reader, typed.untracked(&walk_opts), S)
 			started: core.Typed_Refusal
 			start, started = typed.check_start(&h, it.src, plan, plan.as, nil, &target, read, frames, context.allocator)
 			if started.kind != .None {
@@ -753,7 +753,7 @@ check_run_spec :: proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_
 			pool, fork := h.pool, h.fork
 			h = {}
 			h.pool, h.fork = pool, fork
-			json_reader(&h.reader, untracked(&walk_opts), S)
+			json_reader(&h.reader, typed.untracked(&walk_opts), S)
 			start, _ = typed.check_start(&h, it.src, plan, plan.as, nil, &target, again, frames, context.allocator)
 			h.ctx.temp_allocator = context.temp_allocator
 			regs = start

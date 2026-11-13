@@ -6,7 +6,6 @@ package yaml
 
 import "base:runtime"
 import "core:io"
-import spell "../core/spell"
 import core "../core"
 import typed "../core/typed"
 import write "../core/write"
@@ -55,7 +54,7 @@ TOKENS := write.Token_Spelling {
 		case core.Number:
 			return write.put_number_as(t.out, x, TREE)
 		case write.Number_Literal:
-			return put_number_literal(t.out, x)
+			write.put_text(t.out, x.text)
 		case write.Tagged_Text:
 			return put_flow_string(t.out, x.text, t.opts)
 		case write.Tree_Part:
@@ -96,9 +95,8 @@ block_value :: proc(t: ^write.Tokens, b: ^Block_Writer, v: write.Scalar) -> core
 		return kind
 	case write.Number_Literal:
 		block_lead(b, false)
-		kind := put_number_literal(t.out, x)
+		write.put_text(t.out, x.text)
 		block_end_root(b)
-		return kind
 	case write.Tree_Part:
 		block_raw(b, t.spell.tree[x])
 	}
@@ -114,15 +112,6 @@ put_bytes :: proc(out: ^write.Out, b: typed.Bytes) -> core.Typed_Error_Kind {
 	}
 	write.put_text(out, "!!binary ")
 	put_scalar(out, text, .Plain if len(text) > 0 else .Double, false)
-	return .None
-}
-
-@(private)
-put_number_literal :: proc(out: ^write.Out, n: write.Number_Literal) -> core.Typed_Error_Kind {
-	if _, is_number := spell.number_strict(transmute([]u8)n.text, 0, u64(len(n.text))); !is_number {
-		return .Bad_Raw
-	}
-	write.put_text(out, n.text)
 	return .None
 }
 

@@ -7,8 +7,8 @@ package dsv
 // `spelling_resolve` reads it as: a string, or under `infer` a number, `true` or `false` when its text is exactly one.
 // A check that keeps `readings`, which the schema-directed conversion runs, lets the leaf a cell lands on pick its kind
 // instead (`plain_token` of `core/typed`). A column whose name another column repeats is judged
-// by the read's `Duplicates`: the earlier one is dropped under `.Last`, the later under `.First`, and a repeat is
-// refused under `.Refuse`, where the dropped cell is not judged and does not count as a member.
+// by the read's `Duplicates`: the later one is dropped under `.First`, each repeat is refused under `.Refuse`, and
+// under any other policy the earlier one is dropped. A dropped cell is not judged and does not count as a member.
 
 import "base:runtime"
 import core "../core"
@@ -137,24 +137,12 @@ bind_repeats :: #force_no_inline proc "contextless" (h: ^Check_Cells, regs: core
 	return .Next
 }
 
-// A pointer to what outlives the read that holds it, hidden from the stack escape check, which cannot see through the
-// base `Reader` of a `typed.Check` that the pointer stays within the call.
-@(private)
-untracked :: #force_inline proc "contextless" (p: ^$T) -> ^T {
-	return (^T)(uintptr(p))
-}
-
-@(private)
-untracked_frames :: #force_inline proc "contextless" (f: []typed.Frame) -> []typed.Frame {
-	return ([^]typed.Frame)(untracked(raw_data(f)))[:len(f)]
-}
-
 // Checks `src`, a text of spec `S`, as the plan's description says.
 @(private)
 check_cells :: proc(src: []u8, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
 	h := Check_Cells{dups = read.dups, infer = opts.infer}
 	frames: [ROW_FRAMES]typed.Frame = ---
-	regs, err := typed.check_start(&h.c, src, untracked(plan), bound_as(S, opts), T, target, read, untracked_frames(frames[:]), allocator)
+	regs, err := typed.check_start(&h.c, src, typed.untracked(plan), bound_as(S, opts), T, target, read, typed.untracked_frames(frames[:]), allocator)
 	if err.kind != .None {
 		return err
 	}
@@ -198,7 +186,7 @@ document_check :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, ta
 	d := Check_Document{doc = doc, cells = {dups = read.dups, infer = options_of(doc.as).infer}, positional = options_of(doc.as).no_header}
 	h := &d.cells
 	frames: [ROW_FRAMES]typed.Frame = ---
-	regs, err := typed.check_start(&h.c, doc.src, untracked(plan), doc.as, T, target, read, untracked_frames(frames[:]), allocator)
+	regs, err := typed.check_start(&h.c, doc.src, typed.untracked(plan), doc.as, T, target, read, typed.untracked_frames(frames[:]), allocator)
 	if err.kind != .None {
 		return err
 	}

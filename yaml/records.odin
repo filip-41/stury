@@ -35,12 +35,6 @@ next_document :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) {
 	return {text = it.src[lo:hi], at = lo}, true
 }
 
-// `next_document` judged the document it framed.
-@(private)
-judge_document :: proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) {
-	return nil
-}
-
 // Moves a piece's reader to the first document start at or past `it.pos` and before `to`.
 @(private)
 guess_document :: proc(it: ^records.Reader, to: u64) -> bool {

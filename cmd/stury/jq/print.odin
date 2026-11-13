@@ -154,14 +154,15 @@ emit :: proc(p: ^Printer, v: Value) {
 	}
 }
 
-// Writes `v` by the library's document writer and returns true, when it is a container of an input JSON document that
-// the writer prints as jq does: with no colours, with no line indented by the printer's own depth, with no object in it
+// Writes `v` by the library's document writer and returns true, when it is a container of an input JSON document, or an
+// output of another format's document that holds comments for JSONC, that the writer prints as jq does: with no colours, with no line indented by the printer's own depth, with no object in it
 // that repeats a key, and with no level past jq's depth. A string is spelled again in JSON's shortest escapes, as jq
 // spells it.
 @(private = "file")
 write_node :: proc(p: ^Printer, v: Value) -> bool {
 	r, is_ref := v.(Ref)
-	if !is_ref || p.colors != nil || p.opts.pretty && p.depth > 0 || len(p.colon) > 0 || r.doc.readers.format != json.as(.Json).readers.format ||
+	if !is_ref || p.colors != nil || p.opts.pretty && p.depth > 0 || len(p.colon) > 0 ||
+	   r.doc.readers.format != json.as(.Json).readers.format && !(p.comments && p.depth == 0 && len(core_pkg.subtree_facts(r.doc, r.node)) > 0) ||
 	   p.depth + max(int(r.doc.as.max_depth), core_pkg.MAX_DEPTH) > MAX_DEPTH || repeats_key(r) {
 		return false
 	}

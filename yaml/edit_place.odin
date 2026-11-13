@@ -169,7 +169,6 @@ set_value :: proc(cx: ^Cx, v: u32, text: []u8) -> bool {
 	return true
 }
 
-// Puts `t` in node `v`'s place.
 @(private)
 place :: proc(cx: ^Cx, v: u32, t: []u8, sh: Text_Shape) {
 	src := cx.src
@@ -194,7 +193,7 @@ place :: proc(cx: ^Cx, v: u32, t: []u8, sh: Text_Shape) {
 		return
 	}
 	from := lo
-	first := first_on_line(src, lo)
+	first := compose.first_on_line(src, lo)
 	switch {
 	case p == NIL:
 		col := 0
@@ -305,13 +304,13 @@ place_value :: proc(cx: ^Cx, b: ^[dynamic]u8, v: u32, t: []u8, sh: Text_Shape) -
 	}
 	if sh.form == .Block {
 		// On its own line, or compact after the colon of an explicit key, the collection keeps the old value's column.
-		if first_on_line(src, lo) {
+		if compose.first_on_line(src, lo) {
 			from = indent_end(src, lo)
 			put_spaces_to(b, int(lo - from))
 			put_lines(cx, b, t, column_of(src, lo))
 			return from, false
 		}
-		if explicit && first_on_line(src, colon) && compose.line_start(src, colon) == compose.line_start(src, lo) && lead_end(src, lo) == colon + 1 {
+		if explicit && compose.first_on_line(src, colon) && compose.line_start(src, colon) == compose.line_start(src, lo) && lead_end(src, lo) == colon + 1 {
 			put_lines(cx, b, t, column_of(src, lo))
 			return lo, false
 		}
@@ -326,7 +325,7 @@ place_value :: proc(cx: ^Cx, b: ^[dynamic]u8, v: u32, t: []u8, sh: Text_Shape) -
 		// A comment after the old value stays on the key's line, above the lines that now hold the value.
 		if hi < u64(len(src)) && src[hi - 1] != '\n' && rest_is_blank(src, hi) && bytes.index_byte(src[hi:content_end(src, hi)], '#') >= 0 {
 			add(cx, lead_end(src, lo), hi, b[:])
-			nl := next_line(src, hi)
+			nl := compose.next_line(src, hi)
 			lines := make([dynamic]u8, cx.a)
 			if nl == u64(len(src)) && src[nl - 1] != '\n' {
 				compose.puts(&lines, cx.eol)
@@ -411,7 +410,7 @@ regroup_block :: proc(cx: ^Cx, c: u32, items: []Item, removed: []bool, inserts: 
 		return true
 	}
 	col := column_of(src, items[0].start)
-	compact := !first_on_line(src, items[0].start)
+	compact := !compose.first_on_line(src, items[0].start)
 	// A compact first member removed leaves its dash's line to the next member, or ends the line at the dash.
 	joined := false
 	if compact && removed[0] {
@@ -511,18 +510,18 @@ member_end :: proc(cx: ^Cx, it: Item, col: int) -> u64 {
 	src := cx.src
 	q := it.end
 	if !(q > 0 && src[q - 1] == '\n') {
-		q = next_line(src, q)
+		q = compose.next_line(src, q)
 	}
 	for {
 		r := q
 		for r < u64(len(src)) && blank_line(src, r) {
-			r = next_line(src, r)
+			r = compose.next_line(src, r)
 		}
 		ccol, comment := comment_line(src, r)
 		if r >= u64(len(src)) || !comment || ccol <= col {
 			return q
 		}
-		q = next_line(src, r)
+		q = compose.next_line(src, r)
 	}
 }
 
@@ -565,60 +564,8 @@ member_text :: proc(cx: ^Cx, e: core.Edit, object: bool, col: int) -> ([]u8, boo
 
 @(private = "file")
 regroup_flow :: proc(cx: ^Cx, c: u32, items: []Item, removed: []bool, inserts: []core.Edit) -> bool {
-	src := cx.src
-	n := len(items)
-	sep := ", "
-	if n >= 2 {
-		if gap := src[items[0].end:items[1].start]; bytes.index_byte(gap, '#') < 0 && bytes.index_byte(gap, ',') >= 0 {
-			sep = string(gap)
-		}
-	}
-	// Where each slot's inserts go, and whether they follow a member there or precede one.
-	pos := make([]u64, n + 1, cx.a)
-	follows := make([]bool, n + 1, cx.a)
-	for it, j in items {
-		pos[j] = it.start
-	}
-	pos[n], follows[n] = items[n - 1].end if n > 0 else cx.lo[c] + 1, n > 0
-	empty := n == 0
-	for j := 0; j < n; {
-		if !removed[j] {
-			j += 1
-			continue
-		}
-		r := j
-		for j < n && removed[j] {
-			j += 1
-		}
-		s := j - 1
-		switch {
-		case s < n - 1:
-			add(cx, items[r].start, items[s + 1].start, nil)
-			for k in r + 1 ..= s {
-				pos[k] = items[s + 1].start
-			}
-		case r > 0:
-			add(cx, items[r - 1].end, items[s].end, nil)
-			for k in r ..= n {
-				pos[k], follows[k] = items[s].end, true
-			}
-		case:
-			// With every member goes the separator the last one leaves.
-			end := items[n - 1].end
-			for q := end; q < u64(len(src)) && src[q] != ']' && src[q] != '}'; q += 1 {
-				if src[q] == ',' {
-					end = q + 1
-					break
-				}
-			}
-			add(cx, items[0].start, end, nil)
-			for k in 0 ..= n {
-				pos[k] = end
-			}
-			empty = true
-		}
-	}
 	object := cx.doc.nodes[c].kind == .Object
+	texts := make([]compose.Flow_Insert, len(inserts), cx.a)
 	for e, k in inserts {
 		t := trim_break(e.text)
 		m := make([dynamic]u8, cx.a)
@@ -631,21 +578,8 @@ regroup_flow :: proc(cx: ^Cx, c: u32, items: []Item, removed: []bool, inserts: [
 			compose.puts(&m, ": ")
 		}
 		append(&m, ..flow_text(cx, t, shape_text(cx, t)))
-		b := make([dynamic]u8, cx.a)
-		switch {
-		case empty:
-			if k > 0 {
-				compose.puts(&b, sep)
-			}
-			append(&b, ..m[:])
-		case follows[e.at]:
-			compose.puts(&b, sep)
-			append(&b, ..m[:])
-		case:
-			append(&b, ..m[:])
-			compose.puts(&b, sep)
-		}
-		add(cx, pos[e.at], pos[e.at], b[:])
+		texts[k] = {int(e.at), m[:]}
 	}
+	compose.flow_splices(&cx.splices, cx.src, items, removed, texts, cx.lo[c] + 1, cx.hi[c] - 1, cx.eol, false, cx.a)
 	return true
 }

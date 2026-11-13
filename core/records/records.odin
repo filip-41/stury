@@ -147,6 +147,11 @@ Framing_Services :: struct {
 	cut:    proc(it: ^Reader, lo, hi: u64) -> (u64, bool),
 }
 
+// The `judge` of a format whose `next` judges each record it frames.
+no_judge :: proc(it: ^Reader, rec: Record) -> Maybe(core.Fault) {
+	return nil
+}
+
 // What `Record_Docs.check_run` calls after each record it checks.
 Record_Visit :: #type proc(data: rawptr, rec: Record, first: core.Typed_Refusal) -> bool
 

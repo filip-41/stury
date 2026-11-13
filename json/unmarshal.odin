@@ -119,11 +119,11 @@ read_text :: proc(src: []u8, $S: Spec, opts: Options, target: rawptr, T: typeid,
 		// A check that noticed a repeat reads again, judging the repeats as `read.dups` says.
 		if err.kind == .Duplicate_Key && read.repeats == .Notice && read.dups != .Refuse {
 			own: typed.Sink
-			judged := typed.rejudge(read, mark, untracked(&own), allocator)
+			judged := typed.rejudge(read, mark, typed.untracked(&own), allocator)
 			err = {}
 			read_value(src, 0, u64(len(src)), S, target, T, plan, judged, opts, stack[:], allocator, context.temp_allocator, &err, false, CHECK)
-			if judged.sink == untracked(&own) {
-				err = typed.rejudged(untracked(&own), err)
+			if judged.sink == typed.untracked(&own) {
+				err = typed.rejudged(typed.untracked(&own), err)
 			}
 		}
 	}
@@ -227,8 +227,8 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 	regs: core.Hook_Regs
 	started: core.Typed_Refusal
 	when CHECK {
-		json_reader(&h.reader, untracked(&walk_opts), S)
-		regs, started = typed.check_start(&h, text, plan, bound_as(S, opts), T, target, read, untracked_frames(frames), allocator)
+		json_reader(&h.reader, typed.untracked(&walk_opts), S)
+		regs, started = typed.check_start(&h, text, plan, bound_as(S, opts), T, target, read, typed.untracked_frames(frames), allocator)
 	} else {
 		json_reader(&h, &walk_opts, S)
 		regs, started = typed.read_start(&h, text, plan, bound_as(S, opts), T, target, read, frames, allocator, false)
@@ -269,7 +269,7 @@ read_replacement :: proc(h: ^typed.Check, regs: core.Hook_Regs, v: core.Value, d
 	opts := options_of(h.plan.as)
 	opts.max_depth = min(opts.max_depth if opts.max_depth != 0 else core.MAX_DEPTH, depth)
 	held, format, find_tag := h.src, h.format, h.find_tag
-	json_reader(&h.reader, untracked(&opts), S)
+	json_reader(&h.reader, typed.untracked(&opts), S)
 	h.src = text
 	on :: typed.on_token_check_spelled when S == .Json5 else typed.on_token_check
 	back = regs
@@ -286,18 +286,6 @@ read_replacement :: proc(h: ^typed.Check, regs: core.Hook_Regs, v: core.Value, d
 		back, action = regs, .Next
 	}
 	return
-}
-
-// A pointer to what outlives the read that holds it, hidden from the stack escape check, which cannot see through the
-// base `Reader` of a `typed.Check` that the pointer stays within the call. Only the `Check` read uses it.
-@(private)
-untracked :: #force_inline proc "contextless" (p: ^$T) -> ^T {
-	return (^T)(uintptr(p))
-}
-
-@(private)
-untracked_frames :: #force_inline proc "contextless" (f: []typed.Frame) -> []typed.Frame {
-	return ([^]typed.Frame)(untracked(raw_data(f)))[:len(f)]
 }
 
 // Points the typed reader `h` at JSON's walk under `opts`, which a union's tag scan walks with.

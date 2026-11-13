@@ -52,3 +52,14 @@ schema_options_from_json_names :: proc(t: ^testing.T) {
 		testing.expect_value(t, json.check_schema(&rb, repeated) == nil, dups == .Last)
 	}
 }
+
+// A spec out of range has a handle with no readers, which `bind_schema` refuses.
+@(test)
+a_schema_bound_to_a_spec_out_of_range_is_refused :: proc(t: ^testing.T) {
+	s, err := json.load_schema(transmute([]u8)string(`{"type": "object"}`))
+	testing.expect(t, err == nil)
+	defer json.destroy(s)
+	_, berr := json.bind_schema(s, json.Spec(200))
+	refusal, refused := berr.(core.Typed_Error)
+	testing.expect(t, refused && refusal.kind == .Bad_Option)
+}

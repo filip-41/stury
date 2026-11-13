@@ -228,7 +228,7 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 	}
 	facts := value_facts(v)
 	for f in facts {
-		if is_head(f.role) {
+		if is_head(f.role) && !leads_children(v, f) {
 			put_fact(w, v, f) or_return
 		}
 	}
@@ -243,6 +243,11 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 		}
 	}
 	write.put_byte(&w.out, '>')
+	for f in facts {
+		if is_head(f.role) && leads_children(v, f) {
+			put_fact(w, v, f) or_return
+		}
+	}
 	void := !in_foreign && is_void(name)
 	x := core.plain(v)
 	#partial switch core.value_kind(x) {
@@ -290,6 +295,13 @@ value_facts :: proc(v: core.Value) -> []core.Fact {
 		return core.all_facts(r.doc, r.node)
 	}
 	return nil
+}
+
+// Whether head fact `f` of element `v` of an HTML document stands inside it, before its first child: the tree gives a
+// comment there to the element, whose node starts at its start tag.
+@(private)
+leads_children :: proc(v: core.Value, f: core.Fact) -> bool {
+	return own_node(v) && core.value_kind(v) == .Object && f.lo > v.(core.Node_Ref).doc.nodes[v.(core.Node_Ref).node].lo
 }
 
 // Whether `v` is a node of an HTML document, whose facts are written as they stand.

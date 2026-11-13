@@ -10,6 +10,7 @@ import dsv "../../dsv"
 import json ".."
 import gen "gen"
 import walktest "../../walktest"
+import yaml "../../yaml"
 
 // The options each text is written under: compact, pretty at three widths, and with tabs.
 WRITE_OPTS :: [?]core.Write_Options {
@@ -496,7 +497,8 @@ write_document_json5_generated :: proc(t: ^testing.T) {
 	}
 }
 
-// A delimited text with a header is an array of records, its comment lines dropped and counted.
+// A delimited text with a header is an array of records. JSON drops its comment lines and counts them, and JSONC keeps
+// them.
 @(test)
 write_document_shared_keys :: proc(t: ^testing.T) {
 	doc, err := core.build(transmute([]u8)string("x,y\n# note\n1,a\n2.5,\"b c\"\n"), dsv.as(.Csv, {comment = '#'}))
@@ -511,9 +513,10 @@ write_document_shared_keys :: proc(t: ^testing.T) {
 	pretty, _, perr := core.write(&doc, core.PRETTY, json.as(.Jsonc))
 	defer delete(pretty)
 	walktest.expect_nil(t, perr)
-	again, aerr := core.build(pretty, json.as(.Json))
+	again, aerr := core.build(pretty, json.as(.Jsonc))
 	defer core.destroy(&again)
 	walktest.expect_nil(t, aerr)
+	testing.expectf(t, strings.contains(string(pretty), "// note"), "%s drops the comment", pretty)
 	dropping, dropped, _ := core.write(&doc, as = json.as(.Json))
 	delete(dropping)
 	testing.expect_value(t, dropped, len(doc.facts))
@@ -624,6 +627,22 @@ write_document_jsonc_without_comments :: proc(t: ^testing.T) {
 	defer delete(direct)
 	walktest.expect_nil(t, ferr)
 	testing.expect_value(t, string(direct), `[1,2]`)
+}
+
+// Another format's comments are written as JSONC's, each where JSONC reads a comment of the same place.
+@(test)
+write_document_keeps_comments_of_another_format :: proc(t: ^testing.T) {
+	src := "# head\n\n# before a\na: 1 # tail a\nb:\n  c: 2\n# end\n"
+	doc, err := yaml.build(transmute([]u8)src, .Yaml_1_2)
+	defer core.destroy(&doc)
+	if !walktest.expect_nil(t, err) {
+		return
+	}
+	text, dropped, werr := core.write(&doc, core.PRETTY, json.as(.Jsonc))
+	defer delete(text)
+	walktest.expect_nil(t, werr)
+	testing.expect_value(t, dropped, 0)
+	testing.expect_value(t, string(text), "// head\n// before a\n{\n  \"a\": 1, // tail a\n  \"b\": {\n    \"c\": 2\n  }\n}\n// end\n")
 }
 
 // A document of another format is written through its own text, number and kind: an empty cell is null.

@@ -250,11 +250,12 @@ a_check_of_a_malformed_text_holds_the_fault :: proc(t: ^testing.T) {
 	testing.expect_value(t, sink.fatal.kind, core.Typed_Error_Kind.Walk)
 }
 
-// A check with no plan is a plan mismatch.
+// A read or a check with no plan is a plan mismatch.
 @(test)
-a_check_with_no_plan_is_a_mismatch :: proc(t: ^testing.T) {
+a_read_or_check_with_no_plan_is_a_mismatch :: proc(t: ^testing.T) {
 	v: struct {
 		a: int,
 	}
 	walktest.expect_kind(t, yaml.check(transmute([]u8)string("a: 1\n"), .Yaml_1_2, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
+	walktest.expect_kind(t, yaml.unmarshal(transmute([]u8)string("a: 1\n"), .Yaml_1_2, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
 }

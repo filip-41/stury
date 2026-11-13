@@ -10,7 +10,7 @@ import typed "../core/typed"
 // the same answer through either. The nodes hold a root of records, each of cells, so a loop over them is the whole feed.
 //
 // The node read is the root, which reads as the list of rows, or a record, which reads as a list of that one row. A
-// cell reads in no plan, since `plan_make` refuses a type that is no list of rows.
+// cell reads in no plan, since `plan_make` refuses a type that is no row or list of rows.
 //
 // A full document binds its columns once, from the header row of `Document.tables`. A list of rows reads the header
 // row as its first row, as `unmarshal` does. A partial document has no shared keys: a headed record holds a key beside

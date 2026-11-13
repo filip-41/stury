@@ -340,6 +340,8 @@ format_commit_takes_the_list_as_recorded :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, herr)
 	edit := core.services_of(doc.as).edit^
 	edit.commit = toy_commit
+	// The toy output reads as no JSON, and compose judges a format's own commit by its validate.
+	edit.validate = nil
 	a, _ := core.member(&doc, core.ROOT, "a")
 	wants := [2]string{"[\n        2,\n        3\n    ]", "[\n  2,\n  3\n]"}
 	for want, i in wants {

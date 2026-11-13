@@ -37,11 +37,7 @@ checks :: proc "contextless" (spec: Spec, opts := Options{}) -> typed.Format_Che
 
 // Binds `s` to texts of `spec` read with `opts`, which the checks of the spec judge.
 bind_schema :: proc(s: ^Schema, spec: Spec, opts := Options{}, allocator := context.allocator) -> (Bound_Schema, core.Error) {
-	switch spec {
-	case .Document: return schema.bind(s, {checks(.Document).reads, as(spec, opts)}, allocator)
-	case .Fragment: return schema.bind(s, {checks(.Fragment).reads, as(spec, opts)}, allocator)
-	}
-	return {}, core.error_of(core.Typed_Refusal{kind = .Bad_Option})
+	return schema.bind(s, {layout = as(spec, opts)}, allocator)
 }
 
 // Builds the plan of `T` for HTML, as `typed.plan_make` does.
@@ -79,7 +75,7 @@ plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: run
 reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	@(static, rodata) r := typed.Format_Reads {
 		read       = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return typed.read_built_text(src, as, build_handle, target, T, plan, read, allocator)},
-		check      = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return check_text(src, S, as, target, T, plan, read, allocator)},
+		check      = check_text,
 		node_read  = typed.read_nodes,
 		node_check = typed.check_nodes,
 		build      = proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_spec(src, S, as, false, allocator)},
@@ -88,15 +84,10 @@ reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	return &r
 }
 
-// Checks `src` by `plan`, building its document whole. A handle with no readers is read as `spec` with the default
-// options.
+// Checks `src` by `plan`, building its document whole.
 @(private)
-check_text :: proc(src: []u8, spec: Spec, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
-	handle := as
-	if handle.readers == nil {
-		handle = bound_as(spec)
-	}
-	return typed.check_built_text(src, handle, build_handle, target, T, plan, read, allocator)
+check_text :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
+	return typed.check_built_text(src, as, build_handle, target, T, plan, read, allocator)
 }
 
 @(private)
@@ -111,17 +102,11 @@ plan_handle :: proc "contextless" (spec: Spec, plan: ^typed.Plan) -> core.As {
 // The read builds a plan with `context.allocator` and frees it before it returns.
 unmarshal :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	plan, refusal := plan_make(T, spec, opts)
-	if refusal != nil {
-		return refusal
-	}
-	defer typed.plan_destroy(&plan)
-	err := typed.read_built_text(src, bound_as(spec, opts), build_handle, target, T, &plan, read, allocator)
-	typed.own_errors(&err, read.sink)
-	return core.error_of(err)
+	return typed.unmarshal_planned(&plan, refusal, src, bound_as(spec, opts), build_handle, target, T, read, allocator)
 }
 
 // Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
 // first. The options are the plan's, and any plan of the format reads.
 check :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return typed.check_by(src, plan_handle(spec, plan), target, T, plan, read, allocator, proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return check_text(src, Spec(as.spec), as, target, T, plan, read, allocator)})
+	return typed.check_by(src, plan_handle(spec, plan), target, T, plan, read, allocator, check_text)
 }

@@ -105,10 +105,11 @@ Bound :: struct {
 
 // Binds `c` to the format and layout `checks` names, as `json.checks(.Json)` and `dsv.checks(.Csv, opts)` give them. A
 // layout chosen at run time, a handle, with no reads checks by the handle's reads. A schema keyword the check does not
-// judge is refused as `.Unsupported`, naming it, and a compile that failed as `.Bad_Option`.
+// judge is refused as `.Unsupported`, naming it, and a compile that failed or a handle with no readers, as `as` gives
+// for a spec out of range, as `.Bad_Option`.
 bind :: proc(c: ^Compiled, checks: typed.Format_Checks, allocator := context.allocator) -> (b: Bound, err: core.Error) {
 	as, reads := checks.layout, checks.reads
-	if c == nil || c.description == nil {
+	if c == nil || c.description == nil || as.readers == nil {
 		return {}, core.error_of(core.Typed_Refusal{kind = .Bad_Option})
 	}
 	b.compiled = c

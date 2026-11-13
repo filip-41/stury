@@ -10,7 +10,6 @@ package yaml
 
 import "base:runtime"
 import "core:io"
-import "core:slice"
 import core "../core"
 import write "../core/write"
 
@@ -36,17 +35,11 @@ Context :: enum u8 {
 	Dash,
 }
 
-@(private)
-Member :: struct {
-	key, value: core.Node_Index,
-	name:       string,
-}
-
 // The members of an object in the order they are written. A document read from YAML is walked as it stands, any other
 // is copied so a repeated key is found, and `sort_keys` orders either.
 @(private)
 Members :: struct {
-	items:  []Member,
+	items:  []write.Node_Member,
 	it:     core.Pair_Iter,
 	at:     int,
 	direct: bool,
@@ -304,13 +297,13 @@ put_block_next :: proc(l: ^Layout, opens: ^[dynamic]Put_Open) -> core.Typed_Erro
 		}
 		if !(o.first && o.compact) {
 			put_comments(l, m.value, .Comment, ind)
-			put_spaces(&l.out, ind)
+			write.put_run(&l.out, ind, ' ')
 		}
 		o.first = false
 		explicit := put_key(l, m.key, false) or_return
 		if explicit {
 			write.put_byte(&l.out, '\n')
-			put_spaces(&l.out, ind)
+			write.put_run(&l.out, ind, ' ')
 		}
 		write.put_byte(&l.out, ':')
 		return put_node_start(l, opens, m.value, .Key, ind + l.step)
@@ -321,7 +314,7 @@ put_block_next :: proc(l: ^Layout, opens: ^[dynamic]Put_Open) -> core.Typed_Erro
 	}
 	if !(o.first && o.compact) {
 		put_comments(l, element, .Comment, ind)
-		put_spaces(&l.out, ind)
+		write.put_run(&l.out, ind, ' ')
 	}
 	o.first = false
 	write.put_byte(&l.out, '-')
@@ -364,13 +357,7 @@ has_fact :: proc(l: ^Layout, node: core.Node_Index, role: core.Role) -> bool {
 @(private)
 put_key :: proc(l: ^Layout, key: core.Node_Index, flow: bool) -> (explicit: bool, kind: core.Typed_Error_Kind) {
 	buf: [512]u8
-	text, ok := core.text(l.doc, key, buf[:])
-	if !ok {
-		text, ok = core.text_clone(l.doc, key, runtime.arena_allocator(&l.arena))
-		if !ok {
-			return false, .No_Memory
-		}
-	}
+	text := write.node_text(l.doc, key, buf[:], runtime.arena_allocator(&l.arena)) or_return
 	explicit = len(text) > KEY_MAX
 	if explicit {
 		write.put_text(&l.out, "? ")
@@ -405,13 +392,7 @@ put_leaf :: proc(l: ^Layout, node: core.Node_Index, flow, key: bool, ind: int, t
 	#partial switch core.kind(l.doc, node) {
 	case .String:
 		buf: [512]u8
-		text, ok := core.text(l.doc, node, buf[:])
-		if !ok {
-			text, ok = core.text_clone(l.doc, node, runtime.arena_allocator(&l.arena))
-			if !ok {
-				return false, .No_Memory
-			}
-		}
+		text := write.node_text(l.doc, node, buf[:], runtime.arena_allocator(&l.arena)) or_return
 		place := Place{flow = flow, key = key, block = l.opts.pretty && !flow && !key, ascii = l.opts.ascii, keeps = own_style(l, node), tagged = tagged}
 		shape := shape_of(text, place) or_return
 		if shape == .Literal {
@@ -420,7 +401,7 @@ put_leaf :: proc(l: ^Layout, node: core.Node_Index, flow, key: bool, ind: int, t
 		}
 		put_scalar(&l.out, text, shape, l.opts.ascii)
 	case .Number:
-		return false, put_number(l, node)
+		return false, write.put_number_node(&l.out, l.doc, node, TREE, l.own)
 	case .True:
 		write.put_text(&l.out, own_text(l, node, "true"))
 	case .False:
@@ -450,46 +431,6 @@ own_text :: proc(l: ^Layout, node: core.Node_Index, word: string) -> string {
 		}
 	}
 	return word
-}
-
-@(private)
-put_number :: proc(l: ^Layout, node: core.Node_Index) -> core.Typed_Error_Kind {
-	t := l.doc.nodes[node]
-	span := core.span(l.doc, node)
-	if l.own {
-		write.put_text(&l.out, string(span))
-		return .None
-	}
-	if l.doc.readers.number_text != nil {
-		stack: [64]u8
-		text, ok := write.node_number_text(l.doc, node, stack[:])
-		if !ok {
-			return .No_Memory
-		}
-		write.put_text(&l.out, text)
-		return .None
-	}
-	if t.spelling & core.NUMBER_KIND_MASK == 0 {
-		write.put_text(&l.out, string(span))
-		return .None
-	}
-	kind := write.put_decimal(&l.out, string(span), t.spelling)
-	if kind != .Non_Finite {
-		return kind
-	}
-	f, ok := core.float_value(l.doc, node)
-	if !ok {
-		return .Non_Finite
-	}
-	switch {
-	case f != f:
-		write.put_text(&l.out, ".nan")
-	case f > 0:
-		write.put_text(&l.out, ".inf")
-	case:
-		write.put_text(&l.out, "-.inf")
-	}
-	return .None
 }
 
 // Writes the opening bracket of the flow collection at `node` and opens it. `tail` is the `Put_Open` field.
@@ -573,62 +514,20 @@ put_flow_start :: proc(l: ^Layout, opens: ^[dynamic]Put_Open, node: core.Node_In
 }
 
 // The members of the object at `node`. A key a copied object repeats is `.Unwritable`.
-// Mappings with fewer keys than this check for a repeated key by comparing names in turn.
 @(private)
-LINEAR_KEYS :: 16
-
-@(private)
-members_of :: proc(l: ^Layout, node: core.Node_Index) -> (Members, core.Typed_Error_Kind) {
+members_of :: proc(l: ^Layout, node: core.Node_Index) -> (m: Members, kind: core.Typed_Error_Kind) {
 	if l.own && !l.opts.sort_keys {
 		return Members{it = core.pairs(l.doc, node), direct = true}, .None
 	}
-	scratch := runtime.arena_allocator(&l.arena)
-	items := make([dynamic]Member, scratch)
-	seen: map[string]struct{}
-	it := core.pairs(l.doc, node)
-	for key, value in core.pair_next(&it) {
-		name, whole := core.text(l.doc, key, nil)
-		if !whole {
-			name, whole = core.text_clone(l.doc, key, scratch)
-			if !whole {
-				return {}, .No_Memory
-			}
-		}
-		if !l.own {
-			if len(items) < LINEAR_KEYS {
-				for m in items {
-					if m.name == name {
-						return {}, .Unwritable
-					}
-				}
-			} else {
-				if seen == nil {
-					seen = make(map[string]struct{}, scratch)
-					for m in items {
-						seen[m.name] = {}
-					}
-				}
-				if name in seen {
-					return {}, .Unwritable
-				}
-				seen[name] = {}
-			}
-		}
-		if _, failed := append(&items, Member{key, value, name}); failed != nil {
-			return {}, .No_Memory
-		}
-	}
-	if l.opts.sort_keys {
-		slice.stable_sort_by(items[:], proc(a, b: Member) -> bool {return a.name < b.name})
-	}
-	return Members{items = items[:]}, .None
+	m.items = write.node_members(l.doc, node, l.opts.sort_keys, !l.own, runtime.arena_allocator(&l.arena)) or_return
+	return m, .None
 }
 
 @(private)
-members_next :: proc(m: ^Members) -> (Member, bool) {
+members_next :: proc(m: ^Members) -> (write.Node_Member, bool) {
 	if m.direct {
 		key, value, ok := core.pair_next(&m.it)
-		return Member{key = key, value = value}, ok
+		return {key = key, value = value}, ok
 	}
 	if m.at >= len(m.items) {
 		return {}, false

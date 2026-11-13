@@ -33,10 +33,7 @@ checks :: proc "contextless" (spec: Spec, opts := Options{}) -> typed.Format_Che
 
 // Binds `s` to texts of `spec` read with `opts`, which the checks of the spec judge.
 bind_schema :: proc(s: ^Schema, spec: Spec, opts := Options{}, allocator := context.allocator) -> (Bound_Schema, core.Error) {
-	switch spec {
-	case .Xml: return schema.bind(s, {checks(.Xml).reads, as(spec, opts)}, allocator)
-	}
-	return {}, core.error_of(core.Typed_Refusal{kind = .Bad_Option})
+	return schema.bind(s, {layout = as(spec, opts)}, allocator)
 }
 
 // Builds the plan of `T` for XML, as `typed.plan_make` does.
@@ -72,7 +69,7 @@ plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: run
 // which compares a key by its decoded text.
 @(private, rodata)
 READS := typed.Format_Reads {
-	read       = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return text_read(src, .Xml, as, target, T, plan, read, allocator)},
+	read       = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return typed.read_built_text(src, as, build_handle, target, T, plan, read, allocator)},
 	check      = check_text,
 	node_read  = typed.read_nodes,
 	node_check = typed.check_nodes,
@@ -80,20 +77,10 @@ READS := typed.Format_Reads {
 	plan       = proc(T: typeid, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Refusal) {return plan_built(T, .Xml, {}, opts, &READS, allocator)},
 }
 
-@(private)
-text_read :: proc(src: []u8, spec: Spec, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
-	return typed.read_built_text(src, as, build_handle, target, T, plan, read, allocator)
-}
-
-// Checks `src` by `plan`, building its document whole. A handle with no readers is read as `spec` with the default
-// options.
+// Checks `src` by `plan`, building its document whole.
 @(private)
 check_text :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
-	handle := as
-	if handle.readers == nil {
-		handle = bound_as(.Xml)
-	}
-	return typed.check_built_text(src, handle, build_handle, target, T, plan, read, allocator)
+	return typed.check_built_text(src, as, build_handle, target, T, plan, read, allocator)
 }
 
 // Reads `src`, an XML text, into `target`. The document's one member is the root element, so a target is a struct with
@@ -101,13 +88,7 @@ check_text :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typ
 // `context.allocator` and frees it before it returns.
 unmarshal :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	plan, refusal := plan_make(T, spec, opts)
-	if refusal != nil {
-		return refusal
-	}
-	defer typed.plan_destroy(&plan)
-	err := text_read(src, spec, bound_as(spec, opts), target, T, &plan, read, allocator)
-	typed.own_errors(&err, read.sink)
-	return core.error_of(err)
+	return typed.unmarshal_planned(&plan, refusal, src, bound_as(spec, opts), build_handle, target, T, read, allocator)
 }
 
 // Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the

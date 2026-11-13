@@ -69,9 +69,6 @@ Cx :: struct {
 // format then reads.
 markup_commit :: proc(list: ^core.Edit_List, m: ^Markup, allocator: runtime.Allocator) -> (out: []u8, err: core.Document_Error) {
 	doc := list.doc
-	if doc == nil || doc.partial {
-		return nil, {kind = .Bad_Index}
-	}
 	arena := runtime.Arena{backing_allocator = allocator}
 	defer runtime.arena_destroy(&arena)
 	cx := Cx{doc = doc, src = doc.src, m = m, a = runtime.arena_allocator(&arena)}

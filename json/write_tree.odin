@@ -45,7 +45,7 @@ Pair :: struct {
 @(private)
 write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Out, as: Spec, node: core.Node_Index) -> (dropped: int, kind: core.Typed_Error_Kind) {
 	w := Tree_Writer{doc = doc, root = node, out = out, opts = opts, json = doc.readers.format == rules_of}
-	w.keep = w.json && as != .Json && !doc.partial
+	w.keep = as != .Json && !doc.partial
 	w.respell = !w.json || Spec(doc.as.spec) == .Json5 && as != .Json5
 	w.seps = as == .Json5
 	w.copy = w.json && !w.respell && copies_strings(opts)
@@ -55,6 +55,9 @@ write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Ou
 		_, w.close = core.scalar_ends(root)
 		if root.kind >= .Array {
 			w.close = doc.readers.close_end(doc, node)
+		}
+		for f in core.subtree_facts(doc, node) {
+			w.dropped += 0 if w.json || f.role in core.COMMENT_ROLES else 1
 		}
 	} else {
 		w.dropped = len(core.subtree_facts(doc, node))
@@ -67,11 +70,23 @@ write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Ou
 
 // Writes fact `f` with its markers. A line comment ends its line in compact text, since nothing may follow it there.
 // `ascii` and `escape_html` respell a comment's characters as they do a string's, as literal text, and so is a U+2028 or
-// U+2029 in a line comment that the target ends there. Returns whether it is a line comment.
+// U+2029 in a line comment that the target ends there. Another format's comment is written as a line comment, or as a
+// block comment when its body holds a line end. Returns whether it is a line comment.
 @(private)
 tree_comment :: proc(w: ^Tree_Writer, f: core.Fact) -> (line: bool) {
 	text := w.doc.src[f.lo:f.lo + u64(f.n)]
-	line = text[1] == '/'
+	if !w.json {
+		it := core.Fact_Iter{w.doc, {f}, f.role}
+		body, _ := core.fact_next(&it)
+		text = transmute([]u8)body
+		if !write.comment_ok(body) {
+			TOKENS.comment(w.out, u8(Spec.Jsonc), body)
+			w.held = false
+			return false
+		}
+		write.put_text(w.out, "//")
+	}
+	line = !w.json || text[1] == '/'
 	seps := w.opts.escape_html || line && w.seps
 	if w.opts.ascii || seps {
 		for r in string(text) {
@@ -204,8 +219,9 @@ tree_clear :: #force_inline proc(list: ^[dynamic]Pair) {
 tree_head :: #force_inline proc(w: ^Tree_Writer, i, key: core.Node_Index, depth: int) -> (facts: []core.Fact, ok: bool) {
 	doc := w.doc
 	facts = node_facts(w, i) if w.keep else nil
+	// Another format's comment on a member is written before its key, where JSON reads a member's leading comment.
 	key_lo := max(u64)
-	if key != core.NO_NODE {
+	if key != core.NO_NODE && w.json {
 		key_lo = core.node_start(doc.nodes[key])
 	}
 	for f in facts {

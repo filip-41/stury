@@ -255,25 +255,6 @@ scan_text :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Pat
 	return engine.scan_built(&doc, built, paths, read, state, on, allocator)
 }
 
-// An iterator over the answers of `paths`, or of `one` when `paths` is nil, in a text read with handle `handle`.
-@(private)
-answers_of :: proc(src: []u8, handle: core.As, paths: []core.Path, one: core.Path, read: core.Path_Options, allocator: runtime.Allocator) -> engine.Answer_Iter {
-	return {src = src, as = handle, paths = paths, one = one, read = read, allocator = allocator, fill = answers_fill, max_batch = engine.ANSWER_BATCH}
-}
-
-// The fill of an iterator: the first fills the buffer with every answer of the built text and ends the read.
-@(private)
-answers_fill :: proc(it: ^engine.Answer_Iter) {
-	paths := it.paths if it.paths != nil else ([^]core.Path)(&it.one)[:1]
-	it.buffer = make([dynamic]core.Token_Answer, 0, it.max_batch, it.allocator)
-	doc, err := scan_text(it.src, it.as, paths, it.read, &it.buffer, proc(state: rawptr, a: core.Token_Answer) -> bool {
-		_, e := append((^[dynamic]core.Token_Answer)(state), a)
-		return e == nil
-	}, it.allocator)
-	core.destroy(&doc)
-	engine.answers_fail(it, core.error_of(err))
-}
-
 // A table has no bracket bytes of its own, so its end is the end of its last scalar, and an empty one ends where its
 // token does. A scalar, which a path that meets it as no container names, ends where its bytes do.
 @(private)

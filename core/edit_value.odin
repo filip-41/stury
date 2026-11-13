@@ -183,8 +183,8 @@ spell :: proc(list: ^Edit_List, v: Value, target: Node_Index, into: bool, at: u6
 	return spaced, true, nil
 }
 
-// The container of each node of `list`'s document, `NO_NODE` for the root.
-@(private)
+// The container of each node of `list`'s document, `NO_NODE` for the root, kept in `list` for its next call, or nil
+// when the table cannot be allocated.
 parents_of :: proc(list: ^Edit_List) -> []Node_Index {
 	if list.parents != nil {
 		return list.parents

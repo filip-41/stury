@@ -228,6 +228,9 @@ flow_members_take_their_separators :: proc(t: ^testing.T) {
 		{src = "f: {a: 1, b: 2}\n", op = .Remove, path = "f.a", want = "f: {b: 2}\n"},
 		{src = "f: [[1], {k: v}]\n", op = .Remove, path = "f.0", want = "f: [{k: v}]\n"},
 		{src = "f: [a: 1]\n", op = .Insert, path = "f.0", at = 1, key = "b", text = "2", refused = "implicit_pair"},
+		// A collection its last member leaves is written empty, and one member on its own line puts the next on another.
+		{src = "f: { a: 1 }\n", op = .Remove, path = "f.a", want = "f: {}\n"},
+		{src = "[\n  1\n]\n", op = .Insert, path = "", at = 1, text = "2", want = "[\n  1,\n  2\n]\n"},
 	})
 }
 

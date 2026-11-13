@@ -106,13 +106,7 @@ text_check :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typ
 @(private)
 unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	plan, refusal := plan_make(T, spec, opts)
-	if refusal != nil {
-		return refusal
-	}
-	defer typed.plan_destroy(&plan)
-	err := typed.read_built_text(src, bound_as(spec, opts), build_handle, target, T, &plan, read, allocator)
-	typed.own_errors(&err, read.sink)
-	return core.error_of(err)
+	return typed.unmarshal_planned(&plan, refusal, src, bound_as(spec, opts), build_handle, target, T, read, allocator)
 }
 
 @(private)

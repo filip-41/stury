@@ -19,7 +19,7 @@ import records "../core/records"
 framing_of :: proc "contextless" ($S: Spec) -> ^records.Framing_Services {
 	@(static, rodata) f := records.Framing_Services {
 		next  = #partial {.Lines = proc(it: ^records.Reader) -> (records.Record, bool) {return next_row_spec(it, S)}},
-		judge = proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) {return nil},
+		judge = records.no_judge,
 		span  = proc(it: ^records.Reader, to: u64) -> (records.Record, bool) {return next_span_spec(it, to, S)},
 		guess = guess_row,
 		exact = exact_row,

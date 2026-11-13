@@ -6,18 +6,17 @@ import kernel "../core/kernel"
 import write "../core/write"
 
 // The compact write of a strict JSON source that runs over the source's bytes in place of its rows: each 64-byte block
-// drops the blanks outside strings and stores the rest. A source of dense tokens has more rows than a block has bytes
-// to spare, and this is faster than one row at a time. The text is the one `rows` makes, since a strict source holds
-// only a token, a blank or a punctuation byte outside a string.
+// drops the blanks outside strings and stores the rest. It serves a source of dense tokens, which has more rows than a
+// block has bytes to spare. The text is the one `rows` makes, since a strict source holds only a token, a blank or a
+// punctuation byte outside a string.
 
 // A source with fewer bytes than this per node is written by `write_dense` when its first blocks hold hardly any blank
-// outside a string, see `dense_sample`. Past it the tokens are long enough that copying each is cheaper than testing
-// each block.
+// outside a string, see `dense_sample`. Past it the rows copy each token.
 @(private)
 DENSE_BYTES_PER_NODE :: 26
 
-// The same bound for a source whose first blocks also hold no backslash. A long string that holds escapes is written
-// faster by its rows, which copy the runs between them.
+// The same bound for a source whose first blocks also hold no backslash. A long string that holds escapes goes to the
+// rows, which copy the runs between them.
 @(private)
 DENSE_BYTES_PER_NODE_PLAIN :: 128
 
@@ -62,7 +61,7 @@ dense_route :: #force_inline proc "contextless" (doc: ^core.Document, opts: core
 
 // Whether the blanks outside strings in the first `DENSE_SEGMENT` bytes of `src` are under a sixteenth of them, counted
 // by running `dense_run` over them, and, in a source of `DENSE_BYTES_PER_NODE` bytes per node or more, hold no backslash.
-// A source that fits in the sample is dense whatever it holds, since counting its blanks costs as much as writing it.
+// A source that fits in the sample is dense whatever it holds.
 @(private)
 dense_sample :: proc "contextless" (src: []u8, nodes: int) -> bool {
 	if len(src) <= DENSE_SEGMENT {

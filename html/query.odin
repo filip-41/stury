@@ -39,19 +39,10 @@ find :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := 
 // ends before `next` returns false frees the read with `destroy(&it)`. `path` is read at the first `next`, which builds
 // the whole text.
 answers :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
-	return answers_of(src, bound_as(spec, opts), nil, path, read, allocator)
+	return engine.answers_whole(src, bound_as(spec, opts), path, read, allocator, build_handle)
 }
 
-// An iterator over the answers of `paths`, or of `one` when `paths` is nil, in a text read with handle `handle`.
-@(private)
-answers_of :: proc(src: []u8, handle: core.As, paths: []core.Path, one: core.Path, read: core.Path_Options, allocator: runtime.Allocator) -> engine.Answer_Iter {
-	fill := proc(it: ^engine.Answer_Iter) {
-		engine.answers_built(it, build_handle)
-	}
-	return {src = src, as = handle, paths = paths, one = one, read = read, allocator = allocator, fill = fill, max_batch = engine.ANSWER_BATCH}
-}
-
-// HTML's `Services.scan` of `spec`. The document is built whole and answers the paths.
+// HTML's `Services.scan`. The document is built whole and answers the paths.
 @(private)
 scan_handle :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
 	doc, built := build_spec(src, Spec(handle.spec), handle, false, allocator)

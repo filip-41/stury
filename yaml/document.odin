@@ -53,7 +53,6 @@ options_of :: #force_inline proc "contextless" (as: core.As) -> Options {
 	return {max_depth = as.max_depth, alias_limit = limit, merge_keys = as.opts[8] != 0}
 }
 
-// Whether `doc` was read from a YAML text.
 is_yaml :: #force_inline proc "contextless" (doc: ^core.Document) -> bool {
 	return doc.readers != nil && doc.readers.format == rules_of
 }

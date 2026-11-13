@@ -39,19 +39,7 @@ find :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := 
 // ends before `next` returns false frees the read with `destroy(&it)`. `path` is read at the first `next`, which
 // builds the whole text, as a stream of answers of XML does.
 answers :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
-	return answers_of(src, bound_as(spec, opts), nil, path, read, allocator)
-}
-
-// An iterator over the answers of `paths`, or of `one` when `paths` is nil, in a text read with handle `handle`.
-@(private)
-answers_of :: proc(src: []u8, handle: core.As, paths: []core.Path, one: core.Path, read: core.Path_Options, allocator: runtime.Allocator) -> engine.Answer_Iter {
-	return {src = src, as = handle, paths = paths, one = one, read = read, allocator = allocator, fill = answers_fill, max_batch = engine.ANSWER_BATCH}
-}
-
-// The fill of an iterator, which builds the text whole.
-@(private)
-answers_fill :: proc(it: ^engine.Answer_Iter) {
-	engine.answers_built(it, build_handle)
+	return engine.answers_whole(src, bound_as(spec, opts), path, read, allocator, build_handle)
 }
 
 // XML's `Services.scan`. A read of one path that gives no stream walks the text with the scan's hook,

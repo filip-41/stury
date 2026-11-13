@@ -28,24 +28,33 @@ commit :: proc(list: ^core.Edit_List, as: Maybe(core.As) = nil, allocator := con
 	if target.readers == nil || target.readers.format != doc.readers.format {
 		return nil, 0, core.error_of(core.Document_Error{kind = .Bad_Spec})
 	}
-	if list.edit.commit != nil {
-		made, cut, refusal := list.edit.commit(list, target.spec, allocator)
+	// A partial document does not hold the members a commit composes.
+	if doc.partial {
+		return nil, 0, core.error_of(core.Document_Error{kind = .Bad_Index}, edit = true)
+	}
+	if list.edit.commit == nil {
+		made, cut, refusal := commit_spec(list, target, allocator)
 		return made, cut, core.error_of(refusal, edit = true)
 	}
-	made, cut, refusal := commit_spec(list, target, allocator)
-	return made, cut, core.error_of(refusal, edit = true)
+	made, cut, refusal := list.edit.commit(list, target.spec, allocator)
+	if refusal.kind != .None {
+		return nil, 0, core.error_of(refusal, edit = true)
+	}
+	// A format's own commit is judged by its validate under the document's options and the target spec.
+	if list.edit.validate != nil {
+		judged := doc.as
+		judged.spec = target.spec
+		if fault, bad := list.edit.validate(made, judged).?; bad {
+			delete(made, allocator)
+			return nil, 0, core.error_of(core.Document_Error{kind = .Bad_Result, inner = fault}, edit = true)
+		}
+	}
+	return made, cut, nil
 }
 
 @(private)
 commit_spec :: proc(list: ^core.Edit_List, target: core.As, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 	doc, spec := list.doc, target.spec
-	if doc == nil || doc.readers == nil {
-		return nil, 0, {kind = .Bad_Index}
-	}
-	// A partial document does not hold the members a commit composes.
-	if doc.partial {
-		return nil, 0, {kind = .Bad_Index}
-	}
 	// Refused before any chunk is built or spliced, rather than after the output fails to read.
 	if core.is_flat(doc) && spec != doc.as.spec {
 		return nil, 0, {kind = .Bad_Spec}
@@ -353,6 +362,30 @@ puts :: proc(b: ^[dynamic]u8, parts: ..string) {
 	}
 }
 
+// Refuses as `.Bad_Index` a reorder edit's order that does not name each survivor of a container and each of its
+// `inserts` inserts once, and nothing else. `removed` marks the container's members a removal names. An order with no
+// entries is refused for a container that holds a member or gets an insert.
+order_check :: proc(order: []u8, removed: []bool, inserts: int, allocator: runtime.Allocator) -> core.Document_Error {
+	n, count := len(removed), len(order) / 4
+	seen, serr := make([]bool, n + inserts, allocator)
+	if serr != nil {
+		return {kind = .No_Memory}
+	}
+	for i in 0 ..< count {
+		k := int(endian.unchecked_get_u32le(order[4 * i:]))
+		if k >= len(seen) || seen[k] || k < n && removed[k] {
+			return {kind = .Bad_Index}
+		}
+		seen[k] = true
+	}
+	for k in 0 ..< len(seen) {
+		if !seen[k] && (k >= n || !removed[k]) || count == 0 {
+			return {kind = .Bad_Index}
+		}
+	}
+	return {}
+}
+
 // Records that an edit names `id` in `seen`, and sets `err` to `.Conflicting_Edits` and returns false for a second edit
 // of it.
 claim :: proc(seen: ^map[u64]struct{}, err: ^core.Document_Error, id: u64) -> bool {
@@ -371,4 +404,123 @@ line_start :: proc(src: []u8, p: u64) -> u64 {
 		i -= 1
 	}
 	return i
+}
+
+// One past the line feed that ends the line holding `p`, or the end of the text.
+next_line :: proc(src: []u8, p: u64) -> u64 {
+	i := min(p, u64(len(src)))
+	for i < u64(len(src)) && src[i] != '\n' {
+		i += 1
+	}
+	return min(i + 1, u64(len(src)))
+}
+
+// Whether only spaces and tabs stand before `p` on its line.
+first_on_line :: proc(src: []u8, p: u64) -> bool {
+	for b in src[line_start(src, p):p] {
+		if b != ' ' && b != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+// An insert into a bracketed collection: its text, which goes before item `at`, or after the last item for an `at` past
+// them.
+Flow_Insert :: struct {
+	at:   int,
+	text: []u8,
+}
+
+// Adds the splices that take the items `removed` marks out of a bracketed collection, whose interior runs from `open`
+// to `close`, and put `inserts`, sorted by `at`, in. A run of removed items goes with the separator after it, or before
+// it for the last run. New items are separated as the first gap is when it holds a comma and no comment, else by a line
+// end and the indent when the first item starts a line, and by ", " otherwise. A collection left with no item and no comment
+// is written whole as its inserts, inside a space each side when `pad`.
+flow_splices :: proc(splices: ^[dynamic]Splice, src: []u8, items: []$T, removed: []bool, inserts: []Flow_Insert, open, close: u64, eol: string, pad: bool, allocator: runtime.Allocator) {
+	n := len(items)
+	left := n
+	for r in removed {
+		left -= int(r)
+	}
+	if left == 0 && bytes.index_byte(src[open:close], '#') < 0 {
+		b := make([dynamic]u8, allocator)
+		for e, k in inserts {
+			puts(&b, ", " if k > 0 else " " if pad else "", string(e.text))
+		}
+		if pad && len(inserts) > 0 {
+			puts(&b, " ")
+		}
+		append(splices, Splice{lo = open, hi = close, text = b[:], seq = len(splices)})
+		return
+	}
+	sep := ", "
+	gap: []u8
+	if n >= 2 {
+		gap = src[items[0].end:items[1].start]
+	}
+	if bytes.index_byte(gap, '#') < 0 && bytes.index_byte(gap, ',') >= 0 {
+		sep = string(gap)
+	} else if n > 0 && first_on_line(src, items[0].start) {
+		b := make([dynamic]u8, allocator)
+		puts(&b, ",", eol, string(src[line_start(src, items[0].start):items[0].start]))
+		sep = string(b[:])
+	}
+	// Where each slot's inserts go, and whether they follow an item there or precede one.
+	pos := make([]u64, n + 1, allocator)
+	follows := make([]bool, n + 1, allocator)
+	for it, j in items {
+		pos[j] = it.start
+	}
+	pos[n], follows[n] = items[n - 1].end if n > 0 else open, n > 0
+	empty := n == 0
+	for j := 0; j < n; {
+		if !removed[j] {
+			j += 1
+			continue
+		}
+		r := j
+		for j < n && removed[j] {
+			j += 1
+		}
+		s := j - 1
+		lo, hi := items[r].start, items[s].end
+		switch {
+		case s < n - 1:
+			hi = items[s + 1].start
+			for k in r + 1 ..= s {
+				pos[k] = hi
+			}
+		case r > 0:
+			lo = items[r - 1].end
+			for k in r ..= n {
+				pos[k], follows[k] = hi, true
+			}
+		case:
+			// With every item goes the separator the last one leaves.
+			for q := hi; q < close && src[q] != '#'; q += 1 {
+				if src[q] == ',' {
+					hi = q + 1
+					break
+				}
+			}
+			for k in 0 ..= n {
+				pos[k] = hi
+			}
+			empty = true
+		}
+		append(splices, Splice{lo = lo, hi = hi, seq = len(splices)})
+	}
+	for e, k in inserts {
+		b := make([dynamic]u8, allocator)
+		switch {
+		case empty:
+			puts(&b, sep if k > 0 else "", string(e.text))
+		case follows[e.at]:
+			puts(&b, sep, string(e.text))
+		case:
+			puts(&b, string(e.text), sep)
+		}
+		append(splices, Splice{lo = pos[e.at], hi = pos[e.at], text = b[:], seq = len(splices)})
+	}
 }

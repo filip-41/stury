@@ -151,16 +151,8 @@ element_of :: proc(doc: ^core.Document, v: core.Node_Index) -> (e: compose.Marku
 	return e
 }
 
-// Commits each edit as splices of the source and validates the result.
 @(private)
-edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
+edit_commit :: proc(list: ^core.Edit_List, _: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 	out, err = compose.markup_commit(list, &MARKUP, allocator)
-	if err.kind != .None {
-		return nil, 0, err
-	}
-	if fault, bad := validate_spec(out, .Xml, options_of(list.doc.as)).?; bad {
-		delete(out, allocator)
-		return nil, 0, {kind = .Bad_Result, inner = fault}
-	}
-	return out, 0, {}
+	return out, 0, err
 }

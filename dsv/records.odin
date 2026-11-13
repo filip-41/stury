@@ -4,8 +4,8 @@ import "base:intrinsics"
 import core "../core"
 
 // Counts the cells and records that a block's separators end, for `validate`. The delimiters between two LFs are
-// counted with `count_ones`, so the work is per record, not per cell. `done` is true with `r` set when a width fault
-// ends the walk.
+// counted with `count_ones`, so the work is per record, not per cell. `done` is true when a width fault ends the walk
+// or a record batch fills, with `r` set.
 @(private)
 read_cells :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $H), base: [^]u8, pos: int, seps, lfs, clfs, ill: u64, ill_back: int, lax_on: bool) -> (r: u64, done: bool) {
 	rec_lo, cells, width := w.rec_lo, w.cells, w.width

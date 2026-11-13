@@ -4,6 +4,7 @@ package yaml
 // core schema and under a 1.1 reader, single-quoted when it holds nothing a quote cannot, a literal block when it has
 // line ends and the place takes one, and double-quoted otherwise.
 
+import "core:strings"
 import "core:unicode/utf8"
 import core "../core"
 import write "../core/write"
@@ -366,14 +367,12 @@ put_single :: proc(out: ^write.Out, s: string) {
 // as they are and, under `ascii`, every rune past U+007F are escaped.
 @(private)
 put_double :: proc(out: ^write.Out, s: string, ascii: bool) {
-	HEX := "0123456789abcdef"
 	write.put_byte(out, '"')
 	run := 0
 	for i := 0; i < len(s); {
 		c := s[i]
 		escape: string
-		width := 1
-		buf: [10]u8
+		width, digits, code := 1, 0, u32(c)
 		switch {
 		case c == '"':
 			escape = `\"`
@@ -398,8 +397,7 @@ put_double :: proc(out: ^write.Out, s: string, ascii: bool) {
 		case c == 27:
 			escape = `\e`
 		case c < 0x20 || c == 0x7f:
-			buf = {'\\', 'x', HEX[c >> 4], HEX[c & 15], 0, 0, 0, 0, 0, 0}
-			escape = string(buf[:4])
+			escape, digits = `\x`, 2
 		case c < 0x80:
 			i += 1
 			continue
@@ -419,18 +417,15 @@ put_double :: proc(out: ^write.Out, s: string, ascii: bool) {
 				i += w
 				continue
 			case r > 0xffff:
-				buf = {'\\', 'U', HEX[(r >> 28) & 15], HEX[(r >> 24) & 15], HEX[(r >> 20) & 15], HEX[(r >> 16) & 15], HEX[(r >> 12) & 15], HEX[(r >> 8) & 15], HEX[(r >> 4) & 15], HEX[r & 15]}
-				escape = string(buf[:10])
+				escape, digits, code = `\U`, 8, u32(r)
 			case r > 0xff:
-				buf = {'\\', 'u', HEX[(r >> 12) & 15], HEX[(r >> 8) & 15], HEX[(r >> 4) & 15], HEX[r & 15], 0, 0, 0, 0}
-				escape = string(buf[:6])
+				escape, digits, code = `\u`, 4, u32(r)
 			case:
-				buf = {'\\', 'x', HEX[(r >> 4) & 15], HEX[r & 15], 0, 0, 0, 0, 0, 0}
-				escape = string(buf[:4])
+				escape, digits, code = `\x`, 2, u32(r)
 			}
 		}
 		write.put_text(out, s[run:i])
-		write.put_text(out, escape)
+		write.put_hex(out, escape, code, digits)
 		i += width
 		run = i
 	}
@@ -471,18 +466,12 @@ put_literal :: proc(out: ^write.Out, s: string, ind: int) {
 	rest := body
 	for {
 		line := rest
-		cut := -1
-		for c, i in transmute([]u8)rest {
-			if c == '\n' {
-				cut = i
-				break
-			}
-		}
+		cut := strings.index_byte(rest, '\n')
 		if cut >= 0 {
 			line = rest[:cut]
 		}
 		if len(line) > 0 {
-			put_spaces(out, ind)
+			write.put_run(out, ind, ' ')
 			write.put_text(out, line)
 		}
 		write.put_byte(out, '\n')
@@ -493,12 +482,5 @@ put_literal :: proc(out: ^write.Out, s: string, ind: int) {
 	}
 	for _ in 1 ..< ends {
 		write.put_byte(out, '\n')
-	}
-}
-
-@(private)
-put_spaces :: proc(out: ^write.Out, n: int) {
-	for _ in 0 ..< n {
-		write.put_byte(out, ' ')
 	}
 }

@@ -312,7 +312,6 @@ element_of :: proc(doc: ^core.Document, v: core.Node_Index) -> (e: compose.Marku
 	return e
 }
 
-// Commits each edit as splices of the source, then reads the result again as the edited tree.
 @(private)
 edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 	for e in list.edits {
@@ -391,6 +390,10 @@ reread :: proc(list: ^core.Edit_List, out: []u8) -> core.Document_Error {
 	defer runtime.arena_destroy(&arena)
 	context.allocator = runtime.arena_allocator(&arena)
 	r := Reread{doc = doc}
+	parents := core.parents_of(list)
+	if parents == nil {
+		return {kind = .No_Memory}
+	}
 	edits: for e in list.edits {
 		if kind := members_read_back(list, e); kind != .None {
 			return {kind = .No_Memory} if kind == .No_Memory else {kind = .Bad_Value, reason = .No_Spelling}
@@ -406,16 +409,16 @@ reread :: proc(list: ^core.Edit_List, out: []u8) -> core.Document_Error {
 				append(&r.respelled, e.node + 1)
 				continue edits
 			case run:
-				w.node = parent_of(doc, e.node)
+				w.node = parent_of(parents, e.node)
 			case array:
-				w.node, w.delta = parent_of(doc, e.node), items - 1
+				w.node, w.delta = parent_of(parents, e.node), items - 1
 			case:
 				w.counted = false
 			}
 		case .Insert:
 			w.delta = 0 if string(e.key) == core.MARKUP_TEXT else items
 		case .Remove:
-			w.node, w.delta = parent_of(doc, e.node), 0 if run else -1
+			w.node, w.delta = parent_of(parents, e.node), 0 if run else -1
 		case .Set_Fact, .Remove_Fact:
 			if e.role == .Attribute {
 				append(&r.respelled, e.node)
@@ -482,19 +485,10 @@ members_read_back :: proc(list: ^core.Edit_List, e: core.Edit) -> core.Typed_Err
 	return .None
 }
 
+// The element that holds `v`, and `ROOT` for `ROOT`. An HTML document holds no arrays, so it is `v`'s container.
 @(private = "file")
-parent_of :: proc(doc: ^core.Document, v: core.Node_Index) -> core.Node_Index {
-	p := core.ROOT
-	descend: for {
-		it := core.pairs(doc, p)
-		for _, m in core.pair_next(&it) {
-			if m < v && v < m + core.Node_Index(doc.nodes[m].n) && doc.nodes[m].kind == .Object {
-				p = m
-				continue descend
-			}
-		}
-		return p
-	}
+parent_of :: proc(parents: []core.Node_Index, v: core.Node_Index) -> core.Node_Index {
+	return parents[v] if v != core.ROOT else core.ROOT
 }
 
 // Whether node `b` of `y` holds the tree that node `a` of `x` holds: its kind, its attributes and its text or members.

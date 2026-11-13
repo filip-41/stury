@@ -408,7 +408,7 @@ each_answer_many :: proc(src: []u8, spec: Spec, paths: []core.Path, state: rawpt
 // ends before `next` returns false frees the read with `destroy(&it)`. `path` is read at the first `next`, which
 // builds the whole text, as every path read of TOML does.
 answers :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
-	return answers_of(src, bound_as(spec, opts), nil, path, read, allocator)
+	return engine.answers_whole(src, bound_as(spec, opts), path, read, allocator, build_handle)
 }
 
 find :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {

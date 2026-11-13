@@ -360,6 +360,9 @@ The hooks the formats share:
   TOML's did.
 - A typed `check` with a nil plan refuses it as `.Plan_Mismatch` in every format, where TOML, YAML, XML, HTML, JSON
   and CSV read through it.
+- `unmarshal` with a nil plan refuses it as `.Plan_Mismatch` in TOML and YAML too, as every other format does, where it
+  was `.Bad_Option`.
+- `bind_schema` of a spec out of range refuses it as `.Bad_Option` in every format, where JSON's crashed.
 - `diff --facts` tells a changed TOML or YAML comment, and a changed YAML tag or anchor, through the facts a format's
   edit services write.
 - `yaml.plan_of` builds the plan of a `rules.Description`, as `json.plan_of` does.

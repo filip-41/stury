@@ -8,7 +8,6 @@ package toml
 
 import "base:runtime"
 import "core:io"
-import spell "../core/spell"
 import core "../core"
 import typed "../core/typed"
 import write "../core/write"
@@ -61,9 +60,6 @@ TOKENS := write.Token_Spelling {
 		case core.Number:
 			return write.put_number_as(t.out, x, TREE)
 		case write.Number_Literal:
-			if _, is_number := spell.number_strict(transmute([]u8)x.text, 0, u64(len(x.text))); !is_number {
-				return .Bad_Raw
-			}
 			write.put_text(t.out, x.text)
 		case write.Tagged_Text:
 			// A tag that is no TOML type, as another format's, leaves a string.

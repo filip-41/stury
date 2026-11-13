@@ -161,7 +161,6 @@ BUILDS := typed.Format_Reads {
 	build = build_value,
 }
 
-// A plan's build of a value read whole.
 @(private)
 build_value :: proc(src: []u8, as: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	return build_item(src, as, false, allocator)
@@ -189,11 +188,11 @@ read_text :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typei
 	when CHECK {
 		if err.kind == .Duplicate_Key && read.repeats == .Notice && read.dups != .Refuse {
 			own: typed.Sink
-			judged := typed.rejudge(read, mark, untracked(&own), allocator)
+			judged := typed.rejudge(read, mark, typed.untracked(&own), allocator)
 			err = {}
 			read_item(src, spec, opts, target, T, plan, judged, stack[:], allocator, &err, CHECK)
-			if judged.sink == untracked(&own) {
-				err = typed.rejudged(untracked(&own), err)
+			if judged.sink == typed.untracked(&own) {
+				err = typed.rejudged(typed.untracked(&own), err)
 			}
 		}
 	}
@@ -226,8 +225,8 @@ read_item :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typei
 	regs: core.Hook_Regs
 	started: core.Typed_Refusal
 	when CHECK {
-		item_reader(&h.reader, untracked(&state))
-		regs, started = typed.check_start(&h, src, plan, bound_as(spec, opts), T, target, read, untracked_frames(frames), allocator)
+		item_reader(&h.reader, typed.untracked(&state))
+		regs, started = typed.check_start(&h, src, plan, bound_as(spec, opts), T, target, read, typed.untracked_frames(frames), allocator)
 	} else {
 		item_reader(&h, &state)
 		regs, started = typed.read_start(&h, src, plan, bound_as(spec, opts), T, target, read, frames, allocator, false)
@@ -247,18 +246,6 @@ read_item :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typei
 	if fault != nil || h.first.kind != .None {
 		err^ = typed.read_end(&h, regs, fault)
 	}
-}
-
-// A pointer to what outlives the read that holds it, hidden from the stack escape check, which cannot see through the
-// base `Reader` of a `typed.Check` that the pointer stays within the call. Only the `Check` read uses it.
-@(private)
-untracked :: #force_inline proc "contextless" (p: ^$T) -> ^T {
-	return (^T)(uintptr(p))
-}
-
-@(private)
-untracked_frames :: #force_inline proc "contextless" (f: []typed.Frame) -> []typed.Frame {
-	return ([^]typed.Frame)(untracked(raw_data(f)))[:len(f)]
 }
 
 // Points the typed reader `h` at CBOR's walk under the rules of `state`, which a union's tag scan walks with, and at

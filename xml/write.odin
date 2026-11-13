@@ -387,15 +387,11 @@ put_escaped :: proc(out: ^write.Out, s: string, attribute, ascii: bool) -> core.
 
 @(private)
 put_reference :: proc(out: ^write.Out, r: rune) {
-	HEX := "0123456789abcdef"
-	digits: [8]u8
-	n := 0
-	for v := u32(r); n == 0 || v > 0; v >>= 4 {
-		digits[len(digits) - 1 - n] = HEX[v & 15]
-		n += 1
+	digits := 1
+	for v := u32(r) >> 4; v > 0; v >>= 4 {
+		digits += 1
 	}
-	write.put_text(out, "&#x")
-	write.put_text(out, string(digits[len(digits) - n:]))
+	write.put_hex(out, "&#x", u32(r), digits)
 	write.put_byte(out, ';')
 }
 

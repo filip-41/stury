@@ -275,15 +275,10 @@ put_node :: proc(w: ^Rows, doc: ^core.Document, node: core.Node_Index, buf: []u8
 		text, ok := write.node_bytes_text(doc, node, stack[:])
 		return put_string(w, text, first, false) if ok else .No_Memory
 	case .Number:
-		if doc.readers.number_text != nil {
-			stack: [64]u8
-			text, ok := write.node_number_text(doc, node, stack[:])
-			return put_string(w, text, first, false) if ok else .No_Memory
+		if doc.readers.number_text == nil && doc.nodes[node].spelling & core.NUMBER_KIND_MASK == 0 {
+			return put_string(w, string(core.span(doc, node)), first, false)
 		}
-		if t := doc.nodes[node]; t.kind == .Number && t.spelling & core.NUMBER_KIND_MASK != 0 {
-			return put_respelled(w, string(core.span(doc, node)), t.spelling, first)
-		}
-		return put_string(w, string(core.span(doc, node)), first, false)
+		return put_respelled(w, doc, node, first)
 	case .String, .Plain:
 		// A dsv cell with no bytes at all is absent, where a quoted empty one is an empty string.
 		if len(core.span(doc, node)) == 0 {
@@ -316,13 +311,15 @@ put_inferred_node :: proc(w: ^Rows, doc: ^core.Document, node: core.Node_Index, 
 	return put_inferred_string(w, text, first)
 }
 
-// A number its format spells in a way JSON does not, as JSON spells it, so a read that infers numbers reads it back.
+// A number its format spells in a way JSON does not, as JSON spells it, so a read that infers numbers reads it back. An
+// infinity or a NaN that a format resolves from a word is an empty cell.
 @(cold, private)
-put_respelled :: proc(w: ^Rows, lit: string, spelling: u16, first: bool) -> core.Typed_Error_Kind {
+put_respelled :: proc(w: ^Rows, doc: ^core.Document, node: core.Node_Index, first: bool) -> core.Typed_Error_Kind {
 	spill: [write.ROOM_MAX]u8 = ---
 	out: write.Out
 	write.init(&out, &spill, runtime.arena_allocator(&w.arena))
-	text, err := write.finish(&out, {kind = write.put_decimal(&out, lit, spelling)})
+	kind := write.put_number_node(&out, doc, node, write.MARKUP_TREE)
+	text, err := write.finish(&out, {kind = .None if kind == .Non_Finite && doc.readers.number_text != nil else kind})
 	if err.kind != .None {
 		return err.kind
 	}
@@ -332,9 +329,5 @@ put_respelled :: proc(w: ^Rows, lit: string, spelling: u16, first: bool) -> core
 // The text of a key or a cell: in `buf` when it fits, else in a copy that lasts the call.
 @(private)
 node_text :: proc(w: ^Rows, doc: ^core.Document, node: core.Node_Index, buf: []u8) -> (string, core.Typed_Error_Kind) {
-	if s, ok := core.text(doc, node, buf); ok {
-		return s, .None
-	}
-	s, ok := core.text_clone(doc, node, runtime.arena_allocator(&w.arena))
-	return s, .None if ok else .No_Memory
+	return write.node_text(doc, node, buf, runtime.arena_allocator(&w.arena))
 }

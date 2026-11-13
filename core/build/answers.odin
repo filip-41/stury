@@ -118,23 +118,25 @@ answers_end :: proc(it: ^Answer_Iter, hi: u64, fault: Maybe(core.Fault)) {
 	answers_free(it)
 }
 
-// The fill of an iterator over a text its format reads only whole, once its format binds `build` (`Services.build`):
-// the first fill builds the text, under `.Refuse` refusing a repeated name, buffers every answer and ends the read.
-answers_built :: proc(it: ^Answer_Iter, build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error)) {
-	paths := it.paths if it.paths != nil else ([^]core.Path)(&it.one)[:1]
-	it.buffer = make([dynamic]core.Token_Answer, 0, it.max_batch, it.allocator)
-	doc, built := build(it.src, it.as, it.read.dups == .Refuse, it.allocator)
-	if built.kind != .None && it.read.dups == .Refuse {
+// An iterator over the answers of `path` in a text its format reads only whole, with `build` its `Services.build`: the
+// first fill builds the text, under `.Refuse` refusing a repeated name, buffers every answer and ends the read.
+answers_whole :: proc(src: []u8, as: core.As, path: core.Path, read: core.Path_Options, allocator: runtime.Allocator, $build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error)) -> Answer_Iter {
+	fill := proc(it: ^Answer_Iter) {
+		it.buffer = make([dynamic]core.Token_Answer, 0, it.max_batch, it.allocator)
+		doc, built := build(it.src, it.as, it.read.dups == .Refuse, it.allocator)
+		if built.kind != .None && it.read.dups == .Refuse {
+			core.destroy(&doc)
+			answers_fail(it, core.error_of(built))
+			return
+		}
+		_, err := scan_built(&doc, built, ([^]core.Path)(&it.one)[:1], it.read, &it.buffer, proc(state: rawptr, a: core.Token_Answer) -> bool {
+			_, e := append((^[dynamic]core.Token_Answer)(state), a)
+			return e == nil
+		}, it.allocator)
 		core.destroy(&doc)
-		answers_fail(it, core.error_of(built))
-		return
+		answers_fail(it, core.error_of(err))
 	}
-	_, err := scan_built(&doc, built, paths, it.read, &it.buffer, proc(state: rawptr, a: core.Token_Answer) -> bool {
-		_, e := append((^[dynamic]core.Token_Answer)(state), a)
-		return e == nil
-	}, it.allocator)
-	core.destroy(&doc)
-	answers_fail(it, core.error_of(err))
+	return {src = src, as = as, one = path, read = read, allocator = allocator, fill = fill, max_batch = ANSWER_BATCH}
 }
 
 // Ends a read that could not start with `e`.

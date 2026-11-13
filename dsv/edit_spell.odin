@@ -24,7 +24,7 @@ edit_spell :: proc(doc: ^core.Document, v: core.Value, _: core.Write_Options, _:
 		if i > 0 {
 			append(&out, delimiter)
 		}
-		text, reason := spell_cell(doc, cell.value, at, context.temp_allocator)
+		text, reason := spell_cell(doc, cell, at, context.temp_allocator)
 		if reason != .None {
 			delete(out)
 			return nil, refusal(reason, i)
@@ -35,25 +35,19 @@ edit_spell :: proc(doc: ^core.Document, v: core.Value, _: core.Write_Options, _:
 }
 
 @(private = "file")
-Cell :: struct {
-	value: core.Value,
-}
-
-// The cells of the record `v`.
-@(private = "file")
-record_cells :: proc(doc: ^core.Document, v: core.Value) -> []Cell {
-	cells := make([dynamic]Cell, context.temp_allocator)
+record_cells :: proc(doc: ^core.Document, v: core.Value) -> []core.Value {
+	cells := make([dynamic]core.Value, context.temp_allocator)
 	if core.kind(v) == .Array {
 		it := core.children(v)
 		for c in core.child_next(&it) {
-			append(&cells, Cell{c})
+			append(&cells, c)
 		}
 		return cells[:]
 	}
 	if core.header_of(doc) == 0 {
 		it := core.pairs(v)
 		for _, c in core.pair_next(&it) {
-			append(&cells, Cell{c})
+			append(&cells, c)
 		}
 		return cells[:]
 	}
@@ -65,7 +59,7 @@ record_cells :: proc(doc: ^core.Document, v: core.Value) -> []Cell {
 		if ok {
 			c, _ = core.member(v, name)
 		}
-		append(&cells, Cell{c})
+		append(&cells, c)
 	}
 	return cells[:]
 }
@@ -78,7 +72,6 @@ refusal :: proc(reason: core.Edit_Reason, cell: int) -> core.Error {
 	return core.error_of(core.Document_Error{kind = .Bad_Value, reason = reason, at = u64(cell)})
 }
 
-// The text of the string `v`.
 @(private = "file")
 string_of :: proc(v: core.Value) -> string {
 	#partial switch x in core.plain(v) {
@@ -93,36 +86,36 @@ string_of :: proc(v: core.Value) -> string {
 
 // The scalar a cell holds, null being no scalar.
 @(private = "file")
-scalar_of :: proc(v: core.Value) -> (scalar: write.Scalar, text: string, ok: bool) {
+scalar_of :: proc(v: core.Value) -> (scalar: write.Scalar, text: string) {
 	#partial switch core.kind(v) {
 	case .False:
-		return write.Tree_Part.False, "false", true
+		return write.Tree_Part.False, "false"
 	case .True:
-		return write.Tree_Part.True, "true", true
+		return write.Tree_Part.True, "true"
 	case .String:
 		s := string_of(v)
-		return s, s, true
+		return s, s
 	case .Number:
 		if f, is_double := core.plain(v).(f64); is_double {
 			if math.is_nan(f) {
-				return nil, "", true
+				return nil, ""
 			}
 			if math.is_inf(f) {
-				return core.Number{transmute(u64)math.copy_sign(math.F64_MAX, f), .Float}, "", true
+				return core.Number{transmute(u64)math.copy_sign(math.F64_MAX, f), .Float}, ""
 			}
 		}
 		if r, is_ref := core.plain(v).(core.Node_Ref); is_ref {
 			if _, digits, _ := core.double_of(r); digits != "" {
-				return write.Number_Literal{digits}, digits, true
+				return write.Number_Literal{digits}, digits
 			}
 		}
 		if t, is_text := core.plain(v).(^core.Number_Text); is_text {
-			return write.Number_Literal{t.text}, t.text, true
+			return write.Number_Literal{t.text}, t.text
 		}
 		n, _ := core.number(v)
-		return n, "", true
+		return n, ""
 	}
-	return nil, "", true
+	return nil, ""
 }
 
 // The text of one delimited cell at byte `at`: the format's own writer spells the quotes and escapes. A null cell is
@@ -138,7 +131,7 @@ spell_cell :: proc(doc: ^core.Document, v: core.Value, at: u64, allocator: runti
 	if kind == .Array || kind == .Object {
 		return nil, .Not_Scalar
 	}
-	scalar, cell, _ := scalar_of(v)
+	scalar, cell := scalar_of(v)
 	if kind == .Null || scalar == nil {
 		return nil, .None
 	}

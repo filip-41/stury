@@ -13,7 +13,7 @@ import write "../core/write"
 // not hold, a token that needs another spelling, a line deeper than the room for it. A string and a number that were read
 // keep their source spelling and are copied from the source. The punctuation and the whitespace are made again.
 
-// The longest token `copy_token` moves. A longer one is copied by the system's copy, which is faster past this.
+// The longest token `copy_token` moves. A longer one goes to the system's copy.
 @(private)
 TOKEN_LONG :: 256
 
@@ -209,8 +209,7 @@ plain_string :: #force_inline proc "contextless" (e: ^Emit, src: [^]u8, n: u32) 
 }
 
 // Copies row `t` if it is a string or number past `TOKEN_LONG`, `rows_run` having stopped at it with nothing owed before
-// it, and `NODE_ROOM` still holds after it. The system's copy beats the blocks past `TOKEN_LONG`, and a call there would
-// cost every short row.
+// it, and `NODE_ROOM` still holds after it. It is out of `rows_run` so the short rows take no call.
 @(private)
 copy_long :: proc "contextless" (e: ^Emit, t: core.Token) -> bool {
 	c := &e.c
@@ -312,16 +311,7 @@ put_token :: proc(out: ^write.Out, src: []u8, doc: ^core.Document, i: core.Node_
 		write.put_text(out, "true")
 	case .Number:
 		if doc != nil && doc.readers.number_text != nil {
-			stack: [64]u8
-			text, ok := write.node_number_text(doc, i, stack[:])
-			if !ok {
-				return .No_Memory
-			}
-			if text == "" {
-				return .Non_Finite
-			}
-			write.put_text(out, text)
-			return .None
+			return write.put_number_node(out, doc, i, TREE)
 		}
 		write.put_text(out, string(src[t.lo:t.lo + u64(t.n)]))
 	case .Bytes:

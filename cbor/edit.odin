@@ -14,6 +14,7 @@ import "base:runtime"
 import "core:encoding/endian"
 import "core:slice"
 import core "../core"
+import compose "../core/compose"
 import typed "../core/typed"
 import write "../core/write"
 
@@ -109,9 +110,6 @@ Written :: struct {
 @(private)
 edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 	doc := list.doc
-	if doc == nil || doc.partial {
-		return nil, 0, {kind = .Bad_Index}
-	}
 	arena := runtime.Arena{backing_allocator = allocator, minimum_block_size = 64 * 1024}
 	defer runtime.arena_destroy(&arena)
 	c := Commit{doc = doc, edits = list.edits[:], spec = Spec(spec), a = runtime.arena_allocator(&arena), err = {kind = .No_Memory}}
@@ -130,10 +128,6 @@ edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocato
 	}
 	if out, failed = slice.clone(made[:], allocator); failed != nil {
 		return nil, 0, {kind = .No_Memory}
-	}
-	if fault, bad := validate_text(out, {doc.as.max_depth, doc.as.tolerate, c.spec}).?; bad {
-		delete(out, allocator)
-		return nil, 0, {kind = .Bad_Result, inner = fault}
 	}
 	return out, c.dropped, {}
 }
@@ -162,12 +156,6 @@ conflict :: proc(c: ^Commit, at: u64) -> bool {
 @(private = "file")
 put :: proc(out: ^[dynamic]u8, b: []u8) -> bool {
 	_, failed := append(out, ..b)
-	return failed == nil
-}
-
-@(private = "file")
-push :: proc(d: ^[dynamic]$T, v: T) -> bool {
-	_, failed := append(d, v)
 	return failed == nil
 }
 
@@ -262,12 +250,12 @@ put_container :: proc(c: ^Commit, out: ^[dynamic]u8, i: core.Node_Index, lo, hi:
 	if object {
 		it := core.pairs(doc, i)
 		for key, value in core.pair_next(&it) {
-			push(&members, Member{key, value}) or_return
+			compose.push(&members, Member{key, value}) or_return
 		}
 	} else {
 		it := core.children(doc, i)
 		for value in core.child_next(&it) {
-			push(&members, Member{core.NO_NODE, value}) or_return
+			compose.push(&members, Member{core.NO_NODE, value}) or_return
 		}
 	}
 	removed := removals(c, members[:]) or_return
@@ -276,33 +264,21 @@ put_container :: proc(c: ^Commit, out: ^[dynamic]u8, i: core.Node_Index, lo, hi:
 	n := len(members)
 	entries, _ := make([dynamic]int, 0, n + len(inserts), c.a)
 	if reordered {
-		named, failed := make([]bool, n + len(inserts), c.a)
-		if failed != nil {
+		if e := compose.order_check(order, removed, len(inserts), c.a); e.kind != .None {
+			c.err = e
 			return false
 		}
 		for k in 0 ..< len(order) / 4 {
-			at := int(endian.unchecked_get_u32le(order[4 * k:]))
-			if at >= len(named) || named[at] || at < n && removed[at] {
-				c.err = {kind = .Bad_Index}
-				return false
-			}
-			named[at] = true
-			push(&entries, at) or_return
-		}
-		for k in 0 ..< len(named) {
-			if !named[k] && (k >= n || !removed[k]) {
-				c.err = {kind = .Bad_Index}
-				return false
-			}
+			compose.push(&entries, int(endian.unchecked_get_u32le(order[4 * k:]))) or_return
 		}
 	} else {
 		next := 0
 		for m in 0 ..= n {
 			for ; next < len(inserts) && int(c.edits[inserts[next]].at) <= m; next += 1 {
-				push(&entries, n + next) or_return
+				compose.push(&entries, n + next) or_return
 			}
 			if m < n && !removed[m] {
-				push(&entries, m) or_return
+				compose.push(&entries, m) or_return
 			}
 		}
 	}
@@ -425,7 +401,7 @@ inserts_of :: proc(c: ^Commit, i: core.Node_Index) -> (inserts: []int, ok: bool)
 	keyed, _ := make([dynamic]u64, 0, 4, c.a)
 	for k in first_at(c, i) ..< first_at(c, i + 1) {
 		if at := u32(c.order[k]); c.edits[at].op == .Insert {
-			push(&keyed, u64(c.edits[at].at) << 32 | u64(at)) or_return
+			compose.push(&keyed, u64(c.edits[at].at) << 32 | u64(at)) or_return
 		}
 	}
 	slice.sort(keyed[:])

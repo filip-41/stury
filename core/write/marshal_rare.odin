@@ -175,6 +175,11 @@ put_bit_set :: proc(w: ^Walker, m: ^typed.Meta, v: uintptr, top, nest: int, $P: 
 @(private)
 put_fill :: proc(out: ^Out, n: int, fill: u8) {
 	put_byte(out, '\n')
+	put_run(out, n, fill)
+}
+
+// Writes `n` bytes of `fill`, at any length.
+put_run :: proc(out: ^Out, n: int, fill: u8) {
 	for _ in 0 ..< n {
 		put_byte(out, fill)
 	}
@@ -203,6 +208,15 @@ put_text :: proc(out: ^Out, s: string) {
 	}
 }
 
+// Writes `prefix` and then `v` as `digits` lowercase hex digits, with leading zeros, none when `digits` is 0.
+put_hex :: proc(out: ^Out, prefix: string, v: u32, digits: int) {
+	HEX := "0123456789abcdef"
+	put_text(out, prefix)
+	for k := digits - 1; k >= 0; k -= 1 {
+		put_byte(out, HEX[v >> (4 * u32(k)) & 15])
+	}
+}
+
 // Whether a comment body can be written: no line end, and no control byte but tab.
 comment_ok :: proc(body: string) -> bool {
 	for b in transmute([]u8)body {
@@ -219,9 +233,7 @@ put_comment_lines :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index,
 	for body in core.fact_next(&it) {
 		if comment_ok(body) {
 			written += 1
-			for _ in 0 ..< ind {
-				put_byte(out, ' ')
-			}
+			put_run(out, ind, ' ')
 			put_byte(out, '#')
 			put_text(out, body)
 			put_byte(out, '\n')

@@ -29,6 +29,7 @@ write_reads_back_as_written :: proc(t: ^testing.T) {
 		{src = "<pre>\n\nx</pre><textarea>a&lt;b</textarea>", at = ".html.body", want = "<pre>\n\nx</pre><textarea>a&lt;b</textarea>"},
 		{src = "<ul><li>a<li><b>b</b></ul>", at = ".html.body", pretty = true, want = "<ul>\n  <li>a</li>\n  <li>\n    <b>b</b>\n  </li>\n</ul>"},
 		{src = "<r><!--n--><p k='1&amp;\"'>a&lt;b c</p><img src='x'/><svg><circle r='1'/></svg></r>", xml = true, at = ".r", want = "<!--n--><p k=\"1&amp;&quot;\">a&lt;b&nbsp;c</p><img src=\"x\"><svg><circle r=\"1\"></circle></svg>"},
+		{src = "<div><!--c--><p>x</p></div>", at = ".html.body", want = "<div><!--c--><p>x</p></div>"},
 		{src = "<r><td>1</td></r>", xml = true, at = ".r", kind = .Unwritable},
 		{src = "<r><p><div>x</div></p></r>", xml = true, at = ".r", kind = .Unwritable},
 		{src = "<r><br>x</br></r>", xml = true, at = ".r", kind = .Unwritable},

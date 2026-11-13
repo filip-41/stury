@@ -403,8 +403,8 @@ token_record :: proc(t: ^write.Tokens, plan: ^typed.Plan, value: rawptr, err: ^c
 	return kind
 }
 
-// One cell. The kinds a row is made of are written in line, and `write_other` takes the rest: its frame is large, and a
-// call that pays for it on every number is slower than the number's own work.
+// One cell. The kinds a row is made of are written in line, and `write_other` takes the rest, so its large frame is
+// not set up for every number.
 @(private)
 write_cell :: #force_inline proc(w: ^Rows, pl: ^typed.Plan, f: ^typed.Field, v: uintptr, first, inner: bool) -> core.Typed_Error_Kind #no_bounds_check {
 	#partial switch f.kind {

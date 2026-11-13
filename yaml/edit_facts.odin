@@ -55,7 +55,7 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 			return true
 		}
 		start := member_start(cx, v)
-		if !first_on_line(src, start) {
+		if !compose.first_on_line(src, start) {
 			return refuse_edit(cx, v, .No_Line)
 		}
 		put_spaces_to(&b, column_of(src, start))
@@ -74,7 +74,7 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 		}
 		q := cx.hi[v]
 		if !(q > 0 && src[q - 1] == '\n') {
-			q = next_line(src, q)
+			q = compose.next_line(src, q)
 		}
 		if q == u64(len(src)) && (q == 0 || src[q - 1] != '\n') {
 			compose.puts(&b, cx.eol)
@@ -131,8 +131,8 @@ put_comment_lines :: proc(cx: ^Cx, b: ^[dynamic]u8, lines: [][]u8, padded: bool,
 @(private = "file")
 cut_comment :: proc(cx: ^Cx, f: core.Fact) {
 	lo, hi := f.lo, f.lo + u64(f.n)
-	if first_on_line(cx.src, lo) {
-		add(cx, compose.line_start(cx.src, lo), next_line(cx.src, hi), nil)
+	if compose.first_on_line(cx.src, lo) {
+		add(cx, compose.line_start(cx.src, lo), compose.next_line(cx.src, hi), nil)
 	} else {
 		add(cx, lead_end(cx.src, lo), hi, nil)
 	}
@@ -219,8 +219,8 @@ cut_property :: proc(cx: ^Cx, f: core.Fact) {
 		add(cx, lo, hi, nil)
 		return
 	}
-	if first_on_line(src, lo) {
-		add(cx, compose.line_start(src, lo), next_line(src, hi), nil)
+	if compose.first_on_line(src, lo) {
+		add(cx, compose.line_start(src, lo), compose.next_line(src, hi), nil)
 		return
 	}
 	add(cx, lead_end(src, lo), hi, nil)

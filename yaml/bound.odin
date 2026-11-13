@@ -85,7 +85,7 @@ CHECKS := typed.Format_Reads {
 @(rodata)
 FRAMING := records.Framing_Services {
 	next  = #partial {.Concatenated = next_document},
-	judge = judge_document,
+	judge = records.no_judge,
 	guess = guess_document,
 	piece = piece_documents,
 	whole = whole_stream,

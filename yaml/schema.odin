@@ -9,8 +9,5 @@ import schema "../core/schema"
 
 // Binds `s` to texts of `spec` read with `opts`.
 bind_schema :: proc(s: ^Schema, spec: Spec, opts := Options{}, allocator := context.allocator) -> (Bound_Schema, core.Error) {
-	switch spec {
-	case .Yaml_1_2: return schema.bind(s, {checks(.Yaml_1_2).reads, as(spec, opts)}, allocator)
-	}
-	return {}, core.error_of(core.Typed_Refusal{kind = .Bad_Option})
+	return schema.bind(s, {layout = as(spec, opts)}, allocator)
 }

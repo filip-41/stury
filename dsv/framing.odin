@@ -347,7 +347,7 @@ read_row_spec :: #force_inline proc(it: ^records.Reader, target: rawptr, T: type
 	opts := options_of(it.as)
 	h := Cells_Of(H){refuse_repeats = read.dups == .Refuse}
 	when H == typed.Check {
-		regs, started := typed.check_start(&h.r, it.src, untracked(plan), it.as, T, target, read, untracked_frames(it.frames), allocator)
+		regs, started := typed.check_start(&h.r, it.src, typed.untracked(plan), it.as, T, target, read, typed.untracked_frames(it.frames), allocator)
 	} else {
 		regs, started := typed.read_start(&h.r, it.src, plan, it.as, T, target, read, it.frames, allocator, false)
 	}
