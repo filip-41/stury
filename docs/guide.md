@@ -732,6 +732,29 @@ for a in found.answers {
 - `xml.checks(.Xml)` and `html.checks(.Document)` give a model the format, which loads an element's attributes and
   child elements as members, and `bind_schema` binds a JSON Schema.
 
+### Select by CSS
+
+`compile_selector` compiles a CSS selector list once, and `select` gives the value node of each element of a
+document it matches, in document order, which a caller reads, paths or edits as any node. Both are `core/css`'s,
+forwarded by `xml` and `html`. A selector out of scope or malformed is a `Fault` at the byte that breaks it.
+
+```odin
+sel := html.compile_selector("ul.todo > li:not(.done)") or_return
+defer html.destroy(&sel)
+doc := html.build(transmute([]u8)string(`<ul class=todo><li>pens<li class=done>ink<li>nibs</ul>`), .Document) or_return
+defer html.destroy(&doc)
+found := html.select(&doc, &sel) or_return
+defer delete(found)
+buf: [32]u8
+for node in found {
+	text, _ := html.text(&doc, node, buf[:])
+	fmt.println(text) // pens, then nibs
+}
+```
+
+`select(&doc, &sel, from)` matches the descendants of the element whose value is `from`, against the whole document,
+as a browser's `querySelectorAll` does. [markup.md](markup.md#selectors) holds what a selector may hold and its costs.
+
 ## CBOR
 
 `cbor` reads and writes CBOR (RFC 8949) through the calls of the text formats. [binary.md](binary.md) lists what

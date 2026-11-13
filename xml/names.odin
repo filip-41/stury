@@ -4,6 +4,7 @@ package xml
 import core "../core"
 import host "../host"
 import compose "../core/compose"
+import css "../core/css"
 import build "../core/build"
 import typed "../core/typed"
 import write "../core/write"
@@ -143,6 +144,10 @@ pool_init :: host.pool_init
 
 commit :: compose.commit
 
+Selector :: css.Selector
+compile_selector :: css.compile
+select :: css.select
+
 Answer_Iter :: build.Answer_Iter
 next :: build.answers_next
 
@@ -223,4 +228,4 @@ Schema_Options :: schema.Options
 check_schema :: schema.check
 check_schema_records :: schema.check_records
 
-destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind, cursor_destroy}
+destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind, css.destroy, cursor_destroy}

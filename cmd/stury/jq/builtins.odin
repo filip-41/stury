@@ -265,6 +265,7 @@ fill_table :: proc() {
 	put("ip_valid", {0}, {fn = fn_ip_valid, gives = {.Bool}, typed = .Kinds})
 	put("ip_class ip_canonical", {0}, {fn = fn_ip_text, takes = {.String}, gives = {.String}, typed = .Kinds})
 	put("ip_in_cidr", {1}, {fn = fn_ip_in_cidr, takes = {.String}, arg_takes = {.String}, gives = {.Bool}, typed = .Kinds})
+	put("css", {1}, {gen = gen_css, arg_takes = {.String}})
 }
 
 when ODIN_OS == .Darwin {

@@ -18,6 +18,7 @@ READERS := core.Readers {
 	close_end   = close_end,
 	format      = rules_of,
 	tag_key     = "html",
+	fold_names  = true,
 	attribute   = spelling_attribute,
 	fact        = spelling_fact,
 }

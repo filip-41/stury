@@ -4,6 +4,9 @@
 
 ### Command line
 
+- `css(selector)` gives each element of an XML or HTML input that a CSS selector matches, in document order, and is a
+  path expression, so `path(css("a"))`, `css("a").&href |= ...`, `del(css(".ad"))` and `stury edit` reach the matched
+  elements alone ([Builtins beyond jq](docs/cli.md#builtins-beyond-jq)).
 - Builtins beyond jq: `avg`, `median`, `quantile`, `variance` and `stddev` (population) over an array or `f` of each
   element, `frequency`, `union`, `intersect` and `except`, `fill_forward`, `melt` and `pivot`; `fromrfc3339` and
   `torfc3339`; the digests `sha1`, `sha256`, `sha512` and `md5`, `hmac_sha256(key)`, `hmac_sha512(key)` and `crc32`;
@@ -341,6 +344,10 @@ The hooks the formats share:
 
 ### Library API
 
+- `core/css`: `css.compile` compiles a selector list of the static part of Selectors Level 4 once, and `css.select`
+  gives the value node of each element of a markup document it matches, in document order. A selector out of scope or
+  malformed is a `Fault` at its byte. `xml` and `html` forward them as `compile_selector`, `select` and `Selector`
+  ([markup.md](docs/markup.md#selectors)).
 - `yaml.marshal` writes a `typed.Bytes` as `!!binary` and its base64, as the token write and the document write do.
 - `diff --facts` tells a changed TOML or YAML comment, and a changed YAML tag or anchor, through the facts a format's
   edit services write.

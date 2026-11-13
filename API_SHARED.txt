@@ -158,6 +158,7 @@ text_spelling :: #force_inline proc "contextless" (escaped, lax: bool) -> u16
 text_start :: proc "contextless" (src: []u8, lo: u64) -> u64
 trail_array :: proc(t: Trail) -> ^Array
 typed_refusal_of :: proc "contextless" (f: Typed_Error) -> Typed_Refusal
+view_room :: #force_inline proc(readers: ^Readers, view: ^Token_View, t: Token) -> int
 write_entry_message :: proc(w: io.Writer, e: Error_Entry) -> io.Error
 write_fault_message :: proc(w: io.Writer, src: []u8, f: Fault) -> io.Error
 write_steps :: proc(w: io.Writer, steps: []Step, whole: bool) -> io.Error

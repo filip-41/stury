@@ -60,6 +60,37 @@ load refuses repeated sibling elements as `.Duplicate_Key` unless its options na
 `unmarshal` reads a scalar or struct member of a repeated name by the same rule: the typed read goes by the document's
 members, not by the grouped value.
 
+## Selectors
+
+`core/css` matches CSS selectors over a markup document, and `xml` and `html` forward it. `css.compile` compiles a
+selector list once into a `Selector`, which `css.destroy` frees, and `css.select(&doc, &sel, from)` gives the value
+node of each element it matches among the descendants of node `from`, the root by default, in document order. It
+matches on the document, not the grouped value, so siblings and positions count across names as the text orders them.
+
+- A selector holds type and universal selectors, `#id`, `.class`, attribute selectors `[a]`, `[a=v]`, `[a~=v]`,
+  `[a|=v]`, `[a^=v]`, `[a$=v]` and `[a*=v]` with a quoted or bare value and the `i` or `s` flag, the descendant, `>`,
+  `+` and `~` combinators, lists with `,`, `:is`, `:where`, `:not`, `:has` with relative selectors (`:has(> img)`),
+  `:first-child`, `:last-child`, `:only-child`, their `-of-type` forms, `:nth-child(An+B [of S])`, `:nth-last-child`,
+  `:nth-of-type`, `:nth-last-of-type`, `:root` and `:empty`. Escapes are decoded, so an XML qualified name is
+  `svg\:rect`.
+- A dynamic or UI pseudo-class (`:hover`, `:checked`), a pseudo-element (`::before`, `:first-line`) and a namespace
+  prefix (`svg|a`, `*|a`, `[xlink|href]`) are a `Fault` with the detail `Pseudo_Class`, `Pseudo_Element` or
+  `Namespace` at the first byte of the pseudo-class or the selector, and a malformed selector one with `Syntax` at the
+  byte that breaks it, or `.Truncated` at the end. `:is`, `:not`, `:has` and `of S` nest at most `css.MAX_NESTING`
+  deep.
+- An element is a member whose key is not `#text`. `:root` is the one element at the top of a document, which an HTML
+  fragment of several nodes lacks. `:empty` is an element with no child element and no text. An element at the top counts its
+  position among the root's members, as the root element of a browser's document matches `:first-child`.
+- HTML compares element and attribute names ASCII case-insensitively (`Readers.fold_names`) and attribute values as
+  written, those the standard lists as case-insensitive included, so `[type=TEXT]` needs `i` to match `type=text`. XML compares both as
+  written. An `id` and a `class` are the attributes of those names in either format.
+
+The match goes right to left: each element is read once in document order, and its compounds test it and then the
+elements its combinators reach through the chain of open elements, so a `>` or descendant step costs the depth.
+`+`, `~` and the counts of `:nth-last-*`, `*-of-type` and `of S` read the element's siblings, and `:has` walks the
+element's subtree, or its following siblings' for `+` and `~`, so those cost more. It allocates only the chain of
+elements and the answer, and a decode of an attribute value longer than 256 bytes in the temp allocator.
+
 ## XML
 
 `xml` reads XML 1.0 (Fifth Edition) well-formedness. It has `validate`, `walk`, `build`, `scan`, `find`,

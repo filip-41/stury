@@ -365,7 +365,8 @@ Duplicates :: enum u8 {
 // a format whose number span is the text, see `doc_number_text`. `key_bytes` returns the bytes a member named `name`
 // is written with, a key head and the name, in `buf` of `len(name) + 16` bytes, which a typed plan compares as a
 // key's text is compared. It is nil for a format whose keys are written between `key_open` and `key_close`. `binary`
-// says the format holds a byte string kind, so a `String` token is text and never bytes. `key_is` compares the key at
+// says the format holds a byte string kind, so a `String` token is text and never bytes. `fold_names` says a selector
+// compares the format's element and attribute names ASCII case-insensitively, as HTML's are. `key_is` compares the key at
 // node `i` to a name that needs the key's place in the document, an expanded XML name whose namespace an ancestor
 // declares, and is nil for a format whose `key_equals` needs no more. `room` returns the bytes that hold the decode of
 // a token of `n` source bytes at `lo`, for a format whose decode may outgrow its span past what its spelling bits say,
@@ -384,6 +385,7 @@ Readers :: struct {
 	key_close:   string,
 	flat:        bool,
 	binary:      bool,
+	fold_names:  bool,
 	services:    ^Services,
 	attribute:   proc "contextless" (doc: ^Document, f: Fact) -> (name, value: Token),
 	fact:        proc(doc: ^Document, i: Node_Index, name: Fact_Name) -> (Fact_Value, bool),
@@ -1130,7 +1132,6 @@ text_room :: proc(doc: ^Document, i: Node_Index) -> int {
 
 // The bytes that hold the decode of token `t` in `view`: the format's `room` when it has one, else what the token's
 // spelling bits say.
-@(private)
 view_room :: #force_inline proc(readers: ^Readers, view: ^Token_View, t: Token) -> int {
 	room := decoded_room(t.spelling, int(t.n))
 	if readers != nil && readers.room != nil {
