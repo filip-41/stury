@@ -247,9 +247,17 @@ facts_stand_where_html_reads_them :: proc(t: ^testing.T) {
 }
 
 @(test)
+attribute_names_keep_their_capitals :: proc(t: ^testing.T) {
+	out, err := edited("<div K=1></div>", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+		return core.set_fact(l, at(d, "div"), .Attribute, `K=2`)
+	})
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, out, "<div K=2></div>")
+}
+
+@(test)
 attribute_bodies_html_cannot_read_as_written_are_refused :: proc(t: ^testing.T) {
 	cases := [?]Edits {
-		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return core.set_fact(l, at(d, "div"), .Attribute, `K=1`)},
 		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return core.set_fact(l, at(d, "div"), .Attribute, `a=1 b=2`)},
 		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return core.set_fact(l, at(d, "div"), .Attribute, `a="1`)},
 		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return core.set_fact(l, at(d, "div"), .Attribute, `a=1>`)},

@@ -206,8 +206,8 @@ edit_content :: proc(name, text: string, allocator: runtime.Allocator) -> (out: 
 	return out, false, nil
 }
 
-// Whether `body` is a comment's HTML reads back as written, or with `.Attribute` one attribute whose name HTML reads as
-// written.
+// Whether `body` is a comment's HTML reads back as written, or with `.Attribute` one attribute, whose name may use capitals
+// as HTML folds them.
 @(private = "file")
 edit_fact :: proc(role: core.Role, body: string) -> bool {
 	if role != .Attribute {
@@ -216,7 +216,6 @@ edit_fact :: proc(role: core.Role, body: string) -> bool {
 	Tag_Read :: struct {
 		tags, attrs, errors: int,
 		hi:                  u64,
-		upper:               bool,
 	}
 	on :: proc "contextless" (r: ^Tag_Read, t: ^Html_Token) -> Token_Action {
 		#partial switch t.kind {
@@ -224,7 +223,6 @@ edit_fact :: proc(role: core.Role, body: string) -> bool {
 			r.errors += 1
 		case .Start_Tag:
 			r.tags, r.attrs, r.hi = r.tags + 1, len(t.attrs), t.hi
-			r.upper = len(t.attrs) > 0 && .Upper in t.attrs[0].name.flags
 		case:
 			r.tags += 1
 		}
@@ -233,7 +231,7 @@ edit_fact :: proc(role: core.Role, body: string) -> bool {
 	tag := strings.concatenate({"<x ", body, ">"}, context.temp_allocator)
 	r: Tag_Read
 	_, fault, _ := tokenize(transmute([]u8)tag, &r, on, allocator = context.temp_allocator)
-	return fault == nil && r.errors == 0 && r.tags == 1 && r.attrs == 1 && !r.upper && r.hi == u64(len(tag))
+	return fault == nil && r.errors == 0 && r.tags == 1 && r.attrs == 1 && r.hi == u64(len(tag))
 }
 
 // The byte past the tag that starts at byte `lo` of `src`.

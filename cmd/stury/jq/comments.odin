@@ -290,7 +290,7 @@ written_attributes :: proc(c: ^Commented, name: string, one: bool) -> Value {
 	source, _ := comments(c.v, .Attribute)
 	o: ^Object
 	for body in c.bodies[.Attribute] {
-		key := attribute_body_name(body)
+		key := attribute_read_name(c.v, body)
 		if one && key != name {
 			continue
 		}
@@ -311,6 +311,23 @@ written_attributes :: proc(c: ^Commented, name: string, one: bool) -> Value {
 attribute_body_name :: proc(body: string) -> string {
 	eq := strings.index_byte(body, '=')
 	return strings.trim_right_space(body[:eq if eq >= 0 else len(body)])
+}
+
+// The name the format reads from attribute `body`: what its reader makes of the name the element's source spells that way,
+// as HTML folds capitals, else the name as written.
+@(private = "file")
+attribute_read_name :: proc(v: Value, body: string) -> string {
+	written := attribute_body_name(body)
+	if r, is_ref := plain(v).(Ref); is_ref && len(r.doc.facts) > 0 {
+		it := core_pkg.attributes_of(r.doc, r.node)
+		for k, _ in core_pkg.attribute_next(&it) {
+			if string(r.doc.src[k.lo:][:k.n]) == written {
+				read, _ := core_pkg.token_text(r.doc.readers, &r.doc.view, k, context.allocator)
+				return read
+			}
+		}
+	}
+	return written
 }
 
 // The attribute `name` with the value `text`, as markup writes it: quoted, with the markup, the quote and the white
@@ -431,12 +448,12 @@ write_attribute :: proc(ip: ^Interp, v: Value, name: string, nv: Value) -> (Valu
 	bodies := make([dynamic]string, 0, len(have) + 1)
 	found := false
 	for body in have {
-		if attribute_body_name(body) != name {
+		if attribute_read_name(v, body) != name {
 			append(&bodies, body)
 		} else if !found && is_text {
-			append(&bodies, attribute_body(name, text))
+			append(&bodies, attribute_body(attribute_body_name(body), text))
 		}
-		found ||= attribute_body_name(body) == name
+		found ||= attribute_read_name(v, body) == name
 	}
 	if !found && is_text {
 		append(&bodies, attribute_body(name, text))
