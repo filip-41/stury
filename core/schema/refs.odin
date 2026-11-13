@@ -164,7 +164,7 @@ loop_nodes :: proc(d: ^rules.Description) -> []bool {
 	edges := make([dynamic]rules.Node_Index, context.temp_allocator)
 	for i in 0 ..< count {
 		starts[i] = len(edges)
-		in_place(d, rules.Node_Index(i), &edges)
+		subschemas(d, rules.Node_Index(i), &edges, true)
 	}
 	starts[count] = len(edges)
 	looping := make([]bool, count, context.temp_allocator)
@@ -245,39 +245,15 @@ reachable :: proc(d: ^rules.Description) -> []bool {
 			continue
 		}
 		seen[at] = true
-		in_place(d, at, &todo)
-		n := &d.nodes[at]
-		for x in ([?]Maybe(rules.Node_Index){n.unevaluated_items, n.unevaluated_properties}) {
-			if y, has := x.?; has {
-				append(&todo, y)
-			}
-		}
-		if n.array >= 0 {
-			a := &d.arrays[n.array]
-			append(&todo, ..a.prefix)
-			append(&todo, a.items)
-			if y, has := a.contains.?; has {
-				append(&todo, y)
-			}
-		}
-		if n.object >= 0 {
-			o := &d.objects[n.object]
-			for m in o.members {
-				append(&todo, m.node)
-			}
-			for pat in o.patterns {
-				append(&todo, pat.node)
-			}
-			append(&todo, o.additional, o.keys)
-		}
+		subschemas(d, at, &todo, false)
 	}
 	return seen
 }
 
-// Adds to `out` the subschemas that judge the value `node` judges: its references and its in-place applicators. A
-// `$dynamicRef` may reach any dynamic anchor of its target's name.
+// Adds to `out` the subschemas of `node` that `rules.node_children` gives under `in_place`. A `$dynamicRef` may reach
+// any dynamic anchor of its target's name.
 @(private)
-in_place :: proc(d: ^rules.Description, node: rules.Node_Index, out: ^[dynamic]rules.Node_Index) {
+subschemas :: proc(d: ^rules.Description, node: rules.Node_Index, out: ^[dynamic]rules.Node_Index, in_place: bool) {
 	n := &d.nodes[node]
 	if y, has := n.dynamic_ref.?; has && .Dynamic_Static not_in n.spelled {
 		for a in d.anchors {
@@ -290,21 +266,7 @@ in_place :: proc(d: ^rules.Description, node: rules.Node_Index, out: ^[dynamic]r
 			}
 		}
 	}
-	for x in ([?]Maybe(rules.Node_Index){n.ref, n.dynamic_ref, n.not, n.cond.test, n.cond.then, n.cond.other}) {
-		if y, has := x.?; has {
-			append(out, y)
-		}
-	}
-	for list in ([?][]rules.Node_Index{n.all_of, n.any_of, n.one_of}) {
-		append(out, ..list)
-	}
-	if n.object >= 0 {
-		for x in d.objects[n.object].dependents {
-			if y, has := x.node.?; has {
-				append(out, y)
-			}
-		}
-	}
+	rules.node_children(d, n, out, in_place)
 }
 
 // The node a reference reaches: a resource, an anchor in it, or what a JSON Pointer fragment reaches from it. A

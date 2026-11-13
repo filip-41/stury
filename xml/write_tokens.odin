@@ -1,8 +1,8 @@
 package xml
 
-// The token write and `marshal` of XML, both by the element write of `write_elements.odin`. `marshal` writes the value
-// `write.marshal_markup` reads back. A pretty token write to a stream is `.Unsupported`, since the text is laid out only
-// once it is whole.
+// The token write and `marshal` of XML, both through the element write. `marshal` writes the value that
+// `write.marshal_markup` reads back. A pretty token write to a stream is `.Unsupported`, since the text can be laid out
+// only once it is whole.
 
 import "base:runtime"
 import "core:io"
@@ -69,7 +69,6 @@ TOKENS := write.Token_Spelling {
 	},
 }
 
-// The plan's `marshal`, by the element write.
 @(private)
 marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, omits: ^typed.Omits) -> ([]u8, core.Typed_Refusal) {
 	return write.marshal_markup(plan, value, opts, stream, allocator, omits, value_write)

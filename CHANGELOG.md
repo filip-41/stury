@@ -354,6 +354,12 @@ The hooks the formats share:
   malformed is a `Fault` at its byte. `xml` and `html` forward them as `compile_selector`, `select` and `Selector`
   ([markup.md](docs/markup.md#selectors)).
 - `yaml.marshal` writes a `typed.Bytes` as `!!binary` and its base64, as the token write and the document write do.
+- `marshal` of a nil `any` writes null in every format, and a format with no top-level null refuses it as it refuses
+  any null.
+- A typed check of a YAML, XML or HTML text that does not parse holds the fault as its one entry in the sink, as
+  TOML's did.
+- A typed `check` with a nil plan refuses it as `.Plan_Mismatch` in every format, where TOML, YAML, XML, HTML, JSON
+  and CSV read through it.
 - `diff --facts` tells a changed TOML or YAML comment, and a changed YAML tag or anchor, through the facts a format's
   edit services write.
 - `yaml.plan_of` builds the plan of a `rules.Description`, as `json.plan_of` does.

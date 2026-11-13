@@ -16,14 +16,8 @@ marshal :: proc {marshal_once, cw.marshal}
 
 @(private)
 marshal_once :: proc(value: any, spec := Spec.Yaml_1_2, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
-	if value.id == nil || value.data == nil {
-		return nil, core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
-	}
-	plan, refusal := plan_make(value.id, spec, opts)
-	if refusal != nil {
-		return nil, refusal
-	}
-	defer typed.plan_destroy(&plan)
-	text, err := plan.marshal(&plan, value.data, write, {}, allocator, nil)
-	return text, core.error_of(err)
+	nothing: any
+	v := typed.marshal_target(value, &nothing)
+	plan, refusal := plan_make(v.id, spec, opts)
+	return typed.marshal_planned(&plan, refusal, v.data, write, allocator)
 }

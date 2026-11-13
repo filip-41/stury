@@ -11,7 +11,7 @@ import core "../core"
 // and its services the walks of that spec. The tables hold pointers to the bound tables, so they are set at
 // startup and never written after.
 HANDLES := [Spec]core.Readers {
-	.Yaml_1_2 = handle_readers(&SERVICES[.Yaml_1_2]),
+	.Yaml_1_2 = core.with_services(READERS, &SERVICES[.Yaml_1_2]),
 }
 
 SERVICES := [Spec]core.Services {
@@ -27,13 +27,6 @@ SERVICES := [Spec]core.Services {
 		records  = &FRAMING,
 		docs     = &RECORD_DOCS,
 	},
-}
-
-// The readers of a handle: `READERS` with `services`.
-handle_readers :: proc "contextless" (services: ^core.Services) -> core.Readers {
-	r := READERS
-	r.services = services
-	return r
 }
 
 // YAML's fault table, which names the format whatever the spec.

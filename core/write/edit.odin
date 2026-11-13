@@ -8,11 +8,14 @@ import "base:runtime"
 import "core:strconv"
 import "core:strings"
 import core ".."
+import engine "../build"
 import "../typed"
 
 // What the values a call converted hold, freed after the edit has taken their text.
+@(private)
 Scratch :: runtime.Arena
 
+@(private)
 scratch_destroy :: proc(s: ^Scratch) {
 	runtime.arena_destroy(s)
 }
@@ -20,12 +23,37 @@ scratch_destroy :: proc(s: ^Scratch) {
 // What an edit of `v` writes. A `typed.Raw` is the text of a value, a `core.Value` is spelled as it is, and an Odin
 // scalar or string is the value it holds. Any other type is built by `plan`, which a format made for the type with its
 // reads, and is `.Plan_Mismatch` without one. What the input holds lasts until `scratch` is destroyed.
+@(private)
 edit_input :: proc(v: $T, plan: ^typed.Plan, scratch: ^Scratch) -> (in_: core.Edit_Input, err: core.Error) {
 	when T == typed.Raw {
 		return {text = string(v), raw = true}, nil
 	} else {
 		return edit_input_of(v, plan, scratch)
 	}
+}
+
+// Makes `v` the value at every answer of `path` over the document `build_doc` reads from `src` as `as`, through the
+// edits `edit` names, and returns the new text, which the caller frees with `allocator`. `v` is taken as `edit_input`
+// takes it, before the text is read.
+set_with :: proc(src: []u8, as: core.As, $build_doc: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), edit: ^core.Edit_Services, path: core.Path, v: any, plan: ^typed.Plan, read: core.Query_Options, allocator: runtime.Allocator) -> (out: []u8, err: core.Error) {
+	scratch: Scratch
+	defer scratch_destroy(&scratch)
+	in_ := edit_input(v, plan, &scratch) or_return
+	doc, berr := build_doc(src, as, read.dups == .Refuse, allocator)
+	return set_built(&doc, berr, edit, path, in_, read, allocator)
+}
+
+// The part of `set_with` past the build, apart so that a check of this package alone reaches its imports.
+@(private)
+set_built :: proc(doc: ^core.Document, berr: core.Document_Error, edit: ^core.Edit_Services, path: core.Path, in_: core.Edit_Input, read: core.Query_Options, allocator: runtime.Allocator) -> (out: []u8, err: core.Error) {
+	defer core.destroy(doc)
+	if berr.kind != .None {
+		return nil, core.error_of(berr)
+	}
+	list := core.edit_list_init(doc, allocator)
+	list.edit = edit
+	defer core.edit_list_destroy(&list)
+	return engine.set_answers(&list, path, in_, read, allocator)
 }
 
 @(private = "file")

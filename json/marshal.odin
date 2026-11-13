@@ -104,21 +104,12 @@ marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options,
 // writes. `write.marshal_stream` writes by a plan to a stream.
 marshal :: proc {marshal_once, write.marshal}
 
-// A nil `any` has no type to plan and is written as null.
 @(private)
 marshal_once :: proc(value: any, spec := Spec.Json, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
-	v := value
 	nothing: any
-	if v.id == nil || v.data == nil {
-		v = any{&nothing, typeid_of(any)}
-	}
+	v := typed.marshal_target(value, &nothing)
 	plan, refusal := plan_written(v.id, spec, opts, {}, nil, context.allocator)
-	if refusal != nil {
-		return nil, refusal
-	}
-	defer typed.plan_destroy(&plan)
-	text, err := plan.marshal(&plan, v.data, write, {}, allocator, nil)
-	return text, core.error_of(err)
+	return typed.marshal_planned(&plan, refusal, v.data, write, allocator)
 }
 
 // A value spelled as JSON text for an edit: the colon is the document's own when it shows one.

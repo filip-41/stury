@@ -102,7 +102,7 @@ unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, opts
 // Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
 // first. The options are the plan's, and any plan of the format reads.
 check :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return core.error_of(read_text(src, S, options_of(plan.as), target, T, plan, read, allocator, true))
+	return core.error_of(read_text(src, S, options_of(typed.handle_of(plan)), target, T, plan, read, allocator, true))
 }
 
 // Reads a whole text as the constant spec `S`.

@@ -585,7 +585,7 @@ Describe_State :: struct {
 	unevaluated:   map[[2]i32]bool,
 	// The place in its `allOf` of each member `settle_unevaluated` kept, of a node it dropped one of.
 	all_of_at:     map[rules.Node_Index][]int,
-	// What `judges_nothing` knows of each node, which `presence` asks of every arm.
+	// What `judges_nothing` knows of each node, which `conjoin_pair` and `presence` ask.
 	nothing:       map[rules.Node_Index]Nothing,
 	// The records `fill_checked` was asked for and not yet filled, the member names of those filled, the name of the
 	// record being filled and the name `trail` holds the path to, each an index of `fill_names`, -1 for none.
@@ -904,6 +904,22 @@ stamp_text :: proc(h: ^u64, s: string) {
 	for c in transmute([]u8)s {
 		stamp_mix(h, u64(c))
 	}
+}
+
+// What a format's one-call marshal plans for `value`: `value`, or for a nil `any` the `any` at `nothing`, which holds
+// nil and is written as null.
+marshal_target :: proc(value: any, nothing: ^any) -> any {
+	return value if value.id != nil && value.data != nil else any{nothing, typeid_of(any)}
+}
+
+// Writes `data` by `plan`, which a format's one-call marshal made with the refusal `refusal`, and frees the plan.
+marshal_planned :: proc(plan: ^Plan, refusal: core.Error, data: rawptr, write: core.Write_Options, allocator: runtime.Allocator) -> ([]u8, core.Error) {
+	if refusal != nil {
+		return nil, refusal
+	}
+	defer plan_destroy(plan)
+	text, err := plan.marshal(plan, data, write, {}, allocator, nil)
+	return text, core.error_of(err)
 }
 
 // Frees what `plan_make` allocated and sets `p` to the zero value.

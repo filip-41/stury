@@ -263,6 +263,51 @@ ref_end :: proc(d: ^Description, node: Node_Index) -> (Node_Index, int) {
 	return node, hops
 }
 
+// Appends to `out` the subschemas of `n`: with `in_place` only those that judge `n`'s own value, otherwise all of them.
+node_children :: proc(d: ^Description, n: ^Node, out: ^[dynamic]Node_Index, in_place: bool) {
+	append(out, ..n.all_of)
+	append(out, ..n.any_of)
+	append(out, ..n.one_of)
+	for x in ([?]Maybe(Node_Index){n.not, n.cond.test, n.cond.then, n.cond.other, n.ref, n.dynamic_ref}) {
+		if r, has := x.?; has {
+			append(out, r)
+		}
+	}
+	if n.object >= 0 {
+		o := &d.objects[n.object]
+		for x in o.dependents {
+			if r, has := x.node.?; has {
+				append(out, r)
+			}
+		}
+		if !in_place {
+			for x in o.members {
+				append(out, x.node)
+			}
+			for x in o.patterns {
+				append(out, x.node)
+			}
+			append(out, o.additional, o.keys)
+		}
+	}
+	if in_place {
+		return
+	}
+	for x in ([?]Maybe(Node_Index){n.unevaluated_items, n.unevaluated_properties}) {
+		if r, has := x.?; has {
+			append(out, r)
+		}
+	}
+	if n.array >= 0 {
+		a := &d.arrays[n.array]
+		append(out, ..a.prefix)
+		append(out, a.items)
+		if r, has := a.contains.?; has {
+			append(out, r)
+		}
+	}
+}
+
 // The conjunctions that `nodes` alternate between: a `$ref` and an `allOf` join their targets to a conjunction, and an
 // `anyOf` splits it by its arms. Under `choices` a `oneOf` splits it too, an `if` splits it into what passes the `if` and
 // `then` and what passes the `else`, and a `$dynamicRef` into each node of its anchor's name it may reach. False when

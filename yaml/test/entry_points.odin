@@ -411,3 +411,12 @@ a_key_is_its_resolved_value :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// A nil `any` is a null, which YAML writes as `null`.
+@(test)
+a_nil_any_marshals_as_null :: proc(t: ^testing.T) {
+	nothing: any
+	text, err := yaml.marshal(nothing, allocator = context.temp_allocator)
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, strings.trim_space(string(text)), "null")
+}

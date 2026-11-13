@@ -103,7 +103,7 @@ unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, opts
 // Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
 // first. The options are the plan's, and any plan of the format reads.
 check :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return core.error_of(check_one(src, S, T, target, plan, options_of(plan.as), read, allocator))
+	return core.error_of(check_one(src, S, T, target, plan, options_of(typed.handle_of(plan)), read, allocator))
 }
 
 // Whether `plan` was made by `typed.plan_make` and not `plan_make`, which alone checks that a type is a list of rows of

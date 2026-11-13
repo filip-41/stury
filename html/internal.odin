@@ -2,13 +2,13 @@ package html
 
 import core "../core"
 
-// The tokenizer, the tree and the edit rule for html/test's conformance tests, and for a build with
+// The tokenizer, the tree and the edit rule, for html/test's conformance tests and for a build with
 // `-define:STURY_HTML_INTERNALS=true`. They are no part of the surface.
 
 @(private)
 INTERNALS :: #config(STURY_HTML_INTERNALS, false)
 
-// The block below is the import's one user, and a build without it has none.
+// The block below is the import's only user. A build without it has none.
 _ :: core
 
 when ODIN_TEST || INTERNALS {

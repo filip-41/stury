@@ -232,3 +232,29 @@ a_plan_of_a_description_reads_yaml :: proc(t: ^testing.T) {
 	_, empty := yaml.plan_of(&rules.Description{})
 	walktest.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 }
+
+// A check of a text the walk refuses holds the fault as its one entry, as a check that met it inside a value does.
+@(test)
+a_check_of_a_malformed_text_holds_the_fault :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	Pair :: struct {
+		a: int,
+	}
+	plan, perr := yaml.plan_make(Pair, .Yaml_1_2)
+	walktest.expect_nil(t, perr)
+	v: Pair
+	sink: typed.Sink
+	testing.expect(t, yaml.check(transmute([]u8)string("a: [1\n"), .Yaml_1_2, &v, &plan, {sink = &sink}) != nil)
+	testing.expect_value(t, len(sink.entries), 1)
+	testing.expect_value(t, sink.fatal.kind, core.Typed_Error_Kind.Walk)
+}
+
+// A check with no plan is a plan mismatch.
+@(test)
+a_check_with_no_plan_is_a_mismatch :: proc(t: ^testing.T) {
+	v: struct {
+		a: int,
+	}
+	walktest.expect_kind(t, yaml.check(transmute([]u8)string("a: 1\n"), .Yaml_1_2, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
+}

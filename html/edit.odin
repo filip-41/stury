@@ -1,22 +1,22 @@
 package html
 
-// HTML's edit services. The format commits its edits itself, through `compose.markup_commit`, with the edits every
-// markup format shares, over the elements HTML spells: a new value is written by the serialization's rules, and a scalar
-// is escaped as the element it goes in reads it. An edit that writes at a node the tree construction made, which no bytes
-// of the source spell where it stands, is `.Frozen`. The result is read again, and one whose tree is not the edited tree is
-// `.Bad_Result`: a node the edits leave reads as it did, and the content an edit wrote reads in the full text as it reads
-// alone in its element, as a fragment.
+// HTML's edit services. Edits are committed through `compose.markup_commit`, which holds the edits every markup format
+// shares, over the elements HTML spells. A new value is written by the serialization's rules, and a scalar is escaped as
+// the element it goes in reads it. An edit that writes at a node the tree construction made, which no bytes of the
+// source spell where it stands, is `.Frozen`.
+//
+// The result is read again, and one whose tree is not the edited tree is `.Bad_Result`. A node the edits leave must
+// read as it did, and the content an edit wrote must read in the full text as it reads alone in its element, as a
+// fragment.
 
 import "base:runtime"
 import "core:slice"
 import "core:strings"
 import core "../core"
 import compose "../core/compose"
-import engine "../core/build"
 import typed "../core/typed"
 import write "../core/write"
 
-// HTML's edit services, the same table for every spec.
 @(private, rodata)
 EDIT := core.Edit_Services {
 	key_text = compose.markup_key_text,
@@ -26,13 +26,13 @@ EDIT := core.Edit_Services {
 	commit   = edit_commit,
 }
 
-// The byte before a scalar's text that `edit_spell` writes, which the content it goes in escapes. The input stream
-// reads U+0001 as a parse error, and a relocated content that opens with it is refused, since it would read as a scalar.
+// The byte `edit_spell` writes before a scalar's text. The content it goes in escapes it. The input stream reads U+0001
+// as a parse error, so a relocated content that opens with it is refused, since it would read as a scalar.
 @(private)
 SCALAR :: "\x01"
 
-// The byte before an object's members that `edit_spell` writes. The commit reads them back in the element they go in,
-// as a fragment whose context is that element, and a relocated content that opens with it is refused.
+// The byte `edit_spell` writes before an object's members. The commit reads them back in the element they go in, as a
+// fragment whose context is that element. A relocated content that opens with it is refused.
 @(private = "file")
 MEMBERS :: "\x02"
 
@@ -43,26 +43,16 @@ edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.all
 	return list
 }
 
-// Makes `v` the value at every answer of `path` over `src`, in one call, and returns the new text, which the caller frees
-// with `allocator`, keeping every byte the edit does not reach. A `typed.Raw` is an element's content as HTML, a struct, a
+// Makes `v` the value at every answer of `path` over `src` and returns the new text, which the caller frees with
+// `allocator`. Every byte the edit does not reach is kept. A `typed.Raw` is an element's content as HTML, a struct, a
 // slice or a map is built by `plan`, and any other value is written as an element's content. A `Name` the path ends in
 // that its element lacks is inserted as its last child.
 set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	scratch: write.Scratch
-	defer write.scratch_destroy(&scratch)
-	in_ := write.edit_input(v, plan, &scratch) or_return
-	doc, berr := build(src, spec, opts, read.dups, allocator)
-	defer core.destroy(&doc)
-	if berr != nil {
-		return nil, berr
-	}
-	list := edit_list_init(&doc, spec, allocator)
-	defer core.edit_list_destroy(&list)
-	return engine.set_answers(&list, path, in_, read, allocator)
+	return write.set_with(src, bound_as(spec, opts), build_handle, &EDIT, path, v, plan, read, allocator)
 }
 
-// A value an edit writes, spelled as an element's content: null as none, a scalar as `SCALAR` and its text, an object
-// as `MEMBERS` and its members written compact, and an array as `ITEM` before each item's content.
+// Spells a value an edit writes as an element's content: null as none, a scalar as `SCALAR` and its text, an object as
+// `MEMBERS` and its members written compact, and an array as `ITEM` before each item's content.
 @(private)
 edit_spell :: proc(_: ^core.Document, v: core.Value, opts: core.Write_Options, _: string, _: bool, _: u64, allocator: runtime.Allocator) -> ([]u8, core.Error) {
 	spill: [write.ROOM_MAX]u8 = ---
@@ -112,8 +102,8 @@ put_content :: proc(w: ^Writer, value: core.Value, top: bool) -> core.Typed_Erro
 	return .None
 }
 
-// The content node `node` holds, as `edit_spell` writes a value: an element's between its tags, a raw text's escaped,
-// and the root element for the document. Content that opens with `SCALAR` or `MEMBERS` is refused.
+// The content of node `node`, as `edit_spell` writes a value: an element's between its tags, a raw text's escaped, and
+// the root element for the document. Content that opens with `SCALAR` or `MEMBERS` is refused.
 @(private)
 edit_relocate :: proc(doc: ^core.Document, node: core.Node_Index, _: core.Site, allocator: runtime.Allocator) -> ([]u8, bool) {
 	context.allocator = context.temp_allocator
@@ -128,7 +118,6 @@ edit_relocate :: proc(doc: ^core.Document, node: core.Node_Index, _: core.Site, 
 	return slice.clone(doc.src[lo:hi], allocator), true
 }
 
-// What the markup edits read from HTML.
 @(private, rodata)
 MARKUP := compose.Markup {
 	element = element_of,
@@ -164,7 +153,7 @@ raw_text :: proc(name: string) -> bool {
 	return is_raw(name) || name == "title" || name == "textarea"
 }
 
-// `text` escaped as the serialization escapes a text, in a buffer from `allocator`.
+// Escapes `text` as the serialization escapes a text, into a buffer from `allocator`.
 @(private = "file")
 escape :: proc(text: string, allocator: runtime.Allocator) -> (string, bool) {
 	spill: [write.ROOM_MAX]u8 = ---
@@ -174,8 +163,8 @@ escape :: proc(text: string, allocator: runtime.Allocator) -> (string, bool) {
 	return string(out), err.kind == .None
 }
 
-// The content `text` is written as in element `name`: a scalar's text escaped, or as it stands in a raw text element,
-// and markup as it stands, which a void element and an element that holds text only refuse.
+// The content `text` is written as in element `name`: a scalar's text escaped, or as it stands in a raw text element.
+// Markup stands as it is, and a void element or an element that holds only text refuses it.
 @(private = "file")
 edit_content :: proc(name, text: string, allocator: runtime.Allocator) -> (out: string, void: bool, refusal: Maybe(compose.Markup_Refusal)) {
 	scalar := strings.has_prefix(text, SCALAR)
@@ -206,8 +195,8 @@ edit_content :: proc(name, text: string, allocator: runtime.Allocator) -> (out: 
 	return out, false, nil
 }
 
-// Whether `body` is a comment's HTML reads back as written, or with `.Attribute` one attribute, whose name may use capitals
-// as HTML folds them.
+// Whether `body` is a comment that HTML reads back as written, or with `.Attribute` a single attribute. HTML folds
+// capitals in an attribute's name.
 @(private = "file")
 edit_fact :: proc(role: core.Role, body: string) -> bool {
 	if role != .Attribute {
@@ -234,7 +223,6 @@ edit_fact :: proc(role: core.Role, body: string) -> bool {
 	return fault == nil && r.errors == 0 && r.tags == 1 && r.attrs == 1 && r.hi == u64(len(tag))
 }
 
-// The byte past the tag that starts at byte `lo` of `src`.
 @(private = "file")
 tag_end :: proc(src: []u8, lo: u64) -> u64 {
 	on :: proc "contextless" (hi: ^u64, t: ^Html_Token) -> Token_Action {
@@ -249,7 +237,6 @@ tag_end :: proc(src: []u8, lo: u64) -> u64 {
 	return hi
 }
 
-// Whether an end tag of element `name` starts at byte `at` of `src`.
 @(private = "file")
 end_tag_at :: proc(src: []u8, at: u64, name: string) -> bool {
 	lo := at + 2
@@ -260,9 +247,10 @@ end_tag_at :: proc(src: []u8, at: u64, name: string) -> bool {
 	return is_space(src[hi]) || src[hi] == '/' || src[hi] == '>'
 }
 
-// The element of value `v`, or the root element for the document and the whole text for a fragment. An implied element
-// has no tags. Its start tag ends where the tokenizer ends it. An element with child elements has an end tag when the
-// last tag in it closes its name past its last child, and one without when the tag after its text and comments does.
+// The element of value `v`, the root element for the document, or the whole text for a fragment. An implied element has
+// no tags. Its start tag ends where the tokenizer ends it. An element with child elements has an end tag when the last
+// tag in it closes its name past its last child. One without child elements has one when the tag after its text and
+// comments does.
 @(private = "file")
 element_of :: proc(doc: ^core.Document, v: core.Node_Index) -> (e: compose.Markup_Element) {
 	src := doc.src
@@ -324,7 +312,7 @@ element_of :: proc(doc: ^core.Document, v: core.Node_Index) -> (e: compose.Marku
 	return e
 }
 
-// HTML's commit: each edit as splices of the source, which is then read again as the edited tree.
+// Commits each edit as splices of the source, then reads the result again as the edited tree.
 @(private)
 edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 	for e in list.edits {
@@ -343,8 +331,8 @@ edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocato
 	return out, 0, {}
 }
 
-// The member value whose bytes edit `e` writes at: the member an insert goes before, or the last one it goes after,
-// the value of a renamed key, and the node any other edit names.
+// The member value whose bytes edit `e` writes at. For an insert it is the member the insert goes before, or the last
+// one it goes after. For a renamed key it is the key's value, and for any other edit the node the edit names.
 @(private = "file")
 written_at :: proc(doc: ^core.Document, e: core.Edit) -> core.Node_Index {
 	switch {
@@ -365,8 +353,8 @@ written_at :: proc(doc: ^core.Document, e: core.Edit) -> core.Node_Index {
 	return e.node
 }
 
-// Whether the tree construction implied, moved or copied member value `v`, or moved its text, so that no bytes of the
-// source spell it where it stands.
+// Whether the tree construction implied, moved or copied member value `v`, or moved its text. No bytes of the source
+// then spell it where it stands.
 @(private = "file")
 constructed :: proc(doc: ^core.Document, v: core.Node_Index) -> bool {
 	if v == core.ROOT || v == core.NO_NODE {
@@ -376,7 +364,7 @@ constructed :: proc(doc: ^core.Document, v: core.Node_Index) -> bool {
 	return k.spelling & KEY_FROZEN != 0 || n.kind == .Plain && n.spelling & TEXT_FROZEN != 0
 }
 
-// What a commit's read of its output compares: the nodes whose content an edit wrote, the nodes whose name or
+// What the commit's read of its output compares: the nodes whose content an edit wrote, the nodes whose name or
 // attributes an edit wrote, and where the first difference stands in the output.
 @(private = "file")
 Reread :: struct {
@@ -386,8 +374,8 @@ Reread :: struct {
 	at:        Maybe(u64),
 }
 
-// An element whose content an edit wrote. When `counted`, its edits are inserts, removals and items of an array, which
-// change its child elements by `delta`.
+// An element whose content an edit wrote. When `counted`, its edits are inserts, removals and items of an array, and
+// they change its child elements by `delta`.
 @(private = "file")
 Written :: struct {
 	node:    core.Node_Index,
@@ -395,7 +383,7 @@ Written :: struct {
 	counted: bool,
 }
 
-// Reads `out` as the document's spec and compares its tree with the tree `list`'s edits make.
+// Reads `out` as the document's spec and compares its tree with the tree the edits of `list` make.
 @(private = "file")
 reread :: proc(list: ^core.Edit_List, out: []u8) -> core.Document_Error {
 	doc := list.doc
@@ -442,7 +430,7 @@ reread :: proc(list: ^core.Edit_List, out: []u8) -> core.Document_Error {
 		}
 		append(&r.written, w)
 	}
-	built, berr := read_as(out, doc.as)
+	built, berr := build_handle(out, doc.as, false, context.allocator)
 	if berr.kind != .None {
 		if berr.kind == .No_Memory {
 			return berr
@@ -455,8 +443,8 @@ reread :: proc(list: ^core.Edit_List, out: []u8) -> core.Document_Error {
 	return {kind = .Bad_Result, inner = core.Fault{at = r.at.? or_else 0, rules = &RULES, kind = .Bad_Char, detail = u8(Detail.Reread)}}
 }
 
-// Whether each object edit `e` wrote, as `edit_spell` spells it, reads back as written in the element it goes in: as a
-// fragment whose context is that element, and for the document's `ROOT` as the document is read.
+// Whether each object that edit `e` wrote, as `edit_spell` spells it, reads back as written in the element it goes in:
+// as a fragment whose context is that element, and for the document's `ROOT` as a document.
 @(private = "file")
 members_read_back :: proc(list: ^core.Edit_List, e: core.Edit) -> core.Typed_Error_Kind {
 	doc := list.doc
@@ -494,16 +482,6 @@ members_read_back :: proc(list: ^core.Edit_List, e: core.Edit) -> core.Typed_Err
 	return .None
 }
 
-// `src` read as `as` reads, in the context's allocator.
-@(private = "file")
-read_as :: proc(src: []u8, as: core.As) -> (core.Document, core.Document_Error) {
-	if Spec(as.spec) == .Document {
-		return build_spec(src, .Document, as, false, context.allocator)
-	}
-	return build_spec(src, .Fragment, as, false, context.allocator)
-}
-
-// The element that holds member value `v`, or the document.
 @(private = "file")
 parent_of :: proc(doc: ^core.Document, v: core.Node_Index) -> core.Node_Index {
 	p := core.ROOT
@@ -519,9 +497,9 @@ parent_of :: proc(doc: ^core.Document, v: core.Node_Index) -> core.Node_Index {
 	}
 }
 
-// Whether node `b` of `y` holds the tree node `a` of `x` holds: its kind, its attributes and its text or members. Under
-// `r`, a node whose content an edit wrote holds the tree its content reads as alone, and one whose name or attributes
-// an edit wrote keeps its members only.
+// Whether node `b` of `y` holds the tree that node `a` of `x` holds: its kind, its attributes and its text or members.
+// Under `r`, a node whose content an edit wrote holds the tree that content reads as alone. A node whose name or
+// attributes an edit wrote keeps its members only.
 @(private = "file")
 same :: proc(r: ^Reread, x: ^core.Document, a: core.Node_Index, y: ^core.Document, b: core.Node_Index) -> (ok: bool) {
 	defer if !ok && r != nil && r.at == nil {
@@ -560,7 +538,6 @@ same_members :: proc(r: ^Reread, x: ^core.Document, a: core.Node_Index, y: ^core
 	}
 }
 
-// The number of child elements of node `v`.
 @(private = "file")
 elements :: proc(doc: ^core.Document, v: core.Node_Index) -> (n: int) {
 	if doc.nodes[v].kind != .Object {
@@ -581,7 +558,6 @@ same_key :: proc(x: ^core.Document, ka: core.Node_Index, y: ^core.Document, kb: 
 	return (sa.n == 0) == (sb.n == 0) && sa.spelling >> KEY_NS_SHIFT & 3 == sb.spelling >> KEY_NS_SHIFT & 3 && core.node_string(x, ka) == core.node_string(y, kb)
 }
 
-// Whether nodes `a` of `x` and `b` of `y` hold the same attributes, written alike.
 @(private = "file")
 same_attributes :: proc(x: ^core.Document, a: core.Node_Index, y: ^core.Document, b: core.Node_Index) -> bool {
 	fa, fb := core.all_facts(x, a), core.all_facts(y, b)
@@ -604,12 +580,12 @@ same_attributes :: proc(x: ^core.Document, a: core.Node_Index, y: ^core.Document
 }
 
 // Whether the element of value `b` of `y` holds the tree its content reads as in a fragment whose context is the
-// element, read as `doc` was read, and the document the tree its root element reads as alone.
+// element, read as `doc` was read. For the document it is the tree the root element reads as alone.
 @(private = "file")
 same_content :: proc(doc: ^core.Document, y: ^core.Document, b: core.Node_Index) -> bool {
 	e := element_of(y, b)
 	if b == core.ROOT {
-		alone, err := read_as(y.src[e.lo:e.hi], doc.as)
+		alone, err := build_handle(y.src[e.lo:e.hi], doc.as, false, context.allocator)
 		return err.kind == .None && same_members(nil, y, b, &alone, core.ROOT)
 	}
 	name := core.node_string(y, b - 1)

@@ -150,6 +150,7 @@ select :: css.select
 
 Answer_Iter :: build.Answer_Iter
 next :: build.answers_next
+query :: build.query_doc
 
 Arm :: typed.Arm
 Bytes :: typed.Bytes

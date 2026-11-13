@@ -4,7 +4,8 @@ import "base:runtime"
 import core "../core"
 import typed "../core/typed"
 
-// The typed read of a built delimited document, `Edit_Plan.node_read`: the hook of `unmarshal`, `Cells`, fed from `doc.nodes`.
+// The typed read of a built delimited document, a plan's `node_read`: the hook of `unmarshal`, `Cells`, fed from
+// `doc.nodes`.
 // A cell has no kind of its own, so a document is read as its text is, by the column's field, and a value that reads gives
 // the same answer through either. The nodes hold a root of records, each of cells, so a loop over them is the whole feed.
 //

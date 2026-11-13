@@ -1,13 +1,12 @@
 package jq
 
-// Name resolution before running: a call to an undefined function or a use of an undefined variable is
-// a compile error in jq, reported before any input is read, in the order jq's compiler meets them.
+// Name resolution before the run. jq tells a call of an undefined function or a use of an undefined variable as a
+// compile error, before any input is read, in the order its compiler meets them.
 //
-// jq first drops each definition nothing calls (block_bind_referenced), so an unused definition may name
-// anything. It then compiles a function level by level: the instructions of the body, in order, and
-// then, only if those had no error, each subfunction as a level of its own (a definition's body, and the
-// arguments of a call to a function written in jq). The arguments of a builtin that takes values are
-// instructions of the caller's level.
+// jq first drops each definition nothing calls (block_bind_referenced), so an unused definition may name anything.
+// It then compiles a function level by level: the body's instructions in order, then, only if they had no error,
+// each subfunction as a level of its own (a definition's body, and the arguments of a call of a function written in
+// jq). The arguments of a builtin that takes values are instructions of the caller's level.
 
 import "core:slice"
 import "core:strings"
@@ -19,7 +18,7 @@ Scope :: struct {
 	name:   string,
 	arity:  int, // -1 for a variable, -2 for a label
 	env:    ^Env, // a prelude definition's own entry
-	fn:     ^Func, // the function a definition's entry names, or whose parameter a parameter's names
+	fn:     ^Func, // the function a definition names, or the one a parameter belongs to
 	param:  int, // which parameter, -1 for a definition
 	def:    ^Lib_Def, // a module's definition
 }
@@ -27,10 +26,10 @@ Scope :: struct {
 @(private = "file")
 Checker :: struct {
 	errors: [dynamic]Compile_Error,
-	vars:   []string, // those the command line defines
-	// The module whose definition is being checked, by its path and text, "" for the program.
+	vars:   []string, // the variables the command line defines
+	// The path and text of the module whose definition is being checked, "" for the program.
 	file, src: string,
-	// Only finding the module definitions the program reaches: no errors, and every level walked.
+	// Set while finding the module definitions the program reaches: no error is told and every level is walked.
 	reach:  bool,
 }
 
@@ -42,8 +41,8 @@ Later :: struct {
 }
 
 // `n` without its unused definitions, and its undefined names as jq reports them. `vars` are the variables the
-// command line defines, `linked`, the modules the program imports. Each call to a prelude definition, a module's
-// definition or a builtin is bound to it on the way.
+// command line defines and `linked` the modules the program imports. Each call of a prelude definition, a module's
+// definition or a builtin is bound to its target on the way.
 check :: proc(n: ^Node, vars: []string, linked: Linked = {}) -> (pruned: ^Node, errors: []Compile_Error, prelude: ^Env) {
 	pruned = prune(n)
 	calls: [dynamic]string
@@ -74,7 +73,7 @@ check :: proc(n: ^Node, vars: []string, linked: Linked = {}) -> (pruned: ^Node, 
 	return pruned, c.errors[:], prelude
 }
 
-// The scopes of a module's definitions, each over those before it and the module's imports.
+// Binds the scopes of a module's definitions. Each sees the definitions before it and the module's imports.
 @(private = "file")
 bind_library :: proc(lib: ^Library, prelude_names: ^Scope) {
 	s := import_scope(prelude_names, lib.imports)
@@ -137,8 +136,9 @@ data_name :: proc(name: string) -> string {
 	return strings.concatenate({name, "::", name})
 }
 
-// The program's level, then, if it had no errors, the module definitions it reaches, each a level, in the order jq
-// compiles them (modules as they finished loading, each in its order), then its own subfunctions.
+// Checks the program's level, then, if it had no errors, each module definition it reaches as a level of its own,
+// in jq's compile order (modules in the order they finished loading, definitions in file order), then the program's
+// subfunctions.
 @(private = "file")
 check_program :: proc(c: ^Checker, n: ^Node, s: ^Scope, libs: []^Library) {
 	reach := Checker{vars = c.vars, reach = true}
@@ -163,7 +163,7 @@ check_program :: proc(c: ^Checker, n: ^Node, s: ^Scope, libs: []^Library) {
 }
 
 // Whether `n` calls a function or reads `$ENV`. A program that does neither needs neither the prelude nor the
-// environment as a value. Each name `n` calls is added to `calls` when there is one.
+// environment as a value. When `calls` is given, each name `n` calls is appended to it.
 needs_globals :: proc(n: ^Node, calls: ^[dynamic]string = nil) -> bool {
 	if n == nil {
 		return false
@@ -194,8 +194,8 @@ new_scope :: proc(parent: ^Scope, name: string, arity: int) -> ^Scope {
 	return s
 }
 
-// Bind the calls in the body of `def`, the newest prelude definition. `top` holds those before it, and the result
-// holds `def` too.
+// Binds the calls in the body of `def`, the newest prelude definition. `top` holds the definitions before it, and
+// the returned scope holds `def` too.
 bind_prelude_def :: proc(def: ^Env, top: ^Scope) -> ^Scope {
 	inner, body := def_scope(top, def.fn)
 	inner.env = def
@@ -237,7 +237,7 @@ def_scope :: proc(s: ^Scope, fn: ^Func) -> (inner, body: ^Scope) {
 
 // ---- Unused definitions
 
-// `n` with each definition that its scope does not call dropped, innermost first.
+// `n` with each definition its scope never calls dropped, innermost first.
 @(private = "file")
 prune :: proc(n: ^Node) -> ^Node {
 	if n == nil {
@@ -275,7 +275,7 @@ calls :: proc(n: ^Node, name: string, arity: int) -> bool {
 	return any_child(n, Called{name, arity}, proc(sub: ^^Node, c: Called) -> bool {return calls(sub^, c.name, c.arity)})
 }
 
-// Whether a parameter of `fn` is `name/arity`: each parameter is a filter of arity 0, `$p` too.
+// Whether a parameter of `fn` is `name/arity`. Every parameter, `$p` too, is a filter of arity 0.
 @(private = "file")
 hides :: proc(fn: ^Func, name: string, arity: int) -> bool {
 	if arity != 0 {
@@ -311,7 +311,7 @@ undefined :: proc(c: ^Checker, n: ^Node, format: string, args: ..any) {
 	}
 }
 
-// The instructions of `n`, in jq's order. Its subfunctions go to `later`.
+// Walks the instructions of `n` in jq's order, and queues its subfunctions on `later`.
 @(private = "file")
 walk :: proc(c: ^Checker, n: ^Node, s: ^Scope, later: ^[dynamic]Later) {
 	if n == nil {
@@ -352,7 +352,7 @@ walk :: proc(c: ^Checker, n: ^Node, s: ^Scope, later: ^[dynamic]Later) {
 		append(later, Later{n.fn.body, body})
 		walk(c, n.a, inner, later)
 	case .Update:
-		// `=` and `|=` call jq functions with both sides, `op=` and `//=` compute the right side first.
+		// `=` and `|=` pass both sides to jq functions. `op=` and `//=` compute the right side first.
 		if n.op == .Assign || n.op == .Modify {
 			append(later, Later{n.a, s}, Later{n.b, s})
 		} else {
@@ -372,8 +372,8 @@ walk :: proc(c: ^Checker, n: ^Node, s: ^Scope, later: ^[dynamic]Later) {
 	}
 }
 
-// A call: undefined (its arguments unchecked), to a jq function (its arguments are subfunctions), or to
-// a builtin (its value arguments are instructions here).
+// A call that is undefined (its arguments go unchecked), of a jq function (its arguments are subfunctions), or of a
+// builtin (its value arguments are instructions of this level).
 @(private = "file")
 walk_call :: proc(c: ^Checker, n: ^Node, s: ^Scope, later: ^[dynamic]Later) {
 	found := lookup(s, n.name, len(n.args))
@@ -403,8 +403,8 @@ walk_call :: proc(c: ^Checker, n: ^Node, s: ^Scope, later: ^[dynamic]Later) {
 	}
 }
 
-// The scope an `as` opens: each variable of its patterns. Without `?//` an object pattern's key reads only the scope
-// outside. With it, keys and body see every variable of every alternative.
+// The scope an `as` opens, holding each variable of its patterns. Without `?//` an object pattern's key sees only
+// the outer scope. With `?//`, the keys and the body see every variable of every alternative.
 @(private = "file")
 walk_patterns :: proc(c: ^Checker, pats: []^Pattern, s: ^Scope, later: ^[dynamic]Later) -> ^Scope {
 	inner := s

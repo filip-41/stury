@@ -1,17 +1,20 @@
 package xml
 
-// The write of a document as XML. The node must be an object of one member, the root element, which is no array, since
-// an XML text has one root. A member is an element of its name, an array member one element of the name per item, and
-// the member `#text` the text that stands there among its siblings. An object is an element's attributes and children,
-// null an empty element, and a scalar its text. The root of a document read as XML is written from its spans: an
-// element's attributes, namespace declarations and text as written, and the doctype, comments and processing
-// instructions where they stood, so every reference keeps the declaration it names. Any other node or document is
-// escaped, with its comments written before, after or at the end of the value that holds them, and its other facts
-// dropped and counted. What XML cannot spell so that it reads back is `.Unwritable`: a key that is no XML name or that
-// has a colon, a nested or empty array, an empty string or object, an object of only text, and a character XML 1.0 does
-// not allow, and a text whose bytes are no UTF-8 is `.Invalid_Utf8`. Pretty output indents an element whose children
-// are all elements, and lays no white space into one that holds text. Members keep their order, whatever `sort_keys`
-// says, since it is the elements'.
+// Writes a node as XML. The node must be an object of one member, the root element, and that member is no array, since
+// an XML text has one root. A member is an element of its name, an array member is one element per item, and the member
+// `#text` is the text that stands there among its siblings. An object is an element's attributes and children, null an
+// empty element, and a scalar its text.
+//
+// The root of a document read as XML is written from its spans: attributes, namespace declarations and text as
+// written, and the doctype, comments and processing instructions where they stood. Every reference then keeps the
+// declaration it names. Any other node or document is escaped. Its comments are written before, after or at the end of
+// the value that holds them, and its other facts are dropped and counted.
+//
+// What XML cannot spell so that it reads back is `.Unwritable`: a key that is no XML name or that has a colon, a nested
+// or empty array, an empty string or object, an object of only text, and a character XML 1.0 does not allow. A text
+// that is not UTF-8 is `.Invalid_Utf8`. Pretty output indents an element whose children are all elements and lays no
+// white space into one that holds text. Members keep their order whatever `sort_keys` says, since the order is the
+// elements'.
 
 import "base:runtime"
 import "core:io"
@@ -41,8 +44,8 @@ Apart :: enum u8 {
 	Before, // each after a line end
 }
 
-// Writes node `node` of `doc` as XML, as `core.write` does with `as(spec)`, and returns the facts it dropped. A
-// document of another format is written too.
+// Writes node `node` of `doc` as XML, as `core.write` does with `as(spec)`, and returns the facts it dropped. A document
+// of another format is written too.
 write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
 	if int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
 		return nil, 0, core.error_of(core.Typed_Refusal{kind = .Unsupported})
@@ -51,8 +54,7 @@ write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, nod
 	return out, cut, core.error_of(refusal)
 }
 
-// The handle's `write`: node `node` of `doc` as XML, the root of an XML document from its spans and any other node by
-// the element write.
+// The handle's `write`. The root of an XML document is written from its spans, any other node by the element write.
 @(private)
 document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Refusal) {
 	if doc.partial || core.kind(doc, node) != .Object {
@@ -75,7 +77,6 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 	return text, len(core.subtree_facts(doc, node)) - w.kept, err
 }
 
-// Built value `v` given to the element write, as `opts` say.
 @(private)
 value_write :: proc(v: core.Value, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
 	spill: [write.ROOM_MAX]u8 = ---
@@ -86,7 +87,6 @@ value_write :: proc(v: core.Value, opts: core.Write_Options, stream: io.Stream, 
 	return elements_finish(&e, put_value(&w, &e, v), opts, stream, allocator)
 }
 
-// An XML document: the prolog's facts, the root element, then the facts past it.
 @(private)
 put_own :: proc(w: ^Writer) -> core.Typed_Error_Kind {
 	facts := make([dynamic]core.Fact, 0, len(w.doc.facts), context.temp_allocator)
@@ -104,8 +104,8 @@ put_own :: proc(w: ^Writer) -> core.Typed_Error_Kind {
 	return flush(w, u64(len(w.doc.src)), 0, .Before)
 }
 
-// The element of key `key` and value `value` of an XML document: the facts before it, its tag and its content as
-// written. `laid` says whether the element stands on a line of its own, and each fact before it on one too.
+// Writes the element of key `key` and value `value`, with the facts before it. `laid` puts the element, and each fact
+// before it, on a line of its own.
 @(private)
 put_element :: proc(w: ^Writer, key, value: core.Node_Index, depth: int, laid: bool) -> core.Typed_Error_Kind {
 	name := core.span(w.doc, key)
@@ -114,8 +114,8 @@ put_element :: proc(w: ^Writer, key, value: core.Node_Index, depth: int, laid: b
 	indent(w, laid, depth)
 	write.put_byte(&w.out, '<')
 	write.put_text(&w.out, string(name))
-	// An attribute whose span stands before the element's name is a default its doctype declares, which a read of the
-	// written text gives the element again.
+	// An attribute that stands before the element's name is a default its doctype declares. A read of the written text
+	// supplies it again, so it is counted and not written.
 	for f in core.all_facts(w.doc, value) {
 		if f.role == .Attribute {
 			w.kept += 1
@@ -147,8 +147,8 @@ put_element :: proc(w: ^Writer, key, value: core.Node_Index, depth: int, laid: b
 	return .None
 }
 
-// The members of an XML document's element in order. Returns whether they were laid out on lines of their own, which
-// only the members of an element with no text are.
+// Writes the members of an element in order. Returns whether they stand on lines of their own, which only the members
+// of an element with no text do.
 @(private)
 put_children :: proc(w: ^Writer, value: core.Node_Index, depth: int) -> (laid: bool, kind: core.Typed_Error_Kind) {
 	laid = w.opts.pretty
@@ -173,7 +173,7 @@ put_children :: proc(w: ^Writer, value: core.Node_Index, depth: int) -> (laid: b
 	return laid, .None
 }
 
-// An XML document's text: as written, or escaped when the reader gave it decoded.
+// Writes an element's text as it stands in the source, or escaped when the reader decoded it.
 @(private)
 put_own_text :: proc(w: ^Writer, node: core.Node_Index, among: bool) -> core.Typed_Error_Kind {
 	if w.doc.nodes[node].kind == .Plain {
@@ -183,7 +183,6 @@ put_own_text :: proc(w: ^Writer, node: core.Node_Index, among: bool) -> core.Typ
 	return put_text(&w.out, write.scalar_text(w.doc, node, w.buf[:]) or_return, among, w.opts.ascii)
 }
 
-// Another document's node: the comments before its object, the one member, then the comments after it.
 @(private)
 put_document :: proc(w: ^Writer, e: ^Elements, node: core.Node_Index) -> core.Typed_Error_Kind {
 	facts := core.all_facts(w.doc, node)
@@ -203,8 +202,8 @@ put_document :: proc(w: ^Writer, e: ^Elements, node: core.Node_Index) -> core.Ty
 	return .None
 }
 
-// Value `value` given to the element write. A node of another document comes with the comments before it, its attributes
-// and the comments after it. The comments of the document's object are `put_document`'s, and an array's are dropped.
+// Writes `value` through the element write. A node of another document brings the comments before it, its attributes and
+// the comments after it. The comments of the document's object belong to `put_document`, and an array's are dropped.
 @(private)
 put_value :: proc(w: ^Writer, e: ^Elements, value: core.Value) -> core.Typed_Error_Kind {
 	v := core.plain(value)
@@ -266,7 +265,6 @@ put_value :: proc(w: ^Writer, e: ^Elements, value: core.Value) -> core.Typed_Err
 	return w.out.err
 }
 
-// The members of object `v` given to the element write, a node's as its document holds them, a repeated name each time.
 @(private)
 put_members :: proc(w: ^Writer, e: ^Elements, v: core.Value) -> core.Typed_Error_Kind {
 	context.allocator = context.temp_allocator
@@ -286,7 +284,7 @@ put_members :: proc(w: ^Writer, e: ^Elements, v: core.Value) -> core.Typed_Error
 	return .None
 }
 
-// Writes the facts of an XML document that stand before byte `upto` and were not written, set apart by `apart`.
+// Writes the facts of an XML document that were not written yet and stand before byte `upto`, set apart by `apart`.
 @(private)
 flush :: proc(w: ^Writer, upto: u64, depth: int, apart: Apart) -> core.Typed_Error_Kind {
 	for ; w.next < len(w.facts) && w.facts[w.next].lo < upto; w.next += 1 {
@@ -304,7 +302,8 @@ flush :: proc(w: ^Writer, upto: u64, depth: int, apart: Apart) -> core.Typed_Err
 	return .None
 }
 
-// An XML document's text as written, with the comments and instructions inside it, which the document's facts repeat.
+// Writes an element's text as it stands. The comments and instructions inside it repeat the document's facts, so they
+// are counted and not written again.
 @(private)
 put_raw :: proc(w: ^Writer, span: []u8) {
 	hi := u64(uintptr(raw_data(span)) - uintptr(raw_data(w.doc.src))) + u64(len(span))
@@ -322,9 +321,9 @@ put_close :: proc(out: ^write.Out, name: []u8) {
 	write.put_byte(out, '>')
 }
 
-// Writes `s` as character data, among an element's children when `among`. An empty text is `.Unwritable`, since it
-// reads back as null, and a text among children that is only whitespace is written as references, since a reader drops
-// such a run.
+// Writes `s` as character data, `among` an element's children or not. An empty text is `.Unwritable`, since it reads
+// back as null. A text among children that is only white space is written as references, since a reader drops such a
+// run.
 @(private)
 put_text :: proc(out: ^write.Out, s: string, among, ascii: bool) -> core.Typed_Error_Kind {
 	if len(s) == 0 {
@@ -339,8 +338,8 @@ put_text :: proc(out: ^write.Out, s: string, among, ascii: bool) -> core.Typed_E
 	return put_escaped(out, s, false, ascii)
 }
 
-// Writes `s` as character data, or with `attribute` as an attribute value between double quotes, with every byte a
-// reader would read otherwise written as a reference, and with `ascii` every rune past U+007F too.
+// Writes `s` as character data, or as an attribute value between double quotes when `attribute`. Every byte a reader
+// would read otherwise is written as a reference, and with `ascii` so is every rune past U+007F.
 @(private)
 put_escaped :: proc(out: ^write.Out, s: string, attribute, ascii: bool) -> core.Typed_Error_Kind {
 	run := 0
@@ -386,7 +385,6 @@ put_escaped :: proc(out: ^write.Out, s: string, attribute, ascii: bool) -> core.
 	return .None
 }
 
-// Writes `r` as a hexadecimal character reference.
 @(private)
 put_reference :: proc(out: ^write.Out, r: rune) {
 	HEX := "0123456789abcdef"
@@ -401,9 +399,9 @@ put_reference :: proc(out: ^write.Out, r: rune) {
 	write.put_byte(out, ';')
 }
 
-// A comment, an instruction or the doctype. An XML document's is written as it stands. Another document's comment is
-// written as an XML comment unless its body holds `--` or ends in `-`, which no XML comment can, and is then dropped,
-// as another document's instruction is.
+// Writes a comment, an instruction or the doctype. An XML document's own is written as it stands. Another document's
+// comment is written as an XML comment, unless its body holds `--` or ends in `-`, which no XML comment can. Then it is
+// dropped, as is another document's instruction.
 @(private)
 put_fact :: proc(w: ^Writer, f: core.Fact) -> core.Typed_Error_Kind {
 	if w.own {
@@ -430,7 +428,7 @@ put_fact :: proc(w: ^Writer, f: core.Fact) -> core.Typed_Error_Kind {
 	return .None
 }
 
-// A comment's body, which XML reads with no references, so a byte XML 1.0 does not allow is `.Unwritable`.
+// Writes a comment's body. XML reads it with no references, so a byte XML 1.0 does not allow is `.Unwritable`.
 @(private)
 put_escaped_comment :: proc(w: ^Writer, body: string) -> core.Typed_Error_Kind {
 	for i := 0; i < len(body); {
@@ -461,7 +459,6 @@ is_head :: #force_inline proc(role: core.Role) -> bool {
 	return role == .Comment || role == .Instruction
 }
 
-// Whether `key` is the member `#text`.
 @(private)
 is_text :: proc(w: ^Writer, key: core.Node_Index) -> bool {
 	text, ok := core.text(w.doc, key, w.buf[:])
@@ -489,7 +486,6 @@ only_whitespace :: proc(s: string) -> bool {
 	return true
 }
 
-// A line end and the indent of `depth` levels, when `laid`.
 @(private)
 indent :: #force_inline proc(w: ^Writer, laid: bool, depth: int) {
 	if laid {

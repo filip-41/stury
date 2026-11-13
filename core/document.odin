@@ -398,6 +398,13 @@ Readers :: struct {
 	tag_fits:    proc(tag: string, v: Value) -> (kept: string, fits: bool),
 }
 
+// `r` with `services`: the readers of a handle, which reach the format's services.
+with_services :: proc "contextless" (r: Readers, services: ^Services) -> Readers {
+	r := r
+	r.services = services
+	return r
+}
+
 // The run-time services of a handle, which a call that chooses its format at run time reaches through
 // `Readers.services`. `build` reads a text into a document and `validate` judges one without building, each as the
 // handle says, see `core.build` and `core.validate`. `scan` reads paths over a text as the handle says into a partial

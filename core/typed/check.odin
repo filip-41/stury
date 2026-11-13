@@ -142,7 +142,7 @@ check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, t
 		fork_release(c, c.fork)
 	}
 	if c.pool != nil {
-		c.pool.repeated, c.pool.repeating, c.pool.leads, c.pool.begun, c.pool.verdicts = nil, nil, nil, c.pool.opened, {}
+		c.pool.repeating, c.pool.leads, c.pool.begun, c.pool.verdicts = nil, nil, c.pool.opened, {}
 	}
 	return
 }
@@ -157,13 +157,24 @@ unmarshal_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: 
 
 // Reads `src` into `target` as `unmarshal_text` does, with every refusal in `read.sink.entries`. Returns the first.
 check_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator := context.allocator) -> core.Error {
-	if plan == nil || plan.check == nil {
+	return check_by(src, handle_of(plan), target, T, plan, read, allocator, plan.check if plan != nil else nil)
+}
+
+// Reads `src` into `target` by `plan` through `check`, a format's check of the handle `as`, with the entries it adds in
+// the order `check_text` gives them. A nil plan or check is `.Plan_Mismatch`.
+check_by :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator, check: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal) -> core.Error {
+	if plan == nil || check == nil {
 		return core.error_of(plan_mismatch(plan, nil, T))
 	}
 	from := len(read.sink.entries) if read.sink != nil else 0
-	refused := plan.check(src, plan.as, target, T, plan, read, allocator)
+	refused := check(src, as, target, T, plan, read, allocator)
 	order_entries(read.sink, from)
 	return core.error_of(refused)
+}
+
+// The handle `plan` reads by, or the zero handle for a nil plan, which a read refuses before it reads.
+handle_of :: proc "contextless" (plan: ^Plan) -> core.As {
+	return plan.as if plan != nil else {}
 }
 
 // Whether the keys of an object at record `owner`'s use reach `check_key` whatever the cursor predicts: the object's names are
@@ -1097,7 +1108,11 @@ rejudged :: proc(own: ^Sink, e: core.Typed_Refusal) -> (first: core.Typed_Refusa
 // refusal back, so the caller reads again judging repeats.
 @(private)
 repeat_may_retract :: proc(r: ^Reader) -> bool {
-	return object_open(r) && text_repeats(r)
+	if !object_open(r) {
+		return false
+	}
+	known := repeating_containers(r)
+	return known.every || len(known.at) > 0
 }
 
 // Whether `r` has an object open at frame `from` or past it, a struct's among them.
@@ -1109,21 +1124,6 @@ object_open :: proc(r: ^Reader, from := 1) -> bool {
 		}
 	}
 	return false
-}
-
-// Whether a key repeats in an object of the text a check reads, or a build that refuses repeats could not tell, as for a
-// text that holds more than one value.
-@(cold)
-@(private)
-text_repeats :: proc(r: ^Reader) -> bool {
-	doc, built := text_built(r)
-	defer core.destroy(&doc)
-	if !built {
-		return true
-	}
-	at := make([dynamic]u64, context.temp_allocator)
-	holds, kept := repeats_inside(&doc, core.ROOT, &at)
-	return holds || !kept
 }
 
 // The document of the text a check reads, keeping every member, in the temp allocator: built by the plan's own build,

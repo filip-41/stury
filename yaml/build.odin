@@ -23,8 +23,8 @@ build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.
 }
 
 // The path reads of `core/build`. `scan`, `each_answer`, `find` and `set` take `spec` and `opts`. A read walks the text
-// once, skipping what no path needs, and builds the document only when it reaches an alias. `read.dups` picks among a repeated key, and `.Refuse` builds the whole
-// text.
+// once, skipping what no path needs, and builds the document only when it reaches an alias. `read.dups` picks among a
+// repeated key, and `.Refuse` builds the whole text.
 scan :: proc {scan_one, scan_many}
 
 @(private)
@@ -34,12 +34,7 @@ scan_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := O
 
 @(private)
 scan_many :: proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
-	if read.dups == .Refuse {
-		built, e := build(src, spec, opts, .Refuse, allocator)
-		return engine.query_built(&built, e, paths, read)
-	}
-	doc, err := scan_as(src, bound_as(spec, opts), paths, read, nil, nil, allocator)
-	return doc, core.error_of(err)
+	return engine.scan_with(src, bound_as(spec, opts), paths, read, allocator, build_as, scan_as)
 }
 
 each_answer :: proc {each_answer_one, each_answer_many}
@@ -51,16 +46,7 @@ each_answer_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, st
 
 @(private)
 each_answer_many :: proc(src: []u8, spec: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
-	if read.dups == .Refuse {
-		built, e := build(src, spec, opts, .Refuse, allocator)
-		core.destroy(&built)
-		if e != nil {
-			return e
-		}
-	}
-	doc, err := scan_as(src, bound_as(spec, opts), paths, read, state, on, allocator)
-	core.destroy(&doc)
-	return core.error_of(err)
+	return engine.each_answer_with(src, bound_as(spec, opts), paths, state, on, read, allocator, build_as, scan_as)
 }
 
 // The answers `each_answer` gives, as an iterator that `next` takes them from: `for a in yaml.next(&it)`. A loop that
@@ -70,48 +56,17 @@ answers :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Op
 }
 
 find :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
-	one := path
-	one.limit = min(path.limit.? or_else 1, 1)
-	doc, err = scan_one(src, spec, one, opts, read, allocator)
-	answer = doc.answers[0] if len(doc.answers) > 0 else {core.NO_NODE, core.NO_NODE, 0, .Missing}
-	return
+	doc, err = scan_one(src, spec, engine.first_path(path), opts, read, allocator)
+	return doc, engine.first_answer(&doc), err
 }
 
 // Makes `v` the value at every answer of `path` over `src`, a text of one document, in one call, and returns the new
 // text, which the caller frees with `allocator`, keeping every byte the edit does not reach. A `typed.Raw` is the text
 // of a value, a struct, a slice or a map is built by `plan`, and any other value is spelled by the format. A `Name` the
-// path ends in that its container lacks is inserted after the container's last member. `read.dups` picks among a repeated key as
-// `query` does, and sets each repeat under `.All`.
+// path ends in that its container lacks is inserted after the container's last member. `read.dups` picks among a
+// repeated key as `query` does, and sets each repeat under `.All`.
 set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	scratch: cw.Scratch
-	defer cw.scratch_destroy(&scratch)
-	in_ := cw.edit_input(v, plan, &scratch) or_return
-	doc, berr := build(src, spec, opts, read.dups, allocator)
-	defer core.destroy(&doc)
-	if berr != nil {
-		return nil, berr
-	}
-	list := edit_list_init(&doc, spec, allocator)
-	defer core.edit_list_destroy(&list)
-	return engine.set_answers(&list, path, in_, read, allocator)
-}
-
-// Answers `path` or `paths` over a document built whole, as `core.query` does. A document an entry point reads holds
-// no services, so `core.query` does not answer for it.
-query :: proc {query_one, query_many}
-
-@(private)
-query_one :: proc(doc: ^core.Document, path: core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Error) {
-	return query_many(doc, []core.Path{path}, read, allocator)
-}
-
-@(private)
-query_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Error) {
-	if doc == nil || doc.readers == nil {
-		return nil, core.error_of(core.Path_Error{kind = .Unsupported})
-	}
-	found, refusal := engine.query(doc, paths, read, allocator)
-	return found, core.error_of(refusal)
+	return cw.set_with(src, bound_as(spec, opts), build_as, &EDIT, path, v, plan, read, allocator)
 }
 
 // Returns an edit list over `doc`. A document an entry point reads holds no edit services, so the list takes the

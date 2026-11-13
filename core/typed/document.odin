@@ -174,7 +174,17 @@ check_built_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core
 	case .Duplicate_Key:
 		return {kind = .Duplicate_Key, at = built.at}
 	case:
-		return {kind = .Walk, at = built.at, inner = built.inner}
+		// The fault is the one entry of a check that met it before any token. No refusal holds the check or its
+		// frames, which the stack escape check cannot see through a `Check`'s base `Reader`.
+		frames: [4]Frame = ---
+		held := ([^]Frame)(uintptr(raw_data(frames[:])))[:len(frames)]
+		h: Check
+		regs, err := check_start(&h, src, plan, as, T, target, read, held, allocator)
+		if err.kind != .None {
+			return err
+		}
+		defer read_release(&h, held)
+		return read_end(&h, regs, built.inner)
 	}
 	if doc.clash != 0 && read.dups != .First && read.dups != .All {
 		return {kind = .Duplicate_Key, at = doc.clash}

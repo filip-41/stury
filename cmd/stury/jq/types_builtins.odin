@@ -1,12 +1,12 @@
 package jq
 
-// The builtins, typed (types.odin). What the prelude defines in jq is typed through its definition.
+// Types the builtins (types.odin). A builtin the prelude writes in jq is typed through its definition.
 
 import "core:slice"
 import "../../../core/rules"
 
-// What a call of a builtin gives on `dot`, and whether `n` calls one. A builtin of a fixed input refuses an input of no
-// kind it takes, and the table (`Builtin`) types what it can.
+// What a call of a builtin gives on `dot`, and whether `n` calls a builtin. An input of no kind the builtin's
+// `takes` lists is refused. The table (`Builtin`) types the builtins the switch below does not name.
 @(private)
 builtin_type :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> (Ty, bool) {
 	b, native := n.native.?
@@ -17,7 +17,7 @@ builtin_type :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> (Ty, bool) {
 		return type_of(t, n.args[i], dot, f)
 	}
 	kinds :: kinds_node
-	// A builtin the prelude calls is named by the call outside it.
+	// Inside a prelude definition, a refusal names the filter's own call.
 	named := t.site if t.site != nil else n
 	arity := len(named.args)
 	k, unknown := kinds_of(t, dot)
@@ -42,7 +42,7 @@ builtin_type :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> (Ty, bool) {
 		t.soft -= 1
 		return array_of(t, kinds(t, {.String, .Integer})), true
 	case "sub", "gsub":
-		// The replacement reads each match's captures.
+		// The replacement runs on an object that holds the match's captures.
 		for a, i in n.args {
 			type_of(t, a, loose(t, {.Object}) if i == 1 else dot, f)
 		}
@@ -93,7 +93,7 @@ builtin_type :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> (Ty, bool) {
 	case "input", "inputs":
 		return t.root, true
 	case "getpath":
-		// A literal path reads as its steps do, and fails where they would, but on null.
+		// A literal path reads as its steps would, and fails where they would, except that null gives null.
 		if p := n.args[0]; p.kind == .Literal && kind(p.value) == .Array {
 			at := dot
 			for i in 0 ..< length_of(p.value) {
@@ -103,7 +103,9 @@ builtin_type :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> (Ty, bool) {
 			return at, true
 		}
 	case "setpath", "delpaths":
-		arg_all(t, n, dot, f)
+		for a in n.args {
+			type_of(t, a, dot, f)
+		}
 		if unknown {
 			return t.unknown, true
 		}
@@ -137,7 +139,7 @@ builtin_type :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> (Ty, bool) {
 	return t.unknown, true
 }
 
-// Whether every array `dot` takes holds at least two elements, so that `join` adds its separator to a string.
+// Whether every array of `dot` has at least two elements, so that `join` writes its separator into the string.
 @(private = "file")
 pair_input :: proc(t: ^Typer, dot: Ty) -> bool {
 	split := branches(t, dot)
@@ -187,13 +189,6 @@ nonempty_paths :: proc(p: ^Node) -> bool {
 		}
 	}
 	return true
-}
-
-@(private = "file")
-arg_all :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) {
-	for a in n.args {
-		type_of(t, a, dot, f)
-	}
 }
 
 // `{key, value}` for a member of `dot`.

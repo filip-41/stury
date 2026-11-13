@@ -103,3 +103,21 @@ check_takes_a_list_of_repeated_elements :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(sink.entries), 0)
 	testing.expect_value(t, len(v.ul.li), 2)
 }
+
+// A nil `any` is a null, which HTML cannot write at the top, so it is refused as any null is.
+@(test)
+a_nil_any_is_refused_as_a_null :: proc(t: ^testing.T) {
+	nothing: any
+	text, err := html.marshal(nothing, allocator = context.temp_allocator)
+	testing.expect(t, text == nil)
+	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
+}
+
+// A check with no plan is a plan mismatch.
+@(test)
+a_check_with_no_plan_is_a_mismatch :: proc(t: ^testing.T) {
+	v: struct {
+		a: int,
+	}
+	walktest.expect_kind(t, html.check(transmute([]u8)string("<p>1</p>"), .Document, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
+}

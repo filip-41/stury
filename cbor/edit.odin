@@ -14,7 +14,6 @@ import "base:runtime"
 import "core:encoding/endian"
 import "core:slice"
 import core "../core"
-import engine "../core/build"
 import typed "../core/typed"
 import write "../core/write"
 
@@ -42,17 +41,7 @@ edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.all
 // struct, a slice or a map is built by `plan`, and any other value is written as a CBOR item. A `Name` the path ends in
 // that its map lacks is inserted after the map's last member.
 set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	scratch: write.Scratch
-	defer write.scratch_destroy(&scratch)
-	in_ := write.edit_input(v, plan, &scratch) or_return
-	doc, berr := build(src, spec, opts, read.dups, allocator)
-	defer core.destroy(&doc)
-	if berr != nil {
-		return nil, berr
-	}
-	list := edit_list_init(&doc, spec, allocator)
-	defer core.edit_list_destroy(&list)
-	return engine.set_answers(&list, path, in_, read, allocator)
+	return write.set_with(src, bound_as(spec, opts), build_item, &EDIT, path, v, plan, read, allocator)
 }
 
 // Checks `src` as exactly one item of the document's spec.

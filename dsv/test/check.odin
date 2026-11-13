@@ -7,6 +7,7 @@ import typed "../../core/typed"
 import schema "../../core/schema"
 import dsv ".."
 import json "../../json"
+import walktest "../../walktest"
 
 // The check of a delimited text and document against a schema: each cell reads as the kind its leaf allows, an empty cell
 // is an absent member, and one schema judges the same records alike in JSON, JSON5, CSV and TSV.
@@ -420,4 +421,13 @@ check_from_dsv_names :: proc(t: ^testing.T) {
 	_, unbound := schema.bind(s, {layout = dsv.as(.Csv)})
 	e, refused := unbound.(core.Typed_Error)
 	testing.expect_value(t, refused && e.kind == .Plan_Mismatch, true)
+}
+
+// A check with no plan is a plan mismatch.
+@(test)
+a_check_with_no_plan_is_a_mismatch :: proc(t: ^testing.T) {
+	v: struct {
+		a: int,
+	}
+	walktest.expect_kind(t, dsv.check(transmute([]u8)string("a\n1\n"), .Csv, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
 }

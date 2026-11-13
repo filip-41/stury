@@ -1,12 +1,13 @@
 package jq
 
-// A filter typed by the description of its input (core/rules), before any input is read. Each form gives a node of a
-// description that every output of the form passes: a rule the typing cannot follow is left out, never assumed. A
-// step that no value of the input can take is refused: an index of a kind that holds no member, an operator or a
-// builtin on kinds it does not take, and a member that no object of the description describes where the description
-// lists the members of each object. The typing's description starts with the input's nodes, so a member keeps the
-// input's description of it and a `$ref` still reaches its node. `unknown` is a value the typing cannot describe: any
-// value, from which nothing read is refused. types_eval.odin types the forms and types_builtins.odin the builtins.
+// Types a filter by the description of its input (core/rules), before any input is read. Each form gives a node
+// that every output of the form passes. A rule the typing cannot follow is left out, never assumed. A step that no
+// value of the input can take is refused: an index on a kind that holds no member, an operator or a builtin on kinds
+// it does not take, and a member that no object of the description describes, where the description lists the
+// members of each object. The typing's description starts with the input's nodes, so a member keeps the input's
+// description of it and a `$ref` still reaches its target. `unknown` stands for a value the typing cannot describe.
+// It takes any value, and nothing read from it is refused. types_eval.odin types the forms, types_builtins.odin the
+// builtins.
 
 import "core:math"
 import "core:slice"
@@ -16,9 +17,9 @@ import "../../../core/regex"
 import "../../../core/rules"
 
 // How the run reads its inputs: on null under `null_input`, as one array of them under `slurp`, as strings under
-// `raw`. Under `cells` an input is a record of a table, whose cells are strings or null, and numbers and booleans too under
-// `infer`, and which is an array of its cells under `no_header`. `names` and `values` are the command line's
-// variables, and `text` the filter's text, which a refusal points into.
+// `raw`. Under `cells` an input is a record of a table, whose cells are strings or null, and numbers and booleans
+// too under `infer`, and which is an array of its cells under `no_header`. `names` and `values` are the command
+// line's variables, and `text` the filter's text, which a refusal points into.
 Typing_Input :: struct {
 	null_input, slurp, raw:  bool,
 	cells, infer, no_header: bool,
@@ -27,7 +28,7 @@ Typing_Input :: struct {
 	text:                    string,
 }
 
-// The typing of a filter: `d` holds the input's nodes and the typing's, with `root` the node every output passes.
+// The typing of a filter. `d` holds the input's nodes and the typing's, and its `root` is the node every output passes.
 Typing :: struct {
 	d:        rules.Description,
 	refusals: []Compile_Error,
@@ -45,24 +46,24 @@ Typer :: struct {
 	told:     map[Loc]struct{},
 	steps:    int,
 	nesting:  int,
-	// Inside `try` and `?`, where a step that fails is the filter's own choice, and inside a path
-	// that an update or `path` reads, where a member that is not there is made.
+	// `quiet` counts the open `try` and `?`, where a step that fails is the filter's own choice. `soft` counts the
+	// open paths an update or `path` reads, where a member that is not there is made.
 	quiet:    int,
 	soft:     int,
-	// Inside the rounds of a fixpoint, whose refusals are told on the state it settles on.
+	// Counts the open rounds of a fixpoint. Their refusals are told once, on the state it settles on.
 	held:     int,
-	// The call of a definition of the prelude made outside it, which the refusals inside it are told at and named by.
+	// The filter's own call of a prelude definition. Refusals inside the definition are told at this call and name it.
 	site:     ^Node,
 	active:   map[^Func]int,
 	resource: Ty,
 	unknown, any, never, null, empty: Ty,
-	// The nodes and the objects of the input's description. The ones after are the typing's.
+	// How many nodes and objects the input's description holds. Those past them are the typing's.
 	input_nodes, input_objects: int,
 	plain:    map[Ty]rules.Kinds,
 	unions:   map[Ty][]Ty,
 	split:    map[Ty]Branches,
 	memo:     map[string]Ty,
-	patterns: map[string]^regex.Regex,
+	patterns: rules.Programs,
 	scratch:  regex.Scratch,
 }
 
@@ -72,28 +73,28 @@ Branches :: struct {
 	complete: bool,
 }
 
-// Work the typing does, a step a form typed, a node made, read or split, before what is left is unknown.
+// Units of work before the rest of the typing is unknown: a form typed, a node made, read or split.
 @(private)
 TYPE_STEPS :: 200_000
 
-// Forms open at once before an inner one is unknown.
+// Forms open at once. A form nested deeper is unknown.
 @(private)
 MAX_NESTING :: 512
 
-// Calls of one function open at once before a deeper one is unknown.
+// Calls of one function open at once. A deeper call is unknown.
 @(private)
 MAX_RECURSION :: 2
 
-// Arms of a choice, the conjunctions a node splits into or the arms of a union, past which it is unknown.
+// Arms of a choice (the conjunctions a node splits into, or the arms of a union). A choice with more is unknown.
 @(private)
 MAX_ARMS :: 64
 
-// Rounds of a fixpoint (a fold's state, a recursion's values) before it is unknown.
+// Rounds of a fixpoint (a fold's state, a recursion's values). One that has not settled by then is unknown.
 @(private)
 MAX_ROUNDS :: 16
 
-// `prog`, as `check` returns it, typed against the description `input` of what it reads. Every allocation is made in
-// `context.allocator`, which the caller frees as a whole.
+// Types `prog`, as `check` returns it, against the description `input` of what it reads. Every allocation is made
+// in `context.allocator`, which the caller frees as a whole.
 type_filter :: proc(prog: ^Node, input: ^rules.Description, opts: Typing_Input) -> Typing {
 	t := new(Typer)
 	t.d = new(rules.Description)
@@ -103,7 +104,7 @@ type_filter :: proc(prog: ^Node, input: ^rules.Description, opts: Typing_Input) 
 	t.d.objects = slice.clone_to_dynamic(input.objects[:])
 	t.d.texts = {}
 	t.d.allocator = context.allocator
-	// Draft 4's integer refuses `1.0`, which no 2020-12 keyword says, so the typing takes the integers of 2020-12.
+	// Draft 4's integer refuses `1.0` and no 2020-12 keyword can say so, so the typing uses 2020-12 integers.
 	for &n in t.d.nodes {
 		n.integer_spelled = false
 	}
@@ -130,11 +131,11 @@ type_filter :: proc(prog: ^Node, input: ^rules.Description, opts: Typing_Input) 
 	return {t.d^, t.refusals[:]}
 }
 
-// A record of a table, as `check --schema` reads a table: an element of the array the description's root describes. It
-// is an object of the members the root's `items` list, each a cell and required where every row's object requires it.
-// A row object that leaves other members undescribed leaves them so here, one whose other members a schema takes, or a
-// row that may be anything, takes any member as a cell. Under `no_header` a record is an array of cells. A root that
-// takes no array describes no table, and so no record.
+// A record of a table, as `check --schema` reads a table: an element of the array the description's root
+// describes. It is an object of the members the root's `items` list, each a cell, required where every row object
+// requires it. Where a row object leaves its other members undescribed, the record does too. Where a schema takes
+// them, or a row may be anything, the record takes any other member as a cell. Under `no_header` a record is an
+// array of cells. A root that takes no array describes no table, and so no record.
 @(private = "file")
 cells_record :: proc(t: ^Typer) -> Ty {
 	cell := kinds_node(t, {.String, .Null} + ({.Number, .Bool} if t.input.infer else {}))
@@ -143,6 +144,7 @@ cells_record :: proc(t: ^Typer) -> Ty {
 	}
 	members := make([dynamic]rules.Member, context.temp_allocator)
 	required := make(map[string]int, context.temp_allocator)
+	listed := make(map[string]struct{}, context.temp_allocator)
 	tables := branches(t, t.d.root)
 	open, undescribed, described, objects := !tables.complete, false, false, 0
 	for table in tables.of {
@@ -171,7 +173,8 @@ cells_record :: proc(t: ^Typer) -> Ty {
 						if m.required {
 							required[m.name] += 1
 						}
-						if !m.only_required && !slice.contains(member_names(members[:]), m.name) {
+						if !m.only_required && m.name not_in listed {
+							listed[m.name] = {}
 							append(&members, rules.Member{name = m.name, node = cell})
 						}
 					}
@@ -189,15 +192,6 @@ cells_record :: proc(t: ^Typer) -> Ty {
 		m.required = !open && required[m.name] == objects
 	}
 	return object_of(t, members[:], cell if open || len(members) == 0 else rules.NONE if undescribed else t.never)
-}
-
-@(private = "file")
-member_names :: proc(members: []rules.Member) -> []string {
-	names := make([]string, len(members), context.temp_allocator)
-	for m, i in members {
-		names[i] = m.name
-	}
-	return names
 }
 
 // ---- Nodes
@@ -218,7 +212,7 @@ made :: proc(t: ^Typer, n: rules.Node) -> Ty {
 	return Ty(len(t.d.nodes) - 1)
 }
 
-// The node of `kinds` and no rule, made once. `Number` takes the integers too, and is written without them.
+// The node of `kinds` and no rule, made once per set. `Number` includes the integers, and is written without them.
 @(private)
 kinds_node :: proc(t: ^Typer, of: rules.Kinds) -> Ty {
 	kinds := closure(of)
@@ -234,7 +228,7 @@ kinds_node :: proc(t: ^Typer, of: rules.Kinds) -> Ty {
 	return id
 }
 
-// The node a key in `t.memo` names, or the one `n` makes, kept under it.
+// The node `key` names in `t.memo`, or else a new one made of `n` and kept under `key`.
 @(private)
 memoized :: proc(t: ^Typer, key: string, n: rules.Node) -> Ty {
 	if id, found := t.memo[key]; found {
@@ -317,7 +311,7 @@ value_type :: proc(t: ^Typer, v: Value) -> Ty {
 	return memoized(t, message.build_temp("c%s", to_json(v, allocator = context.temp_allocator)), n)
 }
 
-// The kinds of `values`, a whole number an integer.
+// The kinds of `values`. A whole number counts as an integer.
 @(private)
 value_kinds :: proc(values: ..Value) -> (k: rules.Kinds) {
 	for v in values {
@@ -335,7 +329,7 @@ value_kinds :: proc(values: ..Value) -> (k: rules.Kinds) {
 	return
 }
 
-// Whether `id` is a finite number, `nonzero` whether it is not zero: a constant one.
+// Whether `id` is a constant finite number, and whether that constant is not zero.
 @(private)
 finite :: proc(t: ^Typer, id: Ty) -> (finite, nonzero: bool) {
 	c, has := t.d.nodes[id].const_of.?
@@ -363,8 +357,8 @@ names_node :: proc(t: ^Typer, names: []string, note := "") -> Ty {
 	return made(t, n)
 }
 
-// Any value of `parts`. Equal arms merge, plain kinds join into one, `never` drops out and `unknown` takes the rest. The
-// empty array drops out beside an array the typing made, which takes it.
+// Any value of `parts`. Equal arms merge, plain kinds join into one, `never` drops out and `unknown` takes the
+// rest. The empty array drops out beside an arm that takes it.
 @(private)
 union_of :: proc(t: ^Typer, parts: ..Ty) -> Ty {
 	arms := make([dynamic]Ty, 0, 8, context.temp_allocator)
@@ -409,7 +403,7 @@ union_of :: proc(t: ^Typer, parts: ..Ty) -> Ty {
 	return id
 }
 
-// Whether `[]` passes `id` by its own keywords, which apply nothing in place.
+// Whether `[]` passes `id` by its own keywords, where `id` applies no other schema in place.
 @(private = "file")
 takes_empty_array :: proc(t: ^Typer, id: Ty) -> bool {
 	n := &t.d.nodes[id]
@@ -440,7 +434,7 @@ gather :: proc(t: ^Typer, id: Ty, arms: ^[dynamic]Ty, kinds: ^rules.Kinds) -> bo
 	return true
 }
 
-// A value that passes every one of `parts`. `unknown` adds nothing to the others, and alone is unknown.
+// A value that passes every one of `parts`. `unknown` adds nothing beside other parts, and alone gives unknown.
 @(private)
 all_of :: proc(t: ^Typer, parts: []Ty) -> Ty {
 	kept := make([dynamic]Ty, 0, len(parts), context.temp_allocator)
@@ -468,7 +462,7 @@ all_of :: proc(t: ^Typer, parts: []Ty) -> Ty {
 	return memoized(t, key, n)
 }
 
-// What of `id` is of `kinds`, a union arm by arm. The value is the one `id` holds, with its rules.
+// The values of `id` that are of `kinds`, a union narrowed arm by arm. They keep the rules `id` has.
 @(private)
 restrict :: proc(t: ^Typer, id: Ty, kinds: rules.Kinds) -> Ty {
 	if arms, is_union := t.unions[id]; is_union {
@@ -498,7 +492,7 @@ closure :: proc(kinds: rules.Kinds) -> rules.Kinds {
 
 // ---- Reading a description
 
-// The conjunctions that `id` alternates between (`rules.branches`), split once a node.
+// The conjunctions that `id` alternates between (`rules.branches`), split once per node.
 @(private)
 branches :: proc(t: ^Typer, id: Ty) -> Branches {
 	if s, found := t.split[id]; found {
@@ -544,10 +538,10 @@ kinds_of :: proc(t: ^Typer, id: Ty) -> (k: rules.Kinds, unknown: bool) {
 	return
 }
 
-// What a step finds in a value: `value`, what it reads where it reads something, `absent` and `nulls` whether it may
-// find nothing or a null instead, `holds` whether a value of the kind it reads may be there, and `described` whether
-// the description says what it reads. `others` are the other kinds it may meet, `unknown` whether the typing does not
-// know the value, and `names` the members the description names, for a suggestion.
+// What a step finds in a value. `value` is what it reads where it reads something. `absent` and `nulls` say whether
+// it may find nothing or a null instead, `holds` whether a value of the kind it reads may be there, and `described`
+// whether the description says what it reads. `others` are the other kinds it may meet, `unknown` says the typing
+// does not know the value, and `names` are the members the description names, for a suggestion.
 @(private)
 Read :: struct {
 	value:                  Ty,
@@ -604,7 +598,7 @@ read :: proc(t: ^Typer, id: Ty, how: Reading, name := "", at := -1) -> (r: Read)
 				if u, has := n.unevaluated_properties.?; has {
 					listed = true
 					described ||= t.d.nodes[u].kinds != {}
-					// A node that applies no other schema in place evaluates only what its own object does.
+					// A node that applies no other schema in place evaluates only the members its own object does.
 					if !evaluated && !applies_in_place(t, n) {
 						append(&conj, u)
 					}
@@ -686,7 +680,7 @@ member :: proc(t: ^Typer, o: ^rules.Object, name: string, conj: ^[dynamic]Ty, r:
 		described^ ||= t.d.nodes[o.additional].kinds != {}
 	}
 	described^ ||= named || matched
-	// A dependent schema applies where its member is there, so what it describes may be there.
+	// A dependent schema applies when its member is present, so the members it describes may be present.
 	for x in o.dependents {
 		dependent, has := x.node.?
 		if !has || described^ {
@@ -703,14 +697,14 @@ member :: proc(t: ^Typer, o: ^rules.Object, name: string, conj: ^[dynamic]Ty, r:
 	return named || matched || o.additional != rules.NONE
 }
 
-// Whether `n` applies a schema in place beside its own keywords, which may evaluate members its object does not.
+// Whether `n` applies a schema in place beside its own keywords. That schema may evaluate members its object does not.
 @(private = "file")
 applies_in_place :: proc(t: ^Typer, n: ^rules.Node) -> bool {
 	dependents := n.object >= 0 && len(t.d.objects[n.object].dependents) > 0
 	return len(n.all_of) + len(n.any_of) + len(n.one_of) > 0 || n.ref != nil || n.dynamic_ref != nil || n.cond.test != nil || dependents
 }
 
-// What a node's `const` or `enum` of objects says of the member `name`: the values of it they hold.
+// What a node's `const` or `enum` of objects says of the member `name`: the values they hold for it.
 @(private = "file")
 constant_member :: proc(t: ^Typer, n: ^rules.Node, name: string, conj: ^[dynamic]Ty, listed, described: ^bool) {
 	one: [1]Value
@@ -743,7 +737,7 @@ constant_member :: proc(t: ^Typer, n: ^rules.Node, name: string, conj: ^[dynamic
 	}
 }
 
-// The node of a member, with the rules its use adds, made once a member.
+// The node of a member with the rules the member adds, made once per member.
 @(private = "file")
 member_node :: proc(t: ^Typer, m: ^rules.Member) -> Ty {
 	if m.rules == {} {
@@ -758,22 +752,15 @@ member_node :: proc(t: ^Typer, m: ^rules.Member) -> Ty {
 	return memoized(t, message.build_temp("m%d", uintptr(m)), n)
 }
 
-// Whether the ECMA pattern `expression` finds a match in `name`. A pattern that does not compile matches, which only
-// takes more values.
+// Whether the ECMA pattern `expression` finds a match in `name`. A pattern that does not compile matches, since
+// that can only take more values.
 @(private = "file")
 matches :: proc(t: ^Typer, expression, name: string) -> bool {
-	re, compiled := t.patterns[expression]
-	if !compiled {
-		r, err := regex.compile(expression, {ecma = true})
-		if err == "" {
-			re = new_clone(r)
-		}
-		t.patterns[expression] = re
-	}
-	if re == nil {
+	re, compile_err := rules.program_of(&t.patterns, expression, context.allocator)
+	if compile_err != "" {
 		return true
 	}
-	found, err := regex.search(re, name, 0, nil, &t.scratch)
+	found, err := regex.search((^regex.Regex)(re), name, 0, nil, &t.scratch)
 	return found || err != ""
 }
 
@@ -796,8 +783,8 @@ read_iterated :: proc(t: ^Typer, id: Ty) -> (r: Read) {
 
 // ---- Refusals
 
-// Tells a refusal at `loc`, once a place, or at the call of the prelude's definition it is in. Inside a fixpoint's
-// rounds nothing is told.
+// Tells a refusal at `at`, or at the call of the prelude definition it is in, once per place. Nothing is told inside
+// a fixpoint's rounds.
 @(private)
 refuse :: proc(t: ^Typer, at: Loc, format: string, args: ..any) {
 	loc := t.site.loc if t.site != nil else at
@@ -823,7 +810,7 @@ kinds_text :: proc(kinds: rules.Kinds) -> string {
 	return strings.to_string(b)
 }
 
-// jq's names of the kinds, in jq's order.
+// jq's names of the kinds, in the order jq sorts them.
 @(private, rodata)
 JQ_KINDS := [?]struct {
 	name:  string,

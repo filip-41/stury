@@ -244,7 +244,7 @@ plain :: core.plain
 plan_make :: #force_inline proc(T: typeid, spec := Spec.Json, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 plan_of :: proc(d: ^rules.Description, spec := Spec.Json, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
-query :: proc {query_one, query_many}
+query :: build.query_doc
 reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads
 record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs
 records_build :: records.build
@@ -484,7 +484,7 @@ parse_pointer :: core.parse_pointer
 plain :: core.plain
 plan_make :: proc(T: typeid, spec := Spec.Csv, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
-query :: proc {query_one, query_many}
+query :: build.query_doc
 reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads
 record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs
 records_build :: records.build
@@ -726,7 +726,7 @@ plain :: core.plain
 plan_make :: proc(T: typeid, spec := Spec.Toml_1_0, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 plan_of :: proc(d: ^rules.Description, spec := Spec.Toml_1_0, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
-query :: proc {query_one, query_many}
+query :: build.query_doc
 reads :: proc "contextless" (spec: Spec) -> ^typed.Format_Reads
 record_docs :: proc "contextless" (spec: Spec) -> ^records.Record_Docs
 records_build :: records.build
@@ -957,7 +957,6 @@ new_array :: core.new_array
 new_object :: core.new_object
 next :: build.answers_next
 noted :: core.noted
-number :: core.markup_number
 object_put :: core.object_put
 open_array :: write.open_array
 open_object :: write.open_object
@@ -969,7 +968,7 @@ parse_pointer :: core.parse_pointer
 plain :: core.plain
 plan_make :: proc(T: typeid, spec := Spec.Xml, opts := Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
-query :: proc {query_one, query_many}
+query :: build.query_doc
 record_docs :: proc "contextless" (spec: Spec) -> ^records.Record_Docs
 records_build :: records.build
 records_check :: proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> ([]core.Fault, runtime.Allocator_Error)
@@ -1211,7 +1210,7 @@ plain :: core.plain
 plan_make :: proc(T: typeid, spec := Spec.Yaml_1_2, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 plan_of :: proc(d: ^rules.Description, spec := Spec.Yaml_1_2, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
-query :: proc {query_one, query_many}
+query :: build.query_doc
 reads :: proc "contextless" (spec: Spec) -> ^typed.Format_Reads
 record_docs :: proc "contextless" (spec: Spec) -> ^records.Record_Docs
 records_build :: records.build
@@ -1452,7 +1451,7 @@ plain :: core.plain
 plan_make :: proc(T: typeid, spec := Spec.Cbor, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 plan_of :: proc(d: ^rules.Description, spec := Spec.Cbor, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
-query :: proc {query_one, query_many}
+query :: build.query_doc
 reads :: proc "contextless" (spec: Spec) -> ^typed.Format_Reads
 record_docs :: proc "contextless" (spec: Spec) -> ^records.Record_Docs
 records_build :: records.build
@@ -1685,7 +1684,6 @@ new_array :: core.new_array
 new_object :: core.new_object
 next :: build.answers_next
 noted :: core.noted
-number :: core.markup_number
 object_put :: core.object_put
 open_array :: write.open_array
 open_object :: write.open_object
@@ -1697,7 +1695,7 @@ parse_pointer :: core.parse_pointer
 plain :: core.plain
 plan_make :: proc(T: typeid, spec := Spec.Document, opts := Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error)
 pool_init :: host.pool_init
-query :: proc {query_one, query_many}
+query :: build.query_doc
 record_docs :: proc "contextless" (spec: Spec) -> ^records.Record_Docs
 records_build :: records.build
 records_check :: proc(src: []u8, spec: Spec, opts := Options{}, framing := core.Framing.Concatenated, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> ([]core.Fault, runtime.Allocator_Error)
@@ -1806,7 +1804,6 @@ fact_token :: #force_inline proc "contextless" (f: Fact) -> Token
 hold :: proc "contextless" (s: ^Holding($H), e: Held_Token) -> bool
 lent :: #force_inline proc(a: ^Array) -> bool
 markup_kind :: proc(text: []u8, infer: bool) -> Kind
-markup_number :: proc(v: ^Token_View, t: Token) -> (Number, bool)
 number :: proc { doc_number, value_number, }
 number_text :: proc(text: string, allocator := context.allocator) -> ^Number_Text
 path_destroy :: proc(p: ^Path)
@@ -1890,6 +1887,8 @@ each_answer_many :: proc(src: []u8, as: core.As, paths: []core.Path, state: rawp
 each_answer_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, allocator := context.allocator) -> core.Error
 find :: proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error)
 query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error)
+query_doc_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Error)
+query_doc_one :: proc(doc: ^core.Document, path: core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Error)
 scan :: proc {scan_one, scan_many}
 scan_many :: proc(src: []u8, as: core.As, paths: []core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error)
 scan_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error)

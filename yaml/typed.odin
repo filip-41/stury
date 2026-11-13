@@ -1,9 +1,8 @@
 package yaml
 
 // The typed read of YAML: `unmarshal` reads a document into a value through the document route of `core/typed`, since
-// an alias repeats its anchor's node. A field or a map key is named by a key's decoded text, two keys
-// of one text and two types are refused but under `.First` and `.All`, and a plain scalar is read as the core schema
-// resolves it.
+// an alias repeats its anchor's node. A field or a map key is named by a key's decoded text. Two keys of one text and
+// two types are refused, except under `.First` and `.All`. A plain scalar is read as the core schema resolves it.
 
 import "base:runtime"
 import "core:slice"
@@ -177,16 +176,7 @@ unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, op
 // Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
 // first. The options are the plan's, and any plan of the format reads.
 check :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return check_ordered(src, bound_as(spec, options_of(plan.as)), target, T, plan, read, allocator)
-}
-
-// `text_check` with the entries it adds in the order `typed.check_text` gives them.
-@(private)
-check_ordered :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Error {
-	from := len(read.sink.entries) if read.sink != nil else 0
-	refused := text_check(src, as, target, T, plan, read, allocator)
-	typed.order_entries(read.sink, from)
-	return core.error_of(refused)
+	return typed.check_by(src, bound_as(spec, options_of(typed.handle_of(plan))), target, T, plan, read, allocator, text_check)
 }
 
 // The `spelling` of a number token whose text is `text`: a JSON number carries its digit counts, and any other form

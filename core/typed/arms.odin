@@ -10,13 +10,15 @@ import "core:mem"
 import "core:slice"
 import "core:strings"
 
-// A held record judges its value by its arms, each a record of the plan that a run reads beside the check, fed the
-// value's tokens as the check reads them. Its first arm is the record of its node without the arms, which judges the rest.
+// One arm of a held record. A held record judges its value by its arms: each is a record that a run reads beside the
+// check, fed the value's tokens as the check reads them. The first arm is the record of the node without its arms,
+// which judges everything else.
 @(private)
 Apply :: struct {
 	kind:     Apply_Kind,
 	judge:    Judge,
-	// The arm's record, -1 for an arm that reads none or a `.Choice` arm, and the keyword steps to it from the held record.
+	// The arm's record, -1 for a `.Choice` arm or one that reads no record. `site` holds the keyword steps to it from the
+	// held record.
 	rec:      i32,
 	site:     []core.Step,
 	// The member name a `.Dependent` arm is keyed by or `choices` are picked by, or a `.Pattern`'s expression.
@@ -25,22 +27,22 @@ Apply :: struct {
 	pattern:  rawptr,
 	// The names an `.Additional` arm leaves to the named members' records.
 	names:    []string,
-	// The operands an `.Equal` arm takes, a `const` when `constant` says so, which may be containers, in the order of
-	// their `core.hash` in `hashes`.
+	// The operands of an `.Equal` arm, possibly containers, sorted by their `core.hash` in `hashes`. `constant` marks a
+	// `const` rather than an `enum`.
 	values:   []core.Value,
 	hashes:   []u64,
 	constant: bool,
 	// The elements a `.Contains` arm wants to pass.
 	min, max: u64,
-	// What the held record evaluates, which an `.Unevaluated_Members` or `.Unevaluated_Items` arm judges the rest past.
+	// What the held record evaluates. An `.Unevaluated_Members` or `.Unevaluated_Items` arm judges everything outside it.
 	eval:     ^Evaluates,
-	// What a verdict judges the arm by in place of a run, nil for none.
+	// What a verdict judges the arm by instead of a run, nil to run it.
 	by:       ^Judging,
 }
 
-// How a verdict judges an arm: by a run of its record, by the names its object has, by the arm its object's first
-// member picks among those it stands for, or, for an unevaluated arm whose record takes no value, as failing each member
-// or element it judges.
+// How a verdict judges an arm. `.Run` runs its record, `.Presence` checks which names the object has, `.Choice` lets the
+// object's first member pick one of the arms it stands for, and `.Never` fails every member or element of an
+// unevaluated arm whose record takes no value.
 @(private)
 Judge :: enum u8 {
 	Run,
@@ -49,9 +51,10 @@ Judge :: enum u8 {
 	Never,
 }
 
-// What `Judge` reads: the members an object must have to pass the arm's record when that is all the record judges, or
-// the arms a `.Choice` arm stands for, each an object record whose member `name` has a `const` or `enum` no other
-// choice has, with the operands' enum keys in `rules.enum_sort` order and the choice each is one of in `picks`.
+// What `Judge` reads. For `.Presence`, `present` lists the members an object must have, when that is all the arm's
+// record judges. For `.Choice`, `choices` are the arms it stands for, each an object record whose member `name` has a
+// `const` or `enum` no other choice shares. `keys` holds those enum keys in `rules.enum_sort` order and `picks` the
+// choice each key selects.
 @(private)
 Judging :: struct {
 	present: []string,
@@ -60,7 +63,7 @@ Judging :: struct {
 	picks:   []i32,
 }
 
-// `.All`, `.Any` and `.One` come first, the kinds a run may take a value over under.
+// `.All`, `.Any` and `.One` come first: they are the kinds under which a run may take over a value.
 @(private)
 Apply_Kind :: enum u8 {
 	All, // the value passes the record, whose failures it reports
@@ -97,8 +100,8 @@ holds :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index, edge: 
 	return n.array >= 0 && d.arrays[n.array].contains != nil
 }
 
-// Whether `o`'s `propertyNames` is a schema with arms, which an arm judges each name by, where a leaf judges the rest in
-// the walk.
+// Whether `o`'s `propertyNames` is a schema with arms. An arm then judges each name, where a plain `propertyNames` is
+// judged by a leaf in the walk.
 @(private)
 names_hold :: proc(b: ^Builder, d: ^rules.Description, o: ^rules.Object) -> bool {
 	keys, _ := rules.ref_end(d, o.keys)
@@ -116,7 +119,7 @@ dependent_schemas :: proc(o: ^rules.Object) -> bool {
 	return false
 }
 
-// Whether `n` with `edge` judges anything past its arms.
+// Whether `n` with `edge` judges anything besides its arms.
 @(private)
 bare_judges :: proc(b: ^Builder, d: ^rules.Description, n: ^rules.Node, edge: rules.Rules) -> bool {
 	if edge != {} || n.kinds != rules.EVERY_KIND || n.rules != {} || n.has_enum || n.const_of != nil || n.object in b.inline {
@@ -128,8 +131,8 @@ bare_judges :: proc(b: ^Builder, d: ^rules.Description, n: ^rules.Node, edge: ru
 	return n.array >= 0 && (len(d.arrays[n.array].prefix) > 0 || d.arrays[n.array].items != rules.NONE)
 }
 
-// Whether arms compare `n`'s `const` and `enum`: when one holds a container, as a leaf compares only scalars, or when
-// both are present, as a leaf judges them as one and an arm each reports its own failure.
+// Whether arms compare `n`'s `const` and `enum`: when one holds a container, since a leaf compares only scalars, or
+// when both are present, since a leaf judges them together and each arm reports its own failure.
 @(private)
 arm_operands :: proc(n: ^rules.Node) -> bool {
 	if n.const_of != nil && n.has_enum {
@@ -146,7 +149,8 @@ arm_operands :: proc(n: ^rules.Node) -> bool {
 	return false
 }
 
-// The arms of a held use of `node` with `edge`, in `arena`, and those a check with no sink reads, nil for the same.
+// The arms of a held use of `node` with `edge`, in `arena`, and the arms a check with no sink reads instead, nil when
+// they are the same.
 @(private)
 checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, node: rules.Node_Index, edge: rules.Rules) -> (applies, verdict: []Apply) {
 	n := d.nodes[node]
@@ -160,8 +164,7 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 		}
 		return &out[len(out) - 1]
 	}
-	// The record of the node without its arms, which only its uses with no rules of their own share, and none when it
-	// judges nothing.
+	// The record of the node without its arms, shared only by uses with no rules of their own, -1 when it judges nothing.
 	key := block_key(typeid_of(rules.Rules), i32(node), b.scope) if edge == {} else block_key(typeid_of(Use), i32(len(b.fields)), 0)
 	base, known := b.blocks[key]
 	if !known && bare_judges(b, d, &n, edge) {
@@ -314,9 +317,9 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 	return out[:], v[:]
 }
 
-// Sets in each verdict how its arms are judged: an arm whose record only requires members by the names, and the `.Any`
-// arms, and apart from them the `.One` arms, that one member's `const` or `enum` tells apart gathered into one arm,
-// which an object's first member, when it is that member, picks its choice by. Runs after every record is filled.
+// Sets how each verdict judges its arms. An arm whose record only requires members is judged by presence. The `.Any`
+// arms, and separately the `.One` arms, that one member's `const` or `enum` tells apart are gathered into one `.Choice`
+// arm, and an object whose first member is that member picks its choice by it. Runs after every record is filled.
 @(private)
 choose_arms :: proc(b: ^Builder, arena: runtime.Allocator) {
 	for &u in b.uses {
@@ -337,8 +340,9 @@ choose_arms :: proc(b: ^Builder, arena: runtime.Allocator) {
 	}
 }
 
-// Gives each held use its `judging` and `judging_all` ids: uses whose arms, as a check with no sink and one with a sink
-// read them, are alike in every part but their keyword steps share one. Runs after `choose_arms`.
+// Gives each held use its `judging` and `judging_all` ids. Uses whose arms match in everything but their keyword steps
+// share an id: `judging` for the arms a check with no sink reads, `judging_all` for those a check with a sink reads.
+// Runs after `choose_arms`.
 @(private)
 judging_ids :: proc(b: ^Builder, arena: runtime.Allocator) {
 	ids := make(map[string]u32, arena)
@@ -362,166 +366,131 @@ judging_ids :: proc(b: ^Builder, arena: runtime.Allocator) {
 	}
 }
 
-// Refuses the plan as `.Too_Deep` when a check would judge one value by more than `MAX_HELD` held records one inside the
-// other, through arms that read the whole value. A loop of such arms is left to the check, which meets it at `MAX_HELD`.
+// Refuses the plan as `.Too_Deep` when a check would nest more than `MAX_HELD` held records on one value through arms
+// that read the whole value. A loop of such arms is left to the check, which stops it at `MAX_HELD`.
 @(private)
 held_nesting :: proc(b: ^Builder) {
-	// Each held use's nesting, 0 before it is known and -1 while it is judged.
-	known := make([]i32, len(b.uses), context.temp_allocator)
+	known := make([]Nesting, len(b.uses), context.temp_allocator)
 	if known == nil && len(b.uses) > 0 {
 		refuse_plan(b, .No_Memory)
 		return
 	}
+	edges := make([dynamic]Whole_Edge, context.temp_allocator)
 	for &u in b.uses {
-		if nesting_of(b, known, &u, 0) > MAX_HELD {
-			refuse_plan(b, .Too_Deep, text = "the schema applies more than 256 subschemas to one value one inside the other")
-			steps := held_path(b, known, &u)
-			b.err.n_steps, b.err.truncated = 0, false
-			#reverse for x in steps {
-				path_add(&b.err, x)
-			}
-			path_close(&b.err)
-			return
+		if nesting_of(b, known, &edges, &u, 0) <= MAX_HELD {
+			continue
 		}
+		refuse_plan(b, .Too_Deep, text = "the schema applies more than 256 subschemas to one value one inside the other")
+		steps := make([dynamic]core.Step, context.temp_allocator)
+		append(&steps, ..u.site)
+		at := &u
+		for _ in 0 ..= MAX_HELD {
+			n := known[mem.ptr_sub(at, &b.uses[0])]
+			if n.next == nil {
+				break
+			}
+			append(&steps, ..n.site)
+			append(&steps, ..n.next.site)
+			at = n.next
+		}
+		b.err.n_steps, b.err.truncated = 0, false
+		#reverse for x in steps {
+			path_add(&b.err, x)
+		}
+		path_close(&b.err)
+		return
 	}
 }
 
-// The keyword steps from the use `u` along the held records that nest deepest under it, by the nesting `nesting_of` left
-// in `known`.
+// An arm's way from one held use to the held use of a record that reads the whole value, with the arm's keyword steps.
 @(private)
-held_path :: proc(b: ^Builder, known: []i32, u: ^Use) -> []core.Step {
-	Next :: struct {
-		use:   ^Use,
-		site:  []core.Step,
-		depth: i32,
-	}
-	deeper :: proc(b: ^Builder, known: []i32, a: ^Apply, best: ^Next) {
-		follow :: proc(b: ^Builder, known: []i32, rec: i32, site: []core.Step, best: ^Next) {
-			if int(b.fields[rec].meta) < len(b.uses) {
-				x := &b.uses[b.fields[rec].meta]
-				if d := known[mem.ptr_sub(x, &b.uses[0])]; d > best.depth {
-					best^ = {x, site, d}
-				}
-			}
+Whole_Edge :: struct {
+	use:  ^Use,
+	site: []core.Step,
+}
+
+// How many held records nest on one value from a held use, 0 before it is known and -1 while it is being computed,
+// and the arm to the held use under it that nests deepest.
+@(private)
+Nesting :: struct {
+	depth: i32,
+	next:  ^Use,
+	site:  []core.Step,
+}
+
+// Appends to `out` the edges the arms `list` have to held uses through arms that read the whole value.
+@(private)
+whole_edges :: proc(b: ^Builder, list: []Apply, out: ^[dynamic]Whole_Edge) {
+	add :: proc(b: ^Builder, rec: i32, site: []core.Step, out: ^[dynamic]Whole_Edge) {
+		if int(b.fields[rec].meta) < len(b.uses) {
+			append(out, Whole_Edge{&b.uses[b.fields[rec].meta], site})
 		}
+	}
+	for &a in list {
 		if a.rec >= 0 && (a.kind in WHOLE_ARMS || a.kind == .Names) {
-			follow(b, known, a.rec, a.site, best)
+			add(b, a.rec, a.site, out)
 		}
 		if a.by != nil {
-			for &c in a.by.choices {
-				deeper(b, known, &c, best)
-			}
+			whole_edges(b, a.by.choices, out)
 		}
 		if a.eval != nil {
 			for rec in a.eval.wholes {
-				follow(b, known, rec, a.site, best)
+				add(b, rec, a.site, out)
 			}
 		}
 	}
-	steps := make([dynamic]core.Step, context.temp_allocator)
-	append(&steps, ..u.site)
-	at := u
-	for _ in 0 ..= MAX_HELD {
-		best: Next
-		for list in ([2][]Apply{at.applies, at.verdict}) {
-			for &a in list {
-				deeper(b, known, &a, &best)
-			}
-		}
-		if best.use == nil {
-			break
-		}
-		append(&steps, ..best.site)
-		append(&steps, ..best.use.site)
-		at = best.use
-	}
-	return steps[:]
 }
 
-// How many held records judge a value one inside the other from the use `u`, past `MAX_HELD` at most by one.
+// How many held records nest on one value from use `u`, at most `MAX_HELD + 1`. `edges` is scratch for the walk.
 @(private)
-nesting_of :: proc(b: ^Builder, known: []i32, u: ^Use, depth: int) -> i32 {
+nesting_of :: proc(b: ^Builder, known: []Nesting, edges: ^[dynamic]Whole_Edge, u: ^Use, depth: int) -> i32 {
 	at := mem.ptr_sub(u, &b.uses[0])
-	if len(u.applies) == 0 || raw_data(u.applies) == &FORKING[0] || known[at] < 0 {
+	if len(u.applies) == 0 || raw_data(u.applies) == &FORKING[0] || known[at].depth < 0 {
 		return 0
 	}
-	if known[at] > 0 || depth > MAX_HELD {
-		return known[at] if known[at] > 0 else MAX_HELD + 1
+	if known[at].depth > 0 || depth > MAX_HELD {
+		return known[at].depth if known[at].depth > 0 else MAX_HELD + 1
 	}
-	known[at] = -1
-	most: i32
-	arm :: proc(b: ^Builder, known: []i32, a: ^Apply, depth: int) -> i32 {
-		most: i32
-		if a.rec >= 0 && (a.kind in WHOLE_ARMS || a.kind == .Names) && int(b.fields[a.rec].meta) < len(b.uses) {
-			most = nesting_of(b, known, &b.uses[b.fields[a.rec].meta], depth + 1)
-		}
-		if a.by != nil {
-			for &c in a.by.choices {
-				most = max(most, arm(b, known, &c, depth))
-			}
-		}
-		if a.eval != nil {
-			for rec in a.eval.wholes {
-				if int(b.fields[rec].meta) < len(b.uses) {
-					most = max(most, nesting_of(b, known, &b.uses[b.fields[rec].meta], depth + 1))
-				}
-			}
-		}
-		return most
-	}
-	for list in ([2][]Apply{u.applies, u.verdict}) {
-		for &a in list {
-			most = max(most, arm(b, known, &a, depth))
+	known[at].depth = -1
+	from := len(edges)
+	whole_edges(b, u.applies, edges)
+	whole_edges(b, u.verdict, edges)
+	best: Nesting
+	for i in from ..< len(edges) {
+		e := edges[i]
+		if d := nesting_of(b, known, edges, e.use, depth + 1); d > best.depth {
+			best = {d, e.use, e.site}
 		}
 	}
-	known[at] = most + 1
-	return most + 1
+	resize(edges, from)
+	best.depth += 1
+	known[at] = best
+	return best.depth
 }
 
-// Marks as `shared` each held use a check can reach twice at one value through arms that read the whole value, from one
-// use's arms with a sink or with none.
+// Marks as `shared` each held use that two arms reading the whole value lead to, from the arms a check reads with a
+// sink or from those it reads with none. This takes in every use a check can reach twice on one value, and some more.
 @(private)
 shared_uses :: proc(b: ^Builder) {
-	// The root each use was last reached from, as its place and the arm list, plus one.
-	seen := make([]int, len(b.uses), context.temp_allocator)
-	if seen == nil && len(b.uses) > 0 {
+	reached := make([]u8, len(b.uses), context.temp_allocator)
+	if reached == nil && len(b.uses) > 0 {
 		refuse_plan(b, .No_Memory)
 		return
 	}
-	reach :: proc(b: ^Builder, seen: []int, u: ^Use, stamp: int, sink: bool, depth: int) {
-		at := mem.ptr_sub(u, &b.uses[0])
-		if len(u.applies) == 0 || raw_data(u.applies) == &FORKING[0] || depth > MAX_HELD {
-			return
-		}
-		if seen[at] == stamp {
-			u.shared = true
-			return
-		}
-		seen[at] = stamp
-		arm :: proc(b: ^Builder, seen: []int, a: ^Apply, stamp: int, sink: bool, depth: int) {
-			if a.rec >= 0 && (a.kind in WHOLE_ARMS || a.kind == .Names) && int(b.fields[a.rec].meta) < len(b.uses) {
-				reach(b, seen, &b.uses[b.fields[a.rec].meta], stamp, sink, depth + 1)
+	edges := make([dynamic]Whole_Edge, context.temp_allocator)
+	for sink in ([2]bool{false, true}) {
+		slice.zero(reached)
+		for &u in b.uses {
+			if len(u.applies) == 0 || raw_data(u.applies) == &FORKING[0] {
+				continue
 			}
-			if a.by != nil {
-				for &c in a.by.choices {
-					arm(b, seen, &c, stamp, sink, depth)
-				}
+			clear(&edges)
+			whole_edges(b, u.applies if sink || u.verdict == nil else u.verdict, &edges)
+			for e in edges {
+				at := mem.ptr_sub(e.use, &b.uses[0])
+				reached[at] = min(reached[at] + 1 + u8(e.use == &u), 2)
+				e.use.shared ||= reached[at] == 2
 			}
-			if a.eval != nil {
-				for rec in a.eval.wholes {
-					if int(b.fields[rec].meta) < len(b.uses) {
-						reach(b, seen, &b.uses[b.fields[rec].meta], stamp, sink, depth + 1)
-					}
-				}
-			}
-		}
-		for &a in (u.applies if sink || u.verdict == nil else u.verdict) {
-			arm(b, seen, &a, stamp, sink, depth)
-		}
-	}
-	for &u, i in b.uses {
-		for sink in ([2]bool{false, true}) {
-			reach(b, seen, &u, 2 * i + int(sink) + 1, sink, 0)
 		}
 	}
 }
@@ -573,8 +542,8 @@ arms_key :: proc(key: ^strings.Builder, list: []Apply) {
 	}
 }
 
-// `list` with the arms whose verdict the names their `by` lists decide judged by presence, nil when it has none. An arm
-// that reports through its run's failures keeps its run.
+// A copy of `list` in which each arm whose verdict depends only on the names in `by.present` is judged by presence, nil
+// when no arm is. An arm that reports through its run's failures keeps the run.
 @(private)
 by_presence :: proc(list: []Apply, arena: runtime.Allocator) -> []Apply {
 	PRESENCE_ARMS :: bit_set[Apply_Kind]{.Any, .One, .Not, .If, .Then, .Else}
@@ -592,22 +561,19 @@ by_presence :: proc(list: []Apply, arena: runtime.Allocator) -> []Apply {
 	return out
 }
 
-// The members an object must have to pass `node` when that is all the node judges, nil otherwise. A value that is no
-// object passes it.
+// The members an object must have to pass `node`, when that is all the node judges, nil otherwise. A value that is not
+// an object passes it.
 @(private)
 presence :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index, arena: runtime.Allocator) -> ^Judging {
 	names := make([dynamic]string, arena)
-	if b.nothing.allocator.procedure == nil {
-		b.nothing.allocator = arena
-	}
 	if node == rules.NONE || !judges_nothing(d, node, &b.nothing, 0, &names) || len(names) == 0 {
 		return nil
 	}
 	return new_clone(Judging{present = names[:]}, arena)
 }
 
-// `list` with its arms of `kind` that a member's enum tells apart gathered into one `.Choice` arm at the place of the
-// first, nil when fewer than two are.
+// A copy of `list` with its arms of `kind` that one member's enum tells apart gathered into one `.Choice` arm, placed
+// where the first of them was. Nil when fewer than two arms qualify.
 @(private)
 choices_of :: proc(b: ^Builder, arena: runtime.Allocator, list: []Apply, kind: Apply_Kind) -> []Apply {
 	runs :: proc(a: Apply, kind: Apply_Kind) -> bool {
@@ -623,7 +589,7 @@ choices_of :: proc(b: ^Builder, arena: runtime.Allocator, list: []Apply, kind: A
 	if first < 0 {
 		return nil
 	}
-	// The member is one the first arm names, the one the most arms are told apart by.
+	// Pick the member, among those the first arm names, that tells the most arms apart.
 	name, most := "", 0
 	m := &b.meta[b.fields[list[first].rec].meta]
 	for j in 0 ..< m.members {
@@ -654,7 +620,7 @@ choices_of :: proc(b: ^Builder, arena: runtime.Allocator, list: []Apply, kind: A
 			append(&out, Apply{kind = kind, judge = .Choice, rec = -1, name = name})
 		}
 		for k in keys {
-			// An operand two choices have leaves the arms as they are.
+			// When two choices share an operand, the arms stay as they are.
 			if k in pick {
 				return nil
 			}
@@ -677,9 +643,9 @@ choices_of :: proc(b: ^Builder, arena: runtime.Allocator, list: []Apply, kind: A
 	return out[:]
 }
 
-// The enum keys of the member `name` of the record `rec` when an object's first member that is it can kill the record
-// by them: the record takes objects, waits for their first member, and the member's leaf has an enum and its record no
-// arms. Nil otherwise.
+// The enum keys of member `name` of record `rec`, when an object whose first member is `name` can fail the record by
+// those keys alone: the record takes objects, has members and no arms, and the member's leaf has an enum and its
+// record no arms. Nil otherwise.
 @(private)
 choice_keys :: proc(b: ^Builder, rec: i32, name: string) -> []string {
 	arms :: proc(b: ^Builder, meta: u32) -> bool {
@@ -704,8 +670,8 @@ choice_keys :: proc(b: ^Builder, rec: i32, name: string) -> []string {
 	return nil
 }
 
-// The record of an arm that judges by `node`, which each use of the node by an arm in one scope shares. The keyword
-// steps to it are the arm's.
+// The record of an arm that judges by `node`, shared by every arm on that node in one scope. The keyword steps to it
+// belong to the arm.
 @(private)
 arm_record :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, node: rules.Node_Index) -> i32 {
 	key := block_key(typeid_of(Apply), i32(node), b.scope)
@@ -719,8 +685,8 @@ arm_record :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator,
 	return at
 }
 
-// The record every value inside a held value reads with, which hands each token to the held value's runs. The record
-// after it predicts no key, so each key reaches the fork.
+// The record that every value inside a held value reads with. It hands each token to the held value's runs. The record
+// after it predicts no key, so every key reaches the fork.
 @(private)
 fork_record :: proc(b: ^Builder) -> i32 {
 	key := block_key(typeid_of(Fork), 0, 0)
@@ -742,9 +708,9 @@ fork_record :: proc(b: ^Builder) -> i32 {
 FORKING := [1]Apply{{rec = -1}}
 
 
-// Whether `v` equals one of `values`, a repeated key of each object counting with the value `dups` keeps. With their
-// `hashes`, only the operands of `v`'s hash are compared, unless `v` holds a `Plain` node that `read_plain` reads as the
-// kind of the operand, whose hash is its kind's only as an operand reads it. What a comparison takes in `space` is taken back.
+// Whether `v` equals one of `values`, where a repeated key counts with the value `dups` keeps. Given `hashes`, only the
+// operands with `v`'s hash are compared, unless `read_plain` is set and `v` holds a `Plain` node, whose hash depends on
+// the kind each operand reads it as. Memory a comparison takes from `space` is given back.
 @(private)
 equals_one :: proc(v: core.Value, values: []core.Value, hashes: []u64 = nil, space: ^mem.Arena = nil, read_plain := false, dups := core.Duplicates.Last) -> bool {
 	from := 0
@@ -771,7 +737,6 @@ equals_one :: proc(v: core.Value, values: []core.Value, hashes: []u64 = nil, spa
 	return false
 }
 
-// `values` sorted by their `core.hash`, and the hashes in that order.
 @(private)
 by_hash :: proc(values: []core.Value, arena: runtime.Allocator) -> (sorted: []core.Value, hashes: []u64) {
 	Hashed :: struct {
@@ -790,7 +755,6 @@ by_hash :: proc(values: []core.Value, arena: runtime.Allocator) -> (sorted: []co
 	return
 }
 
-// Whether `v` is or holds a document's `Plain` node.
 @(private)
 holds_plain :: proc(v: core.Value) -> bool {
 	r, is_node := v.(core.Node_Ref)
@@ -805,10 +769,10 @@ holds_plain :: proc(v: core.Value) -> bool {
 	return false
 }
 
-// One arm's judging of a held value beside the check that reads it: a check by the arm's record of the whole value, or
-// of one member or element. `skip` is the depth of a value it passes over unread, -1 for the next value. `parent` is the
-// check that reads the held value, at `at` with `below` frames under it, `site` the keyword steps from the held record to
-// the arm's record, and `step` the member's or element's step from the held value.
+// One arm judging a held value beside the check that reads it, by checking the whole value, or one member or element,
+// against the arm's record. `skip` is the depth of a value it passes over unread, -1 for the next value. `parent` is
+// the check that reads the held value, at `at` with `below` frames under it. `site` is the keyword steps from the held
+// record to the arm's record, and `step` the member's or element's step from the held value.
 @(private)
 Run :: struct {
 	c:        Check,
@@ -821,11 +785,11 @@ Run :: struct {
 	below:    int,
 	site:     []core.Step,
 	step:     Maybe(core.Step),
-	// The failures of a run that reports only when its arm is chosen, made at its first such use.
+	// Failures of a run that reports only when its arm is chosen, allocated at its first such use.
 	buffer:   ^Sink,
-	// The readings the check takes when the run's arm is chosen, made at the first use of a check that keeps them.
+	// Readings the check takes when the run's arm is chosen, allocated at the first use by a check that keeps readings.
 	readings: ^Readings,
-	// The forks that follow the fork of this run's check, which it hands its verdict or its fork as it is freed.
+	// How many forks follow the fork of this run's check. When the run is freed it hands them its verdict or its fork.
 	followers: int,
 	// The next free run, and the run made before this one.
 	next:     ^Run,
@@ -834,7 +798,7 @@ Run :: struct {
 }
 
 // The runs and forks of one check and of the runs inside it: those free for reuse, the count of runs made, and the last
-// run and fork made, which link every one made. They are made with `allocator`, the temp allocator when it is nil.
+// run and fork made, which link to every earlier one. They come from `allocator`, or the temp allocator when it is nil.
 @(private)
 Pool :: struct {
 	free:       ^Run,
@@ -846,13 +810,11 @@ Pool :: struct {
 	stale:      ^Run,
 	stale_fork: ^Fork,
 	allocator:  runtime.Allocator,
-	// Whether a key repeats in the text of the value checked, nil until a refusal asks.
-	repeated:   Maybe(bool),
 	// The containers of the text that hold a repeated key, nil until a check judging repeats asks.
 	repeating:  Maybe(Repeating),
-	// The forks of runs opened at the container starting at `leads_at`, in the order the token reached them, which a fork
-	// opened later at it may follow, in the temp allocator, the count of forks opened, and that count as the check of the
-	// current value began.
+	// `leads` holds the forks of runs opened at the container starting at `leads_at`, in the order the token reached
+	// them, in the temp allocator. A fork opened there later may follow one of them. `opened` counts the forks opened,
+	// and `begun` is that count when the check of the current value began.
 	leads:      [dynamic]^Fork,
 	leads_at:   u64,
 	opened:     u64,
@@ -860,9 +822,9 @@ Pool :: struct {
 	verdicts:   Verdicts,
 }
 
-// The verdicts records gave the scalar at `at`, which every record and run of the check judging that scalar shares:
-// once `asked` passes `VERDICTS_AFTER`, a record asked again reads its verdict from `known`, so arms that share a
-// subschema judge it once. Each key is a `Verdict_Of` and the record's index, or the held container's judging.
+// The verdicts records gave the scalar at `at`, shared by every record and run of the check that judges it. Once
+// `asked` passes `VERDICTS_AFTER`, a record asked again reads its verdict from `known`, so arms that share a subschema
+// judge it once. Each key is a `Verdict_Of` with the record's index, or with the held container's judging id.
 @(private)
 Verdicts :: struct {
 	at:    u64,
@@ -877,8 +839,8 @@ Kept_Verdict :: struct {
 	first:                   core.Typed_Refusal,
 }
 
-// What a verdict is of: a record's passing as `record_passes` judges it, with or without a sink, or a held container with
-// no sink that its open decides.
+// What a kept verdict is about: whether a record passes, as `record_passes` judges it with or without a sink, or a held
+// container with no sink that its open decides.
 @(private)
 Verdict_Of :: enum u64 {
 	Passes,
@@ -886,11 +848,11 @@ Verdict_Of :: enum u64 {
 	Open,
 }
 
-// The records judged at one value past which their verdicts are kept.
+// How many records may be judged at one value before their verdicts are kept.
 @(private)
 VERDICTS_AFTER :: 32
 
-// The verdict of `key` kept at the scalar starting at `at`, counting the ask, and whether one is kept.
+// The verdict kept for `key` at the scalar starting at `at`, and whether there is one. Counts the ask.
 @(private)
 verdict_find :: proc "contextless" (p: ^Pool, at: u64, key: [2]u64) -> (Kept_Verdict, bool) {
 	v := &p.verdicts
@@ -905,7 +867,8 @@ verdict_find :: proc "contextless" (p: ^Pool, at: u64, key: [2]u64) -> (Kept_Ver
 	return x, known
 }
 
-// Keeps the verdict of `key` at the scalar `verdict_find` was last asked of, once that scalar was asked enough.
+// Keeps the verdict for `key` at the scalar `verdict_find` was last asked about, once that scalar has been asked more
+// than `VERDICTS_AFTER` times.
 @(private)
 verdict_keep :: proc(p: ^Pool, key: [2]u64, x: Kept_Verdict) {
 	v := &p.verdicts
@@ -918,9 +881,9 @@ verdict_keep :: proc(p: ^Pool, key: [2]u64, x: Kept_Verdict) {
 	v.known[key] = x
 }
 
-// What checks keep of their arms' runs and held values from one value to the next, so a check of many values makes
-// them once. It serves one check at a time, makes them with the context allocator of its first check, or the heap
-// allocator when that is the temp allocator, and is freed by `checker_destroy`.
+// Keeps the runs and held values of checks from one value to the next, so checking many values allocates them once.
+// It serves one check at a time and allocates with the context allocator of its first check, or the heap allocator
+// when that is the temp allocator. Free it with `checker_destroy`.
 Checker :: struct {
 	pool: Pool,
 }
@@ -940,15 +903,15 @@ checker_destroy :: proc(c: ^Checker) {
 	c^ = {}
 }
 
-// Gives back every run and fork of `p` for the check of a new value, whose parts the temp allocator holds afresh. Each
-// is made fresh when the check first takes it.
+// Returns every run and fork of `p` for the check of a new value, whose parts the temp allocator holds afresh. Each one
+// is reset when the check first takes it.
 @(private)
 pool_begin :: proc(p: ^Pool) {
 	p.free, p.forks, p.stale, p.stale_fork = nil, nil, p.runs, p.held
 }
 
-// A run of `p` for the check of the current value: one given back in it, or else one an earlier value's check made,
-// fresh. Nil when there is neither.
+// A run of `p` for the check of the current value: one freed during this check, else a reset one from an earlier
+// value's check. Nil when there is neither.
 @(private)
 pool_run :: proc(p: ^Pool) -> ^Run {
 	if r := p.free; r != nil {
@@ -978,7 +941,6 @@ pool_fork :: proc(p: ^Pool) -> ^Fork {
 	return fk
 }
 
-// Points the parts of `fk` that grow at the temp allocator, empty.
 @(private)
 fork_fresh :: proc(fk: ^Fork) {
 	t := context.temp_allocator
@@ -988,41 +950,31 @@ fork_fresh :: proc(fk: ^Fork) {
 	temp_scratch(&fk.scratch)
 }
 
-// Whether a key repeats in the text `h` checks, asked once for every run of the check.
-@(private)
-pool_text_repeats :: proc(h: ^Check) -> bool {
-	if known, asked := h.pool.repeated.?; asked {
-		return known
-	}
-	repeated := text_repeats((^Reader)(h))
-	h.pool.repeated = repeated
-	return repeated
-}
-
-// The containers of a text that hold an object in which a key repeats, the object itself included, by their first
-// byte in ascending order. `every` stands for every container, for a text a build could not tell apart so.
+// The containers of a text that hold, or are, an object with a repeated key, as their first bytes in ascending order.
+// `every` stands for all containers, for a text the build could not sort out this way.
 @(private)
 Repeating :: struct {
 	at:    []u64,
 	every: bool,
 }
 
-// Whether the value starting at `lo` holds a key that repeats, which only then reads as `.Judge` says: a value that
-// holds none judges as under `.Ignore`, so its runs need no failures kept to take back and share their forks as such
-// runs do. A repeat outside the value takes back what the value failed from the sink of the check that holds it.
+// Whether the value starting at `lo` holds a repeated key, or with no `lo` whether the text does. Only such a value is
+// read as `.Judge` says. A value with no repeat is judged as under `.Ignore`, so its runs keep no failures to take back
+// and share their forks like those runs do. A repeat outside the value takes back the value's failures from the sink of
+// the check that holds it.
 @(private)
-holds_repeats :: proc(h: ^Check, lo: u64) -> bool {
+holds_repeats :: proc(h: ^Check, lo: Maybe(u64)) -> bool {
 	p := h.pool
 	known, asked := p.repeating.?
 	if !asked {
 		known = repeating_containers((^Reader)(h))
 		p.repeating = known
 	}
-	if known.every {
-		return true
+	if at, has := lo.?; has && !known.every {
+		_, found := slice.binary_search(known.at, at)
+		return found
 	}
-	_, found := slice.binary_search(known.at, lo)
-	return found
+	return known.every || len(known.at) > 0
 }
 
 // The containers of the text `r` reads that hold a repeated key, in the temp allocator.
@@ -1042,8 +994,8 @@ repeating_containers :: proc(r: ^Reader) -> Repeating {
 	return {at = at[:]}
 }
 
-// Whether the container `i` holds an object in which a key repeats, the object itself included, adding the first byte of
-// each such container to `at`. `kept` is false when a name or an entry could not be kept.
+// Whether container `i` holds, or is, an object with a repeated key. Adds the first byte of each such container to
+// `at`. `kept` is false when a name or an entry could not be stored.
 @(private)
 repeats_inside :: proc(doc: ^core.Document, i: core.Node_Index, at: ^[dynamic]u64) -> (holds, kept: bool) {
 	n := doc.nodes[i]
@@ -1080,26 +1032,26 @@ repeats_inside :: proc(doc: ^core.Document, i: core.Node_Index, at: ^[dynamic]u6
 	return holds, true
 }
 
-// The allocator `p` makes its runs and forks with.
 @(private)
 pool_allocator :: proc(p: ^Pool) -> runtime.Allocator {
 	return p.allocator if p.allocator.procedure != nil else context.temp_allocator
 }
 
-// The held values a check judges one inside the other. A plan that nests more is refused when bound, and a schema that
-// applies itself to the same value without end fails there as `.Too_Deep`. The bind recurses once a nested subschema,
-// which a sanitized build's thread stack holds only to about 1000.
+// The most held values a check nests one inside the other. A plan that nests more is refused when bound, and a schema that
+// applies itself to the same value without end fails there as `.Too_Deep`. The bind recurses once per nested subschema,
+// and a sanitized build's thread stack holds only about 1000 levels.
 @(private)
 MAX_HELD :: 256
 
-// The bytes of machine stack the runs of a check may take below its outermost held value, past which a held value that
+// The bytes of machine stack the runs of a check may use below its outermost held value. Past it, a held value that
 // opens in a run fails as `.Too_Deep`. Each run that holds a value calls the next one in, so a check of a deep text whose
 // arms recurse through each level nests as deep as the text. What is left of an 8 MiB stack holds the comparison of a
-// held value `core.MAX_DEPTH` deep. The frame address is the machine stack's also where a sanitizer keeps locals apart.
+// held value `core.MAX_DEPTH` deep. The frame address measures the machine stack even under a sanitizer that keeps locals
+// on a stack of its own.
 @(private)
 STACK_BUDGET :: 6 << 20
 
-// The runs a check makes, past which it stops as `.No_Memory`.
+// The most runs a check makes before it stops as `.No_Memory`.
 @(private)
 MAX_RUNS :: 1 << 16
 
@@ -2525,7 +2477,7 @@ arm_stopped :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run) -> core.Action {
 			// A later repeat of a key in an object the run or the check had open could take the refusal back, so the check
 			// reads again. A run of a whole held value leaves the value's own keys to the fork it is an arm of, which reads on.
 			from := 2 if h.run != nil && h.run.step == nil else 1
-			if h.repeats == .Notice && h.first.kind != .Walk && h.first.kind != .No_Memory && (from == 1 && fk.kind == .Object || object_open((^Reader)(&r.c), 2) || object_open((^Reader)(h), from)) && pool_text_repeats(h) {
+			if h.repeats == .Notice && h.first.kind != .Walk && h.first.kind != .No_Memory && (from == 1 && fk.kind == .Object || object_open((^Reader)(&r.c), 2) || object_open((^Reader)(h), from)) && holds_repeats(h, nil) {
 				h.first = {kind = .Duplicate_Key, at = h.first.at}
 			}
 		}

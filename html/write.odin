@@ -1,18 +1,21 @@
 package html
 
-// The write of a document as HTML, by the standard's serialization of HTML fragments over a markup document's shape: a
-// member is an element of its name, an array member one element of the name per item, and the member `#text` the text
-// that stands there among its siblings. An object is an element's attributes and children, null an element with no
-// content, and a scalar its text. An object whose one member is `html` is written as a document and any other as the
-// nodes of a fragment read in `body`. An element the tree implied is written with its tags, as the tree holds it. A
-// void element has no end tag, the text of a raw text element is written as it stands, and any other text escapes `&`,
-// U+00A0, `<` and `>`, and an attribute value `&`, U+00A0 and `"`. An HTML document's doctype, comments and attributes
-// are written as they stand in the source, and another document's comments before, after or at the end of the value
-// that holds them, unless HTML cannot hold the comment, with its other facts dropped and counted. The text is read
-// back, and one that builds a tree other than the one written is `.Unwritable`: a name HTML folds or cannot spell, an
-// element the tree construction moves or closes where it stands, text of only whitespace among elements, a raw text
-// that holds its end tag. Pretty output indents an element whose children are all elements, but in `pre`, `listing`
-// and `textarea`.
+// The write of a document as HTML, by the standard's serialization of HTML fragments over a markup document's shape. A
+// member is an element of its name, an array member is one element per item, and the member `#text` is the text that
+// stands there among its siblings. An object is an element's attributes and children, null an element with no content,
+// and a scalar its text. An object whose one member is `html` is written as a document, and any other as the nodes of
+// a fragment read in `body`.
+//
+// An element the tree implied is written with its tags, as the tree holds it. A void element has no end tag and the
+// text of a raw text element is written as it stands. Any other text escapes `&`, U+00A0, `<` and `>`, and an attribute
+// value escapes `&`, U+00A0 and `"`. An HTML document's doctype, comments and attributes are written as they stand in
+// the source. Another document's comments are written before, after or at the end of the value that holds them, unless
+// HTML cannot hold the comment, and its other facts are dropped and counted.
+//
+// The text is read back, and one that builds a tree other than the one written is `.Unwritable`: a name HTML folds or
+// cannot spell, an element the tree construction moves or closes where it stands, text of only white space among
+// elements, and a raw text that holds its end tag. Pretty output indents an element whose children are all elements,
+// except in `pre`, `listing` and `textarea`.
 
 import "base:runtime"
 import "core:io"
@@ -40,8 +43,8 @@ write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, nod
 	return out, cut, core.error_of(refusal)
 }
 
-// The handle's `write`: node `node` of `doc` written compact, read back as the spec its shape names and compared, and
-// then written as `opts` say to `stream` or into new bytes from `allocator`.
+// The handle's `write`. Node `node` of `doc` is written compact, read back as the spec its shape names and compared.
+// It is then written as `opts` say, to `stream` or into new bytes from `allocator`.
 @(private)
 document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Refusal) {
 	if doc.partial || core.kind(doc, node) != .Object {
@@ -52,7 +55,7 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 	return text, len(core.subtree_facts(doc, node)) - kept if err.kind == .None else 0, err
 }
 
-// Object `root` written compact, read back by the handle `as` and compared, and then written as `opts` say, with the
+// Writes object `root` compact, reads it back by the handle `as` and compares, then writes it as `opts` say. Returns the
 // facts it wrote.
 @(private)
 value_write :: proc(root: core.Value, as: core.As, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
@@ -69,7 +72,7 @@ value_write :: proc(root: core.Value, as: core.As, opts: core.Write_Options, str
 	return serialize(root, opts, stream, allocator)
 }
 
-// A built value written as `value_write` writes it, for `marshal` and the token write.
+// Writes a built value as `value_write` does, for `marshal` and the token write.
 @(private)
 built_write :: proc(v: core.Value, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
 	if core.value_kind(v) != .Object {
@@ -79,19 +82,18 @@ built_write :: proc(v: core.Value, opts: core.Write_Options, stream: io.Stream, 
 	return text, err
 }
 
-// The plan's `marshal`: the value `write.marshal_markup` reads back, written as HTML.
 @(private)
 marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, omits: ^typed.Omits) -> ([]u8, core.Typed_Refusal) {
 	return write.marshal_markup(plan, value, opts, stream, allocator, omits, built_write)
 }
 
-// Starts a token write, as `write.tokens_init` does with `as(spec)`. The calls give a value as `write` takes a node, read
-// back as `write.put_markup` reads a marshal's, so a write to a stream is `.Unsupported`.
+// Starts a token write, as `write.tokens_init` does with `as(spec)`. The calls give a value as `write` takes a node. It
+// is read back as `write.put_markup` reads a marshal's, so a write to a stream is `.Unsupported`.
 tokens_init :: proc(t: ^write.Tokens, spec: Spec, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind {
 	return write.tokens_init(t, bound_as(spec), opts, allocator, stream, &TOKENS)
 }
 
-// The token spelling: the calls make a value in `write.MARKUP_TREE`, which the end reads back and writes. A scalar that
+// The token spelling. The calls make a value in `write.MARKUP_TREE`, which the end reads back and writes. A scalar that
 // is no string and has no text the tree can hold bare is `.Unwritable`.
 @(private, rodata)
 TOKENS := write.Token_Spelling {
@@ -118,7 +120,6 @@ TOKENS := write.Token_Spelling {
 	},
 }
 
-// Writes `root` as `opts` say, and returns the facts it wrote.
 @(private)
 serialize :: proc(root: core.Value, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
 	spill: [write.ROOM_MAX]u8 = ---
@@ -128,17 +129,11 @@ serialize :: proc(root: core.Value, opts: core.Write_Options, stream: io.Stream,
 	return text, w.kept, err
 }
 
-// Builds `text` as a document when `document` and else as a fragment, and returns `.Unwritable` unless its compact
-// write is `text` again.
+// Builds `text` as a document when `document`, else as a fragment. Returns `.Unwritable` unless its compact write is
+// `text` again.
 @(private)
 read_back :: proc(text: []u8, document: bool, as: core.As, compact: core.Write_Options) -> core.Typed_Error_Kind {
-	doc: core.Document
-	built: core.Document_Error
-	if document {
-		doc, built = build_spec(text, .Document, as, false, context.allocator)
-	} else {
-		doc, built = build_spec(text, .Fragment, as, false, context.allocator)
-	}
+	doc, built := build_spec(text, .Document if document else .Fragment, as, false, context.allocator)
 	defer core.destroy(&doc)
 	if built.kind != .None {
 		return .No_Memory if built.kind == .No_Memory else .Unwritable
@@ -151,7 +146,7 @@ read_back :: proc(text: []u8, document: bool, as: core.As, compact: core.Write_O
 	return .None if string(again) == string(text) else .Unwritable
 }
 
-// Whether object `root` is a document: of one member, `html`, which is no array.
+// Whether object `root` is a document: it has one member, `html`, which is no array.
 @(private)
 is_document :: proc(root: core.Value) -> bool {
 	it := core.value_pairs(root)
@@ -160,7 +155,6 @@ is_document :: proc(root: core.Value) -> bool {
 	return ok && !more && key == "html" && core.value_kind(value) != .Array
 }
 
-// The root object: the facts before its members, the doctype among them, its members, then the facts after them.
 @(private)
 put_root :: proc(w: ^Writer, root: core.Value) -> core.Typed_Error_Kind {
 	facts := value_facts(root)
@@ -178,8 +172,8 @@ put_root :: proc(w: ^Writer, root: core.Value) -> core.Typed_Error_Kind {
 	return w.out.err
 }
 
-// The members of object `v` in order, a node's as its document holds them, a repeated name each time. They are laid on
-// lines of their own when the output is pretty, they hold no text, and `keep` does not hold their white space.
+// Writes the members of object `v` in order, a node's as its document holds them, a repeated name each time. They are
+// laid on lines of their own when the output is pretty, they hold no text, and `keep` does not hold their white space.
 @(private)
 put_members :: proc(w: ^Writer, v: core.Value, depth: int, in_foreign: bool, keep := false) -> core.Typed_Error_Kind {
 	context.allocator = context.temp_allocator
@@ -212,7 +206,6 @@ put_members :: proc(w: ^Writer, v: core.Value, depth: int, in_foreign: bool, kee
 	return .None
 }
 
-// Member `name` of value `v`: its text, or its element, or one element of its name per item of an array.
 @(private)
 put_member :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign, laid: bool) -> core.Typed_Error_Kind {
 	if core.value_kind(v) != .Array {
@@ -228,7 +221,6 @@ put_member :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_forei
 	return .None
 }
 
-// The text of `#text` value `v`, or the element `name` of value `v` with the comments that stand before and after it.
 @(private)
 put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign, laid: bool) -> core.Typed_Error_Kind {
 	if name == core.MARKUP_TEXT {
@@ -292,7 +284,6 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 	return .None
 }
 
-// The facts of `v`, none for a built value.
 @(private)
 value_facts :: proc(v: core.Value) -> []core.Fact {
 	if r, is_node := v.(core.Node_Ref); is_node {
@@ -340,8 +331,8 @@ put_attribute :: proc(w: ^Writer, v: core.Value, f: core.Fact) -> core.Typed_Err
 	return .None
 }
 
-// Writes the comment, instruction or doctype `f` of `v`: as it stands in an HTML document, and from any other a
-// comment HTML can hold, with the rest dropped.
+// Writes the comment, instruction or doctype `f` of `v`: as it stands in an HTML document. From any other document only
+// a comment HTML can hold is written, and the rest is dropped.
 @(private)
 put_fact :: proc(w: ^Writer, v: core.Value, f: core.Fact) -> core.Typed_Error_Kind {
 	r := v.(core.Node_Ref)
@@ -365,15 +356,14 @@ put_fact :: proc(w: ^Writer, v: core.Value, f: core.Fact) -> core.Typed_Error_Ki
 	return .None
 }
 
-// Whether `body` is a comment's that HTML reads back as written.
+// Whether `body` is a comment body that HTML reads back as written.
 @(private)
 holds_comment :: proc(body: string) -> bool {
 	return !strings.has_prefix(body, ">") && !strings.has_prefix(body, "->") && !strings.has_suffix(body, "<!-") && !strings.contains(body, "<!--") && !strings.contains(body, "-->") && !strings.contains(body, "--!>") && utf8.valid_string(body)
 }
 
-// Writes `s` as text, or with `attribute` as an attribute value between double quotes, escaped as the standard's
-// serialization escapes it, and with `ascii` every rune past U+007F as a reference. A text whose bytes are no UTF-8 is
-// `.Invalid_Utf8`.
+// Writes `s` as text, or as an attribute value body when `attribute`, escaped as the standard's serialization escapes
+// it. With `ascii` every rune past U+007F is written as a reference. A text that is not UTF-8 is `.Invalid_Utf8`.
 @(private)
 put_escaped :: proc(w: ^Writer, s: string, attribute: bool) -> core.Typed_Error_Kind {
 	run := 0
@@ -448,8 +438,8 @@ is_raw :: proc(name: string) -> bool {
 	return false
 }
 
-// Whether HTML element `name` holds its white space, so that a line end that opens its text is written twice, since a
-// read drops the first, and no indent is laid into it.
+// Whether HTML element `name` holds its white space. A read drops the first line end that opens its text, so a line end
+// there is written twice, and no indent is laid into it.
 @(private)
 keeps_space :: proc(name: string) -> bool {
 	return name == "pre" || name == "listing" || name == "textarea"

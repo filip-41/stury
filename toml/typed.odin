@@ -22,19 +22,14 @@ marshal :: proc {marshal_once, write.marshal}
 
 @(private)
 marshal_once :: proc(value: any, spec := Spec.Toml_1_0, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
-	if value.id == nil || value.data == nil {
-		return nil, core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
-	}
-	plan, refusal := plan_make(value.id, spec, opts)
-	if refusal != nil {
-		return nil, refusal
-	}
-	defer typed.plan_destroy(&plan)
-	text, err := plan.marshal(&plan, value.data, write, {}, allocator, nil)
-	return text, core.error_of(err)
+	nothing: any
+	v := typed.marshal_target(value, &nothing)
+	plan, refusal := plan_make(v.id, spec, opts)
+	return typed.marshal_planned(&plan, refusal, v.data, write, allocator)
 }
 
-// Returns the typed reads of `spec`, which a plan `plan_make` builds for that spec holds.
+// Returns the typed reads of `spec`, which `plan_make` takes for a plan that reads a text through
+// `typed.unmarshal_text`.
 reads :: proc "contextless" (spec: Spec) -> ^typed.Format_Reads {
 	return reads_of(.Toml_1_1) if spec == .Toml_1_1 else reads_of(.Toml_1_0)
 }
@@ -93,7 +88,7 @@ plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: run
 @(private)
 reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	@(static, rodata) r := typed.Format_Reads {
-		read       = text_read,
+		read       = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return typed.read_built_text(src, as, build_handle, target, T, plan, read, allocator)},
 		check      = text_check,
 		node_read  = typed.read_nodes,
 		node_check = typed.check_nodes,
@@ -103,50 +98,9 @@ reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	return &r
 }
 
-// The plan's `read`: the text is built whole, since a table's members may be written apart, and the document is read.
-@(private)
-text_read :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
-	doc, built := build_text(src, as, context.allocator)
-	defer core.destroy(&doc)
-	#partial switch built.kind {
-	case .None:
-	case .Walk:
-		err := core.Typed_Refusal{kind = .Walk, at = built.at, inner = built.inner}
-		if read.sink != nil {
-			read.sink.fatal = err
-			typed.sink_error(read.sink, err)
-		}
-		return err
-	case:
-		return {kind = .No_Memory}
-	}
-	return typed.read_nodes(&doc, core.ROOT, T, target, plan, read, allocator)
-}
-
-// The plan's `check`: `text_read` with every refusal in `read.sink.entries`. A text the walk refuses is the one entry of
-// a check that met the fault before any token.
 @(private)
 text_check :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
-	doc, built := build_text(src, as, context.allocator)
-	defer core.destroy(&doc)
-	#partial switch built.kind {
-	case .None:
-	case .Walk:
-		// No refusal holds the check or its frames, which the stack escape check cannot see through a `Check`'s base
-		// `Reader`.
-		frames: [4]typed.Frame = ---
-		held := ([^]typed.Frame)(uintptr(raw_data(frames[:])))[:len(frames)]
-		h: typed.Check
-		regs, err := typed.check_start(&h, src, plan, as, T, target, read, held, allocator)
-		if err.kind != .None {
-			return err
-		}
-		defer typed.read_release(&h, held)
-		return typed.read_end(&h, regs, built.inner)
-	case:
-		return {kind = .No_Memory}
-	}
-	return typed.check_nodes(&doc, core.ROOT, T, target, plan, read, allocator)
+	return typed.check_built_text(src, as, build_handle, target, T, plan, read, allocator)
 }
 
 @(private)
@@ -156,27 +110,18 @@ unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, re
 		return refusal
 	}
 	defer typed.plan_destroy(&plan)
-	err := text_read(src, bound_as(spec, opts), target, T, &plan, read, allocator)
+	err := typed.read_built_text(src, bound_as(spec, opts), build_handle, target, T, &plan, read, allocator)
 	typed.own_errors(&err, read.sink)
 	return core.error_of(err)
 }
 
 @(private)
 unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return core.error_of(text_read(src, bound_as(spec, opts), target, T, plan, read, allocator))
+	return core.error_of(typed.read_built_text(src, bound_as(spec, opts), build_handle, target, T, plan, read, allocator))
 }
 
 // Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
 // first. The options are the plan's, and any plan of the format reads.
 check :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return check_ordered(src, bound_as(spec, options_of(plan.as)), target, T, plan, read, allocator)
-}
-
-// `text_check` with the entries it adds in the order `typed.check_text` gives them.
-@(private)
-check_ordered :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Error {
-	from := len(read.sink.entries) if read.sink != nil else 0
-	refused := text_check(src, as, target, T, plan, read, allocator)
-	typed.order_entries(read.sink, from)
-	return core.error_of(refused)
+	return typed.check_by(src, bound_as(spec, options_of(typed.handle_of(plan))), target, T, plan, read, allocator, text_check)
 }

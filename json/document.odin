@@ -18,9 +18,9 @@ import write "../core/write"
 // holds, and its services the walks of that spec, so a call through a handle never switches on the spec. The tables
 // hold pointers to the bound tables, so they are set at startup and never written after.
 HANDLES := [Spec]core.Readers {
-	.Json  = handle_readers(.Json, &SERVICES[.Json]),
-	.Jsonc = handle_readers(.Jsonc, &SERVICES[.Jsonc]),
-	.Json5 = handle_readers(.Json5, &SERVICES[.Json5]),
+	.Json  = core.with_services(readers_of(.Json)^, &SERVICES[.Json]),
+	.Jsonc = core.with_services(readers_of(.Jsonc)^, &SERVICES[.Jsonc]),
+	.Json5 = core.with_services(readers_of(.Json5)^, &SERVICES[.Json5]),
 }
 
 SERVICES := [Spec]core.Services {
@@ -29,14 +29,6 @@ SERVICES := [Spec]core.Services {
 	.Json5 = handle_services(.Json5),
 }
 
-// The readers of the handle of spec `S`: `readers_of(S)` with the services of `S`.
-handle_readers :: proc "contextless" ($S: Spec, services: ^core.Services) -> core.Readers {
-	r := readers_of(S)^
-	r.services = services
-	return r
-}
-
-// The run-time services of spec `S`, which a handle reaches.
 handle_services :: proc "contextless" ($S: Spec) -> core.Services {
 	return {
 		build    = proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {

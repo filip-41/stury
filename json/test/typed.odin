@@ -1485,3 +1485,12 @@ bytes_own_their_allocation :: proc(t: ^testing.T) {
 	delete(blob.data, alloc)
 	testing.expect_value(t, len(tracker.allocation_map), 0)
 }
+
+// A check with no plan is a plan mismatch.
+@(test)
+a_check_with_no_plan_is_a_mismatch :: proc(t: ^testing.T) {
+	v: struct {
+		a: int,
+	}
+	walktest.expect_kind(t, json.check(transmute([]u8)string(`{"a":1}`), .Json, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
+}

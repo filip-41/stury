@@ -226,3 +226,12 @@ a_token_write_refuses_a_stream :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, write.marshal_stream(strings.to_stream(&out), Point{x = 1, p = {y = 2}}, &plan, allocator = context.temp_allocator))
 	testing.expect_value(t, strings.to_string(out), "x = 1\n\n[p]\ny = 2.0\n")
 }
+
+// A nil `any` is a null, which TOML cannot write at the top, so it is refused as any null is.
+@(test)
+a_nil_any_is_refused_as_a_null :: proc(t: ^testing.T) {
+	nothing: any
+	text, err := toml.marshal(nothing, allocator = context.temp_allocator)
+	testing.expect(t, text == nil)
+	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
+}

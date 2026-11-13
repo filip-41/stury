@@ -1,7 +1,6 @@
 package xml
 
 import "base:intrinsics"
-import "base:runtime"
 import core "../core"
 
 // XML's document holds the walk's tokens over the caller's bytes, read through core's readers and XML's handles. The
@@ -14,7 +13,7 @@ import core "../core"
 // startup and never written after.
 @(private)
 HANDLES := [Spec]core.Readers {
-	.Xml = handle_readers(&SERVICES[.Xml]),
+	.Xml = core.with_services(READERS, &SERVICES[.Xml]),
 }
 
 @(private)
@@ -22,9 +21,7 @@ SERVICES := [Spec]core.Services {
 	.Xml = {
 		build    = build_handle,
 		validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, .Xml, options_of(as))},
-		scan     = proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
-			return scan_spec(src, .Xml, as, paths, read, state, on, allocator)
-		},
+		scan     = scan_handle,
 		write    = document_write,
 		plans    = rawptr(plan_as),
 		edit     = &EDIT,
@@ -33,14 +30,6 @@ SERVICES := [Spec]core.Services {
 		records  = &FRAMING,
 		docs     = &RECORD_DOCS,
 	},
-}
-
-// The readers of a handle: `READERS` with `services`.
-@(private)
-handle_readers :: proc "contextless" (services: ^core.Services) -> core.Readers {
-	r := READERS
-	r.services = services
-	return r
 }
 
 // XML's fault table, which names the format whatever the spec.

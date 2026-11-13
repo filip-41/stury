@@ -1,14 +1,14 @@
 package jq
 
-// The forms of a filter, typed (types.odin).
+// Types the forms of a filter (types.odin).
 
 import "base:runtime"
 import "core:strings"
 import "../message"
 import "../../../core/rules"
 
-// What a name means where a form is typed: a variable, a definition, or a call of one, which holds its arguments, the
-// caller's frame they are typed in, and the values of its `$` parameters.
+// What a name means where a form is typed: a variable, a definition, or a call of a definition. A call holds its
+// arguments, the caller's frame they are typed in, and the values of its `$` parameters.
 @(private)
 Frame :: struct {
 	parent: ^Frame,
@@ -34,7 +34,7 @@ type_of :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> Ty {
 	}
 	t.nesting += 1
 	defer t.nesting -= 1
-	// A form gives a node's index, so what it took from the temporary allocator ends with it.
+	// A form returns a node index, so its temporary allocations can end with it.
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	switch n.kind {
 	case .Identity:
@@ -82,7 +82,7 @@ type_of :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> Ty {
 		if k & closure({.Number}) == {} {
 			kind_refusal(t, n, "%s cannot be negated", kinds_text(k))
 		}
-		// A NaN, which the null of a number's kinds may be, stays one.
+		// A null among the number's kinds may be a NaN, and negating it leaves a NaN.
 		return kinds_node(t, k & closure({.Number}) + (k & {.Null} if k & closure({.Number}) != {} else {}))
 	case .Pipe:
 		return type_of(t, n.b, type_of(t, n.a, dot, f), f)
@@ -91,7 +91,7 @@ type_of :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> Ty {
 	case .Binary:
 		return binary(t, n, type_of(t, n.a, dot, f), type_of(t, n.b, dot, f))
 	case .And, .Or:
-		// `b` runs only on what `a` lets through: under `and` what it passes, under `or` the rest.
+		// `b` runs only on what `a` lets through: under `and` the values that pass `a`, under `or` the rest.
 		yes, no := narrowed(t, n.a, dot, f)
 		type_of(t, n.a, dot, f)
 		type_of(t, n.b, yes if n.kind == .And else no, f)
@@ -130,7 +130,7 @@ type_of :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> Ty {
 	return t.unknown
 }
 
-// `n` typed for its refusals only, where its kind errors are the filter's choice.
+// Types `n` where its kind errors are the filter's choice, so they are not told.
 @(private)
 quietly :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> Ty {
 	t.quiet += 1
@@ -145,8 +145,8 @@ kind_refusal :: proc(t: ^Typer, n: ^Node, format: string, args: ..any) {
 	}
 }
 
-// What `.name` gives on `base`, refused where no value of `base` has a member and where no object of it describes
-// `name`.
+// What `.name` gives on `base`. It is refused where no value of `base` has members, and where no object of `base`
+// describes `name`.
 @(private)
 field :: proc(t: ^Typer, n: ^Node, base: Ty, name: string) -> Ty {
 	r := read(t, base, .Member, name)
@@ -163,7 +163,7 @@ field :: proc(t: ^Typer, n: ^Node, base: Ty, name: string) -> Ty {
 	return union_of(t, r.value, t.null if r.absent || r.nulls else t.never)
 }
 
-// Where `name` is spelled in the step `n`: its last spelling there, or the whole step.
+// Where `name` is spelled in the step `n`: its last occurrence there, or else the whole step.
 @(private = "file")
 name_loc :: proc(t: ^Typer, n: ^Node, name: string) -> Loc {
 	text := t.input.text
@@ -175,13 +175,14 @@ name_loc :: proc(t: ^Typer, n: ^Node, name: string) -> Loc {
 	return n.loc
 }
 
-// What a slice of `base`, a value of kinds `k`, gives: a part of a string or an array, or null.
+// What a slice of `base`, of kinds `k`, gives: a part of a string or an array, or null.
 @(private = "file")
 sliced :: proc(t: ^Typer, base: Ty, k: rules.Kinds) -> Ty {
 	return union_of(t, kinds_node(t, k & {.String, .Null}), array_of(t, items_of(t, base)) if .Array in k else t.never)
 }
 
-// Refuses a format of values of `v` that it never takes: `@csv` and `@tsv` take an array, `@sh` no object.
+// Refuses a format of `v` when no value of `v` is of a kind it takes. `@csv` and `@tsv` take an array, `@sh` any
+// kind but an object.
 @(private = "file")
 formatted :: proc(t: ^Typer, n: ^Node, v: Ty) {
 	takes: rules.Kinds
@@ -235,7 +236,7 @@ index_type :: proc(t: ^Typer, n: ^Node, base: Ty, key: ^Node, dot: Ty, f: ^Frame
 	if .Array in k && .Array in b {
 		append(&parts, array_of(t, kinds_node(t, {.Integer})))
 	}
-	// An object key is a slice's `{start, end}`.
+	// An object key is a slice, `{start, end}`.
 	if .Object in k && b & {.Array, .String} != {} {
 		append(&parts, sliced(t, base, b - {.Null}))
 	}
@@ -287,7 +288,7 @@ object_type :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> Ty {
 	if len(computed) == 0 {
 		return object_of(t, members[:], t.never)
 	}
-	// A computed key may name a member a constant key names.
+	// A computed key may name the same member as a constant key.
 	others := union_of(t, ..computed[:])
 	for &m in members {
 		m.node = union_of(t, m.node, others)
@@ -295,8 +296,9 @@ object_type :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> Ty {
 	return object_of(t, members[:], others)
 }
 
-// What `if c` and `select(c)` pass to their branches: under `type == "kind"` the values of that kind, and the rest, under `X | type ==
-// "kind"` all of `dot` to the branch the kinds of X decide, and under `and` and `or` what their sides pass in turn.
+// What `if c` and `select(c)` pass to their branches. Under `type == "kind"` the values of that kind go one way and
+// the rest the other. Under `X | type == "kind"` all of `dot` goes to the branch the kinds of X decide, and under
+// `and` and `or` the right side narrows what the left lets through to it.
 @(private)
 narrowed :: proc(t: ^Typer, c: ^Node, dot: Ty, f: ^Frame) -> (yes, no: Ty) {
 	if c != nil && c.kind == .And {
@@ -330,7 +332,8 @@ narrowed :: proc(t: ^Typer, c: ^Node, dot: Ty, f: ^Frame) -> (yes, no: Ty) {
 	return dot, dot
 }
 
-// The kinds a test `type == "name"` or `X | type == "name"` passes, either way round, and X, nil for the first.
+// The kinds a test `type == "name"` or `X | type == "name"` passes, with the operands either way round, and X,
+// nil for the first form.
 @(private = "file")
 kind_test :: proc(c: ^Node) -> (subject: ^Node, kinds: rules.Kinds, ok: bool) {
 	if c == nil || c.kind != .Binary || c.op != .Eq {
@@ -372,14 +375,14 @@ binary :: proc(t: ^Typer, n: ^Node, a, b: Ty) -> Ty {
 			.Sub = "subtracted",
 			.Mul = "multiplied",
 			.Div = "divided",
-			.Mod = "divided",
+			.Mod = "divided (remainder)",
 		}
 		kind_refusal(t, n, "%s and %s cannot be %s", kinds_text(ka), kinds_text(kb), VERBS[n.op])
 	}
 	return out
 }
 
-// What `a op b` gives for values of kinds `ka` and `kb`, and whether some pair of them is taken.
+// What `a op b` gives for values of kinds `ka` and `kb`, and whether the operator takes some pair of those kinds.
 @(private)
 arithmetic :: proc(t: ^Typer, op: Op, a, b: Ty, ka, kb: rules.Kinds) -> (out: Ty, taken: bool) {
 	numbers := closure({.Number})
@@ -390,8 +393,8 @@ arithmetic :: proc(t: ^Typer, op: Op, a, b: Ty, ka, kb: rules.Kinds) -> (out: Ty
 	}
 	na, nb := ka & numbers != {}, kb & numbers != {}
 	whole := op != .Div && ka & numbers == {.Integer} && kb & numbers == {.Integer}
-	// A NaN is written null. A number of a node that also takes null may be one, and an infinite number, which a large
-	// input or an operation may give, makes one with another infinite number or, multiplied, with zero.
+	// A NaN is written null. A number whose node also takes null may be a NaN. An infinite number, from a large input
+	// or an operation, gives a NaN with another infinite number, or with zero under `*`.
 	fa, za := finite(t, a)
 	fb, zb := finite(t, b)
 	free := fa && fb || op == .Mul && (fa && za || fb && zb) || op != .Mul && op != .Mod && (fa || fb) || op == .Mod
@@ -450,7 +453,7 @@ arithmetic :: proc(t: ^Typer, op: Op, a, b: Ty, ka, kb: rules.Kinds) -> (out: Ty
 }
 
 // An update gives its input with the values at its paths changed: a container stays one, and a null may become one.
-// Where a path may be the input's own, `.` as `..` and `getpath([])` give it, the update may replace the input.
+// Where a path may be the input's own (`.`, as `..` and `getpath([])` give it), the update may replace the input.
 @(private = "file")
 update :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> Ty {
 	t.soft += 1
@@ -494,7 +497,7 @@ extends :: proc(n: ^Node) -> bool {
 	return false
 }
 
-// A `reduce` or a `foreach`: its state widened over every value of its source until it holds still.
+// A `reduce` or a `foreach`: its state widened over every value of its source until it stops changing.
 @(private = "file")
 fold :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> Ty {
 	state := type_of(t, n.b, dot, f)
@@ -512,11 +515,11 @@ Step :: struct {
 	n:      ^Node,
 	f:      ^Frame,
 	source: Ty,
-	out:    Ty, // a foreach's extract on the state settled on
+	out:    Ty, // a foreach's extract, on the settled state
 }
 
-// The least state that holds `start` and what a step gives on it, unknown past MAX_ROUNDS. The refusals of the rounds
-// are held, and those of a last step on the state settled on are told.
+// The least state that holds `start` and what a step gives on it, unknown past MAX_ROUNDS. The rounds tell no
+// refusal. One more step on the settled state tells them.
 @(private)
 settle :: proc(t: ^Typer, start: Ty, s: ^Step) -> Ty {
 	state := start
@@ -599,7 +602,7 @@ bind :: proc(t: ^Typer, pats: []^Pattern, value, dot: Ty, f: ^Frame, body: ^Node
 				})
 			}
 		}
-		// A failure in an alternative but the last, in its destructuring or its body, moves to the next.
+		// A failure in any alternative but the last, in its destructuring or its body, moves on to the next.
 		last := i == len(pats) - 1
 		t.quiet += 0 if last else 1
 		inner = destructure(t, p, value, dot, inner)
@@ -669,8 +672,8 @@ variable :: proc(t: ^Typer, name: string, f: ^Frame) -> Ty {
 	return t.unknown
 }
 
-// A call: of a parameter, typed in its caller's frame, of a definition, typed through its body, or of a builtin. A
-// definition of the prelude refuses at the call of it, and refuses no member.
+// A call of a parameter, typed in its caller's frame, of a definition, typed through its body, or of a builtin. A
+// prelude definition tells its refusals at the filter's call of it, and refuses no member.
 @(private = "file")
 call :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> Ty {
 	if n.is_param {

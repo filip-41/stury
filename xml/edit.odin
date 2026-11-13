@@ -1,19 +1,17 @@
 package xml
 
-// XML's edit services. The format commits its edits itself, through `compose.markup_commit`, with the edits and
-// refusals every markup format shares, over the elements XML spells, and the result is read again, so an edit that
-// breaks a rule of XML is `.Bad_Result`.
+// XML's edit services. Edits are committed through `compose.markup_commit`, which holds the edits and refusals every
+// markup format shares, over the elements XML spells. The result is read again, so an edit that breaks a rule of XML is
+// `.Bad_Result`.
 
 import "base:runtime"
 import "core:slice"
 import "core:strings"
 import core "../core"
 import compose "../core/compose"
-import engine "../core/build"
 import typed "../core/typed"
 import write "../core/write"
 
-// XML's edit services, the same table for every spec.
 @(private, rodata)
 EDIT := core.Edit_Services {
 	value    = edit_value,
@@ -32,22 +30,12 @@ edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.all
 	return list
 }
 
-// Makes `v` the value at every answer of `path` over `src`, in one call, and returns the new text, which the caller frees
-// with `allocator`, keeping every byte the edit does not reach. A `typed.Raw` is an element's content as XML, a struct, a
+// Makes `v` the value at every answer of `path` over `src` and returns the new text, which the caller frees with
+// `allocator`. Every byte the edit does not reach is kept. A `typed.Raw` is an element's content as XML, a struct, a
 // slice or a map is built by `plan`, and any other value is written as an element's content. A `Name` the path ends in
 // that its element lacks is inserted as its last child.
 set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	scratch: write.Scratch
-	defer write.scratch_destroy(&scratch)
-	in_ := write.edit_input(v, plan, &scratch) or_return
-	doc, berr := build(src, spec, opts, read.dups, allocator)
-	defer core.destroy(&doc)
-	if berr != nil {
-		return nil, berr
-	}
-	list := edit_list_init(&doc, spec, allocator)
-	defer core.edit_list_destroy(&list)
-	return engine.set_answers(&list, path, in_, read, allocator)
+	return write.set_with(src, bound_as(spec, opts), build_handle, &EDIT, path, v, plan, read, allocator)
 }
 
 // Checks `src` as an element's content.
@@ -62,9 +50,8 @@ edit_value :: proc(v: ^core.Token_View, src: []u8, allocator: runtime.Allocator)
 	return {}
 }
 
-// A value an edit writes, spelled as an element's content by the element write: null as none, a scalar as its escaped
-// text, an object as its members' elements and its `#text` as text among them, and an array as `ITEM` before each
-// item's content.
+// Spells a value an edit writes as an element's content: null as none, a scalar as its escaped text, an object as its
+// members' elements with `#text` as text among them, and an array as `ITEM` before each item's content.
 @(private)
 edit_spell :: proc(_: ^core.Document, v: core.Value, opts: core.Write_Options, _: string, _: bool, _: u64, allocator: runtime.Allocator) -> ([]u8, core.Error) {
 	spill: [write.ROOM_MAX]u8 = ---
@@ -113,7 +100,6 @@ edit_relocate :: proc(doc: ^core.Document, node: core.Node_Index, _: core.Site, 
 	return slice.clone(doc.src[lo:hi], allocator), true
 }
 
-// What the markup edits read from XML.
 @(private, rodata)
 MARKUP := compose.Markup {
 	element = element_of,
@@ -165,7 +151,7 @@ element_of :: proc(doc: ^core.Document, v: core.Node_Index) -> (e: compose.Marku
 	return e
 }
 
-// XML's commit: each edit as splices of the source, which the walk then reads.
+// Commits each edit as splices of the source and validates the result.
 @(private)
 edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 	out, err = compose.markup_commit(list, &MARKUP, allocator)

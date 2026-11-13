@@ -379,6 +379,22 @@ query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Option
 	return h.answers[:h.n_answers], {}
 }
 
+// Answers `path` or `paths` over a document built whole, in the order a scan of its text answers. A partial document
+// is `.Unsupported`.
+query_doc :: proc {query_doc_one, query_doc_many}
+
+query_doc_one :: proc(doc: ^core.Document, path: core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Error) {
+	return query_doc_many(doc, []core.Path{path}, read, allocator)
+}
+
+query_doc_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Error) {
+	if doc == nil || doc.readers == nil {
+		return nil, core.error_of(core.Path_Error{kind = .Unsupported})
+	}
+	found, refusal := query(doc, paths, read, allocator)
+	return found, core.error_of(refusal)
+}
+
 // Writes `in_` as the value at every answer of `path` over the built `doc`, and returns the new text. A `Name` the path ends
 // in that its container lacks is inserted there, an `Index` the path ends in that is its array's length appends, and a
 // `?` on either passes a container that is not of its kind. A missing parent is `.Bad_Index`, and an index past the
@@ -587,14 +603,48 @@ each_answer_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, s
 
 each_answer :: proc {each_answer_one, each_answer_many}
 
+// `scan_many` through a format's own build and scan of the handle `as`, in place of the handle's services, so that a
+// constant spec links the walk of that spec alone.
+scan_with :: proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, allocator: runtime.Allocator, $build_doc: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), $scan_doc: proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error)) -> (core.Document, core.Error) {
+	if read.dups == .Refuse {
+		built, e := build_doc(src, as, true, allocator)
+		return query_built(&built, core.error_of(e), paths, read)
+	}
+	doc, err := scan_doc(src, as, paths, read, nil, nil, allocator)
+	return doc, core.error_of(err)
+}
+
+// `each_answer_many` through a format's own build and scan, as `scan_with`.
+each_answer_with :: proc(src: []u8, as: core.As, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read: core.Path_Options, allocator: runtime.Allocator, $build_doc: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), $scan_doc: proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error)) -> core.Error {
+	if read.dups == .Refuse {
+		built, e := build_doc(src, as, true, allocator)
+		core.destroy(&built)
+		if e.kind != .None {
+			return core.error_of(e)
+		}
+	}
+	doc, err := scan_doc(src, as, paths, read, state, on, allocator)
+	core.destroy(&doc)
+	return core.error_of(err)
+}
+
 // Reads the first answer of `path`, as `scan` with a limit of one. A path that gives none, as `.[]` of an empty array,
 // answers `.Missing` with `owner` `NO_NODE`.
 find :: proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
+	doc, err = scan_one(src, as, first_path(path), read, allocator)
+	return doc, first_answer(&doc), err
+}
+
+// The path a format's `find` reads: `path` with a limit of one.
+first_path :: proc(path: core.Path) -> core.Path {
 	one := path
 	one.limit = min(path.limit.? or_else 1, 1)
-	doc, err = scan_one(src, as, one, read, allocator)
-	answer = doc.answers[0] if len(doc.answers) > 0 else {core.NO_NODE, core.NO_NODE, 0, .Missing}
-	return
+	return one
+}
+
+// The answer a format's `find` gives from the document its read of `first_path` built.
+first_answer :: proc(doc: ^core.Document) -> core.Answer {
+	return doc.answers[0] if len(doc.answers) > 0 else {core.NO_NODE, core.NO_NODE, 0, .Missing}
 }
 
 // Writes `in_` as the value at every answer of `path` over `src`, in one call: a build of the text, one edit per answer

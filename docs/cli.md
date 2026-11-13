@@ -310,10 +310,11 @@ stays a true description of its outputs. A filter that does not compile writes n
 - A member read by name (`.emial`, `.["emial"]`, `{emial}`, `getpath(["emial"])`) that no object of the schema
   describes is refused at the name, with the closest member it does describe: `"emial" is not a member of the object
   the schema describes (did you mean "email"?)`. An object that lists members (`properties`, `patternProperties`, a
-  `const` or `enum` object) describes those, and every member where `additionalProperties` or `unevaluatedProperties`
-  takes one. An object that lists none (`{}`, `true`, `{"type":"object"}`) describes every member. A `?`, `try` or
-  `//` does not lift this refusal. A path an update or `path` reads may name any member, since an update makes it, and
-  a jq definition the prelude holds (`map_values`, `with_entries`, ...) is told at its call and refuses no member.
+  `const` or `enum` object) describes only those, unless `additionalProperties` or `unevaluatedProperties` is present
+  and takes another member. An object that lists none (`{}`, `true`, `{"type":"object"}`) describes every member. A `?`,
+  `try` or `//` does not lift this refusal. A path an update or `path` reads may name any member, since an update makes
+  it, and a jq definition the prelude holds (`map_values`, `with_entries`, ...) is told at its call and refuses no
+  member.
 - A step on kinds that never take it is refused as jq would fail it at run time: `.name + 1` when `.name` is a string,
   `.[0]` on an object, `.[]` on a number, `ltrimstr` or `keys` on a number, `@csv` on an object. A step that some
   value of its input takes passes. Inside `?`, `try` and the left of `//` these are the filter's choice and pass.

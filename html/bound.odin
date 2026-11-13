@@ -23,7 +23,6 @@ READERS := core.Readers {
 	fact        = spelling_fact,
 }
 
-// The handle of `spec` read with `opts`, over `READERS`.
 bound_as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
 	return as_of(&READERS, spec, opts)
 }

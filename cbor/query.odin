@@ -15,12 +15,7 @@ scan_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := O
 
 @(private)
 scan_many :: proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
-	if read.dups == .Refuse {
-		built, e := build(src, spec, opts, .Refuse, allocator)
-		return engine.query_built(&built, e, paths, read)
-	}
-	doc, err := scan_item(src, bound_as(spec, opts), paths, read, nil, nil, allocator)
-	return doc, core.error_of(err)
+	return engine.scan_with(src, bound_as(spec, opts), paths, read, allocator, build_item, scan_item)
 }
 
 each_answer :: proc {each_answer_one, each_answer_many}
@@ -32,16 +27,7 @@ each_answer_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, st
 
 @(private)
 each_answer_many :: proc(src: []u8, spec: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
-	if read.dups == .Refuse {
-		built, e := build(src, spec, opts, .Refuse, allocator)
-		core.destroy(&built)
-		if e != nil {
-			return e
-		}
-	}
-	doc, err := scan_item(src, bound_as(spec, opts), paths, read, state, on, allocator)
-	core.destroy(&doc)
-	return core.error_of(err)
+	return engine.each_answer_with(src, bound_as(spec, opts), paths, state, on, read, allocator, build_item, scan_item)
 }
 
 // The answers `each_answer` gives, as an iterator that `next` takes them from: `for a in cbor.next(&it)`. A loop that
@@ -52,27 +38,6 @@ answers :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Op
 }
 
 find :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
-	one := path
-	one.limit = min(path.limit.? or_else 1, 1)
-	doc, err = scan_one(src, spec, one, opts, read, allocator)
-	answer = doc.answers[0] if len(doc.answers) > 0 else {core.NO_NODE, core.NO_NODE, 0, .Missing}
-	return
-}
-
-// Answers `path` or `paths` over a document built whole, as `core.query` does. A document read as a constant spec holds
-// no services, so `core.query` does not answer for it.
-query :: proc {query_one, query_many}
-
-@(private)
-query_one :: proc(doc: ^core.Document, path: core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Error) {
-	return query_many(doc, []core.Path{path}, read, allocator)
-}
-
-@(private)
-query_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Error) {
-	if doc == nil || doc.readers == nil {
-		return nil, core.error_of(core.Path_Error{kind = .Unsupported})
-	}
-	found, refusal := engine.query(doc, paths, read, allocator)
-	return found, core.error_of(refusal)
+	doc, err = scan_one(src, spec, engine.first_path(path), opts, read, allocator)
+	return doc, engine.first_answer(&doc), err
 }

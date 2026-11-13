@@ -12,7 +12,7 @@ import engine "../core/build"
 // CBOR's handle, which only `as` names: the readers of a built document with the services, which reach every pass. Every
 // spec shares it, since a handle holds its spec. The tables hold pointers to the bound tables, so they are set at
 // startup and never written after.
-HANDLE := handle_readers(&SERVICES)
+HANDLE := core.with_services(READERS, &SERVICES)
 
 SERVICES := core.Services {
 	build    = build_item,
@@ -25,13 +25,6 @@ SERVICES := core.Services {
 	tokens   = &TOKENS,
 	records  = &FRAMING,
 	docs     = &RECORD_DOCS,
-}
-
-// The readers of the handle: `READERS` with the services.
-handle_readers :: proc "contextless" (services: ^core.Services) -> core.Readers {
-	r := READERS
-	r.services = services
-	return r
 }
 
 // CBOR's fault table, which names the format.

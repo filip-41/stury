@@ -11,8 +11,8 @@ import engine "../core/build"
 // hold pointers to the other tables, so they are set at startup and never written after.
 @(private)
 HANDLES := [Spec]core.Readers {
-	.Toml_1_0 = handle_readers(&SERVICES[.Toml_1_0]),
-	.Toml_1_1 = handle_readers(&SERVICES[.Toml_1_1]),
+	.Toml_1_0 = core.with_services(READERS, &SERVICES[.Toml_1_0]),
+	.Toml_1_1 = core.with_services(READERS, &SERVICES[.Toml_1_1]),
 }
 
 @(private)
@@ -21,19 +21,10 @@ SERVICES := [Spec]core.Services {
 	.Toml_1_1 = handle_services(.Toml_1_1),
 }
 
-// The readers of a handle: `READERS` with `services`.
-@(private)
-handle_readers :: proc "contextless" (services: ^core.Services) -> core.Readers {
-	r := READERS
-	r.services = services
-	return r
-}
-
-// The run-time services of spec `S`, which a handle reaches.
 @(private)
 handle_services :: proc "contextless" ($S: Spec) -> core.Services {
 	return {
-		build    = proc(src: []u8, as: core.As, _: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {return build_text(src, as, allocator)},
+		build    = build_handle,
 		validate = edit_validate,
 		scan     = scan_text,
 		write    = document_write,
@@ -199,6 +190,12 @@ prefixed_number :: proc "contextless" (digits: []u8, form: u16) -> core.Number {
 		}
 	}
 	return {value, .Int}
+}
+
+// `build_text` as `Services.build` takes it. A repeated key is a fault of the grammar, so there is no repeat to refuse.
+@(private)
+build_handle :: proc(src: []u8, as: core.As, _: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+	return build_text(src, as, allocator)
 }
 
 // Reads `src` into a document that holds the handle `handle`: the text is read into the table tree once, and the tree

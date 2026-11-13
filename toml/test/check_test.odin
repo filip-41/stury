@@ -212,3 +212,12 @@ a_plan_of_a_description_reads_toml :: proc(t: ^testing.T) {
 	_, empty := toml.plan_of(&rules.Description{})
 	walktest.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 }
+
+// A check with no plan is a plan mismatch.
+@(test)
+a_check_with_no_plan_is_a_mismatch :: proc(t: ^testing.T) {
+	v: struct {
+		a: int,
+	}
+	walktest.expect_kind(t, toml.check(transmute([]u8)string("a = 1\n"), .Toml_1_0, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
+}

@@ -21,9 +21,9 @@ import typed "../core/typed"
 // holds, and its services the passes of that spec, so a call through a handle never switches on the spec. The tables
 // hold pointers to the bound tables, so they are set at startup and never written after.
 HANDLES := [Spec]core.Readers {
-	.Csv   = handle_readers(.Csv, &SERVICES[.Csv]),
-	.Tsv   = handle_readers(.Tsv, &SERVICES[.Tsv]),
-	.Plain = handle_readers(.Plain, &SERVICES[.Plain]),
+	.Csv   = core.with_services(readers_of(.Csv)^, &SERVICES[.Csv]),
+	.Tsv   = core.with_services(readers_of(.Tsv)^, &SERVICES[.Tsv]),
+	.Plain = core.with_services(readers_of(.Plain)^, &SERVICES[.Plain]),
 }
 
 SERVICES := [Spec]core.Services {
@@ -32,14 +32,6 @@ SERVICES := [Spec]core.Services {
 	.Plain = handle_services(.Plain),
 }
 
-// The readers of the handle of spec `S`: `readers_of(S)` with the services of `S`.
-handle_readers :: proc "contextless" ($S: Spec, services: ^core.Services) -> core.Readers {
-	r := readers_of(S)^
-	r.services = services
-	return r
-}
-
-// The run-time services of spec `S`, which a handle reaches.
 handle_services :: proc "contextless" ($S: Spec) -> core.Services {
 	return {
 		build    = proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
@@ -355,9 +347,9 @@ written_text :: #force_inline proc "contextless" (src: []u8, n: core.Node, spec:
 	return nil, false
 }
 
-// The text of cell `n` of `src`, a text of spec `spec`, and dsv's `Readers.text`. It returns a cell that needs no
-// decode as a slice of the source. It decodes a quoted cell holding `""`, a TSV escape and a `lax` cell into `buf`, and returns
-// false when `buf` is too short.
+// The text of cell `n` of `src`, a text of spec `spec`, and dsv's `Readers.text`. A cell that needs no decode is a
+// slice of the source. A quoted cell holding `""`, a TSV escape and a `lax` cell are decoded into `buf`, and the
+// result is false when `buf` is too short.
 cell_text :: proc(src: []u8, n: core.Node, spec: Spec, buf: []u8) -> (s: string, ok: bool) {
 	if text, written := written_text(src, n, spec); written {
 		return string(text), true
@@ -529,9 +521,10 @@ edit_cells :: proc(doc: ^core.Token_View, src: []u8, record: bool, record_at: Re
 	return err if err.kind != .None || record || cells == 1 else {kind = .Bad_Value}
 }
 
-// Writes a decoded name as one cell of the document's spec. A CSV name that would not read back bare is quoted, as is
-// one a byte order mark starts, which would read as the text's mark at its start, and a TSV name's escapes are written. Plain has neither, and neither has a spelling for every name, so what is written may
-// still be no cell, which the caller checks. Returns false when `text` cannot grow.
+// Writes a decoded name as one cell of the document's spec. A CSV name that would not read back bare is quoted, and so
+// is one a byte order mark starts, which would read as the text's mark. A TSV name's escapes are written. Plain has
+// neither quotes nor escapes. Not every name has a spelling, so what is written may still be no cell, which the
+// caller checks. Returns false when `text` cannot grow.
 edit_key_text :: proc(doc: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bool {
 	delimiter, comment := doc.as.opts[0], doc.as.opts[1]
 	#partial switch Spec(doc.as.spec) {

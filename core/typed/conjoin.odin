@@ -4,22 +4,21 @@ import "base:runtime"
 import rules "../rules"
 import "core:mem"
 
-// The verdict-only reading of the `allOf` and `$ref` arms of a description: the nodes those arms and their holder's
-// own keywords conjoin into one node, which a check with no sink reads as one arm. A failure then has no single
-// keyword path, so a check with a sink reads the arms one by one.
+// A check with no sink reads a holder's `allOf` and `$ref` targets, with the holder's own keywords, as one conjoined
+// node. A failure in that node has no single keyword path, so a check with a sink reads the arms one by one.
 @(private)
 Conjoined :: struct {
-	// The node the plain parts conjoin into, the targets that judge by arms of their own, and the targets whose `not`
-	// and `if` arms the holder takes as its own.
+	// `node` conjoins the plain parts. `held` are the targets that keep arms of their own. `lifted` are the targets
+	// whose `not` and `if` arms the holder takes over.
 	node:   rules.Node_Index,
 	held:   []rules.Node_Index,
 	lifted: []rules.Node_Index,
-	// The holder's `anyOf` or `oneOf` arms, each conjoined with `node`, which the holder then reads in its place.
+	// The holder's `anyOf` or `oneOf` arms, each conjoined with `node`. The holder reads these instead of `node`.
 	arms:   []rules.Node_Index,
 }
 
-// The description `d` with its fixed evaluated sets settled and the conjoined node of each holder whose arms conjoin, in
-// `arena`, recorded in `b.conjoined`. A node `kept_apart` names is not conjoined.
+// A copy of `d` in `arena` with its fixed evaluated sets settled and a conjoined node added for each holder whose arms
+// conjoin, recorded in `b.conjoined`. Nodes that `kept_apart` marks are not conjoined.
 @(private)
 conjoin_description :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator) -> rules.Description {
 	x := d^
@@ -29,10 +28,11 @@ conjoin_description :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.A
 	append(&x.arrays, ..d.arrays[:])
 	x.allocator = arena
 	b.conjoined.allocator, b.pairs.allocator, b.inline.allocator, b.stripped.allocator, b.chain_ends.allocator = arena, arena, arena, arena, arena
+	b.nothing.allocator = arena
 	settle_unevaluated(b, &x, arena)
 	inline_patterns(b, &x, arena)
 	kept := kept_apart(&x, arena)
-	// Conjoining appends the nodes that two members' values make, which the loop reaches in turn.
+	// Conjoining appends nodes for pairs of member values, and the loop visits those too.
 	for i := 0; i < len(x.nodes); i += 1 {
 		if i < len(kept) && kept[i] {
 			continue
@@ -66,9 +66,9 @@ conjoin_description :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.A
 	return x
 }
 
-// The nodes of `d` whose conjoining would move what a dynamic scope or an evaluated set holds: each node that reaches a
-// `$dynamicRef` or an unevaluated keyword by any keyword, and each node the holder of an unevaluated keyword reaches in
-// place.
+// The nodes of `d` that must not be conjoined, because conjoining them would change a dynamic scope or an evaluated
+// set: every node that reaches a `$dynamicRef` or an unevaluated keyword through any keyword, and every node that the
+// holder of an unevaluated keyword reaches in place.
 @(private = "file")
 kept_apart :: proc(d: ^rules.Description, arena: runtime.Allocator) -> []bool {
 	kept := make([]bool, len(d.nodes), arena)
@@ -76,13 +76,13 @@ kept_apart :: proc(d: ^rules.Description, arena: runtime.Allocator) -> []bool {
 	for &n, i in d.nodes {
 		kept[i] = n.dynamic_ref != nil || n.unevaluated_items != nil || n.unevaluated_properties != nil
 	}
-	// A node that reaches a kept node is kept: walk the edges backwards from the kept nodes. `parents` lists the nodes
-	// that reach each node, as slices of `parents` between `starts`.
+	// A node that reaches a kept node is kept, so walk the edges backwards from the kept nodes. The parents of node x
+	// are `parents[starts[x]:starts[x + 1]]`.
 	count := len(d.nodes)
 	starts := make([]int, count + 2, arena)
 	for &n in d.nodes {
 		clear(&next)
-		node_children(d, &n, &next, false)
+		rules.node_children(d, &n, &next, false)
 		for x in next {
 			if x != rules.NONE {
 				starts[x + 2] += 1
@@ -95,7 +95,7 @@ kept_apart :: proc(d: ^rules.Description, arena: runtime.Allocator) -> []bool {
 	parents := make([]rules.Node_Index, starts[count + 1], arena)
 	for &n, i in d.nodes {
 		clear(&next)
-		node_children(d, &n, &next, false)
+		rules.node_children(d, &n, &next, false)
 		for x in next {
 			if x != rules.NONE {
 				parents[starts[x + 1]] = rules.Node_Index(i)
@@ -131,59 +131,13 @@ kept_apart :: proc(d: ^rules.Description, arena: runtime.Allocator) -> []bool {
 			continue
 		}
 		reached[x], kept[x] = true, true
-		node_children(d, &d.nodes[x], &next, true)
+		rules.node_children(d, &d.nodes[x], &next, true)
 	}
 	return kept
 }
 
-// Appends to `out` the nodes `n` applies, those that judge its value itself when `in_place`, and else every node it holds.
-@(private = "file")
-node_children :: proc(d: ^rules.Description, n: ^rules.Node, out: ^[dynamic]rules.Node_Index, in_place: bool) {
-	append(out, ..n.all_of)
-	append(out, ..n.any_of)
-	append(out, ..n.one_of)
-	for x in ([?]Maybe(rules.Node_Index){n.not, n.cond.test, n.cond.then, n.cond.other, n.ref, n.dynamic_ref}) {
-		if r, has := x.?; has {
-			append(out, r)
-		}
-	}
-	if n.object >= 0 {
-		o := &d.objects[n.object]
-		for x in o.dependents {
-			if r, has := x.node.?; has {
-				append(out, r)
-			}
-		}
-		if !in_place {
-			for x in o.members {
-				append(out, x.node)
-			}
-			for x in o.patterns {
-				append(out, x.node)
-			}
-			append(out, o.additional, o.keys)
-		}
-	}
-	if in_place {
-		return
-	}
-	for x in ([?]Maybe(rules.Node_Index){n.unevaluated_items, n.unevaluated_properties}) {
-		if r, has := x.?; has {
-			append(out, r)
-		}
-	}
-	if n.array >= 0 {
-		a := &d.arrays[n.array]
-		append(out, ..a.prefix)
-		append(out, a.items)
-		if r, has := a.contains.?; has {
-			append(out, r)
-		}
-	}
-}
-
-// The record of an arm that judges by `node` in a check with no sink: that of its conjoined node when it has one and
-// nothing else, which reads with no arms.
+// The record a check with no sink uses for an arm on `node`: the record of its conjoined node when that node has no
+// held, lifted or spread arms and so reads with no arms, else `node`'s own record.
 @(private)
 verdict_record :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, node: rules.Node_Index) -> i32 {
 	if c, ok := b.conjoined[node]; ok && len(c.held) == 0 && len(c.lifted) == 0 && c.arms == nil {
@@ -192,15 +146,15 @@ verdict_record :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloca
 	return arm_record(b, d, arena, node)
 }
 
-// `seen` holds the targets passed through, since `allOf` is idempotent and a target joins once.
+// `seen` holds the targets already joined. `allOf` is idempotent, so each target joins once.
 @(private = "file")
 Conjoining :: struct {
 	parts, held, lifted: [dynamic]rules.Node_Index,
 	seen:                map[rules.Node_Index]struct{},
 }
 
-// Adds the node `at` to `c`: its own keywords past its arms as a part, and the targets of its `$ref` and `allOf`.
-// `depth` bounds the targets passed through.
+// Adds node `at` to `c`: its own keywords without its arms as one part, then the targets of its `$ref` and `allOf`.
+// `depth` bounds how deep the targets nest.
 @(private = "file")
 conjoin_into :: proc(b: ^Builder, d: ^rules.Description, at: rules.Node_Index, c: ^Conjoining, depth: int) {
 	n := d.nodes[at]
@@ -215,8 +169,8 @@ conjoin_into :: proc(b: ^Builder, d: ^rules.Description, at: rules.Node_Index, c
 	}
 }
 
-// The node of `at`'s own keywords past its arms, appended to `d` once however many holders conjoin `at`, and whether
-// `at` judges any (`n` is its copy).
+// A copy of node `at` (`n`) without its arms, appended to `d` once however many holders conjoin `at`. `judges` is false
+// when the copy would judge nothing.
 @(private = "file")
 stripped_part :: proc(b: ^Builder, d: ^rules.Description, at: rules.Node_Index, n: ^rules.Node) -> (part: rules.Node_Index, judges: bool) {
 	if part, judges = b.stripped[at]; judges {
@@ -233,8 +187,8 @@ stripped_part :: proc(b: ^Builder, d: ^rules.Description, at: rules.Node_Index, 
 	return part, part != rules.NONE
 }
 
-// The node `node` judges by past each `$ref` that holds nothing else, `NONE` for a loop of them. Each node of a chain
-// remembers its end, so a chain of n references costs n steps however many of its nodes are asked.
+// The node reached from `node` by following each `$ref` that holds nothing else, `NONE` for a loop. Every node on the
+// chain caches the end, so a chain of n references costs n steps in total however many of its nodes are asked.
 @(private = "file")
 chain_end :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index) -> rules.Node_Index {
 	if node == rules.NONE || !rules.ref_only(&d.nodes[node]) {
@@ -263,8 +217,8 @@ chain_end :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index) ->
 	return x
 }
 
-// Adds the target of `node` to `c`: as a part when it judges by no arm, by its own parts when its arms are only
-// `allOf`, `$ref`, `not` and `if`, which the holder then takes, and else held apart.
+// Adds the target of `node` to `c`. A target with no arms becomes a part. A target whose arms are only `allOf`, `$ref`,
+// `not` and `if` is split into its own parts, and the holder takes its `not` and `if`. Any other target is held apart.
 @(private = "file")
 conjoin_part :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index, c: ^Conjoining, depth: int) {
 	x := chain_end(b, d, node)
@@ -289,8 +243,8 @@ conjoin_part :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index,
 	}
 }
 
-// Whether `n`'s own keywords, past its `allOf` and `$ref`, are ones a conjoined node keeps: none an arm of the holder
-// judges beside them.
+// Whether a conjoined node can hold `n`'s own keywords, apart from its `allOf` and `$ref`: none of them may need an
+// arm of the holder.
 @(private = "file")
 own_plain :: proc(b: ^Builder, d: ^rules.Description, n: ^rules.Node) -> bool {
 	if n.rules.unique || arm_operands(n) {
@@ -302,8 +256,8 @@ own_plain :: proc(b: ^Builder, d: ^rules.Description, n: ^rules.Node) -> bool {
 	return n.array < 0 || d.arrays[n.array].contains == nil
 }
 
-// The node that takes what each of the plain nodes `parts` takes, appended to `d`. Fails when two parts have rules,
-// an enum or a spelling of integers the node cannot hold both of.
+// Appends to `d` a node that takes exactly what every one of the plain nodes `parts` takes. Fails when two parts both
+// have rules or both an enum, when their integer spellings or resources differ, or when a part has patterns.
 @(private = "file")
 conjoin_nodes :: proc(b: ^Builder, d: ^rules.Description, parts: []rules.Node_Index, arena: runtime.Allocator) -> (rules.Node_Index, bool) {
 	out := rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1, resource = d.nodes[parts[0]].resource}
@@ -350,13 +304,13 @@ conjoin_nodes :: proc(b: ^Builder, d: ^rules.Description, parts: []rules.Node_In
 	return rules.Node_Index(len(d.nodes) - 1), true
 }
 
-// The kinds with `.Integer` beside `.Number`, which takes every integer.
+// `k` with `.Integer` added when it has `.Number`, since a number kind takes every integer.
 @(private = "file")
 widened :: proc(k: rules.Kinds) -> rules.Kinds {
 	return k + {.Integer} if .Number in k else k
 }
 
-// The object block of the conjoined parts: each name any part gives, valued by what every part takes for it.
+// The object block of the conjoined parts: every member name any part has, valued by what all parts take for it.
 @(private = "file")
 conjoin_objects :: proc(b: ^Builder, d: ^rules.Description, parts: []rules.Node_Index, arena: runtime.Allocator) -> (rules.Object, bool) {
 	ANY :: rules.Object{additional = rules.NONE, keys = rules.NONE}
@@ -402,7 +356,6 @@ conjoin_objects :: proc(b: ^Builder, d: ^rules.Description, parts: []rules.Node_
 	return out, true
 }
 
-// Whether `members` names `name`.
 @(private = "file")
 has_member :: proc(members: []rules.Member, name: string) -> bool {
 	for m in members {
@@ -413,7 +366,7 @@ has_member :: proc(members: []rules.Member, name: string) -> bool {
 	return false
 }
 
-// The array block of the conjoined parts: each place valued by what every part takes there.
+// The array block of the conjoined parts: each position valued by what all parts take there.
 @(private = "file")
 conjoin_arrays :: proc(b: ^Builder, d: ^rules.Description, parts: []rules.Node_Index, arena: runtime.Allocator) -> rules.Array {
 	ANY :: rules.Array{items = rules.NONE}
@@ -439,8 +392,8 @@ conjoin_arrays :: proc(b: ^Builder, d: ^rules.Description, parts: []rules.Node_I
 	return out
 }
 
-// The node that takes what both `x` and `y` take: one of them when the other takes anything or they are one node,
-// else an `allOf` of both, made once per pair.
+// A node that takes what both `x` and `y` take: one of them when the other takes anything or both are the same node,
+// otherwise an `allOf` of the two, made once per pair.
 @(private = "file")
 conjoin_pair :: proc(b: ^Builder, d: ^rules.Description, x, y: rules.Node_Index) -> rules.Node_Index {
 	switch {
@@ -448,9 +401,9 @@ conjoin_pair :: proc(b: ^Builder, d: ^rules.Description, x, y: rules.Node_Index)
 		return y
 	case y == rules.NONE:
 		return x
-	case takes_all(b, d, x):
+	case judges_nothing(d, x, &b.nothing):
 		return y
-	case takes_all(b, d, y):
+	case judges_nothing(d, y, &b.nothing):
 		return x
 	}
 	key := [2]rules.Node_Index{min(x, y), max(x, y)}
@@ -465,19 +418,8 @@ conjoin_pair :: proc(b: ^Builder, d: ^rules.Description, x, y: rules.Node_Index)
 	return at
 }
 
-// Whether `node` takes every value.
-@(private = "file")
-takes_all :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index) -> bool {
-	x := chain_end(b, d, node)
-	if x == rules.NONE {
-		return true
-	}
-	n := &d.nodes[x]
-	return n.kinds == rules.EVERY_KIND && n.object < 0 && n.array < 0 && !bare_judges(b, d, n, {}) && !holds(b, d, x, {})
-}
-
-// Records in `b.inline` each object of `d` with one pattern that matches none of its members' names, which its record then reads
-// as it reads its other members, with no arm.
+// Records in `b.inline` each object of `d` whose single pattern matches none of its member names. Its record then reads
+// the pattern's members like its other members, with no arm.
 @(private = "file")
 inline_patterns :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator) {
 	room: [SCRATCH_ROOM]u8 = ---

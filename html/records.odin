@@ -1,7 +1,7 @@
 // The records of HTML. An HTML text has no mark that ends it, since a browser reads every byte past `</html>` into the
-// tree, so under `.Concatenated` the record is the whole text from the reader's position to the input's end, and an
-// input of no bytes holds none. A stream's record is settled once its input has ended. A reader the entry points open
-// holds no record reads: a caller that builds or scans a record sets `it.docs = record_docs(spec)`.
+// tree. Under `.Concatenated` the record is the whole text from the reader's position to the input's end, and an input
+// of no bytes holds none. A stream's record is settled once its input has ended. A reader the entry points open holds
+// no record reads. A caller that builds or scans a record sets `it.docs = record_docs(spec)`.
 package html
 
 import "base:runtime"
@@ -16,8 +16,8 @@ FRAMING := records.Framing_Services {
 	judge = proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) {return nil},
 }
 
-// Frames the text at the reader's position, the rest of the input, judged by the tree it builds as a text of its own,
-// as the record's build reads it.
+// Frames the text at the reader's position, which is the rest of the input. The tree it builds as a text of its own
+// judges it, as the record's build reads it.
 @(private)
 next_text :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) {
 	lo := it.pos
@@ -35,7 +35,7 @@ next_text :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) {
 	return {text = it.src[lo:], at = lo}, true
 }
 
-// The reads of a record's value as `spec`: its build. A scan of a record builds it.
+// The reads of a record's value as `spec`, which are its build. A scan of a record builds it.
 record_docs :: proc "contextless" (spec: Spec) -> ^records.Record_Docs {
 	return &RECORD_DOCS
 }

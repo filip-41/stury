@@ -4,13 +4,12 @@ import "base:runtime"
 import regex "../regex"
 import core ".."
 import rules "../rules"
-import "core:mem"
 import "core:slice"
 
-// What a node evaluates of a value that passes it, which `unevaluatedProperties` and `unevaluatedItems` leave to their
-// own subschema: the members `names` name and `patterns` match, every member under `members`, the first `prefix`
-// elements, every element under `items`, the elements that pass record `contains`, and what the in-place subschemas
-// of `inner` evaluate when they count.
+// What a node evaluates of a value that passes it. `unevaluatedProperties` and `unevaluatedItems` judge the rest. The
+// set holds the members that `names` names or `patterns` match, every member when `members` is set, the first `prefix`
+// elements, every element when `items` is set, the elements that pass record `contains`, and what each subschema of
+// `inner` evaluates when it counts.
 @(private)
 Evaluates :: struct {
 	names:    []string,
@@ -21,22 +20,23 @@ Evaluates :: struct {
 	prefix:   int,
 	contains: i32,
 	inner:    []Inner,
-	// For the node that asks, the records the set asks the value to pass and those it asks of each element, and what it
-	// evaluates of every value that passes it, which its arms judge with no run. `named` holds the sets in its closure
-	// that evaluate members by name or pattern, and `reach` the longest prefix in it: what the set reads of one member or
-	// element besides the records each element passes.
+	// Set only on the set of the node that asks. `wholes` are the records the value is judged by, `elements` those each
+	// element is judged by, and `fixed` what the node evaluates of every value that passes it, which its arms skip with
+	// no run. `named` lists the sets in the closure that evaluate members by name or pattern, and `reach` is the longest
+	// prefix in the closure: what the set reads of one member or element, beyond the records each element passes.
 	wholes:   []i32,
 	elements: []i32,
 	named:    []^Evaluates,
 	reach:    int,
 	fixed:    ^Evaluates,
-	// The most sets of `inner` one inside the other below this one, 0 while they are made.
+	// How deep the sets of `inner` nest below this one, 0 while they are being made.
 	height:   int,
 }
 
-// An in-place subschema whose evaluation counts when the value passes record `rec`, has the member `name` when one is
-// set, and passes record `test` exactly when `on` (the `if` a `then` or `else` waits on), -1 for none. An `always` one,
-// a `$ref`, `$dynamicRef` or `allOf` member, counts whenever the node that holds it does, since that node fails without it.
+// An in-place subschema. What it evaluates counts when the value passes record `rec`, has member `name` if one is set,
+// and passes record `test` exactly when `on` is true (`test` is the `if` a `then` or `else` waits on, -1 for none). An
+// `always` subschema, a `$ref`, `$dynamicRef` or `allOf` member, counts whenever its holder passes, since the holder
+// fails without it.
 @(private)
 Inner :: struct {
 	rec, test: i32,
@@ -46,10 +46,10 @@ Inner :: struct {
 	eval:      ^Evaluates,
 }
 
-// What a use of `node` evaluates, a node's own unevaluated keywords included unless `own` says the node is the one that
+// What a use of `node` evaluates, including the node's own unevaluated keywords unless `own` marks it as the node that
 // asks. Each in-place subschema that counts by its verdict gets the record that judges it. `depth` counts the sets
-// that hold this one, and `site` holds the keyword steps to `node` from the node that asks. A plan whose sets nest past
-// `MAX_HELD` is refused, as a check would judge them one inside the other.
+// that hold this one, and `site` holds the keyword steps from the asking node to `node`. A plan whose sets nest past
+// `MAX_HELD` is refused, because a check would judge them one inside the other.
 @(private)
 evaluates :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, node: rules.Node_Index, own := false, depth := 0, site: ^[dynamic]core.Step = nil) -> ^Evaluates {
 	site := site
@@ -173,8 +173,8 @@ evaluates :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, 
 	return e
 }
 
-// Refuses the plan as `.Too_Deep` for evaluated sets that nest past `MAX_HELD` at the keyword steps `site` from the node
-// that asks, which the path names after the members that lead to that node, its innermost steps kept.
+// Refuses the plan as `.Too_Deep` for evaluated sets that nest past `MAX_HELD`. The error path is the member path to the
+// asking node followed by the keyword steps `site`, keeping the innermost steps.
 @(private = "file")
 evaluated_too_deep :: proc(b: ^Builder, site: []core.Step) {
 	if b.err.kind != .None {
@@ -191,13 +191,13 @@ evaluated_too_deep :: proc(b: ^Builder, site: []core.Step) {
 	path_close(&b.err)
 }
 
-// Whether the value being judged, or under `index` its member or element of that place, passes record `rec`, which
-// the evaluated set asks of the runs.
+// Asks the runs whether the judged value passes record `rec`, or with `index` >= 0 whether its member or element at
+// that place does.
 @(private)
 Passes :: #type proc(data: rawptr, index: int, rec: i32) -> bool
 
-// The evaluated set's view of a value: its member names in order or its element count, how it asks whether the value or
-// a member passes a record, and a search's scratch.
+// The value as an evaluated set sees it: its member names in order or its element count, the callback that asks
+// whether the value or a member passes a record, and scratch space for pattern searches.
 @(private)
 Evaluating :: struct {
 	names:   []string,
@@ -208,13 +208,13 @@ Evaluating :: struct {
 	undecided: bool, // set when a pattern search ran out of memory
 }
 
-// Marks the groups of failed members or, under `items`, elements that `e` evaluates, each judged by its place `first`.
-// `ev.passes` asks of an element by the group's index. What a set marks depends only on the value, so each set of the
-// closure with sets inside it is read once however many in-place paths reach it, and a set with none once per set that
-// holds it. Says whether the sets read could be kept.
+// Marks which groups of failed members, or of elements under `items`, `e` evaluates. Each group is judged by its place
+// `first`, and `ev.passes` asks of an element by the group's index. What a set marks depends only on the value, so a set
+// with inner sets is read once however many in-place paths reach it, and a set without them once per holder. Returns
+// false when the list of sets read could not grow.
 @(private)
 evaluated_groups :: proc(ev: ^Evaluating, e: ^Evaluates, groups: []Group, items: bool) -> bool {
-	// Marks the groups `s` evaluates, and says whether it evaluates every one.
+	// Marks the groups `s` evaluates. Returns true when it evaluates all of them.
 	mark :: proc(ev: ^Evaluating, s: ^Evaluates, groups: []Group, items: bool) -> bool {
 		if s.items if items else s.members {
 			for &g in groups {
@@ -234,8 +234,7 @@ evaluated_groups :: proc(ev: ^Evaluating, e: ^Evaluates, groups: []Group, items:
 		}
 		return false
 	}
-	near: [SEEN_SCAN]^Evaluates = ---
-	sets := mem.buffer_from_slice(near[:])
+	sets := make([dynamic]^Evaluates, 0, SEEN_SCAN, context.temp_allocator)
 	index: map[^Evaluates]struct{}
 	index.allocator = context.temp_allocator
 	append(&sets, e)
@@ -267,14 +266,6 @@ evaluated_groups :: proc(ev: ^Evaluating, e: ^Evaluates, groups: []Group, items:
 					continue
 				}
 			}
-			if len(sets) == len(near) && raw_data(sets) == &near[0] {
-				wide, failed := make([dynamic]^Evaluates, len(near), 4 * len(near), context.temp_allocator)
-				if failed != nil {
-					return false
-				}
-				copy(wide[:], near[:])
-				sets = wide
-			}
 			if _, failed := append(&sets, x.eval); failed != nil {
 				return false
 			}
@@ -286,7 +277,6 @@ evaluated_groups :: proc(ev: ^Evaluating, e: ^Evaluates, groups: []Group, items:
 	return true
 }
 
-// Whether `e` names the member `name` or a pattern of it matches it.
 @(private)
 evaluates_name :: proc(e: ^Evaluates, name: string, scratch: ^regex.Scratch) -> (found, undecided: bool) {
 	for x in e.names {
@@ -303,7 +293,6 @@ evaluates_name :: proc(e: ^Evaluates, name: string, scratch: ^regex.Scratch) -> 
 	return false, false
 }
 
-// Whether the in-place subschema `x` counts for the value.
 @(private)
 counts :: proc(ev: ^Evaluating, x: ^Inner) -> bool {
 	if name, keyed := x.name.?; keyed && !slice.contains(ev.names, name) {
@@ -315,8 +304,7 @@ counts :: proc(ev: ^Evaluating, x: ^Inner) -> bool {
 	return x.always || ev.passes(ev.data, -1, x.rec)
 }
 
-// Sets in `e` the records its evaluated set asks the value to be judged by and those it asks of each element, each once,
-// with the sets that evaluate by name and the longest prefix in its closure.
+// Fills `e.wholes`, `e.elements`, `e.named` and `e.reach` from the closure of `e`, listing each record once.
 @(private)
 evaluated_records :: proc(e: ^Evaluates, arena: runtime.Allocator) {
 	seen := make(map[^Evaluates]bool, context.temp_allocator)
@@ -356,10 +344,10 @@ evaluated_records :: proc(e: ^Evaluates, arena: runtime.Allocator) {
 	e.wholes, e.elements, e.named = whole[:], each[:], named[:]
 }
 
-// What the in-place closure of a node evaluates of every value that passes it, through its own keywords, its `$ref` and
-// its `allOf`: the names and patterns, the prefix length, whether every member or element is evaluated, and whether an
-// `anyOf`, `oneOf`, `if`, `dependentSchemas` or `$dynamicRef` in it, or a `contains` when `items` asks, makes the whole
-// set depend on the value.
+// What a node evaluates of every value that passes it, through its own keywords, its `$ref` and its `allOf`: names,
+// patterns, the prefix length, and whether every member or element is evaluated. `varies` is set when an `anyOf`,
+// `oneOf`, `if`, `dependentSchemas` or `$dynamicRef` in that closure, or a `contains` when `items` asks, makes the set
+// depend on the value.
 @(private)
 Static_Set :: struct {
 	names:                  [dynamic]string,
@@ -367,7 +355,7 @@ Static_Set :: struct {
 	prefix:                 int,
 	all_members, all_items: bool,
 	varies:                 bool,
-	// The nodes added, false while their targets are added, so a node reached many ways is added once.
+	// The nodes already added, false while their targets are still being added. A node reached many ways is added once.
 	added:                  map[rules.Node_Index]bool,
 }
 
@@ -380,7 +368,7 @@ static_set :: proc(d: ^rules.Description, node: rules.Node_Index, s: ^Static_Set
 	}
 	n := &d.nodes[node]
 	if done, met := s.added[node]; met {
-		// A node met again inside itself nests without end, which the depth bound holds as varying.
+		// A node met again inside itself recurses without end, so the set varies, as at the depth bound.
 		s.varies ||= !done
 		return
 	}
@@ -425,7 +413,6 @@ static_set :: proc(d: ^rules.Description, node: rules.Node_Index, s: ^Static_Set
 	}
 }
 
-// Adds `p` to `list` unless a pattern of its expression is there.
 @(private = "file")
 pattern_add :: proc(list: ^[dynamic]rules.Pattern, p: rules.Pattern) {
 	for x in list {
@@ -436,7 +423,8 @@ pattern_add :: proc(list: ^[dynamic]rules.Pattern, p: rules.Pattern) {
 	append(list, p)
 }
 
-// What `node` evaluates of every value that passes it, past its own unevaluated keywords, with each pattern compiled.
+// What `node` evaluates of every value that passes it, not counting its own unevaluated keywords, with each pattern
+// compiled.
 @(private)
 fixed_part :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, node: rules.Node_Index) -> ^Evaluates {
 	s := Static_Set{names = make([dynamic]string, arena), patterns = make([dynamic]rules.Pattern, arena)}
@@ -458,9 +446,9 @@ fixed_part :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator,
 	return f
 }
 
-// Whether `node` judges nothing: every value passes it, and what it evaluates is all it does. With `required`, the
-// node may also require members of an object, whose names it adds there. `known` holds each node's answer past the
-// first one asked, `.Asked` while it is judged, so a node reached many ways is judged once.
+// Whether every value passes `node`, so evaluating is all it does. With `required`, the node may also require object
+// members, whose names go into `required`. `known` caches the answer for each node below the first, `.Asked` while it
+// is in progress, so a node reached many ways is judged once.
 @(private)
 judges_nothing :: proc(d: ^rules.Description, node: rules.Node_Index, known: ^map[rules.Node_Index]Nothing, depth := 0, required: ^[dynamic]string = nil) -> bool {
 	x, _ := rules.ref_end(d, node)
@@ -471,7 +459,7 @@ judges_nothing :: proc(d: ^rules.Description, node: rules.Node_Index, known: ^ma
 		switch known[x] {
 		case .Unknown:
 		case .Asked, .Judges:
-			// A node met again inside itself nests without end, which the depth bound refuses.
+			// A node met again inside itself recurses without end, so it counts as judging, as at the depth bound.
 			return false
 		case .Nothing:
 			return true
@@ -484,7 +472,6 @@ judges_nothing :: proc(d: ^rules.Description, node: rules.Node_Index, known: ^ma
 	return own_nothing(d, x, known, depth, required)
 }
 
-// What `judges_nothing` knows of a node.
 @(private)
 Nothing :: enum u8 {
 	Unknown,
@@ -493,7 +480,7 @@ Nothing :: enum u8 {
 	Nothing,
 }
 
-// Whether the node `x`, past its `$ref`s, judges nothing, as `judges_nothing` asks.
+// `judges_nothing` for node `x`, which is already past its `$ref`s.
 @(private = "file")
 own_nothing :: proc(d: ^rules.Description, x: rules.Node_Index, known: ^map[rules.Node_Index]Nothing, depth: int, required: ^[dynamic]string) -> bool {
 	n := &d.nodes[x]
@@ -544,13 +531,13 @@ own_nothing :: proc(d: ^rules.Description, x: rules.Node_Index, known: ^map[rule
 	return true
 }
 
-// Rewrites in `d` each `unevaluatedProperties` and `unevaluatedItems` whose evaluated set is fixed by the schema alone
-// as the `additionalProperties` or `items` of its node, with each name, pattern and place the set holds added to the
-// node as one that takes any value, so the node's record judges it with no arm. A set that holds every member or
-// element drops the keyword. The node then evaluates every member or element, as it did, and the `$ref` and `allOf`
-// targets that judge nothing past what they evaluate are dropped, the places of the `allOf` members kept recorded in
-// `b.all_of_at`. The objects and arrays rewritten are recorded in `b.unevaluated`, whose records spell the keyword. A
-// node whose kinds leave out objects or arrays keeps its keyword, which reports beside the kind.
+// Rewrites each `unevaluatedProperties` and `unevaluatedItems` in `d` whose evaluated set the schema alone fixes. The
+// keyword becomes its node's `additionalProperties` or `items`, and each name, pattern and position in the set is
+// added to the node as one that takes any value, so the node's record judges it with no arm. When the set covers every
+// member or element, the keyword is dropped. The node still evaluates every member or element, so its `$ref` and
+// `allOf` targets that judge nothing beyond what they evaluate are dropped, and the places of the kept `allOf` members
+// go in `b.all_of_at`. Rewritten objects and arrays are recorded in `b.unevaluated`, so their records still name the
+// keyword. A node whose kinds exclude objects or arrays keeps its keyword, which reports beside the kind.
 @(private)
 settle_unevaluated :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator) {
 	b.unevaluated.allocator, b.all_of_at.allocator = arena, arena

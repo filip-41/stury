@@ -11,7 +11,7 @@ core/write: Number_Literal Out ROOM_MAX STREAM_BUFFER Tagged_Text Tokens Tree Tr
 core/records: Reader=Record_Reader Record Stream_Options=Record_Stream_Options Writer=Record_Writer build=records_build check=records_check close=records_close each=records_each marshal=records_marshal marshal_stream=records_marshal_stream next=records_next open=records_open open_stream=records_open_stream read=records_read scan=records_scan write=records_write cell cells column write_cells writer_init writer_end
 host: Pool pool_init
 core/schema: Bound=Bound_Schema Compiled=Schema Draft=Schema_Draft Options=Schema_Options check=check_schema check_records=check_schema_records
-core/build: Answer_Iter answers_next=next
+core/build: Answer_Iter answers_next=next query_doc=query
 destroy: core.destroy typed.plan_destroy typed.sink_destroy core.edit_list_destroy core.path_destroy records.writer_destroy write.destroy host.pool_destroy build.answers_destroy schema.destroy schema.unbind toml.cursor_destroy yaml.cursor_destroy cbor.cursor_destroy xml.cursor_destroy html.cursor_destroy
 core/css [xml html]: Selector compile=compile_selector select
 destroy [xml html]: css.destroy

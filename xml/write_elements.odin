@@ -1,17 +1,17 @@
 package xml
 
-// The element write, which every write of a value that is no XML document takes: the token write, `marshal` and the
-// write of another format's document. It writes compact XML as the value arrives and refuses what XML cannot spell so
-// that it reads back, as `write` says. Pretty text is laid out from the compact text, read back as a document and
-// written from its spans, since whether an element holds text is known only at its close.
+// The element write. Every write of a value that is not an XML document goes through it: the token write, `marshal`
+// and the write of another format's document. It writes compact XML as the value arrives and refuses what XML cannot
+// spell so that it reads back, as `write` says. Pretty text is laid out afterwards, since whether an element holds text
+// is known only at its close: the compact text is read back as a document and written from its spans.
 
 import "base:runtime"
 import "core:io"
 import core "../core"
 import write "../core/write"
 
-// An element write's state: the names of the open elements and of the member waiting for its value, end to end in
-// `names`.
+// The state of an element write. `names` holds the names of the open elements and of the member waiting for its value,
+// end to end.
 @(private)
 Elements :: struct {
 	out:      ^write.Out,
@@ -26,8 +26,8 @@ Elements :: struct {
 	key_next: bool, // the token write's next string is a key
 }
 
-// An open level: the document's object, an element's object, the array whose items are elements of its name, or the
-// array under `#text` whose items are text runs. `count` is the root members, the child elements or the items it holds.
+// An open level: the document's object, an element's object, an array whose items are elements of its name, or the
+// array under `#text` whose items are text runs. `count` is the number of root members, child elements or items.
 @(private)
 Level :: struct {
 	kind:   enum u8 {Root, Object, Array, Text},
@@ -109,7 +109,6 @@ el_key :: proc(e: ^Elements, name: string) -> core.Typed_Error_Kind {
 	return .None
 }
 
-// Writes the next element's attribute.
 @(private)
 el_attribute :: proc(e: ^Elements, name, value: string) -> core.Typed_Error_Kind {
 	if !is_name(transmute([]u8)name) {
@@ -179,7 +178,7 @@ el_start :: proc(e: ^Elements) -> core.Typed_Error_Kind {
 	return .None
 }
 
-// Starts an element write into `out` with what lasts only the write from `context.allocator`.
+// Starts an element write into `out`. `names` lives in `context.allocator` memory for the length of the write.
 @(private)
 elements_init :: proc(e: ^Elements, out: ^write.Out, opts: core.Write_Options) {
 	e^ = {out = out, ascii = opts.ascii}

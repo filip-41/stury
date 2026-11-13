@@ -187,3 +187,12 @@ every_record_form_serves_every_spec :: proc(t: ^testing.T) {
 	record_forms(t, .Csv)
 	record_forms(t, .Tsv)
 }
+
+// A nil `any` is a null, which CSV cannot write at the top, so it is refused as any null is.
+@(test)
+a_nil_any_is_refused_as_a_null :: proc(t: ^testing.T) {
+	nothing: any
+	text, err := dsv.marshal(nothing, allocator = context.temp_allocator)
+	testing.expect(t, text == nil)
+	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
+}

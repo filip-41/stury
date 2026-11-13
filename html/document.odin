@@ -13,22 +13,14 @@ import typed "../core/typed"
 // startup and never written after.
 @(private)
 HANDLES := [Spec]core.Readers {
-	.Document = handle_readers(&SERVICES[.Document]),
-	.Fragment = handle_readers(&SERVICES[.Fragment]),
+	.Document = core.with_services(READERS, &SERVICES[.Document]),
+	.Fragment = core.with_services(READERS, &SERVICES[.Fragment]),
 }
 
 @(private)
 SERVICES := [Spec]core.Services {
 	.Document = handle_services(reads_of(.Document)),
 	.Fragment = handle_services(reads_of(.Fragment)),
-}
-
-// The readers of a handle: `READERS` with `services`.
-@(private)
-handle_readers :: proc "contextless" (services: ^core.Services) -> core.Readers {
-	r := READERS
-	r.services = services
-	return r
 }
 
 // The run-time services of a spec whose typed reads are `reads`, which a handle reaches. A read by paths builds the
@@ -38,9 +30,7 @@ handle_services :: proc "contextless" (reads: ^typed.Format_Reads) -> core.Servi
 	return {
 		build    = build_handle,
 		validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, Spec(as.spec), options_of(as))},
-		scan     = proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
-			return scan_spec(src, Spec(as.spec), as, paths, read, state, on, allocator)
-		},
+		scan     = scan_handle,
 		write    = document_write,
 		plans    = rawptr(plan_as),
 		edit     = &EDIT,

@@ -6,42 +6,31 @@ import typed "../core/typed"
 import write "../core/write"
 import schema "../core/schema"
 
-// The typed read of HTML, as XML's is. A text is built whole and its document is read by `core/typed`'s read of a
-// markup document: an element at a struct is an object whose members are its attributes, its child elements and its
-// text as the member `#text`, a list member collects the siblings of its name, and a text read into a number or a
-// boolean is read by that type.
+// The typed read of HTML, as XML's is. A text is built whole and read by `core/typed`'s read of a markup document. An
+// element at a struct is an object whose members are its attributes, its child elements and its text as `#text`. A list
+// member collects the siblings of its name. A text read into a number or a boolean is read by that type.
 
-// Writes `value` as HTML into new bytes from `allocator`, as `write` writes a document: a struct or a map as an element's
-// children, a list as elements of its member's name, and a struct of one member `html` as a document. The form with no
-// plan builds and frees one for the call, and a plan from `plan_make` is the form for many writes.
+// Writes `value` as HTML into new bytes from `allocator`, as `write` writes a document. A struct or a map is an
+// element's children, a list is elements of its member's name, and a struct of one member `html` is a document. Without
+// a plan, `marshal` builds and frees one per call. Pass a plan from `plan_make` for many writes.
 marshal :: proc {marshal_once, write.marshal}
 
 @(private)
 marshal_once :: proc(value: any, spec := Spec.Document, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
-	if value.id == nil || value.data == nil {
-		return nil, core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
-	}
-	plan, refusal := plan_built(value.id, spec, opts, {}, nil, context.allocator)
-	if refusal.kind != .None {
-		return nil, core.error_of(refusal)
-	}
-	defer typed.plan_destroy(&plan)
-	text, err := plan.marshal(&plan, value.data, write, {}, allocator, nil)
-	return text, core.error_of(err)
+	nothing: any
+	v := typed.marshal_target(value, &nothing)
+	plan, refusal := plan_built(v.id, spec, opts, {}, nil, context.allocator)
+	return typed.marshal_planned(&plan, core.error_of(refusal), v.data, write, allocator)
 }
 
-// The number a `Plain` element value spells, exactly a JSON number, as `core.markup_number` reads it.
-number :: core.markup_number
-
-// The typed reads of `spec`.
 @(private)
 reads :: proc "contextless" (spec: Spec) -> ^typed.Format_Reads {
 	return reads_of(.Fragment) if spec == .Fragment else reads_of(.Document)
 }
 
-// Returns the checks of `spec` read with `opts`, which `model.compile` and `schema.bind` take: the reads, which check a
-// text or a document by a plan made from a description or a model, and the handle its plans read by, which reaches no
-// service. A struct's member takes its name from the tag key `html`.
+// Returns the checks of `spec` read with `opts`, for `model.compile` and `schema.bind`: the reads, which check a text or
+// a document by a plan made from a description or a model, and the handle its plans read by, which reaches no service.
+// A struct's member takes its name from the tag key `html`.
 checks :: proc "contextless" (spec: Spec, opts := Options{}) -> typed.Format_Checks {
 	return {reads(spec), bound_as(spec, opts)}
 }
@@ -61,7 +50,7 @@ plan_make :: proc(T: typeid, spec := Spec.Document, opts := Options{}, plan := t
 	return made, core.error_of(err)
 }
 
-// The plan of `T` with HTML's document read, and the reads `reads` holds.
+// Builds the plan of `T` with HTML's writer and document read, and `reads` as its reads.
 @(private)
 plan_built :: proc(T: typeid, spec: Spec, opts: Options, plan: typed.Plan_Options, reads: ^typed.Format_Reads, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Refusal) {
 	p, err := typed.plan_build(T, as_of(&READERS, spec, opts), plan, allocator)
@@ -70,7 +59,6 @@ plan_built :: proc(T: typeid, spec: Spec, opts: Options, plan: typed.Plan_Option
 	return p, err
 }
 
-// Gives a plan HTML's writer, token writer and document read.
 @(private)
 plan_bind :: proc(p: ^typed.Plan) {
 	p.marshal, p.tokens, p.value_text = marshal_text, &TOKENS, write.value_text
@@ -85,7 +73,7 @@ plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: run
 	return p, err
 }
 
-// The typed reads of a plan read as spec `S`: a text is built and its nodes are read, and a document's nodes are read by
+// The typed reads of a plan read as spec `S`. A text is built and its nodes are read. A document's nodes are read by
 // the generic route, which compares a key by its decoded text.
 @(private)
 reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
@@ -100,8 +88,8 @@ reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	return &r
 }
 
-// Checks the text `src` of `spec` by `plan`, building its document whole, a handle with no readers read as `spec` with
-// the default options.
+// Checks `src` by `plan`, building its document whole. A handle with no readers is read as `spec` with the default
+// options.
 @(private)
 check_text :: proc(src: []u8, spec: Spec, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
 	handle := as
@@ -111,10 +99,9 @@ check_text :: proc(src: []u8, spec: Spec, as: core.As, target: rawptr, T: typeid
 	return typed.check_built_text(src, handle, build_handle, target, T, plan, read, allocator)
 }
 
-// The handle of `spec` with the options `plan` reads by.
 @(private)
 plan_handle :: proc "contextless" (spec: Spec, plan: ^typed.Plan) -> core.As {
-	handle := plan.as
+	handle := typed.handle_of(plan)
 	handle.readers, handle.spec = &READERS, u8(spec)
 	return handle
 }
@@ -136,14 +123,5 @@ unmarshal :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read :=
 // Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
 // first. The options are the plan's, and any plan of the format reads.
 check :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return check_ordered(src, spec, plan_handle(spec, plan), target, T, plan, read, allocator)
-}
-
-// `check_text` with the entries it adds in the order `typed.check_text` gives them.
-@(private)
-check_ordered :: proc(src: []u8, spec: Spec, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Error {
-	from := len(read.sink.entries) if read.sink != nil else 0
-	refused := check_text(src, spec, as, target, T, plan, read, allocator)
-	typed.order_entries(read.sink, from)
-	return core.error_of(refused)
+	return typed.check_by(src, plan_handle(spec, plan), target, T, plan, read, allocator, proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return check_text(src, Spec(as.spec), as, target, T, plan, read, allocator)})
 }

@@ -91,21 +91,12 @@ binary_options :: #force_inline proc "contextless" (as: core.As) -> write.Binary
 // built once with `plan_make` is the form for many writes.
 marshal :: proc {marshal_once, write.marshal}
 
-// A nil `any` has no type to plan and is written as null.
 @(private)
 marshal_once :: proc(value: any, spec := Spec.Cbor, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
-	v := value
 	nothing: any
-	if v.id == nil || v.data == nil {
-		v = any{&nothing, typeid_of(any)}
-	}
+	v := typed.marshal_target(value, &nothing)
 	plan, refusal := plan_bound(v.id, spec, opts, {}, nil, context.allocator)
-	if refusal.kind != .None {
-		return nil, core.error_of(refusal)
-	}
-	defer typed.plan_destroy(&plan)
-	text, err := plan.marshal(&plan, v.data, write, {}, allocator, nil)
-	return text, core.error_of(err)
+	return typed.marshal_planned(&plan, core.error_of(refusal), v.data, write, allocator)
 }
 
 // Reads `src`, exactly one CBOR item of `spec`, into `target`. An absent member keeps what `target` holds. A struct
@@ -128,7 +119,6 @@ unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, op
 	return core.error_of(read_text(src, spec, opts, target, T, plan, read, allocator, false))
 }
 
-// A read with a plan made for the call.
 @(private)
 unmarshal_any :: proc(src: []u8, spec: Spec, target: rawptr, T: typeid, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Error {
 	plan, refusal := plan_bound(T, spec, opts, {}, &BUILDS, context.allocator)
@@ -144,19 +134,7 @@ unmarshal_any :: proc(src: []u8, spec: Spec, target: rawptr, T: typeid, opts: Op
 // Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
 // first. The options are the plan's, and any plan of the format reads.
 check :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return check_ordered(src, spec, target, T, plan, read, allocator)
-}
-
-// The check of `read_text` with the entries it adds in the order `typed.check_text` gives them.
-@(private)
-check_ordered :: proc(src: []u8, spec: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Error {
-	if plan == nil {
-		return core.error_of(typed.plan_mismatch(plan, &PLAN_READERS, T))
-	}
-	from := len(read.sink.entries) if read.sink != nil else 0
-	refused := read_text(src, spec, options_of(plan.as), target, T, plan, read, allocator, true)
-	typed.order_entries(read.sink, from)
-	return core.error_of(refused)
+	return typed.check_by(src, bound_as(spec, options_of(typed.handle_of(plan))), target, T, plan, read, allocator, proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, Spec(as.spec), options_of(as), target, T, plan, read, allocator, true)})
 }
 
 // The typed reads of a plan made from a type.
