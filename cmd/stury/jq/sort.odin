@@ -493,10 +493,8 @@ keys_array :: proc(ks: []Keyed) -> ^Array {
 
 // The elements of `input` that sort_by and min_by iterate, each with its key under `f`.
 @(private = "file")
-keyed_elements :: proc(ip: ^Interp, f: ^Node, input: Item, env: ^Env) -> ([]Keyed, Signal) {
-	if k := kind(input.v); k != .Array && k != .Object {
-		return nil, fail(ip, "Cannot iterate over %s (%s)", type_name(input.v), brief(ip, input.v))
-	}
+keyed_elements :: proc(ip: ^Interp, f: ^Node, input: Item, env: ^Env) -> (keyed: []Keyed, sig: Signal) {
+	iterable(ip, input.v) or_return
 	return keys_by(ip, f, input.v, env)
 }
 

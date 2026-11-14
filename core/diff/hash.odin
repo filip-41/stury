@@ -50,7 +50,7 @@ hash_of :: proc(d: ^Differ, v: core.Value) -> u64 {
 		return h
 	}
 	k := core.kind(r)
-	h := core.hash(r)
+	h: u64
 	#partial switch k {
 	case .Array:
 		h = mix(SEED, u64(k))
@@ -65,6 +65,8 @@ hash_of :: proc(d: ^Differ, v: core.Value) -> u64 {
 			sum += mix(core.hash(m.key), hash_of(d, m.val))
 		}
 		h = mix(mix(SEED, u64(k)), sum)
+	case:
+		h = core.hash(r)
 	}
 	hashes[r.node] = h if h != 0 else 1
 	return hashes[r.node]

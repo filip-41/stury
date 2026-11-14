@@ -430,38 +430,128 @@ edit_many_writes_read_back :: proc(t: ^testing.T) {
 	testing.expect(t, expect_commit(t, &list, strings.to_string(want), .Json))
 }
 
-// The read of what a commit wrote refuses a text whose token at a written value's bytes spans other bytes or reads as
-// another value, and a written value no token reaches, and gives the walk's fault for a text that does not read.
+// Past `core.MAX_PATHS` edits, removals, inserts in an array and among removed elements, sets and renames in nested
+// containers read back from the bytes the commit wrote.
 @(test)
-reads_written_judges_each_value :: proc(t: ^testing.T) {
-	as := json.as(.Json)
-	walk := core.services_of(as).edit.walk_written
+edit_many_places_read_back :: proc(t: ^testing.T) {
+	N :: 4 * core.MAX_PATHS
+	src, want: strings.Builder
+	defer strings.builder_destroy(&src)
+	defer strings.builder_destroy(&want)
+	strings.write_byte(&src, '[')
+	strings.write_byte(&want, '[')
+	parts := [4]string{`{"a":[1,9,3],"b":{"c":1}}`, `{"a":[1,2,3]}`, `{"a":[0,1,2,3],"b":{"c":"z"}}`, `{"x":[1,2],"b":{"c":1}}`}
+	for k in 0 ..< N {
+		sep := "," if k > 0 else ""
+		strings.write_string(&src, sep)
+		strings.write_string(&src, `{"a":[1,2,3],"b":{"c":1}}`)
+		strings.write_string(&want, sep)
+		strings.write_string(&want, parts[k % 4])
+	}
+	strings.write_byte(&src, ']')
+	strings.write_byte(&want, ']')
+	doc, err := core.build(src.buf[:], json.as(.Json))
+	defer core.destroy(&doc)
+	walktest.expect_nil(t, err)
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	// Element `k` is node `e = 1 + 10k`: `.a` is `e + 2` with its elements after it, `.b` is `e + 7` and `.b.c` `e + 9`.
+	for k in 0 ..< N {
+		e := core.Node_Index(1 + 10 * k)
+		switch k % 4 {
+		case 0:
+			walktest.expect_nil(t, core.remove(&list, e + 4))
+			walktest.expect_nil(t, write.insert(&list, e + 2, 1, 9))
+		case 1:
+			walktest.expect_nil(t, core.remove(&list, e + 7))
+		case 2:
+			walktest.expect_nil(t, write.set(&list, e + 9, "z"))
+			walktest.expect_nil(t, write.insert(&list, e + 2, 0, 0))
+		case 3:
+			walktest.expect_nil(t, core.set_text(&list, e + 1, "x"))
+			walktest.expect_nil(t, core.remove(&list, e + 5))
+		}
+	}
+	testing.expect(t, expect_commit(t, &list, strings.to_string(want), .Json))
+}
+
+// The read of what a commit wrote holds the output to the source and the edits: a value set, a key renamed, a member
+// inserted or removed at another place than the edit names is refused, as are a written value that reads as another,
+// one glued to the bytes beside it, a source value an edit sets left in place, and a piece written where no edit is. `pieces` are the bytes the commit
+// wrote, hand-made here as a faulty commit would place them, and a text that does not read gives the walk's fault.
+@(test)
+reads_written_judges_each_place :: proc(t: ^testing.T) {
+	// Node 2 is `.a`'s value, 3 `.b`'s key, 4 its value, 6 the array `.c` and 7 to 9 its elements.
+	SRC :: `{"a":1,"b":2,"c":[1,2,3]}`
+	Op :: enum {
+		Set,
+		Rename,
+		Remove,
+		Insert,
+		Insert_Member,
+	}
 	Case :: struct {
-		out:     string,
-		written: core.Written,
-		reason:  core.Edit_Reason,
-		fault:   bool,
+		op:     Op,
+		node:   core.Node_Index,
+		at:     int,
+		out:    string,
+		pieces: []core.Written,
+		reason: core.Edit_Reason,
+		fault:  bool,
 	}
 	cases := []Case {
-		{`[1,7,"a"]`, {lo = 3, hi = 4, want = f64(7)}, .None, false},
-		{`[1,7,"a"]`, {lo = 3, hi = 4, want = f64(8)}, .Reads_Back_Other, false},
-		{`[17,"a"]`, {lo = 2, hi = 3, want = f64(7)}, .Reads_Back_Other, false},
-		{`[1,"b","a"]`, {lo = 3, hi = 6, want = "b"}, .None, false},
-		{`{"k":1}`, {lo = 1, hi = 4, want = "k", key = true}, .None, false},
-		{`{"k":1}`, {lo = 1, hi = 4, want = "j", key = true}, .Reads_Back_Other, false},
-		{`{"k":1}`, {lo = 1, hi = 4, want = "k"}, .Reads_Back_Other, false},
-		{`[1]`, {lo = 5, hi = 6, want = f64(1)}, .Reads_Back_Other, false},
-		{`[1,7,]`, {lo = 3, hi = 4, want = f64(7)}, .None, true},
+		{.Set, 2, 0, `{"a":7,"b":2,"c":[1,2,3]}`, {{5, 6, 6}}, .None, false},
+		{.Set, 2, 0, `{"a":8,"b":2,"c":[1,2,3]}`, {{5, 6, 6}}, .Reads_Back_Other, false},
+		{.Set, 2, 0, `{"a":1,"b":7,"c":[1,2,3]}`, {{11, 12, 12}}, .Reads_Back_Other, false},
+		{.Set, 8, 0, `{"a":1,"b":2,"c":[1,7,3]}`, {{20, 21, 21}}, .None, false},
+		{.Set, 8, 0, `{"a":1,"b":2,"c":[1,2,7]}`, {{22, 23, 23}}, .Reads_Back_Other, false},
+		{.Set, 8, 0, `{"a":1,"b":2,"c":[1,2,3]}`, {{20, 21, 21}}, .Reads_Back_Other, false},
+		{.Set, 8, 0, `{"a":1,"b":2,"c":[1,2,3]}`, nil, .Reads_Back_Other, false},
+		{.Set, 2, 0, `{"a":7,"b":2,"c":[1,2,3]}`, {{5, 6, 6}, {20, 21, 21}}, .Reads_Back_Other, false},
+		{.Rename, 3, 0, `{"a":1,"d":2,"c":[1,2,3]}`, {{7, 10, 10}}, .None, false},
+		{.Rename, 3, 0, `{"d":1,"b":2,"c":[1,2,3]}`, {{1, 4, 4}}, .Reads_Back_Other, false},
+		{.Rename, 3, 0, `{"a":1,"b":2,"c":[1,2,3]}`, {{7, 10, 10}}, .Reads_Back_Other, false},
+		{.Remove, 4, 0, `{"a":1,"c":[1,2,3]}`, {{6, 6, 12}}, .None, false},
+		{.Remove, 4, 0, `{"b":2,"c":[1,2,3]}`, {{1, 1, 7}}, .Reads_Back_Other, false},
+		{.Remove, 8, 0, `{"a":1,"b":2,"c":[1,3]}`, {{19, 19, 21}}, .None, false},
+		{.Remove, 8, 0, `{"a":1,"b":2,"c":[1,2]}`, {{21, 21, 23}}, .Reads_Back_Other, false},
+		{.Insert, 6, 1, `{"a":1,"b":2,"c":[1,7,2,3]}`, {{20, 22, 20}}, .None, false},
+		{.Insert, 6, 1, `{"a":1,"b":2,"c":[1,2,7,3]}`, {{22, 24, 22}}, .Reads_Back_Other, false},
+		{.Insert, 6, 1, `{"a":1,"b":2,"c":[1,72,3]}`, {{20, 21, 20}}, .Reads_Back_Other, false},
+		{.Insert, 6, 1, `{"a":1,"b":2,"c":[1,2,3]}`, {{20, 20, 20}}, .Reads_Back_Other, false},
+		{.Insert_Member, 0, 1, `{"a":1,"d":7,"b":2,"c":[1,2,3]}`, {{6, 12, 6}}, .None, false},
+		{.Insert_Member, 0, 1, `{"a":1,"b":2,"c":[1,2,3],"d":7}`, {{24, 30, 24}}, .Reads_Back_Other, false},
+		{.Insert_Member, 0, 1, `{"a":1,"d":7,"b":2,"c":[1,2,3]}`, {{6, 9, 6}}, .Reads_Back_Other, false},
+		{.Set, 2, 0, `{"a":7,"b":2,"c":[1,2,3],}`, {{5, 6, 6}}, .None, true},
 	}
-	arena: runtime.Arena
-	defer runtime.arena_destroy(&arena)
-	context.allocator = runtime.arena_allocator(&arena)
+	as := json.as(.Json)
+	walk := core.services_of(as).edit.walk_written
 	for c in cases {
-		written := []core.Written{c.written}
-		e := core.reads_written(transmute([]u8)c.out, as, written, walk)
+		doc, err := core.build(transmute([]u8)string(SRC), as)
+		walktest.expect_nil(t, err)
+		list := core.edit_list_init(&doc)
+		switch c.op {
+		case .Set:
+			walktest.expect_nil(t, write.set(&list, c.node, 7))
+		case .Rename:
+			walktest.expect_nil(t, core.set_text(&list, c.node, "d"))
+		case .Remove:
+			walktest.expect_nil(t, core.remove(&list, c.node))
+		case .Insert:
+			walktest.expect_nil(t, write.insert(&list, c.node, c.at, 7))
+		case .Insert_Member:
+			walktest.expect_nil(t, write.insert_member(&list, c.node, c.at, "d", 7))
+		}
+		arena: runtime.Arena
+		context.allocator = runtime.arena_allocator(&arena)
+		e, known := core.reads_written(&list, transmute([]u8)c.out, as, c.pieces, walk)
+		runtime.arena_destroy(&arena)
+		context.allocator = runtime.default_allocator()
 		faulted := e.inner.kind != .None
 		bad := c.reason != .None || c.fault
-		testing.expectf(t, (e.kind == .Bad_Result) == bad && e.reason == c.reason && faulted == c.fault, "%q: %v", c.out, e)
+		testing.expectf(t, known && (e.kind == .Bad_Result) == bad && e.reason == c.reason && faulted == c.fault, "%q: %v", c.out, e)
+		core.edit_list_destroy(&list)
+		core.destroy(&doc)
 	}
 }
 

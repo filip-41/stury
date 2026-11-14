@@ -517,6 +517,98 @@ entries_hold_one_member :: proc(t: ^testing.T) {
 	walktest.expect_entries_bounded(t, merging, {"logs"}, "logs:\n", "- <<: {id: 7, name: " + text + "}\n  id: 8\n", "", true)
 }
 
+// A stream's window lets go of the bytes before the members held but for the anchored nodes an alias can name, which
+// an early anchor aliased by every member and many anchors named throughout leave a few bytes each.
+@(test)
+entries_hold_anchored_nodes :: proc(t: ^testing.T) {
+	as := yaml.as(.Yaml_1_2)
+	text :: "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"
+	walktest.expect_entries_bounded(t, as, {"logs"}, "defaults: &d {x: 1, y: [2, 3]}\nlogs:\n", "- {id: 7, d: *d, name: " + text + "}\n", "", true)
+	walktest.expect_entries_bounded(t, as, {"logs"}, "defaults: &d\n  x: 1\nlogs:\n", "- *d\n- id: 7\n  d: *d\n  name: " + text + "\n", "", true)
+	defer free_all(context.temp_allocator)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, "defs:\n")
+	for i in 0 ..< 200 {
+		fmt.sbprintf(&b, "  a%d: &a%d {{v: %d}}\n", i, i, i)
+	}
+	strings.write_string(&b, "logs:\n")
+	walktest.expect_entries_bounded(t, as, {"logs"}, strings.to_string(b), "- [*a0, *a100, *a199, " + text + "]\n", "", true)
+	walktest.expect_entries_bounded(t, as, {"logs"}, "logs:\n", renamed(text), "", true)
+}
+
+// A member that anchors a name again, and 50 members whose aliases name it.
+@(private = "file")
+renamed :: proc(text: string) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	fmt.sbprintf(&b, "- &a {{v: 1, pad: %s}}\n", text)
+	for _ in 0 ..< 50 {
+		fmt.sbprintf(&b, "- {{a: *a, pad: %s}}\n", text)
+	}
+	return strings.to_string(b)
+}
+
+// A stream's member reads and builds as the memory read does once the anchored nodes its aliases name were copied out of
+// the window: an alias as a key, to a quoted scalar, to a tagged node and to a block mapping, and with merge keys on.
+@(test)
+entries_read_anchors_out_of_the_window :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	pad :: "0123456789012345678901234567890123456789012345678901234567890123456789"
+	for merging in ([2]bool{false, true}) {
+		as := yaml.as(.Yaml_1_2, {merge_keys = merging})
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_string(&b, "d: &d {x: 1, y: [2, 3]}\nk: &k key\ns: &s 'quo''ted'\nt: &t !!str 4\nm: &m\n  a: 1\n  b: [c]\nl:\n")
+		for i in 0 ..< 120 {
+			fmt.sbprintf(&b, "- {{i: %d, d: *d, *k : 1, s: *s, t: *t, pad: %s}}\n- *m\n- i: %d\n  m: *m\n", i, pad, i)
+			if merging {
+				fmt.sbprintf(&b, "- <<: *d\n  y: %d\n", i)
+			}
+		}
+		src := strings.to_string(b)
+		it := records.open(transmute([]u8)src, as, .Entries, entries = {"l"})
+		want := walktest.entries_lines(&it)
+		walktest.expect_entries(t, src, as, {"l"}, want)
+		trickle := walktest.Trickle{src = transmute([]u8)src, size = 64}
+		stream := records.open_stream(walktest.trickle_reader(&trickle), as, .Entries, {entries = {"l"}})
+		given := make([dynamic]records.Record, context.temp_allocator)
+		then := make([dynamic]string, context.temp_allocator)
+		window, since := stream.src, 0
+		for rec in records.next(&stream) {
+			if raw_data(stream.src) != raw_data(window) || len(stream.src) != len(window) {
+				window, since = stream.src, len(given)
+			}
+			append(&given, rec)
+			append(&then, walktest.built_json(&stream, rec))
+			for k := len(given) - 2; k >= since && k >= len(given) - 4; k -= 1 {
+				got := walktest.built_json(&stream, given[k])
+				testing.expectf(t, got == then[k], "merge keys %v: record %d after %d: %s, got %s", merging, k, len(given) - 1, then[k], got)
+			}
+		}
+		testing.expect(t, stream.fault == nil)
+		records.close(&stream)
+	}
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, "k: &k key\nn: &n 1\nm:\n")
+	for i in 0 ..< 200 {
+		fmt.sbprintf(&b, "  i%d: {{*k : %d, *n : %s}}\n", i, i, pad)
+	}
+	src := strings.to_string(b)
+	as := yaml.as(.Yaml_1_2)
+	it := records.open(transmute([]u8)src, as, .Entries, entries = {"m"})
+	walktest.expect_entries(t, src, as, {"m"}, walktest.entries_lines(&it))
+	// The copies of the anchors a later anchor of their name hid are let go while the window moves.
+	strings.builder_reset(&b)
+	strings.write_string(&b, "l:\n")
+	for _ in 0 ..< 300 {
+		strings.write_string(&b, renamed(pad))
+	}
+	src = strings.to_string(b)
+	it = records.open(transmute([]u8)src, as, .Entries, entries = {"l"})
+	want := walktest.entries_lines(&it)
+	trickle := walktest.Trickle{src = transmute([]u8)src, size = 64}
+	stream := records.open_stream(walktest.trickle_reader(&trickle), as, .Entries, {entries = {"l"}})
+	testing.expect_value(t, walktest.entries_lines(&stream), want)
+}
+
 // Under merge keys a stream's member merges what its `<<` names as the whole text does while the window moves, and so
 // does a container of the records, whose earlier keys the window let go.
 @(test)

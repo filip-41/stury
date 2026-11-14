@@ -142,9 +142,6 @@ decode_form_component :: proc(s: string) -> string {
 fn_parse_logfmt :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (result: Value, sig: Signal) {
 	line := must_be_text(ip, name, v) or_return
 	out := new_object()
-	is_space :: proc(c: byte) -> bool {
-		return c == ' ' || c == '\t' || c == '\n' || c == '\r'
-	}
 	for i := 0; i < len(line); {
 		if is_space(line[i]) {
 			i += 1

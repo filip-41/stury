@@ -103,7 +103,7 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 		append(&r.nodes, new_clone(Node{kind = .Format, a = v[3].node, name = v[0].text, loc = l[3]}))
 	case 57, 100:
 		r = {node = node(.If, v[2].node, v[4].node, v[5].node, at = at)}
-	case 58:
+	case 58, 93:
 		r = v[2]
 	case 60, 110, 111, 113:
 		r = {node = node(.Identity, at = at)}
@@ -153,8 +153,6 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 		r = {node = new_clone(Node{kind = .Format, name = v[1].text, loc = at})}
 	case 92:
 		r = {node = node(.Neg, v[2].node, at = at)}
-	case 93:
-		r = v[2]
 	case 94:
 		r = {node = array_node(v[2].node, at)}
 	case 95:
@@ -192,8 +190,6 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 		}
 	case 109:
 		r = {node = new_clone(Node{kind = .Call, name = v[1].text, args = v[3].nodes[:], loc = l[1]})}
-	case 112:
-		r = v[1]
 	case 114:
 		r = {nodes = list(v[1].node)}
 	case 115:

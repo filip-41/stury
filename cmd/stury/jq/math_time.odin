@@ -9,8 +9,18 @@ import "core:math"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
+import "../../../core/rules"
 
 // ---- Numbers
+
+// The number `v` is, or jq's error for a value that is not one.
+number_arg :: #force_inline proc(ip: ^Interp, v: Value) -> (Num, Signal) {
+	n, ok := number_of(v)
+	if !ok {
+		return {}, fail(ip, "%s (%s) number required", type_name(v), brief(ip, v))
+	}
+	return n, .Go
+}
 
 // isinfinite, isnan and isnormal.
 fn_float_class :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
@@ -20,11 +30,8 @@ fn_float_class :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (V
 }
 
 // frexp, modf and lgamma_r: a number's two parts, as an array.
-fn_number_pair :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	n, ok := number_of(v)
-	if !ok {
-		return nil, fail(ip, "%s (%s) number required", type_name(v), brief(ip, v))
-	}
+fn_number_pair :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (result: Value, sig: Signal) {
+	n := number_arg(ip, v) or_return
 	p, q: f64
 	switch name {
 	case "frexp":
@@ -166,7 +173,7 @@ fn_strftime :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Valu
 tz_lock: sync.Mutex
 
 // libc's strftime with TZ set to UTC for the call, so `%z` and `%s` read the fields as UTC on every OS (jq
-// does that on macOS only; elsewhere it reads them as local time).
+// does that on macOS only and reads them as local time elsewhere).
 @(private = "file")
 strftime_utc :: proc(buf: []byte, format: cstring, tm: ^libc.tm) -> uint {
 	sync.guard(&tz_lock)
@@ -235,62 +242,16 @@ fn_fromrfc3339 :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (V
 
 @(private = "file")
 rfc3339_seconds :: proc(s: string) -> (seconds: f64, ok: bool) {
-	digits :: proc(s: string, at, n: int) -> (v: i64, ok: bool) {
-		for c in transmute([]byte)s[at:at + n] {
-			if c < '0' || c > '9' {
-				return 0, false
-			}
-			v = v * 10 + i64(c - '0')
-		}
-		return v, true
-	}
-	if len(s) < 20 || s[4] != '-' || s[7] != '-' || s[10] != 'T' && s[10] != 't' || s[13] != ':' || s[16] != ':' {
-		return 0, false
-	}
-	year := digits(s, 0, 4) or_return
-	month := digits(s, 5, 2) or_return
-	day := digits(s, 8, 2) or_return
-	hour := digits(s, 11, 2) or_return
-	minute := digits(s, 14, 2) or_return
-	second := digits(s, 17, 2) or_return
-	leap_year := year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
-	days_in_month := [12]i64{31, 29 if leap_year else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
-	if month < 1 || month > 12 || day < 1 || day > days_in_month[month - 1] || hour > 23 || minute > 59 || second > 60 {
-		return 0, false
-	}
-	at := 19
+	p := rules.date_time_of(s) or_return
 	fraction := 0.0
-	if s[at] == '.' {
-		end := at + 1
-		for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+	if s[19] == '.' {
+		end := 20
+		for s[end] >= '0' && s[end] <= '9' {
 			end += 1
 		}
-		if end == at + 1 {
-			return 0, false
-		}
-		fraction, _ = strconv.parse_f64(s[at:end])
-		at = end
+		fraction, _ = strconv.parse_f64(s[19:end])
 	}
-	offset: i64
-	switch {
-	case at == len(s) - 1 && (s[at] == 'Z' || s[at] == 'z'):
-	case at == len(s) - 6 && (s[at] == '+' || s[at] == '-') && s[at + 3] == ':':
-		hours := digits(s, at + 1, 2) or_return
-		minutes := digits(s, at + 4, 2) or_return
-		if hours > 23 || minutes > 59 {
-			return 0, false
-		}
-		offset = hours * 3600 + minutes * 60
-		if s[at] == '-' {
-			offset = -offset
-		}
-	case:
-		return 0, false
-	}
-	utc := days_from_civil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second - offset
-	if second == 60 && utc %% 86400 != 0 {
-		return 0, false
-	}
+	utc := days_from_civil(i64(p.year), i64(p.month), i64(p.day)) * 86400 + i64(p.hour * 3600 + p.minute * 60 + p.second - p.offset * 60)
 	return f64(utc) + fraction, true
 }
 
@@ -340,11 +301,8 @@ fn_torfc3339 :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Val
 // numfmt(spec): a number as text by a printf-like spec, `%[flags][width][.precision]conversion` between literal text
 // (`%%` is a percent sign). The conversions are `d` (the number cut toward zero), `f` and `e`; the flags are `,`
 // (thousands separators), `0` (pad with zeros) and `-` (pad on the right).
-fn_numfmt :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	n, ok := number_of(v)
-	if !ok {
-		return nil, fail(ip, "%s (%s) number required", type_name(v), brief(ip, v))
-	}
+fn_numfmt :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (result: Value, sig: Signal) {
+	n := number_arg(ip, v) or_return
 	spec, is_str := string_of(args[0])
 	if !is_str {
 		return nil, fail(ip, "numfmt format must be a string")

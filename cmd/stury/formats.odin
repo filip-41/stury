@@ -344,7 +344,7 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 		}
 	}
 	if o.to != .Json {
-		if cli.validating {
+		if cli.command == .Check {
 			usage_error("check writes nothing: --to %s has no use there", to)
 		}
 		other := unhonoured_flag(cli, FORMATS[o.to].caps.writes) if writes_cells(o) || writes_texts(o) else "--seq" if o.seq else cli.layout_flag if writes_lines(o) else ""
@@ -359,7 +359,7 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 		usage_error("%s applies to --from csv or tsv", cli.cells_flag)
 	}
 	// schema sample takes --infer for a table it writes, whose cells it draws as --infer reads them.
-	if cli.infer_flag != "" && !reads_cells(o) && o.from != .Xml && o.from != .Html && !(cli.schema_verb && writes_cells(o)) {
+	if cli.infer_flag != "" && !reads_cells(o) && o.from != .Xml && o.from != .Html && !(cli.command >= .Schema && writes_cells(o)) {
 		usage_error("%s applies to --from csv, tsv, xml or html", cli.infer_flag)
 	}
 	if cli.yaml_flag != "" && o.from != .Yaml {
@@ -369,7 +369,7 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 		usage_error("%s applies to --from xml", cli.xml_flag)
 	}
 	// check and edit refuse the options that write a table as options they have no use for.
-	if cli.cells_out_flag != "" && !writes_cells(o) && !cli.validating && !cli.editing {
+	if cli.cells_out_flag != "" && !writes_cells(o) && cli.command != .Check && cli.command != .Edit {
 		usage_error("%s applies to --to csv or tsv", cli.cells_out_flag)
 	}
 	if reads_cells(o) {

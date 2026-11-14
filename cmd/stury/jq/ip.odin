@@ -4,6 +4,7 @@ package jq
 
 import "core:fmt"
 import "core:strings"
+import "../../../core/spell"
 
 @(private = "file")
 Address :: struct {
@@ -24,7 +25,7 @@ parse_address :: proc(s: string) -> (a: Address, ok: bool) {
 	}
 	groups: [8]u16
 	count := 0
-	// The groups of one side of the `::`, or of the whole address; the last may be a dotted IPv4 address.
+	// The groups of one side of the `::`, or of the whole address. The last may be a dotted IPv4 address.
 	read_side :: proc(side: string, groups: ^[8]u16, count: ^int, last_side: bool) -> bool {
 		if side == "" {
 			return true
@@ -50,7 +51,7 @@ parse_address :: proc(s: string) -> (a: Address, ok: bool) {
 			}
 			g := 0
 			for c in transmute([]byte)part {
-				d := hex_value(c)
+				d := spell.HEX_NIBBLE[c]
 				if d > 15 {
 					return false
 				}
@@ -79,19 +80,6 @@ parse_address :: proc(s: string) -> (a: Address, ok: bool) {
 		a.bytes[i * 2], a.bytes[i * 2 + 1] = byte(g >> 8), byte(g)
 	}
 	return a, true
-}
-
-@(private = "file")
-hex_value :: proc(c: byte) -> byte {
-	switch {
-	case c >= '0' && c <= '9':
-		return c - '0'
-	case c >= 'a' && c <= 'f':
-		return c - 'a' + 10
-	case c >= 'A' && c <= 'F':
-		return c - 'A' + 10
-	}
-	return 0xFF
 }
 
 // Four decimal octets without leading zeros, which some readers take as octal.

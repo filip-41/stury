@@ -375,12 +375,20 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, n
 	// The source bytes and the nodes the write covers. A partial document's node holds no span of its own text, so its
 	// output grows from the least room.
 	src, count := doc.src, len(doc.nodes)
+	// A record's document views the reader's whole text, so the root's own bytes size the output. A document made by
+	// hand may have no `close_end` to find a container's close.
+	size := len(src)
+	if !doc.partial && size > 0 && doc.readers != nil && doc.readers.close_end != nil {
+		size = len(core.span(doc, core.ROOT))
+	}
 	if node != core.ROOT {
 		t := doc.nodes[node]
 		src, count = nil if doc.partial else core.span(doc, node), 1 if t.kind < .Array else int(t.n)
+		size = len(src)
 	}
-	// The size to ask the output for: the source, and for pretty text what eight levels of indent make on each node.
-	hint := len(src) + write.ROOM_MAX
+	// The size to ask the output for: the value's source, and for pretty text what eight levels of indent make on each
+	// node.
+	hint := size + write.ROOM_MAX
 	if opts.pretty {
 		hint += count * (3 + 8 * (1 if opts.tab else int(opts.indent)))
 	}

@@ -180,8 +180,7 @@ parse_alias :: proc(p: ^Parser, role: core.Role) -> bool {
 	name := p.src[lo + 1:p.pos]
 	found := -1
 	for k := len(p.anchors) - 1; k >= 0; k -= 1 {
-		a := p.anchors[k]
-		if string(p.src[a.name_lo:a.name_lo + u64(a.name_n)]) == string(name) {
+		if anchor_name(p, p.anchors[k]) == string(name) {
 			found = k
 			break
 		}

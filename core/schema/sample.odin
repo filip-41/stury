@@ -588,17 +588,12 @@ number :: proc(g: ^Gen, list: []^rules.Rules, whole: bool) -> (v: core.Value, ok
 	if lo > hi || lo == hi && (low_open || high_open) {
 		return
 	}
+	// Every whole number is a multiple of a step finer than doubles.
+	if whole && (step == "" || finer_than_doubles(step)) {
+		step = "1"
+	}
 	if step != "" && !finer_than_doubles(step) {
 		return stepped(g, step, lo, hi, low_open, high_open, whole)
-	}
-	if whole {
-		first, last := math.ceil(lo), math.floor(hi)
-		first += 1 if low_open && first == lo else 0
-		last -= 1 if high_open && last == hi else 0
-		if first > last {
-			return {}, false
-		}
-		return core.number_text(fmt.tprintf("%d", i64(first) + i64(below(g, int(min(last - first, 1e6) + 1))))), true
 	}
 	x := lo + (hi - lo) * (0.1 + 0.8 * f64(below(g, 1000)) / 1000)
 	digits: [spell.F64_ROOM]u8

@@ -1,10 +1,11 @@
-// Package regex is the Oniguruma-syntax engine behind jq's `test`, `match`, `sub` and the like.
-// A pattern goes: parse.odin (`parse`: source to a tree of Nodes, with Oniguruma's error messages),
-// call.odin (`check_calls`: \g<...> calls checked for endless recursion), compile.odin (`compile`:
-// the tree to a Regex holding a program of Insts), analyze.odin (a look-behind tuned to a fixed length,
-// and the literals a search can skip by), optimize.odin (Oniguruma's search optimizer), then match.odin (`search`: the backtracking matcher over that
-// program). unicode.odin supplies character classes and case folds to all of them, from the generated
-// unicode_tables.odin.
+// Package regex is the engine behind jq's `test`, `match`, `sub` and the like, in Oniguruma's syntax, and behind a
+// schema's `pattern`, in ECMA-262's (`Flags.ecma`). A pattern goes: parse.odin (`parse`: source to a tree of Nodes,
+// with Oniguruma's error messages), call.odin (`check_calls`: \g<...> calls checked for endless recursion),
+// compile.odin (`compile`: the tree to a Regex holding a program of Insts), analyze.odin (a look-behind tuned to a fixed
+// length, and the literals a search can skip by), optimize.odin (Oniguruma's search optimizer), dfa.odin (the automata
+// that answer in one pass whether and where a program matches), then match.odin (`search`: the backtracking matcher over
+// that program). sample.odin draws a text a pattern matches. unicode.odin supplies character classes and case folds to
+// all of them, from the generated unicode_tables.odin.
 package regex
 
 // A pattern's tree as a program for the backtracking matcher (match.odin), with what the search can skip
@@ -39,31 +40,31 @@ Op :: enum u8 {
 	Any, // any rune but "\n"
 	Any_All,
 	Class, // classes[a]
-	Split, // go on at a; on failure, at b
-	Split_Head, // a greedy loop: go on at pc+1 when the byte at the position is a, on failure at b; otherwise at b
+	Split, // go on at a, on failure at b
+	Split_Head, // a greedy loop: go on at pc+1 with b to fall back to when the byte at the position is a, otherwise at b
 	Jmp, // to a
-	Save, // slot a = the position (captures, loop marks, and \K as slot 0); b: a group's start, which unsets its end
+	Save, // slot a = the position (captures, loop marks, and \K as slot 0). b: a group's start, which unsets its end
 	Set, // slot a = the position, kept as the match backs past it: a group's bound Oniguruma writes in place
-	Assert, // Assert_Kind(a); a callout's data at callouts[b]
-	Backref, // the text of one of refs[a]'s groups; b: folded
+	Assert, // Assert_Kind(a). A callout's data at callouts[b]
+	Backref, // the text of one of refs[a]'s groups. b: folded
 	Look, // a look-around or atomic group, Look_Kind(a), ending at the Look_End at b
 	Look_End,
 	Back, // a runes back, for a look-behind
 	Check, // a loop's body matched empty when slot a is the position: leave the loop, for b, or fail for b -1
 	Unset, // slots a up to b = -1: the groups of an ECMA loop's body, at each iteration
-	Cond, // group a matched: go on; otherwise go to b
+	Cond, // group a matched: go on, otherwise go to b
 	Linebreak, // \R
 	Grapheme, // \X
-	Rep, // the one-rune instruction after this, a to b times (b -1: no bound), as many as can; then pc+2
+	Rep, // the one-rune instruction after this, a to b times (b -1: no bound), as many as can, then pc+2
 	Rep_Lazy, // the same, as few as can
 	Count_Reset, // slot a, a counted loop's iterations, = 0
-	Count, // a counted loop at slot a: its body at pc+2 runs while slot a is short of insts[pc+1].a, may run while short of insts[pc+1].b, as many times as can; then on to b
+	Count, // a counted loop at slot a: its body at pc+2 runs while slot a is short of insts[pc+1].a, may run while short of insts[pc+1].b, as many times as can, then on to b
 	Count_Lazy, // the same, as few times as can
 	Count_Next, // slot a += 1, then to the loop's Count at b
 	Count_Check, // as Check under ECMA, failing only once the loop whose Count is at b has run its least count
 	Seen, // a pair a linear search has been to: fails (match.odin)
 	// Call and the ops after it are a call's or an absent operator's, which `Regex.calls_or_limits` tells of.
-	Call, // the group at a, which returns to pc+1; b: its number
+	Call, // the group at a, which returns to pc+1. b: its number
 	Return,
 	Mem_Start, // group a's start, in a group that calls itself, whose end finds the start of its own call
 	Mem_End,

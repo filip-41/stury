@@ -211,6 +211,18 @@ plain_token :: #force_inline proc(p: ^Parser, lo: u64, n: u32, role: core.Role, 
 	return t
 }
 
+// `plain_token` of the plain key `x`, staged by a replay, whose bytes the copies of a stream's window hold.
+@(private)
+far_plain_key :: proc(p: ^Parser, x: core.Token) -> core.Token {
+	at, src := far_token(p, x)
+	t := core.Token{x.lo, x.n, .Plain, .Key, x.spelling}
+	if (t.n == 0 || KEY_LEADS[src[at.lo]]) && p.tag.n == 0 && key_typed(at, src) {
+		t.spelling |= u16(Key_Tag.Resolved) << KEY_TAG_SHIFT
+		p.typed = true
+	}
+	return t
+}
+
 // Whether key `t`, which has no tag, is a plain scalar that resolves to no string. A word is decoded only when its first
 // four bytes spell `null`, `true` or `fals` in any case.
 @(private)

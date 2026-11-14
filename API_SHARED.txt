@@ -164,7 +164,7 @@ prefixed_decimal :: proc(text: string, buf: []u8) -> (digits: string, ok: bool)
 reads_as_edited :: proc(list: ^Edit_List, got: Node_Ref) -> (reads, known: bool)
 reads_back_as :: proc(want, got: Value) -> bool
 reads_rows :: proc(list: ^Edit_List, out: []u8, as: As, walk: proc(src: []u8, as: As, r: ^Row_Read) -> Maybe(Fault)) -> (err: Document_Error, known: bool)
-reads_written :: proc(out: []u8, as: As, written: []Written, walk: proc(src: []u8, as: As, w: ^Written_Read) -> Maybe(Fault)) -> Document_Error
+reads_written :: proc(list: ^Edit_List, out: []u8, as: As, written: []Written, walk: proc(src: []u8, as: As, w: ^Written_Read) -> Maybe(Fault)) -> (err: Document_Error, known: bool)
 rebuilt_attributes :: proc(v: Value) -> (attributes: ^Object, rebuilt: bool)
 rebuilt_comments :: proc(v: Value, role: Role) -> (bodies: []string, rebuilt: bool)
 reindex :: proc(o: ^Object)
@@ -476,6 +476,7 @@ visit :: proc(plan: ^typed.Plan, value: rawptr, v: ^Visitor, omits: ^typed.Omits
 visit_path :: proc(v: ^Visitor, steps: ^[dynamic]core.Step) -> bool
 write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator, site := core.Site{}, comments := false) -> (text: []u8, err: core.Typed_Refusal)
 # core/records
+FAR :: u64(1) << 46
 check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, outer: ^typed.Outer, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0, dups := core.Duplicates.Default, repeats := typed.Repeats.Ignore) -> (records: i64, failure: core.Typed_Refusal, fatal: core.Typed_Refusal, failed: i64)
 entries_close :: proc(it: ^Reader)
 entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64, services: ^Framing_Services = nil) -> bool

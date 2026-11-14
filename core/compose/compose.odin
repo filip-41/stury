@@ -78,9 +78,8 @@ Compose :: struct {
 	gap, key_pre, key_gap: []u8,
 	// The container's first key is written bare, as an inserted key is where the format can write it so.
 	bare_keys:    bool,
-	// Each scalar and key the edits wrote, `lo` and `hi` offsets in `text`, while `unwritten` is false. It is true once an
-	// edit writes what they do not hold: a container, a text the caller spelled, or a reorder.
-	written:      [dynamic]core.Written,
+	// True once an edit writes what the read of the written pieces does not follow: a container, a text the caller
+	// spelled, or a reorder.
 	unwritten:    bool,
 }
 
@@ -396,33 +395,26 @@ write_member :: proc(cx: ^Compose, e: core.Edit) -> bool {
 		put_text(cx, transmute([]u8)string("\n")) or_return
 	}
 	if e.role == .Key {
-		from := len(cx.text)
 		if cx.bare_keys && edit.bare_key(cx.spec, e.key) {
 			push_all(&cx.text, e.key) or_return
 		} else if edit.key_text == nil || !edit.key_text(cx.doc, e.key, &cx.text) {
 			return false
 		}
-		wrote(cx, from, string(e.key), true) or_return
 		push_all(&cx.text, cx.key_pre) or_return
 		push_all(&cx.text, transmute([]u8)edit.key_sep) or_return
 		push_all(&cx.text, cx.key_gap) or_return
 	}
-	from := len(cx.text)
 	push_all(&cx.text, e.text) or_return
 	cx.value_line = true
-	return wrote(cx, from, e.value, false)
+	note_written(cx, e.value)
+	return true
 }
 
-// Records the text written from `from` as the scalar or key `want`, which the commit reads back.
-wrote :: proc(cx: ^Compose, from: int, want: core.Value, key: bool) -> bool {
+// Marks the commit unwritten when an edit writes `want`, a value that is no scalar.
+note_written :: proc(cx: ^Compose, want: core.Value) {
 	if k := core.value_kind(want); want == nil || k == .Array || k == .Object {
 		cx.unwritten = true
 	}
-	if cx.unwritten {
-		return true
-	}
-	_, ok := push(&cx.written, core.Written{lo = u64(from), hi = u64(len(cx.text)), want = want, key = key})
-	return ok
 }
 
 // Fills `cx.items` with the comment items between survivors `l` and `r` of container `c`, sorted, and returns the span
@@ -847,7 +839,6 @@ compose_tree :: proc(cx: ^Compose) -> bool {
 	cx.segments, _ = make([dynamic]Segment, cx.allocator)
 	cx.items, _ = make([dynamic]Item, cx.allocator)
 	cx.members, _ = make([dynamic]Member, cx.allocator)
-	cx.written, _ = make([dynamic]core.Written, cx.allocator)
 	groups, _ := make([dynamic]Target, cx.allocator)
 	keys, _ := make([dynamic]Fact_Key, cx.allocator)
 	group_edits(cx, &groups) or_return
@@ -862,10 +853,9 @@ compose_tree :: proc(cx: ^Compose) -> bool {
 				if cx.edit.key_text == nil || !cx.edit.key_text(doc, e.text, &cx.text) {
 					return false
 				}
-				wrote(cx, from, string(e.text), true) or_return
 			} else {
 				push_all(&cx.text, e.text) or_return
-				wrote(cx, from, e.value, false) or_return
+				note_written(cx, e.value)
 			}
 			at := core.node_start(doc.nodes[e.node])
 			end := at + u64(len(core.span(doc, e.node)))

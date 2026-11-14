@@ -50,6 +50,11 @@ run_pool :: proc(run: ^Run) -> ^core.Runner {
 	return &run.pool.runner
 }
 
+// The run's pool for an input of `data`, or nil for one too short to share.
+pool_for :: proc(run: ^Run, data: []byte) -> ^core.Runner {
+	return run_pool(run) if len(data) >= POOLED_BYTES else nil
+}
+
 // What a piece's records came to, merged into the run's in source order. `cursor` is the bytes its outputs hold.
 Piece_Sum :: struct {
 	cursor, ret, last_result, records, rows: int,

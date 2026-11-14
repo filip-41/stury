@@ -52,9 +52,7 @@ write_odin :: proc(d: ^rules.Description, package_name: string, as: core.As, for
 		return "", core.error_of(s.refused)
 	}
 	b := strings.builder_make()
-	strings.write_string(&b, "// The types of a schema's values, written by stury's schema.write_odin.\npackage ")
-	strings.write_string(&b, package_name)
-	strings.write_string(&b, "\n\n")
+	put(&b, "// The types of a schema's values, written by stury's schema.write_odin.\npackage ", package_name, "\n\n")
 	if s.fragments || s.defaults {
 		s.imports += {.Core, .Json} if s.fragments else {.Core}
 	} else {
@@ -71,20 +69,13 @@ write_odin :: proc(d: ^rules.Description, package_name: string, as: core.As, for
 		if root.note != "" {
 			comment(&b, "", strings.concatenate({"format: ", root.note}))
 		}
-		strings.write_string(&b, unique(&s.taken, "Root"))
-		strings.write_string(&b, " :: ")
-		strings.write_string(&b, held_type(root))
-		strings.write_string(&b, "\n")
+		put(&b, unique(&s.taken, "Root"), " :: ", held_type(root), "\n")
 	}
 	for x in s.decls {
 		strings.write_string(&b, "\n")
 		strings.write_string(&b, x.text)
 	}
-	strings.write_string(&b, "\n// Adds the rules of these types that their tags do not hold to `reg`, before `model.compile`.\n")
-	strings.write_string(&b, "register :: proc(reg: ^model.Registry) -> ")
-	strings.write_string(&b, "core.Error {\n" if s.fragments || s.defaults else "runtime.Allocator_Error {\n")
-	strings.write_string(&b, strings.to_string(s.registers))
-	strings.write_string(&b, "\treturn nil\n}\n")
+	put(&b, "\n// Adds the rules of these types that their tags do not hold to `reg`, before `model.compile`.\n", "register :: proc(reg: ^model.Registry) -> ", "core.Error {\n" if s.fragments || s.defaults else "runtime.Allocator_Error {\n", strings.to_string(s.registers), "\treturn nil\n}\n")
 	if s.fragments {
 		strings.write_string(&b, REGISTER_FRAGMENT)
 	}
@@ -416,28 +407,25 @@ judged_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string, held: bool
 		return
 	}
 	s.fragments = true
-	strings.write_string(&s.registers, "\tregister_fragment(reg, ")
-	strings.write_string(&s.registers, out.type)
-	strings.write_string(&s.registers, ", ")
+	put(&s.registers, "\tregister_fragment(reg, ", out.type, ", ")
 	literal(&s.registers, string(text))
 	strings.write_string(&s.registers, ") or_return\n")
 	return
 }
 
-// Writes `text` as an Odin string: a raw one where it holds no backquote and no control byte but a tab, else a quoted one.
+// Writes `text` as an Odin string: a raw one where it holds no backquote and no control byte but a tab, or a newline
+// when `newline` is set, else a quoted one.
 @(private = "file")
-literal :: proc(b: ^strings.Builder, text: string) {
+literal :: proc(b: ^strings.Builder, text: string, newline := false) {
 	raw := true
 	for c in transmute([]u8)text {
-		raw &&= c >= ' ' && c != '`' && c != 0x7f || c == '\t'
+		raw &&= c >= ' ' && c != '`' && c != 0x7f || c == '\t' || newline && c == '\n'
 	}
 	if !raw {
 		strings.write_quoted_string(b, text)
 		return
 	}
-	strings.write_byte(b, '`')
-	strings.write_string(b, text)
-	strings.write_byte(b, '`')
+	put(b, "`", text, "`")
 }
 
 // A node of the strings that are a declared member's name of `o` or that its patterns match.
@@ -458,9 +446,7 @@ names_node :: proc(s: ^Source, o: rules.Object) -> rules.Node_Index {
 		strings.write_string(&b, ")$")
 	}
 	for p in o.patterns {
-		strings.write_string(&b, "|(?:" if strings.builder_len(b) > 0 else "(?:")
-		strings.write_string(&b, p.expression)
-		strings.write_string(&b, ")")
+		put(&b, "|(?:" if strings.builder_len(b) > 0 else "(?:", p.expression, ")")
 	}
 	append(&s.d.nodes, rules.Node{kinds = {.String}, array = -1, object = -1, rules = {pattern = strings.to_string(b)}})
 	return rules.Node_Index(len(s.d.nodes) - 1)
@@ -816,9 +802,7 @@ distinct_spelled :: proc(s: ^Source, part: Part, spelled: Spelled, hint: string)
 	name := s.decls[k].name
 	s.decls[k].text = strings.concatenate({name, " :: distinct ", spelled.type, "\n"})
 	s.decls[k].open = false
-	strings.write_string(&s.registers, "\tmodel.register_type(reg, {")
-	strings.write_string(&s.registers, name)
-	strings.write_string(&s.registers, ", ")
+	put(&s.registers, "\tmodel.register_type(reg, {", name, ", ")
 	strings.write_quoted_string(&s.registers, tag_items(s, spelled.rules))
 	strings.write_string(&s.registers, "}) or_return\n")
 	return {type = name, decl = k}
@@ -1079,9 +1063,7 @@ object_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Part, r: rules.Rul
 		if value.note != "" {
 			comment(&b, "\t", strings.concatenate({"format: ", value.note}))
 		}
-		strings.write_byte(&b, '\t')
-		strings.write_string(&b, field)
-		strings.write_string(&b, ": ")
+		put(&b, "\t", field, ": ")
 		t := member_type(s, value)
 		// An optional member that takes no null is nil when absent, which a write leaves out: a `Maybe`, or the pointer
 		// of a struct that holds itself.
@@ -1103,27 +1085,19 @@ object_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Part, r: rules.Rul
 		if len(o.members) > 128 {
 			refuse(s, "properties")
 		}
-		strings.write_byte(&b, '\t')
-		strings.write_string(&b, unique(&fields, "set"))
-		strings.write_string(&b, ": model.Fields_Set,\n")
+		put(&b, "\t", unique(&fields, "set"), ": model.Fields_Set,\n")
 	}
 	// A whole struct keeps the members it does not declare.
 	if (other != rules.NONE || part.whole) && !forbids {
 		append(&s.path, core.All{})
 		value := odin_type(s, other, strings.concatenate({name, "_Value"}), true)
 		pop(&s.path)
-		strings.write_byte(&b, '\t')
-		strings.write_string(&b, unique(&fields, "extra"))
-		strings.write_string(&b, ": map[string]")
-		strings.write_string(&b, held_type(value))
-		strings.write_string(&b, " `json:\",unknown\"`,\n")
+		put(&b, "\t", unique(&fields, "extra"), ": map[string]", held_type(value), " `json:\",unknown\"`,\n")
 	}
 	strings.write_string(&b, "}\n")
 	s.decls[k].text, s.decls[k].open = strings.to_string(b), false
 	if forbids {
-		strings.write_string(&s.registers, "\tmodel.register_extra(reg, ")
-		strings.write_string(&s.registers, name)
-		strings.write_string(&s.registers, ", .Forbid) or_return\n")
+		put(&s.registers, "\tmodel.register_extra(reg, ", name, ", .Forbid) or_return\n")
 	}
 	return {type = name, decl = k}
 }
@@ -1169,10 +1143,7 @@ default_spelled :: proc(s: ^Source, owner, field: string, at: rules.Node_Index, 
 		if base == NUMBER_TEXT {
 			strings.write_string(&b, text)
 		} else {
-			strings.write_string(&b, v.type)
-			strings.write_byte(&b, '(')
-			strings.write_string(&b, text)
-			strings.write_byte(&b, ')')
+			put(&b, v.type, "(", text, ")")
 		}
 	case .True, .False:
 		if base != "bool" {
@@ -1186,13 +1157,9 @@ default_spelled :: proc(s: ^Source, owner, field: string, at: rules.Node_Index, 
 		return
 	}
 	s.defaults = true
-	strings.write_string(&s.registers, "\tmodel.register_default(reg, ")
-	strings.write_string(&s.registers, owner)
-	strings.write_string(&s.registers, ", ")
+	put(&s.registers, "\tmodel.register_default(reg, ", owner, ", ")
 	strings.write_quoted_string(&s.registers, field)
-	strings.write_string(&s.registers, ", ")
-	strings.write_string(&s.registers, strings.to_string(b))
-	strings.write_string(&s.registers, ") or_return\n")
+	put(&s.registers, ", ", strings.to_string(b), ") or_return\n")
 }
 
 // The type of a member's number that a double may not hold, which keeps the number's text.
@@ -1247,9 +1214,7 @@ member_tag :: proc(s: ^Source, b: ^strings.Builder, owner: string, m: rules.Memb
 	if strings.contains_any(r.pattern, "\",") {
 		// A struct tag cannot hold a quote, and a `pattern=` item, which takes the rest of the tag, refuses text after a
 		// comma that reads as another item, so `register` adds such a pattern as the member's rule.
-		strings.write_string(&s.registers, "\tmodel.register_field(reg, {")
-		strings.write_string(&s.registers, owner)
-		strings.write_string(&s.registers, ", ")
+		put(&s.registers, "\tmodel.register_field(reg, {", owner, ", ")
 		strings.write_quoted_string(&s.registers, field)
 		strings.write_string(&s.registers, ", ")
 		strings.write_quoted_string(&s.registers, strings.concatenate({"pattern=", r.pattern}))
@@ -1272,24 +1237,11 @@ member_tag :: proc(s: ^Source, b: ^strings.Builder, owner: string, m: rules.Memb
 	}
 	items := tag_items(s, r, !m.required, not_null)
 	if items != "" {
-		strings.write_string(&tag, " model:\"" if named else "model:\"")
-		strings.write_string(&tag, items)
-		strings.write_string(&tag, "\"")
+		put(&tag, " model:\"" if named else "model:\"", items, "\"")
 	}
-	text := strings.to_string(tag)
-	raw := true
-	for c in transmute([]u8)text {
-		raw &&= c >= ' ' && c != '`' && c != 0x7f || c == '\t' || c == '\n'
-	}
-	switch {
-	case text == "":
-	case raw:
-		strings.write_string(b, " `")
-		strings.write_string(b, text)
-		strings.write_byte(b, '`')
-	case:
+	if text := strings.to_string(tag); text != "" {
 		strings.write_byte(b, ' ')
-		strings.write_quoted_string(b, text)
+		literal(b, text, true)
 	}
 }
 
@@ -1301,9 +1253,7 @@ tag_items :: proc(s: ^Source, r: rules.Rules, optional := false, not_null := fal
 		if strings.builder_len(b^) > 0 {
 			strings.write_byte(b, ',')
 		}
-		for p in parts {
-			strings.write_string(b, p)
-		}
+		put(b, ..parts)
 	}
 	if optional {
 		item(&b, "optional")
@@ -1466,18 +1416,11 @@ enum_declared :: proc(s: ^Source, part: Part, description: string, texts: []stri
 	members := make(map[string]bool)
 	renames := strings.builder_make()
 	for x in numbers {
-		strings.write_string(&b, "\tV")
-		strings.write_string(&b, "M" if x < 0 else "")
-		strings.write_string(&b, uint_text(u64(abs(x))))
-		strings.write_string(&b, " = ")
-		strings.write_string(&b, int_text(int(x)))
-		strings.write_string(&b, ",\n")
+		put(&b, "\tV", "M" if x < 0 else "", uint_text(u64(abs(x))), " = ", int_text(int(x)), ",\n")
 	}
 	for x in texts {
 		member := unique(&members, enum_member(x))
-		strings.write_byte(&b, '\t')
-		strings.write_string(&b, member)
-		strings.write_string(&b, ",\n")
+		put(&b, "\t", member, ",\n")
 		if member != x {
 			strings.write_string(&renames, "{" if strings.builder_len(renames) == 0 else ", {")
 			strings.write_quoted_string(&renames, member)
@@ -1494,9 +1437,7 @@ enum_declared :: proc(s: ^Source, part: Part, description: string, texts: []stri
 		if len(numbers) > 0 {
 			strings.write_string(&s.registers, ", true, nil")
 		} else {
-			strings.write_string(&s.registers, ", false, []model.Enum_Rename{")
-			strings.write_string(&s.registers, strings.to_string(renames))
-			strings.write_string(&s.registers, "}")
+			put(&s.registers, ", false, []model.Enum_Rename{", strings.to_string(renames), "}")
 		}
 		strings.write_string(&s.registers, "}) or_return\n")
 	}
@@ -1586,9 +1527,7 @@ arms_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 	strings.write_string(&b, name)
 	// Arms that are all one type are that type.
 	if len(types) == 1 && !null {
-		strings.write_string(&b, " :: ")
-		strings.write_string(&b, types[0])
-		strings.write_string(&b, "\n")
+		put(&b, " :: ", types[0], "\n")
 		s.decls[k].text, s.decls[k].open = strings.to_string(b), false
 		return {type = name, decl = k}
 	}
@@ -1600,9 +1539,7 @@ arms_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 	strings.write_string(&b, "}\n")
 	s.decls[k].text, s.decls[k].open = strings.to_string(b), false
 	if overlap {
-		strings.write_string(&s.registers, "\tmodel.register_union(reg, {")
-		strings.write_string(&s.registers, name)
-		strings.write_string(&s.registers, ", .One_Match, \"\"}) or_return\n" if len(n.one_of) > 0 else ", .First_Match, \"\"}) or_return\n")
+		put(&s.registers, "\tmodel.register_union(reg, {", name, ", .One_Match, \"\"}) or_return\n" if len(n.one_of) > 0 else ", .First_Match, \"\"}) or_return\n")
 	}
 	return {type = name, decl = k}
 }
@@ -1763,4 +1700,11 @@ comment :: proc(b: ^strings.Builder, indent, text: string) {
 @(private = "file")
 uint_text :: proc(n: u64) -> string {
 	return string(strconv.write_uint(make([]u8, 24), n, 10))
+}
+
+@(private = "file")
+put :: proc(b: ^strings.Builder, parts: ..string) {
+	for p in parts {
+		strings.write_string(b, p)
+	}
 }

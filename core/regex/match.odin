@@ -11,7 +11,7 @@ import "core:strings"
 import "core:unicode/utf8"
 
 @(private)
-MAX_RETRIES :: 10_000_000 // ONIG_DEFAULT_RETRY_LIMIT_IN_MATCH; past it the match errors, as Oniguruma's does
+MAX_RETRIES :: 10_000_000 // ONIG_DEFAULT_RETRY_LIMIT_IN_MATCH. Past it the match errors, as Oniguruma's does
 @(private)
 MAX_STACK :: 1 << 23 // entries, 24 bytes each
 @(private)
@@ -105,10 +105,10 @@ group_names :: proc "contextless" (re: ^Regex) -> []string {
 }
 
 // The first match of `re` in `s` at or after byte `start`, with its groups' byte bounds in `caps` (2 per group with
-// the whole match; -1 for a group that did not take part), or Oniguruma's message when the search gave up. With no
+// the whole match, -1 for a group that did not take part), or Oniguruma's message when the search gave up. With no
 // `caps` it answers only whether there is one.
 search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch) -> (found: bool, err: string) {
-	scratch.ends = -1
+	scratch.ends, scratch.resumes = -1, 0
 	// Oniguruma's search gives up past its retries where the automata would answer, so they answer a jq search only where
 	// the visited set runs it, which never gives up, or where no start can take that many.
 	jq_automaton := !re.ecma && re.dfa != nil && !re.longest && !re.not_empty && !re.calls_or_limits
@@ -119,14 +119,12 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 	if re.narrowed && start <= len(s) && jq_automaton {
 		first, last, _, high, ok := search_starts(re.opt, s, start)
 		if !ok {
-			scratch.resumes = 0
 			return false, ""
 		}
 		from = first if high >= last else -1
 	}
 	if len(caps) == 0 && re.dfa != nil && (re.ecma || jq_automaton) && from >= 0 {
 		if hit, judged := dfa_search(re.dfa, s, from); judged {
-			scratch.resumes = 0
 			return hit, ""
 		}
 	}
@@ -136,7 +134,6 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 	if len(caps) > 0 && (jq_automaton || re.ecma && re.dfa != nil) && re.dfa.first != nil && from >= 0 {
 		if end, reach, judged := dfa_first(re.dfa, s, from); judged {
 			if end < 0 {
-				scratch.resumes = 0
 				return false, ""
 			}
 			lo, width, last_start = from, reach - from + 1, end
@@ -144,7 +141,6 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 			if begin, known := dfa_start(re.dfa, s, from, end); known {
 				if len(caps) == 2 {
 					caps[0], caps[1] = begin, end
-					scratch.resumes = 0
 					return true, ""
 				}
 				lo, width, first_start, last_start = begin, reach - begin + 1, begin, begin

@@ -435,3 +435,75 @@ a_deep_inline_value_is_written_on_a_small_stack :: proc(t: ^testing.T) {
 		testing.expect_value(t, out, text)
 	})
 }
+
+@(private)
+comment_count :: proc(doc: ^core.Document) -> (n: int) {
+	for f in core.subtree_facts(doc, core.ROOT) {
+		n += int(f.role in core.COMMENT_ROLES)
+	}
+	return
+}
+
+// The text `doc` is written as, read again as TOML 1.0 so that a form only 1.1 reads is a fault, with its comments
+// counted against the document's.
+@(private)
+expect_written_as_1_0 :: proc(t: ^testing.T, doc: ^core.Document) -> string {
+	text, dropped, err := core.write(doc, {}, toml.as(.Toml_1_0), allocator = context.temp_allocator)
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, dropped, 0)
+	back, rerr := toml.build(text, .Toml_1_0)
+	if !testing.expectf(t, rerr == nil, "%s\nis not TOML 1.0: %v", text, rerr) {
+		return string(text)
+	}
+	defer core.destroy(&back)
+	testing.expect_value(t, comment_count(&back), comment_count(doc))
+	return string(text)
+}
+
+@(test)
+the_comments_inside_the_tables_of_an_array_stand_above_the_element :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "{\"l\": [1, // one\n {\"k\": 1, // kk\n \"m\": [ // in m\n 2 ]\n},\n // before three\n 3 ]}"
+	doc, err := json_pkg.build(transmute([]u8)src, .Jsonc)
+	walktest.expect_nil(t, err)
+	defer core.destroy(&doc)
+	got := expect_written_as_1_0(t, &doc)
+	testing.expect_value(t, got, "l = [\n  1, # one\n  # kk\n  # in m\n  { k = 1, m = [2] },\n  # before three\n  3,\n]\n")
+}
+
+@(test)
+the_comments_of_a_flow_mapping_in_a_sequence_are_written_as_toml_1_0 :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "a: { x: 1, # cx\n  y: 2 }\nl: [[1, # c1\n 2], { k: { j: 1 # cj\n } }, 3]\n"
+	doc, err := yaml.build(transmute([]u8)src, .Yaml_1_2)
+	walktest.expect_nil(t, err)
+	defer core.destroy(&doc)
+	got := expect_written_as_1_0(t, &doc)
+	testing.expect_value(t, got, "l = [\n  # c1\n  [1, 2],\n  # cj\n  { k = { j = 1 } },\n  3,\n]\n\n[a]\nx = 1 # cx\ny = 2\n")
+}
+
+@(test)
+token_write_keeps_the_comments_inside_the_tables_of_an_array :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	w: write.Tokens
+	write.tokens_init(&w, toml.as(.Toml_1_0), allocator = context.temp_allocator)
+	write.open_object(&w)
+	write.key(&w, "l")
+	write.open_array(&w)
+	write.value_int(&w, 1)
+	write.open_object(&w)
+	write.key(&w, "k")
+	write.value_int(&w, 1)
+	write.comment(&w, "ck", .Comment_Inline)
+	write.close(&w)
+	write.comment(&w, "after the table", .Comment_Inline)
+	write.close(&w)
+	write.close(&w)
+	bytes, err := write.tokens_finish(&w)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, string(bytes), "l = [\n  1,\n  # ck\n  { k = 1 }, # after the table\n]\n")
+	back, rerr := toml.build(bytes, .Toml_1_0)
+	walktest.expect_nil(t, rerr)
+	defer core.destroy(&back)
+	testing.expect_value(t, comment_count(&back), 2)
+}

@@ -132,13 +132,6 @@ bind :: proc(c: ^Compiled, checks: typed.Format_Checks, allocator := context.all
 // in `checker` for the next check when one is given. A root array whose rules are per entry is checked on the threads of
 // `runner` when one is given, with the same entries.
 check :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, checker: ^typed.Checker = nil) -> core.Error {
-	return check_reading(b, src, sink, runner, checker, nil)
-}
-
-// `check` that keeps the kind each `Plain` value reads as in `readings` when it is given, which also lets the schema pick the
-// kind of a cell of a delimited text in place of reading it as a string or, under `infer`, as its text spells.
-@(private)
-check_reading :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink, runner: ^core.Runner, checker: ^typed.Checker, readings: ^typed.Readings) -> core.Error {
 	if b.plan.check == nil {
 		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
 	}
@@ -151,7 +144,7 @@ check_reading :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink, runner: ^core.Run
 	}
 	target: u8
 	read := read_of(b, sink)
-	read.checker, read.readings = checker, readings
+	read.checker = checker
 	return outcome(typed.check_text(src, &target, nil, &b.plan, read), sink)
 }
 
@@ -173,21 +166,9 @@ outcome :: proc(err: core.Error, sink: ^typed.Sink) -> core.Error {
 	return err
 }
 
-// The check of `plan` over the text `src`, for a plan that holds no record.
-@(private)
-check_text :: proc(plan: ^typed.Plan, src: []u8, read: typed.Read_Options) -> core.Typed_Refusal {
-	target: u8
-	return plan.check(src, plan.as, &target, nil, plan, read, context.allocator)
-}
-
 // Whether `src` passes the schema, as `check` with no sink says.
 valid :: proc(b: ^Bound, src: []u8, runner: ^core.Runner = nil, checker: ^typed.Checker = nil) -> bool {
-	if parallel(b, runner) {
-		if err, done := check_elements(b, src, nil, runner); done {
-			return err == nil
-		}
-	}
-	return check(b, src, checker = checker) == nil
+	return check(b, src, nil, runner, checker) == nil
 }
 
 // Whether a check of a root array can run on the threads of `runner`.

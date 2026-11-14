@@ -109,6 +109,7 @@ Parser_State :: struct {
 	pause:      bool,
 	typed:      bool, // a key of the text resolves to no string
 	masks:      Masks,
+	far:        []u8, // the bytes a stream's cursor copied out of its window, which offsets from `FAR` name
 }
 
 @(private)
@@ -410,7 +411,8 @@ emit_key :: #force_no_inline proc(p: ^Parser, t: core.Token, bits: u16) -> bool 
 // a text the type does not hold is a fault.
 @(private)
 check_tag :: proc(p: ^Parser, t: core.Token) -> (ct: Core_Type, ok: bool) {
-	tag := string(p.src[p.tag.lo:p.tag.lo + u64(p.tag.n)])
+	tag_at, tag_src := far_token(p, {lo = p.tag.lo, n = p.tag.n})
+	tag := string(tag_src[tag_at.lo:tag_at.lo + u64(tag_at.n)])
 	p.tag.n = 0
 	handle, suffix := tag_parts(tag)
 	head := tag_head(handle)
@@ -424,12 +426,31 @@ check_tag :: proc(p: ^Parser, t: core.Token) -> (ct: Core_Type, ok: bool) {
 		return ct, true
 	}
 	stack: [64]u8 = ---
-	text := transmute([]u8)scalar_text(p.src, t, stack[:])
+	at, src := far_token(p, t)
+	text := transmute([]u8)scalar_text(src, at, stack[:])
 	class, _, integer, _ := classify_number(text)
 	if !holds(ct, class, integer) {
 		return ct, fault(p, t.lo, .Bad_Char, .Tag_Mismatch)
 	}
 	return ct, true
+}
+
+// Token `t` over the text it names: `p.src`, or for an offset from `FAR` on the copy a stream's cursor keeps.
+@(private)
+far_token :: #force_inline proc "contextless" (p: ^Parser, t: core.Token) -> (core.Token, []u8) {
+	if t.lo < FAR {
+		return t, p.src
+	}
+	t := t
+	t.lo -= FAR
+	return t, p.far
+}
+
+// The name of anchor `a`, in the text or in the copy a stream's cursor keeps.
+@(private)
+anchor_name :: #force_inline proc "contextless" (p: ^Parser, a: Anchor) -> string {
+	at, src := far_token(p, {lo = a.name_lo, n = a.name_n})
+	return string(src[at.lo:at.lo + u64(at.n)])
 }
 
 @(private)
@@ -464,7 +485,11 @@ flush_stage :: proc(p: ^Parser, key: int, role := core.Role.Value) -> bool {
 		if !patched && i >= max(key, 0) && x.role <= .Key {
 			x.role = .Key if key >= 0 else role
 			if x.kind == .Plain && x.role == .Key {
-				x = plain_token(p, x.lo, x.n, .Key, at(p, x.lo), x.spelling)
+				if x.lo < FAR {
+					x = plain_token(p, x.lo, x.n, .Key, at(p, x.lo), x.spelling)
+				} else {
+					x = far_plain_key(p, x)
+				}
 			}
 			patched = true
 		}

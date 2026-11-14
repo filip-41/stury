@@ -10,7 +10,6 @@ import "core:unicode/utf8"
 import "../spell"
 import core "../"
 import "../rules"
-import "../write"
 import "../records"
 
 // Inference reads values and keeps, per position, what was seen there. It makes no guess: a position takes the kinds it
@@ -648,7 +647,7 @@ Piece_Sums :: struct {
 // whose text does not read ends the records, and that fault is the result, with the records before it taken in. The
 // summary is the one a single thread would make.
 infer_records :: proc(inf: ^Inferred, src: []u8, as: core.As, framing := core.Framing.Lines, runner: ^core.Runner = nil) -> core.Error {
-	inf.rows ||= flat(as)
+	inf.rows ||= as.readers != nil && as.readers.flat
 	sums := Piece_Sums {
 		ranges   = inf.ranges,
 		rows     = inf.rows,
@@ -677,13 +676,6 @@ infer_records :: proc(inf: ^Inferred, src: []u8, as: core.As, framing := core.Fr
 		err = core.error_of(core.Typed_Refusal{kind = .No_Memory})
 	}
 	return err
-}
-
-// Whether the format `as` writes flat records.
-@(private = "file")
-flat :: proc(as: core.As) -> bool {
-	services := core.services_of(as)
-	return services != nil && services.tokens != nil && (^write.Token_Spelling)(services.tokens).line != nil
 }
 
 // A piece's task: its records, taken into a summary of its own that is left at slot `k`.

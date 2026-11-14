@@ -4,7 +4,7 @@ package jq
 
 Node_Kind :: enum u8 {
 	Identity, // .
-	Field, // a.name; each of Field, Index, Slice and Iterate drops its own error when `opt` (`?`)
+	Field, // a.name, and each of Field, Index, Slice and Iterate drops its own error when `opt` (`?`)
 	Index, // a[b]
 	Slice, // a[b:c], either bound may be nil
 	Iterate, // a[]
@@ -20,8 +20,8 @@ Node_Kind :: enum u8 {
 	And, // a and b
 	Or, // a or b
 	Alt, // a // b
-	If, // if a then b else c end; c nil is `.`
-	Try, // try a catch b; b may be nil
+	If, // if a then b else c end, with a nil c read as `.`
+	Try, // try a catch b, where b may be nil
 	Reduce, // reduce a as patterns (b; c)
 	Foreach, // foreach a as patterns (b; c; d), d may be nil
 	Def, // def fn; a

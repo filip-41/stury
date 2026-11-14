@@ -181,7 +181,7 @@ refuses_reference :: proc(err: core.Error) -> bool {
 	return keyword == "$ref" || keyword == "$dynamicRef" || keyword == "$recursiveRef"
 }
 
-// Judges `data`, the file `name`, against the schema and tells what it finds. A report names the file; a valid file has a basic report and no problem document.
+// Judges `data`, the file `name`, against the schema and tells what it finds. A report names the file, and a valid file has a basic report and no problem document.
 // A fault is left for the plain check to tell, and is returned for the case it finds nothing.
 schema_judge :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, data: []byte, src: Source, runner: ^core.Runner) -> (Verdict, core.Error) {
 	sink := typed.Sink {

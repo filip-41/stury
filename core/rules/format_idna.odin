@@ -65,7 +65,7 @@ Map_Kind :: enum u8 {
 @(private)
 MAX_MAPPED :: 6
 
-// The last of `runs` that starts at or before `r`; the first starts at 0.
+// The last of `runs` that starts at or before `r`. The first starts at 0.
 @(private)
 run_at :: proc(runs: []$T, shift: uint, r: rune) -> T {
 	lo, hi := 0, len(runs)

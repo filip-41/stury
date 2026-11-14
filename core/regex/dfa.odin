@@ -1202,15 +1202,7 @@ fold_runs :: proc(b: ^Builder, runs: [][2]rune) -> ([][2]rune, bool) {
 	out := make([dynamic][2]rune)
 	append(&out, ..runs)
 	for g in runs {
-		lo, n := 0, len(FOLDS)
-		for n > 0 {
-			half := n >> 1
-			if rune(FOLDS[lo + half] >> (2 * FOLD_BITS)) < g[0] {
-				lo, n = lo + half + 1, n - half - 1
-			} else {
-				n = half
-			}
-		}
+		lo, _ := slice.binary_search_by(FOLDS, u64(g[0]), fold_order)
 		for k := lo; k < len(FOLDS) && rune(FOLDS[k] >> (2 * FOLD_BITS)) <= g[1]; k += 1 {
 			c := rune(FOLDS[k] >> (2 * FOLD_BITS))
 			for r := fold_next(c); r != c; r = fold_next(r) {

@@ -94,7 +94,7 @@ Interp :: struct {
 	owned:        ^Owned, // the innermost reduce or foreach whose update changes its state in place, or nil
 	text:         Text_Count, // the code-point count a state that grows by `+` resumes from (`length`)
 	recycler:     Input_Recycler,
-	faults:       Fault_Memory,
+	faults:       Arena_Pair, // `fail`'s messages and their details (`message_allocator`)
 	regions:      ^Region, // regions given back (`collect_regioned`)
 }
 

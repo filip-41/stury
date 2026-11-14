@@ -424,8 +424,10 @@ commit the same way, and HTML's result is read as a browser reads it: one whose 
 edits make: a result that reads back as other values is `.Bad_Result` with the reason `.Reads_Back_Other`. JSON, YAML,
 CBOR and TOML read the values the edits wrote by their paths, and the rest of the result is judged by the format's
 validate, as XML reads a list that sets one element's content through the first element of each name on its way. JSON
-reads a list of more than 64 edits that write scalars and keys by the bytes it wrote each one in, in one walk that
-judges the whole result, and TOML by its read, which parses the text whole. A delimited
+reads a list of more than 64 edits that write scalars and keys in one walk that judges the whole result against the
+source and the edits: each value and key the edits wrote at the place its edit names, each removed member absent, and
+every other value and key the source's, where the source holds it. TOML reads by its read, which parses the text
+whole. A delimited
 text whose edits set or remove cells of a rectangular table is read record by record against the edited cells. The
 result is read whole for HTML, any other delimited text or XML list, whose paths do not name their values as their read
 groups them, for a path through an object that holds one key twice, and for edited values that make more than 64 paths,

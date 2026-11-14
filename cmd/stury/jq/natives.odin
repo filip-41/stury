@@ -1,8 +1,8 @@
 package jq
 
 // Natives and generators (`Native_Sink`, `path`, `getpath`, `setpath`, `delpaths`, `limit`, `skip`, `first`, `last`,
-// `isempty`, `range`, `recurse`). The builtins themselves are here, the ones that read inputs and write
-// messages are in io.odin; the regular-expression ones are in regex_natives.odin.
+// `isempty`, `range`, `recurse`). The builtins themselves are here. The ones that read inputs and write
+// messages are in io.odin, the regular-expression ones in regex_natives.odin.
 
 import "core:math"
 

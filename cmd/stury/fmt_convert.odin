@@ -41,11 +41,7 @@ conversion_open :: proc(run: ^Run, options: Schema_Options, src: Source) -> ^Con
 
 // Judges the open file against the schema and tells its failures. A fault is left for fmt to tell.
 conversion_judge :: proc(run: ^Run, ins: ^Inputs) -> Verdict {
-	runner: ^core.Runner
-	if len(ins.data) >= POOLED_BYTES {
-		runner = run_pool(run)
-	}
-	verdict, _ := schema_judge(run.convert.check, run.convert.options, ins.name, ins.data, ins.source, runner)
+	verdict, _ := schema_judge(run.convert.check, run.convert.options, ins.name, ins.data, ins.source, pool_for(run, ins.data))
 	return verdict
 }
 

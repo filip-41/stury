@@ -241,9 +241,12 @@ for rec in records.next(&it) {
   whose `Framing_Services.closed` says no later byte continues it, as a CBOR item. Under `.Entries` the window holds the text before the container up to its first member, then whole
   members, at the root or at the path `Stream_Options.entries` names, so a JSON, YAML or CBOR record is given as it is
   read. A YAML member is given once the window holds 16 bytes past the next byte after it that is no white space or
-  line break, since its walk ends a node at the line after it. The window keeps the node of every anchor an alias may
-  still name: one that a later anchor of its name hides leaves it, and one no later anchor hides keeps the window from
-  its node on. A YAML stream's alias limit, unless `alias_limit` sets it, counts the bytes read so far. Under
+  line break, since its walk ends a node at the line after it. The reader keeps the node of every anchor an alias may
+  still name, and one that a later anchor of its name hides leaves it. A node 4 KiB or more before the bytes the walk
+  reads again is copied out of the window, and the tokens of its aliases name the copy, so the window holds the members
+  and the reader the anchored nodes. A record whose tokens name a copy builds over its own text, which its document
+  owns. Under `merge_keys` no node is copied, and an anchor no later anchor hides keeps the window from its node on.
+  A YAML stream's alias limit, unless `alias_limit` sets it, counts the bytes read so far. Under
   `merge_keys` the window also keeps the members a `<<` holds, until their mapping closes, and the reader copies out
   the text of the open mappings' keys. An XML record is given once the window holds the next element end past it,
   and the window keeps the bytes from the walk's pause on, with the names of the open elements and the namespaces in

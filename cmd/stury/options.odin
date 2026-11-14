@@ -53,13 +53,8 @@ Opts :: struct {
 
 // What the command line gives besides the options.
 Cli :: struct {
-	validating: bool,
-	formatting: bool,
-	editing:    bool,
-	// `schema`: the verb (`infer` or `sample`) is the first of `files`, and these are its options.
-	schema_verb: bool,
-	verbs:      Verb_Options,
-	diffing:    bool,
+	command:    Command,
+	verbs:      Verb_Options, // the schema verbs' options
 	filter:     Maybe(string), // the filter, or under -f the file it is in
 	files:      [dynamic]string,
 	// --arg, --argjson, --slurpfile and --rawfile, the first of a name standing.
@@ -104,11 +99,11 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	subcommand := subcommand_index(args)
 	if subcommand >= 0 {
 		switch args[subcommand] {
-		case "fmt":  cli.formatting = true
-		case "edit": cli.editing = true
-		case "schema": cli.schema_verb = true
-		case "diff": cli.diffing = true
-		case:        cli.validating = true
+		case "fmt":    cli.command = .Fmt
+		case "edit":   cli.command = .Edit
+		case "schema": cli.command = .Schema
+		case "diff":   cli.command = .Diff
+		case:          cli.command = .Check
 		}
 	}
 	rest_as: enum {
@@ -136,7 +131,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		}
 		if args_done || !is_option(a) {
 			switch {
-			case !cli.validating && !cli.formatting && !cli.schema_verb && !cli.diffing && cli.filter == nil:
+			case (cli.command == .Run || cli.command == .Edit) && cli.filter == nil:
 				cli.filter = a
 			case rest_as == .Args:
 				append(&cli.positional, jq.valid_utf8(a))
@@ -158,68 +153,56 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		if owned_option(a[2:]) != nil {
 			append(&cli.owned, a)
 		}
+		// -L, --package, --seed and --count tell a missing parameter in their own words.
+		if option_arity(a) == 1 && i + 1 >= len(args) && !slice.contains([]string{"--library-path", "--package", "--seed", "--count"}, a) {
+			usage_error("%s takes one parameter", a)
+		}
 		switch name := a[2:]; name {
 		case "tab":
 			o.compact, o.indent = false, -1
 			note_json_flag(&cli, "--tab", .Tab, layout = true)
 		case "indent":
-			if i + 1 >= len(args) {
-				usage_error("--indent takes one parameter")
-			}
 			n, ok := parse_indent(args[i + 1])
 			if !ok {
 				usage_error("--indent takes a number between -1 and 7")
 			}
 			o.compact, o.indent = false, n
 			note_json_flag(&cli, "--indent", .Indent, layout = true)
-			i += option_arity(a)
 		case "max-depth":
-			if i + 1 >= len(args) {
-				usage_error("--max-depth takes one parameter")
-			}
 			if _, ok := parse_max_depth(args[i + 1]); !ok {
 				usage_error("--max-depth takes a number between 1 and %d", DEPTH_CEILING)
 			}
-			i += option_arity(a)
 		case "raw-output0":
 			o.raw, o.join, o.raw0 = true, true, true
 			note_json_flag(&cli, "--raw-output0")
 		case "unbuffered":
 			o.unbuffered = true
 		case "arg", "argjson", "slurpfile", "rawfile":
-			note_binding_flag(&cli, a)
+			note_first(&cli.binding_flag, a)
 			bind_variable_option(&cli, args, i)
-			i += option_arity(a)
 		case "args":
-			note_binding_flag(&cli, a)
+			note_first(&cli.binding_flag, a)
 			rest_as = .Args
 		case "jsonargs":
-			note_binding_flag(&cli, a)
+			note_first(&cli.binding_flag, a)
 			rest_as = .Json_Args
 		case "build-configuration":
 			message.write_stdout("%s\n", BUILD_CONFIGURATION)
 			exit_closing_stdout(0)
 		case "library-path":
-			i = lib_dir_arg(&cli, args, i)
+			lib_dir_arg(&cli, args, i)
 		case "from", "to":
-			i += option_arity(a)
 		case "schema", "schema-ref", "schema-draft", "max-errors", "report", "format-assert", "filter":
 			schema_option(&cli.schema, args, i)
-			i += option_arity(a)
 		case "ranges", "invalid", "comments", "seed", "count", "package":
 			verb_option(&cli.verbs, args, i)
-			i += option_arity(a)
 		case "old-schema", "new-schema", "compat", "key", "set", "position", "facts", "json", "shape":
 			diff_option(&cli.diff, args, i)
-			i += option_arity(a)
 		case "diff":
 			o.diff = true
 		case "grow-header":
 			o.grow_header = true
 		case "delimiter", "comment", "out-delimiter", "out-comment":
-			if i + 1 >= len(args) {
-				usage_error("%s takes one parameter", a)
-			}
 			c := cell_byte(a, args[i + 1])
 			switch name {
 			case "delimiter":     o.cells_in.delimiter = c
@@ -227,32 +210,24 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			case "out-delimiter": cli.out_delimiter = c
 			case "out-comment":   cli.out_comment = c
 			}
-			note_cells_flag(&cli, a, strings.has_prefix(name, "out-"))
-			i += option_arity(a)
+			note_first(&cli.cells_out_flag if strings.has_prefix(name, "out-") else &cli.cells_flag, a)
 		case "no-header", "ragged", "lazy-quotes":
 			switch name {
 			case "no-header":   o.cells_in.no_header = true
 			case "ragged":      o.cells_in.tolerate += {.Ragged}
 			case "lazy-quotes": o.cells_in.tolerate += {.Bare_Quote}
 			}
-			note_cells_flag(&cli, a, false)
+			note_first(&cli.cells_flag, a)
 		case "infer":
 			o.cells_in.infer = true
 			cli.infer_flag = a
 		case "threads":
-			if i + 1 >= len(args) {
-				usage_error("--threads takes one parameter")
-			}
 			n, ok := parse_digits(args[i + 1], 1 << 16)
 			if !ok || n < 1 {
 				usage_error("--threads takes a number from 1")
 			}
 			o.threads = int(n)
-			i += option_arity(a)
 		case "alias-limit", "expansion-limit":
-			if i + 1 >= len(args) {
-				usage_error("%s takes one parameter", a)
-			}
 			n, ok := parse_digits(args[i + 1], 1 << 62)
 			if !ok || n < 1 {
 				usage_error("%s takes a number of bytes, 1 or more", a)
@@ -264,7 +239,6 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 				o.expansion_limit = n
 				note_first(&cli.xml_flag, a)
 			}
-			i += option_arity(a)
 		case "merge-keys":
 			o.merge_keys = true
 			note_first(&cli.yaml_flag, a)
@@ -273,10 +247,10 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			note_first(&cli.xml_flag, a)
 		case "out-no-header":
 			o.cells_out.no_header = true
-			note_cells_flag(&cli, a, true)
+			note_first(&cli.cells_out_flag, a)
 		case "crlf":
 			o.cells_out.crlf = true
-			note_cells_flag(&cli, a, true)
+			note_first(&cli.cells_out_flag, a)
 		case "explain":
 			o.explain = true
 		case "follow":
@@ -304,10 +278,11 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 				die()
 			}
 		}
+		i += option_arity(a)
 	}
 	// fmt writes each input as its own format unless --to says otherwise, so its --to follows --from when --to
 	// was not given. `--to ndjson` is what sets the compact layout here, since fmt refuses -c.
-	if cli.formatting && cli.formats.to == nil {
+	if cli.command == .Fmt && cli.formats.to == nil {
 		o.to = o.from
 	}
 	if writes_lines(o) {
@@ -324,6 +299,14 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	}
 	o.cells_out.delimiter = cli.out_delimiter.? or_else o.cells_out.delimiter
 	o.cells_out.comment = cli.out_comment.? or_else o.cells_out.comment
+	// The schema verb is the first file. One not named stays `.Schema`, for `schema_main` to refuse.
+	if cli.command == .Schema && len(cli.files) > 0 {
+		switch cli.files[0] {
+		case "infer":  cli.command = .Infer
+		case "sample": cli.command = .Sample
+		case "gen":    cli.command = .Gen
+		}
+	}
 	return
 }
 
@@ -337,15 +320,6 @@ cell_byte :: proc(flag, arg: string) -> byte {
 		usage_error("%s takes one ASCII character, or \\t for a tab, not %q", flag, arg)
 	}
 	return arg[0]
-}
-
-// Records `flag` as the first option that reads a delimited text, or with `out` the first that writes one.
-@(private = "file")
-note_cells_flag :: proc(cli: ^Cli, flag: string, out: bool) {
-	first := &cli.cells_out_flag if out else &cli.cells_flag
-	if first^ == "" {
-		first^ = flag
-	}
 }
 
 // Records `flag` in `first` unless an earlier option is there.
@@ -401,13 +375,6 @@ note_json_flag :: proc(cli: ^Cli, flag: string, option: Maybe(core.Write_Option)
 	}
 	if layout {
 		note_first(&cli.layout_flag, flag)
-	}
-}
-
-@(private = "file")
-note_binding_flag :: proc(cli: ^Cli, flag: string) {
-	if cli.binding_flag == "" {
-		cli.binding_flag = flag
 	}
 }
 
@@ -641,13 +608,14 @@ parse_max_depth :: proc(s: string) -> (n: u64, ok: bool) {
 	return n, ok && 1 <= n && n <= DEPTH_CEILING
 }
 
-// A command, as the owner of the options that only some commands take.
+// A command, and the owner of the options that only some commands take. The schema verbs come last.
 Command :: enum u8 {
 	Run,
 	Check,
 	Fmt,
 	Edit,
 	Diff,
+	Schema,
 	Infer,
 	Sample,
 	Gen,
@@ -660,6 +628,7 @@ COMMAND_NAMES := [Command]string {
 	.Fmt    = "fmt",
 	.Edit   = "edit",
 	.Diff   = "diff",
+	.Schema = "schema",
 	.Infer  = "schema infer",
 	.Sample = "schema sample",
 	.Gen    = "schema gen",
@@ -701,23 +670,11 @@ owned_option :: proc(name: string) -> ^Owned_Options {
 // Refuses the first option given that only other commands take, naming them and what the option does. A schema verb
 // not named is left for `schema_main` to refuse.
 refuse_unowned :: proc(cli: ^Cli) {
-	command := Command.Run
-	switch {
-	case cli.validating: command = .Check
-	case cli.formatting: command = .Fmt
-	case cli.editing:    command = .Edit
-	case cli.diffing:    command = .Diff
-	case cli.schema_verb:
-		verb := cli.files[0] if len(cli.files) > 0 else ""
-		switch verb {
-		case "infer":  command = .Infer
-		case "sample": command = .Sample
-		case "gen":    command = .Gen
-		case:          return
-		}
+	if cli.command == .Schema {
+		return
 	}
 	for flag in cli.owned {
-		if o := owned_option(flag[2:]); command not_in o.by {
+		if o := owned_option(flag[2:]); cli.command not_in o.by {
 			owners := make([dynamic]string, context.temp_allocator)
 			for c in o.by {
 				append(&owners, strings.concatenate({COMMAND_NAMES[c], "'s"}, context.temp_allocator))
@@ -731,18 +688,18 @@ refuse_unowned :: proc(cli: ^Cli) {
 
 // The command `cli` names, or "" for a filter run.
 command_name :: proc(cli: ^Cli) -> string {
-	return "check" if cli.validating else "fmt" if cli.formatting else "edit" if cli.editing else "diff" if cli.diffing else "schema" if cli.schema_verb else ""
+	return "" if cli.command == .Run else "schema" if cli.command >= .Schema else COMMAND_NAMES[cli.command]
 }
 
 // What the command writes, which is why it refuses an option `command_refused_option` names.
 command_writes :: proc(cli: ^Cli) -> string {
 	switch {
-	case cli.validating && cli.schema.filter != nil: return "it types the filter and writes the schema of its outputs"
-	case cli.validating && cli.schema.reported:      return "it runs no filter and writes its report in one layout"
-	case cli.validating:                             return "it runs no filter and prints nothing"
-	case cli.formatting:                             return "it runs no filter and writes each input in its own format or the one --to names"
-	case generates_odin(cli):                        return "it runs no filter and writes Odin types"
-	case cli.schema_verb:                            return "it runs no filter and writes a schema or samples"
+	case cli.command == .Check && cli.schema.filter != nil: return "it types the filter and writes the schema of its outputs"
+	case cli.command == .Check && cli.schema.reported:      return "it runs no filter and writes its report in one layout"
+	case cli.command == .Check:                             return "it runs no filter and prints nothing"
+	case cli.command == .Fmt:                               return "it runs no filter and writes each input in its own format or the one --to names"
+	case cli.command == .Gen:                               return "it runs no filter and writes Odin types"
+	case cli.command >= .Schema:                            return "it runs no filter and writes a schema or samples"
 	}
 	return "it writes each input back in its own bytes"
 }
@@ -755,14 +712,15 @@ command_writes :: proc(cli: ^Cli) -> string {
 // is written with -a, -S, --indent and --tab.
 command_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
 	// check --filter runs no filter but types one, on the inputs the input options describe, and writes a schema.
-	typing := cli.validating && cli.schema.filter != nil
-	editing, schema := cli.editing, cli.schema_verb && !generates_odin(cli) || typing
+	typing := cli.command == .Check && cli.schema.filter != nil
+	editing, formatting := cli.command == .Edit, cli.command == .Fmt
+	schema := cli.command >= .Schema && cli.command != .Gen || typing
 	switch {
-	case (editing || cli.diffing) && cli.formats.to != nil: return "--to"
-	case !cli.formatting && !schema && cli.cells_out_flag != "": return cli.cells_out_flag
+	case (editing || cli.command == .Diff) && cli.formats.to != nil: return "--to"
+	case !formatting && !schema && cli.cells_out_flag != "": return cli.cells_out_flag
 	case o.raw0:                 return "--raw-output0"
 	case o.raw:                  return "-j" if o.join else "-r"
-	case cli.compact_given && !editing && !schema && !cli.formatting: return "-c"
+	case cli.compact_given && !editing && !schema && !formatting: return "-c"
 	case o.ascii && !editing && !schema: return "-a"
 	case o.sort_keys && !editing && !schema: return "-S"
 	case cli.color_set:          return "-C"
@@ -770,13 +728,13 @@ command_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
 	case o.null_input && !typing: return "-n"
 	case o.slurp && !editing && !typing: return "-s"
 	case o.from_file && !editing && !typing: return "-f"
-	case o.seq && (cli.formatting || typing): return "--seq"
+	case o.seq && (formatting || typing): return "--seq"
 	case o.stream_errors:        return "--stream-errors"
 	case o.stream:               return "--stream"
 	case o.exit_status && !editing: return "-e"
 	case o.explain && !editing:  return "--explain"
 	case cli.binding_flag != "" && !editing && !typing: return cli.binding_flag
-	case !cli.formatting && !editing && !schema && cli.layout_flag != "": return cli.layout_flag
+	case !formatting && !editing && !schema && cli.layout_flag != "": return cli.layout_flag
 	case cli.lib_dirs != nil && !editing && !typing: return "-L"
 	}
 	return ""

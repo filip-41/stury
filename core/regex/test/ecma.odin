@@ -172,26 +172,7 @@ test_jq_matches_where_oniguruma_does :: proc(t: ^testing.T) {
 		{`ss$`, "\u017f\u017f", {fold = true}, 0, 4},
 		{`ss\z`, "Ss\u017f", {fold = true}, 1, 4},
 		{"\u00df$", "x\u017fs", {fold = true}, 1, 4},
-	}
-	for c in cases {
-		f := search(c.pattern, c.text, flags = c.flags)
-		testing.expectf(t, f.lo == c.lo && f.hi == c.hi, "%q on %q: %d..%d %s, want %d..%d", c.pattern, c.text, f.lo, f.hi, f.err, c.lo, c.hi)
-	}
-	for pattern in ([?]string{`(?)`, `(?<=(?<=ab?)|)`, `(?<!(?<=ab?)|)`}) {
-		testing.expectf(t, search(pattern, "", flags = {}).err != "", "%q compiled", pattern)
-	}
-	testing.expect(t, search(`(?<=(?<=a+)|)`, "", flags = {}).err == "")
-}
-
-@(test)
-test_jq_reads_unicode_17 :: proc(t: ^testing.T) {
-	// jq 1.8.2 holds Oniguruma's Unicode 16.0, stury Unicode 17.0 under the same names.
-	Case :: struct {
-		pattern, text: string,
-		flags:         regex.Flags,
-		lo, hi:        int,
-	}
-	cases := [?]Case {
+		// jq 1.8.2 holds Oniguruma's Unicode 16.0, stury Unicode 17.0 under the same names.
 		{`\p{L}`, "\u0c5c", {}, 0, 3},
 		{`\w`, "\u0c5c", {}, 0, 3},
 		{`\p{Lo}`, "\u0295", {}, 0, 2},
@@ -204,6 +185,10 @@ test_jq_reads_unicode_17 :: proc(t: ^testing.T) {
 		f := search(c.pattern, c.text, flags = c.flags)
 		testing.expectf(t, f.lo == c.lo && f.hi == c.hi, "%q on %q: %d..%d %s, want %d..%d", c.pattern, c.text, f.lo, f.hi, f.err, c.lo, c.hi)
 	}
+	for pattern in ([?]string{`(?)`, `(?<=(?<=ab?)|)`, `(?<!(?<=ab?)|)`}) {
+		testing.expectf(t, search(pattern, "", flags = {}).err != "", "%q compiled", pattern)
+	}
+	testing.expect(t, search(`(?<=(?<=a+)|)`, "", flags = {}).err == "")
 }
 
 @(test)
@@ -320,12 +305,27 @@ test_ecma_counted_search_is_bounded :: proc(t: ^testing.T) {
 	testing.expect_value(t, search(`^(a{1,1000}){1,1000}b`, strings.concatenate({letters[:500], "b"}, context.temp_allocator)).hi, 501)
 }
 
+// The next of the generator's states in `state`, and a draw below `n` from it.
+next :: proc(state: ^u64, n: int) -> int {
+	state^ = state^ * 6364136223846793005 + 1442695040888963407
+	return int(state^ >> 33) % n
+}
+
+// A text of up to ten of `pieces` drawn from `state`, the last two of them one time in eight.
+random_text :: proc(state: ^u64, pieces: []string) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	for _ in 0 ..< next(state, 11) {
+		k := next(state, len(pieces))
+		if k >= len(pieces) - 2 && state^ & 7 != 0 {
+			k = 0
+		}
+		strings.write_string(&b, pieces[k])
+	}
+	return strings.to_string(b)
+}
+
 // A pattern over `a` and `b` drawn from `state`.
 generate :: proc(b: ^strings.Builder, state: ^u64, depth: int) {
-	next :: proc(state: ^u64, n: int) -> int {
-		state^ = state^ * 6364136223846793005 + 1442695040888963407
-		return int(state^ >> 33) % n
-	}
 	for _ in 0 ..< 1 + next(state, 3) {
 		repeatable := true
 		k := next(state, 14)
@@ -374,12 +374,10 @@ test_ecma_visited_set_keeps_the_matches :: proc(t: ^testing.T) {
 	for _ in 0 ..< 8000 {
 		b := strings.builder_make(context.temp_allocator)
 		generate(&b, &state, 2)
-		state = state * 6364136223846793005 + 1442695040888963407
-		text := make([]byte, int(state >> 33) % 11, context.temp_allocator)
+		text := make([]byte, next(&state, 11), context.temp_allocator)
 		letters := "aaabbc"
 		for &c in text {
-			state = state * 6364136223846793005 + 1442695040888963407
-			c = letters[int(state >> 33) % 6]
+			c = letters[next(&state, 6)]
 		}
 		pattern := strings.to_string(b)
 		with, without := search(pattern, string(text)), search(pattern, string(text), linear = false)
@@ -509,10 +507,6 @@ test_ecma_search_from_past_the_end :: proc(t: ^testing.T) {
 
 // A pattern over `a`, `b`, `é` and `😀` drawn from `state`, of the instructions the automaton runs.
 generate_plain :: proc(b: ^strings.Builder, state: ^u64, depth: int) {
-	next :: proc(state: ^u64, n: int) -> int {
-		state^ = state^ * 6364136223846793005 + 1442695040888963407
-		return int(state^ >> 33) % n
-	}
 	for _ in 0 ..< 1 + next(state, 3) {
 		atoms := [?]string{"a", "b", "é", "😀", ".", "[^a]", "[a-cé]", "\\w", "\\d", "\\s", "\\p{L}", "\\P{Ll}", "[^\\p{Lu}b]", "ab", "aé"}
 		k := next(state, len(atoms) + 6)
@@ -558,25 +552,16 @@ test_ecma_automaton_keeps_the_answers :: proc(t: ^testing.T) {
 		} else {
 			generate(&b, &state, 2)
 		}
-		state = state * 6364136223846793005 + 1442695040888963407
-		text := strings.builder_make(context.temp_allocator)
-		for _ in 0 ..< int(state >> 33) % 11 {
-			state = state * 6364136223846793005 + 1442695040888963407
-			k := int(state >> 33) % len(pieces)
-			if k >= len(pieces) - 2 && state & 7 != 0 {
-				k = 0
-			}
-			strings.write_string(&text, pieces[k])
-		}
+		text := random_text(&state, pieces[:])
 		pattern := strings.to_string(b)
-		whether := search(pattern, strings.to_string(text), whether = true)
-		with := search(pattern, strings.to_string(text))
-		plain := search(pattern, strings.to_string(text), linear = false)
+		whether := search(pattern, text, whether = true)
+		with := search(pattern, text)
+		plain := search(pattern, text, linear = false)
 		built += int(whether.automaton)
 		first += int(with.ends >= 0)
-		testing.expectf(t, whether.err == with.err && (whether.lo >= 0) == (with.lo >= 0), "%q on %q: %v whether, %v with the set", pattern, strings.to_string(text), whether, with)
+		testing.expectf(t, whether.err == with.err && (whether.lo >= 0) == (with.lo >= 0), "%q on %q: %v whether, %v with the set", pattern, text, whether, with)
 		with.resumes, with.ends, with.automaton, plain.resumes = 0, -1, false, 0
-		testing.expectf(t, plain.err != "" || with == plain, "%q on %q: %v with the automata, %v backtracking", pattern, strings.to_string(text), with, plain)
+		testing.expectf(t, plain.err != "" || with == plain, "%q on %q: %v with the automata, %v backtracking", pattern, text, with, plain)
 	}
 	testing.expectf(t, built > 8000 && first > 3000, "%d of 20000 patterns have the automaton, %d searches found a match's end with it", built, first)
 }
@@ -594,10 +579,6 @@ test_ecma_counter_loops_keep_the_answers :: proc(t: ^testing.T) {
 	}
 	counts := [?]string{"{4}", "{1,4}", "{0,4}", "{0,4}?", "{4,}", "{4,}?", "{4}?", "{2,5}", "{3,6}?"}
 	state := u64(20261111)
-	next :: proc(state: ^u64, n: int) -> int {
-		state^ = state^ * 6364136223846793005 + 1442695040888963407
-		return int(state^ >> 33) % n
-	}
 	for i in 0 ..< 2000 {
 		g := strings.builder_make(context.temp_allocator)
 		if i % 2 == 0 {
@@ -681,8 +662,7 @@ test_ecma_leading_look_aheads_keep_the_answers :: proc(t: ^testing.T) {
 	for i in 0 ..< 20000 {
 		b := strings.builder_make(context.temp_allocator)
 		strings.write_string(&b, "^")
-		state = state * 6364136223846793005 + 1442695040888963407
-		for _ in 0 ..< 1 + int(state >> 33) % 3 {
+		for _ in 0 ..< 1 + next(&state, 3) {
 			state = state * 6364136223846793005 + 1442695040888963407
 			strings.write_string(&b, "(?!" if state >> 62 == 0 else "(?=")
 			if i % 4 == 3 {
@@ -693,35 +673,22 @@ test_ecma_leading_look_aheads_keep_the_answers :: proc(t: ^testing.T) {
 			strings.write_string(&b, ")")
 		}
 		generate_plain(&b, &state, 2)
-		state = state * 6364136223846793005 + 1442695040888963407
-		text := strings.builder_make(context.temp_allocator)
-		for _ in 0 ..< int(state >> 33) % 11 {
-			state = state * 6364136223846793005 + 1442695040888963407
-			k := int(state >> 33) % len(pieces)
-			if k >= len(pieces) - 2 && state & 7 != 0 {
-				k = 0
-			}
-			strings.write_string(&text, pieces[k])
-		}
+		text := random_text(&state, pieces[:])
 		pattern := strings.to_string(b)
-		whether := search(pattern, strings.to_string(text), whether = true)
-		plain := search(pattern, strings.to_string(text), linear = false)
+		whether := search(pattern, text, whether = true)
+		plain := search(pattern, text, linear = false)
 		if plain.err != "" {
 			// The backtracker gave up at its retry limit, where the visited set does not.
-			plain = search(pattern, strings.to_string(text))
+			plain = search(pattern, text)
 		}
 		built += int(whether.automaton)
-		testing.expectf(t, whether.err == plain.err && (whether.lo >= 0) == (plain.lo >= 0), "%q on %q: %v whether, %v backtracking", pattern, strings.to_string(text), whether, plain)
+		testing.expectf(t, whether.err == plain.err && (whether.lo >= 0) == (plain.lo >= 0), "%q on %q: %v whether, %v backtracking", pattern, text, whether, plain)
 	}
 	testing.expectf(t, built > 12000, "%d of 20000 patterns have the automaton", built)
 }
 
 // A jq pattern drawn from `state`, of the instructions and assertions the automaton runs and some it does not.
 generate_jq :: proc(b: ^strings.Builder, state: ^u64, depth: int) {
-	next :: proc(state: ^u64, n: int) -> int {
-		state^ = state^ * 6364136223846793005 + 1442695040888963407
-		return int(state^ >> 33) % n
-	}
 	for _ in 0 ..< 1 + next(state, 3) {
 		atoms := [?]string{"a", "A", "b", "k", "é", "É", "ß", "_", " ", "1", ".", "[a-c]", "[^a]", "[K\\d]", "\\w", "\\W", "\\d", "\\s", "\\p{L}", "[\\w-]", "\\b", "\\B", "^", "$", "\\A", "\\z", "\\Z", "\\n", "ab", "(?i:a)", "(?i:[k-m])", "(?i:é)", "(?=a)"}
 		k := next(state, len(atoms) + 4)
@@ -804,12 +771,11 @@ test_jq_automaton_keeps_the_answers :: proc(t: ^testing.T) {
 	for _ in 0 ..< 20000 {
 		b := strings.builder_make(context.temp_allocator)
 		generate_jq(&b, &state, 2)
-		state = state * 6364136223846793005 + 1442695040888963407
+		count := next(&state, 11)
 		flags := regex.Flags{fold = state & 8 != 0, dotall = state & 16 != 0, extend = state & 32 != 0, multiline = state & 64 != 0}
 		text := strings.builder_make(context.temp_allocator)
-		for _ in 0 ..< int(state >> 33) % 11 {
-			state = state * 6364136223846793005 + 1442695040888963407
-			strings.write_string(&text, pieces[int(state >> 33) % len(pieces)])
+		for _ in 0 ..< count {
+			strings.write_string(&text, pieces[next(&state, len(pieces))])
 		}
 		pattern := strings.to_string(b)
 		whether := search(pattern, strings.to_string(text), flags = flags, whether = true)

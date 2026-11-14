@@ -97,16 +97,18 @@ commit_spec :: proc(list: ^core.Edit_List, target: core.As, allocator: runtime.A
 	}
 	// The output holds the planned edits, a cell removed from every record among them. An output of the document's spec
 	// is read back under the strict options. Only an output that read refuses goes to `reads_as_source`, and then is read
-	// again under the target's options. Past `core.MAX_PATHS` edits each scalar and key is read in the bytes the commit
-	// wrote it to, in one walk that judges the whole output.
+	// again under the target's options. Past `core.MAX_PATHS` edits the output is read against the source and the edits
+	// in one walk that judges it whole, each token at the place the commit wrote or copied it.
 	e := core.Document_Error{kind = .Bad_Result}
 	if spec == doc.as.spec {
 		strict := doc.as
 		strict.tolerate = {}
-		if written, known := written_at(&cx, seps); known && len(planned.edits) > core.MAX_PATHS && list.edit.walk_written != nil {
+		known := false
+		if written, placed := written_at(&cx, seps); placed && len(planned.edits) > core.MAX_PATHS && list.edit.walk_written != nil {
 			context.allocator = scratch
-			e = core.reads_written(out, strict, written, list.edit.walk_written)
-		} else {
+			e, known = core.reads_written(&planned, out, strict, written, list.edit.walk_written)
+		}
+		if !known {
 			e = reads_back(&planned, out, target, strict, true, allocator)
 		}
 	}
@@ -194,39 +196,23 @@ splice :: proc(doc: ^core.Document, chunks: []Chunk, text: []u8, segments: []Seg
 	return out, {}
 }
 
-// The bytes of the output `splice` writes that each of `cx.written` lies in, sorted, from the place of the chunk it was
-// written in. False when an edit wrote what they do not hold, or segments or line separators write the output.
+// The pieces of the output `splice` writes that the chunks write, in order. False when an edit wrote what
+// `core.reads_written` does not follow, chunks overlap, or segments or line separators write the output.
 @(private)
 written_at :: proc(cx: ^Compose, seps: []u64) -> ([]core.Written, bool) {
 	if cx.unwritten || len(cx.segments) > 0 || len(seps) > 0 {
 		return nil, false
 	}
-	Placed :: struct {
-		from, to: int,
-		at:       u64,
-	}
-	// Chunks do not overlap once ordered, so each starts in the output past the length the chunks before it add.
-	placed := make([]Placed, len(cx.chunks), cx.allocator)
-	shift := i64(0)
+	written := make([]core.Written, len(cx.chunks), cx.allocator)
+	shift, end := i64(0), u64(0)
 	for c, i in cx.chunks {
-		placed[i] = {c.from, c.to, u64(i64(c.lo) + shift)}
-		shift += i64(c.to - c.from) - i64(c.hi - c.lo)
-	}
-	slice.sort_by(placed, proc(a, b: Placed) -> bool {return a.from < b.from})
-	written := cx.written[:]
-	k := 0
-	for &w in written {
-		for k < len(placed) && placed[k].to < int(w.hi) {
-			k += 1
-		}
-		if k == len(placed) || placed[k].from > int(w.lo) {
+		if c.lo < end {
 			return nil, false
 		}
-		p := placed[k]
-		w.lo, w.hi = p.at + (w.lo - u64(p.from)), p.at + (w.hi - u64(p.from))
-	}
-	if !slice.is_sorted_by(written, proc(a, b: core.Written) -> bool {return a.lo < b.lo}) {
-		slice.sort_by(written, proc(a, b: core.Written) -> bool {return a.lo < b.lo})
+		lo := u64(i64(c.lo) + shift)
+		written[i] = {lo = lo, hi = lo + u64(c.to - c.from), src_hi = c.hi}
+		shift += i64(c.to - c.from) - i64(c.hi - c.lo)
+		end = c.hi
 	}
 	return written, true
 }

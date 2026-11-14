@@ -946,8 +946,8 @@ object is a `[section]` after them, and an array of objects is a `[[section]]` p
 out in another order than the input has them. A value that is a node of a TOML input is written from the document,
 which keeps its comments, a string's quoting, a number's form (`0xff` stays `0xff`), a datetime bare, and each table
 written in line, through dotted keys or as a section as the input has it. A node of another input keeps a number form
-TOML has, and a YAML flow mapping is an inline table, unless a comment inside it needs a line of its own: YAML's `0o17`, a hex integer and a leading `+` stay, and `5.` or `.5` are
-written `5.0` and `0.5`. A value a filter built is a new text, with no comments, inline tables or number forms, but its strings keep their tags: a datetime
+TOML has, and a YAML flow mapping is an inline table, unless a comment inside it needs a line of its own, which makes it a section: YAML's `0o17`, a hex integer and a leading `+` stay, and `5.` or `.5` are
+written `5.0` and `0.5`. A comment inside a table or an array that is an element of an array is written on a line above that element, since TOML 1.0 has no multi-line inline table. A value a filter built is a new text, with no comments, inline tables or number forms, but its strings keep their tags: a datetime
 stays bare, and `"2020-01-01" | .@tag = "date-local"` writes one. A text that is not of its tag's type ends the run,
 `"2020-13-01" is not a TOML date-local`. `stury edit` keeps every byte the filter does not reach. Only TOML 1.0 forms
 are written, so a time without seconds gets `:00`. Several outputs are several texts, a blank line between them, which is one TOML file only

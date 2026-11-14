@@ -26,11 +26,7 @@ FMT_EXIT_DIFFERS :: 1
 // `stury fmt`, which reads and writes the files and exits.
 fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	o := &run.opts
-	files := cli.files[:] if len(cli.files) > 0 else STDIN_ONLY
-	if len(cli.files) == 0 && is_terminal(os.stdin) && is_terminal(os.stdout) {
-		// As check, rather than wait on the keyboard.
-		usage(EXIT_USAGE, true)
-	}
+	files := input_files(cli.files[:])
 	switch {
 	case o.in_place && o.check:
 		usage_error("--in-place rewrites each file; --check only reads it")

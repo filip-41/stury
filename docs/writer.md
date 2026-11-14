@@ -267,8 +267,8 @@ bytes, as `finish` does for an output that failed. A stream that failed leaves a
   while the format's state is set (YAML's block style), in place of the tree's punctuation.
 - `comment` writes a comment of a role: a lead before the next item, an inline comment on the line of the item last
   written and a foot after the last item of the open container, or after a whole root. JSONC and JSON5 write block
-  comments, YAML and TOML `#` lines, which break a flow line and a TOML inline table as TOML 1.1 does before `end` lays
-  it out, and XML `<!-- -->`. JSON, CBOR, a delimited text and HTML answer
+  comments, YAML and TOML `#` lines, which break a flow line and, as TOML 1.1 does, the inline table the TOML calls build before
+  `end` lays it out as a 1.0 text, and XML `<!-- -->`. JSON, CBOR, a delimited text and HTML answer
   `.Unsupported`. `write_value` writes every comment of a built value, written on it or its node's, where the format
   writes comments, and `write_laid` does under `comments`: an edit writes a new value's comments itself.
 
@@ -385,11 +385,13 @@ token write of one. Only TOML 1.0 forms are written. A byte string is the string
 
 Comments are written where TOML reads them back: a head comment above its line or section, an inline comment after its
 value or its header, and a table's foot comments after a blank line, the form that reads back as the head of what
-follows. An array that has a comment on an element or a foot comment is written one element a line, each element's
-comments above it and after it, and the foot comments before the close. A comment whose body holds line ends is
+follows. An array that has a comment on an element or inside one, or a foot comment, is written one element a line,
+each element's comments above it and after it, and the foot comments before the close. TOML 1.0 has no multi-line
+inline table, so a comment inside a table or an array that is an element of an array stands on a line above that element,
+in document order. A comment whose body holds line ends is
 written as one `#` line for each of its lines. The inline comments of one value or header are joined into one, their
-bodies a space apart, as `a = 1 # a b`. A comment inside an inline table or an array within an array, an inline
-one with a line end, one whose body holds a control byte other than a tab or a line end, and the head comments of a
+bodies a space apart, as `a = 1 # a b`. An inline
+comment with a line end, one whose body holds a control byte other than a tab or a line end, and the head comments of a
 table whose header is omitted and which has no line are dropped and counted in `dropped`. `sort_keys` orders the
 members of every table.
 

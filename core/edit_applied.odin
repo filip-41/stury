@@ -24,7 +24,7 @@ reads_as_edited :: proc(list: ^Edit_List, got: Node_Ref) -> (reads, known: bool)
 // allocator.
 reads_rows :: proc(list: ^Edit_List, out: []u8, as: As, walk: proc(src: []u8, as: As, r: ^Row_Read) -> Maybe(Fault)) -> (err: Document_Error, known: bool) {
 	r := Row_Read{view = {src = out, as = as}, ctx = context}
-	r.a = applied_of(list) or_return
+	r.a = applied_of(list, ways = false) or_return
 	doc := list.doc
 	if len(r.a.inserts) + len(r.a.renames) + len(r.a.orders) > 0 || doc.n_tables == 0 || doc.tables_at[0].width == 0 {
 		return {}, false
@@ -168,62 +168,211 @@ kept_pair :: proc(r: ^Row_Read) -> (key, v: Node_Index, ok: bool) {
 	return NO_NODE, NO_NODE, false
 }
 
-// A scalar or key an edit wrote, where the commit put it in its output: `lo` through `hi`, the bytes of its text.
+// A piece of a commit's output that its edits wrote: `lo` through `hi` of the output, in place of the source bytes
+// that end at `src_hi`. The output past it, up to the next piece, is the source's bytes from `src_hi` on.
 Written :: struct {
-	lo, hi: u64,
-	want:   Value,
-	key:    bool,
+	lo, hi, src_hi: u64,
 }
 
-// Whether `out`, a text a commit made, read as `as` token by token through `walk`, which passes each token to
-// `written_hook`, holds each of `written`, sorted by `lo`, as one token that spans its bytes and reads as the value
-// written. The bytes between are the source's, which its read judged, and the walk judges the whole text. Works in the
-// context allocator.
-reads_written :: proc(out: []u8, as: As, written: []Written, walk: proc(src: []u8, as: As, w: ^Written_Read) -> Maybe(Fault)) -> Document_Error {
-	w := Written_Read{view = {src = out, as = as}, written = written, ctx = context}
+// Whether `out`, a text a commit of `list` made, read as `as` token by token through `walk`, which passes each token to
+// `written_hook`, holds the document the edits make, judged as `reads_as_edited` judges a read of it. `written` are
+// the pieces the edits wrote, sorted, and every other byte is the source's. Each key and value outside them is the
+// source node the edited document holds next, at the place the source holds it. Each token inside them is a scalar
+// that lies within its piece and is the next key or value an edit writes: a set or a rename where the source node
+// stood, an insert at its index among the members that stay. A removed member's tokens are absent, and each container
+// ends where its members that stay and its inserts end. The walk judges the whole text. `known` is false where an
+// edit holds no value to read back, as for `reads_as_edited`. Works in the context allocator.
+reads_written :: proc(list: ^Edit_List, out: []u8, as: As, written: []Written, walk: proc(src: []u8, as: As, w: ^Written_Read) -> Maybe(Fault)) -> (err: Document_Error, known: bool) {
+	w := Written_Read{view = {src = out, as = as}, written = written, pending = -1, ctx = context}
+	w.a = applied_of(list, ways = false) or_return
+	touched := make([]Node_Index, len(list.edits))
+	for e, i in list.edits {
+		touched[i] = e.node
+	}
+	if !slice.is_sorted(touched) {
+		slice.sort(touched)
+	}
+	w.touched = touched
+	append(&w.frames, Written_Frame{node = NO_NODE, end = Node_Index(subtree_size(list.doc, ROOT)), ins = len(w.a.inserts)})
 	if fault, bad := walk(out, as, &w).?; bad {
-		return {kind = .No_Memory} if fault.kind == .No_Memory else {kind = .Bad_Result, inner = fault}
+		return {kind = .No_Memory} if fault.kind == .No_Memory else {kind = .Bad_Result, inner = fault}, true
 	}
-	if w.failed || w.next != len(written) {
-		return {kind = .Bad_Result, reason = .Reads_Back_Other}
+	if w.failed || len(w.frames) != 1 || w.frames[0].c != w.frames[0].end {
+		return {kind = .Bad_Result, reason = .Reads_Back_Other}, true
 	}
-	return {}
+	return {}, true
 }
 
-// Where `reads_written` stands in the output: the next value written that a token must read as.
+// Where `reads_written` stands in the output: the containers open, the written piece the next token meets and the
+// distance from a source byte to the output byte that copies it.
 Written_Read :: struct {
+	a:       Applied,
 	view:    Token_View, // the output's
 	written: []Written,
-	next:    int,
+	next:    int, // the first of `written` that does not end at or before the token read
+	shift:   i64, // an output byte past `written[next - 1]` less the source byte it copies
+	pending: int, // the insert into an object whose key was read and whose value comes next, -1 if none
+	touched:    []Node_Index, // the node of each edit, sorted
+	touched_at: int, // the first of `touched` at or past the last container read
+	frames:  [dynamic]Written_Frame,
 	failed:  bool,
 	ctx:     runtime.Context,
 }
 
-// The hook a format's walk runs `reads_written` with. It stops the walk at the first token that starts at or past the
-// next value written and does not read as it.
+// An open container of the output as the source holds it: `c` the next source node of its members, `at` the index of
+// the member `c` starts, and `ins` the next of the inserts, sorted by container and index, that the container takes.
+// The frame below the root has no container and takes no insert.
+@(private = "file")
+Written_Frame :: struct {
+	node, c, end:     Node_Index,
+	at:               u32,
+	ins:              int,
+	object, key_next: bool,
+}
+
+// The hook a format's walk runs `reads_written` with. It stops the walk at the first token that does not read as
+// edited.
 written_hook :: proc "contextless" (w: ^Written_Read, s: Hook_Regs, t: Token) -> (Hook_Regs, Action) {
-	if w.next == len(w.written) || (t.role != .Value && t.role != .Key) {
+	if t.role != .Value && t.role != .Key {
 		return s, .Next
 	}
+	action := written_reads(w, t)
+	if action == .Stop {
+		w.failed = true
+	}
+	return s, action
+}
+
+// The walk of a copied value stays off the context, which only a written value and a container's frame need.
+@(private = "file")
+written_reads :: #force_inline proc "contextless" (w: ^Written_Read, t: Token) -> Action #no_bounds_check {
+	doc := w.a.doc
+	f := &w.frames[len(w.frames) - 1]
+	if t.kind == .End {
+		kept_gone(w, f)
+		if w.pending >= 0 || f.c != f.end || (f.ins < len(w.a.inserts) && w.a.inserts[f.ins].node == f.node) {
+			return .Stop
+		}
+		context = w.ctx
+		pop(&w.frames)
+		return .Next if len(w.frames) > 0 else .Stop
+	}
+	open := t.kind == .Array || t.kind == .Object
 	lo, hi := scalar_ends(t)
-	if lo < w.written[w.next].lo {
-		return s, .Next
+	for w.next < len(w.written) && w.written[w.next].hi <= lo {
+		x := w.written[w.next]
+		w.shift = i64(x.hi) - i64(x.src_hi)
+		w.next += 1
+	}
+	if w.next < len(w.written) && w.written[w.next].lo <= lo {
+		context = w.ctx
+		return .Next if !open && hi <= w.written[w.next].hi && written_token(w, f, t) else .Stop
+	}
+	if w.pending >= 0 || (w.next < len(w.written) && (hi if !open else lo + 1) > w.written[w.next].lo) {
+		return .Stop
+	}
+	if !f.object || f.key_next {
+		if _, due := kept_gone(w, f); due {
+			return .Stop
+		}
+	}
+	c := f.c
+	if c >= f.end || has(w.a.is_set, c) {
+		return .Stop
+	}
+	n := doc.nodes[c]
+	if i64(t.lo) - w.shift != i64(n.lo) || t.kind != n.kind || (!open && t.n != n.n) {
+		return .Stop
+	}
+	if f.object && f.key_next {
+		f.c, f.key_next = c + 1, false
+		return .Next
+	}
+	f.c, f.at, f.key_next = c + Node_Index(n.n if open else 1), f.at + 1, f.object
+	if !open {
+		return .Next
+	}
+	// A container no edit reaches whose source bytes, up to the next node's, hold no written piece is the source's
+	// bytes, which the walk judges past with no token given.
+	end := f.c
+	for w.touched_at < len(w.touched) && w.touched[w.touched_at] < c {
+		w.touched_at += 1
+	}
+	past := doc.nodes[end].lo if int(end) < len(doc.nodes) else u64(len(doc.src))
+	if (w.touched_at == len(w.touched) || w.touched[w.touched_at] >= end) && (w.next == len(w.written) || i64(w.written[w.next].lo) - w.shift >= i64(past)) {
+		return .Skip
 	}
 	context = w.ctx
-	x := w.written[w.next]
-	w.next += 1
-	if lo != x.lo || hi != x.hi || t.kind == .Array || t.kind == .Object || (t.role == .Key) != x.key {
-		w.failed = true
-		return s, .Stop
+	append(&w.frames, Written_Frame{node = c, c = c + 1, end = end, ins = first_of(w.a.inserts, c), object = t.kind == .Object, key_next = t.kind == .Object})
+	return .Next
+}
+
+// Whether `t`, a token in a piece an edit wrote, is the next key or value an edit writes in frame `f`, and reads as it.
+@(private = "file")
+written_token :: proc(w: ^Written_Read, f: ^Written_Frame, t: Token) -> bool {
+	doc := w.a.doc
+	if p := w.pending; p >= 0 {
+		w.pending = -1
+		return t.role == .Value && written_as(w, t, w.a.inserts[p].v)
 	}
-	if x.key {
-		text, ok := token_text(w.view.readers, &w.view, t, context.allocator)
-		w.failed = !ok || text != x.want.(string)
-	} else {
-		read := Document{view = w.view, nodes = []Node{t}}
-		w.failed = !reads_back_as(x.want, Node_Ref{&read, ROOT})
+	if !f.object || f.key_next {
+		if p, due := kept_gone(w, f); due {
+			f.ins += 1
+			if !f.object {
+				return written_as(w, t, w.a.inserts[p].v)
+			}
+			w.pending = p
+			return written_key(w, t, w.a.inserts[p].key)
+		}
 	}
-	return s, .Stop if w.failed else .Next
+	c := f.c
+	if c >= f.end || !has(w.a.is_set, c) {
+		return false
+	}
+	if f.object && f.key_next {
+		renamed, is_renamed := entry_of(w.a.renames, c + 1)
+		f.c, f.key_next = c + 1, false
+		return is_renamed && written_key(w, t, renamed.key)
+	}
+	f.c, f.at, f.key_next = c + Node_Index(subtree_size(doc, c)), f.at + 1, f.object
+	return t.role == .Value && written_as(w, t, set_of(&w.a, c))
+}
+
+// Steps frame `f` past the members that edits remove, up to the next insert, and returns whether that insert is due.
+@(private = "file")
+kept_gone :: proc "contextless" (w: ^Written_Read, f: ^Written_Frame) -> (insert: int, due: bool) {
+	for {
+		if insert, due = insert_due(w, f); due || f.c >= f.end {
+			return
+		}
+		v := f.c + 1 if f.object else f.c
+		if !has(w.a.gone, v) {
+			return
+		}
+		n := w.a.doc.nodes[v]
+		f.c, f.at = v + Node_Index(n.n if n.kind == .Array || n.kind == .Object else 1), f.at + 1
+	}
+}
+
+// The next insert frame `f` takes, when its index is the member the frame stands at.
+@(private = "file")
+insert_due :: #force_inline proc "contextless" (w: ^Written_Read, f: ^Written_Frame) -> (int, bool) {
+	if f.ins < len(w.a.inserts) && w.a.inserts[f.ins].node == f.node && w.a.inserts[f.ins].at <= f.at {
+		return f.ins, true
+	}
+	return 0, false
+}
+
+@(private = "file")
+written_key :: proc(w: ^Written_Read, t: Token, want: string) -> bool {
+	text, ok := token_text(w.view.readers, &w.view, t, context.allocator)
+	return t.role == .Key && ok && text == want
+}
+
+@(private = "file")
+written_as :: proc(w: ^Written_Read, t: Token, want: Value) -> bool {
+	read := Document{view = w.view, nodes = []Node{t}}
+	return reads_back_as(want, Node_Ref{&read, ROOT})
 }
 
 // Whether `got` reads as node `n` with the edits of `a` made. A container whose members the edits set, insert, remove
@@ -403,9 +552,10 @@ one_content_set :: proc(list: ^Edit_List) -> bool {
 }
 
 // The edits of `list` gathered by the node they change, each list sorted by node, with each container on the way to one
-// marked dirty.
+// marked dirty unless `ways` is false, for a read that follows the source node by node and needs no way to an edit.
 @(private = "file")
-applied_of :: proc(list: ^Edit_List) -> (a: Applied, known: bool) {
+applied_of :: proc(list: ^Edit_List, ways := true) -> (a: Applied, known: bool) {
+	reach := on_way if ways else proc(_: ^Applied, _: Node_Index, _: bool) {}
 	doc := list.doc
 	a.doc = doc
 	words := (len(doc.nodes) + 63) / 64
@@ -419,33 +569,38 @@ applied_of :: proc(list: ^Edit_List) -> (a: Applied, known: bool) {
 		case .Set:
 			if e.role == .Key {
 				append(&renames, Applied_Rename{e.node + 1, string(e.text)})
-				on_way(&a, e.node + 1, false)
+				mark(a.is_set, e.node)
+				reach(&a, e.node + 1, false)
 			} else if e.value == nil || doc.nodes[e.node].role == .Key {
 				return {}, false
 			} else {
 				append(&sets, Applied_Set{e.node, e.value})
 				mark(a.is_set, e.node)
-				on_way(&a, e.node, false)
+				reach(&a, e.node, false)
 			}
 		case .Insert:
 			if e.value == nil {
 				return {}, false
 			}
 			append(&inserts, Applied_Insert{node = e.node, at = e.at, key = string(e.key), v = e.value})
-			on_way(&a, e.node, true)
+			reach(&a, e.node, true)
 		case .Remove:
 			mark(a.gone, e.node)
-			on_way(&a, e.node, false)
+			reach(&a, e.node, false)
 		case .Reorder:
 			append(&orders, Applied_Order{e.node, e.text})
-			on_way(&a, e.node, true)
+			reach(&a, e.node, true)
 		case .Set_Fact, .Remove_Fact:
 			if e.role == .Tag || e.role == .Alias || e.role == .Anchor {
 				return {}, false
 			}
 		}
 	}
-	a.sets, a.inserts, a.renames, a.orders = by_node(sets[:]), by_node(inserts[:]), by_node(renames[:]), by_node(orders[:])
+	a.sets, a.renames, a.orders = by_node(sets[:]), by_node(renames[:]), by_node(orders[:])
+	insert_before :: proc(x, y: Applied_Insert) -> bool {return x.node < y.node || x.node == y.node && x.at < y.at}
+	if a.inserts = inserts[:]; !slice.is_sorted_by(a.inserts, insert_before) {
+		slice.stable_sort_by(a.inserts, insert_before)
+	}
 	if !slice.is_sorted(a.reached[:]) {
 		slice.sort(a.reached[:])
 	}
@@ -476,7 +631,7 @@ of_node :: proc(xs: []$T, n: Node_Index) -> []T {
 
 // The first entry of `xs`, sorted by node, at or past node `n`.
 @(private = "file")
-first_of :: proc(xs: []$T, n: Node_Index) -> int {
+first_of :: proc "contextless" (xs: []$T, n: Node_Index) -> int {
 	lo, hi := 0, len(xs)
 	for lo < hi {
 		mid := (lo + hi) / 2
@@ -554,10 +709,10 @@ on_way :: proc(a: ^Applied, x: Node_Index, itself: bool) {
 Applied :: struct {
 	doc:     ^Document,
 	sets:    []Applied_Set,
-	inserts: []Applied_Insert,
+	inserts: []Applied_Insert, // sorted by node, then by index, each index's in their order
 	renames: []Applied_Rename,
 	orders:  []Applied_Order,
-	is_set:  []u64, // bit n: node n is in `sets`
+	is_set:  []u64, // bit n: node n is in `sets`, or is the key of a node in `renames`
 	gone:    []u64, // bit n: node n is removed
 	dirty:   []u64, // bit n: node n is a container an edit changes, or one that holds such a container
 	reached: [dynamic]Node_Index, // each edit's node and each member on the way to one, sorted once the edits are read
@@ -566,12 +721,12 @@ Applied :: struct {
 }
 
 @(private = "file")
-has :: #force_inline proc(bits: []u64, n: Node_Index) -> bool {
+has :: #force_inline proc "contextless" (bits: []u64, n: Node_Index) -> bool {
 	return bits[n >> 6] & (1 << (u64(n) & 63)) != 0
 }
 
 @(private = "file")
-mark :: #force_inline proc(bits: []u64, n: Node_Index) {
+mark :: #force_inline proc "contextless" (bits: []u64, n: Node_Index) {
 	bits[n >> 6] |= 1 << (u64(n) & 63)
 }
 

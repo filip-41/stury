@@ -49,11 +49,6 @@ verb_option :: proc(v: ^Verb_Options, args: []string, i: int) {
 	}
 }
 
-// Whether the command is `schema gen`, which writes Odin and takes no layout.
-generates_odin :: proc(cli: ^Cli) -> bool {
-	return cli.schema_verb && len(cli.files) > 0 && cli.files[0] == "gen"
-}
-
 // Runs the verb that `cli.files` opens with and exits.
 schema_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	verb := cli.files[0] if len(cli.files) > 0 else ""
@@ -125,15 +120,12 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 	if cli.schema.draft != nil {
 		usage_error("--schema-draft is schema sample's and schema gen's: schema infer reads no schema")
 	}
-	if len(files) == 0 && is_terminal(os.stdin) && is_terminal(os.stdout) {
-		usage(EXIT_USAGE, true)
-	}
 	src := input_source(&run.opts, cli.json_reading)
 	inf := schema.Inferred {
 		ranges = cli.verbs.ranges,
 	}
 	failures, faults := 0, 0
-	for path in (files if len(files) > 0 else STDIN_ONLY) {
+	for path in input_files(files) {
 		spent, read := file_bytes(path, "schema infer")
 		if !read {
 			failures += 1
@@ -147,11 +139,7 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 			free_spent(spent)
 			continue
 		}
-		runner: ^core.Runner
-		if len(data) >= POOLED_BYTES {
-			runner = run_pool(run)
-		}
-		if !infer_read(&inf, src, path, data, &run.opts, runner) {
+		if !infer_read(&inf, src, path, data, &run.opts, pool_for(run, data)) {
 			faults += 1
 		}
 		free_spent(spent)

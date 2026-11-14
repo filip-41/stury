@@ -186,8 +186,8 @@ Token_View :: struct {
 }
 
 // A `Document` holds the walk's tokens over the caller's bytes, the facts beside them, and the format's `Readers`
-// table. `src` is borrowed and must outlive the document. `nodes_alloc` is the allocation behind `nodes`, whose length
-// is its capacity, so `destroy` frees it after `nodes` shrank to the node count.
+// table. `src` is borrowed and must outlive the document, unless `owns_src` says it is the document's. `nodes_alloc` is the allocation
+// behind `nodes`, whose length is its capacity, so `destroy` frees it after `nodes` shrank to the node count.
 //
 // A format whose root members share their keys keeps those keys as the root's first child, an `Array` of role `Key`, so
 // the root's readers step over it as they step over a member's key. A `Table` says where that `Array` is, and its
@@ -230,6 +230,9 @@ Document :: struct {
 	// Set by a build that sent no node's tokens again in another place, as a YAML alias or merge key does, so every
 	// container's children follow it in the text.
 	in_order:     bool,
+	// Set when `src` is the document's own allocation, as a stream's record built over bytes its window no longer holds
+	// is.
+	owns_src:     bool,
 	// The tables at `tables_at`: a dsv text has one.
 	n_tables:     u16,
 }
@@ -768,9 +771,13 @@ has_comments :: #force_inline proc "contextless" (s: Comment_Syntax) -> bool {
 	return s.line != "" || s.open != ""
 }
 
-// Frees `doc`'s node, fact, child-count and child-index allocations and sets `doc` to the zero value.
+// Frees `doc`'s text when it owns it, its node, fact, child-count and child-index allocations, and sets `doc` to the
+// zero value.
 destroy :: proc(doc: ^Document) {
 	// A nil slice frees nothing.
+	if doc.owns_src {
+		delete(doc.src, doc.allocator)
+	}
 	delete(doc.nodes_alloc, doc.allocator)
 	delete(doc.facts_alloc, doc.allocator)
 	delete(doc.counts_alloc, doc.allocator)
@@ -790,8 +797,8 @@ destroy :: proc(doc: ^Document) {
 }
 
 // Returns a copy of `doc` whose nodes, facts, child counts, path answers and format tables are new allocations from
-// `allocator`, so `doc` may be destroyed while the copy lives. The text is not copied: the copy borrows `doc.src` as
-// `doc` does. The copy has no child index.
+// `allocator`, so `doc` may be destroyed while the copy lives. The text is copied only when `doc` owns it, and else the
+// copy borrows `doc.src` as `doc` does. The copy has no child index.
 clone :: proc(doc: ^Document, allocator := context.allocator) -> (c: Document, err: runtime.Allocator_Error) {
 	c = doc^
 	c.allocator = allocator
@@ -807,6 +814,9 @@ clone :: proc(doc: ^Document, allocator := context.allocator) -> (c: Document, e
 		// A format's tables hold words of up to 8 bytes.
 		c.state = runtime.mem_alloc_bytes(len(doc.state), 16, allocator) or_return
 		copy(c.state, doc.state)
+	}
+	if doc.owns_src {
+		c.src = slice.clone(doc.src, allocator) or_return
 	}
 	c.nodes_alloc = slice.clone(doc.nodes, allocator) or_return
 	c.facts_alloc = slice.clone(doc.facts, allocator) or_return

@@ -8,7 +8,9 @@ package toml
 // seconds, and a string has no `\e` or `\x`. A string read from TOML keeps its literal quotes unless `respell_strings`
 // is set, and a datetime string that carries a `Tag` is written as the bare datetime. A comment is written when the
 // document holds it: above the line or section it stands before, on the line it ends, and at the end of a table. A
-// comment the output has no place for, and one with a line end in its body, is dropped and counted.
+// comment inside a table or an array that is an element of an array stands above that element, since TOML 1.0 has no
+// multi-line inline table. A comment the output has no other place for, and one with a line end in its body, is
+// dropped and counted.
 
 import "base:runtime"
 import "core:io"
@@ -248,37 +250,31 @@ put_header :: proc(l: ^Layout, node: core.Node_Index, element: bool) {
 	write.put_byte(&l.out, '\n')
 }
 
-// Whether `node` is an array with a comment on an element or a foot comment, which only an array written one element a
-// line has a place for.
+// Whether `node` is an array that holds a comment past its own head and inline ones: on an element, inside an element,
+// or a foot comment. Only an array written one element a line has a place for them.
 @(private)
 elements_commented :: proc(l: ^Layout, node: core.Node_Index) -> bool {
 	if !l.commented || core.kind(l.doc, node) != .Array {
 		return false
 	}
-	for f in core.all_facts(l.doc, node) {
-		if f.role == .Comment_Foot {
+	for f in core.subtree_facts(l.doc, node) {
+		if f.role in core.COMMENT_ROLES && (f.node != node || f.role == .Comment_Foot) {
 			return true
-		}
-	}
-	it := core.children(l.doc, node)
-	for e in core.child_next(&it) {
-		for f in core.all_facts(l.doc, e) {
-			if f.role in core.COMMENT_ROLES {
-				return true
-			}
 		}
 	}
 	return false
 }
 
 // The array at `node` one element a line, each with its head comments above it and its inline comment after it, and
-// its foot comments before the close.
+// its foot comments before the close. A comment inside an element that is a table or an array has no line of its own in
+// TOML 1.0, which has no multi-line inline table, so it stands above the element.
 @(private)
 put_lined_array :: proc(l: ^Layout, node: core.Node_Index) -> core.Typed_Error_Kind {
 	write.put_text(&l.out, "[\n")
 	it := core.children(l.doc, node)
 	for e in core.child_next(&it) {
 		l.kept += write.put_comment_lines(&l.out, l.doc, e, .Comment, 2)
+		put_hoisted_comments(l, e)
 		write.put_text(&l.out, "  ")
 		put_inline(l, e) or_return
 		write.put_byte(&l.out, ',')
@@ -288,6 +284,23 @@ put_lined_array :: proc(l: ^Layout, node: core.Node_Index) -> core.Typed_Error_K
 	l.kept += write.put_comment_lines(&l.out, l.doc, node, .Comment_Foot, 2)
 	write.put_byte(&l.out, ']')
 	return .None
+}
+
+// The comments of the nodes below `node`, in document order, each as `#` lines of its own at column 2.
+@(private)
+put_hoisted_comments :: proc(l: ^Layout, node: core.Node_Index) {
+	for f in core.subtree_facts(l.doc, node) {
+		if f.node == node || f.role not_in core.COMMENT_ROLES {
+			continue
+		}
+		text, padded := core.comment_text(l.doc, f)
+		if write.comment_lines_ok(text) {
+			l.kept += 1
+			write.put_text(&l.out, "  ")
+			write.put_comment(&l.out, "#", text, padded, 2)
+			write.put_byte(&l.out, '\n')
+		}
+	}
 }
 
 // An array or inline table `put_inline` has open: the members or elements still to write.

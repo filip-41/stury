@@ -34,7 +34,7 @@ in_table :: proc(table: int, r: rune) -> bool {
 	if len(ranges) == 0 {
 		return false
 	}
-	// The last range starting at or below r, found without a branch per step; base + n stays within the
+	// The last range starting at or below r, found without a branch per step. base + n stays within the
 	// table. The key is wide enough for any rune to shift into.
 	SPAN :: 1 << RANGE_SPAN_BITS - 1
 	key := u64(u32(r)) << RANGE_SPAN_BITS | SPAN
@@ -160,8 +160,11 @@ unfold :: proc(runes: []rune) -> (r: rune, ok: bool) {
 
 @(private = "file")
 fold_entry :: proc(r: rune) -> (f: u64, ok: bool) {
-	k := slice.binary_search_by(FOLDS, u64(u32(r)), proc(f: u64, c: u64) -> slice.Ordering {
-		return slice.cmp(f >> (2 * FOLD_BITS), c)
-	}) or_return
+	k := slice.binary_search_by(FOLDS, u64(u32(r)), fold_order) or_return
 	return FOLDS[k], true
+}
+
+// Orders an entry of FOLDS against a character by the character it holds.
+fold_order :: proc(f: u64, c: u64) -> slice.Ordering {
+	return slice.cmp(f >> (2 * FOLD_BITS), c)
 }

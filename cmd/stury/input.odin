@@ -25,6 +25,18 @@ import "message"
 @(rodata)
 STDIN_ONLY := []string{"-"}
 
+// The files a command reads, or stdin when it names none. With none named and stdin and stdout both a terminal, the
+// help is told rather than a wait on the keyboard, as a run with no filter tells it.
+input_files :: proc(files: []string) -> []string {
+	if len(files) > 0 {
+		return files
+	}
+	if is_terminal(os.stdin) && is_terminal(os.stdout) {
+		usage(EXIT_USAGE, true)
+	}
+	return STDIN_ONLY
+}
+
 // The longest piece jq's fgets reads under -R: its 4096-byte buffer, less room to finish a UTF-8 sequence.
 FGETS_MAX :: 4091
 
@@ -195,8 +207,7 @@ slurp_table :: proc(ins: ^Inputs, all: ^jq.Array) -> bool {
 		return false
 	}
 	// A long table is built on the pool's threads.
-	pool := run_pool(ins.run) if len(ins.data) >= POOLED_BYTES else nil
-	doc, fault := jq.judge_build(records.build(ins.data, ins.as, allocator = context.allocator, runner = pool))
+	doc, fault := jq.judge_build(records.build(ins.data, ins.as, allocator = context.allocator, runner = pool_for(ins.run, ins.data)))
 	if _, bad := fault.?; bad {
 		return false
 	}

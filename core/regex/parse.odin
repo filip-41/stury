@@ -69,13 +69,13 @@ Callout :: struct {
 	// COUNT's, TOTAL_COUNT's and MAX's: '>' counts as it is passed, 'X' also takes it back as the match backs past
 	// it, '<' counts only then. Any other ends the search when it is reached.
 	type:  rune,
-	sides: [2]Operand, // MAX's most in [0]; CMP's two sides
+	sides: [2]Operand, // MAX's most in [0], CMP's two sides
 	cmp:   u8, // CMP's operator as the outcomes it holds for: 1 less, 2 equal, 4 greater, 0 for none
 	index: int, // its count's slot
 }
 
-// A number, or the count of the callout of a tag (`ref`, nil for a number; a tag on a callout that keeps
-// no count reads 0).
+// A number, or the count of the callout of a tag (`ref`, nil for a number). A tag on a callout that keeps
+// no count reads 0.
 Operand :: struct {
 	n:   int,
 	tag: string,
@@ -104,8 +104,8 @@ Node :: struct {
 	used:       bool, // Group: a backreference, condition or call reads it, so a look-behind is not cut to nothing
 	text:       string, // Str
 	class:      ^Class,
-	kids:       [dynamic]^Node, // Cat, Alt; Group, Repeat and Look have one; Cond its yes and no
-	min, max:   int, // Repeat; max -1 for no bound
+	kids:       [dynamic]^Node, // Cat and Alt. Group, Repeat and Look have one, Cond its yes and no
+	min, max:   int, // Repeat, max -1 for no bound
 	group:      int, // Group's capture number (0 for none), Cond's group
 	refs:       [dynamic]int, // Backref's groups, which a name may give several of
 	name:       string, // Backref or Cond by name, until resolved
@@ -117,7 +117,7 @@ Node :: struct {
 Pattern :: struct {
 	root:       ^Node, // under group 0 when a call names the whole pattern
 	names:      []string, // group n's name at n, "" for none; [0] is the whole match
-	groups:     []^Node, // group n's node at n; [0] only under a call of the whole pattern
+	groups:     []^Node, // group n's node at n, [0] only under a call of the whole pattern
 	referenced: []bool, // by group number: a backreference or condition reads it
 	callouts:   []^Callout, // those that keep data, each at its index
 	has_calls:  bool,

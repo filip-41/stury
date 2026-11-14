@@ -209,11 +209,8 @@ fn_fromjson :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Valu
 }
 
 // ascii_downcase and ascii_upcase.
-fn_ascii_case :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	s, ok := string_of(v)
-	if !ok {
-		return nil, fail(ip, "explode input must be a string") // jq's are `explode | ... | implode`
-	}
+fn_ascii_case :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (result: Value, sig: Signal) {
+	s := must_be_string(ip, "explode", v) or_return // jq's are `explode | ... | implode`
 	from: byte = 'A' if name == "ascii_downcase" else 'a'
 	// The letters of the case being changed, flipped by their 0x20 bit as they are copied, in a loop
 	// without branches, which vectorizes.
@@ -224,11 +221,8 @@ fn_ascii_case :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Va
 	return string(b), .Go
 }
 
-fn_explode :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	s, ok := string_of(v)
-	if !ok {
-		return nil, fail(ip, "explode input must be a string")
-	}
+fn_explode :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (result: Value, sig: Signal) {
+	s := must_be_string(ip, "explode", v) or_return
 	a := new_array(len(s))
 	for r in s {
 		append(&a.items, num(f64(r)))
@@ -289,11 +283,8 @@ is_trimmed :: proc(r: rune) -> bool {
 }
 
 // trim, ltrim and rtrim.
-fn_trim :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	whole, ok := string_of(v)
-	if !ok {
-		return nil, fail(ip, "trim input must be a string")
-	}
+fn_trim :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (result: Value, sig: Signal) {
+	whole := must_be_string(ip, "trim", v) or_return
 	s := whole
 	if name != "rtrim" {
 		s = strings.trim_left_proc(s, is_trimmed)
@@ -316,14 +307,19 @@ fn_split :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, 
 	return split_string(s, sep), .Go
 }
 
+// jq's error for iterating a value that is neither an array nor an object.
+iterable :: proc(ip: ^Interp, v: Value) -> Signal {
+	if k := kind(v); k != .Array && k != .Object {
+		return fail(ip, "Cannot iterate over %s (%s)", type_name(v), brief(ip, v))
+	}
+	return .Go
+}
+
 // jq's `reduce .[] as $i (null; (if . == null then "" else . + $x end) + ($i | if type == "boolean" or
 // type == "number" then tostring else . // "" end)) // ""`, its errors included: only a string or null adds to the
 // string so far.
-fn_join :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	k := kind(v)
-	if k != .Array && k != .Object {
-		return nil, fail(ip, "Cannot iterate over %s (%s)", type_name(v), brief(ip, v))
-	}
+fn_join :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (result: Value, sig: Signal) {
+	iterable(ip, v) or_return
 	sep, sep_is_str := string_of(args[0])
 	b := strings.builder_make()
 	it := iterate(v)
@@ -371,7 +367,7 @@ fn_reverse :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value
 
 // jq's `if $x < 0 then error(...) else _flatten($x) end`: a depth of any type that orders below 0
 // fails, and one that is not a number fails as `$x - 1` does at the first array it would flatten.
-fn_flatten :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
+fn_flatten :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (result: Value, sig: Signal) {
 	depth: Value = num(1e18)
 	if len(args) > 0 {
 		depth = args[0]
@@ -379,10 +375,7 @@ fn_flatten :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value
 			return nil, fail(ip, "flatten depth must not be negative")
 		}
 	}
-	k := kind(v)
-	if k != .Array && k != .Object {
-		return nil, fail(ip, "Cannot iterate over %s (%s)", type_name(v), brief(ip, v))
-	}
+	iterable(ip, v) or_return
 	a := new_array()
 	return a, flatten_into(ip, a, v, depth)
 }
@@ -433,16 +426,12 @@ fn_strindices :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Va
 	return a, .Go
 }
 
-fn_add :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	k := kind(v)
-	if k != .Array && k != .Object {
-		return nil, fail(ip, "Cannot iterate over %s (%s)", type_name(v), brief(ip, v))
-	}
+fn_add :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (result: Value, sig: Signal) {
+	iterable(ip, v) or_return
 	owned: Owned
 	acc: Value
 	it := iterate(v)
 	for _, m in next_member(&it) {
-		sig: Signal
 		if acc, sig = add(ip, acc, m, &owned); sig != .Go {
 			return nil, sig
 		}

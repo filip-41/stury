@@ -137,7 +137,8 @@ check_elements :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink, runner: ^core.Ru
 	most, limited := e.max.?
 	if (u64(count) < e.min || limited && u64(count) > most) && (sink != nil || failure.kind == .None) {
 		// The count is the array's own failure, after those of its entries.
-		counted := outcome(core.error_of(check_text(&e.counts, src, read_of(b, sink))), sink)
+		target: u8
+		counted := outcome(typed.check_text(src, &target, nil, &e.counts, read_of(b, sink)), sink)
 		if failure.kind == .None || sink.fatal.kind != .None {
 			return counted, true
 		}

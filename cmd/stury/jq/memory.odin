@@ -103,31 +103,29 @@ free_detached :: proc(ip: ^Interp) {
 	if ip.scope.ready {
 		virtual.arena_destroy(&ip.scope.arena)
 	}
-	if ip.recycler.ready {
-		virtual.arena_destroy(&ip.recycler.arenas[0])
-		virtual.arena_destroy(&ip.recycler.arenas[1])
-	}
-	if ip.faults.ready {
-		virtual.arena_destroy(&ip.faults.arenas[0])
-		virtual.arena_destroy(&ip.faults.arenas[1])
+	for p in ([2]^Arena_Pair{&ip.recycler, &ip.faults}) {
+		if p.ready {
+			virtual.arena_destroy(&p.arenas[0])
+			virtual.arena_destroy(&p.arenas[1])
+		}
 	}
 	free_regions(ip)
 	detach_memory(ip)
 }
 
-// The memory `fail` makes an error's message in, `arenas[0]`, and the details it shows (`brief`) in, `arenas[1]`.
-// A message is read until the next `fail` empties its arena: the error it raises is caught, and a handler reads a copy
-// (`caught`), or it ends the run, before another can be raised. Details are read until their message is made.
-Fault_Memory :: struct {
+// Two growing arenas, set up when first needed (`pair_ready`).
+Arena_Pair :: struct {
 	arenas: [2]virtual.Arena,
 	ready:  bool, // the arenas are set up
 }
 
-// The allocator of a new message, the last one's emptied, or of a detail: the context allocator if the arenas cannot
-// be had.
+// `fail` makes an error's message in `ip.faults.arenas[0]` and the details it shows (`brief`) in `arenas[1]`. A message
+// is read until the next `fail` empties its arena: the error it raises is caught, and a handler reads a copy (`caught`),
+// or it ends the run, before another can be raised. Details are read until their message is made. Without the arenas,
+// a message or a detail is made in the context allocator.
 @(private)
 message_allocator :: proc(ip: ^Interp) -> runtime.Allocator {
-	if !faults_ready(&ip.faults) {
+	if !pair_ready(&ip.faults) {
 		return context.allocator
 	}
 	a := arena_allocator(&ip.faults.arenas[0])
@@ -137,20 +135,20 @@ message_allocator :: proc(ip: ^Interp) -> runtime.Allocator {
 
 @(private)
 detail_allocator :: proc(ip: ^Interp) -> runtime.Allocator {
-	return arena_allocator(&ip.faults.arenas[1]) if faults_ready(&ip.faults) else context.allocator
+	return arena_allocator(&ip.faults.arenas[1]) if pair_ready(&ip.faults) else context.allocator
 }
 
 @(private = "file")
-faults_ready :: proc(f: ^Fault_Memory) -> bool {
-	if !f.ready {
-		if virtual.arena_init_growing(&f.arenas[0]) != nil {
+pair_ready :: proc(p: ^Arena_Pair) -> bool {
+	if !p.ready {
+		if virtual.arena_init_growing(&p.arenas[0]) != nil {
 			return false
 		}
-		if virtual.arena_init_growing(&f.arenas[1]) != nil {
-			virtual.arena_destroy(&f.arenas[0])
+		if virtual.arena_init_growing(&p.arenas[1]) != nil {
+			virtual.arena_destroy(&p.arenas[0])
 			return false
 		}
-		f.ready = true
+		p.ready = true
 	}
 	return true
 }
@@ -577,10 +575,9 @@ give_region :: proc(ip: ^Interp, r: ^Region) {
 
 // Memory `inputs` reads into when what takes its outputs keeps none of them (`recycled_inputs`).
 Input_Recycler :: struct {
-	arenas:    [2]virtual.Arena,
-	free_envs: [2]^Env, // scopes made in each arena, given back
-	ready:     bool, // the arenas are set up
-	on:        bool, // an `inputs` reads into them
+	using pair: Arena_Pair,
+	free_envs:  [2]^Env, // scopes made in each arena, given back
+	on:         bool, // an `inputs` reads into them
 }
 
 // What keeps something of an output given to `out` once `out` returns: nothing (it is printed, or
@@ -627,18 +624,8 @@ recycled_inputs :: proc(ip: ^Interp, input: Item, out: ^Sink) -> (sig: Signal, o
 		return scratch_inputs(ip, input, out, reduce), true
 	}
 	r := &ip.recycler
-	if r.on {
+	if r.on || !pair_ready(r) {
 		return
-	}
-	if !r.ready {
-		if virtual.arena_init_growing(&r.arenas[0]) != nil {
-			return
-		}
-		if virtual.arena_init_growing(&r.arenas[1]) != nil {
-			virtual.arena_destroy(&r.arenas[0])
-			return
-		}
-		r.ready = true
 	}
 	r.on = true
 	outside := context.allocator

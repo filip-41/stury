@@ -87,8 +87,8 @@ TOKENS := write.Token_Spelling {
 		}
 		return lay_out_text(bytes, t.mark, t.opts, {}, t.base.allocator)
 	},
-	// A comment is TOML 1.1's, which an inline table holds on lines of its own, and `end` reads it back as 1.1. An
-	// inline comment that follows one on the same item joins it.
+	// The calls build an inline table that `end` reads back as TOML 1.1, whose inline table holds a comment on a line of
+	// its own, and writes as a 1.0 text. An inline comment that follows one on the same item joins it.
 	comment = proc(t: ^write.Tokens, role: core.Role, text: string) -> core.Typed_Error_Kind {
 		if !write.comment_lines_ok(text) {
 			return .Unwritable

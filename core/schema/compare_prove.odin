@@ -100,12 +100,6 @@ included :: proc(p: ^Prover, a, b: []rules.Node_Index, depth: int) -> bool {
 	return true
 }
 
-// Whether the node says nothing but the node its `$ref` names.
-@(private = "file")
-ref_only :: proc(n: ^rules.Node) -> bool {
-	return n.ref != nil && n.kinds == rules.EVERY_KIND && !n.integer_spelled && n.rules == {} && n.array < 0 && n.object < 0 && len(n.any_of) == 0 && !n.has_enum && n.const_of == nil && len(n.all_of) == 0 && len(n.one_of) == 0 && n.not == nil && n.cond == {} && n.dynamic_ref == nil && n.unevaluated_items == nil && n.unevaluated_properties == nil
-}
-
 // The conjunction `ids` as a key, each node replaced by the node a chain of nodes that only name it reaches, in order
 // and once, so two spellings of one conjunction share it.
 @(private = "file")
@@ -113,7 +107,7 @@ conjunction_key :: proc(d: ^rules.Description, ids: []rules.Node_Index) -> strin
 	reached := make([dynamic]rules.Node_Index, 0, len(ids), context.temp_allocator)
 	for id in ids {
 		at := id
-		for hops := 0; hops < MAX_DEPTH * 4 && ref_only(&d.nodes[at]); hops += 1 {
+		for hops := 0; hops < MAX_DEPTH * 4 && rules.ref_only(&d.nodes[at]) && !d.nodes[at].integer_spelled; hops += 1 {
 			at = d.nodes[at].ref.?
 		}
 		append(&reached, at)

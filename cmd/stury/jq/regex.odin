@@ -316,12 +316,7 @@ capture_object :: proc(r: ^Regex, s: string, m: Match) -> ^Object {
 		if g == 0 || name == "" {
 			continue
 		}
-		lo, hi := m[2 * g], m[2 * g + 1]
-		text: Value = nil
-		if lo >= 0 {
-			text = span_text(s, lo, hi) if m[0] < m[1] else string("")
-		}
-		object_put(o, name, text)
+		object_put(o, name, group_text(s, m, g))
 	}
 	return o
 }

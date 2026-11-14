@@ -13,7 +13,9 @@ import "../core/records"
 // of its name hides. `hidden` counts the hidden anchors, `names` maps each name to its last anchor, and `low` is the
 // lowest of their lows. `open_low` is the lowest byte the first unfinished anchor, `open`, reads, and `scan` how far
 // through the log it has looked. `directives` holds the `%TAG` directives once their bytes may leave the window, the
-// text `declared_prefix` reads. `short` is set when memory ran out for any of it.
+// text `declared_prefix` reads. `copies` holds the nodes of anchors copied out of the window, at `regions`, which the
+// walk's offsets from `FAR` name, and `compacted` its length when it last let go of the regions no offset names.
+// `short` is set when memory ran out for any of it.
 @(private)
 Entry_Cursor :: struct {
 	cursor:     Cursor,
@@ -35,7 +37,31 @@ Entry_Cursor :: struct {
 	open_low:   u64,
 	directives: []u8,
 	declared:   int,
+	copies:     [dynamic]u8,
+	regions:    [dynamic]Region,
+	compacted:  int,
 }
+
+// Bytes `lo ..< hi` of `Entry_Cursor.copies`, a copy of one anchor's node. A byte apart from the next, so an empty
+// token at its end names it alone.
+@(private)
+Region :: struct {
+	lo, hi: u64,
+}
+
+// The offsets `lo ..< hi` taken to `to` on.
+@(private)
+Move :: struct {
+	lo, hi, to: u64,
+}
+
+@(private)
+FAR :: records.FAR
+
+// How far before the lowest byte the rest of the walk reads again an anchor's node lies when it is copied out of the
+// window, so that a name taken again soon after is not copied.
+@(private)
+COPY_SPAN :: 4096
 
 // The walk of `.Entries` from the reader's position, or its resume, and the cursor's part in following a stream's
 // window. A stream's record stands once the window holds the bytes the walk judged it by: the walk ends a node at the
@@ -61,6 +87,9 @@ step_entries :: proc(it: ^records.Reader, w: ^records.Entry_Walk, op: records.En
 		} else if e.short {
 			return 0, core.Fault{kind = .No_Memory}
 		} else {
+			if held := e.cursor.held; held != nil {
+				held.parser.far = e.copies[:]
+			}
 			hi, fault = walk_resume(it.src, &e.cursor, .Yaml_1_2, opts, w, nil, records.entry_hook)
 		}
 		if w.given && it.input.procedure != nil && !it.last && !told(it.src, e.cursor.held) {
@@ -75,7 +104,7 @@ step_entries :: proc(it: ^records.Reader, w: ^records.Entry_Walk, op: records.En
 	case .Free:
 		if e != nil {
 			entry_cursor_free(e, it.allocator)
-			w.cursor = nil
+			w.cursor, w.far = nil, nil
 		}
 	case .Save:
 		if e == nil || e.short {
@@ -113,6 +142,7 @@ step_entries :: proc(it: ^records.Reader, w: ^records.Entry_Walk, op: records.En
 		e.short ||= !held_copy(e.cursor.held, &e.back, stable, logged, e.cursor.allocator) ||
 			!mirror(&e.lows, e.back_lows, 0, e.cursor.allocator)
 		e.hidden, e.low = e.back_hidden, e.back_low
+		e.cursor.held.parser.far = e.copies[:]
 		anchors_name(e, &e.cursor.held.parser)
 	case .Rebase:
 		e.cursor.src, e.cursor.n = raw_data(it.src), u64(len(it.src))
@@ -121,10 +151,14 @@ step_entries :: proc(it: ^records.Reader, w: ^records.Entry_Walk, op: records.En
 			anchors_compact(e, &held.parser)
 			held_shift(held, it.src, w.delta)
 			for &low in e.lows {
-				if low != max(u64) {
+				if low < FAR {
 					low -= w.delta
 				}
 			}
+			if len(e.copies) > 2 * e.compacted + COPY_SPAN && !copies_compact(e, w, held) {
+				e.short = true
+			}
+			held.parser.far = e.copies[:]
 			anchors_name(e, &held.parser)
 			if opts.alias_limit == 0 {
 				held.parser.limit = max(held.parser.limit, ALIAS_RATIO * (it.base + u64(len(it.src))))
@@ -134,11 +168,19 @@ step_entries :: proc(it: ^records.Reader, w: ^records.Entry_Walk, op: records.En
 	case .Keep:
 		hi = max(u64)
 		if held := e.cursor.held; held != nil {
-			if p := &held.parser; e.hidden >= 32 + len(p.anchors) / 2 {
+			p := &held.parser
+			if e.hidden >= 32 + len(p.anchors) / 2 {
 				anchors_compact(e, p)
 				anchors_name(e, p)
 			}
-			hi = held_keep(e, held)
+			hi = held_keep(held)
+			low := anchors_low(e, p)
+			// No anchor lies `COPY_SPAN` bytes back unless the lowest does.
+			if !opts.merge_keys && low < FAR && low + COPY_SPAN <= hi {
+				e.short ||= !anchors_copy(e, w, held, hi)
+				low = anchors_low(e, p)
+			}
+			hi = min(hi, low)
 			// The keys of the open mappings are read again under `merge_keys` by each later key, so those the window
 			// lets go are copied out, in the saved walk too.
 			if !keys_hold(&held.parser.keys, it.src, hi) || e.saved && !keys_hold(&e.back.parser.keys, it.src, hi) {
@@ -151,8 +193,11 @@ step_entries :: proc(it: ^records.Reader, w: ^records.Entry_Walk, op: records.En
 			if !ok {
 				return 0, core.Fault{kind = .No_Memory}
 			}
-			w.cursor = c
+			w.cursor, w.far = c, c.copies[:]
 		}
+	}
+	if e != nil && w.cursor == e {
+		w.far = e.copies[:]
 	}
 	return
 }
@@ -177,12 +222,12 @@ told :: proc "contextless" (src: []u8, held: ^Held) -> bool {
 	return at + core.FAULT_REACH < n
 }
 
-// The lowest byte the walk `held` holds reads again. The start of the line and the next line found are compared with
-// the place the walk reads at, and only read there.
+// The lowest byte the walk `held` holds reads again but for the anchors' nodes. The start of the line and the next line
+// found are compared with the place the walk reads at, and only read there.
 @(private)
-held_keep :: proc(e: ^Entry_Cursor, held: ^Held) -> u64 {
+held_keep :: proc(held: ^Held) -> u64 {
 	p := &held.parser
-	lo := min(p.pos, p.last_end, anchors_low(e, p))
+	lo := min(p.pos, p.last_end)
 	if p.tag.n != 0 {
 		lo = min(lo, p.tag.lo)
 	}
@@ -236,15 +281,12 @@ anchors_seen :: proc(e: ^Entry_Cursor, p: ^Parser) {
 	for len(e.lows) < len(p.anchors) && !p.anchors[len(e.lows)].open {
 		k := len(e.lows)
 		a := p.anchors[k]
-		low := a.name_lo - 1
-		for t in p.log[a.log_lo:a.log_hi] {
-			low = min(low, t.lo)
-		}
+		low := anchor_low(p, a)
 		if _, failed := append(&e.lows, low); failed != nil {
 			e.short = true
 			return
 		}
-		name := string(p.src[a.name_lo:a.name_lo + u64(a.name_n)])
+		name := anchor_name(p, a)
 		if j, seen := e.names[name]; seen {
 			e.dirty ||= e.lows[j] == e.low
 			e.lows[j] = max(u64)
@@ -261,6 +303,199 @@ anchors_seen :: proc(e: ^Entry_Cursor, p: ^Parser) {
 	}
 }
 
+// The lowest window byte a replay of anchor `a` reads, its name's `&` among them, past the window when it reads none.
+@(private)
+anchor_low :: proc "contextless" (p: ^Parser, a: Anchor) -> u64 {
+	low := a.name_lo - 1
+	for t in p.log[a.log_lo:a.log_hi] {
+		low = min(low, t.lo)
+	}
+	return low
+}
+
+// Copies the nodes of the anchors an alias may still name whose bytes lie `COPY_SPAN` bytes before `rest` or more out of
+// the window, oldest first, and moves every offset the walk and the member hold into them, the saved walk's too, so
+// the window may let them go. An anchor the saved walk does not hold complete waits. False when memory ran out.
+@(private)
+anchors_copy :: proc(e: ^Entry_Cursor, w: ^records.Entry_Walk, held: ^Held, rest: u64) -> bool {
+	p := &held.parser
+	anchors_seen(e, p)
+	limit := min(len(e.lows), e.stable) if e.saved else len(e.lows)
+	copied := false
+	for k in 0 ..< limit {
+		if e.lows[k] >= FAR || rest < COPY_SPAN || e.lows[k] + COPY_SPAN > rest {
+			continue
+		}
+		a := p.anchors[k]
+		lo, hi := anchor_low(p, a), a.lo
+		for t in p.log[a.log_lo:a.log_hi] {
+			if t.lo < FAR {
+				hi = max(hi, t.lo + u64(t.n))
+			}
+		}
+		e.lows[k] = lo
+		if lo + COPY_SPAN > rest {
+			continue
+		}
+		at := u64(len(e.copies))
+		if _, failed := append(&e.copies, ..p.src[lo:hi]); failed != nil {
+			return false
+		}
+		if _, failed := append(&e.copies, '\n'); failed != nil {
+			return false
+		}
+		if _, failed := append(&e.regions, Region{at, at + hi - lo}); failed != nil {
+			return false
+		}
+		move := []Move{{lo, hi, FAR + at}}
+		far_move(p, held.queue[:], move)
+		member_far_move(w, move)
+		if e.saved {
+			far_move(&e.back.parser, e.back.queue[:], move)
+		}
+		copied = true
+	}
+	if copied {
+		e.low = lows_again(&e.lows, p)
+		if e.saved {
+			e.back_low = lows_again(&e.back_lows, &e.back.parser)
+		}
+		// The names may be views of the copies, which grew.
+		p.far = e.copies[:]
+		anchors_name(e, p)
+	}
+	return true
+}
+
+// Takes again each anchor's lowest window byte in `lows` but for those a later anchor of their name hides, and returns
+// the lowest.
+@(private)
+lows_again :: proc(lows: ^[dynamic]u64, p: ^Parser) -> u64 {
+	lowest := max(u64)
+	for &low, k in lows {
+		if low != max(u64) {
+			low = anchor_low(p, p.anchors[k])
+			lowest = min(lowest, low)
+		}
+	}
+	return lowest
+}
+
+// Moves each offset the walk holds whose bytes, from the offset for its length, lie in one of `moves`, sorted by `lo`:
+// its anchors' names, the tokens of its log, its held and staged tokens, its tag and its last token's end.
+@(private)
+far_move :: proc(p: ^Parser, queue: []core.Token, moves: []Move) {
+	for &a in p.anchors {
+		a.name_lo = moved(moves, a.name_lo, a.name_n)
+		a.lo = a.name_lo + u64(a.name_n)
+	}
+	far_move_tokens(p.log[:], moves)
+	far_move_tokens(queue, moves)
+	far_move_tokens(p.stage[:], moves)
+	p.tag.lo = moved(moves, p.tag.lo, p.tag.n)
+	p.last_end = moved(moves, p.last_end, 0)
+}
+
+// Moves the offsets of the member's tokens and the token held ahead of it as `far_move` does.
+@(private)
+member_far_move :: proc(w: ^records.Entry_Walk, moves: []Move) {
+	far_move_tokens(w.log[:], moves)
+	if ahead, ok := w.ahead.?; ok {
+		ahead.lo = moved(moves, ahead.lo, ahead.n)
+		w.ahead = ahead
+	}
+}
+
+@(private)
+far_move_tokens :: proc(tokens: []core.Token, moves: []Move) {
+	for &t in tokens {
+		t.lo = moved(moves, t.lo, t.n)
+	}
+}
+
+// Offset `x` of `n` bytes taken by the move of `moves` that holds them, or `x` when none does.
+@(private)
+moved :: #force_inline proc "contextless" (moves: []Move, x: u64, n: u32) -> u64 {
+	lo, hi := 0, len(moves)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if moves[mid].lo <= x {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	if lo > 0 {
+		if m := moves[lo - 1]; x <= m.hi && u64(n) <= m.hi - x {
+			return x - m.lo + m.to
+		}
+	}
+	return x
+}
+
+// Lets go of the copies no offset the walk holds names, the member's log and the token held ahead of it included, and
+// moves the offsets into those it keeps. Run where the cursor holds no saved walk, which a save writes again whole.
+// False when memory ran out.
+@(private)
+copies_compact :: proc(e: ^Entry_Cursor, w: ^records.Entry_Walk, held: ^Held) -> bool {
+	p := &held.parser
+	live := make([]bool, len(e.regions), context.temp_allocator)
+	mark :: proc(e: ^Entry_Cursor, live: []bool, x: u64) {
+		if x < FAR || x - FAR > u64(len(e.copies)) {
+			return
+		}
+		lo, hi := 0, len(e.regions)
+		for lo < hi {
+			mid := (lo + hi) / 2
+			if e.regions[mid].lo <= x - FAR {
+				lo = mid + 1
+			} else {
+				hi = mid
+			}
+		}
+		if lo > 0 {
+			live[lo - 1] = true
+		}
+	}
+	for a in p.anchors {
+		mark(e, live, a.name_lo)
+	}
+	for list in ([?][]core.Token{p.log[:], held.queue[:], p.stage[:], w.log[:]}) {
+		for t in list {
+			mark(e, live, t.lo)
+		}
+	}
+	mark(e, live, p.tag.lo)
+	mark(e, live, p.last_end)
+	if ahead, ok := w.ahead.?; ok {
+		mark(e, live, ahead.lo)
+	}
+	moves := make([dynamic]Move, context.temp_allocator)
+	kept, at := 0, u64(0)
+	for r, i in e.regions {
+		if !live[i] {
+			continue
+		}
+		if _, failed := append(&moves, Move{FAR + r.lo, FAR + r.hi, FAR + at}); failed != nil {
+			return false
+		}
+		copy(e.copies[at:], e.copies[r.lo:r.hi + 1])
+		e.regions[kept] = {at, at + r.hi - r.lo}
+		kept, at = kept + 1, at + r.hi - r.lo + 1
+	}
+	resize(&e.copies, int(at))
+	resize(&e.regions, kept)
+	e.compacted = int(at)
+	far_move(p, held.queue[:], moves[:])
+	member_far_move(w, moves[:])
+	for &low in e.lows {
+		if low >= FAR && low != max(u64) {
+			low = moved(moves[:], low, 0)
+		}
+	}
+	return true
+}
+
 // Forgets what `anchors_seen` took.
 @(private)
 anchors_forget :: proc(e: ^Entry_Cursor) {
@@ -269,14 +504,14 @@ anchors_forget :: proc(e: ^Entry_Cursor) {
 	e.low, e.dirty, e.open, e.hidden = max(u64), false, -1, 0
 }
 
-// Takes `names` again from the anchors `lows` holds and no later anchor hides, as their names now read in `p.src`.
+// Takes `names` again from the anchors `lows` holds and no later anchor hides, as their names now read in `p.src` or
+// the copies.
 @(private)
 anchors_name :: proc(e: ^Entry_Cursor, p: ^Parser) {
 	clear(&e.names)
 	for low, k in e.lows {
 		if low != max(u64) {
-			a := p.anchors[k]
-			e.names[string(p.src[a.name_lo:a.name_lo + u64(a.name_n)])] = k
+			e.names[anchor_name(p, p.anchors[k])] = k
 		}
 	}
 	e.dirty, e.open = true, -1
@@ -407,28 +642,28 @@ held_shift :: proc(held: ^Held, src: []u8, delta: u64) {
 	p.src, p.masks.at = src, NO_BLOCK
 	p.pos -= delta
 	p.ls -= delta
-	p.last_end -= delta
+	p.last_end = window_shift(p.last_end, delta)
 	p.nl.pos -= delta
-	p.tag.lo -= delta
+	p.tag.lo = window_shift(p.tag.lo, delta)
 	if p.fail != 0 {
 		p.fail = ((p.fail >> 16) - delta) << 16 | p.fail & 0xffff
 	}
-	held.stop_at -= delta
+	held.stop_at = window_shift(held.stop_at, delta)
 	for &t in held.queue {
-		t.lo -= delta
+		t.lo = window_shift(t.lo, delta)
 	}
 	for &t in p.stage {
-		t.lo -= delta
+		t.lo = window_shift(t.lo, delta)
 	}
 	for &c in p.pending {
 		c.lo -= delta
 	}
 	for &a in p.anchors {
-		a.name_lo -= delta
-		a.lo -= delta
+		a.name_lo = window_shift(a.name_lo, delta)
+		a.lo = window_shift(a.lo, delta)
 	}
 	for &t in p.log {
-		t.lo -= delta
+		t.lo = window_shift(t.lo, delta)
 	}
 	for &b in p.blocks {
 		b.lead.tag.lo -= delta
@@ -444,12 +679,18 @@ held_shift :: proc(held: ^Held, src: []u8, delta: u64) {
 	}
 	for &k in p.keys.keys {
 		if !k.kept {
-			k.lo -= delta
+			k.lo = window_shift(k.lo, delta)
 		}
 	}
 	for &t in p.merges {
 		t.lo -= delta
 	}
+}
+
+// `x` past a window move of `delta` bytes, an offset into the copies left as it is.
+@(private)
+window_shift :: #force_inline proc "contextless" (x, delta: u64) -> u64 {
+	return x if x >= FAR else x - delta
 }
 
 // A copy of `e` that holds its own walk, anchors and directives, with no saved state, nil and false when memory ran
@@ -470,7 +711,11 @@ entry_cursor_clone :: proc(e: ^Entry_Cursor, allocator: runtime.Allocator) -> (c
 			ok = false
 		} else {
 			ok = held_copy(c.cursor.held, held, 0, 0, e.cursor.allocator) && mirror(&c.lows, e.lows, 0, allocator)
+			c.copies.allocator, c.regions.allocator = allocator, allocator
+			c.compacted = e.compacted
+			ok = ok && mirror(&c.copies, e.copies, 0, allocator) && mirror(&c.regions, e.regions, 0, allocator)
 			if ok {
+				c.cursor.held.parser.far = c.copies[:]
 				anchors_name(c, &c.cursor.held.parser)
 				ok = directives_keep(c, &c.cursor.held.parser)
 			}
@@ -493,6 +738,8 @@ entry_cursor_free :: proc(e: ^Entry_Cursor, allocator: runtime.Allocator) {
 	delete(e.lows)
 	delete(e.back_lows)
 	delete(e.names)
+	delete(e.copies)
+	delete(e.regions)
 	delete(e.directives, e.cursor.allocator)
 	free(e, allocator)
 }

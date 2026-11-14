@@ -58,6 +58,8 @@ Entry_Walk :: struct {
 	logging: bool,
 	short:   bool,
 	log:     [dynamic]core.Token,
+	// The bytes the format's cursor copied out of a stream's window, which a token's offset from `FAR` on names.
+	far:     []u8,
 	// What the format reads once before the container for its members' documents, as XML's DTD, in `Reader.allocator`.
 	prolog:  []u8,
 	// The input offset of the reader's position at the first step, where a walk that finds an earlier member again
@@ -74,6 +76,10 @@ Entry_Walk :: struct {
 	moving:   bool,
 	unpinned: bool,
 }
+
+// The first offset that names a byte of `Entry_Walk.far`, `FAR + i` its byte `i`, past every window offset and below
+// the faults that wrap below the window. A window's move leaves such offsets as they are.
+FAR :: u64(1) << 46
 
 // How many bytes of members past the origin an earlier member may be found again across.
 @(private)
@@ -152,6 +158,9 @@ entry_hook :: proc "contextless" (h: ^Entry_Walk, s: core.Hook_Regs, t: core.Tok
 	}
 	h.hi = max(h.hi, t.lo + u64(t.n))
 	if h.depth == h.inner && t.role != .Tag && t.role != .Anchor && t.role != .Alias {
+		if h.hi >= FAR {
+			h.hi = window_end(h)
+		}
 		h.open, h.mark = false, h.hi
 		if t.kind == .End {
 			h.closed = true
@@ -161,6 +170,18 @@ entry_hook :: proc "contextless" (h: ^Entry_Walk, s: core.Hook_Regs, t: core.Tok
 		return s, .Stop
 	}
 	return s, .Next
+}
+
+// The end of the member's tokens in the window, where a token of a copied node past it lies in the bytes of its alias.
+@(private)
+window_end :: proc "contextless" (h: ^Entry_Walk) -> u64 {
+	hi := h.lo
+	for t in h.log {
+		if t.lo < FAR {
+			hi = max(hi, t.lo + u64(t.n))
+		}
+	}
+	return hi
 }
 
 @(private)
@@ -455,7 +476,7 @@ entries_origin :: proc(it: ^Reader, w: ^Entry_Walk) {
 // the window dropped is no place the walk reads again.
 shifted :: #force_inline proc "contextless" (x, delta, pin: u64) -> u64 {
 	switch {
-	case x < pin:
+	case x < pin, x >= FAR:
 		return x
 	case x < pin + delta:
 		return 0
@@ -492,6 +513,7 @@ member_document :: proc(doc: ^core.Document, allocator: runtime.Allocator) -> (s
 	if sub, failed = subtree(nil, doc, v, allocator); failed != nil {
 		return {}, {kind = .No_Memory}
 	}
+	sub.owns_src, doc.owns_src = doc.owns_src, false
 	return
 }
 
@@ -521,28 +543,39 @@ entry_document :: proc(it: ^Reader, rec: Record, state: []u8, in_order: bool, al
 	if found.short {
 		return {}, {kind = .No_Memory}
 	}
-	keyed := found.log[0].role == .Key
-	open := core.Token{lo = found.log[0].lo, kind = .Object if keyed else .Array}
-	end := core.Token{lo = found.hi, kind = .End}
+	src, tokens, hi := it.src, found.log[:], found.hi
+	owned, moved, lost := far_source(it, found, allocator)
+	defer delete(moved, allocator)
+	if lost != nil {
+		return {}, {kind = .No_Memory}
+	}
+	if owned != nil {
+		src, tokens, hi = owned, moved, u64(len(owned))
+	}
+	keyed := tokens[0].role == .Key
+	open := core.Token{lo = tokens[0].lo, kind = .Object if keyed else .Array}
+	end := core.Token{lo = hi, kind = .End}
 	count: engine.Count
 	counted: core.Hook_Regs
 	counted, _ = engine.builder_hook_count(&count, counted, open)
-	for t in found.log {
+	for t in tokens {
 		counted, _ = engine.builder_hook_count(&count, counted, t)
 	}
 	counted, _ = engine.builder_hook_count(&count, counted, end)
-	b := engine.builder_start(it.src, it.as, false, allocator, count.nodes, count.deepest, count.facts)
+	b := engine.builder_start(src, it.as, false, allocator, count.nodes, count.deepest, count.facts)
 	regs := engine.BUILDER_REGS
 	regs, _ = engine.builder_hook(&b, regs, open)
 	// The feed reads the format's state in the builder's document, which holds none of its own.
 	b.doc.state, b.doc.in_order = state, in_order
-	regs = feed(&b, regs, found.log[:])
+	regs = feed(&b, regs, tokens)
 	b.doc.state = nil
 	regs, _ = engine.builder_hook(&b, regs, end)
 	doc, err = engine.builder_end(&b, regs, nil)
 	if err.kind != .None {
+		delete(owned, allocator)
 		return
 	}
+	doc.owns_src = owned != nil
 	if len(state) > 0 {
 		// A format's tables hold words of up to 8 bytes.
 		kept, failed := runtime.mem_alloc_bytes(len(state), 16, allocator)
@@ -554,6 +587,41 @@ entry_document :: proc(it: ^Reader, rec: Record, state: []u8, in_order: bool, al
 		doc.state = kept
 	}
 	return member_document(&doc, allocator)
+}
+
+// The text a member whose tokens `w.log` holds builds over when some name bytes of `w.far`, and its tokens moved there:
+// the far bytes they read, then the window's from the lowest the others read through `w.hi`. The far bytes come first,
+// as an anchored node comes before the aliases that read it. Nil when no token names a far byte.
+@(private)
+far_source :: proc(it: ^Reader, w: ^Entry_Walk, allocator: runtime.Allocator) -> (src: []u8, tokens: []core.Token, err: runtime.Allocator_Error) {
+	if len(w.far) == 0 {
+		return
+	}
+	far_lo, far_hi, lo, hi := max(u64), u64(0), w.hi, w.hi
+	for t in w.log {
+		if t.lo >= FAR {
+			far_lo, far_hi = min(far_lo, t.lo - FAR), max(far_hi, t.lo - FAR + u64(t.n))
+		} else {
+			lo, hi = min(lo, t.lo), max(hi, t.lo + u64(t.n))
+		}
+	}
+	if far_lo > far_hi {
+		return
+	}
+	n := far_hi - far_lo
+	src = make([]u8, n + hi - lo, allocator) or_return
+	defer if err != nil {
+		delete(src, allocator)
+		src = nil
+	}
+	tokens = make([]core.Token, len(w.log), allocator) or_return
+	copy(src, w.far[far_lo:far_hi])
+	copy(src[n:], it.src[lo:hi])
+	for t, i in w.log {
+		tokens[i] = t
+		tokens[i].lo = t.lo - FAR - far_lo if t.lo >= FAR else t.lo - lo + n
+	}
+	return
 }
 
 // Walks to the member that starts at window offset `at` again, into `again`, which the caller frees: from the reader's

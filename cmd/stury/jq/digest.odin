@@ -7,25 +7,11 @@ import "core:crypto"
 import "core:crypto/hash"
 import "core:crypto/hmac"
 import "core:encoding/base64"
+import "core:encoding/hex"
 import hashing "core:hash"
 import "core:strings"
 import "core:time"
-import "../../../core/spell"
 
-@(private = "file")
-HEX_DIGITS :: "0123456789abcdef"
-
-@(private = "file")
-hex_text :: proc(bytes: []byte) -> string {
-	digits := HEX_DIGITS
-	b := make([]byte, len(bytes) * 2)
-	for c, i in bytes {
-		b[i * 2], b[i * 2 + 1] = digits[c >> 4], digits[c & 15]
-	}
-	return string(b)
-}
-
-@(private = "file")
 must_be_string :: proc(ip: ^Interp, name: string, v: Value) -> (string, Signal) {
 	s, ok := string_of(v)
 	if !ok {
@@ -48,7 +34,7 @@ fn_digest :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (result
 	case:
 		algorithm = .Insecure_MD5
 	}
-	return hex_text(hash.hash_string(algorithm, s, context.temp_allocator)), .Go
+	return string(hex.encode(hash.hash_string(algorithm, s, context.temp_allocator))), .Go
 }
 
 // hmac_sha256(key) and hmac_sha512(key): the HMAC of the input's bytes under the key's, as lowercase hex.
@@ -61,7 +47,7 @@ fn_hmac :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (result: 
 	algorithm := hash.Algorithm.SHA256 if name == "hmac_sha256" else .SHA512
 	tag := make([]byte, hash.DIGEST_SIZES[algorithm], context.temp_allocator)
 	hmac.sum(algorithm, tag, transmute([]byte)s, transmute([]byte)key)
-	return hex_text(tag), .Go
+	return string(hex.encode(tag)), .Go
 }
 
 // crc32: the IEEE CRC-32 of the input's bytes, as a number.
@@ -76,22 +62,15 @@ fn_text_encoding :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> 
 	s := must_be_string(ip, name, v) or_return
 	switch name {
 	case "hex_encode":
-		return hex_text(transmute([]byte)s), .Go
+		return string(hex.encode(transmute([]byte)s)), .Go
 	case "base64url_encode":
 		return base64.encode(transmute([]byte)s, base64.ENC_URL_TABLE, options = {.No_Padding}), .Go
 	case "base64url_decode":
 		return decode_base64(ip, s, BASE64_URL)
 	}
-	if len(s) % 2 != 0 {
+	b, ok := hex.decode(transmute([]byte)s)
+	if !ok {
 		return nil, fail(ip, "string (%s) is not valid hex data", brief(ip, s))
-	}
-	b := make([]byte, len(s) / 2)
-	for i in 0 ..< len(b) {
-		hi, lo := spell.HEX_NIBBLE[s[i * 2]], spell.HEX_NIBBLE[s[i * 2 + 1]]
-		if hi | lo > 15 {
-			return nil, fail(ip, "string (%s) is not valid hex data", brief(ip, s))
-		}
-		b[i] = hi << 4 | lo
 	}
 	return valid_utf8(string(b)), .Go
 }
@@ -111,6 +90,6 @@ fn_uuid :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, S
 	}
 	id[6] = version << 4 | id[6] & 0x0F
 	id[8] = 0x80 | id[8] & 0x3F
-	text := hex_text(id[:])
+	text := string(hex.encode(id[:]))
 	return strings.join({text[0:8], text[8:12], text[12:16], text[16:20], text[20:32]}, "-"), .Go
 }

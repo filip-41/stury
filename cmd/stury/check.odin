@@ -15,27 +15,21 @@ import "message"
 // Each file in turn. Exits 0, 2 after a file that did not open or read, or else 5 after a fault, or else 1 after a schema failure.
 check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	o := &run.opts
-	if len(cli.files) == 0 && is_terminal(os.stdin) && is_terminal(os.stdout) {
-		// As stury with no filter, rather than wait on the keyboard.
-		usage(EXIT_USAGE, true)
-	}
+	files := input_files(cli.files[:])
 	src := input_source(o, cli.json_reading)
 	failures, faults, invalid := 0, 0, 0
 	sc: ^Schema_Check
 	if cli.schema.flag != "" {
 		sc = schema_open(cli.schema, src)
 	}
-	for path in (cli.files[:] if len(cli.files) > 0 else STDIN_ONLY) {
+	for path in files {
 		spent, read := file_bytes(path, "check")
 		if !read {
 			failures += 1
 			continue
 		}
 		data := spent.data
-		runner: ^core.Runner
-		if len(data) >= POOLED_BYTES {
-			runner = run_pool(run)
-		}
+		runner := pool_for(run, data)
 		verdict, why := Verdict.Fault, core.Error(nil)
 		if sc != nil && !(reads_cells(o) && header_fault(file_name(path), data, src.as) != "") {
 			verdict, why = schema_judge(sc, cli.schema, file_name(path), data, src, runner)

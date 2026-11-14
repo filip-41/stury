@@ -13,30 +13,6 @@ package main
 // (usage.odin). With no FILE it reads stdin, and with no FILTER it runs `.` unless stdin and stdout are both a
 // terminal. The exit codes are jq's: 2 for a usage or file error, 3 for a filter that does not compile, 5 for invalid
 // input or an error the filter raises. Under `-e`, 1 when the last output is false or null and 4 when there is none.
-//
-// Where things live in cmd/stury:
-//
-//	options.odin                     the command line
-//	usage.odin                       the help, the version and the usage error
-//	load_values.odin                 JSON texts and files the options name, and the -f program
-//	colors.odin                      jq's output colours and when a run uses them
-//	formats.odin                     the formats --from reads and --to writes
-//	input.odin                       reading files and stdin
-//	stream_fault.odin                --stream for a text that does not parse
-//	route.odin                       the path scan or the interpreter, which answers the filter
-//	explain.odin                     --explain's report of the route and the run
-//	check.odin                       `stury check`, which judges the inputs
-//	fmt.odin                         `stury fmt`, which writes the inputs back in the printer's layout
-//	edit.odin                        `stury edit`, which splices the filter's value into the input's bytes
-//	diff.odin                        `stury diff` over two data files, and the preview of `edit --diff`
-//	diff_schema.odin                 `stury diff` over schemas: two compared, or one against a data file
-//	filter.odin                      the jq interpreter over each input
-//	print.odin                       output as jq prints it, and what it comes to (`Output`)
-//	message/                         the text of every message, built from a format and its values (package `message`)
-//	platform_posix.odin,
-//	platform_windows.odin            the calls into the system, one file per platform
-//	jq/                              the jq interpreter (package `jq`)
-//	regex/                           the Oniguruma-compatible matcher behind `test`, `match` and `sub`
 
 import "core:os"
 import "core:slice"
@@ -82,19 +58,19 @@ main :: proc() {
 	set_colors(&run, cli)
 	run.route.on = run.opts.explain
 	o := &run.opts
-	if cli.editing {
+	if cli.command == .Edit {
 		refuse_edit(o)
 	}
 	refuse_format_clashes(o, &cli)
 	refuse_unowned(&cli)
-	validating := cli.validating
-	switch {
-	case cli.diffing:
+	#partial switch cli.command {
+	case .Diff:
 		if flag := command_refused_option(o, &cli); flag != "" {
 			usage_error("%s has no use with diff: it runs no filter and prints the changes between its inputs", flag)
 		}
 		diff_main(&run, &cli)
-	case validating || cli.formatting || cli.editing || cli.schema_verb:
+	case .Run:
+	case:
 		if flag := command_refused_option(o, &cli); flag != "" {
 			usage_error("%s has no use with %s: %s", flag, command_name(&cli), command_writes(&cli))
 		}
@@ -102,13 +78,13 @@ main :: proc() {
 	if o.follow {
 		refuse_follow(o, &cli)
 	}
-	if validating && cli.schema.filter == nil {
+	if cli.command == .Check && cli.schema.filter == nil {
 		check_main(&run, &cli)
 	}
-	if cli.formatting {
+	if cli.command == .Fmt {
 		fmt_main(&run, &cli)
 	}
-	if cli.schema_verb {
+	if cli.command >= .Schema {
 		schema_main(&run, &cli)
 	}
 	if dirs, given := cli.lib_dirs.?; given {
@@ -142,10 +118,10 @@ main :: proc() {
 	explain_filter(&run)
 	run.home_module = jq.home_module(&run.ip)
 	ready_interpreter(&run)
-	if cli.editing {
+	if cli.command == .Edit {
 		edit_main(&run, &cli)
 	}
-	if validating {
+	if cli.command == .Check {
 		check_filter_main(&run, &cli)
 	}
 	choose_route(&run, text)

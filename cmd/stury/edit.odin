@@ -73,11 +73,7 @@ refuse_edit :: proc(o: ^Opts) {
 
 // `stury edit`, which edits each file in turn and exits.
 edit_main :: proc(run: ^Run, cli: ^Cli) -> ! {
-	files := cli.files[:] if len(cli.files) > 0 else STDIN_ONLY
-	if len(cli.files) == 0 && is_terminal(os.stdin) && is_terminal(os.stdout) {
-		// As fmt, rather than wait on the keyboard.
-		usage(EXIT_USAGE, true)
-	}
+	files := input_files(cli.files[:])
 	if run.opts.in_place {
 		refuse_in_place_inputs(files)
 	}

@@ -4,6 +4,9 @@
 
 ### Command line
 
+- TOML output keeps a comment inside a table or an array that is an element of an array, which was dropped: it stands on
+  a line above the element, since TOML 1.0 has no multi-line inline table.
+
 - A YAML `0x` or `0o` integer past 64 bits reads as its exact digits, and one past 128 bits is compared by them. A YAML
   integer written `-00` reads as `0`, as TOML's does.
 - `-s` over a long CSV or TSV table builds it on the pool's threads, as the library's `records.build` does. `--threads 1`
@@ -499,6 +502,9 @@ The hooks the formats share:
   the members, where it grew to the whole input before the first record. A DTD that declares an entity or an
   attribute list stays at the window's start, as `records.Reader.pin` bytes a move keeps, and `records.shifted` gives
   a window offset after a move.
+- A YAML stream under `.Entries` copies the node of an anchor an alias may still name out of the window, where it kept
+  the window from that node on, so memory follows the members and the anchored nodes. `core.Document.owns_src` marks
+  a document's own text, and `records.FAR` marks a token offset into such copies, as `Entry_Walk.far` holds them.
 - A YAML or XML record under `.Entries` given before the last builds, in memory and while a stream's window holds its
   bytes, where it was `.Bad_Index`. `records.Entry_Op.Clone` copies a format's paused walk.
 - A stream under `.Entries` whose walk cannot copy what it keeps of the window ends its records with `.No_Memory` after

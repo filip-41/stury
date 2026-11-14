@@ -237,13 +237,10 @@ fill_table :: proc() {
 	for m in math2 {
 		put(m.name, {2}, {math2 = m.f, gives = {.Number, .Null}, typed = .Kinds})
 	}
-	put("fma", {3}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
+	put("fma", {3}, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (result: Value, sig: Signal) {
 			xs: [3]f64
 			for a, i in args {
-				n, ok := number_of(a)
-				if !ok {
-					return nil, fail(ip, "%s (%s) number required", type_name(a), brief(ip, a))
-				}
+				n := number_arg(ip, a) or_return
 				xs[i] = n.f
 			}
 			return num(libc.fma(xs[0], xs[1], xs[2])), .Go
@@ -538,10 +535,7 @@ apply_builtin :: #force_no_inline proc(x: ^Args_Sink) -> Signal {
 	case b.gen != nil:
 		return b.gen(x.ip, x.input, x.vals, x.track, x.out)
 	case b.math1 != nil:
-		n, ok := number_of(x.input.v)
-		if !ok {
-			return fail(x.ip, "%s (%s) number required", type_name(x.input.v), brief(x.ip, x.input.v))
-		}
+		n := number_arg(x.ip, x.input.v) or_return
 		return emit_made(x.out, x.input, num(b.math1(n.f)), x.track)
 	case b.math2 != nil:
 		a, aok := number_of(x.vals[0])

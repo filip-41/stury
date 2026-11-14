@@ -31,7 +31,7 @@ Fault_Walk :: struct {
 	line, column: int,
 	seq, rs_follows, reset_each, late: bool,
 	given:        int, // p.events[:given] are given
-	arenas:       [2]virtual.Arena, // what the parser makes, in arenas[gen]; the other takes its state over (`renew`)
+	arenas:       [2]virtual.Arena, // what the parser makes, in arenas[gen], and the other takes its state over (`renew`)
 	gen:          int,
 	held:         uint, // what renew moved: the next renew waits until the arena holds twice as much
 }
@@ -148,7 +148,7 @@ renew :: proc(w: ^Fault_Walk) {
 	virtual.arena_free_all(&w.arenas[old])
 }
 
-// One byte of the text scanned, or once all are, its end; what events either makes go to `w.p.events`.
+// One byte of the text scanned, or once all are, its end. The events either makes go to `w.p.events`.
 @(private = "file")
 step :: proc(w: ^Fault_Walk) {
 	p := &w.p
