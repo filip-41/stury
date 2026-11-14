@@ -1,7 +1,8 @@
 package write
 
 // A value written in any format with a token writer. A node is written by the readers, as a built value is, so its
-// text is spelled new. An object's members are written in order, a repeated key each time. A string with a tag, written on it or its node's, is a `Tagged_Text`.
+// text is spelled new. An object's members are written in order, a repeated key each time. A string with a tag, written
+// on it or its node's, is a `Tagged_Text`.
 
 import "base:runtime"
 import "core:math"

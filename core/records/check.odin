@@ -34,13 +34,13 @@ Check_Job :: struct {
 }
 
 // Checks each record of `src` read from byte `at` under `framing` by `plan`, whose paths and keyword paths start with
-// `outer` when it is given, on the threads of `runner` when it has
-// any, and gives the answer one thread gives. The failures go to `sink` in source order with record indexes counted from
-// the first record, up to its `max_errors`, and with a runner the sink's entries are allocated with the heap, so a sink
-// with an allocator of its own is checked on this thread. The result is the number of records read and the first failure,
-// whose kind is `.None` for none, and the fault the records ended on, whose kind is `.None` for none, which is a `.Walk`
-// or a `.No_Memory` and outranks the failures before it. With no sink the check stops at the first failure. The last result
-// is the index of the record the failure is the first of. `dups` and `repeats` are the read's, see `typed.Repeats`.
+// `outer` when it is given, on the threads of `runner` when it has any, and gives the answer one thread gives. The
+// failures go to `sink` in source order with record indexes counted from the first record, up to its `max_errors`. With
+// a runner the sink's entries are allocated with the heap, so a sink with an allocator of its own is checked on this
+// thread. The results are the number of records read, the first failure, the fault the records ended on, which is a
+// `.Walk` or a `.No_Memory` and outranks the failures before it, and the index of the record the first failure is in.
+// A result's kind is `.None` for none. With no sink the check stops at the first failure. `dups` and `repeats` are the
+// read's, see `typed.Repeats`.
 check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, outer: ^typed.Outer, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0, dups := core.Duplicates.Default, repeats := typed.Repeats.Ignore) -> (records: i64, failure: core.Typed_Refusal, fatal: core.Typed_Refusal, failed: i64) {
 	heap := runtime.heap_allocator()
 	runner := runner

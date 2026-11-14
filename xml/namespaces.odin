@@ -86,7 +86,7 @@ has_colon :: #force_inline proc "contextless" (p: [^]u8, n: int) -> bool #no_bou
 	return false
 }
 
-// Whether the attribute name at `p` declares_ns a namespace: `xmlns`, or `xmlns:` and a prefix.
+// Whether the attribute name at `p` declares a namespace: `xmlns`, or `xmlns:` and a prefix.
 @(private)
 declares_ns :: #force_inline proc "contextless" (p: [^]u8, n: int) -> bool #no_bounds_check {
 	return n >= 5 && p[0] == 'x' && p[1] == 'm' && p[2] == 'l' && p[3] == 'n' && p[4] == 's' && (n == 5 || p[5] == ':')

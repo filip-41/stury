@@ -120,7 +120,7 @@ in_state :: proc(v: Value, st: ^Path_State) -> Item {
 }
 
 // Paths as data: getpath, setpath and delpaths. Values are shared, so a change copies each container on
-// its way down; an `Owned` set names the containers one update already copied, which it may then change
+// its way down. An `Owned` set names the containers one update already copied, which it may then change
 // in place: `.[] |= f` copies its array once, not once per element, and a reduce whose update only
 // writes into its state keeps one set for the whole reduction.
 Owned :: map[rawptr]bool

@@ -148,10 +148,7 @@ build_once :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: r
 	hi, fault := walk(src, 0, .Yaml_1_2, opts, &cf, &counted, filter_hook)
 	fault = document_fault(src, hi, opts, &cf, fault, u64(count.nodes))
 	if f, bad := fault.?; bad {
-		if f.kind == .No_Memory {
-			return {}, {kind = .No_Memory}, false
-		}
-		return {}, {kind = .Walk, at = f.at, inner = f}, false
+		return {}, core.fault_error(f), false
 	}
 	b = engine.builder_start(src, as, refuse_duplicates, allocator, count.nodes, count.deepest, count.facts)
 	if len(b.doc.nodes) == 0 {

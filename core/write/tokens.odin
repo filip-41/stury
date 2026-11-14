@@ -88,6 +88,7 @@ Tokens :: struct {
 	spec:   u8, // the format's spec
 	notes:  bool, // the spec holds comments and the spelling writes them
 	top:    int, // the open levels
+	inline: int, // the output offset just past the text of the last one-line inline comment, 0 after any other write
 	mark:   int, // the output offset where the open record began, or a format's own mark in a nested text
 	first:  bool, // nothing is written yet in the open container or record
 	led:    bool, // a comment has written the comma that the next item owes
@@ -103,7 +104,7 @@ Tokens :: struct {
 // in a flow collection or after a key is laid out for that place. The zero site is a whole text.
 tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}, spell: ^Token_Spelling = nil, site := core.Site{}) -> core.Typed_Error_Kind {
 	// The spill and the levels are not zeroed: a level is read only below `top`.
-	t.opts, t.spell, t.state, t.top, t.mark, t.first, t.keyed, t.done, t.err = opts, nil, nil, 0, 0, true, false, false, .None
+	t.opts, t.spell, t.state, t.top, t.mark, t.inline, t.first, t.keyed, t.done, t.err = opts, nil, nil, 0, 0, 0, true, false, false, .None
 	t.spec, t.led, t.site = as.spec, false, site
 	services := core.services_of(as)
 	t.words = services.words if services != nil else {}
@@ -213,7 +214,19 @@ comment :: proc(t: ^Tokens, text: string, role := core.Role.Comment) -> core.Typ
 		put_line(t.out, t.opts, t.top)
 	}
 	refuse(t, t.spell.comment(t, role, text))
+	t.inline = 0
+	if role == .Comment_Inline && strings.index_byte(text, '\n') < 0 {
+		ended := t.out.cursor > 0 && t.out.buf[t.out.cursor - 1] == '\n'
+		t.inline = t.out.flushed + t.out.cursor - (1 if ended else 0)
+	}
 	return refuse(t, t.out.err)
+}
+
+// The bytes written since the last inline comment's text, and whether that comment is in the buffer with at most its
+// line end after it, so that a next inline comment on the item joins it.
+inline_tail :: proc(t: ^Tokens) -> (tail: int, joins: bool) {
+	tail = t.out.flushed + t.out.cursor - t.inline
+	return tail, t.inline > t.out.flushed && tail <= 1
 }
 
 // The value calls write a JSON value, or a cell of a flat format. A string that is not UTF-8 is `.Invalid_Utf8`, and a float
@@ -811,13 +824,11 @@ foot_of :: proc(root: ^core.Value, open: []core.Value) -> ^core.Value {
 	return last_item(open[len(open) - 2])
 }
 
-// Adds comment `text` of `role` to the value at `at`.
 @(private = "file")
 note :: proc(at: ^core.Value, role: core.Role, text: string) {
 	at^ = core.noted(at^, role, add_body(at^, role, text))
 }
 
-// The last item of the open container `up`.
 @(private = "file")
 last_item :: proc(up: core.Value) -> ^core.Value {
 	if o, is_object := up.(^core.Object); is_object {

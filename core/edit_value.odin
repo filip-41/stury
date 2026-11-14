@@ -3,7 +3,6 @@ package core
 import "base:runtime"
 import "core:bytes"
 import "core:slice"
-import "core:strings"
 
 // The edits that take a value. The format spells it, with `Edit_Services.spell`, under the list's `write` options and
 // the layout the container it goes in shows, and the text is recorded as it is: a value edit makes no check walk of
@@ -122,39 +121,8 @@ keep_value :: proc(list: ^Edit_List, v: Value) -> bool {
 		list.kept = arena
 	}
 	context.allocator = runtime.arena_allocator(list.kept)
-	list.edits[len(list.edits) - 1].value = kept_copy(list.doc, plain(v))
+	list.edits[len(list.edits) - 1].value = kept_value(v, list.doc)
 	return true
-}
-
-@(private = "file")
-kept_copy :: proc(doc: ^Document, v: Value) -> Value {
-	switch x in v {
-	case nil, bool, f64:
-		return x
-	case string:
-		return strings.clone(x)
-	case Number_View:
-		return view_copy(x)
-	case ^Array:
-		a := new_array(len(x.items))
-		for item in x.items {
-			append(&a.items, kept_copy(doc, plain(item)))
-		}
-		return a
-	case ^Object:
-		o := new_object()
-		for k, i in x.keys {
-			object_append(o, strings.clone(k), kept_copy(doc, plain(x.vals[i])))
-		}
-		return o
-	case Node_Ref:
-		return x if x.doc == doc else built_value(x)
-	case Trail:
-		return kept_copy(doc, trail_array(x))
-	case ^Commented:
-		return kept_copy(doc, x.v)
-	}
-	return nil
 }
 
 // The text an insert of `v` into `container` writes, which is the source bytes of a node of the list's document when `v`

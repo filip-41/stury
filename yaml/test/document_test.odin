@@ -60,6 +60,22 @@ number_forms_read_their_value :: proc(t: ^testing.T) {
 }
 
 @(test)
+number_forms_read_their_digits :: proc(t: ^testing.T) {
+	doc, _ := build("a: +3\nb: .5\nc: 5.\nd: 007\ne: -00\nf: -0\ng: 0x1F\nh: 0o17\ni: 0x1000000000000000000000000000000000000000\n")
+	defer core.destroy(&doc)
+	want := [?]struct {
+		key:    string,
+		digits: string,
+	}{{"a", "3"}, {"b", "0.5"}, {"c", "5.0"}, {"d", "7"}, {"e", "0"}, {"f", "-0"}, {"g", "31"}, {"h", "15"}, {"i", "91343852333181432387730302044767688728495783936"}}
+	for w in want {
+		i, _ := core.member(&doc, core.ROOT, w.key)
+		buf: [64]u8
+		got, ok := core.doc_number_text(&doc, i, buf[:])
+		testing.expectf(t, ok && got == w.digits, "%s is %q, got %q", w.key, w.digits, got)
+	}
+}
+
+@(test)
 tags_force_or_spare_the_type :: proc(t: ^testing.T) {
 	doc, _ := build("a: !!str 12\nb: !!int \"12\"\nc: !!float 3\nd: !local 5\ne: !!null null\nf: !<tag:yaml.org,2002:bool> 'true'\n")
 	defer core.destroy(&doc)

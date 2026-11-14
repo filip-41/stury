@@ -571,7 +571,7 @@ a_cell_is_a_string_unless_read_as_a_number :: proc(t: ^testing.T) {
 	testing.expect(t, core.compare(cell, core.Value("1e-400"), eq = true) == 0)
 }
 
-// A hex integer of up to 128 bits equals, orders and hashes as the decimal that spells it, and one past 128 bits is its double.
+// A hex integer of up to 128 bits equals, orders and hashes as the decimal that spells it, and so does one past 128 bits.
 @(test)
 hex_integers_are_their_decimals :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -618,8 +618,8 @@ hex_integers_are_their_decimals :: proc(t: ^testing.T) {
 	big, berr := core.build(transmute([]u8)string("[0x100000000000000000000000000000000, 340282366920938463463374607431768211456, 3.402823669209385e38]"), json.as(.Json5))
 	defer core.destroy(&big)
 	walktest.expect_nil(t, berr)
-	testing.expect(t, core.equal(at(&big, 0), at(&big, 2)) && core.hash(at(&big, 0)) == core.hash(at(&big, 2)))
-	testing.expect(t, !core.equal(at(&big, 0), at(&big, 1)))
+	testing.expect(t, core.equal(at(&big, 0), at(&big, 1)) && core.hash(at(&big, 0)) == core.hash(at(&big, 1)))
+	testing.expect(t, !core.equal(at(&big, 0), at(&big, 2)))
 }
 
 // A decimal a format spells with a sign, a point of its own or underscores, and a hex, octal or binary integer with

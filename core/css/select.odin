@@ -113,7 +113,10 @@ select_value :: proc(v: core.Value, sel: ^Selector, fold: bool, paths: bool, all
 		append(&m.levels, Level{children = children_of(&m, v), frame = -1})
 	}
 	out := make([dynamic]Match, allocator)
-	for f in next_match(&m) {
+	for f in walk_next(&m, 0, true) {
+		if !match_list(&m, sel.list, f, -1) {
+			continue
+		}
 		path: []core.Value
 		e: runtime.Allocator_Error
 		if paths {
@@ -143,17 +146,6 @@ start :: proc(m: ^Matcher, doc: ^core.Document, from: core.Node_Index) -> i32 {
 		append(&m.levels, Level{children = {pairs = core.doc_pairs(doc, from)}, frame = top, top = len(m.frames)})
 	}
 	return top
-}
-
-// The frame of the next element the selector matches.
-@(private)
-next_match :: proc(m: ^Matcher) -> (i32, bool) {
-	for f in walk_next(m, 0, true) {
-		if match_list(m, m.sel.list, f, -1) {
-			return f, true
-		}
-	}
-	return -1, false
 }
 
 // The steps from frame `base`'s element, -1 for the root, down to frame `f`'s, in `allocator`.
@@ -279,7 +271,6 @@ next_built :: proc(it: ^Children) -> (Frame, bool) {
 	return {}, false
 }
 
-// The value of frame `f`'s element.
 @(private)
 frame_value :: #force_inline proc(m: ^Matcher, f: Frame) -> core.Value {
 	if f.key < BUILT {
@@ -301,7 +292,6 @@ frame_name :: #force_inline proc(m: ^Matcher, f: Frame, buf: []u8) -> string {
 	return token_string(m.doc, m.doc.nodes[f.key], buf)
 }
 
-// The elements of frame `f`'s element.
 @(private)
 frame_children :: #force_inline proc(m: ^Matcher, f: Frame) -> Children {
 	if f.key < BUILT {

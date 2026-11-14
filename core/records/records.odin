@@ -242,8 +242,8 @@ docs_of :: proc(as: core.As) -> ^Record_Docs {
 
 // Opens the records of `src` in format `as` under `framing`, from byte `at` of `src`, with every offset from `src[0]`.
 // The reader's own memory comes from `allocator`. A UTF-8 byte order mark at the input's first byte is passed over,
-// except in a binary format. A format with no record reader, or one that does not take `framing`, ends the records with the fault `.Bad_Option`
-// before any is read. Under `.Entries`, `entries` names the members to follow from the root, each the value of a
+// except in a binary format. A format with no record reader, or one that does not take `framing`, ends the records
+// with the fault `.Bad_Option` before any is read. Under `.Entries`, `entries` names the members to follow from the root, each the value of a
 // member of the one before, to the container whose members are the records, and a text with no such container has no
 // records. Without `entries` the root is the container.
 open :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator, entries: []string = nil) -> Reader {

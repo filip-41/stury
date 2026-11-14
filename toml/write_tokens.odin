@@ -93,7 +93,7 @@ TOKENS := write.Token_Spelling {
 		if !write.comment_lines_ok(text) {
 			return .Unwritable
 		}
-		if role == .Comment_Inline && strings.index_byte(text, '\n') < 0 && ends_inline_comment(t.out) {
+		if _, joins := write.inline_tail(t); joins && role == .Comment_Inline && strings.index_byte(text, '\n') < 0 {
 			t.out.cursor -= 1
 			write.put_text(t.out, " " if len(text) > 0 else "")
 			write.put_text(t.out, text)
@@ -108,21 +108,6 @@ TOKENS := write.Token_Spelling {
 		}
 		return .None
 	},
-}
-
-// Whether the text written so far ends with an inline comment. Only a comment ends a line in the calls' text, whose
-// strings are basic, and a line that holds a value before its comment is an inline one.
-@(private)
-ends_inline_comment :: proc(out: ^write.Out) -> bool {
-	written := string(out.buf[:out.cursor])
-	if !strings.has_suffix(written, "\n") {
-		return false
-	}
-	start := strings.last_index_byte(written[:len(written) - 1], '\n')
-	if start < 0 && out.flushed > 0 {
-		return false
-	}
-	return !strings.has_prefix(written[start + 1:], "#")
 }
 
 @(private)

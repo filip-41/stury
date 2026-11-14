@@ -1,74 +1,22 @@
 // The tokens a walk passes and the faults it returns, for small texts.
 package yaml_tests
 
-import "base:runtime"
-import "core:fmt"
 import "core:strings"
 import "core:testing"
 import core "../../core"
 import yaml ".."
-
-@(private)
-Tokens :: struct {
-	text:   []u8,
-	out:    strings.Builder,
-	skip:   string, // the text of the key whose value the hook skips
-	stop:   int, // the number of tokens after which the hook stops, 0 for never
-	tokens: int,
-}
-
-@(private)
-note :: proc "contextless" (r: ^Tokens, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	context = runtime.default_context()
-	text := string(r.text[t.lo:t.lo + u64(t.n)])
-	name: string
-	switch t.role {
-	case .Value:
-		name = fmt.tprint(t.kind)
-	case .Key:
-		name = "Key"
-	case .Comment:
-		name = "Comment"
-	case .Comment_Inline:
-		name = "Inline"
-	case .Comment_Foot:
-		name = "Foot"
-	case .Tag:
-		name = "Tag"
-	case .Anchor:
-		name = "Anchor"
-	case .Alias:
-		name = "Alias"
-	case .Instruction, .Doctype, .Directive, .Attribute:
-		name = fmt.tprint(t.role)
-	case .Partial:
-		name = "Partial"
-	}
-	if text != "" {
-		fmt.sbprintf(&r.out, "%s:%s ", name, text)
-	} else {
-		fmt.sbprintf(&r.out, "%s ", name)
-	}
-	r.tokens += 1
-	if r.stop != 0 && r.tokens >= r.stop {
-		return s, .Stop
-	}
-	if t.role == .Key && text == r.skip {
-		return s, .Skip
-	}
-	return s, .Next
-}
+import walktest "../../walktest"
 
 @(private)
 tokens_of :: proc(text: string, opts := yaml.Options{}, skip := "", stop := 0) -> (tokens: string, hi: u64, fault: Maybe(core.Fault)) {
-	r := Tokens {
+	r := walktest.Token_Log {
 		text = transmute([]u8)text,
 		skip = skip,
 		stop = stop,
 	}
 	strings.builder_init(&r.out, context.temp_allocator)
-	hi, fault = yaml.walk(r.text, 0, .Yaml_1_2, opts, &r, nil, note)
-	return strings.trim_space(strings.to_string(r.out)), hi, fault
+	hi, fault = yaml.walk(r.text, 0, .Yaml_1_2, opts, &r, nil, walktest.log_token)
+	return walktest.log_line(&r), hi, fault
 }
 
 @(test)
@@ -76,7 +24,7 @@ tokens_of_a_block_document :: proc(t: ^testing.T) {
 	got, hi, fault := tokens_of("a: 1\nb:\n  - x\n  - 'y'\n")
 	testing.expect_value(t, fault == nil, true)
 	testing.expect_value(t, hi, 22)
-	testing.expect_value(t, got, "Object Key:a Plain:1 Key:b Array Plain:x String:'y' End End")
+	testing.expect_value(t, got, "Object Key:a Plain:1 Key:b Array Plain:x String*:'y' End End")
 }
 
 @(test)
@@ -98,12 +46,12 @@ properties_come_before_their_node :: proc(t: ^testing.T) {
 @(test)
 documents_are_read_one_at_a_time :: proc(t: ^testing.T) {
 	src := "a: 1\n---\nb: 2\n...\n"
-	r := Tokens{text = transmute([]u8)src}
+	r := walktest.Token_Log{text = transmute([]u8)src}
 	strings.builder_init(&r.out, context.temp_allocator)
-	hi, fault := yaml.walk(r.text, 0, .Yaml_1_2, {}, &r, nil, note)
+	hi, fault := yaml.walk(r.text, 0, .Yaml_1_2, {}, &r, nil, walktest.log_token)
 	testing.expect_value(t, fault == nil, true)
 	testing.expect_value(t, hi, 5)
-	hi, fault = yaml.walk(r.text, hi, .Yaml_1_2, {}, &r, nil, note)
+	hi, fault = yaml.walk(r.text, hi, .Yaml_1_2, {}, &r, nil, walktest.log_token)
 	testing.expect_value(t, fault == nil, true)
 	testing.expect_value(t, hi, u64(len(src)))
 }
@@ -188,7 +136,7 @@ decoded_text_follows_the_quoting :: proc(t: ^testing.T) {
 		src := c[0]
 		tok: core.Token
 		found := false
-		r := Tokens{text = transmute([]u8)src}
+		r := walktest.Token_Log{text = transmute([]u8)src}
 		strings.builder_init(&r.out, context.temp_allocator)
 		Probe :: struct {
 			tok:   ^core.Token,

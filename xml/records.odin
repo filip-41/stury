@@ -192,22 +192,22 @@ held_copy :: proc(to, from: ^core.Held_Tokens, allocator: runtime.Allocator) -> 
 	if _, failed := append(&to.queue, ..from.queue[from.next:]); failed != nil {
 		return false
 	}
-	switch {
-	case from.walk == nil:
+	if from.walk == nil {
 		if to.walk != nil {
 			to.release(to.walk)
 			to.walk = nil
 		}
-	case to.walk == nil:
-		to.release = from.release
-		if to.walk = paused_clone((^Entry_Paused)(from.walk)); to.walk == nil {
+		return true
+	}
+	to.release = from.release
+	if to.walk == nil {
+		// The pause frees itself in its own allocator.
+		context = core.cursor_context((^Entry_Paused)(from.walk).allocator)
+		if to.walk = new(Entry_Paused); to.walk == nil {
 			return false
 		}
-	case:
-		to.release = from.release
-		return paused_copy((^Entry_Paused)(to.walk), (^Entry_Paused)(from.walk))
 	}
-	return true
+	return paused_copy((^Entry_Paused)(to.walk), (^Entry_Paused)(from.walk))
 }
 
 @(private)

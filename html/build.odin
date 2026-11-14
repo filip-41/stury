@@ -26,7 +26,7 @@ build_handle :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator:
 build_spec :: proc(src: []u8, spec: Spec, handle: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	t, fault := build_tree(src, spec, options_of(handle), 0, runtime.default_allocator())
 	if f, bad := fault.?; bad {
-		return {}, document_error(f)
+		return {}, core.fault_error(f)
 	}
 	defer tree_destroy(&t)
 	c: engine.Count
@@ -34,7 +34,7 @@ build_spec :: proc(src: []u8, spec: Spec, handle: core.As, refuse_duplicates: bo
 	defer delete(counter.run)
 	emit_tree(&counter, engine.builder_hook_count)
 	if f, bad := counter.fault.?; bad {
-		return {}, document_error(f)
+		return {}, core.fault_error(f)
 	}
 	b := engine.builder_start(src, handle, refuse_duplicates, allocator, c.nodes, c.deepest, c.facts)
 	kept: Kept
@@ -51,14 +51,6 @@ build_spec :: proc(src: []u8, spec: Spec, handle: core.As, refuse_duplicates: bo
 		return {}, {kind = .No_Memory}
 	}
 	return doc, err
-}
-
-@(private)
-document_error :: proc "contextless" (f: core.Fault) -> core.Document_Error {
-	if f.kind == .No_Memory {
-		return {kind = .No_Memory}
-	}
-	return {kind = .Walk, at = f.at, inner = f}
 }
 
 // Checks that `src` is an HTML text of `spec` with no parse error. Returns the first error the standard's algorithm

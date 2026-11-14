@@ -7,13 +7,13 @@ import engine "../core/build"
 import "../core/records"
 
 // The cursor of `.Entries`, with the walk's state at the save. `back` holds the anchors before `stable` and the log
-// before `logged` as the live walk holds them, which only completes anchors past `stable` and adds to the log, and
-// `back_lows`, `back_hidden` and `back_low` what `lows`, `hidden` and `low` held then.
-// `lows` is the lowest byte a replay of each anchor before `len(lows)` reads, `max(u64)` for one a later anchor of its
-// name hides, `hidden` the count of those, `names` the last of those anchors of each name and `low` the lowest of
-// their lows. `scan` is how far `open_low`, the lowest byte the first unfinished anchor
-// `open` reads, has looked through the log. `directives` holds the `%TAG` directives once their bytes may leave the
-// window, the text `declared_prefix` reads. `short` is set when memory ran out for any of it.
+// before `logged` as the live walk holds them, since the walk only completes anchors past `stable` and appends to the
+// log. `back_lows`, `back_hidden` and `back_low` hold what `lows`, `hidden` and `low` held at the save.
+// `lows` holds the lowest byte a replay of each anchor before `len(lows)` reads, `max(u64)` for an anchor a later one
+// of its name hides. `hidden` counts the hidden anchors, `names` maps each name to its last anchor, and `low` is the
+// lowest of their lows. `open_low` is the lowest byte the first unfinished anchor, `open`, reads, and `scan` how far
+// through the log it has looked. `directives` holds the `%TAG` directives once their bytes may leave the window, the
+// text `declared_prefix` reads. `short` is set when memory ran out for any of it.
 @(private)
 Entry_Cursor :: struct {
 	cursor:     Cursor,

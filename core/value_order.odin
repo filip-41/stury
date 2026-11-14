@@ -2,10 +2,10 @@ package core
 
 // The order, equality and hash of values, in either form. The order is jq's: null < false < true < numbers < strings
 // < arrays < objects, with a binary format's byte strings between the numbers and the strings, in the order of their
-// payloads, arrays member by member, objects by their sorted key sets and then their values in key order.
-// An object's repeated key counts once, with its last value, or its first where `dups` is `.First`. A number literal is the decimal it spells at any size, so
-// `1.0` equals `1`, `100000000000000000001` is above `100000000000000000000`, `1e400` is below `1e401` and `1e-400` is
-// above `0`. A double is its shortest decimal, and an infinity is no decimal: it is above every literal, `-inf` below.
+// payloads, arrays member by member, objects by their sorted key sets and then their values in key order. An object's
+// repeated key counts once, with its last value, or its first where `dups` is `.First`. A number literal is the decimal
+// it spells at any size, so `1.0` equals `1`, `100000000000000000001` is above `100000000000000000000`, `1e400` is below
+// `1e401` and `1e-400` is above `0`. A double is its shortest decimal, and an infinity is no decimal: it is above every literal, `-inf` below.
 // A trail is the array of its keys.
 
 import "base:runtime"
@@ -27,10 +27,10 @@ HEX_ROOM :: 40
 // The double of number `v` and the digits it keeps: a `Number_View`'s or a number node's text, none for a double or a
 // number whose text is no decimal. A decimal a format spells with a sign, a point of its own, leading zeros or
 // underscores (`+1e400`, `.5`, `1_000`) keeps the JSON number it spells, written in `buf` when that holds the text and
-// one byte more, and else its text, or none when the text holds an underscore. A hex, octal or binary integer of at most
-// 128 bits (`0x10`, `0o17`) keeps its decimal digits in `buf` when that holds `HEX_ROOM` bytes, and has none past 128
-// bits or without a `buf`. A number of a format whose span is not its text, which has a `number_text`, keeps the
-// digits that spells when they lie in the source or `buf` holds them, and is its double otherwise.
+// one byte more, and else its text, or none when the text holds an underscore. A hex, octal or binary integer of any
+// size (`0x10`, `0o17`) keeps its decimal digits in `buf` when that holds them, and has none without room. A number of a
+// format whose span is not its text, which has a `number_text`, keeps the digits that spells when they lie in the
+// source or `buf` holds them, and is its double otherwise.
 double_of :: proc(v: Value, buf: []u8 = nil) -> (f: f64, digits: string, ok: bool) {
 	#partial switch x in plain(v) {
 	case f64:
@@ -61,12 +61,8 @@ double_of :: proc(v: Value, buf: []u8 = nil) -> (f: f64, digits: string, ok: boo
 			}
 			return f, "" if strings.index_byte(text, '_') >= 0 else text, true
 		case kind > NUMBER_DECIMAL:
-			if len(buf) >= HEX_ROOM {
-				if decimal, prefixed := prefixed_decimal(text, buf); prefixed {
-					return f, decimal, true
-				}
-			}
-			return f, "", true
+			decimal, _ := prefixed_decimal(text, buf)
+			return f, decimal, true
 		}
 		return f, text, true
 	}
@@ -116,10 +112,10 @@ spelled_double :: proc(doc: ^Document, i: Node_Index, buf: []u8) -> (f: f64, dig
 }
 
 // The decimal digits of the hex, octal or binary integer `text`, `0x`, `0o` or `0b` and digits an underscore may
-// separate, with a sign when it is negative, written at the end of `buf`. `ok` is false for any other text and for an
-// integer of more than 128 bits.
-@(private = "file")
+// separate, with a sign when it is negative and not zero, written at the end of `buf`, which needs about 1.21 bytes per
+// digit and two more. `ok` is false for any other text, when `buf` is too small and when the work words cannot be held.
 prefixed_decimal :: proc(text: string, buf: []u8) -> (digits: string, ok: bool) {
+	WORD :: 1_000_000_000
 	s, neg := text, false
 	if len(s) > 0 && (s[0] == '-' || s[0] == '+') {
 		neg, s = s[0] == '-', s[1:]
@@ -127,33 +123,64 @@ prefixed_decimal :: proc(text: string, buf: []u8) -> (digits: string, ok: bool) 
 	if len(s) < 3 || s[0] != '0' {
 		return
 	}
-	base: u128
+	base: u64
 	switch s[1] | 0x20 {
 	case 'x': base = 16
 	case 'o': base = 8
 	case 'b': base = 2
 	case: return
 	}
-	v: u128
+	// Least significant word first, each word nine decimal digits.
+	stack: [16]u32
+	words := stack[:]
+	if len(s) / 7 + 1 > len(stack) {
+		made, err := make([]u32, len(s) / 7 + 1)
+		if err != nil {
+			return
+		}
+		words = made
+	}
+	defer if raw_data(words) != raw_data(stack[:]) {
+		delete(words)
+	}
+	n := 0
 	for c in transmute([]u8)s[2:] {
 		if c == '_' {
 			continue
 		}
-		d := u128(spell.HEX_NIBBLE[c])
-		if d >= base || v > (max(u128) - d) / base {
+		d := u64(spell.HEX_NIBBLE[c])
+		if d >= base {
 			return
 		}
-		v = v * base + d
+		for &w in words[:n] {
+			x := u64(w) * base + d
+			w, d = u32(x % WORD), x / WORD
+		}
+		if d > 0 {
+			words[n] = u32(d)
+			n += 1
+		}
 	}
-	neg = neg && v != 0
 	at := len(buf)
-	for first := true; v > 0 || first; first, v = false, v / 10 {
-		at -= 1
-		buf[at] = u8('0' + v % 10)
+	for k in 0 ..< n {
+		w := words[k]
+		for _ in 0 ..< 9 {
+			if k + 1 == n && w == 0 {
+				break
+			}
+			if at == 0 {
+				return
+			}
+			at -= 1
+			buf[at], w = u8('0' + w % 10), w / 10
+		}
 	}
-	if neg {
+	if n == 0 || neg {
+		if at == 0 {
+			return
+		}
 		at -= 1
-		buf[at] = '-'
+		buf[at] = '0' if n == 0 else '-'
 	}
 	return string(buf[at:]), true
 }
@@ -701,10 +728,9 @@ string_text :: proc(v: Value) -> string {
 	return ""
 }
 
-// A hash of `v` that two equal values share: a number's is its double's when its literal is that double's shortest decimal, and
-// its exact decimal otherwise. With `like`
-// the value `v` is to be equal to, a cell reads as `like`'s kind as `compare` reads it, and a container's members read as
-// the members of `like` at their keys or positions.
+// A hash of `v` that two equal values share: a number's is its double's when its literal is that double's shortest
+// decimal, and its exact decimal otherwise. With `like` the value `v` is to be equal to, a cell reads as `like`'s kind
+// as `compare` reads it, and a container's members read as the members of `like` at their keys or positions.
 hash :: proc(v: Value, seed := u64(0xcbf29ce484222325), like: Value = nil, dups := Duplicates.Last) -> u64 {
 	h := seed
 	k := value_kind(v)

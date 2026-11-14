@@ -95,11 +95,10 @@ commit_spec :: proc(list: ^core.Edit_List, target: core.As, allocator: runtime.A
 		delete(out, allocator)
 		return nil, 0, {kind = .Bad_Result}
 	}
-	// The planned edits are the ones the output holds, a cell removed from every record among them. An output of the
-	// document's spec is read back under its strict options, which judge it as `reads_as_source` does, and only a text
-	// that read refuses is judged by `reads_as_source` and read again under the target's own.
-	// Many edits are read back as they were written: each scalar and key in the bytes the commit put it in, in a walk that
-	// judges the whole output, since the bytes between are the source's.
+	// The output holds the planned edits, a cell removed from every record among them. An output of the document's spec
+	// is read back under the strict options. Only an output that read refuses goes to `reads_as_source`, and then is read
+	// again under the target's options. Past `core.MAX_PATHS` edits each scalar and key is read in the bytes the commit
+	// wrote it to, in one walk that judges the whole output.
 	e := core.Document_Error{kind = .Bad_Result}
 	if spec == doc.as.spec {
 		strict := doc.as

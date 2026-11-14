@@ -79,7 +79,7 @@ Entity :: struct {
 
 // An attribute an attribute-list declaration names. A default's fact spans `src` from the attribute's name through the
 // default's closing quote, as an attribute in a tag spans its name through its value, and `lead` is the fact's lead,
-// the bytes before the default's value, saturated at `LEAD_MAX`. `size` bounds the bytes the default's value decodes
+// the bytes before the default's value, saturated at `ATTRIBUTE_LEAD_MAX`. `size` bounds the bytes the default's value decodes
 // to.
 @(private)
 Attr_Decl :: struct {

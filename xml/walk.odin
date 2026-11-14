@@ -625,7 +625,7 @@ st_attributes :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: 
 			}
 		}
 		value_end := r.q[1:]
-		if x := emit(w, on, &hs, .Plain, .Attribute, at(w, q), intrinsics.ptr_sub(value_end, q), attribute_spelling(intrinsics.ptr_sub(v[1:], q))); x != .Next {
+		if x := emit(w, on, &hs, .Plain, .Attribute, at(w, q), intrinsics.ptr_sub(value_end, q), core.attribute_spelling(intrinsics.ptr_sub(v[1:], q), true)); x != .Next {
 			return refused(w, hs, x, value_end)
 		}
 		q = value_end

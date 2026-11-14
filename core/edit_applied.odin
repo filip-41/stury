@@ -239,11 +239,11 @@ reads_applied :: proc(a: ^Applied, n: Node_Index, got: Value) -> bool {
 	if (k != .Object && k != .Array) || !has(a.dirty, n) {
 		return reads_as(Node_Ref{doc, n}, got)
 	}
-	_, reordered := order_of(a, n)
+	_, reordered := entry_of(a.orders, n)
 	if reordered || (k == .Object && is_markup(doc)) || value_kind(got) != k {
 		return reads_as(applied(a, n), got)
 	}
-	inserts := inserts_of(a, n)
+	inserts := of_node(a.inserts, n)
 	if k == .Array {
 		mine, theirs := doc_children(doc, n), value_children(got)
 		i := 0
@@ -277,8 +277,8 @@ reads_applied :: proc(a: ^Applied, n: Node_Index, got: Value) -> bool {
 		}
 		name, y, more := value_pair_next(&theirs)
 		named := key_equals(doc, key, name)
-		if renamed, is_renamed := renamed_of(a, v); is_renamed {
-			named = name == renamed
+		if renamed, is_renamed := entry_of(a.renames, v); is_renamed {
+			named = name == renamed.key
 		}
 		if !more || !named || !reads_applied(a, v, y) {
 			return reads_as(applied(a, n), got)
@@ -504,27 +504,14 @@ set_of :: proc(a: ^Applied, n: Node_Index) -> Value {
 	return v
 }
 
+// The first entry of `xs`, sorted by node, that node `n` holds.
 @(private = "file")
-inserts_of :: proc(a: ^Applied, n: Node_Index) -> []Applied_Insert {
-	return of_node(a.inserts, n)
-}
-
-@(private = "file")
-renamed_of :: proc(a: ^Applied, n: Node_Index) -> (string, bool) {
-	r := of_node(a.renames, n)
-	if len(r) == 0 {
-		return "", false
+entry_of :: proc(xs: []$T, n: Node_Index) -> (T, bool) {
+	at := first_of(xs, n)
+	if at < len(xs) && xs[at].node == n {
+		return xs[at], true
 	}
-	return r[0].key, true
-}
-
-@(private = "file")
-order_of :: proc(a: ^Applied, n: Node_Index) -> ([]u8, bool) {
-	o := of_node(a.orders, n)
-	if len(o) == 0 {
-		return nil, false
-	}
-	return o[0].order, true
+	return {}, false
 }
 
 // Marks each container from the root down to node `x` dirty, and `x` itself when `itself`, with the member each holds
@@ -642,14 +629,14 @@ applied :: proc(a: ^Applied, n: Node_Index) -> Value {
 		}
 	}
 	members := read[:]
-	if order, reordered := order_of(a, n); reordered {
+	if order, reordered := entry_of(a.orders, n); reordered {
 		members = make([]Member, len(read))
 		for &m, i in members {
-			m = read[endian.unchecked_get_u32le(order[4 * i:])]
+			m = read[endian.unchecked_get_u32le(order.order[4 * i:])]
 		}
 	}
 	b := Applied_Build{object = object, markup = object && is_markup(doc), o = new_object(), arr = new_array(len(members))}
-	inserts := inserts_of(a, n)
+	inserts := of_node(a.inserts, n)
 	for i in 0 ..= len(members) {
 		for p in inserts {
 			if int(p.at) == i {
@@ -660,8 +647,8 @@ applied :: proc(a: ^Applied, n: Node_Index) -> Value {
 			continue
 		}
 		key := members[i].key
-		if renamed, is_renamed := renamed_of(a, members[i].v); is_renamed {
-			key = renamed
+		if renamed, is_renamed := entry_of(a.renames, members[i].v); is_renamed {
+			key = renamed.key
 		}
 		applied_put(&b, key, applied(a, members[i].v))
 	}
@@ -700,7 +687,7 @@ regions_of :: proc(r: ^Regions, n: Node_Index) {
 	if !has(a.dirty, n) || !r.fits {
 		return
 	}
-	if _, reordered := order_of(a, n); reordered {
+	if _, reordered := entry_of(a.orders, n); reordered {
 		region(r, nil, applied(a, n))
 		return
 	}
@@ -708,7 +695,7 @@ regions_of :: proc(r: ^Regions, n: Node_Index) {
 		r.fits = false
 		return
 	}
-	inserts := inserts_of(a, n)
+	inserts := of_node(a.inserts, n)
 	// The members of `n` an edit reaches are the reached nodes within its subtree that no other reached node holds. A
 	// walk in document order enters each reached node at the entry the last one left off at.
 	touched := make([dynamic]Node_Index)
@@ -805,12 +792,12 @@ object_regions :: proc(r: ^Regions, n: Node_Index, touched: []Node_Index, insert
 	start := len(r.out)
 	for v, i in touched {
 		name := names[i]
-		renamed, is_renamed := renamed_of(a, v)
+		renamed, is_renamed := entry_of(a.renames, v)
 		switch {
 		case has(a.gone, v) || is_renamed:
 			region(r, Name(name), nil, true)
 			if is_renamed && !has(a.gone, v) {
-				region(r, Name(renamed), applied(a, v))
+				region(r, Name(renamed.key), applied(a, v))
 			}
 		case:
 			append(&r.steps, Name(name))

@@ -285,45 +285,8 @@ records_validate_on_threads :: proc(t: ^testing.T) {
 }
 
 @(private = "file")
-RECORDS_SLICE :: #config(RECORDS_SLICE, 64 * 1024)
-
-@(private = "file")
-same_tables :: proc(got, want: ^core.Document) -> bool {
-	a, b := core.tables_of(got), core.tables_of(want)
-	if len(a) != len(b) {
-		return false
-	}
-	for x, i in a {
-		y := b[i]
-		if x.node != y.node || x.header != y.header || x.first_row != y.first_row || x.width != y.width || x.unique_keys != y.unique_keys || !slice.equal(x.key_slots, y.key_slots) {
-			return false
-		}
-	}
-	return true
-}
-
-// A whole table built on threads against the same table built on one: the same document, node for node, with the same
-// table and line ends, or the same refusal at the same byte. `joined` says the text is one a build cuts into pieces.
-@(private = "file")
 expect_build_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, spec: dsv.Spec, opts: dsv.Options, refuse, joined: bool) -> bool {
-	text, as := transmute([]u8)src, dsv.as(spec, opts)
-	dups: core.Duplicates = .Refuse if refuse else .Last
-	want, want_err := core.build(text, as, dups)
-	defer core.destroy(&want)
-	for &pool in pools {
-		pieces: int
-		got, err := records.build(text, as, dups, runner = &pool.runner, pieces = &pieces)
-		defer core.destroy(&got)
-		same := walktest.same_error(err, want_err) && slice.equal(got.nodes, want.nodes) && slice.equal(got.counts, want.counts) && got.root_close == want.root_close && got.as == want.as && got.kinds_stored == want.kinds_stored && same_tables(&got, &want)
-		if !testing.expectf(t, same, "%v %v %q at width %d: %v, want %v", spec, opts, src[:min(len(src), 200)], pool.runner.threads + 1, err, want_err) {
-			return false
-		}
-		in_pieces := joined && len(src) >= 4 * RECORDS_SLICE && pool.runner.threads > 0
-		if !testing.expectf(t, !in_pieces || pieces > 0, "%v %v %q at width %d: built on one thread", spec, opts, src[:min(len(src), 200)], pool.runner.threads + 1) {
-			return false
-		}
-	}
-	return true
+	return walktest.expect_build_law(t, pools, src, dsv.as(spec, opts), refuse, joined)
 }
 
 @(test)
@@ -336,7 +299,7 @@ records_build_a_table_on_threads :: proc(t: ^testing.T) {
 	defer for &p in pools {
 		host.pool_destroy(&p)
 	}
-	rows := 4 * RECORDS_SLICE / 6 + 40
+	rows := 4 * walktest.RECORDS_SLICE / 6 + 40
 	Case :: struct {
 		spec:   dsv.Spec,
 		head:   string,

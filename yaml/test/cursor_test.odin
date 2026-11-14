@@ -1,53 +1,27 @@
 // A walk stopped and resumed through a cursor, and the answers iterator, against an unbroken walk and `each_answer`.
 package yaml_tests
 
-import "base:runtime"
 import "core:fmt"
 import "core:slice"
 import "core:testing"
 import core "../../core"
+import walktest "../../walktest"
 import yaml ".."
-
-// A hook that logs every token, skips the value of the key `skip` and stops at every token in `stops`, or at every
-// `every`th one when `every` is not 0. A skipped key is never a stop, so the tokens match those of a walk with no stops.
-@(private)
-Stopping :: struct {
-	src:    []u8,
-	tokens: [dynamic]core.Token,
-	skip:   string,
-	stop:   int,
-	every:  int,
-}
-
-@(private)
-stopping_hook :: proc "contextless" (h: ^Stopping, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	context = runtime.default_context()
-	n := len(h.tokens)
-	append(&h.tokens, t)
-	r := core.Hook_Regs{s.a + 1, s.b, s.c}
-	if t.role == .Key && string(h.src[t.lo:t.lo + u64(t.n)]) == h.skip {
-		return r, .Skip
-	}
-	if h.every != 0 && (n + 1) % h.every == 0 || n + 1 == h.stop {
-		return r, .Stop
-	}
-	return r, .Next
-}
 
 // The tokens, ends and faults of the walks of every document of `src` in turn, with a stop at token `stop` or at every
 // `every`th and a resume after each.
 @(private)
-walk_stream :: proc(src: []u8, opts: yaml.Options, skip: string, stop, every: int) -> (h: Stopping, ends: [dynamic]string) {
-	h = Stopping{src = src, skip = skip, stop = stop, every = every}
+walk_stream :: proc(src: []u8, opts: yaml.Options, skip: string, stop, every: int) -> (h: walktest.Stopping, ends: [dynamic]string) {
+	h = walktest.Stopping{src = src, skip = skip, stop = stop, every = every}
 	h.tokens = make([dynamic]core.Token, 0, 256)
 	ends = make([dynamic]string, context.temp_allocator)
 	regs: core.Hook_Regs
 	cursor: yaml.Cursor
 	lo: u64
 	for {
-		hi, fault := yaml.walk(src, lo, .Yaml_1_2, opts, &h, &regs, stopping_hook, &cursor)
+		hi, fault := yaml.walk(src, lo, .Yaml_1_2, opts, &h, &regs, walktest.stopping_hook, &cursor)
 		for yaml.can_resume(&cursor) {
-			hi, fault = yaml.walk_resume(src, &cursor, .Yaml_1_2, opts, &h, &regs, stopping_hook)
+			hi, fault = yaml.walk_resume(src, &cursor, .Yaml_1_2, opts, &h, &regs, walktest.stopping_hook)
 		}
 		append(&ends, fmt.tprint(hi, fault, regs.a))
 		if fault != nil || hi >= u64(len(src)) || hi <= lo {
@@ -112,19 +86,19 @@ cursor_resumes_after_any_token :: proc(t: ^testing.T) {
 @(test)
 cursor_refuses_another_text :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("a: [1, 2]\n")
-	h := Stopping{src = src, stop = 2}
+	h := walktest.Stopping{src = src, stop = 2}
 	h.tokens = make([dynamic]core.Token, 0, 16)
 	defer delete(h.tokens)
 	cursor: yaml.Cursor
-	_, fault := yaml.walk(src, 0, .Yaml_1_2, {}, &h, nil, stopping_hook, &cursor)
+	_, fault := yaml.walk(src, 0, .Yaml_1_2, {}, &h, nil, walktest.stopping_hook, &cursor)
 	testing.expect(t, fault == nil && yaml.can_resume(&cursor))
 	other := transmute([]u8)string("a: [1, 3]\n")
-	_, fault = yaml.walk_resume(other, &cursor, .Yaml_1_2, {}, &h, nil, stopping_hook)
+	_, fault = yaml.walk_resume(other, &cursor, .Yaml_1_2, {}, &h, nil, walktest.stopping_hook)
 	f, bad := fault.?
 	testing.expect(t, bad && f.kind == .Bad_Option && yaml.can_resume(&cursor))
 	yaml.destroy(&cursor)
 	testing.expect(t, !yaml.can_resume(&cursor))
-	_, fault = yaml.walk_resume(src, &cursor, .Yaml_1_2, {}, &h, nil, stopping_hook)
+	_, fault = yaml.walk_resume(src, &cursor, .Yaml_1_2, {}, &h, nil, walktest.stopping_hook)
 	f, bad = fault.?
 	testing.expect(t, bad && f.kind == .Bad_Option)
 }

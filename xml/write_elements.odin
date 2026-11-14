@@ -7,7 +7,6 @@ package xml
 
 import "base:runtime"
 import "core:io"
-import "core:strings"
 import core "../core"
 import write "../core/write"
 
@@ -164,17 +163,15 @@ el_value :: proc(e: ^Elements, s: string, null := false, open := false) -> core.
 	return .None
 }
 
-// Writes `text` as a comment where the element write stands. A text XML cannot hold in a comment, one with `--` or a
-// last `-`, and a comment inside a start tag are `.Unwritable`.
+// Writes `text` as a comment where the element write stands, as `put_comment` does. A text with `--`, a byte XML cannot
+// hold and a comment inside a start tag are `.Unwritable`.
 @(private)
 el_comment :: proc(e: ^Elements, text: string) -> core.Typed_Error_Kind {
-	if e.tag || e.keyed || strings.contains(text, "--") || strings.has_suffix(text, "-") {
+	if e.tag || e.keyed {
 		return .Unwritable
 	}
-	write.put_text(e.out, "<!-- ")
-	write.put_text(e.out, text)
-	write.put_text(e.out, " -->")
-	return .None
+	written := put_comment(e.out, text, true) or_return
+	return .None if written else .Unwritable
 }
 
 // Writes the start tag's `<` and name of the next element, unless an attribute wrote them. An array counts it as an item.

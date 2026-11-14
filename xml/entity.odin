@@ -466,7 +466,7 @@ st_defaults :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^W
 			return fault(w, hs, tag, .Too_Wide, .Expansion)
 		}
 		if declares_ns(name, int(a.name_n)) {
-			_, value := attribute_parts(t.src, {lo = a.fact_lo, n = a.fact_n, spelling = attribute_spelling(int(a.lead))})
+			_, value := attribute_parts(t.src, {lo = a.fact_lo, n = a.fact_n, spelling = core.attribute_spelling(int(a.lead), true)})
 			rule, no_memory := declare(w, name, int(a.name_n), value, e)
 			if no_memory {
 				return fault(w, hs, tag, .No_Memory)
@@ -476,7 +476,7 @@ st_defaults :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^W
 			}
 		}
 		qualified ||= a.qualified
-		if x := emit(w, on, &hs, .Plain, .Attribute, a.fact_lo, int(a.fact_n), attribute_spelling(int(a.lead))); x != .Next {
+		if x := emit(w, on, &hs, .Plain, .Attribute, a.fact_lo, int(a.fact_n), core.attribute_spelling(int(a.lead), true)); x != .Next {
 			return refused(w, hs, x, p)
 		}
 	}

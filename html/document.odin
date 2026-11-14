@@ -83,12 +83,12 @@ options_of :: #force_inline proc "contextless" (as: core.As) -> Read {
 	}
 }
 
-// HTML's `Readers.text`. A key reads as its form says, and a text value is decoded as the tokenizer read it, piece by
-// piece when the state lists it. `core.text_room` sizes `buf`. A container returns false.
 // The number a markup token reads as, false for one that is not a number. A caller that knows the format calls it without
 // the table.
 token_number :: core.markup_number
 
+// HTML's `Readers.text`. A key reads as its form says, and a text value is decoded as the tokenizer read it, piece by
+// piece when the state lists it. `core.text_room` sizes `buf`. A container returns false.
 token_text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
 	if t.kind > .Plain {
 		return "", false
@@ -208,12 +208,6 @@ fold_name_equal :: proc "contextless" (written: []u8, name: string) -> bool {
 		}
 	}
 	return true
-}
-
-// HTML's `Readers.resolve`, what a `Plain` value is: its decoded text as the document's `infer` reads it.
-@(private)
-spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
-	return core.markup_resolve(doc, i, options_of(doc.as).infer)
 }
 
 // HTML's `Readers.attribute`: the name of attribute fact `f` as a `Key`, its case lowered and, on an SVG or MathML

@@ -14,7 +14,7 @@ import core_pkg "../../../core"
 Sort_Atom :: struct {
 	kind: Kind,
 	s:    string, // a string, or a literal's digits
-	f:    f64, // a number's double; an object's place in `object_members`
+	f:    f64, // a number's double, or an object's place in `object_members`
 	v:    Value,
 }
 

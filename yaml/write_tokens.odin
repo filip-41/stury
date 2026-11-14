@@ -74,8 +74,7 @@ TOKENS := write.Token_Spelling {
 	},
 	layout = layout_step,
 	// A flow text breaks its line where a comment goes. An inline comment on a block collection after a key goes on the
-	// key's line. An inline comment that follows one on the same item joins it, and `t.mark` is where the last inline
-	// comment that is one line ended.
+	// key's line. An inline comment that follows one on the same item joins it.
 	comment = proc(t: ^write.Tokens, role: core.Role, text: string) -> core.Typed_Error_Kind {
 		if !write.comment_lines_ok(text) {
 			return .Unwritable
@@ -84,7 +83,7 @@ TOKENS := write.Token_Spelling {
 		b := (^Block_Writer)(t.state)
 		if b != nil && one_line && block_inline_back(b, text) {
 			// The comment stands before the collection's items, so nothing joins it at the end.
-		} else if tail := t.out.flushed + t.out.cursor - t.mark; one_line && t.mark > t.out.flushed && tail <= 1 {
+		} else if tail, joins := write.inline_tail(t); one_line && joins {
 			t.out.cursor -= tail
 			write.put_text(t.out, " " if len(text) > 0 else "")
 			write.put_text(t.out, text)
@@ -93,11 +92,6 @@ TOKENS := write.Token_Spelling {
 			block_comment(b, role, text)
 		} else {
 			flow_comment(t, role, text)
-		}
-		t.mark = 0
-		if one_line {
-			ended := t.out.cursor > 0 && t.out.buf[t.out.cursor - 1] == '\n'
-			t.mark = t.out.flushed + t.out.cursor - (1 if ended else 0)
 		}
 		return .None
 	},

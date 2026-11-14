@@ -206,8 +206,8 @@ held_free :: proc "contextless" (cursor: ^Cursor, held: ^Held) {
 // The walk's verdict on `src` for `spec`, after one leading BOM: nil for a text that reads, else its fault. It reads the
 // text into a tree on the default heap, as `walk` does, and makes no tokens. It links the walk alone, and `core.validate`
 // with `as(spec, opts)` links every service of the format. The same holds for the other entry points below. A document
-// an entry point builds holds no services, so `query`,
-// `edit_list_init` and `write` of this package serve it where the same names of `core` serve a handle's.
+// an entry point builds holds no services, so `query`, `edit_list_init` and `write` of this package serve it where the
+// same names of `core` serve a handle's.
 validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error {
 	return core.error_of(validate_text(src, S, opts))
 }

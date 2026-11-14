@@ -183,6 +183,33 @@ token_write_writes_elements :: proc(t: ^testing.T) {
 	}
 }
 
+// A token comment is written as a document's comment is: one that ends in `-` is written padded, and one with `--` or a
+// byte XML 1.0 does not hold is refused.
+@(test)
+token_write_writes_comments_by_the_document_rule :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	for c in ([]struct {
+			text: string,
+			want: core.Typed_Error_Kind,
+		}{{"a-", .None}, {"a--b", .Unwritable}, {"a\x01b", .Unwritable}}) {
+		w: write.Tokens
+		xml.tokens_init(&w, .Xml, allocator = context.temp_allocator)
+		write.open_object(&w)
+		write.key(&w, "r")
+		write.open_object(&w)
+		write.comment(&w, c.text)
+		write.key(&w, "a")
+		write.value_int(&w, 1)
+		write.close(&w)
+		write.close(&w)
+		bytes, err := write.tokens_finish(&w)
+		testing.expectf(t, err.kind == c.want, "%q: %v", c.text, err.kind)
+		if c.want == .None {
+			testing.expect_value(t, string(bytes), "<r><!-- a- --><a>1</a></r>")
+		}
+	}
+}
+
 // Every valid document of the W3C suite that the walk reads is written so that it reads back as the document it was
 // written from, and a second write writes the first's text.
 @(test)

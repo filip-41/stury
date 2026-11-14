@@ -36,11 +36,11 @@ Entry_Walk :: struct {
 	// the hook before it resumes, as a walk need not stop on an `End`.
 	closed: bool,
 	ahead:  Maybe(core.Token),
-	// On a stream: the window's `Reader.base` and `Reader.moves` the offsets above count from, and the state saved
-	// reading from `saved` on, before a step at most `SAVE_SPAN` bytes of members back, which comes back
-	// when the window could not tell a step's record. `given` counts the members given since the save and `redo` those
-	// given before the last step, which the walk takes again from the saved state. `whole` is set for a format whose
-	// walk cannot follow a moving window, whose records wait for the input's end.
+	// On a stream: `base` and `moves` are the window's `Reader.base` and `Reader.moves`, which the offsets above count
+	// from. `back` is the state saved before a step at most `SAVE_SPAN` bytes of members back, reading from `saved` on,
+	// which comes back when the window could not tell a step's record. `since` counts the members given since the save
+	// and `redo` those given before the last step, which the walk takes again from the saved state. `whole` is set for a
+	// format whose walk cannot follow a moving window, whose records wait for the input's end.
 	base:   u64,
 	moves:  u64,
 	back:   ^Entry_Walk,
@@ -83,12 +83,12 @@ ORIGIN_SPAN :: CHUNK / 8
 @(private)
 SAVE_SPAN :: 1024
 
-// What `Framing_Services.entry_step` does: walk on, free the cursor, save the cursor's state, bring the saved state
-// back, take `Entry_Walk.delta` off every offset the cursor holds and point it at the reader's window, return the
-// lowest offset of the window the cursor reads again, `max(u64)` for none, which stays past the window's first byte,
-// or a fault that ends the records after the one given, or
-// point `Entry_Walk.cursor` at a copy of the cursor, which the caller keeps. A format whose walk cannot follow a moving
-// window refuses the last five with `.Bad_Option`, and one that makes no copy refuses the last.
+// What `Framing_Services.entry_step` does. `Step` walks on and `Free` frees the cursor. `Save` keeps the cursor's state
+// and `Restore` brings it back. `Rebase` takes `Entry_Walk.delta` off every offset the cursor holds and points it at the
+// reader's window. `Keep` returns the lowest window offset the cursor reads again, `max(u64)` for none, which stays past
+// the window's first byte, or a fault that ends the records after the one given. `Clone` points `Entry_Walk.cursor` at
+// a copy of the cursor, which the caller keeps. A format whose walk cannot follow a moving window refuses the last five
+// with `.Bad_Option`, and one that makes no copy refuses `Clone`.
 Entry_Op :: enum u8 {
 	Step,
 	Free,
@@ -245,15 +245,7 @@ entries_walked :: proc(it: ^Reader) -> (rec: Record, ok: bool) {
 	if stream && !entries_follow(it, w) {
 		return
 	}
-	w.given = false
-	fault: Maybe(core.Fault)
-	if ahead, held := w.ahead.?; held {
-		w.ahead = nil
-		entry_hook(w, {}, ahead)
-	}
-	if !w.given {
-		_, fault = it.services.entry_step(it, w, .Step)
-	}
+	fault := entry_next(it, w)
 	if !w.given {
 		it.fault = fault
 		if !stream || it.last {
@@ -280,6 +272,21 @@ entries_walked :: proc(it: ^Reader) -> (rec: Record, ok: bool) {
 		}
 	}
 	return rec, true
+}
+
+// Walks to the next member, which sets `w.given`: the one an `End` closed, at the token held ahead, or else the
+// format's step. The fault is the step's.
+@(private)
+entry_next :: #force_inline proc(it: ^Reader, w: ^Entry_Walk) -> (fault: Maybe(core.Fault)) {
+	w.given = false
+	if ahead, held := w.ahead.?; held {
+		w.ahead = nil
+		entry_hook(w, {}, ahead)
+	}
+	if !w.given {
+		_, fault = it.services.entry_step(it, w, .Step)
+	}
+	return
 }
 
 // Readies a stream's walk for a step: brings back the state before the last step when the window could not tell its
@@ -315,12 +322,7 @@ entries_follow :: proc(it: ^Reader, w: ^Entry_Walk) -> bool {
 	}
 	moved := it.base != w.base || raw_data(it.src) != raw_data(w.view.src) || len(it.src) != len(w.view.src)
 	if moved {
-		w.delta = it.base - w.base
-		w.lo, w.hi, w.mark = shifted(w.lo, w.delta, it.pin), shifted(w.hi, w.delta, it.pin), shifted(w.mark, w.delta, it.pin)
-		if ahead, held := w.ahead.?; held {
-			ahead.lo = shifted(ahead.lo, w.delta, it.pin)
-			w.ahead = ahead
-		}
+		member_shift(w, it.base - w.base, it.pin)
 		for &t in w.log {
 			if t.lo >= it.pin && t.lo < it.pin + w.delta {
 				clear(&w.log)
@@ -334,12 +336,7 @@ entries_follow :: proc(it: ^Reader, w: ^Entry_Walk) -> bool {
 		}
 		w.kept, w.reads = shifted(w.kept, w.delta, it.pin), shifted(w.reads, w.delta, it.pin)
 		if o := w.origin; o != nil && !w.moving {
-			o.delta = w.delta
-			o.lo, o.hi, o.mark = shifted(o.lo, o.delta, it.pin), shifted(o.hi, o.delta, it.pin), shifted(o.mark, o.delta, it.pin)
-			if ahead, held := o.ahead.?; held {
-				ahead.lo = shifted(ahead.lo, o.delta, it.pin)
-				o.ahead = ahead
-			}
+			member_shift(o, w.delta, it.pin)
 			o.view.src, o.base, o.moves = it.src, it.base, it.moves
 			it.services.entry_step(it, o, .Rebase)
 		}
@@ -375,6 +372,17 @@ entries_follow :: proc(it: ^Reader, w: ^Entry_Walk) -> bool {
 	return true
 }
 
+// Sets `w.delta` and moves the member's offsets and the token held ahead with the window, as `shifted` does.
+@(private)
+member_shift :: proc(w: ^Entry_Walk, delta, pin: u64) {
+	w.delta = delta
+	w.lo, w.hi, w.mark = shifted(w.lo, delta, pin), shifted(w.hi, delta, pin), shifted(w.mark, delta, pin)
+	if ahead, held := w.ahead.?; held {
+		ahead.lo = shifted(ahead.lo, delta, pin)
+		w.ahead = ahead
+	}
+}
+
 // Takes the `n` members given after the saved state again, from it, as `entries_walked` gave them, to the state the
 // last step started from. False when the records end on the reader's fault.
 @(private)
@@ -382,16 +390,7 @@ entries_redo :: proc(it: ^Reader, w: ^Entry_Walk, n: int) -> bool {
 	pos := it.pos
 	it.pos = w.saved
 	for _ in 0 ..< n {
-		w.given = false
-		fault: Maybe(core.Fault)
-		if ahead, held := w.ahead.?; held {
-			w.ahead = nil
-			entry_hook(w, {}, ahead)
-		}
-		if !w.given {
-			_, fault = it.services.entry_step(it, w, .Step)
-		}
-		if !w.given {
+		if fault := entry_next(it, w); !w.given {
 			it.fault, w.done = fault if fault != nil else core.Fault{kind = .Bad_Option}, true
 			return false
 		}
@@ -578,14 +577,7 @@ entry_again :: proc(it: ^Reader, w: ^Entry_Walk, at: u64, again: ^Entry_Walk) ->
 	}
 	again.log = make([dynamic]core.Token, it.allocator)
 	for {
-		again.given = false
-		if ahead, held := again.ahead.?; held {
-			again.ahead = nil
-			entry_hook(again, {}, ahead)
-		}
-		if !again.given {
-			it.services.entry_step(it, again, .Step)
-		}
+		entry_next(it, again)
 		if !again.given || again.lo > at {
 			return {kind = .Bad_Index}
 		}

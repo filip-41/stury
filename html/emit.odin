@@ -301,12 +301,12 @@ content :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Re
 		}
 		end = nodes[end].next
 	}
-	// A comment is the parent's foot when only whitespace follows it before the end tag, and inline when a child
-	// element ended on its line with only whitespace and comments between.
 	if opening && parent != top && end != 0 && !give_open(e, on, parent, end, top) {
 		return 0, true
 	}
 	lead := head_end(e, from, end) if opening && parent == top else max(u32)
+	// A comment is the parent's foot when only whitespace follows it before the end tag, and inline when a child
+	// element ended on its line with only whitespace and comments between.
 	seen := last_text == 0
 	text_seen := false
 	next_line := !prev
@@ -409,8 +409,8 @@ give_open :: #force_inline proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H,
 	return true
 }
 
-// Gives element `n`'s key and attributes, and its value when it has no child element, whose comments are its foot. Returns whether its children
-// are to be read, which they are not for such an element or one the hook skipped.
+// Gives element `n`'s key and attributes, and its value when it has no child element, whose comments are its foot.
+// Returns whether its children are to be read, which they are not for such an element or one the hook skipped.
 @(private)
 element :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), n: u32) -> bool {
 	t := e.t

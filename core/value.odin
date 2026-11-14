@@ -368,7 +368,7 @@ value_number :: #force_inline proc(v: Value) -> (Number, bool) {
 }
 
 // The largest integer every smaller one of which a double holds exactly.
-@(private = "file")
+@(private)
 MAX_EXACT_INT :: 1 << 53
 
 // A path from the root as a value, read as an array of its keys from the root. Its steps are shared with the trails

@@ -127,11 +127,7 @@ builder_finish :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Faul
 	}
 	if f, bad := fault.?; bad {
 		builder_free(b)
-		// A stack the walk could not grow is the allocator's refusal, not the text's.
-		if f.kind == .No_Memory {
-			return {kind = .No_Memory}
-		}
-		return {kind = .Walk, at = f.at, inner = f}
+		return core.fault_error(f)
 	}
 	n := int(regs.a)
 	b.doc.nodes = b.doc.nodes_alloc[:n]

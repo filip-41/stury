@@ -3,7 +3,6 @@ package yaml
 import "core:math"
 import spell "../core/spell"
 import core "../core"
-import write "../core/write"
 
 // What a plain scalar's text is under the YAML core schema.
 @(private)
@@ -125,14 +124,26 @@ tag_parts :: proc "contextless" (tag: string) -> (handle, suffix: string) {
 	return tag[:1], tag[1:]
 }
 
-// The core type the tag of `handle` and `suffix` names, where `prefix` is what a `%TAG` directive made the handle and
-// `declared` says one did. With no directive `!!` is `tag:yaml.org,2002:` and `!` is itself.
+// What tag handle `handle` stands for with no `%TAG` directive: `!!` is `tag:yaml.org,2002:` and any other is itself.
 @(private)
-core_type :: proc "contextless" (handle, suffix, prefix: string, declared: bool) -> Core_Type {
-	head := prefix
-	if !declared {
-		head = CORE_PREFIX if handle == "!!" else handle
+tag_head :: #force_inline proc "contextless" (handle: string) -> string {
+	return CORE_PREFIX if handle == "!!" else handle
+}
+
+// What tag handle `handle` stands for under the `%TAG` directives of `src`'s document.
+@(private)
+declared_head :: proc "contextless" (src: []u8, handle: string) -> string {
+	if handle != "" {
+		if prefix, declared := declared_prefix(src, handle); declared {
+			return prefix
+		}
 	}
+	return tag_head(handle)
+}
+
+// The core type of the tag whose handle stands for `head` and whose suffix is `suffix`.
+@(private)
+core_type :: proc "contextless" (head, suffix: string) -> Core_Type {
 	for name, ct in CORE_TAGS {
 		if ct != .None && is_named(head, suffix, name) {
 			return ct
@@ -156,12 +167,7 @@ tag_meaning :: proc(doc: ^core.Document, i: core.Node_Index, tag: string) -> cor
 	if n.kind != .String && n.kind != .Plain || len(suffix) < 6 {
 		return .Own
 	}
-	head := CORE_PREFIX if handle == "!!" else handle
-	if handle != "" {
-		if prefix, declared := declared_prefix(directive_source(doc), handle); declared {
-			head = prefix
-		}
-	}
+	head := declared_head(directive_source(doc), handle)
 	if is_named(head, suffix, CORE_PREFIX + "binary") {
 		return .Binary
 	}
@@ -236,7 +242,7 @@ tag_fits :: proc(tag: string, v: core.Value) -> (string, bool) {
 	@(static, rodata)
 	kinds := [Core_Type]bit_set[core.Kind]{.None = ~{}, .Str = {.String}, .Int = {.Number}, .Float = {.Number}, .Bool = {.True, .False}, .Null = {.Null}}
 	handle, suffix := tag_parts(tag)
-	return tag, core.value_kind(v) in kinds[core_type(handle, suffix, "", false)]
+	return tag, core.value_kind(v) in kinds[core_type(tag_head(handle), suffix)]
 }
 
 // The prefix the `%TAG` directive of `src`'s document gives `handle`. The directives are the lines starting with `%`
@@ -299,12 +305,7 @@ directive_word :: proc "contextless" (s: string) -> (word, rest: string) {
 @(private)
 doc_core_type :: proc "contextless" (src: []u8, tag: string) -> Core_Type {
 	handle, suffix := tag_parts(tag)
-	prefix: string
-	declared: bool
-	if handle != "" {
-		prefix, declared = declared_prefix(src, handle)
-	}
-	return core_type(handle, suffix, prefix, declared)
+	return core_type(declared_head(src, handle), suffix)
 }
 
 // Whether a scalar of `class` has core type `type`. `integer` says a `Decimal` has no fraction or exponent.
@@ -412,7 +413,7 @@ scalar_value :: proc(text: []u8) -> (class: Class, n: core.Number, integer: bool
 
 // YAML's `Readers.number_text`: the JSON digits of a plain scalar that resolves to a number. A decimal JSON reads
 // returns its text, another decimal form, a hex and an octal integer are written into `buf`, and an infinity and a
-// NaN, which have no digits, return an empty text.
+// NaN, which have no digits, return an empty text. A hex or octal integer is exact at any size.
 @(private)
 number_text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
 	stack: [64]u8 = ---
@@ -421,7 +422,7 @@ number_text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string
 	switch class {
 	case .Decimal:
 		if !strict {
-			return json_decimal(text, buf)
+			return core.json_decimal(text, buf)
 		}
 		if t.spelling & core.SPELLING_DECODE == 0 {
 			return string(v.src[t.lo:t.lo + u64(t.n)]), true
@@ -431,59 +432,12 @@ number_text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string
 		}
 		return string(buf[:copy(buf, text)]), true
 	case .Hex, .Octal:
-		// `write.number_text` writes into a reservation of this many bytes.
-		if len(buf) < 48 {
-			return "", false
-		}
-		size, _ := write.number_text(raw_data(buf), radix_number(transmute([]u8)text[2:], 16 if text[1] == 'x' else 8))
-		return string(buf[:size]), true
+		return core.prefixed_decimal(text, buf)
 	case .Inf, .Nan:
 		return "", true
 	case .Text, .Null, .False, .True:
 	}
 	return "", true
-}
-
-// Decimal `text` as JSON writes it, into `buf`: no `+`, no leading zeros, a digit on each side of a point.
-@(private)
-json_decimal :: proc "contextless" (text: string, buf: []u8) -> (s: string, ok: bool) {
-	if len(buf) < len(text) + 1 {
-		return "", false
-	}
-	out := 0
-	k := 0
-	if text[0] == '+' || text[0] == '-' {
-		if text[0] == '-' {
-			buf[0] = '-'
-			out = 1
-		}
-		k = 1
-	}
-	lead := k
-	for k < len(text) && text[k] >= '0' && text[k] <= '9' {
-		k += 1
-	}
-	whole := text[lead:k]
-	for len(whole) > 1 && whole[0] == '0' {
-		whole = whole[1:]
-	}
-	if len(whole) == 0 {
-		whole = "0"
-	}
-	out += copy(buf[out:], whole)
-	if k < len(text) && text[k] == '.' {
-		k += 1
-		lo := k
-		for k < len(text) && text[k] >= '0' && text[k] <= '9' {
-			k += 1
-		}
-		// A point with no digit after it still makes a float, so it keeps a zero.
-		buf[out] = '.'
-		out += 1
-		out += copy(buf[out:], text[lo:k]) if k > lo else copy(buf[out:], "0")
-	}
-	out += copy(buf[out:], text[k:])
-	return string(buf[:out]), true
 }
 
 @(private)

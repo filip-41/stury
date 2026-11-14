@@ -1207,8 +1207,8 @@ json5	["--from", "json5", "-c", ".unquoted, .hex, .qA"]	"// head\n{\n  unquoted:
 json5	["--from", "json5", "-c", ".[0]==.[1], .[0]<.[2], .[3]==.[4], .[5]>.[6], sort, (unique|length), (group_by(.)|map(length))"]	"[+1e400, 1e400, 1e401, .5e400, 5.e399, +1e-400, 0]"	{}	null	null	null	0	"true\ntrue\ntrue\ntrue\n[0,1e-400,0.5e400,5.0e399,1e400,1e400,1e401]\n5\n[1,1,2,2,1]\n"	""
 # A hex integer of up to 128 bits is compared by its decimal digits, which it prints.
 json5	["--from", "json5", "-c", ".[0]==.[1], .[0]==.[2], (unique|length), (sort|map(.))"]	"[0x20000000000001, 9007199254740993, 9007199254740992]"	{}	null	null	null	0	"true\nfalse\n2\n[9007199254740992,9007199254740993,9007199254740993]\n"	""
-# A hex integer past 128 bits is compared as its double.
-json5	["--from", "json5", "-c", ".[0]==.[1], .[0]==.[2]"]	"[0x100000000000000000000000000000000, 340282366920938463463374607431768211456, 3.402823669209385e38]"	{}	null	null	null	0	"false\ntrue\n"	""
+# A hex integer past 128 bits is compared by its decimal digits too, so it is not the double that rounds it.
+json5	["--from", "json5", "-c", ".[0]==.[1], .[0]==.[2]"]	"[0x100000000000000000000000000000000, 340282366920938463463374607431768211456, 3.402823669209385e38]"	{}	null	null	null	0	"true\nfalse\n"	""
 json5	["--from", "json5", "-c", "."]	"{a: 01}"	{}	null	null	null	5	""	"stury: parse error: <stdin>:1:6: Invalid number\n{a: 01}\n     ^\n"
 json5	["--from", "json5", "-c", "."]	"[1, NaN]"	{}	null	null	null	5	""	"stury: parse error: <stdin>:1:5: Infinity and NaN have no JSON value\n[1, NaN]\n    ^\n"
 json5	["--from", "json5", "-c", "."]	"\u000b\u00a0\u2028\ufeff"	{}	null	null	null	0	""	""

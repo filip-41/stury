@@ -413,14 +413,13 @@ check_tag :: proc(p: ^Parser, t: core.Token) -> (ct: Core_Type, ok: bool) {
 	tag := string(p.src[p.tag.lo:p.tag.lo + u64(p.tag.n)])
 	p.tag.n = 0
 	handle, suffix := tag_parts(tag)
-	prefix: string
-	declared := false
+	head := tag_head(handle)
 	for h in p.handles {
 		if h.handle == handle {
-			prefix, declared = h.prefix, true
+			head = h.prefix
 		}
 	}
-	ct = core_type(handle, suffix, prefix, declared)
+	ct = core_type(head, suffix)
 	if ct == .None || ct == .Str {
 		return ct, true
 	}

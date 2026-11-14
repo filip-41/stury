@@ -68,10 +68,7 @@ build_spec :: proc(src: []u8, spec: Spec, handle: core.As, refuse_duplicates: bo
 	counted: core.Hook_Regs
 	_, fault := walk(src, 0, .Xml, opts, &c, &counted, count_hook)
 	if f, bad := fault.?; bad {
-		if f.kind == .No_Memory {
-			return {}, {kind = .No_Memory}
-		}
-		return {}, {kind = .Walk, at = f.at, inner = f}
+		return {}, core.fault_error(f)
 	}
 	b := engine.builder_start(src, handle, refuse_duplicates, allocator, c.count.nodes, c.count.deepest, c.count.facts)
 	if len(b.doc.nodes) == 0 {

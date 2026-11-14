@@ -232,9 +232,8 @@ put_document :: proc(w: ^Writer, e: ^Elements, node: core.Node_Index) -> core.Ty
 // Writes `value` through the element write, with the facts `lead` before its own and `tail` after them. A node of
 // another document brings the comments before it, its attributes and the comments after it. A value an update put in
 // place of an element brings the attributes and comments it reads, and a comment role written on a value stands for its
-// node's. The comments of the document's object belong to
-// `put_document`, and an array's go to its items, where they read back: the lead ones to the first and the rest to the
-// last.
+// node's. The comments of the document's object belong to `put_document`, and an array's go to its items, where they
+// read back: the lead ones to the first and the rest to the last.
 @(private)
 put_value :: proc(w: ^Writer, e: ^Elements, value: core.Value, lead: []core.Fact = nil, tail: []core.Fact = nil) -> core.Typed_Error_Kind {
 	v := core.plain(value)
@@ -275,7 +274,7 @@ put_value :: proc(w: ^Writer, e: ^Elements, value: core.Value, lead: []core.Fact
 		}
 	}
 	for body in brought[.Comment] {
-		_ = put_comment(w, body, true) or_return
+		_ = put_comment(&w.out, body, true) or_return
 		if e.top == 1 {
 			write.put_byte(&w.out, '\n')
 		}
@@ -334,7 +333,7 @@ put_value :: proc(w: ^Writer, e: ^Elements, value: core.Value, lead: []core.Fact
 		}
 		for body in brought[.Comment_Foot] {
 			put_foot(w, kind)
-			_ = put_comment(w, body, true) or_return
+			_ = put_comment(&w.out, body, true) or_return
 		}
 		el_close(e) or_return
 	}
@@ -346,7 +345,7 @@ put_value :: proc(w: ^Writer, e: ^Elements, value: core.Value, lead: []core.Fact
 		}
 	}
 	for body in brought[.Comment_Inline] {
-		_ = put_comment(w, body, true) or_return
+		_ = put_comment(&w.out, body, true) or_return
 		end_inline(w)
 	}
 	return w.out.err
@@ -525,7 +524,7 @@ put_fact :: proc(w: ^Writer, f: core.Fact) -> core.Typed_Error_Kind {
 	if f.kind == .Plain {
 		body, padded = core.comment_text(w.doc, f)
 	}
-	written := put_comment(w, body, padded) or_return
+	written := put_comment(&w.out, body, padded) or_return
 	w.kept += int(written)
 	return .None
 }
@@ -533,15 +532,15 @@ put_fact :: proc(w: ^Writer, f: core.Fact) -> core.Typed_Error_Kind {
 // Writes comment `body`, set apart from its markers by a space when `padded`, unless it holds `--` or, unpadded, ends in
 // `-`, which no XML comment can.
 @(private)
-put_comment :: proc(w: ^Writer, body: string, padded: bool) -> (written: bool, kind: core.Typed_Error_Kind) {
+put_comment :: proc(out: ^write.Out, body: string, padded: bool) -> (written: bool, kind: core.Typed_Error_Kind) {
 	for i in 0 ..< len(body) {
 		if body[i] == '-' && (i + 1 == len(body) && !padded || i + 1 < len(body) && body[i + 1] == '-') {
 			return false, .None
 		}
 	}
-	write.put_text(&w.out, "<!-- " if padded else "<!--")
-	put_escaped_comment(w, body) or_return
-	write.put_text(&w.out, " -->" if padded else "-->")
+	write.put_text(out, "<!-- " if padded else "<!--")
+	put_escaped_comment(out, body) or_return
+	write.put_text(out, " -->" if padded else "-->")
 	return true, .None
 }
 
@@ -565,7 +564,7 @@ put_doctype :: proc(w: ^Writer, f: core.Fact) {
 
 // Writes a comment's body. XML reads it with no references, so a byte XML 1.0 does not allow is `.Unwritable`.
 @(private)
-put_escaped_comment :: proc(w: ^Writer, body: string) -> core.Typed_Error_Kind {
+put_escaped_comment :: proc(out: ^write.Out, body: string) -> core.Typed_Error_Kind {
 	for i := 0; i < len(body); {
 		c := body[i]
 		if c < 0x20 && c != '\t' && c != '\n' && c != '\r' {
@@ -584,7 +583,7 @@ put_escaped_comment :: proc(w: ^Writer, body: string) -> core.Typed_Error_Kind {
 		}
 		i += size
 	}
-	write.put_text(&w.out, body)
+	write.put_text(out, body)
 	return .None
 }
 

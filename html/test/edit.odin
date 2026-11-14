@@ -3,18 +3,15 @@
 // tree construction made, and a result whose tree is not the edited tree.
 package html_tests
 
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
 import compose "../../core/compose"
 import typed "../../core/typed"
 import write "../../core/write"
-import json "../../json"
 import html ".."
 import walktest "../../walktest"
-
-@(private = "file")
-Edits :: proc(list: ^core.Edit_List, doc: ^core.Document) -> core.Error
 
 // The node at `path` of `doc`, each step the first member of its name.
 @(private = "file")
@@ -26,39 +23,10 @@ at :: proc(doc: ^core.Document, path: ..string) -> core.Node_Index {
 	return node
 }
 
-// The `k`-th member of element `parent` named `name`, or `core.NO_NODE`.
-@(private = "file")
-nth :: proc(doc: ^core.Document, parent: core.Node_Index, name: string, k: int) -> core.Node_Index {
-	it := core.members_named(doc, parent, name)
-	for i := 0; ; i += 1 {
-		node, ok := core.member_next(&it)
-		if !ok || i == k {
-			return node if ok else core.NO_NODE
-		}
-	}
-}
-
 // The text `src` read as `spec` becomes when `edits` records its edits and the list is committed.
 @(private = "file")
-edited :: proc(src: string, edits: Edits, spec := html.Spec.Fragment) -> (out: string, err: core.Error) {
-	doc, berr := core.build(transmute([]u8)src, html.as(spec), allocator = context.temp_allocator)
-	if berr != nil {
-		return "", berr
-	}
-	list := core.edit_list_init(&doc, context.temp_allocator)
-	if e := edits(&list, &doc); e != nil {
-		return "", e
-	}
-	bytes, _, cerr := compose.commit(&list, allocator = context.temp_allocator)
-	return string(bytes), cerr
-}
-
-// The value of the JSON text `src`, which the test's temp allocator holds.
-@(private = "file")
-from_json :: proc(src: string) -> core.Value {
-	doc := new(core.Document, context.temp_allocator)
-	doc^, _ = json.build(transmute([]u8)src, .Json, allocator = context.temp_allocator)
-	return core.Node_Ref{doc, core.ROOT}
+edited :: proc(src: string, edits: walktest.Edits, spec := html.Spec.Fragment) -> (string, core.Error) {
+	return walktest.markup_edited(src, html.as(spec), edits)
 }
 
 // Whether `err` is a refusal of the edit rules for `detail`.
@@ -96,7 +64,7 @@ set_escapes_a_string_and_writes_an_object_as_elements :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "<div id=a>\n  <p class=x>a&lt;b &amp; c</p>\n  <br>\n  <script>run()</script>\n</div>")
 	out, err = edited(SRC, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "div"), from_json(`{"i": 1, "q": null, "#text": "t", "s": [true, "u"], "hr": null}`))
+		return write.set(l, at(d, "div"), walktest.from_json(`{"i": 1, "q": null, "#text": "t", "s": [true, "u"], "hr": null}`))
 	})
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "<div id=a><i>1</i><q></q>t<s>true</s><s>u</s><hr></div>")
@@ -114,19 +82,19 @@ set_escapes_a_string_and_writes_an_object_as_elements :: proc(t: ^testing.T) {
 an_object_reads_back_in_its_element :: proc(t: ^testing.T) {
 	TABLE :: "<table><tr><td>1</td></tr></table>"
 	cases := [?]struct {
-		edits: Edits,
+		edits: walktest.Edits,
 		want:  string,
 	} {
-		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "table"), from_json(`{"tbody": {"tr": {"td": 2}}}`))}, "<table><tbody><tr><td>2</td></tr></tbody></table>"},
-		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "table", "tbody", "tr"), from_json(`{"td": [3, 4]}`))}, "<table><tr><td>3</td><td>4</td></tr></table>"},
-		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.insert(l, at(d, "table", "tbody"), 1, "tr", from_json(`{"td": 5}`))}, "<table><tr><td>1</td></tr><tr><td>5</td></tr></table>"},
+		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "table"), walktest.from_json(`{"tbody": {"tr": {"td": 2}}}`))}, "<table><tbody><tr><td>2</td></tr></tbody></table>"},
+		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "table", "tbody", "tr"), walktest.from_json(`{"td": [3, 4]}`))}, "<table><tr><td>3</td><td>4</td></tr></table>"},
+		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.insert(l, at(d, "table", "tbody"), 1, "tr", walktest.from_json(`{"td": 5}`))}, "<table><tr><td>1</td></tr><tr><td>5</td></tr></table>"},
 	}
 	for c, i in cases {
 		out, err := edited(TABLE, c.edits)
 		testing.expectf(t, err == nil && out == c.want, "case %d: %q %v", i, out, err)
 	}
 	_, err := edited(TABLE, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "table"), from_json(`{"tr": {"td": 2}}`))
+		return write.set(l, at(d, "table"), walktest.from_json(`{"tr": {"td": 2}}`))
 	})
 	expect_no_spelling(t, err)
 }
@@ -134,7 +102,7 @@ an_object_reads_back_in_its_element :: proc(t: ^testing.T) {
 @(test)
 set_writes_an_array_as_elements_of_the_name :: proc(t: ^testing.T) {
 	out, err := edited(SRC, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "div", "p"), from_json(`[1, null, {"i": 2}]`))
+		return write.set(l, at(d, "div", "p"), walktest.from_json(`[1, null, {"i": 2}]`))
 	})
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "<div id=a>\n  <p class=x>1</p>\n  <p></p>\n  <p><i>2</i></p>\n  <br>\n  <script>run()</script>\n</div>")
@@ -149,7 +117,7 @@ set_of_text_writes_the_run :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "<div><a></a>1 &lt; 2<b></b></div>")
 	_, err = edited(src, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "div", "#text"), from_json(`{"c": 1}`))
+		return write.set(l, at(d, "div", "#text"), walktest.from_json(`{"c": 1}`))
 	})
 	expect_frozen(t, err, .Text_Markup)
 }
@@ -417,21 +385,11 @@ an_edit_replaces_bytes_of_its_element_alone :: proc(t: ^testing.T) {
 					continue
 				}
 				name := region[last + 2:len(region) - 1]
-				testing.expectf(t, slice_has(inside[:], name), "%q: setting %s replaced the end tag </%s> after its content in %q", src, key, name, src[p:i])
+				testing.expectf(t, slice.contains(inside[:], name), "%q: setting %s replaced the end tag </%s> after its content in %q", src, key, name, src[p:i])
 			}
 		}
 	}
 	testing.expect(t, edits > 800)
-}
-
-@(private = "file")
-slice_has :: proc(s: []string, x: string) -> bool {
-	for e in s {
-		if e == x {
-			return true
-		}
-	}
-	return false
 }
 
 // Each element of a repeated name and each run of `#text` is a member of its own, which a set, an insert, a removal and
@@ -440,14 +398,14 @@ slice_has :: proc(s: []string, x: string) -> bool {
 edits_reach_each_element_of_a_repeated_name :: proc(t: ^testing.T) {
 	SRC :: "<div>hello <b k=1>bold</b> tail<b>x</b><i>y</i></div>"
 	cases := [?]struct {
-		edits: Edits,
+		edits: walktest.Edits,
 		want:  string,
 	} {
-		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, nth(d, at(d, "div"), "b", 1), "y")}, "<div>hello <b k=1>bold</b> tail<b>y</b><i>y</i></div>"},
-		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, nth(d, at(d, "div"), "#text", 1), " T")}, "<div>hello <b k=1>bold</b> T<b>x</b><i>y</i></div>"},
+		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, walktest.nth(d, at(d, "div"), "b", 1), "y")}, "<div>hello <b k=1>bold</b> tail<b>y</b><i>y</i></div>"},
+		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, walktest.nth(d, at(d, "div"), "#text", 1), " T")}, "<div>hello <b k=1>bold</b> T<b>x</b><i>y</i></div>"},
 		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.insert(l, at(d, "div"), 4, "b", "n")}, "<div>hello <b k=1>bold</b> tail<b>x</b><b>n</b><i>y</i></div>"},
-		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return core.remove(l, nth(d, at(d, "div"), "b", 0))}, "<div>hello  tail<b>x</b><i>y</i></div>"},
-		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, nth(d, at(d, "div"), "b", 1) - 1, "em")}, "<div>hello <b k=1>bold</b> tail<em>x</em><i>y</i></div>"},
+		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return core.remove(l, walktest.nth(d, at(d, "div"), "b", 0))}, "<div>hello  tail<b>x</b><i>y</i></div>"},
+		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, walktest.nth(d, at(d, "div"), "b", 1) - 1, "em")}, "<div>hello <b k=1>bold</b> tail<em>x</em><i>y</i></div>"},
 	}
 	for c in cases {
 		out, err := edited(SRC, c.edits)
@@ -476,7 +434,7 @@ insert_and_remove_lay_out_a_member_as_its_neighbour :: proc(t: ^testing.T) {
 	src := "<ul>\n  <li>1</li>\n  <li>2</li><!-- note -->\n</ul>"
 	out, err := edited(src, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
 		write.insert(l, at(d, "ul"), 0, "li", 0) or_return
-		return write.insert(l, at(d, "ul"), 2, "li", from_json(`{"#text": "t", "b": "e"}`))
+		return write.insert(l, at(d, "ul"), 2, "li", walktest.from_json(`{"#text": "t", "b": "e"}`))
 	})
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "<ul>\n  <li>0</li>\n  <li>1</li>\n  <li>2</li><!-- note -->\n  <li>t<b>e</b></li>\n</ul>")
@@ -513,7 +471,7 @@ attribute_names_keep_their_capitals :: proc(t: ^testing.T) {
 
 @(test)
 attribute_bodies_html_cannot_read_as_written_are_refused :: proc(t: ^testing.T) {
-	cases := [?]Edits {
+	cases := [?]walktest.Edits {
 		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return core.set_fact(l, at(d, "div"), .Attribute, `a=1 b=2`)},
 		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return core.set_fact(l, at(d, "div"), .Attribute, `a="1`)},
 		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return core.set_fact(l, at(d, "div"), .Attribute, `a=1>`)},
@@ -531,7 +489,7 @@ nodes_the_tree_made_are_refused :: proc(t: ^testing.T) {
 	cases := [?]struct {
 		src:   string,
 		spec:  html.Spec,
-		edits: Edits,
+		edits: walktest.Edits,
 	} {
 		{"<p>x", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "html", "body"), 1)}},
 		{"<p>x", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return core.remove(l, at(d, "html", "head"))}},
@@ -562,7 +520,7 @@ edits_around_the_nodes_the_tree_made_keep_them :: proc(t: ^testing.T) {
 	cases := [?]struct {
 		src:   string,
 		spec:  html.Spec,
-		edits: Edits,
+		edits: walktest.Edits,
 		want:  string,
 	} {
 		{"<p>x", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "html", "body", "p"), "y")}, "<p>y"},
@@ -594,7 +552,7 @@ edits_of_the_document_are_read_again :: proc(t: ^testing.T) {
 	cases := [?]struct {
 		src:   string,
 		spec:  html.Spec,
-		edits: Edits,
+		edits: walktest.Edits,
 	} {
 		{"<html><body></body></html>", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.insert(l, core.ROOT, 1, "p", 1)}},
 		{"<p>x", .Fragment, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.insert(l, core.ROOT, 1, "td", 1)}},
@@ -618,7 +576,7 @@ content_an_element_cannot_hold_is_refused :: proc(t: ^testing.T) {
 	})
 	expect_frozen(t, err, .Text_Markup)
 	_, err = edited(SRC, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "div", "p"), from_json(`{"B": 1}`))
+		return write.set(l, at(d, "div", "p"), walktest.from_json(`{"B": 1}`))
 	})
 	expect_no_spelling(t, err)
 	_, err = edited(SRC, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
@@ -631,9 +589,9 @@ content_an_element_cannot_hold_is_refused :: proc(t: ^testing.T) {
 // where the edit put it inside another, or a cell outside a table.
 @(test)
 a_result_that_reads_as_another_tree_is_refused :: proc(t: ^testing.T) {
-	cases := [?]Edits {
+	cases := [?]walktest.Edits {
 		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "div", "p"), typed.Raw("<p>x</p>"))},
-		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "div", "p"), from_json(`{"div": 1}`))},
+		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "div", "p"), walktest.from_json(`{"div": 1}`))},
 		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.insert(l, at(d, "div", "p"), 0, "td", 1)},
 		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "div", "p") - 1, "table")},
 	}

@@ -384,77 +384,28 @@ put_number_as :: proc(out: ^Out, n: core.Number, $T: Tree) -> core.Typed_Error_K
 put_decimal :: proc(out: ^Out, lit: string, spelling: u16) -> core.Typed_Error_Kind {
 	kind := spelling & core.NUMBER_KIND_MASK
 	p := 1 if lit[0] == '+' || lit[0] == '-' else 0
-	base := u64(0)
-	if kind != core.NUMBER_DECIMAL && p + 1 < len(lit) && lit[p] == '0' {
-		switch lit[p + 1] | 0x20 {
-		case 'x': base = 16
-		case 'o': base = 8
-		case 'b': base = 2
-		}
-	}
-	if kind != core.NUMBER_DECIMAL && base == 0 {
+	prefixed := p + 1 < len(lit) && lit[p] == '0' && (lit[p + 1] | 0x20 == 'x' || lit[p + 1] | 0x20 == 'o' || lit[p + 1] | 0x20 == 'b')
+	if kind != core.NUMBER_DECIMAL && !prefixed {
 		return .Non_Finite
 	}
-	if base != 0 {
-		if lit[0] == '-' {
-			put_byte(out, '-')
-		}
-		return .None if put_prefixed_decimal(out, lit[p + 2:], base) else .No_Memory
-	}
+	// Room for either spelling: a prefixed integer's decimal digits take 1.21 bytes a digit and a sign.
 	stack: [128]u8
 	room := stack[:]
-	if len(lit) >= len(stack) {
-		made, err := make([]u8, len(lit) + 1, context.temp_allocator)
+	if len(lit) * 13 / 10 + 3 > len(stack) {
+		made, err := make([]u8, len(lit) * 13 / 10 + 3, context.temp_allocator)
 		if err != nil {
 			return .No_Memory
 		}
 		room = made
 	}
+	if kind != core.NUMBER_DECIMAL {
+		digits, ok := core.prefixed_decimal(lit, room)
+		put_text(out, digits)
+		return .None if ok else .No_Memory
+	}
 	json, _ := core.json_decimal(lit, room)
 	put_text(out, json)
 	return .None
-}
-
-// Writes the digits `digits` of base 16, 8 or 2 as the exact decimal integer they spell, at any length, kept in base
-// 10^9 words with the least significant first. An underscore between digits is skipped. Returns false when the words
-// cannot be held.
-@(private)
-put_prefixed_decimal :: proc(out: ^Out, digits: string, base: u64) -> bool {
-	BASE :: 1_000_000_000
-	words, failed := make([dynamic]u32, 0, len(digits) / 7 + 1)
-	if failed != nil {
-		return false
-	}
-	defer delete(words)
-	for c in transmute([]u8)digits {
-		if c == '_' {
-			continue
-		}
-		carry := u64(spell.HEX_NIBBLE[c])
-		for &w in words {
-			x := u64(w) * base + carry
-			w, carry = u32(x % BASE), x / BASE
-		}
-		if carry > 0 {
-			if _, no_word := append(&words, u32(carry)); no_word != nil {
-				return false
-			}
-		}
-	}
-	if len(words) == 0 {
-		put_byte(out, '0')
-		return true
-	}
-	buf: [spell.INT_ROOM]u8
-	put_text(out, string(buf[:spell.u64_text(&buf[0], u64(words[len(words) - 1]))]))
-	#reverse for w in words[:len(words) - 1] {
-		size := spell.u64_text(&buf[0], u64(w))
-		for _ in size ..< 9 {
-			put_byte(out, '0')
-		}
-		put_text(out, string(buf[:size]))
-	}
-	return true
 }
 
 // Writes a member whose name has no key text in the plan, or a long one, through the string writer, up to the colon's end.

@@ -140,11 +140,9 @@ token_number :: proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) 
 	lo, hi := t.lo, t.lo + u64(t.n)
 	switch number_spelling_of(t.spelling) {
 	case .Plain:
-		n, ok := spell.number_strict(v.src, lo, hi)
-		return signed_zero(n, v.src[lo:hi]), ok
+		return spell.number_strict(v.src, lo, hi)
 	case .Decimal:
-		n, ok := decimal_number(v.src[lo:hi])
-		return signed_zero(n, v.src[lo:hi]), ok
+		return decimal_number(string(v.src[lo:hi]))
 	case .Hex, .Octal, .Binary:
 		return prefixed_number(v.src[lo + 2:hi], t.spelling & core.NUMBER_KIND_MASK), true
 	case .Inf:
@@ -156,42 +154,23 @@ token_number :: proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) 
 	return {}, false
 }
 
-// An integer written `-0` is 0, where JSON's `-0` is a negative zero.
+// The number a decimal spells with a plus sign, underscores or as an integer `-0`: the JSON number `core.json_decimal`
+// writes for it, in which an integer `-0` is 0.
 @(private)
-signed_zero :: proc "contextless" (n: core.Number, text: []u8) -> core.Number {
-	if n.kind != .Float || n.bits != 1 << 63 {
-		return n
-	}
-	for b in text {
-		if b == '.' || b | 0x20 == 'e' {
-			return n
-		}
-	}
-	return {0, .Int}
-}
-
-// The number a decimal spells with a plus sign or underscores: the same digits without them.
-@(private)
-decimal_number :: proc(text: []u8) -> (core.Number, bool) {
+decimal_number :: proc(text: string) -> (core.Number, bool) {
 	stack: [128]u8
 	buf := stack[:]
 	heap: []u8
-	if len(text) > len(stack) {
-		heap = make([]u8, len(text))
+	if len(text) >= len(stack) {
+		heap = make([]u8, len(text) + 1)
 		if heap == nil {
 			return {}, false
 		}
 		buf = heap
 	}
 	defer delete(heap)
-	w := 0
-	for b in text {
-		if b != '_' && !(b == '+' && w == 0) {
-			buf[w] = b
-			w += 1
-		}
-	}
-	return spell.number_strict(buf[:w], 0, u64(w))
+	json, _ := core.json_decimal(text, buf)
+	return spell.number_strict(transmute([]u8)json, 0, u64(len(json)))
 }
 
 // The integer a hex, octal or binary run of digits spells, which the walk has judged to fit 63 bits.
@@ -264,11 +243,7 @@ parse_text :: proc(p: ^Parser, src: []u8, handle: core.As) -> core.Document_Erro
 	}
 	if !parse(p, 0) {
 		_, fault, _ := core.result_of(p.fail, &RULES)
-		f := fault.?
-		if f.kind == .No_Memory {
-			return {kind = .No_Memory}
-		}
-		return {kind = .Walk, at = f.at, inner = f}
+		return core.fault_error(fault.?)
 	}
 	return {}
 }
@@ -413,12 +388,7 @@ spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_K
 		case .Number:
 			switch number_spelling_of(t.spelling) {
 			case .Plain, .Decimal:
-				for b in doc.src[t.lo:t.lo + u64(t.n)] {
-					if b == '.' || b | 0x20 == 'e' {
-						return {text = "float"}, true
-					}
-				}
-				return {text = "integer"}, true
+				return {text = "float" if core.number_shape(t.spelling) >= 32 else "integer"}, true
 			case .Hex:
 				return {text = "hex"}, true
 			case .Octal:

@@ -1422,9 +1422,9 @@ line and column in the stream, without a file's name.
   literal has more digits (`12345678901234567890123456789012345678901 | . == . + 0` is false, where jq says true), and an
   infinity, which is no decimal, is above every literal (`infinite == 1e400` is false, `infinite > 1e400` true).
 - A JSON5 decimal written with a sign or a point of its own, `+1e400` or `.5e400`, is compared by its digits as the JSON
-  spelling is, and so is a TOML decimal with underscores (`1_000 == 1000`). A hex, octal or binary integer of up to
-  128 bits, underscores and all, is compared by the decimal digits it prints (`0x20000000000001` equals
-  `9007199254740993`, `0xdead_beef` equals `3735928559`), and a longer one is compared as its double.
+  spelling is, and so is a TOML decimal with underscores (`1_000 == 1000`). A hex, octal or binary integer of any size,
+  underscores and all, is compared by the decimal digits it prints (`0x20000000000001` equals `9007199254740993`,
+  `0xdead_beef` equals `3735928559`).
 - A CSV or TSV cell is a string in a comparison, as `type` says: `.a == 1e-400` is false for the cell `1e-400`, and
   `[.a, 1e-400] | unique` has two members. The library's `core.compare` and `core.equal` do the same: a cell is a string
   unless the document was read with `infer`, and only `read_plain = true`, which the schema-directed conversion uses, reads it as the number,

@@ -35,13 +35,14 @@ markup_kind :: proc(text: []u8, infer: bool) -> Kind {
 	return kind
 }
 
-// What `Plain` node `i` is, its text decoded through the format's `text` and read by `markup_kind`. A key reads as a
-// string. A decode longer than the stack holds is made in the temp allocator.
-markup_resolve :: proc(doc: ^Document, i: Node_Index, infer: bool) -> Kind {
+// What `Plain` node `i` is, its text decoded through the format's `text` and read by `markup_kind` as the document's
+// `infer` says. A key reads as a string. A decode longer than the stack holds is made in the temp allocator.
+markup_resolve :: proc(doc: ^Document, i: Node_Index) -> Kind {
 	n := doc.nodes[i]
 	if n.role != .Value {
 		return .String
 	}
+	infer := doc.readers.resolves(doc.as)
 	if n.spelling & SPELLING_DECODE == 0 {
 		return markup_kind(node_text(doc.src, n), infer)
 	}

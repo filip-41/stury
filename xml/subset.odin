@@ -395,7 +395,7 @@ attlist_declaration :: proc "contextless" (d: ^Dtd, rw: ^Walk(core.No_Hooks), p,
 			a.defaulted = true
 			a.fact_lo = u64(intrinsics.ptr_sub(name_at, raw_data(d.src)))
 			a.fact_n = u32(intrinsics.ptr_sub(value_end, name_at))
-			a.lead = u8(min(intrinsics.ptr_sub(q[1:], name_at), LEAD_MAX))
+			a.lead = u8(min(intrinsics.ptr_sub(q[1:], name_at), core.ATTRIBUTE_LEAD_MAX))
 			a.size = expansion_room(&d.view, d.src, name_at[:a.fact_n])
 			if stored && .Stopped not_in d.built.flags {
 				return name_at, {name_at, .Bad_Char, .Entity_Respelled}

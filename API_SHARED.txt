@@ -108,6 +108,7 @@ fact_next :: proc(it: ^Fact_Iter) -> (body: string, ok: bool)
 fact_of_role :: proc "contextless" (role: Role) -> (Fact_Kind, bool)
 facts_node :: proc(v: Value) -> (Node_Ref, bool)
 fault_at :: #force_inline proc "contextless" (pos: u64, kind: Fault_Kind, detail: u8 = 0) -> u64
+fault_error :: proc "contextless" (f: Fault) -> Document_Error
 has_comments :: #force_inline proc "contextless" (s: Comment_Syntax) -> bool
 has_line_end :: #force_inline proc(body: []u8) -> bool
 has_repeated_key :: proc(r: Node_Ref) -> bool
@@ -130,6 +131,7 @@ is_wide :: proc(v: Value) -> bool
 json_decimal :: proc(lit: string, buf: []u8) -> (json: string, ok: bool)
 keep_comments :: #force_inline proc(old, nv: Value) -> Value
 kept_tag :: proc(doc: ^Document, tag: string, nv: Value) -> (string, bool)
+kept_value :: proc(v: Value, keep: ^Document = nil, dups := Duplicates.Default) -> Value
 line_end_len :: proc(src: []u8, pos: u64) -> u64
 locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines = nil) -> (line, col: u64)
 lower_node :: proc(entries: []$E, node: $N) -> int
@@ -138,7 +140,7 @@ markup_fact :: proc(doc: ^Document, i: Node_Index, name: Fact_Kind) -> (Fact_Val
 markup_member :: proc(r: Node_Ref, name: string) -> (v: Value, found: bool)
 markup_members :: proc(r: Node_Ref) -> ^Object
 markup_number_text :: proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool)
-markup_resolve :: proc(doc: ^Document, i: Node_Index, infer: bool) -> Kind
+markup_resolve :: proc(doc: ^Document, i: Node_Index) -> Kind
 move_document_error :: proc(e: ^Document_Error, by: u64)
 move_typed_error :: proc(e: ^Typed_Refusal, by: u64)
 no_hook :: #force_inline proc "contextless" (h: ^No_Hooks, s: Hook_Regs, t: Token) -> (Hook_Regs, Action)
@@ -158,6 +160,7 @@ owns_tables :: #force_inline proc "contextless" (doc: ^Document) -> bool
 parents_of :: proc(list: ^Edit_List) -> []Node_Index
 path_error :: proc(e: Document_Error) -> Path_Error
 plain_kind :: proc (src: []u8, lo, hi: u64, bools, numbers: bool) -> (kind: Kind, integer: bool)
+prefixed_decimal :: proc(text: string, buf: []u8) -> (digits: string, ok: bool)
 reads_as_edited :: proc(list: ^Edit_List, got: Node_Ref) -> (reads, known: bool)
 reads_back_as :: proc(want, got: Value) -> bool
 reads_rows :: proc(list: ^Edit_List, out: []u8, as: As, walk: proc(src: []u8, as: As, r: ^Row_Read) -> Maybe(Fault)) -> (err: Document_Error, known: bool)
@@ -425,6 +428,7 @@ finish :: proc(out: ^Out, refused := core.Typed_Refusal{}) -> (bytes: []u8, err:
 holds_inner_fact :: proc(doc: ^core.Document, node: core.Node_Index) -> bool
 holds_null :: proc(m: ^typed.Meta, kind: typed.Read_Kind, v: uintptr) -> bool
 init :: proc(out: ^Out, spill: ^[ROOM_MAX]u8, allocator := context.allocator, stream := io.Stream{}, hint := 0)
+inline_tail :: proc(t: ^Tokens) -> (tail: int, joins: bool)
 int_text :: proc(p: [^]u8, kind: typed.Read_Kind, v: uintptr) -> int
 marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, $T: Tree, $put, $put_opted: Put, omits: ^typed.Omits) -> ([]u8, core.Typed_Refusal)
 marshal_binary :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, omits: ^typed.Omits, binary: Binary_Options, $T: Tree, $put: Put) -> ([]u8, core.Typed_Refusal)

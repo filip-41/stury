@@ -4,6 +4,8 @@
 
 ### Command line
 
+- A YAML `0x` or `0o` integer past 64 bits reads as its exact digits, and one past 128 bits is compared by them. A YAML
+  integer written `-00` reads as `0`, as TOML's does.
 - `-s` over a long CSV or TSV table builds it on the pool's threads, as the library's `records.build` does. `--threads 1`
   builds it on the calling thread.
 
@@ -480,6 +482,11 @@ The hooks the formats share:
 
 ### Library API
 
+- `core.prefixed_decimal` writes the decimal digits of a hex, octal or binary integer of any size.
+- The XML token writer writes a comment that ends in `-`, as a document's comment is written, and refuses one with a byte
+  XML 1.0 cannot hold.
+- `core.kept_value` copies a value so it outlives the document it came from, keeping a node of a document it is given as a
+  reference.
 - `records.build` of a long CSV or TSV table with a `runner` builds its rows in pieces on the runner's threads and
   joins them into the document a build on one thread gives. `Record_Docs.joined` completes a format's joined document.
 - `core.equal`, `core.compare` and the writers read a TOML number with underscores, or a JSON5 or TOML number with a

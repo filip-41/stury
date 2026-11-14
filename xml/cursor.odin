@@ -140,21 +140,6 @@ walk_holding :: proc "contextless" (src: []u8, lo: u64, opts: Options, h: ^$H, r
 	return core.holding_end(src, cursor, &s, r, hi, fault, &RULES)
 }
 
-// A copy of the walk `from` holds, which shares none of its memory, nil when memory runs out.
-@(private)
-paused_clone :: proc "contextless" (from: ^Paused($H)) -> ^Paused(H) {
-	context = core.cursor_context(from.allocator)
-	to := new(Paused(H))
-	if to == nil {
-		return nil
-	}
-	if !paused_copy(to, from) {
-		paused_free(to)
-		return nil
-	}
-	return to
-}
-
 // Makes `to` a copy of the walk `from` holds, which shares none of its memory, in the memory `to` holds where it is
 // large enough. False when memory runs out, with `to` a walk `paused_free` frees.
 @(private)

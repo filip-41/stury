@@ -17,17 +17,6 @@ name_length :: #force_inline proc "contextless" (src: []u8, lo: u64) -> int #no_
 	return int(q - lo)
 }
 
-// The longest lead an attribute fact's `spelling` holds.
-@(private)
-LEAD_MAX :: core.ATTRIBUTE_LEAD_MAX
-
-// The `spelling` of an attribute fact whose value starts `lead` bytes past its name's first byte: the lead through the
-// opening quote and the closing quote as the tail.
-@(private)
-attribute_spelling :: #force_inline proc "contextless" (lead: int) -> u16 {
-	return core.attribute_spelling(lead, true)
-}
-
 // The name and value of attribute fact `f`, as written between its quotes. The fact's lead runs through the opening
 // quote unless it saturated, and then the quote is the nearest byte before the closing one that equals it, since a
 // value holds no quote of its own kind.
@@ -36,7 +25,7 @@ attribute_parts :: proc "contextless" (src: []u8, f: core.Fact) -> (name, value:
 	hi := f.lo + u64(f.n)
 	name = src[f.lo:f.lo + u64(name_length(src, f.lo))]
 	open := f.lo + core.comment_lead(f.spelling)
-	if core.comment_lead(f.spelling) == LEAD_MAX {
+	if core.comment_lead(f.spelling) == core.ATTRIBUTE_LEAD_MAX {
 		open = hi - 1
 		for src[open - 1] != src[hi - 1] {
 			open -= 1

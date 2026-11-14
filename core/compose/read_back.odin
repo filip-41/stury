@@ -37,9 +37,8 @@ reads_back :: proc(list: ^core.Edit_List, out: []u8, target: core.As, judged: Ma
 			return judge(list, out, judged)
 		}
 		if runs, few := region_runs(regions); fits && few {
-			// A scan that reads `out` whole judges it. Past its last answer a read costs about what the validate does,
-			// so a read of many regions passes every byte in place of the validate, and a read of few ends at its last
-			// answer after it.
+			// A scan that reads `out` whole judges it. A read of many regions reads every byte in place of the validate,
+			// and a read of few stops at its last answer, after the validate has judged `out`.
 			if as, judging := judged.?; judging && list.edit.whole_scan {
 				return regions_read_back(regions, runs, out, as, true, scan)
 			} else if judging && read_judges && len(regions) > core.MAX_PATHS {

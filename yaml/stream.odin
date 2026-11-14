@@ -29,8 +29,8 @@ reset_document :: proc(p: ^Parser) {
 }
 
 // Reads the next document of the text from the cursor: its directives, an optional `---`, its node and an optional
-// `...`, giving each directive and marker as a `Directive`. Leaves the cursor at the byte after the document: past the `...` line, or at the next `---`, or at the end.
-// `found` is false when only comments, blank lines and `...` markers remained.
+// `...`, giving each directive and marker as a `Directive`. Leaves the cursor at the byte after the document: past the
+// `...` line, or at the next `---`, or at the end. `found` is false when only comments, blank lines and `...` markers remained.
 @(private)
 read_document :: proc(p: ^Parser) -> (found: bool, ok: bool) {
 	for {

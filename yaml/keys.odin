@@ -298,9 +298,6 @@ key_repeats :: proc(k: ^Key_Table, e: Key, src: []u8, text: string) -> bool {
 	if e.kept {
 		return string(k.kept[e.lo:e.lo + u64(e.n)]) == text
 	}
-	if e.spelling & core.SPELLING_DECODE == 0 {
-		return string(src[e.lo:e.lo + u64(e.n)]) == text
-	}
 	stack: [256]u8 = ---
 	prior, owned := key_decoded(core.Token{e.lo, e.n, .Plain, .Key, e.spelling}, src, stack[:])
 	defer delete(owned)

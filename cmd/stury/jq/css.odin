@@ -24,9 +24,6 @@ gen_css :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink
 		return fail(ip, "css: out of memory")
 	}
 	defer css.destroy(&sel)
-	if r, is_ref := input.v.(Ref); is_ref {
-		return css_nodes(ip, input, r, &sel, track, out)
-	}
 	found, no_memory := css.select_value(input.v, &sel, doc.readers.fold_names, track)
 	if no_memory != nil {
 		return fail(ip, "css: out of memory")
@@ -44,56 +41,6 @@ gen_css :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink
 		}
 	}
 	return .Go
-}
-
-// `css` of node `r`, which no update has touched, over the document's nodes.
-@(private = "file")
-css_nodes :: proc(ip: ^Interp, input: Item, r: Ref, sel: ^css.Selector, track: bool, out: ^Sink) -> Signal {
-	found, no_memory := css.select(r.doc, sel, r.node)
-	if no_memory != nil {
-		return fail(ip, "css: out of memory")
-	}
-	defer delete(found)
-	for v in found {
-		it := Item{v = Ref{r.doc, v}}
-		if track {
-			it.path = path_from(input, input.v) if pathless(input.path) else input.path
-			it.path = element_path(it.path, r, v)
-		}
-		if sig := out.emit(out, it); sig != .Go {
-			return sig
-		}
-	}
-	return .Go
-}
-
-// `p` extended by the steps from object node `r` down to the element whose value is `v`: each element's name, then
-// its index among the elements of that name when its parent has more than one.
-@(private = "file")
-element_path :: proc(p: ^Path_Step, r: Ref, v: core_pkg.Node_Index) -> ^Path_Step {
-	p := p
-	for at := r.node; at != v; {
-		it := core_pkg.doc_pairs(r.doc, at)
-		for k, child in core_pkg.doc_pair_next(&it) {
-			if v < child || int(v) >= int(child) + core_pkg.subtree_size(r.doc, child) {
-				continue
-			}
-			name := core_pkg.node_string(r.doc, k)
-			p = extend(p, name)
-			same := core_pkg.members_named(r.doc, at, name)
-			index, count := 0, 0
-			for node in core_pkg.member_next(&same) {
-				index = count if node == child else index
-				count += 1
-			}
-			if count > 1 {
-				p = extend(p, num(f64(index)))
-			}
-			at = child
-			break
-		}
-	}
-	return p
 }
 
 // The markup document `v` is a node of or was put in place of one of, or that the first node an update of one kept is

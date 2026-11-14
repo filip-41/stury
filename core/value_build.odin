@@ -183,6 +183,38 @@ built_value :: proc(r: Node_Ref, dups := Duplicates.Default, borrow := false) ->
 	}
 }
 
+// A copy of `v` in the context allocator, with its texts, which outlives the document a node of it is in. A node of
+// `keep` stays a reference, another node is built by `dups`, a trail is its array and a comment is dropped.
+kept_value :: proc(v: Value, keep: ^Document = nil, dups := Duplicates.Default) -> Value {
+	switch x in plain(v) {
+	case nil, bool, f64:
+		return x
+	case string:
+		return strings.clone(x)
+	case Number_View:
+		return view_copy(x)
+	case ^Array:
+		a := new_array(len(x.items))
+		for item in x.items {
+			array_append(a, kept_value(item, keep, dups))
+		}
+		return a
+	case ^Object:
+		o := new_object()
+		for k, i in x.keys {
+			object_append(o, strings.clone(k), kept_value(x.vals[i], keep, dups))
+		}
+		return o
+	case Node_Ref:
+		return x if x.doc == keep else built_value(x, dups)
+	case Trail:
+		return kept_value(trail_array(x), keep, dups)
+	case ^Commented:
+		return kept_value(x.v, keep, dups)
+	}
+	return nil
+}
+
 // `v` made the next item of the array `f` fills, or the value of its object's member `f.key` under `dups`, which is
 // `.Default` only for a markup document.
 @(private = "file")
@@ -244,8 +276,8 @@ built_data :: proc(r: Node_Ref, borrow: bool) -> Value {
 		return true
 	case .Number:
 		n, _ := doc_number(r.doc, r.node)
-		if n.kind == .Int && (i64(n.bits) > MAX_EXACT_DOUBLE_INT || i64(n.bits) < -MAX_EXACT_DOUBLE_INT) ||
-		   n.kind == .Uint && n.bits > MAX_EXACT_DOUBLE_INT {
+		if n.kind == .Int && (i64(n.bits) > MAX_EXACT_INT || i64(n.bits) < -MAX_EXACT_INT) ||
+		   n.kind == .Uint && n.bits > MAX_EXACT_INT {
 			digits: [spell.INT_ROOM]u8
 			size := spell.i64_text(&digits[0], i64(n.bits)) if n.kind == .Int else spell.u64_text(&digits[0], n.bits)
 			return number_text(string(digits[:size]))
@@ -295,7 +327,3 @@ spells_digits :: proc(f: f64, digits: string) -> bool {
 	order := spell.decimal_compare(spell.decimal_of(digits), spell.decimal_of(string(buf[:spell.f64_text(&buf[0], f)])))
 	return order == 0
 }
-
-// The largest integer every smaller one of which a double holds exactly.
-@(private = "file")
-MAX_EXACT_DOUBLE_INT :: 1 << 53

@@ -68,7 +68,7 @@ Input_Source :: struct {
 Interp :: struct {
 	err:          Value, // the error being raised, by `fail` or `error`
 	raised:       int, // errors raised so far: tells one raise of `err` from another of the same value
-	brk:          int, // the label id a `.Break` unwinds to; -1 for `halt`
+	brk:          int, // the label id a `.Break` unwinds to, -1 for `halt`
 	labels:       int, // label ids handed out so far (`fresh_label`)
 	literals:     u32, // the marks `tonumber` gave its literals, which tell one from another of the same text
 	globals:      ^Env, // the prelude's functions and the command line's variables

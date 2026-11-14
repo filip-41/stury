@@ -5,6 +5,8 @@ import "core:fmt"
 import "core:strings"
 import "core:testing"
 import core "../core"
+import compose "../core/compose"
+import json "../json"
 
 // The reads the markup formats' tests share over a built document: a node's text, a member reached by names, an
 // element's attributes, and the shape of a whole document as one line, which an XML text and an HTML text with the
@@ -143,7 +145,7 @@ rule_code :: proc(f: core.Fault) -> string {
 	return fmt.tprintf("%s.%s", f.rules.format, core.rule_of(f).code)
 }
 
-// A hook's log of a markup walk's tokens as one line: each token as its kind for a value, `Key`, `Comment`, `Inline`,
+// A hook's log of a walk's tokens as one line: each token as its kind for a value, `Key`, `Comment`, `Inline`,
 // `Foot` or its role, a `*` after a value whose text needs decoding, and `:` and its span when it has one. The hook
 // skips the value of the key spelled `skip` and stops after `stop` tokens, 0 for never.
 Token_Log :: struct {
@@ -195,7 +197,7 @@ log_line :: proc(r: ^Token_Log) -> string {
 	return strings.trim_space(strings.to_string(r.out))
 }
 
-// A hook of a markup walk with a cursor that logs every token, skips the element named `skip` at its key or its object,
+// A hook of a walk with a cursor that logs every token, skips the element named `skip` at its key or its object,
 // and stops at token `stop`, or at every `every`th one when `every` is not 0. A skipped token is never a stop, so the
 // tokens match those of a walk with no stops.
 Stopping :: struct {
@@ -226,4 +228,33 @@ stopping_hook :: proc "contextless" (h: ^Stopping, s: core.Hook_Regs, t: core.To
 		return r, .Stop
 	}
 	return r, .Next
+}
+
+Edits :: proc(list: ^core.Edit_List, doc: ^core.Document) -> core.Error
+
+// The text `src` read as `as` becomes when `edits` records its edits and the list is committed.
+markup_edited :: proc(src: string, as: core.As, edits: Edits) -> (out: string, err: core.Error) {
+	doc := core.build(transmute([]u8)src, as, allocator = context.temp_allocator) or_return
+	list := core.edit_list_init(&doc, context.temp_allocator)
+	edits(&list, &doc) or_return
+	bytes, _, cerr := compose.commit(&list, allocator = context.temp_allocator)
+	return string(bytes), cerr
+}
+
+// The `k`-th member of element `parent` named `name`, or `core.NO_NODE`.
+nth :: proc(doc: ^core.Document, parent: core.Node_Index, name: string, k: int) -> core.Node_Index {
+	it := core.members_named(doc, parent, name)
+	for i := 0; ; i += 1 {
+		node, ok := core.member_next(&it)
+		if !ok || i == k {
+			return node if ok else core.NO_NODE
+		}
+	}
+}
+
+// The value of the JSON text `src`, which the test's temp allocator holds.
+from_json :: proc(src: string) -> core.Value {
+	doc := new(core.Document, context.temp_allocator)
+	doc^, _ = json.build(transmute([]u8)src, .Json, allocator = context.temp_allocator)
+	return core.Node_Ref{doc, core.ROOT}
 }

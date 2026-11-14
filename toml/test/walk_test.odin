@@ -1,8 +1,6 @@
 // The tokens a walk passes and the faults it returns, for small texts.
 package toml_tests
 
-import "base:runtime"
-import "core:fmt"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -10,51 +8,8 @@ import toml ".."
 import walktest "../../walktest"
 
 @(private)
-Recorder :: struct {
-	text:   []u8,
-	out:    strings.Builder,
-	skip:   string, // the text of the key whose value the hook skips
-	stop:   int, // the number of tokens after which the hook stops, 0 for never
-	tokens: int,
-}
-
-@(private)
-record :: proc "contextless" (r: ^Recorder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	context = runtime.default_context()
-	text := string(r.text[t.lo:t.lo + u64(t.n)])
-	name: string
-	switch t.role {
-	case .Value:
-		name = fmt.tprint(t.kind)
-	case .Key:
-		name = "Key"
-	case .Comment:
-		name = "Comment"
-	case .Comment_Inline:
-		name = "Inline"
-	case .Comment_Foot:
-		name = "Foot"
-	case .Tag, .Anchor, .Alias, .Instruction, .Doctype, .Directive, .Attribute, .Partial:
-		name = "Fact"
-	}
-	if text != "" {
-		fmt.sbprintf(&r.out, "%s:%s ", name, text)
-	} else {
-		fmt.sbprintf(&r.out, "%s ", name)
-	}
-	r.tokens += 1
-	if r.stop != 0 && r.tokens >= r.stop {
-		return s, .Stop
-	}
-	if t.role == .Key && text == r.skip {
-		return s, .Skip
-	}
-	return s, .Next
-}
-
-@(private)
 tokens_of :: proc(text: string, spec := toml.Spec.Toml_1_1, skip := "", stop := 0) -> (tokens: string, hi: u64, fault: Maybe(core.Fault)) {
-	r := Recorder {
+	r := walktest.Token_Log {
 		text = transmute([]u8)text,
 		skip = skip,
 		stop = stop,
@@ -62,11 +17,11 @@ tokens_of :: proc(text: string, spec := toml.Spec.Toml_1_1, skip := "", stop := 
 	strings.builder_init(&r.out, context.temp_allocator)
 	switch spec {
 	case .Toml_1_0:
-		hi, fault = toml.walk(r.text, 0, .Toml_1_0, toml.Options{}, &r, nil, record)
+		hi, fault = toml.walk(r.text, 0, .Toml_1_0, toml.Options{}, &r, nil, walktest.log_token)
 	case .Toml_1_1:
-		hi, fault = toml.walk(r.text, 0, .Toml_1_1, toml.Options{}, &r, nil, record)
+		hi, fault = toml.walk(r.text, 0, .Toml_1_1, toml.Options{}, &r, nil, walktest.log_token)
 	}
-	return strings.trim_space(strings.to_string(r.out)), hi, fault
+	return walktest.log_line(&r), hi, fault
 }
 
 @(test)
@@ -74,7 +29,7 @@ tokens_of_a_table_in_document_order :: proc(t: ^testing.T) {
 	got, hi, fault := tokens_of("a = 1\n[t]\nb = \"x\"\n[[l]]\nc = true\n[[l]]\nc = false\n")
 	testing.expect_value(t, fault == nil, true)
 	testing.expect_value(t, hi, 49)
-	testing.expect_value(t, got, `Object Key:a Number:1 Key:t Object Key:b String:"x" End Key:l Array Object Key:c True:true End Object Key:c False:false End End End`)
+	testing.expect_value(t, got, `Object Key:a Number:1 Key:t Object Key:b String*:"x" End Key:l Array Object Key:c True:true End Object Key:c False:false End End End`)
 }
 
 @(test)
@@ -91,7 +46,7 @@ members_stay_in_first_definition_order :: proc(t: ^testing.T) {
 scalars_keep_their_spans :: proc(t: ^testing.T) {
 	got, _, fault := tokens_of("a = 0xff\nb = 1_000\nc = 1979-05-27 07:32:00Z\nd = 'lit'\ne = \"\"\"\nm\"\"\"\nf = inf\n\"q.k\" = [1, 2.5]\n")
 	testing.expect_value(t, fault == nil, true)
-	testing.expect_value(t, got, "Object Key:a Number:0xff Key:b Number:1_000 Key:c String:1979-05-27 07:32:00Z Key:d String:'lit' Key:e String:\"\"\"\nm\"\"\" Key:f Number:inf Key:\"q.k\" Array Number:1 Number:2.5 End End")
+	testing.expect_value(t, got, "Object Key:a Number:0xff Key:b Number:1_000 Key:c String:1979-05-27 07:32:00Z Key:d String*:'lit' Key:e String*:\"\"\"\nm\"\"\" Key:f Number:inf Key:\"q.k\" Array Number:1 Number:2.5 End End")
 }
 
 @(test)

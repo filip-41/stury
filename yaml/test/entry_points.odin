@@ -484,26 +484,15 @@ entries_build_after_the_window_moved :: proc(t: ^testing.T) {
 			window, since = it.src, len(given)
 		}
 		append(&given, rec)
-		append(&then, entry_json(&it, rec))
+		append(&then, walktest.built_json(&it, rec))
 		for k := len(given) - 2; k >= since && k >= len(given) - 4; k -= 1 {
 			checked += int(since > 0)
-			got := entry_json(&it, given[k])
+			got := walktest.built_json(&it, given[k])
 			testing.expectf(t, got == then[k], "record %d after %d: %s, got %s", k, len(given) - 1, then[k], got)
 		}
 	}
 	testing.expect(t, checked > 0)
 	testing.expect_value(t, len(given), 4001)
-}
-
-@(private = "file")
-entry_json :: proc(it: ^records.Reader, rec: records.Record) -> string {
-	doc, err := records.build(it, rec, context.temp_allocator)
-	defer core.destroy(&doc)
-	if err != nil {
-		return fmt.tprint("error", err)
-	}
-	out, _, _ := yaml.write(&doc, .Yaml_1_2, {}, allocator = context.temp_allocator)
-	return string(out)
 }
 
 // Reading the records of a sequence ten times as long under `.Entries` holds no more of the reader's memory at its

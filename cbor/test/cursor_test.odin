@@ -1,50 +1,24 @@
 // A walk stopped and resumed through a cursor against an unbroken walk.
 package cbor_tests
 
-import "base:runtime"
 import "core:fmt"
 import "core:slice"
 import "core:testing"
 import core "../../core"
+import walktest "../../walktest"
 import cbor ".."
-
-// A hook that logs every token, skips the value of the text key `skip` and stops at token `stop`, or at every `every`th
-// one when `every` is not 0. A skipped key is never a stop, so the tokens match those of a walk with no stops.
-@(private)
-Stopping :: struct {
-	src:    []u8,
-	tokens: [dynamic]core.Token,
-	skip:   string,
-	stop:   int,
-	every:  int,
-}
-
-@(private)
-stopping_hook :: proc "contextless" (h: ^Stopping, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	context = runtime.default_context()
-	n := len(h.tokens)
-	append(&h.tokens, t)
-	r := core.Hook_Regs{s.a + 1, s.b, s.c}
-	if t.role == .Key && t.kind == .String && string(h.src[t.lo:t.lo + u64(t.n)]) == h.skip {
-		return r, .Skip
-	}
-	if h.every != 0 && (n + 1) % h.every == 0 || n + 1 == h.stop {
-		return r, .Stop
-	}
-	return r, .Next
-}
 
 // The tokens, end and fault of the walk of `src` as spec `S`, with a stop at token `stop` or at every `every`th and a
 // resume after each.
 @(private)
-walk_stopping :: proc(src: []u8, $S: cbor.Spec, skip: string, stop, every: int) -> (h: Stopping, end: string) {
-	h = Stopping{src = src, skip = skip, stop = stop, every = every}
+walk_stopping :: proc(src: []u8, $S: cbor.Spec, skip: string, stop, every: int) -> (h: walktest.Stopping, end: string) {
+	h = walktest.Stopping{src = src, skip = skip, stop = stop, every = every}
 	h.tokens = make([dynamic]core.Token, 0, 64)
 	regs: core.Hook_Regs
 	cursor: cbor.Cursor
-	hi, fault := cbor.walk(src, 0, S, {}, &h, &regs, stopping_hook, &cursor)
+	hi, fault := cbor.walk(src, 0, S, {}, &h, &regs, walktest.stopping_hook, &cursor)
 	for cbor.can_resume(&cursor) {
-		hi, fault = cbor.walk_resume(src, &cursor, S, {}, &h, &regs, stopping_hook)
+		hi, fault = cbor.walk_resume(src, &cursor, S, {}, &h, &regs, walktest.stopping_hook)
 	}
 	return h, fmt.tprint(hi, fault, regs.a)
 }
@@ -104,19 +78,19 @@ cursor_resumes_after_any_token :: proc(t: ^testing.T) {
 @(test)
 cursor_refuses_another_text :: proc(t: ^testing.T) {
 	src := hex("82 01 02")
-	h := Stopping{src = src, stop = 2}
+	h := walktest.Stopping{src = src, stop = 2}
 	h.tokens = make([dynamic]core.Token, 0, 16)
 	defer delete(h.tokens)
 	cursor: cbor.Cursor
-	_, fault := cbor.walk(src, 0, .Cbor, {}, &h, nil, stopping_hook, &cursor)
+	_, fault := cbor.walk(src, 0, .Cbor, {}, &h, nil, walktest.stopping_hook, &cursor)
 	testing.expect(t, fault == nil && cbor.can_resume(&cursor))
 	other := hex("82 01 03")
-	_, fault = cbor.walk_resume(other, &cursor, .Cbor, {}, &h, nil, stopping_hook)
+	_, fault = cbor.walk_resume(other, &cursor, .Cbor, {}, &h, nil, walktest.stopping_hook)
 	f, bad := fault.?
 	testing.expect(t, bad && f.kind == .Bad_Option && cbor.can_resume(&cursor))
 	cbor.destroy(&cursor)
 	testing.expect(t, !cbor.can_resume(&cursor))
-	_, fault = cbor.walk_resume(src, &cursor, .Cbor, {}, &h, nil, stopping_hook)
+	_, fault = cbor.walk_resume(src, &cursor, .Cbor, {}, &h, nil, walktest.stopping_hook)
 	f, bad = fault.?
 	testing.expect(t, bad && f.kind == .Bad_Option)
 }

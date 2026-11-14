@@ -109,13 +109,6 @@ check_text :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typ
 	return typed.check_built_text(src, as, build_handle, target, T, plan, read, allocator)
 }
 
-@(private)
-plan_handle :: proc "contextless" (spec: Spec, plan: ^typed.Plan) -> core.As {
-	handle := typed.handle_of(plan)
-	handle.readers, handle.spec = &READERS, u8(spec)
-	return handle
-}
-
 // Reads `src`, an HTML text, into `target`. A document's one member is the `html` element and a fragment's members are
 // its nodes, so a target is a struct with a member of that name, or a map. An absent member keeps what `target` holds.
 // The read builds a plan with `context.allocator` and frees it before it returns.
@@ -135,5 +128,7 @@ unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, opts
 // Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
 // first. The options are the plan's, and any plan of the format reads.
 check :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return typed.check_by(src, plan_handle(S, plan), target, T, plan, read, allocator, check_text)
+	handle := typed.handle_of(plan)
+	handle.readers, handle.spec = &READERS, u8(S)
+	return typed.check_by(src, handle, target, T, plan, read, allocator, check_text)
 }

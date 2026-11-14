@@ -102,13 +102,13 @@ SPELLING_TOKENIZED :: u16(1 << 15)
 
 #assert((SPELLING_ATTRIBUTE | SPELLING_TOKENIZED) & (core.SPELLING_DECODE | core.SPELLING_QUOTED | core.SPELLING_LAX) == 0)
 
-// XML's `Readers.text`. An element's name is its span and the `#text` member's name is `#text`. An element's text and
-// a `#text` run are decoded into `buf` as content, and an attribute's value, which `SPELLING_ATTRIBUTE` marks, as an
-// attribute value, unless the walk found nothing to decode. `core.text_room` sizes `buf`. A container returns false.
 // The number a markup token reads as, false for one that is not a number. A caller that knows the format calls it without
 // the table.
 token_number :: core.markup_number
 
+// XML's `Readers.text`. An element's name is its span and the `#text` member's name is `#text`. An element's text and
+// a `#text` run are decoded into `buf` as content, and an attribute's value, which `SPELLING_ATTRIBUTE` marks, as an
+// attribute value, unless the walk found nothing to decode. `core.text_room` sizes `buf`. A container returns false.
 token_text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
 	if t.kind > .Plain {
 		return "", false
@@ -140,12 +140,6 @@ token_key_equals :: proc "contextless" (v: ^core.Token_View, t: core.Token, name
 		return name == TEXT_KEY
 	}
 	return string(v.src[t.lo:t.lo + u64(t.n)]) == name
-}
-
-// XML's `Readers.resolve`, what a `Plain` value is: its decoded text as the document's `infer` reads it.
-@(private)
-spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
-	return core.markup_resolve(doc, i, options_of(doc.as).infer)
 }
 
 // Says why an edit may not touch `node`, as `core.Edit_Services.frozen` asks: a node whose bytes lie in the internal

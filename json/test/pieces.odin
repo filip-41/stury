@@ -132,7 +132,7 @@ records_validate_large_records :: proc(t: ^testing.T) {
 	defer for &p in pools {
 		host.pool_destroy(&p)
 	}
-	pad := strings.repeat("x", RECORDS_SLICE / 2 + 64, context.temp_allocator)
+	pad := strings.repeat("x", walktest.RECORDS_SLICE / 2 + 64, context.temp_allocator)
 	for faults in ([]u16{0, 1 << 3, 1 << 0 | 1 << 9 | 1 << 11}) {
 		lines := strings.builder_make(context.temp_allocator)
 		entries := strings.builder_make(context.temp_allocator)
@@ -242,33 +242,6 @@ records_validate_a_spine :: proc(t: ^testing.T) {
 	testing.expect_value(t, records.validate_parallel(src, deep), walktest.fault_of(json.validate(src, .Json, {max_depth = 2})))
 }
 
-// The bytes of a piece as `core/records` reads it: a text shorter than four is built on one thread.
-@(private = "file")
-RECORDS_SLICE :: #config(RECORDS_SLICE, 64 * 1024)
-
-// A whole text built on threads against the same text built on one: the same nodes, child counts and close, or the
-// same refusal. `joined` says the entries were built in pieces, which the count of pieces `records.build` gives tells.
-@(private = "file")
-expect_build_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, as: core.As, refuse: bool, joined: bool) -> bool {
-	in_pieces := joined && len(src) >= 4 * RECORDS_SLICE
-	text := transmute([]u8)src
-	want, want_err := core.build(text, as, .Refuse if refuse else .Last)
-	defer core.destroy(&want)
-	for &pool in pools {
-		pieces: int
-		got, err := records.build(text, as, .Refuse if refuse else .Last, runner = &pool.runner, pieces = &pieces)
-		defer core.destroy(&got)
-		same := walktest.same_error(err, want_err) && slice.equal(got.nodes, want.nodes) && slice.equal(got.counts, want.counts) && got.root_close == want.root_close
-		if !testing.expectf(t, same, "%q at width %d: %v, want %v", src[:min(len(src), 200)], pool.runner.threads + 1, err, want_err) {
-			return false
-		}
-		if !testing.expectf(t, !in_pieces || pool.runner.threads == 0 || pieces > 0, "%q at width %d: built on one thread", src[:min(len(src), 200)], pool.runner.threads + 1) {
-			return false
-		}
-	}
-	return true
-}
-
 @(test)
 records_build_a_spine :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -285,7 +258,7 @@ records_build_a_spine :: proc(t: ^testing.T) {
 		src, _ := strings.replace(text, "@", array, 1, context.temp_allocator)
 		for refuse in ([]bool{false, true}) {
 			// The deep text has no spine, and the last but one has text past its root.
-			if !expect_build_law(t, pools[:], src, strict, refuse, i != 3 && i != 4) {
+			if !walktest.expect_build_law(t, pools[:], src, strict, refuse, i != 3 && i != 4) {
 				return
 			}
 		}
@@ -293,7 +266,7 @@ records_build_a_spine :: proc(t: ^testing.T) {
 		for at in ([]int{1, 9, 30, len(src) / 2, len(src) - 12, len(src) - 2}) {
 			for c in ([]string{"x", "]", ",", "\""}) {
 				broken := strings.concatenate({src[:at], c, src[at + 1:]}, context.temp_allocator)
-				if !expect_build_law(t, pools[:], broken, strict, false, false) || !expect_build_law(t, pools[:], src[:at], strict, false, false) {
+				if !walktest.expect_build_law(t, pools[:], broken, strict, false, false) || !walktest.expect_build_law(t, pools[:], src[:at], strict, false, false) {
 					return
 				}
 			}
@@ -302,8 +275,8 @@ records_build_a_spine :: proc(t: ^testing.T) {
 	// A repeated key in an entry, and at the root around the array.
 	dups, _ := strings.replace(array, `"s":`, `"a":`, 40, context.temp_allocator)
 	for refuse in ([]bool{false, true}) {
-		expect_build_law(t, pools[:], dups, strict, refuse, !refuse)
-		expect_build_law(t, pools[:], strings.concatenate({`{"n":1,"logs":`, array, `,"n":2}`}, context.temp_allocator), strict, refuse, !refuse)
+		walktest.expect_build_law(t, pools[:], dups, strict, refuse, !refuse)
+		walktest.expect_build_law(t, pools[:], strings.concatenate({`{"n":1,"logs":`, array, `,"n":2}`}, context.temp_allocator), strict, refuse, !refuse)
 	}
 	// Entries nested to the deepest level a text may open, and one past it.
 	b := strings.builder_make(context.temp_allocator)
@@ -316,18 +289,18 @@ records_build_a_spine :: proc(t: ^testing.T) {
 	shallow.max_depth = 5
 	nested := strings.to_string(b)
 	level, _ := strings.replace(nested, "[[[[1]]]]", "[[[1]]]", 1, context.temp_allocator)
-	expect_build_law(t, pools[:], nested, shallow, false, false)
-	expect_build_law(t, pools[:], level, shallow, false, true)
-	expect_build_law(t, pools[:], nested, strict, false, true)
+	walktest.expect_build_law(t, pools[:], nested, shallow, false, false)
+	walktest.expect_build_law(t, pools[:], level, shallow, false, true)
+	walktest.expect_build_law(t, pools[:], nested, strict, false, true)
 	// An array and two arrays inside it wider than a node's child count holds.
 	wide := strings.repeat("0,", 70000, context.temp_allocator)
 	inner := strings.concatenate({"[", wide, "1]"}, context.temp_allocator)
-	expect_build_law(t, pools[:], strings.concatenate({"[", wide, inner, ",", inner, "]"}, context.temp_allocator), strict, false, true)
+	walktest.expect_build_law(t, pools[:], strings.concatenate({"[", wide, inner, ",", inner, "]"}, context.temp_allocator), strict, false, true)
 	// A root object with no spine: its members are entries with keys, which a document does not join.
-	expect_build_law(t, pools[:], `{"a":[1,2,3],"b":{"c":"d"},"e":[4,5,6]}`, strict, false, false)
+	walktest.expect_build_law(t, pools[:], `{"a":[1,2,3],"b":{"c":"d"},"e":[4,5,6]}`, strict, false, false)
 	// A spine whose first entry holds most of the text is built on one thread.
 	one := strings.concatenate({`{"type":"x","features":[{"c":`, array, `},1]}`}, context.temp_allocator)
-	expect_build_law(t, pools[:], one, strict, false, false)
+	walktest.expect_build_law(t, pools[:], one, strict, false, false)
 	pieces: int
 	doc, _ := records.build(transmute([]u8)one, strict, runner = &pools[len(pools) - 1].runner, pieces = &pieces)
 	core.destroy(&doc)

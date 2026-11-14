@@ -198,6 +198,14 @@ document_at_byte :: proc "contextless" (e: Document_Error) -> bool {
 	return e.kind not_in DOCUMENT_AT_NO_BYTE && (e.kind != .Walk || e.inner.kind not_in AT_NO_BYTE)
 }
 
+// Returns the build error a walk's fault is. A stack the walk could not grow is the allocator's refusal, not the text's.
+fault_error :: proc "contextless" (f: Fault) -> Document_Error {
+	if f.kind == .No_Memory {
+		return {kind = .No_Memory}
+	}
+	return {kind = .Walk, at = f.at, inner = f}
+}
+
 // Moves the bytes of the source `e` names by `by`, for an error found in a text that starts `by` bytes in.
 move_document_error :: proc(e: ^Document_Error, by: u64) {
 	if document_at_byte(e^) {

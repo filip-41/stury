@@ -74,7 +74,7 @@ graft :: proc(into, from: ^rules.Description, own: bool) -> (root: rules.Node_In
 		}
 		out = make([]core.Value, len(xs)) or_return
 		for x, i in xs {
-			out[i] = value_kept(x) if own else x
+			out[i] = core.kept_value(x, nil, .All) if own else x
 		}
 		return
 	}
@@ -95,10 +95,10 @@ graft :: proc(into, from: ^rules.Description, own: bool) -> (root: rules.Node_In
 		x.description, x.title = text(n.description, own), text(n.title, own)
 		x.content_encoding, x.content_media_type = text(n.content_encoding, own), text(n.content_media_type, own)
 		if c, has := n.const_of.?; has && own {
-			x.const_of = value_kept(c)
+			x.const_of = core.kept_value(c, nil, .All)
 		}
 		if d, has := n.default_of.?; has && own {
-			x.default_of = value_kept(d)
+			x.default_of = core.kept_value(d, nil, .All)
 		}
 		append(&into.nodes, x) or_return
 	}
@@ -140,32 +140,6 @@ graft :: proc(into, from: ^rules.Description, own: bool) -> (root: rules.Node_In
 		map_insert(&into.names, at(k, nodes), text(v, own)) or_return
 	}
 	return at(from.root, nodes), nil
-}
-
-// A copy of `v` built in the context allocator, with its texts, which outlives the document a node of it is in.
-@(private)
-value_kept :: proc(v: core.Value) -> core.Value {
-	#partial switch x in v {
-	case core.Node_Ref:
-		return core.built_value(x, .All)
-	case string:
-		return strings.clone(x) or_else ""
-	case core.Number_View:
-		return core.view_copy(x)
-	case ^core.Array:
-		out := core.new_array(len(x.items))
-		for item in x.items {
-			core.array_append(out, value_kept(item))
-		}
-		return out
-	case ^core.Object:
-		out := core.new_object()
-		for k, i in x.keys {
-			core.object_put(out, strings.clone(k) or_else "", value_kept(x.vals[i]))
-		}
-		return out
-	}
-	return v
 }
 
 // What a model judges past its read: the types that a fragment, `unique` or a `.One_Match` union judges, each with the

@@ -6,7 +6,8 @@ package yaml
 // string under the 1.2 core schema and a 1.1 reader. Tags and anchors are written back from the facts, and an alias where
 // its anchor stands before it. A comment is written when the document holds it, above the line it heads, after the value
 // it ends and at the end of a collection, and compact text breaks its flow line at a comment. A comment the output has
-// no place for, and one with a line end in its body, is dropped and counted. Null is `null`, or the spelling a YAML source had. A key an object repeats is `.Unwritable`.
+// no place for, and one with a line end in its body, is dropped and counted. Null is `null`, or the spelling a YAML
+// source had. A key an object repeats is `.Unwritable`.
 
 import "base:runtime"
 import "core:io"
@@ -274,7 +275,6 @@ put_node_start :: proc(l: ^Layout, opens: ^[dynamic]Put_Open, node: core.Node_In
 	return .None
 }
 
-// Pushes `o` on `opens`.
 @(private)
 put_open_push :: proc(opens: ^[dynamic]Put_Open, o: Put_Open) -> core.Typed_Error_Kind {
 	if _, failed := append(opens, o); failed != nil {
