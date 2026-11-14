@@ -72,7 +72,7 @@ uses every arm whose binary exists. `ARMS=stury,yy` keeps a subset.
 ## Lanes
 
 - `build` builds the document and stops. Its `check` is the document's node count, then each node's kind and role.
-- `read` builds, then reads every value once. A JSON string goes through `json.text` and a dsv cell through
+- `read` builds, then reads every value once. A JSON string goes through `json.token_text` and a dsv cell through
   `core.text`, and each number is read as a `core.Number`. The timed read folds each value's text length or number
   bits into one sink. One untimed read after the timed calls hashes the tags, decoded text lengths and number bits.
 - `key` builds, then looks up one key in every object. The key is the first key of the first object (or the first

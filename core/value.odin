@@ -1,8 +1,8 @@
 package core
 
 // A value of the library in either form: a node of a document (`Node_Ref`) or a value built in memory. A number built
-// is a double, or the digits of one that no double holds or that was read and not computed on (`Number_Text`). A built value
-// lives in the allocator it was made with, usually an arena, and has no destructor. It is not changed once shared,
+// is a double, or the digits of one that no double holds or that was read and not computed on (`Number_View`). A built
+// value lives in the allocator it was made with, usually an arena, and has no destructor. It is not changed once shared,
 // and a slice of an array marks the array `lent`, which a writer copies before changing it.
 //
 // The readers have the document readers' names and take either form. An object is its members in the order they were
@@ -10,14 +10,16 @@ package core
 // `length` and the writer see all of them. An object node of a markup document has each name once, a repeated one with
 // an array of each of its elements (`markup_members`), so each of them sees that.
 
+import "base:runtime"
 import "core:hash"
+import "core:strings"
 import "spell"
 
 // `nil` is null.
 Value :: union {
 	bool,
 	f64,
-	^Number_Text,
+	Number_View,
 	string,
 	^Array,
 	^Object,
@@ -28,18 +30,66 @@ Value :: union {
 
 #assert(size_of(Value) == 24)
 
-// A number's text: an integer no double holds exactly, or a number read and not computed on, whose digits are kept, with
-// the double they round to. `text` is a JSON number. As a typed target it takes any number.
+// A number's text as a typed target, which takes any number: its digits, a JSON number, and the double they round to.
 Number_Text :: struct {
 	text:   string,
 	double: f64,
 }
 
-// A `Number_Text` of `text`, a JSON number, in `allocator`. `text` is not copied.
-number_text :: proc(text: string, allocator := context.allocator) -> ^Number_Text {
-	n := new(Number_Text, allocator)
-	n^ = {text, text_f64(text)}
-	return n
+// A number's digits in a value: an integer no double holds exactly, or a number read and not computed on. The digits
+// are a JSON number shorter than 4 GiB. A view marked `NUMBER_HELD` has the double of its digits in the 8 bytes before
+// them, any other is read from its digits at each use. Two views of one text with different marks are two numbers to
+// their maker: no reader of the value sees the mark.
+Number_View :: struct {
+	text: [^]u8,
+	len:  u32,
+	mark: u32,
+}
+
+// The mark of a view made by `number_text`, whose double precedes its digits.
+NUMBER_HELD :: max(u32)
+
+// `text`, a JSON number shorter than 4 GiB, as a `Number_View` marked `mark`, which is not `NUMBER_HELD`. `text` is
+// not copied.
+number_view :: #force_inline proc "contextless" (text: string, mark: u32) -> Number_View {
+	return {raw_data(text), u32(len(text)), mark}
+}
+
+// The digits of `n`.
+view_text :: #force_inline proc "contextless" (n: Number_View) -> string {
+	return string(n.text[:n.len])
+}
+
+// The double of `n` when it holds one.
+held_f64 :: #force_inline proc "contextless" (n: Number_View) -> (f64, bool) {
+	if n.mark != NUMBER_HELD {
+		return 0, false
+	}
+	return (^f64)(uintptr(n.text) - size_of(f64))^, true
+}
+
+// The double of `n`.
+view_f64 :: #force_inline proc(n: Number_View) -> f64 {
+	if f, held := held_f64(n); held {
+		return f
+	}
+	return text_f64(view_text(n))
+}
+
+// `text`, a JSON number shorter than 4 GiB, as a `Number_View` that holds its double, copied in `allocator` after it.
+number_text :: proc(text: string, allocator := context.allocator) -> Number_View {
+	room, _ := runtime.mem_alloc_non_zeroed(size_of(f64) + len(text), align_of(f64), allocator)
+	(^f64)(raw_data(room))^ = text_f64(text)
+	copy(room[size_of(f64):], text)
+	return {([^]u8)(raw_data(room))[size_of(f64):], u32(len(text)), NUMBER_HELD}
+}
+
+// A copy of `n` in `allocator`, its digits copied, with its mark.
+view_copy :: proc(n: Number_View, allocator := context.allocator) -> Number_View {
+	if n.mark == NUMBER_HELD {
+		return number_text(view_text(n), allocator)
+	}
+	return number_view(strings.clone(view_text(n), allocator), n.mark)
 }
 
 Array :: struct {
@@ -111,7 +161,7 @@ value_kind :: #force_inline proc(v: Value) -> Kind {
 		return .Null
 	case bool:
 		return .True if x else .False
-	case f64, ^Number_Text:
+	case f64, Number_View:
 		return .Number
 	case string:
 		return .String
@@ -301,7 +351,7 @@ value_text :: #force_inline proc(v: Value, buf: []u8) -> (string, bool) {
 }
 
 // The number `v` holds. A double that holds an integer of at most 53 bits is an `.Int`, any other a `.Float`. A
-// `Number_Text` is read as the document's `number` reads a number's text.
+// `Number_View` is read as the document's `number` reads a number's text.
 value_number :: #force_inline proc(v: Value) -> (Number, bool) {
 	#partial switch x in plain(v) {
 	case f64:
@@ -309,8 +359,8 @@ value_number :: #force_inline proc(v: Value) -> (Number, bool) {
 			return {bits = u64(i64(x)), kind = .Int}, true
 		}
 		return {bits = transmute(u64)x, kind = .Float}, true
-	case ^Number_Text:
-		return spell.number_strict(transmute([]u8)x.text, 0, u64(len(x.text)))
+	case Number_View:
+		return spell.number_strict(x.text[:x.len], 0, u64(x.len))
 	case Node_Ref:
 		return doc_number(x.doc, x.node)
 	}
@@ -353,7 +403,7 @@ trail_keys :: proc(t: Trail, into: []Value) {
 // Whether object node `r` has a key that one before it has.
 has_repeated_key :: proc(r: Node_Ref) -> bool {
 	n := doc_length(r.doc, r.node)
-	if n < 2 {
+	if n < 2 || header_of(r.doc) != 0 && r.doc.tables_at[0].unique_keys {
 		return false
 	}
 	it := doc_pairs(r.doc, r.node)

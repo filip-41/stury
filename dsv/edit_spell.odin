@@ -12,6 +12,7 @@ import records "../core/records"
 // The text of `v` at byte `at`: one cell, or with `record` the cells of an array in order, or of an object in the header's
 // order for a headed table and its own order otherwise, a column it names that the header lacks refused, one the object
 // lacks empty. A record is written without its line end. A refusal names the cell by its place in the record.
+@(private)
 edit_spell :: proc(doc: ^core.Document, v: core.Value, _: core.Write_Options, _: string, record: bool, at: u64, allocator: runtime.Allocator) -> ([]u8, core.Error) {
 	if !record {
 		text, reason := spell_cell(doc, v, at, allocator)
@@ -109,8 +110,10 @@ scalar_of :: proc(v: core.Value) -> (scalar: write.Scalar, text: string) {
 				return write.Number_Literal{digits}, digits
 			}
 		}
-		if t, is_text := core.plain(v).(^core.Number_Text); is_text {
-			return write.Number_Literal{t.text}, t.text
+		#partial switch t in core.plain(v) {
+		case core.Number_View:
+			digits := core.view_text(t)
+			return write.Number_Literal{digits}, digits
 		}
 		n, _ := core.number(v)
 		return n, ""

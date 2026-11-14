@@ -14,12 +14,17 @@ HANDLES := [Spec]core.Readers {
 	.Yaml_1_2 = core.with_services(READERS, &SERVICES[.Yaml_1_2]),
 }
 
+// The reasons the writer gives a refusal that names none.
+@(private)
+WRITE_WORDS :: core.Write_Words{"YAML has no spelling for the text, or the object repeats a key", "YAML writes a whole document"}
+
 SERVICES := [Spec]core.Services {
 	.Yaml_1_2 = {
 		build    = build_as,
 		validate = validate_as,
 		scan     = scan_as,
 		write    = document_write,
+		words    = WRITE_WORDS,
 		edit     = &EDIT,
 		plans    = rawptr(plan_as),
 		reads    = &CHECKS,

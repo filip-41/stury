@@ -41,7 +41,7 @@ SCHEMA :: `{"type":"object","required":["name","port"],"properties":{"name":{"ty
 a_schema_judges_a_text_by_the_core_schema :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
-	s, err := json_pkg.load_schema(transmute([]u8)string(SCHEMA))
+	s, err := json_pkg.load_schema(transmute([]u8)string(SCHEMA), .Json)
 	walktest.expect_nil(t, err)
 	bound, berr := yaml.bind_schema(s, .Yaml_1_2)
 	walktest.expect_nil(t, berr)
@@ -140,7 +140,7 @@ a_plan_checks_a_text_and_a_document :: proc(t: ^testing.T) {
 	refused := yaml.check(src, .Yaml_1_2, &v, &plan, {sink = &sink})
 	testing.expect(t, refused != nil)
 	testing.expect_value(t, spelled(&sink), "Wrong_Kind/a;Wrong_Kind/b/1;")
-	spec := yaml.Spec.Yaml_1_2
+	spec :: yaml.Spec.Yaml_1_2
 	again: Pair
 	other: typed.Sink
 	testing.expect(t, yaml.check(src, spec, &again, &plan, {sink = &other}) != nil)
@@ -197,9 +197,9 @@ a_plan_checks_a_text_and_a_document :: proc(t: ^testing.T) {
 a_schema_binds_to_a_handle_chosen_at_run_time :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
-	s, err := json_pkg.load_schema(transmute([]u8)string(SCHEMA))
+	s, err := json_pkg.load_schema(transmute([]u8)string(SCHEMA), .Json)
 	walktest.expect_nil(t, err)
-	spec := yaml.Spec.Yaml_1_2
+	spec :: yaml.Spec.Yaml_1_2
 	bound, berr := schema.bind(s, {nil, yaml.as(spec)})
 	walktest.expect_nil(t, berr)
 	walktest.expect_nil(t, schema.check(&bound, transmute([]u8)string("name: web\nport: 0x1F\n")))

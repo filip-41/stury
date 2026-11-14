@@ -84,7 +84,7 @@ Emit :: struct {
 put_start :: proc(e: ^Emit, out: ^write.Out, src: []u8, doc: ^core.Document, opts: core.Write_Options, local: []Open) {
 	e.out, e.src, e.doc, e.opts, e.cap = out, src, doc, opts, len(local) - 1
 	stack := raw_data(local)
-	e.copy = copies_strings(opts)
+	e.copy = write.copies_raw(opts)
 	e.hi = V(0x7f) if opts.ascii || opts.escape_del && opts.escape_html else V(0xFF)
 	e.html = {V('\\'), V('\\'), V('\\'), V('\\')}
 	switch {
@@ -346,10 +346,12 @@ put_token_string :: proc(out: ^write.Out, src: []u8, doc: ^core.Document, i: cor
 	return put_string(out, s, opts)
 }
 
-// Whether a string read from a source is written as it was authored under `opts`.
-@(private)
-copies_strings :: #force_inline proc "contextless" (opts: core.Write_Options) -> bool {
-	return !opts.ascii && !opts.escape_del && !opts.escape_html && !opts.respell_strings
+// A text after the first of strict JSON is trailing text to a whole build.
+CAPABILITIES :: core.Capabilities {
+	writes = ~{},
+	framings = ~{},
+	specs = Spec,
+	follows = proc "contextless" (f: core.Fault) -> bool {return f.rules == &RULES && f.detail == u8(Detail.Trailing)},
 }
 
 // The handle of JSON of spec `spec` read with `opts`. As the target of `core.write`, `.Json` drops a document's comments,
@@ -369,7 +371,7 @@ as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
 // The spelling's `write`: node `node` of `doc`, which `core.write` checked is a value the document holds, as the spec
 // `as` names.
 @(private)
-write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Refusal) {
+write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
 	// The source bytes and the nodes the write covers. A partial document's node holds no span of its own text, so its
 	// output grows from the least room.
 	src, count := doc.src, len(doc.nodes)
@@ -389,14 +391,14 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, n
 	switch {
 	// The tree writes what the row walk does not: a partial document, another format's, comments, sorted keys and JSON5.
 	case doc.partial || doc.readers.format != rules_of || len(core.subtree_facts(doc, node)) != 0 || opts.sort_keys || Spec(doc.as.spec) == .Json5:
-		dropped, kind = write_tree(doc, opts, &out, Spec(as.spec), node)
+		kept, kind = write_tree(doc, opts, &out, Spec(as.spec), node)
 	case dense_route(doc, opts, src, count):
 		write_dense(&out, src)
 	case:
 		kind = write_rows(doc, opts, &out, node)
 	}
 	text, err = write.finish((^write.Out)(rawptr(&out)), {kind = kind})
-	return text, 0 if err.kind != .None else dropped, err
+	return text, kept, err
 }
 
 // Writes node `node` of `doc` by its rows.

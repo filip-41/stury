@@ -53,6 +53,7 @@ Block :: struct {
 	object:   bool,
 	mode:     Entry,
 	key_done: bool,
+	inline:   Comment, // the comment on the line of the collection's key, sent after its close, or `n` 0
 }
 
 // Reads the node that follows an indicator (`-`, `?`, `:`, `---`) or starts a document. `n` is the indentation of the
@@ -265,6 +266,10 @@ parse_scalar_node :: proc(p: ^Parser, n: int, role: core.Role, flow, multiline: 
 		spelling := scan_single(p, n) or_return
 		return p.ls != line, emit(p, core.Token{start, u32(p.pos - start), .String, role, spelling})
 	}
+	// A flow collection the input ends inside reads an empty node there, and its close is what faults.
+	if flow && start >= u64(len(p.src)) {
+		return false, emit(p, core.Token{start, 0, .Plain, role, 0})
+	}
 	if !plain_first(p, flow) {
 		return false, fault(p, start, .Bad_Char, .Bad_Start)
 	}
@@ -274,13 +279,66 @@ parse_scalar_node :: proc(p: ^Parser, n: int, role: core.Role, flow, multiline: 
 }
 
 
+// Sends the opening `open` of a block collection. The pending comments on lines of their own wait for the first entry,
+// but at a document's top those up to the last blank line before it are the document's head. A comment after the
+// collection's key on its line is the collection's inline comment, held in `inline` for its close.
+@(private)
+open_block :: #force_inline proc(p: ^Parser, open: core.Token, inline: ^Comment) -> bool {
+	if p.staging || len(p.pending) == 0 {
+		return emit(p, open)
+	}
+	return open_commented(p, open, inline)
+}
+
+// `open_block` past pending comments.
+@(private)
+open_commented :: proc(p: ^Parser, open: core.Token, inline: ^Comment) -> bool {
+	head := 0
+	if p.depth != 1 {
+		x := p.pending[0].lo
+		for x > 0 && (p.src[x - 1] == ' ' || p.src[x - 1] == '\t') {
+			x -= 1
+		}
+		if x != 0 && p.src[x - 1] != '\n' && p.src[x - 1] != '\r' {
+			inline^ = p.pending[0]
+			ordered_remove(&p.pending, 0)
+		}
+	} else {
+		head = root_head(p, open.lo)
+	}
+	for c in p.pending[:head] {
+		emit_raw(p, core.Token{c.lo, c.n, .Plain, .Comment, core.comment_spelling(1, 0)}) or_return
+	}
+	remove_range(&p.pending, 0, head)
+	return emit_raw(p, open)
+}
+
+// The count of the pending comments up to the last blank line before byte `next`, the document's head.
+@(private)
+root_head :: proc(p: ^Parser, next: u64) -> int {
+	next := next
+	for i := len(p.pending) - 1; i >= 0; i -= 1 {
+		c := p.pending[i]
+		breaks := 0
+		for b in p.src[c.lo + u64(c.n):next] {
+			breaks += int(b == '\n')
+		}
+		if breaks > 1 {
+			return i + 1
+		}
+		next = c.lo
+	}
+	return 0
+}
+
 // Opens a block sequence whose first `-` is at the cursor, indented `ind`.
 @(private)
 open_seq :: proc(p: ^Parser, ind: int, role: core.Role, outer: ^Props) -> bool {
 	enter(p) or_return
 	emit_props(p, outer) or_return
-	emit(p, core.Token{p.pos, 0, .Array, role, 0}) or_return
-	append(&p.blocks, Block{ind = ind})
+	inline: Comment
+	open_block(p, core.Token{p.pos, 0, .Array, role, 0}, &inline) or_return
+	append(&p.blocks, Block{ind = ind, inline = inline})
 	p.next = .Seq_Entry
 	return true
 }
@@ -292,8 +350,9 @@ open_map :: proc(p: ^Parser, ind: int, lo: u64, role: core.Role, outer, inner: ^
 	enter(p) or_return
 	p.staging = false
 	emit_props(p, outer) or_return
-	emit(p, core.Token{lo, 0, .Object, role, 0}) or_return
-	append(&p.blocks, Block{ind = ind, key_idx = key_idx, lead = inner^, object = true, mode = first})
+	inline: Comment
+	open_block(p, core.Token{lo, 0, .Object, role, 0}, &inline) or_return
+	append(&p.blocks, Block{ind = ind, key_idx = key_idx, lead = inner^, object = true, mode = first, inline = inline})
 	p.next = .Map_Entry
 	return true
 }
@@ -423,10 +482,11 @@ after_entry :: proc(p: ^Parser) -> bool {
 	if l.kind == .Content && l.ind > ind {
 		return fault(p, p.pos, .Bad_Char, .Bad_Indent)
 	}
-	pop(&p.blocks)
+	c := pop(&p.blocks).inline
 	leave(p)
 	flush_foot(p, ind) or_return
-	return emit(p, core.Token{p.last_end, 0, .End, .Value, 0})
+	emit(p, core.Token{p.last_end, 0, .End, .Value, 0}) or_return
+	return c.n == 0 || emit_raw(p, core.Token{c.lo, c.n, .Plain, .Comment_Inline, core.comment_spelling(1, 0)})
 }
 
 // Whether `b` starts a plain scalar whatever byte follows it.

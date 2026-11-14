@@ -3,6 +3,7 @@ package dsv_tests
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import rules "../../core/rules"
 import typed "../../core/typed"
 import schema "../../core/schema"
 import dsv ".."
@@ -405,11 +406,12 @@ check_equal_and_hash_retype_cells :: proc(t: ^testing.T) {
 	}
 }
 
-// A table is checked from the names of `dsv`, and a bind that lacks the delimited checks is refused.
+// A table is checked from the names of `dsv`, and a bind of a spec chosen at run time, given the handle alone, checks
+// as `dsv.bind_schema` does.
 @(test)
 check_from_dsv_names :: proc(t: ^testing.T) {
 	text := `{"type": "array", "items": {"properties": {"a": {"type": "integer"}}}}`
-	s, err := json.load_schema(transmute([]u8)text)
+	s, err := json.load_schema(transmute([]u8)text, .Json)
 	testing.expect(t, err == nil)
 	defer json.destroy(s)
 	for infer in ([2]bool{false, true}) {
@@ -418,9 +420,14 @@ check_from_dsv_names :: proc(t: ^testing.T) {
 		defer dsv.destroy(&b)
 		testing.expect_value(t, dsv.check_schema(&b, transmute([]u8)string("a\n1\n")) == nil, infer)
 	}
-	_, unbound := schema.bind(s, {layout = dsv.as(.Csv)})
-	e, refused := unbound.(core.Typed_Error)
-	testing.expect_value(t, refused && e.kind == .Plan_Mismatch, true)
+	spec := dsv.Spec.Csv
+	b, berr := schema.bind(s, {layout = dsv.as(spec)})
+	testing.expect(t, berr == nil)
+	defer dsv.destroy(&b)
+	sink: typed.Sink
+	defer typed.sink_destroy(&sink)
+	testing.expect(t, dsv.check_schema(&b, transmute([]u8)string("a\nx\n"), &sink) != nil)
+	testing.expect_value(t, len(sink.entries), 1)
 }
 
 // A check with no plan is a plan mismatch.
@@ -430,4 +437,18 @@ a_check_with_no_plan_is_a_mismatch :: proc(t: ^testing.T) {
 		a: int,
 	}
 	walktest.expect_kind(t, dsv.check(transmute([]u8)string("a\n1\n"), .Csv, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
+}
+
+// A plan of a description holds the delimited reads when it is given them, and an empty description is refused.
+@(test)
+a_plan_of_a_description_reads_csv :: proc(t: ^testing.T) {
+	s, err := json.load_schema(transmute([]u8)string(`{"type": "array", "items": {"properties": {"a": {"type": "integer"}}}}`), .Json)
+	walktest.expect_nil(t, err)
+	defer json.destroy(s)
+	plan, built := dsv.plan_of(s.description, reads = dsv.checks(.Csv).reads)
+	walktest.expect_nil(t, built)
+	defer dsv.destroy(&plan)
+	testing.expect(t, plan.read != nil && plan.marshal != nil)
+	_, empty := dsv.plan_of(&rules.Description{})
+	walktest.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 }

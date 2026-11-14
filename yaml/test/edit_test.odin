@@ -243,6 +243,8 @@ comments_and_properties_are_facts :: proc(t: ^testing.T) {
 		{src = "a: 1\nb: 2\n", op = .Fact, path = "b", role = .Comment_Inline, text = "note", want = "a: 1\nb: 2 # note\n"},
 		{src = "a: 1 # old\n", op = .Fact, path = "a", role = .Comment_Inline, text = "new", want = "a: 1 # new\n"},
 		{src = "a: 1 # old\n", op = .Unfact, path = "a", role = .Comment_Inline, want = "a: 1\n"},
+		{src = "a: # old\n  k: 1\n", op = .Fact, path = "a", role = .Comment_Inline, text = "new", want = "a: # new\n  k: 1\n"},
+		{src = "a: # old\n  k: 1\n", op = .Unfact, path = "a", role = .Comment_Inline, want = "a:\n  k: 1\n"},
 		{src = "a:\n  k: 1\n", op = .Fact, path = "a", role = .Comment_Foot, text = "end", want = "a:\n  k: 1\n  # end\n"},
 		{src = "a: 1\n", op = .Fact, path = "a", role = .Tag, text = "str", want = "a: !str 1\n"},
 		{src = "a: 1\n", op = .Fact, path = "a", role = .Tag, text = "!!str", want = "a: !!str 1\n"},
@@ -625,4 +627,39 @@ spelled_values_take_their_site :: proc(t: ^testing.T) {
 	out, _, err := commit(&list)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	testing.expect_value(t, string(out), "a:\n    k: v\nf: [1, 2]\nt:\n    k: v\n")
+}
+
+// A commented value set or put into a flow collection under block mappings has its lines inside the block's
+// indentation, and reads back as the value with its comment.
+@(test)
+a_commented_value_in_a_nested_flow_collection_reads_back :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	for at in ([]string{"a", "a.b", "a.b.c"}) {
+		src := strings.builder_make(context.temp_allocator)
+		keys := strings.split(at, ".", context.temp_allocator)
+		for key, depth in keys {
+			fmt.sbprintf(&src, "%*s%s:\n", depth * 2, "", key)
+		}
+		fmt.sbprintf(&src, "%*sf: [1, 2]\n", len(keys) * 2, "")
+		path := fmt.tprintf("%s.f", at)
+		for op in ([]Op{.Set, .Insert}) {
+			out, err := apply({src = strings.to_string(src), op = op, path = fmt.tprintf("%s.0", path) if op == .Set else path, at = 1, text = "k: 1 # c\nl: 2"})
+			testing.expectf(t, err.kind == .None, "%s %v: %v", at, op, err.kind)
+			doc, built := core.build(transmute([]u8)out, yaml.as(.Yaml_1_2), allocator = context.temp_allocator)
+			testing.expectf(t, built == nil, "%s %v: %q reads as %v", at, op, out, built)
+			if built != nil {
+				continue
+			}
+			item := node_at(&doc, fmt.tprintf("%s.%d", path, 1 if op == .Insert else 0))
+			value, _, _ := core.write(&doc, {}, json_pkg.as(.Json), item, context.temp_allocator)
+			testing.expectf(t, string(value) == `{"k":1,"l":2}`, "%s %v: %q reads as %s", at, op, out, value)
+			comment := ""
+			for f in core.all_facts(&doc, node_at(&doc, fmt.tprintf("%s.%d.k", path, 1 if op == .Insert else 0))) {
+				if f.role == .Comment_Inline {
+					comment, _ = core.comment_text(&doc, f)
+				}
+			}
+			testing.expectf(t, comment == "c", "%s %v: %q has comment %q", at, op, out, comment)
+		}
+	}
 }

@@ -18,14 +18,15 @@ fn_length :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value,
 	case .Number:
 		// jq's jv_number_abs: a literal without its sign, a negative zero's (`-0.0`) too, else fabs. Either is a new
 		// number, not the input (`1 | path(length)` fails).
+		lit: string
 		#partial switch n in scalar(v) {
 		case f64:
 			return abs(n), .Go
-		case ^Number_Text:
-			if n.text[0] == '-' {
-				return number_text(n.text[1:]), .Go
-			}
-			return number_text(strings.clone(n.text)), .Go
+		case Number_View:
+			lit = view_text(n)
+		}
+		if lit != "" {
+			return number_text(lit[1:] if lit[0] == '-' else lit), .Go
 		}
 	case .String:
 		s, _ := string_of(v)
@@ -186,10 +187,9 @@ fn_tonumber :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Valu
 		return v, .Go
 	case .String:
 		s, _ := string_of(v)
-		if strings.index_byte(s, 0) < 0 {
-			if n, ok := read_number(s); ok {
-				return n, .Go
-			}
+		ip.literals = ip.literals + 1 if ip.literals < NUMBER_HELD - 1 else 1
+		if n, ok := read_number(s, ip.literals); ok {
+			return n, .Go
 		}
 	case .Null, .False, .True, .Array, .Object:
 	}

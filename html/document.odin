@@ -17,6 +17,10 @@ HANDLES := [Spec]core.Readers {
 	.Fragment = core.with_services(READERS, &SERVICES[.Fragment]),
 }
 
+// The reasons the writer gives a refusal that names none.
+@(private)
+WRITE_WORDS :: core.Write_Words{"HTML has no text that reads back as the value", "HTML writes a whole document"}
+
 @(private)
 SERVICES := [Spec]core.Services {
 	.Document = handle_services(reads_of(.Document)),
@@ -32,6 +36,7 @@ handle_services :: proc "contextless" (reads: ^typed.Format_Reads) -> core.Servi
 		validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, Spec(as.spec), options_of(as))},
 		scan     = scan_handle,
 		write    = document_write,
+		words    = WRITE_WORDS,
 		plans    = rawptr(plan_as),
 		edit     = &EDIT,
 		reads    = reads,
@@ -45,6 +50,13 @@ handle_services :: proc "contextless" (reads: ^typed.Format_Reads) -> core.Servi
 @(private)
 rules_of :: proc "contextless" () -> ^core.Rules {
 	return &RULES
+}
+
+// Document order is meaning in HTML, so its writer does not sort keys.
+CAPABILITIES :: core.Capabilities {
+	writes = {.Pretty, .Indent, .Tab, .Ascii},
+	framings = {.Concatenated, .Entries},
+	specs = Spec,
 }
 
 // The handle of an HTML text of `spec` read with `opts`.
@@ -73,8 +85,11 @@ options_of :: #force_inline proc "contextless" (as: core.As) -> Read {
 
 // HTML's `Readers.text`. A key reads as its form says, and a text value is decoded as the tokenizer read it, piece by
 // piece when the state lists it. `core.text_room` sizes `buf`. A container returns false.
-@(private)
-token_decode :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
+// The number a markup token reads as, false for one that is not a number. A caller that knows the format calls it without
+// the table.
+token_number :: core.markup_number
+
+token_text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
 	if t.kind > .Plain {
 		return "", false
 	}
@@ -97,6 +112,18 @@ token_decode :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: strin
 		w += len(part)
 	}
 	return string(buf[:w]), true
+}
+
+// HTML's `Readers.room`: a text whose pieces run past its span, the text an element reads on past the body's end tag,
+// decodes to the pieces' text.
+@(private)
+room :: proc(v: ^core.Token_View, lo: u64, n: u32) -> int {
+	pieces, listed := text_pieces(v.state, lo)
+	end := lo + u64(n)
+	for p in pieces {
+		end = max(end, p.lo + u64(p.n))
+	}
+	return 3 * int(end - lo) + core.DECODE_SLACK if listed else int(n)
 }
 
 // The pieces the state lists for the text whose first byte is `lo`.
@@ -191,7 +218,7 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 
 // HTML's `Readers.attribute`: the name of attribute fact `f` as a `Key`, its case lowered and, on an SVG or MathML
 // element, its mixed case restored, and its value as a `Plain`, the bytes between its quotes or the unquoted value,
-// decoded by `token_decode` when it holds a reference, U+0000, a CR or a byte past ASCII. A valueless attribute's value
+// decoded by `token_text` when it holds a reference, U+0000, a CR or a byte past ASCII. A valueless attribute's value
 // is an empty `String`.
 @(private)
 spelling_attribute :: proc "contextless" (doc: ^core.Document, f: core.Fact) -> (name, value: core.Token) {
@@ -277,10 +304,8 @@ NAMESPACE_URIS := [Namespace]string {
 // The facts HTML names for node `i`, the value of an element or the document: its name and string value as every
 // markup format reads them, and the namespace of its element.
 @(private)
-spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Name) -> (core.Fact_Value, bool) {
-	switch name {
-	case .Tag, .Anchor, .Alias, .Style:
-		return {}, false
+spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Kind) -> (core.Fact_Value, bool) {
+	#partial switch name {
 	case .Name, .Content:
 		return core.markup_fact(doc, i, name)
 	case .Namespace:

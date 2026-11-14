@@ -150,7 +150,7 @@ toy_prefix :: proc(doc: ^core.Document, role: core.Role, body: []u8, text: ^[dyn
 	return true
 }
 
-toy_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Name) -> (core.Fact_Value, bool) {
+toy_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Kind) -> (core.Fact_Value, bool) {
 	return {text = "toy"}, name == .Style
 }
 
@@ -340,8 +340,9 @@ format_commit_takes_the_list_as_recorded :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, herr)
 	edit := core.services_of(doc.as).edit^
 	edit.commit = toy_commit
-	// The toy output reads as no JSON, and compose judges a format's own commit by its validate.
+	// The toy output reads as no JSON, and compose judges a format's own commit by its validate and its build.
 	edit.validate = nil
+	edit.build = nil
 	a, _ := core.member(&doc, core.ROOT, "a")
 	wants := [2]string{"[\n        2,\n        3\n    ]", "[\n  2,\n  3\n]"}
 	for want, i in wants {

@@ -59,7 +59,7 @@ set_through_a_path :: proc(t: ^testing.T) {
 		if c.raw != "" {
 			v = typed.Raw(string(hex(c.raw)))
 		}
-		out, err := cbor.set(hex(c.src), c.spec, path, v)
+		out, err := set_by(hex(c.src), c.spec, path, v)
 		got := kind_of(err) if err != nil else spaced(out)
 		testing.expectf(t, got == c.want, "%s %v %s: %s, want %s", c.src, c.spec, c.path, got, c.want)
 	}
@@ -84,17 +84,29 @@ kind_of :: proc(err: core.Error) -> string {
 	return fmt.tprint(err)
 }
 
+// `cbor.set` with the constant spec `spec` names.
+@(private = "file")
+set_by :: proc(src: []u8, spec: cbor.Spec, path: core.Path, v: any) -> ([]u8, core.Error) {
+	switch spec {
+	case .Cbor:          return cbor.set(src, .Cbor, path, v)
+	case .Preferred:     return cbor.set(src, .Preferred, path, v)
+	case .Deterministic: return cbor.set(src, .Deterministic, path, v)
+	case .Length_First:  return cbor.set(src, .Length_First, path, v)
+	}
+	return nil, nil
+}
+
 @(private)
 Edit_Plan :: proc(list: ^core.Edit_List, doc: ^core.Document) -> core.Error
 
 // The hex of the item `src` becomes when `plan` records its edits and the list is committed, or the error's kind.
 @(private)
 edited :: proc(src: string, plan: Edit_Plan, spec := cbor.Spec.Cbor) -> string {
-	doc, berr := cbor.build(hex(src), spec, allocator = context.temp_allocator)
+	doc, berr := core.build(hex(src), cbor.as(spec), allocator = context.temp_allocator)
 	if berr != nil {
 		return kind_of(berr)
 	}
-	list := cbor.edit_list_init(&doc, spec, context.temp_allocator)
+	list := core.edit_list_init(&doc, context.temp_allocator)
 	if perr := plan(&list, &doc); perr != nil {
 		return kind_of(perr)
 	}

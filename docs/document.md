@@ -12,7 +12,7 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 
 | File | Holds |
 |---|---|
-| `core/document.odin` | `Node`, `Document`, the readers, `Fact`, `Fact_Name`, `fact_value`, `Site`, `destroy`, `clone`, `Readers`, `Services` and `Edit_Services` |
+| `core/document.odin` | `Node`, `Document`, the readers, `Fact`, `Fact_Kind`, `FACTS`, `fact_value`, `Site`, `destroy`, `clone`, `Readers`, `Services` and `Edit_Services` |
 | `core/build/build.odin` | `Builder`, the hooks, `builder_start`, `builder_end`, the header row, the duplicate-key check |
 | `core/edit.odin` | `Edit_List`, `Edit`, `set`, `insert`, `remove`, `set_fact`, `remove_fact` |
 | `core/compose/compose.odin` | a commit's container composition: members, junctions and the placement of facts |
@@ -29,7 +29,7 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `core/error.odin` | `Document_Error`, its kinds and rules, `inner`, `render`, `write_code` |
 | `json/document.odin` | JSON's `build`, `HANDLES`, `SERVICES` and edit tables, `close_end`, the edit checks |
 | `core/compose/lines.odin` | a flat text's root junctions and the comments above its header |
-| `json/unescape.odin` | JSON's `text` and `number` readers and the decoder behind them |
+| `json/unescape.odin` | JSON's `token_text` and `token_number` readers and the decoder behind them |
 | `dsv/document.odin` | dsv's `build`, its handle tables, its edit table, `close_end`, the record check |
 | `dsv/plan.odin` | a commit's column changes, turned into plain cell edits before core composes the list |
 | `toml/document.odin` | TOML's handles and readers, `text`, `number`, `close_end`, the `Tag` and `Style` facts |
@@ -285,7 +285,7 @@ text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator
 
 `text` returns a source slice or a decode in `buf`. It returns false for a container, an index past the last node, or a
 `buf` too short for the decoded text. A `buf` of `text_room(doc, i)` bytes always holds it, and a node that needs no
-decode needs none. `json.text(&doc.view, doc.nodes[i], buf)` is the same read without the table, for a
+decode needs none. `json.token_text(&doc.view, doc.nodes[i], buf)` is the same read without the table, for a
 caller that knows the format.
 
 `text_clone` always allocates, and the result is exactly what the caller passes to `delete(s, allocator)`: a text that
@@ -386,7 +386,7 @@ and the format package's `query`, `edit_list_init` and `write` serve such a docu
 Edit_Services :: struct {
 	value:        proc(v: ^Token_View, src: []u8, allocator: runtime.Allocator) -> Document_Error,
 	key_text:     proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
-	comment:      proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
+	comment:      proc(doc: ^Document, spec: u8) -> Comment_Syntax,
 	separators:   proc(doc: ^Document, spec: u8) -> bool,
 	member_sep:   proc(doc: ^Document, c: Node_Index) -> string,
 	key_sep:      string,
@@ -404,10 +404,12 @@ Edit_Services :: struct {
 }
 ```
 
-`Comment_Spelling` is `None`, `Line` or `Byte`: no marker, a JSON line or block comment, or a delimited text's comment
-line. Under `Line` a body holding a line end is written as `/* */`, so a line comment cannot end its line early. JSON's
-table supplies `value`, `key_text`, `comment`, `separators`, `member_sep`, `spell` and `validate`, with `key_sep` `":"`,
-and its `comment` is `.Line` for `Jsonc` and `Json5` and `.None` for `Json`. dsv's table supplies `value`, `key_text`,
+`Comment_Syntax` holds a format's line comment marker and its block comment markers, and its zero value spells no
+comment: `SLASH_COMMENTS` (`//`, `/* */`), `HASH_COMMENTS` (`#`), `MARKUP_COMMENTS` (`<!-- -->`), or a delimited text's
+comment character. A body holding a line end is written as a block when the syntax has one, so a line comment cannot
+end its line early. Every edit spells a comment through `compose.spell_comment`. JSON's table supplies `value`,
+`key_text`, `comment`, `separators`, `member_sep`, `spell` and `validate`, with `key_sep` `":"`, and its `comment` is
+`SLASH_COMMENTS` for `Jsonc` and `Json5` and none for `Json`. dsv's table supplies `value`, `key_text`,
 `comment`, `member_sep`, `insert_check` and `plan`, which turns a list's column changes into plain edits. A format with
 `Readers.flat` set has no brackets in its text, so `interior` says where a container's members lie, the root's members
 are lines that `core/compose/lines.odin` composes, and `fact_slot` and `emptied` say which facts the output holds. dsv's
@@ -437,7 +439,7 @@ container:
 
 A reader reaches the table only where it must: `text` and `key_equals` for a marked node, `number` for every scalar,
 `resolve` for every node, `close_end` for a container whose span is read, and the edit services for every recorded or
-committed text. A caller that knows the format at compile time calls `json.text` or `json.number` directly.
+committed text. A caller that knows the format at compile time calls `json.token_text` or `json.token_number` directly.
 
 ## Duplicate keys
 
@@ -493,14 +495,19 @@ their node, on its line. An `Attribute` fact leads through the opening quote of 
 one, and a value that starts more than 255 bytes past its name holds a lead of 255, which the markup formats' readers
 pass over by finding the opening quote from the closing one.
 
-`fact_value(doc, i, name)` reads a `Fact_Name`: `Tag`, `Anchor` and `Alias` are the body of the node's span fact of
-that role when it has one, and otherwise, with `Style`, `Name`, `Namespace` and `Content`, what `Readers.fact` reads
-from the node's spelling. A `Number` fact is left to `Readers.fact` when the format has one, which gives a CBOR tag's
+`FACTS` gives each `Fact_Kind` its name as a filter reads it after `.@`, the role of its span, whether an edit may
+write it, and its class: a comment, a property, or another fact of markup. `fact_value(doc, i, name)` reads a property:
+`Tag`, `Anchor` and `Alias` are the body of the node's span fact of that role when it has one, and otherwise, with
+`Style`, `Name`, `Namespace` and `Content`, what `Readers.fact` reads from the node's spelling. A `Number` fact is left to `Readers.fact` when the format has one, which gives a CBOR tag's
 digits in the temp allocator, with `Fact_Value.numeric` set.
 
 A comment's node follows the walk's `Role` rule: a comment on the line where the value before it ends is that value's
 `Comment_Inline`, else one before a value the grammar allows it above is that value's `Comment`, else it is the
-`Comment_Foot` of the innermost open container, or of the root at depth 0.
+`Comment_Foot` of the innermost open container, or of the root at depth 0. So a comment before a container's first
+member is that member's, and one in an empty container, or in a markup element with no child element, is the
+container's foot. Where no bracket opens the root (a YAML or TOML text, the prolog of XML and HTML), the comments
+before the first member are the root's up to the last blank line before it, or the last instruction in a markup prolog,
+and the first member's after it. A TOML text's last comments end the table open at its end.
 
 The builder keeps a head comment pending until the value it marks arrives, gives an inline comment to the last value
 it completed (`Builder.last`), or holds it pending when none has, and gives a foot to the innermost open container's

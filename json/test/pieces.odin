@@ -32,13 +32,13 @@ whole_fault :: proc(src: []u8, spec: json.Spec) -> Maybe(core.Fault) {
 @(private = "file")
 expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, framing: core.Framing, spec: json.Spec) -> bool {
 	text := transmute([]u8)src
-	serial, _ := records.check(text, json.as(spec), framing, context.temp_allocator)
+	serial, _ := records.validate(text, json.as(spec), framing, context.temp_allocator)
 	whole := whole_fault(text, spec)
 	if !testing.expectf(t, records.validate_parallel(text, json.as(spec)) == whole, "%v %q: validate %v, want %v", spec, src, records.validate_parallel(text, json.as(spec)), whole) {
 		return false
 	}
 	for &pool in pools {
-		got, _ := records.check(text, json.as(spec), framing, context.temp_allocator, &pool.runner)
+		got, _ := records.validate(text, json.as(spec), framing, context.temp_allocator, &pool.runner)
 		if !testing.expectf(t, slice.equal(got, serial), "%v %v %q at width %d: %v, want %v", framing, spec, src, pool.runner.threads + 1, got, serial) {
 			return false
 		}
@@ -58,7 +58,7 @@ expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, framing
 CHAIN_PIECES := []string{`",,,,"`, `[1,[2,[3,",]"]],4]`, `{"a":",","b":[",",","]}`, `"\",\n"`, `[]`, `{}`, `1`, `"x"`, `[1,,2]`, `{"a" 1}`}
 
 @(test)
-records_check_on_threads :: proc(t: ^testing.T) {
+records_validate_on_threads :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	pools: [len(WIDTHS)]host.Pool
 	for w, i in WIDTHS {
@@ -123,7 +123,7 @@ records_check_on_threads :: proc(t: ^testing.T) {
 // Records of about half a piece, which a default build finds too sparse to fan out, read in order. A forced build
 // fans out, so the records are small there, and the answers are the same in either.
 @(test)
-records_check_large_records :: proc(t: ^testing.T) {
+records_validate_large_records :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	pools: [len(WIDTHS)]host.Pool
 	for w, i in WIDTHS {

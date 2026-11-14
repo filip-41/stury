@@ -83,7 +83,7 @@ token_value :: proc(t: ^write.Tokens, v: write.Scalar) -> core.Typed_Error_Kind 
 	case write.Number_Literal:
 		need += 2 * len(x.text)
 	case write.Tagged_Text:
-		need += len(x.text)
+		need += len(x.text) + 9
 	}
 	held(t, s, need, t.top) or_return
 	out := t.out
@@ -91,6 +91,19 @@ token_value :: proc(t: ^write.Tokens, v: write.Scalar) -> core.Typed_Error_Kind 
 	case string:
 		return put_long_string(out, x)
 	case write.Tagged_Text:
+		if x.meaning == .Binary {
+			bytes, ok, err := base64_bytes(x.text)
+			if err != .None {
+				return err
+			}
+			if ok {
+				out.cursor += write.put_head(write.room(out, 9), u64(len(bytes)), TREE, .Bytes)
+				write.put_text(out, string(bytes))
+				return .None
+			}
+		} else if x.meaning != .Own || x.tag == "" {
+			write.put_date_tag(out, x.text, x.meaning, TREE)
+		}
 		return put_long_string(out, x.text)
 	case typed.Bytes:
 		out.cursor += write.put_head(write.room(out, 9), u64(len(x)), TREE, .Bytes)

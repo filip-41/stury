@@ -17,6 +17,8 @@ EDIT := core.Edit_Services {
 	value    = edit_value,
 	key_text = compose.markup_key_text,
 	validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, .Xml, options_of(as))},
+	build    = build_handle,
+	scan     = scan_handle,
 	spell    = edit_spell,
 	relocate = edit_relocate,
 	frozen   = frozen,
@@ -24,7 +26,7 @@ EDIT := core.Edit_Services {
 }
 
 // Returns an edit list over `doc`. A document read as a constant spec holds no edit services, so the list takes XML's.
-edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List {
+edit_list_init :: proc(doc: ^core.Document, $S: Spec, allocator := context.allocator) -> core.Edit_List {
 	list := core.edit_list_init(doc, allocator)
 	list.edit = &EDIT
 	return list
@@ -34,8 +36,8 @@ edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.all
 // `allocator`. Every byte the edit does not reach is kept. A `typed.Raw` is an element's content as XML, a struct, a
 // slice or a map is built by `plan`, and any other value is written as an element's content. A `Name` the path ends in
 // that its element lacks is inserted as its last child.
-set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	return write.set_with(src, bound_as(spec, opts), build_handle, &EDIT, path, v, plan, read, allocator)
+set :: proc(src: []u8, $S: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+	return write.set_with(src, bound_as(S, opts), build_handle, &EDIT, path, v, plan, read, allocator)
 }
 
 // Checks `src` as an element's content.

@@ -4,6 +4,8 @@ package yaml
 // and a count per open collection. Where a line break and a dash or a key go is settled when the item arrives, and an
 // empty collection is `{}` or `[]` when it closes.
 
+import "core:slice"
+import "core:strings"
 import core "../core"
 import write "../core/write"
 
@@ -22,6 +24,7 @@ Level :: struct {
 	reach:  Reach,
 	col:    i32, // the column of the items
 	n:      i32, // the items begun
+	head:   int, // the output offset past its key's `:`, where an inline comment on it goes
 }
 
 @(private)
@@ -33,12 +36,19 @@ Block_Writer :: struct {
 	key_next: bool, // the next scalar is a key
 	top:      int,
 	levels:   [core.MAX_DEPTH]Level,
+	// The output offsets of the head of the block collection after a key closed last and of its end, which an inline
+	// comment on it, coming before anything else is written, goes back to, and whether one is there.
+	closed:   [2]int,
+	noted:    bool,
+	// The comments in the innermost open collection before its first item, which lead that item, or are the foot of
+	// the collection when it closes empty.
+	held:     [dynamic]string,
 }
 
 @(private)
 block_new :: proc(out: ^write.Out, opts: core.Write_Options) -> ^Block_Writer {
 	b := new(Block_Writer)
-	b.out, b.ascii = out, opts.ascii
+	b.out, b.ascii, b.ended = out, opts.ascii, true
 	b.step = int(opts.indent) if opts.indent > 0 else 2
 	return b
 }
@@ -48,9 +58,13 @@ block_new :: proc(out: ^write.Out, opts: core.Write_Options) -> ^Block_Writer {
 @(private)
 block_lead :: proc(b: ^Block_Writer, container: bool) -> (literal_at: int) {
 	if b.top == 0 {
+		b.ended = b.ended && container
 		return b.step
 	}
 	l := &b.levels[b.top - 1]
+	if len(b.held) > 0 && !l.keyed {
+		block_put_held(b, l^)
+	}
 	if l.object && l.keyed {
 		l.keyed = false
 		if !container {
@@ -66,7 +80,9 @@ block_lead :: proc(b: ^Block_Writer, container: bool) -> (literal_at: int) {
 		}
 		write.put_run(b.out, int(l.col), ' ')
 	case l.reach == .Key:
-		write.put_byte(b.out, '\n')
+		if !b.ended {
+			write.put_byte(b.out, '\n')
+		}
 		write.put_run(b.out, int(l.col), ' ')
 	}
 	l.n += 1
@@ -93,7 +109,7 @@ block_open :: proc(b: ^Block_Writer, object: bool) -> core.Typed_Error_Kind {
 		}
 	}
 	block_lead(b, true)
-	b.levels[b.top] = {object = object, reach = reach, col = col}
+	b.levels[b.top] = {object = object, reach = reach, col = col, head = b.out.flushed + b.out.cursor}
 	b.top += 1
 	return .None
 }
@@ -102,15 +118,110 @@ block_open :: proc(b: ^Block_Writer, object: bool) -> core.Typed_Error_Kind {
 @(private)
 block_close :: proc(b: ^Block_Writer) {
 	b.top -= 1
-	l := b.levels[b.top]
-	if l.n == 0 {
-		if l.reach == .Key {
-			write.put_byte(b.out, ' ')
-		}
-		write.put_text(b.out, "{}" if l.object else "[]")
-		b.ended = false
+	b.closed, b.noted = {}, false
+	if l := b.levels[b.top]; l.n == 0 {
+		block_empty(b, l)
+	} else if l.reach == .Key {
+		b.closed = {l.head, b.out.flushed + b.out.cursor}
 	}
 	block_end_root(b)
+}
+
+// Writes the empty collection `l` as `{}` or `[]`, with the held comments inside it on lines of their own, where they
+// read back as its foot.
+@(private)
+block_empty :: proc(b: ^Block_Writer, l: Level) {
+	if l.reach == .Key {
+		write.put_byte(b.out, ' ')
+	}
+	if len(b.held) == 0 {
+		write.put_text(b.out, "{}" if l.object else "[]")
+	} else {
+		write.put_text(b.out, "{\n" if l.object else "[\n")
+		for text in b.held {
+			write.put_run(b.out, int(l.col), ' ')
+			write.put_comment(b.out, "#", text, true, int(l.col))
+			write.put_byte(b.out, '\n')
+		}
+		write.put_run(b.out, int(l.col), ' ')
+		write.put_byte(b.out, '}' if l.object else ']')
+		block_drop_held(b)
+	}
+	b.ended = false
+}
+
+// Writes the held comments before the first item of `l`, at its column. After a dash the first item stands on the
+// dash's line, so the comments do and the item goes to the next line.
+@(private)
+block_put_held :: proc(b: ^Block_Writer, l: Level) {
+	for text in b.held {
+		if l.reach == .Dash {
+			write.put_comment(b.out, "#", text, true, int(l.col))
+			write.put_byte(b.out, '\n')
+			write.put_run(b.out, int(l.col), ' ')
+			b.ended = false
+			continue
+		}
+		if !b.ended {
+			write.put_byte(b.out, '\n')
+		}
+		write.put_run(b.out, int(l.col), ' ')
+		write.put_comment(b.out, "#", text, true, int(l.col))
+		write.put_byte(b.out, '\n')
+		b.ended = true
+	}
+	block_drop_held(b)
+}
+
+@(private)
+block_drop_held :: proc(b: ^Block_Writer) {
+	for text in b.held {
+		delete(text)
+	}
+	clear(&b.held)
+}
+
+// Writes `text` as `#` lines of `role`: a lead before the next item at its column, an inline comment after the item last
+// written on its line, and a foot after the last item of the open collection at the column of its items. A comment
+// before the first item is held until that item or the close.
+@(private)
+block_comment :: proc(b: ^Block_Writer, role: core.Role, text: string) {
+	l := &b.levels[b.top - 1] if b.top > 0 else nil
+	col := int(l.col) if l != nil else 0
+	if l != nil && l.n == 0 && role != .Comment_Inline {
+		append(&b.held, strings.clone(text))
+		return
+	}
+	switch {
+	case role == .Comment_Inline && !b.ended:
+		write.put_byte(b.out, ' ')
+	case:
+		if !b.ended {
+			write.put_byte(b.out, '\n')
+		}
+		write.put_run(b.out, col, ' ')
+	}
+	write.put_comment(b.out, "#", text, true, col)
+	write.put_byte(b.out, '\n')
+	b.ended = true
+}
+
+// Writes the one-line inline comment `text` on the block collection after a key that closed last, on the key's line,
+// joined to one written there, and returns whether it did. Nothing may have been written since the close.
+@(private)
+block_inline_back :: proc(b: ^Block_Writer, text: string) -> bool {
+	out := b.out
+	if b.closed[1] != out.flushed + out.cursor || b.closed[0] < out.flushed || out.stream.procedure != nil {
+		return false
+	}
+	at := b.closed[0] - out.flushed
+	tail := out.cursor - at
+	write.put_text(out, " " if b.noted else " # ")
+	write.put_text(out, text)
+	moved := out.cursor - at - tail
+	slice.rotate_right(out.buf[at:out.cursor], moved)
+	b.closed, b.noted = {b.closed[0] + moved, out.flushed + out.cursor}, true
+	return true
 }
 
 // Ends the text's last line when the root value is whole.
@@ -148,16 +259,20 @@ block_key :: proc(b: ^Block_Writer, name: string) -> core.Typed_Error_Kind {
 	return .None
 }
 
-// Writes the string `s` as the next item, as a plain, quoted or literal scalar.
+// Writes the string `s` as the next item, after `tag` when it is given, as a plain, quoted or literal scalar.
 @(private)
-block_string :: proc(b: ^Block_Writer, s: string) -> core.Typed_Error_Kind {
+block_string :: proc(b: ^Block_Writer, s: string, tag := "") -> core.Typed_Error_Kind {
 	at := block_lead(b, false)
-	shape, kind := shape_of(s, {block = true, ascii = b.ascii})
+	if tag != "" {
+		write.put_text(b.out, tag)
+		write.put_byte(b.out, ' ')
+	}
+	shape, kind := shape_of(s, {block = true, tagged = tag != "", ascii = b.ascii})
 	if kind != .None {
 		return kind
 	}
 	if shape == .Literal {
-		put_literal(b.out, s, at)
+		put_block(b.out, s, shape, at)
 		b.ended = true
 		block_end_root(b)
 		return .None
@@ -194,6 +309,8 @@ layout_step :: proc(t: ^write.Tokens, step: write.Layout_Step) -> core.Typed_Err
 
 @(private)
 block_free :: proc(b: ^Block_Writer) {
+	block_drop_held(b)
+	delete(b.held)
 	free(b)
 }
 

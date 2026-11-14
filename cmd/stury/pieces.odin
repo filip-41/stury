@@ -1029,7 +1029,8 @@ put_fmt :: proc(run: ^Run, doc: ^core.Document, out: ^write.Out) -> bool {
 	if writes_cells(&run.opts) || writes_comments(&run.opts) || writes_texts(&run.opts) {
 		return false
 	}
-	text, _, err := core.write(doc, run.output.layout.opts, json.as(.Json, {max_depth = run.opts.max_depth}), allocator = context.temp_allocator)
+	text, dropped, err := core.write(doc, run.output.layout.opts, json.as(.Json, {max_depth = run.opts.max_depth}), allocator = context.temp_allocator)
+	tell_dropped("", run.opts.to, dropped)
 	write.put_text(out, string(text))
 	return err == nil
 }

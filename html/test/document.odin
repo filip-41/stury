@@ -11,7 +11,7 @@ import walktest "../../walktest"
 
 @(private)
 built :: proc(t: ^testing.T, text: string, spec := html.Spec.Document, opts := html.Options{}, loc := #caller_location) -> (doc: core.Document, ok: bool) {
-	d, err := html.build(transmute([]u8)text, spec, opts)
+	d, err := core.build(transmute([]u8)text, html.as(spec, opts))
 	testing.expectf(t, err == nil, "%v", err, loc = loc)
 	return d, err == nil
 }
@@ -61,7 +61,7 @@ markup_builds_the_shape_xml_builds :: proc(t: ^testing.T) {
 a_document_is_its_root_element_with_the_implied_ones :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	testing.expect_value(t, shape(t, "<p>x", .Document), `{"html": {"head": null, "body": {"p": "x"}}}`)
-	testing.expect_value(t, shape(t, "<!DOCTYPE html><!--pre--><html lang=en><title>T</title><p>x</html><!--post-->", .Document), `{<!<!DOCTYPE html>> <!--pre--> "html": {@lang="en" <!--post-->^ "head": {"title": "T"}, "body": {"p": "x"}}}`)
+	testing.expect_value(t, shape(t, "<!DOCTYPE html><!--pre--><html lang=en><title>T</title><p>x</html><!--post-->", .Document), `{<!<!DOCTYPE html>> "html": {@lang="en" <!--pre--> <!--post-->^ "head": {"title": "T"}, "body": {"p": "x"}}}`)
 	testing.expect_value(t, shape(t, "<table><tr><td>1</table>", .Fragment), `{"table": {"tbody": {"tr": {"td": "1"}}}}`)
 	testing.expect_value(t, shape(t, "text only", .Fragment), `{"#text": "text only"}`)
 	testing.expect_value(t, shape(t, "", .Fragment), `{}`)
@@ -178,7 +178,7 @@ text_reads_as_the_tokenizer_read_it :: proc(t: ^testing.T) {
 moved_and_merged_text_reads_whole :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	testing.expect_value(t, shape(t, "<table>a<tr><td>1</td></tr>b&amp;c</table>"), `{"#text": "ab&c", "table": {"tbody": {"tr": {"td": "1"}}}}`)
-	testing.expect_value(t, shape(t, "<p>one<!--x--> two &amp;<!--y--> three</p>"), `{"p": (<!--x--> <!--y--> "one two & three")}`)
+	testing.expect_value(t, shape(t, "<p>one<!--x--> two &amp;<!--y--> three</p>"), `{"p": (<!--x-->$ <!--y-->$ "one two & three")}`)
 	testing.expect_value(t, shape(t, "<b>1<p>2</b>3</p>"), `{"b": "1", "p": {"b": "2", "#text": "3"}}`)
 	doc, ok := built(t, "<table>a<tr><td>1</td></tr>b</table>", .Fragment)
 	if !ok {
@@ -311,4 +311,31 @@ an_html_document_and_an_xml_one_compare_as_one_value :: proc(t: ^testing.T) {
 		testing.expect_value(t, r.changes[0].role, core.Role.Attribute)
 	}
 	diff.result_destroy(&r)
+}
+
+// A change's values outlive the diff's scratch: a repeated name's array, which the walk builds, is the result's own,
+// whether the list shrinks to one element or grows from one.
+@(test)
+a_diff_keeps_the_array_of_a_repeated_name :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	two, err := xml.build(transmute([]u8)string("<note><item>one</item><item>two</item></note>"), .Xml)
+	walktest.expect_nil(t, err)
+	defer core.destroy(&two)
+	one, oerr := xml.build(transmute([]u8)string("<note><item>X</item></note>"), .Xml)
+	walktest.expect_nil(t, oerr)
+	defer core.destroy(&one)
+	a, b := core.Node_Ref{&two, core.ROOT}, core.Node_Ref{&one, core.ROOT}
+	for swap in ([2]bool{false, true}) {
+		r, derr := diff.values(b if swap else a, a if swap else b)
+		testing.expect_value(t, derr, nil)
+		testing.expect_value(t, len(r.changes), 1)
+		if len(r.changes) == 1 {
+			list := r.changes[0].new if swap else r.changes[0].old
+			testing.expect_value(t, core.kind(list), core.Kind.Array)
+			testing.expect_value(t, core.length(list), 2)
+			second, _ := core.child_at(list, 1)
+			testing.expect(t, core.equal(second, "two"))
+		}
+		diff.result_destroy(&r)
+	}
 }

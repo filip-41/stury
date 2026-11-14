@@ -3,6 +3,7 @@
 package cbor_tests
 
 import "core:bytes"
+import "core:fmt"
 import "core:testing"
 import core "../../core"
 import typed "../../core/typed"
@@ -101,7 +102,7 @@ models_load_items :: proc(t: ^testing.T) {
 schemas_check_items :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	bound :: proc(t: ^testing.T, text: string) -> (b: cbor.Bound_Schema, ok: bool) {
-		s, err := stury_json.load_schema(transmute([]u8)text)
+		s, err := stury_json.load_schema(transmute([]u8)text, .Json)
 		if !walktest.expect_nil(t, err) {
 			return
 		}
@@ -165,7 +166,7 @@ record_entry_points_bind_the_framing :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, count, 3)
 	testing.expect(t, it.fault == nil)
-	faults, failed := cbor.records_check(hex("01 82 02"), .Cbor)
+	faults, failed := cbor.records_validate(hex("01 82 02"), .Cbor)
 	testing.expect(t, failed == nil)
 	testing.expect_value(t, len(faults), 1)
 	other := cbor.records_open(src, .Cbor, framing = .Lines)
@@ -195,7 +196,7 @@ record_entry_points_bind_the_framing :: proc(t: ^testing.T) {
 	plan, perr := cbor.plan_make(Row)
 	walktest.expect_nil(t, perr)
 	wr: records.Writer
-	testing.expect_value(t, cbor.writer_init(&wr, {}, cbor.as(.Cbor), .Concatenated), core.Typed_Error_Kind.None)
+	testing.expect_value(t, cbor.writer_init(&wr, {}, .Cbor), core.Typed_Error_Kind.None)
 	testing.expect_value(t, records.write(&wr, Row{1}, &plan), core.Typed_Error_Kind.None)
 	testing.expect_value(t, records.write(&wr, Row{300}, &plan), core.Typed_Error_Kind.None)
 	text, werr := records.writer_end(&wr)
@@ -250,6 +251,23 @@ bound_entry_points_answer_as_the_handle :: proc(t: ^testing.T) {
 	tokens, terr := write.tokens_finish(&w)
 	testing.expect_value(t, terr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, hex_of(tokens), "8120")
+}
+
+// A `Datetime` is written after the tag of its meaning: 0 on a date-time with an offset, 1004 on a date, and none on a
+// local date-time or a time, which CBOR has no tag for. It reads back as the text it was.
+@(test)
+datetimes_marshal_with_their_tags :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	Times :: struct {
+		at, day, local, clock: typed.Datetime,
+	}
+	v := Times{"2013-03-21T20:04:00Z", "2013-03-21", "2013-03-21T20:04:00", "20:04:00"}
+	text, err := cbor.marshal(v, .Cbor)
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, hex_of(text), "a4626174c074323031332d30332d32315432303a30343a30305a63646179d903ec6a323031332d30332d3231656c6f63616c73323031332d30332d32315432303a30343a303065636c6f636b6832303a30343a3030")
+	back: Times
+	walktest.expect_nil(t, cbor.unmarshal(text, .Cbor, &back))
+	testing.expect_value(t, back, v)
 }
 
 // A `Raw` is one item in the plan's encoding, and its containers count toward the depth with the structs that hold it.
@@ -428,4 +446,34 @@ unions_and_captures_round_trip :: proc(t: ^testing.T) {
 	testing.expect(t, len(got.extra) == 2 && got.extra["zz"] == 1 && got.extra["a"] == 2)
 	missing: Drawing
 	walktest.expect_kind(t, cbor.unmarshal(hex("a1 66736861706573 81 a1 6172 01"), .Cbor, &missing, &plan), core.Typed_Error_Kind.Missing_Tag)
+}
+
+// `.Entries` gives the items of a root array and the values of a map's members, with each key's bytes, and a fault
+// ends the records at the byte `validate` gives, after the members before it.
+@(test)
+entries_are_the_members_of_a_container :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	array := "\x83\x01\xa1aa\x02cabc"
+	walktest.expect_entries(t, array, cbor.as(.Cbor), nil, "1  1\n2  {\"a\":2}\n6  \"abc\"\nend")
+	named := "\xa2al\x82\x01\x02am\x00"
+	walktest.expect_entries(t, named, cbor.as(.Cbor), {"l"}, "4  1\n5  2\nend")
+	walktest.expect_entries(t, named, cbor.as(.Cbor), nil, "3 l [1,2]\n8 m 0\nend")
+	walktest.expect_entries(t, named, cbor.as(.Deterministic), {"l"}, "4  1\n5  2\nend")
+	unordered := "\xa3al\x82\x01\x02an\x01am\x00"
+	late, _ := walktest.fault_in(cbor.validate(transmute([]u8)unordered, .Deterministic))
+	walktest.expect_entries(t, unordered, cbor.as(.Deterministic), nil, fmt.tprintf("3 l [1,2]\n8 n 1\nfault %d", late.at))
+	walktest.expect_framings(t, cbor.CAPABILITIES, cbor.as(.Cbor))
+	bad := "\x82\x01\x1c"
+	fault, _ := walktest.fault_in(cbor.validate(transmute([]u8)bad, .Cbor))
+	walktest.expect_entries(t, bad, cbor.as(.Cbor), nil, fmt.tprintf("1  1\nfault %d", fault.at))
+	it := cbor.records_open(transmute([]u8)array, .Cbor, framing = .Entries)
+	testing.expect_value(t, walktest.entries_lines(&it), "1  1\n2  {\"a\":2}\n6  \"abc\"\nend")
+}
+
+// Reading the items of an array ten times as long under `.Entries` holds no more of the reader's memory at its peak,
+// from a stream too: the cursor follows the window, which keeps no more than an item past the last record.
+@(test)
+entries_hold_one_member :: proc(t: ^testing.T) {
+	item := "\xa2bidcabcdtagsx\x64" + "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"
+	walktest.expect_entries_bounded(t, cbor.as(.Cbor), nil, "\x9f", item, "\xff", true)
 }

@@ -70,6 +70,7 @@ Interp :: struct {
 	raised:       int, // errors raised so far: tells one raise of `err` from another of the same value
 	brk:          int, // the label id a `.Break` unwinds to; -1 for `halt`
 	labels:       int, // label ids handed out so far (`fresh_label`)
+	literals:     u32, // the marks `tonumber` gave its literals, which tell one from another of the same text
 	globals:      ^Env, // the prelude's functions and the command line's variables
 	inputs:       Input_Source,
 	reading:      core_pkg.As, // how `fromjson` reads a text, as `--from` and `--max-depth` read input
@@ -465,16 +466,17 @@ negate :: proc(v: Value) -> Value {
 	#partial switch n in v {
 	case f64:
 		return -n
-	case ^Number_Text:
-		if n.text[0] == '-' {
-			return number_text(n.text[1:])
+	case Number_View:
+		text := view_text(n)
+		if text[0] == '-' {
+			return number_text(text[1:])
 		}
 		// decNumberMinus makes a zero +0, but a literal that underflows to 0.0 (1e-400) is no zero to it.
-		digits := strings.trim_left(n.text, "0.")
+		digits := strings.trim_left(text, "0.")
 		if digits == "" || digits[0] | 0x20 == 'e' {
-			return n
+			return v
 		}
-		return number_text(strings.concatenate({"-", n.text}))
+		return number_text(strings.concatenate({"-", text}, context.temp_allocator))
 	}
 	return v
 }

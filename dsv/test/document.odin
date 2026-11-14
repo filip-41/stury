@@ -496,6 +496,8 @@ duplicate_names :: proc(t: ^testing.T) {
 	ragged := dsv.Options{tolerate = {.Ragged}}
 	for c in ([]Member_Case{
 		{"a,a\n1,2\n", {}, "a", 1, 2, 2},
+		{"\"a\",b,a\n1,2,3\n", {}, "a", 1, 3, 2},
+		{"\"a\"\"\",x,\"a\"\"\"\n1,2,3\n", {}, "a\"", 1, 3, 2},
 		{"3,b\n1,2,x\n", ragged, "3", 1, 3, 2},
 		{"a,,c\n1,2,3\n", {}, "", 2, 2, 1},
 		{"a,b,c\n1,2\n", ragged, "b", 2, 2, 1},
@@ -523,6 +525,31 @@ duplicate_names :: proc(t: ^testing.T) {
 	text, _ := core.text(&doc, core.header_of(&doc) + 3, buf[:])
 	testing.expect_value(t, text, "3")
 	testing.expect_value(t, core.length(&doc, cell_node(&doc, 0, 0) - 1), 4)
+}
+
+// A header of distinct keys finds every column by name, keys that share a length and their first and last bytes included,
+// and a copy finds them once the source document is gone. A name no key spells, and a key past a short record's cells,
+// answer nothing.
+@(test)
+key_index :: proc(t: ^testing.T) {
+	src := "axb,ayb,a,b,,\"q\"\n1,2,3,4,5,6\n7,8\n"
+	names := []string{"axb", "ayb", "a", "b", "", "q"}
+	doc, err := build(src, .Csv, {tolerate = {.Ragged}})
+	walktest.expect_nil(t, err)
+	c, cerr := core.clone(&doc)
+	testing.expect_value(t, cerr, nil)
+	core.destroy(&doc)
+	defer core.destroy(&c)
+	rec, _ := core.child_at(&c, 0, 0)
+	short, _ := core.child_at(&c, 0, 1)
+	for name, col in names {
+		v, ok := core.member(&c, rec, name)
+		testing.expectf(t, ok && v == rec + core.Node_Index(1 + col), "%q: %v %v", name, v, ok)
+		_, ok = core.member(&c, short, name)
+		testing.expectf(t, ok == (col < 2), "%q in the short record: %v", name, ok)
+	}
+	_, ok := core.member(&c, rec, "ab")
+	testing.expect(t, !ok)
 }
 
 Shape_Case :: struct {

@@ -24,7 +24,8 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: str
 	ins.rows_end = end + u64(end < u64(len(ins.data)) && ins.data[end] == '\n')
 	cols := ins.run.route.columns
 	if cols == nil || !ins.header_judged {
-		built, err := records.build(&ins.texts, rec, context.allocator)
+		// --stream's document lives until its last event.
+		built, err := records.build(&ins.texts, rec, runtime.heap_allocator() if ins.run.opts.stream else context.allocator)
 		doc, fault := jq.judge_build(built, err)
 		if f, bad := fault.?; bad {
 			v, msg, status = cells_fault(ins, f)
@@ -46,6 +47,11 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: str
 		if cols == nil {
 			// The value lies in the file's bytes until its outputs are printed. What the column route prints holds none.
 			ins.pinned = true
+			if ins.run.opts.stream {
+				ins.events, ins.events_at = jq.value_events_start(doc, len(rec.text) - 1), int(rec.at)
+				v, msg, status = next_value(ins, false)
+				return
+			}
 			return jq.document_value(doc), "", .Value, false
 		}
 	}
@@ -77,6 +83,25 @@ row_noted :: #force_no_inline proc(ins: ^Inputs, v: ^jq.Value) {
 	if len(notes) > 0 {
 		v^ = jq.noted(v^, .Comment, notes)
 	}
+}
+
+// The comment lines of the open file between the record that ends at `lo` and offset `hi`, with those before its
+// header when `lo` is -1, where no record has ended.
+cells_notes :: proc(ins: ^Inputs, lo, hi: int) -> []string {
+	comment := ins.run.opts.cells_in.comment
+	if lo >= 0 {
+		return comment_lines(ins.data[lo:hi], comment)
+	}
+	from := int(core.text_start(ins.data, 0))
+	if ins.run.opts.cells_in.no_header {
+		return comment_lines(ins.data[from:hi], comment)
+	}
+	head_lo, head_hi := dsv.header_span(ins.data, ins.as)
+	head := comment_lines(ins.data[from:head_lo], comment)
+	notes := make([dynamic]string, 0, len(head))
+	append(&notes, ..head)
+	append(&notes, ..comment_lines(ins.data[head_hi:hi], comment))
+	return notes[:]
 }
 
 // The comment lines the open file holds after its last record, or all it holds when it has no record, which are the

@@ -28,6 +28,10 @@ TREE :: write.Tree {
 	.Bytes_Tag    = "",
 }
 
+// The number spellings of JSON5 past JSON's.
+@(private)
+JSON5_FORMS :: write.Number_Forms{.Hex, .Plus, .Lead_Point, .Bare_Point}
+
 // The token write of every JSON spec: a key and a string go through `put_string`.
 @(private, rodata)
 TOKENS := write.Token_Spelling {
@@ -55,27 +59,15 @@ TOKENS := write.Token_Spelling {
 		return write.tokens_marshal(t, plan, value, err, TREE, put_plain, put_opted)
 	},
 	stop = write.tokens_release,
-	comment = proc(out: ^write.Out, spec: u8, text: string) -> bool {
-		if Spec(spec) == .Json {
-			return false
+	comment = proc(t: ^write.Tokens, role: core.Role, text: string) -> core.Typed_Error_Kind {
+		// A foot of the root stands on a line of its own.
+		if role == .Comment_Inline {
+			write.put_byte(t.out, ' ')
+		} else if role == .Comment_Foot && t.top == 0 {
+			write.put_byte(t.out, '\n')
 		}
-		if out != nil {
-			write.put_text(out, "/* ")
-			// A `*/` in the text would end the comment, so a space splits it.
-			rest := text
-			for {
-				end := strings.index(rest, "*/")
-				if end < 0 {
-					write.put_text(out, rest)
-					break
-				}
-				write.put_text(out, rest[:end + 1])
-				write.put_text(out, " ")
-				rest = rest[end + 1:]
-			}
-			write.put_text(out, " */")
-		}
-		return true
+		put_block_comment(t.out, text)
+		return .None
 	},
 }
 
@@ -109,7 +101,26 @@ marshal_once :: proc(value: any, spec := Spec.Json, opts := Options{}, write := 
 }
 
 // A value spelled as JSON text for an edit: the colon is the document's own when it shows one.
+@(private)
 edit_spell :: proc(doc: ^core.Document, v: core.Value, opts: core.Write_Options, colon: string, _: bool, _: u64, allocator: runtime.Allocator) -> ([]u8, core.Error) {
 	text, err := write.write_laid(v, doc.as, opts, colon, &TOKENS, allocator)
 	return text, core.error_of(err)
+}
+
+// Writes `text` as one block comment. A `*/` in the text would end the comment, so a space splits it.
+@(private)
+put_block_comment :: proc(out: ^write.Out, text: string) {
+	write.put_text(out, "/* ")
+	rest := text
+	for {
+		end := strings.index(rest, "*/")
+		if end < 0 {
+			write.put_text(out, rest)
+			break
+		}
+		write.put_text(out, rest[:end + 1])
+		write.put_text(out, " ")
+		rest = rest[end + 1:]
+	}
+	write.put_text(out, " */")
 }

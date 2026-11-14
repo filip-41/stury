@@ -148,10 +148,6 @@ scan_begin :: proc(h: ^engine.Scan, it: ^records.Reader, src: []u8, last: ^core.
 	return started
 }
 
-// An iterator over the answers of `paths`, or of `one` when `paths` is nil, that `fill` reads.
-answers_of :: proc(src: []u8, handle: core.As, paths: []core.Path, one: core.Path, read: core.Path_Options, allocator: runtime.Allocator, fill: proc(it: ^engine.Answer_Iter)) -> engine.Answer_Iter {
-	return {src = src, as = handle, paths = paths, one = one, read = read, allocator = allocator, fill = fill, max_batch = engine.ANSWER_BATCH}
-}
 
 // The fill of an iterator over a text of spec `S`: the stream's walk with a cursor, which stops once the buffer holds a
 // batch. It judges what the walk leaves and ends the read as `scan_walk` does.

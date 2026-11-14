@@ -391,7 +391,7 @@ st_halt :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 			}
 			t.stack, t.stack_cap = ([^]Entity_Frame)(grown), cap
 		}
-		t.stack[t.depth] = {name_after[1:], end, amp, d, f.tag_lo, i}
+		t.stack[t.depth] = {name_after[1:], end, amp, d, f.tag, i}
 		t.depth += 1
 		t.head.flags += {.In_Place}
 		lit := w.base[e.lit_lo:]
@@ -407,7 +407,7 @@ st_halt :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 	}
 	if r.kind == .Truncated && r.q == end && t.depth > 0 {
 		fr := t.stack[t.depth - 1]
-		if d != fr.depth || f.tag_lo != fr.tag_lo {
+		if d != fr.depth || f.tag != fr.tag {
 			return fault(w, hs, fr.at, .Bad_Char, .Entity_Boundary)
 		}
 		t.depth -= 1
@@ -454,7 +454,7 @@ st_defaults :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^W
 	hs := core.Hook_Regs{s0, s1, s2}
 	t := w.dtd
 	f := &w.frames[e - 1]
-	tag := w.base[f.tag_lo:]
+	tag := f.tag
 	qualified := false
 	for i := dtd_find(&t.view, .Element, tag[1:][:f.name_n]); i != NO_DECL; i = t.attrs[i].next {
 		a := t.attrs[i]

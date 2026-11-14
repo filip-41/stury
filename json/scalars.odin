@@ -69,6 +69,9 @@ number_run :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec, $lax, $
 					return q2, 0, k2, 0
 				}
 				k = .Decimal
+				if r == q[1:] && (r >= end || r[0] | 0x20 != 'e') {
+					return r, core.number_spelling(u16(k), int_digits, 0) | core.NUMBER_POINT, .None, mant
+				}
 			}
 		} else {
 			if r == q[1:] {
@@ -188,7 +191,7 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 
 // JSON's `Readers.number`, false for a token that is not a number. A decimal of at most 19 digits is decoded from the
 // walk's digit counts, and the rest go to `number_slow`.
-number :: #force_inline proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) {
+token_number :: #force_inline proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) {
 	if t.kind == .Number {
 		sp := t.spelling
 		if sp & core.NUMBER_KIND_MASK <= u16(Number_Spelling.Decimal) {
@@ -218,14 +221,34 @@ number_f32 :: proc(doc: ^core.Token_View, n: core.Node) -> (f32, bool) {
 	return spell.number_hex_f32(doc.src, n.lo, n.lo + u64(n.n))
 }
 
+// JSON's `Readers.fact`: a JSON5 number's `Style`, `integer`, `float`, `hex`, `inf` or `nan`, the words TOML reads. A
+// number of the other specs has none.
+@(private)
+number_style :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Kind) -> (core.Fact_Value, bool) {
+	t := doc.nodes[i]
+	if name != .Style || t.kind != .Number || Spec(doc.as.spec) != .Json5 {
+		return {}, false
+	}
+	switch number_spelling_of(t.spelling) {
+	case .Json, .Decimal:
+		return {text = "float" if core.number_shape(t.spelling) >= 32 else "integer"}, true
+	case .Hex:
+		return {text = "hex"}, true
+	case .Infinity:
+		return {text = "inf"}, true
+	case .Nan:
+		return {text = "nan"}, true
+	}
+	return {}, false
+}
+
 // Decodes what `number` does not: long decimals, hex, `Infinity` and `NaN`.
 @(private, cold)
 number_slow :: #force_no_inline proc(doc: ^core.Token_View, n: core.Node) -> core.Number {
 	lo, hi := n.lo, n.lo + u64(n.n)
 	switch number_spelling_of(n.spelling) {
 	case .Json, .Decimal:
-		// JSON5's `5.` has no fraction digit, so it is the integer `5`.
-		num, _, _, _ := spell.number_loose(doc.src, lo, hi - u64(doc.src[hi - 1] == '.'))
+		num, _, _, _ := spell.number_loose(doc.src, lo, hi)
 		return num
 	case .Hex:
 		return spell.number_hex(doc.src, lo, hi)

@@ -39,7 +39,14 @@ arena_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: 
 			}
 			return ([^]byte)(old)[:size], nil
 		}
-	case .Alloc, .Alloc_Non_Zeroed, .Free, .Query_Features, .Query_Info:
+	case .Alloc, .Alloc_Non_Zeroed:
+		if room, ok := take_committed(arena, size, alignment); ok {
+			if mode == .Alloc {
+				intrinsics.mem_zero(raw_data(room), len(room))
+			}
+			return room, nil
+		}
+	case .Free, .Query_Features, .Query_Info:
 	}
 	out, err = virtual.arena_allocator_proc(data, mode, size, alignment, old, old_size, loc)
 	if err == nil && (mode == .Alloc || mode == .Resize) {
@@ -176,6 +183,25 @@ in_arena :: proc(a: ^virtual.Arena, p: rawptr) -> bool {
 	return false
 }
 
+// `size` bytes of the current block of `arena`, as `virtual.arena_alloc` takes them, when they fit in its committed room,
+// false when they do not. It takes no lock: an interpreter's arena is used by one thread at a time.
+@(private = "file")
+take_committed :: #force_inline proc "contextless" (arena: ^virtual.Arena, size, alignment: int) -> ([]byte, bool) {
+	b := arena.curr_block
+	if b == nil || size <= 0 {
+		return nil, false
+	}
+	pad := uint(-(uintptr(b.base) + uintptr(b.used)) & uintptr(alignment - 1))
+	need := pad + uint(size)
+	if b.committed - b.used < need {
+		return nil, false
+	}
+	out := b.base[b.used + pad:][:size]
+	b.used += need
+	arena.total_used += need
+	return out, true
+}
+
 // The allocator of an output scope's arena: the virtual arena's, which keeps the memory past a block's use zeroed so
 // that `.Alloc` writes nothing, but a shrink by KEPT_TAIL or more leaves the tail in use, neither given back nor
 // zeroed, until the arena is emptied. A build's unused node room, reserved for a text as long as the file, is then
@@ -191,6 +217,9 @@ KEPT_TAIL :: 64 << 10
 scope_arena_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old: rawptr, old_size: int, loc := #caller_location) -> ([]byte, runtime.Allocator_Error) {
 	switch mode {
 	case .Alloc, .Alloc_Non_Zeroed:
+		if room, ok := take_committed((^virtual.Arena)(data), size, alignment); ok {
+			return room, nil
+		}
 		return virtual.arena_alloc((^virtual.Arena)(data), uint(size), uint(alignment), loc)
 	case .Resize, .Resize_Non_Zeroed:
 		if old != nil && 0 < size && size <= old_size - KEPT_TAIL && uintptr(old) & uintptr(alignment - 1) == 0 {
@@ -772,14 +801,11 @@ copy_value :: proc(c: ^Copier, v: Value) -> Value {
 		d.src = transmute([]byte)copy_string(c, string(x.doc.src))
 		c.made[{x.doc, -1}] = Ref{d, core_pkg.ROOT}
 		return Ref{d, x.node}
-	case ^Number_Text:
-		text := copy_string(c, x.text)
-		if raw_data(text) == raw_data(x.text) && !held(c, x) {
+	case Number_View:
+		if !held(c, x.text) {
 			return x
 		}
-		made := new_clone(x^)
-		made.text = text
-		return made
+		return view_copy(x)
 	case string:
 		return copy_string(c, x)
 	case ^Array:

@@ -17,7 +17,7 @@ records.cell   :: proc(it: ^records.Reader, rec: records.Record, column: int, bu
 records.cells  :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto := max(int)) -> ([]write.Scalar, bool)
 records.next_window :: proc(it: ^records.Reader) -> (window: []u8, base: u64, ok: bool)
 records.close :: proc(it: ^records.Reader)
-records.check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> (faults: []core.Fault, err: runtime.Allocator_Error)
+records.validate :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> (faults: []core.Fault, err: runtime.Allocator_Error)
 records.validate_parallel :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> core.Error
 records.each :: proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0) -> core.Error
 json.spine :: proc(src: []u8, as: core.As) -> (at: u64, levels: int, ok: bool)
@@ -103,6 +103,8 @@ A record whose text does not read returns true and its error, and the next `scan
 | `.Concatenated` | one document of a text of documents one after another, as jq reads its input, from its value's first byte to its last |
 | `.Entries` | one element of the root array, or the value of one member of the root object, with its key in `key` |
 
+- Each format's `CAPABILITIES.framings` names the framings its records open in, and another framing ends the records
+  with `.Bad_Option`.
 - A line of whitespace alone is no record, under `.Lines` and between two 0x1E under `.Seq`. Whitespace is the format's:
   JSON5 has VT, FF, NBSP, the byte order mark and the other Unicode spaces besides JSON's four bytes.
 - A UTF-8 byte order mark is passed over at the input's first byte only. One that starts a later record is the record's,
@@ -122,8 +124,24 @@ A record whose text does not read returns true and its error, and the next `scan
 - `entries` names a path of object keys, as `records.open(src, as, .Entries, entries = {"data"})` or
   `Stream_Options{entries = {"data"}}`. The records are then the elements or members of the container at that path, and
   text outside it is judged but gives no record. A path that is absent or names a scalar gives no records.
-- A YAML stream's documents and a CBOR sequence's items are records under `.Concatenated`, the one framing those
-  formats take. A record reader does not pass over a byte order mark in a binary format's text, whose bytes are not
+- In YAML, TOML, XML, HTML and CBOR the records under `.Entries` are the members of the root or of the container
+  `entries` names, the first member of each name whose value is a container: a YAML block sequence, the children of
+  an XML or HTML element, a TOML `[[x]]` array of tables. A record's `text` is its member's bytes.
+- YAML, XML and CBOR give each member as the walk reads its last byte, and the walk resumes from there for the next,
+  so a fault ends the records at its byte after every member before it. A member's document is built from the tokens
+  the walk read of it in its place, so it reads as the whole text's build reads it: a YAML alias to an earlier anchor and
+  a tag by a `%TAG` handle, an XML prefix an ancestor declares and the DTD's entities and attribute defaults. An earlier
+  member builds by a walk to it again, from the reader's first position or, on a stream past it, from the walk as it
+  stood at the window's start, and one whose bytes a stream's window no longer holds is `.Bad_Index`, as in JSON.
+- `read` of a YAML, TOML, XML, HTML or CBOR record under `.Entries` reads the member's document, as the format's
+  `unmarshal` reads a built text, and under `.Refuse` is `.Bad_Option`.
+- TOML reads its whole text into a tree first, because a later `[x.y]` table may add to an `[[x]]` member already
+  read. HTML does too, because an element's end may be implied by a tag that comes later. A record's document there is
+  its member's part of the tree, and a fault ends the records before any.
+- Under `.Entries` these formats read on one thread: a piece cannot start inside the container without the walk from
+  the text's start, since a YAML line's meaning hangs on the lines above it, an XML text's on the declarations before
+  it, and no CBOR byte marks where an item starts.
+- A YAML stream's documents and a CBOR sequence's items are records under `.Concatenated`. A record reader does not pass over a byte order mark in a binary format's text, whose bytes are not
   characters.
 - A format with no record reader, or one that does not take the framing, ends the records with `.Bad_Option` before
   any is read.
@@ -219,8 +237,19 @@ for rec in records.next(&it) {
 - The window always ends on a whole record. Under `.Lines` and `.Seq` it ends at the last LF or 0x1E it holds. Under
   `.Concatenated` a record whose walk faults within 12 bytes of the window's end, or ends at it, while more input may
   come, is walked again once more is read, since the bytes after it may make it whole. A record with a byte after it,
-  such as the LF a pipe's writer ends a text with, is given at once. Under `.Entries` the window holds the text before the container up to its first member, then whole
-  members, at the root or at the path `Stream_Options.entries` names, so a record is given as it is read.
+  such as the LF a pipe's writer ends a text with, is given at once, and so is one that ends the window in a format
+  whose `Framing_Services.closed` says no later byte continues it, as a CBOR item. Under `.Entries` the window holds the text before the container up to its first member, then whole
+  members, at the root or at the path `Stream_Options.entries` names, so a JSON, YAML or CBOR record is given as it is
+  read. A YAML member is given once the window holds 16 bytes past the next byte after it that is no white space or
+  line break, since its walk ends a node at the line after it. The window keeps the node of every anchor an alias may
+  still name: one that a later anchor of its name hides leaves it, and one no later anchor hides keeps the window from
+  its node on. A YAML stream's alias limit, unless `alias_limit` sets it, counts the bytes read so far. Under
+  `merge_keys` the window also keeps the members a `<<` holds, until their mapping closes, and the reader copies out
+  the text of the open mappings' keys. An XML record is given once the window holds the next element end past it,
+  and the window keeps the bytes from the walk's pause on, with the names of the open elements and the namespaces in
+  scope copied out of it. A DTD that declares an entity or an attribute list stays at the window's start through its
+  moves, as `Reader.pin` bytes, since the nodes its entities and defaults give span the DTD's bytes. In the other
+  formats the window grows to the whole input before the first record, since their walks resume over one text.
 - When the input ends inside a record that a longer input could finish, a `Truncated` fault at the input's end, the
   records end with no fault and the bytes past the last whole record in `it.held`, at offset `it.held_at`. Under
   `.Concatenated` those bytes start after the last record, gap included. The same text in memory ends on the
@@ -289,6 +318,11 @@ pages as the pieces finish, since threads that write fresh pages of one allocati
 that is not so, or a piece that does not build, is built on the calling thread, which gives its refusal. `pieces` is
 set to the pieces a joined build cut, and left alone otherwise.
 
+A long CSV or TSV table is built so too: its rows are the entries, and a piece's rows are built keyless by one walk.
+The text around them is the header row, built with its table, and the joined document gets its table, line ends and
+kinds as a build on one thread completes them. A table read with a comment byte or with `.Ragged`, whose rows may widen
+its header, and one with a row too wide for a node's child count, are built on the calling thread.
+
 ## Writing
 
 `records.Writer` writes a list one record at a time, with `records.write` for a typed value by its plan, `write_text` for a
@@ -303,7 +337,7 @@ points at, and the reads of a record's value as a `records.Record_Docs`, which `
 an entry point opens takes from the caller (`it.docs = json.record_docs(.Json)`). `next` holds one procedure per framing, nil for a framing the format does not take, which frames the next record
 and stores the fault that ends the records in `it.fault`. `judge` returns a record's fault (`records.no_judge` for a format whose `next` judges what it frames), `read`, `build` and `scan` read
 one, and `build_next` frames the next record by the walk that writes its nodes to a builder (nil where the format
-builds whole texts on one thread). `guess` moves a piece's reader to where a record may start, and marks it so that a fault ends its records
+builds whole texts on one thread), and `joined` completes a joined document as the format's own build completes it. `guess` moves a piece's reader to where a record may start, and marks it so that a fault ends its records
 without the cost of finding the whole text's fault. `exact` gives the scan whose cuts `each` starts pieces at, `cut` finds a cut in a range of the text for a format
 whose separators no quote scan finds (YAML's `---` and `...` lines), and `piece` turns a copy of a reader past its
 first record into a piece's reader. `whole` names the framing and offset `validate_parallel` reads a whole

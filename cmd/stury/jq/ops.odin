@@ -116,8 +116,9 @@ built_f64 :: #force_inline proc(v: Value) -> (f64, bool) {
 	#partial switch n in v {
 	case f64:
 		return n, true
-	case ^Number_Text:
-		return n.double, true
+	case Number_View:
+		// A view without its double is read in `other_binary_op`, so that this one calls nothing.
+		return held_f64(n)
 	}
 	return 0, false
 }
@@ -128,8 +129,8 @@ operand_f64 :: #force_inline proc(v: Value) -> (f64, bool) {
 	#partial switch n in v {
 	case f64:
 		return n, true
-	case ^Number_Text:
-		return n.double, true
+	case Number_View:
+		return view_f64(n), true
 	case Ref:
 		node := n.doc.nodes[n.node]
 		if node.kind == .Number && node.spelling & core_pkg.NUMBER_KIND_MASK == 0 {
@@ -147,6 +148,11 @@ cannot :: proc(ip: ^Interp, a, b: Value, what: string) -> (Value, Signal) {
 
 // The sum carries no comments, as any value computed does.
 add :: proc(ip: ^Interp, a, b: Value, owned: ^Owned = nil) -> (Value, Signal) {
+	if x, is_number := built_f64(a); is_number {
+		if y, both := built_f64(b); both {
+			return x + y, .Go
+		}
+	}
 	ka, kb := kind(a), kind(b)
 	switch {
 	case ka == .Null:

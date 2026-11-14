@@ -31,6 +31,13 @@ marshal_once :: proc(value: any, spec := Spec.Csv, opts := Options{}, write := c
 	return typed.marshal_planned(&plan, refusal, v.data, write, allocator)
 }
 
+// A cell is written as it stands, so the writer takes no layout or escape option.
+CAPABILITIES :: core.Capabilities {
+	writes = {.Sort_Keys},
+	framings = {.Lines},
+	specs = Spec,
+}
+
 // The handle of a delimited text of `spec` read or written with `opts`, which holds the delimiter `spec` reads when
 // `opts` leaves it 0. See the file's header for what a document may hold.
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
@@ -53,7 +60,7 @@ options_of :: #force_inline proc "contextless" (as: core.As) -> Options {
 
 // The spelling's `write`: `doc` as the handle `as` says.
 @(private)
-document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Refusal) {
+document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
 	spec, layout := Spec(as.spec), options_of(as)
 	if !layout_ok(spec, layout) {
 		return nil, 0, {kind = .Bad_Option}
@@ -70,7 +77,7 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 	if err.kind != .None {
 		return nil, 0, err
 	}
-	return text, len(core.subtree_facts(doc, node)) - w.kept + w.dropped, err
+	return text, w.kept - w.dropped, err
 }
 
 // The header, then each record of the array at `list`. The header is the document's shared keys, else the keys of its
@@ -209,18 +216,24 @@ write_records :: #force_inline proc(w: ^Rows, doc: ^core.Document, list: core.No
 	return .None
 }
 
-// Writes each of node `node`'s comments of `role` whose body holds no line end as a comment line, and counts it written.
+// Writes each of node `node`'s comments of `role` as comment lines, one for each line of its body, and counts it
+// written. A body with a control byte a line cannot hold is left out.
 @(private)
 put_comments :: proc(w: ^Rows, doc: ^core.Document, node: core.Node_Index, role: core.Role) -> core.Typed_Error_Kind {
 	it := core.facts_of(doc, node, role)
-	for body in core.fact_next(&it) {
-		if strings.index_any(body, "\r\n") >= 0 {
+	for text, padded in core.comment_next(&it) {
+		if !write.comment_lines_ok(text) {
 			continue
 		}
 		w.kept += 1
-		write.put_byte(&w.out, w.opts.comment)
-		write.put_text(&w.out, body)
-		end_line(w) or_return
+		// An empty body is one empty line.
+		rest := text if len(text) > 0 else "\n"
+		for line in strings.split_lines_iterator(&rest) {
+			write.put_byte(&w.out, w.opts.comment)
+			write.put_text(&w.out, " " if padded && len(line) > 0 else "")
+			write.put_text(&w.out, line)
+			end_line(w) or_return
+		}
 	}
 	return .None
 }

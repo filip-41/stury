@@ -37,7 +37,7 @@ SCALAR :: "\x01"
 MEMBERS :: "\x02"
 
 // Returns an edit list over `doc`. A document an entry point reads holds no edit services, so the list takes HTML's.
-edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List {
+edit_list_init :: proc(doc: ^core.Document, $S: Spec, allocator := context.allocator) -> core.Edit_List {
 	list := core.edit_list_init(doc, allocator)
 	list.edit = &EDIT
 	return list
@@ -47,8 +47,8 @@ edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.all
 // `allocator`. Every byte the edit does not reach is kept. A `typed.Raw` is an element's content as HTML, a struct, a
 // slice or a map is built by `plan`, and any other value is written as an element's content. A `Name` the path ends in
 // that its element lacks is inserted as its last child.
-set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	return write.set_with(src, bound_as(spec, opts), build_handle, &EDIT, path, v, plan, read, allocator)
+set :: proc(src: []u8, $S: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+	return write.set_with(src, bound_as(S, opts), build_handle, &EDIT, path, v, plan, read, allocator)
 }
 
 // Spells a value an edit writes as an element's content: null as none, a scalar as `SCALAR` and its text, an object as
@@ -86,7 +86,8 @@ put_content :: proc(w: ^Writer, value: core.Value, top: bool) -> core.Typed_Erro
 		spill: [write.ROOM_MAX]u8 = ---
 		members := Writer{opts = w.opts}
 		write.init(&members.out, &spill, context.temp_allocator)
-		text, err := write.finish(&members.out, {kind = put_members(&members, v, 0, false)})
+		_, kind := put_members(&members, v, 0, false)
+		text, err := write.finish(&members.out, {kind = kind})
 		if err.kind != .None {
 			return err.kind
 		}
@@ -298,6 +299,9 @@ element_of :: proc(doc: ^core.Document, v: core.Node_Index) -> (e: compose.Marku
 		return e
 	}
 	c := max(e.open, n.lo + u64(n.n))
+	if n.kind == .Plain && n.spelling & TEXT_PIECES != 0 {
+		c = max(e.open, min(c, text_before_read_on(doc, n.lo)))
+	}
 	for f in core.all_facts(doc, v) {
 		if (f.role == .Comment || f.role == .Instruction) && f.lo >= e.open {
 			c = max(c, f.lo + u64(f.n))
@@ -312,6 +316,22 @@ element_of :: proc(doc: ^core.Document, v: core.Node_Index) -> (e: compose.Marku
 	return e
 }
 
+// The end of the text at `lo` before the white space the tree read into it past tokens it ignored, which the commit
+// treats as text past the element's span.
+@(private = "file")
+text_before_read_on :: proc(doc: ^core.Document, lo: u64) -> u64 {
+	pieces, _ := text_pieces(doc.state, lo)
+	k := len(pieces) - 1
+	for ; k > 0 && pieces[k].lo > pieces[k - 1].lo + u64(pieces[k - 1].n); k -= 1 {
+		for c in doc.src[pieces[k].lo:][:pieces[k].n] {
+			if !is_space(c) {
+				return pieces[k].lo + u64(pieces[k].n)
+			}
+		}
+	}
+	return pieces[k].lo + u64(pieces[k].n) if k >= 0 else lo
+}
+
 @(private)
 edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 	for e in list.edits {
@@ -319,15 +339,33 @@ edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocato
 			return nil, 0, {kind = .Frozen, at = u64(e.node), inner = {rules = &RULES, detail = u8(Detail.Constructed)}}
 		}
 	}
-	out, err = compose.markup_commit(list, &MARKUP, allocator)
-	if err.kind != .None {
-		return nil, 0, err
+	// The settled list shares the list's parents, which the list frees.
+	if core.parents_of(list) == nil {
+		return nil, 0, {kind = .No_Memory}
 	}
-	if err = reread(list, out); err.kind != .None {
-		delete(out, allocator)
-		return nil, 0, err
+	// The text past an element that a value keeps reads into it only while the edit leaves the tokens before that text
+	// ignored. An edit that ends the select or table they were ignored in makes them close elements, so the value is
+	// then written whole and the text cut.
+	for keep in ([?]bool{true, false}) {
+		edits, cut, kept := settle_read_on(list, keep)
+		defer delete(edits)
+		defer delete(cut)
+		settled := list^
+		settled.edits = edits
+		out, err = compose.markup_commit(&settled, &MARKUP, allocator, cut[:])
+		if err.kind != .None {
+			return nil, 0, err
+		}
+		if err = reread(&settled, out); err.kind != .None {
+			delete(out, allocator)
+			if kept && err.kind == .Bad_Result {
+				continue
+			}
+			return nil, 0, err
+		}
+		return out, 0, {}
 	}
-	return out, 0, {}
+	return nil, 0, err
 }
 
 // The member value whose bytes edit `e` writes at. For an insert it is the member the insert goes before, or the last
@@ -382,7 +420,8 @@ Written :: struct {
 	counted: bool,
 }
 
-// Reads `out` as the document's spec and compares its tree with the tree the edits of `list` make.
+// Reads `out` as the document's spec and compares its tree with the tree the edits of `list` make, and its values with
+// the values the edits wrote. It is HTML's read back of a commit, so the commit reads the output once.
 @(private = "file")
 reread :: proc(list: ^core.Edit_List, out: []u8) -> core.Document_Error {
 	doc := list.doc
@@ -440,10 +479,13 @@ reread :: proc(list: ^core.Edit_List, out: []u8) -> core.Document_Error {
 		}
 		return {kind = .Bad_Result, inner = berr.inner}
 	}
-	if same(&r, doc, core.ROOT, &built, core.ROOT) {
-		return {}
+	if !same(&r, doc, core.ROOT, &built, core.ROOT) {
+		return {kind = .Bad_Result, inner = core.Fault{at = r.at.? or_else 0, rules = &RULES, kind = .Bad_Char, detail = u8(Detail.Reread)}}
 	}
-	return {kind = .Bad_Result, inner = core.Fault{at = r.at.? or_else 0, rules = &RULES, kind = .Bad_Char, detail = u8(Detail.Reread)}}
+	if reads, known := core.reads_as_edited(list, core.Node_Ref{&built, core.ROOT}); known && !reads {
+		return {kind = .Bad_Result, reason = .Reads_Back_Other}
+	}
+	return {}
 }
 
 // Whether each object that edit `e` wrote, as `edit_spell` spells it, reads back as written in the element it goes in:
@@ -593,6 +635,7 @@ same_content :: proc(doc: ^core.Document, y: ^core.Document, b: core.Node_Index)
 			content = content[1:]
 		}
 	}
+	content = slice.concatenate([][]u8{content, read_on(y, b, e.close)})
 	read := options_of(doc.as)
 	opts := Options{max_depth = read.max_depth, infer = read.infer, scripting = read.scripting, context_name = name, context_namespace = ns}
 	frag, err := build_spec(content, .Fragment, as_of(&READERS, .Fragment, opts), false, context.allocator)
@@ -612,4 +655,126 @@ same_content :: proc(doc: ^core.Document, y: ^core.Document, b: core.Node_Index)
 	}
 	got := core.node_string(y, b)
 	return text == got || text == "" && strings.trim(got, " \t\n\r\f") == ""
+}
+
+// The text the tree gives element `b` of `y` past `close`, where its content ends: the white space that follows the
+// tokens the tree ignored there.
+@(private = "file")
+read_on :: proc(y: ^core.Document, b: core.Node_Index, close: u64) -> []u8 {
+	out: [dynamic]u8
+	for k in b ..< b + core.Node_Index(core.subtree_size(y, b)) {
+		if y.nodes[k].kind != .Plain || y.nodes[k].spelling & TEXT_PIECES == 0 {
+			continue
+		}
+		pieces, _ := text_pieces(y.state, y.nodes[k].lo)
+		for p in pieces {
+			if p.lo >= close {
+				append(&out, ..y.src[p.lo:][:p.n])
+			}
+		}
+	}
+	return out[:]
+}
+
+// The edits of `list`, and the splices that cut source bytes, for the text that reads into an element past its span
+// once a set makes the element a text: the element, which keeps no child, is then the current node across the tokens
+// the tree ignores past it. Under `keep`, a scalar set that ends with that text is written without it, which keeps the
+// source's, and `kept` says one was. Any other set cuts it, so that the element reads as the value.
+@(private = "file")
+settle_read_on :: proc(list: ^core.Edit_List, keep: bool) -> (edits: [dynamic]core.Edit, cut: [dynamic]compose.Splice, kept: bool) {
+	doc := list.doc
+	append(&edits, ..list.edits[:])
+	parents := core.parents_of(list)
+	for &e in edits {
+		if e.op != .Set || e.role != .Value || e.node == core.ROOT || core.key_equals(doc, e.node - 1, core.MARKUP_TEXT) {
+			continue
+		}
+		// The body's end tag leaves it the current node.
+		el := element_of(doc, e.node)
+		if el.end_tag && !core.key_equals(doc, e.node - 1, "body") || el.close >= u64(len(doc.src)) {
+			continue
+		}
+		tail := text_past(doc, parents, e.node, el.close)
+		if len(tail) == 0 {
+			continue
+		}
+		text := string(e.text)
+		joined := 0
+		for t in tail {
+			joined += int(t.hi - t.lo)
+		}
+		if keep && strings.has_prefix(text, SCALAR) && len(text) - 1 >= joined && ends_with_spans(text, doc.src, tail[:]) {
+			e.text = e.text[:len(e.text) - joined]
+			kept = true
+			continue
+		}
+		for t in tail {
+			append(&cut, compose.Splice{lo = t.lo, hi = t.hi, seq = len(cut)})
+		}
+	}
+	return edits, cut, kept
+}
+
+// Whether `text` ends with the source bytes of `spans` in order.
+@(private = "file")
+ends_with_spans :: proc(text: string, src: []u8, spans: []compose.Splice) -> bool {
+	at := len(text)
+	#reverse for t in spans {
+		n := int(t.hi - t.lo)
+		if string(src[t.lo:t.hi]) != text[at - n:at] {
+			return false
+		}
+		at -= n
+	}
+	return true
+}
+
+// The texts from `close` up to the first token that ends element `v` as the current node: a start tag, a DOCTYPE, an
+// instruction, an end tag of an element `v` is in, or one that names `v`, which the tree ignored where `v` held its
+// children. The tree takes nothing from the other end tags, and after the body's and the document's end tags it puts
+// text in the current node.
+@(private = "file")
+text_past :: proc(doc: ^core.Document, parents: []core.Node_Index, v: core.Node_Index, close: u64) -> [dynamic]compose.Splice {
+	Past :: struct {
+		src:       []u8,
+		name:      string,
+		closes:    [dynamic]u64,
+		texts:     [dynamic]compose.Splice,
+		allocator: runtime.Allocator,
+	}
+	on :: proc "contextless" (p: ^Past, t: ^Html_Token) -> Token_Action {
+		context = runtime.default_context()
+		context.allocator = p.allocator
+		#partial switch t.kind {
+		case .Text:
+			append(&p.texts, compose.Splice{lo = t.lo, hi = t.hi})
+		case .Comment, .Error:
+		case .End_Tag:
+			name := p.src[t.name.lo:][:t.name.n]
+			if fold_name_equal(name, "body") || fold_name_equal(name, "html") {
+				return .Next
+			}
+			if fold_name_equal(name, p.name) {
+				return .Stop
+			}
+			for c in p.closes {
+				if c == t.lo {
+					return .Stop
+				}
+			}
+		case:
+			return .Stop
+		}
+		return .Next
+	}
+	p := Past{src = doc.src, name = core.node_string(doc, v - 1), closes = make([dynamic]u64, context.temp_allocator), texts = make([dynamic]compose.Splice, context.temp_allocator), allocator = context.temp_allocator}
+	for a := parent_of(parents, v); a != core.ROOT; a = parent_of(parents, a) {
+		if doc.nodes[a].kind == .Object {
+			if el := element_of(doc, a); el.end_tag {
+				append(&p.closes, el.close)
+			}
+		}
+	}
+	tokenize(doc.src, &p, on, from = close, allocator = context.temp_allocator)
+	return p.texts
 }

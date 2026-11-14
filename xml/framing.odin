@@ -7,8 +7,9 @@ import core "../core"
 // What stands around the root element: the XML declaration, comments, processing instructions, the document type
 // declaration, and after the root the comments and instructions that end the text.
 
-// Reads the prolog of the document in `src` from `lo`, gives the `Doctype`, the prolog's comments and instructions, and
-// the document's `Object`, then reads the root element and the epilog. Returns the walk's result.
+// Reads the prolog of the document in `src` from `lo`, gives the XML declaration as a `Directive`, the `Doctype`, the
+// prolog's comments and instructions, and the document's `Object`, then reads the root element and the epilog.
+// Returns the walk's result.
 @(private)
 prolog :: proc "contextless" (w: ^Walk($H), src: []u8, lo: u64, s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
@@ -24,11 +25,15 @@ prolog :: proc "contextless" (w: ^Walk($H), src: []u8, lo: u64, s0, s1, s2: u64,
 		if kind != .None {
 			return fault(w, hs, next, kind, detail)
 		}
+		if x := emit(w, on, &hs, .Plain, .Directive, at(w, q), intrinsics.ptr_sub(next, q)); x != .Next {
+			return refused(w, hs, x, next)
+		}
 		q, standalone = next, alone
 	}
 	result: u64
 	ok: bool
-	q, result, ok = prolog_misc(w, on, &hs, q, end)
+	lead: [^]u8
+	q, lead, result, ok = prolog_misc(w, on, &hs, q, end)
 	if !ok {
 		return result
 	}
@@ -41,7 +46,7 @@ prolog :: proc "contextless" (w: ^Walk($H), src: []u8, lo: u64, s0, s1, s2: u64,
 		if x := emit(w, on, &hs, .Plain, .Doctype, at(w, q), intrinsics.ptr_sub(r, q)); x != .Next {
 			return refused(w, hs, x, r)
 		}
-		q, result, ok = prolog_misc(w, on, &hs, r, end)
+		q, lead, result, ok = prolog_misc(w, on, &hs, r, end)
 		if !ok {
 			return result
 		}
@@ -61,6 +66,9 @@ prolog :: proc "contextless" (w: ^Walk($H), src: []u8, lo: u64, s0, s1, s2: u64,
 	if x := emit(w, on, &hs, .Object, .Value, at(w, q), 0, 0, max(u64)); x != .Next {
 		return refused(w, hs, x, q)
 	}
+	if x, at_ := give_misc(w, on, &hs, lead, q, end, false, .Comment); x != .Next {
+		return refused(w, hs, x, at_)
+	}
 	return st_start(q, end, 0, w, hs.a, hs.b, hs.c, on)
 }
 
@@ -72,18 +80,50 @@ declares :: #force_inline proc "contextless" (q, end: [^]u8) -> bool #no_bounds_
 }
 
 // Reads the run of comments and instructions before the root element or after the document type declaration, and
-// gives them as comments of the document. Returns where it ends, or the walk's result as `fault`.
+// gives them as comments of the document up to `lead`. Those from `lead` to the root element, after the run's last
+// blank line or instruction, are the root element's, which the caller gives after the document's `Object`. Returns where the run
+// ends, or the walk's result as `fault`.
 @(private)
-prolog_misc :: proc "contextless" (w: ^Walk($H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, p, end: [^]u8) -> (q: [^]u8, result: u64, ok: bool) {
+prolog_misc :: proc "contextless" (w: ^Walk($H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, p, end: [^]u8) -> (q, lead: [^]u8, result: u64, ok: bool) {
 	r: Run
 	q, r = misc_run(w, p, end)
 	if r.kind != .None {
-		return q, run_fault(w, hs^, r), false
+		return q, q, run_fault(w, hs^, r), false
 	}
-	if x, at_ := give_misc(w, on, hs, p, q, end, false, .Comment); x != .Next {
-		return q, refused(w, hs^, x, at_), false
+	lead = q
+	when H != core.No_Hooks {
+		if intrinsics.ptr_sub(end, q) < 9 || string(q[:9]) != "<!DOCTYPE" {
+			lead = blank_line_end(w, p, q)
+		}
 	}
-	return q, 0, true
+	if x, at_ := give_misc(w, on, hs, p, lead, end, false, .Comment); x != .Next {
+		return q, q, refused(w, hs^, x, at_), false
+	}
+	return q, lead, 0, true
+}
+
+// One past the last blank line or instruction in the run from `p` to `q` that `misc_run` has read, or `p` when it has
+// neither. An instruction is the document's, as the comments before it are.
+@(private)
+blank_line_end :: proc "contextless" (w: ^Walk($H), p, q: [^]u8) -> [^]u8 #no_bounds_check {
+	lead := p
+	breaks := 0
+	for x := p; x < q; {
+		switch {
+		case x[0] == '<' && x[1] == '!':
+			x, breaks = run(w, x[4:], q, .Comment, 0).q[3:], 0
+		case x[0] == '<':
+			x, _ = instruction(w, x, q)
+			lead, breaks = x, 0
+		case:
+			breaks += int(x[0] == '\n')
+			x = x[1:]
+			if breaks == 2 {
+				lead = x
+			}
+		}
+	}
+	return lead
 }
 
 // Reads the run of comments and instructions after the root element, which ends the text. A comment on the line

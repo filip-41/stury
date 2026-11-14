@@ -227,7 +227,7 @@ gen_range :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Si
 	lo, hi, by := bounds[0], bounds[1], bounds[2]
 	// The first output is the start itself, as jq's is, and keeps a literal's identity (jv_identical):
 	// `range(3) | path(round)` fails on 0 as jq's does.
-	v := args[0] if len(args) > 1 else Value(&range_start)
+	v := args[0] if len(args) > 1 else Value(number_view("0", 0))
 	for x := lo; (by > 0 && x < hi) || (by < 0 && x > hi); x += by {
 		if sig := emit_made(out, input, v, track); sig != .Go {
 			return sig
@@ -236,10 +236,6 @@ gen_range :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Si
 	}
 	return .Go
 }
-
-// range/1's start, jq's `range(0; $upto)`: a literal 0 of the program.
-@(private = "file")
-range_start := Number_Text{text = "0"}
 
 // `..`: the input and everything inside it, depth first.
 native_recurse :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {

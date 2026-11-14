@@ -33,6 +33,8 @@ Opts :: struct {
 	stream_errors:    bool, // and an error as a [message, path] event
 	from:             Format, // how the input is read
 	to:               Format, // how the outputs are written
+	from_spec:        Maybe(u8), // the spec of `from` that `--from FORMAT:SPEC` names
+	to_spec:          Maybe(u8), // the spec of `to` that `--to FORMAT:SPEC` names
 	grow_header:      bool, // --grow-header: --to csv or tsv holds all rows and writes a header of every key
 	cells_in:         dsv.Options, // how a --from csv or tsv text is read
 	cells_out:        dsv.Options, // how a --to csv or tsv text is written
@@ -74,11 +76,14 @@ Cli :: struct {
 	compact_given: bool,
 	// --from and --to as given on the command line. `parse_args` resolves them into `Opts`.
 	formats:    struct {
-		from, to: Maybe(Format),
+		from, to:           Maybe(Format),
+		from_spec, to_spec: Maybe(u8),
 	},
-	// The first JSON-output-only option given (-r, -c, --indent...), the first of them that no text of another format
-	// takes (-r, --seq, --tab...), and the first JSON layout option given.
-	json_flag, text_flag, layout_flag: string,
+	// The first option given that shapes JSON text alone (-r, --seq, -C...), the first given of each write option a
+	// format's writer may honour (-c, --indent, --tab, -a, -S), and the first JSON layout option given.
+	text_flag:    string,
+	option_flags: [core.Write_Option]string,
+	layout_flag:  string,
 	// The first option given that reads a delimited text (--delimiter...), and the first that writes one (--crlf...).
 	cells_flag, cells_out_flag: string,
 	// The option --infer, which types a text value of a delimited text, of XML or of HTML.
@@ -121,6 +126,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		}
 	}
 	o.from, o.to = cli.formats.from.? or_else .Json, cli.formats.to.? or_else .Json
+	o.from_spec, o.to_spec = cli.formats.from_spec, cli.formats.to_spec
 	cli.json_reading = json.as(FORMATS[o.from].spec, {max_depth = o.max_depth, refuse_non_finite = true})
 	args_done := false
 	for i := 0; i < len(args); i += 1 {
@@ -155,7 +161,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		switch name := a[2:]; name {
 		case "tab":
 			o.compact, o.indent = false, -1
-			note_json_flag(&cli, "--tab", layout = true)
+			note_json_flag(&cli, "--tab", .Tab, layout = true)
 		case "indent":
 			if i + 1 >= len(args) {
 				usage_error("--indent takes one parameter")
@@ -165,7 +171,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 				usage_error("--indent takes a number between -1 and 7")
 			}
 			o.compact, o.indent = false, n
-			note_json_flag(&cli, "--indent", layout = true, laid = true)
+			note_json_flag(&cli, "--indent", .Indent, layout = true)
 			i += option_arity(a)
 		case "max-depth":
 			if i + 1 >= len(args) {
@@ -302,7 +308,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	// fmt writes each input as its own format unless --to says otherwise, so its --to follows --from when --to
 	// was not given. `--to ndjson` is what sets the compact layout here, since fmt refuses -c.
 	if cli.formatting && cli.formats.to == nil {
-		o.to = FORMATS[o.from].written_as.? or_else o.from
+		o.to = o.from
 	}
 	if writes_lines(o) {
 		o.compact = true
@@ -350,7 +356,8 @@ note_first :: proc(first: ^string, flag: string) {
 	}
 }
 
-// Records a `--from NAME` or `--to NAME` option at `args[i]` in `cli.formats`. A later one overrides an earlier one.
+// Records a `--from NAME[:SPEC]` or `--to NAME[:SPEC]` option at `args[i]` in `cli.formats`. A later one overrides an
+// earlier one.
 @(private = "file")
 format_option :: proc(cli: ^Cli, args: []string, i: int) {
 	a := args[i]
@@ -360,31 +367,40 @@ format_option :: proc(cli: ^Cli, args: []string, i: int) {
 	if i + 1 >= len(args) {
 		usage_error("%s takes one parameter", a)
 	}
-	f, ok := format_named(args[i + 1])
+	name, colon, text := strings.partition(args[i + 1], ":")
+	f, ok := format_named(name)
 	if !ok {
-		usage_error("%s takes one of %s, not %q", a, format_names(a == "--to"), args[i + 1])
+		usage_error("%s takes one of %s, not %q", a, format_names(), args[i + 1])
+	}
+	spec: Maybe(u8)
+	if colon != "" {
+		s, named := spec_named(f, text)
+		switch {
+		case FORMATS[f].whole_as == nil:
+			usage_error("%s %s takes no spec", a, name)
+		case !named:
+			usage_error("%s %s takes a spec of %s, not %q", a, name, spec_names(f), text)
+		}
+		spec = s
 	}
 	if a == "--from" {
-		cli.formats.from = f
-	} else if FORMATS[f].written_as != nil {
-		usage_error("--to does not write %s: --to %s writes its values and comments", args[i + 1], FORMATS[FORMATS[f].written_as.?].name)
+		cli.formats.from, cli.formats.from_spec = f, spec
 	} else {
-		cli.formats.to = f
+		cli.formats.to, cli.formats.to_spec = f, spec
 	}
 }
 
-// Records `flag` as the first JSON-output-only option, as the first one a format written with a layout of its own
-// refuses unless `laid` is set, and as the first layout option when `layout` is set.
+// Records `flag` as the first option given of write option `option`, or with none as the first that shapes JSON text
+// alone, and as the first layout option when `layout` is set.
 @(private = "file")
-note_json_flag :: proc(cli: ^Cli, flag: string, layout := false, laid := false) {
-	if cli.json_flag == "" {
-		cli.json_flag = flag
+note_json_flag :: proc(cli: ^Cli, flag: string, option: Maybe(core.Write_Option) = nil, layout := false) {
+	if o, ok := option.?; ok {
+		note_first(&cli.option_flags[o], flag)
+	} else {
+		note_first(&cli.text_flag, flag)
 	}
-	if !laid && cli.text_flag == "" {
-		cli.text_flag = flag
-	}
-	if layout && cli.layout_flag == "" {
-		cli.layout_flag = flag
+	if layout {
+		note_first(&cli.layout_flag, flag)
 	}
 }
 
@@ -530,7 +546,7 @@ letter_option :: proc(o: ^Opts, cli: ^Cli, c: byte) -> bool {
 	case 'c':
 		o.compact = true
 		cli.compact_given = true
-		note_json_flag(cli, "-c", laid = true)
+		note_json_flag(cli, "-c", .Pretty)
 	case 'C':
 		cli.color_set = true
 		note_json_flag(cli, "-C")
@@ -538,9 +554,10 @@ letter_option :: proc(o: ^Opts, cli: ^Cli, c: byte) -> bool {
 		cli.mono = true
 	case 'a':
 		o.ascii = true
-		note_json_flag(cli, "-a", laid = true)
+		note_json_flag(cli, "-a", .Ascii)
 	case 'S':
 		o.sort_keys = true
+		note_json_flag(cli, "-S", .Sort_Keys)
 	case 'R':
 		o.raw_input = true
 	case 'n':
@@ -783,9 +800,5 @@ refuse_follow :: proc(o: ^Opts, cli: ^Cli) {
 	}
 	if FORMATS[o.from].spec != .Json || reads_whole(o) {
 		usage_error("--follow reads records: --from %s makes one text of a file", FORMATS[o.from].name)
-	}
-	// A follow window ends at a line end, and a binary sequence has none between its items.
-	if o.from == .Cbor {
-		usage_error("--follow reads lines: --from cbor items are not lines")
 	}
 }

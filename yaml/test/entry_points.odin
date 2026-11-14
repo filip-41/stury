@@ -33,7 +33,7 @@ take_first :: proc(state: rawptr, a: yaml.Token_Answer) -> bool {
 
 // The reads and the one-call edit of a text through the forms the group `spec` picks.
 @(private = "file")
-text_forms :: proc(t: ^testing.T, spec: yaml.Spec) {
+text_forms :: proc(t: ^testing.T, $spec: yaml.Spec) {
 	src := transmute([]u8)string(ENTRY_TEXT)
 	path, perr := yaml.parse_path(".a")
 	walktest.expect_nil(t, perr)
@@ -167,7 +167,7 @@ constant_forms :: proc(t: ^testing.T, $S: yaml.Spec) {
 	testing.expect_value(t, yaml.tokens_init(&tokens, S), yaml.Typed_Error_Kind.None)
 	yaml.open_array(&tokens)
 	yaml.value_int(&tokens, 1)
-	yaml.tokens_close(&tokens)
+	yaml.close(&tokens)
 	laid, lerr := write.tokens_finish(&tokens)
 	defer delete(laid)
 	testing.expect_value(t, lerr.kind, yaml.Typed_Error_Kind.None)
@@ -184,7 +184,7 @@ every_constant_form_reads_and_writes :: proc(t: ^testing.T) {
 @(private = "file")
 record_forms :: proc(t: ^testing.T, $S: yaml.Spec) {
 	src := transmute([]u8)string("a: 1\n---\na: 2\n")
-	faults, err := yaml.records_check(src, S)
+	faults, err := yaml.records_validate(src, S)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, len(faults), 0)
 	delete(faults)
@@ -234,8 +234,8 @@ record_forms :: proc(t: ^testing.T, $S: yaml.Spec) {
 every_record_form_reads_a_stream :: proc(t: ^testing.T) {
 	record_forms(t, .Yaml_1_2)
 	src := transmute([]u8)string("a: 1\n---\na: 2\n")
-	spec := yaml.Spec.Yaml_1_2
-	faults, err := yaml.records_check(src, spec)
+	spec :: yaml.Spec.Yaml_1_2
+	faults, err := yaml.records_validate(src, spec)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, len(faults), 0)
 	delete(faults)
@@ -289,7 +289,7 @@ a_repeated_key_follows_the_duplicate_policy_of_every_read :: proc(t: ^testing.T)
 	src := transmute([]u8)text
 	path, perr := yaml.parse_path(".a")
 	walktest.expect_nil(t, perr)
-	spec := yaml.Spec.Yaml_1_2
+	spec :: yaml.Spec.Yaml_1_2
 	for c in POLICY_CASES {
 		read := core.Path_Options{dups = c.dups}
 		refused := c.dups == .Refuse
@@ -373,7 +373,7 @@ a_repeated_key_follows_the_duplicate_policy_of_every_read :: proc(t: ^testing.T)
 a_key_is_its_resolved_value :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
-	spec := yaml.Spec.Yaml_1_2
+	spec :: yaml.Spec.Yaml_1_2
 	for text in ([]string{"a: 1\na: 2\n", "a: 1\n\"a\": 2\n", "1: x\n0x1: y\n", "~: x\nnull: y\n", "!!str 1: x\n\"1\": y\n", "{a: 1, a: 2}\n", "a: 1\nb:\n  c: 1\n  \"c\": 2\n"}) {
 		_, err := yaml.build(transmute([]u8)text, spec, dups = .Refuse)
 		fault, _ := err.(core.Fault)
@@ -419,4 +419,150 @@ a_nil_any_marshals_as_null :: proc(t: ^testing.T) {
 	text, err := yaml.marshal(nothing, allocator = context.temp_allocator)
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, strings.trim_space(string(text)), "null")
+}
+
+// `.Entries` gives the members of the container that a path of keys names as the walk reads them, a block member read
+// as it does in its place, and a fault ends the records at the byte `validate` gives, after the members before it.
+@(test)
+entries_are_the_members_of_a_container :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "a: 0\nlogs:\n  - id: 1\n    s: x\n  - [1, 2]\n  - 3\n"
+	walktest.expect_entries(t, src, yaml.as(.Yaml_1_2), {"logs"}, "15  {\"id\":1,\"s\":\"x\"}\n34  [1,2]\n45  3\nend")
+	walktest.expect_entries(t, src, yaml.as(.Yaml_1_2), nil, "3 a 0\n13 logs [{\"id\":1,\"s\":\"x\"},[1,2],3]\nend")
+	walktest.expect_entries(t, src, yaml.as(.Yaml_1_2), {"none"}, "end")
+	walktest.expect_framings(t, yaml.CAPABILITIES, yaml.as(.Yaml_1_2))
+	bad := "logs:\n  - 1\n  - [2\n"
+	fault, _ := walktest.fault_in(yaml.validate(transmute([]u8)string(bad), .Yaml_1_2))
+	walktest.expect_entries(t, bad, yaml.as(.Yaml_1_2), {"logs"}, fmt.tprintf("10  1\nfault %d", fault.at))
+	other := "f: [1, {a: 2}, [3]]\nm:\n  x: 1\n  y:\n    - 2\n"
+	walktest.expect_entries(t, other, yaml.as(.Yaml_1_2), {"f"}, "4  1\n7  {\"a\":2}\n15  [3]\nend")
+	walktest.expect_entries(t, other, yaml.as(.Yaml_1_2), {"m"}, "28 x 1\n39 y [2]\nend")
+	it := yaml.records_open(transmute([]u8)src, .Yaml_1_2, framing = .Entries, entries = {"logs"})
+	testing.expect_value(t, walktest.entries_lines(&it), "15  {\"id\":1,\"s\":\"x\"}\n34  [1,2]\n45  3\nend")
+}
+
+// A member under `.Entries` reads in its place, as the build of the whole text reads it: an alias to an anchor of an
+// earlier member, and a tag by a handle the directives declare, by a build and by a typed read.
+@(test)
+entries_read_in_their_place :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	aliased := "l:\n- &a 1\n- *a\n"
+	walktest.expect_entries(t, aliased, yaml.as(.Yaml_1_2), {"l"}, "5  1\n12  1\nend")
+	testing.expect_value(t, walktest.entries_read(aliased, yaml.as(.Yaml_1_2), {"l"}, int), "1\n1\nend")
+	tagged := "%TAG !e! tag:e.com,2000:\n---\nl:\n- !e!x 1\n"
+	walktest.expect_entries(t, tagged, yaml.as(.Yaml_1_2), {"l"}, "34  \"1\"\nend")
+	testing.expect_value(t, walktest.entries_read(tagged, yaml.as(.Yaml_1_2), {"l"}, string), "1\nend")
+}
+
+// A member given before the last builds once later members are read, in memory and while a stream's window holds it:
+// an alias to an anchor of an earlier member too.
+@(test)
+entries_build_after_later_members :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	walktest.expect_entries_built_later(t, "l:\n- &a {x: 1}\n- *a\n- [2, 3]\n- 4\n", yaml.as(.Yaml_1_2), {"l"})
+	walktest.expect_entries_built_later(t, "m:\n  a: 1\n  b: {c: d}\n  e: [f]\n", yaml.as(.Yaml_1_2), {"m"})
+}
+
+// A stream's member given before the last builds as it did when it was given, once the window moved past the reader's
+// first position, by a walk from the window's first step: an alias to an anchor before the window's start too.
+@(test)
+entries_build_after_the_window_moved :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, "l:\n- &a {k: 1}\n")
+	for i in 0 ..< 2000 {
+		fmt.sbprintf(&b, "- {{id: %d, pad: 0123456789012345678901234567890123456789012345678901234567890123456789}}\n- *a\n", i)
+	}
+	r: strings.Reader
+	it := records.open_stream(strings.to_reader(&r, strings.to_string(b)), yaml.as(.Yaml_1_2), .Entries, {entries = {"l"}})
+	defer records.close(&it)
+	given := make([dynamic]records.Record, context.temp_allocator)
+	then := make([dynamic]string, context.temp_allocator)
+	window, since, checked := it.src, 0, 0
+	for rec in records.next(&it) {
+		if raw_data(it.src) != raw_data(window) || len(it.src) != len(window) {
+			window, since = it.src, len(given)
+		}
+		append(&given, rec)
+		append(&then, entry_json(&it, rec))
+		for k := len(given) - 2; k >= since && k >= len(given) - 4; k -= 1 {
+			checked += int(since > 0)
+			got := entry_json(&it, given[k])
+			testing.expectf(t, got == then[k], "record %d after %d: %s, got %s", k, len(given) - 1, then[k], got)
+		}
+	}
+	testing.expect(t, checked > 0)
+	testing.expect_value(t, len(given), 4001)
+}
+
+@(private = "file")
+entry_json :: proc(it: ^records.Reader, rec: records.Record) -> string {
+	doc, err := records.build(it, rec, context.temp_allocator)
+	defer core.destroy(&doc)
+	if err != nil {
+		return fmt.tprint("error", err)
+	}
+	out, _, _ := yaml.write(&doc, .Yaml_1_2, {}, allocator = context.temp_allocator)
+	return string(out)
+}
+
+// Reading the records of a sequence ten times as long under `.Entries` holds no more of the reader's memory at its
+// peak, so the reader walks the members and holds no tree of the text.
+@(test)
+entries_hold_no_tree :: proc(t: ^testing.T) {
+	walktest.expect_entries_bounded(t, yaml.as(.Yaml_1_2), {"logs"}, "meta: 1\nlogs:\n", "  - id: 7\n    tags: [a, b]\n", "", false)
+}
+
+// A stream's window follows the records under `.Entries`, as the input of a stream ten times as long holds no more of
+// the reader's memory at its peak: in a block and a flow container, with an anchor each member takes again and an
+// alias to it, and with a tag by a handle the directives declare.
+@(test)
+entries_hold_one_member :: proc(t: ^testing.T) {
+	as := yaml.as(.Yaml_1_2)
+	text :: "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"
+	walktest.expect_entries_bounded(t, as, {"logs"}, "meta: 1\nlogs:\n", "  - id: 7\n    name: " + text + "\n    tags: [a, b]\n", "", true)
+	walktest.expect_entries_bounded(t, as, {"logs"}, "logs: [", "{id: 7, name: " + text + "}, ", "1]\n", true)
+	walktest.expect_entries_bounded(t, as, {"logs"}, "logs:\n", "- &m {id: 7, name: " + text + "}\n- *m\n", "", true)
+	walktest.expect_entries_bounded(t, as, {"logs"}, "%TAG !e! tag:e.com,2000:\n---\nlogs:\n", "- !e!x " + text + "\n", "", true)
+	merging := yaml.as(.Yaml_1_2, {merge_keys = true})
+	walktest.expect_entries_bounded(t, merging, {"logs"}, "logs:\n", "- <<: {id: 7, name: " + text + "}\n  id: 8\n", "", true)
+}
+
+// Under merge keys a stream's member merges what its `<<` names as the whole text does while the window moves, and so
+// does a container of the records, whose earlier keys the window let go.
+@(test)
+entries_merge_keys_across_window_moves :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	as := yaml.as(.Yaml_1_2, {merge_keys = true})
+	walktest.expect_entries(t, "base: &b {x: 1, y: 2}\nl:\n- <<: *b\n  y: 3\n- {<<: [*b, {w: 0}], z: 4}\n- k: 1\n  <<: {k: 2, m: 3}\n", as, {"l"}, "27  {\"y\":3,\"x\":1}\n43  {\"z\":4,\"x\":1,\"y\":2,\"w\":0}\n70  {\"k\":1,\"m\":3}\nend")
+	walktest.expect_entries(t, "m:\n  alpha: 1\n  beta: [2]\n  <<: {alpha: 9, zeta: 1}\n", as, {"m"}, "12 alpha 1\n22 beta [2]\n49 zeta 1\nend")
+}
+
+// A stream's member reads as the whole text reads it while the window moves under it: an alias to an anchor of an
+// earlier member, after the name was taken again too, a tag by a handle a `%TAG` directive declares or redefines, a
+// repeated key, block and flow members, and scalars that end only at a line past them.
+@(test)
+entries_read_across_window_moves :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	as := yaml.as(.Yaml_1_2)
+	walktest.expect_entries(t, "l:\n- &a 1\n- x\n- {k: &b [2, 3]}\n- *a\n- &a 4\n- {y: 1, z: *b}\n- *a\n", as, {"l"}, "5  1\n12  \"x\"\n16  {\"k\":[2,3]}\n33  1\n38  4\n45  {\"y\":1,\"z\":[2,3]}\n61  4\nend")
+	walktest.expect_entries(t, "%TAG !e! tag:e.com,2000:\n%TAG !! tag:e.com:\n---\nl:\n- !e!x 1\n- !!int 2\n- 3\n", as, {"l"}, "53  \"1\"\n62  \"2\"\n72  3\nend")
+	walktest.expect_entries(t, "l:\n- {a: 1, a: 2}\n- 1: a\n  0x1: b\n- k: [1]\n  k: [2]\n", as, {"l"}, "5  {\"a\":1,\"a\":2}\n20  {\"1\":\"a\",\"0x1\":\"b\"}\n36  {\"k\":[1],\"k\":[2]}\nend")
+	walktest.expect_entries(t, "l: [1, {a: [2, 3]}, \"q\", 'r', [ ], b c\n  d]\n", as, {"l"}, "4  1\n7  {\"a\":[2,3]}\n20  \"q\"\n25  \"r\"\n30  []\n35  \"b c d\"\nend")
+	walktest.expect_entries(t, "l:\n- |\n  text\n  more\n- >-\n  folded\n  line\n- a\n  b\n- - 1\n  - 2\n- k: v\n  m:\n    n: 1\n# end\n", as, {"l"}, "5  \"text\\nmore\\n\"\n23  \"folded line\"\n44  \"a b\"\n52  [1,2]\n64  {\"k\":\"v\",\"m\":{\"n\":1}}\nend")
+	for size in 1 ..= 3 {
+		b := strings.builder_make(context.temp_allocator)
+		want := strings.builder_make(context.temp_allocator)
+		strings.write_string(&b, "l:\n- &keep k\n")
+		strings.write_string(&want, "5  \"k\"\n")
+		for i in 0 ..< 40 {
+			fmt.sbprintf(&want, "%d  %d\n%d  %d\n", len(b.buf) + 2, i, len(b.buf) + len(fmt.tprintf("- &a %d\n", i)) + 2, i)
+			fmt.sbprintf(&b, "- &a %d\n- *a\n", i)
+		}
+		fmt.sbprintf(&want, "%d  \"k\"\nend", len(b.buf) + 2)
+		strings.write_string(&b, "- *keep\n")
+		trickle := walktest.Trickle{src = b.buf[:], size = size}
+		it := records.open_stream(walktest.trickle_reader(&trickle), as, .Entries, {entries = {"l"}})
+		testing.expect_value(t, walktest.entries_lines(&it), strings.to_string(want))
+	}
 }

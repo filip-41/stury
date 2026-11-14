@@ -53,7 +53,7 @@ Dense_State :: struct {
 // JSON that the document read in full under no tolerance, and the options must not spell anything again.
 @(private)
 dense_route :: #force_inline proc "contextless" (doc: ^core.Document, opts: core.Write_Options, src: []u8, nodes: int) -> bool {
-	return !opts.pretty && copies_strings(opts) &&
+	return !opts.pretty && write.copies_raw(opts) &&
 		len(src) < DENSE_BYTES_PER_NODE_PLAIN * nodes &&
 		Spec(doc.as.spec) == .Json && doc.as.tolerate == {} && doc.readers.format == rules_of &&
 		(len(src) < DENSE_BYTES_PER_NODE_BLANK * nodes || dense_sample(src, nodes))

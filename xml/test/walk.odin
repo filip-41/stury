@@ -86,14 +86,26 @@ comments_follow_the_position_rule :: proc(t: ^testing.T) {
 	testing.expect_value(
 		t,
 		got,
-		"Comment:<!--p--> Object Key:r Comment:<!--a--> Object:<r> Key:x Plain Inline:<!--i--> Comment:<!--n--> Key:y Plain Foot:<!--f--> End:</r> Inline:<!--e--> End",
+		"Object Comment:<!--p--> Key:r Object:<r> Comment:<!--a--> Key:x Plain Inline:<!--i--> Comment:<!--n--> Key:y Plain Foot:<!--f--> End:</r> Inline:<!--e--> End",
+	)
+}
+
+// A comment before an element's first child is the child's, one in an element with no child element is the element's
+// foot, and the prolog's comments are the document's up to the last blank line and the root element's past it.
+@(test)
+comments_belong_to_the_first_child_and_the_empty_element :: proc(t: ^testing.T) {
+	got, _, _ := tokens_of("<!--a-->\n\n<!--b-->\n<r><!--c--><x>1</x><e><!--z--></e><t>v<!--w--></t></r>")
+	testing.expect_value(
+		t,
+		got,
+		"Comment:<!--a--> Object Comment:<!--b--> Key:r Object:<r> Comment:<!--c--> Key:x Plain:1 Key:e Foot:<!--z--> Plain*:<!--z--> Key:t Foot:<!--w--> Plain*:v<!--w--> End:</r> End",
 	)
 }
 
 @(test)
-instructions_and_the_doctype_stand_before_the_document :: proc(t: ^testing.T) {
+the_declaration_instructions_and_the_doctype_stand_before_the_document :: proc(t: ^testing.T) {
 	got, _, _ := tokens_of(`<?xml version="1.0"?><?pi data?><!DOCTYPE r SYSTEM "r.dtd"><r/>`)
-	testing.expect_value(t, got, "Instruction:<?pi data?> Doctype:<!DOCTYPE r SYSTEM \"r.dtd\"> Object Key:r Plain End")
+	testing.expect_value(t, got, "Directive:<?xml version=\"1.0\"?> Instruction:<?pi data?> Doctype:<!DOCTYPE r SYSTEM \"r.dtd\"> Object Key:r Plain End")
 }
 
 @(test)

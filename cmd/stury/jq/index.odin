@@ -144,12 +144,13 @@ index_value :: proc(ip: ^Interp, t: Value, key: Value) -> (Value, Signal) {
 			return nil, .Go
 		}
 		return nil, fail(ip, "Cannot index %s with string (%s)", type_name(t), brief(ip, k))
-	case f64, ^Number_Text:
+	case f64, Number_View:
 		if tk == .Array {
 			// A literal zero keeps its digits (`literal`), and `.[0]` is common.
 			f, is_f64 := key.(f64)
 			if !is_f64 {
-				f = key.(^Number_Text).double
+				n, _ := number_of(key)
+				f = n.f
 			}
 			if math.is_nan(f) {
 				return nil, .Go
@@ -168,7 +169,7 @@ index_value :: proc(ip: ^Interp, t: Value, key: Value) -> (Value, Signal) {
 		switch kind(key) {
 		case .Object:
 			if fact, is_fact := fact_step(key); is_fact {
-				if fact == .Attribute {
+				if is_attribute_step(key) {
 					return attributes_value(t, attribute_step_name(key), true), .Go
 				}
 				return fact_value(t, fact), .Go

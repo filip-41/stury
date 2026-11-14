@@ -247,11 +247,10 @@ scan_pick :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Sca
 		}
 		h.cut |= 1 << uint(k)
 	case core.Slice:
-		when MANY {
-			count := int(u32(s.b))
-			if path.negative >> uint(k) & 1 == 0 && count >= x.lo && count < (x.hi.? or_else max(int)) {
-				scan_picked(MANY, h, path, p, k, true)
-			}
+		count := int(u32(s.b))
+		if path.negative >> uint(k) & 1 == 0 && count >= x.lo && count < (x.hi.? or_else max(int)) {
+			scan_picked(MANY, h, path, p, k, true)
+			return s, true
 		}
 	case core.Descend:
 		when MANY {

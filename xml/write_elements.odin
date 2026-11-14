@@ -7,6 +7,7 @@ package xml
 
 import "base:runtime"
 import "core:io"
+import "core:strings"
 import core "../core"
 import write "../core/write"
 
@@ -42,7 +43,7 @@ el_open :: proc(e: ^Elements, object: bool) -> core.Typed_Error_Kind {
 	if e.top == 0 {
 		e.levels[0] = {kind = .Root}
 		e.top = 1
-		return .None if object else .Unsupported
+		return .None if object else .Unwritable
 	}
 	up := &e.levels[e.top - 1]
 	if e.text && !object && up.kind != .Text {
@@ -124,11 +125,11 @@ el_attribute :: proc(e: ^Elements, name, value: string) -> core.Typed_Error_Kind
 }
 
 // Writes a scalar as the text that stands at the waiting `#text` member or as its next run, or as the next element,
-// which `null` leaves empty.
+// which `null` leaves empty. With `open` the element stays open for its foot comments, and `el_close` ends it.
 @(private)
-el_value :: proc(e: ^Elements, s: string, null := false) -> core.Typed_Error_Kind {
+el_value :: proc(e: ^Elements, s: string, null := false, open := false) -> core.Typed_Error_Kind {
 	if e.top == 0 {
-		return .Unsupported
+		return .Unwritable
 	}
 	l := &e.levels[e.top - 1]
 	if e.text {
@@ -141,17 +142,38 @@ el_value :: proc(e: ^Elements, s: string, null := false) -> core.Typed_Error_Kin
 		lo, hi = l.lo, l.hi
 	}
 	el_start(e) or_return
-	if null {
+	if null && !open {
 		write.put_text(e.out, "/>")
 	} else {
 		write.put_byte(e.out, '>')
-		put_text(e.out, s, false, e.ascii) or_return
+		if !null {
+			put_text(e.out, s, false, e.ascii) or_return
+		}
+		if open {
+			e.levels[e.top] = {kind = .Object, lo = lo, hi = hi, count = 1}
+			e.top += 1
+			e.keyed, e.tag = false, false
+			return .None
+		}
 		put_close(e.out, e.names[lo:hi])
 	}
 	if e.keyed {
 		resize(&e.names, e.at)
 	}
 	e.keyed, e.tag = false, false
+	return .None
+}
+
+// Writes `text` as a comment where the element write stands. A text XML cannot hold in a comment, one with `--` or a
+// last `-`, and a comment inside a start tag are `.Unwritable`.
+@(private)
+el_comment :: proc(e: ^Elements, text: string) -> core.Typed_Error_Kind {
+	if e.tag || e.keyed || strings.contains(text, "--") || strings.has_suffix(text, "-") {
+		return .Unwritable
+	}
+	write.put_text(e.out, "<!-- ")
+	write.put_text(e.out, text)
+	write.put_text(e.out, " -->")
 	return .None
 }
 

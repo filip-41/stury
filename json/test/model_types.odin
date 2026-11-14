@@ -17,7 +17,7 @@ import walktest "../../walktest"
 // The description of the JSON Schema `text`, in the context allocator.
 @(private = "file")
 fragment :: proc(text: string) -> ^rules.Description {
-	s, err := json.load_schema(transmute([]u8)text)
+	s, err := json.load_schema(transmute([]u8)text, .Json)
 	assert(err == nil)
 	return s.description
 }

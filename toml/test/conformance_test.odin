@@ -7,7 +7,7 @@ import toml ".."
 import walktest "../../walktest"
 
 @(private)
-check_list :: proc(t: ^testing.T, list: string, spec: toml.Spec) -> (cases: int) {
+check_list :: proc(t: ^testing.T, list: string, $spec: toml.Spec) -> (cases: int) {
 	rest := list
 	for name in strings.split_lines_iterator(&rest) {
 		if !strings.has_suffix(name, ".toml") {

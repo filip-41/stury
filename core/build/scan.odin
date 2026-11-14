@@ -166,7 +166,6 @@ scan_plan_path :: proc(h: ^Scan, x: ^Scan_Path, path: core.Path) -> core.Path_Er
 			x.multi = min(x.multi, i)
 			x.indexed |= bit
 		case core.Slice:
-			x.broad = true
 			x.indexed |= bit
 			x.multi = min(x.multi, i)
 		case core.Descend:

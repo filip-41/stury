@@ -5,8 +5,8 @@ package yaml
 // unless `respell_strings` is set, and any other string takes the style `shape_of` picks, which reads back as the same
 // string under the 1.2 core schema and a 1.1 reader. Tags and anchors are written back from the facts, and an alias where
 // its anchor stands before it. A comment is written when the document holds it, above the line it heads, after the value
-// it ends and at the end of a block collection. A comment the output has no place for, and one with a line end in its
-// body, is dropped and counted. Null is `null`, or the spelling a YAML source had. A key an object repeats is `.Unwritable`.
+// it ends and at the end of a collection, and compact text breaks its flow line at a comment. A comment the output has
+// no place for, and one with a line end in its body, is dropped and counted. Null is `null`, or the spelling a YAML source had. A key an object repeats is `.Unwritable`.
 
 import "base:runtime"
 import "core:io"
@@ -22,6 +22,7 @@ Layout :: struct {
 	step:      int, // the spaces of one block level
 	own:       bool, // the document is YAML
 	commented: bool, // the document holds a fact
+	tagged:    bool, // the document is of another format that holds tags
 	kept:      int, // the facts written
 	skipped:   int, // the facts of the nodes an alias stands for
 	defined:   map[string]struct{}, // the anchors written so far
@@ -45,16 +46,18 @@ Members :: struct {
 	direct: bool,
 }
 
-// What a node carries before it: its tag, its anchor, and the alias it stands for.
+// What a node carries before it: its tag, its anchor, and the alias it stands for. `spelled` says the tag is spelled
+// by no fact span, as another format's datetime may be, so it counts as no fact kept.
 @(private)
 Properties :: struct {
 	tag, anchor, alias: string,
+	spelled:            bool,
 }
 
 // The handle's `write`: node `node` of `doc` as YAML.
 @(private)
-document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Refusal) {
-	if doc.partial || opts.tab {
+document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
+	if doc.partial {
 		return nil, 0, {kind = .Unsupported}
 	}
 	spill: [write.ROOM_MAX]u8 = ---
@@ -64,67 +67,88 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 	l.defined.allocator = runtime.arena_allocator(&l.arena)
 	write.init(&l.out, &spill, allocator, stream, len(doc.src) + write.ROOM_MAX if l.own else 0)
 	l.commented = len(core.subtree_facts(doc, node)) > 0
+	l.tagged = !l.own && .Tag in doc.readers.holds && core.has_tags(doc)
 	kind := put_root(&l, node)
 	text, err = write.finish(&l.out, {kind = kind})
 	if err.kind != .None {
 		return nil, 0, err
 	}
-	return text, len(core.subtree_facts(doc, node)) - l.kept - l.skipped, err
+	return text, l.kept + l.skipped, err
 }
 
-// The text of `node` as a document: its head comments, the `%TAG` directives of the source, a `---` where they or a
-// property on a block collection need one, and the node.
+// The text of `node` as a document: its head comments, the directives and explicit markers of the source, a `---` where a
+// property on a block collection needs one, and the node.
 @(private)
 put_root :: proc(l: ^Layout, node: core.Node_Index) -> core.Typed_Error_Kind {
 	pr := props_of(l, node)
+	before := l.kept
 	put_comments(l, node, .Comment, 0)
 	directives := l.own && node == core.ROOT && put_directives(l)
 	k := core.kind(l.doc, node)
 	block := (k == .Object || k == .Array) && l.opts.pretty && core.length(l.doc, node) > 0 && !kept_flow(l, node)
+	// A blank line ends the text's head comment, so the first entry's comments stay its own.
+	if block && l.kept > before && !directives {
+		write.put_byte(&l.out, '\n')
+	}
 	if directives || block && (pr.tag != "" || pr.anchor != "") {
 		if !directives {
 			write.put_text(&l.out, "---")
 		}
-		return put_node(l, node, .Key, 0)
+		put_node(l, node, .Key, 0) or_return
+	} else {
+		put_node(l, node, .Root, 0) or_return
 	}
-	return put_node(l, node, .Root, 0)
+	if l.own && node == core.ROOT && ends_explicitly(l) {
+		// A pretty text ends its last line already.
+		write.put_text(&l.out, "...\n" if l.opts.pretty else "\n...")
+	}
+	return .None
 }
 
-// Writes the `%TAG` directives the source text begins with and the `---` after them, and tells whether there were any.
+// Writes the directives of the source's document and the `---` after them, when it has them or an explicit `---`, and
+// tells whether it wrote the `---`.
 @(private)
 put_directives :: proc(l: ^Layout) -> bool {
-	src := l.doc.src
-	at := 0
-	if len(src) >= 3 && src[0] == 0xef && src[1] == 0xbb && src[2] == 0xbf {
-		at = 3
-	}
-	found := false
-	for at < len(src) {
-		end := at
-		for end < len(src) && src[end] != '\n' {
-			end += 1
-		}
-		line := string(src[at:end])
-		switch {
-		case len(line) > 4 && line[:4] == "%TAG":
-			write.put_text(&l.out, line)
+	it := core.facts_of(l.doc, core.ROOT, .Directive)
+	start := false
+	for body in core.fact_next(&it) {
+		if body[0] == '%' {
+			write.put_text(&l.out, body)
 			write.put_byte(&l.out, '\n')
-			found = true
-		case len(line) == 0 || line[0] == '#' || line[0] == '%' || line[0] == '\r':
-		case:
-			end = len(src)
 		}
-		at = end + 1
+		start ||= body[0] != '.'
 	}
-	if found {
+	if start {
 		write.put_text(&l.out, "---")
 	}
-	return found
+	return start
 }
 
-// The tag, anchor and alias of `node`, as the facts of a document read from YAML hold them.
+// Whether the source's document ends in an explicit `...`.
+@(private)
+ends_explicitly :: proc(l: ^Layout) -> bool {
+	it := core.facts_of(l.doc, core.ROOT, .Directive)
+	for body in core.fact_next(&it) {
+		if body[0] == '.' {
+			return true
+		}
+	}
+	return false
+}
+
+// The tag, anchor and alias of `node`, as the facts of a document read from YAML hold them. A tag of another format
+// is the YAML tag of its meaning: `!!binary`, and `!!timestamp` on a text YAML reads as a timestamp of that kind.
 @(private)
 props_of :: proc(l: ^Layout, node: core.Node_Index) -> (pr: Properties) {
+	if l.tagged && core.kind(l.doc, node) == .String {
+		tag, _ := core.fact_value(l.doc, node, .Tag)
+		pr.spelled = !tag.span
+		if tag.meaning != .Own {
+			buf: [64]u8 = ---
+			text, _ := core.text(l.doc, node, buf[:])
+			pr.tag = meaning_tag(text, tag.meaning)
+		}
+	}
 	if !l.own || !l.commented {
 		return
 	}
@@ -152,7 +176,7 @@ put_token :: proc(l: ^Layout, space: ^bool, text: string) {
 put_props :: proc(l: ^Layout, space: ^bool, pr: Properties) {
 	if pr.tag != "" {
 		put_token(l, space, pr.tag)
-		l.kept += 1
+		l.kept += 0 if pr.spelled else 1
 	}
 	if pr.anchor != "" {
 		put_token(l, space, "&")
@@ -222,6 +246,10 @@ put_node_start :: proc(l: ^Layout, opens: ^[dynamic]Put_Open, node: core.Node_In
 		if space {
 			write.put_byte(&l.out, ' ')
 		}
+		if pretty && l.commented && core.length(l.doc, node) == 0 && has_fact(l, node, .Comment_Foot) {
+			put_empty_foot(l, node, k == .Object, ind)
+			return .None
+		}
 		return put_flow_open(l, opens, node, true)
 	case .Null:
 		if ctx != .Root && l.own && pr.tag == "" && pr.anchor == "" && len(core.span(l.doc, node)) == 0 {
@@ -237,6 +265,9 @@ put_node_start :: proc(l: ^Layout, opens: ^[dynamic]Put_Open, node: core.Node_In
 	ended := put_leaf(l, node, false, false, ind, pr.tag != "") or_return
 	if ended {
 		return .None
+	}
+	if ctx == .Root {
+		put_flow_inline(l, node)
 	}
 	put_inline_comment(l, node)
 	put_line_end(l)
@@ -371,10 +402,18 @@ put_key :: proc(l: ^Layout, key: core.Node_Index, flow: bool) -> (explicit: bool
 	return explicit, .None
 }
 
-// Whether the collection at `node` stays flow style: it was read as one, in a document whose text is not computed.
+// Whether the collection at `node` stays flow style, in a document whose text is not computed: it was read as one, or
+// another format's document writes it in line (`flow`) and it holds no fact inside, which a flow collection drops.
 @(private)
 kept_flow :: proc(l: ^Layout, node: core.Node_Index) -> bool {
-	return l.own && !l.opts.respell_strings && is_flow(l.doc, l.doc.nodes[node])
+	if l.opts.respell_strings {
+		return false
+	}
+	if l.own {
+		return is_flow(l.doc, l.doc.nodes[node])
+	}
+	style, _ := core.fact_value(l.doc, node, .Style)
+	return style.text == "flow" && !write.holds_inner_fact(l.doc, node)
 }
 
 // The style a scalar was read in, for a document read from YAML whose strings are not respelled.
@@ -386,22 +425,24 @@ own_style :: proc(l: ^Layout, node: core.Node_Index) -> Maybe(Style) {
 	return nil
 }
 
-// Writes the scalar at `node` as `put_node` places it. A literal block ends its lines itself, which is `ended`.
+// Writes the scalar at `node` as `put_node` places it. A block scalar ends its lines itself, which is `ended`.
 @(private)
 put_leaf :: proc(l: ^Layout, node: core.Node_Index, flow, key: bool, ind: int, tagged: bool) -> (ended: bool, kind: core.Typed_Error_Kind) {
 	#partial switch core.kind(l.doc, node) {
 	case .String:
 		buf: [512]u8
 		text := write.node_text(l.doc, node, buf[:], runtime.arena_allocator(&l.arena)) or_return
-		place := Place{flow = flow, key = key, block = l.opts.pretty && !flow && !key, ascii = l.opts.ascii, keeps = own_style(l, node), tagged = tagged}
+		keeps := own_style(l, node)
+		folded := keeps == .Block && l.doc.src[l.doc.nodes[node].lo] == '>'
+		place := Place{flow = flow, key = key, block = l.opts.pretty && !flow && !key, ascii = l.opts.ascii, keeps = keeps, folded = folded, tagged = tagged}
 		shape := shape_of(text, place) or_return
-		if shape == .Literal {
-			put_literal(&l.out, text, ind if ind > 0 else l.step)
+		if shape == .Literal || shape == .Folded {
+			put_block(&l.out, text, shape, ind if ind > 0 else l.step)
 			return true, .None
 		}
 		put_scalar(&l.out, text, shape, l.opts.ascii)
 	case .Number:
-		return false, write.put_number_node(&l.out, l.doc, node, TREE, l.own)
+		return false, write.put_number_node(&l.out, l.doc, node, TREE, l.own, NUMBER_FORMS)
 	case .True:
 		write.put_text(&l.out, own_text(l, node, "true"))
 	case .False:
@@ -433,6 +474,18 @@ own_text :: proc(l: ^Layout, node: core.Node_Index, word: string) -> string {
 	return word
 }
 
+// Writes the empty collection at `node` in pretty text with its foot comments on lines of their own at column `ind`
+// between its brackets, where they read back as its foot.
+@(private)
+put_empty_foot :: proc(l: ^Layout, node: core.Node_Index, object: bool, ind: int) {
+	write.put_text(&l.out, "{\n" if object else "[\n")
+	put_comments(l, node, .Comment_Foot, ind)
+	write.put_run(&l.out, ind, ' ')
+	write.put_byte(&l.out, '}' if object else ']')
+	put_inline_comment(l, node)
+	put_line_end(l)
+}
+
 // Writes the opening bracket of the flow collection at `node` and opens it. `tail` is the `Put_Open` field.
 @(private)
 put_flow_open :: proc(l: ^Layout, opens: ^[dynamic]Put_Open, node: core.Node_Index, tail: bool) -> core.Typed_Error_Kind {
@@ -456,6 +509,7 @@ put_flow_next :: proc(l: ^Layout, opens: ^[dynamic]Put_Open) -> core.Typed_Error
 	if o.object {
 		m, more := members_next(&o.members)
 		if !more {
+			put_flow_comments(l, o.node, .Comment_Foot)
 			write.put_byte(&l.out, '}')
 			return put_flow_close(l, opens)
 		}
@@ -463,12 +517,14 @@ put_flow_next :: proc(l: ^Layout, opens: ^[dynamic]Put_Open) -> core.Typed_Error
 			write.put_text(&l.out, ", ")
 		}
 		o.first = false
+		put_flow_comments(l, m.value, .Comment)
 		explicit := put_key(l, m.key, true) or_return
 		write.put_text(&l.out, " : " if explicit else ": ")
 		return put_flow_start(l, opens, m.value)
 	}
 	element, more := core.child_next(&o.elements)
 	if !more {
+		put_flow_comments(l, o.node, .Comment_Foot)
 		write.put_byte(&l.out, ']')
 		return put_flow_close(l, opens)
 	}
@@ -476,13 +532,16 @@ put_flow_next :: proc(l: ^Layout, opens: ^[dynamic]Put_Open) -> core.Typed_Error
 		write.put_text(&l.out, ", ")
 	}
 	o.first = false
+	put_flow_comments(l, element, .Comment)
 	return put_flow_start(l, opens, element)
 }
 
 @(private)
 put_flow_close :: proc(l: ^Layout, opens: ^[dynamic]Put_Open) -> core.Typed_Error_Kind {
 	o := pop(opens)
-	if o.tail {
+	if !o.tail {
+		put_flow_inline(l, o.node)
+	} else {
 		put_inline_comment(l, o.node)
 		put_line_end(l)
 	}
@@ -509,8 +568,9 @@ put_flow_start :: proc(l: ^Layout, opens: ^[dynamic]Put_Open, node: core.Node_In
 	if k == .Object || k == .Array {
 		return put_flow_open(l, opens, node, false)
 	}
-	_, kind := put_leaf(l, node, true, false, 0, pr.tag != "")
-	return kind
+	put_leaf(l, node, true, false, 0, pr.tag != "") or_return
+	put_flow_inline(l, node)
+	return .None
 }
 
 // The members of the object at `node`. A key a copied object repeats is `.Unwritable`.
@@ -544,10 +604,37 @@ put_comments :: proc(l: ^Layout, node: core.Node_Index, role: core.Role, ind: in
 	}
 }
 
-// The first comment of `node` that ends on its line, after the value, in pretty text.
+// The one-line comments of `node` that end on its line, after the value, joined into one, in pretty text.
 @(private)
 put_inline_comment :: proc(l: ^Layout, node: core.Node_Index) {
-	if l.commented && l.opts.pretty && write.put_comment_inline(&l.out, l.doc, node) {
-		l.kept += 1
+	if l.commented && l.opts.pretty {
+		l.kept += write.put_comment_inline(&l.out, l.doc, node)
+	}
+}
+
+// Each comment of `role` on `node` inside a flow collection of compact text, on a line of its own.
+@(private)
+put_flow_comments :: proc(l: ^Layout, node: core.Node_Index, role: core.Role) {
+	if !l.commented || l.opts.pretty || !has_fact(l, node, role) {
+		return
+	}
+	if l.out.cursor > 0 && l.out.buf[l.out.cursor - 1] == ' ' {
+		l.out.cursor -= 1
+	}
+	if l.out.cursor > 0 && l.out.buf[l.out.cursor - 1] != '\n' {
+		write.put_byte(&l.out, '\n')
+	}
+	put_comments(l, node, role, 0)
+}
+
+// The inline comments of `node` inside a flow collection of compact text, or on its root, which end the line.
+@(private)
+put_flow_inline :: proc(l: ^Layout, node: core.Node_Index) {
+	if !l.commented || l.opts.pretty {
+		return
+	}
+	if joined := write.put_comment_inline(&l.out, l.doc, node); joined > 0 {
+		l.kept += joined
+		write.put_byte(&l.out, '\n')
 	}
 }

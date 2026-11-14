@@ -4,8 +4,10 @@ package html_tests
 
 import "core:testing"
 import core "../../core"
+import rules "../../core/rules"
 import typed "../../core/typed"
 import html ".."
+import json "../../json"
 import walktest "../../walktest"
 
 @(private = "file")
@@ -54,10 +56,17 @@ unmarshal_reads_the_tree_a_browser_builds :: proc(t: ^testing.T) {
 	testing.expect_value(t, rows[0].td[1].value, 2)
 	testing.expect_value(t, rows[1].td[0].class, "c")
 
-	chosen := html.Spec.Document
+	chosen :: html.Spec.Document
 	again: Page
 	walktest.expect_nil(t, html.unmarshal(transmute([]u8)string(text), chosen, &again))
 	testing.expect_value(t, len(again.html.body.table.tbody.tr), 2)
+
+	plan, perr := html.plan_make(Page, .Document)
+	walktest.expect_nil(t, perr)
+	defer html.destroy(&plan)
+	planned: Page
+	walktest.expect_nil(t, html.unmarshal(transmute([]u8)string(text), .Document, &planned, &plan))
+	testing.expect_value(t, len(planned.html.body.table.tbody.tr), 2)
 }
 
 @(test)
@@ -81,6 +90,25 @@ check_gives_every_refusal :: proc(t: ^testing.T) {
 	testing.expect_value(t, refused.kind, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, len(sink.entries), 2)
 	testing.expect_value(t, v.a.m, 2)
+}
+
+// A text whose character references decode to exactly a JSON number reads into a number.
+@(test)
+unmarshal_reads_a_number_a_text_decodes_to :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	v: struct {
+		b: struct {
+			n:     int,
+			text: f64 `html:"#text"`,
+		},
+		i: int,
+	}
+	src := `<b n="&#45;&#55;">&#49;.&#53;</b><i>&#55;</i>`
+	walktest.expect_nil(t, html.unmarshal(transmute([]u8)string(src), .Fragment, &v))
+	testing.expect_value(t, v.b.n, -7)
+	testing.expect_value(t, v.b.text, 1.5)
+	testing.expect_value(t, v.i, 7)
 }
 
 // A check of a list member over repeated elements takes every element, as `unmarshal` does.
@@ -110,7 +138,7 @@ a_nil_any_is_refused_as_a_null :: proc(t: ^testing.T) {
 	nothing: any
 	text, err := html.marshal(nothing, allocator = context.temp_allocator)
 	testing.expect(t, text == nil)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
+	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
 }
 
 // A check with no plan is a plan mismatch.
@@ -120,4 +148,18 @@ a_check_with_no_plan_is_a_mismatch :: proc(t: ^testing.T) {
 		a: int,
 	}
 	walktest.expect_kind(t, html.check(transmute([]u8)string("<p>1</p>"), .Document, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
+}
+
+// A plan of a description holds HTML's reads when it is given them, and an empty description is refused.
+@(test)
+a_plan_of_a_description_reads_html :: proc(t: ^testing.T) {
+	s, err := json.load_schema(transmute([]u8)string(`{"properties": {"a": {"type": "integer"}}}`), .Json)
+	walktest.expect_nil(t, err)
+	defer json.destroy(s)
+	plan, built := html.plan_of(s.description, reads = html.checks(.Document).reads)
+	walktest.expect_nil(t, built)
+	defer html.destroy(&plan)
+	testing.expect(t, plan.read != nil && plan.marshal != nil)
+	_, empty := html.plan_of(&rules.Description{})
+	walktest.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 }

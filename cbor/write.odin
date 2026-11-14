@@ -4,13 +4,15 @@ package cbor
 // or, from a CBOR source, the integer it was, and a byte string is a byte string. An item read from CBOR in an encoding
 // the target accepts is copied as it was read, a tag with it, and any other is written again from its value in
 // preferred serialization. A deterministic target writes a map's members in the order of their encoded keys, and a
-// key two members write alike is `.Unwritable`. A comment, a text tag and any other fact CBOR has no place for is
-// dropped and counted.
+// key two members write alike is `.Unwritable`. A tag of another format is written as the CBOR tag of its meaning, a
+// datetime as tag 0 or 1004 on an RFC 3339 text and binary as a byte string. A comment, any other tag and any other fact
+// CBOR has no place for is dropped and counted.
 
 import "base:intrinsics"
 import "base:runtime"
 import "core:io"
 import "core:slice"
+import spell "../core/spell"
 import core "../core"
 import write "../core/write"
 
@@ -20,18 +22,20 @@ Emit :: struct {
 	out:    write.Out,
 	enc:    Spec,
 	own:    bool, // the source is CBOR
+	tagged: bool, // the source is of another format that holds tags
 	sorted: bool, // a map's members follow their encoded keys
 	kept:   int, // the facts written as tags
 }
 
 // The handle's `write`: node `node` of `doc` as one CBOR item of `as`'s spec.
 @(private)
-document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Refusal) {
+document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
 	if doc.partial {
 		return nil, 0, {kind = .Unsupported}
 	}
 	spill: [write.ROOM_MAX]u8 = ---
 	e := Emit{doc = doc, enc = Spec(as.spec), own = doc.readers != nil && doc.readers.format == format_rules}
+	e.tagged = !e.own && doc.readers != nil && .Tag in doc.readers.holds && core.has_tags(doc)
 	source := Spec(doc.as.spec)
 	// A deterministic text is in preferred serialization, and a preferred one need not have its keys in order.
 	verbatim := e.own && (e.enc == .Cbor || source == e.enc || e.enc == .Preferred && source > .Preferred)
@@ -49,10 +53,7 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 	if err.kind != .None {
 		return nil, 0, err
 	}
-	if verbatim {
-		return text, 0, err
-	}
-	return text, len(core.subtree_facts(doc, node)) - e.kept, err
+	return text, len(core.subtree_facts(doc, node)) if verbatim else e.kept, err
 }
 
 // Copies the bytes node `i` was read from, its tags first, as one span.
@@ -146,7 +147,7 @@ put_leaf :: #force_inline proc(e: ^Emit, i: core.Node_Index, k: core.Kind) -> co
 	case .String, .Bytes:
 		return put_string_node(e, i, k)
 	case:
-		return .Unsupported
+		return .Unwritable
 	}
 	return e.out.err
 }
@@ -222,7 +223,7 @@ put_number :: proc(e: ^Emit, i: core.Node_Index) -> core.Typed_Error_Kind {
 		v, ok = core.number(doc, i)
 	}
 	if !ok {
-		return .Unsupported
+		return .Unwritable
 	}
 	// A float, and an integer `Int` holds, written again from its value is as short as preferred serialization asks.
 	if (v.kind == .Wide || number_tagged(e, i)) && put_copied(e, i) {
@@ -264,6 +265,7 @@ spelled_past_float :: proc(e: ^Emit, i: core.Node_Index, v: core.Number) -> bool
 
 @(private)
 put_string_node :: proc(e: ^Emit, i: core.Node_Index, k: core.Kind) -> core.Typed_Error_Kind {
+	k := k
 	doc := e.doc
 	n := doc.nodes[i]
 	if e.own && n.spelling & INT_KEY != 0 {
@@ -287,6 +289,9 @@ put_string_node :: proc(e: ^Emit, i: core.Node_Index, k: core.Kind) -> core.Type
 		if k == .String && !utf8_valid(transmute([]u8)text) {
 			return .Invalid_Utf8
 		}
+		if e.tagged && k == .String {
+			k = put_meaning(e, i, &text) or_return
+		}
 	}
 	short := len(text) <= write.ROOM_MAX - 9
 	p := write.room(&e.out, 9 + len(text) if short else 9)
@@ -299,6 +304,51 @@ put_string_node :: proc(e: ^Emit, i: core.Node_Index, k: core.Kind) -> core.Type
 	intrinsics.mem_copy_non_overlapping(p[h:], raw_data(text), len(text))
 	e.out.cursor += h + len(text)
 	return e.out.err
+}
+
+// Writes the tag that spells the meaning of text node `i`'s tag, a node of another format, before the item `text^` is
+// written as, and returns the item's kind. Binary text is the byte string it spells, which `text^` becomes. A text
+// that is no RFC 3339 spelling of its datetime, or no base64, stays a text without the tag.
+@(private)
+put_meaning :: proc(e: ^Emit, i: core.Node_Index, text: ^string) -> (core.Kind, core.Typed_Error_Kind) {
+	tag, _ := core.fact_value(e.doc, i, .Tag)
+	#partial switch tag.meaning {
+	case .Datetime, .Local_Date:
+		if write.put_date_tag(&e.out, text^, tag.meaning, TREE) {
+			e.kept += int(tag.span)
+		}
+	case .Binary:
+		bytes, ok, err := base64_bytes(text^)
+		if err != .None {
+			return .String, err
+		}
+		if ok {
+			e.kept += int(tag.span)
+			text^ = string(bytes)
+			return .Bytes, .None
+		}
+	}
+	return .String, .None
+}
+
+// The bytes base64 text `text` spells, in the temp allocator, and false for a text that is no base64. A text holds
+// its base64 across lines, so the blanks between its characters are cut first. The decode is in place, since each
+// group of four characters is read before the three bytes it spells are written.
+@(private)
+base64_bytes :: proc(text: string) -> ([]u8, bool, core.Typed_Error_Kind) {
+	buf, failed := make([]u8, len(text), context.temp_allocator)
+	if failed != nil {
+		return nil, false, .No_Memory
+	}
+	n := 0
+	for b in transmute([]u8)text {
+		if b != ' ' && b != '\t' && b != '\n' && b != '\r' {
+			buf[n] = b
+			n += 1
+		}
+	}
+	bytes, ok := spell.base64_decode(buf, buf[:n])
+	return bytes, ok, .None
 }
 
 // The one NaN a deterministic text has.

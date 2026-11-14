@@ -212,3 +212,23 @@ answers_break_early_and_fault_late :: proc(t: ^testing.T) {
 	want := yaml.each_answer(late, .Yaml_1_2, path, nil, proc(_: rawptr, _: core.Token_Answer) -> bool {return true})
 	testing.expectf(t, n == 3 && it.err != nil && fmt.tprint(it.err) == fmt.tprint(want), "%d answers, %v, want %v", n, it.err, want)
 }
+
+// An iterator over several paths gives what `each_answer` gives for them.
+@(test)
+answers_of_many_paths :: proc(t: ^testing.T) {
+	a, _ := core.parse_path(".a")
+	defer core.path_destroy(&a)
+	b, _ := core.parse_path(".b[]")
+	defer core.path_destroy(&b)
+	paths := []core.Path{b, a}
+	src := transmute([]u8)string("a: 1\nb: [2, 3]\n")
+	want, got: [dynamic]core.Token_Answer
+	defer delete(want)
+	defer delete(got)
+	testing.expect(t, yaml.each_answer(src, .Yaml_1_2, paths, &want, collect_answer) == nil)
+	it := yaml.answers(src, .Yaml_1_2, paths)
+	for x in yaml.next(&it) {
+		append(&got, x)
+	}
+	testing.expectf(t, it.err == nil && len(want) == 3 && slice.equal(got[:], want[:]), "%v, want %v: %v", got[:], want[:], it.err)
+}

@@ -21,21 +21,22 @@ import "spell"
 @(private = "file")
 WIDE_OBJECT :: 64
 
-// The room `double_of` needs in `buf` to give a hex integer's digits: a sign and the 39 digits of 2^128 - 1.
+// The room `double_of` needs in `buf` to give a prefixed integer's digits: a sign and the 39 digits of 2^128 - 1.
 HEX_ROOM :: 40
 
-// The double of number `v` and the digits it keeps: a `Number_Text`'s or a number node's text, none for a double or a
-// number whose text is no decimal. A decimal a format spells with a sign or a point of its own, `+1e400` or `.5`, keeps
-// its text, and a hex integer of at most 128 bits (JSON5's `0x10`) keeps its decimal digits in `buf` when that holds
-// `HEX_ROOM` bytes. A hex integer past 128 bits, and without a `buf`, has none and is its double. A number of a format
-// whose span is not its text, which has a `number_text`, keeps the digits that spells when they lie in the source or
-// `buf` holds them, and is its double otherwise.
+// The double of number `v` and the digits it keeps: a `Number_View`'s or a number node's text, none for a double or a
+// number whose text is no decimal. A decimal a format spells with a sign, a point of its own, leading zeros or
+// underscores (`+1e400`, `.5`, `1_000`) keeps the JSON number it spells, written in `buf` when that holds the text and
+// one byte more, and else its text, or none when the text holds an underscore. A hex, octal or binary integer of at most
+// 128 bits (`0x10`, `0o17`) keeps its decimal digits in `buf` when that holds `HEX_ROOM` bytes, and has none past 128
+// bits or without a `buf`. A number of a format whose span is not its text, which has a `number_text`, keeps the
+// digits that spells when they lie in the source or `buf` holds them, and is its double otherwise.
 double_of :: proc(v: Value, buf: []u8 = nil) -> (f: f64, digits: string, ok: bool) {
 	#partial switch x in plain(v) {
 	case f64:
 		return x, "", true
-	case ^Number_Text:
-		return x.double, x.text, true
+	case Number_View:
+		return view_f64(x), view_text(x), true
 	case Node_Ref:
 		if int(x.node) >= len(x.doc.nodes) {
 			return 0, "", false
@@ -52,10 +53,17 @@ double_of :: proc(v: Value, buf: []u8 = nil) -> (f: f64, digits: string, ok: boo
 		n, _ := doc_number(x.doc, x.node)
 		f = number_f64(n, text)
 		// The `NUMBER_*` layout holds only for a `.Number` token.
-		if node.kind == .Number && node.spelling & NUMBER_KIND_MASK > NUMBER_DECIMAL {
+		kind := node.spelling & NUMBER_KIND_MASK if node.kind == .Number else 0
+		switch {
+		case kind == NUMBER_DECIMAL:
+			if json, fits := json_decimal(text, buf); fits {
+				return f, json, true
+			}
+			return f, "" if strings.index_byte(text, '_') >= 0 else text, true
+		case kind > NUMBER_DECIMAL:
 			if len(buf) >= HEX_ROOM {
-				if hex, is_hex := hex_decimal(text, buf); is_hex {
-					return f, hex, true
+				if decimal, prefixed := prefixed_decimal(text, buf); prefixed {
+					return f, decimal, true
 				}
 			}
 			return f, "", true
@@ -107,25 +115,35 @@ spelled_double :: proc(doc: ^Document, i: Node_Index, buf: []u8) -> (f: f64, dig
 	return f, digits, true
 }
 
-// The decimal digits of the hex integer `text`, with a sign when it is negative, written at the end of `buf`. `ok` is false
-// for any other text and for an integer of more than 128 bits.
+// The decimal digits of the hex, octal or binary integer `text`, `0x`, `0o` or `0b` and digits an underscore may
+// separate, with a sign when it is negative, written at the end of `buf`. `ok` is false for any other text and for an
+// integer of more than 128 bits.
 @(private = "file")
-hex_decimal :: proc(text: string, buf: []u8) -> (digits: string, ok: bool) {
+prefixed_decimal :: proc(text: string, buf: []u8) -> (digits: string, ok: bool) {
 	s, neg := text, false
 	if len(s) > 0 && (s[0] == '-' || s[0] == '+') {
 		neg, s = s[0] == '-', s[1:]
 	}
-	if len(s) < 3 || s[0] != '0' || s[1] | 0x20 != 'x' {
+	if len(s) < 3 || s[0] != '0' {
 		return
 	}
-	hex := strings.trim_left(s[2:], "0")
-	if len(hex) > 32 {
-		return
+	base: u128
+	switch s[1] | 0x20 {
+	case 'x': base = 16
+	case 'o': base = 8
+	case 'b': base = 2
+	case: return
 	}
 	v: u128
-	for c in transmute([]u8)hex {
-		d := c - '0' if c <= '9' else (c | 0x20) - 'a' + 10
-		v = v << 4 | u128(d)
+	for c in transmute([]u8)s[2:] {
+		if c == '_' {
+			continue
+		}
+		d := u128(spell.HEX_NIBBLE[c])
+		if d >= base || v > (max(u128) - d) / base {
+			return
+		}
+		v = v * base + d
 	}
 	neg = neg && v != 0
 	at := len(buf)
@@ -138,6 +156,59 @@ hex_decimal :: proc(text: string, buf: []u8) -> (digits: string, ok: bool) {
 		buf[at] = '-'
 	}
 	return string(buf[at:]), true
+}
+
+// The JSON number that `lit`, a decimal a format spells with a sign, a point of its own, leading zeros or underscores,
+// spells, written in `buf`: `+1` as `1`, `.5` as `0.5`, `5.` as `5.0`, `007` as `7`, `1_0` as `10`, and `-0` as `0` when
+// it is an integer. `ok` is false when `buf` holds fewer bytes than `lit` and one more.
+json_decimal :: proc(lit: string, buf: []u8) -> (json: string, ok: bool) {
+	if len(lit) == 0 || len(buf) <= len(lit) {
+		return
+	}
+	n := 0
+	p := 1 if lit[0] == '+' || lit[0] == '-' else 0
+	if lit[0] == '-' && !integer_zero(lit[p:]) {
+		buf[n] = '-'
+		n += 1
+	}
+	if p < len(lit) && lit[p] == '.' {
+		buf[n] = '0'
+		n += 1
+	}
+	leading := true
+	for k in p ..< len(lit) {
+		if lit[k] == '_' {
+			continue
+		}
+		// A zero is leading while a digit follows it, past any underscores.
+		next := k + 1
+		for next < len(lit) && lit[next] == '_' {
+			next += 1
+		}
+		if leading && lit[k] == '0' && next < len(lit) && lit[next] - '0' < 10 {
+			continue
+		}
+		leading = false
+		buf[n] = lit[k]
+		n += 1
+		// A point with no digit after it still makes a float, so it keeps a zero.
+		if lit[k] == '.' && (k + 1 == len(lit) || lit[k + 1] - '0' >= 10) {
+			buf[n] = '0'
+			n += 1
+		}
+	}
+	return string(buf[:n]), true
+}
+
+// Whether `digits` is an integer zero: zeros and underscores, which a sign does not make negative.
+@(private = "file")
+integer_zero :: proc(digits: string) -> bool {
+	for c in transmute([]u8)digits {
+		if c != '0' && c != '_' {
+			return false
+		}
+	}
+	return len(digits) > 0
 }
 
 // The binary64 of `n`, a number spelled `text`.
@@ -377,6 +448,66 @@ compare_numbers :: proc(x: f64, lx_in: string, y: f64, ly_in: string) -> int {
 // Whether `a` and `b` are equal: `compare` with `eq` gives 0.
 equal :: proc(a, b: Value, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false, dups := Duplicates.Last) -> bool {
 	return compare(a, b, eq = true, too_deep = too_deep, max_depth = max_depth, read_plain = read_plain, dups = dups) == 0
+}
+
+// Whether numbers `a` and `b` are of one type, an integer or a float, as TOML, YAML and CBOR tell them apart: a number
+// spelled with a point, an exponent or a word (`1.0`, `1e2`, `inf`) is a float, and a hex, octal or binary one is an
+// integer. A double, a number computed and spelled by no text, takes either, as does a number whose text does not fit
+// the room read here.
+same_number_type :: proc(a, b: Value) -> bool {
+	fa, ka := float_spelled(a)
+	fb, kb := float_spelled(b)
+	return !ka || !kb || fa == fb
+}
+
+@(private = "file")
+float_spelled :: proc(v: Value) -> (float, known: bool) {
+	text: string
+	buf: [64]u8
+	#partial switch x in plain(v) {
+	case Number_View:
+		text = view_text(x)
+	case Node_Ref:
+		text = doc_number_text(x.doc, x.node, buf[:]) or_return
+	case:
+		return false, false
+	}
+	if len(text) > 0 && (text[0] == '-' || text[0] == '+') {
+		text = text[1:]
+	}
+	if prefix := text[1] | 0x20 if len(text) > 2 && text[0] == '0' else 0; prefix == 'x' || prefix == 'o' || prefix == 'b' {
+		return false, true
+	}
+	return text == "" || text[0] - '0' >= 10 || strings.contains_any(text, ".eE"), true
+}
+
+// Whether each number of `want` is of the type of the number at its place in `got`, a value equal to it, as
+// `same_number_type` tells them apart.
+same_number_types :: proc(want, got: Value, depth := 0) -> bool {
+	if depth > MAX_DEPTH {
+		return true
+	}
+	#partial switch value_kind(want) {
+	case .Number:
+		return same_number_type(want, got)
+	case .Array:
+		mine, theirs := value_children(want), value_children(got)
+		for x in value_child_next(&mine) {
+			y, _ := value_child_next(&theirs)
+			if !same_number_types(x, y, depth + 1) {
+				return false
+			}
+		}
+	case .Object:
+		it := value_pairs(want)
+		for k, x in value_pair_next(&it) {
+			y, _ := value_member(got, k)
+			if !same_number_types(x, y, depth + 1) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Whether `a` and `b` are one container or one document node, not two alike.

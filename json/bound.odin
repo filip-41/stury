@@ -16,28 +16,44 @@ import records "../core/records"
 // The readers of a document built as spec `S`: the leaves, and the spec's own `close_end`. It holds no services.
 readers_of :: proc "contextless" ($S: Spec) -> ^core.Readers {
 	@(static, rodata) r := core.Readers {
-		text = text, key_equals = key_equals_decode, number = number, number_f32 = number_f32,
+		text = token_text, key_equals = key_equals_decode, number = token_number, number_f32 = number_f32,
 		resolve = spelling_resolve, format = rules_of,
 		close_end = proc(doc: ^core.Document, i: core.Node_Index) -> u64 {return close_end_spec(doc, i, S)},
 		tag_key = "json", key_open = "\"", key_close = "\":",
+		holds = HOLDS[S], fact = number_style,
 	}
 	return &r
 }
 
+// The facts a text of each spec holds: JSON5 numbers also have a `Style`.
+@(private = "file")
+HOLDS :: [Spec]bit_set[core.Fact_Kind]{.Json = {}, .Jsonc = core.COMMENT_FACTS, .Json5 = core.COMMENT_FACTS + {.Style}}
+
 // The edit services of a list over a document of spec `S`: its value check and its commit's check are the walk of `S`.
 edit_of :: proc "contextless" ($S: Spec) -> ^core.Edit_Services {
 	@(static, rodata) e := core.Edit_Services {
-		value      = proc(v: ^core.Token_View, src: []u8, allocator: runtime.Allocator) -> core.Document_Error {return edit_value(src, allocator, v.max_depth, S)},
-		key_text   = edit_key_text,
-		comment    = edit_comment,
-		separators = edit_separators,
-		member_sep = proc(_: ^core.Document, _: core.Node_Index) -> string {return ","},
-		key_sep    = ":",
-		spell      = edit_spell,
-		validate   = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {
+		value        = proc(v: ^core.Token_View, src: []u8, allocator: runtime.Allocator) -> core.Document_Error {return edit_value(src, allocator, v.max_depth, S)},
+		key_text     = edit_key_text,
+		bare_key     = edit_bare_key,
+		comment      = edit_comment,
+		separators   = edit_separators,
+		member_sep   = proc(_: ^core.Document, _: core.Node_Index) -> string {return ","},
+		key_sep      = ":",
+		spell        = edit_spell,
+		build        = proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+			return build_spec(src, S, as, refuse_duplicates, allocator)
+		},
+		scan         = proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
+			return scan_spec(src, S, as, paths, read, state, on, allocator)
+		},
+		validate     = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {
 			h: core.No_Hooks
 			regs: core.Hook_Regs
 			return walk_text(src, 0, S, options_of(as), &h, &regs, core.no_hook)
+		},
+		walk_written = proc(src: []u8, as: core.As, w: ^core.Written_Read) -> Maybe(core.Fault) {
+			regs: core.Hook_Regs
+			return walk_text(src, 0, S, options_of(as), w, &regs, core.written_hook)
 		},
 	}
 	return &e
@@ -115,7 +131,7 @@ bound_as :: proc "contextless" ($S: Spec, opts := Options{}) -> core.As {
 // and the option bytes in `As`.
 @(rodata)
 PLAN_READERS := core.Readers {
-	text = text, key_equals = key_equals_decode, number = number, number_f32 = number_f32,
+	text = token_text, key_equals = key_equals_decode, number = token_number, number_f32 = number_f32,
 	format = rules_of, tag_key = "json", key_open = "\"", key_close = "\":",
 }
 

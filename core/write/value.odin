@@ -1,8 +1,7 @@
 package write
 
 // A value written in any format with a token writer. A node is written by the readers, as a built value is, so its
-// text is spelled new. A value's comments are not written, and an object's members are written in order, a repeated
-// key each time. A string with a tag, written on it or its node's, is a `Tagged_Text`.
+// text is spelled new. An object's members are written in order, a repeated key each time. A string with a tag, written on it or its node's, is a `Tagged_Text`.
 
 import "base:runtime"
 import "core:math"
@@ -15,21 +14,24 @@ import "../typed"
 // members are written in key order.
 write_value :: proc(v: core.Value, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> (text: []u8, err: core.Error) {
 	refusal: core.Typed_Refusal
-	text, refusal = write_laid(v, as, opts, "", nil, allocator)
+	text, refusal = write_laid(v, as, opts, "", nil, allocator, comments = true)
 	return text, core.error_of(refusal)
 }
 
 // `write_value` with the bytes between a member's key and its value given as `colon`, unless empty, and a format
 // that binds its spelling at compile time giving it as `spelling`. `site` is where the text will stand, as
-// `tokens_init` takes it. The refusal is the writer's own.
-write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator, site := core.Site{}) -> (text: []u8, err: core.Typed_Refusal) {
+// `tokens_init` takes it. `comments` writes the value's comments, which an edit writes itself. The refusal is the
+// writer's own.
+write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator, site := core.Site{}, comments := false) -> (text: []u8, err: core.Typed_Refusal) {
 	spelling := spelling
-	if spelling == nil && colon != "" {
-		services := core.services_of(as)
-		if services == nil || services.tokens == nil {
-			return nil, {kind = .Unsupported}
-		}
+	if services := core.services_of(as); spelling == nil && services != nil {
 		spelling = (^Token_Spelling)(services.tokens)
+	}
+	if spelling != nil && spelling.built != nil {
+		return spelling.built(v, opts, {}, allocator)
+	}
+	if spelling == nil && colon != "" {
+		return nil, {kind = .Unsupported}
 	}
 	laid: Token_Spelling
 	if colon != "" {
@@ -42,7 +44,7 @@ write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: 
 		tokens_finish(&t)
 		return nil, {kind = kind}
 	}
-	value_of(&t, v)
+	value_of(&t, v, comments)
 	return tokens_finish(&t)
 }
 
@@ -78,99 +80,111 @@ marshal_value :: proc(v: $T, plan: ^typed.Plan, allocator := context.allocator) 
 	return core.built_value({&doc, core.ROOT}), nil
 }
 
-// A value of any form, written as `marshal` writes it. With `comments` the comments written on a value (`Commented`) go
-// before it where the format has comments, and without it they are left out.
+// A value of any form, written as `marshal` writes it. With `comments` its comments, written on it (`Commented`) or its
+// node's, are written where the format has comments, and without it they are left out.
 value_of :: proc(t: ^Tokens, v: core.Value, comments := false) -> core.Typed_Error_Kind {
-	if comments {
-		lead_comments(t, v) or_return
-	}
-	return value_plain(t, v, comments)
+	notes := comments && t.notes
+	put_notes(t, v, .Comment, notes) or_return
+	value_plain(t, v, notes) or_return
+	return put_notes(t, v, .Comment_Inline, notes)
 }
 
-// The comments before the value `v`, which `comment` writes where a key does not wait for its value.
+// A member of an object: its lead comments, its key, its value and its inline comments.
 @(private = "file")
-lead_comments :: proc(t: ^Tokens, v: core.Value) -> core.Typed_Error_Kind {
-	if c, is_commented := v.(^core.Commented); is_commented && .Comment in c.written {
-		for body in c.bodies[.Comment] {
-			comment(t, body) or_return
-		}
+member :: proc(t: ^Tokens, name: string, v: core.Value, notes: bool) -> core.Typed_Error_Kind {
+	put_notes(t, v, .Comment, notes) or_return
+	key(t, name) or_return
+	value_plain(t, v, notes) or_return
+	return put_notes(t, v, .Comment_Inline, notes)
+}
+
+// The comments of `role` on `v` when `notes`. A scalar's foot follows it.
+@(private = "file")
+put_notes :: proc(t: ^Tokens, v: core.Value, role: core.Role, notes: bool) -> core.Typed_Error_Kind {
+	if !notes {
+		return .None
+	}
+	context.allocator = context.temp_allocator
+	bodies, _ := core.comments(v, role)
+	for body in bodies {
+		comment(t, body, role) or_return
 	}
 	return .None
 }
 
 @(private = "file")
-value_plain :: proc(t: ^Tokens, v: core.Value, comments: bool) -> core.Typed_Error_Kind {
+value_plain :: proc(t: ^Tokens, v: core.Value, notes: bool) -> core.Typed_Error_Kind {
 	switch x in core.plain(v) {
 	case nil:
-		return value_null(t)
+		value_null(t) or_return
 	case bool:
-		return value_bool(t, x)
+		value_bool(t, x) or_return
 	case f64:
 		if t.opts.jq_numbers && (math.is_nan(x) || math.is_inf(x)) {
-			return value_null(t) if math.is_nan(x) else value_float(t, math.copy_sign(math.F64_MAX, x))
+			(value_null(t) if math.is_nan(x) else value_float(t, math.copy_sign(math.F64_MAX, x))) or_return
+		} else {
+			n, _ := core.number(v)
+			value(t, n) or_return
 		}
-		n, _ := core.number(v)
-		return value(t, n)
-	case ^core.Number_Text:
-		return value(t, Number_Literal{x.text})
+	case core.Number_View:
+		value(t, Number_Literal{core.view_text(x)}) or_return
 	case string:
 		if tag, tagged := string_tag(v); tagged {
-			return value(t, Tagged_Text{x, tag})
+			value(t, Tagged_Text{x, tag.text, tag.meaning}) or_return
+		} else {
+			value_string(t, x) or_return
 		}
-		return value_string(t, x)
 	case ^core.Array:
 		open_array(t) or_return
 		for m in x.items {
-			value_of(t, m, comments) or_return
+			value_of(t, m, notes) or_return
 		}
-		return close(t)
+		return close_noted(t, v, notes)
 	case ^core.Object:
 		open_object(t) or_return
 		if t.opts.sort_keys && len(x.keys) > 1 {
 			for m in sorted(x.keys[:], x.vals[:]) {
-				if comments {
-					lead_comments(t, m.val) or_return
-				}
-				key(t, m.key) or_return
-				value_plain(t, m.val, comments) or_return
+				member(t, m.key, m.val, notes) or_return
 			}
-			return close(t)
-		}
-		for k, i in x.keys {
-			if comments {
-				lead_comments(t, x.vals[i]) or_return
+		} else {
+			for k, i in x.keys {
+				member(t, k, x.vals[i], notes) or_return
 			}
-			key(t, k) or_return
-			value_plain(t, x.vals[i], comments) or_return
 		}
-		return close(t)
+		return close_noted(t, v, notes)
 	case core.Node_Ref:
-		return put_node(t, x, v)
+		return put_node(t, x, v, notes)
 	case core.Trail:
-		return value_of(t, core.trail_array(x), comments)
+		return value_plain(t, core.trail_array(x), notes)
 	case ^core.Commented:
 	}
-	return .None
+	return put_notes(t, v, .Comment_Foot, notes)
 }
 
-// The tag string `v` is written with: the one written on it, else its node's, and false for none.
+// Closes the container `v` after its foot comments.
 @(private = "file")
-string_tag :: proc(v: core.Value) -> (string, bool) {
+close_noted :: proc(t: ^Tokens, v: core.Value, notes: bool) -> core.Typed_Error_Kind {
+	put_notes(t, v, .Comment_Foot, notes) or_return
+	return close(t)
+}
+
+// The tag `v` is written with: the one written on it, else its node's with its meaning, and false for none.
+@(private = "file")
+string_tag :: proc(v: core.Value) -> (core.Fact_Value, bool) {
 	if c, is_commented := v.(^core.Commented); is_commented && .Tag in c.written {
 		bodies := c.bodies[.Tag]
-		return bodies[0] if len(bodies) > 0 else "", len(bodies) > 0
+		return {text = bodies[0] if len(bodies) > 0 else ""}, len(bodies) > 0
 	}
 	r, is_ref := core.plain(v).(core.Node_Ref)
 	if !is_ref || len(r.doc.facts) == 0 && r.doc.readers.fact == nil {
-		return "", false
+		return {}, false
 	}
-	tag, tagged := core.fact_value(r.doc, r.node, .Tag)
-	return tag.text, tagged
+	return core.fact_value(r.doc, r.node, .Tag)
 }
 
 // Node `r` of `v`, which may write a tag on it.
 @(private = "file")
-put_node :: proc(t: ^Tokens, r: core.Node_Ref, v: core.Value) -> core.Typed_Error_Kind {
+put_node :: proc(t: ^Tokens, r: core.Node_Ref, v: core.Value, notes: bool) -> core.Typed_Error_Kind {
 	#partial switch core.kind(r) {
 	case .Null:
 		return value_null(t)
@@ -179,9 +193,9 @@ put_node :: proc(t: ^Tokens, r: core.Node_Ref, v: core.Value) -> core.Typed_Erro
 	case .True:
 		return value_bool(t, true)
 	case .Number:
-		// The digits a format spells for a number whose span is not its text are read into `spelled`.
+		// The digits of a number whose span is not a JSON number are read into `spelled`.
 		spelled: [core.HEX_ROOM]u8
-		if _, digits, _ := core.double_of(r, spelled[:] if r.doc.readers.number_text != nil else nil); digits != "" {
+		if _, digits, _ := core.double_of(r, spelled[:]); digits != "" {
 			return value(t, Number_Literal{digits})
 		}
 		n, _ := core.number(r)
@@ -196,16 +210,16 @@ put_node :: proc(t: ^Tokens, r: core.Node_Ref, v: core.Value) -> core.Typed_Erro
 		return value_bytes(t, payload) if held else .No_Memory
 	case .String:
 		if tag, tagged := string_tag(v); tagged {
-			return value(t, Tagged_Text{core.node_string(r.doc, r.node), tag})
+			return value(t, Tagged_Text{core.node_string(r.doc, r.node), tag.text, tag.meaning})
 		}
 		return value_string(t, core.node_string(r.doc, r.node))
 	case .Array:
 		open_array(t) or_return
 		it := core.children(r)
 		for m in core.child_next(&it) {
-			value_of(t, m) or_return
+			value_of(t, m, notes) or_return
 		}
-		return close(t)
+		return close_noted(t, v, notes)
 	case .Object:
 		open_object(t) or_return
 		it := core.pairs(r)
@@ -217,16 +231,14 @@ put_node :: proc(t: ^Tokens, r: core.Node_Ref, v: core.Value) -> core.Typed_Erro
 				append(&vals, m)
 			}
 			for m in sorted(keys[:], vals[:]) {
-				key(t, m.key) or_return
-				value_of(t, m.val) or_return
+				member(t, m.key, m.val, notes) or_return
 			}
-			return close(t)
+			return close_noted(t, v, notes)
 		}
 		for k, m in core.pair_next(&it) {
-			key(t, k) or_return
-			value_of(t, m) or_return
+			member(t, k, m, notes) or_return
 		}
-		return close(t)
+		return close_noted(t, v, notes)
 	}
 	return .None
 }

@@ -2,6 +2,8 @@ package main
 
 // The formats `--from` reads and `--to` writes, one row of FORMATS each, and the options a format refuses.
 
+import "core:reflect"
+import "core:strings"
 import core "../../core"
 import cbor "../../cbor"
 import dsv "../../dsv"
@@ -14,7 +16,7 @@ import yaml "../../yaml"
 Format :: enum u8 {
 	Json,
 	Jsonc,
-	Json5, // read only: --to jsonc writes its values and comments
+	Json5,
 	Ndjson,
 	Csv,
 	Tsv,
@@ -34,19 +36,15 @@ Format_Spec :: struct {
 	// How the format's texts are split in an input, and nil for a JSON-like format, whose inputs are concatenated
 	// documents (`--seq` makes them RFC 7464 records).
 	framing:    Maybe(core.Framing),
-	// The format keeps the comments read with a value.
-	comments:   bool,
-	// The format a format that is only read is written as, by default and by `--to`. Such a format is not itself written.
-	written_as: Maybe(Format),
 	// The spec its JSON texts are read in: `--argjson`, `fromjson` and a JSON-like format's input.
 	spec:       json.Spec,
+	// What the format's library offers: the write options its writer honours, so that the flags of the others are
+	// refused, its specs, and whether an input of it is a stream of texts.
+	caps:       core.Capabilities,
 	// A tree format that is not JSON: the handle a whole text of it is read with, as the options say, and nil for
-	// every other. Its input is one document built whole, unless `follows` makes it a stream of them.
+	// every other. Its input is one document built whole, unless `caps.follows` makes it a stream of them.
 	whole_as:   proc "contextless" (o: ^Opts) -> core.As,
-	// Whether the fault of a text read whole is of a text after its first, so that the input is read as the texts its
-	// record reader cuts, one after another. Nil for a format whose input is one text.
-	follows:    proc "contextless" (f: core.Fault) -> bool,
-	// With `whole_as` and `follows`: whether a document that ends a window of a followed file is closed there, so that
+	// With `whole_as` and `caps.follows`: whether a document that ends a window of a followed file is closed there, so that
 	// no later line continues it. Nil for a format whose document ends where its record is cut.
 	ended:      proc "contextless" (text: []byte) -> bool,
 	// With `whole_as`: a path is answered from a text of the format without building it.
@@ -54,47 +52,35 @@ Format_Spec :: struct {
 	// The handle `--to` writes each output with as a text of the format, through the format's document writer, which
 	// takes a document of any format. Nil for a format written as JSON or as cells.
 	written:    proc "contextless" (o: ^Opts) -> core.As,
-	// With `written`: the format's writer takes -c, --indent and -a, where another refuses every option that lays out
-	// JSON.
-	laid:       bool,
 	// With `written`: what stands between a text of a run and `text`, the next one, and nil for nothing.
 	parted:     proc "contextless" (text: []u8) -> string,
-	// With `written`: why the format's writer refused a value with `kind`, or "" for a kind it has no words for.
-	refusal:    proc "contextless" (kind: core.Typed_Error_Kind) -> string,
 }
 
 @(rodata)
 FORMATS := [Format]Format_Spec {
-	.Json   = {name = "json", title = "JSON", follows = json_follows},
-	.Jsonc  = {name = "jsonc", title = "JSON with comments", comments = true, spec = .Jsonc},
-	.Json5  = {name = "json5", title = "JSON5", comments = true, written_as = .Jsonc, spec = .Json5},
-	.Ndjson = {name = "ndjson", title = "NDJSON", framing = .Lines},
-	.Csv    = {name = "csv", title = "CSV", cells = true, framing = .Lines},
-	.Tsv    = {name = "tsv", title = "TSV", cells = true, framing = .Lines},
-	.Toml   = {name = "toml", title = "TOML", framing = .Concatenated, whole_as = toml_reading, written = toml_written, parted = toml_parted, refusal = toml_refusal},
-	.Yaml   = {name = "yaml", title = "YAML", framing = .Concatenated, whole_as = yaml_reading, follows = yaml_follows, ended = yaml_ended, scans = true, written = yaml_written, laid = true, parted = yaml_parted, refusal = yaml_refusal},
-	.Xml    = {name = "xml", title = "XML", framing = .Concatenated, whole_as = xml_reading, written = xml_written, laid = true, refusal = xml_refusal},
-	.Cbor   = {name = "cbor", title = "CBOR", framing = .Concatenated, whole_as = cbor_reading, follows = cbor_follows, scans = true, written = cbor_written},
-	.Html   = {name = "html", title = "HTML", framing = .Concatenated, whole_as = html_reading, written = html_written, laid = true, refusal = html_refusal},
-}
-
-// A text after the first is the next text of strict JSON, where `validate` and a build, judging one, refuse it as
-// trailing text.
-@(private = "file")
-json_follows :: proc "contextless" (f: core.Fault) -> bool {
-	return f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing)
+	.Json   = {name = "json", title = "JSON", caps = json.CAPABILITIES},
+	.Jsonc  = {name = "jsonc", title = "JSON with comments", spec = .Jsonc, caps = json.CAPABILITIES},
+	.Json5  = {name = "json5", title = "JSON5", spec = .Json5, caps = json.CAPABILITIES},
+	.Ndjson = {name = "ndjson", title = "NDJSON", framing = .Lines, caps = json.CAPABILITIES},
+	.Csv    = {name = "csv", title = "CSV", cells = true, framing = .Lines, caps = dsv.CAPABILITIES},
+	.Tsv    = {name = "tsv", title = "TSV", cells = true, framing = .Lines, caps = dsv.CAPABILITIES},
+	.Toml   = {name = "toml", title = "TOML", framing = .Concatenated, caps = toml.CAPABILITIES, whole_as = toml_reading, written = toml_written, parted = toml_parted},
+	.Yaml   = {name = "yaml", title = "YAML", framing = .Concatenated, caps = yaml.CAPABILITIES, whole_as = yaml_reading, ended = yaml_ended, scans = true, written = yaml_written, parted = yaml_parted},
+	.Xml    = {name = "xml", title = "XML", framing = .Concatenated, caps = xml.CAPABILITIES, whole_as = xml_reading, written = xml_written},
+	.Cbor   = {name = "cbor", title = "CBOR", framing = .Concatenated, caps = cbor.CAPABILITIES, whole_as = cbor_reading, scans = true, written = cbor_written},
+	.Html   = {name = "html", title = "HTML", framing = .Concatenated, caps = html.CAPABILITIES, whole_as = html_reading, written = html_written},
 }
 
 // TOML 1.1 reads every form 1.0 does, and there is no name for strict 1.0.
 @(private = "file")
 toml_reading :: proc "contextless" (o: ^Opts) -> core.As {
-	return toml.as(.Toml_1_1, {max_depth = o.max_depth})
+	return toml.as(toml.Spec(o.from_spec.? or_else u8(toml.Spec.Toml_1_1)), {max_depth = o.max_depth})
 }
 
 // TOML 1.0, which every reader takes.
 @(private = "file")
 toml_written :: proc "contextless" (o: ^Opts) -> core.As {
-	return toml.as(.Toml_1_0, {max_depth = o.max_depth})
+	return toml.as(toml.Spec(o.to_spec.? or_else u8(toml.Spec.Toml_1_0)), {max_depth = o.max_depth})
 }
 
 // A TOML text of a run follows a blank line.
@@ -103,27 +89,10 @@ toml_parted :: proc "contextless" (text: []u8) -> string {
 	return "\n"
 }
 
-@(private = "file")
-toml_refusal :: proc "contextless" (kind: core.Typed_Error_Kind) -> string {
-	#partial switch kind {
-	case .Unsupported:
-		return "cannot write a value that is no object as TOML"
-	case .Unwritable:
-		return "cannot write null, or a key a table repeats, as TOML"
-	}
-	return ""
-}
-
 // YAML 1.2 with the core schema. A `%YAML 1.1` directive reads with the same rules.
 @(private = "file")
 yaml_reading :: proc "contextless" (o: ^Opts) -> core.As {
-	return yaml.as(.Yaml_1_2, {max_depth = o.max_depth, alias_limit = o.alias_limit, merge_keys = o.merge_keys})
-}
-
-// A YAML text holds a stream of documents: a whole build refuses a second document, and a text with none.
-@(private = "file")
-yaml_follows :: proc "contextless" (f: core.Fault) -> bool {
-	return f.rules == &yaml.RULES && (f.detail == u8(yaml.Detail.Extra_Document) || f.detail == u8(yaml.Detail.No_Document))
+	return yaml.as(yaml.Spec(o.from_spec.? or_else u8(yaml.Spec.Yaml_1_2)), {max_depth = o.max_depth, alias_limit = o.alias_limit, merge_keys = o.merge_keys})
 }
 
 // Whether YAML document `text` ends with its `...` line, which no line after it continues.
@@ -141,24 +110,28 @@ yaml_ended :: proc "contextless" (text: []byte) -> bool {
 
 @(private = "file")
 yaml_written :: proc "contextless" (o: ^Opts) -> core.As {
-	return yaml.as(.Yaml_1_2, {max_depth = o.max_depth})
+	return yaml.as(yaml.Spec(o.to_spec.? or_else u8(yaml.Spec.Yaml_1_2)), {max_depth = o.max_depth})
 }
 
-// A YAML text of a run starts its own document, as `---`, or as `...` before the directives of one that has them.
+// A YAML text of a run starts its own document, as `---`, or as `...` before the directives of one that has them. The
+// text's head comments stand before either.
 @(private = "file")
 yaml_parted :: proc "contextless" (text: []u8) -> string {
+	at := 0
+	for at < len(text) && (text[at] == '#' || text[at] == '\n') {
+		for at < len(text) && text[at] != '\n' {
+			at += 1
+		}
+		at += 1
+	}
+	rest := text[min(at, len(text)):]
 	switch {
-	case len(text) > 0 && text[0] == '%':
+	case len(rest) > 0 && rest[0] == '%':
 		return "...\n"
-	case len(text) >= 3 && string(text[:3]) == "---":
+	case len(rest) >= 3 && string(rest[:3]) == "---":
 		return ""
 	}
 	return "---\n"
-}
-
-@(private = "file")
-yaml_refusal :: proc "contextless" (kind: core.Typed_Error_Kind) -> string {
-	return "cannot write a text YAML has no spelling for" if kind == .Unwritable else ""
 }
 
 // XML 1.0 with Namespaces and the internal subset. A text value is a string unless --infer.
@@ -168,63 +141,71 @@ xml_reading :: proc "contextless" (o: ^Opts) -> core.As {
 	if o.unread_entities {
 		tolerate = {.Unread_Entity}
 	}
-	return xml.as(.Xml, {max_depth = o.max_depth, infer = o.cells_in.infer, tolerate = tolerate, max_expansion = o.expansion_limit})
+	return xml.as(xml.Spec(o.from_spec.? or_else u8(xml.Spec.Xml)), {max_depth = o.max_depth, infer = o.cells_in.infer, tolerate = tolerate, max_expansion = o.expansion_limit})
 }
 
 @(private = "file")
 xml_written :: proc "contextless" (o: ^Opts) -> core.As {
-	return xml.as(.Xml, {max_depth = o.max_depth})
+	return xml.as(xml.Spec(o.to_spec.? or_else u8(xml.Spec.Xml)), {max_depth = o.max_depth})
 }
 
-@(private = "file")
-xml_refusal :: proc "contextless" (kind: core.Typed_Error_Kind) -> string {
-	#partial switch kind {
-	case .Unsupported:
-		return "cannot write a value that is no object as XML"
-	case .Unwritable:
-		return "cannot write a value XML has no element or text for"
-	}
-	return ""
-}
-
-// An HTML document, as a browser with scripting disabled reads it. A text value is a string unless --infer.
+// An HTML document, or a fragment in `body`, as a browser with scripting disabled reads it. A text value is a string unless --infer.
 @(private = "file")
 html_reading :: proc "contextless" (o: ^Opts) -> core.As {
-	return html.as(.Document, {max_depth = o.max_depth, infer = o.cells_in.infer})
+	return html.as(html.Spec(o.from_spec.? or_else u8(html.Spec.Document)), {max_depth = o.max_depth, infer = o.cells_in.infer})
 }
 
 @(private = "file")
 html_written :: proc "contextless" (o: ^Opts) -> core.As {
-	return html.as(.Document, {max_depth = o.max_depth})
+	return html.as(html.Spec(o.to_spec.? or_else u8(html.Spec.Document)), {max_depth = o.max_depth})
 }
 
-@(private = "file")
-html_refusal :: proc "contextless" (kind: core.Typed_Error_Kind) -> string {
-	#partial switch kind {
-	case .Unsupported:
-		return "cannot write a value that is no object as HTML"
-	case .Unwritable:
-		return "cannot write a value as HTML whose text reads back as another tree"
-	}
-	return ""
-}
-
-// Any well-formed and valid item, in whatever serialization.
+// Any well-formed and valid item, in whatever serialization, unless a spec names one.
 @(private = "file")
 cbor_reading :: proc "contextless" (o: ^Opts) -> core.As {
-	return cbor.as(.Cbor, {max_depth = o.max_depth})
+	return cbor.as(cbor.Spec(o.from_spec.? or_else u8(cbor.Spec.Cbor)), {max_depth = o.max_depth})
 }
 
-// An input is an RFC 8742 sequence: a whole build refuses the bytes after its first item, and a text with none.
-@(private = "file")
-cbor_follows :: proc "contextless" (f: core.Fault) -> bool {
-	return f.rules == &cbor.RULES && (f.detail == u8(cbor.Detail.Trailing) || f.detail == u8(cbor.Detail.No_Item))
-}
-
-// Each output one item in preferred serialization.
+// Each output one item in preferred serialization, unless a spec names another.
 @(private = "file")
 cbor_written :: proc "contextless" (o: ^Opts) -> core.As {
-	return cbor.as(.Preferred, {max_depth = o.max_depth})
+	return cbor.as(cbor.Spec(o.to_spec.? or_else u8(cbor.Spec.Preferred)), {max_depth = o.max_depth})
+}
+
+// The spec of format `f` that `text` names after `--from f:` or `--to f:`. Only a format whose own procs choose its
+// spec takes one.
+spec_named :: proc(f: Format, text: string) -> (spec: u8, ok: bool) {
+	if FORMATS[f].whole_as == nil {
+		return
+	}
+	values := reflect.enum_field_values(FORMATS[f].caps.specs)
+	for name, i in reflect.enum_field_names(FORMATS[f].caps.specs) {
+		if spec_spelling(f, name) == text {
+			return u8(values[i]), true
+		}
+	}
+	return
+}
+
+// The comma-separated spec names of format `f`, for a `spec_named` refusal.
+spec_names :: proc(f: Format) -> string {
+	b := make([dynamic]string, context.temp_allocator)
+	for name in reflect.enum_field_names(FORMATS[f].caps.specs) {
+		append(&b, spec_spelling(f, name))
+	}
+	return strings.join(b[:], ", ", context.temp_allocator)
+}
+
+// Spec `name` of format `f` as the command line spells it: in lower case, without the format's name before an
+// underscore, and with a `.` for each underscore of a version.
+@(private = "file")
+spec_spelling :: proc(f: Format, name: string) -> string {
+	s := strings.to_lower(name, context.temp_allocator)
+	s = strings.trim_prefix(s, strings.concatenate({FORMATS[f].name, "_"}, context.temp_allocator))
+	if len(s) > 0 && '0' <= s[0] && s[0] <= '9' {
+		s, _ = strings.replace_all(s, "_", ".", context.temp_allocator)
+	}
+	return s
 }
 
 format_named :: proc(name: string) -> (f: Format, ok: bool) {
@@ -236,13 +217,10 @@ format_named :: proc(name: string) -> (f: Format, ok: bool) {
 	return
 }
 
-// Returns the comma-separated format names for `--from` and `--to` messages: a format that is only read is not written.
-format_names :: proc(writing: bool) -> string {
+// Returns the comma-separated format names for `--from` and `--to` messages.
+format_names :: proc() -> string {
 	b := make([dynamic]byte, context.temp_allocator)
 	for spec, k in FORMATS {
-		if writing && spec.written_as != nil {
-			continue
-		}
 		if k != .Json {
 			append(&b, ", ")
 		}
@@ -295,7 +273,7 @@ reads_whole :: #force_inline proc(o: ^Opts) -> bool {
 
 // Reports whether an input of format `f` is one document of a handle of its own.
 source_whole :: #force_inline proc(f: Format) -> bool {
-	return FORMATS[f].whole_as != nil && FORMATS[f].follows == nil
+	return FORMATS[f].whole_as != nil && FORMATS[f].caps.follows == nil
 }
 
 // Whether `data` holds no text of a JSON-like format, which has no value. A format read with a handle of its own
@@ -320,6 +298,14 @@ lines_of_json :: #force_inline proc(f: Format) -> bool {
 	return FORMATS[f].framing == .Lines && !FORMATS[f].cells
 }
 
+// How a whole text of the tree format `f` is read under `o`.
+tree_reading :: proc(f: Format, o: ^Opts) -> core.As {
+	if whole_as := FORMATS[f].whole_as; whole_as != nil {
+		return whole_as(o)
+	}
+	return json.as(FORMATS[f].spec, {max_depth = o.max_depth})
+}
+
 // Reports whether each output is written as a text of the output format, by the format's own writer.
 writes_texts :: #force_inline proc(o: ^Opts) -> bool {
 	return FORMATS[o.to].written != nil
@@ -330,17 +316,29 @@ text_written_as :: proc(o: ^Opts) -> core.As {
 	return FORMATS[o.to].written(o)
 }
 
-// Reports whether the outputs, written, keep the comments read with their values.
+// Reports whether the outputs are JSON texts that keep the comments read with their values.
 writes_comments :: #force_inline proc(o: ^Opts) -> bool {
-	return FORMATS[o.to].comments
+	return !writes_texts(o) && !writes_cells(o) && .Comment in json.as(FORMATS[o.to].spec).readers.holds
 }
 
-// Refuses options that conflict with the chosen formats. A non-JSON input format splits the input itself, so -R,
-// --seq and --stream do not apply. A delimited output writes no JSON text, so JSON layout options do not apply.
+// The facts a text of the output format holds.
+holds_out :: proc(o: ^Opts) -> bit_set[core.Fact_Kind] {
+	switch {
+	case writes_texts(o):
+		return text_written_as(o).readers.holds
+	case writes_cells(o):
+		return cells_written_as(o).readers.holds
+	}
+	return json.as(FORMATS[o.to].spec).readers.holds
+}
+
+// Refuses options that conflict with the chosen formats. A format with its own framing splits the input itself, and
+// any format but JSON reads its own text, so --seq and -R do not apply. A delimited output writes no JSON text, so JSON
+// layout options do not apply.
 refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 	from, to := FORMATS[o.from].name, FORMATS[o.to].name
 	if o.from != .Json {
-		other := "--seq" if o.seq else "-R" if o.raw_input else "--stream" if o.stream && !reads_lines(o) else ""
+		other := "--seq" if o.seq && FORMATS[o.from].framing != nil else "-R" if o.raw_input else ""
 		if other != "" {
 			usage_error("--from %s cannot be combined with %s", from, other)
 		}
@@ -349,8 +347,7 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 		if cli.validating {
 			usage_error("check writes nothing: --to %s has no use there", to)
 		}
-		laid := writes_texts(o) && FORMATS[o.to].laid
-		other := cli.json_flag if writes_cells(o) || writes_texts(o) && !laid else cli.text_flag if laid else "--seq" if o.seq else cli.layout_flag if writes_lines(o) else ""
+		other := unhonoured_flag(cli, FORMATS[o.to].caps.writes) if writes_cells(o) || writes_texts(o) else "--seq" if o.seq else cli.layout_flag if writes_lines(o) else ""
 		if other != "" {
 			usage_error("%s cannot be combined with --to %s", other, to)
 		}
@@ -381,6 +378,20 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 	if writes_cells(o) {
 		refuse_cell_bytes(cells_spec(o.to), o.cells_out, to, "--out-delimiter" if cli.out_delimiter != nil else "--delimiter", "--out-comment" if cli.out_comment != nil else "--comment")
 	}
+}
+
+// The first option given that a writer honouring `writes` has no use for, or "".
+@(private = "file")
+unhonoured_flag :: proc(cli: ^Cli, writes: bit_set[core.Write_Option; u8]) -> string {
+	if cli.text_flag != "" {
+		return cli.text_flag
+	}
+	for flag, option in cli.option_flags {
+		if flag != "" && option not_in writes {
+			return flag
+		}
+	}
+	return ""
 }
 
 // Refuses a delimiter or comment character that `format` cannot read, as the library's walk refuses it.

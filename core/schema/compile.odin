@@ -116,7 +116,7 @@ bind :: proc(c: ^Compiled, checks: typed.Format_Checks, allocator := context.all
 	b.allocator = allocator
 	b.plan, err = typed.plan_of(c.description, as, reads, {checking = true}, allocator)
 	if err == nil && (b.plan.check == nil || b.plan.node_check == nil && as.readers != nil && as.readers.flat) {
-		// The format's checks are not given: a delimited format's come from its package, `dsv.bind_schema`.
+		// A handle whose services hold no checks binds no schema.
 		typed.plan_destroy(&b.plan)
 		err = core.error_of(typed.plan_mismatch(&b.plan, nil, nil))
 	}

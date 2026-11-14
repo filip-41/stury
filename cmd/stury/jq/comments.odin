@@ -7,54 +7,17 @@ package jq
 // each spelled as markup writes it. The other facts of markup, an element's name, namespace and content and a
 // document's instructions and doctype, are read only.
 //
-// In a path a fact is a step of its own, the object `{"fact": "comment"}` (or any other name in `FACT_NAMES`), and only
+// In a path a fact is a step of its own, the object `{"fact": "comment"}` (or any other name in `core.FACTS`), and only
 // the last step: `.a.@comment` is the path `["a", {"fact": "comment"}]`. `.@` reads only the names in the catalogue. An
 // attribute's step names it too: `.&k` is `{"fact": "attribute", "name": "k"}`.
 
-import "core:slice"
-import "core:strconv"
-import "core:strings"
-
 import core_pkg "../../../core"
 
-// Every fact `.@` names: the three comment roles, the properties of `core.Fact_Name`, then the markup facts that are
-// no property. `Attribute` is the step of `.&name`, which `.@` does not name.
-Fact :: enum u8 {
-	Comment,
-	Comment_Inline,
-	Comment_Foot,
-	Tag,
-	Anchor,
-	Alias,
-	Style,
-	Name,
-	Namespace,
-	Content,
-	Pi,
-	Doctype,
-	Attrs,
-	Attribute,
-}
+// Every fact `.@` names is a `core.Fact_Kind`, by its `core.FACTS` name. `.@attrs` reads `Attribute` as an object of
+// every attribute, and the step of `.&name`, `{"fact": "attribute", "name": name}`, one attribute.
+Fact :: core_pkg.Fact_Kind
 
-// The name of each fact as a path step spells it, and as `.@` reads it after its `@`.
-FACT_NAMES :: [Fact]string {
-	.Comment        = "comment",
-	.Comment_Inline = "comment_inline",
-	.Comment_Foot   = "comment_foot",
-	.Tag            = "tag",
-	.Anchor         = "anchor",
-	.Alias          = "alias",
-	.Style          = "style",
-	.Name           = "name",
-	.Namespace      = "namespace",
-	.Content        = "content",
-	.Pi             = "pi",
-	.Doctype        = "doctype",
-	.Attrs          = "attrs",
-	.Attribute      = "attribute",
-}
-
-// The other names `.@` reads, each for the fact it names. A path step always spells the fact by its `FACT_NAMES` name.
+// The other names `.@` reads, each for the fact it names. A path step always spells the fact by its `core.FACTS` name.
 FACT_ALIASES :: [?]struct {
 	name: string,
 	fact: Fact,
@@ -62,9 +25,8 @@ FACT_ALIASES :: [?]struct {
 
 // The fact `.@name` names, `name` without its `@`, and whether the catalogue holds it.
 fact_named :: proc(name: string) -> (Fact, bool) {
-	names := FACT_NAMES
-	for n, f in names {
-		if n == name && f != .Attribute {
+	for info, f in core_pkg.FACTS {
+		if info.name == name {
 			return f, true
 		}
 	}
@@ -74,54 +36,6 @@ fact_named :: proc(name: string) -> (Fact, bool) {
 		}
 	}
 	return .Comment, false
-}
-
-// The comment role of fact `f`, when it is one.
-comment_role :: proc(f: Fact) -> (core_pkg.Role, bool) {
-	#partial switch f {
-	case .Comment:
-		return .Comment, true
-	case .Comment_Inline:
-		return .Comment_Inline, true
-	case .Comment_Foot:
-		return .Comment_Foot, true
-	}
-	return .Value, false
-}
-
-// The property fact `f` names, when it is one.
-property_name :: proc(f: Fact) -> (core_pkg.Fact_Name, bool) {
-	#partial switch f {
-	case .Tag:
-		return .Tag, true
-	case .Anchor:
-		return .Anchor, true
-	case .Alias:
-		return .Alias, true
-	case .Style:
-		return .Style, true
-	case .Name:
-		return .Name, true
-	case .Namespace:
-		return .Namespace, true
-	case .Content:
-		return .Content, true
-	}
-	return .Tag, false
-}
-
-// The role property `name` is written under, which a style, held in a node's spelling alone, has none of.
-property_role :: proc(name: core_pkg.Fact_Name) -> (core_pkg.Role, bool) {
-	switch name {
-	case .Tag:
-		return .Tag, true
-	case .Anchor:
-		return .Anchor, true
-	case .Alias:
-		return .Alias, true
-	case .Style, .Name, .Namespace, .Content:
-	}
-	return .Value, false
 }
 
 // `.@role` of `v`: its comments of `role` as an array of strings, or null when it has none.
@@ -181,18 +95,22 @@ fact_step :: proc(key: Value) -> (fact: Fact, ok: bool) {
 	if !is_str {
 		return
 	}
-	names := FACT_NAMES
-	for n, f in names {
-		if n == s && (f == .Attribute) == (length_of(key) == 2) {
-			if f == .Attribute {
-				n, _ := object_get(key, "name")
-				_, named := string_of(n)
-				return f, named
-			}
+	if length_of(key) == 2 {
+		n, _ := object_get(key, "name")
+		_, named := string_of(n)
+		return .Attribute, s == "attribute" && named
+	}
+	for info, f in core_pkg.FACTS {
+		if info.name == s {
 			return f, true
 		}
 	}
 	return
+}
+
+// Whether fact path step `key` is the step of one attribute, `.&name`.
+is_attribute_step :: proc(key: Value) -> bool {
+	return length_of(key) == 2
 }
 
 // The attribute name of an attribute step, which `fact_step` reports as `Attribute`.
@@ -205,8 +123,7 @@ attribute_step_name :: proc(key: Value) -> string {
 // The path step of `fact`.
 fact_key :: proc(fact: Fact) -> Value {
 	o := new_object()
-	names := FACT_NAMES
-	object_put(o, "fact", names[fact])
+	object_put(o, "fact", core_pkg.FACTS[fact].name)
 	return o
 }
 
@@ -220,26 +137,30 @@ attribute_key :: proc(name: string) -> Value {
 
 // `.@fact` of `v`: a comment role's bodies as an array of strings, or a property's value, null when it has none.
 fact_value :: proc(v: Value, fact: Fact) -> Value {
-	if role, is_comment := comment_role(fact); is_comment {
-		return comments_value(v, role)
+	info := core_pkg.FACTS[fact]
+	switch info.class {
+	case .Comment:
+		return comments_value(v, info.role)
+	case .Property:
+		return property_value(v, fact)
+	case .Markup:
 	}
 	#partial switch fact {
-	case .Pi:
+	case .Instruction:
 		return markup_facts(v, .Instruction, true)
 	case .Doctype:
 		return markup_facts(v, .Doctype, false)
-	case .Attrs:
-		return attributes_value(v, "", false)
+	case .Directive:
+		return markup_facts(v, .Directive, true)
 	}
-	name, _ := property_name(fact)
-	return property_value(v, name)
+	return attributes_value(v, "", false)
 }
 
 // The bodies of the facts of `role` on `v`, an array of strings, or the first one as a string when `many` is false.
 // Null when `v` has none.
 @(private = "file")
 markup_facts :: proc(v: Value, role: core_pkg.Role, many: bool) -> Value {
-	r, is_ref := plain(v).(Ref)
+	r, is_ref := core_pkg.facts_node(v)
 	if !is_ref || len(r.doc.facts) == 0 {
 		return nil
 	}
@@ -254,131 +175,14 @@ markup_facts :: proc(v: Value, role: core_pkg.Role, many: bool) -> Value {
 	return Value(a) if many else a.items[0]
 }
 
-// The attributes of the element `v` is, by name as written: with `one` the value of the attribute `name`, else an
-// object of every one's value. Null for a value that is no element or has none, or none of that name.
-attributes_value :: proc(v: Value, name: string, one: bool) -> Value {
-	if c, is_commented := v.(^Commented); is_commented && .Attribute in c.written {
-		return written_attributes(c, name, one)
-	}
-	r, is_ref := plain(v).(Ref)
-	if !is_ref || len(r.doc.facts) == 0 {
-		return nil
-	}
-	o: ^Object
-	it := core_pkg.attributes_of(r.doc, r.node)
-	for k, value in core_pkg.attribute_next(&it) {
-		key, _ := core_pkg.token_text(r.doc.readers, &r.doc.view, k, context.allocator)
-		if one && key != name {
-			continue
-		}
-		text, _ := core_pkg.token_text(r.doc.readers, &r.doc.view, value, context.allocator)
-		if one {
-			return text
-		}
-		if o == nil {
-			o = new_object()
-		}
-		object_put(o, key, text)
-	}
-	return o if o != nil else nil
-}
-
-// `attributes_value` of an element whose attributes the filter wrote: a body its node has is read as the source reads
-// it, and one the filter spelled by undoing `attribute_body`.
-@(private = "file")
-written_attributes :: proc(c: ^Commented, name: string, one: bool) -> Value {
-	source, _ := comments(c.v, .Attribute)
-	o: ^Object
-	for body in c.bodies[.Attribute] {
-		key := attribute_read_name(c.v, body)
-		if one && key != name {
-			continue
-		}
-		text := attributes_value(c.v, key, true) if slice.contains(source, body) else Value(attribute_body_text(body))
-		if one {
-			return text
-		}
-		if o == nil {
-			o = new_object()
-		}
-		object_put(o, key, text)
-	}
-	return o if o != nil else nil
-}
-
-// The name of attribute body `body`, what stands before its `=`.
-@(private = "file")
-attribute_body_name :: proc(body: string) -> string {
-	eq := strings.index_byte(body, '=')
-	return strings.trim_right_space(body[:eq if eq >= 0 else len(body)])
-}
-
-// The name the format reads from attribute `body`: what its reader makes of the name the element's source spells that way,
-// as HTML folds capitals, else the name as written.
-@(private = "file")
-attribute_read_name :: proc(v: Value, body: string) -> string {
-	written := attribute_body_name(body)
-	if r, is_ref := plain(v).(Ref); is_ref && len(r.doc.facts) > 0 {
-		it := core_pkg.attributes_of(r.doc, r.node)
-		for k, _ in core_pkg.attribute_next(&it) {
-			if string(r.doc.src[k.lo:][:k.n]) == written {
-				read, _ := core_pkg.token_text(r.doc.readers, &r.doc.view, k, context.allocator)
-				return read
-			}
-		}
-	}
-	return written
-}
-
-// The attribute `name` with the value `text`, as markup writes it: quoted, with the markup, the quote and the white
-// space a reader would fold to a space written as references.
-@(private = "file")
-attribute_body :: proc(name, text: string) -> string {
-	b := strings.builder_make()
-	strings.write_string(&b, name)
-	strings.write_string(&b, `="`)
-	for c in transmute([]u8)text {
-		switch c {
-		case '&', '<', '"', '\t', '\n', '\r':
-			strings.write_string(&b, "&#")
-			strings.write_int(&b, int(c))
-			strings.write_byte(&b, ';')
-		case:
-			strings.write_byte(&b, c)
-		}
-	}
-	strings.write_byte(&b, '"')
-	return strings.to_string(b)
-}
-
-// The value of a body `attribute_body` wrote.
-@(private = "file")
-attribute_body_text :: proc(body: string) -> string {
-	quoted := body[strings.index_byte(body, '"') + 1:len(body) - 1]
-	b := strings.builder_make()
-	for i := 0; i < len(quoted); i += 1 {
-		if quoted[i] == '&' {
-			end := strings.index_byte(quoted[i:], ';')
-			n, _ := strconv.parse_int(quoted[i + 2:i + end])
-			strings.write_byte(&b, u8(n))
-			i += end
-		} else {
-			strings.write_byte(&b, quoted[i])
-		}
-	}
-	return strings.to_string(b)
-}
-
 // `v`'s property `name`: the filter's write, else the value of its node's fact, a number when the fact spells one.
-property_value :: proc(v: Value, name: core_pkg.Fact_Name) -> Value {
-	inner := v
+property_value :: proc(v: Value, name: Fact) -> Value {
 	if c, is_commented := v.(^Commented); is_commented {
-		if role, spanned := property_role(name); spanned && role in c.written {
+		if role := core_pkg.FACTS[name].role; role != .Value && role in c.written {
 			return c.bodies[role][0] if len(c.bodies[role]) > 0 else nil
 		}
-		inner = c.v
 	}
-	r, is_ref := inner.(Ref)
+	r, is_ref := core_pkg.facts_node(v)
 	if !is_ref {
 		return nil
 	}
@@ -398,16 +202,16 @@ property_value :: proc(v: Value, name: core_pkg.Fact_Name) -> Value {
 // or null, and a number for a tag, which is held as its digits, and for an attribute a string or null. A style is
 // written only as the one `v` has.
 write_fact :: proc(ip: ^Interp, v: Value, step: Value, nv: Value) -> (Value, Signal) {
-	fact, _ := fact_step(step)
-	if fact == .Attribute {
+	name, _ := fact_step(step)
+	if is_attribute_step(step) {
 		return write_attribute(ip, v, attribute_step_name(step), nv)
 	}
-	if role, is_comment := comment_role(fact); is_comment {
-		return write_comments(ip, v, role, nv)
+	info := core_pkg.FACTS[name]
+	if info.class == .Comment {
+		return write_comments(ip, v, info.role, nv)
 	}
-	name, writable := property_name(fact)
-	if !writable || name == .Name || name == .Namespace || name == .Content {
-		return nil, fail(ip, "A markup name, namespace, content, instruction or doctype cannot be written")
+	if info.read_only || info.class != .Property {
+		return nil, fail(ip, "A markup name, namespace, content, instruction, doctype or document marker cannot be written")
 	}
 	text: string
 	switch kind(nv) {
@@ -422,8 +226,8 @@ write_fact :: proc(ip: ^Interp, v: Value, step: Value, nv: Value) -> (Value, Sig
 	case .False, .True, .Array, .Object:
 		return nil, bad_property(ip)
 	}
-	role, spanned := property_role(name)
-	if !spanned {
+	role := info.role
+	if role == .Value {
 		if compare(property_value(v, name), plain(nv)) == 0 {
 			return v, .Go
 		}
@@ -444,21 +248,7 @@ write_attribute :: proc(ip: ^Interp, v: Value, name: string, nv: Value) -> (Valu
 	if !is_text && kind(nv) != .Null {
 		return nil, fail(ip, "an attribute is a string or null")
 	}
-	have, _ := comments(v, .Attribute)
-	bodies := make([dynamic]string, 0, len(have) + 1)
-	found := false
-	for body in have {
-		if attribute_read_name(v, body) != name {
-			append(&bodies, body)
-		} else if !found && is_text {
-			append(&bodies, attribute_body(attribute_body_name(body), text))
-		}
-		found ||= attribute_read_name(v, body) == name
-	}
-	if !found && is_text {
-		append(&bodies, attribute_body(name, text))
-	}
-	return noted(v, .Attribute, bodies[:]), .Go
+	return noted(v, .Attribute, core_pkg.attribute_bodies(v, name, text if is_text else nil)), .Go
 }
 
 @(private = "file")
@@ -519,8 +309,11 @@ merge_facts :: #force_no_inline proc(old, nv: Value) -> Value {
 		}
 	}
 	kept := core_pkg.keep_comments(old, nv)
-	for name in core_pkg.Fact_Name {
-		role := property_role(name) or_continue
+	for info, name in core_pkg.FACTS {
+		role := info.role
+		if info.class != .Property || role == .Value {
+			continue
+		}
 		if property_value(nv, name) != nil {
 			continue
 		}
@@ -541,6 +334,14 @@ merge_facts :: #force_no_inline proc(old, nv: Value) -> Value {
 		bodies := make([]string, 1)
 		bodies[0] = text
 		kept = noted(kept, role, bodies)
+	}
+	if r, is_node := core_pkg.facts_node(old); is_node && core_pkg.is_markup(r.doc) {
+		n, brings := nv.(^Commented)
+		_, is_ref := plain(nv).(Ref)
+		if c, is_commented := old.(^Commented); is_commented && .Attribute in c.written && !is_ref && !(brings && .Attribute in n.written) {
+			kept = noted(kept, .Attribute, c.bodies[.Attribute])
+		}
+		kept = core_pkg.in_place_of(kept, r)
 	}
 	return kept
 }

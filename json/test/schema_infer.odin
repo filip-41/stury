@@ -244,6 +244,7 @@ infer_records_order_is_independent_of_pieces :: proc(t: ^testing.T) {
 infer_reads_markup :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	readers := json.as(.Json).readers^
+	readers.holds += {.Attribute}
 	readers.attribute = markup_attribute
 	markup := json.as(.Json)
 	markup.readers = &readers
@@ -431,17 +432,18 @@ sample_is_seeded_and_follows_inference :: proc(t: ^testing.T) {
 	}
 }
 
-// A comment is written where the format has comments and dropped where it has none.
+// A comment is written where the format has comments and refused where it has none.
 @(test)
 tokens_comment :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	cases := [?]struct {
 		spec: json.Spec,
 		want: string,
+		kind: core.Typed_Error_Kind,
 	} {
-		{.Json, `{"a":1}`},
-		{.Jsonc, `{/* note */"a":1}`},
-		{.Json5, `{/* note */"a":1}`},
+		{.Json, "", .Unsupported},
+		{.Jsonc, `{/* note */"a":1}`, .None},
+		{.Json5, `{/* note */"a":1}`, .None},
 	}
 	for c in cases {
 		tk: write.Tokens
@@ -452,7 +454,7 @@ tokens_comment :: proc(t: ^testing.T) {
 		write.value_int(&tk, 1)
 		write.close(&tk)
 		out, err := write.tokens_finish(&tk)
-		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+		testing.expect_value(t, err.kind, c.kind)
 		testing.expect_value(t, string(out), c.want)
 	}
 }

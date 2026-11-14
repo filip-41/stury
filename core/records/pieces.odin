@@ -12,7 +12,7 @@ import engine "../build"
 // the records, if any. The slice is allocated with `allocator`. An allocation that fails returns its error and no
 // faults. With a `runner`, a long text is read in pieces on its threads, with the same answer. A format that binds its
 // framing at compile time gives it as `services`, and then `as` need hold none.
-check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0, services: ^Framing_Services = nil) -> (faults: []core.Fault, err: runtime.Allocator_Error) {
+validate :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0, services: ^Framing_Services = nil) -> (faults: []core.Fault, err: runtime.Allocator_Error) {
 	out := make([dynamic]core.Fault, allocator)
 	if err = judge_all(src, as, services, framing, at, runner, &out); err != nil {
 		delete(out)
@@ -87,7 +87,7 @@ judge_all :: proc(src: []u8, as: core.As, services: ^Framing_Services, framing: 
 	// Until `FAN_AFTER` records are read the records come one at a time, to see whether they are dense enough for a
 	// piece's guess to land on one.
 	origin, seen := it.pos, 0
-	sampling := runner != nil && runner.threads > 0 && it.services.guess != nil && u64(len(src)) >= it.pos + 2 * SLICE
+	sampling := runner != nil && runner.threads > 0 && it.services.guess != nil && !by_tree(it.services, framing) && u64(len(src)) >= it.pos + 2 * SLICE
 	for {
 		rec, more := next_span(&it, to)
 		fault := it.fault
@@ -247,7 +247,7 @@ each_piece :: proc(src: []u8, as: core.As, services: ^Framing_Services, framing:
 		return e.start.fault
 	}
 	framed := e.start.services
-	if runner != nil && runner.threads > 0 && u64(len(src)) >= at + 2 * SLICE && (framed.exact != nil || framed.cut != nil) {
+	if runner != nil && runner.threads > 0 && u64(len(src)) >= at + 2 * SLICE && (framed.exact != nil || framed.cut != nil) && !by_tree(framed, framing) {
 		cut := false
 		if framed.cut != nil {
 			_, cut = framed.cut(&e.start, at, u64(len(src)) - 2 * SLICE)
@@ -483,13 +483,17 @@ build_piece :: proc(job: ^Build_Job, it: ^Reader, k: int) -> bool {
 		}
 		// A member's key makes no node, so an object's entries do not join.
 		ok = rec.key == nil
-		p.lo = p.lo if p.entries > 0 else rec.at
+		p.lo = p.lo if p.hi > 0 else rec.at
 		p.hi = rec.at + u64(len(rec.text))
-		p.entries += 1
 	}
 	err: core.Document_Error
 	p.doc, err = engine.builder_end(&b, regs, it.fault if ok else core.Fault{kind = .Bad_Option})
 	ok &&= err.kind == .None
+	// A record may give several entries, each a root of the piece's document.
+	for i := 0; ok && i < len(p.doc.nodes); p.entries += 1 {
+		t := p.doc.nodes[i]
+		i += int(t.n) if t.kind == .Array || t.kind == .Object else 1
+	}
 	{
 		sync.guard(&job.lock)
 		if k >= len(job.pieces) && resize(&job.pieces, k + 1) != nil {
@@ -520,8 +524,9 @@ fault_ahead :: proc(job: ^Build_Job) {
 	sync.atomic_store(&job.faulting, false)
 }
 
-// The document of `src` with the pieces' entries in its array, or false when the text around them does not build
-// with the array empty. That text is built alone, and its nodes past the array move by the bytes cut out.
+// The document of `src` with the pieces' entries in their container, or false when the text around them does not
+// build with them cut out. That text is built alone, and the entries follow the container's own children there: an
+// array the cut left empty, or the rows of a table after its header. Its nodes past them move by the bytes cut out.
 @(private)
 join :: proc(src: []u8, as: core.As, job: ^Build_Job, allocator: runtime.Allocator, runner: ^core.Runner) -> (doc: core.Document, ok: bool) {
 	lo, hi := u64(len(src)), u64(0)
@@ -548,34 +553,47 @@ join :: proc(src: []u8, as: core.As, job: ^Build_Job, allocator: runtime.Allocat
 	copy(shell[lo:], src[hi:])
 	frame, err := core.build(shell, as, .Refuse if job.refuse else .Last, heap)
 	defer core.destroy(&frame)
-	// The array is the last node to open before the first entry.
+	// The container is a table's, or else the last node to open before the first entry.
 	array := 0
-	for array < len(frame.nodes) && frame.nodes[array].lo < lo {
-		array += 1
+	table := len(core.tables_of(&frame)) > 0
+	if table {
+		array = int(core.tables_of(&frame)[0].node)
+	} else {
+		for array < len(frame.nodes) && frame.nodes[array].lo < lo {
+			array += 1
+		}
+		array -= 1
 	}
-	array -= 1
-	if err != nil || array < 0 || frame.nodes[array].kind != .Array || frame.nodes[array].n != 1 || len(frame.facts) > 0 {
+	if err != nil || array < 0 || frame.nodes[array].kind != .Array || frame.nodes[array].n != 1 && !table || len(frame.facts) > 0 {
 		return
 	}
+	at := array + int(frame.nodes[array].n)
+	entries += int(frame.nodes[array].spelling)
 	if len(frame.nodes) + n > len(job.nodes) {
-		return
+		// A table of one-byte cells holds more nodes than half its bytes, the room reserved.
+		delete(job.nodes, allocator)
+		room, short := runtime.mem_alloc_non_zeroed((len(frame.nodes) + n) * size_of(core.Node), align_of(core.Node), allocator)
+		job.nodes = ([^]core.Node)(raw_data(room))[:len(room) / size_of(core.Node)]
+		if short != nil {
+			return
+		}
 	}
 	nodes := job.nodes[:len(frame.nodes) + n]
-	copy(nodes, frame.nodes[:array + 1])
-	// The array's subtree and each one around it grow by the entries' nodes.
+	copy(nodes, frame.nodes[:at])
+	// The container's subtree and each one around it grow by the entries' nodes.
 	for &t, i in nodes[:array + 1] {
 		if (t.kind == .Array || t.kind == .Object) && i + int(t.n) > array {
 			t.n += u32(n)
 		}
 	}
 	nodes[array].spelling = u16(min(entries, int(core.MAX_CHILDREN)))
-	for t, i in frame.nodes[array + 1:] {
-		nodes[array + 1 + n + i] = {t.lo + cut, t.n, t.kind, t.role, t.spelling}
+	for t, i in frame.nodes[at:] {
+		nodes[at + n + i] = {t.lo + cut, t.n, t.kind, t.role, t.spelling}
 	}
 	wide := entries >= int(core.MAX_CHILDREN)
 	n_counts := len(frame.counts) + int(wide)
 	for &p in job.pieces {
-		p.base += array + 1
+		p.base += at
 		n_counts += len(p.doc.counts)
 	}
 	counts, failed := make([dynamic]core.Child_Count, 0, n_counts, allocator)
@@ -585,7 +603,7 @@ join :: proc(src: []u8, as: core.As, job: ^Build_Job, allocator: runtime.Allocat
 	fan(runner, copy_pieces, job)
 	// The appends fit the room reserved, so `counts_alloc` is the whole allocation.
 	for c in frame.counts {
-		append(&counts, core.Child_Count{c.node + core.Node_Index(n) if int(c.node) > array else c.node, c.count})
+		append(&counts, core.Child_Count{c.node + core.Node_Index(n) if int(c.node) >= at else c.node, c.count})
 	}
 	if wide {
 		append(&counts, core.Child_Count{core.Node_Index(array), u32(entries)})
@@ -597,7 +615,13 @@ join :: proc(src: []u8, as: core.As, job: ^Build_Job, allocator: runtime.Allocat
 	}
 	slice.sort_by(counts[:], proc(a, b: core.Child_Count) -> bool { return a.node < b.node })
 	doc = {view = {src = src, as = as}, nodes = nodes, nodes_alloc = job.nodes, counts = counts[:], counts_alloc = counts[:], allocator = allocator}
-	doc.root_close = frame.root_close + cut if frame.root_close > lo else frame.root_close
+	doc.root_close = frame.root_close + cut if frame.root_close >= lo else frame.root_close
+	if docs := docs_of(as); docs.joined != nil && !docs.joined(&doc, &frame) {
+		// The nodes are the caller's to free.
+		doc.nodes_alloc = nil
+		core.destroy(&doc)
+		return {}, false
+	}
 	return doc, true
 }
 

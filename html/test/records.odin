@@ -18,7 +18,7 @@ RECORD_TEXT :: "<!doctype html><!-- lead --><p>1<p>2</p><table><td>x</table>\n<!
 @(test)
 a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(RECORD_TEXT)
-	faults, err := html.records_check(src, .Document)
+	faults, err := html.records_validate(src, .Document)
 	testing.expect(t, err == nil && len(faults) == 0)
 	delete(faults)
 	it := html.records_open(src, .Document)
@@ -112,4 +112,19 @@ answers_agree_with_each_answer :: proc(t: ^testing.T) {
 			}
 		}
 	}
+}
+
+// `.Entries` gives the members of the element a path of names reaches, each read from the whole tree, with the ends
+// of its elements, and a fault ends the records at the byte `validate` gives.
+@(test)
+entries_are_the_members_of_a_container :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "<ul><li>a<li>b <i>c</i><li><p>d</ul>"
+	LI :: "8 li \"a\"\n9 li {\"#text\":\"b \",\"i\":\"c\"}\n23 li {\"p\":\"d\"}\nend"
+	walktest.expect_entries(t, src, html.as(.Fragment), {"ul"}, LI)
+	walktest.expect_framings(t, html.CAPABILITIES, html.as(.Fragment))
+	it := html.records_open(transmute([]u8)src, .Fragment, framing = .Entries, entries = {"ul"})
+	testing.expect_value(t, walktest.entries_lines(&it), LI)
+	numbers := "<ul><li>&#55;<li>&#45;8<li>9</ul>"
+	testing.expect_value(t, walktest.entries_read(numbers, html.as(.Fragment), {"ul"}, int), "7\n-8\n9\nend")
 }

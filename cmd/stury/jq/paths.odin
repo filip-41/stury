@@ -81,9 +81,9 @@ identical :: proc(a, b: Value) -> bool {
 	case f64:
 		y, is_num := b.(f64)
 		return is_num && transmute(u64)x == transmute(u64)y
-	case ^Number_Text:
-		y, is_text := b.(^Number_Text)
-		return is_text && x == y
+	case Number_View:
+		y, is_view := b.(Number_View)
+		return is_view && x == y
 	case string:
 		y, is_str := b.(string)
 		return is_str && raw_data(x) == raw_data(y) && len(x) == len(y)

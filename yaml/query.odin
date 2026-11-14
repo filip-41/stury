@@ -153,11 +153,6 @@ scan_document :: proc(h: ^engine.Scan, src: []u8, lo: u64, opts: Options, stream
 	return
 }
 
-// An iterator over the answers of `paths`, or of `one` when `paths` is nil, in a text read with handle `handle`.
-@(private)
-answers_of :: proc(src: []u8, handle: core.As, paths: []core.Path, one: core.Path, read: core.Path_Options, allocator: runtime.Allocator) -> engine.Answer_Iter {
-	return {src = src, as = handle, paths = paths, one = one, read = read, allocator = allocator, fill = answers_fill, max_batch = engine.ANSWER_BATCH}
-}
 
 // What an iterator's walk keeps across fills, from the iterator's allocator, its address in the iterator's `cursor`:
 // the scan's filter and log, the walk's cursor, and the number of answers the fills before gave, which a read that

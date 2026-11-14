@@ -136,7 +136,7 @@ decoded_escape_other :: proc "contextless" (src: []u8, p, end: u64, e: u8) -> (s
 // `SPELLING_DECODE` clear returns its span. A node that needs decoding is written into `buf`, and the call returns false
 // when `buf` is too short. A container returns false, as `core.text` does. `doc.view` and `doc.nodes[i]` are its arguments
 // for node `i` of a document.
-text :: #force_inline proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
+token_text :: #force_inline proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
 	// A container's `n` is a node count and its `spelling` a child count, not a span and a decode bit.
 	if t.kind > .Plain {
 		return "", false

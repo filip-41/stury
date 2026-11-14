@@ -11,7 +11,6 @@ import "core:strings"
 import core "../../core"
 import "../../core/rules"
 import "../../core/schema"
-import dsv "../../dsv"
 import json "../../json"
 import "jq"
 import "message"
@@ -120,8 +119,8 @@ infer_read :: proc(inf: ^schema.Inferred, src: Source, path: string, data: []byt
 // after a text that does not read or runs out of memory, and 2 after a file that does not open.
 @(private = "file")
 infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
-	if cli.formats.to != nil {
-		usage_error("--to is sample's: schema infer writes JSON Schema")
+	if writes_cells(&run.opts) {
+		usage_error("a schema is a tree, and --to %s writes a table", FORMATS[run.opts.to].name)
 	}
 	if cli.schema.draft != nil {
 		usage_error("--schema-draft is schema sample's and schema gen's: schema infer reads no schema")
@@ -165,18 +164,29 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 		message.write_stderr("stury: error: out of memory\n")
 		os.exit(EXIT_INPUT)
 	}
-	text, err := schema.write(&d, json.as(.Json), output_layout(run).opts)
+	as := schema_written_as(&run.opts)
+	text, err := schema.write(&d, as, output_layout(run).opts)
 	if e, refused := err.(core.Typed_Error); refused && e.kind == .Too_Deep {
 		// A schema nests a level or two for each level of its values, so one of a deep input may pass the writer's limit.
-		message.write_stderr("stury: error: schema infer: the schema of the input nests past %d levels, which a schema written as JSON may not\n", core.MAX_DEPTH)
+		message.write_stderr("stury: error: schema infer: the schema of the input nests past %d levels, which a schema written as %s may not\n", core.MAX_DEPTH, FORMATS[run.opts.to].title)
 		os.exit(EXIT_INPUT)
 	}
 	if err != nil {
-		message.write_stderr("stury: error: %s\n", edit_error_text(nil, err))
+		message.write_stderr("stury: error: schema infer: %s\n", edit_error_text(nil, err))
 		os.exit(EXIT_USAGE)
 	}
-	message.write_stdout("%s\n", string(text))
+	if !as.readers.binary && (len(text) == 0 || text[len(text) - 1] != '\n') {
+		message.write_stdout("%s\n", string(text))
+	} else {
+		write_out(text)
+	}
 	exit_closing_stdout(0)
+}
+
+// How a schema or a sample is written as --to says: as a text of a format with its own writer, and else as JSON in its spec.
+@(private = "file")
+schema_written_as :: proc(o: ^Opts) -> core.As {
+	return text_written_as(o) if writes_texts(o) else json.as(FORMATS[o.to].spec, {max_depth = o.max_depth})
 }
 
 // Values for the schema in the one file `files` names, a line each in the format --to names.
@@ -186,40 +196,43 @@ sample_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 	if len(files) != 1 {
 		usage_error("schema sample takes one schema file")
 	}
-	if cli.formats.from != nil {
-		usage_error("--from is infer's: a schema is read as JSON")
+	if cli.verbs.comments && .Comment not_in holds_out(o) {
+		usage_error("--comments writes a description as a comment, and %s holds no comment", FORMATS[o.to].name)
 	}
-	if cli.verbs.comments && !writes_comments(o) {
-		usage_error("--comments writes a description as a comment, and %s has no comments", FORMATS[o.to].name)
-	}
-	sc := schema_read({file = files[0], refs = cli.schema.refs, draft = cli.schema.draft}, "schema sample")
+	sc := schema_read({file = files[0], refs = cli.schema.refs, draft = cli.schema.draft, format = cli.formats.from}, "schema sample")
 	d, text := sc.compiled.description, sc.text
 	if writes_cells(o) && cli.verbs.count > 1 {
 		usage_error("--count above 1 writes one table for each value, which is not one %s: use --count 1", FORMATS[o.to].name)
 	}
-	if writes_texts(o) {
-		usage_error("schema sample writes json, jsonc, ndjson, csv or tsv, not %s", FORMATS[o.to].name)
-	}
 	refuse_unlisted(d, o.to, "writes")
 	// A table is drawn as --infer reads one, so a column the schema types holds that type's cells.
 	o.cells_out.infer = o.cells_in.infer
-	as := cells_written_as(o) if writes_cells(o) else json.as(FORMATS[FORMATS[o.to].written_as.? or_else o.to].spec)
+	as := cells_written_as(o) if writes_cells(o) else schema_written_as(o)
 	// A value is a line, so the text is compact unless a layout option asks for more.
 	layout := output_layout(run).opts
 	layout.pretty = layout.pretty && cli.layout_flag != ""
 	// A value is written as it is made, so the run holds one value and one chunk of output.
 	Out :: struct {
-		text:  strings.Builder,
-		lines: bool,
+		text:   strings.Builder,
+		cells:  bool,
+		binary: bool,
+		parted: proc "contextless" (text: []u8) -> string,
+		count:  int,
 	}
 	out := Out {
-		text  = strings.builder_make(runtime.heap_allocator()),
-		lines = !writes_cells(o),
+		text   = strings.builder_make(runtime.heap_allocator()),
+		cells  = writes_cells(o),
+		binary = as.readers.binary,
+		parted = FORMATS[o.to].parted,
 	}
-	serr := schema.sample_each(d, as, {reads = dsv.checks_for(as), seed = cli.verbs.seed, count = cli.verbs.count, invalid = cli.verbs.invalid, comments = cli.verbs.comments, write = layout}, proc(text: []u8, user: rawptr) {
+	serr := schema.sample_each(d, as, {seed = cli.verbs.seed, count = cli.verbs.count, invalid = cli.verbs.invalid, comments = cli.verbs.comments, write = layout}, proc(text: []u8, user: rawptr) {
 		out := (^Out)(user)
+		if out.parted != nil && out.count > 0 {
+			strings.write_string(&out.text, out.parted(text))
+		}
+		out.count += 1
 		strings.write_bytes(&out.text, text)
-		if out.lines {
+		if !out.cells && !out.binary && (len(text) == 0 || text[len(text) - 1] != '\n') {
 			strings.write_byte(&out.text, '\n')
 		}
 		flush_out(&out.text, false)
@@ -240,14 +253,14 @@ gen_main :: proc(cli: ^Cli, files: []string) -> ! {
 	if len(files) != 1 {
 		usage_error("schema gen takes one schema file")
 	}
-	if cli.formats.from != nil || cli.formats.to != nil {
-		usage_error("--%s has no use with schema gen: a schema is read as JSON and the types are written as Odin", "from" if cli.formats.from != nil else "to")
+	if cli.formats.to != nil {
+		usage_error("--to has no use with schema gen: the types are written as Odin")
 	}
 	name := cli.verbs.package_name
 	if name == "" {
 		name = strings.to_snake_case(filepath.short_stem(files[0]))
 	}
-	sc := schema_read({file = files[0], refs = cli.schema.refs, draft = cli.schema.draft}, "schema gen")
+	sc := schema_read({file = files[0], refs = cli.schema.refs, draft = cli.schema.draft, format = cli.formats.from}, "schema gen")
 	text := sc.text
 	source, err := schema.write_odin(sc.compiled.description, name, json.as(.Json), cli.schema.format_assert)
 	if e, typed := err.(core.Typed_Error); typed && e.kind == .Bad_Option {

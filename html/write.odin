@@ -9,8 +9,8 @@ package html
 // An element the tree implied is written with its tags, as the tree holds it. A void element has no end tag and the
 // text of a raw text element is written as it stands. Any other text escapes `&`, U+00A0, `<` and `>`, and an attribute
 // value escapes `&`, U+00A0 and `"`. An HTML document's doctype, comments and attributes are written as they stand in
-// the source. Another document's comments are written before, after or at the end of the value that holds them, unless
-// HTML cannot hold the comment, and its other facts are dropped and counted.
+// the source. Another document's comments, and those written on a value, are written before, after or at the end of the
+// value that holds them, unless HTML cannot hold the comment, and its other facts are dropped and counted.
 //
 // The text is read back, and one that builds a tree other than the one written is `.Unwritable`: a name HTML folds or
 // cannot spell, an element the tree construction moves or closes where it stands, text of only white space among
@@ -27,32 +27,37 @@ import write "../core/write"
 
 @(private)
 Writer :: struct {
-	out:  write.Out,
-	opts: core.Write_Options,
-	kept: int, // the facts written
-	buf:  [512]u8,
+	out:       write.Out,
+	opts:      core.Write_Options,
+	kept:      int, // the facts written
+	// The members of the element being written end with an element on the output's line, so a comment written after
+	// them starts a line, or it would read back as that element's.
+	foot_line: bool,
+	foot_depth: int, // with `foot_line`, the depth a comment's line starts at, 0 for no indent, as in a compact write
+	ended:     int, // the output's length after the last element and its inline comments
+	buf:       [512]u8,
 }
 
-// Writes node `node` of `doc` as HTML, as `core.write` does with `as(spec)`, and returns the facts it dropped. A
-// document of another format is written too.
-write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
-	if int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
-		return nil, 0, core.error_of(core.Typed_Refusal{kind = .Unsupported})
-	}
-	out, cut, refusal := document_write(doc, opts, bound_as(spec), node, {}, allocator)
-	return out, cut, core.error_of(refusal)
+// Writes node `node` of `doc` as HTML, as `core.write` does with `as(spec)`. A document of another format is written
+// too.
+write :: proc(doc: ^core.Document, $S: Spec, write := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
+	return core.write(doc, write, as(S), node, allocator)
 }
+
+@(private = "file")
+NO_TREE :: "an HTML text is a tree of elements, so its root is an object"
 
 // The handle's `write`. Node `node` of `doc` is written compact, read back as the spec its shape names and compared.
 // It is then written as `opts` say, to `stream` or into new bytes from `allocator`.
 @(private)
-document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Refusal) {
-	if doc.partial || core.kind(doc, node) != .Object {
+document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
+	if doc.partial {
 		return nil, 0, {kind = .Unsupported}
 	}
-	kept: int
-	text, kept, err = value_write(core.Node_Ref{doc, node}, as, opts, stream, allocator)
-	return text, len(core.subtree_facts(doc, node)) - kept if err.kind == .None else 0, err
+	if core.kind(doc, node) != .Object {
+		return nil, 0, {kind = .Unwritable, detail = {want = {text = NO_TREE}}}
+	}
+	return value_write(core.Node_Ref{doc, node}, as, opts, stream, allocator)
 }
 
 // Writes object `root` compact, reads it back by the handle `as` and compares, then writes it as `opts` say. Returns the
@@ -76,7 +81,7 @@ value_write :: proc(root: core.Value, as: core.As, opts: core.Write_Options, str
 @(private)
 built_write :: proc(v: core.Value, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
 	if core.value_kind(v) != .Object {
-		return nil, {kind = .Unsupported}
+		return nil, {kind = .Unwritable, detail = {want = {text = NO_TREE}}}
 	}
 	text, _, err := value_write(v, bound_as(.Document), opts, stream, allocator)
 	return text, err
@@ -87,17 +92,13 @@ marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options,
 	return write.marshal_markup(plan, value, opts, stream, allocator, omits, built_write)
 }
 
-// Starts a token write, as `write.tokens_init` does with `as(spec)`. The calls give a value as `write` takes a node. It
-// is read back as `write.put_markup` reads a marshal's, so a write to a stream is `.Unsupported`.
-tokens_init :: proc(t: ^write.Tokens, spec: Spec, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind {
-	return write.tokens_init(t, bound_as(spec), opts, allocator, stream, &TOKENS)
-}
 
 // The token spelling. The calls make a value in `write.MARKUP_TREE`, which the end reads back and writes. A scalar that
 // is no string and has no text the tree can hold bare is `.Unwritable`.
 @(private, rodata)
 TOKENS := write.Token_Spelling {
 	tree = write.MARKUP_TREE,
+	built = built_write,
 	start = proc(t: ^write.Tokens, _: core.As) -> core.Typed_Error_Kind {
 		return .Unsupported if t.out.stream.procedure != nil else .None
 	},
@@ -113,6 +114,9 @@ TOKENS := write.Token_Spelling {
 		}
 		write.put_text(t.out, text)
 		return .None
+	},
+	comment = proc(t: ^write.Tokens, role: core.Role, text: string) -> core.Typed_Error_Kind {
+		return write.put_marked_comment(t.out, role, text) if holds_comment(text) else .Unwritable
 	},
 	end = proc(t: ^write.Tokens, bytes: []u8) -> ([]u8, core.Typed_Refusal) {
 		defer delete(bytes, t.base.allocator)
@@ -158,24 +162,32 @@ is_document :: proc(root: core.Value) -> bool {
 @(private)
 put_root :: proc(w: ^Writer, root: core.Value) -> core.Typed_Error_Kind {
 	facts := value_facts(root)
+	bodies, written := core.rebuilt_comments(root, .Comment)
+	lead := len(bodies) > 0
 	for f in facts {
-		if is_head(f.role) || f.role == .Doctype && own_node(root) {
+		if is_head(f.role) && !(written && f.role == .Comment) || f.role == .Doctype && own_node(root) {
+			before := w.kept
 			put_fact(w, root, f) or_return
+			lead = is_head(f.role) && w.kept > before || lead && f.role != .Doctype
 		}
 	}
-	put_members(w, root, 0, false) or_return
-	for f in facts {
-		if f.role == .Comment_Inline || f.role == .Comment_Foot {
-			put_fact(w, root, f) or_return
-		}
+	put_bodies(w, bodies)
+	// A blank line ends the text's head comment, so the comments of the first member stay its own.
+	if lead {
+		write.put_text(&w.out, "\n\n")
 	}
+	_ = put_members(w, root, 0, false) or_return
+	put_comments(w, root, facts, .Comment_Inline) or_return
+	put_comments(w, root, facts, .Comment_Foot) or_return
+	w.foot_line = false
 	return w.out.err
 }
 
 // Writes the members of object `v` in order, a node's as its document holds them, a repeated name each time. They are
 // laid on lines of their own when the output is pretty, they hold no text, and `keep` does not hold their white space.
+// `closing` says that they were, so the caller ends the line of the element's end tag after the element's foot comments.
 @(private)
-put_members :: proc(w: ^Writer, v: core.Value, depth: int, in_foreign: bool, keep := false) -> core.Typed_Error_Kind {
+put_members :: proc(w: ^Writer, v: core.Value, depth: int, in_foreign: bool, keep := false) -> (closing: bool, kind: core.Typed_Error_Kind) {
 	context.allocator = context.temp_allocator
 	laid := w.opts.pretty && !keep
 	n := 0
@@ -200,10 +212,9 @@ put_members :: proc(w: ^Writer, v: core.Value, depth: int, in_foreign: bool, kee
 			put_member(w, key, child, depth, in_foreign, laid) or_return
 		}
 	}
-	if laid && n > 0 && depth > 0 {
-		write.put_line(&w.out, w.opts, depth - 1)
-	}
-	return .None
+	w.foot_line = !laid && !keep && n > 0 && w.ended == w.out.cursor + w.out.flushed
+	put_empty_runs(w, v, depth, laid) or_return
+	return laid && n > 0 && depth > 0, .None
 }
 
 @(private)
@@ -211,56 +222,84 @@ put_member :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_forei
 	if core.value_kind(v) != .Array {
 		return put_node(w, name, v, depth, in_foreign, laid)
 	}
+	// The run's comments read back as those of its first and last elements.
+	n := core.value_length(v)
 	items := core.value_children(v)
-	for item in core.value_child_next(&items) {
+	for i := 0; ; i += 1 {
+		item := core.value_child_next(&items) or_break
 		if core.value_kind(item) == .Array {
 			return .Unwritable
 		}
-		put_node(w, name, item, depth, in_foreign, laid) or_return
+		put_node(w, name, item, depth, in_foreign, laid, v if i == 0 else nil, v if i == n - 1 else nil) or_return
 	}
 	return .None
 }
 
+// Writes the comments of each empty array among the members of object `v` after the last member, as the object's foot,
+// since an empty array is no element to hold them.
 @(private)
-put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign, laid: bool) -> core.Typed_Error_Kind {
+put_empty_runs :: proc(w: ^Writer, v: core.Value, depth: int, laid: bool) -> core.Typed_Error_Kind {
+	it := core.value_pairs(v)
+	for _, child in core.value_pair_next(&it) {
+		if core.value_kind(child) != .Array || core.value_length(child) > 0 {
+			continue
+		}
+		_, commented := child.(^core.Commented)
+		facts := value_facts(child)
+		if laid && (commented || len(facts) > 0) {
+			write.put_line(&w.out, w.opts, depth)
+		}
+		for role in ([]core.Role{.Comment, .Comment_Inline, .Comment_Foot}) {
+			put_comments(w, child, facts, role) or_return
+		}
+	}
+	return .None
+}
+
+// Writes element `name` of value `v`, with the lead comments of `lead` before it and the foot and inline comments of
+// `tail` after its own.
+@(private)
+put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign, laid: bool, lead: core.Value = nil, tail: core.Value = nil) -> core.Typed_Error_Kind {
 	if name == core.MARKUP_TEXT {
 		return put_escaped(w, write.value_scalar_text(core.plain(v), w.buf[:], write.MARKUP_TREE) or_return, false)
 	}
-	facts := value_facts(v)
-	for f in facts {
-		if is_head(f.role) && !leads_children(v, f) {
-			put_fact(w, v, f) or_return
-		}
-	}
+	// A comment on the line of the element before is that element's.
 	if laid && w.out.cursor + w.out.flushed > 0 {
 		write.put_line(&w.out, w.opts, depth)
 	}
+	put_comments(w, lead, value_facts(lead), .Comment) or_return
+	facts := value_facts(v)
+	bodies, written := core.rebuilt_comments(v, .Comment)
+	for f in facts {
+		if is_head(f.role) && !(written && f.role == .Comment) {
+			put_fact(w, v, f) or_return
+		}
+	}
+	put_bodies(w, bodies)
 	write.put_byte(&w.out, '<')
 	write.put_text(&w.out, name)
+	attributes, rebuilt := core.rebuilt_attributes(v)
+	if attributes != nil {
+		for key, i in attributes.keys {
+			write.put_byte(&w.out, ' ')
+			put_attribute_text(w, key, attributes.vals[i].(string) or_else "") or_return
+		}
+	}
 	for f in facts {
-		if f.role == .Attribute {
+		if f.role == .Attribute && !rebuilt {
 			put_attribute(w, v, f) or_return
 		}
 	}
 	write.put_byte(&w.out, '>')
-	for f in facts {
-		if is_head(f.role) && leads_children(v, f) {
-			put_fact(w, v, f) or_return
-		}
-	}
 	void := !in_foreign && is_void(name)
 	x := core.plain(v)
+	closing := false
 	#partial switch core.value_kind(x) {
 	case .Object:
 		if void {
 			return .Unwritable
 		}
-		put_members(w, x, depth + 1, in_foreign || name == "svg" || name == "math", keeps_space(name)) or_return
-		for f in facts {
-			if f.role == .Comment_Foot {
-				put_fact(w, v, f) or_return
-			}
-		}
+		closing = put_members(w, x, depth + 1, in_foreign || name == "svg" || name == "math", keeps_space(name)) or_return
 	case .Null:
 	case:
 		if void {
@@ -276,46 +315,46 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 			put_escaped(w, text, false) or_return
 		}
 	}
+	tail_facts := value_facts(tail)
 	if !void {
+		if closing {
+			w.foot_line, w.foot_depth = true, depth + 1
+		}
+		put_comments(w, v, facts, .Comment_Foot) or_return
+		put_comments(w, tail, tail_facts, .Comment_Foot) or_return
+		w.foot_line, w.foot_depth = false, 0
+		if closing {
+			write.put_line(&w.out, w.opts, depth)
+		}
 		write.put_text(&w.out, "</")
 		write.put_text(&w.out, name)
 		write.put_byte(&w.out, '>')
 	}
-	for f in facts {
-		if f.role == .Comment_Inline {
-			put_fact(w, v, f) or_return
-		}
-	}
+	put_comments(w, v, facts, .Comment_Inline) or_return
+	put_comments(w, tail, tail_facts, .Comment_Inline) or_return
+	w.ended = w.out.cursor + w.out.flushed
 	return .None
 }
 
 @(private)
 value_facts :: proc(v: core.Value) -> []core.Fact {
-	if r, is_node := v.(core.Node_Ref); is_node {
+	if r, is_node := core.plain(v).(core.Node_Ref); is_node {
 		return core.all_facts(r.doc, r.node)
 	}
 	return nil
 }
 
-// Whether head fact `f` of element `v` of an HTML document stands inside it, before its first child: the tree gives a
-// comment there to the element, whose node starts at its start tag.
-@(private)
-leads_children :: proc(v: core.Value, f: core.Fact) -> bool {
-	return own_node(v) && core.value_kind(v) == .Object && f.lo > v.(core.Node_Ref).doc.nodes[v.(core.Node_Ref).node].lo
-}
-
 // Whether `v` is a node of an HTML document, whose facts are written as they stand.
 @(private)
 own_node :: proc(v: core.Value) -> bool {
-	r, is_node := v.(core.Node_Ref)
+	r, is_node := core.plain(v).(core.Node_Ref)
 	return is_node && r.doc.readers.format == rules_of
 }
 
-// Writes attribute `f` of `v`: as it stands in an HTML document, and as `name="value"` from any other. A name HTML
-// reads as another is `.Unwritable`.
+// Writes attribute `f` of `v`: as it stands in an HTML document, and as `put_attribute_text` writes it from any other.
 @(private)
 put_attribute :: proc(w: ^Writer, v: core.Value, f: core.Fact) -> core.Typed_Error_Kind {
-	r := v.(core.Node_Ref)
+	r := core.plain(v).(core.Node_Ref)
 	w.kept += 1
 	write.put_byte(&w.out, ' ')
 	if own_node(v) {
@@ -328,6 +367,12 @@ put_attribute :: proc(w: ^Writer, v: core.Value, f: core.Fact) -> core.Typed_Err
 	if !named || !read {
 		return .No_Memory
 	}
+	return put_attribute_text(w, name, text)
+}
+
+// Writes attribute `name` with the value `text` as `name="value"`. A name HTML reads as another is `.Unwritable`.
+@(private)
+put_attribute_text :: proc(w: ^Writer, name, text: string) -> core.Typed_Error_Kind {
 	if len(name) == 0 {
 		return .Unwritable
 	}
@@ -347,7 +392,7 @@ put_attribute :: proc(w: ^Writer, v: core.Value, f: core.Fact) -> core.Typed_Err
 // a comment HTML can hold is written, and the rest is dropped.
 @(private)
 put_fact :: proc(w: ^Writer, v: core.Value, f: core.Fact) -> core.Typed_Error_Kind {
-	r := v.(core.Node_Ref)
+	r := core.plain(v).(core.Node_Ref)
 	span := string(r.doc.src[f.lo:][:f.n])
 	if own_node(v) {
 		w.kept += 1
@@ -357,15 +402,60 @@ put_fact :: proc(w: ^Writer, v: core.Value, f: core.Fact) -> core.Typed_Error_Ki
 	if f.role == .Instruction || f.role == .Doctype || f.kind != .Plain {
 		return .None
 	}
-	body := span[core.comment_lead(f.spelling):u64(f.n) - core.comment_tail(f.spelling)]
+	body, padded := core.comment_text(r.doc, f)
 	if !holds_comment(body) {
 		return .None
 	}
 	w.kept += 1
-	write.put_text(&w.out, "<!--")
-	write.put_text(&w.out, body)
-	write.put_text(&w.out, "-->")
+	put_comment(w, body, padded)
 	return .None
+}
+
+@(private)
+put_comment :: proc(w: ^Writer, body: string, padded: bool) {
+	write.put_text(&w.out, "<!-- " if padded else "<!--")
+	write.put_text(&w.out, body)
+	write.put_text(&w.out, " -->" if padded else "-->")
+}
+
+// Writes comment bodies a value brings, each one HTML can hold.
+@(private)
+put_bodies :: proc(w: ^Writer, bodies: []string) {
+	for body in bodies {
+		if holds_comment(body) {
+			put_comment(w, body, true)
+		}
+	}
+}
+
+// Writes the comments of `role` on `v`: those it brings, else its node's.
+@(private)
+put_comments :: proc(w: ^Writer, v: core.Value, facts: []core.Fact, role: core.Role) -> core.Typed_Error_Kind {
+	if bodies, written := core.rebuilt_comments(v, role); written {
+		if len(bodies) > 0 {
+			start_foot(w)
+		}
+		put_bodies(w, bodies)
+		return .None
+	}
+	for f in facts {
+		if f.role == role {
+			start_foot(w)
+			put_fact(w, v, f) or_return
+		}
+	}
+	return .None
+}
+
+@(private)
+start_foot :: #force_inline proc(w: ^Writer) {
+	switch {
+	case w.foot_depth > 0:
+		write.put_line(&w.out, w.opts, w.foot_depth)
+	case w.foot_line:
+		write.put_byte(&w.out, '\n')
+		w.foot_line = false
+	}
 }
 
 // Whether `body` is a comment body that HTML reads back as written.

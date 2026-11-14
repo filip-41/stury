@@ -25,13 +25,15 @@ EDIT := core.Edit_Services {
 	value    = edit_value,
 	key_text = edit_key_text,
 	validate = validate_handle,
+	build    = build_item,
+	scan     = scan_item,
 	spell    = edit_spell,
 	relocate = edit_relocate,
 	commit   = edit_commit,
 }
 
 // Returns an edit list over `doc`. A document read as a constant spec holds no edit services, so the list takes CBOR's.
-edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List {
+edit_list_init :: proc(doc: ^core.Document, $S: Spec, allocator := context.allocator) -> core.Edit_List {
 	list := core.edit_list_init(doc, allocator)
 	list.edit = &EDIT
 	return list
@@ -41,8 +43,8 @@ edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.all
 // frees with `allocator`, keeping every byte the edit does not reach. A `typed.Raw` is the bytes of a CBOR item, a
 // struct, a slice or a map is built by `plan`, and any other value is written as a CBOR item. A `Name` the path ends in
 // that its map lacks is inserted after the map's last member.
-set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	return write.set_with(src, bound_as(spec, opts), build_item, &EDIT, path, v, plan, read, allocator)
+set :: proc(src: []u8, $S: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+	return write.set_with(src, bound_as(S, opts), build_item, &EDIT, path, v, plan, read, allocator)
 }
 
 // Checks `src` as exactly one item of the document's spec.

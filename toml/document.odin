@@ -15,6 +15,10 @@ HANDLES := [Spec]core.Readers {
 	.Toml_1_1 = core.with_services(READERS, &SERVICES[.Toml_1_1]),
 }
 
+// The reasons the writer gives a refusal that names none.
+@(private)
+WRITE_WORDS :: core.Write_Words{"TOML has no spelling for null or for a key a table repeats", "TOML writes a whole document"}
+
 @(private)
 SERVICES := [Spec]core.Services {
 	.Toml_1_0 = handle_services(.Toml_1_0),
@@ -28,6 +32,7 @@ handle_services :: proc "contextless" ($S: Spec) -> core.Services {
 		validate = edit_validate,
 		scan     = scan_text,
 		write    = document_write,
+		words    = WRITE_WORDS,
 		edit     = &EDIT,
 		plans    = rawptr(plan_as),
 		reads    = reads_of(S),
@@ -41,14 +46,17 @@ handle_services :: proc "contextless" ($S: Spec) -> core.Services {
 // this table, and so does every plan.
 @(private, rodata)
 READERS := core.Readers {
-	text       = text,
-	key_equals = spelling_key_equals,
-	number     = number,
-	close_end  = close_end,
-	format     = rules_of,
-	tag_key    = "toml",
-	fact       = spelling_fact,
-	tag_fits   = tag_fits,
+	text         = token_text,
+	key_equals   = spelling_key_equals,
+	number       = token_number,
+	close_end    = close_end,
+	format       = rules_of,
+	tag_key      = "toml",
+	floats_apart = true,
+	holds        = core.COMMENT_FACTS + {.Tag, .Style},
+	fact         = spelling_fact,
+	tag_fits     = tag_fits,
+	tag_meaning  = tag_name_meaning,
 }
 
 // TOML's fault table, which names the format whatever the spec.
@@ -70,8 +78,16 @@ Number_Spelling :: enum u16 {
 }
 
 // Returns the `Number_Spelling` in a token's `spelling`.
+@(private)
 number_spelling_of :: #force_inline proc "contextless" (spelling: u16) -> Number_Spelling {
 	return Number_Spelling(spelling & core.NUMBER_KIND_MASK)
+}
+
+// TOML lays out its tables itself, so its writer takes no layout option.
+CAPABILITIES :: core.Capabilities {
+	writes = {.Ascii, .Sort_Keys, .Respell_Strings},
+	framings = {.Concatenated, .Entries},
+	specs = Spec,
 }
 
 // The handle of a TOML text of `spec` read with `opts`, which reaches every service of the format.
@@ -93,7 +109,7 @@ options_of :: #force_inline proc "contextless" (as: core.As) -> Options {
 // TOML's `Readers.text`, exported so a caller that knows the format calls it without the table. A bare key and a
 // datetime return their span, and a quoted string or key is decoded into `buf`, which holds the span's length at most.
 // A container returns false.
-text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
+token_text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
 	if t.kind > .Plain {
 		return "", false
 	}
@@ -117,7 +133,7 @@ spelling_key_equals :: proc "contextless" (v: ^core.Token_View, t: core.Token, n
 
 // TOML's `Readers.number`, the value of the number token `t`: a JSON number for a decimal, the digits' value for a hex,
 // octal or binary integer, and a `Float` of infinity or NaN for the two words.
-number :: proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) {
+token_number :: proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) {
 	if t.kind != .Number || t.role != .Value {
 		return {}, false
 	}
@@ -203,21 +219,10 @@ build_handle :: proc(src: []u8, as: core.As, _: bool, allocator: runtime.Allocat
 // duplicate policy to refuse.
 @(private)
 build_text :: proc(src: []u8, handle: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-	if handle.spec > u8(max(Spec)) {
-		return {}, {kind = .Bad_Spec}
-	}
 	p: Parser
 	defer parser_destroy(&p)
-	if !parser_init(&p, src, Spec(handle.spec) == .Toml_1_1, depth_limit(options_of(handle))) {
-		return {}, {kind = .No_Memory}
-	}
-	if !parse(&p, 0) {
-		_, fault, _ := core.result_of(p.fail, &RULES)
-		f := fault.?
-		if f.kind == .No_Memory {
-			return {}, {kind = .No_Memory}
-		}
-		return {}, {kind = .Walk, at = f.at, inner = f}
+	if e := parse_text(&p, src, handle); e.kind != .None {
+		return {}, e
 	}
 	count: engine.Count
 	counted: core.Hook_Regs
@@ -238,6 +243,7 @@ build_text :: proc(src: []u8, handle: core.As, allocator: runtime.Allocator) -> 
 	}
 	hi, fault, _ := core.result_of(verdict, &RULES)
 	b.root_close = hi
+	b.doc.spelled_tags = p.datetimes
 	return engine.builder_end(&b, regs, fault)
 }
 
@@ -247,12 +253,60 @@ edit_validate :: proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault
 	return validate_text(src, Spec(as.spec), options_of(as))
 }
 
-// A path read builds the whole document and answers from it, since a table's members may be written apart and a read
-// cannot stop at the first answer. The answers go to `on`, when it is given, in the order the document holds them.
+// Reads `src` into the table tree `p`, which judges every byte of the text, under the handle `handle`.
 @(private)
-scan_text :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
-	doc, built := build_text(src, handle, allocator)
-	return engine.scan_built(&doc, built, paths, read, state, on, allocator)
+parse_text :: proc(p: ^Parser, src: []u8, handle: core.As) -> core.Document_Error {
+	if handle.spec > u8(max(Spec)) {
+		return {kind = .Bad_Spec}
+	}
+	if !parser_init(p, src, Spec(handle.spec) == .Toml_1_1, depth_limit(options_of(handle))) {
+		return {kind = .No_Memory}
+	}
+	if !parse(p, 0) {
+		_, fault, _ := core.result_of(p.fail, &RULES)
+		f := fault.?
+		if f.kind == .No_Memory {
+			return {kind = .No_Memory}
+		}
+		return {kind = .Walk, at = f.at, inner = f}
+	}
+	return {}
+}
+
+// TOML's `Services.scan`. The text is parsed whole before the first token, so every read judges every byte. A read of
+// one path that gives no stream replays the tree through the scan's hook, which builds only what the path reaches. A
+// read of several paths or a stream of answers builds the document and answers from it, in the order it holds them.
+@(private)
+scan_text :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (doc: core.Document, err: core.Path_Error) {
+	if on != nil || len(paths) != 1 {
+		whole, built := build_text(src, handle, allocator)
+		return engine.scan_built(&whole, built, paths, read, state, on, allocator)
+	}
+	p: Parser
+	defer parser_destroy(&p)
+	if e := parse_text(&p, src, handle); e.kind != .None {
+		return {}, core.path_error(e)
+	}
+	// The scan's room as words, which an uninitialized declaration leaves unwritten where a struct's padding would not.
+	room: [size_of(engine.Scan) / 8]u64 = ---
+	h := (^engine.Scan)(rawptr(&room))
+	frames: [core.MAX_DEPTH]u64 = ---
+	if e := engine.scan_start(h, src, handle, paths, read, false, allocator, min(core.reserve_depth(handle.max_depth, len(src)), core.MAX_DEPTH), frames[:]); e.kind != .None {
+		return {}, e
+	}
+	if h.many != nil {
+		engine.scan_free(h, allocator)
+		_, _ = engine.builder_end(&h.b, engine.BUILDER_REGS, nil)
+		whole, built := build_text(src, handle, allocator)
+		return engine.scan_built(&whole, built, paths, read, state, on, allocator)
+	}
+	regs := engine.BUILDER_REGS
+	replayed: Replay
+	defer delete(replayed.frames)
+	hi, fault, _ := core.result_of(replay(&p, &replayed, h, &regs, engine.scan_hook), &RULES)
+	err = engine.scan_end(h, regs, hi, fault, &doc)
+	doc.spelled_tags = p.datetimes
+	return
 }
 
 // A table has no bracket bytes of its own, so its end is the end of its last scalar, and an empty one ends where its
@@ -279,34 +333,41 @@ close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 }
 
 @(private, rodata)
-DATETIME_TAGS := [Datetime]string {
-	.None   = "",
-	.Offset = "datetime",
-	.Local  = "datetime-local",
-	.Date   = "date-local",
-	.Time   = "time-local",
+DATETIME_TAGS := [core.Tag_Meaning]string {
+	.Own            = "",
+	.Datetime       = "datetime",
+	.Local_Datetime = "datetime-local",
+	.Local_Date     = "date-local",
+	.Local_Time     = "time-local",
+	.Binary         = "",
 }
 
-// The datetime type tag `tag` names, `.None` for a tag that is no TOML type.
+// The readers' `tag_meaning`: a tag an edit gives a value is a span that holds the datetime type's name.
 @(private)
-tag_datetime :: proc(tag: string) -> Datetime {
+tag_name_meaning :: proc(_: ^core.Document, _: core.Node_Index, tag: string) -> core.Tag_Meaning {
+	return tag_datetime(tag)
+}
+
+// The datetime type tag `tag` names, `.Own` for a tag that is no TOML type.
+@(private)
+tag_datetime :: proc(tag: string) -> core.Tag_Meaning {
 	for name, d in DATETIME_TAGS {
-		if d != .None && name == tag {
+		if d != .Own && name == tag {
 			return d
 		}
 	}
-	return .None
+	return .Own
 }
 
-// The datetime type `text` is, whole, `.None` for a text that is no datetime.
+// The datetime type `text` is, whole, `.Own` for a text that is no datetime.
 @(private)
-text_datetime :: proc(text: string) -> Datetime {
+text_datetime :: proc(text: string) -> core.Tag_Meaning {
 	src := transmute([]u8)text
 	if len(src) < 5 || !datetime_starts(src, 0) {
-		return .None
+		return .Own
 	}
 	end, kind, verdict := scan_datetime(src, 0, true)
-	return kind if verdict == 0 && end == len(src) else .None
+	return kind if verdict == 0 && end == len(src) else .Own
 }
 
 // The readers' `tag_fits`: a value keeps a datetime's tag when it is a string whose text is a datetime, as the type
@@ -315,8 +376,8 @@ text_datetime :: proc(text: string) -> Datetime {
 tag_fits :: proc(_: string, v: core.Value) -> (string, bool) {
 	buf: [64]u8
 	text, is_text := core.value_text(v, buf[:])
-	d := text_datetime(text) if is_text && core.value_kind(v) == .String else .None
-	return DATETIME_TAGS[d], d != .None
+	d := text_datetime(text) if is_text && core.value_kind(v) == .String else .Own
+	return DATETIME_TAGS[d], d != .Own
 }
 
 @(private, rodata)
@@ -327,16 +388,17 @@ STRING_STYLES := [Style]string {
 	.Multiline_Literal = "multiline_literal",
 }
 
-// `Tag` is a datetime's type. `Style` is how a string or a number is written: a string's quoting, `bare` for a key
-// written without quotes, and for a number `integer`, `float`, `hex`, `octal`, `binary`, `inf` or `nan`.
+// `Tag` is a datetime's type. `Style` is how a string, a number or a collection is written: a string's quoting, `bare`
+// for a key written without quotes, for a number `integer`, `float`, `hex`, `octal`, `binary`, `inf` or `nan`, and for
+// a table or an array below the root the word `Form` names.
 @(private)
-spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Name) -> (core.Fact_Value, bool) {
+spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Kind) -> (core.Fact_Value, bool) {
 	t := doc.nodes[i]
-	switch name {
+	#partial switch name {
 	case .Tag:
 		if t.kind == .String && t.role == .Value {
-			if d := datetime_of(t.spelling); d != .None {
-				return {text = DATETIME_TAGS[d]}, true
+			if d := datetime_of(t.spelling); d != .Own {
+				return {text = DATETIME_TAGS[d], meaning = d}, true
 			}
 		}
 	case .Style:
@@ -368,9 +430,17 @@ spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_N
 			case .Nan:
 				return {text = "nan"}, true
 			}
-		case .Null, .False, .True, .Bytes, .Plain, .End, .Array, .Object:
+		case .Array, .Object:
+			#partial switch form_of(doc, u32(i)) {
+			case .Inline:
+				return {text = "flow"}, true
+			case .Dotted:
+				return {text = "dotted"}, true
+			case .Header, .Implicit, .Tables:
+				return {text = "block"}, true
+			}
+		case .Null, .False, .True, .Bytes, .Plain, .End:
 		}
-	case .Anchor, .Alias, .Name, .Namespace, .Content:
 	}
 	return {}, false
 }

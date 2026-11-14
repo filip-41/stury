@@ -134,7 +134,7 @@ closed_first :: proc(data: []byte) -> bool {
 // The first fault of the records of `data` from byte `at`, framed by `framing`.
 first_fault :: proc(data: []byte, as: core.As, framing: core.Framing, runner: ^core.Runner, at: u64) -> Maybe(core.Fault) {
 	heap := runtime.heap_allocator()
-	faults, err := records.check(data, as, framing, heap, runner, at)
+	faults, err := records.validate(data, as, framing, heap, runner, at)
 	defer delete(faults, heap)
 	if err != nil {
 		return core.Fault{kind = .No_Memory}

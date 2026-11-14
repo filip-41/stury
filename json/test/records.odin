@@ -152,13 +152,14 @@ records_frame_and_place :: proc(t: ^testing.T) {
 	testing.expect(t, !ok && it.fault == nil)
 
 	// A refused record is the caller's to see. The next one is read past it.
-	faults, _ := records.check(transmute([]u8)string("{\"a\":\n1}\n2"), json.as(.Json), .Lines, context.temp_allocator)
+	faults, _ := records.validate(transmute([]u8)string("{\"a\":\n1}\n2"), json.as(.Json), .Lines, context.temp_allocator)
 	testing.expect_value(t, len(faults), 2)
 	testing.expect_value(t, faults[0], core.Fault{at = 5, rules = &json.RULES, kind = .Truncated})
 	testing.expect_value(t, faults[1], core.Fault{at = 7, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Trailing)})
 
 	// The members of a root object, keys as written, and a root at the deepest level, whose entries may be no container.
 	obj := transmute([]u8)string(`{"a": 1, "b\"c" :[2] , "a":{}}`)
+	walktest.expect_framings(t, json.CAPABILITIES, json.as(.Json))
 	it3 := records.open(obj, json.as(.Json), .Entries)
 	keys := []string{`"a"`, `"b\"c"`, `"a"`}
 	values := []string{"1", "[2]", "{}"}
@@ -175,19 +176,19 @@ records_frame_and_place :: proc(t: ^testing.T) {
 	testing.expect(t, kerr == nil && name == `b"c`)
 	flat := json.as(.Json)
 	flat.max_depth = 1
-	faults, _ = records.check(transmute([]u8)string("[1, 2]"), flat, .Entries, context.temp_allocator)
+	faults, _ = records.validate(transmute([]u8)string("[1, 2]"), flat, .Entries, context.temp_allocator)
 	testing.expect_value(t, len(faults), 0)
-	faults, _ = records.check(transmute([]u8)string("[1, [2]]"), flat, .Entries, context.temp_allocator)
+	faults, _ = records.validate(transmute([]u8)string("[1, [2]]"), flat, .Entries, context.temp_allocator)
 	testing.expect(t, len(faults) == 1 && faults[0].kind == .Too_Deep && faults[0].at == 4)
 	// Concatenated documents: a number runs on into a letter as one bad token.
-	faults, _ = records.check(transmute([]u8)string("1 [2]{}\"s\"3x"), json.as(.Json), .Concatenated, context.temp_allocator)
+	faults, _ = records.validate(transmute([]u8)string("1 [2]{}\"s\"3x"), json.as(.Json), .Concatenated, context.temp_allocator)
 	testing.expect(t, len(faults) == 1 && faults[0].detail == u8(json.Detail.Trailing) && faults[0].at == 11)
 	// So does a scalar into a ',', ':', ']', '}', or a '/' where no comment may start, as jq reads them.
 	for text in ([]string{"1,2", "1 true:", "1]", "1}", "1/"}) {
-		faults, _ = records.check(transmute([]u8)text, json.as(.Json), .Concatenated, context.temp_allocator)
+		faults, _ = records.validate(transmute([]u8)text, json.as(.Json), .Concatenated, context.temp_allocator)
 		testing.expectf(t, len(faults) == 1 && faults[0].detail == u8(json.Detail.Trailing) && faults[0].at == u64(strings.index_any(text[1:], ",:]}/")) + 1, "%q", text)
 	}
-	faults, _ = records.check(transmute([]u8)string("1/**/2"), json.as(.Jsonc), .Concatenated, context.temp_allocator)
+	faults, _ = records.validate(transmute([]u8)string("1/**/2"), json.as(.Jsonc), .Concatenated, context.temp_allocator)
 	testing.expect_value(t, len(faults), 0)
 	// A trailing comma at the input's end closes nothing, whatever byte lies past the input, and a member's key is a string.
 	comma_cut := "[1,]"
@@ -196,7 +197,7 @@ records_frame_and_place :: proc(t: ^testing.T) {
 	for _ in records.next(&cut) {}
 	end_fault, ended := cut.fault.?
 	testing.expect(t, ended && end_fault.kind == .Truncated && end_fault.at == 3)
-	faults, _ = records.check(transmute([]u8)string("{1:2}"), json.as(.Json), .Entries, context.temp_allocator)
+	faults, _ = records.validate(transmute([]u8)string("{1:2}"), json.as(.Json), .Entries, context.temp_allocator)
 	testing.expect(t, len(faults) == 1 && faults[0].kind == .Bad_Char && faults[0].at == 1)
 
 	// A line of JSON5 whitespace is no record, in JSON it is a refused one.
@@ -212,7 +213,7 @@ records_frame_and_place :: proc(t: ^testing.T) {
 	}
 
 	// RFC 7464: text before the first 0x1E is a record of its own, faulty, and the records go on.
-	unframed, unframed_err := records.check(transmute([]u8)string(" 1\x1e2\n"), json.as(.Json), .Seq, context.temp_allocator)
+	unframed, unframed_err := records.validate(transmute([]u8)string(" 1\x1e2\n"), json.as(.Json), .Seq, context.temp_allocator)
 	testing.expect_value(t, unframed_err, nil)
 	testing.expect(t, len(unframed) == 1 && unframed[0] ==core.Fault{at = 1, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Unframed)})
 }
@@ -860,7 +861,7 @@ records_seq_reads_frame_as_build :: proc(t: ^testing.T) {
 			testing.expectf(t, slice.equal(way[:], c.want), "%q way %d: %v, want %v", c.src, i, way[:], c.want)
 			delete(way)
 		}
-		checked, _ := records.check(src, as, .Seq, context.temp_allocator)
+		checked, _ := records.validate(src, as, .Seq, context.temp_allocator)
 		want := make([dynamic]core.Fault, context.temp_allocator)
 		for f in c.want {
 			if x, faulted := f.?; faulted {

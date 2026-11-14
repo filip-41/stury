@@ -2,9 +2,11 @@ package jq
 
 // --stream's events of a document, made one at a time as jq's streaming parser makes them: `[path, leaf]` for each
 // scalar and empty container, and `[path]` after a container's last member, `path` ending with that member's step.
-// Every member is walked, a repeated key's too.
+// Every member is walked, a repeated key's too. A document whose nodes are not its value's members, as a markup
+// document's repeated name and a table's record are not, is walked by its value's members instead, as `tostream` does.
 
 import "base:runtime"
+import "core:mem/virtual"
 import "core:strings"
 import core_pkg "../../../core"
 
@@ -17,6 +19,20 @@ Events :: struct {
 	last:         core_pkg.Node_Index, // the node whose text made the event returned last,
 	closing:      bool, // and whether the event closes that container,
 	after_scalar: bool, // whose last member is then a scalar
+	// The walk by the value's members: its containers open, what iterating them holds, and the byte of the text that
+	// triggers every event.
+	members:      [dynamic]Member_Frame,
+	walk:         virtual.Arena,
+	end:          int,
+	by_value:     bool,
+}
+
+@(private = "file")
+Member_Frame :: struct {
+	it:    Members,
+	array: bool,
+	index: int,
+	key:   string,
 }
 
 @(private = "file")
@@ -36,8 +52,20 @@ events_start :: proc(doc: core_pkg.Document) -> ^Events {
 	return e
 }
 
+// The events of the value of `doc`, which the heap holds, walked by its members, each triggered at byte `end` of the
+// text.
+value_events_start :: proc(doc: core_pkg.Document, end: int) -> ^Events {
+	e := events_start(doc)
+	e.members.allocator = runtime.heap_allocator()
+	e.end, e.by_value = end, true
+	return e
+}
+
 // The next event, or false once the last has been made, when the events are freed.
 next_event :: proc(e: ^Events) -> (Value, bool) {
+	if e.by_value {
+		return next_member_event(e)
+	}
 	doc := &e.doc
 	if !e.started {
 		e.started = true
@@ -74,11 +102,80 @@ next_event :: proc(e: ^Events) -> (Value, bool) {
 	return nil, false
 }
 
+@(private = "file")
+next_member_event :: proc(e: ^Events) -> (Value, bool) {
+	caller := context.allocator
+	if !e.started {
+		e.started = true
+		root := Value(Ref{&e.doc, core_pkg.ROOT})
+		if !member_push(e, root) {
+			return member_event(e, root, false), true
+		}
+	}
+	for len(e.members) > 0 {
+		f := &e.members[len(e.members) - 1]
+		context.allocator = virtual.arena_allocator(&e.walk)
+		key, m, ok := next_member(&f.it)
+		context.allocator = caller
+		if !ok {
+			closing := member_event(e, nil, true)
+			pop(&e.members)
+			return closing, true
+		}
+		if f.array {
+			f.index += 1
+		} else {
+			f.key = key
+		}
+		if !member_push(e, m) {
+			return member_event(e, m, false), true
+		}
+	}
+	core_pkg.destroy(&e.doc)
+	delete(e.members)
+	virtual.arena_destroy(&e.walk)
+	free(e, runtime.heap_allocator())
+	return nil, false
+}
+
+// Opens container `v` when it has a member, and answers whether it did.
+@(private = "file")
+member_push :: proc(e: ^Events, v: Value) -> bool {
+	k := kind(v)
+	if k < .Array || is_empty(v) {
+		return false
+	}
+	context.allocator = virtual.arena_allocator(&e.walk)
+	append(&e.members, Member_Frame{it = iterate(v), array = k == .Array, index = -1})
+	return true
+}
+
+// `[path, leaf]`, or `[path]` when `closing`, copied whole into the context's allocator.
+@(private = "file")
+member_event :: proc(e: ^Events, leaf: Value, closing: bool) -> Value {
+	path := new_array(len(e.members))
+	for f in e.members {
+		append(&path.items, num(f64(f.index)) if f.array else Value(strings.clone(f.key)))
+	}
+	switch {
+	case closing:
+		return event_of(path)
+	case kind(leaf) == .Array:
+		return event_of(path, new_array())
+	case kind(leaf) == .Object:
+		return event_of(path, new_object())
+	}
+	return event_of(path, event_clone(scalar(leaf)))
+}
+
 // The byte of the text whose reading makes the event returned last, as jq's streaming parser has it: a container's
 // closing bracket for an empty container and for its closing event, or the byte after that bracket when its last member
 // is a scalar, the ',' or closing bracket after any other member, the quote that ends a top-level string, else the byte
 // after a top-level literal. Valid until the next `next_event`.
 event_trigger :: proc(e: ^Events) -> int {
+	if e.by_value {
+		return e.end
+	}
 	src := e.doc.src
 	lo := int(e.doc.nodes[e.last].lo)
 	hi := lo + len(core_pkg.span(&e.doc, e.last))
@@ -143,8 +240,8 @@ event_of :: proc(path: ^Array, leaf: ..Value) -> Value {
 // An event or a part of one, made anew in the context allocator. An event's container leaf is empty.
 event_clone :: proc(v: Value) -> Value {
 	#partial switch x in v {
-	case ^Number_Text:
-		return number_text(strings.clone(x.text))
+	case Number_View:
+		return view_copy(x)
 	case string:
 		return strings.clone(x)
 	case ^Array:

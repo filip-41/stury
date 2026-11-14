@@ -17,6 +17,27 @@ Write_Options :: struct {
 	jq_numbers:      bool, // a built value's number that is not finite is written as jq writes it: NaN as null, an infinity as the largest double of its sign
 }
 
+// A field of `Write_Options` that a format's document writer may honour. A writer ignores one it does not.
+Write_Option :: enum u8 {
+	Pretty,
+	Indent,
+	Tab,
+	Ascii,
+	Sort_Keys,
+	Respell_Strings,
+}
+
+// What a format offers, which each format exports as `CAPABILITIES`. `writes` holds the options its document writer
+// honours, `framings` those its records are read in and `specs` is its `Spec` type. `follows` reports whether the fault of a build of a whole text is the start
+// of a second text, so that the text is a stream of them read one after another, and is nil for a format with one text
+// to an input.
+Capabilities :: struct {
+	writes:   bit_set[Write_Option; u8],
+	framings: bit_set[Framing; u8],
+	specs:    typeid,
+	follows:  proc "contextless" (f: Fault) -> bool,
+}
+
 // Pretty with two spaces per level.
 PRETTY :: Write_Options{pretty = true, indent = 2}
 
@@ -76,10 +97,23 @@ write_to :: proc(doc: ^Document, opts: Write_Options, as: Maybe(As), node: Node_
 		return nil, 0, {kind = .Unsupported}
 	}
 	// A markup document is written by a format with no attributes as its value reads, a repeated name as an array.
-	if is_markup(doc) && target.readers.attribute == nil {
-		grouped := markup_grouped(Node_Ref{doc, node}, allocator)
-		defer free_grouped(&grouped)
-		return services.write(&grouped, opts, target, ROOT, stream, allocator)
+	written, at := doc, node
+	grouped: Document
+	if is_markup(doc) && .Attribute not_in target.readers.holds {
+		grouped = markup_grouped(Node_Ref{doc, node}, allocator)
+		written, at = &grouped, ROOT
 	}
-	return services.write(doc, opts, target, node, stream, allocator)
+	defer if written != doc {
+		free_grouped(&grouped)
+	}
+	text, kept, refusal := services.write(written, opts, target, at, stream, allocator)
+	if refusal.kind != .None {
+		return nil, 0, worded(refusal, services.words)
+	}
+	facts := subtree_facts(written, at)
+	// A directive is layout, as a style is, so a writer does not count it kept and no output drops it.
+	for f in facts {
+		kept += int(f.role == .Directive)
+	}
+	return text, len(facts) - kept, refusal
 }

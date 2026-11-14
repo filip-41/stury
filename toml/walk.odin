@@ -208,8 +208,8 @@ held_free :: proc "contextless" (cursor: ^Cursor, held: ^Held) {
 // with `as(spec, opts)` links every service of the format. The same holds for the other entry points below. A document
 // an entry point builds holds no services, so `query`,
 // `edit_list_init` and `write` of this package serve it where the same names of `core` serve a handle's.
-validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
-	return core.error_of(validate_text(src, spec, opts))
+validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error {
+	return core.error_of(validate_text(src, S, opts))
 }
 
 @(private)
@@ -232,8 +232,8 @@ Frame :: struct {
 	node, next: u32,
 }
 
-// The next token a replay gives: the text's `Object`, a member's comments, key, value and the comment on its line, and
-// a container's foot comments, `End` and the comment on the line it closes.
+// The next token a replay gives: the text's head comments and `Object`, a member's comments, key, value and the comment
+// on its line, and a container's foot comments, `End` and the comment on the line it closes.
 @(private)
 Phase :: enum u8 {
 	Open,
@@ -289,6 +289,11 @@ replay :: proc "contextless" (p: ^Parser, s: ^Replay, h: ^$H, hs: ^core.Hook_Reg
 	for {
 		switch s.phase {
 		case .Open:
+			if s.k < nodes[0].heads {
+				s.k += 1
+				emit(h, on, hs, &r, comment_token(p.tree.comments[nodes[0].head + s.k - 1], .Comment))
+				break
+			}
 			if _, e := append(&s.frames, Frame{0, nodes[0].first}); e != nil {
 				return core.fault_at(0, .No_Memory)
 			}
@@ -370,8 +375,8 @@ replay :: proc "contextless" (p: ^Parser, s: ^Replay, h: ^$H, hs: ^core.Hook_Reg
 // Reads a text as spec `spec` into a document, allocating its nodes with `allocator`. The document borrows `src`, which
 // must outlive it, and `destroy` frees it. A table is one `Object` whose members are in the order the text first names
 // them, wherever the text writes them. `dups` has no effect, since a repeated key is a fault.
-build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
-	doc, err := build_text(src, bound_as(spec, opts), allocator)
+build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
+	doc, err := build_text(src, bound_as(S, opts), allocator)
 	return doc, core.error_of(err)
 }
 
@@ -380,38 +385,46 @@ build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.
 scan :: proc {scan_one, scan_many}
 
 @(private)
-scan_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
-	return scan_many(src, spec, []core.Path{path}, opts, read, allocator)
+scan_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
+	return scan_many(src, S, []core.Path{path}, opts, read, allocator)
 }
 
 @(private)
-scan_many :: proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
-	doc, err := scan_text(src, bound_as(spec, opts), paths, read, nil, nil, allocator)
+scan_many :: proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
+	doc, err := scan_text(src, bound_as(S, opts), paths, read, nil, nil, allocator)
 	return doc, core.error_of(err)
 }
 
 each_answer :: proc {each_answer_one, each_answer_many}
 
 @(private)
-each_answer_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
-	return each_answer_many(src, spec, []core.Path{path}, state, on, opts, read, allocator)
+each_answer_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
+	return each_answer_many(src, S, []core.Path{path}, state, on, opts, read, allocator)
 }
 
 @(private)
-each_answer_many :: proc(src: []u8, spec: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
-	doc, err := scan_text(src, bound_as(spec, opts), paths, read, state, on, allocator)
+each_answer_many :: proc(src: []u8, $S: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
+	doc, err := scan_text(src, bound_as(S, opts), paths, read, state, on, allocator)
 	core.destroy(&doc)
 	return core.error_of(err)
 }
 
 // The answers `each_answer` gives, as an iterator that `next` takes them from: `for a in toml.next(&it)`. A loop that
-// ends before `next` returns false frees the read with `destroy(&it)`. `path` is read at the first `next`, which
+// ends before `next` returns false frees the read with `destroy(&it)`. `paths` is read at the first `next`, which
 // builds the whole text, as every path read of TOML does.
-answers :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
-	return engine.answers_whole(src, bound_as(spec, opts), path, read, allocator, build_handle)
+answers :: proc {answers_one, answers_many}
+
+@(private)
+answers_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+	return engine.answers_of(src, bound_as(S, opts), nil, path, read, allocator, engine.answers_whole(build_handle))
 }
 
-find :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
-	doc, err = scan_one(src, spec, engine.first_path(path), opts, read, allocator)
+@(private)
+answers_many :: #force_inline proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+	return engine.answers_of(src, bound_as(S, opts), paths, {}, read, allocator, engine.answers_whole(build_handle))
+}
+
+find :: proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
+	doc, err = scan_one(src, S, engine.first_path(path), opts, read, allocator)
 	return doc, engine.first_answer(&doc), err
 }

@@ -5,12 +5,14 @@ import "base:runtime"
 import core "../core"
 
 // The keys of the mappings a walk has open, which the walk under `merge_keys` keeps to leave out a merged member whose
-// key the host holds, and a build keeps under `.Refuse` and to find a clash.
+// key the host holds, and a build keeps under `.Refuse` and to find a clash. `kept` holds the decoded text of the keys
+// whose bytes a stream's window let go, in the order of their keys.
 @(private)
 Key_Table :: struct {
 	frames: [dynamic]Key_Frame,
 	keys:   [dynamic]Key,
 	heads:  [dynamic]u32,
+	kept:   [dynamic]u8,
 }
 
 // A collection the walk has open. `first` is the index in `Key_Table.keys` of the first key of a mapping. A mapping's
@@ -37,6 +39,8 @@ Key :: struct {
 	value:    core.Number,
 	hash:     u64,
 	next:     u32,
+	// The key's text is `n` bytes of `Key_Table.kept` from `lo`, decoded.
+	kept:     bool,
 }
 
 // The core type a key resolves to.
@@ -111,6 +115,9 @@ keys_close :: #force_inline proc(k: ^Key_Table) {
 	mask := u64(len(k.heads) - 1)
 	#reverse for key in k.keys[f.first:] {
 		k.heads[key.hash & mask] = key.next
+		if key.kept && !key.by_value {
+			resize(&k.kept, int(key.lo))
+		}
 	}
 	resize(&k.keys, int(f.first))
 }
@@ -120,6 +127,30 @@ keys_destroy :: proc(k: ^Key_Table) {
 	delete(k.frames)
 	delete(k.keys)
 	delete(k.heads)
+	delete(k.kept)
+}
+
+// Copies out the text of the keys before window offset `below`, whose bytes the window may let go, and returns false
+// when memory ran out.
+@(private)
+keys_hold :: proc(k: ^Key_Table, src: []u8, below: u64) -> bool {
+	for &key in k.keys {
+		if key.kept || key.lo >= below {
+			continue
+		}
+		if !key.by_value {
+			stack: [256]u8 = ---
+			text, owned := key_decoded(core.Token{key.lo, key.n, .Plain, .Key, key.spelling}, src, stack[:])
+			defer delete(owned)
+			at := len(k.kept)
+			if _, failed := append(&k.kept, text); failed != nil {
+				return false
+			}
+			key.lo, key.n = u64(at), u32(len(text))
+		}
+		key.kept = true
+	}
+	return true
 }
 
 // Adds key `t`, a scalar, to the keys of the innermost mapping, and returns how it stands to them. A key that repeats
@@ -141,14 +172,14 @@ key_enter :: proc(k: ^Key_Table, t: core.Token, src: []u8) -> (judged: bit_set[K
 	mask := u64(len(k.heads) - 1)
 	for i := k.heads[h & mask]; i != NO_KEY && i >= f.first; i = k.keys[i].next {
 		e := k.keys[i]
-		if !e.by_value && e.hash == h && key_repeats(e, src, text) {
+		if !e.by_value && e.hash == h && key_repeats(k, e, src, text) {
 			if e.type == type {
 				return judged + {.Repeat}
 			}
 			judged += {.Clash}
 		}
 	}
-	key_add(k, Key{t.lo, t.n, t.spelling, type, false, value, h, 0})
+	key_add(k, Key{t.lo, t.n, t.spelling, type, false, value, h, 0, false})
 	// Two keys of one type and text hold one value, so only a key with a value of its own is looked up by it.
 	if type == .Str || value.kind == .Wide {
 		return
@@ -159,7 +190,7 @@ key_enter :: proc(k: ^Key_Table, t: core.Token, src: []u8) -> (judged: bit_set[K
 			return judged + {.Repeat, .Clash}
 		}
 	}
-	key_add(k, Key{t.lo, t.n, t.spelling, type, true, value, vh, 0})
+	key_add(k, Key{t.lo, t.n, t.spelling, type, true, value, vh, 0, false})
 	return
 }
 
@@ -263,7 +294,10 @@ key_type :: proc(t: core.Token, text: string) -> (type: Key_Type, value: core.Nu
 }
 
 @(private)
-key_repeats :: proc(e: Key, src: []u8, text: string) -> bool {
+key_repeats :: proc(k: ^Key_Table, e: Key, src: []u8, text: string) -> bool {
+	if e.kept {
+		return string(k.kept[e.lo:e.lo + u64(e.n)]) == text
+	}
 	if e.spelling & core.SPELLING_DECODE == 0 {
 		return string(src[e.lo:e.lo + u64(e.n)]) == text
 	}

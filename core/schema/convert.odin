@@ -58,7 +58,7 @@ convert :: proc(cv: ^Converter, doc: ^core.Document, opts := core.Write_Options{
 	// A markup text's kind is the one the check read it as, and a flat cell's the one its format reads.
 	readings: typed.Readings
 	readings.read.allocator = scratch
-	markup := doc.readers != nil && doc.readers.attribute != nil
+	markup := core.is_markup(doc)
 	if err = check_node(&cv.from, doc, core.ROOT, sink, &readings if markup else nil); err != nil {
 		return nil, .Input, err
 	}
@@ -170,7 +170,7 @@ build :: proc(m: ^Model, v: core.Value) -> core.Value {
 	if m.refused || !is_node {
 		return v
 	}
-	markup := ref.doc.readers != nil && ref.doc.readers.attribute != nil
+	markup := core.is_markup(ref.doc)
 	if !m.probe && !markup {
 		return v
 	}

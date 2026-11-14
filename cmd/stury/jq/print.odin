@@ -273,8 +273,8 @@ close :: proc(p: ^Printer, k: Kind, bracket: u8) {
 put_number :: proc(p: ^Printer, v: Value) {
 	f: f64
 	#partial switch n in v {
-	case ^Number_Text:
-		write.put_text(p.out, n.text)
+	case Number_View:
+		write.put_text(p.out, view_text(n))
 		return
 	case Ref:
 		room: [core_pkg.HEX_ROOM]u8 = ---

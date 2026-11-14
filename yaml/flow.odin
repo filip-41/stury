@@ -230,7 +230,10 @@ read_flow :: proc(p: ^Parser) -> bool {
 			}
 		case .Entry_Done:
 			flow_space(p, n, true) or_return
-			c := at(p, p.pos)
+			if at_eof(p) {
+				return fault(p, f.lo, .Truncated, .Open_Collection)
+			}
+			c := p.src[p.pos]
 			if c == ',' {
 				p.pos += 1
 				p.flows[top].after_value = true

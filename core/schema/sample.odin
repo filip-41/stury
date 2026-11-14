@@ -62,6 +62,9 @@ Gen :: struct {
 	// The node the innermost failed draw of this try was for, `NONE` when none failed.
 	culprit:  rules.Node_Index,
 	comments: bool,
+	// What the format's writer refused of this value's tries, and whether one of them was written.
+	refused:  core.Typed_Error_Kind,
+	wrote:    bool,
 }
 
 // Takes each value `sample_each` writes. `text` is valid until the sink returns.
@@ -69,7 +72,8 @@ Sample_Sink :: proc(text: []u8, user: rawptr)
 
 // Writes values that pass `d` in the format `as`, as many as `opts.count` says, each to `sink` as it is made. A
 // description that no value passes is `.No_Sample` naming the node the search stopped at by its keyword path, which
-// `allocator` holds, and one the check cannot judge is the check's own refusal.
+// `allocator` holds, one the check cannot judge is the check's own refusal, and one whose every drawn value the format
+// cannot write is the writer's refusal.
 sample_each :: proc(d: ^rules.Description, as: core.As, opts: Sample_Options, sink: Sample_Sink, user: rawptr, allocator := context.allocator) -> (err: core.Error) {
 	asserted := asserting(d, opts.format_assert)
 	defer asserted_restore(d, asserted)
@@ -91,7 +95,12 @@ sample_each :: proc(d: ^rules.Description, as: core.As, opts: Sample_Options, si
 	context.temp_allocator = scratch
 	for _ in 0 ..< max(opts.count, 1) {
 		virtual.arena_free_all(&arena)
+		g.refused, g.wrote = .None, false
 		text, ok := value_text(&g, &b, as, opts, scratch)
+		if !ok && !g.wrote && g.refused != .None {
+			services := core.services_of(as)
+			return core.error_of(core.worded({kind = g.refused}, services.words if services != nil else {}), allocator)
+		}
 		if !ok {
 			return no_sample(&g, .No_Invalid_Sample if opts.invalid else .No_Sample, allocator)
 		}
@@ -254,6 +263,8 @@ value_text :: proc(g: ^Gen, b: ^Bound, as: core.As, opts: Sample_Options, scratc
 		} else {
 			refusal: Refusal
 			text, refusal = written(v, as, opts.write, scratch)
+			g.refused = refusal.kind if refusal.kind != .None else g.refused
+			g.wrote ||= refusal.kind == .None
 			ok = refusal.kind == .None && valid(b, text)
 		}
 		if ok && len(text) == 0 {
@@ -587,11 +598,11 @@ number :: proc(g: ^Gen, list: []^rules.Rules, whole: bool) -> (v: core.Value, ok
 		if first > last {
 			return {}, false
 		}
-		return core.number_text(fmt.aprintf("%d", i64(first) + i64(below(g, int(min(last - first, 1e6) + 1))))), true
+		return core.number_text(fmt.tprintf("%d", i64(first) + i64(below(g, int(min(last - first, 1e6) + 1))))), true
 	}
 	x := lo + (hi - lo) * (0.1 + 0.8 * f64(below(g, 1000)) / 1000)
 	digits: [spell.F64_ROOM]u8
-	return core.number_text(strings.clone(string(digits[:spell.f64_text(&digits[0], math.round(x * 100) / 100 if hi - lo >= 1 else x)]))), true
+	return core.number_text(string(digits[:spell.f64_text(&digits[0], math.round(x * 100) / 100 if hi - lo >= 1 else x)])), true
 }
 
 // Whether `step` is a power of ten below every double's decimal places, which every number spelled as a double is a

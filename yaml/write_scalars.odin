@@ -2,7 +2,8 @@ package yaml
 
 // How a string is spelled in a YAML text. A string is plain when the text reads back as the same string under the 1.2
 // core schema and under a 1.1 reader, single-quoted when it holds nothing a quote cannot, a literal block when it has
-// line ends and the place takes one, and double-quoted otherwise.
+// line ends and the place takes one, a folded block where the source's was and still holds it, and double-quoted
+// otherwise.
 
 import "core:strings"
 import "core:unicode/utf8"
@@ -15,6 +16,7 @@ Shape :: enum u8 {
 	Single,
 	Double,
 	Literal,
+	Folded,
 }
 
 // What a string holds that decides how it can be spelled.
@@ -238,10 +240,12 @@ looks_timestamp :: proc(s: string) -> bool {
 Place :: struct {
 	flow:   bool, // inside a flow collection
 	key:    bool, // a mapping key, which is one line
-	block:  bool, // a literal block can stand here
+	block:  bool, // a block scalar can stand here
 	ascii:  bool,
 	// The source's own style, which a text read from YAML keeps when it still reads back, and `nil` for a computed string.
 	keeps:  Maybe(Style),
+	// The source's block was folded.
+	folded: bool,
 	// A tag is written with the string, which settles the type a plain scalar would be read as.
 	tagged: bool,
 }
@@ -299,7 +303,10 @@ shape_of :: proc(s: string, place: Place) -> (Shape, core.Typed_Error_Kind) {
 		case .Double:
 			return .Double, .None
 		case .Block:
-			if literal_fits(s, f, place) {
+			if place.folded && block_fits(s, f, place) {
+				return .Folded, .None
+			}
+			if f.line_ends && block_fits(s, f, place) {
 				return .Literal, .None
 			}
 		}
@@ -307,9 +314,9 @@ shape_of :: proc(s: string, place: Place) -> (Shape, core.Typed_Error_Kind) {
 	switch {
 	case len(s) == 0:
 		return .Double, .None
-	case !f.escapes && !f.line_ends && !f.tab && plain_fits(s, place.flow) && !reads_as_other(s):
+	case !f.escapes && !f.line_ends && !f.tab && plain_fits(s, place.flow) && (place.tagged || !reads_as_other(s)):
 		return .Plain, .None
-	case literal_fits(s, f, place):
+	case f.line_ends && block_fits(s, f, place):
 		return .Literal, .None
 	case !f.escapes && !f.line_ends:
 		return .Single, .None
@@ -317,11 +324,11 @@ shape_of :: proc(s: string, place: Place) -> (Shape, core.Typed_Error_Kind) {
 	return .Double, .None
 }
 
-// Whether `s` is a literal block scalar's text here: it has a line end, holds nothing a block cannot, starts with a
-// character that sets the block's indent, and has no line of white space alone.
+// Whether `s` is a block scalar's text here: it holds nothing a block cannot, starts with a character that sets the
+// block's indent, and has no line of white space alone.
 @(private)
-literal_fits :: proc(s: string, f: Facts, place: Place) -> bool {
-	if !place.block || place.key || place.flow || f.escapes || !f.line_ends || s[0] == ' ' || s[0] == '\n' || s[0] == '\t' {
+block_fits :: proc(s: string, f: Facts, place: Place) -> bool {
+	if !place.block || place.key || place.flow || f.escapes || len(s) == 0 || s[0] == ' ' || s[0] == '\n' || s[0] == '\t' {
 		return false
 	}
 	body := s
@@ -433,11 +440,11 @@ put_double :: proc(out: ^write.Out, s: string, ascii: bool) {
 	write.put_byte(out, '"')
 }
 
-// Writes `s` as the scalar `shape` names, which is not `.Literal`: that one is a block of lines, see `put_literal`.
+// Writes `s` as the scalar `shape` names, which is not a block: that one is a block of lines, see `put_block`.
 @(private)
 put_scalar :: proc(out: ^write.Out, s: string, shape: Shape, ascii: bool) {
 	switch shape {
-	case .Plain, .Literal:
+	case .Plain, .Literal, .Folded:
 		write.put_text(out, s)
 	case .Single:
 		put_single(out, s)
@@ -446,16 +453,17 @@ put_scalar :: proc(out: ^write.Out, s: string, shape: Shape, ascii: bool) {
 	}
 }
 
-// Writes the header and lines of a literal block scalar for `s`, with its lines indented by `ind` spaces, each line
-// ended. A header chomps the final line ends: `-` for none, nothing for one and `+` for more.
+// Writes the header and lines of a block scalar of `shape` for `s`, with its lines indented by `ind` spaces, each line
+// ended. A header chomps the final line ends: `-` for none, nothing for one and `+` for more. A folded block reads the
+// break between two lines that start with no white space as a space, so each line end of `s` there takes one more.
 @(private)
-put_literal :: proc(out: ^write.Out, s: string, ind: int) {
+put_block :: proc(out: ^write.Out, s: string, shape: Shape, ind: int) {
 	body := s
 	for len(body) > 0 && body[len(body) - 1] == '\n' {
 		body = body[:len(body) - 1]
 	}
 	ends := len(s) - len(body)
-	write.put_byte(out, '|')
+	write.put_byte(out, '>' if shape == .Folded else '|')
 	switch {
 	case ends == 0:
 		write.put_byte(out, '-')
@@ -464,6 +472,7 @@ put_literal :: proc(out: ^write.Out, s: string, ind: int) {
 	}
 	write.put_byte(out, '\n')
 	rest := body
+	spaced := true
 	for {
 		line := rest
 		cut := strings.index_byte(rest, '\n')
@@ -471,6 +480,12 @@ put_literal :: proc(out: ^write.Out, s: string, ind: int) {
 			line = rest[:cut]
 		}
 		if len(line) > 0 {
+			if shape == .Folded {
+				if !spaced && line[0] != ' ' && line[0] != '\t' {
+					write.put_byte(out, '\n')
+				}
+				spaced = line[0] == ' ' || line[0] == '\t'
+			}
 			write.put_run(out, ind, ' ')
 			write.put_text(out, line)
 		}

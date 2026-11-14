@@ -259,12 +259,12 @@ run_tree_file :: proc(t: ^testing.T, file: string, data: []u8, tally: ^Tree_Tall
 read_document :: proc(t: ^testing.T, file: string, c: Tree_Case, scripting: bool, tree: ^html.Internal_Tree) {
 	src := transmute([]u8)c.data
 	spec := html.Spec.Fragment if c.fragment else .Document
-	doc, err := html.build(src, spec, context_options(c, scripting))
+	doc, err := core.build(src, html.as(spec, context_options(c, scripting)))
 	if !testing.expectf(t, err == nil, "%s #%d %q: %v", file, c.number, c.data, err) {
 		return
 	}
 	defer core.destroy(&doc)
-	testing.expectf(t, (html.validate(src, spec, context_options(c, scripting)) == nil) == (len(tree.errors) == 0), "%s #%d %q: validate disagrees with the tree", file, c.number, c.data)
+	testing.expectf(t, (core.validate(src, html.as(spec, context_options(c, scripting))) == nil) == (len(tree.errors) == 0), "%s #%d %q: validate disagrees with the tree", file, c.number, c.data)
 	elements := tree_elements(tree, tree.nodes[1].first if c.fragment else 1)
 	next := 0
 	for n, i in doc.nodes {

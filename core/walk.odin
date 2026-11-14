@@ -35,12 +35,13 @@ Kind :: enum u8 {
 // change its meaning. A comment's role and node follow its position, by the same rule in every format. On the line
 // where the previous value ends it is that value's `Comment_Inline`. Before a value the grammar allows it above, it is
 // that value's `Comment`. Any other comment is a `Comment_Foot` of the innermost open container, or of the root at
-// depth 0. `Tag`, `Anchor` and `Alias` are node properties. Each is a fact span that stands just before the node it
-// belongs to, on the node's line, and the span's lead marker length says how much of it is a marker. `Instruction`
-// follows the comment position rule, and `Doctype` stands at the root. An `Attribute` is a markup element's attribute,
-// a fact of the element's value node, which a walk gives after the element's key and before its value. A consumer that
-// wants values only tests `t.role <= .Key`. `Partial` is no token's role: a read by paths writes it on a container it
-// kept only some children of.
+// depth 0, and a `Comment_Foot` between a key and its value, a markup element's with no child element, is the value's.
+// `Tag`, `Anchor` and `Alias` are node properties. Each is a fact span that stands just before the node it belongs to,
+// on the node's line, and the span's lead marker length says how much of it is a marker. `Instruction` follows the
+// comment position rule, and `Doctype` and `Directive` stand at the root. An `Attribute` is a markup element's
+// attribute, a fact of the element's value node, which a walk gives after the element's key and before its value. A
+// consumer that wants values only tests `t.role <= .Key`. `Partial` is no token's role: a read by paths writes it on a
+// container it kept only some children of.
 Role :: enum u8 {
 	Value, // json, dsv
 	Key, // json: a member's name, always a `String`, in JSON5 quoted or not, dsv: the header cell of a cell's column
@@ -53,6 +54,7 @@ Role :: enum u8 {
 	Alias, // the node that follows is a copy of a named anchor's node, `Plain`
 	Instruction, // a processing instruction, `target data`, by the comment position rule, `Plain`
 	Doctype, // the document type declaration, read only, on the root, `Plain`
+	Directive, // a document marker, read only, on the root: a YAML `%` line, `---` or `...`, the XML declaration, `Plain`
 	Attribute, // markup: an element's attribute, `name="value"` through the closing quote, `spelling` as `Fact` says
 	Partial, // a document's container whose children were not all kept, in place of `Value`
 }

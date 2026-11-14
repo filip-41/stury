@@ -677,6 +677,13 @@ past_limit :: #force_inline proc "contextless" (neg: bool) -> core.Typed_Error_K
 @(private)
 number_cold :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, fld: ^Field, dest: uintptr) -> core.Typed_Error_Kind {
 	context = h.ctx
+	if t.kind == .Plain {
+		// A markup text whose decode `typed_text` found to be a number.
+		buf: [TEXT_ROOM]u8 = ---
+		text, _ := decoded_text(h, t, buf[:])
+		n, integer, _, _ := spell.number_loose(transmute([]u8)text, 0, u64(len(text)))
+		return store_number(n, integer, h, t, fld, dest)
+	}
 	if frac, sum := core.number_digits(t.spelling); fld.kind > .U64 && sum <= 19 && t.spelling & core.NUMBER_KIND_MASK == 0 {
 		// `mant` holds all the digits of a plain decimal, the one kind the walk folds.
 		return store_number(spell.number_significand(h.mant, -i64(frac), raw_data(h.src)[t.lo] == '-', sum <= 15), false, h, t, fld, dest)
@@ -706,12 +713,18 @@ store_number :: proc(n: core.Number, integer: bool, h: ^Reader, t: core.Token, f
 	if fld.kind != .F64 && fld.kind != .F32 {
 		return .Wrong_Kind
 	}
+	// A `Plain` text's digits are its decode.
+	digits := string(raw_data(h.src)[t.lo:][:t.n])
+	decoded: [128]u8 = ---
+	if t.kind == .Plain {
+		digits, _ = number_digits(h, t, decoded[:])
+	}
 	x: f64
 	switch n.kind {
 	case .Int:
 		x = f64(i64(n.bits))
 		// `-0` is the integer 0, and a float keeps its sign.
-		if n.bits == 0 && raw_data(h.src)[t.lo] == '-' {
+		if n.bits == 0 && len(digits) > 0 && digits[0] == '-' {
 			x = -x
 		}
 	case .Uint:
@@ -742,10 +755,10 @@ store_number :: proc(n: core.Number, integer: bool, h: ^Reader, t: core.Token, f
 			v = f32(n.bits)
 		case:
 			v = f32(x)
-			if t.spelling & core.NUMBER_KIND_MASK <= core.NUMBER_DECIMAL {
+			if t.kind == .Plain || t.spelling & core.NUMBER_KIND_MASK <= core.NUMBER_DECIMAL {
 				if f32_double_rounds(x) {
 					// Rounds the decimal once. Past `max(f32)` it is infinity, refused below.
-					v, _ = strconv.parse_f32(string(raw_data(h.src)[t.lo:][:t.n]))
+					v, _ = strconv.parse_f32(digits)
 				}
 			} else if read := h.plan.readers.number_f32; read != nil {
 				if exact, ok := read(&h.view, t); ok {
@@ -776,7 +789,7 @@ past_binary64 :: #force_inline proc "contextless" (x: f64, spelling: u16) -> boo
 	return (x != x || abs(x) > max(f64)) && !spells_non_finite(x, spelling)
 }
 
-// A number whose spelling the walk does not fold: `+5` and `5.` spell an integer a plain decimal writes as `5`.
+// A number whose spelling the walk does not fold: `+5` spells an integer a plain decimal writes as `5`, and `5.` a float.
 @(cold)
 @(private)
 spelled_number :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {

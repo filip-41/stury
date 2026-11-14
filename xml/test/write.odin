@@ -35,7 +35,7 @@ from_json :: proc(src: string, opts := core.Write_Options{}) -> (string, int, co
 	return string(text), dropped, werr
 }
 
-// An XML document keeps its doctype, comments, instructions, attributes, namespace declarations and references as
+// An XML document keeps its declaration, doctype, comments, instructions, attributes, namespace declarations and references as
 // written, drops the white space between elements, and pretty output indents only elements with no text.
 @(test)
 an_xml_document_is_written_as_it_stands :: proc(t: ^testing.T) {
@@ -43,13 +43,42 @@ an_xml_document_is_written_as_it_stands :: proc(t: ^testing.T) {
 	src := "<?xml version=\"1.0\"?>\n<!DOCTYPE r [<!ENTITY e \"E\">]>\n<!--c0--><?p0 x?>\n<r a='1&amp;' xmlns:q=\"u\"><!--c1--><q:e b=\"&e;\"/><!--c2-->\n  <n>5 &e; <![CDATA[<]]></n><m>t1<!--m--><b/>  t2</m><c><!--y--></c></r><!--c4-->\n<?p1?>"
 	got, err := rewritten(src)
 	walktest.expect_nil(t, err)
-	testing.expect_value(t, got, "<!DOCTYPE r [<!ENTITY e \"E\">]>\n<!--c0-->\n<?p0 x?>\n<r a='1&amp;' xmlns:q=\"u\"><!--c1--><q:e b=\"&e;\"/><!--c2--><n>5 &e; <![CDATA[<]]></n><m>t1<!--m--><b/>  t2</m><c><!--y--></c></r>\n<!--c4-->\n<?p1?>")
+	testing.expect_value(t, got, "<?xml version=\"1.0\"?>\n<!DOCTYPE r [<!ENTITY e \"E\">]>\n<!--c0-->\n<?p0 x?>\n<r a='1&amp;' xmlns:q=\"u\"><!--c1--><q:e b=\"&e;\"/><!--c2--><n>5 &e; <![CDATA[<]]></n><m>t1<!--m--><b/>  t2</m><c><!--y--></c></r> <!--c4-->\n<?p1?>")
 	again, aerr := rewritten(got)
 	walktest.expect_nil(t, aerr)
 	testing.expect_value(t, again, got)
 	pretty, perr := rewritten("<r><a><b>1</b><b>2</b></a><m>x<b/></m></r>", core.PRETTY)
 	walktest.expect_nil(t, perr)
 	testing.expect_value(t, pretty, "<r>\n  <a>\n    <b>1</b>\n    <b>2</b>\n  </a>\n  <m>x<b/></m>\n</r>")
+	declared, derr := rewritten("<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"yes\"?><r/>", core.PRETTY)
+	walktest.expect_nil(t, derr)
+	testing.expect_value(t, declared, "<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<r/>")
+	// The declaration is layout, as a style is, so a format with no place for it drops none.
+	doc, berr := xml.build(transmute([]u8)string("<?xml version=\"1.0\"?><r>1</r>"), .Xml)
+	walktest.expect_nil(t, berr)
+	defer xml.destroy(&doc)
+	_, dropped, jerr := core.write(&doc, {}, json.as(.Json), allocator = context.temp_allocator)
+	walktest.expect_nil(t, jerr)
+	testing.expect_value(t, dropped, 0)
+	escaped, eerr := rewritten("<r><a>xé</a><b>ü</b></r>", {ascii = true})
+	walktest.expect_nil(t, eerr)
+	testing.expect_value(t, escaped, "<r><a>x&#xe9;</a><b>&#xfc;</b></r>")
+}
+
+// A foot comment after the last child element starts a line in a compact write, where on the element's line it would
+// read back as that element's inline comment.
+@(test)
+a_compact_foot_comment_after_an_element_stays_a_foot :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	got, err := rewritten("<r>\n<a>1</a>\n<!-- f -->\n</r>")
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, got, "<r><a>1</a>\n<!-- f --></r>")
+	inline, ierr := rewritten("<r><a>1</a> <!-- i -->\n<!-- f -->\n</r>")
+	walktest.expect_nil(t, ierr)
+	testing.expect_value(t, inline, "<r><a>1</a><!-- i -->\n<!-- f --></r>")
+	mixed, merr := rewritten("<r><a>1</a>t<!-- f --></r>")
+	walktest.expect_nil(t, merr)
+	testing.expect_value(t, mixed, "<r><a>1</a>t<!-- f --></r>")
 }
 
 // A JSON document is written with its members as elements, an array as repeated elements, `#text` as text, its text
@@ -61,14 +90,14 @@ a_json_document_is_written_as_elements :: proc(t: ^testing.T) {
 {"r": {"a": [1, true], "b": null, "#text": " ", "c": {"d": "<&>\r\"", "#text": "x"}, "é": "é"}}`)
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, dropped, 0)
-	testing.expect_value(t, got, "<!-- head-->\n<r><a>1</a><a>true</a><b/>&#x20;<c><d>&lt;&amp;&gt;&#xd;\"</d>x</c><é>é</é></r>")
+	testing.expect_value(t, got, "<!-- head -->\n\n<r><a>1</a><a>true</a><b/>&#x20;<c><d>&lt;&amp;&gt;&#xd;\"</d>x</c><é>é</é></r>")
 	ascii, _, aerr := from_json(`{"r": "é"}`, {ascii = true})
 	walktest.expect_nil(t, aerr)
 	testing.expect_value(t, ascii, "<r>&#xe9;</r>")
 	back, berr := rewritten(got)
 	walktest.expect_nil(t, berr)
 	testing.expect_value(t, back, got)
-	for refused in ([]string{`[1]`, `{"a": 1, "b": 2}`, `{"a": [1]}`, `{"r": {"a": [[1]]}}`, `{"r": {"a": []}}`, `{"r": {}}`, `{"r": ""}`, `{"r": {"#text": "x"}}`, `{"a:b": 1}`, `{"1a": 1}`, `{"r": "\u0001"}`}) {
+	for refused in ([]string{`[1]`, `{"a": 1, "b": 2}`, `{"a": [1]}`, `{"r": {"a": [[1]]}}`, `{"r": {"a": []}}`, `{"r": {"a": [/* z */]}}`, `{"r": {}}`, `{"r": ""}`, `{"r": {"#text": "x"}}`, `{"a:b": 1}`, `{"1a": 1}`, `{"r": "\u0001"}`}) {
 		_, _, rerr := from_json(refused)
 		e, typed_err := rerr.(core.Typed_Error)
 		testing.expectf(t, typed_err && (e.kind == .Unwritable || e.kind == .Unsupported), "%s: %v", refused, rerr)
@@ -76,6 +105,10 @@ a_json_document_is_written_as_elements :: proc(t: ^testing.T) {
 	_, cut, cerr := from_json("{\"r\": 1 /* a -- b */}")
 	walktest.expect_nil(t, cerr)
 	testing.expect_value(t, cut, 1)
+	run, run_dropped, run_err := from_json("{\"r\": {\"a\": /* l */ [1, 2] // t\n}}")
+	walktest.expect_nil(t, run_err)
+	testing.expect_value(t, run_dropped, 0)
+	testing.expect_value(t, run, "<r><!-- l --><a>1</a><a>2</a><!-- t -->\n</r>")
 }
 
 // The value of an XML document, a repeated name an array, is written as one element per item and an array of text runs
@@ -109,7 +142,7 @@ token_write_writes_elements :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	for pretty in ([]bool{false, true}) {
 		w: write.Tokens
-		testing.expect_value(t, xml.tokens_init(&w, .Xml, core.PRETTY if pretty else {}, context.temp_allocator), core.Typed_Error_Kind.None)
+		testing.expect_value(t, xml.tokens_init(&w, .Xml, write = core.PRETTY if pretty else {}, allocator = context.temp_allocator), core.Typed_Error_Kind.None)
 		write.open_object(&w)
 		write.key(&w, "r")
 		write.open_object(&w)
@@ -135,7 +168,7 @@ token_write_writes_elements :: proc(t: ^testing.T) {
 		calls: proc(w: ^write.Tokens),
 		kind:  core.Typed_Error_Kind,
 	} {
-		{proc(w: ^write.Tokens) {write.value_int(w, 1)}, .Unsupported},
+		{proc(w: ^write.Tokens) {write.value_int(w, 1)}, .Unwritable},
 		{proc(w: ^write.Tokens) {write.open_object(w); write.key(w, "r"); write.open_object(w); write.close(w); write.close(w)}, .Unwritable},
 		{proc(w: ^write.Tokens) {write.open_object(w); write.key(w, "r"); write.open_array(w); write.close(w); write.close(w)}, .Unwritable},
 		{proc(w: ^write.Tokens) {write.open_object(w); write.key(w, "1a"); write.value_int(w, 1); write.close(w)}, .Unwritable},

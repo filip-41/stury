@@ -107,10 +107,6 @@ record_hook :: proc "contextless" (r: ^Record_Read, s: core.Hook_Regs, t: core.T
 	return r.on(r.h, s, t)
 }
 
-// An iterator over the answers of `paths`, or of `one` when `paths` is nil, that `fill` reads.
-answers_of :: proc(src: []u8, handle: core.As, paths: []core.Path, one: core.Path, read: core.Path_Options, allocator: runtime.Allocator, fill: proc(it: ^engine.Answer_Iter)) -> engine.Answer_Iter {
-	return {src = src, as = handle, paths = paths, one = one, read = read, allocator = allocator, fill = fill, max_batch = engine.ANSWER_BATCH}
-}
 
 // The fill of an iterator over a text of spec `S`: the stream's walk with a cursor, which stops on the first record's
 // end once the buffer holds a batch, and ends the read as `scan_spec` does. The header's cells are the iterator's.

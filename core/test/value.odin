@@ -14,8 +14,11 @@ import "core:time"
 import core ".."
 import typed "../typed"
 import write "../write"
+import cbor "../../cbor"
 import json "../../json"
 import dsv "../../dsv"
+import toml "../../toml"
+import yaml "../../yaml"
 import walktest "../../walktest"
 
 // What each reader answers for one text, which a node of the text and its built value must both give.
@@ -128,7 +131,7 @@ typed_bridges_round_trip :: proc(t: ^testing.T) {
 	big, _ := core.member(v, "big")
 	_, is_double := n.(f64)
 	testing.expect(t, is_double)
-	testing.expect_value(t, big.(^core.Number_Text).text, "1152921504606846977")
+	testing.expect_value(t, core.view_text(big.(core.Number_View)), "1152921504606846977")
 	out: S
 	walktest.expect_nil(t, typed.unmarshal(v, &out, &plan))
 	testing.expect_value(t, out.n, 7)
@@ -196,7 +199,7 @@ built_numbers_keep_digits_and_equal_like_nodes :: proc(t: ^testing.T) {
 			nodes[i] = core.Node_Ref{&docs[i], core.ROOT}
 			built[i] = core.built_value(nodes[i].(core.Node_Ref))
 		}
-		_, kept := built[0].(^core.Number_Text)
+		_, kept := built[0].(core.Number_View)
 		testing.expectf(t, kept, "%s keeps its digits", pair[0])
 		testing.expectf(t, core.equal(nodes[0], nodes[1]) == core.equal(built[0], built[1]), "%s and %s", pair[0], pair[1])
 		testing.expectf(t, !core.equal(built[0], built[1]), "%s and %s are two numbers", pair[0], pair[1])
@@ -339,6 +342,31 @@ literals_are_equal_exactly_at_any_size :: proc(t: ^testing.T) {
 	inf := core.Value(max(f64) * 2)
 	testing.expect(t, core.compare(inf, core.number_text("1e400")) == 1 && core.compare(core.number_text("1e400"), inf) == -1)
 	testing.expect(t, core.equal(inf, inf) && !core.equal(inf, core.number_text("1e400")))
+}
+
+// A `Number_View` without its double reads, orders, hashes and writes as one that holds it, whatever its mark, and a
+// copy keeps its mark.
+@(test)
+views_read_as_their_text :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	for lit, i in ([]string{"1.000", "-0", "12345678901234567890", "1e400", "1.5e3", "7"}) {
+		view, text := core.Value(core.number_view(lit, u32(i))), core.Value(core.number_text(lit))
+		testing.expectf(t, core.kind(view) == .Number, "%s is a number", lit)
+		testing.expectf(t, core.equal(view, text) && core.compare(view, text) == 0 && core.hash(view) == core.hash(text), "%s", lit)
+		f, digits, ok := core.double_of(view)
+		testing.expectf(t, ok && digits == lit && transmute(u64)f == transmute(u64)core.text_f64(lit), "%s reads its double", lit)
+		vn, vok := core.number(view)
+		tn, tok := core.number(text)
+		testing.expectf(t, vok && tok && vn == tn, "%s reads its number", lit)
+		written, err := write.write_value(view, json.as(.Json))
+		walktest.expect_nil(t, err)
+		testing.expect_value(t, string(written), lit)
+		held, is_held := core.held_f64(text.(core.Number_View))
+		testing.expectf(t, is_held && transmute(u64)held == transmute(u64)f, "%s holds its double", lit)
+		testing.expectf(t, core.view_copy(view.(core.Number_View)).mark == u32(i), "%s keeps its mark", lit)
+	}
+	testing.expect(t, core.compare(core.number_view("10", 1), core.number_view("9", 1)) == 1)
 }
 
 // Numbers that are equal hash alike, over literals of random size respelled by moving the point, padding with zeros and
@@ -592,4 +620,78 @@ hex_integers_are_their_decimals :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, berr)
 	testing.expect(t, core.equal(at(&big, 0), at(&big, 2)) && core.hash(at(&big, 0)) == core.hash(at(&big, 2)))
 	testing.expect(t, !core.equal(at(&big, 0), at(&big, 1)))
+}
+
+// A decimal a format spells with a sign, a point of its own or underscores, and a hex, octal or binary integer with
+// underscores, equals and hashes as the JSON number it spells, and a write of it in another format writes that number.
+@(test)
+spelled_numbers_are_the_numbers_they_spell :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	Spelled :: struct {
+		as:        core.As,
+		src, json: string,
+	}
+	texts := []Spelled {
+		{toml.as(.Toml_1_1), "a = [1_000, 0xdead_beef, 0o1_7, 0b1_1, +1.5, -0, 1_0.5e1_0, +1]\n", "[1000, 3735928559, 15, 3, 1.5, 0, 10.5e10, 1]"},
+		{json.as(.Json5), "{a: [+1, .5, 5., +.5e1, -.5]}", "[1, 0.5, 5.0, 0.5e1, -0.5]"},
+	}
+	for x in texts {
+		doc, err := core.build(transmute([]u8)x.src, x.as)
+		walktest.expect_nil(t, err)
+		want, jerr := core.build(transmute([]u8)x.json, json.as(.Json))
+		walktest.expect_nil(t, jerr)
+		list, _ := core.value_member(core.Node_Ref{&doc, core.ROOT}, "a")
+		spelled, plain := core.value_children(list), core.value_children(core.Node_Ref{&want, core.ROOT})
+		for a in core.value_child_next(&spelled) {
+			b, _ := core.value_child_next(&plain)
+			testing.expectf(t, core.equal(a, b) && core.hash(a) == core.hash(b), "%s: %v against %v", x.src, a, b)
+			text, werr := write.write_value(a, yaml.as(.Yaml_1_2))
+			walktest.expect_nil(t, werr)
+			written, _ := write.write_value(b, yaml.as(.Yaml_1_2))
+			testing.expect_value(t, string(text), string(written))
+		}
+	}
+}
+
+// A float that reads back as an integer, or an integer as a float, is another value in a format that tells them apart,
+// and the same value in JSON. A double, a number with no spelling, reads back as either.
+@(test)
+a_number_reads_back_as_its_type :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	Read :: struct {
+		as:             core.As,
+		src, int_, flt: string,
+	}
+	reads := []Read {
+		{toml.as(.Toml_1_1), "a = 2\n", "a = 1\n", "a = 1.0\n"},
+		{yaml.as(.Yaml_1_2), "a: 2\n", "a: 1\n", "a: 1e0\n"},
+		{cbor.as(.Cbor), "\xa1\x61a\x02", "\xa1\x61a\x01", "\xa1\x61a\xfb\x3f\xf0\x00\x00\x00\x00\x00\x00"},
+		{json.as(.Json), "{\"a\": 2}", "{\"a\": 1}", "{\"a\": 1e0}"},
+	}
+	for r in reads {
+		doc, err := core.build(transmute([]u8)r.src, r.as)
+		walktest.expect_nil(t, err)
+		a, _ := core.value_member(core.Node_Ref{&doc, core.ROOT}, "a")
+		apart := r.as.readers.floats_apart
+		Want :: struct {
+			v:     core.Value,
+			float: Maybe(bool),
+		}
+		for want in ([]Want{{core.number_text("1.0"), true}, {core.number_text("1"), false}, {f64(1), nil}}) {
+			for got_src, i in ([]string{r.int_, r.flt}) {
+				got, gerr := core.build(transmute([]u8)got_src, r.as)
+				walktest.expect_nil(t, gerr)
+				list := core.edit_list_init(&doc)
+				walktest.expect_nil(t, core.set_value(&list, a.(core.Node_Ref).node, want.v))
+				reads, known := core.reads_as_edited(&list, core.Node_Ref{&got, core.ROOT})
+				g, _ := core.value_member(core.Node_Ref{&got, core.ROOT}, "a")
+				float, typed := want.float.?
+				wants := !apart || !typed || float == (i == 1)
+				testing.expectf(t, known && reads == wants, "%q: %v reads back from %q as %v", r.src, want.v, got_src, reads)
+				testing.expectf(t, core.reads_back_as(want.v, g) == wants, "%q: %v reads back as %q", r.src, want.v, got_src)
+			}
+		}
+	}
 }

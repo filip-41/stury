@@ -8,7 +8,8 @@ package xml
 // The root of a document read as XML is written from its spans: attributes, namespace declarations and text as
 // written, and the doctype, comments and processing instructions where they stood. Every reference then keeps the
 // declaration it names. Any other node or document is escaped. Its comments are written before, after or at the end of
-// the value that holds them, and its other facts are dropped and counted.
+// the value that holds them, a doctype that names only the root element is written, and its other facts are dropped
+// and counted.
 //
 // What XML cannot spell so that it reads back is `.Unwritable`: a key that is no XML name or that has a colon, a nested
 // or empty array, an empty string or object, an object of only text, and a character XML 1.0 does not allow. A text
@@ -19,6 +20,7 @@ package xml
 import "base:runtime"
 import "core:io"
 import "core:slice"
+import "core:strings"
 import "core:unicode/utf8"
 import core "../core"
 import write "../core/write"
@@ -32,6 +34,7 @@ Writer :: struct {
 	kept:  int, // the facts written
 	facts: []core.Fact, // with `own`, the comments, instructions and doctype by their place in the source
 	next:  int, // the first of `facts` not yet written
+	ended: int, // the output's length after the line end that last ended an inline comment
 	buf:   [512]u8,
 }
 
@@ -41,24 +44,23 @@ Apart :: enum u8 {
 	None,
 	Indent, // each on a line of its own, at the depth's indent
 	After, // each followed by a line end
+	Foot, // on the line of the element before them, the first not inline one after a line end
 	Before, // each after a line end
 }
 
-// Writes node `node` of `doc` as XML, as `core.write` does with `as(spec)`, and returns the facts it dropped. A document
-// of another format is written too.
-write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
-	if int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
-		return nil, 0, core.error_of(core.Typed_Refusal{kind = .Unsupported})
-	}
-	out, cut, refusal := document_write(doc, opts, bound_as(spec), node, {}, allocator)
-	return out, cut, core.error_of(refusal)
+// Writes node `node` of `doc` as XML, as `core.write` does with `as(spec)`. A document of another format is written too.
+write :: proc(doc: ^core.Document, $S: Spec, write := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
+	return core.write(doc, write, as(S), node, allocator)
 }
 
 // The handle's `write`. The root of an XML document is written from its spans, any other node by the element write.
 @(private)
-document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Refusal) {
-	if doc.partial || core.kind(doc, node) != .Object {
+document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
+	if doc.partial {
 		return nil, 0, {kind = .Unsupported}
+	}
+	if core.kind(doc, node) != .Object {
+		return nil, 0, {kind = .Unwritable, detail = {want = {text = "an XML document is one element, so its root is an object"}}}
 	}
 	spill: [write.ROOM_MAX]u8 = ---
 	w := Writer{doc = doc, opts = opts, own = doc.readers.format == rules_of && node == core.ROOT}
@@ -74,7 +76,7 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 	if err.kind != .None {
 		return nil, 0, err
 	}
-	return text, len(core.subtree_facts(doc, node)) - w.kept, err
+	return text, w.kept, err
 }
 
 @(private)
@@ -99,7 +101,20 @@ put_own :: proc(w: ^Writer) -> core.Typed_Error_Kind {
 	w.facts = facts[:]
 	it := core.pairs(w.doc, core.ROOT)
 	key, value, _ := core.pair_next(&it)
-	flush(w, w.doc.nodes[key].lo, 0, .After) or_return
+	at := w.doc.nodes[key].lo
+	lead := at
+	for f in w.facts {
+		if f.lo < at && f.node != core.ROOT {
+			lead = f.lo
+			break
+		}
+	}
+	flush(w, lead, 0, .After) or_return
+	// A blank line ends the text's head comment, so the comments of the root element stay its own.
+	if w.next > 0 && w.facts[w.next - 1].role == .Comment {
+		write.put_byte(&w.out, '\n')
+	}
+	flush(w, at, 0, .After) or_return
 	put_element(w, key, value, 0, false) or_return
 	return flush(w, u64(len(w.doc.src)), 0, .Before)
 }
@@ -130,8 +145,8 @@ put_element :: proc(w: ^Writer, key, value: core.Node_Index, depth: int, laid: b
 	#partial switch core.kind(w.doc, value) {
 	case .Object:
 		write.put_byte(&w.out, '>')
-		inner := put_children(w, value, depth) or_return
-		flush(w, t.lo + u64(len(span)) - 1, depth + 1, .Indent if inner else .None) or_return
+		inner, last_element := put_children(w, value, depth) or_return
+		flush(w, t.lo + u64(len(span)) - 1, depth + 1, .Indent if inner else .Foot if last_element else .None) or_return
 		indent(w, inner, depth)
 	case .Null:
 		if t.kind != .Plain || len(span) == 0 {
@@ -148,9 +163,9 @@ put_element :: proc(w: ^Writer, key, value: core.Node_Index, depth: int, laid: b
 }
 
 // Writes the members of an element in order. Returns whether they stand on lines of their own, which only the members
-// of an element with no text do.
+// of an element with no text do, and whether the last one is an element.
 @(private)
-put_children :: proc(w: ^Writer, value: core.Node_Index, depth: int) -> (laid: bool, kind: core.Typed_Error_Kind) {
+put_children :: proc(w: ^Writer, value: core.Node_Index, depth: int) -> (laid, last_element: bool, kind: core.Typed_Error_Kind) {
 	laid = w.opts.pretty
 	it := core.pairs(w.doc, value)
 	for key in core.pair_next(&it) {
@@ -158,7 +173,8 @@ put_children :: proc(w: ^Writer, value: core.Node_Index, depth: int) -> (laid: b
 	}
 	it = core.pairs(w.doc, value)
 	for key, child in core.pair_next(&it) {
-		if is_text(w, key) {
+		last_element = !is_text(w, key)
+		if !last_element {
 			flush(w, w.doc.nodes[child].lo, depth + 1, .None) or_return
 			put_own_text(w, child, true) or_return
 		} else if core.kind(w.doc, child) != .Array {
@@ -170,27 +186,38 @@ put_children :: proc(w: ^Writer, value: core.Node_Index, depth: int) -> (laid: b
 			}
 		}
 	}
-	return laid, .None
+	return laid, last_element, .None
 }
 
 // Writes an element's text as it stands in the source, or escaped when the reader decoded it.
 @(private)
 put_own_text :: proc(w: ^Writer, node: core.Node_Index, among: bool) -> core.Typed_Error_Kind {
-	if w.doc.nodes[node].kind == .Plain {
+	if w.doc.nodes[node].kind == .Plain && write.copies_raw(w.opts) {
 		put_raw(w, core.span(w.doc, node))
 		return .None
 	}
 	return put_text(&w.out, write.scalar_text(w.doc, node, w.buf[:]) or_return, among, w.opts.ascii)
 }
 
+// Writes the document of another format: its doctype, when it names only a root element, its head comments and a blank
+// line that ends them, the root, then its foot comments.
 @(private)
 put_document :: proc(w: ^Writer, e: ^Elements, node: core.Node_Index) -> core.Typed_Error_Kind {
 	facts := core.all_facts(w.doc, node)
+	for f in facts {
+		if f.role == .Doctype {
+			put_doctype(w, f)
+		}
+	}
+	before := w.kept
 	for f in facts {
 		if is_head(f.role) {
 			put_fact(w, f) or_return
 			write.put_byte(&w.out, '\n')
 		}
+	}
+	if w.kept > before {
+		write.put_byte(&w.out, '\n')
 	}
 	put_value(w, e, core.Node_Ref{w.doc, node}) or_return
 	for f in facts {
@@ -202,27 +229,69 @@ put_document :: proc(w: ^Writer, e: ^Elements, node: core.Node_Index) -> core.Ty
 	return .None
 }
 
-// Writes `value` through the element write. A node of another document brings the comments before it, its attributes and
-// the comments after it. The comments of the document's object belong to `put_document`, and an array's are dropped.
+// Writes `value` through the element write, with the facts `lead` before its own and `tail` after them. A node of
+// another document brings the comments before it, its attributes and the comments after it. A value an update put in
+// place of an element brings the attributes and comments it reads, and a comment role written on a value stands for its
+// node's. The comments of the document's object belong to
+// `put_document`, and an array's go to its items, where they read back: the lead ones to the first and the rest to the
+// last.
 @(private)
-put_value :: proc(w: ^Writer, e: ^Elements, value: core.Value) -> core.Typed_Error_Kind {
+put_value :: proc(w: ^Writer, e: ^Elements, value: core.Value, lead: []core.Fact = nil, tail: []core.Fact = nil) -> core.Typed_Error_Kind {
 	v := core.plain(value)
 	kind := core.value_kind(v)
 	facts: []core.Fact
-	if r, is_node := v.(core.Node_Ref); is_node && e.top > 0 && kind != .Array {
+	if r, is_node := v.(core.Node_Ref); is_node && e.top > 0 {
 		w.doc, facts = r.doc, core.all_facts(r.doc, r.node)
 	}
+	if len(lead) + len(tail) > 0 {
+		facts = slice.concatenate([][]core.Fact{lead, facts, tail}, context.temp_allocator)
+	}
+	run_lead, run_tail: [dynamic]core.Fact
+	if kind == .Array {
+		run_lead.allocator, run_tail.allocator = context.temp_allocator, context.temp_allocator
+		for f in facts {
+			append(&run_lead if is_head(f.role) else &run_tail, f)
+		}
+		facts = nil
+	}
 	doc := w.doc
+	brought: [core.Role][]string
+	rebuilt: bit_set[core.Role]
+	if kind != .Array {
+		context.allocator = context.temp_allocator
+		for role in core.COMMENT_ROLES {
+			if bodies, is_rebuilt := core.rebuilt_comments(value, role); is_rebuilt {
+				brought[role] = bodies
+				rebuilt += {role}
+			}
+		}
+	}
 	for f in facts {
-		if is_head(f.role) {
+		if is_head(f.role) && f.role not_in rebuilt {
 			put_fact(w, f) or_return
 			if e.top == 1 {
 				write.put_byte(&w.out, '\n')
 			}
 		}
 	}
+	for body in brought[.Comment] {
+		_ = put_comment(w, body, true) or_return
+		if e.top == 1 {
+			write.put_byte(&w.out, '\n')
+		}
+	}
+	if kind != .Array {
+		context.allocator = context.temp_allocator
+		written, is_rebuilt := core.rebuilt_attributes(value)
+		rebuilt += {.Attribute} if is_rebuilt else {}
+		if written != nil {
+			for name, i in written.keys {
+				el_attribute(e, name, written.vals[i].(string) or_else "") or_return
+			}
+		}
+	}
 	for f in facts {
-		if f.role == .Attribute {
+		if f.role == .Attribute && .Attribute not_in rebuilt {
 			w.kept += 1
 			name_token, value_token := w.doc.readers.attribute(w.doc, f)
 			name, named := core.token_text(w.doc.readers, &w.doc.view, name_token, context.temp_allocator)
@@ -233,34 +302,52 @@ put_value :: proc(w: ^Writer, e: ^Elements, value: core.Value) -> core.Typed_Err
 			el_attribute(e, name, text) or_return
 		}
 	}
+	foot := kind == .Object || len(brought[.Comment_Foot]) > 0
+	for f in facts {
+		foot ||= f.role == .Comment_Foot && .Comment_Foot not_in rebuilt
+	}
 	#partial switch kind {
 	case .Object:
 		el_open(e, true) or_return
 		put_members(w, e, v) or_return
-		w.doc = doc
-		for f in facts {
-			if f.role == .Comment_Foot {
-				put_fact(w, f) or_return
-			}
-		}
-		el_close(e) or_return
 	case .Array:
 		el_open(e, false) or_return
+		n := core.value_length(v)
 		items := core.value_children(v)
-		for item in core.value_child_next(&items) {
-			put_value(w, e, item) or_return
+		for i := 0; ; i += 1 {
+			item := core.value_child_next(&items) or_break
+			put_value(w, e, item, run_lead[:] if i == 0 else nil, run_tail[:] if i == n - 1 else nil) or_return
 		}
 		el_close(e) or_return
 	case .Null:
-		el_value(e, "", true) or_return
+		el_value(e, "", true, foot) or_return
 	case:
-		el_value(e, write.value_scalar_text(v, w.buf[:], write.MARKUP_TREE) or_return) or_return
+		el_value(e, write.value_scalar_text(v, w.buf[:], write.MARKUP_TREE) or_return, false, foot) or_return
 	}
 	w.doc = doc
-	for f in facts {
-		if f.role == .Comment_Inline {
-			put_fact(w, f) or_return
+	if foot {
+		for f in facts {
+			if f.role == .Comment_Foot && .Comment_Foot not_in rebuilt {
+				put_foot(w, kind)
+				put_fact(w, f) or_return
+			}
 		}
+		for body in brought[.Comment_Foot] {
+			put_foot(w, kind)
+			_ = put_comment(w, body, true) or_return
+		}
+		el_close(e) or_return
+	}
+	// A comment is inline only while a line end follows it on the element's line.
+	for f in facts {
+		if f.role == .Comment_Inline && .Comment_Inline not_in rebuilt {
+			put_fact(w, f) or_return
+			end_inline(w)
+		}
+	}
+	for body in brought[.Comment_Inline] {
+		_ = put_comment(w, body, true) or_return
+		end_inline(w)
 	}
 	return w.out.err
 }
@@ -284,15 +371,41 @@ put_members :: proc(w: ^Writer, e: ^Elements, v: core.Value) -> core.Typed_Error
 	return .None
 }
 
+@(private)
+end_inline :: #force_inline proc(w: ^Writer) {
+	write.put_byte(&w.out, '\n')
+	w.ended = w.out.cursor + w.out.flushed
+}
+
+// Starts a foot comment of an element of `kind`. A comment on the line of the last child element would be that
+// element's, unless an inline comment's line end stands between them.
+@(private)
+put_foot :: #force_inline proc(w: ^Writer, kind: core.Kind) {
+	if kind == .Object && w.out.cursor + w.out.flushed != w.ended {
+		write.put_byte(&w.out, '\n')
+	}
+}
+
 // Writes the facts of an XML document that were not written yet and stand before byte `upto`, set apart by `apart`.
 @(private)
 flush :: proc(w: ^Writer, upto: u64, depth: int, apart: Apart) -> core.Typed_Error_Kind {
+	footed := false
 	for ; w.next < len(w.facts) && w.facts[w.next].lo < upto; w.next += 1 {
-		#partial switch apart {
-		case .Indent:
-			write.put_line(&w.out, w.opts, depth)
-		case .Before:
+		inline := w.facts[w.next].role == .Comment_Inline
+		if apart == .Foot && !inline && !footed {
 			write.put_byte(&w.out, '\n')
+			footed = true
+		}
+		#partial switch apart {
+		case .Indent, .Before:
+			if inline {
+				// An inline comment stays on the line of the element before it.
+				write.put_byte(&w.out, ' ')
+			} else if apart == .Indent {
+				write.put_line(&w.out, w.opts, depth)
+			} else {
+				write.put_byte(&w.out, '\n')
+			}
 		}
 		put_fact(w, w.facts[w.next]) or_return
 		if apart == .After {
@@ -395,33 +508,59 @@ put_reference :: proc(out: ^write.Out, r: rune) {
 	write.put_byte(out, ';')
 }
 
-// Writes a comment, an instruction or the doctype. An XML document's own is written as it stands. Another document's
-// comment is written as an XML comment, unless its body holds `--` or ends in `-`, which no XML comment can. Then it is
-// dropped, as is another document's instruction.
+// Writes a comment, an instruction, the doctype or the declaration. An XML document's own is written as it stands.
+// Another document's comment is written as an XML comment, unless its body holds `--` or ends in `-` with no space after
+// it, which no XML comment can. Then it is dropped, as is another document's instruction.
 @(private)
 put_fact :: proc(w: ^Writer, f: core.Fact) -> core.Typed_Error_Kind {
 	if w.own {
-		w.kept += 1
+		w.kept += int(f.role != .Directive)
 		write.put_text(&w.out, string(w.doc.src[f.lo:][:f.n]))
 		return .None
 	}
 	if f.role == .Instruction {
 		return .None
 	}
-	body := string(w.doc.src[f.lo:][:f.n])
+	body, padded := string(w.doc.src[f.lo:][:f.n]), false
 	if f.kind == .Plain {
-		body = body[core.comment_lead(f.spelling):u64(f.n) - core.comment_tail(f.spelling)]
+		body, padded = core.comment_text(w.doc, f)
 	}
+	written := put_comment(w, body, padded) or_return
+	w.kept += int(written)
+	return .None
+}
+
+// Writes comment `body`, set apart from its markers by a space when `padded`, unless it holds `--` or, unpadded, ends in
+// `-`, which no XML comment can.
+@(private)
+put_comment :: proc(w: ^Writer, body: string, padded: bool) -> (written: bool, kind: core.Typed_Error_Kind) {
 	for i in 0 ..< len(body) {
-		if body[i] == '-' && (i + 1 == len(body) || body[i + 1] == '-') {
-			return .None
+		if body[i] == '-' && (i + 1 == len(body) && !padded || i + 1 < len(body) && body[i + 1] == '-') {
+			return false, .None
 		}
 	}
-	write.put_text(&w.out, "<!--")
+	write.put_text(&w.out, "<!-- " if padded else "<!--")
 	put_escaped_comment(w, body) or_return
-	write.put_text(&w.out, "-->")
+	write.put_text(&w.out, " -->" if padded else "-->")
+	return true, .None
+}
+
+// Writes the doctype `f` of another format's document as `<!DOCTYPE name>` when it names an XML name and no more, as
+// HTML's does. One with an external identifier, which HTML spells otherwise than XML, is dropped.
+@(private)
+put_doctype :: proc(w: ^Writer, f: core.Fact) {
+	span := string(w.doc.src[f.lo:][:f.n])
+	if len(span) < len("<!DOCTYPE>") || !strings.equal_fold(span[:len("<!DOCTYPE")], "<!DOCTYPE") || span[len(span) - 1] != '>' {
+		return
+	}
+	name := strings.trim_space(span[len("<!DOCTYPE"):len(span) - 1])
+	if !is_name(transmute([]u8)name) {
+		return
+	}
+	write.put_text(&w.out, "<!DOCTYPE ")
+	write.put_text(&w.out, name)
+	write.put_text(&w.out, ">\n")
 	w.kept += 1
-	return .None
 }
 
 // Writes a comment's body. XML reads it with no references, so a byte XML 1.0 does not allow is `.Unwritable`.

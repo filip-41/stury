@@ -14,11 +14,16 @@ import engine "../core/build"
 // startup and never written after.
 HANDLE := core.with_services(READERS, &SERVICES)
 
+// The reasons the writer gives a refusal that names none.
+@(private)
+WRITE_WORDS :: core.Write_Words{"CBOR has no item for the value, or two of its keys write alike", "CBOR writes a whole document"}
+
 SERVICES := core.Services {
 	build    = build_item,
 	validate = validate_handle,
 	scan     = scan_item,
 	write    = document_write,
+	words    = WRITE_WORDS,
 	edit     = &EDIT,
 	plans    = rawptr(plan_as),
 	reads    = &CHECKS,
@@ -158,10 +163,6 @@ scan_item :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Pat
 	return
 }
 
-// An iterator over the answers of `paths`, or of `one` when `paths` is nil, in an item read with handle `handle`.
-answers_of :: proc(src: []u8, handle: core.As, paths: []core.Path, one: core.Path, read: core.Path_Options, allocator: runtime.Allocator) -> engine.Answer_Iter {
-	return {src = src, as = handle, paths = paths, one = one, read = read, allocator = allocator, fill = answers_fill, max_batch = engine.ANSWER_BATCH}
-}
 
 // The fill of an iterator: the stream's walk with a cursor in the iterator's `cursor`, which stops once the buffer
 // holds a batch. It judges what the walk leaves and ends the read as `scan_item` does.

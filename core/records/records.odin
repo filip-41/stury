@@ -73,6 +73,9 @@ Reader :: struct {
 	// The window's moves and the times `pos` came back to a record the window could not tell, so a format that keeps
 	// a frame between calls sees it is stale.
 	moves:     u64,
+	// The bytes at the window's start a move keeps, which a format's `.Entries` sets for what its records' nodes span
+	// before the container, as XML's DTD. A move leaves the offsets below it as they are.
+	pin:       u64,
 	// What `scan` keeps, allocated at its first call.
 	scan:      ^Scanned,
 	// The temp allocator of the format's `read`, emptied by the next, so what one record's read binds or decodes for
@@ -138,9 +141,22 @@ Framing_Services :: struct {
 	whole:  proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64),
 	// Frees `it.format`, nil for a format that keeps none.
 	close:  proc(it: ^Reader),
+	// The build of a whole text, for a format whose `.Entries` are `entries_next` over its tree, nil for another.
+	tree:   proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),
+	// The format's `Token_View.state` of the document of the `count` nodes of `doc` from `v`, numbered from `v`, for a
+	// format whose state names nodes. nil copies the state as it is.
+	tree_state: proc(doc: ^core.Document, v, count: core.Node_Index, allocator: runtime.Allocator) -> ([]u8, runtime.Allocator_Error),
+	// For a format whose `.Entries` are `entries_walked`: `op` on the walk of `it.src` from `it.pos` through
+	// `entry_hook` with `w` its hook state, whose cursor is in `w.cursor`.
+	entry_step: proc(it: ^Reader, w: ^Entry_Walk, op: Entry_Op) -> (u64, Maybe(core.Fault)),
+	// The document of a record `entries_walked` gave, for a format whose member's bytes alone may read otherwise.
+	entry_build: proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),
 	// The byte that ends a record under each framing where a backward scan for it finds the end of a whole record, and 0
 	// where only a walk of the records does.
 	ends:   [core.Framing]u8,
+	// Under each framing where `ends` is 0: whether a record a stream's window ends with is whole, as no later byte
+	// continues it.
+	closed: [core.Framing]bool,
 	// The byte past the first separator in `it.src[lo:hi]` that ends a record and starts the next, as if the text before
 	// it were well-formed, for a format whose cuts no `exact` scan finds. A separator's verdict depends on the text alone,
 	// not on `lo` or `hi`, and the call only reads `it`, from any thread. nil for a format with `exact`.
@@ -173,9 +189,13 @@ Record_Docs :: struct {
 	framing:    proc "contextless" () -> ^Framing_Services,
 	// Builds a record's document.
 	build:  proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),
-	// `next`, and the record's nodes written to `b` by the walk that frames it, with the offsets of `it.src`. nil for a
-	// format whose whole text `build` reads on one thread.
+	// `next`, and the record's nodes written to `b` by the walk that frames it, with the offsets of `it.src`, each entry
+	// a root. A record may span several entries, as a table's rows read in one walk are. nil for a format whose whole
+	// text `build` reads on one thread.
 	build_next: proc(it: ^Reader, b: ^engine.Builder, regs: ^core.Hook_Regs) -> (Record, bool),
+	// Completes `doc`, joined from the pieces `build_next` built and `frame`, the build of the text with them cut out,
+	// as a build of the whole text gives it, or returns false. nil for a format whose join needs nothing more.
+	joined: proc(doc, frame: ^core.Document) -> bool,
 	// `next` and a check by `plan` of each record to the end of the reader's records, by the walk that frames it, with
 	// every offset from the input's first byte, calling `visit` after each with the record and the first failure the check
 	// found, whose kind is `.None` for none. `visit` returns false to end the run. A sink in `read` counts the records in its
@@ -315,6 +335,8 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 	reads := it.docs.read if it.docs != nil else nil
 	if plan != nil && plan.model_plan == .Load {
 		reads = (^Record_Docs)(typed.plan_docs(plan)()).check_read if typed.plan_docs(plan) != nil else nil
+	} else if reads == nil && it.services != nil && by_tree(it.services, it.framing) {
+		reads = read_member
 	}
 	if reads == nil {
 		it.fault = core.Fault{kind = .Bad_Option}
@@ -387,6 +409,33 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 	return
 }
 
+// The typed read of the next member under `.Entries` in a format whose records have none of their own: the member's
+// document, read by the plan's `node_read`, or as `typed.read_built_text` reads a text's.
+@(private)
+read_member :: proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
+	if read.dups == .Refuse {
+		err^ = {kind = .Bad_Option}
+		return false
+	}
+	rec := it.services.next[it.framing](it) or_return
+	rec.at += it.base
+	doc, built := record_document(it, rec, context.allocator)
+	defer core.destroy(&doc)
+	switch {
+	case built.kind == .No_Memory:
+		err^ = {kind = .No_Memory}
+	case built.kind != .None:
+		err^ = {kind = .Walk, at = built.at, inner = built.inner}
+	case doc.clash != 0 && read.dups != .First && read.dups != .All:
+		err^ = {kind = .Duplicate_Key, at = doc.clash}
+	case plan.node_read != nil:
+		err^ = plan.node_read(&doc, core.ROOT, T, target, plan, read, allocator)
+	case:
+		err^ = typed.read_nodes(&doc, core.ROOT, T, target, plan, read, allocator)
+	}
+	return true
+}
+
 // Replaces the reader's plan with one of `T`.
 @(private)
 reader_plan :: proc(it: ^Reader, T: typeid) -> core.Error {
@@ -452,7 +501,7 @@ scan :: proc(it: ^Reader, path: core.Path, read := core.Path_Options{}) -> (rec:
 		}
 	}
 	s := it.scan
-	if it.docs != nil && it.docs.scan != nil && it.input.procedure == nil {
+	if it.docs != nil && it.docs.scan != nil && it.input.procedure == nil && (it.services == nil || !by_tree(it.services, it.framing)) {
 		walked, refusal, ok := it.docs.scan(it, &s.h, &s.last, path, read)
 		// A record that fails before its walk leaves `last` and its buffers for the next.
 		return walked, s.last if refusal.kind == .None else {}, core.error_of(refusal), ok
@@ -474,12 +523,25 @@ scan :: proc(it: ^Reader, path: core.Path, read := core.Path_Options{}) -> (rec:
 // an error from the input's first byte. The nodes' offsets index the document's `src`, which is JSON's record text and
 // dsv's input. A streamed record's document lives until the next call on `it`.
 @(private)
-build_record :: proc(it: ^Reader, rec: Record, allocator := context.allocator) -> (core.Document, core.Error) {
-	if it.docs == nil || it.docs.build == nil {
-		return {}, core.error_of(core.Document_Error{kind = .Bad_Index})
+build_record :: proc(it: ^Reader, rec: Record, allocator := context.allocator) -> (doc: core.Document, err: core.Error) {
+	built: core.Document_Error
+	doc, built = record_document(it, rec, allocator)
+	return doc, core.error_of(built)
+}
+
+@(private)
+record_document :: #force_inline proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (doc: core.Document, err: core.Document_Error) {
+	switch {
+	case over_tree(it):
+		doc, err = entries_build(it, rec, allocator)
+	case it.framing == .Entries && it.services != nil && it.services.entry_build != nil:
+		doc, err = it.services.entry_build(it, rec, allocator)
+	case it.docs == nil || it.docs.build == nil:
+		err = {kind = .Bad_Index}
+	case:
+		doc, err = it.docs.build(it, rec, allocator)
 	}
-	doc, err := it.docs.build(it, rec, allocator)
-	return doc, core.error_of(err)
+	return
 }
 
 // Returns the index of the first column `name` names, or -1 when none does or the format has no named columns. It may
@@ -611,7 +673,7 @@ settle_window :: proc(it: ^Reader, ok: bool, pos: u64, state: [8]u8) -> bool {
 			}
 			return true
 		}
-	} else if it.last || ok && (!walked || it.pos < n) {
+	} else if it.last || ok && (!walked || it.pos < n || it.services.closed[it.framing]) {
 		return true
 	}
 	// A window cut at an end byte has no record left to look for.
@@ -628,6 +690,8 @@ settle_window :: proc(it: ^Reader, ok: bool, pos: u64, state: [8]u8) -> bool {
 @(private)
 window_move :: proc(it: ^Reader, hold_cut := true) -> bool {
 	at := it.base + it.pos
+	// The pinned bytes kept at the buffer's start, and the position past them.
+	front, front_pos := 0, u64(0)
 	if it.buf == nil {
 		buf, failed := make([]u8, min(CHUNK, it.max_bytes) + 1, it.allocator)
 		if failed != nil {
@@ -637,7 +701,16 @@ window_move :: proc(it: ^Reader, hold_cut := true) -> bool {
 		it.buf, buf[0], it.filled = buf, '\n', 1
 	} else {
 		lo := int(uintptr(raw_data(it.src)) - uintptr(raw_data(it.buf)))
-		it.filled = copy(it.buf, it.buf[lo + int(it.pos) - 1:it.filled])
+		from := lo + int(it.pos) - 1
+		if front = int(it.pin); front > 0 {
+			// The pinned bytes stay at the window's start, and the bytes from the one before `pos` follow them.
+			gap := max(from - lo - front, 0)
+			copy(it.buf, it.buf[lo:lo + front])
+			it.filled = front + copy(it.buf[front:], it.buf[lo + front + gap:it.filled])
+			front_pos = it.pos - u64(gap)
+		} else {
+			it.filled = copy(it.buf, it.buf[from:it.filled])
+		}
 	}
 	it.src, it.last = nil, false
 	if it.eof && it.filled == 1 {
@@ -648,7 +721,7 @@ window_move :: proc(it: ^Reader, hold_cut := true) -> bool {
 		gained := fill(it) or_return
 		if !it.eof && gained == 0 {
 			if it.cause != nil {
-				it.held, it.held_at, it.eof = it.buf[1:it.filled], at, true
+				it.held, it.held_at, it.eof = it.buf[int(front_pos) if front > 0 else 1:it.filled], at, true
 			} else {
 				it.fault = core.Fault{at = at, rules = &RULES, kind = .Too_Wide, detail = u8(Detail.Too_Long)}
 			}
@@ -662,10 +735,15 @@ window_move :: proc(it: ^Reader, hold_cut := true) -> bool {
 				continue
 			}
 		}
-		// The input's first window has no byte before it.
-		lo := 1 if at == 0 else 0
-		it.src, it.base = it.buf[lo:cut], at - 1 + u64(lo)
-		it.pos = core.text_start(it.src, 0) if lo == 1 else 1
+		if front > 0 {
+			it.src, it.pos = it.buf[:cut], front_pos
+			it.base = at - it.pos
+		} else {
+			// The input's first window has no byte before it.
+			lo := 1 if at == 0 else 0
+			it.src, it.base = it.buf[lo:cut], at - 1 + u64(lo)
+			it.pos = core.text_start(it.src, 0) if lo == 1 else 1
+		}
 		it.last = it.eof && cut == it.filled
 		if it.last && stop != 0 && hold_cut {
 			// The input's last record has no end byte, so it is held unless its judgement says it is whole.

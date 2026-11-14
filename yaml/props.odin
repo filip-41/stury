@@ -152,7 +152,7 @@ read_tag :: proc "contextless" (p: ^Parser, flow: bool) -> bool {
 @(private)
 handle_declared :: proc "contextless" (p: ^Parser, lo, hi: u64) -> bool {
 	for h in p.handles {
-		if string(p.src[h.lo:h.hi]) == string(p.src[lo:hi]) {
+		if h.handle == string(p.src[lo:hi]) {
 			return true
 		}
 	}

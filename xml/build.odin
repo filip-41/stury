@@ -8,8 +8,8 @@ import engine "../core/build"
 // member, the root element, and `.Refuse` fails at a name an element repeats among its children. The document borrows
 // `src`, which must outlive it, and `core.destroy` frees the document. It links the walk alone, and `core.build` with
 // `as(spec, opts)` links every pass.
-build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
-	doc, err := build_spec(src, spec, bound_as(spec, opts), dups == .Refuse, allocator)
+build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
+	doc, err := build_spec(src, S, bound_as(S, opts), dups == .Refuse, allocator)
 	return doc, core.error_of(err)
 }
 
@@ -79,7 +79,7 @@ build_spec :: proc(src: []u8, spec: Spec, handle: core.As, refuse_duplicates: bo
 	}
 	regs := engine.BUILDER_REGS
 	state: []u8
-	b.root_close, fault, state = walk_keeping(src, opts, &b, &regs, engine.builder_hook)
+	b.root_close, fault, state = walk_keeping(src, 0, opts, &b, &regs, engine.builder_hook)
 	doc, err := engine.builder_end(&b, regs, fault)
 	if !keep_state(&doc, state, err.kind == .None, allocator) {
 		core.destroy(&doc)

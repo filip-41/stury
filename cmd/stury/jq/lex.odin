@@ -7,6 +7,7 @@ import "core:math"
 import "core:strings"
 import "core:unicode/utf8"
 import "../../../core/spell"
+import core_pkg "../../../core"
 import "../message"
 
 @(private)
@@ -101,15 +102,11 @@ fact_accessor :: proc(rest: string) -> (name: string, known: bool) {
 @(private = "file")
 fact_list :: proc() -> string {
 	b := strings.builder_make()
-	names := FACT_NAMES
-	for n, f in names {
-		if f == .Attribute {
-			continue
-		}
+	for info, f in core_pkg.FACTS {
 		if f != .Comment {
 			strings.write_string(&b, ", ")
 		}
-		strings.write_string(&b, n)
+		strings.write_string(&b, info.name)
 	}
 	for a in FACT_ALIASES {
 		strings.write_string(&b, ", ")
@@ -366,8 +363,16 @@ take_ident :: proc(p: ^Parser) -> string {
 }
 
 // `text` as decNumber reads a number (jv_number_with_literal): a sign, then digits with a point and an exponent,
-// `Inf` or `Infinity`, or `NaN` with no payload. It returns false if it is none of them.
-read_number :: proc(text: string) -> (Value, bool) {
+// `Inf` or `Infinity`, or `NaN` with no payload. It returns false if it is none of them, or if it holds a NUL. A JSON
+// number is a literal, the place it is written: a view of `text` marked `mark` when `mark` is not 0, else a copy
+// that holds its double.
+read_number :: proc(text: string, mark := u32(0)) -> (Value, bool) {
+	if mark != 0 && json_integer(text) {
+		return number_view(text, mark), true
+	}
+	if strings.index_byte(text, 0) >= 0 {
+		return nil, false
+	}
 	t := text
 	neg := false
 	if len(t) > 0 && (t[0] == '+' || t[0] == '-') {
@@ -396,7 +401,28 @@ read_number :: proc(text: string) -> (Value, bool) {
 	if !strict {
 		return num(number_f64(n, text)), true
 	}
-	return number_text(text), true // a literal is the place it is written (`identical`)
+	if len(text) > int(max(u32)) {
+		return num(number_f64(n, text)), true
+	}
+	if mark != 0 {
+		return number_view(text, mark), true
+	}
+	return number_text(text), true
+}
+
+// Whether `text` is a JSON integer a `Number_View` holds: an optional minus, then digits without a leading zero.
+@(private = "file")
+json_integer :: #force_inline proc(text: string) -> bool {
+	s := text[1:] if len(text) > 0 && text[0] == '-' else text
+	if len(s) == 0 || len(text) > int(max(u32)) || s[0] == '0' && len(s) > 1 {
+		return false
+	}
+	for c in transmute([]byte)s {
+		if c - '0' > 9 {
+			return false
+		}
+	}
+	return true
 }
 
 // The body of a JSON string decoded into `out` as jq's JSON parser decodes it, or why it cannot be, in jq's

@@ -210,7 +210,7 @@ edit_document :: proc(er: ^Edit_Run, path: string) -> int {
 	src := ins.data
 	heap := runtime.heap_allocator()
 	doc, fault := jq.build_text(src, ins.as, heap)
-	if f, bad := fault.?; bad && FORMATS[ins.format].whole_as != nil && FORMATS[ins.format].follows != nil && FORMATS[ins.format].follows(f) {
+	if f, bad := fault.?; bad && FORMATS[ins.format].whole_as != nil && FORMATS[ins.format].caps.follows != nil && FORMATS[ins.format].caps.follows(f) {
 		return edit_records(er, path)
 	} else if bad {
 		tell_fault(ins, f)
@@ -298,12 +298,12 @@ edit_commit :: proc(w: ^Edit_State, src, text: []u8, base: u64) -> (out: []u8, o
 	}
 	if dropped > 0 && edit_writes_fact(w.list) {
 		delete(committed, runtime.heap_allocator())
-		flat, style := core.is_flat(w.doc), core.Comment_Spelling.None
+		flat, syntax := core.is_flat(w.doc), core.Comment_Syntax{}
 		if flat {
-			style, _ = w.doc.readers.services.edit.comment(w.doc, w.doc.as.spec)
+			syntax = w.doc.readers.services.edit.comment(w.doc, w.doc.as.spec)
 		}
 		switch {
-		case flat && style == .None:
+		case flat && !core.has_comments(syntax):
 			message.write_stderr("stury: error: %s: a table holds comments only with a comment character, which --comment names\n", w.name)
 		case flat:
 			message.write_stderr("stury: error: %s: a table holds a comment only as whole lines above a record or after the last one\n", w.name)

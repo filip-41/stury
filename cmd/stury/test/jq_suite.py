@@ -827,7 +827,7 @@ def check_cli(stury, diff, case):
 def check_tty(stury, diff, stdin_tty, stdout_tty, opts, feed, env, pinned):
     code, out, err = run_tty(stury, opts, stdin_tty, stdout_tty, feed, env)
     if stdin_tty and stdout_tty:
-        usage = err.startswith(b"stury - command-line JSON and CSV processor") and err.endswith(b"For listing the command options, use stury --help.\n")
+        usage = err.startswith(b"stury - command-line JSON, YAML, TOML, XML, HTML, CSV and CBOR processor") and err.endswith(b"For listing the command options, use stury --help.\n")
         why = None if (code, out) == (2, b"") and usage else f"exit {code} out {out!r} err {err!r}, want the usage and exit 2"
     else:
         want = run_tty("jq", opts, stdin_tty, stdout_tty, feed, env) if diff else None

@@ -22,11 +22,12 @@ Tree_Writer :: struct {
 	out:     ^write.Out,
 	opts:    core.Write_Options,
 	close:   u64, // the byte past `root`, where the document root's feet that follow it begin
-	dropped: int, // the facts the target cannot hold
+	kept:    int, // the facts the target holds
 	kind:    core.Typed_Error_Kind, // what stopped the write
 	json:    bool, // the document is JSON's, in any spec
 	keep:    bool, // facts are written as comments
 	respell: bool, // a number of JSON5 or of another format is spelled again for JSON, and a JSON5 string
+	forms:   write.Number_Forms, // the number spellings past JSON's that the target keeps, JSON5's
 	seps:    bool, // U+2028 and U+2029 end a line comment in the target, JSON5
 	copy:    bool, // a string is written as it was authored
 	resolve: bool, // a `Plain` cell with bytes is written as `core.kind` reads it, else as text
@@ -41,14 +42,15 @@ Pair :: struct {
 	name:     string,
 }
 
-// Writes node `node` of `doc` as spec `as` into `out`. The count is the facts `as` cannot hold.
+// Writes node `node` of `doc` as spec `as` into `out`. The count is the facts `as` holds.
 @(private)
-write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Out, as: Spec, node: core.Node_Index) -> (dropped: int, kind: core.Typed_Error_Kind) {
+write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Out, as: Spec, node: core.Node_Index) -> (kept: int, kind: core.Typed_Error_Kind) {
 	w := Tree_Writer{doc = doc, root = node, out = out, opts = opts, json = doc.readers.format == rules_of}
 	w.keep = as != .Json && !doc.partial
 	w.respell = !w.json || Spec(doc.as.spec) == .Json5 && as != .Json5
 	w.seps = as == .Json5
-	w.copy = w.json && !w.respell && copies_strings(opts)
+	w.forms = JSON5_FORMS if as == .Json5 else {}
+	w.copy = w.json && !w.respell && write.copies_raw(opts)
 	w.resolve = doc.readers.resolves != nil && doc.readers.resolves(doc.as)
 	if w.keep {
 		root := doc.nodes[node]
@@ -57,15 +59,13 @@ write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Ou
 			w.close = doc.readers.close_end(doc, node)
 		}
 		for f in core.subtree_facts(doc, node) {
-			w.dropped += 0 if w.json || f.role in core.COMMENT_ROLES else 1
+			w.kept += 1 if w.json || f.role in core.COMMENT_ROLES else 0
 		}
-	} else {
-		w.dropped = len(core.subtree_facts(doc, node))
 	}
 	if !tree_walk(&w, node) {
 		return 0, w.kind
 	}
-	return w.dropped, .None
+	return w.kept, .None
 }
 
 // Writes fact `f` with its markers. A line comment ends its line in compact text, since nothing may follow it there.
@@ -76,15 +76,14 @@ write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Ou
 tree_comment :: proc(w: ^Tree_Writer, f: core.Fact) -> (line: bool) {
 	text := w.doc.src[f.lo:f.lo + u64(f.n)]
 	if !w.json {
-		it := core.Fact_Iter{w.doc, {f}, f.role}
-		body, _ := core.fact_next(&it)
+		body, padded := core.comment_text(w.doc, f)
 		text = transmute([]u8)body
-		if !write.comment_ok(body) {
-			TOKENS.comment(w.out, u8(Spec.Jsonc), body)
+		if !write.comment_lines_ok(body) || strings.index_byte(body, '\n') >= 0 {
+			put_block_comment(w.out, body)
 			w.held = false
 			return false
 		}
-		write.put_text(w.out, "//")
+		write.put_text(w.out, "// " if padded else "//")
 	}
 	line = !w.json || text[1] == '/'
 	seps := w.opts.escape_html || line && w.seps
@@ -303,12 +302,12 @@ tree_scalar :: #force_inline proc(w: ^Tree_Writer, i: core.Node_Index) -> bool {
 	doc := w.doc
 	t := doc.nodes[i]
 	w.held = true
-	if w.respell && t.kind == .Number && t.spelling & core.NUMBER_KIND_MASK != 0 && doc.readers.number_text == nil {
-		w.kind = write.put_decimal(w.out, string(doc.src[t.lo:t.lo + u64(t.n)]), t.spelling)
-		return w.kind == .None
-	}
 	cell := t
 	cell.kind = doc.readers.resolve(doc, i) if t.kind == .Plain && (w.resolve || t.n == 0) else t.kind
+	if w.respell && cell.kind == .Number {
+		w.kind = write.put_number_node(w.out, doc, i, TREE, false, w.forms)
+		return w.kind == .None
+	}
 	w.kind = put_token(w.out, doc.src, doc, i, cell, w.opts, w.json, w.copy)
 	return w.kind == .None
 }

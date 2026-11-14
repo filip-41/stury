@@ -16,7 +16,7 @@ import walktest "../../walktest"
 // The rendered failures of `text` against `schema_text`, each as the message, its path and its keyword path, one a line.
 @(private = "file")
 failures :: proc(schema_text: string, text: string, checks: typed.Format_Checks) -> (out: string, err: core.Error) {
-	c, cerr := json_pkg.load_schema(transmute([]u8)schema_text)
+	c, cerr := json_pkg.load_schema(transmute([]u8)schema_text, .Json)
 	defer schema.destroy(c)
 	if cerr != nil {
 		return "", cerr
@@ -81,15 +81,15 @@ check_reports_a_fault_of_the_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, strings.count(got, "\n"), 1)
 }
 
-// `bind_schema` binds a schema to the handle of a spec chosen at run time, and `check_schema` judges a text by it.
+// `schema.bind` binds a schema to the handle of a spec chosen at run time, and `check_schema` judges a text by it.
 @(test)
 bind_schema_checks_a_text :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	c, cerr := json_pkg.load_schema(transmute([]u8)string(SERVER))
+	c, cerr := json_pkg.load_schema(transmute([]u8)string(SERVER), .Json)
 	defer toml.destroy(c)
 	testing.expect(t, cerr == nil)
 	for spec in toml.Spec {
-		b, berr := toml.bind_schema(c, spec)
+		b, berr := schema.bind(c, {layout = toml.as(spec)})
 		defer toml.destroy(&b)
 		testing.expect(t, berr == nil)
 		testing.expect(t, toml.check_schema(&b, transmute([]u8)string("id = 1\nhost = \"a\"\n")) == nil)
@@ -182,7 +182,7 @@ a_plan_checks_a_text :: proc(t: ^testing.T) {
 	sink: typed.Sink
 	testing.expect(t, toml.check(src, .Toml_1_1, &v, &plan, {sink = &sink}) != nil)
 	testing.expect_value(t, len(sink.entries), 2)
-	spec := toml.Spec.Toml_1_0
+	spec :: toml.Spec.Toml_1_0
 	again: Pair
 	other: typed.Sink
 	testing.expect(t, toml.check(src, spec, &again, &plan, {sink = &other}) != nil)

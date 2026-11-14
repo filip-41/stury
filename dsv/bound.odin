@@ -17,13 +17,14 @@ readers_of :: proc "contextless" ($S: Spec) -> ^core.Readers {
 	@(static, rodata) r := core.Readers {
 		text       = proc(v: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool) {return cell_text(v.src, n, S, buf)},
 		key_equals = spelling_key_equals,
-		number     = number,
+		number     = token_number,
 		resolve    = spelling_resolve,
 		resolves   = proc "contextless" (as: core.As) -> bool {return options_of(as).infer},
 		close_end  = proc(doc: ^core.Document, i: core.Node_Index) -> u64 {return close_end_spec(doc, i, S)},
 		format     = rules_of,
 		tag_key    = "csv",
 		flat       = true,
+		holds      = {.Comment, .Comment_Foot},
 	}
 	return &r
 }
@@ -37,9 +38,9 @@ bound_as :: proc "contextless" ($S: Spec, opts := Options{}) -> core.As {
 // and the option bytes in `As`.
 @(rodata)
 PLAN_READERS := core.Readers {
-	text       = text,
+	text       = token_text,
 	key_equals = spelling_key_equals,
-	number     = number,
+	number     = token_number,
 	resolve    = spelling_resolve,
 	resolves   = proc "contextless" (as: core.As) -> bool {return options_of(as).infer},
 	format     = rules_of,
@@ -57,7 +58,7 @@ edit_of :: proc "contextless" ($S: Spec) -> ^core.Edit_Services {
 	@(static, rodata) e := core.Edit_Services {
 		value        = proc(doc: ^core.Token_View, src: []u8, _: runtime.Allocator) -> core.Document_Error {return edit_cells(doc, src, false, record_check(S))},
 		key_text     = edit_key_text,
-		comment      = proc(doc: ^core.Document, _: u8) -> (core.Comment_Spelling, u8) {return (.Byte if doc.as.opts[1] != 0 else .None), doc.as.opts[1]},
+		comment      = proc(doc: ^core.Document, _: u8) -> core.Comment_Syntax {return {line = string(doc.as.opts[1:2])} if doc.as.opts[1] != 0 else {}},
 		member_sep   = proc(doc: ^core.Document, c: core.Node_Index) -> string {return edit_record_sep(doc) if c == core.ROOT else string(doc.as.opts[:1])},
 		insert_check = proc(doc: ^core.Document, c: core.Node_Index, text: string, _: runtime.Allocator) -> core.Document_Error {return edit_cells(doc, transmute([]u8)text, c == core.ROOT, record_check(S))},
 		interior     = edit_interior,
@@ -66,6 +67,13 @@ edit_of :: proc "contextless" ($S: Spec) -> ^core.Edit_Services {
 		plan         = proc(doc: ^core.Document, list: ^core.Edit_List, out: ^[dynamic]core.Edit, allocator: runtime.Allocator) -> (bool, core.Document_Error) {return edit_plan(doc, list, out, allocator, record_check(S))},
 		spell        = edit_spell,
 		validate     = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, S, options_of(as))},
+		build        = proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+			return build_spec(src, S, as.readers, options_of(as), refuse_duplicates, allocator)
+		},
+		walk_rows    = proc(src: []u8, as: core.As, r: ^core.Row_Read) -> Maybe(core.Fault) {
+			_, fault := walk(src, 0, S, options_of(as), r, nil, core.rows_hook)
+			return fault
+		},
 	}
 	return &e
 }

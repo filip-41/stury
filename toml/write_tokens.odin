@@ -8,6 +8,7 @@ package toml
 
 import "base:runtime"
 import "core:io"
+import "core:strings"
 import core "../core"
 import typed "../core/typed"
 import write "../core/write"
@@ -32,10 +33,15 @@ TREE :: write.Tree {
 	.Bytes_Tag    = "",
 }
 
+// The number spellings of TOML past JSON's.
+@(private)
+NUMBER_FORMS :: write.Number_Forms{.Hex, .Octal, .Binary, .Plus}
+
 @(private, rodata)
 TOKENS := write.Token_Spelling {
 	tree = TREE,
-	// A whole text is written behind a key that `end` lays out, which `state` records.
+	// A whole text is written behind a key that `end` puts at `mark`, after the root's comments, and lays out. `state`
+	// records it.
 	start = proc(t: ^write.Tokens, _: core.As) -> core.Typed_Error_Kind {
 		// The text is laid out once it is whole, and a stream has taken its bytes by then.
 		if t.out.stream.procedure != nil {
@@ -44,7 +50,6 @@ TOKENS := write.Token_Spelling {
 		// An inline table is one line, and the layout of the document is the writer's own, so the calls never indent.
 		t.opts.pretty = false
 		if !t.site.placed {
-			write.put_text(t.out, "r = ")
 			t.state = rawptr(&TOKENS)
 		}
 		return .None
@@ -62,11 +67,12 @@ TOKENS := write.Token_Spelling {
 		case write.Number_Literal:
 			write.put_text(t.out, x.text)
 		case write.Tagged_Text:
-			// A tag that is no TOML type, as another format's, leaves a string.
-			if x.tag != "" && tag_datetime(x.tag) == .None {
+			// A tag that is no TOML type leaves a string, and so does another format's datetime that no TOML one spells.
+			tag := DATETIME_TAGS[x.meaning] if x.meaning != .Own else x.tag
+			if tag != "" && tag_datetime(tag) == .Own || x.meaning != .Own && text_datetime(x.text) != x.meaning {
 				return put_basic(t.out, x.text, t.opts)
 			}
-			return put_datetime(t.out, x.text, x.tag)
+			return put_datetime(t.out, x.text, tag)
 		case write.Tree_Part:
 			write.put_text(t.out, t.spell.tree[x])
 		}
@@ -79,8 +85,44 @@ TOKENS := write.Token_Spelling {
 			}
 			return bytes, {}
 		}
-		return lay_out_text(bytes, t.opts, {}, t.base.allocator)
+		return lay_out_text(bytes, t.mark, t.opts, {}, t.base.allocator)
 	},
+	// A comment is TOML 1.1's, which an inline table holds on lines of its own, and `end` reads it back as 1.1. An
+	// inline comment that follows one on the same item joins it.
+	comment = proc(t: ^write.Tokens, role: core.Role, text: string) -> core.Typed_Error_Kind {
+		if !write.comment_lines_ok(text) {
+			return .Unwritable
+		}
+		if role == .Comment_Inline && strings.index_byte(text, '\n') < 0 && ends_inline_comment(t.out) {
+			t.out.cursor -= 1
+			write.put_text(t.out, " " if len(text) > 0 else "")
+			write.put_text(t.out, text)
+			write.put_byte(t.out, '\n')
+			return .None
+		}
+		write.put_byte(t.out, ' ' if role == .Comment_Inline else '\n')
+		write.put_comment(t.out, "#", text, true, 0)
+		write.put_byte(t.out, '\n')
+		if t.top == 0 && role == .Comment {
+			t.mark = t.out.cursor
+		}
+		return .None
+	},
+}
+
+// Whether the text written so far ends with an inline comment. Only a comment ends a line in the calls' text, whose
+// strings are basic, and a line that holds a value before its comment is an inline one.
+@(private)
+ends_inline_comment :: proc(out: ^write.Out) -> bool {
+	written := string(out.buf[:out.cursor])
+	if !strings.has_suffix(written, "\n") {
+		return false
+	}
+	start := strings.last_index_byte(written[:len(written) - 1], '\n')
+	if start < 0 && out.flushed > 0 {
+		return false
+	}
+	return !strings.has_prefix(written[start + 1:], "#")
 }
 
 @(private)
@@ -96,26 +138,19 @@ marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options,
 	if err.kind != .None {
 		return nil, err
 	}
-	prefixed, failed := make([]u8, len(bytes) + 4, allocator)
-	if failed != nil {
-		delete(bytes, allocator)
-		return nil, {kind = .No_Memory}
-	}
-	copy(prefixed, "r = ")
-	copy(prefixed[4:], bytes)
-	delete(bytes, allocator)
-	return lay_out_text(prefixed, opts, stream, allocator)
+	return lay_out_text(bytes, 0, opts, stream, allocator)
 }
 
 // The value `bytes` holds, spelled as the inline value the document writer puts in a line: bare keys, a space inside
 // the braces and after each comma.
 @(private)
 inline_text :: proc(bytes: []u8, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
-	defer delete(bytes, allocator)
-	prefixed := make([]u8, len(bytes) + 4, context.temp_allocator)
-	copy(prefixed, "r = ")
-	copy(prefixed[4:], bytes)
-	doc, berr := build_text(prefixed, bound_as(.Toml_1_0), context.allocator)
+	keyed, made := keyed_text(bytes, 0, allocator)
+	if !made {
+		return nil, {kind = .No_Memory}
+	}
+	defer delete(keyed, allocator)
+	doc, berr := build_text(keyed, bound_as(.Toml_1_0), context.allocator)
 	defer core.destroy(&doc)
 	if berr.kind != .None {
 		return nil, {kind = .Unwritable if berr.kind == .Walk else .No_Memory}

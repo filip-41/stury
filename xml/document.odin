@@ -16,6 +16,10 @@ HANDLES := [Spec]core.Readers {
 	.Xml = core.with_services(READERS, &SERVICES[.Xml]),
 }
 
+// The reasons the writer gives a refusal that names none.
+@(private)
+WRITE_WORDS :: core.Write_Words{"XML has no element or text for the value", "XML writes a whole document"}
+
 @(private)
 SERVICES := [Spec]core.Services {
 	.Xml = {
@@ -23,6 +27,7 @@ SERVICES := [Spec]core.Services {
 		validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, .Xml, options_of(as))},
 		scan     = scan_handle,
 		write    = document_write,
+		words    = WRITE_WORDS,
 		plans    = rawptr(plan_as),
 		edit     = &EDIT,
 		reads    = &READS,
@@ -36,6 +41,13 @@ SERVICES := [Spec]core.Services {
 @(private)
 rules_of :: proc "contextless" () -> ^core.Rules {
 	return &RULES
+}
+
+// Document order is meaning in XML, so its writer does not sort keys.
+CAPABILITIES :: core.Capabilities {
+	writes = {.Pretty, .Indent, .Tab, .Ascii, .Respell_Strings},
+	framings = {.Concatenated, .Entries},
+	specs = Spec,
 }
 
 // The handle of an XML text of `spec` read with `opts`.
@@ -93,8 +105,11 @@ SPELLING_TOKENIZED :: u16(1 << 15)
 // XML's `Readers.text`. An element's name is its span and the `#text` member's name is `#text`. An element's text and
 // a `#text` run are decoded into `buf` as content, and an attribute's value, which `SPELLING_ATTRIBUTE` marks, as an
 // attribute value, unless the walk found nothing to decode. `core.text_room` sizes `buf`. A container returns false.
-@(private)
-token_decode :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
+// The number a markup token reads as, false for one that is not a number. A caller that knows the format calls it without
+// the table.
+token_number :: core.markup_number
+
+token_text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
 	if t.kind > .Plain {
 		return "", false
 	}

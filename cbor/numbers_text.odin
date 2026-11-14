@@ -83,9 +83,10 @@ digits_text :: proc "contextless" (d: ^Digits, buf: []u8, negative: bool) -> str
 }
 
 // CBOR's `Readers.number_text`: the decimal digits of number token `t`. An integer, a tag and a bignum give their
-// digits, a float its shortest digits, and none for an infinity or a NaN, a decimal fraction `<mantissa>e<exponent>`,
-// and a bigfloat its exact value, a negative exponent as `e-<places>`. Returns false when `buf` is too short, or when a
-// bigfloat's exponent or a bignum is larger than the digits are bounded to.
+// digits, a float its shortest digits with a point or an exponent, and none for an infinity or a NaN, a decimal
+// fraction `<mantissa>e<exponent>`, and a bigfloat its exact value, a negative exponent as `e-<places>`. Returns false
+// when `buf` is too short, or when a bigfloat's exponent or a bignum is larger than the digits are bounded to.
+@(private)
 number_text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
 	if t.kind != .Number {
 		return "", false
@@ -141,10 +142,18 @@ float_text :: proc "contextless" (span: []u8, buf: []u8) -> (s: string, ok: bool
 	if f - f != 0 {
 		return "", true
 	}
-	if len(buf) < spell.F64_ROOM {
+	if len(buf) < spell.F64_ROOM + 2 {
 		return "", false
 	}
-	return string(buf[:spell.f64_text(raw_data(buf), f)]), true
+	n := spell.f64_text(raw_data(buf), f)
+	// A float keeps a point, so a format that tells floats from integers reads its text as a float.
+	for c in buf[:n] {
+		if c == '.' || c == 'e' || c == 'E' {
+			return string(buf[:n]), true
+		}
+	}
+	buf[n], buf[n + 1] = '.', '0'
+	return string(buf[:n + 2]), true
 }
 
 // The text of a decimal fraction or a bigfloat whose array is `span`.
@@ -208,10 +217,10 @@ decimal_text :: proc "contextless" (span: []u8, binary: bool, buf: []u8) -> (s: 
 	return string(buf[from:used + w]), true
 }
 
-// CBOR's `Readers.fact`: node `i`'s tag as its decimal digits, the tag nearest the item when several are stacked. The
-// digits are in the temp allocator, since the span holds the tag's head and not its text.
+// CBOR's `Readers.fact`: node `i`'s tag as its decimal digits, the tag nearest the item when several are stacked, and
+// its meaning. The digits are in the temp allocator, since the span holds the tag's head and not its text.
 @(private)
-fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Name) -> (core.Fact_Value, bool) {
+fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Kind) -> (core.Fact_Value, bool) {
 	if name != .Tag || len(doc.facts) == 0 {
 		return {}, false
 	}
@@ -223,8 +232,25 @@ fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Name) -> (
 		if failed != nil {
 			return {}, false
 		}
-		digits, _ := integer_text(doc.src[f.lo:f.lo + u64(f.n)], buf)
-		return {text = digits, numeric = true}, true
+		span := doc.src[f.lo:f.lo + u64(f.n)]
+		digits, _ := integer_text(span, buf)
+		_, tag, _ := head_of(span)
+		return {text = digits, numeric = true, meaning = tag_meaning(tag, core.kind(doc, i))}, true
 	}
 	return {}, false
+}
+
+// The meaning of tag `tag` on an item of kind `k`: RFC 8949's date and time text (0), RFC 8943's date text (1004) and
+// base64 text (34).
+@(private)
+tag_meaning :: proc "contextless" (tag: u64, k: core.Kind) -> core.Tag_Meaning {
+	if k != .String {
+		return .Own
+	}
+	switch tag {
+	case 0:    return .Datetime
+	case 1004: return .Local_Date
+	case 34:   return .Binary
+	}
+	return .Own
 }

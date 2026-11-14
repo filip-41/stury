@@ -68,7 +68,7 @@ build :: proc(src: []u8) -> int {
 }
 
 check :: proc(src: []u8) -> int {
-	faults, _ := records.check(src, handle, .Lines, context.temp_allocator)
+	faults, _ := records.validate(src, handle, .Lines, context.temp_allocator)
 	defer free_all(context.temp_allocator)
 	return len(faults)
 }
@@ -76,7 +76,7 @@ check :: proc(src: []u8) -> int {
 pool: host.Pool
 
 threads :: proc(src: []u8) -> int {
-	faults, _ := records.check(src, handle, .Lines, context.temp_allocator, &pool.runner)
+	faults, _ := records.validate(src, handle, .Lines, context.temp_allocator, &pool.runner)
 	defer free_all(context.temp_allocator)
 	return len(faults)
 }

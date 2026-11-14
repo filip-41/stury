@@ -6,7 +6,6 @@ package write
 import "base:intrinsics"
 import "base:runtime"
 import "core:strconv"
-import "core:strings"
 import core ".."
 import engine "../build"
 import "../typed"
@@ -69,7 +68,7 @@ edit_input_of :: proc(v: any, plan: ^typed.Plan, scratch: ^Scratch) -> (in_: cor
 		return {value = x}, nil
 	case core.Node_Ref:
 		return {value = x}, nil
-	case ^core.Number_Text:
+	case core.Number_View:
 		return {value = x}, nil
 	case ^core.Array:
 		return {value = x}, nil
@@ -135,7 +134,7 @@ digits :: proc(n: $T, allocator: runtime.Allocator) -> core.Value {
 	} else {
 		text = strconv.write_int(buf[:], i64(n), 10)
 	}
-	return core.number_text(strings.clone(text, allocator), allocator)
+	return core.number_text(text, allocator)
 }
 
 // Makes `v` the value of node `node`, as `core.set_value` does for a built value.

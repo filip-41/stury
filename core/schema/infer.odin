@@ -158,7 +158,7 @@ child :: proc(inf: ^Inferred, p: ^^Summary) -> ^Summary {
 take :: proc(inf: ^Inferred, p: ^Summary, value: core.Value) {
 	v := core.plain(value)
 	kind := core.kind(v)
-	if ref, ok := v.(core.Node_Ref); ok && kind != .Array && ref.doc.readers != nil && ref.doc.readers.attribute != nil {
+	if ref, ok := v.(core.Node_Ref); ok && kind != .Array && core.is_markup(ref.doc) {
 		it := core.attributes_of(ref.doc, ref.node)
 		if _, _, held := core.attribute_next(&it); held || kind == .Object {
 			object(inf, p, v, ref)
@@ -223,8 +223,8 @@ number :: proc(inf: ^Inferred, p: ^Summary, v: core.Value) {
 @(private = "file")
 kept :: proc(v: core.Value) -> core.Value {
 	#partial switch x in v {
-	case ^core.Number_Text:
-		return core.number_text(strings.clone(x.text))
+	case core.Number_View:
+		return core.view_copy(x)
 	case core.Node_Ref:
 		return core.built_value(x)
 	}
@@ -617,8 +617,8 @@ ranges_of :: proc(b: ^Describer, p: ^Summary) -> (r: rules.Rules) {
 @(private = "file")
 number_text :: proc(b: ^Describer, v: core.Value) -> string {
 	#partial switch x in v {
-	case ^core.Number_Text:
-		return text_of(b, x.text)
+	case core.Number_View:
+		return text_of(b, core.view_text(x))
 	case f64:
 		if math.is_inf(x) || math.is_nan(x) {
 			return ""

@@ -4,8 +4,10 @@ package xml_tests
 
 import "core:testing"
 import core "../../core"
+import rules "../../core/rules"
 import typed "../../core/typed"
 import xml ".."
+import json "../../json"
 import walktest "../../walktest"
 
 @(private = "file")
@@ -85,6 +87,36 @@ unmarshal_refuses_a_text_of_the_wrong_type :: proc(t: ^testing.T) {
 	testing.expect(t, dup != nil)
 }
 
+// A text or an attribute whose decode is exactly a JSON number reads into a number, its sign that of the decode.
+@(test)
+unmarshal_reads_a_number_a_text_decodes_to :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	v: struct {
+		r: struct {
+			a, b: int,
+			m:    i8,
+			z:    f64,
+			f:    f32,
+		},
+	}
+	src := `<!DOCTYPE r [<!ENTITY e "7">]><r a="&#55;1"><b>&e;</b><m>&#45;8</m><z>&#45;0</z><f>&#49;.5</f></r>`
+	walktest.expect_nil(t, xml.unmarshal(transmute([]u8)string(src), .Xml, &v))
+	testing.expect_value(t, v.r.a, 71)
+	testing.expect_value(t, v.r.b, 7)
+	testing.expect_value(t, v.r.m, -8)
+	testing.expect_value(t, transmute(u64)v.r.z, transmute(u64)f64(-0.0))
+	testing.expect_value(t, v.r.f, 1.5)
+	refusals := [?]struct {
+		src:  string,
+		kind: core.Typed_Error_Kind,
+	}{{`<r><b>&#55;x</b></r>`, .Wrong_Kind}, {`<r><b>&#55;.5</b></r>`, .Wrong_Kind}, {`<r><m>&#55;00</m></r>`, .Above_Maximum}}
+	for c in refusals {
+		refused, _ := xml.unmarshal(transmute([]u8)c.src, .Xml, &v).(core.Typed_Error)
+		testing.expect_value(t, refused.kind, c.kind)
+	}
+}
+
 @(test)
 a_value_member_groups_a_repeated_name_as_a_built_value_does :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -123,7 +155,7 @@ unmarshal_reads_a_document_node_and_a_chosen_spec :: proc(t: ^testing.T) {
 	w: struct {
 		r: R,
 	}
-	spec := xml.Spec.Xml
+	spec :: xml.Spec.Xml
 	walktest.expect_nil(t, xml.unmarshal(src, spec, &w))
 	testing.expect_value(t, w.r, R{k = "v", x = 5})
 }
@@ -192,7 +224,7 @@ a_nil_any_is_refused_as_a_null :: proc(t: ^testing.T) {
 	nothing: any
 	text, err := xml.marshal(nothing, allocator = context.temp_allocator)
 	testing.expect(t, text == nil)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
+	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
 }
 
 // A check with no plan is a plan mismatch.
@@ -202,4 +234,30 @@ a_check_with_no_plan_is_a_mismatch :: proc(t: ^testing.T) {
 		a: int,
 	}
 	walktest.expect_kind(t, xml.check(transmute([]u8)string("<a>1</a>"), .Xml, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
+}
+
+// A plan from `plan_make` reads a text, a plan of a description holds XML's reads when it is given them, and an empty
+// description is refused.
+@(test)
+plans_read_xml :: proc(t: ^testing.T) {
+	Doc :: struct {
+		a: struct {
+			n: int,
+		},
+	}
+	plan, perr := xml.plan_make(Doc, .Xml)
+	walktest.expect_nil(t, perr)
+	defer xml.destroy(&plan)
+	v: Doc
+	walktest.expect_nil(t, xml.unmarshal(transmute([]u8)string(`<a><n>4</n></a>`), .Xml, &v, &plan))
+	testing.expect_value(t, v.a.n, 4)
+	s, err := json.load_schema(transmute([]u8)string(`{"properties": {"a": {"type": "object"}}}`), .Json)
+	walktest.expect_nil(t, err)
+	defer json.destroy(s)
+	described, built := xml.plan_of(s.description, reads = xml.checks(.Xml).reads)
+	walktest.expect_nil(t, built)
+	defer xml.destroy(&described)
+	testing.expect(t, described.read != nil && described.marshal != nil)
+	_, empty := xml.plan_of(&rules.Description{})
+	walktest.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 }

@@ -12,17 +12,20 @@ import records "../core/records"
 // The readers of a document the entry points build. It holds no services.
 @(rodata)
 READERS := core.Readers {
-	text        = text,
-	key_equals  = spelling_key_equals,
-	number      = number,
-	resolve     = spelling_resolve,
-	resolves    = proc "contextless" (as: core.As) -> bool {return true},
-	close_end   = close_end,
-	format      = rules_of,
-	tag_key     = "yaml",
-	fact        = spelling_fact,
-	number_text = number_text,
-	tag_fits    = tag_fits,
+	text         = token_text,
+	key_equals   = spelling_key_equals,
+	number       = token_number,
+	resolve      = spelling_resolve,
+	resolves     = proc "contextless" (as: core.As) -> bool {return true},
+	close_end    = close_end,
+	format       = rules_of,
+	tag_key      = "yaml",
+	floats_apart = true,
+	holds        = core.COMMENT_FACTS + {.Tag, .Anchor, .Alias, .Style, .Directive},
+	fact         = spelling_fact,
+	number_text  = number_text,
+	tag_fits     = tag_fits,
+	tag_meaning  = tag_meaning,
 }
 
 // The handle of `spec` read with `opts`, over `READERS`.
@@ -34,9 +37,9 @@ bound_as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
 // and the option bytes in `As`.
 @(rodata)
 PLAN_READERS := core.Readers {
-	text        = text,
+	text        = token_text,
 	key_equals  = spelling_key_equals,
-	number      = number,
+	number      = token_number,
 	resolve     = spelling_resolve,
 	resolves    = proc "contextless" (as: core.As) -> bool {return true},
 	format      = rules_of,
@@ -51,8 +54,10 @@ PLAN_READERS := core.Readers {
 EDIT := core.Edit_Services {
 	value    = edit_value,
 	key_text = edit_key_text,
-	comment  = proc(_: ^core.Document, _: u8) -> (core.Comment_Spelling, u8) {return .Byte, '#'},
+	comment  = proc(_: ^core.Document, _: u8) -> core.Comment_Syntax {return core.HASH_COMMENTS},
 	validate = validate_as,
+	build    = build_as,
+	scan     = scan_as,
 	spell    = edit_spell,
 	prefix   = edit_prefix,
 	relocate = edit_relocate,
@@ -84,8 +89,12 @@ CHECKS := typed.Format_Reads {
 // the cuts at one are documents' starts in any text the walk takes. It holds no record reads, which `record_docs` gives.
 @(rodata)
 FRAMING := records.Framing_Services {
-	next  = #partial {.Concatenated = next_document},
+	next  = #partial {.Concatenated = next_document, .Entries = records.entries_walked},
 	judge = records.no_judge,
+	close = records.entries_walked_close,
+	closed = #partial {.Entries = true},
+	entry_step = step_entries,
+	entry_build = build_entry,
 	guess = guess_document,
 	piece = piece_documents,
 	whole = whole_stream,

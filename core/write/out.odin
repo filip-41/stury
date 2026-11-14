@@ -26,6 +26,11 @@ Out :: struct {
 	spill:     ^[ROOM_MAX]u8,
 }
 
+// Whether a scalar read from a source is written as it was authored under `opts`, its source bytes copied.
+copies_raw :: #force_inline proc "contextless" (opts: core.Write_Options) -> bool {
+	return !opts.ascii && !opts.escape_del && !opts.escape_html && !opts.respell_strings
+}
+
 // Starts an output. A stream with no procedure writes into a buffer that `finish` returns, otherwise bytes go to
 // `stream` through a buffer of `STREAM_BUFFER` bytes. Either allocates at its first `room`. A buffer output allocates
 // `hint` bytes there when it is more than a `ROOM_MAX`, so a writer that knows its text's size from its source never

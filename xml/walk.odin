@@ -153,11 +153,12 @@ STATE_TIER :: kernel.Tier(0)
 @(private)
 STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 
-// `Frame` is an open element. Its name starts one byte past `tag_lo`. `text_lo` is where the text run that has not
-// been given yet starts: past the start tag, or past the child that last closed.
+// `Frame` is an open element. `tag` is its start tag's `<`, and its name follows it: in the text, or once the frame is an
+// ancestor of a paused walk whose window moved past it, in a copy of the name the pause keeps. `text_lo` is where the
+// text run that has not been given yet starts: past the start tag, or past the child that last closed.
 @(private)
 Frame :: struct {
-	tag_lo:  u64,
+	tag:     [^]u8,
 	text_lo: u64,
 	tag_n:   u32,
 	name_n:  u16,
@@ -170,6 +171,7 @@ Frame_Flag :: enum u8 {
 	Seen, // the run holds a character that is no markup whitespace, so it is text
 	Decode, // the run holds a reference, CDATA, a comment, a processing instruction or a CR
 	Prev, // a child element or text member ended before this point
+	Held, // a comment or instruction stands before the first child, and the next child or the end tag gives its role
 }
 
 @(private)
@@ -220,13 +222,15 @@ Walk :: struct($H: typeid) {
 	dtd:    ^Dtd,
 	halt:   Run,
 	opts:   Options,
+	// The `Paused` this walk runs in once it paused, nil before.
+	parked: rawptr,
 }
 
 // Checks that `src` holds exactly one XML document in UTF-8, with no hook and after one leading BOM. Returns the fault,
 // or nil. A constant `spec` links the walk of that spec alone, and a `spec` chosen at run time is `core.validate` with
 // `as(spec, opts)`. The same holds for the other entry points.
-validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
-	return core.error_of(validate_spec(src, spec, opts))
+validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error {
+	return core.error_of(validate_spec(src, S, opts))
 }
 
 // Reads `src` as one document from `lo` through the hook, as `validate` checks it. A BOM is passed over only at the
@@ -253,11 +257,11 @@ walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: 
 	return
 }
 
-// `walk` from the text's start that also returns the sealed DTD the text declares, empty for none, on the default heap
+// `walk` from `lo` that also returns the sealed DTD the text declares, empty for none, on the default heap
 // for the caller to free.
 @(private)
-walk_keeping :: proc "contextless" (src: []u8, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault), state: []u8) {
-	hi, fault, _ = core.result_of(walk_document(src, 0, opts, h, regs, on, &state), &RULES)
+walk_keeping :: proc "contextless" (src: []u8, lo: u64, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault), state: []u8) {
+	hi, fault, _ = core.result_of(walk_document(src, lo, opts, h, regs, on, &state), &RULES)
 	return
 }
 
@@ -271,7 +275,8 @@ validate_spec :: proc "contextless" (src: []u8, spec: Spec, opts: Options) -> Ma
 }
 
 // Reads the document that starts at `lo`. Keeps the frames in this frame, which `deepen` grows on the default heap
-// for a text that nests past it, freed before returning. The DTD is freed too, or its sealed block handed to `kept`.
+// for a text that nests past it, freed before returning. The DTD is freed too, or its sealed block handed to `kept`. A
+// walk through `core.Holding` that paused keeps them in its `Paused`.
 @(private)
 walk_document :: #force_inline proc "contextless" (src: []u8, lo: u64, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), kept: ^[]u8) -> u64 {
 	// `= ---` leaves the array unwritten, where a struct would be zeroed. Every frame is written before it is read.
@@ -288,8 +293,20 @@ walk_document :: #force_inline proc "contextless" (src: []u8, lo: u64, opts: Opt
 		opts   = opts,
 	}
 	r := prolog(&w, src, min(lo, u64(len(src))), regs.a, regs.b, regs.c, on)
+	when intrinsics.type_is_specialization_of(H, core.Holding) {
+		if r & 0xffff == PAUSED << 8 {
+			return r
+		}
+	}
+	return walk_end(&w, r, kept)
+}
+
+// Frees what walk `w` holds, the DTD's sealed block handed to `kept` unless it is nil, and returns its result `r`.
+@(private)
+walk_end :: proc "contextless" (w: ^Walk($H), r: u64, kept: ^[]u8) -> u64 {
+	r := r
 	if w.dtd != nil {
-		r = dtd_end(&w, r, kept)
+		r = dtd_end(w, r, kept)
 	}
 	if w.owned {
 		runtime.heap_free(w.frames)
@@ -298,11 +315,7 @@ walk_document :: #force_inline proc "contextless" (src: []u8, lo: u64, opts: Opt
 		runtime.heap_free(w.table)
 	}
 	if w.ns != nil {
-		for entry in w.ns[:w.ns_len] {
-			if entry.owned {
-				runtime.heap_free(entry.uri.p)
-			}
-		}
+		ns_release(w.ns[:w.ns_len])
 		runtime.heap_free(w.ns)
 	}
 	return r
@@ -359,6 +372,11 @@ fault :: #force_inline proc "contextless" (w: ^Walk($H), hs: core.Hook_Regs, p: 
 	w.regs^ = hs
 	return core.fault_at(at(w, p), kind, u8(detail))
 }
+
+// The detail of a result with no fault when a walk through `core.Holding` paused, at the end of the element `pause`
+// keeps.
+@(private)
+PAUSED :: 2
 
 // Returns the result for a hook that stopped the walk at the token ending at `p`, with `core.STOPPED` in the detail.
 @(private)
@@ -452,11 +470,41 @@ has_cr :: #force_inline proc "contextless" (p, q: [^]u8) -> bool #no_bounds_chec
 open_content :: #force_inline proc "contextless" (w: ^Walk($H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, f: ^Frame, e: u64, child: [^]u8) -> (result: u64, done: bool) {
 	if .Object not_in f.flags {
 		f.flags += {.Object}
-		if r := emit(w, on, hs, .Object, .Value, f.tag_lo, int(f.tag_n), 0, e); r != .Next {
+		if r := emit(w, on, hs, .Object, .Value, at(w, f.tag), int(f.tag_n), 0, e); r != .Next {
 			return refused(w, hs^, r, child), true
+		}
+		when H != core.No_Hooks {
+			if .Held in f.flags {
+				if r, over := give_held(w, on, hs, f, child, .Comment); over {
+					return r, true
+				}
+			}
 		}
 	}
 	return text_member(w, on, hs, f, child)
+}
+
+// Gives the comments and instructions of frame `f`'s content before `upto` with role `role`: those of the first
+// member, given after the element's `Object`, or the foot comments of an element with no child, given before its value.
+@(private, cold)
+give_held :: #force_no_inline proc "contextless" (w: ^Walk($H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, f: ^Frame, upto: [^]u8, role: core.Role) -> (result: u64, done: bool) #no_bounds_check {
+	f.flags -= {.Held}
+	CDATA :: len("<![CDATA[")
+	for x := w.base[f.text_lo:]; x < upto; {
+		switch {
+		case x[0] != '<':
+			x = x[1:]
+		case x[1] == '!' && x[2] == '[':
+			x = run(w, x[CDATA:], upto, .Cdata, 0).q[3:]
+		case:
+			q, _ := misc_run(w, x, upto)
+			if r, at_ := give_misc(w, on, hs, x, q, upto, false, role); r != .Next {
+				return refused(w, hs^, r, at_), true
+			}
+			x = q
+		}
+	}
+	return 0, false
 }
 
 // Gives the text run of frame `f` that ends at `end_of_run` as a `#text` member when it is text, and starts the next run.
@@ -501,7 +549,7 @@ st_start :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk
 			return r
 		}
 	}
-	w.frames[d] = Frame{tag_lo = at(w, p), name_n = u16(name_n)}
+	w.frames[d] = Frame{tag = p, name_n = u16(name_n)}
 	w.nattr = 0
 	w.tag_ns = colon
 	if r := emit(w, on, &hs, .String, .Key, at(w, p) + 1, name_n, 0, d + 1); r != .Next {
@@ -665,7 +713,7 @@ table_put :: proc "contextless" (table: [^]Name_Ref, cap: u64, name: [^]u8, n: u
 @(private, enable_target_feature = STATE_FEATURES)
 st_open_done :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^Walk($H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	f := &w.frames[e - 1]
-	n := intrinsics.ptr_sub(p[1:], w.base[f.tag_lo:])
+	n := intrinsics.ptr_sub(p[1:], f.tag)
 	if n > int(max(u32)) {
 		return fault(w, {s0, s1, s2}, p, .Too_Wide)
 	}
@@ -679,8 +727,8 @@ st_open_done :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^
 		w.table = nil
 	}
 	if w.tag_ns {
-		if kind, d := tag_names(w, w.base[f.tag_lo:], p); kind != .None {
-			return fault(w, {s0, s1, s2}, w.base[f.tag_lo:], kind, d)
+		if kind, d := tag_names(w, f.tag, p); kind != .None {
+			return fault(w, {s0, s1, s2}, f.tag, kind, d)
 		}
 	}
 	return #must_tail st_content(p[1:], end, e, w, s0, s1, s2, on)
@@ -712,8 +760,8 @@ st_empty_done :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: 
 		w.table = nil
 	}
 	if w.tag_ns {
-		if kind, d := tag_names(w, w.base[w.frames[e - 1].tag_lo:], p); kind != .None {
-			return fault(w, hs, w.base[w.frames[e - 1].tag_lo:], kind, d)
+		if kind, d := tag_names(w, w.frames[e - 1].tag, p); kind != .None {
+			return fault(w, hs, w.frames[e - 1].tag, kind, d)
 		}
 	}
 	if x := emit(w, on, &hs, .Plain, .Value, at(w, p), 0); x != .Next {
@@ -726,13 +774,16 @@ st_empty_done :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: 
 // content of its parent, or to the epilog after the root.
 @(private, enable_target_feature = STATE_FEATURES)
 st_closed :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^Walk($H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
-	if w.mute == e {
-		w.mute = 0
-	}
 	when intrinsics.type_is_specialization_of(H, core.Holding) {
 		if w.hooks.held != nil {
+			if w.dtd == nil || w.dtd.depth == 0 {
+				return pause(p, e, w, {s0, s1, s2})
+			}
 			core.hold(w.hooks, core.Held_Token{at = e, close = true})
 		}
+	}
+	if w.mute == e {
+		w.mute = 0
 	}
 	for w.ns_len > 0 && w.ns[w.ns_len - 1].depth == e {
 		if w.ns[w.ns_len - 1].owned {
@@ -815,7 +866,8 @@ st_bang :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 // `p` is at a comment or a processing instruction in the content of the element with `d` open elements. Reads the
 // run of comments, instructions and whitespace up to the next byte, then gives them: those on the line where the
 // element's last child ended are inline comments, and the rest are comments of what follows, or foot comments when
-// the element's end tag follows a child.
+// the element's end tag follows a child. A run before the element's first child is held for `give_held`, except in
+// a replacement text, which the end of the reference leaves.
 @(private, enable_target_feature = STATE_FEATURES)
 st_misc :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
@@ -826,6 +878,10 @@ st_misc :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 	f := &w.frames[d - 1]
 	f.flags += {.Decode}
 	when H != core.No_Hooks {
+		if .Object not_in f.flags && (w.dtd == nil || w.dtd.depth == 0) {
+			f.flags += {.Held}
+			return #must_tail st_content(q, end, d, w, hs.a, hs.b, hs.c, on)
+		}
 		foot := .Object in f.flags && intrinsics.ptr_sub(end, q) >= 2 && q[0] == '<' && q[1] == '/'
 		inline := .Prev in f.flags && .Seen not_in f.flags
 		// The whitespace before the run, which `st_content` has passed, says whether the first comment is on the line
@@ -849,7 +905,7 @@ st_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($
 	hs := core.Hook_Regs{s0, s1, s2}
 	f := &w.frames[d - 1]
 	n := int(f.name_n)
-	name := w.base[f.tag_lo + 1:]
+	name := f.tag[1:]
 	room := intrinsics.ptr_sub(end, p[2:])
 	if room < n {
 		if string(p[2:][:room]) != string(name[:room]) {
@@ -880,6 +936,13 @@ st_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($
 			return refused(w, hs, x, after)
 		}
 	} else {
+		when H != core.No_Hooks {
+			if .Held in f.flags {
+				if r, done := give_held(w, on, &hs, f, p, .Comment_Foot); done {
+					return r
+				}
+			}
+		}
 		lo := f.text_lo
 		// A run of white space alone is no text run, so no scan judged its line ends.
 		decode := .Decode in f.flags || .Seen not_in f.flags && has_cr(w.base[lo:], p)

@@ -57,7 +57,7 @@ FORMAT_WORD = re.compile(r"(?<![a-z])(header|table|cell|delimiter)s?(?![a-z])")
 # The words a neutral package may use, since its users look for them: `records.cell` and `records.write_cells`, and the
 # document's `Table`, whose rows share a header.
 TABLE_WORDS = {"table", "header"}
-ALLOWED_WORDS = {"core/records": {"cell"}, "core": TABLE_WORDS, "core/build": TABLE_WORDS, "core/compose": TABLE_WORDS, "core/typed": TABLE_WORDS}
+ALLOWED_WORDS = {"core/records": {"cell"} | TABLE_WORDS, "core": TABLE_WORDS, "core/build": TABLE_WORDS, "core/compose": TABLE_WORDS, "core/typed": TABLE_WORDS}
 
 DECL = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(::|:=|:)")
 
@@ -516,6 +516,88 @@ def api_read(path):
             out[package].append(line)
     return out
 
+# The entries every format declares. Each takes the same parameters in the same order as the others' once the format's
+# own package name is read as `F`, with the defaults left out, a format choosing its own (a framing, say).
+ENTRIES = (
+    "validate build find scan each_answer answers set edit_list_init write marshal unmarshal check plan_make plan_of reads "
+    "checks bind_schema load_schema record_docs records_open records_open_stream records_validate records_each writer_init "
+    "tokens_init"
+).split()
+# The entries a format declares in another shape, each with the reason.
+ENTRY_EXCEPTIONS = {
+    ("xml", "reads"): "private by Filip's ruling: a markup plan's reads are the format's own",
+    ("html", "reads"): "private by Filip's ruling: a markup plan's reads are the format's own",
+}
+
+
+def split_top(text, sep=","):
+    """`text` split on `sep` outside brackets and braces."""
+    parts, depth, start = [], 0, 0
+    for i, c in enumerate(text):
+        depth += c in "([{"
+        depth -= c in ")]}"
+        if c == sep and depth == 0:
+            parts.append(text[start:i].strip())
+            start = i + 1
+    tail = text[start:].strip()
+    return parts + [tail] if tail else parts
+
+
+def entry_shape(signature, aliases):
+    """A signature as the entry law compares it: a group's members, or a procedure's parameters without their defaults
+    and its results, with each import alias read as the package it names (the format's own as `F`)."""
+    signature = re.sub(r"\b([A-Za-z_]\w*)\.", lambda m: aliases.get(m.group(1), m.group(1)) + ".", signature)
+    group = re.match(r"proc\s*\{(.*)\}$", signature)
+    if group:
+        return "group " + ", ".join(sorted(split_top(group.group(1))))
+    if not signature.startswith("proc"):
+        return signature
+    at = signature.index("(")
+    depth = 0
+    for end in range(at, len(signature)):
+        depth += signature[end] == "("
+        depth -= signature[end] == ")"
+        if depth == 0:
+            break
+    params = []
+    for param in split_top(signature[at + 1 : end]):
+        if ":=" in param:
+            params.append(param.split(":=")[0].strip() + " :=")
+        else:
+            params.append(param.split("=")[0].strip())
+    return "(" + ", ".join(params) + ")" + signature[end + 1 :].strip()
+
+
+def entries():
+    """Every format declares every entry of ENTRIES, each in the shape the others give it."""
+    found = {}
+    for package in sorted(FORMATS):
+        for path in package_files(package):
+            aliases = {alias or os.path.basename(target): resolve(target, path) or target for alias, target in imports_in(path)}
+            aliases = {alias: "F" if target == package else target for alias, target in aliases.items()}
+            for name, signature in declarations(path):
+                if name in ENTRIES:
+                    rest = signature.split("::", 1)[1].strip()
+                    rest = re.sub(r"^#force_inline\s+", "", rest)
+                    rest = re.sub(r'^proc\s+"contextless"\s*', "proc", rest)
+                    found[package, name] = entry_shape(rest, aliases)
+    problems = []
+    for name in ENTRIES:
+        shapes = {}
+        for package in sorted(FORMATS):
+            if (package, name) in ENTRY_EXCEPTIONS:
+                continue
+            if (package, name) not in found:
+                problems.append(f"entries: {package} declares no `{name}`")
+                continue
+            shapes.setdefault(found[package, name], []).append(package)
+        if len(shapes) > 1:
+            problems.append(f"entries: `{name}` has {len(shapes)} shapes:")
+            problems += [f"entries:   {', '.join(packages)}: {shape}" for shape, packages in shapes.items()]
+    for problem in problems:
+        print(problem)
+    return 1 if problems else 0
+
 
 def api(write=False):
     """Compares the public signatures with API.txt and API_SHARED.txt, and the format packages' names files with
@@ -549,7 +631,7 @@ def api(write=False):
                 differs = True
     if differs:
         print("api: API.txt, API_SHARED.txt or a names file differs from the sources: regenerate them with `make api-write` and review the change")
-    return 1 if differs else 0
+    return 1 if entries() or differs else 0
 
 
 # A variable is `name := v`, `name: T` or `name: T = v`, at file scope or under `@(static)` in a procedure. Only

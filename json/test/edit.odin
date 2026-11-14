@@ -2,6 +2,7 @@ package json_tests
 
 import "base:runtime"
 import "core:mem"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -164,7 +165,125 @@ edit_insert_member :: proc(t: ^testing.T) {
 		// The new member takes the line, indent and space after the key separator of the container's members.
 		{"{\r\n  \"a\": 1\r\n}", "{\r\n  \"a\": 1,\r\n  \"b\": [ ]\r\n}", .Insert, 0, 1, "b", "[ ]"},
 	})
-	edit_rows(t, .Json5, {{`{a:1}`, `{a:1,"b":2}`, .Insert, 0, 1, "b", "2"}})
+	// A new key is written bare where the container's first key is and an unquoted key can spell it.
+	edit_rows(t, .Json5, {
+		{`{a:1}`, `{a:1,b:2}`, .Insert, 0, 1, "b", "2"},
+		{`{a:1}`, `{b:2,a:1}`, .Insert, 0, 0, "b", "2"},
+		{"{\n  host: 'a',\n}", "{\n  host: 'a',\n  $tls_2: true,\n}", .Insert, 0, 1, "$tls_2", "true"},
+		// A lone member on its line spaces its siblings as it spaces its value.
+		{`{host: "a"}`, `{host: "a", tls: true}`, .Insert, 0, 1, "tls", "true"},
+		{`{a:1}`, `{a:1,"a-b":2}`, .Insert, 0, 1, "a-b", "2"},
+		{`{a:1}`, `{a:1,"2b":2}`, .Insert, 0, 1, "2b", "2"},
+		{`{a:1}`, `{a:1,"a\\b":2}`, .Insert, 0, 1, "a\\b", "2"},
+		{`{"a":1,b:2}`, `{"a":1,b:2,"c":3}`, .Insert, 0, 2, "c", "3"},
+		{`{'a':1}`, `{'a':1,"c":3}`, .Insert, 0, 1, "c", "3"},
+		{`{}`, `{"b":2}`, .Insert, 0, 0, "b", "2"},
+	})
+	edit_rows(t, .Jsonc, {{`{"a":1}`, `{"a":1,"b":2}`, .Insert, 0, 1, "b", "2"}})
+}
+
+// An insert after the last member and between two, after each separator and comment shape a member's line can end
+// with, a trailing comma and a blank line included, in an object and an array, nested or not: the text reads back to
+// the value with the member added, keeps every source byte, keeps each source line that holds a separator as it was,
+// and puts the new member at its siblings' indent.
+@(test)
+edit_insert_junction_law :: proc(t: ^testing.T) {
+	separated := []string{",", ",\n", ", // c", " /* c */,", ", /* c */", " /* c */, // d"}
+	unseparated := []string{"", "\n", " // c", " /* c */"}
+	for spec in json.Spec {
+		comments := spec != .Json
+		led := separated if comments else separated[:2]
+		last := slice.concatenate([][]string{unseparated if comments else unseparated[:2], led if comments else {}}, context.temp_allocator)
+		for object in ([]bool{true, false}) {
+			for nested in ([]bool{false, true}) {
+				for n in 1 ..= 2 {
+					for first in (led if n == 2 else []string{""}) {
+						for tail in last {
+							for at in max(n - 1, 1) ..= n {
+								if !junction_law(t, spec, object, nested, n, at, first, tail) {
+									return
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+@(private = "file")
+junction_law :: proc(t: ^testing.T, spec: json.Spec, object, nested: bool, n, at: int, first, tail: string) -> bool {
+	context.allocator = context.temp_allocator
+	indent := "    " if nested else "  "
+	member := [2]string{`"a": 1`, `"c": 3`} if object else {"1", "3"}
+	value := [3]string{`"a":1`, `"b":2`, `"c":3`} if object else {"1", "2", "3"}
+	src, want: strings.Builder
+	if nested {
+		strings.write_string(&src, "{\n  \"o\": ")
+		strings.write_string(&want, `{"o":`)
+	}
+	strings.write_string(&src, "{\n" if object else "[\n")
+	strings.write_string(&want, "{" if object else "[")
+	for i in 0 ..< n {
+		strings.write_string(&src, indent)
+		strings.write_string(&src, member[i])
+		strings.write_string(&src, tail if i == n - 1 else first)
+		strings.write_byte(&src, '\n')
+	}
+	strings.write_string(&src, indent[2:])
+	strings.write_string(&src, "}" if object else "]")
+	in_order := [3]string{value[0], value[1], value[2]} if at == 1 else {value[0], value[2], value[1]}
+	for v, i in in_order[:n + 1] {
+		strings.write_string(&want, "," if i > 0 else "")
+		strings.write_string(&want, v)
+	}
+	strings.write_string(&want, "}" if object else "]")
+	if nested {
+		strings.write_string(&src, "\n}")
+		strings.write_string(&want, "}")
+	}
+	text := strings.to_string(src)
+
+	doc, err := read_json(transmute([]u8)text, spec)
+	defer core.destroy(&doc)
+	testing.expectf(t, err == nil, "%v %q: %v", spec, text, err) or_return
+	container := core.ROOT
+	if nested {
+		container, _ = core.member(&doc, core.ROOT, "o")
+	}
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	e := write.insert(&list, container, at, "b", typed.Raw("2")) if object else write.insert(&list, container, at, typed.Raw("2"))
+	walktest.expect_nil(t, e)
+	out_bytes, _, cerr := compose.commit(&list)
+	testing.expectf(t, cerr == nil, "%v %q: commit %v", spec, text, cerr) or_return
+	out := string(out_bytes)
+
+	got, gerr := read_json(out_bytes, spec)
+	defer core.destroy(&got)
+	expected, _ := core.build(transmute([]u8)strings.to_string(want), json.as(.Json))
+	defer core.destroy(&expected)
+	testing.expectf(t, gerr == nil && core.equal(core.Node_Ref{&got, core.ROOT}, core.Node_Ref{&expected, core.ROOT}), "%v %q at %d: %q does not read as %s", spec, text, at, out, strings.to_string(want)) or_return
+	k := 0
+	for i in 0 ..< len(out) {
+		if k < len(text) && out[i] == text[k] {
+			k += 1
+		}
+	}
+	testing.expectf(t, k == len(text), "%v %q at %d: %q drops source bytes", spec, text, at, out) or_return
+	for line in strings.split_lines(text) {
+		if strings.contains_rune(line, ',') {
+			testing.expectf(t, strings.contains(out, strings.concatenate({"\n", line, "\n"})), "%v %q at %d: %q changes the line %q", spec, text, at, out, line) or_return
+		}
+	}
+	new_member := `"b": 2` if object else "2"
+	for line in strings.split_lines(out) {
+		if strings.has_prefix(strings.trim_left(line, " "), new_member) {
+			return testing.expectf(t, strings.has_prefix(line, indent) && line[len(indent)] != ' ', "%v %q at %d: %q puts the new member off its siblings' indent", spec, text, at, out)
+		}
+	}
+	return testing.expectf(t, false, "%v %q at %d: %q has no line that starts with the new member", spec, text, at, out)
 }
 
 // A key is a decoded name, so a quote, a backslash, a line feed and a control byte are written escaped, by `set` on a
@@ -216,6 +335,134 @@ edit_log_uses_list_allocator :: proc(t: ^testing.T) {
 	defer core.edit_list_destroy(&list)
 	walktest.expect_nil(t, write.set(&list, 1, typed.Raw(string("2"))))
 	testing.expect_value(t, len(track.allocation_map), 2)
+}
+
+// A list of more edits than a read holds paths reads back by runs of regions, each an array's elements in order: a set
+// of each even element's member and a removal of each odd one's.
+@(test)
+edit_many_regions :: proc(t: ^testing.T) {
+	N :: 3 * core.MAX_PATHS
+	src, want: strings.Builder
+	defer strings.builder_destroy(&src)
+	defer strings.builder_destroy(&want)
+	strings.write_byte(&src, '[')
+	strings.write_byte(&want, '[')
+	for k in 0 ..< N {
+		sep := "," if k > 0 else ""
+		strings.write_string(&src, sep)
+		strings.write_string(&src, `{"s":0}`)
+		strings.write_string(&want, sep)
+		strings.write_string(&want, `{"s":7}` if k % 2 == 0 else `{}`)
+	}
+	strings.write_byte(&src, ']')
+	strings.write_byte(&want, ']')
+	doc, err := core.build(src.buf[:], json.as(.Json))
+	defer core.destroy(&doc)
+	walktest.expect_nil(t, err)
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	// Element `k` is node `1 + 3k`, its key and value the two after it.
+	for k in 0 ..< N {
+		value := core.Node_Index(3 + 3 * k)
+		walktest.expect_nil(t, write.set(&list, value, 7) if k % 2 == 0 else core.remove(&list, value))
+	}
+	{
+		arena: runtime.Arena
+		defer runtime.arena_destroy(&arena)
+		context.allocator = runtime.arena_allocator(&arena)
+		regions, known, fits := core.edited_regions(&list)
+		testing.expect(t, known && fits && len(regions) == N)
+	}
+	testing.expect(t, expect_commit(t, &list, strings.to_string(want), .Json))
+}
+
+// A set beside a removal at an array's end reads back, the end apart from the element before it, since a `Slice` gives
+// no answer past an array's end.
+@(test)
+edit_set_beside_a_removed_end :: proc(t: ^testing.T) {
+	doc, err := core.build(transmute([]u8)string(`[1,2]`), json.as(.Json))
+	defer core.destroy(&doc)
+	walktest.expect_nil(t, err)
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	walktest.expect_nil(t, write.set(&list, 1, 9))
+	walktest.expect_nil(t, core.remove(&list, 2))
+	testing.expect(t, expect_commit(t, &list, "[9]", .Json))
+}
+
+// A commit of many edits reads each scalar and key it wrote in the bytes it put it in: a set string that needs an escape,
+// a renamed key that needs one, and an inserted member's key and value.
+@(test)
+edit_many_writes_read_back :: proc(t: ^testing.T) {
+	N :: 3 * core.MAX_PATHS
+	src, want: strings.Builder
+	defer strings.builder_destroy(&src)
+	defer strings.builder_destroy(&want)
+	strings.write_byte(&src, '[')
+	strings.write_byte(&want, '[')
+	parts := [3]string{`{"a":"q\"y","b":1}`, `{"a":"x","c\\d":1}`, `{"a":"x","b":1,"n":2.5}`}
+	for k in 0 ..< N {
+		sep := "," if k > 0 else ""
+		strings.write_string(&src, sep)
+		strings.write_string(&src, `{"a":"x","b":1}`)
+		strings.write_string(&want, sep)
+		strings.write_string(&want, parts[k % 3])
+	}
+	strings.write_byte(&src, ']')
+	strings.write_byte(&want, ']')
+	doc, err := core.build(src.buf[:], json.as(.Json))
+	defer core.destroy(&doc)
+	walktest.expect_nil(t, err)
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	// Element `k` is node `1 + 5k`, its keys and values the four after it.
+	for k in 0 ..< N {
+		element := core.Node_Index(1 + 5 * k)
+		switch k % 3 {
+		case 0:
+			walktest.expect_nil(t, write.set(&list, element + 2, `q"y`))
+		case 1:
+			walktest.expect_nil(t, core.set_text(&list, element + 3, `c\d`))
+		case 2:
+			walktest.expect_nil(t, write.insert_member(&list, element, 2, "n", 2.5))
+		}
+	}
+	testing.expect(t, expect_commit(t, &list, strings.to_string(want), .Json))
+}
+
+// The read of what a commit wrote refuses a text whose token at a written value's bytes spans other bytes or reads as
+// another value, and a written value no token reaches, and gives the walk's fault for a text that does not read.
+@(test)
+reads_written_judges_each_value :: proc(t: ^testing.T) {
+	as := json.as(.Json)
+	walk := core.services_of(as).edit.walk_written
+	Case :: struct {
+		out:     string,
+		written: core.Written,
+		reason:  core.Edit_Reason,
+		fault:   bool,
+	}
+	cases := []Case {
+		{`[1,7,"a"]`, {lo = 3, hi = 4, want = f64(7)}, .None, false},
+		{`[1,7,"a"]`, {lo = 3, hi = 4, want = f64(8)}, .Reads_Back_Other, false},
+		{`[17,"a"]`, {lo = 2, hi = 3, want = f64(7)}, .Reads_Back_Other, false},
+		{`[1,"b","a"]`, {lo = 3, hi = 6, want = "b"}, .None, false},
+		{`{"k":1}`, {lo = 1, hi = 4, want = "k", key = true}, .None, false},
+		{`{"k":1}`, {lo = 1, hi = 4, want = "j", key = true}, .Reads_Back_Other, false},
+		{`{"k":1}`, {lo = 1, hi = 4, want = "k"}, .Reads_Back_Other, false},
+		{`[1]`, {lo = 5, hi = 6, want = f64(1)}, .Reads_Back_Other, false},
+		{`[1,7,]`, {lo = 3, hi = 4, want = f64(7)}, .None, true},
+	}
+	arena: runtime.Arena
+	defer runtime.arena_destroy(&arena)
+	context.allocator = runtime.arena_allocator(&arena)
+	for c in cases {
+		written := []core.Written{c.written}
+		e := core.reads_written(transmute([]u8)c.out, as, written, walk)
+		faulted := e.inner.kind != .None
+		bad := c.reason != .None || c.fault
+		testing.expectf(t, (e.kind == .Bad_Result) == bad && e.reason == c.reason && faulted == c.fault, "%q: %v", c.out, e)
+	}
 }
 
 // `commit` on edits in different subtrees, on two adjacent members, on an insert that conflicts with a removal, and on

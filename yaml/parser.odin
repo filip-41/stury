@@ -36,11 +36,11 @@ Open_Anchor :: struct {
 	depth:  u32,
 }
 
-// A tag handle a `%TAG` directive declared, as the spans of its text and of its prefix.
+// A tag handle a `%TAG` directive declared, and its prefix, as views of the text or of a copy a cursor keeps once the
+// directive's bytes may leave its window.
 @(private)
 Handle :: struct {
-	lo, hi:   u64,
-	plo, phi: u64,
+	handle, prefix: string,
 }
 
 // What the next content line is, as `peek_next` finds it.
@@ -59,8 +59,24 @@ Line :: struct {
 	tab:  bool, // a tab stands in the indentation
 }
 
+// The parser's place, which a saved walk copies whole, and the arrays it keeps beside it.
 @(private)
 Parser :: struct {
+	using state: Parser_State,
+	stage:      [dynamic]core.Token,
+	pending:    [dynamic]Comment,
+	anchors:    [dynamic]Anchor,
+	log:        [dynamic]core.Token,
+	open:       [dynamic]Open_Anchor,
+	handles:    [dynamic]Handle,
+	merges:     [dynamic]core.Token,
+	blocks:     [dynamic]Block,
+	flows:      [dynamic]Flow,
+	keys:       Key_Table,
+}
+
+@(private)
+Parser_State :: struct {
 	src:        []u8,
 	pos:        u64,
 	ls:         u64, // the first byte of the line `pos` is on
@@ -69,13 +85,7 @@ Parser :: struct {
 	fail:       u64,
 	sink:       Token_Sink,
 	data:       rawptr,
-	stage:      [dynamic]core.Token,
 	staging:    bool,
-	pending:    [dynamic]Comment,
-	anchors:    [dynamic]Anchor,
-	log:        [dynamic]core.Token,
-	open:       [dynamic]Open_Anchor,
-	handles:    [dynamic]Handle,
 	pend_anch:  int, // the anchor the next node token takes, or -1
 	tdepth:     u32,
 	expanded:   u64, // the bytes the document's replays have read
@@ -91,16 +101,12 @@ Parser :: struct {
 	merge_keys: bool,
 	holding:    bool, // the tokens of a `<<` value are being held
 	hold_depth: u32,
-	merges:     [dynamic]core.Token,
-	blocks:     [dynamic]Block,
-	flows:      [dynamic]Flow,
 	next:       Next,
 	flow_n:     int, // the indentation the outermost flow collection open was read at
 	flow_step:  Flow_Step, // the step a paused flow walk takes next
 	flow_then:  Flow_Then,
 	// A hook stopped a walk that saves a cursor: the walk returns at the next place `read_blocks` can resume from.
 	pause:      bool,
-	keys:       Key_Table,
 	typed:      bool, // a key of the text resolves to no string
 	masks:      Masks,
 }
@@ -322,12 +328,12 @@ emit_now :: proc(p: ^Parser, t: core.Token) -> bool {
 	return emit_raw(p, t)
 }
 
-// Sends a token past the pending comments, keeping the anchors and the token log. A comment and an anchor fact are not
-// counted or logged, since an alias does not read them back.
+// Sends a token past the pending comments, keeping the anchors and the token log. A comment, a directive and an anchor
+// fact are not counted or logged, since an alias does not read them back.
 @(private)
 emit_raw :: proc(p: ^Parser, t: core.Token) -> bool {
 	#partial switch t.role {
-	case .Comment, .Comment_Inline, .Comment_Foot:
+	case .Comment, .Comment_Inline, .Comment_Foot, .Directive:
 		return call_sink(p, t)
 	case .Anchor:
 		p.pend_anch = len(p.anchors)
@@ -410,8 +416,8 @@ check_tag :: proc(p: ^Parser, t: core.Token) -> (ct: Core_Type, ok: bool) {
 	prefix: string
 	declared := false
 	for h in p.handles {
-		if string(p.src[h.lo:h.hi]) == handle {
-			prefix, declared = string(p.src[h.plo:h.phi]), true
+		if h.handle == handle {
+			prefix, declared = h.prefix, true
 		}
 	}
 	ct = core_type(handle, suffix, prefix, declared)

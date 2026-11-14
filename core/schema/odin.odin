@@ -100,7 +100,7 @@ write_odin :: proc(d: ^rules.Description, package_name: string, as: core.As, for
 REGISTER_FRAGMENT ::
 	"\n// Adds the JSON Schema `text` to the rules of `T`.\n" +
 	"register_fragment :: proc(reg: ^model.Registry, T: typeid, text: string) -> core.Error {\n" +
-	"\ts := json.load_schema(transmute([]u8)text) or_return\n" +
+	"\ts := json.load_schema(transmute([]u8)text, .Json) or_return\n" +
 	"\tdefer json.destroy(s)\n" +
 	"\tmodel.register_schema(reg, T, s.description) or_return\n" +
 	"\treturn nil\n" +
@@ -1215,8 +1215,8 @@ default_number :: proc(x: core.Value, base: string) -> (string, bool) {
 	#partial switch v in x {
 	case core.Node_Ref:
 		text = string(core.span(v.doc, v.node))
-	case ^core.Number_Text:
-		text = v.text
+	case core.Number_View:
+		text = core.view_text(v)
 	case f64:
 		digits: [spell.F64_ROOM]u8
 		text = strings.clone(string(digits[:spell.f64_text(&digits[0], v)]))

@@ -1,6 +1,7 @@
 // The records of TOML: a text is one record, from the reader's position to the input's end.
 package toml_tests
 
+import "core:fmt"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -16,7 +17,7 @@ RECORD_TEXT :: "a = 1\n[t]\nb = [1, 2]\n\n[t.u]\nc = 'x'\n"
 @(private = "file")
 record_forms :: proc(t: ^testing.T, $S: toml.Spec) {
 	src := transmute([]u8)string(RECORD_TEXT)
-	faults, err := toml.records_check(src, S)
+	faults, err := toml.records_validate(src, S)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, len(faults), 0)
 	delete(faults)
@@ -69,7 +70,7 @@ every_record_form_reads_a_text :: proc(t: ^testing.T) {
 	record_forms(t, .Toml_1_0)
 	record_forms(t, .Toml_1_1)
 	src := transmute([]u8)string(RECORD_TEXT)
-	spec := toml.Spec.Toml_1_1
+	spec :: toml.Spec.Toml_1_1
 	it := records.open(src, toml.as(spec), .Concatenated)
 	defer toml.records_close(&it)
 	n := 0
@@ -86,7 +87,7 @@ every_record_form_reads_a_text :: proc(t: ^testing.T) {
 // the reader's fault at its byte in the input.
 @(test)
 a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
-	spec := toml.Spec.Toml_1_1
+	spec :: toml.Spec.Toml_1_1
 	empty := toml.records_open(nil, spec)
 	defer toml.records_close(&empty)
 	_, more := toml.records_next(&empty)
@@ -97,7 +98,7 @@ a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
 	rec, ok := toml.records_next(&from)
 	testing.expect(t, ok && rec.at == 7 && string(rec.text) == "a = 1\nb = 2\n")
 	bad := transmute([]u8)string("a = 1\nb = 2\na = 3\n")
-	faults, err := toml.records_check(bad, spec)
+	faults, err := toml.records_validate(bad, spec)
 	defer delete(faults)
 	testing.expect(t, err == nil && len(faults) == 1 && faults[0].detail == u8(toml.Detail.Duplicate_Key) && faults[0].at == 12)
 }
@@ -139,4 +140,20 @@ a_stream_is_read_as_one_text :: proc(t: ^testing.T) {
 	}
 	f, bad := it.fault.?
 	testing.expect(t, bad && f.detail == u8(toml.Detail.Redefined_Table) && f.at == u64(len(whole)) + 1)
+}
+
+// `.Entries` gives the tables of an array of tables, each with the subtables its sections hold after it, and the
+// members of a table, and a fault ends the records at the byte `validate` gives.
+@(test)
+entries_are_the_members_of_a_container :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "a = 1\n[[x]]\ny = 1\n[x.z]\nq = 2\n[[x]]\ny = 2\n"
+	walktest.expect_entries(t, src, toml.as(.Toml_1_0), {"x"}, "6  {\"y\":1,\"z\":{\"q\":2}}\n30  {\"y\":2}\nend")
+	walktest.expect_entries(t, src, toml.as(.Toml_1_0), nil, "4 a 1\n6 x [{\"y\":1,\"z\":{\"q\":2}},{\"y\":2}]\nend")
+	walktest.expect_framings(t, toml.CAPABILITIES, toml.as(.Toml_1_0))
+	bad := "[[x]]\ny = 1\n[[x]]\ny = \n"
+	fault, _ := walktest.fault_in(toml.validate(transmute([]u8)string(bad), .Toml_1_0))
+	walktest.expect_entries(t, bad, toml.as(.Toml_1_0), {"x"}, fmt.tprintf("fault %d", fault.at))
+	it := toml.records_open(transmute([]u8)src, .Toml_1_0, framing = .Entries, entries = {"x"})
+	testing.expect_value(t, walktest.entries_lines(&it), "6  {\"y\":1,\"z\":{\"q\":2}}\n30  {\"y\":2}\nend")
 }

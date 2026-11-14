@@ -34,7 +34,7 @@ record :: proc "contextless" (r: ^Recorder, s: core.Hook_Regs, t: core.Token) ->
 		name = "Inline"
 	case .Comment_Foot:
 		name = "Foot"
-	case .Tag, .Anchor, .Alias, .Instruction, .Doctype, .Attribute, .Partial:
+	case .Tag, .Anchor, .Alias, .Instruction, .Doctype, .Directive, .Attribute, .Partial:
 		name = "Fact"
 	}
 	if text != "" {
@@ -98,7 +98,9 @@ scalars_keep_their_spans :: proc(t: ^testing.T) {
 comments_take_their_roles :: proc(t: ^testing.T) {
 	got, _, fault := tokens_of("# top\na = 1 # one\n\n# above b\nb = [ # open\n  1, # first\n  # before two\n  2,\n  # last\n]\n[t] # header\n# foot\n")
 	testing.expect_value(t, fault == nil, true)
-	testing.expect_value(t, got, "Object Comment:# top Key:a Number:1 Inline:# one Comment:# above b Key:b Array Comment:# open Number:1 Inline:# first Comment:# before two Number:2 Foot:# last End Key:t Object End Inline:# header Foot:# foot End")
+	testing.expect_value(t, got, "Object Comment:# top Key:a Number:1 Inline:# one Comment:# above b Key:b Array Comment:# open Number:1 Inline:# first Comment:# before two Number:2 Foot:# last End Key:t Object Foot:# foot End Inline:# header End")
+	got, _, _ = tokens_of("# head\n\n# above a\na = 1\n")
+	testing.expect_value(t, got, "Comment:# head Object Comment:# above a Key:a Number:1 End")
 }
 
 @(test)

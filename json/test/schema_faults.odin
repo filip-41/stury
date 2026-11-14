@@ -1,8 +1,8 @@
 package json_tests
 
 import "core:fmt"
+import "core:mem"
 import "core:strings"
-import "core:time"
 import "core:testing"
 import core "../../core"
 import typed "../../core/typed"
@@ -101,10 +101,10 @@ a_shared_allof_chain_binds_in_bounded_memory :: proc(t: ^testing.T) {
 	e := binds(strings.to_string(text)); testing.expectf(t, e == nil, "%v", e)
 }
 
-// A chain of references loads and binds in time linear in its length: a chain eight times as long takes less than 32
-// times as long, where a search along the chain from each link would take 64 times as long. Each length takes its
-// fastest of three runs, and a ratio of two times holds on a machine that runs slow throughout. The runs bind on the
-// heap, so a run after the first reuses the pages the one before released rather than faulting in new ones.
+// A chain of references loads and binds in work linear in its length: a chain eight times as long allocates less than
+// 16 times as many bytes, where a walk along the chain from each link, which builds the way it took, allocates 64
+// times as many. The chains are short enough that such a walk fails the test and does not exhaust memory. The bytes are those of the heap and the temp allocator together, which load, binding and unbinding
+// ask for, so the figure holds on a machine of any speed and load.
 @(test)
 a_long_ref_chain_loads_and_binds :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -117,19 +117,23 @@ a_long_ref_chain_loads_and_binds :: proc(t: ^testing.T) {
 		strings.write_string(&text, "}}")
 		return strings.to_string(text)
 	}
-	short, long := chain(6250), chain(50000)
-	fastest: [2]time.Duration = max(time.Duration)
-	for _ in 0 ..< 3 {
-		for text, i in ([2]string{short, long}) {
-			start := time.tick_now()
-			e := binds(text)
-			fastest[i] = min(fastest[i], time.tick_since(start))
-			if !testing.expectf(t, e == nil, "%v", e) {
-				return
-			}
-		}
+	allocated :: proc(text: string) -> (bytes: i64, err: core.Error) {
+		heap, temp: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&heap, context.allocator)
+		mem.tracking_allocator_init(&temp, context.temp_allocator)
+		defer mem.tracking_allocator_destroy(&heap)
+		defer mem.tracking_allocator_destroy(&temp)
+		context.allocator, context.temp_allocator = mem.tracking_allocator(&heap), mem.tracking_allocator(&temp)
+		err = binds(text)
+		return heap.total_memory_allocated + temp.total_memory_allocated, err
 	}
-	testing.expectf(t, fastest[1] < 32 * fastest[0], "%v for 50000 links, %v for 6250", fastest[1], fastest[0])
+	short, long := chain(1500), chain(12000)
+	few, ferr := allocated(short)
+	many, merr := allocated(long)
+	if !testing.expectf(t, ferr == nil && merr == nil, "%v, %v", ferr, merr) {
+		return
+	}
+	testing.expectf(t, many < 16 * few, "%v bytes for 12000 links, %v for 1500", many, few)
 }
 
 // A schema whose references lead 2100 levels down is refused and no recursion runs out of stack.

@@ -10,14 +10,11 @@ import core "../core"
 import typed "../core/typed"
 import write "../core/write"
 
-// Starts a token write, as `write.tokens_init` does with `as(spec)`. The calls give a value as `write` takes a node.
-tokens_init :: proc(t: ^write.Tokens, spec: Spec, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind {
-	return write.tokens_init(t, bound_as(spec), opts, allocator, stream, &TOKENS)
-}
 
 @(private, rodata)
 TOKENS := write.Token_Spelling {
 	tree = write.MARKUP_TREE,
+	built = value_write,
 	start = proc(t: ^write.Tokens, _: core.As) -> core.Typed_Error_Kind {
 		if t.opts.pretty && t.out.stream.procedure != nil {
 			return .Unsupported
@@ -52,6 +49,9 @@ TOKENS := write.Token_Spelling {
 			e.key_next = true
 		}
 		return .None
+	},
+	comment = proc(t: ^write.Tokens, _: core.Role, text: string) -> core.Typed_Error_Kind {
+		return el_comment((^Elements)(t.state), text)
 	},
 	stop = proc(t: ^write.Tokens) {
 		if e := (^Elements)(t.state); e != nil {

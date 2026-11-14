@@ -107,7 +107,7 @@ record :: proc "contextless" (r: ^Recorder, s: core.Hook_Regs, t: core.Token) ->
 	context = runtime.default_context()
 	text := string(r.src[t.lo:t.lo + u64(t.n)])
 	#partial switch t.role {
-	case .Comment, .Comment_Inline, .Comment_Foot:
+	case .Comment, .Comment_Inline, .Comment_Foot, .Directive:
 		return s, .Next
 	case .Anchor:
 		r.props[0] = text[1:]
@@ -169,7 +169,7 @@ record :: proc "contextless" (r: ^Recorder, s: core.Hook_Regs, t: core.Token) ->
 		}
 		buf := make([]u8, 3 * int(t.n) + 4)
 		view := core.Token_View{src = r.src}
-		decoded, ok := yaml.text(&view, t, buf)
+		decoded, ok := yaml.token_text(&view, t, buf)
 		strings.write_byte(&r.out, ' ')
 		strings.write_string(&r.out, style)
 		escaped(&r.out, decoded if ok else "<overflow>")

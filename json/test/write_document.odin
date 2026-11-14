@@ -399,7 +399,7 @@ write_document_sort_keys :: proc(t: ^testing.T) {
 }
 
 JSON5_TEXTS :: [?][2]string {
-	{`{a:1,'b':+.5,"c":5.,d:0x1F,e:-0xff,f:[.5e3,-.0,+1],g:'it\'s'}`, `{"a":1,"b":0.5,"c":5,"d":31,"e":-255,"f":[0.5e3,-0.0,1],"g":"it's"}`},
+	{`{a:1,'b':+.5,"c":5.,d:0x1F,e:-0xff,f:[.5e3,-.0,+1],g:'it\'s'}`, `{"a":1,"b":0.5,"c":5.0,"d":31,"e":-255,"f":[0.5e3,-0.0,1],"g":"it's"}`},
 	{"{ // c\n a: 0xFFFFFFFFFFFFFFFFFFFFFFFF, $_x: 'a\\\nb' }", `{"a":79228162514264337593543950335,"$_x":"ab"}`},
 	{`[0x0,"\u00e9",'\x41\0']`, `[0,"é","A\u0000"]`},
 	{`/* c */ 1e5 // d`, `1e5`},
@@ -642,7 +642,29 @@ write_document_keeps_comments_of_another_format :: proc(t: ^testing.T) {
 	defer delete(text)
 	walktest.expect_nil(t, werr)
 	testing.expect_value(t, dropped, 0)
-	testing.expect_value(t, string(text), "// head\n// before a\n{\n  \"a\": 1, // tail a\n  \"b\": {\n    \"c\": 2\n  }\n}\n// end\n")
+	testing.expect_value(t, string(text), "// head\n{\n  // before a\n  \"a\": 1, // tail a\n  \"b\": {\n    \"c\": 2\n  }\n}\n// end\n")
+}
+
+// A JSON5 or YAML number with a point and no digit after it stays a float when written as JSON, and one with no point
+// stays an integer.
+@(test)
+write_document_keeps_a_bare_point_a_float :: proc(t: ^testing.T) {
+	doc, err := core.build(transmute([]u8)string(`[5., +1., -2., .5, 5.e3, +7]`), json.as(.Json5))
+	defer core.destroy(&doc)
+	if !walktest.expect_nil(t, err) {
+		return
+	}
+	text, _, werr := core.write(&doc, as = json.as(.Json))
+	defer delete(text)
+	walktest.expect_nil(t, werr)
+	testing.expect_value(t, string(text), `[5.0,1.0,-2.0,0.5,5.0e3,7]`)
+	plain, perr := yaml.build(transmute([]u8)string("[5., +1., 5.e3, +7]"), .Yaml_1_2)
+	defer core.destroy(&plain)
+	walktest.expect_nil(t, perr)
+	written, _, yerr := core.write(&plain, as = json.as(.Json))
+	defer delete(written)
+	walktest.expect_nil(t, yerr)
+	testing.expect_value(t, string(written), `[5.0,1.0,5.0e3,7]`)
 }
 
 // A document of another format is written through its own text, number and kind: an empty cell is null.

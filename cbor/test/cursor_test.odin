@@ -175,7 +175,7 @@ answers_break_early :: proc(t: ^testing.T) {
 	path, _ := core.parse_path(".[]")
 	defer core.path_destroy(&path)
 	src := hex("83 01 02 03")
-	spec := cbor.Spec.Preferred
+	spec :: cbor.Spec.Preferred
 	it := cbor.answers(src, spec, path)
 	first: core.Token_Answer
 	for a in cbor.next(&it) {

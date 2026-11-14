@@ -1251,7 +1251,7 @@ fork_value :: #force_no_inline proc "contextless" (h: ^Check, regs, next: core.H
 // `t` is read so, which needs a check with no sink and no other arm that judges the value.
 @(private)
 fork_read :: #force_no_inline proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use, t: core.Token) -> (core.Hook_Regs, core.Action, bool) {
-	if h.find_tag == document_tag && (^Document_Read(Check))(h.format).doc.readers.attribute != nil {
+	if h.find_tag == document_tag && core.is_markup((^Document_Read(Check))(h.format).doc) {
 		return {}, .Next, false
 	}
 	taken := Apply_Kind.All
@@ -1478,7 +1478,7 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 		return next, fork_fault(h, regs, .Too_Deep, lo, hi, "the subschemas that judge the value nest deeper than the check's stack holds")
 	}
 	// A markup element reads as its record says, which a run of another record cannot follow.
-	if h.find_tag == document_tag && (^Document_Read(Check))(h.format).doc.readers.attribute != nil {
+	if h.find_tag == document_tag && core.is_markup((^Document_Read(Check))(h.format).doc) {
 		return next, fork_fault(h, regs, .Unsupported, lo, hi)
 	}
 	if h.pool == nil {

@@ -87,7 +87,7 @@ model_rows :: proc(src: string, spec: dsv.Spec, opts: dsv.Options) -> (out: [dyn
 	return
 }
 
-// Checks `records.next` and `records.check` on `src` against the model.
+// Checks `records.next` and `records.validate` on `src` against the model.
 @(private = "file")
 expect_rows :: proc(t: ^testing.T, src: string, spec: dsv.Spec, opts: dsv.Options) -> bool {
 	want, _, fault := model_rows(src, spec, opts)
@@ -104,7 +104,7 @@ expect_rows :: proc(t: ^testing.T, src: string, spec: dsv.Spec, opts: dsv.Option
 	if !testing.expectf(t, n == len(want) && it.fault == fault, "%v %v %q: %d rows, fault %v, want %d, %v", spec, opts, src, n, it.fault, len(want), fault) {
 		return false
 	}
-	faults, err := records.check(transmute([]u8)src, dsv.as(spec, opts), .Lines, context.temp_allocator)
+	faults, err := records.validate(transmute([]u8)src, dsv.as(spec, opts), .Lines, context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	f, bad := fault.?
 	return testing.expectf(t, len(faults) == int(bad) && (!bad || faults[0] == f), "%v %q: check gave %v, want %v", spec, src, faults, fault)
@@ -155,6 +155,7 @@ LAYOUTS := []dsv.Options{{}, {no_header = true}, {comment = '#'}, {no_header = t
 @(test)
 rows_follow_the_model :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
+	walktest.expect_framings(t, dsv.CAPABILITIES, dsv.as(.Csv))
 	state := rand.create(5)
 	gen := rand.default_random_generator(&state)
 	// Each byte of a text in turn becomes a byte that breaks or ends a row.
@@ -231,13 +232,13 @@ rows_across_batches :: proc(t: ^testing.T) {
 @(private = "file")
 expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, spec: dsv.Spec, opts: dsv.Options) -> bool {
 	text, as := transmute([]u8)src, dsv.as(spec, opts)
-	serial, _ := records.check(text, as, .Lines, context.temp_allocator)
+	serial, _ := records.validate(text, as, .Lines, context.temp_allocator)
 	whole := walktest.fault_of(core.validate(text, as))
 	if v := records.validate_parallel(text, as); !testing.expectf(t, v == whole, "%v %v %q: validate %v, want %v", spec, opts, src, v, whole) {
 		return false
 	}
 	for &pool in pools {
-		got, _ := records.check(text, as, .Lines, context.temp_allocator, &pool.runner)
+		got, _ := records.validate(text, as, .Lines, context.temp_allocator, &pool.runner)
 		if !testing.expectf(t, slice.equal(got, serial), "%v %v %q at width %d: %v, want %v", spec, opts, src, pool.runner.threads + 1, got, serial) {
 			return false
 		}
@@ -249,7 +250,7 @@ expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, spec: d
 }
 
 @(test)
-records_check_on_threads :: proc(t: ^testing.T) {
+records_validate_on_threads :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	pools: [4]host.Pool
 	for w, i in ([4]int{1, 2, 6, 18}) {
@@ -283,6 +284,117 @@ records_check_on_threads :: proc(t: ^testing.T) {
 	expect_chain_law(t, pools[:], strings.concatenate({"h,k\n0,ok\n1,x\"y\n", cells}, context.temp_allocator), .Csv, {})
 }
 
+@(private = "file")
+RECORDS_SLICE :: #config(RECORDS_SLICE, 64 * 1024)
+
+@(private = "file")
+same_tables :: proc(got, want: ^core.Document) -> bool {
+	a, b := core.tables_of(got), core.tables_of(want)
+	if len(a) != len(b) {
+		return false
+	}
+	for x, i in a {
+		y := b[i]
+		if x.node != y.node || x.header != y.header || x.first_row != y.first_row || x.width != y.width || x.unique_keys != y.unique_keys || !slice.equal(x.key_slots, y.key_slots) {
+			return false
+		}
+	}
+	return true
+}
+
+// A whole table built on threads against the same table built on one: the same document, node for node, with the same
+// table and line ends, or the same refusal at the same byte. `joined` says the text is one a build cuts into pieces.
+@(private = "file")
+expect_build_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, spec: dsv.Spec, opts: dsv.Options, refuse, joined: bool) -> bool {
+	text, as := transmute([]u8)src, dsv.as(spec, opts)
+	dups: core.Duplicates = .Refuse if refuse else .Last
+	want, want_err := core.build(text, as, dups)
+	defer core.destroy(&want)
+	for &pool in pools {
+		pieces: int
+		got, err := records.build(text, as, dups, runner = &pool.runner, pieces = &pieces)
+		defer core.destroy(&got)
+		same := walktest.same_error(err, want_err) && slice.equal(got.nodes, want.nodes) && slice.equal(got.counts, want.counts) && got.root_close == want.root_close && got.as == want.as && got.kinds_stored == want.kinds_stored && same_tables(&got, &want)
+		if !testing.expectf(t, same, "%v %v %q at width %d: %v, want %v", spec, opts, src[:min(len(src), 200)], pool.runner.threads + 1, err, want_err) {
+			return false
+		}
+		in_pieces := joined && len(src) >= 4 * RECORDS_SLICE && pool.runner.threads > 0
+		if !testing.expectf(t, !in_pieces || pieces > 0, "%v %v %q at width %d: built on one thread", spec, opts, src[:min(len(src), 200)], pool.runner.threads + 1) {
+			return false
+		}
+	}
+	return true
+}
+
+@(test)
+records_build_a_table_on_threads :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	pools: [4]host.Pool
+	for w, i in ([4]int{1, 2, 6, 18}) {
+		host.pool_init(&pools[i], w)
+	}
+	defer for &p in pools {
+		host.pool_destroy(&p)
+	}
+	rows := 4 * RECORDS_SLICE / 6 + 40
+	Case :: struct {
+		spec:   dsv.Spec,
+		head:   string,
+		row:    string,
+		opts:   dsv.Options,
+		joined: bool,
+	}
+	cases := []Case {
+		{.Csv, "h,k\n", "1,x\n", {}, true},
+		// Quoted line ends, so a piece cut by bytes alone starts inside a cell.
+		{.Csv, "h,k\n", "1,\"a\nb,\"\"c\"\n", {}, true},
+		{.Csv, "h,k\r\n", "1,2\r\n", {}, true},
+		{.Csv, "\xef\xbb\xbfh,k\n", "1,2\n", {}, true},
+		{.Tsv, "h\tk\n", "1\tx y\n", {}, true},
+		{.Plain, "h,k\n", "1,x\n", {}, true},
+		{.Csv, "", "1,2\n", {no_header = true}, true},
+		{.Csv, "h,k\n", "1,true\n", {infer = true}, true},
+		{.Csv, "h,h\n", "1,2\n", {}, true},
+		// Ragged rows widen the header, and a comment byte reads lines the row splitter does not judge.
+		{.Csv, "h,k\n", "1,2\n3\n4,5,6\n", {tolerate = {.Ragged}}, false},
+		{.Csv, "h,k\n", "1,2\n#c\n", {comment = '#'}, false},
+	}
+	for c in cases {
+		body := strings.repeat(c.row, rows, context.temp_allocator)
+		src := strings.concatenate({c.head, body}, context.temp_allocator)
+		for refuse in ([]bool{false, true}) {
+			if !expect_build_law(t, pools[:], src, c.spec, c.opts, refuse, c.joined && !(refuse && c.head == "h,h\n")) {
+				return
+			}
+		}
+		// A header alone, one row, the text cut short, and a byte broken near either end and through the middle.
+		expect_build_law(t, pools[:], c.head, c.spec, c.opts, false, false)
+		expect_build_law(t, pools[:], strings.concatenate({c.head, c.row}, context.temp_allocator), c.spec, c.opts, false, false)
+		for at in ([]int{1, len(c.head) + 2, len(src) / 2, len(src) - 3, len(src) - 1}) {
+			for b in ([]string{"\"", ",", "\r", "\xff", "\n"}) {
+				broken := strings.concatenate({src[:at], b, src[at + 1:]}, context.temp_allocator)
+				if !expect_build_law(t, pools[:], broken, c.spec, c.opts, false, false) || !expect_build_law(t, pools[:], src[:at], c.spec, c.opts, false, false) {
+					return
+				}
+			}
+		}
+		free_all(context.temp_allocator)
+	}
+	// Seeded tables with blank lines, comments, ragged rows and CRLF among them, under every layout.
+	state := rand.create(11)
+	gen := rand.default_random_generator(&state)
+	for round in 0 ..< 24 {
+		spec := dsv.Spec(round % 3)
+		src := seeded_rows(gen, spec, 40 + rand.int_max(40, gen))
+		for opts in LAYOUTS {
+			if !expect_build_law(t, pools[:], src, spec, opts, round % 2 == 0, false) {
+				return
+			}
+		}
+		free_all(context.temp_allocator)
+	}
+}
+
 // Under `.Ragged` a wide row's cells past the header's last are columns named by position, in memory, on a stream and in
 // a check on threads. A header cell of that name is the column `column` finds, and a built row takes the last of the two.
 @(test)
@@ -293,7 +405,7 @@ rows_name_wide_cells_by_position :: proc(t: ^testing.T) {
 	pool: host.Pool
 	host.pool_init(&pool, 2)
 	defer host.pool_destroy(&pool)
-	faults, _ := records.check(transmute([]u8)src, as, .Lines, context.temp_allocator, &pool.runner)
+	faults, _ := records.validate(transmute([]u8)src, as, .Lines, context.temp_allocator, &pool.runner)
 	testing.expect_value(t, len(faults), 0)
 	testing.expect_value(t, records.validate_parallel(transmute([]u8)src, as, &pool.runner), nil)
 	path, _ := core.parse_path(`.["4"]`, context.temp_allocator)

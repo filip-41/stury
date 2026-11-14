@@ -132,6 +132,14 @@ Html_Tree :: struct {
 	too_deep:        bool,
 	max_depth:       int,
 	at:              u64, // where the current token starts
+	// The end tag that ended the body, while nothing has reopened it, and past the `html` end tag after it, 0 for none.
+	// An element still open there ends with the body.
+	body_end:        Span,
+	html_hi:         u64,
+	// Where the run of tokens the tree took nothing from started, white space put in a text counted in it, 0 for none.
+	// An element the run's end closes ends where it starts, so the bytes the tree ignored stay out of its span.
+	tail:            u64,
+	taken_to:        u64, // the end of the last source bytes the tree took
 	tok:             ^Html_Token, // the current token, nil before the first
 	errors:          [dynamic]Parse_Error, // the tokenizer's included, in the order they were found
 	ctx:             runtime.Context,
@@ -340,6 +348,10 @@ clone_node :: proc(t: ^Html_Tree, n: u32) -> u32 {
 @(private)
 link :: proc(t: ^Html_Tree, parent, n, before: u32) {
 	nodes := t.nodes[:]
+	// A comment, an instruction or a DOCTYPE takes nothing into the elements open where it is put.
+	if nodes[n].kind == .Element {
+		taken(t)
+	}
 	nodes[n].parent = parent
 	nodes[n].next = before
 	prev := nodes[before].prev if before != 0 else nodes[parent].last
@@ -409,6 +421,15 @@ push :: proc(t: ^Html_Tree, n: u32) {
 		return
 	}
 	t.nodes[n].flags += {.Open}
+	taken(t)
+}
+
+// Notes that the tree took the current token.
+@(private)
+taken :: #force_inline proc "contextless" (t: ^Html_Tree) {
+	if t.tok != nil {
+		t.taken_to = max(t.taken_to, t.tok.hi)
+	}
 }
 
 @(private)
@@ -423,6 +444,7 @@ pop_current :: #force_inline proc(t: ^Html_Tree) {
 // Marks element `n` as taken off the stack of open elements.
 @(private)
 unstacked :: #force_inline proc(t: ^Html_Tree, n: u32) {
+	taken(t)
 	node := &t.nodes[n]
 	node.flags -= {.Open}
 	if node.ns != .Html {
@@ -438,6 +460,13 @@ ended :: proc "contextless" (t: ^Html_Tree, n: u32) {
 	end := t.at
 	if tok := t.tok; tok != nil && tok.kind == .End_Tag && node.tag == t.tag && (node.tag != .Other || names_equal(raw_data(t.src), node.name, tok.name)) {
 		end = tok.hi
+	} else if t.body_end.n > 0 && node.ns == .Html && node.tag == .Html {
+		end = t.html_hi if t.html_hi > 0 else end
+	} else if t.body_end.n > 0 && node.ns == .Html && node.tag == .Body {
+		end = t.body_end.lo + u64(t.body_end.n)
+	} else {
+		end = t.body_end.lo if t.body_end.n > 0 else end
+		end = min(end, t.tail) if t.tail > 0 else end
 	}
 	node.end = max(end, node.hi)
 }
@@ -663,6 +692,10 @@ insert_text :: proc(t: ^Html_Tree, s: Span) {
 	if t.nodes[parent].kind == .Document {
 		return
 	}
+	// White space a text takes inside the run of tokens the tree took nothing from does not end the run.
+	if t.tail == 0 || space_prefix(t, s) < s.n {
+		t.taken_to = max(t.taken_to, s.lo + u64(s.n))
+	}
 	prev := t.nodes[before].prev if before != 0 else t.nodes[parent].last
 	if prev != 0 && t.nodes[prev].kind == .Text {
 		extend_text(t, prev, s)
@@ -749,6 +782,7 @@ merge_attrs :: proc(t: ^Html_Tree, n: u32, tok: ^Html_Token) {
 			return
 		}
 		t.nodes[n].b += 1
+		taken(t)
 	}
 }
 
@@ -904,7 +938,8 @@ active_after_marker :: proc(t: ^Html_Tree, tag: Tag) -> int {
 	return -1
 }
 
-// Reopens the formatting elements opened in the current body, cell or caption that were not closed.
+// Reopens the formatting elements opened in the current body, cell or caption that were not closed. The copies take no
+// source bytes, so white space that reopens them past ignored tokens leaves the run of those tokens open.
 @(private)
 reconstruct :: proc(t: ^Html_Tree) {
 	n := len(t.active)
@@ -923,11 +958,13 @@ reconstruct :: proc(t: ^Html_Tree) {
 		}
 		i -= 1
 	}
+	taken_to := t.taken_to
 	for ; i < n && !t.oom && !t.too_deep; i += 1 {
 		c := clone_node(t, t.active[i])
 		insert_node(t, c)
 		t.active[i] = c
 	}
+	t.taken_to = taken_to
 }
 
 // Runs the adoption agency for an end tag of formatting element `tag`. Returns whether the tag is to be read as any

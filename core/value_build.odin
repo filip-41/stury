@@ -116,7 +116,7 @@ object_delete_all :: proc(o: ^Object, gone: map[string]bool) {
 }
 
 // The value of node `r` as a built value of its own, which outlives the document: a number is a double, but a number
-// whose digits the double does not spell keeps them as a `Number_Text`, and a byte string is the string of its RFC 4648
+// whose digits the double does not spell keeps them as a `Number_View`, and a byte string is the string of its RFC 4648
 // base64, as a text format writes it. An object follows `dups`: `.All` keeps a
 // repeated key in order, `.First` the first and `.Last` the last. `.Default` is the format's own: a markup document
 // makes a repeated name an array of each of its elements in document order, as `markup_members` reads it, and any other
@@ -248,13 +248,13 @@ built_data :: proc(r: Node_Ref, borrow: bool) -> Value {
 		   n.kind == .Uint && n.bits > MAX_EXACT_DOUBLE_INT {
 			digits: [spell.INT_ROOM]u8
 			size := spell.i64_text(&digits[0], i64(n.bits)) if n.kind == .Int else spell.u64_text(&digits[0], n.bits)
-			return number_text(strings.clone(string(digits[:size])))
+			return number_text(string(digits[:size]))
 		}
-		// The digits a format spells for a number whose span is not its text are read into `spelled`.
+		// The digits of a number whose span is not a JSON number are read into `spelled`.
 		spelled: [HEX_ROOM]u8
-		f, digits, _ := double_of(r, spelled[:] if r.doc.readers.number_text != nil else nil)
+		f, digits, _ := double_of(r, spelled[:])
 		if digits != "" && (n.kind == .Float || n.kind == .Wide) && !spells_digits(f, digits) {
-			return number_text(strings.clone(digits))
+			return number_text(digits)
 		}
 		return f
 	case .Bytes:

@@ -1,7 +1,9 @@
 package core
 
+import "base:runtime"
 import "core:bytes"
 import "core:slice"
+import "core:strings"
 
 // The edits that take a value. The format spells it, with `Edit_Services.spell`, under the list's `write` options and
 // the layout the container it goes in shows, and the text is recorded as it is: a value edit makes no check walk of
@@ -75,6 +77,9 @@ set_spelled :: proc(list: ^Edit_List, node: Node_Index, n: Node, v: Value) -> Er
 	if err := edit_add_text(list, node, .Set, .Value, 0, text, owned); err.kind != .None {
 		return error_of(err)
 	}
+	if !keep_value(list, v) {
+		return error_of(Document_Error{kind = .No_Memory})
+	}
 	return write_comments(list, node, v)
 }
 
@@ -88,14 +93,68 @@ insert_spelled :: proc(list: ^Edit_List, container: Node_Index, at: int, key: st
 		if err := edit_add_text(list, container, .Insert, .Value, u32(at), text, owned); err.kind != .None {
 			return error_of(err)
 		}
-		return nil
+	} else {
+		// A key and its text share one allocation.
+		err := edit_add(list, container, .Insert, .Key, u32(at), key, string(text))
+		if owned {
+			delete(text, list.allocator)
+		}
+		if err.kind != .None {
+			return error_of(err)
+		}
 	}
-	// A key and its text share one allocation.
-	err := edit_add(list, container, .Insert, .Key, u32(at), key, string(text))
-	if owned {
-		delete(text, list.allocator)
+	if !keep_value(list, v) {
+		return error_of(Document_Error{kind = .No_Memory})
 	}
-	return error_of(err)
+	return nil
+}
+
+// Keeps a copy of `v` as the value of the list's last edit, for its commit to read the output back against. A node of
+// the list's document stays a reference, since the document outlives the list, and any other value is copied.
+@(private = "file")
+keep_value :: proc(list: ^Edit_List, v: Value) -> bool {
+	if list.kept == nil {
+		arena, err := new(runtime.Arena, list.allocator)
+		if err != nil {
+			return false
+		}
+		arena.backing_allocator = list.allocator
+		list.kept = arena
+	}
+	context.allocator = runtime.arena_allocator(list.kept)
+	list.edits[len(list.edits) - 1].value = kept_copy(list.doc, plain(v))
+	return true
+}
+
+@(private = "file")
+kept_copy :: proc(doc: ^Document, v: Value) -> Value {
+	switch x in v {
+	case nil, bool, f64:
+		return x
+	case string:
+		return strings.clone(x)
+	case Number_View:
+		return view_copy(x)
+	case ^Array:
+		a := new_array(len(x.items))
+		for item in x.items {
+			append(&a.items, kept_copy(doc, plain(item)))
+		}
+		return a
+	case ^Object:
+		o := new_object()
+		for k, i in x.keys {
+			object_append(o, strings.clone(k), kept_copy(doc, plain(x.vals[i])))
+		}
+		return o
+	case Node_Ref:
+		return x if x.doc == doc else built_value(x)
+	case Trail:
+		return kept_copy(doc, trail_array(x))
+	case ^Commented:
+		return kept_copy(doc, x.v)
+	}
+	return nil
 }
 
 // The text an insert of `v` into `container` writes, which is the source bytes of a node of the list's document when `v`

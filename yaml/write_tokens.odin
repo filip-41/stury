@@ -6,6 +6,7 @@ package yaml
 
 import "base:runtime"
 import "core:io"
+import "core:strings"
 import core "../core"
 import typed "../core/typed"
 import write "../core/write"
@@ -29,6 +30,10 @@ TREE :: write.Tree {
 	.Heads        = "",
 	.Bytes_Tag    = "!!binary ",
 }
+
+// The number spellings of the core schema past JSON's.
+@(private)
+NUMBER_FORMS :: write.Number_Forms{.Hex, .Octal, .Plus, .Lead_Point, .Bare_Point}
 
 @(private, rodata)
 TOKENS := write.Token_Spelling {
@@ -56,6 +61,11 @@ TOKENS := write.Token_Spelling {
 		case write.Number_Literal:
 			write.put_text(t.out, x.text)
 		case write.Tagged_Text:
+			if tag := meaning_tag(x.text, x.meaning); tag != "" {
+				write.put_text(t.out, tag)
+				write.put_byte(t.out, ' ')
+				return put_scalar_shaped(t.out, x.text, {flow = true, tagged = true, ascii = t.opts.ascii})
+			}
 			return put_flow_string(t.out, x.text, t.opts)
 		case write.Tree_Part:
 			write.put_text(t.out, t.spell.tree[x])
@@ -63,12 +73,58 @@ TOKENS := write.Token_Spelling {
 		return .None
 	},
 	layout = layout_step,
+	// A flow text breaks its line where a comment goes. An inline comment on a block collection after a key goes on the
+	// key's line. An inline comment that follows one on the same item joins it, and `t.mark` is where the last inline
+	// comment that is one line ended.
+	comment = proc(t: ^write.Tokens, role: core.Role, text: string) -> core.Typed_Error_Kind {
+		if !write.comment_lines_ok(text) {
+			return .Unwritable
+		}
+		one_line := role == .Comment_Inline && strings.index_byte(text, '\n') < 0
+		b := (^Block_Writer)(t.state)
+		if b != nil && one_line && block_inline_back(b, text) {
+			// The comment stands before the collection's items, so nothing joins it at the end.
+		} else if tail := t.out.flushed + t.out.cursor - t.mark; one_line && t.mark > t.out.flushed && tail <= 1 {
+			t.out.cursor -= tail
+			write.put_text(t.out, " " if len(text) > 0 else "")
+			write.put_text(t.out, text)
+			write.put_text(t.out, "\n" if tail > 0 else "")
+		} else if b != nil {
+			block_comment(b, role, text)
+		} else {
+			flow_comment(t, role, text)
+		}
+		t.mark = 0
+		if one_line {
+			ended := t.out.cursor > 0 && t.out.buf[t.out.cursor - 1] == '\n'
+			t.mark = t.out.flushed + t.out.cursor - (1 if ended else 0)
+		}
+		return .None
+	},
 	stop = proc(t: ^write.Tokens) {
 		if t.state != nil {
 			block_free((^Block_Writer)(t.state))
 			t.state = nil
 		}
 	},
+}
+
+// Writes `text` as a `#` comment of `role` in a flow text, which breaks its line there.
+@(private)
+flow_comment :: proc(t: ^write.Tokens, role: core.Role, text: string) {
+	out := t.out
+	if out.cursor > 0 && out.buf[out.cursor - 1] == ' ' {
+		out.cursor -= 1
+	}
+	if role == .Comment_Inline {
+		write.put_byte(out, ' ')
+	} else if t.top > 0 || t.done {
+		write.put_byte(out, '\n')
+	}
+	write.put_comment(out, "#", text, true, 0)
+	if !t.done {
+		write.put_byte(out, '\n')
+	}
 }
 
 // Writes scalar `v` as the next item of the block text.
@@ -82,7 +138,7 @@ block_value :: proc(t: ^write.Tokens, b: ^Block_Writer, v: write.Scalar) -> core
 		}
 		return block_string(b, x)
 	case write.Tagged_Text:
-		return block_string(b, x.text)
+		return block_string(b, x.text, meaning_tag(x.text, x.meaning))
 	case typed.Bytes:
 		block_lead(b, false)
 		kind := put_bytes(t.out, x)
@@ -118,12 +174,30 @@ put_bytes :: proc(out: ^write.Out, b: typed.Bytes) -> core.Typed_Error_Kind {
 // Writes `s` as a scalar of a flow collection, in the style the computed strings take.
 @(private)
 put_flow_string :: proc(out: ^write.Out, s: string, opts: core.Write_Options) -> core.Typed_Error_Kind {
-	shape, kind := shape_of(s, {flow = true, ascii = opts.ascii})
+	return put_scalar_shaped(out, s, {flow = true, ascii = opts.ascii})
+}
+
+@(private)
+put_scalar_shaped :: proc(out: ^write.Out, s: string, place: Place) -> core.Typed_Error_Kind {
+	shape, kind := shape_of(s, place)
 	if kind != .None {
 		return kind
 	}
-	put_scalar(out, s, shape, opts.ascii)
+	put_scalar(out, s, shape, place.ascii)
 	return .None
+}
+
+// The YAML tag that spells meaning `m` of text `s`, a string of another format: `!!binary`, and `!!timestamp` on a
+// text YAML reads as a timestamp of that kind. "" for none.
+@(private)
+meaning_tag :: proc(s: string, m: core.Tag_Meaning) -> string {
+	#partial switch m {
+	case .Binary:
+		return "!!binary"
+	case .Datetime, .Local_Datetime, .Local_Date:
+		return "!!timestamp" if timestamp_kind(s) == m else ""
+	}
+	return ""
 }
 
 @(private)

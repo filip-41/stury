@@ -318,6 +318,63 @@ build_row_spec :: proc(it: ^records.Reader, rec: records.Record, allocator: runt
 	return build.builder_end(&b, regs, nil)
 }
 
+// `next` for a piece of a whole table's build: the rows from `it.pos` to the piece's end as one record, written to `b` as
+// roots by one walk, keyless as a table's build keeps them. Piece 0 reads the header, whose row the build of the text
+// with the rows cut out writes, and a later piece checks its rows against the width the first record's batch read. A
+// table read with `.Ragged`, which may widen its header, or with a row too wide for a node's child count, is refused,
+// and the table is built on one thread.
+@(private)
+build_rows_spec :: proc(it: ^records.Reader, b: ^build.Builder, regs: ^core.Hook_Regs, $S: Spec) -> (records.Record, bool) {
+	opts := options_of(it.as)
+	if .Ragged in opts.tolerate {
+		it.fault = core.Fault{rules = &RULES, kind = .Bad_Option}
+	}
+	if it.fault != nil || it.pos >= u64(len(it.src)) {
+		return {}, false
+	}
+	// The root's token steps over a header row written at its next node, and none is.
+	if len(b.doc.nodes) > 1 {
+		b.doc.nodes[1] = {}
+	}
+	keys: []core.Token
+	width := 0
+	if batch := (^Batch)(it.format); batch != nil {
+		keys, width = batch.keys, batch.width
+	}
+	fault: Maybe(core.Fault)
+	if opts.infer {
+		it.pos, fault = rows_walk(it, opts, b, regs, keys, width, S, keyless_infer)
+	} else {
+		it.pos, fault = rows_walk(it, opts, b, regs, keys, width, S, build.builder_hook_keyless)
+	}
+	if fault == nil && b.wide_count != 0 {
+		fault = core.Fault{rules = &RULES, kind = .Bad_Option}
+	}
+	if fault != nil {
+		it.fault = fault
+		return {}, false
+	}
+	// The walk's root holds the rows, which become the document's roots.
+	n := int(regs.a)
+	copy(b.doc.nodes[:n - 1], b.doc.nodes[1:n])
+	regs.a = u64(n - 1)
+	if n == 1 {
+		return {}, false
+	}
+	lo := b.doc.nodes[0].lo
+	return {text = it.src[lo:it.pos], at = lo}, true
+}
+
+// The walk of a piece's rows from `it.pos`, which reads the header when `width` is 0 and the piece is the text's first.
+@(private)
+rows_walk :: #force_inline proc(it: ^records.Reader, opts: Options, b: ^build.Builder, regs: ^core.Hook_Regs, keys: []core.Token, width: int, $S: Spec, $on: proc "contextless" (h: ^build.Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
+	if width == 0 {
+		return walk_keys(it.src, it.pos, S, opts, b, regs, on, nil)
+	}
+	hi, fault, _ = core.result_of(run(it.src, it.pos, S, opts, b, regs, on, true, keys, width), &RULES)
+	return
+}
+
 // Writes a row's keys and cells into `b`, a cell at its place in `src`, kinded as `infer` reads it when `INFER`.
 @(private)
 put_row_cells :: #force_inline proc(b: ^build.Builder, regs: core.Hook_Regs, cells, keys: []core.Token, src: []u8, shift: u64, $INFER: bool) -> core.Hook_Regs {

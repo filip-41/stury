@@ -150,7 +150,6 @@ Date_Time_Parts :: struct {
 }
 
 // RFC 3339 `full-date`.
-@(private)
 date_of :: proc(s: string) -> (p: Date_Time_Parts, ok: bool) {
 	if len(s) != 10 || s[4] != '-' || s[7] != '-' {
 		return

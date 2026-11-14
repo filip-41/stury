@@ -26,28 +26,37 @@ Layout :: struct {
 	path:      [dynamic]string, // the decoded keys of the open section
 	own:       bool, // the document is TOML
 	commented: bool, // the document holds a comment
-	kept:      int, // the comments written
+	tagged:    bool, // the document is of another format and holds a tag
+	kept:      int, // the facts written
 	glue:      bool, // comments of an omitted header were written, which the next header follows without a blank line
+	laid:      bool, // a collection the document writes in line or through dotted keys is written so
 }
 
 // Writes node `node` of `doc` as TOML, as `core.write` does with `as(spec)`. A document of another format is written
 // too, when its root is an object and it holds no null.
-write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
-	if int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
-		return nil, 0, core.error_of(core.Typed_Refusal{kind = .Unsupported})
-	}
-	out, cut, refusal := document_write(doc, opts, bound_as(spec), node, {}, allocator)
-	return out, cut, core.error_of(refusal)
+write :: proc(doc: ^core.Document, $S: Spec, write := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
+	return core.write(doc, write, as(S), node, allocator)
 }
 
 // The handle's `write`: node `node` of `doc` as TOML.
 @(private)
-document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Refusal) {
-	if doc.partial || core.kind(doc, node) != .Object {
+document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
+	return write_table_text(doc, opts, node, stream, allocator, true)
+}
+
+// Node `node` of `doc` as a TOML text. `laid` keeps the layout its collections' `.@style` names, which a text this
+// writer laid out in line itself has not chosen.
+@(private)
+write_table_text :: proc(doc: ^core.Document, opts: core.Write_Options, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator, laid: bool) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
+	if doc.partial {
 		return nil, 0, {kind = .Unsupported}
 	}
+	if core.kind(doc, node) != .Object {
+		return nil, 0, {kind = .Unwritable, detail = {want = {text = "a TOML text is a table, so its root is an object"}}}
+	}
 	spill: [write.ROOM_MAX]u8 = ---
-	l := Layout{doc = doc, opts = opts, own = doc.readers.format == rules_of}
+	l := Layout{doc = doc, opts = opts, own = doc.readers.format == rules_of, laid = laid}
+	l.tagged = !l.own && .Tag in doc.readers.holds && core.has_tags(doc)
 	l.arena.backing_allocator = context.allocator
 	defer runtime.arena_destroy(&l.arena)
 	l.path.allocator = runtime.arena_allocator(&l.arena)
@@ -58,28 +67,45 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 	if err.kind != .None {
 		return nil, 0, err
 	}
-	return text, len(core.subtree_facts(doc, node)) - l.kept, err
+	return text, l.kept, err
 }
 
-// Whether `value` is written as a section of its own: a table, or a non-empty array of tables.
+// Where a member's value stands: on a `key = value` line, in a section of its own, or on dotted-key lines in the table
+// that holds it.
 @(private)
-is_section :: proc(l: ^Layout, value: core.Node_Index) -> bool {
-	#partial switch core.kind(l.doc, value) {
-	case .Object:
-		return true
-	case .Array:
-		if core.length(l.doc, value) == 0 {
-			return false
-		}
-		it := core.children(l.doc, value)
-		for element in core.child_next(&it) {
-			if core.kind(l.doc, element) != .Object {
-				return false
-			}
-		}
-		return true
+Place :: enum u8 {
+	Line,
+	Section,
+	Dotted,
+}
+
+// A table, or a non-empty array of tables, is a section, unless `laid` and its document writes it in line (`flow`)
+// with no comment inside, which an inline table cannot hold, or through dotted keys (`dotted`) and it is not empty.
+@(private)
+place_of :: proc(l: ^Layout, value: core.Node_Index) -> Place {
+	k := core.kind(l.doc, value)
+	if k != .Object && k != .Array || k == .Array && core.length(l.doc, value) == 0 {
+		return .Line
 	}
-	return false
+	if l.laid {
+		style, _ := core.fact_value(l.doc, value, .Style)
+		switch {
+		case style.text == "flow" && !write.holds_inner_fact(l.doc, value):
+			return .Line
+		case style.text == "dotted" && core.length(l.doc, value) > 0:
+			return .Dotted
+		}
+	}
+	if k == .Object {
+		return .Section
+	}
+	it := core.children(l.doc, value)
+	for element in core.child_next(&it) {
+		if core.kind(l.doc, element) != .Object {
+			return .Line
+		}
+	}
+	return .Section
 }
 
 // The table at `node`: its header unless it is the root or only holds sections, its lines, its foot comments, then its
@@ -89,7 +115,7 @@ put_table :: proc(l: ^Layout, node: core.Node_Index, element: bool) -> core.Type
 	members := write.node_members(l.doc, node, l.opts.sort_keys, true, runtime.arena_allocator(&l.arena)) or_return
 	lines, sections := 0, 0
 	for m in members {
-		if is_section(l, m.value) {
+		if place_of(l, m.value) == .Section {
 			sections += 1
 		} else {
 			lines += 1
@@ -104,26 +130,69 @@ put_table :: proc(l: ^Layout, node: core.Node_Index, element: bool) -> core.Type
 			l.glue = l.kept > before
 		}
 	} else {
+		// A blank line ends the text's head comment, so the first member's comments stay its own.
+		before := l.kept
 		put_comments(l, node, .Comment)
-	}
-	for m in members {
-		if !is_section(l, m.value) {
-			put_comments(l, m.value, .Comment)
-			put_key(&l.out, m.name)
-			write.put_text(&l.out, " = ")
-			put_inline(l, m.value) or_return
-			put_inline_comment(l, m.value)
+		if l.kept > before && len(members) > 0 {
 			write.put_byte(&l.out, '\n')
 		}
 	}
+	keys := make([dynamic]string, runtime.arena_allocator(&l.arena))
+	put_lines(l, members, &keys) or_return
+	put_sections(l, members) or_return
+	put_foot(l, node)
+	return .None
+}
+
+// The `key = value` lines of `members`, each key after the dotted path `keys`, and the lines of a dotted member's members
+// after its key.
+@(private)
+put_lines :: proc(l: ^Layout, members: []write.Node_Member, keys: ^[dynamic]string) -> core.Typed_Error_Kind {
 	for m in members {
-		if !is_section(l, m.value) {
+		switch place_of(l, m.value) {
+		case .Line:
+			put_comments(l, m.value, .Comment)
+			for k in keys {
+				put_key(&l.out, k)
+				write.put_byte(&l.out, '.')
+			}
+			put_key(&l.out, m.name)
+			write.put_text(&l.out, " = ")
+			if elements_commented(l, m.value) {
+				put_lined_array(l, m.value) or_return
+			} else {
+				put_inline(l, m.value) or_return
+			}
+			put_inline_comment(l, m.value)
+			write.put_byte(&l.out, '\n')
+		case .Dotted:
+			put_comments(l, m.value, .Comment)
+			inner := write.node_members(l.doc, m.value, l.opts.sort_keys, true, runtime.arena_allocator(&l.arena)) or_return
+			append(keys, m.name)
+			put_lines(l, inner, keys) or_return
+			pop(keys)
+		case .Section:
+		}
+	}
+	return .None
+}
+
+// The sections of `members`, and those of a dotted member's members under its key.
+@(private)
+put_sections :: proc(l: ^Layout, members: []write.Node_Member) -> core.Typed_Error_Kind {
+	for m in members {
+		place := place_of(l, m.value)
+		if place == .Line {
 			continue
 		}
 		append(&l.path, m.name)
-		if core.kind(l.doc, m.value) == .Object {
+		switch {
+		case place == .Dotted:
+			inner := write.node_members(l.doc, m.value, l.opts.sort_keys, true, runtime.arena_allocator(&l.arena)) or_return
+			put_sections(l, inner) or_return
+		case core.kind(l.doc, m.value) == .Object:
 			put_table(l, m.value, false) or_return
-		} else {
+		case:
 			it := core.children(l.doc, m.value)
 			for e in core.child_next(&it) {
 				put_table(l, e, true) or_return
@@ -131,7 +200,6 @@ put_table :: proc(l: ^Layout, node: core.Node_Index, element: bool) -> core.Type
 		}
 		pop(&l.path)
 	}
-	put_foot(l, node)
 	return .None
 }
 
@@ -144,8 +212,8 @@ put_foot :: proc(l: ^Layout, node: core.Node_Index) {
 	}
 	it := core.facts_of(l.doc, node, .Comment_Foot)
 	written := false
-	for body in core.fact_next(&it) {
-		if !write.comment_ok(body) {
+	for text, padded in core.comment_next(&it) {
+		if !write.comment_lines_ok(text) {
 			continue
 		}
 		if !written && l.out.cursor + l.out.flushed > 0 {
@@ -153,8 +221,7 @@ put_foot :: proc(l: ^Layout, node: core.Node_Index) {
 		}
 		written = true
 		l.kept += 1
-		write.put_byte(&l.out, '#')
-		write.put_text(&l.out, body)
+		write.put_comment(&l.out, "#", text, padded, 0)
 		write.put_byte(&l.out, '\n')
 	}
 	l.glue ||= written
@@ -177,7 +244,50 @@ put_header :: proc(l: ^Layout, node: core.Node_Index, element: bool) {
 		put_key(&l.out, name)
 	}
 	write.put_text(&l.out, "]]" if element else "]")
+	put_inline_comment(l, node)
 	write.put_byte(&l.out, '\n')
+}
+
+// Whether `node` is an array with a comment on an element or a foot comment, which only an array written one element a
+// line has a place for.
+@(private)
+elements_commented :: proc(l: ^Layout, node: core.Node_Index) -> bool {
+	if !l.commented || core.kind(l.doc, node) != .Array {
+		return false
+	}
+	for f in core.all_facts(l.doc, node) {
+		if f.role == .Comment_Foot {
+			return true
+		}
+	}
+	it := core.children(l.doc, node)
+	for e in core.child_next(&it) {
+		for f in core.all_facts(l.doc, e) {
+			if f.role in core.COMMENT_ROLES {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// The array at `node` one element a line, each with its head comments above it and its inline comment after it, and
+// its foot comments before the close.
+@(private)
+put_lined_array :: proc(l: ^Layout, node: core.Node_Index) -> core.Typed_Error_Kind {
+	write.put_text(&l.out, "[\n")
+	it := core.children(l.doc, node)
+	for e in core.child_next(&it) {
+		l.kept += write.put_comment_lines(&l.out, l.doc, e, .Comment, 2)
+		write.put_text(&l.out, "  ")
+		put_inline(l, e) or_return
+		write.put_byte(&l.out, ',')
+		put_inline_comment(l, e)
+		write.put_byte(&l.out, '\n')
+	}
+	l.kept += write.put_comment_lines(&l.out, l.doc, node, .Comment_Foot, 2)
+	write.put_byte(&l.out, ']')
+	return .None
 }
 
 // An array or inline table `put_inline` has open: the members or elements still to write.
@@ -250,7 +360,7 @@ inline_start :: proc(l: ^Layout, opens: ^[dynamic]Inline_Open, node: core.Node_I
 	case .String:
 		return put_string_node(l, node)
 	case .Number:
-		return write.put_number_node(&l.out, l.doc, node, TREE, l.own)
+		return write.put_number_node(&l.out, l.doc, node, TREE, l.own, NUMBER_FORMS)
 	case .True:
 		write.put_text(&l.out, "true")
 		return .None
@@ -277,11 +387,17 @@ inline_start :: proc(l: ^Layout, opens: ^[dynamic]Inline_Open, node: core.Node_I
 put_string_node :: proc(l: ^Layout, node: core.Node_Index) -> core.Typed_Error_Kind {
 	buf: [512]u8
 	text := write.node_text(l.doc, node, buf[:], runtime.arena_allocator(&l.arena)) or_return
+	// A datetime tag of another format whose text is no TOML datetime of its type is dropped.
+	if l.own || l.tagged {
+		if tag, tagged := core.fact_value(l.doc, node, .Tag); tagged && DATETIME_TAGS[tag.meaning] != "" {
+			if kind := put_datetime(&l.out, text, DATETIME_TAGS[tag.meaning]); kind == .None || l.own {
+				l.kept += int(tag.span)
+				return kind
+			}
+		}
+	}
 	if l.own {
 		t := l.doc.nodes[node]
-		if tag, tagged := core.fact_value(l.doc, node, .Tag); tagged {
-			return put_datetime(&l.out, text, tag.text)
-		}
 		if t.spelling & core.SPELLING_DECODE != 0 && !l.opts.respell_strings && style_of(t.spelling) == .Literal && literal_ok(text) {
 			write.put_byte(&l.out, '\'')
 			write.put_text(&l.out, text)
@@ -383,12 +499,12 @@ put_basic :: proc(out: ^write.Out, s: string, opts: core.Write_Options) -> core.
 @(private)
 put_datetime :: proc(out: ^write.Out, text, tag: string) -> core.Typed_Error_Kind {
 	kind := text_datetime(text)
-	if kind == .None || tag != "" && kind != tag_datetime(tag) {
+	if kind == .Own || tag != "" && kind != tag_datetime(tag) {
 		return .Bad_Raw
 	}
 	src := transmute([]u8)text
 	if _, _, v10 := scan_datetime(src, 0, false); v10 != 0 {
-		at := 0 if kind == .Time else 11
+		at := 0 if kind == .Local_Time else 11
 		write.put_text(out, text[:at + 5])
 		write.put_text(out, ":00")
 		write.put_text(out, text[at + 5:])
@@ -406,20 +522,24 @@ put_comments :: proc(l: ^Layout, node: core.Node_Index, role: core.Role) {
 	}
 }
 
-// The first comment of `node` that ends on its line, after the value.
+// The one-line comments of `node` that end on its line, after the value, joined into one.
 @(private)
 put_inline_comment :: proc(l: ^Layout, node: core.Node_Index) {
-	if l.commented && write.put_comment_inline(&l.out, l.doc, node) {
-		l.kept += 1
+	if l.commented {
+		l.kept += write.put_comment_inline(&l.out, l.doc, node)
 	}
 }
 
-// Reads `bytes`, a text `end` or a typed write made as `r = {...}`, and writes the table `r` holds as a TOML text. The
-// bytes are freed.
+// Reads `bytes`, a text `end` or a typed write made of an inline table and the comments before it from offset `at`,
+// behind `r = ` there, and writes the table `r` holds as a TOML text. The bytes are freed.
 @(private)
-lay_out_text :: proc(bytes: []u8, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
-	defer delete(bytes, allocator)
-	doc, berr := build_text(bytes, bound_as(.Toml_1_0), context.allocator)
+lay_out_text :: proc(bytes: []u8, at: int, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
+	keyed, made := keyed_text(bytes, at, allocator)
+	if !made {
+		return nil, {kind = .No_Memory}
+	}
+	defer delete(keyed, allocator)
+	doc, berr := build_text(keyed, bound_as(.Toml_1_1), context.allocator)
 	defer core.destroy(&doc)
 	if berr.kind != .None {
 		return nil, {kind = .Unwritable if berr.kind == .Walk else .No_Memory}
@@ -429,6 +549,21 @@ lay_out_text :: proc(bytes: []u8, opts: core.Write_Options, stream: io.Stream, a
 	if !found {
 		return nil, {kind = .Unwritable}
 	}
-	text, _, err := document_write(&doc, opts, bound_as(.Toml_1_0), table, stream, allocator)
+	text, _, err := write_table_text(&doc, opts, table, stream, allocator, false)
 	return text, err
+}
+
+// `bytes` with `r = ` at offset `at`, in new bytes from `allocator`, and false when they are refused. The bytes are
+// freed.
+@(private)
+keyed_text :: proc(bytes: []u8, at: int, allocator: runtime.Allocator) -> ([]u8, bool) {
+	defer delete(bytes, allocator)
+	keyed, failed := make([]u8, len(bytes) + 4, allocator)
+	if failed != nil {
+		return nil, false
+	}
+	copy(keyed, bytes[:at])
+	copy(keyed[at:], "r = ")
+	copy(keyed[at + 4:], bytes[at:])
+	return keyed, true
 }

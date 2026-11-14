@@ -8,7 +8,6 @@ import "core:strings"
 import core "../../core"
 import "../../core/typed"
 import "../../core/schema"
-import dsv "../../dsv"
 import "message"
 
 // fmt --schema's schema, bound to the inputs' format and, for an output of cells, to the cells as they read back.
@@ -34,7 +33,7 @@ conversion_open :: proc(run: ^Run, options: Schema_Options, src: Source) -> ^Con
 	o.cells_out.infer ||= !reads_cells(o)
 	c.cells_as = cells_written_as(o)
 	err: core.Error
-	if c.cells, err = schema.bind(c.check.compiled, {dsv.checks_for(c.cells_as), c.cells_as}); err != nil {
+	if c.cells, err = schema.bind(c.check.compiled, {layout = c.cells_as}); err != nil {
 		usage_error("--schema %s: %s", options.file, edit_error_text(c.check.text, err))
 	}
 	return c

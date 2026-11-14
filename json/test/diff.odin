@@ -171,6 +171,7 @@ diff_attribute_facts :: proc(t: ^testing.T) {
 	}
 	original := a.readers
 	readers := original^
+	readers.holds += {.Attribute}
 	readers.attribute = hand_attribute
 	facts := [1]core.Fact{{lo = 6, node = core.ROOT, n = 3, role = .Attribute, kind = .Plain}}
 	for doc in ([]^core.Document{&a, &b, &c}) {

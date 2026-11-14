@@ -171,7 +171,7 @@ datetime_form :: proc(text: string) -> string {
 }
 
 @(private)
-check_documents :: proc(t: ^testing.T, list: string, spec: toml.Spec) -> (cases: int) {
+check_documents :: proc(t: ^testing.T, list: string, $spec: toml.Spec) -> (cases: int) {
 	rest := list
 	for name in strings.split_lines_iterator(&rest) {
 		if !strings.has_prefix(name, "valid/") || !strings.has_suffix(name, ".toml") {
@@ -220,7 +220,7 @@ invalid_cases_do_not_build :: proc(t: ^testing.T) {
 				continue
 			}
 			data, _ := case_data(name)
-			doc, err := toml.build(data, spec)
+			doc, err := core.build(data, toml.as(spec))
 			fault, walked := err.(core.Fault)
 			if !testing.expectf(t, walked && fault.kind != .No_Memory, "%s: built or failed otherwise: %v", name, err) {
 				core.destroy(&doc)
@@ -300,7 +300,7 @@ numbers_read_by_value :: proc(t: ^testing.T) {
 	n, _ = core.number(&doc, node_at(t, &doc, "nn"))
 	testing.expect(t, math.is_nan(transmute(f64)n.bits))
 	view := core.Token_View{src = transmute([]u8)string("x = 0o7")}
-	octal, ok := toml.number(&view, core.Token{lo = 4, n = 3, kind = .Number, role = .Value, spelling = u16(toml.Number_Spelling.Octal)})
+	octal, ok := toml.token_number(&view, core.Token{lo = 4, n = 3, kind = .Number, role = .Value, spelling = u16(toml.Number_Spelling.Octal)})
 	testing.expect(t, ok && i64(octal.bits) == 7)
 }
 

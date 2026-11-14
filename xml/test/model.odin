@@ -96,7 +96,7 @@ a_schema_checks_an_xml_text :: proc(t: ^testing.T) {
 	text := `{"type": "object", "required": ["item"], "properties": {"item": {"type": "object", "required": ["id", "name"], "additionalProperties": false,
 		"properties": {"id": {"type": "integer", "minimum": 1}, "name": {"type": "string", "minLength": 3}, "tag": {"type": "array", "items": {"enum": ["a", "b"]}, "maxItems": 2},
 		"price": {"type": "object", "properties": {"currency": {"enum": ["EUR", "USD"]}, "#text": {"type": "number"}}, "required": ["currency", "#text"]}}}}}`
-	s, serr := json.load_schema(transmute([]u8)string(text))
+	s, serr := json.load_schema(transmute([]u8)string(text), .Json)
 	walktest.expect_nil(t, serr)
 	bound, berr := xml.bind_schema(s, .Xml)
 	walktest.expect_nil(t, berr)
@@ -142,7 +142,7 @@ a_built_document_is_checked_by_a_model_and_a_schema :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(sink.entries), 2)
 	testing.expect_value(t, v.note.lang, "twelve bytes")
 	testing.expect_value(t, len(v.note.text), 12 * 32)
-	s, serr := json.load_schema(transmute([]u8)string(`{"properties": {"note": {"properties": {"lang": {"maxLength": 12}, "#text": {"minLength": 385}}}}}`))
+	s, serr := json.load_schema(transmute([]u8)string(`{"properties": {"note": {"properties": {"lang": {"maxLength": 12}, "#text": {"minLength": 385}}}}}`), .Json)
 	walktest.expect_nil(t, serr)
 	bound, berr := xml.bind_schema(s, .Xml)
 	walktest.expect_nil(t, berr)

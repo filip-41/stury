@@ -7,6 +7,7 @@ import "base:runtime"
 import "core:mem"
 import "core:mem/virtual"
 import "core:slice"
+import "core:strings"
 import core ".."
 
 Op :: enum u8 {
@@ -187,8 +188,8 @@ walk :: proc(d: ^Differ, a, b: core.Value, depth: int) {
 emit :: proc(d: ^Differ, op: Op, a, b: core.Value, kind_changed: bool, role := core.Role.Value) {
 	c := Change {
 		op           = op,
-		old          = a if op != .Added else nil,
-		new          = b if op != .Removed else nil,
+		old          = kept(d, a) if op != .Added else nil,
+		new          = kept(d, b) if op != .Removed else nil,
 		kind_changed = kind_changed,
 		role         = role,
 	}
@@ -200,6 +201,28 @@ emit :: proc(d: ^Differ, op: Op, a, b: core.Value, kind_changed: bool, role := c
 		c.old_path = c.path if op == .Added || slice.equal(d.old[:], d.new[:]) else core.steps_clone(d.old[:], d.allocator)
 	}
 	append(&d.changes, c)
+}
+
+// `v` in the result's allocator where it is built: a markup node's repeated name and members are arrays and objects
+// the walk makes in the scratch, which the result outlives. A node stays its document's.
+@(private = "file")
+kept :: proc(d: ^Differ, v: core.Value) -> core.Value {
+	context.allocator = d.allocator
+	#partial switch x in v {
+	case ^core.Array:
+		c := core.new_array(len(x.items))
+		for item in x.items {
+			append(&c.items, kept(d, item))
+		}
+		return c
+	case ^core.Object:
+		c := core.new_object()
+		for k, i in x.keys {
+			core.object_append(c, strings.clone(k), kept(d, x.vals[i]))
+		}
+		return c
+	}
+	return v
 }
 
 @(private)

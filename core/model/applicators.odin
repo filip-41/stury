@@ -150,8 +150,8 @@ value_kept :: proc(v: core.Value) -> core.Value {
 		return core.built_value(x, .All)
 	case string:
 		return strings.clone(x) or_else ""
-	case ^core.Number_Text:
-		return core.number_text(strings.clone(x.text) or_else "")
+	case core.Number_View:
+		return core.view_copy(x)
 	case ^core.Array:
 		out := core.new_array(len(x.items))
 		for item in x.items {

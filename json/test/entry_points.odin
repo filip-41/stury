@@ -162,7 +162,7 @@ destroy_serves_each_owner :: proc(t: ^testing.T) {
 // `record_docs` builds them.
 record_forms :: proc(t: ^testing.T, $S: json.Spec) {
 	src := transmute([]u8)string("{\"a\":1}\n{\"a\":2}\n")
-	faults, err := json.records_check(src, S)
+	faults, err := json.records_validate(src, S)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, len(faults), 0)
 	delete(faults)

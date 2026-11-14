@@ -80,10 +80,12 @@ may_be_block :: proc(t: []u8) -> bool {
 	return t[len(t) - 1] == ':' || bytes.contains(t, transmute([]u8)string(": ")) || bytes.contains(t, transmute([]u8)string(":\t"))
 }
 
-// The text `t` takes inside a flow collection: itself, or a block text or a plain scalar that holds a flow indicator
-// written again as one flow value.
+// The text `t` takes inside a flow collection, or as the flow collection `at`: itself, or a block text or a plain scalar
+// that holds a flow indicator written again as one flow value. A line break it holds ends a comment, and the line after
+// it stands past the indentation of the line the outermost flow collection around `at` opens on, as a flow collection
+// in a block needs.
 @(private)
-flow_text :: proc(cx: ^Cx, t: []u8, sh: Text_Shape) -> []u8 {
+flow_text :: proc(cx: ^Cx, at: u32, t: []u8, sh: Text_Shape) -> []u8 {
 	switch sh.form {
 	case .Block, .Literal:
 	case .Inline, .Lines:
@@ -106,10 +108,27 @@ flow_text :: proc(cx: ^Cx, t: []u8, sh: Text_Shape) -> []u8 {
 	if werr.kind != .None {
 		return t
 	}
-	for len(text) > 0 && is_blank_byte(text[len(text) - 1]) {
+	for len(text) > 0 && (text[len(text) - 1] == ' ' || text[len(text) - 1] == '\t') {
 		text = text[:len(text) - 1]
 	}
-	return text
+	if bytes.index_byte(text, '\n') < 0 {
+		return text
+	}
+	top := at
+	for p := cx.parent[top]; p != NIL && (.Flow in cx.flags[p]); p = cx.parent[p] {
+		top = p
+	}
+	from := compose.line_start(cx.src, cx.lo[top])
+	ind := 0
+	for cx.src[from + u64(ind)] == ' ' {
+		ind += 1
+	}
+	b := make([dynamic]u8, cx.a)
+	put_lines(cx, &b, text, ind + 2)
+	if text[len(text) - 1] == '\n' {
+		put_spaces_to(&b, ind + 2)
+	}
+	return b[:]
 }
 
 // The byte of the colon after the key that ends at `p`: on the key's line, or after an explicit key on a later line
@@ -183,13 +202,13 @@ place :: proc(cx: ^Cx, v: u32, t: []u8, sh: Text_Shape) {
 		if pair, ok := pair_text(cx, v, t); ok {
 			append(&b, ..pair)
 		} else {
-			append(&b, ..flow_text(cx, t, sh))
+			append(&b, ..flow_text(cx, v, t, sh))
 		}
 		add(cx, lo, hi, b[:])
 		return
 	}
 	if sh.form == .Block && .Bracket in cx.flags[v] {
-		place(cx, v, flow_text(cx, t, sh), {form = .Inline})
+		place(cx, v, bytes.trim_right(flow_text(cx, v, t, sh), transmute([]u8)string(" \r\n")), {form = .Inline})
 		return
 	}
 	from := lo
@@ -360,7 +379,7 @@ place_value :: proc(cx: ^Cx, b: ^[dynamic]u8, v: u32, t: []u8, sh: Text_Shape) -
 		#partial switch f.role {
 		case .Tag, .Anchor:
 			from = max(from, f.lo + u64(f.n))
-		case .Comment:
+		case .Comment_Inline:
 			comment = src[f.lo:f.lo + u64(f.n)]
 		}
 	}
@@ -577,7 +596,7 @@ regroup_flow :: proc(cx: ^Cx, c: u32, items: []Item, removed: []bool, inserts: [
 			append(&m, ..key)
 			compose.puts(&m, ": ")
 		}
-		append(&m, ..flow_text(cx, t, shape_text(cx, t)))
+		append(&m, ..flow_text(cx, c, t, shape_text(cx, t)))
 		texts[k] = {int(e.at), m[:]}
 	}
 	compose.flow_splices(&cx.splices, cx.src, items, removed, texts, cx.lo[c] + 1, cx.hi[c] - 1, cx.eol, false, cx.a)

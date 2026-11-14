@@ -205,6 +205,9 @@ block_layout_indents_by_the_option :: proc(t: ^testing.T) {
 	testing.expect_value(t, got, "a: 1\nb:\n  - 1\n  - c: 2\n    d: []\n  - - 3\n    - 4\ne: {}\nf: x y\n")
 	four := text_of_json(`{"a":[1,{"b":2}]}`, core.Write_Options{pretty = true, indent = 4})
 	testing.expect_value(t, four, "a:\n    - 1\n    - b: 2\n")
+	// YAML forbids a tab in indentation, so `tab` is an option the writer does not honour and leaves to `indent`.
+	tabbed := text_of_json(`{"a":[1,{"b":2}]}`, core.Write_Options{pretty = true, tab = true})
+	testing.expect_value(t, tabbed, "a:\n  - 1\n  - b: 2\n")
 	flow := text_of_json(`{"a":1,"b":[1,"x y",null,true],"c":{}}`, core.Write_Options{})
 	testing.expect_value(t, flow, `{a: 1, b: [1, x y, null, true], c: {}}`)
 }
@@ -224,6 +227,35 @@ multi_line_strings_are_literal_blocks :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(got, "|"))
 }
 
+// A folded block is written folded and reads back as its value: a kept line end is an empty line, and a line that
+// starts with white space is not folded. One a block cannot hold is written in another style.
+@(test)
+folded_blocks_stay_folded :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	sources := [?]string {
+		"v: >\n  a\n  b\n",
+		"v: >-\n  a\n  b\n",
+		"v: >\n  a\n\n  b\n",
+		"v: >\n  a\n\n\n  b\n",
+		"v: >+\n  a\n\n\n",
+		"v: >\n  a\n    b\n  c\n",
+		"v: >\n  a\n\n    b\n\n  c\n",
+		"v: >\n  a\n    b\n\n    c\n  d\n",
+		"v:\n  - >\n    x\n    y\n  - z\n",
+		"v: >2\n   a\n  b\n",
+	}
+	for src, k in sources {
+		doc, err := build(src)
+		walktest.expect_nil(t, err)
+		got := text_of(src)
+		again, aerr := build(got)
+		walktest.expect_nil(t, aerr)
+		testing.expectf(t, core.equal(core.Node_Ref{&doc, core.ROOT}, core.Node_Ref{&again, core.ROOT}), "%q is written %q", src, got)
+		testing.expectf(t, strings.contains(got, ">") == (k < len(sources) - 1), "%q is written %q", src, got)
+	}
+}
+
 @(test)
 comments_tags_and_anchors_are_written_back :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
@@ -239,6 +271,125 @@ comments_tags_and_anchors_are_written_back :: proc(t: ^testing.T) {
 	testing.expect(t, core.equal(core.Node_Ref{&doc, core.ROOT}, core.Node_Ref{&again, core.ROOT}))
 	i, _ := core.member(&again, core.ROOT, "c")
 	testing.expect_value(t, core.kind(&again, i), core.Kind.String)
+}
+
+@(test)
+directives_and_markers_are_written_back :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	cases := [?][2]string {
+		{"%YAML 1.2\n%TAG !e! tag:example.com,2000:\n---\na: 1\n...\n", "%YAML 1.2\n%TAG !e! tag:example.com,2000:\n---\na: 1\n...\n"},
+		{"# head\n%YAML 1.2\n---\na: 1\n", "# head\n%YAML 1.2\n---\na: 1\n"},
+		{"--- 5\n", "--- 5\n"},
+		{"---\na: 1\n", "---\na: 1\n"},
+		{"a: 1\n...\n", "a: 1\n...\n"},
+		{"a: 1\n", "a: 1\n"},
+	}
+	for c in cases {
+		testing.expectf(t, text_of(c[0]) == c[1], "%q is written %q", c[0], text_of(c[0]))
+	}
+	doc, err := build("%YAML 1.2\n---\na: 1\n...\n")
+	walktest.expect_nil(t, err)
+	it := core.facts_of(&doc, core.ROOT, .Directive)
+	for want in ([?]string{"%YAML 1.2", "---", "..."}) {
+		body, ok := core.fact_next(&it)
+		testing.expectf(t, ok && body == want, "a directive is %q, not %q", body, want)
+	}
+	// A marker is layout, as a style is, so JSON drops none.
+	_, dropped, werr := core.write(&doc, {}, json_pkg.as(.Json))
+	walktest.expect_nil(t, werr)
+	testing.expect_value(t, dropped, 0)
+}
+
+@(test)
+a_block_comment_of_another_format_is_written_as_yaml_lines :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	doc, err := json_pkg.build(transmute([]u8)string("{\n/* x\n y */\n\"a\": 1, /* tail a */\n\"b\": 2 //b\n}"), .Jsonc)
+	walktest.expect_nil(t, err)
+	defer core.destroy(&doc)
+	got, werr := written(&doc)
+	walktest.expect_nil(t, werr)
+	testing.expect_value(t, got, "# x\n#  y\na: 1 # tail a\nb: 2 #b\n")
+}
+
+@(test)
+inline_comments_on_one_node_join_at_the_end_of_its_line :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	doc, err := json_pkg.build(transmute([]u8)string("{\"a\": 1 /* a */ /* b */, \"c\": 2}"), .Jsonc)
+	walktest.expect_nil(t, err)
+	defer core.destroy(&doc)
+	got, werr := written(&doc)
+	walktest.expect_nil(t, werr)
+	testing.expect_value(t, got, "a: 1 # a b\nc: 2\n")
+
+	for opts in ([]core.Write_Options{PRETTY, {}}) {
+		w: write.Tokens
+		write.tokens_init(&w, yaml.as(.Yaml_1_2), opts, allocator = context.temp_allocator)
+		write.open_array(&w)
+		write.value_int(&w, 1)
+		write.comment(&w, "a", .Comment_Inline)
+		write.comment(&w, "b", .Comment_Inline)
+		write.value_int(&w, 2)
+		write.close(&w)
+		bytes, terr := write.tokens_finish(&w)
+		testing.expect_value(t, terr.kind, core.Typed_Error_Kind.None)
+		testing.expect_value(t, string(bytes), "- 1 # a b\n- 2\n" if opts.pretty else "[1 # a b\n, 2]")
+	}
+}
+
+@(test)
+token_write_puts_an_inline_comment_on_a_collection_on_its_key_line :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	w: write.Tokens
+	write.tokens_init(&w, yaml.as(.Yaml_1_2), PRETTY, allocator = context.temp_allocator)
+	write.open_object(&w)
+	write.key(&w, "l")
+	write.open_array(&w)
+	write.value_int(&w, 1)
+	write.value_int(&w, 2)
+	write.close(&w)
+	write.comment(&w, "a", .Comment_Inline)
+	write.comment(&w, "b", .Comment_Inline)
+	write.key(&w, "s")
+	write.value_int(&w, 3)
+	write.close(&w)
+	bytes, err := write.tokens_finish(&w)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, string(bytes), "l: # a b\n  - 1\n  - 2\ns: 3\n")
+}
+
+@(test)
+compact_text_breaks_its_flow_line_at_a_comment :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	doc, err := json_pkg.build(transmute([]u8)string("{\n  // lead a\n  \"a\": 1, // in a\n  \"b\": [1, /* in 1 */ 2]\n  // foot\n}"), .Jsonc)
+	walktest.expect_nil(t, err)
+	defer core.destroy(&doc)
+	got, werr := written(&doc, {})
+	walktest.expect_nil(t, werr)
+	testing.expect_value(t, got, "{\n# lead a\na: 1 # in a\n, b: [1 # in 1\n, 2]\n# foot\n}")
+}
+
+@(test)
+compact_text_keeps_a_root_scalar_inline_comment :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	doc, err := json_pkg.build(transmute([]u8)string("1 // c\n"), .Jsonc)
+	walktest.expect_nil(t, err)
+	defer core.destroy(&doc)
+	text, dropped, werr := core.write(&doc, {}, yaml.as(.Yaml_1_2), allocator = context.temp_allocator)
+	walktest.expect_nil(t, werr)
+	testing.expect_value(t, string(text), "1 # c\n")
+	testing.expect_value(t, dropped, 0)
+}
+
+@(test)
+an_empty_collection_keeps_its_foot_comment :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	doc, err := json_pkg.build(transmute([]u8)string(`{"e": { /* in e */ }, "f": [ /* in f */ ]}`), .Jsonc)
+	walktest.expect_nil(t, err)
+	defer core.destroy(&doc)
+	got, werr := written(&doc)
+	walktest.expect_nil(t, werr)
+	testing.expect_value(t, got, "e: {\n  # in e\n  }\nf: [\n  # in f\n  ]\n")
 }
 
 @(test)

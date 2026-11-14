@@ -136,7 +136,8 @@ Inputs :: struct {
 // after the array. An `own` value, which `input` reads, holds a copy of its text, so the bytes it was read from can go
 // while it lives on.
 next_input :: proc(ins: ^Inputs, own := false) -> (jq.Value, string, jq.Parse_Status) {
-	noted := ins.run.opts.cells_in.comment != 0
+	// A --stream event is no row, so it holds no comment.
+	noted := ins.run.opts.cells_in.comment != 0 && !ins.run.opts.stream
 	if !ins.slurp {
 		v, msg, status := next_value(ins, own)
 		if noted && status == .Value {
@@ -150,6 +151,9 @@ next_input :: proc(ins: ^Inputs, own := false) -> (jq.Value, string, jq.Parse_St
 	}
 	all := jq.new_array()
 	read: for {
+		if slurp_table(ins, all) {
+			continue
+		}
 		if ins.walk != nil && ins.fault_error == "" {
 			if ev, more := fault_peek(ins.walk); more && ev.late {
 				break
@@ -173,6 +177,37 @@ next_input :: proc(ins: ^Inputs, own := false) -> (jq.Value, string, jq.Parse_St
 	}
 	ins.slurp = false
 	return slurped(ins, all), "", .Value
+}
+
+// Under -s, the records of the open file, or of the next file, appended to `all` from one build of the whole table.
+// False when the file is not read so: a pipe's window, a file a record of which is read, comments or the column route
+// asked for, or a text that does not build or names a column twice, whose records' reader then tells the fault.
+@(private = "file")
+slurp_table :: proc(ins: ^Inputs, all: ^jq.Array) -> bool {
+	o := &ins.run.opts
+	if !reads_cells(o) || o.cells_in.comment != 0 || ins.run.route.columns != nil || o.stream {
+		return false
+	}
+	if !ins.open && !open_next(ins) || !ins.last || ins.header_judged || ins.rows_end != 0 {
+		return false
+	}
+	if header_fault(ins.name, ins.data, ins.as) != "" {
+		return false
+	}
+	// A long table is built on the pool's threads.
+	pool := run_pool(ins.run) if len(ins.data) >= POOLED_BYTES else nil
+	doc, fault := jq.judge_build(records.build(ins.data, ins.as, allocator = context.allocator, runner = pool))
+	if _, bad := fault.?; bad {
+		return false
+	}
+	d := new_clone(doc)
+	it := core.children(d, core.ROOT)
+	for rec in core.child_next(&it) {
+		append(&all.items, jq.Value(jq.Ref{d, rec}))
+	}
+	ins.has_text, ins.pinned, ins.text_end = true, true, len(ins.data)
+	close_file(ins)
+	return true
 }
 
 // Tells the parse error `msg` of a --seq record, which is passed over, as jq's parser goes on at the next separator.
@@ -435,7 +470,7 @@ build_whole :: proc(data: []byte, src: Source, allocator: runtime.Allocator, poo
 // Whether the fault `f` of a text of `format` read whole is a text after the first, which the format reads as the next
 // text of the input.
 texts_follow :: proc(f: core.Fault, format: Format) -> bool {
-	follows := FORMATS[format].follows
+	follows := FORMATS[format].caps.follows
 	return follows != nil && follows(f)
 }
 
@@ -443,13 +478,15 @@ texts_follow :: proc(f: core.Fault, format: Format) -> bool {
 @(private = "file")
 text_value :: proc(ins: ^Inputs, built: core.Document, at: int, own: bool) -> (jq.Value, string, jq.Parse_Status) {
 	doc := built
+	end := int(doc.nodes[0].lo) + len(core.span(&doc, core.ROOT))
 	if ins.run.opts.stream {
 		ins.pinned = true
-		ins.events, ins.events_at = jq.events_start(doc), at
+		ins.events = jq.value_events_start(doc, end - 1) if core.is_markup(&doc) else jq.events_start(doc)
+		ins.events_at = at
 		return next_value(ins, own)
 	}
 	ins.pinned ||= !own
-	ins.text_end = at + int(doc.nodes[0].lo) + len(core.span(&doc, core.ROOT))
+	ins.text_end = at + end
 	return jq.document_value(doc), "", .Value
 }
 
@@ -532,7 +569,7 @@ open_next :: proc(ins: ^Inputs) -> bool {
 		if follow || !is_regular_file(f) && (reads_cells(&ins.run.opts) || ins.spec == .Json) {
 			p := new(Pipe, runtime.heap_allocator())
 			p.file, p.run, p.follow, p.name = f, ins.run, follow, ins.name
-			p.lines = records.open_stream({pipe_read, p}, json.as(.Json), .Lines, allocator = runtime.heap_allocator())
+			pipe_open(p)
 			ins.pipe = p
 			ins.open = true
 			take_data(ins, nil)
@@ -824,8 +861,8 @@ release_spent :: proc(ins: ^Inputs) {
 }
 
 // A pipe, or any file that is not a regular one, read as it comes through a stream of `records`, framed at line ends,
-// which gives windows of whole lines. A read that would wait first writes the output so far, as what it waits for may
-// be a while coming.
+// which gives windows of whole lines, or at the end of each CBOR item, as a CBOR sequence has no line end between
+// items. A read that would wait first writes the output so far, as what it waits for may be a while coming.
 Pipe :: struct {
 	file:    ^os.File,
 	run:     ^Run,
@@ -838,6 +875,15 @@ Pipe :: struct {
 	read:    i64,
 	restart: bool,
 	taken:   u64, // the stream's bytes the windows hold end here
+}
+
+@(private = "file")
+pipe_open :: proc(p: ^Pipe) {
+	as, framing := json.as(.Json), core.Framing.Lines
+	if p.run.opts.from == .Cbor {
+		as, framing = FORMATS[.Cbor].whole_as(&p.run.opts), .Concatenated
+	}
+	p.lines = records.open_stream({pipe_read, p}, as, framing, allocator = runtime.heap_allocator())
 }
 
 @(private = "file")
@@ -924,7 +970,7 @@ pipe_take :: proc(p: ^Pipe, window: ^[dynamic]byte, carry: int) -> (ended, resta
 			}
 			// A line the old file ended without its newline is not the new file's.
 			records.close(&p.lines)
-			p.lines = records.open_stream({pipe_read, p}, json.as(.Json), .Lines, allocator = runtime.heap_allocator())
+			pipe_open(p)
 			p.restart, p.taken = false, 0
 			return false, true
 		}

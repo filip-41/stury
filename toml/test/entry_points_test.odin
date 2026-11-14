@@ -6,6 +6,7 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import compose "../../core/compose"
+import build "../../core/build"
 import typed "../../core/typed"
 import write "../../core/write"
 import toml ".."
@@ -20,15 +21,15 @@ a_constant_and_a_chosen_spec_agree :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(TEXT)
 	path := core.Path{steps = {core.Name("t"), core.Name("k"), core.Index(2)}}
 	for spec in toml.Spec {
-		walktest.expect_nil(t, toml.validate(src, spec))
+		walktest.expect_nil(t, core.validate(src, toml.as(spec)))
 		chosen, built := core.build(src, toml.as(spec), allocator = context.temp_allocator)
 		walktest.expect_nil(t, built)
 		testing.expect(t, core.services_of(chosen.as) != nil)
-		found, answer, err := toml.find(src, spec, path, allocator = context.temp_allocator)
+		found, answer, err := build.find(src, toml.as(spec), path, allocator = context.temp_allocator)
 		walktest.expect_nil(t, err)
 		n, _ := core.number(&found, answer.node)
 		testing.expect_value(t, n.bits, 3)
-		scanned, serr := toml.scan(src, spec, path, allocator = context.temp_allocator)
+		scanned, serr := build.scan(src, toml.as(spec), path, allocator = context.temp_allocator)
 		walktest.expect_nil(t, serr)
 		testing.expect_value(t, len(scanned.answers), 1)
 	}
@@ -57,7 +58,7 @@ a_document_of_either_form_is_written_and_edited :: proc(t: ^testing.T) {
 	text, _, werr := toml.write(&bound, .Toml_1_0, allocator = context.temp_allocator)
 	walktest.expect_nil(t, werr)
 	testing.expect_value(t, string(text), TEXT)
-	spec := toml.Spec.Toml_1_0
+	spec :: toml.Spec.Toml_1_0
 	chosen, _ := core.build(src, toml.as(spec), allocator = context.temp_allocator)
 	again, _, aerr := toml.write(&chosen, spec, allocator = context.temp_allocator)
 	walktest.expect_nil(t, aerr)
@@ -111,7 +112,7 @@ set_spells_a_value_at_a_path :: proc(t: ^testing.T) {
 	out, err := toml.set(src, .Toml_1_1, path, 20, allocator = context.temp_allocator)
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, string(out), "a = 1\n\n[t]\nk = [1, 20, 3]\ns = \"x\"\n")
-	spec := toml.Spec.Toml_1_0
+	spec :: toml.Spec.Toml_1_0
 	out, err = toml.set(src, spec, core.Path{steps = {core.Name("t"), core.Name("n")}}, "new", allocator = context.temp_allocator)
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, string(out), "a = 1\n\n[t]\nk = [1, 2, 3]\ns = \"x\"\nn = \"new\"\n")

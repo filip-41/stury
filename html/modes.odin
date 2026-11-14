@@ -53,6 +53,12 @@ on_token :: proc "contextless" (t: ^Html_Tree, tok: ^Html_Token) -> Token_Action
 		t.tag = tag_of(t.src, tok.name)
 	}
 	dispatch(t, tok)
+	// Text the tree held back and took with this token lies before it, so the run starts again here.
+	if t.taken_to > tok.lo {
+		t.tail = 0
+	} else if t.tail == 0 || t.tail < t.taken_to {
+		t.tail = tok.lo
+	}
 	if tok.kind == .Start_Tag && .Self_Closing in tok.flags && !t.acknowledged {
 		parse_error(t, .Non_Void_Html_Element_Start_Tag_With_Trailing_Solidus, tok.hi)
 	}
@@ -1076,6 +1082,9 @@ body_end_tag :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 		}
 		check_open_at_end(t)
 		t.mode = .After_Body
+		if t.body_end.n == 0 {
+			t.body_end = {lo = tok.lo, n = u32(tok.hi - tok.lo)}
+		}
 		return tag == .Html
 	case .Address, .Article, .Aside, .Blockquote, .Button, .Center, .Details, .Dialog, .Dir, .Div, .Dl, .Fieldset, .Figcaption, .Figure, .Footer, .Header, .Hgroup, .Listing, .Main, .Menu, .Nav, .Ol, .Pre, .Search, .Section, .Select, .Summary, .Ul:
 		close_element(t, tag, SCOPE)
@@ -1595,6 +1604,7 @@ after_body :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 				return false
 			}
 			t.mode = .After_After_Body
+			t.html_hi = tok.hi if t.html_hi == 0 else t.html_hi
 			return false
 		}
 	case EOF:
@@ -1602,6 +1612,10 @@ after_body :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 	}
 	unexpected(t, tok)
 	t.mode = .In_Body
+	// An end tag of the body or the document again leaves the body and takes nothing, so the body ends where it first did.
+	if tok.kind != .End_Tag || t.tag != .Body && t.tag != .Html {
+		t.body_end, t.html_hi = {}, 0
+	}
 	return true
 }
 
@@ -1712,6 +1726,10 @@ after_after_body :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 	}
 	unexpected(t, tok)
 	t.mode = .In_Body
+	// An end tag of the body or the document again leaves the body and takes nothing, so the body ends where it first did.
+	if tok.kind != .End_Tag || t.tag != .Body && t.tag != .Html {
+		t.body_end, t.html_hi = {}, 0
+	}
 	return true
 }
 

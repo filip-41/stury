@@ -287,8 +287,8 @@ documents_write :: proc(t: ^testing.T) {
 		{src = `[[1,"a"],[2,"b"]]`, from = .Json, as = dsv.as(.Tsv), want = "1\ta\n2\tb\n"},
 		{src = `[{"a":[1]}]`, from = .Json, as = dsv.as(.Csv), kind = .Unsupported},
 		{src = "[/* c */ {\"a\":[1]}]", from = .Jsonc, as = dsv.as(.Csv), kind = .Unsupported},
-		{src = `[{a:-0x10,b:+1,c:.5,d:5.,e:0X1F,f:1.50}]`, from = .Json5, as = dsv.as(.Csv, {comment = '-'}), want = "a,b,c,d,e,f\n\"-16\",1,0.5,5,31,1.50\n"},
-		{src = `[{a:-0x10,b:+1,c:.5,d:5.,e:0X1F,f:1.50}]`, from = .Json5, as = dsv.as(.Csv, {delimiter = '.'}), want = "a.b.c.d.e.f\n-16.1.\"0.5\".5.31.\"1.50\"\n"},
+		{src = `[{a:-0x10,b:+1,c:.5,d:5.,e:0X1F,f:1.50}]`, from = .Json5, as = dsv.as(.Csv, {comment = '-'}), want = "a,b,c,d,e,f\n\"-16\",1,0.5,5.0,31,1.50\n"},
+		{src = `[{a:-0x10,b:+1,c:.5,d:5.,e:0X1F,f:1.50}]`, from = .Json5, as = dsv.as(.Csv, {delimiter = '.'}), want = "a.b.c.d.e.f\n-16.1.\"0.5\".\"5.0\".31.\"1.50\"\n"},
 		{src = `[[Infinity]]`, from = .Json5, as = dsv.as(.Csv), kind = .Non_Finite},
 		{src = `[1]`, from = .Json, as = dsv.as(.Csv), kind = .Unsupported},
 		{src = `[{"a":1,"a":2,"a":3,"b":4},{"a":5}]`, from = .Json, as = dsv.as(.Csv), want = "a,b\n3,4\n5,\n", dropped = 2},
@@ -306,7 +306,7 @@ documents_write :: proc(t: ^testing.T) {
 		{src = "#top\na,b\n", read = {comment = '#'}, want = "a,b\n#top\n"},
 		{src = "1\n#two\n2\n#foot\n", read = {comment = '#', no_header = true}, want = "1\n#two\n2\n#foot\n"},
 		{src = "// top\n[ // one\n {\"a\": 1}, /* inline */\n {\"a\": 2 /* cell */}\n// foot\n]\n", from = .Jsonc, as = dsv.as(.Csv, {comment = '#'}), want = "# top\na\n# one\n1\n2\n# foot\n", dropped = 2},
-		{src = "[/* one\ntwo */ {\"a\": 1}]", from = .Jsonc, as = dsv.as(.Csv, {comment = '#'}), want = "a\n1\n", dropped = 1},
+		{src = "[/* one\ntwo */ {\"a\": 1}]", from = .Jsonc, as = dsv.as(.Csv, {comment = '#'}), want = "a\n# one\n# two\n1\n"},
 	}
 	// A string cell an inferring read would take for another kind is quoted, and a cell it infers keeps its text.
 	inferred := "a,b,c,d\n1,\"2\",true,\"false\"\n,x,1e2,\"\"\n"

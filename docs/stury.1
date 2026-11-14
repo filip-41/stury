@@ -1,6 +1,6 @@
 .TH STURY 1 "2026-11-11" "stury 0.1.1" "General Commands Manual"
 .SH NAME
-stury \- JSON and CSV codec with a jq 1.8.2\-compatible command line
+stury \- JSON, YAML, TOML, XML, HTML, CSV and CBOR codec with a jq 1.8.2\-compatible command line
 .SH SYNOPSIS
 .B stury
 [\-bcCMnRrsSaejV] [\-\-tab|\-\-indent n] [\-\-arg name value] [\-\-argjson name value] [\-\-slurpfile name file] [\-\-rawfile name file] [\-f file] [\-L dir] [\-\-seq] [\-\-stream|\-\-stream\-errors] [\-\-from format] [\-\-to format] [\-\-grow\-header] [csv options] [\-\-max\-depth n] [\-\-threads n] [\-\-follow] [\-\-explain] [yaml and xml options] [stury options] <jq filter> [file...]
@@ -56,7 +56,7 @@ schema gen
 .B stury
 \-h | \-V | \-\-build\-configuration
 .SH DESCRIPTION
-stury applies a jq 1.8 filter to JSON inputs and gives jq's results and exit codes. Its messages start with stury: and are worded its own way. It accepts all of jq 1.8's options except \-\-run\-tests, \-\-debug\-dump\-disasm and \-\-debug\-trace, a test\-file runner and bytecode listings it does not have. The filter language and those options are described in
+stury applies a jq 1.8 filter to JSON, YAML, TOML, XML, HTML, CSV and CBOR inputs and gives jq's results and exit codes. Its messages start with stury: and are worded its own way. It accepts all of jq 1.8's options except \-\-run\-tests, \-\-debug\-dump\-disasm and \-\-debug\-trace, a test\-file runner and bytecode listings it does not have. The filter language and those options are described in
 .BR jq (1).
 This page covers stury's own options and how its input handling differs from jq's.
 .PP
@@ -83,10 +83,10 @@ idempotent, and a file already in that layout comes back byte for byte. \-c is \
 With \fB\-\-schema\fR \fIfile\fR, fmt judges each file against the JSON Schema as check \-\-schema does (a csv or tsv cell by \-\-infer, never by the schema) and formats a file that passes as plain fmt does. A file that fails is told as check \-\-schema tells it, with at most \-\-max\-errors n failures, is not written, and makes the exit 1. A table written is judged again as it reads back, under \-\-infer when the input is no table, which quotes a text that reads as a number, true or false, and a failure there is told against \fIname\fR (output). \-\-in\-place and \-\-check leave a file with a failure as it is.
 .PP
 .B stury schema infer
-writes the JSON Schema every record of its inputs passes: the kinds met at each position, a member required where every object had it, an empty csv cell a null. \-\-ranges also keeps the least and greatest number and length. An input that does not parse, an empty one, and one whose schema would nest past the depth a JSON text may have exit 5.
+writes the JSON Schema every record of its inputs passes: the kinds met at each position, a member required where every object had it, an empty csv cell a null. \-\-ranges also keeps the least and greatest number and length. An input that does not parse, an empty one, and one whose schema would nest past the depth a JSON text may have exit 5. The schema is written in the format \-\-to names, JSON by default, and not as csv or tsv.
 .PP
 .B stury schema sample
-writes \-\-count n values (default 1) that pass the schema, chosen by \-\-seed n, a text a line in the format \-\-to names; \-\-invalid writes values that fail it, \-\-comments writes descriptions as comments where the format has them, and under \-\-to csv or tsv \-\-infer reads the sample's cells as check \-\-infer does. A schema for which no passing value is found, or under \-\-invalid no failing one, exits 1 with the file named.
+writes \-\-count n values (default 1) that pass the schema, chosen by \-\-seed n, a text a line in the format \-\-to names; \-\-invalid writes values that fail it, \-\-comments writes descriptions as comments where the format has them, and under \-\-to csv or tsv \-\-infer reads the sample's cells as check \-\-infer does. A schema for which no passing value is found, or under \-\-invalid no failing one, exits 1 with the file named. A schema file is read in the format its extension names, and as JSON under any other name; \-\-from names it for sample and gen.
 .PP
 .B stury schema gen
 writes the Odin source of the types a model reads the schema's values with, and a register procedure for the rules no tag holds; \-\-package names the package. A keyword no Odin type spells exits 1, told with the path of the node that holds it.
@@ -106,10 +106,10 @@ with \-\-to, \-n, \-\-stream, \-\-stream\-errors, \-\-follow, \-r, \-j, \-\-raw\
 .SH OPTIONS
 .TP
 .BI \-\-from " format"
-Read json (the default), jsonc, json5, ndjson, csv, tsv, toml, yaml, xml, cbor or html. With check, judge the input as that format is read.
+Read json (the default), jsonc, json5, ndjson, csv, tsv, toml, yaml, xml, cbor or html. toml, yaml, xml, html and cbor take a spec after a colon: toml:1.0 or toml:1.1 (the default), yaml:1.2, xml:xml, html:document (the default) or html:fragment, and cbor:cbor (any serialization, the default), cbor:preferred, cbor:deterministic or cbor:length_first, which refuse an item in another. With check, judge the input as that format is read.
 .TP
 .BI \-\-to " format"
-Write json (the default), jsonc, ndjson (as \-c), csv, tsv, toml, yaml, xml, cbor or html. toml, yaml and xml write each output as a text of the format, which a node of a toml or yaml input, and an xml document written whole, keeps its comments and spellings in, and cbor each output as one item in preferred serialization with nothing between the items. toml takes an object only and no JSON layout option; yaml takes \-c (flow style), \-\-indent and \-a. xml takes an object of one member, the root element, and \-c, \-\-indent and \-a. html takes an object, one of one html member a document and any other a fragment, and writes it by the WHATWG serialization. A member is an element, an array repeats it, and #text is text. csv and tsv write each output as one record. An object is a row under a header of the first object's keys (sorted under \-S). A missing key is an empty cell, and an extra key ends the run with exit 5. An array or a scalar is a row with no header, and the two kinds do not mix. A string is its text, a number is spelled as it was written, and null is an empty cell. csv writes "" as a quoted empty cell; tsv cannot tell the two apart. An array or object in a cell ends the run (tojson makes text of it). Not with \-r, \-j, \-a, \-C, \-c, \-\-indent, \-\-tab, \-\-seq or \-\-raw\-output0, and not with check.
+Write json (the default), jsonc, json5, ndjson (as \-c), csv, tsv, toml, yaml, xml, cbor or html. toml, yaml and xml write each output as a text of the format, which a node of a toml or yaml input, and an xml document written whole, keeps its comments and spellings in, and cbor each output as one item in preferred serialization with nothing between the items. A spec after a colon names another: toml:1.0 (the default) or toml:1.1, cbor:deterministic or cbor:length_first for sorted keys. toml takes an object only, and \-a and \-S; yaml takes \-c (flow style), \-\-indent, \-a and \-S. xml takes an object of one member, the root element, and \-c, \-\-indent, \-\-tab and \-a, as html does. html takes an object, one of one html member a document and any other a fragment, and writes it by the WHATWG serialization. A member is an element, an array repeats it, and #text is text. csv and tsv write each output as one record. An object is a row under a header of the first object's keys (sorted under \-S). A missing key is an empty cell, and an extra key ends the run with exit 5. An array or a scalar is a row with no header, and the two kinds do not mix. A string is its text, a number is spelled as it was written, and null is an empty cell. csv writes "" as a quoted empty cell; tsv cannot tell the two apart. An array or object in a cell ends the run (tojson makes text of it). Not with \-r, \-j, \-a, \-C, \-c, \-\-indent, \-\-tab, \-\-seq or \-\-raw\-output0, and not with check.
 .TP
 .B \-\-grow\-header
 With \-\-to csv or tsv, hold the output and write a header of every key in the order first seen (byte order under \-S). Memory holds all the output.
@@ -118,25 +118,25 @@ With \-\-to csv or tsv, hold the output and write a header of every key in the o
 Read one JSON text per line, not with \-R or \-\-seq. \-\-to ndjson prints compact, one value per line, so \-\-indent, \-\-tab and \-\-seq are refused with it.
 .TP
 .BI \-\-from " jsonc"
-Read JSONC (comments and trailing commas), also for \-\-argjson, \-\-jsonargs, \-\-slurpfile (one document per file) and fromjson. Values print with their comments. Not with \-R, \-\-seq or \-\-stream, and \-\-to jsonc not with \-\-seq.
+Read JSONC (comments and trailing commas), also for \-\-argjson, \-\-jsonargs, \-\-slurpfile (one document per file) and fromjson. Values print with their comments. Not with \-R, and \-\-to jsonc not with \-\-seq.
 .TP
 .BI \-\-from " json5"
-Read JSON5 1.0.0: each input is one text, read as written (comments kept), and numbers print in JSON's spelling. Infinity and NaN end the run, having no JSON value. Read only: not \-\-to json5, nor fmt \-\-in\-place or fmt \-\-check. \-\-argjson, \-\-slurpfile, \-\-jsonargs and fromjson read JSON5. Not with \-R, \-\-seq or \-\-stream.
+Read JSON5 1.0.0: one text after another, read as written (comments kept), and numbers print in JSON's spelling. Infinity and NaN end the run, having no JSON value. \-\-to json5 writes each value with its comments, and fmt keeps a JSON5 text's spelling. \-\-argjson, \-\-slurpfile, \-\-jsonargs and fromjson read JSON5. Not with \-R.
 .TP
 .BI \-\-from " toml"
-Read TOML 1.1, one document per input (an empty input is {}). A datetime is a string that .@tag names, and .@style tells a string's quoting and a number's form. Not with \-R, \-\-seq, \-\-stream or \-\-follow.
+Read TOML 1.1, one document per input (an empty input is {}). A datetime is a string that .@tag names, and .@style tells a string's quoting and a number's form. Not with \-R, \-\-seq or \-\-follow.
 .TP
 .BI \-\-from " yaml"
-Read YAML 1.2 with the core schema, each document of a stream one input. An alias to no anchor and a collection as a key are parse errors. .@tag, .@anchor, .@alias and .@style read a node's properties. edit edits each document as a record. Not with \-R, \-\-seq or \-\-stream.
+Read YAML 1.2 with the core schema, each document of a stream one input. An alias to no anchor and a collection as a key are parse errors. .@tag, .@anchor, .@alias and .@style read a node's properties. edit edits each document as a record. Not with \-R or \-\-seq.
 .TP
 .BI \-\-from " xml"
-Read XML 1.0 with its internal subset, one document per input: an element is a member named as written, its text a string (\-\-infer types it) or a #text member. .&name reads an attribute by its name as written, and .@attrs, .@name, .@namespace, .@content, .@pi and .@doctype the element's attributes, name, namespace and text and the document's instructions and doctype. A name an element repeats is an array of its elements. edit keeps every byte the output does not change. Not with \-R, \-\-seq, \-\-stream or \-\-follow.
+Read XML 1.0 with its internal subset, one document per input: an element is a member named as written, its text a string (\-\-infer types it) or a #text member. .&name reads an attribute by its name as written, and .@attrs, .@name, .@namespace, .@content, .@pi and .@doctype the element's attributes, name, namespace and text and the document's instructions and doctype. A name an element repeats is an array of its elements. edit keeps every byte the output does not change. Not with \-R, \-\-seq or \-\-follow.
 .TP
 .BI \-\-from " html"
-Read HTML as a browser builds its tree, one document per input, in the shape \-\-from xml reads, every element with a .@namespace. check tells the first parse error. \-\-to html and fmt write it by the WHATWG serialization, the doctype, comments and attributes kept. edit keeps every byte it does not change and refuses an edit of what the tree construction made. Not with \-R, \-\-seq, \-\-stream or \-\-follow.
+Read HTML as a browser builds its tree, one document per input, in the shape \-\-from xml reads, every element with a .@namespace. check tells the first parse error. \-\-to html and fmt write it by the WHATWG serialization, the doctype, comments and attributes kept. edit keeps every byte it does not change and refuses an edit of what the tree construction made. Not with \-R, \-\-seq or \-\-follow.
 .TP
 .BI \-\-from " cbor"
-Read CBOR (RFC 8949), each item of an RFC 8742 sequence one input, in any serialization. A byte string reads as its base64, a byte string key as its bytes, an integer key as its decimal text and a tag as its content, whose number .@tag reads. edit edits each item as a record. Not with \-R, \-\-seq, \-\-stream or \-\-follow.
+Read CBOR (RFC 8949), each item of an RFC 8742 sequence one input, in any serialization. A byte string reads as its base64, a byte string key as its bytes, an integer key as its decimal text and a tag as its content, whose number .@tag reads. edit edits each item as a record. Not with \-R or \-\-seq.
 .TP
 .BI \-\-alias\-limit " n"
 With \-\-from yaml, refuse aliases that read more than n bytes again (default ten times the text, at least 1 MiB).
@@ -151,7 +151,7 @@ With \-\-from xml, refuse entity references that expand to more than n bytes in 
 With \-\-from xml, read a reference to an entity no declaration stury read names as its own text.
 .TP
 .BI \-\-from " csv"
-Read CSV (RFC 4180). The first record of each file names the fields. Each later record is one input, an object of those names with each cell's text as a string, never a number. An empty cell with no quotes is null and a quoted "" is ""; every empty tsv cell is null. A repeated header name, a record of another width and a fault in the text end the file with NAME:LINE:COLUMN: FAULT and exit 5. A regular file is read whole and a pipe a window at a time, a window holding the longest record. A record of another width is told at the byte where its width is wrong, as having more or fewer fields than the first record. A filter that is only columns (.name, .a, .b, or [.a, .b] under \-c) is printed from the cells in pieces on every core. With \-s the records are one array. Not with \-R, \-\-seq or \-\-stream.
+Read CSV (RFC 4180). The first record of each file names the fields. Each later record is one input, an object of those names with each cell's text as a string, never a number. An empty cell with no quotes is null and a quoted "" is ""; every empty tsv cell is null. A repeated header name, a record of another width and a fault in the text end the file with NAME:LINE:COLUMN: FAULT and exit 5. A regular file is read whole and a pipe a window at a time, a window holding the longest record. A record of another width is told at the byte where its width is wrong, as having more or fewer fields than the first record. A filter that is only columns (.name, .a, .b, or [.a, .b] under \-c) is printed from the cells in pieces on every core. With \-s the records are one array. Not with \-R or \-\-seq.
 .TP
 .BI \-\-from " tsv"
 Read tab\-separated values as \-\-from csv does, with no quoting and the escapes \\t, \\n, \\r, \\0 and \\\\ that jq's @tsv writes.
@@ -200,7 +200,7 @@ With \-\-to csv or tsv, write no header line.
 With \-\-to csv or tsv, end each written record with CR LF.
 .TP
 .B \-\-follow
-With one named file, answer each record as it is appended, like tail \-f FILE | stury FILTER without the pipe. It reads NDJSON, \-\-seq, \-R, jq's texts per file, CSV, TSV and YAML streams. A record cut short waits for its delimiter, the output is written after each record, and a file that shrinks is read again from its start with a note on stderr. SIGINT and SIGTERM end the run once the answers so far are written, by the signal, as they end jq. Not with standard input, several files, \-s, \-n, \-\-stream, JSONC, JSON5, TOML, XML, CBOR, HTML, check or fmt.
+With one named file, answer each record as it is appended, like tail \-f FILE | stury FILTER without the pipe. It reads NDJSON, \-\-seq, \-R, jq's texts per file, CSV, TSV, YAML streams and CBOR sequences. A record cut short waits for its delimiter, the output is written after each record, and a file that shrinks is read again from its start with a note on stderr. SIGINT and SIGTERM end the run once the answers so far are written, by the signal, as they end jq. Not with standard input, several files, \-s, \-n, \-\-stream, JSONC, JSON5, TOML, XML, HTML, check or fmt.
 .TP
 .B \-\-explain
 Write how the filter runs and what the run did to stderr, as lines \fBstury: explain: KEY: SENTENCE\fR, and run the filter as without it. Before the run: filter, input, plan (reading only a path, reading only named columns, or building each input), because (each reason an input is built), decides (what the speed and memory follow). After it: ran (inputs read by path and built), threads, fallback (the first input a path plan built after all, and why), time and used (peak memory, bytes read and written). The keys and reasons are listed in docs/cli.md. Not with check or fmt.

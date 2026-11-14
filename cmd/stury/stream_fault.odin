@@ -379,9 +379,6 @@ check_literal :: proc(p: ^Parser, end: int) -> string {
 			return "Invalid numeric literal"
 		}
 		v = n
-		if x, is_text := n.(^jq.Number_Text); is_text {
-			v = jq.number_text(strings.clone(x.text))
-		}
 	}
 	if msg := value(p, v); msg != "" {
 		return msg

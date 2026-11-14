@@ -56,17 +56,20 @@ EDIT_RULES := core.Rules{"toml_edit", {
 // TOML's edit services, the same table for both specs.
 @(private, rodata)
 EDIT := core.Edit_Services {
-	value    = edit_value,
-	key_text = edit_key_text,
-	comment  = proc(_: ^core.Document, _: u8) -> (core.Comment_Spelling, u8) {return .Byte, '#'},
-	validate = edit_validate,
-	spell    = edit_spell,
-	relocate = edit_relocate,
-	commit   = edit_commit,
+	value      = edit_value,
+	key_text   = edit_key_text,
+	comment    = proc(_: ^core.Document, _: u8) -> core.Comment_Syntax {return core.HASH_COMMENTS},
+	validate   = edit_validate,
+	build      = build_handle,
+	scan       = scan_text,
+	whole_scan = true,
+	spell      = edit_spell,
+	relocate   = edit_relocate,
+	commit     = edit_commit,
 }
 
 // Returns an edit list over `doc`. A document an entry point reads holds no edit services, so the list takes TOML's.
-edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List {
+edit_list_init :: proc(doc: ^core.Document, $S: Spec, allocator := context.allocator) -> core.Edit_List {
 	list := core.edit_list_init(doc, allocator)
 	list.edit = &EDIT
 	return list
@@ -76,8 +79,8 @@ edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.all
 // with `allocator`, keeping every byte the edit does not reach. A `typed.Raw` is the text of a TOML value, a struct, a
 // slice or a map is built by `plan`, and any other value is spelled as an inline TOML value. A `Name` the path ends in
 // that its table lacks is inserted as the TOML commit places it.
-set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	return write.set_with(src, bound_as(spec, opts), build_handle, &EDIT, path, v, plan, read, allocator)
+set :: proc(src: []u8, $S: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+	return write.set_with(src, bound_as(S, opts), build_handle, &EDIT, path, v, plan, read, allocator)
 }
 
 // A value an edit writes, spelled as the inline value a line holds: the token write at a site of the document.
@@ -149,7 +152,7 @@ spell_key :: proc(name: []u8, allocator: runtime.Allocator) -> []u8 {
 @(private)
 edit_relocate :: proc(doc: ^core.Document, node: core.Node_Index, _: core.Site, allocator: runtime.Allocator) -> ([]u8, bool) {
 	cx := Cx{doc = doc, src = doc.src, a = allocator}
-	switch form_of(&cx, u32(node)) {
+	switch form_of(cx.doc, u32(node)) {
 	case .Scalar, .Inline:
 		lo, _ := core.scalar_ends(doc.nodes[node])
 		return slice.clone(doc.src[lo:node_end(&cx, u32(node))], allocator), true
@@ -166,7 +169,9 @@ edit_relocate :: proc(doc: ^core.Document, node: core.Node_Index, _: core.Site, 
 	return text, err.kind == .None
 }
 
-@(private = "file")
+// How a node is written in the source. A table's `.@style` is `flow` inline, `dotted` through dotted keys and `block`
+// otherwise, and an array's `block` for an array of tables and `flow` otherwise.
+@(private)
 Form :: enum u8 {
 	Root, // the document
 	Scalar, // a value with one range
@@ -214,29 +219,29 @@ refuse_edit :: proc(cx: ^Cx, node: core.Node_Index, detail: Edit_Detail) -> bool
 	return false
 }
 
-@(private = "file")
-form_of :: proc(cx: ^Cx, i: u32) -> Form {
+@(private)
+form_of :: proc(doc: ^core.Document, i: u32) -> Form {
 	if i == 0 {
 		return .Root
 	}
-	n := cx.doc.nodes[i]
+	n := doc.nodes[i]
 	#partial switch n.kind {
 	case .Object:
-		switch cx.src[n.lo] {
+		switch doc.src[n.lo] {
 		case '{':
 			return .Inline
 		case '[':
 			return .Header
 		}
-		key := cx.doc.nodes[i - 1]
-		if first_byte(cx.src, compose.line_start(cx.src, key.lo)) == '[' {
+		key := doc.nodes[i - 1]
+		if first_byte(doc.src, compose.line_start(doc.src, key.lo)) == '[' {
 			return .Implicit
 		}
 		return .Dotted
 	case .Array:
 		if n.n > 1 {
-			first := cx.doc.nodes[i + 1]
-			if first.kind == .Object && cx.src[first.lo] == '[' {
+			first := doc.nodes[i + 1]
+			if first.kind == .Object && doc.src[first.lo] == '[' {
 				return .Tables
 			}
 		}
@@ -342,7 +347,7 @@ node_end :: proc(cx: ^Cx, i: u32) -> u64 {
 	#partial switch n.kind {
 	case .Object, .Array:
 		last := last_value(cx, i)
-		if form_of(cx, i) == .Inline {
+		if form_of(cx.doc, i) == .Inline {
 			from := n.lo + 1
 			if last != NIL {
 				from = node_end(cx, last)
@@ -365,7 +370,7 @@ statement_end :: proc(cx: ^Cx, i: u32) -> u64 {
 // end of its last line. A dotted table's lines may lie apart, so the last is the latest.
 @(private = "file")
 lines_of :: proc(cx: ^Cx, v: u32) -> (head, end: u64, ok: bool) {
-	#partial switch form_of(cx, v) {
+	#partial switch form_of(cx.doc, v) {
 	case .Scalar, .Inline:
 		head = head_start(cx, compose.line_start(cx.src, cx.doc.nodes[v - 1].lo))
 		return head, statement_end(cx, v), true
@@ -387,7 +392,7 @@ build_sections :: proc(cx: ^Cx) {
 	cx.sec_of = make([]i32, len(nodes), cx.a)
 	for i in 1 ..< len(nodes) {
 		cx.sec_of[i] = -1
-		if nodes[i].kind == .Object && form_of(cx, u32(i)) == .Header {
+		if nodes[i].kind == .Object && form_of(cx.doc, u32(i)) == .Header {
 			ls := compose.line_start(cx.src, nodes[i].lo)
 			append(&cx.sections, Section{ls = ls, head = head_start(cx, ls), node = u32(i)})
 		}
@@ -458,7 +463,7 @@ apply :: proc(cx: ^Cx, e: core.Edit) -> bool {
 set_value :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	i := u32(e.node)
 	n := cx.doc.nodes[i]
-	switch form_of(cx, i) {
+	switch form_of(cx.doc, i) {
 	case .Scalar:
 		lo, hi := core.scalar_ends(n)
 		add_text(cx, lo, hi, string(e.text))
@@ -473,7 +478,7 @@ set_value :: proc(cx: ^Cx, e: core.Edit) -> bool {
 @(private = "file")
 set_key :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	i := u32(e.node)
-	switch form_of(cx, i + 1) {
+	switch form_of(cx.doc, i + 1) {
 	case .Scalar, .Inline:
 		k := cx.doc.nodes[i]
 		add(cx, k.lo, k.lo + u64(k.n), spell_key(e.text, cx.a))
@@ -511,7 +516,7 @@ items_of :: proc(cx: ^Cx, c: u32) -> []Item {
 @(private = "file")
 insert_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	c := u32(e.node)
-	switch form_of(cx, c) {
+	switch form_of(cx.doc, c) {
 	case .Inline:
 		return insert_inline(cx, e, c)
 	case .Root, .Header, .Implicit:
@@ -579,7 +584,7 @@ insert_line :: proc(cx: ^Cx, e: core.Edit, t: u32) -> bool {
 	if insert_member_sections(cx, e, t) {
 		return true
 	}
-	if form_of(cx, t) == .Implicit {
+	if form_of(cx.doc, t) == .Implicit {
 		return insert_section(cx, e, t, line)
 	}
 	src := cx.src
@@ -620,7 +625,7 @@ insert_line :: proc(cx: ^Cx, e: core.Edit, t: u32) -> bool {
 insert_dotted :: proc(cx: ^Cx, e: core.Edit, d: u32) -> bool {
 	src := cx.src
 	for p := cx.parent[d]; p != NIL; p = cx.parent[p] {
-		if form_of(cx, p) == .Inline {
+		if form_of(cx.doc, p) == .Inline {
 			return refuse_edit(cx, e.node, .Inline_Dotted)
 		}
 	}
@@ -657,14 +662,14 @@ header_path :: proc(cx: ^Cx, i: u32) -> (path: string, ok: bool) {
 	cur := i
 	for cur != 0 {
 		p := cx.parent[cur]
-		if form_of(cx, p) == .Tables {
+		if form_of(cx.doc, p) == .Tables {
 			if cur + cx.doc.nodes[cur].n != p + cx.doc.nodes[p].n {
 				return "", false
 			}
 			cur = p
 			continue
 		}
-		if form_of(cx, p) == .Inline {
+		if form_of(cx.doc, p) == .Inline {
 			return "", false
 		}
 		append(&parts, key_source(cx, cur - 1))
@@ -744,7 +749,7 @@ value_sections :: proc(cx: ^Cx, text: []u8, prefix: string, name: []u8, element:
 			return nil, false
 		}
 		kind = put_table(&l, value, true)
-	case !is_section(&l, value):
+	case place_of(&l, value) != .Section:
 		return nil, false
 	case:
 		append(&l.path, string(name))
@@ -833,13 +838,13 @@ insert_element :: proc(cx: ^Cx, e: core.Edit, arr: u32) -> bool {
 remove_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	v := u32(e.node)
 	p := cx.parent[v]
-	switch form_of(cx, p) {
+	switch form_of(cx.doc, p) {
 	case .Inline:
 		return remove_inline(cx, p, v)
 	case .Tables:
 		remove_sections(cx, v)
 	case .Root, .Header, .Dotted, .Implicit, .Scalar:
-		switch form_of(cx, v) {
+		switch form_of(cx.doc, v) {
 		case .Scalar, .Inline, .Dotted:
 			remove_lines(cx, v)
 		case .Header, .Implicit, .Tables:
@@ -859,7 +864,7 @@ remove_inline :: proc(cx: ^Cx, c, v: u32) -> bool {
 // The lines of a member of a table, with the comments directly above them.
 @(private = "file")
 remove_lines :: proc(cx: ^Cx, v: u32) {
-	if form_of(cx, v) == .Dotted {
+	if form_of(cx.doc, v) == .Dotted {
 		it := core.pairs(cx.doc, core.Node_Index(v))
 		for _, w in core.pair_next(&it) {
 			remove_lines(cx, u32(w))
@@ -913,13 +918,13 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	compose.claim(&cx.seen, &cx.err, id) or_return
 	node := u32(e.node)
 	for p := cx.parent[node]; p != NIL; p = cx.parent[p] {
-		if form_of(cx, p) == .Inline {
+		if form_of(cx.doc, p) == .Inline {
 			return refuse_edit(cx, e.node, .Inline_Comment)
 		}
 	}
 	lines := compose.fact_lines(e, cx.a)
 	for line in lines {
-		if !write.comment_ok(string(line)) {
+		if !write.comment_lines_ok(string(line)) {
 			return refuse_edit(cx, e.node, .Comment_Body)
 		}
 	}
@@ -934,7 +939,7 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 		return block_comment(cx, e, cx.foot_at, nil, lines[:], existing[:])
 	case .Comment:
 		return head_comment(cx, e, node, lines[:], existing[:])
-	case .Key, .Value, .Tag, .Anchor, .Alias, .Instruction, .Doctype, .Attribute, .Partial:
+	case .Key, .Value, .Tag, .Anchor, .Alias, .Instruction, .Doctype, .Directive, .Attribute, .Partial:
 	}
 	return refuse_edit(cx, e.node, .Tag_Fact)
 }
@@ -959,11 +964,11 @@ retag :: proc(cx: ^Cx, e: core.Edit) -> bool {
 @(private = "file")
 head_comment :: proc(cx: ^Cx, e: core.Edit, node: u32, lines: [][]u8, existing: []core.Fact) -> bool {
 	ls: u64
-	switch form_of(cx, node) {
+	switch form_of(cx.doc, node) {
 	case .Scalar, .Inline:
 		ls = compose.line_start(cx.src, cx.doc.nodes[node - 1].lo)
 	case .Dotted, .Header:
-		ls = compose.line_start(cx.src, cx.doc.nodes[node].lo if form_of(cx, node) == .Header else cx.doc.nodes[node - 1].lo)
+		ls = compose.line_start(cx.src, cx.doc.nodes[node].lo if form_of(cx.doc, node) == .Header else cx.doc.nodes[node - 1].lo)
 	case .Root, .Implicit, .Tables:
 		return refuse_edit(cx, e.node, .No_Statement)
 	}
@@ -978,7 +983,9 @@ block_comment :: proc(cx: ^Cx, e: core.Edit, ls: u64, indent: []u8, lines: [][]u
 		compose.puts(&b, cx.eol)
 	}
 	for line in lines {
-		compose.puts(&b, string(indent), "#", " " if e.padded else "", string(line), cx.eol)
+		compose.puts(&b, string(indent))
+		compose.spell_comment(&b, core.HASH_COMMENTS, line, true, e.padded)
+		compose.puts(&b, cx.eol)
 	}
 	if len(existing) == 0 {
 		if len(lines) > 0 {
@@ -999,7 +1006,7 @@ inline_comment :: proc(cx: ^Cx, e: core.Edit, node: u32, lines: [][]u8, existing
 		return refuse_edit(cx, e.node, .Many_Comments)
 	}
 	pos: u64
-	switch form_of(cx, node) {
+	switch form_of(cx.doc, node) {
 	case .Scalar, .Inline, .Dotted:
 		pos = node_end(cx, node)
 	case .Header:
@@ -1012,7 +1019,7 @@ inline_comment :: proc(cx: ^Cx, e: core.Edit, node: u32, lines: [][]u8, existing
 	}
 	text := make([dynamic]u8, cx.a)
 	if len(lines) == 1 {
-		compose.puts(&text, "#", " " if e.padded else "", string(lines[0]))
+		compose.spell_comment(&text, core.HASH_COMMENTS, lines[0], true, e.padded)
 	}
 	if len(existing) == 1 {
 		f := existing[0]

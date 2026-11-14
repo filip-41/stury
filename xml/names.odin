@@ -20,7 +20,7 @@ Attribute_Iter :: core.Attribute_Iter
 Child_Count :: core.Child_Count
 Child_Index :: core.Child_Index
 Child_Iter :: core.Child_Iter
-Comment_Spelling :: core.Comment_Spelling
+Comment_Syntax :: core.Comment_Syntax
 Commented :: core.Commented
 Descend :: core.Descend
 Document :: core.Document
@@ -36,7 +36,7 @@ Error_Entry :: core.Error_Entry
 Expected_Key :: core.Expected_Key
 Fact :: core.Fact
 Fact_Iter :: core.Fact_Iter
-Fact_Name :: core.Fact_Name
+Fact_Kind :: core.Fact_Kind
 Fact_Value :: core.Fact_Value
 Fault :: core.Fault
 Fault_Kind :: core.Fault_Kind
@@ -60,6 +60,7 @@ Node_Ref :: core.Node_Ref
 Number :: core.Number
 Number_Kind :: core.Number_Kind
 Number_Text :: core.Number_Text
+Number_View :: core.Number_View
 Object :: core.Object
 PRETTY :: core.PRETTY
 Pair_Iter :: core.Pair_Iter
@@ -120,6 +121,7 @@ members_named :: core.members_named
 new_array :: core.new_array
 new_object :: core.new_object
 noted :: core.noted
+number :: core.number
 object_put :: core.object_put
 pair_next :: core.pair_next
 pairs :: core.pairs
@@ -134,7 +136,6 @@ set_fact :: core.set_fact
 span :: core.span
 text :: core.text
 text_room :: core.text_room
-token_text :: core.token_text
 write_code :: core.write_code
 write_pointer :: core.write_pointer
 write_stream :: core.write_stream
@@ -200,7 +201,10 @@ write_value :: write.write_value
 insert :: write.insert
 set_member :: write.set_member
 set_node :: write.set
-tokens_close :: write.close
+close :: write.close
+comment :: write.comment
+end_record :: write.end_record
+tokens_finish :: write.tokens_finish
 marshal_stream :: write.marshal_stream
 
 Record_Reader :: records.Reader
@@ -219,7 +223,6 @@ cell :: records.cell
 cells :: records.cells
 column :: records.column
 write_cells :: records.write_cells
-writer_init :: records.writer_init
 writer_end :: records.writer_end
 
 Bound_Schema :: schema.Bound
@@ -229,4 +232,4 @@ Schema_Options :: schema.Options
 check_schema :: schema.check
 check_schema_records :: schema.check_records
 
-destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind, css.destroy, cursor_destroy}
+destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind, css.destroy, core.cursor_free}

@@ -21,7 +21,7 @@ written :: proc(doc: ^core.Document, opts := core.Write_Options{}) -> (string, c
 
 // Every case read, written, read again and compared with its expected value, then written again for the same text.
 @(private)
-check_written :: proc(t: ^testing.T, list: string, spec: toml.Spec) -> (cases: int) {
+check_written :: proc(t: ^testing.T, list: string, $spec: toml.Spec) -> (cases: int) {
 	rest := list
 	for name in strings.split_lines_iterator(&rest) {
 		if !strings.has_prefix(name, "valid/") || !strings.has_suffix(name, ".toml") {
@@ -88,13 +88,43 @@ layout_puts_lines_before_sections :: proc(t: ^testing.T) {
 layout_omits_the_header_of_a_table_that_holds_only_sections :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	testing.expect_value(t, text_of("[a.b.c]\nx = 1\n"), "[a.b.c]\nx = 1\n")
-	testing.expect_value(t, text_of("a = {}\n"), "[a]\n")
+	testing.expect_value(t, text_of("[a]\n"), "[a]\n")
 }
 
 @(test)
 layout_writes_arrays_of_tables_as_sections :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	testing.expect_value(t, text_of("a = [{x = 1}, {x = 2, y = [{z = 3}]}]\nb = [[1], 2]\nc = []\n"), "b = [[1], 2]\nc = []\n\n[[a]]\nx = 1\n\n[[a]]\nx = 2\n\n[[a.y]]\nz = 3\n")
+	doc, err := json_pkg.build(transmute([]u8)string(`{"a": [{"x": 1}, {"x": 2, "y": [{"z": 3}]}], "b": [[1], 2], "c": [], "d": {}}`), .Json)
+	walktest.expect_nil(t, err)
+	defer core.destroy(&doc)
+	got, werr := written(&doc)
+	walktest.expect_nil(t, werr)
+	testing.expect_value(t, got, "b = [[1], 2]\nc = []\n\n[[a]]\nx = 1\n\n[[a]]\nx = 2\n\n[[a.y]]\nz = 3\n\n[d]\n")
+}
+
+// A TOML text keeps its layout: an inline table or array stays in line, a dotted key stays dotted, and a section stays
+// one. `.@style` reads it as `flow`, `dotted` and `block`.
+@(test)
+layout_keeps_inline_tables_dotted_keys_and_sections :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "it = { a = 1, b = { c = 2 } }\nl = [{ a = 1 }, [2]]\nx.y = 2\nx.z.w = 3\ne = {}\n\n[s]\nq = 1\n\n[s.t]\nr = 2\n\n[[arr]]\nk = 1\n\n[[arr]]\nk = 2\n"
+	testing.expect_value(t, text_of(src), src)
+	testing.expect_value(t, text_of("x.y = 1\n\n[x.z]\nw = 2\n"), "x.y = 1\n\n[x.z]\nw = 2\n")
+	doc, err := toml.build(transmute([]u8)src, .Toml_1_0)
+	walktest.expect_nil(t, err)
+	defer core.destroy(&doc)
+	for want in ([?][2]string{{"it", "flow"}, {"l", "flow"}, {"x", "dotted"}, {"e", "flow"}, {"s", "block"}, {"arr", "block"}}) {
+		i, _ := core.member(&doc, core.ROOT, want[0])
+		style, _ := core.fact_value(&doc, i, .Style)
+		testing.expectf(t, style.text == want[1], "%s is %q, not %q", want[0], style.text, want[1])
+	}
+	s, _ := core.member(&doc, core.ROOT, "s")
+	st, _ := core.member(&doc, s, "t")
+	arr, _ := core.member(&doc, core.ROOT, "arr")
+	for node in ([?]core.Node_Index{st, arr + 1}) {
+		style, _ := core.fact_value(&doc, node, .Style)
+		testing.expect_value(t, style.text, "block")
+	}
 }
 
 @(test)
@@ -102,6 +132,13 @@ layout_keeps_comments :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := "# head\na = 1 # inline\n\n# section\n[t]\n# above b\nb = 2\n# foot\n"
 	testing.expect_value(t, text_of(src), "# head\na = 1 # inline\n\n# section\n[t]\n# above b\nb = 2\n\n# foot\n")
+}
+
+@(test)
+layout_keeps_the_comments_of_arrays_and_headers :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "c = [ 1, # in arr\n 2 ]\nf = [ # f\n]\n[t] # tail t\nb = 2\n"
+	testing.expect_value(t, text_of(src), "c = [\n  1, # in arr\n  2,\n]\nf = [\n  # f\n]\n\n[t] # tail t\nb = 2\n")
 }
 
 @(test)
@@ -163,7 +200,19 @@ the_head_comment_of_another_format_is_written_as_toml :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	got, werr := written(&doc)
 	walktest.expect_nil(t, werr)
-	testing.expect_value(t, got, "# head\n# before a\na = 1 # tail a\n")
+	testing.expect_value(t, got, "# head\n\n# before a\na = 1 # tail a\n")
+}
+
+@(test)
+a_block_comment_of_another_format_is_written_as_toml_lines :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "{\n/* x\n y */\n\"a\": 1, /* tail a */\n\"b\": 2 //b\n}"
+	doc, err := json_pkg.build(transmute([]u8)src, .Jsonc)
+	walktest.expect_nil(t, err)
+	defer core.destroy(&doc)
+	got, werr := written(&doc)
+	walktest.expect_nil(t, werr)
+	testing.expect_value(t, got, "# x\n#  y\na = 1 # tail a\nb = 2 #b\n")
 }
 
 @(test)
@@ -225,6 +274,24 @@ token_write_under_a_pretty_layout_lays_out_the_same_text :: proc(t: ^testing.T) 
 }
 
 @(test)
+token_write_joins_the_inline_comments_of_one_value :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	w: write.Tokens
+	write.tokens_init(&w, toml.as(.Toml_1_0), allocator = context.temp_allocator)
+	write.open_object(&w)
+	write.key(&w, "a")
+	write.value_int(&w, 1)
+	write.comment(&w, "a", .Comment_Inline)
+	write.comment(&w, "b", .Comment_Inline)
+	write.key(&w, "c")
+	write.value_int(&w, 2)
+	write.close(&w)
+	bytes, err := write.tokens_finish(&w)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, string(bytes), "a = 1 # a b\nc = 2\n")
+}
+
+@(test)
 token_write_refuses_a_datetime_of_another_type :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	w: write.Tokens
@@ -237,6 +304,7 @@ token_write_refuses_a_datetime_of_another_type :: proc(t: ^testing.T) {
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Bad_Raw)
 }
 
+// A refusal names why in the format's words, which `core.render` writes after the kind's message.
 @(test)
 token_write_refuses_null_and_a_value_that_is_no_table :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -248,11 +316,15 @@ token_write_refuses_null_and_a_value_that_is_no_table :: proc(t: ^testing.T) {
 	write.close(&w)
 	_, err := write.tokens_finish(&w)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unwritable)
+	b := strings.builder_make(context.temp_allocator)
+	core.render(strings.to_writer(&b), nil, core.error_of(err))
+	testing.expect_value(t, strings.to_string(b), "Value cannot be written in the format: TOML has no spelling for null or for a key a table repeats")
 	v: write.Tokens
 	write.tokens_init(&v, toml.as(.Toml_1_0), allocator = context.temp_allocator)
 	write.value_int(&v, 3)
 	_, err = write.tokens_finish(&v)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unwritable)
+	testing.expect_value(t, err.want.text, "a TOML text is a table, so its root is an object")
 }
 
 Server :: struct {
@@ -325,7 +397,7 @@ unmarshal_reports_a_fault_of_the_text :: proc(t: ^testing.T) {
 marshal_refuses_a_value_that_is_no_table :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	_, err := toml.marshal(3, allocator = context.temp_allocator)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
+	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
 }
 
 @(test)

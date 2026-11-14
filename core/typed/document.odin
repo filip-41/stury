@@ -287,7 +287,7 @@ document_step :: proc "contextless" (d: ^Document_Read($H), regs: core.Hook_Regs
 	} else if t.kind == .Number && t.spelling & core.NUMBER_KIND_MASK == 0 {
 		h.mant = fold_digits(h.src, t)
 	}
-	if d.doc.readers.attribute != nil && t.role == .Value && t.kind != .End {
+	if .Attribute in d.doc.readers.holds && t.role == .Value && t.kind != .End {
 		return element_step(d, regs, t, at)
 	}
 	return hook_spelled(h, regs, t)

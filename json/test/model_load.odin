@@ -323,6 +323,7 @@ a_load_reads_markup_as_it_reads_its_json_form :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	readers := json.as(.Json).readers^
+	readers.holds += {.Attribute}
 	readers.attribute = markup_attribute
 	reg: model.Registry
 	prices, _ := model.compile(&reg, struct{ price: Price }, json.checks(.Json))

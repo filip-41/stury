@@ -9,16 +9,18 @@ import core "../core"
 // The readers of a built document: the leaves and `close_end`. It holds no services.
 @(rodata)
 READERS := core.Readers {
-	text        = text,
-	key_equals  = spelling_key_equals,
-	number      = number,
-	number_text = number_text,
-	close_end   = close_end,
-	format      = format_rules,
-	fact        = fact,
-	tag_key     = "cbor",
-	binary      = true,
-	key_bytes   = key_bytes,
+	text         = token_text,
+	key_equals   = spelling_key_equals,
+	number       = token_number,
+	number_text  = number_text,
+	close_end    = close_end,
+	format       = format_rules,
+	fact         = fact,
+	tag_key      = "cbor",
+	binary       = true,
+	floats_apart = true,
+	holds        = {.Tag},
+	key_bytes    = key_bytes,
 }
 
 // The handle of an item of `spec` read with `opts`, over `READERS`.
@@ -30,9 +32,9 @@ bound_as :: #force_inline proc "contextless" (spec: Spec, opts := Options{}) -> 
 // plan holds this table, and the option bytes in `As`.
 @(rodata)
 PLAN_READERS := core.Readers {
-	text        = text,
+	text        = token_text,
 	key_equals  = spelling_key_equals,
-	number      = number,
+	number      = token_number,
 	number_text = number_text,
 	format      = format_rules,
 	tag_key     = "cbor",

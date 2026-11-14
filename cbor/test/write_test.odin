@@ -111,7 +111,7 @@ items_are_respelled_for_the_encoding :: proc(t: ^testing.T) {
 		}
 		got := written(t, &doc, r.enc)
 		testing.expectf(t, string(got) == string(hex(r.want)), "%s under %v: want %s, got %s", r.src, r.enc, r.want, hex_of(got))
-		testing.expectf(t, cbor.validate(got, r.enc) == nil, "%s under %v: %s is refused", r.src, r.enc, hex_of(got))
+		testing.expectf(t, core.validate(got, cbor.as(r.enc)) == nil, "%s under %v: %s is refused", r.src, r.enc, hex_of(got))
 	}
 }
 
@@ -164,7 +164,7 @@ json_written_as_cbor_reads_back :: proc(t: ^testing.T) {
 		}
 		for enc in ([?]cbor.Spec{.Cbor, .Preferred, .Deterministic, .Length_First}) {
 			bin := written(t, &src, enc)
-			testing.expectf(t, cbor.validate(bin, enc) == nil, "%s under %v: %s is refused", text, enc, hex_of(bin))
+			testing.expectf(t, core.validate(bin, cbor.as(enc)) == nil, "%s under %v: %s is refused", text, enc, hex_of(bin))
 			back, berr := cbor.build(bin, .Cbor)
 			if !testing.expectf(t, berr == nil, "%s: %v", text, berr) {
 				continue
@@ -188,7 +188,7 @@ deterministic_output_stays_deterministic :: proc(t: ^testing.T) {
 	src, _ := stury_json.build(transmute([]u8)string(`{"zz":{"b":1,"a":[{"y":2,"x":3}]},"a":0,"m":"n","10":1,"9":2}`), .Json)
 	for enc in ([?]cbor.Spec{.Deterministic, .Length_First}) {
 		first := written(t, &src, enc)
-		testing.expect(t, cbor.validate(first, enc) == nil)
+		testing.expect(t, core.validate(first, cbor.as(enc)) == nil)
 		doc, _ := cbor.build(first, .Cbor)
 		testing.expect_value(t, hex_of(written(t, &doc, enc)), hex_of(first))
 		testing.expect_value(t, hex_of(written(t, &doc, .Cbor)), hex_of(first))
@@ -207,7 +207,7 @@ deterministic_output_stays_deterministic :: proc(t: ^testing.T) {
 			write.value_string(w, "n")
 			write.close(w)
 		})
-		testing.expect(t, cbor.validate(tokens, enc) == nil)
+		testing.expect(t, core.validate(tokens, cbor.as(enc)) == nil)
 		Shuffled :: struct {
 			zz:    int,
 			a:     map[string]int,
@@ -219,7 +219,7 @@ deterministic_output_stays_deterministic :: proc(t: ^testing.T) {
 		v.a["q"], v.a["p"] = 1, 2
 		typed_text, err := cbor.marshal(v, enc)
 		walktest.expect_nil(t, err)
-		testing.expectf(t, cbor.validate(typed_text, enc) == nil, "%v: %s", enc, hex_of(typed_text))
+		testing.expectf(t, core.validate(typed_text, cbor.as(enc)) == nil, "%v: %s", enc, hex_of(typed_text))
 	}
 }
 
@@ -241,7 +241,7 @@ fixtures_write_back :: proc(t: ^testing.T) {
 		testing.expectf(t, string(written(t, &doc, .Cbor)) == string(src), "%s: .Cbor changed the bytes", name)
 		for enc in ([?]cbor.Spec{.Preferred, .Deterministic}) {
 			bin := written(t, &doc, enc)
-			testing.expectf(t, cbor.validate(bin, enc) == nil, "%s: not %v", name, enc)
+			testing.expectf(t, core.validate(bin, cbor.as(enc)) == nil, "%s: not %v", name, enc)
 			back, _ := cbor.build(bin, .Cbor)
 			testing.expectf(t, same_document(&doc, &back), "%s under %v: another value", name, enc)
 		}
@@ -463,7 +463,7 @@ every :: proc() -> Every {
 		value = items,
 		scalar = u64(max(u64)),
 		number = core.Number{u64(1 << 40), .Int},
-		digits = core.number_text("123456789012345678901234567890")^,
+		digits = core.Number_Text{text = "123456789012345678901234567890"},
 		raw = typed.Raw(string(hex("a1 6161 82 01 02"))),
 		blob = blob,
 		c = "c string",
@@ -528,27 +528,31 @@ typed_values_round_trip :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	want := every()
 	for form in cbor.Struct_Form {
-		for enc in ([?]cbor.Spec{.Cbor, .Deterministic}) {
-			opts := cbor.Options{structs = form}
-			text, err := cbor.marshal(want, enc, opts)
-			if !testing.expectf(t, err == nil, "%v %v: %v", form, enc, err) {
-				continue
-			}
-			testing.expectf(t, cbor.validate(text, .Preferred if enc == .Cbor else enc) == nil, "%v %v: %s", form, enc, hex_of(text))
-			got: Every
-			rerr := cbor.unmarshal(text, enc, &got, opts)
-			testing.expectf(t, rerr == nil, "%v %v: %v", form, enc, rerr)
-			expect_every(t, &got, &want, form)
-			plan, perr := cbor.plan_make(Every, enc, opts, reads = cbor.reads(.Cbor))
-			walktest.expect_nil(t, perr)
-			again: Every
-			walktest.expect_nil(t, cbor.unmarshal(text, enc, &again, &plan))
-			expect_every(t, &again, &want, form)
-			planned, merr := cbor.marshal(want, &plan)
-			walktest.expect_nil(t, merr)
-			testing.expect_value(t, hex_of(planned), hex_of(text))
-		}
+		round_trips(t, &want, form, .Cbor)
+		round_trips(t, &want, form, .Deterministic)
 	}
+}
+
+@(private = "file")
+round_trips :: proc(t: ^testing.T, want: ^Every, form: cbor.Struct_Form, $enc: cbor.Spec) {
+	opts := cbor.Options{structs = form}
+	text, err := cbor.marshal(want^, enc, opts)
+	if !testing.expectf(t, err == nil, "%v %v: %v", form, enc, err) {
+		return
+	}
+	testing.expectf(t, core.validate(text, cbor.as(.Preferred if enc == .Cbor else enc)) == nil, "%v %v: %s", form, enc, hex_of(text))
+	got: Every
+	rerr := cbor.unmarshal(text, enc, &got, opts)
+	testing.expectf(t, rerr == nil, "%v %v: %v", form, enc, rerr)
+	expect_every(t, &got, want, form)
+	plan, perr := cbor.plan_make(Every, enc, opts, reads = cbor.reads(.Cbor))
+	walktest.expect_nil(t, perr)
+	again: Every
+	walktest.expect_nil(t, cbor.unmarshal(text, enc, &again, &plan))
+	expect_every(t, &again, want, form)
+	planned, merr := cbor.marshal(want^, &plan)
+	walktest.expect_nil(t, merr)
+	testing.expect_value(t, hex_of(planned), hex_of(text))
 }
 
 // A struct is a map by name or an array by position, and either reads into it whatever the plan's form.

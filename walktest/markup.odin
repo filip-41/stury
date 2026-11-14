@@ -169,7 +169,7 @@ log_token :: proc "contextless" (r: ^Token_Log, s: core.Hook_Regs, t: core.Token
 		name = "Inline"
 	case .Comment_Foot:
 		name = "Foot"
-	case .Instruction, .Doctype, .Attribute, .Tag, .Anchor, .Alias, .Partial:
+	case .Instruction, .Doctype, .Directive, .Attribute, .Tag, .Anchor, .Alias, .Partial:
 		name = fmt.tprint(t.role)
 	}
 	if t.spelling & core.SPELLING_DECODE != 0 && t.role == .Value {

@@ -168,7 +168,7 @@ answers_break_early :: proc(t: ^testing.T) {
 	path, _ := core.parse_path(".[]")
 	defer core.path_destroy(&path)
 	src := transmute([]u8)string("a = 1\nb = 2\nc = 3\n")
-	spec := toml.Spec.Toml_1_0
+	spec :: toml.Spec.Toml_1_0
 	it := toml.answers(src, spec, path)
 	first: core.Token_Answer
 	for a in toml.next(&it) {
@@ -177,4 +177,24 @@ answers_break_early :: proc(t: ^testing.T) {
 	}
 	testing.expectf(t, it.err == nil && first.outcome == .Found && string(src[first.lo:first.hi]) == "1", "%v %v", first, it.err)
 	toml.destroy(&it)
+}
+
+// An iterator over several paths gives what `each_answer` gives for them.
+@(test)
+answers_of_many_paths :: proc(t: ^testing.T) {
+	a, _ := core.parse_path(".a")
+	defer core.path_destroy(&a)
+	b, _ := core.parse_path(".b[]")
+	defer core.path_destroy(&b)
+	paths := []core.Path{b, a}
+	src := transmute([]u8)string("a = 1\nb = [2, 3]\n")
+	want, got: [dynamic]core.Token_Answer
+	defer delete(want)
+	defer delete(got)
+	testing.expect(t, toml.each_answer(src, .Toml_1_1, paths, &want, collect_answer) == nil)
+	it := toml.answers(src, .Toml_1_1, paths)
+	for x in toml.next(&it) {
+		append(&got, x)
+	}
+	testing.expectf(t, it.err == nil && len(want) == 3 && slice.equal(got[:], want[:]), "%v, want %v: %v", got[:], want[:], it.err)
 }

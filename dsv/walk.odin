@@ -282,9 +282,17 @@ each_answer_many :: proc(src: []u8, $S: Spec, paths: []core.Path, state: rawptr,
 }
 
 // The answers `each_answer` gives, as an iterator that `next` takes them from: `for a in dsv.next(&it)`. A loop that
-// ends before `next` returns false frees the read with `destroy(&it)`. `path` is read at the first `next`.
-answers :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
-	return answers_of(src, bound_as(S, opts), nil, path, read, allocator, answers_fill(S))
+// ends before `next` returns false frees the read with `destroy(&it)`. `paths` is read at the first `next`.
+answers :: proc {answers_one, answers_many}
+
+@(private)
+answers_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+	return engine.answers_of(src, bound_as(S, opts), nil, path, read, allocator, answers_fill(S))
+}
+
+@(private)
+answers_many :: #force_inline proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+	return engine.answers_of(src, bound_as(S, opts), paths, {}, read, allocator, answers_fill(S))
 }
 
 find :: proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
@@ -309,12 +317,8 @@ edit_list_init :: proc(doc: ^core.Document, $S: Spec, allocator := context.alloc
 }
 
 // Writes node `node` of `doc` as spec `spec`, as `core.write` does with `as(spec)`.
-write :: proc(doc: ^core.Document, $S: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
-	if int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
-		return nil, 0, core.error_of(core.Typed_Refusal{kind = .Unsupported})
-	}
-	out, cut, refusal := document_write(doc, opts, bound_as(S), node, {}, allocator)
-	return out, cut, core.error_of(refusal)
+write :: proc(doc: ^core.Document, $S: Spec, write := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
+	return core.write(doc, write, as(S), node, allocator)
 }
 
 @(private)

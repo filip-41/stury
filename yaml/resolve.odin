@@ -134,11 +134,99 @@ core_type :: proc "contextless" (handle, suffix, prefix: string, declared: bool)
 		head = CORE_PREFIX if handle == "!!" else handle
 	}
 	for name, ct in CORE_TAGS {
-		if ct != .None && len(head) + len(suffix) == len(name) && name[:len(head)] == head && name[len(head):] == suffix {
+		if ct != .None && is_named(head, suffix, name) {
 			return ct
 		}
 	}
 	return .None
+}
+
+// Whether a tag whose handle stands for `head` and whose suffix is `suffix` is the tag `name` in full.
+@(private)
+is_named :: #force_inline proc "contextless" (head, suffix, name: string) -> bool {
+	return len(head) + len(suffix) == len(name) && name[:len(head)] == head && name[len(head):] == suffix
+}
+
+// YAML's `Readers.tag_meaning`: `!!binary`, and `!!timestamp` on a scalar whose text is a timestamp, as its kind, under
+// the names the document's `%TAG` directives give.
+@(private)
+tag_meaning :: proc(doc: ^core.Document, i: core.Node_Index, tag: string) -> core.Tag_Meaning {
+	n := doc.nodes[i]
+	handle, suffix := tag_parts(tag)
+	if n.kind != .String && n.kind != .Plain || len(suffix) < 6 {
+		return .Own
+	}
+	head := CORE_PREFIX if handle == "!!" else handle
+	if handle != "" {
+		if prefix, declared := declared_prefix(directive_source(doc), handle); declared {
+			head = prefix
+		}
+	}
+	if is_named(head, suffix, CORE_PREFIX + "binary") {
+		return .Binary
+	}
+	if !is_named(head, suffix, CORE_PREFIX + "timestamp") {
+		return .Own
+	}
+	stack: [64]u8 = ---
+	return timestamp_kind(scalar_text(doc.src, n, stack[:]))
+}
+
+// The kind of timestamp `s` is by YAML 1.1's timestamp type: a date alone is `.Local_Date`, a date and a time
+// `.Local_Datetime`, and one with a zone `.Datetime`. A text of neither form is `.Own`.
+@(private)
+timestamp_kind :: proc "contextless" (s: string) -> core.Tag_Meaning {
+	at := 0
+	if !run(s, &at, 4, 4) || !at_byte(s, &at, '-') || !run(s, &at, 1, 2) || !at_byte(s, &at, '-') || !run(s, &at, 1, 2) {
+		return .Own
+	}
+	if at == len(s) {
+		return .Local_Date if at == 10 else .Own
+	}
+	if !at_byte(s, &at, 'T') && !at_byte(s, &at, 't') && blanks(s, &at) == 0 {
+		return .Own
+	}
+	if !run(s, &at, 1, 2) || !at_byte(s, &at, ':') || !run(s, &at, 2, 2) || !at_byte(s, &at, ':') || !run(s, &at, 2, 2) {
+		return .Own
+	}
+	if at_byte(s, &at, '.') {
+		run(s, &at, 0, len(s))
+	}
+	if at == len(s) {
+		return .Local_Datetime
+	}
+	zone := at
+	blanks(s, &at)
+	if !at_byte(s, &at, 'Z') {
+		at = zone
+		if !at_byte(s, &at, '+') && !at_byte(s, &at, '-') || !run(s, &at, 1, 2) || at_byte(s, &at, ':') && !run(s, &at, 2, 2) {
+			return .Own
+		}
+	}
+	return .Datetime if at == len(s) else .Own
+
+	run :: proc "contextless" (s: string, at: ^int, lo, hi: int) -> bool {
+		n := 0
+		for at^ < len(s) && n < hi && s[at^] >= '0' && s[at^] <= '9' {
+			at^ += 1
+			n += 1
+		}
+		return n >= lo
+	}
+	at_byte :: proc "contextless" (s: string, at: ^int, b: u8) -> bool {
+		if at^ < len(s) && s[at^] == b {
+			at^ += 1
+			return true
+		}
+		return false
+	}
+	blanks :: proc "contextless" (s: string, at: ^int) -> int {
+		from := at^
+		for at^ < len(s) && (s[at^] == ' ' || s[at^] == '\t') {
+			at^ += 1
+		}
+		return at^ - from
+	}
 }
 
 // The readers' `tag_fits`: a core schema tag, as written with no `%TAG` directive, stays on a value of its type, and any
@@ -184,6 +272,13 @@ declared_prefix :: proc "contextless" (src: []u8, handle: string) -> (prefix: st
 		}
 	}
 	return
+}
+
+// The text whose `%TAG` directives `doc`'s tags resolve by: its state, the directives a stream's member keeps as
+// `directives_keep` writes them, or else the start of its text.
+@(private)
+directive_source :: #force_inline proc "contextless" (doc: ^core.Document) -> []u8 {
+	return doc.state if len(doc.state) > 0 else doc.src
 }
 
 // The first word of `s` past its white space, and the text after it.
@@ -242,7 +337,7 @@ scalar_text :: proc(src: []u8, t: core.Token, stack: []u8) -> string {
 // YAML's `Readers.text`, exported so a caller that knows the format calls it without the table. A plain scalar on one
 // line returns its span, and any other scalar is decoded into `buf`, which `core.text_room` sizes. A container returns
 // false.
-text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
+token_text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
 	if t.kind > .Plain {
 		return "", false
 	}
@@ -264,7 +359,7 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 	}
 	if len(doc.facts) != 0 {
 		if tag, tagged := core.fact_value(doc, i, .Tag); tagged {
-			#partial switch doc_core_type(doc.src, tag.text) {
+			#partial switch doc_core_type(directive_source(doc), tag.text) {
 			case .None, .Str:   return .String
 			case .Int, .Float:  return .Number
 			}
@@ -283,7 +378,7 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 
 // YAML's `Readers.number`, exported so a caller that knows the format calls it without the table: the value of a plain
 // scalar that resolves to a number, in every form the core schema has.
-number :: proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) {
+token_number :: proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) {
 	if t.kind != .Plain && t.kind != .Number || t.role != .Value {
 		return {}, false
 	}
@@ -382,11 +477,10 @@ json_decimal :: proc "contextless" (text: string, buf: []u8) -> (s: string, ok: 
 		for k < len(text) && text[k] >= '0' && text[k] <= '9' {
 			k += 1
 		}
-		if k > lo {
-			buf[out] = '.'
-			out += 1
-			out += copy(buf[out:], text[lo:k])
-		}
+		// A point with no digit after it still makes a float, so it keeps a zero.
+		buf[out] = '.'
+		out += 1
+		out += copy(buf[out:], text[lo:k]) if k > lo else copy(buf[out:], "0")
 	}
 	out += copy(buf[out:], text[k:])
 	return string(buf[:out]), true
@@ -413,9 +507,10 @@ radix_number :: proc "contextless" (digits: []u8, base: u64) -> core.Number {
 	return {value, .Int}
 }
 
-// YAML's `Readers.fact`: `Style` names how a scalar or a collection is written.
+// YAML's `Readers.fact`: `Style` names how a scalar or a collection is written, and for a plain hex or octal integer its
+// base, `hex` or `octal`, as TOML and JSON5 name it.
 @(private)
-spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Name) -> (core.Fact_Value, bool) {
+spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Kind) -> (core.Fact_Value, bool) {
 	if name != .Style {
 		return {}, false
 	}
@@ -427,6 +522,9 @@ spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_N
 		style := style_of(t.spelling)
 		if style == .Block {
 			return {text = "folded" if doc.src[t.lo] == '>' else "literal"}, true
+		}
+		if style == .Plain && t.n > 2 && doc.src[t.lo] == '0' && (doc.src[t.lo + 1] == 'x' || doc.src[t.lo + 1] == 'o') && core.kind(doc, i) == .Number {
+			return {text = "hex" if doc.src[t.lo + 1] == 'x' else "octal"}, true
 		}
 		return {text = STYLE_NAMES[style]}, true
 	case .End:

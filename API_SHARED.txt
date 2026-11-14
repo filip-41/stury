@@ -56,44 +56,69 @@ scratch_destroy :: proc(scratch: ^Scratch)
 # core
 ATTRIBUTE_LEAD_MAX :: 255
 AT_NO_BYTE :: bit_set[Fault_Kind]{.None, .No_Memory, .Bad_Option}
+COMMENT_FACTS :: bit_set[Fact_Kind]{.Comment, .Comment_Inline, .Comment_Foot}
 COMMENT_ROLES :: bit_set[Role]{.Comment, .Comment_Inline, .Comment_Foot}
+Capabilities :: struct { writes: bit_set[Write_Option; u8], framings: bit_set[Framing; u8], specs: typeid, follows: proc "contextless" (f: Fault) -> bool, }
 DECODE_SLACK :: 8
+ELEMENT_FACTS :: bit_set[Fact_Kind]{.Name, .Namespace, .Content, .Attribute, .Doctype}
+Edited_Region :: struct { path: Path, want: Value, gone: bool, }
+FACTS := [Fact_Kind]Fact_Info {
 FAULT_REACH :: 16
+HASH_COMMENTS :: Comment_Syntax{line = "#"}
 HEX_ROOM :: 40
 INDEX_FROM :: 16
+MARKUP_COMMENTS :: Comment_Syntax{open = "<!--", close = "-->"}
 MAX_PATHS :: 64
 Member :: struct { key: string, val: Value, }
 NO_NODE :: Node_Index(max(u32))
 NUMBER_DECIMAL :: u16(2)
 NUMBER_EXP :: u16(1 << 14)
+NUMBER_HELD :: max(u32)
 NUMBER_KIND_MASK :: u16(0xF)
+NUMBER_POINT :: u16(1 << 15)
 No_Hooks :: struct {}
 POSITIONAL_TABLES := [1]Table{{node = ROOT}}
+SLASH_COMMENTS :: Comment_Syntax{line = "//", open = "/*", close = "*/"}
 SPELLING_DECODE :: u16(1)
 SPELLING_LAX :: u16(4)
 SPELLING_QUOTED :: u16(2)
 SPELLING_SYNTHETIC :: SPELLING_DECODE | SPELLING_LAX
 STOPPED :: 1
 TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .No_Sample, .No_Invalid_Sample, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Invalid_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
+Write_Option :: enum u8 { Pretty, Indent, Tab, Ascii, Sort_Keys, Respell_Strings, }
 all_facts :: #force_inline proc(doc: ^Document, i: Node_Index) -> []Fact
+attribute_bodies :: proc(v: Value, name: string, text: Maybe(string)) -> []string
 attribute_spelling :: #force_inline proc "contextless" (lead: int, quoted: bool) -> u16
+attributes_value :: proc(v: Value, name: string, one: bool) -> Value
 children_from :: proc(doc: ^Document, i: Node_Index, k: int) -> Child_Iter
+comment_next :: proc(it: ^Fact_Iter) -> (text: string, padded: bool, ok: bool)
 comment_spelling :: #force_inline proc "contextless" (lead, tail: u8) -> u16
 comment_tail :: #force_inline proc "contextless" (spelling: u16) -> u64
+comment_text :: proc(doc: ^Document, f: Fact) -> (text: string, padded: bool)
 compare_members :: proc(a, b: []Member, depth: int, eq: bool, too_deep: ^bool = nil, max_depth := MAX_DEPTH, read_plain := false, dups := Duplicates.Last) -> int
+cursor_context :: #force_inline proc "contextless" (allocator: runtime.Allocator) -> runtime.Context
+cursor_give :: proc "contextless" (held: ^Held_Tokens, h: ^$H, $on: proc "contextless" (h: ^H, s: Hook_Regs, t: Token) -> (Hook_Regs, Action)) -> (hi: u64, stopped: bool)
 cursor_resume :: proc "contextless" (src: []u8, cursor: ^Token_Cursor, h: ^$H, regs: ^Hook_Regs, $on: proc "contextless" (h: ^H, s: Hook_Regs, t: Token) -> (Hook_Regs, Action), rules: ^Rules) -> (hi: u64, fault: Maybe(Fault))
 distinct_keys :: #force_no_inline proc(r: Node_Ref) -> int
 double_of :: proc(v: Value, buf: []u8 = nil) -> (f: f64, digits: string, ok: bool)
+edited_regions :: proc(list: ^Edit_List) -> (regions: []Edited_Region, known, fits: bool)
 element_of :: proc(doc: ^Document, c: Node_Index, k: int) -> (Node_Index, Presence)
 entry_code :: proc(e: Error_Entry) -> string
 fact_next :: proc(it: ^Fact_Iter) -> (body: string, ok: bool)
+fact_of_role :: proc "contextless" (role: Role) -> (Fact_Kind, bool)
+facts_node :: proc(v: Value) -> (Node_Ref, bool)
 fault_at :: #force_inline proc "contextless" (pos: u64, kind: Fault_Kind, detail: u8 = 0) -> u64
+has_comments :: #force_inline proc "contextless" (s: Comment_Syntax) -> bool
 has_line_end :: #force_inline proc(body: []u8) -> bool
 has_repeated_key :: proc(r: Node_Ref) -> bool
+has_tags :: proc "contextless" (doc: ^Document) -> bool
 header_of :: #force_inline proc "contextless" (doc: ^Document) -> Node_Index
+held_f64 :: #force_inline proc "contextless" (n: Number_View) -> (f64, bool)
 holding_end :: proc "contextless" (src: []u8, cursor: ^Token_Cursor, s: ^Holding($H), regs: ^Hook_Regs, hi: u64, fault: Maybe(Fault), rules: ^Rules) -> (u64, Maybe(Fault))
 holding_hook :: #force_inline proc "contextless" (s: ^Holding($H), regs: Hook_Regs, t: Token, $on: proc "contextless" (h: ^H, s: Hook_Regs, t: Token) -> (Hook_Regs, Action)) -> (Hook_Regs, Action)
+in_place_of :: proc(v: Value, origin: Node_Ref) -> Value
 index_children :: proc(doc: ^Document, i: Node_Index) -> bool
+index_keys :: proc(doc: ^Document, t: ^Table) -> runtime.Allocator_Error
 insert_element_value :: proc(list: ^Edit_List, container: Node_Index, at: int, v: Value) -> Error
 insert_input :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string, member: bool, in_: Edit_Input) -> Error
 insert_member_value :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string, v: Value) -> Error
@@ -102,15 +127,16 @@ is_flat :: #force_inline proc(doc: ^Document) -> bool
 is_markup :: #force_inline proc "contextless" (doc: ^Document) -> bool
 is_property :: #force_inline proc "contextless" (role: Role) -> bool
 is_wide :: proc(v: Value) -> bool
+json_decimal :: proc(lit: string, buf: []u8) -> (json: string, ok: bool)
 keep_comments :: #force_inline proc(old, nv: Value) -> Value
 kept_tag :: proc(doc: ^Document, tag: string, nv: Value) -> (string, bool)
 line_end_len :: proc(src: []u8, pos: u64) -> u64
 locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines = nil) -> (line, col: u64)
+lower_node :: proc(entries: []$E, node: $N) -> int
 make_room :: #force_inline proc(a: ^[dynamic]$T)
-markup_fact :: proc(doc: ^Document, i: Node_Index, name: Fact_Name) -> (Fact_Value, bool)
+markup_fact :: proc(doc: ^Document, i: Node_Index, name: Fact_Kind) -> (Fact_Value, bool)
 markup_member :: proc(r: Node_Ref, name: string) -> (v: Value, found: bool)
 markup_members :: proc(r: Node_Ref) -> ^Object
-markup_number :: proc(v: ^Token_View, t: Token) -> (Number, bool)
 markup_number_text :: proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool)
 markup_resolve :: proc(doc: ^Document, i: Node_Index, infer: bool) -> Kind
 move_document_error :: proc(e: ^Document_Error, by: u64)
@@ -132,13 +158,21 @@ owns_tables :: #force_inline proc "contextless" (doc: ^Document) -> bool
 parents_of :: proc(list: ^Edit_List) -> []Node_Index
 path_error :: proc(e: Document_Error) -> Path_Error
 plain_kind :: proc (src: []u8, lo, hi: u64, bools, numbers: bool) -> (kind: Kind, integer: bool)
+reads_as_edited :: proc(list: ^Edit_List, got: Node_Ref) -> (reads, known: bool)
+reads_back_as :: proc(want, got: Value) -> bool
+reads_rows :: proc(list: ^Edit_List, out: []u8, as: As, walk: proc(src: []u8, as: As, r: ^Row_Read) -> Maybe(Fault)) -> (err: Document_Error, known: bool)
+reads_written :: proc(out: []u8, as: As, written: []Written, walk: proc(src: []u8, as: As, w: ^Written_Read) -> Maybe(Fault)) -> Document_Error
+rebuilt_attributes :: proc(v: Value) -> (attributes: ^Object, rebuilt: bool)
+rebuilt_comments :: proc(v: Value, role: Role) -> (bodies: []string, rebuilt: bool)
 reindex :: proc(o: ^Object)
 render_entry :: proc(w: io.Writer, src: []u8, e: Error_Entry, lines: ^Lines = nil) -> io.Error
 reorder :: proc(list: ^Edit_List, container: Node_Index, order: []u32) -> Error
 reserve_depth :: #force_inline proc "contextless" (max_depth: u32, n: int) -> int
 result_of :: #force_inline proc "contextless" (r: u64, rules: ^Rules) -> (hi: u64, fault: Maybe(Fault), stopped: bool)
 rewrap :: proc(c: ^Commented, inner: Value) -> Value
+rows_hook :: proc "contextless" (r: ^Row_Read, s: Hook_Regs, t: Token) -> (Hook_Regs, Action)
 same_format :: #force_inline proc "contextless" (a, b: ^Readers) -> bool
+same_number_type :: proc(a, b: Value) -> bool
 scalar_ends :: #force_inline proc "contextless" (t: Token) -> (lo, hi: u64)
 services_of :: #force_inline proc "contextless" (as: As) -> ^Services
 set_facts :: proc(list: ^Edit_List, node: Node_Index, role: Role, texts: []string, padded := false) -> Error
@@ -162,11 +196,14 @@ text_spelling :: #force_inline proc "contextless" (escaped, lax: bool) -> u16
 text_start :: proc "contextless" (src: []u8, lo: u64) -> u64
 trail_array :: proc(t: Trail) -> ^Array
 typed_refusal_of :: proc "contextless" (f: Typed_Error) -> Typed_Refusal
+view_copy :: proc(n: Number_View, allocator := context.allocator) -> Number_View
 view_room :: #force_inline proc(readers: ^Readers, view: ^Token_View, t: Token) -> int
 with_services :: proc "contextless" (r: Readers, services: ^Services) -> Readers
+worded :: proc "contextless" (e: Typed_Refusal, words: Write_Words) -> Typed_Refusal
 write_entry_message :: proc(w: io.Writer, e: Error_Entry) -> io.Error
 write_fault_message :: proc(w: io.Writer, src: []u8, f: Fault) -> io.Error
 write_steps :: proc(w: io.Writer, steps: []Step, whole: bool) -> io.Error
+written_hook :: proc "contextless" (w: ^Written_Read, s: Hook_Regs, t: Token) -> (Hook_Regs, Action)
 # host
 writing :: proc(pool: ^Pool, on: bool)
 # core/kernel
@@ -209,7 +246,7 @@ fact_lines :: proc(e: core.Edit, allocator: runtime.Allocator) -> [dynamic][]u8
 first_on_line :: proc(src: []u8, p: u64) -> bool
 flow_splices :: proc(splices: ^[dynamic]Splice, src: []u8, items: []$T, removed: []bool, inserts: []Flow_Insert, open, close: u64, eol: string, pad: bool, allocator: runtime.Allocator)
 line_start :: proc(src: []u8, p: u64) -> u64
-markup_commit :: proc(list: ^core.Edit_List, m: ^Markup, allocator: runtime.Allocator) -> (out: []u8, err: core.Document_Error)
+markup_commit :: proc(list: ^core.Edit_List, m: ^Markup, allocator: runtime.Allocator, cut: []Splice = nil) -> (out: []u8, err: core.Document_Error)
 markup_content :: proc(doc: ^core.Document, m: ^Markup, node: core.Node_Index) -> (lo, hi: u64)
 markup_key_text :: proc(_: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bool
 next_line :: proc(src: []u8, p: u64) -> u64
@@ -217,6 +254,7 @@ order_check :: proc(order: []u8, removed: []bool, inserts: int, allocator: runti
 push :: proc(d: ^[dynamic]$T, v: T) -> (int, bool)
 push_all :: proc(d: ^[dynamic]$T, vs: []T) -> (count: int, ok: bool)
 role_facts :: proc(doc: ^core.Document, e: core.Edit, allocator: runtime.Allocator) -> [dynamic]core.Fact
+spell_comment :: proc(b: ^[dynamic]u8, s: core.Comment_Syntax, body: []u8, line, padded: bool) -> bool
 # core/rules
 EVERY_KIND :: Kinds{.Null, .Bool, .Integer, .Number, .String, .Array, .Object}
 FORMAT_PATTERNS := #partial [String_Format]string {
@@ -224,6 +262,7 @@ Failures :: bit_set[core.Typed_Error_Kind; u64]
 NONE :: Node_Index(-1)
 Programs :: map[string]rawptr
 branches :: proc(d: ^Description, nodes: []Node_Index, choices: bool, limit: int, allocator := context.temp_allocator) -> (out: [][dynamic]Node_Index, complete: bool)
+date_of :: proc(s: string) -> (p: Date_Time_Parts, ok: bool)
 date_time_of :: proc(s: string) -> (p: Date_Time_Parts, ok: bool)
 decimal_i64 :: proc(d: spell.Decimal) -> (v: i64, ok: bool)
 description_destroy :: proc(d: ^Description)
@@ -248,14 +287,16 @@ rules_leaf :: proc(r: Rules, kinds: Kinds, allocator := context.allocator) -> (l
 tighter :: proc(x, y: string, strict_x, strict_y, lower: bool) -> int
 trivial :: proc(l: ^Leaf) -> bool
 uri_split :: proc(s: string) -> (u: Uri)
+# core/css
+select_value :: proc(v: core.Value, sel: ^Selector, fold: bool, paths: bool, allocator := context.allocator) -> (found: []Match, err: runtime.Allocator_Error)
 # core/build
-ANSWER_BATCH :: 64
 BUILDER_REGS :: core.Hook_Regs{a = 0, b = u64(core.NO_NODE) << 32, c = 0}
 Count :: struct { nodes: int, facts: int, depth: int, deepest: int, }
 answers_end :: proc(it: ^Answer_Iter, hi: u64, fault: Maybe(core.Fault))
 answers_fail :: proc(it: ^Answer_Iter, e: core.Error)
+answers_of :: proc(src: []u8, as: core.As, paths: []core.Path, one: core.Path, read: core.Path_Options, allocator: runtime.Allocator, fill: proc(it: ^Answer_Iter)) -> Answer_Iter
 answers_start :: proc(it: ^Answer_Iter, positional: bool, depth: int) -> bool
-answers_whole :: proc(src: []u8, as: core.As, path: core.Path, read: core.Path_Options, allocator: runtime.Allocator, $build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error)) -> Answer_Iter
+answers_whole :: proc "contextless" ($build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error)) -> proc(it: ^Answer_Iter)
 builder_close_node :: #force_inline proc "contextless" (h: ^Builder, a: int, open: core.Node_Index, count: u32)
 builder_deepen :: #force_no_inline proc "contextless" (b: ^Builder, extra: int) -> bool
 builder_end :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> (core.Document, core.Document_Error)
@@ -316,7 +357,6 @@ mark_arm :: proc(dest: uintptr, fld: ^Field, m: ^Meta, arm: int)
 mark_member :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, i: int)
 marshal_planned :: proc(plan: ^Plan, refusal: core.Error, data: rawptr, write: core.Write_Options, allocator: runtime.Allocator) -> ([]u8, core.Error)
 marshal_target :: proc(value: any, nothing: ^any) -> any
-number_text :: proc(ti: ^runtime.Type_Info) -> bool
 on_tag_token :: proc "contextless" (s: ^Tag_Scan, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
 on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
 on_token_check :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
@@ -372,15 +412,17 @@ Binary_Options :: struct { positional: bool, length_first: bool, }
 LINE_ROOM :: 1024
 MARKUP_TREE :: Tree {
 Node_Member :: struct { key, value: core.Node_Index, name: string, }
+Number_Forms :: bit_set[Number_Form; u8]
 Report :: struct { file: string, records: bool, truncated: bool, }
 Visit :: #type proc(v: ^Visitor, f: ^typed.Field, at: uintptr, kind: core.Typed_Error_Kind) -> bool
 Visitor :: struct { call: Visit, close: proc(v: ^Visitor, end: ^typed.Field, base: uintptr) -> bool, walker: rawptr, }
 bytes_text :: proc(b: []u8, stack: []u8) -> (text: string, ok: bool)
-comment_ok :: proc(body: string) -> bool
-end_record :: proc(t: ^Tokens) -> core.Typed_Error_Kind
+comment_lines_ok :: proc(text: string) -> bool
+copies_raw :: #force_inline proc "contextless" (opts: core.Write_Options) -> bool
 enum_spelled :: proc(plan: ^typed.Plan, info: ^runtime.Type_Info_Enum, value: i64, p: [^]u8) -> (string, core.Typed_Error_Kind)
 enum_value :: proc "contextless" (info: ^runtime.Type_Info_Enum, v: uintptr) -> i64
 finish :: proc(out: ^Out, refused := core.Typed_Refusal{}) -> (bytes: []u8, err: core.Typed_Refusal)
+holds_inner_fact :: proc(doc: ^core.Document, node: core.Node_Index) -> bool
 holds_null :: proc(m: ^typed.Meta, kind: typed.Read_Kind, v: uintptr) -> bool
 init :: proc(out: ^Out, spill: ^[ROOM_MAX]u8, allocator := context.allocator, stream := io.Stream{}, hint := 0)
 int_text :: proc(p: [^]u8, kind: typed.Read_Kind, v: uintptr) -> int
@@ -391,21 +433,22 @@ node_bytes_text :: proc(doc: ^core.Document, node: core.Node_Index, stack: []u8)
 node_members :: proc(doc: ^core.Document, node: core.Node_Index, sort, unique: bool, allocator: runtime.Allocator) -> ([]Node_Member, core.Typed_Error_Kind)
 node_number_text :: proc(doc: ^core.Document, node: core.Node_Index, stack: []u8) -> (text: string, ok: bool)
 node_text :: #force_inline proc(doc: ^core.Document, node: core.Node_Index, buf: []u8, allocator: runtime.Allocator) -> (string, core.Typed_Error_Kind)
-number_text :: proc(p: [^]u8, n: core.Number) -> (size: int, kind: core.Typed_Error_Kind)
 put_binary_number :: proc(out: ^Out, n: core.Number, $T: Tree) -> core.Typed_Error_Kind
 put_binary_number_text :: proc(out: ^Out, s: string, $T: Tree) -> core.Typed_Error_Kind
 put_byte :: #force_inline proc(out: ^Out, b: u8)
-put_comment_inline :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index) -> bool
+put_comment :: proc(out: ^Out, marker, text: string, padded: bool, ind: int)
+put_comment_inline :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index) -> (joined: int)
 put_comment_lines :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index, role: core.Role, ind: int) -> (written: int)
-put_decimal :: proc(out: ^Out, lit: string, spelling: u16) -> core.Typed_Error_Kind
+put_date_tag :: proc(out: ^Out, text: string, m: core.Tag_Meaning, $T: Tree) -> bool
 put_head :: #force_inline proc "contextless" (p: [^]u8, n: u64, $T: Tree, $h: Head) -> int #no_bounds_check
 put_hex :: proc(out: ^Out, prefix: string, v: u32, digits: int)
 put_line :: proc(out: ^Out, opts: core.Write_Options, depth: int)
 put_marked :: proc(out: ^Out, _: [^]u8, s: string, _: ^core.Write_Options) -> core.Typed_Error_Kind
+put_marked_comment :: proc(out: ^Out, role: core.Role, text: string) -> core.Typed_Error_Kind
 put_markup :: proc(s: string, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, put: Markup_Put) -> ([]u8, core.Typed_Refusal)
 put_number :: proc(out: ^Out, n: core.Number) -> core.Typed_Error_Kind
 put_number_as :: proc(out: ^Out, n: core.Number, $T: Tree) -> core.Typed_Error_Kind
-put_number_node :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index, $T: Tree, own := false) -> core.Typed_Error_Kind
+put_number_node :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index, $T: Tree, own := false, forms := Number_Forms{}) -> core.Typed_Error_Kind
 put_run :: proc(out: ^Out, n: int, fill: u8)
 put_text :: proc(out: ^Out, s: string)
 release_sides :: proc(side: ^map[typeid]^typed.Plan)
@@ -419,7 +462,6 @@ scalar_text :: proc(doc: ^core.Document, node: core.Node_Index, stack: []u8) -> 
 set_with :: proc(src: []u8, as: core.As, $build_doc: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), edit: ^core.Edit_Services, path: core.Path, v: any, plan: ^typed.Plan, read: core.Query_Options, allocator: runtime.Allocator) -> (out: []u8, err: core.Error)
 side_plan :: proc(side: ^map[typeid]^typed.Plan, parent: ^typed.Plan, T: typeid) -> (^typed.Plan, core.Typed_Error_Kind)
 token_scalar_text :: proc(v: Scalar, stack: []u8) -> (text: string, null: bool, kind: core.Typed_Error_Kind)
-tokens_finish :: proc(t: ^Tokens) -> (bytes: []u8, err: core.Typed_Refusal)
 tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Refusal, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind
 tokens_release :: proc(t: ^Tokens)
 union_arm :: proc(m: ^typed.Meta, v: uintptr) -> ^typed.Arm
@@ -428,15 +470,23 @@ value_scalar_text :: proc(v: core.Value, stack: []u8, $T: Tree) -> (text: string
 value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal)
 visit :: proc(plan: ^typed.Plan, value: rawptr, v: ^Visitor, omits: ^typed.Omits = nil) -> core.Typed_Refusal
 visit_path :: proc(v: ^Visitor, steps: ^[dynamic]core.Step) -> bool
-write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator, site := core.Site{}) -> (text: []u8, err: core.Typed_Refusal)
+write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: string, spelling: ^Token_Spelling, allocator := context.allocator, site := core.Site{}, comments := false) -> (text: []u8, err: core.Typed_Refusal)
 # core/records
 check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, outer: ^typed.Outer, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0, dups := core.Duplicates.Default, repeats := typed.Repeats.Ignore) -> (records: i64, failure: core.Typed_Refusal, fatal: core.Typed_Refusal, failed: i64)
+entries_close :: proc(it: ^Reader)
 entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64, services: ^Framing_Services = nil) -> bool
+entries_next :: proc(it: ^Reader) -> (rec: Record, ok: bool)
 entries_of :: proc(src: []u8, as: core.As, plan: ^typed.Plan = nil) -> (whole: core.As, at: u64, ok: bool)
+entries_walked :: proc(it: ^Reader) -> (rec: Record, ok: bool)
+entries_walked_close :: proc(it: ^Reader)
+entry_document :: proc(it: ^Reader, rec: Record, state: []u8, in_order: bool, allocator: runtime.Allocator, feed: proc(b: ^engine.Builder, regs: core.Hook_Regs, tokens: []core.Token) -> core.Hook_Regs) -> (doc: core.Document, err: core.Document_Error)
+entry_hook :: proc "contextless" (h: ^Entry_Walk, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
+locate_hook :: proc "contextless" (h: ^Entry_Walk, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
 next_window :: proc(it: ^Reader) -> (window: []u8, base: u64, ok: bool)
 no_judge :: proc(it: ^Reader, rec: Record) -> Maybe(core.Fault)
 open_stream_with :: proc(input: io.Reader, as: core.As, services: ^Framing_Services, docs: ^Record_Docs, framing := core.Framing.Lines, opts := Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> Reader
 open_with :: proc(src: []u8, as: core.As, services: ^Framing_Services, docs: ^Record_Docs, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator, entries: []string = nil) -> Reader
+shifted :: #force_inline proc "contextless" (x, delta, pin: u64) -> u64
 validate_parallel :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault)
 write_text :: proc(wr: ^Writer, text: []u8) -> core.Typed_Error_Kind
 writer_take :: proc(wr: ^Writer) -> []u8
@@ -447,17 +497,22 @@ write_basic :: proc(t: ^write.Tokens, entries: []core.Error_Entry, uri: string, 
 # core/model
 write_problem :: proc(t: ^write.Tokens, entries: []core.Error_Entry, p: Problem, r := write.Report{}) -> core.Typed_Error_Kind
 # json
+CAPABILITIES :: core.Capabilities {
 Detail :: enum u8 { None, Literal, Identifier, Colon, Trailing, Unframed, Cut_Number, Non_Finite, Array_Separator, Member_Separator, Trailing_Comma, Lone_Comma, Unmatched_Bracket, Unmatched_Brace, Single_Quote, Control_Char, Invalid_Utf8, Leading_Zero, Leading_Dot, Leading_Plus, Key_Not_String, Expected_Value, }
 RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", "Invalid unquoted key"}, {"colon", "Missing colon after key"}, {"trailing", "Unexpected text after the value"}, {"unframed", "Text before the first RS"}, {"cut_number", "Potentially truncated top-level numeric value"}, {"non_finite", "Infinity and NaN have no JSON value"}, {"array_separator", "Expected ',' or ']' after an array element"}, {"member_separator", "Expected ',' or '}' after an object member"}, {"trailing_comma", "Trailing comma before the closing bracket"}, {"lone_comma", "Expected value before ','"}, {"unmatched_bracket", "Unmatched ']'"}, {"unmatched_brace", "Unmatched '}'"}, {"single_quote", "Invalid string literal; expected \", but got '"}, {"control_char", "Unescaped control character"}, {"invalid_utf8", "Invalid UTF-8"}, {"leading_zero", "Leading zero in a number"}, {"leading_dot", "A number cannot start with '.'"}, {"leading_plus", "A number cannot start with '+'"}, {"key_not_string", "Object keys must be strings"}, {"expected_value", "Expected a value"}}}
 blank :: proc "contextless" (src: []u8, spec: Spec) -> bool
 put_string :: proc(out: ^write.Out, s: string, opts := core.Write_Options{}) -> core.Typed_Error_Kind
 spine :: proc(src: []u8, as: core.As) -> (at: u64, levels: int, ok: bool)
 # dsv
-checks_for :: proc "contextless" (as: core.As) -> ^typed.Format_Reads
+CAPABILITIES :: core.Capabilities {
 header_span :: proc(src: []u8, as: core.As) -> (lo, hi: int)
+# toml
+CAPABILITIES :: core.Capabilities {
+# xml
+CAPABILITIES :: core.Capabilities {
 # yaml
-Detail :: enum u8 { None, Cut_Utf8, Invalid_Utf8, Control_Char, Expected_Line_End, Duplicate_Directive, Bad_Directive, Bad_Version, Expected_Document_Start, Unexpected_Content, Duplicate_Property, Bad_Tag, Undeclared_Handle, Bad_Anchor, Undefined_Alias, Alias_Cycle, Alias_Limit, Open_String, Bad_Codepoint, Marker_In_Scalar, Bad_Indent, Tab_Indent, Bad_Block_Header, Block_In_Line, Multiline_Key, Key_Too_Long, Bad_Start, Expected_Colon, Expected_Value, Expected_Comma, Open_Collection, Alias_Property, Extra_Document, No_Document, Complex_Key, Tag_Mismatch, }
-RULES := core.Rules{"yaml", {
+CAPABILITIES :: core.Capabilities {
 # cbor
-Detail :: enum u8 { None, Reserved_Info, Bad_Simple, Bad_Break, Bad_Chunk, Invalid_Utf8, Bad_Key, Bad_Tag_Content, Count_Too_Large, Trailing, No_Item, Not_Preferred, Key_Order, Bad_Nan, }
-RULES := core.Rules{"cbor", {
+CAPABILITIES :: core.Capabilities {
+# html
+CAPABILITIES :: core.Capabilities {

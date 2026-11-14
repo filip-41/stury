@@ -18,7 +18,7 @@ Case :: struct {
 
 @(private)
 expect_refused :: proc(t: ^testing.T, c: Case, spec := cbor.Spec.Cbor) {
-	fault, bad := walktest.fault_of(cbor.validate(hex(c.hex), spec)).?
+	fault, bad := walktest.fault_of(core.validate(hex(c.hex), cbor.as(spec))).?
 	if !testing.expectf(t, bad, "%s is read", c.hex) {
 		return
 	}
@@ -29,7 +29,7 @@ expect_refused :: proc(t: ^testing.T, c: Case, spec := cbor.Spec.Cbor) {
 
 @(private)
 expect_read :: proc(t: ^testing.T, text: string, spec := cbor.Spec.Cbor, opts := cbor.Options{}) {
-	fault, bad := walktest.fault_of(cbor.validate(hex(text), spec, opts)).?
+	fault, bad := walktest.fault_of(core.validate(hex(text), cbor.as(spec, opts))).?
 	testing.expectf(t, !bad, "%s: %v", text, fault)
 }
 
@@ -262,7 +262,7 @@ paths_reach_integer_keys :: proc(t: ^testing.T) {
 	testing.expect_value(t, answer3.outcome, core.Presence.Found)
 }
 
-// The text of a number that no 64-bit value holds.
+// The text of a number that no 64-bit value holds, and of a float, which keeps a point.
 @(test)
 wide_numbers_have_text :: proc(t: ^testing.T) {
 	Row :: struct {
@@ -276,9 +276,9 @@ wide_numbers_have_text :: proc(t: ^testing.T) {
 		{"1b ff ff ff ff ff ff ff ff", "18446744073709551615"},
 		{"c4 82 21 19 6a b3", "27315e-2"},
 		{"c5 82 20 03", "15e-1"},
-		{"f9 3c 00", "1"},
-		{"f9 c4 00", "-4"},
-		{"fa 47 c3 50 00", "100000"},
+		{"f9 3c 00", "1.0"},
+		{"f9 c4 00", "-4.0"},
+		{"fa 47 c3 50 00", "100000.0"},
 		{"fb 3f f1 99 99 99 99 99 9a", "1.1"},
 	}
 	for r in rows {

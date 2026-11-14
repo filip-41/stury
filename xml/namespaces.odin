@@ -15,13 +15,31 @@ XMLNS_URI :: "http://www.w3.org/2000/xmlns/"
 
 // A declaration in scope: `prefix` is empty for the default namespace. `depth` is the open count of the element that
 // declared it, which pops it when it closes. The `uri` is the attribute's normalized value: its source bytes, or a
-// decode on the default heap when `owned`, which the pop frees.
+// decode on the default heap when `owned`, which the pop frees. A declaration a stream's window moved past is `moved`:
+// its `uri` and then its `prefix` are copied into one owned block.
 @(private)
 Ns_Entry :: struct {
 	prefix: Name_Ref,
 	uri:    Name_Ref,
 	depth:  u64,
 	owned:  bool,
+	moved:  bool,
+}
+
+// The bytes of a namespace entry's own block: its URI, and its prefix when it moved there.
+@(private)
+ns_bytes :: #force_inline proc "contextless" (entry: Ns_Entry) -> int {
+	return int(entry.uri.n) + (int(entry.prefix.n) if entry.moved else 0)
+}
+
+// Frees the blocks the namespace entries own.
+@(private)
+ns_release :: proc "contextless" (entries: []Ns_Entry) {
+	for entry in entries {
+		if entry.owned {
+			runtime.heap_free(entry.uri.p)
+		}
+	}
 }
 
 // Whether an attribute value written as `value` is its own normalized value: it holds no reference and no tab or line
@@ -148,7 +166,7 @@ declare :: proc "contextless" (w: ^Walk($H), name: [^]u8, n: int, value: []u8, e
 	tokenized := false
 	if w.dtd != nil {
 		f := w.frames[e - 1]
-		if a := attr_decl(&w.dtd.view, w.base[f.tag_lo + 1:][:f.name_n], name[:n]); a != nil {
+		if a := attr_decl(&w.dtd.view, f.tag[1:][:f.name_n], name[:n]); a != nil {
 			tokenized = a.tokenized
 		}
 	}

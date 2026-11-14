@@ -53,7 +53,8 @@ walks use, `markup.md` the XML walk and the HTML tokenizer and tree, and `binary
 
 Each format package exposes the names a caller uses: `Spec`, `Options`, `Detail`, `RULES`, `walk`, `validate` and
 `build`, plus the token spelling detail its walk documents (`json.Number_Spelling` and `json.number_spelling_of`).
-`json` also exposes `commit`, `text`, `number` and `blank`, and `dsv` exposes `text` and `number`. `make surface` lists every public name.
+Every format exposes its token decoders `token_text` and `token_number` beside core's node readers `text` and
+`number`, and `json` also exposes `commit` and `blank`. `make surface` lists every public name.
 
 `core`'s walk interface is what a format author uses: `Kind` and `Role` are a token's fields, `Token`, `Action` and
 `Hook_Regs` are a hook's signature, `Fault`, `Fault_Kind` and `Rules` are a walk's result, `fault_at` makes the result
@@ -148,7 +149,7 @@ the record that names it. `kind` says what the token is: a scalar (`Null`, `Fals
 whose token spans its payload. `role` is `Key` for a member's name and for the header cell that names a dsv cell's
 column, and past `Key` a fact: a comment, `Plain`, as `Comment`, `Comment_Inline` or `Comment_Foot`; a node property,
 `Tag`, `Anchor` or `Alias`, which stands just before its node on the node's line; an `Instruction`, by the comment
-position rule; the `Doctype`, on the root; and an `Attribute`, which a markup walk gives after the element's key and
+position rule; the `Doctype` and a `Directive`, a document marker, on the root; and an `Attribute`, which a markup walk gives after the element's key and
 before its value. A consumer that wants values only tests `role <= .Key`, and `role <= .Comment_Foot` is a comment. `spelling` is a detail the format writes
 and core reads through three bits: bit 0 says `text` must be decoded, bit 1 says the token is quoted (a JSON string,
 whose token span leaves its quotes out, or a quoted dsv cell, whose span holds them), and bit 2 says the decode may
@@ -432,7 +433,8 @@ comment's role. The rule is `core.Role`'s and is the same in every format:
 
 - a comment on the line where the value before it ends is that value's `Comment_Inline`,
 - else, before a value, that value's `Comment`,
-- else the `Comment_Foot` of the innermost open container, or of the root at depth 0.
+- else the `Comment_Foot` of the innermost open container, or of the root at depth 0. A markup element with no child
+  element gives its comments as `Comment_Foot` between its key and its value, and they are the value's.
 
 A foot is written after the container's last value and before the container's `End`, so a foot in an empty container is
 written before that container's `End`.

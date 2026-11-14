@@ -59,7 +59,7 @@ emit :: proc(w: ^Walk, keyword: string, old, new: string, effect: Effect) {
 @(private = "file")
 emit_numbers :: proc(w: ^Walk, keyword: string, old, new: string, effect: Effect) {
 	number :: proc(w: ^Walk, text: string) -> Maybe(core.Value) {
-		return core.Value(core.number_text(strings.clone(text, w.allocator), w.allocator)) if text != "" else nil
+		return core.Value(core.number_text(text, w.allocator)) if text != "" else nil
 	}
 	emit_values(w, keyword, number(w, old), number(w, new), effect)
 }

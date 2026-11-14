@@ -8,6 +8,14 @@ import engine "../core/build"
 import typed "../core/typed"
 import cw "../core/write"
 
+// A YAML text holds a stream of documents: a whole build refuses a second document, and a text with none.
+CAPABILITIES :: core.Capabilities {
+	writes = {.Pretty, .Indent, .Ascii, .Sort_Keys, .Respell_Strings},
+	framings = {.Concatenated, .Entries},
+	specs = Spec,
+	follows = proc "contextless" (f: core.Fault) -> bool {return f.rules == &RULES && (f.detail == u8(Detail.Extra_Document) || f.detail == u8(Detail.No_Document))},
+}
+
 // The handle of a YAML text of `spec` read with `opts`.
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
 	return as_of(&HANDLES[spec] if spec <= max(Spec) else nil, spec, opts)
@@ -17,8 +25,8 @@ as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
 // fails at a repeated key. It links the passes a build needs alone, and `core.build` with `as(spec, opts)` links every
 // pass. The same holds for the other entry points below, and the forms that take a `Document` give it the services of
 // the spec.
-build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Default, allocator := context.allocator) -> (core.Document, core.Error) {
-	doc, err := build_as(src, bound_as(spec, opts), dups == .Refuse, allocator)
+build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.Default, allocator := context.allocator) -> (core.Document, core.Error) {
+	doc, err := build_as(src, bound_as(S, opts), dups == .Refuse, allocator)
 	return doc, core.error_of(err)
 }
 
@@ -28,35 +36,43 @@ build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.
 scan :: proc {scan_one, scan_many}
 
 @(private)
-scan_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
-	return scan_many(src, spec, []core.Path{path}, opts, read, allocator)
+scan_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
+	return scan_many(src, S, []core.Path{path}, opts, read, allocator)
 }
 
 @(private)
-scan_many :: proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
-	return engine.scan_with(src, bound_as(spec, opts), paths, read, allocator, build_as, scan_as)
+scan_many :: proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
+	return engine.scan_with(src, bound_as(S, opts), paths, read, allocator, build_as, scan_as)
 }
 
 each_answer :: proc {each_answer_one, each_answer_many}
 
 @(private)
-each_answer_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
-	return each_answer_many(src, spec, []core.Path{path}, state, on, opts, read, allocator)
+each_answer_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
+	return each_answer_many(src, S, []core.Path{path}, state, on, opts, read, allocator)
 }
 
 @(private)
-each_answer_many :: proc(src: []u8, spec: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
-	return engine.each_answer_with(src, bound_as(spec, opts), paths, state, on, read, allocator, build_as, scan_as)
+each_answer_many :: proc(src: []u8, $S: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
+	return engine.each_answer_with(src, bound_as(S, opts), paths, state, on, read, allocator, build_as, scan_as)
 }
 
 // The answers `each_answer` gives, as an iterator that `next` takes them from: `for a in yaml.next(&it)`. A loop that
-// ends before `next` returns false frees the read with `destroy(&it)`. `path` is read at the first `next`.
-answers :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
-	return answers_of(src, bound_as(spec, opts), nil, path, read, allocator)
+// ends before `next` returns false frees the read with `destroy(&it)`. `paths` is read at the first `next`.
+answers :: proc {answers_one, answers_many}
+
+@(private)
+answers_one :: #force_inline proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+	return engine.answers_of(src, bound_as(S, opts), nil, path, read, allocator, answers_fill)
 }
 
-find :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
-	doc, err = scan_one(src, spec, engine.first_path(path), opts, read, allocator)
+@(private)
+answers_many :: #force_inline proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> engine.Answer_Iter {
+	return engine.answers_of(src, bound_as(S, opts), paths, {}, read, allocator, answers_fill)
+}
+
+find :: proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
+	doc, err = scan_one(src, S, engine.first_path(path), opts, read, allocator)
 	return doc, engine.first_answer(&doc), err
 }
 
@@ -65,31 +81,28 @@ find :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := 
 // of a value, a struct, a slice or a map is built by `plan`, and any other value is spelled by the format. A `Name` the
 // path ends in that its container lacks is inserted after the container's last member. `read.dups` picks among a
 // repeated key as `query` does, and sets each repeat under `.All`.
-set :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	return cw.set_with(src, bound_as(spec, opts), build_as, &EDIT, path, v, plan, read, allocator)
+set :: proc(src: []u8, $S: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
+	return cw.set_with(src, bound_as(S, opts), build_as, &EDIT, path, v, plan, read, allocator)
 }
 
 // Returns an edit list over `doc`. A document an entry point reads holds no edit services, so the list takes the
 // spec's.
-edit_list_init :: proc(doc: ^core.Document, spec: Spec, allocator := context.allocator) -> core.Edit_List {
+edit_list_init :: proc(doc: ^core.Document, $S: Spec, allocator := context.allocator) -> core.Edit_List {
 	list := core.edit_list_init(doc, allocator)
 	list.edit = &EDIT
 	return list
 }
 
 // Writes node `node` of `doc` as YAML, as `core.write` does with `as(spec)`.
-write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
-	if int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
-		return nil, 0, core.error_of(core.Typed_Refusal{kind = .Unsupported})
-	}
-	out, cut, refusal := document_write(doc, opts, bound_as(spec), node, {}, allocator)
-	return out, cut, core.error_of(refusal)
+write :: proc(doc: ^core.Document, $S: Spec, write := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
+	return core.write(doc, write, as(S), node, allocator)
 }
 
 // The handle's build: the first document of the text, whose scalars are `Plain` nodes that `resolve` types. A second
 // document is `Extra_Document`, and a text with no document is `No_Document`. A key that repeats one of its mapping's,
 // of the same type and value, is `.Duplicate_Key` under `refuse_duplicates`, and two keys of one text and two types
 // are two members, the second marked in `Document.clash`.
+@(private)
 build_as :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	doc, err, typed := build_once(src, as, refuse_duplicates, allocator)
 	if typed && err.kind == .Duplicate_Key {
@@ -114,11 +127,13 @@ build_once :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: r
 	if len(b.doc.nodes) > 0 {
 		regs := engine.BUILDER_REGS
 		f := Filter{build = &b, src = src}
-		hi, fault := walk_noting(src, 0, opts, &f, &regs, filter_hook, nil, &typed)
+		replayed: bool
+		hi, fault := walk_noting(src, 0, opts, &f, &regs, filter_hook, nil, &typed, &replayed)
 		if b.err.kind == .None {
 			fault = document_fault(src, hi, opts, &f, fault, regs.a)
 		}
 		doc, err = engine.builder_end(&b, regs, fault)
+		doc.in_order = !replayed && !opts.merge_keys
 		if err.kind != .No_Memory {
 			return
 		}
@@ -145,8 +160,10 @@ build_once :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: r
 	}
 	regs := engine.BUILDER_REGS
 	bf := Filter{build = &b, src = src}
-	_, fault = walk_noting(src, 0, opts, &bf, &regs, filter_hook, nil, &typed)
+	replayed: bool
+	_, fault = walk_noting(src, 0, opts, &bf, &regs, filter_hook, nil, &typed, &replayed)
 	doc, err = engine.builder_end(&b, regs, fault)
+	doc.in_order = !replayed && !opts.merge_keys
 	return
 }
 
@@ -219,6 +236,8 @@ Filter :: struct {
 	scan:   ^engine.Scan,
 	stream: bool,
 	src:    []u8,
+	// The `%TAG` directives the tags resolve by, as `directives_keep` writes them, nil for those at the start of `src`.
+	directives: []u8,
 	held:  [4]core.Token,
 	n:     int,
 	// The first byte of a key that is a collection, which the filter stops at.
@@ -228,7 +247,7 @@ Filter :: struct {
 }
 
 @(private)
-filter_hook :: proc "contextless" (f: ^Filter, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+filter_hook :: #force_inline proc "contextless" (f: ^Filter, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	return filter_token(f, s, t, false)
 }
 
@@ -263,7 +282,7 @@ filter_token :: #force_inline proc "contextless" (f: ^Filter, s: core.Hook_Regs,
 	if t.role != .Key {
 		for held in f.held[:f.n] {
 			if held.role == .Tag && f.count == nil && (t.kind == .String || READ && t.kind == .Plain) {
-				ct := doc_core_type(f.src, string(f.src[held.lo:held.lo + u64(held.n)]))
+				ct := doc_core_type(f.directives if f.directives != nil else f.src, string(f.src[held.lo:held.lo + u64(held.n)]))
 				t.kind = .String if ct == .None || ct == .Str else .Plain
 			}
 			regs, _ = forward_action(f, regs, held, READ)
@@ -301,13 +320,18 @@ forward_action :: #force_inline proc "contextless" (f: ^Filter, s: core.Hook_Reg
 // The byte just past node `i`. A block collection has no bytes of its own, so it ends where its last child does. A
 // flow collection ends at its bracket, which follows the last descendant, any commas and comments. The descent goes
 // down the last children in a loop and counts the flow collections on the way, whose brackets are then read past one
-// after another from the innermost, so the native stack does not grow with the node's depth.
+// after another from the innermost, so the native stack does not grow with the node's depth. The children an alias
+// replayed hold the bytes of the node it names, and those a merge key adds the bytes of their source, so a flow
+// collection that holds such children ends at its bracket found in its text, and a block collection whose last
+// children an alias replayed ends past their `*` names, read on from the end of the last child that is none. A
+// document built `in_order` holds none of them.
 @(private)
 close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 	flows := 0
 	at: u64
 	j := i
-	for {
+	merging, ordered := options_of(doc.as).merge_keys, doc.in_order
+	descent: for {
 		n := doc.nodes[j]
 		if n.kind <= .Plain {
 			_, at = core.scalar_ends(n)
@@ -321,10 +345,33 @@ close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 			at = n.lo + 1 if flow else n.lo
 			break
 		}
-		last := j + 1
+		last, authored, aliases := j + 1, core.NO_NODE, 0
+		if ordered {
+			for k := last; k < j + core.Node_Index(n.n); k += core.Node_Index(core.subtree_size(doc, k)) {
+				last = k
+			}
+			j = last
+			continue
+		}
+		floor := n.lo
 		for k := last; k < j + core.Node_Index(n.n); {
 			last = k
+			if lo := doc.nodes[k].lo; replayed(lo, floor, doc.nodes[k - 1].lo, k - 1 == j) {
+				aliases += 1
+			} else {
+				authored, aliases, floor = k, 0, lo
+			}
 			k += core.Node_Index(core.subtree_size(doc, k))
+		}
+		if flow && (aliases > 0 || merging) {
+			at = flow_end(doc.src, n.lo)
+			flows -= 1
+			break descent
+		}
+		if aliases > 0 {
+			at = close_end(doc, authored) if authored != core.NO_NODE else n.lo
+			at = past_aliases(doc.src, at, aliases)
+			break descent
 		}
 		j = last
 	}
@@ -345,4 +392,98 @@ close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 		}
 	}
 	return at
+}
+
+// Whether a child starting at `lo` is a node an alias replayed or a merge key added, whose bytes lie before it. An
+// authored child starts past the last authored child before it, at `floor`, and past the node just before it, at
+// `before`, or at both when that node is its parent.
+@(private)
+replayed :: #force_inline proc "contextless" (lo, floor, before: u64, first: bool) -> bool {
+	return lo < floor || lo < before || !first && (lo == floor || lo == before)
+}
+
+// The byte past the `count`th alias name from `from` in a block collection, over the white space, comments, indicators
+// and a merge key's `<<` and brackets between them. A merge key's members have no name, so it stops past the last
+// name when the next byte that is none of those starts no alias.
+@(private)
+past_aliases :: proc "contextless" (src: []u8, from: u64, count: int) -> u64 {
+	end := from
+	for _ in 0 ..< count {
+		at := end
+		for at < u64(len(src)) {
+			switch src[at] {
+			case ' ', '\t', '\r', '\n', ',', ':', '?', '-', '<', '[', ']':
+				at += 1
+				continue
+			case '#':
+				for at < u64(len(src)) && src[at] != '\n' && src[at] != '\r' {
+					at += 1
+				}
+				continue
+			}
+			break
+		}
+		if at >= u64(len(src)) || src[at] != '*' {
+			return end
+		}
+		at += 1
+		for at < u64(len(src)) && !(src[at] == ' ' || src[at] == '\t' || src[at] == '\r' || src[at] == '\n' || is_flow_indicator(src[at])) {
+			at += 1
+		}
+		end = at
+		for end < u64(len(src)) && (src[end] == ' ' || src[end] == ',') {
+			end += 1
+		}
+		if end < u64(len(src)) && src[end] == ']' {
+			end += 1
+		} else {
+			end = at
+		}
+	}
+	return end
+}
+
+// The byte past the bracket that closes the flow collection opening at `lo`, read over its quoted scalars and
+// comments.
+@(private)
+flow_end :: proc "contextless" (src: []u8, lo: u64) -> u64 {
+	depth := 0
+	at := lo
+	for at < u64(len(src)) {
+		c := src[at]
+		at += 1
+		switch c {
+		case '[', '{':
+			depth += 1
+		case ']', '}':
+			depth -= 1
+			if depth == 0 {
+				return at
+			}
+		case '"':
+			for at < u64(len(src)) && src[at] != '"' {
+				at += 2 if src[at] == '\\' else 1
+			}
+			at += 1
+		case '\'':
+			for at < u64(len(src)) {
+				if src[at] == '\'' {
+					if at + 1 < u64(len(src)) && src[at + 1] == '\'' {
+						at += 2
+						continue
+					}
+					break
+				}
+				at += 1
+			}
+			at += 1
+		case '#':
+			if b := src[at - 2]; b == ' ' || b == '\t' || b == '\n' || b == '\r' {
+				for at < u64(len(src)) && src[at] != '\n' && src[at] != '\r' {
+					at += 1
+				}
+			}
+		}
+	}
+	return min(at, u64(len(src)))
 }

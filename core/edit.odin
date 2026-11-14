@@ -35,7 +35,8 @@ Edit_Op :: enum u8 {
 // a decoded key name. `key` is a member insert's decoded name, or for a fact set of several bodies their lengths as
 // little-endian u32, and `text` is a value's source text, a record, a cell, a key's decoded name for a key set, a fact
 // set's bodies one after another, or a reorder's positions, each copied into the list's allocator. A `padded` fact set
-// writes one space inside each marker of each body.
+// writes one space inside each marker of each body. `value` is the value a set or an insert spelled as `text`, which a
+// commit reads its output back against, kept in the list's `kept` arena, and nil for a text the caller spelled.
 Edit :: struct {
 	node:   Node_Index,
 	op:     Edit_Op,
@@ -44,6 +45,7 @@ Edit :: struct {
 	at:     u32,
 	key:    []u8,
 	text:   []u8,
+	value:  Value,
 }
 
 // A log of edits against one document. `edits` holds the recorded edits, grows as edits are recorded, and
@@ -62,6 +64,8 @@ Edit_List :: struct {
 	fixed:     bool,
 	// The container of each node, made when a value is first spelled in a layout of the site.
 	parents:   []Node_Index,
+	// The copies of the edits' values, made at the first value edit from `allocator`.
+	kept:      ^runtime.Arena,
 }
 
 // Returns an edit list over `doc`. It allocates nothing until the first edit is recorded.
@@ -84,6 +88,10 @@ edit_list_destroy :: proc(list: ^Edit_List) {
 	}
 	delete(list.edits)
 	delete(list.parents, list.allocator)
+	if list.kept != nil {
+		runtime.arena_destroy(list.kept)
+		free(list.kept, list.allocator)
+	}
 	list^ = {}
 }
 
@@ -383,7 +391,7 @@ fact_node :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string, 
 		}
 	case .Comment, .Comment_Foot:
 	case .Attribute:
-		if list.doc.readers.attribute == nil {
+		if .Attribute not_in list.doc.readers.holds {
 			return {kind = .Bad_Fact}
 		}
 	case .Tag, .Anchor, .Alias:

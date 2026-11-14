@@ -3,28 +3,20 @@ package toml
 
 import core "../core"
 
-// The four datetime types, in bits 3 to 5 of a datetime token's `spelling`. Bit 0 is clear, which tells a datetime from
-// a quoted string.
-Datetime :: enum u8 {
-	None,
-	Offset, // `1979-05-27T07:32:00Z`
-	Local, // `1979-05-27T07:32:00`
-	Date, // `1979-05-27`
-	Time, // `07:32:00`
-}
-
+// A datetime token's `spelling` holds its type, a `core.Tag_Meaning`, in bits 3 to 5. Bit 0 is clear, which tells a
+// datetime from a quoted string.
 DATETIME_SHIFT :: 3
 
-datetime_spelling :: #force_inline proc "contextless" (d: Datetime) -> u16 {
+datetime_spelling :: #force_inline proc "contextless" (d: core.Tag_Meaning) -> u16 {
 	return u16(d) << DATETIME_SHIFT
 }
 
-// The datetime type of a value token's `spelling`, `.None` for a string.
-datetime_of :: #force_inline proc "contextless" (spelling: u16) -> Datetime {
+// The datetime type of a value token's `spelling`, `.Own` for a string.
+datetime_of :: #force_inline proc "contextless" (spelling: u16) -> core.Tag_Meaning {
 	if spelling & core.SPELLING_DECODE != 0 {
-		return .None
+		return .Own
 	}
-	return Datetime(spelling >> DATETIME_SHIFT & 7)
+	return core.Tag_Meaning(spelling >> DATETIME_SHIFT & 7)
 }
 
 digit :: #force_inline proc "contextless" (src: []u8, i: int) -> (v: int, ok: bool) {
@@ -124,40 +116,40 @@ scan_offset :: proc "contextless" (src: []u8, i: int) -> (end: int, v: Verdict) 
 }
 
 // Judges the datetime at `i`, where `datetime_starts` holds. Returns the byte past it and its type.
-scan_datetime :: proc "contextless" (src: []u8, i: int, v11: bool) -> (end: int, kind: Datetime, v: Verdict) {
+scan_datetime :: proc "contextless" (src: []u8, i: int, v11: bool) -> (end: int, kind: core.Tag_Meaning, v: Verdict) {
 	if src[i + 2] == ':' {
 		end, v = scan_time(src, i, v11)
-		return end, .Time, v
+		return end, .Local_Time, v
 	}
 	year, _ := digits(src, i, 4)
 	month, ok := digits(src, i + 5, 2)
 	if i + 5 >= len(src) || src[i + 4] != '-' || !ok || month < 1 || month > 12 {
-		return i + 5, .None, bad(i + 5, .Bad_Char, .Bad_Datetime)
+		return i + 5, .Own, bad(i + 5, .Bad_Char, .Bad_Datetime)
 	}
 	if i + 7 >= len(src) || src[i + 7] != '-' {
-		return i + 7, .None, bad(i + 7, .Bad_Char, .Bad_Datetime)
+		return i + 7, .Own, bad(i + 7, .Bad_Char, .Bad_Datetime)
 	}
 	day: int
 	day, ok = digits(src, i + 8, 2)
 	if !ok || day < 1 || day > days_in(year, month) {
-		return i + 8, .None, bad(i + 8, .Bad_Char, .Bad_Datetime)
+		return i + 8, .Own, bad(i + 8, .Bad_Char, .Bad_Datetime)
 	}
 	k := i + 10
 	if k >= len(src) {
-		return k, .Date, 0
+		return k, .Local_Date, 0
 	}
 	sep := src[k]
 	_, time_follows := digit(src, k + 1)
 	if !(sep == 'T' || sep == 't' || sep == ' ' && time_follows) {
-		return k, .Date, 0
+		return k, .Local_Date, 0
 	}
 	end, v = scan_time(src, k + 1, v11)
 	if v != 0 {
-		return end, .None, v
+		return end, .Own, v
 	}
 	if end < len(src) && (src[end] == 'Z' || src[end] == 'z' || src[end] == '+' || src[end] == '-') {
 		end, v = scan_offset(src, end)
-		return end, .Offset, v
+		return end, .Datetime, v
 	}
-	return end, .Local, 0
+	return end, .Local_Datetime, 0
 }

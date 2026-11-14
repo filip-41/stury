@@ -94,7 +94,7 @@ stury: parse error: <stdin>:1:10: Leading zero in a number
 | --- | --- | --- | --- |
 | JSON | `json` | RFC 8259 | yes |
 | JSON with comments | `jsonc` | RFC 8259 with comments | yes, with the comments a filter keeps |
-| JSON5 | `json5` | JSON5 | no |
+| JSON5 | `json5` | JSON5 | yes, with its comments and number spellings |
 | NDJSON, RFC 7464 | `ndjson`, `--seq` | a JSON text per record | yes |
 | CSV, TSV | `csv`, `tsv` | RFC 4180 | yes |
 | TOML | `toml` | TOML 1.0 and 1.1 | TOML 1.0 |
@@ -106,7 +106,8 @@ stury: parse error: <stdin>:1:10: Leading zero in a number
 An XML or HTML element is a member and its text a value, and a repeated child name reads as an array. Facts read
 what a format holds beside the value: `.@tag`, `.@anchor`, `.@alias` and `.@style` in TOML and YAML, a CBOR tag, and
 `.@name`, `.@namespace`, `.@content`, `.@attrs`, `.&name`, `.@pi` and `.@doctype` in XML and HTML. A comment is the
-fact `.@comment`.
+fact `.@comment`. A conversion writes each fact the output format holds, a comment, a tag's meaning or a number's
+spelling, and `fmt` says on stderr how many it drops.
 
 ```sh
 $ cat cities.csv
@@ -129,7 +130,7 @@ $ stury --from toml --to yaml . server.toml
 server:
   host: a.example # primary
   port: 8080
-  started: '2026-11-12T09:00:00Z'
+  started: !!timestamp 2026-11-12T09:00:00Z
 $ cat feed.xml
 <feed xmlns="http://www.w3.org/2005/Atom"><entry id="7"><title>Hi</title></entry></feed>
 $ stury --from xml -c '.feed.entry | {id: .&id, ns: .@namespace, title}' feed.xml
@@ -430,7 +431,7 @@ the sink gathers every failure:
 
 ```odin
 schema_text := transmute([]u8)string(`{"properties": {"age": {"type": "integer", "minimum": 0}}}`)
-s := json.load_schema(schema_text) or_return
+s := json.load_schema(schema_text, .Json) or_return
 defer json.destroy(s)
 b := json.bind_schema(s, .Json) or_return
 defer json.destroy(&b)
@@ -448,9 +449,9 @@ if json.check_schema(&b, src, &sink) != nil {
 Compare two schemas, and diff two values:
 
 ```odin
-v1 := json.load_schema(transmute([]u8)string(`{"properties": {"id": {"minimum": 0}}}`)) or_return
+v1 := json.load_schema(transmute([]u8)string(`{"properties": {"id": {"minimum": 0}}}`), .Json) or_return
 defer json.destroy(v1)
-v2 := json.load_schema(transmute([]u8)string(`{"properties": {"id": {"minimum": 1}}}`)) or_return
+v2 := json.load_schema(transmute([]u8)string(`{"properties": {"id": {"minimum": 1}}}`), .Json) or_return
 defer json.destroy(v2)
 c := schema.compare(v1.description, v2.description, {as = json.as(.Json)}) or_return
 defer schema.comparison_destroy(&c)

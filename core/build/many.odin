@@ -7,9 +7,9 @@ import "core:slice"
 import core ".."
 
 // What `$MANY` adds to the step logic of `scan.odin`: what a read of one plain path never pays for. Up to 64 paths at once,
-// each with its limit, and the steps one path has no state for: negative indexes, `Slice`, `Descend`, `?` and `every_key`.
-// A frame per depth holds the armed paths as one `u64`, so a path with no `Descend` is at step `d - 1` of a container at
-// depth `d`. A `Descend` path can be at several steps of a container at once, so it has a row of step bits per frame.
+// each with its limit, and the steps one path has no state for: negative indexes, a `Slice` end from the end, `Descend`,
+// `?` and `every_key`. A frame per depth holds the armed paths as one `u64`, so a path with no `Descend` is at step
+// `d - 1` of a container at depth `d`. A `Descend` path can be at several steps of a container at once, so it has a row of step bits per frame.
 
 // A tombstone for an answer a repeated key took back. It keeps the list's indexes, which the marks hold.
 DEAD :: max(u32)

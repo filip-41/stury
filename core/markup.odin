@@ -96,7 +96,7 @@ markup_number_text :: proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, o
 // The facts every markup format reads from the document's shape for node `i`, the value of an element: `Name`, the key
 // before the value, and `Content`, the element's string value, its text and its descendants' text in document order
 // in the temp allocator. Returns false for any other name, which the format answers itself.
-markup_fact :: proc(doc: ^Document, i: Node_Index, name: Fact_Name) -> (Fact_Value, bool) {
+markup_fact :: proc(doc: ^Document, i: Node_Index, name: Fact_Kind) -> (Fact_Value, bool) {
 	#partial switch name {
 	case .Name:
 		if i == ROOT || doc.nodes[i - 1].role != .Key {
@@ -141,7 +141,7 @@ markup_content :: proc(doc: ^Document, i: Node_Index) -> string {
 // as one member, an array of each of the elements in document order, as `markup_members` gives them. A markup document
 // holds no array, so an array member of its value is such a group.
 is_markup :: #force_inline proc "contextless" (doc: ^Document) -> bool {
-	return doc.readers != nil && doc.readers.attribute != nil
+	return doc.readers != nil && .Attribute in doc.readers.holds
 }
 
 // The members of object node `r` of a markup document as a built object one level deep, in the context allocator:

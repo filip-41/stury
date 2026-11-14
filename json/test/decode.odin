@@ -114,7 +114,7 @@ json5 :: proc(t: ^testing.T) {
 	}{
 		{.Int, 1},
 		{.Float, 0x3fe0000000000000},
-		{.Int, 5},
+		{.Float, 0x4014000000000000},
 		{.Float, 0x7ff0000000000000},
 		{.Float, 0xfff0000000000000},
 		{.Float, 0x7ff8000000000000},
@@ -267,8 +267,8 @@ numbers :: proc(t: ^testing.T) {
 }
 
 
-// A number token's spelling has no `SPELLING_DECODE` bit, stays below bit 15, and `number_spelling_of` returns the
-// spelling of each form.
+// A number token's spelling has no `SPELLING_DECODE` bit, sets bit 15 only for a point with no digit after it, and
+// `number_spelling_of` returns the spelling of each form.
 @(test)
 number_spelling_bits :: proc(t: ^testing.T) {
 	doc, err := build(`[0, 1.5, 1e2, 0x10, Infinity, NaN, +1, .5, 5.]`, .Json5)
@@ -285,7 +285,7 @@ number_spelling_bits :: proc(t: ^testing.T) {
 		n := doc.nodes[v]
 		testing.expect_value(t, n.kind, core.Kind.Number)
 		testing.expect_value(t, n.spelling & core.SPELLING_DECODE, 0)
-		testing.expect(t, n.spelling < 1 << 15)
+		testing.expect_value(t, n.spelling & core.NUMBER_POINT != 0, i == len(want) - 1)
 		testing.expect_value(t, json.number_spelling_of(n.spelling), want[i])
 		i += 1
 	}

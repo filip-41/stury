@@ -34,7 +34,7 @@ converted :: proc(t: ^testing.T, rules_text, src: string, from, to: core.As, sin
 @(private = "file")
 convert_document :: proc(t: ^testing.T, c: ^schema.Compiled, doc: ^core.Document, to: core.As, sink: ^typed.Sink = nil) -> Converted {
 	cv: schema.Converter
-	err := schema.converter_init(&cv, c, doc.as, to, dsv.checks_for(doc.as), dsv.checks_for(to))
+	err := schema.converter_init(&cv, c, doc.as, to)
 	testing.expectf(t, err == nil, "%v", err)
 	defer schema.converter_destroy(&cv)
 	text, stage, err2 := schema.convert(&cv, doc, sink = sink, allocator = context.temp_allocator)
@@ -158,6 +158,7 @@ convert_reads_a_cell_as_the_format_reads_it :: proc(t: ^testing.T) {
 convert_writes_markup_text_as_the_check_reads_it :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	readers := json.as(.Json).readers^
+	readers.holds += {.Attribute}
 	readers.attribute = proc "contextless" (doc: ^core.Document, f: core.Fact) -> (name, value: core.Token) {
 		name, value = markup_attribute(doc, f)
 		value.kind = .Plain
@@ -200,6 +201,7 @@ convert_refuses_a_table_with_no_member :: proc(t: ^testing.T) {
 convert_writes_attributes_as_members :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	readers := json.as(.Json).readers^
+	readers.holds += {.Attribute}
 	readers.attribute = markup_attribute
 	s := `{"type": "object", "properties": {"price": {"type": "object", "properties": {"currency": {"enum": ["EUR", "USD"]}, "#text": {"maxLength": 3}}, "required": ["currency"], "additionalProperties": false}}}`
 	schema_doc, _ := core.build(transmute([]u8)s, json.as(.Json))
@@ -223,6 +225,7 @@ convert_writes_attributes_as_members :: proc(t: ^testing.T) {
 @(private = "file")
 markup_converted :: proc(t: ^testing.T, model: string, attributes: []Markup_Attribute) -> Converted {
 	readers := json.as(.Json).readers^
+	readers.holds += {.Attribute}
 	readers.attribute = markup_attribute
 	schema_doc, _ := core.build(transmute([]u8)string(`{"type": "object"}`), json.as(.Json))
 	defer core.destroy(&schema_doc)

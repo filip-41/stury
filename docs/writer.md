@@ -40,9 +40,10 @@ core.PRETTY :: core.Write_Options{pretty = true, indent = 2}
 
 The zero value writes compact text. `pretty` writes one member or element a line, `indent` is the spaces per level and
 `tab` one tab per level in its place. Pretty with `indent` 0 keeps the line breaks and writes no indent. A field a format
-has no use for is ignored: a delimited text reads `sort_keys` alone, and a token write puts keys in the order of its
-calls whatever `sort_keys` says. The typed write, a document's write and the token write of JSON read every other field
-the same way.
+has no use for is ignored, and each format's `CAPABILITIES.writes` names the fields its document writer honours: a
+delimited text reads `sort_keys` alone, YAML, which has no tab indentation, ignores `tab`, and a token write puts keys
+in the order of its calls whatever `sort_keys` says. The typed write, a document's write and the token write of JSON
+read every other field the same way.
 
 ## Errors
 
@@ -60,6 +61,10 @@ A write returns `core.Error`, whose `core.Typed_Error` arm is the type a typed r
 | `.Write_Failed` | the stream refused bytes, `cause` holds its `io.Error` |
 
 A write also returns `.No_Memory`, `.Unsupported`, `.Not_A_Member` and `.Plan_Mismatch` by the reads' meanings.
+`.Unwritable` is a value the target cannot spell, a root its grammar does not take among them, and `.Unsupported` an
+option or operation the target lacks, such as a partial document or a token write to a stream where the text is laid
+out whole. A format's `Services.words` give the two kinds their reasons in `want.text`, which `core.render` writes after
+the kind's message, as `core.write` and `tokens_finish` return them. A site that knows more gives its own.
 `steps` names the value as in a read. `at` is a byte of a source, so a write sets none and `core.render` leaves the
 position out for every kind that names no byte. The codes are `typed.` and the kind, as in `typed.non_finite`.
 
@@ -260,7 +265,12 @@ bytes, as `finish` does for an output that failed. A stream that failed leaves a
   `start` and `line`. `end` turns the finished text into the format's own, for a format whose grammar fixes an order the
   calls cannot know (TOML), and so runs only on a buffer. `layout`, called at each `Layout_Step`, lays the text out
   while the format's state is set (YAML's block style), in place of the tree's punctuation.
-- A token write of TOML or YAML drops a comment, since their `comment` is nil.
+- `comment` writes a comment of a role: a lead before the next item, an inline comment on the line of the item last
+  written and a foot after the last item of the open container, or after a whole root. JSONC and JSON5 write block
+  comments, YAML and TOML `#` lines, which break a flow line and a TOML inline table as TOML 1.1 does before `end` lays
+  it out, and XML `<!-- -->`. JSON, CBOR, a delimited text and HTML answer
+  `.Unsupported`. `write_value` writes every comment of a built value, written on it or its node's, where the format
+  writes comments, and `write_laid` does under `comments`: an edit writes a new value's comments itself.
 
 ## Records
 
@@ -341,9 +351,9 @@ The rules that keep a text readable:
 A dsv document with no `as` is written in the spec and layout it was read in, with the line end of its first row, header or record.
 With a comment byte in the output's options, which a write with no `as` takes from the read, the document's comments are
 written as comment lines where an edit writes them: a comment on the list above the header when a record follows it, one
-on a record above the record, and the list's foot below the last record. A comment with no such place, as one on a cell
-or an inline one, a comment whose body holds a line end, and every comment when the output has no comment byte, is
-dropped and counted in `dropped`. A document of another
+on a record above the record, and the list's foot below the last record, one comment line for each line of its body. A
+comment with no such place, as one on a cell or an inline one, one whose body holds a control byte other than a tab or
+a line end, and every comment when the output has no comment byte, is dropped and counted in `dropped`. A document of another
 format whose root is an array of objects or of arrays is written through its `text` and spans: the objects' keys in first-seen
 order are the header, null is an empty cell, a number is its source spelling, and a container is `.Unsupported`. A JSON5 number JSON does not spell so is written as JSON writes it, `0x10` as `16` and `.5` as `0.5`, and an infinity or NaN is `.Non_Finite`. A partial
 document is `.Unsupported`. `sort_keys` puts the columns in byte order of their names, stable, as the JSON writer orders an
@@ -359,7 +369,7 @@ cannot know, so the typed write and the token write write the value as one inlin
 `toml/write_document.odin` lays the document out. A token write to a stream is `.Unsupported`, since the layout needs
 the whole text in a buffer.
 
-The root must be an object, else the write is `.Unsupported`. A scalar, an array that is not all tables and an empty
+The root must be an object, else the write is `.Unwritable`. A scalar, an array that is not all tables and an empty
 array are `key = value` lines at the top of their table. A table is a `[header]` section after the lines, and a non-empty
 array of tables is a `[[header]]` section per element, so a table's keys may be written in another order than the
 document holds them. A table that holds only sections has no header of its own. Null has no TOML spelling and a key a
@@ -374,9 +384,14 @@ seconds a time lacks added, since only TOML 1.1 reads a time without them, and `
 token write of one. Only TOML 1.0 forms are written. A byte string is the string of its base64.
 
 Comments are written where TOML reads them back: a head comment above its line or section, an inline comment after its
-value, and a table's foot comments after a blank line, the form that reads back as the head of what follows. A comment
-inside an inline table or array, one whose body holds a control byte, and the head comments of a table whose header is
-omitted and which has no line are dropped and counted in `dropped`. `sort_keys` orders the members of every table.
+value or its header, and a table's foot comments after a blank line, the form that reads back as the head of what
+follows. An array that has a comment on an element or a foot comment is written one element a line, each element's
+comments above it and after it, and the foot comments before the close. A comment whose body holds line ends is
+written as one `#` line for each of its lines. The inline comments of one value or header are joined into one, their
+bodies a space apart, as `a = 1 # a b`. A comment inside an inline table or an array within an array, an inline
+one with a line end, one whose body holds a control byte other than a tab or a line end, and the head comments of a
+table whose header is omitted and which has no line are dropped and counted in `dropped`. `sort_keys` orders the
+members of every table.
 
 ## YAML
 
@@ -388,13 +403,17 @@ line. A collection read from a flow collection stays one.
 A string is plain when its text reads back as the same string under the 1.2 core schema and under a 1.1 reader, so
 `yes`, `~`, `0123`, `.inf` and a date are quoted. It is single-quoted when it holds nothing a single quote cannot, a
 literal block when it has line ends and its place takes one, and double-quoted otherwise. A scalar read from YAML keeps
-its style unless `respell_strings` is set. A float is written so that it reads back as one (`1.0`, `.inf`, `.nan`),
+its style unless `respell_strings` is set, a folded block too: the writer folds a line end of the value between two
+lines that start with no white space into an empty line. A float is written so that it reads back as one (`1.0`, `.inf`, `.nan`),
 null is `null` or the spelling a YAML source had, and a byte string of the typed write is `!!binary` and its base64.
 A key an object repeats is `.Unwritable`.
 
 Tags and anchors are written back from the facts, and an alias where its anchor stands before it. A comment is written
-when the document holds it: above the line it heads, after the value it ends, and at the end of a block collection. A
-comment the output has no place for, and one with a line end in its body, is dropped and counted. A token write that
+when the document holds it: above the line it heads, after the value it ends, at the end of a block collection, and
+after an empty collection for its foot comment when no inline one is there. A
+comment the output has no place for, and an inline one with a line end in its body, is dropped and counted. Any other
+comment whose body holds line ends is written as one `#` line for each of its lines. The inline comments of one node
+are joined into one at the end of its line, their bodies a space apart, as `a: 1 # a b`. A token write that
 stands at a site of a document is block text at column 0, which the edit indents to the site or turns to flow inside a
 flow collection.
 

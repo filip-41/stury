@@ -32,16 +32,16 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	b := make([dynamic]u8, cx.a)
 	#partial switch e.role {
 	case .Comment_Inline:
-		if is_block(cx, v) || cx.doc.nodes[v].kind == .String && style_of(cx.doc.nodes[v].spelling) == .Block {
-			return refuse_edit(cx, v, .Block_Comment)
-		}
 		if len(lines) > 1 {
 			return refuse_edit(cx, v, .No_Line)
 		}
-		put_comment(&b, lines[0], e.padded)
+		compose.spell_comment(&b, core.HASH_COMMENTS, lines[0], true, e.padded)
 		if len(existing) > 0 {
 			add(cx, existing[0].lo, existing[0].lo + u64(existing[0].n), b[:])
 			return true
+		}
+		if is_block(cx, v) || cx.doc.nodes[v].kind == .String && style_of(cx.doc.nodes[v].spelling) == .Block {
+			return refuse_edit(cx, v, .Block_Comment)
 		}
 		if !rest_is_blank(src, cx.hi[v]) || bytes.index_byte(src[cx.hi[v]:content_end(src, cx.hi[v])], '#') >= 0 {
 			return refuse_edit(cx, v, .No_Line)
@@ -106,12 +106,6 @@ member_start :: proc(cx: ^Cx, v: u32) -> u64 {
 	return cx.lo[v]
 }
 
-@(private = "file")
-put_comment :: proc(b: ^[dynamic]u8, body: []u8, padded: bool) {
-	compose.puts(b, "# " if padded else "#")
-	append(b, ..body)
-}
-
 // Writes comment lines, each after the first at column `col`, with a line end after the last when `ended`.
 @(private = "file")
 put_comment_lines :: proc(cx: ^Cx, b: ^[dynamic]u8, lines: [][]u8, padded: bool, col: int, ended: bool) {
@@ -120,7 +114,7 @@ put_comment_lines :: proc(cx: ^Cx, b: ^[dynamic]u8, lines: [][]u8, padded: bool,
 			compose.puts(b, cx.eol)
 			put_spaces_to(b, col)
 		}
-		put_comment(b, line, padded)
+		compose.spell_comment(b, core.HASH_COMMENTS, line, true, padded)
 	}
 	if ended {
 		compose.puts(b, cx.eol)

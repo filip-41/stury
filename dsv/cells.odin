@@ -13,7 +13,7 @@ import records "../core/records"
 // number a value cell spells, and false for any other cell. A quoted cell, a TSV escape and a key cell are never numbers,
 // since no JSON number holds a quote, a backslash or a byte past 0x7F. A header cell names a column and answers as a JSON
 // key node does.
-number :: proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) {
+token_number :: proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) {
 	if t.role != .Value {
 		return {}, false
 	}
@@ -22,7 +22,7 @@ number :: proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) {
 
 // dsv's `Readers.text`, exported so a caller that knows the format calls it without the table: a cell's text as the
 // spec the view was read as decodes it, into `buf` when it needs decoding. A container returns false.
-text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
+token_text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
 	return cell_text(v.src, t, Spec(v.spec), buf)
 }
 

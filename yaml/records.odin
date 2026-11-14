@@ -3,7 +3,520 @@ package yaml
 import "base:runtime"
 import "core:bytes"
 import core "../core"
+import engine "../core/build"
 import "../core/records"
+
+// The cursor of `.Entries`, with the walk's state at the save. `back` holds the anchors before `stable` and the log
+// before `logged` as the live walk holds them, which only completes anchors past `stable` and adds to the log, and
+// `back_lows`, `back_hidden` and `back_low` what `lows`, `hidden` and `low` held then.
+// `lows` is the lowest byte a replay of each anchor before `len(lows)` reads, `max(u64)` for one a later anchor of its
+// name hides, `hidden` the count of those, `names` the last of those anchors of each name and `low` the lowest of
+// their lows. `scan` is how far `open_low`, the lowest byte the first unfinished anchor
+// `open` reads, has looked through the log. `directives` holds the `%TAG` directives once their bytes may leave the
+// window, the text `declared_prefix` reads. `short` is set when memory ran out for any of it.
+@(private)
+Entry_Cursor :: struct {
+	cursor:     Cursor,
+	back:       Held,
+	saved:      bool,
+	short:      bool,
+	stable:     int,
+	logged:     int,
+	hidden:     int,
+	lows:       [dynamic]u64,
+	back_lows:  [dynamic]u64,
+	back_hidden: int,
+	back_low:   u64,
+	names:      map[string]int,
+	low:        u64,
+	dirty:      bool,
+	open:       int,
+	scan:       int,
+	open_low:   u64,
+	directives: []u8,
+	declared:   int,
+}
+
+// The walk of `.Entries` from the reader's position, or its resume, and the cursor's part in following a stream's
+// window. A stream's record stands once the window holds the bytes the walk judged it by: the walk ends a node at the
+// next line that is no blank line, so a window that ends near that line waits for the bytes past it. The cursor reads
+// again its last tokens, its comments and properties held for a node, its open blocks' properties and the nodes of
+// the anchors an alias may still name. Under `merge_keys` the tokens a `<<` holds stay in the window until their
+// mapping closes, and the text of the open mappings' keys is copied out of it.
+@(private)
+step_entries :: proc(it: ^records.Reader, w: ^records.Entry_Walk, op: records.Entry_Op) -> (hi: u64, fault: Maybe(core.Fault)) {
+	e := (^Entry_Cursor)(w.cursor)
+	opts := options_of(it.as)
+	switch op {
+	case .Step:
+		if e == nil {
+			failed: runtime.Allocator_Error
+			if e, failed = new(Entry_Cursor, it.allocator); failed != nil {
+				return 0, core.Fault{kind = .No_Memory}
+			}
+			e.cursor.allocator, e.names.allocator, e.lows.allocator = it.allocator, it.allocator, it.allocator
+			anchors_forget(e)
+			w.cursor, w.logging = e, true
+			hi, fault = walk(it.src, it.pos, .Yaml_1_2, opts, w, nil, records.entry_hook, &e.cursor)
+		} else if e.short {
+			return 0, core.Fault{kind = .No_Memory}
+		} else {
+			hi, fault = walk_resume(it.src, &e.cursor, .Yaml_1_2, opts, w, nil, records.entry_hook)
+		}
+		if w.given && it.input.procedure != nil && !it.last && !told(it.src, e.cursor.held) {
+			w.given = false
+			return 0, core.Fault{at = u64(len(it.src)), kind = .Truncated}
+		}
+		// A fault at an offset the window's start has passed comes back wrapped below the window.
+		if f, bad := fault.?; bad && f.at >= 1 << 47 {
+			f.at -= 1 << 48
+			fault = f
+		}
+	case .Free:
+		if e != nil {
+			entry_cursor_free(e, it.allocator)
+			w.cursor = nil
+		}
+	case .Save:
+		if e == nil || e.short {
+			return
+		}
+		held := e.cursor.held
+		if e.saved = held != nil; e.saved {
+			p := &held.parser
+			e.back_hidden, e.back_low = e.hidden, e.low
+			if e.short || !directives_keep(e, p) || !held_copy(&e.back, held, e.stable, e.logged, e.cursor.allocator) ||
+			   !mirror(&e.back_lows, e.lows, 0, e.cursor.allocator) {
+				e.short = true
+				return
+			}
+			for e.stable < len(p.anchors) && !p.anchors[e.stable].open {
+				e.stable += 1
+			}
+			e.logged = len(p.log)
+		}
+	case .Restore:
+		if !e.saved {
+			cursor_destroy(&e.cursor)
+			anchors_forget(e)
+			break
+		}
+		stable, logged := e.stable, e.logged
+		if e.cursor.held == nil {
+			context = core.cursor_context(e.cursor.allocator)
+			if e.cursor.held = new(Held); e.cursor.held == nil {
+				e.short = true
+				break
+			}
+			stable, logged = 0, 0
+		}
+		e.short ||= !held_copy(e.cursor.held, &e.back, stable, logged, e.cursor.allocator) ||
+			!mirror(&e.lows, e.back_lows, 0, e.cursor.allocator)
+		e.hidden, e.low = e.back_hidden, e.back_low
+		anchors_name(e, &e.cursor.held.parser)
+	case .Rebase:
+		e.cursor.src, e.cursor.n = raw_data(it.src), u64(len(it.src))
+		if held := e.cursor.held; held != nil {
+			// A hidden anchor's bytes may have left the window, and an alias reads every anchor's name.
+			anchors_compact(e, &held.parser)
+			held_shift(held, it.src, w.delta)
+			for &low in e.lows {
+				if low != max(u64) {
+					low -= w.delta
+				}
+			}
+			anchors_name(e, &held.parser)
+			if opts.alias_limit == 0 {
+				held.parser.limit = max(held.parser.limit, ALIAS_RATIO * (it.base + u64(len(it.src))))
+			}
+		}
+		e.stable, e.logged = 0, 0
+	case .Keep:
+		hi = max(u64)
+		if held := e.cursor.held; held != nil {
+			if p := &held.parser; e.hidden >= 32 + len(p.anchors) / 2 {
+				anchors_compact(e, p)
+				anchors_name(e, p)
+			}
+			hi = held_keep(e, held)
+			// The keys of the open mappings are read again under `merge_keys` by each later key, so those the window
+			// lets go are copied out, in the saved walk too.
+			if !keys_hold(&held.parser.keys, it.src, hi) || e.saved && !keys_hold(&e.back.parser.keys, it.src, hi) {
+				e.short = true
+			}
+		}
+	case .Clone:
+		if e != nil {
+			c, ok := entry_cursor_clone(e, it.allocator)
+			if !ok {
+				return 0, core.Fault{kind = .No_Memory}
+			}
+			w.cursor = c
+		}
+	}
+	return
+}
+
+// Whether the bytes of `src` past the place `held` paused at, or ended or faulted at, could not change what the walk
+// read: the next byte that is no white space or line break lies `FAULT_REACH` bytes before the end. A `Truncated`
+// fault may name a byte far back, such as an opening quote, and the next bytes may close it.
+@(private)
+told :: proc "contextless" (src: []u8, held: ^Held) -> bool {
+	if held == nil {
+		return false
+	}
+	p := &held.parser
+	if held.ended && core.Fault_Kind(p.fail & 0xff) == .Truncated {
+		return false
+	}
+	n := u64(len(src))
+	at := max(p.pos, p.fail >> 16)
+	for at < n && (src[at] == ' ' || src[at] == '\t' || src[at] == '\n' || src[at] == '\r') {
+		at += 1
+	}
+	return at + core.FAULT_REACH < n
+}
+
+// The lowest byte the walk `held` holds reads again. The start of the line and the next line found are compared with
+// the place the walk reads at, and only read there.
+@(private)
+held_keep :: proc(e: ^Entry_Cursor, held: ^Held) -> u64 {
+	p := &held.parser
+	lo := min(p.pos, p.last_end, anchors_low(e, p))
+	if p.tag.n != 0 {
+		lo = min(lo, p.tag.lo)
+	}
+	if p.staging {
+		for t in p.stage {
+			lo = min(lo, t.lo)
+		}
+	}
+	for c in p.pending {
+		lo = min(lo, c.lo)
+	}
+	for b in p.blocks {
+		if b.lead.tag.n != 0 {
+			lo = min(lo, b.lead.tag.lo)
+		}
+		if b.lead.anchor.n != 0 {
+			lo = min(lo, b.lead.anchor.lo)
+		}
+	}
+	for t in held.queue {
+		lo = min(lo, t.lo)
+	}
+	// Under `merge_keys` the tokens a `<<` holds are read again at its mapping's close.
+	for t in p.merges {
+		lo = min(lo, t.lo)
+	}
+	return lo
+}
+
+// The lowest byte an alias may read again: the anchors of a name no later anchor took, and the anchors not yet
+// complete with every anchor after them.
+@(private)
+anchors_low :: proc(e: ^Entry_Cursor, p: ^Parser) -> u64 {
+	anchors_seen(e, p)
+	lo := e.low
+	if u := len(e.lows); u < len(p.anchors) {
+		if e.open != u {
+			e.open, e.scan, e.open_low = u, p.anchors[u].log_lo, p.anchors[u].name_lo - 1
+		}
+		for ; e.scan < len(p.log); e.scan += 1 {
+			e.open_low = min(e.open_low, p.log[e.scan].lo)
+		}
+		lo = min(lo, e.open_low)
+	}
+	return lo
+}
+
+// Takes the anchors up to the first that is not complete into `lows` and `names`.
+@(private)
+anchors_seen :: proc(e: ^Entry_Cursor, p: ^Parser) {
+	for len(e.lows) < len(p.anchors) && !p.anchors[len(e.lows)].open {
+		k := len(e.lows)
+		a := p.anchors[k]
+		low := a.name_lo - 1
+		for t in p.log[a.log_lo:a.log_hi] {
+			low = min(low, t.lo)
+		}
+		if _, failed := append(&e.lows, low); failed != nil {
+			e.short = true
+			return
+		}
+		name := string(p.src[a.name_lo:a.name_lo + u64(a.name_n)])
+		if j, seen := e.names[name]; seen {
+			e.dirty ||= e.lows[j] == e.low
+			e.lows[j] = max(u64)
+			e.hidden += 1
+		}
+		e.names[name] = k
+		e.low = min(e.low, low)
+	}
+	if e.dirty {
+		e.low, e.dirty = max(u64), false
+		for _, k in e.names {
+			e.low = min(e.low, e.lows[k])
+		}
+	}
+}
+
+// Forgets what `anchors_seen` took.
+@(private)
+anchors_forget :: proc(e: ^Entry_Cursor) {
+	clear(&e.lows)
+	clear(&e.names)
+	e.low, e.dirty, e.open, e.hidden = max(u64), false, -1, 0
+}
+
+// Takes `names` again from the anchors `lows` holds and no later anchor hides, as their names now read in `p.src`.
+@(private)
+anchors_name :: proc(e: ^Entry_Cursor, p: ^Parser) {
+	clear(&e.names)
+	for low, k in e.lows {
+		if low != max(u64) {
+			a := p.anchors[k]
+			e.names[string(p.src[a.name_lo:a.name_lo + u64(a.name_n)])] = k
+		}
+	}
+	e.dirty, e.open = true, -1
+}
+
+// Drops the anchors a later anchor of their name hides, which no alias can name, with the log tokens no other anchor
+// holds. It reads no anchor's bytes, which may have left the window, and leaves `names` to `anchors_name`.
+@(private)
+anchors_compact :: proc(e: ^Entry_Cursor, p: ^Parser) {
+	if e.hidden == 0 {
+		return
+	}
+	seen := len(e.lows)
+	kept, logged := 0, 0
+	run_lo, run_hi, run_at := 0, -1, 0
+	for k in 0 ..< len(p.anchors) {
+		a := p.anchors[k]
+		if k < seen && e.lows[k] == max(u64) {
+			continue
+		}
+		hi := len(p.log) if a.open else a.log_hi
+		if a.log_lo > run_hi {
+			if run_hi > run_lo {
+				copy(p.log[logged:], p.log[run_lo:run_hi])
+				logged += run_hi - run_lo
+			}
+			run_lo, run_hi, run_at = a.log_lo, hi, logged
+		} else {
+			run_hi = max(run_hi, hi)
+		}
+		a.log_lo = run_at + a.log_lo - run_lo
+		if !a.open {
+			a.log_hi = run_at + a.log_hi - run_lo
+		}
+		for &o in p.open {
+			if o.anchor == k {
+				o.anchor = kept
+			}
+		}
+		if p.pend_anch == k {
+			p.pend_anch = kept
+		}
+		if k < seen {
+			e.lows[kept] = e.lows[k]
+		}
+		p.anchors[kept] = a
+		kept += 1
+	}
+	if run_hi > run_lo {
+		copy(p.log[logged:], p.log[run_lo:run_hi])
+		logged += run_hi - run_lo
+	}
+	resize(&e.lows, seen - e.hidden)
+	resize(&p.anchors, kept)
+	resize(&p.log, logged)
+	e.hidden, e.stable, e.logged = 0, 0, 0
+}
+
+// Moves the `%TAG` directives' handles and prefixes into `e.directives`, once, written as directive lines.
+@(private)
+directives_keep :: proc(e: ^Entry_Cursor, p: ^Parser) -> bool {
+	if len(p.handles) == e.declared {
+		return true
+	}
+	size := 0
+	for h in p.handles {
+		size += len("%TAG  \n") + len(h.handle) + len(h.prefix)
+	}
+	text, failed := make([]u8, size, e.cursor.allocator)
+	if failed != nil {
+		return false
+	}
+	at := 0
+	for &h in p.handles {
+		at += copy(text[at:], "%TAG ")
+		handle := at
+		at += copy(text[at:], h.handle)
+		at += copy(text[at:], " ")
+		prefix := at
+		at += copy(text[at:], h.prefix)
+		at += copy(text[at:], "\n")
+		h.handle, h.prefix = string(text[handle:prefix - 1]), string(text[prefix:at - 1])
+	}
+	delete(e.directives, e.cursor.allocator)
+	e.directives, e.declared = text, len(p.handles)
+	return true
+}
+
+// Copies the walk `from` holds to `to`, which keeps its own arrays. Their anchors before `stable` and log tokens before
+// `logged` are equal already.
+@(private)
+held_copy :: proc(to, from: ^Held, stable, logged: int, allocator: runtime.Allocator) -> bool {
+	t, f := &to.parser, &from.parser
+	t.state = f.state
+	to.regs, to.stop_at, to.stopped, to.ended = from.regs, from.stop_at, from.stopped, from.ended
+	return mirror(&to.queue, from.queue, 0, allocator) && mirror(&t.stage, f.stage, 0, allocator) &&
+		mirror(&t.pending, f.pending, 0, allocator) && mirror(&t.anchors, f.anchors, stable, allocator) &&
+		mirror(&t.log, f.log, logged, allocator) && mirror(&t.open, f.open, 0, allocator) &&
+		mirror(&t.handles, f.handles, 0, allocator) && mirror(&t.merges, f.merges, 0, allocator) &&
+		mirror(&t.blocks, f.blocks, 0, allocator) && mirror(&t.flows, f.flows, 0, allocator) &&
+		mirror(&t.keys.frames, f.keys.frames, 0, allocator) && mirror(&t.keys.keys, f.keys.keys, 0, allocator) &&
+		mirror(&t.keys.heads, f.keys.heads, 0, allocator) && mirror(&t.keys.kept, f.keys.kept, 0, allocator)
+}
+
+// Makes `to` hold what `from` holds, whose items before `from_i` it holds already. `to` keeps its memory and grows
+// it to the capacity of `from`, in `allocator` when it has none of its own.
+@(private)
+mirror :: #force_inline proc(to: ^[dynamic]$T, from: [dynamic]T, from_i: int, allocator: runtime.Allocator) -> bool {
+	if cap(from) > cap(to) {
+		context = core.cursor_context(allocator)
+		if reserve(to, cap(from)) != nil {
+			return false
+		}
+	}
+	(^runtime.Raw_Dynamic_Array)(to).len = len(from)
+	if at := min(from_i, len(from)); at < len(from) {
+		copy(to[at:], from[at:])
+	}
+	return true
+}
+
+// Takes `delta` off every offset the walk `held` holds and points it at `src`. An offset `held_keep` did not keep is
+// one the walk does not read again: a flow collection's start, which only a fault names, wraps below the window, and an
+// open block's inline comment is dropped.
+@(private)
+held_shift :: proc(held: ^Held, src: []u8, delta: u64) {
+	p := &held.parser
+	p.src, p.masks.at = src, NO_BLOCK
+	p.pos -= delta
+	p.ls -= delta
+	p.last_end -= delta
+	p.nl.pos -= delta
+	p.tag.lo -= delta
+	if p.fail != 0 {
+		p.fail = ((p.fail >> 16) - delta) << 16 | p.fail & 0xffff
+	}
+	held.stop_at -= delta
+	for &t in held.queue {
+		t.lo -= delta
+	}
+	for &t in p.stage {
+		t.lo -= delta
+	}
+	for &c in p.pending {
+		c.lo -= delta
+	}
+	for &a in p.anchors {
+		a.name_lo -= delta
+		a.lo -= delta
+	}
+	for &t in p.log {
+		t.lo -= delta
+	}
+	for &b in p.blocks {
+		b.lead.tag.lo -= delta
+		b.lead.anchor.lo -= delta
+		if b.inline.lo < delta {
+			b.inline = {}
+		} else {
+			b.inline.lo -= delta
+		}
+	}
+	for &f in p.flows {
+		f.lo -= delta
+	}
+	for &k in p.keys.keys {
+		if !k.kept {
+			k.lo -= delta
+		}
+	}
+	for &t in p.merges {
+		t.lo -= delta
+	}
+}
+
+// A copy of `e` that holds its own walk, anchors and directives, with no saved state, nil and false when memory ran
+// out.
+@(private)
+entry_cursor_clone :: proc(e: ^Entry_Cursor, allocator: runtime.Allocator) -> (c: ^Entry_Cursor, ok: bool) {
+	failed: runtime.Allocator_Error
+	if c, failed = new(Entry_Cursor, allocator); failed != nil {
+		return
+	}
+	c.cursor.src, c.cursor.n, c.cursor.allocator, c.cursor.replayed = e.cursor.src, e.cursor.n, e.cursor.allocator, e.cursor.replayed
+	c.names.allocator, c.lows.allocator = allocator, allocator
+	c.short, c.hidden, c.low, c.dirty, c.open, c.scan, c.open_low = e.short, e.hidden, e.low, e.dirty, e.open, e.scan, e.open_low
+	ok = true
+	if held := e.cursor.held; held != nil {
+		context = core.cursor_context(e.cursor.allocator)
+		if c.cursor.held = new(Held); c.cursor.held == nil {
+			ok = false
+		} else {
+			ok = held_copy(c.cursor.held, held, 0, 0, e.cursor.allocator) && mirror(&c.lows, e.lows, 0, allocator)
+			if ok {
+				anchors_name(c, &c.cursor.held.parser)
+				ok = directives_keep(c, &c.cursor.held.parser)
+			}
+		}
+	}
+	if !ok {
+		entry_cursor_free(c, allocator)
+		c = nil
+	}
+	return
+}
+
+// Frees what `e` holds and `e`.
+@(private)
+entry_cursor_free :: proc(e: ^Entry_Cursor, allocator: runtime.Allocator) {
+	cursor_destroy(&e.cursor)
+	context = core.cursor_context(e.cursor.allocator)
+	parser_destroy(&e.back.parser)
+	delete(e.back.queue)
+	delete(e.lows)
+	delete(e.back_lows)
+	delete(e.names)
+	delete(e.directives, e.cursor.allocator)
+	free(e, allocator)
+}
+
+// The document of an `.Entries` member, built from the tokens the walk read of it in its place, an alias's node
+// among them and a tag typed by the directives, with its keys judged as a whole text's are.
+@(private)
+build_entry :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (doc: core.Document, err: core.Document_Error) {
+	e := (^Entry_Cursor)((^records.Entry_Walk)(it.format).cursor) if it.format != nil else nil
+	directives := e.directives if e != nil else nil
+	in_order := e != nil && !e.cursor.replayed && !options_of(it.as).merge_keys
+	doc, err = records.entry_document(it, rec, directives, in_order, allocator, proc(b: ^engine.Builder, regs: core.Hook_Regs, tokens: []core.Token) -> core.Hook_Regs {
+		f := Filter{build = b, src = b.doc.src, directives = b.doc.state}
+		regs := regs
+		for t in tokens {
+			regs, _ = filter_hook(&f, regs, t)
+		}
+		return regs
+	})
+	if err.kind == .None {
+		err = judge_keys(&doc, false)
+	}
+	return
+}
 
 // Frames the document at the reader's position: the bytes from there through the document's end, judged by the walk
 // that frames it. A stream's last comments and blank lines hold no document, so they end the records.
@@ -56,7 +569,8 @@ cut_document :: proc(it: ^records.Reader, lo, to: u64) -> (u64, bool) {
 	if lo >= hi {
 		return 0, false
 	}
-	p := Parser{src = src}
+	p: Parser
+	p.src = src
 	ls := u64(bytes.last_index_byte(src[:lo], '\n') + 1)
 	for i := lo; i < hi; {
 		k := bytes.index_byte(src[i:hi], '\n')

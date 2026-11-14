@@ -53,6 +53,7 @@ choose_columns :: proc(run: ^Run) {
 	r := &run.route
 	if o.null_input {r.whys += {.Null_Input}}
 	if o.slurp {r.whys += {.Slurp}}
+	if o.stream {r.whys += {.Stream}}
 	if o.cells_in.no_header {r.whys += {.No_Header}}
 	if o.cells_in.infer {r.whys += {.Infer}}
 	if r.whys != {} && !r.on {
@@ -63,8 +64,9 @@ choose_columns :: proc(run: ^Run) {
 	cols.ragged = .Ragged in o.cells_in.tolerate
 	cols.names.allocator, cols.keys.allocator = context.allocator, context.allocator
 	r.whys += columns_of(run.prog, cols)
-	// The record passes through, and with it the comment lines above it, to a table that writes them.
-	if r.whys == {} && o.cells_in.comment != 0 && o.cells_out.comment != 0 && writes_cells(o) && (cols.every || cols.shape == .Select) {
+	// The record passes through, and with it the comment lines above it, to an output that writes them.
+	writes_notes := o.cells_out.comment != 0 if writes_cells(o) else .Comment in holds_out(o)
+	if r.whys == {} && o.cells_in.comment != 0 && writes_notes && (cols.every || cols.shape == .Select) {
 		r.whys += {.Comments_In}
 	}
 	if r.whys == {} {
@@ -257,14 +259,20 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 	switch cols.shape {
 	case .Column:
 		for at in cols.at {
-			emit(o, value_of(column_cell(it, rec, row, at, buf)))
+			if !emit(o, value_of(column_cell(it, rec, row, at, buf))) {
+				refuse_record(run)
+				return
+			}
 		}
 	case .Array:
 		a := jq.new_array(len(cols.at))
 		for at in cols.at {
 			append(&a.items, value_of(column_cell(it, rec, row, at, buf)))
 		}
-		emit(o, a)
+		if !emit(o, a) {
+			refuse_record(run)
+			return
+		}
 	case .Object:
 		l := o.layout
 		switch {
@@ -303,13 +311,19 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 			}
 		case cols.every:
 			built, _ := records.build(it, rec, context.allocator)
-			emit(o, jq.document_value(built))
+			if !emit(o, jq.document_value(built)) {
+				refuse_record(run)
+				return
+			}
 		case:
 			obj := jq.new_object()
 			for at, i in cols.at {
 				jq.object_put(obj, cols.keys[i], value_of(column_cell(it, rec, row, at, buf)))
 			}
-			emit(o, obj)
+			if !emit(o, obj) {
+				refuse_record(run)
+				return
+			}
 		}
 	case .Select:
 		watched := jq.new_object()
@@ -322,6 +336,14 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 		return
 	}
 	finish_input(o)
+}
+
+// Ends the record whose output the writer refused, as `run_once` ends an input whose filter fails.
+@(private = "file")
+refuse_record :: proc(run: ^Run) {
+	flush_some(&run.output, force = true)
+	tell_filter_error(&run.ip, (^Inputs)(run.ip.inputs.data))
+	finish_input(&run.output, EXIT_INPUT)
 }
 
 // The cell at column `at` of `rec` as the record's object holds it: its text, or nil for an empty unquoted cell and for

@@ -32,7 +32,7 @@ directory describe one part each: [document.md](document.md), [paths.md](paths.m
 | `html` | HTML as the WHATWG standard parses it, built into the document XML builds, with the calls of `xml` |
 | `cbor` | CBOR (RFC 8949): the encoding rules, documents, paths, a sequence's items as records, `marshal`, `unmarshal`, the writer and the checks. A byte string is `Kind.Bytes` |
 | `core` | what every format shares, and the interface a format's author or a run-time choice of format uses: `As`, `build` and `validate` over a handle |
-| `core/records` | NDJSON, RFC 7464 and CSV-style text as a sequence of records, reached as `records_check`, `records_open`, `records_open_stream`, `records_next`, `records_each` and the writer |
+| `core/records` | NDJSON, RFC 7464 and CSV-style text as a sequence of records, reached as `records_validate`, `records_open`, `records_open_stream`, `records_next`, `records_each` and the writer |
 | `core/typed` | plans and the options of a typed read |
 | `core/model` | models: rules on an Odin type, `load`, `validate`, `patch`, `dump`, problem documents and the schema of a model, imported as `model "stury:core/model"` |
 | `core/schema` | JSON Schema: `compile`, `bind` and `check`, reached from a format as `load_schema`, `bind_schema` and `check_schema`, and `infer`, `sample`, `compare`, `convert` and `write_odin` |
@@ -90,9 +90,10 @@ shows that `.Json` refuses a comment that `.Jsonc` takes:
 
 ## Check against a schema
 
-`json.load_schema` reads and compiles a JSON Schema (drafts 4 to 2020-12) once, and `json.bind_schema(s, .Json)` binds it
-to the spec the inputs are read as. `json.load_schema(text, {draft = .D07, refs = dir})` takes `json.Schema_Options`: the draft
-of a schema with no `$schema`, the directory `$ref`s are read from, `format_assert` and `dups`. `json.check_schema` judges a text and puts every failure in a `json.Sink`, each with its
+`json.load_schema(text, .Json)` reads and compiles a JSON Schema (drafts 4 to 2020-12) once, and `json.bind_schema(s, .Json)` binds it
+to the spec the inputs are read as. `json.load_schema(text, .Json, load = {draft = .D07, refs = dir})` takes `json.Schema_Options`: the draft
+of a schema with no `$schema`, the directory `$ref`s are read from, `format_assert` and `dups`. A reference resolves within the schema, to a
+draft's meta-schema or to a file under `refs`, and `load_schema` refuses any other, since it reads no network. `json.check_schema` judges a text and puts every failure in a `json.Sink`, each with its
 position, its path and the keywords that failed it. `json.check_schema_records` checks a text of records (`.Lines`, `.Seq`) one by one and, with a `json.Runner`, on its
 threads, with the entries a serial check gives. Set the sink's `max_errors`: a sink without one keeps the first 100 failures. A check of
 many records holds no memory per record, but a failure is kept until the sink is destroyed. A table is bound with
@@ -100,7 +101,7 @@ many records holds no memory per record, but a failure is kept until the sink is
 a number, `true` or `false` when its text is exactly one, as `dsv.unmarshal` reads it.
 
 ```odin
-s, _ := json.load_schema(schema_text)
+s, _ := json.load_schema(schema_text, .Json)
 defer json.destroy(s)
 b, _ := json.bind_schema(s, .Json)
 defer json.destroy(&b)
@@ -266,7 +267,7 @@ defer json.destroy(&doc)
 if answer.outcome == .Found {
 	fmt.println(string(json.span(&doc, answer.node))) // "engines", quotes and all
 	buf: [32]u8
-	text, _ := json.text(&doc, doc.nodes[answer.node], buf[:]) // engines, decoded into the caller's buffer
+	text, _ := json.text(&doc, answer.node, buf[:]) // engines, decoded into the caller's buffer
 }
 
 every_tag, _ := json.parse_path(".tags[]")
@@ -324,9 +325,10 @@ so `yaml.destroy(&cursor)` frees a cursor left holding a stop. A toml cursor res
 whole text into its tables before the first token, and a stop keeps those tables and where the walk stood on the heap
 until a resume ends the walk or `toml.destroy(&cursor)` frees them. A cbor cursor resumes after any token: a stop keeps
 the walk's open containers and where it stood on the heap, and `cbor.destroy(&cursor)` frees a cursor left holding one. An xml cursor resumes after any token: at the first stop the
-walk reads on to the text's end and holds the tokens past the stop and the text's verdict on the heap, which the
-resumes give, so a stop's `hi` is the end of the stopped token's span. `xml.destroy(&cursor)` frees a cursor left
-holding a stop.
+walk reads on to the end of the element it stopped in, or to the text's end past the root, and holds the tokens past
+the stop on the heap, which the resume gives before it continues the walk, so a stop's `hi` is the end of the stopped
+token's span. `xml.destroy(&cursor)` frees a cursor left holding a stop. A cursor's `allocator`, the default heap
+when it is nil, holds what a yaml, cbor or xml cursor keeps, and a reader under `.Entries` sets it to its own.
 `can_resume` says whether a cursor holds a stop, and a resume on another text is refused with `.Bad_Option`.
 
 ## Build a document
@@ -356,12 +358,14 @@ A reader given a node of the wrong kind, or an index no node holds, returns its 
 
 ### Values
 
-A `Value` is null (`nil`), a `bool`, a `f64`, a `Number_Text`, a `string`, an `^Array`, an `^Object` or a node of a
-document (`Node_Ref`). A `Number_Text` keeps a number's digits: a number read and not computed on, or an integer no
-double holds exactly. `json.new_array`, `json.new_object`, `json.array_append` and `json.object_put` build one in the
-context allocator. `spell.decimal_of` reads a number's text as an exact decimal, `spell.decimal_compare` orders two of
-them and `spell.decimal_multiple_of` divides one by another, with no limit on the digits or the exponent. The readers
-above take a value as they take a node, so one loop reads both:
+A `Value` is null (`nil`), a `bool`, a `f64`, a `Number_View`, a `string`, an `^Array`, an `^Object` or a node of a
+document (`Node_Ref`). A `Number_View` keeps a number's digits: a number read and not computed on, or an integer no
+double holds exactly. `core.number_text` copies the digits after their double, which the view then holds, and
+`core.number_view` views digits in place, read at each use. `core.view_text` gives the digits and `core.view_f64` the
+double. `json.new_array`, `json.new_object`, `json.array_append` and `json.object_put` build one in the context
+allocator. `spell.decimal_of` reads a number's text as an exact decimal, `spell.decimal_compare` orders two of them and
+`spell.decimal_multiple_of` divides one by another, with no limit on the digits or the exponent. The readers above take
+a value as they take a node, so one loop reads both:
 
 ```odin
 v := json.Value(json.Node_Ref{&doc, json.ROOT})
@@ -416,7 +420,17 @@ itself, since a TOML table, a YAML block collection and a CBOR container's count
 is read again by the format's walk, so an edit that breaks a rule of the language is `.Bad_Result`, and an edit the
 format cannot make is a `.Frozen` error whose message names the reason. `xml.set`, `html.set` and their edit lists
 commit the same way, and HTML's result is read as a browser reads it: one whose tree is not the edited tree is
-`.Bad_Result`.
+`.Bad_Result`. Every commit, in every format, reads its result back and compares it as values with the document the
+edits make: a result that reads back as other values is `.Bad_Result` with the reason `.Reads_Back_Other`. JSON, YAML,
+CBOR and TOML read the values the edits wrote by their paths, and the rest of the result is judged by the format's
+validate, as XML reads a list that sets one element's content through the first element of each name on its way. JSON
+reads a list of more than 64 edits that write scalars and keys by the bytes it wrote each one in, in one walk that
+judges the whole result, and TOML by its read, which parses the text whole. A delimited
+text whose edits set or remove cells of a rectangular table is read record by record against the edited cells. The
+result is read whole for HTML, any other delimited text or XML list, whose paths do not name their values as their read
+groups them, for a path through an object that holds one key twice, and for edited values that make more than 64 paths,
+where the values one array's elements hold at one place make one path. A list that holds a text the caller spelled
+(`typed.Raw`), or sets a YAML tag, anchor or alias, is judged by the format's read alone.
 
 - TOML: a scalar or an inline value is replaced in place, a new member is a line after its table's last line and before
   its sub-tables, a built table or array of tables is a section after the last section of the table it joins, and a
@@ -448,12 +462,21 @@ Comments are facts attached to a node, with a role of `Comment`, `Comment_Inline
 
 A format that marks a node with a type tag, an anchor or an alias (YAML's `!!str`, `&a` and `*a`, CBOR's tags) holds
 them as facts of the roles `Tag`, `Anchor` and `Alias`, which stand just before the node. `set_fact` and `remove_fact`
-take them, one non-empty line a body, in YAML, which spells them. TOML refuses them, and a commit in a format that holds
-none counts one in `dropped`. A fact the node's spelling carries instead of a span is read by name:
+take them, one non-empty line a body, in YAML, which spells them, and in CBOR, whose tag body is its number. TOML
+refuses them, and a commit in a format that holds none counts one in `dropped`. A fact the node's spelling carries instead of a span is read by name:
 `fact_value(&doc, node, .Style)` gives how a scalar or a collection is written (TOML's `literal` or `hex`, YAML's
-`plain`, `double`, `folded` or `flow`), `.Tag` a node's tag or a TOML datetime's type (`date-local`, `datetime`), and
+`plain`, `double`, `folded` or `flow`, a hex integer's `hex` in TOML, YAML and JSON5 alike, a TOML table's `flow`,
+`dotted` or `block`), `.Tag` a node's tag or a TOML datetime's type (`date-local`, `datetime`), and
 `.Name`, `.Namespace` and `.Content` a markup element's name, namespace and text. A markup element's attributes
-are facts of the role `Attribute`, which `attributes_of` walks.
+are facts of the role `Attribute`, which `attributes_of` walks. A tag's `Fact_Value.meaning` is what the tag says its
+value is, the same `Tag_Meaning` in every format: `.Datetime` for a TOML `datetime`, a YAML `!!timestamp` with an
+offset and a CBOR tag 0, `.Local_Date` for a TOML `date-local`, a date-only `!!timestamp` and a CBOR tag 1004,
+`.Binary` for `!!binary` and a CBOR tag 34, and `.Own` for a tag no other format spells. `core.write` spells a meaning
+in the output's own syntax where its text fits that syntax, and counts the tag in `dropped` where it does not. A token
+write does the same with a `write.Tagged_Text`'s `meaning`, which `write_value` takes from a node's tag. A document
+marker is a fact of the role `Directive` on the root, read by `facts_of(&doc, ROOT, .Directive)`: a YAML `%YAML` or
+`%TAG` line, an explicit `---` or `...`, and the XML declaration. Only a write in the document's own format keeps one,
+and no write counts one in `dropped`.
 
 ## Write
 
@@ -487,7 +510,7 @@ defer delete(out)
 ```
 
 `json.as(.Json)` is an `As`, the handle of a format. The calls in `core` and `core/records` that work on any format
-(`core.validate`, `core.build`, `json.format`, `json.records_check`, `json.records_open` and the rest) take one where a
+(`core.validate`, `core.build`, `json.format`, `json.records_validate`, `json.records_open` and the rest) take one where a
 `json` or `dsv` call takes a `Spec`, and `core.write` and `json.commit` take one to change the format. `json.as(spec, opts)` and
 `dsv.as(spec, opts)` make it, and a document holds the one it was read with. A program that names a `Spec` in each
 call links only the walks it reaches. A handle reaches every walk of its format, since it serves a choice made at run time.
@@ -498,7 +521,7 @@ call links only the walks it reaches. A handle reaches every walk of its format,
 the bytes of one line and the offset it starts at. [examples/records](../examples/records/main.odin):
 
 ```odin
-faults, _ := json.records_check(src, .Json, framing = .Lines)   // one fault per invalid record, positions in the whole text
+faults, _ := json.records_validate(src, .Json, framing = .Lines)   // one fault per invalid record, positions in the whole text
 defer delete(faults)
 ```
 
@@ -536,7 +559,8 @@ Under `.Entries` the records are the elements or members of the root, or of the 
 keys names: `json.records_open(src, .Json, framing = .Entries, entries = {"data"})` reads the items of `{"data": [...]}`,
 and `Record_Stream_Options.entries` does the same on a stream, which gives each record as it reads it. A YAML stream's
 documents are its records, read with `yaml.records_open`, and so are the items of a CBOR sequence, with
-`cbor.records_open`, both under `.Concatenated`.
+`cbor.records_open`, both under `.Concatenated`. YAML, TOML, XML, HTML and CBOR take `.Entries` and `entries` too, as
+`toml.records_open(src, .Toml_1_0, framing = .Entries, entries = {"x"})` reads each `[[x]]` table.
 
 ## Delimited text
 
@@ -623,7 +647,7 @@ fmt.print(string(out)) // the text with `port = 9090`, its comment and every oth
 - A plan from `toml.plan_make` reads a text only when it is made with `reads = toml.reads(spec)`, as json's and yaml's
   do, and `toml.set` with a struct and a plan writes it through those reads.
 - A TOML text has no mark that ends it, so under `.Concatenated` a record is the whole text from the reader's position
-  to the input's end (`toml.records_open`, `records_open_stream`, `records_check`, `records_each`), and an input of no
+  to the input's end (`toml.records_open`, `records_open_stream`, `records_validate`, `records_each`), and an input of no
   bytes holds none. A stream's text is a record once its input has ended. A reader an entry point opens builds or
   scans a record once it is given `it.docs = toml.record_docs(spec)`.
 
@@ -661,7 +685,7 @@ fmt.print(string(out)) // replicas: 5 # scaled by hand, and the rest as it was
   `0x1`, as `.Duplicate_Key` under every policy but `.First` and `.All`, since it cannot tell which name holds them.
 - `yaml.find`, `scan` and `each_answer` read a document in one pass without a build, and build it when the read
   reaches an alias.
-- A stream of several documents is read as records under `.Concatenated` (`yaml.records_open`, `records_check`,
+- A stream of several documents is read as records under `.Concatenated` (`yaml.records_open`, `records_validate`,
   `records_each`), each document one record. A text with more than one document is a fault of `build`.
 - `core.write` with `yaml.as(.Yaml_1_2)`, and `yaml.marshal`, write block style when the layout is pretty and flow
   style on one line when it is compact. A string is plain unless a YAML 1.1 or 1.2 reader would read it as another
@@ -685,10 +709,10 @@ src := transmute([]u8)string(`<order id="7"><item>pen</item><item>ink</item><not
 doc := xml.build(src, .Xml) or_return
 defer xml.destroy(&doc)
 order, _ := xml.member(&doc, xml.ROOT, "order")
-text_buf: [32]u8
+text_buf, id_buf: [32]u8, [16]u8
 attrs := xml.attributes_of(&doc, order)
 _, id_token, _ := xml.attribute_next(&attrs)
-id, _ := xml.token_text(doc.readers, &doc.view, id_token, context.temp_allocator)
+id, _ := xml.token_text(&doc.view, id_token, id_buf[:])
 note, _ := xml.member(&doc, order, "note")
 text, _ := xml.text(&doc, note, text_buf[:])
 fmt.println(id, text) // 7 rush & wrap
@@ -728,7 +752,7 @@ for a in found.answers {
   standard builds, implied elements included. `html.write` writes a document as the WHATWG standard serializes a tree,
   and `html.marshal` and `html.tokens_init` write a typed value and a token write's calls as it writes a built one. A
   value whose text a browser reads back as another tree is `.Unwritable`.
-- A text is one record under `.Concatenated`, so `xml.records_each`, `html.records_each` and `records_check` read a
+- A text is one record under `.Concatenated`, so `xml.records_each`, `html.records_each` and `records_validate` read a
   file as one document.
 - `xml.checks(.Xml)` and `html.checks(.Document)` give a model the format, which loads an element's attributes and
   child elements as members, and `bind_schema` binds a JSON Schema.
@@ -790,7 +814,8 @@ fmt.println(string(as_json), dropped) // {"sensor":"t1","value":21.5,"raw":"AQID
 - A tag is a fact: `fact_value(&doc, node, .Tag)` gives the nearest tag's number. A byte string written as JSON is
   base64 text, and a tag is dropped and counted in `dropped`.
 - `cbor.marshal` writes a struct as a map, or as an array under `Options{structs = .Array}`, and `unmarshal` reads
-  either form.
+  either form. A `typed.Datetime` is written after tag 0 when it is a date and time with an offset and after tag 1004
+  when it is a date, and as a plain text otherwise.
 
 ## One program, several formats
 

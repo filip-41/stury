@@ -2051,6 +2051,7 @@ rendered :: proc(src: []u8, sink: ^typed.Sink) -> string {
 schema_check_reads_markup :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	readers := json.as(.Json).readers^
+	readers.holds += {.Attribute}
 	readers.attribute = markup_attribute
 	markup := json.as(.Json)
 	markup.readers = &readers
@@ -2120,6 +2121,7 @@ schema_check_reads_markup :: proc(t: ^testing.T) {
 markup_attributes_survive_an_edit :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	readers := json.as(.Json).readers^
+	readers.holds += {.Attribute}
 	readers.attribute = markup_attribute
 	services := readers.services^
 	edit := services.edit^

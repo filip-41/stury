@@ -15,7 +15,7 @@ EXPONENT_MAX :: 5000
 // token `t`, which is an integer, a float widened to binary64, a bignum, a decimal fraction or a bigfloat. A tag fact is
 // its tag number. A bignum, decimal fraction or bigfloat that binary64 or `Int` cannot hold exactly reads as `Wide`,
 // with its digits in `number_text`.
-number :: proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) {
+token_number :: proc(v: ^core.Token_View, t: core.Token) -> (core.Number, bool) {
 	if t.kind != .Number {
 		return {}, false
 	}

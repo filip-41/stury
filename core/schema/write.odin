@@ -12,9 +12,10 @@ import "../write"
 // `$defs` under its name in `d` or `n<index>` and is referred to, so a shared or recursive node is written once, with
 // the rules a member adds beside its `$ref`. A description that writes a `$dynamicRef` writes each of its schema resources
 // under an `$id` of its own, so the `$dynamicRef` reaches the anchors it reached, and refers to every node by an absolute
-// URI. An operand the format cannot spell and a draft 4 integer are `.Unsupported`, naming the keyword in `want.text`. A
-// description that asserts a format names `DIALECT_URI` as its `$schema`, so every `format` of it asserts, and writes
-// beside each asserted format the pattern that spells it, in an `allOf` when the node has a pattern of its own.
+// URI. An operand the format cannot spell and a draft 4 integer are `.Unsupported`, naming the keyword in `want.text`,
+// and a refusal of the format's writer names it after the format's words. A description that asserts a format names
+// `DIALECT_URI` as its `$schema`, so every `format` of it asserts, and writes beside each asserted format the pattern
+// that spells it, in an `allOf` when the node has a pattern of its own.
 write :: proc(d: ^rules.Description, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> (text: []u8, err: core.Error) {
 	uses, e := make([]u8, len(d.nodes), allocator)
 	refs: []string
@@ -81,10 +82,14 @@ write :: proc(d: ^rules.Description, as: core.As, opts := core.Write_Options{}, 
 	if terr.kind == .None {
 		return text, nil
 	}
-	if w.refused != "" {
-		terr.kind = .Unsupported
+	switch {
+	case w.refused != "":
+		terr.kind, terr.want.text = .Unsupported, w.refused
+	case terr.want.text == "":
+		terr.want.text = w.keyword
+	case w.keyword != "":
+		terr.want.text = strings.concatenate({terr.want.text, ", at ", w.keyword}, context.temp_allocator)
 	}
-	terr.want.text = w.refused if w.refused != "" else w.keyword
 	return text, core.error_of(terr)
 }
 
@@ -621,7 +626,7 @@ refuse :: proc(w: ^Writer, keyword: string) {
 put_number :: proc(w: ^Writer, name, text: string) {
 	key(w, name)
 	if _, _, _, strict := spell.number_shape_strict(transmute([]u8)text, 0, u64(len(text))); strict {
-		write.value_of(&w.t, &core.Number_Text{text = text})
+		write.value_of(&w.t, core.number_view(text, 0))
 		return
 	}
 	spelled: string
@@ -646,7 +651,7 @@ put_number :: proc(w: ^Writer, name, text: string) {
 		spell.write_point(&b, d, -i128(len(digits)))
 		spelled = strings.to_string(b)
 	}
-	write.value_of(&w.t, &core.Number_Text{text = spelled})
+	write.value_of(&w.t, core.number_view(spelled, 0))
 }
 
 @(private)

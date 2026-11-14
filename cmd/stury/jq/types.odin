@@ -585,7 +585,9 @@ read :: proc(t: ^Typer, id: Ty, how: Reading, name := "", at := -1) -> (r: Read)
 		required := how == .Values || how == .Element && at < 0
 		listed, described := false, false
 		for node in b {
-			n := &t.d.nodes[node]
+			// Copies, since typing a constant or a dependent schema grows the tables they come from.
+			node_row := t.d.nodes[node]
+			n := &node_row
 			switch how {
 			case .Member:
 				constant_member(t, n, name, &conj, &listed, &described)
@@ -593,7 +595,8 @@ read :: proc(t: ^Typer, id: Ty, how: Reading, name := "", at := -1) -> (r: Read)
 				if n.object >= 0 {
 					// An object the filter builds is not a description of what may be there.
 					described ||= int(n.object) >= t.input_objects
-					evaluated = member(t, &t.d.objects[n.object], name, &conj, &r, &required, &listed, &described)
+					object_row := t.d.objects[n.object]
+					evaluated = member(t, &object_row, name, &conj, &r, &required, &listed, &described)
 				}
 				if u, has := n.unevaluated_properties.?; has {
 					listed = true

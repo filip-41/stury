@@ -34,10 +34,6 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	switch {
 	case o.in_place && o.check:
 		usage_error("--in-place rewrites each file; --check only reads it")
-	case o.in_place && FORMATS[o.from].written_as != nil:
-		usage_error("--in-place writes each file back as its own format, and %s is read only", FORMATS[o.from].name)
-	case o.check && FORMATS[o.from].written_as != nil:
-		usage_error("--check compares each file with its own format, and %s is read only", FORMATS[o.from].name)
 	case o.in_place && o.to != o.from:
 		usage_error("--in-place writes each file back as its own format: --from %s and --to %s differ", FORMATS[o.from].name, FORMATS[o.to].name)
 	case o.in_place:
@@ -148,7 +144,7 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 			if cells == writes_cells(o) {
 				written = put_document(run, ins, &doc)
 			} else {
-				emit_rows(run, ins, jq.document_value(doc))
+				written = emit_rows(run, ins, jq.document_value(doc))
 			}
 			core.destroy(&doc)
 			return written
@@ -157,8 +153,15 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 	it := records.open(data, ins.as, ins.framing, allocator = heap)
 	// Where the records written as cells end, which a table cut short at a fault is written up to.
 	cut := -1
+	// A table's record written as a value waits for the next record, so the last takes the comment lines after it.
+	held: jq.Value
+	noted := cells && o.cells_in.comment != 0
 	for {
 		rec, more := records.next(&it)
+		if held != nil {
+			put_value(run, ins, held if more else jq.noted(held, .Comment_Foot, cells_notes(ins, cut, len(data)))) or_return
+			held = nil
+		}
 		if !more {
 			break
 		}
@@ -178,10 +181,13 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 			cut = int(rec.at) + len(rec.text)
 		case cells == writes_cells(o):
 			put_document(run, ins, &doc) or_return
+		case noted:
+			held = jq.noted(jq.document_value(doc), .Comment, cells_notes(ins, cut, int(rec.at)))
+			cut = int(rec.at) + len(rec.text)
 		case cells:
-			emit(&run.output, jq.document_value(doc))
+			put_value(run, ins, jq.document_value(doc)) or_return
 		case:
-			emit_rows(run, ins, jq.document_value(doc))
+			emit_rows(run, ins, jq.document_value(doc)) or_return
 		}
 	}
 	if f, bad := it.fault.?; bad {
@@ -193,12 +199,12 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 }
 
 // The text `v` written as a table's rows. A text whose root is an array is a list of rows, as the library's writer
-// takes it, its comments placed as the writer places a document's, and a record is a row.
+// takes it, its comments placed as the writer places a document's, and a record is a row. False, told, when a row
+// cannot be written.
 @(private = "file")
-emit_rows :: proc(run: ^Run, ins: ^Inputs, v: jq.Value) {
+emit_rows :: proc(run: ^Run, ins: ^Inputs, v: jq.Value) -> bool {
 	if ins.framing != .Concatenated || jq.kind(v) != .Array {
-		emit(&run.output, v)
-		return
+		return put_value(run, ins, v)
 	}
 	table_root(&run.output, v)
 	if run.convert != nil {
@@ -214,9 +220,22 @@ emit_rows :: proc(run: ^Run, ins: ^Inputs, v: jq.Value) {
 	context.temp_allocator = jq.arena_allocator(&rows)
 	it := jq.iterate(v)
 	for _, row in jq.next_member(&it) {
-		emit(&run.output, row)
+		put_value(run, ins, row) or_return
 		free_all(context.temp_allocator)
 	}
+	return true
+}
+
+// The value `v` of the open file written as an output, or false, told, when the output's format cannot hold it.
+@(private = "file")
+put_value :: proc(run: ^Run, ins: ^Inputs, v: jq.Value) -> bool {
+	if emit(&run.output, v) {
+		return true
+	}
+	flush_some(&run.output, force = true)
+	why, _ := jq.string_of(run.output.ip.err)
+	message.write_stderr("stury: error: %s: %s\n", ins.name, why)
+	return false
 }
 
 // The header of the open file and its records up to byte `cut`, or its header alone when `cut` is -1, written as its
@@ -243,18 +262,19 @@ cells_cut :: proc(run: ^Run, ins: ^Inputs, cut: int) {
 put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
 	as := fmt_written_as(&run.opts)
 	out := &run.output
-	text, _, err := core.write(doc, out.layout.opts, as, allocator = context.temp_allocator)
+	text, dropped, err := core.write(doc, out.layout.opts, as, allocator = context.temp_allocator)
+	tell_dropped(ins.name, run.opts.to, dropped)
 	if err != nil {
 		flush_some(out, force = true)
 		kind := write_refusal_kind(err)
 		if kind == .Too_Deep {
 			message.write_stderr("stury: error: %s: nesting this deep is not written in the format it was read in\n", ins.name)
 		} else {
-			message.write_stderr("stury: error: %s: cannot write the value: %v\n", ins.name, kind)
+			message.write_stderr("stury: error: %s: %s\n", ins.name, edit_error_text(nil, err))
 		}
 		return false
 	}
-	put_format_text(out, as, text, FORMATS[run.opts.to].follows != nil)
+	put_format_text(out, as, text, FORMATS[run.opts.to].caps.follows != nil)
 	return true
 }
 
@@ -267,7 +287,7 @@ fmt_written_as :: proc(o: ^Opts) -> core.As {
 	case writes_texts(o):
 		return text_written_as(o)
 	}
-	return json.as(.Jsonc if writes_comments(o) else .Json, {max_depth = o.max_depth})
+	return json.as(FORMATS[o.to].spec, {max_depth = o.max_depth})
 }
 
 // Refuses an input `--in-place` cannot rewrite. A temporary file and a rename replace a name with a regular file, so

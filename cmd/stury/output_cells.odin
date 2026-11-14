@@ -7,8 +7,8 @@ package main
 // prints, true, false, or empty for null and NaN. Under --infer a string that would read back as a number, true or false
 // is quoted, and TSV, which has no quotes, refuses it. An array or object in a cell ends the run, and so does a row no
 // reader reads back: no cell, or one empty cell, is a blank line. When the table has a comment character, an output's
-// `.@comment` is written as comment lines above its row, as the library's writer places a document's, and its other
-// comments, a cell's and one holding a line end are dropped.
+// `.@comment` is written as comment lines above its row, one for each line of its body, as the library's writer places a
+// document's, and its other comments, a cell's and one holding a control byte a line cannot hold are dropped.
 
 import "base:runtime"
 import "core:math"
@@ -134,8 +134,8 @@ table_root :: proc(o: ^Output, root: jq.Value) {
 	}
 }
 
-// The comments of `role` on `v` that the table holds as whole lines: none when it has no comment character, and none
-// that hold a line end.
+// The lines of the comments of `role` on `v` that the table holds: none when it has no comment character, and none of a
+// comment that holds a control byte a line cannot hold.
 @(private = "file")
 table_comments :: proc(o: ^Output, v: jq.Value, role: core.Role) -> []string {
 	if o.opts.cells_out.comment == 0 {
@@ -144,20 +144,29 @@ table_comments :: proc(o: ^Output, v: jq.Value, role: core.Role) -> []string {
 	bodies, _ := jq.comments(v, role)
 	kept := make([dynamic]string, 0, len(bodies), context.temp_allocator)
 	for b in bodies {
-		if strings.index_any(b, "\r\n") < 0 {
-			append(&kept, b)
+		if !write.comment_lines_ok(b) {
+			continue
+		}
+		// An empty body is one empty line.
+		rest := b if len(b) > 0 else "\n"
+		for line in strings.split_lines_iterator(&rest) {
+			append(&kept, line)
 		}
 	}
 	return kept[:]
 }
 
-// Writes each of `notes` as a comment line, its body after the comment character and a space.
+// Writes each of `notes` as a comment line, its body after the comment character and, when it is not empty, a space.
 @(private = "file")
 put_notes :: proc(t: ^Table, comment: u8, notes: []string) {
 	for n in notes {
-		line := make([]u8, len(n) + 2, context.temp_allocator)
-		line[0], line[1] = comment, ' '
-		copy(line[2:], n)
+		pad := 1 if len(n) > 0 else 0
+		line := make([]u8, 1 + pad + len(n), context.temp_allocator)
+		line[0] = comment
+		if pad > 0 {
+			line[1] = ' '
+		}
+		copy(line[1 + pad:], n)
 		records.write_text(&t.wr, line)
 	}
 }

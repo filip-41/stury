@@ -31,13 +31,9 @@ SERVICES := [Spec]core.Services {
 
 handle_services :: proc "contextless" ($S: Spec) -> core.Services {
 	return {
-		build    = proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-			return build_spec(src, S, as, refuse_duplicates, allocator)
-		},
+		build    = edit_of(S).build,
 		validate = edit_of(S).validate,
-		scan     = proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
-			return scan_spec(src, S, as, paths, read, state, on, allocator)
-		},
+		scan     = edit_of(S).scan,
 		write    = write_text,
 		edit     = edit_of(S),
 		plans    = rawptr(plan_as),
@@ -295,6 +291,16 @@ edit_key_text :: proc(_: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bool
 	return appended == nil
 }
 
+// Whether `name` is an ECMAScript 5.1 IdentifierName with no escape under JSON5, which reads it as an unquoted key.
+edit_bare_key :: proc(spec: u8, name: []u8) -> bool {
+	if Spec(spec) != .Json5 || len(name) == 0 {
+		return false
+	}
+	end := ([^]u8)(raw_data(name))[len(name):]
+	q, esc, kind := ident5(raw_data(name), end)
+	return kind == .None && !esc && q == end
+}
+
 // Returns JSON's comment spelling for `spec`. It is `//` for the specs whose grammar has comments, and none for
 // strict JSON. A line body holding a line end is written as a block comment, so the spec's line ends are the only
 // shape rule.
@@ -302,6 +308,6 @@ edit_separators :: proc(doc: ^core.Document, spec: u8) -> bool {
 	return Spec(spec) == .Json5 && Spec(doc.as.spec) != .Json5
 }
 
-edit_comment :: proc(doc: ^core.Document, spec: u8) -> (core.Comment_Spelling, u8) {
-	return .Line if Spec(spec) == .Jsonc || Spec(spec) == .Json5 else .None, 0
+edit_comment :: proc(doc: ^core.Document, spec: u8) -> core.Comment_Syntax {
+	return core.SLASH_COMMENTS if Spec(spec) == .Jsonc || Spec(spec) == .Json5 else {}
 }

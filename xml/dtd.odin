@@ -117,7 +117,7 @@ Dtd_View :: struct {
 }
 
 // A reference the walk entered: it reads the literal of `entity` and resumes at `resume`, before `end`, when the
-// literal ends. `at` is the reference's `&`. `depth` and `tag_lo` are the open count and the start tag of the element
+// literal ends. `at` is the reference's `&`. `depth` and `tag` are the open count and the start tag of the element
 // around the reference, which the literal must close as it found.
 @(private)
 Entity_Frame :: struct {
@@ -125,7 +125,7 @@ Entity_Frame :: struct {
 	end:    [^]u8,
 	at:     [^]u8,
 	depth:  u64,
-	tag_lo: u64,
+	tag:    [^]u8,
 	entity: u32,
 }
 
@@ -373,6 +373,64 @@ dtd_attr :: proc "contextless" (d: ^Dtd, a: Attr_Decl) -> u32 {
 	d.built.attrs += 1
 	dtd_refresh(d)
 	return i
+}
+
+// A copy of the sealed DTD `d` on the default heap, nil when memory runs out. A walk copies its DTD only between
+// references, where no entity frame is open.
+@(private)
+dtd_clone :: proc "contextless" (d: ^Dtd) -> ^Dtd {
+	c := (^Dtd)(runtime.heap_alloc(size_of(Dtd), false))
+	if c == nil {
+		return nil
+	}
+	c^ = d^
+	c.stack, c.stack_cap = nil, 0
+	c.block = ([^]u8)(runtime.heap_alloc(d.block_n, false))
+	if c.block == nil {
+		runtime.heap_free(c)
+		return nil
+	}
+	intrinsics.mem_copy_non_overlapping(c.block, d.block, d.block_n)
+	c.view = dtd_view(c.block[:c.block_n])
+	return c
+}
+
+// Makes the sealed DTD `to` a copy of `from` in the block `to` holds, false when its size differs.
+@(private)
+dtd_copy :: proc "contextless" (to, from: ^Dtd) -> bool {
+	if to.block == nil || to.block_n != from.block_n {
+		return false
+	}
+	block, stack, stack_cap := to.block, to.stack, to.stack_cap
+	to^ = from^
+	to.block, to.stack, to.stack_cap = block, stack, stack_cap
+	intrinsics.mem_copy_non_overlapping(block, from.block, from.block_n)
+	to.view = dtd_view(block[:to.block_n])
+	return true
+}
+
+// Takes `delta` off every offset of the text the sealed tables `v` hold.
+@(private)
+dtd_shift :: proc "contextless" (v: Dtd_View, delta: u64) {
+	shift :: #force_inline proc "contextless" (x: ^u64, delta: u64) {
+		x^ = x^ - delta if x^ >= delta else 0
+	}
+	if v.head == nil {
+		return
+	}
+	shift(&v.head.subset_lo, delta)
+	shift(&v.head.subset_hi, delta)
+	for &e in v.entities {
+		if .Stored not_in e.flags {
+			shift(&e.text_lo, delta)
+		}
+		if .Lit_Stored not_in e.flags {
+			shift(&e.lit_lo, delta)
+		}
+	}
+	for &a in v.attrs {
+		shift(&a.fact_lo, delta)
+	}
 }
 
 // The replacement text of entity `e`.

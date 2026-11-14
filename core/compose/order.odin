@@ -206,7 +206,7 @@ order_inline_text :: proc(cx: ^Compose, e: core.Edit, after: []u8) -> (line, ok:
 	n := fact_count(e)
 	for i in 0 ..< n {
 		body := fact_body(e, i)
-		closes := bytes.index(body, transmute([]u8)string("*/")) >= 0
+		closes := cx.syntax.close != "" && bytes.index(body, transmute([]u8)cx.syntax.close) >= 0
 		if i < n - 1 && closes {
 			cx.dropped += 1
 			continue

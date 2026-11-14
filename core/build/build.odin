@@ -521,7 +521,8 @@ builder_grow :: #force_no_inline proc "contextless" (h: ^Builder) {
 }
 
 // Handles a fact token out of line. A head comment is held until the value it marks arrives, an inline comment
-// belongs to the last value completed, and a foot belongs to the innermost open container, or to the root at depth 0.
+// belongs to the last value completed, a foot belongs to the innermost open container, or to the root at depth 0, and
+// a directive to the root.
 @(private, cold)
 builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) {
 	node := core.Node_Index(0)
@@ -529,6 +530,7 @@ builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: core.Hook_R
 	#partial switch t.role {
 	case .Comment:
 		pending = true
+	case .Directive:
 	case .Comment_Inline:
 		if h.last == core.NO_NODE {
 			pending = true
@@ -536,8 +538,10 @@ builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: core.Hook_R
 			node = h.last
 		}
 	case .Comment_Foot:
-		open := core.Node_Index(s.b >> 32)
-		if open != core.NO_NODE {
+		// A foot between a key and its value is a markup element's with no child element, so it waits for the value.
+		if a := int(s.a); a > 0 && h.doc.nodes[a - 1].role == .Key {
+			pending = true
+		} else if open := core.Node_Index(s.b >> 32); open != core.NO_NODE {
 			node = open
 		}
 	case:

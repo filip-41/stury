@@ -117,7 +117,8 @@ at_seq_entry :: #force_inline proc "contextless" (p: ^Parser) -> bool {
 	return at(p, p.pos) == '-' && indicator_at(p, p.pos)
 }
 
-// Reads a `%` directive line at the cursor. A `%YAML` names a version and a `%TAG` a handle that tags may then use.
+// Reads a `%` directive line at the cursor and gives it as a `Directive`. A `%YAML` names a version and a `%TAG` a
+// handle that tags may then use.
 @(private)
 read_directive :: proc(p: ^Parser) -> bool {
 	start := p.pos
@@ -169,7 +170,7 @@ read_directive :: proc(p: ^Parser) -> bool {
 		} else if p.pos != lo + 1 {
 			return fault(p, lo, .Bad_Char, .Bad_Directive)
 		}
-		handle := Handle{lo = lo, hi = p.pos}
+		handle := string(p.src[lo:p.pos])
 		if !is_white(at(p, p.pos)) {
 			return fault(p, p.pos, .Bad_Char, .Bad_Directive)
 		}
@@ -185,18 +186,22 @@ read_directive :: proc(p: ^Parser) -> bool {
 			return fault(p, plo, .Bad_Char, .Bad_Directive)
 		}
 		for h in p.handles {
-			if string(p.src[h.lo:h.hi]) == string(p.src[handle.lo:handle.hi]) {
+			if h.handle == handle {
 				return fault(p, lo, .Bad_Char, .Duplicate_Directive)
 			}
 		}
-		handle.plo, handle.phi = plo, p.pos
-		append(&p.handles, handle)
+		append(&p.handles, Handle{handle, string(p.src[plo:p.pos])})
 	case:
 		// A reserved directive: its parameters are skipped.
 		for !at_eol(p) && !comment_here(p) {
 			p.pos = step(p, p.pos) or_return
 		}
 	}
+	hi := p.pos
+	for hi > start && (p.src[hi - 1] == ' ' || p.src[hi - 1] == '\t') {
+		hi -= 1
+	}
+	emit_now(p, core.Token{start, u32(hi - start), .Plain, .Directive, 0}) or_return
 	p.directives = true
 	return finish_line(p, false)
 }

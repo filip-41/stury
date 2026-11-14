@@ -9,6 +9,7 @@ import "core:io"
 import "core:slice"
 import "../spell"
 import core ".."
+import rules "../rules"
 import "../typed"
 
 // The kinds of head a binary tree's `Heads` holds a form for, `HEAD_FORM` bytes each in this order. An argument up to
@@ -595,4 +596,24 @@ sort_written :: proc(w: ^Walker, first: int) {
 	} else {
 		slice.sort_by(entries, proc(a, b: Entry) -> bool {return a.text < b.text})
 	}
+}
+
+// Writes the tag head a binary tree gives a datetime of meaning `m` before its text `text`: tag 0 on an RFC 3339
+// date-time and 1004 on a full-date. `.Own` is the meaning the text spells, a `typed.Datetime`'s. Returns false, and
+// writes nothing, for a text that is no value of its meaning.
+put_date_tag :: proc(out: ^Out, text: string, m: core.Tag_Meaning, $T: Tree) -> bool {
+	number := date_tag_number(text, m) or_return
+	out.cursor += put_head(room(out, 9), number, T, .Tag)
+	return true
+}
+
+@(private)
+date_tag_number :: proc(text: string, m: core.Tag_Meaning) -> (u64, bool) {
+	if _, is_time := rules.date_time_of(text); is_time && (m == .Datetime || m == .Own) {
+		return 0, true
+	}
+	if _, is_date := rules.date_of(text); is_date && (m == .Local_Date || m == .Own) {
+		return 1004, true
+	}
+	return 0, false
 }

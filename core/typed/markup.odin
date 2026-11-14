@@ -58,7 +58,7 @@ element_step :: proc "contextless" (d: ^Document_Read($H), regs: core.Hook_Regs,
 	// A struct's record reads an element as an object. It collects no repeated child, so a repeat is the struct's.
 	structured := fld.kind == .Struct || fld.kind == .Required
 	if fld.kind != .Checked && !structured {
-		return hook_spelled(h, regs, typed_text(h, fld, t))
+		return text_hook(h, regs, typed_text(h, fld, t))
 	}
 	l: ^rules.Leaf
 	when H == Check {
@@ -92,7 +92,7 @@ element_step :: proc "contextless" (d: ^Document_Read($H), regs: core.Hook_Regs,
 	if !no_text(t) {
 		key := core.Token{lo = t.lo, kind = .String, role = .Key, spelling = TEXT_KEY}
 		if next, action = hook(h, next, key); action == .Next {
-			next, action = hook_spelled(h, next, typed_text(h, field_at(next.b), t))
+			next, action = text_hook(h, next, typed_text(h, field_at(next.b), t))
 		}
 		if action == .Stop {
 			return next, action
@@ -104,8 +104,9 @@ element_step :: proc "contextless" (d: ^Document_Read($H), regs: core.Hook_Regs,
 
 // The text `t` of an element as the record `fld` reads it. A `Plain` text has no kind, which a `Checked` record's
 // leaf picks. A record of a type reads it by that type, as a delimited cell is read by its column's: a number where the
-// type is a number and the text is exactly a JSON number, `true` and `false` where the type is a boolean, and a string
-// anywhere else. A union reads it as `infer` does, an empty text as null.
+// type is a number and the text, decoded, is exactly a JSON number, `true` and `false` where the type is a boolean, and
+// a string anywhere else. A number whose text needs a decode stays `Plain`, which `text_hook` reads. A union reads a
+// text as `infer` does, an empty text as null.
 @(private)
 typed_text :: proc "contextless" (h: ^Reader, fld: ^Field, t: core.Token) -> core.Token {
 	t := t
@@ -115,7 +116,11 @@ typed_text :: proc "contextless" (h: ^Reader, fld: ^Field, t: core.Token) -> cor
 	t.kind = .String
 	#partial switch fld.kind {
 	case .I8 ..= .F64:
-		text_number(h, &t)
+		if t.spelling & core.SPELLING_DECODE == 0 {
+			text_number(h, &t)
+		} else if decodes_to_number(h, t) {
+			t.kind = .Plain
+		}
 	case .Bool:
 		text_bool(h, &t)
 	case .Union:
@@ -128,8 +133,8 @@ typed_text :: proc "contextless" (h: ^Reader, fld: ^Field, t: core.Token) -> cor
 	return t
 }
 
-// Makes the text `t` a number when it is exactly a JSON number. A number's digits are its span, so a text that needs a
-// decode is none.
+// Makes the text `t` a number when it is exactly a JSON number. A `Number` token's digits are its span, so a text that
+// needs a decode is none here.
 @(private)
 text_number :: proc "contextless" (h: ^Reader, t: ^core.Token) -> bool {
 	if t.spelling & core.SPELLING_DECODE != 0 {
@@ -142,6 +147,27 @@ text_number :: proc "contextless" (h: ^Reader, t: ^core.Token) -> bool {
 		h.mant = fold_digits(h.src, t^)
 	}
 	return ok
+}
+
+// Whether the text `t`, decoded, is exactly a JSON number.
+@(private)
+decodes_to_number :: proc "contextless" (h: ^Reader, t: core.Token) -> bool {
+	buf: [TEXT_ROOM]u8 = ---
+	text, ok := decoded_text(h, t, buf[:])
+	_, _, _, number := spell.number_shape_strict(transmute([]u8)text, 0, u64(len(text)))
+	return ok && number
+}
+
+// Hooks the text `t` as `typed_text` read it. A `Plain` text at a number's record decodes to a number, which only
+// `number_cold` reads.
+@(private)
+text_hook :: #force_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	if t.kind == .Plain {
+		if fld := field_at(regs.b); fld.kind >= .I8 && fld.kind <= .F64 {
+			return spelled_number(h, regs, t)
+		}
+	}
+	return hook_spelled(h, regs, t)
 }
 
 // Makes the text `t` a boolean when it is `true` or `false`.
@@ -381,7 +407,7 @@ feed_attributes :: proc(d: ^Document_Read($H), regs: core.Hook_Regs, at: core.No
 		}
 		next, action := hook(&d.reader, regs, name)
 		if action == .Next {
-			next, action = hook_spelled(&d.reader, next, typed_text(&d.reader, field_at(next.b), value))
+			next, action = text_hook(&d.reader, next, typed_text(&d.reader, field_at(next.b), value))
 		}
 		if action == .Stop {
 			return next, action

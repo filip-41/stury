@@ -257,7 +257,7 @@ for opt in ("-V", "--version", "-h", "--help", "--build-configuration"):
     check(opt, 0, None, opt)
 re.search(r"(?m)^      --from format", usage) or fail("--help lists --from", "")
 re.search(r"docs/cli.md in stury.s source", usage) or fail("--help points to docs/cli.md", "")
-text(run("-h")[1]).startswith("stury - command-line JSON and CSV processor [version ") or fail("-h", "")
+text(run("-h")[1]).startswith("stury - command-line JSON, YAML, TOML, XML, HTML, CSV and CBOR processor [version ") or fail("-h", "")
 code, _, err, _ = run("-f")
 code == 2 and text(err).splitlines()[-1:] == ["For listing the command options, use stury --help."] or fail("-f with no file", f"exit {code}")
 

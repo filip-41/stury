@@ -209,7 +209,7 @@ key_is :: proc "contextless" (doc: ^core.Document, i: core.Node_Index, name: str
 
 // XML's `Readers.attribute`: the name of attribute fact `f` as a `Key` and its value as a `Plain`, the bytes between
 // its quotes, which have no kind as an element's text has none. A value with a reference, a tab or a line end, and one
-// of a declared type that is not `CDATA`, is decoded by `token_decode`.
+// of a declared type that is not `CDATA`, is decoded by `token_text`.
 @(private)
 spelling_attribute :: proc "contextless" (doc: ^core.Document, f: core.Fact) -> (name, value: core.Token) {
 	n, v := attribute_parts(doc.src, f)
@@ -236,10 +236,8 @@ collapsed :: proc "contextless" (value: []u8) -> bool {
 
 // The facts XML names for node `i`, the value of an element or the document. The name is the key before the value.
 @(private)
-spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Name) -> (core.Fact_Value, bool) {
-	switch name {
-	case .Tag, .Anchor, .Alias, .Style:
-		return {}, false
+spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Kind) -> (core.Fact_Value, bool) {
+	#partial switch name {
 	case .Name, .Content:
 		return core.markup_fact(doc, i, name)
 	case .Namespace:

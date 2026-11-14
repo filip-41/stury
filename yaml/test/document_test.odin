@@ -187,9 +187,9 @@ a_stream_judged_on_threads_gives_the_serial_fault :: proc(t: ^testing.T) {
 			}
 			text := b[:]
 			whole := yaml.validate(text, .Yaml_1_2)
-			serial, _ := records.check(text, yaml.as(.Yaml_1_2), .Concatenated, context.temp_allocator)
+			serial, _ := records.validate(text, yaml.as(.Yaml_1_2), .Concatenated, context.temp_allocator)
 			for &pool in pools {
-				got, _ := records.check(text, yaml.as(.Yaml_1_2), .Concatenated, context.temp_allocator, &pool.runner)
+				got, _ := records.validate(text, yaml.as(.Yaml_1_2), .Concatenated, context.temp_allocator, &pool.runner)
 				testing.expectf(t, slice.equal(got, serial), "%q at width %d: %v, want %v", string(text), pool.runner.threads + 1, got, serial)
 				v := records.validate_parallel(text, yaml.as(.Yaml_1_2), &pool.runner)
 				testing.expectf(t, v == walktest.fault_of(whole), "%q at width %d: %v, want %v", string(text), pool.runner.threads + 1, v, whole)
@@ -383,5 +383,41 @@ style_names_how_a_node_is_written :: proc(t: ^testing.T) {
 		i, _ := core.member(&doc, core.ROOT, name)
 		style, ok := core.fact_value(&doc, i, .Style)
 		testing.expectf(t, ok && style.text == want[k], "%s is %s, got %s", name, want[k], style.text)
+	}
+}
+
+// A collection whose last children are aliases ends past their names, not where the nodes they name end.
+@(test)
+a_collection_ending_in_aliases_spans_its_own_text :: proc(t: ^testing.T) {
+	cases := [][2]string {
+		{"a: &b [2, 3]\nc: [1, *b]\n", "[1, *b]"},
+		{"a: &b [2, 3]\nc: {y: 1, z: *b}\n", "{y: 1, z: *b}"},
+		{"a: &b 1\nc: [1, *b]\n", "[1, *b]"},
+		{"a: &b {k: 1}\nc:\n  y: 1\n  z: *b\nd: 2\n", "y: 1\n  z: *b"},
+		{"a: &b 1\nc:\n- 1\n- *b # tail\n- *b\nd: 2\n", "- 1\n- *b # tail\n- *b"},
+		{"a: &b 1\nc: [*b, *b ]\n", "[*b, *b ]"},
+		{"c: [[&b 1, 2], *b]\n", "[[&b 1, 2], *b]"},
+		{"a: &b 1\nc:\n  *b : *b\n", "*b : *b"},
+	}
+	for c in cases {
+		doc, err := yaml.build(transmute([]u8)c[0], .Yaml_1_2)
+		defer core.destroy(&doc)
+		walktest.expect_nil(t, err)
+		v, _ := core.member(&doc, core.ROOT, "c")
+		testing.expect_value(t, string(core.span(&doc, v)), c[1])
+		for i in 0 ..< len(doc.nodes) {
+			_ = core.span(&doc, core.Node_Index(i))
+		}
+	}
+	merged := [][2]string {
+		{"b: &b {x: 1}\nc:\n  <<: *b\n  y: 3\nd: 1\n", "<<: *b\n  y: 3"},
+		{"b: &b {x: 1}\nc: {y: *b, <<: [*b, {w: 0}]}\n", "{y: *b, <<: [*b, {w: 0}]}"},
+	}
+	for c in merged {
+		doc, err := core.build(transmute([]u8)c[0], yaml.as(.Yaml_1_2, {merge_keys = true}))
+		defer core.destroy(&doc)
+		walktest.expect_nil(t, err)
+		v, _ := core.member(&doc, core.ROOT, "c")
+		testing.expect_value(t, string(core.span(&doc, v)), c[1])
 	}
 }

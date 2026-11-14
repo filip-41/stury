@@ -15,7 +15,7 @@ import json "../../../json"
 
 // The library's value, with the readers and builders the interpreter uses from it under their own names.
 Value :: core_pkg.Value
-Number_Text :: core_pkg.Number_Text
+Number_View :: core_pkg.Number_View
 Array :: core_pkg.Array
 Object :: core_pkg.Object
 Ref :: core_pkg.Node_Ref
@@ -36,8 +36,15 @@ reindex :: core_pkg.reindex
 make_room :: core_pkg.make_room
 plain :: core_pkg.plain
 number_text :: core_pkg.number_text
+view_text :: core_pkg.view_text
+number_view :: core_pkg.number_view
+view_copy :: core_pkg.view_copy
+view_f64 :: core_pkg.view_f64
+held_f64 :: core_pkg.held_f64
+NUMBER_HELD :: core_pkg.NUMBER_HELD
 comments :: core_pkg.comments
 noted :: core_pkg.noted
+attributes_value :: core_pkg.attributes_value
 rewrap :: core_pkg.rewrap
 number_f64 :: core_pkg.number_f64
 text_f64 :: core_pkg.text_f64
@@ -93,7 +100,7 @@ kind :: proc(v: Value) -> Kind {
 		return .Null
 	case bool:
 		return .True if x else .False
-	case f64, ^Number_Text:
+	case f64, Number_View:
 		return .Number
 	case string:
 		return .String
@@ -226,11 +233,11 @@ node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Value {
 	if !is_literal {
 		return num(f)
 	}
-	// Digits the format spelled into `room` are kept in a copy.
+	// Digits the format spelled into `room` are kept in a copy. The others lie outside it, in the place they are written.
 	if at := uintptr(raw_data(lit)); at >= uintptr(&room[0]) && at < uintptr(&room[0]) + len(room) {
-		lit = strings.clone(lit)
+		return number_text(lit)
 	}
-	return number_text(lit)
+	return number_view(string(([^]u8)(rawptr(raw_data(lit)))[:len(lit)]), 0)
 }
 
 // The literal of number node `i` as `node_number` reads it, or its double when JSON cannot write it. The digits of a
@@ -261,8 +268,10 @@ number_of :: #force_inline proc(v: Value) -> (Num, bool) {
 	#partial switch x in v {
 	case f64:
 		return {f = x}, true
-	case ^Number_Text:
-		return {x.double, x.text}, true
+	case Number_View:
+		if f, held := held_f64(x); held {
+			return {f, view_text(x)}, true
+		}
 	}
 	return other_number(v)
 }
@@ -301,7 +310,7 @@ length_of :: proc(v: Value) -> int {
 		return n
 	case ^Commented:
 		return length_of(x.v)
-	case nil, bool, f64, ^Number_Text, string:
+	case nil, bool, f64, Number_View, string:
 	}
 	return 0
 }
@@ -340,7 +349,7 @@ index_shared :: proc(v: Value) {
 		}
 	case ^Commented:
 		index_shared(x.v)
-	case nil, bool, f64, ^Number_Text, string, Path:
+	case nil, bool, f64, Number_View, string, Path:
 	}
 }
 
@@ -369,7 +378,7 @@ array_at :: proc(v: Value, i: int) -> Value {
 		return s.key
 	case ^Commented:
 		return array_at(x.v, i)
-	case nil, bool, f64, ^Number_Text, string, ^Object:
+	case nil, bool, f64, Number_View, string, ^Object:
 	}
 	return nil
 }
@@ -394,7 +403,7 @@ object_get :: proc(v: Value, k: string) -> (Value, bool) {
 		return Ref{x.doc, node}, true
 	case ^Commented:
 		return object_get(x.v, k)
-	case nil, bool, f64, ^Number_Text, string, ^Array, Path:
+	case nil, bool, f64, Number_View, string, ^Array, Path:
 	}
 	return nil, false
 }
@@ -522,12 +531,53 @@ repeats_key :: proc(r: Ref) -> bool {
 	return false
 }
 
+// An array of document nodes that a sort or a group made reads them in an order unrelated to their text, so a member's
+// node is fetched 2 * FETCH_AHEAD members before it is read and the first bytes of its text FETCH_AHEAD members before,
+// all of the first ones at once.
+@(private = "file")
+fetch_ahead :: #force_inline proc(items: []Value, i: int) {
+	if i == 0 {
+		for j in 1 ..< min(len(items), 2 * FETCH_AHEAD) {
+			fetch_node(items[j])
+		}
+		for j in 1 ..< min(len(items), FETCH_AHEAD) {
+			fetch_text(items[j])
+		}
+	}
+	if i + 2 * FETCH_AHEAD < len(items) {
+		fetch_node(items[i + 2 * FETCH_AHEAD])
+	}
+	if i + FETCH_AHEAD < len(items) {
+		fetch_text(items[i + FETCH_AHEAD])
+	}
+}
+
+@(private = "file")
+fetch_node :: #force_inline proc(v: Value) {
+	if r, is_ref := v.(Ref); is_ref {
+		intrinsics.prefetch_read_data(&r.doc.nodes[r.node], 3)
+		intrinsics.prefetch_read_data(&r.doc.nodes[min(int(r.node) + 8, len(r.doc.nodes) - 1)], 3)
+	}
+}
+
+@(private = "file")
+fetch_text :: #force_inline proc(v: Value) {
+	if r, is_ref := v.(Ref); is_ref && len(r.doc.src) > 0 {
+		at := r.doc.nodes[r.node].lo
+		intrinsics.prefetch_read_data(&r.doc.src[min(at, u64(len(r.doc.src) - 1))], 3)
+		intrinsics.prefetch_read_data(&r.doc.src[min(at + 64, u64(len(r.doc.src) - 1))], 3)
+	}
+}
+
+FETCH_AHEAD :: 8
+
 next_member :: #force_inline proc(it: ^Members) -> (key: string, v: Value, ok: bool) {
 	for it.i < it.n {
 		i := it.i
 		it.i += 1
 		switch x in it.v {
 		case ^Array:
+			fetch_ahead(x.items[:], i)
 			return "", x.items[i], true
 		case Path:
 			a := path_array((^Path_Step)(x)) // made at the first member, read as an array from then on
@@ -551,7 +601,7 @@ next_member :: #force_inline proc(it: ^Members) -> (key: string, v: Value, ok: b
 			vn = it.last[k]
 			it.last[k] = 0
 			return k, Ref{x.doc, vn}, true
-		case nil, bool, f64, ^Number_Text, string, ^Commented: // `iterate` takes off a `^Commented`
+		case nil, bool, f64, Number_View, string, ^Commented: // `iterate` takes off a `^Commented`
 		}
 	}
 	return "", nil, false

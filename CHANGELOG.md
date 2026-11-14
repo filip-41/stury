@@ -4,9 +4,116 @@
 
 ### Command line
 
+- `-s` over a long CSV or TSV table builds it on the pool's threads, as the library's `records.build` does. `--threads 1`
+  builds it on the calling thread.
+
+- `fmt` refuses with exit 5 a value its output format cannot hold, as `fmt --from csv --to xml` a record, where it
+  wrote nothing and exited 0.
+- A tag keeps its meaning across formats: a TOML datetime is written as a YAML `!!timestamp` and as a CBOR tag 0 or
+  1004 on its text, a YAML `!!timestamp` and a CBOR tag 0 or 1004 as a TOML datetime, a YAML `!!binary` as a CBOR
+  byte string and a CBOR tag 34 text as `!!binary`. A text the output does not spell as its type stays a string, and a
+  YAML or CBOR tag it had counts as dropped. A tagged YAML scalar written from another format is plain where it fits.
+  A filter's output keeps the meanings too: `--from toml --to cbor '.x = 1'` writes the datetimes as tags 0 and 1004.
+- `stury edit --from cbor` sets a tag: `.a.@tag = 32` writes tag 32 before the item.
+- A comment has one place in every format: a comment above a container's first member is that member's (an XML or
+  HTML comment before an element's first child is the child's, a YAML comment above a nested mapping's first key is
+  the key's), a comment in an XML or HTML element with no child element is its `.@comment_foot`, and the comments at
+  the head of a YAML or TOML text, or in an XML or HTML prolog, are the root's up to the last blank line and the first
+  member's after it. A TOML text's last comments are the foot of the table open at its end. A conversion writes a
+  blank line after the root's head comments, so they read back where they were.
+- `stury edit` writes a new `.@comment` of an XML or HTML element before the element, and a new `.@comment_foot` in
+  an element that holds only text. A YAML edit that sets a comment and inserts a commented member writes the comment
+  once.
+- `--to xml` keeps an HTML document's `<!DOCTYPE html>`, keeps an inline comment on its element's line, and writes an
+  element's foot comments on a line after its last child.
+- A JSON5 or YAML number with a point and no digit after it, as `5.` or `+1.`, is a float, is written `5.0` and stays a
+  float in every output format, CBOR included. A typed read into an integer refuses it, as it refuses `5.0`.
+- A TOML decimal with underscores equals its digits (`1_000 == 1000`), and a hex, octal or binary integer with
+  underscores its decimal (`0xdead_beef == 3735928559`), where both compared false. An edit leaves such a number,
+  and a hex one spelled with `E`, as written when the filter keeps its value.
+- A conversion writes a JSON5 or TOML number spelled with a sign, a lone point or underscores (`+1`, `.5`, `1_000`)
+  to YAML, TOML and CBOR, where it refused it as a value the format cannot hold.
+- An edit of TOML, YAML or CBOR reads its output back as an integer or a float as the value was, and refuses a text
+  where one became the other.
+- A conversion keeps a number's spelling where the output's grammar has it: a hex integer between TOML, YAML and
+  JSON5, an octal one between TOML and YAML, a leading `+` in all three, and `.5` and `5.` between YAML and JSON5.
+  `.@style` reads `hex` or `octal` for such an integer in YAML and names a JSON5 number's form as TOML does.
+- `fmt` of YAML to YAML keeps the `%YAML` and `%TAG` lines and an explicit `---` or `...`, and of XML to XML the
+  declaration. `.@directives` reads them, an array. No other format writes them, and a conversion counts none dropped.
+- TOML keeps its layout through `fmt` and a filter: an inline table stays in line, dotted keys stay dotted and a
+  section stays a section, and `.@style` names a table's layout `flow`, `dotted` or `block`. A YAML flow mapping is
+  written as an inline table, and an inline table or array as a YAML flow collection.
+- A write of `.@directives` is the error `A markup name, namespace, content, instruction, doctype or document marker
+  cannot be written`.
+- `--from` and `--to` take a spec after a colon where a format has several: `toml:1.0`, `html:fragment`,
+  `cbor:preferred`, `cbor:deterministic`, `cbor:length_first` and the rest of each format's specs.
+- A writer's refusal reads as the library renders it, in the format's words, and `schema sample` whose every drawn
+  value the format cannot write says why the writer refused, not that no value passes.
+- `--stream` reads every format, a CSV or TSV record and an XML or HTML document as the events of the value the reader
+  gives, and `--seq` reads JSONC and JSON5 records.
+- A schema file is read in the format its extension names, or as `schema sample --from` and `schema gen --from` say,
+  and `schema infer --to` and `schema sample --to` write every tree format.
+- `--to json5` writes each value with its comments, and `fmt` reads and writes a JSON5 file as JSON5, `--check` and
+  `--in-place` included.
+- `--from jsonc` and `--from json5` read one text after another in an input, as `--from json` does. `--tab` writes XML
+  and HTML with tabs, `-a` and `-S` work with `--to toml`, and each layout or escape flag a format's writer does not
+  honour is refused, `--tab` for YAML and `-S` for XML and HTML among them.
+- `-a` writes a text an XML input holds in ASCII under `--to xml` too, as it does a computed one.
+- A CSV or TSV input written as a format that refuses a record, `--from csv --to toml .a`, fails the input with the
+  reason, where it printed nothing and exited 0.
+- An edit that writes a fact the format holds none of names the kind, as `toml holds no attribute`, and `schema sample
+  --comments` refuses only a target that holds no comment, so YAML, TOML, XML and HTML are no longer said to have none.
+- A comment converted to another format keeps its spacing: one space after its leading marker is written back, and
+  none is added, so `<!-- head -->` reaches YAML as `# head` and `# head` reaches XML as `<!-- head -->`. A comment
+  whose text holds line ends reaches YAML, TOML, CSV and TSV as one comment line for each of its lines.
+- Several inline comments on one value reach YAML and TOML joined into one at the end of its line, as `a: 1 # a b`,
+  where the second was dropped.
+- `--to yaml` writes an inline comment on a block collection a filter built on its key's line, as `l: # c`, where it
+  went after the collection.
+- A YAML comment on the line of a key whose value is a block collection below it, as `l: # c`, reads as the
+  collection's inline comment, where it read as its lead one, so JSONC to YAML to JSONC keeps it after the collection.
+- `--to html` writes the comments a filter puts on an element, before it, after it or at its end, where it dropped
+  them, and a pretty HTML text puts an element's lead comment on the element's line.
+- Compact YAML output breaks its flow line at a comment, as `{a: 1 # c\n, b: 2}`, where a comment inside a flow
+  collection was dropped.
+- Compact YAML output keeps the inline comment of a root scalar, as `1 # c`, where it dropped it.
+- `stury edit` that sets or inserts a commented value in a flow collection under a block mapping indents the lines
+  after the comment past the block, where the edit was refused.
+- `--to xml` and `--to html` write the comments on an array of repeated elements as a whole on the run's ends: the
+  lead ones before the first element and the rest after the last, where they were dropped. HTML's token write writes a
+  comment in an empty element as the element's foot comment, where it was dropped.
+- `fmt`, and a filter whose output is a node written as YAML, TOML, XML or HTML, say on stderr how many comments, tags
+  or attributes the output format cannot hold and drops, as `json cannot hold 2 comments, tags or attributes of the
+  input, so they are dropped`.
+- `--to yaml`, `--to toml` and `--to xml` write the comments of a value a filter built, as `.a.@comment = "note"` and
+  the comments of the input values it holds.
+- `fmt --from csv --comment C` to YAML or TOML, and a `.` over its records, keep the comment lines: each record's above
+  its document, the lines before the header above the first and those after the last record below the last.
+- `--to toml` keeps a comment on an array element and on a `[table]` header line: an array with such a comment is
+  written one element a line. `--to yaml` writes an empty collection's comment on a line of its own between its
+  brackets, where it reads back as the collection's.
+- `--to html` writes the comments of an empty array as the foot of the element that holds it, and YAML's token write
+  puts a comment in an empty collection between its brackets, where it reads back as the collection's foot.
 - `css(selector)` gives each element of an XML or HTML input that a CSS selector matches, in document order, and is a
   path expression, so `path(css("a"))`, `css("a").&href |= ...`, `del(css(".ad"))` and `stury edit` reach the matched
   elements alone ([Builtins beyond jq](docs/cli.md#builtins-beyond-jq)).
+- `css(selector)` selects from the value an update made of an XML or HTML input, so `css("a").&href = "y" |
+  del(css(".ad"))` works in either order and with `|=`, path edits and reads between, in a filter and in `stury
+  edit`. An element an update replaces or rebuilds keeps its name and attributes for `.@name`, `.&a`, `.@attrs` and
+  `css`, as `stury edit` already wrote them: `.r.c = 1 | .r.&k` reads `r`'s attribute `k`.
+- `--to xml` and `--to html` after an update of an XML or HTML input keep the attributes of every element the update
+  left alone, and the name and attributes of one it replaced, with the attributes it wrote: `.r.c |= "C"` writes
+  `<r k="v"><c a="1">C</c>...` where it wrote `<r><c>C</c>...` before.
+- `--to xml` writes the comments a filter wrote on a value (`.r.a.@comment = ["n"]`), and `--to xml` and `--to html`
+  write the comments of an element an update replaced with the value it put there: `.r.a |= "9"` keeps the comments
+  before and after `a`.
+- Compact (`-c`) XML writes no empty line between an inline comment and a foot comment after it, and compact HTML starts
+  a foot comment that follows a child element on a new line, so it reads back as the foot and not as that element's.
+  A compact write of an XML document does the same for the foot of its own elements.
+- Pretty HTML writes an element's foot comment on a line of its own at the indent of its members, and the end tag on the
+  line after it, where the end tag followed the comment on its line.
+- An insert into a JSON, JSONC or JSON5 object with one member on its line spaces the new member as the member spaces
+  its value from its key: `{host: "a"}` with `.tls = true` is `{host: "a", tls: true}`.
 - Builtins beyond jq: `avg`, `median`, `quantile`, `variance` and `stddev` (population) over an array or `f` of each
   element, `frequency`, `union`, `intersect` and `except`, `fill_forward`, `melt` and `pivot`; `fromrfc3339` and
   `torfc3339`; the digests `sha1`, `sha256`, `sha512` and `md5`, `hmac_sha256(key)`, `hmac_sha512(key)` and `crc32`;
@@ -34,7 +141,7 @@
 - `--from cbor` reads each item of an RFC 8742 sequence as an input, in any serialization, and `--to cbor` writes CBOR
   in its preferred serialization. A byte string reads as its base64 and a byte string key as its bytes. `check`,
   `check --schema`, `fmt`, `edit`, `diff` and `schema infer` take it, an edit keeps the bytes of every item it does not
-  reach, and `--follow` is refused.
+  reach, and `--follow` answers each item as it is appended.
 - `--alias-limit N` and `--merge-keys` set how `--from yaml` reads: the bytes aliases may read again, and `<<` as
   YAML 1.1's merge key. `--expansion-limit N` and `--unread-entities` set how `--from xml` reads: the bytes entity
   references may expand to, and a reference to an entity no declaration stury read names, read as its own text.
@@ -218,6 +325,30 @@
   literal, and an infinity, are no longer equal to a literal they round to.
   A JSON5 decimal written with a sign or a point is compared by its digits, and a CSV or TSV cell is a string in these
   comparisons.
+- `edit --diff` and `diff` of an XML or HTML input no longer crash when a repeated element name becomes one
+  element or one goes: the change keeps the array it was.
+- `check --filter` no longer panics on a member read from a schema of several enums or constants of objects.
+- An HTML edit of an element left open where the tree starts to ignore tokens keeps those tokens, in every insertion
+  mode: `.html.body.select.option = "X"` on `<select><option>a</body></html>` keeps `</body></html>`, and so do a
+  cell, a caption, a template, an svg or math element, and a `p` past a stray end tag. The text past them is the
+  element's: a value that ends with it keeps it, and any other value removes it, so `.html.body.p |= ascii_upcase` on
+  `<p>a</body></html>\n` writes `<p>A</body></html>\n` and `.html.body.p = "X"` writes `<p>X</body></html>`. A second
+  end tag of the body or the document, and a comment after them, no longer move where an open element ends.
+  A comment the element takes past those tokens is its foot, and the tokens stay before it.
+- An HTML edit keeps the ignored end tags before white space that the tree reads into a reopened formatting element
+  or into a cell: `.html.body.ul = "Z"` on `<ul><li><b>ab</li></td>\n` writes `<ul>Z</td>`, where it removed `</td>`.
+  An edit that takes away the select or table those tags were ignored in writes the value whole and cuts the white
+  space after them, where it was refused (exit 5): `.html.body.ul.li = "Z\n"` on
+  `<ul><li><select><option>b</ul>\n</html>` writes `<ul><li>Z\n</ul></html>`.
+- An edit's result is read back and compared, as values, with the document the edits make, in every format: one that
+  reads back as other values is refused (exit 5), where it was written.
+- `fmt --from yaml` and a YAML edit keep a folded block scalar folded, where it was written as a literal one.
+- `stury --help`, the manual page and docs/cli.md name every format stury reads.
+- docs/cli.md and docs/guide.md say which schemas `check --schema` and `load_schema` refuse: a reference to
+  anything outside the schema, the drafts' meta-schemas and the files under `--schema-ref`, since neither reads the
+  network.
+- A float keeps a point where a format tells floats from integers: `edit '.a = 1.0'` writes `a = 1.0` to TOML and
+  `a: 1.0` to YAML over a source `1`, and a CBOR float converts to TOML or YAML as `1.0`, where they wrote `1`.
 
 ### Formats
 
@@ -349,6 +480,100 @@ The hooks the formats share:
 
 ### Library API
 
+- `records.build` of a long CSV or TSV table with a `runner` builds its rows in pieces on the runner's threads and
+  joins them into the document a build on one thread gives. `Record_Docs.joined` completes a format's joined document.
+- `core.equal`, `core.compare` and the writers read a TOML number with underscores, or a JSON5 or TOML number with a
+  sign or a lone point, by its value: `core.json_decimal` spells such a decimal as JSON does, and `core.double_of`
+  returns those digits.
+- `core.same_number_type` and `core.same_number_types` tell whether two numbers are both integers or both floats by
+  their spelling, and `core.reads_back_as`, which `reads_as_edited` and the commit's read-back use, refuses an integer
+  for a float in a format whose `Readers.floats_apart` says the two are apart: TOML, YAML and CBOR.
+- An XML stream under `.Entries` gives each member once the window holds the next element end past it, and the window follows
+  the members, where it grew to the whole input before the first record. A DTD that declares an entity or an
+  attribute list stays at the window's start, as `records.Reader.pin` bytes a move keeps, and `records.shifted` gives
+  a window offset after a move.
+- A YAML or XML record under `.Entries` given before the last builds, in memory and while a stream's window holds its
+  bytes, where it was `.Bad_Index`. `records.Entry_Op.Clone` copies a format's paused walk.
+- A stream under `.Entries` whose walk cannot copy what it keeps of the window ends its records with `.No_Memory` after
+  the record given, where it kept the whole window.
+- `core.Value` has a `Number_View` case: a number's digits held in the value, without the allocation of a
+  `Number_Text`, its double read from them at each use. `number_view` makes one and `view_text` gives its digits. jq's
+  `tonumber` makes one, so it allocates nothing.
+- `core.Value` holds a number's digits as a `Number_View` (`^Number_Text` is no longer one of its cases): the digits
+  in place, read at each use (`number_view`), or a copy after their double (`number_text`, `NUMBER_HELD`). `view_text`,
+  `view_f64`, `held_f64` and `view_copy` read and copy one. `Number_Text` stays the typed target for a number's digits.
+  jq's `tonumber` and a number read from a document allocate nothing.
+- `Comment_Syntax` replaces `Comment_Spelling` and its comment byte: `Edit_Services.comment` returns a format's line and
+  block comment markers (`SLASH_COMMENTS`, `HASH_COMMENTS`, `MARKUP_COMMENTS`), and every edit spells a comment with
+  them.
+- `cbor.marshal` writes a `typed.Datetime` after tag 0 (a date and time with an offset) or 1004 (a date). A
+  `write.Tagged_Text` carries its tag's `meaning`, which every token writer spells.
+- `core.Tag_Meaning` is what a tag says its value is, read alike in every format: `Fact_Value.meaning` of a `.Tag`,
+  which `Readers.tag_meaning` gives for a format whose tags are spans. `Fact_Value.span` says a fact span holds the
+  value. `core.write` spells a meaning as the output's tag, and `rules.date_of` judges an RFC 3339 `full-date`.
+- `Role.Directive` and `Fact_Kind.Directive` are a document marker on the root: YAML's `%` lines and explicit `---`
+  and `...`, and the XML declaration. A write in the document's own format keeps them, and none counts in `dropped`.
+  `write.holds_inner_fact` tells whether a collection holds a fact of a node below it or a foot comment.
+- An XML or HTML element text or attribute whose decode is exactly a JSON number, as an XML entity `&e;` that the DTD
+  defines as `7` or an HTML `&#55;`, reads into a number field in `unmarshal`, `check` and `records.read`, with the
+  sign of its decode.
+- A YAML or XML member under `.Entries` builds in its place, so it reads as the whole text reads it: a YAML alias to
+  an earlier member's anchor and a `%TAG` handle, an XML prefix an ancestor declares and the DTD's entities and
+  attribute defaults no longer refuse. `records.read` under `.Entries` reads a YAML, TOML, XML, HTML or CBOR member
+  through its document.
+- A CBOR stream under `.Entries` gives each record as it reads it, and keeps no more than a member past the last
+  record. An XML cursor holds the tokens past a stop up to the end of the element it stopped in, not to the text's
+  end, so an XML reader under `.Entries` holds one member's tokens at a time. A yaml, cbor or xml `Cursor` takes an
+  `allocator` for what it holds.
+- A YAML stream under `.Entries` gives each record once the window holds the bytes its walk judged it by, and keeps
+  no more than a member past the last record, the `%TAG` directives and the nodes of the anchors an alias may still
+  name, where it held the whole input. Under `merge_keys` it keeps the members a `<<` holds too, until their mapping
+  closes.
+- The token write's `comment(t, text, role)` writes a lead, inline or foot comment in JSONC, JSON5, YAML, TOML, XML and
+  HTML, and is `.Unsupported` in a format that writes none. `write_value` writes a built value's comments, and
+  `Token_Spelling.comment` takes the write and the role.
+- YAML, TOML, XML, HTML and CBOR read records under `.Entries`, and their `records_open` takes `entries` as
+  `json.records_open` does: the records are the members of the container the path names. YAML, XML and CBOR give each
+  member as the walk reads it and a fault after the members before it, and TOML and HTML read their tree first. On a
+  stream the records of these formats come at the input's end.
+- `core.Capabilities.framings` names the framings a format's records open in, `.Entries` among them in every tree
+  format.
+- `records.Framing_Services.closed` says a framing's record is whole where a stream's window ends, so a CBOR stream
+  gives an item once its last byte has come, not once the next item starts.
+- `json.edit_spell`, `dsv.edit_spell`, `toml.number_spelling_of`, `cbor.number_text`, `yaml.build_as`, `yaml.ALIAS_FLOOR`,
+  `yaml.ALIAS_RATIO`, `xml.cursor_destroy` and `html.cursor_destroy` are private: `destroy` frees a markup cursor.
+- `text` and `number` read a node in every format, as `core.text` and `core.number` do. The token decoders that json,
+  dsv, toml, yaml and cbor called `text` and `number` are `token_text` and `token_number`, which xml and html now have too,
+  and the format forwarders of `core.token_text` are cut.
+- The write options of every format's `write` are named `write`, as in `marshal` and `tokens_init`.
+- `plan_of` is in every format, and `xml.unmarshal` and `html.unmarshal` take a plan from `plan_make`, whose `reads` they
+  take as the other formats do.
+- `tokens_init(t, spec, opts, write, allocator, stream)` and `writer_init(wr, w, spec, opts, framing, write, allocator)` take
+  one shape in every format: the format's `Options` as `opts` and the `Write_Options` as `write`. json, dsv and toml gain
+  `tokens_init`, toml, xml, yaml, cbor and html take a spec in `writer_init`, and dsv's `layout` is `opts`. Every format
+  forwards the token write's `close`, `comment`, `end_record` and `tokens_finish`, and `tokens_close` is gone.
+  `yaml.records_open_stream` and `cbor.records_each` take a spec.
+- `answers` takes one path or a slice of paths in every format, as JSON's does.
+- `records_check` is `records_validate` in every format and `records.check` is `records.validate`: it judges faults, as
+  `validate` does.
+- A schema bound to a CSV, TSV or plain handle chosen at run time (`schema.bind(s, {layout = dsv.as(spec)})`) checks as
+  `dsv.bind_schema` does, where it was refused. `dsv.checks_for` is gone.
+- Every format entry takes its `Spec` as a constant (`toml.validate(src, .Toml_1_1)`), and a spec chosen at run time
+  goes through `core`'s forms with the format's handle: `core.validate(src, toml.as(spec))`.
+  `load_schema(text, spec, opts, load)` takes the spec in every format, and `bind_schema` has one body over `checks`.
+- `core.comment_text` and `core.comment_next` read a comment's text without its markers and the space next to each,
+  and say whether a space followed the leading marker. `write.put_comment` writes a text as line comments, one a line,
+  and `write.comment_lines_ok` replaces `write.comment_ok`.
+- `Readers.holds` names the facts a text of the format can hold. A writer, an edit, `diff --facts` and the command line read
+  it, where they inferred the capability from a nil service.
+- `Fact_Name` is `Fact_Kind`, which also names the comment roles, the instructions, the doctype and the attributes,
+  and `FACTS` gives each kind its name in a filter, its role, whether an edit may write it, and its class.
+- An insert after a JSONC or JSON5 member whose separator a comment follows or precedes, `"a": 1, // c` or
+  `"a": 1 /* c */,`, keeps that line as written and puts the new member on its own line at its siblings' indent, and a
+  trailing comma stays trailing. The indent learned from the members leaves out blanks that end a line.
+- A key inserted into a JSON5 object whose first key is unquoted is written unquoted too where it is an identifier
+  (`host: "a"` takes `tls: true`, and `"a-b"` stays quoted). `Edit_Services.bare_key` says what a format can write
+  bare.
 - `core/css`: `css.compile` compiles a selector list of the static part of Selectors Level 4 once, and `css.select`
   gives the value node of each element of a markup document it matches, in document order. A selector out of scope or
   malformed is a `Fault` at its byte. `xml` and `html` forward them as `compile_selector`, `select` and `Selector`
@@ -530,6 +755,12 @@ The hooks the formats share:
 
 ### Errors
 
+- A YAML flow collection the input ends inside, as in `{a:`, `[? ` or `[&x`, is `.Truncated` with `Open_Collection`, where
+  the walk read past the end, and `{a` is no longer `Expected_Comma`.
+- A refusal of the TOML, YAML, XML, HTML and CBOR writers names its reason in `want.text`, which `core.render` writes
+  after the message: `core.Services.words` give each format's words for `.Unwritable` and `.Unsupported`, and
+  `core.worded` fills them in. A root the format cannot spell, such as a TOML, XML or HTML value that is no object, is
+  `.Unwritable`, not `.Unsupported`.
 - A model and its schema refuse a value with the same kind, under the schema's names. A number past a bound is
   `.Above_Maximum` or `.Below_Minimum`, in a plain `unmarshal` too, where it was `.Out_Of_Range`, which stays for a map
   key that spells no integer and a `cstring` holding NUL. A fixed array or a capacity given too few or too many values
@@ -640,6 +871,8 @@ Windows).
 
 ### Library
 
+- Each format exports `CAPABILITIES`, a `core.Capabilities` that names the write options its writer honours, its spec
+  type and how a second text in an input is found. The YAML writer ignores `tab` instead of refusing it.
 - `Record_Read` (json and csv) reads each record of one type; CSV can now decode a stream one record at a time.
 - `csv.validate_records` lists every refused record, as `json.validate_records` does (`core.Record_Fault`).
 - `csv.query`, `find` and `find_column` answer paths like JSON's (`core.Answer`), honouring `duplicates`.

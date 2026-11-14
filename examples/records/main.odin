@@ -29,7 +29,7 @@ main :: proc() {
 
 run :: proc(src: []u8) -> json.Error {
 	// One fault per invalid record, with its position counted from the start of the text.
-	faults := json.records_check(src, .Json, framing = .Lines) or_return
+	faults := json.records_validate(src, .Json, framing = .Lines) or_return
 	defer delete(faults)
 	for f in faults {
 		report(src, f) // 2:9: Invalid literal

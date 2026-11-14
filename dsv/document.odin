@@ -34,9 +34,7 @@ SERVICES := [Spec]core.Services {
 
 handle_services :: proc "contextless" ($S: Spec) -> core.Services {
 	return {
-		build    = proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-			return build_spec(src, S, as.readers, options_of(as), refuse_duplicates, allocator)
-		},
+		build    = edit_of(S).build,
 		validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, S, options_of(as))},
 		scan     = proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
 			return scan_spec(src, S, as, paths, read, state, on, allocator)
@@ -46,7 +44,7 @@ handle_services :: proc "contextless" ($S: Spec) -> core.Services {
 		plans    = rawptr(proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Refusal) {
 			return plan_built(T, S, options_of(as), opts, reads_of(S), allocator)
 		}),
-		reads    = reads_of(S),
+		reads    = checks_of(S),
 		tokens   = &TOKENS,
 		records  = framing_of(S),
 		docs     = record_docs(S),
@@ -205,7 +203,10 @@ build_reserved :: proc(src: []u8, $S: Spec, readers: ^core.Readers, opts: Option
 	doc, err := build.builder_end(&b, regs, fault)
 	if err.kind == .None {
 		doc.kinds_stored = true
-		finish_table(&doc, opts)
+		if finish_table(&doc, opts) != nil {
+			core.destroy(&doc)
+			return {}, {kind = .No_Memory}
+		}
 	}
 	return doc, err
 }
@@ -249,9 +250,9 @@ infer_token :: #force_inline proc "contextless" (src: []u8, t: core.Token) -> co
 	return t
 }
 
-// Writes the table's first row and width, which the walk's nodes decide. A text read with `Ragged` has no common width,
+// Writes the table's first row, width and key index, which the walk's nodes decide. A text read with `Ragged` has no common width,
 // and a text with no record has no row to measure.
-finish_table :: proc(doc: ^core.Document, opts: Options) {
+finish_table :: proc(doc: ^core.Document, opts: Options) -> runtime.Allocator_Error {
 	t := &doc.tables_at[0]
 	header := core.header_of(doc)
 	t.first_row = core.Node_Index(len(doc.nodes))
@@ -260,11 +261,52 @@ finish_table :: proc(doc: ^core.Document, opts: Options) {
 	} else if len(doc.nodes) > 1 {
 		t.first_row = 1
 	}
-	if .Ragged in opts.tolerate || int(t.first_row) >= len(doc.nodes) {
-		return
+	t.unique_keys = header != 0 && keys_unique(doc, header)
+	if .Ragged not_in opts.tolerate && int(t.first_row) < len(doc.nodes) {
+		t.width = u32(core.length(doc, header)) if header != 0 else doc.nodes[t.first_row].n - 1
 	}
-	t.width = u32(core.length(doc, header)) if header != 0 else doc.nodes[t.first_row].n - 1
+	return core.index_keys(doc, t)
 }
+
+// Completes a table joined from pieces as `build_spec` completes its own: its line ends, its kinds, and its table, whose
+// header row `frame` holds at the same node. Returns false when an allocation is refused.
+joined_table :: proc(doc, frame: ^core.Document) -> bool {
+	opts := options_of(doc.as)
+	opts.crlf = line_end_before(doc.src, record_end(doc, 1)) == "\r\n"
+	doc.as = as_of(doc.readers, Spec(doc.spec), opts)
+	doc.kinds_stored = true
+	tables, err := make([]core.Table, 1, doc.allocator)
+	if err != nil {
+		return false
+	}
+	tables[0].header = core.header_of(frame)
+	core.set_tables(doc, tables)
+	return finish_table(doc, opts) == nil
+}
+
+// Whether no two keys of header row `header` spell one name. A key that needs decoding, or a row past MAX_UNIQUE_KEYS
+// cells, is not compared, and the row then counts as not distinct.
+@(private = "file")
+keys_unique :: proc(doc: ^core.Document, header: core.Node_Index) -> bool {
+	keys := doc.nodes[int(header) + 1:][:core.length(doc, header)]
+	if len(keys) > MAX_UNIQUE_KEYS {
+		return false
+	}
+	for a, i in keys {
+		if a.spelling & core.SPELLING_DECODE != 0 {
+			return false
+		}
+		for b in keys[:i] {
+			if a.n == b.n && string(doc.src[a.lo:][:a.n]) == string(doc.src[b.lo:][:b.n]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// The widest header keys_unique() compares, pair by pair.
+MAX_UNIQUE_KEYS :: 256
 
 // Returns quoted CSV cell `n`'s span without its quote pair. The walk gives a quoted cell only once it closes it.
 inner_span :: #force_inline proc "contextless" (n: core.Node) -> (lo, hi: u64) {

@@ -29,9 +29,12 @@ Number_Literal :: struct {
 
 // A string by its text and the type its format tags it with, as a TOML datetime is: a format with tags writes it as the
 // type's own literal, and the text must be one of that type, else `.Bad_Raw`. An empty tag is the type the text spells,
-// a `typed.Datetime`'s. A format with none, or a tag the format has no type of, writes the string.
+// a `typed.Datetime`'s. A format with none, or a tag the format has no type of, writes the string. `meaning` is the
+// tag's meaning when a node of a document holds it: a format writes that meaning as its own tag where the text is a
+// value of it, and the string elsewhere.
 Tagged_Text :: struct {
 	text, tag: string,
+	meaning:   core.Tag_Meaning,
 }
 
 // A format's token spelling, which `core.Services.tokens` points at. `tree` is the nested format's punctuation. `value`
@@ -54,9 +57,12 @@ Token_Spelling :: struct {
 	// `layout` is called at each step instead, and `value` writes the scalars and the keys, whose separators it writes
 	// too. A `state` that stays nil writes `tree` as it is.
 	layout: proc(t: ^Tokens, step: Layout_Step) -> core.Typed_Error_Kind,
-	// Writes `text` as a comment to `out`. It writes nothing and answers false where the spec `spec` of the format has no
-	// comments, and with a nil `out` only says whether it has.
-	comment: proc(out: ^Out, spec: u8, text: string) -> bool,
+	// Writes `text` as a comment of `role` where `comment` puts it, after the comma or line that a tree's item owes. Nil
+	// for a format with no comments.
+	comment: proc(t: ^Tokens, role: core.Role, text: string) -> core.Typed_Error_Kind,
+	// Writes a whole value in place of the calls, as a markup format does, whose element write reads the facts of the
+	// value's nodes and those an update kept on a value it put in place of one.
+	built:   Markup_Put,
 }
 
 // The steps of a laid-out write. `Close` comes after the level is popped, and `Key` before `value` writes the name.
@@ -75,12 +81,14 @@ Tokens :: struct {
 	spell:  ^Token_Spelling,
 	state:  rawptr, // a format's own, set by `start`
 	site:   core.Site, // where the text will stand in a document, for a format that indents or styles by place
+	words:  core.Write_Words, // the reasons the format's refusals give
 	base:   Out,
 	spill:  [ROOM_MAX]u8,
 	object: [core.MAX_DEPTH]bool, // per open level, whether it is an object
-	spec:   u8, // the format's spec, as `comment` takes it
+	spec:   u8, // the format's spec
+	notes:  bool, // the spec holds comments and the spelling writes them
 	top:    int, // the open levels
-	mark:   int, // the output offset where the open record began
+	mark:   int, // the output offset where the open record began, or a format's own mark in a nested text
 	first:  bool, // nothing is written yet in the open container or record
 	led:    bool, // a comment has written the comma that the next item owes
 	keyed:  bool, // a key is written and its value is owed
@@ -97,16 +105,18 @@ tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, alloc
 	// The spill and the levels are not zeroed: a level is read only below `top`.
 	t.opts, t.spell, t.state, t.top, t.mark, t.first, t.keyed, t.done, t.err = opts, nil, nil, 0, 0, true, false, false, .None
 	t.spec, t.led, t.site = as.spec, false, site
+	services := core.services_of(as)
+	t.words = services.words if services != nil else {}
 	init(&t.base, &t.spill, allocator, stream)
 	t.out = &t.base
 	t.spell = spell
 	if t.spell == nil {
-		services := core.services_of(as)
 		if services == nil || services.tokens == nil {
 			return refuse(t, .Unsupported)
 		}
 		t.spell = (^Token_Spelling)(services.tokens)
 	}
+	t.notes = t.spell.comment != nil && as.readers != nil && .Comment in as.readers.holds
 	if t.spell.start != nil {
 		return refuse(t, t.spell.start(t, as))
 	}
@@ -126,6 +136,7 @@ tokens_finish :: proc(t: ^Tokens) -> (bytes: []u8, err: core.Typed_Refusal) {
 	if err.kind == .None && bytes != nil && t.spell != nil && t.spell.end != nil {
 		bytes, err = t.spell.end(t, bytes)
 	}
+	err = core.worded(err, t.words)
 	return
 }
 
@@ -175,23 +186,33 @@ key :: proc(t: ^Tokens, name: string) -> core.Typed_Error_Kind {
 	return refuse(t, t.out.err)
 }
 
-// Writes `text` as a comment before the next key, value or container where the format has comments, and drops it where it
-// has none. A comment between a key and its value or before a close is `.Out_Of_Order`.
-comment :: proc(t: ^Tokens, text: string) -> core.Typed_Error_Kind {
-	if t.err != .None || t.spell.line != nil || t.spell.comment == nil || !t.spell.comment(nil, t.spec, text) {
+// Writes `text` as a comment of `role`: `.Comment` before the next key, value or container, `.Comment_Inline` on the
+// line of the item last written, and `.Comment_Foot` after the last item of the innermost open container, or after the
+// root once it is whole. A format with no comments, and any other role, is `.Unsupported`, and a comment between a key
+// and its value, or a role with no item to stand by, is `.Out_Of_Order`.
+comment :: proc(t: ^Tokens, text: string, role := core.Role.Comment) -> core.Typed_Error_Kind {
+	if t.err != .None {
 		return t.err
 	}
-	if t.keyed || t.top == 0 && t.done {
+	if t.spell.line != nil || !t.notes || role != .Comment && role != .Comment_Inline && role != .Comment_Foot {
+		return refuse(t, .Unsupported)
+	}
+	root := t.top == 0
+	switch {
+	case t.keyed, role == .Comment && root && t.done, role == .Comment_Inline && (root && !t.done || !root && t.first), role == .Comment_Foot && root && !t.done:
 		return refuse(t, .Out_Of_Order)
 	}
-	if t.top > 0 {
+	if role == .Comment && !root && !laid(t) {
 		if !t.first && !t.led {
 			put_text(t.out, t.spell.tree[.Comma])
 		}
 		put_line(t.out, t.opts, t.top)
+		t.led = !t.first
 	}
-	t.spell.comment(t.out, t.spec, text)
-	t.led = !t.first
+	if role == .Comment_Foot && !root && !laid(t) && !t.first {
+		put_line(t.out, t.opts, t.top)
+	}
+	refuse(t, t.spell.comment(t, role, text))
 	return refuse(t, t.out.err)
 }
 
@@ -213,7 +234,7 @@ value_null :: proc(t: ^Tokens) -> core.Typed_Error_Kind {return value(t, Tree_Pa
 value_bytes :: proc(t: ^Tokens, b: []u8) -> core.Typed_Error_Kind {return value(t, typed.Bytes(b))}
 
 // A string with the type its format tags it with, see `Tagged_Text`.
-value_tagged :: proc(t: ^Tokens, text, tag: string) -> core.Typed_Error_Kind {return value(t, Tagged_Text{text, tag})}
+value_tagged :: proc(t: ^Tokens, text, tag: string) -> core.Typed_Error_Kind {return value(t, Tagged_Text{text = text, tag = tag})}
 
 // Ends the record of a flat format with the layout's line end. A JSON write is `.Unsupported`, and a record that wrote
 // no byte is `.Unwritable` as `marshal` refuses it.
@@ -368,12 +389,16 @@ node_number_text :: proc(doc: ^core.Document, node: core.Node_Index, stack: []u8
 NUMBER_TEXT_MAX :: 1 << 26
 
 // Writes number node `node` as its decimal digits as JSON spells them, or as its span when `own` says the writing
-// format reads it. An infinity or a NaN is written with tree `T`'s word, and is `.Non_Finite` when `T` has none.
-put_number_node :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index, $T: Tree, own := false) -> core.Typed_Error_Kind {
+// format reads it. A text number whose spelling the writing format's `forms` hold keeps it, see `put_spelled`. An
+// infinity or a NaN is written with tree `T`'s word, and is `.Non_Finite` when `T` has none.
+put_number_node :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index, $T: Tree, own := false, forms := Number_Forms{}) -> core.Typed_Error_Kind {
 	t := doc.nodes[node]
 	span := string(core.span(doc, node))
 	if own || doc.readers.number_text == nil && (t.kind != .Number || t.spelling & core.NUMBER_KIND_MASK == 0) {
 		put_text(out, span)
+		return .None
+	}
+	if forms != {} && !doc.readers.binary && put_spelled(out, span, forms) {
 		return .None
 	}
 	kind: core.Typed_Error_Kind
@@ -399,6 +424,105 @@ put_number_node :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index, $
 	return .None
 }
 
+// The number spellings past a JSON decimal that a format's grammar has and its writer keeps from a source that spells a
+// number so: a hex, octal or binary integer (`0xFF`, `0o17`, `0b101`), a leading plus (`+1`), a point with no digit
+// before it (`.5`) and one with no digit after it (`5.`).
+Number_Form :: enum u8 {
+	Hex,
+	Octal,
+	Binary,
+	Plus,
+	Lead_Point,
+	Bare_Point,
+}
+Number_Forms :: bit_set[Number_Form; u8]
+
+// Writes number text `lit` in a spelling of `forms` and returns true, or writes nothing and returns false when `forms`
+// lacks one of its forms or it has a form no format here shares: underscores, leading zeros, a word, or a sign on a
+// prefixed integer. A prefixed integer is written with a lowercase prefix and without underscores, as every grammar of
+// a base reads it, and any other text as it stands.
+@(private)
+put_spelled :: proc(out: ^Out, lit: string, forms: Number_Forms) -> bool {
+	if len(lit) == 0 {
+		return false
+	}
+	p := 0
+	if lit[0] == '+' || lit[0] == '-' {
+		if lit[0] == '+' && .Plus not_in forms {
+			return false
+		}
+		p = 1
+	}
+	if p == 0 && len(lit) > 2 && lit[0] == '0' {
+		base: Number_Form
+		switch lit[1] {
+		case 'x', 'X':
+			base = .Hex
+		case 'o':
+			base = .Octal
+		case 'b':
+			base = .Binary
+		case:
+			return put_spelled_decimal(out, lit, p, forms)
+		}
+		if base not_in forms {
+			return false
+		}
+		put_byte(out, '0')
+		put_byte(out, lit[1] | 0x20)
+		for c in transmute([]u8)lit[2:] {
+			if c != '_' {
+				put_byte(out, c)
+			}
+		}
+		return true
+	}
+	return put_spelled_decimal(out, lit, p, forms)
+}
+
+// `put_spelled` for a decimal whose digits start at `p`.
+@(private)
+put_spelled_decimal :: proc(out: ^Out, lit: string, p: int, forms: Number_Forms) -> bool {
+	whole := p
+	for whole < len(lit) && lit[whole] - '0' < 10 {
+		whole += 1
+	}
+	if whole - p > 1 && lit[p] == '0' {
+		return false
+	}
+	k := whole
+	if k < len(lit) && lit[k] == '.' {
+		k += 1
+		frac := k
+		for k < len(lit) && lit[k] - '0' < 10 {
+			k += 1
+		}
+		if whole == p && .Lead_Point not_in forms || k == frac && .Bare_Point not_in forms || whole == p && k == frac {
+			return false
+		}
+	} else if whole == p {
+		return false
+	}
+	if k < len(lit) && lit[k] | 0x20 == 'e' {
+		k += 1
+		if k < len(lit) && (lit[k] == '+' || lit[k] == '-') {
+			k += 1
+		}
+		exp := k
+		for k < len(lit) && lit[k] - '0' < 10 {
+			k += 1
+		}
+		if k == exp {
+			return false
+		}
+	}
+	if k != len(lit) {
+		return false
+	}
+	put_text(out, lit)
+	return true
+}
+
 // Returns the text of node `node`, in `buf` when it fits and else in a copy made with `allocator`.
 node_text :: #force_inline proc(doc: ^core.Document, node: core.Node_Index, buf: []u8, allocator: runtime.Allocator) -> (string, core.Typed_Error_Kind) {
 	if text, ok := core.text(doc, node, buf); ok {
@@ -406,6 +530,16 @@ node_text :: #force_inline proc(doc: ^core.Document, node: core.Node_Index, buf:
 	}
 	text, ok := core.text_clone(doc, node, allocator)
 	return text, .None if ok else .No_Memory
+}
+
+// Whether the collection at `node` holds a fact inside it: one of a node below it, or a foot comment of its own.
+holds_inner_fact :: proc(doc: ^core.Document, node: core.Node_Index) -> bool {
+	for f in core.subtree_facts(doc, node) {
+		if f.node != node || f.role == .Comment_Foot {
+			return true
+		}
+	}
+	return false
 }
 
 // A member of an object node as a document writer lays it out: its key, its value and the key's text.
@@ -510,8 +644,8 @@ value_scalar_text :: proc(v: core.Value, stack: []u8, $T: Tree) -> (text: string
 		return scalar_text(x.doc, x.node, stack)
 	case string:
 		return x, .None
-	case ^core.Number_Text:
-		return x.text, .None
+	case core.Number_View:
+		return core.view_text(x), .None
 	case f64:
 		n, _ := core.value_number(x)
 		size := number_text_as(raw_data(stack), n, T) or_return
@@ -557,6 +691,17 @@ put_marked :: proc(out: ^Out, _: [^]u8, s: string, _: ^core.Write_Options) -> co
 	return .None
 }
 
+// The byte that starts a comment in a markup text `put_markup` reads: no string or bare scalar of the text holds it.
+@(private = "file")
+MARKUP_COMMENT :: '\x01'
+
+// Writes comment `text` of `role` into a markup text `put_markup` reads, which puts it on the value it stands by.
+put_marked_comment :: proc(out: ^Out, role: core.Role, text: string) -> core.Typed_Error_Kind {
+	put_byte(out, MARKUP_COMMENT)
+	put_byte(out, '0' + u8(role))
+	return put_marked(out, nil, text, nil)
+}
+
 // A markup format's write of a built value as `opts` say, to `stream` or into new bytes from `allocator`.
 Markup_Put :: proc(v: core.Value, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal)
 
@@ -574,7 +719,9 @@ marshal_markup :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Option
 }
 
 // Reads `s`, made in `MARKUP_TREE` with `put_marked`'s strings, into a built value in an arena of its own and gives it
-// to `put`. A bare scalar is its text, and `null` is nil.
+// to `put`. A bare scalar is its text, and `null` is nil. A comment is written on the value it stands by: a lead one
+// on the next value, an inline one on the value last written and a foot one on the innermost open container, or on
+// the root when none is open. A lead one in an empty container is that container's foot one.
 put_markup :: proc(s: string, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, put: Markup_Put) -> ([]u8, core.Typed_Refusal) {
 	arena: virtual.Arena
 	if virtual.arena_init_growing(&arena) != nil {
@@ -584,13 +731,32 @@ put_markup :: proc(s: string, opts: core.Write_Options, stream: io.Stream, alloc
 	context.allocator = virtual.arena_allocator(&arena)
 	root: core.Value
 	open: [dynamic]core.Value
+	lead: [dynamic]string
 	key: string
 	for i := 0; i < len(s); i += 1 {
 		v: core.Value
 		switch s[i] {
+		case MARKUP_COMMENT:
+			role := core.Role(s[i + 1] - '0')
+			end := i + 3 + strings.index_byte(s[i + 3:], 0)
+			text := s[i + 3:end]
+			i = end
+			#partial switch role {
+			case .Comment:
+				append(&lead, text)
+			case .Comment_Foot:
+				note(foot_of(&root, open[:]), role, text)
+			case:
+				note(last_item(open[len(open) - 1]) if len(open) > 0 else &root, role, text)
+			}
+			continue
 		case ' ', '\t', '\n', ',', ':':
 			continue
 		case '}', ']':
+			for text in lead {
+				note(foot_of(&root, open[:]), .Comment_Foot, text)
+			}
+			lead = {}
 			pop(&open)
 			continue
 		case '{':
@@ -608,7 +774,7 @@ put_markup :: proc(s: string, opts: core.Write_Options, stream: io.Stream, alloc
 			v = text
 		case:
 			end := i
-			for end < len(s) && strings.index_byte(",}] \t\n", s[end]) < 0 {
+			for end < len(s) && strings.index_byte(",}] \t\n\x01", s[end]) < 0 {
 				end += 1
 			}
 			if s[i:end] != "null" {
@@ -616,12 +782,17 @@ put_markup :: proc(s: string, opts: core.Write_Options, stream: io.Stream, alloc
 			}
 			i = end - 1
 		}
+		at := v
+		if len(lead) > 0 {
+			at = core.noted(v, .Comment, lead[:])
+			lead = {}
+		}
 		if len(open) == 0 {
-			root = v
+			root = at
 		} else if up, is_object := open[len(open) - 1].(^core.Object); is_object {
-			core.object_append(up, key, v)
+			core.object_append(up, key, at)
 		} else {
-			core.array_append(open[len(open) - 1].(^core.Array), v)
+			core.array_append(open[len(open) - 1].(^core.Array), at)
 		}
 		#partial switch _ in v {
 		case ^core.Object, ^core.Array:
@@ -629,4 +800,39 @@ put_markup :: proc(s: string, opts: core.Write_Options, stream: io.Stream, alloc
 		}
 	}
 	return put(root, opts, stream, allocator)
+}
+
+// The value a foot comment stands on while `open` are the open containers: the innermost one, or `root`.
+@(private = "file")
+foot_of :: proc(root: ^core.Value, open: []core.Value) -> ^core.Value {
+	if len(open) < 2 {
+		return root
+	}
+	return last_item(open[len(open) - 2])
+}
+
+// Adds comment `text` of `role` to the value at `at`.
+@(private = "file")
+note :: proc(at: ^core.Value, role: core.Role, text: string) {
+	at^ = core.noted(at^, role, add_body(at^, role, text))
+}
+
+// The last item of the open container `up`.
+@(private = "file")
+last_item :: proc(up: core.Value) -> ^core.Value {
+	if o, is_object := up.(^core.Object); is_object {
+		return &o.vals[len(o.vals) - 1]
+	}
+	a := up.(^core.Array)
+	return &a.items[len(a.items) - 1]
+}
+
+// The comments of `role` on built value `v` with `text` after them.
+@(private = "file")
+add_body :: proc(v: core.Value, role: core.Role, text: string) -> []string {
+	bodies, _ := core.comments(v, role)
+	all := make([]string, len(bodies) + 1)
+	copy(all, bodies)
+	all[len(bodies)] = text
+	return all
 }

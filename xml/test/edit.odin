@@ -215,10 +215,10 @@ comment_facts_stand_where_xml_reads_them :: proc(t: ^testing.T) {
 		return core.set_fact(l, core.ROOT, .Comment, " prolog ")
 	})
 	walktest.expect_nil(t, err)
-	testing.expect_value(t, out, "<!-- prolog --><r><!-- head --><a>1</a><!-- after a --><b>2</b></r>")
+	testing.expect_value(t, out, "<!-- prolog -->\n\n<!-- head --><r><a>1</a><!-- after a --><b>2</b></r>")
 	out, err = edited("<!-- p --><r><a>1</a><!-- one --></r>", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
 		core.set_fact(l, member(d, root(d), "a"), .Comment_Inline, "two") or_return
-		return core.remove_fact(l, core.ROOT, .Comment)
+		return core.remove_fact(l, root(d), .Comment)
 	})
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "<r><a>1</a><!--two--></r>")
@@ -272,4 +272,29 @@ edits_xml_cannot_hold_are_refused :: proc(t: ^testing.T) {
 		return write.set(l, member(d, root(d), "p"), 2)
 	})
 	walktest.expect_kind(t, err, core.Document_Error_Kind.Frozen)
+}
+
+// A set of the first element of a repeated name is a region its path reads under `.First`, and a set of a later one is
+// read back whole. Both read back.
+@(test)
+a_set_through_the_first_of_a_name_is_a_region :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	src := "<r><b>1</b><b>2</b></r>"
+	rows := []struct {
+		node: core.Node_Index,
+		fits: bool,
+		want: string,
+	}{{4, true, "<r><b>x</b><b>2</b></r>"}, {6, false, "<r><b>1</b><b>x</b></r>"}}
+	for row in rows {
+		doc, berr := xml.build(transmute([]u8)src, .Xml)
+		walktest.expect_nil(t, berr)
+		list := xml.edit_list_init(&doc, .Xml)
+		walktest.expect_nil(t, write.set(&list, row.node, "x"))
+		regions, known, fits := core.edited_regions(&list)
+		testing.expectf(t, known && fits == row.fits && (!fits || len(regions) == 1), "node %d: %d regions, known %v, fits %v", row.node, len(regions), known, fits)
+		out, _, err := compose.commit(&list)
+		walktest.expect_nil(t, err)
+		testing.expect_value(t, string(out), row.want)
+	}
 }

@@ -32,7 +32,7 @@ cbor.write       :: proc(doc: ^core.Document, spec: cbor.Spec, opts := core.Writ
 cbor.as          :: proc "contextless" (spec: cbor.Spec, opts := cbor.Options{}) -> core.As
 cbor.find, cbor.scan, cbor.answers, cbor.each_answer, cbor.query, cbor.can_resume, cbor.edit_list_init
 cbor.marshal, cbor.unmarshal, cbor.check, cbor.plan_make, cbor.plan_of, cbor.tokens_init, cbor.checks, cbor.bind_schema
-cbor.records_open, cbor.records_open_stream, cbor.records_check, cbor.writer_init
+cbor.records_open, cbor.records_open_stream, cbor.records_validate, cbor.writer_init
 ```
 
 Each entry point takes a `cbor.Spec`, the rules an item is judged and written by, and links only the passes it names.

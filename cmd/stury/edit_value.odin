@@ -77,7 +77,7 @@ edit_tree :: proc(w: ^Edit_State, node: core.Node_Index, value: jq.Value) -> boo
 				return edit_array(w, node, a.items[:])
 			}
 		case .Null, .False, .True, .Number, .String:
-			if jq.compare(v, jq.Ref{w.doc, node}) == 0 {
+			if jq.compare(v, jq.Ref{w.doc, node}) == 0 && core.same_number_type(v, jq.Ref{w.doc, node}) {
 				return true
 			}
 		}
@@ -95,6 +95,10 @@ edit_comments :: proc(w: ^Edit_State, node: core.Node_Index, c: ^jq.Commented, s
 		if role == .Tag && !same && core.tags_in_text(w.list) {
 			continue
 		}
+		if kind, _ := core.fact_of_role(role); kind not_in w.doc.readers.holds && kind not_in core.COMMENT_FACTS && len(c.bodies[role]) > 0 {
+			w.err = message.build_temp("%s holds no %s", w.doc.readers.tag_key, "attribute" if kind == .Attribute else core.FACTS[kind].name)
+			return false
+		}
 		if core.is_property(role) {
 			edit_property(w, node, role, c.bodies[role]) or_return
 		} else {
@@ -105,16 +109,10 @@ edit_comments :: proc(w: ^Edit_State, node: core.Node_Index, c: ^jq.Commented, s
 }
 
 // The edit that makes `bodies`, one text or none, the tag, anchor or alias `role` of `node`, none when it already is.
-// The format must spell a property before its node, or a tag in the node's text.
+// The format must hold the property.
 @(private = "file")
 edit_property :: proc(w: ^Edit_State, node: core.Node_Index, role: core.Role, bodies: []string) -> bool {
-	name := core.Fact_Name.Tag
-	#partial switch role {
-	case .Anchor:
-		name = .Anchor
-	case .Alias:
-		name = .Alias
-	}
+	name, _ := core.fact_of_role(role)
 	have, held := core.fact_value(w.doc, node, name)
 	if len(bodies) == 0 {
 		if !held {
@@ -125,7 +123,7 @@ edit_property :: proc(w: ^Edit_State, node: core.Node_Index, role: core.Role, bo
 	if held && have.text == bodies[0] {
 		return true
 	}
-	if edit := w.list.edit; edit == nil || edit.prefix == nil && (role != .Tag || !core.tags_in_text(w.list)) {
+	if w.list.edit == nil || name not_in w.doc.readers.holds {
 		w.err = "the format cannot hold a tag, an anchor or an alias"
 		return false
 	}

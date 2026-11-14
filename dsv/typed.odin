@@ -9,6 +9,7 @@ import "base:intrinsics"
 import "base:runtime"
 import spell "../core/spell"
 import core "../core"
+import rules "../core/rules"
 import typed "../core/typed"
 import write "../core/write"
 
@@ -33,19 +34,6 @@ checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Check
 	return {checks_of(S), bound_as(S, opts)}
 }
 
-// The reads `checks` gives for the spec of `as`, a handle `as` made with a spec chosen at run time, or nil for a
-// handle of another format.
-checks_for :: proc "contextless" (as: core.As) -> ^typed.Format_Reads {
-	if as.spec > u8(max(Spec)) || as.readers != &HANDLES[Spec(as.spec)] {
-		return nil
-	}
-	switch Spec(as.spec) {
-	case .Csv:   return checks_of(.Csv)
-	case .Tsv:   return checks_of(.Tsv)
-	case .Plain: return checks_of(.Plain)
-	}
-	return nil
-}
 
 // Builds the plan of `T` for dsv's spelling, as `typed.plan_make` does, and refuses a `T` that is no list of rows and no
 // row. A write by the plan is of spec `spec` with the delimiter, comment byte, `no_header`, `crlf` and `.Ragged` of
@@ -55,6 +43,16 @@ checks_for :: proc "contextless" (as: core.As) -> ^typed.Format_Reads {
 plan_make :: proc(T: typeid, spec := Spec.Csv, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error) {
 	made, err := plan_built(T, spec, opts, plan, reads, allocator)
 	return made, core.error_of(err)
+}
+
+// Builds the plan that reads values of description `d` as `spec`, as `typed.plan_of` does. The reads are the plan's with
+// `reads`, as for `plan_make`.
+plan_of :: proc(d: ^rules.Description, spec := Spec.Csv, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error) {
+	made, err := typed.plan_of(d, layout_as(spec, {}), reads, opts, allocator)
+	if err == nil {
+		plan_bind(&made)
+	}
+	return made, err
 }
 
 // The plan of `T` with the writer, the token writer and the document read of dsv, and the reads `reads` holds.
@@ -654,8 +652,8 @@ scalar_text :: proc "contextless" (v: core.Value, buf: ^[spell.F64_ROOM]u8) -> (
 		return x, true
 	case bool:
 		return "true" if x else "false", true
-	case ^core.Number_Text:
-		return x.text, true
+	case core.Number_View:
+		return core.view_text(x), true
 	case f64:
 		if x != x || abs(x) > max(f64) {
 			return "", false

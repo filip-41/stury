@@ -17,7 +17,7 @@ Options :: struct {
 	// The deepest nesting a text may have, 0 for `MAX_DEPTH`.
 	max_depth:   u32,
 	// The most bytes the aliases of one document may read again, each alias its anchor's node with the aliases in it,
-	// 0 for the larger of `ALIAS_FLOOR` and `ALIAS_RATIO` times the text's length.
+	// 0 for the larger of 1 MiB and ten times the text's length.
 	alias_limit: u64,
 	// Applies `<<` merge keys: a `<<` member whose value is a mapping, an alias to one or a sequence of those adds their
 	// members the host mapping lacks, an earlier source before a later one. Without it `<<` is an ordinary key.
@@ -26,7 +26,9 @@ Options :: struct {
 
 // The alias limit of a text with no `alias_limit`, which a small text's limit does not fall below, and the multiple
 // of a larger text's length.
+@(private)
 ALIAS_FLOOR :: 1 << 20
+@(private)
 ALIAS_RATIO :: 10
 
 // The `core.Fault.detail` values a YAML text's faults use.
@@ -194,12 +196,12 @@ hook_sink :: proc "contextless" ($H: typeid, $on: proc "contextless" (h: ^H, s: 
 // followed by the tokens of the node it names. `regs` nil starts from zero registers and keeps none. With a `cursor`,
 // a stop saves where the walk stood there for `walk_resume`.
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault)) {
-	return walk_noting(src, lo, opts, h, regs, on, cursor, nil)
+	return walk_noting(src, lo, opts, h, regs, on, cursor, nil, nil)
 }
 
 // `walk`, which sets `typed^` when a key of the document resolves to no string.
 @(private)
-walk_noting :: proc "contextless" (src: []u8, lo: u64, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor, typed: ^bool) -> (hi: u64, fault: Maybe(core.Fault)) {
+walk_noting :: proc "contextless" (src: []u8, lo: u64, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^Cursor, typed: ^bool, replayed: ^bool) -> (hi: u64, fault: Maybe(core.Fault)) {
 	if cursor != nil {
 		hi, fault, _ = walk_saving(src, lo, opts, h, regs, on, cursor, nil)
 		return
@@ -227,6 +229,9 @@ walk_noting :: proc "contextless" (src: []u8, lo: u64, opts: Options, h: ^$H, re
 	if typed != nil {
 		typed^ = p.typed
 	}
+	if replayed != nil {
+		replayed^ = p.expanded > 0
+	}
 	hi, fault, _ = core.result_of(p.fail, &RULES)
 	return
 }
@@ -239,9 +244,13 @@ walk_noting :: proc "contextless" (src: []u8, lo: u64, opts: Options, h: ^$H, re
 // a cursor resumes after any token. A walk that ends or faults frees what its cursor holds, and `cursor_destroy`
 // frees a cursor no resume ended.
 Cursor :: struct {
-	src:  [^]u8,
-	n:    u64,
-	held: ^Held,
+	src:       [^]u8,
+	n:         u64,
+	held:      ^Held,
+	// What `held` and the walk it holds live under, the default heap when it is nil.
+	allocator: runtime.Allocator,
+	// Set once a run of the walk sent a node's tokens again for an alias.
+	replayed:  bool,
 }
 
 // What a cursor holds past a stop: the parser at the place the walk paused, the tokens read between the stop and the
@@ -287,8 +296,9 @@ walk_saving :: proc "contextless" (src: []u8, lo: u64, opts: Options, h: ^$H, re
 	if start >= u64(len(src)) {
 		return u64(len(src)), nil, false
 	}
-	context = runtime.default_context()
+	context = core.cursor_context(cursor.allocator)
 	held: Held
+	held.queue = make([dynamic]core.Token)
 	w := Walk_State(H){h = h, log = log, held = &held}
 	if regs != nil {
 		w.regs = regs^
@@ -314,7 +324,7 @@ resume_held :: proc "contextless" (src: []u8, cursor: ^Cursor, opts: Options, h:
 	if held == nil || cursor.src != raw_data(src) || cursor.n != u64(len(src)) {
 		return 0, core.Fault{rules = &RULES, kind = .Bad_Option}
 	}
-	context = runtime.default_context()
+	context = core.cursor_context(cursor.allocator)
 	w := Walk_State(H){h = h, regs = held.regs, log = log, held = held}
 	if regs != nil {
 		w.regs = regs^
@@ -346,6 +356,7 @@ held_end :: proc(cursor: ^Cursor, held: ^Held, last: core.Hook_Regs, regs: ^core
 		regs^ = last
 	}
 	p := &held.parser
+	cursor.replayed ||= p.expanded > 0
 	if !held.stopped {
 		r := p.fail
 		held_free(cursor, held)
@@ -369,7 +380,7 @@ held_end :: proc(cursor: ^Cursor, held: ^Held, last: core.Hook_Regs, regs: ^core
 // Frees the walk `held` holds, and `cursor`'s copy of it.
 @(private)
 held_free :: proc "contextless" (cursor: ^Cursor, held: ^Held) {
-	context = runtime.default_context()
+	context = core.cursor_context(cursor.allocator)
 	parser_destroy(&held.parser)
 	delete(held.queue)
 	if cursor.held == held {
@@ -401,7 +412,7 @@ resume_document :: proc(p: ^Parser) -> bool {
 }
 
 // The walk's verdict on `src` for `spec`, after one leading BOM: every document of the stream is read and judged.
-validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
+validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error {
 	return core.error_of(validate_text(src, opts))
 }
 

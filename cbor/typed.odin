@@ -107,16 +107,16 @@ marshal_once :: proc(value: any, spec := Spec.Cbor, opts := Options{}, write := 
 unmarshal :: proc {unmarshal_once, unmarshal_plan}
 
 @(private)
-unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return unmarshal_any(src, spec, target, T, opts, read, allocator)
+unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	return unmarshal_any(src, S, target, T, opts, read, allocator)
 }
 
 @(private)
-unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	if plan == nil {
 		return core.error_of(typed.plan_mismatch(plan, &PLAN_READERS, T))
 	}
-	return core.error_of(read_text(src, spec, opts, target, T, plan, read, allocator, false))
+	return core.error_of(read_text(src, S, opts, target, T, plan, read, allocator, false))
 }
 
 @(private)
@@ -133,8 +133,8 @@ unmarshal_any :: proc(src: []u8, spec: Spec, target: rawptr, T: typeid, opts: Op
 
 // Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
 // first. The options are the plan's, and any plan of the format reads.
-check :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return typed.check_by(src, bound_as(spec, options_of(typed.handle_of(plan))), target, T, plan, read, allocator, proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, Spec(as.spec), options_of(as), target, T, plan, read, allocator, true)})
+check :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	return typed.check_by(src, bound_as(S, options_of(typed.handle_of(plan))), target, T, plan, read, allocator, proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return read_text(src, Spec(as.spec), options_of(as), target, T, plan, read, allocator, true)})
 }
 
 // The typed reads of a plan made from a type.

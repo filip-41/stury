@@ -92,7 +92,7 @@ a_schema_checks_an_html_text :: proc(t: ^testing.T) {
 	text := `{"type": "object", "required": ["item"], "properties": {"item": {"type": "object", "required": ["id", "name"], "additionalProperties": false,
 		"properties": {"id": {"type": "integer", "minimum": 1}, "name": {"type": "string", "minLength": 3}, "tag": {"type": "array", "items": {"enum": ["a", "b"]}, "maxItems": 2},
 		"price": {"type": "object", "properties": {"currency": {"enum": ["EUR", "USD"]}, "#text": {"type": "number"}}, "required": ["currency", "#text"]}}}}}`
-	s, serr := json.load_schema(transmute([]u8)string(text))
+	s, serr := json.load_schema(transmute([]u8)string(text), .Json)
 	walktest.expect_nil(t, serr)
 	bound, berr := html.bind_schema(s, .Fragment)
 	walktest.expect_nil(t, berr)
@@ -112,7 +112,7 @@ a_schema_checks_an_html_text :: proc(t: ^testing.T) {
 		testing.expectf(t, len(sink.entries) == c.errors && (err == nil) == (c.errors == 0), "%s: %d entries, %v", c.text, len(sink.entries), err)
 	}
 	// A whole document is checked from its root, the `html` element.
-	page, perr := json.load_schema(transmute([]u8)string(`{"properties": {"html": {"properties": {"@lang": {"const": "en"}, "body": {"required": ["main"]}}}}}`))
+	page, perr := json.load_schema(transmute([]u8)string(`{"properties": {"html": {"properties": {"@lang": {"const": "en"}, "body": {"required": ["main"]}}}}}`), .Json)
 	walktest.expect_nil(t, perr)
 	doc_bound, dberr := html.bind_schema(page, .Document)
 	walktest.expect_nil(t, dberr)
@@ -146,7 +146,7 @@ a_built_document_is_checked_by_a_model_and_a_schema :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(sink.entries), 2)
 	testing.expect_value(t, v.note.lang, "english")
 	testing.expect_value(t, v.note.text, "one two & three")
-	s, serr := json.load_schema(transmute([]u8)string(`{"properties": {"note": {"properties": {"lang": {"maxLength": 7}, "#text": {"minLength": 16}}}}}`))
+	s, serr := json.load_schema(transmute([]u8)string(`{"properties": {"note": {"properties": {"lang": {"maxLength": 7}, "#text": {"minLength": 16}}}}}`), .Json)
 	walktest.expect_nil(t, serr)
 	bound, berr := html.bind_schema(s, .Fragment)
 	walktest.expect_nil(t, berr)

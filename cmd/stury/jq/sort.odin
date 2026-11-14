@@ -3,6 +3,7 @@ package jq
 // Sorting, grouping, uniqueness, and extrema (`sort`, `unique`, `sort_by`, `group_by`, `unique_by`,
 // `min`, `max`, `min_by`, `max_by`).
 
+import "core:hash"
 import "core:math"
 import "core:slice"
 import core_pkg "../../../core"
@@ -12,7 +13,7 @@ import core_pkg "../../../core"
 // which must run before any key is compared.
 Sort_Atom :: struct {
 	kind: Kind,
-	s:    string, // a string, or a `Number_Text`'s digits
+	s:    string, // a string, or a literal's digits
 	f:    f64, // a number's double; an object's place in `object_members`
 	v:    Value,
 }
@@ -45,8 +46,8 @@ sort_atom :: proc(v: Value) -> Sort_Atom {
 		a.s = y
 	case f64:
 		a.f = y
-	case ^Number_Text:
-		a.f, a.s = y.double, y.text
+	case Number_View:
+		a.f, a.s = view_f64(y), view_text(y)
 	}
 	return a
 }
@@ -88,10 +89,19 @@ compare_keys :: proc(a, b: []Sort_Atom) -> int {
 	return -1 if len(a) < len(b) else (1 if len(a) > len(b) else 0)
 }
 
-// The places of `ks` in their keys' order: a bottom-up merge sort. Equal keys keep input order.
+// The places of `ks` in their keys' order. Equal keys keep input order.
 @(private = "file")
 sorted_order :: proc(ks: []Keyed) -> []int {
-	n := len(ks)
+	// The left key is asked whether it is above the right, as jq's qsort asks: a nan is below every key, another nan
+	// too, so keys of nan keep their input order.
+	return merge_order(ks, proc(a, b: Keyed) -> bool {return compare_keys(a.key, b.key) > 0})
+}
+
+// The places of `xs` in order: a bottom-up merge sort that takes the right element first only when the left is `above`
+// it, so equal elements keep input order.
+@(private = "file")
+merge_order :: proc(xs: []$T, $above: proc(a, b: T) -> bool) -> []int {
+	n := len(xs)
 	a, b := make([]int, n), make([]int, n)
 	for i in 0 ..< n {
 		a[i] = i
@@ -101,9 +111,7 @@ sorted_order :: proc(ks: []Keyed) -> []int {
 			mid, hi := min(lo + width, n), min(lo + 2 * width, n)
 			i, j, k := lo, mid, lo
 			for i < mid && j < hi {
-				// The left key is asked whether it is above the right, as jq's qsort asks: a nan is below
-				// every key, another nan too, so keys of nan keep their input order.
-				if compare_keys(ks[a[i]].key, ks[a[j]].key) > 0 {
+				if above(xs[a[i]], xs[a[j]]) {
 					b[k], j = a[j], j + 1
 				} else {
 					b[k], i = a[i], i + 1
@@ -235,9 +243,8 @@ short_integer :: proc(lit: string) -> bool {
 	return true
 }
 
-// sorted_order() of keys that are each one string, of few distinct values (group_by on a field, say): the distinct
-// strings sorted, and every element counted into its string's place. It is nil when the keys are not all one string,
-// or too many differ for that to pay. `ties` as number_key_order() gives them.
+// sorted_order() of keys that are each one string: the distinct strings sorted, and every element counted into its
+// string's place. It is nil when the keys are not all one string. `ties` as number_key_order() gives them.
 @(private = "file")
 string_key_order :: proc(ks: []Keyed) -> (order: []int, ties: []bool) {
 	n := len(ks)
@@ -247,52 +254,75 @@ string_key_order :: proc(ks: []Keyed) -> (order: []int, ties: []bool) {
 	if len(ks[0].key) != 1 || ks[0].key[0].kind != .String {
 		return nil, nil
 	}
-	ids := make(map[string]int, 16)
-	group := make([]int, n)
+	// Each distinct string gets the next id, its first place in `names`. `slots` holds id + 1 by the string's hash, 0
+	// for none, and is kept at least twice as long as `names`.
+	names := make([dynamic]string, 0, 64)
+	codes := make([dynamic]u64, 0, 64)
+	slots := make([]u32, 128)
+	group := make([]u32, n)
 	for k, i in ks {
 		if len(k.key) != 1 || k.key[0].kind != .String {
 			return nil, nil
 		}
-		id, has := ids[k.key[0].s]
-		if !has {
-			if len(ids) >= n / 16 {
-				return nil, nil
-			}
-			id = len(ids)
-			ids[k.key[0].s] = id
+		s := k.key[0].s
+		code := hash.fnv64a(transmute([]u8)s)
+		mask := u64(len(slots) - 1)
+		at := code & mask
+		for slots[at] != 0 && (codes[slots[at] - 1] != code || names[slots[at] - 1] != s) {
+			at = (at + 1) & mask
 		}
-		group[i] = id
+		if slots[at] != 0 {
+			group[i] = slots[at] - 1
+			continue
+		}
+		group[i] = u32(len(names))
+		append(&names, s)
+		append(&codes, code)
+		slots[at] = u32(len(names))
+		if 2 * len(names) > len(slots) {
+			slots = rehashed(codes[:], 2 * len(slots))
+		}
 	}
-	Distinct :: struct {
-		s:  string,
-		id: int,
+	// Each element's id becomes its string's place in order, so one pass counts the places and one more puts every
+	// element at its place's next slot, in input order.
+	rank := make([]u32, len(names))
+	for id, r in merge_order(names[:], proc(a, b: string) -> bool {return a > b}) {
+		rank[id] = u32(r)
 	}
-	names := make([]Distinct, len(ids))
-	for s, id in ids {
-		names[id] = {s, id}
+	start := make([]int, len(names))
+	for &g in group {
+		g = rank[g]
+		start[g] += 1
 	}
-	slice.sort_by(names, proc(a, b: Distinct) -> bool {return a.s < b.s})
-	rank := make([]int, len(ids))
-	for d, r in names {
-		rank[d.id] = r
-	}
-	start := make([]int, len(ids))
-	for g in group {
-		start[rank[g]] += 1
-	}
+	order, ties = make([]int, n), make([]bool, n)
 	at := 0
 	for &s in start {
 		s, at = at, at + s
 	}
-	order, ties = make([]int, n), make([]bool, n)
-	for g, i in group {
-		order[start[rank[g]]] = i
-		start[rank[g]] += 1
+	slice.fill(ties, true)
+	for s in start {
+		ties[s] = false
 	}
-	for i in 1 ..< n {
-		ties[i] = group[order[i]] == group[order[i - 1]]
+	for g, i in group {
+		order[start[g]] = i
+		start[g] += 1
 	}
 	return order, ties
+}
+
+// string_key_order()'s slots for strings of hashes `codes`, ids in order, in a table of `size` slots, a power of two.
+@(private = "file")
+rehashed :: proc(codes: []u64, size: int) -> []u32 {
+	slots := make([]u32, size)
+	mask := u64(size - 1)
+	for code, id in codes {
+		at := code & mask
+		for slots[at] != 0 {
+			at = (at + 1) & mask
+		}
+		slots[at] = u32(id + 1)
+	}
+	return slots
 }
 
 // The elements paired with themselves as their sort keys, one atom each.

@@ -234,8 +234,8 @@ One hook on the walk answers every path, in core, written once for every format.
 hook sees `Object`, `Array`, `Key` and value tokens and returns `Next`, `Skip` or `Stop`.
 
 - Its state per depth is which step of which path is armed there. `core/build/step.odin` writes the step logic once, as
-  `scan_step($MANY, $SINK, ...)`. `$MANY` false compiles it down to one plain path, of `Name`, `Index` from 0, `All` and
-  `Index_Or_Name`, at step `d - 1`: a step number and a depth, two registers. Several paths, and any path with a step or an option
+  `scan_step($MANY, $SINK, ...)`. `$MANY` false compiles it down to one plain path, of `Name`, `Index` from 0, `All`, `Slice`
+  from 0 to an end from 0 and `Index_Or_Name`, at step `d - 1`: a step number and a depth, two registers. Several paths, and any path with a step or an option
   that form has no state for, run it with `$MANY` true, and `core/build/many.odin` holds what only they need: one `u64`
   bit set of armed paths per depth, a `u64` of steps per depth for a `Descend` path, which can be at several steps of a
   container at once, the rings of negative indexes, the answers placed in text order and the stream. A plain path pays

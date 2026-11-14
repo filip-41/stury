@@ -31,32 +31,11 @@ quiet :: proc(a, b: core.Value) -> bool {
 	return true
 }
 
-// Whether the format of `doc` can hold a fact of `role`: a comment needs the format to spell one, an attribute needs it
-// to read, a tag needs the edit services to write property facts or the format to spell it in a value's text, and an
-// anchor needs the edit services.
+// Whether the format of `doc` can hold a fact of `role`.
 @(private)
 carries :: proc(doc: ^core.Document, role: core.Role) -> bool {
-	if doc.readers == nil {
-		return false
-	}
-	if role == .Attribute {
-		return doc.readers.attribute != nil
-	}
-	if role == .Tag && doc.readers.fact != nil {
-		return true
-	}
-	s := doc.readers.services
-	if s == nil || s.edit == nil {
-		return false
-	}
-	if core.is_property(role) {
-		return s.edit.prefix != nil
-	}
-	if s.edit.comment != nil {
-		style, _ := s.edit.comment(doc, doc.spec)
-		return style != .None
-	}
-	return false
+	kind, is_fact := core.fact_of_role(role)
+	return doc.readers != nil && is_fact && kind in doc.readers.holds
 }
 
 // Reports each role whose facts differ on the nodes `a` and `b`, when both documents carry the role.

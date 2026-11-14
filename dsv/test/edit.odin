@@ -384,6 +384,30 @@ edit_zero_width_cells :: proc(t: ^testing.T) {
 	})
 }
 
+// A commit's read-back follows the output cell by cell: a dropped column's cells read as gone and every other cell as
+// its header cell names it and as its source text, so an output that holds another column, cell or record is refused.
+@(test)
+edit_reads_rows :: proc(t: ^testing.T) {
+	doc, _ := core.build(transmute([]u8)string("a,b,c\n1,2,3\n4,5,6\n"), dsv.as(.Csv))
+	defer core.destroy(&doc)
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	for op in drops(7, 11) {
+		walktest.expect_nil(t, apply(&list, op))
+	}
+	arena: runtime.Arena
+	defer runtime.arena_destroy(&arena)
+	context.allocator = runtime.arena_allocator(&arena)
+	Case :: struct {
+		out:   string,
+		reads: bool,
+	}
+	for c in ([]Case{{"a,c\n1,3\n4,6\n", true}, {"a,c\n1,3\n4,7\n", false}, {"a,b\n1,2\n4,5\n", false}, {"a,c\n1,3\n", false}, {"a,c\n1,3\n4,6\n7,8\n", false}}) {
+		e, known := core.reads_rows(&list, transmute([]u8)c.out, doc.as, list.edit.walk_rows)
+		testing.expectf(t, known && (e.kind == .None) == c.reads, "%q: %v", c.out, e)
+	}
+}
+
 @(test)
 set_and_remove_of_a_cell :: proc(t: ^testing.T) {
 	for text in ([]string{"z", ""}) {

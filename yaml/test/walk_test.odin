@@ -39,7 +39,7 @@ note :: proc "contextless" (r: ^Tokens, s: core.Hook_Regs, t: core.Token) -> (co
 		name = "Anchor"
 	case .Alias:
 		name = "Alias"
-	case .Instruction, .Doctype, .Attribute:
+	case .Instruction, .Doctype, .Directive, .Attribute:
 		name = fmt.tprint(t.role)
 	case .Partial:
 		name = "Partial"
@@ -81,9 +81,11 @@ tokens_of_a_block_document :: proc(t: ^testing.T) {
 
 @(test)
 comments_take_their_roles :: proc(t: ^testing.T) {
-	got, _, fault := tokens_of("# top\na: 1 # one\n# above b\nb: 2\n")
+	got, _, fault := tokens_of("# top\n\na: 1 # one\n# above b\nb: 2\n")
 	testing.expect_value(t, fault == nil, true)
 	testing.expect_value(t, got, "Comment:# top Object Key:a Plain:1 Inline:# one Comment:# above b Key:b Plain:2 End")
+	got, _, _ = tokens_of("# top\n\n# above a\na: 1\n")
+	testing.expect_value(t, got, "Comment:# top Object Comment:# above a Key:a Plain:1 End")
 }
 
 @(test)
@@ -142,6 +144,14 @@ nested_aliases_count_what_they_read_again :: proc(t: ^testing.T) {
 }
 
 @(test)
+a_flow_node_cut_by_the_end_faults_its_collection :: proc(t: ^testing.T) {
+	for text in ([]string{"{a", "[a", "{a:", "{a: ", "[a:", "[? ", "{? a:", "[&x", "[!t ", "{a: &x", "[a: &x "}) {
+		f, bad := yaml.validate(transmute([]u8)text, .Yaml_1_2).(core.Fault)
+		testing.expectf(t, bad && f.kind == .Truncated && f.detail == u8(yaml.Detail.Open_Collection), "%q: %v %v", text, f.kind, f.detail)
+	}
+}
+
+@(test)
 nesting_past_the_depth_limit_is_refused :: proc(t: ^testing.T) {
 	_, _, fault := tokens_of("[[[[1]]]]", yaml.Options{max_depth = 3})
 	testing.expect(t, fault != nil)
@@ -193,7 +203,7 @@ decoded_text_follows_the_quoting :: proc(t: ^testing.T) {
 		})
 		buf: [64]u8
 		view := core.Token_View{src = r.text}
-		got, ok := yaml.text(&view, tok, buf[:])
+		got, ok := yaml.token_text(&view, tok, buf[:])
 		testing.expectf(t, found && ok && got == c[1], "%q reads as %q, got %q", c[0], c[1], got)
 	}
 }

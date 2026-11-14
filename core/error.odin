@@ -208,7 +208,8 @@ move_document_error :: proc(e: ^Document_Error, by: u64) {
 	}
 }
 
-// Why an edit is `.Bad_Index`, or for the cell reasons `.Bad_Value`, with `at` the position of the cell in a record.
+// Why an edit is `.Bad_Index`, or for the cell reasons `.Bad_Value`, with `at` the position of the cell in a record, or
+// for `.Reads_Back_Other` `.Bad_Result`.
 Edit_Reason :: enum u8 {
 	None,
 	No_Document, // the edit list has no document
@@ -227,6 +228,7 @@ Edit_Reason :: enum u8 {
 	Starts_With_Mark, // the value would start the text with a byte order mark
 	Reads_Back_Typed, // the document reads kinds from the text, and the format has no quotes to keep the value a string
 	No_Spelling, // the format has no spelling for the value
+	Reads_Back_Other, // a committed text reads back as values other than the edits wrote
 }
 
 // A value layer error. `at` is the byte `kind` names: the walk's fault byte for `.Walk`, the first byte of the
@@ -277,6 +279,7 @@ EDIT_REASONS := [Edit_Reason]string {
 	.Starts_With_Mark       = "the value would start the text with a byte order mark",
 	.Reads_Back_Typed  = "a read with kinds inferred would read the value back as a number, true or false, and the format has no quotes",
 	.No_Spelling = "the format has no spelling for the value",
+	.Reads_Back_Other = "it reads back as values other than the edits wrote",
 }
 
 // Writes `prefix` then `code`.
@@ -569,13 +572,14 @@ Error_Entry :: struct {
 // by the tags.
 Typed_Detail :: struct #raw_union {
 	inner: Fault `raw_union_tag:"kind=Walk"`,
-	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Below_Minimum,kind=Above_Maximum,kind=Missing_Field,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema,kind=No_Sample,kind=No_Invalid_Sample,kind=Custom,kind=Check_Failed,kind=Bad_Option,kind=Too_Deep"`,
+	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Below_Minimum,kind=Above_Maximum,kind=Missing_Field,kind=Bad_Tag,kind=Unsupported,kind=Unwritable,kind=Ambiguous_Union,kind=Bad_Schema,kind=No_Sample,kind=No_Invalid_Sample,kind=Custom,kind=Check_Failed,kind=Bad_Option,kind=Too_Deep"`,
 	plans: Plan_Clash `raw_union_tag:"kind=Plan_Mismatch"`,
 }
 
 // `type` is the type a `.Wrong_Kind`, `.Out_Of_Range`, `.Not_A_Member`, `.Below_Minimum` or `.Above_Maximum` read wanted. `text` is the refused scalar's
-// source text for those kinds, which lives as long as `src`, the flag a `.Bad_Tag` names, why a type is
-// `.Unsupported`, a union `.Ambiguous_Union` or an option `.Bad_Option`, or what a `.Too_Deep` limit bounds. Either may be empty.
+// source text for those kinds, which lives as long as `src`, the flag a `.Bad_Tag` names, why a type, an option or an
+// operation is `.Unsupported`, a value `.Unwritable` in the format whose writer refused it, a union `.Ambiguous_Union`
+// or an option `.Bad_Option`, or what a `.Too_Deep` limit bounds. Either may be empty.
 Typed_Want :: struct {
 	type: typeid,
 	text: string,
@@ -760,7 +764,7 @@ write_typed_message :: proc(w: io.Writer, e: Typed_Refusal) -> io.Error {
 			_, err := io.write_string(w, e.want.text)
 			return err
 		}
-	case .Unsupported, .Ambiguous_Union, .Bad_Schema, .No_Sample, .No_Invalid_Sample, .Bad_Option, .Too_Deep:
+	case .Unsupported, .Unwritable, .Ambiguous_Union, .Bad_Schema, .No_Sample, .No_Invalid_Sample, .Bad_Option, .Too_Deep:
 		io.write_string(w, TYPED_KIND_RULES[e.kind].message) or_return
 		if len(e.want.text) > 0 {
 			io.write_string(w, ": ") or_return

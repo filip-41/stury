@@ -12,8 +12,7 @@ import core ".."
 // element, takes the elements past the items, and adds the items past the elements as elements after the name's last.
 // An insert is an element after the member before it, laid out by the white space a reader drops before that member, a
 // removal takes an element with that white space, and a rename respells both tags. A fact edit replaces a node's
-// comments or attributes where they stand, or writes them at the head of the element's content, after the element, or
-// before its end tag. Every byte no splice touches stays, and the format reads the result again.
+// comments or attributes where they stand, or writes them before the element, after it, or before its end tag. Every byte no splice touches stays, and the format reads the result again.
 
 // The byte before each item of an array a format spells as an element's content, which no markup text holds.
 MARKUP_ITEM :: "\x00"
@@ -65,9 +64,9 @@ Cx :: struct {
 	err:     core.Document_Error,
 }
 
-// Returns the source bytes `list`'s edits make as splices of the source, in one allocation of `allocator`, which the
-// format then reads.
-markup_commit :: proc(list: ^core.Edit_List, m: ^Markup, allocator: runtime.Allocator) -> (out: []u8, err: core.Document_Error) {
+// Returns the source bytes `list`'s edits make as splices of the source, and the bytes `cut` removes, in one allocation
+// of `allocator`, which the format then reads.
+markup_commit :: proc(list: ^core.Edit_List, m: ^Markup, allocator: runtime.Allocator, cut: []Splice = nil) -> (out: []u8, err: core.Document_Error) {
 	doc := list.doc
 	arena := runtime.Arena{backing_allocator = allocator}
 	defer runtime.arena_destroy(&arena)
@@ -81,6 +80,7 @@ markup_commit :: proc(list: ^core.Edit_List, m: ^Markup, allocator: runtime.Allo
 			return nil, cx.err
 		}
 	}
+	append(&cx.splices, ..cut)
 	return apply_splices(doc.src, cx.splices[:], allocator)
 }
 
@@ -345,8 +345,8 @@ insert_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 }
 
 // Replaces the comments or the attributes of `e.node` of `e.role`: the first where it stands, the others with the white
-// space before them. New ones go at the head of an element's content, before the root element, after an element, before
-// an end tag or the text's end, or after an element's name.
+// space before them. New ones go before an element, after an element, before an end tag or the text's end, or after an
+// element's name.
 @(private = "file")
 fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	v := e.node
@@ -366,7 +366,7 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 		if e.role == .Attribute {
 			puts(&b, " ", body)
 		} else {
-			puts(&b, "<!--", body, "-->")
+			spell_comment(&b, core.MARKUP_COMMENTS, transmute([]u8)body, false, false)
 		}
 	}
 	first := true
@@ -390,16 +390,20 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 		at = el.name
 	case e.role == .Comment_Inline && v != core.ROOT:
 		at = el.hi
-	case e.role == .Comment && v == core.ROOT:
+	case e.role == .Comment:
 		at = el.lo
-	case e.role == .Comment && !el.empty:
-		at = el.open
 	case e.role == .Comment_Foot && v == core.ROOT:
 		at = u64(len(cx.src))
-	case e.role == .Comment_Foot && cx.doc.nodes[v].kind == .Object:
+	case e.role == .Comment_Foot && !el.empty:
 		at = el.close
 	case:
 		return refuse_edit(cx, v, .No_Place)
+	}
+	if v == core.ROOT && e.role == .Comment {
+		// A blank line ends the text's head comment, which stands before the root element's comments at the same byte.
+		puts(&b, "\n\n")
+		append(&cx.splices, Splice{lo = at, hi = at, text = b[:], seq = -1})
+		return true
 	}
 	add(cx, at, at, string(b[:]))
 	return true

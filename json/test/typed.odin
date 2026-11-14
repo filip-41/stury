@@ -789,7 +789,7 @@ json5_and_jsonc_read_alike :: proc(t: ^testing.T) {
 	}
 	want := S{5, 16, "x"}
 	s: S
-	src5 := `{a:+5.,'b':0x10,c:'x',/*c*/}`
+	src5 := `{a:+5,'b':0x10,c:'x',/*c*/}`
 	e := json.unmarshal(transmute([]u8)src5, json.Spec.Json5, &s, allocator = context.temp_allocator)
 	walktest.expect_nil(t, e)
 	testing.expect_value(t, s, want)
@@ -804,8 +804,8 @@ json5_and_jsonc_read_alike :: proc(t: ^testing.T) {
 	e = json.unmarshal(transmute([]u8)src5, json.Spec.Json5, &s, allocator = context.temp_allocator)
 	walktest.expect_nil(t, e)
 	testing.expect_value(t, s, S{1, 2, "y"})
-	// A fraction or an exponent is no integer in any spelling, however far out of range.
-	for text in ([]string{`{a:1e9999}`, `{a:+1e9999}`, `{a:.5e9999}`}) {
+	// A point, a fraction or an exponent is no integer in any spelling, however far out of range.
+	for text in ([]string{`{a:1e9999}`, `{a:+1e9999}`, `{a:.5e9999}`, `{a:5.}`}) {
 		kind := walktest.typed_kind(json.unmarshal(transmute([]u8)text, json.Spec.Json5, &s, allocator = context.temp_allocator))
 		testing.expectf(t, kind == .Wrong_Kind, "%s: %v", text, kind)
 	}
@@ -814,7 +814,7 @@ json5_and_jsonc_read_alike :: proc(t: ^testing.T) {
 		b: bit_set[0 ..< 10],
 	}
 	bits: B
-	src5 = `{b:[0,5.,+7]}`
+	src5 = `{b:[0,0x5,+7]}`
 	e = json.unmarshal(transmute([]u8)src5, json.Spec.Json5, &bits, allocator = context.temp_allocator)
 	walktest.expect_nil(t, e)
 	testing.expect_value(t, bits.b, bit_set[0 ..< 10]{0, 5, 7})
@@ -1382,7 +1382,7 @@ value_member_takes_any_text :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, json.unmarshal(transmute([]u8)string(src), json.Spec.Json, &var, &plan))
 	k, _ := core.member(var.a, "k")
 	big, _ := core.child_at(k, 2)
-	testing.expect_value(t, big.(^core.Number_Text).text, "1e400")
+	testing.expect_value(t, core.view_text(big.(core.Number_View)), "1e400")
 	testing.expect_value(t, core.length(k), 3)
 	testing.expect_value(t, len(var.b), 3)
 	out, merr := json.marshal(var, &plan)

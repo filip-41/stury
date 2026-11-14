@@ -21,14 +21,14 @@ import cw "../core/write"
 unmarshal :: proc {unmarshal_once, unmarshal_plan}
 
 // Returns the typed reads of `spec`, which `plan_make` takes for a plan that reads through `typed.unmarshal_text`.
-reads :: proc "contextless" (spec: Spec) -> ^typed.Format_Reads {
+reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	return &READS
 }
 
 // Returns the checks of `spec` read with `opts`, which `model.compile` and `schema.bind` take: the reads of a plan made
 // from a model or a description, and the handle of `spec` its plans read by.
-checks :: proc "contextless" (spec: Spec, opts := Options{}) -> typed.Format_Checks {
-	return {&CHECKS, bound_as(spec, opts)}
+checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Checks {
+	return {&CHECKS, bound_as(S, opts)}
 }
 
 // Builds the plan of `T` for YAML, as `typed.plan_make` does. The plan reads a text only with `reads`, and with none it
@@ -159,20 +159,20 @@ type_scalars :: proc(doc: ^core.Document, first: core.Node_Index, nodes: []core.
 }
 
 @(private)
-unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	plan, refusal := plan_make(T, spec, opts)
-	return typed.unmarshal_planned(&plan, refusal, src, bound_as(spec, opts), typed_build, target, T, read, allocator)
+unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	plan, refusal := plan_make(T, S, opts)
+	return typed.unmarshal_planned(&plan, refusal, src, bound_as(S, opts), typed_build, target, T, read, allocator)
 }
 
 @(private)
-unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return core.error_of(text_read(src, bound_as(spec, opts), target, T, plan, read, allocator))
+unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	return core.error_of(text_read(src, bound_as(S, opts), target, T, plan, read, allocator))
 }
 
 // Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the
 // first. The options are the plan's, and any plan of the format reads.
-check :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return typed.check_by(src, bound_as(spec, options_of(typed.handle_of(plan))), target, T, plan, read, allocator, text_check)
+check :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	return typed.check_by(src, bound_as(S, options_of(typed.handle_of(plan))), target, T, plan, read, allocator, text_check)
 }
 
 // The `spelling` of a number token whose text is `text`: a JSON number carries its digit counts, and any other form

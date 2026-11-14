@@ -169,3 +169,33 @@ answers_break_early :: proc(t: ^testing.T) {
 		testing.expectf(t, err == nil && seen == 1, "%s %s with stop_early: %d %v", c[0], c[1], seen, err)
 	}
 }
+
+// A `Slice` read as the only path answers as it does beside another path, which reads it with the steps of several.
+@(test)
+slice_alone_answers_as_beside_another :: proc(t: ^testing.T) {
+	src := transmute([]u8)string(`{"a": [{"s": 1}, {"s": 2}, {"t": 3}, {"s": 4}, 5]}`)
+	other, _ := core.parse_path(".b")
+	defer core.path_destroy(&other)
+	for text in ([?]string{".a[1:3].s", ".a[0:9].s", ".a[2:]", ".a[:2]", ".a[3:3]"}) {
+		path, e := core.parse_path(text)
+		defer core.path_destroy(&path)
+		walktest.expect_nil(t, e)
+		alone, err := json.scan(src, .Json, path)
+		defer core.destroy(&alone)
+		walktest.expect_nil(t, err)
+		beside, err2 := json.scan(src, .Json, []core.Path{path, other})
+		defer core.destroy(&beside)
+		walktest.expect_nil(t, err2)
+		got := 0
+		for b in beside.answers {
+			if b.path != 0 {
+				continue
+			}
+			ok := got < len(alone.answers) && alone.answers[got].outcome == b.outcome
+			ok = ok && (b.outcome != .Found || core.equal(core.Node_Ref{&alone, alone.answers[got].node}, core.Node_Ref{&beside, b.node}))
+			testing.expectf(t, ok, "%s: answer %d", text, got)
+			got += 1
+		}
+		testing.expectf(t, got == len(alone.answers) && got > 0 || text == ".a[3:3]", "%s: %d answers alone, %d beside", text, len(alone.answers), got)
+	}
+}

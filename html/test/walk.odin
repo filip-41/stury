@@ -28,7 +28,7 @@ tokens_of :: proc(text: string, spec := html.Spec.Fragment, opts := html.Options
 // The fault `validate` returns for `text`, as `code@at`, or "" for a text it accepts.
 @(private)
 refusal :: proc(text: string, spec := html.Spec.Document, opts := html.Options{}) -> string {
-	f, bad := walktest.fault_in(html.validate(transmute([]u8)text, spec, opts))
+	f, bad := walktest.fault_in(core.validate(transmute([]u8)text, html.as(spec, opts)))
 	if !bad {
 		return ""
 	}
@@ -45,11 +45,13 @@ a_walk_gives_the_tree_in_preorder :: proc(t: ^testing.T) {
 	got, _, _ = tokens_of("<p>x", .Document)
 	testing.expect_value(t, got, "Object Key Object Key Plain Key Object Key:p Plain:x End End End")
 	got, _, _ = tokens_of("<!DOCTYPE html><html lang=en><!--c--><p class='a b'>one<br>two</p>", .Document)
-	testing.expect_value(t, got, "Doctype:<!DOCTYPE html> Object Key:html Attribute:lang=en Comment:<!--c--> Object:<html lang=en> Key Plain Key Object Key:p Attribute:class='a b' Object:<p class='a b'> Key Plain:one Key:br Plain Key Plain:two End End End End")
+	testing.expect_value(t, got, "Doctype:<!DOCTYPE html> Object Key:html Attribute:lang=en Object:<html lang=en> Comment:<!--c--> Key Plain Key Object Key:p Attribute:class='a b' Object:<p class='a b'> Key Plain:one Key:br Plain Key Plain:two End End End End")
 	got, _, _ = tokens_of("<table>a<tr><td>1</td></tr>b</table>")
 	testing.expect_value(t, got, "Object Key Plain*:a<tr><td>1</td></tr>b Key:table Object:<table> Key Object Key:tr Object:<tr> Key:td Plain:1 End End End End")
 	got, _, _ = tokens_of("<p>a<!--x-->b <i>c</i></p>")
-	testing.expect_value(t, got, "Object Key:p Comment:<!--x--> Object:<p> Key Plain*:a<!--x-->b  Key:i Plain:c End End")
+	testing.expect_value(t, got, "Object Key:p Object:<p> Comment:<!--x--> Key Plain*:a<!--x-->b  Key:i Plain:c End End")
+	got, _, _ = tokens_of("<!--a-->\n\n<!--b-->\n<html><body><!--c--><p>1</p><e><!--z--></e></body></html>", .Document)
+	testing.expect_value(t, got, "Comment:<!--a--> Object Comment:<!--b--> Key:html Object:<html> Key Plain Key:body Object:<body> Comment:<!--c--> Key:p Plain:1 Key:e Foot:<!--z--> Plain End End End")
 }
 
 @(test)

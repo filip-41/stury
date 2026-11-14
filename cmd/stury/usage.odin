@@ -22,7 +22,7 @@ OPTIMIZATION ::
 
 // jq's usage(): this, then the options or where to find them.
 @(private = "file")
-HELP_HEAD :: "stury - command-line JSON and CSV processor [version " + VERSION + `]
+HELP_HEAD :: "stury - command-line JSON, YAML, TOML, XML, HTML, CSV and CBOR processor [version " + VERSION + `]
 
 Usage:	stury [options] <jq filter> [file...]
 	stury [options] --args <jq filter> [strings...]
@@ -104,8 +104,8 @@ Command options:
 stury's own options:
       --from format         read json (default), jsonc, json5, ndjson,
                             csv, tsv, toml, yaml, xml, cbor or html;
-      --to format           write json (default), jsonc, ndjson, csv, tsv,
-                            toml, yaml, xml, cbor or html;
+      --to format           write json (default), jsonc, json5, ndjson,
+                            csv, tsv, toml, yaml, xml, cbor or html;
       --in-place            with fmt or edit, rewrite each file in place;
       --check               with fmt or edit, name each file it would
                             change and exit 1;
@@ -204,13 +204,16 @@ writes values that pass the schema file, a text a line. gen writes the Odin
 types a model reads the schema's values with.
 
 Options:
-      --from format         read json (default), jsonc, json5, ndjson, csv, tsv,
-                            toml, yaml, xml, cbor or html;
+      --from format         infer: read json (default), jsonc, json5, ndjson,
+                            csv, tsv, toml, yaml, xml, cbor or html; sample
+                            and gen: the schema's format, by default its
+                            file's extension's;
       --ranges              infer: keep the least and greatest number, string
                             length and array length;
       --threads n           infer: the threads that share a long input
                             (default: one per core);
-      --to format           sample: write json (default), jsonc, ndjson, csv or tsv;
+      --to format           infer and sample: write json (default), or any
+                            format --to takes, but csv and tsv for infer;
       --count n, --seed n   sample: how many values, and from which seed;
       --invalid             sample: values that fail the schema;
       --comments            sample: write descriptions as comments;
@@ -243,8 +246,8 @@ not written, and a table written is judged again as it reads back.
 Options:
       --from format         read json (default), jsonc, json5, ndjson,
                             csv, tsv, toml, yaml, xml, cbor or html;
-      --to format           write json, jsonc, ndjson, csv, tsv, toml, yaml,
-                            xml, cbor or html (default the --from format);
+      --to format           write json, jsonc, json5, ndjson, csv, tsv, toml,
+                            yaml, xml, cbor or html (default the --from format);
       --in-place            rewrite each file in place;
       --check               write nothing, name each file that is not
                             already formatted, and exit 1;

@@ -1,5 +1,7 @@
 package yaml
 
+import core "../core"
+
 // Clears what one document holds and the next must not see.
 @(private)
 reset_document :: proc(p: ^Parser) {
@@ -10,6 +12,7 @@ reset_document :: proc(p: ^Parser) {
 	clear(&p.keys.frames)
 	clear(&p.keys.keys)
 	clear(&p.keys.heads)
+	clear(&p.keys.kept)
 	clear(&p.stage)
 	clear(&p.blocks)
 	clear(&p.flows)
@@ -26,7 +29,7 @@ reset_document :: proc(p: ^Parser) {
 }
 
 // Reads the next document of the text from the cursor: its directives, an optional `---`, its node and an optional
-// `...`. Leaves the cursor at the byte after the document: past the `...` line, or at the next `---`, or at the end.
+// `...`, giving each directive and marker as a `Directive`. Leaves the cursor at the byte after the document: past the `...` line, or at the next `---`, or at the end.
 // `found` is false when only comments, blank lines and `...` markers remained.
 @(private)
 read_document :: proc(p: ^Parser) -> (found: bool, ok: bool) {
@@ -64,6 +67,7 @@ read_document :: proc(p: ^Parser) -> (found: bool, ok: bool) {
 			}
 			continue
 		case l.kind == .Marker:
+			emit_now(p, core.Token{p.pos, 3, .Plain, .Directive, 0}) or_return
 			p.pos += 3
 			parse_node(p, -1, false, false, .Value) or_return
 		case p.directives:
@@ -88,6 +92,7 @@ end_document :: proc(p: ^Parser) -> bool {
 	}
 	flush_foot(p, 0) or_return
 	if l.kind == .Marker && at(p, p.pos) == '.' {
+		emit_raw(p, core.Token{p.pos, 3, .Plain, .Directive, 0}) or_return
 		p.pos += 3
 		finish_line(p, false) or_return
 		clear(&p.pending)

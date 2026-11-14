@@ -217,42 +217,69 @@ put_hex :: proc(out: ^Out, prefix: string, v: u32, digits: int) {
 	}
 }
 
-// Whether a comment body can be written: no line end, and no control byte but tab.
-comment_ok :: proc(body: string) -> bool {
-	for b in transmute([]u8)body {
-		if b < 0x20 && b != '\t' || b == 0x7f {
+// Whether `text` can be written as line comments, one a line: no control byte but tab and a line end.
+comment_lines_ok :: proc(text: string) -> bool {
+	for b, i in transmute([]u8)text {
+		if b < 0x20 && b != '\t' && b != '\n' && !(b == '\r' && i + 1 < len(text) && text[i + 1] == '\n') || b == 0x7f {
 			return false
 		}
 	}
 	return true
 }
 
-// Writes each comment of `role` on `node` as a `#` line of its own at column `ind`, and returns how many it wrote.
+// Writes `text` as `marker` line comments, one for each of its lines, each line after the first on a line of its own
+// at column `ind`. `padded` writes a space between a marker and a line that is not empty.
+put_comment :: proc(out: ^Out, marker, text: string, padded: bool, ind: int) {
+	rest := text
+	for first := true; first || len(rest) > 0; first = false {
+		end := strings.index_byte(rest, '\n')
+		line := rest if end < 0 else rest[:end]
+		rest = "" if end < 0 else rest[end + 1:]
+		if !first {
+			put_byte(out, '\n')
+			put_run(out, ind, ' ')
+		}
+		put_text(out, marker)
+		line = strings.trim_suffix(line, "\r")
+		if padded && len(line) > 0 {
+			put_byte(out, ' ')
+		}
+		put_text(out, line)
+	}
+}
+
+// Writes each comment of `role` on `node` as `#` lines of their own at column `ind`, and returns how many it wrote.
 put_comment_lines :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index, role: core.Role, ind: int) -> (written: int) {
 	it := core.facts_of(doc, node, role)
-	for body in core.fact_next(&it) {
-		if comment_ok(body) {
+	for text, padded in core.comment_next(&it) {
+		if comment_lines_ok(text) {
 			written += 1
 			put_run(out, ind, ' ')
-			put_byte(out, '#')
-			put_text(out, body)
+			put_comment(out, "#", text, padded, ind)
 			put_byte(out, '\n')
 		}
 	}
 	return
 }
 
-// Writes the first comment of `node` that ends on its line as ` #` and its body, and returns whether it wrote one.
-put_comment_inline :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index) -> bool {
+// Writes the inline comments of `node` that are one line as one ` #` comment, their texts joined by a space, and
+// returns how many it joined.
+put_comment_inline :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index) -> (joined: int) {
 	it := core.facts_of(doc, node, .Comment_Inline)
-	for body in core.fact_next(&it) {
-		if comment_ok(body) {
-			put_text(out, " #")
-			put_text(out, body)
-			return true
+	for text, padded in core.comment_next(&it) {
+		if !comment_lines_ok(text) || strings.index_byte(text, '\n') >= 0 {
+			continue
 		}
+		if joined == 0 {
+			put_byte(out, ' ')
+			put_comment(out, "#", text, padded, 0)
+		} else if len(text) > 0 {
+			put_byte(out, ' ')
+			put_text(out, text)
+		}
+		joined += 1
 	}
-	return false
+	return
 }
 
 // A `Raw`, the text of one value of the format, checked and written as it is. An empty one is null. Text around the value
@@ -351,8 +378,9 @@ put_number_as :: proc(out: ^Out, n: core.Number, $T: Tree) -> core.Typed_Error_K
 
 // Number token text `lit`, of token spelling `spelling`, whose kind is not the format's plain decimal, as a JSON number:
 // a decimal with a sign, a point of its own, leading zeros or underscores as JSON writes it (`+1` as `1`, `.5` as
-// `0.5`, `5.` as `5`, `007` as `7`, `1_0` as `10`, `-0` as `0` when it is an integer), and a hex, octal or binary
+// `0.5`, `5.` as `5.0`, `007` as `7`, `1_0` as `10`, `-0` as `0` when it is an integer), and a hex, octal or binary
 // integer as the exact decimal it spells. Any other text, an infinity or a NaN, is `.Non_Finite`.
+@(private)
 put_decimal :: proc(out: ^Out, lit: string, spelling: u16) -> core.Typed_Error_Kind {
 	kind := spelling & core.NUMBER_KIND_MASK
 	p := 1 if lit[0] == '+' || lit[0] == '-' else 0
@@ -367,45 +395,24 @@ put_decimal :: proc(out: ^Out, lit: string, spelling: u16) -> core.Typed_Error_K
 	if kind != core.NUMBER_DECIMAL && base == 0 {
 		return .Non_Finite
 	}
-	if lit[0] == '-' && !integer_zero(lit[p:]) {
-		put_byte(out, '-')
-	}
 	if base != 0 {
+		if lit[0] == '-' {
+			put_byte(out, '-')
+		}
 		return .None if put_prefixed_decimal(out, lit[p + 2:], base) else .No_Memory
 	}
-	if lit[p] == '.' {
-		put_byte(out, '0')
+	stack: [128]u8
+	room := stack[:]
+	if len(lit) >= len(stack) {
+		made, err := make([]u8, len(lit) + 1, context.temp_allocator)
+		if err != nil {
+			return .No_Memory
+		}
+		room = made
 	}
-	leading := true
-	for k in p ..< len(lit) {
-		if lit[k] == '_' {
-			continue
-		}
-		// A zero is leading while a digit follows it, past any underscores.
-		next := k + 1
-		for next < len(lit) && lit[next] == '_' {
-			next += 1
-		}
-		if leading && lit[k] == '0' && next < len(lit) && lit[next] - '0' < 10 {
-			continue
-		}
-		leading = false
-		if lit[k] != '.' || k + 1 < len(lit) && lit[k + 1] - '0' < 10 {
-			put_byte(out, lit[k])
-		}
-	}
+	json, _ := core.json_decimal(lit, room)
+	put_text(out, json)
 	return .None
-}
-
-// Whether `digits` is an integer zero: zeros and underscores, which a sign does not make negative.
-@(private)
-integer_zero :: proc(digits: string) -> bool {
-	for c in transmute([]u8)digits {
-		if c != '0' && c != '_' {
-			return false
-		}
-	}
-	return len(digits) > 0
 }
 
 // Writes the digits `digits` of base 16, 8 or 2 as the exact decimal integer they spell, at any length, kept in base
@@ -848,7 +855,8 @@ enter_target :: proc(w: ^Walker, target: rawptr, rec: ^typed.Field) -> core.Type
 
 // Writes an `any`, or a hook's stand-in, that holds a nil or a scalar, and returns nil. Any other value is left to a frame,
 // and this enters the side plan of its type and returns the record to write it by. A `typed.Datetime` shaped as a date
-// or a time is written bare where the format reads that text as one value, as a string elsewhere.
+// or a time is written bare where the format reads that text as one value, after the tag of its meaning in a binary
+// format, and as a string elsewhere.
 @(private)
 any_value :: proc(w: ^Walker, a: any, $T: Tree, $put: Put) -> (rec: ^typed.Field, kind: core.Typed_Error_Kind) {
 	out := &w.out
@@ -862,6 +870,8 @@ any_value :: proc(w: ^Walker, a: any, $T: Tree, $put: Put) -> (rec: ^typed.Field
 			if len(text) >= 5 && text[0] >= '0' && text[0] <= '9' && (text[4] == '-' || text[2] == ':') && put_raw(w, text, 0, T) == .None {
 				return nil, .None
 			}
+		} else {
+			put_date_tag(out, text, .Own, T)
 		}
 		return nil, put(out, room(out, LEAF_ROOM), text, &w.opts)
 	}

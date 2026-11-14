@@ -10,8 +10,8 @@ import engine "../core/build"
 // fails at a name an element repeats among its children. The document borrows `src`, which must outlive it, and
 // `core.destroy` frees the document. A constant `spec` links the reads of that spec alone. A `spec` chosen at run time
 // goes through `core.build` with `as(spec, opts)`. The same holds for the other entry points.
-build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
-	doc, err := build_spec(src, spec, bound_as(spec, opts), dups == .Refuse, allocator)
+build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
+	doc, err := build_spec(src, S, bound_as(S, opts), dups == .Refuse, allocator)
 	return doc, core.error_of(err)
 }
 
@@ -65,8 +65,8 @@ document_error :: proc "contextless" (f: core.Fault) -> core.Document_Error {
 // finds, in the order it finds them, or a fault a build would return, or nil. A parse error of the input stream or the
 // tokenizer is `Truncated` when the standard names it after the end of the text, and `Bad_Char` at its byte otherwise. A
 // tree construction error is `Bad_Char` at the token it reads.
-validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
-	return core.error_of(validate_spec(src, spec, read_of(opts)))
+validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error {
+	return core.error_of(validate_spec(src, S, read_of(opts)))
 }
 
 @(private)
@@ -105,7 +105,8 @@ walk :: proc(src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^cor
 	zero: core.Hook_Regs
 	r := regs if regs != nil else &zero
 	s := core.Holding(H) {
-		hooks = h,
+		hooks     = h,
+		allocator = cursor.allocator,
 	}
 	hi, fault = walk_tree(src, lo, S, opts, &s, r, holding)
 	return core.holding_end(src, cursor, &s, r, hi, fault, &RULES)
@@ -126,9 +127,6 @@ can_resume :: #force_inline proc "contextless" (cursor: ^Cursor) -> bool {
 walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
 	return core.cursor_resume(src, cursor, h, regs, on, &RULES)
 }
-
-// Frees what `cursor` holds, a stop that no resume ended.
-cursor_destroy :: core.cursor_free
 
 @(private)
 walk_tree :: proc(src: []u8, lo: u64, spec: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {

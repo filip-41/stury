@@ -348,67 +348,19 @@ shell_fault :: proc(it: ^records.Reader, levels: u32, head: string, from: u64, $
 	return f
 }
 
-// The hook of `entries_locate`: it follows `names` from the root through object members, skipping every value off the
-// path, and stops the walk at the container the last name has as its value.
-@(private)
-Locate :: struct {
-	view:  core.Token_View,
-	names: []string,
-	// The names followed so far, which is the depth of the object whose members come next.
-	depth: int,
-	// Whether the last key matched its name, so the value that comes next is on the path.
-	armed: bool,
-	at:    u64,
-	found: bool,
-}
-
-@(private)
-locate_hook :: proc "contextless" (h: ^Locate, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	if t.role > .Key {
-		return s, .Next
-	}
-	if t.role == .Key {
-		if h.view.readers.key_equals(&h.view, t, h.names[h.depth]) {
-			h.armed = true
-			return s, .Next
-		}
-		return s, .Skip
-	}
-	armed := h.armed
-	h.armed = false
-	#partial switch t.kind {
-	case .Array, .Object:
-		switch {
-		case !armed:
-			// The root.
-			return s, .Next if t.kind == .Object else .Skip
-		case h.depth + 1 == len(h.names):
-			h.at, h.found = t.lo, true
-			return s, .Stop
-		case t.kind == .Object:
-			h.depth += 1
-			return s, .Next
-		}
-		return s, .Skip
-	case .End:
-		h.depth = max(h.depth - 1, 0)
-	}
-	return s, .Next
-}
-
 // Finds the container `it.entries` names, by a walk of the text from its start, and moves the reader to it, with the
 // objects around it in `state[LEVELS]`. Returns false when the records end here: on a fault the walk found, which the
 // reader keeps, or on a text with no such container, which has no records. On a stream a window that does not yet
 // reach the container is a `Truncated` fault, which the window's retry settles.
 @(private)
 entries_locate :: proc(it: ^records.Reader, $S: Spec, opts: Options) -> bool {
-	loc := Locate{view = {src = it.src, as = it.as}, names = it.entries}
+	loc := records.Entry_Walk{view = {src = it.src, as = it.as}, names = it.entries}
 	zero: core.Hook_Regs
-	fault := walk_text(it.src, it.from if it.input.procedure == nil else it.pos, S, opts, &loc, &zero, locate_hook)
-	if loc.found {
-		it.pos, it.state[LEVELS], it.state[LOCATED] = loc.at, u8(len(it.entries)), 1
+	fault := walk_text(it.src, it.from if it.input.procedure == nil else it.pos, S, opts, &loc, &zero, records.locate_hook)
+	if loc.inner != 0 {
+		it.pos, it.state[LEVELS], it.state[LOCATED] = loc.lo, u8(len(it.entries)), 1
 		if it.input.procedure == nil {
-			it.from = loc.at
+			it.from = loc.lo
 		}
 		return true
 	}

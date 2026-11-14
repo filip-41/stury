@@ -2,6 +2,7 @@
 // to a node, and the faults a selector compiles to.
 package css_tests
 
+import "core:mem/virtual"
 import "core:strings"
 import "core:testing"
 import core "../.."
@@ -209,6 +210,53 @@ a_document_with_no_elements_matches_none :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	testing.expect_value(t, described(t, &doc, "*", 2), "")
 	testing.expect_value(t, described(t, &doc, "a", core.ROOT), "a")
+}
+
+@(test)
+an_update_of_a_document_is_selected_from :: proc(t: ^testing.T) {
+	doc, err := xml.build(transmute([]u8)string(`<r k="v"><b n="1"/><c/><b n="2"><i/></b></r>`), .Xml)
+	if !testing.expectf(t, err == nil, "%v", err) {
+		return
+	}
+	defer core.destroy(&doc)
+	arena: virtual.Arena
+	context.allocator = virtual.arena_allocator(&arena)
+	defer virtual.arena_destroy(&arena)
+	// The value `.r.c = "C"` makes: a built spine in place of `r`, which keeps its other members as nodes.
+	r, _ := core.member(core.Value(core.Node_Ref{&doc, core.ROOT}), "r")
+	bs, _ := core.member(r, "b")
+	last := bs.(^core.Array).items[1]
+	spine := core.new_object()
+	core.object_put(spine, "b", bs)
+	core.object_put(spine, "c", "C")
+	top := core.new_object()
+	core.object_put(top, "r", core.in_place_of(spine, r.(core.Node_Ref)))
+
+	found := selected(t, top, "[k=v] > b:has(i)")
+	if testing.expect_value(t, len(found), 1) {
+		testing.expect(t, found[0].value == last)
+		testing.expect_value(t, len(found[0].path), 3)
+		index, _ := found[0].path[2].(f64)
+		testing.expect_value(t, index, 1)
+	}
+	found = selected(t, top, ":root > c, b + c")
+	if testing.expect_value(t, len(found), 1) {
+		text, _ := found[0].value.(string)
+		testing.expect_value(t, text, "C")
+	}
+	testing.expect_value(t, len(selected(t, top, "r[k]:root, r b[n]")), 3)
+}
+
+@(private)
+selected :: proc(t: ^testing.T, v: core.Value, selector: string, loc := #caller_location) -> []css.Match {
+	sel, err := css.compile(selector)
+	if !testing.expectf(t, err == nil, "%q: %v", selector, err, loc = loc) {
+		return nil
+	}
+	defer css.destroy(&sel)
+	found, no_memory := css.select_value(v, &sel, false, true)
+	testing.expect_value(t, no_memory, nil, loc = loc)
+	return found
 }
 
 @(test)

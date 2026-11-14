@@ -2,13 +2,14 @@ package json_tests
 
 import "core:testing"
 import core "../../core"
+import schema "../../core/schema"
 import json ".."
 
 // A check from the names of `json` alone: load the schema, bind it to a spec, judge a text and its records.
 @(test)
 schema_check_from_json_names :: proc(t: ^testing.T) {
 	text := `{"type": "object", "properties": {"a": {"type": "integer"}}, "required": ["a"]}`
-	s, err := json.load_schema(transmute([]u8)text)
+	s, err := json.load_schema(transmute([]u8)text, .Json)
 	testing.expect(t, err == nil)
 	defer json.destroy(s)
 	b, berr := json.bind_schema(s, .Json)
@@ -23,7 +24,7 @@ schema_check_from_json_names :: proc(t: ^testing.T) {
 	testing.expect_value(t, count, 2)
 	_, failed := rerr.(core.Typed_Error)
 	testing.expect(t, failed)
-	_, bad := json.load_schema(transmute([]u8)string(`{"type": 5}`))
+	_, bad := json.load_schema(transmute([]u8)string(`{"type": 5}`), .Json)
 	testing.expect(t, bad != nil)
 }
 
@@ -32,7 +33,7 @@ schema_check_from_json_names :: proc(t: ^testing.T) {
 @(test)
 schema_options_from_json_names :: proc(t: ^testing.T) {
 	tuple := transmute([]u8)string(`{"items": [{"type": "integer"}]}`)
-	s, err := json.load_schema(tuple, {draft = .D07})
+	s, err := json.load_schema(tuple, .Json, load = {draft = .D07})
 	testing.expectf(t, err == nil, "%v", err)
 	defer json.destroy(s)
 	b, berr := json.bind_schema(s, .Json)
@@ -43,7 +44,7 @@ schema_options_from_json_names :: proc(t: ^testing.T) {
 	once := transmute([]u8)string(`{"maxProperties": 1}`)
 	repeated := transmute([]u8)string(`{"a": 1, "a": 2}`)
 	for dups in ([2]json.Duplicates{.Last, .Refuse}) {
-		r, rerr := json.load_schema(once, {dups = dups})
+		r, rerr := json.load_schema(once, .Json, load = {dups = dups})
 		testing.expect(t, rerr == nil)
 		defer json.destroy(r)
 		rb, rberr := json.bind_schema(r, .Json)
@@ -53,13 +54,13 @@ schema_options_from_json_names :: proc(t: ^testing.T) {
 	}
 }
 
-// A spec out of range has a handle with no readers, which `bind_schema` refuses.
+// A spec chosen at run time out of range has a handle with no readers, which `schema.bind` refuses.
 @(test)
 a_schema_bound_to_a_spec_out_of_range_is_refused :: proc(t: ^testing.T) {
-	s, err := json.load_schema(transmute([]u8)string(`{"type": "object"}`))
+	s, err := json.load_schema(transmute([]u8)string(`{"type": "object"}`), .Json)
 	testing.expect(t, err == nil)
 	defer json.destroy(s)
-	_, berr := json.bind_schema(s, json.Spec(200))
+	_, berr := schema.bind(s, {layout = json.as(json.Spec(200))})
 	refusal, refused := berr.(core.Typed_Error)
 	testing.expect(t, refused && refusal.kind == .Bad_Option)
 }

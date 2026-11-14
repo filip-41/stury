@@ -59,8 +59,8 @@ Compose :: struct {
 	doc:          ^core.Document,
 	edit:         ^core.Edit_Services,
 	list:         ^core.Edit_List,
-	style:        core.Comment_Spelling,
-	comment_byte: u8,
+	syntax:       core.Comment_Syntax,
+	spec:         u8, // the spec the output is written in
 	allocator:    runtime.Allocator,
 	err:          core.Document_Error, // what a procedure returning false refuses, `.No_Memory` until one sets it
 	text:         [dynamic]u8,
@@ -76,6 +76,12 @@ Compose :: struct {
 	// The container's whitespace after a member separator, and before and after a key separator, which an inserted
 	// member is written with, so it follows the container's lines and indent. Nil when the container shows none.
 	gap, key_pre, key_gap: []u8,
+	// The container's first key is written bare, as an inserted key is where the format can write it so.
+	bare_keys:    bool,
+	// Each scalar and key the edits wrote, `lo` and `hi` offsets in `text`, while `unwritten` is false. It is true once an
+	// edit writes what they do not hold: a container, a text the caller spelled, or a reorder.
+	written:      [dynamic]core.Written,
+	unwritten:    bool,
 }
 
 // Records why the commit stops, and returns false for `or_return`.
@@ -106,7 +112,7 @@ holds_fact :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Role) 
 // fact it names and cuts the others.
 fact_action :: proc(cx: ^Compose, f: core.Fact) -> (action: Item_Action, edit: int) {
 	doc := cx.doc
-	slot := fact_slot(cx.edit, doc, f.node, f.role, cx.style, cx.emptied)
+	slot := fact_slot(cx.edit, doc, f.node, f.role, core.has_comments(cx.syntax), cx.emptied)
 	edit = fact_edit_of(cx, f.node, f.role)
 	if edit < 0 {
 		return .Keep if slot else .Cut, -1
@@ -128,7 +134,7 @@ new_fact :: proc(cx: ^Compose, node: core.Node_Index, role: core.Role) -> int {
 	if edit < 0 || cx.list.edits[edit].op != .Set_Fact {
 		return -1
 	}
-	if !fact_slot(cx.edit, cx.doc, node, role, cx.style, cx.emptied) || holds_fact(cx.doc, node, role) {
+	if !fact_slot(cx.edit, cx.doc, node, role, core.has_comments(cx.syntax), cx.emptied) || holds_fact(cx.doc, node, role) {
 		return -1
 	}
 	return edit
@@ -180,13 +186,13 @@ write_fact :: proc(cx: ^Compose, e: core.Edit, lo, hi: u64) -> bool {
 	line_end := fresh || hi >= u64(len(doc.src)) || core.line_end_len(doc.src, hi) > hi
 	n := fact_count(e)
 	// A body is held when the output can spell it: a line comment, the last one or one on a line of its own, holds no line
-	// end, and a block comment no `*/`.
+	// end, and a block comment no close marker.
 	held :: proc(cx: ^Compose, body: []u8, line_ok: bool) -> (held, line: bool) {
-		if cx.style == .Byte {
+		if cx.syntax.open == "" {
 			return !core.has_line_end(body), false
 		}
 		line = line_ok && !body_line_end(body)
-		return line || bytes.index(body, transmute([]u8)string("*/")) < 0, line
+		return line || bytes.index(body, transmute([]u8)cx.syntax.close) < 0, line
 	}
 	kept := 0
 	for i in 0 ..< n {
@@ -200,7 +206,7 @@ write_fact :: proc(cx: ^Compose, e: core.Edit, lo, hi: u64) -> bool {
 	}
 	indent: []u8
 	lead := false
-	if cx.style == .Byte {
+	if cx.syntax.open == "" {
 		lead = cx.value_line
 	} else if !inline {
 		indent, lead = line_shape(doc, lo)
@@ -215,6 +221,10 @@ write_fact :: proc(cx: ^Compose, e: core.Edit, lo, hi: u64) -> bool {
 		push(&cx.text, '\n') or_return
 	}
 	if lead {
+		// A comment on a line of its own leaves no blanks at the end of the line before it.
+		for t := len(cx.text); t > 0 && (cx.text[t - 1] == ' ' || cx.text[t - 1] == '\t'); t -= 1 {
+			resize(&cx.text, t - 1)
+		}
 		push(&cx.text, '\n') or_return
 		push_all(&cx.text, indent) or_return
 	}
@@ -336,6 +346,10 @@ learn_layout :: proc(cx: ^Compose, c: core.Node_Index, lo: u64) {
 		for i > 0 && (b[i - 1] == ' ' || b[i - 1] == '\t' || b[i - 1] == '\n' || b[i - 1] == '\r') {
 			i -= 1
 		}
+		// Blanks that end a line belong to the line, not to the gap.
+		if at := bytes.index_any(b[i:], transmute([]u8)string("\r\n")); at >= 0 {
+			i += at
+		}
 		return b[i:]
 	}
 	switch len(members) {
@@ -360,6 +374,7 @@ learn_layout :: proc(cx: ^Compose, c: core.Node_Index, lo: u64) {
 	for ws > 0 && (head[ws - 1] == ' ' || head[ws - 1] == '\t') {
 		ws -= 1
 	}
+	cx.bare_keys = cx.edit.bare_key != nil && len(head) > 0 && head[0] != '"' && head[0] != '\''
 	if strings.has_suffix(string(head[:ws]), key_sep) {
 		cx.key_gap = head[ws:]
 		pre := ws - len(key_sep)
@@ -367,6 +382,10 @@ learn_layout :: proc(cx: ^Compose, c: core.Node_Index, lo: u64) {
 			pre -= 1
 		}
 		cx.key_pre = head[pre:ws - len(key_sep)]
+		// A lone member on its container's line spaces its siblings as it spaces its value from its key.
+		if len(members) == 1 && len(cx.gap) == 0 {
+			cx.gap = cx.key_gap
+		}
 	}
 }
 
@@ -377,16 +396,33 @@ write_member :: proc(cx: ^Compose, e: core.Edit) -> bool {
 		put_text(cx, transmute([]u8)string("\n")) or_return
 	}
 	if e.role == .Key {
-		if edit.key_text == nil || !edit.key_text(cx.doc, e.key, &cx.text) {
+		from := len(cx.text)
+		if cx.bare_keys && edit.bare_key(cx.spec, e.key) {
+			push_all(&cx.text, e.key) or_return
+		} else if edit.key_text == nil || !edit.key_text(cx.doc, e.key, &cx.text) {
 			return false
 		}
+		wrote(cx, from, string(e.key), true) or_return
 		push_all(&cx.text, cx.key_pre) or_return
 		push_all(&cx.text, transmute([]u8)edit.key_sep) or_return
 		push_all(&cx.text, cx.key_gap) or_return
 	}
+	from := len(cx.text)
 	push_all(&cx.text, e.text) or_return
 	cx.value_line = true
-	return true
+	return wrote(cx, from, e.value, false)
+}
+
+// Records the text written from `from` as the scalar or key `want`, which the commit reads back.
+wrote :: proc(cx: ^Compose, from: int, want: core.Value, key: bool) -> bool {
+	if k := core.value_kind(want); want == nil || k == .Array || k == .Object {
+		cx.unwritten = true
+	}
+	if cx.unwritten {
+		return true
+	}
+	_, ok := push(&cx.written, core.Written{lo = u64(from), hi = u64(len(cx.text)), want = want, key = key})
+	return ok
 }
 
 // Fills `cx.items` with the comment items between survivors `l` and `r` of container `c`, sorted, and returns the span
@@ -433,15 +469,18 @@ compose_junction :: proc(cx: ^Compose, c: core.Node_Index, open, close: u64, l, 
 			first_r = it.lo
 		}
 	}
+	sep_text := transmute([]u8)cx.edit.member_sep(doc, c)
+	end := u64(len(doc.src))
+	// A separator after the left member's inline comments stays there, as the separator to what follows.
+	if comma := blanks_end(doc.src, l_end, end); has_left && following && c != core.NO_NODE && comma < end && doc.src[comma] == sep_text[0] {
+		l_end = comma + 1
+	}
 	new_inline := -1
 	inline_at := lo
 	if has_left {
 		new_inline = new_fact(cx, members[l].node, .Comment_Inline)
-		if new_inline >= 0 {
-			if comma := blanks_end(doc.src, lo, u64(len(doc.src))); following && comma < u64(len(doc.src)) && doc.src[comma] == ',' {
-				inline_at = comma + 1
-				l_end = max(l_end, inline_at)
-			}
+		if comma := blanks_end(doc.src, lo, end); new_inline >= 0 && following && comma < end && doc.src[comma] == ',' {
+			inline_at = comma + 1
 		}
 	}
 	a_end, b_lo: u64
@@ -458,7 +497,6 @@ compose_junction :: proc(cx: ^Compose, c: core.Node_Index, open, close: u64, l, 
 	case:
 		a_end, b_lo = lo, first_r
 	}
-	sep_text := transmute([]u8)cx.edit.member_sep(doc, c)
 	ca, cz := NO_BYTE, NO_BYTE
 	if c != core.NO_NODE {
 		ca = gap_comma(cx, lo, a_end, sep_text[0])
@@ -490,7 +528,7 @@ compose_junction :: proc(cx: ^Compose, c: core.Node_Index, open, close: u64, l, 
 		if i > 0 {
 			put_text(cx, sep_text) or_return
 		}
-		if i > 0 || wrote_sep {
+		if i > 0 || wrote_sep || joined && a_end == l_end {
 			put_text(cx, cx.gap) or_return
 		}
 		write_member(cx, e) or_return
@@ -498,6 +536,10 @@ compose_junction :: proc(cx: ^Compose, c: core.Node_Index, open, close: u64, l, 
 	if len(inserts) > 0 && has_right && cz == NO_BYTE {
 		put_text(cx, sep_text) or_return
 		put_text(cx, cx.gap) or_return
+	}
+	// The left member's trailing separator now joins it to the new members, so the last of them takes one.
+	if len(inserts) > 0 && joined && !run && !has_right {
+		put_text(cx, sep_text) or_return
 	}
 	emit_range(cx, b_lo, hi, true) or_return
 	owner := members[r].node if has_right else (c if c != core.NO_NODE else members[0].node)
@@ -592,7 +634,7 @@ compose_container :: proc(cx: ^Compose, c: core.Node_Index, group: []Target) -> 
 	}
 	members := cx.members[:]
 	n := len(members)
-	cx.gap, cx.key_pre, cx.key_gap = nil, nil, nil
+	cx.gap, cx.key_pre, cx.key_gap, cx.bare_keys = nil, nil, nil, false
 	if c != core.NO_NODE && !lines {
 		learn_layout(cx, c, lo)
 	}
@@ -795,7 +837,7 @@ group_edits :: proc(cx: ^Compose, groups: ^[dynamic]Target) -> bool {
 // output cannot hold.
 compose_tree :: proc(cx: ^Compose) -> bool {
 	doc, list := cx.doc, cx.list
-	style := cx.style
+	comments := core.has_comments(cx.syntax)
 	if edit := cx.edit; edit != nil && edit.emptied != nil {
 		cx.emptied = edit.emptied(doc, list)
 	}
@@ -805,27 +847,32 @@ compose_tree :: proc(cx: ^Compose) -> bool {
 	cx.segments, _ = make([dynamic]Segment, cx.allocator)
 	cx.items, _ = make([dynamic]Item, cx.allocator)
 	cx.members, _ = make([dynamic]Member, cx.allocator)
+	cx.written, _ = make([dynamic]core.Written, cx.allocator)
 	groups, _ := make([dynamic]Target, cx.allocator)
 	keys, _ := make([dynamic]Fact_Key, cx.allocator)
 	group_edits(cx, &groups) or_return
 	for e, i in list.edits {
 		switch e.op {
-		case .Insert, .Remove, .Reorder:
+		case .Insert, .Remove:
+		case .Reorder:
+			cx.unwritten = true
 		case .Set:
 			from := len(cx.text)
 			if e.role == .Key {
 				if cx.edit.key_text == nil || !cx.edit.key_text(doc, e.text, &cx.text) {
 					return false
 				}
+				wrote(cx, from, string(e.text), true) or_return
 			} else {
 				push_all(&cx.text, e.text) or_return
+				wrote(cx, from, e.value, false) or_return
 			}
 			at := core.node_start(doc.nodes[e.node])
 			end := at + u64(len(core.span(doc, e.node)))
 			push(&cx.chunks, Chunk{lo = at, hi = end, from = from, to = len(cx.text), rank = .Set}) or_return
 		case .Set_Fact, .Remove_Fact:
 			push(&keys, Fact_Key{key = u64(e.node) << 8 | u64(e.role), edit = i}) or_return
-			if e.op == .Set_Fact && !fact_slot(cx.edit, doc, e.node, e.role, style, emptied) {
+			if e.op == .Set_Fact && !fact_slot(cx.edit, doc, e.node, e.role, comments, emptied) {
 				cx.dropped += 1
 			} else if core.is_property(e.role) {
 				property_chunks(cx, e) or_return
@@ -855,7 +902,7 @@ compose_tree :: proc(cx: ^Compose) -> bool {
 	}
 	for f in doc.facts {
 		// Only a comment is cut for want of a slot: an attribute is the format's markup, which stays with its node.
-		if f.role > .Comment_Foot || fact_edit_of(cx, f.node, f.role) >= 0 || fact_slot(cx.edit, doc, f.node, f.role, style, emptied) {
+		if f.role > .Comment_Foot || fact_edit_of(cx, f.node, f.role) >= 0 || fact_slot(cx.edit, doc, f.node, f.role, comments, emptied) {
 			continue
 		}
 		// An unnamed root comment above shared keys reads as the root's foot once the root is emptied, so it stays.
@@ -984,26 +1031,12 @@ blanks_end :: #force_inline proc(src: []u8, lo, hi: u64) -> u64 {
 	return p
 }
 
-// Writes `body` as one comment: after the format's comment byte, as a line comment, or as a block comment, with one
-// space inside each marker when `padded`.
+// Writes `body` as one comment of the output's syntax: a line comment when `line` or the syntax has no block form, else a
+// block comment, with one space inside each marker when `padded`.
 put_comment :: proc(cx: ^Compose, body: []u8, line, padded: bool) -> bool {
-	switch {
-	case cx.style == .Byte:
-		push(&cx.text, cx.comment_byte) or_return
-	case line:
-		push_all(&cx.text, transmute([]u8)string("//")) or_return
-	case:
-		push_all(&cx.text, transmute([]u8)string("/*")) or_return
-	}
-	if padded {
-		push(&cx.text, ' ') or_return
-	}
-	push_all(&cx.text, body) or_return
-	if cx.style != .Byte && !line {
-		push_all(&cx.text, transmute([]u8)string(" */" if padded else "*/")) or_return
-	}
-	return true
+	return spell_comment(&cx.text, cx.syntax, body, line, padded)
 }
+
 
 // Whether `body` holds a line end a JSON line comment ends at: LF, CR, or a Unicode line separator. `line_end_len`
 // reads the same set.
@@ -1032,11 +1065,11 @@ line_shape :: proc(doc: ^core.Document, pos: u64) -> (indent: []u8, lead: bool) 
 // or text's end it precedes, and on no other node. A format with a `fact_slot` says its own. An output with no marker
 // holds no fact. The role's shape and the body's spelling are checked where the fact is written. `emptied` says the
 // list removes every member of the root.
-fact_slot :: #force_inline proc(edit: ^core.Edit_Services, doc: ^core.Document, node: core.Node_Index, role: core.Role, style: core.Comment_Spelling, emptied: bool) -> bool {
+fact_slot :: #force_inline proc(edit: ^core.Edit_Services, doc: ^core.Document, node: core.Node_Index, role: core.Role, comments: bool, emptied: bool) -> bool {
 	if core.is_property(role) {
 		return edit != nil && edit.prefix != nil && (edit.fact_slot == nil || edit.fact_slot(doc, node, role, emptied))
 	}
-	if style == .None {
+	if !comments {
 		return false
 	}
 	if edit != nil && edit.fact_slot != nil {

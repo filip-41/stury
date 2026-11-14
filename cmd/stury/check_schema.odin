@@ -13,7 +13,6 @@ import core "../../core"
 import "../../core/typed"
 import "../../core/write"
 import "../../core/schema"
-import dsv "../../dsv"
 import json "../../json"
 import "../../core/model"
 import "message"
@@ -35,6 +34,7 @@ Schema_Options :: struct {
 	reported:      bool,
 	format_assert: bool,
 	filter:        Maybe(string), // a filter to type against the schema, which judges no input then
+	format:        Maybe(Format), // the format the schema is written in, and else the one its file's extension names
 }
 
 // A schema compiled and bound to the format the inputs are read as. `text` is the schema's, which `compiled` borrows.
@@ -98,7 +98,7 @@ schema_option :: proc(s: ^Schema_Options, args: []string, i: int) {
 schema_open :: proc(s: Schema_Options, src: Source, option := "--schema") -> ^Schema_Check {
 	sc := schema_read(s, option)
 	err: core.Error
-	if sc.bound, err = schema.bind(sc.compiled, {dsv.checks_for(src.as), src.as}); err != nil {
+	if sc.bound, err = schema.bind(sc.compiled, {layout = src.as}); err != nil {
 		message.write_stderr("stury: error: %s %s: %s\n", option, s.file, edit_error_text(sc.text, err))
 		os.exit(EXIT_USAGE)
 	}
@@ -155,8 +155,14 @@ schema_read :: proc(s: Schema_Options, option := "--schema") -> ^Schema_Check {
 		refs          = s.refs if s.refs != "" else schema_directory(s.file),
 		draft         = s.draft,
 	}
+	dot := strings.last_index_byte(s.file, '.')
+	named, _ := format_named(s.file[dot + 1:] if dot >= 0 else "")
+	format := s.format.? or_else named
+	if FORMATS[format].cells {
+		usage_error("%s %s: a schema is a tree, and %s holds a table", option, s.file, FORMATS[format].name)
+	}
 	err: core.Error
-	if sc.compiled, err = schema.compile(sc.text, json.as(.Json), opts); err != nil {
+	if sc.compiled, err = schema.compile(sc.text, tree_reading(format, &Opts{}), opts); err != nil {
 		hint := " (--schema-ref names the directory references are read from)" if refuses_reference(err) else ""
 		message.write_stderr("stury: error: %s %s: %s%s\n", option, s.file, edit_error_text(sc.text, err), hint)
 		os.exit(EXIT_USAGE)

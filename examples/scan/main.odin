@@ -35,7 +35,7 @@ run :: proc(src: []u8) -> json.Error {
 	if answer.outcome == .Found {
 		fmt.println(string(json.span(&doc, answer.node))) // "engines", quotes and all
 		buf: [32]u8
-		text, _ := json.text(&doc, doc.nodes[answer.node], buf[:]) // decoded into the caller's buffer, never allocated
+		text, _ := json.text(&doc, answer.node, buf[:]) // decoded into the caller's buffer, never allocated
 		fmt.println(text) // engines
 	}
 

@@ -112,6 +112,14 @@ emit :: proc(o: ^Output, v: jq.Value) -> bool {
 	return true
 }
 
+// Tells on stderr that `dropped` facts of input `name`, or of the input when it is empty, are not in the output,
+// whose format `to` holds no place for them.
+tell_dropped :: proc(name: string, to: Format, dropped: int) {
+	if dropped > 0 {
+		message.write_stderr("stury: warning: %s%s%s cannot hold %d %s of the input, so %s dropped\n", name, ": " if name != "" else "", FORMATS[to].name, dropped, "comment, tag or attribute" if dropped == 1 else "comments, tags or attributes", "it is" if dropped == 1 else "they are")
+	}
+}
+
 // One output as a text of the output format: a value that is a node of a document by the format's document writer,
 // which keeps what the document spells beyond JSON, and any other value by its token writer, which keeps the tags of
 // its strings. A value the format has no spelling for fails the run, with the reason.
@@ -121,27 +129,19 @@ emit_text :: proc(o: ^Output, v: jq.Value) -> bool {
 	text: []u8
 	err: core.Error
 	if ref, is_ref := v.(jq.Ref); is_ref {
-		text, _, err = core.write(ref.doc, o.layout.opts, as, ref.node, context.temp_allocator)
+		dropped: int
+		text, dropped, err = core.write(ref.doc, o.layout.opts, as, ref.node, context.temp_allocator)
+		tell_dropped("", o.opts.to, dropped)
 	} else {
 		text, err = write.write_value(v, as, o.layout.opts, context.temp_allocator)
 	}
 	if err != nil {
 		why := mistag_text(as.readers, FORMATS[o.opts.to].title, v) if write_refusal_kind(err) == .Bad_Raw else ""
-		o.ip.err = why if why != "" else text_refusal(o.opts.to, err)
+		o.ip.err = why if why != "" else edit_error_text(nil, err)
 		return false
 	}
 	put_format_text(o, as, text, true)
 	return true
-}
-
-// Why the writer of format `to` refused a value, in the format's own words where its row has them.
-text_refusal :: proc(to: Format, err: core.Error) -> string {
-	if refusal := FORMATS[to].refusal; refusal != nil {
-		if why := refusal(write_refusal_kind(err)); why != "" {
-			return why
-		}
-	}
-	return strings.concatenate({"cannot write the value as ", FORMATS[to].name}, context.temp_allocator)
 }
 
 // Why a writer refused `v` as `.Bad_Raw` where a string in it holds a tag its text is no type of by `readers`, as

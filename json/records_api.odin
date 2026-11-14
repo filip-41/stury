@@ -11,6 +11,7 @@ import "core:io"
 import core "../core"
 import build "../core/build"
 import typed "../core/typed"
+import cw "../core/write"
 import records "../core/records"
 
 // The reads of a record's value as spec `S`: its typed read, its build and its scan. Its checks are the plan's.
@@ -58,9 +59,9 @@ records_open_stream :: proc(input: io.Reader, $S: Spec, opts := Options{}, frami
 	return records.open_stream_with(input, bound_as(S, opts), framing_of(S), nil, framing, stream, at, allocator)
 }
 
-// Returns the fault of each refused record of `src`, as `records.check` does with `as(spec, opts)`.
-records_check :: proc(src: []u8, $S: Spec, opts := Options{}, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> ([]core.Fault, runtime.Allocator_Error) {
-	return records.check(src, bound_as(S, opts), framing, allocator, runner, at, framing_of(S))
+// Returns the fault of each refused record of `src`, as `records.validate` does with `as(spec, opts)`.
+records_validate :: proc(src: []u8, $S: Spec, opts := Options{}, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> ([]core.Fault, runtime.Allocator_Error) {
+	return records.validate(src, bound_as(S, opts), framing, allocator, runner, at, framing_of(S))
 }
 
 // Hands the pieces of the records of `src` to `task`, as `records.each` does with `as(spec, opts)`.
@@ -68,7 +69,12 @@ records_each :: #force_inline proc(src: []u8, $S: Spec, framing: core.Framing, t
 	return records.each(src, bound_as(S, opts), framing, task, data, runner, at, framing_of(S))
 }
 
-// Starts a writer of records, as `records.writer_init` does with `as(spec)`.
-writer_init :: proc(wr: ^records.Writer, w: io.Stream, $S: Spec, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error_Kind {
-	return records.writer_init(wr, w, bound_as(S), framing, opts, allocator, &TOKENS)
+// Starts a token write, as `write.tokens_init` does with `as(spec, opts)`.
+tokens_init :: proc(t: ^cw.Tokens, $S: Spec, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind {
+	return cw.tokens_init(t, bound_as(S, opts), write, allocator, stream, &TOKENS)
+}
+
+// Starts a writer of records, as `records.writer_init` does with `as(spec, opts)`.
+writer_init :: proc(wr: ^records.Writer, w: io.Stream, $S: Spec, opts := Options{}, framing := core.Framing.Lines, write := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error_Kind {
+	return records.writer_init(wr, w, bound_as(S, opts), framing, write, allocator, &TOKENS)
 }

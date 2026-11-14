@@ -22,6 +22,7 @@ object of the nodes of its root, one member each.
 | A comment | a `Comment`, `Comment_Inline` or `Comment_Foot` fact, by the position rule every format uses |
 | A processing instruction | an `Instruction` fact, by the same rule |
 | The document type | a `Doctype` fact on the root |
+| The XML declaration | a `Directive` fact on the root |
 
 The key `#text` (`core.MARKUP_TEXT`, `xml.TEXT_KEY`) has no source span and is marked `SPELLING_SYNTHETIC`, so its text
 comes from the format. An element's text reads by `kind` as a string, or with `Options.infer` as `true`, `false` or a
@@ -66,6 +67,10 @@ members, not by the grouped value.
 selector list once into a `Selector`, which `css.destroy` frees, and `css.select(&doc, &sel, from)` gives the value
 node of each element it matches among the descendants of node `from`, the root by default, in document order. It
 matches on the document, not the grouped value, so siblings and positions count across names as the text orders them.
+`css.select_value(v, &sel, fold)` matches over a value instead, a node or the value an update made of one, whose
+built members are read as the update left them and whose nodes as the document has them, and gives each match's value
+with its path from `v` through the grouped members. A value an update put in place of an element keeps that element's
+name and attributes where it writes none (`core.in_place_of`).
 
 - A selector holds type and universal selectors, `#id`, `.class`, attribute selectors `[a]`, `[a=v]`, `[a~=v]`,
   `[a|=v]`, `[a^=v]`, `[a$=v]` and `[a*=v]` with a quoted or bare value and the `i` or `s` flag, the descendant, `>`,
@@ -94,8 +99,8 @@ elements and the answer, and a decode of an attribute value longer than 256 byte
 ## XML
 
 `xml` reads XML 1.0 (Fifth Edition) well-formedness. It has `validate`, `walk`, `build`, `scan`, `find`,
-`each_answer`, `query`, `as`, `checks` and `bind_schema`, each in a bound form for a constant `Spec` (`.Xml`) and a
-chosen one. The internal subset of the document type is read, as a processor that does not validate reads it, and
+`each_answer`, `query`, `as`, `checks` and `bind_schema`, each taking a constant `Spec` (`.Xml`), and `core`'s forms take a
+spec chosen at run time as `xml.as(spec)`. The internal subset of the document type is read, as a processor that does not validate reads it, and
 nothing else of a DTD: stury reads no external subset and no external entity. Only UTF-8 is read, with or without a
 byte order mark.
 
@@ -107,10 +112,10 @@ byte order mark.
 | An attribute | an `Attribute`-role fact after the key, `Plain`, spanning `name="value"` through the closing quote |
 | An element with no child element | `Plain` over its content, with `n = 0` when empty. `SPELLING_DECODE` is set when the content holds `&`, a carriage return, a CDATA section, a comment or a processing instruction |
 | An element with child elements | `Object` spanning the start tag, a `#text` `Key` and `Plain` for each run of text that is not only white space, each child as a member, `End` spanning the end tag |
-| A processing instruction or the document type | a fact with the `Instruction` or `Doctype` role |
-| A comment | `Comment` before the token that follows it, `Comment_Inline` after a child that ends on its own line, `Comment_Foot` before an end tag of an `Object` |
+| A processing instruction, the document type or the XML declaration | a fact with the `Instruction`, `Doctype` or `Directive` role |
+| A comment | `Comment` before the token that follows it, given after the parent's `Object` when it stands before the parent's first child, `Comment_Inline` after a child that ends on its own line, `Comment_Foot` before an end tag that follows a child, and in an element with no child element the element's `Comment_Foot`, given between its key and its value |
 
-The XML declaration is no fact. A skip from the hook hides the element's value and its `End`. An attribute fact's
+A skip from the hook hides the element's value and its `End`. An attribute fact's
 lead runs through the opening quote and its tail is the closing one, as `Fact` says for the role, so
 `core.facts_of(&doc, node, .Attribute)` gives the value as written. A value that starts more than 255 bytes past its
 name, as a DTD default behind a long enumerated type may, holds a lead of 255, and XML's readers find the opening quote
@@ -209,9 +214,9 @@ read is `.Bad_Result`.
 - An insert is an element after the member before it, and before the first child when it goes first, laid out by the
   white space before the member that follows. A removal takes an element with the white space before it. A rename
   respells the start and end tags.
-- A fact edit of role `Comment` writes `<!--…-->` at the head of an element's content (before the root element for
-  `ROOT`), `Comment_Inline` after the element and `Comment_Foot` before its end tag (after the root element for
-  `ROOT`). Role `Attribute` takes a body `name="value"` written in the start tag after the name, the shape
+- A fact edit of role `Comment` writes `<!--…-->` before the element (before the root element for `ROOT`),
+  `Comment_Inline` after the element and `Comment_Foot` before its end tag (after the root element for `ROOT`), which
+  an empty-element tag has no place for. Role `Attribute` takes a body `name="value"` written in the start tag after the name, the shape
   `core.comments(v, .Attribute)` reads a node's attributes in, so the CLI's `.&k = "v"` writes the bodies it read with
   one replaced or added. Either replaces the facts of that role where they stand, an attribute an internal subset
   defaults excepted.
@@ -299,7 +304,7 @@ A text is sound when it reads back as the tree it was written from: the write re
 document or a fragment in `body`, writes that again and compares the two, so `{"td": 1}`, a `div` in a `p`, a void
 element with content, a raw text that holds its end tag and an upper-case name are `.Unwritable`. A pretty write puts an
 element whose children are all elements on lines of its own and lays nothing into `pre`, `listing`, `textarea` or an
-element that holds text. A value no object is `.Unsupported`.
+element that holds text. A value no object is `.Unwritable`.
 
 `html.marshal` and the token write make their value in `write.MARKUP_TREE`, as XML's do, and `write.put_markup` reads it
 back as a built value that `html.write`'s serialization writes, read back as above. A struct of one member `html` is

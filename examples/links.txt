@@ -3,9 +3,9 @@
 # reaches a format's handle table; a count below it means the line is stale.
 # example walks passes
 crossformat 6 9
-dsv 0 43
-edit 4 0
-jsonc 5 0
+dsv 0 45
+edit 8 0
+jsonc 9 0
 model 8 0
 quickstart 6 0
 records 2 0

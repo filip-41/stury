@@ -123,7 +123,7 @@ strings_of :: proc(src: []u8) -> (strs: []string, total: int) {
 		if n.role != .Value || n.kind != .String {
 			continue
 		}
-		s, ok := json.text(&doc.view, n, pool[used:])
+		s, ok := json.token_text(&doc.view, n, pool[used:])
 		if !ok {
 			fmt.eprintln("string too long")
 			os.exit(1)

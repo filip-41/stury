@@ -1,11 +1,12 @@
 // The walk tests share this harness. It holds a hook that logs every token and hashes it, the rule that picks `Skip`
-// and `Stop`, a mutation of a seeded text, the json5-tests suites, the law of `records.each`, the bound on a
-// reader's memory, and a thread with a small stack.
+// and `Stop`, a mutation of a seeded text, the json5-tests suites, the law of `records.each`, the records of
+// `.Entries`, the bound on a reader's memory, and a thread with a small stack.
 package walktest
 
 import "base:runtime"
 import "core:bytes"
 import "core:fmt"
+import "core:io"
 import "core:mem"
 import "core:mem/virtual"
 import "core:math/rand"
@@ -18,6 +19,7 @@ import compose "../core/compose"
 import host "../host"
 import typed "../core/typed"
 import records "../core/records"
+import json "../json"
 
 // The stack of the thread `on_small_stack` runs its work on: a quarter of the 1 MB a Windows thread has by default.
 SMALL_STACK :: 256 * 1024
@@ -368,8 +370,8 @@ fact_holdable :: proc(list: ^core.Edit_List, node: core.Node_Index, role: core.R
 	if edit == nil || edit.comment == nil {
 		return false
 	}
-	style, _ := edit.comment(doc, spec)
-	if style == .None {
+	syntax := edit.comment(doc, spec)
+	if !core.has_comments(syntax) {
 		return false
 	}
 	table := core.is_flat(doc)
@@ -400,18 +402,14 @@ fact_holdable :: proc(list: ^core.Edit_List, node: core.Node_Index, role: core.R
 			return false
 		}
 	}
-	switch style {
-	case .None:
-		return false
-	case .Byte:
+	if syntax.open == "" {
 		return !strings.contains(body, "\n") && !strings.contains(body, "\r")
-	case .Line:
-		return !(strings.contains(body, "*/") && (body_line_end(body) || role == .Comment_Inline))
 	}
-	return false
+	return !(strings.contains(body, syntax.close) && (body_line_end(body) || role == .Comment_Inline))
 }
 
-// Whether a named fact's body holds `*/` and no line end under a `.Line` style, so core may spell it or drop it.
+// Whether a named fact's body holds `*/` and no line end under a syntax with a block form, so core may spell it or
+// drop it.
 @(private)
 fact_either :: proc(list: ^core.Edit_List, e: core.Edit, spec: u8) -> bool {
 	body := string(e.text)
@@ -422,8 +420,7 @@ fact_either :: proc(list: ^core.Edit_List, e: core.Edit, spec: u8) -> bool {
 	if edit == nil || edit.comment == nil {
 		return false
 	}
-	style, _ := edit.comment(list.doc, spec)
-	return style == .Line
+	return edit.comment(list.doc, spec).open != ""
 }
 
 // Whether a fact edit names one node and role: that fact is the edit's, not the invariant's.
@@ -790,6 +787,201 @@ expect_each_law :: proc(t: ^testing.T, pools: []host.Pool, src: []u8, as: core.A
 	return true
 }
 
+// The records `it` gives, a line each: the offset, the key as written and the record's document written as JSON, then
+// `end`, or `fault` and its offset. It closes `it`.
+entries_lines :: proc(it: ^records.Reader) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	for rec in records.next(it) {
+		doc, err := records.build(it, rec, context.temp_allocator)
+		out, _, werr := json.write(&doc, .Json, allocator = context.temp_allocator)
+		if err != nil || werr != nil {
+			out = transmute([]u8)fmt.tprint("error", err, werr)
+		}
+		fmt.sbprintf(&b, "%d %s %s\n", rec.at, rec.key, out)
+		core.destroy(&doc)
+	}
+	if f, bad := it.fault.?; bad {
+		fmt.sbprintf(&b, "fault %d", f.at)
+	} else {
+		strings.write_string(&b, "end")
+	}
+	records.close(it)
+	return strings.to_string(b)
+}
+
+// An input that gives `size` bytes a read, so a stream's window moves between the records.
+Trickle :: struct {
+	src:  []u8,
+	at:   int,
+	size: int,
+}
+
+trickle_reader :: proc(t: ^Trickle) -> io.Reader {
+	return {data = t, procedure = proc(data: rawptr, mode: io.Stream_Mode, p: []u8, _: i64, _: io.Seek_From) -> (i64, io.Error) {
+		t := (^Trickle)(data)
+		if mode != .Read {
+			return 0, .Unsupported
+		}
+		if t.at == len(t.src) {
+			return 0, .EOF
+		}
+		n := copy(p[:min(len(p), t.size)], t.src[t.at:])
+		t.at += n
+		return i64(n), nil
+	}}
+}
+
+// The framings `caps` names are those the records of `as` open in.
+expect_framings :: proc(t: ^testing.T, caps: core.Capabilities, as: core.As, loc := #caller_location) -> bool {
+	ok := true
+	for framing in core.Framing {
+		it := records.open(nil, as, framing)
+		opens := it.fault == nil
+		records.close(&it)
+		ok &&= testing.expectf(t, opens == (framing in caps.framings), "%v opens %v", framing, opens, loc = loc)
+	}
+	return ok
+}
+
+// Under `.Entries` the records of `src` named by `names` are `want`, as `entries_lines` writes them, read in memory and
+// from a stream, and `each` on two threads gives the records `next` gives.
+expect_entries :: proc(t: ^testing.T, src: string, as: core.As, names: []string, want: string, loc := #caller_location) -> bool {
+	it := records.open(transmute([]u8)src, as, .Entries, entries = names)
+	ok := testing.expect_value(t, entries_lines(&it), want, loc)
+	r: strings.Reader
+	stream := records.open_stream(strings.to_reader(&r, src), as, .Entries, {entries = names})
+	ok &&= testing.expect_value(t, entries_lines(&stream), want, loc)
+	for size in 1 ..= 3 {
+		trickle := Trickle{src = transmute([]u8)src, size = size}
+		slow := records.open_stream(trickle_reader(&trickle), as, .Entries, {entries = names})
+		ok &&= testing.expect_value(t, entries_lines(&slow), want, loc)
+	}
+	if strings.has_suffix(want, "end") {
+		ok &&= expect_entries_whole(t, src, as, names, loc)
+	}
+	pools: [1]host.Pool
+	host.pool_init(&pools[0], 2)
+	defer host.pool_destroy(&pools[0])
+	return expect_each_law(t, pools[:], transmute([]u8)src, as, .Entries) && ok
+}
+
+// The `.Entries` records of `src` named by `names`, read in memory and from a stream, are the members of that container
+// in the build of the whole text, each written as JSON.
+expect_entries_whole :: proc(t: ^testing.T, src: string, as: core.As, names: []string, loc := #caller_location) -> bool {
+	whole, err := core.build(transmute([]u8)src, as, allocator = context.temp_allocator)
+	if !testing.expectf(t, err == nil, "%q builds: %v", src, err, loc = loc) {
+		return false
+	}
+	defer core.destroy(&whole)
+	b := strings.builder_make(context.temp_allocator)
+	container, found := core.ROOT, true
+	for name, depth in names {
+		found = false
+		named := core.members_named(&whole, container, name)
+		for v in core.member_next(&named) {
+			if kind := whole.nodes[v].kind; kind == .Object || kind == .Array && depth == len(names) - 1 {
+				container, found = v, true
+				break
+			}
+		}
+		if !found {
+			break
+		}
+	}
+	members := core.children(&whole, container)
+	for v in core.child_next(&members) {
+		if !found {
+			break
+		}
+		out, _, _ := json.write(&whole, .Json, node = v, allocator = context.temp_allocator)
+		fmt.sbprintf(&b, "%s\n", out)
+	}
+	ok := true
+	for streamed in ([2]bool{false, true}) {
+		r: strings.Reader
+		it := records.open(transmute([]u8)src, as, .Entries, entries = names)
+		if streamed {
+			it = records.open_stream(strings.to_reader(&r, src), as, .Entries, {entries = names})
+		}
+		got := strings.builder_make(context.temp_allocator)
+		for rec in records.next(&it) {
+			doc, berr := records.build(&it, rec, context.temp_allocator)
+			out, _, _ := json.write(&doc, .Json, allocator = context.temp_allocator)
+			fmt.sbprintf(&got, "%s\n", out if berr == nil else transmute([]u8)fmt.tprint("error", berr))
+			core.destroy(&doc)
+		}
+		records.close(&it)
+		ok &&= testing.expectf(t, strings.to_string(got) == strings.to_string(b), "%q streamed %v: records\n%s\nwhole members\n%s", src, streamed, strings.to_string(got), strings.to_string(b), loc = loc)
+	}
+	return ok
+}
+
+// Every `.Entries` record of `src` named by `names` builds, after each later record is given, to the document it built
+// when it was given: in memory, also once the records end, and from a stream whose window holds the whole text.
+expect_entries_built_later :: proc(t: ^testing.T, src: string, as: core.As, names: []string, loc := #caller_location) -> bool {
+	ok := true
+	for streamed in ([2]bool{false, true}) {
+		r: strings.Reader
+		it := records.open(transmute([]u8)src, as, .Entries, entries = names)
+		if streamed {
+			it = records.open_stream(strings.to_reader(&r, src), as, .Entries, {entries = names})
+		}
+		given := make([dynamic]records.Record, context.temp_allocator)
+		then := make([dynamic]string, context.temp_allocator)
+		for rec in records.next(&it) {
+			append(&given, rec)
+			append(&then, built_json(&it, rec))
+			for earlier, i in given {
+				ok &&= testing.expectf(t, built_json(&it, earlier) == then[i], "%q streamed %v: record %d after %d", src, streamed, i, len(given) - 1, loc = loc)
+			}
+		}
+		if !streamed {
+			for earlier, i in given {
+				ok &&= testing.expectf(t, built_json(&it, earlier) == then[i], "%q: record %d after the end", src, i, loc = loc)
+			}
+		}
+		records.close(&it)
+	}
+	return ok
+}
+
+@(private)
+built_json :: proc(it: ^records.Reader, rec: records.Record) -> string {
+	doc, err := records.build(it, rec, context.temp_allocator)
+	defer core.destroy(&doc)
+	if err != nil {
+		return fmt.tprint("error", err)
+	}
+	out, _, _ := json.write(&doc, .Json, allocator = context.temp_allocator)
+	return string(out)
+}
+
+// The `.Entries` records of `src` named by `names`, each read as a `T` by `records.read`, a line each, then `end`, or
+// the error that ended them.
+entries_read :: proc(src: string, as: core.As, names: []string, $T: typeid) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	it := records.open(transmute([]u8)src, as, .Entries, entries = names)
+	defer records.close(&it)
+	for {
+		v: T
+		err, more := records.read(&it, &v, nil, allocator = context.temp_allocator)
+		if !more {
+			break
+		}
+		if err != nil {
+			fmt.sbprintf(&b, "error %v\n", err)
+			continue
+		}
+		fmt.sbprintf(&b, "%v\n", v)
+	}
+	if f, bad := it.fault.?; bad {
+		fmt.sbprintf(&b, "fault %v", f.kind)
+	} else {
+		strings.write_string(&b, "end")
+	}
+	return strings.to_string(b)
+}
+
 @(private = "file")
 Read_Way :: enum {
 	Read,
@@ -1013,4 +1205,40 @@ same_error :: proc "contextless" (a, b: core.Error) -> bool {
 		return ok && x == y
 	}
 	return false
+}
+
+// Reading and building the `.Entries` records of `head`, then `member` ten times as many times, then `tail`, holds no
+// more of the reader's memory at its peak, so the reader and the format's cursor hold no more than a member at a time.
+// With `stream` the text is read from a stream too.
+expect_entries_bounded :: proc(t: ^testing.T, as: core.As, names: []string, head, member, tail: string, stream: bool, loc := #caller_location) -> bool {
+	peak :: proc(as: core.As, names: []string, head, member, tail: string, n: int, stream: bool) -> int {
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_string(&b, head)
+		for _ in 0 ..< n {
+			strings.write_string(&b, member)
+		}
+		strings.write_string(&b, tail)
+		src := b.buf[:]
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, runtime.heap_allocator())
+		defer mem.tracking_allocator_destroy(&track)
+		allocator := mem.tracking_allocator(&track)
+		r: bytes.Reader
+		it := records.open(src, as, .Entries, 0, allocator, names)
+		if stream {
+			it = records.open_stream(bytes.reader_init(&r, src), as, .Entries, {entries = names}, 0, allocator)
+		}
+		for rec in records.next(&it) {
+			doc, err := records.build(&it, rec, allocator)
+			if err != nil {
+				return -1
+			}
+			core.destroy(&doc)
+		}
+		records.close(&it)
+		return -1 if it.fault != nil else int(track.peak_memory_allocated)
+	}
+	defer free_all(context.temp_allocator)
+	few, many := peak(as, names, head, member, tail, 100, stream), peak(as, names, head, member, tail, 1000, stream)
+	return testing.expectf(t, few > 0 && many <= few, "peak bytes %v for 100 members, %v for 1000", few, many, loc = loc)
 }

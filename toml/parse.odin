@@ -18,6 +18,7 @@ Parser :: struct {
 	pending:   u32, // the first comment no node has taken
 	last:      u32, // the value that most recently ended, which a comment on its line belongs to
 	inline_ok: bool, // no line end has passed since `last` ended
+	datetimes: bool, // a datetime was read
 	parts:     [dynamic]Part,
 	stack:     [dynamic]u32,
 }
@@ -106,6 +107,7 @@ blanks :: proc "contextless" (p: ^Parser, newlines: bool) -> bool {
 			if !newlines {
 				return true
 			}
+			root_heads(p)
 			p.pos += 1
 			p.inline_ok = false
 		case '\r':
@@ -115,6 +117,7 @@ blanks :: proc "contextless" (p: ^Parser, newlines: bool) -> bool {
 			if p.pos + 1 >= len(src) || src[p.pos + 1] != '\n' {
 				return fault(p, p.pos, .Bad_Char, .Lone_Cr)
 			}
+			root_heads(p)
 			p.pos += 2
 			p.inline_ok = false
 		case:
@@ -122,6 +125,23 @@ blanks :: proc "contextless" (p: ^Parser, newlines: bool) -> bool {
 		}
 	}
 	return true
+}
+
+// Gives the comments no node has taken to the root when no statement came before them and the line that ends at
+// `p.pos` is blank: the text's head comment runs to its last blank line before the first statement.
+root_heads :: proc "contextless" (p: ^Parser) {
+	if len(p.tree.nodes) != 1 || p.pending == u32(len(p.tree.comments)) {
+		return
+	}
+	i := p.pos
+	for i > 0 && (p.src[i - 1] == ' ' || p.src[i - 1] == '\t') {
+		i -= 1
+	}
+	if i > 0 && p.src[i - 1] == '\n' {
+		root := &p.tree.nodes[0]
+		root.head, root.heads = 0, u32(len(p.tree.comments))
+		p.pending = root.heads
+	}
 }
 
 // Judges the end of a statement: a comment, then a line end or the text's end.
@@ -411,6 +431,7 @@ value :: proc "contextless" (p: ^Parser, id: u32) -> (opened: bool, ok: bool) {
 				p.fail = v
 				return false, false
 			}
+			p.datetimes = true
 			return false, set_scalar(p, id, lo, end, .String, datetime_spelling(kind))
 		}
 		end, spelling, v := scan_number(src, lo)
@@ -497,8 +518,9 @@ parse :: proc "contextless" (p: ^Parser, lo: u64) -> bool {
 		}
 		end_of_line(p) or_return
 	}
-	root := &p.tree.nodes[0]
-	root.foot, root.foots = p.pending, u32(len(p.tree.comments)) - p.pending
+	// The comments past the last member end the table open at the text's end, the root when no header opened one.
+	last := &p.tree.nodes[p.cur]
+	last.foot, last.foots = p.pending, u32(len(p.tree.comments)) - p.pending
 	p.pending = u32(len(p.tree.comments))
 	return true
 }

@@ -40,14 +40,12 @@ commit :: proc(list: ^core.Edit_List, as: Maybe(core.As) = nil, allocator := con
 	if refusal.kind != .None {
 		return nil, 0, core.error_of(refusal, edit = true)
 	}
-	// A format's own commit is judged by its validate under the document's options and the target spec.
-	if list.edit.validate != nil {
-		judged := doc.as
-		judged.spec = target.spec
-		if fault, bad := list.edit.validate(made, judged).?; bad {
-			delete(made, allocator)
-			return nil, 0, core.error_of(core.Document_Error{kind = .Bad_Result, inner = fault}, edit = true)
-		}
+	// A format's own commit is judged under the document's options and the target spec.
+	judged := doc.as
+	judged.spec = target.spec
+	if refusal = reads_back(list, made, target, judged, false, allocator); refusal.kind != .None {
+		delete(made, allocator)
+		return nil, 0, core.error_of(refusal, edit = true)
 	}
 	return made, cut, nil
 }
@@ -74,9 +72,9 @@ commit_spec :: proc(list: ^core.Edit_List, target: core.As, allocator: runtime.A
 			planned.edits = written
 		}
 	}
-	cx := Compose{doc = doc, edit = list.edit, list = &planned, allocator = scratch, err = {kind = .No_Memory}}
+	cx := Compose{doc = doc, edit = list.edit, list = &planned, spec = spec, allocator = scratch, err = {kind = .No_Memory}}
 	if edit := list.edit; edit != nil && edit.comment != nil {
-		cx.style, cx.comment_byte = edit.comment(doc, spec)
+		cx.syntax = edit.comment(doc, spec)
 	}
 	if !compose_tree(&cx) {
 		return nil, 0, cx.err
@@ -97,7 +95,28 @@ commit_spec :: proc(list: ^core.Edit_List, target: core.As, allocator: runtime.A
 		delete(out, allocator)
 		return nil, 0, {kind = .Bad_Result}
 	}
-	if e := reads_as_source(list.edit, doc, out, target); e.kind != .None {
+	// The planned edits are the ones the output holds, a cell removed from every record among them. An output of the
+	// document's spec is read back under its strict options, which judge it as `reads_as_source` does, and only a text
+	// that read refuses is judged by `reads_as_source` and read again under the target's own.
+	// Many edits are read back as they were written: each scalar and key in the bytes the commit put it in, in a walk that
+	// judges the whole output, since the bytes between are the source's.
+	e := core.Document_Error{kind = .Bad_Result}
+	if spec == doc.as.spec {
+		strict := doc.as
+		strict.tolerate = {}
+		if written, known := written_at(&cx, seps); known && len(planned.edits) > core.MAX_PATHS && list.edit.walk_written != nil {
+			context.allocator = scratch
+			e = core.reads_written(out, strict, written, list.edit.walk_written)
+		} else {
+			e = reads_back(&planned, out, target, strict, true, allocator)
+		}
+	}
+	if e.kind == .Bad_Result && e.reason == .None {
+		if e = reads_as_source(list.edit, doc, out, target); e.kind == .None {
+			e = reads_back(&planned, out, target, nil, false, allocator)
+		}
+	}
+	if e.kind != .None {
 		delete(out, allocator)
 		return nil, 0, e
 	}
@@ -174,6 +193,43 @@ splice :: proc(doc: ^core.Document, chunks: []Chunk, text: []u8, segments: []Seg
 	}
 	copy(out[w:], doc.src[at:])
 	return out, {}
+}
+
+// The bytes of the output `splice` writes that each of `cx.written` lies in, sorted, from the place of the chunk it was
+// written in. False when an edit wrote what they do not hold, or segments or line separators write the output.
+@(private)
+written_at :: proc(cx: ^Compose, seps: []u64) -> ([]core.Written, bool) {
+	if cx.unwritten || len(cx.segments) > 0 || len(seps) > 0 {
+		return nil, false
+	}
+	Placed :: struct {
+		from, to: int,
+		at:       u64,
+	}
+	// Chunks do not overlap once ordered, so each starts in the output past the length the chunks before it add.
+	placed := make([]Placed, len(cx.chunks), cx.allocator)
+	shift := i64(0)
+	for c, i in cx.chunks {
+		placed[i] = {c.from, c.to, u64(i64(c.lo) + shift)}
+		shift += i64(c.to - c.from) - i64(c.hi - c.lo)
+	}
+	slice.sort_by(placed, proc(a, b: Placed) -> bool {return a.from < b.from})
+	written := cx.written[:]
+	k := 0
+	for &w in written {
+		for k < len(placed) && placed[k].to < int(w.hi) {
+			k += 1
+		}
+		if k == len(placed) || placed[k].from > int(w.lo) {
+			return nil, false
+		}
+		p := placed[k]
+		w.lo, w.hi = p.at + (w.lo - u64(p.from)), p.at + (w.hi - u64(p.from))
+	}
+	if !slice.is_sorted_by(written, proc(a, b: core.Written) -> bool {return a.lo < b.lo}) {
+		slice.sort_by(written, proc(a, b: core.Written) -> bool {return a.lo < b.lo})
+	}
+	return written, true
 }
 
 // Appends the source bytes `lo` through `hi` with `chunks`, the sorted chunks that lie inside them, applied. A
@@ -360,6 +416,19 @@ puts :: proc(b: ^[dynamic]u8, parts: ..string) {
 	for s in parts {
 		append(b, s)
 	}
+}
+
+// Appends `body` to `b` as one comment of syntax `s`, as `put_comment` writes it, and false when out of memory.
+spell_comment :: proc(b: ^[dynamic]u8, s: core.Comment_Syntax, body: []u8, line, padded: bool) -> bool {
+	block := s.open != "" && (!line || s.line == "")
+	pad := " " if padded else ""
+	parts := [?]string{s.open if block else s.line, pad, string(body), pad if block else "", s.close if block else ""}
+	for part in parts {
+		if _, err := append(b, part); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // Refuses as `.Bad_Index` a reorder edit's order that does not name each survivor of a container and each of its

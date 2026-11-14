@@ -71,6 +71,15 @@ RULES := core.Rules{"cbor", {
 	{"bad_nan", "NaN other than f97e00"},
 }}
 
+// CBOR is binary, so its writer takes no text option but `sort_keys`. An input is an RFC 8742 sequence: a whole build refuses the
+// bytes after its first item, and a text with none.
+CAPABILITIES :: core.Capabilities {
+	writes = {.Sort_Keys},
+	framings = {.Concatenated, .Entries},
+	specs = Spec,
+	follows = proc "contextless" (f: core.Fault) -> bool {return f.rules == &RULES && (f.detail == u8(Detail.Trailing) || f.detail == u8(Detail.No_Item))},
+}
+
 // The handle of a CBOR item of `spec` read or written with `opts`, which reaches every service of the format.
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
 	return as_of(&HANDLE if spec <= max(Spec) else nil, spec, opts)
@@ -80,23 +89,19 @@ as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
 // the walk alone, and `core.validate` with `as(spec, opts)` links every service of the format. The same holds for the
 // other entry points of the package. A document an entry point builds holds no services, so `query`, `edit_list_init` and `write` of this package serve it where the same names of
 // `core` serve a handle's.
-validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
-	return core.error_of(validate_text(src, rules_of(spec, opts)))
+validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error {
+	return core.error_of(validate_text(src, rules_of(S, opts)))
 }
 
 // Reads the one item in `src` into a document, as `core.build` does with `as(spec, opts)`.
-build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
-	doc, err := build_item(src, bound_as(spec, opts), dups == .Refuse, allocator)
+build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
+	doc, err := build_item(src, bound_as(S, opts), dups == .Refuse, allocator)
 	return doc, core.error_of(err)
 }
 
 // Writes node `node` of `doc` as one CBOR item of `spec`, as `core.write` does with `as(spec)`.
-write :: proc(doc: ^core.Document, spec: Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
-	if int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
-		return nil, 0, core.error_of(core.Typed_Refusal{kind = .Unsupported})
-	}
-	out, cut, refusal := document_write(doc, opts, bound_as(spec), node, {}, allocator)
-	return out, cut, core.error_of(refusal)
+write :: proc(doc: ^core.Document, $S: Spec, write := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
+	return core.write(doc, write, as(S), node, allocator)
 }
 
 // Reads the item at `lo` of spec `S` through the hook. Returns one past the item, or the fault. A hook that stops the
@@ -119,9 +124,11 @@ walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: 
 // are judged as the resumed walk reads them. A walk that ends frees what its cursor holds, and `cursor_destroy` frees
 // a cursor no resume ended.
 Cursor :: struct {
-	src:  [^]u8,
-	n:    u64,
-	held: ^Held,
+	src:       [^]u8,
+	n:         u64,
+	held:      ^Held,
+	// What `held` lives under, the default heap when it is nil.
+	allocator: runtime.Allocator,
 }
 
 // What a cursor holds past a stop: the frames and, for a strict spec, the last key of each map, the place, and the
@@ -176,7 +183,7 @@ walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts :=
 @(private)
 cursor_destroy :: proc "contextless" (cursor: ^Cursor) {
 	if cursor.held != nil {
-		context = runtime.default_context()
+		context = core.cursor_context(cursor.allocator)
 		free(cursor.held)
 		cursor.held = nil
 	}
@@ -195,13 +202,16 @@ cursor_result :: proc "contextless" (word: u64, cursor: ^Cursor) -> (hi: u64, fa
 
 // Saves a stop at `at` in `cursor`, with the open frames and the last key of each open map, and returns `halt`, the
 // stop's result word. A nil `cursor` saves nothing.
+// The test of `cursor` is inline, so a walk with no cursor keeps no stop's frames live.
 @(private)
-hold :: #force_no_inline proc "contextless" (cursor: ^Cursor, halt: u64, at: Place, stack: []u64, prevs: [][2]u64, regs: core.Hook_Regs) -> u64 {
-	if cursor == nil {
-		return halt
-	}
+hold :: #force_inline proc "contextless" (cursor: ^Cursor, halt: u64, at: Place, stack: []u64, prevs: [][2]u64, regs: core.Hook_Regs) -> u64 {
+	return halt if cursor == nil else hold_saved(cursor, halt, at, stack, prevs, regs)
+}
+
+@(private)
+hold_saved :: #force_no_inline proc "contextless" (cursor: ^Cursor, halt: u64, at: Place, stack: []u64, prevs: [][2]u64, regs: core.Hook_Regs) -> u64 {
 	if cursor.held == nil {
-		context = runtime.default_context()
+		context = core.cursor_context(cursor.allocator)
 		if cursor.held = new(Held); cursor.held == nil {
 			return fault(0, .No_Memory)
 		}
@@ -217,7 +227,7 @@ hold :: #force_no_inline proc "contextless" (cursor: ^Cursor, halt: u64, at: Pla
 // token or of a key, a text string, a byte string's payload, or an integer key's decimal digits. Returns the span as it
 // stands for a string that needs no decode, else decodes it into `buf`, which `core.text_room` sizes. A container and
 // a number return false.
-text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
+token_text :: proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
 	return decode(v.src, t, buf)
 }
 

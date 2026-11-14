@@ -3,6 +3,7 @@
 // tree construction made, and a result whose tree is not the edited tree.
 package html_tests
 
+import "core:strings"
 import "core:testing"
 import core "../../core"
 import compose "../../core/compose"
@@ -40,11 +41,11 @@ nth :: proc(doc: ^core.Document, parent: core.Node_Index, name: string, k: int) 
 // The text `src` read as `spec` becomes when `edits` records its edits and the list is committed.
 @(private = "file")
 edited :: proc(src: string, edits: Edits, spec := html.Spec.Fragment) -> (out: string, err: core.Error) {
-	doc, berr := html.build(transmute([]u8)src, spec, allocator = context.temp_allocator)
+	doc, berr := core.build(transmute([]u8)src, html.as(spec), allocator = context.temp_allocator)
 	if berr != nil {
 		return "", berr
 	}
-	list := html.edit_list_init(&doc, spec, context.temp_allocator)
+	list := core.edit_list_init(&doc, context.temp_allocator)
 	if e := edits(&list, &doc); e != nil {
 		return "", e
 	}
@@ -176,6 +177,261 @@ a_document_keeps_its_doctype_and_tags :: proc(t: ^testing.T) {
 	}, .Document)
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "<!DOCTYPE html>\n<html lang=en><head><title>A &amp; B</title></head>\n<body>\n<p>x</p>\n<p>y</p>\n</body></html>\n")
+}
+
+// An element open where the tree starts to ignore tokens, `</body>` or another end tag in any insertion mode, ends
+// there, so an edit of it keeps those tags. The white space after them is the element's text, which a value that does
+// not end with it cuts.
+@(test)
+an_element_open_past_ignored_tags_keeps_them :: proc(t: ^testing.T) {
+	cases := [?]struct {
+		src, want: string,
+		steps:     []core.Step,
+	} {
+		{"<html><body><p>one<p>two</body></html>\n", "<html><body><p>one<p>X</body></html>", {core.Name("html"), core.Name("body"), core.Name("p")}},
+		{"<html><body><p>one<p>two</body>\n</html>\n", "<html><body><p>one<p>X</body></html>", {core.Name("html"), core.Name("body"), core.Name("p")}},
+		{"<html><body><ul><li>a<li>b</body></html>\n", "<html><body><ul><li>a<li>X</body></html>", {core.Name("html"), core.Name("body"), core.Name("ul"), core.Name("li")}},
+		{"<html><body>hi</body></html>\n", "<html><body>X</body></html>", {core.Name("html"), core.Name("body")}},
+		{"<html><body><select><option>a<option>b</body></html>\n", "<html><body><select><option>a<option>X</body></html>", {core.Name("html"), core.Name("body"), core.Name("select"), core.Name("option")}},
+		{"<html><body><table><tr><td>a<td>b</body></html>\n", "<html><body><table><tr><td>a<td>X</body></html>", {core.Name("html"), core.Name("body"), core.Name("table"), core.Name("tbody"), core.Name("tr"), core.Name("td")}},
+		{"<html><body><table><caption>a</body></html>\n", "<html><body><table><caption>X</body></html>", {core.Name("html"), core.Name("body"), core.Name("table"), core.Name("caption")}},
+		{"<html><body><template>a</body></html>\n", "<html><body><template>X</body></html>", {core.Name("html"), core.Name("body"), core.Name("template")}},
+		{"<html><head><template>a</head></html>\n", "<html><head><template>X</head></html>", {core.Name("html"), core.Name("head"), core.Name("template")}},
+		{"<html><body><svg><g>a</body></html>\n", "<html><body><svg><g>X</body></html>", {core.Name("html"), core.Name("body"), core.Name("svg"), core.Name("g")}},
+		{"<html><body><math><mi>a</body></html>\n", "<html><body><math><mi>X</body></html>", {core.Name("html"), core.Name("body"), core.Name("math"), core.Name("mi")}},
+		{"<html><body><p>a</div></span>\n", "<html><body><p>X</div></span>", {core.Name("html"), core.Name("body"), core.Name("p")}},
+		{"<html><body><ul><li>a</div></ul></body></html>\n", "<html><body><ul><li>X</div></ul></body></html>\n", {core.Name("html"), core.Name("body"), core.Name("ul"), core.Name("li")}},
+	}
+	for c in cases {
+		out, err := html.set(transmute([]u8)c.src, .Document, core.Path{steps = c.steps}, "X", allocator = context.temp_allocator)
+		walktest.expect_nil(t, err)
+		testing.expect_value(t, string(out), c.want)
+	}
+}
+
+// The white space the tree reads on into an element past the tokens it ignored is the element's text: a value that ends
+// with it keeps those bytes, and any other value removes them, so the element reads back as the value.
+@(test)
+an_element_open_past_ignored_tags_reads_back_as_its_value :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	p := []core.Step{core.Name("html"), core.Name("body"), core.Name("p")}
+	option := []core.Step{core.Name("html"), core.Name("body"), core.Name("select"), core.Name("option")}
+	ul := []core.Step{core.Name("html"), core.Name("body"), core.Name("ul")}
+	li := []core.Step{core.Name("html"), core.Name("body"), core.Name("ul"), core.Name("li")}
+	td := []core.Step{core.Name("html"), core.Name("body"), core.Name("table"), core.Name("tbody"), core.Name("tr"), core.Name("td")}
+	cases := [?]struct {
+		steps:            []core.Step,
+		src, value, want: string,
+	} {
+		{p, "<p>a</body></html>\n", "A\n", "<p>A</body></html>\n"},
+		{p, "<p>a</body></html>\n", "X", "<p>X</body></html>"},
+		{p, "<p>a</body> </html>\n", "X \n", "<p>X</body> </html>\n"},
+		// A comment the element takes past the ignored tags is its foot, and the tags stay before it.
+		{option, "<select><option>ab</body> <!--c-->", "Z", "<select><option>Z</body><!--c-->"},
+		{option, "<select><option>ab</body> <!--c-->", "Z ", "<select><option>Z</body> <!--c-->"},
+		// White space that reopens a formatting element past the ignored tags reads into the element once the edit
+		// takes the formatting element away.
+		{ul, "<ul><li><b>ab</li></td>\n", "Z", "<ul>Z</td>"},
+		{ul, "<ul><li><b>ab</li></td>\n", "Z\n", "<ul>Z</td>\n"},
+		// The select the ignored tags stood in goes with the edit, so they close elements and the value is written whole.
+		{li, "<ul><li><select><option>b</ul>\n</html>", "Z\n", "<ul><li>Z\n</ul></html>"},
+		// The white space a cell reads on past an ignored end tag is text past its span, before the cell's end tag.
+		{td, "<table><tr><td>ba</div>\n</span></td>", "Z", "<table><tr><td>Z</div></span></td>"},
+	}
+	for c in cases {
+		path := core.Path{steps = c.steps}
+		out, err := html.set(transmute([]u8)c.src, .Document, path, c.value, allocator = context.temp_allocator)
+		walktest.expect_nil(t, err)
+		testing.expect_value(t, string(out), c.want)
+		read, answer, ferr := html.find(out, .Document, path, allocator = context.temp_allocator)
+		walktest.expect_nil(t, ferr)
+		testing.expectf(t, core.equal(c.value, core.Node_Ref{&read, answer.node}, read_plain = true), "%q reads back as another value than %q", out, c.value)
+	}
+}
+
+// A set of one element's content replaces bytes of that element alone, in documents of nested elements whose end tags
+// are left out at random and that end in tokens the tree ignores: the bytes it replaces end in no end tag of an element
+// outside it, where its own end tag does not follow them.
+@(test)
+an_edit_replaces_bytes_of_its_element_alone :: proc(t: ^testing.T) {
+	Shape :: struct {
+		open, close: string,
+		inner:       int, // the shape of its children, -1 for text
+	}
+	// A shape whose children are 0 takes any shape OPENERS names.
+	SHAPES :: [?]Shape{{"<p>", "</p>", -1}, {"<div>", "</div>", 0}, {"<ul>", "</ul>", 3}, {"<li>", "</li>", 0}, {"<table>", "</table>", 5}, {"<tr>", "</tr>", 6}, {"<td>", "</td>", 0}, {"<select>", "</select>", 8}, {"<option>", "</option>", -1}, {"<b>", "</b>", -1}, {"<svg>", "</svg>", 11}, {"<g>", "</g>", -1}}
+	OPENERS :: [?]int{0, 1, 2, 4, 7, 9, 10}
+	TAILS :: [?]string{"</body>", "</html>", "</div>", "</span>", "</td>", "\n", " ", "<!--c-->"}
+	Gen :: struct {
+		b:     strings.Builder,
+		state: u64,
+	}
+	pick :: proc(g: ^Gen, n: int) -> int {
+		g.state ~= g.state << 13
+		g.state ~= g.state >> 7
+		g.state ~= g.state << 17
+		return int(g.state % u64(n))
+	}
+	grow :: proc(g: ^Gen, shape, depth: int) {
+		shapes := SHAPES
+		s := shapes[shape]
+		strings.write_string(&g.b, s.open)
+		for _ in 0 ..< 1 + pick(g, 2) {
+			if s.inner < 0 || depth >= 3 {
+				strings.write_string(&g.b, "a" if pick(g, 2) == 0 else "b")
+				continue
+			}
+			openers := OPENERS
+			grow(g, openers[pick(g, len(openers))] if s.inner == 0 else s.inner, depth + 1)
+		}
+		if pick(g, 2) == 0 {
+			strings.write_string(&g.b, s.close)
+		}
+	}
+	names :: proc(doc: ^core.Document, v: core.Node_Index, into: ^[dynamic]string) {
+		if core.kind(doc, v) != .Object {
+			return
+		}
+		it := core.pairs(doc, v)
+		for k, c in core.pair_next(&it) {
+			append(into, core.node_string(doc, k))
+			names(doc, c, into)
+		}
+	}
+	members :: proc(doc: ^core.Document, v: core.Node_Index, into: ^[dynamic]core.Node_Index) {
+		if core.kind(doc, v) != .Object {
+			return
+		}
+		it := core.pairs(doc, v)
+		for k, c in core.pair_next(&it) {
+			if !core.key_equals(doc, k, core.MARKUP_TEXT) {
+				append(into, c)
+			}
+			members(doc, c, into)
+		}
+	}
+	// The member indexes from `from` down to `target`.
+	index_path :: proc(doc: ^core.Document, from, target: core.Node_Index, into: ^[dynamic]int) -> bool {
+		if from == target {
+			return true
+		}
+		if core.kind(doc, from) != .Object {
+			return false
+		}
+		it := core.pairs(doc, from)
+		i := 0
+		for _, c in core.pair_next(&it) {
+			append(into, i)
+			if index_path(doc, c, target, into) {
+				return true
+			}
+			pop(into)
+			i += 1
+		}
+		return false
+	}
+	follow :: proc(doc: ^core.Document, at: []int) -> core.Node_Index {
+		n := core.ROOT
+		for i in at {
+			it := core.pairs(doc, n)
+			for _ in 0 ..< i {
+				core.pair_next(&it)
+			}
+			_, n, _ = core.pair_next(&it)
+		}
+		return n
+	}
+	context.allocator = context.temp_allocator
+	g := Gen{state = 0x9e3779b97f4a7c15}
+	edits := 0
+	for _ in 0 ..< 400 {
+		free_all(context.temp_allocator)
+		g.b = strings.builder_make(context.temp_allocator)
+		strings.write_string(&g.b, "<html><body>")
+		openers := OPENERS
+		grow(&g, openers[pick(&g, len(openers))], 0)
+		for _ in 0 ..< pick(&g, 5) {
+			tails := TAILS
+			strings.write_string(&g.b, tails[pick(&g, len(tails))])
+		}
+		src := strings.to_string(g.b)
+		doc, err := html.build(transmute([]u8)src, .Document, allocator = context.temp_allocator)
+		walktest.expect_nil(t, err)
+		elements := make([dynamic]core.Node_Index, context.temp_allocator)
+		members(&doc, core.ROOT, &elements)
+		for v in elements {
+			key := core.node_string(&doc, v - 1)
+			if key == "html" || key == "body" || key == "head" {
+				continue
+			}
+			at := make([dynamic]int, context.temp_allocator)
+			index_path(&doc, core.ROOT, v, &at)
+			// "Z" cuts the white space that reads into the element past its span, and "Z\n" keeps a line end there.
+			for value in ([?]string{"Z\n", "Z"}) {
+				list := html.edit_list_init(&doc, .Document, context.temp_allocator)
+				if write.set(&list, v, value) != nil {
+					continue
+				}
+				out, _, cerr := compose.commit(&list, allocator = context.temp_allocator)
+				if refused, is_doc := cerr.(core.Document_Error); is_doc {
+					testing.expectf(t, refused.reason != .Reads_Back_Other, "%q: setting %s to %q reads back as another value", src, key, value)
+				}
+				if cerr != nil {
+					continue
+				}
+				edits += 1
+				read, rerr := html.build(out, .Document, allocator = context.temp_allocator)
+				walktest.expect_nil(t, rerr)
+				testing.expectf(t, core.equal(value, core.Node_Ref{&read, follow(&read, at[:])}, read_plain = true), "%q: setting %s to %q reads back other in %q", src, key, value, out)
+				if value != "Z" {
+					continue
+				}
+				p, q := 0, 0
+				for p < len(src) && p < len(out) && src[p] == out[p] {
+					p += 1
+				}
+				for q < len(src) - p && q < len(out) - p && src[len(src) - 1 - q] == out[len(out) - 1 - q] {
+					q += 1
+				}
+				// Its own end tag after the bytes it replaced bounds them: an end tag the tree ignored there is content.
+				if rest := src[len(src) - q:]; strings.has_prefix(rest, "</") && strings.has_prefix(rest[2:], key) {
+					continue
+				}
+				// The white space a set cuts past its element's span is the element's text.
+				i, j := len(src), len(out)
+				for i > p && j > p {
+					if src[i - 1] == out[j - 1] {
+						i, j = i - 1, j - 1
+					} else if src[i - 1] == ' ' || src[i - 1] == '\n' {
+						i -= 1
+					} else {
+						break
+					}
+				}
+				inside := make([dynamic]string, context.temp_allocator)
+				append(&inside, key)
+				names(&doc, v, &inside)
+				region := strings.trim_right(src[p:i], " \n")
+				last := strings.last_index(region, "</")
+				if last < 0 || !strings.has_suffix(region, ">") || strings.contains(region[last:len(region) - 1], ">") {
+					continue
+				}
+				name := region[last + 2:len(region) - 1]
+				testing.expectf(t, slice_has(inside[:], name), "%q: setting %s replaced the end tag </%s> after its content in %q", src, key, name, src[p:i])
+			}
+		}
+	}
+	testing.expect(t, edits > 800)
+}
+
+@(private = "file")
+slice_has :: proc(s: []string, x: string) -> bool {
+	for e in s {
+		if e == x {
+			return true
+		}
+	}
+	return false
 }
 
 // Each element of a repeated name and each run of `#text` is a member of its own, which a set, an insert, a removal and
@@ -387,3 +643,4 @@ a_result_that_reads_as_another_tree_is_refused :: proc(t: ^testing.T) {
 		testing.expectf(t, is_edit && e.kind == .Bad_Result && html.Detail(e.inner.detail) == .Reread, "case %d: %v", i, err)
 	}
 }
+

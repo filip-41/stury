@@ -28,7 +28,7 @@ a_plan_checks_an_item :: proc(t: ^testing.T) {
 	sink: typed.Sink
 	testing.expect(t, cbor.check(src, .Cbor, &v, &plan, {sink = &sink}) != nil)
 	testing.expect_value(t, len(sink.entries), 2)
-	spec := cbor.Spec.Preferred
+	spec :: cbor.Spec.Preferred
 	again: Pair
 	other: typed.Sink
 	testing.expect(t, cbor.check(src, spec, &again, &plan, {sink = &other}) != nil)

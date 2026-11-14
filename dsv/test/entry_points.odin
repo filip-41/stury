@@ -162,7 +162,7 @@ destroy_serves_each_owner :: proc(t: ^testing.T) {
 // `record_docs` builds them.
 record_forms :: proc(t: ^testing.T, $S: dsv.Spec) {
 	src := transmute([]u8)string("a,b\n1,2\n3,4\n")
-	faults, err := dsv.records_check(src, S)
+	faults, err := dsv.records_validate(src, S)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, len(faults), 0)
 	delete(faults)

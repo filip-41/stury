@@ -32,7 +32,7 @@ class Follow:
             threading.Thread(target=lambda s=stream, k=sink: [k.put(line.rstrip("\n")) for line in s], daemon=True).start()
 
     def append(self, data):
-        with open(self.path, "a") as f:
+        with open(self.path, "ab" if isinstance(data, bytes) else "a") as f:
             f.write(data)
 
     def get(self, sink=None):
@@ -63,14 +63,14 @@ def check(name, got, want):
 def lines_case(exe, tmp, name, args, first, cut, rest, answers):
     """`first` is in the file when the run starts, `cut` is appended in two pieces, `rest` after a truncation."""
     path = os.path.join(tmp, name)
-    open(path, "w").write(first)
+    open(path, "wb" if isinstance(first, bytes) else "w").write(first)
     run = Follow(exe, path, args)
     check(name + " first", run.get(), answers[0])
     run.append(cut[0])
     run.expect_quiet()
     run.append(cut[1])
     check(name + " cut record", run.get(), answers[1])
-    open(path, "w").write(rest)
+    open(path, "wb" if isinstance(rest, bytes) else "w").write(rest)
     check(name + " truncated", run.get(run.errors), f"stury: {path}: file truncated")
     check(name + " after truncation", run.get(), answers[2])
     check(name + " exit", run.end(), -signal.SIGTERM)
@@ -125,6 +125,8 @@ def main():
         lines_case(exe, tmp, "csv", ["-c", "--from", "csv", "."], "k,v\na,1\n", ("b,", "2\n"), "k,v\nc,3\n", ['{"k":"a","v":"1"}', '{"k":"b","v":"2"}', '{"k":"c","v":"3"}'])
         lines_case(exe, tmp, "csv-path", ["--from", "csv", ".v"], "k,v\na,1\n", ('b,"x\n', 'y"\n'), "k,v\nc,3\n", ['"1"', '"x\\ny"', '"3"'])
         lines_case(exe, tmp, "csv-comment", ["-c", "--from", "csv", "--comment", "#", ".@comment"], "# t\nk,v\n#a\na,1\n", ("#b\nb,", "2\n"), "k,v\n#c\nc,3\n", ['["a"]', '["b"]', '["c"]'])
+        # A CBOR item ends where its own bytes say, and a 0x0A byte inside one is no line end.
+        lines_case(exe, tmp, "cbor", ["-c", "--from", "cbor", "."], b"\x82\x0a\x01", (b"\xa1\x61", b"\x61\x0a"), b"\x83\x01\x0a\x02", ["[10,1]", '{"a":10}', "[1,10,2]"])
         # A signal ends the run by the signal, after an error too.
         path = os.path.join(tmp, "bad")
         open(path, "w").write('{"a":1}\n')
@@ -141,7 +143,6 @@ def main():
             (["-n", path], "cannot be combined with --null-input"),
             (["--stream", path], "cannot be combined with --stream"),
             (["--from", "json5", path], "--follow reads records"),
-            (["--from", "cbor", path], "--follow reads lines"),
         ):
             done = subprocess.run([exe, "--follow", ".", *args], capture_output=True, text=True)
             assert done.returncode == 2 and message in done.stderr, (args, done.returncode, done.stderr)

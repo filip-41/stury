@@ -2,6 +2,7 @@ package html
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:strings"
 import core "../core"
 
 // The tokens of a tree, in preorder, which a hook reads as it reads a walk's: the document's tokens are those of an
@@ -140,6 +141,27 @@ keep_state :: proc(doc: ^core.Document, k: ^Kept, allocator: runtime.Allocator) 
 	return true
 }
 
+// The state of the document of the `count` nodes of `doc` from `v`, which a record of `.Entries` reads: the ends of its
+// elements, numbered from `v`, and every text.
+@(private)
+member_state :: proc(doc: ^core.Document, v, count: core.Node_Index, allocator: runtime.Allocator) -> (block: []u8, err: runtime.Allocator_Error) {
+	ends, texts, pieces := state_tables(doc.state)
+	if len(doc.state) == 0 {
+		return
+	}
+	lo, hi := core.lower_node(ends, u32(v)), core.lower_node(ends, u32(v + count))
+	size := size_of(State_Head) + (hi - lo) * size_of(End_Entry) + len(texts) * size_of(Text_Entry) + len(pieces) * size_of(Span)
+	block = runtime.mem_alloc_bytes(size, 16, allocator) or_return
+	(^State_Head)(raw_data(block))^ = {ends = u32(hi - lo), texts = u32(len(texts)), pieces = u32(len(pieces))}
+	own_ends, own_texts, own_pieces := state_tables(block)
+	for e, i in ends[lo:hi] {
+		own_ends[i] = {node = e.node - u32(v), end = e.end}
+	}
+	copy(own_texts, texts)
+	copy(own_pieces, pieces)
+	return
+}
+
 @(private)
 kept_destroy :: proc(k: ^Kept) {
 	delete(k.ends)
@@ -263,9 +285,10 @@ emit_tree :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_
 }
 
 // Gives the run of `parent`'s children from `from` to its next element child, which it returns, 0 at the end of the
-// children: their comments, instructions and DOCTYPE as facts, then the parent's `Object` when `opening`, then the
-// run's text as a `#text` member when it holds a character other than whitespace. `prev` says a child element ends
-// before the run. `shut` says the hook skipped the `Object`, so the parent has no more tokens.
+// children: the parent's `Object` when `opening`, their comments, instructions and DOCTYPE as facts, then the run's
+// text as a `#text` member when it holds a character other than whitespace. The document's `Object` follows the facts,
+// which are the head of the root. `prev` says a child element ends before the run. `shut` says the hook skipped the
+// `Object`, so the parent has no more tokens.
 @(private)
 content :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), parent, from: u32, prev, opening: bool, top: u32) -> (next: u32, shut: bool) {
 	t := e.t
@@ -280,10 +303,17 @@ content :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Re
 	}
 	// A comment is the parent's foot when only whitespace follows it before the end tag, and inline when a child
 	// element ended on its line with only whitespace and comments between.
+	if opening && parent != top && end != 0 && !give_open(e, on, parent, end, top) {
+		return 0, true
+	}
+	lead := head_end(e, from, end) if opening && parent == top else max(u32)
 	seen := last_text == 0
 	text_seen := false
 	next_line := !prev
 	for k := from; k != end; k = nodes[k].next {
+		if k == lead && !give_open(e, on, parent, end, top) {
+			return 0, true
+		}
 		n := &nodes[k]
 		switch n.kind {
 		case .Text:
@@ -323,40 +353,63 @@ content :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Re
 		case .Document, .Element:
 		}
 	}
-	if opening && (end != 0 || parent == top) {
-		lo, n: u64
-		if parent == top {
-			lo = nodes[end].lo if end != 0 && e.spec == .Document else 0
-		} else {
-			p := &nodes[parent]
-			lo, n = p.lo, p.hi - p.lo
-		}
-		at := e.node
-		a := give(e, on, .Object, .Value, lo, n, 0, parent if parent != top else 0)
-		if a == .Stop {
-			return 0, true
-		}
-		if a == .Skip && parent != top {
-			return 0, true
-		}
-		if e.keep != nil && parent != top {
-			if _, err := append(&e.keep.open, at); err != nil {
-				e.keep.oom = true
-			}
-		}
+	if lead == end && !give_open(e, on, parent, end, top) {
+		return 0, true
 	}
 	if last_text != 0 {
 		if give(e, on, .String, .Key, nodes[last_text].lo, 0, core.SPELLING_SYNTHETIC) == .Stop {
 			return 0, true
 		}
-		if !text_value(e, on, from, end, 0) {
+		if !text_value(e, on, from, end, 0, nodes[parent].end if parent != top else max(u64)) {
 			return 0, true
 		}
 	}
 	return end, false
 }
 
-// Gives element `n`'s key and attributes, and its value when it has no child element. Returns whether its children
+// The first of the nodes from `from` to `end` that a document's root element takes, after the last blank line or
+// DOCTYPE among them, `end` for none, read for the document's own run. Those before it are the document's head.
+@(private)
+head_end :: proc(e: ^Emitter($H), from, end: u32) -> u32 {
+	nodes := e.t.nodes[:]
+	lead := from
+	for k := from; k != end; k = nodes[k].next {
+		next := nodes[k].next
+		if nodes[k].kind == .Doctype {
+			lead = next
+		} else if next != 0 && nodes[next].lo > nodes[k].hi && strings.count(string(e.t.src[nodes[k].hi:nodes[next].lo]), "\n") > 1 {
+			lead = next
+		}
+	}
+	return lead
+}
+
+// Gives the `Object` of `parent`, the document's or an element's whose first child element is `end`. Returns false when
+// the hook stopped the walk or skipped the element.
+@(private)
+give_open :: #force_inline proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), parent, end, top: u32) -> bool {
+	nodes := e.t.nodes[:]
+	lo, n: u64
+	if parent == top {
+		lo = nodes[end].lo if end != 0 && e.spec == .Document else 0
+	} else {
+		p := &nodes[parent]
+		lo, n = p.lo, p.hi - p.lo
+	}
+	at := e.node
+	a := give(e, on, .Object, .Value, lo, n, 0, parent if parent != top else 0)
+	if a == .Stop || a == .Skip && parent != top {
+		return false
+	}
+	if e.keep != nil && parent != top {
+		if _, err := append(&e.keep.open, at); err != nil {
+			e.keep.oom = true
+		}
+	}
+	return true
+}
+
+// Gives element `n`'s key and attributes, and its value when it has no child element, whose comments are its foot. Returns whether its children
 // are to be read, which they are not for such an element or one the hook skipped.
 @(private)
 element :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), n: u32) -> bool {
@@ -386,7 +439,7 @@ element :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Re
 		child := &t.nodes[c]
 		#partial switch child.kind {
 		case .Comment:
-			if give(e, on, .Plain, .Comment, child.lo, child.hi - child.lo, markers(child.lo, child.hi, child.name.lo, child.name.lo + u64(child.name.n))) == .Stop {
+			if give(e, on, .Plain, .Comment_Foot, child.lo, child.hi - child.lo, markers(child.lo, child.hi, child.name.lo, child.name.lo + u64(child.name.n))) == .Stop {
 				return false
 			}
 		case .Instruction:
@@ -397,7 +450,7 @@ element :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Re
 			}
 		}
 	}
-	if text_value(e, on, node.first, 0, node.lo if .Implied in node.flags else node.hi) {
+	if text_value(e, on, node.first, 0, node.lo if .Implied in node.flags else node.hi, node.end) {
 		element_end(e, n)
 	}
 	return false
@@ -405,9 +458,11 @@ element :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Re
 
 // Gives the `Plain` of the text nodes among the siblings from `from` to `end`, an empty one at `empty_at` when they are
 // none. Its span runs from the first byte of its pieces to past the last, and pieces apart, or in another order, are
-// listed in the state by that first byte. Returns false when the walk is over.
+// listed in the state by that first byte. A piece past `limit`, the end of the element that holds them, is white space
+// the tree gave the element after the tokens it ignored there, and the span stops before them, so an edit of the
+// element keeps them. Returns false when the walk is over.
 @(private)
-text_value :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), from, end: u32, empty_at: u64) -> bool {
+text_value :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), from, end: u32, empty_at, limit: u64) -> bool {
 	t := e.t
 	clear(&e.run)
 	lo, hi := empty_at, empty_at
@@ -433,6 +488,14 @@ text_value :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook
 			}
 			if p == n.b {
 				break
+			}
+		}
+	}
+	if lo < limit && hi > limit {
+		hi = 0
+		for s in e.run {
+			if s.lo < limit {
+				hi = max(hi, s.lo + u64(s.n))
 			}
 		}
 	}
