@@ -1,18 +1,13 @@
 package dsv_tests
 
-import "core:fmt"
 import "core:math/rand"
 import "core:slice"
+import "core:strings"
 import "core:testing"
 import core "../../core"
 import walktest "../../walktest"
 import dsv ".."
 import gen "gen"
-
-collect :: proc(state: rawptr, a: core.Token_Answer) -> bool {
-	append((^[dynamic]core.Token_Answer)(state), a)
-	return true
-}
 
 // Under `.Refuse` a repeated header cell faults before any answer, and the text is read with the caller's options: a
 // tolerated ragged record gives the answers `each_answer` gives.
@@ -33,7 +28,7 @@ answers_refuse :: proc(t: ^testing.T) {
 
 	ragged := transmute([]u8)string("a,b\n1,2,3\n4\n5,6\n")
 	opts := dsv.Options{tolerate = {.Ragged}}
-	want_err := dsv.each_answer(ragged, .Csv, path, &want, collect, opts, read)
+	want_err := dsv.each_answer(ragged, .Csv, path, &want, walktest.collect_answer, opts, read)
 	testing.expectf(t, want_err == nil && len(want) == 3, "each_answer: %d answers, %v", len(want), want_err)
 	it = dsv.answers(ragged, .Csv, path, opts, read)
 	clear(&got)
@@ -44,31 +39,20 @@ answers_refuse :: proc(t: ^testing.T) {
 }
 
 // An iterator gives the answers `each_answer` gives and ends with its error, whatever its largest batch, over valid
-// and broken texts with and without a header.
+// and broken texts, as CSV and as TSV, with and without a header.
 @(test)
 answers_agree :: proc(t: ^testing.T) {
 	state := rand.create(5)
 	context.random_generator = rand.default_random_generator(&state)
-	texts := [?]string{".[]", ".[][0]", ".[1:]", ".[-1]", ".[0][]", ".."}
-	paths: [len(texts)]core.Path
-	for text, i in texts {
-		e: core.Error
-		paths[i], e = core.parse_path(text)
-		testing.expectf(t, e == nil, "%s: %v", text, e)
+	texts: [100]string
+	defer for text in texts {
+		delete(text)
 	}
-	defer for &p in paths {
-		core.path_destroy(&p)
-	}
-	want, got: [dynamic]core.Token_Answer
-	defer delete(want)
-	defer delete(got)
 	text, broken: [dynamic]u8
 	defer delete(text)
 	defer delete(broken)
-	for round in 0 ..< 100 {
-		tsv := round % 4 >= 2
-		opts := dsv.Options{no_header = round % 8 >= 4}
-		gen.text(&text, tsv)
+	for round in 0 ..< len(texts) {
+		gen.text(&text, round % 4 >= 2)
 		if round % 10 == 9 {
 			// Enough records for every batch size to fill several times over.
 			for i in 0 ..< 200 {
@@ -80,32 +64,26 @@ answers_agree :: proc(t: ^testing.T) {
 			walktest.mutate(&broken, text[:], gen.SHARP)
 			src = broken[:]
 		}
-		agreed := agree(t, src, .Tsv, paths[:], texts[:], opts, &want, &got) if tsv else agree(t, src, .Csv, paths[:], texts[:], opts, &want, &got)
-		if !agreed {
-			return
-		}
+		texts[round] = strings.clone(string(src))
 	}
-}
-
-// Whether the iterator over each of `paths` gives what `each_answer` gives at every batch size, as `answers_agree` says.
-@(private = "file")
-agree :: proc(t: ^testing.T, src: []u8, $S: dsv.Spec, paths: []core.Path, texts: []string, opts: dsv.Options, want, got: ^[dynamic]core.Token_Answer) -> bool {
-	for path, i in paths {
-		clear(want)
-		err := dsv.each_answer(src, S, path, want, collect, opts)
-		for batch in ([]int{1, 3, 64}) {
-			it := dsv.answers(src, S, path, opts)
+	// A variant's bit 0 spells the text as TSV and its bit 1 reads it with no header.
+	run := walktest.Answer_Run {
+		each = proc(src: []u8, paths: []core.Path, variant: int, early: bool, out: ^[dynamic]core.Token_Answer) -> core.Error {
+			opts := dsv.Options{no_header = variant >= 2}
+			if variant % 2 == 1 {
+				return dsv.each_answer(src, .Tsv, paths, out, walktest.collect_answer, opts, {stop_early = early})
+			}
+			return dsv.each_answer(src, .Csv, paths, out, walktest.collect_answer, opts, {stop_early = early})
+		},
+		iter = proc(src: []u8, paths: []core.Path, variant: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
+			opts := dsv.Options{no_header = variant >= 2}
+			it := dsv.answers(src, .Tsv, paths, opts, {stop_early = early}) if variant % 2 == 1 else dsv.answers(src, .Csv, paths, opts, {stop_early = early})
 			it.max_batch = batch
-			clear(got)
 			for a in dsv.next(&it) {
-				append(got, a)
+				append(out, a)
 			}
-			ok := testing.expectf(t, slice.equal(got[:], want[:]), "%v %q %s batch %d: %d answers, want %d", S, src, texts[i], batch, len(got), len(want))
-			ok &&= testing.expectf(t, fmt.tprint(it.err) == fmt.tprint(err), "%v %q %s batch %d: %v, want %v", S, src, texts[i], batch, it.err, err)
-			if !ok {
-				return false
-			}
-		}
+			return it.err
+		},
 	}
-	return true
+	walktest.expect_answers_agree(t, texts[:], {".[]", ".[][0]", ".[1:]", ".[-1]", ".[0][]", ".."}, 4, run)
 }

@@ -27,7 +27,7 @@ import tempfile
 
 from harness import ROOT, fixtures_dir, passing, run_capped
 
-SUITE = os.path.join(ROOT, "json/test/conformance/JSON-Schema-Test-Suite/tests/draft2020-12")
+SUITE = os.path.join(ROOT, "core/schema/test/conformance/JSON-Schema-Test-Suite/tests/draft2020-12")
 # Keywords that list the members of an object, or reach a schema that may, where `.emial` is refused although an object
 # may have it.
 LISTS = ("properties", "patternProperties", "const", "enum", "$ref")

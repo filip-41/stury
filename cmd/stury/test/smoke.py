@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """The stury CLI end to end on what jq has not: its own options and subcommands, and the CPU and memory guards. jq's
-command line is pinned byte for byte by cli.tsv (jq_suite.py). A failing case that smoke.floor does not list fails the
-run, and `--write` lists this run's failures there.
+command line is pinned byte for byte by cli.tsv (jq_suite.py). A failing case fails the run.
 
-    python3 cmd/stury/test/smoke.py [build/stury] [--write]
+    python3 cmd/stury/test/smoke.py [build/stury]
 
 Under a sanitizer (STURY_SANITIZED set, as `make test-asan` sets it) the CPU and memory caps measure the sanitizer,
 so only answers count.
@@ -20,7 +19,6 @@ import time
 
 from harness import peak
 
-FLOOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smoke.floor")
 SANITIZED = bool(os.environ.get("STURY_SANITIZED"))
 POOL = (os.cpu_count() or 1) >= 2
 S = os.path.abspath(next((a for a in sys.argv[1:] if not a.startswith("--")), "build/stury"))
@@ -276,6 +274,21 @@ piped("cut_raw", 0, '"abc"\n"d"', "ab", "c\nd", "-R", ".")
 piped("cut_stream", 0, '[["a",0],1]\n[["a",1],2]\n[["a",1]]\n[["a"]]', '{"a":[1,', "2]}\n", "--stream", "-c", ".")
 piped("cut_bom", 0, "[1,2]", "﻿[1,\n", "2]\n", "-c", ".")
 piped("cut_bom_seq", 0, "\x1e1", "﻿\x1e1\n", "", "--seq", "-c", ".")
+# A fault after many records: the answers before it print, and the fault names its place.
+ids = "".join('{"id":%d}\n' % i for i in range(6000))
+every_id = "".join("%d\n" % i for i in range(6000))
+for name, stdin, message in (
+    ("pipe_fault_text", ids + '{"id":\n,}\n', "stury: parse error: Expected value before ',' at line 6002, column 1\n,}\n^\n"),
+    ("pipe_fault_filter", ids + "7", 'stury: error (at <stdin>:6000): Cannot index number with string ("id")\n'),
+):
+    got = run("-c", ".id", stdin=stdin)
+    (got[0], got[1].decode(), got[2].decode()) == (5, every_id, message) or fail(name, f"exit {got[0]}\n{got[2][:300]!r}")
+
+# A pretty print of nested arrays indents each level, the innermost empty one on its own line.
+depth = 1100
+want = "".join("  " * i + "[\n" for i in range(depth - 1)) + "  " * (depth - 1) + "[]\n" + "".join("  " * i + "]\n" for i in reversed(range(depth - 1)))
+check("fmt_depth", 0, want.rstrip("\n"), "fmt", "--max-depth", "2000", stdin="[" * depth + "]" * depth)
+
 # A pipe is held a window at a time: 100 MB of records through one peak under 64 MB, and a regular file of them under
 # 62 MB above idle.
 records = lines(1400000, lambda i: '{"id":%d,"msg":"a line of text that makes each record seventy bytes"}' % i)
@@ -446,11 +459,5 @@ for name, script, want in (("pipe_process_substitution", '"$0" -c . <(echo "[6]"
     got.stdout.strip() == want or fail(name, got.stdout + got.stderr)
 
 shutil.rmtree(T)
-if "--write" in sys.argv:
-    with open(FLOOR, "w") as f:
-        f.writelines(name + "\n" for name in sorted(set(failed)))
-known = set(open(FLOOR).read().splitlines())
-new = sorted(set(failed) - known)
-print(f"stury CLI smoke: {len(set(failed))} failing, {len(known)} listed in smoke.floor")
-if new and "--write" not in sys.argv:
-    sys.exit("failing and not in smoke.floor: " + ", ".join(new))
+print(f"stury CLI smoke: {len(set(failed))} failing")
+sys.exit(1 if failed else 0)

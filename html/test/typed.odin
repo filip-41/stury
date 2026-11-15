@@ -141,15 +141,6 @@ a_nil_any_is_refused_as_a_null :: proc(t: ^testing.T) {
 	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
 }
 
-// A check with no plan is a plan mismatch.
-@(test)
-a_check_with_no_plan_is_a_mismatch :: proc(t: ^testing.T) {
-	v: struct {
-		a: int,
-	}
-	walktest.expect_kind(t, html.check(transmute([]u8)string("<p>1</p>"), .Document, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
-}
-
 // A plan of a description holds HTML's reads when it is given them, and an empty description is refused.
 @(test)
 a_plan_of_a_description_reads_html :: proc(t: ^testing.T) {

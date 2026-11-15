@@ -1,4 +1,4 @@
-package json_tests
+package model_tests
 
 import "base:runtime"
 import "core:fmt"
@@ -8,12 +8,12 @@ import "core:mem/virtual"
 import "core:strings"
 import "core:testing"
 import "core:time"
-import core "../../core"
-import typed "../../core/typed"
-import write "../../core/write"
-import json ".."
-import model "../../core/model"
-import walktest "../../walktest"
+import core "../.."
+import typed "../../typed"
+import write "../../write"
+import json "../../../json"
+import model ".."
+import walktest "../../../walktest"
 
 @(private = "file")
 Address :: struct {

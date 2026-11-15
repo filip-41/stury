@@ -1,12 +1,12 @@
-package core_test
+package model_tests
 
 import "core:testing"
-import core ".."
-import typed "../typed"
-import dsv "../../dsv"
-import json "../../json"
-import model "../model"
-import walktest "../../walktest"
+import core "../.."
+import typed "../../typed"
+import dsv "../../../dsv"
+import json "../../../json"
+import model ".."
+import walktest "../../../walktest"
 
 @(private = "file")
 Pair :: struct {

@@ -229,6 +229,8 @@ an_edit_replaces_bytes_of_its_element_alone :: proc(t: ^testing.T) {
 	// A shape whose children are 0 takes any shape OPENERS names.
 	SHAPES :: [?]Shape{{"<p>", "</p>", -1}, {"<div>", "</div>", 0}, {"<ul>", "</ul>", 3}, {"<li>", "</li>", 0}, {"<table>", "</table>", 5}, {"<tr>", "</tr>", 6}, {"<td>", "</td>", 0}, {"<select>", "</select>", 8}, {"<option>", "</option>", -1}, {"<b>", "</b>", -1}, {"<svg>", "</svg>", 11}, {"<g>", "</g>", -1}}
 	OPENERS :: [?]int{0, 1, 2, 4, 7, 9, 10}
+	// The elements whose sets commit. A table or a row holding an implied tbody is refused, which the loop skips.
+	EDITED :: [?]string{"p", "div", "ul", "li", "td", "select", "option", "b", "svg", "g"}
 	TAILS :: [?]string{"</body>", "</html>", "</div>", "</span>", "</td>", "\n", " ", "<!--c-->"}
 	Gen :: struct {
 		b:     strings.Builder,
@@ -311,8 +313,9 @@ an_edit_replaces_bytes_of_its_element_alone :: proc(t: ^testing.T) {
 	}
 	context.allocator = context.temp_allocator
 	g := Gen{state = 0x9e3779b97f4a7c15}
-	edits := 0
-	for _ in 0 ..< 400 {
+	// The commits made, by the element's name and the value set.
+	edits: [len(EDITED)][2]int
+	for _ in 0 ..< 60 {
 		free_all(context.temp_allocator)
 		g.b = strings.builder_make(context.temp_allocator)
 		strings.write_string(&g.b, "<html><body>")
@@ -347,7 +350,11 @@ an_edit_replaces_bytes_of_its_element_alone :: proc(t: ^testing.T) {
 				if cerr != nil {
 					continue
 				}
-				edits += 1
+				for name, n in EDITED {
+					if key == name {
+						edits[n][0 if value == "Z" else 1] += 1
+					}
+				}
 				read, rerr := html.build(out, .Document, allocator = context.temp_allocator)
 				walktest.expect_nil(t, rerr)
 				testing.expectf(t, core.equal(value, core.Node_Ref{&read, follow(&read, at[:])}, read_plain = true), "%q: setting %s to %q reads back other in %q", src, key, value, out)
@@ -389,7 +396,9 @@ an_edit_replaces_bytes_of_its_element_alone :: proc(t: ^testing.T) {
 			}
 		}
 	}
-	testing.expect(t, edits > 800)
+	for name, n in EDITED {
+		testing.expectf(t, edits[n][0] > 0 && edits[n][1] > 0, "no set of %s committed with both values: %v", name, edits[n])
+	}
 }
 
 // Each element of a repeated name and each run of `#text` is a member of its own, which a set, an insert, a removal and

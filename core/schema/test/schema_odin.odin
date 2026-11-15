@@ -1,10 +1,10 @@
-package json_tests
+package schema_tests
 
 import "core:strings"
 import "core:testing"
-import core "../../core"
-import schema "../../core/schema"
-import json ".."
+import core "../.."
+import schema ".."
+import json "../../../json"
 
 // `schema.write_odin`: the types written for a description, and the keyword a refusal names.
 

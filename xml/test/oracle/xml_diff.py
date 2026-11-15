@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Random XML texts run through build/xml_oracle and pyexpat (expat), reporting where they disagree.
 
-    python3 cmd/stury/test/xml_diff.py [build/xml_oracle] [--seed 1] [--cases 20000] [--show 20]
+    python3 xml/test/oracle/xml_diff.py [build/xml_oracle] [--seed 1] [--cases 20000] [--show 20]
 
 The parsers read namespaces: an undeclared prefix, a reserved prefix or URI, and two attributes of one expanded name are
 refused by both. Well-formed documents come from a seeded grammar (elements, attributes in both quotes, text with the predefined and

@@ -1,4 +1,4 @@
-package json_tests
+package schema_tests
 
 import "core:fmt"
 import "core:log"
@@ -8,20 +8,21 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:testing"
-import regex "../../core/regex"
-import core "../../core"
-import compose "../../core/compose"
-import rules "../../core/rules"
-import typed "../../core/typed"
-import write "../../core/write"
-import schema "../../core/schema"
-import json ".."
+import regex "../../regex"
+import core "../.."
+import compose "../../compose"
+import rules "../../rules"
+import typed "../../typed"
+import write "../../write"
+import schema ".."
+import json "../../../json"
+import walktest "../../../walktest"
 
 @(private = "file")
 SUITE :: #directory + "conformance/JSON-Schema-Test-Suite/tests/"
 
 @(private = "file")
-FIXTURES :: #directory + "schema"
+FIXTURES :: #directory + "fixtures"
 
 // The remote documents the suite's runners serve at `REMOTE_URL`, which a read takes as files under its root.
 @(private = "file")
@@ -1087,13 +1088,13 @@ Typed_Spelling :: struct {
 corpus_plans :: proc() -> map[Typed_Spelling]typed.Plan {
 	plans := make(map[Typed_Spelling]typed.Plan, context.temp_allocator)
 	for enums in typed.Enum_Spelling {
-		plans[{Corpus_Tie, enums}] = ruled_plan(Corpus_Tie, enums)
-		plans[{Corpus_Formats, enums}] = ruled_plan(Corpus_Formats, enums)
-		plans[{Corpus_Whole, enums}] = ruled_plan(Corpus_Whole, enums)
-		plans[{Corpus_Narrow, enums}] = ruled_plan(Corpus_Narrow, enums)
-		plans[{Corpus_Keys, enums}] = ruled_plan(Corpus_Keys, enums)
-		plans[{Corpus_Gap, enums}] = ruled_plan(Corpus_Gap, enums)
-		plans[{Corpus_Enum_Keys, enums}] = ruled_plan(Corpus_Enum_Keys, enums)
+		plans[{Corpus_Tie, enums}] = walktest.ruled_plan(Corpus_Tie, enums)
+		plans[{Corpus_Formats, enums}] = walktest.ruled_plan(Corpus_Formats, enums)
+		plans[{Corpus_Whole, enums}] = walktest.ruled_plan(Corpus_Whole, enums)
+		plans[{Corpus_Narrow, enums}] = walktest.ruled_plan(Corpus_Narrow, enums)
+		plans[{Corpus_Keys, enums}] = walktest.ruled_plan(Corpus_Keys, enums)
+		plans[{Corpus_Gap, enums}] = walktest.ruled_plan(Corpus_Gap, enums)
+		plans[{Corpus_Enum_Keys, enums}] = walktest.ruled_plan(Corpus_Enum_Keys, enums)
 	}
 	return plans
 }
@@ -1145,7 +1146,7 @@ schema_check_agrees_with_model_load :: proc(t: ^testing.T) {
 		plan := plans[{c.type, c.enums}]
 		target := make([]u8, size_of(Corpus_Keys))
 		loaded := typed.check_text(transmute([]u8)c.text, raw_data(target), c.type, &plan, {}) == nil
-		d, described := description_of(&plan)
+		d, described := walktest.description_of(&plan)
 		testing.expect(t, described == nil)
 		compiled, _ := schema.compile_description(&d)
 		defer schema.destroy(compiled)
@@ -1567,12 +1568,12 @@ schema_check_agrees_on_json5_numbers :: proc(t: ^testing.T) {
 		{Json5_Count, `{n: -0x1}`, false},
 		{Json5_Count, `{n: 0x1}`, true},
 	}
-	plans := [?]typed.Plan{ruled_plan(Json5_Bound, checks = json.checks(.Json5)), ruled_plan(Json5_Count, checks = json.checks(.Json5))}
+	plans := [?]typed.Plan{walktest.ruled_plan(Json5_Bound, checks = json.checks(.Json5)), walktest.ruled_plan(Json5_Count, checks = json.checks(.Json5))}
 	for c in cases {
 		plan := plans[0 if c.type == Json5_Bound else 1]
 		target := make([]u8, size_of(Json5_Bound))
 		loaded := typed.check_text(transmute([]u8)c.text, raw_data(target), c.type, &plan, {}) == nil
-		d, _ := description_of(&plan)
+		d, _ := walktest.description_of(&plan)
 		compiled, _ := schema.compile_description(&d)
 		defer schema.destroy(compiled)
 		b, bound := schema.bind(compiled, json.checks(.Json5))
@@ -1891,20 +1892,20 @@ schema_write_reads_back_to_described_types :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	plans := corpus_plans()
 	for enums in typed.Enum_Spelling {
-		plans[{Written_Tree, enums}] = ruled_plan(Written_Tree, enums)
-		plans[{Written_Member, enums}] = ruled_plan(Written_Member, enums)
-		plans[{Written_Merge, enums}] = ruled_plan(Written_Merge, enums)
+		plans[{Written_Tree, enums}] = walktest.ruled_plan(Written_Tree, enums)
+		plans[{Written_Member, enums}] = walktest.ruled_plan(Written_Member, enums)
+		plans[{Written_Merge, enums}] = walktest.ruled_plan(Written_Merge, enums)
 	}
 	for key, &plan in plans {
-		d, described := description_of(&plan)
+		d, described := walktest.description_of(&plan)
 		testing.expect(t, described == nil)
 		back, text, refused := written_back(t, &d)
 		testing.expectf(t, refused == "", "%v: %s", key.type, refused)
 		seen: Pairs
 		testing.expectf(t, same_schema(&d, back.description, d.root, back.description.root, &seen, true), "%v %v: %s", key.type, key.enums, text)
 	}
-	plan := ruled_plan(Written_Merge)
-	d, _ := description_of(&plan)
+	plan := walktest.ruled_plan(Written_Merge)
+	d, _ := walktest.description_of(&plan)
 	back, text, _ := written_back(t, &d)
 	b, bound := schema.bind(back, json.checks(.Json))
 	testing.expect(t, bound == nil)
@@ -1997,38 +1998,6 @@ schema_write_spells_json5_numbers_as_json :: proc(t: ^testing.T) {
 	}
 }
 
-// An attribute fact `name="value"` read as a format with attributes reads one, its value a string with nothing to decode.
-@(private)
-markup_attribute :: proc "contextless" (doc: ^core.Document, f: core.Fact) -> (name, value: core.Token) {
-	lead := u32(core.comment_lead(f.spelling))
-	return {lo = f.lo, n = lead - 2, kind = .String, role = .Key}, {lo = f.lo + u64(lead), n = f.n - lead - 1, kind = .String}
-}
-
-// A markup document made by hand: `model` is the JSON text of its data model, where an element is a member whose value
-// is its text, empty when it is, or an object of its children and `#text` runs, and each attribute `name="value"` is a
-// fact of its node, written past the model.
-@(private)
-markup_doc :: proc(model: string, attributes: []Markup_Attribute, readers: ^core.Readers, dups := core.Duplicates.Last) -> core.Document {
-	b := strings.builder_make(context.temp_allocator)
-	strings.write_string(&b, model)
-	facts := make([]core.Fact, len(attributes), context.temp_allocator)
-	for a, i in attributes {
-		strings.write_byte(&b, ' ')
-		name, _, _ := strings.partition(a.text, "=")
-		facts[i] = {lo = u64(len(b.buf)), node = a.node, n = u32(len(a.text)), role = .Attribute, kind = .Plain, spelling = core.comment_spelling(u8(len(name) + 2), 1)}
-		strings.write_string(&b, a.text)
-	}
-	doc, _ := core.build(b.buf[:len(model)], json.as(.Json), dups)
-	doc.src, doc.facts, doc.readers = b.buf[:], facts, readers
-	return doc
-}
-
-@(private)
-Markup_Attribute :: struct {
-	node: core.Node_Index,
-	text: string,
-}
-
 // The entries of a check, each without its position.
 @(private = "file")
 rendered :: proc(src: []u8, sink: ^typed.Sink) -> string {
@@ -2052,12 +2021,12 @@ schema_check_reads_markup :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	readers := json.as(.Json).readers^
 	readers.holds += {.Attribute}
-	readers.attribute = markup_attribute
+	readers.attribute = walktest.markup_attribute
 	markup := json.as(.Json)
 	markup.readers = &readers
 	cases := [?]struct {
 		schema, model, form: string,
-		attributes:          []Markup_Attribute,
+		attributes:          []walktest.Markup_Attribute,
 		errors:              int,
 		bind:                string, // a member whose record binds `node`, as `xml.nodeType` would
 		node:                typed.Markup_Node,
@@ -2102,7 +2071,7 @@ schema_check_reads_markup :: proc(t: ^testing.T) {
 				bound.plan.uses[i].node = c.node
 			}
 		}
-		doc := markup_doc(c.model, c.attributes, &readers)
+		doc := walktest.markup_doc(c.model, c.attributes, &readers)
 		defer core.destroy(&doc)
 		from_doc, from_form: typed.Sink
 		defer typed.sink_destroy(&from_doc)
@@ -2122,12 +2091,12 @@ markup_attributes_survive_an_edit :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	readers := json.as(.Json).readers^
 	readers.holds += {.Attribute}
-	readers.attribute = markup_attribute
+	readers.attribute = walktest.markup_attribute
 	services := readers.services^
 	edit := services.edit^
 	edit.validate = proc "contextless" (_: []u8, _: core.As) -> Maybe(core.Fault) { return nil }
 	services.edit, readers.services = &edit, &services
-	doc := markup_doc(`{"price": "5", "n": 1}`, {{2, `currency="EUR"`}}, &readers)
+	doc := walktest.markup_doc(`{"price": "5", "n": 1}`, {{2, `currency="EUR"`}}, &readers)
 	defer core.destroy(&doc)
 	it := core.facts_of(&doc, 2, .Attribute)
 	body, _ := core.fact_next(&it)

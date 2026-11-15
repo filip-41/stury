@@ -1,17 +1,17 @@
-package json_tests
+package model_tests
 
 import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:strings"
 import "core:testing"
-import core "../../core"
-import typed "../../core/typed"
-import write "../../core/write"
-import schema "../../core/schema"
-import json ".."
-import model "../../core/model"
-import walktest "../../walktest"
+import core "../.."
+import typed "../../typed"
+import write "../../write"
+import schema "../../schema"
+import json "../../../json"
+import model ".."
+import walktest "../../../walktest"
 
 @(private = "file")
 Celsius :: distinct f64
@@ -487,21 +487,4 @@ a_write_leaves_out_write_only_members :: proc(t: ^testing.T) {
 	back: Secret
 	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name":"b","key":"s"}`), &back, nil, {dups = .Refuse}, context.temp_allocator))
 	testing.expect_value(t, back.key, "s")
-}
-
-@(private = "file")
-Stamped :: struct {
-	a: int,
-	b: int,
-}
-
-@(test)
-a_plan_stamp_tells_required_members_apart :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	required, _ := model.compile(nil, Stamped, json.checks(.Json), context.temp_allocator)
-	reg: model.Registry
-	defer model.destroy(&reg)
-	model.register(&reg, model.Field_Rule_Of{Stamped, "b", "optional"})
-	optional, _ := model.compile(&reg, Stamped, json.checks(.Json), context.temp_allocator)
-	testing.expect(t, required.plan.stamp != optional.plan.stamp)
 }

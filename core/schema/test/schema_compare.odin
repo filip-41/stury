@@ -1,15 +1,15 @@
-package json_tests
+package schema_tests
 
 import "base:runtime"
 import "core:fmt"
 import "core:strings"
 import "core:testing"
-import core "../../core"
-import typed "../../core/typed"
-import write "../../core/write"
-import schema "../../core/schema"
-import dsv "../../dsv"
-import json ".."
+import core "../.."
+import typed "../../typed"
+import write "../../write"
+import schema ".."
+import dsv "../../../dsv"
+import json "../../../json"
 
 // Schema comparison: the verdict in each direction, the witness of a No, and the changes that explain the difference.
 
@@ -314,10 +314,7 @@ compare_long_reference_chain :: proc(t: ^testing.T) {
 		fmt.sbprintf(&sb, `"d%d":{{"$ref":"#/$defs/d%d"}},`, i, i + 1)
 	}
 	strings.write_string(&sb, `"d3000":{"type":"integer"}}}`)
-	c, ok := compare_texts(t, strings.to_string(sb), strings.to_string(sb))
-	if ok {
-		schema.comparison_destroy(&c)
-	}
+	expect_verdicts(t, strings.to_string(sb), strings.to_string(sb), .Yes, .Yes)
 	free_all(context.temp_allocator)
 }
 

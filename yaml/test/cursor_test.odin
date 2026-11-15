@@ -2,19 +2,20 @@
 package yaml_tests
 
 import "core:fmt"
-import "core:slice"
 import "core:testing"
 import core "../../core"
 import walktest "../../walktest"
 import yaml ".."
 
-// The tokens, ends and faults of the walks of every document of `src` in turn, with a stop at token `stop` or at every
-// `every`th and a resume after each.
+// The tokens and the ends and faults of the walks of every document of `text` in turn, with the options of variant 0 or
+// the merge-key ones, a stop at token `stop` or at every `every`th and a resume after each.
 @(private)
-walk_stream :: proc(src: []u8, opts: yaml.Options, skip: string, stop, every: int) -> (h: walktest.Stopping, ends: [dynamic]string) {
+walk_stream :: proc(text: string, skip: string, stop, every, variant: int) -> (h: walktest.Stopping, end: string) {
+	src := transmute([]u8)text
+	opts := yaml.Options{merge_keys = variant == 1}
 	h = walktest.Stopping{src = src, skip = skip, stop = stop, every = every}
 	h.tokens = make([dynamic]core.Token, 0, 256)
-	ends = make([dynamic]string, context.temp_allocator)
+	ends := make([dynamic]string, context.temp_allocator)
 	regs: core.Hook_Regs
 	cursor: yaml.Cursor
 	lo: u64
@@ -29,7 +30,7 @@ walk_stream :: proc(src: []u8, opts: yaml.Options, skip: string, stop, every: in
 		}
 		lo = hi
 	}
-	return
+	return h, fmt.tprint(ends[:])
 }
 
 @(private)
@@ -52,33 +53,7 @@ CURSOR_TEXTS := [?]string {
 // with skipped values, merge keys and the documents of a stream among them.
 @(test)
 cursor_resumes_after_any_token :: proc(t: ^testing.T) {
-	for text in CURSOR_TEXTS {
-		src := transmute([]u8)text
-		for opts in ([]yaml.Options{{}, {merge_keys = true}}) {
-			for skip in ([]string{"", "b", "list"}) {
-				full, want := walk_stream(src, opts, skip, 0, 0)
-				defer delete(full.tokens)
-				for stop in 1 ..= len(full.tokens) + 1 {
-					got, ends := walk_stream(src, opts, skip, stop, 0)
-					defer delete(got.tokens)
-					ok := testing.expectf(t, slice.equal(got.tokens[:], full.tokens[:]), "%q skip %q stop %d: %d tokens, want %d", text, skip, stop, len(got.tokens), len(full.tokens))
-					ok &&= testing.expectf(t, slice.equal(ends[:], want[:]), "%q skip %q stop %d: %v, want %v", text, skip, stop, ends, want)
-					if !ok {
-						return
-					}
-				}
-				for every in 1 ..= 3 {
-					got, ends := walk_stream(src, opts, skip, 0, every)
-					defer delete(got.tokens)
-					ok := testing.expectf(t, slice.equal(got.tokens[:], full.tokens[:]), "%q skip %q every %d: %d tokens, want %d", text, skip, every, len(got.tokens), len(full.tokens))
-					ok &&= testing.expectf(t, slice.equal(ends[:], want[:]), "%q skip %q every %d: %v, want %v", text, skip, every, ends, want)
-					if !ok {
-						return
-					}
-				}
-			}
-		}
-	}
+	walktest.expect_resumes(t, CURSOR_TEXTS[:], {"", "b", "list"}, 2, walk_stream)
 }
 
 // A resume over another text, or of a cursor that holds no stop, is refused, and `destroy` frees a cursor no resume
@@ -103,61 +78,33 @@ cursor_refuses_another_text :: proc(t: ^testing.T) {
 	testing.expect(t, bad && f.kind == .Bad_Option)
 }
 
-@(private)
-collect_answer :: proc(state: rawptr, a: core.Token_Answer) -> bool {
-	append((^[dynamic]core.Token_Answer)(state), a)
-	return true
-}
-
 // The iterator gives the answers `each_answer` gives and ends with its error, whatever its largest batch, over texts
 // with aliases, merge keys, comments, several documents and late faults, with paths that answer at once, at a
-// container's close and at the text's end.
+// container's close and at the text's end, and for several paths at once.
 @(test)
 answers_agree_with_each_answer :: proc(t: ^testing.T) {
-	texts := [?]string{".a", ".[]", ".b[]", "...x", ".[-1]", "..", "limit(2; ...b)", ".other.z"}
-	paths: [len(texts)]core.Path
-	for text, i in texts {
-		e: core.Error
-		paths[i], e = core.parse_path(text)
-		testing.expectf(t, e == nil, "%s: %v", text, e)
+	run := walktest.Answer_Run {
+		each = proc(src: []u8, paths: []core.Path, variant: int, early: bool, out: ^[dynamic]core.Token_Answer) -> core.Error {
+			return yaml.each_answer(src, .Yaml_1_2, paths, out, walktest.collect_answer, {merge_keys = variant == 1}, {stop_early = early})
+		},
+		iter = proc(src: []u8, paths: []core.Path, variant: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
+			it := yaml.answers(src, .Yaml_1_2, paths, {merge_keys = variant == 1}, {stop_early = early})
+			it.max_batch = batch
+			for a in yaml.next(&it) {
+				append(out, a)
+			}
+			return it.err
+		},
 	}
-	defer for &p in paths {
-		core.path_destroy(&p)
-	}
-	srcs := [?]string {
+	texts := [?]string {
+		CURSOR_TEXTS[0], CURSOR_TEXTS[2], CURSOR_TEXTS[3], CURSOR_TEXTS[5], CURSOR_TEXTS[6], CURSOR_TEXTS[8], CURSOR_TEXTS[10],
 		"b: [{x: 1}, {x: 2, y: [3]}, 4]\na: {x: 5}\nx: 6\n",
 		"- x: 1\n- [2, 3]\n- {b: [x, y]}\n- 7\n",
 		"b: &n [1, 2]\nc: *n\nx: last\n",
 		"other:\n  <<: {z: 1, w: 2}\n  q: 3\nb: [1]\n",
+		CURSOR_TEXTS[4],
 	}
-	want, got: [dynamic]core.Token_Answer
-	defer delete(want)
-	defer delete(got)
-	for text in ([]string{CURSOR_TEXTS[0], CURSOR_TEXTS[2], CURSOR_TEXTS[3], CURSOR_TEXTS[5], CURSOR_TEXTS[6], CURSOR_TEXTS[8], CURSOR_TEXTS[10], srcs[0], srcs[1], srcs[2], srcs[3], CURSOR_TEXTS[4]}) {
-		src := transmute([]u8)text
-		for opts in ([]yaml.Options{{}, {merge_keys = true}}) {
-			for path, i in paths {
-				for early in ([]bool{false, true}) {
-					read := core.Path_Options{stop_early = early}
-					clear(&want)
-					err := yaml.each_answer(src, .Yaml_1_2, path, &want, collect_answer, opts, read)
-					for batch in ([]int{1, 3, 64}) {
-						it := yaml.answers(src, .Yaml_1_2, path, opts, read)
-						it.max_batch = batch
-						clear(&got)
-						for a in yaml.next(&it) {
-							append(&got, a)
-						}
-						ok := testing.expectf(t, slice.equal(got[:], want[:]), "%q %s batch %d: %d answers, want %d", text, texts[i], batch, len(got), len(want))
-						ok &&= testing.expectf(t, fmt.tprint(it.err) == fmt.tprint(err), "%q %s batch %d: %v, want %v", text, texts[i], batch, it.err, err)
-						if !ok {
-							return
-						}
-					}
-				}
-			}
-		}
-	}
+	walktest.expect_answers_agree(t, texts[:], {".a", ".[]", ".b[]", "...x", ".[-1]", "..", "limit(2; ...b)", ".other.z"}, 2, run)
 }
 
 // A loop that ends after the first answer leaves the text past it unjudged, and `destroy` frees the read. A fault after
@@ -185,24 +132,4 @@ answers_break_early_and_fault_late :: proc(t: ^testing.T) {
 	}
 	want := yaml.each_answer(late, .Yaml_1_2, path, nil, proc(_: rawptr, _: core.Token_Answer) -> bool {return true})
 	testing.expectf(t, n == 3 && it.err != nil && fmt.tprint(it.err) == fmt.tprint(want), "%d answers, %v, want %v", n, it.err, want)
-}
-
-// An iterator over several paths gives what `each_answer` gives for them.
-@(test)
-answers_of_many_paths :: proc(t: ^testing.T) {
-	a, _ := core.parse_path(".a")
-	defer core.path_destroy(&a)
-	b, _ := core.parse_path(".b[]")
-	defer core.path_destroy(&b)
-	paths := []core.Path{b, a}
-	src := transmute([]u8)string("a: 1\nb: [2, 3]\n")
-	want, got: [dynamic]core.Token_Answer
-	defer delete(want)
-	defer delete(got)
-	testing.expect(t, yaml.each_answer(src, .Yaml_1_2, paths, &want, collect_answer) == nil)
-	it := yaml.answers(src, .Yaml_1_2, paths)
-	for x in yaml.next(&it) {
-		append(&got, x)
-	}
-	testing.expectf(t, it.err == nil && len(want) == 3 && slice.equal(got[:], want[:]), "%v, want %v: %v", got[:], want[:], it.err)
 }

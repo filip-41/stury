@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compares the errors model.load gives each value with pydantic 2 in strict mode.
 
-The models of json/test/oracle/main.odin are declared here in pydantic. Generated bodies, with unknown members and
+The models of core/model/test/oracle/main.odin are declared here in pydantic. Generated bodies, with unknown members and
 repeated keys, go through both, and the first code each refuses a pointer with must be the same, but where `explained`
 names the difference. pydantic keeps the last of a repeated key and judges only it, while a collecting load judges each
 occurrence, so a body that repeats a key is compared only by the oracle's `refuse` run, which must refuse it and must
@@ -17,14 +17,10 @@ from typing import Annotated, Dict, List, Literal, Optional, Tuple, Union, get_a
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 
-class TypeRange:
-    """Marks the bounds of an integer as its Odin type's range, which stury refuses as `Out_Of_Range`, not as a rule."""
-
-
 class Address(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
     street: str
-    floor: Annotated[int, Field(ge=-128, le=127), TypeRange()]
+    floor: Annotated[int, Field(ge=-128, le=127)]
 
 
 class Cat(BaseModel):
@@ -80,18 +76,21 @@ def refusal_of(err):
     # A discriminated union's errors name the arm by its tag, which stury's path does not hold.
     if len(loc) > 1 and loc[0] == "pet" and loc[1] in ("Cat", "Dog"):
         loc = loc[:1] + loc[2:]
-    annotation, metadata = annotation_at(loc)
+    annotation, _ = annotation_at(loc)
     fixed = get_origin(annotation) is tuple
     if kind == "missing" and len(loc) > 1 and get_origin(annotation_at(loc[:-1])[0]) is tuple:
-        return pointer(loc[:-1]), "Wrong_Length"
+        return pointer(loc[:-1]), "Too_Few"
     if kind == "missing":
         return pointer(loc), "Missing_Field"
+    # A union takes no value of the kind or tag it was given, which stury reports as `No_Arm`, not as the arm's own fault.
+    if loc == ("pet",) and (kind in ("union_tag_not_found", "union_tag_invalid", "model_type", "model_attributes_type", "dict_type")):
+        return pointer(loc), "No_Arm"
     if kind == "union_tag_not_found":
         return pointer(loc), "Missing_Tag"
     if kind == "extra_forbidden":
-        return pointer(loc), "Unknown_Field"
+        return pointer(loc), "Not_Allowed"
     if kind in ("too_short", "too_long") and fixed:
-        return pointer(loc), "Wrong_Length"
+        return pointer(loc), "Too_Few" if kind == "too_short" else "Too_Many"
     if kind in ("string_too_short", "too_short"):
         return pointer(loc), "Too_Short"
     if kind == "string_too_long":
@@ -99,8 +98,6 @@ def refusal_of(err):
     if kind == "too_long":
         return pointer(loc), "Too_Many"
     if kind in ("greater_than_equal", "less_than_equal"):
-        if any(isinstance(m, TypeRange) for m in metadata):
-            return pointer(loc), "Out_Of_Range"
         return pointer(loc), "Below_Minimum" if kind == "greater_than_equal" else "Above_Maximum"
     if kind == "multiple_of":
         return pointer(loc), "Not_Multiple"
@@ -131,8 +128,6 @@ def stury_errors(line):
         return {"": "fatal " + line[6:]}, more
     for item in line.split("\t") if line else []:
         at, code = item.split(" ")
-        if code == "Wrong_Length" and at.startswith("/pair/"):
-            at = "/pair"
         if at in first:
             more.add(at)
         else:

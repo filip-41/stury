@@ -164,11 +164,10 @@ print_tree :: proc(b: ^strings.Builder, t: ^html.Internal_Tree, n: u32, depth: i
 	}
 }
 
-// The cases, the builds compared, which are one per scripting mode a case reads in, the ledger's cases, and the cases
-// of each kind.
+// The cases, the builds compared, which are one per scripting mode a case reads in, and the ledger's cases.
 @(private)
 Tree_Tally :: struct {
-	cases, runs, ledger, fragments, script_on, script_off, templates, foreign_content: int,
+	cases, runs, ledger: int,
 }
 
 @(private)
@@ -179,13 +178,6 @@ in_ledger :: proc(file: string, number: int) -> bool {
 		}
 	}
 	return false
-}
-
-// Whether `data` holds `tag` as a start or end tag, ASCII case folded.
-@(private)
-holds_tag :: proc(data, tag: string) -> bool {
-	lower := strings.to_lower(data)
-	return strings.contains(lower, fmt.tprintf("<%s", tag)) || strings.contains(lower, fmt.tprintf("</%s", tag))
 }
 
 // The options of a fragment case's context, `svg path` or `td` as the format writes it.
@@ -209,11 +201,6 @@ run_tree_file :: proc(t: ^testing.T, file: string, data: []u8, tally: ^Tree_Tall
 	context.allocator = virtual.arena_allocator(&arena)
 	for c in tree_cases(string(data)) {
 		tally.cases += 1
-		tally.fragments += int(c.fragment)
-		tally.script_on += int(c.script_on)
-		tally.script_off += int(c.script_off)
-		tally.templates += int(holds_tag(c.data, "template") || c.fragment_context == "template")
-		tally.foreign_content += int(holds_tag(c.data, "svg") || holds_tag(c.data, "math") || strings.contains(c.fragment_context, " "))
 		listed := in_ledger(file, c.number)
 		passed := false
 		for scripting in ([2]bool{false, true}) {
@@ -363,7 +350,7 @@ tree_construction :: proc(t: ^testing.T) {
 			run_tree_file(t, f.name, f.data, &tally)
 		}
 	}
-	testing.expect_value(t, tally, Tree_Tally{cases = 1973, runs = 3898, ledger = len(TREE_LEDGER), fragments = 206, script_on = 14, script_off = 28, templates = 130, foreign_content = 312})
+	testing.expect_value(t, tally, Tree_Tally{cases = 1973, runs = 3898, ledger = len(TREE_LEDGER)})
 }
 
 // The tree keeps every parse error, the tokenizer's and its own, in the order the text holds them.

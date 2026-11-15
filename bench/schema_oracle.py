@@ -23,7 +23,7 @@ import schema as lane
 from doc import Failed, select_arms, spawn
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SUITE = os.path.join(ROOT, "json", "test", "conformance", "JSON-Schema-Test-Suite", "tests")
+SUITE = os.path.join(ROOT, "core", "schema", "test", "conformance", "JSON-Schema-Test-Suite", "tests")
 REMOTES = os.path.join(os.path.dirname(SUITE), "remotes")
 BASE = "http://localhost:1234/"
 DRAFTS = {"draft4": jsonschema.Draft4Validator, "draft6": jsonschema.Draft6Validator, "draft7": jsonschema.Draft7Validator,

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Random ECMA patterns and texts run through core/regex (ecma_probe.odin) and Node's RegExp with the `u` flag,
+"""Random ECMA patterns and texts run through core/regex (oracle/main.odin) and Node's RegExp with the `u` flag,
 reporting where the verdict, the match or a group's bounds differ.
 
-    python3 cmd/stury/test/ecma_diff.py [--odin PATH] [--seed 1] [--cases 6000] [--show 20]
+    python3 core/regex/test/ecma_diff.py [--odin PATH] [--seed 1] [--cases 6000] [--show 20]
 
 A seeded grammar makes each pattern from what a JSON Schema's `pattern` uses: characters, `.`, classes and the class
 escapes, anchors and \\b, groups with and without names, alternatives, look-aheads, and every quantifier, lazy or
@@ -108,7 +108,7 @@ def main():
     corpus = json.dumps(cases).encode()
     with tempfile.TemporaryDirectory() as scratch:
         probe = os.path.join(scratch, "ecma_probe")
-        subprocess.run([args.odin, "build", "cmd/stury/test/ecma_probe.odin", "-file", "-o:speed", f"-out:{probe}"],
+        subprocess.run([args.odin, "build", "core/regex/test/oracle", "-o:speed", f"-out:{probe}"],
                        cwd=ROOT, check=True)
         with open(os.path.join(scratch, "cases.json"), "wb") as f:
             f.write(corpus)

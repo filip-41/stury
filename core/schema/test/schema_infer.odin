@@ -1,16 +1,17 @@
-package json_tests
+package schema_tests
 
 import "base:runtime"
 import "core:fmt"
 import "core:slice"
 import "core:strings"
 import "core:testing"
-import core "../../core"
-import host "../../host"
-import rules "../../core/rules"
-import write "../../core/write"
-import schema "../../core/schema"
-import json ".."
+import core "../.."
+import host "../../../host"
+import rules "../../rules"
+import write "../../write"
+import schema ".."
+import json "../../../json"
+import walktest "../../../walktest"
 
 // Inference and sampling: every input passes the description inferred from it, a description round trips through JSON
 // Schema, and every sample passes the check that the description makes.
@@ -245,12 +246,12 @@ infer_reads_markup :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	readers := json.as(.Json).readers^
 	readers.holds += {.Attribute}
-	readers.attribute = markup_attribute
+	readers.attribute = walktest.markup_attribute
 	markup := json.as(.Json)
 	markup.readers = &readers
 	cases := [?]struct {
 		model:      string,
-		attributes: []Markup_Attribute,
+		attributes: []walktest.Markup_Attribute,
 	} {
 		// <price currency="EUR">5</price>
 		{`{"price": "5"}`, {{2, `currency="EUR"`}}},
@@ -265,7 +266,7 @@ infer_reads_markup :: proc(t: ^testing.T) {
 		{`{"a": {"id": "2", "id": "3"}}`, {{2, `id="1"`}}},
 	}
 	for c in cases {
-		doc := markup_doc(c.model, c.attributes, &readers)
+		doc := walktest.markup_doc(c.model, c.attributes, &readers)
 		defer core.destroy(&doc)
 		inf: schema.Inferred
 		defer schema.inferred_destroy(&inf)

@@ -1,18 +1,18 @@
-package json_tests
+package model_tests
 
 import "base:runtime"
 import "core:encoding/uuid"
 import "core:strings"
 import "core:testing"
 import "core:time"
-import core "../../core"
-import rules "../../core/rules"
-import typed "../../core/typed"
-import write "../../core/write"
-import schema "../../core/schema"
-import json ".."
-import model "../../core/model"
-import walktest "../../walktest"
+import core "../.."
+import rules "../../rules"
+import typed "../../typed"
+import write "../../write"
+import schema "../../schema"
+import json "../../../json"
+import model ".."
+import walktest "../../../walktest"
 
 // The description of the JSON Schema `text`, in the context allocator.
 @(private = "file")

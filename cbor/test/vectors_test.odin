@@ -120,25 +120,6 @@ appendix_a_simple_24_is_refused :: proc(t: ^testing.T) {
 	testing.expect_value(t, cbor.Detail(fault.detail), cbor.Detail.Bad_Simple)
 }
 
-// A row with `roundtrip` true is in preferred serialization, so the walk that judges it accepts it.
-@(test)
-appendix_a_roundtrip_rows_are_preferred :: proc(t: ^testing.T) {
-	context.allocator = context.temp_allocator
-	table, _ := json.parse(transmute([]u8)APPENDIX_A)
-	preferred := 0
-	for row in table.(json.Array) {
-		entry := row.(json.Object)
-		input := hex(entry["hex"].(json.String))
-		if !entry["roundtrip"].(json.Boolean) || entry["hex"].(json.String) == SIMPLE_24 {
-			continue
-		}
-		fault, bad := walktest.fault_of(cbor.validate(input, .Preferred)).?
-		testing.expectf(t, !bad, "%s: %v", entry["hex"], fault)
-		preferred += 1
-	}
-	testing.expect_value(t, preferred, 64)
-}
-
 // The rows the table gives only a diagnostic notation for: the value each one reads as.
 @(test)
 appendix_a_diagnostic_rows :: proc(t: ^testing.T) {

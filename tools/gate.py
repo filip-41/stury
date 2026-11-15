@@ -226,19 +226,19 @@ def rosetta():
 
 
 def cli_suites(absent, odin):
-    """The command line's suites against jq: every jq and cli.tsv case passes, the smoke cases fail only where
-    smoke.floor names them, every toml-test case reads as the tagged JSON says, every yaml-test-suite case reads as its
-    JSON, the random cases of regex_diff and jq_diff hold none different, and the types and gen laws hold. They run on the binary `build-cli` makes,
+    """The command line's suites against jq: every jq and cli.tsv case passes, every smoke case passes, every valid toml-test and yaml-test-suite case reads as its
+    JSON says, the random cases of regex_diff and jq_diff hold none different, and the types and gen laws hold. They run on the binary `build-cli` makes,
     after every other stage so that a loaded host does not time them out."""
     test = at(f"{CLI}/test")
     suite = lambda name, stage, *argv, tier=1: Check(name, stage, tier, [at(CLI)], ["python3", *argv], trees=[test], cli=True)
     out = [
         suite("cli jq suite", 5, f"{test}/jq_suite.py", CLI_BINARY),
         suite("cli smoke", 5, f"{test}/smoke.py", CLI_BINARY),
-        suite("cli toml suite", 5, f"{test}/toml_suite.py", CLI_BINARY),
-        suite("cli yaml suite", 5, f"{test}/yaml_suite.py", CLI_BINARY),
+        suite("cli conformance suite", 5, f"{test}/conformance_suite.py", CLI_BINARY),
         suite("cli types law", 5, f"{test}/types_law.py", CLI_BINARY),
         suite("cli gen law", 5, f"{test}/gen_law.py", CLI_BINARY, f"--odin={odin}"),
+        suite("cli follow", 5, f"{test}/follow_test.py", CLI_BINARY),
+        suite("cli memory", 5, f"{test}/memory_test.py", CLI_BINARY),
     ]
     has_jq = shutil.which("jq") and subprocess.run(["jq", "--version"], capture_output=True, text=True).stdout.strip() == "jq-1.8.2"
     # The merge tier runs the first seed, the full tier every seed.
@@ -250,10 +250,14 @@ def cli_suites(absent, odin):
     if not has_jq:
         absent.append("cli jq diff (no jq 1.8.2 on PATH)")
     if subprocess.run(["python3", "-c", "import xml.parsers.expat"], capture_output=True).returncode == 0:
-        script = at(f"{CLI}/test/xml_diff.py")
-        out.append(Check("xml expat diff", 6, 1, [at("xml"), at("xml/test/oracle")], make(odin, "diff-xml"), trees=[script]))
+        out.append(Check("xml expat diff", 6, 1, [at("xml"), at("xml/test/oracle")], make(odin, "diff-xml"), trees=[at("xml/test/oracle")]))
     else:
         absent.append("xml expat diff (no pyexpat in python3)")
+    if shutil.which("uv"):
+        script = at("core/model/test/pydantic_diff.py")
+        out.append(Check("model pydantic diff", 6, 2, [at("core/model"), at("core/model/test/oracle")], make(odin, "diff-model"), trees=[script]))
+    else:
+        absent.append("model pydantic diff (no uv)")
     return out
 
 
@@ -266,14 +270,17 @@ def checks(odin):
     # `checks.py imports` reads every tracked source, the examples' among them.
     every = [at(p) for p in LIB_PKGS + TEST_PKGS + BENCH_PKGS + [CLI]] + examples
     out.append(Check("lint", 0, 0, every, make(odin, "lint"), trees=[at("tools/checks.py"), at("API.txt"), at("API_SHARED.txt")], also="amd64"))
+    if shutil.which("node"):
+        out.append(Check("ecma node diff", 6, 2, [at("core/regex"), at("core/regex/test/oracle")], make(odin, "ecma-diff"), trees=[at("core/regex/test/ecma_diff.py")]))
+    else:
+        absent.append("ecma node diff (no node on PATH)")
     out.append(Check("examples", 2, 1, examples, make(odin, "test-examples"), trees=[at("examples")]))
     if os.path.isdir(at(CLI)):
         # Only the merge tier's suites run the binary, and its -o:speed compile is the edit loop's longest step.
         out.append(Check("cli build", 1, 1, [at(CLI)], make(odin, "build-cli")))
-        # The pieces law and the memory test build their own binaries, so they wait for the merge tier.
-        for name, script, tier in (("cli pieces law", "pieces_law.py", 1), ("cli follow", "follow_test.py", 0), ("cli memory", "memory_test.py", 1)):
-            script = at(f"{CLI}/test/{script}")
-            out.append(Check(name, 2, tier, [at(CLI)], ["python3", script, f"--odin={odin}"], trees=[script, at(f"{CLI}/test/harness.py")]))
+        # The pieces law builds its own binaries, so it waits for the merge tier.
+        script = at(f"{CLI}/test/pieces_law.py")
+        out.append(Check("cli pieces law", 2, 1, [at(CLI)], ["python3", script, f"--odin={odin}"], trees=[script, at(f"{CLI}/test/harness.py")]))
         out += cli_suites(absent, odin)
     for package in TEST_PKGS:
         name = package.replace("/", "-")

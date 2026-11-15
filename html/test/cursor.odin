@@ -2,14 +2,14 @@
 package html_tests
 
 import "core:fmt"
-import "core:slice"
 import "core:testing"
 import core "../../core"
 import html ".."
 import walktest "../../walktest"
 
 @(private = "file")
-walk_stopping :: proc(src: []u8, $S: html.Spec, skip: string, stop, every: int) -> (h: walktest.Stopping, end: string) {
+walk_as :: proc(text: string, $S: html.Spec, skip: string, stop, every: int) -> (h: walktest.Stopping, end: string) {
+	src := transmute([]u8)text
 	h = walktest.Stopping{src = src, skip = skip, stop = stop, every = every}
 	h.tokens = make([dynamic]core.Token, 0, 64)
 	regs: core.Hook_Regs
@@ -21,30 +21,13 @@ walk_stopping :: proc(src: []u8, $S: html.Spec, skip: string, stop, every: int) 
 	return h, fmt.tprint(hi, fault, regs.a)
 }
 
+// `walk_as` as a document, then as a fragment.
 @(private = "file")
-expect_resumes :: proc(t: ^testing.T, text: string, $S: html.Spec) -> bool {
-	src := transmute([]u8)text
-	for skip in ([]string{"", "a", "b", "*a", "*b", "*p", "p"}) {
-		full, want := walk_stopping(src, S, skip, 0, 0)
-		defer delete(full.tokens)
-		for stop in 1 ..= len(full.tokens) + 1 {
-			got, end := walk_stopping(src, S, skip, stop, 0)
-			defer delete(got.tokens)
-			ok := testing.expectf(t, slice.equal(got.tokens[:], full.tokens[:]), "%q skip %q stop %d: %d tokens, want %d", text, skip, stop, len(got.tokens), len(full.tokens))
-			ok &&= testing.expectf(t, end == want, "%q skip %q stop %d: %v, want %v", text, skip, stop, end, want)
-			if !ok {
-				return false
-			}
-		}
-		for every in 1 ..= 3 {
-			got, end := walk_stopping(src, S, skip, 0, every)
-			defer delete(got.tokens)
-			if !testing.expectf(t, slice.equal(got.tokens[:], full.tokens[:]) && end == want, "%q skip %q every %d: %v, want %v", text, skip, every, end, want) {
-				return false
-			}
-		}
+walk_stopping :: proc(text: string, skip: string, stop, every, variant: int) -> (walktest.Stopping, string) {
+	if variant == 0 {
+		return walk_as(text, .Document, skip, stop, every)
 	}
-	return true
+	return walk_as(text, .Fragment, skip, stop, every)
 }
 
 // A walk stopped at any one token, or at every one, and resumed gives the tokens, end and fault of an unbroken walk,
@@ -57,11 +40,7 @@ cursor_resumes_after_any_token :: proc(t: ^testing.T) {
 		"<table><a>x</a><tr><td>1<td><p>2</table><b>z",
 		"<p>a<!--c--></p><b>",
 	}
-	for text in texts {
-		if !expect_resumes(t, text, .Document) || !expect_resumes(t, text, .Fragment) {
-			return
-		}
-	}
+	walktest.expect_resumes(t, texts[:], {"", "a", "b", "*a", "*b", "*p", "p"}, 2, walk_stopping)
 	src := transmute([]u8)string("<p>1</p>")
 	h := walktest.Stopping{src = src, stop = 2}
 	h.tokens = make([dynamic]core.Token, 0, 16)

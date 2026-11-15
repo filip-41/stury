@@ -2,6 +2,7 @@ package walktest
 
 import "base:runtime"
 import "core:fmt"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../core"
@@ -230,6 +231,102 @@ stopping_hook :: proc "contextless" (h: ^Stopping, s: core.Hook_Regs, t: core.To
 	return r, .Next
 }
 
+// A format's walk of `text` under its spec number `variant`, with `skip` and the stops `Stopping` takes, resumed after
+// each stop. It gives the hook's tokens and the end, fault and registers as text.
+Walk_Stopping :: proc(text: string, skip: string, stop, every, variant: int) -> (h: Stopping, end: string)
+
+// Checks that a walk stopped at any one token of each of `texts`, or at every one of the first three strides, and
+// resumed gives the tokens, end and fault of an unbroken walk, for each of `skips` and of the `variants` specs.
+expect_resumes :: proc(t: ^testing.T, texts, skips: []string, variants: int, walk: Walk_Stopping, loc := #caller_location) -> bool {
+	for text in texts {
+		for variant in 0 ..< variants {
+			for skip in skips {
+				full, want := walk(text, skip, 0, 0, variant)
+				defer delete(full.tokens)
+				for stop in 1 ..= len(full.tokens) + 1 {
+					got, end := walk(text, skip, stop, 0, variant)
+					defer delete(got.tokens)
+					ok := testing.expectf(t, slice.equal(got.tokens[:], full.tokens[:]), "%q v%d skip %q stop %d: %d tokens, want %d", text, variant, skip, stop, len(got.tokens), len(full.tokens), loc = loc)
+					ok &&= testing.expectf(t, end == want, "%q v%d skip %q stop %d: %v, want %v", text, variant, skip, stop, end, want, loc = loc)
+					if !ok {
+						return false
+					}
+				}
+				for every in 1 ..= 3 {
+					got, end := walk(text, skip, 0, every, variant)
+					defer delete(got.tokens)
+					ok := testing.expectf(t, slice.equal(got.tokens[:], full.tokens[:]), "%q v%d skip %q every %d: %d tokens, want %d", text, variant, skip, every, len(got.tokens), len(full.tokens), loc = loc)
+					ok &&= testing.expectf(t, end == want, "%q v%d skip %q every %d: %v, want %v", text, variant, skip, every, end, want, loc = loc)
+					if !ok {
+						return false
+					}
+				}
+			}
+		}
+	}
+	return true
+}
+
+// A format's answers of `paths` over `src` under its spec number `variant`: `each` through `each_answer`, `iter`
+// through the iterator at largest batch `batch`. Each gives the answers and the error that ended the read.
+Answer_Run :: struct {
+	each: proc(src: []u8, paths: []core.Path, variant: int, early: bool, out: ^[dynamic]core.Token_Answer) -> core.Error,
+	iter: proc(src: []u8, paths: []core.Path, variant: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error,
+}
+
+// Collects the answers `each_answer` gives into the `[dynamic]core.Token_Answer` at `state`.
+collect_answer :: proc(state: rawptr, a: core.Token_Answer) -> bool {
+	append((^[dynamic]core.Token_Answer)(state), a)
+	return true
+}
+
+// Checks that the iterator gives the answers `each_answer` gives and ends with its error, at batch 1, 3 and 64 and
+// with the stop at the last answer on and off, over each of `texts` under each spec number below `variants`, for each
+// of the paths `path_texts` alone and for all of them together, and that some read gave an answer.
+expect_answers_agree :: proc(t: ^testing.T, texts, path_texts: []string, variants: int, run: Answer_Run, loc := #caller_location) -> bool {
+	paths := make([]core.Path, len(path_texts))
+	defer {
+		for &p in paths {
+			core.path_destroy(&p)
+		}
+		delete(paths)
+	}
+	for text, i in path_texts {
+		e: core.Error
+		paths[i], e = core.parse_path(text)
+		if !testing.expectf(t, e == nil, "%s: %v", text, e, loc = loc) {
+			return false
+		}
+	}
+	want, got: [dynamic]core.Token_Answer
+	defer delete(want)
+	defer delete(got)
+	answered := 0
+	for text in texts {
+		src := transmute([]u8)text
+		for variant in 0 ..< variants {
+			for early in ([]bool{false, true}) {
+				for i in 0 ..= len(paths) {
+					set := paths[i:i + 1] if i < len(paths) else paths
+					clear(&want)
+					err := run.each(src, set, variant, early, &want)
+					answered += len(want)
+					for batch in ([]int{1, 3, 64}) {
+						clear(&got)
+						got_err := run.iter(src, set, variant, early, batch, &got)
+						ok := testing.expectf(t, slice.equal(got[:], want[:]), "%q v%d path %d early %v batch %d: %d answers, want %d", text, variant, i, early, batch, len(got), len(want), loc = loc)
+						ok &&= testing.expectf(t, fmt.tprint(got_err) == fmt.tprint(err), "%q v%d path %d early %v batch %d: %v, want %v", text, variant, i, early, batch, got_err, err, loc = loc)
+						if !ok {
+							return false
+						}
+					}
+				}
+			}
+		}
+	}
+	return testing.expect(t, answered > 0, "no read gave an answer", loc = loc)
+}
+
 Edits :: proc(list: ^core.Edit_List, doc: ^core.Document) -> core.Error
 
 // The text `src` read as `as` becomes when `edits` records its edits and the list is committed.
@@ -257,4 +354,33 @@ from_json :: proc(src: string) -> core.Value {
 	doc := new(core.Document, context.temp_allocator)
 	doc^, _ = json.build(transmute([]u8)src, .Json, allocator = context.temp_allocator)
 	return core.Node_Ref{doc, core.ROOT}
+}
+
+// An attribute fact `name="value"` read as a format with attributes reads one, its value a string with nothing to decode.
+markup_attribute :: proc "contextless" (doc: ^core.Document, f: core.Fact) -> (name, value: core.Token) {
+	lead := u32(core.comment_lead(f.spelling))
+	return {lo = f.lo, n = lead - 2, kind = .String, role = .Key}, {lo = f.lo + u64(lead), n = f.n - lead - 1, kind = .String}
+}
+
+// A markup document made by hand: `model` is the JSON text of its data model, where an element is a member whose value
+// is its text, empty when it is, or an object of its children and `#text` runs, and each attribute `name="value"` is a
+// fact of its node, written past the model.
+markup_doc :: proc(model: string, attributes: []Markup_Attribute, readers: ^core.Readers, dups := core.Duplicates.Last) -> core.Document {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, model)
+	facts := make([]core.Fact, len(attributes), context.temp_allocator)
+	for a, i in attributes {
+		strings.write_byte(&b, ' ')
+		name, _, _ := strings.partition(a.text, "=")
+		facts[i] = {lo = u64(len(b.buf)), node = a.node, n = u32(len(a.text)), role = .Attribute, kind = .Plain, spelling = core.comment_spelling(u8(len(name) + 2), 1)}
+		strings.write_string(&b, a.text)
+	}
+	doc, _ := core.build(b.buf[:len(model)], json.as(.Json), dups)
+	doc.src, doc.facts, doc.readers = b.buf[:], facts, readers
+	return doc
+}
+
+Markup_Attribute :: struct {
+	node: core.Node_Index,
+	text: string,
 }

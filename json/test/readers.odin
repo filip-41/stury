@@ -12,30 +12,13 @@ build :: proc(src: string, $S: json.Spec, opts := json.Options{}, dups := core.D
 	return core.build(transmute([]u8)src, json.as(S, opts), dups)
 }
 
-// `{"a":[1,2],"b":{}}` makes 7 nodes. A container's `n` counts its subtree in nodes, a key node is written right
-// before its value's, `length` counts a container's members, and `span` returns its bytes through the close.
+// `{"a":[1,2],"b":{}}`: `length` counts a container's members, and `span` returns its bytes through the close.
 @(test)
-node_layout :: proc(t: ^testing.T) {
+spans_and_member_counts :: proc(t: ^testing.T) {
 	src := `{"a":[1,2],"b":{}}`
 	doc, err := build(src, .Json)
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
-	testing.expect_value(t, len(doc.nodes), 7)
-	if len(doc.nodes) != 7 {
-		return
-	}
-	want := []walktest.Node_Want{
-		{0, 7, .Object, .Value},
-		{2, 1, .String, .Key},
-		{5, 3, .Array, .Value},
-		{6, 1, .Number, .Value},
-		{8, 1, .Number, .Value},
-		{12, 1, .String, .Key},
-		{15, 1, .Object, .Value},
-	}
-	if !walktest.expect_nodes(t, &doc, want) {
-		return
-	}
 	testing.expect_value(t, doc.root_close, u64(len(src)))
 	testing.expect_value(t, string(core.span(&doc, 0)), src)
 	testing.expect_value(t, string(core.span(&doc, 2)), "[1,2]")

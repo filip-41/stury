@@ -75,7 +75,35 @@ Entry_Walk :: struct {
 	reads:    u64,
 	moving:   bool,
 	unpinned: bool,
+	// The members a walk from `start` or `origin` found again for a build, which a move that replaces the origin lets
+	// go, nil before.
+	rewalk:   ^Rewalk,
 }
+
+// A walk from `Entry_Walk.start`, when `from_start` is set, or from `Entry_Walk.origin`, paused past the last member it
+// found again, and the tokens it logged of the members it passed since the window last moved, the latest of them up to
+// `REWALK_TOKENS` tokens, oldest first. It follows the window's moves as the origin does.
+@(private)
+Rewalk :: struct {
+	walk:       Entry_Walk,
+	walking:    bool,
+	from_start: bool,
+	tokens:     [dynamic]core.Token,
+	members:    [dynamic]Rewalked,
+}
+
+// A member a `Rewalk` passed: its first window offset, its end, its tokens in `Rewalk.tokens` and whether memory ran out
+// for them.
+@(private)
+Rewalked :: struct {
+	at, hi:      u64,
+	first, last: int,
+	short:       bool,
+}
+
+// How many tokens of the members a `Rewalk` passed it keeps for later builds.
+@(private)
+REWALK_TOKENS :: 4096
 
 // The first offset that names a byte of `Entry_Walk.far`, `FAR + i` its byte `i`, past every window offset and below
 // the faults that wrap below the window. A window's move leaves such offsets as they are.
@@ -328,11 +356,11 @@ entries_follow :: proc(it: ^Reader, w: ^Entry_Walk) -> bool {
 		// What the steps changed past the saved state stays: the prolog, and the log cut back to the tokens it held at
 		// the save, which a step past the save only appended to unless it began another member, whose tokens a member
 		// taken again logs anew.
-		cursor, back, origin, log, prolog := w.cursor, w.back, w.origin, w.log, w.prolog
+		cursor, back, origin, log, prolog, rewalk := w.cursor, w.back, w.origin, w.log, w.prolog, w.rewalk
 		kept, reads, moving, unpinned, saved := w.kept, w.reads, w.moving, w.unpinned, w.saved
 		redo = w.redo
 		w^ = back^
-		w.cursor, w.back, w.origin, w.log, w.prolog = cursor, back, origin, log, prolog
+		w.cursor, w.back, w.origin, w.log, w.prolog, w.rewalk = cursor, back, origin, log, prolog, rewalk
 		w.kept, w.reads, w.moving, w.unpinned, w.saved = kept, reads, moving, unpinned, saved
 		resize(&w.log, len(back.log))
 		if back.cursor == nil {
@@ -360,6 +388,11 @@ entries_follow :: proc(it: ^Reader, w: ^Entry_Walk) -> bool {
 			member_shift(o, w.delta, it.pin)
 			o.view.src, o.base, o.moves = it.src, it.base, it.moves
 			it.services.entry_step(it, o, .Rebase)
+		}
+		if r := w.rewalk; r != nil && w.moving {
+			rewalk_free(it, w)
+		} else if r != nil {
+			rewalk_shift(it, w, r)
 		}
 		w.saved = shifted(w.saved, w.delta, it.pin)
 	}
@@ -464,7 +497,7 @@ entries_origin :: proc(it: ^Reader, w: ^Entry_Walk) {
 		return
 	}
 	o^ = w^
-	o.back, o.log, o.prolog = nil, {}, nil
+	o.back, o.log, o.prolog, o.rewalk = nil, {}, nil, nil
 	if _, refused := it.services.entry_step(it, o, .Clone); refused != nil {
 		free(o, it.allocator)
 		return
@@ -492,6 +525,7 @@ entries_walked_close :: proc(it: ^Reader) {
 			it.services.entry_step(it, w.origin, .Free)
 			free(w.origin, it.allocator)
 		}
+		rewalk_free(it, w)
 		delete(w.log)
 		delete(w.prolog, it.allocator)
 		free(w.back, it.allocator)
@@ -521,30 +555,26 @@ member_document :: proc(doc: ^core.Document, allocator: runtime.Allocator) -> (s
 // reader's text and with the format's `state`, marked `in_order` when no token goes back to bytes before the one sent
 // before it. `feed` passes them to the builder as the format's build of a whole text
 // passes its walk's, inside a container that holds the member alone, which `member_document` takes off. A member given
-// before the last is found again by a walk from `Entry_Walk.start` or `Entry_Walk.origin`, and one the window no longer
-// holds is `.Bad_Index`.
+// before the last is found again by `rewalked`, from `Entry_Walk.start` or `Entry_Walk.origin`, at the cost of the
+// members between the last one found again and it, and one the window no longer holds is `.Bad_Index`.
 entry_document :: proc(it: ^Reader, rec: Record, state: []u8, in_order: bool, allocator: runtime.Allocator, feed: proc(b: ^engine.Builder, regs: core.Hook_Regs, tokens: []core.Token) -> core.Hook_Regs) -> (doc: core.Document, err: core.Document_Error) {
 	w := (^Entry_Walk)(it.format)
 	if w == nil || !w.logging || rec.at < it.base {
 		return {}, {kind = .Bad_Index}
 	}
-	found := w
-	again: Entry_Walk
-	defer if found == &again {
-		it.services.entry_step(it, &again, .Free)
-		delete(again.log)
-	}
+	log, hi, far, short := w.log[:], w.hi, w.far, w.short
 	if len(w.log) == 0 || rec.at != it.base + w.lo {
-		found = &again
-		if err = entry_again(it, w, rec.at - it.base, &again); err.kind != .None {
+		m: Rewalked
+		if m, err = rewalked(it, w, rec.at - it.base); err.kind != .None {
 			return
 		}
+		log, hi, far, short = w.rewalk.tokens[m.first:m.last], m.hi, w.rewalk.walk.far, m.short
 	}
-	if found.short {
+	if short {
 		return {}, {kind = .No_Memory}
 	}
-	src, tokens, hi := it.src, found.log[:], found.hi
-	owned, moved, lost := far_source(it, found, allocator)
+	src, tokens := it.src, log
+	owned, moved, lost := far_source(it, far, log, hi, allocator)
 	defer delete(moved, allocator)
 	if lost != nil {
 		return {}, {kind = .No_Memory}
@@ -589,16 +619,17 @@ entry_document :: proc(it: ^Reader, rec: Record, state: []u8, in_order: bool, al
 	return member_document(&doc, allocator)
 }
 
-// The text a member whose tokens `w.log` holds builds over when some name bytes of `w.far`, and its tokens moved there:
-// the far bytes they read, then the window's from the lowest the others read through `w.hi`. The far bytes come first,
-// as an anchored node comes before the aliases that read it. Nil when no token names a far byte.
+// The text a member whose tokens `log` holds, through window offset `end`, builds over when some name bytes of `far`,
+// and its tokens moved there: the far bytes they read, then the window's from the lowest the others read through `end`.
+// The far bytes come first, as an anchored node comes before the aliases that read it. Nil when no token names a far
+// byte.
 @(private)
-far_source :: proc(it: ^Reader, w: ^Entry_Walk, allocator: runtime.Allocator) -> (src: []u8, tokens: []core.Token, err: runtime.Allocator_Error) {
-	if len(w.far) == 0 {
+far_source :: proc(it: ^Reader, far: []u8, log: []core.Token, end: u64, allocator: runtime.Allocator) -> (src: []u8, tokens: []core.Token, err: runtime.Allocator_Error) {
+	if len(far) == 0 {
 		return
 	}
-	far_lo, far_hi, lo, hi := max(u64), u64(0), w.hi, w.hi
-	for t in w.log {
+	far_lo, far_hi, lo, hi := max(u64), u64(0), end, end
+	for t in log {
 		if t.lo >= FAR {
 			far_lo, far_hi = min(far_lo, t.lo - FAR), max(far_hi, t.lo - FAR + u64(t.n))
 		} else {
@@ -614,46 +645,153 @@ far_source :: proc(it: ^Reader, w: ^Entry_Walk, allocator: runtime.Allocator) ->
 		delete(src, allocator)
 		src = nil
 	}
-	tokens = make([]core.Token, len(w.log), allocator) or_return
-	copy(src, w.far[far_lo:far_hi])
+	tokens = make([]core.Token, len(log), allocator) or_return
+	copy(src, far[far_lo:far_hi])
 	copy(src[n:], it.src[lo:hi])
-	for t, i in w.log {
+	for t, i in log {
 		tokens[i] = t
 		tokens[i].lo = t.lo - FAR - far_lo if t.lo >= FAR else t.lo - lo + n
 	}
 	return
 }
 
-// Walks to the member that starts at window offset `at` again, into `again`, which the caller frees: from the reader's
-// first position while the window holds it, else from `w.origin`, so the member's tokens are logged in their place.
+// The member that starts at window offset `at`, found again: among those `Entry_Walk.rewalk` keeps, or by walking it
+// on, or once it passed `at` by a walk from the reader's first position while the window holds it, else from
+// `w.origin`, so the member's tokens are logged in their place.
 @(private)
-entry_again :: proc(it: ^Reader, w: ^Entry_Walk, at: u64, again: ^Entry_Walk) -> core.Document_Error {
+rewalked :: proc(it: ^Reader, w: ^Entry_Walk, at: u64) -> (m: Rewalked, err: core.Document_Error) {
+	r := w.rewalk
+	if r == nil {
+		failed: runtime.Allocator_Error
+		if r, failed = new(Rewalk, it.allocator); failed != nil {
+			return {}, {kind = .No_Memory}
+		}
+		r.tokens, r.members = make([dynamic]core.Token, it.allocator), make([dynamic]Rewalked, it.allocator)
+		r.walk.log = make([dynamic]core.Token, it.allocator)
+		w.rewalk = r
+	}
+	#reverse for kept in r.members {
+		if kept.at == at {
+			return kept, {}
+		}
+		if kept.at < at {
+			break
+		}
+	}
+	if !r.walking || r.walk.lo >= at {
+		if err = rewalk_start(it, w, r); err.kind != .None {
+			return
+		}
+	}
 	pos := it.pos
 	defer it.pos = pos
+	for {
+		if r.walk.cursor == nil {
+			it.pos = w.start - it.base
+		}
+		entry_next(it, &r.walk)
+		if !r.walk.given {
+			r.walking = false
+			return {}, {kind = .Bad_Index}
+		}
+		r.walk.key = {}
+		m = rewalk_keep(r)
+		if m.at > at {
+			return {}, {kind = .Bad_Index}
+		}
+		if m.at == at {
+			return
+		}
+	}
+}
+
+// Starts `r.walk` from the reader's first position while the window holds it, else from a copy of `w.origin`, and lets
+// go of the members it kept.
+@(private)
+rewalk_start :: proc(it: ^Reader, w: ^Entry_Walk, r: ^Rewalk) -> core.Document_Error {
+	if r.walk.cursor != nil {
+		it.services.entry_step(it, &r.walk, .Free)
+	}
+	log := r.walk.log
+	clear(&log)
+	defer r.walk.log = log
+	clear(&r.tokens)
+	clear(&r.members)
+	r.walking, r.from_start = false, w.start >= it.base
 	switch {
-	case w.start >= it.base:
-		again^ = {view = w.view, names = w.names, base = w.base, moves = w.moves, logging = true}
-		it.pos = w.start - it.base
+	case r.from_start:
+		r.walk = {view = w.view, names = w.names, base = w.base, moves = w.moves, logging = true}
 	case w.origin != nil:
-		again^ = w.origin^
-		if _, refused := it.services.entry_step(it, again, .Clone); refused != nil {
-			again.cursor = nil
+		r.walk = w.origin^
+		if _, refused := it.services.entry_step(it, &r.walk, .Clone); refused != nil {
+			r.walk.cursor = nil
 			return {kind = .Bad_Index}
 		}
 	case:
 		return {kind = .Bad_Index}
 	}
-	again.log = make([dynamic]core.Token, it.allocator)
-	for {
-		entry_next(it, again)
-		if !again.given || again.lo > at {
-			return {kind = .Bad_Index}
+	r.walking = true
+	return {}
+}
+
+// Keeps the member `r.walk` gave last, letting go of the oldest past `REWALK_TOKENS` tokens, and returns it.
+@(private)
+rewalk_keep :: proc(r: ^Rewalk) -> Rewalked {
+	w := &r.walk
+	m := Rewalked{at = w.lo, hi = w.hi, short = w.short}
+	if len(r.tokens) + len(w.log) > REWALK_TOKENS {
+		drop := 0
+		for drop < len(r.members) && len(r.tokens) - r.members[drop].first + len(w.log) > REWALK_TOKENS / 2 {
+			drop += 1
 		}
-		if again.lo == at {
-			return {}
+		first := r.members[drop].first if drop < len(r.members) else len(r.tokens)
+		remove_range(&r.tokens, 0, first)
+		remove_range(&r.members, 0, drop)
+		for &kept in r.members {
+			kept.first, kept.last = kept.first - first, kept.last - first
 		}
-		again.key = {}
 	}
+	m.first = len(r.tokens)
+	if _, failed := append(&r.tokens, ..w.log[:]); failed != nil {
+		m.short = true
+	}
+	m.last = len(r.tokens)
+	append(&r.members, m)
+	return m
+}
+
+// Lets go of the members `r` kept, whose tokens may name bytes the window dropped or far bytes a move changed, and moves
+// `r.walk` with the window as `entries_follow` moves the origin, or stops it once the window dropped the reader's first
+// position it started from.
+@(private)
+rewalk_shift :: proc(it: ^Reader, w: ^Entry_Walk, r: ^Rewalk) {
+	clear(&r.tokens)
+	clear(&r.members)
+	r.walking = r.walking && (!r.from_start || w.start >= it.base)
+	if r.walking {
+		member_shift(&r.walk, w.delta, it.pin)
+		r.walk.view.src, r.walk.base, r.walk.moves = it.src, it.base, it.moves
+		if r.walk.cursor != nil {
+			it.services.entry_step(it, &r.walk, .Rebase)
+		}
+	}
+}
+
+// Frees `w.rewalk`.
+@(private)
+rewalk_free :: proc(it: ^Reader, w: ^Entry_Walk) {
+	r := w.rewalk
+	if r == nil {
+		return
+	}
+	if r.walk.cursor != nil {
+		it.services.entry_step(it, &r.walk, .Free)
+	}
+	delete(r.walk.log)
+	delete(r.tokens)
+	delete(r.members)
+	free(r, it.allocator)
+	w.rewalk = nil
 }
 
 // What an `.Entries` reader over a tree keeps in `Reader.format`: the tree, built from byte `start` of the reader's

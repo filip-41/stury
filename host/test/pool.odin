@@ -22,28 +22,19 @@ bump_twice :: proc(arg: rawptr) {
 	sync.atomic_add((^int)(arg), 2)
 }
 
-// The caller's call always runs, a helper's may be taken back unstarted, and none runs after `finish`.
+// The caller's call always runs, a helper's may be taken back unstarted, none runs after `finish`, and no more run than
+// the width asked for.
 @(test)
-every_started_call_returns_before_finish :: proc(t: ^testing.T) {
+started_calls_return_before_finish_and_are_no_more_than_asked :: proc(t: ^testing.T) {
 	pool: host.Pool
 	host.pool_init(&pool, 4)
 	defer host.pool_destroy(&pool)
-	for _ in 0 ..< 2000 {
-		count: int
-		run(&pool.runner, pool.runner.threads, bump, &count)
-		testing.expect(t, 1 <= count && count <= pool.runner.threads + 1)
-	}
-}
-
-@(test)
-no_more_calls_than_asked :: proc(t: ^testing.T) {
-	pool: host.Pool
-	host.pool_init(&pool, 4)
-	defer host.pool_destroy(&pool)
-	for _ in 0 ..< 200 {
-		count: int
-		run(&pool.runner, 1, bump, &count)
-		testing.expect(t, 1 <= count && count <= 2)
+	for width in ([]int{1, pool.runner.threads}) {
+		for _ in 0 ..< 1000 {
+			count: int
+			run(&pool.runner, width, bump, &count)
+			testing.expect(t, 1 <= count && count <= width + 1)
+		}
 	}
 }
 

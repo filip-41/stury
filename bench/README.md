@@ -133,7 +133,7 @@ writes a 0 or 1 per instance to the path in `BENCH_VERDICTS`). The peers' driver
 `peers/rust-schema/src/main.rs` (a package of its own, so the crates parse with serde_json's default features), with
 jsonschema 0.60.2 and boon 0.6.1 pinned in `peers/rust-schema/Cargo.toml`. `schema_oracle.py` runs the same instances
 through the pinned Python `jsonschema` package and compares each instance's verdict; `make diff-schema ORACLE_ARGS=--suite`
-also holds the package to the vendored JSON-Schema-Test-Suite (`json/test/conformance/`).
+also holds the package to the vendored JSON-Schema-Test-Suite (`core/schema/test/conformance/`).
 
 ## Record lanes
 

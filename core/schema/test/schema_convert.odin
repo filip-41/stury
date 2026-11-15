@@ -1,11 +1,12 @@
-package json_tests
+package schema_tests
 
 import "core:testing"
-import core "../../core"
-import "../../core/typed"
-import schema "../../core/schema"
-import dsv "../../dsv"
-import json ".."
+import core "../.."
+import "../../typed"
+import schema ".."
+import dsv "../../../dsv"
+import json "../../../json"
+import walktest "../../../walktest"
 
 // Conversion through a schema: the output passes it, a member it leaves open survives, a value the output format
 // cannot spell is refused with its path, and a cell is the kind its format reads, which no schema changes.
@@ -160,7 +161,7 @@ convert_writes_markup_text_as_the_check_reads_it :: proc(t: ^testing.T) {
 	readers := json.as(.Json).readers^
 	readers.holds += {.Attribute}
 	readers.attribute = proc "contextless" (doc: ^core.Document, f: core.Fact) -> (name, value: core.Token) {
-		name, value = markup_attribute(doc, f)
+		name, value = walktest.markup_attribute(doc, f)
 		value.kind = .Plain
 		return
 	}
@@ -170,7 +171,7 @@ convert_writes_markup_text_as_the_check_reads_it :: proc(t: ^testing.T) {
 	c, cerr := schema.compile(core.span(&schema_doc, core.ROOT), json.as(.Json), {})
 	testing.expect(t, cerr == nil)
 	defer schema.destroy(c)
-	doc := markup_doc(`{"price": "5"}`, {{2, `n="3"`}, {2, `id="7"`}}, &readers)
+	doc := walktest.markup_doc(`{"price": "5"}`, {{2, `n="3"`}, {2, `id="7"`}}, &readers)
 	defer core.destroy(&doc)
 	doc.as.readers = &readers
 	doc.nodes[2].kind = .Plain
@@ -202,20 +203,20 @@ convert_writes_attributes_as_members :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	readers := json.as(.Json).readers^
 	readers.holds += {.Attribute}
-	readers.attribute = markup_attribute
+	readers.attribute = walktest.markup_attribute
 	s := `{"type": "object", "properties": {"price": {"type": "object", "properties": {"currency": {"enum": ["EUR", "USD"]}, "#text": {"maxLength": 3}}, "required": ["currency"], "additionalProperties": false}}}`
 	schema_doc, _ := core.build(transmute([]u8)s, json.as(.Json))
 	defer core.destroy(&schema_doc)
 	c, cerr := schema.compile(core.span(&schema_doc, core.ROOT), json.as(.Json), {})
 	testing.expect(t, cerr == nil)
 	defer schema.destroy(c)
-	doc := markup_doc(`{"price": "5"}`, {{2, `currency="EUR"`}}, &readers)
+	doc := walktest.markup_doc(`{"price": "5"}`, {{2, `currency="EUR"`}}, &readers)
 	doc.as.readers = &readers
 	got := convert_document(t, c, &doc, json.as(.Json))
 	testing.expectf(t, got.err == nil, "%v", got.err)
 	testing.expect_value(t, got.text, `{"price":{"currency":"EUR","#text":"5"}}`)
 	core.destroy(&doc)
-	doc = markup_doc(`{"price": "5"}`, {{2, `currency="GBP"`}}, &readers)
+	doc = walktest.markup_doc(`{"price": "5"}`, {{2, `currency="GBP"`}}, &readers)
 	doc.as.readers = &readers
 	got = convert_document(t, c, &doc, json.as(.Json))
 	testing.expect_value(t, got.stage, schema.Stage.Input)
@@ -223,16 +224,16 @@ convert_writes_attributes_as_members :: proc(t: ^testing.T) {
 }
 
 @(private = "file")
-markup_converted :: proc(t: ^testing.T, model: string, attributes: []Markup_Attribute) -> Converted {
+markup_converted :: proc(t: ^testing.T, model: string, attributes: []walktest.Markup_Attribute) -> Converted {
 	readers := json.as(.Json).readers^
 	readers.holds += {.Attribute}
-	readers.attribute = markup_attribute
+	readers.attribute = walktest.markup_attribute
 	schema_doc, _ := core.build(transmute([]u8)string(`{"type": "object"}`), json.as(.Json))
 	defer core.destroy(&schema_doc)
 	c, cerr := schema.compile(core.span(&schema_doc, core.ROOT), json.as(.Json), {})
 	testing.expect(t, cerr == nil)
 	defer schema.destroy(c)
-	doc := markup_doc(model, attributes, &readers, .All)
+	doc := walktest.markup_doc(model, attributes, &readers, .All)
 	doc.as.readers = &readers
 	defer core.destroy(&doc)
 	return convert_document(t, c, &doc, json.as(.Json))

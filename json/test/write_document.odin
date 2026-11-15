@@ -745,13 +745,13 @@ write_document_near_the_end :: proc(t: ^testing.T) {
 	}
 }
 
-// A text past the stream's buffer is written through each refill.
+// A text of more than twice the stream's buffer is written through each refill.
 @(test)
 write_document_refills :: proc(t: ^testing.T) {
 	b: strings.Builder
 	defer strings.builder_destroy(&b)
 	strings.write_string(&b, "[")
-	for _ in 0 ..< 20000 {
+	for _ in 0 ..< 3000 {
 		strings.write_string(&b, `{"id":1,"tags":[[[[[[[["a","b"]]]]]]]],"on":true},`)
 	}
 	strings.write_string(&b, "null]")

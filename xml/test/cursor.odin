@@ -2,14 +2,14 @@
 package xml_tests
 
 import "core:fmt"
-import "core:slice"
 import "core:testing"
 import core "../../core"
 import xml ".."
 import walktest "../../walktest"
 
 @(private)
-walk_stopping :: proc(src: []u8, skip: string, stop, every: int) -> (h: walktest.Stopping, end: string) {
+walk_stopping :: proc(text: string, skip: string, stop, every, _: int) -> (h: walktest.Stopping, end: string) {
+	src := transmute([]u8)text
 	h = walktest.Stopping{src = src, skip = skip, stop = stop, every = every}
 	h.tokens = make([dynamic]core.Token, 0, 64)
 	regs: core.Hook_Regs
@@ -35,31 +35,7 @@ CURSOR_TEXTS := [?]string {
 // with skipped elements among them.
 @(test)
 cursor_resumes_after_any_token :: proc(t: ^testing.T) {
-	for text in CURSOR_TEXTS {
-		src := transmute([]u8)text
-		for skip in ([]string{"", "a", "b", "*a", "*b", "*r", "r"}) {
-			full, want := walk_stopping(src, skip, 0, 0)
-			defer delete(full.tokens)
-			for stop in 1 ..= len(full.tokens) + 1 {
-				got, end := walk_stopping(src, skip, stop, 0)
-				defer delete(got.tokens)
-				ok := testing.expectf(t, slice.equal(got.tokens[:], full.tokens[:]), "%q skip %q stop %d: %d tokens, want %d", text, skip, stop, len(got.tokens), len(full.tokens))
-				ok &&= testing.expectf(t, end == want, "%q skip %q stop %d: %v, want %v", text, skip, stop, end, want)
-				if !ok {
-					return
-				}
-			}
-			for every in 1 ..= 3 {
-				got, end := walk_stopping(src, skip, 0, every)
-				defer delete(got.tokens)
-				ok := testing.expectf(t, slice.equal(got.tokens[:], full.tokens[:]), "%q skip %q every %d: %d tokens, want %d", text, skip, every, len(got.tokens), len(full.tokens))
-				ok &&= testing.expectf(t, end == want, "%q skip %q every %d: %v, want %v", text, skip, every, end, want)
-				if !ok {
-					return
-				}
-			}
-		}
-	}
+	walktest.expect_resumes(t, CURSOR_TEXTS[:], {"", "a", "b", "*a", "*b", "*r", "r"}, 1, walk_stopping)
 }
 
 // A resume over another text, or of a cursor that holds no stop, is refused, and `destroy` frees a cursor no resume

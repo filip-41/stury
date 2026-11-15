@@ -146,10 +146,12 @@ def run(binary, args):
 def main():
     odin = odin_flag()
     with tempfile.TemporaryDirectory() as directory:
-        serial = {"STURY_POOLED_BYTES": 1 << 62}
-        builds = {"serial": serial} | {w: {"STURY_POOLED_BYTES": 0, "RECORDS_SLICE": SLICE} | ({} if w == DENSITY_RULE else FAN_ALWAYS) for w in WIDTHS}
+        # The width is a run-time `--threads`, so the widths that fan out share one build.
+        pooled = {"STURY_POOLED_BYTES": 0, "RECORDS_SLICE": SLICE}
+        builds = {"serial": {"STURY_POOLED_BYTES": 1 << 62}, "fan": pooled | FAN_ALWAYS, "density": pooled}
         with concurrent.futures.ThreadPoolExecutor(2) as pool:
-            binaries = dict(zip(builds, pool.map(lambda kv: build(odin, os.path.join(directory, f"stury-{kv[0]}"), kv[1]), builds.items())))
+            built = dict(zip(builds, pool.map(lambda kv: build(odin, os.path.join(directory, f"stury-{kv[0]}"), kv[1]), builds.items())))
+        binaries = {"serial": built["serial"]} | {w: built["density" if w == DENSITY_RULE else "fan"] for w in WIDTHS}
         failures = 0
         runs = cases(directory)
         for case in runs:

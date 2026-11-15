@@ -3,10 +3,10 @@ package model_oracle
 import "core:fmt"
 import "core:os"
 import "core:strings"
-import core "../../../core"
-import typed "../../../core/typed"
-import json "../.."
-import model "../../../core/model"
+import core "../../.."
+import typed "../../../typed"
+import json "../../../../json"
+import model "../.."
 
 // The models `pydantic_diff.py` declares in pydantic, loaded here. Reads the bodies of the file named by the first
 // argument, one per line, loads each with repeats taken as the second argument says (`last` or `refuse`), and writes

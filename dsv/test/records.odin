@@ -330,14 +330,19 @@ records_build_a_table_on_threads :: proc(t: ^testing.T) {
 				return
 			}
 		}
-		// A header alone, one row, the text cut short, and a byte broken near either end and through the middle.
+		// A header alone, one row, and the text cut short and with a byte broken near either end and through the middle:
+		// of a short text at each byte, of the long one at one.
 		expect_build_law(t, pools[:], c.head, c.spec, c.opts, false, false)
 		expect_build_law(t, pools[:], strings.concatenate({c.head, c.row}, context.temp_allocator), c.spec, c.opts, false, false)
-		for at in ([]int{1, len(c.head) + 2, len(src) / 2, len(src) - 3, len(src) - 1}) {
-			for b in ([]string{"\"", ",", "\r", "\xff", "\n"}) {
-				broken := strings.concatenate({src[:at], b, src[at + 1:]}, context.temp_allocator)
-				if !expect_build_law(t, pools[:], broken, c.spec, c.opts, false, false) || !expect_build_law(t, pools[:], src[:at], c.spec, c.opts, false, false) {
-					return
+		short := strings.concatenate({c.head, strings.repeat(c.row, 40, context.temp_allocator)}, context.temp_allocator)
+		for text, n in ([]string{short, src}) {
+			bytes_at := []string{"\"", ",", "\r", "\xff", "\n"} if n == 0 else []string{"\""}
+			for at in ([]int{1, len(c.head) + 2, len(text) / 2, len(text) - 3, len(text) - 1}) {
+				for b in bytes_at {
+					broken := strings.concatenate({text[:at], b, text[at + 1:]}, context.temp_allocator)
+					if !expect_build_law(t, pools[:], broken, c.spec, c.opts, false, false) || !expect_build_law(t, pools[:], text[:at], c.spec, c.opts, false, false) {
+						return
+					}
 				}
 			}
 		}

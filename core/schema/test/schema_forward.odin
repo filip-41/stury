@@ -1,9 +1,9 @@
-package json_tests
+package schema_tests
 
 import "core:testing"
-import core "../../core"
-import schema "../../core/schema"
-import json ".."
+import core "../.."
+import schema ".."
+import json "../../../json"
 
 // A check from the names of `json` alone: load the schema, bind it to a spec, judge a text and its records.
 @(test)

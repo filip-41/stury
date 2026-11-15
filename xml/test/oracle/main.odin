@@ -7,7 +7,7 @@ import "core:os"
 import core "../../../core"
 import xml "../.."
 
-// The texts `cmd/stury/test/xml_diff.py` sends, read from standard input as a four-byte little-endian length and that
+// The texts `xml_diff.py` sends, read from standard input as a four-byte little-endian length and that
 // many bytes each. Writes for each its verdict on a line: `ok`, or `err` with the offset and the rule's code. A reference
 // to an entity no subset read declares is read as its text, as expat skips it.
 main :: proc() {

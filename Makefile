@@ -18,9 +18,9 @@ endif
 
 # The library packages, and the test packages that read them.
 LIB_PKGS  := core/spell core/regex core host core/kernel core/compose core/diff core/rules core/css core/build core/typed core/write core/records core/schema core/model json dsv toml xml yaml cbor html
-TEST_PKGS := core/spell/test core/regex/test host/test core/kernel/test core/test core/css/test core/write/test core/records/test json/test dsv/test toml/test xml/test yaml/test cbor/test html/test
+TEST_PKGS := core/spell/test core/regex/test host/test core/kernel/test core/test core/diff/test core/model/test core/schema/test core/css/test core/write/test core/records/test json/test dsv/test toml/test xml/test yaml/test cbor/test html/test
 # The packages the tests share, checked by `lint` and built through their imports.
-SUPPORT_PKGS := walktest bench/timing xml/test/oracle
+SUPPORT_PKGS := walktest bench/timing xml/test/oracle core/model/test/oracle core/regex/test/oracle
 # The benchmark programs, which `lint` and the gate compile.
 BENCH_PKGS := bench bench/doc bench/editbench bench/paths bench/typed bench/write bench/records bench/schema bench/schema_csv bench/schema_json
 # html/internal.odin opens the HTML tokenizer and tree to html/test's conformance tests. A test build opens them by
@@ -46,12 +46,14 @@ ASAN_TARGETS  := $(foreach p,$(TEST_PKGS),$(BUILD)/test/asan/$(p))
 # The test packages that run threads, which only `host` does.
 TSAN_PKGS     := host/test
 TSAN_TARGETS  := $(foreach p,$(TSAN_PKGS),$(BUILD)/test/tsan/$(p))
-X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS),$(BUILD)/test/x86/$(o)/$(t)/$(p))))
+# X86_OPTS and WIDE_TIERS narrow test-x86 and test-wide, so CI runs their parts on separate runners.
+X86_OPTS      ?= none speed
+X86_TARGETS   := $(foreach o,$(X86_OPTS),$(foreach t,0 1,$(foreach p,$(TEST_PKGS),$(BUILD)/test/x86/$(o)/$(t)/$(p))))
 
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: help check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite diff-schema diff-schema-csv diff-schema-gen ecma-diff diff-xml test-x86 test-wide test-asan test-tsan test-f32 test-sweep lint lint-man lint-fixtures api-write bench bench-doc bench-paths bench-typed bench-records bench-schema bench-schema-peers bench-write bench-peers bench-cli fixtures surface \
+.PHONY: help check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite diff-schema diff-schema-csv diff-schema-gen diff-model ecma-diff diff-xml test-x86 test-wide test-asan test-asan-lib test-tsan test-f32 test-sweep lint lint-man lint-fixtures api-write bench bench-doc bench-paths bench-typed bench-records bench-schema bench-schema-peers bench-write bench-peers bench-cli fixtures surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
 
 # The bench lanes' probes and peers, and the fixtures they read. BENCH_CC, BENCH_CXX and BENCH_CARGO name the compilers
@@ -101,6 +103,7 @@ help:
 	@echo "make diff-schema  the schema lane's peers against the Python jsonschema package (needs uv)"
 	@echo "make diff-schema-csv  the check of CSV and TSV against a Python cell-rule converter and jsonschema (needs uv)"
 	@echo "make diff-schema-gen  the check over generated schemas against jsonschema (needs uv)"
+	@echo "make diff-model       the errors of model.load against pydantic (needs uv)"
 	@echo "make bench-doc, bench-paths, bench-typed, bench-records, bench-schema, bench-write, bench-cli   see bench/README.md"
 	@echo "ODIN=<path> names the compiler, and needs release $(MIN_ODIN) or later."
 
@@ -136,12 +139,11 @@ test-one:
 	@[ -n "$(P)" ] && [ -n "$(T)" ] || { echo "usage: make test-one P=<package dir> T=<test name>" >&2; exit 2; }
 	$(ODIN) test $(P) $(TEST_OPT) $(TEST_MEMORY) $(TEST_PIECES) -define:ODIN_TEST_NAMES=$(T) -out:$(BUILD)/test-one
 
-# The command line end to end on what jq has not, held to smoke.floor.
+# The command line end to end on what jq has not.
 test-cli: build-cli
 	@echo "== cmd/stury"
 	python3 cmd/stury/test/smoke.py $(BUILD)/stury
-	python3 cmd/stury/test/toml_suite.py $(BUILD)/stury
-	python3 cmd/stury/test/yaml_suite.py $(BUILD)/stury
+	python3 cmd/stury/test/conformance_suite.py $(BUILD)/stury
 
 # jq 1.8.2's corpus and cli.tsv, every row passing.
 test-jq: build-cli
@@ -166,7 +168,7 @@ $(DIFF_SEED_TARGETS): diff-seed-%: build-cli
 
 # core/regex's ECMA patterns against Node's RegExp. Without node on PATH it says so and compares nothing.
 ecma-diff:
-	python3 cmd/stury/test/ecma_diff.py --odin $(ODIN)
+	python3 core/regex/test/ecma_diff.py --odin $(ODIN)
 
 # The XML walk against expat (pyexpat) on seeded random and broken texts, with xmllint as the third opinion. XML_DIFF_SEEDS
 # and XML_DIFF_CASES set the runs.
@@ -175,7 +177,7 @@ XML_DIFF_CASES ?= 40000
 diff-xml:
 	@mkdir -p $(BUILD)
 	$(ODIN) build xml/test/oracle $(TEST_OPT) -out:$(BUILD)/xml_oracle
-	@for seed in $(XML_DIFF_SEEDS); do python3 cmd/stury/test/xml_diff.py $(BUILD)/xml_oracle --seed=$$seed --cases=$(XML_DIFF_CASES) || exit 1; done
+	@for seed in $(XML_DIFF_SEEDS); do python3 xml/test/oracle/xml_diff.py $(BUILD)/xml_oracle --seed=$$seed --cases=$(XML_DIFF_CASES) || exit 1; done
 
 # The XML conformance documents, fetched once, which the package's tests read.
 XML_SUITE := xml/test/conformance/files
@@ -212,9 +214,10 @@ $(X86_TARGETS): $(BUILD)/test/x86/%:
 # Intel SDE (`SDE=sde64`) emulating a Nehalem for v2 (x86-64-v2, no PCLMULQDQ), a Haswell for v3 and a Sapphire Rapids
 # for v4.
 SDE ?= sde64
+WIDE_TIERS ?= 0:nhm 1:hsw 2:spr
 test-wide: | $(XML_SUITE)
 	@mkdir -p $(BUILD)/wide
-	@for spec in 0:nhm 1:hsw 2:spr; do t=$${spec%%:*}; cpu=$${spec##*:}; for p in $(TEST_PKGS); do \
+	@for spec in $(WIDE_TIERS); do t=$${spec%%:*}; cpu=$${spec##*:}; for p in $(TEST_PKGS); do \
 		echo "== $$p (tier $$t on $$cpu)"; \
 		$(ODIN) build $$p -build-mode:test -target:linux_amd64 -o:minimal $(TEST_MEMORY) $(TEST_PIECES) \
 			-define:ODIN_TEST_FANCY=false -define:TIER=$$t -out:$(BUILD)/wide/test || exit 1; \
@@ -255,8 +258,9 @@ test-asan-cli:
 test-tsan-cli:
 	$(call sanitized_cli,thread)
 
-test-asan: $(ASAN_TARGETS)
+test-asan: test-asan-lib
 	@$(MAKE) --no-print-directory test-asan-cli
+test-asan-lib: $(ASAN_TARGETS)
 
 # Under the sanitizer a text read on threads is cut in pieces of 16 bytes: the -o:minimal suites take the pieces of one byte.
 $(ASAN_TARGETS): $(BUILD)/test/asan/%:
@@ -393,6 +397,15 @@ diff-schema-gen:
 	@mkdir -p $(BUILD)/oracle
 	$(ODIN) build bench/schema_json $(TEST_OPT) -collection:stury=. -out:$(BUILD)/oracle/schema_json
 	uv run --offline --no-project --with jsonschema==4.26.0 python3 -I bench/schema_gen_oracle.py $(BUILD)/oracle/schema_json $(GEN_ORACLE_ARGS)
+
+# The errors of model.load on generated bodies against pydantic 2 in strict mode. MODEL_ORACLE_ARGS sets --seed and --count.
+# MODEL_PY is a Python that imports pydantic: by default uv fetches the pinned version once.
+MODEL_ORACLE_ARGS ?=
+MODEL_PY ?= uv run --no-project --with pydantic==2.14.2 python3 -I
+diff-model:
+	@mkdir -p $(BUILD)/oracle
+	$(ODIN) build core/model/test/oracle $(TEST_OPT) -out:$(BUILD)/oracle/model
+	$(MODEL_PY) core/model/test/pydantic_diff.py $(BUILD)/oracle/model $(MODEL_ORACLE_ARGS)
 
 # The peers whose toolchain and sources are present: yyjson, simdjson (threaded, as its document_stream runs stage 1 in a
 # thread of its own), and the Rust binaries (sonic-rs, serde_json, simd-csv). The first Rust build downloads the crates

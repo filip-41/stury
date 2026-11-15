@@ -6,7 +6,7 @@ import "core:testing"
 import "core:thread"
 import spell ".."
 
-ROUNDS :: #config(ROUNDS, 200_000)
+ROUNDS :: 200_000
 // The exhaustive binary32 check visits every `F32_STRIDE`th pattern on `F32_THREADS` threads. The default samples the
 // range, and the gate's full tier sets the stride to 1.
 F32_STRIDE :: #config(F32_STRIDE, 4099)

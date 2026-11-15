@@ -1,11 +1,11 @@
-package json_tests
+package schema_tests
 
 import "core:strings"
 import "core:testing"
-import core "../../core"
-import typed "../../core/typed"
-import schema "../../core/schema"
-import json ".."
+import core "../.."
+import typed "../../typed"
+import schema ".."
+import json "../../../json"
 
 // A key that repeats in an object is judged as the read's `Duplicates` sees the object: the member counts once, and its
 // rules judge the value `dups` keeps.

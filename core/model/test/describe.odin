@@ -1,15 +1,15 @@
-package json_tests
+package model_tests
 
 import "base:runtime"
 import "core:fmt"
 import "core:strings"
 import "core:testing"
-import core "../../core"
-import rules "../../core/rules"
-import typed "../../core/typed"
-import json ".."
-import model "../../core/model"
-import walktest "../../walktest"
+import core "../.."
+import rules "../../rules"
+import typed "../../typed"
+import json "../../../json"
+import model ".."
+import walktest "../../../walktest"
 
 // A type's description, `model.schema`, and the plan built from it, `plan_of`, agree on the plan's shape.
 
@@ -198,22 +198,6 @@ project_block :: proc(p: ^Projection, m: typed.Meta, union_block: bool) -> strin
 	return fmt.tprintf("#%d", k)
 }
 
-// The plan of `T`'s model with no registered rules, in the temp allocator, checked as `checks` names, JSON's for nil.
-ruled_plan :: proc($T: typeid, enums := typed.Enum_Spelling.Name, checks: Maybe(typed.Format_Checks) = nil) -> typed.Plan {
-	reg := model.Registry{naming = {enums = enums}}
-	m, _ := model.compile(&reg, T, checks.? or_else json.checks(.Json), context.temp_allocator)
-	// The model's plan refuses reads, and these tests read by it to compare the read with the schema.
-	plan := m.plan
-	plan.model_plan = .None
-	return plan
-}
-
-// The load description of a plan under test, through a model that holds it.
-description_of :: proc(plan: ^typed.Plan, allocator := context.allocator) -> (rules.Description, core.Error) {
-	m := model.Model(struct{}){plan = plan^}
-	return model.schema(&m, .Load, allocator)
-}
-
 // Why `T`'s model does not compile.
 refusal :: proc($T: typeid) -> core.Error {
 	reg: model.Registry
@@ -257,8 +241,8 @@ a_plan_of_a_types_description_has_the_types_plan_shape :: proc(t: ^testing.T) {
 		{Zoo_Tree, {}, nil},
 		{[]Maybe(Zoo_Inner), {}, nil},
 		{map[string]any, {}, nil},
-		{Ruled, {}, ruled_plan(Ruled)},
-		{Ruled_Union, {}, ruled_plan(Ruled_Union)},
+		{Ruled, {}, walktest.ruled_plan(Ruled)},
+		{Ruled_Union, {}, walktest.ruled_plan(Ruled_Union)},
 	}
 	for c in cases {
 		plan, ruled := c.model.?
@@ -267,7 +251,7 @@ a_plan_of_a_types_description_has_the_types_plan_shape :: proc(t: ^testing.T) {
 			plan, planned = json.plan_make(c.type, plan = c.opts, allocator = context.temp_allocator)
 			walktest.expect_nil(t, planned)
 		}
-		d, described := description_of(&plan, context.temp_allocator)
+		d, described := walktest.description_of(&plan, context.temp_allocator)
 		walktest.expect_nil(t, described)
 		again, built := json.plan_of(&d, .Json, c.opts, allocator = context.temp_allocator)
 		walktest.expect_nil(t, built)
@@ -292,7 +276,7 @@ Shown :: struct {
 a_type_and_its_description_read_the_classes_the_type_reads :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	plan, _ := json.plan_make(Shown, allocator = context.temp_allocator)
-	d, _ := description_of(&plan, context.temp_allocator)
+	d, _ := walktest.description_of(&plan, context.temp_allocator)
 	again, _ := json.plan_of(&d, allocator = context.temp_allocator)
 	want := "obj#0 [\"#0 n: ?#1, t: num?, e: str, u: ?#2, l: arr<obj#0>, required []\", \"#1 | int \", \"#2 | bool | str \"]"
 	testing.expect_value(t, project(&plan), want)
@@ -303,14 +287,14 @@ a_type_and_its_description_read_the_classes_the_type_reads :: proc(t: ^testing.T
 two_members_of_one_type_with_different_rules_get_two_blocks :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	plain, _ := json.plan_make(Ruled, allocator = context.temp_allocator)
-	plan := ruled_plan(Ruled)
+	plan := walktest.ruled_plan(Ruled)
 	block :: proc(p: ^typed.Plan, member: i32) -> i32 {
 		return p.meta[p.meta[0].block + member].block
 	}
 	testing.expect_value(t, block(&plain, 0), block(&plain, 1))
 	testing.expect(t, block(&plan, 0) != block(&plan, 1))
 	testing.expect_value(t, block(&plan, 0), block(&plan, 2))
-	d, _ := description_of(&plan, context.temp_allocator)
+	d, _ := walktest.description_of(&plan, context.temp_allocator)
 	members := d.objects[d.nodes[d.root].object].members
 	testing.expect_value(t, members[0].rules.min_length, 3)
 	testing.expect_value(t, members[1].rules.min_length, 0)
@@ -358,7 +342,7 @@ a_model_tag_it_cannot_hold_refuses_the_plan :: proc(t: ^testing.T) {
 describe_and_plan_of_free_what_they_allocate :: proc(t: ^testing.T) {
 	plan, _ := json.plan_make(Zoo, plan = {hooks = {{type = Zoo_Hooked, read = read_zoo_hooked}}})
 	defer typed.plan_destroy(&plan)
-	d, _ := description_of(&plan)
+	d, _ := walktest.description_of(&plan)
 	defer rules.description_destroy(&d)
 	again, built := json.plan_of(&d)
 	walktest.expect_nil(t, built)
@@ -414,12 +398,12 @@ two_maybes_of_one_type_that_differ_on_null_get_two_nodes :: proc(t: ^testing.T) 
 	defer free_all(context.temp_allocator)
 	check :: proc(t: ^testing.T, plan: typed.Plan, name, email: int) {
 		plan := plan
-		d, err := description_of(&plan, context.temp_allocator)
+		d, err := walktest.description_of(&plan, context.temp_allocator)
 		walktest.expect_nil(t, err)
 		members := d.objects[d.nodes[d.root].object].members
 		testing.expect(t, !takes_null(&d, members[name].node))
 		testing.expect(t, takes_null(&d, members[email].node))
 	}
-	check(t, ruled_plan(Null_After), 1, 0)
-	check(t, ruled_plan(Null_Before), 0, 1)
+	check(t, walktest.ruled_plan(Null_After), 1, 0)
+	check(t, walktest.ruled_plan(Null_Before), 0, 1)
 }

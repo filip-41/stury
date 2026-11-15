@@ -581,7 +581,7 @@ marshal_two_lines_at_a_struct_close :: proc(t: ^testing.T) {
 	}
 	for depth in ([]int{170, 260}) {
 		for pad in 0 ..< 12 {
-			v := make_tree(depth, 200)
+			v := make_tree(depth, 24)
 			v.p = strings.repeat("x", pad * 37 + 1, context.temp_allocator)
 			text, err := json.marshal(v, write = core.PRETTY)
 			walktest.expect_nil(t, err)

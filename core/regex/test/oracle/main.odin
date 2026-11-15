@@ -1,7 +1,7 @@
 // ecma_diff.py's reader of ECMA patterns: a file of a JSON array of [pattern, text] pairs, and for each a line on stdout,
 // `E` for a pattern core/regex refuses, `W` where a search that reads no bounds answers otherwise, `-` for no match, or each group's start and length in code points with the
 // whole match first, -1 -1 for a group that did not take part.
-package main
+package regex_oracle
 
 import "core:encoding/json"
 import "core:fmt"
@@ -9,7 +9,7 @@ import "core:mem/virtual"
 import "core:os"
 import "core:strings"
 import "core:unicode/utf8"
-import "../../../core/regex"
+import regex "../.."
 
 main :: proc() {
 	input, read_err := os.read_entire_file(os.args[1] if len(os.args) > 1 else "", context.allocator)

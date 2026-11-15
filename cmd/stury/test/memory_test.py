@@ -3,7 +3,7 @@
 the peak over the first few, for NDJSON, a root array (the one-document route), CSV and -R, on one thread and on a pool
 of fixed width. Each file is long enough to be answered in pieces on the pool's threads.
 
-    memory_test.py [--odin PATH]
+    memory_test.py [build/stury]
 """
 
 import json
@@ -11,7 +11,8 @@ import os
 import sys
 import tempfile
 
-from harness import build, odin_flag, peak
+from harness import peak, stury_binary
+
 COPIES = 40
 RECORDS = 100000
 # The pool lane's width. A thread that takes part maps an arena of its own, so the peak depends on how many woke, and
@@ -58,10 +59,9 @@ def peak_over(exe, args, files):
 
 
 def main():
-    odin = odin_flag()
     failed = []
+    exe = stury_binary()
     with tempfile.TemporaryDirectory() as tmp:
-        exe = build(odin, os.path.join(tmp, "stury"))
         # Per lane: the --threads option, the slack that the threads' arenas may add, and the file count of the base run.
         lanes_by_width = {threads: (["--threads", str(width)], (width - 1) * ARENA, 2 * width - 1) for threads, width in (("1 thread", 1), ("pool", POOL_WIDTH))}
         paths = {}

@@ -2,16 +2,16 @@
 package toml_tests
 
 import "core:fmt"
-import "core:slice"
 import "core:testing"
 import core "../../core"
 import walktest "../../walktest"
 import toml ".."
 
-// The tokens, end and fault of the walk of `src`, with a stop at token `stop` or at every `every`th and a resume after
+// The tokens, end and fault of the walk of `text`, with a stop at token `stop` or at every `every`th and a resume after
 // each.
 @(private)
-walk_stopping :: proc(src: []u8, skip: string, stop, every: int) -> (h: walktest.Stopping, end: string) {
+walk_stopping :: proc(text: string, skip: string, stop, every, _: int) -> (h: walktest.Stopping, end: string) {
+	src := transmute([]u8)text
 	h = walktest.Stopping{src = src, skip = skip, stop = stop, every = every}
 	h.tokens = make([dynamic]core.Token, 0, 256)
 	regs: core.Hook_Regs
@@ -39,31 +39,7 @@ CURSOR_TEXTS := [?]string {
 // with skipped values among them.
 @(test)
 cursor_resumes_after_any_token :: proc(t: ^testing.T) {
-	for text in CURSOR_TEXTS {
-		src := transmute([]u8)text
-		for skip in ([]string{"", "b", "t", "arr", "inline", "a"}) {
-			full, want := walk_stopping(src, skip, 0, 0)
-			defer delete(full.tokens)
-			for stop in 1 ..= len(full.tokens) + 1 {
-				got, end := walk_stopping(src, skip, stop, 0)
-				defer delete(got.tokens)
-				ok := testing.expectf(t, slice.equal(got.tokens[:], full.tokens[:]), "%q skip %q stop %d: %d tokens, want %d", text, skip, stop, len(got.tokens), len(full.tokens))
-				ok &&= testing.expectf(t, end == want, "%q skip %q stop %d: %v, want %v", text, skip, stop, end, want)
-				if !ok {
-					return
-				}
-			}
-			for every in 1 ..= 3 {
-				got, end := walk_stopping(src, skip, 0, every)
-				defer delete(got.tokens)
-				ok := testing.expectf(t, slice.equal(got.tokens[:], full.tokens[:]), "%q skip %q every %d: %d tokens, want %d", text, skip, every, len(got.tokens), len(full.tokens))
-				ok &&= testing.expectf(t, end == want, "%q skip %q every %d: %v, want %v", text, skip, every, end, want)
-				if !ok {
-					return
-				}
-			}
-		}
-	}
+	walktest.expect_resumes(t, CURSOR_TEXTS[:], {"", "b", "t", "arr", "inline", "a"}, 1, walk_stopping)
 }
 
 // A resume over another text, or of a cursor that holds no stop, is refused, and `destroy` frees a cursor no resume
@@ -88,52 +64,24 @@ cursor_refuses_another_text :: proc(t: ^testing.T) {
 	testing.expect(t, bad && f.kind == .Bad_Option)
 }
 
-@(private)
-collect_answer :: proc(state: rawptr, a: core.Token_Answer) -> bool {
-	append((^[dynamic]core.Token_Answer)(state), a)
-	return true
-}
-
 // The iterator gives the answers `each_answer` gives and ends with its error, whatever its largest batch, over texts
-// whose tables are written apart and texts the walk refuses.
+// whose tables are written apart and texts the walk refuses, and for several paths at once.
 @(test)
 answers_agree_with_each_answer :: proc(t: ^testing.T) {
-	texts := [?]string{".a", ".[]", ".arr[].x", "...x", ".arr[-1]", "..", "limit(2; ...x)", ".t.u.z"}
-	paths: [len(texts)]core.Path
-	for text, i in texts {
-		e: core.Error
-		paths[i], e = core.parse_path(text)
-		testing.expectf(t, e == nil, "%s: %v", text, e)
-	}
-	defer for &p in paths {
-		core.path_destroy(&p)
-	}
-	want, got: [dynamic]core.Token_Answer
-	defer delete(want)
-	defer delete(got)
-	for text in CURSOR_TEXTS {
-		src := transmute([]u8)text
-		for path, i in paths {
-			for early in ([]bool{false, true}) {
-				read := core.Path_Options{stop_early = early}
-				clear(&want)
-				err := toml.each_answer(src, .Toml_1_1, path, &want, collect_answer, {}, read)
-				for batch in ([]int{1, 3, 64}) {
-					it := toml.answers(src, .Toml_1_1, path, {}, read)
-					it.max_batch = batch
-					clear(&got)
-					for a in toml.next(&it) {
-						append(&got, a)
-					}
-					ok := testing.expectf(t, slice.equal(got[:], want[:]), "%q %s batch %d: %d answers, want %d", text, texts[i], batch, len(got), len(want))
-					ok &&= testing.expectf(t, fmt.tprint(it.err) == fmt.tprint(err), "%q %s batch %d: %v, want %v", text, texts[i], batch, it.err, err)
-					if !ok {
-						return
-					}
-				}
+	run := walktest.Answer_Run {
+		each = proc(src: []u8, paths: []core.Path, _: int, early: bool, out: ^[dynamic]core.Token_Answer) -> core.Error {
+			return toml.each_answer(src, .Toml_1_1, paths, out, walktest.collect_answer, {}, {stop_early = early})
+		},
+		iter = proc(src: []u8, paths: []core.Path, _: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
+			it := toml.answers(src, .Toml_1_1, paths, {}, {stop_early = early})
+			it.max_batch = batch
+			for a in toml.next(&it) {
+				append(out, a)
 			}
-		}
+			return it.err
+		},
 	}
+	walktest.expect_answers_agree(t, CURSOR_TEXTS[:], {".a", ".[]", ".arr[].x", "...x", ".arr[-1]", "..", "limit(2; ...x)", ".t.u.z", ".b[]"}, 1, run)
 }
 
 // A loop that ends after the first answer frees the read with `destroy`.
@@ -151,24 +99,4 @@ answers_break_early :: proc(t: ^testing.T) {
 	}
 	testing.expectf(t, it.err == nil && first.outcome == .Found && string(src[first.lo:first.hi]) == "1", "%v %v", first, it.err)
 	toml.destroy(&it)
-}
-
-// An iterator over several paths gives what `each_answer` gives for them.
-@(test)
-answers_of_many_paths :: proc(t: ^testing.T) {
-	a, _ := core.parse_path(".a")
-	defer core.path_destroy(&a)
-	b, _ := core.parse_path(".b[]")
-	defer core.path_destroy(&b)
-	paths := []core.Path{b, a}
-	src := transmute([]u8)string("a = 1\nb = [2, 3]\n")
-	want, got: [dynamic]core.Token_Answer
-	defer delete(want)
-	defer delete(got)
-	testing.expect(t, toml.each_answer(src, .Toml_1_1, paths, &want, collect_answer) == nil)
-	it := toml.answers(src, .Toml_1_1, paths)
-	for x in toml.next(&it) {
-		append(&got, x)
-	}
-	testing.expectf(t, it.err == nil && len(want) == 3 && slice.equal(got[:], want[:]), "%v, want %v: %v", got[:], want[:], it.err)
 }

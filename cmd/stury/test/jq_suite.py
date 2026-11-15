@@ -81,6 +81,13 @@ def parse_suite(path):
     return cases
 
 
+def joined(cell):
+    """A cell written as {"cat": [text or [unit, count], ...]} is the concatenation of its parts, a unit repeated count times."""
+    if isinstance(cell, dict) and "cat" in cell:
+        return "".join(p if isinstance(p, str) else p[0] * p[1] for p in cell["cat"])
+    return cell
+
+
 def parse_cli(path):
     """cli.tsv: area, then as JSON the arguments, stdin, files and, once recorded, jq's exit status,
     stdout and stderr. The arguments may be {"env": {NAME: VALUE}, "args": [...]}, to run with those
@@ -96,6 +103,7 @@ def parse_cli(path):
         if slow:
             area = area[1:]
         args, stdin, files, *want = [json.loads(c) for c in cols]
+        stdin, files, want = joined(stdin), {k: joined(v) for k, v in files.items()}, [joined(w) for w in want]
         env, closed = {}, False
         if isinstance(args, dict):
             env, closed, args = args.get("env", {}), args.get("stdout") == "closed", args["args"]
@@ -347,13 +355,8 @@ FAST_ROUTE += [
 # are given, so the walk holds its path, not its events, and moves what it holds between its arenas no more often than
 # it doubles. A sanitizer's shadow memory takes a few times the plain build's.
 EVENTS, EVENTS_MB = 1000000, 300 if os.environ.get("STURY_SANITIZED") else 100
-CAPPED = [(["-n", f], "", 100, 0, want + "\n") for f, want in [
-    ('reduce range(50000) as $i (""; . + "abcdefghij" + " ") | length', "550000"),
-    ('reduce range(50000) as $i ([]; . + [$i] + [$i]) | length', "100000"),
-    ('reduce range(5000) as $i ({}; . + {($i | tostring): $i} + {a: 1}) | length', "5001"),
-    ('reduce range(50000) as $i (""; "\\(.)abcdefghij ") | length', "550000"),
-    ('last(foreach range(20000) as $i (""; . + "abcdefghij" + " "; length))', "220000"),
-]] + [
+CAPPED = [
+    (["-n", 'reduce range(50000) as $i (""; "\\(.)abcdefghij ") | length'], "", 100, 0, "550000\n"),
     (["-c", "--stream", "."], "[" + "1," * EVENTS + "x]", EVENTS_MB, 5, EVENTS),
     (["-c", "--stream-errors", "."], "[" + "1," * EVENTS + "x]", EVENTS_MB, 0, EVENTS + 1),
     (["-c", "--stream-errors", "."], '{"' + "k" * 1200000 + '":[1' + " " * 300000 + " tru]}", EVENTS_MB, 0, 1),

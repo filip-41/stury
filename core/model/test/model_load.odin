@@ -1,17 +1,17 @@
-package json_tests
+package model_tests
 
 import "base:runtime"
 import "core:fmt"
 import "core:strings"
 import "core:testing"
 import "core:time"
-import core "../../core"
-import typed "../../core/typed"
-import write "../../core/write"
-import schema "../../core/schema"
-import json ".."
-import model "../../core/model"
-import walktest "../../walktest"
+import core "../.."
+import typed "../../typed"
+import write "../../write"
+import schema "../../schema"
+import json "../../../json"
+import model ".."
+import walktest "../../../walktest"
 
 @(private = "file")
 Profile :: struct {
@@ -324,14 +324,14 @@ a_load_reads_markup_as_it_reads_its_json_form :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	readers := json.as(.Json).readers^
 	readers.holds += {.Attribute}
-	readers.attribute = markup_attribute
+	readers.attribute = walktest.markup_attribute
 	reg: model.Registry
 	prices, _ := model.compile(&reg, struct{ price: Price }, json.checks(.Json))
 	items, _ := model.compile(&reg, struct{ a: Item }, json.checks(.Json))
 	cases := [?]struct {
 		is_price:   bool,
 		model, form: string,
-		attributes: []Markup_Attribute,
+		attributes: []walktest.Markup_Attribute,
 		errors:     int,
 	} {
 		// <price currency="EUR">5</price>
@@ -346,7 +346,7 @@ a_load_reads_markup_as_it_reads_its_json_form :: proc(t: ^testing.T) {
 		{false, `{"a": {"name": "ab", "note": "n"}}`, `{"a": {"name": "ab", "note": "n"}}`, nil, 2},
 	}
 	for c in cases {
-		doc := markup_doc(c.model, c.attributes, &readers)
+		doc := walktest.markup_doc(c.model, c.attributes, &readers)
 		defer core.destroy(&doc)
 		from_doc, from_form: typed.Sink
 		defer typed.sink_destroy(&from_doc)

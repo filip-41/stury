@@ -1,4 +1,4 @@
-package json_tests
+package schema_tests
 
 import "base:runtime"
 import "core:fmt"
@@ -8,15 +8,15 @@ import "core:math/rand"
 import "core:os"
 import "core:strings"
 import "core:testing"
-import core "../../core"
-import host "../../host"
-import rules "../../core/rules"
-import typed "../../core/typed"
-import write "../../core/write"
-import records "../../core/records"
-import schema "../../core/schema"
-import json ".."
-import model "../../core/model"
+import core "../.."
+import host "../../../host"
+import rules "../../rules"
+import typed "../../typed"
+import write "../../write"
+import records "../../records"
+import schema ".."
+import json "../../../json"
+import model "../../model"
 
 // A check on the threads of a pool against the check on one, and the reports of a check's entries.
 

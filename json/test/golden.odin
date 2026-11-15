@@ -1,5 +1,5 @@
 // Checks every text of `golden/json.txt` against the answer the file records for each JSONTestSuite and json5-tests
-// file. A marker names the reason where an answer was decided by design.
+// file, and holds each answer to the suite's own verdict. A marker names the reason where an answer was decided by design.
 package json_tests
 
 import "base:runtime"
@@ -60,6 +60,9 @@ golden_answers :: proc(t: ^testing.T) {
 		if !testing.expectf(t, found, "no file named %q", name) {
 			return
 		}
+		if !holds_suite_verdict(t, name, spec, kind, line) {
+			return
+		}
 		if !expect_answer(t, src, spec, kind, at, line) {
 			return
 		}
@@ -71,6 +74,28 @@ golden_answers :: proc(t: ^testing.T) {
 	}
 	testing.expectf(t, suite_lines == len(files) * 3, "%d suite lines, want %d", suite_lines, len(files) * 3)
 	testing.expect(t, marked > 0)
+}
+
+// JSONTestSuite's verdicts: a `y_` text passes under JSON and an `n_` text fails. json5-tests': a `.json` or `.json5` text
+// passes under JSON5 and a `.js` or `.txt` text fails.
+@(private)
+holds_suite_verdict :: proc(t: ^testing.T, name: string, spec: json.Spec, kind: core.Fault_Kind, line: string) -> bool {
+	passes: bool
+	switch {
+	case strings.has_prefix(name, "y_"), strings.has_prefix(name, "n_"):
+		if spec != .Json {
+			return true
+		}
+		passes = name[0] == 'y'
+	case strings.has_prefix(name, "i_"), spec != .Json5:
+		return true
+	case strings.has_suffix(name, ".json"), strings.has_suffix(name, ".json5"):
+		passes = true
+	case strings.has_suffix(name, ".js"), strings.has_suffix(name, ".txt"):
+	case:
+		return true
+	}
+	return testing.expectf(t, (kind == .None) == passes, "%q", line)
 }
 
 @(private)

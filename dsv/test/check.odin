@@ -430,15 +430,6 @@ check_from_dsv_names :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(sink.entries), 1)
 }
 
-// A check with no plan is a plan mismatch.
-@(test)
-a_check_with_no_plan_is_a_mismatch :: proc(t: ^testing.T) {
-	v: struct {
-		a: int,
-	}
-	walktest.expect_kind(t, dsv.check(transmute([]u8)string("a\n1\n"), .Csv, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
-}
-
 // A plan of a description holds the delimited reads when it is given them, and an empty description is refused.
 @(test)
 a_plan_of_a_description_reads_csv :: proc(t: ^testing.T) {

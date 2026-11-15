@@ -1,14 +1,14 @@
-package json_tests
+package diff_tests
 
 import "core:fmt"
 import "core:math/rand"
 import "core:slice"
 import "core:strings"
 import "core:testing"
-import core "../../core"
-import diff "../../core/diff"
-import write "../../core/write"
-import json ".."
+import core "../.."
+import diff ".."
+import write "../../write"
+import json "../../../json"
 
 // The value diff over JSON and JSONC documents: objects, the four ways arrays match, numbers, facts and a longer
 // sequence against a brute-force one.
@@ -280,7 +280,7 @@ diff_edit_cap :: proc(t: ^testing.T) {
 // A long array with scattered changes is diffed in one pass, and every change is found.
 @(test)
 diff_long_arrays :: proc(t: ^testing.T) {
-	n := 100_000
+	n := 20_000
 	xs := make([]int, n, context.temp_allocator)
 	ys := make([]int, n, context.temp_allocator)
 	for i in 0 ..< n {

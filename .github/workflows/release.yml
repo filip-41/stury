@@ -1,7 +1,5 @@
 name: release
 
-# A `v*` tag runs the whole gate (ci.yml), then builds the CLI for each target, tests it there, and opens a
-# draft GitHub release with the binaries and the tag's CHANGELOG section. The draft is published by hand.
 on:
   push:
     tags: ["v*"]
@@ -10,39 +8,62 @@ permissions:
   contents: write
 
 jobs:
+  # The tagged commit's full CI run on main, which the release takes in place of running the gate again. Tag after
+  # main's run has passed, or the gate runs here.
+  passed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      ci: ${{ steps.find.outputs.ci }}
+    steps:
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&branch=main&event=push&status=success" --jq '.workflow_runs[].id')
+          ci=none
+          for id in $runs; do
+            # A docs-only run skipped the suites, so it does not count.
+            short=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=100" --jq '[.jobs[] | select(.conclusion != "success")] | length')
+            if [ "$short" = 0 ]; then ci=$id; break; fi
+          done
+          echo "ci=$ci" | tee -a "$GITHUB_OUTPUT"
+
   gate:
+    needs: passed
+    if: needs.passed.outputs.ci == 'none'
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
 
   build:
-    needs: gate
+    needs: [passed, gate]
+    if: >-
+      !cancelled() && needs.passed.result == 'success' &&
+      (needs.gate.result == 'success' || (needs.gate.result == 'skipped' && needs.passed.outputs.ci != 'none'))
     strategy:
       fail-fast: true
       matrix:
         include:
-          # Ubuntu 22.04 sets the Linux binaries' glibc floor at 2.35; older systems would need a musl static build,
-          # not made unless a distribution asks for it.
+          # Ubuntu 22.04 sets the Linux binaries' glibc floor at 2.35.
           - os: ubuntu-22.04
             name: linux-amd64
           - os: ubuntu-22.04-arm
             name: linux-arm64
           - os: macos-15
             name: darwin-arm64
-          # Odin has no macOS Intel toolchain; build the Intel binary on the
-          # arm64 runner with -target:darwin_amd64.
           - os: macos-15
             name: darwin-amd64
             opt: -o:speed -target:darwin_amd64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     env:
       VERSION: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
-      - name: Test
-        if: matrix.name != 'darwin-amd64'
-        run: make test
       - name: Build
         env:
           TARGET_OPT: ${{ matrix.opt }}
@@ -52,7 +73,6 @@ jobs:
           else
             make build-cli STURY_VERSION="${VERSION#v}"
           fi
-      # The Intel binary runs under Rosetta on the arm64 runner.
       - name: Check
         run: |
           set -e
@@ -72,7 +92,6 @@ jobs:
             chmod +x build/stury-rosetta
             bin=build/stury-rosetta
           fi
-          # The same floor make test-cli holds: smoke.py's known failures are listed in smoke.floor.
           python3 cmd/stury/test/smoke.py "$bin"
       - name: Package
         run: |
@@ -108,7 +127,8 @@ jobs:
 
   release:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     env:
       VERSION: ${{ github.ref_name }}
       GH_TOKEN: ${{ github.token }}

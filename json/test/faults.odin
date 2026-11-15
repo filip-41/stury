@@ -2,7 +2,6 @@ package json_tests
 
 import "core:math/rand"
 import "core:mem"
-import "core:path/filepath"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -642,45 +641,4 @@ rendered_faults :: proc(t: ^testing.T) {
 		core.render(strings.to_writer(&b), transmute([]u8)want.src, core.Fault{want.at, &json.RULES, .Bad_Char, 0})
 		testing.expectf(t, strings.to_string(b) == strings.concatenate({want.text, ": Unexpected character"}, context.temp_allocator), "%q at %d: %s", want.src, want.at, strings.to_string(b))
 	}
-}
-
-// JSONTestSuite: every `y_` text passes, every `n_` text fails, and the `i_` texts are left to the oracle.
-@(test)
-json_test_suite :: proc(t: ^testing.T) {
-	suite := #load_directory("conformance/JSONTestSuite/test_parsing")
-	n: int
-	for file in suite {
-		_, bad := walktest.fault_of(json.validate(file.data, .Json)).?
-		switch file.name[0] {
-		case 'y':
-			testing.expectf(t, !bad, "%s", file.name)
-		case 'n':
-			testing.expectf(t, bad, "%s", file.name)
-		case:
-			continue
-		}
-		n += 1
-	}
-	testing.expect(t, n > 250)
-}
-
-// json5-tests: every `.json` and `.json5` text passes and every `.js` and `.txt` text fails, 114 files in all.
-@(test)
-json5_tests :: proc(t: ^testing.T) {
-	n: int
-	for dir in walktest.JSON5_TESTS {
-		for file in dir {
-			f, bad := walktest.fault_of(json.validate(file.data, .Json5)).?
-			switch filepath.ext(file.name) {
-			case ".json", ".json5":
-				testing.expectf(t, !bad, "%s: %v", file.name, f)
-			case ".js", ".txt":
-				testing.expectf(t, bad, "%s", file.name)
-			case:
-				continue
-			}
-			n += 1
-		}
-	}
-	testing.expect_value(t, n, 114)
 }

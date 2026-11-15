@@ -1,7 +1,4 @@
 name: ci
-
-# The gate: lint, the suites on every target, the jq differential, the sanitizers and Windows, all at once. A `v*`
-# tag runs it through release.yml before any binary is built.
 on:
   push:
     branches: [main]
@@ -17,13 +14,38 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # A push to main or a pull request that changes only docs runs lint alone, which checks the docs. Every other run,
+  # a tag's gate among them, runs everything.
+  scope:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - id: scope
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          code=true
+          if [ "$EVENT" = pull_request ] || [ "$EVENT/$GITHUB_REF" = push/refs/heads/main ]; then
+            if [ -n "$BASE" ] && [ "$BASE" != 0000000000000000000000000000000000000000 ] && git fetch -q --depth=1 origin "$BASE"; then
+              files=$(git diff --name-only "$BASE" HEAD)
+              if [ -n "$files" ] && ! grep -qvE '^(docs/.*|[^/]+\.md|LICENSE|THIRD_PARTY_NOTICES)$' <<< "$files"; then
+                code=false
+              fi
+            fi
+          fi
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
   lint:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
       - run: make lint
-      # The generated fixtures hold for the CPython the generators were checked on.
       - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: "3.14"
@@ -32,9 +54,12 @@ jobs:
           sudo apt-get install -y mandoc
           make lint-fixtures lint-man
 
-  # The library suites with their compiles at once, then the command line against its smoke cases and the jq corpus.
+  # The library suites, then the command line against its smoke cases and the jq corpus.
   # The command line's suites time their runs, so they do not share the host with the compiles.
   test:
+    needs: scope
+    if: needs.scope.outputs.code == 'true'
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -48,20 +73,37 @@ jobs:
 
   # Odin has no macOS Intel toolchain: the x86 suites are cross-compiled from the arm64 runner and run under Rosetta.
   test-x86:
+    needs: scope
+    if: needs.scope.outputs.code == 'true'
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        opt: [none, speed]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
       # One suite per core, each on one test thread, so the timed tests do not share a core under Rosetta.
-      - run: make -j3 test-x86 X86_THREADS=1
+      - run: make -j3 test-x86 X86_OPTS=${{ matrix.opt }} X86_THREADS=1
 
-  # The jq 1.8.2 differential: jq_suite in diff mode, jq_diff and regex_diff over every seed. The test job runs the
-  # corpus but cannot compare against jq itself. A seed per runner: each driver keeps every core busy.
+  # The differentials: jq_diff and regex_diff against jq 1.8.2 over a seed per runner, beside the jq suite in diff mode,
+  # core/regex against Node's RegExp, and model.load against pydantic.
   diff:
+    needs: scope
+    if: needs.scope.outputs.code == 'true'
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         seed: [77, 1016, 5]
+        include:
+          - seed: 77
+            suite: diff-suite
+          - seed: 1016
+            suite: ecma-diff
+          - seed: 5
+            suite: diff-model
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -73,14 +115,27 @@ jobs:
           echo 'b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f  /tmp/jq' | sha256sum -c -
           sudo install -m 0755 /tmp/jq /usr/local/bin/jq
           jq --version | grep -qx 'jq-1.8.2'
-      - run: make -j -O diff DIFF_SEEDS=${{ matrix.seed }}
+      - if: matrix.suite == 'diff-model'
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.14"
+      - if: matrix.suite == 'diff-model'
+        run: |
+          python -m pip install -q pydantic==2.14.2
+          echo "MODEL_PY=python -I" >> "$GITHUB_ENV"
+      - run: make -j -O diff-seed-${{ matrix.seed }} ${{ matrix.suite }}
 
-  # The x86 tiers. A hosted x64 runner's processor varies (AVX-512BW is not guaranteed) and Rosetta has neither AVX-512
-  # nor a way to force it, so every suite is built for each tier and run under Intel SDE emulating a Nehalem (the
-  # x86-64-v2 floor), a Haswell and a Sapphire Rapids (SDE's Skylake-X has no brand string, which core:sys/info's init indexes past).
+  # The x86 tiers, a runner each. A hosted x64 runner's processor varies (AVX-512BW is not guaranteed), so each tier
+  # runs under Intel SDE.
   wide:
-    runs-on: ubuntu-24.04
+    needs: scope
+    if: needs.scope.outputs.code == 'true'
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: ["0:nhm", "1:hsw", "2:spr"]
+    runs-on: ubuntu-24.04
     env:
       SDE_URL: https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
       SDE_SHA256: 94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50
@@ -96,37 +151,38 @@ jobs:
           echo "$RUNNER_TEMP/sde" >> "$GITHUB_PATH"
           # SDE injects itself with ptrace, which Ubuntu's yama setting forbids.
           echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
-      - run: make test-wide
+      - run: make test-wide WIDE_TIERS=${{ matrix.tier }}
 
   # Sanitizer runs are checked where they were made to pass: macOS on Apple silicon.
+  # The sanitized CLI builds take most of this, so the ASan library suites run beside them.
   sanitizers:
+    needs: scope
+    if: needs.scope.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
-        target: [test-asan, test-tsan]
+        target: [test-asan-lib, test-asan-cli, test-tsan]
     runs-on: macos-15
-    # The sanitized CLI builds take most of this: 66 min for ASan and 47 for TSan on 2026-11-04. A job
-    # that hangs would otherwise hold the release for GitHub's 6-hour default.
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
-      - run: make ${{ matrix.target }}
+      - run: make -j3 ${{ matrix.target }}
 
-  # Windows is built only here. It builds the library suites that do not read the POSIX-only walktest helper (json and
-  # dsv do) and the CLI, then runs a few answers end to end. smoke.py is not run here: its CPU and memory guards need
-  # POSIX resource limits and rusage, and it checks file modes.
+  # Windows is built only here
   windows:
-    runs-on: windows-latest
+    needs: scope
+    if: needs.scope.outputs.code == 'true'
+    timeout-minutes: 60
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
       - shell: bash
         run: |
           set -e
-          # xml/test reads the W3C conformance documents, which the Makefile's XML_SUITE rule fetches elsewhere.
           python xml/test/conformance/fetch.py
-          # The Makefile's test packages, but json and dsv, whose tests read the POSIX-only walktest helper.
+          # json and dsv are left out: their tests read the POSIX-only walktest helper.
           for p in $(python tools/checks.py list TEST_PKGS | tr -d '\r' | grep -v -e '^json/' -e '^dsv/'); do
             odin test $p -o:minimal -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:RECORDS_SLICE=1 -define:RECORDS_FAN_AFTER=1 -define:RECORDS_SPARSE=1000000000 -out:test.exe
           done
@@ -136,7 +192,6 @@ jobs:
         run: |
           set -e
           [ "$(echo '{"a":[1,2]}' | ./stury.exe -c '.a')" = "[1,2]" ]
-          # Output is bytes as written, LF and no CR, with jq's -b or without it.
           [ "$(echo '[1,2]' | ./stury.exe -c '.[]' | od -An -tx1 | tr -d ' \n')" = "310a320a" ]
           [ "$(echo '[1,2]' | ./stury.exe -b -c '.[]' | od -An -tx1 | tr -d ' \n')" = "310a320a" ]
           printf '{"a":1}\n{"a":2}\n' > two.json

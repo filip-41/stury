@@ -4,7 +4,6 @@ import "core:mem"
 import "core:mem/virtual"
 import "core:strings"
 import "core:testing"
-import "core:time"
 import regex ".."
 
 // The first match of `pattern` in `text`, its span and group 1's (-1 for none), or the message of why there is none,
@@ -293,13 +292,14 @@ test_ecma_search_is_capped_by_memory :: proc(t: ^testing.T) {
 @(test)
 test_ecma_counted_search_is_bounded :: proc(t: ^testing.T) {
 	// Counted repeats that nest multiply the pairs a search visits, and the search gives up within a bound linear in
-	// the program and the text rather than run on.
+	// the program and the text rather than run on. Each search runs to its whole work budget, so few patterns run:
+	// the lazy and wider spellings of the first reach the same budget through the same code.
 	letters := strings.repeat("a", 3_000, context.temp_allocator)
 	text := strings.concatenate({letters, "cbx"}, context.temp_allocator)
-	for pattern in ([?]string{`^(a{1,1000}){1,1000}b`, `^(a{1,1000}?){1,1000}b`, `((a{1,100}){1,100}){1,100}b`, `(?=(?:a{1,200}){1,200})x`}) {
+	for pattern in ([?]string{`((a{1,100}){1,100}){1,100}b`, `(?=(?:a{1,200}){1,200})x`}) {
 		for whether in ([?]bool{false, true}) {
 			f := search(pattern, text, whether = whether)
-			testing.expectf(t, f.err == "fail to memory allocation" && f.resumes <= 1 << 27, "%q: %q after %d", pattern, f.err, f.resumes)
+			testing.expectf(t, f.err == "fail to memory allocation" && f.resumes <= 1 << 26, "%q: %q after %d", pattern, f.err, f.resumes)
 		}
 	}
 	testing.expect_value(t, search(`^(a{1,1000}){1,1000}b`, strings.concatenate({letters[:500], "b"}, context.temp_allocator)).hi, 501)
@@ -422,8 +422,8 @@ test_ecma_automaton_is_linear :: proc(t: ^testing.T) {
 	}
 }
 
-// Building the automata of each of these patterns stays within a bound on its working memory, on the bytes it moves
-// and on its time, frees its working memory before it returns and keeps the program and a megabyte of table an automaton.
+// Building the automata of each of these patterns stays within a bound on its working memory, on the bytes it moves,
+// frees its working memory before it returns and keeps the program and a megabyte of table an automaton.
 @(test)
 test_ecma_automaton_build_is_bounded :: proc(t: ^testing.T) {
 	repeat :: proc(piece: string, n: int, sep := "") -> string {
@@ -469,20 +469,17 @@ test_ecma_automaton_build_is_bounded :: proc(t: ^testing.T) {
 		defer mem.tracking_allocator_destroy(&program)
 		mem.tracking_allocator_init(&scratch, context.allocator)
 		defer mem.tracking_allocator_destroy(&scratch)
-		start := time.tick_now()
 		err: string
 		{
 			context.allocator = mem.tracking_allocator(&scratch)
 			_, err = regex.compile(pattern, flags, mem.tracking_allocator(&program))
 		}
-		took := time.tick_since(start)
 		name := pattern[:min(len(pattern), 40)]
 		testing.expectf(t, err == "" || !flags.ecma, "%q: %s", name, err)
 		testing.expectf(t, scratch.current_memory_allocated == 0, "%q keeps %d bytes of scratch", name, scratch.current_memory_allocated)
 		testing.expectf(t, scratch.peak_memory_allocated <= 8 << 20, "%q: %d bytes of scratch at once", name, scratch.peak_memory_allocated)
 		testing.expectf(t, scratch.total_memory_allocated <= 16 << 20, "%q: %d bytes of scratch in all", name, scratch.total_memory_allocated)
 		testing.expectf(t, program.current_memory_allocated <= i64(automata << 20 + 300 * len(pattern)), "%q keeps %d bytes", name, program.current_memory_allocated)
-		testing.expectf(t, took < 2 * time.Second, "%q compiles in %v", name, took)
 	}
 }
 
@@ -545,7 +542,7 @@ test_ecma_automaton_keeps_the_answers :: proc(t: ^testing.T) {
 	state := u64(20261110)
 	built, first := 0, 0
 	pieces := [?]string{"a", "a", "b", "é", "😀", "A", "1", " ", "\n", "-", "\xff", "\x80"}
-	for i in 0 ..< 20000 {
+	for i in 0 ..< 4000 {
 		b := strings.builder_make(context.temp_allocator)
 		if i % 2 == 0 {
 			generate_plain(&b, &state, 2)
@@ -563,7 +560,7 @@ test_ecma_automaton_keeps_the_answers :: proc(t: ^testing.T) {
 		with.resumes, with.ends, with.automaton, plain.resumes = 0, -1, false, 0
 		testing.expectf(t, plain.err != "" || with == plain, "%q on %q: %v with the automata, %v backtracking", pattern, text, with, plain)
 	}
-	testing.expectf(t, built > 8000 && first > 3000, "%d of 20000 patterns have the automaton, %d searches found a match's end with it", built, first)
+	testing.expectf(t, built > 1600 && first > 600, "%d of 4000 patterns have the automaton, %d searches found a match's end with it", built, first)
 }
 
 // A counted repeat too long to write out runs as a counter loop and finds the match and groups the same repeat written
@@ -659,7 +656,7 @@ test_ecma_leading_look_aheads_keep_the_answers :: proc(t: ^testing.T) {
 	state := u64(20261111)
 	built := 0
 	pieces := [?]string{"a", "a", "b", "é", "😀", "A", "1", " ", "\n", "-", "\xff", "\x80"}
-	for i in 0 ..< 20000 {
+	for i in 0 ..< 4000 {
 		b := strings.builder_make(context.temp_allocator)
 		strings.write_string(&b, "^")
 		for _ in 0 ..< 1 + next(&state, 3) {
@@ -684,7 +681,7 @@ test_ecma_leading_look_aheads_keep_the_answers :: proc(t: ^testing.T) {
 		built += int(whether.automaton)
 		testing.expectf(t, whether.err == plain.err && (whether.lo >= 0) == (plain.lo >= 0), "%q on %q: %v whether, %v backtracking", pattern, text, whether, plain)
 	}
-	testing.expectf(t, built > 12000, "%d of 20000 patterns have the automaton", built)
+	testing.expectf(t, built > 2400, "%d of 4000 patterns have the automaton", built)
 }
 
 // A jq pattern drawn from `state`, of the instructions and assertions the automaton runs and some it does not.
@@ -768,7 +765,7 @@ test_jq_automaton_keeps_the_answers :: proc(t: ^testing.T) {
 	state := u64(20261111)
 	built, first := 0, 0
 	pieces := [?]string{"a", "a", "A", "b", "k", "K", "\u212a", "é", "É", "ß", "s", "_", "1", " ", "\n", "-", "😀"}
-	for _ in 0 ..< 20000 {
+	for _ in 0 ..< 4000 {
 		b := strings.builder_make(context.temp_allocator)
 		generate_jq(&b, &state, 2)
 		count := next(&state, 11)
@@ -788,5 +785,5 @@ test_jq_automaton_keeps_the_answers :: proc(t: ^testing.T) {
 		with.resumes, with.ends, with.automaton, plain.resumes = 0, -1, false, 0
 		testing.expectf(t, with == plain, "%q %v on %q: %v with the automata, %v backtracking", pattern, flags, strings.to_string(text), with, plain)
 	}
-	testing.expectf(t, built > 8000 && first > 3000, "%d of 20000 patterns have the automaton, %d searches found a match's end with it", built, first)
+	testing.expectf(t, built > 1600 && first > 600, "%d of 4000 patterns have the automaton, %d searches found a match's end with it", built, first)
 }

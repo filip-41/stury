@@ -1,13 +1,13 @@
-package json_tests
+package schema_tests
 
 import "core:fmt"
 import "core:mem"
 import "core:strings"
 import "core:testing"
-import core "../../core"
-import typed "../../core/typed"
-import schema "../../core/schema"
-import json ".."
+import core "../.."
+import typed "../../typed"
+import schema ".."
+import json "../../../json"
 
 // What a check of `instance` by the schema `text` finds first: the kind of its first entry, or `.None` when it passes.
 @(private = "file")

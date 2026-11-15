@@ -4,7 +4,7 @@ arrives, reads a truncated file again from its start, and ends on SIGINT or SIGT
 file, a FIFO and a pipe named /dev/stdin. Each answer is
 read within a timeout while the process is still running, so an answer held until the file ends fails.
 
-    follow_test.py [--odin PATH]
+    follow_test.py [build/stury]
 """
 
 import atexit
@@ -17,7 +17,8 @@ import tempfile
 import threading
 import time
 
-from harness import build, odin_flag
+from harness import stury_binary
+
 TIMEOUT = 5
 
 
@@ -116,8 +117,8 @@ def stop_cases(exe, tmp):
 
 
 def main():
+    exe = stury_binary()
     with tempfile.TemporaryDirectory() as tmp:
-        exe = build(odin_flag(), os.path.join(tmp, "stury"))
         lines_case(exe, tmp, "ndjson", ["-c", "--from", "ndjson", ".a"], '{"a":1}\n', ('{"a":', '2}\n'), '{"a":3}\n', ["1", "2", "3"])
         lines_case(exe, tmp, "texts", ["-c", ".a"], '{"a":1}\n', ('{"a":\n', "2}\n"), '{"a":3} {"a":4}\n', ["1", "2", "3"])
         lines_case(exe, tmp, "raw", ["-R", "."], "one\n", ("tw", "o\n"), "three\n", ['"one"', '"two"', '"three"'])

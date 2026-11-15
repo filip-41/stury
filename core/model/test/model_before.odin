@@ -1,15 +1,15 @@
-package core_test
+package model_tests
 
 import "core:mem"
 import "core:strconv"
 import "core:strings"
 import "core:testing"
-import core ".."
-import typed "../typed"
-import dsv "../../dsv"
-import json "../../json"
-import model "../model"
-import walktest "../../walktest"
+import core "../.."
+import typed "../../typed"
+import dsv "../../../dsv"
+import json "../../../json"
+import model ".."
+import walktest "../../../walktest"
 
 @(private = "file")
 Person :: struct {

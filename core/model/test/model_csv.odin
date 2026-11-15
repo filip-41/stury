@@ -1,16 +1,16 @@
-package core_test
+package model_tests
 
 import "core:fmt"
 import "core:strings"
 import "core:io"
 import "core:testing"
-import core ".."
-import typed "../typed"
-import records "../records"
-import dsv "../../dsv"
-import json "../../json"
-import model "../model"
-import walktest "../../walktest"
+import core "../.."
+import typed "../../typed"
+import records "../../records"
+import dsv "../../../dsv"
+import json "../../../json"
+import model ".."
+import walktest "../../../walktest"
 
 @(private = "file")
 Row :: struct {
@@ -115,8 +115,7 @@ csv_model_single_row :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(sink.entries), 0)
 	sink2: typed.Sink
 	_ = model.load(&m, transmute([]u8)string("id,name,age\n1,ada,30\n2,bob,40\n"), &row, &sink2)
-	testing.expect(t, len(sink2.entries) > 0 || true)
-	testing.expect_value(t, spelled(&sink2) != "", true)
+	testing.expect_value(t, spelled(&sink2), "Wrong_Length;")
 }
 
 @(test)

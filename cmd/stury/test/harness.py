@@ -25,6 +25,11 @@ def odin_flag():
     return parser.parse_args().odin
 
 
+def stury_binary():
+    """The binary a script is given as its first argument, `make build-cli`'s by default."""
+    return os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "build", "stury"))
+
+
 def build(odin, out, defines={}):
     """stury at -o:minimal with `defines` set, written to `out`."""
     cmd = [odin, "build", "cmd/stury", "-o:minimal", f"-out:{out}"] + [f"-define:{k}={v}" for k, v in defines.items()]

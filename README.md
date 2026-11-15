@@ -506,7 +506,7 @@ make gate           # what a branch passes before it lands, once (python3 tools/
 make test           # the library suites, the examples, the CLI smoke cases and the jq corpus
 make test-lib       # the library suites alone, one package per test directory (make test-one P=json/test T=name)
 make test-examples  # build and run the nine example programs against their expected output
-make test-cli       # cmd/stury/test/smoke.py against build/stury, held to smoke.floor
+make test-cli       # cmd/stury/test/smoke.py against build/stury
 make test-jq        # jq's corpus and cmd/stury/test/cli.tsv, whose row layout its first lines describe
 make ecma-diff      # core/regex's ECMA patterns against Node's RegExp (needs node on PATH)
 make diff-schema    # the schema check against the Python jsonschema package (needs uv)

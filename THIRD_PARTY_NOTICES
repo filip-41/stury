@@ -164,7 +164,7 @@ JSONTestSuite — https://github.com/nst/JSONTestSuite
 
 JSON-Schema-Test-Suite — https://github.com/json-schema-org/JSON-Schema-Test-Suite
 
-    json/test/conformance/JSON-Schema-Test-Suite (the schema conformance corpus, MIT, Copyright (c) 2012
+    core/schema/test/conformance/JSON-Schema-Test-Suite (the schema conformance corpus, MIT, Copyright (c) 2012
     Julian Berman). Its LICENSE and UPSTREAM files ship in that directory.
 
 yaml-test-suite — https://github.com/yaml/yaml-test-suite

@@ -2,16 +2,16 @@
 package cbor_tests
 
 import "core:fmt"
-import "core:slice"
 import "core:testing"
 import core "../../core"
 import walktest "../../walktest"
 import cbor ".."
 
-// The tokens, end and fault of the walk of `src` as spec `S`, with a stop at token `stop` or at every `every`th and a
-// resume after each.
+// The tokens, end and fault of the walk of the hex `text` as spec `S`, with a stop at token `stop` or at every `every`th
+// and a resume after each.
 @(private)
-walk_stopping :: proc(src: []u8, $S: cbor.Spec, skip: string, stop, every: int) -> (h: walktest.Stopping, end: string) {
+walk_as :: proc(text: string, $S: cbor.Spec, skip: string, stop, every: int) -> (h: walktest.Stopping, end: string) {
+	src := hex(text)
 	h = walktest.Stopping{src = src, skip = skip, stop = stop, every = every}
 	h.tokens = make([dynamic]core.Token, 0, 64)
 	regs: core.Hook_Regs
@@ -21,6 +21,15 @@ walk_stopping :: proc(src: []u8, $S: cbor.Spec, skip: string, stop, every: int) 
 		hi, fault = cbor.walk_resume(src, &cursor, S, {}, &h, &regs, walktest.stopping_hook)
 	}
 	return h, fmt.tprint(hi, fault, regs.a)
+}
+
+// `walk_as` under the spec that reads every item, then the one that sorts keys.
+@(private)
+walk_stopping :: proc(text: string, skip: string, stop, every, variant: int) -> (walktest.Stopping, string) {
+	if variant == 0 {
+		return walk_as(text, .Cbor, skip, stop, every)
+	}
+	return walk_as(text, .Deterministic, skip, stop, every)
 }
 
 @(private)
@@ -40,37 +49,7 @@ CURSOR_TEXTS := [?]string {
 // with skipped values among them, under the spec that reads every item and one that sorts keys.
 @(test)
 cursor_resumes_after_any_token :: proc(t: ^testing.T) {
-	resumes :: proc(t: ^testing.T, $S: cbor.Spec) -> bool {
-		for text in CURSOR_TEXTS {
-			src := hex(text)
-			for skip in ([]string{"", "a", "b", "s"}) {
-				full, want := walk_stopping(src, S, skip, 0, 0)
-				defer delete(full.tokens)
-				for stop in 1 ..= len(full.tokens) + 1 {
-					got, end := walk_stopping(src, S, skip, stop, 0)
-					defer delete(got.tokens)
-					ok := testing.expectf(t, slice.equal(got.tokens[:], full.tokens[:]), "%v %s skip %q stop %d: %d tokens, want %d", S, text, skip, stop, len(got.tokens), len(full.tokens))
-					ok &&= testing.expectf(t, end == want, "%v %s skip %q stop %d: %v, want %v", S, text, skip, stop, end, want)
-					if !ok {
-						return false
-					}
-				}
-				for every in 1 ..= 3 {
-					got, end := walk_stopping(src, S, skip, 0, every)
-					defer delete(got.tokens)
-					ok := testing.expectf(t, slice.equal(got.tokens[:], full.tokens[:]), "%v %s skip %q every %d: %d tokens, want %d", S, text, skip, every, len(got.tokens), len(full.tokens))
-					ok &&= testing.expectf(t, end == want, "%v %s skip %q every %d: %v, want %v", S, text, skip, every, end, want)
-					if !ok {
-						return false
-					}
-				}
-			}
-		}
-		return true
-	}
-	if resumes(t, .Cbor) {
-		resumes(t, .Deterministic)
-	}
+	walktest.expect_resumes(t, CURSOR_TEXTS[:], {"", "a", "b", "s"}, 2, walk_stopping)
 }
 
 // A resume over another text, or of a cursor that holds no stop, is refused, and `destroy` frees a cursor no resume
@@ -95,52 +74,28 @@ cursor_refuses_another_text :: proc(t: ^testing.T) {
 	testing.expect(t, bad && f.kind == .Bad_Option)
 }
 
-@(private)
-collect_answer :: proc(state: rawptr, a: core.Token_Answer) -> bool {
-	append((^[dynamic]core.Token_Answer)(state), a)
-	return true
-}
-
 // The iterator gives the answers `each_answer` gives and ends with its error, whatever its largest batch, over items
-// the walk reads and items it refuses.
+// the walk reads and items it refuses, and for several paths at once.
 @(test)
 answers_agree_with_each_answer :: proc(t: ^testing.T) {
-	texts := [?]string{".a", ".[]", ".b[]", "..", ".b[-1]", "limit(2; ..)", ".s.s", ".[1]"}
-	paths: [len(texts)]core.Path
-	for text, i in texts {
-		e: core.Error
-		paths[i], e = core.parse_path(text)
-		testing.expectf(t, e == nil, "%s: %v", text, e)
-	}
-	defer for &p in paths {
-		core.path_destroy(&p)
-	}
-	want, got: [dynamic]core.Token_Answer
-	defer delete(want)
-	defer delete(got)
-	for text in CURSOR_TEXTS {
-		src := hex(text)
-		for path, i in paths {
-			for early in ([]bool{false, true}) {
-				read := core.Path_Options{stop_early = early}
-				clear(&want)
-				err := cbor.each_answer(src, .Cbor, path, &want, collect_answer, {}, read)
-				for batch in ([]int{1, 3, 64}) {
-					it := cbor.answers(src, .Cbor, path, {}, read)
-					it.max_batch = batch
-					clear(&got)
-					for a in cbor.next(&it) {
-						append(&got, a)
-					}
-					ok := testing.expectf(t, slice.equal(got[:], want[:]), "%s %s batch %d: %d answers, want %d", text, texts[i], batch, len(got), len(want))
-					ok &&= testing.expectf(t, fmt.tprint(it.err) == fmt.tprint(err), "%s %s batch %d: %v, want %v", text, texts[i], batch, it.err, err)
-					if !ok {
-						return
-					}
-				}
+	run := walktest.Answer_Run {
+		each = proc(src: []u8, paths: []core.Path, _: int, early: bool, out: ^[dynamic]core.Token_Answer) -> core.Error {
+			return cbor.each_answer(src, .Cbor, paths, out, walktest.collect_answer, {}, {stop_early = early})
+		},
+		iter = proc(src: []u8, paths: []core.Path, _: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
+			it := cbor.answers(src, .Cbor, paths, {}, {stop_early = early})
+			it.max_batch = batch
+			for a in cbor.next(&it) {
+				append(out, a)
 			}
-		}
+			return it.err
+		},
 	}
+	texts: [len(CURSOR_TEXTS)]string
+	for text, i in CURSOR_TEXTS {
+		texts[i] = string(hex(text))
+	}
+	walktest.expect_answers_agree(t, texts[:], {".a", ".[]", ".b[]", "..", ".b[-1]", "limit(2; ..)", ".s.s", ".[1]"}, 1, run)
 }
 
 // A loop that ends after the first answer frees the read with `destroy`, and the spec chosen at run time answers alike.
