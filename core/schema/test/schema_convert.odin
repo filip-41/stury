@@ -19,7 +19,7 @@ Converted :: struct {
 }
 
 @(private = "file")
-converted :: proc(t: ^testing.T, rules_text, src: string, from, to: core.As, sink: ^typed.Sink = nil) -> Converted {
+converted :: proc(t: ^testing.T, rules_text, src: string, from, to: core.As, sink: ^typed.Sink = nil, opts := core.Write_Options{}) -> Converted {
 	schema_doc, serr := core.build(transmute([]u8)rules_text, json.as(.Json))
 	testing.expectf(t, serr == nil, "%s: %v", rules_text, serr)
 	defer core.destroy(&schema_doc)
@@ -29,16 +29,16 @@ converted :: proc(t: ^testing.T, rules_text, src: string, from, to: core.As, sin
 	doc, derr := core.build(transmute([]u8)src, from)
 	testing.expectf(t, derr == nil, "%s: %v", src, derr)
 	defer core.destroy(&doc)
-	return convert_document(t, c, &doc, to, sink)
+	return convert_document(t, c, &doc, to, sink, opts)
 }
 
 @(private = "file")
-convert_document :: proc(t: ^testing.T, c: ^schema.Compiled, doc: ^core.Document, to: core.As, sink: ^typed.Sink = nil) -> Converted {
+convert_document :: proc(t: ^testing.T, c: ^schema.Compiled, doc: ^core.Document, to: core.As, sink: ^typed.Sink = nil, opts := core.Write_Options{}) -> Converted {
 	cv: schema.Converter
 	err := schema.converter_init(&cv, c, doc.as, to)
 	testing.expectf(t, err == nil, "%v", err)
 	defer schema.converter_destroy(&cv)
-	text, stage, err2 := schema.convert(&cv, doc, sink = sink, allocator = context.temp_allocator)
+	text, stage, err2 := schema.convert(&cv, doc, opts, sink, allocator = context.temp_allocator)
 	return {string(text), stage, err2}
 }
 
@@ -91,16 +91,16 @@ convert_refuses_what_the_output_cannot_spell_with_its_path :: proc(t: ^testing.T
 	rows := `{"type": "array"}`
 	got = converted(t, rows, `[{"a": 1}, {"a": [1]}]`, json.as(.Json), dsv.as(.Csv))
 	expect_refused(t, got, .Write, core.Index(1), core.Name("a"))
-	got = converted(t, rows, `[1]`, json.as(.Json), dsv.as(.Csv))
-	expect_refused(t, got, .Write, core.Index(0))
+	got = converted(t, rows, `[{"a": 1}, {"b": 2}]`, json.as(.Json), dsv.as(.Csv))
+	expect_refused(t, got, .Write, core.Index(1), core.Name("b"))
 }
 
 @(test)
-convert_to_a_table_joins_the_columns_of_every_row :: proc(t: ^testing.T) {
+convert_to_a_grown_table_joins_the_columns_of_every_row :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	s := `{"type": "array", "items": {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]}}`
 	infer := dsv.as(.Csv, {infer = true})
-	got := converted(t, s, `[{"n": 1, "a": "x"}, {"n": 2, "b": true}, {"n": 3}]`, json.as(.Json), infer)
+	got := converted(t, s, `[{"n": 1, "a": "x"}, {"n": 2, "b": true}, {"n": 3}]`, json.as(.Json), infer, opts = {grow_header = true})
 	testing.expectf(t, got.err == nil, "%v", got.err)
 	testing.expect_value(t, got.text, "n,a,b\n1,x,\n2,,true\n3,,\n")
 }
@@ -192,10 +192,13 @@ convert_writes_an_empty_cell_as_null :: proc(t: ^testing.T) {
 @(test)
 convert_refuses_a_table_with_no_member :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
+	// The refusal is of the header, which has no path.
 	got := converted(t, `{"type": "array"}`, `[{}, {}]`, json.as(.Json), dsv.as(.Csv))
-	expect_refused(t, got, .Write, core.Index(0))
-	got = converted(t, `{"type": "integer"}`, `5`, json.as(.Json), dsv.as(.Csv))
 	expect_refused(t, got, .Write)
+	// A scalar is a table of one cell, which reads back as a table with no row.
+	got = converted(t, `{"type": "integer"}`, `5`, json.as(.Json), dsv.as(.Csv))
+	testing.expect_value(t, got.text, "5\n")
+	testing.expect_value(t, got.stage, schema.Stage.Output)
 }
 
 @(test)
@@ -224,7 +227,7 @@ convert_writes_attributes_as_members :: proc(t: ^testing.T) {
 }
 
 @(private = "file")
-markup_converted :: proc(t: ^testing.T, model: string, attributes: []walktest.Markup_Attribute) -> Converted {
+markup_converted :: proc(t: ^testing.T, model: string, attributes: []walktest.Markup_Attribute, to: core.As) -> Converted {
 	readers := json.as(.Json).readers^
 	readers.holds += {.Attribute}
 	readers.attribute = walktest.markup_attribute
@@ -236,7 +239,7 @@ markup_converted :: proc(t: ^testing.T, model: string, attributes: []walktest.Ma
 	doc := walktest.markup_doc(model, attributes, &readers, .All)
 	doc.as.readers = &readers
 	defer core.destroy(&doc)
-	return convert_document(t, c, &doc, json.as(.Json))
+	return convert_document(t, c, &doc, to)
 }
 
 // A markup document loses nothing to the JSON model: a name its children repeat is an array, and the runs of text of a
@@ -244,10 +247,10 @@ markup_converted :: proc(t: ^testing.T, model: string, attributes: []walktest.Ma
 @(test)
 convert_keeps_repeated_children_and_runs_of_text :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	got := markup_converted(t, `{"list": {"item": "1", "item": "2", "other": "x", "item": "3"}}`, nil)
+	got := markup_converted(t, `{"list": {"item": "1", "item": "2", "other": "x", "item": "3"}}`, nil, json.as(.Json))
 	testing.expectf(t, got.err == nil, "%v", got.err)
 	testing.expect_value(t, got.text, `{"list":{"item":["1","2","3"],"other":"x"}}`)
-	got = markup_converted(t, `{"p": {"#text": "a", "b": "x", "#text": "c"}}`, nil)
+	got = markup_converted(t, `{"p": {"#text": "a", "b": "x", "#text": "c"}}`, nil, json.as(.Json))
 	testing.expectf(t, got.err == nil, "%v", got.err)
 	testing.expect_value(t, got.text, `{"p":{"#text":["a","c"],"b":"x"}}`)
 }
@@ -256,8 +259,22 @@ convert_keeps_repeated_children_and_runs_of_text :: proc(t: ^testing.T) {
 @(test)
 convert_refuses_what_markup_cannot_hold :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	got := markup_converted(t, `{"a": {"id": "x"}}`, {{2, `id="1"`}})
+	got := markup_converted(t, `{"a": {"id": "x"}}`, {{2, `id="1"`}}, json.as(.Json))
 	expect_refused(t, got, .Write, core.Name("a"), core.Name("id"))
-	got = markup_converted(t, `{"a": [1, 2]}`, {{2, `id="1"`}})
+	got = markup_converted(t, `{"a": [1, 2]}`, {{2, `id="1"`}}, json.as(.Json))
 	expect_refused(t, got, .Write, core.Name("a"))
+}
+
+// A markup document written as a table is one row, whose element with children is a cell the table refuses.
+@(test)
+convert_writes_markup_as_one_row :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	// The row reads back as a list, which the schema's object refuses.
+	got := markup_converted(t, `{"r": "x"}`, nil, dsv.as(.Csv))
+	testing.expect_value(t, got.text, "r\nx\n")
+	testing.expect_value(t, got.stage, schema.Stage.Output)
+	got = markup_converted(t, `{"r": {"i": "1"}}`, nil, dsv.as(.Csv))
+	expect_refused(t, got, .Write, core.Index(0), core.Name("r"))
+	failure, _ := got.err.(core.Typed_Error)
+	testing.expect_value(t, failure.kind, core.Typed_Error_Kind.Unsupported)
 }

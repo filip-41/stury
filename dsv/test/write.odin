@@ -283,14 +283,18 @@ documents_write :: proc(t: ^testing.T) {
 		{src = "b,a,c,a\n1,2,3,4\n5,6\n", read = ragged, opts = {sort_keys = true}, want = "a,a,b,c\n2,4,1,3\n6,,5,\n"},
 		{src = `[{"b":1,"a":2,"c":3},{"c":4,"a":5}]`, from = .Json, opts = {sort_keys = true}, as = dsv.as(.Csv), want = "a,b,c\n2,1,3\n5,,4\n"},
 		{src = `[{"b":1,"a":2,"c":3},{"c":4,"a":5}]`, from = .Json, as = dsv.as(.Csv), want = "b,a,c\n1,2,3\n,5,4\n"},
-		{src = `[{"a":1,"b":"x,y"},{"b":null,"c":true,"a":2.50}]`, from = .Json, as = dsv.as(.Csv), want = "a,b,c\n1,\"x,y\",\n2.50,,true\n"},
+		{src = `[{"a":1,"b":"x,y"},{"b":null,"c":true,"a":2.50}]`, from = .Json, as = dsv.as(.Csv), kind = .Unknown_Field},
+		{src = `[{"a":1,"b":"x,y"},{"b":null,"c":true,"a":2.50}]`, from = .Json, opts = {grow_header = true}, as = dsv.as(.Csv), want = "a,b,c\n1,\"x,y\",\n2.50,,true\n"},
+		{src = `[{"a":1},[2]]`, from = .Json, as = dsv.as(.Csv), kind = .Wrong_Kind},
+		{src = `{"a":1,"b":2}`, from = .Json, as = dsv.as(.Csv), want = "a,b\n1,2\n"},
+		{src = `"x"`, from = .Json, as = dsv.as(.Csv), want = "x\n"},
 		{src = `[[1,"a"],[2,"b"]]`, from = .Json, as = dsv.as(.Tsv), want = "1\ta\n2\tb\n"},
 		{src = `[{"a":[1]}]`, from = .Json, as = dsv.as(.Csv), kind = .Unsupported},
 		{src = "[/* c */ {\"a\":[1]}]", from = .Jsonc, as = dsv.as(.Csv), kind = .Unsupported},
 		{src = `[{a:-0x10,b:+1,c:.5,d:5.,e:0X1F,f:1.50}]`, from = .Json5, as = dsv.as(.Csv, {comment = '-'}), want = "a,b,c,d,e,f\n\"-16\",1,0.5,5.0,31,1.50\n"},
 		{src = `[{a:-0x10,b:+1,c:.5,d:5.,e:0X1F,f:1.50}]`, from = .Json5, as = dsv.as(.Csv, {delimiter = '.'}), want = "a.b.c.d.e.f\n-16.1.\"0.5\".\"5.0\".31.\"1.50\"\n"},
 		{src = `[[Infinity]]`, from = .Json5, as = dsv.as(.Csv), kind = .Non_Finite},
-		{src = `[1]`, from = .Json, as = dsv.as(.Csv), kind = .Unsupported},
+		{src = `[1]`, from = .Json, as = dsv.as(.Csv), want = "1\n"},
 		{src = `[{"a":1,"a":2,"a":3,"b":4},{"a":5}]`, from = .Json, as = dsv.as(.Csv), want = "a,b\n3,4\n5,\n", dropped = 2},
 		{src = "a,b\n1,\"x,y\"\n", as = dsv.as(.Tsv), want = "a\tb\n1\tx,y\n"},
 		{src = "# c\na\n1\n", read = {comment = '#'}, want = "# c\na\n1\n"},
@@ -372,7 +376,7 @@ document_under_failing_allocators :: proc(t: ^testing.T) {
 	headed, herr := core.build(transmute([]u8)string("a,b\n1,\"x y\"\n2,3\n"), dsv.as(.Csv))
 	defer core.destroy(&headed)
 	walktest.expect_nil(t, herr)
-	src := strings.concatenate({`[{"`, long, `":1,"b":"`, long, `"},{"c":null}]`}, context.temp_allocator)
+	src := strings.concatenate({`[{"`, long, `":1,"b":"`, long, `"},{"b":null}]`}, context.temp_allocator)
 	foreign_doc, ferr := json.build(transmute([]u8)src, .Json)
 	defer core.destroy(&foreign_doc)
 	walktest.expect_nil(t, ferr)

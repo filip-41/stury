@@ -253,7 +253,8 @@ write_document_respell_strings :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(text), `[/* \/ */"/"]`)
 }
 
-// A subtree of a delimited target is the array's records, and a key or a node past the document is refused.
+// A subtree of a delimited target is the array's records or a scalar's one cell, and a key or a node past the document is
+// refused.
 @(test)
 write_document_nodes :: proc(t: ^testing.T) {
 	doc, _ := core.build(transmute([]u8)string(`{"n":1,"rows":[{"a":1,"b":"x"},{"a":2}]}`), json.as(.Json))
@@ -267,7 +268,11 @@ write_document_nodes :: proc(t: ^testing.T) {
 		_, _, err = core.write(&doc, node = node)
 		walktest.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
 	}
-	_, _, err = core.write(&doc, as = dsv.as(.Csv), node = 2)
+	cell, _, cerr := core.write(&doc, as = dsv.as(.Csv), node = 2)
+	defer delete(cell)
+	walktest.expect_nil(t, cerr)
+	testing.expect_value(t, string(cell), "1\n")
+	_, _, err = core.write(&doc, as = dsv.as(.Csv), node = 1)
 	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
 }
 

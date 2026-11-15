@@ -1,14 +1,13 @@
 package dsv
 
-// The write of a document: a list of records as a delimited text. A dsv document is written in the spec and layout it was
-// read in. A document of another format whose root is a list of records is written through its `text` and spans: its
-// objects give a header of their keys in first-seen order, its arrays no header. `sort_keys` puts the columns of a
-// header in byte order of their names. A cell that is a container is
-// `.Unsupported`, null is an empty cell, and a number is its source spelling, or JSON's where JSON does not spell it so.
-// With a comment byte in the output's options, which a write without a handle takes from the read, a comment on the list
-// is written above the header when a record follows it, one on a record above the record, and the list's foot below the
-// last record, each a comment line, as an edit writes them. A comment the output has no place or no comment byte for,
-// and one whose body holds a line end, is dropped and counted, as is the earlier value of a key its object repeats.
+// The write of a document as a delimited text. A dsv document with a header is written in the spec and layout it was
+// read in, its header the shared keys, sorted under `sort_keys`. Any other document is written as the rows of a record
+// writer's table, see `records.write_object`: a list's elements, an object as one row and a scalar as one cell, null an
+// empty cell and a number its source spelling, or JSON's where JSON does not spell it so. With a comment byte in the
+// output's options, which a write without a handle takes from the read, a comment on the list is written above the
+// header when a record follows it, one on a record above the record, and the list's foot below the last record, each a
+// comment line, as an edit writes them. A comment the output has no place or no comment byte for, and one whose body
+// holds a control byte a line cannot hold, is dropped and counted, as is the earlier value of a key its object repeats.
 
 import "base:runtime"
 import "core:io"
@@ -17,6 +16,7 @@ import "core:strings"
 import core "../core"
 import typed "../core/typed"
 import write "../core/write"
+import records "../core/records"
 
 // Writes `value`, a list of rows, as `spec` says, with the delimiter, comment byte, `no_header` and `crlf` of `opts`, and
 // as `write` says. The form with no plan builds one for its type, and a plan made by `plan_make`, which holds the spec
@@ -65,8 +65,8 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 	if !layout_ok(spec, layout) {
 		return nil, 0, {kind = .Bad_Option}
 	}
-	if doc.partial || doc.nodes[node].kind != .Array {
-		return nil, 0, {kind = .Unsupported}
+	if doc.partial || core.header_of(doc) == 0 || doc.nodes[node].kind != .Array {
+		return table_write(doc, opts, as, node, stream, allocator)
 	}
 	spill: [write.ROOM_MAX]u8 = ---
 	w: Rows
@@ -77,72 +77,53 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 	if err.kind != .None {
 		return nil, 0, err
 	}
-	return text, w.kept - w.dropped, err
+	return text, w.kept, err
 }
 
-// The header, then each record of the array at `list`. The header is the document's shared keys, else the keys of its
-// objects, each once. `INFER` is the output's `infer`, a constant so the cell loops test it once. Inlined into
-// `document_write`, so the output's cursor and buffer stay in registers across the cell loop.
+// `doc` written as the rows of a record writer's table, see `records.write_object`.
+@(private)
+table_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
+	wr: records.Writer
+	if kind := records.writer_init(&wr, stream, as, .Lines, opts, allocator); kind != .None {
+		return nil, 0, {kind = kind}
+	}
+	if records.write_rows(&wr, core.Node_Ref{doc, node}) != .None || records.table_end(&wr) != .None {
+		err = wr.err
+		records.writer_destroy(&wr)
+		return nil, 0, err
+	}
+	kept = wr.table.kept - wr.table.dropped
+	failed: core.Error
+	if text, failed = records.writer_end(&wr); failed != nil {
+		return nil, 0, {kind = .No_Memory}
+	}
+	return text, kept, {}
+}
+
+// The header, the document's shared keys, then each record of the array at `list`. `INFER` is the output's `infer`, a
+// constant so the cell loops test it once. Inlined into `document_write`, so the output's cursor and buffer stay in
+// registers across the cell loop.
 @(private)
 write_records :: #force_inline proc(w: ^Rows, doc: ^core.Document, list: core.Node_Index, $INFER: bool) -> core.Typed_Error_Kind {
 	scratch := runtime.arena_allocator(&w.arena)
 	header := make([dynamic]string, scratch)
-	column := make(map[string]int, scratch)
 	buf: [512]u8
-	keys := core.header_of(doc)
-	keyed := keys != 0
-	if keyed {
-		it := core.children(doc, keys)
-		for key, more := core.child_next(&it); more; key, more = core.child_next(&it) {
-			name, whole := core.text_clone(doc, key, scratch)
-			if _, failed := append(&header, name); !whole || failed != nil {
-				return .No_Memory
-			}
+	it := core.children(doc, core.header_of(doc))
+	for key, more := core.child_next(&it); more; key, more = core.child_next(&it) {
+		name, whole := core.text_clone(doc, key, scratch)
+		if _, failed := append(&header, name); !whole || failed != nil {
+			return .No_Memory
 		}
 	}
-	maps, arrays := 0, 0
-	records := core.children(doc, list)
-	for rec, more := core.child_next(&records); more; rec, more = core.child_next(&records) {
-		#partial switch doc.nodes[rec].kind {
-		case .Object:
-			maps += 1
-			if !keyed {
-				pairs := core.pairs(doc, rec)
-				for key, _, ok := core.pair_next(&pairs); ok; key, _, ok = core.pair_next(&pairs) {
-					name, whole := core.text_clone(doc, key, scratch)
-					_, at, fresh, failed := map_entry(&column, name)
-					if !whole || failed != nil {
-						return .No_Memory
-					}
-					if fresh {
-						at^ = len(header)
-						if _, no_name := append(&header, name); no_name != nil {
-							return .No_Memory
-						}
-					}
-				}
-			}
-		case .Array:
-			arrays += 1
-		case:
-			return .Unsupported
-		}
-	}
-	if maps > 0 && arrays > 0 {
-		return .Unsupported
-	}
-	// The column each of the shared keys moves to under `sort_keys`. An object's keys find theirs by name.
+	// The column each of the shared keys moves to under `sort_keys`.
 	slot: []int
 	moved: []core.Node_Index
 	if w.sort {
 		slot, moved = sort_header(header[:], scratch) or_return
-		for name, k in header {
-			column[name] = k
-		}
 	}
 	// Comments are written only when the output has a comment byte and the list holds one.
 	commented := w.opts.comment != 0 && len(core.subtree_facts(doc, list)) > 0
-	if (maps > 0 || keyed) && !w.opts.no_header {
+	if !w.opts.no_header {
 		// Above a header, a comment reads as the list's only when a record follows the header.
 		if commented && core.length(doc, list) > 0 {
 			put_comments(w, doc, list, .Comment) or_return
@@ -153,14 +134,14 @@ write_records :: #force_inline proc(w: ^Rows, doc: ^core.Document, list: core.No
 	if no_cells != nil {
 		return .No_Memory
 	}
-	records = core.children(doc, list)
+	records := core.children(doc, list)
 	i := 0
 	for rec, more := core.child_next(&records); more; rec, more = core.child_next(&records) {
 		if commented {
 			put_comments(w, doc, rec, .Comment) or_return
 		}
 		start := total(w)
-		if keyed && !w.sort {
+		if !w.sort {
 			// A record's values are in its header's order, and a column past its last is an empty cell.
 			values := core.children(doc, rec)
 			for k in 0 ..< len(header) {
@@ -170,41 +151,17 @@ write_records :: #force_inline proc(w: ^Rows, doc: ^core.Document, list: core.No
 					return refuse_in(w, kind, i, core.Index(k))
 				}
 			}
-		} else if maps > 0 {
+		} else {
+			values := core.children(doc, rec)
 			for &c in cells {
-				c = core.NO_NODE
+				c, _ = core.child_next(&values)
 			}
-			if keyed {
-				values := core.children(doc, rec)
-				for &c in cells {
-					c, _ = core.child_next(&values)
-				}
-				sort_cells(cells, moved, slot)
-			} else {
-				pairs := core.pairs(doc, rec)
-				for key, value, ok := core.pair_next(&pairs); ok; key, value, ok = core.pair_next(&pairs) {
-					at := column[node_text(w, doc, key, buf[:]) or_return]
-					if cells[at] != core.NO_NODE {
-						w.dropped += 1
-					}
-					cells[at] = value
-				}
-			}
+			sort_cells(cells, moved, slot)
 			for node, k in cells {
 				put_sep(w, k > 0)
 				if kind := put_cell(w, doc, node, buf[:], k == 0, INFER); kind != .None {
 					return refuse_in(w, kind, i, core.Index(k))
 				}
-			}
-		} else {
-			values := core.children(doc, rec)
-			k := 0
-			for node, more_cells := core.child_next(&values); more_cells; node, more_cells = core.child_next(&values) {
-				put_sep(w, k > 0)
-				if kind := put_cell(w, doc, node, buf[:], k == 0, INFER); kind != .None {
-					return refuse_in(w, kind, i, core.Index(k))
-				}
-				k += 1
 			}
 		}
 		end_record(w, start, i) or_return

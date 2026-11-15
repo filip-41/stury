@@ -21,31 +21,13 @@ import records "../../core/records"
 import "jq"
 import "message"
 
-Table_Shape :: enum u8 {
-	Unset,
-	Objects,
-	Rows,
-}
-
-// The run's output table, on the heap, as it outlives each input's arena. The writer's text is a buffer that each row
-// moves into the run's output, so the rows go out as the others do.
+// The run's output table, on the heap, as it outlives each input's arena. The library's writer holds the rows, and its
+// text is a buffer that each row moves into the run's output, so the rows go out as the others do.
 Table :: struct {
 	wr:     records.Writer,
-	shape:  Table_Shape,
-	header: [dynamic]string,
-	held:   [dynamic]Held_Row, // --grow-header: every row, written at the end under the header of every key
-	count:  int, // the outputs so far
 	format: string,
 	infer:  bool, // the table reads back under --infer, so a text that reads as another kind is quoted
-	lead:   [dynamic]string, // the comments written above the header, which the input holds
-	foot:   [dynamic]string, // the comments written after the last row
 	ended:  bool,
-}
-
-Held_Row :: struct {
-	keys:  []string,
-	cells: []write.Scalar,
-	notes: []string,
 }
 
 table_start :: proc(run: ^Run) -> ^Table {
@@ -53,89 +35,51 @@ table_start :: proc(run: ^Run) -> ^Table {
 	heap := runtime.heap_allocator()
 	t := new(Table, heap)
 	t.format, t.infer = FORMATS[o.to].name, o.cells_out.infer
-	t.header.allocator, t.held.allocator, t.lead.allocator, t.foot.allocator = heap, heap, heap, heap
-	records.writer_init(&t.wr, {}, cells_written_as(o), allocator = heap)
+	records.writer_init(&t.wr, {}, cells_written_as(o), opts = {sort_keys = o.sort_keys, grow_header = o.grow_header}, allocator = heap)
 	return t
 }
 
 // Writes the output `v` as a table row, or ends the run on what the table refuses.
 emit_row :: proc(o: ^Output, v: jq.Value) {
 	t := o.table
-	t.count += 1
 	o.result = JQ_OK if jq.truthy(v) else JQ_OK_NULL_KIND
 	context.allocator = context.temp_allocator
 	keys: [dynamic]string
 	cells: [dynamic]write.Scalar
 	object := jq.kind(v) == .Object
-	if t.shape != .Unset && object != (t.shape == .Objects) {
-		table_fail(o, "output %d is %s: a table is all objects (under a header) or none", t.count, "an object, after arrays or scalars" if object else "not an object, after objects")
-	}
 	if !object && jq.kind(v) != .Array {
-		append(&cells, cell_of(o, v, nil, 0))
+		append(&cells, cell_of(v))
 	} else {
 		it := jq.iterate(v)
 		for k, e in jq.next_member(&it) {
-			if object && !o.opts.grow_header && t.shape == .Objects && !slice.contains(t.header[:], k) {
-				unknown_key(o, k)
-			}
 			append(&keys, k)
-			append(&cells, cell_of(o, e, k if object else nil, len(cells) + 1))
+			append(&cells, cell_of(e))
 		}
-	}
-	t.shape = .Objects if object else .Rows
-	if t.count == 1 && o.opts.cells_out.comment != 0 {
-		put_notes(t, o.opts.cells_out.comment, t.lead[:])
 	}
 	notes := table_comments(o, v, .Comment)
-	if !object {
-		put_notes(t, o.opts.cells_out.comment, notes)
-		put_row(o, cells[:])
-		return
-	}
-	if o.opts.grow_header {
-		heap := runtime.heap_allocator()
-		row := Held_Row{make([]string, len(keys), heap), make([]write.Scalar, len(cells), heap), make([]string, len(notes), heap)}
-		for n, i in notes {
-			row.notes[i] = strings.clone(n, heap)
-		}
-		for k, i in keys {
-			row.keys[i] = strings.clone(k, heap)
-			#partial switch c in cells[i] {
-			case string:
-				row.cells[i] = strings.clone(c, heap)
-			case write.Number_Literal:
-				row.cells[i] = write.Number_Literal{strings.clone(c.text, heap)}
-			case:
-				row.cells[i] = c
-			}
-		}
-		append(&t.held, row)
-		for k in row.keys {
-			if !slice.contains(t.header[:], k) {
-				append(&t.header, k)
-			}
-		}
-		return
-	}
-	object_row(o, keys[:], cells[:], notes = notes)
+	put_written(o, records.write_object(&t.wr, keys[:], cells[:], notes) if object else records.write_row(&t.wr, cells[:], notes))
 }
 
-// Writes the comments of `root`, a text whose array is written as the table's rows, as the library's writer places a
-// document's: its `.@comment` now, above the rows, and its `.@comment_foot` after the last row.
-table_root :: proc(o: ^Output, root: jq.Value) {
-	t := o.table
-	if notes := table_comments(o, root, .Comment); len(notes) > 0 {
-		put_notes(t, o.opts.cells_out.comment, notes)
-		write.put_text(&o.buf, string(records.writer_take(&t.wr)))
-		flush_some(o)
+// Writes `doc` as the table's rows, see `records.write_document`, or ends the run on what the table refuses.
+table_document :: proc(o: ^Output, doc: ^core.Document) {
+	o.table.wr.taken, o.table.wr.taker = put_text, o
+	put_written(o, records.write_document(&o.table.wr, doc))
+}
+
+// Writes the comment lines of `bodies` now, or holds them for after the table's last row when `foot`, or ends the run
+// when they cannot be.
+table_notes :: proc(o: ^Output, bodies: []string, foot: bool) {
+	lines := make([dynamic]string, context.temp_allocator)
+	_, kind := records.comment_lines(bodies, &lines)
+	if kind == .None {
+		kind = records.hold_notes(&o.table.wr, lines[:]) if foot else records.write_notes(&o.table.wr, lines[:])
 	}
-	for n in table_comments(o, root, .Comment_Foot) {
-		append(&t.foot, strings.clone(n, runtime.heap_allocator()))
+	if kind != .None {
+		put_written(o, kind)
 	}
 }
 
-// The lines of the comments of `role` on `v` that the table holds: none when it has no comment character, and none of a
-// comment that holds a control byte a line cannot hold.
+// The lines of the comments of `role` on `v` that the table holds: none when it has no comment character.
 @(private = "file")
 table_comments :: proc(o: ^Output, v: jq.Value, role: core.Role) -> []string {
 	if o.opts.cells_out.comment == 0 {
@@ -143,97 +87,69 @@ table_comments :: proc(o: ^Output, v: jq.Value, role: core.Role) -> []string {
 	}
 	bodies, _ := jq.comments(v, role)
 	kept := make([dynamic]string, 0, len(bodies), context.temp_allocator)
-	for b in bodies {
-		if !write.comment_lines_ok(b) {
-			continue
-		}
-		// An empty body is one empty line.
-		rest := b if len(b) > 0 else "\n"
-		for line in strings.split_lines_iterator(&rest) {
-			append(&kept, line)
-		}
+	if _, kind := records.comment_lines(bodies, &kept); kind != .None {
+		put_written(o, kind)
 	}
 	return kept[:]
-}
-
-// Writes each of `notes` as a comment line, its body after the comment character and, when it is not empty, a space.
-@(private = "file")
-put_notes :: proc(t: ^Table, comment: u8, notes: []string) {
-	for n in notes {
-		pad := 1 if len(n) > 0 else 0
-		line := make([]u8, 1 + pad + len(n), context.temp_allocator)
-		line[0] = comment
-		if pad > 0 {
-			line[1] = ' '
-		}
-		copy(line[1 + pad:], n)
-		records.write_text(&t.wr, line)
-	}
 }
 
 // Writes the output object of `cells` under `keys` as a table row, when every output is such an object of the same
 // keys, `ordered` when they are the header's, or ends the run on a row the table refuses.
 table_object :: proc(o: ^Output, keys: []string, cells: []write.Scalar, ordered: bool) {
-	o.table.count += 1
-	o.table.shape = .Objects
 	o.result = JQ_OK
-	object_row(o, keys, cells, ordered)
+	put_written(o, records.write_object(&o.table.wr, keys, cells, ordered = ordered))
 }
 
-// Writes an object's `cells`, under `keys`, as a row under the header, which the first object's keys make.
+// Moves what the writer wrote into the run's output, or ends the run on the row it refused.
 @(private = "file")
-object_row :: proc(o: ^Output, keys: []string, cells: []write.Scalar, ordered := false, notes: []string = nil) {
+put_written :: proc(o: ^Output, kind: core.Typed_Error_Kind) {
 	t := o.table
-	fresh := len(t.header) == 0
-	if fresh {
-		for k in keys {
-			append(&t.header, strings.clone(k, runtime.heap_allocator()))
-		}
-		if o.opts.sort_keys {
-			slice.sort(t.header[:])
-		}
+	if kind != .None {
+		table_fail(o, "%s", refusal_text(t, kind))
 	}
-	row := cells
-	if !ordered && !slice.equal(t.header[:], keys) {
-		for k in keys {
-			if !slice.contains(t.header[:], k) {
-				unknown_key(o, k)
+	put_text(o, records.writer_take(&t.wr))
+}
+
+// Moves `text`, which the table's writer wrote, into the run's output `out`.
+@(private = "file")
+put_text :: proc(out: rawptr, text: []u8) {
+	o := (^Output)(out)
+	write.put_text(&o.buf, string(text))
+	flush_some(o)
+}
+
+// The sentence for the writer's refusal `kind` of a row, or of the header when its path is empty.
+@(private = "file")
+refusal_text :: proc(t: ^Table, kind: core.Typed_Error_Kind) -> string {
+	err := &t.wr.err
+	if err.n_steps == 0 {
+		return row_refusal(t, kind, t.wr.cells)
+	}
+	output := int(err.steps[0].(core.Index)) + 1
+	#partial switch kind {
+	case .Wrong_Kind:
+		return message.build_temp("output %d is %s: a table is all objects (under a header) or none", output, "an object, after arrays or scalars" if err.found == .Object else "not an object, after objects")
+	case .Unknown_Field:
+		return message.build_temp("output %d has the key %q, which the header lacks (the header is output 1's keys; --grow-header adds keys as they come)", output, string(err.steps[1].(core.Name)))
+	case .Unsupported:
+		if err.n_steps == 2 && (err.found == .Array || err.found == .Object) {
+			what := "an object" if err.found == .Object else "an array"
+			at: string
+			#partial switch s in err.steps[1] {
+			case core.Name:
+				at = message.build_temp("at key %q", string(s))
+			case core.Index:
+				at = message.build_temp("at cell %d", int(s) + 1)
 			}
-		}
-		row = aligned(t.header[:], keys, cells)
-	}
-	head := -1
-	if fresh {
-		head = o.buf.flushed + o.buf.cursor
-		write_header(o)
-	}
-	if len(notes) > 0 {
-		put_notes(o.table, o.opts.cells_out.comment, notes)
-	}
-	put_row(o, row, head)
-}
-
-// Ends the run on the key `k` of an object, which the header lacks.
-@(private = "file")
-unknown_key :: proc(o: ^Output, k: string) {
-	table_fail(o, "output %d has the key %q, which the header lacks (the header is output 1's keys; --grow-header adds keys as they come)", o.table.count, k)
-}
-
-// The cells of an object row under `header`: each key's cell in the header's order, empty for a key the row lacks.
-@(private = "file")
-aligned :: proc(header, keys: []string, cells: []write.Scalar) -> []write.Scalar {
-	row := make([]write.Scalar, len(header), context.temp_allocator)
-	for k, i in keys {
-		if at, found := slice.linear_search(header, k); found {
-			row[at] = cells[i]
+			return message.build_temp("output %d has %s %s: a cell is a text, a number, true, false or null; tojson makes text of %s", output, what, at, what)
 		}
 	}
-	return row
+	return row_refusal(t, kind, t.wr.cells)
 }
 
-// The cell `v` writes as, or the end of the run for an array or object at `key`, or with no key at cell `n` of the row.
+// The cell `v` writes as, an array or object as the open of its kind, which the table refuses.
 @(private = "file")
-cell_of :: proc(o: ^Output, v: jq.Value, key: Maybe(string), n: int) -> write.Scalar {
+cell_of :: proc(v: jq.Value) -> write.Scalar {
 	switch jq.kind(v) {
 	case .Null:
 		return nil
@@ -250,42 +166,12 @@ cell_of :: proc(o: ^Output, v: jq.Value, key: Maybe(string), n: int) -> write.Sc
 			return nil
 		}
 		return write.Number_Literal{jq.to_json(v)}
-	case .Array, .Object:
-		what := "an object" if jq.kind(v) == .Object else "an array"
-		k, keyed := key.?
-		at := message.build_temp("at key %q", k) if keyed else message.build_temp("at cell %d", n)
-		table_fail(o, "output %d has %s %s: a cell is a text, a number, true, false or null; tojson makes text of %s", o.table.count, what, at, what)
+	case .Array:
+		return write.Tree_Part.Open_Array
+	case .Object:
+		return write.Tree_Part.Open_Object
 	}
 	return nil
-}
-
-@(private = "file")
-write_header :: proc(o: ^Output) {
-	t := o.table
-	if o.opts.cells_out.no_header {
-		return
-	}
-	names := make([]write.Scalar, len(t.header), context.temp_allocator)
-	for k, i in t.header {
-		names[i] = k
-	}
-	put_row(o, names)
-}
-
-// Writes one record, after any comment lines the writer holds, and moves the writer's text into the run's output, or
-// ends the run on a record the writer refuses, dropping the output from `head` on when it is not yet flushed: a refused
-// first row takes its header with it.
-@(private = "file")
-put_row :: proc(o: ^Output, cells: []write.Scalar, head := -1) {
-	t := o.table
-	if kind := records.write_cells(&t.wr, cells); kind != .None {
-		if head >= o.buf.flushed {
-			o.buf.cursor = head - o.buf.flushed
-		}
-		table_fail(o, "%s", row_refusal(t, kind, cells))
-	}
-	write.put_text(&o.buf, string(records.writer_take(&t.wr)))
-	flush_some(o)
 }
 
 // Why the writer refused `cells`, as only the reasons that hold for them: a blank line, a byte order mark that opens
@@ -329,28 +215,15 @@ reads_as_other :: proc(c: write.Scalar) -> bool {
 	return is_number || s == "true" || s == "false"
 }
 
-// Writes the rows --grow-header held, under the header of every key, once the outputs end. A second call does nothing.
+// Writes the rows --grow-header held, under the header of every key, and the foot, once the outputs end. A second call
+// does nothing.
 table_end :: proc(o: ^Output) {
 	t := o.table
 	if t == nil || t.ended {
 		return
 	}
 	t.ended = true
-	if len(t.held) > 0 {
-		if o.opts.sort_keys {
-			slice.sort(t.header[:])
-		}
-		write_header(o)
-		for r in t.held {
-			put_notes(t, o.opts.cells_out.comment, r.notes)
-			put_row(o, aligned(t.header[:], r.keys, r.cells))
-		}
-	}
-	if len(t.foot) > 0 {
-		put_notes(t, o.opts.cells_out.comment, t.foot[:])
-		write.put_text(&o.buf, string(records.writer_take(&t.wr)))
-		flush_some(o)
-	}
+	put_written(o, records.table_end(&t.wr))
 }
 
 // Writes what the table holds, reports `format` and ends the run. A piece's output is marked refused instead.

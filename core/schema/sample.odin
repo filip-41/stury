@@ -14,6 +14,7 @@ import core "../"
 import "../rules"
 import "../typed"
 import "../write"
+import "../records"
 
 // The values that pass a description are drawn as `core.Value`s in a scratch arena, written in the format asked for and
 // checked by the description's own check. A draw that fails the check is dropped for another, so the answer is
@@ -75,6 +76,9 @@ Sample_Sink :: proc(text: []u8, user: rawptr)
 // `allocator` holds, one the check cannot judge is the check's own refusal, and one whose every drawn value the format
 // cannot write is the writer's refusal.
 sample_each :: proc(d: ^rules.Description, as: core.As, opts: Sample_Options, sink: Sample_Sink, user: rawptr, allocator := context.allocator) -> (err: core.Error) {
+	// The rows drawn are new, so every key they have is written.
+	opts := opts
+	opts.write.grow_header = true
 	asserted := asserting(d, opts.format_assert)
 	defer asserted_restore(d, asserted)
 	c := Compiled{description = d}
@@ -261,7 +265,7 @@ value_text :: proc(g: ^Gen, b: ^Bound, as: core.As, opts: Sample_Options, scratc
 		if opts.invalid {
 			text, ok = broken(g, b, as, &v, opts, scratch)
 		} else {
-			refusal: Refusal
+			refusal: core.Typed_Refusal
 			text, refusal = written(v, as, opts.write, scratch)
 			g.refused = refusal.kind if refusal.kind != .None else g.refused
 			g.wrote ||= refusal.kind == .None
@@ -277,100 +281,35 @@ value_text :: proc(g: ^Gen, b: ^Bound, as: core.As, opts: Sample_Options, scratc
 	return nil, empty
 }
 
-// What a write refused: its kind, and for a flat format the row (-1 for a value that is no array) and the member name.
+// `v` written in `as`, the bytes in `allocator`, or the refusal, with a flat format's path to the row and the member. A
+// flat format writes it as `records.write_rows` does.
 @(private)
-Refusal :: struct {
-	kind: core.Typed_Error_Kind,
-	row:  int,
-	key:  string,
-}
-
-// `v` written in `as`, the bytes in `allocator`, or the refusal. A flat format's text is a record of the member names of
-// the rows, in the order they first appear, then each row's values in that order, null for a member a row lacks. A value
-// that is not an array is a table of one row. A row that is no object, a cell that is nested and rows with no member at
-// all are not written.
-@(private)
-written :: proc(v: core.Value, as: core.As, opts: core.Write_Options, allocator: runtime.Allocator) -> (text: []u8, refusal: Refusal) {
-	t: write.Tokens
-	if refusal.kind = write.tokens_init(&t, as, opts, allocator = allocator); refusal.kind != .None {
-		return nil, {refusal.kind, -1, ""}
-	}
-	if t.spell.line != nil {
-		refusal = emit_rows(&t, v)
-	} else {
-		refusal = {write.value_of(&t, v, true), -1, ""}
-	}
-	bytes, err := write.tokens_finish(&t)
-	if refusal.kind == .None {
-		refusal = {err.kind, -1, ""}
-	}
-	return bytes, refusal
-}
-
-@(private = "file")
-emit_rows :: proc(t: ^write.Tokens, v: core.Value) -> Refusal {
-	rows := make([dynamic]core.Value, context.temp_allocator)
-	listed := core.value_kind(v) == .Array
-	if listed {
-		it := core.value_children(v)
-		for row in core.value_child_next(&it) {
-			append(&rows, row)
+written :: proc(v: core.Value, as: core.As, opts: core.Write_Options, allocator: runtime.Allocator) -> (text: []u8, refusal: core.Typed_Refusal) {
+	if as.readers == nil || !as.readers.flat {
+		t: write.Tokens
+		if refusal.kind = write.tokens_init(&t, as, opts, allocator = allocator); refusal.kind != .None {
+			return nil, refusal
 		}
-	} else {
-		append(&rows, v)
+		refusal.kind = write.value_of(&t, v, true)
+		bytes, err := write.tokens_finish(&t)
+		return bytes, {kind = err.kind if refusal.kind == .None else refusal.kind}
 	}
-	columns := make(map[string]int, context.temp_allocator)
-	names := make([dynamic]string, context.temp_allocator)
-	for row, i in rows {
-		if core.value_kind(row) != .Object {
-			return {.Unwritable, i if listed else -1, ""}
+	// A refused row is the writer's last refusal, which ends the text here.
+	wr: records.Writer
+	kind := records.writer_init(&wr, {}, as, opts = opts, allocator = allocator)
+	if kind == .None {
+		kind = records.write_rows(&wr, v)
+	}
+	if kind == .None {
+		bytes, err := records.writer_end(&wr)
+		if failed, typed := err.(core.Typed_Error); typed {
+			refusal.kind = failed.kind
 		}
-		it := core.value_pairs(row)
-		for k in core.value_pair_next(&it) {
-			if k not_in columns {
-				columns[k] = len(names)
-				append(&names, k)
-			}
-		}
+		return bytes, refusal
 	}
-	if len(names) == 0 {
-		return {.Unwritable if len(rows) > 0 else .None, 0 if listed else -1, ""}
-	}
-	for k in names {
-		if kind := write.value_string(t, k); kind != .None {
-			return {kind, -1, k}
-		}
-	}
-	if kind := write.end_record(t); kind != .None {
-		return {kind, -1, ""}
-	}
-	slots := make([]core.Value, len(names), context.temp_allocator)
-	for row, i in rows {
-		if refused := row_written(t, row, columns, names[:], slots, i if listed else -1); refused.kind != .None {
-			return refused
-		}
-	}
-	return {}
-}
-
-// The row `row`, number `i`, of a flat format's table: the value of each of `names` in order, `columns` giving the place
-// of each, and null for one the row lacks. A nested value is not written. `slots` holds a value for each name.
-@(private)
-row_written :: proc(t: ^write.Tokens, row: core.Value, columns: map[string]int, names: []string, slots: []core.Value, i: int) -> Refusal {
-	slice.zero(slots)
-	it := core.value_pairs(row)
-	for name, member in core.value_pair_next(&it) {
-		if kind := core.value_kind(member); kind == .Array || kind == .Object {
-			return {.Unwritable, i, name}
-		}
-		slots[columns[name]] = member
-	}
-	for slot, j in slots {
-		if kind := write.value_of(t, slot, true); kind != .None {
-			return {kind, i, names[j]}
-		}
-	}
-	return {write.end_record(t), i, ""}
+	refusal = wr.err
+	records.writer_destroy(&wr)
+	return nil, refusal
 }
 
 // `v` with the `description` `note` written on it as a comment, when comments are asked for.

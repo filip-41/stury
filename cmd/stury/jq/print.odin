@@ -10,6 +10,7 @@ import "base:runtime"
 import "core:io"
 import "core:math"
 import "core:mem"
+import "core:strings"
 import "../../../core/spell"
 import core_pkg "../../../core"
 import "../../../core/write"
@@ -104,6 +105,7 @@ emit :: proc(p: ^Printer, v: Value) {
 	case p.depth > MAX_DEPTH:
 		token(p, int(k), "<skipped: too deep>") // what jq prints past its depth limit
 	case (k >= .Array || p.comments && p.depth == 0) && write_node(p, v):
+	case p.comments && p.depth == 0 && write_commented(p, v):
 	case k <= .True:
 		token(p, int(k), "null" if k == .Null else ("true" if k == .True else "false"))
 	case k == .Number:
@@ -151,6 +153,46 @@ emit :: proc(p: ^Printer, v: Value) {
 			}
 		}
 		close(p, k, '}')
+	}
+}
+
+// Writes `v`, a value that holds the comments a run gave it above or after it, as JSONC: each line of such a comment as a
+// line comment, around the value as it prints alone, and returns true. One that holds none returns false.
+@(private = "file")
+write_commented :: proc(p: ^Printer, v: Value) -> bool {
+	c, noted := v.(^core_pkg.Commented)
+	if !noted || p.colors != nil || core_pkg.Role.Comment not_in c.written && core_pkg.Role.Comment_Foot not_in c.written {
+		return false
+	}
+	head, _ := core_pkg.comments(v, .Comment)
+	foot, _ := core_pkg.comments(v, .Comment_Foot)
+	for b in head {
+		line_comments(p, b, false)
+	}
+	emit(p, c.v)
+	for b in foot {
+		line_comments(p, b, true)
+	}
+	return true
+}
+
+// Writes each line of `body` as a line comment, after a line end when `after`, else each before one. A body with a byte
+// a line cannot hold is left out.
+@(private = "file")
+line_comments :: proc(p: ^Printer, body: string, after: bool) {
+	if !write.comment_lines_ok(body) {
+		return
+	}
+	rest := body if len(body) > 0 else "\n"
+	for line in strings.split_lines_iterator(&rest) {
+		if after {
+			write.put_byte(p.out, '\n')
+		}
+		write.put_text(p.out, "// " if len(line) > 0 else "//")
+		write.put_text(p.out, line)
+		if !after {
+			write.put_byte(p.out, '\n')
+		}
 	}
 }
 

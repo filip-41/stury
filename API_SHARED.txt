@@ -478,6 +478,7 @@ write_laid :: proc(v: core.Value, as: core.As, opts: core.Write_Options, colon: 
 # core/records
 FAR :: u64(1) << 46
 check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, outer: ^typed.Outer, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0, dups := core.Duplicates.Default, repeats := typed.Repeats.Ignore) -> (records: i64, failure: core.Typed_Refusal, fatal: core.Typed_Refusal, failed: i64)
+comment_lines :: proc(bodies: []string, into: ^[dynamic]string, padded := true) -> (kept: int, kind: core.Typed_Error_Kind)
 entries_close :: proc(it: ^Reader)
 entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64, services: ^Framing_Services = nil) -> bool
 entries_next :: proc(it: ^Reader) -> (rec: Record, ok: bool)
@@ -486,14 +487,20 @@ entries_walked :: proc(it: ^Reader) -> (rec: Record, ok: bool)
 entries_walked_close :: proc(it: ^Reader)
 entry_document :: proc(it: ^Reader, rec: Record, state: []u8, in_order: bool, allocator: runtime.Allocator, feed: proc(b: ^engine.Builder, regs: core.Hook_Regs, tokens: []core.Token) -> core.Hook_Regs) -> (doc: core.Document, err: core.Document_Error)
 entry_hook :: proc "contextless" (h: ^Entry_Walk, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
+hold_notes :: proc(wr: ^Writer, lines: []string) -> core.Typed_Error_Kind
 locate_hook :: proc "contextless" (h: ^Entry_Walk, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
 next_window :: proc(it: ^Reader) -> (window: []u8, base: u64, ok: bool)
 no_judge :: proc(it: ^Reader, rec: Record) -> Maybe(core.Fault)
 open_stream_with :: proc(input: io.Reader, as: core.As, services: ^Framing_Services, docs: ^Record_Docs, framing := core.Framing.Lines, opts := Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> Reader
 open_with :: proc(src: []u8, as: core.As, services: ^Framing_Services, docs: ^Record_Docs, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator, entries: []string = nil) -> Reader
 shifted :: #force_inline proc "contextless" (x, delta, pin: u64) -> u64
+table_end :: proc(wr: ^Writer) -> core.Typed_Error_Kind
 validate_parallel :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault)
-write_text :: proc(wr: ^Writer, text: []u8) -> core.Typed_Error_Kind
+write_document :: proc(wr: ^Writer, doc: ^core.Document, node := core.ROOT) -> core.Typed_Error_Kind
+write_notes :: proc(wr: ^Writer, notes: []string) -> core.Typed_Error_Kind
+write_object :: proc(wr: ^Writer, keys: []string, cells: []cw.Scalar, notes: []string = nil, ordered := false) -> core.Typed_Error_Kind
+write_row :: proc(wr: ^Writer, cells: []cw.Scalar, notes: []string = nil) -> core.Typed_Error_Kind
+write_rows :: proc(wr: ^Writer, v: core.Value) -> core.Typed_Error_Kind
 writer_take :: proc(wr: ^Writer) -> []u8
 # core/schema
 check_written :: proc(b: ^Bound, text: []u8, as: core.As, rows: bool, sink: ^typed.Sink = nil) -> (err: core.Error)

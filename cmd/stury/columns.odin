@@ -217,7 +217,7 @@ place_columns :: proc(run: ^Run, cols: ^Columns, texts: ^records.Reader, header:
 		m.lead = lead[:len(lead) - len(LEAD_PAD)]
 	}
 	if t := run.output.table; t != nil {
-		cols.ordered = len(t.header) == 0 || slice.equal(t.header[:], cols.heads)
+		cols.ordered = len(t.wr.table.header) == 0 || slice.equal(t.wr.table.header[:], cols.heads)
 	}
 }
 

@@ -188,7 +188,7 @@ accepts :: proc(s: ^Side, nodes: []rules.Node_Index, text: []u8) -> (taken, know
 @(private)
 text_of :: proc(s: ^Side, v: core.Value) -> (text: []u8, ok: bool) {
 	if s.as.readers != nil && s.as.readers.flat {
-		bytes, refusal := written(v, s.as, {}, context.temp_allocator)
+		bytes, refusal := written(v, s.as, {grow_header = true}, context.temp_allocator)
 		return bytes, refusal.kind == .None
 	}
 	written, err := write.write_value(v, s.as, allocator = context.temp_allocator)

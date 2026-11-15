@@ -45,6 +45,8 @@ Token_Spelling :: struct {
 	start:  proc(t: ^Tokens, as: core.As) -> core.Typed_Error_Kind, // sets `state` and `out`
 	value:  proc(t: ^Tokens, v: Scalar) -> core.Typed_Error_Kind,
 	line:   proc(t: ^Tokens) -> core.Typed_Error_Kind, // ends a record
+	// Writes a flat format's line of field `names` above its records, or nothing in a layout that has none.
+	names:  proc(t: ^Tokens, names: []string) -> core.Typed_Error_Kind,
 	stop:   proc(t: ^Tokens), // frees `state`
 	// Turns the finished text into the format's own: a format whose grammar fixes an order the calls cannot know
 	// writes the calls as a text it reads back and lays that out here. It receives the bytes the calls made, which it

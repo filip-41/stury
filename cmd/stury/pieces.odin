@@ -186,7 +186,7 @@ records_pieces :: proc(ins: ^Inputs) -> bool {
 	cells := reads_cells(&run.opts)
 	// A delimited text's reader frames records ahead of the one it gave last.
 	from := u64(ins.text_end) if cells else ins.texts.pos
-	if ins.framing == .Seq || !ins.last && ins.framing != .Lines || u64(len(ins.data)) < from + POOLED_BYTES || from < ins.parallel_from || ins.failures > 0 || run.halted || cells && !ins.header_judged || run.output.table != nil && run.output.table.shape == .Unset || !parallel(run) {
+	if ins.framing == .Seq || !ins.last && ins.framing != .Lines || u64(len(ins.data)) < from + POOLED_BYTES || from < ins.parallel_from || ins.failures > 0 || run.halted || cells && !ins.header_judged || run.output.table != nil && run.output.table.wr.table.shape == .Unset || !parallel(run) {
 		return false
 	}
 	flush_some(&run.output, force = true)
@@ -253,7 +253,7 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 	o.buf.hint = 1 << 16
 	take_spare(&ps.run.spares, &o.buf, k)
 	if table != nil {
-		o.table.shape, o.table.header = table.shape, table.header
+		o.table.wr.table.shape, o.table.wr.table.header = table.wr.table.shape, table.wr.table.header
 	}
 	values, temp, mapped := piece_arenas()
 	failed := !mapped
@@ -304,11 +304,13 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 		o.buf.cursor, o.ret, o.last_result, r.route.explain, n = before.cursor, before.ret, before.last_result, before.explain, before.records
 		o.refused = false
 		if o.table != nil {
-			o.table.count = before.rows
+			o.table.wr.table.rows = before.rows
 		}
 	}
 	slot := Piece_Slot{lo = lo, hi = stop, end = end, sum = piece_sum(&r, n), stopped = stopped, crossed = crossed}
 	if o.table != nil {
+		// The header is the run's table's.
+		o.table.wr.table.header = {}
 		records.writer_destroy(&o.table.wr)
 		free(o.table, runtime.heap_allocator())
 	}
@@ -346,7 +348,7 @@ piece_record :: proc(r: ^Run, it: ^records.Reader, rec: records.Record, part: ^c
 @(private = "file")
 piece_sum :: proc(r: ^Run, records: int) -> Piece_Sum {
 	o := &r.output
-	return {o.buf.cursor, o.ret, o.last_result, records, o.table.count if o.table != nil else 0, r.route.explain}
+	return {o.buf.cursor, o.ret, o.last_result, records, o.table.wr.table.rows if o.table != nil else 0, r.route.explain}
 }
 
 // Keeps a piece's slot and writes every slot that follows the written ones in the text. Entries are written once
@@ -406,7 +408,7 @@ write_piece :: proc(ps: ^Pieces, s: ^Piece_Slot) {
 		}
 	}
 	if o.table != nil {
-		o.table.count += s.sum.rows
+		o.table.wr.table.rows += s.sum.rows
 	}
 	r := &run.route
 	if p := s.sum.explain; !ps.entries {

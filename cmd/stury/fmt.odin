@@ -10,7 +10,6 @@ package main
 import "base:runtime"
 import "core:bytes"
 import "core:math/rand"
-import "core:mem/virtual"
 import "core:os"
 import "core:strconv"
 import "core:strings"
@@ -138,7 +137,7 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 			if cells == writes_cells(o) {
 				written = put_document(run, ins, &doc)
 			} else {
-				written = emit_rows(run, ins, jq.document_value(doc))
+				written = put_rows(run, ins, &doc)
 			}
 			core.destroy(&doc)
 			return written
@@ -181,7 +180,7 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 		case cells:
 			put_value(run, ins, jq.document_value(doc)) or_return
 		case:
-			emit_rows(run, ins, jq.document_value(doc)) or_return
+			put_rows(run, ins, &doc) or_return
 		}
 	}
 	if f, bad := it.fault.?; bad {
@@ -192,31 +191,17 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 	return true
 }
 
-// The text `v` written as a table's rows. A text whose root is an array is a list of rows, as the library's writer
-// takes it, its comments placed as the writer places a document's, and a record is a row. False, told, when a row
-// cannot be written.
+// `doc` written as a table's rows: a text whose root is an array is a list of rows, its comments placed as the library's
+// writer places them, and any other value is a row. False, told, when a row cannot be written.
 @(private = "file")
-emit_rows :: proc(run: ^Run, ins: ^Inputs, v: jq.Value) -> bool {
-	if ins.framing != .Concatenated || jq.kind(v) != .Array {
-		return put_value(run, ins, v)
+put_rows :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
+	if ins.framing != .Concatenated || core.is_markup(doc) || doc.nodes[core.ROOT].kind != .Array {
+		return put_value(run, ins, jq.document_value(doc^))
 	}
-	table_root(&run.output, v)
 	if run.convert != nil {
 		run.convert.table = true
 	}
-	// A row's cells are temporary and written before the next row, so a large array runs in one row's memory.
-	rows: virtual.Arena
-	if virtual.arena_init_growing(&rows) != nil {
-		message.write_stderr("stury: error: out of memory\n")
-		finish(run, EXIT_INPUT)
-	}
-	defer virtual.arena_destroy(&rows)
-	context.temp_allocator = jq.arena_allocator(&rows)
-	it := jq.iterate(v)
-	for _, row in jq.next_member(&it) {
-		put_value(run, ins, row) or_return
-		free_all(context.temp_allocator)
-	}
+	table_document(&run.output, doc)
 	return true
 }
 

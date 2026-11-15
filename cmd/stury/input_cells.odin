@@ -152,14 +152,14 @@ file_notes :: proc(ins: ^Inputs, notes: []string, foot: bool) {
 	if len(notes) == 0 {
 		return
 	}
-	into: ^[dynamic]string
-	if ins.slurp {
-		into = &ins.foot_notes if foot else &ins.head_notes
-	} else if t := ins.run.output.table; t != nil {
-		into = &t.foot if foot else &t.lead
-	} else {
+	if t := ins.run.output.table; t != nil && !ins.slurp {
+		table_notes(&ins.run.output, notes, foot)
 		return
 	}
+	if !ins.slurp {
+		return
+	}
+	into := &ins.foot_notes if foot else &ins.head_notes
 	heap := runtime.heap_allocator()
 	into.allocator = heap
 	for n in notes {

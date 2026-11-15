@@ -57,7 +57,7 @@ FORMAT_WORD = re.compile(r"(?<![a-z])(header|table|cell|delimiter)s?(?![a-z])")
 # The words a neutral package may use, since its users look for them: `records.cell` and `records.write_cells`, and the
 # document's `Table`, whose rows share a header.
 TABLE_WORDS = {"table", "header"}
-ALLOWED_WORDS = {"core/records": {"cell"} | TABLE_WORDS, "core": TABLE_WORDS, "core/build": TABLE_WORDS, "core/compose": TABLE_WORDS, "core/typed": TABLE_WORDS}
+ALLOWED_WORDS = {"core/records": {"cell"} | TABLE_WORDS, "core": TABLE_WORDS, "core/build": TABLE_WORDS, "core/compose": TABLE_WORDS, "core/typed": TABLE_WORDS, "core/schema": TABLE_WORDS}
 
 DECL = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(::|:=|:)")
 

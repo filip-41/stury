@@ -4,6 +4,9 @@
 
 ### Command line
 
+- `fmt --from csv --comment C --to jsonc` keeps a comment line as a line comment above its row, as `--to yaml` does,
+  and the table's last comments after the last row. JSON5 output keeps them too.
+
 - TOML output keeps a comment inside a table or an array that is an element of an array, which was dropped: it stands on
   a line above the element, since TOML 1.0 has no multi-line inline table.
 
@@ -490,6 +493,19 @@ The hooks the formats share:
 
 ### Library API
 
+- A document of another format written as CSV or TSV is a table by the command line's rules: the header is the first
+  object's keys, and a later object with a key the header lacks is `.Unknown_Field`, unless the new
+  `Write_Options.grow_header` holds the rows and writes them under a header of every key. An object root writes one row
+  and a scalar one cell, where both were `.Unsupported`. A comment keeps its source's space after the comment byte,
+  and the list's comment is written above an empty list too.
+- `records.Writer` holds that table across its calls: `write_object` and `write_row` write a row, `write_notes` and
+  `hold_notes` comment lines, `table_end` ends the table, `write_rows` writes a value as rows, and
+  `write_document` writes a document as the table's rows, a buffer writer handing each row's text to `taken`. A refusal's path is the row, then the key
+  or the cell, and its `found` the kind of a cell that is an array or an object.
+- `schema.convert`, `schema.sample` and `schema.compare` write CSV and TSV through `records.Writer`, sample's and
+  compare's drawn rows under `grow_header`. A markup document converted to a table is one row, an element with children
+  in it `.Unsupported` at the row and the name, where it was `.Unwritable` at the name, and a table with no key is
+  refused with no path, where the path was the first row.
 - `rules.date_of` and `rules.date_time_of` are contextless.
 - `core.prefixed_decimal` writes the decimal digits of a hex, octal or binary integer of any size.
 - The XML token writer writes a comment that ends in `-`, as a document's comment is written, and refuses one with a byte

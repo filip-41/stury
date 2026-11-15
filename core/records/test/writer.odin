@@ -154,6 +154,43 @@ refusal_after_a_flush_is_final :: proc(t: ^testing.T) {
 
 BOM :: "\xEF\xBB\xBF"
 
+// A table's header is its first row's keys across documents: a later key is refused unless the header grows, an object
+// root is one row and a scalar one cell, and a writer of a tree format writes no document.
+@(test)
+table_holds_across_documents :: proc(t: ^testing.T) {
+	put :: proc(wr: ^records.Writer, src: string) -> core.Typed_Error_Kind {
+		doc, err := core.build(transmute([]u8)src, json.as(.Json), allocator = context.temp_allocator)
+		return records.write_document(wr, &doc) if err == nil else .Unsupported
+	}
+	for grow in ([2]bool{false, true}) {
+		wr: records.Writer
+		records.writer_init(&wr, {}, dsv.as(.Csv), opts = {grow_header = grow}, allocator = context.temp_allocator)
+		testing.expect_value(t, put(&wr, `{"a":1}`), core.Typed_Error_Kind.None)
+		kind := put(&wr, `[{"a":2},{"z":3}]`)
+		if grow {
+			testing.expect_value(t, kind, core.Typed_Error_Kind.None)
+			testing.expect_value(t, records.table_end(&wr), core.Typed_Error_Kind.None)
+			text, _ := records.writer_end(&wr)
+			testing.expect_value(t, string(text), "a,z\n1,\n2,\n,3\n")
+		} else {
+			testing.expect_value(t, kind, core.Typed_Error_Kind.Unknown_Field)
+			testing.expect_value(t, wr.err.n_steps, 2)
+			testing.expect_value(t, wr.err.steps[0], core.Step(core.Index(2)))
+			records.writer_destroy(&wr)
+		}
+	}
+	wr: records.Writer
+	records.writer_init(&wr, {}, dsv.as(.Csv), allocator = context.temp_allocator)
+	testing.expect_value(t, put(&wr, `5`), core.Typed_Error_Kind.None)
+	testing.expect_value(t, put(&wr, `[6]`), core.Typed_Error_Kind.None)
+	testing.expect_value(t, put(&wr, `{"a":1}`), core.Typed_Error_Kind.Wrong_Kind)
+	records.writer_destroy(&wr)
+
+	records.writer_init(&wr, {}, json.as(.Json), .Lines, allocator = context.temp_allocator)
+	testing.expect_value(t, put(&wr, `[1]`), core.Typed_Error_Kind.Unsupported)
+	records.writer_destroy(&wr)
+}
+
 @(test)
 cells_keep_the_old_guards :: proc(t: ^testing.T) {
 	wr: records.Writer

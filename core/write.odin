@@ -15,6 +15,7 @@ Write_Options :: struct {
 	sort_keys:       bool, // a struct's fields and a document's keys in byte order. A map's keys are always sorted
 	respell_strings: bool, // a string read from a source is written in the writer's own escapes, as a computed one is
 	jq_numbers:      bool, // a built value's number that is not finite is written as jq writes it: NaN as null, an infinity as the largest double of its sign
+	grow_header:     bool, // a delimited text's table takes a key its header lacks, and writes its object rows at the end under a header of every key
 }
 
 // A field of `Write_Options` that a format's document writer may honour. A writer ignores one it does not.

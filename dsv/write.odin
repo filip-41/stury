@@ -60,7 +60,6 @@ Rows :: struct {
 	numbers: bool, // a number's text may hold the delimiter or start with the comment byte
 	words:   bool, // `true` and `false` hold neither the delimiter nor the comment byte
 	depth:   int,
-	dropped: int, // the cells a repeated key overwrote
 	kept:    int, // the comments a document's write wrote
 	width:   int, // a list row's cell count, set by the first row written, which the others keep unless `.Ragged`
 	cols:    []Named, // a struct row's columns, in the order written
@@ -808,6 +807,35 @@ TOKENS := write.Token_Spelling {
 		}
 	},
 	record = token_record,
+	names = token_header,
+	comment = token_comment,
+}
+
+// Writes the header of `names`, each a cell, unless the layout has none.
+@(private)
+token_header :: proc(t: ^write.Tokens, names: []string) -> core.Typed_Error_Kind {
+	w := (^Rows)(t.state)
+	if w.opts.no_header {
+		return .None
+	}
+	for name, k in names {
+		t.first = k == 0
+		token_cell(t, name) or_return
+	}
+	t.first = true
+	return end_line(w) if total(w) != t.mark else .Unwritable
+}
+
+// Writes one line of a comment: the comment byte, then `text`. A layout with no comment byte has no place for it.
+@(private)
+token_comment :: proc(t: ^write.Tokens, role: core.Role, text: string) -> core.Typed_Error_Kind {
+	w := (^Rows)(t.state)
+	if w.opts.comment == 0 {
+		return .Unsupported
+	}
+	write.put_byte(&w.out, w.opts.comment)
+	write.put_text(&w.out, text)
+	return end_line(w)
 }
 
 // Writes the delimiter if a cell came before in the record, then the cell `v`.
@@ -854,5 +882,6 @@ tokens_start :: proc(t: ^write.Tokens, as: core.As) -> core.Typed_Error_Kind {
 	}
 	rows_start(w, &t.spill, layout, spec, t.opts, t.base.stream, t.base.allocator, 0)
 	t.state, t.out = w, &w.out
+	t.notes = layout.comment != 0
 	return .None
 }

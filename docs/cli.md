@@ -895,7 +895,8 @@ A comment line is written as `C text`, so `#a` reads back as `# a`. A filter tha
 `{name}`) reads no comments and keeps the column route; `.` and `select(...)` into a table with a comment character, or
 into YAML, TOML or XML, are built whole, and a long input is then answered on one thread. `fmt` from such a table to
 YAML or TOML writes one document a record with its comment lines above it, the lines before the header above the first
-and those after the last record below the last.
+and those after the last record below the last, and to JSONC or JSON5 one value a record with its comment lines as `//`
+line comments the same way.
 
 The names follow the tools people know: `--delimiter` as in csvkit, xsv and qsv (DuckDB's `delim`), `--no-header`
 as xsv's `--no-headers` and csvkit's `--no-header-row`, `--comment` as qsv's comment character and DuckDB's

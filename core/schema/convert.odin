@@ -74,10 +74,13 @@ convert :: proc(cv: ^Converter, doc: ^core.Document, opts := core.Write_Options{
 	if m.refused {
 		return nil, .Write, refusal(m.kind, m.steps[:], allocator)
 	}
-	wrote: Refusal
+	wrote: core.Typed_Refusal
 	if markup {
 		text, wrote = written(v, cv.to, opts, allocator)
 	} else if text, _, err = core.write(doc, opts, cv.to, allocator = allocator); err != nil {
+		if refused, typed := err.(core.Typed_Error); typed && len(refused.steps) > 0 {
+			return nil, .Write, err
+		}
 		// The model finds where the refusal is.
 		_, wrote = written(v, cv.to, opts, context.temp_allocator)
 		wrote.kind = .No_Memory
@@ -131,16 +134,9 @@ Model :: struct {
 // The refusal `wrote` made, found at a path: of a flat format by its row and member, of any other by building the
 // model again with every scalar tried alone.
 @(private = "file")
-locate :: proc(m: ^Model, doc: ^core.Document, wrote: Refusal, allocator: runtime.Allocator) -> core.Error {
+locate :: proc(m: ^Model, doc: ^core.Document, wrote: core.Typed_Refusal, allocator: runtime.Allocator) -> core.Error {
 	if m.flat {
-		steps := make([dynamic]core.Step, context.temp_allocator)
-		if wrote.row >= 0 {
-			append(&steps, core.Index(wrote.row))
-		}
-		if wrote.key != "" {
-			append(&steps, core.Name(wrote.key))
-		}
-		return refusal(wrote.kind, steps[:], allocator)
+		return core.error_of(wrote, allocator)
 	}
 	m.probe, m.steps = true, make([dynamic]core.Step)
 	build(m, core.Node_Ref{doc, core.ROOT})

@@ -330,7 +330,13 @@ its header, and one with a row too wide for a node's child count, are built on t
 
 `records.Writer` writes a list one record at a time, with `records.write` for a typed value by its plan, `write_text` for a
 caller's text and `write_cells` for a row of cells, and `records.marshal` and `marshal_stream` write a whole list. A
-record is framed as the reader reads it under the same `framing`. The calls and their refusals are in
+record is framed as the reader reads it under the same `framing`. A writer of a delimited text also keeps a table across
+its calls: `write_object` writes an object's row under the header of the first object's keys, `write_row` an array's or
+a scalar's row with no header, `write_document` a document's list of rows, an object or a scalar (`write_rows` the same with a markup document's
+elements taken as built), and `table_end` the
+rows `grow_header` held and the comment lines after the last row. A key the header lacks is `.Unknown_Field`, an object
+after rows with no header and the reverse `.Wrong_Kind`, and a cell that is an array or an object `.Unsupported`, each
+with the row's index and the key or cell in its path. The calls and their refusals are in
 [writer.md](writer.md#records).
 
 ## The format's services

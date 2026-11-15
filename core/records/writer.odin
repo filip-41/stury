@@ -4,6 +4,7 @@ package records
 // write for its life, whose format writes a typed value through the plan's walk and cells through its `value` calls,
 // so a run of records sets up once.
 
+import "base:runtime"
 import "core:io"
 import core ".."
 import typed "../typed"
@@ -11,10 +12,18 @@ import cw "../write"
 
 // A writer of records. It is not copied after `writer_init`.
 Writer :: struct {
-	tokens:  cw.Tokens,
-	framing: core.Framing,
-	final:   bool, // `err` ends the writer: every later call returns its kind
-	err:     core.Typed_Refusal, // the last refusal, with its path
+	tokens:    cw.Tokens,
+	framing:   core.Framing,
+	final:     bool, // `err` ends the writer: every later call returns its kind
+	err:       core.Typed_Refusal, // the last refusal, with its path
+	as:        core.As,
+	allocator: runtime.Allocator, // the table's and the buffer's
+	table:     Table, // a delimited text's rows, see `write_object`
+	row:       [dynamic]cw.Scalar, // the cells of a row in the header's order
+	cells:     []cw.Scalar, // the cells of the row or header refused last, in the temp allocator
+	// A buffer writer hands `taken` the text of each row of a list as `write_rows` writes it, with `taker`.
+	taken:     proc(taker: rawptr, text: []u8),
+	taker:     rawptr,
 }
 
 // Starts a writer of records in format `as`, framed by `framing`, to `w`, or with no stream procedure into a buffer from
@@ -34,7 +43,9 @@ writer_init :: proc(wr: ^Writer, w: io.Stream, as: core.As, framing := core.Fram
 	}
 	// A record is written around the token grammar, which then takes no JSON value call.
 	wr.tokens.done = true
-	wr.framing, wr.final, wr.err = framing, kind != .None, {kind = kind}
+	wr.framing, wr.final, wr.err, wr.as, wr.allocator = framing, kind != .None, {kind = kind}, as, allocator
+	wr.table = {store = {backing_allocator = allocator}, header = make([dynamic]string, allocator), held = make([dynamic]Held_Row, allocator), foot = make([dynamic]string, allocator)}
+	wr.row = make([dynamic]cw.Scalar, allocator)
 	return kind
 }
 
@@ -44,11 +55,15 @@ writer_end :: proc(wr: ^Writer) -> ([]u8, core.Error) {
 	if wr.tokens.spell == nil {
 		return nil, core.error_of(wr.err)
 	}
+	if !wr.final {
+		table_end(wr)
+	}
 	if wr.final {
 		wr.tokens.err = wr.err.kind
 	}
 	text, err := cw.tokens_finish(&wr.tokens)
 	wr.tokens.spell = nil
+	table_free(wr)
 	if wr.final {
 		return nil, core.error_of(wr.err)
 	}
@@ -63,6 +78,7 @@ writer_destroy :: proc(wr: ^Writer) {
 		wr.tokens.err = .Unsupported
 		cw.tokens_finish(&wr.tokens)
 		wr.tokens.spell = nil
+		table_free(wr)
 	}
 }
 
@@ -118,6 +134,33 @@ write_text :: proc(wr: ^Writer, text: []u8) -> core.Typed_Error_Kind {
 	return end(wr, t.spell.line(t) if t.spell.line != nil else .None, false)
 }
 
+// Writes node `node` of `doc` as the rows of a delimited text's table, see `write_rows`. A document of a delimited text
+// with a header, or a markup document, is written whole by `core.write` in the writer's layout. A writer of another
+// format is `.Unsupported`. Returns the kind of the first refusal.
+write_document :: proc(wr: ^Writer, doc: ^core.Document, node := core.ROOT) -> core.Typed_Error_Kind {
+	t := &wr.tokens
+	if wr.final {
+		return wr.err.kind
+	}
+	if doc.partial || t.spell.line == nil || int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
+		wr.err = {kind = .Unsupported}
+		return .Unsupported
+	}
+	if !(doc.readers.flat && core.header_of(doc) != 0) && !core.is_markup(doc) {
+		return write_rows(wr, core.Node_Ref{doc, node})
+	}
+	text, _, err := core.write(doc, t.opts, wr.as, node, wr.allocator)
+	defer delete(text, wr.allocator)
+	if err != nil {
+		failed, typed := err.(core.Typed_Error)
+		wr.err = {kind = failed.kind if typed else .No_Memory}
+		return wr.err.kind
+	}
+	begin(wr)
+	cw.put_text(t.out, string(text))
+	return end(wr, .None, false)
+}
+
 // Writes `cells` as one row of a delimited text, each as the typed write writes its kind, and a string that the
 // writer's handle would read back as another kind under `infer` quoted. A nil cell is empty and has no quotes. A row
 // that would be an empty line, which reads back as no record, is `.Unwritable`: no cell, one nil cell, and in a format
@@ -136,7 +179,13 @@ write_cells :: proc(wr: ^Writer, cells: []cw.Scalar) -> core.Typed_Error_Kind {
 		return .Unwritable
 	}
 	begin(wr)
-	// A flat format takes every scalar in any order, so each cell goes to the format's cell write with no token check.
+	return end(wr, put_cells(t, cells), false)
+}
+
+// Writes `cells` and the record's end. A flat format takes every scalar in any order, so each cell goes to the format's
+// cell write with no token check.
+@(private)
+put_cells :: proc(t: ^cw.Tokens, cells: []cw.Scalar) -> core.Typed_Error_Kind {
 	for c in cells {
 		if kind := t.spell.value(t, c); kind != .None {
 			t.err = kind
@@ -144,7 +193,7 @@ write_cells :: proc(wr: ^Writer, cells: []cw.Scalar) -> core.Typed_Error_Kind {
 		}
 		t.first = false
 	}
-	return end(wr, cw.end_record(t), false)
+	return cw.end_record(t)
 }
 
 // Writes `list` as records, each by `plan`, a plan of the element type, into new bytes from `allocator`. The first
