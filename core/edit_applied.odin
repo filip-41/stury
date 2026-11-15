@@ -807,6 +807,10 @@ applied :: proc(a: ^Applied, n: Node_Index) -> Value {
 		}
 		applied_put(&b, key, applied(a, members[i].v))
 	}
+	// An element the edits leave with no child element reads as its text, and with none as null.
+	if b.markup && n != ROOT && (len(b.o.keys) == 0 || len(b.o.keys) == 1 && b.o.keys[0] == MARKUP_TEXT) {
+		return b.o.vals[0] if len(b.o.keys) == 1 else nil
+	}
 	return b.o if object else b.arr
 }
 

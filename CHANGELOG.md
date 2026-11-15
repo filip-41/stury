@@ -22,6 +22,9 @@
   byte string and a CBOR tag 34 text as `!!binary`. A text the output does not spell as its type stays a string, and a
   YAML or CBOR tag it had counts as dropped. A tagged YAML scalar written from another format is plain where it fits.
   A filter's output keeps the meanings too: `--from toml --to cbor '.x = 1'` writes the datetimes as tags 0 and 1004.
+- `stury edit` of an XML or HTML text removes every child of an element, as `del(.r.a.b)` on `<a><b>1</b></a>`, and
+  leaves `<a></a>`, which reads as `null`, with the white space laid out between the children gone. It refused with
+  `it reads back as values other than the edits wrote`.
 - `stury edit --from cbor` sets a tag: `.a.@tag = 32` writes tag 32 before the item.
 - A comment has one place in every format: a comment above a container's first member is that member's (an XML or
   HTML comment before an element's first child is the child's, a YAML comment above a nested mapping's first key is

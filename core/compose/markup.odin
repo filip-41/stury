@@ -80,6 +80,7 @@ markup_commit :: proc(list: ^core.Edit_List, m: ^Markup, allocator: runtime.Allo
 			return nil, cx.err
 		}
 	}
+	emptied_layout(&cx, list)
 	append(&cx.splices, ..cut)
 	return apply_splices(doc.src, cx.splices[:], allocator)
 }
@@ -203,6 +204,76 @@ elements :: proc(cx: ^Cx, at: core.Node_Index, name: string, items: []string, se
 drop :: proc(cx: ^Cx, v: core.Node_Index) {
 	lead, _, hi := extent(cx, v)
 	add(cx, lead, hi, "")
+}
+
+// Takes the white space a reader drops between the children of each element whose members the edits all remove and
+// into which none inserts, which would read as its text once no child is left, so that the element reads as null, as
+// it does when no white space is laid out. The element's comments and instructions stay.
+@(private = "file")
+emptied_layout :: proc(cx: ^Cx, list: ^core.Edit_List) {
+	doc := cx.doc
+	removed := make([dynamic]core.Node_Index, cx.a)
+	for e in list.edits {
+		if e.op == .Remove {
+			append(&removed, e.node)
+		}
+	}
+	slice.sort(removed[:])
+	stack := make([dynamic]core.Node_Index, cx.a)
+	held := make(map[core.Node_Index]int, cx.a)
+	next := core.Node_Index(0)
+	for r in slice.unique(removed[:]) {
+		if parent, ok := parent_of(doc, r, &stack, &next); ok && parent != core.NO_NODE && parent != core.ROOT {
+			held[parent] += 1
+		}
+	}
+	parents: for parent, gone in held {
+		for e in list.edits {
+			if e.op == .Insert && e.node == parent {
+				continue parents
+			}
+		}
+		count := 0
+		it := core.pairs(doc, parent)
+		for _, _ in core.pair_next(&it) {
+			count += 1
+		}
+		if count != gone {
+			continue
+		}
+		e := cx.m.element(doc, parent)
+		at := e.open
+		it = core.pairs(doc, parent)
+		for _, v in core.pair_next(&it) {
+			lead, _, hi := extent(cx, v)
+			drop_layout(cx, at, lead)
+			at = hi
+		}
+		drop_layout(cx, at, e.close)
+	}
+}
+
+// Takes each run of white space in `lo` through `hi` of the source that stands outside a comment or an instruction.
+@(private = "file")
+drop_layout :: proc(cx: ^Cx, lo, hi: u64) {
+	src := cx.src[:hi]
+	for i := lo; i < hi; {
+		switch {
+		case markup_space(src[i]):
+			j := i
+			for j < hi && markup_space(src[j]) {
+				j += 1
+			}
+			add(cx, i, j, "")
+			i = j
+		case src[i] == '<':
+			end := "-->" if strings.has_prefix(string(src[i:]), "<!--") else "?>" if strings.has_prefix(string(src[i:]), "<?") else ">"
+			past := strings.index(string(src[i:]), end)
+			i = hi if past < 0 else i + u64(past + len(end))
+		case:
+			i += 1
+		}
+	}
 }
 
 @(private = "file")

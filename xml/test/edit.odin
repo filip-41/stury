@@ -174,6 +174,28 @@ remove_takes_the_white_space_before_an_element :: proc(t: ^testing.T) {
 	testing.expect_value(t, out, "<r><a/><b/></r>")
 }
 
+// An element whose children are all removed reads as null, so the white space laid out between them goes too.
+@(test)
+remove_of_every_child_leaves_an_empty_element :: proc(t: ^testing.T) {
+	out, err := edited("<r><a><b>1</b></a><c>2</c></r>", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+		return core.remove(l, member(d, member(d, root(d), "a"), "b"))
+	})
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, out, "<r><a></a><c>2</c></r>")
+	out, err = edited("<r>\n  <a>\n    <!-- k -->\n    <b>1</b>\n    <b>2</b>\n  </a>\n</r>", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+		a := member(d, root(d), "a")
+		core.remove(l, walktest.nth(d, a, "b", 0)) or_return
+		return core.remove(l, walktest.nth(d, a, "b", 1))
+	})
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, out, "<r>\n  <a><!-- k --></a>\n</r>")
+	out, err = edited("<r><a>t<b>1</b></a></r>", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+		return core.remove(l, member(d, member(d, root(d), "a"), "b"))
+	})
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, out, "<r><a>t</a></r>")
+}
+
 @(test)
 comment_facts_stand_where_xml_reads_them :: proc(t: ^testing.T) {
 	out, err := edited("<r><a>1</a><b>2</b></r>", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
