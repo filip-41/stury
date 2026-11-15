@@ -40,6 +40,13 @@ served_suite :: proc(path: string) -> []u8 {
 	return transmute([]u8)text
 }
 
+// A path of the walk with `/` between its names, as Windows writes `\`.
+@(private = "file")
+suite_path :: proc(path: string) -> string {
+	slashed, _ := strings.replace_all(path, "\\", "/", context.temp_allocator)
+	return slashed
+}
+
 @(private = "file", rodata)
 SUITE_DRAFTS := [?]struct {
 	dir:   string,
@@ -356,10 +363,11 @@ schema_suite_checks :: proc(t: ^testing.T) {
 			bytes := served_suite(info.fullpath)
 			doc, _ := core.build(bytes, json.as(.Json))
 			groups := core.children(&doc, core.ROOT)
+			path := suite_path(info.fullpath)
 			// The format suites run with `format` asserting, since a format is an annotation unless asked to assert.
-			in_formats := strings.contains(info.fullpath, "optional/format/")
+			in_formats := strings.contains(path, "optional/format/")
 			// Draft 7's content assertions and the later drafts' `dependencies` are optional behaviour the check leaves out.
-			optional_out := strings.has_suffix(info.fullpath, "optional/content.json") || strings.has_suffix(info.fullpath, "optional/dependencies-compatibility.json")
+			optional_out := strings.has_suffix(path, "optional/content.json") || strings.has_suffix(path, "optional/dependencies-compatibility.json")
 			for group in core.child_next(&groups) {
 				node, _ := core.member(&doc, group, "schema")
 				read_total += 1
@@ -1170,7 +1178,13 @@ schema_resolves_file_links :: proc(t: ^testing.T) {
 	testing.expect(t, os.make_directory(root) == nil)
 	testing.expect(t, os.write_entire_file(outside, `{"minLength": 2}`) == nil)
 	testing.expect(t, os.write_entire_file(inside, `{"minLength": 3}`) == nil)
-	testing.expect(t, os.symlink(inside, strings.concatenate({root, "/stays.json"}, context.temp_allocator)) == nil)
+	// A Windows account makes a link only with a privilege it may not hold.
+	if err := os.symlink(inside, strings.concatenate({root, "/stays.json"}, context.temp_allocator)); err != nil && ODIN_OS == .Windows {
+		log.infof("no link made: %v", err)
+		return
+	} else {
+		testing.expect(t, err == nil)
+	}
 	testing.expect(t, os.symlink(outside, strings.concatenate({root, "/leaves.json"}, context.temp_allocator)) == nil)
 
 	d, res, err := read_text(`{"$ref": "stays.json"}`, root = root)
@@ -1810,7 +1824,7 @@ schema_write_reads_back_to_the_suite_schemas :: proc(t: ^testing.T) {
 			bytes := served_suite(info.fullpath)
 			doc, _ := core.build(bytes, json.as(.Json))
 			groups := core.children(&doc, core.ROOT)
-			in_formats := strings.contains(info.fullpath, "optional/format/")
+			in_formats := strings.contains(suite_path(info.fullpath), "optional/format/")
 			for group in core.child_next(&groups) {
 				node, _ := core.member(&doc, group, "schema")
 				c, err := schema.compile(core.span(&doc, node), json.as(.Json), {format_assert = in_formats, draft = entry.draft, refs = REMOTES})

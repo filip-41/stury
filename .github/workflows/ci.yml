@@ -183,10 +183,12 @@ jobs:
           set -e
           python xml/test/conformance/fetch.py
           # json and dsv are left out: their tests read the POSIX-only walktest helper.
+          # A thread's stack is the 8 MiB a POSIX thread takes from its limit, not Windows' 1 MiB.
+          stack=-extra-linker-flags:-STACK:8388608
           for p in $(python tools/checks.py list TEST_PKGS | tr -d '\r' | grep -v -e '^json/' -e '^dsv/'); do
-            odin test $p -o:minimal -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:RECORDS_SLICE=1 -define:RECORDS_FAN_AFTER=1 -define:RECORDS_SPARSE=1000000000 -out:test.exe
+            odin test $p -o:minimal $stack -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:RECORDS_SLICE=1 -define:RECORDS_FAN_AFTER=1 -define:RECORDS_SPARSE=1000000000 -out:test.exe
           done
-          odin build cmd/stury -o:speed -define:STURY_VERSION='"ci"' -out:stury.exe
+          odin build cmd/stury -o:speed $stack -define:STURY_VERSION='"ci"' -out:stury.exe
       - name: Answers through files and pipes
         shell: bash
         run: |
