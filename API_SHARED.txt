@@ -265,8 +265,8 @@ Failures :: bit_set[core.Typed_Error_Kind; u64]
 NONE :: Node_Index(-1)
 Programs :: map[string]rawptr
 branches :: proc(d: ^Description, nodes: []Node_Index, choices: bool, limit: int, allocator := context.temp_allocator) -> (out: [][dynamic]Node_Index, complete: bool)
-date_of :: proc(s: string) -> (p: Date_Time_Parts, ok: bool)
-date_time_of :: proc(s: string) -> (p: Date_Time_Parts, ok: bool)
+date_of :: proc "contextless" (s: string) -> (p: Date_Time_Parts, ok: bool)
+date_time_of :: proc "contextless" (s: string) -> (p: Date_Time_Parts, ok: bool)
 decimal_i64 :: proc(d: spell.Decimal) -> (v: i64, ok: bool)
 description_destroy :: proc(d: ^Description)
 dynamic_keyword :: proc(n: ^Node) -> string

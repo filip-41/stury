@@ -68,8 +68,8 @@ INSTANCE_BYTES = 256 * 1024
 CAP_MB = 1024
 
 
-def run(argv, data=None, timeout=TIMEOUT):
-    p = run_capped(argv, data, timeout, cap_mb=CAP_MB)
+def run(argv, data=None, timeout=TIMEOUT, cap_mb=CAP_MB, **kw):
+    p = run_capped(argv, data, timeout, cap_mb=cap_mb, **kw)
     return p.returncode, p.stdout, p.stderr
 
 

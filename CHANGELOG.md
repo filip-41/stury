@@ -202,6 +202,9 @@
   for a CSV or TSV sample, prefers a table with rows, and spells a decimal plainly. `schema infer` of an empty input,
   and of one whose schema nests too deep, is exit 5. `schema sample` and `schema gen` refuse `--max-depth`, and
   `schema sample` `--comments` for a format with no comments.
+- A number `schema sample` makes as a multiple of `multipleOf` is spelled as the library writes a decimal: `1.2e31`
+  where it wrote `12e30`. A schema written from a JSON5 or TOML schema spells a number JSON does not as that decimal
+  too: `.5` as `0.5` and `+2.` as `2`, where it wrote `5e-1` and `2e0`.
 - `fmt` takes `-c` as `--indent 0`. A "has no use" refusal says what the command writes, and a filter given by
   `--filter` is not taken for a mistyped command. `--report basic` counts the records before a cut one as records.
 
@@ -482,9 +485,12 @@ The hooks the formats share:
 - `records.open`, `Stream_Options` and `json.records_open` take `entries`, a path of keys to the container whose
   members are the records under `.Entries`, and a stream under `.Entries` gives its records as it reads them.
 - A record reader does not skip a byte order mark at the start of a binary format's text.
+- A CBOR tag 0 text is judged by `rules.date_time_of`, so a leap second is read only at 23:59:60 in UTC, as RFC 3339
+  has it, where any minute's second 60 was read.
 
 ### Library API
 
+- `rules.date_of` and `rules.date_time_of` are contextless.
 - `core.prefixed_decimal` writes the decimal digits of a hex, octal or binary integer of any size.
 - The XML token writer writes a comment that ends in `-`, as a document's comment is written, and refuses one with a byte
   XML 1.0 cannot hold.

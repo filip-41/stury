@@ -83,6 +83,14 @@ well_formed_edges_are_read :: proc(t: ^testing.T) {
 	}
 }
 
+// Tag 0 takes an RFC 3339 date and time, whose leap second is the last second of 23:59 in UTC.
+@(test)
+datetime_leap_second_is_judged :: proc(t: ^testing.T) {
+	expect_read(t, "c0 74 323031362d31322d33315432333a35393a36305a")
+	expect_read(t, "c0 78 19 323031372d30312d30315430303a35393a36302b30313a3030")
+	expect_refused(t, {"c0 74 323031362d31322d33315431323a30303a36305a", .Bad_Tag_Content})
+}
+
 // Section 4.1: preferred serialization.
 @(test)
 preferred_serialization_is_judged :: proc(t: ^testing.T) {

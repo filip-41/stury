@@ -113,9 +113,7 @@ leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator, programs:
 		case .Number:         held += {.Integer, .Number}
 		case .String:         held += {.String}
 		}
-		b := strings.builder_make(allocator)
-		operand_key(&b, v, k, allocator)
-		append(&keys, strings.to_string(b))
+		append(&keys, operand_key(v, k, allocator))
 	}
 	l.enum_keys, l.plain = keys[:], l.kinds & held
 	enum_sort(l.enum_keys)
@@ -129,15 +127,10 @@ operand_in :: proc(c: core.Value, operands: []core.Value, allocator: runtime.All
 	if k == .Object || k == .Array {
 		return false
 	}
-	want := strings.builder_make(allocator)
-	operand_key(&want, c, k, allocator)
+	want := operand_key(c, k, allocator)
 	for v in operands {
-		if vk := core.value_kind(v); vk == k {
-			b := strings.builder_make(allocator)
-			operand_key(&b, v, vk, allocator)
-			if strings.to_string(b) == strings.to_string(want) {
-				return true
-			}
+		if core.value_kind(v) == k && operand_key(v, k, allocator) == want {
+			return true
 		}
 	}
 	return false
@@ -296,20 +289,9 @@ operand_text :: proc(l: ^Leaf, kind: core.Typed_Error_Kind, members: bool, alloc
 // Narrows a bound in `have` to `text` where that is tighter, as two lower bounds or two upper bounds combine.
 @(private)
 tighten :: proc(have: ^string, flag: ^bool, text: string, strict, lower: bool) {
-	if text == "" {
-		return
+	if text != "" && (have^ == "" || tighter(text, have^, strict, flag^, lower) > 0) {
+		have^, flag^ = text, strict
 	}
-	if have^ != "" {
-		order := spell.decimal_compare(spell.decimal_of(text), spell.decimal_of(have^))
-		if order == 0 {
-			flag^ = flag^ || strict
-			return
-		}
-		if (order > 0) != lower {
-			return
-		}
-	}
-	have^, flag^ = text, strict
 }
 
 // How the bound `x` compares to `y` as a limit: above zero when `x` takes fewer values, below zero when more. Both are
@@ -487,7 +469,7 @@ key_order :: proc(a, b: string) -> slice.Ordering {
 }
 
 @(private)
-operand_key :: proc(b: ^strings.Builder, v: core.Value, k: core.Kind, allocator := context.allocator) {
+operand_key :: proc(v: core.Value, k: core.Kind, allocator := context.allocator) -> string {
 	text: string
 	#partial switch k {
 	case .String:
@@ -505,5 +487,7 @@ operand_key :: proc(b: ^strings.Builder, v: core.Value, k: core.Kind, allocator 
 			text = string(buf[:spell.f64_text(&buf[0], f)])
 		}
 	}
-	enum_key(b, k, text)
+	b := strings.builder_make(allocator)
+	enum_key(&b, k, text)
+	return strings.to_string(b)
 }

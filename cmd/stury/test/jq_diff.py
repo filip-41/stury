@@ -19,12 +19,11 @@ import random
 import re
 import resource
 import signal
-import subprocess
 import sys
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
 
-from harness import as_jq, run_capped
+from harness import as_jq, outcome
 
 TIMEOUT = 5
 
@@ -330,15 +329,10 @@ def limits():
 
 
 def run(binary, opts, prog, stdin):
-    try:
-        p = run_capped([binary, *opts, prog], stdin.encode(), TIMEOUT, preexec_fn=limits)
-        # RLIMIT_CPU and the wall clock are the same limit; which one stops a runaway first is a race. On a
-        # host with less memory than two capped runs, the kernel's OOM killer (a SIGKILL) can win it too.
-        if p.returncode in (-signal.SIGXCPU, -signal.SIGKILL):
-            return "timeout", b"", b""
-        return p.returncode, p.stdout, p.stderr
-    except subprocess.TimeoutExpired:
-        return "timeout", b"", b""
+    got = outcome([binary, *opts, prog], stdin.encode(), TIMEOUT, preexec_fn=limits)
+    # RLIMIT_CPU and the wall clock are the same limit, and which one stops a runaway first is a race. On a
+    # host with less memory than two capped runs, the kernel's OOM killer (a SIGKILL) can win it too.
+    return ("timeout", b"", b"") if got[0] in (-signal.SIGXCPU, -signal.SIGKILL) else got
 
 
 def refuse(name):

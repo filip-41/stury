@@ -699,6 +699,7 @@ command_writes :: proc(cli: ^Cli) -> string {
 	case cli.command == .Check:                             return "it runs no filter and prints nothing"
 	case cli.command == .Fmt:                               return "it runs no filter and writes each input in its own format or the one --to names"
 	case cli.command == .Gen:                               return "it runs no filter and writes Odin types"
+	case cli.command == .Diff:                              return "it runs no filter and prints the changes between its inputs"
 	case cli.command >= .Schema:                            return "it runs no filter and writes a schema or samples"
 	}
 	return "it writes each input back in its own bytes"

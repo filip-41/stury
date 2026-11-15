@@ -9,6 +9,7 @@ import "core:simd"
 import spell "../core/spell"
 import core "../core"
 import kernel "../core/kernel"
+import rules "../core/rules"
 
 // The rules an item is read and written by. `.Cbor` reads every well-formed item of RFC 8949. `.Preferred` refuses an
 // item not in preferred serialization (section 4.1): a head argument wider than its value needs, a float that a
@@ -1234,8 +1235,10 @@ tag_content_fault :: proc "contextless" (src: []u8, i: int, tag: u64) -> int {
 			return -1
 		}
 		arg, hl, ok := read_head(src, i, b & 31)
-		if ok && arg <= u64(len(src) - i - hl) && !datetime(src[i + hl:i + hl + int(arg)]) {
-			return i
+		if ok && arg <= u64(len(src) - i - hl) {
+			if _, is_time := rules.date_time_of(string(src[i + hl:i + hl + int(arg)])); !is_time {
+				return i
+			}
 		}
 	case 1:
 		if b >> 5 > 1 && b != 0xf9 && b != 0xfa && b != 0xfb {
@@ -1247,64 +1250,4 @@ tag_content_fault :: proc "contextless" (src: []u8, i: int, tag: u64) -> int {
 		}
 	}
 	return -1
-}
-
-// Whether `s` is an RFC 3339 date and time with a zone.
-@(private)
-datetime :: proc "contextless" (s: []u8) -> bool {
-	digits :: proc "contextless" (s: []u8, at, n: int) -> (v: int, ok: bool) {
-		if at + n > len(s) {
-			return 0, false
-		}
-		for c in s[at:at + n] {
-			if c - '0' > 9 {
-				return 0, false
-			}
-			v = v * 10 + int(c - '0')
-		}
-		return v, true
-	}
-	if len(s) < 20 || s[4] != '-' || s[7] != '-' || s[13] != ':' || s[16] != ':' {
-		return false
-	}
-	if s[10] != 'T' && s[10] != 't' {
-		return false
-	}
-	year, ok1 := digits(s, 0, 4)
-	month, ok2 := digits(s, 5, 2)
-	day, ok3 := digits(s, 8, 2)
-	hour, ok4 := digits(s, 11, 2)
-	minute, ok5 := digits(s, 14, 2)
-	second, ok6 := digits(s, 17, 2)
-	if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6) || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 60 {
-		return false
-	}
-	days := [12]int{31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
-	leap := year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
-	if day < 1 || day > days[month - 1] + (1 if leap && month == 2 else 0) {
-		return false
-	}
-	at := 19
-	if s[at] == '.' {
-		at += 1
-		from := at
-		for at < len(s) && s[at] - '0' <= 9 {
-			at += 1
-		}
-		if at == from {
-			return false
-		}
-	}
-	if at >= len(s) {
-		return false
-	}
-	if s[at] == 'Z' || s[at] == 'z' {
-		return at + 1 == len(s)
-	}
-	if s[at] != '+' && s[at] != '-' || len(s) != at + 6 || s[at + 3] != ':' {
-		return false
-	}
-	zh, okh := digits(s, at + 1, 2)
-	zm, okm := digits(s, at + 4, 2)
-	return okh && okm && zh <= 23 && zm <= 59
 }

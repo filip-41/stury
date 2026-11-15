@@ -6,7 +6,6 @@ package main
 // input that does not parse, 2 for a usage or file error. `edit --diff` previews the value changes of an edit.
 
 import "base:runtime"
-import "core:fmt"
 import "core:os"
 import "core:reflect"
 import "core:slice"
@@ -354,7 +353,7 @@ OP_MARKS := [diff.Op]u8{.Added = '+', .Removed = '-', .Changed = '~', .Fact = '~
 @(private = "file")
 write_value_changes :: proc(b: ^strings.Builder, as_json: bool, changes: []diff.Change, file: string) {
 	if file != "" && len(changes) > 0 && !as_json {
-		fmt.sbprintf(b, "--- %s\n", file)
+		message.write(b, "--- %s\n", file)
 	}
 	for c in changes {
 		was := c.op != .Added && c.op != .Removed && !slice.equal(c.path, c.old_path)
@@ -394,7 +393,7 @@ write_value_changes :: proc(b: ^strings.Builder, as_json: bool, changes: []diff.
 			put_value(b, c.old)
 		case .Changed, .Fact:
 			if c.op == .Fact {
-				fmt.sbprintf(b, " @%s", word(c.role))
+				message.write(b, " @%s", word(c.role))
 			}
 			strings.write_string(b, ": ")
 			put_value(b, c.old)
@@ -402,7 +401,7 @@ write_value_changes :: proc(b: ^strings.Builder, as_json: bool, changes: []diff.
 			put_value(b, c.new)
 		}
 		if c.kind_changed {
-			fmt.sbprintf(b, "  (%s -> %s)", jq.type_name(c.old), jq.type_name(c.new))
+			message.write(b, "  (%s -> %s)", jq.type_name(c.old), jq.type_name(c.new))
 		}
 		if was {
 			strings.write_string(b, "  (was ")

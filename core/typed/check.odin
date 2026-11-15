@@ -641,7 +641,7 @@ stack_scratch :: proc(stack: ^mem.Arena, room: []u8) -> (scratch: regex.Scratch)
 	mem.arena_init(stack, room)
 	spill := runtime.Allocator{spill_proc, stack}
 	scratch.stack.allocator, scratch.slots.allocator, scratch.counts.allocator = spill, spill, spill
-	scratch.seen.allocator, scratch.good.allocator, scratch.log.allocator = spill, spill, spill
+	scratch.seen.allocator, scratch.good.allocator, scratch.log.allocator, scratch.rows.allocator = spill, spill, spill, spill
 	return
 }
 

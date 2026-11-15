@@ -62,9 +62,6 @@ edit_reader_position :: proc(data: rawptr) -> (string, int) {
 
 // Refuses what an edit cannot honour. An edit writes each input back in its own bytes and format.
 refuse_edit :: proc(o: ^Opts) {
-	if o.in_place && o.check {
-		usage_error("--in-place rewrites each file; --check only reads it")
-	}
 	if o.diff && (o.check || o.raw_input || o.seq || reads_lines(o)) {
 		usage_error("--diff previews the changes of a whole document: it takes neither --check nor records")
 	}
@@ -113,13 +110,9 @@ edit_files :: proc(run: ^Run, ins: ^Inputs) {
 	context.temp_allocator = jq.arena_allocator(&temp)
 	exit := 0
 	for path in ins.files {
-		f, read := open_file(path)
-		if read {
-			ins.data, read = read_file(f)
-		}
 		code := EXIT_USAGE
-		if read {
-			ins.name = file_name(path)
+		if spent, read := file_bytes(path); read {
+			ins.data, ins.name = spent.data, file_name(path)
 			switch {
 			case run.opts.raw_input:
 				code = edit_lines(er, path)
@@ -130,7 +123,7 @@ edit_files :: proc(run: ^Run, ins: ^Inputs) {
 			case:
 				code = edit_records(er, path)
 			}
-			delete(ins.data, runtime.heap_allocator())
+			free_spent(spent)
 		}
 		exit = max(exit, code)
 		free_all(context.allocator)

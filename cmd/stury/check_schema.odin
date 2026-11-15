@@ -136,15 +136,12 @@ schema_read :: proc(s: Schema_Options, option := "--schema") -> ^Schema_Check {
 	if s.file == "" {
 		usage_error("%s needs --schema", s.flag)
 	}
-	f, opened := open_file(s.file, "check")
-	if !opened {
+	spent, read := file_bytes(s.file, "check")
+	if !read {
 		os.exit(EXIT_USAGE)
 	}
 	sc := new(Schema_Check, runtime.heap_allocator())
-	read: bool
-	if sc.text, read = read_file(f); !read {
-		os.exit(EXIT_USAGE)
-	}
+	sc.text = spent.data
 	if s.refs != "" && !os.is_dir(s.refs) {
 		usage_error("--schema-ref %s is not a directory", s.refs)
 	}

@@ -3,6 +3,7 @@ the peak a run held."""
 
 import argparse
 import ctypes
+import json
 import os
 import re
 import subprocess
@@ -182,6 +183,27 @@ def run_capped(argv, input, timeout, cap_mb=MEM_CAP_MB, **kw):
     if over.is_set():
         raise subprocess.TimeoutExpired(argv, timeout)
     return subprocess.CompletedProcess(argv, p.returncode, out, err)
+
+
+def outcome(argv, input, timeout, **kw):
+    """(exit status, stdout, stderr) of run_capped, or ("timeout", b"", b"") past its time or memory cap."""
+    try:
+        p = run_capped(argv, input, timeout, **kw)
+        return p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired:
+        return "timeout", b"", b""
+
+
+def values(text, decoder=json.JSONDecoder()):
+    """The JSON values of a text, one after another."""
+    out, at = [], 0
+    while True:
+        while at < len(text) and text[at] in " \t\r\n":
+            at += 1
+        if at >= len(text):
+            return out
+        value, at = decoder.raw_decode(text, at)
+        out.append(value)
 
 
 def passing(stury, schema, path, count, flags=(), timeout=60, cap_mb=1024):

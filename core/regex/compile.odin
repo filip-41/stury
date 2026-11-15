@@ -97,11 +97,10 @@ Program :: struct {
 	opt:      ^Search_Opt, // what Oniguruma's optimizer would have the search skip by, kept apart since a Regex is copied
 	visited:  ^Visited, // under `linear`, what the visited set needs of the program
 	dfa:      ^Dfa, // the automaton that answers a search that reads no bounds, or nil (dfa.odin)
-	prefix:   string, // every match starts with these bytes
-	first:     [4]u64, // with has_first, the bytes a match can start with
+	// What every match starts with, at distance 0: the literal it begins with, or one of the bytes it can begin with.
+	head:      ^Search_Opt,
 	longest:   bool, // Flags.longest
 	not_empty: bool, // Flags.not_empty
-	has_first: bool,
 	calls_or_limits: bool, // holds a subexpression call or an absent operator, whose tracking the match then runs
 	narrowed:  bool, // `opt` bounds the starts the search tries
 	ecma:      bool, // compiled under `Flags.ecma`, whose search refuses a text too long for the visited set
@@ -253,35 +252,39 @@ program :: proc(pattern: string, flags: Flags, allocator: mem.Allocator) -> (re:
 		names    = names,
 		slots    = c.slots,
 		opt      = new_clone(search_opt(root)),
+		head     = new(Search_Opt),
 	}
-	prefix := make([dynamic]byte)
-	literal_prefix(root, &prefix)
-	re.prefix = string(prefix[:])
-	// A callout that ends the search or counts over its starts sees which starts are tried, so the skip is then
-	// held to the one Oniguruma's optimizer makes: none by a class or fold that may take a non-ASCII rune.
+	// A callout that ends the search or counts over its starts sees which starts are tried, so the skip is then the one
+	// Oniguruma's optimizer makes alone.
 	like_onig := false
 	for co in pat.callouts {
 		like_onig ||= co.kind == .Error || co.kind == .Total_Count
 	}
-	empty, known := first_bytes(root, &re.first, like_onig)
-	re.has_first = known && !empty
-	// A string or map the optimizer finds at the start of every match is a skip the prefix and first bytes make
-	// without windows, and they leave no start too near the end for it.
+	h := re.head
+	if !like_onig {
+		prefix := make([dynamic]byte)
+		if literal_prefix(root, &prefix); len(prefix) > 0 {
+			h.kind, h.exact = .Exact, string(prefix[:])
+		} else if empty, known := first_bytes(root, &h.set); known && !empty {
+			h.kind = .Map
+		}
+	}
+	// A string or map the optimizer finds at the start of every match narrows the head, which skips without windows and
+	// leaves no start too near the end for it.
 	o := re.opt
-	if o.dist_min == 0 && o.dist_max == 0 {
+	if o.dist_max == 0 {
 		#partial switch o.kind {
 		case .Exact:
-			if re.prefix == "" {
-				re.prefix = o.exact
-			}
-			if strings.has_prefix(re.prefix, o.exact) {
-				o.kind, o.threshold = .None, 0
+			if h.kind != .Exact || len(o.exact) > len(h.exact) {
+				h.kind, h.exact = .Exact, o.exact
 			}
 		case .Map:
-			re.first = re.first & o.set if re.has_first else o.set
-			re.has_first = true
-			o.kind, o.threshold = .None, 0
+			if h.kind != .Exact {
+				h.set = h.set & o.set if h.kind == .Map else o.set
+				h.kind = .Map
+			}
 		}
+		o.kind, o.threshold = .None, 0
 	}
 	re.narrowed = o.kind != .None || o.anchored || o.end != .None || o.threshold > 0
 	for ins in re.insts {
@@ -314,26 +317,6 @@ program :: proc(pattern: string, flags: Flags, allocator: mem.Allocator) -> (re:
 	}
 	return re, ""
 }
-
-// Each instruction's first row of the visited set into `rows`, the total last: its block, times the counts
-// `radix` gives each counter loop around it. A total past MAX_ROWS is held at it.
-@(private)
-lay_out_rows :: proc(v: ^Visited, rows: []int, radix: []int) {
-	rows[0] = 0
-	for block, pc in v.block {
-		times := 1
-		if radix != nil {
-			for k := int(v.counter_of[pc]); k >= 0; k = v.counters[k].outer {
-				times = min(times * radix[k], MAX_ROWS)
-			}
-		}
-		rows[pc + 1] = min(rows[pc] + block * times, MAX_ROWS)
-	}
-}
-
-// More rows than a visited set within MAX_BYTES holds over one place.
-@(private)
-MAX_ROWS :: MAX_BYTES * 8 + 1
 
 // Whether the visited set pays and holds for a program. Under ECMA it does with a loop, a look-ahead, two choices, or one
 // choice in a search that tries more than one start. Under jq it does with a

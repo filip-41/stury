@@ -24,11 +24,9 @@ import re
 import sys
 import tempfile
 
-from harness import ROOT, fixtures_dir, passing, run_capped
-from types_law import fixture_schemas, suite_schemas
+from harness import ROOT, fixtures_dir, passing
+from types_law import fixture_schemas, run, suite_schemas
 
-TIMEOUT = 60
-CAP_MB = 1024
 # The Odin compile of one driver, which instantiates the model of every package it imports.
 COMPILE_CAP_MB = 1800
 COMPILE_TIMEOUT = 600
@@ -41,11 +39,6 @@ ROOT_TYPE = re.compile(r"^(\w+) :: ", re.M)
 I64 = {-(2**63), 2**63 - 1}
 # The two runs of each schema: gen's and check's flags.
 RUNS = {"a": [], "f": ["--format-assert"]}
-
-
-def run(argv, data=None, timeout=TIMEOUT, cap_mb=CAP_MB, **kw):
-    p = run_capped(argv, data, timeout, cap_mb=cap_mb, **kw)
-    return p.returncode, p.stdout, p.stderr
 
 
 def gen(stury, case, i, scratch):

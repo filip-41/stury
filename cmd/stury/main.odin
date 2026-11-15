@@ -58,22 +58,19 @@ main :: proc() {
 	set_colors(&run, cli)
 	run.route.on = run.opts.explain
 	o := &run.opts
+	if (cli.command == .Edit || cli.command == .Fmt) && o.in_place && o.check {
+		usage_error("--in-place rewrites each file; --check only reads it")
+	}
 	if cli.command == .Edit {
 		refuse_edit(o)
 	}
 	refuse_format_clashes(o, &cli)
 	refuse_unowned(&cli)
-	#partial switch cli.command {
-	case .Diff:
-		if flag := command_refused_option(o, &cli); flag != "" {
-			usage_error("%s has no use with diff: it runs no filter and prints the changes between its inputs", flag)
-		}
+	if flag := command_refused_option(o, &cli); flag != "" && cli.command != .Run {
+		usage_error("%s has no use with %s: %s", flag, command_name(&cli), command_writes(&cli))
+	}
+	if cli.command == .Diff {
 		diff_main(&run, &cli)
-	case .Run:
-	case:
-		if flag := command_refused_option(o, &cli); flag != "" {
-			usage_error("%s has no use with %s: %s", flag, command_name(&cli), command_writes(&cli))
-		}
 	}
 	if o.follow {
 		refuse_follow(o, &cli)

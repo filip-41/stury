@@ -1986,7 +1986,7 @@ schema_write_spells_json5_numbers_as_json :: proc(t: ^testing.T) {
 	cases := [?]struct {
 		text, written, keyword: string,
 	} {
-		{`{minimum: 0x10, maximum: .5, multipleOf: +2.}`, `"minimum":16,"maximum":5e-1,"multipleOf":2e0`, ""},
+		{`{minimum: 0x10, maximum: .5, multipleOf: +2.}`, `"minimum":16,"maximum":0.5,"multipleOf":2`, ""},
 		{`{minimum: Infinity}`, "", "minimum"},
 	}
 	for c in cases {
@@ -2311,4 +2311,37 @@ schema_keeps_annotations :: proc(t: ^testing.T) {
 	testing.expect(t, m.title == "T" && m.deprecated && len(m.examples) == 2 && m.default_of != nil)
 	_, _, berr := read_text(`{"title": 1}`)
 	testing.expect(t, berr != nil)
+}
+
+// A pattern's search under an ECMA counter loop keeps its scratch on the stack or the temp allocator, whether it judges
+// a member name or a member name under an applicator.
+@(test)
+schema_counted_pattern_scratch :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	P :: `^(?:ab|cd){2,3000}$`
+	cases := [?][2]string {
+		{`{"patternProperties": {"` + P + `": {}}, "additionalProperties": false}`, `{"abcd": 1}`},
+		{`{"anyOf": [{"patternProperties": {"` + P + `": {"type": "integer"}}}]}`, `{"abcd": 1}`},
+	}
+	for c in cases {
+		ch, err := checked_make(c[0])
+		testing.expect(t, err == nil)
+		defer checked_destroy(ch)
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		defer mem.tracking_allocator_destroy(&track)
+		{
+			context.allocator = mem.tracking_allocator(&track)
+			testing.expect(t, schema.valid(&ch.bound, transmute([]u8)c[1]), c[0])
+		}
+		testing.expectf(t, len(track.allocation_map) == 0, "%s: %d blocks left", c[0], len(track.allocation_map))
+	}
+}
+
+// Two equal bounds merge to the strict one, spelled as it is.
+@(test)
+schema_rules_merge_equal_bounds :: proc(t: ^testing.T) {
+	r, clash := rules.merged(&rules.Node{rules = {minimum = "1", maximum = "2.0", exclusive_maximum = true}}, {minimum = "1.0", exclusive_minimum = true, maximum = "2"})
+	testing.expect_value(t, clash, "")
+	testing.expect(t, r.minimum == "1.0" && r.exclusive_minimum && r.maximum == "2.0" && r.exclusive_maximum, "merged bounds")
 }

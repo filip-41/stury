@@ -9,16 +9,7 @@ import "core:strings"
 @(private)
 eval_bind :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
 	s := Bind_Sink{sink = {emit = bind_emit}, ip = ip, n = n, input = input, env = env, track = track, out = out}
-	if out == ip.printer && !track && !ip.scope.on {
-		return eval_scoped_outputs(ip, n.a, input, env, &s)
-	}
-	if out.emit == last_emit && !track && keeps_outputs(out) {
-		return eval_kept_outputs(ip, n.a, input, env, &s, (^Last_Sink)(out))
-	}
-	if !track && sources_outputs(out) {
-		return eval_sourced_outputs(ip, n.a, input, env, &s, (^Bind_Sink)(out))
-	}
-	return eval_commas(ip, n.a, input, env, false, &s)
+	return eval_into(ip, n.a, input, env, track, out, &s, false)
 }
 
 // The scope `a as $x | b` runs `b` in, `a` single and its last pattern binding at most one way: on the heap, as the

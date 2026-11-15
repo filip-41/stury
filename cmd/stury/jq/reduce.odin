@@ -122,11 +122,9 @@ scoped_from_here :: proc(x: ^Bind_Sink) -> bool {
 scoped_update :: #force_no_inline proc(x: ^Bind_Sink, e: ^Env, st: ^Path_State, update: proc(x: ^Bind_Sink, e: ^Env, st: ^Path_State) -> Signal) -> Signal {
 	sc, ip := x.scratch, x.ip
 	context.allocator = arena_allocator(&sc.scratch)
-	envs := ip.free_envs
-	ip.free_envs = sc.free_envs
+	envs := enter_envs(ip, sc.free_envs)
 	sig := update(x, e, st)
-	sc.free_envs = ip.free_envs
-	ip.free_envs = envs
+	leave_envs(ip, &sc.free_envs, envs)
 	sc.updates += 1
 	if sig == .Go && !sc.deferred && collects(sc) {
 		collect_scratch(x)
@@ -264,14 +262,12 @@ sourced_emit :: proc(s: ^Sink, it: Item) -> Signal {
 	}
 	ip := x.reduce.ip
 	context.allocator = arena_allocator(&sc.scratch)
-	envs := ip.free_envs
-	ip.free_envs = sc.free_envs
+	envs := enter_envs(ip, sc.free_envs)
 	sc.deferred = true
 	updates := sc.updates
 	sig := x.rest.emit(x.rest, it)
 	sc.deferred = false
-	sc.free_envs = ip.free_envs
-	ip.free_envs = envs
+	leave_envs(ip, &sc.free_envs, envs)
 	x.long = sc.updates - updates > SOURCE_DEFERRED_MAX
 	if sig == .Go && collects(sc) {
 		collect_scratch(x.reduce)

@@ -312,16 +312,23 @@ eval_neg :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env,
 @(private = "file")
 eval_pipe :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
 	s := Pipe_Sink{sink = {emit = pipe_emit}, ip = ip, n = n.b, env = env, track = track, out = out}
+	return eval_into(ip, n.a, input, env, track, out, &s, track)
+}
+
+// `a`'s outputs into `s`, which runs the rest and leads into `out`, in the memory scheme `out` allows: a scope per
+// output to the printer, the last output kept, or the outputs a reduce sources. `a` is evaluated under `track_a`.
+@(private)
+eval_into :: #force_inline proc(ip: ^Interp, a: ^Node, input: Item, env: ^Env, track: bool, out, s: ^Sink, track_a: bool) -> Signal {
 	if out == ip.printer && !track && !ip.scope.on {
-		return eval_scoped_outputs(ip, n.a, input, env, &s)
+		return eval_scoped_outputs(ip, a, input, env, s)
 	}
 	if out.emit == last_emit && !track && keeps_outputs(out) {
-		return eval_kept_outputs(ip, n.a, input, env, &s, (^Last_Sink)(out))
+		return eval_kept_outputs(ip, a, input, env, s, (^Last_Sink)(out))
 	}
 	if !track && sources_outputs(out) {
-		return eval_sourced_outputs(ip, n.a, input, env, &s, (^Bind_Sink)(out))
+		return eval_sourced_outputs(ip, a, input, env, s, (^Bind_Sink)(out))
 	}
-	return eval_commas(ip, n.a, input, env, track, &s)
+	return eval_commas(ip, a, input, env, track_a, s)
 }
 
 @(private = "file")

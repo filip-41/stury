@@ -53,18 +53,14 @@ markup_document :: proc(v: Value, depth := 0) -> ^core_pkg.Document {
 	if r, is_node := core_pkg.facts_node(v); is_node {
 		return r.doc if core_pkg.is_markup(r.doc) else nil
 	}
+	members: []Value
 	#partial switch x in plain(v) {
-	case ^Object:
-		for m in x.vals {
-			if doc := markup_document(m, depth + 1); doc != nil {
-				return doc
-			}
-		}
-	case ^Array:
-		for m in x.items {
-			if doc := markup_document(m, depth + 1); doc != nil {
-				return doc
-			}
+	case ^Object: members = x.vals[:]
+	case ^Array:  members = x.items[:]
+	}
+	for m in members {
+		if doc := markup_document(m, depth + 1); doc != nil {
+			return doc
 		}
 	}
 	return nil

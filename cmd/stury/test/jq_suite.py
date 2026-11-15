@@ -27,7 +27,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
-from harness import as_jq, run_capped
+from harness import as_jq, outcome, run_capped, values
 
 try:
     import pty
@@ -127,13 +127,10 @@ def run_cli(binary, case):
         for k in [k for k, v in case["env"].items() if v is None]:
             env.pop(k, None)
         real = enc(os.path.realpath(d))
-        try:
-            closing = ["/bin/sh", "-c", 'exec "$0" "$@" >&-'] if case["closed"] else []
-            p = run_capped(closing + [binary] + args, enc(case["stdin"]), TIMEOUT, cwd=d, env=env)
-            unreal = lambda b: b.replace(real, b"$DIR").replace(enc(d), b"$DIR")
-            return p.returncode, unreal(p.stdout), unreal(p.stderr)
-        except subprocess.TimeoutExpired:
-            return "timeout", b"", b""
+        closing = ["/bin/sh", "-c", 'exec "$0" "$@" >&-'] if case["closed"] else []
+        code, out, err = outcome(closing + [binary] + args, enc(case["stdin"]), TIMEOUT, cwd=d, env=env)
+        unreal = lambda b: b.replace(real, b"$DIR").replace(enc(d), b"$DIR")
+        return code, unreal(out), unreal(err)
 
 
 def record_cli(path):
@@ -637,11 +634,7 @@ DIFFERS = {
 
 
 def run(argv, stdin):
-    try:
-        p = run_capped(argv, stdin.encode("utf-8", "surrogateescape"), TIMEOUT)
-        return p.returncode, p.stdout, p.stderr
-    except subprocess.TimeoutExpired:
-        return "timeout", b"", b""
+    return outcome(argv, stdin.encode("utf-8", "surrogateescape"), TIMEOUT)
 
 
 CONSTS = {"NaN": Decimal("NaN"), "Infinity": Decimal("Infinity"), "-Infinity": Decimal("-Infinity")}
@@ -674,17 +667,7 @@ def same_output(a, b):
     if NUMBER.sub(b"0", a) != NUMBER.sub(b"0", b):
         return False
     try:
-        values = []
-        for raw in (a, b):
-            text, at, found = raw.decode("utf-8", "surrogateescape"), 0, []
-            while at < len(text):
-                if text[at] in " \t\r\n":
-                    at += 1
-                    continue
-                value, at = DECODER.raw_decode(text, at)
-                found.append(jq_value(value))
-            values.append(found)
-        return same(*values)
+        return same(*([jq_value(v) for v in values(raw.decode("utf-8", "surrogateescape"), DECODER)] for raw in (a, b)))
     except ValueError:
         return False
 

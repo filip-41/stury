@@ -19,7 +19,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-from harness import ROOT
+from harness import ROOT, values
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOML = os.path.join(ROOT, "toml", "test", "conformance", "toml-test")
@@ -62,18 +62,6 @@ def same(got, want):
     if isinstance(want, float) and isinstance(got, (int, float)):
         return got == want or math.isnan(got) and math.isnan(want)
     return got == want
-
-
-def values(text):
-    """The JSON values of a text, one after another."""
-    decoder, out, at = json.JSONDecoder(), [], 0
-    while True:
-        while at < len(text) and text[at] in " \t\r\n":
-            at += 1
-        if at >= len(text):
-            return out
-        value, at = decoder.raw_decode(text, at)
-        out.append(value)
 
 
 def toml_cases():

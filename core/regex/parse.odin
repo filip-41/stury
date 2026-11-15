@@ -740,34 +740,25 @@ parse_group :: proc(p: ^Parser) -> ^Node {
 // character that is no word character, and a backslash in it is a backslash. Under ECMA it is an identifier no other
 // group has, whose characters may be written as `\uXXXX` or `\u{...}`.
 @(private = "file")
-group_name :: proc(p: ^Parser, close: byte) -> (string, bool) {
-	name: string
-	ok: bool
+group_name :: proc(p: ^Parser, close: byte) -> (name: string, ok: bool) {
+	message := "invalid group name <"
 	if p.flags.ecma {
-		name, ok = ecma_name(p, close)
+		name = ecma_name(p, close) or_return
+		ok = ecma_identifier(name) && !slice.contains(p.names[:], name)
 	} else {
-		name, ok = read_name(p, close)
+		name = read_name(p, close) or_return
+		first, _ := utf8.decode_rune_in_string(name)
+		numbered := first >= '0' && first <= '9' || first == '-'
+		ok = !numbered && is_word(first)
+		if !numbered {
+			message = "invalid char in group name <"
+		}
 	}
 	if !ok {
+		fail(p, strings.concatenate({message, name, ">"}))
 		return "", false
 	}
-	if p.flags.ecma {
-		if !ecma_identifier(name) || slice.contains(p.names[:], name) {
-			fail(p, strings.concatenate({"invalid group name <", name, ">"}))
-			return "", false
-		}
-		return name, true
-	}
-	first, _ := utf8.decode_rune_in_string(name)
-	switch {
-	case first >= '0' && first <= '9' || first == '-':
-		fail(p, strings.concatenate({"invalid group name <", name, ">"}))
-		return "", false
-	case !is_word(first):
-		fail(p, strings.concatenate({"invalid char in group name <", name, ">"}))
-		return "", false
-	}
-	return name, true
+	return
 }
 
 // An ECMA group name up to `close`, with its `\u` escapes decoded.

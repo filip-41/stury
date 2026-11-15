@@ -8,9 +8,8 @@ import "core:crypto/hash"
 import "core:crypto/hmac"
 import "core:encoding/base64"
 import "core:encoding/hex"
+import "core:encoding/uuid"
 import hashing "core:hash"
-import "core:strings"
-import "core:time"
 
 must_be_string :: proc(ip: ^Interp, name: string, v: Value) -> (string, Signal) {
 	s, ok := string_of(v)
@@ -78,18 +77,6 @@ fn_text_encoding :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> 
 // uuid_v4 and uuid_v7 (RFC 9562): a new identifier per call, from the system's random source. A version 7 one starts
 // with the Unix time in milliseconds.
 fn_uuid :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	id: [16]byte
-	crypto.rand_bytes(id[:])
-	version: byte = 4
-	if name == "uuid_v7" {
-		version = 7
-		ms := u64(time.time_to_unix_nano(time.now()) / 1_000_000)
-		for i in 0 ..< 6 {
-			id[i] = byte(ms >> uint(40 - 8 * i))
-		}
-	}
-	id[6] = version << 4 | id[6] & 0x0F
-	id[8] = 0x80 | id[8] & 0x3F
-	text := string(hex.encode(id[:]))
-	return strings.join({text[0:8], text[8:12], text[12:16], text[16:20], text[20:32]}, "-"), .Go
+	context.random_generator = crypto.random_generator()
+	return uuid.to_string(uuid.generate_v7() if name == "uuid_v7" else uuid.generate_v4()), .Go
 }

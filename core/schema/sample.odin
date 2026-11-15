@@ -635,30 +635,9 @@ stepped :: proc(g: ^Gen, step: string, lo, hi: f64, low_open, high_open, whole: 
 		return
 	}
 	k := (i128(first) + i128(below(g, int(min(last - first, 1e6) + 1)))) * stride
-	return core.number_text(decimal_text(k * i128(mantissa), exp)), true
-}
-
-// `n` times ten to `exp`, spelled with a point and no exponent, as readers write a decimal. An exponent past twenty
-// places is kept, which spares a text of that many zeros.
-@(private = "file")
-decimal_text :: proc(n: i128, exp: int) -> string {
-	if exp == 0 || abs(exp) > 20 {
-		return fmt.aprintf("%d", n) if exp == 0 else fmt.aprintf("%de%d", n, exp)
-	}
-	digits := fmt.tprintf("%d", abs(n))
-	sign := "-" if n < 0 else ""
-	if exp > 0 {
-		return strings.concatenate({sign, digits, strings.repeat("0", exp, context.temp_allocator)})
-	}
-	places := -exp
-	if len(digits) <= places {
-		digits = strings.concatenate({strings.repeat("0", places - len(digits) + 1, context.temp_allocator), digits}, context.temp_allocator)
-	}
-	whole, fraction := digits[:len(digits) - places], strings.trim_right(digits[len(digits) - places:], "0")
-	if fraction == "" {
-		return strings.concatenate({sign, whole})
-	}
-	return strings.concatenate({sign, whole, ".", fraction})
+	b := strings.builder_make()
+	spell.write_decimal(&b, spell.decimal_of(fmt.tprintf("%de%d", k * i128(mantissa), exp)))
+	return core.number_text(strings.to_string(b)), true
 }
 
 @(private = "file")

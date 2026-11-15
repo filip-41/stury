@@ -338,6 +338,23 @@ sample_passes_its_check :: proc(t: ^testing.T) {
 	}
 }
 
+// A sampled multiple of a step is spelled as `spell.write_decimal` spells its value.
+@(test)
+sample_spells_a_multiple_canonically :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	for c in ([?][2]string {
+			{`{"type": "number", "multipleOf": 1e30, "minimum": 11.5e30, "maximum": 12.5e30}`, "1.2e31"},
+			{`{"type": "number", "multipleOf": 0.25, "minimum": 1, "maximum": 1}`, "1"},
+			{`{"type": "number", "multipleOf": 0.25, "minimum": 0.5, "maximum": 0.5}`, "0.5"},
+		}) {
+		doc, _ := core.build(transmute([]u8)c[0], json.as(.Json))
+		d, _, _ := read_text(string(core.span(&doc, core.ROOT)))
+		got, err := schema.sample(&d, json.as(.Json), {})
+		testing.expectf(t, err == nil && len(got) == 1 && string(got[0]) == c[1], "%s: %v %s", c[0], err, got)
+	}
+}
+
 // A description that no value passes gives no sample.
 @(test)
 sample_gives_no_sample :: proc(t: ^testing.T) {

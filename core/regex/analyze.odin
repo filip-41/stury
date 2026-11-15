@@ -472,10 +472,9 @@ last_group :: proc(n: ^Node) -> int {
 }
 
 // Adds to `set` every byte a match of `n` can start with, `ok` is false when that is not known, and `empty` is true
-// when `n` can match without a byte, so what follows it starts the match too. With `like_onig`, a class or (?i) rune
-// that may match a non-ASCII rune is not known.
+// when `n` can match without a byte, so what follows it starts the match too.
 @(private)
-first_bytes :: proc(n: ^Node, set: ^[4]u64, like_onig: bool) -> (empty: bool, ok: bool) {
+first_bytes :: proc(n: ^Node, set: ^[4]u64) -> (empty: bool, ok: bool) {
 	add_byte :: proc(set: ^[4]u64, b: byte) {
 		set[b >> 6] |= 1 << (u64(b) & 63)
 	}
@@ -496,9 +495,6 @@ first_bytes :: proc(n: ^Node, set: ^[4]u64, like_onig: bool) -> (empty: bool, ok
 		add_rune(set, n.r)
 		if n.fold {
 			for x := fold_next(n.r); x != n.r; x = fold_next(x) {
-				if like_onig && (x >= 0x80 || n.r >= 0x80) {
-					return false, false
-				}
 				add_rune(set, x)
 			}
 		}
@@ -517,23 +513,17 @@ first_bytes :: proc(n: ^Node, set: ^[4]u64, like_onig: bool) -> (empty: bool, ok
 		set[0] |= n.class.ascii[0] // filled when the class was emitted
 		set[1] |= n.class.ascii[1]
 		if !ascii_only(n.class) || folds_out_of_ascii(n.class) {
-			if like_onig {
-				return false, false
-			}
 			set[2], set[3] = max(u64), max(u64)
 		}
 		return false, true
 	case .Linebreak:
-		if like_onig {
-			return false, false
-		}
 		for b in ([]byte{'\n', '\v', '\f', '\r', 0xC2, 0xE2}) {
 			add_byte(set, b)
 		}
 		return false, true
 	case .Cat:
 		for k in n.kids {
-			empty, ok = first_bytes(k, set, like_onig)
+			empty, ok = first_bytes(k, set)
 			if !ok || !empty {
 				return
 			}
@@ -541,7 +531,7 @@ first_bytes :: proc(n: ^Node, set: ^[4]u64, like_onig: bool) -> (empty: bool, ok
 		return true, true
 	case .Alt:
 		for k in n.kids {
-			e, o := first_bytes(k, set, like_onig)
+			e, o := first_bytes(k, set)
 			if !o {
 				return false, false
 			}
@@ -549,16 +539,16 @@ first_bytes :: proc(n: ^Node, set: ^[4]u64, like_onig: bool) -> (empty: bool, ok
 		}
 		return empty, true
 	case .Group:
-		return first_bytes(n.kids[0], set, like_onig)
+		return first_bytes(n.kids[0], set)
 	case .Repeat:
-		empty, ok = first_bytes(n.kids[0], set, like_onig)
+		empty, ok = first_bytes(n.kids[0], set)
 		return empty || n.min == 0, ok
 	case .Look:
 		if n.look == .Atomic {
-			return first_bytes(n.kids[0], set, like_onig)
+			return first_bytes(n.kids[0], set)
 		}
 		if n.look == .Ahead {
-			if e, o := first_bytes(n.kids[0], set, like_onig); o && !e {
+			if e, o := first_bytes(n.kids[0], set); o && !e {
 				return false, true // the match starts where the look-ahead's does
 			}
 		}

@@ -3,7 +3,6 @@ package main
 // `stury diff` over schemas: two schemas compared, and a schema against the data of one file.
 
 import "base:runtime"
-import "core:fmt"
 import "core:os"
 import "core:strings"
 import core "../../core"
@@ -66,7 +65,7 @@ compare_report :: proc(cli: ^Cli, src: Source, old, new: ^rules.Description) -> 
 			json_line_close(&l, &out)
 		} else {
 			put_path(&out, ch.path)
-			fmt.sbprintf(&out, "  %s: %s -> %s  %s\n", ch.keyword, side_text(ch.keyword, ch.old), side_text(ch.keyword, ch.new), word(ch.effect))
+			message.write(&out, "  %s: %s -> %s  %s\n", ch.keyword, side_text(ch.keyword, ch.old), side_text(ch.keyword, ch.new), word(ch.effect))
 		}
 		flush_out(&out, false)
 	}
@@ -133,10 +132,10 @@ write_inclusion :: proc(b: ^strings.Builder, as_json: bool, name: string, in_: s
 		json_line_close(&l, b)
 		return
 	}
-	fmt.sbprintf(b, "%s: %s", name, word(in_.verdict))
+	message.write(b, "%s: %s", name, word(in_.verdict))
 	switch in_.verdict {
-	case .No:      fmt.sbprintf(b, ", %s passes the %s schema and fails the %s one", in_.witness, from, to)
-	case .Unknown: fmt.sbprintf(b, ", not proven at %s", in_.reason)
+	case .No:      message.write(b, ", %s passes the %s schema and fails the %s one", in_.witness, from, to)
+	case .Unknown: message.write(b, ", not proven at %s", in_.reason)
 	case .Yes:
 	}
 	strings.write_byte(b, '\n')

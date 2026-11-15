@@ -23,7 +23,7 @@ from jq_diff import main
 
 STARTS_SEEN = ("a callout that aborts the search, or a total count read back, sees which starts are tried, "
                "which is Oniguruma's optimizer's choice (a minimum length, the literal it searches by); stury "
-               "skips as it does by literals, ASCII classes, (?i) runes and look-ahead, not in all of its choices")
+               "then skips only as its copy of that optimizer does, which misses some of its choices")
 
 # (regex on "FLAGS PATTERN", why stury answers otherwise), checked before a case runs.
 # Not generated, and known to differ: a lazy `{n,}?` with n >= 2 over a body that can match empty and holds

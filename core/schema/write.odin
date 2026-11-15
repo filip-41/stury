@@ -620,7 +620,8 @@ refuse :: proc(w: ^Writer, keyword: string) {
 	}
 }
 
-// A number by its decimal value: the text as it stands when JSON spells it, else the digits and exponent of its value.
+// A number by its decimal value: the text as it stands when JSON spells it, else its value as `spell.write_decimal`
+// spells it.
 // Another format's `+1`, `.5`, `5.` and hex are written as JSON, and a number that is not finite is refused.
 @(private = "file")
 put_number :: proc(w: ^Writer, name, text: string) {
@@ -637,18 +638,12 @@ put_number :: proc(w: ^Writer, name, text: string) {
 			return
 		}
 		spelled = int_text(int(n))
-	} else if d := spell.decimal_of(text); strings.trim_left(text, "0123456789+-.eE") != "" {
+	} else if strings.trim_left(text, "0123456789+-.eE") != "" {
 		refuse(w, name)
 		return
-	} else if d.head == "" {
-		spelled = "0"
 	} else {
-		digits := strings.concatenate({d.head, d.tail}, context.temp_allocator)
 		b := strings.builder_make(context.temp_allocator)
-		strings.write_string(&b, "-" if d.neg else "")
-		strings.write_string(&b, digits)
-		strings.write_byte(&b, 'e')
-		spell.write_point(&b, d, -i128(len(digits)))
+		spell.write_decimal(&b, spell.decimal_of(text))
 		spelled = strings.to_string(b)
 	}
 	write.value_of(&w.t, core.number_view(spelled, 0))

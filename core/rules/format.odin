@@ -109,7 +109,7 @@ format_valid :: proc(f: String_Format, s: string) -> bool {
 
 // The length of the run of ASCII digits that starts `s`.
 @(private)
-digits :: proc(s: string) -> int {
+digits :: proc "contextless" (s: string) -> int {
 	n := 0
 	for n < len(s) && s[n] >= '0' && s[n] <= '9' {
 		n += 1
@@ -119,7 +119,7 @@ digits :: proc(s: string) -> int {
 
 // The ASCII decimal number `s` is, false for any other byte and for an empty `s`.
 @(private)
-decimal :: proc(s: string) -> (n: int, ok: bool) {
+decimal :: proc "contextless" (s: string) -> (n: int, ok: bool) {
 	for c in transmute([]u8)s {
 		if c < '0' || c > '9' || n > 1 << 40 {
 			return 0, false
@@ -140,7 +140,7 @@ all_hex :: proc(s: string) -> bool {
 }
 
 @(private)
-is_leap :: proc(y: int) -> bool {
+is_leap :: proc "contextless" (y: int) -> bool {
 	return y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
 }
 
@@ -150,7 +150,7 @@ Date_Time_Parts :: struct {
 }
 
 // RFC 3339 `full-date`.
-date_of :: proc(s: string) -> (p: Date_Time_Parts, ok: bool) {
+date_of :: proc "contextless" (s: string) -> (p: Date_Time_Parts, ok: bool) {
 	if len(s) != 10 || s[4] != '-' || s[7] != '-' {
 		return
 	}
@@ -167,7 +167,7 @@ date_of :: proc(s: string) -> (p: Date_Time_Parts, ok: bool) {
 // RFC 3339 `full-time`: `HH:MM:SS`, a fraction of one digit or more, and a `Z` or `+HH:MM` offset. A leap second is
 // the last second of a minute that is 23:59 in UTC.
 @(private)
-time_of :: proc(s: string) -> (p: Date_Time_Parts, ok: bool) {
+time_of :: proc "contextless" (s: string) -> (p: Date_Time_Parts, ok: bool) {
 	if len(s) < 9 || s[2] != ':' || s[5] != ':' {
 		return
 	}
@@ -207,7 +207,7 @@ time_of :: proc(s: string) -> (p: Date_Time_Parts, ok: bool) {
 }
 
 // RFC 3339 `date-time`: a date, `T` or `t`, and a time.
-date_time_of :: proc(s: string) -> (p: Date_Time_Parts, ok: bool) {
+date_time_of :: proc "contextless" (s: string) -> (p: Date_Time_Parts, ok: bool) {
 	if len(s) <= 11 || s[10] != 'T' && s[10] != 't' {
 		return
 	}

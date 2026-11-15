@@ -73,12 +73,9 @@ Dfa :: struct {
 	classes: []u8, // each symbol's class
 	final:   u8, // the class of a newline that ends the text
 	// The rows before `start_end` are the start rows, of the thread at the program's start alone, where a search may
-	// skip to the next place a match can start: the next `prefix`, or with `leads` the next byte in `lead`. None are
-	// when neither is known.
+	// skip to the next place a match can start, the next first byte of `head`. None are when it is not known.
 	start_end: u32,
-	prefix:    string,
-	leads:     bool,
-	lead:      [4]u64,
+	head:      Search_Opt,
 	anchored:  bool, // a start row is read only where a search starts, so a skip tests that byte and goes no further
 	// The automaton that finds where the first match in the backtracker's order ends, in rows of the same stride, with
 	// FIRST_ENDS on an entry when a match ends before the character it reads. Nil for a program it does not run.
@@ -282,26 +279,27 @@ dfa_start :: proc(d: ^Dfa, s: string, from, end: int) -> (start: int, judged: bo
 }
 
 // The next place from `i` where a match can start, `i` itself when nothing tells, or -1 for none. Only a program that
-// cannot match empty has a prefix or lead bytes.
+// cannot match empty has a head.
 @(private = "file")
 skip_to_lead :: #force_inline proc(d: ^Dfa, s: string, i: int) -> int {
+	h := &d.head
 	if d.anchored {
-		lead := d.prefix[0] == s[i] if d.prefix != "" else !d.leads || d.lead[s[i] >> 6] & (1 << (u64(s[i]) & 63)) != 0
+		lead := h.exact[0] == s[i] if h.kind == .Exact else h.kind == .None || h.set[s[i] >> 6] & (1 << (u64(s[i]) & 63)) != 0
 		return i if lead else -1
 	}
-	if d.prefix != "" {
-		k := strings.index_byte(s[i:], d.prefix[0])
+	#partial switch h.kind {
+	case .Exact:
+		k := strings.index_byte(s[i:], h.exact[0])
 		return i + k if k >= 0 else -1
-	}
-	if !d.leads {
-		return i
-	}
-	for j in i ..< len(s) {
-		if d.lead[s[j] >> 6] & (1 << (u64(s[j]) & 63)) != 0 {
-			return j
+	case .Map:
+		for j in i ..< len(s) {
+			if h.set[s[j] >> 6] & (1 << (u64(s[j]) & 63)) != 0 {
+				return j
+			}
 		}
+		return -1
 	}
-	return -1
+	return i
 }
 
 // The class of the character before byte `i` of `s`, which starts a valid one past the text's start.
@@ -509,9 +507,7 @@ build_dfa :: proc(re: ^Regex, spans: bool, allocator, scratch: mem.Allocator) ->
 		classes = slice.clone(classes),
 		final   = final,
 		start_end = start_end,
-		prefix  = re.prefix,
-		leads   = re.has_first,
-		lead    = re.first,
+		head    = re.head^,
 		anchored = b.restart_dies,
 	}
 	if has_first {
@@ -519,7 +515,7 @@ build_dfa :: proc(re: ^Regex, spans: bool, allocator, scratch: mem.Allocator) ->
 		d.last, d.last_starts = slice.clone(last.table[:]), last_starts
 	}
 	// With nothing to skip to, no row is a start row, so the search does not stop at each byte to look.
-	if d.prefix == "" && !d.leads {
+	if d.head.kind == .None {
 		d.start_end, d.first_end = 0, 0
 	}
 	reps := make([dynamic]i32)

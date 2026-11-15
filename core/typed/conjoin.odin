@@ -54,6 +54,13 @@ conjoin_description :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.A
 		if !ok {
 			continue
 		}
+		// Each arm conjoined with the parts reads the parts again, so the parts spread only when they judge no member.
+		if spread && reads_members(&x, node) {
+			if len(c.parts) < 2 {
+				continue
+			}
+			spread = false
+		}
 		arms: []rules.Node_Index
 		if spread {
 			arms = make([]rules.Node_Index, len(group), arena)
@@ -452,4 +459,26 @@ inline_patterns :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 		}
 		b.inline[i32(i)] = Inline_Pattern{p.expression, p.node, re}
 	}
+}
+
+// Whether node `i` judges a member's value, as an arm conjoined with it would judge again.
+@(private = "file")
+reads_members :: proc(d: ^rules.Description, i: rules.Node_Index) -> bool {
+	n := &d.nodes[i]
+	if n.array >= 0 {
+		return true
+	}
+	if n.object < 0 {
+		return false
+	}
+	o := &d.objects[n.object]
+	if o.additional != rules.NONE || o.keys != rules.NONE || len(o.patterns) > 0 || len(o.dependents) > 0 {
+		return true
+	}
+	for m in o.members {
+		if !m.only_required {
+			return true
+		}
+	}
+	return false
 }

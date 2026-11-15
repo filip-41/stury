@@ -206,14 +206,19 @@ number :: proc(inf: ^Inferred, p: ^Summary, v: core.Value) {
 	}
 	p.kinds += {.Integer if whole else .Number}
 	p.numbers += 1
-	if !inf.ranges {
-		return
+	if inf.ranges {
+		widen(p, v, v)
 	}
-	if !p.ranged || core.compare(v, p.low) < 0 {
-		p.low = kept(v)
+}
+
+// Widens `p`'s range of numbers to take `low` and `high`.
+@(private = "file")
+widen :: proc(p: ^Summary, low, high: core.Value) {
+	if !p.ranged || core.compare(low, p.low) < 0 {
+		p.low = kept(low)
 	}
-	if !p.ranged || core.compare(v, p.high) > 0 {
-		p.high = kept(v)
+	if !p.ranged || core.compare(high, p.high) > 0 {
+		p.high = kept(high)
 	}
 	p.ranged = true
 }
@@ -398,13 +403,7 @@ join :: proc(inf: ^Inferred, dst, src: ^Summary, offset: u64) {
 	dst.kinds += src.kinds
 	dst.numbers += src.numbers
 	if src.ranged {
-		if !dst.ranged || core.compare(src.low, dst.low) < 0 {
-			dst.low = kept(src.low)
-		}
-		if !dst.ranged || core.compare(src.high, dst.high) > 0 {
-			dst.high = kept(src.high)
-		}
-		dst.ranged = true
+		widen(dst, src.low, src.high)
 	}
 	if src.strings > 0 {
 		dst.min_chars, dst.max_chars = (src.min_chars if dst.strings == 0 else min(dst.min_chars, src.min_chars)), max(dst.max_chars, src.max_chars)

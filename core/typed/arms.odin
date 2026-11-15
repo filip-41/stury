@@ -3160,6 +3160,7 @@ matches :: proc(p: rawptr, name: string, scratch: ^regex.Scratch) -> (found, und
 temp_scratch :: proc(s: ^regex.Scratch) {
 	t := context.temp_allocator
 	s.stack.allocator, s.slots.allocator, s.counts.allocator, s.seen.allocator, s.good.allocator, s.log.allocator = t, t, t, t, t, t
+	s.rows.allocator = t
 }
 
 // Adds to `steps` and `words` the read's outer path and keyword steps of the outermost check `c`.

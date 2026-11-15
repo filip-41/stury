@@ -246,17 +246,28 @@ scope_emit :: proc(s: ^Sink, it: Item) -> Signal {
 	ip := x.ip
 	sc := &ip.scope
 	context.allocator = scope_allocator(sc)
-	envs := ip.free_envs
-	ip.free_envs = sc.free_envs
+	envs := enter_envs(ip, sc.free_envs)
 	sig := x.out.emit(x.out, it)
-	sc.free_envs = ip.free_envs
-	ip.free_envs = envs
+	leave_envs(ip, &sc.free_envs, envs)
 	if sig == .Go && sc.arena.total_used >= SCOPE_EMPTIED_FROM {
 		virtual.arena_free_all(&sc.arena)
 		sc.free_envs = nil
 		ip.err = nil // the last caught error's, emptied with the arena
 	}
 	return sig
+}
+
+// Gives `ip` the scopes `envs`, given back in an arena an evaluation runs in, and returns those it held.
+@(private)
+enter_envs :: #force_inline proc(ip: ^Interp, envs: ^Env) -> (outer: ^Env) {
+	outer, ip.free_envs = ip.free_envs, envs
+	return
+}
+
+// Keeps in `envs` the scopes given back in the arena since `enter_envs`, and gives `ip` back `outer`.
+@(private)
+leave_envs :: #force_inline proc(ip: ^Interp, envs: ^^Env, outer: ^Env) {
+	envs^, ip.free_envs = ip.free_envs, outer
 }
 
 // The allocator of the arena an output given to `out` may be made in, as `out` holds nothing of it once it has taken
@@ -362,11 +373,9 @@ region_collect_emit :: proc(s: ^Sink, it: Item) -> Signal {
 	}
 	r := x.region
 	context.allocator = arena_allocator(&r.arena)
-	envs := ip.free_envs
-	ip.free_envs = r.free_envs
+	envs := enter_envs(ip, r.free_envs)
 	sig := eval(ip, x.b, it, x.env, false, &x.items)
-	r.free_envs = ip.free_envs
-	ip.free_envs = envs
+	leave_envs(ip, &r.free_envs, envs)
 	if sig == .Go && r.arena.total_used >= SCOPE_EMPTIED_FROM {
 		empty_region(x)
 	}
@@ -483,11 +492,9 @@ kept_emit :: proc(s: ^Sink, it: Item) -> Signal {
 	}
 	r := x.region
 	context.allocator = arena_allocator(&r.arena)
-	envs := ip.free_envs
-	ip.free_envs = r.free_envs
+	envs := enter_envs(ip, r.free_envs)
 	sig := x.rest.emit(x.rest, it)
-	r.free_envs = ip.free_envs
-	ip.free_envs = envs
+	leave_envs(ip, &r.free_envs, envs)
 	if sig == .Go && r.arena.total_used >= SCOPE_EMPTIED_FROM {
 		move_kept(x)
 	}
@@ -629,18 +636,17 @@ recycled_inputs :: proc(ip: ^Interp, input: Item, out: ^Sink) -> (sig: Signal, o
 	}
 	r.on = true
 	outside := context.allocator
-	envs := ip.free_envs
 	cur := 0
 	for {
 		context.allocator = arena_allocator(&r.arenas[cur])
-		ip.free_envs = r.free_envs[cur]
+		envs := enter_envs(ip, r.free_envs[cur])
 		found := false
 		if last != nil {
 			found, last.found = last.found, false
 		}
 		v, msg, status := ip.inputs.next(ip.inputs.data)
 		sig = input_signal(ip, v, msg, status, input, false, out)
-		r.free_envs[cur] = ip.free_envs
+		leave_envs(ip, &r.free_envs[cur], envs)
 		took := last != nil && last.found
 		if last != nil {
 			last.found ||= found
@@ -655,7 +661,6 @@ recycled_inputs :: proc(ip: ^Interp, input: Item, out: ^Sink) -> (sig: Signal, o
 			empty_recycled(ip, cur)
 		}
 	}
-	ip.free_envs = envs
 	context.allocator = outside
 	from := [3]^virtual.Arena{&r.arenas[0], &r.arenas[1], nil}
 	if last != nil && last.found {
@@ -691,18 +696,14 @@ scratch_inputs :: proc(ip: ^Interp, input: Item, out: ^Sink, x: ^Bind_Sink) -> S
 		sc := x.scratch
 		on := sc != nil && sc.on
 		context.allocator = arena_allocator(&sc.scratch) if on else outside
-		envs := ip.free_envs
-		if on {
-			ip.free_envs = sc.free_envs
-		}
+		envs := enter_envs(ip, sc.free_envs if on else ip.free_envs)
 		if sc != nil {
 			sc.deferred = true
 		}
 		v, msg, status := ip.inputs.next(ip.inputs.data)
 		sig := input_signal(ip, v, msg, status, input, false, out)
 		if on {
-			sc.free_envs = ip.free_envs
-			ip.free_envs = envs
+			leave_envs(ip, &sc.free_envs, envs)
 		}
 		if sc != nil {
 			sc.deferred = false
