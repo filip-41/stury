@@ -3,9 +3,11 @@ the peak a run held."""
 
 import argparse
 import ctypes
+import functools
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -141,6 +143,12 @@ _live = set()
 _live_lock = threading.Lock()
 
 
+@functools.cache
+def program(name):
+    """The path a command name runs."""
+    return shutil.which(name) or name
+
+
 def start_when_budget_allows(argv, **kw):
     """Popen of a child, started once the live children's resident sum is under RSS_BUDGET_MB (or none is live).
     The lock covers the sum and the set, not the spawn: under it, the workers started their children one at a
@@ -149,16 +157,35 @@ def start_when_budget_allows(argv, **kw):
         with _live_lock:
             allowed = not _live or sum(resident_mb(q) for q in _live) <= RSS_BUDGET_MB
         if allowed:
-            p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+            # A program's path and close_fds=False let subprocess posix_spawn the child, where otherwise it forks this
+            # process, one fork at a time. Python opens every descriptor non-inheritable, so the child gets its pipes alone.
+            p = subprocess.Popen(argv, executable=program(argv[0]), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, close_fds=False, **kw)
             with _live_lock:
                 _live.add(p.pid)
             return p
         time.sleep(0.05)
 
 
+# The bytes an empty pipe takes without blocking (POSIX's PIPE_BUF, which Windows' pipes exceed).
+PIPE_TAKES = 512
+
+
+def feed(stdin, input):
+    """Writes `input` and closes `stdin`. A child that stops reading closes the pipe, and close() closes it even when
+    its flush fails."""
+    for step in (lambda: input and stdin.write(input), stdin.close):
+        try:
+            step()
+        except BrokenPipeError:
+            pass
+
+
 def run_capped(argv, input, timeout, cap_mb=MEM_CAP_MB, **kw):
     """subprocess.run with capture, killing the child past `timeout` or `cap_mb` resident; either raises
-    subprocess.TimeoutExpired. One communicate() call: a retried one stops feeding stdin."""
+    subprocess.TimeoutExpired. One communicate() call: a retried one stops feeding stdin. communicate() writes
+    PIPE_TAKES bytes per turn of a loop that holds the interpreter, which the suites' workers then wait on in turn,
+    so a longer input is written whole on a thread of its own."""
     p = start_when_budget_allows(argv, **kw)
     done, over = threading.Event(), threading.Event()
 
@@ -170,8 +197,13 @@ def run_capped(argv, input, timeout, cap_mb=MEM_CAP_MB, **kw):
                 return
 
     threading.Thread(target=watch, daemon=True).start()
+    stdin, p.stdin = p.stdin, None
+    if input and len(input) > PIPE_TAKES:
+        threading.Thread(target=feed, args=(stdin, input), daemon=True).start()
+    else:
+        feed(stdin, input)
     try:
-        out, err = p.communicate(input, timeout=timeout)
+        out, err = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         p.kill()
         p.communicate()

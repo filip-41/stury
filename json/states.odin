@@ -1,6 +1,7 @@
 package json
 
 import "base:intrinsics"
+import kernel "../core/kernel"
 import core "../core"
 import build "../core/build"
 
@@ -446,7 +447,7 @@ st_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		// The root's inline and foot comments belong to its walk and are read only where a hook reads them. `validate`
 		// passes over them while it checks what follows the document.
 		when .Comments in FEATURES[S] && H != core.No_Hooks {
-			if x := skip_ws(p, end); x < end && gap_lead(x, S) {
+			if x := kernel.skip_ws(p, end); x < end && gap_lead(x, S) {
 				w.resume, w.crossed = x, false
 				return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
@@ -501,7 +502,7 @@ st_after_ws :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, 
 	}
 	if q[0] == ',' {
 		when .Comments in FEATURES[S] {
-			if r := skip_ws(q[1:], end); r < end && gap_lead(r, S) {
+			if r := kernel.skip_ws(q[1:], end); r < end && gap_lead(r, S) {
 				w.resume, w.crossed = r, true
 				return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
@@ -793,7 +794,7 @@ st_after_number :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 	ind := ind
 	if d < 2 {
 		when .Comments in FEATURES[S] && H != core.No_Hooks {
-			if x := skip_ws(p, end); x < end && gap_lead(x, S) {
+			if x := kernel.skip_ws(p, end); x < end && gap_lead(x, S) {
 				w.resume, w.crossed = x, false
 				return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}

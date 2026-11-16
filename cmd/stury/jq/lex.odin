@@ -474,7 +474,7 @@ decode_string :: proc(out: ^strings.Builder, in_: string, stury_only_at: ^int = 
 			if !low_ok || !spell.low_surrogate(low) {
 				return "Invalid \\uXXXX\\uXXXX surrogate pair escape"
 			}
-			cp = 0x10000 + (cp - 0xD800) * 0x400 + (low - 0xDC00)
+			cp = u32(spell.surrogate_pair(cp, low))
 			next += 6
 		}
 		strings.write_rune(out, rune(cp))

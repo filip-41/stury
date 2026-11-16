@@ -6,9 +6,9 @@ package dsv
 import "base:intrinsics"
 import "base:runtime"
 import spell "../core/spell"
+import kernel "../core/kernel"
 import core "../core"
 import compose "../core/compose"
-import kernel "../core/kernel"
 import build "../core/build"
 import typed "../core/typed"
 

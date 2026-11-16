@@ -5,8 +5,8 @@ package xml
 
 import "base:intrinsics"
 import "base:runtime"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 
 // `Spec` is the grammar a text follows, a compile-time parameter.
 Spec :: enum u8 {
@@ -423,36 +423,6 @@ deepen :: #force_no_inline proc "contextless" (w: ^Walk($H)) -> core.Fault_Kind 
 	return .None
 }
 
-@(private)
-is_ws :: #force_inline proc "contextless" (c: u8) -> bool {
-	return c == ' ' || c == '\n' || c == '\r' || c == '\t'
-}
-
-// Returns the first byte at or past `p` that is no space, tab, CR or LF, or `end`. Reads up to four bytes one at a
-// time, then 64-byte blocks, then the remaining bytes one at a time.
-@(private)
-skip_ws :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_check {
-	q := p
-	for _ in 0 ..< 4 {
-		if q >= end || !is_ws(q[0]) {
-			return q
-		}
-		q = q[1:]
-	}
-	for intrinsics.ptr_sub(end, q) >= 64 {
-		b := kernel.load(q)
-		ws := kernel.pack(kernel.either(kernel.either(kernel.eq(b, ' '), kernel.eq(b, '\n')), kernel.either(kernel.eq(b, '\t'), kernel.eq(b, '\r'))))
-		if ws != max(u64) {
-			return q[intrinsics.count_trailing_zeros(~ws):]
-		}
-		q = q[64:]
-	}
-	for q < end && is_ws(q[0]) {
-		q = q[1:]
-	}
-	return q
-}
-
 // Whether `[p, q)` holds a CR.
 @(private)
 has_cr :: #force_inline proc "contextless" (p, q: [^]u8) -> bool #no_bounds_check {
@@ -566,7 +536,7 @@ st_attributes :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: 
 	q := p
 	for {
 		gap := q
-		q = skip_ws(q, end)
+		q = kernel.skip_ws(q, end)
 		if q >= end {
 			return fault(w, hs, end, .Truncated)
 		}
@@ -593,14 +563,14 @@ st_attributes :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: 
 		if name_n > int(max(u16)) {
 			return fault(w, hs, q, .Too_Wide)
 		}
-		eq := skip_ws(name_end_at, end)
+		eq := kernel.skip_ws(name_end_at, end)
 		if eq >= end {
 			return fault(w, hs, end, .Truncated)
 		}
 		if eq[0] != '=' {
 			return fault(w, hs, eq, .Bad_Char, .Equals)
 		}
-		v := skip_ws(eq[1:], end)
+		v := kernel.skip_ws(eq[1:], end)
 		if v >= end {
 			return fault(w, hs, end, .Truncated)
 		}
@@ -805,7 +775,7 @@ st_closed :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^Wal
 // Reads whitespace and then character data up to the next `<`, then branches on what the `<` opens.
 @(private, enable_target_feature = STATE_FEATURES)
 st_content :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
-	q := skip_ws(p, end)
+	q := kernel.skip_ws(p, end)
 	if q >= end {
 		w.halt = Run{q = end, decode = q > p && has_cr(p, q), kind = .Truncated}
 		return #must_tail st_halt(q, end, d, w, s0, s1, s2, on)
@@ -887,7 +857,7 @@ st_misc :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 		// The whitespace before the run, which `st_content` has passed, says whether the first comment is on the line
 		// where the element before it ended.
 		lead := p
-		for lead > w.base[f.text_lo:] && is_ws(lead[-1]) {
+		for lead > w.base[f.text_lo:] && kernel.is_ws(lead[-1]) {
 			lead = lead[-1:]
 		}
 		if x, at_ := give_misc(w, on, &hs, lead, q, end, inline, .Comment_Foot if foot else .Comment); x != .Next {
@@ -920,7 +890,7 @@ st_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($
 	if q < end && NAME_BYTE[q[0]] != .No {
 		return fault(w, hs, q, .Bad_Char, .Mismatched_Tag)
 	}
-	q = skip_ws(q, end)
+	q = kernel.skip_ws(q, end)
 	if q >= end {
 		return fault(w, hs, end, .Truncated)
 	}

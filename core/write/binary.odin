@@ -439,14 +439,11 @@ number_of_text :: proc(s: string) -> (core.Number, bool) {
 parse_exponent :: proc(text: string) -> (int, bool) {
 	neg := len(text) > 0 && text[0] == '-'
 	digits := text[1:] if len(text) > 0 && (text[0] == '-' || text[0] == '+') else text
-	e := 0
-	for c in transmute([]u8)digits {
-		e = e * 10 + int(c - '0')
-		if e > 1 << 40 {
-			return 0, false
-		}
+	e, ok := spell.digits_u64(digits, 1 << 40 + 1)
+	if !ok || e > 1 << 40 {
+		return 0, false
 	}
-	return -e if neg else e, len(digits) > 0
+	return -int(e) if neg else int(e), true
 }
 
 // The integer of the decimal digits `whole` then `fraction`, negative when `neg`: an integer when it fits 64 bits, else

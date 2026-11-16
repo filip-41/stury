@@ -291,8 +291,8 @@ built_data :: proc(r: Node_Ref, borrow: bool) -> Value {
 		return f
 	case .Bytes:
 		payload := transmute([]u8)node_string(r.doc, r.node)
-		text := make([]u8, spell.base64_len(len(payload)))
-		return string(text[:spell.base64_put(text, payload)])
+		text := make([]u8, spell.base64_room(len(payload)))
+		return string(text[:spell.base64_text(text, payload)])
 	case .String:
 		return text_kept(r.doc, node_string(r.doc, r.node), borrow)
 	case .Array:

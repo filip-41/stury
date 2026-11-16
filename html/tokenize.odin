@@ -3,8 +3,8 @@ package html
 import "base:intrinsics"
 import "base:runtime"
 import spell "../core/spell"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 
 // HTML's tokenizer: the states of the WHATWG standard's section 13.2.5 (states.odin), the character references
 // (refs.odin), and the input stream's preprocessing. It reads UTF-8. A token's text is a span of the source, read
@@ -447,8 +447,6 @@ C_LOWER :: 0x04
 @(private)
 C_DIGIT :: 0x08
 @(private)
-C_HEX :: 0x10 // A to F and a to f
-@(private)
 C_JUDGE :: 0x20
 @(private)
 C_TAG_END :: 0x40 // `/`, `>` and U+0000
@@ -478,10 +476,8 @@ CLASS := [256]u8 {
 	'<'             = C_ATTR_END,
 	'='             = C_ATTR_END,
 	'>'             = C_TAG_END,
-	'A' ..= 'F'     = C_UPPER | C_HEX,
-	'G' ..= 'Z'     = C_UPPER,
-	'a' ..= 'f'     = C_LOWER | C_HEX,
-	'g' ..= 'z'     = C_LOWER,
+	'A' ..= 'Z'     = C_UPPER,
+	'a' ..= 'z'     = C_LOWER,
 	0x7F            = C_JUDGE,
 	0x80 ..= 0xFF   = C_JUDGE,
 }

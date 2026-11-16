@@ -3,8 +3,8 @@ package json
 import "base:intrinsics"
 import "core:unicode/utf8"
 import spell "../core/spell"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 
 // JSON's string and key decoder runs when a token needs it. It reads JSON's escapes, JSON5's other escapes and quotes,
 // and the tolerated readings of ill-formed UTF-8 and lone surrogate halves. `decoded_escape` serves the copy, the key
@@ -284,7 +284,7 @@ put_word :: #force_inline proc(dst: []u8, w: int, spelled: [4]u8, size: int) {
 @(private)
 store_block :: #force_inline proc(out: [^]u8, w: int, b: kernel.Block) {
 	#unroll for k in 0 ..< 4 {
-		intrinsics.unaligned_store((^#simd[16]u8)(out[w + k * 16:]), b[k])
+		kernel.store16(out[w + k * 16:], b[k])
 	}
 }
 
@@ -295,7 +295,7 @@ copy_run :: #force_inline proc(dst: []u8, w: int, src: [^]u8, p, n: int) {
 	#no_bounds_check {
 		i := 0
 		for i + 16 <= n {
-			intrinsics.unaligned_store((^#simd[16]u8)(&dst[w + i]), intrinsics.unaligned_load((^#simd[16]u8)(&src[p + i])))
+			kernel.store16(raw_data(dst)[w + i:], kernel.load16(src[p + i:]))
 			i += 16
 		}
 		copy_up_to(dst, w + i, src, p + i, n - i)

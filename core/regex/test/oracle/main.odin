@@ -1,6 +1,7 @@
-// ecma_diff.py's reader of ECMA patterns: a file of a JSON array of [pattern, text] pairs, and for each a line on stdout,
-// `E` for a pattern core/regex refuses, `W` where a search that reads no bounds answers otherwise, `-` for no match, or each group's start and length in code points with the
-// whole match first, -1 -1 for a group that did not take part.
+// Reads the ECMA patterns for ecma_diff.py from the file named by the first argument, a JSON array of [pattern, text]
+// pairs. It prints one line per pair: `E` for a pattern core/regex refuses (with the message when the search fails),
+// `W` where a search that reads no bounds disagrees with the search that does, `-` for no match, otherwise each group's
+// start and length in code points with the whole match first, -1 -1 for a group that did not take part.
 package regex_oracle
 
 import "core:encoding/json"
@@ -38,7 +39,8 @@ main :: proc() {
 			fmt.println("E", search_err)
 			continue
 		}
-		// A search that reads no bounds takes the automaton where there is one, and must find a match as this one does.
+		// A search that reads no bounds uses the automaton where there is one. It must agree on whether there is a
+		// match.
 		if whether, _ := regex.search(&re, c[1], 0, nil, &scratch); whether != found {
 			fmt.println("W")
 			continue

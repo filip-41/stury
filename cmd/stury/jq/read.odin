@@ -4,11 +4,10 @@ package jq
 // --jsonargs and --slurpfile. A fault is told in jq's form, `MESSAGE at line L, column C`, its message the
 // library's sentence.
 
-import "base:intrinsics"
 import "base:runtime"
 import "core:bytes"
-import "core:simd"
 import "core:strings"
+import "../../../core/kernel"
 import core_pkg "../../../core"
 import json "../../../json"
 import "../message"
@@ -124,37 +123,11 @@ fault_sentence :: proc(f: core_pkg.Fault, rest: string) -> string {
 // Move a line and column past `b`, as jq's parser counts them.
 advance :: proc(line, column: ^int, b: []byte) {
 	if nl := bytes.last_index_byte(b, '\n'); nl >= 0 {
-		line^ += count_newlines(b[:nl + 1])
+		line^ += kernel.count_byte(b[:nl + 1], '\n')
 		column^ = len(b) - nl - 1
 	} else {
 		column^ += len(b)
 	}
-}
-
-// The newlines in `b`: 64 bytes at a time into byte counters, which are summed before one can overflow.
-count_newlines :: proc(b: []byte) -> (n: int) #no_bounds_check {
-	V :: #simd[16]u8
-	ROUNDS :: 255
-	nl := V('\n')
-	at := 0
-	for at + 64 * ROUNDS <= len(b) {
-		acc: [4]V
-		for _ in 0 ..< ROUNDS {
-			for k in 0 ..< 4 {
-				acc[k] -= simd.lanes_eq(intrinsics.unaligned_load((^V)(&b[at + 16 * k])), nl)
-			}
-			at += 64
-		}
-		for v in acc {
-			for c in transmute([16]u8)v {
-				n += int(c)
-			}
-		}
-	}
-	for c in b[at:] {
-		n += int(c == '\n')
-	}
-	return
 }
 
 // What jq says for a top-level number in a --seq record with no whitespace or separator after it.

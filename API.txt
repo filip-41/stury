@@ -1792,14 +1792,11 @@ writer_init :: proc(wr: ^records.Writer, w: io.Stream, $S: Spec, opts := Options
 # core/spell
 Decimal :: struct { neg: bool, head, tail: string, point: i128, wide: string, wide_neg: bool, }
 Fault_Kind :: enum u8 { None, Truncated, Bad_Char, Bad_Escape, Bad_Number, Too_Deep, Too_Wide, No_Memory, Bad_Option, Bad_Width, Duplicate_Key, }
-MAX_NUMBER_DIGITS :: 256
-MAX_NUMBER_SCALE :: 4096
-MULTIPLE_DIGITS :: 19
 Number :: struct { bits: u64, kind: Number_Kind, }
 Number_Kind :: enum u8 { Int, Uint, Float, Wide, }
 decimal_compare :: proc(x, y: Decimal) -> int
 decimal_multiple_of :: proc(x, y: Decimal) -> (multiple, exact: bool)
-decimal_of :: proc(lit: string) -> (d: Decimal)
+decimal_of :: proc(text: string) -> (d: Decimal)
 # core/regex
 Flags :: struct { fold, extend, dotall, multiline, ecma, longest, not_empty: bool, }
 Regex :: struct { using program: Program, }
@@ -1882,14 +1879,11 @@ pool_destroy :: proc(pool: ^Pool)
 # core/kernel
 Block :: [4]#simd[16]u8
 Quotes :: struct { quote, escape, sep: u8, nest, quoted: bool, odd: u64, want: int, depth, low: [2]int, }
-Tier :: enum u8 { Base, }
-Utf8_State :: struct { prev: #simd[64]u8, err: #simd[64]u8, }
 below :: #force_inline proc "contextless" (b: Block, c: u8) -> Block
 either :: #force_inline proc "contextless" (a, b: Block) -> Block
 escaped :: #force_inline proc "contextless" (escape: u64, odd: ^u64) -> u64
 has :: #force_inline proc "contextless" (c: Block, bits: u8) -> Block
 load :: #force_inline proc "contextless" (p: [^]u8) -> Block
-utf8_block :: #force_inline proc "contextless" ($T: Tier, b: Block, s: ^Utf8_State)
 # core/compose
 puts :: proc(b: ^[dynamic]u8, parts: ..string)
 # core/diff

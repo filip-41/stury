@@ -58,12 +58,9 @@ fn_parse_url :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (res
 			host = authority
 		}
 		if port_text != "" {
-			n := 0
-			for c in transmute([]byte)port_text {
-				n = n * 10 + int(c - '0')
-				if c < '0' || c > '9' || n > 65535 {
-					return nil, fail(ip, "string (%s) is not a URL: its port is not a number up to 65535", brief(ip, url))
-				}
+			n, n_ok := spell.digits_u64(port_text, 65536)
+			if !n_ok || n > 65535 {
+				return nil, fail(ip, "string (%s) is not a URL: its port is not a number up to 65535", brief(ip, url))
 			}
 			port = num(f64(n))
 		}
@@ -229,12 +226,9 @@ fn_json_pointer :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (
 			if token == "" || len(token) > 1 && token[0] == '0' {
 				return nil, .Go
 			}
-			index := 0
-			for c in transmute([]byte)token {
-				index = index * 10 + int(c - '0')
-				if c < '0' || c > '9' || index > 1 << 31 {
-					return nil, .Go
-				}
+			index, index_ok := spell.digits_u64(token, 1 << 31 + 1)
+			if !index_ok || index > 1 << 31 {
+				return nil, .Go
 			}
 			step = num(f64(index))
 		}

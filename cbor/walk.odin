@@ -5,10 +5,9 @@ package cbor
 
 import "base:intrinsics"
 import "base:runtime"
-import "core:simd"
 import spell "../core/spell"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 import rules "../core/rules"
 
 // The rules an item is read and written by. `.Cbor` reads every well-formed item of RFC 8949. `.Preferred` refuses an
@@ -419,9 +418,6 @@ CLASS := [256]Class {
 	0xff = .Break,
 }
 
-@(private)
-Lanes :: #simd[16]u8
-
 // The length of an item's head and the shift that leaves its argument in a byte-swapped 8-byte load after the initial
 // byte, indexed by additional information up to 27.
 @(private, rodata)
@@ -479,9 +475,8 @@ ascii_16 :: #force_inline proc "contextless" (src: []u8, q: int, n: u64) -> bool
 	if n > 16 || q + 16 > len(src) {
 		return false
 	}
-	v := intrinsics.unaligned_load((^Lanes)(raw_data(src)[q:]))
-	live := simd.lanes_lt(simd.indices(Lanes), Lanes(u8(n)))
-	return simd.reduce_max(simd.bit_and(v, live)) < 0x80
+	v := kernel.load16(raw_data(src)[q:])
+	return kernel.is_ascii16(v & kernel.live16(int(n)))
 }
 
 // What of a handle a walk reads, so an option only a write takes does not reach it.
@@ -1020,77 +1015,15 @@ string_item :: proc "contextless" (src: []u8, i: int, major: u8, tolerate: bool)
 }
 
 // Judges the `n` bytes of text at `q` as UTF-8. Returns the offset of the first ill-formed byte, or -1, and whether a
-// tolerated ill-formed sequence was passed. Text of 16 bytes or more is first tested for ASCII by 16-byte loads. The
-// kernel's UTF-8 blocks judge the rest, and only text they refuse is read a sequence at a time, to find the fault.
+// tolerated ill-formed sequence was passed. Only text the kernel refuses is read a sequence at a time, to find the fault.
 @(private)
 text_fault :: #force_no_inline proc "contextless" (src: []u8, q, n: int, tolerate: bool) -> (bad: int, lax: bool) #no_bounds_check {
 	// The caller has checked that `src` holds the `n` bytes at `q`.
 	text := src[q:q + n]
-	if n >= 16 {
-		p := raw_data(text)
-		acc: Lanes
-		j := 0
-		for ; j + 16 <= n; j += 16 {
-			acc |= intrinsics.unaligned_load((^Lanes)(p[j:]))
-		}
-		acc |= intrinsics.unaligned_load((^Lanes)(p[n - 16:]))
-		if simd.reduce_max(acc) < 0x80 {
-			return -1, false
-		}
-	}
-	if utf8_valid(text) {
+	if kernel.utf8_valid(text) {
 		return -1, false
 	}
 	return utf8_fault(text, tolerate)
-}
-
-// Whether `text` is UTF-8, by the kernel's blocks for this CPU's tier.
-@(private)
-utf8_valid :: #force_inline proc "contextless" (text: []u8) -> bool {
-	when ODIN_ARCH == .amd64 {
-		switch kernel.tier() {
-		case .V4:
-			return utf8_valid_v4(text)
-		case .V3:
-			return utf8_valid_v3(text)
-		case .V2:
-			return utf8_valid_v2(text)
-		}
-		return false
-	} else {
-		return utf8_blocks(.Base, text)
-	}
-}
-
-when ODIN_ARCH == .amd64 {
-	@(private, enable_target_feature = kernel.FEATURES[.V2])
-	utf8_valid_v2 :: #force_no_inline proc "contextless" (text: []u8) -> bool {
-		return utf8_blocks(.V2, text)
-	}
-	@(private, enable_target_feature = kernel.FEATURES[.V3])
-	utf8_valid_v3 :: #force_no_inline proc "contextless" (text: []u8) -> bool {
-		return utf8_blocks(.V3, text)
-	}
-	@(private, enable_target_feature = kernel.FEATURES[.V4])
-	utf8_valid_v4 :: #force_no_inline proc "contextless" (text: []u8) -> bool {
-		return utf8_blocks(.V4, text)
-	}
-}
-
-@(private)
-utf8_blocks :: #force_inline proc "contextless" ($T: kernel.Tier, text: []u8) -> bool #no_bounds_check {
-	u: kernel.Utf8_State
-	high: bool
-	j := 0
-	for ; j + 64 <= len(text); j += 64 {
-		b := kernel.load(raw_data(text)[j:])
-		kernel.utf8_next(T, b, kernel.is_ascii(b), &u, &high)
-	}
-	if j < len(text) {
-		b := kernel.load_padded(T, text, j)
-		kernel.utf8_next(T, b, kernel.is_ascii(b), &u, &high)
-	}
-	return kernel.utf8_ok(u)
 }
 
 // Judges `text` as UTF-8 a sequence at a time, for `text_fault`.

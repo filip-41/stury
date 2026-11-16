@@ -2,52 +2,21 @@ package json
 
 import "base:intrinsics"
 import "core:simd"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 
 // Reads whitespace, a `:`, and whitespace, and returns where the member's value starts. Returns `end` and
 // `Truncated` when the text ends first, or the byte that is no colon and `Bad_Char`.
 @(private)
 colon :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: core.Fault_Kind) {
-	q = skip_ws(p, end)
+	q = kernel.skip_ws(p, end)
 	if q >= end {
 		return end, .Truncated
 	}
 	if q[0] != ':' {
 		return q, .Bad_Char
 	}
-	return skip_ws(q[1:], end), .None
-}
-
-// Returns the first byte at or past `p` that is no space, tab, CR or LF, or `end`. Reads up to four bytes one at a
-// time, then 64-byte blocks, then the remaining bytes one at a time. Inlined into the states that skip whitespace,
-// which would otherwise save registers for a call.
-@(private)
-skip_ws :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_check {
-	q := p
-	for _ in 0 ..< 4 {
-		if q >= end || !is_ws(q[0]) {
-			return q
-		}
-		q = q[1:]
-	}
-	for intrinsics.ptr_sub(end, q) >= 64 {
-		b := kernel.load(q)
-		ws := kernel.pack(kernel.either(kernel.either(kernel.eq(b, ' '), kernel.eq(b, '\n')), kernel.either(kernel.eq(b, '\t'), kernel.eq(b, '\r'))))
-		if ws != max(u64) {
-			return q[intrinsics.count_trailing_zeros(~ws):]
-		}
-		q = q[64:]
-	}
-	for q < end && is_ws(q[0]) {
-		q = q[1:]
-	}
-	return q
-}
-
-@(private)
-is_ws :: #force_inline proc "contextless" (c: u8) -> bool {
-	return c == ' ' || c == '\n' || c == '\r' || c == '\t'
+	return kernel.skip_ws(q[1:], end), .None
 }
 
 // `Indent_At` names which token follows the whitespace, for `indent_fast`'s indent prediction. `Open` adds the indent
@@ -117,7 +86,7 @@ skip_indent :: #force_inline proc "contextless" (p, end: [^]u8, ind: ^u64, $at: 
 			return q
 		}
 	}
-	q := skip_ws(p, end)
+	q := kernel.skip_ws(p, end)
 	if line != nil {
 		n := u64(intrinsics.ptr_sub(q, line))
 		step := ind^ >> 32
@@ -150,13 +119,11 @@ indent_predicted :: #force_inline proc "contextless" (line: [^]u8, ind: ^u64, $a
 }
 
 // Whether the `k` bytes at `p` are all `b`. The caller guarantees `k < LEAD_MAX` and that `LEAD_MAX` bytes at `p` are
-// in the text. Uses `reduce_max` on the xor with `b` because NEON reduces a max in one cross-lane instruction, where an
-// OR folds through scalar shifts.
+// in the text.
 @(private)
 indent_lead :: #force_inline proc "contextless" (p: [^]u8, k: u64, b: u8) -> bool #no_bounds_check {
-	V :: #simd[16]u8
 	m := ([^]u8)(&LEAD_MASK[LEAD_MAX - k])
-	x := simd.bit_and(simd.bit_xor(intrinsics.unaligned_load((^V)(p)), V(b)), intrinsics.unaligned_load((^V)(m)))
-	y := simd.bit_and(simd.bit_xor(intrinsics.unaligned_load((^V)(p[16:])), V(b)), intrinsics.unaligned_load((^V)(m[16:])))
-	return simd.reduce_max(simd.bit_or(x, y)) == 0
+	x := simd.bit_and(simd.bit_xor(kernel.load16(p), V(b)), kernel.load16(m))
+	y := simd.bit_and(simd.bit_xor(kernel.load16(p[16:]), V(b)), kernel.load16(m[16:]))
+	return kernel.all_zero(simd.bit_or(x, y))
 }

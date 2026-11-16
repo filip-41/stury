@@ -17,7 +17,6 @@ import json
 import os
 import random
 import re
-import resource
 import signal
 import sys
 from decimal import Decimal
@@ -324,15 +323,10 @@ def make_cases(seed, count):
     return cases
 
 
-def limits():
-    resource.setrlimit(resource.RLIMIT_CPU, (TIMEOUT, TIMEOUT))
-
-
 def run(binary, opts, prog, stdin):
-    got = outcome([binary, *opts, prog], stdin.encode(), TIMEOUT, preexec_fn=limits)
-    # RLIMIT_CPU and the wall clock are the same limit, and which one stops a runaway first is a race. On a
-    # host with less memory than two capped runs, the kernel's OOM killer (a SIGKILL) can win it too.
-    return ("timeout", b"", b"") if got[0] in (-signal.SIGXCPU, -signal.SIGKILL) else got
+    got = outcome([binary, *opts, prog], stdin.encode(), TIMEOUT)
+    # On a host with less memory than two capped runs, the kernel's OOM killer (a SIGKILL) can stop a run first.
+    return ("timeout", b"", b"") if got[0] == -signal.SIGKILL else got
 
 
 def refuse(name):

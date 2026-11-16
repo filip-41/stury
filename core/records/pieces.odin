@@ -4,8 +4,8 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:slice"
 import "core:sync"
-import core ".."
 import "../kernel"
+import core ".."
 import engine "../build"
 
 // Returns the fault of each refused record of `src` read from byte `at`, in source order, and last the fault that ended

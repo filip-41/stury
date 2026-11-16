@@ -1,8 +1,8 @@
 package json
 
 import "base:intrinsics"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 import write "../core/write"
 
 // The compact write of a strict JSON source that runs over the source's bytes in place of its rows: each 64-byte block
@@ -86,7 +86,7 @@ dense_sample :: proc "contextless" (src: []u8, nodes: int) -> bool {
 dense_run :: #force_inline proc "contextless" ($T: kernel.Tier, out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $MODE: Dense_Mode) -> (w, i: int) {
 	in_string, odd, escapes := s.in_string, s.odd, u64(0)
 	for i = lo; i < hi; i += 64 {
-		b := kernel.load(raw_data(src)[i:]) if hi - i >= 64 else kernel.load_padded(T, src, i)
+		b := kernel.load_block(T, src, i)
 		drop: u64
 		when MODE == .Blind {
 			m := kernel.pack_n([2]kernel.Block{kernel.eq(b, ' '), kernel.below(b, ' ' + 1)})

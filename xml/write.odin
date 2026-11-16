@@ -22,6 +22,7 @@ import "core:io"
 import "core:slice"
 import "core:strings"
 import "core:unicode/utf8"
+import kernel "../core/kernel"
 import core "../core"
 import write "../core/write"
 
@@ -613,7 +614,7 @@ is_name :: proc(s: []u8) -> bool {
 @(private)
 only_whitespace :: proc(s: string) -> bool {
 	for c in transmute([]u8)s {
-		if !is_ws(c) {
+		if !kernel.is_ws(c) {
 			return false
 		}
 	}

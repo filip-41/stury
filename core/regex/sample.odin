@@ -7,11 +7,11 @@ import "core:unicode/utf8"
 @(private = "file")
 SAMPLE_MAX :: 1 << 12
 
-// The most characters one class is offered as a choice of.
+// The most characters `class_rune` collects from one class to choose among.
 @(private = "file")
 CHOICES :: 128
 
-// The generator that sampled texts, and the values a caller draws beside them, come from: a splitmix64 of one seed.
+// A splitmix64 random number generator, which `sample` and its callers draw from.
 Source :: struct {
 	state: u64,
 }

@@ -16,6 +16,7 @@ import "core:strings"
 import "core:sync"
 import "core:time"
 import "core:sys/posix"
+import kernel "../../core/kernel"
 import core "../../core"
 import records "../../core/records"
 import json "../../json"
@@ -700,7 +701,7 @@ next_window :: proc(ins: ^Inputs, from: int) {
 	advance_past(ins, from)
 	// --stream's lines are counted to `line_end`, which the window moves.
 	if ins.run.opts.stream {
-		ins.line += jq.count_newlines(ins.data[min(ins.line_end, from):from])
+		ins.line += kernel.count_byte(ins.data[min(ins.line_end, from):from], '\n')
 		ins.line_end = max(ins.line_end - from, 0)
 	}
 	keep_lead(ins, from)
@@ -755,7 +756,7 @@ take_data :: proc(ins: ^Inputs, carry: []byte) {
 	}
 	if ins.head != nil && !ins.headed {
 		// The window's lines are counted from past the header, as the lines before it were.
-		ins.file_lines -= jq.count_newlines(ins.head)
+		ins.file_lines -= kernel.count_byte(ins.head, '\n')
 	}
 	// Each window takes the room the longest takes, so the heap reuses one window's room for the next rather than
 	// keeping the rooms a window grew through.
@@ -1023,7 +1024,7 @@ lines_read :: proc(ins: ^Inputs, end: int) -> int {
 	if stop < c.at {
 		c^ = {}
 	}
-	c.lines += jq.count_newlines(data[c.at:stop])
+	c.lines += kernel.count_byte(data[c.at:stop], '\n')
 	c.at = stop
 	return ins.file_lines + c.lines
 }
@@ -1038,7 +1039,7 @@ lines_through :: proc(ins: ^Inputs, at: int) {
 	data := ins.data
 	nl := bytes.index_byte(data[at:], '\n')
 	stop := len(data) if nl < 0 else at + nl + 1
-	ins.line += jq.count_newlines(data[ins.line_end:stop])
+	ins.line += kernel.count_byte(data[ins.line_end:stop], '\n')
 	ins.line_end = stop
 }
 

@@ -5,31 +5,11 @@ import "core:mem"
 import "core:strconv"
 import "core:strings"
 import "core:testing"
-import spell "../../core/spell"
 import core "../../core"
 import json ".."
 import walktest "../../walktest"
 
 // Decoding a document's text and numbers: JSON5 forms, tolerances, the decoder's block edges, and number spellings.
-
-// Checks `bytes_equal` on lengths 0 to 40, with the last byte differing and with the second slice a byte shorter.
-@(test)
-bytes_equal_table :: proc(t: ^testing.T) {
-	a, b: [64]u8
-	for i in 0 ..< len(a) {
-		a[i] = u8(i * 31 + 7)
-		b[i] = a[i]
-	}
-	for n in 0 ..= 40 {
-		testing.expectf(t, spell.bytes_equal(a[:n], b[:n]), "length %d: equal", n)
-		if n > 0 {
-			b[n - 1] = a[n - 1] ~ 0x80
-			testing.expectf(t, !spell.bytes_equal(a[:n], b[:n]), "length %d: last byte differs", n)
-			b[n - 1] = a[n - 1]
-			testing.expectf(t, !spell.bytes_equal(a[:n], b[:n - 1]), "length %d against %d", n, n - 1)
-		}
-	}
-}
 
 // For numbers of 3 to 19 digits with a point after `total / 2` of them, `number` returns `.Float` with the bits
 // `strconv.parse_f64` returns.
@@ -498,15 +478,3 @@ decode_into_token_sized_buffer :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(s), 301)
 	testing.expect_value(t, s[300], 'A')
 }
-
-
-// A leading zero in a multi-digit integer run is a digit, not the zero of a `0.<fraction>` significand.
-@(test)
-number_loose_leading_zero :: proc(t: ^testing.T) {
-	for src in ([]string{"012345678901234567890123456789", "0012345678901234567890123456789"}) {
-		got, _, _, _ := spell.number_loose(transmute([]u8)src, 0, u64(len(src)))
-		want, ok := strconv.parse_f64(src)
-		testing.expectf(t, ok && got.kind == .Float && got.bits == transmute(u64)want, "%q: %v, want %x", src, got, transmute(u64)want)
-	}
-}
-

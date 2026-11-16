@@ -3,6 +3,7 @@ package core
 import "base:runtime"
 import "core:bytes"
 import "core:slice"
+import kernel "./kernel"
 
 // The edits that take a value. The format spells it, with `Edit_Services.spell`, under the list's `write` options and
 // the layout the container it goes in shows, and the text is recorded as it is: a value edit makes no check walk of
@@ -192,7 +193,7 @@ spell :: proc(list: ^Edit_List, v: Value, target: Node_Index, into: bool, at: u6
 	if len(indent) == 0 {
 		return text, true, nil
 	}
-	lines := bytes.count(text, {'\n'})
+	lines := kernel.count_byte(text, '\n')
 	spaced, merr := make([]u8, len(text) + lines * len(indent), list.allocator)
 	if merr != nil {
 		delete(text, list.allocator)

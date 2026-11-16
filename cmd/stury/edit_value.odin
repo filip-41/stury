@@ -9,7 +9,7 @@ package main
 
 import "core:slice"
 import "core:strings"
-import "core:unicode/utf8"
+import kernel "../../core/kernel"
 import core "../../core"
 import "jq"
 import "message"
@@ -656,7 +656,7 @@ edit_set :: proc(w: ^Edit_State, node: core.Node_Index, v: jq.Value) -> bool {
 edit_valid :: proc(v: jq.Value) -> jq.Value {
 	#partial switch x in v {
 	case string:
-		return x if utf8.valid_string(x) else jq.valid_utf8(x)
+		return x if kernel.utf8_valid(transmute([]u8)x) else jq.valid_utf8(x)
 	case ^jq.Array:
 		var: ^jq.Array
 		for item, i in x.items {
@@ -674,7 +674,7 @@ edit_valid :: proc(v: jq.Value) -> jq.Value {
 		var: ^jq.Object
 		for val, i in x.vals {
 			key := x.keys[i]
-			fixed_key := key if utf8.valid_string(key) else jq.valid_utf8(key)
+			fixed_key := key if kernel.utf8_valid(transmute([]u8)key) else jq.valid_utf8(key)
 			fixed := edit_valid(val)
 			if var == nil && (fixed_key != key || !edit_same(fixed, val)) {
 				var = new(jq.Object)

@@ -17,23 +17,8 @@ Utf8_State :: struct {
 	err:  #simd[64]u8,
 }
 
-// Adds the errors of `b`, read after the bytes in `s.prev`, to `s.err`, and stores `b` in `s.prev`.
-utf8_block :: #force_inline proc "contextless" ($T: Tier, b: Block, s: ^Utf8_State) {
-	N :: VECTOR_BYTES[T]
-	U :: #simd[N]u8
-	w := transmute([64 / N]U)b
-	prev := (transmute([64 / N]U)s.prev)[64 / N - 1]
-	err: [64 / N]U
-	err[0] = (transmute([64 / N]U)s.err)[0]
-	#unroll for i in 0 ..< 64 / N {
-		err[0] = simd.bit_or(err[0], errors(T, prev, w[i]))
-		prev = w[i]
-	}
-	s.err = transmute(W)err
-	s.prev = transmute(W)b
-}
-
-// `utf8_block` for the vectors of `b` up to the one holding byte `last`, for a reader that stops there.
+// Adds the errors of the vectors of `b` up to the one holding byte `last`, read after the bytes in `s.prev`, to `s.err`.
+@(private)
 utf8_head :: #force_inline proc "contextless" ($T: Tier, b: Block, s: ^Utf8_State, last: u64) {
 	N :: VECTOR_BYTES[T]
 	U :: #simd[N]u8
@@ -53,6 +38,7 @@ utf8_head :: #force_inline proc "contextless" ($T: Tier, b: Block, s: ^Utf8_Stat
 
 // Reads a block whose bytes are all below 0x80, as `is_ascii` reports. Its only possible error is a sequence the
 // block before left open, so this adds that error to `s.err` and sets `s.prev` to zeros.
+@(private)
 utf8_ascii_block :: #force_inline proc "contextless" ($T: Tier, s: ^Utf8_State) {
 	N :: VECTOR_BYTES[T]
 	U :: #simd[N]u8
@@ -67,7 +53,8 @@ utf8_ascii_block :: #force_inline proc "contextless" ($T: Tier, s: ^Utf8_State) 
 // grown.
 utf8_next :: #force_inline proc "contextless" ($T: Tier, b: Block, ascii: bool, s: ^Utf8_State, high: ^bool) -> bool {
 	if !ascii {
-		utf8_block(T, b, s)
+		utf8_head(T, b, s, 63)
+		s.prev = transmute(W)b
 	} else if high^ {
 		utf8_ascii_block(T, s)
 	} else {
@@ -77,11 +64,22 @@ utf8_next :: #force_inline proc "contextless" ($T: Tier, b: Block, ascii: bool, 
 	return true
 }
 
+// Adds the errors of `b`, which `is_ascii` reports as `ascii`, up to the vector holding byte `last`, for a reader that
+// stops there. `high` says whether the block before had a byte past 0x7F. Returns `utf8_clean` of the blocks so far.
+utf8_stop :: #force_inline proc "contextless" ($T: Tier, b: Block, ascii: bool, s: ^Utf8_State, high: bool, last: u64) -> bool {
+	if !ascii {
+		utf8_head(T, b, s, last)
+	} else if high {
+		utf8_ascii_block(T, s)
+	}
+	return utf8_clean(T, s^)
+}
+
 // Reports whether the blocks given so far hold no error, ignoring a sequence the last block leaves open. For a reader
 // that stops inside the last block. An error anywhere in the blocks counts, including in bytes past the stop.
 utf8_clean :: #force_inline proc "contextless" ($T: Tier, s: Utf8_State) -> bool {
 	N :: VECTOR_BYTES[T]
-	return simd.reduce_max((transmute([64 / N]#simd[N]u8)s.err)[0]) == 0
+	return all_zero((transmute([64 / N]#simd[N]u8)s.err)[0])
 }
 
 // Reports whether every block given was valid UTF-8 and the last block leaves no sequence open. Called once, at the
@@ -90,12 +88,53 @@ utf8_ok :: proc "contextless" (s: Utf8_State) -> bool {
 	return simd.reduce_or(simd.bit_or(s.err, open_sequence(s.prev))) == 0
 }
 
+// Reports whether `text` is UTF-8. Text of 16 bytes or more is first tested for ASCII by 16-byte loads, before the
+// blocks of this CPU's tier are entered.
+utf8_valid :: #force_inline proc "contextless" (text: []u8) -> bool {
+	if n := len(text); n >= 16 {
+		p := raw_data(text)
+		acc: V
+		for j := 0; j + 16 <= n; j += 16 {
+			acc |= load16(p[j:])
+		}
+		acc |= load16(p[n - 16:])
+		if is_ascii16(acc) {
+			return true
+		}
+	}
+	return scan(text, 0, nil, .Utf8) != 0
+}
+
+// The loop of `utf8_valid` over the blocks of `text`, built once per tier.
+@(private)
+utf8_blocks :: #force_inline proc "contextless" ($T: Tier, text: []u8) -> bool {
+	u: Utf8_State
+	high: bool
+	j := 0
+	for ; j + 64 <= len(text); j += 64 {
+		b := load(raw_data(text)[j:])
+		utf8_next(T, b, is_ascii(b), &u, &high)
+	}
+	if j < len(text) {
+		b := load_padded(T, text, j)
+		utf8_next(T, b, is_ascii(b), &u, &high)
+	}
+	return utf8_ok(u)
+}
+
+// Returns a non-zero lane where the 16 bytes `v`, read after the 16 bytes `prev`, are not UTF-8. For a reader that steps
+// through a text a vector at a time, with `prev` zero before the first. It uses the lowest tier's lookups, so any tier's
+// procedure may call it. A sequence the last vector leaves open shows when a vector of ASCII follows it.
+utf8_window :: #force_inline proc "contextless" (prev, v: V) -> V {
+	return errors(Tier(0), prev, v)
+}
+
 @(private = "file", rodata)
 BEFORE_HIGH := V{2, 2, 2, 2, 2, 2, 2, 2, 128, 128, 128, 128, 33, 1, 21, 73}
 @(private = "file", rodata)
 BEFORE_LOW := V{231, 163, 131, 131, 139, 203, 203, 203, 203, 203, 203, 203, 203, 219, 203, 203}
 @(private = "file", rodata)
-HIGH := V{1, 1, 1, 1, 1, 1, 1, 1, 230, 174, 186, 186, 1, 1, 1, 1}
+OWN_HIGH := V{1, 1, 1, 1, 1, 1, 1, 1, 230, 174, 186, 186, 1, 1, 1, 1}
 
 // Returns a non-zero lane where `v`, read after `prev`, is not UTF-8. The tables leave 0x80 set on a continuation
 // byte after a lead, and the 0x80 of `must` cancels it, so either flag alone marks an error.
@@ -105,7 +144,7 @@ errors :: #force_inline proc "contextless" ($T: Tier, prev, v: #simd[$N]u8) -> #
 	p1, p2, p3 := before(prev, v, 1), before(prev, v, 2), before(prev, v, 3)
 	pairs := simd.bit_and(
 		simd.bit_and(lookup(T, BEFORE_HIGH, simd.shr(p1, U(4))), lookup(T, BEFORE_LOW, simd.bit_and(p1, U(0x0f)))),
-		lookup(T, HIGH, simd.shr(v, U(4))),
+		lookup(T, OWN_HIGH, simd.shr(v, U(4))),
 	)
 	// A byte two after a lead of three or four bytes, or three after a lead of four, must be a continuation.
 	must := simd.bit_or(simd.saturating_sub(p2, U(0xe0 - 0x80)), simd.saturating_sub(p3, U(0xf0 - 0x80)))
@@ -126,13 +165,6 @@ before :: #force_inline proc "contextless" (prev, v: #simd[$N]u8, $K: int) -> #s
 		U :: #simd[N]u8
 		return simd.select(simd.lanes_lt(simd.indices(U), U(K)), simd.lanes_rotate_right(prev, K), simd.lanes_rotate_right(v, K))
 	}
-}
-
-// Returns a non-zero lane where the 16 bytes `v`, read after the 16 bytes `prev`, are not UTF-8. For a reader that steps
-// through a text a vector at a time, with `prev` zero before the first. It uses the lowest tier's lookups, so any tier's
-// procedure may call it. A sequence the last vector leaves open shows when a vector of ASCII follows it.
-utf8_window :: #force_inline proc "contextless" (prev, v: V) -> V {
-	return errors(Tier(0), prev, v)
 }
 
 // Returns a non-zero lane where one of the last bytes of `prev` starts a sequence longer than the bytes left: a

@@ -1,139 +1,13 @@
-// Package regex is the engine behind jq's `test`, `match`, `sub` and the like, in Oniguruma's syntax, and behind a
-// schema's `pattern`, in ECMA-262's (`Flags.ecma`). A pattern goes: parse.odin (`parse`: source to a tree of Nodes,
-// with Oniguruma's error messages), call.odin (`check_calls`: \g<...> calls checked for endless recursion),
-// compile.odin (`compile`: the tree to a Regex holding a program of Insts), analyze.odin (a look-behind tuned to a fixed
-// length, and the literals a search can skip by), optimize.odin (Oniguruma's search optimizer), dfa.odin (the automata
-// that answer in one pass whether and where a program matches), then match.odin (`search`: the backtracking matcher over
-// that program). sample.odin draws a text a pattern matches. unicode.odin supplies character classes and case folds to
-// all of them, from the generated unicode_tables.odin.
 package regex
 
-// A pattern's tree as a program for the backtracking matcher (match.odin), with what the search can skip
-// by: Oniguruma's optimizer's choice (optimize.odin), a literal every match starts with, the bytes one starts with.
+// Compiles a pattern's tree into a program for the backtracking matcher (match.odin), with what the search can skip by:
+// the choice of Oniguruma's optimizer (optimize.odin), a literal that every match starts with, and the bytes that a
+// match starts with.
 
 import "core:mem"
 import "core:slice"
 import "core:strings"
 import "core:unicode/utf8"
-
-// The most memory, in bytes, that a program may take, and that a linear search's visited sets, backtrack stack and log
-// take together. Short counted repeats are written out, so many of them would otherwise take unbounded memory.
-// Oniguruma has no such limit.
-@(private)
-MAX_BYTES :: 1 << 28
-
-@(private)
-MEMORY_ERROR :: "fail to memory allocation"
-
-// The pattern's options: jq's `i`, `x` and `s` flags, or `ecma` alone for a JSON Schema pattern (parse.odin). `longest`
-// and `not_empty` change only the search: ONIG_OPTION_FIND_LONGEST takes the longest match of all, not the first, and
-// ONIG_OPTION_FIND_NOT_EMPTY takes no empty match.
-Flags :: struct {
-	fold, extend, dotall, multiline, ecma, longest, not_empty: bool,
-}
-
-@(private)
-Op :: enum u8 {
-	Match,
-	Str, // the literal bytes[a:][:b]
-	Char_Fold, // a rune whose fold is a
-	Any, // any rune but "\n"
-	Any_All,
-	Class, // classes[a]
-	Split, // go on at a, on failure at b
-	Split_Head, // a greedy loop: go on at pc+1 with b to fall back to when the byte at the position is a, otherwise at b
-	Jmp, // to a
-	Save, // slot a = the position (captures, loop marks, and \K as slot 0). b: a group's start, which unsets its end
-	Set, // slot a = the position, kept as the match backs past it: a group's bound Oniguruma writes in place
-	Assert, // Assert_Kind(a). A callout's data at callouts[b]
-	Backref, // the text of one of refs[a]'s groups. b: folded
-	Look, // a look-around or atomic group, Look_Kind(a), ending at the Look_End at b
-	Look_End,
-	Back, // a runes back, for a look-behind
-	Check, // a loop's body matched empty when slot a is the position: leave the loop, for b, or fail for b -1
-	Unset, // slots a up to b = -1: the groups of an ECMA loop's body, at each iteration
-	Cond, // group a matched: go on, otherwise go to b
-	Linebreak, // \R
-	Grapheme, // \X
-	Rep, // the one-rune instruction after this, a to b times (b -1: no bound), as many as can, then pc+2
-	Rep_Lazy, // the same, as few as can
-	Count_Reset, // slot a, a counted loop's iterations, = 0
-	Count, // a counted loop at slot a: its body at pc+2 runs while slot a is short of insts[pc+1].a, may run while short of insts[pc+1].b, as many times as can, then on to b
-	Count_Lazy, // the same, as few times as can
-	Count_Next, // slot a += 1, then to the loop's Count at b
-	Count_Check, // as Check under ECMA, failing only once the loop whose Count is at b has run its least count
-	Seen, // a pair a linear search has been to: fails (match.odin)
-	// Call and the ops after it are a call's or an absent operator's, which `Regex.calls_or_limits` tells of.
-	Call, // the group at a, which returns to pc+1. b: its number
-	Return,
-	Mem_Start, // group a's start, in a group that calls itself, whose end finds the start of its own call
-	Mem_End,
-	Limit_Save, // slot a = the text's end as matched against (an absent's limit), restored when the match backs past
-	Limit_Cut, // the limit = slot a, kept as the match backs within the absent
-	Limit_Restore, // the limit = slot a
-	Limit_Clear, // the limit = the text's end
-}
-
-@(private)
-Inst :: struct {
-	op:   Op,
-	a, b: i32,
-}
-
-// A compiled pattern, which `search` runs.
-Regex :: struct {
-	using program: Program,
-}
-
-@(private)
-Program :: struct {
-	insts:    []Inst,
-	bytes:    string,
-	classes:  []^Class,
-	refs:     [][]int,
-	callouts: []^Callout, // those that keep data, each at its index
-	names:    []string, // group n's name at n, "" for none; [0] is the whole match
-	slots:    int, // two per group with the whole match, then a mark per loop that can match empty
-	opt:      ^Search_Opt, // what Oniguruma's optimizer would have the search skip by, kept apart since a Regex is copied
-	visited:  ^Visited, // under `linear`, what the visited set needs of the program
-	dfa:      ^Dfa, // the automaton that answers a search that reads no bounds, or nil (dfa.odin)
-	// What every match starts with, at distance 0: the literal it begins with, or one of the bytes it can begin with.
-	head:      ^Search_Opt,
-	longest:   bool, // Flags.longest
-	not_empty: bool, // Flags.not_empty
-	calls_or_limits: bool, // holds a subexpression call or an absent operator, whose tracking the match then runs
-	narrowed:  bool, // `opt` bounds the starts the search tries
-	ecma:      bool, // compiled under `Flags.ecma`, whose search refuses a text too long for the visited set
-	// A program with choices whose outcome at an instruction and a position does not depend on the way there: the search
-	// keeps the pairs it has been to, so no pair runs twice. The ECMA programs `linear_ops` allows, and the jq ones.
-	linear:    bool,
-}
-
-// The program's facts the visited set reads, kept behind a pointer since a Regex is copied.
-@(private)
-Visited :: struct {
-	owner:   []i32, // the look-ahead each instruction lies in, -1 for none, or nil for no look-ahead
-	// The ECMA loops whose body may match empty, each one's mark slot and the loop around it (-1 for none), the
-	// innermost each instruction lies in (-1 for none), and each instruction's first row of the visited set, the row
-	// count last. An instruction has a row and one more for each loop around it, since an iteration that has matched
-	// nothing yet fails where one that has goes on (`row_of`). Nil when no such loop.
-	loops:   [][2]i32,
-	loop_of: []i32,
-	// The ECMA counter loops, the innermost each instruction lies in (-1 for none, nil for no loop), and each
-	// instruction's rows for one count of the loops around it (`block`). An instruction has a block of rows for each
-	// count of each loop around it, since what follows depends on the count. A program with counter loops has its
-	// rows laid out for each search (`counted_rows`), the others here.
-	counters:   []Counter,
-	counter_of: []i32,
-	block:      []int,
-	rows:       []int,
-}
-
-// An ECMA counter loop's slot, its least and most counts, and the loop around it, -1 for none.
-@(private)
-Counter :: struct {
-	slot, least, most, outer: int,
-}
 
 @(private)
 Compiler :: struct {
@@ -141,20 +15,20 @@ Compiler :: struct {
 	bytes:      [dynamic]byte,
 	classes:    [dynamic]^Class,
 	refs:       [dynamic][]int,
-	groups:     []^Node, // the group nodes by number
-	referenced: []bool, // by group number: a backreference or condition reads it
+	groups:     []^Node, // the group nodes, indexed by group number
+	referenced: []bool, // by group number: true when a backreference or condition reads it
 	undone:     []bool, // by group number: the match undoes its bounds as it backs past them (`mark_undone`)
 	open:       [dynamic]int, // the groups being emitted, innermost last
-	ecma:       bool, // ECMA's loops: no counter loops, no Rep in a look-ahead, an empty iteration fails
-	looking:    int, // the look-aheads being emitted
+	ecma:       bool, // set under ECMA: no counter loops, no Rep in a look-ahead, an empty iteration fails
+	looking:    int, // the number of look-arounds being emitted, nested
 	loops:      [dynamic][2]i32, // `Regex.loops`
-	loop_of:    [dynamic]i32, // under ECMA
-	loop:       int, // the loop being emitted, -1 for none
+	loop_of:    [dynamic]i32, // under ECMA, per instruction: the index into `loops` of its loop, -1 for none
+	loop:       int, // the index into `loops` of the loop being emitted, -1 for none
 	counters:   [dynamic]Counter, // `Visited.counters`
-	counter_of: [dynamic]i32, // under ECMA
+	counter_of: [dynamic]i32, // under ECMA, per instruction: the index into `counters` of its counter loop, -1 for none
 	counter:    int, // the counter loop being emitted, -1 for none
-	looped:     [dynamic]^Node, // the ECMA repeats run as counter loops, which a repeat around them emits again
-	tuned:      int, // the last group Oniguruma's tune_tree has reached, as a look-behind measures one
+	looped:     [dynamic]^Node, // the ECMA repeats that run as counter loops, which a repeat around them emits again
+	tuned:      int, // the highest group number Oniguruma's tune_tree has reached by now, as `fixed_length` reads it
 	slots:      int,
 	err:        string,
 	called:     []bool, // by group number: a call reaches it, so it is a subroutine
@@ -163,7 +37,7 @@ Compiler :: struct {
 }
 
 // Whether `pattern` is well formed under `flags`. It builds no program, frees what it allocated, and under `ecma`
-// takes back references and look-behind as syntax, since a JSON Schema pattern may hold them.
+// accepts back references and look-behind as syntax, since a JSON Schema pattern may hold them.
 valid :: proc(pattern: string, flags: Flags) -> bool {
 	arena: mem.Dynamic_Arena
 	mem.dynamic_arena_init(&arena)
@@ -173,18 +47,19 @@ valid :: proc(pattern: string, flags: Flags) -> bool {
 	return err == ""
 }
 
-// Whether `r` has the Unicode property `name` as Oniguruma spells it (`\p{name}`: a general category, a script or a
-// binary property). A name it does not know holds for no rune.
+// Whether `r` has the Unicode property `name`, spelled as Oniguruma spells `\p{name}`: a general category, a script or
+// a binary property. An unknown name matches no rune.
 in_property :: proc(name: string, r: rune) -> bool {
 	it, ok := named_prop(name)
 	return ok && in_table(int(it.table), r)
 }
 
-// `pattern` compiled as jq compiles it, or Oniguruma's message for why not. The program, what it was built from and
-// any message are allocated from `allocator`, which is meant to be an arena the caller frees whole. With `automaton`
-// the automaton that answers whether there is a match is built too, which pays for a regex that searches more than a
-// few short texts, and with `spans` also the two that find where a match ends and starts, which pay for a regex whose
-// searches read bounds. Their build borrows its working memory from `context.allocator` and frees it before returning.
+// Compiles `pattern` as jq compiles it, or returns Oniguruma's message for why not. The program, what it was built from
+// and any message are allocated from `allocator`, which is meant to be an arena that the caller frees whole. With
+// `automaton` the automaton that answers whether there is a match is built too, which is worth it for a regex that
+// searches more than a few short texts. With `spans` the two automata that find where a match ends and starts are built
+// too, which is worth it for a regex whose searches read bounds. Building them takes working memory from
+// `context.allocator` and frees it before returning.
 compile :: proc(pattern: string, flags: Flags, allocator := context.allocator, automaton := true, spans := false) -> (re: Regex, err: string) {
 	scratch := context.allocator
 	if re, err = program(pattern, flags, allocator); err == "" && automaton {
@@ -193,8 +68,8 @@ compile :: proc(pattern: string, flags: Flags, allocator := context.allocator, a
 	return
 }
 
-// Oniguruma's message for why `pattern` does not compile under `flags`, allocated from `allocator`, or "" when it does.
-// It builds no automaton and frees the program it made.
+// Returns Oniguruma's message for why `pattern` does not compile under `flags`, allocated from `allocator`, or "" when
+// it does. It builds no automaton and frees the program it made.
 refusal :: proc(pattern: string, flags: Flags, allocator := context.allocator) -> string {
 	arena: mem.Dynamic_Arena
 	mem.dynamic_arena_init(&arena, block_size = 4096, out_band_size = 1024)
@@ -203,7 +78,7 @@ refusal :: proc(pattern: string, flags: Flags, allocator := context.allocator) -
 	return strings.clone(err, allocator) if err != "" else ""
 }
 
-// `compile` without the automaton.
+// Builds the program of `compile`, without the automaton.
 @(private = "file")
 program :: proc(pattern: string, flags: Flags, allocator: mem.Allocator) -> (re: Regex, err: string) {
 	context.allocator = allocator
@@ -254,8 +129,8 @@ program :: proc(pattern: string, flags: Flags, allocator: mem.Allocator) -> (re:
 		opt      = new_clone(search_opt(root)),
 		head     = new(Search_Opt),
 	}
-	// A callout that ends the search or counts over its starts sees which starts are tried, so the skip is then the one
-	// Oniguruma's optimizer makes alone.
+	// A callout that ends the search or counts the starts sees which starts are tried, so only the skip that
+	// Oniguruma's optimizer makes is used and no head is set.
 	like_onig := false
 	for co in pat.callouts {
 		like_onig ||= co.kind == .Error || co.kind == .Total_Count
@@ -269,8 +144,8 @@ program :: proc(pattern: string, flags: Flags, allocator: mem.Allocator) -> (re:
 			h.kind = .Map
 		}
 	}
-	// A string or map the optimizer finds at the start of every match narrows the head, which skips without windows and
-	// leaves no start too near the end for it.
+	// A string or map that the optimizer finds at the start of every match is merged into the head. The head skips
+	// without windows, so the optimizer's kind and threshold are cleared.
 	o := re.opt
 	if o.dist_max == 0 {
 		#partial switch o.kind {
@@ -318,78 +193,11 @@ program :: proc(pattern: string, flags: Flags, allocator: mem.Allocator) -> (re:
 	return re, ""
 }
 
-// Whether the visited set pays and holds for a program. Under ECMA it does with a loop, a look-ahead, two choices, or one
-// choice in a search that tries more than one start. Under jq it does with a
-// choice inside a loop, the one shape that backtracks past polynomial time, and when each instruction's outcome depends
-// on the position alone: no look-around, back reference, counter, call or callout, and no empty check, whose exit
-// Oniguruma takes where ECMA fails.
-@(private = "file")
-linear_ops :: proc(insts: []Inst, ecma: bool, anchored: bool) -> bool {
-	for ins in insts {
-		allowed := ecma
-		#partial switch ins.op {
-		case .Match, .Str, .Char_Fold, .Any, .Any_All, .Class, .Split, .Split_Head, .Jmp, .Set, .Linebreak, .Rep, .Rep_Lazy:
-			allowed = true
-		case .Save:
-			allowed ||= ins.a != 0 && ins.b == 0 // not \K, nor a referenced group's start
-		case .Assert:
-			allowed ||= Assert_Kind(ins.a) < .Fail
-		}
-		if !allowed {
-			return false
-		}
-	}
-	choices := 0
-	for ins, i in insts {
-		if ecma {
-			// A program that starts at one place and has one choice and no loop or look-ahead tries each alternative
-			// of it along a straight line, so the set would only cost.
-			choices += int(is_choice(ins))
-			if ins.op == .Look || ins.op == .Count_Next || ins.op == .Jmp && int(ins.a) < i {
-				return true
-			}
-		} else if ins.op == .Jmp && int(ins.a) < i && slice.any_of_proc(insts[ins.a + 1:i], is_choice) {
-			return true
-		}
-	}
-	return choices > 1 || choices == 1 && !anchored
-}
-
-@(private = "file")
-is_choice :: proc(ins: Inst) -> bool {
-	#partial switch ins.op {
-	case .Split, .Split_Head, .Count, .Count_Lazy, .Look:
-		return true
-	case .Rep, .Rep_Lazy:
-		return ins.a != ins.b
-	}
-	return false
-}
-
-// For each instruction, the look-ahead whose body it lies in (the innermost), or -1. Nil for none.
-@(private = "file")
-look_owners :: proc(insts: []Inst) -> []i32 {
-	owner: []i32
-	for ins, i in insts {
-		if ins.op != .Look {
-			continue
-		}
-		if owner == nil {
-			owner = make([]i32, len(insts))
-			slice.fill(owner, -1)
-		}
-		for k in i + 1 ..= int(ins.b) {
-			owner[k] = i32(i)
-		}
-	}
-	return owner
-}
-
-// The called groups no call has emitted in place (as a group under `{0}` is), each after the program, then each
-// call's address.
+// Emits each called group that no call has emitted in place (as a group under `{0}` is) after the program, then sets
+// each call's address.
 @(private = "file")
 emit_subroutines :: proc(c: ^Compiler) {
-	// By index: emitting a group grows c.insts, and the loop reaches the calls it emits.
+	// By index, because emitting a group grows c.insts and the loop must reach the calls that group emits.
 	for i := 0; i < len(c.insts); i += 1 {
 		if c.insts[i].op != .Call {
 			continue
@@ -404,105 +212,6 @@ emit_subroutines :: proc(c: ^Compiler) {
 	}
 }
 
-// Oniguruma's multi-character case folds (expand_case_fold_string, and a class's strings): under (?i) a character
-// that folds to two or three (ß to ss) also matches them. Two or three characters of a run that fold to those (ss)
-// also match the one character, three tried before two and the run going on past them, and a class not negated
-// matches, after its one character, the strings its characters fold to. In a look-behind's body only the classes have
-// them, as Oniguruma's parser gives them.
-@(private = "file")
-expand_folds :: proc(n: ^Node, behind := false) -> ^Node {
-	#partial switch n.kind {
-	case .Look:
-		if n.look == .Behind || n.look == .Not_Behind {
-			n.kids[0] = expand_folds(n.kids[0], true)
-			return n
-		}
-	case .Char:
-		if runes, ok := multi_fold(n.r); ok && n.fold && !behind {
-			return new_node(.Alt, n, fold_string(runes))
-		}
-		return n
-	case .Class:
-		strs := class_strings(n.class)
-		if len(strs) == 0 {
-			return n
-		}
-		alt := new_node(.Alt, n)
-		for s in strs {
-			append(&alt.kids, fold_string(s))
-		}
-		return alt
-	case .Cat:
-		if behind {
-			break
-		}
-		kids := make([dynamic]^Node, 0, len(n.kids))
-		for i := 0; i < len(n.kids); {
-			run := 0
-			for i + run < len(n.kids) && run < 3 && n.kids[i + run].kind == .Char && n.kids[i + run].fold {
-				run += 1
-			}
-			width := 1
-			for w := run; w >= 2 && width == 1; w -= 1 {
-				runes: [3]rune
-				for k in 0 ..< w {
-					runes[k] = n.kids[i + k].r
-				}
-				if r, ok := unfold(runes[:w]); ok {
-					one := new_node(.Char)
-					one.r, one.fold = r, true
-					append(&kids, new_node(.Alt, new_node(.Cat, ..n.kids[i:i + w]), one))
-					width = w
-				}
-			}
-			if width == 1 {
-				append(&kids, expand_folds(n.kids[i]))
-			}
-			i += width
-		}
-		n.kids = kids
-		return n
-	}
-	for &k in n.kids {
-		k = expand_folds(k, behind)
-	}
-	return n
-}
-
-// The strings, folded, a (?i) class that is not negated matches besides its characters: those its
-// characters fold to, each once.
-@(private = "file")
-class_strings :: proc(cls: ^Class) -> [dynamic][]u32 {
-	out := make([dynamic][]u32)
-	if !cls.fold || cls.negated {
-		return out
-	}
-	next: for &f in MULTI_FOLDS {
-		if !class_match_slow(cls, rune(f[0])) {
-			continue
-		}
-		s, _ := multi_fold(rune(f[0]))
-		for t in out {
-			if slice.equal(s, t) {
-				continue next
-			}
-		}
-		append(&out, s)
-	}
-	return out
-}
-
-@(private = "file")
-fold_string :: proc(runes: []u32) -> ^Node {
-	n := new_node(.Cat)
-	for r in runes {
-		k := new(Node)
-		k.kind, k.r, k.fold = .Char, rune(r), true
-		append(&n.kids, k)
-	}
-	return n
-}
-
 @(private = "file")
 add :: proc(c: ^Compiler, op: Op, a: int = 0, b: int = 0) -> int {
 	if len(c.insts) * size_of(Inst) >= MAX_BYTES {
@@ -515,23 +224,6 @@ add :: proc(c: ^Compiler, op: Op, a: int = 0, b: int = 0) -> int {
 		append(&c.counter_of, i32(c.counter))
 	}
 	return len(c.insts) - 1
-}
-
-// A character a fold-insensitive comparison sees as only itself.
-@(private)
-literal :: proc(n: ^Node) -> bool {
-	return n.kind == .Str || n.kind == .Char && utf8.valid_rune(n.r) && (!n.fold || fold_next(n.r) == n.r)
-}
-
-// The bytes of a `literal` node, a Char's written into `buf`.
-@(private)
-literal_text :: proc(n: ^Node, buf: ^[4]byte) -> string {
-	if n.kind == .Str {
-		return n.text
-	}
-	w: int
-	buf^, w = utf8.encode_rune(n.r)
-	return string(buf[:w])
 }
 
 @(private = "file")
@@ -610,8 +302,8 @@ emit :: proc(c: ^Compiler, n: ^Node) {
 			emit_group(c, n)
 			break
 		}
-		// A called group is a subroutine, which the group in place calls too. A counted repeat's later copy of it
-		// calls the first.
+		// A called group is emitted as a subroutine, and the group at its own position calls it too. A later copy of
+		// it, from a counted repeat, calls the first.
 		if c.addr[g] >= 0 {
 			add(c, .Call, c.addr[g], g)
 			break
@@ -624,7 +316,7 @@ emit :: proc(c: ^Compiler, n: ^Node) {
 		patch(c, call, c.addr[g], g)
 		patch(c, jump, len(c.insts))
 	case .Call:
-		add(c, .Call, -1, n.target.group) // its address once every group is emitted (`emit_subroutines`)
+		add(c, .Call, -1, n.target.group) // the address is set by `emit_subroutines` once every group is emitted
 	case .Absent:
 		emit_absent(c, n)
 	case .Repeat:
@@ -652,9 +344,9 @@ emit :: proc(c: ^Compiler, n: ^Node) {
 	}
 }
 
-// A group's captures and body. One that calls itself takes its start from the stack at its end, as Oniguruma's
-// OP_MEM_END_REC does, so it captures where its own call began. The whole pattern called (group 0) captures nothing
-// of its own.
+// Emits a group's captures and body. A group that calls itself reads its start from the stack at its end, as
+// Oniguruma's OP_MEM_END_REC does, so it captures where its own call began. The whole pattern called (group 0)
+// captures nothing of its own.
 @(private = "file")
 emit_group :: proc(c: ^Compiler, n: ^Node) {
 	g := n.group
@@ -678,9 +370,9 @@ emit_group :: proc(c: ^Compiler, n: ^Node) {
 	}
 }
 
-// The groups whose bounds Oniguruma pushes (its backtrack_mem), so the match undoes them as it backs past: those
-// within an alternative, a condition's branch, a negative look, an absent operator or a repeat of no fixed count.
-// Every other group's MEM_START and MEM_END write its bounds in place, and those a failed try wrote stay.
+// Marks the groups whose bounds Oniguruma pushes (its backtrack_mem), so that the match undoes them as it backs past:
+// those within an alternative, a condition's branch, a negative look, an absent operator or a repeat of no fixed count.
+// The MEM_START and MEM_END of every other group write its bounds in place, and the bounds a failed try wrote stay.
 @(private = "file")
 mark_undone :: proc(n: ^Node, undone: []bool, within: bool) {
 	within := within
@@ -699,10 +391,10 @@ mark_undone :: proc(n: ^Node, undone: []bool, within: bool) {
 	}
 }
 
-// An absent operator as Oniguruma's make_absent_tree runs one: the end the match reads to (its limit) is saved. The
-// absent is tried at each position from here short of the limit, and where it first matches becomes the limit, inside
-// a negative look so its captures and position are undone, then exp runs, and the saved limit comes back after it. A
-// stopper keeps the new limit, and `(?~|)` sets it to the text's end.
+// Emits an absent operator as Oniguruma's make_absent_tree does. It saves the limit, the end the match reads to. Then,
+// inside a negative look so that its captures and position are undone, it tries the absent at each position from here
+// short of the limit, and where the absent first matches becomes the new limit. Then exp runs, and the saved limit is
+// restored after it. A stopper keeps the new limit, and `(?~|)` sets the limit to the text's end.
 @(private = "file")
 emit_absent :: proc(c: ^Compiler, n: ^Node) {
 	if len(n.kids) == 0 {
@@ -755,7 +447,8 @@ emit_repeat :: proc(c: ^Compiler, n: ^Node) {
 	if n.max == 0 {
 		return
 	}
-	// Under ECMA a look-ahead's body has no Rep, whose alternatives the visited set's log does not follow (match.odin).
+	// Under ECMA no Rep is used in a look-ahead's body, because the visited set's log does not follow its alternatives
+	// (match.odin).
 	if (x.kind == .Char || x.kind == .Any || x.kind == .Class) && (n.max != n.min || c.ecma) && !(c.ecma && c.looking > 0) {
 		add(c, .Rep if n.greedy else .Rep_Lazy, n.min, n.max)
 		emit(c, x)
@@ -765,11 +458,11 @@ emit_repeat :: proc(c: ^Compiler, n: ^Node) {
 		emit_counted(c, n)
 		return
 	}
-	// A body that can match empty is left once an iteration of it does, as Oniguruma's empty check
-	// leaves it, so `(a*)*` ends.
+	// A body that can match empty ends the loop after an iteration that does match empty, as Oniguruma's empty check
+	// does, so `(a*)*` terminates.
 	empty := can_be_empty(x)
-	// One least iteration of a body that cannot match empty enters the loop past its Split, as Oniguruma's OP_JUMP
-	// does, rather than as a copy, which nested repeats would double at every level.
+	// With a minimum of 1 and a body that cannot match empty, the first iteration is entered by a jump into the loop
+	// past its Split, as Oniguruma's OP_JUMP does. A copy of the body would double nested repeats at every level.
 	enter := add(c, .Jmp) if n.min == 1 && !empty else -1
 	if enter < 0 && n.min > 1 && c.ecma && looped(c, n) {
 		emit_counter_loop(c, x, n.min, n.min, true, -1)
@@ -800,16 +493,18 @@ emit_repeat :: proc(c: ^Compiler, n: ^Node) {
 	if empty {
 		patch(c, check, mark, -1 if c.ecma else exit)
 	} else if h := head_literal(x); h != nil && (h.kind == .Str || h.kind == .Char && !h.fold && utf8.valid_rune(h.r)) && n.greedy && n.min <= 1 {
-		// Oniguruma's OP_PUSH_OR_JUMP_EXACT1: no alternative is kept for an iteration that cannot start (one that
-		// starts with an exact character, no class, no case folding), which its retry limit counts.
+		// Oniguruma's OP_PUSH_OR_JUMP_EXACT1: when the body starts with an exact character (no class, no case
+		// folding), no alternative is pushed for an iteration that cannot start, and Oniguruma's retry limit counts
+		// that.
 		head, _ := utf8.encode_rune(h.r)
 		c.insts[loop] = {op = .Split_Head, a = i32(head[0]), b = i32(exit)}
 	}
 }
 
-// A repeat to a most count. Oniguruma's counted repeat leaves a body that can match empty once an iteration
-// of it does, short of its least count too: `(|a){2}b` matches "ab" with the group empty after the a. ECMA's lets an
-// iteration short of the least count match empty, and fails one past it that does, `(a?)?` included.
+// Emits a repeat with a maximum count. In Oniguruma's counted repeat, once an iteration of a body that can match empty
+// does match empty, the loop ends even short of the least count: `(|a){2}b` matches "ab" with the group empty after the
+// a. In ECMA's, an iteration short of the least count may match empty, and one past it fails when it does, `(a?)?`
+// included.
 @(private = "file")
 emit_counted :: proc(c: ^Compiler, n: ^Node) {
 	x := n.kids[0]
@@ -823,17 +518,17 @@ emit_counted :: proc(c: ^Compiler, n: ^Node) {
 	start := len(c.insts)
 	at := emitted(c)
 	for i in 0 ..< n.max {
-		// Under ECMA a repeat written out past ECMA_WRITTEN_OUT runs as a counter loop instead, whose one body holds
-		// the empty-iteration rule by its count.
+		// Under ECMA a repeat written out past ECMA_WRITTEN_OUT runs as a counter loop instead, whose single body
+		// applies the empty-iteration rule by its count.
 		if i == 1 && c.ecma && (len(c.insts) - start) * n.max > ECMA_WRITTEN_OUT {
 			take_back(c, at)
 			append(&c.looped, n)
 			emit_counter_loop(c, x, n.min, n.max, n.greedy, mark)
 			return
 		}
-		// A call reuses the slots, so a counter is only kept where no group can be entered again.
+		// Calls enter groups again and reuse the slots, so this counter loop is used only in a pattern without calls.
 		if i == 1 && c.addr == nil && !c.ecma && (len(c.insts) - start) * n.max > COUNTED_WRITTEN_OUT {
-			// The rest in a counter loop: its Count is an exit, as a Split is.
+			// The remaining iterations run in a counter loop, whose Count can exit the loop as a Split does.
 			slot := new_slot(c)
 			add(c, .Count_Reset, slot)
 			loop := add(c, .Count if n.greedy else .Count_Lazy, slot)
@@ -869,8 +564,9 @@ emit_counted :: proc(c: ^Compiler, n: ^Node) {
 	}
 }
 
-// A loop's body, after a mark and before the check that leaves the loop once an iteration matched empty, or
-// with neither for `mark` -1. Under ECMA an iteration starts with its groups unset. The check's index, or -1.
+// Emits a loop's body. With `mark` set it saves the mark before the body and adds a check after it that leaves the loop
+// once an iteration matched empty. With `mark` -1 it adds neither. Under ECMA an iteration starts with its groups
+// unset. Returns the check's instruction index, or -1.
 @(private = "file")
 emit_body :: proc(c: ^Compiler, x: ^Node, mark: int) -> int {
 	if last := last_group(x); c.ecma && last > 0 {
@@ -903,19 +599,19 @@ new_slot :: proc(c: ^Compiler) -> int {
 @(private = "file")
 COUNTED_WRITTEN_OUT :: 1024
 
-// The most instructions an ECMA counted repeat is written out to, which the automaton needs, and few programs past it
-// fit the automaton's caps. A longer one runs its body once in a counter loop, so nested repeats add their bodies
-// rather than multiply them.
+// The most instructions an ECMA counted repeat is written out to. Few programs larger than this fit the automaton's
+// caps. A longer repeat runs its body once in a counter loop, so nested repeats add their sizes instead of multiplying
+// them.
 @(private = "file")
 ECMA_WRITTEN_OUT :: 1 << 13
 
-// Whether the ECMA repeat `n` runs as a counter loop, which a repeat around it emitting its body again finds.
+// Whether the ECMA repeat `n` already runs as a counter loop, as found when a repeat around it emits its body again.
 @(private = "file")
 looped :: proc(c: ^Compiler, n: ^Node) -> bool {
 	return slice.contains(c.looped[:], n)
 }
 
-// How much of each of the compiler's lists has been emitted, for `take_back`.
+// The length of each of the compiler's lists at one point, for `take_back`.
 @(private = "file")
 Emitted :: struct {
 	insts, bytes, classes, refs, loops, counters: int,
@@ -939,8 +635,8 @@ take_back :: proc(c: ^Compiler, at: Emitted) {
 	resize(&c.counters, at.counters)
 }
 
-// An ECMA repeat of `x` from `least` to `most` times as one body in a loop whose count is in a slot of its own. With a
-// `mark`, an iteration past the least count that matches nothing fails, and one short of it goes on.
+// Emits an ECMA repeat of `x` from `least` to `most` times as one body in a loop whose count is kept in a slot of its
+// own. With a `mark`, an iteration past the least count that matches empty fails, and one short of it continues.
 @(private = "file")
 emit_counter_loop :: proc(c: ^Compiler, x: ^Node, least, most: int, greedy: bool, mark: int) {
 	slot := new_slot(c)
@@ -980,8 +676,8 @@ emit_look :: proc(c: ^Compiler, n: ^Node) {
 	if back > 0 {
 		add(c, .Back, back)
 	}
-	// The visited set may carry an ECMA look-ahead on at its end with its groups unset (match.odin), which they are
-	// from its start too.
+	// The visited set may carry an ECMA look-ahead on at its end with its groups unset (match.odin), so the groups are
+	// unset from its start too.
 	if last := last_group(body); c.ecma && last > 0 && n.look == .Ahead {
 		add(c, .Unset, 2 * first_group(body), 2 * last + 2)
 	}
@@ -992,29 +688,26 @@ emit_look :: proc(c: ^Compiler, n: ^Node) {
 	patch(c, look, int(n.look), end)
 }
 
-
-
+// The least group number in `n`, 0 for none.
 @(private)
-class_match_slow :: proc(cls: ^Class, r: rune) -> bool {
-	// `r`, then each character of its case fold orbit when the class folds.
-	x := r
-	for {
-		for g in cls.ranges {
-			if x >= g[0] && x <= g[1] {
-				return !cls.negated
-			}
-		}
-		for it in cls.props {
-			if in_table(int(it.table), x) != it.neg {
-				return !cls.negated
-			}
-		}
-		if !cls.fold {
-			return cls.negated
-		}
-		x = fold_next(x)
-		if x == r {
-			return cls.negated
+first_group :: proc(n: ^Node) -> int {
+	if n.kind == .Group && n.group > 0 {
+		return n.group // a group's number is less than those inside it
+	}
+	for k in n.kids {
+		if g := first_group(k); g > 0 {
+			return g
 		}
 	}
+	return 0
+}
+
+// The greatest group number in `n`, 0 for none.
+@(private)
+last_group :: proc(n: ^Node) -> int {
+	last := n.group if n.kind == .Group else 0
+	for k in n.kids {
+		last = max(last, last_group(k))
+	}
+	return last
 }

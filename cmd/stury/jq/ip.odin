@@ -88,17 +88,8 @@ parse_dotted :: proc(s: string, out: []byte) -> bool {
 	rest := s
 	n := 0
 	for part in strings.split_iterator(&rest, ".") {
-		v := 0
-		if n >= 4 || len(part) < 1 || len(part) > 3 || len(part) > 1 && part[0] == '0' {
-			return false
-		}
-		for c in transmute([]byte)part {
-			if c < '0' || c > '9' {
-				return false
-			}
-			v = v * 10 + int(c - '0')
-		}
-		if v > 255 {
+		v, ok := spell.digits_u64(part, 256)
+		if n >= 4 || !ok || v > 255 || len(part) > 3 || len(part) > 1 && part[0] == '0' {
 			return false
 		}
 		out[n] = byte(v)
@@ -236,13 +227,8 @@ fn_ip_in_cidr :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (re
 	cidr, _ := string_of(args[0])
 	network_text, _, length_text := strings.partition(cidr, "/")
 	network, network_ok := parse_address(network_text)
-	length := 0
-	length_ok := length_text != "" && len(length_text) <= 3
-	for c in transmute([]byte)length_text {
-		length = length * 10 + int(c - '0')
-		length_ok &&= c >= '0' && c <= '9'
-	}
-	if !network_ok || !length_ok || length > (32 if network.v4 else 128) {
+	length, length_ok := spell.digits_u64(length_text, 129)
+	if !network_ok || !length_ok || len(length_text) > 3 || length > (32 if network.v4 else 128) {
 		return nil, fail(ip, "%s (%s) is not a CIDR network", type_name(args[0]), brief(ip, args[0]))
 	}
 	if a.v4 != network.v4 {

@@ -1,6 +1,7 @@
 package yaml
 
 import "core:unicode/utf8"
+import spell "../core/spell"
 
 // Writer into the caller's buffer. A write past the buffer's end sets `over` and is dropped.
 @(private)
@@ -44,11 +45,6 @@ decode :: proc "contextless" (span: []u8, spelling: u16, buf: []u8) -> (s: strin
 		decode_block(&o, span, spelling)
 	}
 	return string(buf[:o.n]), !o.over
-}
-
-@(private)
-hex_value :: #force_inline proc "contextless" (b: u8) -> u32 {
-	return u32(b - '0') if b <= '9' else u32((b | 0x20) - 'a' + 10)
 }
 
 // Decodes a plain, single-quoted or double-quoted scalar's body. Line breaks fold: one between two lines is a space,
@@ -128,7 +124,7 @@ fold_flow :: proc "contextless" (o: ^Decoded, s: []u8, style: Style) {
 				digits := 2 if e == 'x' else 4 if e == 'u' else 8
 				cp := u32(0)
 				for _ in 0 ..< digits {
-					cp = cp << 4 | hex_value(s[i])
+					cp = cp << 4 | u32(spell.HEX_NIBBLE[s[i]])
 					i += 1
 				}
 				put_rune(o, cp)

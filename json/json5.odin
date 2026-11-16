@@ -6,8 +6,8 @@ import "core:simd"
 import "core:unicode"
 import "core:unicode/utf8"
 import spell "../core/spell"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 
 // This file reads JSON5 1.0.0's forms beyond JSON's in a spec with `.Es5`. They are its numbers, strings and escapes,
 // unquoted keys and whitespace. A token JSON spells alike is read by JSON's leaf, and a state here runs only where that
@@ -50,12 +50,11 @@ st_number5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w
 
 // Returns the lanes of `v` that are a hex digit: `0` to `9`, or `a` to `f` in either case.
 @(private)
-hex_digits :: #force_inline proc "contextless" (v: #simd[16]u8) -> #simd[16]u8 {
-	K :: #simd[16]u8
+hex_digits :: #force_inline proc "contextless" (v: V) -> V {
 	lower := v | 0x20
 	return simd.bit_or(
-		simd.bit_and(simd.lanes_ge(v, K('0')), simd.lanes_le(v, K('9'))),
-		simd.bit_and(simd.lanes_ge(lower, K('a')), simd.lanes_le(lower, K('f'))),
+		simd.bit_and(simd.lanes_ge(v, V('0')), simd.lanes_le(v, V('9'))),
+		simd.bit_and(simd.lanes_ge(lower, V('a')), simd.lanes_le(lower, V('f'))),
 	)
 }
 
@@ -65,7 +64,7 @@ hex_run :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_
 	q := p
 	for intrinsics.ptr_sub(end, q) >= 16 {
 		// The first lane that holds no hex digit.
-		k := kernel.first_lane(~hex_digits(load16(q)))
+		k := kernel.first_lane16(~hex_digits(kernel.load16(q)))
 		if k != 16 {
 			return q[k:]
 		}

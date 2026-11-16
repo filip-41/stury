@@ -3,6 +3,7 @@ package xml
 import "base:intrinsics"
 import "base:runtime"
 import spell "../core/spell"
+import kernel "../core/kernel"
 import core "../core"
 
 // The internal subset: every `markupdecl` production is judged, and the entity and attribute-list declarations go
@@ -21,7 +22,7 @@ MAX_NEST :: 64
 declarations :: proc "contextless" (d: ^Dtd, rw: ^Walk(core.No_Hooks), p, end: [^]u8, top, stored: bool, nest: int) -> ([^]u8, Dtd_Fault) #no_bounds_check {
 	q := p
 	for {
-		q = skip_ws(q, end)
+		q = kernel.skip_ws(q, end)
 		if q >= end {
 			if top {
 				return q, {end, .Truncated, .None}
@@ -112,7 +113,7 @@ decl_rule :: #force_inline proc "contextless" (q, end: [^]u8, detail: Detail) ->
 // Passes the whitespace at `q`, of which there must be some.
 @(private)
 gap :: proc "contextless" (q, end: [^]u8, detail: Detail) -> ([^]u8, Dtd_Fault) {
-	s := skip_ws(q, end)
+	s := kernel.skip_ws(q, end)
 	if s >= end {
 		return s, {end, .Truncated, .None}
 	}
@@ -155,7 +156,7 @@ decl_name :: proc "contextless" (q, end: [^]u8, detail: Detail, no_colon := fals
 // Passes the whitespace at `q` and the `>` that ends a declaration.
 @(private)
 decl_close :: proc "contextless" (q, end: [^]u8, detail: Detail) -> ([^]u8, Dtd_Fault) {
-	s := skip_ws(q, end)
+	s := kernel.skip_ws(q, end)
 	if s >= end {
 		return s, {end, .Truncated, .None}
 	}
@@ -186,7 +187,7 @@ element_declaration :: proc "contextless" (p, end: [^]u8) -> ([^]u8, Dtd_Fault) 
 	case keyword(q, end, "ANY"):
 		q = q[3:]
 	case q[0] == '(':
-		s := skip_ws(q[1:], end)
+		s := kernel.skip_ws(q[1:], end)
 		if keyword(s, end, "#PCDATA") {
 			q, f = mixed(s[7:], end)
 		} else {
@@ -207,7 +208,7 @@ mixed :: proc "contextless" (p, end: [^]u8) -> ([^]u8, Dtd_Fault) #no_bounds_che
 	q := p
 	names := false
 	for {
-		q = skip_ws(q, end)
+		q = kernel.skip_ws(q, end)
 		if q >= end {
 			return q, {end, .Truncated, .None}
 		}
@@ -221,7 +222,7 @@ mixed :: proc "contextless" (p, end: [^]u8) -> ([^]u8, Dtd_Fault) #no_bounds_che
 			}
 			return q[1:], {}
 		case '|':
-			s := skip_ws(q[1:], end)
+			s := kernel.skip_ws(q[1:], end)
 			n, f := decl_name(s, end, .Element_Declaration)
 			if f.kind != .None {
 				return n, f
@@ -239,13 +240,13 @@ content_group :: proc "contextless" (p, end: [^]u8, nest: int) -> ([^]u8, Dtd_Fa
 	if nest >= MAX_NEST {
 		return p, {p, .Too_Deep, .None}
 	}
-	q, f := content_particle(skip_ws(p[1:], end), end, nest)
+	q, f := content_particle(kernel.skip_ws(p[1:], end), end, nest)
 	if f.kind != .None {
 		return q, f
 	}
 	sep: u8
 	for {
-		q = skip_ws(q, end)
+		q = kernel.skip_ws(q, end)
 		if q >= end {
 			return q, {end, .Truncated, .None}
 		}
@@ -257,7 +258,7 @@ content_group :: proc "contextless" (p, end: [^]u8, nest: int) -> ([^]u8, Dtd_Fa
 			return q, {q, .Bad_Char, decl_rule(q, end, .Element_Declaration)}
 		}
 		sep = c
-		q, f = content_particle(skip_ws(q[1:], end), end, nest)
+		q, f = content_particle(kernel.skip_ws(q[1:], end), end, nest)
 		if f.kind != .None {
 			return q, f
 		}
@@ -307,7 +308,7 @@ attlist_declaration :: proc "contextless" (d: ^Dtd, rw: ^Walk(core.No_Hooks), p,
 	}
 	element_name := element[:intrinsics.ptr_sub(q, element)]
 	for {
-		s := skip_ws(q, end)
+		s := kernel.skip_ws(q, end)
 		if s >= end {
 			return s, {end, .Truncated, .None}
 		}
@@ -457,7 +458,7 @@ declare_attribute :: proc "contextless" (d: ^Dtd, element, name: []u8, a: Attr_D
 enumeration :: proc "contextless" (p, end: [^]u8, names: bool) -> ([^]u8, Dtd_Fault) #no_bounds_check {
 	q := p
 	for {
-		q = skip_ws(q[1:], end)
+		q = kernel.skip_ws(q[1:], end)
 		t: [^]u8
 		f: Dtd_Fault
 		if names {
@@ -468,7 +469,7 @@ enumeration :: proc "contextless" (p, end: [^]u8, names: bool) -> ([^]u8, Dtd_Fa
 		if f.kind != .None {
 			return t, f
 		}
-		q = skip_ws(t, end)
+		q = kernel.skip_ws(t, end)
 		if q >= end {
 			return q, {end, .Truncated, .None}
 		}
@@ -606,7 +607,7 @@ entity_declaration :: proc "contextless" (d: ^Dtd, p, end: [^]u8, stored: bool) 
 		}
 		e.flags += {.External}
 		if kind == .General {
-			s := skip_ws(q, end)
+			s := kernel.skip_ws(q, end)
 			if s > q && keyword(s, end, "NDATA") {
 				s, f = gap(s[5:], end, .Entity_Declaration)
 				if f.kind == .None {
@@ -732,7 +733,7 @@ replacement_text :: proc "contextless" (d: ^Dtd, value: []u8) -> (lo: u64, n: u3
 		switch {
 		case c == '&' && value[i + 1] == '#':
 			k, r, _ := decode_reference(value[i:])
-			w += spell.put_rune(out[w:][:4], r)
+			w += spell.rune_text(out[w:][:4], r)
 			i += k
 		case c == '\r':
 			out[w] = '\n'

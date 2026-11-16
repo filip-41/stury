@@ -1,5 +1,6 @@
 package html
 
+import spell "../core/spell"
 import core "../core"
 
 // The encoding sniffing of the standard's section 13.2.3: a byte order mark, else a `meta` that the prescan finds in
@@ -207,12 +208,12 @@ meta :: proc "contextless" (b: []u8, i: ^int) -> (enc: Encoding, at: u64, ok, en
 		name := b[attr.name_lo:attr.name_hi]
 		value := b[attr.value_lo:attr.value_hi]
 		switch {
-		case ascii_fold_equal(string(name), "http-equiv"):
+		case spell.ascii_fold_equal(string(name), "http-equiv"):
 			if .Http_Equiv not_in seen {
 				seen += {.Http_Equiv}
-				got_pragma ||= ascii_fold_equal(string(value), "content-type")
+				got_pragma ||= spell.ascii_fold_equal(string(value), "content-type")
 			}
-		case ascii_fold_equal(string(name), "content"):
+		case spell.ascii_fold_equal(string(name), "content"):
 			if .Content not_in seen {
 				seen += {.Content}
 				if !charset_set {
@@ -223,7 +224,7 @@ meta :: proc "contextless" (b: []u8, i: ^int) -> (enc: Encoding, at: u64, ok, en
 					}
 				}
 			}
-		case ascii_fold_equal(string(name), "charset"):
+		case spell.ascii_fold_equal(string(name), "charset"):
 			if .Charset not_in seen {
 				seen += {.Charset}
 				e, a, found := encoding_of(b, attr.value_lo, attr.value_hi)

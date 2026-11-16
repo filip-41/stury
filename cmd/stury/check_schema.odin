@@ -9,6 +9,7 @@ import "base:runtime"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import "../../core/spell"
 import core "../../core"
 import "../../core/typed"
 import "../../core/write"
@@ -77,7 +78,7 @@ schema_option :: proc(s: ^Schema_Options, args: []string, i: int) {
 	case "--filter":
 		s.filter = value
 	case "--max-errors":
-		n, ok := parse_digits(value, 1 << 31)
+		n, ok := spell.digits_u64(value, 1 << 31)
 		if !ok || n < 1 {
 			usage_error("--max-errors takes a number from 1")
 		}

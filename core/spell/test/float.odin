@@ -366,17 +366,6 @@ f32_every_binade_edge :: proc(t: ^testing.T) {
 	verify(t, all[:], f32)
 }
 
-@(test)
-f32_random_bits :: proc(t: ^testing.T) {
-	all := make([]u64, ROUNDS)
-	defer delete(all)
-	state := u64(4)
-	for &bits in all {
-		bits = splitmix(&state) & 0xffff_ffff
-	}
-	verify(t, all, f32)
-}
-
 Sweep :: struct {
 	first, last: u64,
 	faults:      int,

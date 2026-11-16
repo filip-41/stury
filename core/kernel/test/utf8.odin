@@ -7,29 +7,28 @@ import "core:testing"
 import "core:unicode/utf8"
 import k ".."
 
-// Returns whether the kernel finds `src` valid UTF-8, a 64-byte block at a time, through `utf8_next` when `skip_ascii`
-// is set.
+// Returns whether the kernel finds `src` valid UTF-8, a 64-byte block at a time, skipping ASCII blocks when
+// `skip_ascii` is set.
 @(enable_target_feature = FEATURES)
 kernel_utf8 :: proc(src: []u8, skip_ascii: bool) -> bool {
 	s: k.Utf8_State
 	high: bool
 	for lo := 0; lo < len(src); lo += 64 {
-		b := lo + 64 <= len(src) ? k.load(raw_data(src[lo:])) : k.load_padded(T, src, lo)
-		if skip_ascii {
-			k.utf8_next(T, b, k.is_ascii(b), &s, &high)
-		} else {
-			k.utf8_block(T, b, &s)
-		}
+		b := k.load_block(T, src, lo)
+		k.utf8_next(T, b, skip_ascii && k.is_ascii(b), &s, &high)
 	}
 	return k.utf8_ok(s)
 }
 
+// Checks `kernel_utf8`, with and without skipping ASCII blocks, and `utf8_valid` against the standard library.
 check_utf8 :: proc(t: ^testing.T, src: []u8, loc := #caller_location) {
 	want := utf8.valid_string(string(src))
 	for skip in ([2]bool{false, true}) {
 		got := kernel_utf8(src, skip)
 		testing.expectf(t, got == want, "% x, skip ascii %v: %v, want %v", src, skip, got, want, loc = loc)
 	}
+	got := k.utf8_valid(src)
+	testing.expectf(t, got == want, "% x, utf8_valid: %v, want %v", src, got, want, loc = loc)
 }
 
 // Each pair of bytes followed by two bytes that continue, end or break a sequence, placed where a 16-byte vector
@@ -154,8 +153,9 @@ utf8_clean_at_block_end :: proc(t: ^testing.T) {
 			buf[rand.int_max(n)] = u8(rand.int_max(256))
 		}
 		s: k.Utf8_State
+		high: bool
 		for lo := 0; lo < n; lo += 64 {
-			k.utf8_block(T, k.load(raw_data(buf[lo:])), &s)
+			k.utf8_next(T, k.load(raw_data(buf[lo:])), false, &s, &high)
 		}
 		want := reference_clean(buf[:n])
 		testing.expectf(t, k.utf8_clean(T, s) == want, "% x: %v, want %v", buf[n - 8:n], !want, want)

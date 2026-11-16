@@ -4,8 +4,8 @@ import "base:intrinsics"
 import "core:simd"
 import "core:unicode/utf8"
 import spell "../core/spell"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 import write "../core/write"
 
 // The JSON string writer. A string is checked as UTF-8 and written with `"`, `\` and the control bytes escaped as
@@ -107,8 +107,6 @@ QUOTE :: V('"')
 @(private)
 BACKSLASH :: V('\\')
 @(private)
-HIGH :: V(0x80)
-@(private)
 PAD :: V(0x61)
 @(private)
 PAD_WORD :: u64(0x6161616161616161)
@@ -128,11 +126,7 @@ esc_lanes :: #force_inline proc "contextless" (v: V) -> V {
 // and with `ESC_DEL` a DEL.
 @(private)
 dirty :: #force_inline proc "contextless" (v: V, $ESC_DEL: bool) -> bool {
-	m := simd.lanes_lt(transmute(#simd[16]i8)v, (#simd[16]i8)(0x20)) | simd.lanes_eq(v, QUOTE) | simd.lanes_eq(v, BACKSLASH)
-	when ESC_DEL {
-		m |= simd.lanes_eq(v, DEL)
-	}
-	return kernel.any_lane16(m)
+	return kernel.any_lane16(kernel.control_or_high16(v, ESC_DEL) | simd.lanes_eq(v, QUOTE) | simd.lanes_eq(v, BACKSLASH))
 }
 
 // Writes `s` as a JSON string at the output's cursor and returns `.Invalid_Utf8` when it is not UTF-8. With `ascii` DEL and
@@ -168,7 +162,7 @@ put_short :: #force_inline proc(out: ^write.Out, p: [^]u8, s: string, $ESC_DEL: 
 		}
 		if !dirty(v, ESC_DEL) {
 			p[0] = '"'
-			intrinsics.unaligned_store((^V)(p[1:]), v)
+			kernel.store16(p[1:], v)
 			p[1 + len(s)] = '"'
 			out.cursor += len(s) + 2
 			return .None
@@ -189,17 +183,17 @@ put_string_mid :: proc(out: ^write.Out, s: string, $ESC_DEL: bool) -> core.Typed
 	p := write.room(out, n + 18)
 	i := 0
 	for ; i + 16 < n; i += 16 {
-		v := intrinsics.unaligned_load((^V)(src[i:]))
+		v := kernel.load16(src[i:])
 		if dirty(v, ESC_DEL) {
 			return put_mixed(out, s, i, ESC_DEL)
 		}
-		intrinsics.unaligned_store((^V)(p[1 + i:]), v)
+		kernel.store16(p[1 + i:], v)
 	}
-	v := intrinsics.unaligned_load((^V)(src[n - 16:]))
+	v := kernel.load16(src[n - 16:])
 	if dirty(v, ESC_DEL) {
 		return put_mixed(out, s, i, ESC_DEL)
 	}
-	intrinsics.unaligned_store((^V)(p[1 + n - 16:]), v)
+	kernel.store16(p[1 + n - 16:], v)
 	p[0], p[1 + n] = '"', '"'
 	out.cursor += n + 2
 	return .None
@@ -233,10 +227,10 @@ short_block :: #force_inline proc "contextless" (src: [^]u8, n: int) -> V #no_bo
 tail_block :: #force_inline proc "contextless" (src: [^]u8, i, n: int) -> V #no_bounds_check {
 	live := n - i
 	if n >= 16 {
-		last := intrinsics.unaligned_load((^V)(src[n - 16:]))
+		last := kernel.load16(src[n - 16:])
 		lane := simd.indices(V)
 		shifted := simd.runtime_swizzle(last, lane + V(u8(16 - live)))
-		return simd.select(simd.lanes_lt(lane, V(u8(live))), shifted, PAD)
+		return simd.select(kernel.live16(live), shifted, PAD)
 	}
 	return short_block(src[i:], live)
 }
@@ -275,11 +269,11 @@ escape_del_block :: #force_no_inline proc "contextless" (base: [^]u8, o: int, v:
 
 // Copies the 64-byte blocks of `src` from `i` while they hold no stop, with `ESC_DEL` a DEL among them, checking the
 // UTF-8 of those with a byte past 0x7F.
-// Out of line so the four registers of a block stay out of `put_mixed`'s loop, which spills them. `prev` is the last
-// block read, `bad` the faults so far and `high` whether `prev` ended after a byte past 0x7F. It stops before `end`, at
-// the first block with a stop, and returns the source offset and the offset in `base`.
+// Out of line so the four registers of a block stay out of `put_mixed`'s loop, which spills them. `u` is the UTF-8 state
+// and `high` whether the block before had a byte past 0x7F. It stops before `end`, at the first block with a stop, and
+// returns the source offset and the offset in `base`.
 @(private)
-wide_run :: #force_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool, $ESC_DEL: bool) -> (int, int) {
+wide_run :: #force_inline proc "contextless" (base, src: [^]u8, i, o, end: int, u: ^kernel.Utf8_State, high: ^bool, $ESC_DEL: bool) -> (int, int) {
 	i, o := i, o
 	for ; i + 64 <= end; i += 64 {
 		b := kernel.load(src[i:])
@@ -290,14 +284,7 @@ wide_run :: #force_inline proc "contextless" (base, src: [^]u8, i, o, end: int, 
 		if kernel.any_lane(stop) {
 			break
 		}
-		if !kernel.is_ascii(b) {
-			bad^ |= kernel.utf8_window(prev^, b[0]) | kernel.utf8_window(b[0], b[1]) | kernel.utf8_window(b[1], b[2]) | kernel.utf8_window(b[2], b[3])
-			high^ = true
-		} else if high^ {
-			bad^ |= kernel.utf8_window(prev^, b[0])
-			high^ = false
-		}
-		prev^ = b[3]
+		kernel.utf8_next(kernel.Tier(0), b, kernel.is_ascii(b), u, high)
 		intrinsics.unaligned_store((^kernel.Block)(base[o:]), b)
 		o += 64
 	}
@@ -308,37 +295,37 @@ wide_run :: #force_inline proc "contextless" (base, src: [^]u8, i, o, end: int, 
 // use the tier's registers.
 when ODIN_ARCH == .amd64 {
 	@(private, enable_target_feature = kernel.FEATURES[.V2])
-	wide_run_v2 :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool, $ESC_DEL: bool) -> (int, int) {
-		return wide_run(base, src, i, o, end, prev, bad, high, ESC_DEL)
+	wide_run_v2 :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, u: ^kernel.Utf8_State, high: ^bool, $ESC_DEL: bool) -> (int, int) {
+		return wide_run(base, src, i, o, end, u, high, ESC_DEL)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V3])
-	wide_run_v3 :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool, $ESC_DEL: bool) -> (int, int) {
-		return wide_run(base, src, i, o, end, prev, bad, high, ESC_DEL)
+	wide_run_v3 :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, u: ^kernel.Utf8_State, high: ^bool, $ESC_DEL: bool) -> (int, int) {
+		return wide_run(base, src, i, o, end, u, high, ESC_DEL)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V4])
-	wide_run_v4 :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool, $ESC_DEL: bool) -> (int, int) {
-		return wide_run(base, src, i, o, end, prev, bad, high, ESC_DEL)
+	wide_run_v4 :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, u: ^kernel.Utf8_State, high: ^bool, $ESC_DEL: bool) -> (int, int) {
+		return wide_run(base, src, i, o, end, u, high, ESC_DEL)
 	}
 } else {
 	@(private)
-	wide_run_base :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool, $ESC_DEL: bool) -> (int, int) {
-		return wide_run(base, src, i, o, end, prev, bad, high, ESC_DEL)
+	wide_run_base :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, u: ^kernel.Utf8_State, high: ^bool, $ESC_DEL: bool) -> (int, int) {
+		return wide_run(base, src, i, o, end, u, high, ESC_DEL)
 	}
 }
 
 @(private)
-wide_run_tier :: #force_inline proc "contextless" (tier: kernel.Tier, base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool, $ESC_DEL: bool) -> (int, int) {
+wide_run_tier :: #force_inline proc "contextless" (tier: kernel.Tier, base, src: [^]u8, i, o, end: int, u: ^kernel.Utf8_State, high: ^bool, $ESC_DEL: bool) -> (int, int) {
 	when ODIN_ARCH == .amd64 {
 		switch tier {
 		case .V4:
-			return wide_run_v4(base, src, i, o, end, prev, bad, high, ESC_DEL)
+			return wide_run_v4(base, src, i, o, end, u, high, ESC_DEL)
 		case .V3:
-			return wide_run_v3(base, src, i, o, end, prev, bad, high, ESC_DEL)
+			return wide_run_v3(base, src, i, o, end, u, high, ESC_DEL)
 		case .V2:
 		}
-		return wide_run_v2(base, src, i, o, end, prev, bad, high, ESC_DEL)
+		return wide_run_v2(base, src, i, o, end, u, high, ESC_DEL)
 	} else {
-		return wide_run_base(base, src, i, o, end, prev, bad, high, ESC_DEL)
+		return wide_run_base(base, src, i, o, end, u, high, ESC_DEL)
 	}
 }
 
@@ -370,18 +357,19 @@ put_mixed :: #force_no_inline proc(out: ^write.Out, s: string, i0: int, $ESC_DEL
 			left := n - i
 			if i >= try_from && left >= 64 && i + 64 <= end {
 				// Copies, so that the address the call takes keeps `prev`, `bad` and `high` out of memory in this loop.
-				run_prev, run_bad, run_high := prev, bad, high
-				i, o = wide_run_tier(tier, base, src, i, o, end, &run_prev, &run_bad, &run_high, ESC_DEL)
-				prev, bad, high = run_prev, run_bad, run_high
+				run := kernel.Utf8_State{prev = transmute(#simd[64]u8)[4]V{{}, {}, {}, prev}, err = transmute(#simd[64]u8)[4]V{bad, {}, {}, {}}}
+				run_high := high
+				i, o = wide_run_tier(tier, base, src, i, o, end, &run, &run_high, ESC_DEL)
+				prev, bad, high = (transmute([4]V)run.prev)[3], (transmute([4]V)run.err)[0], run_high
 				try_from = i + 64
 				if i >= end {
 					break
 				}
 				left = n - i
 			}
-			v := intrinsics.unaligned_load((^V)(src[i:])) if left >= 16 else tail_block(src, i, n)
+			v := kernel.load16(src[i:]) if left >= 16 else tail_block(src, i, n)
 			take := min(left, 16)
-			h := kernel.any_lane16(simd.lanes_ge(v, HIGH))
+			h := !kernel.is_ascii16(v)
 			if h || high {
 				bad |= kernel.utf8_window(prev, v)
 			}
@@ -394,7 +382,7 @@ put_mixed :: #force_no_inline proc(out: ^write.Out, s: string, i0: int, $ESC_DEL
 				try_from = i + 80
 				o = escape_block(base, o, v, ESC_DEL) - (16 - take)
 			} else {
-				intrinsics.unaligned_store((^V)(base[o:]), v)
+				kernel.store16(base[o:], v)
 				o += take
 			}
 			i += take
@@ -403,7 +391,7 @@ put_mixed :: #force_no_inline proc(out: ^write.Out, s: string, i0: int, $ESC_DEL
 			if high {
 				bad |= kernel.utf8_window(prev, PAD)
 			}
-			if simd.reduce_or(bad) != 0 {
+			if !kernel.all_zero(bad) {
 				return .Invalid_Utf8
 			}
 			base[o] = '"'
@@ -432,11 +420,11 @@ put_escaped :: #force_no_inline proc(out: ^write.Out, s: string, $ASCII, $HTML, 
 			// stop has more.
 			if i >= next_block {
 				if i + 16 <= end {
-					v := intrinsics.unaligned_load((^V)(src[i:]))
+					v := kernel.load16(src[i:])
 					stop := dirty(v, ASCII || ESC_DEL)
 					stop ||= HTML && kernel.any_lane16(simd.lanes_eq(v, V('<')) | simd.lanes_eq(v, V('>')) | simd.lanes_eq(v, V('&')))
 					if !stop {
-						intrinsics.unaligned_store((^V)(base[o:]), v)
+						kernel.store16(base[o:], v)
 						o += 16
 						i += 16
 						next_block = i
@@ -491,8 +479,7 @@ unit_text :: proc "contextless" (p: [^]u8, cp: u32) -> int {
 // Writes `\u` and the four lowercase hex digits of `unit` at `p` and returns 6.
 @(private)
 u_escape :: #force_inline proc "contextless" (p: [^]u8, unit: u16) -> int #no_bounds_check {
-	hex := "0123456789abcdef"
 	p[0], p[1] = '\\', 'u'
-	p[2], p[3], p[4], p[5] = hex[unit >> 12], hex[unit >> 8 & 15], hex[unit >> 4 & 15], hex[unit & 15]
+	(^[4]u8)(p[2:])^ = spell.hex_text(u64(unit), 4, false)
 	return 6
 }

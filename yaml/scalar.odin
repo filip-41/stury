@@ -1,5 +1,6 @@
 package yaml
 
+import spell "../core/spell"
 import core "../core"
 
 // A scalar token's `spelling`: bit 0 (`core.SPELLING_DECODE`) says the text needs `text`, bit 2 (`core.SPELLING_LAX`) that
@@ -130,11 +131,11 @@ scan_double :: proc "contextless" (p: ^Parser, n: int) -> (spelling: u16, ok: bo
 				digits := u64(2 if c == 'x' else 4 if c == 'u' else 8)
 				cp := u32(0)
 				for k in u64(0) ..< digits {
-					d := at(p, i + 2 + k)
-					if !is_hex(d) {
+					d := spell.HEX_NIBBLE[at(p, i + 2 + k)]
+					if d > 15 {
 						return 0, fault(p, i, .Bad_Escape)
 					}
-					cp = cp << 4 | u32(d - '0' if d <= '9' else (d | 0x20) - 'a' + 10)
+					cp = cp << 4 | u32(d)
 				}
 				if cp > 0x10ffff || cp >= 0xd800 && cp <= 0xdfff {
 					return 0, fault(p, i, .Bad_Escape, .Bad_Codepoint)

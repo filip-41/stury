@@ -1,6 +1,7 @@
 package html
 
 import "base:runtime"
+import spell "../core/spell"
 import core "../core"
 
 // The tree construction of the standard's section 13.2.6, which reads the tokenizer's tokens into a document: the
@@ -804,7 +805,7 @@ attr_value_is :: proc(t: ^Html_Tree, attrs: []Attribute, name, want: string) -> 
 	if a == nil {
 		return false, false
 	}
-	return true, ascii_fold_equal(decoded(t, a.value, 0), want)
+	return true, spell.ascii_fold_equal(decoded(t, a.value, 0), want)
 }
 
 // The first of `attrs` named `name`, ASCII case folded, or nil.
@@ -818,25 +819,6 @@ attribute_of :: proc(t: ^Html_Tree, attrs: []Attribute, name: string) -> ^Attrib
 	return nil
 }
 
-@(private)
-ascii_fold_equal :: proc "contextless" (a, b: string) -> bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i in 0 ..< len(a) {
-		x, y := a[i], b[i]
-		if 'A' <= x && x <= 'Z' {
-			x |= 0x20
-		}
-		if 'A' <= y && y <= 'Z' {
-			y |= 0x20
-		}
-		if x != y {
-			return false
-		}
-	}
-	return true
-}
 
 // Decodes `s` into the scratch buffer from byte `from` and returns it.
 @(private)

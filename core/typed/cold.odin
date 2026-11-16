@@ -1269,7 +1269,7 @@ store_bytes :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, d
 		if err != nil {
 			return .No_Memory
 		}
-		payload, ok = spell.base64_decode(room, transmute([]u8)text)
+		payload, ok = spell.base64_bytes(room, transmute([]u8)text)
 		if !ok {
 			return .Wrong_Kind
 		}

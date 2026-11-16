@@ -3,6 +3,7 @@ package css
 import "base:runtime"
 import "core:strings"
 import "core:unicode/utf8"
+import spell "../spell"
 import core ".."
 
 // CSS selectors over a markup document: the static part of Selectors Level 4, compiled once by `compile` and matched by
@@ -404,23 +405,23 @@ parse_pseudo :: proc(p: ^Parser, read: ^[dynamic]Test) -> (t: Test, ok: bool) {
 	name := p.src[name_at:p.at]
 	if peek(p) != '(' {
 		switch {
-		case fold_equal(name, "root"):
+		case spell.ascii_fold_equal(name, "root"):
 			return {kind = .Root}, true
-		case fold_equal(name, "empty"):
+		case spell.ascii_fold_equal(name, "empty"):
 			return {kind = .Empty}, true
-		case fold_equal(name, "first-child"):
+		case spell.ascii_fold_equal(name, "first-child"):
 			return {kind = .Nth, b = 1}, true
-		case fold_equal(name, "last-child"):
+		case spell.ascii_fold_equal(name, "last-child"):
 			return {kind = .Nth, b = 1, last = true}, true
-		case fold_equal(name, "first-of-type"):
+		case spell.ascii_fold_equal(name, "first-of-type"):
 			return {kind = .Nth, b = 1, of_type = true}, true
-		case fold_equal(name, "last-of-type"):
+		case spell.ascii_fold_equal(name, "last-of-type"):
 			return {kind = .Nth, b = 1, last = true, of_type = true}, true
-		case fold_equal(name, "only-child"), fold_equal(name, "only-of-type"):
+		case spell.ascii_fold_equal(name, "only-child"), spell.ascii_fold_equal(name, "only-of-type"):
 			of_type := len(name) > len("only-child")
 			push(p, read, Test{kind = .Nth, b = 1, of_type = of_type}) or_return
 			return {kind = .Nth, b = 1, last = true, of_type = of_type}, true
-		case fold_equal(name, "before"), fold_equal(name, "after"), fold_equal(name, "first-line"), fold_equal(name, "first-letter"):
+		case spell.ascii_fold_equal(name, "before"), spell.ascii_fold_equal(name, "after"), spell.ascii_fold_equal(name, "first-line"), spell.ascii_fold_equal(name, "first-letter"):
 			return {}, refuse(p, start, .Pseudo_Element)
 		}
 		return {}, refuse(p, start, .Pseudo_Class)
@@ -428,16 +429,16 @@ parse_pseudo :: proc(p: ^Parser, read: ^[dynamic]Test) -> (t: Test, ok: bool) {
 	p.at += 1
 	skip_spaces(p)
 	switch {
-	case fold_equal(name, "is"), fold_equal(name, "where"):
+	case spell.ascii_fold_equal(name, "is"), spell.ascii_fold_equal(name, "where"):
 		t = {kind = .Is, list = parse_list(p, false) or_return}
-	case fold_equal(name, "not"):
+	case spell.ascii_fold_equal(name, "not"):
 		t = {kind = .Not, list = parse_list(p, false) or_return}
-	case fold_equal(name, "has"):
+	case spell.ascii_fold_equal(name, "has"):
 		t = {kind = .Has, list = parse_list(p, true) or_return}
-	case fold_equal(name, "nth-child"), fold_equal(name, "nth-last-child"), fold_equal(name, "nth-of-type"), fold_equal(name, "nth-last-of-type"):
-		t = {kind = .Nth, last = fold_equal(name[:min(8, len(name))], "nth-last"), of_type = fold_equal(name[len(name) - 7:], "of-type")}
+	case spell.ascii_fold_equal(name, "nth-child"), spell.ascii_fold_equal(name, "nth-last-child"), spell.ascii_fold_equal(name, "nth-of-type"), spell.ascii_fold_equal(name, "nth-last-of-type"):
+		t = {kind = .Nth, last = spell.ascii_fold_equal(name[:min(8, len(name))], "nth-last"), of_type = spell.ascii_fold_equal(name[len(name) - 7:], "of-type")}
 		t.a, t.b = parse_nth(p) or_return
-		if !t.of_type && skip_spaces(p) && fold_equal(p.src[p.at:min(p.at + 2, len(p.src))], "of") && !is_name_byte(peek(p, 2)) {
+		if !t.of_type && skip_spaces(p) && spell.ascii_fold_equal(p.src[p.at:min(p.at + 2, len(p.src))], "of") && !is_name_byte(peek(p, 2)) {
 			p.at += 2
 			t.list = parse_list(p, false) or_return
 		}
@@ -457,11 +458,11 @@ parse_pseudo :: proc(p: ^Parser, read: ^[dynamic]Test) -> (t: Test, ok: bool) {
 @(private)
 parse_nth :: proc(p: ^Parser) -> (a, b: i64, ok: bool) {
 	rest := p.src[p.at:]
-	if len(rest) >= 3 && fold_equal(rest[:3], "odd") && !is_name_byte(peek(p, 3)) {
+	if len(rest) >= 3 && spell.ascii_fold_equal(rest[:3], "odd") && !is_name_byte(peek(p, 3)) {
 		p.at += 3
 		return 2, 1, true
 	}
-	if len(rest) >= 4 && fold_equal(rest[:4], "even") && !is_name_byte(peek(p, 4)) {
+	if len(rest) >= 4 && spell.ascii_fold_equal(rest[:4], "even") && !is_name_byte(peek(p, 4)) {
 		p.at += 4
 		return 2, 0, true
 	}
@@ -595,9 +596,8 @@ put_escape :: proc(p: ^Parser) -> bool {
 	cp: u32
 	digits := 0
 	for digits < 6 && p.at < len(p.src) {
-		c := p.src[p.at]
-		v := u32(c - '0') if c - '0' < 10 else u32((c | 0x20) - 'a' + 10) if (c | 0x20) - 'a' < 6 else 16
-		if v == 16 {
+		v := u32(spell.HEX_NIBBLE[p.src[p.at]])
+		if v > 15 {
 			break
 		}
 		cp = cp * 16 + v
@@ -635,21 +635,3 @@ put_text :: proc(p: ^Parser, s: string) -> (Run, bool) {
 	return {u32(lo), u32(len(s))}, true
 }
 
-// Whether `a` and `b` are equal with their ASCII letters compared case-insensitively.
-@(private)
-fold_equal :: proc(a, b: string) -> bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i in 0 ..< len(a) {
-		if fold(a[i]) != fold(b[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-@(private)
-fold :: #force_inline proc(c: u8) -> u8 {
-	return c | 0x20 if c - 'A' < 26 else c
-}

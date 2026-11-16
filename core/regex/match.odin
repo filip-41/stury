@@ -1,14 +1,14 @@
 package regex
 
-// The backtracking matcher, which tries a program's alternatives in order as Oniguruma does, so a match
-// and its captures are the ones Oniguruma finds. It gives up as Oniguruma does after ten million
-// backtracks at one start (ONIG_DEFAULT_RETRY_LIMIT_IN_MATCH), and its stack is capped where Oniguruma's
-// would grow without bound.
+// The backtracking matcher and the search entry point. The matcher tries a program's alternatives in order as
+// Oniguruma does, so its matches and captures are Oniguruma's. After ten million backtracks at one start it gives
+// up with an error (ONIG_DEFAULT_RETRY_LIMIT_IN_MATCH). Its stack is capped, where Oniguruma's grows without bound.
+// `search` asks the automata of dfa.odin first where they can answer.
 
 import "core:slice"
-import "core:strconv"
 import "core:strings"
 import "core:unicode/utf8"
+import spell "../spell"
 
 @(private)
 MAX_RETRIES :: 10_000_000 // ONIG_DEFAULT_RETRY_LIMIT_IN_MATCH. Past it the match errors, as Oniguruma's does
@@ -34,7 +34,7 @@ Entry_Kind :: enum u8 {
 	Limit, // the limit was a
 }
 
-// What a look's or atomic group's end keeps of its body: all but the alternatives.
+// The entry kinds that the end of a look or atomic group keeps from its body: all but the alternatives.
 @(private = "file")
 KEPT :: bit_set[Entry_Kind]{.Restore, .Retract, .Call_Frame, .Return, .Mem_Start, .Mem_End, .Limit}
 
@@ -45,8 +45,9 @@ Entry :: struct {
 	a, b: int,
 }
 
-// The matcher's stack and slots, which a caller keeps for its next search and no two searches share at once. The zero
-// value is ready: it takes its memory from the context allocator on first use and gives it back in `scratch_destroy`.
+// The matcher's stack and slots. A caller keeps one for its next search, and two searches running at once must not
+// share one. The zero value is ready for use: it allocates from the context allocator on first use and
+// `scratch_destroy` frees it.
 Scratch :: struct {
 	stack:  [dynamic]Entry,
 	slots:  [dynamic]int,
@@ -82,39 +83,35 @@ Matcher :: struct {
 	caps:     []int,
 	best_len: int, // under `longest`, the longest match so far
 	keep:     int, // under `longest`, where the last match at this start kept from (\K)
-	skip:     int, // the furthest a (*SKIP) was reached, where the next start may not be before
+	skip:     int, // the furthest position a (*SKIP) reached, before which the next start may not be
 	counts:   []int, // each callout's count (`Callout`)
 	limit:    int, // the end of the text the match reads to, short of its end within an absent operator
 	depth:    int, // calls not returned from
 	behind:   Grapheme_Behind,
-	seen, good: []u64, // under `Regex.linear`, good for a program with a look-ahead
-	rows:     []int, // under `Regex.linear`, each instruction's first row of the visited set, nil for one row each
+	seen, good: []u64, // under `Regex.linear`, good only for a program with a look-ahead
+	rows:     []int, // under `Regex.linear`, each instruction's first row of the visited set, nil when each has one
 	radix:    []int, // under counter loops, the counts each loop's count is held to
 	budget:   int, // under `Regex.linear`, the alternatives the search may resume (`SEARCH_WORK`)
 	log:      ^[dynamic]u32,
 	looking:  int, // the look-aheads being matched, under `Regex.linear`
 	room:     int, // under `Regex.linear`, the bytes the stack and the log may take beside the sets
-	// Under `Regex.linear`, the places the sets hold, from `lo` on, `width` a row. And the first and last start a match
-	// can have.
+	// Under `Regex.linear`, the sets hold the places from `lo` on, `width` places a row. `first_start` and `last_start`
+	// are the first and last start a match can have.
 	lo, width, first_start, last_start: int,
 }
 
-// Each group's name at its number, "" for a group with none. The whole match is group 0.
-group_names :: proc "contextless" (re: ^Regex) -> []string {
-	return re.names
-}
-
-// The first match of `re` in `s` at or after byte `start`, with its groups' byte bounds in `caps` (2 per group with
-// the whole match, -1 for a group that did not take part), or Oniguruma's message when the search gave up. With no
-// `caps` it answers only whether there is one.
+// Finds the first match of `re` in `s` at or after byte `start`. `caps` receives the groups' byte bounds, 2 per group
+// with the whole match first, -1 for a group that did not take part. `err` is Oniguruma's message when the search gave
+// up. With no `caps` it only reports whether there is a match.
 search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch) -> (found: bool, err: string) {
 	scratch.ends, scratch.resumes = -1, 0
-	// Oniguruma's search gives up past its retries where the automata would answer, so they answer a jq search only where
-	// the visited set runs it, which never gives up, or where no start can take that many.
+	// Oniguruma's search gives up past its retry limit where the automata would still answer. So under jq they answer
+	// only where the visited set runs the program, which never gives up, or where no start can take that many retries.
 	jq_automaton := !re.ecma && re.dfa != nil && !re.longest && !re.not_empty && !re.calls_or_limits
 	jq_automaton &&= visited_room(re, total_rows(re, re.visited.rows), len(s) + 1) >= 0 if re.linear else retries_bounded(re.dfa, len(s) - min(start, len(s)), MAX_RETRIES)
-	// Under jq the automata start where Oniguruma's first start is, which its optimizer can put past a match. Each later
-	// start it skips can have no match, but one in a window of starts it looks for in turn is left to the backtracker.
+	// Under jq the automata start at Oniguruma's first start, which its optimizer can place past a match. The starts it
+	// skips after that cannot have a match, but when it searches windows of starts in turn (`high < last` in
+	// `try_starts`) the backtracker does the search.
 	from := start
 	if re.narrowed && start <= len(s) && jq_automaton {
 		first, last, _, high, ok := search_starts(re.opt, s, start)
@@ -128,8 +125,8 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 			return hit, ""
 		}
 	}
-	// The automata tell where the match ends and starts, and how far a search reads, so the backtracker runs only at
-	// that start for the groups, and its visited set covers only that.
+	// The automata give where the match ends and starts and how far a search reads. The backtracker then runs only at
+	// that start, for the groups, and its visited set covers only that range.
 	lo, width, first_start, last_start := 0, len(s) + 1, 0, len(s)
 	if len(caps) > 0 && (jq_automaton || re.ecma && re.dfa != nil) && re.dfa.first != nil && from >= 0 {
 		if end, reach, judged := dfa_first(re.dfa, s, from); judged {
@@ -154,9 +151,9 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 	for &n in m.counts {
 		n = 0
 	}
-	// The visited set is bounded by the text, so the retry limit and the jq stack cap give way to the one memory cap. The
-	// set holds across starts, so the jq options that make a pair's outcome depend on the start run without it, as does a
-	// jq program whose set would pass the cap.
+	// The visited set is bounded by the text, so the memory cap replaces the retry limit and the jq stack cap. The set
+	// persists across starts, so a search where a pair's outcome depends on the start (`longest`, `not_empty`) runs
+	// without it, and so does a jq program whose set would pass the cap.
 	linear := re.linear && !re.longest && !re.not_empty
 	words: int
 	if linear {
@@ -202,7 +199,7 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 	return try_starts(&m, false, false)
 }
 
-// Frees a deep search's array rather than keep it for the next.
+// Frees `a` when its capacity passes KEEP_BYTES, instead of keeping it for the next search.
 @(private = "file")
 shrink :: proc(a: ^[dynamic]$T) {
 	if cap(a) * size_of(T) > KEEP_BYTES {
@@ -225,7 +222,7 @@ try_starts :: proc(m: ^Matcher, $EXT, $SET: bool) -> (found: bool, err: string) 
 	}
 	first, last = max(first, m.first_start), min(last, m.last_start)
 	// A string or map the optimizer finds at a bounded distance gives each window of starts, low to high, a match
-	// holding it there can have. Other searches take one window of every start.
+	// holding it there can have. Other searches try every start in a single window.
 	windowed := high < last
 	at := first
 	starts: for at <= last {
@@ -273,8 +270,8 @@ try_starts :: proc(m: ^Matcher, $EXT, $SET: bool) -> (found: bool, err: string) 
 	return m.best_len >= 0, ""
 }
 
-// Bytes Oniguruma steps over from `b` to the next place a search tries, which inside a character (where
-// jq's global search can start one) is one byte.
+// Returns the bytes Oniguruma steps over from lead byte `b` to the next place a search tries. A continuation byte,
+// where jq's global search can start inside a character, gives 1.
 @(private)
 lead_width :: #force_inline proc(b: byte) -> int {
 	switch {
@@ -290,8 +287,8 @@ lead_width :: #force_inline proc(b: byte) -> int {
 	return 1
 }
 
-// The character at `pos`, inside a character, where jq's global search can start. Oniguruma reads a byte as the code
-// point of its value.
+// Returns the character at `pos` and its width. A byte below 0xC0 is read as the code point of its value, as Oniguruma
+// reads a continuation byte where jq's global search starts inside a character.
 @(private)
 decode :: #force_inline proc(s: string, pos: int) -> (rune, int) {
 	if s[pos] < 0xC0 {
@@ -300,24 +297,7 @@ decode :: #force_inline proc(s: string, pos: int) -> (rune, int) {
 	return utf8.decode_rune_in_string(s[pos:])
 }
 
-@(private)
-char_start :: #force_inline proc(s: string, p: int) -> int {
-	p := p
-	for p > 0 && s[p] & 0xC0 == 0x80 {
-		p -= 1
-	}
-	return p
-}
-
-@(private = "file")
-class_match :: #force_inline proc(cls: ^Class, r: rune) -> bool {
-	if r >= 0 && r < 0x80 {
-		return cls.ascii[r >> 6] & (1 << (u64(r) & 63)) != 0
-	}
-	return class_match_slow(cls, r)
-}
-
-// The position after the one-rune instruction `in` matches at `pos`, or -1.
+// Returns the position after what the Str, Any, Any_All, Class or Char_Fold instruction `ins` matches at `pos`, or -1.
 @(private = "file")
 step :: #force_inline proc(re: ^Regex, ins: Inst, s: string, pos: int) -> int {
 	if pos >= len(s) {
@@ -356,10 +336,10 @@ push :: #force_inline proc(m: ^Matcher, e: Entry) {
 	append(m.stack, e)
 }
 
-// Pushes an entry the stack is capped for, or ends the search with Oniguruma's error, or under the set the memory error
-// once the stack and the log may take more than the room beside the sets: an array's capacity is at most twice its
-// length, and the log grows by at most a program's length between two pushes.
-@(private = "file")
+// Pushes an alternative. At MAX_STACK entries it sets Oniguruma's error and returns false. With `$SET` it sets the
+// memory error instead once the stack and the log may take `m.room` bytes, the room beside the sets. An array's
+// capacity is at most twice its length, and the log grows by at most a program's length between two pushes.
+@(private)
 push_branch :: #force_inline proc(m: ^Matcher, e: Entry, $SET: bool) -> bool {
 	when SET {
 		if 2 * (len(m.stack) * size_of(Entry) + len(m.log) * size_of(u32)) >= m.room {
@@ -388,7 +368,7 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 	slots[0] = at
 	for c, i in re.callouts {
 		if c.kind != .Total_Count {
-			m.counts[i] = 0 // as Oniguruma clears a callout's data at each start, but TOTAL_COUNT's
+			m.counts[i] = 0 // Oniguruma clears a callout's data at each start, except TOTAL_COUNT's
 		}
 	}
 	clear(m.stack)
@@ -407,9 +387,9 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 		ok := true
 		when SET {
 			if row := row_of(m, pc, pos); !first_visit(m, row, pos) {
-				// A pair a look-ahead's body is known to match from carries on at the body's end. When the caller reads
-				// groups and the body holds some, it runs the path again instead (the pairs on it are all known), since
-				// the groups it sets are the result.
+				// A pair that a look-ahead's body is known to match from continues at the body's end. When the caller
+				// reads groups and the body holds some, the path is run again instead, since the groups it sets are the
+				// result. The pairs on it are all known by then.
 				ins = {op = .Seen}
 				if m.good != nil && in_good(m, row, pos) {
 					look := int(re.visited.owner[pc])
@@ -436,7 +416,7 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 				}
 				return true
 			}
-			// Oniguruma takes the latest \K on the stack, or where the last match at this start kept from when
+			// Oniguruma uses the latest \K on the stack, or where the last match at this start kept from when
 			// there is none (UPDATE_VAR_KEEP_FROM_STACK_LAST), as it backtracks for a longer match.
 			kept := slots[0] != at || m.keep == at
 			for k := len(m.stack) - 1; !kept && k >= 0; k -= 1 {
@@ -485,8 +465,8 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 			slots[ins.a] = pos
 			if ins.b != 0 {
 				// Oniguruma pushes a referenced group's start (OP_MEM_START_PUSH), which unsets its end until
-				// the group closes again: a backreference or condition inside sees it unset, never a start
-				// past the last iteration's end.
+				// the group closes again. A backreference or condition inside the group sees it unset, and never
+				// a start past the last iteration's end.
 				push(m, {kind = .Restore, a = int(ins.a) + 1, b = slots[ins.a + 1]})
 				slots[ins.a + 1] = -1
 			}
@@ -540,7 +520,8 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 				}
 				ok = false
 			case .Ahead, .Behind, .Atomic:
-				// The body's alternatives go, what it captured stays, and is undone when the match backs past it.
+				// Drops the body's alternatives and keeps what it captured, which is undone when the match backs past
+				// it.
 				w := k
 				for j in k + 1 ..< len(m.stack) {
 					if m.stack[j].kind in KEPT {
@@ -549,8 +530,9 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 					}
 				}
 				resize(m.stack, w)
-				// A look-behind goes on where its body ends, as Oniguruma's of one length does not restore the
-				// position: where it began, but past it when it began within a character.
+				// A look-behind continues where its body ends. Oniguruma's look-behind of one length does not
+				// restore the position, which leaves it where it began, or past that when it began within a
+				// character.
 				if Look_Kind(insts[bar.pc].a) == .Ahead {
 					pos = bar.a
 				}
@@ -562,7 +544,7 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 					ok = false
 					break
 				}
-				pos = char_start(s, pos - 1)
+				pos = spell.char_start(s, pos - 1)
 			}
 			pc += 1
 		case .Check:
@@ -611,9 +593,10 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 				}
 			} else {
 				lo := p
-				// Under the set an unbounded repeat marks the stops past where it began in its body's row, which `run`
-				// never visits, and walks no further than a stop an earlier walk marked: that walk tries the stops from
-				// there. Past where it began, no loop's iteration has matched nothing, so the row is the first.
+				// With `$SET` an unbounded repeat marks each stop past where it began in its body's row, which `run`
+				// never visits. It walks no further than a stop an earlier walk marked, because that walk tries the
+				// stops from there. Past where it began, no loop iteration has matched nothing, so the row is the
+				// first.
 				row := stop_row(m, pc) if SET else 0
 				_ = row
 				when SET {
@@ -702,8 +685,8 @@ unset_slots :: proc(m: ^Matcher, ins: Inst) {
 	}
 }
 
-// The ops of subexpression calls and the absent operator, kept out of `run`'s loop, which patterns without
-// them run with none of their tracking (`Regex.calls_or_limits`).
+// Executes the ops of subexpression calls and the absent operator. They are kept out of `run`'s loop so that patterns
+// without them (`Regex.calls_or_limits` false) run with no tracking for them.
 @(private = "file")
 call_or_limit :: #force_no_inline proc(m: ^Matcher, ins: Inst, pc: ^int, pos: int) -> bool {
 	slots := m.slots
@@ -727,7 +710,7 @@ call_or_limit :: #force_no_inline proc(m: ^Matcher, ins: Inst, pc: ^int, pos: in
 		push(m, {kind = .Mem_Start, a = g, b = pos})
 		pc^ += 1
 	case .Mem_End:
-		// The start of this group's own run, past the starts and ends of runs it called.
+		// The start of this group's own run, skipping the starts and ends of runs it called.
 		g := int(ins.a)
 		start := latest_open(m.stack[:], .Mem_Start, .Mem_End, g).b
 		push(m, {kind = .Restore, a = 2 * g, b = slots[2 * g]})
@@ -751,7 +734,8 @@ call_or_limit :: #force_no_inline proc(m: ^Matcher, ins: Inst, pc: ^int, pos: in
 	return true
 }
 
-// The latest `open` entry of group `g` (0 for a call) not closed, a `close` passing over the one it closed.
+// Returns the latest `open` entry of group `g` (0 for a call) that no `close` entry has closed. Each `close` skips the
+// `open` it closes.
 @(private = "file")
 latest_open :: proc(stack: []Entry, open, close: Entry_Kind, g: int) -> Entry {
 	level := 0
@@ -792,7 +776,7 @@ undo :: #force_inline proc(m: ^Matcher, e: Entry, $EXT: bool) {
 	}
 }
 
-// Resumes at the latest alternative, undoing the captures made since. It returns false when none is left.
+// Resumes at the latest alternative, undoing the captures made since. Returns false when none is left.
 @(private = "file")
 backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 	for len(m.stack) > 0 {
@@ -823,8 +807,8 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 					return false
 				}
 			}
-			// Back a character, but a repeat that began inside a character stepped a byte at a time until the next
-			// one began, as Oniguruma steps.
+			// Gives back a character, but a repeat that began inside a character stepped a byte at a time until the
+			// next character began, as Oniguruma steps.
 			p := e.a - 1
 			q := p
 			for q > e.b && m.s[q] & 0xC0 == 0x80 {
@@ -874,85 +858,6 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 	return false
 }
 
-// The callout of data `i` run as the match passes it, as Oniguruma's builtin is: false to fail here, `end` when it
-// ends the match at this start, or the search with its error in m.err.
-@(private = "file")
-callout :: proc(m: ^Matcher, i: int) -> (ok: bool, end: bool) {
-	c := m.re.callouts[i]
-	count := &m.counts[i]
-	switch c.kind {
-	case .Error:
-		if c.code != -1 { // ONIG_MISMATCH
-			m.err = error_message(c.code)
-		}
-		return false, true
-	case .Count, .Total_Count, .Max:
-		if c.type != '>' && c.type != 'X' && c.type != '<' {
-			m.err = "invalid callout arg"
-			return false, true
-		}
-		if c.type != '<' {
-			if c.kind == .Max && count^ >= operand(m, c.sides[0]) {
-				return false, false
-			}
-			count^ += 1
-		}
-		if c.type != '>' {
-			if !push_branch(m, {kind = .Retract, a = i}, false) {
-				return false, true
-			}
-		}
-		return true, false
-	case .Cmp:
-		if c.cmp == 0 {
-			m.err = "invalid callout arg"
-			return false, true
-		}
-		x, y := operand(m, c.sides[0]), operand(m, c.sides[1])
-		return c.cmp & (1 if x < y else 2 if x == y else 4) != 0, false
-	case .Begin_Buf, .End_Buf, .Semi_End_Buf, .Begin_Line, .End_Line, .Word_Boundary, .Not_Word_Boundary,
-	     .Search_Start, .Ascii_Boundary, .Not_Ascii_Boundary, .Fail, .Mismatch, .Skip:
-	}
-	return true, false
-}
-
-// The callout of data `i` as the match backs past it: '<' counts up to its most, 'X' takes back its count.
-@(private = "file")
-retract :: proc(m: ^Matcher, i: int) {
-	c := m.re.callouts[i]
-	switch {
-	case c.type == 'X':
-		m.counts[i] -= 1
-	case c.kind != .Max || m.counts[i] < operand(m, c.sides[0]):
-		m.counts[i] += 1
-	}
-}
-
-@(private = "file")
-operand :: #force_inline proc(m: ^Matcher, o: Operand) -> int {
-	if o.ref == nil {
-		return o.n
-	}
-	return m.counts[o.ref.index]
-}
-
-// Oniguruma's message for its error `code`, as onig_error_code_to_str gives it with no details: a code whose
-// message names a detail is taken as one (*ERROR) may not give.
-@(private = "file")
-error_message :: proc(code: int) -> string {
-	if code >= 0 {
-		return "invalid callout body"
-	}
-	messages := ERROR_MESSAGES
-	for each in strings.split_iterator(&messages, "\x00") {
-		at := strings.index_byte(each, ' ')
-		if n, _ := strconv.parse_int(each[:at]); n == code {
-			return each[at + 1:]
-		}
-	}
-	return "undefined error code"
-}
-
 @(private = "file")
 assert_at :: proc(m: ^Matcher, kind: Assert_Kind, pos: int) -> bool {
 	s := m.s
@@ -972,12 +877,12 @@ assert_at :: proc(m: ^Matcher, kind: Assert_Kind, pos: int) -> bool {
 		if pos > 0 { 	// the character before, whole even when `pos` is inside it, as Oniguruma finds it
 			r := rune(s[pos - 1])
 			if r >= 0x80 {
-				r, _ = decode(s, char_start(s, pos - 1))
+				r, _ = decode(s, spell.char_start(s, pos - 1))
 			}
 			before = is_word(r)
 		}
-		// Oniguruma reads the character after the text's start only short of an absent operator's limit
-		// (DATA_ENSURE), and elsewhere up to the text's end.
+		// At position 0 Oniguruma reads the character after it only short of an absent operator's limit
+		// (DATA_ENSURE), and at other positions up to the text's end.
 		if pos < (m.limit if pos == 0 else len(s)) {
 			r, _ := decode(s, pos)
 			after = is_word(r)
@@ -996,10 +901,10 @@ assert_at :: proc(m: ^Matcher, kind: Assert_Kind, pos: int) -> bool {
 	return false
 }
 
-// The position after the text of the latest of the backreference's groups that matches at `pos`, or -1.
+// Returns the position after the text of the latest of the backreference's groups that matches at `pos`, or -1.
 @(private = "file")
 backref :: proc(m: ^Matcher, ins: Inst, pos: int) -> int {
-	s := m.s[:m.limit] // the group's text may lie past the limit, which reads up to it
+	s := m.s[:m.limit] // the group's text may lie past the limit, but the match reads only up to it
 	groups := m.re.refs[ins.a]
 	#reverse for g in groups {
 		lo, hi := m.slots[2 * g], m.slots[2 * g + 1]

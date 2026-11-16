@@ -11,10 +11,9 @@ import "core:io"
 import "core:simd"
 import "core:slice"
 import "core:strings"
-import "core:unicode/utf8"
 import spell "../core/spell"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 import typed "../core/typed"
 import write "../core/write"
 
@@ -570,7 +569,7 @@ put_string :: proc(w: ^Rows, s: string, first, inner: bool) -> core.Typed_Error_
 	special, high := scan_text(w, s)
 	bom := false
 	if high {
-		if !utf8.valid_string(s) {
+		if !kernel.utf8_valid(transmute([]u8)s) {
 			return .Invalid_Utf8
 		}
 		bom = out.cursor == 0 && out.flushed == 0 && strings.has_prefix(s, "\xEF\xBB\xBF")
@@ -639,22 +638,22 @@ put_plain_cell :: #force_inline proc(w: ^Rows, s: string, first: bool) -> bool #
 		if !ok || kernel.any_lane16(stop(v, dv, w.ev, w.nv, cv, lv) & live) {
 			return false
 		}
-		intrinsics.unaligned_store((^V)(p), v)
+		kernel.store16(p, v)
 		w.out.cursor += n
 		return true
 	}
 	for k := 0; k < n - 16; k += 16 {
-		v := intrinsics.unaligned_load((^V)(src[k:]))
+		v := kernel.load16(src[k:])
 		if kernel.any_lane16(stop(v, dv, w.ev, w.nv, cv, lv)) {
 			return false
 		}
-		intrinsics.unaligned_store((^V)(p[k:]), v)
+		kernel.store16(p[k:], v)
 	}
-	v := intrinsics.unaligned_load((^V)(src[n - 16:]))
+	v := kernel.load16(src[n - 16:])
 	if kernel.any_lane16(stop(v, dv, w.ev, w.nv, cv, lv)) {
 		return false
 	}
-	intrinsics.unaligned_store((^V)(p[n - 16:]), v)
+	kernel.store16(p[n - 16:], v)
 	w.out.cursor += n
 	return true
 }
@@ -677,8 +676,8 @@ put_guarded :: proc(w: ^Rows, s: string, marked, bom: bool) -> core.Typed_Error_
 			}
 			// A 16-byte block with no quote is stored whole, and `p` holds twice `take`, so the store stays inside it.
 			for i + 16 <= take {
-				v := intrinsics.unaligned_load((^V)(src[i:]))
-				intrinsics.unaligned_store((^V)(p[n:]), v)
+				v := kernel.load16(src[i:])
+				kernel.store16(p[n:], v)
 				if kernel.any_lane16(simd.lanes_eq(v, quote)) {
 					n = put_doubled(p, n, src, i, i + 16)
 				} else {
@@ -781,12 +780,12 @@ scan_text :: #force_inline proc(w: ^Rows, s: string) -> (special, high: bool) #n
 	hits, bits: V
 	for k := 0; ; k += 16 {
 		i := min(k, n - 16)
-		v := intrinsics.unaligned_load((^V)(p[i:]))
+		v := kernel.load16(p[i:])
 		m := simd.lanes_eq(v, dv) | simd.lanes_eq(v, ev) | simd.lanes_eq(v, cv) | simd.lanes_eq(v, lv) | simd.lanes_eq(v, nv)
 		hits |= m
 		bits |= v
 		if i == n - 16 {
-			return kernel.any_lane16(hits), kernel.any_lane16(simd.lanes_ge(bits, V(0x80)))
+			return kernel.any_lane16(hits), !kernel.is_ascii16(bits)
 		}
 	}
 }

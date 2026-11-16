@@ -18,13 +18,13 @@ BASE64_VECTORS :: [?][2]string {
 base64_rfc_vectors :: proc(t: ^testing.T) {
 	for v in BASE64_VECTORS {
 		raw := transmute([]u8)v[0]
-		testing.expect_value(t, spell.base64_len(len(raw)), len(v[1]))
+		testing.expect_value(t, spell.base64_room(len(raw)), len(v[1]))
 		text: [16]u8
-		n := spell.base64_put(text[:], raw)
+		n := spell.base64_text(text[:], raw)
 		testing.expect_value(t, string(text[:n]), v[1])
 
 		room: [16]u8
-		decoded, ok := spell.base64_decode(room[:], transmute([]u8)v[1])
+		decoded, ok := spell.base64_bytes(room[:], transmute([]u8)v[1])
 		testing.expectf(t, ok, "%q refused", v[1])
 		testing.expect_value(t, string(decoded), v[0])
 	}
@@ -39,10 +39,10 @@ base64_round_trip :: proc(t: ^testing.T) {
 	}
 	for n in 0 ..= len(raw) {
 		text: [400]u8
-		w := spell.base64_put(text[:], raw[:n])
-		testing.expect_value(t, w, spell.base64_len(n))
+		w := spell.base64_text(text[:], raw[:n])
+		testing.expect_value(t, w, spell.base64_room(n))
 		room: [300]u8
-		decoded, ok := spell.base64_decode(room[:], text[:w])
+		decoded, ok := spell.base64_bytes(room[:], text[:w])
 		testing.expectf(t, ok && string(decoded) == string(raw[:n]), "length %d did not round trip", n)
 	}
 }
@@ -65,7 +65,7 @@ base64_refuses_other_text :: proc(t: ^testing.T) {
 			"Zm\x009", // a byte outside the alphabet
 		}) {
 		room: [16]u8
-		_, ok := spell.base64_decode(room[:], transmute([]u8)text)
+		_, ok := spell.base64_bytes(room[:], transmute([]u8)text)
 		testing.expectf(t, !ok, "%q accepted", text)
 	}
 }

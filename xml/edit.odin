@@ -7,6 +7,7 @@ package xml
 import "base:runtime"
 import "core:slice"
 import "core:strings"
+import kernel "../core/kernel"
 import core "../core"
 import compose "../core/compose"
 import typed "../core/typed"
@@ -149,7 +150,7 @@ element_of :: proc(doc: ^core.Document, v: core.Node_Index) -> (e: compose.Marku
 		e.hi = n.lo + 2 if e.empty else end_tag_end(src, e.close)
 	}
 	e.end_tag = !e.empty
-	for e.name = e.lo + 1; !is_ws(src[e.name]) && src[e.name] != '>' && src[e.name] != '/'; e.name += 1 {}
+	for e.name = e.lo + 1; !kernel.is_ws(src[e.name]) && src[e.name] != '>' && src[e.name] != '/'; e.name += 1 {}
 	return e
 }
 

@@ -1,11 +1,10 @@
 #+private
 package toml
 
-import "base:intrinsics"
 import "core:simd"
 import spell "../core/spell"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 
 // The spelling of a string or key token. Bit 0 is `core.SPELLING_DECODE`, set on every token written with quotes, whose
 // span holds them. Bits 3 and 4 hold the style. A bare key has no bits set.
@@ -137,13 +136,12 @@ plain_run :: #force_inline proc "contextless" (src: []u8, k: int, $quote: u8) ->
 		return 0
 	}
 	V :: #simd[16]u8
-	v := intrinsics.unaligned_load((^V)(raw_data(src)[k:]))
-	// `v - 0x20 > 0x5e` holds for a control byte, DEL and a byte past 0x7F.
-	stops := simd.bit_or(simd.lanes_eq(v, V(quote)), simd.lanes_gt(v - 0x20, V(0x5e)))
+	v := kernel.load16(raw_data(src)[k:])
+	stops := simd.bit_or(simd.lanes_eq(v, V(quote)), kernel.control_or_high16(v, true))
 	when quote == '"' {
 		stops = simd.bit_or(stops, simd.lanes_eq(v, V('\\')))
 	}
-	return int(kernel.first_lane(stops))
+	return int(kernel.first_lane16(stops))
 }
 
 // Scans a basic string whose opening quote is at `i`. Returns the byte past its closing quote.
@@ -292,29 +290,6 @@ scan_multiline :: proc "contextless" (src: []u8, i: int, $LITERAL: bool, v11: bo
 	return k, bad(k, .Truncated, .Open_String)
 }
 
-// Writes the code point `r` as UTF-8 at `buf[w:]`. Returns the new length.
-put_rune :: #force_inline proc "contextless" (buf: []u8, w: int, r: u32) -> int {
-	switch {
-	case r < 0x80:
-		buf[w] = u8(r)
-		return w + 1
-	case r < 0x800:
-		buf[w] = 0xc0 | u8(r >> 6)
-		buf[w + 1] = 0x80 | u8(r & 0x3f)
-		return w + 2
-	case r < 0x10000:
-		buf[w] = 0xe0 | u8(r >> 12)
-		buf[w + 1] = 0x80 | u8(r >> 6 & 0x3f)
-		buf[w + 2] = 0x80 | u8(r & 0x3f)
-		return w + 3
-	}
-	buf[w] = 0xf0 | u8(r >> 18)
-	buf[w + 1] = 0x80 | u8(r >> 12 & 0x3f)
-	buf[w + 2] = 0x80 | u8(r >> 6 & 0x3f)
-	buf[w + 3] = 0x80 | u8(r & 0x3f)
-	return w + 4
-}
-
 // The text of a string or quoted key token whose span `s` holds its quotes, in `buf`, which is as long as the span at
 // least. A bare key is its span.
 decode :: proc "contextless" (s: []u8, spelling: u16, buf: []u8) -> (text: string, ok: bool) {
@@ -382,7 +357,7 @@ decode :: proc "contextless" (s: []u8, spelling: u16, buf: []u8) -> (text: strin
 			}
 			continue
 		}
-		w = put_rune(buf, w, r)
+		w += spell.rune_text(buf[w:], rune(r))
 	}
 	return string(buf[:w]), true
 }

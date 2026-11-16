@@ -10,6 +10,7 @@ import "base:runtime"
 import "core:bytes"
 import "core:mem/virtual"
 import "core:os"
+import kernel "../../core/kernel"
 import core "../../core"
 import compose "../../core/compose"
 import records "../../core/records"
@@ -595,7 +596,7 @@ edit_read :: proc(r: ^Edit_Reader) -> (doc: ^core.Document, more: bool) {
 		r.fault = r.it.fault
 		return nil, false
 	}
-	r.line += jq.count_newlines(r.ins.data[r.counted:rec.at])
+	r.line += kernel.count_byte(r.ins.data[r.counted:rec.at], '\n')
 	r.counted = rec.at
 	line := r.line + 1
 	built, err := records.build(&r.it, rec, heap)

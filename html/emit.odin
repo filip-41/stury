@@ -2,7 +2,7 @@ package html
 
 import "base:intrinsics"
 import "base:runtime"
-import "core:strings"
+import kernel "../core/kernel"
 import core "../core"
 
 // The tokens of a tree, in preorder, which a hook reads as it reads a walk's: the document's tokens are those of an
@@ -377,7 +377,7 @@ head_end :: proc(e: ^Emitter($H), from, end: u32) -> u32 {
 		next := nodes[k].next
 		if nodes[k].kind == .Doctype {
 			lead = next
-		} else if next != 0 && nodes[next].lo > nodes[k].hi && strings.count(string(e.t.src[nodes[k].hi:nodes[next].lo]), "\n") > 1 {
+		} else if next != 0 && nodes[next].lo > nodes[k].hi && kernel.count_byte(e.t.src[nodes[k].hi:nodes[next].lo], '\n') > 1 {
 			lead = next
 		}
 	}

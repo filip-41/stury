@@ -1,6 +1,7 @@
 package xml
 
 import "base:runtime"
+import kernel "../core/kernel"
 import core "../core"
 
 // Reads of a built document that need an element's place in it: the namespace its prefix is bound to, an element's
@@ -11,7 +12,7 @@ import core "../core"
 @(private)
 name_length :: #force_inline proc "contextless" (src: []u8, lo: u64) -> int #no_bounds_check {
 	q := lo
-	for !is_ws(src[q]) && src[q] != '=' {
+	for !kernel.is_ws(src[q]) && src[q] != '=' {
 		q += 1
 	}
 	return int(q - lo)
@@ -343,7 +344,7 @@ balanced_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 skip_misc :: proc "contextless" (src: []u8, p: u64) -> u64 {
 	p := p
 	for {
-		for p < u64(len(src)) && is_ws(src[p]) {
+		for p < u64(len(src)) && kernel.is_ws(src[p]) {
 			p += 1
 		}
 		if p + 1 >= u64(len(src)) || src[p] != '<' {

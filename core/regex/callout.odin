@@ -1,16 +1,38 @@
 #+private
 package regex
 
-// Callouts in a pattern, `(*NAME[tag]{args})`, as Oniguruma parses them.
+// Callouts, `(*NAME[tag]{args})`, parsed as Oniguruma parses them, their tags resolved once the whole pattern is
+// read, and run by the matcher.
 
 import "core:slice"
+import "core:strconv"
 import "core:strings"
 import "core:unicode/utf8"
+
+// A callout Oniguruma's builtins keep data for, with its arguments as they read them.
+Callout :: struct {
+	kind:  Assert_Kind,
+	tag:   string,
+	code:  int, // ERROR's
+	// COUNT's, TOTAL_COUNT's and MAX's: '>' counts as it is passed, 'X' also takes it back as the match backs past
+	// it, '<' counts only then. Any other ends the search when it is reached.
+	type:  rune,
+	sides: [2]Operand, // MAX's most in [0], CMP's two sides
+	cmp:   u8, // CMP's operator as the outcomes it holds for: 1 less, 2 equal, 4 greater, 0 for none
+	index: int, // its count's slot
+}
+
+// A number, or the count of the callout of a tag (`ref`, nil for a number). A tag on a callout that keeps
+// no count reads 0.
+Operand :: struct {
+	n:   int,
+	tag: string,
+	ref: ^Callout,
+}
 
 // A callout of name at `*`, `(*NAME[tag]{args})`, as Oniguruma parses one: its arguments are split at each
 // `,` not escaped by `\`, an empty one dropped, and those of a fixed kind checked here, the rest when the
 // callout is reached.
-@(private)
 parse_callout :: proc(p: ^Parser) -> ^Node {
 	p.i += 1
 	if at_end(p) {
@@ -170,4 +192,101 @@ callout_name :: proc(s: string) -> bool {
 		}
 	}
 	return s != ""
+}
+
+// Each tag a MAX or CMP reads, which a callout anywhere in the pattern must have.
+resolve_tags :: proc(p: ^Parser) {
+	for c in p.callouts {
+		for &o in c.sides {
+			if o.tag == "" {
+				continue
+			}
+			if !slice.contains(p.tags[:], o.tag) {
+				fail(p, "invalid callout tag name")
+				return
+			}
+			for d in p.callouts {
+				if d.tag == o.tag && (d.kind == .Count || d.kind == .Total_Count || d.kind == .Max) {
+					o.ref = d
+				}
+			}
+		}
+	}
+}
+
+// The callout of data `i` run as the match passes it, as Oniguruma's builtin is: false to fail here, `end` when it
+// ends the match at this start, or the search with its error in m.err.
+callout :: proc(m: ^Matcher, i: int) -> (ok: bool, end: bool) {
+	c := m.re.callouts[i]
+	count := &m.counts[i]
+	switch c.kind {
+	case .Error:
+		if c.code != -1 { // ONIG_MISMATCH
+			m.err = error_message(c.code)
+		}
+		return false, true
+	case .Count, .Total_Count, .Max:
+		if c.type != '>' && c.type != 'X' && c.type != '<' {
+			m.err = "invalid callout arg"
+			return false, true
+		}
+		if c.type != '<' {
+			if c.kind == .Max && count^ >= operand(m, c.sides[0]) {
+				return false, false
+			}
+			count^ += 1
+		}
+		if c.type != '>' {
+			if !push_branch(m, {kind = .Retract, a = i}, false) {
+				return false, true
+			}
+		}
+		return true, false
+	case .Cmp:
+		if c.cmp == 0 {
+			m.err = "invalid callout arg"
+			return false, true
+		}
+		x, y := operand(m, c.sides[0]), operand(m, c.sides[1])
+		return c.cmp & (1 if x < y else 2 if x == y else 4) != 0, false
+	case .Begin_Buf, .End_Buf, .Semi_End_Buf, .Begin_Line, .End_Line, .Word_Boundary, .Not_Word_Boundary,
+	     .Search_Start, .Ascii_Boundary, .Not_Ascii_Boundary, .Fail, .Mismatch, .Skip:
+	}
+	return true, false
+}
+
+// The callout of data `i` as the match backs past it: '<' counts up to its most, 'X' takes back its count.
+retract :: proc(m: ^Matcher, i: int) {
+	c := m.re.callouts[i]
+	switch {
+	case c.type == 'X':
+		m.counts[i] -= 1
+	case c.kind != .Max || m.counts[i] < operand(m, c.sides[0]):
+		m.counts[i] += 1
+	}
+}
+
+@(private = "file")
+operand :: #force_inline proc(m: ^Matcher, o: Operand) -> int {
+	if o.ref == nil {
+		return o.n
+	}
+	return m.counts[o.ref.index]
+}
+
+// Oniguruma's message for its error `code`, as onig_error_code_to_str gives it with no details: a code whose
+// message names a detail is taken as one (*ERROR) may not give.
+@(private = "file")
+error_message :: proc(code: int) -> string {
+	if code >= 0 {
+		return "invalid callout body"
+	}
+	messages := ERROR_MESSAGES
+	for each in strings.split_iterator(&messages, "\x00") {
+		at := strings.index_byte(each, ' ')
+		if n, _ := strconv.parse_int(each[:at]); n == code {
+			return each[at + 1:]
+		}
+	}
+	return "undefined error code"
 }

@@ -38,13 +38,18 @@ is_ascii :: #force_inline proc "contextless" (b: Block) -> bool {
 	return simd.extract_msbs(transmute(W)b) == {}
 }
 
-// Reports whether any lane of the 16-lane mask `m` is set, by `pmovmskb`. An OR reduction is a shuffle tree on x86.
-any_lane16 :: #force_inline proc "contextless" (m: V) -> bool {
-	return transmute(u16)simd.extract_msbs(m) != 0
+// Whether every byte of `v` is zero, by `ptest`. A max reduction is a shuffle tree on x86.
+all_zero :: #force_inline proc "contextless" (v: #simd[$N]u8) -> bool {
+	return simd.reduce_or(v) == 0
+}
+
+// Whether every byte of `v` is below 0x80, by `pmovmskb`.
+is_ascii16 :: #force_inline proc "contextless" (v: V) -> bool {
+	return transmute(u16)simd.extract_msbs(v) == 0
 }
 
 // Returns the index of the first set lane in the 16 lane masks of `m`, or 16 when none is set. `pmovmskb` gives one
 // bit per lane, and `0x1_0000` adds a bit past lane 15 that the trailing-zero count finds when no lane is set.
-first_lane :: #force_inline proc "contextless" (m: V) -> u64 {
+first_lane16 :: #force_inline proc "contextless" (m: V) -> u64 {
 	return u64(intrinsics.count_trailing_zeros(u32(transmute(u16)simd.extract_msbs(m)) | 0x1_0000))
 }

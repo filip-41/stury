@@ -12,22 +12,25 @@ part of the shape works around.
 
 | File | Builds on | Holds |
 |---|---|---|
-| `kernel.odin` | every target | `Block`, `below`, `either`, `has` and `any_lane`, the copied tail, the nibble table and `classes`, `escaped` |
-| `arm64.odin` | arm64 | the block operations on NEON, one 16-byte register at a time |
-| `lanes64.odin` | everything but arm64 | the same operations on one 64-lane vector that LLVM splits to the target's width |
-| `amd64.odin` | x86-64 | `Tier` with v2, v3 and v4, `tier()`, and the kernels whose instructions differ by tier |
-| `single_tier.odin` | everything but x86-64 | `Tier` with one member, and the same tier-dependent kernels in portable or arm64 form |
-| `utf8.odin` | every target | UTF-8 validation of blocks |
+| `kernel.odin` | every target | `Block`, `below`, `either`, `any_lane` and `any_lane16`, `live16`, `head16`, `control_or_high16`, the copied tail, `load_block` |
+| `block_arm64.odin` | arm64 | the block operations on NEON, one 16-byte register at a time |
+| `block_lanes64.odin` | everything but arm64 | the same operations on one 64-lane vector that LLVM splits to the target's width |
+| `tier_amd64.odin` | x86-64 | `Tier` with v2, v3 and v4, `tier()`, and the kernels whose instructions differ by tier |
+| `tier_single.odin` | everything but x86-64 | `Tier` with one member, and the same tier-dependent kernels in portable or arm64 form |
+| `classes.odin` | every target | the nibble table, `classes` and `has` |
+| `scan.odin` | every target | `escaped`, `index_byte`, `last_index_byte`, `count_byte`, `count_chars`, `skip_ws`, `quote_run`, `quote_cut` and their loops |
+| `utf8.odin` | every target | UTF-8 validation of blocks and of a whole text (`utf8_valid`) |
 | `compress.odin` | every target | `compress`, which gathers the lanes a mask keeps |
 
 The package splits in two independent ways. The block operations (`load`, `eq`, `pack`, `pack_n`, `is_ascii`,
-`first_lane`) split by how the target packs a mask. `below`, `either` and `has` are written on 64 lanes for every target,
-since LLVM splits them to NEON registers as well as the code written one register at a time, and `any_lane` is
-`is_ascii` of a mask. The kernels that take a tier (`lookup`, `prefix_xor`, `load_padded`) split by whether the
-target has more than one instruction set to choose at run time. A target with neither NEON nor x86 vectors, such as riscv64, builds `lanes64.odin` and `single_tier.odin`,
+`is_ascii16`, `first_lane16`) split by how the target packs a mask. `below`, `either` and `has` are written on 64 lanes for every target,
+since LLVM splits them to NEON registers as well as the code written one register at a time, and `any_lane` and
+`any_lane16` are `is_ascii` and `is_ascii16` of a mask. The kernels that take a tier (`lookup`, `prefix_xor`, `load_padded`) split by whether the
+target has more than one instruction set to choose at run time. A target with neither NEON nor x86 vectors, such as riscv64, builds `block_lanes64.odin` and `tier_single.odin`,
 portable code that LLVM lowers to the target.
 
-Shared code is in `kernel.odin`. Each architecture file holds only what differs.
+Shared code is in `kernel.odin`, `classes.odin`, `scan.odin`, `utf8.odin` and `compress.odin`. Each `block_` and `tier_`
+file holds only what differs.
 
 ## Block
 
@@ -45,8 +48,8 @@ registers and the block is wrong. An array of 16-byte vectors crosses the call i
 This difference appears only where a kernel is not inlined, at -o:none and -o:minimal, so the tests run at those
 levels.
 
-Inside a kernel the block is reinterpreted as the shape the work needs: `W :: #simd[64]u8` in `lanes64.odin`, four
-`V :: #simd[16]u8` in `arm64.odin`, or `64 / N` vectors of the tier's register width in `classes` and the UTF-8 code.
+Inside a kernel the block is reinterpreted as the shape the work needs: `W :: #simd[64]u8` in `block_lanes64.odin`, four
+`V :: #simd[16]u8` in `block_arm64.odin`, or `64 / N` vectors of the tier's register width in `classes` and the UTF-8 code.
 
 ## Tiers
 
@@ -124,18 +127,18 @@ Each rule below works around a behaviour of Odin or LLVM:
   tunes for it, and Odin's default CPU, x86-64-v2, splits every unaligned 32-byte load in two.
 - **The 64-byte shuffle is declared as an LLVM intrinsic** (`llvm.x86.avx512.pshuf.b.512`). `core:simd/x86` lacks
   it.
-- **Only `head16` and `compress` are `#no_bounds_check`.** Their table indices are computed at run time: `16 - n` with
-  `n` below 16, and a mask's byte, whose check the v3 and v4 builds of `compress` keep. A constant index, as `#unroll`
+- **Only `live16` and `compress` are `#no_bounds_check`.** Their table indices are computed at run time: `16 - n` with
+  `n` up to 16, and a mask's byte, whose check the v3 and v4 builds of `compress` keep. A constant index, as `#unroll`
   gives, and a multi-pointer index carry no check.
 
 ## The block operations
 
-`lanes64.odin` writes each operation on all 64 lanes at once. LLVM splits a 64-lane vector into four registers on SSE,
+`block_lanes64.odin` writes each operation on all 64 lanes at once. LLVM splits a 64-lane vector into four registers on SSE,
 two on AVX2 and one on AVX-512. On AVX-512 a compare writes a mask register and `pack` moves it out with one `kmovq`,
 where code written at 16 lanes would merge four 16-bit masks with ORs. On SSE and AVX2 `pack` is one `pmovmskb` per
 register.
 
-`arm64.odin` works one 16-byte register at a time, because NEON has no instruction that gathers the top bit of each
+`block_arm64.odin` works one 16-byte register at a time, because NEON has no instruction that gathers the top bit of each
 lane. Instead:
 
 - **`pack`** weights each lane by its bit in a byte (1 to 128) and folds the 64 lanes into 8 bytes with three rounds
@@ -147,9 +150,10 @@ lane. Instead:
 - **`pack_n`** packs two to four masks, sharing the last round of adds between two masks. The walk packs its masks
   together for this reason.
 - **`is_ascii`** reduces with `umaxv`, one instruction per block after the ORs. On x86 it tests the packed top bits,
-  one instruction per register, the same as a vector test. `any_lane` is `is_ascii` of a mask, since a lane mask is set
-  exactly when its top bit is.
-- **`first_lane`** finds the first set lane of one 16-byte mask, for a reader that looks at a short span before it
+  one instruction per register, the same as a vector test. `is_ascii16` does the same for one 16-byte vector, where an
+  OR or max reduction is a shuffle tree on x86. `any_lane` and `any_lane16` are `is_ascii` and `is_ascii16` of a mask,
+  since a lane mask is set exactly when its top bit is.
+- **`first_lane16`** finds the first set lane of one 16-byte mask, for a reader that looks at a short span before it
   takes a whole block. x86 gathers one bit per lane with `pmovmskb`. NEON has no such instruction, so a narrowing
   shift (`shrn`) keeps four bits per lane and the trailing zero count is divided by four.
 - **`compress`** stores the lanes of a block that a 64-bit mask keeps, in order, and returns how many: per 8 lanes one

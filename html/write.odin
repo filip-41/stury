@@ -21,6 +21,7 @@ import "base:runtime"
 import "core:io"
 import "core:strings"
 import "core:unicode/utf8"
+import spell "../core/spell"
 import core "../core"
 import typed "../core/typed"
 import write "../core/write"
@@ -495,14 +496,10 @@ put_escaped :: proc(w: ^Writer, s: string, attribute: bool) -> core.Typed_Error_
 		case c == '>' && !attribute:
 			write.put_text(&w.out, "&gt;")
 		case c >= 0x80 && w.opts.ascii:
-			digits: [8]u8
-			n := len(digits)
-			for v := u32(r); v > 0; v /= 10 {
-				n -= 1
-				digits[n] = '0' + u8(v % 10)
-			}
+			digits: [spell.INT_ROOM]u8
+			n := spell.u64_text(&digits[0], u64(r))
 			write.put_text(&w.out, "&#")
-			write.put_text(&w.out, string(digits[n:]))
+			write.put_text(&w.out, string(digits[:n]))
 			write.put_byte(&w.out, ';')
 		case:
 			write.put_text(&w.out, s[i:i + size])

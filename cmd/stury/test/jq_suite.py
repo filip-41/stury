@@ -127,8 +127,13 @@ def run_cli(binary, case):
         for k in [k for k, v in case["env"].items() if v is None]:
             env.pop(k, None)
         real = enc(os.path.realpath(d))
-        closing = ["/bin/sh", "-c", 'exec "$0" "$@" >&-'] if case["closed"] else []
-        code, out, err = outcome(closing + [binary] + args, enc(case["stdin"]), TIMEOUT, cwd=d, env=env)
+        if os.name == "nt":
+            argv, cwd = [binary] + args, d
+        else:
+            # sh enters the directory: a cwd makes subprocess fork this process, which holds the suite's big texts, one
+            # fork at a time, where it otherwise spawns.
+            argv, cwd = ["/bin/sh", "-c", 'cd "$0" && exec "$@"' + (" >&-" if case["closed"] else ""), d, binary, *args], None
+        code, out, err = outcome(argv, enc(case["stdin"]), TIMEOUT, cwd=cwd, env=env)
         unreal = lambda b: b.replace(real, b"$DIR").replace(enc(d), b"$DIR")
         return code, unreal(out), unreal(err)
 

@@ -3,8 +3,8 @@ package xml
 import "base:intrinsics"
 import "core:simd"
 import spell "../core/spell"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 
 // The runs of characters the states read between markup: character data, an attribute value, a CDATA section, a
 // comment and a processing instruction. A run is read to the byte that ends it, judging every character: the `Char`
@@ -82,7 +82,7 @@ reference_slow :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (n: int
 		digits := q
 		cp: u32
 		for q < end {
-			d := hex_digit(q[0])
+			d := u32(spell.HEX_NIBBLE[q[0]])
 			if d >= base {
 				break
 			}
@@ -115,17 +115,6 @@ reference_slow :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (n: int
 		return 0, .Bad_Char, .Reference
 	}
 	return 0, .Bad_Char, .Undeclared_Entity
-}
-
-@(private)
-hex_digit :: #force_inline proc "contextless" (c: u8) -> u32 {
-	switch {
-	case '0' <= c && c <= '9':
-		return u32(c - '0')
-	case 'a' <= c | 0x20 && c | 0x20 <= 'f':
-		return u32(c | 0x20 - 'a' + 10)
-	}
-	return 16
 }
 
 // Whether `cp` is a `Char`: tab, LF, CR, U+0020 to U+D7FF, U+E000 to U+FFFD, and U+10000 to U+10FFFF.
@@ -334,12 +323,7 @@ run_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8, $M
 			}
 			if ends {
 				// The run ends in this block, so only the vectors up to its end are read.
-				if !ascii {
-					kernel.utf8_head(T, b, &u, k)
-				} else if high {
-					kernel.utf8_ascii_block(T, &u)
-				}
-				if !kernel.utf8_clean(T, u) {
+				if !kernel.utf8_stop(T, b, ascii, &u, high, k) {
 					return nil, false
 				}
 				return bs[k:], decode

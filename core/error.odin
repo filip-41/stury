@@ -5,6 +5,7 @@ import "core:io"
 import "core:reflect"
 import "core:strings"
 import spell "./spell"
+import kernel "./kernel"
 
 // The error types of the layers that walk and build a text. `Fault` is the walk's error and `Document_Error` the
 // value layer's, which holds a `Fault` by value in `inner`.
@@ -97,22 +98,14 @@ locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines = nil) -> (
 	l := lines if lines != nil else &fresh
 	if at < l.at {
 		// Back over the bytes between, so a text read out of order costs the distance and not the text.
-		for i in at ..< l.at {
-			if src[i] == '\n' {
-				l.line -= 1
-			}
-		}
-		l.line_lo = at
-		for l.line_lo > 0 && src[l.line_lo - 1] != '\n' {
-			l.line_lo -= 1
-		}
+		l.line -= u64(kernel.count_byte(src[at:l.at], '\n'))
+		l.line_lo = u64(kernel.last_index_byte(src[:at], '\n') + 1)
 		l.at = at
 	}
-	for i in l.at ..< at {
-		if src[i] == '\n' {
-			l.line += 1
-			l.line_lo = i + 1
-		}
+	ahead := src[l.at:at]
+	if n := kernel.count_byte(ahead, '\n'); n > 0 {
+		l.line += u64(n)
+		l.line_lo = l.at + u64(kernel.last_index_byte(ahead, '\n') + 1)
 	}
 	l.at = at
 	return l.line + 1, at - l.line_lo + 1
@@ -153,8 +146,6 @@ write_fault_message :: proc(w: io.Writer, src: []u8, f: Fault) -> io.Error {
 	if f.at >= u64(len(src)) {
 		return nil
 	}
-	hex := "0123456789ABCDEF"
-	b := src[f.at]
 	switch r.code {
 	case "control_char":
 		io.write_string(w, " U+00") or_return
@@ -163,8 +154,9 @@ write_fault_message :: proc(w: io.Writer, src: []u8, f: Fault) -> io.Error {
 	case:
 		return nil
 	}
-	io.write_byte(w, hex[b >> 4]) or_return
-	return io.write_byte(w, hex[b & 15])
+	digits := spell.hex_text(u64(src[f.at]), 2, true)
+	_, err := io.write(w, digits[:])
+	return err
 }
 
 // The value layer's error kinds. `Document_Error.inner` holds a `Fault` by value for `.Walk`, `.Bad_Value` and
@@ -791,11 +783,7 @@ write_shown :: proc(w: io.Writer, text: string) -> io.Error {
 		_, err := io.write_string(w, text)
 		return err
 	}
-	cut := SHOWN_TEXT_MAX
-	for cut > 0 && text[cut] & 0xC0 == 0x80 {
-		cut -= 1
-	}
-	io.write_string(w, text[:cut]) or_return
+	io.write_string(w, text[:spell.char_start(text, SHOWN_TEXT_MAX)]) or_return
 	_, err := io.write_string(w, "...")
 	return err
 }
@@ -896,10 +884,9 @@ write_step_name :: proc(w: io.Writer, name: string) -> io.Error {
 			io.write_byte(w, '\\') or_return
 			io.write_byte(w, c) or_return
 		case c < 0x20:
-			hex := "0123456789abcdef"
+			digits := spell.hex_text(u64(c), 2, false)
 			io.write_string(w, "\\u00") or_return
-			io.write_byte(w, hex[c >> 4]) or_return
-			io.write_byte(w, hex[c & 15]) or_return
+			io.write(w, digits[:]) or_return
 		case:
 			io.write_byte(w, c) or_return
 		}

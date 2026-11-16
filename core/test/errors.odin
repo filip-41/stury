@@ -33,3 +33,16 @@ every_error_arm_renders :: proc(t: ^testing.T) {
 		testing.expect_value(t, strings.to_string(code), c.code)
 	}
 }
+
+// A `Lines` carried between calls in any byte order locates as a fresh count from byte 0 does, on a text of lines
+// longer and shorter than a 64-byte block.
+@(test)
+locate_out_of_order :: proc(t: ^testing.T) {
+	src := transmute([]u8)strings.concatenate({"ab\n\ncd\r\n", strings.repeat("x", 150, context.temp_allocator), "\ne\n", strings.repeat("y\n", 40, context.temp_allocator)}, context.temp_allocator)
+	lines: core.Lines
+	for at in ([?]u64{0, 3, 200, 5, 160, 159, 900, 1, 161, 9, 4, 245}) {
+		want_line, want_col := core.locate(src, at)
+		line, col := core.locate(src, at, &lines)
+		testing.expectf(t, line == want_line && col == want_col, "byte %d: %d:%d, want %d:%d", at, line, col, want_line, want_col)
+	}
+}

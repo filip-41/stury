@@ -8,8 +8,8 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:io"
 import "core:simd"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 import typed "../core/typed"
 import write "../core/write"
 
@@ -42,10 +42,10 @@ put_string :: proc(out: ^write.Out, p: [^]u8, s: string, _: ^core.Write_Options)
 	if n < 16 {
 		v, live, ok := kernel.head16(raw_data(s), n)
 		if ok {
-			v = simd.select(simd.lanes_ne(live, Lanes(0)), v, Lanes(0))
-			if simd.reduce_or(v) < 0x80 {
+			v = simd.select(simd.lanes_ne(live, simd.u8x16(0)), v, simd.u8x16(0))
+			if kernel.is_ascii16(v) {
 				p[0] = 0x60 | u8(n)
-				intrinsics.unaligned_store((^Lanes)(p[1:]), v)
+				kernel.store16(p[1:], v)
 				out.cursor += n + 1
 				return .None
 			}
@@ -57,7 +57,7 @@ put_string :: proc(out: ^write.Out, p: [^]u8, s: string, _: ^core.Write_Options)
 // A text string past the short case, whose bytes are judged as a walk judges them.
 @(private)
 put_long_string :: proc(out: ^write.Out, s: string) -> core.Typed_Error_Kind {
-	if !utf8_valid(transmute([]u8)s) {
+	if !kernel.utf8_valid(transmute([]u8)s) {
 		return .Invalid_Utf8
 	}
 	out.cursor += write.put_head(write.room(out, 9), u64(len(s)), TREE, .Text)

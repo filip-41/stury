@@ -77,8 +77,7 @@ classify_number :: proc(text: []u8) -> (class: Class, num: core.Number, integer,
 @(private)
 all_digits :: proc "contextless" (s: []u8, base: u8) -> bool {
 	for b in s {
-		d := b - '0' if b <= '9' else (b | 0x20) - 'a' + 10
-		if b < '0' || b > '9' && (b | 0x20) < 'a' || d >= base {
+		if spell.HEX_NIBBLE[b] >= base {
 			return false
 		}
 	}
@@ -445,7 +444,7 @@ radix_number :: proc "contextless" (digits: []u8, base: u64) -> core.Number {
 	value, wide: u64
 	approx: f64
 	for b in digits {
-		d := u64(b - '0') if b <= '9' else u64((b | 0x20) - 'a' + 10)
+		d := u64(spell.HEX_NIBBLE[b])
 		approx = approx * f64(base) + f64(d)
 		if value > (max(u64) - d) / base {
 			wide = 1

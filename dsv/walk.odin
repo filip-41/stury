@@ -14,8 +14,8 @@ package dsv
 
 import "base:intrinsics"
 import "base:runtime"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 import engine "../core/build"
 import typed "../core/typed"
 import write "../core/write"

@@ -3,8 +3,8 @@ package model
 import "base:intrinsics"
 import "base:runtime"
 import "core:strings"
-import regex "../regex"
 import spell "../spell"
+import regex "../regex"
 import rules "../rules"
 import typed "../typed"
 

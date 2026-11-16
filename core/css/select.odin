@@ -1,6 +1,7 @@
 package css
 
 import "base:runtime"
+import spell "../spell"
 import core ".."
 
 // Matching walks the elements of a value in preorder, keeping the chain of elements open above the one it is at as
@@ -494,7 +495,7 @@ token_string :: proc(doc: ^core.Document, t: core.Token, buf: []u8) -> string {
 
 @(private)
 names_equal :: #force_inline proc(fold_case: bool, a, b: string) -> bool {
-	return fold_equal(a, b) if fold_case else a == b
+	return spell.ascii_fold_equal(a, b) if fold_case else a == b
 }
 
 // Whether the element whose value is `v` has the attribute `t` names with a value its operator takes.

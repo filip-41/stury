@@ -4,8 +4,8 @@ import "core:mem/virtual"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
-import "../regex"
 import "../spell"
+import "../regex"
 import core "../"
 import "../rules"
 
@@ -1685,10 +1685,9 @@ comment :: proc(b: ^strings.Builder, indent, text: string) {
 		strings.write_string(b, "//" if line == "" else "// ")
 		for c in transmute([]u8)line {
 			if c < ' ' && c != '\t' || c == 0x7f {
-				hex := "0123456789abcdef"
+				digits := spell.hex_text(u64(c), 2, false)
 				strings.write_string(b, "\\x")
-				strings.write_byte(b, hex[c >> 4])
-				strings.write_byte(b, hex[c & 15])
+				strings.write_bytes(b, digits[:])
 			} else {
 				strings.write_byte(b, c)
 			}

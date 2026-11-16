@@ -3,11 +3,10 @@ package jq
 // The builtins that take values and give one value: strings and containers. Sorting and grouping live in `sort.odin`.
 // Numbers and dates live in `math_time.odin`.
 
-import "base:intrinsics"
 import "core:math"
-import "core:simd"
 import "core:strings"
 import "core:unicode/utf8"
+import "../../../core/kernel"
 
 fn_length :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	switch kind(v) {
@@ -36,24 +35,9 @@ fn_length :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value,
 	return num(f64(length_of(v))), .Go
 }
 
-// The codepoints of `s`: its bytes but the continuation ones (10xxxxxx), 16 at a time. Strings here are valid
-// UTF-8 (input is repaired on the way in).
+// The codepoints of `s`. Strings here are valid UTF-8 (input is repaired on the way in).
 codepoints :: proc(s: string) -> int {
-	cont, i := 0, 0
-	for i + 16 <= len(s) {
-		acc: #simd[16]u8
-		for end := min(i + 255 * 16, len(s)); i + 16 <= end; i += 16 {
-			v := intrinsics.unaligned_load((^#simd[16]u8)(raw_data(s)[i:]))
-			acc -= simd.lanes_eq(simd.bit_and(v, 0xC0), 0x80)
-		}
-		for lane in simd.to_array(acc) {
-			cont += int(lane)
-		}
-	}
-	for b in transmute([]u8)s[i:] {
-		cont += int(b & 0xC0 == 0x80)
-	}
-	return len(s) - cont
+	return kernel.count_chars(transmute([]u8)s)
 }
 
 fn_utf8bytelength :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {

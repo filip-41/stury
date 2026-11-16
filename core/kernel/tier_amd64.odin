@@ -86,19 +86,8 @@ lookup_v4 :: proc "contextless" (t: V, i: Block) -> Block {
 	return transmute(Block)pshufb512(transmute(W)[4]V{t, t, t, t}, transmute(W)i)
 }
 
-// Returns a mask with bit i set when an odd number of bits of `x` at or below i are set. With a block's quote bits
-// as `x`, the set bits mark the bytes from each opening quote to its closing quote, excluding the close. x86-64-v2
-// has no carry-less multiply, so `.V2` shifts.
-prefix_xor :: #force_inline proc "contextless" ($T: Tier, x: u64) -> u64 {
-	when T == .V2 {
-		return shift_prefix_xor(x)
-	} else {
-		return clmul_prefix_xor(x)
-	}
-}
-
 // Returns bit i as the XOR of bits 0 to i of `x`, computed as bit i of the carry-less product of `x` and all ones.
-@(private = "file", enable_target_feature = "pclmul")
+@(private, enable_target_feature = "pclmul")
 clmul_prefix_xor :: proc "contextless" (x: u64) -> u64 {
 	p := x86._mm_clmulepi64_si128(x86.__m128i{i64(x), 0}, x86.__m128i{-1, -1}, 0)
 	return u64(simd.extract(p, 0))

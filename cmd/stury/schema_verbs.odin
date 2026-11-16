@@ -8,6 +8,7 @@ import "base:runtime"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import "../../core/spell"
 import core "../../core"
 import "../../core/rules"
 import "../../core/schema"
@@ -37,7 +38,7 @@ verb_option :: proc(v: ^Verb_Options, args: []string, i: int) {
 		}
 		v.package_name = args[i + 1]
 	case "--seed", "--count":
-		n, ok := parse_digits(args[i + 1] if i + 1 < len(args) else "", 1 << 31)
+		n, ok := spell.digits_u64(args[i + 1] if i + 1 < len(args) else "", 1 << 31)
 		if !ok || a == "--count" && n < 1 {
 			usage_error("%s takes a number%s", a, " from 1" if a == "--count" else "")
 		}

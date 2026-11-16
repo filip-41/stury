@@ -4,6 +4,7 @@ package jq
 // with. `v[k]` and `l[k]` are `$k` and `@k`, `at` is `@$`.
 
 import "core:strings"
+import "../../../core/kernel"
 import "../message"
 
 @(private)
@@ -404,7 +405,7 @@ object_node :: proc(entries: []^Node, at: Loc) -> ^Node {
 loc_literal :: proc(p: ^Parser, at: Loc) -> ^Node {
 	o := new_object()
 	object_put(o, "file", p.file if p.file != "" else string("<top-level>"))
-	object_put(o, "line", num(f64(strings.count(p.src[:at.start], "\n") + 1)))
+	object_put(o, "line", num(f64(kernel.count_byte(transmute([]u8)p.src[:at.start], '\n') + 1)))
 	return literal(o, at)
 }
 

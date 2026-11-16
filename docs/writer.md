@@ -456,11 +456,11 @@ significand is scaled by a power of ten from the 128-bit table, the integral par
 candidate, and the 17th digit is read off the fraction when the candidate does not read back.
 
 - The power-of-ten significands are `POW10_SIG` (`zmij_tables.odin`), the 128-bit floor of 10^k for -342 <= k <= 341,
-  which `zmij_tables.py` writes with exact integer arithmetic.
-- `EXP_SHIFT` (`exp_shift.odin`) holds the shift the scaling needs for each biased exponent of a regular double. It
-  replaces a multiply and a shift on every value. A subnormal reads the entry of biased exponent 1. A power of two,
-  whose lower neighbour is closer, computes the shift.
-- The 16 or 17 digits are made by `bcd16`, which splits two 8-digit halves into digit values in one 16-byte vector.
+  which `tools/zmij_tables.py` writes with exact integer arithmetic.
+- `EXP_SHIFT` (`zmij_tables.odin`, from the same script) holds the shift the scaling needs for each biased exponent of a
+  regular double. It replaces a multiply and a shift on every value. A subnormal reads the entry of biased exponent 1.
+  A power of two, whose lower neighbour is closer, computes the shift.
+- The 16 or 17 digits are made by `sixteen_text`, which splits two 8-digit halves into digit values in one 16-byte vector.
   The count of significant digits comes from a scalar split of the half that ends the digits, so that it does not wait
   on the vector. Digits past the last significant one are `'0'`.
 - `f32_text` takes its digits from the port's binary32 path, `to_decimal_f32`, which scales into a 64-bit product
@@ -483,8 +483,8 @@ command line print a computed float one way. A float read from input keeps its s
 
 `u64_text` writes left to right in groups of eight digits. A value under 10^8 is one group. A value under 10^16 is a
 leading group and one group of eight. A longer value has up to four digits above the low sixteen, then those sixteen in
-one `bcd16` store. The leading group is written from its digit values and shifted past its leading zeros, with no branch
-on the length. `i64_text` stores the `-` either way and keeps it only for a negative value, and negates in `u64`, which
+one `sixteen_text` store. The leading group is written from its digit values and shifted past its leading zeros, with no
+branch on the length. `i64_text` stores the `-` either way and keeps it only for a negative value, and negates in `u64`, which
 is exact for the minimum.
 
 ### Checks
@@ -509,13 +509,13 @@ ten, short decimals and integers.
 
 ### Lanes
 
-`bench/kernel.odin` times the number text with `float_random`, `float_canada`, `float_price` and `float_int` (one
+`bench/spell.odin` times the number text with `float_random`, `float_canada`, `float_price` and `float_int` (one
 value per unit) and `int_random <digits>`. `float_canada` reads `bench/fixtures/corpus/canada.json`, which `make
 fixtures` fetches. Run them with `CASES=float python3 bench/run.py build/kernelbench` after `make bench`.
 
 ### Architectures
 
-The layer has no per-tier code. `bcd16` is generic `#simd[16]u8` code and Odin builds it for the target's baseline
+The layer has no per-tier code. `sixteen_text` is generic `#simd[16]u8` code and Odin builds it for the target's baseline
 vectors, NEON on arm64 and SSE2 at x86-64-v2. The zmij port multiplies 64-bit words into 128 bits.
 
 ## JSON strings
@@ -552,7 +552,7 @@ stop, and a 16-byte block that holds one is written through `ESC_SEQ` with DEL's
    bytes past 0x7F. The tier is chosen once per call from `kernel.tier()` for strings of 64 bytes or more.
 
 UTF-8 is checked a 16-byte window at a time with `kernel.utf8_window`, which is the kernel's table check on 16 lanes.
-A window is checked only when it, or the one before it, holds a byte past 0x7F. `kernel.any_lane16` tests a 16-lane mask
+A window is checked only when it, or the one before it, holds a byte past 0x7F. `kernel.is_ascii16` tests the 16 bytes
 with one instruction on both architectures.
 
 A member name in an edit goes through the same writer, so a decoded key that is not UTF-8 cannot be set.

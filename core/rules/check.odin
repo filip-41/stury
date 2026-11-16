@@ -3,8 +3,9 @@ package rules
 import "base:runtime"
 import "core:slice"
 import "core:strings"
-import regex "../regex"
 import spell "../spell"
+import regex "../regex"
+import kernel "../kernel"
 import core "../"
 
 // A bound as the check compares it: its exact decimal, and its value in `int` when `whole` says an i64 holds it.
@@ -149,7 +150,7 @@ kept_leaf :: proc(r: Rules, kinds: Kinds, allocator: runtime.Allocator, programs
 	l.minimum, l.maximum = bound_of(r.minimum, r.exclusive_minimum), bound_of(r.maximum, r.exclusive_maximum)
 	if r.multiple_of != "" {
 		d := spell.decimal_of(r.multiple_of)
-		if d.wide != "" || len(d.head) + len(d.tail) > spell.LONG_DIVISOR_DIGITS {
+		if !spell.divisor_judged(d) {
 			return l, "multipleOf"
 		}
 		l.multiple_of = d
@@ -203,7 +204,7 @@ trivial :: proc(l: ^Leaf) -> bool {
 // is no verdict on the pattern.
 judge_string :: proc(l: ^Leaf, text: string, scratch: ^regex.Scratch) -> (fails: Failures) {
 	if l.min_length > 0 || l.max_length < max(u64) {
-		n := code_points(text)
+		n := u64(kernel.count_chars(transmute([]u8)text))
 		if n < l.min_length {
 			fails += {.Too_Short}
 		}
@@ -391,16 +392,6 @@ bound_order :: proc(b: Bound, small: i64, is_small: bool, d: spell.Decimal) -> i
 multiple :: proc(x, m: spell.Decimal) -> bool {
 	whole, _ := spell.decimal_multiple_of(x, m)
 	return whole
-}
-
-// The code points of the UTF-8 text `s`.
-@(private)
-code_points :: proc "contextless" (s: string) -> u64 {
-	n := u64(0)
-	for i in 0 ..< len(s) {
-		n += u64(s[i] & 0xC0 != 0x80)
-	}
-	return n
 }
 
 // Writes the key a scalar of kind `kind` has in an enum index: a letter for its kind, then a string's decoded `text`

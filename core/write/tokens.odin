@@ -350,7 +350,7 @@ refuse :: proc(t: ^Tokens, kind: core.Typed_Error_Kind) -> core.Typed_Error_Kind
 // Returns the RFC 4648 base64 text of `b`, in `stack` when it fits and else in `context.temp_allocator`, with false when
 // that is refused.
 bytes_text :: proc(b: []u8, stack: []u8) -> (text: string, ok: bool) {
-	n := spell.base64_len(len(b))
+	n := spell.base64_room(len(b))
 	buf := stack
 	if n > len(stack) {
 		made, err := make([]u8, n, context.temp_allocator)
@@ -359,7 +359,7 @@ bytes_text :: proc(b: []u8, stack: []u8) -> (text: string, ok: bool) {
 		}
 		buf = made
 	}
-	return string(buf[:spell.base64_put(buf, b)]), true
+	return string(buf[:spell.base64_text(buf, b)]), true
 }
 
 // Returns the base64 text of byte string `node`, as `bytes_text` does for its payload.

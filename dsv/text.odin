@@ -6,8 +6,8 @@ package dsv
 
 import "base:intrinsics"
 import spell "../core/spell"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 
 // The first byte of the first record at or after `start`. Skips empty lines, lines holding only a CR LF, and lines
 // whose first byte is `comment` when `comment` is not 0. A lone CR is not skipped. Returns `len(src)` when no record

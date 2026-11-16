@@ -6,10 +6,10 @@ import "core:simd"
 
 load :: #force_inline proc "contextless" (p: [^]u8) -> Block {
 	return {
-		intrinsics.unaligned_load((^V)(p)),
-		intrinsics.unaligned_load((^V)(p[16:])),
-		intrinsics.unaligned_load((^V)(p[32:])),
-		intrinsics.unaligned_load((^V)(p[48:])),
+		load16(p),
+		load16(p[16:]),
+		load16(p[32:]),
+		load16(p[48:]),
 	}
 }
 
@@ -58,14 +58,19 @@ is_ascii :: #force_inline proc "contextless" (b: Block) -> bool {
 	return simd.reduce_max(simd.bit_or(simd.bit_or(b[0], b[1]), simd.bit_or(b[2], b[3]))) < 0x80
 }
 
-// Reports whether any lane of the 16-lane mask `m` is set, by `umaxv`.
-any_lane16 :: #force_inline proc "contextless" (m: V) -> bool {
-	return simd.reduce_max(m) != 0
+// Whether every byte of `v` is zero, by `umaxv`.
+all_zero :: #force_inline proc "contextless" (v: #simd[$N]u8) -> bool {
+	return simd.reduce_max(v) == 0
+}
+
+// Whether every byte of `v` is below 0x80, by `umaxv`.
+is_ascii16 :: #force_inline proc "contextless" (v: V) -> bool {
+	return simd.reduce_max(v) < 0x80
 }
 
 // Returns the index of the first set lane in the 16 lane masks of `m`, or 16 when none is set. NEON has no
 // instruction that gathers one bit a lane, so a narrowing shift (`shrn`) keeps four bits a lane in a scalar register.
-first_lane :: #force_inline proc "contextless" (m: V) -> u64 {
+first_lane16 :: #force_inline proc "contextless" (m: V) -> u64 {
 	bits := transmute(u64)cast(#simd[8]u8)simd.shr(transmute(#simd[8]u16)m, 4)
 	return u64(intrinsics.count_trailing_zeros(bits)) >> 2
 }

@@ -84,13 +84,8 @@ read_numeric :: proc "contextless" (p, end: [^]u8) -> (r: Ref) {
 	digits := q
 	code: u32
 	for q < end {
-		c := q[0]
-		d: u32
-		if CLASS[c] & C_DIGIT != 0 {
-			d = u32(c - '0')
-		} else if hex && CLASS[c] & C_HEX != 0 {
-			d = u32(c | 0x20) - 'a' + 10
-		} else {
+		d := u32(spell.HEX_NIBBLE[q[0]])
+		if d >= (16 if hex else 10) {
 			break
 		}
 		// Saturates past U+10FFFF, so a long run of digits cannot wrap.
@@ -129,7 +124,7 @@ read_numeric :: proc "contextless" (p, end: [^]u8) -> (r: Ref) {
 	if d != .None {
 		r.errors[k], r.err_at[k] = d, q
 	}
-	r.n = spell.put_rune(r.value[:], rune(code))
+	r.n = spell.rune_text(r.value[:], rune(code))
 	return
 }
 

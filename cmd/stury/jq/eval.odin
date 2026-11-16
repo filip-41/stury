@@ -9,6 +9,7 @@ package jq
 // at, which `path`, `paths`, `del` and the assignments build on.
 
 import "core:strings"
+import "../../../core/spell"
 import core_pkg "../../../core"
 import "../message"
 
@@ -127,11 +128,7 @@ brief :: proc(ip: ^Interp, v: Value, size := 30) -> string {
 	case '{':
 		close = "}"
 	}
-	cut := size - 4 - len(close)
-	for cut > 0 && s[cut] & 0xc0 == 0x80 {
-		cut -= 1
-	}
-	return strings.concatenate({s[:cut], "...", close})
+	return strings.concatenate({s[:spell.char_start(s, size - 4 - len(close))], "...", close})
 }
 
 // The next label's number. jq numbers each `label` it enters, its builtins' (`first`, `limit`, `isempty`,

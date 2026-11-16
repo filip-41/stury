@@ -8,6 +8,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:io"
 import "../spell"
+import "../kernel"
 import core ".."
 import "../typed"
 
@@ -715,7 +716,7 @@ line :: #force_inline proc(w: ^Walker, p: [^]u8, nest: int) -> [^]u8 #no_bounds_
 	}
 	p[0] = '\n'
 	for k := 0; k < n; k += 16 {
-		intrinsics.unaligned_store((^#simd[16]u8)(p[1 + k:]), w.fill)
+		kernel.store16(p[1 + k:], w.fill)
 	}
 	w.out.cursor += n + 1
 	return p[n + 1:]

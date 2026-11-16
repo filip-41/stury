@@ -1,6 +1,7 @@
 package schema
 
 import "core:strings"
+import "../spell"
 import core "../"
 import "../rules"
 import "../write"
@@ -89,12 +90,11 @@ fragment_of :: proc(steps: []core.Step) -> string {
 	b := strings.builder_make(context.temp_allocator)
 	core.write_pointer(strings.to_writer(&b), steps)
 	out := strings.builder_make(context.temp_allocator)
-	hex := "0123456789ABCDEF"
 	for c in transmute([]u8)strings.to_string(b) {
 		if c <= ' ' || c >= 0x7f || strings.contains_rune(`"%<>\^`+"`{|}", rune(c)) {
+			digits := spell.hex_text(u64(c), 2, true)
 			strings.write_byte(&out, '%')
-			strings.write_byte(&out, hex[c >> 4])
-			strings.write_byte(&out, hex[c & 15])
+			strings.write_bytes(&out, digits[:])
 		} else {
 			strings.write_byte(&out, c)
 		}

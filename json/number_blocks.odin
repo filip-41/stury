@@ -1,8 +1,8 @@
 package json
 
 import "base:intrinsics"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 
 // The levels below an array's depth `st_number_blocks` looks at for arrays it may close.
 @(private)

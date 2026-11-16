@@ -6,17 +6,25 @@ import "core:strings"
 import "core:testing"
 import regex ".."
 
-// The first match of `pattern` in `text`, its span and group 1's (-1 for none), or the message of why there is none,
-// with the alternatives the search resumed. Under `ecma` the pattern is ECMA's, otherwise jq's. Under `whether` the
-// search reads no bounds, and the span is 0..0 for a match.
+// Returns an allocator over a growing arena kept in `arena`. The arena is destroyed when the caller's scope ends.
+@(deferred_in = virtual.arena_destroy)
+growing :: proc(arena: ^virtual.Arena, loc := #caller_location) -> mem.Allocator {
+	ensure(virtual.arena_init_growing(arena) == nil)
+	return virtual.arena_allocator(arena)
+}
+
+// The result of `search`: the span of the first match and of group 1 (-1 for none), the error message, and the
+// alternatives the search resumed.
 Found :: struct {
 	lo, hi, g1, g1_end: int,
 	err:                string,
 	resumes:            int,
 	automaton:          bool, // the pattern has the automaton that answers a search reading no bounds
-	ends:               int, // where the automaton that finds where a match ends found it to, -1 for none
+	ends:               int, // where the automaton that finds match ends found the match to end, -1 for none
 }
 
+// Searches `text` for `pattern`. With `flags.ecma` the pattern is ECMA's, otherwise jq's. With `linear` false the
+// automata and the visited set are off. With `whether` the search reads no bounds, and the span is 0..0 for a match.
 search :: proc(pattern, text: string, linear := true, flags := regex.Flags{ecma = true}, whether := false) -> (f: Found) {
 	f = {-1, -1, -1, -1, "", 0, false, -1}
 	arena: virtual.Arena
@@ -86,7 +94,7 @@ test_ecma_rules :: proc(t: ^testing.T) {
 		{`(?:|a)+`, "aa", 0, 2, -1, -1}, // an iteration past the least count may not
 		{`(?:(a)|b)+`, "ab", 0, 2, -1, -1}, // an iteration unsets its groups
 		{`(a?)?`, "b", 0, 0, -1, -1}, // an optional iteration may not match empty either
-		{`^[a-z]{0,65535}$`, letters, 0, 20_000, -1, -1}, // a repeat of one character is no copies
+		{`^[a-z]{0,65535}$`, letters, 0, 20_000, -1, -1}, // a repeat of one character is compiled without copies
 		{`(?=(a+))a\d`, "aaa1", 2, 4, 2, 3}, // a group in a look-ahead keeps its span past the visited set's shortcut
 		{`(?=(a|aa)*(b))a.*c`, "aabc", 0, 4, 1, 2},
 		{`(?<\u0061b>x)`, "x", 0, 1, 0, 1}, // a group name may be written with escapes
@@ -144,9 +152,7 @@ test_ecma_group_names :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		arena: virtual.Arena
-		testing.expect(t, virtual.arena_init_growing(&arena) == nil)
-		defer virtual.arena_destroy(&arena)
-		re, err := regex.compile(c.pattern, {ecma = true}, virtual.arena_allocator(&arena))
+		re, err := regex.compile(c.pattern, {ecma = true}, growing(&arena))
 		if c.name == "" {
 			testing.expectf(t, err != "", "%q compiled", c.pattern)
 		} else {
@@ -193,9 +199,7 @@ test_jq_matches_where_oniguruma_does :: proc(t: ^testing.T) {
 @(test)
 test_sample_ends_an_empty_repeat :: proc(t: ^testing.T) {
 	arena: virtual.Arena
-	testing.expect(t, virtual.arena_init_growing(&arena) == nil)
-	defer virtual.arena_destroy(&arena)
-	context.allocator = virtual.arena_allocator(&arena)
+	context.allocator = growing(&arena)
 	src := regex.Source{state = 1}
 	for pattern in ([?]string{`(?:){2000000000}`, `(?:){9007199254740991}`, `(?:(?:){100000}){100000}`}) {
 		text, ok := regex.sample(pattern, &src, 3, 0)
@@ -205,7 +209,8 @@ test_sample_ends_an_empty_repeat :: proc(t: ^testing.T) {
 
 @(test)
 test_regex_jq_group_names :: proc(t: ^testing.T) {
-	// Oniguruma's: a name starts with a word character, and a backslash in it is a backslash.
+	// Group names as jq's Oniguruma reads them: a name starts with a word character, and a backslash in it is a
+	// backslash.
 	Case :: struct {
 		pattern, want: string,
 	}
@@ -239,12 +244,12 @@ test_ecma_refusals :: proc(t: ^testing.T) {
 	testing.expect(t, search(`a`, "", flags = {ecma = true, fold = true}).err != "")
 	testing.expect_value(t, search(`a\&b`, "").err, "invalid escape \\& at offset 1")
 	testing.expect_value(t, search(`[a\%]`, "").err, "invalid escape \\% at offset 2")
-	testing.expect(t, search(`\&\%[\&\%]`, "", flags = {}).err == "") // jq's Oniguruma keeps them
+	testing.expect(t, search(`\&\%[\&\%]`, "", flags = {}).err == "") // jq's Oniguruma accepts these escapes
 }
 
 @(test)
 test_ecma_valid_back_references :: proc(t: ^testing.T) {
-	// As syntax, a back reference names a group the pattern has, before or after it, and a name is an identifier.
+	// A back reference is valid when it names a group the pattern has, before or after it, and a name is an identifier.
 	refused := [?]string{`\1`, `\5`, `(a)\2`, `(a)\10`, `\8`, `\k<a>`, `(?<a>x)\k<b>`, `\k<1>`, `\k<a>x`, `\k`, `\k<>`, `\ka`}
 	for pattern in refused {
 		testing.expectf(t, !regex.valid(pattern, {ecma = true}), "%q is valid", pattern)
@@ -257,8 +262,8 @@ test_ecma_valid_back_references :: proc(t: ^testing.T) {
 
 @(test)
 test_ecma_search_is_linear :: proc(t: ^testing.T) {
-	// Each of these resumes exponentially or quadratically many alternatives without the visited set: on four times the
-	// text it resumes about four times as many.
+	// Without the visited set each of these resumes exponentially or quadratically many alternatives. With it, on four
+	// times the text the search resumes under six times as many.
 	Case :: struct {
 		pattern, tail: string,
 		flags:         regex.Flags,
@@ -291,9 +296,9 @@ test_ecma_search_is_capped_by_memory :: proc(t: ^testing.T) {
 
 @(test)
 test_ecma_counted_search_is_bounded :: proc(t: ^testing.T) {
-	// Counted repeats that nest multiply the pairs a search visits, and the search gives up within a bound linear in
-	// the program and the text rather than run on. Each search runs to its whole work budget, so few patterns run:
-	// the lazy and wider spellings of the first reach the same budget through the same code.
+	// Nested counted repeats multiply the pairs a search visits. The search gives up with the memory error within a
+	// bound linear in the program and the text. Each search uses its whole work budget, so few patterns are run: the
+	// lazy and wider spellings of the first reach the same budget in the same code.
 	letters := strings.repeat("a", 3_000, context.temp_allocator)
 	text := strings.concatenate({letters, "cbx"}, context.temp_allocator)
 	for pattern in ([?]string{`((a{1,100}){1,100}){1,100}b`, `(?=(?:a{1,200}){1,200})x`}) {
@@ -305,13 +310,14 @@ test_ecma_counted_search_is_bounded :: proc(t: ^testing.T) {
 	testing.expect_value(t, search(`^(a{1,1000}){1,1000}b`, strings.concatenate({letters[:500], "b"}, context.temp_allocator)).hi, 501)
 }
 
-// The next of the generator's states in `state`, and a draw below `n` from it.
+// Advances the generator state `state` and returns a draw from 0..<n.
 next :: proc(state: ^u64, n: int) -> int {
 	state^ = state^ * 6364136223846793005 + 1442695040888963407
 	return int(state^ >> 33) % n
 }
 
-// A text of up to ten of `pieces` drawn from `state`, the last two of them one time in eight.
+// Returns a text of up to ten of `pieces` drawn from `state`. The last two pieces are used one time in eight and are
+// replaced by `pieces[0]` otherwise.
 random_text :: proc(state: ^u64, pieces: []string) -> string {
 	b := strings.builder_make(context.temp_allocator)
 	for _ in 0 ..< next(state, 11) {
@@ -324,7 +330,21 @@ random_text :: proc(state: ^u64, pieces: []string) -> string {
 	return strings.to_string(b)
 }
 
-// A pattern over `a` and `b` drawn from `state`.
+// Writes a pattern drawn from `state` with `depth` levels of nesting left.
+Generator :: proc(b: ^strings.Builder, state: ^u64, depth: int)
+
+// Writes `open`, a pattern from `gen`, then with `alternatives` a `|` and a second pattern, then `)`.
+nested :: proc(gen: Generator, b: ^strings.Builder, state: ^u64, depth: int, open: string, alternatives := false) {
+	strings.write_string(b, open)
+	gen(b, state, depth - 1)
+	if alternatives {
+		strings.write_string(b, "|")
+		gen(b, state, depth - 1)
+	}
+	strings.write_string(b, ")")
+}
+
+// Writes a pattern over `a` and `b` drawn from `state`.
 generate :: proc(b: ^strings.Builder, state: ^u64, depth: int) {
 	for _ in 0 ..< 1 + next(state, 3) {
 		repeatable := true
@@ -344,19 +364,11 @@ generate :: proc(b: ^strings.Builder, state: ^u64, depth: int) {
 		case depth == 0:
 			strings.write_string(b, "ab")
 		case k == 8, k == 9:
-			strings.write_string(b, "(")
-			generate(b, state, depth - 1)
-			strings.write_string(b, ")")
+			nested(generate, b, state, depth, "(")
 		case k == 10:
-			strings.write_string(b, "(?:")
-			generate(b, state, depth - 1)
-			strings.write_string(b, "|")
-			generate(b, state, depth - 1)
-			strings.write_string(b, ")")
+			nested(generate, b, state, depth, "(?:", true)
 		case:
-			strings.write_string(b, "(?=" if k < 13 else "(?!")
-			generate(b, state, depth - 1)
-			strings.write_string(b, ")")
+			nested(generate, b, state, depth, "(?=" if k < 13 else "(?!")
 			repeatable = false
 		}
 		if repeatable {
@@ -366,8 +378,8 @@ generate :: proc(b: ^strings.Builder, state: ^u64, depth: int) {
 	}
 }
 
-// With and without the visited set the search finds the same match and groups, on texts over `a`, `b` and `c` no longer than ten
-// letters.
+// With and without the visited set the search finds the same match and groups, on texts over `a`, `b` and `c` of up
+// to ten letters.
 @(test)
 test_ecma_visited_set_keeps_the_matches :: proc(t: ^testing.T) {
 	state := u64(20261109)
@@ -386,8 +398,8 @@ test_ecma_visited_set_keeps_the_matches :: proc(t: ^testing.T) {
 	}
 }
 
-// The automaton answers each of these on a long text in one pass, where a backtracker without the visited set takes a
-// power of the text's length.
+// The automaton answers each of these on a long text in one pass, where a backtracker without the visited set takes
+// time that is a power of the text's length.
 @(test)
 test_ecma_automaton_is_linear :: proc(t: ^testing.T) {
 	Case :: struct {
@@ -413,7 +425,7 @@ test_ecma_automaton_is_linear :: proc(t: ^testing.T) {
 		f := search(c.pattern, strings.concatenate({text, c.tail}, context.temp_allocator), whether = true)
 		testing.expectf(t, f.automaton && f.err == "" && (f.lo == 0) == c.found, "%q: automaton %v, %v %s", c.pattern, f.automaton, f.lo == 0, f.err)
 	}
-	// Look-ahead past the text's start leaves a pattern to the visited set, and `\b` does not.
+	// A look-ahead past the text's start leaves a pattern with no automaton, so the visited set runs it. `\b` does not.
 	for pattern in ([?]string{`(?=a)b`, `(?!a*b)a`, `^a(?=a)`, `^(?=a(?=b))`, `^(?<=a)b`}) {
 		testing.expectf(t, !search(pattern, "a").automaton, "%q has an automaton", pattern)
 	}
@@ -422,8 +434,8 @@ test_ecma_automaton_is_linear :: proc(t: ^testing.T) {
 	}
 }
 
-// Building the automata of each of these patterns stays within a bound on its working memory, on the bytes it moves,
-// frees its working memory before it returns and keeps the program and a megabyte of table an automaton.
+// Building the automata of each of these patterns stays within 8 MiB of working memory at once and 16 MiB allocated in
+// all, frees its working memory before it returns, and keeps at most a megabyte of table per automaton in the program.
 @(test)
 test_ecma_automaton_build_is_bounded :: proc(t: ^testing.T) {
 	repeat :: proc(piece: string, n: int, sep := "") -> string {
@@ -456,16 +468,14 @@ test_ecma_automaton_build_is_bounded :: proc(t: ^testing.T) {
 		`(a|b)*a(a|b){20}`,
 		`^[a-z]{0,1000}$`,
 	}
-	// Under jq's syntax the build makes three automata within the one budget, and a pattern of ECMA's syntax alone can
+	// Under jq's syntax the build makes three automata within a single budget. Only under ECMA's syntax may a pattern
 	// fail to compile.
 	for k in 0 ..< 2 * len(patterns) {
 		pattern, flags := patterns[k / 2], regex.Flags{ecma = k % 2 == 0}
 		automata := 1 if flags.ecma else 3
 		program, scratch: mem.Tracking_Allocator
 		arena: virtual.Arena
-		testing.expect(t, virtual.arena_init_growing(&arena) == nil)
-		defer virtual.arena_destroy(&arena)
-		mem.tracking_allocator_init(&program, virtual.arena_allocator(&arena))
+		mem.tracking_allocator_init(&program, growing(&arena))
 		defer mem.tracking_allocator_destroy(&program)
 		mem.tracking_allocator_init(&scratch, context.allocator)
 		defer mem.tracking_allocator_destroy(&scratch)
@@ -487,12 +497,11 @@ test_ecma_automaton_build_is_bounded :: proc(t: ^testing.T) {
 @(test)
 test_ecma_search_from_past_the_end :: proc(t: ^testing.T) {
 	arena: virtual.Arena
-	testing.expect(t, virtual.arena_init_growing(&arena) == nil)
-	defer virtual.arena_destroy(&arena)
+	allocator := growing(&arena)
 	scratch: regex.Scratch
 	defer regex.scratch_destroy(&scratch)
 	for pattern in ([?]string{`a*`, `$`, `(?=a)|`}) {
-		re, err := regex.compile(pattern, {ecma = true}, virtual.arena_allocator(&arena))
+		re, err := regex.compile(pattern, {ecma = true}, allocator)
 		testing.expect(t, err == "")
 		for start in ([?]int{3, 5}) {
 			found: bool
@@ -502,7 +511,8 @@ test_ecma_search_from_past_the_end :: proc(t: ^testing.T) {
 	}
 }
 
-// A pattern over `a`, `b`, `é` and `😀` drawn from `state`, of the instructions the automaton runs.
+// Writes a pattern drawn from `state` of the characters `a`, `b`, `é` and `😀`, classes, `^`, `$` and groups, which the
+// automaton runs.
 generate_plain :: proc(b: ^strings.Builder, state: ^u64, depth: int) {
 	for _ in 0 ..< 1 + next(state, 3) {
 		atoms := [?]string{"a", "b", "é", "😀", ".", "[^a]", "[a-cé]", "\\w", "\\d", "\\s", "\\p{L}", "\\P{Ll}", "[^\\p{Lu}b]", "ab", "aé"}
@@ -517,15 +527,9 @@ generate_plain :: proc(b: ^strings.Builder, state: ^u64, depth: int) {
 		case depth == 0:
 			strings.write_string(b, "a")
 		case k < len(atoms) + 3:
-			strings.write_string(b, "(")
-			generate_plain(b, state, depth - 1)
-			strings.write_string(b, ")")
+			nested(generate_plain, b, state, depth, "(")
 		case:
-			strings.write_string(b, "(?:")
-			generate_plain(b, state, depth - 1)
-			strings.write_string(b, "|")
-			generate_plain(b, state, depth - 1)
-			strings.write_string(b, ")")
+			nested(generate_plain, b, state, depth, "(?:", true)
 		}
 		if repeatable {
 			quantifiers := [?]string{"", "", "", "*", "+", "?", "*?", "+?", "??", "{2}", "{1,3}", "{2,}", "{0,2}?", "{3}"}
@@ -534,9 +538,9 @@ generate_plain :: proc(b: ^strings.Builder, state: ^u64, depth: int) {
 	}
 }
 
-// The automaton finds a match exactly where the visited set's search does, and the automata that find where it ends and
-// starts find the match and groups a backtracker without them does, on generated patterns and on texts of up to ten
-// characters, some of them not valid UTF-8.
+// On generated patterns and on texts of up to ten characters, some not valid UTF-8, the automaton finds a match exactly
+// where the visited set's search does, and the automata that find where a match ends and starts give the match and
+// groups that a backtracker without them gives.
 @(test)
 test_ecma_automaton_keeps_the_answers :: proc(t: ^testing.T) {
 	state := u64(20261110)
@@ -563,10 +567,10 @@ test_ecma_automaton_keeps_the_answers :: proc(t: ^testing.T) {
 	testing.expectf(t, built > 1600 && first > 600, "%d of 4000 patterns have the automaton, %d searches found a match's end with it", built, first)
 }
 
-// A counted repeat too long to write out runs as a counter loop and finds the match and groups the same repeat written
-// out finds. A body grows past the bound by alternatives of characters no text holds, which change no match, and a
-// repeat around a counter loop grows the same way. The counter loop's search keeps the answers without the visited set
-// too.
+// A counted repeat too long to write out runs as a counter loop, and finds the match and groups that the same repeat
+// written out finds. A body grows past the bound with alternatives of characters that no text holds, which change no
+// match, and a repeat around a counter loop grows the same way. The counter loop's search gives the same answers
+// without the visited set.
 @(test)
 test_ecma_counter_loops_keep_the_answers :: proc(t: ^testing.T) {
 	fill := strings.builder_make(context.temp_allocator)
@@ -608,8 +612,9 @@ test_ecma_counter_loops_keep_the_answers :: proc(t: ^testing.T) {
 	}
 }
 
-// Nested counted repeats compile to a program the size of their bodies, a count past what the text can hold costs
-// nothing, and a search whose visited set would pass the memory bound refuses before it takes any.
+// Nested counted repeats compile to a program the size of their bodies, a count too large for the text to hold
+// (`{0,2000000000}`) compiles within 4 MiB, and a search whose visited set would pass the memory bound is refused
+// before it allocates the set.
 @(test)
 test_ecma_nested_counts_are_bounded :: proc(t: ^testing.T) {
 	Case :: struct {
@@ -631,9 +636,7 @@ test_ecma_nested_counts_are_bounded :: proc(t: ^testing.T) {
 	for c in cases {
 		program: mem.Tracking_Allocator
 		arena: virtual.Arena
-		testing.expect(t, virtual.arena_init_growing(&arena) == nil)
-		defer virtual.arena_destroy(&arena)
-		mem.tracking_allocator_init(&program, virtual.arena_allocator(&arena))
+		mem.tracking_allocator_init(&program, growing(&arena))
 		defer mem.tracking_allocator_destroy(&program)
 		re, err := regex.compile(c.pattern, {ecma = true}, mem.tracking_allocator(&program))
 		testing.expectf(t, err == "" && program.peak_memory_allocated < 4 << 20, "%q: %s, %d bytes", c.pattern, err, program.peak_memory_allocated)
@@ -649,8 +652,8 @@ test_ecma_nested_counts_are_bounded :: proc(t: ^testing.T) {
 	}
 }
 
-// The automaton of a pattern that begins with look-aheads after `^` finds a match exactly where a backtracker without
-// the visited set does, on texts of up to ten characters, some of them not valid UTF-8.
+// On texts of up to ten characters, some not valid UTF-8, the automaton of a pattern that begins with look-aheads after
+// `^` finds a match exactly where a backtracker without the visited set does.
 @(test)
 test_ecma_leading_look_aheads_keep_the_answers :: proc(t: ^testing.T) {
 	state := u64(20261111)
@@ -684,7 +687,8 @@ test_ecma_leading_look_aheads_keep_the_answers :: proc(t: ^testing.T) {
 	testing.expectf(t, built > 2400, "%d of 4000 patterns have the automaton", built)
 }
 
-// A jq pattern drawn from `state`, of the instructions and assertions the automaton runs and some it does not.
+// Writes a jq pattern drawn from `state`, of the instructions and assertions the automaton runs and some it does not,
+// such as `(?=a)`.
 generate_jq :: proc(b: ^strings.Builder, state: ^u64, depth: int) {
 	for _ in 0 ..< 1 + next(state, 3) {
 		atoms := [?]string{"a", "A", "b", "k", "é", "É", "ß", "_", " ", "1", ".", "[a-c]", "[^a]", "[K\\d]", "\\w", "\\W", "\\d", "\\s", "\\p{L}", "[\\w-]", "\\b", "\\B", "^", "$", "\\A", "\\z", "\\Z", "\\n", "ab", "(?i:a)", "(?i:[k-m])", "(?i:é)", "(?=a)"}
@@ -695,22 +699,16 @@ generate_jq :: proc(b: ^strings.Builder, state: ^u64, depth: int) {
 		case depth == 0:
 			strings.write_string(b, "a")
 		case k < len(atoms) + 2:
-			strings.write_string(b, "(")
-			generate_jq(b, state, depth - 1)
-			strings.write_string(b, ")")
+			nested(generate_jq, b, state, depth, "(")
 		case:
-			strings.write_string(b, "(?:")
-			generate_jq(b, state, depth - 1)
-			strings.write_string(b, "|")
-			generate_jq(b, state, depth - 1)
-			strings.write_string(b, ")")
+			nested(generate_jq, b, state, depth, "(?:", true)
 		}
 		quantifiers := [?]string{"", "", "", "*", "+", "?", "*?", "+?", "{2}", "{1,3}", "{2,}"}
 		strings.write_string(b, quantifiers[next(state, len(quantifiers))])
 	}
 }
 
-// Under jq's syntax the automaton answers the assertions as Oniguruma does at a text's edges and its lines.
+// Under jq's syntax the automaton answers the assertions at a text's edges and line breaks as Oniguruma does.
 @(test)
 test_jq_automaton_assertions :: proc(t: ^testing.T) {
 	Case :: struct {
@@ -758,8 +756,8 @@ test_jq_automaton_assertions :: proc(t: ^testing.T) {
 	}
 }
 
-// Under jq's syntax and flags the automata find a match exactly where the backtracker does, with its groups' bounds,
-// on generated patterns and on texts of up to ten characters across words, lines and case.
+// Under jq's syntax and flags, on generated patterns and on texts of up to ten characters across words, lines and case,
+// the automata find a match exactly where the backtracker does, with the same span and group 1 bounds.
 @(test)
 test_jq_automaton_keeps_the_answers :: proc(t: ^testing.T) {
 	state := u64(20261111)

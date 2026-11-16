@@ -1,6 +1,7 @@
 package html
 
 import "base:intrinsics"
+import spell "../core/spell"
 
 // The insertion modes of the standard's section 13.2.6.4, each a procedure that reads one token and returns whether
 // the token is to be read again in the mode it switched to. A mode that uses another's rules calls it. A text token is
@@ -416,11 +417,11 @@ doctype :: proc(t: ^Html_Tree, tok: ^Html_Token) {
 @(private)
 quirks_ids :: proc "contextless" (public, system: string, system_missing: bool) -> bool {
 	for id in QUIRKS_PUBLIC {
-		if ascii_fold_equal(public, id) {
+		if spell.ascii_fold_equal(public, id) {
 			return true
 		}
 	}
-	if ascii_fold_equal(system, QUIRKS_SYSTEM) {
+	if spell.ascii_fold_equal(system, QUIRKS_SYSTEM) {
 		return true
 	}
 	return has_prefix_in(public, QUIRKS_PREFIXES[:]) || (system_missing || len(system) == 0) && has_prefix_in(public, HTML401_PREFIXES[:])
@@ -429,7 +430,7 @@ quirks_ids :: proc "contextless" (public, system: string, system_missing: bool) 
 @(private)
 has_prefix_in :: proc "contextless" (s: string, prefixes: []string) -> bool {
 	for p in prefixes {
-		if len(s) >= len(p) && ascii_fold_equal(s[:len(p)], p) {
+		if len(s) >= len(p) && spell.ascii_fold_equal(s[:len(p)], p) {
 			return true
 		}
 	}

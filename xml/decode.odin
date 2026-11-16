@@ -28,7 +28,7 @@ content_text :: proc "contextless" (span: []u8, buf: []u8, dtd: ^Dtd_View = nil,
 				copy(buf[w:], span[i:i + n])
 				w += n
 			} else {
-				w += spell.put_rune(buf[w:], r)
+				w += spell.rune_text(buf[w:], r)
 			}
 			i += n
 		case '\r':
@@ -108,7 +108,7 @@ attribute_text :: proc "contextless" (span: []u8, buf: []u8, dtd: ^Dtd_View = ni
 				copy(buf[w:], span[i:i + n])
 				w += n
 			} else {
-				w += spell.put_rune(buf[w:], r)
+				w += spell.rune_text(buf[w:], r)
 			}
 			i += n
 		case '\r':
@@ -153,7 +153,7 @@ expand :: proc "contextless" (x: ^Expander, span: []u8, top, attr: bool, nest: i
 				if x.w + rune_size(r) > len(x.buf) {
 					return false
 				}
-				x.w += spell.put_rune(x.buf[x.w:], r)
+				x.w += spell.rune_text(x.buf[x.w:], r)
 				continue
 			}
 			name := span[i - n + 1:i - 1]
@@ -265,17 +265,7 @@ decode_reference :: proc "contextless" (p: []u8) -> (n: int, r: rune, named: boo
 		n += 1
 	}
 	for p[n] != ';' {
-		c := p[n]
-		d: rune
-		switch {
-		case c <= '9':
-			d = rune(c - '0')
-		case c <= 'F':
-			d = rune(c - 'A' + 10)
-		case:
-			d = rune(c - 'a' + 10)
-		}
-		r = r * base + d
+		r = r * base + rune(spell.HEX_NIBBLE[p[n]])
 		n += 1
 	}
 	return n + 1, r, false

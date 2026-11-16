@@ -2,8 +2,8 @@ package model
 
 import "base:runtime"
 import "core:strings"
-import regex "../regex"
 import spell "../spell"
+import regex "../regex"
 import core ".."
 import rules "../rules"
 import typed "../typed"

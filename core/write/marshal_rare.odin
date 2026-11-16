@@ -208,13 +208,11 @@ put_text :: proc(out: ^Out, s: string) {
 	}
 }
 
-// Writes `prefix` and then `v` as `digits` lowercase hex digits, with leading zeros, none when `digits` is 0.
+// Writes `prefix` and then `v` as `digits`, 0 to 8, lowercase hex digits with leading zeros.
 put_hex :: proc(out: ^Out, prefix: string, v: u32, digits: int) {
-	HEX := "0123456789abcdef"
+	all := spell.hex_text(u64(v), 8, false)
 	put_text(out, prefix)
-	for k := digits - 1; k >= 0; k -= 1 {
-		put_byte(out, HEX[v >> (4 * u32(k)) & 15])
-	}
+	put_text(out, string(all[8 - digits:]))
 }
 
 // Whether `text` can be written as line comments, one a line: no control byte but tab and a line end.
@@ -333,16 +331,10 @@ f64_value :: #force_inline proc "contextless" (p: [^]u8, x: f64, $T: Tree) -> (s
 			return 0, .Non_Finite
 		}
 	}
-	size = spell.f64_text(p, x)
 	when T[.Point_Zero] != "" {
-		for i in 0 ..< size {
-			if p[i] == '.' || p[i] == 'e' {
-				return size, .None
-			}
-		}
-		size += put_word(p[size:], T[.Point_Zero])
+		return spell.f64_point_text(p, x, T[.Point_Zero]), .None
 	}
-	return size, .None
+	return spell.f64_text(p, x), .None
 }
 
 // The text of `n` at `p`, under a reservation of `LEAF_ROOM`, and its length. A `.Wide` number holds no value to write.

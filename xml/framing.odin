@@ -2,6 +2,7 @@ package xml
 
 import "base:intrinsics"
 import spell "../core/spell"
+import kernel "../core/kernel"
 import core "../core"
 
 // What stands around the root element: the XML declaration, comments, processing instructions, the document type
@@ -76,7 +77,7 @@ prolog :: proc "contextless" (w: ^Walk($H), src: []u8, lo: u64, s0, s1, s2: u64,
 @(private)
 declares :: #force_inline proc "contextless" (q, end: [^]u8) -> bool #no_bounds_check {
 	room := intrinsics.ptr_sub(end, q)
-	return room >= 5 && string(q[:5]) == "<?xml" && (room == 5 || is_ws(q[5]) || q[5] == '?')
+	return room >= 5 && string(q[:5]) == "<?xml" && (room == 5 || kernel.is_ws(q[5]) || q[5] == '?')
 }
 
 // Reads the run of comments and instructions before the root element or after the document type declaration, and
@@ -158,7 +159,7 @@ st_epilog :: #force_no_inline proc "contextless" (p, end: [^]u8, e: u64, w: ^Wal
 misc_run :: proc "contextless" (w: ^Walk($H), p, end: [^]u8) -> (q: [^]u8, r: Run) #no_bounds_check {
 	q = p
 	for {
-		q = skip_ws(q, end)
+		q = kernel.skip_ws(q, end)
 		room := intrinsics.ptr_sub(end, q)
 		if room < 2 || q[0] != '<' {
 			return q, {}
@@ -222,7 +223,7 @@ instruction :: proc "contextless" (w: ^Walk($H), q, end: [^]u8) -> (next: [^]u8,
 		}
 		return t[2:], {}
 	}
-	if !is_ws(t[0]) {
+	if !kernel.is_ws(t[0]) {
 		return q, Run{q = t, kind = .Bad_Char, detail = .Instruction}
 	}
 	d := run(w, t, end, .Pi, 0)
@@ -319,7 +320,7 @@ declaration :: proc "contextless" (q, end: [^]u8) -> (next: [^]u8, kind: core.Fa
 		}
 		p, standalone = after_standalone, value == "yes"
 	}
-	p = skip_ws(p, end)
+	p = kernel.skip_ws(p, end)
 	if intrinsics.ptr_sub(end, p) < 2 {
 		return end, .Truncated, .None, false
 	}
@@ -341,15 +342,15 @@ utf8_label :: proc "contextless" (label: string) -> bool {
 // past the closing quote, or with `ok` false the byte it stopped at.
 @(private)
 pseudo_attribute :: proc "contextless" (p, end: [^]u8, name: string) -> (value: string, next: [^]u8, ok: bool) #no_bounds_check {
-	s := skip_ws(p, end)
+	s := kernel.skip_ws(p, end)
 	if s == p || intrinsics.ptr_sub(end, s) < len(name) || string(s[:len(name)]) != name {
 		return "", p if s == p else s, false
 	}
-	q := skip_ws(s[len(name):], end)
+	q := kernel.skip_ws(s[len(name):], end)
 	if q >= end || q[0] != '=' {
 		return "", q, false
 	}
-	q = skip_ws(q[1:], end)
+	q = kernel.skip_ws(q[1:], end)
 	if q >= end || q[0] != '"' && q[0] != '\'' {
 		return "", q, false
 	}
@@ -369,7 +370,7 @@ pseudo_attribute :: proc "contextless" (p, end: [^]u8, name: string) -> (value: 
 @(private)
 doctype :: proc "contextless" (w: ^Walk($H), src: []u8, q, end: [^]u8, standalone: bool) -> (next, at_: [^]u8, kind: core.Fault_Kind, detail: Detail) #no_bounds_check {
 	p := q[9:]
-	s := skip_ws(p, end)
+	s := kernel.skip_ws(p, end)
 	if s >= end {
 		return q, end, .Truncated, .None
 	}
@@ -386,7 +387,7 @@ doctype :: proc "contextless" (w: ^Walk($H), src: []u8, q, end: [^]u8, standalon
 		return q, n, .Bad_Char, .Invalid_Utf8
 	case .None:
 	}
-	p = skip_ws(n, end)
+	p = kernel.skip_ws(n, end)
 	if p >= end {
 		return q, end, .Truncated, .None
 	}
@@ -403,7 +404,7 @@ doctype :: proc "contextless" (w: ^Walk($H), src: []u8, q, end: [^]u8, standalon
 			p = p[len(word):]
 			passes := 2 if is_public else 1
 			for pass in 0 ..< passes {
-				l := skip_ws(p, end)
+				l := kernel.skip_ws(p, end)
 				if l >= end {
 					return q, end, .Truncated, .None
 				}
@@ -422,7 +423,7 @@ doctype :: proc "contextless" (w: ^Walk($H), src: []u8, q, end: [^]u8, standalon
 			break
 		}
 	}
-	p = skip_ws(p, end)
+	p = kernel.skip_ws(p, end)
 	if p >= end {
 		return q, end, .Truncated, .None
 	}
@@ -460,7 +461,7 @@ doctype :: proc "contextless" (w: ^Walk($H), src: []u8, q, end: [^]u8, standalon
 			return q, f.at if f.at != nil else p, f.kind, f.detail
 		}
 		d.built.subset_hi = u64(intrinsics.ptr_sub(close, raw_data(src)))
-		p = skip_ws(close[1:], end)
+		p = kernel.skip_ws(close[1:], end)
 		if p >= end {
 			return q, end, .Truncated, .None
 		}

@@ -1,14 +1,14 @@
 #+private
 package regex
 
-// Escapes at `\` outside a class and the single-character escapes a class shares.
+// Parses escapes at `\` outside a class, and the single-character escapes that classes share.
 
 import "core:strconv"
 import "core:strings"
 import "core:unicode/utf8"
+import spell "../spell"
 
-// At `\`, outside a class.
-@(private)
+// Parses the escape at `\` outside a class.
 parse_escape :: proc(p: ^Parser) -> ^Node {
 	esc := p.i
 	p.i += 1
@@ -82,7 +82,7 @@ parse_escape :: proc(p: ^Parser) -> ^Node {
 	return char_node(p, r) if ok else nil
 }
 
-// After `\` and `c` outside a class, under ECMA.
+// Parses the escape after `\` and its letter `c` outside a class, under ECMA.
 @(private = "file")
 ecma_escape :: proc(p: ^Parser, c: byte) -> ^Node {
 	switch c {
@@ -100,7 +100,7 @@ ecma_escape :: proc(p: ^Parser, c: byte) -> ^Node {
 		if !p.syntax_only {
 			return fail(p, "back references are not supported")
 		}
-		// Judged as syntax, a reference names a group the pattern has, which `resolve_refs` checks at the end.
+		// When only syntax is judged, `resolve_refs` still checks at the end that the reference names a group.
 		n := new_node(.Backref)
 		if c != 'k' {
 			p.i -= 1
@@ -125,9 +125,9 @@ ecma_escape :: proc(p: ^Parser, c: byte) -> ^Node {
 	return char_node(p, r) if ok else nil
 }
 
-// The character of an ECMA escape after `\` and its letter `c`: \t \n \v \f \r \0 \cX \xHH, \uHHHH or a pair of
-// them for a surrogate pair, \u{H...}, or an escaped syntax character. A lone surrogate is a character no text holds.
-@(private)
+// Returns the character of an ECMA escape after `\` and its letter `c`: \t \n \v \f \r \0 \cX \xHH, \uHHHH or a pair
+// of them for a surrogate pair, \u{H...}, or an escaped syntax character. A lone surrogate is returned as a character
+// that no text holds.
 ecma_char :: proc(p: ^Parser, c: byte) -> (r: rune, ok: bool) {
 	if k := strings.index_byte("tnvfr", c); k >= 0 {
 		controls := "\t\n\v\f\r"
@@ -135,7 +135,7 @@ ecma_char :: proc(p: ^Parser, c: byte) -> (r: rune, ok: bool) {
 	}
 	switch c {
 	case '0':
-		if digit(peek(p)) >= 10 {
+		if spell.HEX_NIBBLE[peek(p)] >= 10 {
 			return 0, true
 		}
 	case 'c':
@@ -157,9 +157,9 @@ ecma_char :: proc(p: ^Parser, c: byte) -> (r: rune, ok: bool) {
 			}
 		} else if v, n := number(p.src, &p.i, 0xFFFF, 16, 4); n == 4 {
 			j := p.i + 2
-			if low, m := number(p.src, &j, 0xFFFF, 16, 4); v >> 10 == 0x36 && peek(p) == '\\' && peek(p, 1) == 'u' && m == 4 && low >> 10 == 0x37 {
+			if low, m := number(p.src, &j, 0xFFFF, 16, 4); spell.high_surrogate(u32(v)) && peek(p) == '\\' && peek(p, 1) == 'u' && m == 4 && spell.low_surrogate(u32(low)) {
 				p.i = j
-				v = 0x10000 + (v - 0xD800) << 10 + low - 0xDC00
+				v = int(spell.surrogate_pair(u32(v), u32(low)))
 			}
 			return rune(v), true
 		}
@@ -176,117 +176,10 @@ ecma_char :: proc(p: ^Parser, c: byte) -> (r: rune, ok: bool) {
 	return
 }
 
-// At `<` or `'` after \k: `\k<name>`, `\k<n>` or `\k<-n>`.
-@(private = "file")
-parse_backref_name :: proc(p: ^Parser) -> ^Node {
-	close: byte = '>' if peek(p) == '<' else '\''
-	p.i += 1
-	name, named := read_name(p, close)
-	if !named {
-		return nil
-	}
-	n := new_node(.Backref)
-	n.fold = p.flags.fold
-	switch name[0] {
-	case '0' ..= '9', '-', '+':
-		num, rel := 0, name[0] == '-'
-		digits := name[1:] if name[0] == '-' || name[0] == '+' else name
-		if name[0] == '+' || digits == "" {
-			return fail(p, "invalid backref number/name")
-		}
-		j := 0
-		if num, _ = number(digits, &j, MAX_BACKREF + 1); j < len(digits) {
-			return fail(p, "invalid backref number/name")
-		}
-		if rel {
-			num = len(p.names) - num
-		}
-		if num <= 0 {
-			return fail(p, "invalid backref number/name")
-		}
-		append(&n.refs, num)
-	case:
-		n.name = name
-		if !resolve_name(p, n) {
-			return nil
-		}
-	}
-	add_ref(p, n)
-	return n
-}
-
-// At `<` or `'` after \g: a call of a group by number, by number relative to the groups opened so far
-// (`-1` the last, `+1` the next), or by name, read as Oniguruma's fetch_name reads one, with its messages.
-// A name of odd characters is still a name, which no group has.
-@(private = "file")
-parse_call :: proc(p: ^Parser) -> ^Node {
-	close: rune = '>' if peek(p) == '<' else '\''
-	p.i += 1
-	start := p.i
-	if at_end(p) || rune(peek(p)) == close {
-		return fail(p, "group name is empty")
-	}
-	next :: proc(p: ^Parser) -> rune {
-		r, w := utf8.decode_rune_in_string(p.src[p.i:])
-		p.i += w
-		return r
-	}
-	c := next(p)
-	numeric, sign := c >= '0' && c <= '9', c == '-' || c == '+'
-	if !numeric && !sign && !is_word(c) {
-		for !at_end(p) {
-			if c = next(p); c == close || c == ')' {
-				break
-			}
-		}
-		return fail(p, strings.concatenate({"invalid char in group name <", p.src[start:p.i], ">"}))
-	}
-	numeric ||= sign
-	name_end := len(p.src)
-	for !at_end(p) {
-		name_end = p.i
-		if c = next(p); c == close || c == ')' {
-			break
-		}
-		numeric &&= c >= '0' && c <= '9'
-	}
-	name := p.src[start:name_end]
-	if c != close {
-		return fail(p, strings.concatenate({"invalid group name <", name, ">"}))
-	}
-	n := new_node(.Call)
-	n.name, n.group = name, -1
-	append(&p.calls, n)
-	if !numeric {
-		return n
-	}
-	j := int(sign)
-	num, _ := number(name, &j, int(max(i32)) + 1)
-	if num > int(max(i32)) {
-		return fail(p, "too big number")
-	}
-	if sign && num == 0 {
-		return fail(p, strings.concatenate({"invalid group name <", name, ">"}))
-	}
-	opened := len(p.names) - 1
-	switch name[0] {
-	case '-':
-		n.group = opened + 1 - num
-	case '+':
-		n.group = opened + num if num <= int(max(i32)) - opened else -1
-	case:
-		n.group = num
-	}
-	if n.group < 0 {
-		return fail(p, strings.concatenate({"undefined group <", name, "> reference"}))
-	}
-	return n
-}
-
-// A single-character escape at `\`: \t \n \r \f \a \e, \xHH, \x{H...}, \0oo, \ooo, \o{o...}, \cX, or the
-// escaped character itself. \x and octal give bytes, and bytes that start a UTF-8 sequence take the
-// escapes that follow to finish it. In a class a byte that starts none is `lone`, its value as it is.
-@(private)
+// Parses a single-character escape at `\`: \t \n \r \f \a \e, \xHH, \x{H...}, \0oo, \ooo, \o{o...}, \cX, or the
+// escaped character itself. \x and octal give bytes. A byte that starts a UTF-8 sequence is completed by the escapes
+// that follow, which give its continuation bytes. In a class a byte that starts no sequence is returned with `lone`
+// set, as its byte value.
 parse_char_escape :: proc(p: ^Parser, in_class: bool) -> (r: rune, lone: bool, ok: bool) {
 	b, is_byte, b_ok := escape_unit(p)
 	if !b_ok || !is_byte || b < 0x80 {
@@ -321,14 +214,11 @@ parse_char_escape :: proc(p: ^Parser, in_class: bool) -> (r: rune, lone: bool, o
 	return r, false, true
 }
 
-// One escape at `\`, or one character: its value, and whether it is a raw byte.
+// Reads one escape at `\`, or one character. Returns its value, and whether it is a raw byte.
 @(private = "file")
 escape_unit :: proc(p: ^Parser) -> (r: rune, is_byte: bool, ok: bool) {
 	if peek(p) != '\\' {
-		w: int
-		r, w = utf8.decode_rune_in_string(p.src[p.i:])
-		p.i += w
-		return r, false, true
+		return next_rune(p), false, true
 	}
 	p.i += 1
 	if at_end(p) {
@@ -343,7 +233,7 @@ escape_unit :: proc(p: ^Parser) -> (r: rune, is_byte: bool, ok: bool) {
 	}
 	switch c {
 	case 'x':
-		if peek(p) == '{' && !at_end(p) && digit(peek(p, 1)) < 16 {
+		if peek(p) == '{' && !at_end(p) && spell.HEX_NIBBLE[peek(p, 1)] < 16 {
 			p.i += 1
 			v, n := number(p.src, &p.i, 1 << 40, 16)
 			if n > 8 {
@@ -384,8 +274,20 @@ escape_unit :: proc(p: ^Parser) -> (r: rune, is_byte: bool, ok: bool) {
 		return 0x7F if x == '?' else rune(x & 0x1F), false, true
 	}
 	p.i -= 1
-	w: int
-	r, w = utf8.decode_rune_in_string(p.src[p.i:])
-	p.i += w
-	return r, false, true
+	return next_rune(p), false, true
+}
+
+// Builds a class node of one property item. \w and \W (TABLE_WORD) keep their negation in the item, as Oniguruma's word
+// type. For any other item (\d \s \p{...}) the class itself is negated as a whole, which shows at a lone continuation
+// byte.
+prop_node :: proc(it: Prop_Item) -> ^Node {
+	n := new_node(.Class)
+	n.class = new(Class)
+	if it.table == TABLE_WORD {
+		append(&n.class.props, it)
+	} else {
+		append(&n.class.props, Prop_Item{table = it.table})
+		n.class.negated = it.neg
+	}
+	return n
 }

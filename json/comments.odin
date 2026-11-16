@@ -3,8 +3,8 @@ package json
 import "base:intrinsics"
 import "core:simd"
 import spell "../core/spell"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 
 // This file reads the comments of the specs that have them. A `//` comment runs to the line's end, which is not part
 // of the comment, and a `/* */` comment may be anywhere whitespace may be. A comment is a `Plain` fact token whose
@@ -16,11 +16,9 @@ import kernel "../core/kernel"
 
 // Marks the lanes of `v` that `comment` must judge one at a time: a byte past 0x7F, which its UTF-8 reader judges, a
 // control byte, a line end among them, which its control test judges, and a `*`, which may close a `/* */` comment.
-// `v - 0x20 > 0x5f` is true for a control byte and a byte past 0x7F.
 @(private)
-comment_stops :: #force_inline proc "contextless" (v: #simd[16]u8, $star: bool) -> #simd[16]u8 {
-	V :: #simd[16]u8
-	m := simd.lanes_gt(v - 0x20, V(0x5f))
+comment_stops :: #force_inline proc "contextless" (v: V, $star: bool) -> V {
+	m := kernel.control_or_high16(v, false)
 	when star {
 		m = simd.bit_or(m, simd.lanes_eq(v, V('*')))
 	}
@@ -33,7 +31,7 @@ comment_stops :: #force_inline proc "contextless" (v: #simd[16]u8, $star: bool) 
 comment_scan :: #force_inline proc "contextless" (q, end: [^]u8, $star: bool) -> [^]u8 #no_bounds_check {
 	q := q
 	for intrinsics.ptr_sub(end, q) >= 16 {
-		k := kernel.first_lane(comment_stops(load16(q), star))
+		k := kernel.first_lane16(comment_stops(kernel.load16(q), star))
 		if k != 16 {
 			return q[k:]
 		}
@@ -152,7 +150,7 @@ line_end :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> bool {
 ws_short :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_check {
 	q := p
 	for _ in 0 ..< 8 {
-		if q >= end || !is_ws(q[0]) {
+		if q >= end || !kernel.is_ws(q[0]) {
 			return q
 		}
 		q = q[1:]
@@ -162,7 +160,7 @@ ws_short :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds
 
 @(private, cold)
 ws_long :: #force_no_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_check {
-	return skip_ws(p, end)
+	return kernel.skip_ws(p, end)
 }
 
 // Reads whitespace and comments from `p` and, when `comma`, one comma among them. Returns the next token's byte,

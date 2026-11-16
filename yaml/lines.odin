@@ -1,5 +1,6 @@
 package yaml
 
+import spell "../core/spell"
 import core "../core"
 
 // Whether the `---` or `...` marker stands at `i`, which is the first byte of a line.
@@ -216,7 +217,7 @@ is_word :: #force_inline proc "contextless" (b: u8) -> bool {
 uri_char_at :: proc "contextless" (p: ^Parser, i: u64) -> bool {
 	b := at(p, i)
 	if b == '%' {
-		return is_hex(at(p, i + 1)) && is_hex(at(p, i + 2))
+		return spell.HEX_NIBBLE[at(p, i + 1)] | spell.HEX_NIBBLE[at(p, i + 2)] < 16
 	}
 	if is_word(b) {
 		return true
@@ -226,9 +227,4 @@ uri_char_at :: proc "contextless" (p: ^Parser, i: u64) -> bool {
 		return true
 	}
 	return false
-}
-
-@(private)
-is_hex :: #force_inline proc "contextless" (b: u8) -> bool {
-	return b >= '0' && b <= '9' || b | 0x20 >= 'a' && b | 0x20 <= 'f'
 }

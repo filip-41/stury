@@ -11,7 +11,7 @@ quantifiers, \\K, \\R, \\X, class intersection, properties, anchors, inline opti
 (*MISMATCH), (*SKIP), (*ERROR), and (*COUNT), (*TOTAL_COUNT), (*MAX) and (*CMP) with their tags), a set of
 jq's flags (g, i, x, n, s, l, m, p) and a text of ASCII and multi-byte characters, and runs one of match,
 test, capture, scan, splits, sub or gsub on them. A case differs, or differs as documented, as in
-jq_diff.py; SKIP lists what stury differs in on purpose. Each run is held to TIMEOUT seconds of CPU, and the peak RSS of any one is reported.
+jq_diff.py; SKIP lists what stury differs in on purpose. Each run is held to TIMEOUT seconds, and the peak RSS of any one is reported.
 """
 
 import random

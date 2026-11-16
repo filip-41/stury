@@ -4,6 +4,7 @@ package regex
 // \X's extended grapheme clusters, which the matcher steps over.
 
 import "core:unicode"
+import spell "../spell"
 
 // \X, an extended grapheme cluster by UAX #29's rules as Oniguruma 6.9.10 keeps them (no GB9c), over the
 // break classes its \X shows (unicode_tables.odin).
@@ -22,7 +23,7 @@ grapheme :: proc(s: string, pos: int, behind: ^Grapheme_Behind) -> int {
 	}
 	before_emoji, before_regional := grapheme_behind(behind, s, pos)
 	// An odd count of regional indicators so far, Extended_Pictographic Extend* so far, and a ZWJ after them.
-	whole, _ := decode(s, char_start(s, pos))
+	whole, _ := decode(s, spell.char_start(s, pos))
 	regional := !before_regional && in_table(TABLE_REGIONAL, prev)
 	emoji := in_table(TABLE_PICTOGRAPHIC, whole) || before_emoji && in_table(TABLE_GCB_EXTEND, whole)
 	zwj := before_emoji && whole == 0x200D
@@ -50,9 +51,9 @@ grapheme :: proc(s: string, pos: int, behind: ^Grapheme_Behind) -> int {
 	return p
 }
 
-// What Oniguruma's \X reads back over the text before a cluster (GB11, GB12/13) at `pos`: whether the
-// characters before it end in Extended_Pictographic Extend*, and in an odd run of regional indicators.
-// Kept for the last position asked, a walk back stops there, so a search's positions in order cost one walk.
+// What Oniguruma's \X reads back over the text before `pos` (GB11, GB12/13): whether the characters before it end in
+// Extended_Pictographic Extend*, and in an odd run of regional indicators. It holds the answer for the last position
+// asked, where a later walk back stops, so positions searched in order walk back over the text once in all.
 @(private)
 Grapheme_Behind :: struct {
 	pos:             int, // 0 for none kept
@@ -77,7 +78,7 @@ grapheme_behind :: proc(b: ^Grapheme_Behind, s: string, pos: int) -> (emoji, reg
 @(private = "file")
 run_back :: proc(s: string, pos, stop, table: int) -> (r: rune, n: int, found: bool) {
 	for q := pos; q > stop; n += 1 {
-		if q = char_start(s, q - 1); q < stop {
+		if q = spell.char_start(s, q - 1); q < stop {
 			return
 		}
 		if r, _ = decode(s, q); !in_table(table, r) {

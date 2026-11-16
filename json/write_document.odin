@@ -4,8 +4,8 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:io"
 import "core:simd"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 import write "../core/write"
 
 // The document writer. A document walks its node rows in `rows_run`, which holds the common case, calls nothing, and
@@ -147,9 +147,9 @@ settle :: proc(e: ^Emit) {
 // Writes a line break and `n - 1` bytes of indent, and stores up to 15 more bytes past them.
 @(private)
 put_line :: #force_inline proc "contextless" (c: ^Out_Cursor, p: [^]u8, n: int) -> [^]u8 #no_bounds_check {
-	intrinsics.unaligned_store((^V)(p), c.head)
+	kernel.store16(p, c.head)
 	for k := 16; k < n; k += 16 {
-		intrinsics.unaligned_store((^V)(p[k:]), c.fill)
+		kernel.store16(p[k:], c.fill)
 	}
 	return p[n:]
 }
@@ -160,7 +160,7 @@ put_line :: #force_inline proc "contextless" (c: ^Out_Cursor, p: [^]u8, n: int) 
 @(private)
 copy_token :: #force_inline proc "contextless" (dst, src: [^]u8, n: u32) -> bool #no_bounds_check {
 	block :: #force_inline proc "contextless" (dst, src: [^]u8, k: u32) #no_bounds_check {
-		intrinsics.unaligned_store((^V)(dst[k:]), intrinsics.unaligned_load((^V)(src[k:])))
+		kernel.store16(dst[k:], kernel.load16(src[k:]))
 	}
 	block(dst, src, 0)
 	block(dst, src, 16)
@@ -198,7 +198,7 @@ copy_token :: #force_inline proc "contextless" (dst, src: [^]u8, n: u32) -> bool
 @(private)
 plain_string :: #force_inline proc "contextless" (e: ^Emit, src: [^]u8, n: u32) -> bool #no_bounds_check {
 	for k := u32(0); k < n; k += 16 {
-		v := intrinsics.unaligned_load((^V)(src[k:]))
+		v := kernel.load16(src[k:])
 		m := simd.lanes_ge(v, e.hi) | simd.lanes_eq(v, V('\\')) | simd.lanes_eq(v, e.html[0]) | simd.lanes_eq(v, e.html[1]) |
 			simd.lanes_eq(v, e.html[2]) | simd.lanes_eq(v, e.html[3])
 		if kernel.any_lane16(m) {
@@ -536,9 +536,9 @@ past_value :: #force_inline proc "contextless" (c: ^Out_Cursor, i: u32, $P: bool
 	}
 	when P {
 		n := 2 + c.bytes
-		intrinsics.unaligned_store((^V)(p), c.comma)
+		kernel.store16(p, c.comma)
 		for k := 16; k < n; k += 16 {
-			intrinsics.unaligned_store((^V)(p[k:]), c.fill)
+			kernel.store16(p[k:], c.fill)
 		}
 		c.p = p[n:]
 	} else {

@@ -4,8 +4,8 @@ package dsv
 import "base:intrinsics"
 import "core:strconv"
 import spell "../core/spell"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 import write "../core/write"
 import records "../core/records"
 
@@ -94,7 +94,7 @@ split_row :: #force_inline proc "contextless" ($LAX: bool, src: []u8, row: Batch
 		in_quote, close, start: u64 = 0, 0, 1
 	}
 	for pos := lo; ; pos += 64 {
-		blk := kernel.load(base[pos:]) if len(src) - pos >= 64 else kernel.load_padded(T, src, pos)
+		blk := kernel.load_block(T, src, pos)
 		live := bits_between(0, min(hi - pos, 64))
 		d := kernel.pack(kernel.eq(blk, delim)) & live
 		bs: u64

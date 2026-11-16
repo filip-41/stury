@@ -1,147 +1,42 @@
 #+private
 package regex
 
-// Oniguruma's pattern syntax as jq compiles it (ONIG_SYNTAX_PERL_NT, UTF-8, ONIG_OPTION_CAPTURE_GROUP),
-// parsed into a tree. An error is Oniguruma's own message, which jq prints after "Regex failure: ". Under
-// `Flags.ecma` the grammar is ECMA-262's with the `u` flag, as a JSON Schema's `pattern` uses it, and back references
-// and look-behind are refused: with neither, a program's outcome at an instruction and a position does not depend on
-// the way it got there, which the linear search relies on (match.odin).
+// Parses Oniguruma's pattern syntax as jq compiles it (ONIG_SYNTAX_PERL_NT, UTF-8, ONIG_OPTION_CAPTURE_GROUP) into a
+// tree. A syntax error is Oniguruma's own message, which jq prints after "Regex failure: ". Under `Flags.ecma` the
+// grammar is ECMA-262's with the `u` flag, as a JSON Schema `pattern` uses it, and back references and look-behind are
+// refused. Without them the outcome of a program at an instruction and a position does not depend on how the search got
+// there, which the linear search relies on (match.odin).
 
 import "core:slice"
 import "core:strings"
 import "core:unicode/utf8"
+import spell "../spell"
 
 MAX_REPEAT :: 100000 // ONIG_MAX_REPEAT_NUM
 MAX_BACKREF :: 1000 // ONIG_MAX_BACKREF_NUM
 MAX_CAPTURES :: 32767 // ONIG_MAX_CAPTURE_NUM
-// The nesting jq's Oniguruma refuses past: the pattern and each group count two, each quantifier on an atom one more.
-// It bounds the tree's depth, which compiling and analysing recurse over.
+// The deepest nesting jq's Oniguruma accepts. The whole pattern and each group count two, each quantifier on an atom
+// one. It bounds the tree's depth, which compiling and analysing recurse over.
 MAX_PARSE_DEPTH :: 1024
 
-Node_Kind :: enum u8 {
-	Empty,
-	Char,
-	Str, // a run of two or more plain characters outside (?i), `text`, as written in the pattern
-	Any,
-	Class,
-	Cat,
-	Alt,
-	Group,
-	Repeat,
-	Assert,
-	Look,
-	Backref,
-	Keep,
-	Cond,
-	Linebreak, // \R
-	Grapheme, // \X
-	Call, // \g<...>, a call of group `group` (-1 for one by name), as written in `name`
-	Absent, // (?~...): kids [absent, exp], [absent] for a stopper `(?~|absent)`, none for `(?~|)`
-}
-
-Assert_Kind :: enum u8 {
-	Begin_Buf, // \A, and ^ outside (?m)
-	End_Buf, // \z
-	Semi_End_Buf, // \Z, and $ outside (?m): the end, or before a newline that ends the string
-	Begin_Line,
-	End_Line,
-	Word_Boundary,
-	Not_Word_Boundary,
-	Search_Start, // \G
-	Ascii_Boundary, // ECMA's \b: a boundary of ASCII word characters
-	Not_Ascii_Boundary,
-	// The callouts, last.
-	Fail, // (*FAIL)
-	Mismatch, // (*MISMATCH): no match at this start
-	Skip, // (*SKIP): the search's next start is past where it was reached
-	Error, // (*ERROR{n}): the search ends with Oniguruma's error n, or at -1 the match at this start
-	Count, // (*COUNT{type}): counts as it is passed (`Callout`)
-	Total_Count, // (*TOTAL_COUNT{type}): a count the search keeps over its starts
-	Max, // (*MAX{n, type}): counts, and fails once passed n times
-	Cmp, // (*CMP{x, op, y}): fails unless the comparison holds
-}
-
-// A callout Oniguruma's builtins keep data for, with its arguments as they read them.
-Callout :: struct {
-	kind:  Assert_Kind,
-	tag:   string,
-	code:  int, // ERROR's
-	// COUNT's, TOTAL_COUNT's and MAX's: '>' counts as it is passed, 'X' also takes it back as the match backs past
-	// it, '<' counts only then. Any other ends the search when it is reached.
-	type:  rune,
-	sides: [2]Operand, // MAX's most in [0], CMP's two sides
-	cmp:   u8, // CMP's operator as the outcomes it holds for: 1 less, 2 equal, 4 greater, 0 for none
-	index: int, // its count's slot
-}
-
-// A number, or the count of the callout of a tag (`ref`, nil for a number). A tag on a callout that keeps
-// no count reads 0.
-Operand :: struct {
-	n:   int,
-	tag: string,
-	ref: ^Callout,
-}
-
-Look_Kind :: enum u8 {
-	Ahead,
-	Not_Ahead,
-	Behind,
-	Not_Behind,
-	Atomic, // (?>...) and the possessive quantifiers
-}
-
-Node :: struct {
-	kind:       Node_Kind,
-	fold:       bool, // Char, Class, Backref: under (?i)
-	dotall:     bool, // Any: also matches "\n"
-	greedy:     bool,
-	possessive: bool,
-	assert:     Assert_Kind,
-	look:       Look_Kind,
-	bag:        bool, // the body of an option group `(?i:...)`, which Oniguruma keeps as a group of its own
-	r:          rune, // Char, and Str's first character
-	recursion:  bool, // Backref: within a group it names
-	used:       bool, // Group: a backreference, condition or call reads it, so a look-behind is not cut to nothing
-	text:       string, // Str
-	class:      ^Class,
-	kids:       [dynamic]^Node, // Cat and Alt. Group, Repeat and Look have one, Cond its yes and no
-	min, max:   int, // Repeat, max -1 for no bound
-	group:      int, // Group's capture number (0 for none), Cond's group
-	refs:       [dynamic]int, // Backref's groups, which a name may give several of
-	name:       string, // Backref or Cond by name, until resolved
-	callout:    ^Callout, // a callout of data
-	target:     ^Node, // Call's group, once resolved (`resolve_calls`)
-}
-
-// A pattern's tree with what the parser learns of it on the way.
-Pattern :: struct {
-	root:       ^Node, // under group 0 when a call names the whole pattern
-	names:      []string, // group n's name at n, "" for none; [0] is the whole match
-	groups:     []^Node, // group n's node at n, [0] only under a call of the whole pattern
-	referenced: []bool, // by group number: a backreference or condition reads it
-	callouts:   []^Callout, // those that keep data, each at its index
-	has_calls:  bool,
-}
-
-@(private)
 Parser :: struct {
 	src:    string,
 	i:      int,
-	flags:  Flags, // the current group's, which (?i) changes to the group's end
-	names:  [dynamic]string, // group n's name at n, "" for none; [0] is the whole match
+	flags:  Flags, // flags in force in the current group, which (?i) changes until the group's end
+	names:  [dynamic]string, // group n's name at index n, "" for none. Index 0 is the whole match
 	groups: [dynamic]^Node,
-	open:   [dynamic]int, // the groups being parsed
+	open:   [dynamic]int, // numbers of the groups being parsed, innermost last
 	refs:   [dynamic]^Node, // backreferences and conditions, resolved once every group is known
-	calls:  [dynamic]^Node, // the same for calls
-	tags:   [dynamic]string, // callouts' [tag]s
+	calls:  [dynamic]^Node, // calls, resolved the same way
+	tags:   [dynamic]string, // the tags of callouts, written [tag]
 	callouts: [dynamic]^Callout,
 	err:    string,
-	depth:  int, // the groups being parsed and the quantifiers on the atom, as MAX_PARSE_DEPTH counts them
-	syntax_only: bool, // judging syntax alone: an ECMA back reference and look-behind parse and mean nothing
-	head:   bool, // at an absent's first atom, where Oniguruma keeps a `(?:...)` as a group of its own (group_head)
+	depth:  int, // nesting of the groups being parsed, 2 per group, checked against MAX_PARSE_DEPTH
+	syntax_only: bool, // only syntax is judged (`valid`): ECMA back references and look-behind are accepted
+	head:   bool, // at the first atom of an absent or condition branch, where `(?:...)` stays a group (group_head)
 }
 
-// The pattern's tree, or Oniguruma's message when it does not compile.
+// Returns the pattern's tree, or Oniguruma's message when it does not compile.
 parse :: proc(src: string, flags: Flags, syntax_only := false) -> (pat: Pattern, err: string) {
 	p := Parser{src = src, flags = flags, syntax_only = syntax_only}
 	append(&p.names, "")
@@ -167,7 +62,6 @@ parse :: proc(src: string, flags: Flags, syntax_only := false) -> (pat: Pattern,
 	return {root, p.names[:], p.groups[:], referenced, p.callouts[:], len(p.calls) > 0}, p.err
 }
 
-@(private)
 fail :: proc(p: ^Parser, msg: string) -> ^Node {
 	if p.err == "" {
 		p.err = msg
@@ -175,24 +69,22 @@ fail :: proc(p: ^Parser, msg: string) -> ^Node {
 	return nil
 }
 
-new_node :: proc(kind: Node_Kind, kids: ..^Node) -> ^Node {
-	n := new(Node)
-	n.kind = kind
-	append(&n.kids, ..kids)
-	return n
-}
-
-@(private)
 peek :: proc(p: ^Parser, off := 0) -> byte {
 	return p.src[p.i + off] if p.i + off < len(p.src) else 0
 }
 
-@(private)
 at_end :: proc(p: ^Parser) -> bool {
 	return p.i >= len(p.src)
 }
 
-// Alternatives up to the group's `)` or the pattern's end. (?i) holds to the group's end, past `|`.
+// Returns the rune at `p.i` and moves `p.i` past it.
+next_rune :: proc(p: ^Parser) -> rune {
+	r, w := utf8.decode_rune_in_string(p.src[p.i:])
+	p.i += w
+	return r
+}
+
+// Parses alternatives up to the group's `)` or the pattern's end. A (?i) lasts to the group's end, across `|`.
 @(private = "file")
 parse_alt :: proc(p: ^Parser) -> ^Node {
 	saved := p.flags
@@ -219,7 +111,7 @@ parse_alt :: proc(p: ^Parser) -> ^Node {
 
 @(private = "file")
 parse_cat :: proc(p: ^Parser) -> ^Node {
-	// The Cat is made at the second element, so a lone one takes no node.
+	// A Cat node is made at the second element, so a single element has no Cat around it.
 	first, cat: ^Node
 	add :: proc(first, cat: ^^Node, n: ^Node) {
 		switch {
@@ -241,7 +133,7 @@ parse_cat :: proc(p: ^Parser) -> ^Node {
 			add(&first, &cat, run)
 			continue
 		}
-		// ECMA repeats any group, whatever it holds.
+		// Under ECMA any `(?:...)` group may be repeated, whatever it holds.
 		head := (p.head || p.flags.ecma) && strings.has_prefix(p.src[p.i:], "(?:")
 		quoted := strings.has_prefix(p.src[p.i:], `\Q`)
 		p.head = false
@@ -256,7 +148,7 @@ parse_cat :: proc(p: ^Parser) -> ^Node {
 			atom = atom.kids[len(atom.kids) - 1]
 		}
 		if head && atom != nil {
-			atom.bag = true // so a repeat of it is valid, whatever it holds
+			atom.bag = true // makes a repeat of it valid, whatever it holds
 		}
 		if atom == nil { // a comment or an option change
 			continue
@@ -273,9 +165,9 @@ parse_cat :: proc(p: ^Parser) -> ^Node {
 	return first if first != nil else new_node(.Empty)
 }
 
-// The plain characters from here, and the escaped ASCII punctuation, as one Str node, short of one a quantifier
-// follows, which repeats it alone. Nil for fewer than two, under (?i) or (?x), where each character is its own node.
-// The text is the pattern's own bytes until an escape, then a copy.
+// Takes the plain characters from here and the escaped ASCII punctuation as a Str node, stopping short of a character
+// that a quantifier follows, which repeats it alone. Returns nil for fewer than two characters, and under (?i) or (?x),
+// where each character is its own node. The text is a slice of the pattern until an escape is met, then a copy.
 @(private = "file")
 plain_run :: proc(p: ^Parser) -> ^Node {
 	if p.flags.fold || p.flags.extend {
@@ -284,7 +176,7 @@ plain_run :: proc(p: ^Parser) -> ^Node {
 	copied: [dynamic]byte
 	owned := false
 	seg, end, runes := p.i, p.i, 0
-	last, last_len := p.i, 0 // where the last character starts in the pattern, and the text's length before it
+	last, last_len := p.i, 0 // pattern offset where the last character starts, and the length of the text before it
 	scan: for end < len(p.src) {
 		w := 0
 		switch c := p.src[end]; c {
@@ -342,10 +234,9 @@ plain_run :: proc(p: ^Parser) -> ^Node {
 	return n
 }
 
-// Whether `\c` is the character c itself, as an escaped ASCII character other than a letter or digit is, and under
-// ECMA's `u` flag only a syntax character or `/`, which no escape outside a class otherwise names. `-` is escaped only
-// in a class, whose parse takes it first.
-@(private)
+// Whether `\c` is the character c itself: an escaped ASCII character other than a letter or digit, and under ECMA's
+// `u` flag only a syntax character or `/`. Outside a class no other escape uses these characters. `-` is escaped only
+// in a class, whose parse handles it first.
 escaped_punctuation :: proc(c: byte, ecma: bool) -> bool {
 	if ecma {
 		return c == '/' || strings.index_byte("^$\\.*+?()[]{}|", c) >= 0
@@ -357,7 +248,7 @@ escaped_punctuation :: proc(c: byte, ecma: bool) -> bool {
 	return c < 0x80
 }
 
-// Under (?x), white space and `#` comments between tokens.
+// Under (?x), skips white space and `#` comments between tokens.
 @(private = "file")
 skip_extended :: proc(p: ^Parser) {
 	for p.flags.extend && !at_end(p) {
@@ -411,9 +302,9 @@ parse_quantifiers :: proc(p: ^Parser, atom: ^Node) -> ^Node {
 		if peek(p) == '?' && !at_end(p) {
 			rep.greedy = false
 			p.i += 1
-		} else if p.flags.ecma { // one quantifier, which a second one after it cannot repeat
+		} else if p.flags.ecma { // ECMA takes one quantifier per atom, a second one is not a repeat of the first
 			return rep
-		} else if peek(p) == '+' && !at_end(p) { // PERL_NT's PLUS_POSSESSIVE_INTERVAL too: `a{1,2}+`
+		} else if peek(p) == '+' && !at_end(p) { // also after an interval: `a{1,2}+` (PLUS_POSSESSIVE_INTERVAL)
 			rep.possessive = true
 			p.i += 1
 		}
@@ -429,20 +320,20 @@ parse_quantifiers :: proc(p: ^Parser, atom: ^Node) -> ^Node {
 
 @(private = "file")
 Nested :: enum u8 {
-	// The inner repeat's body under the outer repeat made the simple repeat of simple_repeat's number.
-	Q,
+	// The outer repeat becomes a repeat of the inner repeat's body, of the kind simple_repeat numbers 0 to 5.
+	Q, // ?
 	A, // *
 	P, // +
 	QQ, // ??
 	AQ, // *?
-	PQ,
-	Asis, // as it is
-	Del, // the inner repeat alone
-	P_QQ, // (?:a+)??
+	PQ, // +?
+	Asis, // both repeats stay as written
+	Del, // the inner repeat replaces the outer one
+	P_QQ, // kept as `(?:a+)??`
 }
 
-// Oniguruma's ReduceTypeTable, [inner][outer] for each of ? * + ?? *? +?, with `(?:a+?)*` and `(?:a+?)+` as jq
-// 1.8.2 matches them: as `a*` and `a+`, in linear time.
+// Oniguruma's ReduceTypeTable, indexed [inner][outer] by the numbers of ? * + ?? *? +?. `(?:a+?)*` and `(?:a+?)+`
+// reduce to `a*` and `a+`, as jq 1.8.2 matches them, in linear time.
 @(private = "file", rodata)
 REDUCE_NESTED := [6][6]Nested {
 	{.Del, .A, .A, .QQ, .AQ, .Asis},
@@ -453,8 +344,9 @@ REDUCE_NESTED := [6][6]Nested {
 	{.Asis, .A, .P, .AQ, .AQ, .Del},
 }
 
-// Oniguruma's onig_reduce_nested_quantifier, and its cut of `(?:a*){n,m}` to `(?:a*){n}`: a repeat of a
-// repeat taken as the one repeat that matches the same, so `(?:a+)+$` backtracks as `a+$` does.
+// Oniguruma's onig_reduce_nested_quantifier. Replaces a repeat of a repeat by the single repeat that matches the same,
+// so `(?:a+)+$` backtracks as `a+$` does. Also cuts the maximum of a greedy counted repeat of `a*` or `a+` to
+// max(min, 1).
 @(private = "file")
 reduce_nested :: proc(outer: ^Node) {
 	inner := outer.kids[0]
@@ -481,7 +373,7 @@ reduce_nested :: proc(outer: ^Node) {
 	}
 }
 
-// Oniguruma's quantifier_type_num: 0-5 for ? * + ?? *? +?, -1 for another repeat.
+// Oniguruma's quantifier_type_num: returns 0-5 for ? * + ?? *? +?, -1 for any other repeat.
 @(private = "file")
 simple_repeat :: proc(n: ^Node) -> int {
 	lazy := 0 if n.greedy else 3
@@ -496,8 +388,8 @@ simple_repeat :: proc(n: ^Node) -> int {
 	return -1
 }
 
-// Oniguruma's is_invalid_quantifier_target: an anchor, a lookaround or \K, or alternatives one of which is. A group
-// other than `(?:...)` or a sequence is a valid target whatever it holds.
+// Oniguruma's is_invalid_quantifier_target: whether `n` is an anchor, a look-around other than an atomic group, \K, or
+// alternatives one of which is. A group other than `(?:...)` or a sequence is a valid target whatever it holds.
 @(private = "file")
 invalid_repeat_target :: proc(n: ^Node) -> bool {
 	if n.bag {
@@ -518,31 +410,19 @@ invalid_repeat_target :: proc(n: ^Node) -> bool {
 	return false
 }
 
-// The digits of `base` at s[j^:], at most `most` of them, read past: their value capped at `cap`, and how many.
-@(private)
+// Reads at most `most` digits of `base` at s[j^:] and advances `j^` past them. Returns their value capped at `cap`,
+// and how many.
 number :: proc(s: string, j: ^int, cap: int, base := 10, most := max(int)) -> (n: int, digits: int) {
-	for ; digits < most && j^ < len(s) && digit(s[j^]) < base; digits += 1 {
-		n = min(n * base + digit(s[j^]), cap)
+	for ; digits < most && j^ < len(s) && int(spell.HEX_NIBBLE[s[j^]]) < base; digits += 1 {
+		n = min(n * base + int(spell.HEX_NIBBLE[s[j^]]), cap)
 		j^ += 1
 	}
 	return
 }
 
-@(private)
-digit :: proc(c: byte) -> int {
-	switch c {
-	case '0' ..= '9':
-		return int(c - '0')
-	case 'a' ..= 'f':
-		return int(c - 'a') + 10
-	case 'A' ..= 'F':
-		return int(c - 'A') + 10
-	}
-	return 16
-}
-
-// `{n}`, `{n,}` or `{n,m}` at `{`, read past when it is one. Anything else leaves `{` a literal, and is an error under
-// ECMA, whose counts have no bound: a count past an i32 is taken as the most an i32 holds.
+// Reads `{n}`, `{n,}` or `{n,m}` at `{` and moves past it. Anything else returns ok false, and `{` is a literal, or an
+// error under ECMA. Oniguruma limits counts to MAX_REPEAT. ECMA counts have no limit, and one past an i32 is read as
+// the largest i32.
 @(private = "file")
 parse_interval :: proc(p: ^Parser) -> (lo, hi: int, ok: bool) {
 	j := p.i + 1
@@ -571,29 +451,12 @@ parse_interval :: proc(p: ^Parser) -> (lo, hi: int, ok: bool) {
 	return lo, hi, true
 }
 
-@(private)
 char_node :: proc(p: ^Parser, r: rune) -> ^Node {
 	n := new_node(.Char)
 	n.r, n.fold = r, p.flags.fold
 	return n
 }
 
-// Outside a bracket \w and \W are Oniguruma's word type, and the other escapes and \p{...} classes that \D,
-// \S, \H and \P{...} negate whole, which tells at a lone continuation byte.
-@(private)
-prop_node :: proc(it: Prop_Item) -> ^Node {
-	n := new_node(.Class)
-	n.class = new(Class)
-	if it.table == TABLE_WORD {
-		append(&n.class.props, it)
-	} else {
-		append(&n.class.props, Prop_Item{table = it.table})
-		n.class.negated = it.neg
-	}
-	return n
-}
-
-@(private)
 assert_node :: proc(kind: Assert_Kind) -> ^Node {
 	n := new_node(.Assert)
 	n.assert = kind
@@ -641,12 +504,9 @@ parse_atom :: proc(p: ^Parser) -> ^Node {
 			return fail(p, "invalid pattern character")
 		}
 	}
-	r, w := utf8.decode_rune_in_string(p.src[p.i:])
-	p.i += w
-	return char_node(p, r)
+	return char_node(p, next_rune(p))
 }
 
-@(private)
 expect_close :: proc(p: ^Parser, body: ^Node) -> ^Node {
 	if p.err != "" {
 		return nil
@@ -680,7 +540,7 @@ capture_node :: proc(p: ^Parser, name: string) -> ^Node {
 	return expect_close(p, n)
 }
 
-// At `(`: a group of any form, or nil for a comment or an option change.
+// Parses the group at `(`, of any form. Returns nil for a comment or an option change.
 @(private = "file")
 parse_group :: proc(p: ^Parser) -> ^Node {
 	p.i += 1
@@ -736,9 +596,9 @@ parse_group :: proc(p: ^Parser) -> ^Node {
 	return parse_options(p)
 }
 
-// A group's name up to `close`. Under Oniguruma it must not be empty, start with a digit or `-`, or start with a
-// character that is no word character, and a backslash in it is a backslash. Under ECMA it is an identifier no other
-// group has, whose characters may be written as `\uXXXX` or `\u{...}`.
+// Reads a group's name up to `close`. Under Oniguruma it must not be empty, start with a digit or `-`, or start with a
+// character that is not a word character, and a backslash in it is literal. Under ECMA it must be an identifier that no
+// other group has, whose characters may be written as `\uXXXX` or `\u{...}`.
 @(private = "file")
 group_name :: proc(p: ^Parser, close: byte) -> (name: string, ok: bool) {
 	message := "invalid group name <"
@@ -761,8 +621,7 @@ group_name :: proc(p: ^Parser, close: byte) -> (name: string, ok: bool) {
 	return
 }
 
-// An ECMA group name up to `close`, with its `\u` escapes decoded.
-@(private)
+// Reads an ECMA group name up to `close` and decodes its `\u` escapes.
 ecma_name :: proc(p: ^Parser, close: byte) -> (string, bool) {
 	b := strings.builder_make()
 	for !at_end(p) && peek(p) != close {
@@ -794,8 +653,7 @@ ecma_name :: proc(p: ^Parser, close: byte) -> (string, bool) {
 	return strings.to_string(b), true
 }
 
-// A name up to `close`, which must not be empty.
-@(private)
+// Reads a name up to `close`. An empty name is an error.
 read_name :: proc(p: ^Parser, close: byte) -> (string, bool) {
 	start := p.i
 	for !at_end(p) && peek(p) != close {
@@ -814,9 +672,9 @@ read_name :: proc(p: ^Parser, close: byte) -> (string, bool) {
 	return name, true
 }
 
-// Past `(?~`: the absent repeater `(?~absent)`, which is `(?~|absent|\O*)`. The expression `(?~|absent|exp)`, which
-// matches exp short of where absent first matches from here. The stopper `(?~|absent)`, which ends the text there for
-// what follows, or `(?~|)`, which ends a stopper.
+// Parses past `(?~`. `(?~absent)` is the absent repeater, the same as `(?~|absent|\O*)`. `(?~|absent|exp)` is the
+// absent expression, which matches exp short of where absent first matches from here. `(?~|absent)` is the stopper,
+// which ends the text there for what follows, and `(?~|)` ends a stopper.
 @(private = "file")
 parse_absent :: proc(p: ^Parser) -> ^Node {
 	n := new_node(.Absent)
@@ -853,7 +711,7 @@ parse_absent :: proc(p: ^Parser) -> ^Node {
 	return expect_close(p, n)
 }
 
-// `(?imsx-imsx)`, which holds to the group's end, or `(?imsx-imsx:...)`.
+// Parses `(?imsx-imsx)`, whose flags last to the group's end, or `(?imsx-imsx:...)`.
 @(private = "file")
 parse_options :: proc(p: ^Parser) -> ^Node {
 	flags := p.flags
@@ -897,7 +755,7 @@ parse_options :: proc(p: ^Parser) -> ^Node {
 	}
 }
 
-// At `(?(`: `(?(n)yes|no)`, `(?(<name>)yes|no)` or `(?('name')yes|no)`.
+// Parses the condition at `(?(`: `(?(n)yes|no)`, `(?(<name>)yes|no)` or `(?('name')yes|no)`.
 @(private = "file")
 parse_cond :: proc(p: ^Parser) -> ^Node {
 	n := new_node(.Cond)
@@ -925,8 +783,8 @@ parse_cond :: proc(p: ^Parser) -> ^Node {
 	return expect_close(p, n)
 }
 
-// `(?(cond)yes|no)` where cond is an expression: Oniguruma matches cond atomically and goes on with yes, or
-// takes no when cond cannot match, which is `(?>cond)yes|(?!cond)no`.
+// Parses `(?(cond)yes|no)` where cond is an expression. Oniguruma matches cond atomically and continues with yes, or
+// with no when cond cannot match. This builds `(?>cond)yes|(?!cond)no`.
 @(private = "file")
 parse_cond_expr :: proc(p: ^Parser) -> ^Node {
 	cond := parse_alt(p)
@@ -949,8 +807,8 @@ parse_cond_expr :: proc(p: ^Parser) -> ^Node {
 	return expect_close(p, new_node(.Alt, new_node(.Cat, atomic, branches.kids[0]), new_node(.Cat, absent, branches.kids[1])))
 }
 
-// A condition's yes and no branches, as n.kids[0] and [1]: alternatives past the first are no's. A group's
-// alternatives, `(?(1)(?i:x|y))` or `(?(1)(?:x|y))`, are its own: the group is the yes branch.
+// Parses a condition's yes and no branches into n.kids[0] and [1]. Alternatives past the first are the no branch. The
+// alternatives of a group, `(?(1)(?i:x|y))` or `(?(1)(?:x|y))`, belong to the group, which is the yes branch.
 @(private = "file")
 cond_branches :: proc(p: ^Parser, n: ^Node) -> bool {
 	p.head = true
@@ -966,7 +824,7 @@ cond_branches :: proc(p: ^Parser, n: ^Node) -> bool {
 	return true
 }
 
-// The alternatives of `alt` past its first, as one node.
+// Returns the alternatives of `alt` past its first, as one node.
 @(private = "file")
 alt_rest :: proc(alt: ^Node) -> ^Node {
 	return alt.kids[1] if len(alt.kids) == 2 else new_node(.Alt, ..alt.kids[1:])

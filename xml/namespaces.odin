@@ -3,6 +3,7 @@ package xml
 import "base:intrinsics"
 import "base:runtime"
 import spell "../core/spell"
+import kernel "../core/kernel"
 import core "../core"
 
 // Namespaces in XML 1.0: the declarations in scope while a walk reads, and the judgement of the names of a tag against
@@ -256,15 +257,15 @@ tag_names :: #force_no_inline proc "contextless" (w: ^Walk($H), tag, tag_end: [^
 	}
 	p := q
 	for {
-		p = skip_ws(p, tag_end)
+		p = kernel.skip_ws(p, tag_end)
 		if p >= tag_end || p[0] == '>' || p[0] == '/' {
 			break
 		}
 		name_at := p
 		p, _ = name_end(p, tag_end)
 		an := intrinsics.ptr_sub(p, name_at)
-		p = skip_ws(p, tag_end)[1:]
-		p = skip_ws(p, tag_end)
+		p = kernel.skip_ws(p, tag_end)[1:]
+		p = kernel.skip_ws(p, tag_end)
 		quote := p[0]
 		p = p[1:]
 		for p[0] != quote {

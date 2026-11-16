@@ -5,6 +5,7 @@ package json
 
 import "base:intrinsics"
 import "base:runtime"
+import kernel "../core/kernel"
 import core "../core"
 import compose "../core/compose"
 import build "../core/build"
@@ -201,7 +202,7 @@ close_by_walk :: proc(doc: ^core.Document, lo: u64, $S: Spec) -> u64 {
 skip_to_close :: proc(src: []u8, p: u64, $S: Spec) -> u64 {
 	q: [^]u8
 	when S == .Json {
-		q = skip_ws(raw_data(src)[p:], raw_data(src)[len(src):])
+		q = kernel.skip_ws(raw_data(src)[p:], raw_data(src)[len(src):])
 	} else {
 		q, _, _ = comment_run(raw_data(src)[p:], raw_data(src)[len(src):], true, S)
 	}

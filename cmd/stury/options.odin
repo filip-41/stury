@@ -6,6 +6,7 @@ package main
 
 import "core:slice"
 import "core:strings"
+import "../../core/spell"
 import core "../../core"
 import dsv "../../dsv"
 import json "../../json"
@@ -222,13 +223,13 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			o.cells_in.infer = true
 			cli.infer_flag = a
 		case "threads":
-			n, ok := parse_digits(args[i + 1], 1 << 16)
+			n, ok := spell.digits_u64(args[i + 1], 1 << 16)
 			if !ok || n < 1 {
 				usage_error("--threads takes a number from 1")
 			}
 			o.threads = int(n)
 		case "alias-limit", "expansion-limit":
-			n, ok := parse_digits(args[i + 1], 1 << 62)
+			n, ok := spell.digits_u64(args[i + 1], 1 << 62)
 			if !ok || n < 1 {
 				usage_error("%s takes a number of bytes, 1 or more", a)
 			}
@@ -572,7 +573,7 @@ add_lib_dir :: proc(cli: ^Cli, dir: string) {
 @(private = "file")
 parse_indent :: proc(s: string) -> (n: i8, ok: bool) {
 	signed := len(s) > 0 && (s[0] == '+' || s[0] == '-')
-	digits, digits_ok := parse_digits(s[1:] if signed else s, 100) // anything past 7 is refused
+	digits, digits_ok := spell.digits_u64(s[1:] if signed else s, 100) // anything past 7 is refused
 	if !digits_ok {
 		return
 	}
@@ -583,20 +584,6 @@ parse_indent :: proc(s: string) -> (n: i8, ok: bool) {
 	return i8(v), -1 <= v && v <= 7
 }
 
-// `s` as decimal digits only, and at least one, to `cap` at most. The cap keeps a long run from overflowing.
-parse_digits :: proc(s: string, cap: u64) -> (n: u64, ok: bool) {
-	if len(s) == 0 {
-		return
-	}
-	for c in transmute([]byte)s {
-		if c < '0' || c > '9' {
-			return
-		}
-		n = min(n * 10 + u64(c - '0'), cap)
-	}
-	return n, true
-}
-
 // The deepest --max-depth: the interpreter and the printer recurse once per level, on a stack sized for this.
 @(private = "file")
 DEPTH_CEILING :: 1 << 20
@@ -604,7 +591,7 @@ DEPTH_CEILING :: 1 << 20
 // --max-depth's number: decimal digits, from 1 to DEPTH_CEILING.
 @(private = "file")
 parse_max_depth :: proc(s: string) -> (n: u64, ok: bool) {
-	n, ok = parse_digits(s, DEPTH_CEILING + 1) // past the ceiling is refused
+	n, ok = spell.digits_u64(s, DEPTH_CEILING + 1) // past the ceiling is refused
 	return n, ok && 1 <= n && n <= DEPTH_CEILING
 }
 

@@ -1,5 +1,6 @@
 package kernel_tests
 
+import "base:intrinsics"
 import "core:math/rand"
 import "core:testing"
 import k ".."
@@ -88,7 +89,7 @@ reference_set :: proc(src: []u8, set: string) -> (m: u64) {
 }
 
 // Checks `classes` against every byte value in 4 blocks, then against random blocks of each set's bytes and their
-// neighbours, and checks `pack_n` against `pack` for the four masks.
+// neighbours, and checks `pack_n` for two, three and four masks and `either` against `pack`.
 @(enable_target_feature = FEATURES)
 check_sets :: proc(t: ^testing.T, sets: []string) {
 	table, bits := nibble_table(sets)
@@ -118,6 +119,9 @@ check_sets :: proc(t: ^testing.T, sets: []string) {
 		for m, s in masks {
 			testing.expect_value(t, joint[s], k.pack(m))
 		}
+		testing.expect_value(t, k.pack_n([3]k.Block{masks[0], masks[1], masks[2]}), [3]u64{joint[0], joint[1], joint[2]})
+		testing.expect_value(t, k.pack_n([2]k.Block{masks[0], masks[1]}), [2]u64{joint[0], joint[1]})
+		testing.expect_value(t, k.pack(k.either(masks[0], masks[1])), joint[0] | joint[1])
 	}
 }
 
@@ -149,28 +153,9 @@ classes_of_every_byte :: proc(t: ^testing.T) {
 	}
 }
 
-@(test, enable_target_feature = FEATURES)
-either_and_pack_n :: proc(t: ^testing.T) {
-	state := rand.create(4)
-	context.random_generator = rand.default_random_generator(&state)
-	buf: [64]u8
-	for _ in 0 ..< 1000 {
-		for &b in buf {
-			b = rand.choice([]u8{'a', ',', '"', '\n', '\r'})
-		}
-		b := k.load(raw_data(buf[:]))
-		lines := k.either(k.eq(b, '\n'), k.eq(b, '\r'))
-		testing.expect_value(t, k.pack(lines), reference_set(buf[:], "\n\r"))
-		r3 := k.pack_n([3]k.Block{k.eq(b, ','), k.eq(b, '"'), lines})
-		testing.expect_value(t, r3, [3]u64{reference(buf[:], ','), reference(buf[:], '"'), reference_set(buf[:], "\n\r")})
-		r2 := k.pack_n([2]k.Block{k.eq(b, ','), k.eq(b, '"')})
-		testing.expect_value(t, r2, [2]u64{reference(buf[:], ','), reference(buf[:], '"')})
-	}
-}
-
 // Sets bit `i % 64` of `quotes[i / 64]` for each quote in `src` that no backslash escapes. A backslash escapes the
 // next byte unless it is escaped itself.
-reference_quotes :: proc(src: []u8, quotes: []u64) {
+reference_escaped :: proc(src: []u8, quotes: []u64) {
 	escaped := false
 	for b, i in src {
 		bit := u64(1) << u64(i % 64)
@@ -185,26 +170,10 @@ reference_quotes :: proc(src: []u8, quotes: []u64) {
 	}
 }
 
-@(enable_target_feature = FEATURES)
-check_strings :: proc(t: ^testing.T, src: []u8) {
-	assert(len(src) % 64 == 0 && len(src) <= 64 * 8)
-	want: [8]u64
-	reference_quotes(src, want[:])
-	odd: u64
-	for i in 0 ..< len(src) / 64 {
-		b := k.load(raw_data(src[64 * i:]))
-		m := k.pack_n([2]k.Block{k.eq(b, '"'), k.eq(b, '\\')})
-		quotes := m[0] &~ k.escaped(m[1], &odd)
-		testing.expectf(t, quotes == want[i], "%q block %d: quotes %x, want %x", string(src), i, quotes, want[i])
-	}
-}
-
-@(test)
-strings_across_blocks :: proc(t: ^testing.T) {
-	state := rand.create(5)
-	context.random_generator = rand.default_random_generator(&state)
-	buf: [64 * 8]u8
-	// A run of 1 to 128 backslashes ending at each byte of the third block, then a quote.
+// Checks `escaped` on a run of 1 to 128 backslashes ending at each byte of the third block, then a quote.
+@(test, enable_target_feature = FEATURES)
+escaped_across_blocks :: proc(t: ^testing.T) {
+	buf: [64 * 4]u8
 	for run in 1 ..= 128 {
 		for end in 0 ..< 64 {
 			for &b in buf {
@@ -215,17 +184,15 @@ strings_across_blocks :: proc(t: ^testing.T) {
 				buf[i] = '\\'
 			}
 			buf[at] = '"'
-			check_strings(t, buf[:256])
-		}
-	}
-	// Random blocks from four alphabets: a quote and a backslash in every 3 bytes, then 1 quote and 3 backslashes in 8,
-	// 1 quote in 28, and 1 quote and 1 backslash in 50.
-	for alphabet in ([]string{"\"\\a", "\"\\\\\\aaaa", "\"aaaaaaaaaaaaaaaaaaaaaaaaaaa", "\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}) {
-		for _ in 0 ..< 2000 {
-			for &b in buf {
-				b = alphabet[rand.int_max(len(alphabet))]
+			want: [4]u64
+			reference_escaped(buf[:], want[:])
+			odd: u64
+			for i in 0 ..< 4 {
+				b := k.load(raw_data(buf[64 * i:]))
+				m := k.pack_n([2]k.Block{k.eq(b, '"'), k.eq(b, '\\')})
+				quotes := m[0] &~ k.escaped(m[1], &odd)
+				testing.expectf(t, quotes == want[i], "run %d to %d, block %d: quotes %x, want %x", run, at, i, quotes, want[i])
 			}
-			check_strings(t, buf[:])
 		}
 	}
 }
@@ -255,17 +222,22 @@ below_every_byte_and_lane :: proc(t: ^testing.T) {
 	}
 }
 
-// Checks `first_lane` and `any_lane16` on the empty mask, on each lane alone, and `first_lane` on each lane under random lanes above it.
+// Checks `first_lane16` and `any_lane16` on the empty mask and on each lane alone, `is_ascii16` on 0x7F and 0x80 in each
+// lane, and `first_lane16` on each lane under random lanes above it.
 @(test, enable_target_feature = FEATURES)
-first_lane_every_lane :: proc(t: ^testing.T) {
+first_lane16_every_lane :: proc(t: ^testing.T) {
 	state := rand.create(8)
 	context.random_generator = rand.default_random_generator(&state)
-	testing.expect_value(t, k.first_lane(#simd[16]u8{}), 16)
+	testing.expect_value(t, k.first_lane16(#simd[16]u8{}), 16)
 	testing.expect(t, !k.any_lane16(#simd[16]u8{}))
 	for lane in 0 ..< 16 {
 		single: [16]u8
 		single[lane] = 0xff
 		testing.expectf(t, k.any_lane16(transmute(#simd[16]u8)single), "lane %d", lane)
+		single[lane] = 0x80
+		testing.expectf(t, !k.is_ascii16(transmute(#simd[16]u8)single), "lane %d", lane)
+		single[lane] = 0x7f
+		testing.expectf(t, k.is_ascii16(transmute(#simd[16]u8)single), "lane %d", lane)
 		for round in 0 ..< 64 {
 			m: [16]u8
 			m[lane] = 0xff
@@ -274,7 +246,7 @@ first_lane_every_lane :: proc(t: ^testing.T) {
 					m[above] = 0xff
 				}
 			}
-			got := k.first_lane(transmute(#simd[16]u8)m)
+			got := k.first_lane16(transmute(#simd[16]u8)m)
 			testing.expectf(t, got == u64(lane), "% x: %d, want %d", m, got, lane)
 		}
 	}
@@ -318,8 +290,9 @@ compress_keeps_lanes_in_order :: proc(t: ^testing.T) {
 	}
 }
 
-// Checks `index_byte` and `last_index_byte` against a scalar scan on every prefix of random texts that hold the searched
-// byte, its neighbours and a byte with its top bit flipped, for the bytes a record ends on and the quote.
+// Checks `index_byte`, `last_index_byte` and `count_byte` against a scalar scan on every prefix of random texts that
+// hold the searched byte, its neighbours and a byte with its top bit flipped, for the bytes a record ends on and the
+// quote.
 @(test)
 index_byte_every_cut :: proc(t: ^testing.T) {
 	state := rand.create(7)
@@ -335,15 +308,17 @@ index_byte_every_cut :: proc(t: ^testing.T) {
 			for cut in 0 ..= len(buf) {
 				for start in ([2]int{0, min(cut, 1)}) {
 					text := buf[start:cut]
-					first, last := -1, -1
+					first, last, count := -1, -1, 0
 					for b, i in text {
 						if b == c {
 							first = first if first >= 0 else i
 							last = i
+							count += 1
 						}
 					}
 					testing.expect_value(t, k.index_byte(text, c), first)
 					testing.expect_value(t, k.last_index_byte(text, c), last)
+					testing.expect_value(t, k.count_byte(text, c), count)
 				}
 			}
 		}
@@ -394,6 +369,61 @@ quote_scan_every_stretch :: proc(t: ^testing.T) {
 						testing.expectf(t, k.quote_cut(text, from) == -1, "%q from %d below `want`: cut %d", text, g, k.quote_cut(text, from))
 					}
 				}
+			}
+		}
+	}
+}
+
+// Checks `count_byte` and `count_chars` on texts past the 255 blocks a counter holds: all hits, all misses, and random
+// bytes, at lengths around the block and round sizes.
+@(test)
+count_across_counter_rounds :: proc(t: ^testing.T) {
+	state := rand.create(10)
+	context.random_generator = rand.default_random_generator(&state)
+	buf := make([]u8, 64 * 255 * 2 + 70)
+	defer delete(buf)
+	for fill in ([3]u8{'\n', 0x80, 'a'}) {
+		for &b in buf {
+			b = fill
+		}
+		for n in ([]int{0, 63, 64, 65, 64 * 255 - 1, 64 * 255, 64 * 255 + 1, len(buf)}) {
+			testing.expect_value(t, k.count_byte(buf[:n], '\n'), n if fill == '\n' else 0)
+			testing.expect_value(t, k.count_chars(buf[:n]), 0 if fill == 0x80 else n)
+		}
+	}
+	for _ in 0 ..< 20 {
+		for &b in buf {
+			b = u8(rand.int_max(256))
+		}
+		n := rand.int_max(len(buf) + 1)
+		newlines, chars := 0, 0
+		for b in buf[:n] {
+			newlines += int(b == '\n')
+			chars += int(b & 0xC0 != 0x80)
+		}
+		testing.expect_value(t, k.count_byte(buf[:n], '\n'), newlines)
+		testing.expect_value(t, k.count_chars(buf[:n]), chars)
+	}
+}
+
+// Checks `skip_ws` against a scalar scan from every start in a text of whitespace with one other byte, which moves
+// through it, at lengths that end in each part of the loop.
+@(test)
+skip_ws_stops_at_other_byte :: proc(t: ^testing.T) {
+	ws := [4]u8{' ', '\n', '\t', '\r'}
+	buf: [200]u8
+	for n in ([]int{0, 3, 4, 5, 64, 67, 68, 69, 131, 132, 200}) {
+		for other in 0 ..= n {
+			for &b, i in buf[:n] {
+				b = ws[i % 4]
+			}
+			if other < n {
+				buf[other] = 'x'
+			}
+			for from in 0 ..= min(n, other + 1) {
+				p := raw_data(buf[:])
+				want := other if from <= other else n
+				testing.expectf(t, intrinsics.ptr_sub(k.skip_ws(p[from:], p[n:]), p) == want, "length %d, other %d, from %d", n, other, from)
 			}
 		}
 	}

@@ -2,10 +2,10 @@
 package regex
 
 // Oniguruma's search optimizer as jq's build runs it (optimize_nodes and set_optimize_info_from_tree in regcomp.c,
-// forward_search and the anchors of onig_search in regexec.c): what a match must hold, an exact string or a set of
-// bytes at a distance from its start, chosen by Oniguruma's own weights, and the anchors that bound its start. The
-// search tries the starts these leave, so a hopeless search fails at once where Oniguruma's does, and a start
-// Oniguruma tries runs into the retry limit as its does.
+// forward_search and the anchors of onig_search in regexec.c). It finds what a match must hold: an exact string or a
+// set of bytes at a distance from the match start, chosen by Oniguruma's own weights, and the anchors that bound the
+// start. The search tries only the starts these leave, so a hopeless search fails at once where Oniguruma's does, and
+// a start that Oniguruma tries runs into the retry limit as it does.
 
 import "core:strings"
 import "core:unicode/utf8"
@@ -14,7 +14,7 @@ INFINITE_LEN :: max(int)
 // The most bytes of an exact string kept (OPT_EXACT_MAXLEN).
 @(private = "file")
 OPT_EXACT_MAXLEN :: 24
-// A UTF-8 character's most bytes, which a class past ASCII or `.` may take (ONIGENC_MBC_MAXLEN_DIST).
+// The most bytes of a UTF-8 character, the length a class past ASCII or `.` may match (ONIGENC_MBC_MAXLEN_DIST).
 @(private = "file")
 MBC_MAXLEN :: 4
 
@@ -30,12 +30,12 @@ End_Anchor :: enum u8 {
 	Semi_End_Buf, // or before a newline that ends the text
 }
 
-// What the search skips by, as Oniguruma's regex_t keeps it.
+// The string or byte set the search skips by, and the anchors, as Oniguruma's regex_t keeps them.
 Search_Opt :: struct {
 	kind:               Search_Kind,
 	exact:              string,
 	set:                [4]u64,
-	dist_min, dist_max: int, // INFINITE_LEN for no bound
+	dist_min, dist_max: int, // least and greatest distance from the match start to the string or set, or INFINITE_LEN
 	threshold:          int, // the fewest bytes past the search's start a match needs
 	anchored:           bool, // every match starts at \A
 	end:                End_Anchor,
@@ -79,7 +79,6 @@ Opt_Node :: struct {
 	set:         Opt_Map,
 }
 
-@(private)
 search_opt :: proc(root: ^Node) -> (out: Search_Opt) {
 	opt: Opt_Node
 	optimize(root, &opt, {})
@@ -117,7 +116,7 @@ optimize :: proc(n: ^Node, opt: ^Opt_Node, env: Mml) {
 	case .Char, .Str:
 		if literal(n) {
 			run_string({n}, opt, env)
-		} else if n.fold && utf8.valid_rune(n.r) && orbit_ascii(n.r) {
+		} else if n.fold && utf8.valid_rune(n.r) && n.r < 0x80 && !folds_outside(n.r) {
 			// A (?i) character Oniguruma takes as the class of its case variants.
 			add_variant_leads(&opt.set, n.r)
 			opt.len = {1, 1}
@@ -138,7 +137,7 @@ optimize :: proc(n: ^Node, opt: ^Opt_Node, env: Mml) {
 		}
 		opt.len = {1, 1}
 	case .Cat:
-		// Literal runs are one string, as Oniguruma's parser joins them.
+		// Runs of literal nodes are optimized as one string, as Oniguruma's parser joins them.
 		xo: Opt_Node
 		nenv := env
 		for i := 0; i < len(n.kids); {
@@ -201,7 +200,8 @@ optimize :: proc(n: ^Node, opt: ^Opt_Node, env: Mml) {
 			}
 		}
 	case .Cond:
-		// Oniguruma's if-else: the condition, of no length, then the yes branch, merged with the no branch.
+		// Oniguruma's if-else: the condition has no length, the yes branch (kids[0]) follows it, and the result is
+		// merged with the no branch (kids[1]).
 		xo: Opt_Node
 		optimize(n.kids[0], &xo, env)
 		concat_left(opt, &xo)
@@ -250,7 +250,7 @@ optimize_repeat :: proc(n: ^Node, opt: ^Opt_Node, env: Mml) {
 	opt.len = {distance_multiply(body.len.min, n.min), most}
 }
 
-// A run of literal characters as one string node.
+// Optimizes a run of literal nodes as one string node.
 @(private = "file")
 run_string :: proc(run: []^Node, opt: ^Opt_Node, env: Mml) {
 	head: [OPT_EXACT_MAXLEN + utf8.UTF_MAX]byte
@@ -266,7 +266,7 @@ run_string :: proc(run: []^Node, opt: ^Opt_Node, env: Mml) {
 	opt_string(opt, head[:kept], total)
 }
 
-// A string node of `total` bytes, which `s` begins.
+// Optimizes a string node of `total` bytes, of which `s` holds the first.
 @(private = "file")
 opt_string :: proc(opt: ^Opt_Node, s: []byte, total: int) {
 	e := &opt.sb
@@ -285,8 +285,8 @@ opt_string :: proc(opt: ^Opt_Node, s: []byte, total: int) {
 	opt.len = {total, total}
 }
 
-// The alternation expand_folds makes of a (?i) character with a multi-character fold, or of the run that folds
-// to one: Oniguruma unravels it into an alternation of plain strings, each case variant one.
+// Whether `n` is the alternation that expand_folds makes of a (?i) character with a multi-character fold, or of a run
+// of characters that folds to one. Oniguruma unravels it into an alternation of plain strings, one per case variant.
 @(private = "file")
 fold_alternation :: proc(n: ^Node) -> bool {
 	folded :: proc(n: ^Node) -> bool {
@@ -326,18 +326,6 @@ fold_strings :: proc(n: ^Node, opt: ^Opt_Node) {
 		}
 		opt.len = {min(opt.len.min, least), max(opt.len.max, most)}
 	}
-}
-
-// Whether `r` and every case variant of it are ASCII.
-@(private = "file")
-orbit_ascii :: proc(r: rune) -> bool {
-	x := r
-	for x < 0x80 {
-		if x = fold_next(x); x == r {
-			return true
-		}
-	}
-	return false
 }
 
 // The first byte of `r` and of each of its case variants.
@@ -399,7 +387,7 @@ alt_merge :: proc(to, add: ^Opt_Node) {
 	to.len = {min(to.len.min, add.len.min), max(to.len.max, add.len.max)}
 }
 
-// Appends `add` to `to` by whole characters, true when `to` filled first.
+// Appends `add` to `to` by whole characters. Returns true when `to` filled first.
 @(private = "file")
 concat_exact :: proc(to, add: ^Opt_Str) -> (full: bool) {
 	p := 0
@@ -523,8 +511,8 @@ exact_or_map :: proc(e: ^Opt_Str, m: ^Opt_Map) -> int {
 	return compare_distance(e.mm, m.mm, 20 * e.len * 3, 20 * 5 * 2 / m.value)
 }
 
-// Oniguruma's comp_distance_value: above 0 when (d2, v2) is the better, by value over the distance's spread, then
-// by the nearer distance.
+// Oniguruma's comp_distance_value. Returns above 0 when (d2, v2) is the better, compared by the value times
+// 1000 / (spread + 1) of its distance, then by the smaller least distance.
 @(private = "file")
 compare_distance :: proc(d1, d2: Mml, v1, v2: int) -> int {
 	if v2 <= 0 {
@@ -565,7 +553,7 @@ distance_value :: proc(mm: Mml) -> int {
 	return int(DIST_VALS[d]) if d < len(DIST_VALS) else 1
 }
 
-// How common Oniguruma takes byte `b` to be in a text: a byte of a higher value is the worse to search by.
+// Returns how common Oniguruma takes byte `b` to be in a text. A byte of a higher value is the worse to search by.
 @(private = "file")
 map_position_value :: proc(b: byte) -> int {
 	@(static, rodata)
@@ -603,10 +591,10 @@ mml_add :: proc(a, b: Mml) -> Mml {
 	return {distance_add(a.min, b.min), distance_add(a.max, b.max)}
 }
 
-// The starts onig_search tries from `start`, `first` to `last`, with the end a string or map the optimizer finds may
-// reach, and the last start of the first window, before `first` when each window is looked for in turn. False when
-// no start can match. Kept out of line so the matcher inlined into `search` keeps its registers.
-@(private)
+// Computes the starts onig_search tries from `start`: `first` to `last`. `limit` is how far a string or map that the
+// optimizer finds may reach. `high` is the last start of the first window, or -1 when the windows are found one at a
+// time with `next_window`. Returns ok false when no start can match. Kept out of line so that the matcher inlined into
+// `search` keeps its registers.
 search_starts :: #force_no_inline proc(o: ^Search_Opt, s: string, start: int) -> (first, last, limit, high: int, ok: bool) {
 	first, last, limit, high = start, len(s), len(s), INFINITE_LEN
 	if o.anchored {
@@ -637,9 +625,8 @@ search_starts :: #force_no_inline proc(o: ^Search_Opt, s: string, start: int) ->
 	return first, last, limit, -1, true
 }
 
-// The next start at or past `at` in a window of starts, low to high, a string or map the optimizer finds at a
-// bounded distance gives, with `high` moved to that window's end, or -1 when there is none.
-@(private)
+// Returns the next start at or past `at`, in a window of starts from low to high that a string or map found at a
+// bounded distance gives, and sets `high^` to that window's last start. Returns -1 when there is none.
 next_window :: #force_no_inline proc(o: ^Search_Opt, s: string, at, limit: int, high: ^int) -> int {
 	low, h, found := forward_search(o, s, at, limit)
 	if !found {
@@ -649,9 +636,8 @@ next_window :: #force_no_inline proc(o: ^Search_Opt, s: string, at, limit: int, 
 	return max(at, low)
 }
 
-// Oniguruma's forward_search from `from`: the first place at or past it the string or map is, and the starts a match
-// holding it there can have, `low` to `high`.
-@(private)
+// Oniguruma's forward_search from `from`. Finds the first place at or past `from` where the string or map occurs, and
+// returns the starts that a match holding it there can have, `low` to `high`.
 forward_search :: proc(o: ^Search_Opt, s: string, from, limit: int) -> (low, high: int, found: bool) {
 	p := from
 	if o.dist_min != 0 {
@@ -689,10 +675,9 @@ forward_search :: proc(o: ^Search_Opt, s: string, from, limit: int) -> (low, hig
 	return low, max(p - o.dist_min, 0), true
 }
 
-// The first and last start of a match that ends at the text's end, or before a newline that ends it, as onig_search's
-// end_buf bounds them, first past last for none. A newline that ends the text and is its first byte, or lies before
-// `start`, leaves the starts unbounded, as onig_search then skips end_buf.
-@(private)
+// Returns the first and last start of a match that ends at the text's end, or before a newline that ends it, as
+// onig_search's end_buf bounds them. `first` is past `last` when there is none. When the text's final newline is also
+// its first byte, or lies before `start`, the starts stay unbounded, as onig_search then skips end_buf.
 end_bounds :: proc(o: ^Search_Opt, s: string, start: int) -> (first, last: int) {
 	first, last = start, len(s)
 	min_end, max_end := len(s), len(s)
@@ -719,3 +704,126 @@ end_bounds :: proc(o: ^Search_Opt, s: string, start: int) -> (first, last: int) 
 	}
 	return
 }
+
+// Adds to `set` every byte a match of `n` can start with. `ok` is false when that is not known, and `empty` is true
+// when `n` can match without a byte, so what follows it starts the match too.
+first_bytes :: proc(n: ^Node, set: ^[4]u64) -> (empty: bool, ok: bool) {
+	add_byte :: proc(set: ^[4]u64, b: byte) {
+		set[b >> 6] |= 1 << (u64(b) & 63)
+	}
+	add_rune :: proc(set: ^[4]u64, r: rune) {
+		if !utf8.valid_rune(r) {
+			return
+		}
+		buf, _ := utf8.encode_rune(r)
+		add_byte(set, buf[0])
+		if r >= 0x80 && r < 0xC0 { // a search that starts inside a character reads the byte r itself
+			add_byte(set, byte(r))
+		}
+	}
+	switch n.kind {
+	case .Empty, .Assert, .Keep:
+		return true, true
+	case .Char:
+		add_rune(set, n.r)
+		if n.fold {
+			for x := fold_next(n.r); x != n.r; x = fold_next(x) {
+				add_rune(set, x)
+			}
+		}
+		return false, true
+	case .Str:
+		add_rune(set, n.r)
+		return false, true
+	case .Any:
+		for b in 0 ..< 256 {
+			if b != '\n' || n.dotall {
+				add_byte(set, byte(b))
+			}
+		}
+		return false, true
+	case .Class:
+		set[0] |= n.class.ascii[0] // filled when the class was emitted
+		set[1] |= n.class.ascii[1]
+		if !ascii_only(n.class) || folds_out_of_ascii(n.class) {
+			set[2], set[3] = max(u64), max(u64)
+		}
+		return false, true
+	case .Linebreak:
+		for b in ([]byte{'\n', '\v', '\f', '\r', 0xC2, 0xE2}) {
+			add_byte(set, b)
+		}
+		return false, true
+	case .Cat:
+		for k in n.kids {
+			empty, ok = first_bytes(k, set)
+			if !ok || !empty {
+				return
+			}
+		}
+		return true, true
+	case .Alt:
+		for k in n.kids {
+			e, o := first_bytes(k, set)
+			if !o {
+				return false, false
+			}
+			empty ||= e
+		}
+		return empty, true
+	case .Group:
+		return first_bytes(n.kids[0], set)
+	case .Repeat:
+		empty, ok = first_bytes(n.kids[0], set)
+		return empty || n.min == 0, ok
+	case .Look:
+		if n.look == .Atomic {
+			return first_bytes(n.kids[0], set)
+		}
+		if n.look == .Ahead {
+			if e, o := first_bytes(n.kids[0], set); o && !e {
+				return false, true // the match starts where the look-ahead's does
+			}
+		}
+		return true, true // consumes no bytes, so what follows starts the match
+	case .Backref, .Cond, .Grapheme, .Call, .Absent:
+	}
+	return false, false
+}
+
+// Appends to `out` the literal every match of `n` starts with. Returns whether `n` is wholly that literal.
+literal_prefix :: proc(n: ^Node, out: ^[dynamic]byte) -> bool {
+	#partial switch n.kind {
+	case .Char, .Str:
+		if !literal(n) {
+			return false
+		}
+		buf: [4]byte
+		append(out, literal_text(n, &buf))
+		return true
+	case .Cat:
+		for k in n.kids {
+			if !literal_prefix(k, out) {
+				return false
+			}
+		}
+		return true
+	case .Group:
+		return literal_prefix(n.kids[0], out)
+	case .Repeat:
+		// A counted literal is searched as the text it spells, so that a long run does not retry at each start.
+		one: [dynamic]byte
+		defer delete(one)
+		if n.min == 0 || !literal_prefix(n.kids[0], &one) || len(one) == 0 || n.min * len(one) > PREFIX_MAXLEN {
+			return false
+		}
+		for _ in 0 ..< n.min {
+			append(out, ..one[:])
+		}
+		return n.max == n.min
+	}
+	return false
+}
+
+// The most bytes of a literal prefix built from a counted repeat.
+PREFIX_MAXLEN :: 1 << 16

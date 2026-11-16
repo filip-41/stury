@@ -22,9 +22,8 @@ SINGLE_EXP_OFFSET :: 127 + SINGLE_MANTISSA_BITS
 @(private)
 SINGLE_EXTRA_SHIFT :: 34
 
-// The shift that puts the binary point of bin_sig * 2^bin_exp * 10^-dec_exp at a fixed place in the
-// 192-bit product. The approximation holds for -350 <= dec_exp <= 350; the table limits callers to
-// -342 <= dec_exp <= 341.
+// The shift that puts the binary point of bin_sig * 2^bin_exp * 10^-dec_exp at a fixed place in the 192-bit product.
+// The approximation holds for -350 <= dec_exp <= 350, and `POW10_SIG` keeps callers within -342 <= dec_exp <= 341.
 @(private)
 compute_exp_shift :: #force_inline proc "contextless" (bin_exp, dec_exp: i32) -> i32 {
 	return bin_exp + ((-dec_exp * 217707) >> 16) + 1
@@ -85,7 +84,7 @@ to_decimal :: #force_inline proc "contextless" (
 	return integral + u64(round_up), dec_exp, digit, !(round_up || round_down)
 }
 
-// The 128-bit floor of 10^k, as (high, low) words. `k` is -342..341; callers stay inside that range.
+// The 128-bit floor of 10^k as (high, low) words, for -342 <= k <= 341.
 @(private)
 pow10_of :: #force_inline proc "contextless" (k: int) -> (u64, u64) #no_bounds_check {
 	e := POW10_SIG[k + 342]

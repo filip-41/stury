@@ -23,9 +23,13 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `core/build/step.odin` | the step logic every hook and the replay run |
 | `core/build/many.odin` | what only `$MANY` reads hold: armed path sets, rings of negative indexes, answers placed in text order, the stream |
 | `json/query.odin`, `dsv/query.odin` | each format's `Spelling.scan` walk, whose forwarders `scan`, `find`, `each_answer` and `set` sit in its `walk.odin` beside `validate` and `build` |
-| `core/spell/number.odin` | `Number`, `Number_Kind`, the digit and scale bounds, every decoder |
-| `core/spell/text.odin` | `decode_text`, `decoded_equals`, `bytes_equal`, `Pending`, the escape table and `utf8_lax_char`, the decoders' and readers' byte helpers |
-| `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |
+| `core/spell/number.odin` | `Number`, `Number_Kind`, the digit and scale bounds, the decimal decoders |
+| `core/spell/digits.odin` | the digit run readers, eight bytes at a time |
+| `core/spell/hex.odin` | `HEX_NIBBLE`, `hex4` and the hex number decoders |
+| `core/spell/decode.odin` | `decode_text`, `decoded_equals`, `buffered_equals`, `bytes_equal`, `Pending` |
+| `core/spell/escape.odin` | JSON's escapes |
+| `core/spell/utf8.odin` | `utf8_lax_char` and the UTF-8 character readers |
+| `core/number.odin` | core's aliases for `Number` and `Number_Kind`, and `plain_kind` |
 | `core/error.odin` | `Document_Error`, its kinds and rules, `inner`, `render`, `write_code` |
 | `json/document.odin` | JSON's `build`, `HANDLES`, `SERVICES` and edit tables, `close_end`, the edit checks |
 | `core/compose/lines.odin` | a flat text's root junctions and the comments above its header |

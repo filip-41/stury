@@ -1,8 +1,8 @@
 package dsv
 
 import "base:intrinsics"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 
 // State carried from one block to the next, for the blocks and the open record. `rec_lo` is the first byte of the
 // record that holds the cursor, `field_lo` the first byte of its open cell, `cells` the number of cells it has ended,

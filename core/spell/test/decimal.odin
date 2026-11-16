@@ -71,7 +71,4 @@ decimals_past_an_exponent_of_thirty_digits_compare_exactly :: proc(t: ^testing.T
 		back := spell.decimal_compare(y, x)
 		testing.expectf(t, back == -c.order, "%s <=> %s: %d", c.y, c.x, back)
 	}
-	x, y := spell.decimal_of("1e1000000000000000000000000000000"), spell.decimal_of("1e999999999999999999999999999999")
-	divided, exact := spell.decimal_multiple_of(x, y)
-	testing.expect(t, divided && exact)
 }

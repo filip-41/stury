@@ -13,6 +13,7 @@ import "base:runtime"
 import "core:io"
 import "core:slice"
 import spell "../core/spell"
+import kernel "../core/kernel"
 import core "../core"
 import write "../core/write"
 
@@ -286,7 +287,7 @@ put_string_node :: proc(e: ^Emit, i: core.Node_Index, k: core.Kind) -> core.Type
 		if !ok {
 			return .No_Memory
 		}
-		if k == .String && !utf8_valid(transmute([]u8)text) {
+		if k == .String && !kernel.utf8_valid(transmute([]u8)text) {
 			return .Invalid_Utf8
 		}
 		if e.tagged && k == .String {
@@ -347,7 +348,7 @@ base64_bytes :: proc(text: string) -> ([]u8, bool, core.Typed_Error_Kind) {
 			n += 1
 		}
 	}
-	bytes, ok := spell.base64_decode(buf, buf[:n])
+	bytes, ok := spell.base64_bytes(buf, buf[:n])
 	return bytes, ok, .None
 }
 

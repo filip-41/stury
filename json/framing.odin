@@ -5,8 +5,8 @@ package json
 
 import "base:intrinsics"
 import "base:runtime"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 import build "../core/build"
 import typed "../core/typed"
 import records "../core/records"
@@ -420,7 +420,7 @@ gap_end :: #force_inline proc "contextless" (q, end: [^]u8, $S: Spec) -> [^]u8 {
 		r, _, kind := comment_run(q, end, false, S)
 		return r if kind == .None else q
 	} else {
-		return skip_ws(q, end)
+		return kernel.skip_ws(q, end)
 	}
 }
 
@@ -434,10 +434,10 @@ frame_line :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) #no_b
 	end := p[len(src):]
 	stop: u8 = '\n' if it.framing == .Lines else 0x1e
 	for {
-		w := skip_ws(p[it.pos:], end)
+		w := kernel.skip_ws(p[it.pos:], end)
 		if Spec(it.as.spec) == .Json5 {
 			for n := ws5_len(w, end); n > 0; n = ws5_len(w, end) {
-				w = skip_ws(w[n:], end)
+				w = kernel.skip_ws(w[n:], end)
 			}
 		}
 		q := u64(intrinsics.ptr_sub(w, p))

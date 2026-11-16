@@ -34,12 +34,6 @@ lookup :: #force_inline proc "contextless" ($T: Tier, t, i: V) -> V {
 	return simd.runtime_swizzle(t, i)
 }
 
-// Returns a mask with bit i set when an odd number of bits of `x` at or below i are set. With a block's quote bits
-// as `x`, the set bits mark the bytes from each opening quote to its closing quote, excluding the close.
-prefix_xor :: #force_inline proc "contextless" ($T: Tier, x: u64) -> u64 {
-	return shift_prefix_xor(x)
-}
-
 // Returns the bytes of `src` from `lo` to `len(src)`, followed by zeros to fill a `Block`. For a check that reads
 // every lane, such as UTF-8 validation. The caller must pass `0 < len(src) - lo < 64`.
 load_padded :: #force_inline proc "contextless" ($T: Tier, src: []u8, lo: int) -> Block {

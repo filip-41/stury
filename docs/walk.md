@@ -17,9 +17,13 @@ walks use, `markup.md` the XML walk and the HTML tokenizer and tree, and `binary
 | `core/document.odin` | `Node`, `Document`, the readers, `Duplicates`, `Readers`, `Services`, `Edit_Services`, `destroy` |
 | `core/result.odin` | the result word: `fault_at`, `STOPPED`, `result_of`, and the empty hook `No_Hooks`/`no_hook` |
 | `core/build/build.odin` | `Builder`, the hooks a format's `build` passes its walk, the header row, the duplicate-key check |
-| `core/spell/number.odin` | `Number`, `Number_Kind`, the decimal and hex decoders, the digit reader |
-| `core/spell/text.odin` | `decode_text`, `bytes_equal`, the escape table and hex and surrogate helpers JSON's walk and decoder share with paths and the CLI, `Fault_Kind` and the UTF-8 character readers |
-| `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |
+| `core/spell/number.odin` | `Number`, `Number_Kind`, the decimal decoders |
+| `core/spell/digits.odin` | the digit run readers, eight bytes at a time |
+| `core/spell/hex.odin` | `HEX_NIBBLE`, `hex4` and the hex number decoders |
+| `core/spell/decode.odin` | `decode_text`, `bytes_equal` and the other helpers that read a node's decoded text |
+| `core/spell/escape.odin` | JSON's escapes and the surrogate tests JSON's walk and decoder share with paths and the CLI |
+| `core/spell/utf8.odin` | `Fault_Kind` and the UTF-8 character readers |
+| `core/number.odin` | core's aliases for `Number` and `Number_Kind`, and `plain_kind` |
 | `core/edit.odin` | `Edit_List`, `Edit`, `set`/`insert`/`remove`, `commit` |
 | `core/compose/` | the commit the format tables point at, and the composition a format's root junctions share |
 | `core/error.odin` | core's alias for `Fault_Kind`, `Fault`, `Rules`, `Rule`, the codes, line and column, the renderer |

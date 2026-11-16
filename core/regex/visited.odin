@@ -1,6 +1,34 @@
 #+private
 package regex
 
+// The linear search's visited set.
+
+import "core:slice"
+
+// The program's facts the visited set reads, kept behind a pointer since a Regex is copied.
+Visited :: struct {
+	owner:   []i32, // the look-ahead each instruction lies in, -1 for none, or nil for no look-ahead
+	// The ECMA loops whose body may match empty, each one's mark slot and the loop around it (-1 for none), the
+	// innermost each instruction lies in (-1 for none), and each instruction's first row of the visited set, the row
+	// count last. An instruction has a row and one more for each loop around it, since an iteration that has matched
+	// nothing yet fails where one that has goes on (`row_of`). Nil when no such loop.
+	loops:   [][2]i32,
+	loop_of: []i32,
+	// The ECMA counter loops, the innermost each instruction lies in (-1 for none, nil for no loop), and each
+	// instruction's rows for one count of the loops around it (`block`). An instruction has a block of rows for each
+	// count of each loop around it, since what follows depends on the count. A program with counter loops has its
+	// rows laid out for each search (`counted_rows`), the others here.
+	counters:   []Counter,
+	counter_of: []i32,
+	block:      []int,
+	rows:       []int,
+}
+
+// An ECMA counter loop's slot, its least and most counts, and the loop around it, -1 for none.
+Counter :: struct {
+	slot, least, most, outer: int,
+}
+
 // The visited set's rows of `re`'s program laid out with `rows`, one an instruction for nil.
 total_rows :: proc(re: ^Regex, rows: []int) -> int {
 	return rows[len(re.insts)] if rows != nil else len(re.insts)
@@ -126,3 +154,68 @@ lay_out_rows :: proc(v: ^Visited, rows: []int, radix: []int) {
 
 // More rows than a visited set within MAX_BYTES holds over one place.
 MAX_ROWS :: MAX_BYTES * 8 + 1
+
+// Whether a linear search with a visited set applies to a program. Under ECMA it does with a loop, a look-ahead, two
+// choices, or one choice in a search that tries more than one start. Under jq it does with a choice inside a loop,
+// the shape that backtracks past polynomial time, and only when each instruction's outcome depends on the position
+// alone: no look-around, back reference, counter, call or callout, and no empty check, whose exit Oniguruma takes
+// where ECMA fails.
+linear_ops :: proc(insts: []Inst, ecma: bool, anchored: bool) -> bool {
+	for ins in insts {
+		allowed := ecma
+		#partial switch ins.op {
+		case .Match, .Str, .Char_Fold, .Any, .Any_All, .Class, .Split, .Split_Head, .Jmp, .Set, .Linebreak, .Rep, .Rep_Lazy:
+			allowed = true
+		case .Save:
+			allowed ||= ins.a != 0 && ins.b == 0 // not \K, nor a referenced group's start
+		case .Assert:
+			allowed ||= Assert_Kind(ins.a) < .Fail
+		}
+		if !allowed {
+			return false
+		}
+	}
+	choices := 0
+	for ins, i in insts {
+		if ecma {
+			// A program that starts at one place and has one choice and no loop or look-ahead tries each alternative
+			// of it along a straight line, so the visited set would only add work.
+			choices += int(is_choice(ins))
+			if ins.op == .Look || ins.op == .Count_Next || ins.op == .Jmp && int(ins.a) < i {
+				return true
+			}
+		} else if ins.op == .Jmp && int(ins.a) < i && slice.any_of_proc(insts[ins.a + 1:i], is_choice) {
+			return true
+		}
+	}
+	return choices > 1 || choices == 1 && !anchored
+}
+
+@(private = "file")
+is_choice :: proc(ins: Inst) -> bool {
+	#partial switch ins.op {
+	case .Split, .Split_Head, .Count, .Count_Lazy, .Look:
+		return true
+	case .Rep, .Rep_Lazy:
+		return ins.a != ins.b
+	}
+	return false
+}
+
+// For each instruction, the look-ahead whose body it lies in (the innermost), or -1. Nil for none.
+look_owners :: proc(insts: []Inst) -> []i32 {
+	owner: []i32
+	for ins, i in insts {
+		if ins.op != .Look {
+			continue
+		}
+		if owner == nil {
+			owner = make([]i32, len(insts))
+			slice.fill(owner, -1)
+		}
+		for k in i + 1 ..= int(ins.b) {
+			owner[k] = i32(i)
+		}
+	}
+	return owner
+}

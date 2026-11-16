@@ -4,24 +4,29 @@ ESCAPED: [256]u8 = {
 F64_ROOM :: 1 + 17 + 16
 HEX_NIBBLE: [256]u8 = {
 INT_ROOM :: 20
-LONG_DIVISOR_DIGITS :: 200
 POW10_F64 := [23]f64{
-Pending :: struct { buf: [4]u8, n: u8, at: u8, }
+Pending :: struct { buf: [4]u8, at, end: u8, }
 REPLACEMENT :: [4]u8{0xEF, 0xBF, 0xBD, 0}
-base64_decode :: proc "contextless" (dst: []u8, text: []u8) -> (decoded: []u8, ok: bool)
-base64_len :: #force_inline proc "contextless" (n: int) -> int
-base64_put :: proc "contextless" (dst: []u8, src: []u8) -> int
+ascii_fold_equal :: proc "contextless" (a, b: string) -> bool
+base64_bytes :: proc "contextless" (bytes: []u8, text: []u8) -> (decoded: []u8, ok: bool)
+base64_room :: proc "contextless" (n: int) -> int
+base64_text :: proc "contextless" (text: []u8, bytes: []u8) -> int
 buffered_equals :: proc "contextless" (room: int, name: string, c: rawptr, decode: proc "contextless" (rawptr, []u8) -> (string, bool)) -> bool
 bytes_equal :: #force_inline proc "contextless" (a, b: []u8) -> bool
-decode_text :: proc(buf: []u8, d: $D, $next: proc "contextless" (^D) -> (u8, bool)) -> (s: string, ok: bool)
+char_start :: #force_inline proc "contextless" (s: string, i: int) -> int
+decode_text :: proc "contextless" (buf: []u8, d: $D, $next: proc "contextless" (^D) -> (u8, bool)) -> (s: string, ok: bool)
 decoded_equals :: proc "contextless" (d: $D, $next: proc "contextless" (^D) -> (u8, bool), name: string) -> bool
 digit_end :: #force_inline proc "contextless" (p, end: [^]u8, mant: ^u64, $fold: bool) -> [^]u8
+digits_u64 :: proc "contextless" (s: string, cap: u64) -> (n: u64, ok: bool)
+divisor_judged :: proc "contextless" (y: Decimal) -> bool
 entity_child :: #force_inline proc "contextless" (node: u32, c: u8) -> u32 #no_bounds_check
 entity_named :: proc "contextless" (name: []u8) -> (text: []u8, ok: bool)
 entity_value :: #force_inline proc "contextless" (node: u32) -> (text: []u8, ok: bool) #no_bounds_check
 f32_text :: proc "contextless" (dst: [^]u8, f: f32) -> int #no_bounds_check
+f64_point_text :: proc "contextless" (dst: [^]u8, f: f64, point: string) -> int #no_bounds_check
 f64_text :: proc "contextless" (dst: [^]u8, f: f64) -> int #no_bounds_check
 hex4 :: #force_inline proc "contextless" (h: [^]u8) -> (unit: u32, ok: bool)
+hex_text :: #force_inline proc "contextless" (v: u64, $N: int, $upper: bool) -> (digits: [N]u8) #no_bounds_check
 high_surrogate :: #force_inline proc "contextless" (unit: u32) -> bool
 i64_text :: #force_inline proc "contextless" (dst: [^]u8, v: i64) -> int
 low_surrogate :: #force_inline proc "contextless" (unit: u32) -> bool
@@ -36,10 +41,11 @@ number_significand :: #force_inline proc(mant: u64, e: i64, neg: bool, exact: bo
 number_strict :: proc(src: []u8, lo, hi: u64) -> (Number, bool)
 pending_give :: #force_inline proc "contextless" (p: ^Pending, spelled: [4]u8, size: int) -> u8
 pending_next :: #force_inline proc "contextless" (p: ^Pending) -> (b: u8, ok: bool)
-put_rune :: #force_inline proc "contextless" (buf: []u8, r: rune) -> int
+rune_text :: #force_inline proc "contextless" (buf: []u8, r: rune) -> int
 short_decimal :: #force_inline proc "contextless" (p: [^]u8, n: u64) -> (v: f64, ok: bool)
 short_integer :: #force_inline proc "contextless" (p: [^]u8, n: u64) -> (v: i64, ok: bool)
 string_escape :: #force_inline proc "contextless" (e: [^]u8, room: int) -> (r: rune, n: int) #no_bounds_check
+surrogate_pair :: #force_inline proc "contextless" (high, low: u32) -> rune
 u64_text :: #force_inline proc "contextless" (dst: [^]u8, u: u64) -> int
 unicode_escape :: #force_inline proc "contextless" (e: [^]u8, room: int) -> (r: rune, n: int) #no_bounds_check
 utf8_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: Fault_Kind)
@@ -212,29 +218,42 @@ writing :: proc(pool: ^Pool, on: bool)
 # core/kernel
 FEATURES :: [Tier]string {
 Nibble_Table :: struct { lo, hi: #simd[16]u8, }
+Tier :: enum u8 { Base, }
+Utf8_State :: struct { prev: #simd[64]u8, err: #simd[64]u8, }
+all_zero :: #force_inline proc "contextless" (v: #simd[$N]u8) -> bool
 any_lane :: #force_inline proc "contextless" (m: Block) -> bool
 any_lane16 :: #force_inline proc "contextless" (m: V) -> bool
 classes :: #force_inline proc "contextless" ($T: Tier, b: Block, t: Nibble_Table) -> Block
 compress :: #force_inline proc "contextless" (b: Block, keep: u64, out: [^]u8) -> int #no_bounds_check
+control_or_high16 :: #force_inline proc "contextless" (v: V, $del: bool) -> V
+count_byte :: proc "contextless" (src: []u8, c: u8) -> int
+count_chars :: proc "contextless" (src: []u8) -> int
 depth_low :: #force_inline proc "contextless" (low, depth: int, open, close: u64) -> int
 eq :: #force_inline proc "contextless" (b: Block, c: u8) -> Block
-first_lane :: #force_inline proc "contextless" (m: V) -> u64
-head16 :: #force_inline proc "contextless" (src: [^]u8, n: int) -> (v, live: V, ok: bool) #no_bounds_check
+first_lane16 :: #force_inline proc "contextless" (m: V) -> u64
+head16 :: #force_inline proc "contextless" (src: [^]u8, n: int) -> (v, live: V, ok: bool)
 index_byte :: #force_inline proc "contextless" (src: []u8, c: u8) -> int
 is_ascii :: #force_inline proc "contextless" (b: Block) -> bool
+is_ascii16 :: #force_inline proc "contextless" (v: V) -> bool
+is_ws :: #force_inline proc "contextless" (c: u8) -> bool
 last_index_byte :: #force_inline proc "contextless" (src: []u8, c: u8) -> int
+live16 :: #force_inline proc "contextless" (n: int) -> V #no_bounds_check
+load16 :: #force_inline proc "contextless" (p: [^]u8) -> V
+load_block :: #force_inline proc "contextless" ($T: Tier, src: []u8, lo: int) -> Block
 load_padded :: #force_inline proc "contextless" ($T: Tier, src: []u8, lo: int) -> Block
 pack :: #force_inline proc "contextless" (m: Block) -> u64
 pack_n :: #force_inline proc "contextless" (m: [$N]Block) -> (r: [N]u64) where 2 <= N && N <= 4
 prefix_xor :: #force_inline proc "contextless" ($T: Tier, x: u64) -> u64
 quote_cut :: proc "contextless" (src: []u8, s: Quotes) -> int
 quote_run :: proc "contextless" (src: []u8, s: ^Quotes)
+skip_ws :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8
+store16 :: #force_inline proc "contextless" (p: [^]u8, v: V)
 tier :: proc "contextless" () -> Tier
-utf8_ascii_block :: #force_inline proc "contextless" ($T: Tier, s: ^Utf8_State)
 utf8_clean :: #force_inline proc "contextless" ($T: Tier, s: Utf8_State) -> bool
-utf8_head :: #force_inline proc "contextless" ($T: Tier, b: Block, s: ^Utf8_State, last: u64)
 utf8_next :: #force_inline proc "contextless" ($T: Tier, b: Block, ascii: bool, s: ^Utf8_State, high: ^bool) -> bool
 utf8_ok :: proc "contextless" (s: Utf8_State) -> bool
+utf8_stop :: #force_inline proc "contextless" ($T: Tier, b: Block, ascii: bool, s: ^Utf8_State, high: bool, last: u64) -> bool
+utf8_valid :: #force_inline proc "contextless" (text: []u8) -> bool
 utf8_window :: #force_inline proc "contextless" (prev, v: V) -> V
 # core/compose
 Flow_Insert :: struct { at: int, text: []u8, }

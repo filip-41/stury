@@ -8,8 +8,8 @@ package json
 import "base:intrinsics"
 import "base:runtime"
 import spell "../core/spell"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 import engine "../core/build"
 import typed "../core/typed"
 import write "../core/write"
@@ -333,7 +333,7 @@ blank :: proc "contextless" (src: []u8, spec: Spec) -> bool {
 walk_text :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> Maybe(core.Fault) {
 	p := raw_data(src)
 	end := p[len(src):]
-	r := walk_document(src, skip_ws(p[core.text_start(src, lo):], end), S, opts, h, regs, on)
+	r := walk_document(src, kernel.skip_ws(p[core.text_start(src, lo):], end), S, opts, h, regs, on)
 	hi, fault, stopped := core.result_of(r, &RULES)
 	if f, bad := fault.?; bad {
 		return describe(src, f, S)
@@ -358,7 +358,7 @@ tail_fault :: proc "contextless" (src: []u8, hi: u64, $S: Spec) -> Maybe(core.Fa
 			return describe(src, core.Fault{at = u64(intrinsics.ptr_sub(q, p)), rules = &RULES, kind = kind, detail = u8(Detail.Trailing) if stray_slash(q, kind) else 0}, S)
 		}
 	} else {
-		q = skip_ws(q, end)
+		q = kernel.skip_ws(q, end)
 	}
 	if q != end {
 		return core.Fault{at = u64(intrinsics.ptr_sub(q, p)), rules = &RULES, kind = .Bad_Char, detail = u8(Detail.Trailing)}
@@ -537,13 +537,13 @@ stray_bom :: #force_inline proc "contextless" (text: []u8, at: u64, spec: Spec) 
 document_start :: proc "contextless" (src: []u8, lo: u64, $S: Spec) -> (q: [^]u8, sep: [^]u8) {
 	p := raw_data(src)
 	end := p[len(src):]
-	q = skip_ws(p[core.text_start(src, min(lo, u64(len(src)))):], end)
+	q = kernel.skip_ws(p[core.text_start(src, min(lo, u64(len(src)))):], end)
 	for q < end {
 		if q[0] == 0x1e {
 			if sep == nil {
 				sep = q
 			}
-			q = skip_ws(q[1:], end)
+			q = kernel.skip_ws(q[1:], end)
 			continue
 		}
 		// A comment before the text's end or a 0x1E is the foot of the document before it, or of no document.

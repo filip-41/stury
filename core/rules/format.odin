@@ -1,8 +1,8 @@
 package rules
 
 import "core:strings"
-import regex "../regex"
 import "../spell"
+import regex "../regex"
 
 // The string formats a string rule can ask for. Another name is an annotation and judges nothing.
 String_Format :: enum u8 {
@@ -119,14 +119,9 @@ digits :: proc "contextless" (s: string) -> int {
 
 // The ASCII decimal number `s` is, false for any other byte and for an empty `s`.
 @(private)
-decimal :: proc "contextless" (s: string) -> (n: int, ok: bool) {
-	for c in transmute([]u8)s {
-		if c < '0' || c > '9' || n > 1 << 40 {
-			return 0, false
-		}
-		n = n * 10 + int(c - '0')
-	}
-	return n, s != ""
+decimal :: proc "contextless" (s: string) -> (int, bool) {
+	n, ok := spell.digits_u64(s, 1 << 40)
+	return int(n), ok
 }
 
 @(private)

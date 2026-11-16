@@ -145,15 +145,8 @@ float_text :: proc "contextless" (span: []u8, buf: []u8) -> (s: string, ok: bool
 	if len(buf) < spell.F64_ROOM + 2 {
 		return "", false
 	}
-	n := spell.f64_text(raw_data(buf), f)
 	// A float keeps a point, so a format that tells floats from integers reads its text as a float.
-	for c in buf[:n] {
-		if c == '.' || c == 'e' || c == 'E' {
-			return string(buf[:n]), true
-		}
-	}
-	buf[n], buf[n + 1] = '.', '0'
-	return string(buf[:n + 2]), true
+	return string(buf[:spell.f64_point_text(raw_data(buf), f, ".0")]), true
 }
 
 // The text of a decimal fraction or a bigfloat whose array is `span`.

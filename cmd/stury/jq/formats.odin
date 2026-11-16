@@ -5,8 +5,8 @@ package jq
 import "core:encoding/base64"
 import "core:math"
 import "core:strings"
-import "core:unicode/utf8"
 import "../../../core/spell"
+import "../../../core/kernel"
 
 format :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 	switch name {
@@ -19,7 +19,6 @@ format :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 		write_escaped(&b, text_of(v), "<>&'\"\x00", {"&lt;", "&gt;", "&amp;", "&apos;", "&quot;", `\0`})
 		return strings.to_string(b), .Go
 	case "uri":
-		HEX := "0123456789ABCDEF"
 		b := strings.builder_make()
 		s := text_of(v)
 		for i in 0 ..< len(s) {
@@ -27,9 +26,9 @@ format :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 			if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~' {
 				strings.write_byte(&b, c)
 			} else {
+				digits := spell.hex_text(u64(c), 2, true)
 				strings.write_byte(&b, '%')
-				strings.write_byte(&b, HEX[c >> 4])
-				strings.write_byte(&b, HEX[c & 15])
+				strings.write_bytes(&b, digits[:])
 			}
 		}
 		return strings.to_string(b), .Go
@@ -60,7 +59,7 @@ format :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 			append(&b, hi << 4 | lo)
 			i += 2
 		}
-		if !utf8.valid_string(string(b[:])) {
+		if !kernel.utf8_valid(b[:]) {
 			return nil, fail(ip, "string (%s) is not a valid uri encoding", brief(ip, s))
 		}
 		return string(b[:]), .Go

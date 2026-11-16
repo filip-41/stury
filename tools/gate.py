@@ -7,21 +7,28 @@ packages among them, with comments dropped, plus what they `#load`. A key that p
 directory, so all worktrees of the repository share the stamps and a merge reruns nothing its branch ran.
 
 Run from the repository root: `python3 tools/gate.py [quick|merge|full]`, `--force` to ignore stamps, `--list` to print what would run,
-`-j N` for the compiles at once. `quick` is the edit loop, `merge` what a branch passes before it lands (`make gate`), and
-`full` adds the long randomized runs. A check that cannot run on this machine is named in the last lines, not passed.
+`-j N` for the slots the checks share. `quick` is the edit loop, `merge` what a branch passes before it lands (`make gate`, and
+the pre-push hook), and `full` adds the long randomized runs. A check that cannot run on this machine is named in the last
+lines, not passed.
+
+Every check that is due starts as soon as a slot is free, the longest expected chain first, by the seconds each took when
+it last passed. Only the command line's suites wait, for the binary. The first failure stops every running check.
 """
 
 import argparse
-import concurrent.futures
 import dataclasses
 import functools
 import hashlib
+import json
 import os
+import queue
 import re
 import platform
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 
 from checks import makefile_list, odin_problem
@@ -51,12 +58,15 @@ COMMENT = re.compile(
     r'(?P<keep>"(?:\\.|[^"\\\n])*"|`[^`]*`|\'(?:\\.|[^\'\\\n])*\')|//[^\n]*|/\*.*?\*/', re.DOTALL
 )
 ARCHES = {"amd64", "arm64", "riscv64", "i386", "arm32", "wasm32", "wasm64p32"}
+# A check never timed runs first, as if it were the longest.
+UNTIMED_SECONDS = 1e6
+# The slots of a check that fills every core, which runs alone.
+EVERY_SLOT = 1 << 10
 
 
 @dataclasses.dataclass
 class Check:
     name: str
-    stage: int  # A stage runs once every earlier one passed, cheapest first.
     tier: int
     roots: list  # Package directories, whose imports are followed.
     cmd: list
@@ -65,6 +75,7 @@ class Check:
     trees: list = dataclasses.field(default_factory=list)  # Whole directories, hashed as they are.
     also: str = ""  # A second architecture whose sources the check compiles.
     cli: bool = False  # Runs build/stury, which must be the binary the current sources make.
+    slots: int = 1  # The -j slots its own threads fill.
 
 
 def strip_comments(text):
@@ -228,80 +239,80 @@ def rosetta():
 def cli_suites(absent, odin):
     """The command line's suites against jq: every jq and cli.tsv case passes, every smoke case passes, every valid toml-test and yaml-test-suite case reads as its
     JSON says, the random cases of regex_diff and jq_diff hold none different, and the types and gen laws hold. They run on the binary `build-cli` makes,
-    after every other stage so that a loaded host does not time them out."""
+    once that binary is built."""
     test = at(f"{CLI}/test")
-    suite = lambda name, stage, *argv, tier=1: Check(name, stage, tier, [at(CLI)], ["python3", *argv], trees=[test], cli=True)
+    suite = lambda name, *argv, tier=1, slots=1: Check(name, tier, [at(CLI)], ["python3", *argv], trees=[test], cli=True, slots=slots)
     out = [
-        suite("cli jq suite", 5, f"{test}/jq_suite.py", CLI_BINARY),
-        suite("cli smoke", 5, f"{test}/smoke.py", CLI_BINARY),
-        suite("cli conformance suite", 5, f"{test}/conformance_suite.py", CLI_BINARY),
-        suite("cli types law", 5, f"{test}/types_law.py", CLI_BINARY),
-        suite("cli gen law", 5, f"{test}/gen_law.py", CLI_BINARY, f"--odin={odin}"),
-        suite("cli follow", 5, f"{test}/follow_test.py", CLI_BINARY),
-        suite("cli memory", 5, f"{test}/memory_test.py", CLI_BINARY),
+        suite("cli jq suite", f"{test}/jq_suite.py", CLI_BINARY),
+        suite("cli smoke", f"{test}/smoke.py", CLI_BINARY),
+        suite("cli conformance suite", f"{test}/conformance_suite.py", CLI_BINARY),
+        suite("cli types law", f"{test}/types_law.py", CLI_BINARY),
+        suite("cli gen law", f"{test}/gen_law.py", CLI_BINARY, f"--odin={odin}"),
+        suite("cli follow", f"{test}/follow_test.py", CLI_BINARY),
+        suite("cli memory", f"{test}/memory_test.py", CLI_BINARY),
     ]
     has_jq = shutil.which("jq") and subprocess.run(["jq", "--version"], capture_output=True, text=True).stdout.strip() == "jq-1.8.2"
-    # The merge tier runs the first seed, the full tier every seed.
+    # The merge tier runs the first seed, the full tier every seed. Each runs its cases on every core.
     for i, seed in enumerate(DIFF_SEEDS):
         tier = 1 if i == 0 else 2
-        out.append(suite(f"cli regex diff seed {seed}", 6, f"{test}/regex_diff.py", CLI_BINARY, f"--seed={seed}", tier=tier))
+        out.append(suite(f"cli regex diff seed {seed}", f"{test}/regex_diff.py", CLI_BINARY, f"--seed={seed}", tier=tier, slots=3))
         if has_jq:
-            out.append(suite(f"cli jq diff seed {seed}", 6, f"{test}/jq_diff.py", CLI_BINARY, f"--seed={seed}", tier=tier))
+            out.append(suite(f"cli jq diff seed {seed}", f"{test}/jq_diff.py", CLI_BINARY, f"--seed={seed}", tier=tier, slots=3))
     if not has_jq:
         absent.append("cli jq diff (no jq 1.8.2 on PATH)")
     if subprocess.run(["python3", "-c", "import xml.parsers.expat"], capture_output=True).returncode == 0:
-        out.append(Check("xml expat diff", 6, 1, [at("xml"), at("xml/test/oracle")], make(odin, "diff-xml"), trees=[at("xml/test/oracle")]))
+        out.append(Check("xml expat diff", 1, [at("xml"), at("xml/test/oracle")], make(odin, "diff-xml"), trees=[at("xml/test/oracle")]))
     else:
         absent.append("xml expat diff (no pyexpat in python3)")
     if shutil.which("uv"):
         script = at("core/model/test/pydantic_diff.py")
-        out.append(Check("model pydantic diff", 6, 2, [at("core/model"), at("core/model/test/oracle")], make(odin, "diff-model"), trees=[script]))
+        out.append(Check("model pydantic diff", 2, [at("core/model"), at("core/model/test/oracle")], make(odin, "diff-model"), trees=[script]))
     else:
         absent.append("model pydantic diff (no uv)")
     return out
 
 
 def checks(odin):
-    """Every check, cheapest stage first, and the groups left out because their checkout is absent. Each package is its
-    own check, so a diff reruns only what imports it."""
+    """Every check, and the groups left out because their checkout is absent. Each package is its own check, so a diff
+    reruns only what imports it."""
     out = []
     absent = []
     examples = sorted(entry.path for entry in os.scandir(at("examples")) if entry.is_dir())
     # `checks.py imports` reads every tracked source, the examples' among them.
     every = [at(p) for p in LIB_PKGS + TEST_PKGS + BENCH_PKGS + [CLI]] + examples
-    out.append(Check("lint", 0, 0, every, make(odin, "lint"), trees=[at("tools/checks.py"), at("API.txt"), at("API_SHARED.txt")], also="amd64"))
+    out.append(Check("lint", 0, every, make(odin, "lint"), trees=[at("tools/checks.py"), at("API.txt"), at("API_SHARED.txt")], also="amd64", slots=2))
     if shutil.which("node"):
-        out.append(Check("ecma node diff", 6, 2, [at("core/regex"), at("core/regex/test/oracle")], make(odin, "ecma-diff"), trees=[at("core/regex/test/ecma_diff.py")]))
+        out.append(Check("ecma node diff", 2, [at("core/regex"), at("core/regex/test/oracle")], make(odin, "ecma-diff"), trees=[at("core/regex/test/ecma_diff.py")]))
     else:
         absent.append("ecma node diff (no node on PATH)")
-    out.append(Check("examples", 2, 1, examples, make(odin, "test-examples"), trees=[at("examples")]))
+    out.append(Check("examples", 1, examples, make(odin, "test-examples"), trees=[at("examples")]))
     if os.path.isdir(at(CLI)):
         # Only the merge tier's suites run the binary, and its -o:speed compile is the edit loop's longest step.
-        out.append(Check("cli build", 1, 1, [at(CLI)], make(odin, "build-cli")))
+        out.append(Check("cli build", 1, [at(CLI)], make(odin, "build-cli")))
         # The pieces law builds its own binaries, so it waits for the merge tier.
         script = at(f"{CLI}/test/pieces_law.py")
-        out.append(Check("cli pieces law", 2, 1, [at(CLI)], ["python3", script, f"--odin={odin}"], trees=[script, at(f"{CLI}/test/harness.py")]))
+        out.append(Check("cli pieces law", 1, [at(CLI)], ["python3", script, f"--odin={odin}"], trees=[script, at(f"{CLI}/test/harness.py")]))
         out += cli_suites(absent, odin)
     for package in TEST_PKGS:
         name = package.replace("/", "-")
         root = [at(package)]
         golden = [at("json/test/golden")] if package == "json/test" else []
-        out.append(Check(f"{name} minimal", 1, 0, root, make(odin, f"build/test/minimal/{package}"), trees=golden))
-        out.append(Check(f"{name} speed", 2, 1, root, make(odin, f"build/test/speed/{package}"), trees=golden))
-        out.append(Check(f"{name} asan", 3, 1, root, make(odin, f"build/test/asan/{package}"), trees=golden))
+        out.append(Check(f"{name} minimal", 0, root, make(odin, f"build/test/minimal/{package}"), trees=golden))
+        out.append(Check(f"{name} speed", 1, root, make(odin, f"build/test/speed/{package}"), trees=golden))
+        out.append(Check(f"{name} asan", 1, root, make(odin, f"build/test/asan/{package}"), trees=golden))
         if package in TSAN_PKGS:
-            out.append(Check(f"{name} tsan", 3, 1, root, make(odin, f"build/test/tsan/{package}")))
+            out.append(Check(f"{name} tsan", 1, root, make(odin, f"build/test/tsan/{package}")))
         # The merge tier runs v2 at -o:none and v3 at -o:speed, the full tier the other two.
         for opt in ("none", "speed"):
             for tier in (0, 1) if rosetta() else ():
                 target = f"build/test/x86/{opt}/{tier}/{package}"
                 gate = 1 if (opt == "none") == (tier == 0) else 2
-                out.append(Check(f"{name} x86 v{tier + 2} {opt}", 3, gate, root, make(odin, target), arch="amd64", trees=golden))
+                out.append(Check(f"{name} x86 v{tier + 2} {opt}", gate, root, make(odin, target), arch="amd64", trees=golden))
     if not rosetta():
         absent.append("the x86 test packages (no Rosetta, and this is not an x86-64 machine)")
-    # Alone in the last stage, since it fills every core.
-    out.append(Check("json-test full sweeps", 4, 2, [at("json/test")], make(odin, "test-sweep")))
-    out.append(Check("f32 exhaustive", 4, 2, [at("core/spell"), at("core/spell/test")], make(odin, "test-f32")))
+    # Alone, since each fills every core.
+    out.append(Check("json-test full sweeps", 2, [at("json/test")], make(odin, "test-sweep"), slots=EVERY_SLOT))
+    out.append(Check("f32 exhaustive", 2, [at("core/spell"), at("core/spell/test")], make(odin, "test-f32"), slots=EVERY_SLOT))
     return out, absent
 
 
@@ -328,10 +339,86 @@ def note_cli(key):
         file.write(cli_record(key))
 
 
-def run_check(check):
-    start = time.monotonic()
-    done = subprocess.run(check.cmd, cwd=check.cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
-    return check, done.returncode, done.stdout, time.monotonic() - start
+def load_seconds(stamps):
+    """The seconds each check took when it last passed."""
+    try:
+        with open(os.path.join(stamps, "seconds.json")) as file:
+            return json.load(file)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def save_seconds(stamps, timed):
+    """Adds `timed` to the stored seconds, which another worktree's gate may have written meanwhile."""
+    stored = load_seconds(stamps)
+    stored.update(timed)
+    path = os.path.join(stamps, "seconds.json")
+    with open(f"{path}.{os.getpid()}", "w") as file:
+        json.dump(stored, file, indent=0, sort_keys=True)
+    os.replace(f"{path}.{os.getpid()}", path)
+
+
+def run_order(todo, builder, seconds):
+    """`todo` by the longest expected chain first, the CLI build's chain holding the longest suite that waits for it."""
+    expected = lambda check: seconds.get(check.name, UNTIMED_SECONDS)
+    chain = {check.name: expected(check) for check in todo}
+    if builder in todo:
+        chain[builder.name] += max((expected(check) for check in todo if check.cli), default=0)
+    return sorted(todo, key=lambda check: -chain[check.name])
+
+
+def stop(proc):
+    """Ends a check's command and everything it started, which share its process group."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+
+def run_checks(ordered, builder, slots, passed):
+    """Starts each check of `ordered` in turn once its slots are free, a CLI suite once `builder` has passed when it is
+    due. A wider check that waits holds back those after it. `passed(check, seconds)` is called for each check that
+    passes. The first failure stops every running check, and the result is whether none failed."""
+    waiting = list(ordered)
+    building = builder in waiting
+    running = {}
+    finished = queue.Queue()
+    free = slots
+    failed = False
+    width = lambda check: min(check.slots, slots)
+    try:
+        while running or (waiting and not failed):
+            for check in [] if failed else list(waiting):
+                if check.cli and building:
+                    continue
+                if width(check) > free:
+                    break
+                waiting.remove(check)
+                free -= width(check)
+                proc = subprocess.Popen(check.cmd, cwd=check.cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+                running[proc] = (check, time.monotonic())
+                threading.Thread(target=lambda proc=proc: finished.put((proc, proc.communicate()[0])), daemon=True).start()
+            proc, output = finished.get()
+            check, began = running.pop(proc)
+            free += width(check)
+            if failed:
+                continue
+            seconds = time.monotonic() - began
+            if proc.returncode == 0:
+                print(f"ok   {check.name} ({seconds:.1f}s)", flush=True)
+                passed(check, seconds)
+                building = building and check is not builder
+            else:
+                failed = True
+                print(f"FAIL {check.name} ({seconds:.1f}s)", flush=True)
+                print(output.decode(errors="replace")[-6000:], flush=True)
+                for other in running:
+                    stop(other)
+    except KeyboardInterrupt:
+        for proc in running:
+            stop(proc)
+        raise
+    return not failed
 
 
 def main():
@@ -357,56 +444,43 @@ def main():
     for line in notice:
         print(line, flush=True)
     start = time.monotonic()
-    todo = {}
-    skipped = 0
+    keys = {}
     for check in wanted:
         key = key_of(check, compiler)
-        if not args.force and os.path.exists(os.path.join(stamps, key)):
-            skipped += 1
-        else:
-            todo.setdefault(check.stage, []).append((check, key))
-    if args.list:
-        for stage in sorted(todo):
-            for check, _ in todo[stage]:
-                print(f"{stage} {check.name}")
-        print(f"{sum(map(len, todo.values()))} to run, {skipped} unchanged")
-        return 0
-
+        if args.force or not os.path.exists(os.path.join(stamps, key)):
+            keys[check.name] = key
+    todo = [check for check in wanted if check.name in keys]
+    skipped = len(wanted) - len(todo)
     builder = next((c for c in every if c.name == "cli build"), None)
     cli_key = builder and key_of(builder, compiler)
-    ran = 0
-    for stage in sorted(todo):
-        keys = {check.name: key for check, key in todo[stage]}
-        if any(check.cli for check, _ in todo[stage]) and not cli_current(cli_key):
-            _, code, output, seconds = run_check(builder)
-            print(f"{'ok  ' if code == 0 else 'FAIL'} {builder.name}, for the suites ({seconds:.1f}s)", flush=True)
-            if code != 0:
-                print(output[-6000:])
-                return 1
+    if any(check.cli for check in todo) and builder not in todo and not cli_current(cli_key):
+        todo.append(builder)
+        keys[builder.name] = cli_key
+    seconds = load_seconds(stamps)
+    ordered = run_order(todo, builder, seconds)
+    if args.list:
+        for check in ordered:
+            print(f"{check.name} ({seconds[check.name]:.0f}s last)" if check.name in seconds else f"{check.name} (untimed)")
+        print(f"{len(todo)} to run, {skipped} unchanged")
+        return 0
+
+    timed = {}
+
+    def passed(check, took):
+        with open(os.path.join(stamps, keys[check.name]), "w") as stamp:
+            stamp.write(check.name + "\n")
+        timed[check.name] = round(took, 1)
+        if check is builder:
             note_cli(cli_key)
-        print(f"stage {stage}: {len(todo[stage])} checks", flush=True)
-        failed = False
-        pool = concurrent.futures.ThreadPoolExecutor(args.j)
-        # map yields in the order of the checks, each as soon as it and those before it are done.
-        for check, code, output, seconds in pool.map(run_check, [check for check, _ in todo[stage]]):
-            ran += 1
-            print(f"{'ok  ' if code == 0 else 'FAIL'} {check.name} ({seconds:.1f}s)", flush=True)
-            if code == 0:
-                with open(os.path.join(stamps, keys[check.name]), "w") as stamp:
-                    stamp.write(check.name + "\n")
-                if check is builder:
-                    note_cli(cli_key)
-            else:
-                failed = True
-                print(output[-6000:], flush=True)
-        pool.shutdown()
-        if failed:
-            print(f"failed after {ran} checks, {skipped} unchanged, {time.monotonic() - start:.1f}s")
-            print(*notice, sep="\n")
-            return 1
-    print(f"passed: {ran} ran, {skipped} unchanged, {time.monotonic() - start:.1f}s")
+
+    print(f"{len(todo)} to run, {skipped} unchanged", flush=True)
+    try:
+        ok = run_checks(ordered, builder, args.j, passed)
+    finally:
+        save_seconds(stamps, timed)
+    print(f"{'passed' if ok else 'failed'}: {len(timed)} ran, {skipped} unchanged, {time.monotonic() - start:.1f}s")
     print(*notice, sep="\n")
-    return 0
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

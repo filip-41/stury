@@ -3,8 +3,8 @@ package json
 import "base:intrinsics"
 import "core:simd"
 import spell "../core/spell"
-import core "../core"
 import kernel "../core/kernel"
+import core "../core"
 
 // The leaves the states read tokens with each return one past the token, or the fault's kind and the byte it is at
 // (`Truncated` at the text's end).
@@ -18,15 +18,8 @@ too_wide :: #force_inline proc "contextless" (p, q: [^]u8) -> bool {
 // Returns the lanes of `v` that stop a run of plain string bytes: the string's `quote`, `\`, a control byte or a byte
 // past 0x7F.
 @(private)
-string_stops :: #force_inline proc "contextless" (v: #simd[16]u8, $quote: u8) -> #simd[16]u8 {
-	V :: #simd[16]u8
-	// `v - 0x20 > 0x5f` is true for a control byte and a byte past 0x7F.
-	return simd.bit_or(simd.bit_or(simd.lanes_eq(v, V(quote)), simd.lanes_eq(v, V('\\'))), simd.lanes_gt(v - 0x20, V(0x5f)))
-}
-
-@(private)
-load16 :: #force_inline proc "contextless" (p: [^]u8) -> #simd[16]u8 {
-	return intrinsics.unaligned_load((^#simd[16]u8)(p))
+string_stops :: #force_inline proc "contextless" (v: V, $quote: u8) -> V {
+	return simd.bit_or(simd.bit_or(simd.lanes_eq(v, V(quote)), simd.lanes_eq(v, V('\\'))), kernel.control_or_high16(v, false))
 }
 
 // Reads the string whose opening `quote` is at `p` when its closing quote is one of the next 32 bytes and the bytes
@@ -37,9 +30,9 @@ string_short :: #force_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> 
 	if intrinsics.ptr_sub(end, p) <= 32 {
 		return nil, false, nil
 	}
-	k := kernel.first_lane(string_stops(load16(p[1:]), quote))
+	k := kernel.first_lane16(string_stops(kernel.load16(p[1:]), quote))
 	if k == 16 {
-		k = 16 + kernel.first_lane(string_stops(load16(p[17:]), quote))
+		k = 16 + kernel.first_lane16(string_stops(kernel.load16(p[17:]), quote))
 		if k == 32 {
 			return nil, false, nil
 		}
@@ -353,12 +346,7 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8,
 			c := bs[k]
 			if c == quote {
 				// The string ends in this block, so only the vectors up to its quote are read.
-				if !ascii {
-					kernel.utf8_head(T, b, &u, k)
-				} else if high {
-					kernel.utf8_ascii_block(T, &u)
-				}
-				if !kernel.utf8_clean(T, u) {
+				if !kernel.utf8_stop(T, b, ascii, &u, high, k) {
 					return nil, false
 				}
 				return bs[k + 1:], esc
