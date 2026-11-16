@@ -153,8 +153,7 @@ schema_read :: proc(s: Schema_Options, option := "--schema") -> ^Schema_Check {
 		refs          = s.refs if s.refs != "" else schema_directory(s.file),
 		draft         = s.draft,
 	}
-	dot := strings.last_index_byte(s.file, '.')
-	named, _ := format_named(s.file[dot + 1:] if dot >= 0 else "")
+	named, _ := format_of_file(s.file)
 	format := s.format.? or_else named
 	if FORMATS[format].cells {
 		usage_error("%s %s: a schema is a tree, and %s holds a table", option, s.file, FORMATS[format].name)

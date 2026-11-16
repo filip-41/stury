@@ -123,7 +123,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	}
 	o.from, o.to = cli.formats.from.? or_else .Json, cli.formats.to.? or_else .Json
 	o.from_spec, o.to_spec = cli.formats.from_spec, cli.formats.to_spec
-	cli.json_reading = json.as(FORMATS[o.from].spec, {max_depth = o.max_depth, refuse_non_finite = true})
+	cli.json_reading = json_reading_of(o)
 	args_done := false
 	for i := 0; i < len(args); i += 1 {
 		a := args[i]
@@ -281,6 +281,26 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		}
 		i += option_arity(a)
 	}
+	// The schema verb is the first file. One not named stays `.Schema`, for `schema_main` to refuse.
+	if cli.command == .Schema && len(cli.files) > 0 {
+		switch cli.files[0] {
+		case "infer":  cli.command = .Infer
+		case "sample": cli.command = .Sample
+		case "gen":    cli.command = .Gen
+		}
+	}
+	// Without --from the files' extensions name the format. -R and --seq read JSON text whatever the file is, and a
+	// verb's schema file names its own format.
+	if cli.formats.from == nil && !o.raw_input && !o.seq {
+		files := cli.files[:]
+		if cli.command >= .Schema {
+			files = files[min(1, len(files)):] if cli.command == .Infer else nil
+		}
+		if f, named := format_of_files(files); named {
+			o.from = f
+			cli.json_reading = json_reading_of(o)
+		}
+	}
 	// fmt writes each input as its own format unless --to says otherwise, so its --to follows --from when --to
 	// was not given. `--to ndjson` is what sets the compact layout here, since fmt refuses -c.
 	if cli.command == .Fmt && cli.formats.to == nil {
@@ -300,15 +320,13 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	}
 	o.cells_out.delimiter = cli.out_delimiter.? or_else o.cells_out.delimiter
 	o.cells_out.comment = cli.out_comment.? or_else o.cells_out.comment
-	// The schema verb is the first file. One not named stays `.Schema`, for `schema_main` to refuse.
-	if cli.command == .Schema && len(cli.files) > 0 {
-		switch cli.files[0] {
-		case "infer":  cli.command = .Infer
-		case "sample": cli.command = .Sample
-		case "gen":    cli.command = .Gen
-		}
-	}
 	return
+}
+
+// How --argjson, --jsonargs, --slurpfile and `fromjson` read their texts under the format `o.from`.
+@(private = "file")
+json_reading_of :: proc(o: ^Opts) -> core.As {
+	return json.as(FORMATS[o.from].spec, {max_depth = o.max_depth, refuse_non_finite = true})
 }
 
 // The byte `arg` names for option `flag`: one ASCII character, or `\t` for a tab.
@@ -745,6 +763,6 @@ refuse_follow :: proc(o: ^Opts, cli: ^Cli) {
 		usage_error("--follow follows one named file, not stdin")
 	}
 	if FORMATS[o.from].spec != .Json || reads_whole(o) {
-		usage_error("--follow reads records: --from %s makes one text of a file", FORMATS[o.from].name)
+		usage_error("--follow reads records: %s makes one text of a file", FORMATS[o.from].name)
 	}
 }

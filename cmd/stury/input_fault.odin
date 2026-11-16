@@ -188,8 +188,7 @@ lead_of :: proc(ins: ^Inputs) -> []byte {
 fault_note :: proc(name: string, data: []byte, f: core.Fault, spec: Maybe(json.Spec), o: ^Opts, lead: []byte = nil, allocator := context.temp_allocator) -> string {
 	at := int(f.at)
 	hint: string
-	dot := strings.last_index_byte(name, '.')
-	named, by_name := format_named(name[dot + 1:] if dot >= 0 else "")
+	named, by_name := format_of_file(name)
 	switch {
 	case f.kind == .Too_Deep:
 		hint = "a larger --max-depth reads it" if o.max_depth != 0 else "--max-depth N raises the nesting limit"

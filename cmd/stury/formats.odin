@@ -217,6 +217,39 @@ format_named :: proc(name: string) -> (f: Format, ok: bool) {
 	return
 }
 
+// The format the extension of file `name` names, as `.yml` is YAML and `.jsonl` NDJSON, and none for any other.
+format_of_file :: proc(name: string) -> (f: Format, ok: bool) {
+	dot := strings.last_index_byte(name, '.')
+	if dot < 0 {
+		return
+	}
+	switch ext := strings.to_lower(name[dot + 1:], context.temp_allocator); ext {
+	case "yml":   return .Yaml, true
+	case "jsonl": return .Ndjson, true
+	case "htm":   return .Html, true
+	case:         return format_named(ext)
+	}
+}
+
+// The one format the extensions of `files` name, as a run with no --from reads them, and none when they name no format
+// but JSON. A file of any other extension names JSON, and "-" names none. Files that name two formats are a usage error.
+format_of_files :: proc(files: []string) -> (f: Format, ok: bool) {
+	first: string
+	for name in files {
+		if name == "-" {
+			continue
+		}
+		named, _ := format_of_file(name)
+		switch {
+		case first == "":
+			f, first = named, name
+		case named != f:
+			usage_error("%s reads as %s and %s as %s: --from FORMAT reads every file as one", first, FORMATS[f].name, name, FORMATS[named].name)
+		}
+	}
+	return f, f != .Json
+}
+
 // Returns the comma-separated format names for `--from` and `--to` messages.
 format_names :: proc() -> string {
 	b := make([dynamic]byte, context.temp_allocator)

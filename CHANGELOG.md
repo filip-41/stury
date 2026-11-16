@@ -25,6 +25,10 @@
 
 - `.@(name)` and `.&[name]` read and write a fact or an attribute by a computed name, as `.@name` and `.&name` do. A
   path step that names a fact the catalogue lacks is an error in `getpath`, `setpath` and `delpaths`, on `null` too.
+
+- Without `--from`, the extension of the named files picks the format: `stury . app.toml` reads TOML and
+  `stury fmt --in-place *.yaml` writes YAML back. Files that name two formats are a usage error, and `--from` wins.
+
 - `fmt --from csv --comment C --to jsonc` keeps a comment line as a line comment above its row, as `--to yaml` does,
   and the table's last comments after the last row. JSON5 output keeps them too.
 

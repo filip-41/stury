@@ -101,6 +101,7 @@ runner and its bytecode listings, which stury does not have) and adds its own. E
 | `fmt` | A subcommand, recognised as `check` is: writes each input back in the printer's layout, or in another format, and runs no filter. See [`fmt`](#fmt). |
 | `edit` | A subcommand, recognised as `check` is: runs the filter on each input and splices its one output into the input's bytes. See [`edit`](#edit). |
 | `--from FORMAT` | Read `json` (the default), `jsonc`, `json5`, `ndjson`, `csv`, `tsv`, `toml`, `yaml`, `xml`, `cbor` or `html`, and a spec after a colon, as `toml:1.0` ([Formats](#formats)). |
+| `--from` default | With no `--from`, the extension of the named files picks the format: `.json`, `.jsonc`, `.json5`, `.ndjson` or `.jsonl`, `.csv`, `.tsv`, `.toml`, `.yaml` or `.yml`, `.xml`, `.cbor`, `.html` or `.htm` (upper case too). Any other extension reads as JSON, and so does the standard input when no file is named. Files that name two formats are a usage error, as `stury: a.yaml reads as yaml and b.toml as toml: --from FORMAT reads every file as one`. A `-` among the files reads in their format. `--from` always wins, `-R` and `--seq` read JSON text whatever the extension, and the options of one format are checked against the format the extensions name (`--delimiter` with `a.csv` reads it). jq has no such default. |
 | `--to FORMAT` | Write `json` (the default), `jsonc`, `ndjson`, `csv`, `tsv`, `toml`, `yaml`, `xml`, `cbor` or `html` ([Formats](#formats), [CSV and TSV output](#csv-and-tsv-output), [TOML output](#toml-output), [YAML output](#yaml-output), [XML output](#xml-output), [CBOR output](#cbor-output), [HTML output](#html-output)). `fmt` writes the `--from` format when `--to` is not given. |
 | `--in-place` | `fmt` and `edit` only: rewrite each file through a temporary one and a rename, when `--to` is `--from` ([`fmt`](#fmt), [`edit`](#edit)). |
 | `--check` | `fmt` and `edit` only: write nothing, name each file that would change on stderr, and exit 1 ([`fmt`](#fmt), [`edit`](#edit)). |
@@ -691,7 +692,7 @@ verdict a last record.
 
 ## Formats
 
-`--from` chooses how the input is cut into values, and `--to` how the outputs are written.
+`--from` chooses how the input is cut into values, and `--to` how the outputs are written. Without `--from`, the files' extensions choose (see `--from` default above).
 
 | Format | `--from` | `--to` |
 | --- | --- | --- |

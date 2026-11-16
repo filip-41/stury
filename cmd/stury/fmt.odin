@@ -28,7 +28,7 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	files := input_files(cli.files[:])
 	switch {
 	case o.in_place && o.to != o.from:
-		usage_error("--in-place writes each file back as its own format: --from %s and --to %s differ", FORMATS[o.from].name, FORMATS[o.to].name)
+		usage_error("--in-place writes each file back as its own format: %s, not --to %s", FORMATS[o.from].name, FORMATS[o.to].name)
 	case o.in_place:
 		refuse_in_place_inputs(files)
 	}
