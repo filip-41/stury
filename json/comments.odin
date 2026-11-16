@@ -46,7 +46,7 @@ comment_scan :: #force_inline proc "contextless" (q, end: [^]u8, $star: bool) ->
 // at U+2028 and U+2029 too. A `/` that opens no comment, the text's last byte among them, faults `Bad_Char` at the `/`,
 // and a `/*` the text ends inside faults `Truncated`.
 @(private)
-comment :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
+skip_comment :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
 	if intrinsics.ptr_sub(end, p) < 2 {
 		return p, .Bad_Char
 	}
@@ -180,7 +180,7 @@ comment_run :: #force_inline proc "contextless" (p, end: [^]u8, comma: bool, $S:
 			}
 		}
 		if q[0] == '/' {
-			if q, kind = comment(q, end, S); kind != .None {
+			if q, kind = skip_comment(q, end, S); kind != .None {
 				return
 			}
 		} else if comma && !crossed && q[0] == ',' {
@@ -207,7 +207,7 @@ emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (
 			x = x[1:]
 			continue
 		}
-		e, _ := comment(x, q, S)
+		e, _ := skip_comment(x, q, S)
 		role := rest if next_line else .Comment_Inline
 		if role == .Value {
 			return

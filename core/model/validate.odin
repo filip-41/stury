@@ -105,23 +105,18 @@ judged :: proc(j: ^Judging, f: ^typed.Field, at: uintptr) -> rules.Failures {
 	case .Map:
 		return rules.judge_count(u64((^runtime.Raw_Map)(at).len), l.min_members, l.max_members)
 	case .Hook:
-		return judged_hooked(j, l, &j.plan.meta[f.meta], at)
-	}
-	return {}
-}
-
-// The rules a hooked value fails, judged on what its write hook gives: a string's text, or a number's.
-@(private)
-judged_hooked :: proc(j: ^Judging, l: ^rules.Leaf, m: ^typed.Meta, at: uintptr) -> rules.Failures {
-	data := typed.extra_of(j.plan, m).data
-	context.user_ptr = data if data != nil else context.user_ptr
-	given, refused := m.write(rawptr(at), context.temp_allocator)
-	if refused != .None {
-		return {refused}
-	} else if given.id == string {
-		return rules.judge_string(l, (^string)(given.data)^, &j.scratch if l.pattern != nil else nil)
-	} else if given.id == core.Number_Text {
-		return rules.judge_number(l, (^core.Number_Text)(given.data).text, nil)
+		// Judged on what the write hook gives: a string's text, or a number's.
+		m := &j.plan.meta[f.meta]
+		data := typed.extra_of(j.plan, m).data
+		context.user_ptr = data if data != nil else context.user_ptr
+		given, refused := m.write(rawptr(at), context.temp_allocator)
+		if refused != .None {
+			return {refused}
+		} else if given.id == string {
+			return rules.judge_string(l, (^string)(given.data)^, &j.scratch if l.pattern != nil else nil)
+		} else if given.id == core.Number_Text {
+			return rules.judge_number(l, (^core.Number_Text)(given.data).text, nil)
+		}
 	}
 	return {}
 }

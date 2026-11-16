@@ -84,7 +84,7 @@ An `Answer` is a read result and holds no edit state. An edit names a node, and 
 A scan and a query are one operation. Reading paths gives a `Document` that holds only the nodes the paths reach, plus
 the answers, and a full build is the same read with every node kept.
 
-The entries live once in `core/build`, over a handle. `json` and `dsv` keep
+The entries live once in `core/build`, over a handle. Each format keeps
 `scan`, `find`, `each_answer` and `set` as forwarders that take the format's own `Spec` and `Options` and call the same
 name in `core/build` with `as(spec, opts)`, so a caller who reads one format imports that format alone. `scan`,
 `each_answer` and `query` are overload groups of a one-path form and a `[]core.Path` form, and the read options come
@@ -96,7 +96,7 @@ scan        :: proc(src: []u8, spec: Spec, paths: core.Path | []core.Path, opts 
 find        :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error)
 each_answer :: proc(src: []u8, spec: Spec, paths: core.Path | []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error
 query       :: proc(doc: ^core.Document, paths: core.Path | []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Error)
-set         :: proc(src: []u8, spec: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error)
+set         :: proc(src: []u8, spec: Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
 ```
 
 | Name | Gives | Freed by |
@@ -216,7 +216,7 @@ list is why `.config.host` with no `host` makes a later `member(config, "host")`
 `Kind` is added and every node stays text-backed. `Not_Loaded` is a document read's result and never an answer's
 outcome. To read more of `config`, ask for `.config` or for each member.
 
-An edit names a node, so a `Not_Loaded` member cannot be edited. `core.set_member` on a listed `Missing` name is an insert
+An edit names a node, so a `Not_Loaded` member cannot be edited. `write.set_member` on a listed `Missing` name is an insert
 after the container's last member, by name, and on a name no path looked for is `Bad_Index`.
 
 `json.set(src, S, port, 8080)` and `dsv.set`, with `port` the parsed `.port`, are a build of the text, one edit per
@@ -263,7 +263,7 @@ A query over a full document, a scan of the text and a value-tree model give the
 
 A format gives the engine its walk through `Services.scan`, which switches once on the handle's spec and runs the walk
 compiled for it with the hook the read needs, the stream's when `on` is set. `core/build`'s `scan`, `find`,
-`each_answer` and `set` call it, and `json.query` and `dsv.query` call the engine over a built document. A format writes no
+`each_answer` and `set` call it, and each format's `query` calls the engine over a built document. A format writes no
 step logic.
 
 | Name | Does |
@@ -272,7 +272,7 @@ step logic.
 | `scan_hook`, `scan_hook_many`, `scan_hook_stream` | the hooks the entry passes its walk: one plain path, `Scan.many` into a document, and `each_answer` |
 | `Rewalk`, `Scan.rewalk` | walks one value again from its first byte, for a ring's element, since only a format can walk from a value |
 | `scan_end` | turns the walk's end into the document and its answers, and frees everything on an error |
-| `query`, `query_built` | answers paths over a built document, the second for a read under `.Refuse` |
+| `query`, `scan_built` | answers paths over a built document, the second as a format's scan that builds the text whole and for a read under `.Refuse` |
 | `set_answers` | one edit per answer and a commit, behind `set` |
 
 `scan_reserve` and `scan_kept` are the engine's own, public since the hooks inline into a format's

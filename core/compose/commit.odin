@@ -43,7 +43,11 @@ commit :: proc(list: ^core.Edit_List, as: Maybe(core.As) = nil, allocator := con
 	// A format's own commit is judged under the document's options and the target spec.
 	judged := doc.as
 	judged.spec = target.spec
-	if refusal = reads_back(list, made, target, judged, false, allocator); refusal.kind != .None {
+	refusal = {kind = .Bad_Spec}
+	if o, reads := output_of(list, made, target); reads {
+		refusal = reads_back(&o, judged, true, allocator)
+	}
+	if refusal.kind != .None {
 		delete(made, allocator)
 		return nil, 0, core.error_of(refusal, edit = true)
 	}
@@ -95,71 +99,26 @@ commit_spec :: proc(list: ^core.Edit_List, target: core.As, allocator: runtime.A
 		delete(out, allocator)
 		return nil, 0, {kind = .Bad_Result}
 	}
-	// The output holds the planned edits, a cell removed from every record among them. An output of the document's spec
-	// is read back under the strict options. Only an output that read refuses goes to `reads_as_source`, and then is read
-	// again under the target's options. Past `core.MAX_PATHS` edits the output is read against the source and the edits
-	// in one walk that judges it whole, each token at the place the commit wrote or copied it.
-	e := core.Document_Error{kind = .Bad_Result}
-	if spec == doc.as.spec {
-		strict := doc.as
-		strict.tolerate = {}
-		known := false
-		if written, placed := written_at(&cx, seps); placed && len(planned.edits) > core.MAX_PATHS && list.edit.walk_written != nil {
-			context.allocator = scratch
-			e, known = core.reads_written(&planned, out, strict, written, list.edit.walk_written)
-		}
-		if !known {
-			e = reads_back(&planned, out, target, strict, true, allocator)
+	// The output holds the planned edits, a cell removed from every record among them. Past `core.MAX_PATHS` edits of
+	// the document's own spec the output is read against the source and the edits in one walk that judges it whole, each
+	// token at the place the commit wrote or copied it.
+	o, reads := output_of(&planned, out, target)
+	if !reads {
+		delete(out, allocator)
+		return nil, 0, {kind = .Bad_Spec}
+	}
+	written: Maybe([]core.Written)
+	if spec == doc.as.spec && len(planned.edits) > core.MAX_PATHS && list.edit.walk_written != nil {
+		if pieces, placed := written_at(&cx, seps); placed {
+			written = pieces
 		}
 	}
-	if e.kind == .Bad_Result && e.reason == .None {
-		if e = reads_as_source(list.edit, doc, out, target); e.kind == .None {
-			e = reads_back(&planned, out, target, nil, false, allocator)
-		}
-	}
-	if e.kind != .None {
+	context.allocator = scratch
+	if e := judge_output(&o, written, allocator); e.kind != .None {
 		delete(out, allocator)
 		return nil, 0, e
 	}
 	return out, cx.dropped, {}
-}
-
-// The output must read as strictly as the source. A text that needs a tolerance only the source needed is the edit's
-// own defect. A tolerance is accepted only when the output keeps the document's spec, since under another spec the
-// source's own reading is no evidence and the output must read strictly. A text that fails even the format's tolerant
-// read returns `.Bad_Result`.
-@(private)
-reads_as_source :: proc(edit: ^core.Edit_Services, doc: ^core.Document, out: []u8, target: core.As) -> core.Document_Error {
-	spec := target.spec
-	strict := doc.as
-	strict.tolerate = {}
-	// The list's own validate reads its own spec. Another spec of the format is judged by the target's handle, which
-	// holds that spec's walk.
-	validate := edit.validate
-	if spec != doc.as.spec {
-		services := core.services_of(target)
-		if services == nil || services.validate == nil {
-			return {kind = .Bad_Spec}
-		}
-		strict.readers, strict.spec = target.readers, spec
-		validate = services.validate
-	}
-	f, faulted := validate(out, strict).?
-	if !faulted {
-		return {}
-	}
-	tolerant := strict
-	tolerant.tolerate = ~bit_set[core.Tolerance; u8]{}
-	if g, still := validate(out, tolerant).?; still {
-		return {kind = .Bad_Result, inner = g}
-	}
-	if spec != doc.as.spec {
-		return {kind = .Bad_Result, inner = f}
-	}
-	if _, src_bad := validate(doc.src, strict).?; !src_bad {
-		return {kind = .Bad_Result, inner = f}
-	}
-	return {}
 }
 
 // Builds the output in one allocation: the source bytes between chunks, and each chunk's text in its place.
@@ -196,11 +155,28 @@ splice :: proc(doc: ^core.Document, chunks: []Chunk, text: []u8, segments: []Seg
 	return out, {}
 }
 
+// Whether an edit writes what `core.reads_written` does not follow: a reorder, or a container or a text the caller
+// spelled.
+@(private)
+writes_unread :: proc(edits: []core.Edit) -> bool {
+	for e in edits {
+		if e.op == .Reorder {
+			return true
+		}
+		if e.op == .Insert || e.op == .Set && e.role != .Key {
+			if k := core.kind(e.value); e.value == nil || k == .Array || k == .Object {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // The pieces of the output `splice` writes that the chunks write, in order. False when an edit wrote what
 // `core.reads_written` does not follow, chunks overlap, or segments or line separators write the output.
 @(private)
 written_at :: proc(cx: ^Compose, seps: []u64) -> ([]core.Written, bool) {
-	if cx.unwritten || len(cx.segments) > 0 || len(seps) > 0 {
+	if len(cx.segments) > 0 || len(seps) > 0 || writes_unread(cx.list.edits[:]) {
 		return nil, false
 	}
 	written := make([]core.Written, len(cx.chunks), cx.allocator)
@@ -262,16 +238,16 @@ splice_range :: proc(out: ^[dynamic]u8, doc: ^core.Document, chunks: []Chunk, te
 	return true
 }
 
-push :: proc(d: ^[dynamic]$T, v: T) -> (int, bool) {
-	count, err := append(d, v)
-	return count, err == nil
+// Appends `v` to `d`, and false when out of memory.
+push :: proc(d: ^[dynamic]$T, v: T) -> bool {
+	_, err := append(d, v)
+	return err == nil
 }
 
-push_all :: proc(d: ^[dynamic]$T, vs: []T) -> (count: int, ok: bool) {
-	if _, err := append(d, ..vs); err != nil {
-		return 0, false
-	}
-	return len(vs), true
+// Appends `vs` to `d`, and false when out of memory.
+push_all :: proc(d: ^[dynamic]$T, vs: []T) -> bool {
+	_, err := append(d, ..vs)
+	return err == nil
 }
 
 // The offsets of the U+2028 and U+2029 inside the source's line comments, sorted. JSON5 ends a line comment at one, so a
@@ -306,8 +282,7 @@ push_src :: proc(out: ^[dynamic]u8, doc: ^core.Document, seps: []u64, lo, hi: u6
 		push_all(out, transmute([]u8)string("\\u2028" if doc.src[s+2] == 0xA8 else "\\u2029")) or_return
 		at = s + 3
 	}
-	_, ok := push_all(out, doc.src[at:hi])
-	return ok
+	return push_all(out, doc.src[at:hi])
 }
 
 // A replacement of the source bytes `lo` through `hi` by `text`, for a format that commits its edits itself. A splice

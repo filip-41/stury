@@ -407,7 +407,10 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 			register_anchor(r, sc, {sc.source, at}, sc.base, RECURSIVE, name, true, i)
 		}
 	case "$vocabulary":
-		read_vocabulary(r, sc, site, name)
+		// Read as part of a schema it only has to be well formed. A `$schema` target has it read by `dialect`.
+		if kind != .Object {
+			fail(r, site, name, "must be an object")
+		}
 	case "$defs", "definitions":
 		for e in members_of(r, sc, v, name) {
 			named(r, read_schema(r, sc, e.v, core.Name(e.key)), e.key)

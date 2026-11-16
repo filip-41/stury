@@ -13,9 +13,9 @@ walks use, `markup.md` the XML walk and the HTML tokenizer and tree, and `binary
 
 | File | Holds |
 |---|---|
-| `core/walk.odin` | `Kind`, `Role`, `Token`, `Action`, `Hook_Regs`, `text_start` |
-| `core/document.odin` | `Node`, `Document`, the readers, `Duplicates`, `Readers`, `Services`, `Edit_Services`, `destroy` |
-| `core/result.odin` | the result word: `fault_at`, `STOPPED`, `result_of`, and the empty hook `No_Hooks`/`no_hook` |
+| `core/walk.odin` | `Kind`, `Role`, `Token`, `Action`, `Hook_Regs`, `text_start`, the result word (`fault_at`, `STOPPED`, `result_of`) and the empty hook `No_Hooks`/`no_hook` |
+| `core/document.odin` | `Node`, `Document`, `Duplicates`, `build`, `validate`, `destroy` |
+| `core/format.odin` | `As`, `Readers`, `Services`, `Edit_Services` |
 | `core/build/build.odin` | `Builder`, the hooks a format's `build` passes its walk, the header row, the duplicate-key check |
 | `core/spell/number.odin` | `Number`, `Number_Kind`, the decimal decoders |
 | `core/spell/digits.odin` | the digit run readers, eight bytes at a time |
@@ -26,7 +26,7 @@ walks use, `markup.md` the XML walk and the HTML tokenizer and tree, and `binary
 | `core/number.odin` | core's aliases for `Number` and `Number_Kind`, and `plain_kind` |
 | `core/edit.odin` | `Edit_List`, `Edit`, `set`/`insert`/`remove`, `commit` |
 | `core/compose/` | the commit the format tables point at, and the composition a format's root junctions share |
-| `core/error.odin` | core's alias for `Fault_Kind`, `Fault`, `Rules`, `Rule`, the codes, line and column, the renderer |
+| `core/fault.odin` | core's alias for `Fault_Kind`, `Fault`, `Rules`, `Rule`, the codes, line and column, a fault's rendered line |
 | `json/walk.odin` | JSON's interface, the result word, `Walk`, `walk_document`, the hook calls |
 | `json/document.odin` | JSON's `build` and its handle tables |
 | `json/unescape.odin` | JSON's string decoder, its key compare and its number reader |

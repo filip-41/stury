@@ -76,8 +76,8 @@ reindex :: proc(o: ^Object) {
 	}
 }
 
-// Room in `a` for one more, the room doubled from 2: append's first reserve is 8, mostly unused by the small arrays
-// and objects built by the million, and none of it is freed before the arena is.
+// Room in `a` for one more, doubling from 2 where append reserves 8, since built arrays and objects are mostly small
+// and live until their arena is freed.
 make_room :: #force_inline proc(a: ^[dynamic]$T) {
 	if n := len(a); n == cap(a) {
 		reserve(a, max(2, 2 * n))
@@ -115,15 +115,13 @@ object_delete_all :: proc(o: ^Object, gone: map[string]bool) {
 	}
 }
 
-// The value of node `r` as a built value of its own, which outlives the document: a number is a double, but a number
-// whose digits the double does not spell keeps them as a `Number_View`, and a byte string is the string of its RFC 4648
-// base64, as a text format writes it. An object follows `dups`: `.All` keeps a
-// repeated key in order, `.First` the first and `.Last` the last. `.Default` is the format's own: a markup document
-// makes a repeated name an array of each of its elements in document order, as `markup_members` reads it, and any other
-// keeps the last. With `borrow` a string or key that lies in the
-// document's text stays a slice of it. A node that has comments in its document carries them, as `Commented` does. The
-// containers being filled are frames of a stack in the context allocator, so the native stack does not grow with the
-// node's depth.
+// The value of node `r` as a built value of its own, which outlives the document. A number is a double, or a
+// `Number_View` of its digits where the double does not spell them, and a byte string is its RFC 4648 base64. An object
+// follows `dups`: `.All` keeps a repeated key in order, `.First` the first, `.Last` the last, and `.Default` is the
+// format's own, a markup document's repeated name being an array as `markup_members` reads it. With `borrow` a string
+// or key in the document's text stays a slice of it. Comments the node has in its document come with it as
+// `Commented`. The containers being filled are frames of a stack in the context allocator, so the native stack does
+// not grow with the node's depth.
 built_value :: proc(r: Node_Ref, dups := Duplicates.Default, borrow := false) -> Value {
 	// A container being filled, from `it`. `key` is the key of the member whose value is being built.
 	Filling :: struct {
@@ -306,8 +304,7 @@ built_data :: proc(r: Node_Ref, borrow: bool) -> Value {
 // `s` as a string of a built value: itself when it lies in the text of `doc` and `borrow` says so, else a copy.
 @(private = "file")
 text_kept :: proc(doc: ^Document, s: string, borrow: bool) -> string {
-	lo, at := uintptr(raw_data(doc.src)), uintptr(raw_data(s))
-	if borrow && at >= lo && at + uintptr(len(s)) <= lo + uintptr(len(doc.src)) {
+	if borrow && lies_in_source(doc, s) {
 		return s
 	}
 	return strings.clone(s)

@@ -8,7 +8,7 @@ format once, through the `core.As` value it opens with, and the calls after that
 records.open  :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator, entries: []string = nil) -> records.Reader
 records.open_stream :: proc(input: io.Reader, as: core.As, framing := core.Framing.Lines, opts := records.Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> records.Reader
 records.next  :: proc(it: ^records.Reader) -> (records.Record, bool)
-records.read  :: proc(it: ^records.Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (more: bool, err: core.Error)
+records.read  :: proc(it: ^records.Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (err: core.Error, more: bool)
 records.build :: proc(it: ^records.Reader, rec: records.Record, allocator := context.allocator) -> (core.Document, core.Error)
 records.build :: proc(src: []u8, as: core.As, dups := core.Duplicates.Last, allocator := context.allocator, runner: ^core.Runner = nil, pieces: ^int = nil) -> (core.Document, core.Error)
 records.scan  :: proc(it: ^records.Reader, path: core.Path, read := core.Path_Options{}) -> (rec: records.Record, doc: core.Document, err: core.Error, more: bool)
@@ -17,9 +17,9 @@ records.cell   :: proc(it: ^records.Reader, rec: records.Record, column: int, bu
 records.cells  :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto := max(int)) -> ([]write.Scalar, bool)
 records.next_window :: proc(it: ^records.Reader) -> (window: []u8, base: u64, ok: bool)
 records.close :: proc(it: ^records.Reader)
-records.validate :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> (faults: []core.Fault, err: runtime.Allocator_Error)
-records.validate_parallel :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> core.Error
-records.each :: proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0) -> core.Error
+records.validate :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0, services: ^records.Framing_Services = nil) -> (faults: []core.Fault, err: runtime.Allocator_Error)
+records.validate_parallel :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault)
+records.each :: proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0, services: ^records.Framing_Services = nil) -> core.Error
 json.spine :: proc(src: []u8, as: core.As) -> (at: u64, levels: int, ok: bool)
 ```
 
@@ -155,7 +155,7 @@ records: the next one is read past it.
 `next` under `.Concatenated` and `.Entries` frames a record by a walk of its value, which judges it, so a fault ends
 the records. Under `.Entries` that fault is the one `validate` gives for the whole text.
 
-`check` judges every record from `at` and returns the faults of the refused ones in source order, then the fault that
+`validate` judges every record from `at` and returns the faults of the refused ones in source order, then the fault that
 ended the records, if any. `validate_parallel` returns the fault the format's `validate` gives for the whole text, read as the
 entries of its spine or its root, and `.Bad_Option` for a format that does not take it.
 
@@ -186,7 +186,7 @@ for rec in records.next(&it) {
 ```
 
 - `next` frames rows by a walk of the text, which judges them, so a fault ends the records with the fault `validate`
-  gives for the whole text, and every row whose line end comes before it is given first. `check` returns that fault.
+  gives for the whole text, and every row whose line end comes before it is given first. `validate` returns that fault.
 - The walk frames rows in batches of up to 256 and keeps each row's first byte and line end. A cell is split from its
   row's text when `cell`, `cells`, `read` or `build` asks for it. The next walk restarts at the next row's first byte
   with the header and the row width carried in.
@@ -272,7 +272,7 @@ whitespace, and its records are read with offsets from `base`.
 
 ## Threads
 
-With a `runner`, such as a `host.Pool`'s, `check` and `validate_parallel` read a long text in pieces on its threads and the
+With a `runner`, such as a `host.Pool`'s, `validate` and `validate_parallel` read a long text in pieces on its threads and the
 caller's, with the answer one thread gives: the same faults at the same bytes. Each piece guesses where a record may
 start in it, past an LF or 0x1E, or at a comma under `.Entries`, and reads records from there until one starts past
 the piece. A guess that leads to a fault is dropped for the next one. Then the records are read in source order on
@@ -282,7 +282,7 @@ never the answer. A runner with no threads and a short text read on the caller a
 
 A dsv text is read in pieces of rows. A piece's guess is the byte past an LF, and its rows are checked against the
 width the text's first record set. A guess inside a quoted cell either faults, and the piece guesses again, or gives
-rows the in-order reading never meets. In `check` and `validate_parallel` the walk that frames the rows judges them, so the
+rows the in-order reading never meets. In `validate` and `validate_parallel` the walk that frames the rows judges them, so the
 in-order reading takes the rows between two pieces' starts as one walk.
 
 `each` hands a task readers over pieces of the text, whose records together are those `next` gives, each once. The
@@ -341,19 +341,25 @@ with the row's index and the key or cell in its path. The calls and their refusa
 
 ## The format's services
 
-A format gives its record reader as a `records.Framing_Services` table in its rodata, which its `core.Services.records`
-points at, and the reads of a record's value as a `records.Record_Docs`, which `Services.docs` points at and a reader
-an entry point opens takes from the caller (`it.docs = json.record_docs(.Json)`). `next` holds one procedure per framing, nil for a framing the format does not take, which frames the next record
-and stores the fault that ends the records in `it.fault`. `judge` returns a record's fault (`records.no_judge` for a format whose `next` judges what it frames), `read`, `build` and `scan` read
-one, and `build_next` frames the next record by the walk that writes its nodes to a builder (nil where the format
-builds whole texts on one thread), and `joined` completes a joined document as the format's own build completes it. `guess` moves a piece's reader to where a record may start, and marks it so that a fault ends its records
-without the cost of finding the whole text's fault. `exact` gives the scan whose cuts `each` starts pieces at, `cut` finds a cut in a range of the text for a format
-whose separators no quote scan finds (YAML's `---` and `...` lines), and `piece` turns a copy of a reader past its
-first record into a piece's reader. `whole` names the framing and offset `validate_parallel` reads a whole
-text by. `column`, `cell` and `cells` are a format's with named columns, and `close` frees the memory the format keeps in
-`Reader.format`. `ends` names, per framing, the byte a backward scan finds a whole record's end by (JSON's LF and 0x1E),
-and 0 where only a walk of the records finds it. `core` stores the table as a
-`rawptr`, since `core/records` imports `core`.
+A format gives its record framing as a `records.Framing_Services` table in its rodata, which `core.Services.records`
+points at. `next` holds one procedure per framing, nil for a framing the format does not take, which frames the next
+record and stores the fault that ends the records in `it.fault`. `judge` returns a record's fault (`records.no_judge`
+for a format whose `next` judges what it frames). `guess` moves a piece's reader to where a record may start, and marks
+it so that a fault ends its records without the cost of finding the whole text's fault. `span` frames the records up to
+a cut as one record. `exact` gives the scan whose cuts `each` starts pieces at, `cut` finds a cut in a range of the text
+for a format whose separators no quote scan finds (YAML's `---` and `...` lines), and `piece` turns a copy of a reader
+past its first record into a piece's reader. `whole` names the framing and offset `validate_parallel` reads a whole text
+by. `ends` names, per framing, the byte a backward scan finds a whole record's end by (JSON's LF and 0x1E), and 0 where
+only a walk of the records finds it, and `closed` says where `ends` is 0 whether no later byte continues a record that
+ends a stream's window. `close` frees the memory the format keeps in `Reader.format`. `tree`, `tree_state`, `entry_step`
+and `entry_build` serve `.Entries` for a format that reads its records from a tree or by `entries_walked`.
+
+The reads of a record's value are a `records.Record_Docs`, which `Services.docs` points at and a reader an entry point
+opens takes from the caller (`it.docs = json.record_docs(.Json)`). `scan`, `read` and `build` read one record,
+`build_next` frames the next record by the walk that writes its nodes to a builder (nil where the format builds whole
+texts on one thread), `joined` completes a joined document as the format's own build completes it, `check_read` and
+`check_run` check records by a model's plan, and `column`, `cell` and `cells` are a format's with named columns. `core`
+stores both tables as a `rawptr`, since `core/records` imports `core`.
 
 dsv reads a stream under `.Lines`. A quoted cell may hold an LF, so the window is found by walking, as under
 `.Concatenated`: a row that ends at the window's end, a fault within 12 bytes of it, and any `Truncated` fault while

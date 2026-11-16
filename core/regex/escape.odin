@@ -37,16 +37,16 @@ parse_escape :: proc(p: ^Parser) -> ^Node {
 		n.dotall = c == 'O'
 		return n
 	case 'p', 'P':
-		if peek(p) == '{' && !at_end(p) {
+		if peek(p) == '{' {
 			it, ok := parse_property(p, c == 'P')
 			return prop_node(it) if ok else nil
 		}
 	case 'k':
-		if (peek(p) == '<' || peek(p) == '\'') && !at_end(p) {
+		if peek(p) == '<' || peek(p) == '\'' {
 			return parse_backref_name(p)
 		}
 	case 'g':
-		if (peek(p) == '<' || peek(p) == '\'') && !at_end(p) {
+		if peek(p) == '<' || peek(p) == '\'' {
 			return parse_call(p)
 		}
 	case 'Q':
@@ -111,7 +111,7 @@ ecma_escape :: proc(p: ^Parser, c: byte) -> ^Node {
 		} else {
 			p.i += 1
 			ok: bool
-			if n.name, ok = ecma_name(p, '>'); !ok {
+			if n.name, ok = read_name(p, '>'); !ok {
 				return nil
 			}
 			if !ecma_identifier(n.name) {
@@ -233,7 +233,7 @@ escape_unit :: proc(p: ^Parser) -> (r: rune, is_byte: bool, ok: bool) {
 	}
 	switch c {
 	case 'x':
-		if peek(p) == '{' && !at_end(p) && spell.HEX_NIBBLE[peek(p, 1)] < 16 {
+		if peek(p) == '{' && spell.HEX_NIBBLE[peek(p, 1)] < 16 {
 			p.i += 1
 			v, n := number(p.src, &p.i, 1 << 40, 16)
 			if n > 8 {
@@ -250,7 +250,7 @@ escape_unit :: proc(p: ^Parser) -> (r: rune, is_byte: bool, ok: bool) {
 		v, _ := number(p.src, &p.i, 0xFF, 16, 2)
 		return rune(v), true, true
 	case 'o':
-		if peek(p) == '{' && !at_end(p) {
+		if peek(p) == '{' {
 			p.i += 1
 			v, _ := number(p.src, &p.i, 0x7FFFFFFF, 8)
 			if at_end(p) || peek(p) != '}' {

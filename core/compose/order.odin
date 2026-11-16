@@ -88,8 +88,7 @@ compose_order :: proc(cx: ^Compose, c: core.Node_Index, lo, hi: u64, removed: []
 		write_member(cx, inserts[k - n]) or_return
 		push(&cx.segments, Segment{lo = u64(at), hi = u64(len(cx.text)), written = true}) or_return
 	}
-	_, ok := push(&cx.chunks, Chunk{lo = lo, hi = hi, from = from, to = len(cx.segments), rank = .Set, ordered = true})
-	return ok
+	return push(&cx.chunks, Chunk{lo = lo, hi = hi, from = from, to = len(cx.segments), rank = .Set, ordered = true})
 }
 
 // Writes the source gap before member `g`, `g == n` for the one before the close, with the inline comments of member
@@ -192,7 +191,7 @@ order_inline :: proc(cx: ^Compose, m: Member, after: []u8) -> bool {
 	if edit := new_fact(cx, m.node, .Comment_Inline); edit >= 0 {
 		line = order_inline_text(cx, cx.list.edits[edit], after) or_return
 	}
-	if k := u64(len(blank_lead(after))); line && core.line_end_len(after, k) == k {
+	if k := blanks_end(after, 0, u64(len(after))); line && line_end_len(after, k) == k {
 		push(&cx.text, '\n') or_return
 	}
 	return true
@@ -202,7 +201,7 @@ order_inline :: proc(cx: ^Compose, m: Member, after: []u8) -> bool {
 // end after its blanks, or where a block comment cannot hold it, and the others block comments, dropping one that a block
 // comment cannot hold. Returns whether it wrote a line comment.
 order_inline_text :: proc(cx: ^Compose, e: core.Edit, after: []u8) -> (line, ok: bool) {
-	k := u64(len(blank_lead(after)))
+	k := blanks_end(after, 0, u64(len(after)))
 	n := fact_count(e)
 	for i in 0 ..< n {
 		body := fact_body(e, i)
@@ -211,7 +210,7 @@ order_inline_text :: proc(cx: ^Compose, e: core.Edit, after: []u8) -> (line, ok:
 			cx.dropped += 1
 			continue
 		}
-		line = i == n - 1 && (core.line_end_len(after, k) > k || closes)
+		line = i == n - 1 && (line_end_len(after, k) > k || closes)
 		push(&cx.text, ' ') or_return
 		put_comment(cx, body, line, e.padded) or_return
 	}
@@ -226,11 +225,8 @@ order_new_fact :: proc(cx: ^Compose, node: core.Node_Index, role: core.Role, at:
 		return true
 	}
 	from := len(cx.text)
-	cx.in_line, cx.value_line = false, false
-	write_fact(cx, cx.list.edits[edit], at, at) or_return
-	cx.in_line = false
-	_, ok := push(&cx.segments, Segment{lo = u64(from), hi = u64(len(cx.text)), written = true})
-	return ok
+	write_piece(cx, cx.list.edits[edit], at, at) or_return
+	return push(&cx.segments, Segment{lo = u64(from), hi = u64(len(cx.text)), written = true})
 }
 
 // Makes a chunk of each head comment before its member's bytes and each foot comment of `c` that a fact edit in
@@ -269,19 +265,9 @@ order_facts :: proc(cx: ^Compose, c: core.Node_Index, lo, hi: u64, group: []Targ
 	return true
 }
 
-// Returns the spaces and tabs `b` starts with.
-blank_lead :: proc(b: []u8) -> []u8 {
-	i := 0
-	for i < len(b) && (b[i] == ' ' || b[i] == '\t') {
-		i += 1
-	}
-	return b[:i]
-}
-
 source_segment :: proc(cx: ^Compose, lo, hi: u64) -> bool {
 	if hi <= lo {
 		return true
 	}
-	_, ok := push(&cx.segments, Segment{lo = lo, hi = hi})
-	return ok
+	return push(&cx.segments, Segment{lo = lo, hi = hi})
 }

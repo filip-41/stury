@@ -166,7 +166,7 @@ dense_run_tier :: #force_inline proc "contextless" (tier: kernel.Tier, out: [^]u
 write_dense :: proc(out: ^write.Out, src: []u8) {
 	tier := kernel.tier()
 	state: Dense_State
-	i := 3 if len(src) >= 3 && src[0] == 0xEF && src[1] == 0xBB && src[2] == 0xBF else 0
+	i := int(core.text_start(src, 0))
 	owed, gap := i, 0
 	for i < len(src) {
 		hi := min(i + DENSE_SEGMENT, len(src))

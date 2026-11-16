@@ -610,7 +610,7 @@ edit_read :: proc(r: ^Edit_Reader) -> (doc: ^core.Document, more: bool) {
 	append(&r.docs, doc)
 	full := rec.at + u64(len(rec.text))
 	end := full
-	for r.ins.framing == .Seq && end > rec.at && jq.is_space(r.ins.data[end - 1]) {
+	for r.ins.framing == .Seq && end > rec.at && kernel.is_ws(r.ins.data[end - 1]) {
 		end -= 1
 	}
 	append(&r.spans, Edit_Span{rec.at, end, full})
@@ -746,7 +746,7 @@ edit_marked :: proc(text: []u8) -> bool {
 		case line[0] == '%':
 			return true
 		case:
-			return bytes.has_prefix(line, transmute([]u8)string("---")) && (len(line) == 3 || jq.is_space(line[3]))
+			return bytes.has_prefix(line, transmute([]u8)string("---")) && (len(line) == 3 || kernel.is_ws(line[3]))
 		}
 		if nl < 0 {
 			break

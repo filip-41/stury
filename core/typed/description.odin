@@ -92,7 +92,14 @@ fill_node :: proc(b: ^Builder, d: ^rules.Description, at: int, at_node: rules.No
 		f.kind = .Maybe
 		node_list(b, d, block_key(typeid_of(Maybe(rules.Node)), i32(at_node), 0), at_node, &m, false)
 	case leaf == {.Object} && n.object >= 0 && (len(o.members) > 0 || o.additional == rules.NONE):
-		node_struct(b, d, block_key(typeid_of(rules.Object), n.object, 0), o, &f, &m)
+		key := block_key(typeid_of(rules.Object), n.object, 0)
+		if !known_struct(b, key, &f, &m) {
+			if first := struct_block(b, key, &f, &m, o.members, false); first >= 0 {
+				for x, i in o.members {
+					fill_node(b, d, int(first) + i, x.node, x.name)
+				}
+			}
+		}
 	case leaf == {.Object}:
 		f.kind = .Map
 		node_list(b, d, block_key(typeid_of(rules.Object), n.object, 0), o.additional, &m)
@@ -111,20 +118,6 @@ fill_node :: proc(b: ^Builder, d: ^rules.Description, at: int, at_node: rules.No
 		refuse_plan(b, .Unsupported)
 	}
 	b.fields[at], b.meta[at] = f, m
-}
-
-@(private)
-node_struct :: proc(b: ^Builder, d: ^rules.Description, key: Block_Key, o: rules.Object, f: ^Field, m: ^Meta) {
-	if known_struct(b, key, f, m) {
-		return
-	}
-	at := struct_block(b, key, f, m, o.members, false)
-	if at < 0 {
-		return
-	}
-	for x, i in o.members {
-		fill_node(b, d, int(at) + i, x.node, x.name)
-	}
 }
 
 // Fills record `at` as a check reads a use of node `use` named `name`, with `edge` the rules the use adds and `site` the
@@ -481,12 +474,9 @@ checked_leaf :: proc(b: ^Builder, n: ^rules.Node, edge: rules.Rules, arena: runt
 // `Never` record. Returns 1 past its first record, where the cursor of its first value stands.
 @(private)
 checked_block :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, key: Block_Key, prefix: []rules.Node_Index, rest: rules.Node_Index, site: []core.Step, word := "prefixItems") -> i32 {
-	if at, ok := b.blocks[key]; ok {
+	at, fresh := block_of(b, len(prefix) + 2, key)
+	if !fresh {
 		return at + 1
-	}
-	at := reserve_block(b, len(prefix) + 2, key)
-	if at < 0 {
-		return 0
 	}
 	never(b, int(at) + len(prefix) + 1)
 	for x, i in prefix {
@@ -501,12 +491,8 @@ checked_block :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocat
 @(private)
 node_list :: proc(b: ^Builder, d: ^rules.Description, key: Block_Key, elem: rules.Node_Index, m: ^Meta, null := true) {
 	m.list = true
-	if at, ok := b.blocks[key]; ok {
-		m.block = at
-		return
-	}
-	m.block = reserve_block(b, 2, key)
-	if m.block < 0 {
+	fresh: bool
+	if m.block, fresh = block_of(b, 2, key); !fresh {
 		return
 	}
 	never(b, int(m.block) + 1)
@@ -534,12 +520,11 @@ node_union :: proc(b: ^Builder, d: ^rules.Description, at_node: rules.Node_Index
 	}
 	m.arms, m.no_nil = made, count == len(all)
 	key := block_key(typeid_of(rules.Node), i32(at_node), 0)
-	at, known := b.blocks[key]
-	if !known {
-		at = reserve_block(b, count + 1, key)
-		if at < 0 {
-			return -1
-		}
+	at, fresh := block_of(b, count + 1, key)
+	if at < 0 {
+		return -1
+	}
+	if fresh {
 		never(b, int(at) + count)
 	}
 	k := 0
@@ -554,7 +539,7 @@ node_union :: proc(b: ^Builder, d: ^rules.Description, at_node: rules.Node_Index
 			}
 		}
 		made[k].tag, made[k].fields = u32(k), at + i32(k)
-		if !known {
+		if fresh {
 			fill_node(b, d, int(at) + k, arm, "")
 		}
 		k += 1
@@ -648,7 +633,7 @@ description_stamp :: proc(d: ^rules.Description, as: core.As, opts: Plan_Options
 // Mixes the operand `v` into `h` with a number's literal by its exact decimal, so two literals of one double differ.
 @(private)
 stamp_value :: proc(h: ^u64, v: core.Value) {
-	k := core.value_kind(v)
+	k := core.kind(v)
 	stamp_mix(h, u64(k))
 	#partial switch k {
 	case .Number:
@@ -665,8 +650,8 @@ stamp_value :: proc(h: ^u64, v: core.Value) {
 		stamp_text(h, x.tail)
 		stamp_text(h, x.wide)
 	case .Array:
-		it := core.value_children(v)
-		for x in core.value_child_next(&it) {
+		it := core.children(v)
+		for x in core.child_next(&it) {
 			stamp_value(h, x)
 		}
 	case .Object:

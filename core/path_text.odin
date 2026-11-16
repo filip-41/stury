@@ -3,8 +3,8 @@ package core
 
 import "base:intrinsics"
 import "base:runtime"
-import "core:unicode/utf8"
 import spell "./spell"
+import kernel "./kernel"
 
 // The readers of a path's text: jq path text and JSON Pointer.
 
@@ -132,7 +132,7 @@ path_of :: proc(p: ^Parser, allocator: runtime.Allocator, $POINTER: bool) -> (Pa
 }
 
 skip_spaces :: proc(p: ^Parser) {
-	for p.at < len(p.text) && (p.text[p.at] == ' ' || p.text[p.at] == '\t' || p.text[p.at] == '\n' || p.text[p.at] == '\r') {
+	for p.at < len(p.text) && kernel.is_ws(p.text[p.at]) {
 		p.at += 1
 	}
 }
@@ -327,9 +327,7 @@ decode_quoted :: proc(raw: string, out: []u8) -> int {
 			continue
 		}
 		r, n := spell.string_escape(raw_data(raw)[i:], len(raw) - i)
-		bytes, size := utf8.encode_rune(r)
-		copy(out[w:], bytes[:size])
-		w += size
+		w += spell.rune_text(out[w:], r)
 		i += n
 	}
 	return w

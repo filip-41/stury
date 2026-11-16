@@ -82,7 +82,7 @@ Node :: struct {
 // A pattern's tree with what the parser learns of it on the way.
 Pattern :: struct {
 	root:       ^Node, // under group 0 when a call names the whole pattern
-	names:      []string, // group n's name at n, "" for none; [0] is the whole match
+	names:      []string, // group n's name at n, "" for none. Index 0 is the whole match
 	groups:     []^Node, // group n's node at n, [0] only under a call of the whole pattern
 	referenced: []bool, // by group number: a backreference or condition reads it
 	callouts:   []^Callout, // those that keep data, each at its index
@@ -99,6 +99,15 @@ new_node :: proc(kind: Node_Kind, kids: ..^Node) -> ^Node {
 // A character a fold-insensitive comparison sees as only itself.
 literal :: proc(n: ^Node) -> bool {
 	return n.kind == .Str || n.kind == .Char && utf8.valid_rune(n.r) && (!n.fold || fold_next(n.r) == n.r)
+}
+
+// Returns the index past the run of `literal` nodes of `kids` that starts at `i`, `i` itself when `kids[i]` is not one.
+literal_run_end :: proc(kids: []^Node, i: int) -> int {
+	j := i
+	for j < len(kids) && literal(kids[j]) {
+		j += 1
+	}
+	return j
 }
 
 // The bytes of a `literal` node, a Char's written into `buf`.

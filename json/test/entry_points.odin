@@ -88,7 +88,7 @@ constant_forms :: proc(t: ^testing.T, $S: json.Spec) {
 	if testing.expect_value(t, len(answers), 1) {
 		list := json.edit_list_init(&doc, S)
 		defer core.edit_list_destroy(&list)
-		walktest.expect_nil(t, write.set(&list, answers[0].node, typed.Raw("7")))
+		walktest.expect_nil(t, write.set_node(&list, answers[0].node, typed.Raw("7")))
 		edited, _, cerr := compose.commit(&list)
 		defer delete(edited)
 		walktest.expect_nil(t, cerr)

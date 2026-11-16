@@ -4,6 +4,7 @@ package write
 // a visitor with the path to its value.
 
 import "base:intrinsics"
+import "core:slice"
 import core ".."
 import "../typed"
 
@@ -58,9 +59,7 @@ visit_path :: proc(v: ^Visitor, steps: ^[dynamic]core.Step) -> bool {
 			}
 		}
 	}
-	for i, j := first, len(steps) - 1; i < j; i, j = i + 1, j - 1 {
-		steps[i], steps[j] = steps[j], steps[i]
-	}
+	slice.reverse(steps[first:])
 	return true
 }
 

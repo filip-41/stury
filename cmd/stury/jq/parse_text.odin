@@ -4,6 +4,7 @@ package jq
 
 import "core:strings"
 import "../../../core/spell"
+import "../../../core/kernel"
 
 @(private = "file")
 must_be_text :: proc(ip: ^Interp, name: string, v: Value) -> (string, Signal) {
@@ -140,19 +141,19 @@ fn_parse_logfmt :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (
 	line := must_be_text(ip, name, v) or_return
 	out := new_object()
 	for i := 0; i < len(line); {
-		if is_space(line[i]) {
+		if kernel.is_ws(line[i]) {
 			i += 1
 			continue
 		}
 		start := i
-		for i < len(line) && !is_space(line[i]) && line[i] != '=' && line[i] != '"' {
+		for i < len(line) && !kernel.is_ws(line[i]) && line[i] != '=' && line[i] != '"' {
 			i += 1
 		}
 		key := line[start:i]
 		if key == "" {
 			return nil, fail(ip, "logfmt: unexpected %s at byte %d", line[i:i + 1], i)
 		}
-		if i >= len(line) || is_space(line[i]) {
+		if i >= len(line) || kernel.is_ws(line[i]) {
 			object_put(out, key, true)
 			continue
 		}
@@ -194,7 +195,7 @@ fn_parse_logfmt :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (
 			continue
 		}
 		start = i
-		for i < len(line) && !is_space(line[i]) {
+		for i < len(line) && !kernel.is_ws(line[i]) {
 			i += 1
 		}
 		object_put(out, key, line[start:i])

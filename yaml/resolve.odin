@@ -241,7 +241,7 @@ tag_fits :: proc(tag: string, v: core.Value) -> (string, bool) {
 	@(static, rodata)
 	kinds := [Core_Type]bit_set[core.Kind]{.None = ~{}, .Str = {.String}, .Int = {.Number}, .Float = {.Number}, .Bool = {.True, .False}, .Null = {.Null}}
 	handle, suffix := tag_parts(tag)
-	return tag, core.value_kind(v) in kinds[core_type(tag_head(handle), suffix)]
+	return tag, core.kind(v) in kinds[core_type(tag_head(handle), suffix)]
 }
 
 // The prefix the `%TAG` directive of `src`'s document gives `handle`. The directives are the lines starting with `%`

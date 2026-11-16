@@ -80,16 +80,9 @@ dfa_search :: proc(d: ^Dfa, s: string, start: int) -> (found: bool, judged: bool
 	if start > len(s) {
 		return false, true
 	}
-	before := EDGE
-	if start > 0 {
-		r, w := utf8.decode_last_rune_in_string(s[:start])
-		if w == 1 && s[start - 1] >= 0x80 || start < len(s) && s[start] & 0xC0 == 0x80 {
-			return false, false
-		}
-		before = int(d.classes[d.ascii[r] if r < 0x80 else rune_symbol(d, r)])
-		if start == len(s) && r == '\n' {
-			before = int(d.final)
-		}
+	before, ok := start_class(d, s, start)
+	if !ok {
+		return false, false
 	}
 	end := len(s) - 1 if len(s) > start && s[len(s) - 1] == '\n' else len(s)
 	st: u32
@@ -153,16 +146,9 @@ dfa_first :: proc(d: ^Dfa, s: string, start: int) -> (end, reach: int, judged: b
 	if start > len(s) {
 		return -1, start, true
 	}
-	before := EDGE
-	if start > 0 {
-		r, w := utf8.decode_last_rune_in_string(s[:start])
-		if w == 1 && s[start - 1] >= 0x80 || start < len(s) && s[start] & 0xC0 == 0x80 {
-			return -1, start, false
-		}
-		before = int(d.classes[d.ascii[r] if r < 0x80 else rune_symbol(d, r)])
-		if start == len(s) && r == '\n' {
-			before = int(d.final)
-		}
+	before, ok := start_class(d, s, start)
+	if !ok {
+		return -1, start, false
 	}
 	st := d.first_starts[before]
 	table := d.first
@@ -219,7 +205,7 @@ dfa_start :: proc(d: ^Dfa, s: string, from, end: int) -> (start: int, judged: bo
 		if w == 1 && s[end] >= 0x80 || s[end] & 0xC0 == 0x80 {
 			return -1, false
 		}
-		after = int(d.classes[d.ascii[r] if r < 0x80 else rune_symbol(d, r)])
+		after = int(d.classes[symbol_of(d, r)])
 		if end == len(s) - 1 && r == '\n' {
 			after = int(d.final)
 		}
@@ -238,7 +224,7 @@ dfa_start :: proc(d: ^Dfa, s: string, from, end: int) -> (start: int, judged: bo
 		if w == 1 && s[p - 1] >= 0x80 {
 			return -1, false
 		}
-		col := u32(d.ascii[r] if r < 0x80 else rune_symbol(d, r))
+		col := u32(symbol_of(d, r))
 		if p == len(s) && r == '\n' {
 			col = d.stride - 2
 		}
@@ -261,7 +247,7 @@ dfa_start :: proc(d: ^Dfa, s: string, from, end: int) -> (start: int, judged: bo
 skip_to_lead :: #force_inline proc(d: ^Dfa, s: string, i: int) -> int {
 	h := &d.head
 	if d.anchored {
-		lead := h.exact[0] == s[i] if h.kind == .Exact else h.kind == .None || h.set[s[i] >> 6] & (1 << (u64(s[i]) & 63)) != 0
+		lead := h.exact[0] == s[i] if h.kind == .Exact else h.kind == .None || has_bit(h.set[:], int(s[i]))
 		return i if lead else -1
 	}
 	#partial switch h.kind {
@@ -270,7 +256,7 @@ skip_to_lead :: #force_inline proc(d: ^Dfa, s: string, i: int) -> int {
 		return i + k if k >= 0 else -1
 	case .Map:
 		for j in i ..< len(s) {
-			if h.set[s[j] >> 6] & (1 << (u64(s[j]) & 63)) != 0 {
+			if has_bit(h.set[:], int(s[j])) {
 				return j
 			}
 		}
@@ -290,6 +276,28 @@ class_before :: #force_inline proc(d: ^Dfa, s: string, i: int) -> int {
 	}
 	r, _ := utf8.decode_last_rune_in_string(s[:i])
 	return int(d.classes[rune_symbol(d, r)])
+}
+
+// Returns the class of the character before byte `start` of `s`, EDGE at 0, and the final class for a newline that ends
+// `s`. `ok` is false when `start` is inside a character or the text before it is not valid UTF-8.
+@(private = "file")
+start_class :: proc(d: ^Dfa, s: string, start: int) -> (before: int, ok: bool) {
+	if start == 0 {
+		return EDGE, true
+	}
+	r, w := utf8.decode_last_rune_in_string(s[:start])
+	if w == 1 && s[start - 1] >= 0x80 || start < len(s) && s[start] & 0xC0 == 0x80 {
+		return 0, false
+	}
+	if start == len(s) && r == '\n' {
+		return int(d.final), true
+	}
+	return int(d.classes[symbol_of(d, r)]), true
+}
+
+@(private = "file")
+symbol_of :: #force_inline proc(d: ^Dfa, r: rune) -> u8 {
+	return d.ascii[r] if r < 0x80 else rune_symbol(d, r)
 }
 
 @(private = "file")

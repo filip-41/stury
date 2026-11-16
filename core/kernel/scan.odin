@@ -91,6 +91,11 @@ is_ws :: #force_inline proc "contextless" (c: u8) -> bool {
 	return c == ' ' || c == '\n' || c == '\r' || c == '\t'
 }
 
+// Whether `c` is white space to every markup format: space, tab, CR, LF or form feed.
+is_markup_ws :: #force_inline proc "contextless" (c: u8) -> bool {
+	return is_ws(c) || c == '\f'
+}
+
 // Returns the first byte at or past `p` that is no space, tab, CR or LF, or `end`. Reads up to four bytes one at a
 // time, then 64-byte blocks, then the remaining bytes one at a time. Inlined into the states that skip whitespace,
 // which would otherwise save registers for a call.

@@ -579,10 +579,7 @@ enum_name_store :: proc(info: ^runtime.Type_Info_Enum, name: string, dest: uintp
 
 // An integer into an enum of `size` bytes. One past `i64` is no member.
 store_enum_value :: proc(info: ^runtime.Type_Info_Enum, n: core.Number, dest: uintptr, size: u32) -> core.Typed_Error_Kind {
-	if n.kind != .Int {
-		return .Not_A_Member
-	}
-	if enum_member(info, i64(n.bits)) < 0 {
+	if n.kind != .Int || enum_member(info, i64(n.bits)) < 0 {
 		return .Not_A_Member
 	}
 	write_uint(dest, n.bits, size)
@@ -980,7 +977,7 @@ on_key :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs,
 	}
 	if t.spelling & core.SPELLING_DECODE != 0 {
 		if t.spelling == TEXT_KEY {
-			return find_member(h, regs, t, f, owner, TEXT_NAME)
+			return find_member(h, regs, t, f, owner, core.MARKUP_TEXT)
 		}
 		return key_decoded(h, regs, t, f, owner)
 	}
@@ -1361,26 +1358,19 @@ holds_set :: proc "contextless" (plan: ^Plan, f: ^Field) -> bool {
 missing_member :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, from: i32) -> i32 {
 	m := &h.plan.meta[owner.meta]
 	end := &h.plan.meta[int(m.block) + int(m.members)]
-	if f.seen != 0 {
-		if from == 0 {
-			mark_run(h, f, owner, (^Field)(uintptr(regs.b)))
-		}
-		if partial(h, f, owner) {
-			return -1
-		}
-		for at in end.required {
-			if at >= from && !seen_has(f, int(at)) {
-				return at
-			}
-		}
-		return -1
+	seen := f.seen != 0
+	if seen && from == 0 {
+		mark_run(h, f, owner, (^Field)(uintptr(regs.b)))
 	}
 	if partial(h, f, owner) {
 		return -1
 	}
-	done := max(from, i32((uintptr(regs.b) - uintptr(owner.first)) / size_of(Field)))
+	from := from
+	if !seen {
+		from = max(from, i32((uintptr(regs.b) - uintptr(owner.first)) / size_of(Field)))
+	}
 	for at in end.required {
-		if at >= done {
+		if at >= from && !(seen && seen_has(f, int(at))) {
 			return at
 		}
 	}

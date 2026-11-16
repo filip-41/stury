@@ -8,6 +8,7 @@ import "base:runtime"
 import "core:reflect"
 import "core:strings"
 import "../spell"
+import "../kernel"
 import core ".."
 import "../typed"
 
@@ -296,8 +297,7 @@ put_raw :: proc(w: ^Walker, s: string, top: int, $T: Tree) -> core.Typed_Error_K
 			return .Too_Deep
 		}
 	}
-	switch s[len(s) - 1] {
-	case ' ', '\t', '\n', '\r':
+	if kernel.is_ws(s[len(s) - 1]) {
 		return .Bad_Raw
 	}
 	view := core.Token_View{as = {readers = w.plan.readers, max_depth = u32(core.MAX_DEPTH - top)}}
@@ -343,6 +343,7 @@ number_text :: proc(p: [^]u8, n: core.Number) -> (size: int, kind: core.Typed_Er
 }
 
 // `number_text` for a float as the tree `T` spells it.
+@(private)
 number_text_as :: proc(p: [^]u8, n: core.Number, $T: Tree) -> (size: int, kind: core.Typed_Error_Kind) {
 	switch n.kind {
 	case .Int:

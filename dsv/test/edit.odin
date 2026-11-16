@@ -84,7 +84,7 @@ fact :: proc(node: core.Node_Index, role: core.Role, text: string) -> Op {
 apply :: proc(list: ^core.Edit_List, op: Op) -> core.Error {
 	switch op.kind {
 	case .Set:
-		return write.set(list, op.node, typed.Raw(op.a))
+		return write.set_node(list, op.node, typed.Raw(op.a))
 	case .Insert:
 		return write.insert(list, op.node, op.at, typed.Raw(op.a))
 	case .Add:
@@ -555,7 +555,7 @@ value_edit_refuses_a_cell_that_is_not_utf8 :: proc(t: ^testing.T) {
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	bad := [3]u8{'a', 0xff, 'b'}
-	walktest.expect_kind(t, write.set(&list, cell_node(&doc, 0, 0), transmute(string)bad[:]), core.Document_Error_Kind.Bad_Value)
+	walktest.expect_kind(t, write.set_node(&list, cell_node(&doc, 0, 0), transmute(string)bad[:]), core.Document_Error_Kind.Bad_Value)
 	out, _, err := compose.commit(&list, dsv.as(.Csv))
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, string(out), src)

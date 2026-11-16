@@ -93,9 +93,25 @@ compose_root_head :: proc(cx: ^Compose, open: u64) -> bool {
 	if new := new_fact(cx, core.ROOT, .Comment); new >= 0 {
 		at := core.text_start(doc.src, 0)
 		from := len(cx.text)
-		cx.in_line, cx.value_line = false, false
-		write_fact(cx, cx.list.edits[new], at, at) or_return
+		write_piece(cx, cx.list.edits[new], at, at) or_return
 		emit_chunk(cx, at, at, from, .Line_Head) or_return
 	}
 	return true
+}
+
+// Returns one past the line end at `pos`: LF, CR, or U+2028 or U+2029. Returns `pos` when no line end starts there.
+line_end_len :: proc(src: []u8, pos: u64) -> u64 {
+	if pos >= u64(len(src)) {
+		return pos
+	}
+	switch src[pos] {
+	case '\n':
+		return pos + 1
+	case '\r':
+		return pos + 2 if pos + 1 < u64(len(src)) && src[pos+1] == '\n' else pos + 1
+	}
+	if pos + 2 < u64(len(src)) && src[pos] == 0xE2 && src[pos+1] == 0x80 && src[pos+2] | 1 == 0xA9 {
+		return pos + 3
+	}
+	return pos
 }

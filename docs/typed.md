@@ -1,8 +1,7 @@
 # Typed reads
 
-A typed read fills an Odin value from a text during the walk, with no document between them. This file is the layer's
-contract: what a plan is, the entries, how fields and types read, who owns a string, what a refusal does, and what a
-format gives. `core/typed` holds everything format-neutral and names no format.
+A typed read fills an Odin value from a text during the walk, with no document between them. `core/typed` holds
+everything format-neutral and names no format.
 
 ## Vocabulary
 
@@ -40,8 +39,6 @@ typed.unmarshal :: proc {unmarshal_node, unmarshal_answer}
 unmarshal_node   :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
 unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
 ```
-
-See From a document below.
 
 ## The plan
 
@@ -210,6 +207,7 @@ Sink :: struct {
 	max_errors: int,  // 100 for 0
 	record:     i64,  // the record index an entry takes
 	truncated:  bool, // set past max_errors
+	fatal:      core.Typed_Refusal, // the fault that ended a read, kept whatever max_errors drops
 }
 ```
 
@@ -226,11 +224,11 @@ and the path of any depth with its names copied. It needs a plan of a format tha
 `typed.unmarshal` reads the value at a node, or the node a `.Found` answer names, with the plan and rules of a read of
 a text: the same fields, tags, refusals, `Typed_Error` and sinks, and the same value for the same text. An
 `Typed_Error`'s `at` is a byte of `doc.src`, whichever node was read. It is one call across formats. A format gives
-it nothing but the `Spelling` its document holds.
+it nothing but the handle `doc.as` its document holds.
 
-- The plan must be built for the type of `target` and the document's `Spelling`, else `.Plan_Mismatch`. A nil plan is
+- The plan must be built for the type of `target` and the document's format, else `.Plan_Mismatch`. A nil plan is
   one `typed.plan_make(T, doc.as)` builds and frees for the call.
-- `.Bad_Option` is a nil document, target or a document with no spelling, a node past the document or a key, an answer
+- `.Bad_Option` is a nil document, target or a document with no format, a node past the document or a key, an answer
   that is not `.Found`, and `.Refuse`. A document that holds no repeated key is built under `.Refuse`, and a repeat it
   kept reads by `Read_Options.dups`.
 - A path's answer is read first and its value second, so there is no typed read at a path.

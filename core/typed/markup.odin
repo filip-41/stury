@@ -28,10 +28,6 @@ Markup_Node :: rules.Markup_Node
 @(private)
 TEXT_KEY :: core.SPELLING_DECODE | 1 << 15
 
-// The name of an element's text when no member record binds it.
-@(private)
-TEXT_NAME :: core.MARKUP_TEXT
-
 // A markup element's children as `child_step` gives them to the check. The values a collection took are marked by their
 // place past `at`, in `small` and past it in `spill`.
 @(private)
@@ -311,8 +307,8 @@ collect :: proc(e: ^Element_Read($H), regs: core.Hook_Regs, k: core.Node_Index, 
 	}
 	reading := action == .Next
 	last := k + 1
-	it := core.doc_pairs(doc, e.at)
-	for key, v in core.doc_pair_next(&it) {
+	it := core.pairs(doc, e.at)
+	for key, v in core.pair_next(&it) {
 		if key < k || key > k && !h.plan.readers.key_equals(&h.view, doc.nodes[key], name) {
 			continue
 		}
@@ -341,8 +337,8 @@ collect :: proc(e: ^Element_Read($H), regs: core.Hook_Regs, k: core.Node_Index, 
 @(private)
 next_named :: proc(e: ^Element_Read($H), k: core.Node_Index, name: string) -> core.Node_Index {
 	h := &e.d.reader
-	it := core.doc_pairs(e.d.doc, e.at)
-	for key, v in core.doc_pair_next(&it) {
+	it := core.pairs(e.d.doc, e.at)
+	for key, v in core.pair_next(&it) {
 		if key > k && h.plan.readers.key_equals(&h.view, e.d.doc.nodes[key], name) {
 			return v
 		}
@@ -436,7 +432,7 @@ binds :: proc(h: ^Reader, key: core.Token, node: Markup_Node) -> bool {
 // binds it, else `#text`.
 @(private)
 member_text :: #force_inline proc "contextless" (h: ^Check, owner: ^Field, t: core.Token, buf: []u8) -> (string, bool) {
-	if t.spelling & core.SPELLING_DECODE == 0 || t.spelling != TEXT_KEY {
+	if t.spelling != TEXT_KEY {
 		return decoded_text(h, t, buf)
 	}
 	m := &h.plan.meta[owner.meta]
@@ -446,7 +442,7 @@ member_text :: #force_inline proc "contextless" (h: ^Check, owner: ^Field, t: co
 			return h.plan.meta[at[i].meta].name, true
 		}
 	}
-	return TEXT_NAME, true
+	return core.MARKUP_TEXT, true
 }
 
 // Whether the scalar element `t` holds no text: an empty element, or one a format reads as null.

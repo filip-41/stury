@@ -104,7 +104,7 @@ leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator, programs:
 	keys := make([dynamic]string, 0, len(operands), allocator)
 	held: Kinds
 	for v in operands {
-		k := core.value_kind(v)
+		k := core.kind(v)
 		if k == .Object || k == .Array {
 			return l, "const" if n.const_of != nil else "enum"
 		}
@@ -124,13 +124,13 @@ leaf_of :: proc(n: ^Node, edge: Rules, allocator := context.allocator, programs:
 // Whether the operand `c` is one of `operands` by the enum index's key, false for a container, which no index holds.
 @(private)
 operand_in :: proc(c: core.Value, operands: []core.Value, allocator: runtime.Allocator) -> bool {
-	k := core.value_kind(c)
+	k := core.kind(c)
 	if k == .Object || k == .Array {
 		return false
 	}
 	want := operand_key(c, k, allocator)
 	for v in operands {
-		if core.value_kind(v) == k && operand_key(v, k, allocator) == want {
+		if core.kind(v) == k && operand_key(v, k, allocator) == want {
 			return true
 		}
 	}
@@ -369,8 +369,10 @@ judge_number :: proc(l: ^Leaf, text: string, small: Maybe(i64)) -> (fails: Failu
 	if order := bound_order(l.maximum, v, is_small, d); l.maximum.set && (order > 0 || order == 0 && l.maximum.exclusive) {
 		fails += {.Above_Maximum}
 	}
-	if m, has := l.multiple_of.?; has && !multiple(d, m) {
-		fails += {.Not_Multiple}
+	if m, has := l.multiple_of.?; has {
+		if whole, _ := spell.decimal_multiple_of(d, m); !whole {
+			fails += {.Not_Multiple}
+		}
 	}
 	return
 }
@@ -385,13 +387,6 @@ bound_order :: proc(b: Bound, small: i64, is_small: bool, d: spell.Decimal) -> i
 		return -1 if small < b.int else (1 if small > b.int else 0)
 	}
 	return spell.decimal_compare(d, b.exact)
-}
-
-// Whether `x` is a whole multiple of `m`, a divisor `rules_leaf` took.
-@(private)
-multiple :: proc(x, m: spell.Decimal) -> bool {
-	whole, _ := spell.decimal_multiple_of(x, m)
-	return whole
 }
 
 // Writes the key a scalar of kind `kind` has in an enum index: a letter for its kind, then a string's decoded `text`

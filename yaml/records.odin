@@ -2,6 +2,7 @@ package yaml
 
 import "base:runtime"
 import "core:bytes"
+import kernel "../core/kernel"
 import core "../core"
 import engine "../core/build"
 import "../core/records"
@@ -216,7 +217,7 @@ told :: proc "contextless" (src: []u8, held: ^Held) -> bool {
 	}
 	n := u64(len(src))
 	at := max(p.pos, p.fail >> 16)
-	for at < n && (src[at] == ' ' || src[at] == '\t' || src[at] == '\n' || src[at] == '\r') {
+	for at < n && kernel.is_ws(src[at]) {
 		at += 1
 	}
 	return at + core.FAULT_REACH < n

@@ -41,6 +41,7 @@ Answer_Iter :: struct {
 	stack_room: [core.MAX_DEPTH]u8,
 }
 
+@(private)
 Answer_State :: enum u8 {
 	Fresh,
 	Walking,
@@ -129,11 +130,6 @@ answers_whole :: proc "contextless" ($build: proc(src: []u8, as: core.As, refuse
 	return proc(it: ^Answer_Iter) {
 		it.buffer = make([dynamic]core.Token_Answer, 0, it.max_batch, it.allocator)
 		doc, built := build(it.src, it.as, it.read.dups == .Refuse, it.allocator)
-		if built.kind != .None && it.read.dups == .Refuse {
-			core.destroy(&doc)
-			answers_fail(it, core.error_of(built))
-			return
-		}
 		_, err := scan_built(&doc, built, it.paths if it.paths != nil else ([^]core.Path)(&it.one)[:1], it.read, &it.buffer, proc(state: rawptr, a: core.Token_Answer) -> bool {
 			_, e := append((^[dynamic]core.Token_Answer)(state), a)
 			return e == nil

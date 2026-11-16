@@ -8,6 +8,7 @@ import "core:testing"
 import core "../../core"
 import compose "../../core/compose"
 import typed "../../core/typed"
+import write "../../core/write"
 import cbor ".."
 import walktest "../../walktest"
 
@@ -217,10 +218,10 @@ values_from_the_document :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
 	testing.expect_value(t, edited("82 41 01 d8 20 7f 61 61 ff", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return core.set_value(l, element(d, core.ROOT, 0), core.Node_Ref{d, element(d, core.ROOT, 1)})
+		return write.set_node(l, element(d, core.ROOT, 0), core.Node_Ref{d, element(d, core.ROOT, 1)})
 	}), "82 7f 61 61 ff d8 20 7f 61 61 ff")
 	testing.expect_value(t, edited("81 41 01", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return core.set_value(l, element(d, core.ROOT, 0), f64(1))
+		return write.set_node(l, element(d, core.ROOT, 0), f64(1))
 	}), "81 01")
 	doc, _ := cbor.build(hex("d8 20 7f 61 61 ff"), .Cbor)
 	out, _, err := cbor.write(&doc, .Cbor)

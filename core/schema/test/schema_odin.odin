@@ -35,6 +35,14 @@ refused_keyword :: proc(t: ^testing.T, text: string) -> (keyword: string, steps:
 	return e.want.text, e.steps
 }
 
+// Expects each of `wants` in `source`.
+@(private = "file")
+expect_contains :: proc(t: ^testing.T, source: string, wants: []string, loc := #caller_location) {
+	for want in wants {
+		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source, loc = loc)
+	}
+}
+
 @(test)
 odin_struct_members :: proc(t: ^testing.T) {
 	source, err := odin_of(t, `{"title": "Person", "type": "object", "required": ["full name"], "additionalProperties": false,
@@ -42,7 +50,7 @@ odin_struct_members :: proc(t: ^testing.T) {
 		"tags": {"type": "array", "items": {"type": "string", "maxLength": 8}}, "boss": {"$ref": "#"},
 		"born": {"type": "string", "format": "date-time"}, "note": {"type": ["string", "null"]}}}`, "people")
 	testing.expectf(t, err == nil, "%v", err)
-	for want in ([]string{
+	expect_contains(t, source, {
 		"package people\n",
 		"Person :: struct {\n",
 		"\tfull_name: string `json:\"full name\" model:\"len>=1\"`,\n",
@@ -55,9 +63,7 @@ odin_struct_members :: proc(t: ^testing.T) {
 		"Person_Tags_Item :: distinct string\n",
 		"\tmodel.register_type(reg, {Person_Tags_Item, \"len<=8\"}) or_return\n",
 		"\tmodel.register_extra(reg, Person, .Forbid) or_return\n",
-	}) {
-		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
-	}
+	})
 }
 
 @(test)
@@ -66,7 +72,7 @@ odin_enums_unions_and_defs :: proc(t: ^testing.T) {
 		"id": {"anyOf": [{"type": "string", "format": "uuid"}, {"type": "integer"}]}, "at": {"$ref": "#/$defs/Point"}},
 		"$defs": {"Point": {"type": "object", "properties": {"x": {"type": "number"}}}}}`, format_assert = true)
 	testing.expectf(t, err == nil, "%v", err)
-	for want in ([]string{
+	expect_contains(t, source, {
 		"Root :: struct {\n",
 		"Root_Kind :: enum {\n\tRead_Only,\n\tAdmin,\n\tEmpty,\n}\n",
 		"Root_Level :: enum i64 {\n\tV1 = 1,\n\tVM2 = -2,\n}\n",
@@ -75,9 +81,7 @@ odin_enums_unions_and_defs :: proc(t: ^testing.T) {
 		"\tat: Maybe(Point) `json:\",omitempty\" model:\"optional,not_null\"`,\n",
 		"[]model.Enum_Rename{{\"Read_Only\", \"read-only\"}, {\"Admin\", \"admin\"}, {\"Empty\", \"\"}}",
 		"model.register_enum(reg, {Root_Level, true, nil})",
-	}) {
-		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
-	}
+	})
 }
 
 @(test)
@@ -85,15 +89,13 @@ odin_names_are_unique_identifiers :: proc(t: ^testing.T) {
 	source, err := odin_of(t, `{"type": "object", "properties": {"a-b": {"type": "string"}, "a_b": {"type": "string"},
 		"proc": {"type": "string"}, "1st": {"type": "string"}, "-": {"type": "string"}}}`)
 	testing.expectf(t, err == nil, "%v", err)
-	for want in ([]string{
+	expect_contains(t, source, {
 		"\ta_b: Maybe(string) `json:\"a-b,omitempty\" model:\"optional,not_null\"`,\n",
 		"\ta_b_2: Maybe(string) `json:\"a_b,omitempty\" model:\"optional,not_null\"`,\n",
 		"\tproc_: Maybe(string) `json:\"proc,omitempty\" model:\"optional,not_null\"`,\n",
 		"\t_1st: Maybe(string) `json:\"1st,omitempty\" model:\"optional,not_null\"`,\n",
 		"\tmember: Maybe(string) `json:\"\\-,omitempty\" model:\"optional,not_null\"`,\n",
-	}) {
-		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
-	}
+	})
 }
 
 @(test)
@@ -145,7 +147,7 @@ odin_null_tuples_merges_and_other_members :: proc(t: ^testing.T) {
 		"e": {"enum": [1, "a", null]}, "when": {"type": "string", "format": "date-time"}}, "additionalProperties": {"type": "string"},
 		"required": ["b"]}`)
 	testing.expectf(t, err == nil, "%v", err)
-	for want in ([]string{
+	expect_contains(t, source, {
 		"\textra: Maybe(i64) `json:\",omitempty\" model:\"optional,not_null\"`,\n",
 		"\tn: Null `json:\",omitunset\" model:\"optional\"`,\n",
 		"\tpair: Maybe([2]core.Number_Text) `json:\",omitempty\" model:\"optional,not_null\"`,\n",
@@ -154,9 +156,7 @@ odin_null_tuples_merges_and_other_members :: proc(t: ^testing.T) {
 		"\textra_2: map[string]string `json:\",unknown\"`,\n",
 		"Null :: union {}\n",
 		"Root_E :: union {Root_E_String, Root_E_Integer}\n",
-	}) {
-		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
-	}
+	})
 	source, err = odin_of(t, `{"type": "object", "properties": {"a": {"type": "integer"}}, "allOf": [{"properties": {"b": {"type": "boolean"}}, "required": ["b"]}]}`)
 	testing.expectf(t, err == nil, "%v", err)
 	testing.expectf(t, strings.contains(source, "\ta: Maybe(i64) `json:\",omitempty\" model:\"optional,not_null\"`,\n\tb: bool,\n"), "%s", source)
@@ -173,7 +173,7 @@ odin_applicators_are_registered_as_fragments_on_a_named_type :: proc(t: ^testing
 		"patternProperties": {"^x-": {"type": "integer"}}, "propertyNames": {"maxLength": 4}, "dependentRequired": {"a": ["b"]},
 		"if": {"required": ["a"]}, "then": {"required": ["c"]}}`)
 	testing.expectf(t, err == nil, "%v", err)
-	for want in ([]string{
+	expect_contains(t, source, {
 		"Root :: struct {\n",
 		"\ttags: Maybe(Root_Tags) `json:\",omitempty\" model:\"optional,not_null,unique\"`,\n",
 		"\textra: map[string]core.Value `json:\",unknown\"`,\n",
@@ -184,9 +184,7 @@ odin_applicators_are_registered_as_fragments_on_a_named_type :: proc(t: ^testing
 		`"if":{"required":["a"]},"then":{"required":["c"]},"patternProperties":{"^x-":{"type":"integer"}},"propertyNames":{"maxLength":4},"dependentRequired":{"a":["b"]}`,
 		"register_fragment :: proc(reg: ^model.Registry, T: typeid, text: string) -> core.Error {\n",
 		"\tmodel.register_schema(reg, T, s.description) or_return\n",
-	}) {
-		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
-	}
+	})
 }
 
 @(test)
@@ -208,9 +206,7 @@ odin_spells_a_judged_value_as_it_reads :: proc(t: ^testing.T) {
 	}) {
 		source, err := odin_of(t, c.text)
 		testing.expectf(t, err == nil, "%s: %v", c.text, err)
-		for want in c.wants {
-			testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
-		}
+		expect_contains(t, source, c.wants)
 	}
 }
 
@@ -235,9 +231,7 @@ odin_keeps_the_text_of_a_number_a_double_may_not_hold :: proc(t: ^testing.T) {
 	source, err := odin_of(t, `{"type": "object", "required": ["a", "b", "l"], "properties": {"a": {"type": "number"},
 		"b": {"type": "number", "minimum": 0, "maximum": 1}, "l": {"type": "array", "items": {"type": "number"}}}}`)
 	testing.expectf(t, err == nil, "%v", err)
-	for want in ([]string{"\ta: core.Number_Text `model:\"not_null\"`,\n", "\tb: f64 `model:\">=0,<=1\"`,\n", "\tl: []core.Number_Text,\n"}) {
-		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
-	}
+	expect_contains(t, source, {"\ta: core.Number_Text `model:\"not_null\"`,\n", "\tb: f64 `model:\">=0,<=1\"`,\n", "\tl: []core.Number_Text,\n"})
 }
 
 @(test)
@@ -246,15 +240,13 @@ odin_registers_a_members_default :: proc(t: ^testing.T) {
 		"n": {"type": "integer", "default": 3}, "x": {"type": "number", "default": 1.5E2}, "on": {"type": "boolean", "default": true},
 		"z": {"type": ["string", "null"], "default": null}}}`)
 	testing.expectf(t, err == nil, "%v", err)
-	for want in ([]string{
+	expect_contains(t, source, {
 		"register :: proc(reg: ^model.Registry) -> core.Error {\n",
 		"\tmodel.register_default(reg, Root, \"name\", string(`a\"b`)) or_return\n",
 		"\tmodel.register_default(reg, Root, \"n\", i64(3)) or_return\n",
 		"\tmodel.register_default(reg, Root, \"x\", core.Number_Text{\"1.5e2\", core.text_f64(\"1.5e2\")}) or_return\n",
 		"\tmodel.register_default(reg, Root, \"on\", bool(true)) or_return\n",
-	}) {
-		testing.expectf(t, strings.contains(source, want), "no %q in\n%s", want, source)
-	}
+	})
 	testing.expectf(t, !strings.contains(source, `"z"`), "%s", source)
 }
 

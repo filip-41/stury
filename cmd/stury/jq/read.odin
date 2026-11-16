@@ -19,11 +19,6 @@ Parse_Status :: enum u8 {
 	Error,
 }
 
-// JSON's whitespace.
-is_space :: #force_inline proc "contextless" (c: u8) -> bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
-}
-
 // `src` as one text's document, or the fault that it is not one.
 build_text :: proc(src: []byte, r: core_pkg.As, allocator := context.allocator) -> (doc: core_pkg.Document, fault: Maybe(core_pkg.Fault)) {
 	return judge_build(core_pkg.build(src, r, allocator = allocator))

@@ -35,7 +35,7 @@ SERVICES := [Spec]core.Services {
 handle_services :: proc "contextless" ($S: Spec) -> core.Services {
 	return {
 		build    = edit_of(S).build,
-		validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, S, options_of(as))},
+		validate = edit_of(S).validate,
 		scan     = proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
 			return scan_spec(src, S, as, paths, read, state, on, allocator)
 		},
@@ -441,17 +441,8 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 	if !options_of(doc.as).infer {
 		return .String
 	}
-	lo, hi := n.lo, n.lo + u64(n.n)
-	switch string(doc.src[lo:hi]) {
-	case "true":
-		return .True
-	case "false":
-		return .False
-	}
-	if _, is_number := spell.number_strict(doc.src, lo, hi); is_number {
-		return .Number
-	}
-	return .String
+	kind, _ := core.plain_kind(doc.src, n.lo, n.lo + u64(n.n), true, true)
+	return kind
 }
 
 // Checks that an edit's text is a record of at least one cell, with its record at the text's start and its last cell

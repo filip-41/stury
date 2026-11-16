@@ -74,7 +74,22 @@ tokens_init :: proc(t: ^cw.Tokens, $S: Spec, opts := Options{}, write := core.Wr
 	return cw.tokens_init(t, bound_as(S, opts), write, allocator, stream, &TOKENS)
 }
 
+// Writes `v` as spec `S`, as `write.write_value` does with `as(spec, opts)`.
+write_value :: proc(v: core.Value, $S: Spec, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> (text: []u8, err: core.Error) {
+	return cw.write_value(v, as(S, opts), write, allocator)
+}
+
 // Starts a writer of records, as `records.writer_init` does with `as(spec, opts)`.
 writer_init :: proc(wr: ^records.Writer, w: io.Stream, $S: Spec, opts := Options{}, framing := core.Framing.Lines, write := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error_Kind {
 	return records.writer_init(wr, w, bound_as(S, opts), framing, write, allocator, &TOKENS)
+}
+
+// Writes `list` as records, each by `plan`, as `records.marshal` does with `as(spec, opts)`.
+records_marshal :: proc(list: []$E, plan: ^typed.Plan, $S: Spec, opts := Options{}, framing := core.Framing.Lines, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
+	return records.marshal(list, plan, as(S, opts), framing, write, allocator)
+}
+
+// Writes `list` as records to `w`, as `records.marshal_stream` does with `as(spec, opts)`.
+records_marshal_stream :: proc(w: io.Stream, list: []$E, plan: ^typed.Plan, $S: Spec, opts := Options{}, framing := core.Framing.Lines, write := core.Write_Options{}) -> core.Error {
+	return records.marshal_stream(w, list, plan, as(S, opts), framing, write)
 }

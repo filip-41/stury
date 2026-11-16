@@ -70,7 +70,7 @@ a_document_of_either_form_is_written_and_edited :: proc(t: ^testing.T) {
 	lists := [?]core.Edit_List{core.edit_list_init(&chosen, context.temp_allocator), toml.edit_list_init(&chosen, spec, context.temp_allocator), toml.edit_list_init(&bound, .Toml_1_0, context.temp_allocator)}
 	for &list in lists {
 		a, _ := core.member(list.doc, core.ROOT, "a")
-		walktest.expect_nil(t, write.set(&list, a, 2))
+		walktest.expect_nil(t, write.set_node(&list, a, 2))
 		out, _, cerr := compose.commit(&list, allocator = context.temp_allocator)
 		walktest.expect_nil(t, cerr)
 		testing.expect_value(t, string(out), "a = 2\n\n[t]\nk = [1, 2, 3]\ns = \"x\"\n")
@@ -86,7 +86,7 @@ an_edit_spells_a_built_value :: proc(t: ^testing.T) {
 	list := toml.edit_list_init(&doc, .Toml_1_1)
 	table, _ := core.member(&doc, core.ROOT, "t")
 	s, _ := core.member(&doc, table, "s")
-	walktest.expect_nil(t, write.set(&list, s, "a\"b"))
+	walktest.expect_nil(t, write.set_node(&list, s, "a\"b"))
 	walktest.expect_nil(t, write.insert(&list, table, 2, "f", 2.5))
 	walktest.expect_nil(t, write.insert(&list, table, 2, "on", true))
 	point := core.new_object()
@@ -101,7 +101,7 @@ an_edit_spells_a_built_value :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(out), "a = 1\n\n[t]\nk = [1, 2, 3]\ns = \"a\\\"b\"\nf = 2.5\non = true\n\n[t.p]\nx = 1.5\ntags = []\n\n[b]\n\"y z\" = \"q\"\n")
 
 	// Null has no TOML spelling.
-	walktest.expect_kind(t, core.set_value(&list, s, nil), core.Typed_Error_Kind.Unwritable)
+	walktest.expect_kind(t, write.set_node(&list, s, core.Value(nil)), core.Typed_Error_Kind.Unwritable)
 }
 
 @(test)
@@ -140,7 +140,7 @@ an_edit_moves_a_node_of_the_document :: proc(t: ^testing.T) {
 	a, _ := core.member(&doc, core.ROOT, "a")
 	k, _ := core.member(&doc, table, "k")
 	walktest.expect_nil(t, write.insert(&list, items, 0, core.Node_Ref{&doc, table}))
-	walktest.expect_nil(t, write.set(&list, a, core.Node_Ref{&doc, k}))
+	walktest.expect_nil(t, write.set_node(&list, a, core.Node_Ref{&doc, k}))
 	out, _, err := compose.commit(&list, allocator = context.temp_allocator)
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, string(out), "a = [1, 2]\nlist = [{ k = [1, 2], u = { v = 'w' } }]\n\n[t]\nk = [1, 2]\n\n[t.u]\nv = 'w'\n")
@@ -200,7 +200,7 @@ a_built_value_is_written_as_a_document :: proc(t: ^testing.T) {
 	table := core.new_object()
 	core.object_put(table, "s", "x")
 	core.object_put(root, "t", table)
-	text, err := write.write_value(root, toml.as(.Toml_1_0))
+	text, err := toml.write_value(root, .Toml_1_0)
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, string(text), "n = 1.5\n\n[t]\ns = \"x\"\n")
 }

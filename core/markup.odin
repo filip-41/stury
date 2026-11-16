@@ -1,5 +1,6 @@
 package core
 
+import "core:hash"
 import "core:slice"
 import spell "./spell"
 
@@ -24,6 +25,7 @@ attribute_spelling :: #force_inline proc "contextless" (lead: int, quoted: bool)
 
 // What the untyped text `text` is: an empty text is a null, and any other a string, or with `infer` a boolean for
 // `true` and `false` and a number for a text that is exactly a JSON number.
+@(private)
 markup_kind :: proc(text: []u8, infer: bool) -> Kind {
 	if len(text) == 0 {
 		return .Null
@@ -47,11 +49,7 @@ markup_resolve :: proc(doc: ^Document, i: Node_Index) -> Kind {
 		return markup_kind(node_text(doc.src, n), infer)
 	}
 	stack: [256]u8
-	buf := stack[:]
-	if size := text_room(doc, i); size > len(stack) {
-		buf = make([]u8, size, context.temp_allocator)
-	}
-	decoded, _ := doc.readers.text(&doc.view, n, buf)
+	decoded, _ := markup_decode(&doc.view, n, stack[:])
 	return markup_kind(transmute([]u8)decoded, infer)
 }
 
@@ -65,11 +63,7 @@ markup_number :: proc(v: ^Token_View, t: Token) -> (Number, bool) {
 		return spell.number_strict(v.src, t.lo, t.lo + u64(t.n))
 	}
 	stack: [128]u8
-	buf := stack[:]
-	if room := view_room(v.readers, v, t); room > len(stack) {
-		buf = make([]u8, room, context.temp_allocator)
-	}
-	decoded, ok := v.readers.text(v, t, buf)
+	decoded, ok := markup_decode(v, t, stack[:])
 	if !ok {
 		return {}, false
 	}
@@ -83,15 +77,22 @@ markup_number_text :: proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, o
 	if t.spelling & SPELLING_DECODE == 0 {
 		return string(v.src[t.lo:t.lo + u64(t.n)]), true
 	}
-	room := view_room(v.readers, v, t)
-	if room <= len(buf) {
-		return v.readers.text(v, t, buf)
-	}
-	decoded := v.readers.text(v, t, make([]u8, room, context.temp_allocator)) or_return
+	decoded := markup_decode(v, t, buf) or_return
 	if len(decoded) > len(buf) {
 		return "", false
 	}
 	return string(buf[:copy(buf, decoded)]), true
+}
+
+// The text of token `t` decoded through the format's `text`, in `buf`, or in the temp allocator when the decode may need
+// more room than `buf` holds.
+@(private)
+markup_decode :: proc(v: ^Token_View, t: Token, buf: []u8) -> (string, bool) {
+	buf := buf
+	if room := view_room(v.readers, v, t); room > len(buf) {
+		buf = make([]u8, room, context.temp_allocator)
+	}
+	return v.readers.text(v, t, buf)
 }
 
 // The facts every markup format reads from the document's shape for node `i`, the value of an element: `Name`, the key
@@ -190,6 +191,74 @@ markup_put :: proc(o: ^Object, k: string, v: Value) {
 	group := new_array(2)
 	append(&group.items, o.vals[i], v)
 	o.vals[i] = group
+}
+
+// Whether object node `r` has a key that one before it has.
+has_repeated_key :: proc(r: Node_Ref) -> bool {
+	n := doc_length(r.doc, r.node)
+	if n < 2 || header_of(r.doc) != 0 && r.doc.tables_at[0].unique_keys {
+		return false
+	}
+	it := doc_pairs(r.doc, r.node)
+	if n <= KEY_TABLE / 2 {
+		return repeats_in_table(&it)
+	}
+	seen := make(map[string]bool, n, context.temp_allocator)
+	for k in next_key(&it) {
+		if k in seen {
+			return true
+		}
+		seen[k] = true
+	}
+	return false
+}
+
+// The number of names of object node `r`, a repeated one once. Kept out of the length readers, whose frames would
+// otherwise cost every call.
+distinct_keys :: #force_no_inline proc(r: Node_Ref) -> int {
+	seen := make(map[string]bool, doc_length(r.doc, r.node), context.temp_allocator)
+	it := doc_pairs(r.doc, r.node)
+	for k in next_key(&it) {
+		seen[k] = true
+	}
+	return len(seen)
+}
+
+// The keys of a document object in source order, a repeated one each time.
+@(private = "file")
+next_key :: #force_inline proc(it: ^Pair_Iter) -> (string, bool) {
+	k, _, ok := doc_pair_next(it)
+	if !ok {
+		return "", false
+	}
+	return node_string(it.doc, k), true
+}
+
+// Slots of `repeats_in_table`'s open-addressed table, kept at most half full.
+@(private = "file")
+KEY_TABLE :: 256
+
+// `has_repeated_key` for an object of up to KEY_TABLE / 2 members, hashed on the stack, not in a map.
+@(private = "file")
+repeats_in_table :: proc(it: ^Pair_Iter) -> bool {
+	slots: [KEY_TABLE]u8 // a key's place in `keys`, plus one, 0 is empty
+	keys: [KEY_TABLE / 2]string = ---
+	i := 0
+	for k in next_key(it) {
+		h := hash.fnv32a(transmute([]byte)k)
+		for s := h % KEY_TABLE;; s = (s + 1) % KEY_TABLE {
+			if slots[s] == 0 {
+				keys[i] = k
+				i += 1
+				slots[s] = u8(i)
+				break
+			}
+			if keys[slots[s] - 1] == k {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // A document of node `r` of a markup document, its root, read as its value reads it: each name of an element once, a

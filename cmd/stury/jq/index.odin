@@ -254,7 +254,7 @@ slice_source :: proc(t: Value) -> (s: string, decoded: bool) {
 				slice_scratch = make([dynamic]byte, runtime.heap_allocator())
 			}
 			resize(&slice_scratch, room)
-			if text, ok := core_pkg.doc_text(r.doc, r.node, slice_scratch[:]); ok {
+			if text, ok := core_pkg.text(r.doc, r.node, slice_scratch[:]); ok {
 				return text, true
 			}
 		}

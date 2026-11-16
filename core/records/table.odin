@@ -16,12 +16,14 @@ import "core:strings"
 import core ".."
 import cw "../write"
 
+@(private)
 Table_Shape :: enum u8 {
 	Unset,
 	Objects,
 	Rows,
 }
 
+@(private)
 Table :: struct {
 	shape:   Table_Shape,
 	header:  [dynamic]string,
@@ -33,6 +35,7 @@ Table :: struct {
 	store:   runtime.Arena, // what the lists above hold
 }
 
+@(private)
 Held_Row :: struct {
 	row:   int,
 	keys:  []string,
@@ -174,18 +177,12 @@ table_end :: proc(wr: ^Writer) -> core.Typed_Error_Kind {
 	if len(t.foot) > 0 {
 		kind = write_notes(wr, t.foot[:])
 	}
-	table_reset(wr)
-	return kind
-}
-
-@(private)
-table_reset :: proc(wr: ^Writer) {
-	t := &wr.table
 	runtime.arena_free_all(&t.store)
 	clear(&t.header)
 	clear(&t.held)
 	clear(&t.foot)
 	t.shape, t.rows = .Unset, 0
+	return kind
 }
 
 @(private)
@@ -250,7 +247,6 @@ put_row :: proc(wr: ^Writer, cells: []cw.Scalar, notes: []string, headed: bool) 
 	wr.cells = nil
 	kind := core.Typed_Error_Kind.None
 	if headed {
-		t.mark = t.out.flushed + t.out.cursor
 		if kind = t.spell.names(t, wr.table.header[:]); kind != .None {
 			wr.err = {kind = kind}
 			wr.cells = make([]cw.Scalar, len(wr.table.header), context.temp_allocator)
@@ -345,7 +341,7 @@ write_rows :: proc(wr: ^Writer, v: core.Value) -> core.Typed_Error_Kind {
 	// A row's cells, and the list's comment lines before the first row, live in `row` until the next row.
 	row := runtime.Arena{backing_allocator = wr.allocator}
 	defer runtime.arena_destroy(&row)
-	if core.value_kind(v) != .Array {
+	if core.kind(v) != .Array {
 		return value_row(wr, v, &row)
 	}
 	context.allocator = runtime.arena_allocator(&row)
@@ -354,8 +350,8 @@ write_rows :: proc(wr: ^Writer, v: core.Value) -> core.Typed_Error_Kind {
 	value_notes(wr, v, .Comment_Foot, &foot) or_return
 	write_notes(wr, head[:]) or_return
 	hold_notes(wr, foot[:]) or_return
-	it := core.value_children(v)
-	for rec in core.value_child_next(&it) {
+	it := core.children(v)
+	for rec in core.child_next(&it) {
 		value_row(wr, rec, &row) or_return
 		if wr.taken != nil {
 			wr.taken(wr.taker, writer_take(wr))
@@ -370,10 +366,10 @@ value_row :: proc(wr: ^Writer, v: core.Value, scratch: ^runtime.Arena) -> core.T
 	context.allocator = runtime.arena_allocator(scratch)
 	lines, keys, cells := make([dynamic]string), make([dynamic]string), make([dynamic]cw.Scalar)
 	value_notes(wr, v, .Comment, &lines) or_return
-	#partial switch core.value_kind(v) {
+	#partial switch core.kind(v) {
 	case .Object:
-		it := core.value_pairs(v)
-		for name, member in core.value_pair_next(&it) {
+		it := core.pairs(v)
+		for name, member in core.pair_next(&it) {
 			cell, kind := value_cell(member)
 			if kind != .None {
 				return cell_fault(wr, kind, core.Name(name))
@@ -391,8 +387,8 @@ value_row :: proc(wr: ^Writer, v: core.Value, scratch: ^runtime.Arena) -> core.T
 		}
 		return write_object(wr, keys[:], cells[:], lines[:])
 	case .Array:
-		it := core.value_children(v)
-		for member in core.value_child_next(&it) {
+		it := core.children(v)
+		for member in core.child_next(&it) {
 			put_cell(wr, &cells, member, core.Index(len(cells))) or_return
 		}
 	case:

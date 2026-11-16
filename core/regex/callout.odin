@@ -44,7 +44,7 @@ parse_callout :: proc(p: ^Parser) -> ^Node {
 	}
 	name := p.src[start:p.i]
 	tag := ""
-	if peek(p) == '[' && !at_end(p) {
+	if peek(p) == '[' {
 		p.i += 1
 		start = p.i
 		for !at_end(p) && peek(p) != ']' {
@@ -61,7 +61,7 @@ parse_callout :: proc(p: ^Parser) -> ^Node {
 		p.i += 1
 	}
 	args: [dynamic]string
-	if peek(p) == '{' && !at_end(p) {
+	if peek(p) == '{' {
 		p.i += 1
 		start = p.i
 		from := p.i

@@ -179,28 +179,24 @@ carry_entries :: proc(h: ^Check, regs: core.Hook_Regs, sub: ^Sink, lo, hi: u64) 
 		return refuse(h, regs, {kind = kind if kind != .None else .Wrong_Kind, at = lo}, hi)
 	}
 	member := member_steps(h, regs)
-	if h.first.kind == .None {
-		x := sub.entries[0]
-		text, _ := x.operand.(string)
+	for x, k in sub.entries {
 		full := make([dynamic]core.Step, context.temp_allocator)
 		append(&full, ..member)
 		append(&full, ..x.path)
-		h.first = refusal_at(x.kind, full[:], text, lo)
-	}
-	if h.sink == nil {
-		return regs, .Stop
-	}
-	for x in sub.entries {
+		text, named := x.operand.(string)
+		if k == 0 && h.first.kind == .None {
+			h.first = refusal_at(x.kind, full[:], text, lo)
+		}
+		if h.sink == nil {
+			return regs, .Stop
+		}
 		if !sink_room(h.sink, context.allocator) {
 			break
 		}
 		entry := core.Error_Entry{kind = x.kind, start = lo, end = max(hi, lo), record = h.sink.record}
-		if text, named := x.operand.(string); named {
+		if named {
 			entry.operand = strings.clone(text, h.sink.entries.allocator)
 		}
-		full := make([dynamic]core.Step, context.temp_allocator)
-		append(&full, ..member)
-		append(&full, ..x.path)
 		if !sink_entry(h.sink, entry, full[:], nil, false) {
 			h.sink.truncated = true
 			break

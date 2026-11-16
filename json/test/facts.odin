@@ -278,7 +278,7 @@ fact_rows :: proc(t: ^testing.T, rows: []Fact_Row) {
 			case .Remove_Fact:
 				e = core.remove_fact(&list, op.node, op.role)
 			case .Set:
-				e = write.set(&list, op.node, typed.Raw(op.text))
+				e = write.set_node(&list, op.node, typed.Raw(op.text))
 			case .Insert:
 				e = write.insert(&list, op.node, op.at, typed.Raw(op.text))
 			case .Remove:
@@ -417,9 +417,9 @@ fact_bound_document_to_another_spec :: proc(t: ^testing.T) {
 	defer json.destroy(&bound_list)
 	chosen_list := core.edit_list_init(&chosen)
 	defer core.edit_list_destroy(&chosen_list)
-	out, dropped, cerr := json.commit(&bound_list, json.as(.Json))
+	out, dropped, cerr := json.commit(&bound_list, .Json)
 	defer delete(out)
-	want, want_dropped, want_err := json.commit(&chosen_list, json.as(.Json))
+	want, want_dropped, want_err := json.commit(&chosen_list, .Json)
 	defer delete(want)
 	testing.expectf(t, cerr == nil && want_err == nil && dropped == 1 && want_dropped == 1 && string(out) == string(want), "committed %q, %d dropped: %v, a handle's %q, %d dropped: %v", out, dropped, cerr, want, want_dropped, want_err)
 }

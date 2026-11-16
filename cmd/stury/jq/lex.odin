@@ -7,6 +7,7 @@ import "core:math"
 import "core:strings"
 import "core:unicode/utf8"
 import "../../../core/spell"
+import "../../../core/kernel"
 import core_pkg "../../../core"
 import "../message"
 
@@ -20,7 +21,7 @@ lex :: proc(p: ^Parser) -> (Sym, Sem, Loc) {
 		start := p.pos
 		switch s[start] {
 		case ' ', '\t', '\n', '\r':
-			for p.pos < len(s) && is_space(s[p.pos]) {
+			for p.pos < len(s) && kernel.is_ws(s[p.pos]) {
 				p.pos += 1
 			}
 			p.last = {start, p.pos}
@@ -89,7 +90,7 @@ fact_accessor :: proc(rest: string) -> (name: string, known: bool) {
 		return "", true
 	}
 	_, known = fact_named(name[1:])
-	for end < len(rest) && is_space(rest[end]) {
+	for end < len(rest) && kernel.is_ws(rest[end]) {
 		end += 1
 	}
 	if end < len(rest) && rest[end] == '"' {

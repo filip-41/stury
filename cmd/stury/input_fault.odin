@@ -7,6 +7,7 @@ package main
 import "base:runtime"
 import "core:bytes"
 import "core:strings"
+import kernel "../../core/kernel"
 import core "../../core"
 import records "../../core/records"
 import json "../../json"
@@ -202,7 +203,7 @@ fault_note :: proc(name: string, data: []byte, f: core.Fault, spec: Maybe(json.S
 		hint = "--from jsonc reads comments"
 	case data[at] == ']' || data[at] == '}':
 		before := at
-		for before > 0 && jq.is_space(data[before - 1]) {
+		for before > 0 && kernel.is_ws(data[before - 1]) {
 			before -= 1
 		}
 		if before > 0 && data[before - 1] == ',' {

@@ -109,8 +109,8 @@ check_written :: proc(b: ^Bound, text: []u8, as: core.As, rows: bool, sink: ^typ
 	if fault, faulted := built.(core.Fault); faulted && fault.kind != .Duplicate_Key {
 		return built
 	}
-	it := core.value_children(core.Node_Ref{&doc, core.ROOT})
-	for row in core.value_child_next(&it) {
+	it := core.children(core.Node_Ref{&doc, core.ROOT})
+	for row in core.child_next(&it) {
 		if failed := check_node(b, &doc, row.(core.Node_Ref).node, sink); err == nil {
 			err = failed
 		}
@@ -172,7 +172,7 @@ build :: proc(m: ^Model, v: core.Value) -> core.Value {
 	}
 	attributes := core.attributes_of(ref.doc, ref.node)
 	members := attribute_members(m, ref, &attributes)
-	kind := core.value_kind(v)
+	kind := core.kind(v)
 	switch {
 	case kind == .Array:
 		if members != nil {
@@ -180,9 +180,9 @@ build :: proc(m: ^Model, v: core.Value) -> core.Value {
 			return v
 		}
 		items := core.new_array()
-		it := core.value_children(v)
+		it := core.children(v)
 		for i := 0; ; i += 1 {
-			child, more := core.value_child_next(&it)
+			child, more := core.child_next(&it)
 			if !more {
 				break
 			}
@@ -304,8 +304,8 @@ attribute_members :: proc(m: ^Model, ref: core.Node_Ref, attributes: ^core.Attri
 // place of its first, as the node's pairs read it, and none may share a name with an attribute.
 @(private = "file")
 object :: proc(m: ^Model, v: core.Value, members: ^core.Object, markup: bool) -> core.Value {
-	it := core.value_pairs(v)
-	for key, child in core.value_pair_next(&it) {
+	it := core.pairs(v)
+	for key, child in core.pair_next(&it) {
 		append(&m.steps, core.Name(key))
 		if markup && core.object_slot(members, key) >= 0 {
 			refuse(m, .Unwritable)

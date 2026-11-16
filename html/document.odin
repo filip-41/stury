@@ -322,15 +322,7 @@ close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 		return u64(len(doc.src))
 	}
 	ends, _, _ := state_tables(doc.state)
-	lo, hi := 0, len(ends)
-	for lo < hi {
-		mid := (lo + hi) / 2
-		if ends[mid].node < u32(i) {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
+	lo := core.lower_node(ends, u32(i))
 	if lo < len(ends) && ends[lo].node == u32(i) {
 		return ends[lo].end
 	}

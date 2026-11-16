@@ -44,7 +44,7 @@ edited :: proc(src: string, plan: Plan) -> (out: string, err: core.Error) {
 @(test)
 set_replaces_a_value_and_keeps_the_rest :: proc(t: ^testing.T) {
 	out, err := edited("# top\na = 1 # note\nb = \"x\"\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, member(d, core.ROOT, "a"), typed.Raw("22"))
+		return write.set_node(l, member(d, core.ROOT, "a"), typed.Raw("22"))
 	})
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "# top\na = 22 # note\nb = \"x\"\n")
@@ -61,7 +61,7 @@ set_through_a_path :: proc(t: ^testing.T) {
 @(test)
 set_refuses_a_table :: proc(t: ^testing.T) {
 	_, err := edited("[t]\nk = 1\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, member(d, core.ROOT, "t"), typed.Raw("1"))
+		return write.set_node(l, member(d, core.ROOT, "t"), typed.Raw("1"))
 	})
 	walktest.expect_kind(t, err, core.Document_Error_Kind.Frozen)
 }
@@ -69,7 +69,7 @@ set_refuses_a_table :: proc(t: ^testing.T) {
 @(test)
 set_refuses_a_result_that_is_not_one_value :: proc(t: ^testing.T) {
 	_, err := edited("a = 1\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, member(d, core.ROOT, "a"), typed.Raw("1\nb = 2"))
+		return write.set_node(l, member(d, core.ROOT, "a"), typed.Raw("1\nb = 2"))
 	})
 	walktest.expect_kind(t, err, core.Document_Error_Kind.Bad_Value)
 }
@@ -155,7 +155,7 @@ rename_a_key :: proc(t: ^testing.T) {
 	out, err := edited("a = 1 # n\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
 		it := core.pairs(d, core.ROOT)
 		key, _, _ := core.pair_next(&it)
-		return write.set(l, key, typed.Raw("a b"))
+		return write.set_node(l, key, typed.Raw("a b"))
 	})
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "\"a b\" = 1 # n\n")
@@ -198,10 +198,10 @@ tag_facts_and_reorders_are_refused :: proc(t: ^testing.T) {
 two_edits_of_one_node_conflict :: proc(t: ^testing.T) {
 	_, err := edited("a = 1\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
 		a := member(d, core.ROOT, "a")
-		if e := write.set(l, a, typed.Raw("2")); e != nil {
+		if e := write.set_node(l, a, typed.Raw("2")); e != nil {
 			return e
 		}
-		return write.set(l, a, typed.Raw("3"))
+		return write.set_node(l, a, typed.Raw("3"))
 	})
 	walktest.expect_kind(t, err, core.Document_Error_Kind.Conflicting_Edits)
 }

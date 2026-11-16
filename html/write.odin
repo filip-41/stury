@@ -45,6 +45,16 @@ write :: proc(doc: ^core.Document, $S: Spec, write := core.Write_Options{}, node
 	return core.write(doc, write, as(S), node, allocator)
 }
 
+// Reads `src` as spec `S` and writes it back as `write` says, as `core.format` does with `as(spec, opts)`.
+format :: proc(src: []u8, $S: Spec, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
+	return core.format(src, as(S, opts), write, allocator)
+}
+
+// Writes node `node` of `doc` as spec `S` to `w`, as `core.write_stream` does with `as(spec)`.
+write_stream :: proc(w: io.Stream, doc: ^core.Document, $S: Spec, write := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (dropped: int, err: core.Error) {
+	return core.write_stream(w, doc, write, as(S), node, allocator)
+}
+
 @(private = "file")
 NO_TREE :: "an HTML text is a tree of elements, so its root is an object"
 
@@ -81,7 +91,7 @@ value_write :: proc(root: core.Value, as: core.As, opts: core.Write_Options, str
 // Writes a built value as `value_write` does, for `marshal` and the token write.
 @(private)
 built_write :: proc(v: core.Value, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
-	if core.value_kind(v) != .Object {
+	if core.kind(v) != .Object {
 		return nil, {kind = .Unwritable, detail = {want = {text = NO_TREE}}}
 	}
 	text, _, err := value_write(v, bound_as(.Document), opts, stream, allocator)
@@ -154,10 +164,10 @@ read_back :: proc(text: []u8, document: bool, as: core.As, compact: core.Write_O
 // Whether object `root` is a document: it has one member, `html`, which is no array.
 @(private)
 is_document :: proc(root: core.Value) -> bool {
-	it := core.value_pairs(root)
-	key, value, ok := core.value_pair_next(&it)
-	_, _, more := core.value_pair_next(&it)
-	return ok && !more && key == "html" && core.value_kind(value) != .Array
+	it := core.pairs(root)
+	key, value, ok := core.pair_next(&it)
+	_, _, more := core.pair_next(&it)
+	return ok && !more && key == "html" && core.kind(value) != .Array
 }
 
 @(private)
@@ -203,13 +213,13 @@ put_members :: proc(w: ^Writer, v: core.Value, depth: int, in_foreign: bool, kee
 			put_member(w, core.node_string(r.doc, key), core.Node_Ref{r.doc, child}, depth, in_foreign, laid) or_return
 		}
 	} else {
-		it := core.value_pairs(v)
-		for key in core.value_pair_next(&it) {
+		it := core.pairs(v)
+		for key in core.pair_next(&it) {
 			laid &&= key != core.MARKUP_TEXT
 			n += 1
 		}
-		it = core.value_pairs(v)
-		for key, child in core.value_pair_next(&it) {
+		it = core.pairs(v)
+		for key, child in core.pair_next(&it) {
 			put_member(w, key, child, depth, in_foreign, laid) or_return
 		}
 	}
@@ -220,15 +230,15 @@ put_members :: proc(w: ^Writer, v: core.Value, depth: int, in_foreign: bool, kee
 
 @(private)
 put_member :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign, laid: bool) -> core.Typed_Error_Kind {
-	if core.value_kind(v) != .Array {
+	if core.kind(v) != .Array {
 		return put_node(w, name, v, depth, in_foreign, laid)
 	}
 	// The run's comments read back as those of its first and last elements.
-	n := core.value_length(v)
-	items := core.value_children(v)
+	n := core.length(v)
+	items := core.children(v)
 	for i := 0; ; i += 1 {
-		item := core.value_child_next(&items) or_break
-		if core.value_kind(item) == .Array {
+		item := core.child_next(&items) or_break
+		if core.kind(item) == .Array {
 			return .Unwritable
 		}
 		put_node(w, name, item, depth, in_foreign, laid, v if i == 0 else nil, v if i == n - 1 else nil) or_return
@@ -240,9 +250,9 @@ put_member :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_forei
 // since an empty array is no element to hold them.
 @(private)
 put_empty_runs :: proc(w: ^Writer, v: core.Value, depth: int, laid: bool) -> core.Typed_Error_Kind {
-	it := core.value_pairs(v)
-	for _, child in core.value_pair_next(&it) {
-		if core.value_kind(child) != .Array || core.value_length(child) > 0 {
+	it := core.pairs(v)
+	for _, child in core.pair_next(&it) {
+		if core.kind(child) != .Array || core.length(child) > 0 {
 			continue
 		}
 		_, commented := child.(^core.Commented)
@@ -295,7 +305,7 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 	void := !in_foreign && is_void(name)
 	x := core.plain(v)
 	closing := false
-	#partial switch core.value_kind(x) {
+	#partial switch core.kind(x) {
 	case .Object:
 		if void {
 			return .Unwritable

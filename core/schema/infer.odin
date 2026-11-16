@@ -107,6 +107,7 @@ infer :: proc(inf: ^Inferred, v: core.Value) -> runtime.Allocator_Error {
 }
 
 // Joins the summary `src`, taken after everything `dst` holds, into `dst`. `src` keeps its own memory.
+@(private)
 merge :: proc(dst, src: ^Inferred) -> runtime.Allocator_Error {
 	if src.failed {
 		return .Out_Of_Memory
@@ -254,7 +255,7 @@ node_text :: proc(ref: core.Node_Ref, buf: []u8) -> (s: string, spill: []u8) {
 	if room := core.text_room(ref.doc, ref.node); room > len(buf) {
 		spill = make([]u8, room, runtime.heap_allocator())
 	}
-	s, _ = core.doc_text(ref.doc, ref.node, spill if spill != nil else buf)
+	s, _ = core.text(ref.doc, ref.node, spill if spill != nil else buf)
 	return
 }
 
@@ -301,7 +302,7 @@ object :: proc(inf: ^Inferred, p: ^Summary, v: core.Value, ref: core.Node_Ref) {
 		key: string
 		value: core.Value
 		if r, is_node := v.(core.Node_Ref); is_node {
-			k, n, more := core.doc_pair_next(&it.pairs)
+			k, n, more := core.pair_next(&it.pairs)
 			if !more {
 				break
 			}

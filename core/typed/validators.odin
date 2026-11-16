@@ -1,6 +1,5 @@
 package typed
 
-import "base:runtime"
 import "core:mem"
 import "core:strings"
 import core ".."
@@ -134,20 +133,6 @@ failed_under :: proc(entries: []core.Error_Entry, path: []core.Step, name: strin
 	return false
 }
 
-// The steps of a verdict's path under the struct at `path`: its member, then the member of that value `fail_at` named.
-@(private)
-verdict_path :: proc(path: []core.Step, v: Verdict, allocator: runtime.Allocator) -> []core.Step {
-	steps := make([dynamic]core.Step, 0, len(path) + 2, allocator)
-	append(&steps, ..path)
-	if v.member != "" {
-		append(&steps, core.Name(v.member))
-	}
-	if v.failure.field != "" {
-		append(&steps, core.Name(v.failure.field))
-	}
-	return steps[:]
-}
-
 // The refusal of `kind` at byte `at` whose path is `steps`, outermost first, and whose wanted text is `message`.
 @(private)
 refusal_at :: proc(kind: core.Typed_Error_Kind, steps: []core.Step, message: string, at: u64) -> core.Typed_Refusal {
@@ -161,12 +146,20 @@ refusal_at :: proc(kind: core.Typed_Error_Kind, steps: []core.Step, message: str
 }
 
 // Reports `v`, found at the close of a struct at `path`, as a `.Custom` refusal at byte `at`: to `first`, when it holds
-// none, and to `sink` as an entry. Returns whether the sink takes more.
+// none, and to `sink` as an entry. Its path is the struct's, its member, then the member of that value `fail_at` named.
+// Returns whether the sink takes more.
 @(private)
 report_verdict :: proc(first: ^core.Typed_Refusal, sink: ^Sink, path: []core.Step, v: Verdict, at: u64) -> bool {
-	steps := verdict_path(path, v, context.temp_allocator)
+	steps := make([dynamic]core.Step, 0, len(path) + 2, context.temp_allocator)
+	append(&steps, ..path)
+	if v.member != "" {
+		append(&steps, core.Name(v.member))
+	}
+	if v.failure.field != "" {
+		append(&steps, core.Name(v.failure.field))
+	}
 	if first.kind == .None {
-		first^ = refusal_at(.Custom, steps, v.failure.message, at)
+		first^ = refusal_at(.Custom, steps[:], v.failure.message, at)
 	}
 	if sink == nil || !sink_room(sink, context.allocator) {
 		return false
@@ -176,7 +169,7 @@ report_verdict :: proc(first: ^core.Typed_Refusal, sink: ^Sink, path: []core.Ste
 	if v.failure.message != "" {
 		entry.operand = strings.clone(v.failure.message)
 	}
-	if !sink_entry(sink, entry, steps, nil, false) {
+	if !sink_entry(sink, entry, steps[:], nil, false) {
 		sink.truncated = true
 		return false
 	}

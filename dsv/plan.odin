@@ -370,8 +370,7 @@ plan_fill :: proc(p: ^Edit_Plan, line, slot: int, text: []u8) -> bool {
 	if slot >= 0 && p.dropped[slot] {
 		return plan_refuse(p, {kind = .Conflicting_Edits, at = core.node_start(p.doc.nodes[p.lines[line].node])})
 	}
-	_, ok := compose.push(&p.fills, Fill{line = line, slot = slot, text = text})
-	return ok
+	return compose.push(&p.fills, Fill{line = line, slot = slot, text = text})
 }
 
 // Writes each line's edits, walking the row of all columns.

@@ -261,18 +261,14 @@ emit :: proc(c: ^Compiler, n: ^Node) {
 		}
 		for r in rune(0) ..< 0x80 {
 			if class_match_slow(cls, r) {
-				cls.ascii[r >> 6] |= 1 << (u64(r) & 63)
+				add_bit(cls.ascii[:], int(r))
 			}
 		}
 		append(&c.classes, cls)
 		add(c, .Class, len(c.classes) - 1)
 	case .Cat:
 		for i := 0; i < len(n.kids); {
-			j := i
-			for j < len(n.kids) && literal(n.kids[j]) {
-				j += 1
-			}
-			if j > i {
+			if j := literal_run_end(n.kids[:], i); j > i {
 				emit_str(c, n.kids[i:j])
 				i = j
 			} else {
@@ -474,9 +470,7 @@ emit_repeat :: proc(c: ^Compiler, n: ^Node) {
 				return
 			}
 			if i == 0 && n.min > 1 && c.ecma && (len(c.insts) - at.insts) * n.min > ECMA_WRITTEN_OUT {
-				take_back(c, at)
-				append(&c.looped, n)
-				emit_counter_loop(c, x, n.min, n.min, true, -1)
+				spill_to_counter_loop(c, at, n, n.min, n.min, true, -1)
 				break
 			}
 		}
@@ -521,9 +515,7 @@ emit_counted :: proc(c: ^Compiler, n: ^Node) {
 		// Under ECMA a repeat written out past ECMA_WRITTEN_OUT runs as a counter loop instead, whose single body
 		// applies the empty-iteration rule by its count.
 		if i == 1 && c.ecma && (len(c.insts) - start) * n.max > ECMA_WRITTEN_OUT {
-			take_back(c, at)
-			append(&c.looped, n)
-			emit_counter_loop(c, x, n.min, n.max, n.greedy, mark)
+			spill_to_counter_loop(c, at, n, n.min, n.max, n.greedy, mark)
 			return
 		}
 		// Calls enter groups again and reuse the slots, so this counter loop is used only in a pattern without calls.
@@ -633,6 +625,14 @@ take_back :: proc(c: ^Compiler, at: Emitted) {
 	resize(&c.refs, at.refs)
 	resize(&c.loops, at.loops)
 	resize(&c.counters, at.counters)
+}
+
+// Drops what was emitted since `at` and emits the repeat `n` as a counter loop, which `looped` records.
+@(private = "file")
+spill_to_counter_loop :: proc(c: ^Compiler, at: Emitted, n: ^Node, least, most: int, greedy: bool, mark: int) {
+	take_back(c, at)
+	append(&c.looped, n)
+	emit_counter_loop(c, n.kids[0], least, most, greedy, mark)
 }
 
 // Emits an ECMA repeat of `x` from `least` to `most` times as one body in a loop whose count is kept in a slot of its

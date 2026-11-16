@@ -3,6 +3,7 @@ package compose
 import "base:runtime"
 import "core:slice"
 import "core:strings"
+import "../kernel"
 import core ".."
 
 // The edits of a markup format, which commits them itself: an element is no value between separators, since its name
@@ -105,12 +106,6 @@ markup_key_text :: proc(_: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bo
 	return failed == nil
 }
 
-// Whether `c` is white space to every markup format.
-@(private)
-markup_space :: #force_inline proc "contextless" (c: u8) -> bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
-}
-
 // Whether value `v` is a text run, the value of a member `#text`, whose key is the node before it.
 @(private = "file")
 is_run :: proc(doc: ^core.Document, v: core.Node_Index) -> bool {
@@ -127,7 +122,7 @@ extent :: proc(cx: ^Cx, v: core.Node_Index) -> (lead, lo, hi: u64) {
 	}
 	e := cx.m.element(cx.doc, v)
 	lead = e.lo
-	for lead > 0 && markup_space(cx.src[lead - 1]) {
+	for lead > 0 && kernel.is_markup_ws(cx.src[lead - 1]) {
 		lead -= 1
 	}
 	if lead == 0 || cx.src[lead - 1] != '>' {
@@ -259,9 +254,9 @@ drop_layout :: proc(cx: ^Cx, lo, hi: u64) {
 	src := cx.src[:hi]
 	for i := lo; i < hi; {
 		switch {
-		case markup_space(src[i]):
+		case kernel.is_markup_ws(src[i]):
 			j := i
-			for j < hi && markup_space(src[j]) {
+			for j < hi && kernel.is_markup_ws(src[j]) {
 				j += 1
 			}
 			add(cx, i, j, "")
@@ -446,7 +441,7 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 			continue
 		}
 		lo := f.lo
-		for lo > 0 && markup_space(cx.src[lo - 1]) && (f.role == .Attribute || !first) {
+		for lo > 0 && kernel.is_markup_ws(cx.src[lo - 1]) && (f.role == .Attribute || !first) {
 			lo -= 1
 		}
 		add(cx, lo, f.lo + u64(f.n), string(b[:]) if first else "")

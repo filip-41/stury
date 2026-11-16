@@ -1,7 +1,7 @@
 package write
 
 // The edits that take an Odin value: a scalar or a string as it is, a `typed.Raw` as the text of a value, and a struct, a
-// slice or a map by the plan the caller gives. The format spells it, as `core.set_value` does for a built value.
+// slice or a map by the plan the caller gives. The format spells it.
 
 import "base:intrinsics"
 import "base:runtime"
@@ -14,29 +14,12 @@ import "../typed"
 @(private)
 Scratch :: runtime.Arena
 
-@(private)
-scratch_destroy :: proc(s: ^Scratch) {
-	runtime.arena_destroy(s)
-}
-
-// What an edit of `v` writes. A `typed.Raw` is the text of a value, a `core.Value` is spelled as it is, and an Odin
-// scalar or string is the value it holds. Any other type is built by `plan`, which a format made for the type with its
-// reads, and is `.Plan_Mismatch` without one. What the input holds lasts until `scratch` is destroyed.
-@(private)
-edit_input :: proc(v: $T, plan: ^typed.Plan, scratch: ^Scratch) -> (in_: core.Edit_Input, err: core.Error) {
-	when T == typed.Raw {
-		return {text = string(v), raw = true}, nil
-	} else {
-		return edit_input_of(v, plan, scratch)
-	}
-}
-
 // Makes `v` the value at every answer of `path` over the document `build_doc` reads from `src` as `as`, through the
 // edits `edit` names, and returns the new text, which the caller frees with `allocator`. `v` is taken as `edit_input`
 // takes it, before the text is read.
 set_with :: proc(src: []u8, as: core.As, $build_doc: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), edit: ^core.Edit_Services, path: core.Path, v: any, plan: ^typed.Plan, read: core.Query_Options, allocator: runtime.Allocator) -> (out: []u8, err: core.Error) {
 	scratch: Scratch
-	defer scratch_destroy(&scratch)
+	defer runtime.arena_destroy(&scratch)
 	in_ := edit_input(v, plan, &scratch) or_return
 	doc, berr := build_doc(src, as, read.dups == .Refuse, allocator)
 	return set_built(&doc, berr, edit, path, in_, read, allocator)
@@ -55,8 +38,11 @@ set_built :: proc(doc: ^core.Document, berr: core.Document_Error, edit: ^core.Ed
 	return engine.set_answers(&list, path, in_, read, allocator)
 }
 
-@(private = "file")
-edit_input_of :: proc(v: any, plan: ^typed.Plan, scratch: ^Scratch) -> (in_: core.Edit_Input, err: core.Error) {
+// What an edit of `v` writes. A `typed.Raw` is the text of a value, a `core.Value` is spelled as it is, and an Odin
+// scalar or string is the value it holds. Any other type is built by `plan`, which a format made for the type with its
+// reads, and is `.Plan_Mismatch` without one. What the input holds lasts until `scratch` is destroyed.
+@(private)
+edit_input :: proc(v: any, plan: ^typed.Plan, scratch: ^Scratch) -> (in_: core.Edit_Input, err: core.Error) {
 	if raw, is_raw := v.(typed.Raw); is_raw {
 		return {text = string(raw), raw = true}, nil
 	}
@@ -137,13 +123,14 @@ digits :: proc(n: $T, allocator: runtime.Allocator) -> core.Value {
 	return core.number_text(text, allocator)
 }
 
-// Makes `v` the value of node `node`, as `core.set_value` does for a built value.
-set :: proc(list: ^core.Edit_List, node: core.Node_Index, v: $T, plan: ^typed.Plan = nil) -> core.Error {
+// Makes `v` the value of node `node`, spelled as the document's format spells it. A key node takes a text. A fact
+// node or a flat text's container returns `.Bad_Index`, and a cell the format has no spelling for `.Bad_Value`.
+set_node :: proc(list: ^core.Edit_List, node: core.Node_Index, v: $T, plan: ^typed.Plan = nil) -> core.Error {
 	when T == typed.Raw {
 		return core.set_text(list, node, string(v))
 	} else {
 		scratch: Scratch
-		defer scratch_destroy(&scratch)
+		defer runtime.arena_destroy(&scratch)
 		in_ := edit_input(v, plan, &scratch) or_return
 		return core.set_input(list, node, in_)
 	}
@@ -155,19 +142,20 @@ set_member :: proc(list: ^core.Edit_List, obj: core.Node_Index, name: string, v:
 		return core.set_member_input(list, obj, name, {text = string(v), raw = true}, dups)
 	} else {
 		scratch: Scratch
-		defer scratch_destroy(&scratch)
+		defer runtime.arena_destroy(&scratch)
 		in_ := edit_input(v, plan, &scratch) or_return
 		return core.set_member_input(list, obj, name, in_, dups)
 	}
 }
 
-// Inserts `v` into the array `container` before its element `at`, or after its last when `at` is its length.
+// Inserts `v` into the array `container` before its element `at`, or after its last when `at` is its length. In a
+// flat text's root `v` is a record: an array or an object of cells.
 insert_element :: proc(list: ^core.Edit_List, container: core.Node_Index, at: int, v: $T, plan: ^typed.Plan = nil) -> core.Error {
 	when T == typed.Raw {
 		return core.insert_input(list, container, at, "", false, {text = string(v), raw = true})
 	} else {
 		scratch: Scratch
-		defer scratch_destroy(&scratch)
+		defer runtime.arena_destroy(&scratch)
 		in_ := edit_input(v, plan, &scratch) or_return
 		return core.insert_input(list, container, at, "", false, in_)
 	}
@@ -180,7 +168,7 @@ insert_member :: proc(list: ^core.Edit_List, container: core.Node_Index, at: int
 		return core.insert_input(list, container, at, key, true, {text = string(v), raw = true})
 	} else {
 		scratch: Scratch
-		defer scratch_destroy(&scratch)
+		defer runtime.arena_destroy(&scratch)
 		in_ := edit_input(v, plan, &scratch) or_return
 		return core.insert_input(list, container, at, key, true, in_)
 	}

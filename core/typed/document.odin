@@ -22,11 +22,13 @@ import build "../build"
 // `.Refuse`.
 unmarshal :: proc {unmarshal_node, unmarshal_answer, unmarshal_value}
 
+@(private)
 unmarshal_node :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error {
 	return core.error_of(read_document(doc, node, typeid_of(T), target, plan, read, allocator, false))
 }
 
 // Reads the value a path found. An answer that is not `.Found` holds no value, and is `.Bad_Option`.
+@(private)
 unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error {
 	if answer.outcome != .Found {
 		return core.error_of(core.Typed_Refusal{kind = .Bad_Option})
@@ -38,6 +40,7 @@ unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, 
 // fills an integer field when it holds that integer exactly, and a `Number_Text` by its digits. A node is read from its
 // document. A nil plan, and one whose format writes no built value, is `.Bad_Option`, and a plan with no text read
 // `.Plan_Mismatch`.
+@(private)
 unmarshal_value :: proc(v: core.Value, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error {
 	if r, is_node := core.plain(v).(core.Node_Ref); is_node {
 		return core.error_of(read_document(r.doc, r.node, typeid_of(T), target, plan, read, allocator, false))
@@ -110,25 +113,35 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 // a markup document's elements read as their records read them (see markup.odin). A format whose keys the reader
 // compares as text, or whose attribute keys have no frame, sets it as its plans' `node_read`.
 read_nodes :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
-	if !nodes_readable(doc, node, plan) {
-		return {kind = .Bad_Option}
-	}
 	return feed_document(doc, node, T, target, plan, read, allocator, false)
 }
 
 // `read_nodes` as a check, with every refusal in `read.sink.entries`, which such a format sets as its `node_check`, since
 // no other check of the document reads its tokens.
 check_nodes :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
-	if !nodes_readable(doc, node, plan) {
-		return {kind = .Bad_Option}
-	}
 	return feed_document(doc, node, T, target, plan, read, allocator, true)
 }
 
-// Whether `node` of `doc` is a value that a plan can be fed from.
+// The refusal of a read of the document `doc` that a format's build made with `built`, `.Walk` for a fault in the text.
+// A read with none reads the repeats `read.dups` keeps, `.Refuse` as `.Last`, since the build held none.
 @(private)
-nodes_readable :: proc "contextless" (doc: ^core.Document, node: core.Node_Index, plan: ^Plan) -> bool {
-	return doc != nil && doc.readers != nil && plan != nil && int(node) < len(doc.nodes) && doc.nodes[node].role != .Key
+built_refusal :: proc(doc: ^core.Document, built: core.Document_Error, read: ^Read_Options) -> core.Typed_Refusal {
+	#partial switch built.kind {
+	case .None:
+	case .No_Memory:
+		return {kind = .No_Memory}
+	case .Duplicate_Key:
+		return {kind = .Duplicate_Key, at = built.at}
+	case:
+		return {kind = .Walk, at = built.at, inner = built.inner}
+	}
+	if doc.clash != 0 && read.dups != .First && read.dups != .All {
+		return {kind = .Duplicate_Key, at = doc.clash}
+	}
+	if read.dups == .Refuse {
+		read.dups = .Last
+	}
+	return {}
 }
 
 // The read of a markup text, a `Text_Read` once its format binds `build` as for `check_built_text`: the text is built
@@ -140,26 +153,13 @@ read_built_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core.
 	}
 	doc, built := build(src, as, read.dups == .Refuse, context.allocator)
 	defer core.destroy(&doc)
-	#partial switch built.kind {
-	case .None:
-	case .No_Memory:
-		return {kind = .No_Memory}
-	case .Duplicate_Key:
-		return {kind = .Duplicate_Key, at = built.at}
-	case:
-		err := core.Typed_Refusal{kind = .Walk, at = built.at, inner = built.inner}
-		if read.sink != nil {
+	read := read
+	if err := built_refusal(&doc, built, &read); err.kind != .None {
+		if err.kind == .Walk && read.sink != nil {
 			read.sink.fatal = err
 			sink_error(read.sink, err)
 		}
 		return err
-	}
-	if doc.clash != 0 && read.dups != .First && read.dups != .All {
-		return {kind = .Duplicate_Key, at = doc.clash}
-	}
-	read := read
-	if read.dups == .Refuse {
-		read.dups = .Last
 	}
 	return read_nodes(&doc, core.ROOT, T, target, plan, read, allocator)
 }
@@ -183,13 +183,9 @@ unmarshal_planned :: proc(plan: ^Plan, refusal: core.Error, src: []u8, as: core.
 check_built_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
 	doc, built := build(src, as, read.dups == .Refuse, context.temp_allocator)
 	defer core.destroy(&doc)
-	#partial switch built.kind {
-	case .None:
-	case .No_Memory:
-		return {kind = .No_Memory}
-	case .Duplicate_Key:
-		return {kind = .Duplicate_Key, at = built.at}
-	case:
+	bound := read
+	refused := built_refusal(&doc, built, &bound)
+	if refused.kind == .Walk {
 		// The fault is the one entry of a check that met it before any token. No refusal holds the check or its
 		// frames, which the stack escape check cannot see through a `Check`'s base `Reader`.
 		frames: [4]Frame = ---
@@ -202,20 +198,16 @@ check_built_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core
 		defer read_release(&h, held)
 		return read_end(&h, regs, built.inner)
 	}
-	if doc.clash != 0 && read.dups != .First && read.dups != .All {
-		return {kind = .Duplicate_Key, at = doc.clash}
+	if refused.kind != .None {
+		return refused
 	}
-	read := read
-	if read.dups == .Refuse {
-		read.dups = .Last
-	}
-	mark := sink_mark(read.sink)
-	err := check_nodes(&doc, core.ROOT, T, target, plan, read, allocator)
-	if err.kind == .Duplicate_Key && read.repeats == .Notice {
+	mark := sink_mark(bound.sink)
+	err := check_nodes(&doc, core.ROOT, T, target, plan, bound, allocator)
+	if err.kind == .Duplicate_Key && bound.repeats == .Notice {
 		own: Sink
 		// The sink is this frame's for the second read alone, which the stack escape check cannot see.
 		kept := (^Sink)(uintptr(&own))
-		judged := rejudge(read, mark, kept, allocator)
+		judged := rejudge(bound, mark, kept, allocator)
 		err = check_nodes(&doc, core.ROOT, T, target, plan, judged, allocator)
 		if judged.sink == kept {
 			err = rejudged(kept, err)
@@ -227,6 +219,9 @@ check_built_text :: proc(src: []u8, as: core.As, build: proc(src: []u8, as: core
 // The read of `read_document` by the hook, fed the nodes from `node` on.
 @(private)
 feed_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Refusal {
+	if doc == nil || doc.readers == nil || plan == nil || int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
+		return {kind = .Bad_Option}
+	}
 	// The frames and the replay's two words a level grow as the value nests past them.
 	frames: [core.MAX_DEPTH + 2]Frame = ---
 	ends: [2 * core.MAX_DEPTH]u32 = ---

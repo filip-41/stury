@@ -5,6 +5,7 @@ import "base:runtime"
 import "core:bytes"
 import "core:slice"
 import "core:strings"
+import "../kernel"
 import core ".."
 
 // A commit, composed per container. A container is its members and the gaps between them, and the root is the
@@ -78,9 +79,6 @@ Compose :: struct {
 	gap, key_pre, key_gap: []u8,
 	// The container's first key is written bare, as an inserted key is where the format can write it so.
 	bare_keys:    bool,
-	// True once an edit writes what the read of the written pieces does not follow: a container, a text the caller
-	// spelled, or a reorder.
-	unwritten:    bool,
 }
 
 // Records why the commit stops, and returns false for `or_return`.
@@ -97,21 +95,21 @@ fact_edit_of :: proc(cx: ^Compose, node: core.Node_Index, role: core.Role) -> in
 	return cx.keys[i].edit if found else -1
 }
 
-// Returns whether `node` holds a fact of `role`.
-holds_fact :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Role) -> bool {
+// Returns the first fact of `node` that carries `role`.
+first_fact :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Role) -> (core.Fact, bool) {
 	for f in core.all_facts(doc, node) {
 		if f.role == role {
-			return true
+			return f, true
 		}
 	}
-	return false
+	return {}, false
 }
 
 // Returns what a source fact becomes: the output cannot hold it, an edit names it, or it stays. A set writes the first
 // fact it names and cuts the others.
 fact_action :: proc(cx: ^Compose, f: core.Fact) -> (action: Item_Action, edit: int) {
 	doc := cx.doc
-	slot := fact_slot(cx.edit, doc, f.node, f.role, core.has_comments(cx.syntax), cx.emptied)
+	slot := fact_slot(cx, f.node, f.role)
 	edit = fact_edit_of(cx, f.node, f.role)
 	if edit < 0 {
 		return .Keep if slot else .Cut, -1
@@ -119,12 +117,8 @@ fact_action :: proc(cx: ^Compose, f: core.Fact) -> (action: Item_Action, edit: i
 	if !slot || cx.list.edits[edit].op == .Remove_Fact {
 		return .Cut, edit
 	}
-	for g in core.all_facts(doc, f.node) {
-		if g.role == f.role {
-			return .Write if g.lo == f.lo else .Cut, edit
-		}
-	}
-	return .Cut, edit
+	first, _ := first_fact(doc, f.node, f.role)
+	return .Write if first.lo == f.lo else .Cut, edit
 }
 
 // Returns the set of `node` and `role` that writes a new fact: the node holds none of that role.
@@ -133,7 +127,7 @@ new_fact :: proc(cx: ^Compose, node: core.Node_Index, role: core.Role) -> int {
 	if edit < 0 || cx.list.edits[edit].op != .Set_Fact {
 		return -1
 	}
-	if !fact_slot(cx.edit, cx.doc, node, role, core.has_comments(cx.syntax), cx.emptied) || holds_fact(cx.doc, node, role) {
+	if _, held := first_fact(cx.doc, node, role); held || !fact_slot(cx, node, role) {
 		return -1
 	}
 	return edit
@@ -161,7 +155,7 @@ put_text :: proc(cx: ^Compose, b: []u8) -> bool {
 	if len(b) == 0 {
 		return true
 	}
-	if cx.in_line && core.line_end_len(b, 0) == 0 {
+	if cx.in_line && line_end_len(b, 0) == 0 {
 		push(&cx.text, '\n') or_return
 		cx.value_line = false
 	}
@@ -182,7 +176,7 @@ write_fact :: proc(cx: ^Compose, e: core.Edit, lo, hi: u64) -> bool {
 	doc := cx.doc
 	inline := e.role == .Comment_Inline
 	fresh := hi == lo && !inline
-	line_end := fresh || hi >= u64(len(doc.src)) || core.line_end_len(doc.src, hi) > hi
+	line_end := fresh || hi >= u64(len(doc.src)) || line_end_len(doc.src, hi) > hi
 	n := fact_count(e)
 	// A body is held when the output can spell it: a line comment, the last one or one on a line of its own, holds no line
 	// end, and a block comment no close marker.
@@ -220,8 +214,10 @@ write_fact :: proc(cx: ^Compose, e: core.Edit, lo, hi: u64) -> bool {
 		push(&cx.text, '\n') or_return
 	}
 	if lead {
-		// A comment on a line of its own leaves no blanks at the end of the line before it.
-		for t := len(cx.text); t > 0 && (cx.text[t - 1] == ' ' || cx.text[t - 1] == '\t'); t -= 1 {
+		// A comment on a line of its own leaves no blanks at the end of the line before it, of the text no chunk or segment
+		// holds yet.
+		held := held_text(cx)
+		for t := len(cx.text); t > held && (cx.text[t - 1] == ' ' || cx.text[t - 1] == '\t'); t -= 1 {
 			resize(&cx.text, t - 1)
 		}
 		push(&cx.text, '\n') or_return
@@ -256,6 +252,33 @@ write_fact :: proc(cx: ^Compose, e: core.Edit, lo, hi: u64) -> bool {
 	if lead || fresh {
 		cx.value_line = false
 	}
+	return true
+}
+
+// The end of the text the chunks and segments so far hold. The text grows only at its end and each chunk or written
+// segment takes it up to its end, so the last of each holds the most. An ordered chunk's ends count segments, so the
+// last chunk that is not ordered counts.
+held_text :: proc(cx: ^Compose) -> int {
+	held := 0
+	#reverse for c in cx.chunks {
+		if !c.ordered {
+			held = c.to
+			break
+		}
+	}
+	#reverse for s in cx.segments {
+		if s.written {
+			return max(held, int(s.hi))
+		}
+	}
+	return held
+}
+
+// Writes a fact edit as a piece of its own, after nothing that leaves a line open and before nothing that needs one.
+write_piece :: proc(cx: ^Compose, e: core.Edit, lo, hi: u64) -> bool {
+	cx.in_line, cx.value_line = false, false
+	write_fact(cx, e, lo, hi) or_return
+	cx.in_line = false
 	return true
 }
 
@@ -342,7 +365,7 @@ learn_layout :: proc(cx: ^Compose, c: core.Node_Index, lo: u64) {
 	members := cx.members[:]
 	blank :: proc(b: []u8) -> []u8 {
 		i := len(b)
-		for i > 0 && (b[i - 1] == ' ' || b[i - 1] == '\t' || b[i - 1] == '\n' || b[i - 1] == '\r') {
+		for i > 0 && kernel.is_ws(b[i - 1]) {
 			i -= 1
 		}
 		// Blanks that end a line belong to the line, not to the gap.
@@ -406,15 +429,7 @@ write_member :: proc(cx: ^Compose, e: core.Edit) -> bool {
 	}
 	push_all(&cx.text, e.text) or_return
 	cx.value_line = true
-	note_written(cx, e.value)
 	return true
-}
-
-// Marks the commit unwritten when an edit writes `want`, a value that is no scalar.
-note_written :: proc(cx: ^Compose, want: core.Value) {
-	if k := core.value_kind(want); want == nil || k == .Array || k == .Object {
-		cx.unwritten = true
-	}
 }
 
 // Fills `cx.items` with the comment items between survivors `l` and `r` of container `c`, sorted, and returns the span
@@ -540,7 +555,7 @@ compose_junction :: proc(cx: ^Compose, c: core.Node_Index, open, close: u64, l, 
 	if edit := new_fact(cx, owner, role); edit >= 0 && (has_right || c != core.ROOT) {
 		write_fact(cx, cx.list.edits[edit], hi, hi) or_return
 	}
-	if cx.in_line && hi < u64(len(doc.src)) && core.line_end_len(doc.src, hi) == hi {
+	if cx.in_line && hi < u64(len(doc.src)) && line_end_len(doc.src, hi) == hi {
 		push(&cx.text, '\n') or_return
 	}
 	cx.in_line = false
@@ -549,8 +564,7 @@ compose_junction :: proc(cx: ^Compose, c: core.Node_Index, open, close: u64, l, 
 
 // Makes the text written from `from` the chunk that replaces `lo` through `hi`.
 emit_chunk :: proc(cx: ^Compose, lo, hi: u64, from: int, rank: Rank) -> bool {
-	_, ok := push(&cx.chunks, Chunk{lo = lo, hi = hi, from = from, to = len(cx.text), rank = rank})
-	return ok
+	return push(&cx.chunks, Chunk{lo = lo, hi = hi, from = from, to = len(cx.text), rank = rank})
 }
 
 // Returns the member position `lo` lies before, which names the gap it is in.
@@ -566,17 +580,16 @@ gap_of :: proc(members: []Member, lo: u64) -> int {
 member_fact :: proc(cx: ^Compose, f: core.Fact) -> bool {
 	action, edit := fact_action(cx, f)
 	from := len(cx.text)
-	cx.in_line, cx.value_line = false, false
 	if action == .Write {
-		write_fact(cx, cx.list.edits[edit], f.lo, f.lo + u64(f.n)) or_return
+		write_piece(cx, cx.list.edits[edit], f.lo, f.lo + u64(f.n)) or_return
+	} else {
+		cx.in_line, cx.value_line = false, false
 	}
-	cx.in_line = false
 	lo, hi := f.lo, f.lo + u64(f.n)
 	if action == .Cut && (f.role == .Comment || f.role == .Comment_Foot) {
 		lo, hi = cut_line(cx.doc.src, lo, hi, f.role)
 	}
-	_, ok := push(&cx.chunks, Chunk{lo = lo, hi = hi, from = from, to = len(cx.text), cut = action == .Cut})
-	return ok
+	return push(&cx.chunks, Chunk{lo = lo, hi = hi, from = from, to = len(cx.text), cut = action == .Cut})
 }
 
 // The bytes a removed comment from `lo` to `hi` takes with it when it stands alone on its line: a head its line end, and
@@ -591,7 +604,7 @@ cut_line :: proc(src: []u8, lo, hi: u64, role: core.Role) -> (u64, u64) {
 	for z < u64(len(src)) && (src[z] == ' ' || src[z] == '\t') {
 		z += 1
 	}
-	end := core.line_end_len(src, z)
+	end := line_end_len(src, z)
 	if a > 0 && src[a - 1] != '\n' && src[a - 1] != '\r' || end == z {
 		return lo, hi
 	}
@@ -829,11 +842,9 @@ group_edits :: proc(cx: ^Compose, groups: ^[dynamic]Target) -> bool {
 // output cannot hold.
 compose_tree :: proc(cx: ^Compose) -> bool {
 	doc, list := cx.doc, cx.list
-	comments := core.has_comments(cx.syntax)
 	if edit := cx.edit; edit != nil && edit.emptied != nil {
 		cx.emptied = edit.emptied(doc, list)
 	}
-	emptied := cx.emptied
 	cx.text, _ = make([dynamic]u8, cx.allocator)
 	cx.chunks, _ = make([dynamic]Chunk, cx.allocator)
 	cx.segments, _ = make([dynamic]Segment, cx.allocator)
@@ -844,9 +855,7 @@ compose_tree :: proc(cx: ^Compose) -> bool {
 	group_edits(cx, &groups) or_return
 	for e, i in list.edits {
 		switch e.op {
-		case .Insert, .Remove:
-		case .Reorder:
-			cx.unwritten = true
+		case .Insert, .Remove, .Reorder:
 		case .Set:
 			from := len(cx.text)
 			if e.role == .Key {
@@ -855,14 +864,13 @@ compose_tree :: proc(cx: ^Compose) -> bool {
 				}
 			} else {
 				push_all(&cx.text, e.text) or_return
-				note_written(cx, e.value)
 			}
 			at := core.node_start(doc.nodes[e.node])
 			end := at + u64(len(core.span(doc, e.node)))
 			push(&cx.chunks, Chunk{lo = at, hi = end, from = from, to = len(cx.text), rank = .Set}) or_return
 		case .Set_Fact, .Remove_Fact:
 			push(&keys, Fact_Key{key = u64(e.node) << 8 | u64(e.role), edit = i}) or_return
-			if e.op == .Set_Fact && !fact_slot(cx.edit, doc, e.node, e.role, comments, emptied) {
+			if e.op == .Set_Fact && !fact_slot(cx, e.node, e.role) {
 				cx.dropped += 1
 			} else if core.is_property(e.role) {
 				property_chunks(cx, e) or_return
@@ -892,11 +900,11 @@ compose_tree :: proc(cx: ^Compose) -> bool {
 	}
 	for f in doc.facts {
 		// Only a comment is cut for want of a slot: an attribute is the format's markup, which stays with its node.
-		if f.role > .Comment_Foot || fact_edit_of(cx, f.node, f.role) >= 0 || fact_slot(cx.edit, doc, f.node, f.role, comments, emptied) {
+		if f.role > .Comment_Foot || fact_edit_of(cx, f.node, f.role) >= 0 || fact_slot(cx, f.node, f.role) {
 			continue
 		}
 		// An unnamed root comment above shared keys reads as the root's foot once the root is emptied, so it stays.
-		if f.role == .Comment && f.node == core.ROOT && core.header_of(doc) != 0 && emptied {
+		if f.role == .Comment && f.node == core.ROOT && core.header_of(doc) != 0 && cx.emptied {
 			continue
 		}
 		push(&cx.chunks, Chunk{lo = f.lo, hi = f.lo + u64(f.n), cut = true, drop = true}) or_return
@@ -1053,17 +1061,17 @@ line_shape :: proc(doc: ^core.Document, pos: u64) -> (indent: []u8, lead: bool) 
 // Whether the output can hold a fact of `role` on `node`. A property (`Tag`, `Anchor`, `Alias`) is held when the format
 // spells it with `prefix` and its `fact_slot`, if any, agrees. A tree writes a foot on a container or the root, whose close
 // or text's end it precedes, and on no other node. A format with a `fact_slot` says its own. An output with no marker
-// holds no fact. The role's shape and the body's spelling are checked where the fact is written. `emptied` says the
-// list removes every member of the root.
-fact_slot :: #force_inline proc(edit: ^core.Edit_Services, doc: ^core.Document, node: core.Node_Index, role: core.Role, comments: bool, emptied: bool) -> bool {
+// holds no fact. The role's shape and the body's spelling are checked where the fact is written.
+fact_slot :: #force_inline proc(cx: ^Compose, node: core.Node_Index, role: core.Role) -> bool {
+	edit, doc := cx.edit, cx.doc
 	if core.is_property(role) {
-		return edit != nil && edit.prefix != nil && (edit.fact_slot == nil || edit.fact_slot(doc, node, role, emptied))
+		return edit != nil && edit.prefix != nil && (edit.fact_slot == nil || edit.fact_slot(doc, node, role, cx.emptied))
 	}
-	if !comments {
+	if !core.has_comments(cx.syntax) {
 		return false
 	}
 	if edit != nil && edit.fact_slot != nil {
-		return edit.fact_slot(doc, node, role, emptied)
+		return edit.fact_slot(doc, node, role, cx.emptied)
 	}
 	n := doc.nodes[node]
 	return role != .Comment_Foot || node == core.ROOT || n.kind == .Array || n.kind == .Object

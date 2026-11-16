@@ -433,7 +433,7 @@ object_changed :: proc(w: ^Walk, x, y: i32) {
 	}
 }
 
-@(private = "file")
+@(private)
 find_member :: proc(o: ^rules.Object, name: string) -> (m: rules.Member, found: bool) {
 	for n in o.members {
 		if n.name == name {
@@ -450,8 +450,6 @@ member_changed :: proc(w: ^Walk, a, b: rules.Member) {
 	if a.required != b.required {
 		emit(w, "required", "required" if a.required else "optional", "required" if b.required else "optional", .Narrows if b.required else .Widens)
 	}
-	if a.rules != b.rules {
-		rules_changed(w, a.rules, b.rules)
-	}
+	rules_changed(w, a.rules, b.rules)
 	walk_nodes(w, a.node, b.node)
 }

@@ -350,8 +350,8 @@ text_datetime :: proc(text: string) -> core.Tag_Meaning {
 @(private)
 tag_fits :: proc(_: string, v: core.Value) -> (string, bool) {
 	buf: [64]u8
-	text, is_text := core.value_text(v, buf[:])
-	d := text_datetime(text) if is_text && core.value_kind(v) == .String else .Own
+	text, is_text := core.text(v, buf[:])
+	d := text_datetime(text) if is_text && core.kind(v) == .String else .Own
 	return DATETIME_TAGS[d], d != .Own
 }
 

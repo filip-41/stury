@@ -49,8 +49,8 @@ SRC :: "<div id=a>\n  <p class=x>t</p>\n  <br>\n  <script>run()</script>\n</div>
 @(test)
 set_writes_the_content_and_keeps_the_tags :: proc(t: ^testing.T) {
 	out, err := edited(SRC, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		write.set(l, at(d, "div", "p"), typed.Raw("new &amp; <b>more</b>")) or_return
-		return write.set(l, at(d, "div", "script"), "if (a < b && c) go()")
+		write.set_node(l, at(d, "div", "p"), typed.Raw("new &amp; <b>more</b>")) or_return
+		return write.set_node(l, at(d, "div", "script"), "if (a < b && c) go()")
 	})
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "<div id=a>\n  <p class=x>new &amp; <b>more</b></p>\n  <br>\n  <script>if (a < b && c) go()</script>\n</div>")
@@ -59,18 +59,18 @@ set_writes_the_content_and_keeps_the_tags :: proc(t: ^testing.T) {
 @(test)
 set_escapes_a_string_and_writes_an_object_as_elements :: proc(t: ^testing.T) {
 	out, err := edited(SRC, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "div", "p"), "a<b & c")
+		return write.set_node(l, at(d, "div", "p"), "a<b & c")
 	})
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "<div id=a>\n  <p class=x>a&lt;b &amp; c</p>\n  <br>\n  <script>run()</script>\n</div>")
 	out, err = edited(SRC, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "div"), walktest.from_json(`{"i": 1, "q": null, "#text": "t", "s": [true, "u"], "hr": null}`))
+		return write.set_node(l, at(d, "div"), walktest.from_json(`{"i": 1, "q": null, "#text": "t", "s": [true, "u"], "hr": null}`))
 	})
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "<div id=a><i>1</i><q></q>t<s>true</s><s>u</s><hr></div>")
 	out, err = edited("<pre>\n\nx</pre><textarea></textarea>", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		write.set(l, at(d, "pre"), "\ny") or_return
-		return write.set(l, at(d, "textarea"), "<b>")
+		write.set_node(l, at(d, "pre"), "\ny") or_return
+		return write.set_node(l, at(d, "textarea"), "<b>")
 	})
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "<pre>\n\ny</pre><textarea>&lt;b&gt;</textarea>")
@@ -85,8 +85,8 @@ an_object_reads_back_in_its_element :: proc(t: ^testing.T) {
 		edits: walktest.Edits,
 		want:  string,
 	} {
-		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "table"), walktest.from_json(`{"tbody": {"tr": {"td": 2}}}`))}, "<table><tbody><tr><td>2</td></tr></tbody></table>"},
-		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "table", "tbody", "tr"), walktest.from_json(`{"td": [3, 4]}`))}, "<table><tr><td>3</td><td>4</td></tr></table>"},
+		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, at(d, "table"), walktest.from_json(`{"tbody": {"tr": {"td": 2}}}`))}, "<table><tbody><tr><td>2</td></tr></tbody></table>"},
+		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, at(d, "table", "tbody", "tr"), walktest.from_json(`{"td": [3, 4]}`))}, "<table><tr><td>3</td><td>4</td></tr></table>"},
 		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.insert(l, at(d, "table", "tbody"), 1, "tr", walktest.from_json(`{"td": 5}`))}, "<table><tr><td>1</td></tr><tr><td>5</td></tr></table>"},
 	}
 	for c, i in cases {
@@ -94,7 +94,7 @@ an_object_reads_back_in_its_element :: proc(t: ^testing.T) {
 		testing.expectf(t, err == nil && out == c.want, "case %d: %q %v", i, out, err)
 	}
 	_, err := edited(TABLE, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "table"), walktest.from_json(`{"tr": {"td": 2}}`))
+		return write.set_node(l, at(d, "table"), walktest.from_json(`{"tr": {"td": 2}}`))
 	})
 	expect_no_spelling(t, err)
 }
@@ -102,7 +102,7 @@ an_object_reads_back_in_its_element :: proc(t: ^testing.T) {
 @(test)
 set_writes_an_array_as_elements_of_the_name :: proc(t: ^testing.T) {
 	out, err := edited(SRC, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "div", "p"), walktest.from_json(`[1, null, {"i": 2}]`))
+		return write.set_node(l, at(d, "div", "p"), walktest.from_json(`[1, null, {"i": 2}]`))
 	})
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "<div id=a>\n  <p class=x>1</p>\n  <p></p>\n  <p><i>2</i></p>\n  <br>\n  <script>run()</script>\n</div>")
@@ -112,12 +112,12 @@ set_writes_an_array_as_elements_of_the_name :: proc(t: ^testing.T) {
 set_of_text_writes_the_run :: proc(t: ^testing.T) {
 	src := "<div><a></a> hi <b></b></div>"
 	out, err := edited(src, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "div", "#text"), "1 < 2")
+		return write.set_node(l, at(d, "div", "#text"), "1 < 2")
 	})
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "<div><a></a>1 &lt; 2<b></b></div>")
 	_, err = edited(src, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "div", "#text"), walktest.from_json(`{"c": 1}`))
+		return write.set_node(l, at(d, "div", "#text"), walktest.from_json(`{"c": 1}`))
 	})
 	expect_frozen(t, err, .Text_Markup)
 }
@@ -129,8 +129,8 @@ set_through_a_path_and_from_the_document :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, string(out), "<div><section><p>1</p></section><span><i>q</i></span><script>a<b</script></div>")
 	moved, merr := edited(src, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		write.set(l, at(d, "div", "span"), core.Node_Ref{d, at(d, "div", "section")}) or_return
-		return write.set(l, at(d, "div", "section", "p"), core.Node_Ref{d, at(d, "div", "script")})
+		write.set_node(l, at(d, "div", "span"), core.Node_Ref{d, at(d, "div", "section")}) or_return
+		return write.set_node(l, at(d, "div", "section", "p"), core.Node_Ref{d, at(d, "div", "script")})
 	})
 	walktest.expect_nil(t, merr)
 	testing.expect_value(t, moved, "<div><section><p>a&lt;b</p></section><span><p>1</p></span><script>a<b</script></div>")
@@ -140,7 +140,7 @@ set_through_a_path_and_from_the_document :: proc(t: ^testing.T) {
 a_document_keeps_its_doctype_and_tags :: proc(t: ^testing.T) {
 	src := "<!DOCTYPE html>\n<html lang=en><head><title>T</title></head>\n<body>\n<p>x</p>\n</body></html>\n"
 	out, err := edited(src, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		write.set(l, at(d, "html", "head", "title"), "A & B") or_return
+		write.set_node(l, at(d, "html", "head", "title"), "A & B") or_return
 		return write.insert(l, at(d, "html", "body"), 1, "p", "y")
 	}, .Document)
 	walktest.expect_nil(t, err)
@@ -340,7 +340,7 @@ an_edit_replaces_bytes_of_its_element_alone :: proc(t: ^testing.T) {
 			// "Z" cuts the white space that reads into the element past its span, and "Z\n" keeps a line end there.
 			for value in ([?]string{"Z\n", "Z"}) {
 				list := html.edit_list_init(&doc, .Document, context.temp_allocator)
-				if write.set(&list, v, value) != nil {
+				if write.set_node(&list, v, value) != nil {
 					continue
 				}
 				out, _, cerr := compose.commit(&list, allocator = context.temp_allocator)
@@ -410,11 +410,11 @@ edits_reach_each_element_of_a_repeated_name :: proc(t: ^testing.T) {
 		edits: walktest.Edits,
 		want:  string,
 	} {
-		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, walktest.nth(d, at(d, "div"), "b", 1), "y")}, "<div>hello <b k=1>bold</b> tail<b>y</b><i>y</i></div>"},
-		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, walktest.nth(d, at(d, "div"), "#text", 1), " T")}, "<div>hello <b k=1>bold</b> T<b>x</b><i>y</i></div>"},
+		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, walktest.nth(d, at(d, "div"), "b", 1), "y")}, "<div>hello <b k=1>bold</b> tail<b>y</b><i>y</i></div>"},
+		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, walktest.nth(d, at(d, "div"), "#text", 1), " T")}, "<div>hello <b k=1>bold</b> T<b>x</b><i>y</i></div>"},
 		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.insert(l, at(d, "div"), 4, "b", "n")}, "<div>hello <b k=1>bold</b> tail<b>x</b><b>n</b><i>y</i></div>"},
 		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return core.remove(l, walktest.nth(d, at(d, "div"), "b", 0))}, "<div>hello  tail<b>x</b><i>y</i></div>"},
-		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, walktest.nth(d, at(d, "div"), "b", 1) - 1, "em")}, "<div>hello <b k=1>bold</b> tail<em>x</em><i>y</i></div>"},
+		{proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, walktest.nth(d, at(d, "div"), "b", 1) - 1, "em")}, "<div>hello <b k=1>bold</b> tail<em>x</em><i>y</i></div>"},
 	}
 	for c in cases {
 		out, err := edited(SRC, c.edits)
@@ -426,14 +426,14 @@ edits_reach_each_element_of_a_repeated_name :: proc(t: ^testing.T) {
 @(test)
 rename_respells_both_tags :: proc(t: ^testing.T) {
 	out, err := edited("<DIV><P>1</P><li>2</div>", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		write.set(l, at(d, "div", "p") - 1, "h1") or_return
-		write.set(l, at(d, "div", "li") - 1, "dd") or_return
-		return write.set(l, at(d, "div") - 1, "section")
+		write.set_node(l, at(d, "div", "p") - 1, "h1") or_return
+		write.set_node(l, at(d, "div", "li") - 1, "dd") or_return
+		return write.set_node(l, at(d, "div") - 1, "section")
 	})
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "<section><h1>1</h1><dd>2</section>")
 	_, err = edited("<div></div>", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "div") - 1, "Section")
+		return write.set_node(l, at(d, "div") - 1, "Section")
 	})
 	expect_frozen(t, err, .Not_Name)
 }
@@ -500,15 +500,15 @@ nodes_the_tree_made_are_refused :: proc(t: ^testing.T) {
 		spec:  html.Spec,
 		edits: walktest.Edits,
 	} {
-		{"<p>x", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "html", "body"), 1)}},
+		{"<p>x", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, at(d, "html", "body"), 1)}},
 		{"<p>x", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return core.remove(l, at(d, "html", "head"))}},
 		{"<p>x", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.insert(l, at(d, "html"), 2, "q", 1)}},
 		{"<p>x", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return core.set_fact(l, at(d, "html", "body"), .Attribute, "a=1")}},
-		{"<table><tr><td>1</table>", .Fragment, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "table", "tbody"), 1)}},
+		{"<table><tr><td>1</table>", .Fragment, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, at(d, "table", "tbody"), 1)}},
 		{"<table><tr><td>1</table>", .Fragment, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.insert(l, at(d, "table"), 0, "caption", 1)}},
-		{"<table>a<tr><td>1</td></tr></table>", .Fragment, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "#text"), "b")}},
-		{"<b>1<p>2</b>3</p>", .Fragment, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "p", "b"), 4)}},
-		{"<b>1<p>2</b>3</p>", .Fragment, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "p", "b") - 1, "i")}},
+		{"<table>a<tr><td>1</td></tr></table>", .Fragment, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, at(d, "#text"), "b")}},
+		{"<b>1<p>2</b>3</p>", .Fragment, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, at(d, "p", "b"), 4)}},
+		{"<b>1<p>2</b>3</p>", .Fragment, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, at(d, "p", "b") - 1, "i")}},
 	}
 	for c, i in cases {
 		_, err := edited(c.src, c.edits, c.spec)
@@ -516,7 +516,7 @@ nodes_the_tree_made_are_refused :: proc(t: ^testing.T) {
 		testing.expectf(t, is_edit && e.kind == .Frozen && html.Detail(e.inner.detail) == .Constructed, "case %d: %v", i, err)
 	}
 	_, err := edited("<p>a<html lang=x>b</p>", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "html", "body", "p"), "c")
+		return write.set_node(l, at(d, "html", "body", "p"), "c")
 	}, .Document)
 	expect_frozen(t, err, .Split)
 }
@@ -532,11 +532,11 @@ edits_around_the_nodes_the_tree_made_keep_them :: proc(t: ^testing.T) {
 		edits: walktest.Edits,
 		want:  string,
 	} {
-		{"<p>x", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "html", "body", "p"), "y")}, "<p>y"},
+		{"<p>x", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, at(d, "html", "body", "p"), "y")}, "<p>y"},
 		{"<p>a</p><p>b</p>", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.insert(l, at(d, "html", "body"), 1, "q", 1)}, "<p>a</p><q>1</q><p>b</p>"},
 		{"<p>a</p><p>b</p>", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return core.remove(l, at(d, "html", "body", "p"))}, "<p>b</p>"},
-		{"<table><tr><td>1</td></tr></table>", .Fragment, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "table"), typed.Raw("<tr><td>2</td></tr>"))}, "<table><tr><td>2</td></tr></table>"},
-		{"<table><tr><td>1</td></tr></table>", .Fragment, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "table", "tbody", "tr", "td"), 3)}, "<table><tr><td>3</td></tr></table>"},
+		{"<table><tr><td>1</td></tr></table>", .Fragment, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, at(d, "table"), typed.Raw("<tr><td>2</td></tr>"))}, "<table><tr><td>2</td></tr></table>"},
+		{"<table><tr><td>1</td></tr></table>", .Fragment, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, at(d, "table", "tbody", "tr", "td"), 3)}, "<table><tr><td>3</td></tr></table>"},
 	}
 	for c, i in cases {
 		out, err := edited(c.src, c.edits, c.spec)
@@ -549,7 +549,7 @@ edits_around_the_nodes_the_tree_made_keep_them :: proc(t: ^testing.T) {
 @(test)
 edits_of_the_document_are_read_again :: proc(t: ^testing.T) {
 	out, err := edited("<!-- c --><p>x</p>", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, core.ROOT, typed.Raw("<html><body><i>1</i></body></html>"))
+		return write.set_node(l, core.ROOT, typed.Raw("<html><body><i>1</i></body></html>"))
 	}, .Document)
 	walktest.expect_nil(t, err)
 	testing.expect_value(t, out, "<!-- c --><html><body><i>1</i></body></html>")
@@ -565,7 +565,7 @@ edits_of_the_document_are_read_again :: proc(t: ^testing.T) {
 	} {
 		{"<html><body></body></html>", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.insert(l, core.ROOT, 1, "p", 1)}},
 		{"<p>x", .Fragment, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.insert(l, core.ROOT, 1, "td", 1)}},
-		{"<!DOCTYPE html><p>x", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, core.ROOT, typed.Raw("<p><table></table>"))}},
+		{"<!DOCTYPE html><p>x", .Document, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, core.ROOT, typed.Raw("<p><table></table>"))}},
 	}
 	for c, i in cases {
 		_, refused := edited(c.src, c.edits, c.spec)
@@ -577,15 +577,15 @@ edits_of_the_document_are_read_again :: proc(t: ^testing.T) {
 @(test)
 content_an_element_cannot_hold_is_refused :: proc(t: ^testing.T) {
 	_, err := edited(SRC, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "div", "br"), "x")
+		return write.set_node(l, at(d, "div", "br"), "x")
 	})
 	expect_frozen(t, err, .Void)
 	_, err = edited(SRC, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "div", "script"), typed.Raw("<b>x</b>"))
+		return write.set_node(l, at(d, "div", "script"), typed.Raw("<b>x</b>"))
 	})
 	expect_frozen(t, err, .Text_Markup)
 	_, err = edited(SRC, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return write.set(l, at(d, "div", "p"), walktest.from_json(`{"B": 1}`))
+		return write.set_node(l, at(d, "div", "p"), walktest.from_json(`{"B": 1}`))
 	})
 	expect_no_spelling(t, err)
 	_, err = edited(SRC, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
@@ -599,10 +599,10 @@ content_an_element_cannot_hold_is_refused :: proc(t: ^testing.T) {
 @(test)
 a_result_that_reads_as_another_tree_is_refused :: proc(t: ^testing.T) {
 	cases := [?]walktest.Edits {
-		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "div", "p"), typed.Raw("<p>x</p>"))},
-		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "div", "p"), walktest.from_json(`{"div": 1}`))},
+		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, at(d, "div", "p"), typed.Raw("<p>x</p>"))},
+		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, at(d, "div", "p"), walktest.from_json(`{"div": 1}`))},
 		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.insert(l, at(d, "div", "p"), 0, "td", 1)},
-		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set(l, at(d, "div", "p") - 1, "table")},
+		proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {return write.set_node(l, at(d, "div", "p") - 1, "table")},
 	}
 	for c, i in cases {
 		_, err := edited("<div><p><i>1</i> t</p></div>", c)
@@ -611,3 +611,30 @@ a_result_that_reads_as_another_tree_is_refused :: proc(t: ^testing.T) {
 	}
 }
 
+
+// A commit as the other spec reads its output as that spec, where the edited tree reads as another, so it is refused.
+@(test)
+commit_as_the_other_spec_is_read_as_it :: proc(t: ^testing.T) {
+	cases := [?]struct {
+		src:  string,
+		spec: html.Spec,
+		path: []string,
+	} {
+		{"<html><body><p>a</p></body></html>", .Document, {"html", "body", "p"}},
+		{"<p>a</p>", .Fragment, {"p"}},
+	}
+	for c, i in cases {
+		doc, err := core.build(transmute([]u8)c.src, html.as(c.spec), allocator = context.temp_allocator)
+		if !testing.expectf(t, err == nil, "case %d: %v", i, err) {
+			continue
+		}
+		list := core.edit_list_init(&doc, context.temp_allocator)
+		walktest.expect_nil(t, write.set_node(&list, at(&doc, ..c.path), "b"))
+		other := html.Spec.Fragment if c.spec == .Document else .Document
+		_, _, cerr := compose.commit(&list, html.as(other), context.temp_allocator)
+		e, is_edit := cerr.(core.Document_Error)
+		testing.expectf(t, is_edit && e.kind == .Bad_Result, "case %d: %v", i, cerr)
+		_, _, own := compose.commit(&list, allocator = context.temp_allocator)
+		walktest.expect_nil(t, own)
+	}
+}

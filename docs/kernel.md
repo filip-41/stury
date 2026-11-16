@@ -5,9 +5,6 @@ input 64 bytes at a time, compares bytes, sorts them into sets, packs per-byte r
 bytes an escape escapes, and validates UTF-8. A format's walk calls these kernels where it reads a block at a time and
 uses scalar bit operations on the masks for everything else.
 
-This document describes how the package is split across files and CPUs, and the Odin and LLVM behaviour that each
-part of the shape works around.
-
 ## Files
 
 | File | Builds on | Holds |
@@ -209,11 +206,11 @@ no add.
 
 `utf8.odin` follows Keiser and Lemire: three 16-entry tables, indexed by the high and low nibble of the byte before and
 the high nibble of the byte itself, flag every error a pair of bytes can show. The bytes two and three before a byte say
-whether it must be a continuation. A caller checks each block with `utf8_block`, or with `utf8_ascii_block` when
-`is_ascii` says the block is all ASCII, and calls `utf8_ok` once at the end. `utf8_next` makes that choice and skips an
-ASCII block after an ASCII block, which adds no error. A reader that stops inside a block, at a string's closing quote,
-calls `utf8_clean` instead, which allows a sequence the last block leaves open because the bytes past the stop are not
-the reader's to judge.
+whether it must be a continuation. A caller passes each block to `utf8_next`, which checks it with `utf8_head`, or with `utf8_ascii_block` when
+`is_ascii` says the block is all ASCII, skips an ASCII block after an ASCII block since it adds no error, and calls
+`utf8_ok` once at the end. A reader that stops inside a block, at a string's closing quote, calls `utf8_stop`, which
+ends in `utf8_clean`. That allows a sequence the last block leaves open because the bytes past the stop are not the
+reader's to judge.
 
 - **Validation works one register of the tier at a time.** Written on all 64 lanes, the 16-byte tiers keep four
   registers live at each step and spill to the stack.

@@ -76,21 +76,6 @@ scan_comment :: proc "contextless" (src: []u8, i: int) -> (end: int, v: Verdict)
 	return k, 0
 }
 
-// The value of the hex digits `src[i:i+count]`, or false at a byte that is none.
-hex_run :: proc "contextless" (src: []u8, i, count: int) -> (v: u32, at: int, ok: bool) {
-	for k in 0 ..< count {
-		if i + k >= len(src) {
-			return 0, len(src), false
-		}
-		d := spell.HEX_NIBBLE[src[i + k]]
-		if d == 0xff {
-			return 0, i + k, false
-		}
-		v = v << 4 | u32(d)
-	}
-	return v, i + count, true
-}
-
 // Judges the escape whose backslash is at `i` in a basic string. Returns the byte past it.
 scan_escape :: proc "contextless" (src: []u8, i: int, v11: bool) -> (next: int, v: Verdict) {
 	if i + 1 >= len(src) {
@@ -118,7 +103,7 @@ scan_escape :: proc "contextless" (src: []u8, i: int, v11: bool) -> (next: int, 
 	case:
 		return i + 1, bad(i + 1, .Bad_Escape, .None)
 	}
-	r, at, ok := hex_run(src, i + 2, count)
+	r, at, ok := spell.hex_run(src, i + 2, count)
 	if !ok {
 		return at, bad(at, .Bad_Escape, .None) if at < len(src) else bad(at, .Truncated, .Open_String)
 	}
@@ -346,13 +331,11 @@ decode :: proc "contextless" (s: []u8, spelling: u16, buf: []u8) -> (text: strin
 			r = '\\'
 		case 'x', 'u', 'U':
 			count := 2 if c == 'x' else 4 if c == 'u' else 8
-			for k in 0 ..< count {
-				r = r << 4 | u32(spell.HEX_NIBBLE[s[i + k]])
-			}
+			r, _, _ = spell.hex_run(s, i, count)
 			i += count
 		case:
 			// A backslash before a line end drops itself and the white space and line ends after it.
-			for i < hi && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+			for i < hi && kernel.is_ws(s[i]) {
 				i += 1
 			}
 			continue

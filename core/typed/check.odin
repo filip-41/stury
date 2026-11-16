@@ -1066,7 +1066,7 @@ checked_step :: proc(h: ^Reader, f: ^Frame, owner: ^Field, at: core.Hook_Regs) -
 	}
 	key := core.Token{lo = u64(uintptr(f.owner)), n = u32(f.target), kind = .String, role = .Key, spelling = u16(f.target >> 32)}
 	if key.spelling == TEXT_KEY {
-		return core.Name(TEXT_NAME), true
+		return core.Name(core.MARKUP_TEXT), true
 	}
 	// The text is the input's or the temp allocator's, never the reader's.
 	text, ok := core.token_text(h.plan.readers, &h.view, key, context.temp_allocator)

@@ -10,24 +10,6 @@ import kernel "./kernel"
 // its text. A value taken from the list's own document keeps its source bytes. A value with comments written on it
 // is its value and a fact edit for each role written.
 
-// Makes `v` the value of node `node`, spelled as the document's format spells it. A key node takes a text. A fact
-// node or a flat text's container returns `.Bad_Index`, and a cell the format has no spelling for `.Bad_Value`.
-set_value :: proc(list: ^Edit_List, node: Node_Index, v: Value) -> Error {
-	return set_input(list, node, {value = v})
-}
-
-// Inserts `v` into the array `container` before its element `at`, or after its last when `at` is its length. In a
-// flat text's root `v` is a record: an array or an object of cells.
-insert_element_value :: proc(list: ^Edit_List, container: Node_Index, at: int, v: Value) -> Error {
-	return insert_input(list, container, at, "", false, {value = v})
-}
-
-// Inserts `key` and `v` as a member of the object `container` before its member `at`, or after its last when `at` is its
-// length.
-insert_member_value :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string, v: Value) -> Error {
-	return insert_input(list, container, at, key, true, {value = v})
-}
-
 // Whether the format of `list`'s document spells a tag in its value's text, as TOML's datetime is, so a value written
 // with a tag is spelled by it and no fact edit writes it.
 tags_in_text :: proc(list: ^Edit_List) -> bool {
@@ -36,6 +18,7 @@ tags_in_text :: proc(list: ^Edit_List) -> bool {
 
 // Makes the comments `c` writes the comments of node `node`: a role's bodies replace the node's, and a role whose
 // bodies are the node's own makes no edit. A tag the value's text spells is no fact edit.
+@(private)
 set_comments :: proc(list: ^Edit_List, node: Node_Index, c: ^Commented) -> Error {
 	for role in c.written {
 		if role == .Tag && tags_in_text(list) {

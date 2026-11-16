@@ -48,8 +48,7 @@ a_load_reports_every_failing_rule_of_a_member :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	profile_registry(&reg)
-	m, compiled := model.compile(&reg, Profile, json.checks(.Json))
-	walktest.expect_nil(t, compiled)
+	m := compiled_ok(t, &reg, Profile, json.checks(.Json))
 	sink: typed.Sink
 	p: Profile
 	err := model.load(&m, transmute([]u8)string(`{"name": "A", "age": 10, "nick": "toolong"}`), &p, &sink)
@@ -132,8 +131,7 @@ a_load_judges_the_value_its_repeat_policy_keeps :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	reg: model.Registry
-	m, compiled := model.compile(&reg, Repeated, json.checks(.Json))
-	walktest.expect_nil(t, compiled)
+	m := compiled_ok(t, &reg, Repeated, json.checks(.Json))
 	Case :: struct {
 		dups: core.Duplicates,
 		text: string,
@@ -455,8 +453,8 @@ a_load_captures_into_a_map_of_values_by_the_repeat_policy :: proc(t: ^testing.T)
 	walktest.expect_nil(t, model.load(&m, text, &first, nil, {dups = .First}))
 	walktest.expect_nil(t, model.load(&m, text, &last, nil, {dups = .Last}))
 	z, z_last := first.extra["z"], last.extra["z"]
-	testing.expect(t, len(first.extra) == 1 && core.value_kind(z) == .Number, "first keeps the first")
-	testing.expect(t, len(last.extra) == 1 && core.value_kind(z_last) == .Array, "last keeps the last")
+	testing.expect(t, len(first.extra) == 1 && core.kind(z) == .Number, "first keeps the first")
+	testing.expect(t, len(last.extra) == 1 && core.kind(z_last) == .Array, "last keeps the last")
 	testing.expect(t, model.load(&m, text, &first) != nil)
 }
 
@@ -573,8 +571,7 @@ a_model_loads_a_union_of_structs_by_its_naming_tag :: proc(t: ^testing.T) {
 	reg := model.Registry {
 		naming = {union_tag = "type"},
 	}
-	m, compiled := model.compile(&reg, Holds, json.checks(.Json))
-	walktest.expect_nil(t, compiled)
+	m := compiled_ok(t, &reg, Holds, json.checks(.Json))
 	h: Holds
 	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"u": {"type": "Arm_B", "b": "x"}}`), &h))
 	b, ok := h.u.(Arm_B)
@@ -749,8 +746,7 @@ a_not_null_pointer_a_typed_capture_and_an_empty_union_load_as_their_schema_says 
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	reg: model.Registry
-	m, err := model.compile(&reg, Chain, json.checks(.Json))
-	walktest.expect_nil(t, err)
+	m := compiled_ok(t, &reg, Chain, json.checks(.Json))
 	d, _ := model.schema(&m, .Load)
 	c, _ := schema.compile_description(&d)
 	defer schema.destroy(c)
@@ -828,8 +824,7 @@ a_model_and_its_schema_refuse_with_one_kind :: proc(t: ^testing.T) {
 	reg: model.Registry
 	model.register(&reg, model.Union_Rule{Kinds_Pet, .Tag, "kind"})
 	model.register(&reg, Kinds, model.Extra.Forbid)
-	m, err := model.compile(&reg, Kinds, json.checks(.Json))
-	walktest.expect_nil(t, err)
+	m := compiled_ok(t, &reg, Kinds, json.checks(.Json))
 	for view in ([]model.Direction{.Load, .Dump}) {
 		d, _ := model.schema(&m, view)
 		text, _ := schema.write(&d, json.as(.Json))
@@ -944,8 +939,7 @@ a_model_outlives_its_registry :: proc(t: ^testing.T) {
 	testing.expect_value(t, model.register(&reg, model.Field_Rule_Of{Kept, "code", "len>=2"}), runtime.Allocator_Error.None)
 	testing.expect_value(t, model.register(&reg, model.Type_Rule{int, ">=0"}), runtime.Allocator_Error.None)
 	testing.expect_value(t, model.register(&reg, model.Naming{fields = .Camel, union_tag = "kind"}), runtime.Allocator_Error.None)
-	m, compiled := model.compile(&reg, Kept, json.checks(.Json))
-	walktest.expect_nil(t, compiled)
+	m := compiled_ok(t, &reg, Kept, json.checks(.Json))
 	defer model.destroy(&m)
 	model.destroy(&reg)
 	v: Kept
@@ -975,8 +969,7 @@ Sent :: struct {
 a_refused_load_sets_no_bit_of_a_missing_member :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
-	m, e := model.compile(nil, Sent, json.checks(.Json))
-	walktest.expect_nil(t, e)
+	m := compiled_ok(t, nil, Sent, json.checks(.Json))
 	cases := [?]struct {
 		text:          string,
 		name, email: bool,

@@ -245,8 +245,8 @@ cell_and_key_order_hash_alike :: proc(t: ^testing.T) {
 	doc, err := core.build(transmute([]u8)string("a\n7\n"), dsv.as(.Csv))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
-	row, _ := core.doc_child_at(&doc, core.ROOT, 0)
-	cell, _ := core.doc_child_at(&doc, row, 0)
+	row, _ := core.child_at(&doc, core.ROOT, 0)
+	cell, _ := core.child_at(&doc, row, 0)
 	testing.expect(t, core.hash(core.Node_Ref{&doc, cell}, like = core.Value(f64(7))) == core.hash(core.Value(f64(7))))
 	a, aerr := core.build(transmute([]u8)string(`{"x":1.0,"y":[0.10]}`), json.as(.Json))
 	defer core.destroy(&a)
@@ -519,7 +519,7 @@ json5_spellings_compare_by_their_digits :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
 	at :: proc(doc: ^core.Document, i: int) -> core.Value {
-		n, _ := core.doc_child_at(doc, core.ROOT, i)
+		n, _ := core.child_at(doc, core.ROOT, i)
 		return core.Node_Ref{doc, n}
 	}
 	same := [?][2]int{{0, 1}, {3, 4}, {7, 9}}
@@ -543,8 +543,8 @@ a_cell_is_a_string_unless_read_as_a_number :: proc(t: ^testing.T) {
 	doc, err := core.build(transmute([]u8)string("a\n1e-400\n"), dsv.as(.Csv))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
-	row, _ := core.doc_child_at(&doc, core.ROOT, 0)
-	n, _ := core.doc_child_at(&doc, row, 0)
+	row, _ := core.child_at(&doc, core.ROOT, 0)
+	n, _ := core.child_at(&doc, row, 0)
 	cell := core.Value(core.Node_Ref{&doc, n})
 	number := core.Value(core.number_text("1e-400"))
 	testing.expect(t, core.equal(cell, number, read_plain = true))
@@ -586,7 +586,7 @@ hex_integers_are_their_decimals :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, herr)
 	walktest.expect_nil(t, derr)
 	at :: proc(doc: ^core.Document, i: int) -> core.Value {
-		n, _ := core.doc_child_at(doc, core.ROOT, i)
+		n, _ := core.child_at(doc, core.ROOT, i)
 		return core.Node_Ref{doc, n}
 	}
 	for i in 0 ..< N {
@@ -622,10 +622,10 @@ spelled_numbers_are_the_numbers_they_spell :: proc(t: ^testing.T) {
 		walktest.expect_nil(t, err)
 		want, jerr := core.build(transmute([]u8)x.json, json.as(.Json))
 		walktest.expect_nil(t, jerr)
-		list, _ := core.value_member(core.Node_Ref{&doc, core.ROOT}, "a")
-		spelled, plain := core.value_children(list), core.value_children(core.Node_Ref{&want, core.ROOT})
-		for a in core.value_child_next(&spelled) {
-			b, _ := core.value_child_next(&plain)
+		list, _ := core.member(core.Node_Ref{&doc, core.ROOT}, "a")
+		spelled, plain := core.children(list), core.children(core.Node_Ref{&want, core.ROOT})
+		for a in core.child_next(&spelled) {
+			b, _ := core.child_next(&plain)
 			testing.expectf(t, core.equal(a, b) && core.hash(a) == core.hash(b), "%s: %v against %v", x.src, a, b)
 			text, werr := write.write_value(a, yaml.as(.Yaml_1_2))
 			walktest.expect_nil(t, werr)
@@ -654,7 +654,7 @@ a_number_reads_back_as_its_type :: proc(t: ^testing.T) {
 	for r in reads {
 		doc, err := core.build(transmute([]u8)r.src, r.as)
 		walktest.expect_nil(t, err)
-		a, _ := core.value_member(core.Node_Ref{&doc, core.ROOT}, "a")
+		a, _ := core.member(core.Node_Ref{&doc, core.ROOT}, "a")
 		apart := r.as.readers.floats_apart
 		Want :: struct {
 			v:     core.Value,
@@ -665,9 +665,9 @@ a_number_reads_back_as_its_type :: proc(t: ^testing.T) {
 				got, gerr := core.build(transmute([]u8)got_src, r.as)
 				walktest.expect_nil(t, gerr)
 				list := core.edit_list_init(&doc)
-				walktest.expect_nil(t, core.set_value(&list, a.(core.Node_Ref).node, want.v))
+				walktest.expect_nil(t, write.set_node(&list, a.(core.Node_Ref).node, want.v))
 				reads, known := core.reads_as_edited(&list, core.Node_Ref{&got, core.ROOT})
-				g, _ := core.value_member(core.Node_Ref{&got, core.ROOT}, "a")
+				g, _ := core.member(core.Node_Ref{&got, core.ROOT}, "a")
 				float, typed := want.float.?
 				wants := !apart || !typed || float == (i == 1)
 				testing.expectf(t, known && reads == wants, "%q: %v reads back from %q as %v", r.src, want.v, got_src, reads)

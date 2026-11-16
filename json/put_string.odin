@@ -356,7 +356,9 @@ put_mixed :: #force_no_inline proc(out: ^write.Out, s: string, i0: int, $ESC_DEL
 		for i < end {
 			left := n - i
 			if i >= try_from && left >= 64 && i + 64 <= end {
-				// Copies, so that the address the call takes keeps `prev`, `bad` and `high` out of memory in this loop.
+				// Copies, so that the address the call takes keeps `prev`, `bad` and `high` out of memory in this loop. The
+				// block step reads only the last bytes of `prev` and any lane of `err`, so `prev` is the state's last
+				// quarter and `bad` one quarter of its errors.
 				run := kernel.Utf8_State{prev = transmute(#simd[64]u8)[4]V{{}, {}, {}, prev}, err = transmute(#simd[64]u8)[4]V{bad, {}, {}, {}}}
 				run_high := high
 				i, o = wide_run_tier(tier, base, src, i, o, end, &run, &run_high, ESC_DEL)

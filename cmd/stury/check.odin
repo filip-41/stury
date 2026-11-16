@@ -7,9 +7,9 @@ package main
 
 import "base:runtime"
 import "core:os"
+import kernel "../../core/kernel"
 import core "../../core"
 import records "../../core/records"
-import "jq"
 import "message"
 
 // Each file in turn. Exits 0, 2 after a file that did not open or read, or else 5 after a fault, or else 1 after a schema failure.
@@ -78,7 +78,7 @@ check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^c
 		// tells it. So does a text that runs on into the next, which only the reader from a scalar first text sees.
 		if f, bad := fault.?; bad && texts_follow(f, src.format) {
 			from := f.at if closed_first(data) else 0
-			if next, more := first_fault(data, src.as, .Concatenated, runner, from).?; !more || next.at != f.at || jq.is_space(data[f.at - 1]) {
+			if next, more := first_fault(data, src.as, .Concatenated, runner, from).?; !more || next.at != f.at || kernel.is_ws(data[f.at - 1]) {
 				fault = next if more else nil
 			}
 		}
@@ -118,7 +118,7 @@ whole_fault :: proc(data: []byte, as: core.As) -> Maybe(core.Fault) {
 @(private = "file")
 closed_first :: proc(data: []byte) -> bool {
 	for c in data {
-		if !jq.is_space(c) {
+		if !kernel.is_ws(c) {
 			return c == '[' || c == '{' || c == '"'
 		}
 	}

@@ -24,6 +24,22 @@ hex4 :: #force_inline proc "contextless" (h: [^]u8) -> (unit: u32, ok: bool) {
 	}
 }
 
+// The value of the hex digits `src[i:i+count]`, and where it stopped: past them, or at the first byte that is none.
+// `ok` is false then.
+hex_run :: proc "contextless" (src: []u8, i, count: int) -> (v: u32, at: int, ok: bool) {
+	for k in 0 ..< count {
+		if i + k >= len(src) {
+			return 0, len(src), false
+		}
+		d := HEX_NIBBLE[src[i + k]]
+		if d == 0xff {
+			return 0, i + k, false
+		}
+		v = v << 4 | u32(d)
+	}
+	return v, i + count, true
+}
+
 // The low `N` hex digits of `v`, most significant first, uppercase when `upper` is set.
 hex_text :: #force_inline proc "contextless" (v: u64, $N: int, $upper: bool) -> (digits: [N]u8) #no_bounds_check {
 	alphabet := "0123456789ABCDEF" if upper else "0123456789abcdef"

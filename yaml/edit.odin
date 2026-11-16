@@ -8,6 +8,7 @@ package yaml
 
 import "base:runtime"
 import "core:bytes"
+import kernel "../core/kernel"
 import core "../core"
 import compose "../core/compose"
 import write "../core/write"
@@ -56,7 +57,7 @@ edit_spell :: proc(doc: ^core.Document, v: core.Value, opts: core.Write_Options,
 // the whole text judges.
 @(private)
 edit_value :: proc(v: ^core.Token_View, src: []u8, allocator: runtime.Allocator) -> core.Document_Error {
-	if len(src) == 0 || src[0] == ' ' || src[0] == '\t' || src[0] == '\n' || src[0] == '\r' || src[0] == '#' || src[0] == '%' || holds_marker(src) {
+	if len(src) == 0 || kernel.is_ws(src[0]) || src[0] == '#' || src[0] == '%' || holds_marker(src) {
 		return {kind = .Bad_Value}
 	}
 	arena := runtime.Arena{backing_allocator = allocator, minimum_block_size = 4 * 1024}
@@ -124,7 +125,7 @@ Judged_Names :: struct {
 @(private = "file")
 name_anchor :: proc(names: ^Judged_Names, rest: []u8) {
 	name := 0
-	for name < len(rest) && !is_blank_byte(rest[name]) && bytes.index_byte(transmute([]u8)string(",[]{}"), rest[name]) < 0 {
+	for name < len(rest) && !kernel.is_ws(rest[name]) && bytes.index_byte(transmute([]u8)string(",[]{}"), rest[name]) < 0 {
 		name += 1
 	}
 	append(&names.anchors, "- &")
@@ -172,7 +173,7 @@ judged_text :: proc(names: ^Judged_Names, src: []u8, allocator: runtime.Allocato
 @(private = "file")
 holds_marker :: proc(src: []u8) -> bool {
 	for ls := 0; ls < len(src); {
-		if rest := src[ls:]; len(rest) >= 3 && (string(rest[:3]) == "---" || string(rest[:3]) == "...") && (len(rest) == 3 || is_blank_byte(rest[3])) {
+		if rest := src[ls:]; len(rest) >= 3 && (string(rest[:3]) == "---" || string(rest[:3]) == "...") && (len(rest) == 3 || kernel.is_ws(rest[3])) {
 			return true
 		}
 		nl := bytes.index_byte(src[ls:], '\n')
@@ -182,11 +183,6 @@ holds_marker :: proc(src: []u8) -> bool {
 		ls += nl + 1
 	}
 	return false
-}
-
-@(private)
-is_blank_byte :: #force_inline proc "contextless" (c: u8) -> bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
 // Writes the decoded name `name` as a block mapping's key: plain when it reads back as itself, else quoted.
@@ -478,7 +474,7 @@ build_geometry :: proc(cx: ^Cx) {
 alias_key_at :: proc(src: []u8, from: u64, flow: bool) -> (lo, hi: u64) {
 	lo = from
 	for lo < u64(len(src)) {
-		at_token := lo == 0 || is_blank_byte(src[lo - 1])
+		at_token := lo == 0 || kernel.is_ws(src[lo - 1])
 		if src[lo] == '#' && at_token {
 			lo = content_end(src, lo)
 			continue
@@ -489,7 +485,7 @@ alias_key_at :: proc(src: []u8, from: u64, flow: bool) -> (lo, hi: u64) {
 		lo += 1
 	}
 	hi = lo + 1
-	for hi < u64(len(src)) && !is_blank_byte(src[hi]) && !(flow && bytes.index_byte(transmute([]u8)string(",[]{}"), src[hi]) >= 0) {
+	for hi < u64(len(src)) && !kernel.is_ws(src[hi]) && !(flow && bytes.index_byte(transmute([]u8)string(",[]{}"), src[hi]) >= 0) {
 		hi += 1
 	}
 	return
@@ -506,7 +502,7 @@ key_props_end :: proc(src: []u8, p: u64) -> u64 {
 		if i == u64(len(src)) || src[i] != '!' && src[i] != '&' {
 			return end
 		}
-		for i < u64(len(src)) && !is_blank_byte(src[i]) {
+		for i < u64(len(src)) && !kernel.is_ws(src[i]) {
 			i += 1
 		}
 		end = i
@@ -534,7 +530,7 @@ key_start :: proc(doc: ^core.Document, src: []u8, j: u32, lo: u64) -> u64 {
 	// An empty explicit key starts at its `?`, which may stand on an earlier line.
 	if doc.nodes[j].n == 0 {
 		q := at
-		for q > 0 && is_blank_byte(src[q - 1]) {
+		for q > 0 && kernel.is_ws(src[q - 1]) {
 			q -= 1
 		}
 		if q > 0 && src[q - 1] == '?' {
@@ -550,7 +546,7 @@ key_start :: proc(doc: ^core.Document, src: []u8, j: u32, lo: u64) -> u64 {
 			return at
 		}
 		t := k
-		for t > 0 && !is_blank_byte(src[t - 1]) {
+		for t > 0 && !kernel.is_ws(src[t - 1]) {
 			t -= 1
 		}
 		// A flow indicator ends a token inside a flow collection, but a verbatim tag may hold one.

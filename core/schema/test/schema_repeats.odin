@@ -107,9 +107,7 @@ repeats_unnamed_and_nested :: proc(t: ^testing.T) {
 repeats_records :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
-	doc, err := core.build(transmute([]u8)string(`{"properties": {"a": {"type": "string"}}}`), json.as(.Json))
-	testing.expect(t, err == nil)
-	c, compiled := schema.compile(core.span(&doc, core.ROOT), json.as(.Json))
+	c, compiled := schema.compile(transmute([]u8)string(`{"properties": {"a": {"type": "string"}}}`), json.as(.Json))
 	testing.expect(t, compiled == nil)
 	b, bound := schema.bind(c, json.checks(.Json))
 	testing.expect(t, bound == nil)

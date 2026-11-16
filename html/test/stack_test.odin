@@ -34,11 +34,11 @@ a_deep_document_is_read_and_written_on_a_small_stack :: proc(t: ^testing.T) {
 		// Down `html`, `body` and each div to the innermost div's text.
 		depth := 0
 		for name in ([]string{"html", "body"}) {
-			v, _ = core.value_member(v, name)
+			v, _ = core.member(v, name)
 			depth += 1
 		}
-		for core.value_kind(v) == .Object {
-			inner, ok := core.value_member(v, "div")
+		for core.kind(v) == .Object {
+			inner, ok := core.member(v, "div")
 			if !ok {
 				break
 			}

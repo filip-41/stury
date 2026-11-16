@@ -11,7 +11,6 @@ package core
 // an array of each of its elements (`markup_members`), so each of them sees that.
 
 import "base:runtime"
-import "core:hash"
 import "core:strings"
 import "spell"
 
@@ -155,6 +154,7 @@ number :: proc {
 }
 
 // The kind of `v`. A node's is the document's `kind`, which reads a `Plain` cell as its format does.
+@(private)
 value_kind :: #force_inline proc(v: Value) -> Kind {
 	switch x in v {
 	case nil:
@@ -178,6 +178,7 @@ value_kind :: #force_inline proc(v: Value) -> Kind {
 }
 
 // The number of members of a container, a repeated key's each time, or 0 for a scalar.
+@(private)
 value_length :: #force_inline proc(v: Value) -> int {
 	#partial switch x in plain(v) {
 	case ^Array:
@@ -197,6 +198,7 @@ value_length :: #force_inline proc(v: Value) -> int {
 }
 
 // Member `k` of array `v`, counted from 0, or false past its end or for anything else.
+@(private)
 value_child_at :: proc(v: Value, k: int) -> (Value, bool) {
 	#partial switch x in plain(v) {
 	case ^Array:
@@ -221,6 +223,7 @@ value_child_at :: proc(v: Value, k: int) -> (Value, bool) {
 
 // The value of the member of object `v` named `name`, the first under `.First` and else the last. A markup node's is
 // its `markup_member`, under any `dups`, whose array is made in the temp allocator.
+@(private)
 value_member :: #force_inline proc(v: Value, name: string, dups := Duplicates.Last) -> (Value, bool) {
 	#partial switch x in plain(v) {
 	case ^Object:
@@ -264,6 +267,7 @@ Value_Iter :: struct {
 
 // Starts a `Value_Iter` over the members of `v`. A scalar has none. A trail's array is made here, in the context
 // allocator, and a markup node's members in the temp allocator.
+@(private)
 value_children :: proc(v: Value) -> Value_Iter {
 	it := Value_Iter{v = plain(v)}
 	#partial switch x in it.v {
@@ -279,6 +283,7 @@ value_children :: proc(v: Value) -> Value_Iter {
 	return it
 }
 
+@(private)
 value_child_next :: #force_inline proc(it: ^Value_Iter) -> (Value, bool) {
 	#partial switch x in it.v {
 	case ^Array:
@@ -302,6 +307,7 @@ value_child_next :: #force_inline proc(it: ^Value_Iter) -> (Value, bool) {
 // Starts a `Value_Iter` over the keys and values of object `v`. Anything else has none. A node's `pairs` are its
 // document's own, a repeated key's each time, even where the iterator reads a markup node's `markup_members`, made in
 // the temp allocator.
+@(private)
 value_pairs :: proc(v: Value) -> Value_Iter {
 	it := Value_Iter{v = plain(v)}
 	if r, is_ref := it.v.(Node_Ref); is_ref {
@@ -315,6 +321,7 @@ value_pairs :: proc(v: Value) -> Value_Iter {
 }
 
 // Returns the next key and value. A node's key that needs decoding is decoded into the context allocator.
+@(private)
 value_pair_next :: #force_inline proc(it: ^Value_Iter) -> (key: string, val: Value, ok: bool) {
 	#partial switch x in it.v {
 	case ^Object:
@@ -340,6 +347,7 @@ node_string :: proc(doc: ^Document, i: Node_Index) -> string {
 }
 
 // The text of string `v`. A node's is the document's `text`, written into `buf` when it needs decoding.
+@(private)
 value_text :: #force_inline proc(v: Value, buf: []u8) -> (string, bool) {
 	#partial switch x in plain(v) {
 	case string:
@@ -352,6 +360,7 @@ value_text :: #force_inline proc(v: Value, buf: []u8) -> (string, bool) {
 
 // The number `v` holds. A double that holds an integer of at most 53 bits is an `.Int`, any other a `.Float`. A
 // `Number_View` is read as the document's `number` reads a number's text.
+@(private)
 value_number :: #force_inline proc(v: Value) -> (Number, bool) {
 	#partial switch x in plain(v) {
 	case f64:
@@ -392,103 +401,11 @@ trail_array :: proc(t: Trail) -> ^Array {
 }
 
 // Writes the keys of trail `t` from the root into `into`, which holds `t.depth` values.
+@(private)
 trail_keys :: proc(t: Trail, into: []Value) {
 	n := len(into)
 	for s := (^Trail_Step)(t); s != nil; s = s.parent {
 		n -= 1
 		into[n] = s.key
 	}
-}
-
-// Whether object node `r` has a key that one before it has.
-has_repeated_key :: proc(r: Node_Ref) -> bool {
-	n := doc_length(r.doc, r.node)
-	if n < 2 || header_of(r.doc) != 0 && r.doc.tables_at[0].unique_keys {
-		return false
-	}
-	it := doc_pairs(r.doc, r.node)
-	if n <= 16 {
-		keys: [16]string = ---
-		// A key's length and end bytes set a bit, so only a key whose bit is set is compared with the ones before it.
-		seen: [4]u64
-		i := 0
-		for k in next_key(&it) {
-			h := u32(len(k))
-			if len(k) > 0 {
-				h = h * 7 + u32(k[0]) * 31 + u32(k[len(k) - 1]) * 131
-			}
-			bit := u64(1) << (h & 63)
-			if seen[(h >> 6) & 3] & bit != 0 {
-				for prev in keys[:i] {
-					if prev == k {
-						return true
-					}
-				}
-			}
-			seen[(h >> 6) & 3] |= bit
-			keys[i] = k
-			i += 1
-		}
-		return false
-	}
-	if n <= KEY_TABLE / 2 {
-		return repeats_in_table(&it)
-	}
-	seen := make(map[string]bool, n, context.temp_allocator)
-	defer delete(seen)
-	for k in next_key(&it) {
-		if k in seen {
-			return true
-		}
-		seen[k] = true
-	}
-	return false
-}
-
-// The number of names of object node `r`, a repeated one once. Kept out of the length readers, whose frames would
-// otherwise cost every call.
-distinct_keys :: #force_no_inline proc(r: Node_Ref) -> int {
-	seen := make(map[string]bool, doc_length(r.doc, r.node), context.temp_allocator)
-	it := doc_pairs(r.doc, r.node)
-	for k in next_key(&it) {
-		seen[k] = true
-	}
-	return len(seen)
-}
-
-// The keys of a document object in source order, a repeated one each time.
-@(private = "file")
-next_key :: #force_inline proc(it: ^Pair_Iter) -> (string, bool) {
-	k, _, ok := doc_pair_next(it)
-	if !ok {
-		return "", false
-	}
-	return node_string(it.doc, k), true
-}
-
-// Slots of `repeats_in_table`'s open-addressed table, kept at most half full.
-@(private = "file")
-KEY_TABLE :: 256
-
-// `has_repeated_key` for an object of up to KEY_TABLE / 2 members, hashed on the stack, not in a map.
-@(private = "file")
-repeats_in_table :: proc(it: ^Pair_Iter) -> bool {
-	slots: [KEY_TABLE]u8 // a key's place in `keys`, plus one, 0 is empty
-	keys: [KEY_TABLE / 2]string = ---
-	i := 0
-	for k in next_key(it) {
-		h := hash.fnv32a(transmute([]byte)k)
-		for s := h % KEY_TABLE;; s = (s + 1) % KEY_TABLE {
-			if slots[s] == 0 {
-				keys[i] = k
-				i += 1
-				slots[s] = u8(i)
-				break
-			}
-			if keys[slots[s] - 1] == k {
-				return true
-			}
-		}
-	}
-	return false
 }

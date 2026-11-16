@@ -8,6 +8,7 @@ package jq
 import "base:runtime"
 import "core:mem/virtual"
 import "core:strings"
+import "../../../core/kernel"
 import core_pkg "../../../core"
 
 // An event is made whole in the allocator of the call that makes it, as `input` under -n empties one each call. The
@@ -188,7 +189,7 @@ event_trigger :: proc(e: ^Events) -> int {
 	case len(e.frames) == 0:
 		return hi - 1 if k == .String else hi
 	}
-	for hi < len(src) && is_space(src[hi]) {
+	for hi < len(src) && kernel.is_ws(src[hi]) {
 		hi += 1
 	}
 	return hi

@@ -299,12 +299,12 @@ parse_quantifiers :: proc(p: ^Parser, atom: ^Node) -> ^Node {
 		}
 		rep := new_node(.Repeat, atom)
 		rep.min, rep.max, rep.greedy = lo, hi, true
-		if peek(p) == '?' && !at_end(p) {
+		if peek(p) == '?' {
 			rep.greedy = false
 			p.i += 1
 		} else if p.flags.ecma { // ECMA takes one quantifier per atom, a second one is not a repeat of the first
 			return rep
-		} else if peek(p) == '+' && !at_end(p) { // also after an interval: `a{1,2}+` (PLUS_POSSESSIVE_INTERVAL)
+		} else if peek(p) == '+' { // also after an interval: `a{1,2}+` (PLUS_POSSESSIVE_INTERVAL)
 			rep.possessive = true
 			p.i += 1
 		}
@@ -544,7 +544,7 @@ capture_node :: proc(p: ^Parser, name: string) -> ^Node {
 @(private = "file")
 parse_group :: proc(p: ^Parser) -> ^Node {
 	p.i += 1
-	if peek(p) == '*' && !at_end(p) && !p.flags.ecma {
+	if peek(p) == '*' && !p.flags.ecma {
 		return parse_callout(p)
 	}
 	if peek(p) != '?' || at_end(p) {
@@ -602,11 +602,10 @@ parse_group :: proc(p: ^Parser) -> ^Node {
 @(private = "file")
 group_name :: proc(p: ^Parser, close: byte) -> (name: string, ok: bool) {
 	message := "invalid group name <"
+	name = read_name(p, close) or_return
 	if p.flags.ecma {
-		name = ecma_name(p, close) or_return
 		ok = ecma_identifier(name) && !slice.contains(p.names[:], name)
 	} else {
-		name = read_name(p, close) or_return
 		first, _ := utf8.decode_rune_in_string(name)
 		numbered := first >= '0' && first <= '9' || first == '-'
 		ok = !numbered && is_word(first)
@@ -621,11 +620,11 @@ group_name :: proc(p: ^Parser, close: byte) -> (name: string, ok: bool) {
 	return
 }
 
-// Reads an ECMA group name up to `close` and decodes its `\u` escapes.
-ecma_name :: proc(p: ^Parser, close: byte) -> (string, bool) {
+// Reads a name up to `close`. An empty name is an error. Under ECMA its `\u` escapes are decoded.
+read_name :: proc(p: ^Parser, close: byte) -> (string, bool) {
 	b := strings.builder_make()
 	for !at_end(p) && peek(p) != close {
-		if p.src[p.i] != '\\' {
+		if !p.flags.ecma || p.src[p.i] != '\\' {
 			strings.write_byte(&b, p.src[p.i])
 			p.i += 1
 			continue
@@ -641,27 +640,9 @@ ecma_name :: proc(p: ^Parser, close: byte) -> (string, bool) {
 		}
 		strings.write_rune(&b, r)
 	}
+	name := strings.to_string(b)
 	if at_end(p) {
-		fail(p, "invalid group name")
-		return "", false
-	}
-	p.i += 1
-	if strings.builder_len(b) == 0 {
-		fail(p, "group name is empty")
-		return "", false
-	}
-	return strings.to_string(b), true
-}
-
-// Reads a name up to `close`. An empty name is an error.
-read_name :: proc(p: ^Parser, close: byte) -> (string, bool) {
-	start := p.i
-	for !at_end(p) && peek(p) != close {
-		p.i += 1
-	}
-	name := p.src[start:p.i]
-	if at_end(p) {
-		fail(p, strings.concatenate({"invalid group name <", name, ">"}))
+		fail(p, "invalid group name" if p.flags.ecma else strings.concatenate({"invalid group name <", name, ">"}))
 		return "", false
 	}
 	p.i += 1

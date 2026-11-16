@@ -96,12 +96,12 @@ parse_class :: proc(p: ^Parser) -> ^Node {
 	cls := new(Class)
 	n.class = cls
 	cls.fold = p.flags.fold
-	if peek(p) == '^' && !at_end(p) {
+	if peek(p) == '^' {
 		cls.negated = true
 		p.i += 1
 	}
 	// A leading `]` is a character that may start a range (`[]-a]`). Under ECMA it ends an empty class.
-	leading := peek(p) == ']' && !at_end(p) && !p.flags.ecma
+	leading := peek(p) == ']' && !p.flags.ecma
 	if leading && strings.index_byte(p.src[p.i + 1:], ']') < 0 {
 		return fail(p, "empty char-class")
 	}
@@ -243,8 +243,8 @@ class_word :: proc(it: Prop_Item) -> Prop_Item {
 	return {table = TABLE_CLASS_WORD, neg = it.neg} if it.table == TABLE_WORD else it
 }
 
+// Tests `r`, then each character of its case fold orbit when the class folds.
 class_match_slow :: proc(cls: ^Class, r: rune) -> bool {
-	// Tests `r`, then each character of its case fold orbit when the class folds.
 	x := r
 	for {
 		for g in cls.ranges {
@@ -267,9 +267,18 @@ class_match_slow :: proc(cls: ^Class, r: rune) -> bool {
 	}
 }
 
+// Bit `i` of a set of bits held in 64-bit words.
+has_bit :: #force_inline proc(words: []u64, i: int) -> bool {
+	return words[i >> 6] & (1 << (u64(i) & 63)) != 0
+}
+
+add_bit :: #force_inline proc(words: []u64, i: int) {
+	words[i >> 6] |= 1 << (u64(i) & 63)
+}
+
 class_match :: #force_inline proc(cls: ^Class, r: rune) -> bool {
 	if r >= 0 && r < 0x80 {
-		return cls.ascii[r >> 6] & (1 << (u64(r) & 63)) != 0
+		return has_bit(cls.ascii[:], int(r))
 	}
 	return class_match_slow(cls, r)
 }

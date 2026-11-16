@@ -26,6 +26,7 @@ f32_text :: proc "contextless" (dst: [^]u8, f: f32) -> int #no_bounds_check
 f64_point_text :: proc "contextless" (dst: [^]u8, f: f64, point: string) -> int #no_bounds_check
 f64_text :: proc "contextless" (dst: [^]u8, f: f64) -> int #no_bounds_check
 hex4 :: #force_inline proc "contextless" (h: [^]u8) -> (unit: u32, ok: bool)
+hex_run :: proc "contextless" (src: []u8, i, count: int) -> (v: u32, at: int, ok: bool)
 hex_text :: #force_inline proc "contextless" (v: u64, $N: int, $upper: bool) -> (digits: [N]u8) #no_bounds_check
 high_surrogate :: #force_inline proc "contextless" (unit: u32) -> bool
 i64_text :: #force_inline proc "contextless" (dst: [^]u8, v: i64) -> int
@@ -67,6 +68,7 @@ COMMENT_ROLES :: bit_set[Role]{.Comment, .Comment_Inline, .Comment_Foot}
 Capabilities :: struct { writes: bit_set[Write_Option; u8], framings: bit_set[Framing; u8], specs: typeid, follows: proc "contextless" (f: Fault) -> bool, }
 DECODE_SLACK :: 8
 ELEMENT_FACTS :: bit_set[Fact_Kind]{.Name, .Namespace, .Content, .Attribute, .Doctype}
+Edit_Input :: struct { text: string, value: Value, raw: bool, }
 Edited_Region :: struct { path: Path, want: Value, gone: bool, }
 FACTS := [Fact_Kind]Fact_Info {
 FAULT_REACH :: 16
@@ -126,9 +128,7 @@ holding_hook :: #force_inline proc "contextless" (s: ^Holding($H), regs: Hook_Re
 in_place_of :: proc(v: Value, origin: Node_Ref) -> Value
 index_children :: proc(doc: ^Document, i: Node_Index) -> bool
 index_keys :: proc(doc: ^Document, t: ^Table) -> runtime.Allocator_Error
-insert_element_value :: proc(list: ^Edit_List, container: Node_Index, at: int, v: Value) -> Error
 insert_input :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string, member: bool, in_: Edit_Input) -> Error
-insert_member_value :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string, v: Value) -> Error
 insert_text :: proc(list: ^Edit_List, container: Node_Index, v: Value) -> (text: []u8, owned: bool, err: Error)
 is_flat :: #force_inline proc(doc: ^Document) -> bool
 is_markup :: #force_inline proc "contextless" (doc: ^Document) -> bool
@@ -138,7 +138,6 @@ json_decimal :: proc(lit: string, buf: []u8) -> (json: string, ok: bool)
 keep_comments :: #force_inline proc(old, nv: Value) -> Value
 kept_tag :: proc(doc: ^Document, tag: string, nv: Value) -> (string, bool)
 kept_value :: proc(v: Value, keep: ^Document = nil, dups := Duplicates.Default) -> Value
-line_end_len :: proc(src: []u8, pos: u64) -> u64
 locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines = nil) -> (line, col: u64)
 lower_node :: proc(entries: []$E, node: $N) -> int
 make_room :: #force_inline proc(a: ^[dynamic]$T)
@@ -175,7 +174,6 @@ rebuilt_attributes :: proc(v: Value) -> (attributes: ^Object, rebuilt: bool)
 rebuilt_comments :: proc(v: Value, role: Role) -> (bodies: []string, rebuilt: bool)
 reindex :: proc(o: ^Object)
 render_entry :: proc(w: io.Writer, src: []u8, e: Error_Entry, lines: ^Lines = nil) -> io.Error
-reorder :: proc(list: ^Edit_List, container: Node_Index, order: []u32) -> Error
 reserve_depth :: #force_inline proc "contextless" (max_depth: u32, n: int) -> int
 result_of :: #force_inline proc "contextless" (r: u64, rules: ^Rules) -> (hi: u64, fault: Maybe(Fault), stopped: bool)
 rewrap :: proc(c: ^Commented, inner: Value) -> Value
@@ -184,18 +182,16 @@ same_format :: #force_inline proc "contextless" (a, b: ^Readers) -> bool
 same_number_type :: proc(a, b: Value) -> bool
 scalar_ends :: #force_inline proc "contextless" (t: Token) -> (lo, hi: u64)
 services_of :: #force_inline proc "contextless" (as: As) -> ^Services
-set_facts :: proc(list: ^Edit_List, node: Node_Index, role: Role, texts: []string, padded := false) -> Error
 set_input :: proc(list: ^Edit_List, node: Node_Index, in_: Edit_Input) -> Error
 set_member_input :: proc(list: ^Edit_List, obj: Node_Index, name: string, in_: Edit_Input, dups: Duplicates) -> Error
 set_tables :: #force_inline proc "contextless" (doc: ^Document, tables: []Table)
 set_text :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Error
-set_value :: proc(list: ^Edit_List, node: Node_Index, v: Value) -> Error
 site_at :: proc "contextless" (src: []u8, at: u64) -> Site
 sorted_keys :: proc(v: Value) -> []string
 sorted_members :: proc(v: Value, dups := Duplicates.Last) -> []Member
 steps_clone :: proc(steps: []Step, allocator := context.allocator) -> []Step
 subtree_facts :: proc(doc: ^Document, i: Node_Index) -> []Fact
-subtree_size :: #force_inline proc(doc: ^Document, i: Node_Index) -> int
+subtree_size :: #force_inline proc "contextless" (doc: ^Document, i: Node_Index) -> int
 tables_of :: #force_inline proc "contextless" (doc: ^Document) -> []Table
 tags_in_text :: proc(list: ^Edit_List) -> bool
 text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator) -> (s: string, ok: bool)
@@ -235,6 +231,7 @@ head16 :: #force_inline proc "contextless" (src: [^]u8, n: int) -> (v, live: V, 
 index_byte :: #force_inline proc "contextless" (src: []u8, c: u8) -> int
 is_ascii :: #force_inline proc "contextless" (b: Block) -> bool
 is_ascii16 :: #force_inline proc "contextless" (v: V) -> bool
+is_markup_ws :: #force_inline proc "contextless" (c: u8) -> bool
 is_ws :: #force_inline proc "contextless" (c: u8) -> bool
 last_index_byte :: #force_inline proc "contextless" (src: []u8, c: u8) -> int
 live16 :: #force_inline proc "contextless" (n: int) -> V #no_bounds_check
@@ -273,8 +270,8 @@ markup_content :: proc(doc: ^core.Document, m: ^Markup, node: core.Node_Index) -
 markup_key_text :: proc(_: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bool
 next_line :: proc(src: []u8, p: u64) -> u64
 order_check :: proc(order: []u8, removed: []bool, inserts: int, allocator: runtime.Allocator) -> core.Document_Error
-push :: proc(d: ^[dynamic]$T, v: T) -> (int, bool)
-push_all :: proc(d: ^[dynamic]$T, vs: []T) -> (count: int, ok: bool)
+push :: proc(d: ^[dynamic]$T, v: T) -> bool
+push_all :: proc(d: ^[dynamic]$T, vs: []T) -> bool
 role_facts :: proc(doc: ^core.Document, e: core.Edit, allocator: runtime.Allocator) -> [dynamic]core.Fact
 spell_comment :: proc(b: ^[dynamic]u8, s: core.Comment_Syntax, body: []u8, line, padded: bool) -> bool
 # core/rules
@@ -333,12 +330,11 @@ builder_hook_plain :: #force_inline proc "contextless" (h: ^Builder, s: core.Hoo
 builder_hook_plain_refuse :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
 builder_refuse_result :: #force_inline proc "contextless" (h: ^Builder, open, end: core.Node_Index)
 builder_start :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth: int, facts := 0, frames: []u64 = nil) -> Builder
-each_answer_with :: proc(src: []u8, as: core.As, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read: core.Path_Options, allocator: runtime.Allocator, $build_doc: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), $scan_doc: proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error)) -> core.Error
+each_answer_with :: proc(src: []u8, as: core.As, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read: core.Path_Options, allocator: runtime.Allocator, $build_doc: type_of(core.Services{}.build), $scan_doc: type_of(core.Services{}.scan)) -> core.Error
 feed_nodes :: proc "contextless" ( doc: ^core.Document, from, to: u32, h: ^$H, out: ^core.Hook_Regs, ends: []u32, $step: proc "contextless" (h: ^H, regs: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action), $keyed: proc "contextless" (h: ^H, regs: core.Hook_Regs, i, open: core.Node_Index) -> (core.Node_Index, bool), $deepen: proc "contextless" (h: ^H, extra: int) -> bool, $OPEN: bool, ) -> bool
 first_answer :: proc(doc: ^core.Document) -> core.Answer
 first_path :: proc(path: core.Path) -> core.Path
 no_deepen :: proc "contextless" (_: ^$H, _: int) -> bool
-query_built :: proc(doc: ^core.Document, built: core.Error, paths: []core.Path, read: core.Path_Options) -> (core.Document, core.Error)
 scan_again :: proc(h: ^Scan, src: []u8, as: core.As, allocator: runtime.Allocator, frames: []u64) -> core.Path_Error
 scan_built :: proc(doc: ^core.Document, built: core.Document_Error, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error)
 scan_deepen :: #force_no_inline proc "contextless" (h: ^Scan, extra: int) -> bool
@@ -351,7 +347,7 @@ scan_kept :: proc "contextless" (h: ^Scan, d: int) -> bool
 scan_reserve :: proc "contextless" (h: ^Scan, nodes: int) -> bool
 scan_room :: #force_inline proc "contextless" (h: ^Scan) -> int
 scan_start :: proc(h: ^Scan, src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error
-scan_with :: proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, allocator: runtime.Allocator, $build_doc: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), $scan_doc: proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error)) -> (core.Document, core.Error)
+scan_with :: proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, allocator: runtime.Allocator, $build_doc: type_of(core.Services{}.build), $scan_doc: type_of(core.Services{}.scan)) -> (core.Document, core.Error)
 set_answers :: proc(list: ^core.Edit_List, path: core.Path, in_: core.Edit_Input, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
 # core/typed
 KEY_SIZE_MAX :: 240

@@ -39,6 +39,20 @@ edit_list_init :: proc(doc: ^core.Document, $S: Spec, allocator := context.alloc
 	return list
 }
 
+// Returns the source bytes `list`'s edits make, as `compose.commit` does, in the document's own spec or in `spec`. A
+// program that names a spec links every spec's passes.
+commit :: proc {commit_own, commit_as}
+
+@(private)
+commit_own :: proc(list: ^core.Edit_List, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Error) {
+	return compose.commit(list, nil, allocator)
+}
+
+@(private)
+commit_as :: proc(list: ^core.Edit_List, spec: Spec, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Error) {
+	return compose.commit(list, as(spec), allocator)
+}
+
 // Makes `v` the value at every answer of `path` over `src`, in one call, and returns the new item, which the caller
 // frees with `allocator`, keeping every byte the edit does not reach. A `typed.Raw` is the bytes of a CBOR item, a
 // struct, a slice or a map is built by `plan`, and any other value is written as a CBOR item. A `Name` the path ends in

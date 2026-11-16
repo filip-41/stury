@@ -260,7 +260,7 @@ frozen_node_refuses_every_edit :: proc(t: ^testing.T) {
 	list.edit = &edit
 	refusal := core.set_text(&list, a, "3")
 	walktest.expect_kind(t, refusal, core.Document_Error_Kind.Frozen)
-	walktest.expect_kind(t, write.set(&list, a, 3), core.Document_Error_Kind.Frozen)
+	walktest.expect_kind(t, write.set_node(&list, a, 3), core.Document_Error_Kind.Frozen)
 	walktest.expect_kind(t, core.remove(&list, a), core.Document_Error_Kind.Frozen)
 	walktest.expect_kind(t, core.set_fact(&list, a, .Comment, "x"), core.Document_Error_Kind.Frozen)
 	b_text := strings.builder_make(context.temp_allocator)
@@ -302,9 +302,9 @@ moved_node_takes_the_formats_bytes :: proc(t: ^testing.T) {
 		if i == 1 {
 			list.edit = &edit
 		}
-		walktest.expect_nil(t, core.set_value(&list, b, core.Node_Ref{&doc, a}))
+		walktest.expect_nil(t, write.set_node(&list, b, core.Node_Ref{&doc, a}))
 		if i == 1 {
-			walktest.expect_kind(t, core.set_value(&list, a, core.Node_Ref{&doc, b}), core.Document_Error_Kind.Bad_Value)
+			walktest.expect_kind(t, write.set_node(&list, a, core.Node_Ref{&doc, b}), core.Document_Error_Kind.Bad_Value)
 			testing.expect_value(t, string(list.edits[0].text), "<1@7>")
 			continue
 		}
@@ -351,7 +351,7 @@ format_commit_takes_the_list_as_recorded :: proc(t: ^testing.T) {
 		if i == 1 {
 			list.edit = &edit
 		}
-		walktest.expect_nil(t, core.set_value(&list, a, core.Node_Ref{&held, core.ROOT}))
+		walktest.expect_nil(t, write.set_node(&list, a, core.Node_Ref{&held, core.ROOT}))
 		testing.expect_value(t, string(list.edits[0].text), want)
 		out, _, cerr := compose.commit(&list, allocator = context.temp_allocator)
 		walktest.expect_nil(t, cerr)

@@ -121,11 +121,6 @@ map_code_point :: proc(r: rune, out: ^[MAX_MAPPED]rune) -> (n: int, ok: bool) {
 	return 0, false
 }
 
-@(private)
-is_mark :: proc(r: rune) -> bool {
-	return regex.in_property("m", r)
-}
-
 // Whether `cps` holds a code point of one of the scripts.
 @(private)
 has_script :: proc(cps: []rune, scripts: ..string) -> bool {
@@ -204,7 +199,7 @@ any_between :: proc(cps: []rune, lo, hi: rune) -> bool {
 @(private)
 ulabel_valid :: proc(cps: []rune, bidi: bool) -> (rtl, ok: bool) {
 	n := len(cps)
-	if n == 0 || cps[0] == '-' || cps[n - 1] == '-' || is_mark(cps[0]) {
+	if n == 0 || cps[0] == '-' || cps[n - 1] == '-' || regex.in_property("m", cps[0]) {
 		return
 	}
 	for r, i in cps {

@@ -392,17 +392,11 @@ flatten :: proc(g: ^Gen, out: ^[dynamic]Part, p: Part, hops: int) -> bool {
 // the parts and their extras.
 @(private = "file")
 draw :: proc(g: ^Gen, given: []Part, depth: int) -> (v: core.Value, ok: bool) {
-	v, ok = draw_parts(g, given, depth)
-	if !ok && g.culprit == rules.NONE {
+	defer if !ok && g.culprit == rules.NONE {
 		for p in given {
 			g.culprit = p.node if p.node != rules.NONE else g.culprit
 		}
 	}
-	return
-}
-
-@(private = "file")
-draw_parts :: proc(g: ^Gen, given: []Part, depth: int) -> (v: core.Value, ok: bool) {
 	if depth < -6 || !spend(g, 1) {
 		return
 	}

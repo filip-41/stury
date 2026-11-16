@@ -55,7 +55,7 @@ rune_atom :: proc(b: ^Builder, r: rune) -> (i32, bool) {
 	}
 	a: Atom
 	if r < 0x80 {
-		a.ascii[r >> 6] = 1 << (u64(r) & 63)
+		add_bit(a.ascii[:], int(r))
 	} else {
 		a.runs = slice.clone([][2]rune{{r, r}})
 	}
@@ -78,7 +78,7 @@ fold_atom :: proc(b: ^Builder, f: rune) -> (i32, bool) {
 		switch {
 		case fold(r) != f:
 		case r < 0x80:
-			a.ascii[r >> 6] |= 1 << (u64(r) & 63)
+			add_bit(a.ascii[:], int(r))
 		case:
 			append(runs, [2]rune{r, r})
 		}
@@ -104,7 +104,7 @@ word_atom :: proc(b: ^Builder, ascii_only: bool) -> (id: i32, ok: bool) {
 	a: Atom
 	for r in rune(0) ..< 0x80 {
 		if is_word(r) {
-			a.ascii[r >> 6] |= 1 << (u64(r) & 63)
+			add_bit(a.ascii[:], int(r))
 		}
 	}
 	if !ascii_only {
@@ -254,8 +254,8 @@ alphabet :: proc(b: ^Builder) -> (ascii: [128]u8, bounds: []rune, symbols: []u8,
 		s := u8(len(ids))
 		ids[string(slice.to_bytes(slice.clone(accepting)))] = s
 		for a in 0 ..< len(atom_syms) {
-			if accepting[a >> 6] & (1 << (u64(a) & 63)) != 0 {
-				atom_syms[a][s >> 6] |= 1 << (u64(s) & 63)
+			if has_bit(accepting, a) {
+				add_bit(atom_syms[a][:], int(s))
 			}
 		}
 		return s, true
@@ -265,9 +265,9 @@ alphabet :: proc(b: ^Builder) -> (ascii: [128]u8, bounds: []rune, symbols: []u8,
 	}
 	for r in 0 ..< 128 {
 		slice.zero(accepting)
-		for a, i in b.atoms {
-			if a.ascii[r >> 6] & (1 << (u64(r) & 63)) != 0 {
-				accepting[i >> 6] |= 1 << (u64(i) & 63)
+		for &a, i in b.atoms {
+			if has_bit(a.ascii[:], r) {
+				add_bit(accepting, i)
 			}
 		}
 		ascii[r] = symbol(b, &ids, atom_syms, accepting) or_return

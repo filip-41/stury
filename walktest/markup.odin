@@ -117,9 +117,9 @@ shape_node :: proc(b: ^strings.Builder, doc: ^core.Document, i: core.Node_Index)
 		return
 	}
 	fmt.sbprintf(b, "{{%s", strings.to_string(facts))
-	it := core.doc_pairs(doc, i)
+	it := core.pairs(doc, i)
 	first := true
-	for k, v in core.doc_pair_next(&it) {
+	for k, v in core.pair_next(&it) {
 		if !first {
 			strings.write_string(b, ", ")
 		}

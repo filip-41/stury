@@ -71,9 +71,7 @@ spells_facts :: proc(doc: ^core.Document) -> bool {
 fact_texts :: proc(r: core.Node_Ref, role: core.Role) -> []string {
 	if role == .Tag {
 		tag, held := core.fact_value(r.doc, r.node, .Tag)
-		out := make([]string, 1 if held else 0, context.temp_allocator)
-		copy(out, []string{tag.text})
-		return out
+		return slice.clone([]string{tag.text}, context.temp_allocator) if held else nil
 	}
 	if core.is_property(role) {
 		out := make([dynamic]string, context.temp_allocator)

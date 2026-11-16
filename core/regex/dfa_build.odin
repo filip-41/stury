@@ -124,7 +124,7 @@ build_dfa :: proc(re: ^Regex, spans: bool, allocator, scratch: mem.Allocator) ->
 	classes := make([]u8, syms)
 	for &c, s in classes {
 		takes :: proc(atom_syms: [][4]u64, atom: i32, s: int) -> bool {
-			return atom >= 0 && atom_syms[atom][s >> 6] & (1 << (u64(s) & 63)) != 0
+			return atom >= 0 && has_bit(atom_syms[atom][:], s)
 		}
 		c = NEWLINE if takes(atom_syms, newline, s) else WORD if takes(atom_syms, word, s) else OTHER
 	}
@@ -228,7 +228,7 @@ step_bucket :: proc(b: ^Builder, bucket: ^[dynamic]u32, reached: []u32, sym: int
 	b.stamp += 1
 	clear(bucket)
 	for it in reached {
-		if atom_syms[b.atom_of[it]][sym >> 6] & (1 << (u64(sym) & 63)) == 0 {
+		if !has_bit(atom_syms[b.atom_of[it]][:], sym) {
 			continue
 		}
 		charge(b, len(b.after[it])) or_return
@@ -499,7 +499,7 @@ build_last :: proc(b: ^Builder, classes: []u8, final: u8, syms, newline_sym: int
 			charge(b, 1 + len(reading[c])) or_return
 			clear(&bucket)
 			for it in reading[c] {
-				if atom_syms[b.atom_of[it]][sym >> 6] & (1 << (u64(sym) & 63)) != 0 {
+				if has_bit(atom_syms[b.atom_of[it]][:], sym) {
 					append(&bucket, it)
 				}
 			}

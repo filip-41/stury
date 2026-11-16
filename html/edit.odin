@@ -43,6 +43,20 @@ edit_list_init :: proc(doc: ^core.Document, $S: Spec, allocator := context.alloc
 	return list
 }
 
+// Returns the source bytes `list`'s edits make, as `compose.commit` does, in the document's own spec or in `spec`. A
+// program that names a spec links every spec's passes.
+commit :: proc {commit_own, commit_as}
+
+@(private)
+commit_own :: proc(list: ^core.Edit_List, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Error) {
+	return compose.commit(list, nil, allocator)
+}
+
+@(private)
+commit_as :: proc(list: ^core.Edit_List, spec: Spec, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Error) {
+	return compose.commit(list, as(spec), allocator)
+}
+
 // Makes `v` the value at every answer of `path` over `src` and returns the new text, which the caller frees with
 // `allocator`. Every byte the edit does not reach is kept. A `typed.Raw` is an element's content as HTML, a struct, a
 // slice or a map is built by `plan`, and any other value is written as an element's content. A `Name` the path ends in
@@ -67,7 +81,7 @@ edit_spell :: proc(_: ^core.Document, v: core.Value, opts: core.Write_Options, _
 @(private = "file")
 put_content :: proc(w: ^Writer, value: core.Value, top: bool) -> core.Typed_Error_Kind {
 	v := core.plain(value)
-	#partial switch core.value_kind(v) {
+	#partial switch core.kind(v) {
 	case .Null:
 		return .None
 	case .Array:
@@ -75,8 +89,8 @@ put_content :: proc(w: ^Writer, value: core.Value, top: bool) -> core.Typed_Erro
 			return .Unwritable
 		}
 		n := 0
-		it := core.value_children(v)
-		for item in core.value_child_next(&it) {
+		it := core.children(v)
+		for item in core.child_next(&it) {
 			write.put_byte(&w.out, compose.MARKUP_ITEM[0])
 			put_content(w, item, false) or_return
 			n += 1

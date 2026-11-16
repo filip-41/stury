@@ -166,13 +166,13 @@ put_header :: proc(w: ^Rows, names: []string) -> core.Typed_Error_Kind {
 		put_sep(w, k > 0)
 		put_string(w, name, k == 0, false) or_return
 	}
-	return end_record(w, start, -1)
+	return finish_record(w, start, -1)
 }
 
 // Ends record `i`, which began at output offset `start`. A record that wrote nothing would be a blank line, which reads
 // back as no record.
 @(private)
-end_record :: proc(w: ^Rows, start, i: int) -> core.Typed_Error_Kind {
+finish_record :: proc(w: ^Rows, start, i: int) -> core.Typed_Error_Kind {
 	if total(w) == start {
 		return rows_refuse(w, .Unwritable, i)
 	}
@@ -316,7 +316,7 @@ write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed
 					return refuse_in(w, kind, i if indexed else -1, core.Name(c.name))
 				}
 			}
-			end_record(w, start, i if indexed else -1) or_return
+			finish_record(w, start, i if indexed else -1) or_return
 		}
 	case .Slice, .Dynamic:
 		cell := typed.field_at(u64(uintptr(row.first)))
@@ -332,7 +332,7 @@ write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed
 					return refuse_in(w, kind, i if indexed else -1, core.Index(k))
 				}
 			}
-			end_record(w, start, i if indexed else -1) or_return
+			finish_record(w, start, i if indexed else -1) or_return
 			w.width = inner.len
 		}
 	case .Map:
@@ -361,7 +361,7 @@ write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed
 			if found < int(m.len) {
 				return rows_refuse(w, .Unwritable, i if indexed else -1)
 			}
-			end_record(w, start, i if indexed else -1) or_return
+			finish_record(w, start, i if indexed else -1) or_return
 		}
 	}
 	return .None

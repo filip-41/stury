@@ -752,6 +752,7 @@ plan_docs :: proc "contextless" (p: ^Plan) -> proc "contextless" () -> rawptr {
 }
 
 // The format's read of the replacement a member's `before` answered, nil for a plan with none.
+@(private)
 plan_replace :: proc "contextless" (p: ^Plan) -> Replacement_Read {
 	return p.reads.replace if p.reads != nil else nil
 }
@@ -775,10 +776,7 @@ plan_start :: proc(b: ^Builder, trail: ^[TRAIL_MAX]string, p: ^Plan, as: core.As
 		p.key_frame, p.key_slack = 1, KEY_HEAD_MAX - 1
 	}
 	if services := readers.services; services != nil {
-		if reads := (^Format_Reads)(services.reads); reads != nil {
-			p.read, p.check, p.node_read, p.node_check = reads.read, reads.check, reads.node_read, reads.node_check
-			p.reads = reads
-		}
+		plan_reads(p, (^Format_Reads)(services.reads))
 		if services.edit != nil {
 			p.raw = services.edit.value
 		}
@@ -800,7 +798,7 @@ plan_start :: proc(b: ^Builder, trail: ^[TRAIL_MAX]string, p: ^Plan, as: core.As
 // Adds the root's block, whose first record the front end fills, then the block a value read whole passes through.
 @(private)
 root_block :: proc(b: ^Builder) -> bool {
-	if reserve_block(b, 4, {}) < 0 {
+	if at, _ := block_of(b, 4, {}); at < 0 {
 		return false
 	}
 	never(b, 1)
@@ -952,17 +950,21 @@ plan_destroy :: proc(p: ^Plan) {
 	p^ = {ext = &NO_EXT}
 }
 
-// Adds a block of `n` records and returns its first, or -1 with the plan refused. The block is recorded under `key`.
+// The first record of the block recorded under `key`: the block already recorded, or a new one of `n` records, `fresh`,
+// for the caller to fill. -1 with the plan refused when a new one does not fit.
 @(private)
-reserve_block :: proc(b: ^Builder, n: int, key: Block_Key) -> i32 {
-	at := len(b.fields)
-	_, slot, _, no_slot := map_entry(&b.blocks, key)
-	if no_slot != nil || resize(&b.fields, at + n) != nil || resize(&b.meta, at + n) != nil || len(b.extra) > 0 && resize(&b.extra, at + n) != nil {
-		refuse_plan(b, .No_Memory)
-		return -1
+block_of :: proc(b: ^Builder, n: int, key: Block_Key) -> (at: i32, fresh: bool) {
+	if known, ok := b.blocks[key]; ok {
+		return known, false
 	}
-	slot^ = i32(at)
-	return i32(at)
+	first := len(b.fields)
+	_, slot, _, no_slot := map_entry(&b.blocks, key)
+	if no_slot != nil || resize(&b.fields, first + n) != nil || resize(&b.meta, first + n) != nil || len(b.extra) > 0 && resize(&b.extra, first + n) != nil {
+		refuse_plan(b, .No_Memory)
+		return -1, false
+	}
+	slot^ = i32(first)
+	return i32(first), true
 }
 
 @(private)
@@ -1330,12 +1332,8 @@ fill_bit_set :: #force_no_inline proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^run
 	}
 	f.kind = .Bit_Set
 	m.list = true
-	if at, ok := b.blocks[{ti.id, 0}]; ok {
-		m.block = at
-		return
-	}
-	m.block = reserve_block(b, 2, {ti.id, 0})
-	if m.block < 0 {
+	fresh: bool
+	if m.block, fresh = block_of(b, 2, {ti.id, 0}); !fresh {
 		return
 	}
 	never(b, int(m.block))
@@ -1362,12 +1360,8 @@ list :: proc(b: ^Builder, m: ^Meta, ti, elem: ^runtime.Type_Info, stride: u32, r
 	case:
 		m.zeroed = true
 	}
-	if at, ok := b.blocks[{ti.id, i64(rule_set)}]; ok {
-		m.block = at
-		return
-	}
-	m.block = reserve_block(b, 2, {ti.id, i64(rule_set)})
-	if m.block < 0 {
+	fresh: bool
+	if m.block, fresh = block_of(b, 2, {ti.id, i64(rule_set)}); !fresh {
 		return
 	}
 	never(b, int(m.block) + 1)
@@ -1400,13 +1394,11 @@ fill_union :: #force_no_inline proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runti
 		}
 	}
 	// The arms take the union's rules, which apply to the value of whichever arm reads it.
-	if at, ok := b.blocks[{ti.id, i64(m.rule_set)}]; ok {
-		m.block = at
-	} else {
-		m.block = reserve_block(b, len(v.variants) + 1, {ti.id, i64(m.rule_set)})
-		if m.block < 0 {
-			return
-		}
+	fresh: bool
+	if m.block, fresh = block_of(b, len(v.variants) + 1, {ti.id, i64(m.rule_set)}); m.block < 0 {
+		return
+	}
+	if fresh {
 		never(b, int(m.block) + len(v.variants))
 		for arm, k in v.variants {
 			fill(b, int(m.block) + k, arm, "", 0, 0, arm_rules(b, arm, m.rule_set))
@@ -1511,12 +1503,12 @@ refuse_tag_members :: proc(b: ^Builder) {
 	}
 }
 
-// The classes of value `ti` reads. `depth` bounds a union that holds a pointer to itself.
 // Whether `ti` is `core.Number_Text` or a distinct type of it, which shares its struct.
 number_text :: proc(ti: ^runtime.Type_Info) -> bool {
 	return runtime.type_info_base(ti) == runtime.type_info_base(type_info_of(core.Number_Text))
 }
 
+// The classes of value `ti` reads. `depth` bounds a union that holds a pointer to itself.
 @(private)
 classes_of :: proc(b: ^Builder, ti: ^runtime.Type_Info, depth: int) -> (c: bit_set[Value_Class]) {
 	if depth > 16 {
@@ -1636,12 +1628,10 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 			b.err.want.type = ti.id
 			return
 		}
+		// The read judges a key it does not name only in a struct that requires members.
 		if forbid {
 			extra_for(b, int(at) + n).forbid = true
 			extra_for(b, int(f.meta)).forbid = true
-		}
-		// The read judges a key it does not name only in a struct that requires members.
-		if forbid {
 			f.kind = .Required
 		}
 		if b.model.structs != nil {
@@ -1724,7 +1714,7 @@ known_struct :: proc(b: ^Builder, key: Block_Key, f: ^Field, m: ^Meta) -> bool {
 @(private)
 struct_block :: proc(b: ^Builder, key: Block_Key, f: ^Field, m: ^Meta, members: []$M, capture: bool) -> i32 {
 	n := len(members)
-	at := reserve_block(b, n + 1 + (2 if capture else 0), key)
+	at, _ := block_of(b, n + 1 + (2 if capture else 0), key)
 	if at < 0 {
 		return -1
 	}
@@ -1865,14 +1855,4 @@ hook_of :: proc(b: ^Builder, T: typeid) -> (hook: Type_Hook, ok: bool) {
 		}
 	}
 	return
-}
-
-// The address and type a pointer held in `target` points at, false for a value that is no non-nil pointer.
-pointer_target :: proc "contextless" (target: any) -> (data: rawptr, T: typeid, pointer: bool) {
-	if target.data == nil || target.id == nil {
-		return
-	}
-	info := runtime.type_info_base(type_info_of(target.id)).variant.(runtime.Type_Info_Pointer) or_return
-	data = (^rawptr)(target.data)^
-	return data, info.elem.id, info.elem != nil && data != nil
 }

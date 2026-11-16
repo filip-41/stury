@@ -70,7 +70,7 @@ main :: proc() {
 	for k in 0 ..< n {
 		// Spreads the edits over the whole file, so their order in the log is not their order in the source.
 		node := nodes[k * len(nodes) / max(n, 1)]
-		if e := write.set(&list, node, typed.Raw(text)); e != nil {
+		if e := write.set_node(&list, node, typed.Raw(text)); e != nil {
 			fmt.eprintln("set:", e)
 			os.exit(1)
 		}

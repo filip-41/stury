@@ -99,14 +99,11 @@ sink_destroy :: proc(c: ^Sink) {
 // An entry's paths and their names are the allocator of the sink's `entries`.
 @(private)
 entry_destroy :: proc(e: ^core.Error_Entry, allocator: runtime.Allocator) {
-	for s in e.path {
-		if name, named := s.(core.Name); named {
-			delete(string(name), allocator)
-		}
-	}
-	for s in e.keyword_path {
-		if name, named := s.(core.Name); named {
-			delete(string(name), allocator)
+	for path in ([2][]core.Step{e.path, e.keyword_path}) {
+		for s in path {
+			if name, named := s.(core.Name); named {
+				delete(string(name), allocator)
+			}
 		}
 	}
 	if name, named := e.operand.(string); named {
@@ -343,7 +340,7 @@ sink_error :: proc(c: ^Sink, e: core.Typed_Refusal) {
 	if c == nil {
 		return
 	}
-	if len(c.errors) >= (sink_limit(c)) {
+	if len(c.errors) >= sink_limit(c) {
 		c.truncated = true
 	} else {
 		append(&c.errors, e)

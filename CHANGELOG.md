@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Library
+
+- The edit list's setter is `write.set_node`, the name every format gives it, so `set` is only the write by path.
+  `core.set_value`, `core.insert_element_value` and `core.insert_member_value` are gone: `write.set_node` and
+  `write.insert` take a `core.Value`.
+- A format package takes its spec in `format`, `write_stream`, `write_value`, `commit`, `records_marshal` and
+  `records_marshal_stream`, as `json.format(src, .Json5)`, where they took `json.as(.Json5)`. `commit` with no spec
+  writes the document's own.
+- Every format package forwards `comment`, `end_record`, `reorder` and `set_facts`.
+- `core.equal` takes no `too_deep` or `max_depth`, which `core.compare` keeps, and `core.hash` no `seed`.
+- `core.compare` with `read_plain` orders nan below every number when it reads a cell as a number, as it orders a
+  number node's.
+- A commit renames a key to the empty name, or a JSON5 key whose spelling decodes to it, which it refused as a result
+  that does not read back.
+- An HTML commit as the other spec reads its output as that spec and refuses one that reads as another tree, which
+  it returned.
+- A comment edit written on a line of its own trims only its own blanks. It took the text of the edit written before
+  it, which moved that text to another place or made the commit refuse its output.
+
 ### Command line
 
 - `fmt --from csv --comment C --to jsonc` keeps a comment line as a line comment above its row, as `--to yaml` does,

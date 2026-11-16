@@ -111,11 +111,10 @@ stop_row :: #force_inline proc(m: ^Matcher, pc: int) -> int {
 // look-ahead is logged, for `settle`.
 first_visit :: #force_inline proc(m: ^Matcher, row, pos: int) -> bool {
 	bit := row * m.width + pos - m.lo
-	word, mask := bit >> 6, u64(1) << (u64(bit) & 63)
-	if m.seen[word] & mask != 0 {
+	if has_bit(m.seen, bit) {
 		return false
 	}
-	m.seen[word] |= mask
+	add_bit(m.seen, bit)
 	if m.looking > 0 {
 		append(m.log, u32(bit))
 	}
@@ -124,14 +123,14 @@ first_visit :: #force_inline proc(m: ^Matcher, row, pos: int) -> bool {
 
 in_good :: #force_inline proc(m: ^Matcher, row, pos: int) -> bool {
 	bit := row * m.width + pos - m.lo
-	return m.good[bit >> 6] & (1 << (u64(bit) & 63)) != 0
+	return has_bit(m.good, bit)
 }
 
 // A look-ahead's body matched: the pairs on the path it took match from there too, to whichever look-ahead reaches them
 // next, and the log goes back to where the look-ahead began.
 settle :: proc(m: ^Matcher, bar: Entry) {
 	for bit in m.log[bar.b:] {
-		m.good[bit >> 6] |= 1 << (u64(bit) & 63)
+		add_bit(m.good, int(bit))
 	}
 	resize(m.log, int(bar.b))
 	m.looking -= 1

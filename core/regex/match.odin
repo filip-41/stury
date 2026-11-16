@@ -242,7 +242,7 @@ try_starts :: proc(m: ^Matcher, $EXT, $SET: bool) -> (found: bool, err: string) 
 				}
 				at += k
 			case .Map:
-				for at < len(s) && h.set[s[at] >> 6] & (1 << (u64(s[at]) & 63)) == 0 {
+				for at < len(s) && !has_bit(h.set[:], int(s[at])) {
 					at += lead_width(s[at])
 				}
 				if at >= len(s) {

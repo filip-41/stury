@@ -2,6 +2,7 @@ package css
 
 import "base:runtime"
 import spell "../spell"
+import kernel "../kernel"
 import core ".."
 
 // Matching walks the elements of a value in preorder, keeping the chain of elements open above the one it is at as
@@ -144,7 +145,7 @@ select_value :: proc(v: core.Value, sel: ^Selector, fold: bool, paths: bool, all
 start :: proc(m: ^Matcher, doc: ^core.Document, from: core.Node_Index) -> i32 {
 	top, element := ancestors(m, doc, from)
 	if element {
-		append(&m.levels, Level{children = {pairs = core.doc_pairs(doc, from)}, frame = top, top = len(m.frames)})
+		append(&m.levels, Level{children = {pairs = core.pairs(doc, from)}, frame = top, top = len(m.frames)})
 	}
 	return top
 }
@@ -189,10 +190,10 @@ ancestors :: proc(m: ^Matcher, doc: ^core.Document, from: core.Node_Index) -> (f
 	frame = -1
 	at := core.ROOT
 	for at != from {
-		it := core.doc_pairs(doc, at)
+		it := core.pairs(doc, at)
 		count: u32
 		inside := false
-		for k, v in core.doc_pair_next(&it) {
+		for k, v in core.pair_next(&it) {
 			if !is_element(doc, k) {
 				continue
 			}
@@ -224,7 +225,7 @@ children_of :: proc(m: ^Matcher, v: core.Value) -> Children {
 	case core.Node_Ref:
 		if x.doc.nodes[x.node].kind == .Object {
 			m.doc = x.doc
-			return {pairs = core.doc_pairs(x.doc, x.node)}
+			return {pairs = core.pairs(x.doc, x.node)}
 		}
 	case ^core.Object:
 		return {obj = x}
@@ -243,7 +244,7 @@ next_element :: #force_inline proc(m: ^Matcher, it: ^Children) -> (Frame, bool) 
 
 @(private)
 next_node :: #force_inline proc(m: ^Matcher, it: ^Children) -> (Frame, bool) {
-	for k, v in core.doc_pair_next(&it.pairs) {
+	for k, v in core.pair_next(&it.pairs) {
 		if is_element(m.doc, k) {
 			return {key = k, value = v}, true
 		}
@@ -296,7 +297,7 @@ frame_name :: #force_inline proc(m: ^Matcher, f: Frame, buf: []u8) -> string {
 @(private)
 frame_children :: #force_inline proc(m: ^Matcher, f: Frame) -> Children {
 	if f.key < BUILT {
-		return {pairs = core.doc_pairs(m.doc, f.value)}
+		return {pairs = core.pairs(m.doc, f.value)}
 	}
 	return children_of(m, frame_value(m, f))
 }
@@ -342,7 +343,7 @@ walk_next :: proc(m: ^Matcher, base: int, $BUILT: bool) -> (frame: i32, ok: bool
 		push_frame(m, f) or_break
 		frame = i32(len(m.frames) - 1)
 		if is_object(m, f) when BUILT else m.doc.nodes[f.value].kind == .Object {
-			children := frame_children(m, f) when BUILT else Children{pairs = core.doc_pairs(m.doc, f.value)}
+			children := frame_children(m, f) when BUILT else Children{pairs = core.pairs(m.doc, f.value)}
 			if _, err := append(&m.levels, Level{children = children, frame = frame, top = len(m.frames)}); err != nil {
 				m.err = err
 				break
@@ -566,11 +567,11 @@ value_matches :: proc(t: Test, have, want: string) -> bool {
 			return false
 		}
 		for i := 0; i < len(have); {
-			for i < len(have) && is_space(have[i]) {
+			for i < len(have) && kernel.is_markup_ws(have[i]) {
 				i += 1
 			}
 			j := i
-			for j < len(have) && !is_space(have[j]) {
+			for j < len(have) && !kernel.is_markup_ws(have[j]) {
 				j += 1
 			}
 			if j > i && names_equal(t.fold, have[i:j], want) {

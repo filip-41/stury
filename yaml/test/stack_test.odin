@@ -54,7 +54,7 @@ deep_documents_are_read_and_written_on_a_small_stack :: proc(t: ^testing.T) {
 			v := core.built_value(core.Node_Ref{&adoc, b})
 			levels := 0
 			for {
-				inner, ok := core.value_child_at(v, 0)
+				inner, ok := core.child_at(v, 0)
 				if !ok {
 					break
 				}

@@ -8,7 +8,6 @@ import core ".."
 // edits the options allow, or when the steps left of the diff's work run out.
 @(private)
 edits :: proc(d: ^Differ, xs, ys: []core.Value) -> (removed, added: []bool, ok: bool) {
-	cap := d.opts.max_edits
 	s := Sequence {
 		d       = d,
 		xs      = xs,
@@ -17,16 +16,15 @@ edits :: proc(d: ^Differ, xs, ys: []core.Value) -> (removed, added: []bool, ok: 
 		hy      = hashes(d, ys),
 		removed = make([]bool, len(xs), context.temp_allocator),
 		added   = make([]bool, len(ys), context.temp_allocator),
-		cap     = cap,
+		cap     = d.opts.max_edits,
 	}
 	// A path of `cap` edits reaches the diagonals -cap to cap and no others.
-	room := min((len(xs) + len(ys) + 1) / 2, cap) + 3
+	room := min((len(xs) + len(ys) + 1) / 2, s.cap) + 3
 	s.from = room
 	s.forward = make([]int, 2 * room + 3, context.temp_allocator)
 	s.backward = make([]int, 2 * room + 3, context.temp_allocator)
-	s.found = 0
 	ok = divide(&s, 0, len(xs), 0, len(ys))
-	return s.removed, s.added, ok && s.found <= cap
+	return s.removed, s.added, ok && s.found <= s.cap
 }
 
 @(private = "file")

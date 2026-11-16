@@ -90,7 +90,7 @@ Program :: struct {
 	classes:  []^Class,
 	refs:     [][]int,
 	callouts: []^Callout, // those that keep data, each at its index
-	names:    []string, // group n's name at n, "" for none; [0] is the whole match
+	names:    []string, // group n's name at n, "" for none. Index 0 is the whole match
 	slots:    int, // two per group with the whole match, then a mark per loop that can match empty
 	opt:      ^Search_Opt, // what Oniguruma's optimizer would have the search skip by, kept apart since a Regex is copied
 	visited:  ^Visited, // under `linear`, what the visited set needs of the program

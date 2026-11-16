@@ -11,6 +11,7 @@ import "core:testing"
 import core "../../core"
 import compose "../../core/compose"
 import typed "../../core/typed"
+import write "../../core/write"
 import records "../../core/records"
 import json_pkg "../../json"
 import walktest "../../walktest"
@@ -623,7 +624,7 @@ spelled_values_take_their_site :: proc(t: ^testing.T) {
 	list := core.edit_list_init(&doc)
 	a, _ := core.member(&doc, core.ROOT, "a")
 	moved, _ := core.member(&doc, core.ROOT, "t")
-	walktest.expect_nil(t, core.set_value(&list, a, core.Node_Ref{&doc, moved}))
+	walktest.expect_nil(t, write.set_node(&list, a, core.Node_Ref{&doc, moved}))
 	out, _, err := commit(&list)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	testing.expect_value(t, string(out), "a:\n    k: v\nf: [1, 2]\nt:\n    k: v\n")

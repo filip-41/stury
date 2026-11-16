@@ -5,6 +5,7 @@ package cbor
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:io"
 import spell "../core/spell"
 import kernel "../core/kernel"
 import core "../core"
@@ -102,6 +103,16 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.La
 // Writes node `node` of `doc` as one CBOR item of `spec`, as `core.write` does with `as(spec)`.
 write :: proc(doc: ^core.Document, $S: Spec, write := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error) {
 	return core.write(doc, write, as(S), node, allocator)
+}
+
+// Reads `src` as spec `S` and writes it back as `write` says, as `core.format` does with `as(spec, opts)`.
+format :: proc(src: []u8, $S: Spec, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
+	return core.format(src, as(S, opts), write, allocator)
+}
+
+// Writes node `node` of `doc` as spec `S` to `w`, as `core.write_stream` does with `as(spec)`.
+write_stream :: proc(w: io.Stream, doc: ^core.Document, $S: Spec, write := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (dropped: int, err: core.Error) {
+	return core.write_stream(w, doc, write, as(S), node, allocator)
 }
 
 // Reads the item at `lo` of spec `S` through the hook. Returns one past the item, or the fault. A hook that stops the

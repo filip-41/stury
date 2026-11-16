@@ -173,7 +173,7 @@ walk :: proc(d: ^Differ, a, b: core.Value, depth: int) {
 		}
 		objects(d, a, b, depth)
 	case ca == .Array && depth < core.MAX_DEPTH:
-		key_rule(d, a)
+		key_rule(d)
 		if equal(d, a, b) && (!d.opts.facts || quiet(a, b)) {
 			return
 		}
@@ -225,13 +225,30 @@ kept :: proc(d: ^Differ, v: core.Value) -> core.Value {
 	return v
 }
 
+// Reports `a` at step `at_a` of the old value and `b` at `at_b` of the new, as far as each stands: compared in depth when
+// both do, else removed or added.
 @(private)
-in_both :: proc(d: ^Differ, step_old, step_new: core.Step, then: proc(d: ^Differ, a, b: core.Value, depth: int), a, b: core.Value, depth: int) {
-	append(&d.old, step_old)
-	append(&d.new, step_new)
-	then(d, a, b, depth + 1)
-	pop(&d.old)
-	pop(&d.new)
+place :: proc(d: ^Differ, at_a, at_b: core.Step, a, b: core.Value, in_a, in_b: bool, depth: int) {
+	if in_a {
+		append(&d.old, at_a)
+	}
+	if in_b {
+		append(&d.new, at_b)
+	}
+	switch {
+	case in_a && in_b:
+		walk(d, a, b, depth + 1)
+	case in_a:
+		emit(d, .Removed, a, nil, false)
+	case:
+		emit(d, .Added, nil, b, false)
+	}
+	if in_a {
+		pop(&d.old)
+	}
+	if in_b {
+		pop(&d.new)
+	}
 }
 
 @(private)
@@ -250,19 +267,7 @@ objects :: proc(d: ^Differ, a, b: core.Value, depth: int) {
 	for name in names {
 		va, in_a := core.member(a, name)
 		vb, in_b := core.member(b, name)
-		step := core.Step(core.Name(name))
-		switch {
-		case in_a && in_b:
-			in_both(d, step, step, walk, va, vb, depth)
-		case in_a:
-			append(&d.old, step)
-			emit(d, .Removed, va, nil, false)
-			pop(&d.old)
-		case:
-			append(&d.new, step)
-			emit(d, .Added, nil, vb, false)
-			pop(&d.new)
-		}
+		place(d, core.Name(name), core.Name(name), va, vb, in_a, in_b, depth)
 	}
 }
 
@@ -280,7 +285,7 @@ elements :: proc(v: core.Value) -> []core.Value {
 @(private)
 arrays :: proc(d: ^Differ, a, b: core.Value, depth: int) {
 	xs, ys := elements(a), elements(b)
-	rule, keyed := key_rule(d, a)
+	rule, keyed := key_rule(d)
 	switch {
 	case keyed:
 		matched(d, xs, ys, rule.member, depth)
@@ -299,47 +304,26 @@ arrays :: proc(d: ^Differ, a, b: core.Value, depth: int) {
 // stand, else removed or added.
 @(private)
 pair :: proc(d: ^Differ, xs, ys: []core.Value, i, j, depth: int) {
-	switch {
-	case i >= 0 && j >= 0:
-		in_both(d, core.Index(i), core.Index(j), walk, xs[i], ys[j], depth)
-	case i >= 0:
-		append(&d.old, core.Index(i))
-		emit(d, .Removed, xs[i], nil, false)
-		pop(&d.old)
-	case:
-		append(&d.new, core.Index(j))
-		emit(d, .Added, nil, ys[j], false)
-		pop(&d.new)
-	}
+	place(d, core.Index(i), core.Index(j), xs[i] if i >= 0 else nil, ys[j] if j >= 0 else nil, i >= 0, j >= 0, depth)
 }
 
 // The rule that names the key of the array `a` stands at: the path of the new value so far.
 @(private)
-key_rule :: proc(d: ^Differ, a: core.Value) -> (rule: Key_Rule, ok: bool) {
-	for r, n in d.opts.keys {
+key_rule :: proc(d: ^Differ) -> (rule: Key_Rule, ok: bool) {
+	next: for r, n in d.opts.keys {
 		if len(r.at) != len(d.new) {
 			continue
 		}
-		matches := true
+		// The path so far holds names and indexes, which a step of any other kind equals not.
 		for s, i in r.at {
-			switch x in s {
-			case core.Name:
-				name, named := d.new[i].(core.Name)
-				matches &&= named && name == x
-			case core.Index:
-				index, indexed := d.new[i].(core.Index)
-				matches &&= indexed && index == x
-			case core.All:
-				_, indexed := d.new[i].(core.Index)
-				matches &&= indexed
-			case core.Slice, core.Descend, core.Index_Or_Name:
-				matches = false
+			_, all := s.(core.All)
+			_, indexed := d.new[i].(core.Index)
+			if !(all && indexed) && s != d.new[i] {
+				continue next
 			}
 		}
-		if matches {
-			d.named[n] = true
-			return r, true
-		}
+		d.named[n] = true
+		return r, true
 	}
 	return
 }

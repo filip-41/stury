@@ -2,7 +2,9 @@ package core
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:io"
 import "core:strings"
+import spell "./spell"
 
 // A path is a chain of steps from a value, spelled as jq text, as an RFC 6901 JSON Pointer, or as an Odin `Path` of step
 // literals. Each spelling gives the same `Path`.
@@ -115,7 +117,6 @@ Missing_Name :: struct {
 	name: string,
 }
 
-
 // Reads a member as `member` does, and on a `Partial` container tells a name a path looked for from one nobody asked for.
 // A member kept by position was not looked for by name: past `.First` a repeat of its key may lie among what the read
 // did not keep, so it is `Not_Loaded`.
@@ -195,11 +196,11 @@ path_destroy :: proc(p: ^Path) {
 	p^ = {}
 }
 
-// Reads jq path text: `.`, `.a`, `."a-b"`, `.["a-b"]`, `.[0]`, `.[-1]`, `.[]`, `.[2:5]`, `..` first in a path, `?` after
-// any step, and the wrappers `first(P)` and `limit(N; P)`. A quoted name's escapes are a JSON string's, a lone surrogate
-// escape and an ill-formed UTF-8 sequence are refused as in one, and its other bytes stand as written. Spaces may stand around the text and inside a
-// wrapper, not inside a path. Text past this subset is refused, so a path means here what it means in jq. A bare name is
-// a jq identifier. `.Bad_Path`'s `at` is a byte of `text`.
+// Reads jq path text: `.`, `.a`, `."a-b"`, `.["a-b"]`, `.[0]`, `.[-1]`, `.[]`, `.[2:5]`, `..` first in a path, `?`
+// after any step, and the wrappers `first(P)` and `limit(N; P)`. A quoted name's escapes are a JSON string's, a lone
+// surrogate escape and an ill-formed UTF-8 sequence are refused as in one, and its other bytes stand as written. Spaces
+// may stand around the text and inside a wrapper, not inside a path. Text past this subset is refused, so a path means
+// here what it means in jq. A bare name is a jq identifier. `.Bad_Path`'s `at` is a byte of `text`.
 parse_path :: proc(text: string, allocator := context.allocator) -> (path: Path, err: Error) {
 	parsed, refusal := parse(text, allocator, false)
 	return parsed, error_of(refusal)
@@ -224,4 +225,216 @@ steps_clone :: proc(steps: []Step, allocator := context.allocator) -> []Step {
 		}
 	}
 	return out
+}
+
+// The path layer's error kinds. A value a path does not reach is an `Answer`'s outcome, not an error.
+Path_Error_Kind :: enum u8 {
+	None,
+	Bad_Path, // the path's text does not parse, at the byte of that text
+	Over_Capacity, // a read past `MAX_PATHS` paths, a path past `MAX_STEPS` steps or of `MAX_STEPS` with a `Descend`, at no byte
+	No_Memory, // an allocation the read owns was refused, at no byte
+	Walk, // the walk's fault, in `inner`
+	Duplicate_Key, // a read under `.Refuse` met a key that repeats one of its object's, or a YAML read by name one of the same text and another type, at the second key's first byte
+	Unsupported, // a query of a partial document, or a read through a handle with no format, at no byte
+}
+
+// Why a path is `.Bad_Path`.
+Path_Reason :: enum u8 {
+	None,
+	No_Dot, // jq path text does not start with `.`
+	Pointer_Text, // jq path text starts with `/`, as a JSON Pointer does
+	No_Slash, // a JSON Pointer does not start with `/`
+	Bad_Name, // a `.` is followed by no name, quoted name or `[`
+	Bad_Bracket, // a `[` holds no quoted name, index or slice
+	Unclosed_Bracket, // a `[` is not closed by `]`
+	Unclosed_Quote, // a quoted name is not closed
+	Unclosed_Paren, // a `first(` or `limit(` is not closed
+	Bad_Escape, // a quoted name holds what is no JSON string escape
+	Invalid_Utf8, // an ill-formed UTF-8 sequence
+	Bad_Tilde, // a pointer's `~` is not followed by `0` or `1`
+	Bad_Limit, // a `limit` count is negative or no integer
+	No_Semicolon, // a `limit(N` is not followed by `;`
+	Trailing, // text past the end of the path
+	Two_Descends, // a path holds a second `Descend`
+	Unset_Step, // a path holds a zero `Step`
+}
+
+// A path layer error. `at` is the byte `kind` names: a byte of the path's text for `.Bad_Path`, and the walk's fault
+// byte for `.Walk`. `path` is the number in the read of the path a `.Bad_Path` or an `.Over_Capacity` of steps names, 0
+// for the other kinds. A `.Bad_Path` says why in `reason`, and one from `parse_path` or `parse_pointer` holds the text
+// it read in `text`, which lives as long as the caller's text.
+Path_Error :: struct {
+	kind:   Path_Error_Kind,
+	reason: Path_Reason,
+	path:   u32,
+	at:     u64,
+	text:   string,
+	inner:  Fault,
+}
+
+@(private, rodata)
+PATH_KIND_RULES := [Path_Error_Kind]Rule {
+	.None          = {"none", "No error"},
+	.Bad_Path      = {"bad_path", "Invalid path"},
+	.Over_Capacity = {"over_capacity", "Read exceeds a fixed limit: MAX_PATHS paths or MAX_STEPS steps in a path"},
+	.No_Memory     = {"no_memory", "Out of memory"},
+	.Walk          = {"walk", "Input does not parse"},
+	.Duplicate_Key = {"duplicate_key", "Duplicate key"},
+	.Unsupported   = {"unsupported", "Read is not supported"},
+}
+
+@(private, rodata)
+PATH_REASONS := [Path_Reason]string {
+	.None             = "",
+	.No_Dot           = "a path starts with `.`",
+	.Pointer_Text     = "a path starts with `.`, and `parse_pointer` reads a JSON Pointer",
+	.No_Slash         = "a JSON Pointer starts with `/`",
+	.Bad_Name         = "`.` is followed by a name, a quoted name or `[`",
+	.Bad_Bracket      = "`[` holds a quoted name, an index or a slice",
+	.Unclosed_Bracket = "`[` is not closed",
+	.Unclosed_Quote   = "the quoted name is not closed",
+	.Unclosed_Paren   = "`(` is not closed",
+	.Bad_Escape       = "not a JSON string escape",
+	.Invalid_Utf8     = "ill-formed UTF-8",
+	.Bad_Tilde        = "`~` is followed by `0` or `1`",
+	.Bad_Limit        = "`limit` takes a count of 0 or more",
+	.No_Semicolon     = "`limit(N; P)` takes a `;` after its count",
+	.Trailing         = "text past the end of the path",
+	.Two_Descends     = "a path holds one `..`",
+	.Unset_Step       = "a step is unset",
+}
+
+// Returns the read error a build's error is.
+path_error :: proc(e: Document_Error) -> Path_Error {
+	#partial switch e.kind {
+	case .None:
+		return {}
+	case .Walk:
+		return {kind = .Walk, at = e.at, inner = e.inner}
+	case .Duplicate_Key:
+		return {kind = .Duplicate_Key, at = e.at}
+	}
+	return {kind = .No_Memory}
+}
+
+// Writes `line:col: message` for `e`, the position in the path's text for a `.Bad_Path` that holds it and in `src` for
+// a `.Duplicate_Key`. A `.Bad_Path` names its text and its reason. `.Walk` writes its fault. `lines` is as in
+// `render_fault`.
+@(private)
+render_path :: proc(w: io.Writer, src: []u8, e: Path_Error, lines: ^Lines = nil) -> io.Error {
+	#partial switch e.kind {
+	case .Walk:
+		return render_fault(w, src, e.inner, lines)
+	case .Duplicate_Key:
+		write_position(w, src, e.at, lines) or_return
+	case .Bad_Path:
+		if len(e.text) > 0 {
+			write_position(w, transmute([]u8)e.text, e.at, nil) or_return
+		}
+		io.write_string(w, PATH_KIND_RULES[e.kind].message) or_return
+		if len(e.text) > 0 {
+			io.write_string(w, " \"") or_return
+			write_shown(w, e.text) or_return
+			io.write_byte(w, '"') or_return
+		}
+		if e.reason != .None {
+			io.write_string(w, ": ") or_return
+			io.write_string(w, PATH_REASONS[e.reason]) or_return
+		}
+		return nil
+	}
+	_, err := io.write_string(w, PATH_KIND_RULES[e.kind].message)
+	return err
+}
+
+// Writes `steps` as stury path text, `.a[1]."b c"`, which `parse_path` reads back. `whole` says the steps start at the
+// root, so a first step that is no name opens with `.`.
+write_steps :: proc(w: io.Writer, steps: []Step, whole: bool) -> io.Error {
+	for s, i in steps {
+		if i == 0 && whole {
+			if _, named := s.(Name); !named {
+				io.write_byte(w, '.') or_return
+			}
+		}
+		switch v in s {
+		case Name:
+			io.write_byte(w, '.') or_return
+			write_step_name(w, string(v)) or_return
+		case Index:
+			io.write_byte(w, '[') or_return
+			io.write_int(w, int(v)) or_return
+			io.write_byte(w, ']') or_return
+		case Index_Or_Name:
+			io.write_byte(w, '[') or_return
+			io.write_int(w, v.index) or_return
+			io.write_byte(w, ']') or_return
+		case All:
+			io.write_string(w, "[]") or_return
+		case Slice:
+			io.write_byte(w, '[') or_return
+			io.write_int(w, v.lo) or_return
+			io.write_byte(w, ':') or_return
+			if hi, bounded := v.hi.?; bounded {
+				io.write_int(w, hi) or_return
+			}
+			io.write_byte(w, ']') or_return
+		case Descend:
+			io.write_byte(w, '.') or_return
+		}
+	}
+	return nil
+}
+
+// Writes `steps` as a JSON Pointer (RFC 6901): nothing for the root, else `/` and each step's name with `~` and `/`
+// escaped, or its index. A step that names no one member, or all, writes `-`.
+write_pointer :: proc(w: io.Writer, steps: []Step) -> io.Error {
+	for s in steps {
+		io.write_byte(w, '/') or_return
+		switch v in s {
+		case Name:
+			for c in transmute([]u8)string(v) {
+				switch c {
+				case '~': io.write_string(w, "~0") or_return
+				case '/': io.write_string(w, "~1") or_return
+				case: io.write_byte(w, c) or_return
+				}
+			}
+		case Index:
+			io.write_int(w, int(v)) or_return
+		case Index_Or_Name:
+			io.write_int(w, v.index) or_return
+		case All, Slice, Descend:
+			io.write_byte(w, '-') or_return
+		}
+	}
+	return nil
+}
+
+// Writes a member name as a path step spells it: bare when it is a jq identifier, else quoted as a JSON string.
+@(private)
+write_step_name :: proc(w: io.Writer, name: string) -> io.Error {
+	bare := len(name) > 0 && is_name_start(name[0])
+	for i in 1 ..< len(name) {
+		bare &&= is_name_start(name[i]) || name[i] >= '0' && name[i] <= '9'
+	}
+	if bare {
+		_, err := io.write_string(w, name)
+		return err
+	}
+	io.write_byte(w, '"') or_return
+	for i in 0 ..< len(name) {
+		c := name[i]
+		switch {
+		case c == '"' || c == '\\':
+			io.write_byte(w, '\\') or_return
+			io.write_byte(w, c) or_return
+		case c < 0x20:
+			digits := spell.hex_text(u64(c), 2, false)
+			io.write_string(w, "\\u00") or_return
+			io.write(w, digits[:]) or_return
+		case:
+			io.write_byte(w, c) or_return
+		}
+	}
+	return io.write_byte(w, '"')
 }

@@ -9,6 +9,7 @@ package yaml
 
 import "core:bytes"
 import "core:slice"
+import kernel "../core/kernel"
 import core "../core"
 import compose "../core/compose"
 
@@ -170,7 +171,7 @@ set_key :: proc(cx: ^Cx, k: u32, name: string) -> bool {
 		return refuse_edit(cx, k, .Long_Key)
 	}
 	b := make([dynamic]u8, cx.a)
-	if lo == hi && lo > 0 && !is_blank_byte(src[lo - 1]) && bytes.index_byte(transmute([]u8)string(",[{"), src[lo - 1]) < 0 {
+	if lo == hi && lo > 0 && !kernel.is_ws(src[lo - 1]) && bytes.index_byte(transmute([]u8)string(",[{"), src[lo - 1]) < 0 {
 		compose.puts(&b, " ")
 	}
 	append(&b, ..spelled)
@@ -312,7 +313,7 @@ place_value :: proc(cx: ^Cx, b: ^[dynamic]u8, v: u32, t: []u8, sh: Text_Shape) -
 	kcol := column_of(src, cx.lo[cx.parent[v]])
 	colon := colon_after(src, cx.hi[key])
 	ks := key_start(cx.doc, src, key, cx.lo[key] if .Alias in cx.flags[key] else min(cx.lo[key], cx.doc.nodes[key].lo))
-	explicit := src[ks] == '?' && (ks + 1 == u64(len(src)) || is_blank_byte(src[ks + 1]))
+	explicit := src[ks] == '?' && (ks + 1 == u64(len(src)) || kernel.is_ws(src[ks + 1]))
 	// An explicit key without a value takes one on a line of its own.
 	if explicit && (colon == u64(len(src)) || src[colon] != ':') {
 		compose.puts(b, cx.eol)

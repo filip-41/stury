@@ -120,7 +120,7 @@ constant_forms :: proc(t: ^testing.T, $S: yaml.Spec) {
 	if testing.expect_value(t, len(answers), 1) {
 		list := yaml.edit_list_init(&doc, S)
 		defer yaml.destroy(&list)
-		walktest.expect_nil(t, write.set(&list, answers[0].node, typed.Raw("7")))
+		walktest.expect_nil(t, write.set_node(&list, answers[0].node, typed.Raw("7")))
 		out, _, cerr := compose.commit(&list)
 		defer delete(out)
 		walktest.expect_nil(t, cerr)

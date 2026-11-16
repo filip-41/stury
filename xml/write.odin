@@ -54,6 +54,16 @@ write :: proc(doc: ^core.Document, $S: Spec, write := core.Write_Options{}, node
 	return core.write(doc, write, as(S), node, allocator)
 }
 
+// Reads `src` as spec `S` and writes it back as `write` says, as `core.format` does with `as(spec, opts)`.
+format :: proc(src: []u8, $S: Spec, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
+	return core.format(src, as(S, opts), write, allocator)
+}
+
+// Writes node `node` of `doc` as spec `S` to `w`, as `core.write_stream` does with `as(spec)`.
+write_stream :: proc(w: io.Stream, doc: ^core.Document, $S: Spec, write := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (dropped: int, err: core.Error) {
+	return core.write_stream(w, doc, write, as(S), node, allocator)
+}
+
 // The handle's `write`. The root of an XML document is written from its spans, any other node by the element write.
 @(private)
 document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
@@ -238,7 +248,7 @@ put_document :: proc(w: ^Writer, e: ^Elements, node: core.Node_Index) -> core.Ty
 @(private)
 put_value :: proc(w: ^Writer, e: ^Elements, value: core.Value, lead: []core.Fact = nil, tail: []core.Fact = nil) -> core.Typed_Error_Kind {
 	v := core.plain(value)
-	kind := core.value_kind(v)
+	kind := core.kind(v)
 	facts: []core.Fact
 	if r, is_node := v.(core.Node_Ref); is_node && e.top > 0 {
 		w.doc, facts = r.doc, core.all_facts(r.doc, r.node)
@@ -312,10 +322,10 @@ put_value :: proc(w: ^Writer, e: ^Elements, value: core.Value, lead: []core.Fact
 		put_members(w, e, v) or_return
 	case .Array:
 		el_open(e, false) or_return
-		n := core.value_length(v)
-		items := core.value_children(v)
+		n := core.length(v)
+		items := core.children(v)
 		for i := 0; ; i += 1 {
-			item := core.value_child_next(&items) or_break
+			item := core.child_next(&items) or_break
 			put_value(w, e, item, run_lead[:] if i == 0 else nil, run_tail[:] if i == n - 1 else nil) or_return
 		}
 		el_close(e) or_return
@@ -363,8 +373,8 @@ put_members :: proc(w: ^Writer, e: ^Elements, v: core.Value) -> core.Typed_Error
 		}
 		return .None
 	}
-	it := core.value_pairs(v)
-	for key, child in core.value_pair_next(&it) {
+	it := core.pairs(v)
+	for key, child in core.pair_next(&it) {
 		el_key(e, key) or_return
 		put_value(w, e, child) or_return
 	}

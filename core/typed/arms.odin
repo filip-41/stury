@@ -138,11 +138,11 @@ arm_operands :: proc(n: ^rules.Node) -> bool {
 	if n.const_of != nil && n.has_enum {
 		return true
 	}
-	if c, has := n.const_of.?; has && core.value_kind(c) >= .Array {
+	if c, has := n.const_of.?; has && core.kind(c) >= .Array {
 		return true
 	}
 	for v in n.enum_of {
-		if core.value_kind(v) >= .Array {
+		if core.kind(v) >= .Array {
 			return true
 		}
 	}
@@ -168,7 +168,7 @@ checked_applies :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Alloc
 	key := block_key(typeid_of(rules.Rules), i32(node), b.scope) if edge == {} else block_key(typeid_of(Use), i32(len(b.fields)), 0)
 	base, known := b.blocks[key]
 	if !known && bare_judges(b, d, &n, edge) {
-		if base = reserve_block(b, 1, key); base >= 0 {
+		if base, _ = block_of(b, 1, key); base >= 0 {
 			fill_checked(b, d, arena, int(base), node, "", edge, nil, true)
 		}
 	} else if !known {
@@ -674,12 +674,8 @@ choice_keys :: proc(b: ^Builder, rec: i32, name: string) -> []string {
 // belong to the arm.
 @(private)
 arm_record :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, node: rules.Node_Index) -> i32 {
-	key := block_key(typeid_of(Apply), i32(node), b.scope)
-	if at, ok := b.blocks[key]; ok {
-		return at
-	}
-	at := reserve_block(b, 1, key)
-	if at >= 0 {
+	at, fresh := block_of(b, 1, block_key(typeid_of(Apply), i32(node), b.scope))
+	if fresh {
 		fill_checked(b, d, arena, int(at), node, "", {}, nil)
 	}
 	return at
@@ -689,12 +685,8 @@ arm_record :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator,
 // after it predicts no key, so every key reaches the fork.
 @(private)
 fork_record :: proc(b: ^Builder) -> i32 {
-	key := block_key(typeid_of(Fork), 0, 0)
-	if at, ok := b.blocks[key]; ok {
-		return at
-	}
-	at := reserve_block(b, 2, key)
-	if at >= 0 && cover_uses(b) {
+	at, fresh := block_of(b, 2, block_key(typeid_of(Fork), 0, 0))
+	if fresh && cover_uses(b) {
 		never(b, int(at))
 		never(b, int(at) + 1)
 		b.fields[at].kind, b.fields[at].meta = .Checked, u32(at)
@@ -706,7 +698,6 @@ fork_record :: proc(b: ^Builder) -> i32 {
 @(private)
 @(rodata)
 FORKING := [1]Apply{{rec = -1}}
-
 
 // Whether `v` equals one of `values`, where a repeated key counts with the value `dups` keeps. Given `hashes`, only the
 // operands with `v`'s hash are compared, unless `read_plain` is set and `v` holds a `Plain` node, whose hash depends on
@@ -926,7 +917,7 @@ pool_run :: proc(p: ^Pool) -> ^Run {
 	return r
 }
 
-// A fork of `p` for the check of the current value, as `pool_run` gives a run.
+// A fork of `p` for the check of the current value, as `pool_run` gives a run, else a new one. Nil when memory runs out.
 @(private)
 pool_fork :: proc(p: ^Pool) -> ^Fork {
 	if fk := p.forks; fk != nil {
@@ -936,8 +927,12 @@ pool_fork :: proc(p: ^Pool) -> ^Fork {
 	fk := p.stale_fork
 	if fk != nil {
 		p.stale_fork = fk.older
-		fork_fresh(fk)
+	} else if fk = new(Fork, pool_allocator(p)); fk == nil {
+		return nil
+	} else {
+		fk.older, p.held = p.held, fk
 	}
+	fork_fresh(fk)
 	return fk
 }
 
@@ -1002,8 +997,8 @@ repeats_inside :: proc(doc: ^core.Document, i: core.Node_Index, at: ^[dynamic]u6
 	#partial switch n.kind {
 	case .Object:
 		names := make([dynamic]string, context.temp_allocator)
-		it := core.doc_pairs(doc, i)
-		for k, v in core.doc_pair_next(&it) {
+		it := core.pairs(doc, i)
+		for k, v in core.pair_next(&it) {
 			inner := repeats_inside(doc, v, at) or_return
 			name, ok := core.text_clone(doc, k, context.temp_allocator)
 			if _, failed := append(&names, name); !ok || failed != nil {
@@ -1016,8 +1011,8 @@ repeats_inside :: proc(doc: ^core.Document, i: core.Node_Index, at: ^[dynamic]u6
 			holds ||= names[j] == names[j - 1]
 		}
 	case .Array:
-		it := core.doc_children(doc, i)
-		for v in core.doc_child_next(&it) {
+		it := core.children(doc, i)
+		for v in core.child_next(&it) {
 			inner := repeats_inside(doc, v, at) or_return
 			holds ||= inner
 		}
@@ -1292,18 +1287,12 @@ fork_read :: #force_no_inline proc "contextless" (h: ^Check, regs, next: core.Ho
 		return {}, .Next, false
 	}
 	context = h.ctx
-	if h.pool == nil {
-		if h.pool = new(Pool, context.temp_allocator); h.pool == nil {
-			return {}, .Next, false
-		}
+	if h.pool = h.pool if h.pool != nil else new(Pool, context.temp_allocator); h.pool == nil {
+		return {}, .Next, false
 	}
 	fk := pool_fork(h.pool)
 	if fk == nil {
-		if fk = new(Fork, pool_allocator(h.pool)); fk == nil {
-			return {}, .Next, false
-		}
-		fork_fresh(fk)
-		fk.older, h.pool.held = h.pool.held, fk
+		return {}, .Next, false
 	}
 	sp := h.sp
 	inside, action := check_value(h, {NO_LIMIT, u64(uintptr(&([^]Field)(raw_data(h.plan.fields))[rec + 1])), 0}, t)
@@ -1439,10 +1428,8 @@ record_arms :: #force_inline proc "contextless" (h: ^Check, rec: i32, applies: [
 @(private)
 record_arms_kept :: #force_no_inline proc "contextless" (h: ^Check, rec: i32, applies: []Apply, t: core.Token, depth: int) -> (passed, judged: bool, reading: core.Kind) {
 	context = h.ctx
-	if h.pool == nil {
-		if h.pool = new(Pool, context.temp_allocator); h.pool == nil {
-			return scalar_verdict(h, applies, t, depth + 1)
-		}
+	if h.pool = h.pool if h.pool != nil else new(Pool, context.temp_allocator); h.pool == nil {
+		return scalar_verdict(h, applies, t, depth + 1)
 	}
 	key := [2]u64{u64(Verdict_Of.Passes_Sink if h.sink != nil else Verdict_Of.Passes), u64(rec)}
 	if v, known := verdict_find(h.pool, t.lo, key); known {
@@ -1481,16 +1468,9 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 	if h.find_tag == document_tag && core.is_markup((^Document_Read(Check))(h.format).doc) {
 		return next, fork_fault(h, regs, .Unsupported, lo, hi)
 	}
-	if h.pool == nil {
-		h.pool = new(Pool, context.temp_allocator)
-	}
+	h.pool = h.pool if h.pool != nil else new(Pool, context.temp_allocator)
 	if h.fork == nil && h.pool != nil {
-		if h.fork = pool_fork(h.pool); h.fork == nil {
-			if h.fork = new(Fork, pool_allocator(h.pool)); h.fork != nil {
-				fork_fresh(h.fork)
-				h.fork.older, h.pool.held = h.pool.held, h.fork
-			}
-		}
+		h.fork = pool_fork(h.pool)
 	}
 	if h.pool == nil || h.fork == nil {
 		return next, fork_fault(h, regs, .No_Memory, lo, hi)
@@ -1735,10 +1715,8 @@ twin_found :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run) -> bool {
 		}
 		if r.c.sink != r.buffer || r.buffer == nil {
 			// The run has read nothing yet, so it starts buffering here.
-			if r.buffer == nil {
-				if r.buffer = new(Sink, context.temp_allocator); r.buffer == nil {
-					return false
-				}
+			if r.buffer = r.buffer if r.buffer != nil else new(Sink, context.temp_allocator); r.buffer == nil {
+				return false
 			}
 			r.buffer.entries = nil
 			r.buffer.entries.allocator = fork_space(fk)
@@ -1981,21 +1959,17 @@ run_start :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run, rec: i32, nest: int, step: 
 			c.sink = h.sink
 		case x.kind in BUFFERED || c.repeats == .Judge:
 			if step == nil {
-				if r.buffer == nil {
-					if r.buffer = new(Sink, context.temp_allocator); r.buffer == nil {
-						h.fatal = .No_Memory
-						return nil
-					}
+				if r.buffer = r.buffer if r.buffer != nil else new(Sink, context.temp_allocator); r.buffer == nil {
+					h.fatal = .No_Memory
+					return nil
 				}
 				c.sink = r.buffer
 				r.buffer.entries = nil
 				r.buffer.entries.allocator = fork_space(fk)
 			} else {
-				if x.pending == nil {
-					if x.pending = new(Sink, fork_space(fk)); x.pending == nil {
-						h.fatal = .No_Memory
-						return nil
-					}
+				if x.pending = x.pending if x.pending != nil else new(Sink, fork_space(fk)); x.pending == nil {
+					h.fatal = .No_Memory
+					return nil
 				}
 				if x.space == nil {
 					if x.space = new(runtime.Arena, context.temp_allocator); x.space == nil || runtime.arena_init(x.space, PENDING_SPACE, context.temp_allocator) != nil {
@@ -2021,11 +1995,9 @@ run_start :: proc(h: ^Check, fk: ^Fork, x: ^Arm_Run, rec: i32, nest: int, step: 
 	c.floor = len(c.sink.entries) if c.sink != nil else 0
 	c.readings = nil
 	if h.readings != nil {
-		if r.readings == nil {
-			if r.readings = new(Readings, context.temp_allocator); r.readings == nil {
-				h.fatal = .No_Memory
-				return nil
-			}
+		if r.readings = r.readings if r.readings != nil else new(Readings, context.temp_allocator); r.readings == nil {
+			h.fatal = .No_Memory
+			return nil
 		}
 		r.readings^ = {}
 		r.readings.read.allocator = fork_space(fk)
@@ -3133,8 +3105,8 @@ unique :: proc(doc: ^core.Document, allocator: runtime.Allocator, read_plain: bo
 		node: core.Node_Index,
 	}
 	all := make([dynamic]Hashed)
-	it := core.doc_children(doc, core.ROOT)
-	for x in core.doc_child_next(&it) {
+	it := core.children(doc, core.ROOT)
+	for x in core.child_next(&it) {
 		append(&all, Hashed{core.hash(core.Node_Ref{doc, x}, dups = dups), x})
 	}
 	slice.sort_by(all[:], proc(a, b: Hashed) -> bool {return a.hash < b.hash})

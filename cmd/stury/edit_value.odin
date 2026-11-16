@@ -11,6 +11,7 @@ import "core:slice"
 import "core:strings"
 import kernel "../../core/kernel"
 import core "../../core"
+import "../../core/write"
 import "jq"
 import "message"
 
@@ -480,9 +481,9 @@ edit_place_entries :: proc(w: ^Edit_State, node: core.Node_Index, length: int, e
 edit_insert :: proc(w: ^Edit_State, node: core.Node_Index, at: int, n: Edit_New) -> bool {
 	v := edit_written(w, n.value)
 	if core.kind(w.doc, node) == .Object {
-		return edit_check(w, core.insert_member_value(w.list, node, at, n.key, v), v)
+		return edit_check(w, write.insert_member(w.list, node, at, n.key, v), v)
 	}
-	return edit_check(w, core.insert_element_value(w.list, node, at, v), v)
+	return edit_check(w, write.insert_element(w.list, node, at, v), v)
 }
 
 // An array's elements: an element the output takes from it is kept and may move, one the output repeats or builds is
@@ -647,7 +648,7 @@ edit_check :: proc(w: ^Edit_State, e: core.Error, v: jq.Value = nil, record := f
 @(private = "file")
 edit_set :: proc(w: ^Edit_State, node: core.Node_Index, v: jq.Value) -> bool {
 	edit_note_comments(w, v) or_return
-	return edit_check(w, core.set_value(w.list, node, edit_written(w, v)), v)
+	return edit_check(w, write.set_node(w.list, node, edit_written(w, v)), v)
 }
 
 // `v` with each string that is not UTF-8 made one as jq makes it, U+FFFD for each bad sequence: the library refuses such

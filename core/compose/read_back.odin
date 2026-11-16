@@ -4,58 +4,114 @@ import "base:runtime"
 import "core:slice"
 import core ".."
 
-// Whether `out`, the text a commit of `list` made, read as `target`, holds the values the edits wrote, compared as
-// values are: a number by the decimal it spells, and a cell or a markup text read as the kind of the value it stands
-// for. A format with a scan reads the regions the edits make by their paths, at most `core.MAX_PATHS` runs of them,
-// see `region_runs`. A format with none, and regions no read of paths answers alone, read `out` whole and compare the
+// The text a commit made and the format's reads of it: those of the list's own spec, or of the target's handle for
+// another spec of the format.
+@(private)
+Output :: struct {
+	list:     ^core.Edit_List,
+	text:     []u8,
+	target:   core.As,
+	validate: type_of(core.Edit_Services{}.validate),
+	build:    type_of(core.Edit_Services{}.build),
+	scan:     type_of(core.Edit_Services{}.scan),
+}
+
+// The reads of `text` as `target`, false when the format has none for that spec.
+@(private)
+output_of :: proc(list: ^core.Edit_List, text: []u8, target: core.As) -> (o: Output, reads: bool) {
+	o = {list = list, text = text, target = target}
+	if target.spec == list.doc.as.spec {
+		o.validate, o.build, o.scan = list.edit.validate, list.edit.build, list.edit.scan
+		return o, true
+	}
+	services := core.services_of(target)
+	if services == nil || services.validate == nil {
+		return o, false
+	}
+	o.validate, o.build, o.scan = services.validate, services.build, services.scan
+	return o, true
+}
+
+// Judges and reads back the output of a commit that composed the edits. The output must read as strictly as the source,
+// and as the edits wrote, see `reads_back`. An output the strict read refuses is accepted only if it keeps the document's
+// spec, the format's tolerant read takes it and the source needed a tolerance too, and is then read back for its values
+// under the target's options. `written`, when given, are the pieces the edits wrote, which one walk of the output judges
+// whole and reads back, see `core.reads_written`. Works in the context allocator.
+@(private)
+judge_output :: proc(o: ^Output, written: Maybe([]core.Written), allocator: runtime.Allocator) -> core.Document_Error {
+	doc := o.list.doc
+	strict := doc.as
+	strict.tolerate = {}
+	if o.target.spec != doc.as.spec {
+		strict.readers, strict.spec = o.target.readers, o.target.spec
+	}
+	e, known := core.Document_Error{}, false
+	if pieces, placed := written.?; placed {
+		e, known = core.reads_written(o.list, o.text, strict, pieces, o.list.edit.walk_written)
+	}
+	if !known {
+		e = reads_back(o, strict, true, allocator)
+	}
+	// A read that refuses the bytes is a `.Bad_Result` that names no reason, a read of other values names one.
+	if e.kind != .Bad_Result || e.reason != .None {
+		return e
+	}
+	tolerant := strict
+	tolerant.tolerate = ~bit_set[core.Tolerance; u8]{}
+	if fault, still := o.validate(o.text, tolerant).?; still {
+		return {kind = .Bad_Result, inner = fault}
+	}
+	if o.target.spec != doc.as.spec {
+		return e
+	}
+	if _, src_bad := o.validate(doc.src, strict).?; !src_bad {
+		return e
+	}
+	return reads_back(o, o.target, false, allocator)
+}
+
+// Whether the text of `o`, a commit of its list, read as `as`, holds the values the edits wrote, compared as values are:
+// a number by the decimal it spells, and a cell or a markup text read as the kind of the value it stands for. A format
+// with a scan reads the regions the edits make by their paths, at most `core.MAX_PATHS` runs of them, see
+// `region_runs`. A format with none, and regions no read of paths answers alone, read the text whole and compare the
 // values the edits wrote and the shape of the rest, see `core.reads_as_edited`. A list whose edits hold no value to
 // compare is judged by the format's read alone.
-// `judged`, when given, is the options `out` is judged under here: by the build or the row read, which read `out`
-// whole and refuse what the validate refuses, by the read of the regions when the scan reads `out` whole or when
-// `read_judges` and the regions are many, and else by the validate. Without it the commit has judged `out` already.
+// `judging` is whether the text is not yet judged. It is judged by the build or the row read, which read it whole and
+// refuse what the validate refuses, by the read of the regions when the scan reads it whole or when the regions are
+// many, and else by the validate.
 @(private)
-reads_back :: proc(list: ^core.Edit_List, out: []u8, target: core.As, judged: Maybe(core.As), read_judges: bool, allocator: runtime.Allocator) -> core.Document_Error {
-	// The list's own services read its own spec. Another spec of the format is read by the target's handle.
-	build, scan := list.edit.build, list.edit.scan
-	if build != nil && target.spec != list.doc.as.spec {
-		services := core.services_of(target)
-		if services == nil || services.build == nil {
-			return {kind = .Bad_Spec}
-		}
-		build, scan = services.build, services.scan
-	}
-	if build == nil {
-		return judge(list, out, judged)
+reads_back :: proc(o: ^Output, as: core.As, judging: bool, allocator: runtime.Allocator) -> core.Document_Error {
+	list, out := o.list, o.text
+	if o.build == nil {
+		return judge(o, as, judging)
 	}
 	arena := runtime.Arena{backing_allocator = allocator, minimum_block_size = 64 * 1024}
 	defer runtime.arena_destroy(&arena)
 	context.allocator = runtime.arena_allocator(&arena)
 	context.temp_allocator = context.allocator
-	if scan != nil {
+	if o.scan != nil {
 		regions, known, fits := core.edited_regions(list)
 		if !known {
-			return judge(list, out, judged)
+			return judge(o, as, judging)
 		}
 		if runs, few := region_runs(regions); fits && few {
-			// A scan that reads `out` whole judges it. A read of many regions reads every byte in place of the validate,
-			// and a read of few stops at its last answer, after the validate has judged `out`.
-			if as, judging := judged.?; judging && list.edit.whole_scan {
-				return regions_read_back(regions, runs, out, as, true, scan)
-			} else if judging && read_judges && len(regions) > core.MAX_PATHS {
-				return regions_read_back(regions, runs, out, as, false, scan)
+			// A read of many regions reads every byte in place of the validate, and a read of few stops at its last
+			// answer, after the validate has judged the text.
+			whole := judging && (list.edit.whole_scan || len(regions) > core.MAX_PATHS)
+			if !whole {
+				if e := judge(o, as, judging); e.kind != .None {
+					return e
+				}
 			}
-			if e := judge(list, out, judged); e.kind != .None {
-				return e
-			}
-			return regions_read_back(regions, runs, out, target, true, scan)
+			return regions_read_back(regions, runs, out, as, !whole, o.scan)
 		}
 	}
 	if list.edit.walk_rows != nil {
-		if e, known := core.reads_rows(list, out, judged.? or_else target, list.edit.walk_rows); known {
+		if e, known := core.reads_rows(list, out, as, list.edit.walk_rows); known {
 			return e
 		}
 	}
-	built, err := build(out, judged.? or_else target, false, context.allocator)
+	built, err := o.build(out, as, false, context.allocator)
 	if err.kind != .None {
 		return {kind = .No_Memory} if err.kind == .No_Memory else {kind = .Bad_Result, inner = err.inner}
 	}
@@ -65,14 +121,13 @@ reads_back :: proc(list: ^core.Edit_List, out: []u8, target: core.As, judged: Ma
 	return {}
 }
 
-// Whether `out` reads under `judged` by the format's validate, when a format's own commit gives the options.
+// Whether the text of `o` reads as `as` by the format's validate, when it is not yet judged.
 @(private = "file")
-judge :: proc(list: ^core.Edit_List, out: []u8, judged: Maybe(core.As)) -> core.Document_Error {
-	as, own := judged.?
-	if !own || list.edit.validate == nil {
+judge :: proc(o: ^Output, as: core.As, judging: bool) -> core.Document_Error {
+	if !judging || o.validate == nil {
 		return {}
 	}
-	if fault, bad := list.edit.validate(out, as).?; bad {
+	if fault, bad := o.validate(o.text, as).?; bad {
 		return {kind = .Bad_Result, inner = fault}
 	}
 	return {}
@@ -81,7 +136,7 @@ judge :: proc(list: ^core.Edit_List, out: []u8, judged: Maybe(core.As)) -> core.
 // Whether each of `regions` reads from `out` as it wants, its path answered once: by the value it wants, or as missing
 // when it wants none. Each of `runs` is one path of the read, whose answers are its regions in their order.
 @(private = "file")
-regions_read_back :: proc(regions: []core.Edited_Region, runs: []Region_Run, out: []u8, target: core.As, stop_early: bool, scan: type_of(core.Edit_Services{}.scan)) -> core.Document_Error {
+regions_read_back :: proc(regions: []core.Edited_Region, runs: []Region_Run, out: []u8, as: core.As, stop_early: bool, scan: type_of(core.Edit_Services{}.scan)) -> core.Document_Error {
 	paths := make([]core.Path, len(runs))
 	for u, i in runs {
 		paths[i] = {steps = u.steps}
@@ -92,7 +147,7 @@ regions_read_back :: proc(regions: []core.Edited_Region, runs: []Region_Run, out
 		}
 	}
 	// No object on a region's path repeats a key, so the first key answers as the last would.
-	doc, err := scan(out, target, paths, {dups = .First, stop_early = stop_early}, nil, nil, context.allocator)
+	doc, err := scan(out, as, paths, {dups = .First, stop_early = stop_early}, nil, nil, context.allocator)
 	if err.kind != .None {
 		return {kind = .No_Memory} if err.kind == .No_Memory else {kind = .Bad_Result, inner = err.inner}
 	}

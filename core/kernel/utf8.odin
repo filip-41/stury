@@ -88,20 +88,8 @@ utf8_ok :: proc "contextless" (s: Utf8_State) -> bool {
 	return simd.reduce_or(simd.bit_or(s.err, open_sequence(s.prev))) == 0
 }
 
-// Reports whether `text` is UTF-8. Text of 16 bytes or more is first tested for ASCII by 16-byte loads, before the
-// blocks of this CPU's tier are entered.
+// Reports whether `text` is UTF-8, by the blocks of this CPU's tier.
 utf8_valid :: #force_inline proc "contextless" (text: []u8) -> bool {
-	if n := len(text); n >= 16 {
-		p := raw_data(text)
-		acc: V
-		for j := 0; j + 16 <= n; j += 16 {
-			acc |= load16(p[j:])
-		}
-		acc |= load16(p[n - 16:])
-		if is_ascii16(acc) {
-			return true
-		}
-	}
 	return scan(text, 0, nil, .Utf8) != 0
 }
 

@@ -436,7 +436,6 @@ read_member :: proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, r
 	return true
 }
 
-// Replaces the reader's plan with one of `T`.
 @(private)
 reader_plan :: proc(it: ^Reader, T: typeid) -> core.Error {
 	drop_plan(it)

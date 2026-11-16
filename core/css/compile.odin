@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:strings"
 import "core:unicode/utf8"
 import spell "../spell"
+import kernel "../kernel"
 import core ".."
 
 // CSS selectors over a markup document: the static part of Selectors Level 4, compiled once by `compile` and matched by
@@ -174,16 +175,11 @@ no_memory :: proc(p: ^Parser) -> bool {
 	return false
 }
 
-@(private)
-is_space :: #force_inline proc(c: u8) -> bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
-}
-
 // Skips white space and returns whether there was any.
 @(private)
 skip_spaces :: proc(p: ^Parser) -> bool {
 	from := p.at
-	for p.at < len(p.src) && is_space(p.src[p.at]) {
+	for p.at < len(p.src) && kernel.is_markup_ws(p.src[p.at]) {
 		p.at += 1
 	}
 	return p.at > from
@@ -610,10 +606,10 @@ put_escape :: proc(p: ^Parser) -> bool {
 	}
 	if p.at + 1 < len(p.src) && p.src[p.at] == '\r' && p.src[p.at + 1] == '\n' {
 		p.at += 2
-	} else if p.at < len(p.src) && is_space(p.src[p.at]) {
+	} else if p.at < len(p.src) && kernel.is_markup_ws(p.src[p.at]) {
 		p.at += 1
 	}
-	if cp == 0 || cp - 0xD800 < 0x800 || cp > 0x10FFFF {
+	if cp == 0 {
 		cp = u32(utf8.RUNE_ERROR)
 	}
 	return put_rune(p, rune(cp))

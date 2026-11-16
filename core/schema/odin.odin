@@ -72,8 +72,7 @@ write_odin :: proc(d: ^rules.Description, package_name: string, as: core.As, for
 		put(&b, unique(&s.taken, "Root"), " :: ", held_type(root), "\n")
 	}
 	for x in s.decls {
-		strings.write_string(&b, "\n")
-		strings.write_string(&b, x.text)
+		put(&b, "\n", x.text)
 	}
 	put(&b, "\n// Adds the rules of these types that their tags do not hold to `reg`, before `model.compile`.\n", "register :: proc(reg: ^model.Registry) -> ", "core.Error {\n" if s.fragments || s.defaults else "runtime.Allocator_Error {\n", strings.to_string(s.registers), "\treturn nil\n}\n")
 	if s.fragments {
@@ -478,8 +477,7 @@ settled :: proc(s: ^Source, i: rules.Node_Index) -> rules.Node_Index {
 	slice.sort(sorted)
 	for c in sorted {
 		if int(c) < s.originals {
-			strings.write_string(&key, int_text(int(c)))
-			strings.write_byte(&key, ',')
+			put(&key, int_text(int(c)), ",")
 		}
 	}
 	if k, ok := s.joined[strings.to_string(key)]; ok {
@@ -1034,8 +1032,7 @@ object_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Part, r: rules.Rul
 	name := s.decls[k].name
 	b := strings.builder_make()
 	comment(&b, "", n.description)
-	strings.write_string(&b, name)
-	strings.write_string(&b, " :: struct {\n")
+	put(&b, name, " :: struct {\n")
 	fields := make(map[string]bool)
 	n_unset := 0
 	for m in o.members {
@@ -1113,7 +1110,7 @@ default_spelled :: proc(s: ^Source, owner, field: string, at: rules.Node_Index, 
 			x, has = s.d.nodes[found].default_of.?
 		}
 	}
-	kind := core.value_kind(x)
+	kind := core.kind(x)
 	if !has || kind == .Null {
 		return
 	}
@@ -1130,8 +1127,7 @@ default_spelled :: proc(s: ^Source, owner, field: string, at: rules.Node_Index, 
 			return
 		}
 		node, is_node := x.(core.Node_Ref)
-		strings.write_string(&b, v.type)
-		strings.write_byte(&b, '(')
+		put(&b, v.type, "(")
 		literal(&b, core.node_string(node.doc, node.node) if is_node else x.(string) or_else "")
 		strings.write_byte(&b, ')')
 	case .Number:
@@ -1150,8 +1146,7 @@ default_spelled :: proc(s: ^Source, owner, field: string, at: rules.Node_Index, 
 			refuse(s, "default")
 			return
 		}
-		strings.write_string(&b, v.type)
-		strings.write_string(&b, "(true)" if kind == .True else "(false)")
+		put(&b, v.type, "(true)" if kind == .True else "(false)")
 	case:
 		refuse(s, "default")
 		return
@@ -1232,8 +1227,7 @@ member_tag :: proc(s: ^Source, b: ^strings.Builder, owner: string, m: rules.Memb
 			}
 			strings.write_byte(&tag, c)
 		}
-		strings.write_string(&tag, ",omitempty" if omit else "")
-		strings.write_string(&tag, ",omitunset\"" if unset else "\"")
+		put(&tag, ",omitempty" if omit else "", ",omitunset\"" if unset else "\"")
 	}
 	items := tag_items(s, r, !m.required, not_null)
 	if items != "" {
@@ -1388,16 +1382,14 @@ enum_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 	name := s.decls[k].name
 	b := strings.builder_make()
 	comment(&b, "", n.description)
-	strings.write_string(&b, name)
-	strings.write_string(&b, " :: union {" if out.null else " :: union #no_nil {")
+	put(&b, name, " :: union {" if out.null else " :: union #no_nil {")
 	if len(texts) > 0 {
 		arm := enum_declared(s, part_of(s, i, .String), "", texts[:], nil, strings.concatenate({name, "_String"}))
 		strings.write_string(&b, s.decls[arm].name)
 	}
 	if len(numbers) > 0 {
 		arm := enum_declared(s, part_of(s, i, .Integer), "", nil, numbers[:], strings.concatenate({name, "_Integer"}))
-		strings.write_string(&b, ", " if len(texts) > 0 else "")
-		strings.write_string(&b, s.decls[arm].name)
+		put(&b, ", " if len(texts) > 0 else "", s.decls[arm].name)
 	}
 	strings.write_string(&b, ", bool}\n" if truth[0] else "}\n")
 	s.decls[k].text, s.decls[k].open = strings.to_string(b), false
@@ -1411,8 +1403,7 @@ enum_declared :: proc(s: ^Source, part: Part, description: string, texts: []stri
 	name := s.decls[k].name
 	b := strings.builder_make()
 	comment(&b, "", description)
-	strings.write_string(&b, name)
-	strings.write_string(&b, " :: enum i64 {\n" if len(numbers) > 0 else " :: enum {\n")
+	put(&b, name, " :: enum i64 {\n" if len(numbers) > 0 else " :: enum {\n")
 	members := make(map[string]bool)
 	renames := strings.builder_make()
 	for x in numbers {
@@ -1432,8 +1423,7 @@ enum_declared :: proc(s: ^Source, part: Part, description: string, texts: []stri
 	strings.write_string(&b, "}\n")
 	s.decls[k].text, s.decls[k].open = strings.to_string(b), false
 	if len(numbers) > 0 || strings.builder_len(renames) > 0 {
-		strings.write_string(&s.registers, "\tmodel.register_enum(reg, {")
-		strings.write_string(&s.registers, name)
+		put(&s.registers, "\tmodel.register_enum(reg, {", name)
 		if len(numbers) > 0 {
 			strings.write_string(&s.registers, ", true, nil")
 		} else {
@@ -1533,8 +1523,7 @@ arms_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 	}
 	strings.write_string(&b, " :: union {" if null else " :: union #no_nil {")
 	for t, j in types {
-		strings.write_string(&b, ", " if j > 0 else "")
-		strings.write_string(&b, t)
+		put(&b, ", " if j > 0 else "", t)
 	}
 	strings.write_string(&b, "}\n")
 	s.decls[k].text, s.decls[k].open = strings.to_string(b), false
@@ -1681,8 +1670,7 @@ KEYWORDS := [?]string {
 comment :: proc(b: ^strings.Builder, indent, text: string) {
 	rest := text
 	for line in strings.split_lines_iterator(&rest) {
-		strings.write_string(b, indent)
-		strings.write_string(b, "//" if line == "" else "// ")
+		put(b, indent, "//" if line == "" else "// ")
 		for c in transmute([]u8)line {
 			if c < ' ' && c != '\t' || c == 0x7f {
 				digits := spell.hex_text(u64(c), 2, false)

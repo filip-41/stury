@@ -8,7 +8,7 @@ write into the bytes it hands back, and move its cursor.
 ```odin
 write.init    :: proc(out: ^write.Out, spill: ^[write.ROOM_MAX]u8, allocator := context.allocator, stream := io.Stream{}, hint := 0)
 write.room    :: proc(out: ^write.Out, n: int) -> [^]u8
-write.finish  :: proc(out: ^write.Out) -> (bytes: []u8, err: core.Typed_Refusal)
+write.finish  :: proc(out: ^write.Out, refused := core.Typed_Refusal{}) -> (bytes: []u8, err: core.Typed_Refusal)
 write.destroy :: proc(out: ^write.Out)
 ```
 
@@ -34,7 +34,7 @@ each call and tests `out.err` where it can stop. `finish` returns the error.
 ## Options
 
 ```odin
-core.Write_Options :: struct {pretty: bool, indent: u8, tab: bool, ascii: bool, escape_html: bool, escape_del: bool, sort_keys: bool, respell_strings: bool}
+core.Write_Options :: struct {pretty: bool, indent: u8, tab: bool, ascii: bool, escape_html: bool, escape_del: bool, sort_keys: bool, respell_strings: bool, jq_numbers: bool, grow_header: bool}
 core.PRETTY :: core.Write_Options{pretty = true, indent = 2}
 ```
 
@@ -43,7 +43,9 @@ The zero value writes compact text. `pretty` writes one member or element a line
 has no use for is ignored, and each format's `CAPABILITIES.writes` names the fields its document writer honours: a
 delimited text reads `sort_keys` alone, YAML, which has no tab indentation, ignores `tab`, and a token write puts keys
 in the order of its calls whatever `sort_keys` says. The typed write, a document's write and the token write of JSON
-read every other field the same way.
+read every other field the same way. `jq_numbers` writes a built value's non-finite number as jq does, NaN as null and
+an infinity as the largest double of its sign, and `grow_header` lets a delimited text's table take a key its header
+lacks.
 
 ## Errors
 
@@ -288,7 +290,7 @@ _, err := records.writer_end(&wr)
 ```
 
 ```odin
-records.writer_init  :: proc(wr: ^records.Writer, w: io.Stream, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error_Kind
+records.writer_init  :: proc(wr: ^records.Writer, w: io.Stream, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator, spell: ^write.Token_Spelling = nil) -> core.Typed_Error_Kind
 records.writer_end   :: proc(wr: ^records.Writer) -> ([]u8, core.Error)
 records.writer_destroy :: proc(wr: ^records.Writer)
 records.write        :: proc(wr: ^records.Writer, value: any, plan: ^typed.Plan) -> core.Typed_Error_Kind
@@ -503,9 +505,6 @@ is exact for the minimum.
 - `f32_exhaustive` reads back and checks every `f32` pattern with `-define:F32_STRIDE=1`, and a sample of them by
   default. `make test-f32` runs all 2^32 on `F32_THREADS` threads, and `python3 tools/gate.py full` runs that when the
   package or its test changes.
-
-The same texts were compared with jq 1.8.2's over two million floats: random bit patterns, every binade edge, powers of
-ten, short decimals and integers.
 
 ### Lanes
 

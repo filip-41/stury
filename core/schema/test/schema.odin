@@ -96,7 +96,7 @@ schema_suite_reads :: proc(t: ^testing.T) {
 			groups := core.children(&doc, core.ROOT)
 			for group in core.child_next(&groups) {
 				node, _ := core.member(&doc, group, "schema")
-				d, _, err := read_text(string(core.span(&doc, node)), entry.draft)
+				_, _, err := read_text(string(core.span(&doc, node)), entry.draft)
 				switch {
 				case err == nil:
 					read += 1
@@ -106,7 +106,6 @@ schema_suite_reads :: proc(t: ^testing.T) {
 					failed += 1
 					testing.expectf(t, false, "%s: %v", info.fullpath, err)
 				}
-				_ = d
 			}
 		}
 		os.walker_destroy(&w)
@@ -577,12 +576,7 @@ schema_check_reports_each_failure :: proc(t: ^testing.T) {
 	defer typed.sink_destroy(&sink)
 	first := schema.check(&b, src, &sink)
 	testing.expect_value(t, first.(core.Typed_Error).kind, core.Typed_Error_Kind.Below_Minimum)
-	out := strings.builder_make(context.temp_allocator)
-	for e in sink.entries {
-		core.render_entry(strings.to_stream(&out), src, e)
-		strings.write_byte(&out, '\n')
-	}
-	testing.expect_value(t, strings.to_string(out), "1:1: Required member \"c\" is missing (.required)\n1:7: Number is below the minimum, at least 2 at .a (.properties.a.minimum)\n1:21: Value is not of the allowed type, expected string at .b[1] (.properties.b.items.type)\n1:30: No value is allowed here at .z (.additionalProperties)\n")
+	testing.expect_value(t, rendered(src, &sink, true), "1:1: Required member \"c\" is missing (.required)\n1:7: Number is below the minimum, at least 2 at .a (.properties.a.minimum)\n1:21: Value is not of the allowed type, expected string at .b[1] (.properties.b.items.type)\n1:30: No value is allowed here at .z (.additionalProperties)\n")
 	testing.expect(t, !schema.valid(&b, src))
 	// `c` is only required, so `additionalProperties` refuses it too.
 	testing.expect(t, !schema.valid(&b, transmute([]u8)string(`{"a": 2, "c": null}`)))
@@ -641,12 +635,7 @@ schema_check_reports_arms :: proc(t: ^testing.T) {
 	defer typed.sink_destroy(&sink)
 	first := schema.check(&ch.bound, src, &sink)
 	testing.expect_value(t, first.(core.Typed_Error).kind, core.Typed_Error_Kind.Below_Minimum)
-	out := strings.builder_make(context.temp_allocator)
-	for e in sink.entries {
-		core.render_entry(strings.to_stream(&out), src, e)
-		strings.write_byte(&out, '\n')
-	}
-	testing.expect_value(t, strings.to_string(out), "1:1: Required member \"q\" is missing (.dependentRequired)\n1:1: Value passes the subschema that not refuses (.not)\n1:7: Number is below the minimum, at least 2 at .a (.properties.a.allOf[0].minimum)\n1:7: Value passes none of the subschemas at .a (.properties.a.anyOf)\n1:16: Value is not of the allowed type, expected integer at .xy (.patternProperties.\"^x\".type)\n1:26: Elements are not unique at .l (.properties.l.uniqueItems)\n1:26: Too few elements pass contains, at least 1 at .l (.properties.l.contains)\n")
+	testing.expect_value(t, rendered(src, &sink, true), "1:1: Required member \"q\" is missing (.dependentRequired)\n1:1: Value passes the subschema that not refuses (.not)\n1:7: Number is below the minimum, at least 2 at .a (.properties.a.allOf[0].minimum)\n1:7: Value passes none of the subschemas at .a (.properties.a.anyOf)\n1:16: Value is not of the allowed type, expected integer at .xy (.patternProperties.\"^x\".type)\n1:26: Elements are not unique at .l (.properties.l.uniqueItems)\n1:26: Too few elements pass contains, at least 1 at .l (.properties.l.contains)\n")
 }
 
 // A fixed evaluated set becomes the node's own additional members or items and a dynamic one stays an arm, and either
@@ -673,12 +662,8 @@ schema_check_reports_unevaluated :: proc(t: ^testing.T) {
 		src := transmute([]u8)c.text
 		sink: typed.Sink
 		schema.check(&ch.bound, src, &sink)
-		out := strings.builder_make(context.temp_allocator)
-		for e in sink.entries {
-			core.render_entry(strings.to_stream(&out), src, e)
-			strings.write_byte(&out, '\n')
-		}
-		testing.expectf(t, strings.to_string(out) == c.want, "%s on %s: %q", c.schema, c.text, strings.to_string(out))
+		got := rendered(src, &sink, true)
+		testing.expectf(t, got == c.want, "%s on %s: %q", c.schema, c.text, got)
 		typed.sink_destroy(&sink)
 		checked_destroy(ch)
 	}
@@ -1034,12 +1019,8 @@ schema_check_reports_names_and_required :: proc(t: ^testing.T) {
 		defer typed.sink_destroy(&sink)
 		src := transmute([]u8)c.text
 		schema.check(&ch.bound, src, &sink)
-		out := strings.builder_make(context.temp_allocator)
-		for e in sink.entries {
-			core.render_entry(strings.to_stream(&out), src, e)
-			strings.write_byte(&out, '\n')
-		}
-		testing.expectf(t, strings.to_string(out) == c.want, "%s on %s: %q", c.schema, c.text, strings.to_string(out))
+		got := rendered(src, &sink, true)
+		testing.expectf(t, got == c.want, "%s on %s: %q", c.schema, c.text, got)
 	}
 }
 
@@ -2012,16 +1993,19 @@ schema_write_spells_json5_numbers_as_json :: proc(t: ^testing.T) {
 	}
 }
 
-// The entries of a check, each without its position.
+// The entries of a check, one to a line, each without its position unless `positions`.
 @(private = "file")
-rendered :: proc(src: []u8, sink: ^typed.Sink) -> string {
+rendered :: proc(src: []u8, sink: ^typed.Sink, positions := false) -> string {
 	out := strings.builder_make(context.temp_allocator)
 	line := strings.builder_make(context.temp_allocator)
 	for e in sink.entries {
 		strings.builder_reset(&line)
 		core.render_entry(strings.to_stream(&line), src, e)
-		_, _, rest := strings.partition(strings.to_string(line), ": ")
-		strings.write_string(&out, rest)
+		text := strings.to_string(line)
+		if !positions {
+			_, _, text = strings.partition(text, ": ")
+		}
+		strings.write_string(&out, text)
 		strings.write_byte(&out, '\n')
 	}
 	return strings.to_string(out)
@@ -2117,7 +2101,7 @@ markup_attributes_survive_an_edit :: proc(t: ^testing.T) {
 	testing.expect_value(t, body, "EUR")
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	testing.expect(t, write.set(&list, 4, typed.Raw("2")) == nil)
+	testing.expect(t, write.set_node(&list, 4, typed.Raw("2")) == nil)
 	edited, _, err := compose.commit(&list)
 	defer delete(edited)
 	testing.expectf(t, err == nil, "%v", err)
@@ -2133,16 +2117,12 @@ markup_attributes_survive_an_edit :: proc(t: ^testing.T) {
 @(test)
 schema_check_holds_deep_values :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
+	wrapped :: proc(depth: int, open, close, inner: string) -> string {
+		head, tail := strings.repeat(open, depth, context.temp_allocator), strings.repeat(close, depth, context.temp_allocator)
+		return strings.concatenate({head, inner, tail}, context.temp_allocator)
+	}
 	nested :: proc(depth: int, inner: string) -> string {
-		b := strings.builder_make(context.temp_allocator)
-		for _ in 0 ..< depth {
-			strings.write_byte(&b, '[')
-		}
-		strings.write_string(&b, inner)
-		for _ in 0 ..< depth {
-			strings.write_byte(&b, ']')
-		}
-		return strings.to_string(b)
+		return wrapped(depth, "[", "]", inner)
 	}
 	arrays :: `{"allOf": [{"$ref": "#/$defs/i"}], "$defs": {"i": {"type": "array", "items": {"$ref": "#/$defs/i"}}}}`
 	recursive :: `{"allOf": [{}], "items": {"$ref": "#"}}`
@@ -2157,37 +2137,13 @@ schema_check_holds_deep_values :: proc(t: ^testing.T) {
 	tagged :: `{"$defs": {"node": {"oneOf": [{"properties": {"kind": {"const": "seq"}, "children": {"type": "array", "items": {"$ref": "#/$defs/node"}}}, "required": ["kind"]}, {"properties": {"kind": {"const": "par"}, "children": {"type": "array", "items": {"$ref": "#/$defs/node"}}}, "required": ["kind"]}, {"properties": {"kind": {"const": "leaf"}, "value": {"type": "integer"}}, "required": ["kind", "value"]}]}}, "$ref": "#/$defs/node"}`
 	either :: `{"$defs": {"n": {"anyOf": [{"properties": {"a": {"$ref": "#/$defs/n"}}, "required": ["a"]}, {"properties": {"a": {"$ref": "#/$defs/n"}}, "required": ["b"]}, {"type": "integer"}]}}, "$ref": "#/$defs/n"}`
 	tagged_tree :: proc(depth: int, leaf: string) -> string {
-		b := strings.builder_make(context.temp_allocator)
-		for _ in 0 ..< depth {
-			strings.write_string(&b, `{"children": [`)
-		}
-		strings.write_string(&b, leaf)
-		for _ in 0 ..< depth {
-			strings.write_string(&b, `], "kind": "seq"}`)
-		}
-		return strings.to_string(b)
+		return wrapped(depth, `{"children": [`, `], "kind": "seq"}`, leaf)
 	}
 	members :: proc(depth: int, inner: string) -> string {
-		b := strings.builder_make(context.temp_allocator)
-		for _ in 0 ..< depth {
-			strings.write_string(&b, `{"a": `)
-		}
-		strings.write_string(&b, inner)
-		for _ in 0 ..< depth {
-			strings.write_byte(&b, '}')
-		}
-		return strings.to_string(b)
+		return wrapped(depth, `{"a": `, "}", inner)
 	}
 	tree :: proc(depth: int, leaf: string) -> string {
-		b := strings.builder_make(context.temp_allocator)
-		for _ in 0 ..< depth {
-			strings.write_string(&b, `{"children": [`)
-		}
-		strings.write_string(&b, leaf)
-		for _ in 0 ..< depth {
-			strings.write_string(&b, "]}")
-		}
-		return strings.to_string(b)
+		return wrapped(depth, `{"children": [`, "]}", leaf)
 	}
 	// Each level nests a run on the machine stack, and a sanitizer's frames hold about three times a plain build's, so
 	// under one the check refuses well before a thousand levels.

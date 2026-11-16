@@ -122,11 +122,8 @@ fold_flow :: proc "contextless" (o: ^Decoded, s: []u8, style: Style) {
 			case 'P': put_rune(o, 0x2029)
 			case 'x', 'u', 'U':
 				digits := 2 if e == 'x' else 4 if e == 'u' else 8
-				cp := u32(0)
-				for _ in 0 ..< digits {
-					cp = cp << 4 | u32(spell.HEX_NIBBLE[s[i]])
-					i += 1
-				}
+				cp, _, _ := spell.hex_run(s, i, digits)
+				i += digits
 				put_rune(o, cp)
 			}
 			keep = o.n

@@ -129,13 +129,9 @@ scan_double :: proc "contextless" (p: ^Parser, n: int) -> (spelling: u16, ok: bo
 				i += 2
 			case 'x', 'u', 'U':
 				digits := u64(2 if c == 'x' else 4 if c == 'u' else 8)
-				cp := u32(0)
-				for k in u64(0) ..< digits {
-					d := spell.HEX_NIBBLE[at(p, i + 2 + k)]
-					if d > 15 {
-						return 0, fault(p, i, .Bad_Escape)
-					}
-					cp = cp << 4 | u32(d)
+				cp, _, hex := spell.hex_run(p.src, int(i) + 2, int(digits))
+				if !hex {
+					return 0, fault(p, i, .Bad_Escape)
 				}
 				if cp > 0x10ffff || cp >= 0xd800 && cp <= 0xdfff {
 					return 0, fault(p, i, .Bad_Escape, .Bad_Codepoint)

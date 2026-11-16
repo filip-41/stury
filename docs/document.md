@@ -4,25 +4,27 @@ A build turns one walk's tokens into a document: the tokens as 16-byte nodes in 
 attributes beside them as facts, and a table of readers the format supplies to read a node's text, number and kind. The readers walk the node
 array and call a service where a node's `spelling` says its value is not its own bytes.
 
-This document describes the node, the document and its builder, the readers, the readers and services tables, the duplicate-key
-rule, a delimited text, facts, the edit list and its commit, the value layer's errors and its bounds. `walk.md`
-describes the walks that make the tokens and `kernel.md` the vector code behind them.
+`walk.md` describes the walks that make the tokens and `kernel.md` the vector code behind them.
 
 ## Files
 
 | File | Holds |
 |---|---|
-| `core/document.odin` | `Node`, `Document`, the readers, `Fact`, `Fact_Kind`, `FACTS`, `fact_value`, `Site`, `destroy`, `clone`, `Readers`, `Services` and `Edit_Services` |
+| `core/document.odin` | `Node`, the spelling bits, `Document`, `Table`, `Duplicates`, `build`, `validate`, `destroy`, `clone` |
+| `core/node.odin` | a node's `span`, `key_equals`, text and numbers, and the iterators over a container's members |
+| `core/document_read.odin` | the document's arms of `kind`, `length`, `child_at`, `member`, `children`, `pairs`, `text` and `number` |
+| `core/fact.odin` | `Fact`, `Fact_Kind`, `FACTS`, `fact_value`, `Comment_Syntax`, `facts_of`, `attributes_of` |
+| `core/format.odin` | `As`, `Capabilities`, `Readers`, `Services`, `Edit_Services`, `Site` |
 | `core/build/build.odin` | `Builder`, the hooks, `builder_start`, `builder_end`, the header row, the duplicate-key check |
-| `core/edit.odin` | `Edit_List`, `Edit`, `set`, `insert`, `remove`, `set_fact`, `remove_fact` |
+| `core/edit.odin` | `Edit_List`, `Edit`, `set_text`, `set_input`, `insert_input`, `remove`, `reorder`, `set_fact`, `set_facts`, `remove_fact` |
 | `core/compose/compose.odin` | a commit's container composition: members, junctions and the placement of facts |
 | `core/compose/commit.odin` | the commit, `commit` in a format package: plan, compose, splice, the read of the result |
-| `core/path.odin` | `Path`, its steps and spellings, `Answer`, `Token_Answer`, `Presence`, `member_of`, `element_of` and `length_exact` |
+| `core/path.odin` | `Path`, its steps and spellings, `Answer`, `Token_Answer`, `Presence`, `member_of`, `element_of`, `length_exact`, `Path_Error`, and the steps written as path text or a JSON Pointer |
 | `core/path_text.odin` | the readers of a path's jq text and JSON Pointer spellings |
 | `core/build/scan.odin` | the one engine's entries: the hooks a format's `scan` walks with, the partial document, the query behind `json.query` and `dsv.query`, `scan`, `find`, `each_answer` and `set` over a handle |
 | `core/build/step.odin` | the step logic every hook and the replay run |
 | `core/build/many.odin` | what only `$MANY` reads hold: armed path sets, rings of negative indexes, answers placed in text order, the stream |
-| `json/query.odin`, `dsv/query.odin` | each format's `Spelling.scan` walk, whose forwarders `scan`, `find`, `each_answer` and `set` sit in its `walk.odin` beside `validate` and `build` |
+| `json/query.odin`, `dsv/query.odin` | each format's scan walk, whose forwarders `scan`, `find`, `each_answer` and `set` sit in its `walk.odin` beside `validate` and `build` |
 | `core/spell/number.odin` | `Number`, `Number_Kind`, the digit and scale bounds, the decimal decoders |
 | `core/spell/digits.odin` | the digit run readers, eight bytes at a time |
 | `core/spell/hex.odin` | `HEX_NIBBLE`, `hex4` and the hex number decoders |
@@ -30,16 +32,17 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `core/spell/escape.odin` | JSON's escapes |
 | `core/spell/utf8.odin` | `utf8_lax_char` and the UTF-8 character readers |
 | `core/number.odin` | core's aliases for `Number` and `Number_Kind`, and `plain_kind` |
-| `core/error.odin` | `Document_Error`, its kinds and rules, `inner`, `render`, `write_code` |
-| `json/document.odin` | JSON's `build`, `HANDLES`, `SERVICES` and edit tables, `close_end`, the edit checks |
+| `core/error.odin` | `Document_Error`, its kinds and rules, `inner`, the `Error` union, `error_of`, `render`, `write_code` |
+| `core/typed_error.odin` | `Typed_Error`, `Typed_Refusal`, their kinds and rules, a check's `Error_Entry` and its rendering |
+| `json/document.odin` | JSON's `HANDLES`, `SERVICES`, `build_spec`, `close_end_spec`, the edit services and checks |
 | `core/compose/lines.odin` | a flat text's root junctions and the comments above its header |
-| `json/unescape.odin` | JSON's `token_text` and `token_number` readers and the decoder behind them |
-| `dsv/document.odin` | dsv's `build`, its handle tables, its edit table, `close_end`, the record check |
+| `json/unescape.odin` | JSON's `token_text` reader and the decoder behind it |
+| `dsv/document.odin` | dsv's `build_spec`, its handle tables, its edit table, the record check |
 | `dsv/plan.odin` | a commit's column changes, turned into plain cell edits before core composes the list |
-| `toml/document.odin` | TOML's handles and readers, `text`, `number`, `close_end`, the `Tag` and `Style` facts |
+| `toml/document.odin` | TOML's handles and readers, `token_text`, `token_number`, `close_end`, the `Tag` and `Style` facts |
 | `toml/edit.odin` | TOML's edit services and its own commit: splices of lines and sections |
 | `yaml/build.odin` | YAML's entry points and its `build`, which holds a key's properties back from its value and types the plain scalars |
-| `yaml/resolve.odin` | YAML's core schema: `resolve`, `number`, the `Style` fact |
+| `yaml/resolve.odin` | YAML's core schema: `spelling_resolve`, `token_number`, the tags |
 | `yaml/keys.odin` | the keys a mapping holds, by resolved type and value, which a merge key and a read that judges repeats read |
 | `yaml/edit.odin`, `edit_place.odin`, `edit_facts.odin` | YAML's edit services and its own commit, the sites of new lines, and property and comment edits |
 | `xml/document.odin`, `xml/scope.odin` | XML's handles and readers, the `Name`, `Namespace` and `Content` facts, expanded names and `close_end` |
@@ -101,7 +104,7 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
   count of every container whose count saturated `MAX_CHILDREN`, sorted by node, and are nil when no container is that
   wide. `indexed`, a `[dynamic]Child_Index` in `allocator`, holds the member nodes of every container
   `index_children` indexed, sorted by node, and is empty until a caller indexes one.
-- `spelling` is a `^Spelling` that points at a format's table in rodata, and `allocator` is the one the build
+- `as.readers` points at the format's `Readers` table in rodata, and `allocator` is the one the build
   received. `destroy` frees the allocations, the child index with them, and sets the document to zero. `clone` copies
   the nodes, facts, counts and a read's answers block into another allocator, so the original may go while the copy
   lives, and the copy borrows the same `src` and holds no child index. A reader that allocates takes its own allocator.
@@ -115,7 +118,7 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
 - `clash` is the first byte of the first YAML key with the text of another key of its mapping, as `1` and `"1"` or `1`
   and `0x1` are, 0 when none is. A query, a typed read and the CLI refuse from it under every `dups` but `.First` and
   `.All`.
-- `as: core.As` is the handle the text was read with, in 24 bytes: the `spelling`, the `spec` in one byte, so an edit
+- `as: core.As` is the handle the text was read with, in 24 bytes: the `readers`, the `spec` in one byte, so an edit
   service can dispatch on it when a procedure pointer carries no compile-time spec, the `tolerate` set, `max_depth`, and
   ten format bytes core passes along unread, which dsv uses for its delimiter, comment byte, `no_header`, `crlf` and
   `infer`, and JSON for `refuse_non_finite`. `max_depth` is `Options.max_depth`, 0 for the default: JSON's edit services read a recorded value at that
@@ -128,16 +131,16 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
 
 ```odin
 core.build :: proc(src: []u8, as: As, dups := Duplicates.Last,
-	allocator := context.allocator) -> (Document, Document_Error)
+	allocator := context.allocator) -> (Document, Error)
 core.validate :: proc "contextless" (src: []u8, as: As) -> Error
 json.build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last,
-	allocator := context.allocator) -> (core.Document, core.Document_Error)
+	allocator := context.allocator) -> (core.Document, core.Error)
 dsv.build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last,
-	allocator := context.allocator) -> (core.Document, core.Document_Error)
+	allocator := context.allocator) -> (core.Document, core.Error)
 ```
 
-`core.build` and `core.validate` are the one implementation: each calls the handle's `Spelling.build` or
-`Spelling.validate`, which switches once on the handle's spec into the walk compiled for it. A handle with no format
+`core.build` and `core.validate` are the one implementation: each calls the handle's `Services.build` or
+`Services.validate`, which switches once on the handle's spec into the walk compiled for it. A handle with no format
 gives `.Bad_Spec` from a build and a `.Bad_Option` fault from a validate. `json.build`, `json.validate`, `dsv.build` and
 `dsv.validate` take the format's own spec and options and forward to them with `as(spec, opts)`.
 
@@ -193,12 +196,6 @@ A build chooses its hook, and the hook is compiled for that choice:
 - `build.builder_end` cuts the node and fact slices to their counts, trims their unused tails where the allocator can
   resize, gives a comment run with no value after it to the root as `Comment_Foot`, and sorts the facts by node,
   keeping source order within a node. The child counts follow node order.
-
-| Error | When |
-|---|---|
-| `.Walk` | the walk's fault, in `inner` |
-| `.Duplicate_Key` | a build under `.Refuse` met a repeated key, at the later key's first byte, or a commit's named cell is one its record holds |
-| `.No_Memory` | an owned allocation was refused |
 
 A JSON `0x1E` before the document is `.Bad_Char` at that byte, a JSON text with no value is `.Truncated` at `len(src)`,
 and dsv's `.Bad_Option` names no byte. On an error the document is zero and its data is freed.
@@ -382,7 +379,7 @@ The slots past these are nil in JSON and dsv and serve the other formats:
 | `flat` | the text has no brackets, so no container has bytes of its own | dsv |
 
 A handle's table also points at the format's `Services`, the passes a call that chooses its format at run time reaches:
-`build`, `validate`, `scan`, `write`, `edit`, and the typed reads, token writer and record framing as `rawptr` slots. A
+`build`, `validate`, `scan`, `write`, `edit`, and `plans`, `reads`, `tokens`, `records` and `docs` as `rawptr` slots. A
 document a format's entry point builds holds a table with no services, so a program links only the passes it names,
 and the format package's `query`, `edit_list_init` and `write` serve such a document where `core`'s serve a handle's.
 
@@ -391,6 +388,7 @@ Edit_Services :: struct {
 	value:        proc(v: ^Token_View, src: []u8, allocator: runtime.Allocator) -> Document_Error,
 	key_text:     proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
 	comment:      proc(doc: ^Document, spec: u8) -> Comment_Syntax,
+	bare_key:     proc(spec: u8, name: []u8) -> bool,
 	separators:   proc(doc: ^Document, spec: u8) -> bool,
 	member_sep:   proc(doc: ^Document, c: Node_Index) -> string,
 	key_sep:      string,
@@ -400,6 +398,11 @@ Edit_Services :: struct {
 	emptied:      proc(doc: ^Document, list: ^Edit_List) -> bool,
 	plan:         proc(doc: ^Document, list: ^Edit_List, out: ^[dynamic]Edit, allocator: runtime.Allocator) -> (changed: bool, err: Document_Error),
 	validate:     proc "contextless" (src: []u8, as: As) -> Maybe(Fault),
+	build:        proc(src: []u8, as: As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (Document, Document_Error),
+	scan:         proc(src: []u8, as: As, paths: []Path, read: Path_Options, state: rawptr, on: proc(state: rawptr, a: Token_Answer) -> bool, allocator: runtime.Allocator) -> (Document, Path_Error),
+	whole_scan:   bool,
+	walk_rows:    proc(src: []u8, as: As, r: ^Row_Read) -> Maybe(Fault),
+	walk_written: proc(src: []u8, as: As, w: ^Written_Read) -> Maybe(Fault),
 	spell:        proc(doc: ^Document, v: Value, opts: Write_Options, colon: string, record: bool, at: u64, allocator: runtime.Allocator) -> ([]u8, Error),
 	prefix:       proc(doc: ^Document, role: Role, body: []u8, text: ^[dynamic]u8) -> bool,
 	relocate:     proc(doc: ^Document, node: Node_Index, site: Site, allocator: runtime.Allocator) -> (text: []u8, ok: bool),
@@ -413,7 +416,8 @@ comment: `SLASH_COMMENTS` (`//`, `/* */`), `HASH_COMMENTS` (`#`), `MARKUP_COMMEN
 comment character. A body holding a line end is written as a block when the syntax has one, so a line comment cannot
 end its line early. Every edit spells a comment through `compose.spell_comment`. JSON's table supplies `value`,
 `key_text`, `comment`, `separators`, `member_sep`, `spell` and `validate`, with `key_sep` `":"`, and its `comment` is
-`SLASH_COMMENTS` for `Jsonc` and `Json5` and none for `Json`. dsv's table supplies `value`, `key_text`,
+`SLASH_COMMENTS` for `Jsonc` and `Json5` and none for `Json`. `bare_key` says whether a name may be written bare. `build`,
+`scan`, `whole_scan`, `walk_rows` and `walk_written` serve the read of a commit's output against its edits. dsv's table supplies `value`, `key_text`,
 `comment`, `member_sep`, `insert_check` and `plan`, which turns a list's column changes into plain edits. A format with
 `Readers.flat` set has no brackets in its text, so `interior` says where a container's members lie, the root's members
 are lines that `core/compose/lines.odin` composes, and `fact_slot` and `emptied` say which facts the output holds. dsv's
@@ -493,7 +497,7 @@ strict JSON document and a dsv text with no comment byte. `lo` and `n` span the 
 
 `kind` is the kind of the token the fact came from. A comment, a text tag, an anchor and an alias are `Plain`, with the
 lead and tail marker lengths in `spelling`. A tag a binary format spells as a number (a CBOR tag) is `Number`, which
-`fact_token` gives as its token and `fact_number` reads through the format's `number`, as a node's number is read. Any
+`fact_number` reads as its token through the format's `number`, as a node's number is read. Any
 kind but `Plain` has no markers, and its body is the whole span. `Tag`, `Anchor` and `Alias` facts stand just before
 their node, on its line. An `Attribute` fact leads through the opening quote of its value and trails with the closing
 one, and a value that starts more than 255 bytes past its name holds a lead of 255, which the markup formats' readers
@@ -532,9 +536,9 @@ An edit list is kept apart from the document, which never changes. A reader sees
 the list and builds the output again.
 
 ```odin
-Edit_List :: struct { doc: ^Document, edits: [dynamic]Edit, allocator: runtime.Allocator }
-Edit :: struct { node: Node_Index, op: Edit_Op, role: Role, at: u32, key: []u8, text: []u8 }
-Edit_Op :: enum u8 { Set, Insert, Remove, Set_Fact, Remove_Fact }
+Edit_List :: struct { doc: ^Document, edits: [dynamic]Edit, allocator: runtime.Allocator, edit: ^Edit_Services, write: Write_Options, fixed: bool, ... }
+Edit :: struct { node: Node_Index, op: Edit_Op, role: Role, padded: bool, at: u32, key: []u8, text: []u8, value: Value }
+Edit_Op :: enum u8 { Set, Insert, Remove, Set_Fact, Remove_Fact, Reorder }
 ```
 
 `edit_list_init` makes an empty list over a borrowed document and allocates nothing until the first edit. Any number
@@ -545,13 +549,12 @@ one allocation with the key first, and `edit_list_destroy` frees them.
 
 An edit is checked when it is recorded, by reading its own text, so the check costs O(the text). The format's own walk
 judges the text as one value, one key or one record of the document's spec, and for a delimited text of its recorded
-`delimiter` and `comment` byte. Every text argument is a `string`, and the list copies it.
+`delimiter` and `comment` byte. `in_` is an `Edit_Input`: source text when `raw`, else a `Value` the format spells. The list copies the text.
 
 | Call | Records | Refuses |
 |---|---|---|
-| `set(list, node, text: string)` | the node's bytes become `text`; a key's text is its decoded name | `.Bad_Index`, `.Bad_Value` |
-| `insert(list, container, at, text: string)` | an element of an `Array` | `.Bad_Index`, `.Wrong_Container`, `.Bad_Position`, `.Bad_Value` |
-| `insert(list, container, at, key, text: string)` | a member of an `Object`, its key a decoded name | the same |
+| `set_text(list, node, text: string)` | the node's bytes become `text`; a key's text is its decoded name | `.Bad_Index`, `.Bad_Value` |
+| `insert_input(list, container, at, key, member, in_)` | an element of an `Array`, or with `member` a member of an `Object`, its `key` a decoded name | `.Bad_Index`, `.Wrong_Container`, `.Bad_Position`, `.Bad_Value` |
 | `remove(list, node)` | the member the node is, and its key | `.Bad_Index` |
 | `set_fact(list, node, role, text: string)`, `remove_fact(list, node, role)` | the facts of the node and role | `.Bad_Index`, `.Bad_Fact` |
 
@@ -641,7 +644,7 @@ line.
 - New members at one index keep the order they were recorded in, and one at an index inside a removal run takes the
   run's place. A new member comes after the inline comment of the member before it and before the head comment of the
   member after it, and a foot stays last, so a record added to a text of only comments comes before them. A new member
-  is joined to its neighbours by one separator. A table writes `read.delimiter` between cells and its `record_sep`
+  is joined to its neighbours by one separator. A table writes the delimiter between cells and the line end `edit_record_sep` gives
   between records, and a new last record ends as the old last record did.
 
 ### Facts in a commit

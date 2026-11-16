@@ -522,12 +522,3 @@ vocabularies_of :: proc(r: ^Reader, doc: ^core.Document, v: core.Node_Index) -> 
 		}
 	}
 }
-
-// `$vocabulary` read as part of a schema has no meaning and only has to be well formed. A schema used as `$schema` has
-// its vocabularies read by `dialect`, which requires the ones it knows.
-@(private)
-read_vocabulary :: proc(r: ^Reader, sc: Scope, site: Site, name: string) {
-	if core.kind(r.sources[sc.source], site.at) != .Object {
-		fail(r, site, name, "must be an object")
-	}
-}

@@ -47,7 +47,7 @@ json_records_are_framed_values :: proc(t: ^testing.T) {
 
 		buf: bytes.Buffer
 		defer bytes.buffer_destroy(&buf)
-		walktest.expect_nil(t, records.marshal_stream(bytes.buffer_to_stream(&buf), ENTRIES[:], &plan, json.as(.Json), framing))
+		walktest.expect_nil(t, json.records_marshal_stream(bytes.buffer_to_stream(&buf), ENTRIES[:], &plan, .Json, framing = framing))
 		testing.expect_value(t, string(bytes.buffer_to_bytes(&buf)), string(got))
 
 		// Read back, a record per frame.

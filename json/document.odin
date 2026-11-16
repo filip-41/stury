@@ -214,7 +214,7 @@ skip_to_close :: proc(src: []u8, p: u64, $S: Spec) -> u64 {
 // first byte may be a byte-order mark, so a value that begins with one is refused here as it would be at any later
 // byte.
 edit_value :: proc(src: []u8, _: runtime.Allocator, depth: u32, $S: Spec) -> core.Document_Error {
-	if len(src) >= 3 && src[0] == 0xEF && src[1] == 0xBB && src[2] == 0xBF {
+	if core.text_start(src, 0) != 0 {
 		return {kind = .Bad_Value}
 	}
 	// Strict JSON has no fact, so a value that validates is the whole text and the check needs no hook.

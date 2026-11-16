@@ -97,8 +97,13 @@ feed_nodes :: proc "contextless" (
 		case .Next, .Keep:
 			if t.kind > .Plain {
 				if (depth + 2) * STRIDE > len(ends) {
-					wide, grown := grow_ends(ends, owned, max(2 * len(ends), 2 * STRIDE))
-					if !grown || !deepen(h, (len(wide) - len(ends)) / STRIDE) {
+					// The hook's stacks grow first, since a resize frees the old `ends` and the deferred free would free it again.
+					n := max(2 * len(ends), 2 * STRIDE)
+					if !deepen(h, (n - len(ends)) / STRIDE) {
+						return false
+					}
+					wide, grown := grow_ends(ends, owned, n)
+					if !grown {
 						return false
 					}
 					ends, owned = wide, true

@@ -103,7 +103,7 @@ check_write :: proc(t: ^testing.T, src: []u8) -> bool {
 		if !testing.expect(t, terr == nil && string(twice) == string(text), "writing a written text changes it") {
 			return false
 		}
-		direct, ferr := core.format(src, json.as(.Json), opts)
+		direct, ferr := json.format(src, .Json, write = opts)
 		defer delete(direct)
 		if !testing.expect(t, ferr == nil && string(direct) == string(text), "format differs from core.write") {
 			return false
@@ -115,7 +115,7 @@ check_write :: proc(t: ^testing.T, src: []u8) -> bool {
 		}
 		buf: bytes.Buffer
 		defer bytes.buffer_destroy(&buf)
-		_, serr := core.write_stream(bytes.buffer_to_stream(&buf), &doc, opts)
+		_, serr := json.write_stream(bytes.buffer_to_stream(&buf), &doc, .Json, opts)
 		if !testing.expect(t, serr == nil && string(bytes.buffer_to_bytes(&buf)) == string(text), "the stream differs from core.write") {
 			return false
 		}

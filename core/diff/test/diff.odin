@@ -21,20 +21,6 @@ build_text :: proc(t: ^testing.T, text: string, spec := json.Spec.Json) -> (doc:
 }
 
 @(private = "file")
-step_text :: proc(sb: ^strings.Builder, steps: []core.Step) {
-	for s in steps {
-		switch v in s {
-		case core.Name:
-			fmt.sbprintf(sb, ".%s", string(v))
-		case core.Index:
-			fmt.sbprintf(sb, "[%d]", int(v))
-		case core.All, core.Slice, core.Descend, core.Index_Or_Name:
-			strings.write_string(sb, "?")
-		}
-	}
-}
-
-@(private = "file")
 value_text :: proc(v: core.Value) -> string {
 	if s, is_text := v.(string); is_text {
 		return s
@@ -61,7 +47,7 @@ render :: proc(r: diff.Result) -> string {
 		case .Fact:
 			strings.write_byte(&sb, '#')
 		}
-		step_text(&sb, c.path)
+		core.write_steps(strings.to_writer(&sb), c.path, false)
 		if c.op != .Added {
 			strings.write_string(&sb, " ")
 			strings.write_string(&sb, value_text(c.old))

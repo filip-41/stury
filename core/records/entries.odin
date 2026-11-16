@@ -536,6 +536,7 @@ entries_walked_close :: proc(it: ^Reader) {
 
 // The document of an `.Entries` member from `doc`, the build of a text that holds that member alone in its container:
 // the first value of `doc`'s root, which `doc` gives up.
+@(private)
 member_document :: proc(doc: ^core.Document, allocator: runtime.Allocator) -> (sub: core.Document, err: core.Document_Error) {
 	defer core.destroy(doc)
 	members := core.children(doc, core.ROOT)
@@ -777,7 +778,6 @@ rewalk_shift :: proc(it: ^Reader, w: ^Entry_Walk, r: ^Rewalk) {
 	}
 }
 
-// Frees `w.rewalk`.
 @(private)
 rewalk_free :: proc(it: ^Reader, w: ^Entry_Walk) {
 	r := w.rewalk

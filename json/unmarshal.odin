@@ -152,13 +152,13 @@ repeat_path :: proc(src: []u8, $S: Spec, opts: Options, at: u64, e: ^core.Typed_
 	at_node := core.ROOT
 	descend: for {
 		if doc.nodes[at_node].kind == .Object {
-			pairs := core.doc_pairs(doc, at_node)
-			for key, val in core.doc_pair_next(&pairs) {
+			pairs := core.pairs(doc, at_node)
+			for key, val in core.pair_next(&pairs) {
 				on_key := holds(doc, key, at)
 				if !on_key && !holds(doc, val, at) {
 					continue
 				}
-				name, plain := core.doc_text(doc, key, nil)
+				name, plain := core.text(doc, key, nil)
 				if plain {
 					// A key with nothing to decode is a slice of the text, which the document reads in place.
 					from := int(uintptr(raw_data(name)) - uintptr(raw_data(doc.src)))
@@ -174,9 +174,9 @@ repeat_path :: proc(src: []u8, $S: Spec, opts: Options, at: u64, e: ^core.Typed_
 				continue descend
 			}
 		} else if doc.nodes[at_node].kind == .Array {
-			children := core.doc_children(doc, at_node)
+			children := core.children(doc, at_node)
 			k := 0
-			for child in core.doc_child_next(&children) {
+			for child in core.child_next(&children) {
 				if holds(doc, child, at) {
 					ring[n % len(ring)], n = core.Index(k), n + 1
 					at_node = child

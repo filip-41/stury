@@ -224,24 +224,20 @@ builder_hook_growing :: #force_inline proc "contextless" (h: ^Builder, s: core.H
 	return builder_step(true, true, true, false, h, s, t)
 }
 
-// Stores tokens with no facts, with the duplicate-key test compiled in, for a build that refuses repeats.
-// `builder_hook_plain` compiles the test out.
+// Stores tokens with no facts and the duplicate-key test, for a build that refuses repeats.
 builder_hook_plain_refuse :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	return builder_step(false, false, true, false, h, s, t)
 }
 
-// Builds a keyless document. It drops every inline key, keeps a headed record as an `Object`, and steps over a header row written
-// before the walk. These are document-model rules, not a grammar's, and `builder_step`'s `$KEYLESS` holds them. The
-// key drop covers facts too (`role` past `.Key`): a fact is not a value. A row written before the walk is the root's
-// next node, role `Key` where a record is a value, and the root's token moves the cursor past it. A build that refuses
-// repeats reads that row after the walk instead of at a close, so no close tests it.
+// Builds a keyless document. It drops every inline key and every fact past it, keeps a headed record as an `Object`, and
+// steps over a header row written before the walk: the root's next node, role `Key` where a record is a value, which the
+// root's token moves the cursor past. A build that refuses repeats reads that row after the walk, so no close tests it.
 builder_hook_keyless :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	return builder_step(false, true, false, true, h, s, t)
 }
 
 // Stores the facts of a delimited text with a comment byte and drops its keys. A fact token is passed to
-// `builder_fact` with the pending cursor, and a record's open resolves the comments above it. A text with no comment
-// byte uses `builder_hook_keyless`, whose `$FACTS` false compiles the fact branch out.
+// `builder_fact` with the pending cursor, and a record's open resolves the comments above it.
 builder_hook_keyless_facts :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	return builder_step(true, true, false, true, h, s, t)
 }
@@ -289,10 +285,8 @@ count_step :: #force_inline proc "contextless" ($KEYLESS: bool, h: ^Count, t: co
 	}
 }
 
-// Every hook runs this body. `$FACTS` false compiles out the fact branch, the pending comments and the write of the
-// last completed value, which a spec with no comments does not use. `$CHECK` false compiles out the capacity test,
-// needed only when the reservation is an estimate. `$REFUSE` false compiles out the duplicate-key test,
-// which a build that did not ask for it does not run. `$KEYLESS` compiles in the keyless document rules above.
+// Every hook runs this body. `$FACTS` compiles in the fact branch, the pending comments and the write of the last
+// completed value, `$CHECK` the capacity test, `$REFUSE` the duplicate-key test, and `$KEYLESS` the keyless rules above.
 @(private)
 builder_step :: #force_inline proc "contextless" ($FACTS, $CHECK, $REFUSE, $KEYLESS: bool, h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	s := s

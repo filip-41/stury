@@ -28,35 +28,8 @@ Write_Option :: enum u8 {
 	Respell_Strings,
 }
 
-// What a format offers, which each format exports as `CAPABILITIES`. `writes` holds the options its document writer
-// honours, `framings` those its records are read in and `specs` is its `Spec` type. `follows` reports whether the fault of a build of a whole text is the start
-// of a second text, so that the text is a stream of them read one after another, and is nil for a format with one text
-// to an input.
-Capabilities :: struct {
-	writes:   bit_set[Write_Option; u8],
-	framings: bit_set[Framing; u8],
-	specs:    typeid,
-	follows:  proc "contextless" (f: Fault) -> bool,
-}
-
 // Pretty with two spaces per level.
 PRETTY :: Write_Options{pretty = true, indent = 2}
-
-// The handle of a format: its readers, and the spec, depth, tolerance and option bytes a text is read or written with. A
-// format's `as` procedure makes one, and a document holds the one it was read with.
-As :: struct {
-	readers:   ^Readers,
-	// The deepest nesting a read takes, 0 for `MAX_DEPTH`. An edit reads a value text at this depth.
-	max_depth: u32,
-	// The format's spec, which its services dispatch on.
-	spec:      u8,
-	// The rules a text read in the format may break.
-	tolerate:  bit_set[Tolerance; u8],
-	// The format's own bytes, opaque to core.
-	opts:      [10]u8,
-}
-
-#assert(size_of(As) == 24)
 
 // Writes node `node` of `doc`, the root by default, as text in format `as`, as `opts` says, into new bytes from
 // `allocator`. A node is written with its subtree and its comments, as a text of its own. A nil `as` is the format and

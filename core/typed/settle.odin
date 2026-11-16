@@ -72,16 +72,14 @@ load_struct :: proc(b: ^Builder, owner: typeid, at: i32, f: ^Field, m: ^Meta, me
 		refuse_plan(b, .No_Memory)
 		return
 	}
-	n = 0
+	n, n_after = 0, 0
 	for &x, i in members {
-		if rule := rule_of(&x); !x.required && rule.make != nil {
+		rule := rule_of(&x)
+		if !x.required && rule.make != nil {
 			defaults[n] = {i32(i), rule.make, rule.data}
 			n += 1
 		}
-	}
-	n_after = 0
-	for &x, i in members {
-		for v in rule_of(&x).afters {
+		for v in rule.afters {
 			afters[n_after] = {i32(i), owned_copy(b, x.name), x.offset, 0 if x.required else x.type.size, v}
 			n_after += 1
 		}

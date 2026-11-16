@@ -341,7 +341,7 @@ write_value_of_built_value_and_node :: proc(t: ^testing.T) {
 	// A repeated key, which only a read under `Duplicates.All` makes: the writer writes each member.
 	append(&o.keys, "a")
 	append(&o.vals, string("again"))
-	text, werr := write.write_value(o, json.as(.Json))
+	text, werr := json.write_value(o, .Json)
 	walktest.expect_nil(t, werr)
 	testing.expect_value(t, string(text), `{"a":[1,2.5,1234567890123456789012345678901234567890,"x",null,true,{"k":[1,"A",2.50]},["k",0]],"a":"again"}`)
 	deep: core.Value

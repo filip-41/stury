@@ -3,7 +3,6 @@ package cbor
 
 import core "../core"
 import host "../host"
-import compose "../core/compose"
 import build "../core/build"
 import typed "../core/typed"
 import write "../core/write"
@@ -106,7 +105,6 @@ fact_number :: core.fact_number
 fact_value :: core.fact_value
 facts_of :: core.facts_of
 float_value :: core.float_value
-format :: core.format
 hash :: core.hash
 int_value :: core.int_value
 key_equals :: core.key_equals
@@ -130,19 +128,18 @@ plain :: core.plain
 remove :: core.remove
 remove_fact :: core.remove_fact
 render :: core.render
+reorder :: core.reorder
 rule_of :: core.rule_of
 set_fact :: core.set_fact
+set_facts :: core.set_facts
 span :: core.span
 text :: core.text
 text_room :: core.text_room
 write_code :: core.write_code
 write_pointer :: core.write_pointer
-write_stream :: core.write_stream
 
 Pool :: host.Pool
 pool_init :: host.pool_init
-
-commit :: compose.commit
 
 Answer_Iter :: build.Answer_Iter
 next :: build.answers_next
@@ -192,10 +189,9 @@ value_null :: write.value_null
 value_string :: write.value_string
 value_tagged :: write.value_tagged
 value_uint :: write.value_uint
-write_value :: write.write_value
 insert :: write.insert
 set_member :: write.set_member
-set_node :: write.set
+set_node :: write.set_node
 close :: write.close
 comment :: write.comment
 end_record :: write.end_record
@@ -208,8 +204,6 @@ Record_Stream_Options :: records.Stream_Options
 Record_Writer :: records.Writer
 records_build :: records.build
 records_close :: records.close
-records_marshal :: records.marshal
-records_marshal_stream :: records.marshal_stream
 records_next :: records.next
 records_read :: records.read
 records_scan :: records.scan

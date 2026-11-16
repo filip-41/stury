@@ -164,7 +164,7 @@ write_records :: #force_inline proc(w: ^Rows, doc: ^core.Document, list: core.No
 				}
 			}
 		}
-		end_record(w, start, i) or_return
+		finish_record(w, start, i) or_return
 		i += 1
 	}
 	if commented {

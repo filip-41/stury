@@ -40,6 +40,16 @@ write :: proc(doc: ^core.Document, $S: Spec, write := core.Write_Options{}, node
 	return core.write(doc, write, as(S), node, allocator)
 }
 
+// Reads `src` as spec `S` and writes it back as `write` says, as `core.format` does with `as(spec, opts)`.
+format :: proc(src: []u8, $S: Spec, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
+	return core.format(src, as(S, opts), write, allocator)
+}
+
+// Writes node `node` of `doc` as spec `S` to `w`, as `core.write_stream` does with `as(spec)`.
+write_stream :: proc(w: io.Stream, doc: ^core.Document, $S: Spec, write := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (dropped: int, err: core.Error) {
+	return core.write_stream(w, doc, write, as(S), node, allocator)
+}
+
 // The handle's `write`: node `node` of `doc` as TOML.
 @(private)
 document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {

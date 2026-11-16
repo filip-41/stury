@@ -141,11 +141,7 @@ optimize :: proc(n: ^Node, opt: ^Opt_Node, env: Mml) {
 		xo: Opt_Node
 		nenv := env
 		for i := 0; i < len(n.kids); {
-			j := i
-			for j < len(n.kids) && literal(n.kids[j]) {
-				j += 1
-			}
-			if j > i {
+			if j := literal_run_end(n.kids[:], i); j > i {
 				run_string(n.kids[i:j], &xo, nenv)
 				i = j
 			} else {
@@ -444,9 +440,10 @@ alt_merge_map :: proc(to, add: ^Opt_Map) {
 	to.mm = {min(to.mm.min, add.mm.min), max(to.mm.max, add.mm.max)}
 	to.value = 0
 	for b in 0 ..< 256 {
-		w, bit := b >> 6, u64(1) << (u64(b) & 63)
-		to.set[w] |= add.set[w] & bit
-		if to.set[w] & bit != 0 {
+		if has_bit(add.set[:], b) {
+			add_bit(to.set[:], b)
+		}
+		if has_bit(to.set[:], b) {
 			to.value += map_position_value(byte(b))
 		}
 	}
@@ -454,9 +451,8 @@ alt_merge_map :: proc(to, add: ^Opt_Map) {
 
 @(private = "file")
 add_map_byte :: proc(m: ^Opt_Map, b: byte) {
-	w, bit := b >> 6, u64(1) << (u64(b) & 63)
-	if m.set[w] & bit == 0 {
-		m.set[w] |= bit
+	if !has_bit(m.set[:], int(b)) {
+		add_bit(m.set[:], int(b))
 		m.value += map_position_value(b)
 	}
 }
@@ -655,7 +651,7 @@ forward_search :: proc(o: ^Search_Opt, s: string, from, limit: int) -> (low, hig
 		}
 		p += k
 	} else {
-		for p < limit && o.set[s[p] >> 6] & (1 << (u64(s[p]) & 63)) == 0 {
+		for p < limit && !has_bit(o.set[:], int(s[p])) {
 			p += lead_width(s[p])
 		}
 	}
@@ -708,17 +704,14 @@ end_bounds :: proc(o: ^Search_Opt, s: string, start: int) -> (first, last: int) 
 // Adds to `set` every byte a match of `n` can start with. `ok` is false when that is not known, and `empty` is true
 // when `n` can match without a byte, so what follows it starts the match too.
 first_bytes :: proc(n: ^Node, set: ^[4]u64) -> (empty: bool, ok: bool) {
-	add_byte :: proc(set: ^[4]u64, b: byte) {
-		set[b >> 6] |= 1 << (u64(b) & 63)
-	}
 	add_rune :: proc(set: ^[4]u64, r: rune) {
 		if !utf8.valid_rune(r) {
 			return
 		}
 		buf, _ := utf8.encode_rune(r)
-		add_byte(set, buf[0])
+		add_bit(set[:], int(buf[0]))
 		if r >= 0x80 && r < 0xC0 { // a search that starts inside a character reads the byte r itself
-			add_byte(set, byte(r))
+			add_bit(set[:], int(r))
 		}
 	}
 	switch n.kind {
@@ -738,7 +731,7 @@ first_bytes :: proc(n: ^Node, set: ^[4]u64) -> (empty: bool, ok: bool) {
 	case .Any:
 		for b in 0 ..< 256 {
 			if b != '\n' || n.dotall {
-				add_byte(set, byte(b))
+				add_bit(set[:], b)
 			}
 		}
 		return false, true
@@ -751,7 +744,7 @@ first_bytes :: proc(n: ^Node, set: ^[4]u64) -> (empty: bool, ok: bool) {
 		return false, true
 	case .Linebreak:
 		for b in ([]byte{'\n', '\v', '\f', '\r', 0xC2, 0xE2}) {
-			add_byte(set, b)
+			add_bit(set[:], int(b))
 		}
 		return false, true
 	case .Cat:

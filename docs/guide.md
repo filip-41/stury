@@ -377,7 +377,7 @@ for key, member in json.pair_next(&it) {
 
 `json.equal`, `json.compare` and `json.hash` order values as jq does. A cell of a CSV or TSV document is a string unless the document was read with `infer`, in `compare` and `equal`
 as in the CLI, and `read_plain = true` reads it as the value it is set against, as the schema-directed conversion (`stury fmt --schema`) does. Two numbers compare by their doubles, and when
-both keep their digits and the doubles are equal, by the digits. `json.write_value(v, json.as(.Json))` writes a value
+both keep their digits and the doubles are equal, by the digits. `json.write_value(v, .Json)` writes a value
 in any format with a token writer. `json.marshal_value(x, &plan)` makes the value of a typed `x`, and
 `json.unmarshal_value(v, &target, &plan)` reads a value into a typed target, an integer field from a double that holds
 it exactly or from the digits. Both take a plan made with `reads = json.reads(.Json)`, which gives it the read and build
@@ -503,7 +503,7 @@ A document written back keeps each string and number as its source spelled it un
 is this call.
 
 ```odin
-out, err := json.format(src, json.as(.Json), json.PRETTY)
+out, err := json.format(src, .Json, write = json.PRETTY)
 if err != nil {
 	report(src, err)
 	return

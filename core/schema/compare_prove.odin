@@ -195,10 +195,7 @@ finite_included :: proc(p: ^Prover, an: []^rules.Node, a, b: []rules.Node_Index,
 		append(&values, nil, false, true)
 		finite = true
 	}
-	if !finite {
-		return refuse(p, "enum")
-	}
-	if len(values) > MAX_FINITE {
+	if !finite || len(values) > MAX_FINITE {
 		return refuse(p, "enum")
 	}
 	// The scratch arena of the compare in progress, whose texts are freed after each value.
@@ -452,7 +449,7 @@ object_included :: proc(p: ^Prover, an: []^rules.Node, have: ^rules.Rules, b: ^r
 	}
 	if want.additional != rules.NONE {
 		for name in named {
-			if !slice.contains(want_names(want), name) && !included(p, member_nodes(blocks[:], name), {want.additional}, depth + 1) {
+			if _, listed := find_member(want, name); !listed && !included(p, member_nodes(blocks[:], name), {want.additional}, depth + 1) {
 				return false
 			}
 		}
@@ -483,15 +480,6 @@ object_included :: proc(p: ^Prover, an: []^rules.Node, have: ^rules.Rules, b: ^r
 		}
 	}
 	return true
-}
-
-@(private = "file")
-want_names :: proc(o: ^rules.Object) -> []string {
-	out := make([]string, len(o.members), context.temp_allocator)
-	for m, i in o.members {
-		out[i] = m.name
-	}
-	return out
 }
 
 @(private = "file")

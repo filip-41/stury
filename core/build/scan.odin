@@ -13,6 +13,7 @@ import compose "../compose"
 
 // Where the engine sends answers. `.Document` writes the partial document, `.Replay` reads a built one and writes
 // nothing, `.Stream` writes nothing and calls `each_answer`'s `on`.
+@(private)
 Sink :: enum u8 {
 	Document,
 	Replay,
@@ -382,10 +383,12 @@ query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Option
 // is `.Unsupported`.
 query_doc :: proc {query_doc_one, query_doc_many}
 
+@(private)
 query_doc_one :: proc(doc: ^core.Document, path: core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Error) {
 	return query_doc_many(doc, []core.Path{path}, read, allocator)
 }
 
+@(private)
 query_doc_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Error) {
 	if doc == nil || doc.readers == nil {
 		return nil, core.error_of(core.Path_Error{kind = .Unsupported})
@@ -483,25 +486,6 @@ replay_rewalk :: proc "contextless" (h: ^Scan, s: ^core.Hook_Regs, lo: u64, at: 
 	replay(true, h, u32(at), u32(at) + h.b.doc.nodes[at].n, s, h.ends[min(int(s.c), len(h.ends)):])
 }
 
-// Answers `paths` over the whole document `doc`, which a read under `.Refuse` built with the error `built`, and
-// gives it its answers. On an error `doc` is destroyed, or empty when the build failed.
-query_built :: proc(doc: ^core.Document, built: core.Error, paths: []core.Path, read: core.Path_Options) -> (core.Document, core.Error) {
-	if built != nil {
-		return {}, built
-	}
-	answers, e := query(doc, paths, {read.dups}, doc.allocator)
-	if e.kind == .None {
-		defer delete(answers, doc.allocator)
-		doc.answers, doc.kept, doc.missing = answers, nil, nil
-		if core.own_reads(doc) == nil {
-			return doc^, nil
-		}
-		e = {kind = .No_Memory}
-	}
-	core.destroy(doc)
-	return {}, core.error_of(e)
-}
-
 // A format's `Services.scan` for a text it reads by building it whole: answers `paths` over `doc`, which the build gave
 // with the error `built`, gives the document its answers as a read by paths does, and gives each answer to `on` when it
 // is set, until `on` returns false. On an error `doc` is destroyed.
@@ -555,22 +539,20 @@ built_answer :: proc(doc: ^core.Document, a: core.Answer) -> core.Token_Answer {
 // text order, through the format's `Services.scan`. Everything the walk passes is still judged, unless `read.stop_early`
 // ends it. `core.destroy` frees the document, which borrows `src`. Under `.Refuse` the document holds the
 // whole text. A handle with no format's scan is `.Unsupported`.
+@(private)
 scan_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
 	return scan_many(src, as, []core.Path{path}, read, allocator)
 }
 
 // Reads up to 64 `paths` in one read, as `scan_one`. An answer's `path` is its path's number, and the answers of all the
 // paths are in one text order.
+@(private)
 scan_many :: proc(src: []u8, as: core.As, paths: []core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
-	if read.dups == .Refuse {
-		built, e := core.build(src, as, .Refuse, allocator)
-		return query_built(&built, e, paths, read)
-	}
-	if core.services_of(as) == nil || core.services_of(as).scan == nil {
+	s := core.services_of(as)
+	if s == nil || s.scan == nil {
 		return {}, core.error_of(core.Path_Error{kind = .Unsupported})
 	}
-	doc, err := core.services_of(as).scan(src, as, paths, read, nil, nil, allocator)
-	return doc, core.error_of(err)
+	return scan_with(src, as, paths, read, allocator, services_build, services_scan)
 }
 
 scan :: proc {scan_one, scan_many}
@@ -580,41 +562,47 @@ scan :: proc {scan_one, scan_many}
 // through a `Name` waits for that `Name`'s container to close there, and `.First` gives each as soon as it is read.
 // Answers come in the order they are known, and a path with a `Descend` or a negative index that has a limit gives them
 // all at the end. `.Refuse` reads the whole text first, so a fault there comes before any answer.
+@(private)
 each_answer_many :: proc(src: []u8, as: core.As, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
-	if read.dups == .Refuse {
-		built, e := core.build(src, as, .Refuse, allocator)
-		core.destroy(&built)
-		if e != nil {
-			return e
-		}
-	}
-	if core.services_of(as) == nil || core.services_of(as).scan == nil {
+	s := core.services_of(as)
+	if s == nil || s.scan == nil {
 		return core.error_of(core.Path_Error{kind = .Unsupported})
 	}
-	doc, err := core.services_of(as).scan(src, as, paths, read, state, on, allocator)
-	core.destroy(&doc)
-	return core.error_of(err)
+	return each_answer_with(src, as, paths, state, on, read, allocator, services_build, services_scan)
 }
 
+@(private)
 each_answer_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
 	return each_answer_many(src, as, []core.Path{path}, state, on, read, allocator)
 }
 
 each_answer :: proc {each_answer_one, each_answer_many}
 
-// `scan_many` through a format's own build and scan of the handle `as`, in place of the handle's services, so that a
-// constant spec links the walk of that spec alone.
-scan_with :: proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, allocator: runtime.Allocator, $build_doc: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), $scan_doc: proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error)) -> (core.Document, core.Error) {
+// The build and scan of the services of the handle `as`, which `scan_many` and `each_answer_many` read by.
+@(private = "file")
+services_build :: proc(src: []u8, as: core.As, refuse: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+	return core.services_of(as).build(src, as, refuse, allocator)
+}
+
+@(private = "file")
+services_scan :: proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
+	return core.services_of(as).scan(src, as, paths, read, state, on, allocator)
+}
+
+// `scan_many` through the build and scan of the handle `as` given here, which a format of a constant spec passes in place
+// of the handle's services, so that the call links the walk of that spec alone.
+scan_with :: proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, allocator: runtime.Allocator, $build_doc: type_of(core.Services{}.build), $scan_doc: type_of(core.Services{}.scan)) -> (core.Document, core.Error) {
 	if read.dups == .Refuse {
 		built, e := build_doc(src, as, true, allocator)
-		return query_built(&built, core.error_of(e), paths, read)
+		doc, err := scan_built(&built, e, paths, read, nil, nil, allocator)
+		return doc, core.error_of(err)
 	}
 	doc, err := scan_doc(src, as, paths, read, nil, nil, allocator)
 	return doc, core.error_of(err)
 }
 
 // `each_answer_many` through a format's own build and scan, as `scan_with`.
-each_answer_with :: proc(src: []u8, as: core.As, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read: core.Path_Options, allocator: runtime.Allocator, $build_doc: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), $scan_doc: proc(src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error)) -> core.Error {
+each_answer_with :: proc(src: []u8, as: core.As, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read: core.Path_Options, allocator: runtime.Allocator, $build_doc: type_of(core.Services{}.build), $scan_doc: type_of(core.Services{}.scan)) -> core.Error {
 	if read.dups == .Refuse {
 		built, e := build_doc(src, as, true, allocator)
 		core.destroy(&built)
@@ -644,21 +632,6 @@ first_path :: proc(path: core.Path) -> core.Path {
 // The answer a format's `find` gives from the document its read of `first_path` built.
 first_answer :: proc(doc: ^core.Document) -> core.Answer {
 	return doc.answers[0] if len(doc.answers) > 0 else {core.NO_NODE, core.NO_NODE, 0, .Missing}
-}
-
-// Writes `in_` as the value at every answer of `path` over `src`, in one call: a build of the text, one edit per answer
-// and a commit. A `Name` the path ends in that its container lacks is inserted after the container's last member. The
-// result is the new text, which the caller frees with `allocator`. `read.dups` picks among a repeated key as `query`
-// does, sets each repeat under `.All`, and under `.Refuse` fails the build at one.
-set :: proc(src: []u8, as: core.As, path: core.Path, in_: core.Edit_Input, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
-	doc, berr := core.build(src, as, read.dups, allocator)
-	defer core.destroy(&doc)
-	if berr != nil {
-		return nil, berr
-	}
-	list := core.edit_list_init(&doc, allocator)
-	defer core.edit_list_destroy(&list)
-	return set_answers(&list, path, in_, read, allocator)
 }
 
 // Feeds the step logic the tokens of nodes `from ..< to` by `feed_nodes`. Only the containers on the path open, so `ends`

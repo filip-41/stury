@@ -538,7 +538,7 @@ header_only :: proc(h: ^Cells_Of(typed.Check), it: ^records.Reader, b: ^Batch, r
 // the input, and the row's bytes are `row`'s.
 @(private)
 place_error :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row, e: ^core.Typed_Refusal) {
-	if e.kind not_in core.TYPED_AT_NO_BYTE {
+	if e.kind not_in core.TYPED_AT_NO_BYTE && (e.kind != .Walk || e.inner.kind not_in core.AT_NO_BYTE) {
 		e.at = place_at(it, b, row, e.at)
 		if e.kind == .Walk {
 			e.inner.at = place_at(it, b, row, e.inner.at)

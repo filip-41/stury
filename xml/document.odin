@@ -24,7 +24,7 @@ WRITE_WORDS :: core.Write_Words{"XML has no element or text for the value", "XML
 SERVICES := [Spec]core.Services {
 	.Xml = {
 		build    = build_handle,
-		validate = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_spec(src, .Xml, options_of(as))},
+		validate = EDIT.validate,
 		scan     = scan_handle,
 		write    = document_write,
 		words    = WRITE_WORDS,

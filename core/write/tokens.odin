@@ -662,7 +662,7 @@ value_scalar_text :: proc(v: core.Value, stack: []u8, $T: Tree) -> (text: string
 	case core.Number_View:
 		return core.view_text(x), .None
 	case f64:
-		n, _ := core.value_number(x)
+		n, _ := core.number(x)
 		size := number_text_as(raw_data(stack), n, T) or_return
 		return string(stack[:size]), .None
 	case bool:
@@ -828,7 +828,11 @@ foot_of :: proc(root: ^core.Value, open: []core.Value) -> ^core.Value {
 
 @(private = "file")
 note :: proc(at: ^core.Value, role: core.Role, text: string) {
-	at^ = core.noted(at^, role, add_body(at^, role, text))
+	bodies, _ := core.comments(at^, role)
+	all := make([]string, len(bodies) + 1)
+	copy(all, bodies)
+	all[len(bodies)] = text
+	at^ = core.noted(at^, role, all)
 }
 
 @(private = "file")
@@ -838,14 +842,4 @@ last_item :: proc(up: core.Value) -> ^core.Value {
 	}
 	a := up.(^core.Array)
 	return &a.items[len(a.items) - 1]
-}
-
-// The comments of `role` on built value `v` with `text` after them.
-@(private = "file")
-add_body :: proc(v: core.Value, role: core.Role, text: string) -> []string {
-	bodies, _ := core.comments(v, role)
-	all := make([]string, len(bodies) + 1)
-	copy(all, bodies)
-	all[len(bodies)] = text
-	return all
 }
