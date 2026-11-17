@@ -94,6 +94,7 @@ Scan :: struct {
 	marks:      [core.MAX_STEPS]Scan_Mark,
 	leap_at:    [core.MAX_STEPS]u32, // the count past which a replay leaps to the close of the container at each depth
 	leap_names: u64, // the steps whose leap waits for their key
+	leaps:      bool, // some step of the path can leap
 	slots:      [core.MAX_STEPS]u32, // the `Child_Count` reserved for the container open at each depth
 	first:      [8]core.Answer, // `answers` until they outgrow it, so a read of few allocates no list
 }
@@ -127,9 +128,10 @@ scan_plan :: proc(h: ^Scan, paths: []core.Path, read: core.Path_Options, depth: 
 		switch x in step {
 		case core.Index:
 			h.leap_at[k] = u32(x) if x >= 0 else max(u32)
+			h.leaps ||= x >= 0
 		case core.Name:
 			if !h.last && !h.every_key {
-				h.leap_at[k], h.leap_names = 0, h.leap_names | 1 << uint(k)
+				h.leap_at[k], h.leap_names, h.leaps = 0, h.leap_names | 1 << uint(k), true
 			}
 		case core.Index_Or_Name, core.All, core.Slice, core.Descend:
 		}
@@ -653,10 +655,16 @@ first_answer :: proc(doc: ^core.Document) -> core.Answer {
 // holds a frame per step, or one per depth with a `Descend`.
 @(private)
 replay :: proc "contextless" ($MANY: bool, h: ^Scan, from, to: u32, out: ^core.Hook_Regs, ends: []u32) {
+	fed: bool
 	when MANY {
-		fed := feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_many, replay_keyed, scan_deepen, false, no_leap)
+		fed = feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_many, replay_keyed, scan_deepen, false, no_leap)
 	} else {
-		fed := feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_one, replay_keyed, scan_deepen, false, replay_leap)
+		// A path with no step to leap on keeps the loop it had.
+		if h.leaps {
+			fed = feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_one, replay_keyed, scan_deepen, false, replay_leap)
+		} else {
+			fed = feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_one, replay_keyed, scan_deepen, false, no_leap)
+		}
 	}
 	if !fed {
 		h.b.err = {kind = .No_Memory}
