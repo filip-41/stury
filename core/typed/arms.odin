@@ -52,12 +52,15 @@ Judge :: enum u8 {
 }
 
 // What `Judge` reads. For `.Presence`, `present` lists the members an object must have, when that is all the arm's
-// record judges. For `.Choice`, `choices` are the arms it stands for, each an object record whose member `name` has a
-// `const` or `enum` no other choice shares. `keys` holds those enum keys in `rules.enum_sort` order and `picks` the
-// choice each key selects.
+// record judges, and `places` their places in the block of record `of`, the first arm of the verdict, when that block
+// names each of them, nil otherwise. For `.Choice`, `choices` are the arms it stands for, each an object record whose
+// member `name` has a `const` or `enum` no other choice shares. `keys` holds those enum keys in `rules.enum_sort` order
+// and `picks` the choice each key selects.
 @(private)
 Judging :: struct {
 	present: []string,
+	places:  []i32,
+	of:      i32,
 	choices: []Apply,
 	keys:    []string,
 	picks:   []i32,
@@ -329,6 +332,7 @@ choose_arms :: proc(b: ^Builder, arena: runtime.Allocator) {
 		}
 		if judged := by_presence(list, arena); judged != nil {
 			list, u.verdict = judged, judged
+			presence_places(b, list, arena)
 		}
 		any := choices_of(b, arena, list, .Any)
 		one := choices_of(b, arena, any if any != nil else list, .One)
@@ -559,6 +563,33 @@ by_presence :: proc(list: []Apply, arena: runtime.Allocator) -> []Apply {
 		out[i].judge = .Presence
 	}
 	return out
+}
+
+// Places the names of each `.Any` and `.One` arm of `list` judged by presence in the block of the record of `list`'s
+// first arm, when that arm judges the whole value and its block names each of them. A run of that record then takes the
+// value over, and its close judges the arms by the members it saw.
+@(private)
+presence_places :: proc(b: ^Builder, list: []Apply, arena: runtime.Allocator) {
+	if list[0].kind != .All || list[0].rec < 0 {
+		return
+	}
+	m := &b.meta[b.fields[list[0].rec].meta]
+	arms: for &a in list[1:] {
+		if a.judge != .Presence || a.kind != .Any && a.kind != .One {
+			continue
+		}
+		places := make([]i32, len(a.by.present), arena)
+		names: for name, i in a.by.present {
+			for j in 0 ..< m.members {
+				if b.meta[b.fields[m.block + j].meta].name == name {
+					places[i] = i32(j)
+					continue names
+				}
+			}
+			continue arms
+		}
+		a.by.places, a.by.of = places, list[0].rec
+	}
 }
 
 // The members an object must have to pass `node`, when that is all the node judges, nil otherwise. A value that is not
@@ -1077,6 +1108,8 @@ Fork :: struct {
 	scratch:    regex.Scratch,
 	takes:      bool,
 	taken:      Apply_Kind,
+	// Whether an arm is judged by the names the object has.
+	presence:   bool,
 	outer:      ^Fork,
 	// The fork made before this one.
 	older:      ^Fork,
@@ -1504,7 +1537,7 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 		}
 	}
 	fk.takes, fk.outer = h.sink == nil && container, nil
-	fk.waiting, fk.opened, fk.first_key, fk.level, fk.per_member, fk.names_arms = 0, t, nil, level, false, false
+	fk.waiting, fk.opened, fk.first_key, fk.level, fk.per_member, fk.names_arms, fk.presence = 0, t, nil, level, false, false, false
 	clear(&fk.names)
 	clear(&fk.spans)
 	clear(&fk.seen)
@@ -1513,7 +1546,8 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 	reserve(&fk.arms, len(applies))
 	for &a in applies {
 		// An arm judged by the names waits for the close.
-		fk.takes &&= a.kind <= .One && a.eval == nil && a.judge != .Presence
+		fk.takes &&= a.kind <= .One && a.eval == nil && (a.judge != .Presence || a.by.places != nil)
+		fk.presence ||= a.judge == .Presence
 		arm_add(h, fk, &a, a.kind, a.rec, level, t)
 		if a.eval != nil {
 			for rec in a.eval.wholes {
@@ -1541,7 +1575,7 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 	if !container || action == .Stop {
 		return next, action
 	}
-	if fk.takes && fk.waiting == 0 && fork_live(fk) == -1 {
+	if fk.takes && fk.waiting == 0 && !fk.presence && fork_live(fk) == -1 {
 		// Every run is decided at the open, so the container is judged now and passed over.
 		action = fork_finish(h, fk, t.lo)
 		if u.shared && h.readings == nil && h.fatal == .None && h.first.kind != .Duplicate_Key && h.pool.verdicts.at == t.lo {
@@ -3228,6 +3262,9 @@ fork_take :: proc "contextless" (h: ^Check, fk: ^Fork) -> (core.Hook_Regs, bool)
 	if r.c.sp != 2 || r.c.fork != nil && r.c.fork.open || r.c.taken != nil || !fork_verdict(fk, live, true) || fork_verdict(fk, live, false) {
 		return {}, false
 	}
+	if fk.presence && !presence_takes(fk, live) {
+		return {}, false
+	}
 	context = h.ctx
 	// The held object's keys go with its frame, so the check meets its repeats as the run would have. Under `.Notice` the
 	// fork noted them in the run's place, and the check goes on from the names it met.
@@ -3281,6 +3318,56 @@ fork_take :: proc "contextless" (h: ^Check, fk: ^Fork) -> (core.Hook_Regs, bool)
 	return regs, true
 }
 
+// Whether the run of arm `live` may take over a fork with arms judged by presence: it judges the whole value, and every
+// other arm is judged by the members of its record that the close sees.
+@(private)
+presence_takes :: proc "contextless" (fk: ^Fork, live: int) -> bool {
+	rec := fk.arms[live].rec
+	if fk.arms[live].kind != .All {
+		return false
+	}
+	for &x, i in fk.arms[:fk.n] {
+		if i != live && (x.apply == nil || x.apply.judge != .Presence || x.apply.by.of != rec) {
+			return false
+		}
+	}
+	return true
+}
+
+// Judges the arms of the fork `fk` that a run took over by the members the close of its object `f` saw: the `anyOf`
+// arms pass when one of them has all its names, the `oneOf` arms when exactly one has. A value that is not an object
+// passes each arm.
+@(private)
+taken_presence :: proc "contextless" (h: ^Check, fk: ^Fork, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, t: core.Token) {
+	if fk.kind != .Object {
+		return
+	}
+	any, any_passed, ones, one := false, false, false, 0
+	applies := fk.u.verdict if fk.u.verdict != nil else fk.u.applies
+	for &a in applies {
+		if a.judge != .Presence {
+			continue
+		}
+		passed := true
+		for i in a.by.places {
+			passed &&= member_seen(h, f, owner, regs, i)
+		}
+		if a.kind == .Any {
+			any, any_passed = true, any_passed || passed
+		} else {
+			ones, one = true, one + int(passed)
+		}
+	}
+	context = h.ctx
+	_, hi := check_ends(h, t)
+	if any && !any_passed {
+		fork_note(h, fk, .No_Arm, hi, "anyOf")
+	}
+	if ones && one != 1 {
+		fork_note(h, fk, .No_Arm if one == 0 else .Many_Arms, hi, "oneOf")
+	}
+}
+
 // The arm of the fork's one run that is neither done nor passing over the value, -1 for none, -2 for more than one.
 @(private)
 fork_live :: proc "contextless" (fk: ^Fork) -> int {
@@ -3323,6 +3410,9 @@ taken_close :: proc "contextless" (h: ^Check, f: ^Frame, owner: ^Field, regs: co
 	h.taken = nil
 	_, action := check_close(h, f, owner, regs, t)
 	h.taken = fk
+	if fk.presence && h.first.kind == .None {
+		taken_presence(h, fk, f, owner, regs, t)
+	}
 	if h.first.kind != .None {
 		taken_settle(h)
 		return next, .Stop
