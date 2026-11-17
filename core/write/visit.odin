@@ -41,7 +41,7 @@ visit :: proc(plan: ^typed.Plan, value: rawptr, v: ^Visitor, omits: ^typed.Omits
 	init(&w.out, &spill)
 	walker_init(&w, {}, raw_data(frames[:]), raw_data(ptrs[:]))
 	w.plan, w.meta, w.visitor, w.omits, v.walker = plan, raw_data(plan.meta), v, omits, &w
-	w.err.kind = walk(&w, uintptr(value), false, VISIT_TREE, visit_put, true)
+	w.err.kind = walk(&w, uintptr(value), false, VISIT_TREE, visit_put, visit_put, true)
 	v.walker = nil
 	release_walker(&w)
 	return w.err

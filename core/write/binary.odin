@@ -84,7 +84,7 @@ marshal_binary_into :: proc(out: ^Out, plan: ^typed.Plan, value: rawptr, opts: c
 	w.omits, w.positional = omits, binary.positional
 	w.key_order = .Length_First if binary.length_first else .Written
 	w.plan, w.meta = plan, raw_data(plan.meta)
-	kind := walk(&w, uintptr(value), false, T, put, false)
+	kind := walk(&w, uintptr(value), false, T, put, put, false)
 	out^ = w.out
 	if kind != .None {
 		err^ = w.err

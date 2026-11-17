@@ -182,10 +182,21 @@ check_value :: proc(value: any, plan: ^typed.Plan) -> core.Typed_Refusal {
 }
 
 // The compact and pretty instances of a format's walk, each with the plain string writer `put` and with `put_opted`, the
-// one a call with `ascii` or `escape_html` takes. `Plan.marshal` is a format's one call of this. The text comes from
-// `allocator`, and what lasts only the call from `context.allocator`. `omits`, nil for none, is asked at each member the
-// plan marks `omit`.
+// one a call with `ascii` or `escape_html` takes, which write the keys too. `Plan.marshal` is a format's one call of this
+// or of `marshal_keyed`. The text comes from `allocator`, and what lasts only the call from `context.allocator`. `omits`,
+// nil for none, is asked at each member the plan marks `omit`.
 marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, $T: Tree, $put, $put_opted: Put, omits: ^typed.Omits) -> ([]u8, core.Typed_Refusal) {
+	return marshal_walk(plan, value, opts, stream, allocator, T, put, put_opted, put, put_opted, omits)
+}
+
+// `marshal_as` with the keys the plan holds no text of written by `key` in every instance, for a format that spells a
+// key unlike a string. `key` reads the call's options.
+marshal_keyed :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, $T: Tree, $put, $put_opted, $key: Put, omits: ^typed.Omits) -> ([]u8, core.Typed_Refusal) {
+	return marshal_walk(plan, value, opts, stream, allocator, T, put, put_opted, key, key, omits)
+}
+
+@(private)
+marshal_walk :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, $T: Tree, $put, $put_opted, $key, $key_opted: Put, omits: ^typed.Omits) -> ([]u8, core.Typed_Refusal) {
 	frames: [FRAMES]Frame = ---
 	ptrs: [core.MAX_DEPTH]Target = ---
 	spill: [ROOM_MAX]u8 = ---
@@ -193,7 +204,7 @@ marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, s
 	init(&w.out, &spill, allocator, stream)
 	walker_init(&w, opts, raw_data(frames[:]), raw_data(ptrs[:]))
 	w.omits = omits
-	kind := walker_value(&w, plan, uintptr(value), T, put, put_opted)
+	kind := walker_value(&w, plan, uintptr(value), T, put, put_opted, key, key_opted)
 	release_walker(&w)
 	w.err.kind = kind
 	return finish((^Out)(rawptr(&w.out)), w.err)
@@ -217,17 +228,17 @@ walker_init :: proc(w: ^Walker, opts: core.Write_Options, frames: [^]Frame, ptrs
 
 // Writes one value by `plan`, in the instance of the walk `opts` picks. A refusal's path is in `w.err`.
 @(private)
-walker_value :: proc(w: ^Walker, plan: ^typed.Plan, value: uintptr, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind {
+walker_value :: proc(w: ^Walker, plan: ^typed.Plan, value: uintptr, $T: Tree, $put, $put_opted, $key, $key_opted: Put) -> core.Typed_Error_Kind {
 	w.plan, w.meta = plan, raw_data(plan.meta)
 	switch {
 	case w.opts.pretty && (w.opts.ascii || w.opts.escape_del || w.opts.escape_html):
-		return walk(w, value, true, T, put_opted, false)
+		return walk(w, value, true, T, put_opted, key_opted, false)
 	case w.opts.pretty:
-		return walk(w, value, true, T, put, false)
+		return walk(w, value, true, T, put, key, false)
 	case w.opts.ascii || w.opts.escape_del || w.opts.escape_html:
-		return walk(w, value, false, T, put_opted, false)
+		return walk(w, value, false, T, put_opted, key_opted, false)
 	}
-	return walk(w, value, false, T, put, false)
+	return walk(w, value, false, T, put, key, false)
 }
 
 // A walker that outlives one value, with its stacks, which a token write keeps in `Tokens.state`.
@@ -265,7 +276,7 @@ tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.
 	if w.arena.total_used > 0 {
 		runtime.arena_free_all(&w.arena)
 	}
-	kind := walker_value(w, plan, uintptr(value), T, put, put_opted)
+	kind := walker_value(w, plan, uintptr(value), T, put, put_opted, put, put_opted)
 	if kind != .None {
 		// A refusal leaves open what its value had open.
 		w.n_ptrs, w.keys.cursor = 0, 0
@@ -289,7 +300,7 @@ tokens_release :: proc(t: ^Tokens) {
 // writes what comes before one value, then the value, which is written in the switch or opens a frame. A visit (`V`)
 // writes nothing and enters no `any` or hook: it calls `w.visitor` at each record with a rule set and at each refusal.
 @(private)
-walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $put: Put, $V: bool) -> core.Typed_Error_Kind #no_bounds_check {
+walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $put, $key: Put, $V: bool) -> core.Typed_Error_Kind #no_bounds_check {
 	// A binary tree writes no punctuation, and a container's head holds its count.
 	BIN :: len(T[.Heads]) != 0
 	out := &w.out
@@ -394,7 +405,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					}
 				} else if n == 0 {
 					out.cursor = start
-					if k := member_key(w, r, T, put); k != .None {
+					if k := member_key(w, r, T, key); k != .None {
 						open := cur
 						return refused(w, open, top, k)
 					}
@@ -534,7 +545,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					if too_deep(w, top) {
 						k = .Too_Deep
 					} else if w.opts.sort_keys && !(BIN && w.positional) || vf.lists {
-						k = list_struct(w, vf, va, nil, T, put)
+						k = list_struct(w, vf, va, nil, T, key)
 						if k == .None {
 							break value
 						}
@@ -584,7 +595,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					if too_deep(w, top) {
 						k = .Too_Deep
 					} else {
-						k = list_map(w, vf, va, T, put)
+						k = list_map(w, vf, va, T, key)
 						if k == .None {
 							break value
 						}
@@ -631,7 +642,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					} else if too_deep(w, top) {
 						k = .Too_Deep
 					} else {
-						k = list_struct(w, &w.plan.fields[arm.fields], va, &arm.name, T, put)
+						k = list_struct(w, &w.plan.fields[arm.fields], va, &arm.name, T, key)
 						if k == .None {
 							break value
 						}
