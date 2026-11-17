@@ -401,6 +401,29 @@ unmarshal_reports_a_fault_of_the_text :: proc(t: ^testing.T) {
 	testkit.expect_kind(t, err, core.Typed_Error_Kind.Walk)
 }
 
+// An array is an array of tables only when every element is a table and it has one, else it is written in line.
+@(test)
+marshal_writes_an_array_of_tables_only_when_every_element_is_one :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Holder :: struct {
+		list: []any,
+	}
+	cases := [?]struct {
+		list: []any,
+		want: string,
+	} {
+		{{Server{host = "a"}, 2}, "list = [{ host = \"a\", port = 0, tags = [] }, 2]\n"},
+		{{2, Server{host = "a"}}, "list = [2, { host = \"a\", port = 0, tags = [] }]\n"},
+		{{Server{host = "a"}, Server{host = "b"}}, "[[list]]\nhost = \"a\"\nport = 0\ntags = []\n\n[[list]]\nhost = \"b\"\nport = 0\ntags = []\n"},
+		{{}, "list = []\n"},
+	}
+	for c in cases {
+		text, err := toml.marshal(Holder{c.list}, allocator = context.temp_allocator)
+		testkit.expect_nil(t, err)
+		testing.expect_value(t, string(text), c.want)
+	}
+}
+
 // A built value written as a member may repeat a key, which a TOML table cannot hold.
 @(test)
 marshal_refuses_a_key_a_table_repeats :: proc(t: ^testing.T) {
