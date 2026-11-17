@@ -37,8 +37,7 @@ Writer :: struct {
 	foot_line: bool,
 	foot_depth: int, // with `foot_line`, the depth a comment's line starts at, 0 for no indent, as in a compact write
 	ended:     int, // the output's length after the last element and its inline comments
-	hint_doc:  ^core.Document, // the document and place `node_facts` last ended at, since nodes are written in order
-	hint_at:   int,
+	facts:     Fact_Cursor,
 	buf:       [512]u8,
 }
 
@@ -83,7 +82,7 @@ value_write :: proc(root: core.Value, as: core.As, opts: core.Write_Options, str
 	if refused.kind != .None {
 		return nil, 0, refused
 	}
-	if kind := read_back(first, is_document(root), as, compact); kind != .None {
+	if kind := read_back(first, root, as, compact); kind != .None {
 		delete(first, allocator if keeps_first else context.allocator)
 		return nil, 0, {kind = kind}
 	}
@@ -149,14 +148,21 @@ serialize :: proc(root: core.Value, opts: core.Write_Options, stream: io.Stream,
 	return text, w.kept, err
 }
 
-// Builds `text` as a document when `document`, else as a fragment. Returns `.Unwritable` unless its compact write is
-// `text` again.
+// Builds `text` as a document when `root` is one, else as a fragment. Returns `.Unwritable` unless its compact write is
+// `text` again. The write of a node of an HTML document is made of its names, texts and fact spans alone, so a built tree
+// that holds the same of each is written as `text` without writing it. Any other tree is written and compared.
 @(private)
-read_back :: proc(text: []u8, document: bool, as: core.As, compact: core.Write_Options) -> core.Typed_Error_Kind {
-	doc, built := build_spec(text, .Document if document else .Fragment, as, false, context.allocator)
+read_back :: proc(text: []u8, root: core.Value, as: core.As, compact: core.Write_Options) -> core.Typed_Error_Kind {
+	doc, built := build_spec(text, .Document if is_document(root) else .Fragment, as, false, context.allocator)
 	defer core.destroy(&doc)
 	if built.kind != .None {
 		return .No_Memory if built.kind == .No_Memory else .Unwritable
+	}
+	if r, is_ref := root.(core.Node_Ref); is_ref && own_node(root) {
+		c: Comparison
+		if same_tree(&c, r.doc, r.node, &doc, core.ROOT) {
+			return .None
+		}
 	}
 	again, _, err := serialize(core.Node_Ref{&doc, core.ROOT}, compact, {}, context.allocator)
 	defer delete(again)
@@ -164,6 +170,59 @@ read_back :: proc(text: []u8, document: bool, as: core.As, compact: core.Write_O
 		return err.kind
 	}
 	return .None if string(again) == string(text) else .Unwritable
+}
+
+@(private)
+Comparison :: struct {
+	a, b:     Fact_Cursor,
+	buf_a:    [512]u8,
+	buf_b:    [512]u8,
+}
+
+// Whether `fx` of `a` and `fy` of `b` are the same roles and spans in order, which the writer writes as they stand.
+@(private)
+same_facts :: proc(a: ^core.Document, fx: []core.Fact, b: ^core.Document, fy: []core.Fact) -> bool {
+	if len(fx) != len(fy) {
+		return false
+	}
+	for f, i in fx {
+		g := fy[i]
+		if f.role != g.role || string(a.src[f.lo:][:f.n]) != string(b.src[g.lo:][:g.n]) {
+			return false
+		}
+	}
+	return true
+}
+
+// Whether node `x` of HTML document `a` and node `y` of `b` hold what the writer writes the same: the same kind,
+// texts, names, facts and members in order. False does not say that they are written differently, since a comment is
+// written where it stands whatever its role.
+@(private)
+same_tree :: proc(c: ^Comparison, a: ^core.Document, x: core.Node_Index, b: ^core.Document, y: core.Node_Index) -> bool {
+	nx, ny := core.Node_Ref{a, x}, core.Node_Ref{b, y}
+	kind := core.kind(nx)
+	if kind != core.kind(ny) || !same_facts(a, facts_at(&c.a, a, x), b, facts_at(&c.b, b, y)) {
+		return false
+	}
+	#partial switch kind {
+	case .Object:
+		if core.length(a, x) != core.length(b, y) {
+			return false
+		}
+		ix, iy := core.pairs(a, x), core.pairs(b, y)
+		for kx, cx in core.pair_next(&ix) {
+			ky, cy, _ := core.pair_next(&iy)
+			if core.node_string(a, kx) != core.node_string(b, ky) || !same_tree(c, a, cx, b, cy) {
+				return false
+			}
+		}
+	case .Null:
+	case:
+		tx, ex := write.value_scalar_text(nx, c.buf_a[:], write.MARKUP_TREE)
+		ty, ey := write.value_scalar_text(ny, c.buf_b[:], write.MARKUP_TREE)
+		return ex == .None && ey == .None && tx == ty
+	}
+	return true
 }
 
 // Whether object `root` is a document: it has one member, `html`, which is no array.
@@ -363,33 +422,45 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 	return .None
 }
 
-// The facts of the node `v` is, as `value_facts` finds them. Nodes come in order, so the search starts where the last
-// node's facts ended.
+// Where the facts of the last node asked for ended in `doc`, so the next node's are searched from there.
+@(private)
+Fact_Cursor :: struct {
+	doc: ^core.Document,
+	at:  int,
+}
+
+// The facts of the node `v` is, as `value_facts` finds them.
 @(private)
 node_facts :: proc(w: ^Writer, v: core.Value) -> []core.Fact {
 	r, is_node := core.plain(v).(core.Node_Ref)
 	if !is_node {
 		return nil
 	}
-	all := r.doc.facts
+	return facts_at(&w.facts, r.doc, r.node)
+}
+
+// The facts of node `node` of `doc`. Nodes come in order, so the search starts where the last node's facts ended.
+@(private)
+facts_at :: proc(c: ^Fact_Cursor, doc: ^core.Document, node: core.Node_Index) -> []core.Fact {
+	all := doc.facts
 	at: int
-	if w.hint_doc == r.doc && w.hint_at <= len(all) && (w.hint_at == 0 || all[w.hint_at - 1].node < r.node) {
-		at = w.hint_at
-		for steps := 0; at < len(all) && all[at].node < r.node; steps += 1 {
+	if c.doc == doc && c.at <= len(all) && (c.at == 0 || all[c.at - 1].node < node) {
+		at = c.at
+		for steps := 0; at < len(all) && all[at].node < node; steps += 1 {
 			if steps == 8 {
-				at = core.lower_node(all, r.node)
+				at = core.lower_node(all, node)
 				break
 			}
 			at += 1
 		}
 	} else {
-		at = core.lower_node(all, r.node)
+		at = core.lower_node(all, node)
 	}
 	end := at
-	for end < len(all) && all[end].node == r.node {
+	for end < len(all) && all[end].node == node {
 		end += 1
 	}
-	w.hint_doc, w.hint_at = r.doc, end
+	c.doc, c.at = doc, end
 	return all[at:end]
 }
 

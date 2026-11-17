@@ -40,6 +40,10 @@ write_reads_back_as_written :: proc(t: ^testing.T) {
 		{src = "<r><P>x</P></r>", xml = true, at = ".r", kind = .Unwritable},
 		{src = "<r><p A='1'>x</p></r>", xml = true, at = ".r", kind = .Unwritable},
 		{src = "<r><a>x</a></r>", xml = true, at = ".r.a", kind = .Unwritable},
+		{src = "<a href=1><table><a href=2>x</table>", kind = .Unwritable},
+		{src = "<plaintext>a</p>", kind = .Unwritable},
+		{src = "x<!--", kind = .Unwritable},
+		{src = "<table>text<tr><td>a</table>", want = "<html><head></head><body>text<table><tbody><tr><td>a</td></tr></tbody></table></body></html>"},
 	}
 	for c in cases {
 		doc: core.Document
