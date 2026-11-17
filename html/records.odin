@@ -47,6 +47,9 @@ record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
 
 @(private, rodata)
 RECORD_DOCS := records.Record_Docs {
+	read  = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
+		return records.read_built(it, target, T, plan, read, allocator, err, build_handle)
+	},
 	build = proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 		doc, err := build_spec(rec.text, Spec(it.as.spec), it.as, false, allocator)
 		core.move_document_error(&err, rec.at)

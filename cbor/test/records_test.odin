@@ -117,3 +117,64 @@ entries_read_into_values :: proc(t: ^testing.T) {
 		testing.expect(t, !more && it.fault == nil)
 	}
 }
+
+// A sequence's items read into values under `.Concatenated`, by handle or by constant spec, with a refused item
+// returned and passed over, a repeated key refused under `.Refuse`, and a fault ending the records after the items
+// before it.
+@(test)
+sequence_items_read_into_values :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	Pair :: struct {
+		a: i32,
+		b: string,
+	}
+	plan, perr := cbor.plan_make(Pair)
+	testkit.expect_nil(t, perr)
+	// {a: 1, b: "x"}, {a: "no"} (refused), {a: 3}
+	src := hex("a2 6161 01 6162 6178  a1 6161 626e6f  a1 6161 03")
+	for reader in ([2]records.Reader{records.open(src, cbor.as(.Cbor), .Concatenated), cbor.records_open(src, .Cbor)}) {
+		it := reader
+		defer records.close(&it)
+		if it.docs == nil {
+			it.docs = cbor.record_docs(.Cbor)
+		}
+		v: Pair
+		err, more := records.read(&it, &v, &plan, {borrow_strings = true})
+		testkit.expect_nil(t, err)
+		testing.expect(t, more)
+		testing.expect_value(t, v, Pair{1, "x"})
+		v = {}
+		err, more = records.read(&it, &v, &plan)
+		testing.expect(t, err != nil && more)
+		if typed, is_typed := err.(core.Typed_Error); is_typed {
+			testing.expect_value(t, typed.kind, core.Typed_Error_Kind.Wrong_Kind)
+			testing.expect_value(t, typed.at, u64(12))
+		} else {
+			testing.expect(t, false, "a typed refusal")
+		}
+		v = {}
+		err, more = records.read(&it, &v, &plan)
+		testkit.expect_nil(t, err)
+		testing.expect_value(t, v, Pair{a = 3})
+		_, more = records.read(&it, &v, &plan)
+		testing.expect(t, !more && it.fault == nil)
+	}
+	faulted := hex("a1 6161 01 1c")
+	it := records.open(faulted, cbor.as(.Cbor), .Concatenated)
+	defer records.close(&it)
+	v: Pair
+	err, more := records.read(&it, &v, &plan)
+	testkit.expect_nil(t, err)
+	testing.expect(t, more)
+	_, more = records.read(&it, &v, &plan)
+	testing.expect(t, !more && it.fault != nil)
+	repeated := hex("a2 6161 01 6161 02  a1 6161 03")
+	again := records.open(repeated, cbor.as(.Cbor), .Concatenated)
+	defer records.close(&again)
+	err, more = records.read(&again, &v, &plan, {dups = .Refuse})
+	testing.expect(t, err != nil && more)
+	err, more = records.read(&again, &v, &plan, {dups = .Refuse})
+	testkit.expect_nil(t, err)
+	testing.expect(t, more)
+	testing.expect_value(t, v.a, 3)
+}

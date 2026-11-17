@@ -3,6 +3,7 @@ package cbor
 
 import "base:runtime"
 import core "../core"
+import typed "../core/typed"
 import "../core/records"
 
 // A CBOR sequence (RFC 8742) reads as records, one per item.
@@ -17,9 +18,10 @@ FRAMING := records.Framing_Services {
 	whole  = proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64) {return as, .Concatenated, 0},
 }
 
-// What a reader reads of a record's value: its document.
+// What a reader reads of a record's value: its typed read and its document.
 @(rodata)
 RECORD_DOCS := records.Record_Docs {
+	read  = read_item_record,
 	build = build_record,
 }
 
@@ -142,4 +144,34 @@ build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtim
 	doc, err := build_item(rec.text, it.as, false, allocator)
 	core.move_document_error(&err, rec.at)
 	return doc, err
+}
+
+// Reads the next item of a sequence into `target` by the walk that frames it. A refusal that stops the walk, and a fault,
+// leave the record's end or its fault to `next_item`. `.Refuse` reads the framed item's text, which notes its keys
+// first, and `.Entries` is read through its walk's tree by `records`.
+read_item_record :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
+	if it.framing != .Concatenated || read.dups == .Refuse {
+		rec := records.frame_text(it) or_return
+		kept := typed.sink_mark(read.sink)
+		err^ = read_text(rec.text, Spec(it.as.spec), options_of(it.as), target, T, plan, read, allocator, false)
+		records.move_refused(err, read, kept, rec.at)
+		return true
+	}
+	if it.pos >= u64(len(it.src)) {
+		return false
+	}
+	kept := typed.sink_mark(read.sink)
+	hi, cut := item_walked(it.src, it.pos, it, Spec(it.as.spec), options_of(it.as), target, T, plan, read, it.frames, allocator, err, false, false, true)
+	if !cut && hi == 0 {
+		return false
+	}
+	if cut {
+		if _, ok := next_item(it); !ok {
+			typed.sink_restore(read.sink, kept)
+			return false
+		}
+		return true
+	}
+	it.pos = hi
+	return true
 }

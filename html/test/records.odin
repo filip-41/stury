@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import records "../../core/records"
 import html ".."
 import testkit "../../testkit"
 
@@ -84,4 +85,31 @@ entries_are_the_members_of_a_container :: proc(t: ^testing.T) {
 	testing.expect_value(t, testkit.entries_lines(&it), LI)
 	numbers := "<ul><li>&#55;<li>&#45;8<li>9</ul>"
 	testing.expect_value(t, testkit.entries_read(numbers, html.as(.Fragment), {"ul"}, int), "7\n-8\n9\nend")
+}
+
+@(private = "file")
+Record_Page :: struct {
+	html: struct {
+		body: struct {
+			p: string,
+		},
+	},
+}
+
+// A text read into a value under `.Concatenated` is what `unmarshal` reads, and a read past the one record gives none.
+@(test)
+a_record_reads_into_a_value :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	plan, perr := html.plan_make(Record_Page, .Document)
+	testkit.expect_nil(t, perr)
+	it := records.open(transmute([]u8)string("<!doctype html><title>t</title><p>hello"), html.as(.Document), .Concatenated)
+	defer records.close(&it)
+	v: Record_Page
+	err, more := records.read(&it, &v, &plan)
+	testkit.expect_nil(t, err)
+	testing.expect(t, more)
+	testing.expect_value(t, v.html.body.p, "hello")
+	_, more = records.read(&it, &v, &plan)
+	testing.expect(t, !more && it.fault == nil)
 }

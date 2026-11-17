@@ -12,6 +12,7 @@ import kernel "../core/kernel"
 import core "../core"
 import typed "../core/typed"
 import write "../core/write"
+import records "../core/records"
 
 // CBOR's heads, in the layout `write.Head` gives: unsigned and negative integers, byte and text strings, arrays, maps
 // and tags, then the half, single and double float markers.
@@ -206,19 +207,22 @@ read_item :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typei
 		item_refusing(src, spec, opts, target, T, plan, read, frames, allocator, err, CHECK)
 		return
 	}
-	item_walked(src, spec, opts, target, T, plan, read, frames, allocator, err, CHECK, false)
+	item_walked(src, 0, nil, spec, opts, target, T, plan, read, frames, allocator, err, CHECK, false, false)
 }
 
 // `read_item` under `.Refuse`, out of line, so a read that takes a repeated key keeps none of the keys in its frame.
 @(private)
 item_refusing :: #force_no_inline proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, frames: []typed.Frame, allocator: runtime.Allocator, err: ^core.Typed_Refusal, $CHECK: bool) {
-	item_walked(src, spec, opts, target, T, plan, read, frames, allocator, err, CHECK, true)
+	item_walked(src, 0, nil, spec, opts, target, T, plan, read, frames, allocator, err, CHECK, true, false)
 }
 
 // The walk of `read_item`. Under `REFUSE` the read notes the keys of every map the walk passes, and a key repeated in
-// its map or a fault refuses the item whatever the read refused before it, as the only refusal.
+// its map or a fault refuses the item whatever the read refused before it, as the only refusal. Under `RECORD` it reads
+// the item at `lo` of a reader `it`'s text, whose bytes after the item are no concern and whose temp allocator is the
+// reader's scratch, and returns where the item ends, `cut` when the hook's stop or a fault ended the walk before that,
+// and `hi` 0 when the read could not start, with its refusal in `err`.
 @(private)
-item_walked :: #force_inline proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, frames: []typed.Frame, allocator: runtime.Allocator, err: ^core.Typed_Refusal, $CHECK: bool, $REFUSE: bool) {
+item_walked :: #force_inline proc(src: []u8, lo: u64, it: ^records.Reader, spec: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, frames: []typed.Frame, allocator: runtime.Allocator, err: ^core.Typed_Refusal, $CHECK: bool, $REFUSE: bool, $RECORD: bool) -> (hi: u64, cut: bool) {
 	H :: typed.Check when CHECK else typed.Reader
 	when REFUSE {
 		hooks: typed.Refusing(H)
@@ -241,9 +245,12 @@ item_walked :: #force_inline proc(src: []u8, spec: Spec, opts: Options, target: 
 	}
 	if started.kind != .None {
 		err^ = started
-		return
+		return 0, false
 	}
 	defer typed.read_release(h, frames)
+	when RECORD && !CHECK {
+		h.ctx.temp_allocator = runtime.arena_allocator(&it.scratch)
+	}
 	state.positional[h.sp] = false
 	when REFUSE {
 		room: [64]typed.Open_Key = ---
@@ -252,9 +259,16 @@ item_walked :: #force_inline proc(src: []u8, spec: Spec, opts: Options, target: 
 	} else {
 		on :: on_item_check when CHECK else on_item
 	}
-	hi, fault := walk_rules(src, 0, state.rules, &hooks, &regs, on)
-	if fault == nil {
-		fault = tail_fault(src, hi)
+	fault: Maybe(core.Fault)
+	hi, fault, cut = walk_stopped(src, lo, state.rules, &hooks, &regs, on)
+	when RECORD {
+		if fault != nil {
+			return hi, true
+		}
+	} else {
+		if fault == nil {
+			fault = tail_fault(src, hi)
+		}
 	}
 	when REFUSE {
 		k := &hooks.open_keys
@@ -274,7 +288,7 @@ item_walked :: #force_inline proc(src: []u8, spec: Spec, opts: Options, target: 
 			context.allocator = allocator
 			typed.sink_refusal(read.sink, refused, CHECK)
 			err^ = refused
-			return
+			return hi, cut
 		}
 		if h.first.kind != .None {
 			err^ = typed.read_end(h, regs, nil)
@@ -285,6 +299,7 @@ item_walked :: #force_inline proc(src: []u8, spec: Spec, opts: Options, target: 
 			err^ = typed.read_end(h, regs, fault)
 		}
 	}
+	return hi, cut
 }
 
 // Points the typed reader `h` at CBOR's walk under the rules of `state`, which a union's tag scan walks with, and at

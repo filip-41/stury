@@ -121,3 +121,40 @@ entries_are_the_members_of_a_container :: proc(t: ^testing.T) {
 	it := toml.records_open(transmute([]u8)src, .Toml_1_0, framing = .Entries, entries = {"x"})
 	testing.expect_value(t, testkit.entries_lines(&it), "6  {\"y\":1,\"z\":{\"q\":2}}\n30  {\"y\":2}\nend")
 }
+
+@(private = "file")
+Reading :: struct {
+	a: int,
+	t: struct {
+		b: [dynamic]int,
+		u: struct {
+			c: string,
+		},
+	},
+}
+
+// A text read into a value under `.Concatenated` is what `unmarshal` reads, and a read past it gives no record.
+@(test)
+a_record_reads_into_a_value :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	plan, perr := toml.plan_make(Reading, .Toml_1_0)
+	testkit.expect_nil(t, perr)
+	it := records.open(transmute([]u8)string(RECORD_TEXT), toml.as(.Toml_1_0), .Concatenated)
+	defer records.close(&it)
+	v: Reading
+	err, more := records.read(&it, &v, &plan)
+	testkit.expect_nil(t, err)
+	testing.expect(t, more)
+	testing.expect_value(t, v.a, 1)
+	testing.expect_value(t, len(v.t.b), 2)
+	testing.expect_value(t, v.t.u.c, "x")
+	_, more = records.read(&it, &v, &plan)
+	testing.expect(t, !more && it.fault == nil)
+	wrong := records.open(transmute([]u8)string("a = 'x'\n"), toml.as(.Toml_1_0), .Concatenated)
+	defer records.close(&wrong)
+	err, more = records.read(&wrong, &v, &plan)
+	typed_err, is_typed := err.(core.Typed_Error)
+	testing.expect(t, is_typed && more)
+	testing.expect_value(t, typed_err.kind, core.Typed_Error_Kind.Wrong_Kind)
+}

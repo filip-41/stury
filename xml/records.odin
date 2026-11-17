@@ -291,6 +291,9 @@ record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
 
 @(private, rodata)
 RECORD_DOCS := records.Record_Docs {
+	read  = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
+		return records.read_built(it, target, T, plan, read, allocator, err, build_handle)
+	},
 	build = build_record,
 }
 

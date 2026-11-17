@@ -335,7 +335,7 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 	reads := it.docs.read if it.docs != nil else nil
 	if plan != nil && plan.model_plan == .Load {
 		reads = (^Record_Docs)(typed.plan_docs(plan)()).check_read if typed.plan_docs(plan) != nil else nil
-	} else if reads == nil && it.services != nil && by_tree(it.services, it.framing) {
+	} else if it.services != nil && by_tree(it.services, it.framing) {
 		reads = read_member
 	}
 	if reads == nil {
@@ -434,6 +434,42 @@ read_member :: proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, r
 		err^ = typed.read_nodes(&doc, core.ROOT, T, target, plan, read, allocator)
 	}
 	return true
+}
+
+// The typed read of the next record through the document `build` makes of the record's text, `typed.read_built_text`,
+// for a format that reads no record in place: it reads as the format's `unmarshal` of the text, `.Refuse` included. The
+// record is framed first, so it is read after the walk that found it. A framing the format does not take ends the
+// records with `.Bad_Option`.
+read_built :: proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal, build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error)) -> bool {
+	rec := frame_text(it) or_return
+	kept := typed.sink_mark(read.sink)
+	err^ = typed.read_built_text(rec.text, it.as, build, target, T, plan, read, allocator)
+	move_refused(err, read, kept, rec.at)
+	return true
+}
+
+// Frames the next record for a read that takes its text, or ends the records with `.Bad_Option` under a framing the
+// format does not take.
+frame_text :: proc(it: ^Reader) -> (Record, bool) {
+	if it.services == nil || it.services.next[it.framing] == nil {
+		it.fault = core.Fault{kind = .Bad_Option}
+		return {}, false
+	}
+	return it.services.next[it.framing](it)
+}
+
+// Moves the offsets of the refusal `err`, and of what `read.sink` collected since `kept`, by `by`: from a record's text
+// to the input.
+move_refused :: proc(err: ^core.Typed_Refusal, read: typed.Read_Options, kept: typed.Sink_Mark, by: u64) {
+	core.move_typed_error(err, by)
+	if read.sink != nil {
+		for &e in read.sink.errors[kept.errors:] {
+			core.move_typed_error(&e, by)
+		}
+		for &e in read.sink.entries[kept.entries:] {
+			e.start, e.end = e.start + by, e.end + by
+		}
+	}
 }
 
 @(private)

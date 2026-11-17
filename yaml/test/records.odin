@@ -243,3 +243,53 @@ entries_read_across_window_moves :: proc(t: ^testing.T) {
 		testing.expect_value(t, testkit.entries_lines(&it), strings.to_string(want))
 	}
 }
+
+@(private = "file")
+Pair :: struct {
+	a: int,
+	b: string,
+}
+
+// The documents of a stream read into values under `.Concatenated`, a refused document returned with its offsets from
+// the input's first byte, and a repeated key refused under `.Refuse`, from a text and from a stream.
+@(test)
+documents_read_into_values :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	text := "a: 1\nb: x\n---\na: no\n---\na: 3\n"
+	plan, perr := yaml.plan_make(Pair)
+	testkit.expect_nil(t, perr)
+	as := yaml.as(.Yaml_1_2)
+	trickle := testkit.Chunked{src = transmute([]u8)text, sizes = {5}}
+	for stream in ([2]bool{false, true}) {
+		it := records.open_stream(testkit.chunked(&trickle), as, .Concatenated) if stream else records.open(transmute([]u8)text, as, .Concatenated)
+		defer records.close(&it)
+		v: Pair
+		err, more := records.read(&it, &v, &plan)
+		testkit.expect_nil(t, err)
+		testing.expect(t, more)
+		testing.expect_value(t, v, Pair{1, "x"})
+		v = {}
+		err, more = records.read(&it, &v, &plan)
+		typed_err, is_typed := err.(core.Typed_Error)
+		testing.expect(t, is_typed && more)
+		testing.expect_value(t, typed_err.kind, core.Typed_Error_Kind.Wrong_Kind)
+		testing.expect_value(t, typed_err.at, u64(strings.index(text, "no")))
+		v = {}
+		err, more = records.read(&it, &v, &plan)
+		testkit.expect_nil(t, err)
+		testing.expect_value(t, v.a, 3)
+		_, more = records.read(&it, &v, &plan)
+		testing.expect(t, !more && it.fault == nil)
+	}
+	repeated := "a: 1\na: 2\n---\na: 3\n"
+	it := records.open(transmute([]u8)repeated, as, .Concatenated)
+	defer records.close(&it)
+	v: Pair
+	err, more := records.read(&it, &v, &plan, {dups = .Refuse})
+	testing.expect(t, err != nil && more)
+	err, more = records.read(&it, &v, &plan, {dups = .Refuse})
+	testkit.expect_nil(t, err)
+	testing.expect(t, more)
+	testing.expect_value(t, v.a, 3)
+}

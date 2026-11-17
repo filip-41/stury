@@ -180,3 +180,33 @@ entries_build_after_later_members :: proc(t: ^testing.T) {
 	_, err := records.build(&it, first, context.temp_allocator)
 	testkit.expect_kind(t, err, core.Document_Error_Kind.Bad_Index)
 }
+
+@(private = "file")
+Record_Item :: struct {
+	r: struct {
+		n: int,
+	},
+}
+
+// A text read into a value under `.Concatenated` is what `unmarshal` reads, a repeated element is refused under
+// `.Refuse`, and a read past the one record gives none.
+@(test)
+a_record_reads_into_a_value :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	plan, perr := xml.plan_make(Record_Item)
+	testkit.expect_nil(t, perr)
+	it := records.open(transmute([]u8)string("<?xml version=\"1.0\"?><r><n>7</n></r>"), xml.as(.Xml), .Concatenated)
+	defer records.close(&it)
+	v: Record_Item
+	err, more := records.read(&it, &v, &plan)
+	testkit.expect_nil(t, err)
+	testing.expect(t, more)
+	testing.expect_value(t, v.r.n, 7)
+	_, more = records.read(&it, &v, &plan)
+	testing.expect(t, !more && it.fault == nil)
+	repeated := records.open(transmute([]u8)string("<r><n>1</n><n>2</n></r>"), xml.as(.Xml), .Concatenated)
+	defer records.close(&repeated)
+	err, more = records.read(&repeated, &v, &plan, {dups = .Refuse})
+	testing.expect(t, err != nil && more)
+}
