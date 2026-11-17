@@ -599,16 +599,9 @@ put_inline_comment :: proc(l: ^Layout, node: core.Node_Index) {
 }
 
 // Reads `bytes`, a text `end` or a typed write made of an inline table and the comments before it from offset `at`,
-// behind `r = ` there, and writes the table `r` holds as a TOML text. The bytes are freed. A text with no comment before
-// it is laid out by `lay_out_inline` where that reads it.
+// behind `r = ` there, and writes the table `r` holds as a TOML text. The bytes are freed.
 @(private)
 lay_out_text :: proc(bytes: []u8, at: int, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
-	if at == 0 {
-		if text, err, declined := lay_out_inline(bytes, stream, allocator); !declined {
-			delete(bytes, allocator)
-			return text, err
-		}
-	}
 	keyed, made := keyed_text(bytes, at, allocator)
 	if !made {
 		return nil, {kind = .No_Memory}

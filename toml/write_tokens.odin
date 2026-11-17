@@ -1,8 +1,8 @@
 package toml
 
 // The token write of TOML. TOML fixes an order the calls cannot know, since a table's keys stand before the sections of
-// its tables, so the calls write the value as an inline table, and `end` lays it out in one pass, `lay_out_inline`. A text
-// that pass does not read is read back behind `r = ` and laid out as `write_document.odin` does. A write that stands at a site of a document is the inline text as it is. Null is a word
+// its tables, so the calls write the value as an inline table behind `r = `, and `end` reads that back and lays it out
+// as `write_document.odin` does. The typed write lays out its inline table in one pass, `lay_out_inline`, where it can. A write that stands at a site of a document is the inline text as it is. Null is a word
 // TOML has no reading for, so a write that holds one is `.Unwritable`, and a write to a stream is `.Unsupported`, since
 // `end` has the whole text to lay out only in a buffer.
 
@@ -130,7 +130,31 @@ marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options,
 	if err.kind != .None {
 		return nil, err
 	}
+	if laid_plan(plan) {
+		if text, lerr, declined := lay_out_inline(bytes, stream, allocator); !declined {
+			delete(bytes, allocator)
+			return text, lerr
+		}
+	}
 	return lay_out_text(bytes, 0, opts, stream, allocator)
+}
+
+// Whether every key a write by `plan` makes stands for one key alone, so that `lay_out_inline`, which judges no repeated
+// key, may lay it out. A built value may repeat a key, and an `any` or a hook's stand-in that is no string may hold one,
+// so their texts are read back, which refuses a repeat.
+@(private)
+laid_plan :: proc(plan: ^typed.Plan) -> bool {
+	for f in plan.fields {
+		#partial switch f.kind {
+		case .Any, .Value, .Before:
+			return false
+		case .Hook:
+			if plan.meta[f.meta].key_kind != .String {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // The value `bytes` holds, spelled as the inline value the document writer puts in a line: bare keys, a space inside
@@ -187,7 +211,7 @@ Laid_Chunk :: struct {
 	lo, hi: int,
 }
 
-// The one-pass layout of an inline table. A segment is a table's header and lines, the bytes of the store written while
+// The one-pass layout of a typed write's inline table. A segment is a table's header and lines, the bytes of the store written while
 // it is the innermost open table, in more than one chunk when a line follows a section in its table. The segments
 // stand in the text in the order they opened.
 @(private)
@@ -205,8 +229,9 @@ Inline_Layout :: struct {
 }
 
 // Writes `src`, an inline table on one line with its keys as `put_key` writes them, as a TOML text laid out as
-// `write_table_text` lays out a table, in one pass with no document. A text in a form it does not read, which a raw
-// value, a comment, a null or an integer past 64 bits gives, is `declined`, and `src` is kept then.
+// `write_table_text` lays out a table, in one pass with no document. Its keys must not repeat in a table, see
+// `laid_plan`. A text in a form it does not read, which a raw value, a null or an integer past 64 bits gives, is
+// `declined`, and `src` is kept then.
 @(private)
 lay_out_inline :: proc(src: []u8, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, err: core.Typed_Refusal, declined: bool) {
 	if len(src) < 2 || src[0] != '{' {
@@ -374,32 +399,18 @@ laid_header :: proc(l: ^Inline_Layout, depth: i32, element: bool) {
 	write.put_text(&l.store, "]]\n" if element else "]\n")
 }
 
-// The key at `i` as `put_key` writes it, and the offset past it, -1 when it is no key this layout reads. A quoted key with
-// no escape whose bytes are bare is bare.
+// The key at `i`, bare or quoted as `put_key` writes it, and the offset past it, -1 when it is no key.
 @(private)
 laid_key :: proc(src: []u8, i: int) -> (string, int) {
-	if peek(src, i) != '"' {
-		j := i
+	j := i
+	if peek(src, i) == '"' {
+		j = laid_string_end(src, i)
+	} else {
 		for j < len(src) && bare_byte(src[j]) {
 			j += 1
 		}
-		return string(src[i:j]), j if j > i else -1
 	}
-	bare := true
-	j := i + 1
-	for ; j < len(src) && src[j] != '"'; j += 1 {
-		if src[j] == '\\' {
-			return "", -1
-		}
-		bare &&= bare_byte(src[j])
-	}
-	if j == len(src) {
-		return "", -1
-	}
-	if bare && j > i + 1 {
-		return string(src[i + 1:j]), j + 1
-	}
-	return string(src[i:j + 1]), j + 1
+	return string(src[i:max(i, j)]), j if j > i else -1
 }
 
 // Writes the value at `i` in line, as `put_inline` spells it, and returns the offset past it, -1 when it is in a form this

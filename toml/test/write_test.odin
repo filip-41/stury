@@ -401,6 +401,20 @@ unmarshal_reports_a_fault_of_the_text :: proc(t: ^testing.T) {
 	testkit.expect_kind(t, err, core.Typed_Error_Kind.Walk)
 }
 
+// A built value written as a member may repeat a key, which a TOML table cannot hold.
+@(test)
+marshal_refuses_a_key_a_table_repeats :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	o := new(core.Object)
+	append(&o.keys, "k", "k")
+	append(&o.vals, core.Value(1.0), core.Value(2.0))
+	_, err := toml.marshal(struct {
+			v: core.Value,
+		}{o})
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
+}
+
 @(test)
 marshal_refuses_a_value_that_is_no_table :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
