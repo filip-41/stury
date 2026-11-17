@@ -423,7 +423,9 @@ comes back as the string `"5"`. A value the output cannot write is exit 5 with t
 
 A comment, tag or attribute the output format cannot hold is dropped, and `fmt`, or a filter whose output is a node of a
 document written as YAML, TOML, XML or HTML, says so on stderr with the count, as
-`stury: warning: a.jsonc: json cannot hold 2 comments, tags or attributes of the input, so they are dropped`. The exit
+`stury: warning: a.jsonc: json cannot hold 2 comments, tags or attributes of the input, so they are dropped`. A filter's
+JSON output of an XML or HTML node tells the attributes it drops, and what reads them:
+`stury: warning: json cannot hold 1 attribute of the input, so it is dropped: .&NAME and .@attrs read them`. The exit
 status is unchanged. A document marker is kept only when a format is written to itself, and none of them crosses
 formats or counts as dropped: YAML's `%YAML` and `%TAG` lines and an explicit `---` or `...`, and the XML declaration.
 
@@ -566,7 +568,8 @@ stury: <stdin> would change
   reverse. `-S` also puts every object of the output in
   key order, moving the members as a reorder does, and puts a table's columns in order.
 - A new member or element follows its container's layout: its line, its indent and the blanks around a key's colon.
-- TOML (`--from toml`) is one text, edited as the filter's one output says. A kept value keeps its bytes. A new member
+- TOML (`--from toml`) is one text, edited as the filter's one output says. A kept value keeps its bytes, and a string
+  set over a literal string stays literal when it holds no `'` or control character. A new member
   is a `key = value` line after the table's last line, before its sub-tables, and a new member of an array of tables'
   element, a dotted table or an inline table or array is placed in that line. A built table is a `[section]` after the
   last section of the table it joins, and a built array of tables is a `[[section]]` per element, with their sub-tables
@@ -581,9 +584,10 @@ stury: <stdin> would change
   comments alone is written back as it is. A kept value keeps its bytes, and a comment stays with its line. A new
   member or element is a line at its collection's column, and in a flow collection it takes the collection's
   separator. A built collection is written in block form on the lines under its key, and in flow form inside a flow
-  collection. Scalars take the style YAML's writer picks for them (`"yes"` is `'yes'`), and `.@tag` and `.@anchor`
-  write a tag and an anchor. An edit inside a value an alias reads, or of an anchored node an alias reads, is refused
-  with the reason (exit 5). `--diff` takes no stream of several documents.
+  collection. A string set over a quoted string keeps its quotes when they hold it, one line of text over a folded block
+  keeps its `>`, and other scalars take the style YAML's writer picks for them (`"yes"` is `'yes'`). `.@tag` and
+  `.@anchor` write a tag and an anchor. An edit inside a value an alias reads, or of an anchored node an alias reads, is refused with the reason
+  (exit 5). `--diff` tells the changes of a stream's documents under their indexes (`.[1].a`).
 - CBOR (`--from cbor`) edits each item of a sequence as a record, and copies the bytes of every item and value the
   output does not change. A changed value is written in preferred serialization, and a container whose length changes
   gets a new head.

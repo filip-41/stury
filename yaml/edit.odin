@@ -797,7 +797,7 @@ apply :: proc(cx: ^Cx, e: core.Edit) -> bool {
 		if e.role == .Key {
 			return set_key(cx, i, string(e.text))
 		}
-		return set_value(cx, i, e.text)
+		return set_value(cx, i, e.text, e.value)
 	case .Insert:
 		if .Alias in cx.flags[i] {
 			return refuse_edit(cx, i, .Alias_Node)

@@ -97,6 +97,18 @@ edit_set :: proc(t: ^testing.T) {
 	edit_rows(t, .Json5, {{`{a: 1}`, `{a: 2}`, .Set, 2, 0, "", "2"}, {`{a: 1}`, `{"b": 1}`, .Set, 1, 0, "", `b`}})
 }
 
+// A JSON5 string set over a single-quoted string keeps the single quotes when its text holds neither quote.
+@(test)
+a_json5_string_set_keeps_single_quotes :: proc(t: ^testing.T) {
+	src := "{'a': 'x', b: \"y\"}"
+	cases := [?][3]string{{"a", "z", "{'a': 'z', b: \"y\"}"}, {"a", "it's", "{'a': \"it's\", b: \"y\"}"}, {"b", "z", "{'a': 'x', b: \"z\"}"}}
+	for c in cases {
+		out, err := json.set(transmute([]u8)src, .Json5, core.Path{steps = {core.Name(c[0])}}, c[1], allocator = context.temp_allocator)
+		walktest.expect_nil(t, err)
+		testing.expect_value(t, string(out), c[2])
+	}
+}
+
 // `insert` into an array at the first, a middle and the last place, and into an empty array: the separator is written
 // on the side nearer the member it joins.
 @(test)

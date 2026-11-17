@@ -26,6 +26,12 @@
 - `.@(name)` and `.&[name]` read and write a fact or an attribute by a computed name, as `.@name` and `.&name` do. A
   path step that names a fact the catalogue lacks is an error in `getpath`, `setpath` and `delpaths`, on `null` too.
 
+- A string an edit sets over a quoted string keeps its quotes when they hold it: YAML single and double quotes and
+  a folded block over one line of text, TOML literal strings and JSON5 single quotes. It took the writer's spelling, so `image: "nginx:1.25"` became plain.
+- `edit --diff` on a YAML stream tells each document's changes under its index, `.[1].a`. It refused a stream.
+- JSON output of an XML or HTML node warns of the attributes it drops and names `.&NAME` and `.@attrs`, which read
+  them, as `--to yaml` warns.
+
 - Without `--from`, the extension of the named files picks the format: `stury . app.toml` reads TOML and
   `stury fmt --in-place *.yaml` writes YAML back. Files that name two formats are a usage error, and `--from` wins.
 

@@ -86,6 +86,7 @@ emit :: proc(o: ^Output, v: jq.Value) -> bool {
 	if writes_texts(opts) {
 		return emit_text(o, v)
 	}
+	tell_attributes_dropped(v)
 	s: string
 	is_str, ended: bool
 	if opts.raw {
@@ -117,6 +118,23 @@ emit :: proc(o: ^Output, v: jq.Value) -> bool {
 tell_dropped :: proc(name: string, to: Format, dropped: int) {
 	if dropped > 0 {
 		message.write_stderr("stury: warning: %s%s%s cannot hold %d %s of the input, so %s dropped\n", name, ": " if name != "" else "", FORMATS[to].name, dropped, "comment, tag or attribute" if dropped == 1 else "comments, tags or attributes", "it is" if dropped == 1 else "they are")
+	}
+}
+
+// Tells on stderr that the attributes of `v`, a node of a markup document, are not in its JSON output, and what reads
+// them. Its comments go unmentioned, as a JSON output of any format drops them.
+@(private = "file")
+tell_attributes_dropped :: proc(v: jq.Value) {
+	ref, is_ref := v.(jq.Ref)
+	if !is_ref || !core.is_markup(ref.doc) {
+		return
+	}
+	n := 0
+	for f in core.subtree_facts(ref.doc, ref.node) {
+		n += int(f.role == .Attribute)
+	}
+	if n > 0 {
+		message.write_stderr("stury: warning: json cannot hold %d %s of the input, so %s dropped: .&NAME and .@attrs read them\n", n, "attribute" if n == 1 else "attributes", "it is" if n == 1 else "they are")
 	}
 }
 

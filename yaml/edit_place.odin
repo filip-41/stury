@@ -12,6 +12,7 @@ import "core:slice"
 import kernel "../core/kernel"
 import core "../core"
 import compose "../core/compose"
+import write "../core/write"
 
 // How a text stands: on one line, a scalar or flow collection over lines, a block collection, or a block scalar.
 @(private)
@@ -181,10 +182,64 @@ set_key :: proc(cx: ^Cx, k: u32, name: string) -> bool {
 }
 
 @(private)
-set_value :: proc(cx: ^Cx, v: u32, text: []u8) -> bool {
+set_value :: proc(cx: ^Cx, v: u32, text: []u8, value: core.Value) -> bool {
 	t := trim_break(text)
+	if s, is_text := value.(string); is_text {
+		t = spelled_as_before(cx, v, s, t)
+	}
 	place(cx, v, t, shape_text(cx, t))
 	return true
+}
+
+// The spelling of string `s` that replaces node `v`, `t` as the writer spelled it: in `v`'s quotes or folded block when
+// they hold `s`, as a renamed key keeps its quotes. A `t` in double quotes holds an escape, which it keeps.
+@(private = "file")
+spelled_as_before :: proc(cx: ^Cx, v: u32, s: string, t: []u8) -> []u8 {
+	nd := cx.doc.nodes[v]
+	style := style_of(nd.spelling)
+	if nd.kind != .String || len(t) == 0 || t[0] == '"' {
+		return t
+	}
+	if style == .Block && cx.src[nd.lo] == '>' {
+		return folded_as_before(cx, s, t)
+	}
+	if style != .Single && style != .Double {
+		return t
+	}
+	quote: u8 = '\'' if style == .Single else '"'
+	spelled, ok := spell_scalar(s, {flow = .Flow in cx.flags[v], keeps = style}, cx.a)
+	if !ok || len(spelled) == 0 || spelled[0] != quote {
+		return t
+	}
+	return spelled
+}
+
+// `s` as a folded block in place of `t`, the writer's literal block, at the indentation of `t`'s lines, or `t` when a
+// folded block does not hold `s`. A folded block doubles each line break inside the text, which a literal block spells
+// as it is, so only one line of text is folded.
+@(private = "file")
+folded_as_before :: proc(cx: ^Cx, s: string, t: []u8) -> []u8 {
+	body := transmute([]u8)s
+	for len(body) > 0 && body[len(body) - 1] == '\n' {
+		body = body[:len(body) - 1]
+	}
+	nl := bytes.index_byte(t, '\n')
+	if t[0] != '|' || nl < 0 || bytes.index_byte(body, '\n') >= 0 {
+		return t
+	}
+	if shape, _ := shape_of(s, {block = true, keeps = .Block, folded = true}); shape != .Folded {
+		return t
+	}
+	ind := 0
+	for nl + 1 + ind < len(t) && t[nl + 1 + ind] == ' ' {
+		ind += 1
+	}
+	spill: [write.ROOM_MAX]u8 = ---
+	out: write.Out
+	write.init(&out, &spill, cx.a)
+	put_block(&out, s, .Folded, ind)
+	spelled, err := write.finish(&out)
+	return trim_break(spelled) if err.kind == .None else t
 }
 
 @(private)

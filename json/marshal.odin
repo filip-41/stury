@@ -100,10 +100,15 @@ marshal_once :: proc(value: any, spec := Spec.Json, opts := Options{}, write := 
 	return typed.marshal_planned(&plan, refusal, v.data, write, allocator)
 }
 
-// A value spelled as JSON text for an edit: the colon is the document's own when it shows one.
+// A value spelled as JSON text for an edit: the colon is the document's own when it shows one. A JSON5 string written
+// where a single-quoted string starts takes single quotes when it holds neither quote.
 @(private)
-edit_spell :: proc(doc: ^core.Document, v: core.Value, opts: core.Write_Options, colon: string, _: bool, _: u64, allocator: runtime.Allocator) -> ([]u8, core.Error) {
+edit_spell :: proc(doc: ^core.Document, v: core.Value, opts: core.Write_Options, colon: string, _: bool, at: u64, allocator: runtime.Allocator) -> ([]u8, core.Error) {
 	text, err := write.write_laid(v, doc.as, opts, colon, &TOKENS, allocator)
+	single := Spec(doc.as.spec) == .Json5 && at < u64(len(doc.src)) && doc.src[at] == '\''
+	if single && len(text) >= 2 && text[0] == '"' && !strings.contains_any(string(text[1:len(text) - 1]), "'\"") {
+		text[0], text[len(text) - 1] = '\'', '\''
+	}
 	return text, core.error_of(err)
 }
 

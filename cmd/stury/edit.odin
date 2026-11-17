@@ -319,9 +319,7 @@ edit_writes_fact :: proc(list: ^core.Edit_List) -> bool {
 // with it.
 edit_publish :: proc(run: ^Run, path: string, src, out: []u8) -> int {
 	if run.opts.diff {
-		if !diff_preview(run, path, src, out) {
-			return EXIT_INPUT
-		}
+		diff_preview(run, path, src, out)
 		if !run.opts.in_place {
 			return 0
 		}

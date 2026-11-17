@@ -47,6 +47,18 @@ set_through_a_path :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(out), "[t]\nk = [1, 20, 3]\n\n[u]\nz = true\n")
 }
 
+// A string set over a literal string stays literal when its text holds no quote or control character.
+@(test)
+a_string_set_keeps_a_literal_string :: proc(t: ^testing.T) {
+	src := "lit = 'raw'\n"
+	path := core.Path{steps = {core.Name("lit")}}
+	for c in ([][2]string{{"raw2", "lit = 'raw2'\n"}, {`a\b`, "lit = 'a\\b'\n"}, {"it's", "lit = \"it's\"\n"}}) {
+		out, err := toml.set(transmute([]u8)src, .Toml_1_1, path, c[0], allocator = context.temp_allocator)
+		walktest.expect_nil(t, err)
+		testing.expect_value(t, string(out), c[1])
+	}
+}
+
 @(test)
 set_refuses_a_table :: proc(t: ^testing.T) {
 	_, err := edited("[t]\nk = 1\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {

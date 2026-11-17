@@ -480,13 +480,25 @@ set_value :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	switch form_of(cx.doc, i) {
 	case .Scalar:
 		lo, hi := core.scalar_ends(n)
-		add_text(cx, lo, hi, string(e.text))
+		add_text(cx, lo, hi, literal_as_before(cx, n, e))
 	case .Inline:
 		add_text(cx, n.lo, node_end(cx, i), string(e.text))
 	case .Root, .Header, .Dotted, .Implicit, .Tables:
 		return refuse_edit(cx, e.node, .Table_Replaced)
 	}
 	return true
+}
+
+// The spelling of `e`'s value: a string replacing a literal string stays literal when the quotes can hold it.
+@(private = "file")
+literal_as_before :: proc(cx: ^Cx, n: core.Node, e: core.Edit) -> string {
+	s, is_text := e.value.(string)
+	if !is_text || n.spelling & core.SPELLING_DECODE == 0 || style_of(n.spelling) != .Literal || !literal_ok(s) {
+		return string(e.text)
+	}
+	b := make([dynamic]u8, cx.a)
+	compose.puts(&b, "'", s, "'")
+	return string(b[:])
 }
 
 @(private = "file")

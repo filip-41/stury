@@ -630,6 +630,38 @@ spelled_values_take_their_site :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(out), "a:\n    k: v\nf: [1, 2]\nt:\n    k: v\n")
 }
 
+// A string set over a quoted string keeps its quotes when they hold it, and one line of text over a folded block keeps
+// the block, as the writer's spelling would drop them. Text a single quote cannot hold, and a value that is no string, take the writer's spelling.
+@(test)
+a_string_set_keeps_the_quotes_or_fold_it_replaces :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	src := "d: \"x\"\ns: 'a b'\nf: {k: 'v'}\n"
+	Quoted :: struct {
+		path:  string,
+		value: any,
+		want:  string,
+	}
+	cases := [?]Quoted {
+		{".d", "nginx:1.27", "d: \"nginx:1.27\"\ns: 'a b'\nf: {k: 'v'}\n"},
+		{".d", "a\nb", "d: \"a\\nb\"\ns: 'a b'\nf: {k: 'v'}\n"},
+		{".s", "it's", "d: \"x\"\ns: 'it''s'\nf: {k: 'v'}\n"},
+		{".s", 5, "d: \"x\"\ns: 5\nf: {k: 'v'}\n"},
+		{".f.k", "w", "d: \"x\"\ns: 'a b'\nf: {k: 'w'}\n"},
+	}
+	for c in cases {
+		path, perr := core.parse_path(c.path)
+		walktest.expect_nil(t, perr)
+		out, err := yaml.set(transmute([]u8)src, .Yaml_1_2, path, c.value)
+		walktest.expect_nil(t, err)
+		testing.expectf(t, string(out) == c.want, "%s:\n got %q\nwant %q", c.path, string(out), c.want)
+	}
+	path, _ := core.parse_path(".f")
+	out, err := yaml.set(transmute([]u8)string("f: >\n  a\n  b\nk: 1\n"), .Yaml_1_2, path, "p q\n")
+	walktest.expect_nil(t, err)
+	testing.expect_value(t, string(out), "f: >\n  p q\nk: 1\n")
+}
+
 // A commented value set or put into a flow collection under block mappings has its lines inside the block's
 // indentation, and reads back as the value with its comment.
 @(test)

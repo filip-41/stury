@@ -408,26 +408,45 @@ write_value_changes :: proc(b: ^strings.Builder, as_json: bool, changes: []diff.
 	}
 }
 
-// `edit --diff`: the value changes the edit makes of `src`, told under a `--- path` line.
-diff_preview :: proc(run: ^Run, path: string, src, out: []u8) -> bool {
-	as := input_source(&run.opts, run.ip.reading).as
+// `edit --diff`: the value changes the edit makes of `src`, told under a `--- path` line. A text of several documents
+// has each compared with the document the edit made of it, its changes under the document's index.
+diff_preview :: proc(run: ^Run, path: string, src, out: []u8) {
+	source := input_source(&run.opts, run.ip.reading)
 	heap := runtime.heap_allocator()
-	a, a_fault := jq.build_text(src, as, heap)
-	b, b_fault := jq.build_text(out, as, heap)
-	if a_fault != nil || b_fault != nil {
-		message.write_stderr("stury: error: %s: --diff compares whole documents, which this input is not\n", file_name(path))
-		return false
+	sb := strings.builder_make(heap)
+	defer strings.builder_destroy(&sb)
+	file := file_name(path)
+	a, a_fault := jq.build_text(src, source.as, heap)
+	b, b_fault := jq.build_text(out, source.as, heap)
+	if a_fault == nil && b_fault == nil {
+		write_document_changes(&sb, core.Node_Ref{&a, core.ROOT}, core.Node_Ref{&b, core.ROOT}, nil, file)
+		core.destroy(&a)
+		core.destroy(&b)
+	} else {
+		xs := records_value(&run.opts, source, path, src).(^core.Array).items[:]
+		ys := records_value(&run.opts, source, path, out).(^core.Array).items[:]
+		for x, k in xs[:min(len(xs), len(ys))] {
+			if write_document_changes(&sb, x, ys[k], {core.Index(k)}, file) {
+				file = ""
+			}
+		}
 	}
-	defer core.destroy(&a)
-	defer core.destroy(&b)
-	r, err := diff.values(core.Node_Ref{&a, core.ROOT}, core.Node_Ref{&b, core.ROOT})
+	flush_out(&sb, true)
+}
+
+// Writes the changes from `a` to `b`, their paths under `at`, after the `--- file` line when `file` is not "". Returns
+// whether there were any.
+@(private = "file")
+write_document_changes :: proc(sb: ^strings.Builder, a, b: core.Value, at: []core.Step, file: string) -> bool {
+	r, err := diff.values(a, b)
 	if err != nil {
 		out_of_memory()
 	}
 	defer diff.result_destroy(&r)
-	sb := strings.builder_make(heap)
-	defer strings.builder_destroy(&sb)
-	write_value_changes(&sb, false, r.changes, file_name(path))
-	flush_out(&sb, true)
-	return true
+	for &c in r.changes {
+		c.path = slice.concatenate([][]core.Step{at, c.path}, context.temp_allocator)
+		c.old_path = slice.concatenate([][]core.Step{at, c.old_path}, context.temp_allocator)
+	}
+	write_value_changes(sb, false, r.changes, file)
+	return len(r.changes) > 0
 }
