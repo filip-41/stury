@@ -255,6 +255,20 @@ array_leaf :: proc "contextless" (t: ^Table_Tree, cur: u32, part: Part, start: u
 	return add_node(t, array, Table_Node{value = core.Token{lo = start}, kind = .Table, flags = {.Header}}, false)
 }
 
+// Whether no later statement can add a member to node `id`: it is written whole where it stands (an inline table or an
+// array of values), or lies in an element of an array of tables that a later element follows, since a header reaches
+// only the last element.
+sealed :: proc "contextless" (t: ^Table_Tree, id: u32) -> bool {
+	nodes := t.nodes[:]
+	for x := id; x != 0; x = nodes[x].parent {
+		n := &nodes[x]
+		if .Inline in n.flags || n.kind == .Array && .Tables not_in n.flags || nodes[n.parent].last != x && nodes[n.parent].kind == .Array {
+			return true
+		}
+	}
+	return false
+}
+
 // A comment into the tree's list. Returns false when the list cannot grow.
 push_comment :: proc "contextless" (t: ^Table_Tree, c: Comment) -> bool {
 	context = runtime.default_context()

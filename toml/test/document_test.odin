@@ -304,6 +304,49 @@ numbers_read_by_value :: proc(t: ^testing.T) {
 	testing.expect(t, ok && i64(octal.bits) == 7)
 }
 
+// A read that stops early gives the answer of a whole read, though a table's members may be written apart, and judges
+// the statements before its answer but not those past the container that holds it.
+@(test)
+a_read_that_stops_early_answers_as_a_whole_read :: proc(t: ^testing.T) {
+	texts := [?]string {
+		"[[logs]]\nid = 1\n[logs.sub]\nk = 2\n[[logs]]\nid = 3\n",
+		"[a]\nx = 1\n[b]\ny = 2\n[a.c]\nz = 3\n[[a.d]]\nw = 4\n[b.e]\n",
+		"[a.b]\nk = 1\n[a]\nj = 2\nd.e.f = 3\ninline = {p = [1, [2]], q = {}}\n",
+		"[[arr]]\nx = 1\n[other]\ny = 2\n[[arr]]\nx = 3\n[arr.sub]\nw = true\n# foot\n",
+		"# head\n\nx = 1 # one\n[t] # table\ny = [ # open\n  1, # elem\n]\n",
+	}
+	paths := [?]string{".logs[0].id", ".logs[0]", ".logs[1].id", ".a", ".a.c.z", ".a.d[0].w", ".b", ".a.b", ".a.d.e", ".arr[0]", ".arr[1].sub", ".other.y", ".t.y[0]", ".x", ".nope"}
+	for text in texts {
+		src := transmute([]u8)text
+		for path_text in paths {
+			path, _ := core.parse_path(path_text, context.temp_allocator)
+			whole, want, werr := toml.find(src, .Toml_1_1, path, read = {dups = .First})
+			early, got, gerr := toml.find(src, .Toml_1_1, path, read = {dups = .First, stop_early = true})
+			testkit.expect_nil(t, werr)
+			testkit.expect_nil(t, gerr)
+			testing.expectf(t, got.outcome == want.outcome, "%q %s: %v, want %v", text, path_text, got.outcome, want.outcome)
+			if want.outcome == .Found && got.outcome == .Found {
+				w, _, _ := core.write(&whole, {}, json_pkg.as(.Json), want.node, context.temp_allocator)
+				g, _, _ := core.write(&early, {}, json_pkg.as(.Json), got.node, context.temp_allocator)
+				testing.expectf(t, string(g) == string(w), "%q %s: %s, want %s", text, path_text, g, w)
+			}
+			core.destroy(&whole)
+			core.destroy(&early)
+		}
+	}
+	path, _ := core.parse_path(".logs[0].id", context.temp_allocator)
+	open := transmute([]u8)string("[[logs]]\nid = 1\n[[logs]]\nid = [unclosed\n")
+	doc, answer, err := toml.find(open, .Toml_1_1, path, read = {dups = .First, stop_early = true})
+	testkit.expect_nil(t, err)
+	testing.expect_value(t, string(core.span(&doc, answer.node)), "1")
+	core.destroy(&doc)
+	_, _, werr := toml.find(open, .Toml_1_1, path, allocator = context.temp_allocator)
+	testkit.expect_kind(t, werr, core.Path_Error_Kind.Walk)
+	bad := transmute([]u8)string("x = \"\\q\"\n[[logs]]\nid = 1\n")
+	_, _, berr := toml.find(bad, .Toml_1_1, path, read = {dups = .First, stop_early = true}, allocator = context.temp_allocator)
+	testkit.expect_kind(t, berr, core.Path_Error_Kind.Walk)
+}
+
 @(test)
 path_reads_through_the_build :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(SAMPLE)

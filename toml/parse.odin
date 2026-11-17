@@ -19,6 +19,7 @@ Parser :: struct {
 	last:      u32, // the value that most recently ended, which a comment on its line belongs to
 	inline_ok: bool, // no line end has passed since `last` ended
 	datetimes: bool, // a datetime was read
+	done:      bool, // the text's end was read
 	parts:     [dynamic]Part,
 	stack:     [dynamic]u32,
 }
@@ -501,22 +502,33 @@ value_tree :: proc "contextless" (p: ^Parser, id: u32) -> bool {
 
 // Reads the whole text into `p.tree`. Returns false with `p.fail` set at the first fault.
 parse :: proc "contextless" (p: ^Parser, lo: u64) -> bool {
-	p.pos = int(core.text_start(p.src, min(lo, u64(len(p.src)))))
-	for {
-		blanks(p, true) or_return
-		if p.pos >= len(p.src) {
-			break
-		}
-		if p.src[p.pos] == '[' {
-			header(p) or_return
-		} else {
-			key_value(p) or_return
-		}
-		end_of_line(p) or_return
+	parse_start(p, lo)
+	for !p.done {
+		statement(p) or_return
 	}
-	// The comments past the last member end the table open at the text's end, the root when no header opened one.
-	last := &p.tree.nodes[p.cur]
-	last.foot, last.foots = p.pending, u32(len(p.tree.comments)) - p.pending
-	p.pending = u32(len(p.tree.comments))
 	return true
+}
+
+parse_start :: #force_inline proc "contextless" (p: ^Parser, lo: u64) {
+	p.pos = int(core.text_start(p.src, min(lo, u64(len(p.src)))))
+}
+
+// Reads the next statement into `p.tree`, or sets `p.done` at the text's end. Every node a statement makes is whole
+// once it returns, but for the tables a later header or dotted key can still add to.
+statement :: proc "contextless" (p: ^Parser) -> bool {
+	blanks(p, true) or_return
+	if p.pos >= len(p.src) {
+		// The comments past the last member end the table open at the text's end, the root when no header opened one.
+		last := &p.tree.nodes[p.cur]
+		last.foot, last.foots = p.pending, u32(len(p.tree.comments)) - p.pending
+		p.pending = u32(len(p.tree.comments))
+		p.done = true
+		return true
+	}
+	if p.src[p.pos] == '[' {
+		header(p) or_return
+	} else {
+		key_value(p) or_return
+	}
+	return end_of_line(p)
 }

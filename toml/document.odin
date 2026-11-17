@@ -232,25 +232,34 @@ edit_validate :: proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault
 	return validate_text(src, Spec(as.spec), options_of(as))
 }
 
-// Reads `src` into the table tree `p`, which judges every byte of the text, under the handle `handle`.
+// Reads `src` into the table tree `p`, which judges every byte of the text, under the handle `handle`. Unless `whole`,
+// it reads the first statement only, which settles the text's head comments, and the replay reads the rest as it needs.
 @(private)
-parse_text :: proc(p: ^Parser, src: []u8, handle: core.As) -> core.Document_Error {
+parse_text :: proc(p: ^Parser, src: []u8, handle: core.As, whole := true) -> core.Document_Error {
 	if handle.spec > u8(max(Spec)) {
 		return {kind = .Bad_Spec}
 	}
 	if !parser_init(p, src, Spec(handle.spec) == .Toml_1_1, depth_limit(options_of(handle))) {
 		return {kind = .No_Memory}
 	}
-	if !parse(p, 0) {
+	ok: bool
+	if whole {
+		ok = parse(p, 0)
+	} else {
+		parse_start(p, 0)
+		ok = statement(p)
+	}
+	if !ok {
 		_, fault, _ := core.result_of(p.fail, &RULES)
 		return core.fault_error(fault.?)
 	}
 	return {}
 }
 
-// TOML's `Services.scan`. The text is parsed whole before the first token, so every read judges every byte. A read of
-// one path that gives no stream replays the tree through the scan's hook, which builds only what the path reaches. A
-// read of several paths or a stream of answers builds the document and answers from it, in the order it holds them.
+// TOML's `Services.scan`. A read of one path that gives no stream replays the tree through the scan's hook, which builds
+// only what the path reaches. The text is parsed whole before the first token, but under `stop_early` the replay parses
+// as it goes, so a read that stops judges the statements up to its last answer's container. A read of several paths
+// or a stream of answers builds the document and answers from it, in the order it holds them.
 @(private)
 scan_text :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (doc: core.Document, err: core.Path_Error) {
 	if on != nil || len(paths) != 1 {
@@ -259,7 +268,7 @@ scan_text :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Pat
 	}
 	p: Parser
 	defer parser_destroy(&p)
-	if e := parse_text(&p, src, handle); e.kind != .None {
+	if e := parse_text(&p, src, handle, !read.stop_early); e.kind != .None {
 		return {}, core.path_error(e)
 	}
 	// The scan's room as words, which an uninitialized declaration leaves unwritten where a struct's padding would not.

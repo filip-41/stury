@@ -227,9 +227,10 @@ validate_text :: proc "contextless" (src: []u8, spec: Spec, opts: Options) -> Ma
 	return nil
 }
 
+// An open container of a replay and the member it gave last, `NIL` before its first.
 @(private)
 Frame :: struct {
-	node, next: u32,
+	node, last: u32,
 }
 
 // The next token a replay gives: the text's head comments and `Object`, a member's comments, key, value and the comment
@@ -279,7 +280,9 @@ comment_token :: #force_inline proc "contextless" (c: Comment, role: core.Role) 
 }
 
 // Passes the tree to the hook in document order, from where `s` stands: a table's members in the order the text first
-// names them. A stop leaves `s` at the token after the one the hook stopped on, and the result is the stop's.
+// names them. A stop leaves `s` at the token after the one the hook stopped on, and the result is the stop's. Over a
+// text `p` has not read to its end, a container whose members are all given reads statements until it gains one or no
+// later statement can add one, and the result is the first fault those statements meet.
 @(private)
 replay :: proc "contextless" (p: ^Parser, s: ^Replay, h: ^$H, hs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	context = runtime.default_context()
@@ -293,7 +296,7 @@ replay :: proc "contextless" (p: ^Parser, s: ^Replay, h: ^$H, hs: ^core.Hook_Reg
 				emit(h, on, hs, &r, comment_token(p.tree.comments[nodes[0].head + s.k - 1], .Comment))
 				break
 			}
-			if _, e := append(&s.frames, Frame{0, nodes[0].first}); e != nil {
+			if _, e := append(&s.frames, Frame{0, NIL}); e != nil {
 				return core.fault_at(0, .No_Memory)
 			}
 			s.phase = .Pick
@@ -305,12 +308,18 @@ replay :: proc "contextless" (p: ^Parser, s: ^Replay, h: ^$H, hs: ^core.Hook_Reg
 			}
 			f := &s.frames[len(s.frames) - 1]
 			s.k = 0
-			if f.next == NIL {
+			next := nodes[f.node].first if f.last == NIL else nodes[f.last].next
+			if next != NIL {
+				s.id, s.phase = next, .Head
+				f.last = next
+			} else if p.done || sealed(&p.tree, f.node) {
 				s.id, s.phase = f.node, .Foot
 				pop(&s.frames)
 			} else {
-				s.id, s.phase = f.next, .Head
-				f.next = nodes[f.next].next
+				if !statement(p) {
+					return p.fail
+				}
+				nodes = p.tree.nodes[:]
 			}
 			continue
 		case .Head:
@@ -336,7 +345,7 @@ replay :: proc "contextless" (p: ^Parser, s: ^Replay, h: ^$H, hs: ^core.Hook_Reg
 			if x.kind == .Scalar {
 				emit(h, on, hs, &r, x.value)
 			} else if emit(h, on, hs, &r, core.Token{x.value.lo, 0, .Object if x.kind == .Table else .Array, .Value, 0}) != .Skip {
-				if _, e := append(&s.frames, Frame{s.id, x.first}); e != nil {
+				if _, e := append(&s.frames, Frame{s.id, NIL}); e != nil {
 					return core.fault_at(x.value.lo, .No_Memory)
 				}
 				s.phase = .Pick
@@ -374,8 +383,9 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.La
 	return doc, core.error_of(err)
 }
 
-// The path reads of `core/build`. `scan`, `each_answer`, `find` and `set` take `spec` and `opts`. A read builds the whole
-// document and answers from it, since a table's members may be written apart.
+// The path reads of `core/build`. `scan`, `each_answer`, `find` and `set` take `spec` and `opts`. A scan of one path
+// under `stop_early` parses statements only as far as its answer needs. Any other read builds the whole document and
+// answers from it, since a table's members may be written apart.
 scan :: proc {scan_one, scan_many}
 
 @(private)
