@@ -10,7 +10,7 @@ import core "../"
 ROOM_MAX :: 4096
 
 // The size of a buffer output's first allocation when it has no hint. A text longer than this doubles from here.
-FIRST_BUFFER :: 512
+FIRST_BUFFER :: 1024
 
 // The buffer size of a stream's output unless `init` is given another.
 STREAM_BUFFER :: 64 * 1024
