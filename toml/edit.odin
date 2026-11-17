@@ -532,7 +532,8 @@ insert_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	c := u32(e.node)
 	switch form_of(cx.doc, c) {
 	case .Inline:
-		return insert_inline(cx, e, c)
+		keyed := cx.doc.nodes[c].kind == .Object
+		append(&inline_edits(cx, c).inserts, compose.Flow_Insert{int(e.at), transmute([]u8)member_text(cx, e, keyed)})
 	case .Root, .Header, .Implicit:
 		return insert_line(cx, e, c)
 	case .Dotted:
@@ -550,12 +551,6 @@ inline_edits :: proc(cx: ^Cx, c: u32) -> ^Inline_Edits {
 		cx.inline[c] = {make([dynamic]u32, cx.a), make([dynamic]compose.Flow_Insert, cx.a)}
 	}
 	return &cx.inline[c]
-}
-
-@(private = "file")
-insert_inline :: proc(cx: ^Cx, e: core.Edit, c: u32) -> bool {
-	append(&inline_edits(cx, c).inserts, compose.Flow_Insert{int(e.at), transmute([]u8)member_text(cx, e, cx.doc.nodes[c].kind == .Object)})
-	return true
 }
 
 // Splices the edits of every inline container. An insert into an empty one that holds a comment is refused.
@@ -838,13 +833,7 @@ insert_element :: proc(cx: ^Cx, e: core.Edit, arr: u32) -> bool {
 		return refuse_edit(cx, e.node, .Element_Not_Table)
 	}
 	last := last_value(cx, arr)
-	pos := u64(0)
-	for i in last ..< last + cx.doc.nodes[last].n {
-		if k := cx.sec_of[i]; k >= 0 {
-			pos = max(pos, section_end(cx, int(k)))
-		}
-	}
-	put_section_at(cx, pos, body)
+	put_section_at(cx, sections_end(cx, last), body)
 	return true
 }
 
@@ -854,7 +843,7 @@ remove_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	p := cx.parent[v]
 	switch form_of(cx.doc, p) {
 	case .Inline:
-		return remove_inline(cx, p, v)
+		append(&inline_edits(cx, p).removed, v)
 	case .Tables:
 		remove_sections(cx, v)
 	case .Root, .Header, .Dotted, .Implicit, .Scalar:
@@ -866,12 +855,6 @@ remove_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 		case .Root:
 		}
 	}
-	return true
-}
-
-@(private = "file")
-remove_inline :: proc(cx: ^Cx, c, v: u32) -> bool {
-	append(&inline_edits(cx, c).removed, v)
 	return true
 }
 

@@ -229,7 +229,8 @@ sort_members :: proc(out: ^write.Out, keys: []int, first: int, enc: Spec) -> cor
 	buf := out.buf[:out.cursor]
 	for at, i in keys {
 		hi := keys[i + 1] if i + 1 < len(keys) else out.cursor
-		members[i] = {lo = at, key = at + key_length(buf[at:]), hi = hi}
+		_, len_key, head_len := head_of(buf[at:])
+		members[i] = {lo = at, key = at + head_len + int(len_key), hi = hi}
 	}
 	Sorter :: struct {
 		buf:          []u8,
@@ -260,11 +261,4 @@ sort_members :: proc(out: ^write.Out, keys: []int, first: int, enc: Spec) -> cor
 	}
 	copy(buf[first:], sorted)
 	return .None
-}
-
-// The length of the text string head and bytes at the start of `b`, a key the token write wrote.
-@(private)
-key_length :: proc(b: []u8) -> int {
-	_, n, size := head_of(b)
-	return size + int(n)
 }

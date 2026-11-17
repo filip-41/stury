@@ -325,6 +325,15 @@ refusal :: proc(err: core.Document_Error) -> string {
 	return name
 }
 
+// Counts a failed edit and prints the first 200.
+@(private = "file")
+failed :: proc(tally: ^Tally, format: string, args: ..any) {
+	tally.failed += 1
+	if tally.failed <= 200 {
+		fmt.eprintfln(format, ..args)
+	}
+}
+
 // Whether `b`'s node `bn` is `a`'s node `an` with node `target` changed by `change`, which says what `target` became.
 @(private = "file")
 equal_except :: proc(a: ^core.Document, an: core.Node_Index, b: ^core.Document, bn: core.Node_Index, target: core.Node_Index, change: proc(a: ^core.Document, an: core.Node_Index, b: ^core.Document, bn: core.Node_Index, data: rawptr) -> bool, data: rawptr) -> bool {
@@ -438,18 +447,12 @@ judge_law :: proc(tally: ^Tally, name: string, doc: ^core.Document, list: ^core.
 		return
 	}
 	if err.kind != .None {
-		tally.failed += 1
-		if tally.failed <= 200 {
-			fmt.eprintfln("%s: node %d %v %q: %v %s %q", name, node, c.kind, c.text, err.kind, refusal(err), string(doc.src))
-		}
+		failed(tally, "%s: node %d %v %q: %v %s %q", name, node, c.kind, c.text, err.kind, refusal(err), string(doc.src))
 		return
 	}
 	if want != "" {
 		if string(out) != want {
-			tally.failed += 1
-			if tally.failed <= 200 {
-				fmt.eprintfln("%s: node %d set to its own text: %q gives %q", name, node, want, string(out))
-			}
+			failed(tally, "%s: node %d set to its own text: %q gives %q", name, node, want, string(out))
 			return
 		}
 		tally.kept += 1
@@ -457,10 +460,7 @@ judge_law :: proc(tally: ^Tally, name: string, doc: ^core.Document, list: ^core.
 	}
 	again, aerr := core.build(out, doc.as, allocator = context.temp_allocator)
 	if aerr != nil || !equal_except(doc, core.ROOT, &again, core.ROOT, node, became, c) {
-		tally.failed += 1
-		if tally.failed <= 200 {
-			fmt.eprintfln("%s: node %d %v %q reads back otherwise (%v): %q gives %q", name, node, c.kind, c.text, aerr, string(doc.src), string(out))
-		}
+		failed(tally, "%s: node %d %v %q reads back otherwise (%v): %q gives %q", name, node, c.kind, c.text, aerr, string(doc.src), string(out))
 		return
 	}
 	tally.changed += 1

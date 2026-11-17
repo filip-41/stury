@@ -153,10 +153,7 @@ st_plaintext :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenize
 @(private, enable_target_feature = STATE_FEATURES)
 st_tag_open :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	if p >= end {
-		if report(t, on, end, .Eof_Before_Tag_Name) {
-			return halt(t, end)
-		}
-		return finish(t, on, end, at(t, end))
+		return eof_error(t, on, end, .Eof_Before_Tag_Name)
 	}
 	c := p[0]
 	switch {
@@ -182,10 +179,7 @@ st_tag_open :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer
 @(private, enable_target_feature = STATE_FEATURES)
 st_end_tag_open :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	if p >= end {
-		if report(t, on, end, .Eof_Before_Tag_Name) {
-			return halt(t, end)
-		}
-		return finish(t, on, end, at(t, end))
+		return eof_error(t, on, end, .Eof_Before_Tag_Name)
 	}
 	c := p[0]
 	if CLASS[c] & C_ALPHA != 0 {
@@ -346,7 +340,7 @@ st_script_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tok
 	for {
 		q = stop_at(q, end, STOP_DASH)
 		if q >= end {
-			return eof_in_script_comment(t, on, end)
+			return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text)
 		}
 		switch q[0] {
 		case '-':
@@ -373,7 +367,7 @@ st_script_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tok
 @(private, enable_target_feature = STATE_FEATURES)
 st_script_escaped_dash :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	if p >= end {
-		return eof_in_script_comment(t, on, end)
+		return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text)
 	}
 	switch p[0] {
 	case '-':
@@ -392,7 +386,7 @@ st_script_escaped_dash_dash :: #force_no_inline proc "contextless" (p, end: [^]u
 		q = q[1:]
 	}
 	if q >= end {
-		return eof_in_script_comment(t, on, end)
+		return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text)
 	}
 	switch q[0] {
 	case '<':
@@ -445,7 +439,7 @@ st_script_double_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, 
 	for {
 		q = stop_at(q, end, STOP_DASH)
 		if q >= end {
-			return eof_in_script_comment(t, on, end)
+			return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text)
 		}
 		switch q[0] {
 		case '-':
@@ -471,7 +465,7 @@ st_script_double_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, 
 @(private, enable_target_feature = STATE_FEATURES)
 st_script_double_escaped_dash :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	if p >= end {
-		return eof_in_script_comment(t, on, end)
+		return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text)
 	}
 	switch p[0] {
 	case '-':
@@ -489,7 +483,7 @@ st_script_double_escaped_dash_dash :: #force_no_inline proc "contextless" (p, en
 		q = q[1:]
 	}
 	if q >= end {
-		return eof_in_script_comment(t, on, end)
+		return eof_error(t, on, end, .Eof_In_Script_Html_Comment_Like_Text)
 	}
 	switch q[0] {
 	case '<':
@@ -1349,10 +1343,7 @@ st_cdata :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H
 	for {
 		q = stop_at(q, end, STOP_CDATA)
 		if q >= end {
-			if report(t, on, end, .Eof_In_Cdata) {
-				return halt(t, end)
-			}
-			return finish(t, on, end, at(t, end))
+			return eof_error(t, on, end, .Eof_In_Cdata)
 		}
 		switch q[0] {
 		case ']':

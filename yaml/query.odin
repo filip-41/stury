@@ -153,7 +153,6 @@ scan_document :: proc(h: ^engine.Scan, src: []u8, lo: u64, opts: Options, stream
 	return
 }
 
-
 // What an iterator's walk keeps across fills, from the iterator's allocator, its address in the iterator's `cursor`:
 // the scan's filter and log, the walk's cursor, and the number of answers the fills before gave, which a read that
 // reaches an alias does not give again.

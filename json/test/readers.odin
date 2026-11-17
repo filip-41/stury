@@ -594,11 +594,10 @@ facts :: proc(t: ^testing.T) {
 			ok &&= testing.expectf(t, role == c.roles[i], "%q node %d fact %d: %v, want %v", c.text, c.node, i, role, c.roles[i])
 		}
 		delete(got)
+		core.destroy(&doc)
 		if !ok {
-			core.destroy(&doc)
 			return
 		}
-		core.destroy(&doc)
 	}
 }
 
@@ -739,8 +738,6 @@ refuse_with_comment :: proc(t: ^testing.T) {
 	testing.expect_value(t, walktest.at_of(err), 7)
 	testing.expect_value(t, len(doc.nodes), 0)
 }
-
-
 
 // `json.text` refuses a container and an index past the last node, and reads a number's digits and a string.
 @(test)

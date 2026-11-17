@@ -293,11 +293,7 @@ drop_lf :: proc "contextless" (t: ^Html_Tree, s: Span) -> Span #no_bounds_check 
 take_space :: proc(t: ^Html_Tree, tok: ^Html_Token, body := false) -> (rest: bool) {
 	n := space_prefix(t, tok.data)
 	if n > 0 {
-		if body {
-			body_text(t, head_of(tok.data, n))
-		} else {
-			insert_text(t, head_of(tok.data, n))
-		}
+		insert_spaces_as(t, head_of(tok.data, n), body)
 	}
 	tok.data = tail_of(tok.data, n)
 	return tok.data.n > 0
@@ -312,11 +308,7 @@ insert_spaces :: proc(t: ^Html_Tree, s: Span, body := false) {
 		class, next := char_at(t, s, i)
 		if class != .Space {
 			if i > run_lo {
-				if body {
-					body_text(t, head_of(tail_of(s, run_lo), i - run_lo))
-				} else {
-					insert_text(t, head_of(tail_of(s, run_lo), i - run_lo))
-				}
+				insert_spaces_as(t, head_of(tail_of(s, run_lo), i - run_lo), body)
 			}
 			if !reported {
 				parse_error(t, .Unexpected_Text, s.lo + u64(i))
@@ -329,11 +321,17 @@ insert_spaces :: proc(t: ^Html_Tree, s: Span, body := false) {
 		i = next
 	}
 	if s.n > run_lo {
-		if body {
-			body_text(t, tail_of(s, run_lo))
-		} else {
-			insert_text(t, tail_of(s, run_lo))
-		}
+		insert_spaces_as(t, tail_of(s, run_lo), body)
+	}
+}
+
+// Inserts whitespace `s` as "in body" reads characters when `body` is set, else as text.
+@(private)
+insert_spaces_as :: proc(t: ^Html_Tree, s: Span, body: bool) {
+	if body {
+		body_text(t, s)
+	} else {
+		insert_text(t, s)
 	}
 }
 
@@ -374,11 +372,8 @@ initial :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 			return false
 		}
 		tok.data = tail_of(tok.data, n)
-	case .Comment:
-		insert_comment(t, tok, DOCUMENT)
-		return false
-	case .Instruction:
-		insert_instruction(t, tok, DOCUMENT)
+	case .Comment, .Instruction:
+		insert_misc(t, tok, DOCUMENT)
 		return false
 	case .Doctype:
 		doctype(t, tok)
@@ -516,11 +511,8 @@ before_html :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 	case .Doctype:
 		misplaced(t, .Unexpected_Doctype)
 		return false
-	case .Comment:
-		insert_comment(t, tok, DOCUMENT)
-		return false
-	case .Instruction:
-		insert_instruction(t, tok, DOCUMENT)
+	case .Comment, .Instruction:
+		insert_misc(t, tok, DOCUMENT)
 		return false
 	case .Text:
 		n := space_prefix(t, tok.data)
@@ -558,11 +550,8 @@ before_head :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 			return false
 		}
 		tok.data = tail_of(tok.data, n)
-	case .Comment:
-		insert_comment(t, tok)
-		return false
-	case .Instruction:
-		insert_instruction(t, tok)
+	case .Comment, .Instruction:
+		insert_misc(t, tok)
 		return false
 	case .Doctype:
 		misplaced(t, .Unexpected_Doctype)
@@ -594,11 +583,8 @@ in_head :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 		if !take_space(t, tok) {
 			return false
 		}
-	case .Comment:
-		insert_comment(t, tok)
-		return false
-	case .Instruction:
-		insert_instruction(t, tok)
+	case .Comment, .Instruction:
+		insert_misc(t, tok)
 		return false
 	case .Doctype:
 		misplaced(t, .Unexpected_Doctype)
@@ -672,11 +658,7 @@ close_template :: proc(t: ^Html_Tree) {
 		misplaced(t, .Unexpected_End_Tag)
 		return
 	}
-	close_implied(t, class = .Thorough_End)
-	if !is_html(current_node(t), .Template) {
-		misplaced(t, .Unclosed_Element)
-	}
-	pop_until(t, {.Template})
+	pop_closed(t, .Template, class = .Thorough_End)
 	clear_to_marker(t)
 	pop(&t.templates)
 	reset_insertion_mode(t)
@@ -729,11 +711,8 @@ after_head :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 		if !take_space(t, tok) {
 			return false
 		}
-	case .Comment:
-		insert_comment(t, tok)
-		return false
-	case .Instruction:
-		insert_instruction(t, tok)
+	case .Comment, .Instruction:
+		insert_misc(t, tok)
 		return false
 	case .Doctype:
 		misplaced(t, .Unexpected_Doctype)
@@ -781,10 +760,8 @@ in_body :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 	switch tok.kind {
 	case .Text:
 		body_text(t, tok.data)
-	case .Comment:
-		insert_comment(t, tok)
-	case .Instruction:
-		insert_instruction(t, tok)
+	case .Comment, .Instruction:
+		insert_misc(t, tok)
 	case .Doctype:
 		misplaced(t, .Unexpected_Doctype)
 	case .Start_Tag:
@@ -1058,12 +1035,7 @@ close_list_item :: proc(t: ^Html_Tree, tags: Tags) {
 	#reverse for m in t.stack {
 		n := &t.nodes[m]
 		if n.tag in tags && n.ns == .Html {
-			tag := n.tag
-			close_implied(t, tag)
-			if !is_html(current_node(t), tag) {
-				misplaced(t, .Unclosed_Element)
-			}
-			pop_until(t, {tag})
+			pop_closed(t, n.tag, except = n.tag)
 			return
 		}
 		if (.Special in classes(n) && n.tag not_in Tags{.Address, .Div, .P}) {
@@ -1120,11 +1092,7 @@ body_end_tag :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 			misplaced(t, .Unexpected_End_Tag)
 			return false
 		}
-		close_implied(t)
-		if !is_html(current_node(t), tag) {
-			misplaced(t, .Unclosed_Element)
-		}
-		pop_until(t, HEADINGS)
+		pop_closed(t, tag, HEADINGS)
 	case .A, .B, .Big, .Code, .Em, .Font, .I, .Nobr, .S, .Small, .Strike, .Strong, .Tt, .U:
 		if adoption_agency(t, tag) {
 			any_other_end_tag(t, tok)
@@ -1155,11 +1123,7 @@ close_element :: proc(t: ^Html_Tree, tag: Tag, bound: Tag_Classes) -> bool {
 		misplaced(t, .Unexpected_End_Tag)
 		return false
 	}
-	close_implied(t, tag if tag == .Li || tag == .Dd || tag == .Dt else .Other)
-	if !is_html(current_node(t), tag) {
-		misplaced(t, .Unclosed_Element)
-	}
-	pop_until(t, {tag})
+	pop_closed(t, tag, except = tag if tag == .Li || tag == .Dd || tag == .Dt else .Other)
 	return true
 }
 
@@ -1212,11 +1176,8 @@ in_table :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 			t.mode = .In_Table_Text
 			return true
 		}
-	case .Comment:
-		insert_comment(t, tok)
-		return false
-	case .Instruction:
-		insert_instruction(t, tok)
+	case .Comment, .Instruction:
+		insert_misc(t, tok)
 		return false
 	case .Doctype:
 		misplaced(t, .Unexpected_Doctype)
@@ -1339,11 +1300,7 @@ close_caption :: proc(t: ^Html_Tree) -> bool {
 		misplaced(t, .Unexpected_End_Tag)
 		return false
 	}
-	close_implied(t)
-	if !is_html(current_node(t), .Caption) {
-		misplaced(t, .Unclosed_Element)
-	}
-	pop_until(t, {.Caption})
+	pop_closed(t, .Caption)
 	clear_to_marker(t)
 	t.mode = .In_Table
 	return true
@@ -1378,11 +1335,8 @@ in_column_group :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 		if !take_space(t, tok) {
 			return false
 		}
-	case .Comment:
-		insert_comment(t, tok)
-		return false
-	case .Instruction:
-		insert_instruction(t, tok)
+	case .Comment, .Instruction:
+		insert_misc(t, tok)
 		return false
 	case .Doctype:
 		misplaced(t, .Unexpected_Doctype)
@@ -1550,11 +1504,7 @@ in_cell :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 				misplaced(t, .Unexpected_End_Tag)
 				return false
 			}
-			close_implied(t)
-			if !is_html(current_node(t), t.tag) {
-				misplaced(t, .Unclosed_Element)
-			}
-			pop_until(t, {t.tag})
+			pop_closed(t, t.tag)
 			clear_to_marker(t)
 			t.mode = .In_Row
 			return false
@@ -1585,11 +1535,8 @@ after_body :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 		if !take_space(t, tok, body = true) {
 			return false
 		}
-	case .Comment:
-		insert_comment(t, tok, t.stack[0])
-		return false
-	case .Instruction:
-		insert_instruction(t, tok, t.stack[0])
+	case .Comment, .Instruction:
+		insert_misc(t, tok, t.stack[0])
 		return false
 	case .Doctype:
 		misplaced(t, .Unexpected_Doctype)
@@ -1626,11 +1573,8 @@ in_frameset :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 	case .Text:
 		insert_spaces(t, tok.data)
 		return false
-	case .Comment:
-		insert_comment(t, tok)
-		return false
-	case .Instruction:
-		insert_instruction(t, tok)
+	case .Comment, .Instruction:
+		insert_misc(t, tok)
 		return false
 	case .Doctype:
 	case .Start_Tag:
@@ -1676,11 +1620,8 @@ after_frameset :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 	case .Text:
 		insert_spaces(t, tok.data)
 		return false
-	case .Comment:
-		insert_comment(t, tok)
-		return false
-	case .Instruction:
-		insert_instruction(t, tok)
+	case .Comment, .Instruction:
+		insert_misc(t, tok)
 		return false
 	case .Doctype:
 	case .Start_Tag:
@@ -1705,11 +1646,8 @@ after_frameset :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 @(private)
 after_after_body :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 	switch tok.kind {
-	case .Comment:
-		insert_comment(t, tok, DOCUMENT)
-		return false
-	case .Instruction:
-		insert_instruction(t, tok, DOCUMENT)
+	case .Comment, .Instruction:
+		insert_misc(t, tok, DOCUMENT)
 		return false
 	case .Doctype:
 		return in_body(t, tok)
@@ -1737,11 +1675,8 @@ after_after_body :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 @(private)
 after_after_frameset :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 	switch tok.kind {
-	case .Comment:
-		insert_comment(t, tok, DOCUMENT)
-		return false
-	case .Instruction:
-		insert_instruction(t, tok, DOCUMENT)
+	case .Comment, .Instruction:
+		insert_misc(t, tok, DOCUMENT)
 		return false
 	case .Doctype:
 		return in_body(t, tok)

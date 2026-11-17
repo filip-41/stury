@@ -71,16 +71,7 @@ edit_table :: proc(er: ^Edit_Run, path: string) -> int {
 				}
 			}
 		}
-		claims := make([]int, len(items), context.temp_allocator)
-		for v, j in items {
-			claims[j] = -1
-			if r, is_ref := v.(jq.Ref); is_ref && r.doc == &doc {
-				if i, found := slice.binary_search(recs, r.node); found {
-					claims[j] = i
-				}
-			}
-		}
-		for i, j in match_items(sources, items, claims) {
+		for i, j in match_items(sources, items, edit_claims(items, &doc, recs)) {
 			append(&placed, Edit_Placed{i, items[j], lines_at[i] if i >= 0 else 0})
 		}
 	} else {
@@ -288,13 +279,10 @@ with_comments :: proc(v, record: jq.Value) -> jq.Value {
 edit_table_moves :: proc(w: ^Edit_State, placed: []Edit_Placed, names: []string) -> bool {
 	last := -1
 	for p in placed {
-		if p.rec < last {
+		if p.rec < 0 || p.rec < last {
 			return true
 		}
-		last = p.rec if p.rec >= 0 else last
-		if p.rec < 0 {
-			return true
-		}
+		last = p.rec
 	}
 	if names == nil {
 		return false

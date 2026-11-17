@@ -144,7 +144,7 @@ reads_as_other :: proc(s: string) -> bool {
 			return true
 		}
 	}
-	return s == "<<" || looks_numeric_11(s) || looks_timestamp(s)
+	return looks_numeric_11(s) || looks_timestamp(s)
 }
 
 @(private)

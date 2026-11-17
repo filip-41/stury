@@ -55,8 +55,7 @@ comment :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 			}
 		}
 		// A `/` after `*` would close a block comment early, so a block comment writes no `/` piece.
-		pieces := PIECES
-		append(out, rand.choice(pieces) if block || rand.int_max(3) != 0 else rand.choice([]string{"/", "//", "/*", "*/"}))
+		append(out, rand.choice(PIECES) if block || rand.int_max(3) != 0 else rand.choice([]string{"/", "//", "/*", "*/"}))
 		if block && rand.int_max(6) == 0 {
 			append(out, walktest.pick("\r\n"))
 		}

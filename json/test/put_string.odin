@@ -3,6 +3,7 @@ package json_tests
 import "core:bytes"
 import "core:io"
 import "core:math/rand"
+import "core:slice"
 import "core:testing"
 import "core:unicode/utf8"
 import core "../../core"
@@ -155,9 +156,7 @@ lengths_around_the_block_sizes :: proc(t: ^testing.T) {
 	for length in 0 ..= 200 {
 		s := make([]u8, length)
 		defer delete(s)
-		for &b in s {
-			b = 'x'
-		}
+		slice.fill(s, 'x')
 		check(t, s)
 		for stop in ([]u8{'"', '\\', '\n', 0x00, 0x1f, 0x7f}) {
 			for at in ([]int{0, 1, 14, 15, 16, 17, 31, 32, 62, 63, 64, 65, 79, 80, 81, 127, 128, 129, 191}) {
@@ -180,9 +179,7 @@ characters_and_escapes_across_blocks :: proc(t: ^testing.T) {
 			for after in ([]int{0, 1, 15, 16, 17, 63, 64, 65, 100}) {
 				s := make([]u8, before + len(piece) + after)
 				defer delete(s)
-				for &b in s {
-					b = 'a'
-				}
+				slice.fill(s, 'a')
 				copy(s[before:], piece)
 				check(t, s)
 			}
@@ -202,9 +199,7 @@ invalid_utf8_is_refused_at_every_offset :: proc(t: ^testing.T) {
 			for after in ([]int{0, 1, 14, 15, 16, 17, 40, 70}) {
 				s := make([]u8, before + len(piece) + after)
 				defer delete(s)
-				for &b in s {
-					b = 'a'
-				}
+				slice.fill(s, 'a')
 				copy(s[before:], piece)
 				for opts in OPTION_SETS {
 					text, kind := written(s, opts)
@@ -295,17 +290,12 @@ strings_after_strings_keep_every_byte :: proc(t: ^testing.T) {
 // A stream that refuses bytes ends the write with the stream's error, not a crash.
 @(test)
 a_refusing_stream_fails_the_write :: proc(t: ^testing.T) {
-	refuse :: proc(_: rawptr, _: io.Stream_Mode, _: []byte, _: i64, _: io.Seek_From) -> (i64, io.Error) {
-		return 0, .Unexpected_EOF
-	}
 	spill: [write.ROOM_MAX]u8 = ---
 	out: write.Out
-	write.init(&out, &spill, stream = io.Stream{procedure = refuse})
+	write.init(&out, &spill, stream = io.Stream{procedure = refusing_stream})
 	s := make([]u8, 200_000)
 	defer delete(s)
-	for &b in s {
-		b = 'a'
-	}
+	slice.fill(s, 'a')
 	json.put_string(&out, string(s))
 	_, err := write.finish(&out)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Write_Failed)
@@ -342,9 +332,7 @@ a_sequence_cut_at_a_block_end :: proc(t: ^testing.T) {
 		for blocks in 1 ..= 5 {
 			for shift in -2 ..= 1 {
 				text := make([]u8, 64 * blocks + 300, context.temp_allocator)
-				for &b in text {
-					b = 'a'
-				}
+				slice.fill(text, 'a')
 				text[64 * blocks - 1 + shift] = lead
 				_, err := json.marshal(string(text), write = {}, allocator = context.temp_allocator)
 				walktest.expect_kind(t, err, core.Typed_Error_Kind.Invalid_Utf8)

@@ -6,6 +6,7 @@ package doc
 import "core:fmt"
 import "core:mem"
 import "core:os"
+import "core:strings"
 import "core:time"
 import core "../../core"
 import "../timing"
@@ -447,12 +448,12 @@ main :: proc() {
 	a.alloc = mem.arena_allocator(&a.arena)
 
 	path := os.args[2]
-	dsv_text := has_suffix(path, ".csv") || has_suffix(path, ".tsv")
-	tsv := has_suffix(path, ".tsv")
+	dsv_text := strings.has_suffix(path, ".csv") || strings.has_suffix(path, ".tsv")
+	tsv := strings.has_suffix(path, ".tsv")
 	spec := json.Spec.Json
-	if has_suffix(path, ".jsonc") {
+	if strings.has_suffix(path, ".jsonc") {
 		spec = .Jsonc
-	} else if has_suffix(path, ".json5") {
+	} else if strings.has_suffix(path, ".json5") {
 		spec = .Json5
 	}
 	ns := run_lane(&a, os.args[1], src, tsv, dsv_text, spec)
@@ -468,7 +469,6 @@ main :: proc() {
 	case "read":
 		a.arena.offset = 0
 		read_all(&a, src, tsv, dsv_text, spec, true)
-	case "key":
 	}
 	if os.args[1] == "key" {
 		fmt.printfln(
@@ -483,8 +483,4 @@ main :: proc() {
 	} else {
 		fmt.printfln("gb_per_s=%.3f ns=%d check=%d", f64(len(src)) / f64(ns), ns, check)
 	}
-}
-
-has_suffix :: proc(s, suffix: string) -> bool {
-	return len(s) >= len(suffix) && s[len(s) - len(suffix):] == suffix
 }

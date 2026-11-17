@@ -163,7 +163,6 @@ scan_item :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Pat
 	return
 }
 
-
 // The fill of an iterator: the stream's walk with a cursor in the iterator's `cursor`, which stops once the buffer
 // holds a batch. It judges what the walk leaves and ends the read as `scan_item` does.
 answers_fill :: proc(it: ^engine.Answer_Iter) {

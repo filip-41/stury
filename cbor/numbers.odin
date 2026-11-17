@@ -185,7 +185,6 @@ set_u64 :: proc "contextless" (d: ^Digits, v: u64) -> bool {
 	return true
 }
 
-
 // The value of a bigfloat, when its mantissa is an integer binary64 holds and its exponent is in range.
 @(private)
 bigfloat :: proc "contextless" (span: []u8) -> (core.Number, bool) {

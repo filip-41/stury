@@ -88,8 +88,8 @@ as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
 
 // The walk's verdict on `src`, which is exactly one item, judged as `spec` says. Returns the fault, or nil. It links
 // the walk alone, and `core.validate` with `as(spec, opts)` links every service of the format. The same holds for the
-// other entry points of the package. A document an entry point builds holds no services, so `query`, `edit_list_init` and `write` of this package serve it where the same names of
-// `core` serve a handle's.
+// other entry points of the package. A document an entry point builds holds no services, so `query`, `edit_list_init`
+// and `write` of this package serve it where the same names of `core` serve a handle's.
 validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.Error {
 	return core.error_of(validate_text(src, rules_of(S, opts)))
 }
@@ -817,10 +817,8 @@ run :: proc "contextless" (src: []u8, lo: u64, opts: Walk_Rules, h: ^$H, regs: ^
 			i += 1
 			top = top & ~COUNT_MASK | 1
 		case .Reserved:
-			if b >> 5 == 4 || b >> 5 == 5 {
-				if d >= limit {
-					return fault(i, .Too_Deep)
-				}
+			if (b >> 5 == 4 || b >> 5 == 5) && d >= limit {
+				return fault(i, .Too_Deep)
 			}
 			return fault(i, .Bad_Char, .Reserved_Info)
 		}

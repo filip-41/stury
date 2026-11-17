@@ -603,15 +603,11 @@ put_number_literal :: proc(w: ^Rows, s: string, first: bool) -> core.Typed_Error
 	if _, is_number := spell.number_strict(transmute([]u8)s, 0, u64(len(s))); !is_number {
 		return .Bad_Raw
 	}
-	if !w.numbers {
-		write.put_text(&w.out, s)
-		return .None
+	if w.numbers && (strings.index_byte(s, w.opts.delimiter) >= 0 || first && w.opts.comment != 0 && s[0] == w.opts.comment) {
+		return put_guarded(w, s, true, false) if w.spec == .Csv else .Unwritable
 	}
-	if strings.index_byte(s, w.opts.delimiter) < 0 && !(first && w.opts.comment != 0 && s[0] == w.opts.comment) {
-		write.put_text(&w.out, s)
-		return .None
-	}
-	return put_guarded(w, s, true, false) if w.spec == .Csv else .Unwritable
+	write.put_text(&w.out, s)
+	return .None
 }
 
 // The longest cell `put_plain_cell` copies under one reservation.

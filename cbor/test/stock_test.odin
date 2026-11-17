@@ -23,6 +23,22 @@ below :: proc(g: ^Generator, n: int) -> int {
 	return int(rand.int_max(n, g.rng))
 }
 
+// The item in `g.out` with one byte changed, cut short, or followed by one more.
+@(private)
+mutate :: proc(g: ^Generator) -> []u8 {
+	src := g.out[:]
+	switch below(g, 3) {
+	case 0:
+		src[below(g, len(src))] = u8(below(g, 256))
+	case 1:
+		src = src[:below(g, len(src))]
+	case:
+		append(&g.out, u8(below(g, 256)))
+		src = g.out[:]
+	}
+	return src
+}
+
 @(private)
 put_head :: proc(g: ^Generator, major: u8, arg: u64) {
 	// Widths beyond the shortest are well-formed and exercise every head length.
@@ -142,12 +158,36 @@ put_item :: proc(g: ^Generator, depth: int, key: bool) {
 	}
 }
 
+@(private)
+integer_value :: proc(v: cbor.Value) -> (n: i128, ok: bool) {
+	#partial switch x in v {
+	case u8:
+		return i128(x), true
+	case u16:
+		return i128(x), true
+	case u32:
+		return i128(x), true
+	case u64:
+		return i128(x), true
+	case cbor.Negative_U8:
+		return -1 - i128(x), true
+	case cbor.Negative_U16:
+		return -1 - i128(x), true
+	case cbor.Negative_U32:
+		return -1 - i128(x), true
+	case cbor.Negative_U64:
+		return -1 - i128(x), true
+	}
+	return 0, false
+}
+
 // Writes value `v` of the stock decoder the way `dump` writes a document node. Returns false for a value `dump` cannot
 // spell: a tag, or a key that is not an integer, text or bytes.
 @(private)
 stock_dump :: proc(b: ^strings.Builder, v: cbor.Value, key := false) -> bool {
-	spell_bytes :: proc(b: ^strings.Builder, p: []u8) {
-		hex_text(b, p)
+	if n, is_int := integer_value(v); is_int {
+		fmt.sbprintf(b, `"%d"` if key else "i:%d", n)
+		return true
 	}
 	if key {
 		#partial switch x in v {
@@ -155,54 +195,14 @@ stock_dump :: proc(b: ^strings.Builder, v: cbor.Value, key := false) -> bool {
 			fmt.sbprintf(b, "%q", string(x^))
 			return true
 		case ^cbor.Bytes:
-			spell_bytes(b, x^)
-			return true
-		case u8:
-			fmt.sbprintf(b, `"%d"`, x)
-			return true
-		case u16:
-			fmt.sbprintf(b, `"%d"`, x)
-			return true
-		case u32:
-			fmt.sbprintf(b, `"%d"`, x)
-			return true
-		case u64:
-			fmt.sbprintf(b, `"%d"`, x)
-			return true
-		case cbor.Negative_U8:
-			fmt.sbprintf(b, `"%d"`, -1 - i128(x))
-			return true
-		case cbor.Negative_U16:
-			fmt.sbprintf(b, `"%d"`, -1 - i128(x))
-			return true
-		case cbor.Negative_U32:
-			fmt.sbprintf(b, `"%d"`, -1 - i128(x))
-			return true
-		case cbor.Negative_U64:
-			fmt.sbprintf(b, `"%d"`, -1 - i128(x))
+			hex_text(b, x^)
 			return true
 		}
 		return false
 	}
-	switch x in v {
-	case u8:
-		fmt.sbprintf(b, "i:%d", x)
-	case u16:
-		fmt.sbprintf(b, "i:%d", x)
-	case u32:
-		fmt.sbprintf(b, "i:%d", x)
-	case u64:
-		fmt.sbprintf(b, "i:%d", x)
-	case cbor.Negative_U8:
-		fmt.sbprintf(b, "i:%d", -1 - i128(x))
-	case cbor.Negative_U16:
-		fmt.sbprintf(b, "i:%d", -1 - i128(x))
-	case cbor.Negative_U32:
-		fmt.sbprintf(b, "i:%d", -1 - i128(x))
-	case cbor.Negative_U64:
-		fmt.sbprintf(b, "i:%d", -1 - i128(x))
+	#partial switch x in v {
 	case ^cbor.Bytes:
-		spell_bytes(b, x^)
+		hex_text(b, x^)
 	case ^cbor.Text:
 		fmt.sbprintf(b, "%q", string(x^))
 	case ^cbor.Array:
@@ -331,18 +331,8 @@ mutated_items_agree_with_the_stock_decoder :: proc(t: ^testing.T) {
 	for _ in 0 ..< 6000 {
 		g.out = make([dynamic]u8, context.temp_allocator)
 		put_item(&g, 0, false)
-		src := g.out[:]
-		switch below(&g, 3) {
-		case 0:
-			src[below(&g, len(src))] = u8(below(&g, 256))
-		case 1:
-			src = src[:below(&g, len(src))]
-		case:
-			append(&g.out, u8(below(&g, 256)))
-			src = g.out[:]
-		}
 		context.allocator = context.temp_allocator
-		compare(t, &tally, src, false)
+		compare(t, &tally, mutate(&g), false)
 		free_all(context.temp_allocator)
 	}
 	testing.expect_value(t, tally.mismatch, 0)

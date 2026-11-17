@@ -390,16 +390,7 @@ edit_elements :: proc(w: ^Edit_State, node: core.Node_Index, members: []Source_M
 			nodes[k] = members[i].node
 			sources[k] = jq.Ref{w.doc, nodes[k]}
 		}
-		claims := make([]int, len(items.items), context.temp_allocator)
-		for v, j in items.items {
-			claims[j] = -1
-			if r, is_ref := v.(jq.Ref); is_ref && r.doc == w.doc {
-				if k, found := slice.binary_search(nodes, r.node); found {
-					claims[j] = k
-				}
-			}
-		}
-		pairs := match_items(sources, items.items[:], claims)
+		pairs := match_items(sources, items.items[:], edit_claims(items.items[:], w.doc, nodes))
 		used := make([]bool, len(group), context.temp_allocator)
 		place := 2 * group[0] - 1
 		last := -1
@@ -503,16 +494,7 @@ edit_array :: proc(w: ^Edit_State, node: core.Node_Index, items: []jq.Value) -> 
 		children[i], _ = core.child_next(&it)
 		sources[i] = jq.Ref{w.doc, children[i]}
 	}
-	claims := make([]int, len(items), context.temp_allocator)
-	for v, j in items {
-		claims[j] = -1
-		if r, is_ref := v.(jq.Ref); is_ref && r.doc == w.doc {
-			if i, found := slice.binary_search(children, r.node); found {
-				claims[j] = i
-			}
-		}
-	}
-	pairs := match_items(sources, items, claims)
+	pairs := match_items(sources, items, edit_claims(items, w.doc, children))
 	used := make([]bool, have, context.temp_allocator)
 	entries := make([]int, len(items), context.temp_allocator)
 	news := make([dynamic]Edit_New, context.temp_allocator)
@@ -533,6 +515,20 @@ edit_array :: proc(w: ^Edit_State, node: core.Node_Index, items: []jq.Value) -> 
 		}
 	}
 	return edit_place_entries(w, node, have, entries, news[:])
+}
+
+// For each of `items`, the position in the sorted `nodes` of `doc` it was taken from, or -1.
+edit_claims :: proc(items: []jq.Value, doc: ^core.Document, nodes: []core.Node_Index) -> []int {
+	claims := make([]int, len(items), context.temp_allocator)
+	for v, j in items {
+		claims[j] = -1
+		if r, is_ref := v.(jq.Ref); is_ref && r.doc == doc {
+			if i, found := slice.binary_search(nodes, r.node); found {
+				claims[j] = i
+			}
+		}
+	}
+	return claims
 }
 
 // Pairs each of `items` with the source it edits, or -1 for a new one. `claims` names the source an item was taken

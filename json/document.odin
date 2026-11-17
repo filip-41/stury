@@ -302,13 +302,13 @@ edit_bare_key :: proc(spec: u8, name: []u8) -> bool {
 	return kind == .None && !esc && q == end
 }
 
-// Returns JSON's comment spelling for `spec`. It is `//` for the specs whose grammar has comments, and none for
-// strict JSON. A line body holding a line end is written as a block comment, so the spec's line ends are the only
-// shape rule.
+// JSON5 ends a line comment at U+2028 and U+2029, which the other specs read as text.
 edit_separators :: proc(doc: ^core.Document, spec: u8) -> bool {
 	return Spec(spec) == .Json5 && Spec(doc.as.spec) != .Json5
 }
 
+// JSON's comment spelling for `spec`: `//` for the specs whose grammar has comments, none for strict JSON. A line body
+// holding a line end is written as a block comment, so the spec's line ends are the only shape rule.
 edit_comment :: proc(doc: ^core.Document, spec: u8) -> core.Comment_Syntax {
 	return core.SLASH_COMMENTS if Spec(spec) == .Jsonc || Spec(spec) == .Json5 else {}
 }

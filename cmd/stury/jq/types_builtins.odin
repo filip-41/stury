@@ -63,13 +63,13 @@ builtin_type :: proc(t: ^Typer, n: ^Node, dot: Ty, f: ^Frame) -> (Ty, bool) {
 		sum, _ := arithmetic(t, .Add, e, e, ke, ke)
 		return union_of(t, e, sum, t.null), true
 	case "sort", "unique":
-		return array_of(t, items_of(t, dot)), true
+		return array_of(t, read(t, dot, .Element).value), true
 	case "reverse":
 		// A value of length 0 reverses to `[]`.
-		reversed := array_of(t, items_of(t, dot)) if .Array in k else t.never
+		reversed := array_of(t, read(t, dot, .Element).value) if .Array in k else t.never
 		return union_of(t, reversed, kinds(t, {.String}) if .String in k else t.never, t.empty if k - {.Array, .Bool} != {} else t.never), true
 	case "sort_by", "group_by", "unique_by", "min_by", "max_by", "min", "max":
-		e := items_of(t, dot)
+		e := read(t, dot, .Element).value
 		if arity > 0 {
 			arg(t, n, 0, e, f)
 		}
@@ -206,14 +206,6 @@ entries :: proc(t: ^Typer, dot: Ty) -> Ty {
 type_names :: proc(t: ^Typer, dot: Ty) -> Ty {
 	names: [dynamic]string
 	names.allocator = context.temp_allocator
-	add :: proc(names: ^[dynamic]string, name: string) {
-		for s in names {
-			if s == name {
-				return
-			}
-		}
-		append(names, name)
-	}
 	split := branches(t, dot)
 	if !split.complete {
 		return kinds_node(t, {.String})
@@ -224,10 +216,9 @@ type_names :: proc(t: ^Typer, dot: Ty) -> Ty {
 		}
 		k := branch_kinds(t, b[:])
 		for kind in JQ_KINDS {
-			if kind.kinds & k == {} {
-				continue
+			if kind.kinds & k != {} && !slice.contains(names[:], kind.name) {
+				append(&names, kind.name)
 			}
-			add(&names, kind.name)
 		}
 	}
 	return names_node(t, names[:]) if len(names) > 0 else t.never

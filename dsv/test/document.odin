@@ -12,21 +12,8 @@ import gen "gen"
 import walktest "../../walktest"
 import dsv ".."
 
-build :: proc(src: string, $S: dsv.Spec, opts := dsv.Options{}, dups := core.Duplicates.Last) -> (core.Document, core.Error) {
-	return core.build(transmute([]u8)src, dsv.as(S, opts), dups)
-}
-
-// `build` with the spec chosen at run time.
-build_any :: proc(src: string, spec: dsv.Spec, opts := dsv.Options{}, dups := core.Duplicates.Last) -> (core.Document, core.Error) {
-	switch spec {
-	case .Csv:
-		return build(src, .Csv, opts, dups)
-	case .Tsv:
-		return build(src, .Tsv, opts, dups)
-	case .Plain:
-		return build(src, .Plain, opts, dups)
-	}
-	return {}, {kind = .Bad_Value}
+build :: proc(src: string, spec: dsv.Spec, opts := dsv.Options{}, dups := core.Duplicates.Last) -> (core.Document, core.Error) {
+	return core.build(transmute([]u8)src, dsv.as(spec, opts), dups)
 }
 
 // The cell `cell` of record `rec`, counting from the first record after the header.
@@ -225,7 +212,7 @@ cell_reads :: proc(t: ^testing.T) {
 		{"a,b\n\"x\n#y\",z#w\n", .Csv, {comment = '#'}, 0, 0, "x\n#y", .String, .No},
 		{"a,b\n\"x\n#y\",z#w\n", .Csv, {comment = '#'}, 0, 1, "z#w", .String, .No},
 	}) {
-		doc, err := build_any(c.src, c.spec, c.opts)
+		doc, err := build(c.src, c.spec, c.opts)
 		defer core.destroy(&doc)
 		if !testing.expectf(t, err == nil, "%q: %v", c.src, err) {
 			return
@@ -315,7 +302,7 @@ key_reads :: proc(t: ^testing.T) {
 		{"\"q\"\tq\n1\t2\n", .Tsv, {}, 1, "q", ""},
 		{"a,,c\n1,2,3\n", .Csv, {}, 1, "", ""},
 	}) {
-		doc, err := build_any(c.src, c.spec, c.opts)
+		doc, err := build(c.src, c.spec, c.opts)
 		defer core.destroy(&doc)
 		if !testing.expectf(t, err == nil, "%q: %v", c.src, err) {
 			return
@@ -368,7 +355,7 @@ refuse_duplicates :: proc(t: ^testing.T) {
 		{"\\0\t\\0", .Tsv, {}, dup, 3},
 		{"3,b\n1,2,x\n", .Csv, {tolerate = {.Ragged}}, dup, 0},
 	}) {
-		doc, err := build_any(c.src, c.spec, c.opts, .Refuse)
+		doc, err := build(c.src, c.spec, c.opts, .Refuse)
 		defer core.destroy(&doc)
 		if c.kind == .None {
 			walktest.expect_nil(t, err)
@@ -614,7 +601,7 @@ generated_keys_agree :: proc(t: ^testing.T) {
 		tsv := round % 2 == 1
 		gen.text(&text, tsv)
 		no_header := round % 3 == 0
-		doc, err := build_any(string(text[:]), .Tsv if tsv else .Csv, {no_header = no_header})
+		doc, err := build(string(text[:]), .Tsv if tsv else .Csv, {no_header = no_header})
 		if err != nil {
 			core.destroy(&doc)
 			continue
@@ -745,7 +732,7 @@ caller_key_buffer :: proc(t: ^testing.T) {
 		{.Csv, {}, {',', 0}},
 		{.Tsv, {}, {'\t', 0}},
 	}) {
-		d, derr := build_any("a\n", c.spec, c.opts)
+		d, derr := build("a\n", c.spec, c.opts)
 		defer core.destroy(&d)
 		walktest.expect_nil(t, derr)
 		testing.expect_value(t, d.as.opts[0], c.want[0])
@@ -821,7 +808,7 @@ smallest_arena :: proc(t: ^testing.T) {
 @(test)
 spelling_complete :: proc(t: ^testing.T) {
 	for spec in dsv.Spec {
-		doc, err := build_any("a\n", spec)
+		doc, err := build("a\n", spec)
 		defer core.destroy(&doc)
 		s := doc.readers
 		walktest.expect_nil(t, err)

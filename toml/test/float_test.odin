@@ -30,7 +30,7 @@ style_of_member :: proc(t: ^testing.T, text: string, name: string) -> (style: st
 }
 
 @(private)
-float_kind_ok :: proc(t: ^testing.T, text: string, x: f64) {
+expect_float_and_int :: proc(t: ^testing.T, text: string, x: f64) {
 	style, n := style_of_member(t, text, "f")
 	want := "float"
 	if math.is_inf(x) {
@@ -44,6 +44,8 @@ float_kind_ok :: proc(t: ^testing.T, text: string, x: f64) {
 		got = f64(i64(n.bits))
 	}
 	testing.expectf(t, math.is_nan(x) || got == x && math.sign_bit(got) == math.sign_bit(x), "%v is written as %q and reads %v", x, text, got)
+	style, _ = style_of_member(t, text, "i")
+	testing.expectf(t, style == "integer", "an int is written as %q", text)
 }
 
 @(test)
@@ -54,9 +56,7 @@ typed_write_keeps_each_float_a_float :: proc(t: ^testing.T) {
 		if !testing.expectf(t, err == nil, "%v: %v", x, err) {
 			continue
 		}
-		float_kind_ok(t, string(text), x)
-		style, _ := style_of_member(t, string(text), "i")
-		testing.expectf(t, style == "integer", "an int is written as %q", text)
+		expect_float_and_int(t, string(text), x)
 	}
 }
 
@@ -76,8 +76,6 @@ token_write_keeps_each_float_a_float :: proc(t: ^testing.T) {
 		if !testing.expectf(t, err.kind == .None, "%v: %v", x, err.kind) {
 			continue
 		}
-		float_kind_ok(t, string(bytes), x)
-		style, _ := style_of_member(t, string(bytes), "i")
-		testing.expectf(t, style == "integer", "an int is written as %q", bytes)
+		expect_float_and_int(t, string(bytes), x)
 	}
 }

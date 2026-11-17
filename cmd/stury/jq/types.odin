@@ -767,12 +767,6 @@ matches :: proc(t: ^Typer, expression, name: string) -> bool {
 	return found || err != ""
 }
 
-// What `.[]` reads from an array.
-@(private)
-items_of :: proc(t: ^Typer, id: Ty) -> Ty {
-	return read(t, id, .Element).value
-}
-
 // What `.[]` reads from an array or an object.
 @(private)
 read_iterated :: proc(t: ^Typer, id: Ty) -> (r: Read) {

@@ -399,10 +399,7 @@ read_number :: proc(text: string, mark := u32(0)) -> (Value, bool) {
 	if !ok {
 		return nil, false
 	}
-	if !strict {
-		return num(number_f64(n, text)), true
-	}
-	if len(text) > int(max(u32)) {
+	if !strict || len(text) > int(max(u32)) {
 		return num(number_f64(n, text)), true
 	}
 	if mark != 0 {

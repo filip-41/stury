@@ -114,7 +114,7 @@ expect_edits :: proc(t: ^testing.T, cases: []Edit_Case) {
 
 @(private = "file")
 run_edit :: proc(t: ^testing.T, c: Edit_Case) -> bool {
-	doc, err := build_any(c.src, c.spec, c.opts)
+	doc, err := build(c.src, c.spec, c.opts)
 	defer core.destroy(&doc)
 	if !testing.expectf(t, err == nil, "%q: build %v", c.src, err) {
 		return false
@@ -141,7 +141,7 @@ run_edit :: proc(t: ^testing.T, c: Edit_Case) -> bool {
 	if !testing.expectf(t, string(out) == c.want && dropped == c.dropped, "%q %v: committed %q with %d dropped, want %q with %d", c.src, c.ops, out, dropped, c.want, c.dropped) {
 		return false
 	}
-	back, berr := build_any(string(out), c.spec, c.opts)
+	back, berr := build(string(out), c.spec, c.opts)
 	defer core.destroy(&back)
 	return testing.expectf(t, berr == nil, "committed %q does not read: %v", out, berr)
 }

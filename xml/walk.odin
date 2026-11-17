@@ -321,8 +321,7 @@ walk_end :: proc "contextless" (w: ^Walk($H), r: u64, kept: ^[]u8) -> u64 {
 	return r
 }
 
-// Passes the token to the hook. `skip_at` is the open count of the element a `Skip` on this token hides, 0 for a token
-// that cannot be skipped.
+// What `emit` reports: the walk goes on, the hook stopped it, or the token is wider than `Token.n` holds.
 @(private)
 Emitted :: enum u8 {
 	Next,
@@ -330,6 +329,8 @@ Emitted :: enum u8 {
 	Wide,
 }
 
+// Passes the token to the hook. `skip_at` is the open count of the element a `Skip` on this token hides, 0 for a token
+// that cannot be skipped.
 @(private)
 emit :: #force_inline proc "contextless" (w: ^Walk($H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, kind: core.Kind, role: core.Role, lo: u64, n: int, spelling: u16 = 0, skip_at: u64 = 0) -> Emitted {
 	when H == core.No_Hooks {

@@ -41,28 +41,10 @@ record_forms :: proc(t: ^testing.T, $S: toml.Spec) {
 	scanned := toml.records_open(src, S)
 	defer toml.records_close(&scanned)
 	scanned.docs = toml.record_docs(S)
-	found := 0
-	for {
-		_, got, serr, more := toml.records_scan(&scanned, path)
-		if !more {
-			break
-		}
-		walktest.expect_nil(t, serr)
-		found += len(got.answers)
-	}
-	testing.expect_value(t, found, 1)
-
-	Counted :: struct {
-		records: int,
-	}
-	counted: Counted
-	walktest.expect_nil(t, toml.records_each(src, S, .Concatenated, proc(c: ^Counted, piece: ^toml.Record_Reader, k: int) -> bool {
-		for _ in toml.records_next(piece) {
-			c.records += 1
-		}
-		return true
-	}, &counted))
-	testing.expect_value(t, counted.records, 1)
+	walktest.expect_records_scanned(t, &scanned, path, 1)
+	each := 0
+	walktest.expect_nil(t, toml.records_each(src, S, .Concatenated, walktest.count_records, &each))
+	testing.expect_value(t, each, 1)
 }
 
 @(test)
@@ -70,8 +52,7 @@ every_record_form_reads_a_text :: proc(t: ^testing.T) {
 	record_forms(t, .Toml_1_0)
 	record_forms(t, .Toml_1_1)
 	src := transmute([]u8)string(RECORD_TEXT)
-	spec :: toml.Spec.Toml_1_1
-	it := records.open(src, toml.as(spec), .Concatenated)
+	it := records.open(src, toml.as(.Toml_1_1), .Concatenated)
 	defer toml.records_close(&it)
 	n := 0
 	for rec in toml.records_next(&it) {

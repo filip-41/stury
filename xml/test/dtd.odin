@@ -2,6 +2,7 @@
 // rule that stops reading declarations.
 package xml_tests
 
+import "core:fmt"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -187,13 +188,9 @@ billion_laughs_is_refused_by_the_budget :: proc(t: ^testing.T) {
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, "<!DOCTYPE a [<!ENTITY l0 'lol'>")
 	for i in 1 ..= 9 {
-		strings.write_string(&b, "<!ENTITY l")
-		strings.write_int(&b, i)
-		strings.write_string(&b, " '")
+		fmt.sbprintf(&b, "<!ENTITY l%d '", i)
 		for _ in 0 ..< 10 {
-			strings.write_string(&b, "&l")
-			strings.write_int(&b, i - 1)
-			strings.write_string(&b, ";")
+			fmt.sbprintf(&b, "&l%d;", i - 1)
 		}
 		strings.write_string(&b, "'>")
 	}

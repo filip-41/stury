@@ -133,17 +133,16 @@ put_table :: proc(l: ^Layout, node: core.Node_Index, element: bool) -> core.Type
 			lines += 1
 		}
 	}
+	before := l.kept
 	if len(l.path) > 0 || l.prefix != "" {
 		if element || lines > 0 || sections == 0 {
 			put_header(l, node, element)
 		} else {
-			before := l.kept
 			put_comments(l, node, .Comment)
 			l.glue = l.kept > before
 		}
 	} else {
 		// A blank line ends the text's head comment, so the first member's comments stay its own.
-		before := l.kept
 		put_comments(l, node, .Comment)
 		if l.kept > before && len(members) > 0 {
 			write.put_byte(&l.out, '\n')
@@ -447,10 +446,7 @@ literal_ok :: proc(s: string) -> bool {
 put_key :: proc(out: ^write.Out, name: string) {
 	bare := len(name) > 0
 	for b in transmute([]u8)name {
-		if !bare_byte(b) {
-			bare = false
-			break
-		}
+		bare &&= bare_byte(b)
 	}
 	if bare {
 		write.put_text(out, name)

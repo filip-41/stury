@@ -538,10 +538,7 @@ key_start :: proc(doc: ^core.Document, src: []u8, j: u32, lo: u64) -> u64 {
 		}
 	}
 	for {
-		k := at
-		for k > 0 && (src[k - 1] == ' ' || src[k - 1] == '\t') {
-			k -= 1
-		}
+		k := lead_end(src, at)
 		if k == at {
 			return at
 		}
@@ -606,9 +603,7 @@ dash_after :: proc(src: []u8, p: u64) -> u64 {
 		case ' ', '\t', '\r', '\n':
 			i += 1
 		case '#':
-			for i < u64(len(src)) && src[i] != '\n' {
-				i += 1
-			}
+			i = content_end(src, i)
 		case:
 			return i
 		}

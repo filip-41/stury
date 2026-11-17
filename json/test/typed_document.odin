@@ -394,15 +394,7 @@ a_deep_document_uses_the_wide_stacks :: proc(t: ^testing.T) {
 		d: ^Deep,
 	}
 	depth := core.MAX_DEPTH + 100
-	text := make([dynamic]u8, context.temp_allocator)
-	for _ in 0 ..< depth {
-		append(&text, `{"d":`)
-	}
-	append(&text, `null`)
-	for _ in 0 ..< depth {
-		append(&text, '}')
-	}
-	doc, built := core.build(text[:], json.as(json.Spec.Json, json.Options{max_depth = u32(depth)}), allocator = context.temp_allocator)
+	doc, built := core.build(nested_text(depth), json.as(json.Spec.Json, json.Options{max_depth = u32(depth)}), allocator = context.temp_allocator)
 	walktest.expect_nil(t, built)
 	plan, _ := json.plan_make(Deep, allocator = context.temp_allocator)
 	d: Deep

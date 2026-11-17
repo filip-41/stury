@@ -101,7 +101,7 @@ That loop reads an NDJSON stream: each walk returns one past the document it rea
 
 `build` runs the value layer: it passes `walk` one of `core/build`'s builder hooks, `build.builder_hook` for a spec
 with comments, and returns the document of nodes and facts, or a `core.Error`: a `Document_Error` from the document's rules or a `Fault` from the text. `Document_Error.at` is the byte the
-error names, 0 for a kind that names none, and `inner` is the walk's fault for `.Walk`. The format's `document.odin` holds one `core.Spelling` table in rodata for all its readings,
+error names, 0 for a kind that names none, and `inner` is the walk's fault for `.Walk`. The format's `document.odin` holds one `core.Readers` table in rodata for all its readings,
 and a reader uses it to decode a string or number without running a second walk.
 
 `core.MAX_DEPTH` is public beside them, because a caller sizes a stack for the walk's tokens from it.

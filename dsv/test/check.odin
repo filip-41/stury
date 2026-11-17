@@ -284,7 +284,7 @@ check_applicators :: proc(t: ^testing.T) {
 	for c in cases {
 		schema_text := strings.concatenate({`{"type": "array", "items": `, c.items, `}`}, context.temp_allocator)
 		if strings.contains(c.items, "$defs") {
-			schema_text = strings.concatenate({`{"type": "array", "$defs": {"n": {"type": "integer"}}, "items": {"properties": {"a": {"$ref": "#/$defs/n", "minimum": 3}}}}`}, context.temp_allocator)
+			schema_text = `{"type": "array", "$defs": {"n": {"type": "integer"}}, "items": {"properties": {"a": {"$ref": "#/$defs/n", "minimum": 3}}}}`
 		}
 		expect_verdict(t, schema_text, c.csv, c.valid)
 	}

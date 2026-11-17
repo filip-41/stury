@@ -137,10 +137,7 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 		if msg := blank_told(file_name(path), data, src, &run.opts); msg != "" {
 			message.write_stderr("stury: parse error: %s", msg)
 			faults += 1
-			free_spent(spent)
-			continue
-		}
-		if !infer_read(&inf, src, path, data, &run.opts, pool_for(run, data)) {
+		} else if !infer_read(&inf, src, path, data, &run.opts, pool_for(run, data)) {
 			faults += 1
 		}
 		free_spent(spent)
@@ -153,7 +150,7 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 		message.write_stderr("stury: error: out of memory\n")
 		os.exit(EXIT_INPUT)
 	}
-	as := schema_written_as(&run.opts)
+	as := written_as(&run.opts)
 	text, err := schema.write(&d, as, output_layout(run).opts)
 	if e, refused := err.(core.Typed_Error); refused && e.kind == .Too_Deep {
 		// A schema nests a level or two for each level of its values, so one of a deep input may pass the writer's limit.
@@ -170,12 +167,6 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 		write_out(text)
 	}
 	exit_closing_stdout(0)
-}
-
-// How a schema or a sample is written as --to says: as a text of a format with its own writer, and else as JSON in its spec.
-@(private = "file")
-schema_written_as :: proc(o: ^Opts) -> core.As {
-	return text_written_as(o) if writes_texts(o) else json.as(FORMATS[o.to].spec, {max_depth = o.max_depth})
 }
 
 // Values for the schema in the one file `files` names, a line each in the format --to names.
@@ -196,7 +187,7 @@ sample_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 	refuse_unlisted(d, o.to, "writes")
 	// A table is drawn as --infer reads one, so a column the schema types holds that type's cells.
 	o.cells_out.infer = o.cells_in.infer
-	as := cells_written_as(o) if writes_cells(o) else schema_written_as(o)
+	as := written_as(o)
 	// A value is a line, so the text is compact unless a layout option asks for more.
 	layout := output_layout(run).opts
 	layout.pretty = layout.pretty && cli.layout_flag != ""

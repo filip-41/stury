@@ -153,8 +153,9 @@ tree_walk :: proc(w: ^Tree_Writer, node: core.Node_Index) -> bool #no_bounds_che
 	frames: [dynamic]Tree_Frame
 	open := 0 // the containers open, each in the frame of its depth
 	defer {
-		for f in frames {
-			tree_free(f.list)
+		for &f in frames {
+			tree_clear(&f.list)
+			delete(f.list)
 		}
 		delete(frames)
 	}
@@ -194,13 +195,6 @@ tree_walk :: proc(w: ^Tree_Writer, node: core.Node_Index) -> bool #no_bounds_che
 			}
 		}
 	}
-}
-
-@(private)
-tree_free :: proc(list: [dynamic]Pair) {
-	list := list
-	tree_clear(&list)
-	delete(list)
 }
 
 // Empties `list` and keeps its room.

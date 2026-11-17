@@ -176,10 +176,8 @@ foreign_rules :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 		if t.frameset_ok && has_text(t, s) {
 			t.frameset_ok = false
 		}
-	case .Comment:
-		insert_comment(t, tok)
-	case .Instruction:
-		insert_instruction(t, tok)
+	case .Comment, .Instruction:
+		insert_misc(t, tok)
 	case .Doctype:
 		misplaced(t, .Unexpected_Doctype)
 	case .Start_Tag:

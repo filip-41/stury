@@ -77,16 +77,7 @@ tokens_equal_marshal :: proc(t: ^testing.T) {
 		testing.expect_value(t, err.kind, walktest.typed_kind(werr))
 		testing.expectf(t, string(got) == string(want), "%v %v: %q, want %q", c.spec, c.layout, got, want)
 		if werr == nil {
-			doc: core.Document
-			derr: core.Error
-			switch c.spec {
-			case .Csv:
-				doc, derr = core.build(got, dsv.as(.Csv, c.layout))
-			case .Tsv:
-				doc, derr = core.build(got, dsv.as(.Tsv, c.layout))
-			case .Plain:
-				doc, derr = core.build(got, dsv.as(.Plain, c.layout))
-			}
+			doc, derr := core.build(got, dsv.as(c.spec, c.layout))
 			walktest.expect_nil(t, derr)
 			core.destroy(&doc)
 		}

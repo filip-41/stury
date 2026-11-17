@@ -254,7 +254,7 @@ put_node :: proc(w: ^Rows, doc: ^core.Document, node: core.Node_Index, buf: []u8
 		if len(core.span(doc, node)) == 0 {
 			return .None
 		}
-		text := node_text(w, doc, node, buf) or_return
+		text := write.node_text(doc, node, buf, runtime.arena_allocator(&w.arena)) or_return
 		return put_string(w, text, first, false)
 	}
 	return .Unsupported
@@ -277,7 +277,7 @@ put_inferred_node :: proc(w: ^Rows, doc: ^core.Document, node: core.Node_Index, 
 	if int(node) >= len(doc.nodes) || core.kind(doc, node) != .String || len(core.span(doc, node)) == 0 {
 		return put_node(w, doc, node, buf, first)
 	}
-	text := node_text(w, doc, node, buf) or_return
+	text := write.node_text(doc, node, buf, runtime.arena_allocator(&w.arena)) or_return
 	return put_inferred_string(w, text, first)
 }
 
@@ -294,10 +294,4 @@ put_respelled :: proc(w: ^Rows, doc: ^core.Document, node: core.Node_Index, firs
 		return err.kind
 	}
 	return put_string(w, string(text), first, false)
-}
-
-// The text of a key or a cell: in `buf` when it fits, else in a copy that lasts the call.
-@(private)
-node_text :: proc(w: ^Rows, doc: ^core.Document, node: core.Node_Index, buf: []u8) -> (string, core.Typed_Error_Kind) {
-	return write.node_text(doc, node, buf, runtime.arena_allocator(&w.arena))
 }

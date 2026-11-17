@@ -11,12 +11,10 @@ import xml "../.."
 // many bytes each. Writes for each its verdict on a line: `ok`, or `err` with the offset and the rule's code. A reference
 // to an entity no subset read declares is read as its text, as expat skips it.
 main :: proc() {
-	in_stream := os.to_stream(os.stdin)
 	reader: bufio.Reader
-	bufio.reader_init(&reader, in_stream)
-	out := os.to_stream(os.stdout)
+	bufio.reader_init(&reader, os.to_stream(os.stdin))
 	writer: bufio.Writer
-	bufio.writer_init(&writer, out)
+	bufio.writer_init(&writer, os.to_stream(os.stdout))
 	defer bufio.writer_flush(&writer)
 	size: [4]u8
 	for {

@@ -10,9 +10,8 @@ import core "../core"
 // of the comment, and a `/* */` comment may be anywhere whitespace may be. A comment is a `Plain` fact token whose
 // span includes its delimiters and whose `spelling` holds its marker lengths, 2 and 0 for `//`, 2 and 2 for `/* */`.
 // Its role follows `core.Role`'s rule. A state that meets a `/` where it wants a token tail-calls a state here, which
-// reads the whole run of whitespace and comments
-// up to the next token before it emits any of them, since the token after the run decides each comment's role. A walk
-// without hooks reads the run and emits nothing.
+// reads the whole run of whitespace and comments up to the next token before it emits any of them, since the token
+// after the run decides each comment's role. A walk without hooks reads the run and emits nothing.
 
 // Marks the lanes of `v` that `comment` must judge one at a time: a byte past 0x7F, which its UTF-8 reader judges, a
 // control byte, a line end among them, which its control test judges, and a `*`, which may close a `/* */` comment.

@@ -661,10 +661,7 @@ emit :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t
 @(private)
 finish :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8, hi: u64) -> u64 {
 	flush(t, on, hi, at(t, end))
-	if t.wide {
-		return core.fault_at(at(t, end), .Too_Wide)
-	}
-	return core.fault_at(at(t, end), .None)
+	return core.fault_at(at(t, end), .Too_Wide if t.wide else .None)
 }
 
 // Hands `t.tok` to the hook at the text's end and ends the read.
@@ -699,10 +696,10 @@ eof_in_pi :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: 
 	return finish(t, on, end, t.text_hi)
 }
 
-// The text ends inside escaped script data, all of it characters.
+// The text ends in a state whose pending text is all characters, reported as `d`.
 @(private)
-eof_in_script_comment :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8) -> u64 {
-	if report(t, on, end, .Eof_In_Script_Html_Comment_Like_Text) {
+eof_error :: proc "contextless" (t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action, end: [^]u8, d: Detail) -> u64 {
+	if report(t, on, end, d) {
 		return halt(t, end)
 	}
 	return finish(t, on, end, at(t, end))

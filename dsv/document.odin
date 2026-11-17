@@ -326,12 +326,9 @@ Dsv_Decoded :: struct {
 }
 
 dsv_decoded_init :: proc "contextless" (src: []u8, n: core.Node, spec: Spec) -> Dsv_Decoded {
-	if spec == .Csv {
-		if n.spelling & core.SPELLING_QUOTED != 0 {
-			lo, hi := inner_span(n)
-			return {src = src, p = lo, end = hi, quoted = true}
-		}
-		return {src = src, p = n.lo, end = n.lo + u64(n.n)}
+	if spec == .Csv && n.spelling & core.SPELLING_QUOTED != 0 {
+		lo, hi := inner_span(n)
+		return {src = src, p = lo, end = hi, quoted = true}
 	}
 	return {src = src, p = n.lo, end = n.lo + u64(n.n), tsv = spec == .Tsv}
 }
@@ -421,9 +418,6 @@ spelling_key_equals :: proc "contextless" (doc: ^core.Token_View, n: core.Node, 
 	}
 	return spell.decoded_equals(dsv_decoded_init(doc.src, n, spec), dsv_decoded_next, name)
 }
-
-
-
 
 // dsv's `Readers.resolve` of a cell. An empty value cell, which holds no quotes, is `.Null`, as a typed read and the
 // CLI read it, and any other cell is `.String`. With the document's `infer`, a `true` or `false` value cell is `.True`
@@ -679,9 +673,8 @@ record_end_by_walk :: proc(doc: ^core.Document, i: core.Node_Index, $S: Spec) ->
 	h: Record_End
 	regs: core.Hook_Regs
 	lo := doc.nodes[i].lo
-	fault: Maybe(core.Fault)
 	opts := Options{no_header = true, delimiter = doc.as.opts[0], comment = doc.as.opts[1], tolerate = {.Invalid_Utf8, .Ragged, .Bare_Quote}}
-	_, fault = walk(doc.src, lo, S, opts, &h, &regs, record_end_hook)
+	_, fault := walk(doc.src, lo, S, opts, &h, &regs, record_end_hook)
 	if f, bad := fault.?; bad {
 		return f.at
 	}

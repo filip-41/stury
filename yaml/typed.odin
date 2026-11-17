@@ -185,11 +185,9 @@ number_form :: proc(text: []u8) -> u16 {
 		case 'o': return 6
 		}
 	}
-	if classify(text) == .Inf {
-		return 10
-	}
-	if classify(text) == .Nan {
-		return 12
+	#partial switch classify(text) {
+	case .Inf: return 10
+	case .Nan: return 12
 	}
 	at := 1 if text[0] == '-' else 0
 	digits := at

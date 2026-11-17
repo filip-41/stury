@@ -135,6 +135,19 @@ bom_at_the_start :: proc(t: ^testing.T) {
 	testing.expect_value(t, fault, core.Fault{1, &json.RULES, .Bad_Char, u8(json.Detail.Expected_Value)})
 }
 
+@(private = "file")
+walk_logging :: proc(log: ^walktest.Log, text: string, lo: u64, spec: json.Spec) -> (hi: u64, fault: Maybe(core.Fault)) {
+	switch spec {
+	case .Json:
+		return json.walk(transmute([]u8)text, lo, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
+	case .Jsonc:
+		return json.walk(transmute([]u8)text, lo, .Jsonc, {}, log, &core.Hook_Regs{}, walktest.log_hook)
+	case .Json5:
+		return json.walk(transmute([]u8)text, lo, .Json5, {}, log, &core.Hook_Regs{}, walktest.log_hook)
+	}
+	return
+}
+
 // A walk from a byte inside a comment or a string starts there with no state, so that byte is `.Bad_Char`. A BOM past
 // byte 0 is `.Bad_Char` in JSON and whitespace in JSON5.
 @(test)
@@ -155,16 +168,7 @@ walk_from_inside :: proc(t: ^testing.T) {
 		{" \xef\xbb\xbf[1]", 1, .Json5, 0, .None},
 	}) {
 		log^ = {}
-		hi: u64
-		fault: Maybe(core.Fault)
-		switch c.spec {
-		case .Json:
-			hi, fault = json.walk(transmute([]u8)c.text, c.lo, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
-		case .Jsonc:
-			hi, fault = json.walk(transmute([]u8)c.text, c.lo, .Jsonc, {}, log, &core.Hook_Regs{}, walktest.log_hook)
-		case .Json5:
-			hi, fault = json.walk(transmute([]u8)c.text, c.lo, .Json5, {}, log, &core.Hook_Regs{}, walktest.log_hook)
-		}
+		hi, fault := walk_logging(log, c.text, c.lo, c.spec)
 		if c.at == 0 {
 			testing.expectf(t, fault == nil && hi == u64(len(c.text)) && log.n == 3, "%v %q from %d: %d %v, %d tokens", c.spec, c.text, c.lo, hi, fault, log.n)
 		} else {
@@ -198,16 +202,7 @@ stop_on_comment :: proc(t: ^testing.T) {
 		{"/* a */ /* b */ /* c */ 1", .Json5, 15},
 	}) {
 		log^ = {rule = 1}
-		hi: u64
-		fault: Maybe(core.Fault)
-		switch c.spec {
-		case .Json:
-			hi, fault = json.walk(transmute([]u8)c.text, 0, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
-		case .Jsonc:
-			hi, fault = json.walk(transmute([]u8)c.text, 0, .Jsonc, {}, log, &core.Hook_Regs{}, walktest.log_hook)
-		case .Json5:
-			hi, fault = json.walk(transmute([]u8)c.text, 0, .Json5, {}, log, &core.Hook_Regs{}, walktest.log_hook)
-		}
+		hi, fault := walk_logging(log, c.text, 0, c.spec)
 		testing.expectf(t, fault == nil && hi == c.hi && log.n == 2, "%v %q: %d %v, %d tokens", c.spec, c.text, hi, fault, log.n)
 		for tok in log.tokens[:log.n] {
 			testing.expectf(t, tok.kind == .Plain && tok.role == .Comment, "%v %q: %v", c.spec, c.text, tok)

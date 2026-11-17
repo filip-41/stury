@@ -97,12 +97,11 @@ dump :: proc(b: ^strings.Builder, doc: ^core.Document, i: core.Node_Index) {
 				strings.write_byte(b, ',')
 			}
 			first = false
+			buf: [4096]u8
 			if core.kind(doc, k) == .Bytes {
-				buf: [4096]u8
 				p, _ := core.doc_bytes(doc, k, buf[:])
 				hex_text(b, p)
 			} else {
-				buf: [4096]u8
 				s, _ := core.text(doc, k, buf[:])
 				fmt.sbprintf(b, "%q", s)
 			}

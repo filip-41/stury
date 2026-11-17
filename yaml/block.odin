@@ -306,10 +306,7 @@ open_commented :: proc(p: ^Parser, open: core.Token, inline: ^Comment) -> bool {
 	} else {
 		head = root_head(p, open.lo)
 	}
-	for c in p.pending[:head] {
-		emit_raw(p, core.Token{c.lo, c.n, .Plain, .Comment, core.comment_spelling(1, 0)}) or_return
-	}
-	remove_range(&p.pending, 0, head)
+	flush_pending(p, head) or_return
 	return emit_raw(p, open)
 }
 

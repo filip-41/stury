@@ -361,6 +361,7 @@ DEFAULT_NAN :: "\xf9\x7e\x00"
 Pair :: struct {
 	key:   []u8,
 	k, v:  core.Node_Index,
+	end:   int, // where its key ends in the scratch
 }
 
 // Writes the object `i` as a map, its members in their order, or sorted by their encoded keys.
@@ -387,11 +388,6 @@ put_map :: proc(e: ^Emit, i: core.Node_Index, depth: int) -> core.Typed_Error_Ki
 		return .No_Memory
 	}
 	defer delete(members)
-	ends, no_ends := make([dynamic]int, 0, count, context.temp_allocator)
-	if no_ends != nil {
-		return .No_Memory
-	}
-	defer delete(ends)
 	held := e.out
 	e.out = scratch
 	for k, v in core.pair_next(&it) {
@@ -399,17 +395,16 @@ put_map :: proc(e: ^Emit, i: core.Node_Index, depth: int) -> core.Typed_Error_Ki
 			scratch, e.out = e.out, held
 			return kind
 		}
-		append(&members, Pair{k = k, v = v})
-		append(&ends, e.out.cursor)
+		append(&members, Pair{k = k, v = v, end = e.out.cursor})
 	}
 	scratch, e.out = e.out, held
 	if scratch.err != .None {
 		return scratch.err
 	}
 	at := 0
-	for &m, j in members {
-		m.key = scratch.buf[at:ends[j]]
-		at = ends[j]
+	for &m in members {
+		m.key = scratch.buf[at:m.end]
+		at = m.end
 	}
 	if e.enc == .Length_First {
 		slice.sort_by(members[:], proc(a, b: Pair) -> bool {

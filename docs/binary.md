@@ -23,12 +23,12 @@ is bytes rather than characters. The format is CBOR (RFC 8949), in package `cbor
 ## CBOR
 
 ```odin
-cbor.validate    :: proc "contextless" (src: []u8, spec: cbor.Spec, opts := cbor.Options{}) -> core.Error
+cbor.validate    :: proc "contextless" (src: []u8, $S: cbor.Spec, opts := cbor.Options{}) -> core.Error
 cbor.walk        :: proc "contextless" (src: []u8, lo: u64, $S: cbor.Spec, opts := cbor.Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^cbor.Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault))
 cbor.walk_resume :: proc "contextless" (src: []u8, cursor: ^cbor.Cursor, $S: cbor.Spec, opts := cbor.Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
-cbor.build       :: proc(src: []u8, spec: cbor.Spec, opts := cbor.Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error)
-cbor.set         :: proc(src: []u8, spec: cbor.Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := cbor.Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
-cbor.write       :: proc(doc: ^core.Document, spec: cbor.Spec, opts := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error)
+cbor.build       :: proc(src: []u8, $S: cbor.Spec, opts := cbor.Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error)
+cbor.set         :: proc(src: []u8, $S: cbor.Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := cbor.Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
+cbor.write       :: proc(doc: ^core.Document, $S: cbor.Spec, write := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error)
 cbor.as          :: proc "contextless" (spec: cbor.Spec, opts := cbor.Options{}) -> core.As
 cbor.find, cbor.scan, cbor.answers, cbor.each_answer, cbor.query, cbor.can_resume, cbor.edit_list_init
 cbor.marshal, cbor.unmarshal, cbor.check, cbor.plan_make, cbor.plan_of, cbor.tokens_init, cbor.checks, cbor.bind_schema
@@ -168,7 +168,7 @@ differential against Odin's `core:encoding/cbor` over generated and mutated item
 the rows already in it), respell items for each encoding, write JSON as CBOR and back, keep a deterministic text
 deterministic, patch token heads at each width, fall back to indefinite lengths on a stream, round-trip a struct of every
 `Read_Kind` in both forms, and read a key the plan matches by its bytes as the lookup reads it, out of order, unknown,
-with a longer head or not valid UTF-8. `seam_test.odin` covers values read whole, a model's load, a schema check, the
-record entry points and streams, and the bound entry points against the handle. `cursor_test.odin` stops a walk after
+with a longer head or not valid UTF-8. `entry_points_test.odin` covers the bound entry points against the handle, and
+`records_test.odin` the record entry points and their framing. `cursor_test.odin` stops a walk after
 each token and resumes it, and reads answers as `each_answer` gives them, `check_test.odin` covers `check` and `plan_of`,
 and `edit_test.odin` sets, removes, inserts and reorders members, edits tags and refuses edits that meet.

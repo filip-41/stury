@@ -244,7 +244,6 @@ Phase :: enum u8 {
 	Inline,
 	Foot,
 	End,
-	Closed,
 	Done,
 }
 
@@ -356,13 +355,8 @@ replay :: proc "contextless" (p: ^Parser, s: ^Replay, h: ^$H, hs: ^core.Hook_Reg
 			s.k += 1
 			emit(h, on, hs, &r, comment_token(p.tree.comments[x.foot + s.k - 1], .Comment_Foot))
 		case .End:
-			s.phase = .Closed if s.id != 0 else .Pick
+			s.phase = .Inline if s.id != 0 else .Pick
 			emit(h, on, hs, &r, core.Token{u64(len(p.src)) if s.id == 0 else 0, 0, .End, .Value, 0})
-		case .Closed:
-			s.phase = .Pick
-			if c := nodes[s.id].inline; c.n != 0 {
-				emit(h, on, hs, &r, comment_token(c, .Comment_Inline))
-			}
 		case .Done:
 			return core.fault_at(u64(len(p.src)), .None)
 		}

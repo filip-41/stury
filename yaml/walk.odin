@@ -339,7 +339,8 @@ resume_held :: proc "contextless" (src: []u8, cursor: ^Cursor, opts: Options, h:
 	if !held.stopped && !held.ended {
 		p := &held.parser
 		p.sink, p.data, p.pause, p.fail = sink, &w, false, 0
-		if resume_document(p) {
+		// Continues the document `read_document` paused in, from the state its parser holds.
+		if read_blocks(p) && end_document(p) {
 			p.fail = core.fault_at(p.pos, .None)
 		}
 		// The next resume points the parser at its own walk.
@@ -402,13 +403,6 @@ hold_sink :: proc "contextless" (data: rawptr, t: core.Token) -> bool {
 	context = runtime.default_context()
 	_, e := append(&(^Held)(data).queue, t)
 	return e == nil
-}
-
-// Continues a document `read_document` paused in, from the state its parser holds.
-@(private)
-resume_document :: proc(p: ^Parser) -> bool {
-	read_blocks(p) or_return
-	return end_document(p)
 }
 
 // The walk's verdict on `src` for `spec`, after one leading BOM: every document of the stream is read and judged.

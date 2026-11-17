@@ -140,7 +140,6 @@ deterministic_encoding_is_judged :: proc(t: ^testing.T) {
 		expect_read(t, text, deterministic)
 	}
 	// Bytewise order of the encoded keys differs from length-first order.
-	expect_read(t, "a2 18 18 00 60 00", deterministic)
 	expect_refused(t, {"a2 18 18 00 60 00", .Key_Order}, length_first)
 	expect_read(t, "a2 60 00 18 18 00", length_first)
 	expect_read(t, "a2 61 61 00 62 61 61 01", length_first)

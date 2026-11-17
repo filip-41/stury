@@ -720,18 +720,10 @@ write_document_infers_cells :: proc(t: ^testing.T) {
 // A long key and a long string past one reservation are copied whole.
 @(test)
 write_document_long_tokens :: proc(t: ^testing.T) {
-	b: strings.Builder
-	defer strings.builder_destroy(&b)
-	strings.write_string(&b, `{"`)
-	for _ in 0 ..< 10000 {
-		strings.write_string(&b, "k")
-	}
-	strings.write_string(&b, `":["`)
-	for _ in 0 ..< 70000 {
-		strings.write_string(&b, "v")
-	}
-	strings.write_string(&b, `",1]}`)
-	check_write(t, transmute([]u8)strings.to_string(b))
+	key := strings.repeat("k", 10000, context.temp_allocator)
+	value := strings.repeat("v", 70000, context.temp_allocator)
+	text := strings.concatenate({`{"`, key, `":["`, value, `",1]}`}, context.temp_allocator)
+	check_write(t, transmute([]u8)text)
 }
 
 // A token within a block copy of the source's end is written whole at every length, as a value and as a key.
@@ -753,14 +745,9 @@ write_document_near_the_end :: proc(t: ^testing.T) {
 // A text of more than twice the stream's buffer is written through each refill.
 @(test)
 write_document_refills :: proc(t: ^testing.T) {
-	b: strings.Builder
-	defer strings.builder_destroy(&b)
-	strings.write_string(&b, "[")
-	for _ in 0 ..< 3000 {
-		strings.write_string(&b, `{"id":1,"tags":[[[[[[[["a","b"]]]]]]]],"on":true},`)
-	}
-	strings.write_string(&b, "null]")
-	check_write(t, transmute([]u8)strings.to_string(b))
+	members := strings.repeat(`{"id":1,"tags":[[[[[[[["a","b"]]]]]]]],"on":true},`, 3000, context.temp_allocator)
+	text := strings.concatenate({"[", members, "null]"}, context.temp_allocator)
+	check_write(t, transmute([]u8)text)
 }
 
 // A text that ends at an unmapped page is written whole, by the row walk, the dense route and `format`: no read passes

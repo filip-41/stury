@@ -436,7 +436,6 @@ put_raw :: proc(w: ^Writer, span: []u8) {
 	write.put_text(&w.out, string(span))
 }
 
-
 @(private)
 put_close :: proc(out: ^write.Out, name: []u8) {
 	write.put_text(out, "</")

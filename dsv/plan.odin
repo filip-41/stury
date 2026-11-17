@@ -212,19 +212,16 @@ line_at :: proc(lines: []Line, node: core.Node_Index) -> int {
 plan_cuts :: proc(p: ^Edit_Plan) -> bool {
 	doc, lines := p.doc, p.lines[:]
 	cuts, _ := make([dynamic]core.Node_Index, p.allocator)
-	for e in p.list.edits {
-		if e.op == .Remove && !is_line(doc, e.node) {
-			compose.push(&cuts, e.node) or_return
-		}
-	}
-	slice.sort(cuts[:])
 	// A cell the list both sets and removes is a conflict, whatever else the list does to its line's width.
 	writes, _ := make([dynamic]core.Node_Index, p.allocator)
 	for e in p.list.edits {
-		if e.op == .Set {
+		if e.op == .Remove && !is_line(doc, e.node) {
+			compose.push(&cuts, e.node) or_return
+		} else if e.op == .Set {
 			compose.push(&writes, e.node) or_return
 		}
 	}
+	slice.sort(cuts[:])
 	slice.sort(writes[:])
 	dropped, e1 := make([]bool, p.width, p.allocator)
 	held, e2 := make([]int, p.width, p.allocator)

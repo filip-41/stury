@@ -256,22 +256,18 @@ declared_prefix :: proc "contextless" (src: []u8, handle: string) -> (prefix: st
 		}
 		line := string(src[i:e])
 		i = e + 1
-		lead := 0
-		for lead < len(line) && (line[lead] == ' ' || line[lead] == '\t') {
-			lead += 1
-		}
-		if lead == len(line) || line[lead] == '#' {
+		word, rest := directive_word(line)
+		if word == "" || word[0] == '#' {
 			continue
 		}
 		if line[0] != '%' {
 			return
 		}
-		h, rest := directive_word(line[1:])
-		if h != "TAG" {
+		if word != "%TAG" {
 			continue
 		}
-		h, rest = directive_word(rest)
-		if h == handle {
+		word, rest = directive_word(rest)
+		if word == handle {
 			prefix, _ = directive_word(rest)
 			return prefix, true
 		}

@@ -188,7 +188,8 @@ expand :: proc "contextless" (x: ^Expander, span: []u8, top, attr: bool, nest: i
 			i += 1
 		case c == '<' && !attr:
 			// A comment or an instruction decodes to nothing and a CDATA section to fewer bytes than it spans.
-			if len(x.buf) - x.w < markup_end_index(span, i) - i {
+			p := raw_data(span)
+			if len(x.buf) - x.w < int(uintptr(markup_end(p[i:], p[len(span):])) - uintptr(p)) - i {
 				return false
 			}
 			i = markup_text(span, i, x.buf, &x.w, top)
@@ -215,13 +216,6 @@ put_bytes :: #force_inline proc "contextless" (x: ^Expander, b: []u8) -> bool {
 @(private)
 rune_size :: #force_inline proc "contextless" (r: rune) -> int {
 	return 1 if r < 0x80 else 2 if r < 0x800 else 3 if r < 0x10000 else 4
-}
-
-// The index past the comment, instruction or CDATA section at `span[i]`, which the walk judged.
-@(private)
-markup_end_index :: proc "contextless" (span: []u8, i: int) -> int {
-	p := raw_data(span)
-	return int(uintptr(markup_end(p[i:], p[len(span):])) - uintptr(p))
 }
 
 // Removes the leading and trailing spaces of `b` and makes each run of spaces one, in place.

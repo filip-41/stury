@@ -113,8 +113,7 @@ options_text :: proc(out: ^[dynamic]u8, c: Options_Case) {
 	width := 1 + rand.int_max(5)
 	rows := rand.int_max(6)
 	crlf := rand.int_max(3) == 0
-	line_end := []string{"\r\n", "\n"}
-	le := line_end[0 if crlf else 1]
+	le := "\r\n" if crlf else "\n"
 	for r in 0 ..= rows {
 		if c.comment != 0 && (r == 0 || rand.int_max(2) == 0) {
 			append(out, c.comment)

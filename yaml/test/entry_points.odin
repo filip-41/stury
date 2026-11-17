@@ -31,40 +31,20 @@ take_first :: proc(state: rawptr, a: yaml.Token_Answer) -> bool {
 	return false
 }
 
-// The reads and the one-call edit of a text through the forms the group `spec` picks.
+// What `constant_forms` leaves out of the reads, the one-call edit and the marshal of a text through the forms the
+// group `spec` picks.
 @(private = "file")
 text_forms :: proc(t: ^testing.T, $spec: yaml.Spec) {
 	src := transmute([]u8)string(ENTRY_TEXT)
 	path, perr := yaml.parse_path(".a")
 	walktest.expect_nil(t, perr)
 	defer yaml.destroy(&path)
-	paths := [?]yaml.Path{path}
-
-	walktest.expect_nil(t, yaml.validate(src, spec))
-	testing.expect(t, yaml.validate(transmute([]u8)string("a: [1\n"), spec) != nil)
-
-	doc, berr := yaml.build(src, spec)
-	walktest.expect_nil(t, berr)
-	yaml.destroy(&doc)
 
 	sdoc, serr := yaml.scan(src, spec, path)
 	walktest.expect_nil(t, serr)
 	testing.expect_value(t, len(sdoc.answers), 1)
 	yaml.destroy(&sdoc)
-	mdoc, merr := yaml.scan(src, spec, paths[:])
-	walktest.expect_nil(t, merr)
-	yaml.destroy(&mdoc)
-	walktest.expect_nil(t, yaml.each_answer(src, spec, path, nil, take_first))
-	walktest.expect_nil(t, yaml.each_answer(src, spec, paths[:], nil, take_first))
-	fdoc, found, ferr := yaml.find(src, spec, path)
-	walktest.expect_nil(t, ferr)
-	testing.expect(t, found.outcome == .Found)
-	yaml.destroy(&fdoc)
 
-	out, oerr := yaml.set(src, spec, path, typed.Raw("7"))
-	walktest.expect_nil(t, oerr)
-	testing.expect_value(t, string(out), ENTRY_EDITED)
-	delete(out)
 	spelled, werr := yaml.set(src, spec, path, i64(7))
 	walktest.expect_nil(t, werr)
 	testing.expect_value(t, string(spelled), ENTRY_EDITED)
@@ -73,7 +53,6 @@ text_forms :: proc(t: ^testing.T, $spec: yaml.Spec) {
 	v: Entry
 	defer delete(v.b)
 	walktest.expect_nil(t, yaml.unmarshal(src, spec, &v))
-	testing.expect(t, v.a == 1 && len(v.b) == 2 && v.b[1] == 3)
 	plan, plerr := yaml.plan_make(Entry, spec)
 	walktest.expect_nil(t, plerr)
 	defer yaml.destroy(&plan)
@@ -235,10 +214,6 @@ every_record_form_reads_a_stream :: proc(t: ^testing.T) {
 	record_forms(t, .Yaml_1_2)
 	src := transmute([]u8)string("a: 1\n---\na: 2\n")
 	spec :: yaml.Spec.Yaml_1_2
-	faults, err := yaml.records_validate(src, spec)
-	testing.expect_value(t, err, nil)
-	testing.expect_value(t, len(faults), 0)
-	delete(faults)
 	it := records.open(src, yaml.as(spec), .Concatenated)
 	defer yaml.records_close(&it)
 	n := 0

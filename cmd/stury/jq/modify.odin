@@ -110,13 +110,10 @@ assign_step :: proc(x: ^Path_Update, p: []Value) -> Signal {
 		if old, sig = getpath(x.ip, x.cur, p); sig != .Go {
 			return sig
 		}
-		switch {
-		case x.n.op == .Alt:
+		if x.n.op == .Alt {
 			nv = old if truthy(old) else x.rhs
-		case:
-			if nv, sig = binary_op(x.ip, x.n.op, old, x.rhs, x.owned); sig != .Go {
-				return sig
-			}
+		} else if nv, sig = binary_op(x.ip, x.n.op, old, x.rhs, x.owned); sig != .Go {
+			return sig
 		}
 	}
 	x.cur, sig = setpath(x.ip, x.cur, p, nv, x.owned)
@@ -337,7 +334,6 @@ update_by_call :: proc(ip: ^Interp, n: ^Node, state: Value, env: ^Env, owned: ^O
 	}
 	return v, true, sig
 }
-
 
 // Whether `n`'s outputs can depend on its input `.`, conservative.
 reads_input :: proc(n: ^Node) -> bool {

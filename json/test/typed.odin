@@ -118,8 +118,7 @@ a_collecting_read_with_no_errors_allocator_uses_the_reads :: proc(t: ^testing.T)
 	track: mem.Tracking_Allocator
 	mem.tracking_allocator_init(&track, context.allocator)
 	defer mem.tracking_allocator_destroy(&track)
-	texts := []string{`{"a":"x"}`, `{"a":01}`, `{"a":1,"a":2}`}
-	for text in texts {
+	for text in ([]string{`{"a":"x"}`, `{"a":01}`, `{"a":1,"a":2}`}) {
 		s: S
 		sink: typed.Sink
 		e := json.unmarshal(transmute([]u8)text, json.Spec.Json, &s, read = {dups = .Refuse, sink = &sink}, opts = {}, allocator = mem.tracking_allocator(&track))
@@ -820,13 +819,8 @@ json5_and_jsonc_read_alike :: proc(t: ^testing.T) {
 	testing.expect_value(t, bits.b, bit_set[0 ..< 10]{0, 5, 7})
 }
 
-@(test)
-max_depth_past_the_stack_form :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	Deep :: struct {
-		d: ^Deep,
-	}
-	depth := core.MAX_DEPTH + 100
+// `depth` objects, each holding the next under "d", around a null.
+nested_text :: proc(depth: int) -> []u8 {
 	b := strings.builder_make(context.temp_allocator)
 	for _ in 0 ..< depth {
 		strings.write_string(&b, `{"d":`)
@@ -835,8 +829,18 @@ max_depth_past_the_stack_form :: proc(t: ^testing.T) {
 	for _ in 0 ..< depth {
 		strings.write_byte(&b, '}')
 	}
+	return transmute([]u8)strings.to_string(b)
+}
+
+@(test)
+max_depth_past_the_stack_form :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Deep :: struct {
+		d: ^Deep,
+	}
+	depth := core.MAX_DEPTH + 100
 	d: Deep
-	src := transmute([]u8)strings.to_string(b)
+	src := nested_text(depth)
 	e := json.unmarshal(src, json.Spec.Json, &d, opts = json.Options{max_depth = u32(depth)}, allocator = context.temp_allocator)
 	walktest.expect_nil(t, e)
 	e = json.unmarshal(src, json.Spec.Json, &d, allocator = context.temp_allocator)
@@ -984,8 +988,7 @@ a_hooked_arm_takes_every_class :: proc(t: ^testing.T) {
 	hooks := []typed.Type_Hook{{type = Hooked_Struct, read = read_hooked_struct}}
 	plan, err := json.plan_make(U, plan = {hooks = hooks}, allocator = context.temp_allocator)
 	walktest.expect_nil(t, err)
-	sources := []string{`"abc"`, `[1,2]`, `{"a":1}`, `true`, `12`}
-	for src in sources {
+	for src in ([]string{`"abc"`, `[1,2]`, `{"a":1}`, `true`, `12`}) {
 		u: U
 		e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &u, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
 		walktest.expect_nil(t, e)

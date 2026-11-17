@@ -178,7 +178,8 @@ name_loc :: proc(t: ^Typer, n: ^Node, name: string) -> Loc {
 // What a slice of `base`, of kinds `k`, gives: a part of a string or an array, or null.
 @(private = "file")
 sliced :: proc(t: ^Typer, base: Ty, k: rules.Kinds) -> Ty {
-	return union_of(t, kinds_node(t, k & {.String, .Null}), array_of(t, items_of(t, base)) if .Array in k else t.never)
+	items := array_of(t, read(t, base, .Element).value) if .Array in k else t.never
+	return union_of(t, kinds_node(t, k & {.String, .Null}), items)
 }
 
 // Refuses a format of `v` when no value of `v` is of a kind it takes. `@csv` and `@tsv` take an array, `@sh` any
@@ -228,7 +229,7 @@ index_type :: proc(t: ^Typer, n: ^Node, base: Ty, key: ^Node, dot: Ty, f: ^Frame
 		append(&parts, read(t, base, .Values).value, t.null)
 	}
 	if k & closure({.Number}) != {} && .Array in b {
-		append(&parts, items_of(t, base), t.null)
+		append(&parts, read(t, base, .Element).value, t.null)
 	}
 	if .Null in b {
 		append(&parts, t.null)
@@ -318,9 +319,7 @@ narrowed :: proc(t: ^Typer, c: ^Node, dot: Ty, f: ^Frame) -> (yes, no: Ty) {
 	case subject == nil:
 		return restrict(t, dot, kinds), restrict(t, dot, rules.EVERY_KIND - closure(kinds))
 	}
-	t.quiet += 1
-	k, unknown := kinds_of(t, type_of(t, subject, dot, f))
-	t.quiet -= 1
+	k, unknown := kinds_of(t, quietly(t, subject, dot, f))
 	switch {
 	case unknown || k == {}:
 		return dot, dot
@@ -415,7 +414,7 @@ arithmetic :: proc(t: ^Typer, op: Op, a, b: Ty, ka, kb: rules.Kinds) -> (out: Ty
 			add(&parts, &taken, kinds_node(t, {.String}))
 		}
 		if .Array in ka && .Array in kb {
-			add(&parts, &taken, array_of(t, union_of(t, items_of(t, a), items_of(t, b))))
+			add(&parts, &taken, array_of(t, union_of(t, read(t, a, .Element).value, read(t, b, .Element).value)))
 		}
 		if .Object in ka && .Object in kb {
 			add(&parts, &taken, loose(t, {.Object}))
@@ -425,7 +424,7 @@ arithmetic :: proc(t: ^Typer, op: Op, a, b: Ty, ka, kb: rules.Kinds) -> (out: Ty
 			add(&parts, &taken, number)
 		}
 		if .Array in ka && .Array in kb {
-			add(&parts, &taken, array_of(t, items_of(t, a)))
+			add(&parts, &taken, array_of(t, read(t, a, .Element).value))
 		}
 	case .Mul:
 		if na && nb {

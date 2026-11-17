@@ -281,15 +281,13 @@ indicator_at :: #force_inline proc "contextless" (p: ^Parser, i: u64) -> bool {
 	return is_space_at(p, i + 1)
 }
 
-// Sends the pending comments as head comments of the node that follows.
+// Sends the first `count` pending comments as head comments of the node that follows.
 @(private)
-flush_pending :: proc(p: ^Parser) -> bool {
-	for c in p.pending {
-		if !emit_raw(p, core.Token{c.lo, c.n, .Plain, .Comment, core.comment_spelling(1, 0)}) {
-			return false
-		}
+flush_pending :: proc(p: ^Parser, count: int) -> bool {
+	for c in p.pending[:count] {
+		emit_raw(p, core.Token{c.lo, c.n, .Plain, .Comment, core.comment_spelling(1, 0)}) or_return
 	}
-	clear(&p.pending)
+	remove_range(&p.pending, 0, count)
 	return true
 }
 
@@ -324,7 +322,7 @@ emit :: proc(p: ^Parser, t: core.Token) -> bool {
 @(private)
 emit_now :: proc(p: ^Parser, t: core.Token) -> bool {
 	if len(p.pending) > 0 && t.role != .Comment_Inline && t.role != .Comment_Foot && t.kind != .End {
-		flush_pending(p) or_return
+		flush_pending(p, len(p.pending)) or_return
 	}
 	return emit_raw(p, t)
 }

@@ -23,7 +23,6 @@ Text_Row :: struct {
 	name, city, quote, note: string,
 }
 
-
 // `write dsv <file>`: `write.marshal` of the file's rows through a plan, chosen by its name: each pass allocates its text and frees it outside the clock. `write dsvdoc <file>`:
 // `core.write` of the file read into a document. GB/s counts the source's bytes in both.
 dsv_lane :: proc(src: []u8, name: string, document: bool) {
@@ -106,10 +105,7 @@ dsv_document_lane :: proc(src: []u8) {
 }
 
 dsv_report :: proc(src, text: []u8, times: ^[timing.TIMED]i64) {
-	h := CHECK_OFFSET
-	for b in text {
-		h = (h ~ u64(b)) * CHECK_PRIME
-	}
+	h := checksum(text)
 	median := timing.median(times)
 	fmt.printfln("gb_per_s=%.3f best=%.3f ns=%d out=%d check=%d", f64(len(src)) / f64(median), f64(len(src)) / f64(times[0]), median, len(text), h)
 }

@@ -13,18 +13,7 @@ import walktest "../../walktest"
 @(private)
 Plan :: proc(list: ^core.Edit_List, doc: ^core.Document) -> core.Error
 
-// The member of table `parent` named `name`, or `core.NO_NODE`.
-@(private)
-member :: proc(doc: ^core.Document, parent: core.Node_Index, name: string) -> core.Node_Index {
-	it := core.pairs(doc, parent)
-	buf: [256]u8
-	for key, val in core.pair_next(&it) {
-		if text, _ := core.text(doc, key, buf[:]); text == name {
-			return val
-		}
-	}
-	return core.NO_NODE
-}
+member :: walktest.member
 
 // The text `src` becomes when `plan` records its edits and the list is committed.
 @(private)
@@ -95,9 +84,7 @@ insert_into_a_header_table_goes_after_its_last_line :: proc(t: ^testing.T) {
 @(test)
 insert_into_inline_containers :: proc(t: ^testing.T) {
 	out, err := edited("a = [1, 2]\nb = {x = 1}\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		if e := write.insert(l, member(d, core.ROOT, "a"), 2, typed.Raw("3")); e != nil {
-			return e
-		}
+		write.insert(l, member(d, core.ROOT, "a"), 2, typed.Raw("3")) or_return
 		return write.insert(l, member(d, core.ROOT, "b"), 1, "y", typed.Raw("2"))
 	})
 	walktest.expect_nil(t, err)
@@ -173,9 +160,7 @@ head_comment_is_set_above_the_statement :: proc(t: ^testing.T) {
 @(test)
 inline_comment_is_set_and_removed :: proc(t: ^testing.T) {
 	out, err := edited("a = 1\nb = 2 # old\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		if e := core.set_fact(l, member(d, core.ROOT, "a"), .Comment_Inline, "new", padded = true); e != nil {
-			return e
-		}
+		core.set_fact(l, member(d, core.ROOT, "a"), .Comment_Inline, "new", padded = true) or_return
 		return core.remove_fact(l, member(d, core.ROOT, "b"), .Comment_Inline)
 	})
 	walktest.expect_nil(t, err)
@@ -198,9 +183,7 @@ tag_facts_and_reorders_are_refused :: proc(t: ^testing.T) {
 two_edits_of_one_node_conflict :: proc(t: ^testing.T) {
 	_, err := edited("a = 1\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
 		a := member(d, core.ROOT, "a")
-		if e := write.set_node(l, a, typed.Raw("2")); e != nil {
-			return e
-		}
+		write.set_node(l, a, typed.Raw("2")) or_return
 		return write.set_node(l, a, typed.Raw("3"))
 	})
 	walktest.expect_kind(t, err, core.Document_Error_Kind.Conflicting_Edits)
@@ -230,18 +213,12 @@ removing_every_member_and_inserting_rewrites_the_inline_table :: proc(t: ^testin
 		a := member(d, core.ROOT, "a")
 		it := core.pairs(d, a)
 		_, x, _ := core.pair_next(&it)
-		if e := core.remove(l, x); e != nil {
-			return e
-		}
-		if e := write.insert(l, a, 0, "y", typed.Raw("2")); e != nil {
-			return e
-		}
+		core.remove(l, x) or_return
+		write.insert(l, a, 0, "y", typed.Raw("2")) or_return
 		b := member(d, core.ROOT, "b")
 		ch := core.children(d, b)
 		for v in core.child_next(&ch) {
-			if e := core.remove(l, v); e != nil {
-				return e
-			}
+			core.remove(l, v) or_return
 		}
 		return write.insert(l, b, 0, typed.Raw("3"))
 	})
@@ -252,9 +229,7 @@ removing_every_member_and_inserting_rewrites_the_inline_table :: proc(t: ^testin
 @(test)
 a_new_table_is_a_section_after_its_parents_sections :: proc(t: ^testing.T) {
 	out, err := edited("a = 1\n\n[t]\nk = 1\n\n[t.u]\nj = 1\n\n[v]\ny = 2\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		if e := write.insert(l, member(d, core.ROOT, "t"), 1, "z", typed.Raw("{ a = 1, c = { d = 2 } }")); e != nil {
-			return e
-		}
+		write.insert(l, member(d, core.ROOT, "t"), 1, "z", typed.Raw("{ a = 1, c = { d = 2 } }")) or_return
 		return write.insert(l, core.ROOT, 2, "w", typed.Raw("{ q = 1 }"))
 	})
 	walktest.expect_nil(t, err)
@@ -284,9 +259,7 @@ a_new_table_stays_inline_where_a_section_would_not_join :: proc(t: ^testing.T) {
 	out, err := edited("a.b = 1\n[x]\n[[p]]\nn = 1\n[[p]]\nn = 2\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
 		first := core.children(d, member(d, core.ROOT, "p"))
 		elem, _ := core.child_next(&first)
-		if e := write.insert(l, member(d, core.ROOT, "a"), 1, "c", typed.Raw("{ y = 2 }")); e != nil {
-			return e
-		}
+		write.insert(l, member(d, core.ROOT, "a"), 1, "c", typed.Raw("{ y = 2 }")) or_return
 		return write.insert(l, elem, 1, "t", typed.Raw("{ y = 2 }"))
 	})
 	walktest.expect_nil(t, err)

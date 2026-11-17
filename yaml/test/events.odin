@@ -29,6 +29,7 @@ Printer :: struct {
 	stack:   [dynamic]Frame,
 	alias:   bool, // the next value token is an alias expansion
 	skip:    int, // the depth inside an expansion being passed
+	props:   [2]string, // anchor name, tag
 }
 
 @(private)
@@ -86,24 +87,18 @@ resolve_tag :: proc(pr: ^Printer, tag: string) -> string {
 }
 
 @(private)
-properties :: proc(pr: ^Printer, props: ^[2]string) {
-	if props[0] != "" {
-		fmt.sbprintf(&pr.out, " &%s", props[0])
+properties :: proc(pr: ^Printer) {
+	if pr.props[0] != "" {
+		fmt.sbprintf(&pr.out, " &%s", pr.props[0])
 	}
-	if props[1] != "" {
-		fmt.sbprintf(&pr.out, " %s", resolve_tag(pr, props[1]))
+	if pr.props[1] != "" {
+		fmt.sbprintf(&pr.out, " %s", resolve_tag(pr, pr.props[1]))
 	}
-	props^ = {}
+	pr.props = {}
 }
 
 @(private)
-Recorder :: struct {
-	using printer: Printer,
-	props:         [2]string, // anchor name, tag
-}
-
-@(private)
-record :: proc "contextless" (r: ^Recorder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+record :: proc "contextless" (r: ^Printer, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	context = runtime.default_context()
 	text := string(r.src[t.lo:t.lo + u64(t.n)])
 	#partial switch t.role {
@@ -142,7 +137,7 @@ record :: proc "contextless" (r: ^Recorder, s: core.Hook_Regs, t: core.Token) ->
 		strings.write_string(&r.out, "+SEQ" if seq else "+MAP")
 		bracket := t.lo < u64(len(r.src)) && r.src[t.lo] == ('[' if seq else '{')
 		append(&r.stack, Frame{seq, bracket, strings.builder_len(r.out)})
-		properties(r, &r.props)
+		properties(r)
 		strings.write_byte(&r.out, '\n')
 	case .End:
 		top := pop(&r.stack)
@@ -154,7 +149,7 @@ record :: proc "contextless" (r: ^Recorder, s: core.Hook_Regs, t: core.Token) ->
 		strings.write_string(&r.out, "-SEQ\n" if top.seq else "-MAP\n")
 	case .Null, .False, .True, .Number, .Bytes, .String, .Plain:
 		strings.write_string(&r.out, "=VAL")
-		properties(r, &r.props)
+		properties(r)
 		style: string
 		if t.n > 0 {
 			switch r.src[t.lo] {
@@ -199,8 +194,7 @@ read_handles :: proc(pr: ^Printer, lo: u64) {
 // The event stream of `src`, and the fault the walk stopped on.
 @(private)
 events :: proc(src: []u8) -> (text: string, fault: Maybe(core.Fault)) {
-	r := Recorder{}
-	r.src = src
+	r := Printer{src = src}
 	strings.write_string(&r.out, "+STR\n")
 	lo := u64(0)
 	for lo < u64(len(src)) {
@@ -236,9 +230,8 @@ normalize :: proc(expected: string) -> string {
 
 @(private)
 Case :: struct {
-	name:   string,
-	dir:    string,
-	failed: string,
+	name: string,
+	dir:  string,
 }
 
 @(private)
@@ -309,11 +302,10 @@ suite_cases :: proc(t: ^testing.T) {
 	cases(&list, SUITE_DIR, "")
 	testing.expect(t, len(list) > 300)
 	failures := 0
-	for &c in list {
-		c.failed = check(c)
-		if c.failed != "" {
+	for c in list {
+		if failed := check(c); failed != "" {
 			failures += 1
-			fmt.eprintfln("%s: %s", c.name, c.failed)
+			fmt.eprintfln("%s: %s", c.name, failed)
 		}
 	}
 	testing.expectf(t, failures == 0, "%d cases", failures)

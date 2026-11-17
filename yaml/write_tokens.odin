@@ -144,9 +144,7 @@ block_value :: proc(t: ^write.Tokens, b: ^Block_Writer, v: write.Scalar) -> core
 		block_end_root(b)
 		return kind
 	case write.Number_Literal:
-		block_lead(b, false)
-		write.put_text(t.out, x.text)
-		block_end_root(b)
+		block_raw(b, x.text)
 	case write.Tree_Part:
 		block_raw(b, t.spell.tree[x])
 	}

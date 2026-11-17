@@ -97,11 +97,17 @@ declared :: proc "contextless" (doc: ^core.Document, v: core.Node_Index, prefix:
 	}
 	_, value := attribute_parts(doc.src, f)
 	dtd: Dtd_View
-	if plain_value(value) && !fact_tokenized(doc, dtd_of(&doc.view, &dtd), f) {
+	view := dtd_of(&doc.view, &dtd)
+	tokenized := fact_tokenized(doc, view, f)
+	if plain_value(value) && !tokenized {
 		return string(value), true
 	}
+	size := len(value)
+	if view != nil {
+		size = int(min(expansion_room(view, doc.src, value), u64(max(int))))
+	}
 	context = runtime.default_context()
-	uri, _ = attribute_decode(doc, f, value, make([]u8, value_room(doc, value), context.temp_allocator))
+	uri, _ = attribute_text(value, make([]u8, size, context.temp_allocator), view, doc.src, tokenized)
 	return uri, true
 }
 
@@ -118,24 +124,6 @@ declared_at :: proc "contextless" (doc: ^core.Document, node: core.Node_Index, p
 		}
 	}
 	return {}, false
-}
-
-// The bytes that hold the decode of the attribute value `raw`, a span of `doc`'s source.
-@(private)
-value_room :: proc "contextless" (doc: ^core.Document, raw: []u8) -> int {
-	dtd: Dtd_View
-	if dtd_of(&doc.view, &dtd) == nil {
-		return len(raw)
-	}
-	return int(min(expansion_room(&dtd, doc.src, raw), u64(max(int))))
-}
-
-// Decodes the value `raw` of attribute fact `f` of `doc` into `buf`, with the normalization its declared type asks.
-@(private)
-attribute_decode :: proc "contextless" (doc: ^core.Document, f: core.Fact, raw: []u8, buf: []u8) -> (string, bool) {
-	dtd: Dtd_View
-	v := dtd_of(&doc.view, &dtd)
-	return attribute_text(raw, buf, v, doc.src, fact_tokenized(doc, v, f))
 }
 
 // Whether the DTD `v` of `doc` declares attribute fact `f` of a tokenized type.
@@ -245,7 +233,6 @@ spelling_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_K
 	}
 	return {}, false
 }
-
 
 // The byte just past the end of the element at container node `i`, or of the root element for the document's node.
 // The close of an element is found from its last descendant: a leaf element ends with its own end tag, and each

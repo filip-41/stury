@@ -40,31 +40,12 @@ every_record_form_reads_a_text :: proc(t: ^testing.T) {
 	path, perr := xml.parse_path(".a.b")
 	walktest.expect_nil(t, perr)
 	defer xml.destroy(&path)
-	spec :: xml.Spec.Xml
-	scanned := records.open(src, xml.as(spec), .Concatenated)
+	scanned := records.open(src, xml.as(.Xml), .Concatenated)
 	defer xml.records_close(&scanned)
-	found := 0
-	for {
-		_, got, serr, more := xml.records_scan(&scanned, path)
-		if !more {
-			break
-		}
-		walktest.expect_nil(t, serr)
-		found += len(got.answers)
-	}
-	testing.expect_value(t, found, 1)
-
-	Counted :: struct {
-		records: int,
-	}
-	counted: Counted
-	walktest.expect_nil(t, xml.records_each(src, .Xml, .Concatenated, proc(c: ^Counted, piece: ^xml.Record_Reader, k: int) -> bool {
-		for _ in xml.records_next(piece) {
-			c.records += 1
-		}
-		return true
-	}, &counted))
-	testing.expect_value(t, counted.records, 1)
+	walktest.expect_records_scanned(t, &scanned, path, 1)
+	each := 0
+	walktest.expect_nil(t, xml.records_each(src, .Xml, .Concatenated, walktest.count_records, &each))
+	testing.expect_value(t, each, 1)
 }
 
 // An input of no bytes holds no record, a record read from a byte past the first starts there, a refused text is the
@@ -148,8 +129,7 @@ answers_agree_with_each_answer :: proc(t: ^testing.T) {
 	path, _ := xml.parse_path(".a[]")
 	defer xml.destroy(&path)
 	src := transmute([]u8)string("<a><b>1</b><c>2</c></a>")
-	spec :: xml.Spec.Xml
-	it := xml.answers(src, spec, path)
+	it := xml.answers(src, .Xml, path)
 	first: core.Token_Answer
 	for a in xml.next(&it) {
 		first = a

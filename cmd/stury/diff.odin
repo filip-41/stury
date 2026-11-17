@@ -134,7 +134,7 @@ diff_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		usage_error("diff reads standard input once, and - names it twice")
 	}
 	a, b := read_operand(o, src, cli.files[0]), read_operand(o, src, cli.files[1])
-	r, err := diff.values(a, b, diff_options(d))
+	r, err := diff.values(a, b, {arrays = d.arrays, keys = d.keys[:], facts = d.facts})
 	if err != nil {
 		out_of_memory()
 	}
@@ -153,11 +153,6 @@ diff_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 out_of_memory :: proc() -> ! {
 	message.write_stderr("stury: error: out of memory\n")
 	os.exit(EXIT_INPUT)
-}
-
-@(private = "file")
-diff_options :: proc(d: ^Diff_Options) -> diff.Options {
-	return {arrays = d.arrays, keys = d.keys[:], facts = d.facts}
 }
 
 // Writes what `b` holds when it is large or `all` is set, so the output never waits on the whole diff.

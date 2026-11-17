@@ -54,6 +54,9 @@ a_schema_judges_a_text_by_the_core_schema :: proc(t: ^testing.T) {
 		sink: typed.Sink
 		refused := yaml.check_schema(&bound, transmute([]u8)text, &sink)
 		testing.expectf(t, refused == nil && len(sink.entries) == 0, "%q: %v %s", text, refused, spelled(&sink))
+		doc, derr := yaml.build(transmute([]u8)text, .Yaml_1_2)
+		walktest.expect_nil(t, derr)
+		walktest.expect_nil(t, schema.check_node(&bound, &doc, core.ROOT))
 	}
 	bad := [?][2]string {
 		{"name: 12\nport: 0\ntags: [a, 3]\nextra: ~\n", "Wrong_Kind/name;Below_Minimum/port;Wrong_Kind/tags/1;Not_Allowed/extra;"},
@@ -71,11 +74,6 @@ a_schema_judges_a_text_by_the_core_schema :: proc(t: ^testing.T) {
 		nodes: typed.Sink
 		testing.expect(t, schema.check_node(&bound, &doc, core.ROOT, &nodes) != nil)
 		testing.expectf(t, spelled(&nodes) == c[1], "%q built:\n got %s\nwant %s", c[0], spelled(&nodes), c[1])
-	}
-	for text in good {
-		doc, derr := yaml.build(transmute([]u8)text, .Yaml_1_2)
-		walktest.expect_nil(t, derr)
-		walktest.expect_nil(t, schema.check_node(&bound, &doc, core.ROOT))
 	}
 	// A text that does not read is its fault, and an alias is judged as the value it repeats.
 	fault := yaml.check_schema(&bound, transmute([]u8)string("name: [x\n"))

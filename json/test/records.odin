@@ -631,16 +631,8 @@ records_stream_limits_and_failures :: proc(t: ^testing.T) {
 		for rec in records.next(&it) {
 			append(&got, strings.clone(string(rec.text), context.temp_allocator))
 		}
-		want: []string
-		held := text[:24]
-		#partial switch framing {
-		case .Lines:
-			want, held = {"1", "22", "333", "4444", "55555"}, text[20:24]
-		case .Concatenated:
-			want, held = {"1", "22", "333", "4444", "55555"}, text[19:24]
-		case .Entries:
-			want, held = {"1", "22", "333", "4444", "55555"}, text[20:24]
-		}
+		want := []string{"1", "22", "333", "4444", "55555"}
+		held := text[19:24] if framing == .Concatenated else text[20:24]
 		testing.expectf(t, fmt.tprint(got[:]) == fmt.tprint(want) && it.fault == nil && it.cause == .Unknown && string(it.held) == held, "%v: %v, %v %v, held %q", framing, got[:], it.fault, it.cause, it.held)
 		records.close(&it)
 	}

@@ -10,18 +10,7 @@ import write "../../core/write"
 import xml ".."
 import walktest "../../walktest"
 
-// The first member of element `parent` named `name`, or `core.NO_NODE`.
-@(private = "file")
-member :: proc(doc: ^core.Document, parent: core.Node_Index, name: string) -> core.Node_Index {
-	it := core.pairs(doc, parent)
-	buf: [256]u8
-	for key, val in core.pair_next(&it) {
-		if text, _ := core.text(doc, key, buf[:]); text == name {
-			return val
-		}
-	}
-	return core.NO_NODE
-}
+member :: walktest.member
 
 // The value of the root element.
 @(private = "file")

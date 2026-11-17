@@ -149,14 +149,12 @@ strings_other_readers_would_retype_are_quoted :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	words := [?]string{"yes", "no", "on", "off", "y", "n", "Yes", "NO", "~", "null", "Null", "true", "False", "0123", "0o17", "0x1F", "1_000", "1e3", ".inf", "-.inf", ".NaN", "+1", "12:30:45", "2001-12-14", "=", "<<", "", " lead", "trail ", "a: b", "a #b", "- a", "? a", "&a", "*a", "!a", "%a", "@a", "`a", "{a", "[a", "a,b", "'a", "\"a", "|", ">", "#a", "---", "...", "a\tb", "a\nb", "é", "\x01"}
 	for w in words {
-		doc: core.Document
 		src := fmt.tprintf("[%s]", json_quote(w))
-		built, err := json_pkg.build(transmute([]u8)src, .Json)
+		doc, err := json_pkg.build(transmute([]u8)src, .Json)
 		if err != nil {
 			continue
 		}
-		doc = built
-		text, werr := written(&doc)
+		_, werr := written(&doc)
 		testing.expectf(t, werr == nil, "%q: the write is %v", w, werr)
 		for style in ([?]core.Write_Options{PRETTY, {pretty = false}}) {
 			out, _ := written(&doc, style)
@@ -168,7 +166,6 @@ strings_other_readers_would_retype_are_quoted :: proc(t: ^testing.T) {
 			got, _ := core.text_clone(&again, item, context.temp_allocator)
 			testing.expectf(t, core.kind(&again, item) == .String && got == w, "%q read back as %q (%v)", w, got, core.kind(&again, item))
 		}
-		_ = text
 	}
 }
 

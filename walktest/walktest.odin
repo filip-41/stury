@@ -22,6 +22,7 @@ import records "../core/records"
 import json "../json"
 
 // The stack of the thread `on_small_stack` runs its work on: a quarter of the 1 MB a Windows thread has by default.
+@(private)
 SMALL_STACK :: 256 * 1024
 
 // The work `on_small_stack` hands its thread: the test, its context and the procedure.
@@ -33,6 +34,7 @@ Small_Stack_Work :: struct {
 }
 
 // The capacity of `Log.tokens` is the most tokens a test text may hold.
+@(private)
 MAX_TOKENS :: 1 << 14
 
 // A `Fence` is one mapping whose last page has no access, sized for the longest text copied into it. `fence_copy`
@@ -127,6 +129,7 @@ ask :: proc "contextless" (rule, i: u64, t: core.Token) -> core.Action {
 	return .Next
 }
 
+@(private)
 mix :: proc "contextless" (hash: u64, t: core.Token) -> u64 {
 	x := hash ~ t.lo ~ u64(t.n) << 32 ~ u64(t.kind) << 48 ~ u64(t.role) << 56 ~ u64(t.spelling) << 60
 	return x * 0x100_0000_01b3 + 1
@@ -293,9 +296,7 @@ tree_touched :: proc(doc: ^core.Document, list: ^core.Edit_List, node: core.Node
 		if int(e.node) >= len(doc.nodes) {
 			continue
 		}
-		n := doc.nodes[e.node]
-		span := n.n if n.kind == .Array || n.kind == .Object else 1
-		if e.node <= node && node < e.node + core.Node_Index(span) {
+		if e.node <= node && node < e.node + core.Node_Index(core.subtree_size(doc, e.node)) {
 			return true
 		}
 	}
@@ -305,6 +306,7 @@ tree_touched :: proc(doc: ^core.Document, list: ^core.Edit_List, node: core.Node
 // Whether a tree edit writes over fact `f`'s bytes. A removal takes the removed subtree and the comments on it. A set
 // takes the node's own span, so a head comment before that span and an inline comment after it stay, and a comment
 // inside the span goes.
+@(private)
 tree_written :: proc(doc: ^core.Document, list: ^core.Edit_List, f: Fact_Model) -> bool {
 	for e in list.edits {
 		if int(e.node) >= len(doc.nodes) {
@@ -312,9 +314,7 @@ tree_written :: proc(doc: ^core.Document, list: ^core.Edit_List, f: Fact_Model) 
 		}
 		switch e.op {
 		case .Remove:
-			n := doc.nodes[e.node]
-			span := n.n if n.kind == .Array || n.kind == .Object else 1
-			if e.node <= f.node && f.node < e.node + core.Node_Index(span) {
+			if e.node <= f.node && f.node < e.node + core.Node_Index(core.subtree_size(doc, e.node)) {
 				return true
 			}
 		case .Set:
@@ -332,13 +332,10 @@ tree_written :: proc(doc: ^core.Document, list: ^core.Edit_List, f: Fact_Model) 
 // Whether `node` and every touched node are outside each other's subtrees, so neither is the other's ancestor.
 nodes_disjoint :: proc(doc: ^core.Document, touched: []core.Node_Index, node: core.Node_Index) -> bool {
 	for t in touched {
-		nt, nn := doc.nodes[t], doc.nodes[node]
-		ts := nt.n if nt.kind == .Array || nt.kind == .Object else 1
-		ns := nn.n if nn.kind == .Array || nn.kind == .Object else 1
-		if t <= node && node < t + core.Node_Index(ts) {
+		if t <= node && node < t + core.Node_Index(core.subtree_size(doc, t)) {
 			return false
 		}
-		if node <= t && t < node + core.Node_Index(ns) {
+		if node <= t && t < node + core.Node_Index(core.subtree_size(doc, node)) {
 			return false
 		}
 	}
@@ -365,6 +362,7 @@ body_line_end :: proc(body: string) -> bool {
 // output that removed every record reads the comment as a foot. A JSON line comment ends at U+2028 or U+2029 too, so
 // such a body needs the block spelling, which holds no `*/`. An inline body with `*/` and no line end is either
 // spelled or dropped, so `fact_agrees` judges it by what reads back.
+@(private)
 fact_holdable :: proc(list: ^core.Edit_List, node: core.Node_Index, role: core.Role, body: string, spec: u8, read: ^core.Document) -> bool {
 	doc, edit := list.doc, list.edit
 	if edit == nil || edit.comment == nil {
@@ -424,6 +422,7 @@ fact_either :: proc(list: ^core.Edit_List, e: core.Edit, spec: u8) -> bool {
 }
 
 // Whether a fact edit names one node and role: that fact is the edit's, not the invariant's.
+@(private)
 fact_named :: proc(list: ^core.Edit_List, node: core.Node_Index, role: core.Role) -> bool {
 	for e in list.edits {
 		if e.op >= .Set_Fact && e.node == node && e.role == role {
@@ -445,6 +444,7 @@ fact_model :: proc(doc: ^core.Document, out: ^[dynamic]Fact_Model) {
 }
 
 // Whether `got` holds one fact of node, role and body, taking it from `used`.
+@(private)
 fact_find :: proc(got: []Fact_Model, used: []bool, node: core.Node_Index, role: core.Role, body: string) -> bool {
 	for g, i in got {
 		if !used[i] && g.node == node && g.role == role && g.body == body {
@@ -457,6 +457,7 @@ fact_find :: proc(got: []Fact_Model, used: []bool, node: core.Node_Index, role: 
 
 // Whether `got` holds one fact of a body and role, taking it from `used`. A fact of the same bytes is taken first, then
 // one of the same role, then one of any role.
+@(private)
 body_find :: proc(got: []Fact_Model, used: []bool, read: ^core.Document, role: core.Role, body, full: string) -> bool {
 	role_found, any_found := -1, -1
 	for g, i in got {
@@ -474,15 +475,11 @@ body_find :: proc(got: []Fact_Model, used: []bool, read: ^core.Document, role: c
 			any_found = i
 		}
 	}
-	if role_found >= 0 {
-		used[role_found] = true
-		return true
+	found := role_found if role_found >= 0 else any_found
+	if found >= 0 {
+		used[found] = true
 	}
-	if any_found >= 0 {
-		used[any_found] = true
-		return true
-	}
-	return false
+	return found >= 0
 }
 
 // Checks the fact rule of a round's commit, over the round's own edit list. A named fact the output holds reads back on
@@ -495,7 +492,6 @@ fact_agrees :: proc(t: ^testing.T, round: int, before: []Fact_Model, doc: ^core.
 	defer delete(got)
 	fact_model(read, &got)
 	used := make([]bool, len(got), context.temp_allocator)
-	kept = 0
 	missing := 0
 	expected := 0
 	either_missing := 0
@@ -537,11 +533,7 @@ fact_agrees :: proc(t: ^testing.T, round: int, before: []Fact_Model, doc: ^core.
 		foot := f.role == .Comment && f.node == core.ROOT && core.header_of(doc) != 0 && core.length(read, core.ROOT) == 0
 		// A source fact in the document's own spec already reads under it, so only a missing slot drops it. Under
 		// another spec the output must hold the whole fact, body included.
-		if spec != doc.as.spec && !foot && !fact_holdable(list, f.node, f.role, f.body, spec, read) {
-			expected += 1
-			continue
-		}
-		if spec == doc.as.spec && !foot && !fact_holdable(list, f.node, f.role, "", spec, read) {
+		if !foot && !fact_holdable(list, f.node, f.role, f.body if spec != doc.as.spec else "", spec, read) {
 			expected += 1
 			continue
 		}
@@ -861,6 +853,7 @@ expect_entries :: proc(t: ^testing.T, src: string, as: core.As, names: []string,
 
 // The `.Entries` records of `src` named by `names`, read in memory and from a stream, are the members of that container
 // in the build of the whole text, each written as JSON.
+@(private)
 expect_entries_whole :: proc(t: ^testing.T, src: string, as: core.As, names: []string, loc := #caller_location) -> bool {
 	whole, err := core.build(transmute([]u8)src, as, allocator = context.temp_allocator)
 	if !testing.expectf(t, err == nil, "%q builds: %v", src, err, loc = loc) {
@@ -1075,9 +1068,7 @@ fault_of :: proc "contextless" (err: core.Error) -> Maybe(core.Fault) {
 	switch e in err {
 	case core.Fault:
 		return e
-	case runtime.Allocator_Error:
-		return core.Fault{kind = .No_Memory}
-	case core.Document_Error, core.Path_Error, core.Typed_Error, core.Typed_Error_Kind:
+	case runtime.Allocator_Error, core.Document_Error, core.Path_Error, core.Typed_Error, core.Typed_Error_Kind:
 		return core.Fault{kind = .No_Memory}
 	case nil:
 	}

@@ -97,13 +97,7 @@ declares_ns :: #force_inline proc "contextless" (p: [^]u8, n: int) -> bool #no_b
 // none, and false for a name that is neither an NCName nor a prefix, a colon and an NCName.
 @(private)
 qname :: proc "contextless" (p: [^]u8, n: int) -> (colon: int, ok: bool) #no_bounds_check {
-	colon = -1
-	for i in 0 ..< n {
-		if p[i] == ':' {
-			colon = i
-			break
-		}
-	}
+	colon = colon_of(p[:n])
 	if colon < 0 {
 		return -1, true
 	}
@@ -187,8 +181,9 @@ declare :: proc "contextless" (w: ^Walk($H), name: [^]u8, n: int, value: []u8, e
 	defer if owned && rule != .None {
 		runtime.heap_free(raw_data(value))
 	}
+	reserved := string(value) == XML_URI || string(value) == XMLNS_URI
 	if n == 5 {
-		if string(value) == XML_URI || string(value) == XMLNS_URI {
+		if reserved {
 			return .Reserved_Namespace, false
 		}
 	} else {
@@ -202,7 +197,7 @@ declare :: proc "contextless" (w: ^Walk($H), name: [^]u8, n: int, value: []u8, e
 		case "xml":
 			return .None if string(value) == XML_URI else .Reserved_Prefix, false
 		}
-		if string(value) == XML_URI || string(value) == XMLNS_URI {
+		if reserved {
 			return .Reserved_Namespace, false
 		}
 		if len(value) == 0 {

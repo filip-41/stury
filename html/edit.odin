@@ -444,9 +444,6 @@ reread :: proc(list: ^core.Edit_List, out: []u8) -> core.Document_Error {
 	context.allocator = runtime.arena_allocator(&arena)
 	r := Reread{doc = doc}
 	parents := core.parents_of(list)
-	if parents == nil {
-		return {kind = .No_Memory}
-	}
 	edits: for e in list.edits {
 		if kind := members_read_back(list, e); kind != .None {
 			return {kind = .No_Memory} if kind == .No_Memory else {kind = .Bad_Value, reason = .No_Spelling}
@@ -771,10 +768,8 @@ text_past :: proc(doc: ^core.Document, parents: []core.Node_Index, v: core.Node_
 			if fold_name_equal(name, p.name) {
 				return .Stop
 			}
-			for c in p.closes {
-				if c == t.lo {
-					return .Stop
-				}
+			if slice.contains(p.closes[:], t.lo) {
+				return .Stop
 			}
 		case:
 			return .Stop

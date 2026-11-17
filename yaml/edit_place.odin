@@ -109,9 +109,7 @@ flow_text :: proc(cx: ^Cx, at: u32, t: []u8, sh: Text_Shape) -> []u8 {
 	if werr.kind != .None {
 		return t
 	}
-	for len(text) > 0 && (text[len(text) - 1] == ' ' || text[len(text) - 1] == '\t') {
-		text = text[:len(text) - 1]
-	}
+	text = bytes.trim_right(text, transmute([]u8)string(" \t"))
 	if bytes.index_byte(text, '\n') < 0 {
 		return text
 	}

@@ -12,6 +12,17 @@ import records "../../core/records"
 import json ".."
 import walktest "../../walktest"
 
+@(private = "file")
+expect_steps :: proc(t: ^testing.T, text: string, got, want: []core.Step) {
+	testing.expect_value(t, len(got), len(want))
+	if len(got) != len(want) {
+		return
+	}
+	for s, i in want {
+		testing.expectf(t, got[i] == s, "%q step %d: %v", text, i, got[i])
+	}
+}
+
 // Each text with the steps it reads as.
 @(test)
 parse_path_steps :: proc(t: ^testing.T) {
@@ -48,13 +59,7 @@ parse_path_steps :: proc(t: ^testing.T) {
 		p, e := core.parse_path(c.text)
 		defer core.path_destroy(&p)
 		walktest.expect_nil(t, e)
-		testing.expect_value(t, len(p.steps), len(c.steps))
-		if len(p.steps) != len(c.steps) {
-			continue
-		}
-		for s, i in c.steps {
-			testing.expectf(t, p.steps[i] == s, "%q step %d: %v", c.text, i, p.steps[i])
-		}
+		expect_steps(t, c.text, p.steps, c.steps)
 	}
 }
 
@@ -154,13 +159,7 @@ parse_pointer_steps :: proc(t: ^testing.T) {
 		p, e := core.parse_pointer(c.text)
 		defer core.path_destroy(&p)
 		walktest.expect_nil(t, e)
-		testing.expect_value(t, len(p.steps), len(c.steps))
-		if len(p.steps) != len(c.steps) {
-			continue
-		}
-		for s, i in c.steps {
-			testing.expectf(t, p.steps[i] == s, "%q step %d: %v", c.text, i, p.steps[i])
-		}
+		expect_steps(t, c.text, p.steps, c.steps)
 	}
 	Refused :: struct {
 		text:   string,
@@ -314,7 +313,6 @@ partial_reads :: proc(t: ^testing.T) {
 	testing.expect_value(t, listed, core.Presence.Missing)
 	_, unlisted := core.member_of(&partial, owner, "y")
 	testing.expect_value(t, unlisted, core.Presence.Not_Loaded)
-
 }
 
 @(private = "file")

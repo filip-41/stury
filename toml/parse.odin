@@ -364,14 +364,6 @@ set_scalar :: proc "contextless" (p: ^Parser, id: u32, lo, end: int, kind: core.
 	return true
 }
 
-push_open :: proc "contextless" (p: ^Parser, id: u32) -> bool {
-	context = runtime.default_context()
-	if _, err := append(&p.stack, id); err != nil {
-		return fault(p, 0, .No_Memory, .None)
-	}
-	return true
-}
-
 // Reads one value into node `id`. Returns true in `opened` when it opened an array or an inline table, which stays open
 // on the stack.
 value :: proc "contextless" (p: ^Parser, id: u32) -> (opened: bool, ok: bool) {
@@ -417,7 +409,11 @@ value :: proc "contextless" (p: ^Parser, id: u32) -> (opened: bool, ok: bool) {
 		n.flags = {} if c == '[' else {.Inline}
 		p.pos += 1
 		p.inline_ok = false
-		return true, push_open(p, id)
+		context = runtime.default_context()
+		if _, err := append(&p.stack, id); err != nil {
+			return false, fault(p, 0, .No_Memory, .None)
+		}
+		return true, true
 	case 't', 'f':
 		word := "true" if c == 't' else "false"
 		if lo + len(word) > len(src) || string(src[lo:lo + len(word)]) != word {

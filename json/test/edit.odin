@@ -364,26 +364,30 @@ edit_log_uses_list_allocator :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 2)
 }
 
+// An array of `n` copies of `elem` and the array whose element k is `parts[k % len(parts)]`.
+@(private = "file")
+repeated_array :: proc(n: int, elem: string, parts: []string) -> (src, want: string) {
+	s, w := strings.builder_make(context.temp_allocator), strings.builder_make(context.temp_allocator)
+	for k in 0 ..< n {
+		sep := "," if k > 0 else "["
+		strings.write_string(&s, sep)
+		strings.write_string(&s, elem)
+		strings.write_string(&w, sep)
+		strings.write_string(&w, parts[k % len(parts)])
+	}
+	strings.write_byte(&s, ']')
+	strings.write_byte(&w, ']')
+	return strings.to_string(s), strings.to_string(w)
+}
+
 // A list of more edits than a read holds paths reads back by runs of regions, each an array's elements in order: a set
 // of each even element's member and a removal of each odd one's.
 @(test)
 edit_many_regions :: proc(t: ^testing.T) {
 	N :: 3 * core.MAX_PATHS
-	src, want: strings.Builder
-	defer strings.builder_destroy(&src)
-	defer strings.builder_destroy(&want)
-	strings.write_byte(&src, '[')
-	strings.write_byte(&want, '[')
-	for k in 0 ..< N {
-		sep := "," if k > 0 else ""
-		strings.write_string(&src, sep)
-		strings.write_string(&src, `{"s":0}`)
-		strings.write_string(&want, sep)
-		strings.write_string(&want, `{"s":7}` if k % 2 == 0 else `{}`)
-	}
-	strings.write_byte(&src, ']')
-	strings.write_byte(&want, ']')
-	doc, err := core.build(src.buf[:], json.as(.Json))
+	defer free_all(context.temp_allocator)
+	src, want := repeated_array(N, `{"s":0}`, {`{"s":7}`, `{}`})
+	doc, err := core.build(transmute([]u8)src, json.as(.Json))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
 	list := core.edit_list_init(&doc)
@@ -400,7 +404,7 @@ edit_many_regions :: proc(t: ^testing.T) {
 		regions, known, fits := core.edited_regions(&list)
 		testing.expect(t, known && fits && len(regions) == N)
 	}
-	testing.expect(t, expect_commit(t, &list, strings.to_string(want), .Json))
+	testing.expect(t, expect_commit(t, &list, want, .Json))
 }
 
 // A set beside a removal at an array's end reads back, the end apart from the element before it, since a `Slice` gives
@@ -422,22 +426,9 @@ edit_set_beside_a_removed_end :: proc(t: ^testing.T) {
 @(test)
 edit_many_writes_read_back :: proc(t: ^testing.T) {
 	N :: 3 * core.MAX_PATHS
-	src, want: strings.Builder
-	defer strings.builder_destroy(&src)
-	defer strings.builder_destroy(&want)
-	strings.write_byte(&src, '[')
-	strings.write_byte(&want, '[')
-	parts := [3]string{`{"a":"q\"y","b":1}`, `{"a":"x","c\\d":1}`, `{"a":"x","b":1,"n":2.5}`}
-	for k in 0 ..< N {
-		sep := "," if k > 0 else ""
-		strings.write_string(&src, sep)
-		strings.write_string(&src, `{"a":"x","b":1}`)
-		strings.write_string(&want, sep)
-		strings.write_string(&want, parts[k % 3])
-	}
-	strings.write_byte(&src, ']')
-	strings.write_byte(&want, ']')
-	doc, err := core.build(src.buf[:], json.as(.Json))
+	defer free_all(context.temp_allocator)
+	src, want := repeated_array(N, `{"a":"x","b":1}`, {`{"a":"q\"y","b":1}`, `{"a":"x","c\\d":1}`, `{"a":"x","b":1,"n":2.5}`})
+	doc, err := core.build(transmute([]u8)src, json.as(.Json))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
 	list := core.edit_list_init(&doc)
@@ -454,7 +445,7 @@ edit_many_writes_read_back :: proc(t: ^testing.T) {
 			walktest.expect_nil(t, write.insert_member(&list, element, 2, "n", 2.5))
 		}
 	}
-	testing.expect(t, expect_commit(t, &list, strings.to_string(want), .Json))
+	testing.expect(t, expect_commit(t, &list, want, .Json))
 }
 
 // Past `core.MAX_PATHS` edits, removals, inserts in an array and among removed elements, sets and renames in nested
@@ -462,22 +453,9 @@ edit_many_writes_read_back :: proc(t: ^testing.T) {
 @(test)
 edit_many_places_read_back :: proc(t: ^testing.T) {
 	N :: 4 * core.MAX_PATHS
-	src, want: strings.Builder
-	defer strings.builder_destroy(&src)
-	defer strings.builder_destroy(&want)
-	strings.write_byte(&src, '[')
-	strings.write_byte(&want, '[')
-	parts := [4]string{`{"a":[1,9,3],"b":{"c":1}}`, `{"a":[1,2,3]}`, `{"a":[0,1,2,3],"b":{"c":"z"}}`, `{"x":[1,2],"b":{"c":1}}`}
-	for k in 0 ..< N {
-		sep := "," if k > 0 else ""
-		strings.write_string(&src, sep)
-		strings.write_string(&src, `{"a":[1,2,3],"b":{"c":1}}`)
-		strings.write_string(&want, sep)
-		strings.write_string(&want, parts[k % 4])
-	}
-	strings.write_byte(&src, ']')
-	strings.write_byte(&want, ']')
-	doc, err := core.build(src.buf[:], json.as(.Json))
+	defer free_all(context.temp_allocator)
+	src, want := repeated_array(N, `{"a":[1,2,3],"b":{"c":1}}`, {`{"a":[1,9,3],"b":{"c":1}}`, `{"a":[1,2,3]}`, `{"a":[0,1,2,3],"b":{"c":"z"}}`, `{"x":[1,2],"b":{"c":1}}`})
+	doc, err := core.build(transmute([]u8)src, json.as(.Json))
 	defer core.destroy(&doc)
 	walktest.expect_nil(t, err)
 	list := core.edit_list_init(&doc)
@@ -499,7 +477,7 @@ edit_many_places_read_back :: proc(t: ^testing.T) {
 			walktest.expect_nil(t, core.remove(&list, e + 5))
 		}
 	}
-	testing.expect(t, expect_commit(t, &list, strings.to_string(want), .Json))
+	testing.expect(t, expect_commit(t, &list, want, .Json))
 }
 
 // The read of what a commit wrote holds the output to the source and the edits: a value set, a key renamed, a member

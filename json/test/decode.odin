@@ -217,16 +217,7 @@ numbers :: proc(t: ^testing.T) {
 			}
 		}
 		if round % 4 == 0 {
-			text[k] = 'e'
-			k += 1
-			text[k] = '-' if round % 8 == 0 else '+'
-			k += 1
-			text[k] = '3'
-			k += 1
-			text[k] = '0'
-			k += 1
-			text[k] = '0'
-			k += 1
+			k += copy(text[k:], "e-300" if round % 8 == 0 else "e+300")
 		}
 		src := string(text[:k])
 		doc, err := build(src, .Json)

@@ -148,7 +148,6 @@ scan_begin :: proc(h: ^engine.Scan, it: ^records.Reader, src: []u8, last: ^core.
 	return started
 }
 
-
 // The fill of an iterator over a text of spec `S`: the stream's walk with a cursor, which stops once the buffer holds a
 // batch. It judges what the walk leaves and ends the read as `scan_walk` does.
 answers_fill :: proc "contextless" ($S: Spec) -> proc(it: ^engine.Answer_Iter) {

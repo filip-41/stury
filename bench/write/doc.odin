@@ -23,7 +23,7 @@ doc_lane :: proc(src: []u8, direct: bool, pretty: bool) {
 	opts := core.Write_Options{pretty = pretty, indent = 2}
 	times: [timing.TIMED]i64
 	size := 0
-	h := CHECK_OFFSET
+	h: u64
 	scratch: virtual.Arena
 	_ = virtual.arena_init_growing(&scratch)
 	for i in 0 ..< timing.WARMUP + timing.TIMED {
@@ -42,9 +42,7 @@ doc_lane :: proc(src: []u8, direct: bool, pretty: bool) {
 			os.exit(1)
 		}
 		if i == timing.WARMUP + timing.TIMED - 1 {
-			for b in text {
-				h = (h ~ u64(b)) * CHECK_PRIME
-			}
+			h = checksum(text)
 		}
 		size = len(text)
 		virtual.arena_free_all(&scratch)

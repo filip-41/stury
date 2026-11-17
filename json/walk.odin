@@ -158,7 +158,7 @@ byte_detail :: proc "contextless" (p, end: [^]u8, other: Detail) -> Detail {
 	return other
 }
 
-// The byte before src[at] and the whitespace before it, or 0 at the text's start.
+// The last byte before src[at] that is no JSON whitespace, or 0 when there is none.
 @(private, cold)
 byte_before :: proc "contextless" (src: []u8, at: u64) -> u8 {
 	for i := at; i > 0; i -= 1 {

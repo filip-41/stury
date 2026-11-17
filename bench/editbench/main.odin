@@ -6,6 +6,7 @@ package editbench
 
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import "core:time"
 import core "../../core"
 import compose "../../core/compose"
@@ -30,17 +31,17 @@ main :: proc() {
 		want = want * 10 + int(c - '0')
 	}
 	suffix := os.args[1]
-	dsv_text := has_suffix(suffix, ".csv") || has_suffix(suffix, ".tsv")
+	dsv_text := strings.has_suffix(suffix, ".csv") || strings.has_suffix(suffix, ".tsv")
 	doc: core.Document
 	derr: core.Error
 	switch {
-	case has_suffix(suffix, ".tsv"):
+	case strings.has_suffix(suffix, ".tsv"):
 		doc, derr = core.build(src, dsv.as(.Tsv))
-	case has_suffix(suffix, ".csv"):
+	case strings.has_suffix(suffix, ".csv"):
 		doc, derr = core.build(src, dsv.as(.Csv))
-	case has_suffix(suffix, ".json5"):
+	case strings.has_suffix(suffix, ".json5"):
 		doc, derr = core.build(src, json.as(.Json5))
-	case has_suffix(suffix, ".jsonc"):
+	case strings.has_suffix(suffix, ".jsonc"):
 		doc, derr = core.build(src, json.as(.Jsonc))
 	case:
 		doc, derr = core.build(src, json.as(.Json))
@@ -96,8 +97,4 @@ main :: proc() {
 		suffix[len(suffix) - 4:], n, len(doc.nodes), len(src),
 		f64(record) / f64(max(n, 1)), best, f64(len(src)) / f64(max(best, 1)), len(out))
 	delete(out)
-}
-
-has_suffix :: proc(s, suffix: string) -> bool {
-	return len(s) >= len(suffix) && s[len(s) - len(suffix):] == suffix
 }

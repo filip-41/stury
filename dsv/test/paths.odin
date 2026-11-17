@@ -64,7 +64,7 @@ path_reads :: proc(t: ^testing.T) {
 		doc, err := dsv.scan(src, .Csv, path, opts = {tolerate = {.Ragged}})
 		defer core.destroy(&doc)
 		testing.expectf(t, err == nil, "%q: %v", c.path, err)
-		testing.expectf(t, slice_equal(answer_texts(&doc, doc.answers), c.want), "scan %q: %v", c.path, doc.answers)
+		testing.expectf(t, slice.equal(answer_texts(&doc, doc.answers), c.want), "scan %q: %v", c.path, doc.answers)
 
 		full, berr := core.build(src, dsv.as(.Csv, {tolerate = {.Ragged}}))
 		defer core.destroy(&full)
@@ -72,22 +72,9 @@ path_reads :: proc(t: ^testing.T) {
 		answers, qerr := dsv.query(&full, path)
 		defer delete(answers)
 		walktest.expect_nil(t, qerr)
-		testing.expectf(t, slice_equal(answer_texts(&full, answers), c.want), "query %q: %v", c.path, answers)
+		testing.expectf(t, slice.equal(answer_texts(&full, answers), c.want), "query %q: %v", c.path, answers)
 	}
 	free_all(context.temp_allocator)
-}
-
-@(private = "file")
-slice_equal :: proc(a, b: []string) -> bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for s, i in a {
-		if s != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // A headerless text has no names, and a kept cell keeps its key in a headed text.
@@ -335,9 +322,9 @@ path_model :: proc(t: ^testing.T) {
 			for w in tagged {
 				testing.expectf(t, slice.contains(stream.want[:], w), "stream %q %v: %v want %v", string(src), paths, stream.want, tagged)
 			}
-			testing.expectf(t, slice_equal(answers_of(&doc, doc.answers, p), want[:]), "scan %q %v: %v want %v", string(src), paths, answers_of(&doc, doc.answers, p), want)
-			testing.expectf(t, slice_equal(answers_of(&stopped, stopped.answers, p), want[:]), "stopped %q %v: %v want %v", string(src), paths, answers_of(&stopped, stopped.answers, p), want)
-			testing.expectf(t, slice_equal(answers_of(&full, answers, p), want[:]), "query %q %v: %v want %v", string(src), paths, answers_of(&full, answers, p), want)
+			testing.expectf(t, slice.equal(answers_of(&doc, doc.answers, p), want[:]), "scan %q %v: %v want %v", string(src), paths, answers_of(&doc, doc.answers, p), want)
+			testing.expectf(t, slice.equal(answers_of(&stopped, stopped.answers, p), want[:]), "stopped %q %v: %v want %v", string(src), paths, answers_of(&stopped, stopped.answers, p), want)
+			testing.expectf(t, slice.equal(answers_of(&full, answers, p), want[:]), "query %q %v: %v want %v", string(src), paths, answers_of(&full, answers, p), want)
 		}
 		delete(answers)
 		core.destroy(&doc)

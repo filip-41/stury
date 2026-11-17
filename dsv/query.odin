@@ -107,7 +107,6 @@ record_hook :: proc "contextless" (r: ^Record_Read, s: core.Hook_Regs, t: core.T
 	return r.on(r.h, s, t)
 }
 
-
 // The fill of an iterator over a text of spec `S`: the stream's walk with a cursor, which stops on the first record's
 // end once the buffer holds a batch, and ends the read as `scan_spec` does. The header's cells are the iterator's.
 answers_fill :: proc "contextless" ($S: Spec) -> proc(it: ^engine.Answer_Iter) {

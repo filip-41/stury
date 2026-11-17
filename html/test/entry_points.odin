@@ -1,111 +1,39 @@
 // The format package's entry points, and the calls in `core` with a handle.
 package html_tests
 
-import "core:strings"
 import "core:testing"
 import core "../../core"
 import compose "../../core/compose"
-import build "../../core/build"
 import typed "../../core/typed"
 import write "../../core/write"
 import html ".."
 import walktest "../../walktest"
 
 @(private = "file")
-Seen :: struct {
-	found: int,
-}
-
-@(private = "file")
-count_found :: proc(state: rawptr, a: core.Token_Answer) -> bool {
-	if a.outcome == .Found {
-		(^Seen)(state).found += 1
-	}
-	return true
-}
-
-// Every entry point with `spec`, a constant in one caller, and the core call with the handle of `spec` in the other.
-@(private = "file")
-entry_points :: proc(t: ^testing.T, spec: html.Spec, bound: bool) {
-	src := transmute([]u8)string(`<a><b>1</b><c k="v">2</c><b>3</b></a>`)
-	b, perr := core.parse_path(".a.b")
-	walktest.expect_nil(t, perr)
-	defer core.path_destroy(&b)
-	c, cerr := core.parse_path(".a.c")
-	walktest.expect_nil(t, cerr)
-	defer core.path_destroy(&c)
-	paths := [?]core.Path{b, c}
-
-	doc, sdoc, mdoc, fdoc: core.Document
-	answer: core.Answer
-	berr, serr, merr, ferr, one, many, verr: core.Error
-	seen_one, seen_many: Seen
-	if bound {
-		verr = html.validate(src, .Fragment)
-		doc, berr = html.build(src, .Fragment)
-		sdoc, serr = html.scan(src, .Fragment, c)
-		mdoc, merr = html.scan(src, .Fragment, paths[:])
-		fdoc, answer, ferr = html.find(src, .Fragment, c)
-		one = html.each_answer(src, .Fragment, c, &seen_one, count_found)
-		many = html.each_answer(src, .Fragment, paths[:], &seen_many, count_found)
-	} else {
-		handle := html.as(spec)
-		verr = core.validate(src, handle)
-		doc, berr = core.build(src, handle)
-		sdoc, serr = build.scan(src, handle, c)
-		mdoc, merr = build.scan(src, handle, paths[:])
-		fdoc, answer, ferr = build.find(src, handle, c)
-		one = build.each_answer(src, handle, c, &seen_one, count_found)
-		many = build.each_answer(src, handle, paths[:], &seen_many, count_found)
-	}
-	defer core.destroy(&doc)
-	defer core.destroy(&sdoc)
-	defer core.destroy(&mdoc)
-	defer core.destroy(&fdoc)
-	for err in ([?]core.Error{verr, berr, serr, merr, ferr, one, many}) {
-		walktest.expect_nil(t, err)
-	}
-	// A document an entry point reads holds no services, and one read through the handle holds them.
-	testing.expect_value(t, core.services_of(doc.as) == nil, bound)
-	testing.expect_value(t, len(sdoc.answers), 1)
-	testing.expect_value(t, walktest.node_text(t, &sdoc, sdoc.answers[0].node), "2")
-	testing.expect_value(t, len(mdoc.answers), 2)
-	testing.expect_value(t, walktest.node_text(t, &mdoc, mdoc.answers[0].node), "2")
-	testing.expect_value(t, walktest.node_text(t, &mdoc, mdoc.answers[1].node), "3")
-	testing.expect_value(t, answer.outcome, core.Presence.Found)
-	testing.expect_value(t, seen_one.found, 1)
-	testing.expect_value(t, seen_many.found, 2)
-
-	answers, qerr := html.query(&doc, b, {dups = .All})
-	defer delete(answers)
-	walktest.expect_nil(t, qerr)
-	testing.expect_value(t, len(answers), 2)
-	testing.expect_value(t, walktest.node_text(t, &doc, answers[0].node), "1")
-	testing.expect_value(t, walktest.node_text(t, &doc, answers[1].node), "3")
+entry_points :: proc(src: []u8, c: core.Path, paths: []core.Path, r: ^walktest.Entry_Reads) {
+	r.errs[0] = html.validate(src, .Fragment)
+	r.doc, r.errs[1] = html.build(src, .Fragment)
+	r.sdoc, r.errs[2] = html.scan(src, .Fragment, c)
+	r.mdoc, r.errs[3] = html.scan(src, .Fragment, paths)
+	r.fdoc, r.answer, r.errs[4] = html.find(src, .Fragment, c)
+	r.errs[5] = html.each_answer(src, .Fragment, c, &r.one, walktest.count_found)
+	r.errs[6] = html.each_answer(src, .Fragment, paths, &r.many, walktest.count_found)
 }
 
 @(test)
 every_entry_point_reads_by_a_constant_spec_and_a_chosen_one :: proc(t: ^testing.T) {
-	entry_points(t, .Fragment, true)
 	chosen := html.Spec.Fragment
-	entry_points(t, chosen, false)
+	walktest.expect_entry_points(t, html.as(chosen), entry_points)
 }
 
 @(test)
 a_repeated_name_is_refused_only_when_asked :: proc(t: ^testing.T) {
-	src := transmute([]u8)string(`<a><b>1</b><b>2</b></a>`)
-	doc, err := html.build(src, .Fragment, {}, .Refuse)
-	defer core.destroy(&doc)
-	f, bad := walktest.fault_in(err)
-	testing.expect(t, bad)
-	testing.expect_value(t, f.kind, core.Fault_Kind.Duplicate_Key)
-	testing.expect_value(t, f.at, u64(strings.index(string(src), "b>2")))
-	path, _ := core.parse_path(".a.b")
-	defer core.path_destroy(&path)
-	_, serr := html.scan(src, .Fragment, path, {}, {dups = .Refuse})
-	_, refused := walktest.fault_in(serr)
-	testing.expect(t, refused)
-	walktest.expect_nil(t, html.each_answer(src, .Fragment, path, nil, proc(state: rawptr, a: core.Token_Answer) -> bool {return true}))
+	walktest.expect_repeated_name_refused_only_when_asked(t, proc(src: []u8, path: core.Path) -> (built, scanned, answered: core.Error) {
+		doc, err := html.build(src, .Fragment, {}, .Refuse)
+		defer core.destroy(&doc)
+		_, serr := html.scan(src, .Fragment, path, {}, {dups = .Refuse})
+		return err, serr, html.each_answer(src, .Fragment, path, nil, proc(state: rawptr, a: core.Token_Answer) -> bool {return true})
+	})
 }
 
 // A path answers through the build: found containers span their tags, and a stream stops when asked.

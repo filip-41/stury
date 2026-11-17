@@ -73,13 +73,7 @@ block_lead :: proc(b: ^Block_Writer, container: bool) -> (literal_at: int) {
 		b.ended = false
 		return int(l.col) + b.step
 	}
-	switch {
-	case l.n > 0:
-		if !b.ended {
-			write.put_byte(b.out, '\n')
-		}
-		write.put_run(b.out, int(l.col), ' ')
-	case l.reach == .Key:
+	if l.n > 0 || l.reach == .Key {
 		if !b.ended {
 			write.put_byte(b.out, '\n')
 		}
@@ -192,10 +186,9 @@ block_comment :: proc(b: ^Block_Writer, role: core.Role, text: string) {
 		append(&b.held, strings.clone(text))
 		return
 	}
-	switch {
-	case role == .Comment_Inline && !b.ended:
+	if role == .Comment_Inline && !b.ended {
 		write.put_byte(b.out, ' ')
-	case:
+	} else {
 		if !b.ended {
 			write.put_byte(b.out, '\n')
 		}
@@ -274,10 +267,9 @@ block_string :: proc(b: ^Block_Writer, s: string, tag := "") -> core.Typed_Error
 	if shape == .Literal {
 		put_block(b.out, s, shape, at)
 		b.ended = true
-		block_end_root(b)
-		return .None
+	} else {
+		put_scalar(b.out, s, shape, b.ascii)
 	}
-	put_scalar(b.out, s, shape, b.ascii)
 	block_end_root(b)
 	return .None
 }

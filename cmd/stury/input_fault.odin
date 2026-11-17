@@ -33,7 +33,8 @@ text_fault :: proc(ins: ^Inputs, found: core.Fault, at: int, end := -1) -> (jq.V
 		return cells_fault(ins, found)
 	}
 	if ins.spec != .Json {
-		fail_text(ins, found)
+		tell_fault(ins, found)
+		finish(ins.run, EXIT_INPUT)
 	}
 	f := literal_cut(data, found, ins.framing)
 	set_note(ins, fault_note(ins.name, data, f, ins.spec, &ins.run.opts, lead_of(ins), runtime.heap_allocator()))
@@ -107,12 +108,6 @@ abandoned :: proc(ins: ^Inputs, counted: []byte) -> (jq.Value, string, jq.Parse_
 	ev := jq.new_array(2)
 	append(&ev.items, message.build("Unfinished abandoned text at EOF at line %d, column %d", l, c), jq.new_array())
 	return ev, "", .Value
-}
-
-// The fault of the open file ends the run, told as `tell_fault` tells it.
-fail_text :: proc(ins: ^Inputs, fault: core.Fault) -> ! {
-	tell_fault(ins, fault)
-	finish(ins.run, EXIT_INPUT)
 }
 
 // The fault of the open file told as a parse error, after the output before it, as `NAME:LINE:COLUMN: SENTENCE` with

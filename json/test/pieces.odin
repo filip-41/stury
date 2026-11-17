@@ -20,6 +20,20 @@ import walktest "../../walktest"
 WIDTHS :: [?]int{1, 2, 6, 18}
 
 @(private = "file")
+pools_open :: proc(pools: ^[len(WIDTHS)]host.Pool) {
+	for w, i in WIDTHS {
+		host.pool_init(&pools[i], w)
+	}
+}
+
+@(private = "file")
+pools_close :: proc(pools: ^[len(WIDTHS)]host.Pool) {
+	for &p in pools {
+		host.pool_destroy(&p)
+	}
+}
+
+@(private = "file")
 whole_fault :: proc(src: []u8, spec: json.Spec) -> Maybe(core.Fault) {
 	switch spec {
 	case .Json:  return walktest.fault_of(json.validate(src, .Json))
@@ -61,12 +75,8 @@ CHAIN_PIECES := []string{`",,,,"`, `[1,[2,[3,",]"]],4]`, `{"a":",","b":[",",","]
 records_validate_on_threads :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	pools: [len(WIDTHS)]host.Pool
-	for w, i in WIDTHS {
-		host.pool_init(&pools[i], w)
-	}
-	defer for &p in pools {
-		host.pool_destroy(&p)
-	}
+	pools_open(&pools)
+	defer pools_close(&pools)
 	breakers := []string{"x", "\"", "]", "}", ",", "\n", "\x1e", "\\", "["}
 	buf := make([dynamic]u8, context.temp_allocator)
 	for seed in u64(1) ..= 3 {
@@ -126,12 +136,8 @@ records_validate_on_threads :: proc(t: ^testing.T) {
 records_validate_large_records :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	pools: [len(WIDTHS)]host.Pool
-	for w, i in WIDTHS {
-		host.pool_init(&pools[i], w)
-	}
-	defer for &p in pools {
-		host.pool_destroy(&p)
-	}
+	pools_open(&pools)
+	defer pools_close(&pools)
 	pad := strings.repeat("x", walktest.RECORDS_SLICE / 2 + 64, context.temp_allocator)
 	for faults in ([]u16{0, 1 << 3, 1 << 0 | 1 << 9 | 1 << 11}) {
 		lines := strings.builder_make(context.temp_allocator)
@@ -175,12 +181,8 @@ long_array :: proc() -> string {
 records_validate_a_spine :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	pools: [len(WIDTHS)]host.Pool
-	for w, i in WIDTHS {
-		host.pool_init(&pools[i], w)
-	}
-	defer for &p in pools {
-		host.pool_destroy(&p)
-	}
+	pools_open(&pools)
+	defer pools_close(&pools)
 	array := long_array()
 	texts: [len(SPINES)]string
 	for text, i in SPINES {
@@ -246,12 +248,8 @@ records_validate_a_spine :: proc(t: ^testing.T) {
 records_build_a_spine :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	pools: [len(WIDTHS)]host.Pool
-	for w, i in WIDTHS {
-		host.pool_init(&pools[i], w)
-	}
-	defer for &p in pools {
-		host.pool_destroy(&p)
-	}
+	pools_open(&pools)
+	defer pools_close(&pools)
 	array := long_array()
 	strict := json.as(.Json)
 	for text, i in SPINES {

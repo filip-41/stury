@@ -103,7 +103,6 @@ marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options,
 	return write.marshal_markup(plan, value, opts, stream, allocator, omits, built_write)
 }
 
-
 // The token spelling. The calls make a value in `write.MARKUP_TREE`, which the end reads back and writes. A scalar that
 // is no string and has no text the tree can hold bare is `.Unwritable`.
 @(private, rodata)

@@ -133,12 +133,7 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 			tell_fault(ins, f)
 			return false
 		} else if !bad && !texts {
-			written := true
-			if cells == writes_cells(o) {
-				written = put_document(run, ins, &doc)
-			} else {
-				written = put_rows(run, ins, &doc)
-			}
+			written := put_document(run, ins, &doc) if cells == writes_cells(o) else put_rows(run, ins, &doc)
 			core.destroy(&doc)
 			return written
 		}
@@ -239,7 +234,7 @@ cells_cut :: proc(run: ^Run, ins: ^Inputs, cut: int) {
 // that stream. False, told, when it cannot be.
 @(private = "file")
 put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
-	as := fmt_written_as(&run.opts)
+	as := written_as(&run.opts)
 	out := &run.output
 	text, dropped, err := core.write(doc, out.layout.opts, as, allocator = context.temp_allocator)
 	tell_dropped(ins.name, run.opts.to, dropped)
@@ -257,9 +252,8 @@ put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
 	return true
 }
 
-// The format fmt writes in, as --to and the output options say.
-@(private = "file")
-fmt_written_as :: proc(o: ^Opts) -> core.As {
+// The format fmt and the schema verbs write in, as --to and the output options say.
+written_as :: proc(o: ^Opts) -> core.As {
 	switch {
 	case writes_cells(o):
 		return cells_written_as(o)

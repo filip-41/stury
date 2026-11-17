@@ -13,11 +13,6 @@ same_error :: proc(a, b: core.Error) -> bool {
 	return fmt.tprint(a) == fmt.tprint(b)
 }
 
-collect :: proc(state: rawptr, a: core.Token_Answer) -> bool {
-	append((^[dynamic]core.Token_Answer)(state), a)
-	return true
-}
-
 // Takes every answer of `it` into `out`, and returns the error the read ended with.
 drain :: proc(it: ^json.Answer_Iter, out: ^[dynamic]core.Token_Answer) -> core.Error {
 	clear(out)
@@ -77,7 +72,7 @@ answers_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 		for path, i in paths {
 			read := core.Path_Options{dups = .First if round % 3 == 0 else .Last}
 			clear(&want)
-			err := json.each_answer(src, S, path, &want, collect, read = read)
+			err := json.each_answer(src, S, path, &want, walktest.collect_answer, read = read)
 			for batch in ([]int{1, 3, 64}) {
 				it := json.answers(src, S, path, read = read)
 				it.max_batch = batch
@@ -133,7 +128,7 @@ answers_refuse :: proc(t: ^testing.T) {
 		append(&deep, '}')
 	}
 	opts := json.Options{max_depth = 2048, tolerate = {.Lone_Surrogate}}
-	want_err := json.each_answer(deep[:], .Json, path, &want, collect, opts, read)
+	want_err := json.each_answer(deep[:], .Json, path, &want, walktest.collect_answer, opts, read)
 	testing.expectf(t, want_err == nil && len(want) > 1500, "each_answer: %d answers, %v", len(want), want_err)
 	it = json.answers(deep[:], .Json, path, opts, read)
 	err = drain(&it, &got)

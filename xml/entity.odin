@@ -91,10 +91,8 @@ entity_reference :: #force_no_inline proc "contextless" (d: ^Dtd, p, end: [^]u8,
 	} else if .Cdata_End in refs && !attr {
 		return n, .Bad_Char, .Cdata_End, 0
 	}
-	if d.block != nil && d.depth == 0 {
-		if !budget(d, size) {
-			return n, .Too_Wide, .Expansion, 0
-		}
+	if d.block != nil && d.depth == 0 && !budget(d, size) {
+		return n, .Too_Wide, .Expansion, 0
 	}
 	if .Markup in refs && !attr {
 		return n, .Bad_Char, .None, i + 1

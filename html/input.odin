@@ -128,7 +128,7 @@ prescan :: proc "contextless" (b: []u8) -> (enc: Encoding, at: u64, found: bool)
 			continue
 		}
 		switch {
-		case has_at(b, i, "<!--"):
+		case i + 4 <= n && string(b[i:][:4]) == "<!--":
 			// The `>` of the first `-->` from the comment's own `--`, so `<!-->` is a comment.
 			j := i + 2
 			for j + 2 < n && !(b[j] == '-' && b[j + 1] == '-' && b[j + 2] == '>') {
@@ -401,11 +401,6 @@ compare_label :: proc "contextless" (s: []u8, label: string) -> int {
 		}
 	}
 	return len(s) - len(label)
-}
-
-@(private)
-has_at :: #force_inline proc "contextless" (b: []u8, i: int, s: string) -> bool {
-	return i + len(s) <= len(b) && string(b[i:][:len(s)]) == s
 }
 
 // ASCII whitespace as the prescan reads it: tab, line feed, form feed, carriage return and space.

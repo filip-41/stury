@@ -38,19 +38,6 @@ fact_named :: proc(name: string) -> (Fact, bool) {
 	return .Comment, false
 }
 
-// `.@role` of `v`: its comments of `role` as an array of strings, or null when it has none.
-comments_value :: proc(v: Value, role: core_pkg.Role) -> Value {
-	bodies, _ := comments(v, role)
-	if len(bodies) == 0 {
-		return nil
-	}
-	a := new_array(len(bodies))
-	for b in bodies {
-		append(&a.items, b)
-	}
-	return a
-}
-
 // `v` with `role` written as `bodies`: a string is one body, an array of strings one per element, and null or an
 // empty array removes the role.
 write_comments :: proc(ip: ^Interp, v: Value, role: core_pkg.Role, bodies: Value) -> (Value, Signal) {
@@ -140,7 +127,15 @@ fact_value :: proc(v: Value, fact: Fact) -> Value {
 	info := core_pkg.FACTS[fact]
 	switch info.class {
 	case .Comment:
-		return comments_value(v, info.role)
+		bodies, _ := comments(v, info.role)
+		if len(bodies) == 0 {
+			return nil
+		}
+		a := new_array(len(bodies))
+		for b in bodies {
+			append(&a.items, b)
+		}
+		return a
 	case .Property:
 		return property_value(v, fact)
 	case .Markup:

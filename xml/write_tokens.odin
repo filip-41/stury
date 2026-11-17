@@ -10,7 +10,6 @@ import core "../core"
 import typed "../core/typed"
 import write "../core/write"
 
-
 @(private, rodata)
 TOKENS := write.Token_Spelling {
 	tree = write.MARKUP_TREE,

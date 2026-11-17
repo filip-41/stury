@@ -167,15 +167,11 @@ Text_Row :: struct {
 }
 
 rows :: proc(src: []u8) -> int {
-	return read_rows(src, Table_Row, &row_plan)
+	return load(src, dsv.as(.Csv), &row_plan, (^[dynamic]Table_Row)(nil))
 }
 
 text :: proc(src: []u8) -> int {
-	return read_rows(src, Text_Row, &text_plan)
-}
-
-read_rows :: proc(src: []u8, $T: typeid, plan: ^typed.Plan) -> int {
-	return load(src, dsv.as(.Csv), plan, (^[dynamic]T)(nil))
+	return load(src, dsv.as(.Csv), &text_plan, (^[dynamic]Text_Row)(nil))
 }
 
 // Reads every record of `src` into a `T`, strings borrowed, appending to `list` when it is not nil. The result is the

@@ -238,9 +238,9 @@ column_key :: #force_inline proc "contextless" (keys: []core.Token, c: int) -> c
 }
 
 // Emits a run of a record's cells as `Plain` values. `$ESC` compiles the TSV backslash test and the ill-formed UTF-8
-// test in or out, chosen per block by `plain_block`. With `$KEYS` the record is headed, so each cell's column key precedes its value and the cell's own
-// count is that key's index, which the run keeps no other counter for. `$PAST` lets that index pass the header's last
-// cell, for `.Ragged`.
+// test in or out, chosen per block by `plain_block`. With `$KEYS` the record is headed, so each cell's column key
+// precedes its value and the cell's own count is that key's index, which the run keeps no other counter for. `$PAST`
+// lets that index pass the header's last cell, for `.Ragged`.
 @(private)
 values_run :: #force_inline proc "contextless" ($ESC, $KEYS, $PAST: bool, h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, base: [^]u8, keys: []core.Token, pos: int, d: u64, field_lo, cells: int, bs: u64, carry: bool, ill: u64, ill_carry: bool, $S: Spec) -> (field_lo2, cells2: int, r: u64, done: bool) {
 	dm := d

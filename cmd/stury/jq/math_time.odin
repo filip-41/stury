@@ -223,7 +223,6 @@ days_from_civil :: proc(y, m, d: i64) -> i64 {
 	return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468
 }
 
-
 // ---- RFC 3339
 
 // fromrfc3339: `YYYY-MM-DDThh:mm:ss[.fraction](Z|+hh:mm|-hh:mm)` as seconds since the epoch, the fraction kept. The

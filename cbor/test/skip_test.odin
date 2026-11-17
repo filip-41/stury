@@ -77,17 +77,7 @@ skipping_judges_mutated_items :: proc(t: ^testing.T) {
 	for _ in 0 ..< 3000 {
 		g.out = make([dynamic]u8, context.temp_allocator)
 		put_item(&g, 0, false)
-		src := g.out[:]
-		switch below(&g, 3) {
-		case 0:
-			src[below(&g, len(src))] = u8(below(&g, 256))
-		case 1:
-			src = src[:below(&g, len(src))]
-		case:
-			append(&g.out, u8(below(&g, 256)))
-			src = g.out[:]
-		}
-		skip_law(t, &tally, src)
+		skip_law(t, &tally, mutate(&g))
 		free_all(context.temp_allocator)
 	}
 	testing.expect(t, 0 < tally.faulted)
@@ -113,10 +103,8 @@ skipping_reads_the_answer :: proc(t: ^testing.T) {
 	testing.expect(t, full_err != nil, "without stop_early the bytes past the answer are judged")
 
 	bad := hex("a2 61 62 61 c3 61 61 01")
-	_, bad_answer, bad_err := cbor.find(bad, .Cbor, core.Path{steps = {core.Name("a")}})
-	_ = bad_answer
+	_, _, bad_err := cbor.find(bad, .Cbor, core.Path{steps = {core.Name("a")}})
 	testing.expect(t, bad_err != nil)
-	_, early_answer, early_err := cbor.find(bad[:3], .Cbor, core.Path{steps = {core.Name("b")}}, read = {stop_early = true})
-	_ = early_answer
+	_, _, early_err := cbor.find(bad[:3], .Cbor, core.Path{steps = {core.Name("b")}}, read = {stop_early = true})
 	testing.expect(t, early_err != nil)
 }

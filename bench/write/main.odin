@@ -19,7 +19,6 @@
 package write_bench
 
 import "core:fmt"
-import "core:mem"
 import "core:os"
 import "core:path/filepath"
 import "core:time"
@@ -30,6 +29,15 @@ import json "../../json"
 
 CHECK_OFFSET :: u64(14695981039346656037)
 CHECK_PRIME :: u64(1099511628211)
+
+// FNV-1a of the output text, taken outside the clock.
+checksum :: proc(text: []u8) -> u64 {
+	h := CHECK_OFFSET
+	for b in text {
+		h = (h ~ u64(b)) * CHECK_PRIME
+	}
+	return h
+}
 
 main :: proc() {
 	if len(os.args) < 3 || (os.args[1] != "string" && os.args[1] != "typed" && os.args[1] != "dump" && os.args[1] != "doc" && os.args[1] != "format" && os.args[1] != "dsv" && os.args[1] != "dsvdoc" && os.args[1] != "records") {
@@ -59,7 +67,7 @@ main :: proc() {
 	}
 	strs, total := strings_of(src)
 	times: [timing.TIMED]i64
-	h := CHECK_OFFSET
+	h: u64
 	size := 0
 	for i in 0 ..< timing.WARMUP + timing.TIMED {
 		spill: [write.ROOM_MAX]u8 = ---
@@ -78,9 +86,7 @@ main :: proc() {
 		}
 		if i == 0 {
 			size = len(text)
-			for b in text {
-				h = (h ~ u64(b)) * CHECK_PRIME
-			}
+			h = checksum(text)
 		}
 		delete(text)
 	}
@@ -132,6 +138,5 @@ strings_of :: proc(src: []u8) -> (strs: []string, total: int) {
 		total += len(s)
 		append(&list, s)
 	}
-	_ = mem.copy
 	return list[:], total
 }

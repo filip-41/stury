@@ -294,10 +294,8 @@ indices_of :: proc(t: Value, sub: Value) -> Value {
 	if m == 0 {
 		return out
 	}
-	if n * m >= 256 {
-		if scalar_indices(t, sub, out) {
-			return out
-		}
+	if n * m >= 256 && scalar_indices(t, sub, out) {
+		return out
 	}
 	outer: for i in 0 ..= n - m {
 		for j in 0 ..< m {

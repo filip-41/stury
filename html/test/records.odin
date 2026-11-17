@@ -36,17 +36,9 @@ a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, n, 1)
 
-	Counted :: struct {
-		records: int,
-	}
-	counted: Counted
-	walktest.expect_nil(t, html.records_each(src, .Document, .Concatenated, proc(c: ^Counted, piece: ^html.Record_Reader, k: int) -> bool {
-		for _ in html.records_next(piece) {
-			c.records += 1
-		}
-		return true
-	}, &counted))
-	testing.expect_value(t, counted.records, 1)
+	each := 0
+	walktest.expect_nil(t, html.records_each(src, .Document, .Concatenated, walktest.count_records, &each))
+	testing.expect_value(t, each, 1)
 
 	empty := html.records_open(nil, .Document)
 	defer html.records_close(&empty)

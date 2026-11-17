@@ -567,6 +567,17 @@ close_implied :: proc(t: ^Html_Tree, except := Tag.Other, class := Tag_Class.Imp
 	}
 }
 
+// Pops the elements `except` leaves out of the implied end tags, reports an open element that is not HTML `tag`, then
+// pops through the first element of a tag in `until`, `tag` for none.
+@(private)
+pop_closed :: proc(t: ^Html_Tree, tag: Tag, until := Tags{}, except := Tag.Other, class := Tag_Class.Implied_End) {
+	close_implied(t, except, class)
+	if !is_html(current_node(t), tag) {
+		misplaced(t, .Unclosed_Element)
+	}
+	pop_until(t, until if until != {} else Tags{tag})
+}
+
 @(private)
 has_template :: proc(t: ^Html_Tree) -> bool {
 	#reverse for m in t.stack {
@@ -603,11 +614,7 @@ clear_to :: proc(t: ^Html_Tree, ctx: Tag_Class) {
 // Closes a `p` element.
 @(private)
 close_p :: proc(t: ^Html_Tree) {
-	close_implied(t, .P)
-	if !is_html(current_node(t), .P) {
-		misplaced(t, .Unclosed_Element)
-	}
-	pop_until(t, {.P})
+	pop_closed(t, .P, except = .P)
 }
 
 // Closes a `p` element when one is in button scope.
@@ -734,31 +741,22 @@ extend_text :: proc(t: ^Html_Tree, n: u32, s: Span) {
 	t.nodes[n].hi = s.lo + u64(s.n)
 }
 
-// Inserts comment `tok` into `parent`, or at the appropriate place for 0.
+// Inserts comment or instruction `tok` into `parent`, or at the appropriate place for 0.
 @(private)
-insert_comment :: proc(t: ^Html_Tree, tok: ^Html_Token, parent: u32 = 0) {
+insert_misc :: proc(t: ^Html_Tree, tok: ^Html_Token, parent: u32 = 0) {
+	node := Tree_Node{kind = .Comment, name = tok.data, lo = tok.lo, hi = tok.hi}
+	if tok.kind == .Instruction {
+		node = {kind = .Instruction, name = tok.name, lo = tok.lo, hi = tok.hi, a = add_piece(t, tok.data)}
+	}
+	n := new_node(t, node)
+	if n == 0 {
+		return
+	}
 	at, before := parent, u32(0)
 	if at == 0 {
 		at, before, _ = place(t)
 	}
-	n := new_node(t, {kind = .Comment, name = tok.data, lo = tok.lo, hi = tok.hi})
-	if n != 0 {
-		link(t, at, n, before)
-	}
-}
-
-// Inserts processing instruction `tok` into `parent`, or at the appropriate place for 0.
-@(private)
-insert_instruction :: proc(t: ^Html_Tree, tok: ^Html_Token, parent: u32 = 0) {
-	at, before := parent, u32(0)
-	if at == 0 {
-		at, before, _ = place(t)
-	}
-	data := add_piece(t, tok.data)
-	n := new_node(t, {kind = .Instruction, name = tok.name, lo = tok.lo, hi = tok.hi, a = data})
-	if n != 0 {
-		link(t, at, n, before)
-	}
+	link(t, at, n, before)
 }
 
 // Adds attributes of `tok` that element `n` lacks, for an `html` or `body` start tag seen again.
@@ -818,7 +816,6 @@ attribute_of :: proc(t: ^Html_Tree, attrs: []Attribute, name: string) -> ^Attrib
 	}
 	return nil
 }
-
 
 // Decodes `s` into the scratch buffer from byte `from` and returns it.
 @(private)

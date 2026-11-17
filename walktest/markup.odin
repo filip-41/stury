@@ -7,6 +7,8 @@ import "core:strings"
 import "core:testing"
 import core "../core"
 import compose "../core/compose"
+import build "../core/build"
+import records "../core/records"
 import json "../json"
 
 // The reads the markup formats' tests share over a built document: a node's text, a member reached by names, an
@@ -33,6 +35,18 @@ member_at :: proc(t: ^testing.T, doc: ^core.Document, path: string, loc := #call
 		node = core.member(doc, node, string(name)) or_return
 	}
 	return node, true
+}
+
+// The first member of element or table `parent` named `name`, or `core.NO_NODE`.
+member :: proc(doc: ^core.Document, parent: core.Node_Index, name: string) -> core.Node_Index {
+	it := core.pairs(doc, parent)
+	buf: [256]u8
+	for key, val in core.pair_next(&it) {
+		if text, _ := core.text(doc, key, buf[:]); text == name {
+			return val
+		}
+	}
+	return core.NO_NODE
 }
 
 // The text and the kind of the node `path` reaches, `.Null` with no text when a name is missing.
@@ -383,4 +397,125 @@ markup_doc :: proc(model: string, attributes: []Markup_Attribute, readers: ^core
 Markup_Attribute :: struct {
 	node: core.Node_Index,
 	text: string,
+}
+
+// Scans every record `it` gives for `path` and expects `want` answers in all.
+expect_records_scanned :: proc(t: ^testing.T, it: ^records.Reader, path: core.Path, want: int, loc := #caller_location) {
+	found := 0
+	for {
+		_, got, err, more := records.scan(it, path)
+		if !more {
+			break
+		}
+		expect_nil(t, err, loc)
+		found += len(got.answers)
+	}
+	testing.expect_value(t, found, want, loc)
+}
+
+// A `records_each` task that counts the records of each piece it is handed.
+count_records :: proc(n: ^int, piece: ^records.Reader, k: int) -> bool {
+	for _ in records.next(piece) {
+		n^ += 1
+	}
+	return true
+}
+
+Found_Count :: struct {
+	found: int,
+}
+
+count_found :: proc(state: rawptr, a: core.Token_Answer) -> bool {
+	if a.outcome == .Found {
+		(^Found_Count)(state).found += 1
+	}
+	return true
+}
+
+// What the entry points of a format's markup give for `ENTRY_SRC`.
+Entry_Reads :: struct {
+	doc, sdoc, mdoc, fdoc: core.Document,
+	answer:                core.Answer,
+	errs:                  [7]core.Error,
+	one, many:             Found_Count,
+}
+
+ENTRY_SRC :: `<a><b>1</b><c k="v">2</c><b>3</b></a>`
+
+// The format's own entry points on `ENTRY_SRC` and the paths `.a.c`, `.a.b`, filling `r`: validate, build, scan one
+// path, scan both, find the first, and `each_answer` on one path and on both, in the order of `r.errs`.
+Entry_Run :: proc(src: []u8, c: core.Path, paths: []core.Path, r: ^Entry_Reads)
+
+// The format's entry points under `run`, and the core calls with `handle`, give the same answers and differ only in
+// whether the document holds the format's services.
+expect_entry_points :: proc(t: ^testing.T, handle: core.As, run: Entry_Run, loc := #caller_location) {
+	expect_entry_reads(t, handle, run, true, loc)
+	expect_entry_reads(t, handle, nil, false, loc)
+}
+
+@(private = "file")
+expect_entry_reads :: proc(t: ^testing.T, handle: core.As, run: Entry_Run, bound: bool, loc: runtime.Source_Code_Location) {
+	src := transmute([]u8)string(ENTRY_SRC)
+	b, perr := core.parse_path(".a.b")
+	expect_nil(t, perr, loc)
+	defer core.path_destroy(&b)
+	c, cerr := core.parse_path(".a.c")
+	expect_nil(t, cerr, loc)
+	defer core.path_destroy(&c)
+	paths := [?]core.Path{b, c}
+	r: Entry_Reads
+	if bound {
+		run(src, c, paths[:], &r)
+	} else {
+		r.errs[0] = core.validate(src, handle)
+		r.doc, r.errs[1] = core.build(src, handle)
+		r.sdoc, r.errs[2] = build.scan(src, handle, c)
+		r.mdoc, r.errs[3] = build.scan(src, handle, paths[:])
+		r.fdoc, r.answer, r.errs[4] = build.find(src, handle, c)
+		r.errs[5] = build.each_answer(src, handle, c, &r.one, count_found)
+		r.errs[6] = build.each_answer(src, handle, paths[:], &r.many, count_found)
+	}
+	defer core.destroy(&r.doc)
+	defer core.destroy(&r.sdoc)
+	defer core.destroy(&r.mdoc)
+	defer core.destroy(&r.fdoc)
+	for err in r.errs {
+		expect_nil(t, err, loc)
+	}
+	// A document an entry point reads holds no services, and one read through the handle holds them.
+	testing.expect_value(t, core.services_of(r.doc.as) == nil, bound, loc)
+	testing.expect_value(t, len(r.sdoc.answers), 1, loc)
+	testing.expect_value(t, node_text(t, &r.sdoc, r.sdoc.answers[0].node, loc), "2", loc)
+	testing.expect_value(t, len(r.mdoc.answers), 2, loc)
+	testing.expect_value(t, node_text(t, &r.mdoc, r.mdoc.answers[0].node, loc), "2", loc)
+	testing.expect_value(t, node_text(t, &r.mdoc, r.mdoc.answers[1].node, loc), "3", loc)
+	testing.expect_value(t, r.answer.outcome, core.Presence.Found, loc)
+	testing.expect_value(t, r.one.found, 1, loc)
+	testing.expect_value(t, r.many.found, 2, loc)
+
+	answers, qerr := build.query_doc(&r.doc, b, {dups = .All})
+	defer delete(answers)
+	expect_nil(t, qerr, loc)
+	testing.expect_value(t, len(answers), 2, loc)
+	testing.expect_value(t, node_text(t, &r.doc, answers[0].node, loc), "1", loc)
+	testing.expect_value(t, node_text(t, &r.doc, answers[1].node, loc), "3", loc)
+}
+
+// The errors a format's build, `scan` with `.Refuse` and `each_answer` give on `<a><b>1</b><b>2</b></a>` and `.a.b`.
+Refusal_Run :: proc(src: []u8, path: core.Path) -> (built, scanned, answered: core.Error)
+
+// A repeated name is a fault at its byte for the build and the scan that ask to refuse it, and no fault for the
+// default `each_answer`.
+expect_repeated_name_refused_only_when_asked :: proc(t: ^testing.T, run: Refusal_Run, loc := #caller_location) {
+	src := "<a><b>1</b><b>2</b></a>"
+	path, _ := core.parse_path(".a.b")
+	defer core.path_destroy(&path)
+	built, scanned, answered := run(transmute([]u8)src, path)
+	f, bad := fault_in(built)
+	testing.expect(t, bad, loc = loc)
+	testing.expect_value(t, f.kind, core.Fault_Kind.Duplicate_Key, loc)
+	testing.expect_value(t, f.at, u64(strings.index(src, "b>2")), loc)
+	_, refused := fault_in(scanned)
+	testing.expect(t, refused, loc = loc)
+	expect_nil(t, answered, loc)
 }

@@ -642,11 +642,10 @@ entity_declaration :: proc "contextless" (d: ^Dtd, p, end: [^]u8, stored: bool) 
 				return q, {kind = .No_Memory}
 			}
 			e.flags += {.Lit_Stored, .Stored}
-			e.text_lo, e.text_n = e.lit_lo, e.lit_n
 		} else {
 			e.lit_lo = u64(intrinsics.ptr_sub(raw_data(value), raw_data(d.src)))
-			e.text_lo, e.text_n = e.lit_lo, e.lit_n
 		}
+		e.text_lo, e.text_n = e.lit_lo, e.lit_n
 		if refs {
 			e.text_lo, e.text_n, ok = replacement_text(d, value)
 			if !ok {

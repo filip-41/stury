@@ -89,14 +89,6 @@ compare_keys :: proc(a, b: []Sort_Atom) -> int {
 	return -1 if len(a) < len(b) else (1 if len(a) > len(b) else 0)
 }
 
-// The places of `ks` in their keys' order. Equal keys keep input order.
-@(private = "file")
-sorted_order :: proc(ks: []Keyed) -> []int {
-	// The left key is asked whether it is above the right, as jq's qsort asks: a nan is below every key, another nan
-	// too, so keys of nan keep their input order.
-	return merge_order(ks, proc(a, b: Keyed) -> bool {return compare_keys(a.key, b.key) > 0})
-}
-
 // The places of `xs` in order: a bottom-up merge sort that takes the right element first only when the left is `above`
 // it, so equal elements keep input order.
 @(private = "file")
@@ -126,7 +118,7 @@ merge_order :: proc(xs: []$T, $above: proc(a, b: T) -> bool) -> []int {
 	return a
 }
 
-// sorted_order() of keys that are each one null, boolean or number, none nan: an LSD radix sort of the numbers' bits,
+// The places of keys that are each one null, boolean or number, none nan: an LSD radix sort of the numbers' bits,
 // as stable as the merge. It is nil when a key is anything else, or when two numbers of one double differ as decimals. The keys are `ks`', or with `items` the items
 // themselves, read without making their atoms. `ties` marks each place whose key is the one before it.
 @(private = "file")
@@ -243,7 +235,7 @@ short_integer :: proc(lit: string) -> bool {
 	return true
 }
 
-// sorted_order() of keys that are each one string: the distinct strings sorted, and every element counted into its
+// The places of keys that are each one string: the distinct strings sorted, and every element counted into its
 // string's place. It is nil when the keys are not all one string. `ties` as number_key_order() gives them.
 @(private = "file")
 string_key_order :: proc(ks: []Keyed) -> (order: []int, ties: []bool) {
@@ -338,7 +330,7 @@ keys_of :: proc(items: []Value) -> []Keyed {
 }
 
 // The sorted members of the objects among the atoms of the sort under way, each sorted once for
-// sorted_order() and not at each of its comparisons. Kept beside the atoms, whose size sort_by on numbers pays for.
+// the sort and not at each of its comparisons. Kept beside the atoms, whose size sort_by on numbers pays for.
 // The table is made anew in the sort's allocator each time: that may be an input's or a reduce's arena, freed
 // before the next sort, which a table kept across sorts would still point into.
 @(private = "file", thread_local)
@@ -370,7 +362,9 @@ sort_keyed :: proc(ip: ^Interp, ks: []Keyed, depth: int) -> (order: []int, ties:
 	}
 	if order == nil {
 		sort_object_keys(ks)
-		order = sorted_order(ks)
+		// The left key is asked whether it is above the right, as jq's qsort asks: a nan is below every key, another nan
+		// too, so keys of nan keep their input order.
+		order = merge_order(ks, proc(a, b: Keyed) -> bool {return compare_keys(a.key, b.key) > 0})
 	}
 	if too_deep {
 		return nil, nil, fail(ip, "Comparison too deep")

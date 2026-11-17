@@ -131,8 +131,7 @@ next_item :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) {
 }
 
 judge_item :: proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) {
-	fault, bad := validate_text(rec.text, handle_rules(it.as)).?
-	if bad {
+	if fault, bad := validate_text(rec.text, handle_rules(it.as)).?; bad {
 		fault.at += rec.at
 		return fault
 	}

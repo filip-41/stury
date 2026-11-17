@@ -12,6 +12,14 @@ import walktest "../../walktest"
 
 // Building with an allocator that refuses an allocation: reservations, retries and the errors they keep.
 
+@(private = "file")
+string_of_8_mb :: proc() -> []u8 {
+	src := make([]u8, 8 << 20, context.allocator)
+	mem.set(raw_data(src), 'a', len(src))
+	src[0], src[len(src) - 1] = '"', '"'
+	return src
+}
+
 // The first reservation is one node, 16 bytes, per two source bytes. An 8 MB arena refuses an 8 MB text holding one
 // string, and the retry, sized by a count, fits. A text of 2,000,000 nested arrays needs 2,000,001 nodes, 32 MB, and
 // still fails with `.No_Memory`.
@@ -23,13 +31,8 @@ reservation_retry :: proc(t: ^testing.T) {
 	mem.arena_init(&arena, backing)
 	alloc := mem.arena_allocator(&arena)
 
-	src := make([]u8, 8 << 20, context.allocator)
+	src := string_of_8_mb()
 	defer delete(src)
-	src[0] = '"'
-	for i in 1 ..< len(src) - 1 {
-		src[i] = 'a'
-	}
-	src[len(src) - 1] = '"'
 	doc, err := json.build(src, .Json, {}, .Last, alloc)
 	testing.expectf(t, err == nil, "longtext in 8 MB: %v", err)
 	core.destroy(&doc)
@@ -58,13 +61,8 @@ sparse_text_fits_small_arena :: proc(t: ^testing.T) {
 	arena: mem.Arena
 	mem.arena_init(&arena, backing)
 
-	src := make([]u8, 8 << 20, context.allocator)
+	src := string_of_8_mb()
 	defer delete(src)
-	src[0] = '"'
-	for i in 1 ..< len(src) - 1 {
-		src[i] = 'a'
-	}
-	src[len(src) - 1] = '"'
 	doc, err := json.build(src, .Json, {}, .Last, mem.arena_allocator(&arena))
 	defer core.destroy(&doc)
 	testing.expectf(t, err == nil, "8 MB string in 1 MB arena: %v", err)

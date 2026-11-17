@@ -34,7 +34,6 @@ checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Check
 	return {checks_of(S), bound_as(S, opts)}
 }
 
-
 // Builds the plan of `T` for dsv's spelling, as `typed.plan_make` does, and refuses a `T` that is no list of rows and no
 // row. A write by the plan is of spec `spec` with the delimiter, comment byte, `no_header`, `crlf` and `.Ragged` of
 // `opts`, and `.Bad_Option` when the spec cannot spell them. A read takes its spec and options at the call. The plan
@@ -131,7 +130,13 @@ read_text :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.P
 	}
 	h := Cells_Of(H){refuse_repeats = read.dups == .Refuse}
 	frames: [ROW_FRAMES]typed.Frame = ---
-	regs, err := start_cells(&h, src, plan, bound_as(S, opts), T, target, read, frames[:], allocator)
+	regs: core.Hook_Regs
+	err: core.Typed_Refusal
+	when H == typed.Check {
+		regs, err = typed.check_start(&h.r, src, typed.untracked(plan), bound_as(S, opts), T, target, read, typed.untracked_frames(frames[:]), allocator)
+	} else {
+		regs, err = typed.read_start(&h.r, src, plan, bound_as(S, opts), T, target, read, frames[:], allocator, false)
+	}
 	if err.kind != .None {
 		return err
 	}
@@ -166,16 +171,6 @@ read_text :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.P
 		fault_position(&h, &regs)
 	}
 	return typed.read_end(&h.r, regs, fault)
-}
-
-// Starts the typed read of `h`, a model's check under `typed.Check`.
-@(private)
-start_cells :: proc(h: ^Cells_Of($H), src: []u8, plan: ^typed.Plan, as: core.As, T: typeid, target: rawptr, read: typed.Read_Options, frames: []typed.Frame, allocator: runtime.Allocator) -> (core.Hook_Regs, core.Typed_Refusal) {
-	when H == typed.Check {
-		return typed.check_start(&h.r, src, typed.untracked(plan), as, T, target, read, typed.untracked_frames(frames), allocator)
-	} else {
-		return typed.read_start(&h.r, src, plan, as, T, target, read, frames, allocator, false)
-	}
 }
 
 // Reads the plan's row type into `h`: the row, whether the target is one row, the token that opens a row, the register

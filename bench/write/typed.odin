@@ -176,10 +176,7 @@ lane :: proc($T: typeid, src: []u8, pretty, dump: bool) {
 			times[i - timing.WARMUP] = d
 		}
 	}
-	h := CHECK_OFFSET
-	for b in text {
-		h = (h ~ u64(b)) * CHECK_PRIME
-	}
+	h := checksum(text)
 	median := timing.median(&times)
 	fmt.printfln("gb_per_s=%.3f best=%.3f ns=%d out=%d check=%d", f64(len(text)) / f64(median), f64(len(text)) / f64(times[0]), median, len(text), h)
 }
@@ -198,15 +195,13 @@ records_lane :: proc(src: []u8) {
 	fixed := runtime.Allocator{fixed_output_proc, &output}
 	times, list_times: [timing.TIMED]i64
 	size, list_size: int
-	h := CHECK_OFFSET
+	h: u64
 	for i in 0 ..< timing.WARMUP + timing.TIMED {
 		start := time.tick_now()
 		text, err := records.marshal(value.logs, &plan, json.as(.Json), allocator = fixed)
 		d := i64(time.tick_since(start))
 		if i == 0 {
-			for b in text {
-				h = (h ~ u64(b)) * CHECK_PRIME
-			}
+			h = checksum(text)
 		}
 		size = len(text)
 		start = time.tick_now()
