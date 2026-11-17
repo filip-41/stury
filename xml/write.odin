@@ -36,6 +36,7 @@ Writer :: struct {
 	kept:  int, // the facts written
 	facts: []core.Fact, // with `own`, the comments, instructions and doctype by their place in the source
 	next:  int, // the first of `facts` not yet written
+	seek:  int, // where the facts of the elements not yet written start in the document's
 	ended: int, // the output's length after the line end that last ended an inline comment
 	buf:   [512]u8,
 }
@@ -143,7 +144,7 @@ put_element :: proc(w: ^Writer, key, value: core.Node_Index, depth: int, laid: b
 	write.put_text(&w.out, string(name))
 	// An attribute that stands before the element's name is a default its doctype declares. A read of the written text
 	// supplies it again, so it is counted and not written.
-	for f in core.all_facts(w.doc, value) {
+	for f in value_facts(w, value) {
 		if f.role == .Attribute {
 			w.kept += 1
 			if f.lo > at {
@@ -153,15 +154,17 @@ put_element :: proc(w: ^Writer, key, value: core.Node_Index, depth: int, laid: b
 		}
 	}
 	t := w.doc.nodes[value]
-	span := core.span(w.doc, value)
 	#partial switch core.kind(w.doc, value) {
 	case .Object:
 		write.put_byte(&w.out, '>')
 		inner, last_element := put_children(w, value, depth) or_return
-		flush(w, t.lo + u64(len(span)) - 1, depth + 1, .Indent if inner else .Foot if last_element else .None) or_return
+		// The end of the element is found only for facts that may stand inside it.
+		if w.next < len(w.facts) {
+			flush(w, t.lo + u64(len(core.span(w.doc, value))) - 1, depth + 1, .Indent if inner else .Foot if last_element else .None) or_return
+		}
 		indent(w, inner, depth)
 	case .Null:
-		if t.kind != .Plain || len(span) == 0 {
+		if t.kind != .Plain || len(core.span(w.doc, value)) == 0 {
 			write.put_text(&w.out, "/>")
 			return .None
 		}
@@ -174,12 +177,28 @@ put_element :: proc(w: ^Writer, key, value: core.Node_Index, depth: int, laid: b
 	return .None
 }
 
+// The facts of value node `value`. The elements come in node order, so the search starts where the last one's ended.
+@(private)
+value_facts :: #force_inline proc(w: ^Writer, value: core.Node_Index) -> []core.Fact {
+	all := w.doc.facts
+	i := w.seek
+	for i < len(all) && all[i].node < value {
+		i += 1
+	}
+	w.seek = i
+	j := i
+	for j < len(all) && all[j].node == value {
+		j += 1
+	}
+	return all[i:j]
+}
+
 // Writes the element of `name` and value node `value` whole when it is a text copied as it stands, has no attribute and
 // fits one room of the output, with one copy per part. Returns false, having written nothing, for any other element.
 @(private)
 put_leaf :: #force_inline proc(w: ^Writer, name: []u8, value: core.Node_Index) -> bool {
 	t := w.doc.nodes[value]
-	if t.kind != .Plain || !write.copies_raw(w.opts) || len(core.all_facts(w.doc, value)) != 0 {
+	if t.kind != .Plain || !write.copies_raw(w.opts) || len(value_facts(w, value)) != 0 {
 		return false
 	}
 	span := core.span(w.doc, value)
@@ -469,10 +488,19 @@ put_raw :: proc(w: ^Writer, span: []u8) {
 }
 
 @(private)
-put_close :: proc(out: ^write.Out, name: []u8) {
-	write.put_text(out, "</")
-	write.put_text(out, string(name))
-	write.put_byte(out, '>')
+put_close :: #force_inline proc(out: ^write.Out, name: []u8) {
+	n := len(name)
+	if n + 3 > write.ROOM_MAX {
+		write.put_text(out, "</")
+		write.put_text(out, string(name))
+		write.put_byte(out, '>')
+		return
+	}
+	p := write.room(out, n + 3)
+	p[0], p[1] = '<', '/'
+	intrinsics.mem_copy_non_overlapping(p[2:], raw_data(name), n)
+	p[2 + n] = '>'
+	out.cursor += n + 3
 }
 
 // Writes `s` as character data, `among` an element's children or not. An empty text is `.Unwritable`, since it reads
