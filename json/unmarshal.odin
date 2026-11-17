@@ -197,62 +197,100 @@ repeat_path :: proc(src: []u8, $S: Spec, opts: Options, at: u64, e: ^core.Typed_
 // Reads the document of `src[lo:cut]` into `target` with `frames`, one more than `opts` lets a text open, and stores
 // its error in `err`, with every offset from `src`'s first byte. A record's read (`LINE`) walks it in place in `src`
 // as `walk_line` does, and `cold` says only a read of `src[:cut]` tells its answer. The error goes out by pointer, as
-// copies of it through the record reader's calls cost a record's read more than its tokens. The duplicate check's
-// document lives in an arena on `scratch`, freed before the read, and `scratch` is the read's temp allocator.
+// copies of it through the record reader's calls cost a record's read more than its tokens. `scratch` is the read's temp
+// allocator.
 @(private)
 read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, opts: Options, frames: []typed.Frame, allocator, scratch: runtime.Allocator, err: ^core.Typed_Refusal, $LINE: bool, $CHECK: bool) -> (cold: bool) {
 	if read.dups == .Refuse && !stray_bom(src[lo:cut], lo, S) {
-		arena := runtime.Arena{backing_allocator = scratch, minimum_block_size = 4096}
-		defer runtime.arena_destroy(&arena)
-		_, built := build_spec(src[lo:cut], S, bound_as(S, opts), true, runtime.arena_allocator(&arena))
-		core.move_document_error(&built, lo)
-		if built.kind == .Walk || built.kind == .Duplicate_Key {
-			err^ = {kind = .Walk if built.kind == .Walk else .Duplicate_Key, at = built.at, inner = built.inner}
-			if built.kind == .Duplicate_Key {
-				repeat_path(src[lo:cut], S, opts, built.at - lo, err, scratch)
-			}
-			context.allocator = allocator
-			typed.sink_refusal(read.sink, err^, CHECK)
-			return
-		}
-		if built.kind != .None {
-			err^ = {kind = .No_Memory}
-			return
-		}
+		return read_refusing(src, lo, cut, S, target, T, plan, read, opts, frames, allocator, scratch, err, LINE, CHECK)
 	}
+	return read_walked(src, lo, cut, S, target, T, plan, read, opts, frames, allocator, scratch, err, LINE, CHECK, false)
+}
+
+// `read_value` under `.Refuse`, out of line, so a read that takes a repeated key keeps none of the keys in its frame.
+@(private)
+read_refusing :: #force_no_inline proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, opts: Options, frames: []typed.Frame, allocator, scratch: runtime.Allocator, err: ^core.Typed_Refusal, $LINE: bool, $CHECK: bool) -> (cold: bool) {
+	return read_walked(src, lo, cut, S, target, T, plan, read, opts, frames, allocator, scratch, err, LINE, CHECK, true)
+}
+
+// The walk of `read_value`. Under `REFUSE` the read notes the keys of every object the walk passes, and a key repeated in
+// its object or a fault refuses the text whatever the read refused before it, as the only refusal.
+@(private)
+read_walked :: #force_inline proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, opts: Options, frames: []typed.Frame, allocator, scratch: runtime.Allocator, err: ^core.Typed_Refusal, $LINE: bool, $CHECK: bool, $REFUSE: bool) -> (cold: bool) {
 	H :: typed.Check when CHECK else typed.Reader
-	h: H
+	when REFUSE {
+		hooks: typed.Refusing(H)
+		h := &hooks.read
+		mark := typed.sink_mark(read.sink)
+	} else {
+		hooks: H
+		h := &hooks
+	}
 	walk_opts := opts
 	text := src if LINE else src[:cut]
 	regs: core.Hook_Regs
 	started: core.Typed_Refusal
 	when CHECK {
 		json_reader(&h.reader, typed.untracked(&walk_opts), S)
-		regs, started = typed.check_start(&h, text, plan, bound_as(S, opts), T, target, read, typed.untracked_frames(frames), allocator)
+		regs, started = typed.check_start(h, text, plan, bound_as(S, opts), T, target, read, typed.untracked_frames(frames), allocator)
 	} else {
-		json_reader(&h, &walk_opts, S)
-		regs, started = typed.read_start(&h, text, plan, bound_as(S, opts), T, target, read, frames, allocator, false)
+		json_reader(h, &walk_opts, S)
+		regs, started = typed.read_start(h, text, plan, bound_as(S, opts), T, target, read, frames, allocator, false)
 	}
 	h.ctx.temp_allocator = scratch
 	if started.kind != .None {
 		err^ = started
 		return
 	}
-	defer typed.read_release(&h, frames)
-	when CHECK {
+	defer typed.read_release(h, frames)
+	when REFUSE {
+		room: [64]typed.Open_Key = ---
+		typed.open_keys_start(&hooks.open_keys, room[:], &h.view, plan.readers, scratch)
+		on :: typed.on_check_refusing when CHECK else typed.on_read_refusing
+	} else when CHECK {
 		on :: typed.on_token_check_spelled when S == .Json5 else typed.on_token_check
 	} else {
 		on :: typed.on_token_spelled when S == .Json5 else typed.on_token
 	}
 	fault: Maybe(core.Fault)
 	when LINE {
-		fault, cold = walk_line(src, lo, cut, S, opts, &h, &regs, on)
+		fault, cold = walk_line(src, lo, cut, S, opts, &hooks, &regs, on)
 	} else {
-		fault = walk_text(text, lo, S, opts, &h, &regs, on)
+		fault = walk_text(text, lo, S, opts, &hooks, &regs, on)
 	}
-	// `read_end` only reports, so a read with no fault and no refusal leaves `err` as it is.
-	if fault != nil || h.first.kind != .None {
-		err^ = typed.read_end(&h, regs, fault)
+	when REFUSE {
+		if LINE && cold {
+			return
+		}
+		k := &hooks.open_keys
+		regs = typed.refusing_regs(k, regs)
+		if f, faulted := fault.?; faulted || k.repeat != typed.NO_REPEAT {
+			if faulted {
+				typed.keys_open_end(k)
+			}
+			refused := core.Typed_Refusal{kind = .Duplicate_Key, at = k.repeat}
+			if k.repeat == typed.NO_REPEAT {
+				refused = {kind = .Walk, at = f.at, inner = f}
+			} else {
+				repeat_path(src[lo:cut], S, opts, k.repeat - lo, &refused, scratch)
+			}
+			// The lists the read left open go to the target, and the refusals it collected give way to this one.
+			h.first = refused
+			typed.read_end(h, regs, nil)
+			typed.sink_restore(read.sink, mark)
+			context.allocator = allocator
+			typed.sink_refusal(read.sink, refused, CHECK)
+			err^ = refused
+			return
+		}
+		if h.first.kind != .None {
+			err^ = typed.read_end(h, regs, nil)
+		}
+	} else {
+		// `read_end` only reports, so a read with no fault and no refusal leaves `err` as it is.
+		if fault != nil || h.first.kind != .None {
+			err^ = typed.read_end(h, regs, fault)
+		}
 	}
 	return
 }

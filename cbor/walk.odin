@@ -10,6 +10,7 @@ import spell "../core/spell"
 import kernel "../core/kernel"
 import core "../core"
 import rules "../core/rules"
+import typed "../core/typed"
 
 // The rules an item is read and written by. `.Cbor` reads every well-formed item of RFC 8949. `.Preferred` refuses an
 // item not in preferred serialization (section 4.1): a head argument wider than its value needs, a float that a
@@ -342,6 +343,12 @@ Sending :: struct {
 // `t` opens. Returns whether the hook stopped the walk.
 @(private)
 send :: #force_inline proc "contextless" (o: ^Sending, h: ^$H, t: core.Token, depth: int, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> bool {
+	// A read that refuses repeats notes the keys of what it skips.
+	when intrinsics.type_has_field(H, "open_keys") {
+		if o.muted || o.skip_value {
+			typed.keys_token(&h.open_keys, t)
+		}
+	}
 	if o.muted {
 		return false
 	}
@@ -601,6 +608,11 @@ run :: proc "contextless" (src: []u8, lo: u64, opts: Walk_Rules, h: ^$H, regs: ^
 			when intrinsics.type_has_field(H, "expect") {
 				if key_due && !o.muted {
 					if r := expected_key(src, i, &o.regs, H); r != 0 {
+						when intrinsics.type_has_field(H, "open_keys") {
+							// A record holds the key's shortest head, and a name with nothing to decode.
+							arg, hl, _ := head(src, i, ai)
+							typed.key_met(&h.open_keys, {lo = u64(i + hl), n = u32(arg), kind = .String, role = .Key, spelling = u16(hl) << HEAD_SHIFT})
+						}
 						i = r
 						break
 					}
@@ -862,6 +874,9 @@ close_frames :: #force_inline proc "contextless" (o: ^Sending, h: ^$H, i: int, d
 		stop := false
 		if top^ & FLAG_TAG == 0 {
 			if o.muted {
+				when intrinsics.type_has_field(H, "open_keys") {
+					typed.keys_token(&h.open_keys, core.Token{lo = u64(i), kind = .End})
+				}
 				o.muted = o.mute_at != d^
 			} else {
 				stop = send(o, h, core.Token{lo = u64(i), kind = .End}, d^, on)

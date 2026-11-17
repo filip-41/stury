@@ -199,52 +199,91 @@ read_text :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typei
 	return err
 }
 
-// Reads the one item of `src` into `target` with `frames`, and stores its error in `err`. A read under `.Refuse` builds
-// the item first, in the temp allocator, to find a repeated key anywhere in it.
+// Reads the one item of `src` into `target` with `frames`, and stores its error in `err`.
 @(private)
 read_item :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, frames: []typed.Frame, allocator: runtime.Allocator, err: ^core.Typed_Refusal, $CHECK: bool) {
 	if read.dups == .Refuse {
-		arena := runtime.Arena{backing_allocator = context.temp_allocator, minimum_block_size = 4096}
-		defer runtime.arena_destroy(&arena)
-		_, built := build_item(src, bound_as(spec, opts), true, runtime.arena_allocator(&arena))
-		if built.kind == .Walk || built.kind == .Duplicate_Key {
-			err^ = {kind = .Walk if built.kind == .Walk else .Duplicate_Key, at = built.at, inner = built.inner}
-			context.allocator = allocator
-			typed.sink_refusal(read.sink, err^, CHECK)
-			return
-		}
-		if built.kind != .None {
-			err^ = {kind = .No_Memory}
-			return
-		}
+		item_refusing(src, spec, opts, target, T, plan, read, frames, allocator, err, CHECK)
+		return
 	}
+	item_walked(src, spec, opts, target, T, plan, read, frames, allocator, err, CHECK, false)
+}
+
+// `read_item` under `.Refuse`, out of line, so a read that takes a repeated key keeps none of the keys in its frame.
+@(private)
+item_refusing :: #force_no_inline proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, frames: []typed.Frame, allocator: runtime.Allocator, err: ^core.Typed_Refusal, $CHECK: bool) {
+	item_walked(src, spec, opts, target, T, plan, read, frames, allocator, err, CHECK, true)
+}
+
+// The walk of `read_item`. Under `REFUSE` the read notes the keys of every map the walk passes, and a key repeated in
+// its map or a fault refuses the item whatever the read refused before it, as the only refusal.
+@(private)
+item_walked :: #force_inline proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, frames: []typed.Frame, allocator: runtime.Allocator, err: ^core.Typed_Refusal, $CHECK: bool, $REFUSE: bool) {
 	H :: typed.Check when CHECK else typed.Reader
-	h: H
+	when REFUSE {
+		hooks: typed.Refusing(H)
+		h := &hooks.read
+		mark := typed.sink_mark(read.sink)
+	} else {
+		hooks: H
+		h := &hooks
+	}
 	state: Read_State = ---
 	state.rules, state.tagged = rules_of(spec, opts), false
 	regs: core.Hook_Regs
 	started: core.Typed_Refusal
 	when CHECK {
 		item_reader(&h.reader, typed.untracked(&state))
-		regs, started = typed.check_start(&h, src, plan, bound_as(spec, opts), T, target, read, typed.untracked_frames(frames), allocator)
+		regs, started = typed.check_start(h, src, plan, bound_as(spec, opts), T, target, read, typed.untracked_frames(frames), allocator)
 	} else {
-		item_reader(&h, &state)
-		regs, started = typed.read_start(&h, src, plan, bound_as(spec, opts), T, target, read, frames, allocator, false)
+		item_reader(h, &state)
+		regs, started = typed.read_start(h, src, plan, bound_as(spec, opts), T, target, read, frames, allocator, false)
 	}
 	if started.kind != .None {
 		err^ = started
 		return
 	}
-	defer typed.read_release(&h, frames)
+	defer typed.read_release(h, frames)
 	state.positional[h.sp] = false
-	on :: on_item_check when CHECK else on_item
-	hi, fault := walk_rules(src, 0, state.rules, &h, &regs, on)
+	when REFUSE {
+		room: [64]typed.Open_Key = ---
+		typed.open_keys_start(&hooks.open_keys, room[:], &h.view, plan.readers, context.temp_allocator)
+		on :: on_item_check_refusing when CHECK else on_item_refusing
+	} else {
+		on :: on_item_check when CHECK else on_item
+	}
+	hi, fault := walk_rules(src, 0, state.rules, &hooks, &regs, on)
 	if fault == nil {
 		fault = tail_fault(src, hi)
 	}
-	// `read_end` only reports, so a read with no fault and no refusal leaves `err` as it is.
-	if fault != nil || h.first.kind != .None {
-		err^ = typed.read_end(&h, regs, fault)
+	when REFUSE {
+		k := &hooks.open_keys
+		regs = typed.refusing_regs(k, regs)
+		if f, faulted := fault.?; faulted || k.repeat != typed.NO_REPEAT {
+			if faulted {
+				typed.keys_open_end(k)
+			}
+			refused := core.Typed_Refusal{kind = .Duplicate_Key, at = k.repeat}
+			if k.repeat == typed.NO_REPEAT {
+				refused = {kind = .Walk, at = f.at, inner = f}
+			}
+			// The lists the read left open go to the target, and the refusals it collected give way to this one.
+			h.first = refused
+			typed.read_end(h, regs, nil)
+			typed.sink_restore(read.sink, mark)
+			context.allocator = allocator
+			typed.sink_refusal(read.sink, refused, CHECK)
+			err^ = refused
+			return
+		}
+		if h.first.kind != .None {
+			err^ = typed.read_end(h, regs, nil)
+		}
+	} else {
+		// `read_end` only reports, so a read with no fault and no refusal leaves `err` as it is.
+		if fault != nil || h.first.kind != .None {
+			err^ = typed.read_end(h, regs, fault)
+		}
 	}
 }
 
@@ -286,6 +325,16 @@ on_item :: proc "contextless" (h: ^typed.Reader, regs: core.Hook_Regs, t: core.T
 @(private)
 on_item_check :: proc "contextless" (h: ^typed.Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	return item_hook(h, regs, t)
+}
+
+@(private)
+on_item_refusing :: proc "contextless" (h: ^typed.Refusing(typed.Reader), regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	return typed.refusing_token(h, regs, t, on_item)
+}
+
+@(private)
+on_item_check_refusing :: proc "contextless" (h: ^typed.Refusing(typed.Check), regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	return typed.refusing_token(h, regs, t, on_item_check)
 }
 
 // The reader's hook with what CBOR adds: where an item starts, a struct's members by position, and integers and floats

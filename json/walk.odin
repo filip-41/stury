@@ -664,13 +664,20 @@ STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 // instances of the walk.
 @(private)
 pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, slot, d, ind: u64, $open: bool) -> u64 {
-	h: core.No_Hooks
 	regs: core.Hook_Regs
-	v := Walk(S, core.No_Hooks){w.base, &h, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, false, false, nil, 0, w.limit - slot}
-	when open {
-		r := enter(.Open, p, end, d, ind, &v, 0, 0, 0, core.no_hook)
+	// A read that refuses repeats notes the keys of what it skips.
+	when intrinsics.type_has_field(H, "open_keys") {
+		v := Walk(S, typed.Open_Keys){w.base, &w.hooks.open_keys, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, false, false, nil, 0, w.limit - slot}
+		on :: typed.on_open_key
 	} else {
-		r := enter(.Value, p, end, d, ind, &v, 0, 0, 0, core.no_hook)
+		h: core.No_Hooks
+		v := Walk(S, core.No_Hooks){w.base, &h, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, false, false, nil, 0, w.limit - slot}
+		on :: core.no_hook
+	}
+	when open {
+		r := enter(.Open, p, end, d, ind, &v, 0, 0, 0, on)
+	} else {
+		r := enter(.Value, p, end, d, ind, &v, 0, 0, 0, on)
 	}
 	if v.owned {
 		drop_stack(v.stack)
@@ -747,7 +754,7 @@ at :: #force_inline proc "contextless" (w: ^Walk($S, $H), p: [^]u8) -> u64 {
 // typed read's caller gives as many as its text can nest when that is fewer. `deepen` grows them all.
 @(private)
 depth_held :: #force_inline proc "contextless" (h: ^$H, regs: ^core.Hook_Regs, limit, room: u64) -> u64 {
-	when H == typed.Reader || H == typed.Check {
+	when H == typed.Reader || H == typed.Check || intrinsics.type_has_field(H, "open_keys") {
 		return min(limit, room, u64(len(h.src)) + 16)
 	} else when H == engine.Builder {
 		return min(limit, room, u64(len(h.stack)) - regs.c)
@@ -766,8 +773,9 @@ deepen :: #force_no_inline proc "contextless" (w: ^Walk($S, $H)) -> core.Fault_K
 		return .Too_Deep
 	}
 	want := min(w.limit, max(2 * w.depth, w.depth + 1))
-	when H == typed.Reader || H == typed.Check {
-		room, grown := typed.grow_frames(w.hooks, int(w.depth) + 2, int(want) + 2)
+	when H == typed.Reader || H == typed.Check || intrinsics.type_has_field(H, "open_keys") {
+		// A `Check` and a `Refusing` read hold the `Reader` first.
+		room, grown := typed.grow_frames((^typed.Reader)(w.hooks), int(w.depth) + 2, int(want) + 2)
 		if !grown {
 			return .No_Memory
 		}

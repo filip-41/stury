@@ -4,6 +4,7 @@ import "base:intrinsics"
 import kernel "../core/kernel"
 import core "../core"
 import build "../core/build"
+import typed "../core/typed"
 
 // Every state takes these arguments. `p` is the cursor, `end` one past the text, `d` the depth shifted left once with
 // the open container's kind in bit 0 (1 for an object), `ind` the predicted indent (whitespace.odin), `w` the rest of
@@ -119,6 +120,7 @@ st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: 
 	}
 	when intrinsics.type_has_field(H, "expect") {
 		if r := expected_key(p, end, &hs, H); r != nil {
+			key_matched(w, p, r)
 			if r[0] > ' ' {
 				return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
@@ -166,6 +168,15 @@ expected_key :: #force_inline proc "contextless" (p, end: [^]u8, hs: ^core.Hook_
 	}
 	hs.b += u64(size_of(intrinsics.type_elem_type(intrinsics.type_field_type(H, "expect"))))
 	return p[e.n:]
+}
+
+// Notes the key at `p` the cursor matched, whose record's bytes end at `r` with the close quote and the colon, for a read
+// that refuses repeats. A matched key holds nothing to decode.
+@(private)
+key_matched :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, r: [^]u8) {
+	when intrinsics.type_has_field(H, "open_keys") {
+		typed.key_met(&w.hooks.open_keys, {lo = at(w, p) + 1, n = u32(intrinsics.ptr_sub(r, p)) - 3, kind = .String, role = .Key, spelling = core.SPELLING_QUOTED})
+	}
 }
 
 // Compares a key's bytes past the 16th, leaving a byte to read after them.
@@ -909,6 +920,9 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		r: [^]u8
 		when intrinsics.type_has_field(H, "expect") {
 			r = expected_key(p, end, &hs, H)
+			if r != nil {
+				key_matched(w, p, r)
+			}
 			if r != nil && r[0] <= ' ' {
 				return #must_tail st_colon(r[-1:], end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
