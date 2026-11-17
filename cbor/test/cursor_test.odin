@@ -4,28 +4,28 @@ package cbor_tests
 import "core:fmt"
 import "core:testing"
 import core "../../core"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import cbor ".."
 
 // The tokens, end and fault of the walk of the hex `text` as spec `S`, with a stop at token `stop` or at every `every`th
 // and a resume after each.
 @(private)
-walk_as :: proc(text: string, $S: cbor.Spec, skip: string, stop, every: int) -> (h: walktest.Stopping, end: string) {
+walk_as :: proc(text: string, $S: cbor.Spec, skip: string, stop, every: int) -> (h: testkit.Stopping, end: string) {
 	src := hex(text)
-	h = walktest.Stopping{src = src, skip = skip, stop = stop, every = every}
+	h = testkit.Stopping{src = src, skip = skip, stop = stop, every = every}
 	h.tokens = make([dynamic]core.Token, 0, 64)
 	regs: core.Hook_Regs
 	cursor: cbor.Cursor
-	hi, fault := cbor.walk(src, 0, S, {}, &h, &regs, walktest.stopping_hook, &cursor)
+	hi, fault := cbor.walk(src, 0, S, {}, &h, &regs, testkit.stopping_hook, &cursor)
 	for cbor.can_resume(&cursor) {
-		hi, fault = cbor.walk_resume(src, &cursor, S, {}, &h, &regs, walktest.stopping_hook)
+		hi, fault = cbor.walk_resume(src, &cursor, S, {}, &h, &regs, testkit.stopping_hook)
 	}
 	return h, fmt.tprint(hi, fault, regs.a)
 }
 
 // `walk_as` under the spec that reads every item, then the one that sorts keys.
 @(private)
-walk_stopping :: proc(text: string, skip: string, stop, every, variant: int) -> (walktest.Stopping, string) {
+walk_stopping :: proc(text: string, skip: string, stop, every, variant: int) -> (testkit.Stopping, string) {
 	if variant == 0 {
 		return walk_as(text, .Cbor, skip, stop, every)
 	}
@@ -49,7 +49,7 @@ CURSOR_TEXTS := [?]string {
 // with skipped values among them, under the spec that reads every item and one that sorts keys.
 @(test)
 cursor_resumes_after_any_token :: proc(t: ^testing.T) {
-	walktest.expect_resumes(t, CURSOR_TEXTS[:], {"", "a", "b", "s"}, 2, walk_stopping)
+	testkit.expect_resumes(t, CURSOR_TEXTS[:], {"", "a", "b", "s"}, 2, walk_stopping)
 }
 
 // A resume over another text, or of a cursor that holds no stop, is refused, and `destroy` frees a cursor no resume
@@ -57,19 +57,19 @@ cursor_resumes_after_any_token :: proc(t: ^testing.T) {
 @(test)
 cursor_refuses_another_text :: proc(t: ^testing.T) {
 	src := hex("82 01 02")
-	h := walktest.Stopping{src = src, stop = 2}
+	h := testkit.Stopping{src = src, stop = 2}
 	h.tokens = make([dynamic]core.Token, 0, 16)
 	defer delete(h.tokens)
 	cursor: cbor.Cursor
-	_, fault := cbor.walk(src, 0, .Cbor, {}, &h, nil, walktest.stopping_hook, &cursor)
+	_, fault := cbor.walk(src, 0, .Cbor, {}, &h, nil, testkit.stopping_hook, &cursor)
 	testing.expect(t, fault == nil && cbor.can_resume(&cursor))
 	other := hex("82 01 03")
-	_, fault = cbor.walk_resume(other, &cursor, .Cbor, {}, &h, nil, walktest.stopping_hook)
+	_, fault = cbor.walk_resume(other, &cursor, .Cbor, {}, &h, nil, testkit.stopping_hook)
 	f, bad := fault.?
 	testing.expect(t, bad && f.kind == .Bad_Option && cbor.can_resume(&cursor))
 	cbor.destroy(&cursor)
 	testing.expect(t, !cbor.can_resume(&cursor))
-	_, fault = cbor.walk_resume(src, &cursor, .Cbor, {}, &h, nil, walktest.stopping_hook)
+	_, fault = cbor.walk_resume(src, &cursor, .Cbor, {}, &h, nil, testkit.stopping_hook)
 	f, bad = fault.?
 	testing.expect(t, bad && f.kind == .Bad_Option)
 }
@@ -78,9 +78,9 @@ cursor_refuses_another_text :: proc(t: ^testing.T) {
 // the walk reads and items it refuses, and for several paths at once.
 @(test)
 answers_agree_with_each_answer :: proc(t: ^testing.T) {
-	run := walktest.Answer_Run {
+	run := testkit.Answer_Run {
 		each = proc(src: []u8, paths: []core.Path, _: int, early: bool, out: ^[dynamic]core.Token_Answer) -> core.Error {
-			return cbor.each_answer(src, .Cbor, paths, out, walktest.collect_answer, {}, {stop_early = early})
+			return cbor.each_answer(src, .Cbor, paths, out, testkit.collect_answer, {}, {stop_early = early})
 		},
 		iter = proc(src: []u8, paths: []core.Path, _: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
 			it := cbor.answers(src, .Cbor, paths, {}, {stop_early = early})
@@ -95,7 +95,7 @@ answers_agree_with_each_answer :: proc(t: ^testing.T) {
 	for text, i in CURSOR_TEXTS {
 		texts[i] = string(hex(text))
 	}
-	walktest.expect_answers_agree(t, texts[:], {".a", ".[]", ".b[]", "..", ".b[-1]", "limit(2; ..)", ".s.s", ".[1]"}, 1, run)
+	testkit.expect_answers_agree(t, texts[:], {".a", ".[]", ".b[]", "..", ".b[-1]", "limit(2; ..)", ".s.s", ".[1]"}, 1, run)
 }
 
 // A loop that ends after the first answer frees the read with `destroy`, and the spec chosen at run time answers alike.

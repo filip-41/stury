@@ -5,7 +5,7 @@ import "core:testing"
 import core "../../core"
 import typed "../../core/typed"
 import write "../../core/write"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import cbor ".."
 import stury_json "../../json"
 
@@ -42,18 +42,18 @@ whole_values_hold_their_items :: proc(t: ^testing.T) {
 		append(&text, 0x65, 'v', 'a', 'l', 'u', 'e')
 		append(&text, ..item)
 		got: Whole
-		if !walktest.expect_nil(t, cbor.unmarshal(text[:], .Cbor, &got)) {
+		if !testkit.expect_nil(t, cbor.unmarshal(text[:], .Cbor, &got)) {
 			continue
 		}
 		testing.expectf(t, string(got.raw) == string(item), "%s: raw is %s", r.item, hex_of(transmute([]u8)string(got.raw)))
 		spelled, err := write.write_value(got.value, stury_json.as(.Json))
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		testing.expectf(t, string(spelled) == r.want, "%s: value is %s", r.item, spelled)
 		// The raw item is written back as it was read.
 		back, merr := cbor.marshal(got, .Cbor)
-		walktest.expect_nil(t, merr)
+		testkit.expect_nil(t, merr)
 		again: Whole
-		walktest.expect_nil(t, cbor.unmarshal(back, .Cbor, &again))
+		testkit.expect_nil(t, cbor.unmarshal(back, .Cbor, &again))
 		testing.expectf(t, string(again.raw) == string(item), "%s: raw is written as %s", r.item, hex_of(transmute([]u8)string(again.raw)))
 	}
 }
@@ -68,10 +68,10 @@ datetimes_marshal_with_their_tags :: proc(t: ^testing.T) {
 	}
 	v := Times{"2013-03-21T20:04:00Z", "2013-03-21", "2013-03-21T20:04:00", "20:04:00"}
 	text, err := cbor.marshal(v, .Cbor)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, hex_of(text), "a4626174c074323031332d30332d32315432303a30343a30305a63646179d903ec6a323031332d30332d3231656c6f63616c73323031332d30332d32315432303a30343a303065636c6f636b6832303a30343a3030")
 	back: Times
-	walktest.expect_nil(t, cbor.unmarshal(text, .Cbor, &back))
+	testkit.expect_nil(t, cbor.unmarshal(text, .Cbor, &back))
 	testing.expect_value(t, back, v)
 }
 
@@ -83,14 +83,14 @@ raw_items_are_judged :: proc(t: ^testing.T) {
 		raw: typed.Raw,
 	}
 	text, err := cbor.marshal(Holder{typed.Raw(string(hex("9f 01 ff")))}, .Cbor)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, hex_of(text), "a1637261779f01ff")
 	_, strict := cbor.marshal(Holder{typed.Raw(string(hex("9f 01 ff")))}, .Preferred)
-	walktest.expect_kind(t, strict, core.Typed_Error_Kind.Bad_Raw)
+	testkit.expect_kind(t, strict, core.Typed_Error_Kind.Bad_Raw)
 	_, two := cbor.marshal(Holder{typed.Raw(string(hex("01 02")))}, .Cbor)
-	walktest.expect_kind(t, two, core.Typed_Error_Kind.Bad_Raw)
+	testkit.expect_kind(t, two, core.Typed_Error_Kind.Bad_Raw)
 	empty, eerr := cbor.marshal(Holder{}, .Cbor)
-	walktest.expect_nil(t, eerr)
+	testkit.expect_nil(t, eerr)
 	testing.expect_value(t, hex_of(empty), "a163726177f6")
 
 	Link :: struct {
@@ -104,12 +104,12 @@ raw_items_are_judged :: proc(t: ^testing.T) {
 	last := &links[len(links) - 1]
 	last.raw = typed.Raw(string(hex("6161")))
 	deep, derr := cbor.marshal(links[0], .Cbor)
-	walktest.expect_nil(t, derr)
-	walktest.expect_nil(t, cbor.validate(deep, .Cbor))
+	testkit.expect_nil(t, derr)
+	testkit.expect_nil(t, cbor.validate(deep, .Cbor))
 	// No level is left for a container.
 	last.raw = typed.Raw(string(hex("80")))
 	_, past := cbor.marshal(links[0], .Cbor)
-	walktest.expect_kind(t, past, core.Typed_Error_Kind.Too_Deep)
+	testkit.expect_kind(t, past, core.Typed_Error_Kind.Too_Deep)
 }
 
 // A number reads into a member by its value, whatever item spells it: a bignum that fits is an integer, one past 64 bits
@@ -158,13 +158,13 @@ numbers_read_by_value :: proc(t: ^testing.T) {
 	}
 	for r in refused {
 		got: Int
-		walktest.expect_kind(t, cbor.unmarshal(item(r.hex), .Cbor, &got), r.want)
+		testkit.expect_kind(t, cbor.unmarshal(item(r.hex), .Cbor, &got), r.want)
 	}
 	most: Uint
-	walktest.expect_nil(t, cbor.unmarshal(item("1b ffffffffffffffff"), .Cbor, &most))
+	testkit.expect_nil(t, cbor.unmarshal(item("1b ffffffffffffffff"), .Cbor, &most))
 	testing.expect_value(t, most.v, max(u64))
 	below: Uint
-	walktest.expect_kind(t, cbor.unmarshal(item("20"), .Cbor, &below), core.Typed_Error_Kind.Below_Minimum)
+	testkit.expect_kind(t, cbor.unmarshal(item("20"), .Cbor, &below), core.Typed_Error_Kind.Below_Minimum)
 	floats := [?]struct {
 		hex:  string,
 		want: f64,
@@ -191,7 +191,7 @@ numbers_read_by_value :: proc(t: ^testing.T) {
 		append(&huge, 0xff)
 	}
 	past: Float
-	walktest.expect_kind(t, cbor.unmarshal(huge[:], .Cbor, &past), core.Typed_Error_Kind.Above_Maximum)
+	testkit.expect_kind(t, cbor.unmarshal(huge[:], .Cbor, &past), core.Typed_Error_Kind.Above_Maximum)
 	digits := [?]struct {
 		hex, want: string,
 	}{{"c3 49 010000000000000000", "-18446744073709551617"}, {"0a", "10"}, {"f93e00", "1.5"}, {"c4 82 21 196ab3", "27315e-2"}}
@@ -200,7 +200,7 @@ numbers_read_by_value :: proc(t: ^testing.T) {
 		testing.expectf(t, cbor.unmarshal(item(r.hex), .Cbor, &got) == nil && got.v.text == r.want, "%s: %s", r.hex, got.v.text)
 	}
 	nan: Digits
-	walktest.expect_kind(t, cbor.unmarshal(item("f97e00"), .Cbor, &nan), core.Typed_Error_Kind.Non_Finite)
+	testkit.expect_kind(t, cbor.unmarshal(item("f97e00"), .Cbor, &nan), core.Typed_Error_Kind.Non_Finite)
 }
 
 // A union of named struct arms is a map with the arm's name under the plan's tag member, found wherever it stands, and
@@ -225,7 +225,7 @@ unions_and_captures_round_trip :: proc(t: ^testing.T) {
 		note:   any `cbor:",omitempty"`,
 	}
 	plan, perr := cbor.plan_make(Drawing, plan = {union_tag = "type"}, reads = cbor.reads(.Cbor))
-	if !walktest.expect_nil(t, perr) {
+	if !testkit.expect_nil(t, perr) {
 		return
 	}
 	extra := make(map[string]int)
@@ -235,20 +235,20 @@ unions_and_captures_round_trip :: proc(t: ^testing.T) {
 	best := Square{9}
 	want := Drawing{shapes = shapes, best = &best, extra = extra, note = "n"}
 	text, err := cbor.marshal(want, &plan)
-	if !walktest.expect_nil(t, err) {
+	if !testkit.expect_nil(t, err) {
 		return
 	}
-	walktest.expect_nil(t, cbor.validate(text, .Preferred))
+	testkit.expect_nil(t, cbor.validate(text, .Preferred))
 	testing.expect_value(t, hex_of(text), "a5" + "66736861706573" + "82" + "a2" + "6474797065" + "66436972636c65" + "6172" + "f93e00" + "a2" + "6474797065" + "66537175617265" + "6473696465" + "02" + "6462657374" + "a1" + "6473696465" + "09" + "646e6f7465" + "616e" + "6161" + "02" + "627a7a" + "01")
 	got: Drawing
 	// An `any` is written and never read.
 	got_text := hex("a4 6462657374 a1 6473696465 09 627a7a 01 66736861706573 82 a2 6172 f93e00 6474797065 66436972636c65 a2 6474797065 66537175617265 6473696465 02 6161 02")
-	if !walktest.expect_nil(t, cbor.unmarshal(got_text, .Cbor, &got, &plan)) {
+	if !testkit.expect_nil(t, cbor.unmarshal(got_text, .Cbor, &got, &plan)) {
 		return
 	}
 	testing.expect(t, len(got.shapes) == 2 && got.shapes[0].(Circle).r == 1.5 && got.shapes[1].(Square).side == 2)
 	testing.expect(t, got.best != nil && got.best.side == 9)
 	testing.expect(t, len(got.extra) == 2 && got.extra["zz"] == 1 && got.extra["a"] == 2)
 	missing: Drawing
-	walktest.expect_kind(t, cbor.unmarshal(hex("a1 66736861706573 81 a1 6172 01"), .Cbor, &missing, &plan), core.Typed_Error_Kind.Missing_Tag)
+	testkit.expect_kind(t, cbor.unmarshal(hex("a1 66736861706573 81 a1 6172 01"), .Cbor, &missing, &plan), core.Typed_Error_Kind.Missing_Tag)
 }

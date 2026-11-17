@@ -587,7 +587,7 @@ member_end :: proc(cx: ^Cx, it: Item, col: int) -> u64 {
 	}
 	for {
 		r := q
-		for r < u64(len(src)) && blank_line(src, r) {
+		for r < u64(len(src)) && compose.blank_line(src, r) {
 			r = compose.next_line(src, r)
 		}
 		ccol, comment := comment_line(src, r)

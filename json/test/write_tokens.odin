@@ -8,7 +8,7 @@ import "core:testing"
 import core "../../core"
 import write "../../core/write"
 import json ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // The token write against `marshal`: the same value written call by call is the same bytes.
 
@@ -114,13 +114,13 @@ tokens_equal_marshal :: proc(t: ^testing.T) {
 			{ascii = true, escape_html = true},
 		}) {
 		want, werr := json.marshal(v, write = opts, allocator = context.temp_allocator)
-		walktest.expect_nil(t, werr)
+		testkit.expect_nil(t, werr)
 		got, err := token_text(v, opts)
 		defer delete(got)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 		testing.expectf(t, string(got) == string(want), "%v: %q, want %q", opts, got, want)
 		doc, derr := core.build(got, json.as(.Json))
-		walktest.expect_nil(t, derr)
+		testkit.expect_nil(t, derr)
 		core.destroy(&doc)
 	}
 }
@@ -288,7 +288,7 @@ tokens_to_a_stream :: proc(t: ^testing.T) {
 tokens_to_a_failing_stream :: proc(t: ^testing.T) {
 	v := token_sample()
 	tw: write.Tokens
-	write.tokens_init(&tw, json.as(.Json), stream = io.Stream{procedure = walktest.refusing_stream})
+	write.tokens_init(&tw, json.as(.Json), stream = io.Stream{procedure = testkit.refusing_stream})
 	write_sample(&tw, v)
 	_, err := write.tokens_finish(&tw)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Write_Failed)
@@ -314,7 +314,7 @@ tokens_under_failing_allocators :: proc(t: ^testing.T) {
 	for opts in ([?]core.Write_Options{{}, core.PRETTY}) {
 		try := Token_Try{v, opts}
 		want, _ := json.marshal(v, write = opts, allocator = context.temp_allocator)
-		walktest.sweep_write(t, token_try, &try, string(want))
+		testkit.sweep_write(t, token_try, &try, string(want))
 	}
 }
 
@@ -342,7 +342,7 @@ write_value_of_built_value_and_node :: proc(t: ^testing.T) {
 	append(&o.keys, "a")
 	append(&o.vals, string("again"))
 	text, werr := json.write_value(o, .Json)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, string(text), `{"a":[1,2.5,1234567890123456789012345678901234567890,"x",null,true,{"k":[1,"A",2.50]},["k",0]],"a":"again"}`)
 	deep: core.Value
 	for _ in 0 ..= core.MAX_DEPTH {
@@ -351,5 +351,5 @@ write_value_of_built_value_and_node :: proc(t: ^testing.T) {
 		deep = a
 	}
 	_, derr := write.write_value(deep, json.as(.Json))
-	walktest.expect_kind(t, derr, core.Typed_Error_Kind.Too_Deep)
+	testkit.expect_kind(t, derr, core.Typed_Error_Kind.Too_Deep)
 }

@@ -7,7 +7,7 @@ import core ".."
 import write "../write"
 import dsv "../../dsv"
 import json "../../json"
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // The bytes of the made-up format's text, laid out for `bin_document`.
 //   0..4    "foob", a byte string
@@ -178,7 +178,7 @@ binary_numbers_equal_by_value :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	json_doc, err := json.build(transmute([]u8)string(`[258,259,258.0]`), .Json)
 	defer core.destroy(&json_doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	number := core.Value(core.Node_Ref{&doc, 4})
 	testing.expect(t, core.equal(number, core.Node_Ref{&json_doc, 1}))
 	testing.expect_value(t, core.hash(number), core.hash(core.Node_Ref{&json_doc, 1}))
@@ -220,7 +220,7 @@ byte_string_builds_and_writes_as_base64 :: proc(t: ^testing.T) {
 
 	for want, i in ([?]string{`"Zm9vYg=="`, `"Zm9vYmE="`}) {
 		text, err := write.write_value(core.Node_Ref{&doc, core.Node_Index(2 + i)}, json.as(.Json))
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		testing.expect_value(t, string(text), want)
 	}
 }
@@ -246,7 +246,7 @@ number_text_spells_a_binary_number :: proc(t: ^testing.T) {
 
 	json_doc, err := json.build(transmute([]u8)string(`[12.50]`), .Json)
 	defer core.destroy(&json_doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	span, span_ok := core.doc_number_text(&json_doc, 1, buf[:])
 	testing.expect(t, span_ok)
 	testing.expect_value(t, span, "12.50")
@@ -285,11 +285,11 @@ json_writes_a_binary_number_with_a_kind :: proc(t: ^testing.T) {
 
 	text, _, err := core.write(&doc, {}, json.as(.Json))
 	defer delete(text)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(text), `[["Zm9vYg==","Zm9vYmE=",258,"hi",""]]`)
 
 	value, value_err := write.write_value(core.Node_Ref{&doc, core.ROOT}, json.as(.Json), {}, context.temp_allocator)
-	walktest.expect_nil(t, value_err)
+	testkit.expect_nil(t, value_err)
 	testing.expect_value(t, string(value), string(text))
 }
 
@@ -315,7 +315,7 @@ resolved_numbers_read_through_number_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, digits, "258")
 	text, _, err := core.write(&doc, {}, json.as(.Json))
 	defer delete(text)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(text), `[["Zm9vYg==","Zm9vYmE=",258,"hi",""]]`)
 
 	readers.number_text = proc(v: ^core.Token_View, t: core.Token, buf: []u8) -> (string, bool) {
@@ -323,7 +323,7 @@ resolved_numbers_read_through_number_text :: proc(t: ^testing.T) {
 	}
 	none, _, refusal := core.write(&doc, {}, json.as(.Json))
 	defer delete(none)
-	walktest.expect_kind(t, refusal, core.Typed_Error_Kind.Non_Finite)
+	testkit.expect_kind(t, refusal, core.Typed_Error_Kind.Non_Finite)
 }
 
 // JSON and CSV spell a byte string as RFC 4648 base64, a binary number as its digits, and count the tags they drop.
@@ -334,20 +334,20 @@ text_formats_write_bytes_as_base64 :: proc(t: ^testing.T) {
 
 	text, dropped, err := core.write(&doc, {}, json.as(.Json))
 	defer delete(text)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(text), `[["Zm9vYg==","Zm9vYmE=",258,"hi",""]]`)
 	testing.expect_value(t, dropped, 2)
 
 	table, table_dropped, table_err := core.write(&doc, {}, dsv.as(.Csv))
 	defer delete(table)
-	walktest.expect_nil(t, table_err)
+	testkit.expect_nil(t, table_err)
 	testing.expect_value(t, string(table), "Zm9vYg==,Zm9vYmE=,258,hi,\"\"\n")
 	testing.expect_value(t, table_dropped, 2)
 
 	// The text a write made reads back as the strings and the number it spells.
 	back, back_err := json.build(text, .Json)
 	defer core.destroy(&back)
-	walktest.expect_nil(t, back_err)
+	testkit.expect_nil(t, back_err)
 	s, ok := core.text(&back, 2, nil)
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "Zm9vYg==")

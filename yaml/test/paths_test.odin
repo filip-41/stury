@@ -8,7 +8,7 @@ import "core:testing"
 import core "../../core"
 import engine "../../core/build"
 import "../../core/records"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import yaml ".."
 
 @(private = "file")
@@ -64,7 +64,7 @@ a_read_answers_as_a_query_of_the_document :: proc(t: ^testing.T) {
 	for text, i in PATHS {
 		e: core.Error
 		paths[i], e = core.parse_path(text, context.temp_allocator)
-		walktest.expect_nil(t, e)
+		testkit.expect_nil(t, e)
 	}
 	for text in TEXTS {
 		src := transmute([]u8)text
@@ -76,11 +76,11 @@ a_read_answers_as_a_query_of_the_document :: proc(t: ^testing.T) {
 			defer core.destroy(&read)
 			if berr != nil {
 				_, faulted := rerr.(core.Fault)
-				testing.expectf(t, faulted && walktest.at_of(rerr) == walktest.at_of(berr), "%q %v: %v, built %v", text, PATHS[min(k, len(PATHS) - 1)], rerr, berr)
+				testing.expectf(t, faulted && testkit.at_of(rerr) == testkit.at_of(berr), "%q %v: %v, built %v", text, PATHS[min(k, len(PATHS) - 1)], rerr, berr)
 				continue
 			}
 			answers, qerr := engine.query(&built, set, allocator = context.temp_allocator)
-			testing.expect(t, walktest.same_error(rerr, core.error_of(qerr)))
+			testing.expect(t, testkit.same_error(rerr, core.error_of(qerr)))
 			testing.expectf(t, seen_of(&read, read.answers) == seen_of(&built, answers), "%q %v:\n%s\nbuilt:\n%s", text, PATHS[min(k, len(PATHS) - 1)], seen_of(&read, read.answers), seen_of(&built, answers))
 		}
 	}
@@ -115,9 +115,9 @@ the_stream_and_the_first_answer_agree_with_the_read :: proc(t: ^testing.T) {
 		path, _ := core.parse_path(c.path, context.temp_allocator)
 		read, rerr := engine.scan(src, as, path)
 		defer core.destroy(&read)
-		walktest.expect_nil(t, rerr)
+		testkit.expect_nil(t, rerr)
 		spans := Spans{src = src, seen = make([dynamic]string, context.temp_allocator)}
-		walktest.expect_nil(t, engine.each_answer(src, as, path, &spans, on))
+		testkit.expect_nil(t, engine.each_answer(src, as, path, &spans, on))
 		testing.expectf(t, len(spans.seen) == len(read.answers), "%q %s: %v", c.text, c.path, spans.seen)
 		for a, i in read.answers {
 			if i < len(spans.seen) {
@@ -126,7 +126,7 @@ the_stream_and_the_first_answer_agree_with_the_read :: proc(t: ^testing.T) {
 		}
 		doc, first, ferr := engine.find(src, as, path)
 		defer core.destroy(&doc)
-		walktest.expect_nil(t, ferr)
+		testkit.expect_nil(t, ferr)
 		testing.expect_value(t, string(core.span(&doc, first.node)) if first.outcome == .Found else "", c.first)
 		testing.expect_value(t, first.outcome, read.answers[0].outcome if len(read.answers) > 0 else .Missing)
 
@@ -139,7 +139,7 @@ the_stream_and_the_first_answer_agree_with_the_read :: proc(t: ^testing.T) {
 			if !more {
 				break
 			}
-			walktest.expect_nil(t, err)
+			testkit.expect_nil(t, err)
 			if k < 2 {
 				testing.expectf(t, seen_of(&got, got.answers) == seen_of(&read, read.answers), "%q %s record %d", c.text, c.path, k)
 			}
@@ -158,14 +158,14 @@ a_read_that_stops_early_judges_the_text_before_its_answer :: proc(t: ^testing.T)
 	src := transmute([]u8)string("a: [1, {x: 2}]\nb: here\nc: [unclosed\n")
 	doc, answer, err := engine.find(src, as, path, {stop_early = true, dups = .First})
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(core.span(&doc, answer.node)), "here")
 	whole, werr := engine.scan(src, as, path)
 	defer core.destroy(&whole)
-	walktest.expect_kind(t, werr, core.Path_Error_Kind.Walk)
+	testkit.expect_kind(t, werr, core.Path_Error_Kind.Walk)
 	bad := transmute([]u8)string("a: [1, {x: \"\\q\"}]\nb: here\n")
 	early, _, eerr := engine.find(bad, as, path, {stop_early = true, dups = .First})
 	defer core.destroy(&early)
-	walktest.expect_kind(t, eerr, core.Path_Error_Kind.Walk)
-	testing.expect_value(t, walktest.at_of(eerr), u64(12))
+	testkit.expect_kind(t, eerr, core.Path_Error_Kind.Walk)
+	testing.expect_value(t, testkit.at_of(eerr), u64(12))
 }

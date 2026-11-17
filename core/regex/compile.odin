@@ -28,6 +28,7 @@ Compiler :: struct {
 	counter_of: [dynamic]i32, // under ECMA, per instruction: the index into `counters` of its counter loop, -1 for none
 	counter:    int, // the counter loop being emitted, -1 for none
 	looped:     [dynamic]^Node, // the ECMA repeats that run as counter loops, which a repeat around them emits again
+	counted:    bool, // a repeat of more than one iteration, which an ECMA search that reads no bounds counts (`counting_of`)
 	tuned:      int, // the highest group number Oniguruma's tune_tree has reached by now, as `fixed_length` reads it
 	slots:      int,
 	err:        string,
@@ -167,6 +168,9 @@ program :: proc(pattern: string, flags: Flags, allocator: mem.Allocator) -> (re:
 	}
 	re.ecma, re.linear = flags.ecma, linear_ops(re.insts, flags.ecma, re.opt.anchored)
 	re.longest, re.not_empty = flags.longest, flags.not_empty
+	if flags.ecma && c.counted {
+		re.counting = counting_of(re.insts)
+	}
 	if re.linear {
 		v := new(Visited)
 		re.visited = v
@@ -443,6 +447,7 @@ emit_repeat :: proc(c: ^Compiler, n: ^Node) {
 	if n.max == 0 {
 		return
 	}
+	c.counted ||= n.min > 1 || n.max > 1
 	// Under ECMA no Rep is used in a look-ahead's body, because the visited set's log does not follow its alternatives
 	// (match.odin).
 	if (x.kind == .Char || x.kind == .Any || x.kind == .Class) && (n.max != n.min || c.ecma) && !(c.ecma && c.looking > 0) {

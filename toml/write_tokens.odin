@@ -63,7 +63,7 @@ TOKENS := write.Token_Spelling {
 			text, ok := write.bytes_text(cast([]u8)x, stack[:])
 			return put_basic(t.out, text, t.opts) if ok else .No_Memory
 		case core.Number:
-			return write.put_number_as(t.out, x, TREE)
+			return write.put_number(t.out, x, TREE)
 		case write.Number_Literal:
 			write.put_text(t.out, x.text)
 		case write.Tagged_Text:

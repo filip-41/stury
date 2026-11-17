@@ -12,7 +12,7 @@ import typed "../../core/typed"
 import write "../../core/write"
 import records "../../core/records"
 import json_pkg "../../json"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import yaml ".."
 
 PRETTY :: core.Write_Options{pretty = true, indent = 2}
@@ -215,7 +215,7 @@ multi_line_strings_are_literal_blocks :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	got := text_of_json(`{"a":"x\ny\n","b":"x\ny","c":"x\n\n","d":"  x\ny"}`)
 	again, err := build(got)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	for pair in ([?][2]string{{"a", "x\ny\n"}, {"b", "x\ny"}, {"c", "x\n\n"}, {"d", "  x\ny"}}) {
 		i, _ := core.member(&again, core.ROOT, pair[0])
 		have, _ := core.text_clone(&again, i, context.temp_allocator)
@@ -244,10 +244,10 @@ folded_blocks_stay_folded :: proc(t: ^testing.T) {
 	}
 	for src, k in sources {
 		doc, err := build(src)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		got := text_of(src)
 		again, aerr := build(got)
-		walktest.expect_nil(t, aerr)
+		testkit.expect_nil(t, aerr)
 		testing.expectf(t, core.equal(core.Node_Ref{&doc, core.ROOT}, core.Node_Ref{&again, core.ROOT}), "%q is written %q", src, got)
 		testing.expectf(t, strings.contains(got, ">") == (k < len(sources) - 1), "%q is written %q", src, got)
 	}
@@ -264,7 +264,7 @@ comments_tags_and_anchors_are_written_back :: proc(t: ^testing.T) {
 	}
 	doc, _ := build(src)
 	again, err := build(got)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect(t, core.equal(core.Node_Ref{&doc, core.ROOT}, core.Node_Ref{&again, core.ROOT}))
 	i, _ := core.member(&again, core.ROOT, "c")
 	testing.expect_value(t, core.kind(&again, i), core.Kind.String)
@@ -286,7 +286,7 @@ directives_and_markers_are_written_back :: proc(t: ^testing.T) {
 		testing.expectf(t, text_of(c[0]) == c[1], "%q is written %q", c[0], text_of(c[0]))
 	}
 	doc, err := build("%YAML 1.2\n---\na: 1\n...\n")
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	it := core.facts_of(&doc, core.ROOT, .Directive)
 	for want in ([?]string{"%YAML 1.2", "---", "..."}) {
 		body, ok := core.fact_next(&it)
@@ -294,7 +294,7 @@ directives_and_markers_are_written_back :: proc(t: ^testing.T) {
 	}
 	// A marker is layout, as a style is, so JSON drops none.
 	_, dropped, werr := core.write(&doc, {}, json_pkg.as(.Json))
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, dropped, 0)
 }
 
@@ -302,10 +302,10 @@ directives_and_markers_are_written_back :: proc(t: ^testing.T) {
 a_block_comment_of_another_format_is_written_as_yaml_lines :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	doc, err := json_pkg.build(transmute([]u8)string("{\n/* x\n y */\n\"a\": 1, /* tail a */\n\"b\": 2 //b\n}"), .Jsonc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	got, werr := written(&doc)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, got, "# x\n#  y\na: 1 # tail a\nb: 2 #b\n")
 }
 
@@ -313,10 +313,10 @@ a_block_comment_of_another_format_is_written_as_yaml_lines :: proc(t: ^testing.T
 inline_comments_on_one_node_join_at_the_end_of_its_line :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	doc, err := json_pkg.build(transmute([]u8)string("{\"a\": 1 /* a */ /* b */, \"c\": 2}"), .Jsonc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	got, werr := written(&doc)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, got, "a: 1 # a b\nc: 2\n")
 
 	for opts in ([]core.Write_Options{PRETTY, {}}) {
@@ -359,10 +359,10 @@ token_write_puts_an_inline_comment_on_a_collection_on_its_key_line :: proc(t: ^t
 compact_text_breaks_its_flow_line_at_a_comment :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	doc, err := json_pkg.build(transmute([]u8)string("{\n  // lead a\n  \"a\": 1, // in a\n  \"b\": [1, /* in 1 */ 2]\n  // foot\n}"), .Jsonc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	got, werr := written(&doc, {})
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, got, "{\n# lead a\na: 1 # in a\n, b: [1 # in 1\n, 2]\n# foot\n}")
 }
 
@@ -370,10 +370,10 @@ compact_text_breaks_its_flow_line_at_a_comment :: proc(t: ^testing.T) {
 compact_text_keeps_a_root_scalar_inline_comment :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	doc, err := json_pkg.build(transmute([]u8)string("1 // c\n"), .Jsonc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	text, dropped, werr := core.write(&doc, {}, yaml.as(.Yaml_1_2), allocator = context.temp_allocator)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, string(text), "1 # c\n")
 	testing.expect_value(t, dropped, 0)
 }
@@ -382,10 +382,10 @@ compact_text_keeps_a_root_scalar_inline_comment :: proc(t: ^testing.T) {
 an_empty_collection_keeps_its_foot_comment :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	doc, err := json_pkg.build(transmute([]u8)string(`{"e": { /* in e */ }, "f": [ /* in f */ ]}`), .Jsonc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	got, werr := written(&doc)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, got, "e: {\n  # in e\n  }\nf: [\n  # in f\n  ]\n")
 }
 
@@ -398,9 +398,9 @@ a_stream_is_written_with_document_starts :: proc(t: ^testing.T) {
 	for rec in records.next(&it) {
 		doc, _ := records.build(&it, rec, context.temp_allocator)
 		text, err := written(&doc)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		again, aerr := build(text)
-		walktest.expect_nil(t, aerr)
+		testkit.expect_nil(t, aerr)
 		testing.expect(t, core.equal(core.Node_Ref{&doc, core.ROOT}, core.Node_Ref{&again, core.ROOT}))
 		count += 1
 	}
@@ -498,11 +498,11 @@ typed_values_are_marshalled_as_yaml :: proc(t: ^testing.T) {
 	}
 	value := Config{name = "web", port = 80, ratio = 0.5, yes = "no", inner = {on = true, tags = {"a", "b c"}}}
 	text, err := yaml.marshal(value, write = PRETTY)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	got := string(text)
 	testing.expect_value(t, got, "name: web\nport: 80\nratio: 0.5\n'yes': 'no'\ninner:\n  'on': true\n  tags:\n    - a\n    - b c\nnone: null\n")
 	compact, cerr := yaml.marshal(value, write = core.Write_Options{})
-	walktest.expect_nil(t, cerr)
+	testkit.expect_nil(t, cerr)
 	testing.expect_value(t, string(compact), `{name: web, port: 80, ratio: 0.5, 'yes': 'no', inner: {'on': true, tags: [a, b c]}, none: null}`)
 }
 
@@ -518,11 +518,11 @@ byte_strings_are_marshalled_as_binary_and_read_back :: proc(t: ^testing.T) {
 	value := Blob{name = "x", data = typed.Bytes([]u8{'a', 'b', 'c', 0, 0xff}), none = typed.Bytes([]u8{})}
 	for layout in ([?]core.Write_Options{PRETTY, {}}) {
 		text, err := yaml.marshal(value, write = layout)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		testing.expect(t, strings.contains(string(text), "!!binary YWJjAP8="), string(text))
 		testing.expect(t, strings.contains(string(text), `!!binary ""`), string(text))
 		back: Blob
-		walktest.expect_nil(t, yaml.unmarshal(text, .Yaml_1_2, &back))
+		testkit.expect_nil(t, yaml.unmarshal(text, .Yaml_1_2, &back))
 		testing.expect_value(t, string(cast([]u8)back.data), "abc\x00\xff")
 		testing.expect_value(t, len(back.none), 0)
 	}

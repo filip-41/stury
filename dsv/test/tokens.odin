@@ -6,7 +6,7 @@ import "core:strings"
 import "core:testing"
 import "core:unicode/utf8"
 import core "../../core"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import dsv ".."
 import gen "gen"
 
@@ -15,7 +15,7 @@ expect :: proc(all: []core.Token, rule: u64, out: ^[dynamic]core.Token) -> (stop
 	clear(out)
 	for j := 0; j < len(all); j += 1 {
 		t := all[j]
-		a := walktest.ask(rule, u64(len(out)), t)
+		a := testkit.ask(rule, u64(len(out)), t)
 		append(out, t)
 		switch a {
 		case .Stop:
@@ -63,9 +63,9 @@ walk :: proc(src: []u8, tsv, no_header: bool, h: ^$H, regs: ^core.Hook_Regs, $on
 hooks_agree :: proc(t: ^testing.T) {
 	state := rand.create(1)
 	context.random_generator = rand.default_random_generator(&state)
-	log := new(walktest.Log)
+	log := new(testkit.Log)
 	defer free(log)
-	full := new(walktest.Log)
+	full := new(testkit.Log)
 	defer free(full)
 	text, broken: [dynamic]u8
 	defer delete(text)
@@ -78,11 +78,11 @@ hooks_agree :: proc(t: ^testing.T) {
 		gen.text(&text, tsv)
 		src := text[:]
 		if round % 2 == 1 {
-			walktest.mutate(&broken, text[:], gen.SHARP)
+			testkit.mutate(&broken, text[:], gen.SHARP)
 			src = broken[:]
 		}
 		full^ = {}
-		hi, fault := walk(src, tsv, no_header, full, &core.Hook_Regs{}, walktest.log_hook)
+		hi, fault := walk(src, tsv, no_header, full, &core.Hook_Regs{}, testkit.log_hook)
 		ok := testing.expectf(t, fault == validate(src, tsv), "%q: walk %v, validate %v", src, fault, validate(src, tsv))
 		ok &&= testing.expectf(t, fault != nil || hi == u64(len(src)), "%q: hi %d", src, hi)
 		ok &&= round % 2 == 1 || testing.expectf(t, fault == nil, "%q: %v", src, fault)
@@ -101,9 +101,9 @@ hooks_agree :: proc(t: ^testing.T) {
 			}
 			stop_hi, was_stopped := expect(full.tokens[:full.n], rule, &want)
 			log^ = {rule = rule}
-			hi1, fault1 := walk(src, tsv, no_header, log, &core.Hook_Regs{}, walktest.log_hook)
+			hi1, fault1 := walk(src, tsv, no_header, log, &core.Hook_Regs{}, testkit.log_hook)
 			regs := core.Hook_Regs{0, 0, rule}
-			hi2, fault2 := walk(src, tsv, no_header, &struct {}{}, &regs, walktest.regs_hook)
+			hi2, fault2 := walk(src, tsv, no_header, &struct {}{}, &regs, testkit.regs_hook)
 			ok = testing.expectf(t, slice.equal(log.tokens[:log.n], want[:]), "%q rule %x: tokens", src, rule)
 			if was_stopped {
 				ok &&= testing.expectf(t, hi1 == stop_hi && fault1 == nil, "%q rule %x: stop at %d %v", src, rule, hi1, fault1)
@@ -220,7 +220,7 @@ append_record_tokens :: proc(out: ^[dynamic]core.Token, src: []u8, rec_lo: int, 
 // across the boundary between two.
 @(test)
 wrong_width_records :: proc(t: ^testing.T) {
-	log := new(walktest.Log)
+	log := new(testkit.Log)
 	defer free(log)
 	text: [dynamic]u8
 	defer delete(text)
@@ -270,7 +270,7 @@ wrong_width_records :: proc(t: ^testing.T) {
 								append(&text, '\n')
 							}
 							log^ = {}
-							hi, fault := walk(text[:], tsv, !header, log, &core.Hook_Regs{}, walktest.log_hook)
+							hi, fault := walk(text[:], tsv, !header, log, &core.Hook_Regs{}, testkit.log_hook)
 							want_fault := core.Fault{u64(fault_at), &dsv.RULES, .Bad_Width, u8(dsv.Detail.Too_Many if len(bad) > len(HEADER) else dsv.Detail.Too_Few)}
 							if !testing.expectf(t, hi == u64(fault_at) && fault == want_fault, "%q tsv %v header %v quoted %v lf %v: %d %v, want %d %v", text[:], tsv, header, quoted, final_lf, hi, fault, fault_at, want_fault) {
 								return
@@ -288,11 +288,11 @@ wrong_width_records :: proc(t: ^testing.T) {
 
 @(test)
 walked_tokens :: proc(t: ^testing.T) {
-	log := new(walktest.Log)
+	log := new(testkit.Log)
 	defer free(log)
 	for c in WALKED {
 		log^ = {}
-		hi, fault := walk(transmute([]u8)c.text, false, false, log, &core.Hook_Regs{}, walktest.log_hook, c.lo)
+		hi, fault := walk(transmute([]u8)c.text, false, false, log, &core.Hook_Regs{}, testkit.log_hook, c.lo)
 		want: Maybe(core.Fault)
 		if c.fault.kind != nil {
 			want = core.Fault{c.fault.at, &dsv.RULES, c.fault.kind, u8(c.fault.detail)}
@@ -305,10 +305,10 @@ walked_tokens :: proc(t: ^testing.T) {
 // A BOM past the text's first byte is a cell byte, not a marker, so a walk from the BOM reads the cell it starts.
 @(test)
 bom_mid_text :: proc(t: ^testing.T) {
-	log := new(walktest.Log)
+	log := new(testkit.Log)
 	defer free(log)
 	src := "a,b\n\xef\xbb\xbfx,y\n"
-	hi, fault := walk(transmute([]u8)src, false, true, log, &core.Hook_Regs{}, walktest.log_hook, 4)
+	hi, fault := walk(transmute([]u8)src, false, true, log, &core.Hook_Regs{}, testkit.log_hook, 4)
 	testing.expectf(t, hi == 11 && fault == nil, "%d %v", hi, fault)
 	want := []core.Token{{4, 0, .Array, .Value, 0}, {4, 0, .Array, .Value, 0}, {4, 4, .Plain, .Value, 0}, {9, 1, .Plain, .Value, 0}, {10, 1, .End, .Value, 0}, {11, 0, .End, .Value, 0}}
 	testing.expectf(t, slice.equal(log.tokens[:log.n], want), "%v", log.tokens[:log.n])
@@ -341,7 +341,7 @@ fault_sentences :: proc(t: ^testing.T) {
 	}
 	b := strings.builder_make(context.temp_allocator)
 	for c in cases {
-		f, bad := walktest.fault_of(dsv.validate(transmute([]u8)c.text, .Csv)).?
+		f, bad := testkit.fault_of(dsv.validate(transmute([]u8)c.text, .Csv)).?
 		strings.builder_reset(&b)
 		core.render(strings.to_writer(&b), transmute([]u8)c.text, f)
 		testing.expectf(t, bad && strings.to_string(b) == c.line, "%q: %q, want %q", c.text, strings.to_string(b), c.line)

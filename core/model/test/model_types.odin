@@ -12,12 +12,12 @@ import write "../../write"
 import schema "../../schema"
 import json "../../../json"
 import model ".."
-import walktest "../../../walktest"
+import testkit "../../../testkit"
 
 // Compiles `T` and fails the test on an error.
 compiled_ok :: proc(t: ^testing.T, reg: ^model.Registry, $T: typeid, checks: typed.Format_Checks, loc := #caller_location) -> model.Model(T) {
 	m, err := model.compile(reg, T, checks)
-	walktest.expect_nil(t, err, loc)
+	testkit.expect_nil(t, err, loc)
 	return m
 }
 
@@ -75,6 +75,20 @@ load_one :: proc(m: ^model.Model($T), text: string) -> (v: T, kind: core.Typed_E
 }
 
 @(test)
+an_integer_past_its_field_is_refused_not_wrapped :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	m := compiled_ok(t, nil, struct{ n: i64 }, json.checks(.Json))
+	for x in ([?]struct {
+		text: string,
+		kind: core.Typed_Error_Kind,
+	}{{`{"n": 9223372036854775807}`, .None}, {`{"n": 9223372036854775808}`, .Above_Maximum}, {`{"n": -9223372036854775809}`, .Below_Minimum}, {`{"n": 1e30}`, .Above_Maximum}}) {
+		_, kind := load_one(&m, x.text)
+		testing.expectf(t, kind == x.kind, "%s: %v", x.text, kind)
+	}
+}
+
+@(test)
 a_time_reads_rfc_3339_into_utc :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
@@ -94,7 +108,7 @@ a_time_reads_rfc_3339_into_utc :: proc(t: ^testing.T) {
 		v, kind := load_one(&m, c.text)
 		testing.expectf(t, kind == .None, "%s: %v", c.text, kind)
 		text, written := write.marshal(v, &m.plan, allocator = context.temp_allocator)
-		walktest.expect_nil(t, written)
+		testkit.expect_nil(t, written)
 		testing.expectf(t, string(text) == strings.concatenate({`{"at":"`, c.want, `"}`}), "%s gives %s", c.text, text)
 	}
 	refusals := [?]struct {
@@ -248,7 +262,7 @@ a_custom_carrier_reads_its_type_through_another :: proc(t: ^testing.T) {
 	_, kind = load_one(&m, `{"total": "1", "codes": [[1, 2, 3]]}`)
 	testing.expect_value(t, kind, core.Typed_Error_Kind.Too_Many)
 	bad := Bill{total = 5}
-	walktest.expect_nil(t, model.validate(&m, &bad))
+	testkit.expect_nil(t, model.validate(&m, &bad))
 	bad.codes = {""}
 	testing.expect_value(t, refused_as(model.validate(&m, &bad)), core.Typed_Error_Kind.Custom)
 	d, _ := model.schema(&m, .Load)
@@ -272,9 +286,9 @@ a_schema_with_an_asserted_format_names_sturys_dialect :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	m := compiled_ok(t, nil, Event, json.checks(.Json))
 	d, described := model.schema(&m, .Load)
-	walktest.expect_nil(t, described)
+	testkit.expect_nil(t, described)
 	text, written := schema.write(&d, json.as(.Json))
-	walktest.expect_nil(t, written)
+	testkit.expect_nil(t, written)
 	testing.expect_value(t, string(text), `{"$schema":"https://raw.githubusercontent.com/filip-41/stury/main/core/schema/meta/stury/format-assertion.json","type":"object","properties":{"at":{"type":"string","pattern":"^(?![0-9]{4}-)|^(?:16(?:7[89]|[89][0-9])|1[7-9][0-9]{2}|2[01][0-9]{2}|22(?:[0-5][0-9]|6[01]))-","format":"date-time"},"blob":{"type":"string","contentEncoding":"base64","pattern":"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$"},"name":{"type":"string","pattern":"^a","format":"email"}},"required":["at","blob","name"]}`)
 	Dated :: struct {
 		day: string `model:"format=date,pattern=^2"`,
@@ -463,6 +477,35 @@ a_first_match_union_reads_the_first_arm_that_reads_its_text :: proc(t: ^testing.
 		append(&kinds, e.kind)
 	}
 	testing.expectf(t, len(kinds) == 4 && kinds[0] == .No_Arm && kinds[1] == .Below_Minimum && kinds[2] == .Wrong_Kind && kinds[3] == .Wrong_Kind, "%v", kinds)
+}
+
+@(private = "file")
+Boxed :: struct {
+	inner: Circle,
+}
+
+@(private = "file")
+Pair :: union {
+	Square,
+	Boxed,
+}
+
+@(test)
+a_first_match_union_refuses_with_the_fault_of_the_arm_that_failed_deepest :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	reg: model.Registry
+	model.register(&reg, model.Union_Rule{type = Pair, mode = .First_Match})
+	m := compiled_ok(t, &reg, struct{ e: Pair }, json.checks(.Json))
+	sink := typed.Sink{max_errors = 10}
+	v: struct {
+		e: Pair,
+	}
+	err := model.load(&m, transmute([]u8)string(`{"e": {"inner": {"r": "x"}}}`), &v, &sink)
+	testing.expect_value(t, refused_as(err), core.Typed_Error_Kind.Wrong_Kind)
+	testing.expectf(t, len(sink.entries) == 1 && sink.entries[0].kind == .Wrong_Kind && len(sink.entries[0].path) == 3, "%v", sink.entries)
+	_, kind := load_one(&m, `{"e": 3}`)
+	testing.expect_value(t, kind, core.Typed_Error_Kind.No_Arm)
 }
 
 @(private = "file")
@@ -677,7 +720,7 @@ validate_and_a_checked_dump_judge_applicators_as_a_load_does :: proc(t: ^testing
 	e := compiled_ok(t, &one, Either, json.checks(.Json))
 	read_twice, read_once := Either(i64(1)), Either(f64(1.5))
 	testing.expect_value(t, refused_as(model.validate(&e, &read_twice)), core.Typed_Error_Kind.Many_Arms)
-	walktest.expect_nil(t, model.validate(&e, &read_once))
+	testkit.expect_nil(t, model.validate(&e, &read_once))
 }
 
 // A load and a validate of what it read list the same failures in one order: a value's before those inside it, its
@@ -783,7 +826,7 @@ a_judged_type_that_holds_itself_judges_each_value_once_at_any_depth :: proc(t: ^
 	text, _ := strings.replace_all(strings.to_string(b), `"kk"`, `"k"`)
 	v, passed := load_one(&m, text)
 	testing.expect_value(t, passed, core.Typed_Error_Kind.None)
-	walktest.expect_nil(t, model.validate(&m, &v))
+	testkit.expect_nil(t, model.validate(&m, &v))
 }
 
 @(private = "file")
@@ -825,11 +868,11 @@ a_patch_is_judged_by_its_applicators_once_merged :: proc(t: ^testing.T) {
 	model.register(&reg, Parcel, fragment(`{"if": {"properties": {"kind": {"const": "post"}}, "required": ["kind"]}, "then": {"required": ["zip"]}}`))
 	m := compiled_ok(t, &reg, Parcel, json.checks(.Json))
 	p: Parcel
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"kind": "air"}`), &p))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"kind": "air"}`), &p))
 	testing.expect_value(t, refused_as(model.patch(&m, &p, transmute([]u8)string(`{"kind": "post"}`))), core.Typed_Error_Kind.Missing_Field)
 	testing.expect_value(t, p.kind, "air")
-	walktest.expect_nil(t, model.patch(&m, &p, transmute([]u8)string(`{"zip": "1"}`)))
-	walktest.expect_nil(t, model.patch(&m, &p, transmute([]u8)string(`{"kind": "post"}`)))
+	testkit.expect_nil(t, model.patch(&m, &p, transmute([]u8)string(`{"zip": "1"}`)))
+	testkit.expect_nil(t, model.patch(&m, &p, transmute([]u8)string(`{"kind": "post"}`)))
 	testing.expect(t, p.kind == "post" && p.zip.? == "1")
 }
 
@@ -856,9 +899,9 @@ a_distinct_number_text_reads_as_a_number :: proc(t: ^testing.T) {
 	model.register_type(&reg, {Bounded_Text, ">=2"})
 	m := compiled_ok(t, &reg, Text_Or_Object, json.checks(.Json))
 	v: Text_Or_Object
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`1e400`), &v))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`1e400`), &v))
 	n, is_number := v.(Bounded_Text)
 	testing.expectf(t, is_number && n.text == "1e400", "%v", v)
 	testing.expect(t, model.load(&m, transmute([]u8)string(`1.5`), &v) != nil)
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"a": 1}`), &v))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"a": 1}`), &v))
 }

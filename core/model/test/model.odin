@@ -11,7 +11,7 @@ import write "../../write"
 import schema "../../schema"
 import json "../../../json"
 import model ".."
-import walktest "../../../walktest"
+import testkit "../../../testkit"
 
 @(private = "file")
 Celsius :: distinct f64
@@ -66,9 +66,9 @@ a_model_validates_its_rules_with_paths :: proc(t: ^testing.T) {
 	account_registry(&reg)
 	m, compiled := model.compile(&reg, Account, json.checks(.Json))
 	defer model.destroy(&m)
-	walktest.expect_nil(t, compiled)
+	testkit.expect_nil(t, compiled)
 	good := Account{id = 1, name = "ada", age = 36, score = 0.5, step = 10, tags = {"a"}, mail = "ada@example.org", secret = "s", rooms = {{"lab", 20}}}
-	walktest.expect_nil(t, model.validate(&m, &good))
+	testkit.expect_nil(t, model.validate(&m, &good))
 	bad := Account {
 		name  = "abcdefghiJ",
 		age   = 10,
@@ -87,7 +87,7 @@ a_model_validates_its_rules_with_paths :: proc(t: ^testing.T) {
 	testing.expect_value(t, steps_text(f.steps), ".name")
 	sink: typed.Sink
 	defer typed.sink_destroy(&sink)
-	testing.expect_value(t, walktest.typed_kind(model.validate(&m, &bad, &sink)), core.Typed_Error_Kind.Too_Long)
+	testing.expect_value(t, testkit.typed_kind(model.validate(&m, &bad, &sink)), core.Typed_Error_Kind.Too_Long)
 	want := [?]struct {
 		kind: core.Typed_Error_Kind,
 		path: string,
@@ -129,7 +129,7 @@ a_model_validates_what_a_write_refuses :: proc(t: ^testing.T) {
 	v := Picked{x = math.inf_f32(1), e = transmute(type_of(Picked{}.e))u8(7), n = -1}
 	sink: typed.Sink
 	defer typed.sink_destroy(&sink)
-	walktest.expect_kind(t, model.validate(&m, &v, &sink), core.Typed_Error_Kind.Non_Finite)
+	testkit.expect_kind(t, model.validate(&m, &v, &sink), core.Typed_Error_Kind.Non_Finite)
 	kinds: [dynamic]core.Typed_Error_Kind
 	defer delete(kinds)
 	for e in sink.entries {
@@ -183,7 +183,7 @@ a_rule_that_does_not_fit_refuses_the_model :: proc(t: ^testing.T) {
 	defer model.destroy(&reg)
 	model.register(&reg, model.Type_Rule{Celsius, "optional"})
 	_, flagged := model.compile(&reg, Flag_On_Type, json.checks(.Json), context.temp_allocator)
-	testing.expect_value(t, walktest.typed_kind(flagged), core.Typed_Error_Kind.Bad_Tag)
+	testing.expect_value(t, testkit.typed_kind(flagged), core.Typed_Error_Kind.Bad_Tag)
 	testing.expect_value(t, model.register(&reg, model.Field_Rule_Of{Room, "nope", ">=1"}), runtime.Allocator_Error.None)
 	_, unknown := model.compile(&reg, Room, json.checks(.Json), context.temp_allocator)
 	f, _ := unknown.(core.Typed_Error)
@@ -192,7 +192,7 @@ a_rule_that_does_not_fit_refuses_the_model :: proc(t: ^testing.T) {
 	defer model.destroy(&clash)
 	model.register(&clash, model.Field_Rule_Of{Account, "name", "pattern=^a"})
 	_, clashed := model.compile(&clash, Account, json.checks(.Json), context.temp_allocator)
-	testing.expect_value(t, walktest.typed_kind(clashed), core.Typed_Error_Kind.Bad_Tag)
+	testing.expect_value(t, testkit.typed_kind(clashed), core.Typed_Error_Kind.Bad_Tag)
 }
 
 @(private = "file")
@@ -271,22 +271,22 @@ a_model_has_a_load_schema_and_a_dump_schema :: proc(t: ^testing.T) {
 	}
 	reg: model.Registry
 	m, compiled := model.compile(&reg, Login, json.checks(.Json))
-	walktest.expect_nil(t, compiled)
+	testkit.expect_nil(t, compiled)
 	texts: [model.Direction]string
 	for direction in model.Direction {
 		d, described := model.schema(&m, direction)
-		walktest.expect_nil(t, described)
+		testkit.expect_nil(t, described)
 		text, written := schema.write(&d, json.as(.Json))
-		walktest.expect_nil(t, written)
+		testkit.expect_nil(t, written)
 		texts[direction] = string(text)
 	}
 	testing.expect_value(t, texts[.Load], `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"id":{"readOnly":true},"user":{"$ref":"#/$defs/n2","minLength":1},"password":{"$ref":"#/$defs/n2","writeOnly":true},"hint":{"$ref":"#/$defs/n2"}},"required":["user","password"],"$defs":{"n2":{"type":"string"}}}`)
 	testing.expect_value(t, texts[.Dump], `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"id":{"type":"integer","minimum":1,"maximum":9223372036854775807,"readOnly":true},"user":{"$ref":"#/$defs/n2","minLength":1},"hint":{"$ref":"#/$defs/n2"}},"required":["id","user"],"$defs":{"n2":{"type":"string"}}}`)
 	load, _ := model.schema(&m, .Load)
 	doc, built := core.build(transmute([]u8)texts[.Load], json.as(.Json))
-	walktest.expect_nil(t, built)
+	testkit.expect_nil(t, built)
 	read, read_err := schema.compile(core.span(&doc, core.ROOT), json.as(.Json), {})
-	walktest.expect_nil(t, read_err)
+	testkit.expect_nil(t, read_err)
 	for member in read.description.objects[0].members {
 		node := read.description.nodes[member.node].rules
 		testing.expectf(t, node.read_only == (member.name == "id") && node.write_only == (member.name == "password"), "%s", member.name)
@@ -302,9 +302,9 @@ a_model_has_a_load_schema_and_a_dump_schema :: proc(t: ^testing.T) {
 a_nil_registry_compiles_a_plain_type :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	m, compiled := model.compile(nil, Room, json.checks(.Json), context.temp_allocator)
-	walktest.expect_nil(t, compiled)
+	testkit.expect_nil(t, compiled)
 	v := Room{"lab", 20}
-	walktest.expect_nil(t, model.validate(&m, &v))
+	testkit.expect_nil(t, model.validate(&m, &v))
 }
 
 @(private = "file")
@@ -426,7 +426,7 @@ a_pattern_before_another_tag_item_refuses_the_model :: proc(t: ^testing.T) {
 	message := strings.to_string(b)
 	testing.expectf(t, strings.contains(message, "put it last") && strings.contains(message, "register_field"), "%s", message)
 	last, compiled := model.compile(nil, Pattern_Last, json.checks(.Json), context.temp_allocator)
-	walktest.expect_nil(t, compiled)
+	testkit.expect_nil(t, compiled)
 	for c in ([?]struct {
 			s:  string,
 			ok: bool,
@@ -438,9 +438,9 @@ a_pattern_before_another_tag_item_refuses_the_model :: proc(t: ^testing.T) {
 	defer model.destroy(&reg)
 	model.register(&reg, model.Field_Rule_Of{Pattern_Plain, "s", "pattern=^a+,len<=3$"})
 	registered, err := model.compile(&reg, Pattern_Plain, json.checks(.Json), context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	v := Pattern_Plain{"aa,len<=3"}
-	walktest.expect_nil(t, model.validate(&registered, &v))
+	testkit.expect_nil(t, model.validate(&registered, &v))
 	v.s = "aa"
 	testing.expect(t, model.validate(&registered, &v) != nil)
 }
@@ -454,9 +454,9 @@ Pattern_Plain :: struct {
 a_tag_item_may_hold_spaces :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	m, compiled := model.compile(nil, Spaced, json.checks(.Json), context.temp_allocator)
-	walktest.expect_nil(t, compiled)
+	testkit.expect_nil(t, compiled)
 	v := Spaced{4, "ab", 2}
-	walktest.expect_nil(t, model.validate(&m, &v))
+	testkit.expect_nil(t, model.validate(&m, &v))
 	v = {2, "a", 5}
 	sink: typed.Sink
 	defer typed.sink_destroy(&sink)
@@ -476,15 +476,15 @@ Secret :: struct {
 a_write_leaves_out_write_only_members :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	m, compiled := model.compile(nil, Secret, json.checks(.Json), context.temp_allocator)
-	walktest.expect_nil(t, compiled)
+	testkit.expect_nil(t, compiled)
 	v := Secret{"a", "k", 7, 0}
 	text, written := write.marshal(v, &m.plan, allocator = context.temp_allocator)
-	walktest.expect_nil(t, written)
+	testkit.expect_nil(t, written)
 	testing.expect_value(t, string(text), `{"name":"a"}`)
 	v.rest = 1
 	text, _ = write.marshal(v, &m.plan, allocator = context.temp_allocator)
 	testing.expect_value(t, string(text), `{"name":"a","rest":1}`)
 	back: Secret
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name":"b","key":"s"}`), &back, nil, {dups = .Refuse}, context.temp_allocator))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name":"b","key":"s"}`), &back, nil, {dups = .Refuse}, context.temp_allocator))
 	testing.expect_value(t, back.key, "s")
 }

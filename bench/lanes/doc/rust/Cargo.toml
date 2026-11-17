@@ -1,0 +1,12 @@
+[package]
+name = "doc-rust"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "doc-rust"
+path = "main.rs"
+
+[dependencies]
+timing.workspace = true
+sonic-rs.workspace = true

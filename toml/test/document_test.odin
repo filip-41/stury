@@ -11,7 +11,7 @@ import "core:testing"
 import core "../../core"
 import json_pkg "../../json"
 import toml ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // Whether node `i` of `doc` is the toml-test value `want`. `why` receives what differs.
 @(private)
@@ -262,7 +262,7 @@ node_at :: proc(t: ^testing.T, doc: ^core.Document, name: string) -> core.Node_I
 @(test)
 facts_name_datetimes_and_styles :: proc(t: ^testing.T) {
 	doc, err := toml.build(transmute([]u8)string(SAMPLE), .Toml_1_1)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	tags := [?][2]string{{"when", "datetime"}, {"local", "datetime-local"}, {"day", "date-local"}, {"clock", "time-local"}}
 	for pair in tags {
@@ -309,7 +309,7 @@ path_reads_through_the_build :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(SAMPLE)
 	path := core.Path{steps = {core.Name("tbl"), core.Name("k"), core.Index(1)}}
 	doc, answer, err := toml.find(src, .Toml_1_1, path)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	testing.expect_value(t, answer.outcome, core.Presence.Found)
 	n, _ := core.number(&doc, answer.node)
@@ -327,7 +327,7 @@ path_reads_through_the_build :: proc(t: ^testing.T) {
 		return true
 	}
 	eerr := toml.each_answer(src, .Toml_1_1, core.Path{steps = {core.Name("title")}}, &seen, collect)
-	walktest.expect_nil(t, eerr)
+	testkit.expect_nil(t, eerr)
 	testing.expect_value(t, len(seen), 1)
 	for s in seen {
 		testing.expect_value(t, s, fmt.tprint(core.Presence.Found, 14, 17))
@@ -338,11 +338,11 @@ path_reads_through_the_build :: proc(t: ^testing.T) {
 @(test)
 build_faults_name_the_rule :: proc(t: ^testing.T) {
 	_, err := toml.build(transmute([]u8)string("a = 1\na = 2\n"), .Toml_1_0)
-	walktest.expect_kind(t, err, core.Document_Error_Kind.Walk)
+	testkit.expect_kind(t, err, core.Document_Error_Kind.Walk)
 	inner, _ := err.(core.Fault)
 	testing.expect_value(t, toml.Detail(inner.detail), toml.Detail.Duplicate_Key)
 	_, fault := core.build(transmute([]u8)string("x = 1979-13-01"), toml.as(.Toml_1_1))
-	walktest.expect_kind(t, fault, core.Document_Error_Kind.Walk)
+	testkit.expect_kind(t, fault, core.Document_Error_Kind.Walk)
 }
 
 @(test)
@@ -351,7 +351,7 @@ json_output_spells_numbers_in_decimal :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	out, _, err := core.write(&doc, {}, json_pkg.as(.Json))
 	defer delete(out)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(out), `{"a":3735928559,"o":15,"b":10,"big":10,"f":10.5,"z":0,"nz":-0.0,"d":"1979-05-27","s":"x"}`)
 }
 
@@ -361,5 +361,5 @@ json_output_refuses_inf_and_nan :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	out, _, err := core.write(&doc, {}, json_pkg.as(.Json))
 	defer delete(out)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Non_Finite)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Non_Finite)
 }

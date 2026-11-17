@@ -6,7 +6,7 @@ import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import json ".."
 import gen "gen"
 
@@ -58,15 +58,15 @@ answers_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 		}
 		src := text[:]
 		if round % 2 == 1 {
-			walktest.mutate(&broken, text[:], gen.SHARP)
+			testkit.mutate(&broken, text[:], gen.SHARP)
 			src = broken[:]
 		}
 		texts[round] = strings.clone(string(src))
 	}
 	// A variant's duplicate policy: the first of a repeated key, then the last.
-	run := walktest.Answer_Run {
+	run := testkit.Answer_Run {
 		each = proc(src: []u8, paths: []core.Path, variant: int, early: bool, out: ^[dynamic]core.Token_Answer) -> core.Error {
-			return json.each_answer(src, S, paths, out, walktest.collect_answer, read = {dups = .Last if variant == 1 else .First, stop_early = early})
+			return json.each_answer(src, S, paths, out, testkit.collect_answer, read = {dups = .Last if variant == 1 else .First, stop_early = early})
 		},
 		iter = proc(src: []u8, paths: []core.Path, variant: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
 			it := json.answers(src, S, paths, read = {dups = .Last if variant == 1 else .First, stop_early = early})
@@ -74,7 +74,7 @@ answers_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 			return drain(&it, out)
 		},
 	}
-	return walktest.expect_answers_agree(t, texts[:], {".[]", ".[].a", ".a", "...a", "limit(2; ...b)", ".[1:]", ".[-1]", ".."}, 2, run)
+	return testkit.expect_answers_agree(t, texts[:], {".[]", ".[].a", ".a", "...a", "limit(2; ...b)", ".[1:]", ".[-1]", ".."}, 2, run)
 }
 
 // A fault after three answers comes after them, in `err` once the loop ends.
@@ -117,7 +117,7 @@ answers_refuse :: proc(t: ^testing.T) {
 		append(&deep, '}')
 	}
 	opts := json.Options{max_depth = 2048, tolerate = {.Lone_Surrogate}}
-	want_err := json.each_answer(deep[:], .Json, path, &want, walktest.collect_answer, opts, read)
+	want_err := json.each_answer(deep[:], .Json, path, &want, testkit.collect_answer, opts, read)
 	testing.expectf(t, want_err == nil && len(want) > 1500, "each_answer: %d answers, %v", len(want), want_err)
 	it = json.answers(deep[:], .Json, path, opts, read)
 	err = drain(&it, &got)
@@ -163,13 +163,13 @@ slice_alone_answers_as_beside_another :: proc(t: ^testing.T) {
 	for text in ([?]string{".a[1:3].s", ".a[0:9].s", ".a[2:]", ".a[:2]", ".a[3:3]"}) {
 		path, e := core.parse_path(text)
 		defer core.path_destroy(&path)
-		walktest.expect_nil(t, e)
+		testkit.expect_nil(t, e)
 		alone, err := json.scan(src, .Json, path)
 		defer core.destroy(&alone)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		beside, err2 := json.scan(src, .Json, []core.Path{path, other})
 		defer core.destroy(&beside)
-		walktest.expect_nil(t, err2)
+		testkit.expect_nil(t, err2)
 		got := 0
 		for b in beside.answers {
 			if b.path != 0 {

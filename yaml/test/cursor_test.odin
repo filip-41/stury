@@ -4,25 +4,25 @@ package yaml_tests
 import "core:fmt"
 import "core:testing"
 import core "../../core"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import yaml ".."
 
 // The tokens and the ends and faults of the walks of every document of `text` in turn, with the options of variant 0 or
 // the merge-key ones, a stop at token `stop` or at every `every`th and a resume after each.
 @(private)
-walk_stream :: proc(text: string, skip: string, stop, every, variant: int) -> (h: walktest.Stopping, end: string) {
+walk_stream :: proc(text: string, skip: string, stop, every, variant: int) -> (h: testkit.Stopping, end: string) {
 	src := transmute([]u8)text
 	opts := yaml.Options{merge_keys = variant == 1}
-	h = walktest.Stopping{src = src, skip = skip, stop = stop, every = every}
+	h = testkit.Stopping{src = src, skip = skip, stop = stop, every = every}
 	h.tokens = make([dynamic]core.Token, 0, 256)
 	ends := make([dynamic]string, context.temp_allocator)
 	regs: core.Hook_Regs
 	cursor: yaml.Cursor
 	lo: u64
 	for {
-		hi, fault := yaml.walk(src, lo, .Yaml_1_2, opts, &h, &regs, walktest.stopping_hook, &cursor)
+		hi, fault := yaml.walk(src, lo, .Yaml_1_2, opts, &h, &regs, testkit.stopping_hook, &cursor)
 		for yaml.can_resume(&cursor) {
-			hi, fault = yaml.walk_resume(src, &cursor, .Yaml_1_2, opts, &h, &regs, walktest.stopping_hook)
+			hi, fault = yaml.walk_resume(src, &cursor, .Yaml_1_2, opts, &h, &regs, testkit.stopping_hook)
 		}
 		append(&ends, fmt.tprint(hi, fault, regs.a))
 		if fault != nil || hi >= u64(len(src)) || hi <= lo {
@@ -53,7 +53,7 @@ CURSOR_TEXTS := [?]string {
 // with skipped values, merge keys and the documents of a stream among them.
 @(test)
 cursor_resumes_after_any_token :: proc(t: ^testing.T) {
-	walktest.expect_resumes(t, CURSOR_TEXTS[:], {"", "b", "list"}, 2, walk_stream)
+	testkit.expect_resumes(t, CURSOR_TEXTS[:], {"", "b", "list"}, 2, walk_stream)
 }
 
 // A resume over another text, or of a cursor that holds no stop, is refused, and `destroy` frees a cursor no resume
@@ -61,19 +61,19 @@ cursor_resumes_after_any_token :: proc(t: ^testing.T) {
 @(test)
 cursor_refuses_another_text :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("a: [1, 2]\n")
-	h := walktest.Stopping{src = src, stop = 2}
+	h := testkit.Stopping{src = src, stop = 2}
 	h.tokens = make([dynamic]core.Token, 0, 16)
 	defer delete(h.tokens)
 	cursor: yaml.Cursor
-	_, fault := yaml.walk(src, 0, .Yaml_1_2, {}, &h, nil, walktest.stopping_hook, &cursor)
+	_, fault := yaml.walk(src, 0, .Yaml_1_2, {}, &h, nil, testkit.stopping_hook, &cursor)
 	testing.expect(t, fault == nil && yaml.can_resume(&cursor))
 	other := transmute([]u8)string("a: [1, 3]\n")
-	_, fault = yaml.walk_resume(other, &cursor, .Yaml_1_2, {}, &h, nil, walktest.stopping_hook)
+	_, fault = yaml.walk_resume(other, &cursor, .Yaml_1_2, {}, &h, nil, testkit.stopping_hook)
 	f, bad := fault.?
 	testing.expect(t, bad && f.kind == .Bad_Option && yaml.can_resume(&cursor))
 	yaml.destroy(&cursor)
 	testing.expect(t, !yaml.can_resume(&cursor))
-	_, fault = yaml.walk_resume(src, &cursor, .Yaml_1_2, {}, &h, nil, walktest.stopping_hook)
+	_, fault = yaml.walk_resume(src, &cursor, .Yaml_1_2, {}, &h, nil, testkit.stopping_hook)
 	f, bad = fault.?
 	testing.expect(t, bad && f.kind == .Bad_Option)
 }
@@ -83,9 +83,9 @@ cursor_refuses_another_text :: proc(t: ^testing.T) {
 // container's close and at the text's end, and for several paths at once.
 @(test)
 answers_agree_with_each_answer :: proc(t: ^testing.T) {
-	run := walktest.Answer_Run {
+	run := testkit.Answer_Run {
 		each = proc(src: []u8, paths: []core.Path, variant: int, early: bool, out: ^[dynamic]core.Token_Answer) -> core.Error {
-			return yaml.each_answer(src, .Yaml_1_2, paths, out, walktest.collect_answer, {merge_keys = variant == 1}, {stop_early = early})
+			return yaml.each_answer(src, .Yaml_1_2, paths, out, testkit.collect_answer, {merge_keys = variant == 1}, {stop_early = early})
 		},
 		iter = proc(src: []u8, paths: []core.Path, variant: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
 			it := yaml.answers(src, .Yaml_1_2, paths, {merge_keys = variant == 1}, {stop_early = early})
@@ -104,7 +104,7 @@ answers_agree_with_each_answer :: proc(t: ^testing.T) {
 		"other:\n  <<: {z: 1, w: 2}\n  q: 3\nb: [1]\n",
 		CURSOR_TEXTS[4],
 	}
-	walktest.expect_answers_agree(t, texts[:], {".a", ".[]", ".b[]", "...x", ".[-1]", "..", "limit(2; ...b)", ".other.z"}, 2, run)
+	testkit.expect_answers_agree(t, texts[:], {".a", ".[]", ".b[]", "...x", ".[-1]", "..", "limit(2; ...b)", ".other.z"}, 2, run)
 }
 
 // A loop that ends after the first answer leaves the text past it unjudged, and `destroy` frees the read. A fault after

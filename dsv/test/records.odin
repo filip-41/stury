@@ -14,7 +14,7 @@ import typed "../../core/typed"
 import write "../../core/write"
 import records "../../core/records"
 import dsv ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // The row reader against a model: a plain framer that honours quotes, then `validate` of the whole text, whose fault
 // ends the rows before the first whose line end is not before it.
@@ -27,9 +27,9 @@ Model_Row :: struct {
 @(private = "file")
 validate_as :: proc(src: string, spec: dsv.Spec, opts: dsv.Options) -> Maybe(core.Fault) {
 	switch spec {
-	case .Csv:   return walktest.fault_of(dsv.validate(transmute([]u8)src, .Csv, opts))
-	case .Tsv:   return walktest.fault_of(dsv.validate(transmute([]u8)src, .Tsv, opts))
-	case .Plain: return walktest.fault_of(dsv.validate(transmute([]u8)src, .Plain, opts))
+	case .Csv:   return testkit.fault_of(dsv.validate(transmute([]u8)src, .Csv, opts))
+	case .Tsv:   return testkit.fault_of(dsv.validate(transmute([]u8)src, .Tsv, opts))
+	case .Plain: return testkit.fault_of(dsv.validate(transmute([]u8)src, .Plain, opts))
 	}
 	return nil
 }
@@ -153,7 +153,7 @@ LAYOUTS := []dsv.Options{{}, {no_header = true}, {comment = '#'}, {no_header = t
 @(test)
 rows_follow_the_model :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	walktest.expect_framings(t, dsv.CAPABILITIES, dsv.as(.Csv))
+	testkit.expect_framings(t, dsv.CAPABILITIES, dsv.as(.Csv))
 	state := rand.create(5)
 	gen := rand.default_random_generator(&state)
 	// Each byte of a text in turn becomes a byte that breaks or ends a row.
@@ -250,7 +250,7 @@ records_validate_on_threads :: proc(t: ^testing.T) {
 				buf[i] = breakers[rand.int_max(len(breakers), gen)]
 			}
 			for opts in LAYOUTS {
-				if !walktest.expect_chain_law(t, pools[:], buf, dsv.as(spec, opts), .Lines) {
+				if !testkit.expect_chain_law(t, pools[:], buf, dsv.as(spec, opts), .Lines) {
 					return
 				}
 			}
@@ -259,12 +259,12 @@ records_validate_on_threads :: proc(t: ^testing.T) {
 	}
 	// Past a bare quote, quoted cells hold text that a piece cut inside them reads as rows.
 	cells := strings.repeat("2,\"a\n7,8\n9,10\nb\"\n", 4, context.temp_allocator)
-	walktest.expect_chain_law(t, pools[:], transmute([]u8)strings.concatenate({"h,k\n0,ok\n1,x\"y\n", cells}, context.temp_allocator), dsv.as(.Csv), .Lines)
+	testkit.expect_chain_law(t, pools[:], transmute([]u8)strings.concatenate({"h,k\n0,ok\n1,x\"y\n", cells}, context.temp_allocator), dsv.as(.Csv), .Lines)
 }
 
 @(private = "file")
 expect_build_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, spec: dsv.Spec, opts: dsv.Options, refuse, joined: bool) -> bool {
-	return walktest.expect_build_law(t, pools, src, dsv.as(spec, opts), refuse, joined)
+	return testkit.expect_build_law(t, pools, src, dsv.as(spec, opts), refuse, joined)
 }
 
 @(test)
@@ -277,7 +277,7 @@ records_build_a_table_on_threads :: proc(t: ^testing.T) {
 	defer for &p in pools {
 		host.pool_destroy(&p)
 	}
-	rows := 4 * walktest.RECORDS_SLICE / 6 + 40
+	rows := 4 * testkit.RECORDS_SLICE / 6 + 40
 	Case :: struct {
 		spec:   dsv.Spec,
 		head:   string,
@@ -357,8 +357,8 @@ rows_name_wide_cells_by_position :: proc(t: ^testing.T) {
 	path, _ := core.parse_path(`.["4"]`, context.temp_allocator)
 	same, _ := core.parse_path(`.["3"]`, context.temp_allocator)
 	for stream in ([]bool{false, true}) {
-		c := walktest.Chunked{src = transmute([]u8)src, sizes = {1}}
-		it := records.open_stream(walktest.chunked(&c), as) if stream else records.open(transmute([]u8)src, as)
+		c := testkit.Chunked{src = transmute([]u8)src, sizes = {1}}
+		it := records.open_stream(testkit.chunked(&c), as) if stream else records.open(transmute([]u8)src, as)
 		testing.expect_value(t, records.column(&it, "3"), 0)
 		testing.expect_value(t, records.column(&it, "4"), 3)
 		testing.expect_value(t, records.column(&it, "2"), -1)
@@ -369,7 +369,7 @@ rows_name_wide_cells_by_position :: proc(t: ^testing.T) {
 		s, got := records.cell(&it, rec, 3, buf[:])
 		testing.expect(t, got && s == "7")
 		doc, err := records.build(&it, rec, context.temp_allocator)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		want := []string{"7", "6"}
 		for p, i in ([]core.Path{path, same}) {
 			answers, _ := dsv.query(&doc, p, allocator = context.temp_allocator)
@@ -388,9 +388,9 @@ rows_give_all_their_cells :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := "a,b,c,d\n,\"\",x,\"p\"\"q\"\n1,2,3,4\n"
 	for stream in ([]bool{false, true}) {
-		c := walktest.Chunked{src = transmute([]u8)src, sizes = {1}}
+		c := testkit.Chunked{src = transmute([]u8)src, sizes = {1}}
 		as := dsv.as(.Csv)
-		it := records.open_stream(walktest.chunked(&c), as) if stream else records.open(transmute([]u8)src, as)
+		it := records.open_stream(testkit.chunked(&c), as) if stream else records.open(transmute([]u8)src, as)
 		buf: [8]u8
 		rec, _ := records.next(&it)
 		// A row split short of its end gives the cells past the split when they are asked for.
@@ -434,7 +434,7 @@ cells_take_the_inferred_kinds :: proc(t: ^testing.T) {
 	records.writer_init(&wr, {}, as, allocator = context.temp_allocator)
 	records.write_cells(&wr, cells)
 	text, err := records.writer_end(&wr)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(text), "1,\"2\",true,\"false\",\n")
 }
 
@@ -443,8 +443,8 @@ cells_take_the_inferred_kinds :: proc(t: ^testing.T) {
 cells_under_failing_allocators :: proc(t: ^testing.T) {
 	src := "a,b\n\"x\"\"y\",z\n"
 	for at := 0;; at += 1 {
-		f := walktest.Failing_Alloc{inner = context.allocator, fail_at = at, fail_on = true}
-		it := records.open(transmute([]u8)src, dsv.as(.Csv), allocator = walktest.failing_allocator(&f))
+		f := testkit.Failing_Alloc{inner = context.allocator, fail_at = at, fail_on = true}
+		it := records.open(transmute([]u8)src, dsv.as(.Csv), allocator = testkit.failing_allocator(&f))
 		buf: [8]u8
 		cells: []write.Scalar
 		rec, more := records.next(&it)
@@ -488,7 +488,7 @@ rows_columns_cells_and_documents :: proc(t: ^testing.T) {
 	testing.expect(t, !got)
 
 	doc, err := records.build(&it, rec, context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	path, _ := core.parse_path(".note", context.temp_allocator)
 	answers, _ := dsv.query(&doc, path, allocator = context.temp_allocator)
 	testing.expect(t, len(answers) == 1)
@@ -501,7 +501,7 @@ rows_columns_cells_and_documents :: proc(t: ^testing.T) {
 	_, got = records.cell(&it, first, 0, buf[:])
 	testing.expect(t, !got)
 	_, err = records.build(&it, first, context.temp_allocator)
-	walktest.expect_kind(t, err, core.Document_Error_Kind.Bad_Index)
+	testkit.expect_kind(t, err, core.Document_Error_Kind.Bad_Index)
 	_, ok = records.next(&it)
 	testing.expect(t, !ok && it.fault == nil)
 
@@ -575,7 +575,7 @@ unmarshal_as :: proc(src: string, spec: dsv.Spec, target: ^$T, plan: ^typed.Plan
 @(private = "file")
 expect_read :: proc(t: ^testing.T, src: string, spec: dsv.Spec, opts: dsv.Options, read: typed.Read_Options, $T: typeid) -> bool {
 	plan, perr := dsv.plan_make(T, spec, allocator = context.temp_allocator)
-	if !walktest.expect_nil(t, perr) {
+	if !testkit.expect_nil(t, perr) {
 		return false
 	}
 	want, header_end, fault := model_rows(src, spec, opts)
@@ -596,7 +596,7 @@ expect_read :: proc(t: ^testing.T, src: string, spec: dsv.Spec, opts: dsv.Option
 			break
 		}
 		if T == map[string]string && opts.no_header {
-			return walktest.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
+			return testkit.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
 		}
 		if n >= len(want) {
 			return testing.expectf(t, false, "%v %q: row %d past the model's", spec, src, n)
@@ -716,8 +716,8 @@ expect_stream :: proc(t: ^testing.T, src: string, spec: dsv.Spec, opts: dsv.Opti
 	mem := records.open(transmute([]u8)src, dsv.as(spec, opts))
 	defer records.close(&mem)
 	want := drain(&mem)
-	c := walktest.Chunked{src = transmute([]u8)src, sizes = sizes, gen = gen}
-	st := records.open_stream(walktest.chunked(&c), dsv.as(spec, opts))
+	c := testkit.Chunked{src = transmute([]u8)src, sizes = sizes, gen = gen}
+	st := records.open_stream(testkit.chunked(&c), dsv.as(spec, opts))
 	defer records.close(&st)
 	got := drain(&st)
 	n := len(got.rows)
@@ -790,8 +790,8 @@ rows_stream_at_every_chunk_size_and_cut :: proc(t: ^testing.T) {
 			}
 		}
 	}
-	c := walktest.Chunked{src = transmute([]u8)string("a,b\n1,\xc3"), sizes = {2}}
-	it := records.open_stream(walktest.chunked(&c), dsv.as(.Csv))
+	c := testkit.Chunked{src = transmute([]u8)string("a,b\n1,\xc3"), sizes = {2}}
+	it := records.open_stream(testkit.chunked(&c), dsv.as(.Csv))
 	defer records.close(&it)
 	n := 0
 	for _ in records.next(&it) {
@@ -822,7 +822,7 @@ rows_read_rebinds_a_new_plan :: proc(t: ^testing.T) {
 	plan, _ = dsv.plan_make(B, .Csv)
 	y: B
 	err, _ = records.read(&it, &y, &plan)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, y, B{b = 4, a = 3})
 	typed.plan_destroy(&plan)
 
@@ -854,8 +854,8 @@ rows_stream_read_as_in_memory :: proc(t: ^testing.T) {
 		plan, _ := dsv.plan_make(Required_Record_Row, spec, allocator = context.temp_allocator)
 		mplan, _ := dsv.plan_make(map[string]string, spec, allocator = context.temp_allocator)
 		mem := records.open(transmute([]u8)src, dsv.as(spec, opts))
-		c := walktest.Chunked{src = transmute([]u8)src, sizes = {1 + round % 7}}
-		st := records.open_stream(walktest.chunked(&c), dsv.as(spec, opts))
+		c := testkit.Chunked{src = transmute([]u8)src, sizes = {1 + round % 7}}
+		st := records.open_stream(testkit.chunked(&c), dsv.as(spec, opts))
 		ms, ss: typed.Sink
 		ms.errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)
 		ss.errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)
@@ -905,10 +905,10 @@ rows_read_in_bounded_memory :: proc(t: ^testing.T) {
 			maps, _ := dsv.plan_make(map[string]string, spec, allocator = context.temp_allocator)
 			ints, _ := dsv.plan_make(map[string]int, spec, allocator = context.temp_allocator)
 			rows, _ := dsv.plan_make(Number_Row, spec, allocator = context.temp_allocator)
-			_ = walktest.expect_bounded_reads(t, few, many, as, &maps, map[string]string) &&
-			walktest.expect_bounded_reads(t, few, many, as, &ints, map[string]int) &&
-			walktest.expect_bounded_reads(t, few, many, as, &rows, Number_Row) &&
-			walktest.expect_bounded_reads(t, few, many, as, &rows, Number_Row, {unknown = .Refuse, dups = .Refuse})
+			_ = testkit.expect_bounded_reads(t, few, many, as, &maps, map[string]string) &&
+			testkit.expect_bounded_reads(t, few, many, as, &ints, map[string]int) &&
+			testkit.expect_bounded_reads(t, few, many, as, &rows, Number_Row) &&
+			testkit.expect_bounded_reads(t, few, many, as, &rows, Number_Row, {unknown = .Refuse, dups = .Refuse})
 		}
 	}
 }
@@ -1038,8 +1038,8 @@ records_keep_their_keys_past_the_first_window :: proc(t: ^testing.T) {
 				}
 				for size in ([]int{1, 700, 1 << 20}) {
 					got := fresh(way, &plan, path, name)
-					c := walktest.Chunked{src = src, sizes = {size}}
-					st := records.open_stream(walktest.chunked(&c), as, allocator = heap)
+					c := testkit.Chunked{src = src, sizes = {size}}
+					st := records.open_stream(testkit.chunked(&c), as, allocator = heap)
 					gather(&got, &st, 0)
 					records.close(&st)
 					expect_same_answers(t, fmt.tprint(spec, opts, way, "stream of", size), got.by_at, want.by_at)

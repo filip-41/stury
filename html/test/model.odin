@@ -9,7 +9,7 @@ import schema "../../core/schema"
 import json "../../json"
 import html ".."
 import model "../../core/model"
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private = "file")
 Price :: struct {
@@ -37,7 +37,7 @@ a_model_loads_attributes_and_elements_as_members :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	m, cerr := model.compile(&reg, Order, html.checks(.Fragment))
-	walktest.expect_nil(t, cerr)
+	testkit.expect_nil(t, cerr)
 	text := `<ITEM id=7 stock=true>
   <name>Acme &amp; Sons</name>
   <note>a <!-- c --> c</note>
@@ -47,7 +47,7 @@ a_model_loads_attributes_and_elements_as_members :: proc(t: ^testing.T) {
 	sink: typed.Sink
 	defer typed.sink_destroy(&sink)
 	err := model.load(&m, transmute([]u8)string(text), &v, &sink)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, len(sink.entries), 0)
 	testing.expect_value(t, v.item.id, 7)
 	testing.expect_value(t, v.item.name, "Acme & Sons")
@@ -63,7 +63,7 @@ a_model_reports_every_rule_an_html_text_fails :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	m, cerr := model.compile(&reg, Order, html.checks(.Fragment))
-	walktest.expect_nil(t, cerr)
+	testkit.expect_nil(t, cerr)
 	text := `<item id="x"><name>ab</name><price currency="eur">-1</price></item>`
 	v: Order
 	sink: typed.Sink
@@ -76,12 +76,12 @@ a_model_reports_every_rule_an_html_text_fails :: proc(t: ^testing.T) {
 		testing.expect_value(t, e.kind, kinds[i])
 	}
 	// A text with parse errors still loads, and a repeated element is refused unless the load says which one it reads.
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`<item id=1><name>abc</name><price currency=EUR>1`), &v))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`<item id=1><name>abc</name><price currency=EUR>1`), &v))
 	twice := `<item id="1"><name>abc</name><name>abd</name><price currency="EUR">1</price></item>`
-	f, repeated := walktest.fault_in(model.load(&m, transmute([]u8)string(twice), &v))
+	f, repeated := testkit.fault_in(model.load(&m, transmute([]u8)string(twice), &v))
 	testing.expect(t, repeated)
 	testing.expect_value(t, f.kind, core.Fault_Kind.Duplicate_Key)
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(twice), &v, nil, {dups = .Last}))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(twice), &v, nil, {dups = .Last}))
 	testing.expect_value(t, v.item.name, "abd")
 }
 
@@ -93,9 +93,9 @@ a_schema_checks_an_html_text :: proc(t: ^testing.T) {
 		"properties": {"id": {"type": "integer", "minimum": 1}, "name": {"type": "string", "minLength": 3}, "tag": {"type": "array", "items": {"enum": ["a", "b"]}, "maxItems": 2},
 		"price": {"type": "object", "properties": {"currency": {"enum": ["EUR", "USD"]}, "#text": {"type": "number"}}, "required": ["currency", "#text"]}}}}}`
 	s, serr := json.load_schema(transmute([]u8)string(text), .Json)
-	walktest.expect_nil(t, serr)
+	testkit.expect_nil(t, serr)
 	bound, berr := html.bind_schema(s, .Fragment)
-	walktest.expect_nil(t, berr)
+	testkit.expect_nil(t, berr)
 	defer schema.unbind(&bound)
 	cases := [?]struct {
 		text:   string,
@@ -113,11 +113,11 @@ a_schema_checks_an_html_text :: proc(t: ^testing.T) {
 	}
 	// A whole document is checked from its root, the `html` element.
 	page, perr := json.load_schema(transmute([]u8)string(`{"properties": {"html": {"properties": {"@lang": {"const": "en"}, "body": {"required": ["main"]}}}}}`), .Json)
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	doc_bound, dberr := html.bind_schema(page, .Document)
-	walktest.expect_nil(t, dberr)
+	testkit.expect_nil(t, dberr)
 	defer schema.unbind(&doc_bound)
-	walktest.expect_nil(t, schema.check(&doc_bound, transmute([]u8)string(`<!DOCTYPE html><html lang=en><main>x</main>`)))
+	testkit.expect_nil(t, schema.check(&doc_bound, transmute([]u8)string(`<!DOCTYPE html><html lang=en><main>x</main>`)))
 	sink: typed.Sink
 	defer typed.sink_destroy(&sink)
 	testing.expect(t, schema.check(&doc_bound, transmute([]u8)string(`<p>x`), &sink) != nil)
@@ -135,7 +135,7 @@ a_built_document_is_checked_by_a_model_and_a_schema :: proc(t: ^testing.T) {
 	}
 	reg: model.Registry
 	m, cerr := model.compile(&reg, struct{ note: Note }, html.checks(.Fragment))
-	walktest.expect_nil(t, cerr)
+	testkit.expect_nil(t, cerr)
 	doc, ok := built(t, "<note lang=english>one<!--x--> two &amp; three</note>", .Fragment)
 	if !ok {
 		return
@@ -147,9 +147,9 @@ a_built_document_is_checked_by_a_model_and_a_schema :: proc(t: ^testing.T) {
 	testing.expect_value(t, v.note.lang, "english")
 	testing.expect_value(t, v.note.text, "one two & three")
 	s, serr := json.load_schema(transmute([]u8)string(`{"properties": {"note": {"properties": {"lang": {"maxLength": 7}, "#text": {"minLength": 16}}}}}`), .Json)
-	walktest.expect_nil(t, serr)
+	testkit.expect_nil(t, serr)
 	bound, berr := html.bind_schema(s, .Fragment)
-	walktest.expect_nil(t, berr)
+	testkit.expect_nil(t, berr)
 	judged: typed.Sink
 	testing.expect(t, schema.check_node(&bound, &doc, core.ROOT, &judged) != nil)
 	testing.expect_value(t, len(judged.entries), 1)

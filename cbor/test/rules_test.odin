@@ -6,7 +6,7 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import "../../core/records"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import cbor ".."
 import stury_json "../../json"
 
@@ -18,7 +18,7 @@ Case :: struct {
 
 @(private)
 expect_refused :: proc(t: ^testing.T, c: Case, spec := cbor.Spec.Cbor) {
-	fault, bad := walktest.fault_of(core.validate(hex(c.hex), cbor.as(spec))).?
+	fault, bad := testkit.fault_of(core.validate(hex(c.hex), cbor.as(spec))).?
 	if !testing.expectf(t, bad, "%s is read", c.hex) {
 		return
 	}
@@ -29,7 +29,7 @@ expect_refused :: proc(t: ^testing.T, c: Case, spec := cbor.Spec.Cbor) {
 
 @(private)
 expect_read :: proc(t: ^testing.T, text: string, spec := cbor.Spec.Cbor, opts := cbor.Options{}) {
-	fault, bad := walktest.fault_of(core.validate(hex(text), cbor.as(spec, opts))).?
+	fault, bad := testkit.fault_of(core.validate(hex(text), cbor.as(spec, opts))).?
 	testing.expectf(t, !bad, "%s: %v", text, fault)
 }
 
@@ -171,15 +171,15 @@ nesting_is_limited :: proc(t: ^testing.T) {
 		b[depth] = 0
 		return b
 	}
-	_, bad := walktest.fault_of(cbor.validate(nest(0x81, 1000), .Cbor)).?
+	_, bad := testkit.fault_of(cbor.validate(nest(0x81, 1000), .Cbor)).?
 	testing.expect(t, !bad)
-	fault, deep := walktest.fault_of(cbor.validate(nest(0x81, 5000), .Cbor)).?
+	fault, deep := testkit.fault_of(cbor.validate(nest(0x81, 5000), .Cbor)).?
 	testing.expect(t, deep)
 	testing.expect_value(t, fault.kind, core.Fault_Kind.Too_Deep)
-	fault, deep = walktest.fault_of(cbor.validate(nest(0x81, 20), .Cbor, {max_depth = 10})).?
+	fault, deep = testkit.fault_of(cbor.validate(nest(0x81, 20), .Cbor, {max_depth = 10})).?
 	testing.expect(t, deep)
 	testing.expect_value(t, fault.kind, core.Fault_Kind.Too_Deep)
-	_, bad = walktest.fault_of(cbor.validate(nest(0x81, 9), .Cbor, {max_depth = 10})).?
+	_, bad = testkit.fault_of(cbor.validate(nest(0x81, 9), .Cbor, {max_depth = 10})).?
 	testing.expect(t, !bad)
 
 	chain := make([dynamic]u8, context.temp_allocator)
@@ -187,7 +187,7 @@ nesting_is_limited :: proc(t: ^testing.T) {
 		append(&chain, 0xd9, 0xd9, 0xf7)
 	}
 	append(&chain, 0)
-	fault, deep = walktest.fault_of(cbor.validate(chain[:], .Cbor)).?
+	fault, deep = testkit.fault_of(cbor.validate(chain[:], .Cbor)).?
 	testing.expect(t, deep)
 	testing.expect_value(t, fault.kind, core.Fault_Kind.Too_Deep)
 
@@ -196,7 +196,7 @@ nesting_is_limited :: proc(t: ^testing.T) {
 		append(&maps, 0xa1, 0x00)
 	}
 	append(&maps, 0)
-	fault, deep = walktest.fault_of(cbor.validate(maps[:], .Cbor)).?
+	fault, deep = testkit.fault_of(cbor.validate(maps[:], .Cbor)).?
 	testing.expect_value(t, fault.kind, core.Fault_Kind.Too_Deep)
 }
 
@@ -223,7 +223,7 @@ text_must_be_utf8 :: proc(t: ^testing.T) {
 	}
 	expect_read(t, "62 c3 28", opts = {tolerate = {.Invalid_Utf8}})
 	doc, err := cbor.build(hex("62 c3 28"), .Cbor, {tolerate = {.Invalid_Utf8}})
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	buf: [16]u8
 	s, _ := core.text(&doc, core.ROOT, buf[:])
@@ -236,7 +236,7 @@ text_must_be_utf8 :: proc(t: ^testing.T) {
 @(test)
 chunks_join :: proc(t: ^testing.T) {
 	doc, err := cbor.build(hex("7f 62 68 69 63 e2 82 ac ff"), .Cbor)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	buf: [16]u8
 	s, _ := core.text(&doc, core.ROOT, buf[:])
@@ -254,7 +254,7 @@ chunks_join :: proc(t: ^testing.T) {
 paths_reach_integer_keys :: proc(t: ^testing.T) {
 	src := hex("a2 01 61 78 02 61 79")
 	doc, answer, err := cbor.find(src, .Cbor, core.Path{steps = {core.Name("1")}})
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	testing.expect_value(t, answer.outcome, core.Presence.Found)
 	buf: [8]u8
@@ -359,7 +359,7 @@ duplicate_keys_follow_the_policy :: proc(t: ^testing.T) {
 	_, err := cbor.build(src, .Cbor, {}, .Refuse)
 	testing.expect(t, err != nil)
 	doc, err2 := cbor.build(src, .Cbor, {}, .Last)
-	walktest.expect_nil(t, err2)
+	testkit.expect_nil(t, err2)
 	defer core.destroy(&doc)
 	field, _ := core.member(&doc, core.ROOT, "a")
 	n, _ := core.number(&doc, field)
@@ -372,9 +372,9 @@ integer_and_text_keys_repeat :: proc(t: ^testing.T) {
 	src := hex("a2 01 61 78 61 31 61 79")
 	_, refused := cbor.build(src, .Cbor, {}, .Refuse)
 	// The fault is at the second key's token, the text past its head.
-	testing.expectf(t, walktest.fault_is(refused, .Duplicate_Key, 5), "%v", refused)
+	testing.expectf(t, testkit.fault_is(refused, .Duplicate_Key, 5), "%v", refused)
 	doc, err := cbor.build(src, .Cbor)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	last, found := core.member(&doc, core.ROOT, "1")
 	testing.expect(t, found)
@@ -392,7 +392,7 @@ integer_and_text_keys_repeat :: proc(t: ^testing.T) {
 the_nearest_tag_is_the_tag_fact :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	doc, err := cbor.build(hex("82 d9 d9f7 c1 1a 51 4b 67 b0 02"), .Cbor)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	tag, held := core.fact_value(&doc, 1, .Tag)
 	testing.expect(t, held)
 	testing.expect(t, tag.numeric)
@@ -401,7 +401,7 @@ the_nearest_tag_is_the_tag_fact :: proc(t: ^testing.T) {
 	_, untagged := core.fact_value(&doc, 2, .Tag)
 	testing.expect(t, !untagged)
 	wide, werr := cbor.build(hex("db ff ff ff ff ff ff ff ff 00"), .Cbor)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	tag, held = core.fact_value(&wide, core.ROOT, .Tag)
 	testing.expect(t, held)
 	testing.expect_value(t, tag.text, "18446744073709551615")
@@ -412,17 +412,17 @@ the_nearest_tag_is_the_tag_fact :: proc(t: ^testing.T) {
 documents_write_as_json :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	doc, err := cbor.build(hex("a2 01 c1 01 61 62 f7"), .Cbor)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	text, dropped, werr := core.write(&doc, {}, stury_json.as(.Json))
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, string(text), `{"1":1,"b":null}`)
 	testing.expect_value(t, dropped, 1)
 	bytes, err2 := cbor.build(hex("a1 61 62 43 01 02 03"), .Cbor)
-	walktest.expect_nil(t, err2)
+	testkit.expect_nil(t, err2)
 	defer core.destroy(&bytes)
 	text, _, werr = core.write(&bytes, {}, stury_json.as(.Json))
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, string(text), `{"b":"AQID"}`)
 }
 

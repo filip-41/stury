@@ -1,0 +1,25 @@
+[lane]
+legend = "GB/s is the output's bytes over time on the typed rows and the source's on the document rows: the best of {rounds} rounds of each arm's median of ten calls after two warm-ups."
+
+# simd_min is simdjson::minify of the source text, which writes no document, and is not checked against the others.
+# Where the libraries spell the same values differently the arms are not compared: nested.json has small doubles,
+# escape.json strings each library re-escapes its own way. stury writes a whole float without a fraction and keeps a
+# document's number spelling, so it is left out of the comparison on logs.json and canada.json.
+
+[arm]
+stury = { source = "stury", args = ["{mode}", "{file}", "{pretty}"], unchecked = ["logs.json", "canada.json"] }
+yyjson = { source = "yyjson.c", args = ["{mode}", "{file}", "{pretty}"] }
+simdjson = { source = "simdjson.cpp", args = ["doc", "{file}"], when = { mode = "doc", pretty = "" } }
+simd_min = { source = "simdjson.cpp", args = ["minify", "{file}"], when = { mode = "doc", pretty = "" }, unchecked = ["*"] }
+sonic = { source = "rust", args = ["{mode}", "{file}", "{pretty}", "sonic"] }
+serde = { source = "rust", args = ["{mode}", "{file}", "{pretty}", "serde"] }
+
+[[group]]
+title = "typed"
+rows = ["logs.json", "twitter.json", "citm_catalog.json", "canada.json", { file = "nested.json", unchecked = true }, "wide.json"]
+variant = [{ title = "compact", mode = "typed" }, { title = "pretty", mode = "typed", pretty = "pretty" }]
+
+[[group]]
+title = "doc"
+rows = ["logs.json", "twitter.json", "citm_catalog.json", "canada.json", "pretty.json", "utf8.json", { file = "escape.json", unchecked = true }, "longtext.json"]
+variant = [{ title = "compact", mode = "doc" }, { title = "pretty", mode = "doc", pretty = "pretty" }]

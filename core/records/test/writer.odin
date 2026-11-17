@@ -12,7 +12,7 @@ import write "../../write"
 import records ".."
 import dsv "../../../dsv"
 import json "../../../json"
-import walktest "../../../walktest"
+import testkit "../../../testkit"
 
 // The record writer against the one-value writer: a list written as records is each value's text with its frame, and
 // reads back as the list.
@@ -42,12 +42,12 @@ json_records_are_framed_values :: proc(t: ^testing.T) {
 			strings.write_byte(&want, '\n')
 		}
 		got, err := records.marshal(ENTRIES[:], &plan, json.as(.Json), framing, allocator = context.temp_allocator)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		testing.expect_value(t, string(got), strings.to_string(want))
 
 		buf: bytes.Buffer
 		defer bytes.buffer_destroy(&buf)
-		walktest.expect_nil(t, json.records_marshal_stream(bytes.buffer_to_stream(&buf), ENTRIES[:], &plan, .Json, framing = framing))
+		testkit.expect_nil(t, json.records_marshal_stream(bytes.buffer_to_stream(&buf), ENTRIES[:], &plan, .Json, framing = framing))
 		testing.expect_value(t, string(bytes.buffer_to_bytes(&buf)), string(got))
 
 		// Read back, a record per frame.
@@ -56,7 +56,7 @@ json_records_are_framed_values :: proc(t: ^testing.T) {
 		for line, i in lines {
 			back: Entry
 			text := strings.trim_prefix(line, "\x1e") if framing == .Seq else line
-			walktest.expect_nil(t, json.unmarshal(transmute([]u8)text, .Json, &back, allocator = context.temp_allocator))
+			testkit.expect_nil(t, json.unmarshal(transmute([]u8)text, .Json, &back, allocator = context.temp_allocator))
 			testing.expect_value(t, back, ENTRIES[i])
 		}
 	}
@@ -65,16 +65,16 @@ json_records_are_framed_values :: proc(t: ^testing.T) {
 @(test)
 dsv_records_are_the_rows_text :: proc(t: ^testing.T) {
 	row_plan, perr := dsv.plan_make(Entry, .Csv)
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	defer typed.plan_destroy(&row_plan)
 	list_plan, _ := dsv.plan_make([]Entry, .Csv)
 	defer typed.plan_destroy(&list_plan)
 	want, _ := write.marshal(ENTRIES[:], &list_plan, {}, context.temp_allocator)
 	got, err := records.marshal(ENTRIES[:], &row_plan, dsv.as(.Csv), allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(got), string(want))
 	back: []Entry
-	walktest.expect_nil(t, dsv.unmarshal(got, .Csv, &back, read = {}, opts = {}, allocator = context.temp_allocator))
+	testkit.expect_nil(t, dsv.unmarshal(got, .Csv, &back, read = {}, opts = {}, allocator = context.temp_allocator))
 	testing.expect(t, len(back) == len(ENTRIES))
 	for v, i in back {
 		testing.expect_value(t, v, ENTRIES[i])
@@ -85,7 +85,7 @@ dsv_records_are_the_rows_text :: proc(t: ^testing.T) {
 	cells_plan, _ := dsv.plan_make([]string, .Csv)
 	defer typed.plan_destroy(&cells_plan)
 	text, cerr := records.marshal(cells, &cells_plan, dsv.as(.Csv), allocator = context.temp_allocator)
-	walktest.expect_nil(t, cerr)
+	testkit.expect_nil(t, cerr)
 	testing.expect_value(t, string(text), "a,b\n\"x,y\",\"\"\n")
 
 	map_plan, _ := dsv.plan_make(map[string]string, .Csv)
@@ -102,7 +102,7 @@ dsv_records_are_the_rows_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, records.write(&wr, maps[1], &map_plan), core.Typed_Error_Kind.None)
 	testing.expect_value(t, records.write(&wr, maps[2], &map_plan), core.Typed_Error_Kind.Unwritable)
 	text, cerr = records.writer_end(&wr)
-	walktest.expect_nil(t, cerr)
+	testkit.expect_nil(t, cerr)
 	testing.expect_value(t, string(text), "a,b\n1,2\n,3\n")
 }
 
@@ -119,7 +119,7 @@ refused_record_is_taken_back :: proc(t: ^testing.T) {
 	testing.expect_value(t, records.write(&wr, 7, &plan), core.Typed_Error_Kind.Plan_Mismatch)
 	records.write_text(&wr, transmute([]u8)string(`{"id":9}`))
 	text, end := records.writer_end(&wr)
-	walktest.expect_nil(t, end)
+	testkit.expect_nil(t, end)
 	testing.expect_value(t, string(text), "\x1e{\"id\":1,\"name\":\"plain\",\"ok\":true,\"score\":0.5}\n\x1e{\"id\":9}\n")
 }
 
@@ -141,15 +141,15 @@ refusal_after_a_flush_is_final :: proc(t: ^testing.T) {
 	testing.expect_value(t, records.write(&wr, Long{"ok", 1}, &plan), core.Typed_Error_Kind.Non_Finite)
 	testing.expect_value(t, records.write_text(&wr, {'1'}), core.Typed_Error_Kind.Non_Finite)
 	_, err := records.writer_end(&wr)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Non_Finite)
-	typed_err := walktest.typed_of(err)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Non_Finite)
+	typed_err := testkit.typed_of(err)
 	testing.expect_value(t, typed_err.n_steps, 1)
 
 	records.writer_init(&wr, bytes.buffer_to_stream(&buf), dsv.as(.Csv))
 	testing.expect_value(t, records.write_cells(&wr, {long, "\xff"}), core.Typed_Error_Kind.Invalid_Utf8)
 	testing.expect_value(t, records.write_cells(&wr, {"a"}), core.Typed_Error_Kind.Invalid_Utf8)
 	_, err = records.writer_end(&wr)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Invalid_Utf8)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Invalid_Utf8)
 }
 
 BOM :: "\xEF\xBB\xBF"
@@ -208,7 +208,7 @@ cells_keep_the_old_guards :: proc(t: ^testing.T) {
 	testing.expect_value(t, records.write_cells(&wr, {"ok", "\xff"}), core.Typed_Error_Kind.Invalid_Utf8)
 	records.write_text(&wr, transmute([]u8)string("p,q"))
 	text, err := records.writer_end(&wr)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(text), "p,q\n")
 
 	// Every record of a TSV text ends a line, and an empty one would vanish.
@@ -237,7 +237,7 @@ cells_keep_the_old_guards :: proc(t: ^testing.T) {
 	testing.expect_value(t, records.write_cells(&wr, {"a"}), core.Typed_Error_Kind.Unsupported)
 	text, err = records.writer_end(&wr)
 	testing.expect_value(t, len(text), 0)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 }
 
 @(test)
@@ -246,7 +246,7 @@ writer_refuses_what_no_record_holds :: proc(t: ^testing.T) {
 	testing.expect_value(t, records.writer_init(&wr, {}, json.as(.Json), .Entries), core.Typed_Error_Kind.Unsupported)
 	testing.expect_value(t, records.write_text(&wr, {'1'}), core.Typed_Error_Kind.Unsupported)
 	_, err := records.writer_end(&wr)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
 	testing.expect_value(t, records.writer_init(&wr, {}, dsv.as(.Csv), .Seq), core.Typed_Error_Kind.Unsupported)
 	records.writer_destroy(&wr)
 	testing.expect_value(t, records.writer_init(&wr, {}, json.as(.Json), .Lines, core.PRETTY), core.Typed_Error_Kind.Bad_Option)
@@ -260,9 +260,9 @@ writer_refuses_what_no_record_holds :: proc(t: ^testing.T) {
 	list_plan, _ := dsv.plan_make([]Entry, .Csv)
 	defer typed.plan_destroy(&list_plan)
 	_, err = records.marshal(ENTRIES[:], &json_plan, dsv.as(.Csv))
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Plan_Mismatch)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Plan_Mismatch)
 	_, err = records.marshal([][]Entry{ENTRIES[:]}, &list_plan, dsv.as(.Csv))
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Plan_Mismatch)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Plan_Mismatch)
 }
 
 @(private)
@@ -276,8 +276,8 @@ failed_stream_is_final :: proc(t: ^testing.T) {
 	defer typed.plan_destroy(&plan)
 	list := make([]Entry, 2000, context.temp_allocator)
 	err := records.marshal_stream(io.Stream{procedure = refusing_stream}, list, &plan, json.as(.Json))
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Write_Failed)
-	typed_err := walktest.typed_of(err)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Write_Failed)
+	typed_err := testkit.typed_of(err)
 	testing.expect_value(t, typed_err.cause, io.Error.Permission_Denied)
 }
 
@@ -298,7 +298,7 @@ failed_buffer_takes_nothing :: proc(t: ^testing.T) {
 	testing.expect_value(t, kind, core.Typed_Error_Kind.No_Memory)
 	testing.expect_value(t, len(records.writer_take(&wr)), 0)
 	_, end := records.writer_end(&wr)
-	walktest.expect_kind(t, end, core.Typed_Error_Kind.No_Memory)
+	testkit.expect_kind(t, end, core.Typed_Error_Kind.No_Memory)
 	testing.expect_value(t, len(records.writer_take(&wr)), 0)
 }
 
@@ -310,12 +310,12 @@ calls_after_the_end_are_out_of_order :: proc(t: ^testing.T) {
 	records.writer_init(&wr, {}, json.as(.Json), allocator = context.temp_allocator)
 	records.write(&wr, ENTRIES[0], &plan)
 	_, end := records.writer_end(&wr)
-	walktest.expect_nil(t, end)
+	testkit.expect_nil(t, end)
 	testing.expect_value(t, records.write(&wr, ENTRIES[1], &plan), core.Typed_Error_Kind.Out_Of_Order)
 	testing.expect_value(t, records.write_text(&wr, {'1'}), core.Typed_Error_Kind.Out_Of_Order)
 	testing.expect_value(t, records.write_cells(&wr, {"a"}), core.Typed_Error_Kind.Out_Of_Order)
 	_, end = records.writer_end(&wr)
-	walktest.expect_kind(t, end, core.Typed_Error_Kind.Out_Of_Order)
+	testkit.expect_kind(t, end, core.Typed_Error_Kind.Out_Of_Order)
 	records.writer_destroy(&wr)
 }
 
@@ -342,13 +342,13 @@ plan_of_another_layout_is_a_mismatch :: proc(t: ^testing.T) {
 	plain, _ := dsv.plan_make(Entry, .Csv)
 	defer typed.plan_destroy(&plain)
 	_, err := records.marshal(ENTRIES[:], &headless, dsv.as(.Csv), allocator = context.temp_allocator)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Plan_Mismatch)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Plan_Mismatch)
 	_, err = records.marshal(ENTRIES[:], &tsv, dsv.as(.Csv), allocator = context.temp_allocator)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Plan_Mismatch)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Plan_Mismatch)
 	_, err = records.marshal(ENTRIES[:], &plain, dsv.as(.Csv, {no_header = true}), allocator = context.temp_allocator)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Plan_Mismatch)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Plan_Mismatch)
 	text, ok := records.marshal(ENTRIES[:1], &headless, dsv.as(.Csv, {no_header = true}), allocator = context.temp_allocator)
-	walktest.expect_nil(t, ok)
+	testkit.expect_nil(t, ok)
 	testing.expect_value(t, string(text), "1,plain,true,0.5\n")
 	text, ok = records.marshal(ENTRIES[:1], &plain, dsv.as(.Csv, {delimiter = ','}), allocator = context.temp_allocator)
 	testing.expect_value(t, string(text), "id,name,ok,score\n1,plain,true,0.5\n")

@@ -6,28 +6,28 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import xml ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private)
 tokens_of :: proc(text: string, opts := xml.Options{}, skip := "", stop := 0) -> (tokens: string, hi: u64, fault: Maybe(core.Fault)) {
-	r := walktest.Token_Log {
+	r := testkit.Token_Log {
 		text = transmute([]u8)text,
 		skip = skip,
 		stop = stop,
 	}
 	strings.builder_init(&r.out, context.temp_allocator)
-	hi, fault = xml.walk(r.text, 0, .Xml, opts, &r, nil, walktest.log_token)
-	return walktest.log_line(&r), hi, fault
+	hi, fault = xml.walk(r.text, 0, .Xml, opts, &r, nil, testkit.log_token)
+	return testkit.log_line(&r), hi, fault
 }
 
 // The fault `validate` returns for `text`, as `code@at`, or "" for a text it accepts.
 @(private)
 refusal :: proc(text: string) -> string {
-	f, bad := walktest.fault_in(xml.validate(transmute([]u8)text, .Xml))
+	f, bad := testkit.fault_in(xml.validate(transmute([]u8)text, .Xml))
 	if !bad {
 		return ""
 	}
-	return fmt.tprintf("%s@%d", walktest.rule_code(f), f.at)
+	return fmt.tprintf("%s@%d", testkit.rule_code(f), f.at)
 }
 
 @(test)
@@ -188,7 +188,7 @@ ill_formed_texts_are_refused_at_their_byte :: proc(t: ^testing.T) {
 @(test)
 nesting_past_the_limit_is_refused :: proc(t: ^testing.T) {
 	text := strings.repeat("<a>", 5, context.temp_allocator)
-	f, bad := walktest.fault_in(xml.validate(transmute([]u8)text, .Xml, {max_depth = 4}))
+	f, bad := testkit.fault_in(xml.validate(transmute([]u8)text, .Xml, {max_depth = 4}))
 	testing.expect_value(t, bad, true)
 	testing.expect_value(t, f.kind, core.Fault_Kind.Too_Deep)
 }

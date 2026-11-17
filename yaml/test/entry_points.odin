@@ -11,7 +11,7 @@ import engine "../../core/build"
 import typed "../../core/typed"
 import write "../../core/write"
 import records "../../core/records"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import yaml ".."
 
 @(private = "file")
@@ -32,36 +32,36 @@ ENTRY_EDITED :: "a: 7\nb: [2, 3]\n"
 text_forms :: proc(t: ^testing.T, $spec: yaml.Spec) {
 	src := transmute([]u8)string(ENTRY_TEXT)
 	path, perr := yaml.parse_path(".a")
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	defer yaml.destroy(&path)
 
 	sdoc, serr := yaml.scan(src, spec, path)
-	walktest.expect_nil(t, serr)
+	testkit.expect_nil(t, serr)
 	testing.expect_value(t, len(sdoc.answers), 1)
 	yaml.destroy(&sdoc)
 
 	spelled, werr := yaml.set(src, spec, path, i64(7))
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, string(spelled), ENTRY_EDITED)
 	delete(spelled)
 
 	v: Entry
 	defer delete(v.b)
-	walktest.expect_nil(t, yaml.unmarshal(src, spec, &v))
+	testkit.expect_nil(t, yaml.unmarshal(src, spec, &v))
 	plan, plerr := yaml.plan_make(Entry, spec)
-	walktest.expect_nil(t, plerr)
+	testkit.expect_nil(t, plerr)
 	defer yaml.destroy(&plan)
 	again: Entry
 	defer delete(again.b)
-	walktest.expect_nil(t, yaml.unmarshal(src, spec, &again, &plan))
+	testkit.expect_nil(t, yaml.unmarshal(src, spec, &again, &plan))
 	testing.expect(t, again.a == 1 && len(again.b) == 2)
 
 	text, terr := yaml.marshal(v, spec, write = yaml.PRETTY)
-	walktest.expect_nil(t, terr)
+	testkit.expect_nil(t, terr)
 	testing.expect_value(t, string(text), "a: 1\nb:\n  - 2\n  - 3\n")
 	delete(text)
 	planned, plnerr := yaml.marshal(v, &plan)
-	walktest.expect_nil(t, plnerr)
+	testkit.expect_nil(t, plnerr)
 	testing.expect_value(t, string(planned), "{a: 1, b: [2, 3]}")
 	delete(planned)
 }
@@ -77,63 +77,63 @@ every_entry_point_accepts_valid_input :: proc(t: ^testing.T) {
 constant_forms :: proc(t: ^testing.T, $S: yaml.Spec) {
 	src := transmute([]u8)string(ENTRY_TEXT)
 	path, perr := yaml.parse_path(".a")
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	defer yaml.destroy(&path)
 	paths := [?]yaml.Path{path}
 
-	walktest.expect_nil(t, yaml.validate(src, S))
+	testkit.expect_nil(t, yaml.validate(src, S))
 	testing.expect(t, yaml.validate(transmute([]u8)string("a: [1\n"), S) != nil)
 
 	doc, berr := yaml.build(src, S)
-	walktest.expect_nil(t, berr)
+	testkit.expect_nil(t, berr)
 	defer yaml.destroy(&doc)
 	testing.expect(t, doc.readers.services == nil)
 	answers, qerr := yaml.query(&doc, path)
-	walktest.expect_nil(t, qerr)
+	testkit.expect_nil(t, qerr)
 	defer delete(answers)
 	if testing.expect_value(t, len(answers), 1) {
 		list := yaml.edit_list_init(&doc, S)
 		defer yaml.destroy(&list)
-		walktest.expect_nil(t, write.set_node(&list, answers[0].node, typed.Raw("7")))
+		testkit.expect_nil(t, write.set_node(&list, answers[0].node, typed.Raw("7")))
 		out, _, cerr := compose.commit(&list)
 		defer delete(out)
-		walktest.expect_nil(t, cerr)
+		testkit.expect_nil(t, cerr)
 		testing.expect_value(t, string(out), ENTRY_EDITED)
 	}
 	written, _, werr := yaml.write(&doc, S, yaml.PRETTY)
 	defer delete(written)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, string(written), ENTRY_TEXT)
 
 	sdoc, serr := yaml.scan(src, S, path)
-	walktest.expect_nil(t, serr)
+	testkit.expect_nil(t, serr)
 	yaml.destroy(&sdoc)
 	mdoc, merr := yaml.scan(src, S, paths[:])
-	walktest.expect_nil(t, merr)
+	testkit.expect_nil(t, merr)
 	yaml.destroy(&mdoc)
-	walktest.expect_nil(t, yaml.each_answer(src, S, path, nil, walktest.take_first))
-	walktest.expect_nil(t, yaml.each_answer(src, S, paths[:], nil, walktest.take_first))
+	testkit.expect_nil(t, yaml.each_answer(src, S, path, nil, testkit.take_first))
+	testkit.expect_nil(t, yaml.each_answer(src, S, paths[:], nil, testkit.take_first))
 	fdoc, found, ferr := yaml.find(src, S, path)
-	walktest.expect_nil(t, ferr)
+	testkit.expect_nil(t, ferr)
 	testing.expect(t, found.outcome == .Found)
 	yaml.destroy(&fdoc)
 	out, oerr := yaml.set(src, S, path, typed.Raw("7"))
-	walktest.expect_nil(t, oerr)
+	testkit.expect_nil(t, oerr)
 	testing.expect_value(t, string(out), ENTRY_EDITED)
 	delete(out)
 
 	v: Entry
 	defer delete(v.b)
-	walktest.expect_nil(t, yaml.unmarshal(src, S, &v))
+	testkit.expect_nil(t, yaml.unmarshal(src, S, &v))
 	testing.expect(t, v.a == 1 && len(v.b) == 2 && v.b[1] == 3)
 	plan, plerr := yaml.plan_make(Entry, S, reads = yaml.reads(S))
-	walktest.expect_nil(t, plerr)
+	testkit.expect_nil(t, plerr)
 	defer yaml.destroy(&plan)
 	again, slot: Entry
 	defer delete(again.b)
 	defer delete(slot.b)
-	walktest.expect_nil(t, yaml.unmarshal(src, S, &again, &plan))
-	walktest.expect_nil(t, typed.unmarshal_text(src, &slot, Entry, &plan, {}))
+	testkit.expect_nil(t, yaml.unmarshal(src, S, &again, &plan))
+	testkit.expect_nil(t, typed.unmarshal_text(src, &slot, Entry, &plan, {}))
 	testing.expect(t, again.a == 1 && len(again.b) == 2)
 	testing.expect(t, slot.a == 1 && len(slot.b) == 2)
 
@@ -168,14 +168,14 @@ record_forms :: proc(t: ^testing.T, $S: yaml.Spec) {
 	n := 0
 	for rec in yaml.records_next(&it) {
 		doc, derr := yaml.records_build(&it, rec)
-		walktest.expect_nil(t, derr)
+		testkit.expect_nil(t, derr)
 		yaml.destroy(&doc)
 		n += 1
 	}
 	testing.expect_value(t, n, 2)
 
 	path, perr := yaml.parse_path(".a")
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	defer yaml.destroy(&path)
 	scanned := yaml.records_open(src, S)
 	defer yaml.records_close(&scanned)
@@ -186,7 +186,7 @@ record_forms :: proc(t: ^testing.T, $S: yaml.Spec) {
 		if !more {
 			break
 		}
-		walktest.expect_nil(t, serr)
+		testkit.expect_nil(t, serr)
 		found += len(got.answers)
 	}
 	testing.expect_value(t, found, 2)
@@ -195,7 +195,7 @@ record_forms :: proc(t: ^testing.T, $S: yaml.Spec) {
 		records: int,
 	}
 	counted: Counted
-	walktest.expect_nil(t, yaml.records_each(src, S, .Concatenated, proc(c: ^Counted, piece: ^yaml.Record_Reader, k: int) -> bool {
+	testkit.expect_nil(t, yaml.records_each(src, S, .Concatenated, proc(c: ^Counted, piece: ^yaml.Record_Reader, k: int) -> bool {
 		for _ in yaml.records_next(piece) {
 			c.records += 1
 		}
@@ -214,7 +214,7 @@ every_record_form_reads_a_stream :: proc(t: ^testing.T) {
 	n := 0
 	for rec in yaml.records_next(&it) {
 		doc, derr := yaml.records_build(&it, rec)
-		walktest.expect_nil(t, derr)
+		testkit.expect_nil(t, derr)
 		yaml.destroy(&doc)
 		n += 1
 	}
@@ -258,7 +258,7 @@ a_repeated_key_follows_the_duplicate_policy_of_every_read :: proc(t: ^testing.T)
 	text := "a: 1\na: 2\nb: [2, 3]\n"
 	src := transmute([]u8)text
 	path, perr := yaml.parse_path(".a")
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	spec :: yaml.Spec.Yaml_1_2
 	for c in POLICY_CASES {
 		read := core.Path_Options{dups = c.dups}
@@ -269,7 +269,7 @@ a_repeated_key_follows_the_duplicate_policy_of_every_read :: proc(t: ^testing.T)
 		testing.expectf(t, (berr != nil) == refused, "build under %v: %v", c.dups, berr)
 		if !refused {
 			found, qerr := yaml.query(&built, path, {dups = c.dups})
-			walktest.expect_nil(t, qerr)
+			testkit.expect_nil(t, qerr)
 			got := make([dynamic]string)
 			for a in found {
 				v, _ := core.int_value(&built, a.node)
@@ -322,12 +322,12 @@ a_repeated_key_follows_the_duplicate_policy_of_every_read :: proc(t: ^testing.T)
 		v: Entry
 		uerr := yaml.unmarshal(src, spec, &v, read = {dups = c.dups})
 		if c.refused == .None {
-			walktest.expect_nil(t, uerr)
+			testkit.expect_nil(t, uerr)
 			testing.expect_value(t, v.a, c.a)
 		} else if c.dups == .All {
-			walktest.expect_kind(t, uerr, yaml.Typed_Error_Kind.Bad_Option)
+			testkit.expect_kind(t, uerr, yaml.Typed_Error_Kind.Bad_Option)
 		} else {
-			walktest.expect_kind(t, uerr, yaml.Typed_Error_Kind.Duplicate_Key)
+			testkit.expect_kind(t, uerr, yaml.Typed_Error_Kind.Duplicate_Key)
 		}
 
 		// `core` with a handle reads as the entries do.
@@ -354,7 +354,7 @@ a_key_is_its_resolved_value :: proc(t: ^testing.T) {
 	for text in ([]string{"1: x\n\"1\": y\n", "1: x\n0x1: y\n"}) {
 		src := transmute([]u8)text
 		doc, err := yaml.build(src, spec)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		testing.expect_value(t, core.length(&doc, core.ROOT), 2)
 		path, _ := yaml.parse_path(".\"1\"")
 		for dups in core.Duplicates {
@@ -364,19 +364,19 @@ a_key_is_its_resolved_value :: proc(t: ^testing.T) {
 			uerr := yaml.unmarshal(src, spec, &m, read = {dups = dups})
 			switch dups {
 			case .First:
-				walktest.expect_nil(t, qerr)
-				walktest.expect_nil(t, serr)
-				walktest.expect_nil(t, uerr)
+				testkit.expect_nil(t, qerr)
+				testkit.expect_nil(t, serr)
+				testkit.expect_nil(t, uerr)
 				testing.expect_value(t, m["1"], "x")
 			case .All:
-				walktest.expect_nil(t, qerr)
-				walktest.expect_nil(t, serr)
+				testkit.expect_nil(t, qerr)
+				testkit.expect_nil(t, serr)
 			case .Default, .Last, .Refuse:
 				for e in ([]core.Error{qerr, serr}) {
 					fault, _ := e.(core.Fault)
 					testing.expectf(t, fault.kind == .Duplicate_Key && fault.at == 5, "%q under %v: %v", text, dups, e)
 				}
-				walktest.expect_kind(t, uerr, yaml.Typed_Error_Kind.Duplicate_Key)
+				testkit.expect_kind(t, uerr, yaml.Typed_Error_Kind.Duplicate_Key)
 			}
 		}
 	}
@@ -387,6 +387,6 @@ a_key_is_its_resolved_value :: proc(t: ^testing.T) {
 a_nil_any_marshals_as_null :: proc(t: ^testing.T) {
 	nothing: any
 	text, err := yaml.marshal(nothing, allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, strings.trim_space(string(text)), "null")
 }

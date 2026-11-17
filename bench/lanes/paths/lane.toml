@@ -1,0 +1,57 @@
+[lane]
+legend = "ns per call is the best of {rounds} rounds of each arm's median of ten samples after two warm-ups, a sample being 100 calls in a get row and 1 in a logs row. GB/s is the whole text's bytes over that ns."
+
+# scan judges every byte. build_query builds the document, judging every byte, then queries it. simdjson runs stage 1
+# over the whole text, then On-Demand reads to the key and skips values without judging their numbers and escapes.
+# stop judges every byte up to the answer and leaves the rest unread. sonic reads to the key and skips values without
+# judging them. query reads a document built outside the clock and only the nodes the path reaches. each judges every
+# byte and gives each answer to a callback. iter gives the answers through `next`, a batch a walk.
+
+[arm]
+scan = { source = "stury", sub = "scan", args = ["{sub}", "{file}", "{dotkey}{path}", "{batch}"] }
+stop = { source = "stury", sub = "stop", args = ["{sub}", "{file}", "{dotkey}{path}", "{batch}"] }
+build_query = { source = "stury", sub = "build_query", args = ["{sub}", "{file}", "{dotkey}{path}", "{batch}"] }
+query = { source = "stury", sub = "query", args = ["{sub}", "{file}", "{path}"] }
+each = { source = "stury", sub = "each", args = ["{sub}", "{file}", "{path}", "{batch}", "{largest}"] }
+iter = { source = "stury", sub = "iter", args = ["{sub}", "{file}", "{path}", "{batch}", "{largest}"] }
+simd = { source = "simdjson.cpp", args = ["get", "{file}", "{key}", "{batch}"] }
+sonic = { source = "rust", args = ["get", "{file}", "{key}", "{batch}"] }
+
+[[group]]
+title = "get"
+metric = "ns"
+arms = ["scan", "build_query", "simd", "stop", "sonic"]
+rows = [
+	{ label = "get early", file = "wide.json", key = "@first", batch = "100" },
+	{ label = "get middle", file = "wide.json", key = "@middle", batch = "100" },
+	{ label = "get late", file = "wide.json", key = "@last", batch = "100" },
+	{ label = "get absent", file = "wide.json", key = "no_such_key", dotkey = ".no_such_key", batch = "100" },
+	{ label = "get last root key", file = "twitter.json", key = "@last", batch = "100" },
+]
+tables = [
+	{ title = "the whole text read", arms = ["scan", "build_query", "simd"], throughput = true },
+	{ title = "the text read up to the answer", arms = ["stop", "sonic"] },
+]
+
+[[group]]
+title = "logs"
+metric = "ns"
+arms = ["scan", "query"]
+rows = [
+	{ label = ".logs[].id", file = "logs.json", path = ".logs[].id" },
+	{ label = ".logs[][]", file = "logs.json", path = ".logs[][]" },
+	{ label = ".logs[-1]", file = "logs.json", path = ".logs[-1]" },
+	{ label = ".logs[-20]", file = "logs.json", path = ".logs[-20]" },
+	{ label = "five keys per record", file = "logs.json", path = ".logs[].ts;.logs[].level;.logs[].service;.logs[].status;.logs[].id" },
+]
+tables = [{ title = "the whole text judged and a document built outside the clock", throughput = true }]
+
+[[group]]
+title = "stream"
+metric = "ns"
+arms = ["each", "iter"]
+rows = [
+	{ label = "stream .logs[]", file = "logs.json", path = ".logs[]", batch = "1", largest = "" },
+	{ label = "stream .logs[].id", file = "logs.json", path = ".logs[].id", batch = "1", largest = "" },
+]
+tables = [{ title = "every answer taken as it comes", throughput = true }]

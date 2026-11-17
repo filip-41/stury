@@ -4,7 +4,7 @@ package toml_tests
 import "core:strings"
 import "core:testing"
 import toml ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private)
 check_list :: proc(t: ^testing.T, list: string, $spec: toml.Spec) -> (cases: int) {
@@ -17,7 +17,7 @@ check_list :: proc(t: ^testing.T, list: string, $spec: toml.Spec) -> (cases: int
 		if !testing.expectf(t, found, "%s is not vendored", name) {
 			continue
 		}
-		fault, refused := walktest.fault_of(toml.validate(data, spec)).?
+		fault, refused := testkit.fault_of(toml.validate(data, spec)).?
 		switch {
 		case strings.has_prefix(name, "valid/"):
 			testing.expectf(t, !refused, "%s: %v", name, fault)

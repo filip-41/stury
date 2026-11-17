@@ -58,9 +58,6 @@ Properties :: struct {
 // The handle's `write`: node `node` of `doc` as YAML.
 @(private)
 document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
-	if doc.partial {
-		return nil, 0, {kind = .Unsupported}
-	}
 	spill: [write.ROOM_MAX]u8 = ---
 	l := Layout{doc = doc, opts = opts, own = is_yaml(doc), step = int(opts.indent) if opts.indent > 0 else 2}
 	l.arena.backing_allocator = context.allocator

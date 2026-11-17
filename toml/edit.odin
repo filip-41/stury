@@ -277,11 +277,6 @@ first_byte :: proc(src: []u8, ls: u64) -> u8 {
 }
 
 @(private = "file")
-blank_line :: proc(src: []u8, ls: u64) -> bool {
-	return ls >= u64(len(src)) || first_byte(src, ls) == 0
-}
-
-@(private = "file")
 indent_of :: proc(src: []u8, p: u64) -> []u8 {
 	ls := compose.line_start(src, p)
 	end := ls
@@ -581,7 +576,7 @@ put_line_at :: proc(cx: ^Cx, pos: u64, line: string, blank_after: bool) {
 		compose.puts(&b, cx.eol)
 	}
 	compose.puts(&b, line, cx.eol)
-	if blank_after && pos < u64(len(cx.src)) && !blank_line(cx.src, pos) {
+	if blank_after && pos < u64(len(cx.src)) && !compose.blank_line(cx.src, pos) {
 		compose.puts(&b, cx.eol)
 	}
 	add(cx, pos, pos, b[:])
@@ -717,12 +712,12 @@ put_section_at :: proc(cx: ^Cx, pos: u64, body: []u8) {
 	if pos > 0 && src[pos - 1] != '\n' {
 		compose.puts(&b, cx.eol)
 	}
-	if pos > 0 && !blank_line(src, compose.line_start(src, pos - 1)) {
+	if pos > 0 && !compose.blank_line(src, compose.line_start(src, pos - 1)) {
 		compose.puts(&b, cx.eol)
 	}
 	append(&b, ..body)
 	compose.puts(&b, cx.eol)
-	if pos < u64(len(src)) && !blank_line(src, pos) {
+	if pos < u64(len(src)) && !compose.blank_line(src, pos) {
 		compose.puts(&b, cx.eol)
 	}
 	add(cx, pos, pos, b[:])
@@ -896,7 +891,7 @@ remove_sections :: proc(cx: ^Cx, v: u32) {
 		return
 	}
 	lo := first
-	for lo > 0 && blank_line(cx.src, compose.line_start(cx.src, lo - 1)) {
+	for lo > 0 && compose.blank_line(cx.src, compose.line_start(cx.src, lo - 1)) {
 		lo = compose.line_start(cx.src, lo - 1)
 	}
 	if lo < first {

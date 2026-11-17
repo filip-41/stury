@@ -13,7 +13,7 @@ import typed "../../typed"
 import write "../../write"
 import json "../../../json"
 import model ".."
-import walktest "../../../walktest"
+import testkit "../../../testkit"
 
 @(private = "file")
 Address :: struct {
@@ -46,7 +46,7 @@ account_model :: proc(reg: ^model.Registry) -> model.Model(Account) {
 @(private = "file")
 dumped :: proc(t: ^testing.T, m: ^model.Model(Account), v: ^Account, opts: model.Dump_Opts) -> string {
 	text, err := model.dump(m, v, opts, allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	return string(text)
 }
 
@@ -57,7 +57,7 @@ a_dump_leaves_out_what_each_option_excludes :: proc(t: ^testing.T) {
 	reg: model.Registry
 	m := account_model(&reg)
 	a: Account
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "pass": "s", "nick": null, "home": {"city": "x"}, "zz": 1, "aa": [2]}`), &a))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "pass": "s", "nick": null, "home": {"city": "x"}, "zz": 1, "aa": [2]}`), &a))
 	a.id = 9
 	testing.expect_value(t, dumped(t, &m, &a, {}), `{"id":9,"name":"ada","level":7,"nick":null,"tags":[],"home":{"city":"x","zip":null},"aa":[2],"zz":1}`)
 	// A required member is written though it holds null, so the text loads back.
@@ -88,7 +88,7 @@ a_dump_with_check_refuses_an_invalid_value_and_writes_nothing :: proc(t: ^testin
 	testing.expect_value(t, len(sink.entries), 1)
 	a.name = "ab"
 	_, err = model.dump(&m, &a, {check = true})
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 
 	// A captured key that names a member is refused, also where the dump leaves the member out.
 	a.extra = make(map[string]core.Value)
@@ -105,9 +105,9 @@ a_dump_loads_back_to_its_value :: proc(t: ^testing.T) {
 	m := account_model(&reg)
 	a := Account{name = "ada", level = 3, nick = "n", tags = {"x", "y"}, home = {city = "c", zip = 5}}
 	text, err := model.dump(&m, &a)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	back: Account
-	walktest.expect_nil(t, model.load(&m, text, &back))
+	testkit.expect_nil(t, model.load(&m, text, &back))
 	again, _ := model.dump(&m, &back)
 	testing.expect_value(t, string(again), string(text))
 	testing.expect_value(t, back.nick.?, "n")
@@ -159,18 +159,18 @@ a_dump_writes_carriers_and_tagged_unions_as_a_load_reads_them :: proc(t: ^testin
 		},
 	})
 	m, compiled := model.compile(&reg, Stamp, json.checks(.Json))
-	walktest.expect_nil(t, compiled)
+	testkit.expect_nil(t, compiled)
 	id, _ := uuid.read("0f8fad5b-d9cb-469f-a165-70867728950e")
 	s := Stamp{at = time.unix(1577836800, 0), id = id, cost = 1500, shape = Box{2}}
 	text, err := model.dump(&m, &s, {exclude_none = true, check = true})
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(text), `{"at":"2020-01-01T00:00:00Z","id":"0f8fad5b-d9cb-469f-a165-70867728950e","cost":1.5,"shape":{"kind":"Box","side":2}}`)
 	back: Stamp
-	walktest.expect_nil(t, model.load(&m, text, &back))
+	testkit.expect_nil(t, model.load(&m, text, &back))
 	testing.expect(t, back.at == s.at && back.id == s.id && back.cost == 1500 && back.shape.(Box).side == 2 && back.spare == nil)
 	s.spare = Disc{1}
 	text, err = model.dump(&m, &s, {exclude_none = true})
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(text), `{"at":"2020-01-01T00:00:00Z","id":"0f8fad5b-d9cb-469f-a165-70867728950e","cost":1.5,"shape":{"kind":"Box","side":2},"spare":{"kind":"Disc","r":1}}`)
 }
 
@@ -181,8 +181,8 @@ a_patch_reads_no_default_and_misses_nothing :: proc(t: ^testing.T) {
 	reg: model.Registry
 	m := account_model(&reg)
 	existing: Account
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "nick": null, "level": 2}`), &existing))
-	walktest.expect_nil(t, model.patch(&m, &existing, transmute([]u8)string(`{"home": {"zip": 3}}`)))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "nick": null, "level": 2}`), &existing))
+	testkit.expect_nil(t, model.patch(&m, &existing, transmute([]u8)string(`{"home": {"zip": 3}}`)))
 	testing.expect_value(t, existing.level, 2)
 	testing.expect_value(t, existing.home.zip.?, 3)
 	testing.expectf(t, model.was_set(&m, Account, existing.set, "name") && model.was_set(&m, Account, existing.set, "home"), "%v", existing.set)
@@ -195,7 +195,7 @@ a_patch_reads_no_default_and_misses_nothing :: proc(t: ^testing.T) {
 	l, _ := model.compile(&reg, Listed, json.checks(.Json))
 	v: Listed
 	testing.expect(t, model.patch(&l, &v, transmute([]u8)string(`{"items": [{"x": 1}]}`)) != nil)
-	walktest.expect_nil(t, model.patch(&l, &v, transmute([]u8)string(`{}`)))
+	testkit.expect_nil(t, model.patch(&l, &v, transmute([]u8)string(`{}`)))
 }
 
 @(private = "file")
@@ -215,14 +215,14 @@ a_patch_frees_what_it_read_or_replaced :: proc(t: ^testing.T) {
 	reg: model.Registry
 	defer model.registry_destroy(&reg)
 	m, compiled := model.compile(&reg, Stock, json.checks(.Json))
-	walktest.expect_nil(t, compiled)
+	testkit.expect_nil(t, compiled)
 	defer model.model_destroy(&m)
 	track: mem.Tracking_Allocator
 	mem.tracking_allocator_init(&track, context.allocator)
 	defer mem.tracking_allocator_destroy(&track)
 	a := mem.tracking_allocator(&track)
 	v: Stock
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name":"widget","qty":3,"tags":["x"],"a":"b","c":"d"}`), &v, allocator = a))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name":"widget","qty":3,"tags":["x"],"a":"b","c":"d"}`), &v, allocator = a))
 	held := len(track.allocation_map)
 	failing := [?]string {
 		`{"name":"longername","qty":-1,"tags":["y","z"],"e":"f"}`,
@@ -234,7 +234,7 @@ a_patch_frees_what_it_read_or_replaced :: proc(t: ^testing.T) {
 		testing.expectf(t, len(track.allocation_map) == held, "%s: %d live, %d before", body, len(track.allocation_map), held)
 	}
 	testing.expect(t, v.name == "widget" && v.qty == 3 && len(v.tags) == 1 && v.extra["a"] == "b")
-	walktest.expect_nil(t, model.patch(&m, &v, transmute([]u8)string(`{"name":"gadget","tags":["p","q"],"a":"z","e":"f"}`), allocator = a))
+	testkit.expect_nil(t, model.patch(&m, &v, transmute([]u8)string(`{"name":"gadget","tags":["p","q"],"a":"z","e":"f"}`), allocator = a))
 	testing.expect(t, v.name == "gadget" && v.qty == 3 && len(v.tags) == 2 && len(v.extra) == 3 && v.extra["a"] == "z" && v.extra["c"] == "d")
 	delete(v.name, a)
 	delete(v.note, a)
@@ -288,13 +288,13 @@ a_dump_judges_only_its_models_members_and_makes_each_default_once :: proc(t: ^te
 		return {}
 	})
 	m, err := model.compile(&reg, []Facts, json.checks(.Json))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	// An `any`'s members are a side plan's, which the model's facts do not describe.
 	all := model.Fields_Set{bits = {7, 0}}
 	fs := []Facts{{v = Inner8{1, 2, 3, 4, 5, 6, 7, 8}, w = 0.0, set = all}, {w = -0.0, tags = {"t"}, set = all}, {w = 1, set = all}}
 	text: []u8
 	text, err = model.dump(&m, &fs, {exclude_unset = true, exclude_defaults = true})
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(text), `[{"v":{"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8},"w":0},{"tags":["t"]},{"w":1}]`)
 	testing.expect_value(t, made_tags, 1)
 }
@@ -306,9 +306,9 @@ a_patch_takes_the_members_it_holds :: proc(t: ^testing.T) {
 	reg: model.Registry
 	m := account_model(&reg)
 	existing: Account
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "nick": "a", "tags": ["x"], "home": {"city": "c", "zip": 1}, "aa": 1, "zz": 2}`), &existing))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "nick": "a", "tags": ["x"], "home": {"city": "c", "zip": 1}, "aa": 1, "zz": 2}`), &existing))
 	before := existing
-	walktest.expect_nil(t, model.patch(&m, &existing, transmute([]u8)string(`{"nick": null, "tags": ["p", "q"], "home": {"zip": 2}, "level": 4, "zz": "patched"}`)))
+	testkit.expect_nil(t, model.patch(&m, &existing, transmute([]u8)string(`{"nick": null, "tags": ["p", "q"], "home": {"zip": 2}, "level": 4, "zz": "patched"}`)))
 	testing.expect_value(t, existing.name, "ada")
 	_, has_nick := existing.nick.?
 	testing.expect(t, !has_nick)
@@ -352,10 +352,10 @@ a_patch_judges_the_struct_it_makes :: proc(t: ^testing.T) {
 	reg: model.Registry
 	model.register(&reg, Range, ordered)
 	m, err := model.compile(&reg, Range, json.checks(.Json))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	r: Range
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"lo": 1, "hi": 9, "name": "ab"}`), &r))
-	walktest.expect_nil(t, model.patch(&m, &r, transmute([]u8)string(`{"lo": 5}`)))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"lo": 1, "hi": 9, "name": "ab"}`), &r))
+	testkit.expect_nil(t, model.patch(&m, &r, transmute([]u8)string(`{"lo": 5}`)))
 	testing.expect(t, r.lo == 5 && r.hi == 9)
 	sink: typed.Sink
 	err = model.patch(&m, &r, transmute([]u8)string(`{"lo": 20}`), &sink)
@@ -363,7 +363,7 @@ a_patch_judges_the_struct_it_makes :: proc(t: ^testing.T) {
 	testing.expect(t, failed && f.kind == .Custom && f.want.text == "lo > hi")
 	testing.expect(t, len(sink.entries) == 1 && len(sink.entries[0].path) == 0)
 	testing.expect(t, r.lo == 5 && r.hi == 9)
-	walktest.expect_nil(t, model.validate(&m, &r))
+	testkit.expect_nil(t, model.validate(&m, &r))
 }
 
 @(test)
@@ -402,14 +402,14 @@ a_patch_reads_a_struct_behind_a_pointer_or_maybe_in_full :: proc(t: ^testing.T) 
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	m, err := model.compile(&reg, Held, json.checks(.Json))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	v: Held
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"by_ptr": {"x": 1, "y": 2}, "by_maybe": {"x": 3, "y": 4}}`), &v))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"by_ptr": {"x": 1, "y": 2}, "by_maybe": {"x": 3, "y": 4}}`), &v))
 	for body in ([]string{`{"by_ptr": {"y": 5}}`, `{"by_maybe": {"y": 5}}`}) {
 		testing.expect_value(t, refused_as(model.patch(&m, &v, transmute([]u8)body)), core.Typed_Error_Kind.Missing_Field)
 		testing.expect(t, v.by_ptr.x == 1 && v.by_ptr.y == 2 && v.by_maybe.?.x == 3 && v.by_maybe.?.y == 4)
 	}
-	walktest.expect_nil(t, model.patch(&m, &v, transmute([]u8)string(`{"by_ptr": {"x": 7}}`)))
+	testkit.expect_nil(t, model.patch(&m, &v, transmute([]u8)string(`{"by_ptr": {"x": 7}}`)))
 	testing.expect(t, v.by_ptr.x == 7 && v.by_ptr.y == 0)
 }
 
@@ -429,7 +429,7 @@ validate_returns_a_path_that_outlives_the_applicator_judge :: proc(t: ^testing.T
 	context.allocator = virtual.arena_allocator(&arena)
 	reg: model.Registry
 	m, err := model.compile(&reg, Tagged, json.checks(.Json))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	v := Tagged{[]string{"a", "a"}}
 	failed := model.validate(&m, &v)
 	e, typed_error := failed.(core.Typed_Error)
@@ -455,13 +455,13 @@ not_null_on_a_maybe_is_judged_by_validate_and_dump :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	reg: model.Registry
 	m, err := model.compile(&reg, Nullable, json.checks(.Json))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	v := Nullable{p = 1}
 	testing.expect_value(t, refused_as(model.validate(&m, &v)), core.Typed_Error_Kind.Wrong_Kind)
 	_, dumped := model.dump(&m, &v, {check = true})
 	testing.expect_value(t, refused_as(dumped), core.Typed_Error_Kind.Check_Failed)
 	v.a = "x"
-	walktest.expect_nil(t, model.validate(&m, &v))
+	testkit.expect_nil(t, model.validate(&m, &v))
 }
 
 // `dump_stream` writes the text `dump` returns, and refuses what `check` refuses.
@@ -472,9 +472,9 @@ dump_stream_writes_what_dump_returns :: proc(t: ^testing.T) {
 	reg: model.Registry
 	m := account_model(&reg)
 	a: Account
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "nick": null, "level": 2}`), &a))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "nick": null, "level": 2}`), &a))
 	b := strings.builder_make()
-	walktest.expect_nil(t, model.dump_stream(strings.to_stream(&b), &m, &a, {exclude_none = true}))
+	testkit.expect_nil(t, model.dump_stream(strings.to_stream(&b), &m, &a, {exclude_none = true}))
 	text, _ := model.dump(&m, &a, {exclude_none = true})
 	testing.expect_value(t, strings.to_string(b), string(text))
 	testing.expect(t, len(text) > 0)
@@ -498,14 +498,14 @@ a_default_converts_a_number_or_a_maybe_element :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	reg: model.Registry
-	walktest.expect_nil(t, model.register(&reg, Counter, "count", 5))
-	walktest.expect_nil(t, model.register(&reg, Counter, "ratio", 1))
-	walktest.expect_nil(t, model.register(&reg, Counter, "nick", "x"))
-	walktest.expect_nil(t, model.register(&reg, Counter, "small", 200))
+	testkit.expect_nil(t, model.register(&reg, Counter, "count", 5))
+	testkit.expect_nil(t, model.register(&reg, Counter, "ratio", 1))
+	testkit.expect_nil(t, model.register(&reg, Counter, "nick", "x"))
+	testkit.expect_nil(t, model.register(&reg, Counter, "small", 200))
 	m, err := model.compile(&reg, Counter, json.checks(.Json))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	v: Counter
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "n"}`), &v))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "n"}`), &v))
 	testing.expect(t, v.count == 5 && v.ratio == 1 && v.nick.? == "x" && v.small == 200)
 	for refusal in ([]core.Error{
 		model.register(&reg, Counter, "small", 300),

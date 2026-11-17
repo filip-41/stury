@@ -10,7 +10,7 @@ import typed "../../core/typed"
 import write "../../core/write"
 import json_pkg "../../json"
 import toml ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 import yaml "../../yaml"
 
 @(private)
@@ -95,10 +95,10 @@ layout_omits_the_header_of_a_table_that_holds_only_sections :: proc(t: ^testing.
 layout_writes_arrays_of_tables_as_sections :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	doc, err := json_pkg.build(transmute([]u8)string(`{"a": [{"x": 1}, {"x": 2, "y": [{"z": 3}]}], "b": [[1], 2], "c": [], "d": {}}`), .Json)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	got, werr := written(&doc)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, got, "b = [[1], 2]\nc = []\n\n[[a]]\nx = 1\n\n[[a]]\nx = 2\n\n[[a.y]]\nz = 3\n\n[d]\n")
 }
 
@@ -111,7 +111,7 @@ layout_keeps_inline_tables_dotted_keys_and_sections :: proc(t: ^testing.T) {
 	testing.expect_value(t, text_of(src), src)
 	testing.expect_value(t, text_of("x.y = 1\n\n[x.z]\nw = 2\n"), "x.y = 1\n\n[x.z]\nw = 2\n")
 	doc, err := toml.build(transmute([]u8)src, .Toml_1_0)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	for want in ([?][2]string{{"it", "flow"}, {"l", "flow"}, {"x", "dotted"}, {"e", "flow"}, {"s", "block"}, {"arr", "block"}}) {
 		i, _ := core.member(&doc, core.ROOT, want[0])
@@ -172,10 +172,10 @@ other_formats_are_written_as_toml :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := `{"b":[1,2.5,"x"],"a":{"k":true,"e":[{"i":1}]},"s":"é\n"}`
 	doc, err := json_pkg.build(transmute([]u8)src, .Json)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	got, werr := written(&doc)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, got, "b = [1, 2.5, \"x\"]\ns = \"é\\n\"\n\n[a]\nk = true\n\n[[a.e]]\ni = 1\n")
 }
 
@@ -184,10 +184,10 @@ infinities_and_nans_of_other_formats_are_written_as_toml :: proc(t: ^testing.T) 
 	defer free_all(context.temp_allocator)
 	src := "a: .inf\nb: -.inf\nc: .nan\n"
 	doc, err := yaml.build(transmute([]u8)src, .Yaml_1_2)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	got, werr := written(&doc)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, got, "a = inf\nb = -inf\nc = nan\n")
 }
 
@@ -196,10 +196,10 @@ the_head_comment_of_another_format_is_written_as_toml :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := "# head\n\n# before a\na: 1 # tail a\n"
 	doc, err := yaml.build(transmute([]u8)src, .Yaml_1_2)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	got, werr := written(&doc)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, got, "# head\n\n# before a\na = 1 # tail a\n")
 }
 
@@ -208,10 +208,10 @@ a_block_comment_of_another_format_is_written_as_toml_lines :: proc(t: ^testing.T
 	defer free_all(context.temp_allocator)
 	src := "{\n/* x\n y */\n\"a\": 1, /* tail a */\n\"b\": 2 //b\n}"
 	doc, err := json_pkg.build(transmute([]u8)src, .Jsonc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	got, werr := written(&doc)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, got, "# x\n#  y\na = 1 # tail a\nb = 2 #b\n")
 }
 
@@ -220,9 +220,9 @@ the_write_refuses_what_toml_cannot_spell :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	for src in ([]string{`{"a":null}`, `[1]`, `1`, `{"a":1,"a":2}`, `{"a":[null]}`}) {
 		doc, err := json_pkg.build(transmute([]u8)src, .Json)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		_, werr := written(&doc)
-		kind := walktest.typed_kind(werr)
+		kind := testkit.typed_kind(werr)
 		testing.expectf(t, kind == .Unsupported || kind == .Unwritable, "%s is written", src)
 		core.destroy(&doc)
 	}
@@ -357,7 +357,7 @@ marshal_writes_a_struct_as_a_document :: proc(t: ^testing.T) {
 	cfg.limits = make(map[string]int, allocator = context.temp_allocator)
 	cfg.limits["m"] = 1
 	text, err := toml.marshal(cfg, allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(text), "title = \"t\"\ndebug = true\nratio = 0.5\n\n[[servers]]\nhost = \"a\"\nport = 1\ntags = [\"x\", \"y\"]\n\n[[servers]]\nhost = \"b\"\nport = 2\ntags = []\n\n[limits]\nm = 1\n\n[inner]\nlabel = \"n\"\n")
 }
 
@@ -367,7 +367,7 @@ unmarshal_reads_what_marshal_writes :: proc(t: ^testing.T) {
 	src := "title = \"t\" # c\ndebug = true\nratio = 0.5\n[limits]\nm = 1\n[inner]\nlabel = \"n\"\n[[servers]]\nhost = \"a\"\nport = 0x10\ntags = [\"x\"]\n[[servers]]\nhost = \"b\"\n"
 	cfg: Config
 	err := toml.unmarshal(transmute([]u8)src, .Toml_1_1, &cfg, allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, cfg.title, "t")
 	testing.expect_value(t, cfg.debug, true)
 	testing.expect_value(t, cfg.inner.name, "n")
@@ -377,10 +377,10 @@ unmarshal_reads_what_marshal_writes :: proc(t: ^testing.T) {
 	testing.expect_value(t, cfg.servers[0].tags[0], "x")
 	testing.expect_value(t, cfg.servers[1].host, "b")
 	text, werr := toml.marshal(cfg, allocator = context.temp_allocator)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	back: Config
 	err = toml.unmarshal(text, .Toml_1_0, &back, allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, back.servers[0].port, 16)
 	testing.expect_value(t, back.inner.name, "n")
 }
@@ -390,14 +390,14 @@ unmarshal_reports_a_fault_of_the_text :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	cfg: Config
 	err := toml.unmarshal(transmute([]u8)string("a = \na = 1\n"), .Toml_1_0, &cfg, allocator = context.temp_allocator)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Walk)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Walk)
 }
 
 @(test)
 marshal_refuses_a_value_that_is_no_table :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	_, err := toml.marshal(3, allocator = context.temp_allocator)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
 }
 
 @(test)
@@ -405,14 +405,14 @@ a_plan_made_for_toml_writes_and_reads :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	plan, perr := toml.plan_make(Server, .Toml_1_0, reads = toml.reads(.Toml_1_0))
 	defer typed.plan_destroy(&plan)
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	s := Server{"h", 2, {"a"}}
 	text, err := plan.marshal(&plan, &s, {}, {}, context.temp_allocator, nil)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(text), "host = \"h\"\nport = 2\ntags = [\"a\"]\n")
 	back: Server
 	rerr := typed.unmarshal_text(text, &back, Server, &plan, {}, context.temp_allocator)
-	walktest.expect_nil(t, rerr)
+	testkit.expect_nil(t, rerr)
 	testing.expect_value(t, back.host, "h")
 }
 
@@ -420,18 +420,18 @@ a_plan_made_for_toml_writes_and_reads :: proc(t: ^testing.T) {
 // has: the writer's stack of open arrays and inline tables does not grow the native one.
 @(test)
 a_deep_inline_value_is_written_on_a_small_stack :: proc(t: ^testing.T) {
-	walktest.on_small_stack(t, proc(t: ^testing.T) {
+	testkit.on_small_stack(t, proc(t: ^testing.T) {
 		defer free_all(context.temp_allocator)
 		levels := core.MAX_DEPTH - 2
 		value := strings.concatenate({strings.repeat("[", levels, context.temp_allocator), "1", strings.repeat("]", levels, context.temp_allocator)}, context.temp_allocator)
 		text := strings.concatenate({"a = ", value, "\n"}, context.temp_allocator)
 		doc, err := core.build(transmute([]u8)text, toml.as(.Toml_1_0))
 		defer core.destroy(&doc)
-		if !walktest.expect_nil(t, err) {
+		if !testkit.expect_nil(t, err) {
 			return
 		}
 		out, werr := written(&doc)
-		walktest.expect_nil(t, werr)
+		testkit.expect_nil(t, werr)
 		testing.expect_value(t, out, text)
 	})
 }
@@ -449,7 +449,7 @@ comment_count :: proc(doc: ^core.Document) -> (n: int) {
 @(private)
 expect_written_as_1_0 :: proc(t: ^testing.T, doc: ^core.Document) -> string {
 	text, dropped, err := core.write(doc, {}, toml.as(.Toml_1_0), allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, dropped, 0)
 	back, rerr := toml.build(text, .Toml_1_0)
 	if !testing.expectf(t, rerr == nil, "%s\nis not TOML 1.0: %v", text, rerr) {
@@ -465,7 +465,7 @@ the_comments_inside_the_tables_of_an_array_stand_above_the_element :: proc(t: ^t
 	defer free_all(context.temp_allocator)
 	src := "{\"l\": [1, // one\n {\"k\": 1, // kk\n \"m\": [ // in m\n 2 ]\n},\n // before three\n 3 ]}"
 	doc, err := json_pkg.build(transmute([]u8)src, .Jsonc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	got := expect_written_as_1_0(t, &doc)
 	testing.expect_value(t, got, "l = [\n  1, # one\n  # kk\n  # in m\n  { k = 1, m = [2] },\n  # before three\n  3,\n]\n")
@@ -476,7 +476,7 @@ the_comments_of_a_flow_mapping_in_a_sequence_are_written_as_toml_1_0 :: proc(t: 
 	defer free_all(context.temp_allocator)
 	src := "a: { x: 1, # cx\n  y: 2 }\nl: [[1, # c1\n 2], { k: { j: 1 # cj\n } }, 3]\n"
 	doc, err := yaml.build(transmute([]u8)src, .Yaml_1_2)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	got := expect_written_as_1_0(t, &doc)
 	testing.expect_value(t, got, "l = [\n  # c1\n  [1, 2],\n  # cj\n  { k = { j = 1 } },\n  3,\n]\n\n[a]\nx = 1 # cx\ny = 2\n")
@@ -503,7 +503,7 @@ token_write_keeps_the_comments_inside_the_tables_of_an_array :: proc(t: ^testing
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(bytes), "l = [\n  1,\n  # ck\n  { k = 1 }, # after the table\n]\n")
 	back, rerr := toml.build(bytes, .Toml_1_0)
-	walktest.expect_nil(t, rerr)
+	testkit.expect_nil(t, rerr)
 	defer core.destroy(&back)
 	testing.expect_value(t, comment_count(&back), 2)
 }

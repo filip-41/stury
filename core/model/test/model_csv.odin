@@ -10,7 +10,7 @@ import records "../../records"
 import dsv "../../../dsv"
 import json "../../../json"
 import model ".."
-import walktest "../../../walktest"
+import testkit "../../../testkit"
 
 @(private = "file")
 Row :: struct {
@@ -108,7 +108,7 @@ csv_model_single_row :: proc(t: ^testing.T) {
 	sink: typed.Sink
 	row: Row
 	err := model.load(&m, transmute([]u8)string("id,name,age\n1,ada,30\n"), &row, &sink)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, row.name, "ada")
 	testing.expect_value(t, len(sink.entries), 0)
 	sink2: typed.Sink
@@ -123,7 +123,7 @@ model_loads_a_built_value_as_its_text :: proc(t: ^testing.T) {
 	reg: model.Registry
 	m := compiled_ok(t, &reg, Row, json.checks(.Json))
 	doc, err := core.build(transmute([]u8)string(`{"id":1,"name":"a","age":10}`), json.as(.Json))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	sink: typed.Sink
 	row: Row
 	_ = model.load_value(&m, core.built_value(core.Node_Ref{&doc, core.ROOT}), &row, &sink)
@@ -152,7 +152,7 @@ csv_model_of_rows_that_are_no_structs_reads_plainly :: proc(t: ^testing.T) {
 	sink: typed.Sink
 	rows: [][]string
 	err := model.load(&m, transmute([]u8)string("a,b\nc,d\n"), &rows, &sink)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, len(sink.entries), 0)
 	testing.expect_value(t, rows[1][1], "d")
 	numbers_model := compiled_ok(t, &reg, [][]int, dsv.checks(.Csv, {no_header = true}))
@@ -334,8 +334,8 @@ csv_and_json_collect_the_same_codes :: proc(t: ^testing.T) {
 	reg: model.Registry
 	csv_m, e1 := model.compile(&reg, []Law, dsv.checks(.Csv))
 	json_m, e2 := model.compile(&reg, []Law, json.checks(.Json))
-	walktest.expect_nil(t, e1)
-	walktest.expect_nil(t, e2)
+	testkit.expect_nil(t, e1)
+	testkit.expect_nil(t, e2)
 	cases := [?]Cell{
 		{"f", "0.10000000000000000001", "0.10000000000000000001"},
 		{"f", "0.1000000000000001", "0.1000000000000001"},
@@ -382,9 +382,9 @@ csv_model_round_trips_a_quote :: proc(t: ^testing.T) {
 	m := compiled_ok(t, nil, []Patch_Row, dsv.checks(.Csv))
 	rows := []Patch_Row{{id = 1, name = `say "hi"`}}
 	text, err := model.dump(&m, &rows)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	back: []Patch_Row
-	walktest.expect_nil(t, model.load(&m, text, &back))
+	testkit.expect_nil(t, model.load(&m, text, &back))
 	testing.expect(t, len(back) == 1 && back[0].name == `say "hi"` && model.was_set(&m, Patch_Row, back[0].set, "name"))
 }
 
@@ -524,7 +524,7 @@ csv_model_patch_of_a_record_misses_nothing :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	m := compiled_ok(t, nil, Patch_Row, dsv.checks(.Csv))
 	row := Patch_Row{id = 4}
-	walktest.expect_nil(t, model.patch(&m, &row, transmute([]u8)string("name\nada\n")))
+	testkit.expect_nil(t, model.patch(&m, &row, transmute([]u8)string("name\nada\n")))
 	testing.expect(t, row.name == "ada" && row.id == 4 && !model.was_set(&m, Patch_Row, row.set, "id"))
 	refused, is_typed := model.patch(&m, &row, transmute([]u8)string("id,name\n,bo\n")).(core.Typed_Error)
 	testing.expect(t, is_typed && refused.kind == .Wrong_Kind)
@@ -560,14 +560,14 @@ model_dump_under_every_option_loads_back :: proc(t: ^testing.T) {
 		source := []Law_Row{{id = 9, kind = "k", role = "boss", n = 3}}
 		source_text, _ := model.dump(&m, &source)
 		loaded_rows: []Law_Row
-		walktest.expect_nil(t, model.load(&m, source_text, &loaded_rows))
+		testkit.expect_nil(t, model.load(&m, source_text, &loaded_rows))
 		values := [?][]Law_Row{{{id = 1, role = "member", n = 7}, {id = 2, kind = "k", role = "boss", n = 3, note = "x"}}, loaded_rows}
 		for &rows in values {
 			plain, _ := model.dump(&m, &rows)
 			for bits in 0 ..< 8 {
 				opts := model.Dump_Opts{exclude_unset = bits & 1 != 0, exclude_none = bits & 2 != 0, exclude_defaults = bits & 4 != 0}
 				text, err := model.dump(&m, &rows, opts)
-				walktest.expect_nil(t, err)
+				testkit.expect_nil(t, err)
 				back: []Law_Row
 				if !testing.expectf(t, model.load(&m, text, &back) == nil, "%v under %v does not load back: %s", names[f], opts, text) {
 					continue

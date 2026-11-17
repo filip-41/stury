@@ -6,7 +6,7 @@ import "core:testing"
 import core "../../core"
 import dsv ".."
 import gen "gen"
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 Case :: struct {
 	text:   string,
@@ -74,10 +74,10 @@ TSV_CASES := []Case {
 @(test)
 faults_at_their_byte :: proc(t: ^testing.T) {
 	for c in CSV_CASES {
-		expect_fault(t, c, walktest.fault_of(dsv.validate(transmute([]u8)c.text, .Csv)), tsv = false)
+		expect_fault(t, c, testkit.fault_of(dsv.validate(transmute([]u8)c.text, .Csv)), tsv = false)
 	}
 	for c in TSV_CASES {
-		expect_fault(t, c, walktest.fault_of(dsv.validate(transmute([]u8)c.text, .Tsv)), tsv = true)
+		expect_fault(t, c, testkit.fault_of(dsv.validate(transmute([]u8)c.text, .Tsv)), tsv = true)
 	}
 }
 
@@ -96,7 +96,7 @@ escapes_at_every_block_byte :: proc(t: ^testing.T) {
 				append(&b, 'a')
 			}
 			append(&b, '\\', escape, '\n')
-			got := walktest.fault_of(dsv.validate(b[:], .Tsv))
+			got := testkit.fault_of(dsv.validate(b[:], .Tsv))
 			fault, bad := got.?
 			if valid < 5 {
 				testing.expectf(t, !bad, "backslash at %d escapes %#x: %v", 2 + k, escape, fault)
@@ -112,12 +112,12 @@ escapes_at_every_block_byte :: proc(t: ^testing.T) {
 		append(&b, 'a')
 	}
 	append(&b, '\\', 't', '\n')
-	if fault, bad := walktest.fault_of(dsv.validate(b[:], .Tsv)).?; bad {
+	if fault, bad := testkit.fault_of(dsv.validate(b[:], .Tsv)).?; bad {
 		testing.expectf(t, false, "escape split across a block: %v", fault)
 	}
 	// A backslash in a comment line is text.
 	comment := "h\n#a\\xb\n1\n"
-	if fault, bad := walktest.fault_of(dsv.validate(transmute([]u8)comment, .Tsv, {comment = '#'})).?; bad {
+	if fault, bad := testkit.fault_of(dsv.validate(transmute([]u8)comment, .Tsv, {comment = '#'})).?; bad {
 		testing.expectf(t, false, "backslash in a comment line: %v", fault)
 	}
 }
@@ -169,7 +169,7 @@ faults_at_every_offset :: proc(t: ^testing.T) {
 					return
 				}
 				// The walk's verdict is `validate`'s, and it ends at the fault or at the text's end.
-				hi, fault := walk(buf[:], tsv, false, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook)
+				hi, fault := walk(buf[:], tsv, false, &struct {}{}, &core.Hook_Regs{}, testkit.regs_hook)
 				end := c.offset + u64(k) if c.kind != nil else u64(len(buf))
 				if !expect_fault(t, c, fault, k, tsv) || !testing.expectf(t, hi == end, "%q shifted %d: hi %d, want %d", c.text, k, hi, end) {
 					return
@@ -180,16 +180,16 @@ faults_at_every_offset :: proc(t: ^testing.T) {
 }
 
 validate :: proc(src: []u8, tsv: bool) -> Maybe(core.Fault) {
-	return walktest.fault_of(dsv.validate(src, .Tsv)) if tsv else walktest.fault_of(dsv.validate(src, .Csv))
+	return testkit.fault_of(dsv.validate(src, .Tsv)) if tsv else testkit.fault_of(dsv.validate(src, .Csv))
 }
 
 // Runs `validate` and `walk` on `src` from a copy at the end of `fence`'s readable page, with the page after it
 // unreadable, so a load past the text faults in every build. Returns the walk's fault when the two differ, else
 // `validate`'s.
-validate_fenced :: proc(fence: ^walktest.Fence, src: []u8, tsv: bool) -> Maybe(core.Fault) {
-	fenced := walktest.fence_copy(fence, src)
+validate_fenced :: proc(fence: ^testkit.Fence, src: []u8, tsv: bool) -> Maybe(core.Fault) {
+	fenced := testkit.fence_copy(fence, src)
 	verdict := validate(fenced, tsv)
-	if _, fault := walk(fenced, tsv, false, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook); fault != verdict {
+	if _, fault := walk(fenced, tsv, false, &struct {}{}, &core.Hook_Regs{}, testkit.regs_hook); fault != verdict {
 		return fault
 	}
 	return verdict
@@ -202,8 +202,8 @@ prefixes_fenced :: proc(t: ^testing.T) {
 	context.random_generator = rand.default_random_generator(&state)
 	text: [dynamic]u8
 	defer delete(text)
-	fence := walktest.fence_init()
-	defer walktest.unfence(&fence)
+	fence := testkit.fence_init()
+	defer testkit.unfence(&fence)
 	for round in 0 ..< 400 {
 		tsv := round % 2 == 1
 		gen.text(&text, tsv)
@@ -293,13 +293,13 @@ tolerances :: proc(t: ^testing.T) {
 				strict, got, fault: Maybe(core.Fault)
 				hi: u64
 				if c.tsv {
-					strict = walktest.fault_of(dsv.validate(buf[:], .Tsv, {no_header = c.no_header, comment = comment}))
-					got = walktest.fault_of(dsv.validate(buf[:], .Tsv, opts))
-					hi, fault = dsv.walk(buf[:], 0, .Tsv, opts, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook)
+					strict = testkit.fault_of(dsv.validate(buf[:], .Tsv, {no_header = c.no_header, comment = comment}))
+					got = testkit.fault_of(dsv.validate(buf[:], .Tsv, opts))
+					hi, fault = dsv.walk(buf[:], 0, .Tsv, opts, &struct {}{}, &core.Hook_Regs{}, testkit.regs_hook)
 				} else {
-					strict = walktest.fault_of(dsv.validate(buf[:], .Csv, {no_header = c.no_header, comment = comment}))
-					got = walktest.fault_of(dsv.validate(buf[:], .Csv, opts))
-					hi, fault = dsv.walk(buf[:], 0, .Csv, opts, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook)
+					strict = testkit.fault_of(dsv.validate(buf[:], .Csv, {no_header = c.no_header, comment = comment}))
+					got = testkit.fault_of(dsv.validate(buf[:], .Csv, opts))
+					hi, fault = dsv.walk(buf[:], 0, .Csv, opts, &struct {}{}, &core.Hook_Regs{}, testkit.regs_hook)
 				}
 				if !expect_fault(t, c, got, k, c.tsv) || !expect_fault(t, c, fault, k, c.tsv) || !testing.expectf(t, c.kind != nil || strict != nil, "%q: strict takes it", c.text) {
 					return
@@ -316,7 +316,7 @@ tolerances :: proc(t: ^testing.T) {
 // A ragged record's missing columns make no tokens, and a bare quote is a byte of its cell, so the cell is not quoted.
 @(test)
 tolerated_tokens :: proc(t: ^testing.T) {
-	log := new(walktest.Log)
+	log := new(testkit.Log)
 	defer free(log)
 	Tokens :: struct {
 		text:   string,
@@ -329,7 +329,7 @@ tolerated_tokens :: proc(t: ^testing.T) {
 		{"a\"b,c\n1,\"2\"", {.Bare_Quote}, {{0, 0, .Array, .Value, 0}, {6, 0, .Object, .Value, 0}, {0, 3, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {4, 1, .Plain, .Key, 0}, {8, 3, .Plain, .Value, core.SPELLING_DECODE | core.SPELLING_QUOTED}, {11, 0, .End, .Value, 0}, {11, 0, .End, .Value, 0}}},
 	}) {
 		log^ = {}
-		hi, fault := dsv.walk(transmute([]u8)c.text, 0, .Csv, {tolerate = c.tol}, log, &core.Hook_Regs{}, walktest.log_hook)
+		hi, fault := dsv.walk(transmute([]u8)c.text, 0, .Csv, {tolerate = c.tol}, log, &core.Hook_Regs{}, testkit.log_hook)
 		testing.expectf(t, fault == nil && hi == u64(len(c.text)), "%q: %d %v", c.text, hi, fault)
 		testing.expectf(t, slice.equal(log.tokens[:log.n], c.tokens), "%q: %v", c.text, log.tokens[:log.n])
 	}

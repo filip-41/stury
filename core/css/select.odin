@@ -255,7 +255,7 @@ next_node :: #force_inline proc(m: ^Matcher, it: ^Children) -> (Frame, bool) {
 @(private)
 next_built :: proc(it: ^Children) -> (Frame, bool) {
 	for int(it.i) < len(it.obj.keys) {
-		if it.obj.keys[it.i] == core.MARKUP_TEXT {
+		if _, _, is_attribute := core.member_attribute(it.obj.keys[it.i], it.obj.vals[it.i]); is_attribute || it.obj.keys[it.i] == core.MARKUP_TEXT {
 			it.i += 1
 			continue
 		}
@@ -466,6 +466,13 @@ test :: proc(m: ^Matcher, t: Test, f: i32) -> bool {
 			}
 			buf: [256]u8
 			return n.spelling & core.SPELLING_DECODE != 0 && len(token_string(v.doc, n, buf[:])) == 0
+		case ^core.Object:
+			for k, i in v.keys {
+				if _, _, is_attribute := core.member_attribute(k, v.vals[i]); !is_attribute {
+					return false
+				}
+			}
+			return true
 		case string:
 			return len(v) == 0
 		case nil:
@@ -515,6 +522,14 @@ attribute :: proc(m: ^Matcher, t: Test, f: Frame) -> bool {
 		for name, i in written.keys {
 			if names_equal(m.fold, name, want) {
 				have, _ := written.vals[i].(string)
+				return t.op == .Exists || value_matches(t, have, text(m, t.value))
+			}
+		}
+		return false
+	}
+	if o, is_built := core.plain(v).(^core.Object); is_built {
+		for k, i in o.keys {
+			if name, have, is_attribute := core.member_attribute(k, o.vals[i]); is_attribute && names_equal(m.fold, name, want) {
 				return t.op == .Exists || value_matches(t, have, text(m, t.value))
 			}
 		}

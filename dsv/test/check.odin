@@ -8,7 +8,7 @@ import typed "../../core/typed"
 import schema "../../core/schema"
 import dsv ".."
 import json "../../json"
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // The check of a delimited text and document against a schema: each cell reads as the kind its leaf allows, an empty cell
 // is an absent member, and one schema judges the same records alike in JSON, JSON5, CSV and TSV.
@@ -434,12 +434,12 @@ check_from_dsv_names :: proc(t: ^testing.T) {
 @(test)
 a_plan_of_a_description_reads_csv :: proc(t: ^testing.T) {
 	s, err := json.load_schema(transmute([]u8)string(`{"type": "array", "items": {"properties": {"a": {"type": "integer"}}}}`), .Json)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer json.destroy(s)
 	plan, built := dsv.plan_of(s.description, reads = dsv.checks(.Csv).reads)
-	walktest.expect_nil(t, built)
+	testkit.expect_nil(t, built)
 	defer dsv.destroy(&plan)
 	testing.expect(t, plan.read != nil && plan.marshal != nil)
 	_, empty := dsv.plan_of(&rules.Description{})
-	walktest.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
+	testkit.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 }

@@ -2,12 +2,9 @@
 
 How to use `stury:json`, `stury:dsv`, `stury:toml`, `stury:yaml`, `stury:xml`, `stury:html` and `stury:cbor`, with
 snippets from the programs in [examples/](../examples). A program imports the package of its format and calls everything
-through it. Each public name's doc comment is its contract, and
-[API.txt](../API.txt) lists the names of the format packages, then the names a format's author reads.
-[API_SHARED.txt](../API_SHARED.txt) lists the public names that only the packages of this repository use. The files in this
-directory describe one part each: [document.md](document.md), [paths.md](paths.md), [typed.md](typed.md),
-[writer.md](writer.md) and [records.md](records.md), and two describe formats: [markup.md](markup.md) XML and HTML, and
-[binary.md](binary.md) CBOR.
+through it. Each public name's doc comment is its contract. The files in this directory describe one part each:
+[document.md](document.md), [paths.md](paths.md), [typed.md](typed.md), [writer.md](writer.md) and
+[records.md](records.md), and two describe formats: [markup.md](markup.md) XML and HTML, and [binary.md](binary.md) CBOR.
 
 ## Requirements
 
@@ -119,8 +116,15 @@ class names only a syntax character (`^$\.*+?()[]{}|`) or `/`, and inside a clas
 refuses the schema at bind: `invalid escape \& at offset 1`. Look-behind (`(?<=`, `(?<!`) and back references (`\1`) are refused
 there too: the search does not backtrack, which both need. `format: "regex"` accepts them when a back reference names a group
 the pattern has, as it asks only that the text is a regular expression, and the jq functions run them. `\p{...}` holds the
-characters of Unicode 17.0. A search that runs out of memory on a very long string, or whose counted repeats nest past what the
-pattern and the text bound, is not a verdict: the check reports `pattern_undecided` and `stury check` exits 2.
+characters of Unicode 17.0. A search that runs out of memory on a very long string, or whose counted repeats sit inside a look-ahead
+or nest past what memory bounds, is not a verdict: the check reports `pattern_undecided` and `stury check` exits 2.
+
+Limits of a schema's size. A check judges at most 256 subschemas that apply to the same value one inside the other (`allOf`,
+`$ref` and `if` chains, nested `unevaluated*` sets): a schema that nests more is refused at bind as `too_deep`, and one that
+applies itself to the same value without end fails there too. Binding a schema whose subschemas combine, through `allOf` and
+`$ref`, takes time that grows with the square of the nesting depth, so a very deep schema binds slowly and is not refused for
+it. Reading a schema recurses once per nested subschema, which a build with the address sanitizer cuts off at about 1000
+levels by overflowing the thread's stack.
 
 `schema.infer` takes in values (and `schema.infer_records` the records of a text, on a runner's threads) and
 `schema.inferred` gives the description they all pass, which `schema.write` writes as JSON Schema. `schema.sample(&d, as,

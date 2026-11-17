@@ -12,7 +12,7 @@ import core "../../core"
 import typed "../../core/typed"
 import write "../../core/write"
 import records "../../core/records"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import cbor ".."
 import stury_json "../../json"
 import model "../../core/model"
@@ -20,7 +20,7 @@ import model "../../core/model"
 @(private)
 written :: proc(t: ^testing.T, doc: ^core.Document, enc: cbor.Spec, loc := #caller_location) -> []u8 {
 	text, _, err := core.write(doc, {}, cbor.as(enc), allocator = context.temp_allocator)
-	walktest.expect_nil(t, err, loc)
+	testkit.expect_nil(t, err, loc)
 	return text
 }
 
@@ -63,7 +63,7 @@ appendix_a_rows_write_back :: proc(t: ^testing.T) {
 		}
 		testing.expectf(t, cbor.validate(preferred, .Preferred) == nil, "%s: %s is not preferred", entry["hex"], hex_of(preferred))
 		back, berr := cbor.build(preferred, .Cbor)
-		walktest.expect_nil(t, berr)
+		testkit.expect_nil(t, berr)
 		// `core.equal` holds no NaN equal to itself, so a NaN row is compared by what it reads as.
 		same := core.equal(core.Node_Ref{&doc, core.ROOT}, core.Node_Ref{&back, core.ROOT}) || dumped(&doc) == dumped(&back)
 		testing.expectf(t, same, "%s: %s reads as another value", entry["hex"], hex_of(preferred))
@@ -120,11 +120,11 @@ items_are_respelled_for_the_encoding :: proc(t: ^testing.T) {
 unwritable_documents_are_refused :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	doc, err := cbor.build(hex("a2 6161 01 6161 02"), .Cbor, dups = .All)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	_, _, werr := core.write(&doc, {}, cbor.as(.Deterministic))
-	walktest.expect_kind(t, werr, core.Typed_Error_Kind.Unwritable)
+	testkit.expect_kind(t, werr, core.Typed_Error_Kind.Unwritable)
 	_, _, werr = core.write(&doc, {}, cbor.as(.Cbor))
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 }
 
 // A tag is written back before its item, and a fact CBOR has no place for is dropped and counted.
@@ -132,15 +132,15 @@ unwritable_documents_are_refused :: proc(t: ^testing.T) {
 tags_are_written_back :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	doc, err := cbor.build(hex("82 c1 1a514b67b0 d9d9f7 c2 41 01"), .Cbor)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	text, dropped, werr := core.write(&doc, {}, cbor.as(.Preferred))
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, dropped, 0)
 	testing.expect_value(t, hex_of(text), "82c11a514b67b0d9d9f701")
 	commented, cerr := stury_json.build(transmute([]u8)string(`[1, /* one */ 2]`), .Jsonc)
-	walktest.expect_nil(t, cerr)
+	testkit.expect_nil(t, cerr)
 	text, dropped, werr = core.write(&commented, {}, cbor.as(.Cbor))
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, dropped, 1)
 	testing.expect_value(t, hex_of(text), "820102")
 }
@@ -172,9 +172,9 @@ json_written_as_cbor_reads_back :: proc(t: ^testing.T) {
 			testing.expectf(t, core.equal(core.Node_Ref{&src, core.ROOT}, core.Node_Ref{&back, core.ROOT}), "%s under %v: %s reads as another value", text, enc, hex_of(bin))
 			if enc == .Cbor {
 				again, _, jerr := core.write(&back, {}, stury_json.as(.Json))
-				walktest.expect_nil(t, jerr)
+				testkit.expect_nil(t, jerr)
 				round, rerr := stury_json.build(again, .Json)
-				walktest.expect_nil(t, rerr)
+				testkit.expect_nil(t, rerr)
 				testing.expectf(t, core.equal(core.Node_Ref{&src, core.ROOT}, core.Node_Ref{&round, core.ROOT}), "%s: written back as %s", text, again)
 			}
 		}
@@ -218,7 +218,7 @@ deterministic_output_stays_deterministic :: proc(t: ^testing.T) {
 		v := Shuffled{zz = 1, a = make(map[string]int), m = "n"}
 		v.a["q"], v.a["p"] = 1, 2
 		typed_text, err := cbor.marshal(v, enc)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		testing.expectf(t, core.validate(typed_text, cbor.as(enc)) == nil, "%v: %s", enc, hex_of(typed_text))
 	}
 }
@@ -237,7 +237,7 @@ fixtures_write_back :: proc(t: ^testing.T) {
 			continue
 		}
 		doc, err := cbor.build(src, .Cbor)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		testing.expectf(t, string(written(t, &doc, .Cbor)) == string(src), "%s: .Cbor changed the bytes", name)
 		for enc in ([?]cbor.Spec{.Preferred, .Deterministic}) {
 			bin := written(t, &doc, enc)
@@ -546,12 +546,12 @@ round_trips :: proc(t: ^testing.T, want: ^Every, form: cbor.Struct_Form, $enc: c
 	testing.expectf(t, rerr == nil, "%v %v: %v", form, enc, rerr)
 	expect_every(t, &got, want, form)
 	plan, perr := cbor.plan_make(Every, enc, opts, reads = cbor.reads(.Cbor))
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	again: Every
-	walktest.expect_nil(t, cbor.unmarshal(text, enc, &again, &plan))
+	testkit.expect_nil(t, cbor.unmarshal(text, enc, &again, &plan))
 	expect_every(t, &again, want, form)
 	planned, merr := cbor.marshal(want^, &plan)
-	walktest.expect_nil(t, merr)
+	testkit.expect_nil(t, merr)
 	testing.expect_value(t, hex_of(planned), hex_of(text))
 }
 
@@ -574,12 +574,12 @@ struct_forms_read_either_way :: proc(t: ^testing.T) {
 	for text in ([?][]u8{by_name, by_place}) {
 		for form in cbor.Struct_Form {
 			got: Pair
-			walktest.expect_nil(t, cbor.unmarshal(text, .Cbor, &got, {structs = form}))
+			testkit.expect_nil(t, cbor.unmarshal(text, .Cbor, &got, {structs = form}))
 			testing.expect_value(t, got, Pair{1, "x"})
 		}
 	}
 	longer: Pair
-	walktest.expect_nil(t, cbor.unmarshal(hex("83 02 6179 f6"), .Cbor, &longer))
+	testkit.expect_nil(t, cbor.unmarshal(hex("83 02 6179 f6"), .Cbor, &longer))
 	testing.expect_value(t, longer, Pair{2, "y"})
 }
 
@@ -596,15 +596,15 @@ dumps_reach_cbor :: proc(t: ^testing.T) {
 	reg: model.Registry
 	defer model.destroy(&reg)
 	m, err := model.compile(&reg, Pet, cbor.checks(.Cbor))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	p := Pet{name = "rex", age = 3}
 	text, derr := model.dump(&m, &p, {exclude_none = true})
-	walktest.expect_nil(t, derr)
+	testkit.expect_nil(t, derr)
 	testing.expect_value(t, hex_of(text), "a2646e616d65637265786361676503")
 	by_place, perr := model.compile(&reg, Pet, cbor.checks(.Cbor, {structs = .Array}))
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	text, derr = model.dump(&by_place, &p, {exclude_none = true})
-	walktest.expect_nil(t, derr)
+	testkit.expect_nil(t, derr)
 	testing.expect_value(t, hex_of(text), "8363726578f603")
 }
 
@@ -619,7 +619,7 @@ records_write_a_sequence :: proc(t: ^testing.T) {
 	plan, _ := cbor.plan_make(Row)
 	rows := []Row{{1, "a"}, {2, "b"}}
 	text, err := records.marshal(rows, &plan, cbor.as(.Cbor), .Concatenated)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, hex_of(text), "a262696401646e616d656161a262696402646e616d656162")
 }
 
@@ -643,7 +643,7 @@ keys_read_by_their_bytes_or_by_lookup :: proc(t: ^testing.T) {
 		testing.expectf(t, cbor.unmarshal(hex(text), .Cbor, &got) == nil && got == want, "%s: %v", text, got)
 	}
 	longer: Keys
-	walktest.expect_nil(t, cbor.unmarshal(hex("a2 780161 07 6162 " + X15), .Cbor, &longer))
+	testkit.expect_nil(t, cbor.unmarshal(hex("a2 780161 07 6162 " + X15), .Cbor, &longer))
 	testing.expect_value(t, longer, Keys{a = 7, b = "xxxxxxxxxxxxxxx"})
 	strict: Keys
 	testing.expect(t, cbor.unmarshal(hex("a2 780161 07 6162 " + X15), .Preferred, &strict) != nil)
@@ -653,7 +653,7 @@ keys_read_by_their_bytes_or_by_lookup :: proc(t: ^testing.T) {
 		b: string,
 	}
 	plan, perr := cbor.plan_make(Pair)
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	pair: Pair
 	testing.expect(t, cbor.unmarshal(hex("a2 61ff 01 6162 " + X15), .Cbor, &pair, &plan) != nil)
 }

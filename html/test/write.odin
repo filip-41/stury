@@ -7,7 +7,7 @@ import write "../../core/write"
 import html ".."
 import json "../../json"
 import xml "../../xml"
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private = "file")
 Write_Case :: struct {
@@ -48,12 +48,12 @@ write_reads_back_as_written :: proc(t: ^testing.T) {
 		} else {
 			doc, err = html.build(transmute([]u8)c.src, .Document)
 		}
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		defer core.destroy(&doc)
 		node := core.ROOT
 		if c.at != "" {
 			found: bool
-			node, found = walktest.member_at(t, &doc, c.at)
+			node, found = testkit.member_at(t, &doc, c.at)
 			testing.expect(t, found)
 		}
 		opts := core.PRETTY if c.pretty else core.Write_Options{}
@@ -69,10 +69,10 @@ write_reads_back_as_written :: proc(t: ^testing.T) {
 an_html_document_is_written_as_xml_with_its_doctype :: proc(t: ^testing.T) {
 	doc, err := html.build(transmute([]u8)string("<!DOCTYPE html><!--h-->\n\n<p>x"), .Document)
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	text, dropped, werr := xml.write(&doc, .Xml)
 	defer delete(text)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, dropped, 0)
 	testing.expect_value(t, string(text), "<!DOCTYPE html>\n<!--h-->\n\n<html><head/><body><p>x</p></body></html>")
 }
@@ -91,13 +91,13 @@ unmarshal_reads_what_marshal_writes :: proc(t: ^testing.T) {
 	v: List
 	append(&v.ul.li, "a<b", "c")
 	text, err := html.marshal(v)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(text), "<ul><li>a&lt;b</li><li>c</li></ul><p>0</p>")
 	laid, lerr := html.marshal(v, write = core.PRETTY)
-	walktest.expect_nil(t, lerr)
+	testkit.expect_nil(t, lerr)
 	testing.expect_value(t, string(laid), "<ul>\n  <li>a&lt;b</li>\n  <li>c</li>\n</ul>\n<p>0</p>")
 	back: List
-	walktest.expect_nil(t, html.unmarshal(text, .Fragment, &back))
+	testkit.expect_nil(t, html.unmarshal(text, .Fragment, &back))
 	testing.expect_value(t, len(back.ul.li), 2)
 	testing.expect_value(t, back.ul.li[0], "a<b")
 	_, refused := html.marshal(struct {td: int}{})
@@ -184,13 +184,13 @@ token_write_writes_comments :: proc(t: ^testing.T) {
 a_run_writes_its_comments_on_its_ends :: proc(t: ^testing.T) {
 	src := "{\"r\": {\"ul\": {\"li\": /* l */ [1, 2] // t\n}}}"
 	doc, err := json.build(transmute([]u8)src, .Jsonc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer json.destroy(&doc)
-	node, found := walktest.member_at(t, &doc, ".r")
+	node, found := testkit.member_at(t, &doc, ".r")
 	testing.expect(t, found)
 	text, dropped, werr := html.write(&doc, .Document, {}, node)
 	defer delete(text)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, dropped, 0)
 	testing.expect_value(t, string(text), "<ul><!-- l --><li>1</li><li>2</li><!-- t --></ul>")
 }
@@ -201,9 +201,9 @@ a_run_writes_its_comments_on_its_ends :: proc(t: ^testing.T) {
 a_pretty_foot_comment_has_its_own_line_before_the_end_tag :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	doc, err := html.build(transmute([]u8)string("<div><p>1</p>\n<!-- n --></div><pre><b>x</b><!-- z --></pre>"), .Document, allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	text, _, werr := html.write(&doc, .Document, core.PRETTY, allocator = context.temp_allocator)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, string(text), "<html>\n  <head></head>\n  <body>\n    <div>\n      <p>1</p>\n      <!-- n -->\n    </div>\n    <pre><b>x</b><!-- z --></pre>\n  </body>\n</html>")
 }
 
@@ -213,11 +213,11 @@ an_empty_run_writes_its_comments_as_the_foot :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := "{\"r\": {\"ul\": {\"li\": [\n  // z\n], \"p\": 1}}}"
 	doc, err := json.build(transmute([]u8)src, .Jsonc, allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
-	node, found := walktest.member_at(t, &doc, ".r")
+	testkit.expect_nil(t, err)
+	node, found := testkit.member_at(t, &doc, ".r")
 	testing.expect(t, found)
 	text, dropped, werr := html.write(&doc, .Document, {}, node, allocator = context.temp_allocator)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, dropped, 0)
 	testing.expect_value(t, string(text), "<ul><p>1</p>\n<!-- z --></ul>")
 	w: write.Tokens

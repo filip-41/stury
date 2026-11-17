@@ -6,7 +6,7 @@ import core "../../core"
 import rules "../../core/rules"
 import typed "../../core/typed"
 import schema "../../core/schema"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import cbor ".."
 import stury_json "../../json"
 import model "../../core/model"
@@ -24,7 +24,7 @@ a_plan_checks_an_item :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
 	plan, perr := cbor.plan_make(Pair, .Cbor)
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	src := hex("a2 61 61 61 78 61 62 82 01 61 79")
 	v: Pair
 	sink: typed.Sink
@@ -36,11 +36,11 @@ a_plan_checks_an_item :: proc(t: ^testing.T) {
 	testing.expect(t, cbor.check(src, spec, &again, &plan, {sink = &other}) != nil)
 	testing.expect_value(t, len(other.entries), 2)
 	good: Pair
-	walktest.expect_nil(t, cbor.unmarshal(hex("a2 61 61 01 61 62 81 02"), spec, &good))
+	testkit.expect_nil(t, cbor.unmarshal(hex("a2 61 61 01 61 62 81 02"), spec, &good))
 	testing.expect(t, good.a == 1 && len(good.b) == 1)
 	read, rerr := cbor.plan_make(Pair, .Cbor, reads = cbor.reads(.Cbor))
-	walktest.expect_nil(t, rerr)
-	walktest.expect_nil(t, typed.unmarshal_text(hex("a1 61 61 03"), &good, Pair, &read, {}))
+	testkit.expect_nil(t, rerr)
+	testkit.expect_nil(t, typed.unmarshal_text(hex("a1 61 61 03"), &good, Pair, &read, {}))
 	testing.expect_value(t, good.a, 3)
 }
 
@@ -51,14 +51,14 @@ a_plan_of_a_description_reads_cbor :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	reg: model.Registry
 	m, compiled := model.compile(&reg, Pair, cbor.checks(.Cbor))
-	walktest.expect_nil(t, compiled)
+	testkit.expect_nil(t, compiled)
 	d, derr := model.schema(&m, .Load, context.temp_allocator)
-	walktest.expect_nil(t, derr)
+	testkit.expect_nil(t, derr)
 	plan, built := cbor.plan_of(&d, .Cbor, reads = cbor.reads(.Cbor))
-	walktest.expect_nil(t, built)
+	testkit.expect_nil(t, built)
 	testing.expect(t, plan.read != nil && plan.marshal != nil)
 	_, empty := cbor.plan_of(&rules.Description{})
-	walktest.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
+	testkit.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 }
 
 // A model loads a CBOR item, judging its rules, and refuses one that breaks them.
@@ -73,15 +73,15 @@ models_load_items :: proc(t: ^testing.T) {
 	reg: model.Registry
 	defer model.destroy(&reg)
 	m, err := model.compile(&reg, Pet, cbor.checks(.Cbor))
-	if !walktest.expect_nil(t, err) {
+	if !testkit.expect_nil(t, err) {
 		return
 	}
 	pet: Pet
-	walktest.expect_nil(t, model.load(&m, hex("a3 646e616d65 63726578 63616765 03 6474616773 82 6161 6162"), &pet))
+	testkit.expect_nil(t, model.load(&m, hex("a3 646e616d65 63726578 63616765 03 6474616773 82 6161 6162"), &pet))
 	testing.expect(t, pet.name == "rex" && pet.age == 3 && len(pet.tags) == 2 && pet.tags[1] == "b")
 	// An array reads the members by position.
 	placed: Pet
-	walktest.expect_nil(t, model.load(&m, hex("83 63726578 04 80"), &placed))
+	testkit.expect_nil(t, model.load(&m, hex("83 63726578 04 80"), &placed))
 	testing.expect(t, placed.name == "rex" && placed.age == 4 && len(placed.tags) == 0)
 	sink: typed.Sink
 	defer typed.sink_destroy(&sink)
@@ -100,12 +100,12 @@ schemas_check_items :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	bound :: proc(t: ^testing.T, text: string) -> (b: cbor.Bound_Schema, ok: bool) {
 		s, err := stury_json.load_schema(transmute([]u8)text, .Json)
-		if !walktest.expect_nil(t, err) {
+		if !testkit.expect_nil(t, err) {
 			return
 		}
 		berr: core.Error
 		b, berr = cbor.bind_schema(s, .Cbor)
-		return b, walktest.expect_nil(t, berr)
+		return b, testkit.expect_nil(t, berr)
 	}
 	unique, made := bound(t, `{"uniqueItems": true}`)
 	if !made {
@@ -135,12 +135,12 @@ schemas_check_items :: proc(t: ^testing.T) {
 	if !shaped_made {
 		return
 	}
-	walktest.expect_nil(t, schema.check(&shaped, hex("a2 626964 07 646e616d65 63616263")))
+	testkit.expect_nil(t, schema.check(&shaped, hex("a2 626964 07 646e616d65 63616263")))
 	sink: typed.Sink
 	defer typed.sink_destroy(&sink)
 	testing.expect(t, schema.check(&shaped, hex("a3 626964 00 646e616d65 6461626364 6178 f5"), &sink) != nil)
 	testing.expect_value(t, len(sink.entries), 3)
 	testing.expect(t, schema.check(&shaped, hex("a1 646e616d65 f6")) != nil)
 	// An item that is not well-formed is the walk's fault.
-	testing.expect(t, walktest.fault_of(schema.check(&shaped, hex("a2 626964 07"))) != nil)
+	testing.expect(t, testkit.fault_of(schema.check(&shaped, hex("a2 626964 07"))) != nil)
 }

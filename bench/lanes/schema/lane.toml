@@ -1,0 +1,37 @@
+[lane]
+legend = "Single thread, parse + judge per instance. GB/s: the best of {rounds} rounds of each arm's median of ten calls after two warm-ups."
+
+# Each fixture is a schema and a text of instances: a JSONL text, one instance per line, or one document. The job is
+# parse plus judge, every instance from its text to a verdict and dropped before the next, each arm with its own parser,
+# in two forms. verdict is Blaze's FastValidation, jsonschema's is_valid, boon's validate().is_ok(). errors gives every
+# error: Blaze's SimpleOutput over an Exhaustive template, jsonschema's iter_errors, boon's basic output. The schema of a
+# benchmark fixture is its schema-noformat.json, so no `format` is asserted.
+
+[arm]
+stury = { source = "stury", args = ["{sub}", "{file}", "{schema}"] }
+blaze = { source = "blaze.cc", args = ["{sub}", "{file}", "{schema}"] }
+jsonschema = { source = "rust", args = ["{sub}", "{file}", "{schema}", "jsonschema"] }
+boon = { source = "rust", args = ["{sub}", "{file}", "{schema}", "boon"] }
+
+[[group]]
+rows = [
+	{ label = "geojson", file = "jsonschema-benchmark/geojson/instances.jsonl", schema = "jsonschema-benchmark/geojson/schema-noformat.json" },
+	{ label = "openapi", file = "jsonschema-benchmark/openapi/instances.jsonl", schema = "jsonschema-benchmark/openapi/schema-noformat.json" },
+	{ label = "draft-04", file = "jsonschema-benchmark/draft-04/instances.jsonl", schema = "jsonschema-benchmark/draft-04/schema-noformat.json" },
+	{ label = "cmake-presets", file = "jsonschema-benchmark/cmake-presets/instances.jsonl", schema = "jsonschema-benchmark/cmake-presets/schema-noformat.json" },
+	{ label = "ui5-manifest", file = "jsonschema-benchmark/ui5-manifest/instances.jsonl", schema = "jsonschema-benchmark/ui5-manifest/schema-noformat.json" },
+	{ label = "helm-chart-lock", file = "jsonschema-benchmark/helm-chart-lock/instances.jsonl", schema = "jsonschema-benchmark/helm-chart-lock/schema-noformat.json" },
+	{ label = "cspell", file = "jsonschema-benchmark/cspell/instances.jsonl", schema = "jsonschema-benchmark/cspell/schema-noformat.json" },
+	{ label = "deno", file = "jsonschema-benchmark/deno/instances.jsonl", schema = "jsonschema-benchmark/deno/schema-noformat.json" },
+	{ label = "code-climate", file = "jsonschema-benchmark/code-climate/instances.jsonl", schema = "jsonschema-benchmark/code-climate/schema-noformat.json" },
+	{ label = "pulumi", file = "jsonschema-benchmark/pulumi/instances.jsonl", schema = "jsonschema-benchmark/pulumi/schema-noformat.json" },
+	{ label = "aws-cdk", file = "jsonschema-benchmark/aws-cdk/instances.jsonl", schema = "jsonschema-benchmark/aws-cdk/schema-noformat.json" },
+	{ label = "ansible-meta", file = "jsonschema-benchmark/ansible-meta/instances.jsonl", schema = "jsonschema-benchmark/ansible-meta/schema-noformat.json" },
+	{ label = "clang-format", file = "jsonschema-benchmark/clang-format/instances.jsonl", schema = "jsonschema-benchmark/clang-format/schema-noformat.json" },
+	{ label = "babelrc", file = "jsonschema-benchmark/babelrc/instances.jsonl", schema = "jsonschema-benchmark/babelrc/schema-noformat.json" },
+	{ label = "krakend", file = "jsonschema-benchmark/krakend/instances.jsonl", schema = "jsonschema-benchmark/krakend/schema-noformat.json" },
+	{ label = "logs", file = "logs.ndjson", schema = "schema/logs.schema.json" },
+	{ label = "twitter", file = "schema/twitter.json", schema = "schema/twitter.schema.json" },
+	{ label = "citm", file = "schema/citm.json", schema = "schema/citm.schema.json" },
+	{ label = "applicator", file = "schema/applicator.ndjson", schema = "schema/applicator.schema.json" },
+]

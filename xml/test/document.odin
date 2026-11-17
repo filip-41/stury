@@ -6,7 +6,7 @@ import "core:testing"
 import core "../../core"
 import json "../../json"
 import xml ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private)
 built :: proc(t: ^testing.T, text: string, opts := xml.Options{}) -> (doc: core.Document, ok: bool) {
@@ -22,14 +22,14 @@ elements_build_values_by_their_name :: proc(t: ^testing.T) {
 		return
 	}
 	defer core.destroy(&doc)
-	s, k := walktest.text_at(t, &doc, ".a.b")
+	s, k := testkit.text_at(t, &doc, ".a.b")
 	testing.expect_value(t, s, "x & y")
 	testing.expect_value(t, k, core.Kind.String)
-	_, k = walktest.text_at(t, &doc, ".a.c")
+	_, k = testkit.text_at(t, &doc, ".a.c")
 	testing.expect_value(t, k, core.Kind.Null)
-	s, _ = walktest.text_at(t, &doc, ".a.d")
+	s, _ = testkit.text_at(t, &doc, ".a.d")
 	testing.expect_value(t, s, "<z>")
-	s, _ = walktest.text_at(t, &doc, ".a.e")
+	s, _ = testkit.text_at(t, &doc, ".a.e")
 	testing.expect_value(t, s, "12")
 }
 
@@ -40,9 +40,9 @@ line_ends_in_white_space_text_read_as_lf :: proc(t: ^testing.T) {
 		return
 	}
 	defer core.destroy(&doc)
-	s, _ := walktest.text_at(t, &doc, ".r.a")
+	s, _ := testkit.text_at(t, &doc, ".r.a")
 	testing.expect_value(t, s, "\n")
-	s, _ = walktest.text_at(t, &doc, ".r.b")
+	s, _ = testkit.text_at(t, &doc, ".r.b")
 	testing.expect_value(t, s, " \n \n")
 }
 
@@ -57,9 +57,9 @@ text_between_children_is_the_text_member :: proc(t: ^testing.T) {
 	testing.expect_value(t, core.length(&doc, r), 3)
 	hash, found := core.member(&doc, r, "#text")
 	testing.expect(t, found)
-	testing.expect_value(t, walktest.node_text(t, &doc, hash), "u\nv")
+	testing.expect_value(t, testkit.node_text(t, &doc, hash), "u\nv")
 	hash, found = core.member(&doc, r, "#text", .First)
-	testing.expect_value(t, walktest.node_text(t, &doc, hash), "t")
+	testing.expect_value(t, testkit.node_text(t, &doc, hash), "t")
 }
 
 @(test)
@@ -67,17 +67,17 @@ inference_types_a_text_value_only_when_asked :: proc(t: ^testing.T) {
 	text := `<a><n>12</n><t>true</t><s> 1</s><e><!--x--></e></a>`
 	plain, _ := built(t, text)
 	defer core.destroy(&plain)
-	_, k := walktest.text_at(t, &plain, ".a.n")
+	_, k := testkit.text_at(t, &plain, ".a.n")
 	testing.expect_value(t, k, core.Kind.String)
-	_, k = walktest.text_at(t, &plain, ".a.e")
+	_, k = testkit.text_at(t, &plain, ".a.e")
 	testing.expect_value(t, k, core.Kind.Null)
 	inferred, _ := built(t, text, {infer = true})
 	defer core.destroy(&inferred)
-	_, k = walktest.text_at(t, &inferred, ".a.n")
+	_, k = testkit.text_at(t, &inferred, ".a.n")
 	testing.expect_value(t, k, core.Kind.Number)
-	_, k = walktest.text_at(t, &inferred, ".a.t")
+	_, k = testkit.text_at(t, &inferred, ".a.t")
 	testing.expect_value(t, k, core.Kind.True)
-	_, k = walktest.text_at(t, &inferred, ".a.s")
+	_, k = testkit.text_at(t, &inferred, ".a.s")
 	testing.expect_value(t, k, core.Kind.String)
 	n, _ := core.member(&inferred, core.ROOT, "a")
 	n, _ = core.member(&inferred, n, "n")
@@ -99,12 +99,12 @@ a_decoded_number_reads_by_its_digits :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	plain, _ := built(t, "<a><d>12</d><p>7.5</p></a>", {infer = true})
 	defer core.destroy(&plain)
-	p, _ := walktest.member_at(t, &doc, ".a.p")
+	p, _ := testkit.member_at(t, &doc, ".a.p")
 	f, has := core.float_value(&doc, p)
 	testing.expect(t, has)
 	testing.expect_value(t, f, 7.5)
 	testing.expect(t, core.equal(core.Node_Ref{&doc, core.ROOT}, core.Node_Ref{&plain, core.ROOT}))
-	d, _ := walktest.member_at(t, &doc, ".a.d")
+	d, _ := testkit.member_at(t, &doc, ".a.d")
 	buf: [core.HEX_ROOM]u8
 	twelve, digits, read := core.double_of(core.Node_Ref{&doc, d}, buf[:])
 	testing.expect(t, read)
@@ -124,17 +124,17 @@ attributes_are_facts_of_the_element :: proc(t: ^testing.T) {
 	it := core.attributes_of(&doc, a)
 	want := [?][2]string{{"x", "1 & 2"}, {"y", "b\nc\n"}, {"z", "t u"}}
 	for w in want {
-		name, value, found := walktest.attribute_texts(&it)
+		name, value, found := testkit.attribute_texts(&it)
 		testing.expect(t, found)
 		testing.expect_value(t, name, w[0])
 		testing.expect_value(t, value, w[1])
 	}
-	_, _, found := walktest.attribute_texts(&it)
+	_, _, found := testkit.attribute_texts(&it)
 	testing.expect_value(t, found, false)
-	v, has := walktest.attribute_text(&doc, a, "y")
+	v, has := testkit.attribute_text(&doc, a, "y")
 	testing.expect_value(t, has, true)
 	testing.expect_value(t, v, "b\nc\n")
-	_, has = walktest.attribute_text(&doc, a, "w")
+	_, has = testkit.attribute_text(&doc, a, "w")
 	testing.expect_value(t, has, false)
 }
 
@@ -170,17 +170,17 @@ an_expanded_name_matches_by_namespace_and_local_name :: proc(t: ^testing.T) {
 	feed, _ := core.member(&doc, core.ROOT, "{http://a}feed")
 	got, found := core.member(&doc, feed, "{http://a}entry")
 	testing.expect_value(t, found, true)
-	testing.expect_value(t, walktest.node_text(t, &doc, got), "1")
+	testing.expect_value(t, testkit.node_text(t, &doc, got), "1")
 	got, found = core.member(&doc, feed, "{http://x}entry")
 	testing.expect_value(t, found, true)
-	testing.expect_value(t, walktest.node_text(t, &doc, got), "2")
+	testing.expect_value(t, testkit.node_text(t, &doc, got), "2")
 	got, found = core.member(&doc, feed, "{}entry")
 	testing.expect_value(t, found, true)
-	testing.expect_value(t, walktest.node_text(t, &doc, got), "3")
+	testing.expect_value(t, testkit.node_text(t, &doc, got), "3")
 	_, found = core.member(&doc, feed, "{http://b}entry")
 	testing.expect_value(t, found, false)
 	got, found = core.member(&doc, feed, "x:entry")
-	testing.expect_value(t, walktest.node_text(t, &doc, got), "2")
+	testing.expect_value(t, testkit.node_text(t, &doc, got), "2")
 }
 
 @(test)
@@ -208,12 +208,12 @@ a_scan_answers_one_path_without_building_the_rest :: proc(t: ^testing.T) {
 	testing.expect(t, err == nil)
 	defer core.destroy(&doc)
 	testing.expect_value(t, answer.outcome, core.Presence.Found)
-	testing.expect_value(t, walktest.node_text(t, &doc, answer.node), "z")
+	testing.expect_value(t, testkit.node_text(t, &doc, answer.node), "z")
 	bad := `<a><d>z</d><e></f></a>`
 	_, _, err = xml.find(transmute([]u8)bad, .Xml, path)
-	f, walked := walktest.fault_in(err)
+	f, walked := testkit.fault_in(err)
 	testing.expect(t, walked)
-	testing.expect_value(t, walktest.rule_code(f), "xml.mismatched_tag")
+	testing.expect_value(t, testkit.rule_code(f), "xml.mismatched_tag")
 }
 
 @(test)
@@ -225,7 +225,7 @@ an_expanded_path_step_answers_from_the_built_document :: proc(t: ^testing.T) {
 	testing.expect(t, err == nil)
 	defer core.destroy(&doc)
 	testing.expect_value(t, answer.outcome, core.Presence.Found)
-	testing.expect_value(t, walktest.node_text(t, &doc, answer.node), "1")
+	testing.expect_value(t, testkit.node_text(t, &doc, answer.node), "1")
 }
 
 // An attribute fact's body is its value as written, which core slices by the fact's lead and tail, and its name and
@@ -275,7 +275,7 @@ an_attribute_far_from_its_name_is_read :: proc(t: ^testing.T) {
 			defer core.destroy(&doc)
 			a, _ := core.member(&doc, core.ROOT, "a")
 			it := core.attributes_of(&doc, a)
-			got, value, found := walktest.attribute_texts(&it)
+			got, value, found := testkit.attribute_texts(&it)
 			testing.expect(t, found)
 			testing.expect_value(t, len(got), width if text[3] == 'n' else 1)
 			testing.expect_value(t, value, "v\"w" if text[3] == 'n' else "v'w")
@@ -288,7 +288,7 @@ an_attribute_far_from_its_name_is_read :: proc(t: ^testing.T) {
 	}
 	defer core.destroy(&doc)
 	a, _ := core.member(&doc, core.ROOT, "a")
-	v, has := walktest.attribute_text(&doc, a, "k")
+	v, has := testkit.attribute_text(&doc, a, "k")
 	testing.expect(t, has)
 	testing.expect_value(t, v, "y")
 }
@@ -305,12 +305,12 @@ a_clone_keeps_the_declarations :: proc(t: ^testing.T) {
 	testing.expect(t, err == nil)
 	defer core.destroy(&copy)
 	a, _ := core.member(&copy, core.ROOT, "a")
-	testing.expect_value(t, walktest.node_text(t, &copy, a), "long replacement text")
-	v, has := walktest.attribute_text(&copy, a, "k")
+	testing.expect_value(t, testkit.node_text(t, &copy, a), "long replacement text")
+	v, has := testkit.attribute_text(&copy, a, "k")
 	testing.expect(t, has)
 	testing.expect_value(t, v, "long replacement text")
 	it := core.attributes_of(&copy, a)
-	_, value, _ := walktest.attribute_texts(&it)
+	_, value, _ := testkit.attribute_texts(&it)
 	testing.expect_value(t, value, "long replacement text")
 }
 
@@ -335,11 +335,11 @@ a_repeated_name_reads_as_an_array_of_its_elements :: proc(t: ^testing.T) {
 	_, single := c.(core.Node_Ref)
 	testing.expect(t, single)
 	text, _, err := core.write(&doc, {}, json.as(.Json), allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	want := `{"r":{"#text":["hello "," tail"],"b":["bold","x"],"c":"y"}}`
 	testing.expect_value(t, string(text), want)
 	same, jerr := json.build(transmute([]u8)want, .Json)
-	walktest.expect_nil(t, jerr)
+	testkit.expect_nil(t, jerr)
 	defer core.destroy(&same)
 	root := core.Node_Ref{&same, core.ROOT}
 	testing.expect(t, core.equal(core.Node_Ref{&doc, core.ROOT}, root))

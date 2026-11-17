@@ -7,7 +7,7 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import xml ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(test)
 declarations_of_every_kind_are_accepted :: proc(t: ^testing.T) {
@@ -68,10 +68,10 @@ entity_text_reads_as_its_replacement :: proc(t: ^testing.T) {
 		return
 	}
 	defer core.destroy(&doc)
-	s, k := walktest.text_at(t, &doc, ".a.b")
+	s, k := testkit.text_at(t, &doc, ".a.b")
 	testing.expect_value(t, s, "x & y!")
 	testing.expect_value(t, k, core.Kind.String)
-	s, _ = walktest.text_at(t, &doc, ".a.c")
+	s, _ = testkit.text_at(t, &doc, ".a.c")
 	testing.expect_value(t, s, "&")
 }
 
@@ -82,14 +82,14 @@ markup_in_replacement_text_builds_elements :: proc(t: ^testing.T) {
 		return
 	}
 	defer core.destroy(&doc)
-	s, _ := walktest.text_at(t, &doc, ".a.b")
+	s, _ := testkit.text_at(t, &doc, ".a.b")
 	testing.expect_value(t, s, "1")
-	s, _ = walktest.text_at(t, &doc, ".a.d")
+	s, _ = testkit.text_at(t, &doc, ".a.d")
 	testing.expect_value(t, s, "2")
 	a, _ := core.member(&doc, core.ROOT, "a")
 	c, found := core.member(&doc, a, "c")
 	testing.expect(t, found)
-	v, has := walktest.attribute_text(&doc, c, "k")
+	v, has := testkit.attribute_text(&doc, c, "k")
 	testing.expect_value(t, has, true)
 	testing.expect_value(t, v, "v")
 	testing.expect_value(t, core.length(&doc, a), 3)
@@ -102,7 +102,7 @@ a_parameter_entity_declares_what_follows :: proc(t: ^testing.T) {
 		return
 	}
 	defer core.destroy(&doc)
-	s, _ := walktest.text_at(t, &doc, ".a")
+	s, _ := testkit.text_at(t, &doc, ".a")
 	testing.expect_value(t, s, "from %")
 }
 
@@ -113,10 +113,10 @@ the_first_binding_of_a_name_wins :: proc(t: ^testing.T) {
 		return
 	}
 	defer core.destroy(&doc)
-	s, _ := walktest.text_at(t, &doc, ".a")
+	s, _ := testkit.text_at(t, &doc, ".a")
 	testing.expect_value(t, s, "1")
 	a, _ := core.member(&doc, core.ROOT, "a")
-	v, has := walktest.attribute_text(&doc, a, "k")
+	v, has := testkit.attribute_text(&doc, a, "k")
 	testing.expect_value(t, has, true)
 	testing.expect_value(t, v, "x")
 }
@@ -136,12 +136,12 @@ declared_defaults_fill_absent_attributes :: proc(t: ^testing.T) {
 		e, _ := core.child_at(&doc, r, n)
 		it := core.attributes_of(&doc, e)
 		for w in row {
-			name, value, found := walktest.attribute_texts(&it)
+			name, value, found := testkit.attribute_texts(&it)
 			testing.expect(t, found)
 			testing.expect_value(t, name, w[0])
 			testing.expect_value(t, value, w[1])
 		}
-		_, _, found := walktest.attribute_texts(&it)
+		_, _, found := testkit.attribute_texts(&it)
 		testing.expect_value(t, found, false)
 	}
 }
@@ -160,7 +160,7 @@ attribute_values_are_normalized_by_their_type :: proc(t: ^testing.T) {
 		name, value: string,
 	}
 	for w in ([]Want{{"t", "one two"}, {"c", " p q\t z"}, {"u", "a\nb"}, {"d", "  x y  "}}) {
-		v, has := walktest.attribute_text(&doc, a, w.name)
+		v, has := testkit.attribute_text(&doc, a, w.name)
 		testing.expect_value(t, has, true)
 		testing.expect_value(t, v, w.value)
 	}
@@ -195,10 +195,10 @@ billion_laughs_is_refused_by_the_budget :: proc(t: ^testing.T) {
 		strings.write_string(&b, "'>")
 	}
 	strings.write_string(&b, "]><a>&l9;</a>")
-	f, bad := walktest.fault_in(xml.validate(b.buf[:], .Xml))
+	f, bad := testkit.fault_in(xml.validate(b.buf[:], .Xml))
 	testing.expect_value(t, bad, true)
 	testing.expect_value(t, f.kind, core.Fault_Kind.Too_Wide)
-	testing.expect_value(t, walktest.rule_code(f), "xml.expansion")
+	testing.expect_value(t, testkit.rule_code(f), "xml.expansion")
 }
 
 @(test)
@@ -206,9 +206,9 @@ quadratic_blowup_is_refused_by_the_budget :: proc(t: ^testing.T) {
 	big := strings.repeat("x", 40_000, context.temp_allocator)
 	refs := strings.repeat("&e;", 4_000, context.temp_allocator)
 	text := strings.concatenate({"<!DOCTYPE a [<!ENTITY e '", big, "'>]><a b='", refs, "'>", refs, "</a>"}, context.temp_allocator)
-	f, bad := walktest.fault_in(xml.validate(transmute([]u8)text, .Xml))
+	f, bad := testkit.fault_in(xml.validate(transmute([]u8)text, .Xml))
 	testing.expect_value(t, bad, true)
-	testing.expect_value(t, walktest.rule_code(f), "xml.expansion")
+	testing.expect_value(t, testkit.rule_code(f), "xml.expansion")
 	testing.expect_value(t, f.kind, core.Fault_Kind.Too_Wide)
 	testing.expect(t, xml.validate(transmute([]u8)text, .Xml, {max_expansion = 1 << 30}) == nil)
 }
@@ -223,9 +223,9 @@ an_unread_parameter_entity_stops_the_declarations :: proc(t: ^testing.T) {
 	}
 	defer core.destroy(&doc)
 	a, _ := core.member(&doc, core.ROOT, "a")
-	_, has := walktest.attribute_text(&doc, a, "k")
+	_, has := testkit.attribute_text(&doc, a, "k")
 	testing.expect_value(t, has, false)
-	testing.expect_value(t, walktest.node_text(t, &doc, a), "&e;")
+	testing.expect_value(t, testkit.node_text(t, &doc, a), "&e;")
 	testing.expect_value(t, refusal("<!DOCTYPE a [<!ENTITY e 'x'>]><a>&e;</a>"), "")
 }
 
@@ -251,7 +251,7 @@ html_names_read_under_an_xhtml_public_id :: proc(t: ^testing.T) {
 		return
 	}
 	defer core.destroy(&doc)
-	s, _ := walktest.text_at(t, &doc, ".html")
+	s, _ := testkit.text_at(t, &doc, ".html")
 	testing.expect_value(t, s, " é")
 }
 
@@ -270,7 +270,7 @@ replacement_nodes_are_views_of_the_subset :: proc(t: ^testing.T) {
 	testing.expect(t, doc.nodes[b].lo < subset_hi)
 	testing.expect(t, doc.nodes[c].lo > subset_hi)
 	it := core.attributes_of(&doc, c)
-	_, value, found := walktest.attribute_texts(&it)
+	_, value, found := testkit.attribute_texts(&it)
 	testing.expect(t, found)
 	testing.expect_value(t, value, "v")
 }

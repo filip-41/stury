@@ -7,7 +7,7 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import json ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // Decoding a document's text and numbers: JSON5 forms, tolerances, the decoder's block edges, and number spellings.
 
@@ -55,7 +55,7 @@ json5 :: proc(t: ^testing.T) {
 	src := `{'a': 'x', b: 'y', \u0063: 0x10}`
 	doc, err := build(src, .Json5)
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	for w in ([]struct {
 		name: string,
 		text: string,
@@ -78,7 +78,7 @@ json5 :: proc(t: ^testing.T) {
 	core.destroy(&doc)
 
 	doc, err = build(`['\x41\0\n\'\\', "\uD83D\uDE00"]`, .Json5)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	buf: [256]u8
 	for want, i in ([]string{"A\x00\n'\\", "\U0001F600"}) {
 		s, ok := core.text(&doc, core.Node_Index(i + 1), buf[:])
@@ -87,7 +87,7 @@ json5 :: proc(t: ^testing.T) {
 	core.destroy(&doc)
 
 	doc, err = build(`[+1, .5, 5., Infinity, -Infinity, NaN, -NaN, 0x10, -0x10]`, .Json5)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	want := []struct {
 		kind: core.Number_Kind,
 		bits: u64,
@@ -129,7 +129,7 @@ tolerated :: proc(t: ^testing.T) {
 		}) {
 		doc, err := core.build(transmute([]u8)c.src, json.as(c.spec, c.opts))
 		defer core.destroy(&doc)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		buf: [64]u8
 		s, ok := core.text(&doc, 0, buf[:])
 		testing.expectf(t, ok && s == c.want, "%q: got %x want %x", c.src, transmute([]u8)s, transmute([]u8)c.want)
@@ -185,7 +185,7 @@ numbers :: proc(t: ^testing.T) {
 		long[i] = '0'
 	}
 	long_doc, long_err := build(string(long[:]), .Json)
-	walktest.expect_nil(t, long_err)
+	testkit.expect_nil(t, long_err)
 	if long_err == nil {
 		long, long_ok := core.number(&long_doc, 0)
 		testing.expect(t, long_ok && long.kind == .Wide)
@@ -244,7 +244,7 @@ numbers :: proc(t: ^testing.T) {
 number_spelling_bits :: proc(t: ^testing.T) {
 	doc, err := build(`[0, 1.5, 1e2, 0x10, Infinity, NaN, +1, .5, 5.]`, .Json5)
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	want := []json.Number_Spelling{.Json, .Json, .Json, .Hex, .Infinity, .Nan, .Decimal, .Decimal, .Decimal}
 	it := core.children(&doc, 0)
 	i := 0
@@ -394,7 +394,7 @@ key_equals_escaped :: proc(t: ^testing.T) {
 	copy(src[66:], `\n":1}`)
 	doc, err := build(string(src[:72]), .Json)
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	name: [65]u8
 	for i in 0 ..< 64 {
 		name[i] = 'k'
@@ -410,7 +410,7 @@ tolerated_key :: proc(t: ^testing.T) {
 	src := "{\"a\xffb\":0}"
 	doc, err := build(src, .Json, {tolerate = {.Invalid_Utf8}})
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	buf: [16]u8
 	k, ok := core.text(&doc, 1, buf[:])
 	testing.expect(t, ok)

@@ -4,21 +4,21 @@ package toml_tests
 import "core:fmt"
 import "core:testing"
 import core "../../core"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import toml ".."
 
 // The tokens, end and fault of the walk of `text`, with a stop at token `stop` or at every `every`th and a resume after
 // each.
 @(private)
-walk_stopping :: proc(text: string, skip: string, stop, every, _: int) -> (h: walktest.Stopping, end: string) {
+walk_stopping :: proc(text: string, skip: string, stop, every, _: int) -> (h: testkit.Stopping, end: string) {
 	src := transmute([]u8)text
-	h = walktest.Stopping{src = src, skip = skip, stop = stop, every = every}
+	h = testkit.Stopping{src = src, skip = skip, stop = stop, every = every}
 	h.tokens = make([dynamic]core.Token, 0, 256)
 	regs: core.Hook_Regs
 	cursor: toml.Cursor
-	hi, fault := toml.walk(src, 0, .Toml_1_1, {}, &h, &regs, walktest.stopping_hook, &cursor)
+	hi, fault := toml.walk(src, 0, .Toml_1_1, {}, &h, &regs, testkit.stopping_hook, &cursor)
 	for toml.can_resume(&cursor) {
-		hi, fault = toml.walk_resume(src, &cursor, .Toml_1_1, {}, &h, &regs, walktest.stopping_hook)
+		hi, fault = toml.walk_resume(src, &cursor, .Toml_1_1, {}, &h, &regs, testkit.stopping_hook)
 	}
 	return h, fmt.tprint(hi, fault, regs.a)
 }
@@ -39,7 +39,7 @@ CURSOR_TEXTS := [?]string {
 // with skipped values among them.
 @(test)
 cursor_resumes_after_any_token :: proc(t: ^testing.T) {
-	walktest.expect_resumes(t, CURSOR_TEXTS[:], {"", "b", "t", "arr", "inline", "a"}, 1, walk_stopping)
+	testkit.expect_resumes(t, CURSOR_TEXTS[:], {"", "b", "t", "arr", "inline", "a"}, 1, walk_stopping)
 }
 
 // A resume over another text, or of a cursor that holds no stop, is refused, and `destroy` frees a cursor no resume
@@ -47,19 +47,19 @@ cursor_resumes_after_any_token :: proc(t: ^testing.T) {
 @(test)
 cursor_refuses_another_text :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("a = [1, 2]\n")
-	h := walktest.Stopping{src = src, stop = 2}
+	h := testkit.Stopping{src = src, stop = 2}
 	h.tokens = make([dynamic]core.Token, 0, 16)
 	defer delete(h.tokens)
 	cursor: toml.Cursor
-	_, fault := toml.walk(src, 0, .Toml_1_1, {}, &h, nil, walktest.stopping_hook, &cursor)
+	_, fault := toml.walk(src, 0, .Toml_1_1, {}, &h, nil, testkit.stopping_hook, &cursor)
 	testing.expect(t, fault == nil && toml.can_resume(&cursor))
 	other := transmute([]u8)string("a = [1, 3]\n")
-	_, fault = toml.walk_resume(other, &cursor, .Toml_1_1, {}, &h, nil, walktest.stopping_hook)
+	_, fault = toml.walk_resume(other, &cursor, .Toml_1_1, {}, &h, nil, testkit.stopping_hook)
 	f, bad := fault.?
 	testing.expect(t, bad && f.kind == .Bad_Option && toml.can_resume(&cursor))
 	toml.destroy(&cursor)
 	testing.expect(t, !toml.can_resume(&cursor))
-	_, fault = toml.walk_resume(src, &cursor, .Toml_1_1, {}, &h, nil, walktest.stopping_hook)
+	_, fault = toml.walk_resume(src, &cursor, .Toml_1_1, {}, &h, nil, testkit.stopping_hook)
 	f, bad = fault.?
 	testing.expect(t, bad && f.kind == .Bad_Option)
 }
@@ -68,9 +68,9 @@ cursor_refuses_another_text :: proc(t: ^testing.T) {
 // whose tables are written apart and texts the walk refuses, and for several paths at once.
 @(test)
 answers_agree_with_each_answer :: proc(t: ^testing.T) {
-	run := walktest.Answer_Run {
+	run := testkit.Answer_Run {
 		each = proc(src: []u8, paths: []core.Path, _: int, early: bool, out: ^[dynamic]core.Token_Answer) -> core.Error {
-			return toml.each_answer(src, .Toml_1_1, paths, out, walktest.collect_answer, {}, {stop_early = early})
+			return toml.each_answer(src, .Toml_1_1, paths, out, testkit.collect_answer, {}, {stop_early = early})
 		},
 		iter = proc(src: []u8, paths: []core.Path, _: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
 			it := toml.answers(src, .Toml_1_1, paths, {}, {stop_early = early})
@@ -81,7 +81,7 @@ answers_agree_with_each_answer :: proc(t: ^testing.T) {
 			return it.err
 		},
 	}
-	walktest.expect_answers_agree(t, CURSOR_TEXTS[:], {".a", ".[]", ".arr[].x", "...x", ".arr[-1]", "..", "limit(2; ...x)", ".t.u.z", ".b[]"}, 1, run)
+	testkit.expect_answers_agree(t, CURSOR_TEXTS[:], {".a", ".[]", ".arr[].x", "...x", ".arr[-1]", "..", "limit(2; ...x)", ".t.u.z", ".b[]"}, 1, run)
 }
 
 // A loop that ends after the first answer frees the read with `destroy`.

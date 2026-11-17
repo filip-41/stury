@@ -10,7 +10,7 @@ import compose "../../core/compose"
 import typed "../../core/typed"
 import write "../../core/write"
 import cbor ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private)
 Set_Case :: struct {
@@ -54,7 +54,7 @@ set_through_a_path :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		path, perr := core.parse_path(c.path)
-		walktest.expect_nil(t, perr)
+		testkit.expect_nil(t, perr)
 		defer core.path_destroy(&path)
 		v: any = "two"
 		if c.raw != "" {
@@ -206,9 +206,9 @@ tags_are_edited_as_facts :: proc(t: ^testing.T) {
 	}), "Bad_Fact")
 	doc, _ := cbor.build(hex("81 01"), .Cbor)
 	list := cbor.edit_list_init(&doc, .Cbor)
-	walktest.expect_nil(t, core.set_fact(&list, element(&doc, core.ROOT, 0), .Comment, "note"))
+	testkit.expect_nil(t, core.set_fact(&list, element(&doc, core.ROOT, 0), .Comment, "note"))
 	out, dropped, err := compose.commit(&list)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expectf(t, spaced(out) == "81 01" && dropped == 1, "% 2x %d", out, dropped)
 }
 
@@ -225,6 +225,6 @@ values_from_the_document :: proc(t: ^testing.T) {
 	}), "81 01")
 	doc, _ := cbor.build(hex("d8 20 7f 61 61 ff"), .Cbor)
 	out, _, err := cbor.write(&doc, .Cbor)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, spaced(out), "d8 20 7f 61 61 ff")
 }

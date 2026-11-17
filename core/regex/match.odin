@@ -52,10 +52,10 @@ Scratch :: struct {
 	stack:  [dynamic]Entry,
 	slots:  [dynamic]int,
 	counts: [dynamic]int,
-	seen:   [dynamic]u64, // a linear search's visited pairs, one bit per instruction and position
+	seen:   [dynamic]u64, // a linear search's visited pairs, one bit per instruction and position, or the counting search's sets
 	good:   [dynamic]u64, // the pairs inside a look-ahead whose body is known to match from there
 	log:    [dynamic]u32, // the pairs first visited on the way through the look-aheads being matched
-	rows:   [dynamic]int, // under counter loops, the visited set's rows and then each loop's counts (`counted_rows`)
+	rows:   [dynamic]int, // under counter loops, the visited set's rows and then each loop's counts (`counted_rows`), or the counting search's layout
 	resumes: int, // the alternatives the last linear search resumed, which its program and text bound
 	ends:    int, // where the automaton found the last search's match to end, -1 when it did not or found none
 }
@@ -125,6 +125,9 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 			return hit, ""
 		}
 	}
+	if hit, judged := count_search(re, s, start, caps, scratch, false); judged {
+		return hit, ""
+	}
 	// The automata give where the match ends and starts and how far a search reads. The backtracker then runs only at
 	// that start, for the groups, and its visited set covers only that range.
 	lo, width, first_start, last_start := 0, len(s) + 1, 0, len(s)
@@ -168,6 +171,9 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 		words = (rows * width + 63) / 64
 		m.room = visited_room(re, rows, len(s) + 1, most)
 		if m.room < 0 && re.ecma {
+			if hit, judged := count_search(re, s, start, caps, scratch, true); judged {
+				return hit, ""
+			}
 			return false, MEMORY_ERROR
 		}
 		linear = m.room >= 0
@@ -194,9 +200,29 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 	case re.calls_or_limits:
 		return try_starts(&m, true, false)
 	case linear:
-		return try_starts(&m, false, true)
+		found, err = try_starts(&m, false, true)
+	case:
+		found, err = try_starts(&m, false, false)
 	}
-	return try_starts(&m, false, false)
+	if err != "" {
+		if hit, judged := count_search(re, s, start, caps, scratch, true); judged {
+			return hit, ""
+		}
+	}
+	return found, err
+}
+
+// The counting search's answer to a search of an ECMA program with counted repeats that reads no bounds: `after`
+// false for a program with counter loops, before the backtracker, and true for one without, once the backtracker gave
+// up. `judged` is false when it does not run or does not decide.
+@(private = "file")
+count_search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch, after: bool) -> (found, judged: bool) {
+	if len(caps) > 0 || re.counting == nil || re.counting.loops == after {
+		return
+	}
+	found, judged = counting_search(re, s, start, scratch)
+	shrink(&scratch.seen)
+	return
 }
 
 // Frees `a` when its capacity passes KEEP_BYTES, instead of keeping it for the next search.
@@ -298,7 +324,7 @@ decode :: #force_inline proc(s: string, pos: int) -> (rune, int) {
 }
 
 // Returns the position after what the Str, Any, Any_All, Class or Char_Fold instruction `ins` matches at `pos`, or -1.
-@(private = "file")
+@(private)
 step :: #force_inline proc(re: ^Regex, ins: Inst, s: string, pos: int) -> int {
 	if pos >= len(s) {
 		return -1
@@ -858,7 +884,7 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 	return false
 }
 
-@(private = "file")
+@(private)
 assert_at :: proc(m: ^Matcher, kind: Assert_Kind, pos: int) -> bool {
 	s := m.s
 	switch kind {

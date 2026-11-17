@@ -8,7 +8,7 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import json ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private)
 GOLDEN :: #load("golden/json.txt")
@@ -18,7 +18,7 @@ golden_answers :: proc(t: ^testing.T) {
 	files := make([dynamic]runtime.Load_Directory_File, 0, 512)
 	defer delete(files)
 	append(&files, ..#load_directory("conformance/JSONTestSuite/test_parsing"))
-	for dir in walktest.JSON5_TESTS {
+	for dir in testkit.JSON5_TESTS {
 		append(&files, ..dir[:])
 	}
 	suite_lines, marked := 0, 0
@@ -135,11 +135,11 @@ expect_answer :: proc(t: ^testing.T, src: []u8, spec: json.Spec, kind: core.Faul
 validate_spec :: proc(src: []u8, spec: json.Spec) -> (core.Fault, bool) {
 	switch spec {
 	case .Json:
-		return walktest.fault_of(json.validate(src, .Json)).?
+		return testkit.fault_of(json.validate(src, .Json)).?
 	case .Jsonc:
-		return walktest.fault_of(json.validate(src, .Jsonc)).?
+		return testkit.fault_of(json.validate(src, .Jsonc)).?
 	case .Json5:
-		return walktest.fault_of(json.validate(src, .Json5)).?
+		return testkit.fault_of(json.validate(src, .Json5)).?
 	}
 	return {}, true
 }

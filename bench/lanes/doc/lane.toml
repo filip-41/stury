@@ -1,0 +1,13 @@
+[lane]
+legend = "GB/s is the source's bytes over time: the best of {rounds} rounds of each arm's median of ten calls after two warm-ups. RSS is the median over the rounds of the child's peak."
+
+[arm]
+stury = { source = "stury" }
+yyjson = { source = "yyjson.c", files = ["*.json"] }
+simdjson = { source = "simdjson.cpp", files = ["*.json"] }
+sonic = { source = "rust", files = ["*.json"] }
+
+[[group]]
+rows = ["logs.json", "citm_catalog.json", "table.csv", "logs.jsonc", "logs.json5"]
+rss = true
+variant = [{ title = "build", sub = "build" }, { title = "read", sub = "read" }, { title = "key", sub = "key" }]

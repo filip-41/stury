@@ -6,7 +6,7 @@ import typed "../../typed"
 import dsv "../../../dsv"
 import json "../../../json"
 import model ".."
-import walktest "../../../walktest"
+import testkit "../../../testkit"
 
 @(private = "file")
 Pair :: struct {
@@ -54,7 +54,7 @@ compiled :: proc(t: ^testing.T) -> (m: model.Model(Outer), reg: model.Registry) 
 	_ = model.register(&reg, Outer, outer_named)
 	err: core.Error
 	m, err = model.compile(&reg, Outer, json.checks(.Json))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	return
 }
 
@@ -146,8 +146,8 @@ csv_rows_run_the_validators_as_json_objects_do :: proc(t: ^testing.T) {
 	_ = model.register(&reg, Account, no_user_name_password)
 	csv_m, e1 := model.compile(&reg, []Account, dsv.checks(.Csv))
 	json_m, e2 := model.compile(&reg, []Account, json.checks(.Json))
-	walktest.expect_nil(t, e1)
-	walktest.expect_nil(t, e2)
+	testkit.expect_nil(t, e1)
+	testkit.expect_nil(t, e2)
 	sink: typed.Sink
 	rows: []Account
 	_ = model.load(&csv_m, transmute([]u8)string("user,pass\nada,ada\nbo,secret\nzed,hunter\n"), &rows, &sink)
@@ -202,7 +202,7 @@ a_missing_member_does_not_hide_the_validators_of_the_others :: proc(t: ^testing.
 	reg: model.Registry
 	_ = model.register(&reg, Req, "b", b_not_x)
 	m, err := model.compile(&reg, Req, json.checks(.Json))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	v: Req
 	sink: typed.Sink
 	_ = model.load(&m, transmute([]u8)string(`{"b":"x"}`), &v, &sink)
@@ -231,7 +231,7 @@ an_absent_optional_member_runs_no_validator :: proc(t: ^testing.T) {
 	reg: model.Registry
 	_ = model.register(&reg, Optional, "a", ran)
 	m, err := model.compile(&reg, Optional, json.checks(.Json))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	cases := [2][2]string{{`{"b":1}`, ""}, {`{"a":2,"b":1}`, "Custom(ran)/a;"}}
 	for c in cases {
 		text, want := c[0], c[1]

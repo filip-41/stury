@@ -9,7 +9,7 @@ import core "../../core"
 import write "../../core/write"
 import json "../../json"
 import xml ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // Writes the XML text `src` with `opts`, and returns the text.
 @(private = "file")
@@ -42,26 +42,26 @@ an_xml_document_is_written_as_it_stands :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := "<?xml version=\"1.0\"?>\n<!DOCTYPE r [<!ENTITY e \"E\">]>\n<!--c0--><?p0 x?>\n<r a='1&amp;' xmlns:q=\"u\"><!--c1--><q:e b=\"&e;\"/><!--c2-->\n  <n>5 &e; <![CDATA[<]]></n><m>t1<!--m--><b/>  t2</m><c><!--y--></c></r><!--c4-->\n<?p1?>"
 	got, err := rewritten(src)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, got, "<?xml version=\"1.0\"?>\n<!DOCTYPE r [<!ENTITY e \"E\">]>\n<!--c0-->\n<?p0 x?>\n<r a='1&amp;' xmlns:q=\"u\"><!--c1--><q:e b=\"&e;\"/><!--c2--><n>5 &e; <![CDATA[<]]></n><m>t1<!--m--><b/>  t2</m><c><!--y--></c></r> <!--c4-->\n<?p1?>")
 	again, aerr := rewritten(got)
-	walktest.expect_nil(t, aerr)
+	testkit.expect_nil(t, aerr)
 	testing.expect_value(t, again, got)
 	pretty, perr := rewritten("<r><a><b>1</b><b>2</b></a><m>x<b/></m></r>", core.PRETTY)
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	testing.expect_value(t, pretty, "<r>\n  <a>\n    <b>1</b>\n    <b>2</b>\n  </a>\n  <m>x<b/></m>\n</r>")
 	declared, derr := rewritten("<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"yes\"?><r/>", core.PRETTY)
-	walktest.expect_nil(t, derr)
+	testkit.expect_nil(t, derr)
 	testing.expect_value(t, declared, "<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<r/>")
 	// The declaration is layout, as a style is, so a format with no place for it drops none.
 	doc, berr := xml.build(transmute([]u8)string("<?xml version=\"1.0\"?><r>1</r>"), .Xml)
-	walktest.expect_nil(t, berr)
+	testkit.expect_nil(t, berr)
 	defer xml.destroy(&doc)
 	_, dropped, jerr := core.write(&doc, {}, json.as(.Json), allocator = context.temp_allocator)
-	walktest.expect_nil(t, jerr)
+	testkit.expect_nil(t, jerr)
 	testing.expect_value(t, dropped, 0)
 	escaped, eerr := rewritten("<r><a>xé</a><b>ü</b></r>", {ascii = true})
-	walktest.expect_nil(t, eerr)
+	testkit.expect_nil(t, eerr)
 	testing.expect_value(t, escaped, "<r><a>x&#xe9;</a><b>&#xfc;</b></r>")
 }
 
@@ -71,13 +71,13 @@ an_xml_document_is_written_as_it_stands :: proc(t: ^testing.T) {
 a_compact_foot_comment_after_an_element_stays_a_foot :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	got, err := rewritten("<r>\n<a>1</a>\n<!-- f -->\n</r>")
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, got, "<r><a>1</a>\n<!-- f --></r>")
 	inline, ierr := rewritten("<r><a>1</a> <!-- i -->\n<!-- f -->\n</r>")
-	walktest.expect_nil(t, ierr)
+	testkit.expect_nil(t, ierr)
 	testing.expect_value(t, inline, "<r><a>1</a><!-- i -->\n<!-- f --></r>")
 	mixed, merr := rewritten("<r><a>1</a>t<!-- f --></r>")
-	walktest.expect_nil(t, merr)
+	testkit.expect_nil(t, merr)
 	testing.expect_value(t, mixed, "<r><a>1</a>t<!-- f --></r>")
 }
 
@@ -88,14 +88,14 @@ a_json_document_is_written_as_elements :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	got, dropped, err := from_json(`// head
 {"r": {"a": [1, true], "b": null, "#text": " ", "c": {"d": "<&>\r\"", "#text": "x"}, "é": "é"}}`)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, dropped, 0)
 	testing.expect_value(t, got, "<!-- head -->\n\n<r><a>1</a><a>true</a><b/>&#x20;<c><d>&lt;&amp;&gt;&#xd;\"</d>x</c><é>é</é></r>")
 	ascii, _, aerr := from_json(`{"r": "é"}`, {ascii = true})
-	walktest.expect_nil(t, aerr)
+	testkit.expect_nil(t, aerr)
 	testing.expect_value(t, ascii, "<r>&#xe9;</r>")
 	back, berr := rewritten(got)
-	walktest.expect_nil(t, berr)
+	testkit.expect_nil(t, berr)
 	testing.expect_value(t, back, got)
 	for refused in ([]string{`[1]`, `{"a": 1, "b": 2}`, `{"a": [1]}`, `{"r": {"a": [[1]]}}`, `{"r": {"a": []}}`, `{"r": {"a": [/* z */]}}`, `{"r": {}}`, `{"r": ""}`, `{"r": {"#text": "x"}}`, `{"a:b": 1}`, `{"1a": 1}`, `{"r": "\u0001"}`}) {
 		_, _, rerr := from_json(refused)
@@ -103,10 +103,10 @@ a_json_document_is_written_as_elements :: proc(t: ^testing.T) {
 		testing.expectf(t, typed_err && (e.kind == .Unwritable || e.kind == .Unsupported), "%s: %v", refused, rerr)
 	}
 	_, cut, cerr := from_json("{\"r\": 1 /* a -- b */}")
-	walktest.expect_nil(t, cerr)
+	testkit.expect_nil(t, cerr)
 	testing.expect_value(t, cut, 1)
 	run, run_dropped, run_err := from_json("{\"r\": {\"a\": /* l */ [1, 2] // t\n}}")
-	walktest.expect_nil(t, run_err)
+	testkit.expect_nil(t, run_err)
 	testing.expect_value(t, run_dropped, 0)
 	testing.expect_value(t, run, "<r><!-- l --><a>1</a><a>2</a><!-- t -->\n</r>")
 }
@@ -117,19 +117,19 @@ a_json_document_is_written_as_elements :: proc(t: ^testing.T) {
 a_grouped_value_is_written_as_its_elements :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	doc, err := xml.build(transmute([]u8)string(`<r>a<b>1</b>c<b>2</b></r>`), .Xml)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer xml.destroy(&doc)
 	value, _, verr := core.write(&doc, {}, json.as(.Json), allocator = context.temp_allocator)
-	walktest.expect_nil(t, verr)
+	testkit.expect_nil(t, verr)
 	testing.expect_value(t, string(value), `{"r":{"#text":["a","c"],"b":["1","2"]}}`)
 	got, _, gerr := from_json(string(value))
-	walktest.expect_nil(t, gerr)
+	testkit.expect_nil(t, gerr)
 	testing.expect_value(t, got, "<r>ac<b>1</b><b>2</b></r>")
 	back, berr := xml.build(transmute([]u8)got, .Xml)
-	walktest.expect_nil(t, berr)
+	testkit.expect_nil(t, berr)
 	defer xml.destroy(&back)
 	again, _, aerr := core.write(&back, {}, json.as(.Json), allocator = context.temp_allocator)
-	walktest.expect_nil(t, aerr)
+	testkit.expect_nil(t, aerr)
 	testing.expect_value(t, string(again), `{"r":{"#text":"ac","b":["1","2"]}}`)
 	_, _, rerr := from_json(`{"r": {"#text": [], "b": 1}}`)
 	e, refused := rerr.(core.Typed_Error)
@@ -141,21 +141,21 @@ attributes_read_as_members_write_back_as_attributes :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	doc, err := xml.build(transmute([]u8)string(`<r><a href="x" id="1">y</a><a href="z"/><b c="d">t<i>u</i></b></r>`), .Xml)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer xml.destroy(&doc)
 	members := core.attributes_as_members(core.Node_Ref{&doc, core.ROOT})
 	text, jerr := write.write_value(members, json.as(.Json))
-	walktest.expect_nil(t, jerr)
+	testkit.expect_nil(t, jerr)
 	testing.expect_value(t, string(text), `{"r":{"a":[{"@href":"x","@id":"1","#text":"y"},{"@href":"z"}],"b":{"@c":"d","#text":"t","i":"u"}}}`)
 	back, xerr := write.write_value(core.members_as_attributes(members), xml.as(.Xml))
-	walktest.expect_nil(t, xerr)
+	testkit.expect_nil(t, xerr)
 	testing.expect_value(t, string(back), `<r><a href="x" id="1">y</a><a href="z"/><b c="d">t<i>u</i></b></r>`)
 	r, root := core.new_object(), core.new_object()
 	core.object_append(r, "@id", f64(1.5))
 	core.object_append(r, "@on", true)
 	core.object_append(root, "r", r)
 	scalars, serr := write.write_value(core.members_as_attributes(root), xml.as(.Xml))
-	walktest.expect_nil(t, serr)
+	testkit.expect_nil(t, serr)
 	testing.expect_value(t, string(scalars), `<r id="1.5" on="true"/>`)
 }
 

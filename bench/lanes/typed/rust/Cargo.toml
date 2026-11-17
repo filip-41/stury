@@ -1,0 +1,17 @@
+[package]
+name = "typed-rust"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "types.rs"
+
+[[bin]]
+name = "typed-rust"
+path = "main.rs"
+
+[dependencies]
+timing.workspace = true
+sonic-rs.workspace = true
+serde.workspace = true
+serde_json.workspace = true

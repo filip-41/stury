@@ -9,7 +9,7 @@ import "core:unicode/utf8"
 import core "../../core"
 import write "../../core/write"
 import json ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // The JSON string writer against a model that goes one byte at a time.
 
@@ -292,7 +292,7 @@ strings_after_strings_keep_every_byte :: proc(t: ^testing.T) {
 a_refusing_stream_fails_the_write :: proc(t: ^testing.T) {
 	spill: [write.ROOM_MAX]u8 = ---
 	out: write.Out
-	write.init(&out, &spill, stream = io.Stream{procedure = walktest.refusing_stream})
+	write.init(&out, &spill, stream = io.Stream{procedure = testkit.refusing_stream})
 	s := make([]u8, 200_000)
 	defer delete(s)
 	slice.fill(s, 'a')
@@ -304,19 +304,19 @@ a_refusing_stream_fails_the_write :: proc(t: ^testing.T) {
 // A string that ends at an unmapped page is written whole at every length: no read passes its last byte.
 @(test)
 strings_at_the_end_of_a_page :: proc(t: ^testing.T) {
-	fence := walktest.fence_init()
-	defer walktest.unfence(&fence)
+	fence := testkit.fence_init()
+	defer testkit.unfence(&fence)
 	body := make([]u8, 400, context.temp_allocator)
 	for &b, i in body {
 		b = 'a' if i % 50 != 49 else '"'
 	}
 	for n in 0 ..< len(body) {
-		s := string(walktest.fence_copy(&fence, body[:n]))
+		s := string(testkit.fence_copy(&fence, body[:n]))
 		for opts in ([?]core.Write_Options{{}, {ascii = true}, {escape_html = true}, {escape_del = true}}) {
 			text, err := json.marshal(s, write = opts, allocator = context.temp_allocator)
-			walktest.expect_nil(t, err)
+			testkit.expect_nil(t, err)
 			doc, derr := json.build(text, .Json)
-			walktest.expect_nil(t, derr)
+			testkit.expect_nil(t, derr)
 			back, ok := core.text_clone(&doc, core.ROOT, context.temp_allocator)
 			core.destroy(&doc)
 			testing.expect(t, ok && back == s)
@@ -335,7 +335,7 @@ a_sequence_cut_at_a_block_end :: proc(t: ^testing.T) {
 				slice.fill(text, 'a')
 				text[64 * blocks - 1 + shift] = lead
 				_, err := json.marshal(string(text), write = {}, allocator = context.temp_allocator)
-				walktest.expect_kind(t, err, core.Typed_Error_Kind.Invalid_Utf8)
+				testkit.expect_kind(t, err, core.Typed_Error_Kind.Invalid_Utf8)
 			}
 		}
 	}

@@ -458,7 +458,7 @@ significand is scaled by a power of ten from the 128-bit table, the integral par
 candidate, and the 17th digit is read off the fraction when the candidate does not read back.
 
 - The power-of-ten significands are `POW10_SIG` (`zmij_tables.odin`), the 128-bit floor of 10^k for -342 <= k <= 341,
-  which `tools/zmij_tables.py` writes with exact integer arithmetic.
+  which `tools/generators/zmij_tables.py` writes with exact integer arithmetic.
 - `EXP_SHIFT` (`zmij_tables.odin`, from the same script) holds the shift the scaling needs for each biased exponent of a
   regular double. It replaces a multiply and a shift on every value. A subnormal reads the entry of biased exponent 1.
   A power of two, whose lower neighbour is closer, computes the shift.

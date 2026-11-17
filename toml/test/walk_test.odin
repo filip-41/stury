@@ -5,11 +5,11 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import toml ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private)
 tokens_of :: proc(text: string, spec := toml.Spec.Toml_1_1, skip := "", stop := 0) -> (tokens: string, hi: u64, fault: Maybe(core.Fault)) {
-	r := walktest.Token_Log {
+	r := testkit.Token_Log {
 		text = transmute([]u8)text,
 		skip = skip,
 		stop = stop,
@@ -17,11 +17,11 @@ tokens_of :: proc(text: string, spec := toml.Spec.Toml_1_1, skip := "", stop := 
 	strings.builder_init(&r.out, context.temp_allocator)
 	switch spec {
 	case .Toml_1_0:
-		hi, fault = toml.walk(r.text, 0, .Toml_1_0, toml.Options{}, &r, nil, walktest.log_token)
+		hi, fault = toml.walk(r.text, 0, .Toml_1_0, toml.Options{}, &r, nil, testkit.log_token)
 	case .Toml_1_1:
-		hi, fault = toml.walk(r.text, 0, .Toml_1_1, toml.Options{}, &r, nil, walktest.log_token)
+		hi, fault = toml.walk(r.text, 0, .Toml_1_1, toml.Options{}, &r, nil, testkit.log_token)
 	}
-	return walktest.log_line(&r), hi, fault
+	return testkit.log_line(&r), hi, fault
 }
 
 @(test)
@@ -119,12 +119,12 @@ faults_name_their_byte_and_rule :: proc(t: ^testing.T) {
 nesting_past_the_limit_is_refused :: proc(t: ^testing.T) {
 	deep := strings.repeat("[", 3000, context.temp_allocator)
 	text := strings.concatenate({"a = ", deep}, context.temp_allocator)
-	fault, refused := walktest.fault_of(toml.validate(transmute([]u8)text, .Toml_1_1)).?
+	fault, refused := testkit.fault_of(toml.validate(transmute([]u8)text, .Toml_1_1)).?
 	testing.expect(t, refused && fault.kind == .Too_Deep)
 	shallow := strings.concatenate({"a = ", strings.repeat("[", 5, context.temp_allocator), strings.repeat("]", 5, context.temp_allocator)}, context.temp_allocator)
-	_, refused = walktest.fault_of(toml.validate(transmute([]u8)shallow, .Toml_1_1, toml.Options{max_depth = 4})).?
+	_, refused = testkit.fault_of(toml.validate(transmute([]u8)shallow, .Toml_1_1, toml.Options{max_depth = 4})).?
 	testing.expect(t, refused)
-	_, refused = walktest.fault_of(toml.validate(transmute([]u8)shallow, .Toml_1_1, toml.Options{max_depth = 6})).?
+	_, refused = testkit.fault_of(toml.validate(transmute([]u8)shallow, .Toml_1_1, toml.Options{max_depth = 6})).?
 	testing.expect(t, !refused)
 }
 

@@ -1,0 +1,21 @@
+# The Rust drivers of the lanes. Cargo unifies a dependency's features across what is built together, so these share
+# serde_json's preserve_order and float_roundtrip: preserve_order keeps an object's members in source order, as stury's
+# document and every other arm's DOM keep them, and float_roundtrip reads every decimal to the nearest double, as stury
+# and the other libraries read it. The schema lane's package is its own, so that jsonschema-rs and boon parse with
+# serde_json's default features.
+[workspace]
+resolver = "3"
+members = ["timing", "lanes/doc/rust", "lanes/paths/rust", "lanes/typed/rust", "lanes/records/rust", "lanes/write/rust"]
+exclude = ["lanes/schema/rust"]
+
+[workspace.dependencies]
+timing = { path = "timing" }
+sonic-rs = "0.5.10"
+simd-csv = "=0.14.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"

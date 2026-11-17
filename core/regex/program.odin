@@ -9,7 +9,8 @@
 // - dfa.odin, dfa_build.odin and dfa_alphabet.odin: automata that answer in one pass whether and where a program
 //   matches.
 // - match.odin (`search`): the backtracking matcher over the program, with visited.odin for the linear search. It
-//   reads \X clusters through grapheme.odin.
+//   reads \X clusters through grapheme.odin. counting.odin answers whether an ECMA program with counted repeats
+//   matches, where the automata do not.
 // sample.odin draws a text a pattern matches. unicode.odin and fold.odin supply character classes and case folds,
 // from the generated unicode_tables.odin.
 package regex
@@ -95,6 +96,7 @@ Program :: struct {
 	opt:      ^Search_Opt, // what Oniguruma's optimizer would have the search skip by, kept apart since a Regex is copied
 	visited:  ^Visited, // under `linear`, what the visited set needs of the program
 	dfa:      ^Dfa, // the automaton that answers a search that reads no bounds, or nil (dfa.odin)
+	counting: ^Counting, // under ECMA, the counted repeats a search that reads no bounds follows in one pass, or nil (counting.odin)
 	// What every match starts with, at distance 0: the literal it begins with, or one of the bytes it can begin with.
 	head:      ^Search_Opt,
 	longest:   bool, // Flags.longest

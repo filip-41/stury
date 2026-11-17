@@ -5,18 +5,18 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import yaml ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private)
 tokens_of :: proc(text: string, opts := yaml.Options{}, skip := "", stop := 0) -> (tokens: string, hi: u64, fault: Maybe(core.Fault)) {
-	r := walktest.Token_Log {
+	r := testkit.Token_Log {
 		text = transmute([]u8)text,
 		skip = skip,
 		stop = stop,
 	}
 	strings.builder_init(&r.out, context.temp_allocator)
-	hi, fault = yaml.walk(r.text, 0, .Yaml_1_2, opts, &r, nil, walktest.log_token)
-	return walktest.log_line(&r), hi, fault
+	hi, fault = yaml.walk(r.text, 0, .Yaml_1_2, opts, &r, nil, testkit.log_token)
+	return testkit.log_line(&r), hi, fault
 }
 
 @(test)
@@ -46,12 +46,12 @@ properties_come_before_their_node :: proc(t: ^testing.T) {
 @(test)
 documents_are_read_one_at_a_time :: proc(t: ^testing.T) {
 	src := "a: 1\n---\nb: 2\n...\n"
-	r := walktest.Token_Log{text = transmute([]u8)src}
+	r := testkit.Token_Log{text = transmute([]u8)src}
 	strings.builder_init(&r.out, context.temp_allocator)
-	hi, fault := yaml.walk(r.text, 0, .Yaml_1_2, {}, &r, nil, walktest.log_token)
+	hi, fault := yaml.walk(r.text, 0, .Yaml_1_2, {}, &r, nil, testkit.log_token)
 	testing.expect_value(t, fault == nil, true)
 	testing.expect_value(t, hi, 5)
-	hi, fault = yaml.walk(r.text, hi, .Yaml_1_2, {}, &r, nil, walktest.log_token)
+	hi, fault = yaml.walk(r.text, hi, .Yaml_1_2, {}, &r, nil, testkit.log_token)
 	testing.expect_value(t, fault == nil, true)
 	testing.expect_value(t, hi, u64(len(src)))
 }
@@ -136,7 +136,7 @@ decoded_text_follows_the_quoting :: proc(t: ^testing.T) {
 		src := c[0]
 		tok: core.Token
 		found := false
-		r := walktest.Token_Log{text = transmute([]u8)src}
+		r := testkit.Token_Log{text = transmute([]u8)src}
 		strings.builder_init(&r.out, context.temp_allocator)
 		Probe :: struct {
 			tok:   ^core.Token,

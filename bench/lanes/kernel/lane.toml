@@ -1,0 +1,28 @@
+case = [
+	{ name = "pack 16/256", sub = "pack", reps = 20000, arg = 16 },
+	{ name = "json 16/256", sub = "json", reps = 20000, arg = 16 },
+	{ name = "csv 16/256", sub = "csv", reps = 20000, arg = 16 },
+	{ name = "str none", sub = "str", reps = 20000, arg = 1073741824 },
+	{ name = "str 1/4096", sub = "str", reps = 20000, arg = 4096 },
+	{ name = "str 1/64", sub = "str", reps = 20000, arg = 64 },
+	{ name = "utf8 none", sub = "utf8", reps = 20000, arg = 1073741824 },
+	{ name = "utf8 1/4096", sub = "utf8", reps = 20000, arg = 4096 },
+	{ name = "utf8 1/256", sub = "utf8", reps = 20000, arg = 256 },
+	{ name = "utf8 1/16", sub = "utf8", reps = 20000, arg = 16 },
+	{ name = "utf8all 1/256", sub = "utf8all", reps = 20000, arg = 256 },
+	{ name = "skip 1/256", sub = "skip", reps = 2048, arg = 256 },
+	{ name = "skip 1/1024", sub = "skip", reps = 2048, arg = 1024 },
+	{ name = "skip 1/4096", sub = "skip", reps = 2048, arg = 4096 },
+	{ name = "float_random", sub = "float_random", reps = 400, arg = 1 },
+	{ name = "float_canada", sub = "float_canada", reps = 400, arg = 1 },
+	{ name = "float_price", sub = "float_price", reps = 400, arg = 1 },
+	{ name = "float_int", sub = "float_int", reps = 400, arg = 1 },
+	{ name = "int_random 6", sub = "int_random", reps = 800, arg = 6 },
+	{ name = "int_random 18", sub = "int_random", reps = 800, arg = 18 },
+]
+
+[lane]
+legend = "ns, instructions and cycles per unit over interleaved rounds. Instructions and cycles are the difference between reps and twice the reps, which cancels the setup."
+
+[arm]
+stury = { source = "stury" }

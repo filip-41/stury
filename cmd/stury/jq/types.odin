@@ -559,9 +559,9 @@ Reading :: enum {
 }
 
 // What a step reads from a value of `id`. A branch that lists no member, no pattern and no rule on the others
-// describes every member.
+// describes every member. `listed_only` leaves out the members an object takes by listing none of them.
 @(private)
-read :: proc(t: ^Typer, id: Ty, how: Reading, name := "", at := -1) -> (r: Read) {
+read :: proc(t: ^Typer, id: Ty, how: Reading, name := "", at := -1, listed_only := false) -> (r: Read) {
 	t.steps += 1
 	split := branches(t, id)
 	if !split.complete || t.steps > TYPE_STEPS {
@@ -583,7 +583,7 @@ read :: proc(t: ^Typer, id: Ty, how: Reading, name := "", at := -1) -> (r: Read)
 		r.holds = true
 		conj := make([dynamic]Ty, context.temp_allocator)
 		required := how == .Values || how == .Element && at < 0
-		listed, described := false, false
+		listed, described, takes_other, unevaluated := false, false, false, false
 		for node in b {
 			// Copies, since typing a constant or a dependent schema grows the tables they come from.
 			node_row := t.d.nodes[node]
@@ -597,9 +597,10 @@ read :: proc(t: ^Typer, id: Ty, how: Reading, name := "", at := -1) -> (r: Read)
 					described ||= int(n.object) >= t.input_objects
 					object_row := t.d.objects[n.object]
 					evaluated = member(t, &object_row, name, &conj, &r, &required, &listed, &described)
+					takes_other ||= !evaluated
 				}
 				if u, has := n.unevaluated_properties.?; has {
-					listed = true
+					listed, unevaluated = true, true
 					described ||= t.d.nodes[u].kinds != {}
 					// A node that applies no other schema in place evaluates only the members its own object does.
 					if !evaluated && !applies_in_place(t, n) {
@@ -641,6 +642,9 @@ read :: proc(t: ^Typer, id: Ty, how: Reading, name := "", at := -1) -> (r: Read)
 				append(&conj, union_of(t, ..parts[:]))
 			}
 		}
+		// Without `additionalProperties` an object takes any other member, unless an `unevaluatedProperties` of the branch
+		// judges it. A dependent schema describes only the members it lists, as it does not see that `unevaluatedProperties`.
+		described ||= takes_other && !unevaluated && !listed_only
 		v := all_of(t, conj[:])
 		if v == t.never {
 			r.absent = true
@@ -694,7 +698,7 @@ member :: proc(t: ^Typer, o: ^rules.Object, name: string, conj: ^[dynamic]Ty, r:
 			continue
 		}
 		t.nesting += 1
-		described^ ||= read(t, dependent, .Member, name).described
+		described^ ||= read(t, dependent, .Member, name, listed_only = true).described
 		t.nesting -= 1
 	}
 	return named || matched || o.additional != rules.NONE

@@ -214,10 +214,10 @@ members_as_attributes :: proc(v: Value) -> Value {
 		bodies := make([dynamic]string)
 		o := new_object()
 		for k, i in x.keys {
-			if len(k) < 2 || k[0] != '@' {
+			if name, s, is_attribute := member_attribute(k, x.vals[i]); is_attribute {
+				append(&bodies, attribute_body(name, s))
+			} else if len(k) < 2 || k[0] != '@' {
 				object_append(o, k, members_as_attributes(x.vals[i]))
-			} else if s, is_text := attribute_text(x.vals[i]); is_text {
-				append(&bodies, attribute_body(k[1:], s))
 			} else if value_kind(x.vals[i]) != .Null {
 				object_append(o, k, x.vals[i])
 			}
@@ -240,7 +240,19 @@ members_as_attributes :: proc(v: Value) -> Value {
 	return v
 }
 
-// The text of the scalar `v` as an attribute's value, its digits for a number. False for null and a container.
+// The attribute the member `key` holding `v` stands for in the view `attributes_as_members` reads: a member `@name`
+// holding a string, a number or a boolean, with its text, a float's in the temp allocator. No markup name starts with
+// `@`, so no such member is an element.
+member_attribute :: proc(key: string, v: Value) -> (name, text: string, ok: bool) {
+	if len(key) < 2 || key[0] != '@' {
+		return
+	}
+	text, ok = attribute_text(v)
+	return key[1:], text, ok
+}
+
+// The text of the scalar `v` as an attribute's value, its digits for a number, a float's in the temp allocator. False for
+// null and a container.
 @(private = "file")
 attribute_text :: proc(v: Value) -> (string, bool) {
 	#partial switch x in plain(v) {
@@ -254,7 +266,7 @@ attribute_text :: proc(v: Value) -> (string, bool) {
 		if math.is_inf(x) || math.is_nan(x) {
 			return "", false
 		}
-		buf := make([]u8, spell.F64_ROOM)
+		buf := make([]u8, spell.F64_ROOM, context.temp_allocator)
 		return string(buf[:spell.f64_text(raw_data(buf), x)]), true
 	}
 	return "", false

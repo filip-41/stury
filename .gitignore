@@ -8,10 +8,12 @@
 # Debug symbols that sanitizer builds (built with -debug) leave on macOS.
 *.dSYM/
 
-# Benchmark inputs: bench/gen.py writes the synthetic fixtures, bench/fetch.py the pinned corpus under corpus/.
+# Benchmark inputs: `bench fixtures` writes the synthetic ones and fetches the downloaded ones.
 /bench/fixtures/
-# A peer built in place with cargo, without CARGO_TARGET_DIR.
-/bench/peers/rust/target/
+/bench/.venv/
+# A driver built in place with cargo, without CARGO_TARGET_DIR.
+/bench/target/
+/bench/lanes/schema/rust/target/
 __pycache__/
 
 # Logs, dumps and crash output.

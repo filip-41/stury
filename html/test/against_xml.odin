@@ -9,7 +9,7 @@ import "core:testing"
 import core "../../core"
 import html ".."
 import xml "../../xml"
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private = "file")
 NAMES := [?]string{"r", "x", "y", "z", "item", "note", "k-v"}
@@ -83,7 +83,7 @@ random_markup_builds_the_shape_xml_builds :: proc(t: ^testing.T) {
 			doc, err := html.build(src, .Fragment, {infer = infer})
 			same, xerr := xml.build(src, .Xml, {infer = infer})
 			if testing.expectf(t, err == nil && xerr == nil, "%q: %v, %v", src, err, xerr) {
-				got, want := walktest.markup_shape(&doc), walktest.markup_shape(&same)
+				got, want := testkit.markup_shape(&doc), testkit.markup_shape(&same)
 				testing.expectf(t, got == want, "%q\n html %s\n xml  %s", src, got, want)
 				testing.expectf(t, core.equal(core.Node_Ref{&doc, core.ROOT}, core.Node_Ref{&same, core.ROOT}), "%q: unequal", src)
 			}

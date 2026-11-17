@@ -9,7 +9,7 @@ import rules "../../rules"
 import typed "../../typed"
 import json "../../../json"
 import model ".."
-import walktest "../../../walktest"
+import testkit "../../../testkit"
 
 // A type's description, `model.schema`, and the plan built from it, `plan_of`, agree on the plan's shape.
 
@@ -241,20 +241,20 @@ a_plan_of_a_types_description_has_the_types_plan_shape :: proc(t: ^testing.T) {
 		{Zoo_Tree, {}, nil},
 		{[]Maybe(Zoo_Inner), {}, nil},
 		{map[string]any, {}, nil},
-		{Ruled, {}, walktest.ruled_plan(Ruled)},
-		{Ruled_Union, {}, walktest.ruled_plan(Ruled_Union)},
+		{Ruled, {}, testkit.ruled_plan(Ruled)},
+		{Ruled_Union, {}, testkit.ruled_plan(Ruled_Union)},
 	}
 	for c in cases {
 		plan, ruled := c.model.?
 		if !ruled {
 			planned: core.Error
 			plan, planned = json.plan_make(c.type, plan = c.opts, allocator = context.temp_allocator)
-			walktest.expect_nil(t, planned)
+			testkit.expect_nil(t, planned)
 		}
-		d, described := walktest.description_of(&plan, context.temp_allocator)
-		walktest.expect_nil(t, described)
+		d, described := testkit.description_of(&plan, context.temp_allocator)
+		testkit.expect_nil(t, described)
 		again, built := json.plan_of(&d, .Json, c.opts, allocator = context.temp_allocator)
-		walktest.expect_nil(t, built)
+		testkit.expect_nil(t, built)
 		want, got := project(&plan), project(&again)
 		testing.expectf(t, want == got, "%v:\nplan        %s\ndescription %s", c.type, want, got)
 	}
@@ -276,7 +276,7 @@ Shown :: struct {
 a_type_and_its_description_read_the_classes_the_type_reads :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	plan, _ := json.plan_make(Shown, allocator = context.temp_allocator)
-	d, _ := walktest.description_of(&plan, context.temp_allocator)
+	d, _ := testkit.description_of(&plan, context.temp_allocator)
 	again, _ := json.plan_of(&d, allocator = context.temp_allocator)
 	want := "obj#0 [\"#0 n: ?#1, t: num?, e: str, u: ?#2, l: arr<obj#0>, required []\", \"#1 | int \", \"#2 | bool | str \"]"
 	testing.expect_value(t, project(&plan), want)
@@ -287,14 +287,14 @@ a_type_and_its_description_read_the_classes_the_type_reads :: proc(t: ^testing.T
 two_members_of_one_type_with_different_rules_get_two_blocks :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	plain, _ := json.plan_make(Ruled, allocator = context.temp_allocator)
-	plan := walktest.ruled_plan(Ruled)
+	plan := testkit.ruled_plan(Ruled)
 	block :: proc(p: ^typed.Plan, member: i32) -> i32 {
 		return p.meta[p.meta[0].block + member].block
 	}
 	testing.expect_value(t, block(&plain, 0), block(&plain, 1))
 	testing.expect(t, block(&plan, 0) != block(&plan, 1))
 	testing.expect_value(t, block(&plan, 0), block(&plan, 2))
-	d, _ := walktest.description_of(&plan, context.temp_allocator)
+	d, _ := testkit.description_of(&plan, context.temp_allocator)
 	members := d.objects[d.nodes[d.root].object].members
 	testing.expect_value(t, members[0].rules.min_length, 3)
 	testing.expect_value(t, members[1].rules.min_length, 0)
@@ -334,7 +334,7 @@ a_model_tag_it_cannot_hold_refuses_the_plan :: proc(t: ^testing.T) {
 	}
 	refusals := [?]core.Error{refusal(Past_Max), refusal(Signed), refusal(Leading_Zero), refusal(Flattened), refusal(Capture)}
 	for err, i in refusals {
-		testing.expectf(t, walktest.typed_kind(err) == .Bad_Tag, "%d: %v", i, err)
+		testing.expectf(t, testkit.typed_kind(err) == .Bad_Tag, "%d: %v", i, err)
 	}
 }
 
@@ -342,20 +342,20 @@ a_model_tag_it_cannot_hold_refuses_the_plan :: proc(t: ^testing.T) {
 describe_and_plan_of_free_what_they_allocate :: proc(t: ^testing.T) {
 	plan, _ := json.plan_make(Zoo, plan = {hooks = {{type = Zoo_Hooked, read = read_zoo_hooked}}})
 	defer typed.plan_destroy(&plan)
-	d, _ := walktest.description_of(&plan)
+	d, _ := testkit.description_of(&plan)
 	defer rules.description_destroy(&d)
 	again, built := json.plan_of(&d)
-	walktest.expect_nil(t, built)
+	testkit.expect_nil(t, built)
 	typed.plan_destroy(&again)
 	_, empty := json.plan_of(&rules.Description{})
-	walktest.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
+	testkit.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 	arms := [2]rules.Node_Index{1, 2}
 	objects := rules.Description{}
 	defer delete(objects.nodes)
 	append(&objects.nodes, rules.Node{kinds = rules.EVERY_KIND, any_of = arms[:], array = -1, object = -1})
 	append(&objects.nodes, rules.Node{kinds = {.Object}, array = -1, object = -1}, rules.Node{kinds = {.Object}, array = -1, object = -1})
 	_, ambiguous := json.plan_of(&objects)
-	walktest.expect_kind(t, ambiguous, core.Typed_Error_Kind.Ambiguous_Union)
+	testkit.expect_kind(t, ambiguous, core.Typed_Error_Kind.Ambiguous_Union)
 }
 
 @(private = "file")
@@ -398,12 +398,12 @@ two_maybes_of_one_type_that_differ_on_null_get_two_nodes :: proc(t: ^testing.T) 
 	defer free_all(context.temp_allocator)
 	check :: proc(t: ^testing.T, plan: typed.Plan, name, email: int) {
 		plan := plan
-		d, err := walktest.description_of(&plan, context.temp_allocator)
-		walktest.expect_nil(t, err)
+		d, err := testkit.description_of(&plan, context.temp_allocator)
+		testkit.expect_nil(t, err)
 		members := d.objects[d.nodes[d.root].object].members
 		testing.expect(t, !takes_null(&d, members[name].node))
 		testing.expect(t, takes_null(&d, members[email].node))
 	}
-	check(t, walktest.ruled_plan(Null_After), 1, 0)
-	check(t, walktest.ruled_plan(Null_Before), 0, 1)
+	check(t, testkit.ruled_plan(Null_After), 1, 0)
+	check(t, testkit.ruled_plan(Null_Before), 0, 1)
 }

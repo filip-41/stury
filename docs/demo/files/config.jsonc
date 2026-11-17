@@ -1,0 +1,5 @@
+{
+  // the port the server listens on
+  "port": 8080,
+  "hosts": ["a", "b"]
+}

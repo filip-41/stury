@@ -2127,7 +2127,8 @@ fork_lead :: proc(h: ^Check, u: ^Use, t: core.Token, level: int) -> ^Run {
 }
 
 // The run of a fork the token opening `t` reached before this check, judging alike at `u` with no sink when `h` has none
-// and else with a sink of its own, that no check holding this one holds, nil for none.
+// and else with a sink of its own, that no check holding this one holds, nil for none. The list may still hold a fork that
+// was released and is now `h`'s own, which cannot lead itself.
 @(private)
 earlier_lead :: proc(h: ^Check, u: ^Use, t: core.Token) -> ^Run {
 	p := h.pool
@@ -2136,7 +2137,7 @@ earlier_lead :: proc(h: ^Check, u: ^Use, t: core.Token) -> ^Run {
 	}
 	leads: for f in p.leads {
 		y := f.owner.run
-		if !f.open || f.follows != nil || f.ruled || f.lo != t.lo || f.u.judging != u.judging || y == nil || y.c.fork != f || y.done {
+		if f == h.fork || !f.open || f.follows != nil || f.ruled || f.lo != t.lo || f.u.judging != u.judging || y == nil || y.c.fork != f || y.done {
 			continue
 		}
 		if y.c.sink != (nil if h.sink == nil else y.buffer) || h.sink != nil && (y.c.sink == nil || f.u.judging_all != u.judging_all) {

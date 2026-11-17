@@ -58,7 +58,7 @@ walks use, `markup.md` the XML walk and the HTML tokenizer and tree, and `binary
 Each format package exposes the names a caller uses: `Spec`, `Options`, `Detail`, `RULES`, `walk`, `validate` and
 `build`, plus the token spelling detail its walk documents (`json.Number_Spelling` and `json.number_spelling_of`).
 Every format exposes its token decoders `token_text` and `token_number` beside core's node readers `text` and
-`number`, and `json` also exposes `commit` and `blank`. `make surface` lists every public name.
+`number`, and `json` also exposes `commit` and `blank`.
 
 `core`'s walk interface is what a format author uses: `Kind` and `Role` are a token's fields, `Token`, `Action` and
 `Hook_Regs` are a hook's signature, `Fault`, `Fault_Kind` and `Rules` are a walk's result, `fault_at` makes the result
@@ -272,7 +272,7 @@ lives in `core`, so a format adds no reader, no `query` and no `commit` of its o
    `as` returns. The entry points bind tables with no services (`READERS` through `bound_as`, the typed reads), json's
    and dsv's for a constant spec and the other formats' for the spec passed, so a program links only the passes it
    names. `Services.edit` points at one `core.Edit_Services`
-   table, nil for a format with no edits. `names.odin`, which `tools/checks.py api --write` generates, exports the
+   table, nil for a format with no edits. `names.odin`, which `make names-write` generates from `tools/names.txt`, exports the
    names of `core` a user of the format calls, so that user never imports `core`.
 4. **The paths.** `set` and the path walk instantiate `build.Scan` over the format's `walk`, and `Scan.rewalk` walks one
    value again for a ring's element. See `paths.md`.
@@ -655,8 +655,7 @@ From the repository root:
 | `make test` | the tests at -o:minimal and -o:speed, one target per compile so `make -j` runs them in parallel, and the golden answers `json/test` checks |
 | `make test-x86` | the tests at v2 and v3 under Rosetta, `-define:TIER` picking the tier |
 | `make test-asan` | the tests under AddressSanitizer |
-| `make lint` | the import order, then vet on the host, x86-64 and riscv64 |
-| `make surface` | each library package's public declarations, sorted |
+| `make lint` | the import order, the format entries and names files, then vet on the host, x86-64 and riscv64 |
 
 The golden file `json/test/golden/json.txt` holds the answer for every JSONTestSuite and json5-tests file per spec. A
 line names the file and the spec, and records a pass or a fault kind and byte, with a marker naming the reason where the

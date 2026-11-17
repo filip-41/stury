@@ -13,7 +13,7 @@ import typed "../typed"
 import write "../write"
 import dsv "../../dsv"
 import json "../../json"
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // A commit to JSON refuses a delimited document before it splices, since a table is another format family.
 @(test)
@@ -21,11 +21,11 @@ json_commit_refuses_table :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("a\n1\n")
 	doc, err := core.build(src, dsv.as(.Csv))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	out, _, cerr := compose.commit(&list, json.as(.Json))
-	walktest.expect_kind(t, cerr, core.Document_Error_Kind.Bad_Spec)
+	testkit.expect_kind(t, cerr, core.Document_Error_Kind.Bad_Spec)
 	testing.expect(t, out == nil)
 }
 
@@ -34,13 +34,13 @@ json_commit_refuses_table :: proc(t: ^testing.T) {
 format_serves_every_format :: proc(t: ^testing.T) {
 	table, terr := core.format(transmute([]u8)string("a,b\n1,\"x\"\n"), dsv.as(.Csv))
 	defer delete(table)
-	walktest.expect_nil(t, terr)
+	testkit.expect_nil(t, terr)
 	testing.expect_value(t, string(table), "a,b\n1,x\n")
 	text, jerr := core.format(transmute([]u8)string(`{a: [1,],}`), json.as(.Json5), core.PRETTY)
 	defer delete(text)
-	walktest.expect_nil(t, jerr)
+	testkit.expect_nil(t, jerr)
 	_, none := core.format(transmute([]u8)string(`1`), core.As{})
-	walktest.expect_kind(t, none, core.Typed_Error_Kind.Unsupported)
+	testkit.expect_kind(t, none, core.Typed_Error_Kind.Unsupported)
 }
 
 // A pointer writes a name with `~` and `/` escaped, an index in digits, and a step with no one place as `-`.
@@ -68,9 +68,9 @@ default_duplicates_read_as_last :: proc(t: ^testing.T) {
 	by_default, by_last: S
 	src := transmute([]u8)string(`{"a":1,"a":2}`)
 	e := json.unmarshal(src, json.Spec.Json, &by_default, read = {}, opts = {}, allocator = context.temp_allocator)
-	walktest.expect_nil(t, e)
+	testkit.expect_nil(t, e)
 	e = json.unmarshal(src, json.Spec.Json, &by_last, read = {dups = .Last}, opts = {}, allocator = context.temp_allocator)
-	walktest.expect_nil(t, e)
+	testkit.expect_nil(t, e)
 	testing.expect_value(t, by_default.a, 2)
 	testing.expect_value(t, by_last, by_default)
 	csv := transmute([]u8)string("a,a\n1,2\n")
@@ -105,7 +105,7 @@ value_edits_write_each_formats_text :: proc(t: ^testing.T) {
 		{"a\tb\n1\t2\n", "a\tb\nx y\t5\n", dsv.as(.Tsv)},
 	}
 	for row in rows {
-		walktest.check(t, row.src, row.want, build_as, row.as, proc(list: ^core.Edit_List) -> core.Error {
+		testkit.check(t, row.src, row.want, build_as, row.as, proc(list: ^core.Edit_List) -> core.Error {
 			record, _ := core.child_at(list.doc, core.ROOT, 0)
 			write.set_member(list, record, "a", "x y") or_return
 			return write.set_member(list, record, "b", 5)
@@ -123,7 +123,7 @@ string_literal_and_variable_edit_alike :: proc(t: ^testing.T) {
 	for i in 0 ..< 3 {
 		doc, err := core.build(transmute([]u8)src, as)
 		defer core.destroy(&doc)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
 		text := "[1]"
@@ -137,7 +137,7 @@ string_literal_and_variable_edit_alike :: proc(t: ^testing.T) {
 		}
 		out, _, cerr := compose.commit(&list)
 		defer delete(out)
-		walktest.expect_nil(t, cerr)
+		testkit.expect_nil(t, cerr)
 		testing.expect_value(t, string(out), spelled[i])
 	}
 }
@@ -160,7 +160,7 @@ toy_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Kind) 
 property_fact_is_written_before_its_node :: proc(t: ^testing.T) {
 	doc, err := core.build(transmute([]u8)string(`{"a": 1, "b": 2}`), json.as(.Jsonc))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	edit := core.services_of(doc.as).edit^
 	edit.prefix = toy_prefix
 	readers := doc.readers^
@@ -177,12 +177,12 @@ property_fact_is_written_before_its_node :: proc(t: ^testing.T) {
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	list.edit = &edit
-	walktest.expect_nil(t, core.set_fact(&list, a, .Tag, "t"))
-	walktest.expect_nil(t, core.set_fact(&list, b, .Anchor, "x"))
-	walktest.expect_nil(t, core.set_fact(&list, b, .Tag, "y"))
+	testkit.expect_nil(t, core.set_fact(&list, a, .Tag, "t"))
+	testkit.expect_nil(t, core.set_fact(&list, b, .Anchor, "x"))
+	testkit.expect_nil(t, core.set_fact(&list, b, .Tag, "y"))
 	out, dropped, cerr := compose.commit(&list)
 	defer delete(out)
-	walktest.expect_nil(t, cerr)
+	testkit.expect_nil(t, cerr)
 	testing.expect_value(t, dropped, 0)
 	testing.expect_value(t, string(out), `{"a": /*!t*/ 1, "b": /*!x*/ /*!y*/ 2}`)
 }
@@ -195,8 +195,8 @@ property_fact_body_is_one_line :: proc(t: ^testing.T) {
 	a, _ := core.member(&doc, core.ROOT, "a")
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	walktest.expect_kind(t, core.set_fact(&list, a, .Tag, ""), core.Document_Error_Kind.Bad_Fact)
-	walktest.expect_kind(t, core.set_fact(&list, a, .Tag, "x\ny"), core.Document_Error_Kind.Bad_Fact)
+	testkit.expect_kind(t, core.set_fact(&list, a, .Tag, ""), core.Document_Error_Kind.Bad_Fact)
+	testkit.expect_kind(t, core.set_fact(&list, a, .Tag, "x\ny"), core.Document_Error_Kind.Bad_Fact)
 }
 
 // A toy token spelling whose start writes the site it was given.
@@ -249,7 +249,7 @@ frozen_node_refuses_every_edit :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	doc, err := core.build(transmute([]u8)string(`{"a": 1, "b": [2]}`), json.as(.Json))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	edit := core.services_of(doc.as).edit^
 	edit.frozen = toy_frozen_a
 
@@ -259,17 +259,17 @@ frozen_node_refuses_every_edit :: proc(t: ^testing.T) {
 	defer core.edit_list_destroy(&list)
 	list.edit = &edit
 	refusal := core.set_text(&list, a, "3")
-	walktest.expect_kind(t, refusal, core.Document_Error_Kind.Frozen)
-	walktest.expect_kind(t, write.set_node(&list, a, 3), core.Document_Error_Kind.Frozen)
-	walktest.expect_kind(t, core.remove(&list, a), core.Document_Error_Kind.Frozen)
-	walktest.expect_kind(t, core.set_fact(&list, a, .Comment, "x"), core.Document_Error_Kind.Frozen)
+	testkit.expect_kind(t, refusal, core.Document_Error_Kind.Frozen)
+	testkit.expect_kind(t, write.set_node(&list, a, 3), core.Document_Error_Kind.Frozen)
+	testkit.expect_kind(t, core.remove(&list, a), core.Document_Error_Kind.Frozen)
+	testkit.expect_kind(t, core.set_fact(&list, a, .Comment, "x"), core.Document_Error_Kind.Frozen)
 	b_text := strings.builder_make(context.temp_allocator)
 	core.render(strings.to_writer(&b_text), doc.src, refusal)
 	testing.expect_value(t, strings.to_string(b_text), "The node cannot be edited: the value is an alias")
-	walktest.expect_nil(t, core.set_text(&list, b, "[4]"))
+	testkit.expect_nil(t, core.set_text(&list, b, "[4]"))
 	out, _, cerr := compose.commit(&list)
 	defer delete(out)
-	walktest.expect_nil(t, cerr)
+	testkit.expect_nil(t, cerr)
 	testing.expect_value(t, string(out), `{"a": 1, "b": [4]}`)
 }
 
@@ -290,7 +290,7 @@ moved_node_takes_the_formats_bytes :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	doc, err := core.build(transmute([]u8)string("{\"a\": 1,\n  \"b\": [2]}"), json.as(.Json))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	edit := core.services_of(doc.as).edit^
 	edit.relocate = toy_relocate
 	a, _ := core.member(&doc, core.ROOT, "a")
@@ -302,15 +302,15 @@ moved_node_takes_the_formats_bytes :: proc(t: ^testing.T) {
 		if i == 1 {
 			list.edit = &edit
 		}
-		walktest.expect_nil(t, write.set_node(&list, b, core.Node_Ref{&doc, a}))
+		testkit.expect_nil(t, write.set_node(&list, b, core.Node_Ref{&doc, a}))
 		if i == 1 {
-			walktest.expect_kind(t, write.set_node(&list, a, core.Node_Ref{&doc, b}), core.Document_Error_Kind.Bad_Value)
+			testkit.expect_kind(t, write.set_node(&list, a, core.Node_Ref{&doc, b}), core.Document_Error_Kind.Bad_Value)
 			testing.expect_value(t, string(list.edits[0].text), "<1@7>")
 			continue
 		}
 		out, _, cerr := compose.commit(&list)
 		defer delete(out)
-		walktest.expect_nil(t, cerr)
+		testkit.expect_nil(t, cerr)
 		testing.expect_value(t, string(out), want)
 	}
 }
@@ -334,10 +334,10 @@ format_commit_takes_the_list_as_recorded :: proc(t: ^testing.T) {
 	src := "{\n    \"a\": [\n        1\n    ]\n}"
 	doc, err := core.build(transmute([]u8)src, json.as(.Json))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	held, herr := core.build(transmute([]u8)string(`[2,3]`), json.as(.Json))
 	defer core.destroy(&held)
-	walktest.expect_nil(t, herr)
+	testkit.expect_nil(t, herr)
 	edit := core.services_of(doc.as).edit^
 	edit.commit = toy_commit
 	// The toy output reads as no JSON, and compose judges a format's own commit by its validate and its build.
@@ -351,10 +351,10 @@ format_commit_takes_the_list_as_recorded :: proc(t: ^testing.T) {
 		if i == 1 {
 			list.edit = &edit
 		}
-		walktest.expect_nil(t, write.set_node(&list, a, core.Node_Ref{&held, core.ROOT}))
+		testkit.expect_nil(t, write.set_node(&list, a, core.Node_Ref{&held, core.ROOT}))
 		testing.expect_value(t, string(list.edits[0].text), want)
 		out, _, cerr := compose.commit(&list, allocator = context.temp_allocator)
-		walktest.expect_nil(t, cerr)
+		testkit.expect_nil(t, cerr)
 		testing.expect_value(t, string(out), "{\n    \"a\": [\n        2,\n        3\n    ]\n}" if i == 0 else fmt.tprintf("%s|%s", src, want))
 	}
 }

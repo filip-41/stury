@@ -80,16 +80,17 @@ jobs:
             run="arch -x86_64"
           fi
           [ "$($run build/stury --version)" = "stury-${VERSION#v}" ]
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Smoke the release binary
         run: |
           bin=build/stury
           if [ "${{ matrix.name }}" = "darwin-amd64" ]; then
-            # smoke.py takes the binary as one word: wrap the Intel one.
+            # The smoke tests take the binary as one word: wrap the Intel one.
             printf '#!/bin/sh\nexec arch -x86_64 "%s/build/stury" "$@"\n' "$PWD" > build/stury-rosetta
             chmod +x build/stury-rosetta
             bin=build/stury-rosetta
           fi
-          python3 cmd/stury/test/smoke.py "$bin"
+          uv run --frozen --directory tools/tests pytest -n auto --stury="$PWD/$bin" cli/test_smoke.py
       - name: Package
         run: |
           d="stury-${VERSION#v}-${{ matrix.name }}"

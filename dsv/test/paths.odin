@@ -10,7 +10,7 @@ import core "../../core"
 import build "../../core/build"
 import typed "../../core/typed"
 import dsv ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private = "file")
 Read_Case :: struct {
@@ -59,7 +59,7 @@ path_reads :: proc(t: ^testing.T) {
 	for c in cases {
 		path, perr := core.parse_path(c.path)
 		defer core.path_destroy(&path)
-		walktest.expect_nil(t, perr)
+		testkit.expect_nil(t, perr)
 		src := transmute([]u8)c.src
 		doc, err := dsv.scan(src, .Csv, path, opts = {tolerate = {.Ragged}})
 		defer core.destroy(&doc)
@@ -68,10 +68,10 @@ path_reads :: proc(t: ^testing.T) {
 
 		full, berr := core.build(src, dsv.as(.Csv, {tolerate = {.Ragged}}))
 		defer core.destroy(&full)
-		walktest.expect_nil(t, berr)
+		testkit.expect_nil(t, berr)
 		answers, qerr := dsv.query(&full, path)
 		defer delete(answers)
-		walktest.expect_nil(t, qerr)
+		testkit.expect_nil(t, qerr)
 		testing.expectf(t, slice.equal(answer_texts(&full, answers), c.want), "query %q: %v", c.path, answers)
 	}
 	free_all(context.temp_allocator)
@@ -85,7 +85,7 @@ path_shapes :: proc(t: ^testing.T) {
 	defer core.path_destroy(&path)
 	doc, err := dsv.scan(src, .Csv, path, opts = {no_header = true})
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(core.span(&doc, doc.answers[0].node)), "4")
 	testing.expect_value(t, core.length(&doc, core.ROOT), 2)
 	record, at := core.element_of(&doc, core.ROOT, 1)
@@ -98,13 +98,13 @@ path_shapes :: proc(t: ^testing.T) {
 	defer core.path_destroy(&named)
 	bare, bad := dsv.scan(src, .Csv, named, opts = {no_header = true})
 	defer core.destroy(&bare)
-	walktest.expect_nil(t, bad)
+	testkit.expect_nil(t, bad)
 	testing.expect_value(t, bare.answers[0].outcome, core.Presence.Wrong_Kind)
 
 	headed := transmute([]u8)string("a,b\n1,2\n")
 	h, herr := dsv.scan(headed, .Csv, named)
 	defer core.destroy(&h)
-	walktest.expect_nil(t, herr)
+	testkit.expect_nil(t, herr)
 	rec, _ := core.element_of(&h, core.ROOT, 0)
 	v, found := core.member_of(&h, rec, "a")
 	testing.expect_value(t, found, core.Presence.Found)
@@ -136,7 +136,7 @@ path_wide_record :: proc(t: ^testing.T) {
 	}
 	many, err := dsv.scan(src, .Csv, paths[:], opts = ragged)
 	defer core.destroy(&many)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	// The answers of several paths come in the text's order.
 	for w, i in ([]string{"1", "6", "7"}) {
 		text, _ := core.text(&many, many.answers[i].node, buf[:])
@@ -144,7 +144,7 @@ path_wide_record :: proc(t: ^testing.T) {
 	}
 	refused, strict := dsv.scan(src, .Csv, paths[0])
 	defer core.destroy(&refused)
-	walktest.expect_kind(t, strict, core.Path_Error_Kind.Walk)
+	testkit.expect_kind(t, strict, core.Path_Error_Kind.Walk)
 }
 
 // A `Partial` record's end comes from a walk that takes the text as the read did, and a stop may leave the record's end
@@ -157,13 +157,13 @@ path_record_ends :: proc(t: ^testing.T) {
 	bare := transmute([]u8)string("a,b\n1,x\"y\n2,3\n")
 	doc, err := dsv.scan(bare, .Csv, path, opts = {tolerate = {.Bare_Quote}})
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(core.span(&doc, doc.answers[0].owner)), "1,x\"y\n")
 
 	open := transmute([]u8)string("a,b\n1,\"x")
 	stopped, serr := dsv.scan(open, .Csv, path, read = {dups = .First, stop_early = true})
 	defer core.destroy(&stopped)
-	walktest.expect_nil(t, serr)
+	testkit.expect_nil(t, serr)
 	testing.expect(t, stopped.stopped)
 	testing.expect(t, strings.has_prefix(string(core.span(&stopped, stopped.answers[0].owner)), "1,"))
 }
@@ -307,12 +307,12 @@ path_model :: proc(t: ^testing.T) {
 		stopped, serr := dsv.scan(src, .Csv, paths, read = {stop_early = true})
 		testing.expectf(t, serr == nil, "%q: %v", string(src), serr)
 		full, berr := core.build(src, dsv.as(.Csv))
-		walktest.expect_nil(t, berr)
+		testkit.expect_nil(t, berr)
 		answers, qerr := dsv.query(&full, paths)
-		walktest.expect_nil(t, qerr)
+		testkit.expect_nil(t, qerr)
 		stream := Stream{src, make([dynamic]string, context.temp_allocator)}
 		eerr := dsv.each_answer(src, .Csv, paths, &stream, on_answer)
-		walktest.expect_nil(t, eerr)
+		testkit.expect_nil(t, eerr)
 		testing.expectf(t, len(stream.want) == total, "stream %q %v: %v", string(src), paths, stream.want)
 		for want, p in wants {
 			tagged := make([dynamic]string, context.temp_allocator)
@@ -347,7 +347,7 @@ stream_spans_are_authored :: proc(t: ^testing.T) {
 	}
 	doc, err := dsv.scan(src, .Csv, paths[:])
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	Seen :: struct {
 		src:   []u8,
 		spans: [8]string,
@@ -358,7 +358,7 @@ stream_spans_are_authored :: proc(t: ^testing.T) {
 		s.spans[a.path] = string(s.src[a.lo:a.hi])
 		return true
 	}
-	walktest.expect_nil(t, dsv.each_answer(src, .Csv, paths[:], &seen, each_answer_span))
+	testkit.expect_nil(t, dsv.each_answer(src, .Csv, paths[:], &seen, each_answer_span))
 	for a in doc.answers {
 		testing.expect_value(t, seen.spans[a.path], string(core.span(&doc, a.node)))
 	}
@@ -381,16 +381,16 @@ scan_allocates_from_its_allocator :: proc(t: ^testing.T) {
 	mem.tracking_allocator_init(&track, context.allocator)
 	defer mem.tracking_allocator_destroy(&track)
 	alloc := mem.tracking_allocator(&track)
-	refused := walktest.Failing_Alloc{inner = context.allocator, fail_all = true}
+	refused := testkit.Failing_Alloc{inner = context.allocator, fail_all = true}
 	context.allocator = mem.panic_allocator()
 	context.temp_allocator = mem.panic_allocator()
 
 	doc, err := dsv.scan(src, .Csv, one, allocator = alloc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(core.span(&doc, doc.answers[0].node)), "3")
 	core.destroy(&doc)
 	doc, err = dsv.scan(src, .Csv, paths, allocator = alloc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, len(doc.answers), 2)
 	core.destroy(&doc)
 	found := 0
@@ -398,12 +398,12 @@ scan_allocates_from_its_allocator :: proc(t: ^testing.T) {
 		(^int)(state)^ += int(a.outcome == .Found)
 		return true
 	}
-	walktest.expect_nil(t, dsv.each_answer(src, .Csv, paths, &found, count, allocator = alloc))
+	testkit.expect_nil(t, dsv.each_answer(src, .Csv, paths, &found, count, allocator = alloc))
 	testing.expect_value(t, found, 2)
 	testing.expect_value(t, len(track.allocation_map), 0)
 
-	_, err = dsv.scan(src, .Csv, paths, allocator = walktest.failing_allocator(&refused))
-	walktest.expect_kind(t, err, core.Path_Error_Kind.No_Memory)
+	_, err = dsv.scan(src, .Csv, paths, allocator = testkit.failing_allocator(&refused))
+	testkit.expect_kind(t, err, core.Path_Error_Kind.No_Memory)
 }
 
 // A dsv record reads by position and by name, and a cell reads as neither.
@@ -464,19 +464,19 @@ cold_walks_each_spec :: proc(t: ^testing.T) {
 		row := strings.concatenate({"1", sep, "2\n"}, context.temp_allocator)
 		src := strings.concatenate({"a", sep, "b\n", strings.repeat(row, 3000, context.temp_allocator)}, context.temp_allocator)
 		whole, werr := core.build(transmute([]u8)src, dsv.as(spec))
-		walktest.expect_nil(t, werr)
+		testkit.expect_nil(t, werr)
 		backing := make([]u8, len(whole.nodes) * size_of(core.Node) + 512)
 		arena: mem.Arena
 		mem.arena_init(&arena, backing)
 		small, serr := core.build(transmute([]u8)src, dsv.as(spec), .Last, mem.arena_allocator(&arena))
-		walktest.expect_nil(t, serr)
+		testkit.expect_nil(t, serr)
 		testing.expect_value(t, len(small.nodes), len(whole.nodes))
 		core.destroy(&small)
 		delete(backing)
 		core.destroy(&whole)
 
 		many, merr := build.scan(transmute([]u8)src, dsv.as(spec), paths[:])
-		walktest.expect_nil(t, merr)
+		testkit.expect_nil(t, merr)
 		if testing.expect_value(t, len(many.answers), 2) {
 			for a in many.answers {
 				testing.expect_value(t, string(core.span(&many, a.owner)), row)

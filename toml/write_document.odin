@@ -60,9 +60,6 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 // writer laid out in line itself has not chosen.
 @(private)
 write_table_text :: proc(doc: ^core.Document, opts: core.Write_Options, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator, laid: bool) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
-	if doc.partial {
-		return nil, 0, {kind = .Unsupported}
-	}
 	if core.kind(doc, node) != .Object {
 		return nil, 0, {kind = .Unwritable, detail = {want = {text = "a TOML text is a table, so its root is an object"}}}
 	}

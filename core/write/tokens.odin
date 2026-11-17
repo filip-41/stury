@@ -663,7 +663,7 @@ value_scalar_text :: proc(v: core.Value, stack: []u8, $T: Tree) -> (text: string
 		return core.view_text(x), .None
 	case f64:
 		n, _ := core.number(x)
-		size := number_text_as(raw_data(stack), n, T) or_return
+		size := number_text(raw_data(stack), n, T) or_return
 		return string(stack[:size]), .None
 	case bool:
 		return "true" if x else "false", .None
@@ -683,7 +683,7 @@ token_scalar_text :: proc(v: Scalar, stack: []u8) -> (text: string, null: bool, 
 		b, ok := bytes_text(cast([]u8)x, stack)
 		return b, false, .None if ok else .No_Memory
 	case core.Number:
-		n := number_text_as(raw_data(stack), x, MARKUP_TREE) or_return
+		n := number_text(raw_data(stack), x, MARKUP_TREE) or_return
 		return string(stack[:n]), false, .None
 	case Number_Literal:
 		return x.text, false, .None

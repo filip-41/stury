@@ -1,0 +1,280 @@
+# Each case asks every tool the same question, end to end: process start, file read, the query, and every answer
+# printed to /dev/null. A tool's command is its template with the case's fields filled in, or the case's `cmd` for that
+# tool. `{S}` is the stury binary, `{jsonc}` the JSONC copy of logs.json the runner writes, and `{strip}` the awk program
+# that removes the line comments and trailing commas jq cannot read. The synthetic inputs are large and compact, one
+# shape each, so the query's cost dominates. The corpus documents are small and mixed, so process start and setup take a
+# larger share. A case named `*_raw` prints raw strings, compared line by line. The jq arm of the CSV cases splits each
+# line at commas, so it runs only on table.csv, which has no quoting. qsv's JSON conversion types numbers and booleans,
+# while stury and Miller's `-S` keep cells as strings, so to_json has no qsv arm.
+
+[template]
+stury = "{S} {stury} {flags} '{filter}' {file}"
+jq = "jq {flags} '{filter}' {file}"
+jaq = "jaq {flags} '{filter}' {file}"
+gojq = "gojq {flags} '{filter}' {file}"
+yq = "yq -p json -o json {yq} '{filter}' {file}"
+
+[[case]]
+name = "logs_id"
+suite = "jq"
+flags = "-c"
+filter = ".logs[].id"
+file = "logs.json"
+yq = "-I0"
+tools = ["stury", "jq", "jaq", "gojq", "yq"]
+
+[[case]]
+name = "logs_all"
+suite = "jq"
+flags = "-c"
+filter = ".logs[][]"
+file = "logs.json"
+yq = "-I0"
+tools = ["stury", "jq", "jaq", "gojq", "yq"]
+
+[[case]]
+name = "neg_index"
+suite = "jq"
+tools = ["stury", "jq", "jaq", "gojq", "yq"]
+cmd = { stury = "{S} -c '.[].msg | arrays | .[-1]' documents.json", jq = "jq -c '.[].msg | arrays | .[-1]' documents.json", jaq = "jaq -c '.[].msg | arrays | .[-1]' documents.json", gojq = "gojq -c '.[].msg | arrays | .[-1]' documents.json", yq = "yq -p json -o json -I0 '.[].msg | select(tag == \"!!seq\") | .[-1]' documents.json" }
+
+[[case]]
+name = "logs_pretty"
+suite = "jq"
+flags = ""
+filter = ".logs[]"
+file = "logs.json"
+yq = ""
+tools = ["stury", "jq", "jaq", "gojq", "yq"]
+
+[[case]]
+name = "logs_msg_raw"
+suite = "jq"
+flags = "-r"
+filter = ".logs[].msg"
+file = "logs.json"
+yq = "-r"
+tools = ["stury", "jq", "jaq", "gojq", "yq"]
+
+[[case]]
+name = "ndjson_v"
+suite = "jq"
+flags = "-c"
+filter = ".id"
+file = "logs.ndjson"
+stury = "--from ndjson"
+yq = "-I0"
+tools = ["stury", "jq", "jaq", "gojq", "yq"]
+
+[[case]]
+name = "ndjson_all"
+suite = "jq"
+flags = "-c"
+filter = "."
+file = "logs.ndjson"
+stury = "--from ndjson"
+yq = "-I0"
+tools = ["stury", "jq", "jaq", "gojq", "yq"]
+
+[[case]]
+name = "jsonc_id"
+suite = "jq"
+tools = ["stury", "jq", "jaq", "gojq", "yq"]
+cmd = { stury = "{S} --from jsonc -c .logs[].id {jsonc}", jq = "sh -c 'awk -f {strip} {jsonc} | jq -c .logs[].id'", jaq = "sh -c 'awk -f {strip} {jsonc} | jaq -c .logs[].id'", gojq = "sh -c 'awk -f {strip} {jsonc} | gojq -c .logs[].id'", yq = "sh -c 'awk -f {strip} {jsonc} | yq -p json -o json -I0 .logs[].id'" }
+
+[[case]]
+name = "validate"
+suite = "jq"
+tools = ["stury", "jq", "jaq", "gojq"]
+cmd = { stury = "{S} check logs.json", jq = "jq empty logs.json", jaq = "jaq empty logs.json", gojq = "gojq empty logs.json" }
+
+[[case]]
+name = "validate_twitter"
+suite = "jq"
+tools = ["stury", "jq", "jaq", "gojq"]
+cmd = { stury = "{S} check corpus/twitter.json", jq = "jq empty corpus/twitter.json", jaq = "jaq empty corpus/twitter.json", gojq = "gojq empty corpus/twitter.json" }
+
+[[case]]
+name = "validate_canada"
+suite = "jq"
+tools = ["stury", "jq", "jaq", "gojq"]
+cmd = { stury = "{S} check corpus/canada.json", jq = "jq empty corpus/canada.json", jaq = "jaq empty corpus/canada.json", gojq = "gojq empty corpus/canada.json" }
+
+[[case]]
+name = "filter_select"
+suite = "jq"
+flags = "-c"
+filter = ".logs[] | select(.status >= 450) | .id"
+file = "logs.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "filter_map"
+suite = "jq"
+flags = "-c"
+filter = ".logs | map({id, ms: .duration_ms})"
+file = "logs.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "filter_group"
+suite = "jq"
+flags = "-c"
+filter = ".logs | group_by(.service) | map([.[0].service, length])"
+file = "logs.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "filter_reduce"
+suite = "jq"
+flags = "-c"
+filter = "reduce .logs[] as $l (0; . + $l.bytes)"
+file = "logs.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "filter_string_raw"
+suite = "jq"
+flags = "-r"
+filter = '.logs[] | "\(.level): \(.msg | ascii_upcase)"'
+file = "logs.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "regex_test"
+suite = "jq"
+flags = "-c"
+filter = '[.logs[].msg | select(test("timeout"))] | length'
+file = "logs.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "regex_test_fold"
+suite = "jq"
+flags = "-c"
+filter = '[.logs[].msg | select(test("ROLLBACK"; "i"))] | length'
+file = "logs.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "regex_test_word"
+suite = "jq"
+flags = "-c"
+filter = '[.logs[].msg | select(test("\\bcommit\\b"))] | length'
+file = "logs.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "regex_match"
+suite = "jq"
+flags = "-c"
+filter = '[.logs[].msg | match("[0-9]+").offset] | add'
+file = "logs.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "regex_capture"
+suite = "jq"
+flags = "-c"
+filter = '[.logs[].msg | capture("(?<w>[a-z]+) (?<n>[0-9]+)$").n] | length'
+file = "logs.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "regex_gsub_raw"
+suite = "jq"
+flags = "-r"
+filter = '.logs[].msg | gsub("\\b(?<w>[a-z])"; "\(.w | ascii_upcase)")'
+file = "logs.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "regex_splits"
+suite = "jq"
+flags = "-c"
+filter = '[.logs[].msg | splits(" +")] | length'
+file = "logs.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "twitter_names"
+suite = "jq"
+flags = "-c"
+filter = ".statuses[].user.screen_name"
+file = "corpus/twitter.json"
+yq = "-I0"
+tools = ["stury", "jq", "jaq", "gojq", "yq"]
+
+[[case]]
+name = "twitter_select"
+suite = "jq"
+flags = "-c"
+filter = ".statuses[] | select(.retweet_count > 0) | {id, n: .retweet_count}"
+file = "corpus/twitter.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "twitter_pretty"
+suite = "jq"
+flags = ""
+filter = "."
+file = "corpus/twitter.json"
+yq = ""
+tools = ["stury", "jq", "jaq", "gojq", "yq"]
+
+[[case]]
+name = "citm_prices"
+suite = "jq"
+flags = "-c"
+filter = "[.performances[].prices[].amount] | add"
+file = "corpus/citm_catalog.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "citm_names"
+suite = "jq"
+flags = "-c"
+filter = ".events | to_entries | map(.value.name)"
+file = "corpus/citm_catalog.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "canada_ring"
+suite = "jq"
+flags = "-c"
+filter = ".features[0].geometry.coordinates[0][-1]"
+file = "corpus/canada.json"
+yq = "-I0"
+tools = ["stury", "jq", "jaq", "gojq", "yq"]
+
+[[case]]
+name = "canada_count"
+suite = "jq"
+flags = "-c"
+filter = "[.features[].geometry.coordinates[][]] | length"
+file = "corpus/canada.json"
+tools = ["stury", "jq", "jaq", "gojq"]
+
+[[case]]
+name = "cols_raw"
+suite = "csv"
+tools = ["stury", "mlr", "qsv", "jq"]
+cmd = { stury = "{S} --from csv --to csv '{id,qty}' table.csv", mlr = "mlr --csv cut -o -f id,qty table.csv", qsv = "qsv select id,qty table.csv", jq = "jq -R -r 'split(\",\") | [.[0], .[4]] | join(\",\")' table.csv" }
+
+[[case]]
+name = "filter_raw"
+suite = "csv"
+tools = ["stury", "mlr", "qsv", "jq"]
+cmd = { stury = "{S} --from csv --to csv 'select(.qty | tonumber >= 9000)' table.csv", mlr = "mlr --csv filter '$qty >= 9000' table.csv", qsv = "qsv search -s qty '^9[0-9]{3}$' table.csv", jq = "jq -R -r 'select(startswith(\"id,\") or (split(\",\")[4] | tonumber >= 9000))' table.csv" }
+
+[[case]]
+name = "cols_quoted_raw"
+suite = "csv"
+tools = ["stury", "mlr", "qsv"]
+cmd = { stury = "{S} --from csv --to csv '{id,quote}' text.csv", mlr = "mlr --csv cut -o -f id,quote text.csv", qsv = "qsv select id,quote text.csv" }
+
+[[case]]
+name = "to_json"
+suite = "csv"
+tools = ["stury", "mlr"]
+cmd = { stury = "{S} --from csv -c . table.csv", mlr = "mlr --icsv --ojsonl -S cat table.csv" }

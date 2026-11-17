@@ -5,26 +5,26 @@ import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import json ".."
 import gen "gen"
 
 // Walks `src` with a stop at every `every`th token, resuming each time, and checks that the tokens, the end and the
 // fault are those of an unbroken walk.
-resumed_agrees :: proc(t: ^testing.T, src: []u8, $S: json.Spec, opts: json.Options, every: int, full: ^walktest.Log) -> bool {
+resumed_agrees :: proc(t: ^testing.T, src: []u8, $S: json.Spec, opts: json.Options, every: int, full: ^testkit.Log) -> bool {
 	full^ = {}
-	hi, fault := json.walk(src, 0, S, opts, full, nil, walktest.log_hook)
-	h := walktest.Stopping{src = src, every = every}
+	hi, fault := json.walk(src, 0, S, opts, full, nil, testkit.log_hook)
+	h := testkit.Stopping{src = src, every = every}
 	defer delete(h.tokens)
 	stack := make([]u8, 2048)
 	defer delete(stack)
 	cursor := json.Cursor{stack = stack}
 	regs: core.Hook_Regs
-	hi2, fault2 := json.walk(src, 0, S, opts, &h, &regs, walktest.stopping_hook, &cursor)
+	hi2, fault2 := json.walk(src, 0, S, opts, &h, &regs, testkit.stopping_hook, &cursor)
 	stops := 0
 	for json.can_resume(&cursor) {
 		stops += 1
-		hi2, fault2 = json.walk_resume(src, &cursor, S, opts, &h, &regs, walktest.stopping_hook)
+		hi2, fault2 = json.walk_resume(src, &cursor, S, opts, &h, &regs, testkit.stopping_hook)
 	}
 	ok := testing.expectf(t, slice.equal(h.tokens[:], full.tokens[:full.n]), "%v every %d: %d tokens, want %d", S, every, len(h.tokens), full.n)
 	ok &&= testing.expectf(t, hi2 == hi && fault2 == fault, "%v %q every %d: %d %v, want %d %v", S, src[:min(len(src), 80)], every, hi2, fault2, hi, fault)
@@ -44,7 +44,7 @@ cursor_resumes :: proc(t: ^testing.T) {
 cursor_resumes_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 	state := rand.create(7)
 	context.random_generator = rand.default_random_generator(&state)
-	full := new(walktest.Log)
+	full := new(testkit.Log)
 	defer free(full)
 	text, broken: [dynamic]u8
 	defer delete(text)
@@ -58,7 +58,7 @@ cursor_resumes_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 		}
 		src := text[:]
 		if round % 2 == 1 {
-			walktest.mutate(&broken, text[:], gen.SHARP)
+			testkit.mutate(&broken, text[:], gen.SHARP)
 			src = broken[:]
 		}
 		for every in ([]int{1, 2, 5}) {
@@ -100,16 +100,16 @@ cursor_resumes_deep :: proc(t: ^testing.T) {
 		strings.write_string(&b, "]}" if i % 2 == 0 else "]")
 	}
 	src := transmute([]u8)strings.to_string(b)
-	full := new(walktest.Log)
+	full := new(testkit.Log)
 	defer free(full)
 	if !resumed_agrees(t, src, .Json, {max_depth = 2048}, 1, full) || !resumed_agrees(t, src, .Jsonc, {max_depth = 2048}, 7, full) {
 		return
 	}
-	h := walktest.Stopping{src = src, every = 1 << 30}
+	h := testkit.Stopping{src = src, every = 1 << 30}
 	defer delete(h.tokens)
 	small: [1024]u8
 	cursor := json.Cursor{stack = small[:]}
-	_, fault := json.walk(src, 0, .Json, {max_depth = 2048}, &h, nil, walktest.stopping_hook, &cursor)
+	_, fault := json.walk(src, 0, .Json, {max_depth = 2048}, &h, nil, testkit.stopping_hook, &cursor)
 	f, faulted := fault.?
 	testing.expectf(t, faulted && f.kind == .Too_Deep && f.at == 2392, "a cursor's stack of 1024 levels: %v", fault)
 }
@@ -120,22 +120,22 @@ cursor_refuses :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("[1, 2, 3]")
 	copied := slice.clone(src)
 	defer delete(copied)
-	h := walktest.Stopping{src = src, every = 2}
+	h := testkit.Stopping{src = src, every = 2}
 	defer delete(h.tokens)
 	stack: [8]u8
 	cursor := json.Cursor{stack = stack[:]}
-	json.walk(src, 0, .Json, {}, &h, nil, walktest.stopping_hook, &cursor)
+	json.walk(src, 0, .Json, {}, &h, nil, testkit.stopping_hook, &cursor)
 	testing.expect(t, json.can_resume(&cursor))
-	_, fault := json.walk_resume(copied, &cursor, .Json, {}, &h, nil, walktest.stopping_hook)
+	_, fault := json.walk_resume(copied, &cursor, .Json, {}, &h, nil, testkit.stopping_hook)
 	f, faulted := fault.?
 	testing.expectf(t, faulted && f.kind == .Bad_Option, "another text: %v", fault)
-	_, fault = json.walk_resume(src[:len(src) - 1], &cursor, .Json, {}, &h, nil, walktest.stopping_hook)
+	_, fault = json.walk_resume(src[:len(src) - 1], &cursor, .Json, {}, &h, nil, testkit.stopping_hook)
 	f, faulted = fault.?
 	testing.expectf(t, faulted && f.kind == .Bad_Option, "a cut text: %v", fault)
-	_, fault = json.walk_resume(src, &cursor, .Json, {}, &h, nil, walktest.stopping_hook)
+	_, fault = json.walk_resume(src, &cursor, .Json, {}, &h, nil, testkit.stopping_hook)
 	testing.expectf(t, fault == nil && len(h.tokens) == 4, "resumed: %v after %d tokens", fault, len(h.tokens))
 	none := json.Cursor{stack = stack[:]}
-	_, fault = json.walk_resume(src, &none, .Json, {}, &h, nil, walktest.stopping_hook)
+	_, fault = json.walk_resume(src, &none, .Json, {}, &h, nil, testkit.stopping_hook)
 	f, faulted = fault.?
 	testing.expectf(t, faulted && f.kind == .Bad_Option, "no stop: %v", fault)
 }

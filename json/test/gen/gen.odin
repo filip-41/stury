@@ -5,7 +5,7 @@ package json_gen
 
 import "core:math/rand"
 import json "../.."
-import walktest "../../../walktest"
+import testkit "../../../testkit"
 
 // Writes a valid document of at most `depth` levels, with up to 3 whitespace runs between its tokens.
 text :: proc(out: ^[dynamic]u8, depth: int, spec: json.Spec) {
@@ -20,7 +20,7 @@ pretty :: proc(out: ^[dynamic]u8, depth: int, spec: json.Spec) {
 	pretty_value(out, depth, 0, 1 + rand.int_max(8), spec)
 }
 
-// Holds the bytes `walktest.mutate` writes: every byte the grammar branches on, and bytes no state accepts.
+// Holds the bytes `testkit.mutate` writes: every byte the grammar branches on, and bytes no state accepts.
 SHARP :: "\"'\\/*{}[]:,0123456789-+.eEtrufalsnINx$_ \t\r\n\v\xa0\xa8u\x00\x1f\x7f\x80\xbf\xc0\xc2\xe0\xe2\xed\xf0\xf4\xf5\xff"
 
 @(private)
@@ -31,7 +31,7 @@ ws :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 		} else if spec == .Json5 && rand.int_max(3) == 0 {
 			append(out, rand.choice(WS5))
 		} else {
-			append(out, walktest.pick(" \t\r\n"))
+			append(out, testkit.pick(" \t\r\n"))
 		}
 	}
 }
@@ -57,7 +57,7 @@ comment :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 		// A `/` after `*` would close a block comment early, so a block comment writes no `/` piece.
 		append(out, rand.choice(PIECES) if block || rand.int_max(3) != 0 else rand.choice([]string{"/", "//", "/*", "*/"}))
 		if block && rand.int_max(6) == 0 {
-			append(out, walktest.pick("\r\n"))
+			append(out, testkit.pick("\r\n"))
 		}
 	}
 	ends := []string{"\n", "\r", "\r\n", "\u2028", "\u2029"}
@@ -227,25 +227,25 @@ num :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 	if rand.int_max(4) == 0 {
 		append(out, '0')
 	} else {
-		append(out, walktest.pick("123456789"))
+		append(out, testkit.pick("123456789"))
 		digits(out)
 	}
 	if rand.int_max(3) == 0 {
 		append(out, '.')
-		append(out, walktest.pick("0123456789"))
+		append(out, testkit.pick("0123456789"))
 		digits(out)
 	}
 	if rand.int_max(3) == 0 {
-		append(out, walktest.pick("eE"))
+		append(out, testkit.pick("eE"))
 		if rand.int_max(2) == 0 {
-			append(out, walktest.pick("+-"))
+			append(out, testkit.pick("+-"))
 		}
 		// Up to 11 leading zeros make a long exponent with a small value, which the current tree caps.
 		for _ in 0 ..< rand.int_max(12) {
 			append(out, '0')
 		}
 		for _ in 0 ..< 1 + rand.int_max(3) {
-			append(out, walktest.pick("0123456789"))
+			append(out, testkit.pick("0123456789"))
 		}
 	}
 }
@@ -254,7 +254,7 @@ num :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 @(private)
 digits :: proc(out: ^[dynamic]u8) {
 	for _ in 0 ..< rand.int_max(20) {
-		append(out, walktest.pick("0123456789"))
+		append(out, testkit.pick("0123456789"))
 	}
 }
 
@@ -263,26 +263,26 @@ digits :: proc(out: ^[dynamic]u8) {
 @(private)
 num5 :: proc(out: ^[dynamic]u8) {
 	if rand.int_max(2) == 0 {
-		append(out, walktest.pick("+-"))
+		append(out, testkit.pick("+-"))
 	}
 	switch rand.int_max(5) {
 	case 0:
 		append(out, rand.choice([]string{"0x", "0X"}))
 		for _ in 0 ..< 1 + rand.int_max(17) {
-			append(out, walktest.pick("0123456789abcdefABCDEF"))
+			append(out, testkit.pick("0123456789abcdefABCDEF"))
 		}
 	case 1:
 		append(out, rand.choice([]string{"Infinity", "NaN"}))
 	case 2:
 		append(out, '.')
-		append(out, walktest.pick("0123456789"))
+		append(out, testkit.pick("0123456789"))
 		digits(out)
 	case:
-		append(out, walktest.pick("0123456789"))
+		append(out, testkit.pick("0123456789"))
 		append(out, '.')
 	}
 	if rand.int_max(4) == 0 && out[len(out) - 1] - '0' < 10 || out[len(out) - 1] == '.' {
-		append(out, walktest.pick("eE"))
-		append(out, walktest.pick("123456789"))
+		append(out, testkit.pick("eE"))
+		append(out, testkit.pick("123456789"))
 	}
 }

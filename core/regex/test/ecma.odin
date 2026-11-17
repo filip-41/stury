@@ -296,18 +296,43 @@ test_ecma_search_is_capped_by_memory :: proc(t: ^testing.T) {
 
 @(test)
 test_ecma_counted_search_is_bounded :: proc(t: ^testing.T) {
-	// Nested counted repeats multiply the pairs a search visits. The search gives up with the memory error within a
-	// bound linear in the program and the text. Each search uses its whole work budget, so few patterns are run: the
-	// lazy and wider spellings of the first reach the same budget in the same code.
+	// Nested counted repeats multiply the pairs a search visits. A search that reads groups, or one under a look-ahead,
+	// gives up with the memory error within a bound linear in the program and the text. Each search uses its whole work
+	// budget, so few patterns are run: the lazy and wider spellings of the first reach the same budget in the same code.
 	letters := strings.repeat("a", 3_000, context.temp_allocator)
 	text := strings.concatenate({letters, "cbx"}, context.temp_allocator)
 	for pattern in ([?]string{`((a{1,100}){1,100}){1,100}b`, `(?=(?:a{1,200}){1,200})x`}) {
 		for whether in ([?]bool{false, true}) {
+			if whether && pattern[1] != '?' {
+				continue
+			}
 			f := search(pattern, text, whether = whether)
 			testing.expectf(t, f.err == "fail to memory allocation" && f.resumes <= 1 << 26, "%q: %q after %d", pattern, f.err, f.resumes)
 		}
 	}
 	testing.expect_value(t, search(`^(a{1,1000}){1,1000}b`, strings.concatenate({letters[:500], "b"}, context.temp_allocator)).hi, 501)
+}
+
+// A search that reads no bounds decides the counted repeats that the backtracker's budget or memory leaves undecided.
+@(test)
+test_ecma_counted_whether_is_decided :: proc(t: ^testing.T) {
+	Case :: struct {
+		pattern, piece: string,
+		times:          int,
+		tail:           string,
+		found:          bool,
+	}
+	cases := [?]Case {
+		{`((a{1,100}){1,100}){1,100}b`, "a", 3_000, "cbx", false},
+		{`((a{1,100}){1,100}){1,100}b`, "a", 3_000, "b", true},
+		{`(?:a|b){1000}`, "x", 1 << 20, "", false},
+		{`(?:a|b){1000}`, "ab", 1 << 19, "", true},
+	}
+	for c in cases {
+		text := strings.concatenate({strings.repeat(c.piece, c.times, context.temp_allocator), c.tail}, context.temp_allocator)
+		f := search(c.pattern, text, whether = true)
+		testing.expectf(t, f.err == "" && (f.hi >= 0) == c.found, "%q on %d of %q: %q, %v", c.pattern, c.times, c.piece, f.err, f.hi >= 0)
+	}
 }
 
 // Advances the generator state `state` and returns a draw from 0..<n.

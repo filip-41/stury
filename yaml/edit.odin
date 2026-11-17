@@ -714,16 +714,6 @@ comment_line :: proc(src: []u8, ls: u64) -> (col: int, ok: bool) {
 	return int(i - ls), i < u64(len(src)) && src[i] == '#'
 }
 
-// Whether the line at `ls` holds only spaces, tabs and a carriage return.
-@(private)
-blank_line :: proc(src: []u8, ls: u64) -> bool {
-	i := ls
-	for i < u64(len(src)) && (src[i] == ' ' || src[i] == '\t' || src[i] == '\r') {
-		i += 1
-	}
-	return i >= u64(len(src)) || src[i] == '\n'
-}
-
 @(private)
 put_spaces_to :: proc(b: ^[dynamic]u8, n: int) {
 	for _ in 0 ..< n {

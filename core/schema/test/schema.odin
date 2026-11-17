@@ -16,7 +16,7 @@ import typed "../../typed"
 import write "../../write"
 import schema ".."
 import json "../../../json"
-import walktest "../../../walktest"
+import testkit "../../../testkit"
 
 @(private = "file")
 SUITE :: #directory + "conformance/JSON-Schema-Test-Suite/tests/"
@@ -1077,13 +1077,13 @@ Typed_Spelling :: struct {
 corpus_plans :: proc() -> map[Typed_Spelling]typed.Plan {
 	plans := make(map[Typed_Spelling]typed.Plan, context.temp_allocator)
 	for enums in typed.Enum_Spelling {
-		plans[{Corpus_Tie, enums}] = walktest.ruled_plan(Corpus_Tie, enums)
-		plans[{Corpus_Formats, enums}] = walktest.ruled_plan(Corpus_Formats, enums)
-		plans[{Corpus_Whole, enums}] = walktest.ruled_plan(Corpus_Whole, enums)
-		plans[{Corpus_Narrow, enums}] = walktest.ruled_plan(Corpus_Narrow, enums)
-		plans[{Corpus_Keys, enums}] = walktest.ruled_plan(Corpus_Keys, enums)
-		plans[{Corpus_Gap, enums}] = walktest.ruled_plan(Corpus_Gap, enums)
-		plans[{Corpus_Enum_Keys, enums}] = walktest.ruled_plan(Corpus_Enum_Keys, enums)
+		plans[{Corpus_Tie, enums}] = testkit.ruled_plan(Corpus_Tie, enums)
+		plans[{Corpus_Formats, enums}] = testkit.ruled_plan(Corpus_Formats, enums)
+		plans[{Corpus_Whole, enums}] = testkit.ruled_plan(Corpus_Whole, enums)
+		plans[{Corpus_Narrow, enums}] = testkit.ruled_plan(Corpus_Narrow, enums)
+		plans[{Corpus_Keys, enums}] = testkit.ruled_plan(Corpus_Keys, enums)
+		plans[{Corpus_Gap, enums}] = testkit.ruled_plan(Corpus_Gap, enums)
+		plans[{Corpus_Enum_Keys, enums}] = testkit.ruled_plan(Corpus_Enum_Keys, enums)
 	}
 	return plans
 }
@@ -1135,7 +1135,7 @@ schema_check_agrees_with_model_load :: proc(t: ^testing.T) {
 		plan := plans[{c.type, c.enums}]
 		target := make([]u8, size_of(Corpus_Keys))
 		loaded := typed.check_text(transmute([]u8)c.text, raw_data(target), c.type, &plan, {}) == nil
-		d, described := walktest.description_of(&plan)
+		d, described := testkit.description_of(&plan)
 		testing.expect(t, described == nil)
 		compiled, _ := schema.compile_description(&d)
 		defer schema.destroy(compiled)
@@ -1563,12 +1563,12 @@ schema_check_agrees_on_json5_numbers :: proc(t: ^testing.T) {
 		{Json5_Count, `{n: -0x1}`, false},
 		{Json5_Count, `{n: 0x1}`, true},
 	}
-	plans := [?]typed.Plan{walktest.ruled_plan(Json5_Bound, checks = json.checks(.Json5)), walktest.ruled_plan(Json5_Count, checks = json.checks(.Json5))}
+	plans := [?]typed.Plan{testkit.ruled_plan(Json5_Bound, checks = json.checks(.Json5)), testkit.ruled_plan(Json5_Count, checks = json.checks(.Json5))}
 	for c in cases {
 		plan := plans[0 if c.type == Json5_Bound else 1]
 		target := make([]u8, size_of(Json5_Bound))
 		loaded := typed.check_text(transmute([]u8)c.text, raw_data(target), c.type, &plan, {}) == nil
-		d, _ := walktest.description_of(&plan)
+		d, _ := testkit.description_of(&plan)
 		compiled, _ := schema.compile_description(&d)
 		defer schema.destroy(compiled)
 		b, bound := schema.bind(compiled, json.checks(.Json5))
@@ -1887,20 +1887,20 @@ schema_write_reads_back_to_described_types :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	plans := corpus_plans()
 	for enums in typed.Enum_Spelling {
-		plans[{Written_Tree, enums}] = walktest.ruled_plan(Written_Tree, enums)
-		plans[{Written_Member, enums}] = walktest.ruled_plan(Written_Member, enums)
-		plans[{Written_Merge, enums}] = walktest.ruled_plan(Written_Merge, enums)
+		plans[{Written_Tree, enums}] = testkit.ruled_plan(Written_Tree, enums)
+		plans[{Written_Member, enums}] = testkit.ruled_plan(Written_Member, enums)
+		plans[{Written_Merge, enums}] = testkit.ruled_plan(Written_Merge, enums)
 	}
 	for key, &plan in plans {
-		d, described := walktest.description_of(&plan)
+		d, described := testkit.description_of(&plan)
 		testing.expect(t, described == nil)
 		back, text, refused := written_back(t, &d)
 		testing.expectf(t, refused == "", "%v: %s", key.type, refused)
 		seen: Pairs
 		testing.expectf(t, same_schema(&d, back.description, d.root, back.description.root, &seen, true), "%v %v: %s", key.type, key.enums, text)
 	}
-	plan := walktest.ruled_plan(Written_Merge)
-	d, _ := walktest.description_of(&plan)
+	plan := testkit.ruled_plan(Written_Merge)
+	d, _ := testkit.description_of(&plan)
 	back, text, _ := written_back(t, &d)
 	b, bound := schema.bind(back, json.checks(.Json))
 	testing.expect(t, bound == nil)
@@ -2019,12 +2019,12 @@ schema_check_reads_markup :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	readers := json.as(.Json).readers^
 	readers.holds += {.Attribute}
-	readers.attribute = walktest.markup_attribute
+	readers.attribute = testkit.markup_attribute
 	markup := json.as(.Json)
 	markup.readers = &readers
 	cases := [?]struct {
 		schema, model, form: string,
-		attributes:          []walktest.Markup_Attribute,
+		attributes:          []testkit.Markup_Attribute,
 		errors:              int,
 		bind:                string, // a member whose record binds `node`, as `xml.nodeType` would
 		node:                typed.Markup_Node,
@@ -2069,7 +2069,7 @@ schema_check_reads_markup :: proc(t: ^testing.T) {
 				bound.plan.uses[i].node = c.node
 			}
 		}
-		doc := walktest.markup_doc(c.model, c.attributes, &readers)
+		doc := testkit.markup_doc(c.model, c.attributes, &readers)
 		defer core.destroy(&doc)
 		from_doc, from_form: typed.Sink
 		defer typed.sink_destroy(&from_doc)
@@ -2089,12 +2089,12 @@ markup_attributes_survive_an_edit :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	readers := json.as(.Json).readers^
 	readers.holds += {.Attribute}
-	readers.attribute = walktest.markup_attribute
+	readers.attribute = testkit.markup_attribute
 	services := readers.services^
 	edit := services.edit^
 	edit.validate = proc "contextless" (_: []u8, _: core.As) -> Maybe(core.Fault) { return nil }
 	services.edit, readers.services = &edit, &services
-	doc := walktest.markup_doc(`{"price": "5", "n": 1}`, {{2, `currency="EUR"`}}, &readers)
+	doc := testkit.markup_doc(`{"price": "5", "n": 1}`, {{2, `currency="EUR"`}}, &readers)
 	defer core.destroy(&doc)
 	it := core.facts_of(&doc, 2, .Attribute)
 	body, _ := core.fact_next(&it)
@@ -2314,4 +2314,15 @@ schema_rules_merge_equal_bounds :: proc(t: ^testing.T) {
 	r, clash := rules.merged(&rules.Node{rules = {minimum = "1", maximum = "2.0", exclusive_maximum = true}}, {minimum = "1.0", exclusive_minimum = true, maximum = "2"})
 	testing.expect_value(t, clash, "")
 	testing.expect(t, r.minimum == "1.0" && r.exclusive_minimum && r.maximum == "2.0" && r.exclusive_maximum, "merged bounds")
+}
+
+// Arms that judge one container alike share a run, and a fork a run's own check reopened is not their lead.
+@(test)
+schema_arms_of_one_container_do_not_follow_themselves :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	text := `{"if": {"allOf": [{"anyOf": [{"not": true}]}, {"type": ["array"], "oneOf": [{}]}]}, "then": {"patternProperties": {"b$": false}, "if": {"not": {}}, "else": {}}}`
+	ch, err := checked_make(text)
+	testing.expect(t, err == nil)
+	defer checked_destroy(ch)
+	testing.expect(t, schema.valid(&ch.bound, transmute([]u8)string(`{"a": {"a": 5, "ab": "abc", "b": false}, "c": []}`)))
 }

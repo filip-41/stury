@@ -10,7 +10,7 @@ import write "../../core/write"
 import records "../../core/records"
 import dsv ".."
 import json "../../json"
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // The typed write of a delimited text: the bytes of each spec, each cell rule and refusal, the layout options, and the
 // read of what was written.
@@ -53,7 +53,7 @@ Write_Case :: struct {
 expect_writes :: proc(t: ^testing.T, cases: []Write_Case, loc := #caller_location) {
 	for c in cases {
 		got, err := dsv.marshal(c.value, c.spec, c.layout, write = {}, allocator = context.temp_allocator)
-		testing.expectf(t, walktest.typed_kind(err) == c.kind && string(got) == c.want, "%v %v %v: %v %q, want %v %q", c.value, c.spec, c.layout, err, got, c.kind, c.want, loc = loc)
+		testing.expectf(t, testkit.typed_kind(err) == c.kind && string(got) == c.want, "%v %v %v: %v %q, want %v %q", c.value, c.spec, c.layout, err, got, c.kind, c.want, loc = loc)
 	}
 }
 
@@ -89,7 +89,7 @@ rows_write_a_header_then_records :: proc(t: ^testing.T) {
 		{[]struct {a: []int}{}, .Csv, {}, "", .Unsupported},
 	})
 	got, err := dsv.marshal([]struct {b, a: int}{{1, 2}}, .Csv, {}, write = {sort_keys = true}, allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(got), "a,b\n2,1\n")
 }
 
@@ -125,7 +125,7 @@ cells_follow_the_spec :: proc(t: ^testing.T) {
 		{[]Float{{max(f64) * 2}}, .Csv, {}, "", .Non_Finite},
 	})
 	got, err := dsv.marshal([]One{{long}}, .Csv, {no_header = true}, write = {}, allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, len(got), 2 + 700 * 4 + 1)
 }
 
@@ -133,24 +133,24 @@ cells_follow_the_spec :: proc(t: ^testing.T) {
 @(test)
 refusals_name_their_steps :: proc(t: ^testing.T) {
 	_, err := dsv.marshal([]Opt{{}}, .Csv, {no_header = true}, write = {}, allocator = context.temp_allocator)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
-	testing.expect_value(t, walktest.typed_of(err).n_steps, u8(1))
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
+	testing.expect_value(t, testkit.typed_of(err).n_steps, u8(1))
 	_, err = dsv.marshal([]Float{{1}, {max(f64) * 2}}, .Csv, {}, write = {}, allocator = context.temp_allocator)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Non_Finite)
-	testing.expect_value(t, walktest.typed_of(err).n_steps, u8(2))
-	testing.expect_value(t, walktest.typed_of(err).steps[0], core.Step(core.Index(1)))
-	testing.expect_value(t, walktest.typed_of(err).steps[1], core.Step(core.Name("f")))
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Non_Finite)
+	testing.expect_value(t, testkit.typed_of(err).n_steps, u8(2))
+	testing.expect_value(t, testkit.typed_of(err).steps[0], core.Step(core.Index(1)))
+	testing.expect_value(t, testkit.typed_of(err).steps[1], core.Step(core.Name("f")))
 	// A list row of another width than the first, which a read without `.Ragged` refuses.
 	_, err = dsv.marshal([][]string{{"a", "b"}, {"c", "d"}, {"e"}}, .Csv, {}, write = {}, allocator = context.temp_allocator)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Wrong_Length)
-	testing.expect_value(t, walktest.typed_of(err).n_steps, u8(1))
-	testing.expect_value(t, walktest.typed_of(err).steps[0], core.Step(core.Index(2)))
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Wrong_Length)
+	testing.expect_value(t, testkit.typed_of(err).n_steps, u8(1))
+	testing.expect_value(t, testkit.typed_of(err).steps[0], core.Step(core.Index(2)))
 	plan, _ := dsv.plan_make([]string, .Csv, allocator = context.temp_allocator)
 	_, err = records.marshal([][]string{{"a"}, {"b", "c"}}, &plan, dsv.as(.Csv), allocator = context.temp_allocator)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Wrong_Length)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Wrong_Length)
 	ragged, _ := dsv.plan_make([]string, .Csv, {tolerate = {.Ragged}}, allocator = context.temp_allocator)
 	text, rerr := records.marshal([][]string{{"a"}, {"b", "c"}}, &ragged, dsv.as(.Csv, {tolerate = {.Ragged}}), allocator = context.temp_allocator)
-	walktest.expect_nil(t, rerr)
+	testkit.expect_nil(t, rerr)
 	testing.expect_value(t, string(text), "a\nb,c\n")
 }
 
@@ -163,10 +163,10 @@ hook_stand_ins_are_cells :: proc(t: ^testing.T) {
 		return (^i32)(v)^, .None
 	}}}
 	plan, err := dsv.plan_make([]Row, .Csv, {}, plan = {hooks = hooks}, allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer typed.plan_destroy(&plan)
 	got, werr := write.marshal([]Row{{h = 5, s = Hooked(6)}}, &plan, {}, context.temp_allocator)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, string(got), "h,s\n5,6\n")
 }
 
@@ -182,7 +182,7 @@ stream_output_matches_buffer :: proc(t: ^testing.T) {
 	strings.builder_init(&b, context.temp_allocator)
 	plan, _ := dsv.plan_make([]Row, .Csv, allocator = context.temp_allocator)
 	err := write.marshal_stream(strings.to_stream(&b), rows, &plan)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, strings.to_string(b), string(want))
 }
 
@@ -202,7 +202,7 @@ written_text_reads_back :: proc(t: ^testing.T) {
 
 round_trip :: proc(t: ^testing.T, rows: []Write_Row, spec: dsv.Spec, layout: dsv.Options, loc := #caller_location) {
 	text, err := dsv.marshal(rows, spec, layout, write = {}, allocator = context.temp_allocator)
-	walktest.expect_nil(t, err, loc)
+	testkit.expect_nil(t, err, loc)
 	back: []Write_Row
 	var_err: core.Error
 	switch spec {
@@ -213,7 +213,7 @@ round_trip :: proc(t: ^testing.T, rows: []Write_Row, spec: dsv.Spec, layout: dsv
 	case .Plain:
 		var_err = dsv.unmarshal(text, .Plain, &back, read = {}, opts = layout, allocator = context.temp_allocator)
 	}
-	walktest.expect_nil(t, var_err, loc)
+	testkit.expect_nil(t, var_err, loc)
 	testing.expect_value(t, len(back), len(rows), loc)
 	for r, i in rows {
 		if i < len(back) {
@@ -328,7 +328,7 @@ documents_write :: proc(t: ^testing.T) {
 				return
 			}
 			text, dropped, werr := core.write(&doc, c.opts, c.as, allocator = context.temp_allocator)
-			testing.expectf(t, walktest.typed_kind(werr) == c.kind && string(text) == c.want && dropped == c.dropped, "%q: %v %q with %d dropped, want %v %q with %d", c.src, werr, text, dropped, c.kind, c.want, c.dropped)
+			testing.expectf(t, testkit.typed_kind(werr) == c.kind && string(text) == c.want && dropped == c.dropped, "%q: %v %q with %d dropped, want %v %q with %d", c.src, werr, text, dropped, c.kind, c.want, c.dropped)
 		}
 	}
 }
@@ -341,7 +341,7 @@ Marshal_Try :: struct {
 marshal_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
 	m := (^Marshal_Try)(data)
 	text, err := dsv.marshal(m.value, .Csv, {}, write = m.opts, allocator = allocator)
-	return text, walktest.typed_kind(err)
+	return text, testkit.typed_kind(err)
 }
 
 Sweep_Row :: struct {
@@ -360,14 +360,14 @@ marshal_under_failing_allocators :: proc(t: ^testing.T) {
 	for c in ([?]Marshal_Try{{rows, {}}, {rows, {sort_keys = true}}, {keyed, {}}}) {
 		c := c
 		want, err := dsv.marshal(c.value, .Csv, {}, write = c.opts, allocator = context.temp_allocator)
-		walktest.expect_nil(t, err)
-		walktest.sweep_write(t, marshal_try, &c, string(want))
+		testkit.expect_nil(t, err)
+		testkit.sweep_write(t, marshal_try, &c, string(want))
 	}
 }
 
 document_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
 	text, _, err := core.write((^core.Document)(data), {}, dsv.as(.Csv), allocator = allocator)
-	return text, walktest.typed_kind(err)
+	return text, testkit.typed_kind(err)
 }
 
 @(test)
@@ -375,32 +375,32 @@ document_under_failing_allocators :: proc(t: ^testing.T) {
 	long := strings.repeat("k", 600, context.temp_allocator)
 	headed, herr := core.build(transmute([]u8)string("a,b\n1,\"x y\"\n2,3\n"), dsv.as(.Csv))
 	defer core.destroy(&headed)
-	walktest.expect_nil(t, herr)
+	testkit.expect_nil(t, herr)
 	src := strings.concatenate({`[{"`, long, `":1,"b":"`, long, `"},{"b":null}]`}, context.temp_allocator)
 	foreign_doc, ferr := json.build(transmute([]u8)src, .Json)
 	defer core.destroy(&foreign_doc)
-	walktest.expect_nil(t, ferr)
+	testkit.expect_nil(t, ferr)
 	for doc in ([?]^core.Document{&headed, &foreign_doc}) {
 		want, _, err := core.write(doc, {}, dsv.as(.Csv), allocator = context.temp_allocator)
-		walktest.expect_nil(t, err)
-		walktest.sweep_write(t, document_try, doc, string(want))
+		testkit.expect_nil(t, err)
+		testkit.sweep_write(t, document_try, doc, string(want))
 	}
 }
 
 // A write that succeeds leaves nothing on the temporary allocator, which a caller may never free.
 @(test)
 write_keeps_off_the_temporary_allocator :: proc(t: ^testing.T) {
-	f := walktest.Failing_Alloc{inner = context.temp_allocator, fail_at = -1}
-	context.temp_allocator = walktest.failing_allocator(&f)
+	f := testkit.Failing_Alloc{inner = context.temp_allocator, fail_at = -1}
+	context.temp_allocator = testkit.failing_allocator(&f)
 	text, err := dsv.marshal([]Sweep_Row{{1, "a"}}, allocator = context.allocator)
 	defer delete(text)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	doc, derr := json.build(transmute([]u8)string(`[{"a":1}]`), .Json)
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, derr)
+	testkit.expect_nil(t, derr)
 	again, _, werr := core.write(&doc, as = dsv.as(.Csv))
 	defer delete(again)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, f.n, 0)
 }
 
@@ -413,13 +413,13 @@ header_of_one_empty_name :: proc(t: ^testing.T) {
 	rows := []map[string]string{row}
 	for spec in ([?]dsv.Spec{.Tsv, .Plain}) {
 		_, err := dsv.marshal(rows, spec, {}, write = {}, allocator = context.temp_allocator)
-		walktest.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
+		testkit.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
 	}
 	text, err := dsv.marshal(rows, .Csv, {}, write = {}, allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	doc, derr := core.build(text, dsv.as(.Csv))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, derr)
+	testkit.expect_nil(t, derr)
 	testing.expect_value(t, core.length(&doc, core.ROOT), 1)
 }
 
@@ -428,14 +428,14 @@ header_of_one_empty_name :: proc(t: ^testing.T) {
 failed_write_counts_nothing :: proc(t: ^testing.T) {
 	doc, err := core.build(transmute([]u8)string("# c\na\n1\n"), dsv.as(.Csv, {comment = '#'}))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	counted, dropped, kerr := core.write(&doc, as = dsv.as(.Csv), allocator = context.temp_allocator)
-	walktest.expect_nil(t, kerr)
+	testkit.expect_nil(t, kerr)
 	testing.expect_value(t, string(counted), "a\n1\n")
 	testing.expect_value(t, dropped, 1)
-	closed := io.Stream{procedure = walktest.refusing_stream}
+	closed := io.Stream{procedure = testkit.refusing_stream}
 	lost, serr := core.write_stream(closed, &doc, as = dsv.as(.Csv))
-	walktest.expect_kind(t, serr, core.Typed_Error_Kind.Write_Failed)
+	testkit.expect_kind(t, serr, core.Typed_Error_Kind.Write_Failed)
 	testing.expect_value(t, lost, 0)
 }
 
@@ -444,22 +444,22 @@ failed_write_counts_nothing :: proc(t: ^testing.T) {
 document_streams :: proc(t: ^testing.T) {
 	doc, err := core.build(transmute([]u8)string("a,b\n1,\"x,y\"\n"), dsv.as(.Csv))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	b := strings.builder_make(context.temp_allocator)
 	_, serr := core.write_stream(strings.to_stream(&b), &doc)
-	walktest.expect_nil(t, serr)
+	testkit.expect_nil(t, serr)
 	testing.expect_value(t, strings.to_string(b), "a,b\n1,\"x,y\"\n")
 	strings.builder_reset(&b)
 	_, derr := core.write_stream(strings.to_stream(&b), &doc, as = dsv.as(.Tsv))
-	walktest.expect_nil(t, derr)
+	testkit.expect_nil(t, derr)
 	testing.expect_value(t, strings.to_string(b), "a\tb\n1\tx,y\n")
 }
 
 // A cell that ends at an unmapped page is written as it is when it is copied elsewhere: no read passes its last byte.
 @(test)
 cells_at_the_end_of_a_page :: proc(t: ^testing.T) {
-	fence := walktest.fence_init()
-	defer walktest.unfence(&fence)
+	fence := testkit.fence_init()
+	defer testkit.unfence(&fence)
 	for stop in ([?]u8{'a', ',', '"', '\t', '\\', 0xC3, '\n'}) {
 		for n in 0 ..< 70 {
 			body := make([]u8, n, context.temp_allocator)
@@ -475,12 +475,12 @@ cells_at_the_end_of_a_page :: proc(t: ^testing.T) {
 					body[n - 2] = 0xC3
 				}
 			}
-			fenced := string(walktest.fence_copy(&fence, body))
+			fenced := string(testkit.fence_copy(&fence, body))
 			plain := strings.clone(string(body), context.temp_allocator)
 			for spec in ([?]dsv.Spec{.Csv, .Tsv, .Plain}) {
 				want, werr := dsv.marshal([][]string{{plain}}, spec, {}, write = {}, allocator = context.temp_allocator)
 				got, gerr := dsv.marshal([][]string{{fenced}}, spec, {}, write = {}, allocator = context.temp_allocator)
-				testing.expect_value(t, walktest.typed_kind(gerr), walktest.typed_kind(werr))
+				testing.expect_value(t, testkit.typed_kind(gerr), testkit.typed_kind(werr))
 				testing.expect_value(t, string(got), string(want))
 			}
 			free_all(context.temp_allocator)

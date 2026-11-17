@@ -6,7 +6,7 @@ import compose "../../core/compose"
 import typed "../../core/typed"
 import write "../../core/write"
 import dsv ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // The plan and marshal entry points accept a valid input. The other entry points run in `constant_forms`.
 
@@ -20,16 +20,16 @@ plan_and_marshal_accept_valid_input :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("a,b\n1,2\n")
 	rows: []Entry_Row
 	defer delete(rows)
-	walktest.expect_nil(t, dsv.unmarshal(src, .Csv, &rows))
+	testkit.expect_nil(t, dsv.unmarshal(src, .Csv, &rows))
 	plan, plerr := dsv.plan_make([]Entry_Row, .Csv)
-	walktest.expect_nil(t, plerr)
+	testkit.expect_nil(t, plerr)
 	defer typed.plan_destroy(&plan)
 	again: []Entry_Row
 	defer delete(again)
-	walktest.expect_nil(t, dsv.unmarshal(src, .Csv, &again, &plan))
+	testkit.expect_nil(t, dsv.unmarshal(src, .Csv, &again, &plan))
 
 	text, merr := dsv.marshal(rows, .Csv)
-	walktest.expect_nil(t, merr)
+	testkit.expect_nil(t, merr)
 	delete(text)
 }
 
@@ -39,66 +39,66 @@ plan_and_marshal_accept_valid_input :: proc(t: ^testing.T) {
 constant_forms :: proc(t: ^testing.T, $S: dsv.Spec, text, edited: string) {
 	src := transmute([]u8)text
 	path, perr := core.parse_path(".[0].a")
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	defer core.path_destroy(&path)
 	paths := [?]core.Path{path}
 
-	walktest.expect_nil(t, dsv.validate(src, S))
+	testkit.expect_nil(t, dsv.validate(src, S))
 	testing.expect(t, dsv.validate(src, S, {delimiter = '\n'}) != nil)
 
 	doc, berr := dsv.build(src, S)
-	walktest.expect_nil(t, berr)
+	testkit.expect_nil(t, berr)
 	defer core.destroy(&doc)
 	answers, qerr := dsv.query(&doc, path)
-	walktest.expect_nil(t, qerr)
+	testkit.expect_nil(t, qerr)
 	defer delete(answers)
 	if testing.expect_value(t, len(answers), 1) {
 		list := dsv.edit_list_init(&doc, S)
 		defer core.edit_list_destroy(&list)
-		walktest.expect_nil(t, write.set_node(&list, answers[0].node, typed.Raw("7")))
+		testkit.expect_nil(t, write.set_node(&list, answers[0].node, typed.Raw("7")))
 		out, _, cerr := compose.commit(&list)
 		defer delete(out)
-		walktest.expect_nil(t, cerr)
+		testkit.expect_nil(t, cerr)
 		testing.expect_value(t, string(out), edited)
 	}
 	written, _, werr := dsv.write(&doc, S)
 	defer delete(written)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, string(written), text)
 
 	sdoc, serr := dsv.scan(src, S, path)
-	walktest.expect_nil(t, serr)
+	testkit.expect_nil(t, serr)
 	core.destroy(&sdoc)
 	mdoc, merr := dsv.scan(src, S, paths[:])
-	walktest.expect_nil(t, merr)
+	testkit.expect_nil(t, merr)
 	core.destroy(&mdoc)
-	walktest.expect_nil(t, dsv.each_answer(src, S, path, nil, walktest.take_first))
-	walktest.expect_nil(t, dsv.each_answer(src, S, paths[:], nil, walktest.take_first))
+	testkit.expect_nil(t, dsv.each_answer(src, S, path, nil, testkit.take_first))
+	testkit.expect_nil(t, dsv.each_answer(src, S, paths[:], nil, testkit.take_first))
 	fdoc, found, ferr := dsv.find(src, S, path)
-	walktest.expect_nil(t, ferr)
+	testkit.expect_nil(t, ferr)
 	testing.expect(t, found.outcome == .Found)
 	core.destroy(&fdoc)
 	out, oerr := dsv.set(src, S, path, typed.Raw("7"))
-	walktest.expect_nil(t, oerr)
+	testkit.expect_nil(t, oerr)
 	testing.expect_value(t, string(out), edited)
 	delete(out)
 
 	rows: []Entry_Row
 	defer delete(rows)
-	walktest.expect_nil(t, dsv.unmarshal(src, S, &rows))
+	testkit.expect_nil(t, dsv.unmarshal(src, S, &rows))
 	if testing.expect_value(t, len(rows), 1) {
 		testing.expect_value(t, rows[0], Entry_Row{1, 2})
 	}
 	plan, plerr := dsv.plan_make([]Entry_Row, S, reads = dsv.reads(S))
-	walktest.expect_nil(t, plerr)
+	testkit.expect_nil(t, plerr)
 	defer typed.plan_destroy(&plan)
 	again, checked, slot: []Entry_Row
 	defer delete(again)
 	defer delete(checked)
 	defer delete(slot)
-	walktest.expect_nil(t, dsv.unmarshal(src, S, &again, &plan))
-	walktest.expect_nil(t, dsv.check(src, S, &checked, &plan))
-	walktest.expect_nil(t, typed.unmarshal_text(src, &slot, []Entry_Row, &plan, {}))
+	testkit.expect_nil(t, dsv.unmarshal(src, S, &again, &plan))
+	testkit.expect_nil(t, dsv.check(src, S, &checked, &plan))
+	testkit.expect_nil(t, typed.unmarshal_text(src, &slot, []Entry_Row, &plan, {}))
 	testing.expect_value(t, len(again), 1)
 	testing.expect_value(t, len(checked), 1)
 	testing.expect_value(t, len(slot), 1)
@@ -115,10 +115,10 @@ every_constant_form_serves_every_spec :: proc(t: ^testing.T) {
 @(test)
 destroy_serves_each_owner :: proc(t: ^testing.T) {
 	doc, err := dsv.build(transmute([]u8)string("a,b\n1,2\n"), .Csv)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	list := dsv.edit_list_init(&doc, .Csv)
 	path, perr := dsv.parse_path(".[0].a")
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	dsv.destroy(&path)
 	dsv.destroy(&list)
 	dsv.destroy(&doc)
@@ -139,7 +139,7 @@ record_forms :: proc(t: ^testing.T, $S: dsv.Spec) {
 	n := 0
 	for rec in dsv.records_next(&it) {
 		doc, derr := dsv.records_build(&it, rec)
-		walktest.expect_nil(t, derr)
+		testkit.expect_nil(t, derr)
 		dsv.destroy(&doc)
 		n += 1
 	}
@@ -161,5 +161,5 @@ a_nil_any_is_refused_as_a_null :: proc(t: ^testing.T) {
 	nothing: any
 	text, err := dsv.marshal(nothing, allocator = context.temp_allocator)
 	testing.expect(t, text == nil)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
 }

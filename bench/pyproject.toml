@@ -1,0 +1,19 @@
+[project]
+name = "bench"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["psutil==7.2.2", "pooch==1.9.0", "tabulate==0.10.0"]
+
+[project.scripts]
+bench = "runner.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+module-name = "runner"
+
+[tool.uv]
+exclude-newer = "2026-11-03T00:00:00Z"

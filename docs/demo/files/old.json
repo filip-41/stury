@@ -1,0 +1,1 @@
+{"port": 8080, "replicas": 3, "tags": ["x"], "debug": true}

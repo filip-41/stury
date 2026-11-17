@@ -3,7 +3,7 @@ package core_test
 import "core:testing"
 import core ".."
 import json "../../json"
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // A format whose keys are the node's span with a `@` added, or `#text` for a span of none, as a markup format spells
 // attribute and text members.
@@ -62,6 +62,6 @@ synthetic_keys_read_through_the_format :: proc(t: ^testing.T) {
 	// The JSON document writer spells them through `text` too.
 	out, _, werr := core.write(&doc, as = json.as(.Json))
 	defer delete(out)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, string(out), `{"@id":"1","#text":"xy"}`)
 }

@@ -3,7 +3,7 @@ package dsv_tests
 import "core:testing"
 import core "../../core"
 import dsv ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // A comment line is the fact of the record after it, or of the root as its foot after the last record. The edits of
 // facts are in `edit.odin`.
@@ -26,7 +26,7 @@ fact_read_lines :: proc(t: ^testing.T) {
 	}) {
 		doc, err := core.build(transmute([]u8)c.src, dsv.as(.Csv, {comment = c.comment}))
 		defer core.destroy(&doc)
-		if !testing.expectf(t, err == nil, "%q: %v", c.src, err) || !walktest.body(t, &doc, c.node, c.role, c.body) {
+		if !testing.expectf(t, err == nil, "%q: %v", c.src, err) || !testkit.body(t, &doc, c.node, c.role, c.body) {
 			return
 		}
 	}

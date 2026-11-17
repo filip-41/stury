@@ -9,7 +9,7 @@ import compose "../../core/compose"
 import typed "../../core/typed"
 import write "../../core/write"
 import dsv ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // Edits over a delimited text: a cell's text, a record's line, the table's columns and the comment lines, which a commit
 // decides from the whole list. Each case records its ops on a list over `src`, commits, and expects `want` and the count
@@ -135,7 +135,7 @@ run_edit :: proc(t: ^testing.T, c: Edit_Case) -> bool {
 	defer if len(out) > 0 {
 		delete(out)
 	}
-	if !testing.expectf(t, (c.fail == .None ? got == nil : walktest.expect_kind(t, got, c.fail)), "%q %v: %v, want %v", c.src, c.ops, got, c.fail) || c.fail != .None {
+	if !testing.expectf(t, (c.fail == .None ? got == nil : testkit.expect_kind(t, got, c.fail)), "%q %v: %v, want %v", c.src, c.ops, got, c.fail) || c.fail != .None {
 		return c.fail != .None
 	}
 	if !testing.expectf(t, string(out) == c.want && dropped == c.dropped, "%q %v: committed %q with %d dropped, want %q with %d", c.src, c.ops, out, dropped, c.want, c.dropped) {
@@ -248,7 +248,7 @@ edit_wide_record :: proc(t: ^testing.T) {
 	})
 	doc, err := core.build(transmute([]u8)string("abc,de\n1,2,3\n"), dsv.as(.Csv, RAGGED))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(core.span(&doc, core.header_of(&doc))), "abc,de\n")
 }
 
@@ -393,7 +393,7 @@ edit_reads_rows :: proc(t: ^testing.T) {
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	for op in drops(7, 11) {
-		walktest.expect_nil(t, apply(&list, op))
+		testkit.expect_nil(t, apply(&list, op))
 	}
 	arena: runtime.Arena
 	defer runtime.arena_destroy(&arena)
@@ -420,11 +420,11 @@ set_and_remove_of_a_cell :: proc(t: ^testing.T) {
 			if !set_first {
 				first, second = second, first
 			}
-			walktest.expect_nil(t, apply(&list, first))
-			walktest.expect_nil(t, apply(&list, second))
+			testkit.expect_nil(t, apply(&list, first))
+			testkit.expect_nil(t, apply(&list, second))
 			out, _, e := compose.commit(&list)
 			delete(out)
-			testing.expectf(t, walktest.document_of(e).kind == .Conflicting_Edits && walktest.at_of(e) == 2, "%q set first %v: %v", text, set_first, e)
+			testing.expectf(t, testkit.document_of(e).kind == .Conflicting_Edits && testkit.at_of(e) == 2, "%q set first %v: %v", text, set_first, e)
 		}
 	}
 }
@@ -445,13 +445,13 @@ edit_no_leak :: proc(t: ^testing.T) {
 	alloc := mem.tracking_allocator(&track)
 	doc, err := core.build(transmute([]u8)string("a,b\n1,2\n3,4\n"), dsv.as(.Csv))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	list := core.edit_list_init(&doc, allocator = alloc)
 	for op in ([]Op{put(5, "9"), ins(core.ROOT, 2, "7,8"), put(6, "9")}) {
-		walktest.expect_nil(t, apply(&list, op))
+		testkit.expect_nil(t, apply(&list, op))
 	}
 	out, _, cerr := compose.commit(&list, allocator = alloc)
-	walktest.expect_nil(t, cerr)
+	testkit.expect_nil(t, cerr)
 	delete(out, allocator = alloc)
 	core.edit_list_destroy(&list)
 	testing.expectf(t, len(track.allocation_map) == 0, "%d allocations left", len(track.allocation_map))
@@ -461,8 +461,8 @@ edit_no_leak :: proc(t: ^testing.T) {
 edit_out_of_memory :: proc(t: ^testing.T) {
 	doc, _ := core.build(transmute([]u8)string("a,b\n1,2\n"), dsv.as(.Csv))
 	defer core.destroy(&doc)
-	f := walktest.Failing_Alloc{inner = context.allocator, fail_at = -1}
-	alloc := walktest.failing_allocator(&f)
+	f := testkit.Failing_Alloc{inner = context.allocator, fail_at = -1}
+	alloc := testkit.failing_allocator(&f)
 	list := core.edit_list_init(&doc, allocator = alloc)
 	defer core.edit_list_destroy(&list)
 	landed := false
@@ -474,7 +474,7 @@ edit_out_of_memory :: proc(t: ^testing.T) {
 			testing.expect_value(t, len(list.edits), 0)
 			continue
 		}
-		walktest.expect_nil(t, e)
+		testkit.expect_nil(t, e)
 		landed = true
 		break
 	}
@@ -488,7 +488,7 @@ edit_out_of_memory :: proc(t: ^testing.T) {
 		if _, oom := e.(runtime.Allocator_Error); oom {
 			continue
 		}
-		walktest.expect_nil(t, e)
+		testkit.expect_nil(t, e)
 		testing.expect_value(t, string(out), "a,b\n1,2\n7,8\n")
 		delete(out, allocator = alloc)
 		committed = true
@@ -506,7 +506,7 @@ fact_spec_change_refused :: proc(t: ^testing.T) {
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	out, _, err := compose.commit(&list, dsv.as(.Tsv))
-	walktest.expect_kind(t, err, core.Document_Error_Kind.Bad_Spec)
+	testkit.expect_kind(t, err, core.Document_Error_Kind.Bad_Spec)
 	testing.expect(t, out == nil)
 }
 
@@ -555,9 +555,9 @@ value_edit_refuses_a_cell_that_is_not_utf8 :: proc(t: ^testing.T) {
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	bad := [3]u8{'a', 0xff, 'b'}
-	walktest.expect_kind(t, write.set_node(&list, cell_node(&doc, 0, 0), transmute(string)bad[:]), core.Document_Error_Kind.Bad_Value)
+	testkit.expect_kind(t, write.set_node(&list, cell_node(&doc, 0, 0), transmute(string)bad[:]), core.Document_Error_Kind.Bad_Value)
 	out, _, err := compose.commit(&list, dsv.as(.Csv))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(out), src)
 	delete(out)
 }

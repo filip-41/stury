@@ -5,18 +5,18 @@ import "core:fmt"
 import "core:testing"
 import core "../../core"
 import xml ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private)
-walk_stopping :: proc(text: string, skip: string, stop, every, _: int) -> (h: walktest.Stopping, end: string) {
+walk_stopping :: proc(text: string, skip: string, stop, every, _: int) -> (h: testkit.Stopping, end: string) {
 	src := transmute([]u8)text
-	h = walktest.Stopping{src = src, skip = skip, stop = stop, every = every}
+	h = testkit.Stopping{src = src, skip = skip, stop = stop, every = every}
 	h.tokens = make([dynamic]core.Token, 0, 64)
 	regs: core.Hook_Regs
 	cursor: xml.Cursor
-	hi, fault := xml.walk(src, 0, .Xml, {}, &h, &regs, walktest.stopping_hook, &cursor)
+	hi, fault := xml.walk(src, 0, .Xml, {}, &h, &regs, testkit.stopping_hook, &cursor)
 	for xml.can_resume(&cursor) {
-		hi, fault = xml.walk_resume(src, &cursor, .Xml, {}, &h, &regs, walktest.stopping_hook)
+		hi, fault = xml.walk_resume(src, &cursor, .Xml, {}, &h, &regs, testkit.stopping_hook)
 	}
 	return h, fmt.tprint(hi, fault, regs.a)
 }
@@ -35,7 +35,7 @@ CURSOR_TEXTS := [?]string {
 // with skipped elements among them.
 @(test)
 cursor_resumes_after_any_token :: proc(t: ^testing.T) {
-	walktest.expect_resumes(t, CURSOR_TEXTS[:], {"", "a", "b", "*a", "*b", "*r", "r"}, 1, walk_stopping)
+	testkit.expect_resumes(t, CURSOR_TEXTS[:], {"", "a", "b", "*a", "*b", "*r", "r"}, 1, walk_stopping)
 }
 
 // A resume over another text, or of a cursor that holds no stop, is refused, and `destroy` frees a cursor no resume
@@ -43,19 +43,19 @@ cursor_resumes_after_any_token :: proc(t: ^testing.T) {
 @(test)
 cursor_refuses_another_text :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("<r><a>1</a></r>")
-	h := walktest.Stopping{src = src, stop = 2}
+	h := testkit.Stopping{src = src, stop = 2}
 	h.tokens = make([dynamic]core.Token, 0, 16)
 	defer delete(h.tokens)
 	cursor: xml.Cursor
-	_, fault := xml.walk(src, 0, .Xml, {}, &h, nil, walktest.stopping_hook, &cursor)
+	_, fault := xml.walk(src, 0, .Xml, {}, &h, nil, testkit.stopping_hook, &cursor)
 	testing.expect(t, fault == nil && xml.can_resume(&cursor))
 	other := transmute([]u8)string("<r><a>2</a></r>")
-	_, fault = xml.walk_resume(other, &cursor, .Xml, {}, &h, nil, walktest.stopping_hook)
+	_, fault = xml.walk_resume(other, &cursor, .Xml, {}, &h, nil, testkit.stopping_hook)
 	f, bad := fault.?
 	testing.expect(t, bad && f.kind == .Bad_Option && xml.can_resume(&cursor))
 	xml.destroy(&cursor)
 	testing.expect(t, !xml.can_resume(&cursor))
-	_, fault = xml.walk_resume(src, &cursor, .Xml, {}, &h, nil, walktest.stopping_hook)
+	_, fault = xml.walk_resume(src, &cursor, .Xml, {}, &h, nil, testkit.stopping_hook)
 	f, bad = fault.?
 	testing.expect(t, bad && f.kind == .Bad_Option)
 }

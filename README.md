@@ -1,147 +1,120 @@
 # stury
 
-stury is a [jq](https://jqlang.org)-compatible command line for JSON, YAML, TOML, XML, HTML, CSV and CBOR, and a
-library for [Odin](https://odin-lang.org) that gives the same answers. It is from about 2 times to two orders of
-magnitude faster than jq, jaq, gojq and yq.
+**stury** is a query engine for jq filters across eleven formats.
 
-- jq 1.8.2's filters, options, messages and exit codes, held to jq's own test corpus.
-- One filter language over JSON, JSONC, JSON5, NDJSON, CSV, TSV, TOML, YAML, XML, HTML and CBOR, and `--from` and
-  `--to` to convert between any two.
-- `stury edit` changes values and keeps every other byte: comments, spacing, key order and number spellings.
-- CSS selectors over XML and HTML, and the tags, anchors, attributes and namespaces beside a value.
-- `check --schema` against JSON Schema drafts 4 to 2020-12, with every failure at its line and column.
-- `check --filter` types a filter against a schema before any data arrives.
-- `stury diff` between two files of any format, or two schemas with a proof of backward and forward compatibility.
-- `schema infer`, `schema sample`, and `schema gen` for the Odin types that read a schema's values.
-- Strict input: `NaN`, `01` and invalid UTF-8 are errors, told at their line and column.
-- Large inputs answered on all cores when the filter takes one record at a time, with the output of a serial run.
-- Builtins beyond jq: statistics, set operations, `pivot`, digests, UUIDs, URL and logfmt parsing, IP addresses and
-  RFC 3339 times.
-- The library validates without allocating, reads one path without building a document, reads into Odin structs and
-  writes them back, edits a text in place, and checks models and schemas, with one interface for every format.
+![stury editing YAML, selecting from HTML and comparing two schemas](docs/demo/intro.gif)
 
-```sh
-$ stury edit --from yaml '.replicas = 5 | .image = "web:1.5"' deploy.yaml
-# web servers
-replicas: 5 # scaled by hand
-image: web:1.5
-ports: [80, 443]
-$ stury --from html -c '[css("a.story") | {href: .&href, title: .@content}]' page.html
-[{"href":"/a","title":"First"},{"href":"/b","title":"Second"}]
-$ stury diff --old-schema v1.schema.json --new-schema v2.schema.json
-.id  minimum: 0 -> 1  narrows
-backward: no, {"id":0} passes the old schema and fails the new one
-forward: yes
-```
+## What it does
 
-## Performance
+- **Command line and library:** a command line with jq 1.8.2's answers, and an Odin library that gives the same ones.
+- **Queries:** jq's filters, options and exit codes, tested against jq's own test corpus, and builtins jq lacks for
+  statistics, sets, pivots, digests, URLs and IP addresses.
+- **Conversion:** read any of the formats and write any other. Comments, YAML tags, TOML datetimes, XML attributes and
+  CBOR tags are kept wherever the output format can hold them.
+- **Lossless edits:** `stury edit` replaces the values a filter changes and copies the rest of the file byte for byte.
+  Comments, spacing, key order, quoting and number spellings survive, so a diff of the file shows only the edit.
+- **Schema checks:** judge any format against JSON Schema drafts 4 to 2020-12, with the line and column of every
+  failure. `check --filter` checks a filter against a schema before any data exists.
+- **Schema diff:** compare two versions of a schema and get a proven answer on backward and forward compatibility,
+  with a value that breaks it when it does not hold.
+- **Speed:** a filter that names a path reads only that path, and a large input is split across cores. On the
+  command-line benchmark stury is 1.8 to 250 times faster than jq, jaq, gojq and yq, and the library builds a JSON
+  document faster than yyjson and simdjson ([benchmarks](docs/benchmarks.md)).
 
-On the 30 filters of the command-line benchmark, process start-up included, stury is between 2.9 and 219 times
-faster than jq, 2.7 and 102 times faster than gojq, 1.8 and 141 times faster than jaq, and 7.9 and 250 times faster
-than yq. The library builds and reads a JSON document between 1.3 and 1.45 times faster than yyjson, 1.25 and 1.35
-times faster than simdjson, and 1.3 and 2.3 times faster than sonic-rs, with less memory than each.
-[docs/benchmarks.md](docs/benchmarks.md) has the method, every lane and the lanes stury loses: on one thread
-simdjson's On-Demand reader, which skips number and escape checks, judges NDJSON records faster.
+Formats:
 
-## Limits
+- JSON, JSONC and JSON5
+- NDJSON and RFC 7464 JSON sequences
+- CSV and TSV
+- TOML 1.0 and 1.1
+- YAML 1.2
+- XML 1.0 with namespaces
+- HTML, parsed as browsers parse it
+- CBOR and CBOR sequences
 
-- stury is pre-1.0, and its options and API may still change.
-- Release binaries are for Linux and macOS on amd64 and arm64. On Windows the command line builds from source.
-- The library needs Odin `dev-2026-11` or later and a 64-bit little-endian target.
-- Nesting past 1024 levels needs `--max-depth` (jq allows 10000).
-- simdjson's On-Demand API and sonic-rs's `get` answer one early key in a large text faster, by skipping the values
-  before it without judging them.
+## Roadmap
+
+stury is pre-1.0. Options, output and the library API can change in any release. Planned:
+
+- MessagePack, Arrow and Parquet, INI, dotenv and Java properties.
+- A C ABI, with bindings for Python (`pystury`), Node, Go and Rust, and a WASM build.
+- `schema gen` for TypeScript, Go, Rust and Python, and SQL `CREATE TABLE` as a schema language.
+- SARIF and GitHub annotations from `check` and `diff`, a GitHub Action, and schemas picked by file name from
+  SchemaStore.
+- Globs and directory trees in one run, and gzip input.
+- Reading incomplete input, such as JSON streamed from an LLM.
 
 ## Install
 
-Download `stury-VERSION-OS-ARCH.tar.gz` (OS `linux` or `darwin`, ARCH `amd64` or `arm64`) from
+Download `stury-VERSION-OS-ARCH.tar.gz` (`linux` or `darwin`, `amd64` or `arm64`) from
 [GitHub Releases](https://github.com/filip-41/stury/releases), or build it with
-[Odin](https://odin-lang.org/docs/install/) `dev-2026-11` or later: `make build-cli` writes `build/stury`. The manual
-page is `docs/stury.1`.
+[Odin](https://odin-lang.org/docs/install/) `dev-2026-11` or later: `make build-cli` writes `build/stury`. On Windows,
+build from source. The manual page is `docs/stury.1`.
 
-For the library, clone stury into your project and add it as a collection:
+The library needs a 64-bit little-endian target. Clone it into your project and add it as a collection:
 
 ```sh
 git clone https://github.com/filip-41/stury vendor/stury
 odin build . -collection:stury=vendor/stury -o:speed
 ```
 
-Then import the format you read: `stury:json`, `stury:dsv` (CSV and TSV), `stury:toml`, `stury:yaml`, `stury:xml`,
-`stury:html` or `stury:cbor`. Each exports the calls a program makes on that format, the schema check included. Models are
-`stury:core/model`, and schema inference, sampling and comparison `stury:core/schema`. For the
-[ols](https://github.com/DanielGavin/ols) language server, add the same collection to `ols.json`.
+Each format is a package: `stury:json`, `stury:dsv` (CSV and TSV), `stury:toml`, `stury:yaml`, `stury:xml`,
+`stury:html`, `stury:cbor`. Models are in `stury:core/model`, and schema inference, sampling and comparison in
+`stury:core/schema`.
 
 ## Command line
 
-`stury` takes jq's arguments: a filter, then files, or standard input. Where it differs from jq, it is on purpose and
-listed in [Differences from jq](docs/cli.md#differences-from-jq).
+`stury` takes jq's arguments. `--from` and `--to` pick the formats, and without `--from` the file extension does.
+Input is strict: `NaN`, `01` and invalid UTF-8 are errors at their line and column. The other differences from jq
+are in [docs/cli.md](docs/cli.md#differences-from-jq), which documents every option. Each row below opens on a demo.
+The input files are in [docs/demo/files](docs/demo/files).
+
+<details open>
+<summary><b>Formats and facts</b></summary>
+
+A CSV record is an object keyed by the header. An XML or HTML element is a member, its text is its value, and a
+repeated child is an array. What a format stores next to a value is a fact: `.@comment`, `.@tag` (a TOML or YAML
+type, a CBOR tag), `.@anchor`, `.&href` (an attribute), `.@namespace`. `--attributes` reads attributes as `@name`
+members instead. `css(selector)` selects XML and HTML elements.
+
+![stury querying CSV, TOML, XML and HTML](docs/demo/formats.gif)
+
+<details>
+<summary>As text</summary>
 
 ```sh
-$ echo '{"logs":[{"id":1}]}' | stury -c '.logs[].id'
-1
-$ printf '{"foo": 01}' | stury check; echo $?
-stury: parse error: <stdin>:1:10: Leading zero in a number
-{"foo": 01}
-         ^
-5
-```
-
-### Formats
-
-`--from` reads a format and `--to` writes one:
-
-| Format | `--from` | Read against | `--to` writes |
-| --- | --- | --- | --- |
-| JSON | `json` | RFC 8259 | yes |
-| JSON with comments | `jsonc` | RFC 8259 with comments | yes, with the comments a filter keeps |
-| JSON5 | `json5` | JSON5 | yes, with its comments and number spellings |
-| NDJSON, RFC 7464 | `ndjson`, `--seq` | a JSON text per record | yes |
-| CSV, TSV | `csv`, `tsv` | RFC 4180 | yes |
-| TOML | `toml` | TOML 1.0 and 1.1 | TOML 1.0 |
-| YAML | `yaml` | YAML 1.2 core schema and its test suite | block or flow style |
-| XML | `xml` | XML 1.0 with its internal subset and namespaces, and its conformance suite | doctype, comments and references as written |
-| HTML | `html` | the WHATWG tree construction, which recovers from every parse error | the WHATWG serialization |
-| CBOR | `cbor` | RFC 8949, and RFC 8742 sequences | the preferred serialization |
-
-An XML or HTML element is a member and its text a value, and a repeated child name reads as an array. Facts read
-what a format holds beside the value: `.@tag`, `.@anchor`, `.@alias` and `.@style` in TOML and YAML, a CBOR tag, and
-`.@name`, `.@namespace`, `.@content`, `.@attrs`, `.&name`, `.@pi` and `.@doctype` in XML and HTML. A comment is the
-fact `.@comment`. A conversion writes each fact the output format holds, a comment, a tag's meaning or a number's
-spelling, and `fmt` says on stderr how many it drops.
-
-```sh
-$ cat cities.csv
-city,country,population
-Oslo,NO,709000
-Stockholm,SE,984000
-Bergen,NO,286000
-$ stury --from csv --to csv 'select(.country == "NO") | {city, population}' cities.csv
+$ stury --to csv 'select(.country == "NO") | {city, population}' cities.csv
 city,population
 Oslo,709000
 Bergen,286000
-$ cat server.toml
-[server]
-host = "a.example" # primary
-port = 8080
-started = 2026-11-12T09:00:00Z
-$ stury --from toml -c '.server | {port, type: (.started | .@tag)}' server.toml
+$ stury -c '.server | {port, type: (.started | .@tag)}' server.toml
 {"port":8080,"type":"datetime"}
-$ stury --from toml --to yaml . server.toml
+$ stury --to yaml . server.toml
 server:
   host: a.example # primary
   port: 8080
   started: !!timestamp 2026-11-12T09:00:00Z
-$ cat feed.xml
-<feed xmlns="http://www.w3.org/2005/Atom"><entry id="7"><title>Hi</title></entry></feed>
-$ stury --from xml -c '.feed.entry | {id: .&id, ns: .@namespace, title}' feed.xml
+$ stury -c '.feed.entry | {id: .&id, ns: .@namespace, title}' feed.xml
 {"id":"7","ns":"http://www.w3.org/2005/Atom","title":"Hi"}
+$ stury -c '[css("a.story") | .&href]' page.html
+["/a","/b"]
 ```
 
-### Edit a file
+</details>
 
-`stury edit` writes each input back with only the changed values replaced, and a new value follows its container's
-layout. `--in-place` rewrites the files, `--check` names each file that would change, and `--diff` tells the changes.
-Tables, NDJSON, YAML streams and CBOR sequences are edited record by record.
+</details>
+
+<details>
+<summary><b>Edit a file</b></summary>
+
+`stury edit FILTER FILE` writes the file back with only the values the filter changed replaced, and a new value takes
+the layout of its container. `--in-place` rewrites the file, `--check` names the files that would change, `--diff`
+prints the changes.
+
+![stury editing JSONC, HTML and YAML](docs/demo/edit.gif)
+
+<details>
+<summary>As text</summary>
 
 ```sh
 $ cat config.jsonc
@@ -150,55 +123,54 @@ $ cat config.jsonc
   "port": 8080,
   "hosts": ["a", "b"]
 }
-$ stury edit --from jsonc '.port = 9090 | .hosts += ["c"]' config.jsonc
+$ stury edit '.port = 9090 | .hosts += ["c"]' config.jsonc
 {
   // the port the server listens on
   "port": 9090,
   "hosts": ["a", "b", "c"]
 }
+$ stury edit '(css("a.ad") | .&href) = "/sale"' page.html
+<!doctype html>
+<title>News</title>
+<ul>
+  <li><a class="story" href="/a">First</a>
+  <li><a class="story" href="/b">Second</a>
+  <li><a class="ad" href="/sale">Buy</a>
+</ul>
+$ stury edit --diff '.replicas = 5' deploy.yaml
+--- deploy.yaml
+~ .replicas: 3 -> 5
 ```
 
-### Check against a schema
+</details>
 
-`stury check` reports each file's first fault. `check --schema` judges each input against a JSON Schema and tells
-every failure with its position, path and keyword. `--report basic` writes the JSON Schema basic output and
-`--report problem` an RFC 9457 problem document.
+</details>
+
+<details>
+<summary><b>Check against a schema</b></summary>
+
+`check --schema S` prints every failure with its line, column, path and keyword. `--report basic` prints JSON
+Schema's basic output, `--report problem` an RFC 9457 problem document. `check --filter F --schema S` reads no input:
+it rejects a member the schema does not allow and prints the schema of the filter's output. `schema infer` writes a
+schema from data, `schema sample` writes data that passes a schema (or fails it, with `--invalid`), and `schema gen`
+writes Odin types with the schema's rules as tags.
+
+![stury checking records and a filter against a schema, and writing samples and Odin types](docs/demo/schema.gif)
+
+<details>
+<summary>As text</summary>
 
 ```sh
-$ cat user.schema.json
-{"type": "object", "properties": {"name": {"type": "string", "minLength": 2}, "age": {"type": "integer", "minimum": 0}}, "required": ["name"]}
-$ cat users.ndjson
-{"name": "ada", "age": 36}
-{"name": "b", "age": -1}
-{"age": "9"}
-$ stury check --from ndjson --schema user.schema.json users.ndjson; echo $?
+$ stury check --schema user.schema.json users.ndjson
 users.ndjson:2:10: String is too short, at least 2 characters at .name (.properties.name.minLength)
 users.ndjson:2:22: Number is below the minimum, at least 0 at .age (.properties.age.minimum)
 users.ndjson:3:1: Required member "name" is missing (.required)
 users.ndjson:3:9: Value is not of the allowed type, expected integer at .age (.properties.age.type)
-1
-```
-
-`check --filter F --schema S` reads no input. It refuses a member the schema does not describe and a step no input
-can take, and writes the schema of the filter's output.
-
-```sh
-$ stury check -c --filter '{n: .name}' --schema user.schema.json
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"n":{"type":"string","minLength":2}},"required":["n"],"additionalProperties":false}
-$ stury check -c --filter '.nmae' --schema user.schema.json; echo $?
+$ stury check -c --filter '.nmae' --schema user.schema.json
 stury: error: "nmae" is not a member of the object the schema describes (did you mean "name"?) at <top-level>, line 1, column 2:
     .nmae
      ^^^^
-{"$schema":"https://json-schema.org/draft/2020-12/schema"}
-1
-```
-
-`schema infer` writes the schema its inputs pass, `schema sample` writes values that pass a schema (or with
-`--invalid` fail it), and `schema gen` writes Odin types for it:
-
-```sh
-$ stury schema infer -c --from ndjson users.ndjson
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"name":{"type":"string"},"age":{"type":["integer","string"]}},"required":["age"]}
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"null"}
 $ stury schema sample --count 2 --seed 1 user.schema.json
 {"name":"fc"}
 {"name":"he"}
@@ -209,12 +181,22 @@ Root :: struct {
 }
 ```
 
-### Compare files and schemas
+</details>
 
-`stury diff` tells the changes between two inputs and exits 1 when they differ. `--set`, `--position` and
-`--key MEMBER` choose how arrays match. For two schemas it tells whether the new one takes everything the old one does
-(`backward`) and the reverse (`forward`), with a value that breaks it when not. `--compat backward|forward|full` exits
-1 unless that direction is proven.
+</details>
+
+<details>
+<summary><b>Compare files and schemas</b></summary>
+
+`stury diff A B` prints what changed between two files, of the same format or not. With `--old-schema` and
+`--new-schema` it compares two schemas: `backward` says whether the new one accepts everything the old one did, and
+`forward` the reverse. Each answer is `yes` with a proof, `no` with a value that shows it, or `unknown` with the keyword
+where the proof stopped. `--compat backward|forward|full` exits 1 unless that direction is proven.
+
+![stury comparing two files and two schemas](docs/demo/diff.gif)
+
+<details>
+<summary>As text</summary>
 
 ```sh
 $ stury diff old.json new.json
@@ -228,42 +210,67 @@ backward: no, {"id":0} passes the old schema and fails the new one
 forward: yes
 ```
 
-### Format and convert
+</details>
 
-`stury fmt` formats or converts files, with `--in-place`, and `--check` names each file that is not formatted.
-`fmt --schema` writes only a file that passes the schema. Regular expressions take Oniguruma's syntax, as jq's do:
+</details>
+
+<details>
+<summary><b>Builtins beyond jq</b></summary>
+
+Statistics, set operations, `pivot` and `melt`, digests and HMACs, UUIDs, URL, query-string and logfmt parsing, IP
+addresses and RFC 3339 times. [docs/cli.md](docs/cli.md#builtins-beyond-jq) lists them.
+
+![stury's statistics, URL and IP builtins](docs/demo/builtins.gif)
+
+<details>
+<summary>As text</summary>
 
 ```sh
-$ echo '"2026-11"' | stury -c 'capture("(?<y>\\d+)-(?<m>\\d+)")'
-{"y":"2026","m":"11"}
+$ stury -s -c '{p90: quantile(0.9; .ms), paths: frequency(.url | parse_url.path)}' access.ndjson
+{"p90":296,"paths":[{"value":"/cart","count":2},{"value":"/home","count":1}]}
+$ stury -s -c 'map(select(.ip | ip_in_cidr("10.0.0.0/8"))) | length' access.ndjson
+2
 ```
 
-`--follow FILE` answers each record as it is appended to a file, and `--explain` shows how a filter is run.
-`stury --help` and each command's `--help` list the options, and [docs/cli.md](docs/cli.md) holds all of them.
+</details>
+
+</details>
+
+<details>
+<summary><b>Format, follow, explain, threads</b></summary>
+
+- `stury fmt` formats or converts files, with `--in-place` and `--check`.
+- `--follow FILE` answers each record as it is appended to the file.
+- `--explain` prints to stderr how the filter runs: whether it reads only a path or builds each input, on how many
+  threads, and the time and memory it took.
+- An input of 1 MiB or more is split across cores when the filter takes one record at a time, with the output of a
+  serial run. `--threads N` sets the count.
+
+</details>
 
 ## Library
 
-The library gives the command line's answers to an Odin program:
+Each format package has the same calls, and they return the same error union, so code written for JSON reads YAML or
+CSV by changing the format argument. The library starts no threads and keeps no global state.
 
-- Validate without allocating, with the line and column of the first fault.
-- Read one value by path (`.tags[1]`) without building a document, or several paths in one pass.
-- Decode into Odin types and encode them back (`unmarshal`, `marshal`), with field tags and hooks for custom names and
-  types.
-- Build a document whose strings point into the input, and query it by path.
-- Edit a text: change, insert, move or remove a value and keep every other byte.
-- Models: rules on an Odin type (bounds, lengths, patterns, formats, defaults, read-only and write-only members). A
-  load gathers every refusal, which `model.problem` turns into an RFC 9457 problem document, and a patch changes only
-  the members it holds.
-- JSON Schema drafts 4 to 2020-12: check, infer, sample, compare two schemas, and write Odin types for one.
-- Diff two values of any format.
-- Process records in parallel on a `stury:host` pool. The library starts no thread of its own and keeps no global
-  state.
-
-Every format is a `Spec` passed to the same calls, and every call returns one error union. A TOML datetime, a YAML
-tag, a CBOR tag and an XML attribute are facts of their node, and a YAML stream's documents and a CBOR sequence's
-items are records.
+- `validate` checks a text without allocating.
+- `find` and `scan` read one path, or several in one pass, without building a document.
+- `unmarshal` reads into Odin structs and `marshal` writes them, with field tags and hooks.
+- `build` makes a document whose strings point into the input, and `query` runs a path over it.
+- `set` and the other edits change a value and keep every other byte.
+- `core/model` puts rules on a struct (bounds, lengths, patterns, defaults, read-only members). A load collects every
+  failure, `model.problem` turns them into an RFC 9457 document, and `model.patch` applies a partial update.
+- `core/schema` checks, infers, samples and compares JSON Schemas and writes Odin types for them.
+- `core/diff` compares two values of any format.
+- `stury:host` runs records on a thread pool the caller starts.
 
 ### Quick start
+
+[examples/quickstart](examples/quickstart/main.odin). Run it with `odin run examples/quickstart -collection:stury=.`,
+or add `-- file.json` to read a file.
+
+<details>
+<summary>main.odin</summary>
 
 ```odin
 package main
@@ -320,18 +327,14 @@ run :: proc(src: []u8) -> json.Error {
 }
 ```
 
-This is [examples/quickstart](examples/quickstart/main.odin). Run it from this directory with
-`odin run examples/quickstart -collection:stury=.`, or add `-- file.json` to read a file in place of the built-in text.
-Every call that can fail returns a `json.Error`, so `or_return` passes a fault, a refused allocation or a refused read
-up alike.
+</details>
 
 ### Examples
 
-The snippets below run inside a procedure that returns `json.Error` (`dsv.Error` for CSV, `yaml.Error` for YAML,
-`core.Error` for a model, the same union), with `stury:core`, `stury:core/model`, `stury:core/typed`,
-`stury:core/schema` and `stury:core/diff` imported where a snippet names them.
+Each snippet runs inside a procedure that returns the format's `Error`.
 
-Read one value by path. The answer is a node of a small document that borrows `src`:
+<details>
+<summary>Read one value by path</summary>
 
 ```odin
 src := transmute([]u8)string(`{"name": "ada", "tags": ["math", "engines"]}`)
@@ -344,7 +347,10 @@ if answer.outcome == .Found {
 }
 ```
 
-Change one value and keep every other byte:
+</details>
+
+<details>
+<summary>Change one value and keep every other byte</summary>
 
 ```odin
 src := transmute([]u8)string(`{"name": "ada",  "tags": ["math"]}`)
@@ -355,7 +361,10 @@ defer delete(out)
 fmt.println(string(out)) // {"name": "grace",  "tags": ["math"]}
 ```
 
-Change a YAML value and keep its comments:
+</details>
+
+<details>
+<summary>Change a YAML value and keep its comment</summary>
 
 ```odin
 src := transmute([]u8)string("replicas: 3 # scaled by hand\nports: [80, 443]\n")
@@ -366,7 +375,10 @@ defer delete(out)
 fmt.print(string(out)) // replicas: 5 # scaled by hand, then the ports line as it was
 ```
 
-Read CSV rows into structs by the header's column names:
+</details>
+
+<details>
+<summary>Read CSV rows into structs</summary>
 
 ```odin
 City :: struct {
@@ -380,9 +392,13 @@ dsv.unmarshal(src, .Csv, &cities, allocator = context.temp_allocator) or_return
 fmt.println(cities[1].name, cities[1].population) // Atlantis nil
 ```
 
-Read request bodies into a model, answer a refused one with a problem document, apply a patch and write the value
-back. `json.checks(.Json)` gives the model the format it reads, and `dsv.checks(.Csv)` would read CSV rows by the
-same rules. From [examples/model](examples/model/main.odin):
+</details>
+
+<details>
+<summary>Load a request body into a model, report failures, patch</summary>
+
+From [examples/model](examples/model/main.odin). `json.checks(.Json)` binds the model to JSON, and `dsv.checks(.Csv)`
+would bind it to CSV rows.
 
 ```odin
 User :: struct {
@@ -397,7 +413,7 @@ reg: model.Registry
 model.register(&reg, User, "role", "member") or_return
 m := model.compile(&reg, User, json.checks(.Json)) or_return
 
-// Every refusal of a body, gathered by the sink, as one RFC 9457 document.
+// Every failure of a body, collected by the sink, as one RFC 9457 document.
 bad: User
 sink: typed.Sink
 if model.load(&m, transmute([]u8)string(`{"name": "a", "email": 3}`), &bad, &sink) != nil {
@@ -411,23 +427,21 @@ model.load(&m, transmute([]u8)string(`{"name": "ada", "email": "ada@example.org"
 user.id = 1
 fmt.println(string(model.dump(&m, &user) or_return)) // {"id":1,"name":"ada","email":"ada@example.org","role":"member"}
 
-// A patch changes only the members it holds, and the merged value is judged whole.
+// A patch changes only the members it holds, and the merged value is checked whole.
 model.patch(&m, &user, transmute([]u8)string(`{"email": null, "role": "admin"}`)) or_return
 fmt.println(string(model.dump(&m, &user, {exclude_none = true}) or_return)) // {"id":1,"name":"ada","role":"admin"}
 ```
 
-The problem document it prints for the refused body:
+The refused body prints:
 
 ```json
 {"title":"Invalid body","status":422,"errors":[{"pointer":"/name","code":"too_short","message":"String is too short, at least 2 characters"},{"pointer":"/email","code":"wrong_kind","message":"Value does not fit the field's type, expected string"}]}
 ```
 
-`Dump_Opts` leaves out the members a load did not set (`exclude_unset`), that hold null (`exclude_none`) or that
-equal their default (`exclude_defaults`). `model.schema(&m, .Load)` describes what a load takes, which `schema.write`
-writes as JSON Schema.
+</details>
 
-Check a text against a JSON Schema. The schema is compiled once and bound to the format its inputs are read as, and
-the sink gathers every failure:
+<details>
+<summary>Check a text against a JSON Schema</summary>
 
 ```odin
 schema_text := transmute([]u8)string(`{"properties": {"age": {"type": "integer", "minimum": 0}}}`)
@@ -446,7 +460,10 @@ if json.check_schema(&b, src, &sink) != nil {
 }
 ```
 
-Compare two schemas, and diff two values:
+</details>
+
+<details>
+<summary>Compare two schemas, and diff two values</summary>
 
 ```odin
 v1 := json.load_schema(transmute([]u8)string(`{"properties": {"id": {"minimum": 0}}}`), .Json) or_return
@@ -469,54 +486,51 @@ for ch in r.changes {
 }
 ```
 
-The [library guide](docs/guide.md) covers each of these in full, with allocation and limits. The complete programs are
-in [examples/](examples). Each prints a fixed answer, and `make test-examples` runs them all.
+</details>
+
+The complete programs are in [examples/](examples), and `make test-examples` runs them.
 
 | Program | Shows |
 | --- | --- |
-| [quickstart](examples/quickstart/main.odin) | validate, `unmarshal`, `marshal` and error rendering |
-| [scan](examples/scan/main.odin) | one value, or every value of a path, without building a whole document |
+| [quickstart](examples/quickstart/main.odin) | validate, `unmarshal`, `marshal`, error rendering |
+| [scan](examples/scan/main.odin) | one value, or every value of a path, without a document |
 | [roundtrip](examples/roundtrip/main.odin) | building a document and querying it |
-| [edit](examples/edit/main.odin) | changing a value in place, and several edits in one commit |
-| [records](examples/records/main.odin) | NDJSON records, from a stream, and on threads |
+| [edit](examples/edit/main.odin) | changing a value in place, several edits in one commit |
+| [records](examples/records/main.odin) | NDJSON records from a stream and on threads |
 | [jsonc](examples/jsonc/main.odin) | JSON with comments |
-| [dsv](examples/dsv/main.odin) | CSV into structs and back, dialects, documents, edits, streaming |
-| [crossformat](examples/crossformat/main.odin) | one struct read from CSV and JSON, with one error type |
+| [dsv](examples/dsv/main.odin) | CSV into structs and back, dialects, edits, streaming |
+| [crossformat](examples/crossformat/main.odin) | one struct read from CSV and JSON |
 | [model](examples/model/main.odin) | a model's load, problem document, patch and dump |
 
 ## Documentation
 
-- [Library guide](docs/guide.md): usage, allocation and ownership, limits, models, schema checks and diffs.
-- [Command line](docs/cli.md), and its manual page [docs/stury.1](docs/stury.1).
-- API reference: the doc comment on each public name, and [API.txt](API.txt), which lists the user surface.
-- [Benchmarks](docs/benchmarks.md): method, fairness rules and every figure. [bench/README.md](bench/README.md)
-  describes the harness.
-- Internals: [walk](docs/walk.md), [document](docs/document.md), [paths](docs/paths.md), [typed reads](docs/typed.md),
-  [writer](docs/writer.md), [records](docs/records.md), [kernel](docs/kernel.md), [hot paths](docs/hotpaths.md),
-  [XML and HTML](docs/markup.md) and [CBOR](docs/binary.md).
-
 ## Development
 
-Run these from this directory. `ODIN` names the compiler when it is not on `PATH`. The Makefile refuses a release older
-than its `MIN_ODIN`, `dev-2026-11`. `make help` lists every target.
+`ODIN` names the compiler when it is not on `PATH`. `tools/tests` and `bench` are [uv](https://docs.astral.sh/uv/)
+projects. `make help` lists every target.
 
 ```sh
-make check          # the checks the files you changed can reach, in seconds
-make gate           # what a branch passes before it lands, once (python3 tools/gate.py full adds the long runs)
-make test           # the library suites, the examples, the CLI smoke cases and the jq corpus
-make test-lib       # the library suites alone, one package per test directory (make test-one P=json/test T=name)
-make test-examples  # build and run the nine example programs against their expected output
-make test-cli       # cmd/stury/test/smoke.py against build/stury
-make test-jq        # jq's corpus and cmd/stury/test/cli.tsv, whose row layout its first lines describe
-make ecma-diff      # core/regex's ECMA patterns against Node's RegExp (needs node on PATH)
-make diff-schema    # the schema check against the Python jsonschema package (needs uv)
-make lint           # the vet set, with warnings as errors, and the import, word, global, API.txt and API_SHARED.txt checks
-make api-write      # regenerate API.txt and API_SHARED.txt after a public change. A public name is shared when another
-                    # package or cmd/ calls it, and README.md, docs/guide.md, examples/ and the user-surface
-                    # signatures never name it
+make build-cli      # build/stury
+make check          # the checks the changed files reach
+make gate           # everything a branch passes before it lands
+make test           # library suites, examples, CLI cases, jq's corpus
+make test-lib       # library suites (make test-one P=json/test T=name for one test)
+make test-examples  # the example programs against their expected output
+make test-py        # all of tools/tests against a fresh build/stury, the oracles included
+make diff           # build/stury against jq 1.8.2 on PATH
+make diff-schema    # the schema check against Python's jsonschema
+make diff-model     # model.load's errors against pydantic
+make ecma-diff      # core/regex against Node's RegExp
+make lint           # vet with warnings as errors, import and names checks
+make names-write    # regenerate each format's names.odin from tools/names.txt
 make test-asan      # the suites under AddressSanitizer
 make test-tsan      # the suites under ThreadSanitizer
+make bench-doc      # a benchmark lane: doc, paths, typed, records, write, schema, edit, cli
 ```
+
+pytest's own options go through `uv run --directory tools/tests pytest`, for example `-k NAME`.
+[bench/README.md](bench/README.md) describes the benchmark lanes. The GIFs are recorded from `docs/demo/*.tape` with
+[vhs](https://github.com/charmbracelet/vhs): `vhs docs/demo/intro.tape` after `make build-cli`.
 
 ## License
 

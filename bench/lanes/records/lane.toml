@@ -1,0 +1,48 @@
+[lane]
+legend = "GB/s is the source's bytes over time (the bytes written, in the write arm): the best of {rounds} rounds of each arm's median of ten calls after two warm-ups. The threaded arms run stury on 6 threads and simdjson with its stage 1 in a thread of its own."
+
+# simd and simd_nt are simdjson's parse_many (a tape per document) with stage 1 threaded and with `threaded = false`.
+# simd_od and simd_od_nt are On-Demand iterate_many, each document skipped, which judges the structure and not the
+# escapes or number syntax of what it skips. serde_validate and sonic_validate run a StreamDeserializer to IgnoredAny,
+# serde_value and sonic_value to a Value. csv_frame is simd-csv's Splitter, each record's bytes and no cells.
+# Every arm of a fixture prints the number of records it passed as `check`. logs.json has none to compare: `validate`
+# reads it as one document and `each` as the entries of its spine.
+
+[arm]
+frame = { source = "stury", files = ["*.ndjson", "*.csv"], sub = "frame" }
+check = { source = "stury", files = ["*.ndjson", "*.csv"], sub = "check" }
+threads = { source = "stury", files = ["*.ndjson", "*.csv"], sub = "threads" }
+each = { source = "stury", files = ["*.ndjson", "*.csv", "logs.json"], sub = "each" }
+validate = { source = "stury", files = ["*.csv", "logs.json"], sub = "validate" }
+build = { source = "stury", files = ["*.ndjson"], sub = "build" }
+stream = { source = "stury", files = ["*.ndjson"], sub = "stream" }
+read = { source = "stury", files = ["logs.ndjson"], sub = "read" }
+refuse = { source = "stury", files = ["logs.ndjson"], sub = "refuse" }
+write = { source = "stury", files = ["logs.ndjson", "table.csv", "text.csv"], sub = "write" }
+cells = { source = "stury", files = ["*.csv"], sub = "cells" }
+rows = { source = "stury", files = ["table.csv"], sub = "rows" }
+text = { source = "stury", files = ["text.csv"], sub = "text" }
+simd = { source = "simdjson.cpp", files = ["*.ndjson"], sub = "stream" }
+simd_nt = { source = "simdjson.cpp", files = ["*.ndjson"], sub = "stream_nothread" }
+simd_od = { source = "simdjson.cpp", files = ["*.ndjson"], sub = "skip" }
+simd_od_nt = { source = "simdjson.cpp", files = ["*.ndjson"], sub = "skip_nothread" }
+serde_validate = { source = "rust", args = ["{sub}", "{file}", "serde"], files = ["*.ndjson"], sub = "validate" }
+serde_value = { source = "rust", args = ["{sub}", "{file}", "serde"], files = ["*.ndjson"], sub = "value" }
+sonic_validate = { source = "rust", args = ["{sub}", "{file}", "sonic"], files = ["*.ndjson"], sub = "validate" }
+sonic_value = { source = "rust", args = ["{sub}", "{file}", "sonic"], files = ["*.ndjson"], sub = "value" }
+csv_frame = { source = "rust", args = ["{sub}", "{file}", "csv"], files = ["table.csv", "text.csv"], sub = "frame" }
+
+[[group]]
+rows = [
+	"logs.ndjson", "docs.ndjson", "twitter.ndjson",
+	{ file = "logs.json", unchecked = true },
+	"table.csv", "text.csv", "wide.csv",
+]
+tables = [
+	{ title = "lanes, one thread", arms = ["frame", "check", "build", "stream", "read", "refuse", "write", "cells", "rows", "text"] },
+	{ title = "lanes, 6 threads", arms = ["threads", "validate", "each"] },
+	{ title = "check, NDJSON, one thread", files = ["logs.ndjson", "docs.ndjson", "twitter.ndjson"], arms = ["check", "simd_nt", "simd_od_nt", "serde_validate", "sonic_validate"] },
+	{ title = "check, NDJSON, threaded", files = ["logs.ndjson", "docs.ndjson", "twitter.ndjson"], arms = ["threads", "simd", "simd_od"] },
+	{ title = "document per record, NDJSON", files = ["logs.ndjson", "docs.ndjson", "twitter.ndjson"], arms = ["build", "serde_value", "sonic_value"] },
+	{ title = "frame, CSV", files = ["table.csv", "text.csv"], arms = ["frame", "csv_frame"] },
+]

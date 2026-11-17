@@ -10,7 +10,7 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import xml ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private)
 SUITE_DIR :: #directory + "conformance/"
@@ -176,13 +176,13 @@ answer :: proc(kind, path, entities, canonical: string) -> string {
 	if entities != "none" {
 		opts.tolerate = {.Unread_Entity}
 	}
-	fault, bad := walktest.fault_in(xml.validate(src, .Xml, opts))
+	fault, bad := testkit.fault_in(xml.validate(src, .Xml, opts))
 	refused := kind == "not-wf" || kind == "not-ns"
 	switch {
 	case refused && !bad:
 		return "accepted"
 	case !refused && bad:
-		return fmt.tprintf("refused at %d: %s", fault.at, walktest.rule_code(fault))
+		return fmt.tprintf("refused at %d: %s", fault.at, testkit.rule_code(fault))
 	case refused || canonical == "":
 		return ""
 	}
@@ -249,7 +249,7 @@ canonical_element :: proc(b: ^strings.Builder, doc: ^core.Document, name: string
 	}
 	attrs := make([dynamic]Attribute, context.temp_allocator)
 	it := core.attributes_of(doc, val)
-	for n, v in walktest.attribute_texts(&it) {
+	for n, v in testkit.attribute_texts(&it) {
 		append(&attrs, Attribute{n, v})
 	}
 	slice.sort_by(attrs[:], proc(x, y: Attribute) -> bool {return x.name < y.name})

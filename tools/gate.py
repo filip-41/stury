@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
-"""Runs the checks a change can reach, and skips those that passed on the same inputs.
+"""Runs the checks a change can reach.
 
-A check's key hashes what can change its answer: the compiler, the check's command, the `STURY_` variables, which loosen
-or skip cases of the suites, and every file its packages import for its target, the compiler's own `base` and `core`
-packages among them, with comments dropped, plus what they `#load`. A key that passed is stamped under the git common
-directory, so all worktrees of the repository share the stamps and a merge reruns nothing its branch ran.
+A check's key hashes what can change its answer.
 
 Run from the repository root: `python3 tools/gate.py [quick|merge|full]`, `--force` to ignore stamps, `--list` to print what would run,
 `-j N` for the slots the checks share. `quick` is the edit loop, `merge` what a branch passes before it lands (`make gate`, and
-the pre-push hook), and `full` adds the long randomized runs. A check that cannot run on this machine is named in the last
-lines, not passed.
+the pre-push hook), and `full` adds the long randomized runs.
 
-Every check that is due starts as soon as a slot is free, the longest expected chain first, by the seconds each took when
-it last passed. Only the command line's suites wait, for the binary. The first failure stops every running check.
+Every check that is due starts as soon as a slot is free, the longest expected chain first. The first failure stops every running check.
 """
 
 import argparse
@@ -31,7 +26,7 @@ import sys
 import threading
 import time
 
-from checks import makefile_list, odin_problem
+from checks import makefile_list
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -45,15 +40,14 @@ LIB_PKGS = makefile_list("LIB_PKGS") + makefile_list("SUPPORT_PKGS")
 CLI = "cmd/stury"
 CLI_BINARY = os.path.join(ROOT, "build", "stury")
 CLI_RECORD = CLI_BINARY + ".key"
-# The seeds of jq_diff and regex_diff, the ones CI and `make diff` run.
+
 DIFF_SEEDS = makefile_list("DIFF_SEEDS")
 BENCH_PKGS = makefile_list("BENCH_PKGS")
 
 IMPORT = re.compile(r'^\s*(?:@\([^)]*\)\s*)?import\s+(?:[A-Za-z_]\w*\s+)?"([^"]+)"', re.MULTILINE)
 LOAD = re.compile(r'#load(?:_directory|_hash)?\(\s*"([^"]+)"')
 BUILD_TAG = re.compile(r"^#\+build\s+(.+)$", re.MULTILINE)
-# Strings come first, so a `//` inside one stays. A nested block comment ends early, which keeps text and only costs a
-# rerun.
+
 COMMENT = re.compile(
     r'(?P<keep>"(?:\\.|[^"\\\n])*"|`[^`]*`|\'(?:\\.|[^\'\\\n])*\')|//[^\n]*|/\*.*?\*/', re.DOTALL
 )
@@ -118,14 +112,14 @@ def resolve_import(path, directory, compiler):
 
 
 def source_name(path, compiler):
-    """A source's name in a key, the same in every worktree."""
+    """A source's name in a key"""
     if os.path.commonpath([compiler.root, path]) == compiler.root:
         return "odin:" + os.path.relpath(path, compiler.root)
     return os.path.relpath(path, ROOT)
 
 
 def hash_tree(digest, path):
-    """Adds a file or every file under a directory, bytes as they are."""
+    """Adds a file or every file under a directory"""
     if os.path.isfile(path):
         names = [path]
     else:
@@ -141,8 +135,7 @@ def hash_tree(digest, path):
 
 @functools.cache
 def package_sources(directory, arch, compiler):
-    """One package directory's sources that build for `arch`, comments dropped, with the directories they import and
-    the paths they load."""
+    """One package directory's sources that build for `arch`"""
     text_of = []
     imports = []
     loads = []
@@ -161,8 +154,7 @@ def package_sources(directory, arch, compiler):
 
 
 def hash_closure(digest, roots, arch, compiler):
-    """Adds every source of `roots` and what they import for `arch`, the runtime every package imports, and what those
-    sources load."""
+    """Adds every source of `roots` and what they import for `arch`"""
     seen = set()
     todo = [os.path.normpath(root) for root in roots] + [os.path.join(compiler.root, "base", "runtime")]
     loads = set()
@@ -180,8 +172,7 @@ def hash_closure(digest, roots, arch, compiler):
 
 
 def compiler_of(odin):
-    """The compiler `odin` runs: its root, the bytes of `odin` and of the root's own `odin`, which a wrapper script runs,
-    and the version and backend it reports."""
+    """The compiler `odin` runs"""
     root = os.path.realpath(subprocess.run([odin, "root"], capture_output=True, text=True, check=True).stdout.strip())
     report = subprocess.run([odin, "report"], capture_output=True, text=True).stdout
     digest = hashlib.sha256(root.encode())
@@ -194,8 +185,7 @@ def compiler_of(odin):
 
 
 def portable(arg):
-    """A command's argument as every worktree spells it: paths under the root relative to it, and the compiler's path
-    left out, since the key holds the compiler's identity."""
+    """A command's argument"""
     return re.sub(r"^(ODIN=|--odin=).*", r"\1", arg.replace(ROOT + os.sep, ""))
 
 
@@ -214,7 +204,7 @@ def key_of(check, compiler):
 
 
 def stamp_directory():
-    """Under the git common directory, so worktrees share stamps, or build/ outside a git checkout."""
+    """Stamps under the git common directory, so worktrees share them, or build/ outside a git checkout."""
     try:
         common = subprocess.run(
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -241,54 +231,63 @@ def rosetta():
     return platform.system() == "Darwin" and native
 
 
+TESTS = "tools/tests"
+# What every pytest module of the project reads.
+TEST_SHARED = [f"{TESTS}/{name}" for name in ("conftest.py", "capped.py", "pyproject.toml", "uv.lock")]
+
+
+def pytest_command(*argv, workers=0):
+    """`pytest ARGV` in the uv project of the tests, on `workers` processes."""
+    return ["uv", "run", "--frozen", "--directory", at(TESTS), "pytest", "-q", "-n", str(workers), *argv]
+
+
 def cli_suites(absent, odin):
-    """The command line's suites against jq: every jq and cli.tsv case passes, every smoke case passes, every valid toml-test and yaml-test-suite case reads as its
-    JSON says, the random cases of regex_diff and jq_diff hold none different, and the types and gen laws hold. They run on the binary `build-cli` makes,
-    once that binary is built."""
-    test = at(f"{CLI}/test")
-    suite = lambda name, *argv, tier=1, slots=1: Check(name, tier, [at(CLI)], ["python3", *argv], trees=[test], cli=True, slots=slots)
+    """The command line's suites against jq, and the oracles of the library"""
+    if not shutil.which("uv"):
+        absent.append("the pytest suites (no uv)")
+        return []
+    stury = f"--stury={CLI_BINARY}"
+    trees = [at(p) for p in TEST_SHARED + [f"{TESTS}/cli"]]
+    suite = lambda name, *argv, tier=1, slots=1: Check(name, tier, [at(CLI)], pytest_command(stury, *argv, workers=slots), trees=trees, cli=True, slots=slots)
     out = [
-        suite("cli jq suite", f"{test}/jq_suite.py", CLI_BINARY),
-        suite("cli smoke", f"{test}/smoke.py", CLI_BINARY),
-        suite("cli conformance suite", f"{test}/conformance_suite.py", CLI_BINARY),
-        suite("cli types law", f"{test}/types_law.py", CLI_BINARY),
-        suite("cli gen law", f"{test}/gen_law.py", CLI_BINARY, f"--odin={odin}"),
-        suite("cli follow", f"{test}/follow_test.py", CLI_BINARY),
-        suite("cli memory", f"{test}/memory_test.py", CLI_BINARY),
+        suite("cli jq suite", "cli/test_jq.py", slots=3),
+        suite("cli smoke", "cli/test_smoke.py"),
+        suite("cli conformance suite", "cli/test_conformance.py"),
+        suite("cli types law", "cli/test_types.py"),
+        suite("cli gen law", "cli/test_gen.py", f"--odin={odin}"),
+        suite("cli follow", "cli/test_follow.py"),
+        suite("cli memory", "cli/test_memory.py"),
     ]
     has_jq = shutil.which("jq") and subprocess.run(["jq", "--version"], capture_output=True, text=True).stdout.strip() == "jq-1.8.2"
     # The merge tier runs the first seed, the full tier every seed. Each runs its cases on every core.
     for i, seed in enumerate(DIFF_SEEDS):
         tier = 1 if i == 0 else 2
-        out.append(suite(f"cli regex diff seed {seed}", f"{test}/regex_diff.py", CLI_BINARY, f"--seed={seed}", tier=tier, slots=3))
+        out.append(suite(f"cli regex diff seed {seed}", "cli/test_regex_diff.py", f"--seed={seed}", tier=tier, slots=3))
         if has_jq:
-            out.append(suite(f"cli jq diff seed {seed}", f"{test}/jq_diff.py", CLI_BINARY, f"--seed={seed}", tier=tier, slots=3))
+            out.append(suite(f"cli jq diff seed {seed}", "cli/test_jq_diff.py", f"--seed={seed}", tier=tier, slots=3))
     if not has_jq:
         absent.append("cli jq diff (no jq 1.8.2 on PATH)")
-    if subprocess.run(["python3", "-c", "import xml.parsers.expat"], capture_output=True).returncode == 0:
-        out.append(Check("xml expat diff", 1, [at("xml"), at("xml/test/oracle")], make(odin, "diff-xml"), trees=[at("xml/test/oracle")]))
-    else:
-        absent.append("xml expat diff (no pyexpat in python3)")
-    if shutil.which("uv"):
-        script = at("core/model/test/pydantic_diff.py")
-        out.append(Check("model pydantic diff", 2, [at("core/model"), at("core/model/test/oracle")], make(odin, "diff-model"), trees=[script]))
-    else:
-        absent.append("model pydantic diff (no uv)")
+    oracle = lambda name: [at(p) for p in TEST_SHARED + [f"{TESTS}/oracles/{name}"]]
+    out.append(Check("xml expat diff", 1, [at("xml"), at(f"{TESTS}/oracles/xml")], make(odin, "diff-xml"), trees=oracle("xml")))
+    out.append(Check("model pydantic diff", 2, [at("core/model"), at(f"{TESTS}/oracles/model")], make(odin, "diff-model"), trees=oracle("model")))
+    schema_trees = oracle("schema") + [at("bench/lanes/schema/lane.toml")]
+    out.append(Check("schema fixtures diff", 2, [at(CLI)], pytest_command(stury, "oracles/schema/test_schema_fixtures.py"), trees=schema_trees, cli=True))
+    out.append(Check("schema csv diff", 2, [at(f"{TESTS}/oracles/schema/csv")], make(odin, "diff-schema-csv"), trees=oracle("schema")))
+    out.append(Check("schema gen diff", 2, [at(f"{TESTS}/oracles/schema/gen")], make(odin, "diff-schema-gen"), trees=oracle("schema")))
     return out
 
 
 def checks(odin):
-    """Every check, and the groups left out because their checkout is absent. Each package is its own check, so a diff
-    reruns only what imports it."""
+    """All checks"""
     out = []
     absent = []
     examples = sorted(entry.path for entry in os.scandir(at("examples")) if entry.is_dir())
-    # `checks.py imports` reads every tracked source, the examples' among them, and `api` reads names.txt and the docs.
+    # `checks.py imports` reads every tracked source, the examples' among them, and `names` reads names.txt.
     every = [at(p) for p in LIB_PKGS + TEST_PKGS + BENCH_PKGS + [CLI]] + examples
-    read = ["tools/checks.py", "tools/names.txt", "API.txt", "API_SHARED.txt", "README.md", "docs/guide.md"]
+    read = ["tools/checks.py", "tools/names.txt"]
     out.append(Check("lint", 0, every, make(odin, "lint"), trees=[at(p) for p in read], also=("amd64", "riscv64"), slots=2))
     if shutil.which("node"):
-        out.append(Check("ecma node diff", 2, [at("core/regex"), at("core/regex/test/oracle")], make(odin, "ecma-diff"), trees=[at("core/regex/test/ecma_diff.py")]))
+        out.append(Check("ecma node diff", 2, [at("core/regex"), at(f"{TESTS}/oracles/regex")], make(odin, "ecma-diff"), trees=[at(p) for p in TEST_SHARED + [f"{TESTS}/oracles/regex"]]))
     else:
         absent.append("ecma node diff (no node on PATH)")
     out.append(Check("examples", 1, examples, make(odin, "test-examples"), trees=[at("examples")]))
@@ -296,8 +295,8 @@ def checks(odin):
         # Only the merge tier's suites run the binary, and its -o:speed compile is the edit loop's longest step.
         out.append(Check("cli build", 1, [at(CLI)], make(odin, "build-cli")))
         # The pieces law builds its own binaries, so it waits for the merge tier.
-        script = at(f"{CLI}/test/pieces_law.py")
-        out.append(Check("cli pieces law", 1, [at(CLI)], ["python3", script, f"--odin={odin}"], trees=[script, at(f"{CLI}/test/harness.py")]))
+        if shutil.which("uv"):
+            out.append(Check("cli pieces law", 1, [at(CLI)], pytest_command("cli/test_pieces.py", f"--odin={odin}"), trees=[at(p) for p in TEST_SHARED + [f"{TESTS}/cli"]]))
         out += cli_suites(absent, odin)
     for package in TEST_PKGS:
         name = package.replace("/", "-")
@@ -323,8 +322,7 @@ def checks(odin):
 
 
 def cli_record(key):
-    """The key of the sources `build-cli` made build/stury from, with the binary's size and time, which any other build
-    of it changes."""
+    """The key of the sources `build-cli` made build/stury from"""
     try:
         stat = os.stat(CLI_BINARY)
     except FileNotFoundError:
@@ -346,7 +344,6 @@ def note_cli(key):
 
 
 def load_seconds(stamps):
-    """The seconds each check took when it last passed."""
     try:
         with open(os.path.join(stamps, "seconds.json")) as file:
             return json.load(file)
@@ -355,7 +352,6 @@ def load_seconds(stamps):
 
 
 def save_seconds(stamps, timed):
-    """Adds `timed` to the stored seconds, which another worktree's gate may have written meanwhile."""
     stored = load_seconds(stamps)
     stored.update(timed)
     path = os.path.join(stamps, "seconds.json")
@@ -374,7 +370,6 @@ def run_order(todo, builder, seconds):
 
 
 def stop(proc):
-    """Ends a check's command and everything it started, which share its process group."""
     try:
         os.killpg(proc.pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -382,9 +377,7 @@ def stop(proc):
 
 
 def run_checks(ordered, builder, slots, passed):
-    """Starts each check of `ordered` in turn once its slots are free, a CLI suite once `builder` has passed when it is
-    due. A wider check that waits holds back those after it. `passed(check, seconds)` is called for each check that
-    passes. The first failure stops every running check, and the result is whether none failed."""
+    """Starts each check of `ordered` in turn once its slots are free"""
     waiting = list(ordered)
     building = builder in waiting
     running = {}
@@ -436,11 +429,6 @@ def main():
     parser.add_argument("--odin", default=os.environ.get("ODIN", "odin"))
     args = parser.parse_args()
 
-    problem = odin_problem(args.odin)
-    if problem:
-        sys.exit(problem)
-    # The makes the checks start need not ask the compiler again.
-    os.environ["ODIN_CHECKED"] = "1"
     stamps = stamp_directory()
     compiler = compiler_of(args.odin)
     every, absent = checks(args.odin)

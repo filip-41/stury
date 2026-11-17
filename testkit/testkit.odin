@@ -1,0 +1,1329 @@
+// The walk tests share this harness. It holds a hook that logs every token and hashes it, the rule that picks `Skip`
+// and `Stop`, a mutation of a seeded text, the json5-tests suites, the law of `records.each`, the records of
+// `.Entries`, the bound on a reader's memory, and a thread with a small stack.
+package testkit
+
+import "base:runtime"
+import "core:bytes"
+import "core:fmt"
+import "core:io"
+import "core:mem"
+import "core:mem/virtual"
+import "core:math/rand"
+import "core:slice"
+import "core:strings"
+import "core:sync"
+import "core:testing"
+import core "../core"
+import compose "../core/compose"
+import host "../host"
+import typed "../core/typed"
+import records "../core/records"
+import json "../json"
+
+// The stack of the thread `on_small_stack` runs its work on: a quarter of the 1 MB a Windows thread has by default.
+@(private)
+SMALL_STACK :: 256 * 1024
+
+// The work `on_small_stack` hands its thread: the test, its context and the procedure.
+@(private)
+Small_Stack_Work :: struct {
+	t:    ^testing.T,
+	ctx:  runtime.Context,
+	work: proc(t: ^testing.T),
+}
+
+// The capacity of `Log.tokens` is the most tokens a test text may hold.
+@(private)
+MAX_TOKENS :: 1 << 14
+
+// A `Fence` is one mapping whose last page has no access, sized for the longest text copied into it. `fence_copy`
+// copies a text to end at the mapping's last readable byte, so a read past the text faults in every build, with or
+// without the address sanitizer. `unfence` releases the mapping.
+Fence :: struct {
+	base: rawptr,
+	span: uint,
+	size: uint,
+}
+
+// Returns a fence with no mapping. `fence_copy` maps it for the first text.
+fence_init :: proc() -> Fence {
+	return {}
+}
+
+// Maps the fence with room for `n` bytes when it holds less, and marks the page after that room as no access.
+@(private)
+fence_reserve :: proc(f: ^Fence, n: uint) {
+	page := uint(mem.PAGE_SIZE)
+	span := (n + page - 1) & ~(page - 1)
+	if span == 0 {
+		span = page
+	}
+	if f.base != nil && f.span >= span {
+		return
+	}
+	unfence(f)
+	size := span + page
+	mapped, err := virtual.reserve_and_commit(size)
+	if err != nil {
+		panic("testkit.fence: mapping failed")
+	}
+	base := raw_data(mapped)
+	if !virtual.protect(rawptr(uintptr(base) + uintptr(span)), page, virtual.Protect_No_Access) {
+		virtual.release(base, size)
+		panic("testkit.fence: protect failed")
+	}
+	f^ = {base = base, span = span, size = size}
+}
+
+// Copies `src` to the end of the fence's readable pages and returns the copy. A read past the copy faults.
+fence_copy :: proc(f: ^Fence, src: []u8) -> []u8 {
+	fence_reserve(f, uint(len(src)))
+	lo := f.span - uint(len(src))
+	dst := ([^]u8)(f.base)[lo:f.span]
+	copy(dst, src)
+	return dst
+}
+
+// Releases the mapping a fence made.
+unfence :: proc(f: ^Fence) {
+	if f.base != nil {
+		virtual.release(f.base, f.size)
+	}
+	f^ = {}
+}
+
+// `log_hook` logs every token into `tokens`, updates `hash`, and returns the action `ask` picks from `rule`.
+Log :: struct {
+	tokens: [MAX_TOKENS]core.Token,
+	n:      int,
+	hash:   u64,
+	rule:   u64,
+}
+
+log_hook :: proc "contextless" (h: ^Log, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	a := ask(h.rule, u64(h.n), t)
+	h.tokens[h.n] = t
+	h.n += 1
+	h.hash = mix(h.hash, t)
+	return s, a
+}
+
+// `log_hook`, with its state in the walk's registers. `a` is the hash, `b` the token count, `c` the rule.
+regs_hook :: proc "contextless" (h: ^struct {}, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	return {mix(s.a, t), s.b + 1, s.c}, ask(s.c, s.b, t)
+}
+
+// The action a hook returns on the `i`th token it sees. It is `Stop` on the token the rule's low 32 bits name, `Skip`
+// on a container or key picked by the high 32 bits, and `Next` otherwise. Rule 0 always returns `Next`.
+ask :: proc "contextless" (rule, i: u64, t: core.Token) -> core.Action {
+	if rule == 0 {
+		return .Next
+	}
+	if i == rule & 0xffff_ffff {
+		return .Stop
+	}
+	if (t.kind == .Array || t.kind == .Object || t.role == .Key) && ((i + rule >> 32) * 0x9e37_79b9_7f4a_7c15) >> 62 == 0 {
+		return .Skip
+	}
+	return .Next
+}
+
+@(private)
+mix :: proc "contextless" (hash: u64, t: core.Token) -> u64 {
+	x := hash ~ t.lo ~ u64(t.n) << 32 ~ u64(t.kind) << 48 ~ u64(t.role) << 56 ~ u64(t.spelling) << 60
+	return x * 0x100_0000_01b3 + 1
+}
+
+// Copies `src` into `out` with one random edit. A byte is replaced, deleted or inserted, or the text is cut short.
+// `sharp` holds the bytes a mutation may write.
+mutate :: proc(out: ^[dynamic]u8, src: []u8, sharp: string) {
+	clear(out)
+	append(out, ..src)
+	if len(src) == 0 {
+		append(out, pick(sharp))
+		return
+	}
+	i := rand.int_max(len(src))
+	switch rand.int_max(4) {
+	case 0:
+		out[i] = pick(sharp)
+	case 1:
+		ordered_remove(out, i)
+	case 2:
+		inject_at(out, i, pick(sharp))
+	case:
+		resize(out, i)
+	}
+}
+
+// Returns a random byte of `s`.
+pick :: proc(s: string) -> u8 {
+	return s[rand.int_max(len(s))]
+}
+
+// A `Node_Want` is a node a document test expects, with its span, its `n` (a byte length, a subtree size or a child
+// count), kind and role.
+Node_Want :: struct {
+	lo, n: u64,
+	kind:  core.Kind,
+	role:  core.Role,
+}
+
+// Checks a document's nodes against `want`, and that no non-container spelling reaches bit 15.
+expect_nodes :: proc(t: ^testing.T, doc: ^core.Document, want: []Node_Want) -> bool {
+	if !testing.expectf(t, len(doc.nodes) == len(want), "%d nodes, want %d", len(doc.nodes), len(want)) {
+		return false
+	}
+	for w, i in want {
+		n := doc.nodes[i]
+		if !testing.expectf(t, n.lo == w.lo && u64(n.n) == w.n && n.kind == w.kind && n.role == w.role, "node %d: %v, want %v", i, n, w) {
+			return false
+		}
+		// A container's spelling is its 16-bit child count, every other node stays below bit 15.
+		if n.kind != .Array && n.kind != .Object && !testing.expectf(t, n.spelling < 1 << 15, "node %d spelling %d", i, n.spelling) {
+			return false
+		}
+	}
+	return true
+}
+
+// Checks every container node's span and child count against the walk's tokens for the same text. The span ends where
+// the container's `End` ends, and the count is its members' count. `tokens` skips facts, as the document does. A headed
+// dsv document keeps a header row the walk makes no token for, and a record keeps no `Key` node, so the token-to-node
+// mapping skips both.
+check_containers :: proc(t: ^testing.T, doc: ^core.Document, tokens: []core.Token) -> bool {
+	Frame :: struct {
+		lo:    u64,
+		node:  core.Node_Index,
+		count: u32,
+	}
+	stack: [1100]Frame
+	depth := 0
+	node := core.Node_Index(0)
+	headed := core.header_of(doc) != 0
+	for tok in tokens {
+		if tok.role > .Key {
+			continue
+		}
+		if tok.kind == .End {
+			if !testing.expect(t, depth > 0) {
+				return false
+			}
+			depth -= 1
+			f := stack[depth]
+			hi := tok.lo + u64(tok.n)
+			s := core.span(doc, f.node)
+			if !testing.expectf(t, f.lo + u64(len(s)) == hi, "container %d at %d: span ends at %d, walk at %d, missing %q after %q", f.node, f.lo, f.lo + u64(len(s)), hi, doc.src[min(f.lo + u64(len(s)), u64(len(doc.src))):min(hi, u64(len(doc.src)))], s[len(s) - min(len(s), 12):]) {
+				return false
+			}
+			if doc.nodes[f.node].spelling != core.MAX_CHILDREN {
+				if !testing.expectf(t, u32(core.length(doc, f.node)) == f.count, "container %d: %d members, walk %d", f.node, core.length(doc, f.node), f.count) {
+					return false
+				}
+			}
+			continue
+		}
+		if headed && tok.role == .Key {
+			continue
+		}
+		if depth > 0 && tok.role == .Value {
+			stack[depth - 1].count += 1
+		}
+		if tok.kind == .Array || tok.kind == .Object {
+			if !testing.expect(t, depth < len(stack)) {
+				return false
+			}
+			stack[depth] = {lo = tok.lo, node = node, count = 0}
+			depth += 1
+		}
+		node += 1
+		// The root is the first token, and a headed document's next nodes are the header row and its cells.
+		if headed && node == 1 {
+			node += core.Node_Index(doc.nodes[core.header_of(doc)].n)
+		}
+	}
+	return testing.expectf(t, depth == 0 && node == core.Node_Index(len(doc.nodes)), "depth %d, %d nodes, doc %d", depth, node, len(doc.nodes))
+}
+
+// `JSON_TEST_SUITE` holds the JSONTestSuite parsing files and `JSON5_TESTS` the json5-tests suites, used by the walk's
+// conformance tests and by tests outside this tree.
+JSON_TEST_SUITE := #load_directory("../json/test/conformance/JSONTestSuite/test_parsing")
+
+JSON5_TESTS := [?][]runtime.Load_Directory_File {
+	#load_directory("../json/test/conformance/json5-tests/arrays"),
+	#load_directory("../json/test/conformance/json5-tests/comments"),
+	#load_directory("../json/test/conformance/json5-tests/misc"),
+	#load_directory("../json/test/conformance/json5-tests/new-lines"),
+	#load_directory("../json/test/conformance/json5-tests/numbers"),
+	#load_directory("../json/test/conformance/json5-tests/objects"),
+	#load_directory("../json/test/conformance/json5-tests/strings"),
+	#load_directory("../json/test/conformance/json5-tests/todo"),
+}
+
+// A `Fact_Model` holds a fact's node, byte, span, role and body for a round's model.
+Fact_Model :: struct {
+	node: core.Node_Index,
+	lo:   u64,
+	n:    u64,
+	role: core.Role,
+	body: string,
+}
+
+FACT_ROLES := [?]core.Role{.Comment, .Comment_Inline, .Comment_Foot}
+
+// The bodies a fact round sets are `c`, `two words`, empty, one with an LF, one with a CR, one that would close a block
+// comment, one that closes it without a line end, a lone `*`, the comment byte, and U+2028, which only JSON5 reads as a
+// line end.
+FACT_BODIES := [?]string{"c", "two words", "", "one\ntwo", "a\rb", "x\n*/", "a*/b", "*", "#", "a\xE2\x80\xA8b"}
+
+// Whether a set, insert or removal touches `node`. With `allow_remove` set a removal is skipped, so a round can name a
+// fact on a node the same list removes and check the commit's refusal.
+tree_touched :: proc(doc: ^core.Document, list: ^core.Edit_List, node: core.Node_Index, allow_remove: bool) -> bool {
+	for e in list.edits {
+		if e.op >= .Set_Fact {
+			continue
+		}
+		if e.op == .Insert {
+			if e.node == node {
+				return true
+			}
+			continue
+		}
+		if e.op == .Remove && allow_remove {
+			continue
+		}
+		if int(e.node) >= len(doc.nodes) {
+			continue
+		}
+		if e.node <= node && node < e.node + core.Node_Index(core.subtree_size(doc, e.node)) {
+			return true
+		}
+	}
+	return false
+}
+
+// Whether a tree edit writes over fact `f`'s bytes. A removal takes the removed subtree and the comments on it. A set
+// takes the node's own span, so a head comment before that span and an inline comment after it stay, and a comment
+// inside the span goes.
+@(private)
+tree_written :: proc(doc: ^core.Document, list: ^core.Edit_List, f: Fact_Model) -> bool {
+	for e in list.edits {
+		if int(e.node) >= len(doc.nodes) {
+			continue
+		}
+		switch e.op {
+		case .Remove:
+			if e.node <= f.node && f.node < e.node + core.Node_Index(core.subtree_size(doc, e.node)) {
+				return true
+			}
+		case .Set:
+			lo := doc.nodes[e.node].lo
+			hi := lo + u64(len(core.span(doc, e.node)))
+			if f.lo >= lo && f.lo + f.n <= hi {
+				return true
+			}
+		case .Insert, .Set_Fact, .Remove_Fact, .Reorder:
+		}
+	}
+	return false
+}
+
+// Whether `node` and every touched node are outside each other's subtrees, so neither is the other's ancestor.
+nodes_disjoint :: proc(doc: ^core.Document, touched: []core.Node_Index, node: core.Node_Index) -> bool {
+	for t in touched {
+		if t <= node && node < t + core.Node_Index(core.subtree_size(doc, t)) {
+			return false
+		}
+		if node <= t && t < node + core.Node_Index(core.subtree_size(doc, node)) {
+			return false
+		}
+	}
+	return true
+}
+
+// Whether `body` holds a line end a JSON line comment ends at.
+@(private)
+body_line_end :: proc(body: string) -> bool {
+	for i in 0 ..< len(body) {
+		switch body[i] {
+		case '\n', '\r':
+			return true
+		}
+		if body[i] == 0xE2 && i + 2 < len(body) && body[i+1] == 0x80 && body[i+2] | 1 == 0xA9 {
+			return true
+		}
+	}
+	return false
+}
+
+// Whether the output `read` holds a fact of `role` on `node`: the role has a slot, the output has a comment marker,
+// and the body has a spelling under it. A delimited text's root comment needs a record after it in `read`, since an
+// output that removed every record reads the comment as a foot. A JSON line comment ends at U+2028 or U+2029 too, so
+// such a body needs the block spelling, which holds no `*/`. An inline body with `*/` and no line end is either
+// spelled or dropped, so `fact_agrees` judges it by what reads back.
+@(private)
+fact_holdable :: proc(list: ^core.Edit_List, node: core.Node_Index, role: core.Role, body: string, spec: u8, read: ^core.Document) -> bool {
+	doc, edit := list.doc, list.edit
+	if edit == nil || edit.comment == nil {
+		return false
+	}
+	syntax := edit.comment(doc, spec)
+	if !core.has_comments(syntax) {
+		return false
+	}
+	table := core.is_flat(doc)
+	if !table {
+		if role == .Comment_Foot {
+			n := doc.nodes[node]
+			if node != core.ROOT && n.kind != .Array && n.kind != .Object {
+				return false
+			}
+		}
+	} else {
+		if role == .Comment_Foot {
+			if node != core.ROOT {
+				return false
+			}
+		} else if role == .Comment {
+			if node == core.ROOT {
+				if core.header_of(read) == 0 || core.length(read, core.ROOT) == 0 {
+					return false
+				}
+			} else {
+				n := doc.nodes[node]
+				if n.role != .Value || (n.kind != .Array && n.kind != .Object) {
+					return false
+				}
+			}
+		} else {
+			return false
+		}
+	}
+	if syntax.open == "" {
+		return !strings.contains(body, "\n") && !strings.contains(body, "\r")
+	}
+	return !(strings.contains(body, syntax.close) && (body_line_end(body) || role == .Comment_Inline))
+}
+
+// Whether a named fact's body holds `*/` and no line end under a syntax with a block form, so core may spell it or
+// drop it.
+@(private)
+fact_either :: proc(list: ^core.Edit_List, e: core.Edit, spec: u8) -> bool {
+	body := string(e.text)
+	if !strings.contains(body, "*/") || body_line_end(body) {
+		return false
+	}
+	edit := list.edit
+	if edit == nil || edit.comment == nil {
+		return false
+	}
+	return edit.comment(list.doc, spec).open != ""
+}
+
+// Whether a fact edit names one node and role: that fact is the edit's, not the invariant's.
+@(private)
+fact_named :: proc(list: ^core.Edit_List, node: core.Node_Index, role: core.Role) -> bool {
+	for e in list.edits {
+		if e.op >= .Set_Fact && e.node == node && e.role == role {
+			return true
+		}
+	}
+	return false
+}
+
+// Appends the facts `doc` reads to `out`, in source order. The body is the bytes between the lead and tail counts in
+// the fact's spelling, as core's reader slices it.
+fact_model :: proc(doc: ^core.Document, out: ^[dynamic]Fact_Model) {
+	for f in doc.facts {
+		lead := u64(f.spelling & 0xFF)
+		tail := u64(f.spelling >> 8)
+		body := doc.src[f.lo + lead:f.lo + u64(f.n) - tail]
+		append(out, Fact_Model{node = f.node, lo = f.lo, n = u64(f.n), role = f.role, body = string(body)})
+	}
+}
+
+// Whether `got` holds one fact of node, role and body, taking it from `used`.
+@(private)
+fact_find :: proc(got: []Fact_Model, used: []bool, node: core.Node_Index, role: core.Role, body: string) -> bool {
+	for g, i in got {
+		if !used[i] && g.node == node && g.role == role && g.body == body {
+			used[i] = true
+			return true
+		}
+	}
+	return false
+}
+
+// Whether `got` holds one fact of a body and role, taking it from `used`. A fact of the same bytes is taken first, then
+// one of the same role, then one of any role.
+@(private)
+body_find :: proc(got: []Fact_Model, used: []bool, read: ^core.Document, role: core.Role, body, full: string) -> bool {
+	role_found, any_found := -1, -1
+	for g, i in got {
+		if used[i] || g.body != body {
+			continue
+		}
+		if string(read.src[g.lo:g.lo + g.n]) == full {
+			used[i] = true
+			return true
+		}
+		if g.role == role && role_found < 0 {
+			role_found = i
+		}
+		if any_found < 0 {
+			any_found = i
+		}
+	}
+	found := role_found if role_found >= 0 else any_found
+	if found >= 0 {
+		used[found] = true
+	}
+	return found >= 0
+}
+
+// Checks the fact rule of a round's commit, over the round's own edit list. A named fact the output holds reads back on
+// the node the commit maps it to, in its role, with its body. A named fact the output cannot hold is not required, and
+// every such fact is one of the commit's drops. Every source fact not named and not written over reads back by its
+// body, unless the output cannot hold it, which is the other kind of drop. `kept` is how many facts the round
+// compared.
+fact_agrees :: proc(t: ^testing.T, round: int, before: []Fact_Model, doc: ^core.Document, list: ^core.Edit_List, node_at: []core.Node_Index, read: ^core.Document, dropped: int, spec: u8) -> (ok: bool, kept: int) {
+	got: [dynamic]Fact_Model
+	defer delete(got)
+	fact_model(read, &got)
+	used := make([]bool, len(got), context.temp_allocator)
+	missing := 0
+	expected := 0
+	either_missing := 0
+	for e in list.edits {
+		if e.op < .Set_Fact {
+			continue
+		}
+		node := core.NO_NODE
+		if int(e.node) < len(node_at) {
+			node = node_at[e.node]
+		}
+		if e.op == .Remove_Fact {
+			continue
+		}
+		kept += 1
+		slot := node != core.NO_NODE && fact_holdable(list, e.node, e.role, "", spec, read)
+		if slot && fact_either(list, e, spec) {
+			if !fact_find(got[:], used, node, e.role, string(e.text)) {
+				either_missing += 1
+			}
+			continue
+		}
+		holdable := slot && fact_holdable(list, e.node, e.role, string(e.text), spec, read)
+		if !holdable {
+			expected += 1
+			continue
+		}
+		if node == core.NO_NODE || !fact_find(got[:], used, node, e.role, string(e.text)) {
+			missing += 1
+			fmt.printfln("    round %d: set fact node %d -> %d role %v body %q is not there", round, e.node, node, e.role, e.text)
+		}
+	}
+	for f in before {
+		if fact_named(list, f.node, f.role) || tree_written(doc, list, f) {
+			continue
+		}
+		// A source root comment above a header reads as the root's foot when the commit leaves no record, which the
+		// output holds.
+		foot := f.role == .Comment && f.node == core.ROOT && core.header_of(doc) != 0 && core.length(read, core.ROOT) == 0
+		// A source fact in the document's own spec already reads under it, so only a missing slot drops it. Under
+		// another spec the output must hold the whole fact, body included.
+		if !foot && !fact_holdable(list, f.node, f.role, f.body if spec != doc.as.spec else "", spec, read) {
+			expected += 1
+			continue
+		}
+		kept += 1
+		if !body_find(got[:], used, read, f.role, f.body, string(doc.src[f.lo:f.lo + f.n])) {
+			missing += 1
+			fmt.printfln("    round %d: source fact node %d role %v body %q went", round, f.node, f.role, f.body)
+		}
+	}
+	// A fact an edit's text writes is new, so its read is not a source fact's.
+	for g, i in got {
+		if used[i] {
+			continue
+		}
+		full := read.src[g.lo:g.lo + g.n]
+		for e in list.edits {
+			if (e.op == .Set || e.op == .Insert) && strings.contains(string(e.text), string(full)) {
+				used[i] = true
+				break
+			}
+		}
+	}
+	// A fact of a node a tree edit removes goes with the node and must not read back on any node. A fact the same
+	// list names is the edit's, and a read already attributed to another fact or to an edit's text is that one's.
+	for b in before {
+		if !tree_written(doc, list, b) || fact_named(list, b.node, b.role) {
+			continue
+		}
+		for g, i in got {
+			if !used[i] && g.body == b.body {
+				return testing.expectf(t, false, "round %d: fact of removed node %d role %v body %q reads on node %d", round, b.node, b.role, b.body, g.node), kept
+			}
+		}
+	}
+	// A removed fact must not read back on the node the commit maps it to. A read already attributed to another source
+	// fact that a tree edit left in the text, or to an edit's text, is not the removed fact's. Every other read of the
+	// body is.
+	for e in list.edits {
+		if e.op != .Remove_Fact {
+			continue
+		}
+		node := core.NO_NODE
+		if int(e.node) < len(node_at) {
+			node = node_at[e.node]
+		}
+		for b in before {
+			if b.node != e.node || b.role != e.role {
+				continue
+			}
+			for g, i in got {
+				if !used[i] && g.node == node && g.role == e.role && g.body == b.body {
+					return testing.expectf(t, false, "round %d: removed fact node %d role %v body %q still reads", round, node, e.role, b.body), kept
+				}
+			}
+		}
+	}
+	extra := 0
+	for u in used {
+		if !u {
+			extra += 1
+		}
+	}
+	if missing > 0 || extra > 0 || dropped != expected + either_missing {
+		for g, i in got {
+			if !used[i] {
+				fmt.printfln("    unused node %d role %v body %q bytes %q", g.node, g.role, g.body, read.src[g.lo:g.lo + g.n])
+			}
+		}
+		for g in got {
+			fmt.printfln("    reads node %d role %v body %q", g.node, g.role, g.body)
+		}
+		for b in before {
+			fmt.printfln("    source node %d role %v body %q", b.node, b.role, b.body)
+		}
+		return testing.expectf(t, false, "round %d: %d facts went of %d, %d extra, dropped %d, expected %d + %d either", round, missing, kept, extra, dropped, expected, either_missing), kept
+	}
+	return true, kept
+}
+
+// Checks that `doc` holds one fact of `role` on `node` with body `want`.
+body :: proc(t: ^testing.T, doc: ^core.Document, node: core.Node_Index, role: core.Role, want: string) -> bool {
+	it := core.facts_of(doc, node, role)
+	got, ok := core.fact_next(&it)
+	if !testing.expectf(t, ok && string(got) == want, "node %d role %v: %q, want %q", node, role, got, want) {
+		return false
+	}
+	if _, more := core.fact_next(&it); !testing.expectf(t, !more, "node %d role %v holds more than one fact", node, role) {
+		return false
+	}
+	return true
+}
+
+// `Failing_Alloc` counts allocations and forwards each call to `inner`. It returns `.Out_Of_Memory` on the
+// allocation numbered `fail_at`, counting from 0, on every later one while `fail_on` is set, and on every allocation
+// while `fail_all` is set. A `fail_at` of -1 fails none.
+Failing_Alloc :: struct {
+	inner:    runtime.Allocator,
+	n:        int,
+	fail_at:  int,
+	fail_all: bool,
+	fail_on:  bool,
+}
+
+@(private)
+failing_alloc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, runtime.Allocator_Error) {
+	f := (^Failing_Alloc)(data)
+	switch mode {
+	case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
+		if f.fail_all || f.n == f.fail_at || (f.fail_on && f.fail_at >= 0 && f.n > f.fail_at) {
+			f.n += 1
+			return nil, .Out_Of_Memory
+		}
+		f.n += 1
+	case .Free, .Free_All, .Query_Features, .Query_Info:
+	}
+	return f.inner.procedure(f.inner.data, mode, size, alignment, old_memory, old_size, loc)
+}
+
+// Returns the allocator `f` describes.
+failing_allocator :: proc(f: ^Failing_Alloc) -> runtime.Allocator {
+	return {procedure = failing_alloc, data = f}
+}
+
+// A write `sweep_write` runs: the text under `allocator`, or why it has none.
+Write_Try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind)
+
+// Fails each allocation of a write in turn, then that one and every later one, on the output's allocator and on
+// `context.allocator`. A write gives `want` or `.No_Memory`, whatever fails, and the test's tracker sees a leak.
+sweep_write :: proc(t: ^testing.T, try: Write_Try, data: rawptr, want: string, loc := #caller_location) {
+	for on_context in ([?]bool{false, true}) {
+		for hold in ([?]bool{false, true}) {
+			for at := 0;; at += 1 {
+				f := Failing_Alloc{inner = context.allocator, fail_at = at, fail_on = hold}
+				text: []u8
+				kind: core.Typed_Error_Kind
+				if on_context {
+					inner := context.allocator
+					context.allocator = failing_allocator(&f)
+					text, kind = try(data, inner)
+				} else {
+					text, kind = try(data, failing_allocator(&f))
+				}
+				fine := kind == .No_Memory && len(text) == 0 || kind == .None && string(text) == want
+				testing.expectf(t, fine, "allocation %d, later ones too %v, on the context %v: %v %q", at, hold, on_context, kind, text, loc = loc)
+				delete(text)
+				if f.n <= at {
+					break
+				}
+			}
+		}
+	}
+}
+
+// Reads `src` as a built document under the spec a caller passes as `spec`.
+Build :: proc(src: []u8, spec: any) -> (core.Document, core.Error)
+
+// Commits `list`, checks the output against `want`, then builds the output with `build` and `spec`.
+expect_commit :: proc(t: ^testing.T, list: ^core.Edit_List, want: string, build: Build, spec: any) -> bool {
+	out, _, err := compose.commit(list)
+	defer if len(out) > 0 {
+		delete(out)
+	}
+	if !testing.expectf(t, err == nil, "commit: %v", err) {
+		return false
+	}
+	if !testing.expectf(t, string(out) == want, "committed %q, want %q", string(out), want) {
+		return false
+	}
+	doc, derr := build(out, spec)
+	defer core.destroy(&doc)
+	return testing.expectf(t, derr == nil, "committed text does not read: %v", derr)
+}
+
+// Builds `src` with `build` and `spec`, records `edit` on a list over it, and checks the committed text against `want`.
+check :: proc(t: ^testing.T, src, want: string, build: Build, spec: any, edit: proc(list: ^core.Edit_List) -> core.Error) -> bool {
+	doc, err := build(transmute([]u8)src, spec)
+	defer core.destroy(&doc)
+	if !testing.expectf(t, err == nil, "%q: %v", src, err) {
+		return false
+	}
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	if e := edit(&list); !testing.expectf(t, e == nil, "%q: record %v", src, e) {
+		return false
+	}
+	return expect_commit(t, &list, want, build, spec)
+}
+
+// `each` on each pool returns the fault `next` ends on, and before its byte gives the records `next` gives, each once and in
+// piece order, from every piece the tasks were handed, those past the fault included.
+expect_each_law :: proc(t: ^testing.T, pools: []host.Pool, src: []u8, as: core.As, framing: core.Framing, at: u64 = 0) -> bool {
+	it := records.open(src, as, framing, at, context.temp_allocator)
+	want := make([dynamic][2]u64, context.temp_allocator)
+	for rec in records.next(&it) {
+		append(&want, [2]u64{rec.at, u64(len(rec.text))})
+	}
+	fault := it.fault
+	records.close(&it)
+	// A piece past the fault may give records that are none, which the caller drops.
+	past := max(u64)
+	if f, bad := fault.?; bad && f.kind not_in core.AT_NO_BYTE {
+		past = f.at
+	}
+	Piece :: struct {
+		k:    int,
+		recs: [dynamic][2]u64,
+	}
+	Got :: struct {
+		lock:   sync.Mutex,
+		pieces: [dynamic]Piece,
+	}
+	collect :: proc(g: ^Got, piece: ^records.Reader, k: int) -> bool {
+		p := Piece{k = k, recs = make([dynamic][2]u64, runtime.heap_allocator())}
+		for rec in records.next(piece) {
+			append(&p.recs, [2]u64{rec.at, u64(len(rec.text))})
+		}
+		sync.guard(&g.lock)
+		append(&g.pieces, p)
+		return true
+	}
+	for &pool in pools {
+		g := Got{pieces = make([dynamic]Piece, runtime.heap_allocator())}
+		f := records.each(src, as, framing, collect, &g, &pool.runner, at)
+		slice.sort_by(g.pieces[:], proc(a, b: Piece) -> bool { return a.k < b.k })
+		got := make([dynamic][2]u64, context.temp_allocator)
+		unique := true
+		for p, i in g.pieces {
+			unique &&= i == 0 || p.k != g.pieces[i - 1].k
+			for r in p.recs {
+				if r[0] < past {
+					append(&got, r)
+				}
+			}
+			delete(p.recs)
+		}
+		delete(g.pieces)
+		got_fault, faulted := f.(core.Fault)
+		same_fault := f == nil && fault == nil || faulted && fault == got_fault
+		if !testing.expectf(t, unique && same_fault && slice.equal(got[:], want[:]), "%v %q at width %d: each %v %v, want %v %v", framing, src, pool.runner.threads + 1, got, f, want, fault) {
+			return false
+		}
+	}
+	return true
+}
+
+// `records.validate` on each pool gives the faults it gives on one thread, `records.validate_parallel` gives the fault
+// `core.validate` gives, at every width, and `expect_each_law` holds. A byte cut inside a cell or string is among the
+// texts a caller passes.
+expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: []u8, as: core.As, framing: core.Framing, loc := #caller_location) -> bool {
+	serial, _ := records.validate(src, as, framing, context.temp_allocator)
+	whole := fault_of(core.validate(src, as))
+	if v := records.validate_parallel(src, as); !testing.expectf(t, v == whole, "%v %q: validate %v, want %v", framing, src, v, whole, loc = loc) {
+		return false
+	}
+	for &pool in pools {
+		got, _ := records.validate(src, as, framing, context.temp_allocator, &pool.runner)
+		if !testing.expectf(t, slice.equal(got, serial), "%v %q at width %d: %v, want %v", framing, src, pool.runner.threads + 1, got, serial, loc = loc) {
+			return false
+		}
+		if v := records.validate_parallel(src, as, &pool.runner); !testing.expectf(t, v == whole, "%v %q at width %d: validate %v, want %v", framing, src, pool.runner.threads + 1, v, whole, loc = loc) {
+			return false
+		}
+	}
+	return expect_each_law(t, pools, src, as, framing)
+}
+
+// The records `it` gives, a line each: the offset, the key as written and the record's document written as JSON, then
+// `end`, or `fault` and its offset. It closes `it`.
+entries_lines :: proc(it: ^records.Reader) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	for rec in records.next(it) {
+		fmt.sbprintf(&b, "%d %s %s\n", rec.at, rec.key, built_json(it, rec))
+	}
+	if f, bad := it.fault.?; bad {
+		fmt.sbprintf(&b, "fault %d", f.at)
+	} else {
+		strings.write_string(&b, "end")
+	}
+	records.close(it)
+	return strings.to_string(b)
+}
+
+// An input that gives at most `sizes[i % len(sizes)]` bytes on its `i`-th read, a random count up to 16 when `sizes`
+// is empty, and fails with `.Unknown` once `fail_at` bytes are read, when it is above 0.
+Chunked :: struct {
+	src:     []u8,
+	sizes:   []int,
+	gen:     rand.Generator,
+	reads:   int,
+	at:      int,
+	fail_at: int,
+}
+
+chunked :: proc(c: ^Chunked) -> io.Reader {
+	return {data = c, procedure = proc(data: rawptr, mode: io.Stream_Mode, p: []u8, _: i64, _: io.Seek_From) -> (i64, io.Error) {
+		c := (^Chunked)(data)
+		if mode != .Read {
+			return 0, .Unsupported
+		}
+		if c.fail_at > 0 && c.at == c.fail_at {
+			return 0, .Unknown
+		}
+		if c.at == len(c.src) {
+			return 0, .EOF
+		}
+		k := c.sizes[c.reads % len(c.sizes)] if len(c.sizes) > 0 else 1 + rand.int_max(16, c.gen)
+		c.reads += 1
+		k = min(k, c.fail_at - c.at) if c.fail_at > 0 else k
+		n := copy(p[:min(len(p), k)], c.src[c.at:])
+		c.at += n
+		return i64(n), nil
+	}}
+}
+
+// A stream whose every write is refused and every other call fails.
+refusing_stream :: proc(data: rawptr, mode: io.Stream_Mode, p: []u8, offset: i64, whence: io.Seek_From) -> (i64, io.Error) {
+	return 0, .Permission_Denied if mode == .Write else .Unknown
+}
+
+// An input of no bytes holds no record, and a record read from byte `at` of `src` is the rest of `src` and starts there.
+expect_record_is_the_rest :: proc(t: ^testing.T, src: string, at: u64, as: core.As, loc := #caller_location) {
+	empty := records.open(nil, as, .Concatenated)
+	defer records.close(&empty)
+	_, more := records.next(&empty)
+	testing.expect(t, !more && empty.fault == nil, loc = loc)
+	from := records.open(transmute([]u8)src, as, .Concatenated, at)
+	defer records.close(&from)
+	rec, ok := records.next(&from)
+	testing.expectf(t, ok && rec.at == at && string(rec.text) == src[at:], "%v at %d: %q", ok, rec.at, rec.text, loc = loc)
+}
+
+// A stream whose input holds `text` gives one record, the whole text from byte 0, once the input has ended.
+expect_stream_is_one_record :: proc(t: ^testing.T, text: string, as: core.As, loc := #caller_location) {
+	r: strings.Reader
+	it := records.open_stream(strings.to_reader(&r, text), as, .Concatenated, {max_bytes = 1 << 22})
+	defer records.close(&it)
+	n := 0
+	for rec in records.next(&it) {
+		testing.expect(t, string(rec.text) == text && rec.at == 0, loc = loc)
+		n += 1
+	}
+	testing.expect(t, n == 1 && it.fault == nil, loc = loc)
+}
+
+// The framings `caps` names are those the records of `as` open in.
+expect_framings :: proc(t: ^testing.T, caps: core.Capabilities, as: core.As, loc := #caller_location) -> bool {
+	ok := true
+	for framing in core.Framing {
+		it := records.open(nil, as, framing)
+		opens := it.fault == nil
+		records.close(&it)
+		ok &&= testing.expectf(t, opens == (framing in caps.framings), "%v opens %v", framing, opens, loc = loc)
+	}
+	return ok
+}
+
+// Under `.Entries` the records of `src` named by `names` are `want`, as `entries_lines` writes them, read in memory and
+// from a stream, and `each` on two threads gives the records `next` gives.
+expect_entries :: proc(t: ^testing.T, src: string, as: core.As, names: []string, want: string, loc := #caller_location) -> bool {
+	it := records.open(transmute([]u8)src, as, .Entries, entries = names)
+	ok := testing.expect_value(t, entries_lines(&it), want, loc)
+	r: strings.Reader
+	stream := records.open_stream(strings.to_reader(&r, src), as, .Entries, {entries = names})
+	ok &&= testing.expect_value(t, entries_lines(&stream), want, loc)
+	for size in 1 ..= 3 {
+		trickle := Chunked{src = transmute([]u8)src, sizes = {size}}
+		slow := records.open_stream(chunked(&trickle), as, .Entries, {entries = names})
+		ok &&= testing.expect_value(t, entries_lines(&slow), want, loc)
+	}
+	if strings.has_suffix(want, "end") {
+		ok &&= expect_entries_whole(t, src, as, names, loc)
+	}
+	pools: [1]host.Pool
+	host.pool_init(&pools[0], 2)
+	defer host.pool_destroy(&pools[0])
+	return expect_each_law(t, pools[:], transmute([]u8)src, as, .Entries) && ok
+}
+
+// The `.Entries` records of `src` named by `names`, read in memory and from a stream, are the members of that container
+// in the build of the whole text, each written as JSON.
+@(private)
+expect_entries_whole :: proc(t: ^testing.T, src: string, as: core.As, names: []string, loc := #caller_location) -> bool {
+	whole, err := core.build(transmute([]u8)src, as, allocator = context.temp_allocator)
+	if !testing.expectf(t, err == nil, "%q builds: %v", src, err, loc = loc) {
+		return false
+	}
+	defer core.destroy(&whole)
+	b := strings.builder_make(context.temp_allocator)
+	container, found := core.ROOT, true
+	for name, depth in names {
+		found = false
+		named := core.members_named(&whole, container, name)
+		for v in core.member_next(&named) {
+			if kind := whole.nodes[v].kind; kind == .Object || kind == .Array && depth == len(names) - 1 {
+				container, found = v, true
+				break
+			}
+		}
+		if !found {
+			break
+		}
+	}
+	members := core.children(&whole, container)
+	for v in core.child_next(&members) {
+		if !found {
+			break
+		}
+		out, _, _ := json.write(&whole, .Json, node = v, allocator = context.temp_allocator)
+		fmt.sbprintf(&b, "%s\n", out)
+	}
+	ok := true
+	for streamed in ([2]bool{false, true}) {
+		r: strings.Reader
+		it := records.open(transmute([]u8)src, as, .Entries, entries = names)
+		if streamed {
+			it = records.open_stream(strings.to_reader(&r, src), as, .Entries, {entries = names})
+		}
+		got := strings.builder_make(context.temp_allocator)
+		for rec in records.next(&it) {
+			fmt.sbprintf(&got, "%s\n", built_json(&it, rec))
+		}
+		records.close(&it)
+		ok &&= testing.expectf(t, strings.to_string(got) == strings.to_string(b), "%q streamed %v: records\n%s\nwhole members\n%s", src, streamed, strings.to_string(got), strings.to_string(b), loc = loc)
+	}
+	return ok
+}
+
+// Every `.Entries` record of `src` named by `names` builds, after each later record is given, to the document it built
+// when it was given: in memory, also once the records end, and from a stream whose window holds the whole text.
+expect_entries_built_later :: proc(t: ^testing.T, src: string, as: core.As, names: []string, loc := #caller_location) -> bool {
+	ok := true
+	for streamed in ([2]bool{false, true}) {
+		r: strings.Reader
+		it := records.open(transmute([]u8)src, as, .Entries, entries = names)
+		if streamed {
+			it = records.open_stream(strings.to_reader(&r, src), as, .Entries, {entries = names})
+		}
+		given := make([dynamic]records.Record, context.temp_allocator)
+		then := make([dynamic]string, context.temp_allocator)
+		for rec in records.next(&it) {
+			append(&given, rec)
+			append(&then, built_json(&it, rec))
+			for earlier, i in given {
+				ok &&= testing.expectf(t, built_json(&it, earlier) == then[i], "%q streamed %v: record %d after %d", src, streamed, i, len(given) - 1, loc = loc)
+			}
+		}
+		if !streamed {
+			for earlier, i in given {
+				ok &&= testing.expectf(t, built_json(&it, earlier) == then[i], "%q: record %d after the end", src, i, loc = loc)
+			}
+		}
+		records.close(&it)
+	}
+	return ok
+}
+
+// The JSON text of the record `rec` of `it`, or the error that built it.
+built_json :: proc(it: ^records.Reader, rec: records.Record) -> string {
+	doc, err := records.build(it, rec, context.temp_allocator)
+	defer core.destroy(&doc)
+	out, _, werr := json.write(&doc, .Json, allocator = context.temp_allocator)
+	if err != nil || werr != nil {
+		return fmt.tprint("error", err, werr)
+	}
+	return string(out)
+}
+
+// The `.Entries` records of `src` named by `names`, each read as a `T` by `records.read`, a line each, then `end`, or
+// the error that ended them.
+entries_read :: proc(src: string, as: core.As, names: []string, $T: typeid) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	it := records.open(transmute([]u8)src, as, .Entries, entries = names)
+	defer records.close(&it)
+	for {
+		v: T
+		err, more := records.read(&it, &v, nil, allocator = context.temp_allocator)
+		if !more {
+			break
+		}
+		if err != nil {
+			fmt.sbprintf(&b, "error %v\n", err)
+			continue
+		}
+		fmt.sbprintf(&b, "%v\n", v)
+	}
+	if f, bad := it.fault.?; bad {
+		fmt.sbprintf(&b, "fault %v", f.kind)
+	} else {
+		strings.write_string(&b, "end")
+	}
+	return strings.to_string(b)
+}
+
+@(private = "file")
+Read_Way :: enum {
+	Read,
+	Build,
+	Scan,
+}
+
+// The bytes a reader and its caller's temp allocator hold after reading every record of `src` one way, `one` reading
+// a typed record.
+@(private = "file")
+reads_used :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, read: typed.Read_Options, way: Read_Way, stream: bool, one: proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> bool) -> [2]int {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, runtime.heap_allocator())
+	defer mem.tracking_allocator_destroy(&track)
+	temp, values: runtime.Arena
+	defer runtime.arena_destroy(&temp)
+	defer runtime.arena_destroy(&values)
+	context.temp_allocator = runtime.arena_allocator(&temp)
+	path, _ := core.parse_path(".a", runtime.arena_allocator(&values))
+	r: bytes.Reader
+	it := records.open(src, as, framing, 0, mem.tracking_allocator(&track))
+	if stream {
+		it = records.open_stream(bytes.reader_init(&r, src), as, framing, {}, 0, mem.tracking_allocator(&track))
+	}
+	defer records.close(&it)
+	for more := true; more; {
+		switch way {
+		case .Read:
+			more = one(&it, plan, read, runtime.arena_allocator(&values))
+		case .Build:
+			rec: records.Record
+			if rec, more = records.next(&it); more {
+				_, _ = records.build(&it, rec, runtime.arena_allocator(&values))
+			}
+		case .Scan:
+			_, _, _, more = records.scan(&it, path)
+		}
+	}
+	return {int(track.current_memory_allocated), int(temp.total_used)}
+}
+
+// Reading the records of `many`, ten times those of `few`, leaves a reader and the temp allocator its caller reads with
+// holding no more memory than reading `few` does, in memory and on a stream: what a record's `read`, `build` or `scan`
+// allocates for itself is gone by the next. A record's value is freed after each.
+expect_bounded_reads :: proc(t: ^testing.T, few, many: []u8, as: core.As, plan: ^typed.Plan, $T: typeid, read := typed.Read_Options{}, framing := core.Framing.Lines) -> bool {
+	one :: proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> bool {
+		v: T
+		_, more := records.read(it, &v, plan, read, allocator)
+		return more
+	}
+	for way in Read_Way {
+		for stream in ([]bool{false, true}) {
+			a, b := reads_used(few, as, framing, plan, read, way, stream, one), reads_used(many, as, framing, plan, read, way, stream, one)
+			if !testing.expectf(t, b[0] <= a[0] && b[1] <= a[1], "%v %v stream %v: reader and temp bytes %v, ten times the records %v", typeid_of(T), way, stream, a, b) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Fails unless `err` is the arm that `kind` names with that kind. A `.Walk` is a `core.Fault`, a `.No_Memory` an
+// allocation refused, and a `.Duplicate_Key` a `core.Fault` of that kind or an edit's own `core.Document_Error`.
+expect_kind :: proc(t: ^testing.T, err: core.Error, kind: $K, loc := #caller_location) -> bool {
+	ok: bool
+	switch {
+	case kind == K.None:
+		ok = err == nil
+	case kind == K.Walk:
+		_, ok = err.(core.Fault)
+	case kind == K.No_Memory:
+		_, ok = err.(runtime.Allocator_Error)
+	case kind == K.Duplicate_Key:
+		f, is_fault := err.(core.Fault)
+		_, is_edit := err.(core.Document_Error)
+		ok = is_fault && f.kind == .Duplicate_Key || is_edit
+	case:
+		when K == core.Document_Error_Kind {
+			e, is_arm := err.(core.Document_Error)
+			ok = is_arm && e.kind == kind
+		} else when K == core.Path_Error_Kind {
+			e, is_arm := err.(core.Path_Error)
+			ok = is_arm && e.kind == kind
+		} else {
+			e, is_arm := err.(core.Typed_Error)
+			bare, is_bare := err.(core.Typed_Error_Kind)
+			ok = is_arm && e.kind == kind || is_bare && bare == kind
+		}
+	}
+	return testing.expectf(t, ok, "want %v, got %v", kind, err, loc = loc)
+}
+
+// Fails unless `err` is nil.
+expect_nil :: proc(t: ^testing.T, err: core.Error, loc := #caller_location) -> bool {
+	return testing.expectf(t, err == nil, "want no error, got %v", err, loc = loc)
+}
+
+// The fault that `err` is, nil when it is none, and an allocation refused as the fault `.No_Memory`.
+fault_of :: proc "contextless" (err: core.Error) -> Maybe(core.Fault) {
+	switch e in err {
+	case core.Fault:
+		return e
+	case runtime.Allocator_Error, core.Document_Error, core.Path_Error, core.Typed_Error, core.Typed_Error_Kind:
+		return core.Fault{kind = .No_Memory}
+	case nil:
+	}
+	return nil
+}
+
+// Whether `err` is a `core.Fault` of kind `kind` at byte `at`.
+fault_is :: proc "contextless" (err: core.Error, kind: core.Fault_Kind, at: u64) -> bool {
+	f, ok := err.(core.Fault)
+	return ok && f.kind == kind && f.at == at
+}
+
+// The byte that `err` names, 0 when it names none.
+at_of :: proc "contextless" (err: core.Error) -> u64 {
+	switch e in err {
+	case core.Fault:
+		return e.at
+	case core.Document_Error:
+		return e.at
+	case core.Path_Error:
+		return e.at
+	case core.Typed_Error:
+		return e.at
+	case runtime.Allocator_Error, core.Typed_Error_Kind:
+	case nil:
+	}
+	return 0
+}
+
+// The `Document_Error`, `Path_Error` or `Typed_Refusal` that `err` holds, zero when it holds another arm. A bare
+// `Typed_Error_Kind` is a `Typed_Refusal` of that kind.
+document_of :: proc "contextless" (err: core.Error) -> core.Document_Error {
+	e, _ := err.(core.Document_Error)
+	return e
+}
+
+path_of :: proc "contextless" (err: core.Error) -> core.Path_Error {
+	e, _ := err.(core.Path_Error)
+	return e
+}
+
+typed_of :: proc "contextless" (err: core.Error) -> core.Typed_Refusal {
+	switch e in err {
+	case core.Typed_Error:
+		return core.typed_refusal_of(e)
+	case core.Typed_Error_Kind:
+		return {kind = e}
+	case core.Fault:
+		return {kind = .Duplicate_Key if e.kind == .Duplicate_Key else .Walk, at = e.at, inner = e}
+	case runtime.Allocator_Error:
+		return {kind = .No_Memory}
+	case core.Document_Error, core.Path_Error:
+	case nil:
+	}
+	return {}
+}
+
+// Whether `err` is an allocation refused.
+is_oom :: proc "contextless" (err: core.Error) -> bool {
+	_, ok := err.(runtime.Allocator_Error)
+	return ok
+}
+
+// Whether `err` is a repeated key, a `core.Fault` of that kind or an edit's own.
+is_duplicate :: proc "contextless" (err: core.Error) -> bool {
+	#partial switch e in err {
+	case core.Fault:
+		return e.kind == .Duplicate_Key
+	case core.Document_Error:
+		return e.kind == .Duplicate_Key
+	}
+	return false
+}
+
+// The typed kind that `err` reports: a `core.Fault` is `.Walk`, or `.Duplicate_Key` for a repeated key, and an
+// allocation refused is `.No_Memory`.
+typed_kind :: proc "contextless" (err: core.Error) -> core.Typed_Error_Kind {
+	switch e in err {
+	case core.Typed_Error:
+		return e.kind
+	case core.Typed_Error_Kind:
+		return e
+	case core.Fault:
+		return .Duplicate_Key if e.kind == .Duplicate_Key else .Walk
+	case runtime.Allocator_Error:
+		return .No_Memory
+	case core.Document_Error, core.Path_Error:
+		return .Bad_Option
+	case nil:
+	}
+	return .None
+}
+
+// Whether `a` and `b` are the same refusal: the same arm, kind and byte.
+same_error :: proc "contextless" (a, b: core.Error) -> bool {
+	switch x in a {
+	case nil:
+		return b == nil
+	case core.Fault:
+		y, ok := b.(core.Fault)
+		return ok && x == y
+	case runtime.Allocator_Error:
+		y, ok := b.(runtime.Allocator_Error)
+		return ok && x == y
+	case core.Document_Error:
+		y, ok := b.(core.Document_Error)
+		return ok && x == y
+	case core.Path_Error:
+		y, ok := b.(core.Path_Error)
+		return ok && x == y
+	case core.Typed_Error:
+		y, ok := b.(core.Typed_Error)
+		return ok && x.kind == y.kind && x.at == y.at
+	case core.Typed_Error_Kind:
+		y, ok := b.(core.Typed_Error_Kind)
+		return ok && x == y
+	}
+	return false
+}
+
+// Reading and building the `.Entries` records of `head`, then `member` ten times as many times, then `tail`, holds no
+// more of the reader's memory at its peak, so the reader and the format's cursor hold no more than a member at a time.
+// With `stream` the text is read from a stream too.
+expect_entries_bounded :: proc(t: ^testing.T, as: core.As, names: []string, head, member, tail: string, stream: bool, loc := #caller_location) -> bool {
+	peak :: proc(as: core.As, names: []string, head, member, tail: string, n: int, stream: bool) -> int {
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_string(&b, head)
+		for _ in 0 ..< n {
+			strings.write_string(&b, member)
+		}
+		strings.write_string(&b, tail)
+		src := b.buf[:]
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, runtime.heap_allocator())
+		defer mem.tracking_allocator_destroy(&track)
+		allocator := mem.tracking_allocator(&track)
+		r: bytes.Reader
+		it := records.open(src, as, .Entries, 0, allocator, names)
+		if stream {
+			it = records.open_stream(bytes.reader_init(&r, src), as, .Entries, {entries = names}, 0, allocator)
+		}
+		for rec in records.next(&it) {
+			doc, err := records.build(&it, rec, allocator)
+			if err != nil {
+				return -1
+			}
+			core.destroy(&doc)
+		}
+		records.close(&it)
+		return -1 if it.fault != nil else int(track.peak_memory_allocated)
+	}
+	defer free_all(context.temp_allocator)
+	few, many := peak(as, names, head, member, tail, 100, stream), peak(as, names, head, member, tail, 1000, stream)
+	return testing.expectf(t, few > 0 && many <= few, "peak bytes %v for 100 members, %v for 1000", few, many, loc = loc)
+}
+
+// The bytes of a piece as `core/records` reads it: a text shorter than four is built on one thread.
+RECORDS_SLICE :: #config(RECORDS_SLICE, 64 * 1024)
+
+// A whole text built on threads against the same text built on one: the same document, node for node, with the same
+// tables and line ends, or the same refusal at the same byte. `joined` says the text is one a build cuts into pieces,
+// which the count of pieces `records.build` gives tells.
+expect_build_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, as: core.As, refuse, joined: bool) -> bool {
+	text := transmute([]u8)src
+	dups: core.Duplicates = .Refuse if refuse else .Last
+	want, want_err := core.build(text, as, dups)
+	defer core.destroy(&want)
+	for &pool in pools {
+		pieces: int
+		got, err := records.build(text, as, dups, runner = &pool.runner, pieces = &pieces)
+		defer core.destroy(&got)
+		same := same_error(err, want_err) && slice.equal(got.nodes, want.nodes) && slice.equal(got.counts, want.counts) && got.root_close == want.root_close && got.as == want.as && got.kinds_stored == want.kinds_stored && same_tables(&got, &want)
+		if !testing.expectf(t, same, "%q at width %d: %v, want %v", src[:min(len(src), 200)], pool.runner.threads + 1, err, want_err) {
+			return false
+		}
+		in_pieces := joined && len(src) >= 4 * RECORDS_SLICE && pool.runner.threads > 0
+		if !testing.expectf(t, !in_pieces || pieces > 0, "%q at width %d: built on one thread", src[:min(len(src), 200)], pool.runner.threads + 1) {
+			return false
+		}
+	}
+	return true
+}
+
+@(private = "file")
+same_tables :: proc(got, want: ^core.Document) -> bool {
+	a, b := core.tables_of(got), core.tables_of(want)
+	if len(a) != len(b) {
+		return false
+	}
+	for x, i in a {
+		y := b[i]
+		if x.node != y.node || x.header != y.header || x.first_row != y.first_row || x.width != y.width || x.unique_keys != y.unique_keys || !slice.equal(x.key_slots, y.key_slots) {
+			return false
+		}
+	}
+	return true
+}

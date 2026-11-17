@@ -4,7 +4,7 @@ import "core:math/rand"
 import "core:slice"
 import "core:testing"
 import core "../../core"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import dsv ".."
 import gen "gen"
 
@@ -22,9 +22,9 @@ record_stop_hook :: proc "contextless" (h: ^Record_Stops, s: core.Hook_Regs, t: 
 
 // Walks `src` with a stop at every record's end, resuming each time, and checks that the tokens, the end and the fault
 // are those of an unbroken walk.
-resumed_agrees :: proc(t: ^testing.T, src: []u8, $S: dsv.Spec, opts: dsv.Options, full: ^walktest.Log) -> bool {
+resumed_agrees :: proc(t: ^testing.T, src: []u8, $S: dsv.Spec, opts: dsv.Options, full: ^testkit.Log) -> bool {
 	full^ = {}
-	hi, fault := dsv.walk(src, 0, S, opts, full, nil, walktest.log_hook)
+	hi, fault := dsv.walk(src, 0, S, opts, full, nil, testkit.log_hook)
 	h := Record_Stops{tokens = make([]core.Token, full.n + 1)}
 	defer delete(h.tokens)
 	keys: [64]core.Token
@@ -57,7 +57,7 @@ resumed_agrees :: proc(t: ^testing.T, src: []u8, $S: dsv.Spec, opts: dsv.Options
 cursor_resumes :: proc(t: ^testing.T) {
 	state := rand.create(3)
 	context.random_generator = rand.default_random_generator(&state)
-	full := new(walktest.Log)
+	full := new(testkit.Log)
 	defer free(full)
 	text, broken: [dynamic]u8
 	defer delete(text)
@@ -68,7 +68,7 @@ cursor_resumes :: proc(t: ^testing.T) {
 		gen.text(&text, tsv)
 		src := text[:]
 		if round % 2 == 1 {
-			walktest.mutate(&broken, text[:], gen.SHARP)
+			testkit.mutate(&broken, text[:], gen.SHARP)
 			src = broken[:]
 		}
 		ok := resumed_agrees(t, src, .Tsv, {no_header = no_header}, full) if tsv else resumed_agrees(t, src, .Csv, {no_header = no_header}, full)

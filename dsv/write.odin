@@ -850,7 +850,7 @@ token_cell :: proc(t: ^write.Tokens, v: write.Scalar) -> core.Typed_Error_Kind {
 		return put_string(w, text, t.first, false) if ok else .No_Memory
 	case core.Number:
 		p := write.room(&w.out, CELL_ROOM)
-		size, kind := write.number_text(p, x)
+		size, kind := write.number_text(p, x, #partial write.Tree{})
 		return kind if kind != .None else put_number(w, p, size, t.first)
 	case write.Number_Literal:
 		return put_number_literal(w, x.text, t.first)

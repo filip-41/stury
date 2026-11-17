@@ -316,9 +316,10 @@ stays a true description of its outputs. A filter that does not compile writes n
 
 - A member read by name (`.emial`, `.["emial"]`, `{emial}`, `getpath(["emial"])`) that no object of the schema
   describes is refused at the name, with the closest member it does describe: `"emial" is not a member of the object
-  the schema describes (did you mean "email"?)`. An object that lists members (`properties`, `patternProperties`, a
-  `const` or `enum` object) describes only those, unless `additionalProperties` or `unevaluatedProperties` is present
-  and takes another member. An object that lists none (`{}`, `true`, `{"type":"object"}`) describes every member. A `?`,
+  the schema describes (did you mean "email"?)`. An object that lists members with `properties` or `patternProperties` takes any other member, as
+  JSON Schema does, with the schema of `additionalProperties` (any value where it is absent), unless that schema or
+  `unevaluatedProperties` takes no value (`false`): then the member is refused. A `const` or `enum` object describes
+  only the members it holds. An object that lists none (`{}`, `true`, `{"type":"object"}`) describes every member. A `?`,
   `try` or `//` does not lift this refusal. A path an update or `path` reads may name any member, since an update makes
   it, and a jq definition the prelude holds (`map_values`, `with_entries`, ...) is told at its call and refuses no
   member.

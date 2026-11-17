@@ -40,7 +40,7 @@ Builder :: struct {
 BUILDER_REGS :: core.Hook_Regs{a = 0, b = u64(core.NO_NODE) << 32, c = 0}
 
 // Returns a builder over `src`, read as `as`, with an open stack of `depth` slots, none when `depth` is 0, room for `facts` facts, and
-// at least 16 nodes, `nodes` when that is larger. The stack is the caller's `frames` when they hold `depth` slots, else
+// at least 16 nodes, `nodes` when that is larger, and none when `nodes` is negative, for a walk that writes no node. The stack is the caller's `frames` when they hold `depth` slots, else
 // it is allocated. The hook pushes an open container's frame with no capacity test, so a walk that nests past `depth`
 // grows the stack with `builder_deepen` first. The nodes are allocated last, and a document keeps the reservation
 // they were given, whose unused tail an arena shrinking it would write zeros over. A format's `build` passes the builder
@@ -68,6 +68,9 @@ builder_start :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator
 			return b
 		}
 		b.doc.facts_alloc = reserved
+	}
+	if nodes < 0 {
+		return b
 	}
 	n := max(16, nodes)
 	raw, err := runtime.mem_alloc_non_zeroed(n * size_of(core.Node), align_of(core.Node), allocator)
@@ -158,8 +161,13 @@ builder_finish :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Faul
 			b.doc.facts_alloc[i].role = .Comment_Foot
 		}
 	}
-	if len(b.doc.facts) > 1 {
-		slice.stable_sort_by(b.doc.facts, proc(a, b: core.Fact) -> bool { return a.node < b.node })
+	// Facts arrive mostly in node order, and a stable sort of an ordered list changes nothing.
+	facts := b.doc.facts
+	for i in 1 ..< len(facts) {
+		if facts[i].node < facts[i - 1].node {
+			slice.stable_sort_by(facts, proc(a, b: core.Fact) -> bool { return a.node < b.node })
+			break
+		}
 	}
 	b.doc.root_close = b.root_close
 	return {}
@@ -197,6 +205,11 @@ builder_free :: proc(b: ^Builder) {
 // they arrive, so its close touches no child again. A close writes the container's subtree size and child count.
 builder_hook :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	return builder_step(true, false, true, false, h, s, t)
+}
+
+// Stores tokens with facts and no duplicate-key test, for a build that keeps repeated keys.
+builder_hook_facts :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	return builder_step(true, false, false, false, h, s, t)
 }
 
 // Stores tokens without a capacity test, for a build whose reservation covers every node, so the node buffer cannot

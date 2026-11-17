@@ -11,7 +11,7 @@ import host "../../host"
 import typed "../../core/typed"
 import records "../../core/records"
 import json ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // A text read in pieces on threads against the same text read on one: the same faults at the same bytes, at every
 // width. The tests build pieces of one byte, so every byte is a cut.
@@ -36,11 +36,11 @@ pools_close :: proc(pools: ^[len(WIDTHS)]host.Pool) {
 @(private = "file")
 expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, framing: core.Framing, spec: json.Spec) -> bool {
 	text, as := transmute([]u8)src, json.as(spec)
-	if !walktest.expect_chain_law(t, pools, text, as, framing) {
+	if !testkit.expect_chain_law(t, pools, text, as, framing) {
 		return false
 	}
 	at, _, ok := json.spine(text, as)
-	return framing != .Entries || !ok || walktest.expect_each_law(t, pools, text, as, .Entries, at)
+	return framing != .Entries || !ok || testkit.expect_each_law(t, pools, text, as, .Entries, at)
 }
 
 // Strings of commas and brackets, arrays inside entries and faults near either end.
@@ -114,7 +114,7 @@ records_validate_large_records :: proc(t: ^testing.T) {
 	pools: [len(WIDTHS)]host.Pool
 	pools_open(&pools)
 	defer pools_close(&pools)
-	pad := strings.repeat("x", walktest.RECORDS_SLICE / 2 + 64, context.temp_allocator)
+	pad := strings.repeat("x", testkit.RECORDS_SLICE / 2 + 64, context.temp_allocator)
 	for faults in ([]u16{0, 1 << 3, 1 << 0 | 1 << 9 | 1 << 11}) {
 		lines := strings.builder_make(context.temp_allocator)
 		entries := strings.builder_make(context.temp_allocator)
@@ -217,7 +217,7 @@ records_validate_a_spine :: proc(t: ^testing.T) {
 	deep := json.as(.Json)
 	deep.max_depth = 2
 	src := transmute([]u8)texts[1]
-	testing.expect_value(t, records.validate_parallel(src, deep), walktest.fault_of(json.validate(src, .Json, {max_depth = 2})))
+	testing.expect_value(t, records.validate_parallel(src, deep), testkit.fault_of(json.validate(src, .Json, {max_depth = 2})))
 }
 
 @(test)
@@ -232,7 +232,7 @@ records_build_a_spine :: proc(t: ^testing.T) {
 		src, _ := strings.replace(text, "@", array, 1, context.temp_allocator)
 		for refuse in ([]bool{false, true}) {
 			// The deep text has no spine, and the last but one has text past its root.
-			if !walktest.expect_build_law(t, pools[:], src, strict, refuse, i != 3 && i != 4) {
+			if !testkit.expect_build_law(t, pools[:], src, strict, refuse, i != 3 && i != 4) {
 				return
 			}
 		}
@@ -240,7 +240,7 @@ records_build_a_spine :: proc(t: ^testing.T) {
 		for at in ([]int{1, 9, 30, len(src) / 2, len(src) - 12, len(src) - 2}) {
 			for c in ([]string{"x", "]", ",", "\""}) {
 				broken := strings.concatenate({src[:at], c, src[at + 1:]}, context.temp_allocator)
-				if !walktest.expect_build_law(t, pools[:], broken, strict, false, false) || !walktest.expect_build_law(t, pools[:], src[:at], strict, false, false) {
+				if !testkit.expect_build_law(t, pools[:], broken, strict, false, false) || !testkit.expect_build_law(t, pools[:], src[:at], strict, false, false) {
 					return
 				}
 			}
@@ -249,8 +249,8 @@ records_build_a_spine :: proc(t: ^testing.T) {
 	// A repeated key in an entry, and at the root around the array.
 	dups, _ := strings.replace(array, `"s":`, `"a":`, 40, context.temp_allocator)
 	for refuse in ([]bool{false, true}) {
-		walktest.expect_build_law(t, pools[:], dups, strict, refuse, !refuse)
-		walktest.expect_build_law(t, pools[:], strings.concatenate({`{"n":1,"logs":`, array, `,"n":2}`}, context.temp_allocator), strict, refuse, !refuse)
+		testkit.expect_build_law(t, pools[:], dups, strict, refuse, !refuse)
+		testkit.expect_build_law(t, pools[:], strings.concatenate({`{"n":1,"logs":`, array, `,"n":2}`}, context.temp_allocator), strict, refuse, !refuse)
 	}
 	// Entries nested to the deepest level a text may open, and one past it.
 	b := strings.builder_make(context.temp_allocator)
@@ -263,18 +263,18 @@ records_build_a_spine :: proc(t: ^testing.T) {
 	shallow.max_depth = 5
 	nested := strings.to_string(b)
 	level, _ := strings.replace(nested, "[[[[1]]]]", "[[[1]]]", 1, context.temp_allocator)
-	walktest.expect_build_law(t, pools[:], nested, shallow, false, false)
-	walktest.expect_build_law(t, pools[:], level, shallow, false, true)
-	walktest.expect_build_law(t, pools[:], nested, strict, false, true)
+	testkit.expect_build_law(t, pools[:], nested, shallow, false, false)
+	testkit.expect_build_law(t, pools[:], level, shallow, false, true)
+	testkit.expect_build_law(t, pools[:], nested, strict, false, true)
 	// An array and two arrays inside it wider than a node's child count holds.
 	wide := strings.repeat("0,", 70000, context.temp_allocator)
 	inner := strings.concatenate({"[", wide, "1]"}, context.temp_allocator)
-	walktest.expect_build_law(t, pools[:], strings.concatenate({"[", wide, inner, ",", inner, "]"}, context.temp_allocator), strict, false, true)
+	testkit.expect_build_law(t, pools[:], strings.concatenate({"[", wide, inner, ",", inner, "]"}, context.temp_allocator), strict, false, true)
 	// A root object with no spine: its members are entries with keys, which a document does not join.
-	walktest.expect_build_law(t, pools[:], `{"a":[1,2,3],"b":{"c":"d"},"e":[4,5,6]}`, strict, false, false)
+	testkit.expect_build_law(t, pools[:], `{"a":[1,2,3],"b":{"c":"d"},"e":[4,5,6]}`, strict, false, false)
 	// A spine whose first entry holds most of the text is built on one thread.
 	one := strings.concatenate({`{"type":"x","features":[{"c":`, array, `},1]}`}, context.temp_allocator)
-	walktest.expect_build_law(t, pools[:], one, strict, false, false)
+	testkit.expect_build_law(t, pools[:], one, strict, false, false)
 	pieces: int
 	doc, _ := records.build(transmute([]u8)one, strict, runner = &pools[len(pools) - 1].runner, pieces = &pieces)
 	core.destroy(&doc)
@@ -296,11 +296,11 @@ records_build_under_a_failing_allocator :: proc(t: ^testing.T) {
 	defer core.destroy(&want)
 	for hold in ([]bool{false, true}) {
 		for at := 0;; at += 1 {
-			f := walktest.Failing_Alloc{inner = context.allocator, fail_at = at, fail_on = hold}
+			f := testkit.Failing_Alloc{inner = context.allocator, fail_at = at, fail_on = hold}
 			pieces: int
-			got, err := records.build(src, strict, allocator = walktest.failing_allocator(&f), runner = &pool.runner, pieces = &pieces)
+			got, err := records.build(src, strict, allocator = testkit.failing_allocator(&f), runner = &pool.runner, pieces = &pieces)
 			same := err == nil && slice.equal(got.nodes, want.nodes) && slice.equal(got.counts, want.counts) && got.root_close == want.root_close
-			testing.expectf(t, same || walktest.is_oom(err), "allocation %d, later ones too %v: %v, %d counts of %d", at, hold, err, len(got.counts), len(want.counts))
+			testing.expectf(t, same || testkit.is_oom(err), "allocation %d, later ones too %v: %v, %d counts of %d", at, hold, err, len(got.counts), len(want.counts))
 			core.destroy(&got)
 			if f.n <= at {
 				break

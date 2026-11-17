@@ -7,7 +7,7 @@ import core "../../core"
 import typed "../../core/typed"
 import write "../../core/write"
 import json ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // Writing with an allocator that refuses an allocation: every write gives its text or `.No_Memory`.
 
@@ -57,7 +57,7 @@ Marshal_Try :: struct {
 marshal_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
 	m := (^Marshal_Try)(data)
 	text, err := json.marshal(m.value, write = m.opts, allocator = allocator)
-	return text, walktest.typed_kind(err)
+	return text, testkit.typed_kind(err)
 }
 
 @(test)
@@ -67,8 +67,8 @@ marshal_under_failing_allocators :: proc(t: ^testing.T) {
 	for opts in ([?]core.Write_Options{{}, {sort_keys = true}, {pretty = true, sort_keys = true, ascii = true}}) {
 		try := Marshal_Try{v, opts}
 		want, err := json.marshal(v, write = opts, allocator = context.temp_allocator)
-		walktest.expect_nil(t, err)
-		walktest.sweep_write(t, marshal_try, &try, string(want))
+		testkit.expect_nil(t, err)
+		testkit.sweep_write(t, marshal_try, &try, string(want))
 	}
 }
 
@@ -83,7 +83,7 @@ Plan_Try :: struct {
 plan_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
 	m := (^Plan_Try)(data)
 	text, err := write.marshal(m.value, m.plan, m.opts, allocator)
-	return text, walktest.typed_kind(err)
+	return text, testkit.typed_kind(err)
 }
 
 @(test)
@@ -92,11 +92,11 @@ planned_marshal_under_failing_allocators :: proc(t: ^testing.T) {
 	v.first, v.second, v.arm = inner, other, inner
 	plan, perr := json.plan_make(Sweep_Value)
 	defer typed.plan_destroy(&plan)
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	try := Plan_Try{v, {sort_keys = true}, &plan}
 	want, err := write.marshal(v, &plan, {sort_keys = true}, context.temp_allocator)
-	walktest.expect_nil(t, err)
-	walktest.sweep_write(t, plan_try, &try, string(want))
+	testkit.expect_nil(t, err)
+	testkit.sweep_write(t, plan_try, &try, string(want))
 }
 
 @(private)
@@ -109,18 +109,18 @@ Doc_Try :: struct {
 doc_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
 	d := (^Doc_Try)(data)
 	text, _, err := core.write(d.doc, d.opts, allocator = allocator)
-	return text, walktest.typed_kind(err)
+	return text, testkit.typed_kind(err)
 }
 
 @(private)
 sweep_document :: proc(t: ^testing.T, src: string, $S: json.Spec, read: json.Options, opts: core.Write_Options, loc := #caller_location) {
 	doc, derr := core.build(transmute([]u8)src, json.as(S, read))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, derr, loc = loc)
+	testkit.expect_nil(t, derr, loc = loc)
 	try := Doc_Try{&doc, opts}
 	want, _, err := core.write(&doc, opts, allocator = context.temp_allocator)
-	walktest.expect_nil(t, err, loc = loc)
-	walktest.sweep_write(t, doc_try, &try, string(want), loc)
+	testkit.expect_nil(t, err, loc = loc)
+	testkit.sweep_write(t, doc_try, &try, string(want), loc)
 }
 
 @(test)
@@ -145,7 +145,7 @@ Format_Try :: struct {
 format_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
 	f := (^Format_Try)(data)
 	text, err := core.format(f.src, json.as(.Json, f.read), f.opts, allocator)
-	return text, walktest.typed_kind(err)
+	return text, testkit.typed_kind(err)
 }
 
 @(test)
@@ -160,8 +160,8 @@ format_under_failing_allocators :: proc(t: ^testing.T) {
 	}
 	for &c in cases {
 		want, err := core.format(c.src, json.as(.Json, c.read), c.opts, context.temp_allocator)
-		walktest.expect_nil(t, err)
-		walktest.sweep_write(t, format_try, &c, string(want))
+		testkit.expect_nil(t, err)
+		testkit.sweep_write(t, format_try, &c, string(want))
 	}
 }
 
@@ -170,10 +170,10 @@ format_under_failing_allocators :: proc(t: ^testing.T) {
 marshal_keeps_off_the_temporary_allocator :: proc(t: ^testing.T) {
 	v, inner, other := sweep_value()
 	v.first, v.second, v.arm = inner, other, inner
-	f := walktest.Failing_Alloc{inner = context.temp_allocator, fail_at = -1}
-	context.temp_allocator = walktest.failing_allocator(&f)
+	f := testkit.Failing_Alloc{inner = context.temp_allocator, fail_at = -1}
+	context.temp_allocator = testkit.failing_allocator(&f)
 	text, err := json.marshal(v, write = {sort_keys = true})
 	defer delete(text)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, f.n, 0)
 }

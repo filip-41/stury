@@ -18,7 +18,7 @@ import json "../../json"
 import dsv "../../dsv"
 import toml "../../toml"
 import yaml "../../yaml"
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // What each reader answers for one text, which a node of the text and its built value must both give.
 @(private = "file")
@@ -48,7 +48,7 @@ readers_answer_alike_for_a_node_and_a_built_value :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	for c in READER_CASES {
 		doc, err := core.build(transmute([]u8)c.text, json.as(.Json))
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		node := core.Value(core.Node_Ref{&doc, core.ROOT})
 		built := core.built_value(core.Node_Ref{&doc, core.ROOT})
 		for v in ([]core.Value{node, built}) {
@@ -82,7 +82,7 @@ repeated_key_reads_alike_in_both_forms :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	src := `{"a":1,"b":true,"a":2}`
 	doc, err := core.build(transmute([]u8)string(src), json.as(.Json))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	built := core.new_object()
 	append(&built.keys, "a", "b", "a")
@@ -102,7 +102,7 @@ repeated_key_reads_alike_in_both_forms :: proc(t: ^testing.T) {
 		}
 		testing.expect_value(t, len(keys), 3)
 		text, werr := write.write_value(v, json.as(.Json))
-		walktest.expect_nil(t, werr)
+		testkit.expect_nil(t, werr)
 		testing.expect_value(t, string(text), src)
 	}
 	testing.expect(t, core.equal(node, built))
@@ -122,17 +122,17 @@ typed_bridges_round_trip :: proc(t: ^testing.T) {
 		xs:  []i32,
 	}
 	plan, perr := json.plan_make(S, reads = json.reads(.Json))
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	in_value := S{n = 7, f = 2.5, s = "x", big = 1 << 60 + 1, xs = {1, -2}}
 	v, merr := write.marshal_value(in_value, &plan)
-	walktest.expect_nil(t, merr)
+	testkit.expect_nil(t, merr)
 	n, _ := core.member(v, "n")
 	big, _ := core.member(v, "big")
 	_, is_double := n.(f64)
 	testing.expect(t, is_double)
 	testing.expect_value(t, core.view_text(big.(core.Number_View)), "1152921504606846977")
 	out: S
-	walktest.expect_nil(t, typed.unmarshal(v, &out, &plan))
+	testkit.expect_nil(t, typed.unmarshal(v, &out, &plan))
 	testing.expect_value(t, out.n, 7)
 	testing.expect_value(t, out.f, 2.5)
 	testing.expect_value(t, out.s, "x")
@@ -146,7 +146,7 @@ typed_bridges_round_trip :: proc(t: ^testing.T) {
 	whole := core.new_object()
 	core.object_put(whole, "n", f64(3))
 	i: I
-	walktest.expect_nil(t, typed.unmarshal(core.Value(whole), &i, &iplan))
+	testkit.expect_nil(t, typed.unmarshal(core.Value(whole), &i, &iplan))
 	testing.expect_value(t, i.n, 3)
 	core.object_put(whole, "n", f64(3.5))
 	testing.expect(t, typed.unmarshal(core.Value(whole), &i, &iplan) != nil)
@@ -164,7 +164,7 @@ equal_numbers_hash_alike :: proc(t: ^testing.T) {
 		first := core.Value(core.number_text(group[0]))
 		for spelling in group {
 			doc, err := core.build(transmute([]u8)spelling, json.as(.Json))
-			walktest.expect_nil(t, err)
+			testkit.expect_nil(t, err)
 			for v in ([]core.Value{core.Node_Ref{&doc, core.ROOT}, core.number_text(spelling)}) {
 				testing.expectf(t, core.equal(first, v) && core.hash(first) == core.hash(v), "%s and %s", group[0], spelling)
 			}
@@ -195,7 +195,7 @@ built_numbers_keep_digits_and_equal_like_nodes :: proc(t: ^testing.T) {
 		for text, i in pair {
 			err: core.Error
 			docs[i], err = core.build(transmute([]u8)text, json.as(.Json))
-			walktest.expect_nil(t, err)
+			testkit.expect_nil(t, err)
 			nodes[i] = core.Node_Ref{&docs[i], core.ROOT}
 			built[i] = core.built_value(nodes[i].(core.Node_Ref))
 		}
@@ -213,7 +213,7 @@ built_object_follows_duplicates :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	src := `{"k": 1, "j": 0, "k": 2}`
 	doc, err := core.build(transmute([]u8)src, json.as(.Json))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	root := core.Node_Ref{&doc, core.ROOT}
 	testing.expect_value(t, core.length(core.built_value(root, .All)), 3)
 	first := core.built_value(root, .First)
@@ -244,7 +244,7 @@ cell_and_key_order_hash_alike :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	doc, err := core.build(transmute([]u8)string("a\n7\n"), dsv.as(.Csv))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	row, _ := core.child_at(&doc, core.ROOT, 0)
 	cell, _ := core.child_at(&doc, row, 0)
 	testing.expect(t, core.hash(core.Node_Ref{&doc, cell}, like = core.Value(f64(7))) == core.hash(core.Value(f64(7))))
@@ -252,8 +252,8 @@ cell_and_key_order_hash_alike :: proc(t: ^testing.T) {
 	defer core.destroy(&a)
 	b, berr := core.build(transmute([]u8)string(`{"y":[1e-1],"x":1}`), json.as(.Json))
 	defer core.destroy(&b)
-	walktest.expect_nil(t, aerr)
-	walktest.expect_nil(t, berr)
+	testkit.expect_nil(t, aerr)
+	testkit.expect_nil(t, berr)
 	na, nb := core.Node_Ref{&a, core.ROOT}, core.Node_Ref{&b, core.ROOT}
 	testing.expect(t, core.equal(na, nb) && core.hash(na) == core.hash(nb))
 }
@@ -264,7 +264,7 @@ a_built_value_keeps_the_comments_of_its_node :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	text := "// top\n{\"a\": /* before */ 1, // after\n\"b\": 2}"
 	doc, err := core.build(transmute([]u8)text, json.as(.Jsonc))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	built := core.built_value(core.Node_Ref{&doc, core.ROOT})
 	node := core.Value(core.Node_Ref{&doc, core.ROOT})
 	for role in core.COMMENT_ROLES {
@@ -341,7 +341,7 @@ views_read_as_their_text :: proc(t: ^testing.T) {
 		tn, tok := core.number(text)
 		testing.expectf(t, vok && tok && vn == tn, "%s reads its number", lit)
 		written, err := write.write_value(view, json.as(.Json))
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		testing.expect_value(t, string(written), lit)
 		held, is_held := core.held_f64(text.(core.Number_View))
 		testing.expectf(t, is_held && transmute(u64)held == transmute(u64)f, "%s holds its double", lit)
@@ -517,7 +517,7 @@ json5_spellings_compare_by_their_digits :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	doc, err := core.build(transmute([]u8)string("[+1e400, 1e400, 1e401, .5e400, 5.e399, +1e-400, 0, 0x20000000000001, 9007199254740992, 9007199254740993]"), json.as(.Json5))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	at :: proc(doc: ^core.Document, i: int) -> core.Value {
 		n, _ := core.child_at(doc, core.ROOT, i)
 		return core.Node_Ref{doc, n}
@@ -542,7 +542,7 @@ a_cell_is_a_string_unless_read_as_a_number :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	doc, err := core.build(transmute([]u8)string("a\n1e-400\n"), dsv.as(.Csv))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	row, _ := core.child_at(&doc, core.ROOT, 0)
 	n, _ := core.child_at(&doc, row, 0)
 	cell := core.Value(core.Node_Ref{&doc, n})
@@ -583,8 +583,8 @@ hex_integers_are_their_decimals :: proc(t: ^testing.T) {
 	defer core.destroy(&hd)
 	dd, derr := core.build(transmute([]u8)strings.to_string(decimals), json.as(.Json5))
 	defer core.destroy(&dd)
-	walktest.expect_nil(t, herr)
-	walktest.expect_nil(t, derr)
+	testkit.expect_nil(t, herr)
+	testkit.expect_nil(t, derr)
 	at :: proc(doc: ^core.Document, i: int) -> core.Value {
 		n, _ := core.child_at(doc, core.ROOT, i)
 		return core.Node_Ref{doc, n}
@@ -598,7 +598,7 @@ hex_integers_are_their_decimals :: proc(t: ^testing.T) {
 	}
 	big, berr := core.build(transmute([]u8)string("[0x100000000000000000000000000000000, 340282366920938463463374607431768211456, 3.402823669209385e38]"), json.as(.Json5))
 	defer core.destroy(&big)
-	walktest.expect_nil(t, berr)
+	testkit.expect_nil(t, berr)
 	testing.expect(t, core.equal(at(&big, 0), at(&big, 1)) && core.hash(at(&big, 0)) == core.hash(at(&big, 1)))
 	testing.expect(t, !core.equal(at(&big, 0), at(&big, 2)))
 }
@@ -619,16 +619,16 @@ spelled_numbers_are_the_numbers_they_spell :: proc(t: ^testing.T) {
 	}
 	for x in texts {
 		doc, err := core.build(transmute([]u8)x.src, x.as)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		want, jerr := core.build(transmute([]u8)x.json, json.as(.Json))
-		walktest.expect_nil(t, jerr)
+		testkit.expect_nil(t, jerr)
 		list, _ := core.member(core.Node_Ref{&doc, core.ROOT}, "a")
 		spelled, plain := core.children(list), core.children(core.Node_Ref{&want, core.ROOT})
 		for a in core.child_next(&spelled) {
 			b, _ := core.child_next(&plain)
 			testing.expectf(t, core.equal(a, b) && core.hash(a) == core.hash(b), "%s: %v against %v", x.src, a, b)
 			text, werr := write.write_value(a, yaml.as(.Yaml_1_2))
-			walktest.expect_nil(t, werr)
+			testkit.expect_nil(t, werr)
 			written, _ := write.write_value(b, yaml.as(.Yaml_1_2))
 			testing.expect_value(t, string(text), string(written))
 		}
@@ -653,7 +653,7 @@ a_number_reads_back_as_its_type :: proc(t: ^testing.T) {
 	}
 	for r in reads {
 		doc, err := core.build(transmute([]u8)r.src, r.as)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		a, _ := core.member(core.Node_Ref{&doc, core.ROOT}, "a")
 		apart := r.as.readers.floats_apart
 		Want :: struct {
@@ -663,9 +663,9 @@ a_number_reads_back_as_its_type :: proc(t: ^testing.T) {
 		for want in ([]Want{{core.number_text("1.0"), true}, {core.number_text("1"), false}, {f64(1), nil}}) {
 			for got_src, i in ([]string{r.int_, r.flt}) {
 				got, gerr := core.build(transmute([]u8)got_src, r.as)
-				walktest.expect_nil(t, gerr)
+				testkit.expect_nil(t, gerr)
 				list := core.edit_list_init(&doc)
-				walktest.expect_nil(t, write.set_node(&list, a.(core.Node_Ref).node, want.v))
+				testkit.expect_nil(t, write.set_node(&list, a.(core.Node_Ref).node, want.v))
 				reads, known := core.reads_as_edited(&list, core.Node_Ref{&got, core.ROOT})
 				g, _ := core.member(core.Node_Ref{&got, core.ROOT}, "a")
 				float, typed := want.float.?

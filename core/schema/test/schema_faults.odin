@@ -57,7 +57,7 @@ long_ab :: proc(n: int) -> string {
 a_pattern_search_that_gives_up_is_a_fault :: proc(t: ^testing.T) {
 	long := long_ab(1_000_000)
 	defer delete(long)
-	pattern :: `(a|b)*a(a|b){20}$`
+	pattern :: `(?=(a|b)*a(a|b){20}$)`
 	// Each failed search holds its memory until the temp allocator is freed, so the searches are freed one by one.
 	testing.expect_value(t, first_kind(t, `{"pattern": "` + pattern + `"}`, long), core.Typed_Error_Kind.Pattern_Undecided)
 	free_all(context.temp_allocator)

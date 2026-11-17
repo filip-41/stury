@@ -11,7 +11,7 @@ import rules "../../rules"
 import write "../../write"
 import schema ".."
 import json "../../../json"
-import walktest "../../../walktest"
+import testkit "../../../testkit"
 
 // Inference and sampling: every input passes the description inferred from it, a description round trips through JSON
 // Schema, and every sample passes the check that the description makes.
@@ -246,12 +246,12 @@ infer_reads_markup :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	readers := json.as(.Json).readers^
 	readers.holds += {.Attribute}
-	readers.attribute = walktest.markup_attribute
+	readers.attribute = testkit.markup_attribute
 	markup := json.as(.Json)
 	markup.readers = &readers
 	cases := [?]struct {
 		model:      string,
-		attributes: []walktest.Markup_Attribute,
+		attributes: []testkit.Markup_Attribute,
 	} {
 		// <price currency="EUR">5</price>
 		{`{"price": "5"}`, {{2, `currency="EUR"`}}},
@@ -266,7 +266,7 @@ infer_reads_markup :: proc(t: ^testing.T) {
 		{`{"a": {"id": "2", "id": "3"}}`, {{2, `id="1"`}}},
 	}
 	for c in cases {
-		doc := walktest.markup_doc(c.model, c.attributes, &readers)
+		doc := testkit.markup_doc(c.model, c.attributes, &readers)
 		defer core.destroy(&doc)
 		inf: schema.Inferred
 		defer schema.inferred_destroy(&inf)

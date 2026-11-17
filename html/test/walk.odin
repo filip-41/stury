@@ -6,11 +6,11 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import html ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private)
 tokens_of :: proc(text: string, spec := html.Spec.Fragment, opts := html.Options{}, skip := "", stop := 0) -> (tokens: string, hi: u64, fault: Maybe(core.Fault)) {
-	r := walktest.Token_Log {
+	r := testkit.Token_Log {
 		text = transmute([]u8)text,
 		skip = skip,
 		stop = stop,
@@ -18,21 +18,21 @@ tokens_of :: proc(text: string, spec := html.Spec.Fragment, opts := html.Options
 	strings.builder_init(&r.out, context.temp_allocator)
 	switch spec {
 	case .Document:
-		hi, fault = html.walk(r.text, 0, .Document, opts, &r, nil, walktest.log_token)
+		hi, fault = html.walk(r.text, 0, .Document, opts, &r, nil, testkit.log_token)
 	case .Fragment:
-		hi, fault = html.walk(r.text, 0, .Fragment, opts, &r, nil, walktest.log_token)
+		hi, fault = html.walk(r.text, 0, .Fragment, opts, &r, nil, testkit.log_token)
 	}
-	return walktest.log_line(&r), hi, fault
+	return testkit.log_line(&r), hi, fault
 }
 
 // The fault `validate` returns for `text`, as `code@at`, or "" for a text it accepts.
 @(private)
 refusal :: proc(text: string, spec := html.Spec.Document, opts := html.Options{}) -> string {
-	f, bad := walktest.fault_in(core.validate(transmute([]u8)text, html.as(spec, opts)))
+	f, bad := testkit.fault_in(core.validate(transmute([]u8)text, html.as(spec, opts)))
 	if !bad {
 		return ""
 	}
-	return fmt.tprintf("%s@%d", walktest.rule_code(f), f.at)
+	return fmt.tprintf("%s@%d", testkit.rule_code(f), f.at)
 }
 
 @(test)
@@ -77,11 +77,11 @@ validate_names_the_first_parse_error :: proc(t: ^testing.T) {
 	testing.expect_value(t, refusal("<!DOCTYPE html><!-- x"), "html.eof_in_comment@21")
 	testing.expect_value(t, refusal("<!DOCTYPE html></b>"), "html.unexpected_end_tag@15")
 	testing.expect_value(t, refusal("<b>x</b>", .Fragment), "")
-	f, _ := walktest.fault_in(html.validate(transmute([]u8)string("<!DOCTYPE html><div"), .Document))
+	f, _ := testkit.fault_in(html.validate(transmute([]u8)string("<!DOCTYPE html><div"), .Document))
 	testing.expect_value(t, f.kind, core.Fault_Kind.Truncated)
 	// Every text builds, whatever its parse errors.
 	doc, err := html.build(transmute([]u8)string("</x><p a=1 a=2>&notit;<!-- x"), .Document)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	core.destroy(&doc)
 }
 
@@ -90,14 +90,14 @@ a_build_refuses_only_what_no_tree_holds :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	deep := strings.repeat("<div>", 40, context.temp_allocator)
 	_, err := html.build(transmute([]u8)deep, .Fragment, {max_depth = 10})
-	f, bad := walktest.fault_in(err)
+	f, bad := testkit.fault_in(err)
 	testing.expect(t, bad)
 	testing.expect_value(t, f.kind, core.Fault_Kind.Too_Deep)
 	testing.expect_value(t, refusal(deep, .Fragment, {max_depth = 10}), fmt.tprintf("too_deep@%d", 9 * 5))
 	_, err = html.build(transmute([]u8)string("<meta charset=latin2><p>caf\xe9"), .Document)
-	f, bad = walktest.fault_in(err)
+	f, bad = testkit.fault_in(err)
 	testing.expect(t, bad)
-	testing.expect_value(t, walktest.rule_code(f), "html.encoding")
-	_, fault := html.walk(transmute([]u8)string("\xfe\xffx"), 0, .Document, {}, &walktest.Token_Log{}, nil, walktest.log_token)
+	testing.expect_value(t, testkit.rule_code(f), "html.encoding")
+	_, fault := html.walk(transmute([]u8)string("\xfe\xffx"), 0, .Document, {}, &testkit.Token_Log{}, nil, testkit.log_token)
 	testing.expect(t, fault != nil)
 }

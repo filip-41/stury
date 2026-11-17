@@ -67,7 +67,7 @@ leaf :: #force_no_inline proc(w: ^Walker, f: ^typed.Field, v: uintptr, top, nest
 		when BIN {
 			return put_binary_number(out, (^core.Number)(v)^, T)
 		} else {
-			return put_number_as(out, (^core.Number)(v)^, T)
+			return put_number(out, (^core.Number)(v)^, T)
 		}
 	case .Bytes:
 		when BIN {
@@ -383,14 +383,9 @@ f64_value :: #force_inline proc "contextless" (p: [^]u8, x: f64, $T: Tree) -> (s
 	return spell.f64_text(p, x), .None
 }
 
-// The text of `n` at `p`, under a reservation of `LEAF_ROOM`, and its length. A `.Wide` number holds no value to write.
-number_text :: proc(p: [^]u8, n: core.Number) -> (size: int, kind: core.Typed_Error_Kind) {
-	return number_text_as(p, n, #partial Tree{})
-}
-
-// `number_text` for a float as the tree `T` spells it.
-@(private)
-number_text_as :: proc(p: [^]u8, n: core.Number, $T: Tree) -> (size: int, kind: core.Typed_Error_Kind) {
+// The text of `n` at `p`, under a reservation of `LEAF_ROOM`, and its length, a float as the tree `T` spells it. A `.Wide`
+// number holds no value to write.
+number_text :: proc(p: [^]u8, n: core.Number, $T: Tree) -> (size: int, kind: core.Typed_Error_Kind) {
 	switch n.kind {
 	case .Int:
 		return spell.i64_text(p, i64(n.bits)), .None
@@ -403,14 +398,9 @@ number_text_as :: proc(p: [^]u8, n: core.Number, $T: Tree) -> (size: int, kind: 
 	return 0, .Non_Finite
 }
 
-// A `core.Number` by its value.
-put_number :: proc(out: ^Out, n: core.Number) -> core.Typed_Error_Kind {
-	return put_number_as(out, n, #partial Tree{})
-}
-
-// `put_number` for a float as the tree `T` spells it.
-put_number_as :: proc(out: ^Out, n: core.Number, $T: Tree) -> core.Typed_Error_Kind {
-	size, kind := number_text_as(room(out, LEAF_ROOM), n, T)
+// A `core.Number` by its value, a float as the tree `T` spells it.
+put_number :: proc(out: ^Out, n: core.Number, $T: Tree) -> core.Typed_Error_Kind {
+	size, kind := number_text(room(out, LEAF_ROOM), n, T)
 	out.cursor += size
 	return kind
 }
@@ -907,7 +897,7 @@ any_value :: proc(w: ^Walker, a: any, $T: Tree, $put: Put) -> (rec: ^typed.Field
 			out.cursor += spell.u64_text(p, (^u64)(a.data)^)
 			return nil, .None
 		case typeid_of(f64):
-			return nil, put_number_as(out, {transmute(u64)(^f64)(a.data)^, .Float}, T)
+			return nil, put_number(out, {transmute(u64)(^f64)(a.data)^, .Float}, T)
 		}
 	}
 	side := side_plan(&w.side, w.plan, a.id) or_return

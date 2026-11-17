@@ -8,7 +8,7 @@ import "core:testing"
 import core "../../core"
 import build "../../core/build"
 import json ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // Building with an allocator that refuses an allocation: reservations, retries and the errors they keep.
 
@@ -48,7 +48,7 @@ reservation_retry :: proc(t: ^testing.T) {
 	}
 	nested[depth] = '0'
 	doc, err = json.build(nested, .Json, {max_depth = u32(depth + 1)}, .Last, alloc)
-	testing.expectf(t, walktest.is_oom(err), "deep in 8 MB: %v", err)
+	testing.expectf(t, testkit.is_oom(err), "deep in 8 MB: %v", err)
 	core.destroy(&doc)
 }
 
@@ -82,11 +82,11 @@ arena_fit_is_monotonic :: proc(t: ^testing.T) {
 		mem.arena_init(&arena, backing[:size])
 		doc, err := json.build(src, .Jsonc, {}, .Refuse, mem.arena_allocator(&arena))
 		core.destroy(&doc)
-		if walktest.is_oom(err) {
+		if testkit.is_oom(err) {
 			testing.expectf(t, fit == 0, "No_Memory in %d bytes after a fit in %d", size, fit)
 			continue
 		}
-		testing.expectf(t, walktest.is_duplicate(err) && walktest.at_of(err) == 13, "%d bytes: %v at %d", size, err, walktest.at_of(err))
+		testing.expectf(t, testkit.is_duplicate(err) && testkit.at_of(err) == 13, "%d bytes: %v at %d", size, err, testkit.at_of(err))
 		if fit == 0 {
 			fit = size
 		}
@@ -114,9 +114,9 @@ refuse_oom_keeps_duplicate :: proc(t: ^testing.T) {
 	// Allocation 0 is the node array, before any repeat is found. Failing 1 to 3 leaves the `.Duplicate_Key` at byte 8 as
 	// the error.
 	for fail_at in 1 ..= 3 {
-		f := walktest.Failing_Alloc{inner = context.allocator, fail_at = fail_at}
-		doc, err := json.build(src, .Json, {}, .Refuse, walktest.failing_allocator(&f))
-		testing.expectf(t, walktest.is_duplicate(err) && walktest.at_of(err) == 8, "fail_at %d: %v at %d", fail_at, err, walktest.at_of(err))
+		f := testkit.Failing_Alloc{inner = context.allocator, fail_at = fail_at}
+		doc, err := json.build(src, .Json, {}, .Refuse, testkit.failing_allocator(&f))
+		testing.expectf(t, testkit.is_duplicate(err) && testkit.at_of(err) == 8, "fail_at %d: %v at %d", fail_at, err, testkit.at_of(err))
 		core.destroy(&doc)
 	}
 }
@@ -151,8 +151,8 @@ refuse_equal_long_escaped_keys :: proc(t: ^testing.T) {
 	alloc := runtime.Allocator{procedure = poison_free_alloc_proc, data = &p}
 	doc, err := json.build(transmute([]u8)strings.to_string(b), .Json, {}, .Refuse, alloc)
 	defer core.destroy(&doc)
-	walktest.expect_kind(t, err, core.Document_Error_Kind.Duplicate_Key)
-	testing.expect_value(t, walktest.at_of(err), 1806)
+	testkit.expect_kind(t, err, core.Document_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, testkit.at_of(err), 1806)
 }
 
 
@@ -169,11 +169,11 @@ refuse_grow_keeps_earliest_repeat :: proc(t: ^testing.T) {
 	strings.write_byte(&b, '}')
 	src := transmute([]u8)strings.to_string(b)
 	// Allocation 0 is the node array.
-	f := walktest.Failing_Alloc{inner = context.allocator, fail_at = 0}
-	doc, err := json.build(src, .Json, {}, .Refuse, walktest.failing_allocator(&f))
+	f := testkit.Failing_Alloc{inner = context.allocator, fail_at = 0}
+	doc, err := json.build(src, .Json, {}, .Refuse, testkit.failing_allocator(&f))
 	defer core.destroy(&doc)
-	walktest.expect_kind(t, err, core.Document_Error_Kind.Duplicate_Key)
-	testing.expect_value(t, walktest.at_of(err), 7)
+	testkit.expect_kind(t, err, core.Document_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, testkit.at_of(err), 7)
 }
 
 
@@ -267,7 +267,7 @@ arena_tail_returns :: proc(t: ^testing.T) {
 	src := strings.concatenate({"[\"", strings.repeat("a", 1 << 20, context.temp_allocator), "\"]"}, context.temp_allocator)
 	doc, err := json.build(transmute([]u8)src, .Json, {}, .Last, mem.arena_allocator(&arena))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	stack := core.MAX_DEPTH * size_of(u64)
 	testing.expectf(t, arena.offset <= stack + 64 + len(doc.nodes) * size_of(core.Node), "%d bytes held", arena.offset)
 }

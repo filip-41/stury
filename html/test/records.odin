@@ -7,7 +7,7 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import html ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private = "file")
 RECORD_TEXT :: "<!doctype html><!-- lead --><p>1<p>2</p><table><td>x</table>\n<!-- tail -->"
@@ -27,8 +27,8 @@ a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
 	for rec in html.records_next(&it) {
 		testing.expect_value(t, string(rec.text), RECORD_TEXT)
 		doc, derr := html.records_build(&it, rec)
-		walktest.expect_nil(t, derr)
-		_, found := walktest.member_at(t, &doc, ".html.body.table.tbody.tr.td")
+		testkit.expect_nil(t, derr)
+		_, found := testkit.member_at(t, &doc, ".html.body.table.tbody.tr.td")
 		testing.expect(t, found)
 		html.destroy(&doc)
 		n += 1
@@ -36,10 +36,10 @@ a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
 	testing.expect_value(t, n, 1)
 
 	each := 0
-	walktest.expect_nil(t, html.records_each(src, .Document, .Concatenated, walktest.count_records, &each))
+	testkit.expect_nil(t, html.records_each(src, .Document, .Concatenated, testkit.count_records, &each))
 	testing.expect_value(t, each, 1)
 
-	walktest.expect_record_is_the_rest(t, RECORD_TEXT, 28, html.as(.Fragment))
+	testkit.expect_record_is_the_rest(t, RECORD_TEXT, 28, html.as(.Fragment))
 
 	defer free_all(context.temp_allocator)
 	b: strings.Builder
@@ -48,16 +48,16 @@ a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
 		fmt.sbprintf(&b, "<li id=%d>t", i)
 	}
 	whole := strings.to_string(b)
-	walktest.expect_stream_is_one_record(t, whole, html.as(.Fragment))
+	testkit.expect_stream_is_one_record(t, whole, html.as(.Fragment))
 }
 
 // The iterator gives the answers `each_answer` gives and ends with its error, whatever its largest batch, for each
 // duplicate policy.
 @(test)
 answers_agree_with_each_answer :: proc(t: ^testing.T) {
-	run := walktest.Answer_Run {
+	run := testkit.Answer_Run {
 		each = proc(src: []u8, paths: []core.Path, variant: int, early: bool, out: ^[dynamic]core.Token_Answer) -> core.Error {
-			return html.each_answer(src, .Document, paths, out, walktest.collect_answer, {}, {dups = .Refuse if variant == 1 else .Last, stop_early = early})
+			return html.each_answer(src, .Document, paths, out, testkit.collect_answer, {}, {dups = .Refuse if variant == 1 else .Last, stop_early = early})
 		},
 		iter = proc(src: []u8, paths: []core.Path, variant: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
 			it := html.answers(src, .Document, paths, {}, {dups = .Refuse if variant == 1 else .Last, stop_early = early})
@@ -68,7 +68,7 @@ answers_agree_with_each_answer :: proc(t: ^testing.T) {
 			return it.err
 		},
 	}
-	walktest.expect_answers_agree(t, {RECORD_TEXT}, {".html.body.p", ".html.body[]", "..", ".html.body.table.tbody.tr.td", ".z"}, 2, run)
+	testkit.expect_answers_agree(t, {RECORD_TEXT}, {".html.body.p", ".html.body[]", "..", ".html.body.table.tbody.tr.td", ".z"}, 2, run)
 }
 
 // `.Entries` gives the members of the element a path of names reaches, each read from the whole tree, with the ends
@@ -78,10 +78,10 @@ entries_are_the_members_of_a_container :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := "<ul><li>a<li>b <i>c</i><li><p>d</ul>"
 	LI :: "8 li \"a\"\n9 li {\"#text\":\"b \",\"i\":\"c\"}\n23 li {\"p\":\"d\"}\nend"
-	walktest.expect_entries(t, src, html.as(.Fragment), {"ul"}, LI)
-	walktest.expect_framings(t, html.CAPABILITIES, html.as(.Fragment))
+	testkit.expect_entries(t, src, html.as(.Fragment), {"ul"}, LI)
+	testkit.expect_framings(t, html.CAPABILITIES, html.as(.Fragment))
 	it := html.records_open(transmute([]u8)src, .Fragment, framing = .Entries, entries = {"ul"})
-	testing.expect_value(t, walktest.entries_lines(&it), LI)
+	testing.expect_value(t, testkit.entries_lines(&it), LI)
 	numbers := "<ul><li>&#55;<li>&#45;8<li>9</ul>"
-	testing.expect_value(t, walktest.entries_read(numbers, html.as(.Fragment), {"ul"}, int), "7\n-8\n9\nend")
+	testing.expect_value(t, testkit.entries_read(numbers, html.as(.Fragment), {"ul"}, int), "7\n-8\n9\nend")
 }

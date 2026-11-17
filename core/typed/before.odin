@@ -207,7 +207,8 @@ carry_entries :: proc(h: ^Check, regs: core.Hook_Regs, sub: ^Sink, lo, hi: u64) 
 
 // Reads the text `lo..hi` of a union at `dest`, a value of `kind`, into its first arm that reads the text with no
 // refusal, each tried into scratch first by the arm's record. A null is the union's nil where it has one. A text no arm
-// reads is refused as `.No_Arm`, followed by each arm's refusals. What the tries allocate is given back once the union is
+// reads is refused with the refusals of the arm that failed deepest in the value, or as `.No_Arm`, followed by each arm's
+// refusals, where every arm refused the value itself. What the tries allocate is given back once the union is
 // read.
 @(private)
 first_match :: proc(h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64) -> (core.Hook_Regs, core.Action) {
@@ -244,6 +245,9 @@ first_match :: proc(h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, ki
 		mark_arm(dest, &extra_of(h.plan, m).before.field, m, k)
 		return judge(h, regs, extra_of(h.plan, m).before.judge, text, lo, hi)
 	}
+	if k := closest_arm(subs); k >= 0 {
+		return carry_entries(h, regs, &subs[k], lo, hi)
+	}
 	back, action := refuse(h, regs, {kind = .No_Arm, at = lo}, hi)
 	for &sub in subs {
 		if action == .Stop || h.sink == nil {
@@ -254,6 +258,18 @@ first_match :: proc(h: ^Check, regs: core.Hook_Regs, m: ^Meta, dest: uintptr, ki
 		}
 	}
 	return back, action
+}
+
+// The first arm whose first refusal lies deepest below the value, -1 where every arm refused the value itself.
+@(private)
+closest_arm :: proc(subs: []Sink) -> int {
+	best, depth := -1, 0
+	for sub, k in subs {
+		if len(sub.entries) > 0 && len(sub.entries[0].path) > depth {
+			best, depth = k, len(sub.entries[0].path)
+		}
+	}
+	return best
 }
 
 // Reads the value `t` opens or is at the judged record `fld`, at `dest`, by the record its `.Before` keeps, as the read reads

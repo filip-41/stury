@@ -5,7 +5,7 @@ import "core:encoding/json"
 import "core:strings"
 import "core:testing"
 import core "../../core"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import cbor ".."
 import stury_json "../../json"
 
@@ -84,7 +84,7 @@ appendix_a_decoded_values :: proc(t: ^testing.T) {
 		if entry["hex"].(json.String) == SIMPLE_24 {
 			continue
 		}
-		if fault, bad := walktest.fault_of(cbor.validate(input, .Cbor)).?; bad {
+		if fault, bad := testkit.fault_of(cbor.validate(input, .Cbor)).?; bad {
 			testing.expectf(t, false, "%s: %v", entry["hex"], fault)
 			continue
 		}
@@ -115,7 +115,7 @@ appendix_a_decoded_values :: proc(t: ^testing.T) {
 // pseudocode of Appendix C.
 @(test)
 appendix_a_simple_24_is_refused :: proc(t: ^testing.T) {
-	fault, bad := walktest.fault_of(cbor.validate(hex(SIMPLE_24), .Cbor)).?
+	fault, bad := testkit.fault_of(cbor.validate(hex(SIMPLE_24), .Cbor)).?
 	testing.expect(t, bad)
 	testing.expect_value(t, cbor.Detail(fault.detail), cbor.Detail.Bad_Simple)
 }
@@ -167,7 +167,7 @@ appendix_a_diagnostic_rows :: proc(t: ^testing.T) {
 @(test)
 appendix_a_tags_are_facts :: proc(t: ^testing.T) {
 	doc, err := cbor.build(hex("c11a514b67b0"), .Cbor)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	testing.expect_value(t, len(doc.facts), 1)
 	testing.expect_value(t, doc.facts[0].role, core.Role.Tag)

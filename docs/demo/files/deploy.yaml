@@ -1,0 +1,4 @@
+# web servers
+replicas: 3 # scaled by hand
+image: web:1.4
+ports: [80, 443]

@@ -14,7 +14,7 @@ import typed "../../core/typed"
 import write "../../core/write"
 import records "../../core/records"
 import json_pkg "../../json"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import yaml ".."
 
 @(private = "file")
@@ -302,10 +302,10 @@ texts_that_are_no_value_are_refused :: proc(t: ^testing.T) {
 set_through_a_path :: proc(t: ^testing.T) {
 	src := "t:\n  k: [1, 2, 3]\nu: true\n"
 	out, err := yaml.set(transmute([]u8)src, .Yaml_1_2, core.Path{steps = {core.Name("t"), core.Name("k"), core.Index(1)}}, typed.Raw("20"), allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(out), "t:\n  k: [1, 20, 3]\nu: true\n")
 	out, err = yaml.set(transmute([]u8)src, .Yaml_1_2, core.Path{steps = {core.Name("t"), core.Name("z")}}, typed.Raw("x"), allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(out), "t:\n  k: [1, 2, 3]\n  z: x\nu: true\n")
 }
 
@@ -596,7 +596,7 @@ spelled_values_take_their_site :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := "a: 1\nf: [1, 2]\nt:\n    k: v\n"
 	held, herr := json_pkg.build(transmute([]u8)string(`{"k":[1,{"m":null}],"s":"x: y"}`), .Json)
-	walktest.expect_nil(t, herr)
+	testkit.expect_nil(t, herr)
 	value := core.Value(core.Node_Ref{&held, core.ROOT})
 	Spelled :: struct {
 		path:  string,
@@ -614,9 +614,9 @@ spelled_values_take_their_site :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		path, perr := core.parse_path(c.path)
-		walktest.expect_nil(t, perr)
+		testkit.expect_nil(t, perr)
 		out, err := yaml.set(transmute([]u8)src, .Yaml_1_2, path, c.value)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		testing.expectf(t, string(out) == c.want, "%s:\n got %q\nwant %q", c.path, string(out), c.want)
 	}
 	// A node of the document keeps its bytes, with its lines at the new site's indentation.
@@ -624,7 +624,7 @@ spelled_values_take_their_site :: proc(t: ^testing.T) {
 	list := core.edit_list_init(&doc)
 	a, _ := core.member(&doc, core.ROOT, "a")
 	moved, _ := core.member(&doc, core.ROOT, "t")
-	walktest.expect_nil(t, write.set_node(&list, a, core.Node_Ref{&doc, moved}))
+	testkit.expect_nil(t, write.set_node(&list, a, core.Node_Ref{&doc, moved}))
 	out, _, err := commit(&list)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	testing.expect_value(t, string(out), "a:\n    k: v\nf: [1, 2]\nt:\n    k: v\n")
@@ -651,14 +651,14 @@ a_string_set_keeps_the_quotes_or_fold_it_replaces :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		path, perr := core.parse_path(c.path)
-		walktest.expect_nil(t, perr)
+		testkit.expect_nil(t, perr)
 		out, err := yaml.set(transmute([]u8)src, .Yaml_1_2, path, c.value)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		testing.expectf(t, string(out) == c.want, "%s:\n got %q\nwant %q", c.path, string(out), c.want)
 	}
 	path, _ := core.parse_path(".f")
 	out, err := yaml.set(transmute([]u8)string("f: >\n  a\n  b\nk: 1\n"), .Yaml_1_2, path, "p q\n")
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(out), "f: >\n  p q\nk: 1\n")
 }
 

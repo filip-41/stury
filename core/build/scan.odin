@@ -214,7 +214,8 @@ scan_start :: proc(h: ^Scan, src: []u8, as: core.As, paths: []core.Path, read: c
 	}
 	h.positional = positional
 	h.answers = h.first[:]
-	h.b = builder_start(src, as, false, allocator, 64, depth, 0, frames)
+	// A stream's walk writes no node, and a key to decode or a kept value takes its room when it arrives.
+	h.b = builder_start(src, as, false, allocator, -1 if on != nil else 64, depth, 0, frames)
 	if h.b.err.kind != .None {
 		many_free(h, allocator)
 		_, be := builder_end(&h.b, BUILDER_REGS, nil)

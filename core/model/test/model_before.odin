@@ -9,7 +9,7 @@ import typed "../../typed"
 import dsv "../../../dsv"
 import json "../../../json"
 import model ".."
-import walktest "../../../walktest"
+import testkit "../../../testkit"
 
 @(private = "file")
 Person :: struct {
@@ -61,7 +61,7 @@ named :: proc(t: ^testing.T, reg: ^model.Registry, checks: typed.Format_Checks, 
 	_ = model.register(reg, E, "name", trimmed)
 	_ = model.register(reg, E, "age", counted)
 	m, err := model.compile(reg, T, checks)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	return m
 }
 
@@ -139,7 +139,7 @@ before_failures_are_the_members :: proc(t: ^testing.T) {
 	reg: model.Registry
 	_ = model.register(&reg, Person, "name", no_forbidden)
 	m, err := model.compile(&reg, Person, json.checks(.Json))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	_, found := loaded_person(&m, `{"name":"root","age":1}`)
 	testing.expect_value(t, found, "Custom(no root)/name;")
 	v: Person
@@ -165,7 +165,7 @@ before_refusal_keeps_its_path_with_a_sink :: proc(t: ^testing.T) {
 	reg: model.Registry
 	_ = model.register(&reg, Short, "name", widened)
 	m, err := model.compile(&reg, Short, json.checks(.Json))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	v: Short
 	sink: typed.Sink
 	failure := model.load(&m, transmute([]u8)string(`{"name":"a"}`), &v, &sink)
@@ -191,7 +191,7 @@ before_failure_names_the_part_it_fails :: proc(t: ^testing.T) {
 	reg: model.Registry
 	_ = model.register(&reg, Person, "name", fails_a_part)
 	m, err := model.compile(&reg, Person, json.checks(.Json))
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	_, found := loaded_person(&m, `{"name":"x","age":1}`)
 	testing.expect_value(t, found, "Custom(nope)/name/sub;")
 }

@@ -20,11 +20,11 @@ not on this page was not measured.
 | Record lanes | frame, judge, build and read the records of NDJSON and CSV | simdjson, serde_json, sonic-rs, simd-csv | `make bench-records` |
 | Write lanes | write a struct or a document, compact and pretty | yyjson, simdjson, serde_json, sonic-rs | `make bench-write` |
 | Kernels | the vector code and the number text writers | none | `make bench` |
-| Command line | filters over JSON and CSV files, end to end | jq, jaq, gojq, yq, and qsv, Miller and jq on CSV | `bench/cli/jq_compare.sh`, `bench/cli/csv_compare.sh` |
+| Command line | filters over JSON and CSV files, end to end | jq, jaq, gojq, yq, and qsv, Miller and jq on CSV | `make bench-cli`, `bench cli --suite csv` |
 
 Every comparison states what it measured and under which guarantee. The fixtures are pinned: the corpus files and the
-other libraries' sources by URL and SHA-256 (`bench/fetch.py`, `bench/sources.toml`), and the synthetic files by
-`bench/manifest.toml` (`bench/gen.py --check`). The synthetic files are large, compact and each stress one cost, so
+other libraries' sources by URL and SHA-256 (`bench/CMakeLists.txt`, `bench/fixtures.toml`), and the synthetic files by
+`bench/fixtures.toml` (`bench fixtures --check`). The synthetic files are large, compact and each stress one cost, so
 they are not typical documents. The corpus files are small, pretty-printed and mixed. They can rank tools differently,
 and a result says which set it comes from.
 
@@ -34,10 +34,10 @@ and a result says which set it comes from.
   timed samples, and the median is the mean of the two middle samples. Every lane of every tool follows this rule. A
   sample is one call, except in the get-one-field lanes below. File reading, process start and output are outside the
   clock.
-- A library-lane runner (`doc.py`, `paths.py`, `typed.py`, `records.py`, `write.py`) interleaves the arms round by round, and each cell is the best round of an arm's median. A command line comparison
-  (`bench/cli/jq_compare.sh`, `csv_compare.sh`) runs its tools in rotating order. All of them run under `bench/guard.py`,
+- The lane runner (`bench/runner/`) interleaves the arms round by round, and each cell is the best round of an arm's median. A command line comparison
+  (`bench/lanes/cli/cases.toml`) runs its tools in rotating order. All of them run under `bench/runner/guard.py`,
   which holds `build/bench/timing.lock`, so one timed job runs at a time, and kills a process that passes 1 GB of live
-  RSS, a descendant of the script included.
+  RSS, a descendant of the runner included.
 - Every arm prints a check of what it read, a hash or, in the record lanes, the number of records, and no figure is
   reported unless the arms' checks agree. The write lanes leave `nested.json` and `escape.json` out of that check.
 - Each other library is built from its pinned source with `-O3 -DNDEBUG`. The Rust arms build in release with fat LTO.
@@ -76,7 +76,7 @@ Each pair does the same work under the same guarantee, or the table names the di
   the table with what it checks.
 - **Command line.** Each figure is the other tool's median wall time divided by stury's, over the same filter and the
   same file, process start-up included, over ten timed runs per tool and case after two warm-up runs. stury answers a file of 1 MiB or more on every core, as it does for a user, and
-  the other tools on one. In `jsonc_id` the other tools read the JSONC file through `perl`, whose start-up is timed. Every tool must give the same answers before it is timed. A tool that cannot
+  the other tools on one. In `jsonc_id` the other tools read the JSONC file through `awk`, whose start-up is timed. Every tool must give the same answers before it is timed. A tool that cannot
   spell a filter is left out of that row. A CSV arm that types the values it converts has no arm for a job that must not
   type them.
 
@@ -139,7 +139,7 @@ libraries answer from the text; `simd` is simdjson's On-Demand `find_field`, who
 checks its UTF-8, and which skips values without judging their numbers and escapes. `stop` reads under `.First` with
 `stop_early`, judging every byte up to the answer and leaving the rest unread; `sonic` is sonic-rs's keyed `get` from
 the text on every call, which stops at the key and skips values without judging them. On `logs.json`, `query` walks a
-document its driver built outside the clock. ns, best of five rounds. `paths.py` prints GB/s of the whole text beside
+document its driver built outside the clock. ns, best of five rounds. the runner prints GB/s of the whole text beside
 the ns of the arms that judge it all; a lane that stops early leaves bytes unread, so its table shows ns alone.
 `build_query` is not in this set: the arm and the GB/s column came after it, and the get lanes' batching changed how every
 ns is taken, so the tables need a rerun.
@@ -296,8 +296,8 @@ make bench-doc     # the document lanes
 make bench-records ROUNDS=3
 ```
 
-`ROUNDS` sets the interleaved rounds, `BENCH_FILES` the document lanes' fixtures and `LANES` the typed and write lanes
-(`bench/README.md` lists what each target takes). The harness needs Odin, a C and a C++ compiler,
+`ROUNDS` sets the interleaved rounds and `ROWS` the rows
+(`bench/README.md` lists what each target takes). The harness needs Odin, uv, CMake with a C and a C++ compiler,
 Cargo and Python 3.11 or later; the command line comparisons also need hyperfine and the tools they compare. A
 comparison whose tool is missing says so and stops before it times anything.
 

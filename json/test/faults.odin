@@ -7,7 +7,7 @@ import "core:testing"
 import core "../../core"
 import json ".."
 import gen "gen"
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 Case :: struct {
 	text:   string,
@@ -300,11 +300,11 @@ non_finite_refused :: proc(t: ^testing.T) {
 		if c.kind != nil {
 			want = core.Fault{c.offset, &json.RULES, .Bad_Char, u8(c.detail)}
 		}
-		verdict := walktest.fault_of(core.validate(src, json.as(.Json5, refuse)))
+		verdict := testkit.fault_of(core.validate(src, json.as(.Json5, refuse)))
 		testing.expectf(t, verdict == want, "%q: validate %v, want %v", c.text, verdict, want)
-		log := new(walktest.Log)
+		log := new(testkit.Log)
 		defer free(log)
-		_, fault := json.walk(src, 0, .Json5, refuse, log, &core.Hook_Regs{}, walktest.log_hook)
+		_, fault := json.walk(src, 0, .Json5, refuse, log, &core.Hook_Regs{}, testkit.log_hook)
 		testing.expectf(t, fault == want, "%q: hooked walk %v, want %v", c.text, fault, want)
 	}
 }
@@ -361,7 +361,7 @@ byte_after_skipped_close :: proc(t: ^testing.T) {
 		{"{\"x\":{\"y\":1}\xfd}", 2, 12, .Member_Separator},
 	}) {
 		f := core.Fault{want.at, &json.RULES, .Bad_Char, u8(want.detail)}
-		testing.expectf(t, walktest.fault_of(json.validate(transmute([]u8)want.text, .Json)) == f, "%q: validate", want.text)
+		testing.expectf(t, testkit.fault_of(json.validate(transmute([]u8)want.text, .Json)) == f, "%q: validate", want.text)
 		for spec in json.Spec {
 			fault := walk_skipping(want.text, spec, want.token)
 			testing.expectf(t, fault == f, "%v %q, token %d skipped: %v, want %v", spec, want.text, want.token, fault, f)
@@ -373,7 +373,7 @@ byte_after_skipped_close :: proc(t: ^testing.T) {
 // which only `validate` reports, and a text with no value, where the walk returns no fault.
 expect_fault :: proc(t: ^testing.T, c: Case, $S: json.Spec) {
 	src := transmute([]u8)c.text
-	verdict := walktest.fault_of(json.validate(src, S))
+	verdict := testkit.fault_of(json.validate(src, S))
 	f, bad := verdict.?
 	if c.kind == nil {
 		testing.expectf(t, !bad, "%v %q: %v", S, c.text, f)
@@ -383,9 +383,9 @@ expect_fault :: proc(t: ^testing.T, c: Case, $S: json.Spec) {
 		testing.expectf(t, bad && f.kind == c.kind && f.at == c.offset && f.detail == u8(c.detail), "%v %q: %v, want %v at %d", S, c.text, f, c.kind, c.offset)
 	}
 	if c.kind != TRAILING {
-		log := new(walktest.Log)
+		log := new(testkit.Log)
 		defer free(log)
-		_, fault := json.walk(src, 0, S, {}, log, &core.Hook_Regs{}, walktest.log_hook)
+		_, fault := json.walk(src, 0, S, {}, log, &core.Hook_Regs{}, testkit.log_hook)
 		empty := fault == nil && log.n == 0
 		testing.expectf(t, empty || fault == verdict, "%v %q: hooked walk %v, validate %v", S, c.text, fault, verdict)
 	}
@@ -393,8 +393,8 @@ expect_fault :: proc(t: ^testing.T, c: Case, $S: json.Spec) {
 
 // Validates `src` from a copy at the end of `fence`'s readable page, with the page after it unreadable, so a read past
 // the end faults in every build.
-validate_fenced :: proc(fence: ^walktest.Fence, src: []u8, $S: json.Spec, opts := json.Options{}) -> Maybe(core.Fault) {
-	return walktest.fault_of(json.validate(walktest.fence_copy(fence, src), S, opts))
+validate_fenced :: proc(fence: ^testkit.Fence, src: []u8, $S: json.Spec, opts := json.Options{}) -> Maybe(core.Fault) {
+	return testkit.fault_of(json.validate(testkit.fence_copy(fence, src), S, opts))
 }
 
 // Validates every prefix of 900 seeded texts, compact and pretty, from a copy that ends at a guard page: each prefix
@@ -405,8 +405,8 @@ prefixes_fenced :: proc(t: ^testing.T) {
 	context.random_generator = rand.default_random_generator(&state)
 	text: [dynamic]u8
 	defer delete(text)
-	fence := walktest.fence_init()
-	defer walktest.unfence(&fence)
+	fence := testkit.fence_init()
+	defer testkit.unfence(&fence)
 	for round in 0 ..< 900 {
 		clear(&text)
 		spec := json.Spec(round / 2 % len(json.Spec))
@@ -419,11 +419,11 @@ prefixes_fenced :: proc(t: ^testing.T) {
 			same: bool
 			switch spec {
 			case .Json:
-				same = validate_fenced(&fence, text[:n], .Json) == walktest.fault_of(json.validate(text[:n], .Json))
+				same = validate_fenced(&fence, text[:n], .Json) == testkit.fault_of(json.validate(text[:n], .Json))
 			case .Jsonc:
-				same = validate_fenced(&fence, text[:n], .Jsonc) == walktest.fault_of(json.validate(text[:n], .Jsonc))
+				same = validate_fenced(&fence, text[:n], .Jsonc) == testkit.fault_of(json.validate(text[:n], .Jsonc))
 			case .Json5:
-				same = validate_fenced(&fence, text[:n], .Json5) == walktest.fault_of(json.validate(text[:n], .Json5))
+				same = validate_fenced(&fence, text[:n], .Json5) == testkit.fault_of(json.validate(text[:n], .Json5))
 			}
 			if !testing.expectf(t, same, "%v %q", spec, text[:n]) {
 				return
@@ -444,21 +444,21 @@ skip_hook :: proc "contextless" (h: ^int, s: core.Hook_Regs, t: core.Token) -> (
 @(test)
 max_depth_option :: proc(t: ^testing.T) {
 	heap := context.allocator
-	log := new(walktest.Log)
+	log := new(testkit.Log)
 	defer free(log, heap)
 	context.allocator = mem.panic_allocator()
 	for depth in ([]u32{1, 3, core.MAX_DEPTH, core.MAX_DEPTH + 1, 5000}) {
 		n := int(depth)
 		fits := strings.concatenate({strings.repeat("[", n, context.temp_allocator), strings.repeat("]", n, context.temp_allocator)}, context.temp_allocator)
-		testing.expectf(t, walktest.fault_of(json.validate(transmute([]u8)fits, .Json, {max_depth = depth})) == nil, "%d levels", n)
+		testing.expectf(t, testkit.fault_of(json.validate(transmute([]u8)fits, .Json, {max_depth = depth})) == nil, "%d levels", n)
 		over := strings.concatenate({strings.repeat("[{\"a\":", n / 2, context.temp_allocator), strings.repeat("[", n % 2 + 1, context.temp_allocator)}, context.temp_allocator)
-		f, bad := walktest.fault_of(json.validate(transmute([]u8)over, .Json, {max_depth = depth})).?
+		f, bad := testkit.fault_of(json.validate(transmute([]u8)over, .Json, {max_depth = depth})).?
 		testing.expectf(t, bad && f.kind == .Too_Deep && f.at == u64(len(over) - 1), "%d levels: %v", n, f)
 		log^ = {}
-		_, fault := json.walk(transmute([]u8)over, 0, .Json, {max_depth = depth}, log, &core.Hook_Regs{}, walktest.log_hook)
+		_, fault := json.walk(transmute([]u8)over, 0, .Json, {max_depth = depth}, log, &core.Hook_Regs{}, testkit.log_hook)
 		testing.expectf(t, fault == f && log.n == n + n / 2, "%d levels, walked: %v, %d tokens", n, fault, log.n)
 		maps := strings.concatenate({strings.repeat("{\"a\":", n, context.temp_allocator), "{"}, context.temp_allocator)
-		f, bad = walktest.fault_of(json.validate(transmute([]u8)maps, .Json, {max_depth = depth})).?
+		f, bad = testkit.fault_of(json.validate(transmute([]u8)maps, .Json, {max_depth = depth})).?
 		testing.expectf(t, bad && f.kind == .Too_Deep && f.at == u64(len(maps) - 1), "%d objects: %v", n, f)
 		for skip in ([]int{0, 1}) {
 			k := skip
@@ -542,8 +542,8 @@ tolerance_offsets :: proc(t: ^testing.T) {
 tolerance_offsets_in :: proc(t: ^testing.T, $S: json.Spec) {
 	text: [dynamic]u8
 	defer delete(text)
-	fence := walktest.fence_init()
-	defer walktest.unfence(&fence)
+	fence := testkit.fence_init()
+	defer testkit.unfence(&fence)
 	for quote in ([]u8{'"', '\''}) {
 		if S != .Json5 && quote == '\'' {
 			continue
@@ -561,7 +561,7 @@ tolerance_offsets_in :: proc(t: ^testing.T, $S: json.Spec) {
 				if !testing.expectf(t, !bad, "%v %q: %v", S, text[:], f) {
 					return
 				}
-				strict, strict_bad := walktest.fault_of(json.validate(text[:], S)).?
+				strict, strict_bad := testkit.fault_of(json.validate(text[:], S)).?
 				if !testing.expectf(t, strict_bad, "%v %q: strict %v", S, text[:], strict) {
 					return
 				}
@@ -572,16 +572,16 @@ tolerance_offsets_in :: proc(t: ^testing.T, $S: json.Spec) {
 
 expect_tolerated :: proc(t: ^testing.T, c: Tolerated, $S: json.Spec) {
 	src := transmute([]u8)c.text
-	strict := walktest.fault_of(json.validate(src, S))
-	f, bad := walktest.fault_of(json.validate(src, S, {tolerate = c.tol})).?
+	strict := testkit.fault_of(json.validate(src, S))
+	f, bad := testkit.fault_of(json.validate(src, S, {tolerate = c.tol})).?
 	if c.kind == nil {
 		testing.expectf(t, !bad && strict != nil, "%v %q: %v, strict %v", S, c.text, f, strict)
 	} else {
 		testing.expectf(t, bad && f.kind == c.kind && f.at == c.offset, "%v %q: %v, want %v at %d", S, c.text, f, c.kind, c.offset)
 	}
-	log := new(walktest.Log)
+	log := new(testkit.Log)
 	defer free(log)
-	_, fault := json.walk(src, 0, S, {tolerate = c.tol}, log, &core.Hook_Regs{}, walktest.log_hook)
+	_, fault := json.walk(src, 0, S, {tolerate = c.tol}, log, &core.Hook_Regs{}, testkit.log_hook)
 	testing.expectf(t, fault == (f if bad else nil), "%v %q: hooked walk %v, validate %v", S, c.text, fault, f)
 	for tok in log.tokens[:log.n] {
 		testing.expectf(t, spans(src, tok), "%v %q: %v", S, c.text, tok)
@@ -595,7 +595,7 @@ expect_tolerated :: proc(t: ^testing.T, c: Tolerated, $S: json.Spec) {
 rendered_faults :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(json.RULES.details), len(json.Detail))
 	src := transmute([]u8)string("{\n  \"a\": tru\n}")
-	f, bad := walktest.fault_of(json.validate(src, .Json)).?
+	f, bad := testkit.fault_of(json.validate(src, .Json)).?
 	testing.expect(t, bad)
 	b := strings.builder_make(context.temp_allocator)
 	core.render(strings.to_writer(&b), src, f)

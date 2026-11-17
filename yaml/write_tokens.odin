@@ -57,7 +57,7 @@ TOKENS := write.Token_Spelling {
 		case typed.Bytes:
 			return put_bytes(t.out, x)
 		case core.Number:
-			return write.put_number_as(t.out, x, TREE)
+			return write.put_number(t.out, x, TREE)
 		case write.Number_Literal:
 			write.put_text(t.out, x.text)
 		case write.Tagged_Text:
@@ -140,7 +140,7 @@ block_value :: proc(t: ^write.Tokens, b: ^Block_Writer, v: write.Scalar) -> core
 		return kind
 	case core.Number:
 		block_lead(b, false)
-		kind := write.put_number_as(t.out, x, TREE)
+		kind := write.put_number(t.out, x, TREE)
 		block_end_root(b)
 		return kind
 	case write.Number_Literal:

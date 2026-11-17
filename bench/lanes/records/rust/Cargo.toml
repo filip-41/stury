@@ -1,0 +1,15 @@
+[package]
+name = "records-rust"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "records-rust"
+path = "main.rs"
+
+[dependencies]
+timing.workspace = true
+sonic-rs.workspace = true
+simd-csv.workspace = true
+serde.workspace = true
+serde_json.workspace = true

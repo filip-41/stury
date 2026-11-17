@@ -1,0 +1,18 @@
+[lane]
+legend = "GB/s is the source's bytes over time: the best of {rounds} rounds of each arm's median of ten calls after two warm-ups. A copied string is a `String` in the Rust arms and a borrowed one a `Text`, borrowed from the input when it has no escape."
+
+[arm]
+stury = { source = "stury", args = ["{lane}", "{file}", "{mode}"] }
+serde = { source = "rust", args = ["{lane}", "{file}", "{mode}", "serde"], files = ["*.json"] }
+sonic = { source = "rust", args = ["{lane}", "{file}", "{mode}", "sonic"], files = ["*.json"] }
+
+[[group]]
+rows = [
+	{ label = "logs", lane = "logs", file = "logs.json" },
+	{ label = "logs_required", lane = "logs_required", file = "logs.json", arms = ["stury"] },
+	{ label = "twitter", lane = "twitter", file = "twitter.json" },
+	{ label = "citm", lane = "citm", file = "citm_catalog.json" },
+	{ label = "table", lane = "table", file = "table.csv" },
+	{ label = "text", lane = "text", file = "text.csv" },
+]
+variant = [{ title = "borrow", mode = "borrow" }, { title = "copy", mode = "copy" }]

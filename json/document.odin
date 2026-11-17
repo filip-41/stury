@@ -36,6 +36,7 @@ handle_services :: proc "contextless" ($S: Spec) -> core.Services {
 		validate = edit_of(S).validate,
 		scan     = edit_of(S).scan,
 		write    = write_text,
+		partial_writes = true,
 		edit     = edit_of(S),
 		plans    = rawptr(plan_as),
 		reads    = checks_of(S),
@@ -105,7 +106,11 @@ build_reserved :: proc(src: []u8, q: [^]u8, $S: Spec, handle: core.As, refuse_du
 	fault: Maybe(core.Fault)
 	stopped: bool
 	when .Comments in FEATURES[S] {
-		hi, fault, stopped = walk_from(src, q, S, opts, &b, &regs, build.builder_hook)
+		if refuse_duplicates {
+			hi, fault, stopped = walk_from(src, q, S, opts, &b, &regs, build.builder_hook)
+		} else {
+			hi, fault, stopped = walk_from(src, q, S, opts, &b, &regs, build.builder_hook_facts)
+		}
 	} else {
 		// A build that refuses repeats selects a separate hook, so the hook a usual build runs has no duplicate-key
 		// test.

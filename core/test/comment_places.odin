@@ -8,7 +8,7 @@ import "core:strings"
 import "core:testing"
 import core ".."
 import write "../write"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import html "../../html"
 import json "../../json"
 import toml "../../toml"
@@ -268,13 +268,13 @@ updated_values_keep_their_comments_in_markup :: proc(t: ^testing.T) {
 		if !testing.expectf(t, err == nil, "%s: %v", from.name, err) {
 			continue
 		}
-		r := walktest.member(&doc, core.ROOT, "r")
-		d := walktest.member(&doc, r, "d")
+		r := testkit.member(&doc, core.ROOT, "r")
+		d := testkit.member(&doc, r, "d")
 		updated_d := core.new_object()
 		core.object_put(updated_d, "y", "2")
 		updated := core.new_object()
-		core.object_put(updated, "a", core.in_place_of("9", {&doc, walktest.member(&doc, r, "a")}))
-		core.object_put(updated, "b", core.noted(core.Node_Ref{&doc, walktest.member(&doc, r, "b")}, .Comment, {"n"}))
+		core.object_put(updated, "a", core.in_place_of("9", {&doc, testkit.member(&doc, r, "a")}))
+		core.object_put(updated, "b", core.noted(core.Node_Ref{&doc, testkit.member(&doc, r, "b")}, .Comment, {"n"}))
 		core.object_put(updated, "d", core.in_place_of(updated_d, {&doc, d}))
 		root := core.new_object()
 		core.object_put(root, "r", core.in_place_of(updated, {&doc, r}))

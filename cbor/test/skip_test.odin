@@ -6,7 +6,7 @@ import "core:encoding/json"
 import "core:math/rand"
 import "core:testing"
 import core "../../core"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import cbor ".."
 
 @(private)
@@ -18,7 +18,7 @@ Skip_Tally :: struct {
 @(private)
 skip_law :: proc(t: ^testing.T, tally: ^Skip_Tally, src: []u8) {
 	context.allocator = context.temp_allocator
-	verdict, invalid := walktest.fault_of(cbor.validate(src, .Cbor)).?
+	verdict, invalid := testkit.fault_of(cbor.validate(src, .Cbor)).?
 	step_zz := [?]core.Step{core.Name("zz")}
 	step_0 := [?]core.Step{core.Index(0)}
 	step_1 := [?]core.Step{core.Name("1")}
@@ -30,7 +30,7 @@ skip_law :: proc(t: ^testing.T, tally: ^Skip_Tally, src: []u8) {
 			if !testing.expectf(t, err != nil, "%x: validate faults at %d, the scan does not", src, verdict.at) {
 				continue
 			}
-			testing.expectf(t, walktest.at_of(err) == verdict.at, "%x: validate faults at %d, the scan at %d", src, verdict.at, walktest.at_of(err))
+			testing.expectf(t, testkit.at_of(err) == verdict.at, "%x: validate faults at %d, the scan at %d", src, verdict.at, testkit.at_of(err))
 			tally.faulted += 1
 		} else {
 			testing.expectf(t, err == nil, "%x: validate accepts, the scan faults: %v", src, err)
@@ -40,7 +40,7 @@ skip_law :: proc(t: ^testing.T, tally: ^Skip_Tally, src: []u8) {
 
 		early, early_err := cbor.scan(src, .Cbor, path, read = {stop_early = true})
 		if early_err != nil {
-			testing.expectf(t, invalid && walktest.at_of(early_err) == verdict.at, "%x: a stop_early scan faults where validate does not", src)
+			testing.expectf(t, invalid && testkit.at_of(early_err) == verdict.at, "%x: a stop_early scan faults where validate does not", src)
 		} else {
 			core.destroy(&early)
 		}
@@ -90,14 +90,14 @@ skipping_reads_the_answer :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	src := hex("a3 61 62 82 01 02 61 61 a1 01 f5 61 63 7f 61 78 ff")
 	doc, answer, err := cbor.find(src, .Cbor, core.Path{steps = {core.Name("a"), core.Name("1")}})
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, answer.outcome, core.Presence.Found)
 	testing.expect_value(t, core.kind(&doc, answer.node), core.Kind.True)
 	testing.expect(t, len(doc.nodes) < 8, "the skipped values are not nodes")
 
 	tail := hex("82 01 ff")
 	_, tail_answer, tail_err := cbor.find(tail, .Cbor, core.Path{steps = {core.Index(0)}}, read = {stop_early = true})
-	walktest.expect_nil(t, tail_err)
+	testkit.expect_nil(t, tail_err)
 	testing.expect_value(t, tail_answer.outcome, core.Presence.Found)
 	_, _, full_err := cbor.find(tail, .Cbor, core.Path{steps = {core.Index(0)}})
 	testing.expect(t, full_err != nil, "without stop_early the bytes past the answer are judged")

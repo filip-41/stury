@@ -5,25 +5,25 @@ import "core:fmt"
 import "core:testing"
 import core "../../core"
 import html ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private = "file")
-walk_as :: proc(text: string, $S: html.Spec, skip: string, stop, every: int) -> (h: walktest.Stopping, end: string) {
+walk_as :: proc(text: string, $S: html.Spec, skip: string, stop, every: int) -> (h: testkit.Stopping, end: string) {
 	src := transmute([]u8)text
-	h = walktest.Stopping{src = src, skip = skip, stop = stop, every = every}
+	h = testkit.Stopping{src = src, skip = skip, stop = stop, every = every}
 	h.tokens = make([dynamic]core.Token, 0, 64)
 	regs: core.Hook_Regs
 	cursor: html.Cursor
-	hi, fault := html.walk(src, 0, S, {}, &h, &regs, walktest.stopping_hook, &cursor)
+	hi, fault := html.walk(src, 0, S, {}, &h, &regs, testkit.stopping_hook, &cursor)
 	for html.can_resume(&cursor) {
-		hi, fault = html.walk_resume(src, &cursor, S, {}, &h, &regs, walktest.stopping_hook)
+		hi, fault = html.walk_resume(src, &cursor, S, {}, &h, &regs, testkit.stopping_hook)
 	}
 	return h, fmt.tprint(hi, fault, regs.a)
 }
 
 // `walk_as` as a document, then as a fragment.
 @(private = "file")
-walk_stopping :: proc(text: string, skip: string, stop, every, variant: int) -> (walktest.Stopping, string) {
+walk_stopping :: proc(text: string, skip: string, stop, every, variant: int) -> (testkit.Stopping, string) {
 	if variant == 0 {
 		return walk_as(text, .Document, skip, stop, every)
 	}
@@ -40,15 +40,15 @@ cursor_resumes_after_any_token :: proc(t: ^testing.T) {
 		"<table><a>x</a><tr><td>1<td><p>2</table><b>z",
 		"<p>a<!--c--></p><b>",
 	}
-	walktest.expect_resumes(t, texts[:], {"", "a", "b", "*a", "*b", "*p", "p"}, 2, walk_stopping)
+	testkit.expect_resumes(t, texts[:], {"", "a", "b", "*a", "*b", "*p", "p"}, 2, walk_stopping)
 	src := transmute([]u8)string("<p>1</p>")
-	h := walktest.Stopping{src = src, stop = 2}
+	h := testkit.Stopping{src = src, stop = 2}
 	h.tokens = make([dynamic]core.Token, 0, 16)
 	defer delete(h.tokens)
 	cursor: html.Cursor
-	_, fault := html.walk(src, 0, .Fragment, {}, &h, nil, walktest.stopping_hook, &cursor)
+	_, fault := html.walk(src, 0, .Fragment, {}, &h, nil, testkit.stopping_hook, &cursor)
 	testing.expect(t, fault == nil && html.can_resume(&cursor))
-	_, fault = html.walk_resume(transmute([]u8)string("<p>2</p>"), &cursor, .Fragment, {}, &h, nil, walktest.stopping_hook)
+	_, fault = html.walk_resume(transmute([]u8)string("<p>2</p>"), &cursor, .Fragment, {}, &h, nil, testkit.stopping_hook)
 	f, bad := fault.?
 	testing.expect(t, bad && f.kind == .Bad_Option && html.can_resume(&cursor))
 	html.destroy(&cursor)

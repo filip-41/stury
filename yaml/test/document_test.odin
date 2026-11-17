@@ -9,7 +9,7 @@ import "core:testing"
 import core "../../core"
 import host "../../host"
 import "../../core/records"
-import walktest "../../walktest"
+import testkit "../../testkit"
 import yaml ".."
 
 @(private)
@@ -34,7 +34,7 @@ kind_at :: proc(doc: ^core.Document, key: string) -> core.Kind {
 plain_scalars_take_the_core_schema :: proc(t: ^testing.T) {
 	doc, err := build("n: ~\nt: True\nf: FALSE\ni: -12\nx: 0x1F\no: 0o17\nd: 1.5e3\ninf: -.inf\nnan: .NaN\ns: yes\nq: \"1\"\nz: 1_000\n")
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	want := [?]struct {
 		key:  string,
 		kind: core.Kind,
@@ -107,7 +107,7 @@ a_text_its_core_tag_does_not_hold_is_a_fault :: proc(t: ^testing.T) {
 a_tag_directive_names_what_a_handle_means :: proc(t: ^testing.T) {
 	doc, err := build("%TAG !! tag:example.com,2000:\n---\na: !!int x\n")
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, kind_at(&doc, "a"), core.Kind.String)
 	core_doc, _ := build("%TAG !c! tag:yaml.org,2002:\n---\na: !c!int '7'\n")
 	defer core.destroy(&core_doc)
@@ -125,7 +125,7 @@ a_key_with_a_tag_does_not_tag_its_value :: proc(t: ^testing.T) {
 aliases_repeat_their_anchor :: proc(t: ^testing.T) {
 	doc, err := build("a: &x [1, 2]\nb: *x\n")
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	i, _ := core.member(&doc, core.ROOT, "b")
 	testing.expect_value(t, core.length(&doc, i), 2)
 }
@@ -147,7 +147,7 @@ deep_aliases_build :: proc(t: ^testing.T) {
 	text := strings.concatenate({"a: &x ", deep, "\nb: ", outer, "*x", close, "\nc: &y [", ones, "1]\nd: [", ys, "*y]\n"}, context.temp_allocator)
 	doc, err := build(text)
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, len(doc.nodes), 1 + (1 + 601) + (1 + 600 + 601) + (1 + 101) + (1 + 1 + 64 * 101))
 	i, _ := core.member(&doc, core.ROOT, "b")
 	for _ in 0 ..< 1200 {
@@ -208,7 +208,7 @@ a_stream_judged_on_threads_gives_the_serial_fault :: proc(t: ^testing.T) {
 				got, _ := records.validate(text, yaml.as(.Yaml_1_2), .Concatenated, context.temp_allocator, &pool.runner)
 				testing.expectf(t, slice.equal(got, serial), "%q at width %d: %v, want %v", string(text), pool.runner.threads + 1, got, serial)
 				v := records.validate_parallel(text, yaml.as(.Yaml_1_2), &pool.runner)
-				testing.expectf(t, v == walktest.fault_of(whole), "%q at width %d: %v, want %v", string(text), pool.runner.threads + 1, v, whole)
+				testing.expectf(t, v == testkit.fault_of(whole), "%q at width %d: %v, want %v", string(text), pool.runner.threads + 1, v, whole)
 			}
 		}
 	}
@@ -291,7 +291,7 @@ a_stream_read_in_pieces_gives_the_serial_records :: proc(t: ^testing.T) {
 					same = same && rec.at == serial[i].at && string(rec.text) == string(serial[i].text)
 				}
 				several += int(len(g.spans) > 1)
-				testing.expectf(t, same && tiled && walktest.fault_of(fault) == it.fault, "%q at width %d: %v %v %v, want %v %v", string(text), pool.runner.threads + 1, got[:], g.spans, fault, serial[:], it.fault)
+				testing.expectf(t, same && tiled && testkit.fault_of(fault) == it.fault, "%q at width %d: %v %v %v, want %v %v", string(text), pool.runner.threads + 1, got[:], g.spans, fault, serial[:], it.fault)
 			}
 			records.close(&it)
 		}
@@ -324,7 +324,7 @@ unmarshal_reads_the_core_schema_into_a_value :: proc(t: ^testing.T) {
 		}
 		delete(s.tags)
 	}
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, s.name, "web")
 	testing.expect_value(t, s.port, 31)
 	testing.expect_value(t, s.ratio, 0.5)
@@ -332,7 +332,7 @@ unmarshal_reads_the_core_schema_into_a_value :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.on, true)
 	testing.expect(t, s.home == nil)
 	bad: Server
-	walktest.expect_kind(t, yaml.unmarshal(transmute([]u8)string("port: yes\n"), .Yaml_1_2, &bad), core.Typed_Error_Kind.Wrong_Kind)
+	testkit.expect_kind(t, yaml.unmarshal(transmute([]u8)string("port: yes\n"), .Yaml_1_2, &bad), core.Typed_Error_Kind.Wrong_Kind)
 }
 
 // A core tag gives a quoted or block scalar its type for the typed read as it does for the document.
@@ -349,14 +349,14 @@ unmarshal_reads_a_tagged_scalar_as_its_tag_types_it :: proc(t: ^testing.T) {
 	v: Tagged
 	err := yaml.unmarshal(transmute([]u8)text, .Yaml_1_2, &v)
 	defer delete(v.text)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, v.n, 12)
 	testing.expect_value(t, v.hex, 31)
 	testing.expect_value(t, v.f, -1.5)
 	testing.expect_value(t, v.b, 7)
 	testing.expect_value(t, v.text, "12")
 	plain: Tagged
-	walktest.expect_kind(t, yaml.unmarshal(transmute([]u8)string("n: \"12\"\n"), .Yaml_1_2, &plain), core.Typed_Error_Kind.Wrong_Kind)
+	testkit.expect_kind(t, yaml.unmarshal(transmute([]u8)string("n: \"12\"\n"), .Yaml_1_2, &plain), core.Typed_Error_Kind.Wrong_Kind)
 }
 
 @(test)
@@ -364,14 +364,14 @@ merge_keys_add_what_the_host_lacks :: proc(t: ^testing.T) {
 	text := "base: &b {a: 1, b: 2}\nmore: &m {b: 3, c: 4}\nhost:\n  <<: [*b, *m]\n  a: 0\nsingle: {<<: *m, d: 5}\nodd: {<<: 7}\n"
 	plain, perr := core.build(transmute([]u8)text, yaml.as(.Yaml_1_2))
 	defer core.destroy(&plain)
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	host, _ := core.member(&plain, core.ROOT, "host")
 	_, found := core.member(&plain, host, "<<")
 	testing.expect(t, found)
 
 	doc, err := core.build(transmute([]u8)text, yaml.as(.Yaml_1_2, {merge_keys = true}))
 	defer core.destroy(&doc)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	want := [?]struct {
 		at:    string,
 		key:   string,
@@ -418,7 +418,7 @@ a_collection_ending_in_aliases_spans_its_own_text :: proc(t: ^testing.T) {
 	for c in cases {
 		doc, err := yaml.build(transmute([]u8)c[0], .Yaml_1_2)
 		defer core.destroy(&doc)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		v, _ := core.member(&doc, core.ROOT, "c")
 		testing.expect_value(t, string(core.span(&doc, v)), c[1])
 		for i in 0 ..< len(doc.nodes) {
@@ -432,7 +432,7 @@ a_collection_ending_in_aliases_spans_its_own_text :: proc(t: ^testing.T) {
 	for c in merged {
 		doc, err := core.build(transmute([]u8)c[0], yaml.as(.Yaml_1_2, {merge_keys = true}))
 		defer core.destroy(&doc)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		v, _ := core.member(&doc, core.ROOT, "c")
 		testing.expect_value(t, string(core.span(&doc, v)), c[1])
 	}

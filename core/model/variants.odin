@@ -85,7 +85,8 @@ enum_rules_refused :: proc(reg: ^Registry) -> core.Typed_Refusal {
 // How a model reads union `type`: under `.Tag` an object by its member `tag`, which names the struct arm, in place of
 // `Naming.union_tag` unless it is "", and the rest by their kind. Under `.First_Match` a load reads a value of the type
 // wherever it is by the first arm that reads its text with no refusal, in the arms' order, a null as nil where the union
-// has one, and refuses it as `.No_Arm` with each arm's refusals after it where none does. A format that holds no value
+// has one, and refuses it with the refusals of the arm that failed deepest in the value where none does, or as `.No_Arm`
+// with each arm's refusals after it where every arm refused the value itself. A format that holds no value
 // alone, a table's, refuses the rule at compile as `.Unsupported`. `.One_Match` reads as `.First_Match` does and then
 // refuses a value that more than one arm reads with no refusal, as JSON Schema's `oneOf`.
 Union_Rule :: struct {

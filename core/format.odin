@@ -123,6 +123,7 @@ Services :: struct {
 	validate: proc "contextless" (src: []u8, as: As) -> Maybe(Fault),
 	scan:     proc(src: []u8, as: As, paths: []Path, read: Path_Options, state: rawptr, on: proc(state: rawptr, a: Token_Answer) -> bool, allocator: runtime.Allocator) -> (Document, Path_Error),
 	write:    proc(doc: ^Document, opts: Write_Options, as: As, node: Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Refusal),
+	partial_writes: bool, // `write` takes a partial document, which `core.write` refuses otherwise
 	edit:     ^Edit_Services,
 	plans:    rawptr,
 	reads:    rawptr,

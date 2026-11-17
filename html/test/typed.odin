@@ -8,7 +8,7 @@ import rules "../../core/rules"
 import typed "../../core/typed"
 import html ".."
 import json "../../json"
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 @(private = "file")
 Cell :: struct {
@@ -45,7 +45,7 @@ unmarshal_reads_the_tree_a_browser_builds :: proc(t: ^testing.T) {
 <table><tr><td class=a>1.5<td class=b>2</tr><tr><td class=c>3</table>`
 	v: Page
 	err := html.unmarshal(transmute([]u8)string(text), .Document, &v)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, v.html.head.title, "Prices & more")
 	rows := v.html.body.table.tbody.tr
 	if !testing.expect_value(t, len(rows), 2) || !testing.expect_value(t, len(rows[0].td), 2) {
@@ -58,14 +58,14 @@ unmarshal_reads_the_tree_a_browser_builds :: proc(t: ^testing.T) {
 
 	chosen :: html.Spec.Document
 	again: Page
-	walktest.expect_nil(t, html.unmarshal(transmute([]u8)string(text), chosen, &again))
+	testkit.expect_nil(t, html.unmarshal(transmute([]u8)string(text), chosen, &again))
 	testing.expect_value(t, len(again.html.body.table.tbody.tr), 2)
 
 	plan, perr := html.plan_make(Page, .Document)
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	defer html.destroy(&plan)
 	planned: Page
-	walktest.expect_nil(t, html.unmarshal(transmute([]u8)string(text), .Document, &planned, &plan))
+	testkit.expect_nil(t, html.unmarshal(transmute([]u8)string(text), .Document, &planned, &plan))
 	testing.expect_value(t, len(planned.html.body.table.tbody.tr), 2)
 }
 
@@ -79,7 +79,7 @@ check_gives_every_refusal :: proc(t: ^testing.T) {
 		},
 	}
 	plan, perr := html.plan_make(V, .Fragment)
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	defer typed.plan_destroy(&plan)
 	v: V
 	sink: typed.Sink
@@ -105,7 +105,7 @@ unmarshal_reads_a_number_a_text_decodes_to :: proc(t: ^testing.T) {
 		i: int,
 	}
 	src := `<b n="&#45;&#55;">&#49;.&#53;</b><i>&#55;</i>`
-	walktest.expect_nil(t, html.unmarshal(transmute([]u8)string(src), .Fragment, &v))
+	testkit.expect_nil(t, html.unmarshal(transmute([]u8)string(src), .Fragment, &v))
 	testing.expect_value(t, v.b.n, -7)
 	testing.expect_value(t, v.b.text, 1.5)
 	testing.expect_value(t, v.i, 7)
@@ -122,12 +122,12 @@ check_takes_a_list_of_repeated_elements :: proc(t: ^testing.T) {
 		},
 	}
 	plan, perr := html.plan_make(V, .Fragment)
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	defer typed.plan_destroy(&plan)
 	v: V
 	sink: typed.Sink
 	defer typed.sink_destroy(&sink)
-	walktest.expect_nil(t, html.check(transmute([]u8)string(`<ul><li>a<li>b</ul>`), .Fragment, &v, &plan, {sink = &sink}))
+	testkit.expect_nil(t, html.check(transmute([]u8)string(`<ul><li>a<li>b</ul>`), .Fragment, &v, &plan, {sink = &sink}))
 	testing.expect_value(t, len(sink.entries), 0)
 	testing.expect_value(t, len(v.ul.li), 2)
 }
@@ -138,19 +138,19 @@ a_nil_any_is_refused_as_a_null :: proc(t: ^testing.T) {
 	nothing: any
 	text, err := html.marshal(nothing, allocator = context.temp_allocator)
 	testing.expect(t, text == nil)
-	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
 }
 
 // A plan of a description holds HTML's reads when it is given them, and an empty description is refused.
 @(test)
 a_plan_of_a_description_reads_html :: proc(t: ^testing.T) {
 	s, err := json.load_schema(transmute([]u8)string(`{"properties": {"a": {"type": "integer"}}}`), .Json)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	defer json.destroy(s)
 	plan, built := html.plan_of(s.description, reads = html.checks(.Document).reads)
-	walktest.expect_nil(t, built)
+	testkit.expect_nil(t, built)
 	defer html.destroy(&plan)
 	testing.expect(t, plan.read != nil && plan.marshal != nil)
 	_, empty := html.plan_of(&rules.Description{})
-	walktest.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
+	testkit.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 }

@@ -67,7 +67,7 @@ format :: proc(src: []u8, as: As, opts := Write_Options{}, allocator := context.
 write_to :: proc(doc: ^Document, opts: Write_Options, as: Maybe(As), node: Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Refusal) {
 	target := as.? or_else doc.as
 	services := services_of(target)
-	if services == nil || services.write == nil || int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
+	if services == nil || services.write == nil || doc.partial && !services.partial_writes || int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key {
 		return nil, 0, {kind = .Unsupported}
 	}
 	// A markup document is written by a format with no attributes as its value reads, a repeated name as an array.

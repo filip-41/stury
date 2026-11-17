@@ -6,7 +6,7 @@ import "core:testing"
 import core "../../core"
 import json ".."
 import gen "gen"
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // Writes `src` as a JSON document, which the dense path writes when its tokens are short, and as a JSONC document, which
 // the rows path writes, and checks that the two and `format` give the same text. A `bound` above zero also checks that
@@ -136,12 +136,12 @@ write_dense_tolerant_read :: proc(t: ^testing.T) {
 	src := []u8{'[', '"', 'a', 0xFF, 'b', '"', ',', '0', ',', '0', ',', '0', ',', '0', ']'}
 	doc, err := core.build(src, json.as(.Json, {tolerate = {.Invalid_Utf8}}))
 	defer core.destroy(&doc)
-	if !walktest.expect_nil(t, err) {
+	if !testkit.expect_nil(t, err) {
 		return
 	}
 	text, _, werr := core.write(&doc)
 	defer delete(text)
-	walktest.expect_nil(t, werr)
+	testkit.expect_nil(t, werr)
 	testing.expect_value(t, string(text), "[\"a\xef\xbf\xbdb\",0,0,0,0]")
 }
 
@@ -154,7 +154,7 @@ write_dense_leaves_other_options_to_rows :: proc(t: ^testing.T) {
 	for opts in ([?]core.Write_Options{{ascii = true}, {escape_html = true}}) {
 		text, _, err := core.write(&doc, opts)
 		defer delete(text)
-		walktest.expect_nil(t, err)
+		testkit.expect_nil(t, err)
 		testing.expect(t, string(text) != `["<é>",1,2,3,4,5,6,7]`)
 	}
 	trailing := transmute([]u8)string(`[1,2,3,4,5,6,7,8,]`)
@@ -162,7 +162,7 @@ write_dense_leaves_other_options_to_rows :: proc(t: ^testing.T) {
 	defer core.destroy(&jsonc)
 	text, _, err := core.write(&jsonc)
 	defer delete(text)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(text), `[1,2,3,4,5,6,7,8]`)
 }
 

@@ -11,7 +11,7 @@ import write "../../write"
 import schema "../../schema"
 import json "../../../json"
 import model ".."
-import walktest "../../../walktest"
+import testkit "../../../testkit"
 
 @(private = "file")
 Profile :: struct {
@@ -69,20 +69,20 @@ a_load_gives_absent_members_their_defaults_and_records_what_it_read :: proc(t: ^
 	profile_registry(&reg)
 	m, _ := model.compile(&reg, Profile, json.checks(.Json))
 	first, second: Profile
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "age": 30}`), &first))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "age": 30}`), &first))
 	testing.expect_value(t, first.level, 7)
 	testing.expect_value(t, first.nick, "anon")
 	testing.expect_value(t, len(first.tags), 1)
 	testing.expect(t, model.was_set(&m, Profile, first.set, "name") && model.was_set(&m, Profile, first.set, "age"))
 	testing.expect(t, !model.was_set(&m, Profile, first.set, "level") && !model.was_set(&m, Profile, first.set, "tags") && !model.was_set(&m, Profile, first.set, "id"))
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "bob", "age": 31, "level": 0, "tags": []}`), &second))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "bob", "age": 31, "level": 0, "tags": []}`), &second))
 	testing.expect_value(t, second.level, 0)
 	testing.expect_value(t, len(second.tags), 0)
 	testing.expect(t, model.was_set(&m, Profile, second.set, "level") && model.was_set(&m, Profile, second.set, "tags"))
 	testing.expect(t, raw_data(first.tags) != raw_data(second.tags))
 	first.tags[0] = "changed"
 	third: Profile
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "cy", "age": 40}`), &third))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "cy", "age": 40}`), &third))
 	testing.expect_value(t, third.tags[0], "new")
 }
 
@@ -107,9 +107,9 @@ a_load_refuses_a_repeated_key_where_the_read_does :: proc(t: ^testing.T) {
 		testing.expectf(t, err != nil && len(sink.entries) > 0 && sink.entries[0].kind == .Duplicate_Key, "%s: %v", text, err)
 	}
 	p: Profile
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "age": 30, "age": 31}`), &p, nil, {dups = .Last}))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "age": 30, "age": 31}`), &p, nil, {dups = .Last}))
 	testing.expect_value(t, p.age, 31)
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "age": 30, "age": 31}`), &p, nil, {dups = .First}))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "age": 30, "age": 31}`), &p, nil, {dups = .First}))
 	testing.expect_value(t, p.age, 30)
 }
 
@@ -161,9 +161,9 @@ a_load_judges_the_value_its_repeat_policy_keeps :: proc(t: ^testing.T) {
 		testing.expectf(t, (err == nil) == (len(c.fails) == 0), "%v %s without a sink: %v", c.dups, c.text, err)
 	}
 	v: Repeated
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"a":{"k":-1,"k":5},"b":[],"n":"x","n":"ab"}`), &v, nil, {dups = .Last}))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"a":{"k":-1,"k":5},"b":[],"n":"x","n":"ab"}`), &v, nil, {dups = .Last}))
 	testing.expect(t, v.a.k == 5 && v.n == "ab")
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"a":{"k":5,"k":-1},"b":[],"n":"ab","n":"x"}`), &v, nil, {dups = .First}))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"a":{"k":5,"k":-1},"b":[],"n":"ab","n":"x"}`), &v, nil, {dups = .First}))
 	testing.expect(t, v.a.k == 5 && v.n == "ab")
 }
 
@@ -175,7 +175,7 @@ a_load_follows_the_roles_of_its_members :: proc(t: ^testing.T) {
 	profile_registry(&reg)
 	m, _ := model.compile(&reg, Profile, json.checks(.Json))
 	p: Profile
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"id": 5, "name": "ada", "age": 30, "secret": "s"}`), &p))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"id": 5, "name": "ada", "age": 30, "secret": "s"}`), &p))
 	testing.expect_value(t, p.id, 0)
 	testing.expect_value(t, p.secret, "s")
 	// The plan that holds every member is not a way to read around them.
@@ -192,7 +192,7 @@ a_load_takes_or_refuses_the_members_a_struct_does_not_name :: proc(t: ^testing.T
 	profile_registry(&reg)
 	m, _ := model.compile(&reg, Profile, json.checks(.Json))
 	p: Profile
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "age": 30, "zip": 9, "city": "x"}`), &p))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"name": "ada", "age": 30, "zip": 9, "city": "x"}`), &p))
 	testing.expect_value(t, len(p.extra), 2)
 	Strict :: struct {
 		a: int,
@@ -203,13 +203,13 @@ a_load_takes_or_refuses_the_members_a_struct_does_not_name :: proc(t: ^testing.T
 	sink: typed.Sink
 	testing.expect(t, model.load(&s, transmute([]u8)string(`{"a": 1, "b": 2}`), &v, &sink) != nil)
 	testing.expect_value(t, sink.entries[0].kind, core.Typed_Error_Kind.Not_Allowed)
-	walktest.expect_nil(t, model.load(&s, transmute([]u8)string(`{"a": 1}`), &v))
+	testkit.expect_nil(t, model.load(&s, transmute([]u8)string(`{"a": 1}`), &v))
 	Loose :: struct {
 		a: int,
 	}
 	l, _ := model.compile(&reg, Loose, json.checks(.Json))
 	lv: Loose
-	walktest.expect_nil(t, model.load(&l, transmute([]u8)string(`{"a": 1, "b": 2}`), &lv))
+	testkit.expect_nil(t, model.load(&l, transmute([]u8)string(`{"a": 1, "b": 2}`), &lv))
 	testing.expect(t, model.load(&l, transmute([]u8)string(`{"a": 1, "b": 2, "b": 3}`), &lv, &sink) != nil)
 }
 
@@ -322,14 +322,14 @@ a_load_reads_markup_as_it_reads_its_json_form :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	readers := json.as(.Json).readers^
 	readers.holds += {.Attribute}
-	readers.attribute = walktest.markup_attribute
+	readers.attribute = testkit.markup_attribute
 	reg: model.Registry
 	prices, _ := model.compile(&reg, struct{ price: Price }, json.checks(.Json))
 	items, _ := model.compile(&reg, struct{ a: Item }, json.checks(.Json))
 	cases := [?]struct {
 		is_price:   bool,
 		model, form: string,
-		attributes: []walktest.Markup_Attribute,
+		attributes: []testkit.Markup_Attribute,
 		errors:     int,
 	} {
 		// <price currency="EUR">5</price>
@@ -344,7 +344,7 @@ a_load_reads_markup_as_it_reads_its_json_form :: proc(t: ^testing.T) {
 		{false, `{"a": {"name": "ab", "note": "n"}}`, `{"a": {"name": "ab", "note": "n"}}`, nil, 2},
 	}
 	for c in cases {
-		doc := walktest.markup_doc(c.model, c.attributes, &readers)
+		doc := testkit.markup_doc(c.model, c.attributes, &readers)
 		defer core.destroy(&doc)
 		from_doc, from_form: typed.Sink
 		defer typed.sink_destroy(&from_doc)
@@ -400,7 +400,7 @@ a_models_plans_read_only_as_its_load :: proc(t: ^testing.T) {
 	}
 	v := Fenced{id = 3}
 	testing.expect(t, mismatch(json.check(text, .Json, &v, &m.plan)))
-	walktest.expect_nil(t, json.check(text, .Json, &v, &m.load_plan))
+	testkit.expect_nil(t, json.check(text, .Json, &v, &m.load_plan))
 	testing.expect_value(t, v.id, 0)
 	testing.expect_value(t, v.name, "a")
 }
@@ -424,7 +424,7 @@ a_default_names_a_member_of_its_type :: proc(t: ^testing.T) {
 		lacking: model.Registry
 		defer model.destroy(&lacking)
 		if item == "default" {
-			walktest.expect_nil(t, model.register(&lacking, Two, "nope", 1))
+			testkit.expect_nil(t, model.register(&lacking, Two, "nope", 1))
 		} else {
 			testing.expect_value(t, model.register(&lacking, Two, "nope", proc(allocator: runtime.Allocator) -> int {return 1}), runtime.Allocator_Error.None)
 		}
@@ -438,7 +438,7 @@ a_default_names_a_member_of_its_type :: proc(t: ^testing.T) {
 	testing.expect_value(t, made, runtime.Allocator_Error.None)
 	m, _ := model.compile(&reg, Two, json.checks(.Json))
 	v: Two
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"a": 1}`), &v))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"a": 1}`), &v))
 	testing.expect_value(t, len(v.c), 2)
 }
 
@@ -450,8 +450,8 @@ a_load_captures_into_a_map_of_values_by_the_repeat_policy :: proc(t: ^testing.T)
 	m, _ := model.compile(&reg, Roles, json.checks(.Json))
 	text := transmute([]u8)string(`{"name": "a", "z": 1, "z": [2]}`)
 	first, last: Roles
-	walktest.expect_nil(t, model.load(&m, text, &first, nil, {dups = .First}))
-	walktest.expect_nil(t, model.load(&m, text, &last, nil, {dups = .Last}))
+	testkit.expect_nil(t, model.load(&m, text, &first, nil, {dups = .First}))
+	testkit.expect_nil(t, model.load(&m, text, &last, nil, {dups = .Last}))
 	z, z_last := first.extra["z"], last.extra["z"]
 	testing.expect(t, len(first.extra) == 1 && core.kind(z) == .Number, "first keeps the first")
 	testing.expect(t, len(last.extra) == 1 && core.kind(z_last) == .Array, "last keeps the last")
@@ -490,7 +490,7 @@ a_read_only_key_never_lands_in_the_members_a_struct_does_not_name :: proc(t: ^te
 	m, _ := model.compile(&reg, Roles, json.checks(.Json))
 	text := transmute([]u8)string(`{"id": 5, "name": "a", "q": 1}`)
 	r: Roles
-	walktest.expect_nil(t, model.load(&m, text, &r))
+	testkit.expect_nil(t, model.load(&m, text, &r))
 	_, held := r.extra["id"]
 	testing.expect(t, r.id == 0 && len(r.extra) == 1 && !held)
 	model.register(&reg, Fenced, model.Extra.Forbid)
@@ -507,7 +507,7 @@ a_read_only_key_never_lands_in_the_members_a_struct_does_not_name :: proc(t: ^te
 	testing.expect(t, schema.valid(&b, transmute([]u8)string(`{"name": "a"}`)))
 	model.register(&reg, Fenced, model.Extra.Ignore)
 	l, _ := model.compile(&reg, Fenced, json.checks(.Json))
-	walktest.expect_nil(t, model.load(&l, transmute([]u8)string(`{"id": 5, "name": "a", "q": 1}`), &v))
+	testkit.expect_nil(t, model.load(&l, transmute([]u8)string(`{"id": 5, "name": "a", "q": 1}`), &v))
 }
 
 @(test)
@@ -544,7 +544,7 @@ was_set_asks_the_struct_that_holds_the_set :: proc(t: ^testing.T) {
 	reg: model.Registry
 	m, _ := model.compile(&reg, Outer, json.checks(.Json))
 	o: Outer
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"inner": {"y": 2, "x": 1}}`), &o))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"inner": {"y": 2, "x": 1}}`), &o))
 	testing.expect(t, model.was_set(&m, Inner, o.inner.set, "x") && model.was_set(&m, Outer, o.set, "inner"))
 }
 
@@ -573,7 +573,7 @@ a_model_loads_a_union_of_structs_by_its_naming_tag :: proc(t: ^testing.T) {
 	}
 	m := compiled_ok(t, &reg, Holds, json.checks(.Json))
 	h: Holds
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"u": {"type": "Arm_B", "b": "x"}}`), &h))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"u": {"type": "Arm_B", "b": "x"}}`), &h))
 	b, ok := h.u.(Arm_B)
 	testing.expect(t, ok && b.b == "x")
 }
@@ -737,8 +737,8 @@ a_forbidding_struct_with_no_required_member_refuses_an_unknown_key :: proc(t: ^t
 	ev: Empty
 	testing.expect(t, model.load(&l, transmute([]u8)string(`{"b": 2}`), &lv) != nil)
 	testing.expect(t, model.load(&e, transmute([]u8)string(`{"b": 2}`), &ev) != nil)
-	walktest.expect_nil(t, model.load(&l, transmute([]u8)string(`{}`), &lv))
-	walktest.expect_nil(t, model.load(&e, transmute([]u8)string(`{}`), &ev))
+	testkit.expect_nil(t, model.load(&l, transmute([]u8)string(`{}`), &lv))
+	testkit.expect_nil(t, model.load(&e, transmute([]u8)string(`{}`), &ev))
 }
 
 @(test)
@@ -768,7 +768,7 @@ a_not_null_pointer_a_typed_capture_and_an_empty_union_load_as_their_schema_says 
 		testing.expectf(t, schema.valid(&b, transmute([]u8)x.text) == x.loads, "%s: the Load schema disagrees", x.text)
 	}
 	v: Chain
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"next": {"n": 2}, "z": 3}`), &v))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"next": {"n": 2}, "z": 3}`), &v))
 	testing.expect(t, v.next != nil && v.next.n == 2 && v.rest["z"] == 3)
 }
 
@@ -835,7 +835,7 @@ a_model_and_its_schema_refuse_with_one_kind :: proc(t: ^testing.T) {
 	// One arm is the value itself, and a fixed array's length bounds its items.
 	testing.expectf(t, strings.contains(string(text), `"mb":{"$ref":`) && strings.contains(string(text), `"arr":{"type":"array","minItems":2,"maxItems":2,"items":{"$ref":`), "%s", text)
 	c, cerr := schema.compile(text, json.as(.Json), {format_assert = true})
-	walktest.expect_nil(t, cerr)
+	testkit.expect_nil(t, cerr)
 	b, _ := schema.bind(c, json.checks(.Json))
 	for x in ([][2]string{
 		{`{"a":5}`, ""},
@@ -876,7 +876,7 @@ a_member_named_dash_is_read_through_an_escaped_tag :: proc(t: ^testing.T) {
 	reg: model.Registry
 	m, _ := model.compile(&reg, Dashed, json.checks(.Json))
 	v: Dashed
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"-": 3}`), &v))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"-": 3}`), &v))
 	testing.expect_value(t, v.member, 3)
 }
 
@@ -894,7 +894,7 @@ was_set_takes_the_odin_name :: proc(t: ^testing.T) {
 	reg: model.Registry
 	m, _ := model.compile(&reg, Aliased, json.checks(.Json))
 	a: Aliased
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"fullName": "ada"}`), &a))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"fullName": "ada"}`), &a))
 	testing.expect(t, model.was_set(&m, Aliased, a.set, "full_name"))
 }
 
@@ -932,9 +932,9 @@ Kept :: struct {
 a_model_outlives_its_registry :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	reg: model.Registry
-	walktest.expect_nil(t, model.register(&reg, Kept, "name", "member"))
-	walktest.expect_nil(t, model.register(&reg, Kept, "tags", []string{"a", "b"}))
-	walktest.expect_nil(t, model.register(&reg, Kept, "hue", Hue.Deep_Blue))
+	testkit.expect_nil(t, model.register(&reg, Kept, "name", "member"))
+	testkit.expect_nil(t, model.register(&reg, Kept, "tags", []string{"a", "b"}))
+	testkit.expect_nil(t, model.register(&reg, Kept, "hue", Hue.Deep_Blue))
 	testing.expect_value(t, model.register(&reg, model.Enum_Rule{type = Hue, renames = {{"Deep_Blue", "navy"}}}), runtime.Allocator_Error.None)
 	testing.expect_value(t, model.register(&reg, model.Field_Rule_Of{Kept, "code", "len>=2"}), runtime.Allocator_Error.None)
 	testing.expect_value(t, model.register(&reg, model.Type_Rule{int, ">=0"}), runtime.Allocator_Error.None)
@@ -943,16 +943,16 @@ a_model_outlives_its_registry :: proc(t: ^testing.T) {
 	defer model.destroy(&m)
 	model.destroy(&reg)
 	v: Kept
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string(`{"code": "ab", "count": 1}`), &v, allocator = context.temp_allocator))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"code": "ab", "count": 1}`), &v, allocator = context.temp_allocator))
 	testing.expect(t, v.name == "member" && len(v.tags) == 2 && v.tags[1] == "b" && v.hue == .Deep_Blue)
 	text, err := model.dump(&m, &v, allocator = context.temp_allocator)
-	walktest.expect_nil(t, err)
+	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(text), `{"name":"member","tags":["a","b"],"hue":"navy","code":"ab","count":1}`)
-	walktest.expect_nil(t, model.validate(&m, &v))
+	testkit.expect_nil(t, model.validate(&m, &v))
 	v.count = -1
 	testing.expect(t, model.validate(&m, &v) != nil)
 	d, described := model.schema(&m, .Load, context.temp_allocator)
-	walktest.expect_nil(t, described)
+	testkit.expect_nil(t, described)
 	testing.expect(t, len(d.nodes) > 0)
 }
 

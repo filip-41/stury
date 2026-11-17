@@ -8,7 +8,7 @@ import "core:testing"
 import core "../../core"
 import write "../../core/write"
 import dsv ".."
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // The token write against `marshal`: a header and rows written cell by cell are the bytes of the same rows.
 
@@ -74,11 +74,11 @@ tokens_equal_marshal :: proc(t: ^testing.T) {
 		want, werr := dsv.marshal(rows, c.spec, c.layout, write = {}, allocator = context.temp_allocator)
 		got, err := token_rows(rows, c.spec, c.layout)
 		defer delete(got)
-		testing.expect_value(t, err.kind, walktest.typed_kind(werr))
+		testing.expect_value(t, err.kind, testkit.typed_kind(werr))
 		testing.expectf(t, string(got) == string(want), "%v %v: %q, want %q", c.spec, c.layout, got, want)
 		if werr == nil {
 			doc, derr := core.build(got, dsv.as(c.spec, c.layout))
-			walktest.expect_nil(t, derr)
+			testkit.expect_nil(t, derr)
 			core.destroy(&doc)
 		}
 	}
@@ -186,7 +186,7 @@ rows_to_a_stream :: proc(t: ^testing.T) {
 
 @(test)
 rows_to_a_failing_stream :: proc(t: ^testing.T) {
-	_, err := token_rows(TOKEN_ROWS[:], .Csv, {}, io.Stream{procedure = walktest.refusing_stream})
+	_, err := token_rows(TOKEN_ROWS[:], .Csv, {}, io.Stream{procedure = testkit.refusing_stream})
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Write_Failed)
 	testing.expect_value(t, err.cause, io.Error.Permission_Denied)
 }
@@ -202,6 +202,6 @@ rows_under_failing_allocators :: proc(t: ^testing.T) {
 	for spec in ([?]dsv.Spec{.Csv, .Tsv}) {
 		spec := spec
 		want, _ := dsv.marshal(TOKEN_ROWS[:], spec, {}, write = {}, allocator = context.temp_allocator)
-		walktest.sweep_write(t, token_try, &spec, string(want))
+		testkit.sweep_write(t, token_try, &spec, string(want))
 	}
 }

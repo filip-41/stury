@@ -435,6 +435,15 @@ line_start :: proc(src: []u8, p: u64) -> u64 {
 	return i
 }
 
+// Whether the line at `ls` holds only spaces, tabs and a carriage return, or is past the end of the text.
+blank_line :: proc(src: []u8, ls: u64) -> bool {
+	i := ls
+	for i < u64(len(src)) && (src[i] == ' ' || src[i] == '\t' || src[i] == '\r') {
+		i += 1
+	}
+	return i >= u64(len(src)) || src[i] == '\n'
+}
+
 // One past the line feed that ends the line holding `p`, or the end of the text.
 next_line :: proc(src: []u8, p: u64) -> u64 {
 	i := min(p, u64(len(src)))

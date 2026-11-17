@@ -11,7 +11,7 @@ import schema "../../core/schema"
 import json_pkg "../../json"
 import toml ".."
 import model "../../core/model"
-import walktest "../../walktest"
+import testkit "../../testkit"
 
 // The rendered failures of `text` against `schema_text`, each as the message, its path and its keyword path, one a line.
 @(private = "file")
@@ -117,12 +117,12 @@ a_model_loads_and_dumps_toml :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	reg: model.Registry
 	m, compiled := model.compile(&reg, Service, toml.checks(.Toml_1_1))
-	walktest.expect_nil(t, compiled)
+	testkit.expect_nil(t, compiled)
 	v: Service
-	walktest.expect_nil(t, model.load(&m, transmute([]u8)string("title = \"t\"\nratio = 0.5\n\n[[peer]]\nname = \"a\"\nport = 0x2000\n"), &v))
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string("title = \"t\"\nratio = 0.5\n\n[[peer]]\nname = \"a\"\nport = 0x2000\n"), &v))
 	testing.expect(t, v.title == "t" && v.ratio == 0.5 && len(v.peers) == 1 && v.peers[0].port == 0x2000)
 	text, dumped := model.dump(&m, &v)
-	walktest.expect_nil(t, dumped)
+	testkit.expect_nil(t, dumped)
 	testing.expect_value(t, string(text), "title = \"t\"\nratio = 0.5\n\n[[peer]]\nname = \"a\"\nport = 8192\n")
 	bad: Service
 	sink: typed.Sink
@@ -145,18 +145,18 @@ datetimes_read_and_write_bare :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	defer free_all(context.temp_allocator)
 	v: Stamped
-	walktest.expect_nil(t, toml.unmarshal(transmute([]u8)string("at = 1979-05-27 07:32:00-01:00\nday = 07:32:00\nnote = \"soon\"\n"), .Toml_1_0, &v))
+	testkit.expect_nil(t, toml.unmarshal(transmute([]u8)string("at = 1979-05-27 07:32:00-01:00\nday = 07:32:00\nnote = \"soon\"\n"), .Toml_1_0, &v))
 	testing.expect_value(t, v.at, time.Time{296641920 * 1e9})
 	testing.expect_value(t, v.day, "07:32:00")
 	want := "at = 1979-05-27T08:32:00Z\nday = 07:32:00\nnote = \"soon\"\n"
 	text, written := toml.marshal(v)
-	walktest.expect_nil(t, written)
+	testkit.expect_nil(t, written)
 	testing.expect_value(t, string(text), want)
 	reg: model.Registry
 	m, compiled := model.compile(&reg, Stamped, toml.checks(.Toml_1_0))
-	walktest.expect_nil(t, compiled)
+	testkit.expect_nil(t, compiled)
 	dumped, dump_err := model.dump(&m, &v)
-	walktest.expect_nil(t, dump_err)
+	testkit.expect_nil(t, dump_err)
 	testing.expect_value(t, string(dumped), want)
 	json_text, _ := json_pkg.marshal(v)
 	testing.expect_value(t, string(json_text), `{"at":"1979-05-27T08:32:00Z","day":"07:32:00","note":"soon"}`)
@@ -176,7 +176,7 @@ a_plan_checks_a_text :: proc(t: ^testing.T) {
 		b: []int,
 	}
 	plan, perr := toml.plan_make(Pair, .Toml_1_1)
-	walktest.expect_nil(t, perr)
+	testkit.expect_nil(t, perr)
 	src := transmute([]u8)string("a = 'x'\nb = [1, 'y']\n")
 	v: Pair
 	sink: typed.Sink
@@ -188,11 +188,11 @@ a_plan_checks_a_text :: proc(t: ^testing.T) {
 	testing.expect(t, toml.check(src, spec, &again, &plan, {sink = &other}) != nil)
 	testing.expect_value(t, len(other.entries), 2)
 	good: Pair
-	walktest.expect_nil(t, toml.unmarshal(transmute([]u8)string("a = 1\nb = [2]\n"), spec, &good))
+	testkit.expect_nil(t, toml.unmarshal(transmute([]u8)string("a = 1\nb = [2]\n"), spec, &good))
 	testing.expect(t, good.a == 1 && len(good.b) == 1)
 	read, rerr := toml.plan_make(Pair, .Toml_1_1, reads = toml.reads(.Toml_1_1))
-	walktest.expect_nil(t, rerr)
-	walktest.expect_nil(t, typed.unmarshal_text(transmute([]u8)string("a = 3\n"), &good, Pair, &read, {}))
+	testkit.expect_nil(t, rerr)
+	testkit.expect_nil(t, typed.unmarshal_text(transmute([]u8)string("a = 3\n"), &good, Pair, &read, {}))
 	testing.expect_value(t, good.a, 3)
 }
 
@@ -203,14 +203,14 @@ a_plan_of_a_description_reads_toml :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	reg: model.Registry
 	m, compiled := model.compile(&reg, Service, toml.checks(.Toml_1_1))
-	walktest.expect_nil(t, compiled)
+	testkit.expect_nil(t, compiled)
 	d, derr := model.schema(&m, .Load, context.temp_allocator)
-	walktest.expect_nil(t, derr)
+	testkit.expect_nil(t, derr)
 	plan, built := toml.plan_of(&d, .Toml_1_1, reads = toml.reads(.Toml_1_1))
-	walktest.expect_nil(t, built)
+	testkit.expect_nil(t, built)
 	testing.expect(t, plan.read != nil && plan.marshal != nil)
 	_, empty := toml.plan_of(&rules.Description{})
-	walktest.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
+	testkit.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 }
 
 // A read or a check with no plan is a plan mismatch.
@@ -219,6 +219,6 @@ a_read_or_check_with_no_plan_is_a_mismatch :: proc(t: ^testing.T) {
 	v: struct {
 		a: int,
 	}
-	walktest.expect_kind(t, toml.check(transmute([]u8)string("a = 1\n"), .Toml_1_0, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
-	walktest.expect_kind(t, toml.unmarshal(transmute([]u8)string("a = 1\n"), .Toml_1_0, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
+	testkit.expect_kind(t, toml.check(transmute([]u8)string("a = 1\n"), .Toml_1_0, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
+	testkit.expect_kind(t, toml.unmarshal(transmute([]u8)string("a = 1\n"), .Toml_1_0, &v, nil), core.Typed_Error_Kind.Plan_Mismatch)
 }
