@@ -56,7 +56,7 @@ MEMBER_ROOM :: 1 + typed.KEY_SIZE_MAX + 16 + LEAF_ROOM
 @(private)
 PRETTY_ROOM :: MEMBER_ROOM + 1 + LINE_ROOM + 16 + 1
 #assert(PRETTY_ROOM <= ROOM_MAX)
-// A struct's close: its line, its bracket, and in a list the comma and the line of the next element.
+// A struct's close: its line, its bracket, and in a list the comma and the line of the next element. Compact text reserves 3.
 @(private)
 CLOSE_ROOM :: 3 + 2 * (1 + LINE_ROOM + 16)
 #assert(CLOSE_ROOM <= ROOM_MAX)
@@ -318,7 +318,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 						}
 					}
 					when !V && !BIN {
-						p = room(out, CLOSE_ROOM)
+						p = room(out, CLOSE_ROOM when P else 3)
 						if cur.lead == u32(T[.Open_Object][0]) {
 							p[0] = T[.Open_Object][0]
 							out.cursor += 1

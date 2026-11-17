@@ -9,6 +9,9 @@ import core "../"
 // The most bytes one `room` call may ask for. A caller with more writes it in pieces.
 ROOM_MAX :: 4096
 
+// The size of a buffer output's first allocation when it has no hint. A text longer than this doubles from here.
+FIRST_BUFFER :: 512
+
 // The buffer size of a stream's output unless `init` is given another.
 STREAM_BUFFER :: 64 * 1024
 
@@ -33,7 +36,7 @@ copies_raw :: #force_inline proc "contextless" (opts: core.Write_Options) -> boo
 
 // Starts an output. A stream with no procedure writes into a buffer that `finish` returns, otherwise bytes go to
 // `stream` through a buffer of `STREAM_BUFFER` bytes. Either allocates at its first `room`. A buffer output allocates
-// `hint` bytes there when it is more than a `ROOM_MAX`, so a writer that knows its text's size from its source never
+// `hint` bytes there when it is more than `FIRST_BUFFER`, so a writer that knows its text's size from its source never
 // regrows. Past the hint the buffer doubles. `spill` is where a failed output writes, bytes nobody reads. Outputs may
 // share one.
 init :: proc(out: ^Out, spill: ^[ROOM_MAX]u8, allocator := context.allocator, stream := io.Stream{}, hint := 0) {
@@ -103,7 +106,7 @@ refill :: #force_no_inline proc(out: ^Out, n: int) -> [^]u8 {
 		}
 		size = STREAM_BUFFER
 	} else {
-		size = max(2 * out.size, out.cursor + n, ROOM_MAX, out.hint)
+		size = max(2 * out.size, out.cursor + n, FIRST_BUFFER, out.hint)
 	}
 	next, err := runtime.non_zero_mem_resize(rawptr(out.buf), out.size, size, 1, out.allocator)
 	if err != nil {
