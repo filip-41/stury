@@ -617,6 +617,20 @@ is_name :: proc(s: []u8) -> bool {
 	return fault == .None && !colon && q == p[len(s):]
 }
 
+// Whether `s` is an XML name with a colon, whose prefix no declaration of the written text binds.
+@(private)
+is_prefixed_name :: proc(s: string) -> bool {
+	if len(s) == 0 {
+		return false
+	}
+	p := raw_data(s)
+	q, fault, colon := name_end_colon(p, p[len(s):])
+	return fault == .None && colon && q == p[len(s):]
+}
+
+@(private)
+UNBOUND_PREFIX :: "a name with a prefix, which no declaration binds"
+
 @(private)
 only_whitespace :: proc(s: string) -> bool {
 	for c in transmute([]u8)s {

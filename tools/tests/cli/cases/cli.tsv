@@ -2871,6 +2871,7 @@ xml	["--to", "xml", "-a", "-c", "."]	"{\"r\":\"é\"}"	{}	null	null	null	0	"<r>&#
 xml	["--to", "xml", "."]	"[1]"	{}	null	null	null	5	""	"stury: error (at <stdin>:0): Value cannot be written in the format: an XML document is one element, so its root is an object\n"
 xml	["--to", "xml", "."]	"{\"a\":1,\"b\":2}"	{}	null	null	null	5	""	"stury: error (at <stdin>:0): Value cannot be written in the format: XML has no element or text for the value\n"
 xml	["--to", "xml", "."]	"{\"a b\":1}"	{}	null	null	null	5	""	"stury: error (at <stdin>:0): Value cannot be written in the format: XML has no element or text for the value\n"
+xml	["--to", "xml", "."]	"{\"r\":{\"p:a\":1}}"	{}	null	null	null	5	""	"stury: error (at <stdin>:0): Value cannot be written in the format: a name with a prefix, which no declaration binds\n"
 xml	["--to", "xml", "."]	"{\"r\":{\"a\":[[1]]}}"	{}	null	null	null	5	""	"stury: error (at <stdin>:0): Value cannot be written in the format: XML has no element or text for the value\n"
 xml	["-a", "-c", "--from", "xml", "--to", "xml", ".", "u.xml"]	""	{"u.xml": "<r><b>xé</b></r>"}	null	null	null	0	"<r><b>x&#xe9;</b></r>\n"	""
 xml	["--from", "yaml", "--to", "xml", "."]	"# c\nr:\n  a: 1\n"	{}	null	null	null	0	"<!-- c -->\n<r>\n  <a>1</a>\n</r>\n"	""
@@ -2888,6 +2889,8 @@ html	["--from", "html", "-c", "--stream", "select(length == 2)"]	"<p>a<p>b"	{}	n
 jsonc	["-c", "[.&k, .a.@attrs, .@name, .a.@content]"]	"{\"a\": 1}"	{}	null	null	null	0	"[null,null,null,null]\n"	""
 jsonc	["fmt", "--from", "yaml", "--to", "jsonc"]	"# head\n\n# before a\na: 1 # tail a\nb:\n  c: 2\n# end\n"	{}	null	null	null	0	"// head\n{\n  // before a\n  \"a\": 1, // tail a\n  \"b\": {\n    \"c\": 2\n  }\n}\n// end\n"	""
 jsonc	["--from", "yaml", "--to", "jsonc", "."]	"# head\n\n# before a\na: 1 # tail a\nb:\n  c: 2\n# end\n"	{}	null	null	null	0	"// head\n{\n  // before a\n  \"a\": 1, // tail a\n  \"b\": {\n    \"c\": 2\n  }\n}\n// end\n"	""
+jsonc	["--from", "toml", "--to", "jsonc", "."]	"# head\na = 1 # inl\nb = inf\nc = -inf\nd = nan\n"	{}	null	null	null	0	"{\n  // head\n  \"a\": 1, // inl\n  \"b\": 1.7976931348623157e+308,\n  \"c\": -1.7976931348623157e+308,\n  \"d\": null\n}\n"	""
+jsonc	["--from", "yaml", "--to", "jsonc", "."]	"# head\na: .inf\n"	{}	null	null	null	0	"{\n  // head\n  \"a\": 1.7976931348623157e+308\n}\n"	""
 jsonc	["--from", "jsonc", "--stream", "-c", "."]	"{\"a\": 1} // c\n[2,]\n"	{}	null	null	null	0	"[[\"a\"],1]\n[[\"a\"]]\n[[0],2]\n[[0]]\n"	""
 jsonc	["--from", "jsonc", "--seq", "-c", "."]	"\u001e{\"a\": 1} // c\n\u001e[2,]\n"	{}	null	null	null	0	"\u001e{\"a\":1}\n\u001e[2]\n"	""
 # edit of a YAML stream: each document is a record, a kept one keeps its bytes, a new or moved one starts with ---, and a

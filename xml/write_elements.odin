@@ -24,6 +24,7 @@ Elements :: struct {
 	text:     bool, // the waiting member is `#text`
 	tag:      bool, // the start tag of the next element is written and open for attributes
 	key_next: bool, // the token write's next string is a key
+	why:      string, // why a key or attribute name is refused, where the refusal's kind alone does not say
 }
 
 // An open level: the document's object, an element's object, an array whose items are elements of its name, or the
@@ -99,6 +100,7 @@ el_key :: proc(e: ^Elements, name: string) -> core.Typed_Error_Kind {
 		return .Unwritable if l.kind == .Root else .None
 	}
 	if !is_name(transmute([]u8)name) || l.kind == .Root && l.count > 0 {
+		e.why = UNBOUND_PREFIX if is_prefixed_name(name) else ""
 		return .Unwritable
 	}
 	l.count += 1
@@ -112,6 +114,7 @@ el_key :: proc(e: ^Elements, name: string) -> core.Typed_Error_Kind {
 @(private)
 el_attribute :: proc(e: ^Elements, name, value: string) -> core.Typed_Error_Kind {
 	if !is_name(transmute([]u8)name) {
+		e.why = UNBOUND_PREFIX if is_prefixed_name(name) else ""
 		return .Unwritable
 	}
 	el_start(e) or_return
@@ -213,7 +216,11 @@ elements_finish :: proc(e: ^Elements, kind: core.Typed_Error_Kind, opts: core.Wr
 	if kind == .None && e.top != 0 {
 		kind = .Out_Of_Order
 	}
-	text, err := write.finish(e.out, {kind = kind})
+	refusal := core.Typed_Refusal{kind = kind}
+	if kind == .Unwritable {
+		refusal.want.text = e.why
+	}
+	text, err := write.finish(e.out, refusal)
 	if err.kind != .None || !opts.pretty {
 		return text, err
 	}
