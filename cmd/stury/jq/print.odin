@@ -209,7 +209,7 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 		return false
 	}
 	opts := p.opts
-	opts.respell_strings, opts.escape_del = true, true
+	opts.respell_strings, opts.escape_del, opts.jq_numbers = true, true, true
 	as := json.as(.Jsonc if p.comments && p.depth == 0 else .Json)
 	heap := runtime.heap_allocator()
 	// A value shorter than the library's stream buffer is written whole and copied, which takes one allocation of its

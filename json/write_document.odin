@@ -311,7 +311,7 @@ put_token :: proc(out: ^write.Out, src: []u8, doc: ^core.Document, i: core.Node_
 		write.put_text(out, "true")
 	case .Number:
 		if doc != nil && doc.readers.number_text != nil {
-			return write.put_number_node(out, doc, i, TREE)
+			return write.put_number_node(out, doc, i, TREE, false, {}, opts.jq_numbers)
 		}
 		write.put_text(out, string(src[t.lo:t.lo + u64(t.n)]))
 	case .Bytes:

@@ -405,8 +405,9 @@ NUMBER_TEXT_MAX :: 1 << 26
 
 // Writes number node `node` as its decimal digits as JSON spells them, or as its span when `own` says the writing
 // format reads it. A text number whose spelling the writing format's `forms` hold keeps it, see `put_spelled`. An
-// infinity or a NaN is written with tree `T`'s word, and is `.Non_Finite` when `T` has none.
-put_number_node :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index, $T: Tree, own := false, forms := Number_Forms{}) -> core.Typed_Error_Kind {
+// infinity or a NaN is written with tree `T`'s word, and is `.Non_Finite` when `T` has none, unless `jq_numbers` writes
+// it as jq does: a NaN as null, an infinity as the largest double of its sign.
+put_number_node :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index, $T: Tree, own := false, forms := Number_Forms{}, jq_numbers := false) -> core.Typed_Error_Kind {
 	t := doc.nodes[node]
 	span := string(core.span(doc, node))
 	if own || doc.readers.number_text == nil && (t.kind != .Number || t.spelling & core.NUMBER_KIND_MASK == 0) {
@@ -428,12 +429,16 @@ put_number_node :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index, $
 	} else {
 		kind = put_decimal(out, span, t.spelling)
 	}
-	if kind != .Non_Finite || T[.Nan] == "" {
+	if kind != .Non_Finite || T[.Nan] == "" && !jq_numbers {
 		return kind
 	}
 	f, is_float := core.float_value(doc, node)
 	if !is_float {
 		return .Non_Finite
+	}
+	if T[.Nan] == "" {
+		put_text(out, "null" if f != f else "1.7976931348623157e+308" if f > 0 else "-1.7976931348623157e+308")
+		return .None
 	}
 	put_text(out, T[.Nan] if f != f else T[.Inf] if f > 0 else T[.Neg_Inf])
 	return .None

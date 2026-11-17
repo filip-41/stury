@@ -299,7 +299,7 @@ tree_scalar :: #force_inline proc(w: ^Tree_Writer, i: core.Node_Index) -> bool {
 	cell := t
 	cell.kind = doc.readers.resolve(doc, i) if t.kind == .Plain && (w.resolve || t.n == 0) else t.kind
 	if w.respell && cell.kind == .Number {
-		w.kind = write.put_number_node(w.out, doc, i, TREE, false, w.forms)
+		w.kind = write.put_number_node(w.out, doc, i, TREE, false, w.forms, w.opts.jq_numbers)
 		return w.kind == .None
 	}
 	w.kind = put_token(w.out, doc.src, doc, i, cell, w.opts, w.json, w.copy)
