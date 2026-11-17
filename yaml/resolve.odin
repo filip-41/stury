@@ -48,21 +48,12 @@ classify_number :: proc(text: []u8) -> (class: Class, num: core.Number, integer,
 			return .Null, {}, false, false
 		}
 		return .Text, {}, false, false
-	}
-	switch string(text) {
-	case "null", "Null", "NULL":
-		return .Null, {}, false, false
-	case "true", "True", "TRUE":
-		return .True, {}, false, false
-	case "false", "False", "FALSE":
-		return .False, {}, false, false
-	case ".inf", ".Inf", ".INF", "+.inf", "+.Inf", "+.INF", "-.inf", "-.Inf", "-.INF":
-		return .Inf, {}, false, false
-	case ".nan", ".NaN", ".NAN":
-		return .Nan, {}, false, false
-	}
-	switch text[0] {
+	case 'n', 'N', 't', 'T', 'f', 'F':
+		return word(text), {}, false, false
 	case '+', '-', '.':
+		if w := word(text); w != .Text {
+			return w, {}, false, false
+		}
 		return decimal(text)
 	}
 	return .Text, {}, false, false
@@ -71,6 +62,26 @@ classify_number :: proc(text: []u8) -> (class: Class, num: core.Number, integer,
 		ok: bool
 		num, integer, strict, ok = spell.number_loose(text, 0, u64(len(text)))
 		return .Decimal if ok else .Text, num, integer, strict
+	}
+
+	// The class of a text that may be a word of the schema, every one of which has three to five bytes.
+	word :: proc(text: []u8) -> Class {
+		if len(text) < 3 || len(text) > 5 {
+			return .Text
+		}
+		switch string(text) {
+		case "null", "Null", "NULL":
+			return .Null
+		case "true", "True", "TRUE":
+			return .True
+		case "false", "False", "FALSE":
+			return .False
+		case ".inf", ".Inf", ".INF", "+.inf", "+.Inf", "+.INF", "-.inf", "-.Inf", "-.INF":
+			return .Inf
+		case ".nan", ".NaN", ".NAN":
+			return .Nan
+		}
+		return .Text
 	}
 }
 
