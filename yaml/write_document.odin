@@ -137,7 +137,7 @@ ends_explicitly :: proc(l: ^Layout) -> bool {
 // The tag, anchor and alias of `node`, as the facts of a document read from YAML hold them. A tag of another format
 // is the YAML tag of its meaning: `!!binary`, and `!!timestamp` on a text YAML reads as a timestamp of that kind.
 @(private)
-props_of :: proc(l: ^Layout, node: core.Node_Index) -> (pr: Properties) {
+props_read :: proc(l: ^Layout, node: core.Node_Index) -> (pr: Properties) {
 	if l.tagged && core.kind(l.doc, node) == .String {
 		tag, _ := core.fact_value(l.doc, node, .Tag)
 		pr.spelled = !tag.span
@@ -157,6 +157,52 @@ props_of :: proc(l: ^Layout, node: core.Node_Index) -> (pr: Properties) {
 	it = core.facts_of(l.doc, node, .Alias)
 	pr.alias, _ = core.fact_next(&it)
 	return
+}
+
+// The properties of `node`, none for a document that holds no fact and is not another format's with tags.
+@(private)
+props_of :: #force_inline proc(l: ^Layout, node: core.Node_Index) -> (pr: Properties) {
+	if l.tagged || l.own && l.commented {
+		return props_read(l, node)
+	}
+	return
+}
+
+// The kind of `node`. A plain value of a document that holds no fact, written as it was read, is a number when its text
+// is a decimal that starts with a digit from 1 to 9, an optional fraction following, which skips the parse of the number
+// the document's own resolution makes.
+@(private)
+node_kind :: #force_inline proc(l: ^Layout, node: core.Node_Index) -> core.Kind {
+	if l.own && !l.commented {
+		n := l.doc.nodes[node]
+		if n.kind == .Plain && n.role == .Value && plain_decimal(l.doc.src[n.lo:n.lo + u64(n.n)]) {
+			return .Number
+		}
+	}
+	return core.kind(l.doc, node)
+}
+
+// Whether `text` is an optional minus, a digit from 1 to 9 and more digits, and optionally a point with digits after it.
+@(private)
+plain_decimal :: proc(text: []u8) -> bool {
+	i := 1 if len(text) > 0 && text[0] == '-' else 0
+	if i >= len(text) || text[i] < '1' || text[i] > '9' {
+		return false
+	}
+	for i += 1; i < len(text) && text[i] >= '0' && text[i] <= '9'; i += 1 {
+	}
+	if i == len(text) {
+		return true
+	}
+	if text[i] != '.' || i + 1 == len(text) {
+		return false
+	}
+	for i += 1; i < len(text); i += 1 {
+		if text[i] < '0' || text[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Writes a space unless `space` is clear, then `text`, and sets `space`.
@@ -234,7 +280,7 @@ put_node_start :: proc(l: ^Layout, opens: ^[dynamic]Put_Open, node: core.Node_In
 		put_line_end(l)
 		return .None
 	}
-	k := core.kind(l.doc, node)
+	k := node_kind(l, node)
 	#partial switch k {
 	case .Object, .Array:
 		if core.length(l.doc, node) > 0 && pretty && !kept_flow(l, node) {
@@ -576,7 +622,7 @@ put_flow_start :: proc(l: ^Layout, opens: ^[dynamic]Put_Open, node: core.Node_In
 	if space {
 		write.put_byte(&l.out, ' ')
 	}
-	k := core.kind(l.doc, node)
+	k := node_kind(l, node)
 	if k == .Object || k == .Array {
 		return put_flow_open(l, opens, node, false)
 	}
