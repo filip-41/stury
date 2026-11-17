@@ -260,7 +260,7 @@ put_node_start :: proc(l: ^Layout, opens: ^[dynamic]Put_Open, node: core.Node_In
 	if space {
 		write.put_byte(&l.out, ' ')
 	}
-	ended := put_leaf(l, node, false, false, ind, pr.tag != "") or_return
+	ended := put_leaf(l, node, k, false, false, ind, pr.tag != "") or_return
 	if ended {
 		return .None
 	}
@@ -424,9 +424,13 @@ own_style :: proc(l: ^Layout, node: core.Node_Index) -> Maybe(Style) {
 
 // Writes the scalar at `node` as `put_node` places it. A block scalar ends its lines itself, which is `ended`.
 @(private)
-put_leaf :: proc(l: ^Layout, node: core.Node_Index, flow, key: bool, ind: int, tagged: bool) -> (ended: bool, kind: core.Typed_Error_Kind) {
-	#partial switch core.kind(l.doc, node) {
+put_leaf :: proc(l: ^Layout, node: core.Node_Index, k: core.Kind, flow, key: bool, ind: int, tagged: bool) -> (ended: bool, kind: core.Typed_Error_Kind) {
+	#partial switch k {
 	case .String:
+		if body, whole := single_quoted_body(l, node); whole {
+			write.put_text(&l.out, body)
+			return false, .None
+		}
 		buf: [512]u8 = ---
 		text := write.node_text(l.doc, node, buf[:], runtime.arena_allocator(&l.arena)) or_return
 		keeps := own_style(l, node)
@@ -458,6 +462,17 @@ put_leaf :: proc(l: ^Layout, node: core.Node_Index, flow, key: bool, ind: int, t
 		return false, .Unwritable
 	}
 	return false, .None
+}
+
+// The source text of the string at `node` with its quotes, when a document read from YAML keeps it single-quoted and
+// its body holds only the printable ASCII bytes, which is the text `put_single` writes for its decoded string.
+@(private)
+single_quoted_body :: proc(l: ^Layout, node: core.Node_Index) -> (text: string, whole: bool) {
+	if !l.own || l.opts.respell_strings || style_of(l.doc.nodes[node].spelling) != .Single {
+		return "", false
+	}
+	span := core.span(l.doc, node)
+	return string(span), printable_ascii(string(span[1:len(span) - 1]))
 }
 
 // The spelling a YAML source gave a boolean or a null, or `word`.
@@ -565,7 +580,7 @@ put_flow_start :: proc(l: ^Layout, opens: ^[dynamic]Put_Open, node: core.Node_In
 	if k == .Object || k == .Array {
 		return put_flow_open(l, opens, node, false)
 	}
-	put_leaf(l, node, true, false, 0, pr.tag != "") or_return
+	put_leaf(l, node, k, true, false, 0, pr.tag != "") or_return
 	put_flow_inline(l, node)
 	return .None
 }

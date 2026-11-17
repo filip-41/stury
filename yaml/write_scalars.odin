@@ -254,6 +254,17 @@ SAFE_PLAIN := [256]bool {
 	'_' = true, '.' = true, '/' = true, '-' = true, '+' = true, '=' = true, ' ' = true, '(' = true, ')' = true, '$' = true, '~' = true, ';' = true,
 }
 
+// Whether `s` holds only the ASCII bytes from space to tilde, which a single-quoted scalar holds as they are.
+@(private)
+printable_ascii :: proc(s: string) -> bool {
+	for c in transmute([]u8)s {
+		if c < 0x20 || c > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 // Whether `s` is plain in every place: it starts with a letter, a numeral, a slash or an underscore, ends with no space
 // and holds only bytes of `SAFE_PLAIN`.
 @(private)
