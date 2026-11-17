@@ -3,7 +3,7 @@
 stury \- JSON, YAML, TOML, XML, HTML, CSV and CBOR codec with a jq 1.8.2\-compatible command line
 .SH SYNOPSIS
 .B stury
-[\-bcCMnRrsSaejV] [\-\-tab|\-\-indent n] [\-\-arg name value] [\-\-argjson name value] [\-\-slurpfile name file] [\-\-rawfile name file] [\-f file] [\-L dir] [\-\-seq] [\-\-stream|\-\-stream\-errors] [\-\-from format] [\-\-to format] [\-\-grow\-header] [csv options] [\-\-max\-depth n] [\-\-threads n] [\-\-follow] [\-\-explain] [yaml and xml options] [stury options] <jq filter> [file...]
+[\-bcCMnRrsSaejV] [\-\-tab|\-\-indent n] [\-\-arg name value] [\-\-argjson name value] [\-\-slurpfile name file] [\-\-rawfile name file] [\-f file] [\-L dir] [\-\-seq] [\-\-stream|\-\-stream\-errors] [\-\-from format] [\-\-to format] [\-\-grow\-header] [\-\-attributes] [csv options] [\-\-max\-depth n] [\-\-threads n] [\-\-follow] [\-\-explain] [yaml and xml options] [stury options] <jq filter> [file...]
 .br
 .B stury
 .B check
@@ -113,6 +113,9 @@ Write json (the default), jsonc, json5, ndjson (as \-c), csv, tsv, toml, yaml, x
 .TP
 .B \-\-grow\-header
 With \-\-to csv or tsv, hold the output and write a header of every key in the order first seen (byte order under \-S). Memory holds all the output.
+.TP
+.B \-\-attributes
+With \-\-from or \-\-to xml or html, read each attribute of an element as its member @NAME, an element of text as an object with #text, and write a member @NAME holding a string, number or boolean as an attribute. Not with \-\-stream or edit.
 .TP
 .BI \-\-from " ndjson"
 Read one JSON text per line, not with \-R or \-\-seq. \-\-to ndjson prints compact, one value per line, so \-\-indent, \-\-tab and \-\-seq are refused with it.

@@ -499,6 +499,9 @@ text_value :: proc(ins: ^Inputs, built: core.Document, at: int, own: bool) -> (j
 	}
 	ins.pinned ||= !own
 	ins.text_end = at + end
+	if ins.run.opts.attributes {
+		return core.attributes_as_members(jq.document_value(doc)), "", .Value
+	}
 	return jq.document_value(doc), "", .Value
 }
 

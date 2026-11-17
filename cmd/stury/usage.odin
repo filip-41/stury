@@ -110,6 +110,8 @@ stury's own options:
       --check               with fmt or edit, name each file it would
                             change and exit 1;
       --grow-header         with --to csv or tsv, write a header of every key;
+      --attributes          with xml or html, read and write each attribute
+                            as a member @NAME of its element;
       --schema file         with check and fmt, judge each input against
                             this JSON Schema, and refuse one that fails it;
       --schema-ref dir      the directory a file reference may read, the schema's by default;

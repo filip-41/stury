@@ -94,7 +94,7 @@ parallel :: proc(run: ^Run) -> bool {
 	defer delete(walk.done)
 	// A piece builds its records alone, without the comment lines above them that the interpreter's filter may read.
 	comments := reads_cells(o) && o.cells_in.comment != 0 && run.route.columns == nil
-	p := !(o.null_input || o.slurp || o.raw_input || o.stream || o.stream_errors || o.unbuffered || o.grow_header || comments || writes_texts(o)) && o.max_depth <= core.MAX_DEPTH && !serial_node(&run.prog, &walk)
+	p := !(o.null_input || o.slurp || o.raw_input || o.stream || o.stream_errors || o.unbuffered || o.grow_header || o.attributes || comments || writes_texts(o)) && o.max_depth <= core.MAX_DEPTH && !serial_node(&run.prog, &walk)
 	run.parallel = p
 	return p
 }

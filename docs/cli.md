@@ -20,7 +20,7 @@ The examples below assume `stury` is on your `PATH`; otherwise use `build/stury`
 ```sh
 stury [-c] [-r] [-j] [--raw-output0] [-a] [-S] [-C|-M] [--tab|--indent N] [--unbuffered] [-b]
       [-n] [-R] [-s] [-e] [-f FILE] [-L DIR] [--seq] [--stream|--stream-errors]
-      [--from FORMAT] [--to FORMAT] [--grow-header]
+      [--from FORMAT] [--to FORMAT] [--grow-header] [--attributes]
       [--max-depth N] [--threads N] [--follow] [--explain]
       [--alias-limit N] [--merge-keys] [--expansion-limit N] [--unread-entities]
       [--arg NAME VALUE] [--argjson NAME JSON] [--slurpfile NAME FILE] [--rawfile NAME FILE]
@@ -106,6 +106,7 @@ runner and its bytecode listings, which stury does not have) and adds its own. E
 | `--in-place` | `fmt` and `edit` only: rewrite each file through a temporary one and a rename, when `--to` is `--from` ([`fmt`](#fmt), [`edit`](#edit)). |
 | `--check` | `fmt` and `edit` only: write nothing, name each file that would change on stderr, and exit 1 ([`fmt`](#fmt), [`edit`](#edit)). |
 | `--grow-header` | With `--to csv` or `--to tsv`, write a header of every key of every object output ([CSV and TSV output](#csv-and-tsv-output)). |
+| `--attributes` | With `--from` or `--to` `xml` or `html`, read each attribute as a member `@NAME` of its element, and write such a member as an attribute ([XML output](#xml-output)). |
 | `--delimiter C`, `--no-header`, `--comment C`, `--infer`, `--ragged`, `--lazy-quotes` | How `--from csv` or `--from tsv` reads ([CSV and TSV options](#csv-and-tsv-options)). `--infer` also types the text of `--from xml` and `--from html`, and with any other `--from` is a usage error: `--infer applies to --from csv, tsv, xml or html`. |
 | `--out-delimiter C`, `--out-comment C`, `--out-no-header`, `--crlf` | How `--to csv` or `--to tsv` writes ([CSV and TSV options](#csv-and-tsv-options)). |
 | `--alias-limit N`, `--merge-keys` | How `--from yaml` reads: the bytes aliases may read again (1 or more), and `<<` as a merge key ([Formats](#formats)). With another `--from`, a usage error: `--merge-keys applies to --from yaml`. |
@@ -425,7 +426,8 @@ A comment, tag or attribute the output format cannot hold is dropped, and `fmt`,
 document written as YAML, TOML, XML or HTML, says so on stderr with the count, as
 `stury: warning: a.jsonc: json cannot hold 2 comments, tags or attributes of the input, so they are dropped`. A filter's
 JSON output of an XML or HTML node tells the attributes it drops, and what reads them:
-`stury: warning: json cannot hold 1 attribute of the input, so it is dropped: .&NAME and .@attrs read them`. The exit
+`stury: warning: json cannot hold 1 attribute of the input, so it is dropped: .&NAME and .@attrs read them, and
+--attributes keeps them as members`. The exit
 status is unchanged. A document marker is kept only when a format is written to itself, and none of them crosses
 formats or counts as dropped: YAML's `%YAML` and `%TAG` lines and an explicit `---` or `...`, and the XML declaration.
 
@@ -767,7 +769,7 @@ pieces are:
 - the same array, for `.` and `fmt`, which print it in pieces under every layout option (`-c`, `--tab`, `--indent`, `-S`, `-a`), and for `length` and
   `.logs | length`, which count it.
 
-A run stays on one thread under `-n`, `-s`, `-R`, `--stream`, `--stream-errors`, `--unbuffered`, `--grow-header`,
+A run stays on one thread under `-n`, `-s`, `-R`, `--stream`, `--stream-errors`, `--unbuffered`, `--grow-header`, `--attributes`,
 `--max-depth` past 1024, and a filter that calls `input`, `inputs`, `debug`, `stderr`, `halt`, `halt_error`,
 `input_filename`, `input_line_number`, `recurse` with a filter, or a function that calls itself. The entries of an array
 and the array printed or counted by `.`, `fmt` and `length` are read on all cores in a JSON text only, not JSONC or
@@ -975,8 +977,8 @@ written whole (`.`), keeps its doctype, comments, processing instructions, attri
 references as written, so an entity reference keeps the declaration it names. An update of it keeps the attributes and
 comments of every element it leaves alone, and of one it replaces, with those it writes (`.r.c |= "C"`, `del(.r.d)`,
 `.r.&k = "w"`, `.r.c.@comment = ["n"]`).
-A value a filter built is written from its JSON: it has no attributes, and its comments come before, after or at the
-end of the element of the value that holds them. Pretty output, the default, puts an element whose children are all
+A value a filter built is written from its JSON: it has no attributes but under `--attributes`, and its comments come
+before, after or at the end of the element of the value that holds them. Pretty output, the default, puts an element whose children are all
 elements on lines of its own and lays no white space into one that holds text. `-c` writes no white space between
 elements, `--indent N` sets the indent, `--tab` indents by a tab, and `-a` writes every character past ASCII as a
 reference (`&#xe9;`). Members keep their order, as it is the elements', so `-S` is refused. Several outputs are several
@@ -987,6 +989,15 @@ An output that is no object (`cannot write a value that is no object as XML`) en
 XML cannot spell so that it reads back (`cannot write a value XML has no element or text for`): an object of more or
 less than one member at the root, a key that is no XML name or holds a colon, an array in an array or an empty array, an
 empty string or object, an object of only `#text`, and a character XML 1.0 does not allow.
+
+`--attributes` reads the attributes of each element of an XML or HTML input as its first members, `@` and the name
+with the value as a string, so `.[].a."@href"` reads the links. An element of text or of nothing that has attributes
+is an object of them, with its text as `#text`: `<a href="x">y</a>` reads as `{"a":{"@href":"x","#text":"y"}}` and
+`<a href="z"/>` as `{"a":{"@href":"z"}}`. Under `--to xml` or `--to html` a member `@NAME` whose value is a string, a
+number or a boolean is written as the attribute `NAME`, and an object left with only `#text` as the element of that
+text, so `stury --attributes --to xml .` writes an XML input back with its attributes, in the shape its value reads
+(the order of text among elements is not kept). The input is a value then, not the document, so its comments and
+spellings are not kept, and `--stream` and `edit` refuse the option.
 
 ### HTML output
 

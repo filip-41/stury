@@ -388,6 +388,12 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 	if o.grow_header && !writes_cells(o) {
 		usage_error("--grow-header applies to --to csv or tsv")
 	}
+	if o.attributes && o.from != .Xml && o.from != .Html && o.to != .Xml && o.to != .Html {
+		usage_error("--attributes applies to --from or --to xml or html")
+	}
+	if o.attributes && o.stream {
+		usage_error("--attributes cannot be combined with --stream, whose events are each a leaf")
+	}
 	if cli.cells_flag != "" && !reads_cells(o) {
 		usage_error("%s applies to --from csv or tsv", cli.cells_flag)
 	}

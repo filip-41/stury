@@ -41,6 +41,8 @@
   facts and attributes, and `.@(name)` and `.&[name]` take a computed name. A step that names an unknown fact is an
   error.
 - `css(selector)` selects the elements of an XML or HTML input.
+- `--attributes` reads each attribute of an XML or HTML element as its member `@NAME`, and writes such a member back
+  as an attribute.
 - `check --schema FILE` judges each input against a JSON Schema and tells every failure. `check --filter F --schema S`
   types a filter against the schema of its inputs. `--schema-draft` names the draft of a schema with no `$schema`.
 - `diff` tells what differs between two inputs, two schemas (`--compat`) or a schema and data.

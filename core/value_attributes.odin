@@ -1,8 +1,10 @@
 package core
 
+import "core:math"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
+import spell "./spell"
 
 // The attributes of the element `v` is, by name as read: with `one` the value of the attribute `name`, else an object
 // of every one's value, made in the context allocator. Null for a value that is no element or has none, or none of
@@ -149,4 +151,111 @@ attribute_body_text :: proc(body: string) -> string {
 		}
 	}
 	return strings.to_string(b)
+}
+
+// `v` with the attributes of each element in it read as members, made in the context allocator: attribute `name` as
+// the member `@name` before the element's own, and an element of text or of nothing with attributes as an object of
+// them with its text as `MARKUP_TEXT`. A value of no markup document is `v`. `members_as_attributes` reads it back.
+attributes_as_members :: proc(v: Value) -> Value {
+	#partial switch x in v {
+	case ^Array:
+		a := new_array(len(x.items))
+		for item in x.items {
+			array_append(a, attributes_as_members(item))
+		}
+		return a
+	case ^Object:
+		o := new_object()
+		for k, i in x.keys {
+			object_append(o, k, attributes_as_members(x.vals[i]))
+		}
+		return o
+	case Node_Ref:
+		if !is_markup(x.doc) {
+			return v
+		}
+		attributes, _ := attributes_value(x, "", false).(^Object)
+		element := x.doc.nodes[x.node].kind == .Object
+		if attributes == nil && !element {
+			return v
+		}
+		o := new_object()
+		if attributes != nil {
+			for k, i in attributes.keys {
+				object_append(o, strings.concatenate({"@", k}), attributes.vals[i])
+			}
+		}
+		if element {
+			members := markup_members(x)
+			for k, i in members.keys {
+				object_append(o, k, attributes_as_members(members.vals[i]))
+			}
+		} else if value_kind(v) != .Null {
+			object_append(o, MARKUP_TEXT, v)
+		}
+		return o
+	}
+	return v
+}
+
+// `v` with each member `@name` of an object in it whose value is a string, a number or a boolean read as attribute
+// `name` of the element the object is, made in the context allocator, and one whose value is null left out. An object
+// left with only `MARKUP_TEXT` is the element of that text, and one left with nothing an empty element. A node of a
+// document is built first.
+members_as_attributes :: proc(v: Value) -> Value {
+	#partial switch x in v {
+	case ^Array:
+		a := new_array(len(x.items))
+		for item in x.items {
+			array_append(a, members_as_attributes(item))
+		}
+		return a
+	case ^Object:
+		bodies := make([dynamic]string)
+		o := new_object()
+		for k, i in x.keys {
+			if len(k) < 2 || k[0] != '@' {
+				object_append(o, k, members_as_attributes(x.vals[i]))
+			} else if s, is_text := attribute_text(x.vals[i]); is_text {
+				append(&bodies, attribute_body(k[1:], s))
+			} else if value_kind(x.vals[i]) != .Null {
+				object_append(o, k, x.vals[i])
+			}
+		}
+		if len(bodies) == 0 {
+			return o
+		}
+		content: Value = o
+		if len(o.keys) == 0 {
+			content = nil
+		} else if len(o.keys) == 1 && o.keys[0] == MARKUP_TEXT {
+			content = o.vals[0]
+		}
+		return noted(content, .Attribute, bodies[:])
+	case Node_Ref:
+		if k := value_kind(v); k == .Object || k == .Array {
+			return members_as_attributes(built_value(x))
+		}
+	}
+	return v
+}
+
+// The text of the scalar `v` as an attribute's value, its digits for a number. False for null and a container.
+@(private = "file")
+attribute_text :: proc(v: Value) -> (string, bool) {
+	#partial switch x in plain(v) {
+	case string:
+		return x, true
+	case bool:
+		return "true" if x else "false", true
+	case Number_View:
+		return string(x.text[:x.len]), true
+	case f64:
+		if math.is_inf(x) || math.is_nan(x) {
+			return "", false
+		}
+		buf := make([]u8, spell.F64_ROOM)
+		return string(buf[:spell.f64_text(raw_data(buf), x)]), true
+	}
+	return "", false
 }

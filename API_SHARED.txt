@@ -97,6 +97,7 @@ Write_Option :: enum u8 { Pretty, Indent, Tab, Ascii, Sort_Keys, Respell_Strings
 all_facts :: #force_inline proc(doc: ^Document, i: Node_Index) -> []Fact
 attribute_bodies :: proc(v: Value, name: string, text: Maybe(string)) -> []string
 attribute_spelling :: #force_inline proc "contextless" (lead: int, quoted: bool) -> u16
+attributes_as_members :: proc(v: Value) -> Value
 attributes_value :: proc(v: Value, name: string, one: bool) -> Value
 children_from :: proc(doc: ^Document, i: Node_Index, k: int) -> Child_Iter
 comment_next :: proc(it: ^Fact_Iter) -> (text: string, padded: bool, ok: bool)
@@ -146,6 +147,7 @@ markup_member :: proc(r: Node_Ref, name: string) -> (v: Value, found: bool)
 markup_members :: proc(r: Node_Ref) -> ^Object
 markup_number_text :: proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool)
 markup_resolve :: proc(doc: ^Document, i: Node_Index) -> Kind
+members_as_attributes :: proc(v: Value) -> Value
 move_document_error :: proc(e: ^Document_Error, by: u64)
 move_typed_error :: proc(e: ^Typed_Refusal, by: u64)
 no_hook :: #force_inline proc "contextless" (h: ^No_Hooks, s: Hook_Regs, t: Token) -> (Hook_Regs, Action)

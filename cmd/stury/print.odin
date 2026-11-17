@@ -134,7 +134,7 @@ tell_attributes_dropped :: proc(v: jq.Value) {
 		n += int(f.role == .Attribute)
 	}
 	if n > 0 {
-		message.write_stderr("stury: warning: json cannot hold %d %s of the input, so %s dropped: .&NAME and .@attrs read them\n", n, "attribute" if n == 1 else "attributes", "it is" if n == 1 else "they are")
+		message.write_stderr("stury: warning: json cannot hold %d %s of the input, so %s dropped: .&NAME and .@attrs read them, and --attributes keeps them as members\n", n, "attribute" if n == 1 else "attributes", "it is" if n == 1 else "they are")
 	}
 }
 
@@ -144,6 +144,7 @@ tell_attributes_dropped :: proc(v: jq.Value) {
 @(private = "file")
 emit_text :: proc(o: ^Output, v: jq.Value) -> bool {
 	as := text_written_as(o.opts)
+	v := core.members_as_attributes(v) if o.opts.attributes && (o.opts.to == .Xml || o.opts.to == .Html) else v
 	text: []u8
 	err: core.Error
 	if ref, is_ref := v.(jq.Ref); is_ref {

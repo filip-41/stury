@@ -136,6 +136,29 @@ a_grouped_value_is_written_as_its_elements :: proc(t: ^testing.T) {
 	testing.expect(t, refused && e.kind == .Unwritable)
 }
 
+@(test)
+attributes_read_as_members_write_back_as_attributes :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	doc, err := xml.build(transmute([]u8)string(`<r><a href="x" id="1">y</a><a href="z"/><b c="d">t<i>u</i></b></r>`), .Xml)
+	walktest.expect_nil(t, err)
+	defer xml.destroy(&doc)
+	members := core.attributes_as_members(core.Node_Ref{&doc, core.ROOT})
+	text, jerr := write.write_value(members, json.as(.Json))
+	walktest.expect_nil(t, jerr)
+	testing.expect_value(t, string(text), `{"r":{"a":[{"@href":"x","@id":"1","#text":"y"},{"@href":"z"}],"b":{"@c":"d","#text":"t","i":"u"}}}`)
+	back, xerr := write.write_value(core.members_as_attributes(members), xml.as(.Xml))
+	walktest.expect_nil(t, xerr)
+	testing.expect_value(t, string(back), `<r><a href="x" id="1">y</a><a href="z"/><b c="d">t<i>u</i></b></r>`)
+	r, root := core.new_object(), core.new_object()
+	core.object_append(r, "@id", f64(1.5))
+	core.object_append(r, "@on", true)
+	core.object_append(root, "r", r)
+	scalars, serr := write.write_value(core.members_as_attributes(root), xml.as(.Xml))
+	walktest.expect_nil(t, serr)
+	testing.expect_value(t, string(scalars), `<r id="1.5" on="true"/>`)
+}
+
 // The token write is the element write of `write` and refuses what it refuses.
 @(test)
 token_write_writes_elements :: proc(t: ^testing.T) {

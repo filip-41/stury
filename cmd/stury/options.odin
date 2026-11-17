@@ -37,6 +37,7 @@ Opts :: struct {
 	from_spec:        Maybe(u8), // the spec of `from` that `--from FORMAT:SPEC` names
 	to_spec:          Maybe(u8), // the spec of `to` that `--to FORMAT:SPEC` names
 	grow_header:      bool, // --grow-header: --to csv or tsv holds all rows and writes a header of every key
+	attributes:       bool, // --attributes: an element's attributes are its members @NAME, read and written
 	cells_in:         dsv.Options, // how a --from csv or tsv text is read
 	cells_out:        dsv.Options, // how a --to csv or tsv text is written
 	explain:          bool, // --explain: write the filter's plan and what the run did to stderr
@@ -203,6 +204,8 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			o.diff = true
 		case "grow-header":
 			o.grow_header = true
+		case "attributes":
+			o.attributes = true
 		case "delimiter", "comment", "out-delimiter", "out-comment":
 			c := cell_byte(a, args[i + 1])
 			switch name {
@@ -659,6 +662,7 @@ OWNED_OPTIONS := [?]Owned_Options {
 	{{"old-schema", "new-schema", "compat", "key", "set", "position", "facts", "json", "shape"}, {.Diff}, "it shapes what diff compares and tells"},
 	{{"threads"}, {.Run, .Check, .Fmt, .Infer}, "it sets the threads that share a long input"},
 	{{"diff"}, {.Edit}, "it previews the changes of an edit"},
+	{{"attributes"}, {.Run}, "it reads and writes the attributes of each element as members"},
 	{{"in-place", "check"}, {.Fmt, .Edit}, "it writes each file back, or tells whether it would change"},
 }
 
