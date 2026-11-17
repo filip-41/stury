@@ -390,3 +390,74 @@ a_nil_any_marshals_as_null :: proc(t: ^testing.T) {
 	testkit.expect_nil(t, err)
 	testing.expect_value(t, strings.trim_space(string(text)), "null")
 }
+
+// The members a read of a text takes from the tokens of their values, which a plan reads during the walk.
+@(private = "file")
+Probe :: struct {
+	a, b, c, foo, key: string,
+	n:    i64,
+	f:    f64,
+	on:   bool,
+	seq:  []string,
+	m:    map[string]string,
+	bar:  []map[string]string,
+	home: Maybe(i64),
+}
+
+// `Probe` with a member that makes the plan read the text's document, which no text holds.
+@(private = "file")
+Probe_Doc :: struct {
+	using probe: Probe,
+	built:       typed.Raw `yaml:"read the document"`,
+}
+
+@(private = "file")
+error_spelled :: proc(err: core.Error) -> string {
+	#partial switch e in err {
+	case core.Fault:
+		return fmt.tprintf("fault %v %d %d", e.kind, e.detail, e.at)
+	case core.Typed_Error:
+		return fmt.tprintf("typed %v %d %v", e.kind, e.at, e.steps)
+	}
+	return fmt.tprint(err)
+}
+
+// A read during the walk gives what a read of the text's document gives: the value, or the same refusal at the same
+// byte, under every duplicate policy, over the yaml-test-suite and texts of repeated, clashing, aliased and tagged keys.
+@(test)
+a_read_during_the_walk_reads_as_the_document_does :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	crafted := []string{
+		"a: 1\na: 2\n", "1: x\n\"1\": y\nb: 2\n", "1: x\n0x1: y\n", "a: x\nm: {1: x, \"1\": y}\n", "m: {1: x, 1: y}\n",
+		"a: 1\na: 2\nb: [\n", "m: {a: 1, a: 2}\nb: [\n", "x: &a {k: 1, k: 2}\nm: *a\nn: 3\n",
+		"a: !!str 12\nn: !!int \"12\"\nf: !!float '1'\n", "bar:\n- {a: 1, 2: b}\n- {\"2\": c, 2: d}\n", "seq: [a, b]\nseq: [c]\n",
+		"n: yes\nn: 2\n", "home: ~\nn: 0o17\nf: .inf\n", "a: 1\n1: 2\nother: {x: {1: a, \"1\": b}}\n", "on: true\n? [a]\n: b\n",
+		"a: '1'\nb: \"2\\n\"\nc: |\n  x\n", "x: {a: 1, a: 2}\n1: y\n", "1: y\nx: {a: 1, a: 2}\nb: [\n",
+	}
+	texts := make([dynamic]string)
+	append(&texts, ..crafted)
+	list: [dynamic]Case
+	cases(&list, SUITE_DIR, "")
+	for c in list {
+		src, _ := read_file(c.dir, "in.yaml")
+		append(&texts, string(src))
+	}
+	compared := 0
+	for text in texts {
+		src := transmute([]u8)text
+		for dups in ([]core.Duplicates{.Default, .First, .Last, .Refuse}) {
+			v: Probe
+			d: Probe_Doc
+			got := yaml.unmarshal(src, .Yaml_1_2, &v, read = {dups = dups})
+			want := yaml.unmarshal(src, .Yaml_1_2, &d, read = {dups = dups})
+			testing.expectf(t, error_spelled(got) == error_spelled(want), "%q under %v: %s, the document's %s", text, dups, error_spelled(got), error_spelled(want))
+			if want == nil {
+				read, built := fmt.tprint(v), fmt.tprint(d.probe)
+				testing.expectf(t, read == built, "%q under %v: %s, the document's %s", text, dups, read, built)
+				compared += 1
+			}
+		}
+	}
+	testing.expect(t, compared > 100)
+}
