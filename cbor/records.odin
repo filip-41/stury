@@ -10,7 +10,7 @@ import "../core/records"
 @(rodata)
 FRAMING := records.Framing_Services {
 	next   = {.Lines = nil, .Seq = nil, .Concatenated = next_item, .Entries = records.entries_walked},
-	judge  = judge_item,
+	judge  = records.no_judge,
 	close  = records.entries_walked_close,
 	closed = {.Lines = false, .Seq = false, .Concatenated = true, .Entries = true},
 	entry_step = step_entries,
@@ -115,7 +115,8 @@ held_map :: proc "contextless" (s: ^Held, k: int) -> bool {
 	return frame & FLAG_OBJECT != 0
 }
 
-// Frames the item at the reader's position: the bytes from there through the item's end.
+// Frames the item at the reader's position: the bytes from there through the item's end, judged by the walk that
+// frames them.
 next_item :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) {
 	lo := it.pos
 	if lo >= u64(len(it.src)) {
@@ -130,14 +131,6 @@ next_item :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) {
 	}
 	it.pos = hi
 	return {text = it.src[lo:hi], at = lo}, true
-}
-
-judge_item :: proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) {
-	if fault, bad := validate_text(rec.text, handle_rules(it.as)).?; bad {
-		fault.at += rec.at
-		return fault
-	}
-	return nil
 }
 
 build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
