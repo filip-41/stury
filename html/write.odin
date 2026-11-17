@@ -280,7 +280,7 @@ put_empty_runs :: proc(w: ^Writer, v: core.Value, depth: int, laid: bool) -> cor
 // `tail` after its own.
 @(private)
 put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign, laid: bool, lead: core.Value = nil, tail: core.Value = nil) -> core.Typed_Error_Kind {
-	if name == core.MARKUP_TEXT {
+	if len(name) > 0 && name[0] == '#' && name == core.MARKUP_TEXT {
 		return put_escaped(w, write.value_scalar_text(core.plain(v), w.buf[:], write.MARKUP_TREE) or_return, false)
 	}
 	// A comment on the line of the element before is that element's.
@@ -323,7 +323,7 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 		if void {
 			return .Unwritable
 		}
-		closing = put_members(w, x, depth + 1, in_foreign || name == "svg" || name == "math", keeps_space(name)) or_return
+		closing = put_members(w, x, depth + 1, in_foreign || is_foreign_root(name), keeps_space(name)) or_return
 	case .Null:
 	case:
 		if void {
@@ -607,11 +607,47 @@ is_head :: #force_inline proc(role: core.Role) -> bool {
 // Whether HTML element `name` is void, written with no end tag and no content.
 @(private)
 is_void :: proc(name: string) -> bool {
-	switch name {
-	case "area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img", "input", "keygen", "link", "meta", "param", "source", "track", "wbr":
-		return true
+	if len(name) < 2 || len(name) > 8 {
+		return false
+	}
+	// The first byte settles most names before a compare, since this runs for every element.
+	switch name[0] {
+	case 'a':
+		return name == "area"
+	case 'b':
+		return name == "base" || name == "basefont" || name == "bgsound" || name == "br"
+	case 'c':
+		return name == "col"
+	case 'e':
+		return name == "embed"
+	case 'f':
+		return name == "frame"
+	case 'h':
+		return name == "hr"
+	case 'i':
+		return name == "img" || name == "input"
+	case 'k':
+		return name == "keygen"
+	case 'l':
+		return name == "link"
+	case 'm':
+		return name == "meta"
+	case 'p':
+		return name == "param"
+	case 's':
+		return name == "source"
+	case 't':
+		return name == "track"
+	case 'w':
+		return name == "wbr"
 	}
 	return false
+}
+
+// Whether `name` opens a foreign element's content, where names keep their case and no element is void.
+@(private)
+is_foreign_root :: #force_inline proc(name: string) -> bool {
+	return (len(name) == 3 && name == "svg") || (len(name) == 4 && name == "math")
 }
 
 // Whether the text of HTML element `name` is written as it stands.
@@ -627,6 +663,6 @@ is_raw :: proc(name: string) -> bool {
 // Whether HTML element `name` holds its white space. A read drops the first line end that opens its text, so a line end
 // there is written twice, and no indent is laid into it.
 @(private)
-keeps_space :: proc(name: string) -> bool {
-	return name == "pre" || name == "listing" || name == "textarea"
+keeps_space :: #force_inline proc(name: string) -> bool {
+	return len(name) >= 3 && (name[0] == 'p' && name == "pre" || name[0] == 'l' && name == "listing" || name[0] == 't' && name == "textarea")
 }
