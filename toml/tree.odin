@@ -63,7 +63,10 @@ Table_Tree :: struct {
 	index:     map[u64]u32,
 	names:     runtime.Arena,
 	members:   int, // the members the index reserves for
+	keyed:     int, // the nodes a key names, which a replay gives a key token before the value
+	inlines:   int, // the comments set on a value's line, which may replace one another
 	max_depth: u32,
+	deepest:   u32, // the depth of the deepest container node, 0 for the root alone
 }
 
 // Why an insertion refused.
@@ -148,6 +151,10 @@ add_node :: proc "contextless" (t: ^Table_Tree, parent: u32, node: Table_Node, k
 	}
 	// The node is written in its slot, which the reservation left unwritten.
 	(^runtime.Raw_Dynamic_Array)(&t.nodes).len += 1
+	t.keyed += int(keyed)
+	if node.kind != .Scalar {
+		t.deepest = max(t.deepest, depth)
+	}
 	n := &t.nodes[id]
 	n^ = node
 	n.parent, n.depth = parent, depth

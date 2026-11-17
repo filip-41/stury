@@ -193,9 +193,9 @@ build_handle :: proc(src: []u8, as: core.As, _: bool, allocator: runtime.Allocat
 	return build_text(src, as, allocator)
 }
 
-// Reads `src` into a document that holds the handle `handle`: the text is read into the table tree once, and the tree
-// is replayed twice, to size the document and to write it. A repeated key is a fault of the grammar, so a build has no
-// duplicate policy to refuse.
+// Reads `src` into a document that holds the handle `handle`: the text is read into the table tree once, which counts
+// what the document needs, and the tree is replayed to write it. A repeated key is a fault of the grammar, so a build
+// has no duplicate policy to refuse.
 @(private)
 build_text :: proc(src: []u8, handle: core.As, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	p: Parser
@@ -203,19 +203,20 @@ build_text :: proc(src: []u8, handle: core.As, allocator: runtime.Allocator) -> 
 	if e := parse_text(&p, src, handle); e.kind != .None {
 		return {}, e
 	}
-	count: engine.Count
-	counted: core.Hook_Regs
-	sizing, writing: Replay
-	defer delete(sizing.frames)
-	defer delete(writing.frames)
-	replay(&p, &sizing, &count, &counted, engine.builder_hook_count)
-	b := engine.builder_start(src, handle, false, allocator, count.nodes, count.deepest, count.facts)
+	// A replay gives the root and every node of the tree a value token, a member of a table a key token too, and every
+	// comment a fact. An inline comment that replaced another was counted twice, and the unused facts stay reserved.
+	tree := &p.tree
+	facts := len(tree.comments) + tree.inlines
+	frames: [core.MAX_DEPTH]u64 = ---
+	b := engine.builder_start(src, handle, false, allocator, len(tree.nodes) + tree.keyed, int(tree.deepest) + 1, facts, frames[:])
 	if len(b.doc.nodes) == 0 {
 		return engine.builder_end(&b, engine.BUILDER_REGS, nil)
 	}
 	regs := engine.BUILDER_REGS
+	writing: Replay
+	defer delete(writing.frames)
 	verdict: u64
-	if count.facts > 0 {
+	if facts > 0 {
 		verdict = replay(&p, &writing, &b, &regs, engine.builder_hook)
 	} else {
 		verdict = replay(&p, &writing, &b, &regs, engine.builder_hook_plain)

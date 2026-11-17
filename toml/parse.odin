@@ -100,6 +100,7 @@ blanks :: proc "contextless" (p: ^Parser, newlines: bool) -> bool {
 			c := Comment{u64(p.pos), u32(end - p.pos)}
 			if p.inline_ok && p.last != NIL {
 				p.tree.nodes[p.last].inline = c
+				p.tree.inlines += 1
 			} else if !push_comment(&p.tree, c) {
 				return fault(p, 0, .No_Memory, .None)
 			}
@@ -415,6 +416,7 @@ value :: proc "contextless" (p: ^Parser, id: u32) -> (opened: bool, ok: bool) {
 		n.value = core.Token{lo = u64(lo), kind = .Array if c == '[' else .Object}
 		n.kind = .Array if c == '[' else .Table
 		n.flags = {} if c == '[' else {.Inline}
+		p.tree.deepest = max(p.tree.deepest, n.depth)
 		p.pos += 1
 		p.inline_ok = false
 		context = runtime.default_context()
