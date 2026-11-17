@@ -165,8 +165,8 @@ judge_all :: proc(src: []u8, as: core.As, services: ^Framing_Services, framing: 
 }
 
 // Claims pieces until none is left, and chains records from each piece's first guess until the next record starts past
-// the piece, then from the next guess past where a chain that a fault ended stopped. The first piece starts where the
-// reader stands, so it needs no guess.
+// the piece, then from the next guess past where a chain that a fault ended stopped. The first piece of a format with
+// `cut` starts where the reader stands, as its guess finds no record at the text's start.
 @(private)
 chain_pieces :: proc(arg: rawptr) {
 	c := (^Chain)(arg)
@@ -181,7 +181,7 @@ chain_pieces :: proc(arg: rawptr) {
 		hi := min(lo + SLICE, u64(len(c.start.src)))
 		for from := lo; from < hi; {
 			it := c.start
-			it.pos, it.guessed = from, k > 0 || from > lo
+			it.pos, it.guessed = from, k > 0 || from > lo || it.services.cut == nil
 			if it.guessed && !it.services.guess(&it, hi) {
 				break
 			}
