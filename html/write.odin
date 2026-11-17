@@ -17,6 +17,7 @@ package html
 // elements, and a raw text that holds its end tag. Pretty output indents an element whose children are all elements,
 // except in `pre`, `listing` and `textarea`.
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:io"
 import "core:strings"
@@ -36,6 +37,8 @@ Writer :: struct {
 	foot_line: bool,
 	foot_depth: int, // with `foot_line`, the depth a comment's line starts at, 0 for no indent, as in a compact write
 	ended:     int, // the output's length after the last element and its inline comments
+	hint_doc:  ^core.Document, // the document and place `node_facts` last ended at, since nodes are written in order
+	hint_at:   int,
 	buf:       [512]u8,
 }
 
@@ -284,15 +287,19 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 	if laid && w.out.cursor + w.out.flushed > 0 {
 		write.put_line(&w.out, w.opts, depth)
 	}
-	put_comments(w, lead, value_facts(lead), .Comment) or_return
-	facts := value_facts(v)
-	bodies, written := core.rebuilt_comments(v, .Comment)
-	for f in facts {
-		if is_head(f.role) && !(written && f.role == .Comment) {
-			put_fact(w, v, f) or_return
+	facts := node_facts(w, v)
+	// A node that has attributes among its facts and nothing written on it has no comment to write.
+	bare := lead == nil && tail == nil && is_bare(v, facts)
+	if !bare {
+		put_comments(w, lead, value_facts(lead), .Comment) or_return
+		bodies, written := core.rebuilt_comments(v, .Comment)
+		for f in facts {
+			if is_head(f.role) && !(written && f.role == .Comment) {
+				put_fact(w, v, f) or_return
+			}
 		}
+		put_bodies(w, bodies)
 	}
-	put_bodies(w, bodies)
 	write.put_byte(&w.out, '<')
 	write.put_text(&w.out, name)
 	attributes, rebuilt := core.rebuilt_attributes(v)
@@ -337,8 +344,10 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 		if closing {
 			w.foot_line, w.foot_depth = true, depth + 1
 		}
-		put_comments(w, v, facts, .Comment_Foot) or_return
-		put_comments(w, tail, tail_facts, .Comment_Foot) or_return
+		if !bare {
+			put_comments(w, v, facts, .Comment_Foot) or_return
+			put_comments(w, tail, tail_facts, .Comment_Foot) or_return
+		}
 		w.foot_line, w.foot_depth = false, 0
 		if closing {
 			write.put_line(&w.out, w.opts, depth)
@@ -347,10 +356,56 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 		write.put_text(&w.out, name)
 		write.put_byte(&w.out, '>')
 	}
-	put_comments(w, v, facts, .Comment_Inline) or_return
-	put_comments(w, tail, tail_facts, .Comment_Inline) or_return
+	if !bare {
+		put_comments(w, v, facts, .Comment_Inline) or_return
+		put_comments(w, tail, tail_facts, .Comment_Inline) or_return
+	}
 	w.ended = w.out.cursor + w.out.flushed
 	return .None
+}
+
+// The facts of the node `v` is, as `value_facts` finds them. Nodes come in order, so the search starts where the last
+// node's facts ended.
+@(private)
+node_facts :: proc(w: ^Writer, v: core.Value) -> []core.Fact {
+	r, is_node := core.plain(v).(core.Node_Ref)
+	if !is_node {
+		return nil
+	}
+	all := r.doc.facts
+	at: int
+	if w.hint_doc == r.doc && w.hint_at <= len(all) && (w.hint_at == 0 || all[w.hint_at - 1].node < r.node) {
+		at = w.hint_at
+		for steps := 0; at < len(all) && all[at].node < r.node; steps += 1 {
+			if steps == 8 {
+				at = core.lower_node(all, r.node)
+				break
+			}
+			at += 1
+		}
+	} else {
+		at = core.lower_node(all, r.node)
+	}
+	end := at
+	for end < len(all) && all[end].node == r.node {
+		end += 1
+	}
+	w.hint_doc, w.hint_at = r.doc, end
+	return all[at:end]
+}
+
+// Whether node `v` has only attributes among its `facts` and nothing written on it.
+@(private)
+is_bare :: #force_inline proc(v: core.Value, facts: []core.Fact) -> bool {
+	if _, commented := v.(^core.Commented); commented {
+		return false
+	}
+	for f in facts {
+		if f.role != .Attribute {
+			return false
+		}
+	}
+	return true
 }
 
 @(private)
@@ -487,6 +542,12 @@ holds_comment :: proc(body: string) -> bool {
 put_escaped :: proc(w: ^Writer, s: string, attribute: bool) -> core.Typed_Error_Kind {
 	run := 0
 	for i := 0; i < len(s); {
+		for i + 8 <= len(s) && !has_special(intrinsics.unaligned_load((^u64)(&raw_data(s)[i]))) {
+			i += 8
+		}
+		if i == len(s) {
+			break
+		}
 		c := s[i]
 		if c < 0x80 && c != '&' && c != '<' && c != '>' && c != '"' {
 			i += 1
@@ -525,6 +586,16 @@ put_escaped :: proc(w: ^Writer, s: string, attribute: bool) -> core.Typed_Error_
 	}
 	write.put_text(&w.out, s[run:])
 	return .None
+}
+
+// Whether one of the eight bytes of `x` is `&`, `<`, `>`, `"` or past 0x7f, which `put_escaped` stops at.
+@(private)
+has_special :: #force_inline proc(x: u64) -> bool {
+	ONES :: u64(0x0101010101010101)
+	HIGH :: u64(0x8080808080808080)
+	zero :: #force_inline proc(v: u64) -> u64 {return (v - ONES) & ~v}
+	found := zero(x ~ (ONES * '&')) | zero(x ~ (ONES * '<')) | zero(x ~ (ONES * '>')) | zero(x ~ (ONES * '"')) | x
+	return found & HIGH != 0
 }
 
 // Whether a fact of `role` stands before the value it is held by.
