@@ -138,17 +138,20 @@ find_child :: proc "contextless" (t: ^Table_Tree, parent: u32, name: string) -> 
 // `INDEXED_AFTER` members, when its earlier members join it too. A container node is refused past the depth limit,
 // since its token opens a level.
 add_node :: proc "contextless" (t: ^Table_Tree, parent: u32, node: Table_Node, keyed: bool) -> (id: u32, r: Refusal) {
-	context = runtime.default_context()
-	n := node
-	n.parent, n.depth = parent, t.nodes[parent].depth + 1
-	n.first, n.last, n.next, n.chain = NIL, NIL, NIL, NIL
-	if n.kind != .Scalar && n.depth + 1 > t.max_depth {
+	depth := t.nodes[parent].depth + 1
+	if node.kind != .Scalar && depth + 1 > t.max_depth {
 		return NIL, .Too_Deep
 	}
 	id = u32(len(t.nodes))
-	if _, err := append(&t.nodes, n); err != nil {
+	if len(t.nodes) == cap(t.nodes) && !grow_nodes(t) {
 		return NIL, .No_Memory
 	}
+	// The node is written in its slot, which the reservation left unwritten.
+	(^runtime.Raw_Dynamic_Array)(&t.nodes).len += 1
+	n := &t.nodes[id]
+	n^ = node
+	n.parent, n.depth = parent, depth
+	n.first, n.last, n.next, n.chain = NIL, NIL, NIL, NIL
 	p := &t.nodes[parent]
 	if p.last == NIL {
 		p.first = id
@@ -160,6 +163,7 @@ add_node :: proc "contextless" (t: ^Table_Tree, parent: u32, node: Table_Node, k
 	if !keyed || p.count <= INDEXED_AFTER {
 		return id, .None
 	}
+	context = runtime.default_context()
 	from := id
 	if p.count == INDEXED_AFTER + 1 {
 		if cap(t.index) == 0 && reserve(&t.index, t.members) != nil {
@@ -175,6 +179,12 @@ add_node :: proc "contextless" (t: ^Table_Tree, parent: u32, node: Table_Node, k
 		t.index[h] = m
 	}
 	return id, .None
+}
+
+@(cold)
+grow_nodes :: proc "contextless" (t: ^Table_Tree) -> bool {
+	context = runtime.default_context()
+	return reserve(&t.nodes, 2 * cap(t.nodes)) == nil
 }
 
 // The member a dotted key's part `part` names in table `cur`, which the key creates when it is new. An existing one is

@@ -219,14 +219,15 @@ simple_key :: proc "contextless" (p: ^Parser) -> (part: Part, ok: bool) {
 
 // Reads a dotted key into `p.parts`.
 key_path :: proc "contextless" (p: ^Parser) -> bool {
-	context = runtime.default_context()
 	clear(&p.parts)
 	for {
 		skip_ws(p)
 		part := simple_key(p) or_return
-		if _, err := append(&p.parts, part); err != nil {
+		if len(p.parts) == cap(p.parts) && !grow_parts(p) {
 			return fault(p, 0, .No_Memory, .None)
 		}
+		(^runtime.Raw_Dynamic_Array)(&p.parts).len += 1
+		p.parts[len(p.parts) - 1] = part
 		skip_ws(p)
 		if p.pos < len(p.src) && p.src[p.pos] == '.' {
 			p.pos += 1
@@ -234,6 +235,12 @@ key_path :: proc "contextless" (p: ^Parser) -> bool {
 		}
 		return true
 	}
+}
+
+@(cold)
+grow_parts :: proc "contextless" (p: ^Parser) -> bool {
+	context = runtime.default_context()
+	return reserve(&p.parts, 2 * cap(p.parts)) == nil
 }
 
 // Reads `=` and the white space after it.

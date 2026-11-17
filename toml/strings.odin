@@ -300,7 +300,13 @@ decode :: proc "contextless" (s: []u8, spelling: u16, buf: []u8) -> (text: strin
 		w = copy(buf, s[lo:hi])
 		return string(buf[:w]), true
 	}
-	i := lo
+	k := kernel.index_byte(s[lo:hi], '\\')
+	if k < 0 {
+		w = copy(buf, s[lo:hi])
+		return string(buf[:w]), true
+	}
+	w = copy(buf, s[lo:lo + k])
+	i := lo + k
 	for i < hi {
 		b := s[i]
 		if b != '\\' {
