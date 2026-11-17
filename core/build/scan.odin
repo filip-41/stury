@@ -92,6 +92,8 @@ Scan :: struct {
 	opts:       rawptr, // the format's walk options, which `rewalk` reads
 	ends:       []u32, // the container ends a `$MANY` replay holds, a frame per depth
 	marks:      [core.MAX_STEPS]Scan_Mark,
+	leap_at:    [core.MAX_STEPS]u32, // the count past which a replay leaps to the close of the container at each depth
+	leap_names: u64, // the steps whose leap waits for their key
 	slots:      [core.MAX_STEPS]u32, // the `Child_Count` reserved for the container open at each depth
 	first:      [8]core.Answer, // `answers` until they outgrow it, so a read of few allocates no list
 }
@@ -120,6 +122,18 @@ scan_plan :: proc(h: ^Scan, paths: []core.Path, read: core.Path_Options, depth: 
 	}
 	h.free = h.path.n
 	h.keep = h.free
+	for step, k in h.path.steps {
+		h.leap_at[k] = max(u32)
+		switch x in step {
+		case core.Index:
+			h.leap_at[k] = u32(x) if x >= 0 else max(u32)
+		case core.Name:
+			if !h.last && !h.every_key {
+				h.leap_at[k], h.leap_names = 0, h.leap_names | 1 << uint(k)
+			}
+		case core.Index_Or_Name, core.All, core.Slice, core.Descend:
+		}
+	}
 	h.next = 1 if h.path.limit > 0 else 0
 	// With one path an `All` drops a member only for the limit, and `cut` tells that.
 	if h.path.limit == max(int) {
@@ -655,18 +669,19 @@ replay_step_one :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs
 	return scan_step(false, .Replay, h, s, t)
 }
 
-// Past the element an `Index` step picked, no sibling of an array is read, so the replay goes on at the array's close
-// with its true count.
+// Past what its step can still pick, no sibling of the open container is read, so the replay goes on at the container's
+// close with its true count. An `Index` has picked at its index, and a `Name` under a first-wins read at its first key.
 @(private)
 replay_leap :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, next, end: u32) -> (u32, core.Hook_Regs) {
 	d := int(s.c)
-	if d < 1 || d > h.path.n || next >= end {
+	#no_bounds_check if d < 1 || u32(s.b) <= h.leap_at[d - 1] || next >= end {
 		return next, s
 	}
-	index, indexed := h.path.steps[d - 1].(core.Index)
+	bit := u64(1) << uint(d - 1)
 	doc := &h.b.doc
 	open := core.Node_Index(s.b >> 32)
-	if !indexed || index < 0 || int(u32(s.b)) <= int(index) || doc.nodes[open].kind != .Array || doc.nodes[open].spelling == core.MAX_CHILDREN || core.header_of(doc) != 0 {
+	named := h.leap_names & bit != 0
+	if named && h.matched & bit == 0 || doc.nodes[open].kind != (.Object if named else .Array) || doc.nodes[open].spelling == core.MAX_CHILDREN || core.header_of(doc) != 0 {
 		return next, s
 	}
 	s := s
