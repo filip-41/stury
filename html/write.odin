@@ -74,14 +74,20 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 value_write :: proc(root: core.Value, as: core.As, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
 	compact := opts
 	compact.pretty = false
-	first, _, refused := serialize(root, compact, {}, context.allocator)
+	// A compact write to bytes is the text that was read back, so it is the answer.
+	keeps_first := !opts.pretty && stream.procedure == nil
+	first, written, refused := serialize(root, compact, {}, allocator if keeps_first else context.allocator)
 	if refused.kind != .None {
 		return nil, 0, refused
 	}
-	defer delete(first)
 	if kind := read_back(first, is_document(root), as, compact); kind != .None {
+		delete(first, allocator if keeps_first else context.allocator)
 		return nil, 0, {kind = kind}
 	}
+	if keeps_first {
+		return first, written, {}
+	}
+	delete(first)
 	return serialize(root, opts, stream, allocator)
 }
 
@@ -246,6 +252,10 @@ put_member :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_forei
 // since an empty array is no element to hold them.
 @(private)
 put_empty_runs :: proc(w: ^Writer, v: core.Value, depth: int, laid: bool) -> core.Typed_Error_Kind {
+	// A markup document's node holds no empty array, and its pairs would group the members of each element in temp memory.
+	if r, is_node := v.(core.Node_Ref); is_node && core.is_markup(r.doc) {
+		return .None
+	}
 	it := core.pairs(v)
 	for _, child in core.pair_next(&it) {
 		if core.kind(child) != .Array || core.length(child) > 0 {
