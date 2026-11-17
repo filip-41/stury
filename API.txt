@@ -953,7 +953,7 @@ comments :: core.comments
 commit :: proc {commit_own, commit_as}
 compare :: core.compare
 compile_selector :: css.compile
-destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind, css.destroy, core.cursor_free}
+destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind, css.destroy, core.cursor_destroy}
 doc_bytes :: core.doc_bytes
 doc_number_text :: core.doc_number_text
 each_answer :: proc {each_answer_one, each_answer_many}
@@ -1705,7 +1705,7 @@ comments :: core.comments
 commit :: proc {commit_own, commit_as}
 compare :: core.compare
 compile_selector :: css.compile
-destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind, css.destroy, core.cursor_free}
+destroy :: proc {core.destroy, typed.plan_destroy, typed.sink_destroy, core.edit_list_destroy, core.path_destroy, records.writer_destroy, write.destroy, host.pool_destroy, build.answers_destroy, schema.destroy, schema.unbind, css.destroy, core.cursor_destroy}
 doc_bytes :: core.doc_bytes
 doc_number_text :: core.doc_number_text
 each_answer :: proc {each_answer_one, each_answer_many}
@@ -1840,13 +1840,12 @@ Tag_Meaning :: enum u8 { Own, Datetime, Local_Datetime, Local_Date, Local_Time, 
 Token_Cursor :: struct { src: [^]u8, n: u64, held: ^Held_Tokens, allocator: runtime.Allocator, }
 Trail :: distinct ^Trail_Step
 Trail_Step :: struct { parent: ^Trail_Step, key: Value, depth: int, }
-Value_Iter :: struct { v: Value, i: int, nodes: Child_Iter, pairs: Pair_Iter, }
 Write_Words :: struct { unwritable, unsupported: string, }
 Written :: struct { lo, hi, src_hi: u64, }
 Written_Read :: struct { a: Applied, view: Token_View, written: []Written, next: int, shift: i64, pending: int, touched: []Node_Index, touched_at: int, frames: [dynamic]Written_Frame, failed: bool, ctx: runtime.Context, }
 build :: proc(src: []u8, as: As, dups := Duplicates.Last, allocator := context.allocator) -> (Document, Error)
 built_value :: proc(r: Node_Ref, dups := Duplicates.Default, borrow := false) -> Value
-cursor_free :: proc "contextless" (cursor: ^Token_Cursor)
+cursor_destroy :: proc "contextless" (cursor: ^Token_Cursor)
 destroy :: proc(doc: ^Document)
 edit_list_destroy :: proc(list: ^Edit_List)
 edit_list_init :: proc(doc: ^Document, allocator := context.allocator) -> Edit_List

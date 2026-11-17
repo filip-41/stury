@@ -48,7 +48,7 @@ LEAF_ROOM :: 48
 #assert(LEAF_ROOM >= spell.F64_ROOM && LEAF_ROOM >= spell.INT_ROOM && LEAF_ROOM >= 18)
 
 // The longest line break and indent stored under the reservation past a token or a member. Deeper text takes `long_line`
-// in the typed write and `rare_line` in the document write.
+// in the typed write.
 LINE_ROOM :: 1024
 
 @(private)

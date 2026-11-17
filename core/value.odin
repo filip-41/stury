@@ -258,6 +258,7 @@ first_slot :: proc(o: ^Object, k: string) -> int {
 
 // A `Value_Iter` walks the members of a container: an array's elements, an object's values, or with `value_pairs`
 // an object's keys and values, in order and a repeated key's each time.
+@(private)
 Value_Iter :: struct {
 	v:     Value,
 	i:     int,

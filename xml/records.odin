@@ -69,7 +69,7 @@ step_entries :: proc(it: ^records.Reader, w: ^records.Entry_Walk, op: records.En
 	case .Free:
 		if e != nil {
 			held_free(e.back, it.allocator)
-			core.cursor_free(&e.cursor)
+			core.cursor_destroy(&e.cursor)
 			free(e, it.allocator)
 			w.cursor = nil
 		}
@@ -89,7 +89,7 @@ step_entries :: proc(it: ^records.Reader, w: ^records.Entry_Walk, op: records.En
 			return 0, core.Fault{kind = .No_Memory}
 		}
 	case .Restore:
-		core.cursor_free(&e.cursor)
+		core.cursor_destroy(&e.cursor)
 		e.cursor.held, e.back = e.back, nil
 	case .Rebase:
 		old, old_n := e.cursor.src, e.cursor.n
@@ -214,7 +214,7 @@ held_copy :: proc(to, from: ^core.Held_Tokens, allocator: runtime.Allocator) -> 
 @(private)
 held_free :: proc(held: ^core.Held_Tokens, allocator: runtime.Allocator) {
 	c := Cursor{held = held, allocator = allocator}
-	core.cursor_free(&c)
+	core.cursor_destroy(&c)
 }
 
 // The hooks of the prolog's walk, which stops at the root's key. `core.No_Hooks` would not stop it, since the walk

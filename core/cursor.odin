@@ -7,7 +7,7 @@ import "base:runtime"
 // token it would give, up to the text's end with the result of the whole text, or up to a place the format's walk
 // pauses at, which its resume continues once the held tokens are given. A cursor so resumes after any token, a `Skip`
 // given on a held token hides what it hides in a walk, and a fault past the stop comes after the held tokens. A stop's
-// `hi` is one past the span of the token it stopped on. A walk that ends frees what its cursor holds, and `cursor_free`
+// `hi` is one past the span of the token it stopped on. A walk that ends frees what its cursor holds, and `cursor_destroy`
 // frees a cursor no resume ended. What the cursor holds lives under `allocator`, or on the default heap when it is nil.
 Token_Cursor :: struct {
 	src:       [^]u8,
@@ -93,11 +93,11 @@ hold :: proc "contextless" (s: ^Holding($H), e: Held_Token) -> bool {
 // Ends a walk of `src` that ran through `s` and had `hi` and `fault` for the whole text: with no stop the walk's result,
 // and with one the stop's, its tokens handed to `cursor` and the registers it saved in `regs`.
 holding_end :: proc "contextless" (src: []u8, cursor: ^Token_Cursor, s: ^Holding($H), regs: ^Hook_Regs, hi: u64, fault: Maybe(Fault), rules: ^Rules) -> (u64, Maybe(Fault)) {
-	cursor_free(cursor)
+	cursor_destroy(cursor)
 	cursor.src, cursor.n = raw_data(src), u64(len(src))
 	if s.no_memory {
 		cursor.held = s.held
-		cursor_free(cursor)
+		cursor_destroy(cursor)
 		return 0, Fault{rules = rules, kind = .No_Memory}
 	}
 	if s.held == nil {
@@ -129,7 +129,7 @@ cursor_resume :: proc "contextless" (src: []u8, cursor: ^Token_Cursor, h: ^$H, r
 		return
 	}
 	hi, fault = held.hi, held.fault
-	cursor_free(cursor)
+	cursor_destroy(cursor)
 	return
 }
 
@@ -159,7 +159,7 @@ cursor_give :: proc "contextless" (held: ^Held_Tokens, h: ^$H, $on: proc "contex
 }
 
 // Frees what `cursor` holds, a stop no resume ended.
-cursor_free :: proc "contextless" (cursor: ^Token_Cursor) {
+cursor_destroy :: proc "contextless" (cursor: ^Token_Cursor) {
 	if cursor.held != nil {
 		if cursor.held.walk != nil {
 			cursor.held.release(cursor.held.walk)

@@ -36,7 +36,7 @@ walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts :=
 	r := held.regs
 	held.walk = nil
 	mute := held.mute
-	core.cursor_free(cursor)
+	core.cursor_destroy(cursor)
 	if regs != nil {
 		regs^ = r
 		return walk_continue(src, paused, mute, h, regs, on, cursor)
