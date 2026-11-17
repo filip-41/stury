@@ -23,7 +23,7 @@ Reading :: struct {
 
 @(private)
 reading_hook :: proc "contextless" (r: ^Reading, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	if t.role == .Attribute && declares_ns(raw_data(r.build.doc.src[t.lo:]), name_length(r.build.doc.src, t.lo)) {
+	if t.role == .Attribute && r.build.doc.src[t.lo] == 'x' && declares_ns(raw_data(r.build.doc.src[t.lo:]), name_length(r.build.doc.src, t.lo)) {
 		r.namespaced = true
 	}
 	return engine.builder_hook_growing(&r.build, s, t)
