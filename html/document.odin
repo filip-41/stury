@@ -190,10 +190,21 @@ token_key_equals :: proc "contextless" (v: ^core.Token_View, t: core.Token, name
 	if len(name) > 3 * int(t.n) {
 		return false
 	}
-	context = runtime.default_context()
-	buf := make([]u8, 3 * int(t.n), context.temp_allocator)
+	room: [256]u8
+	buf := room[:]
+	big := 3 * int(t.n) > len(room)
+	if big {
+		buf = ([^]u8)(runtime.heap_alloc(3 * int(t.n), false))[:3 * int(t.n)]
+		if raw_data(buf) == nil {
+			return false
+		}
+	}
 	s, _ := decode(v.src, Span{lo = t.lo, n = t.n, mode = .Name, flags = DECODED}, buf)
-	return s == name
+	equal := s == name
+	if big {
+		runtime.heap_free(raw_data(buf))
+	}
+	return equal
 }
 
 // Whether the name `written` with its ASCII upper case lowered is `name`.

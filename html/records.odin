@@ -29,7 +29,7 @@ next_text :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) {
 	if lo >= u64(len(it.src)) || it.to != 0 && lo >= it.to {
 		return
 	}
-	t, fault := build_tree(it.src[lo:], Spec(it.as.spec), options_of(it.as), 0, runtime.default_allocator())
+	t, fault := build_tree(it.src[lo:], Spec(it.as.spec), options_of(it.as), 0, tree_allocator())
 	if f, bad := fault.?; bad {
 		f.at += lo
 		it.fault = f

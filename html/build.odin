@@ -20,11 +20,11 @@ build_handle :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator:
 	return build_spec(src, Spec(as.spec), as, refuse_duplicates, allocator)
 }
 
-// Reads `src` as `spec` into a document that holds the handle `handle`. The tree is built on the default heap and freed
+// Reads `src` as `spec` into a document that holds the handle `handle`. The tree is built on the heap, as `tree_allocator` gives it, and freed
 // after the build. Its tokens are given twice, once to size the document and once to write it.
 @(private)
 build_spec :: proc(src: []u8, spec: Spec, handle: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-	t, fault := build_tree(src, spec, options_of(handle), 0, runtime.default_allocator())
+	t, fault := build_tree(src, spec, options_of(handle), 0, tree_allocator())
 	if f, bad := fault.?; bad {
 		return {}, core.fault_error(f)
 	}
@@ -64,7 +64,7 @@ validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> core.
 @(private)
 validate_spec :: proc "contextless" (src: []u8, spec: Spec, opts: Read) -> Maybe(core.Fault) {
 	context = runtime.default_context()
-	t, fault := build_tree(src, spec, opts, 0)
+	t, fault := build_tree(src, spec, opts, 0, tree_allocator())
 	if fault != nil {
 		return fault
 	}
@@ -123,7 +123,7 @@ walk_resume :: proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts :=
 @(private)
 walk_tree :: proc(src: []u8, lo: u64, spec: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
 	t: Html_Tree
-	t, fault = build_tree(src, spec, read_of(opts), lo, runtime.default_allocator())
+	t, fault = build_tree(src, spec, read_of(opts), lo, tree_allocator())
 	if fault != nil {
 		return
 	}

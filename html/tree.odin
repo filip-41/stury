@@ -183,6 +183,31 @@ tag_of :: proc "contextless" (src: []u8, name: Span) -> Tag #no_bounds_check {
 	}
 }
 
+// The allocator of a tree's arrays: the default heap, whose growth moves a block by a new block, a copy and a free in
+// place of a `realloc`. The platform's `realloc` of a large block leaves the old pages resident, so a caller that builds
+// tree after tree passes the size of every tree it ever built.
+@(private)
+tree_allocator :: proc "contextless" () -> runtime.Allocator {
+	return {procedure = tree_allocator_proc}
+}
+
+@(private)
+tree_allocator_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, runtime.Allocator_Error) {
+	#partial switch mode {
+	case .Resize, .Resize_Non_Zeroed:
+		if old_memory != nil && size > 0 {
+			grown, err := runtime.default_allocator_proc(nil, .Alloc if mode == .Resize else .Alloc_Non_Zeroed, size, alignment, nil, 0, loc)
+			if err != nil {
+				return nil, err
+			}
+			copy(grown, ([^]u8)(old_memory)[:min(old_size, size)])
+			runtime.default_allocator_proc(nil, .Free, 0, 0, old_memory, old_size, loc)
+			return grown, nil
+		}
+	}
+	return runtime.default_allocator_proc(nil, mode, size, alignment, old_memory, old_size, loc)
+}
+
 // Reads `src` into a tree: a document, or for `.Fragment` the nodes of a fragment whose context element `opts` names,
 // from byte `lo`, past the sniffed byte order mark for a document read from its first byte. A tree always builds: the faults are `.No_Memory`, `.Too_Wide` at a span longer than 4 GiB, `.Too_Deep` where the
 // stack of open elements would pass `opts.max_depth`, and `.Bad_Char` with `.Encoding` where a document's byte order
