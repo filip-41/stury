@@ -5,7 +5,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   # The tagged commit's full CI run on main, which the release takes in place of running the gate again. Tag after
@@ -129,6 +129,8 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: write
     env:
       VERSION: ${{ github.ref_name }}
       GH_TOKEN: ${{ github.token }}

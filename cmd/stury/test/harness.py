@@ -3,6 +3,7 @@ the peak a run held."""
 
 import argparse
 import ctypes
+import errno
 import functools
 import json
 import os
@@ -177,8 +178,10 @@ def feed(stdin, input):
     for step in (lambda: input and stdin.write(input), stdin.close):
         try:
             step()
-        except BrokenPipeError:
-            pass
+        except OSError as e:
+            # Windows reports a write to a pipe the child closed as EINVAL.
+            if not isinstance(e, BrokenPipeError) and e.errno != errno.EINVAL:
+                raise
 
 
 def run_capped(argv, input, timeout, cap_mb=MEM_CAP_MB, **kw):

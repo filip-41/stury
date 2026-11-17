@@ -127,7 +127,8 @@ def run_cli(binary, case):
         for k in [k for k, v in case["env"].items() if v is None]:
             env.pop(k, None)
         real = enc(os.path.realpath(d))
-        if os.name == "nt":
+        # dash, /bin/sh on Debian and Ubuntu, drops a variable whose name is not a shell name.
+        if os.name == "nt" or not all(re.fullmatch("[A-Za-z_][A-Za-z0-9_]*", k) for k in case["env"]):
             argv, cwd = [binary] + args, d
         else:
             # sh enters the directory: a cwd makes subprocess fork this process, which holds the suite's big texts, one

@@ -57,23 +57,15 @@ FORMAT_WORD = re.compile(r"(?<![a-z])(header|table|cell|delimiter)s?(?![a-z])")
 # The words a neutral package may use, since its users look for them: `records.cell` and `records.write_cells`, and the
 # document's `Table`, whose rows share a header.
 TABLE_WORDS = {"table", "header"}
-ALLOWED_WORDS = {"core/records": {"cell"} | TABLE_WORDS, "core": TABLE_WORDS, "core/build": TABLE_WORDS, "core/compose": TABLE_WORDS, "core/typed": TABLE_WORDS, "core/schema": TABLE_WORDS}
+ALLOWED_WORDS = {"core/records": {"cell"} | TABLE_WORDS, "core": TABLE_WORDS, "core/build": TABLE_WORDS, "core/compose": {"header"}, "core/typed": {"header"}, "core/schema": {"header"}}
 
 DECL = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(::|:=|:)")
 
 
 def odin_files():
-    """Every .odin file in path order: the tracked and the untracked ones that git does not ignore, or, outside a git
-    checkout, every one on disk."""
-    try:
-        out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "*.odin"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
-        return [os.path.join(ROOT, name) for name in sorted(set(out.split()))]
-    except (OSError, subprocess.CalledProcessError):
-        found = []
-        for base, dirs, files in os.walk(ROOT):
-            dirs[:] = [d for d in sorted(dirs) if d != "build" and not d.startswith(".")]
-            found += [os.path.join(base, name) for name in sorted(files) if name.endswith(".odin")]
-        return found
+    """Every .odin file in path order: the tracked and the untracked ones that git does not ignore."""
+    out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "*.odin"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    return [os.path.join(ROOT, name) for name in sorted(set(out.split()))]
 
 
 def package_files(package):
@@ -124,9 +116,9 @@ def strip_code(line, block, keep_strings=False):
     return "".join(out), block
 
 
-IMPORT = re.compile(r'^\s*import\s+(?:([A-Za-z_][A-Za-z0-9_]*)\s+)?"([^"]+)"\s*$')
-IMPORT_GROUP = re.compile(r"^\s*import\s*\(\s*$")
-GROUPED = re.compile(r'^\s*(?:([A-Za-z_][A-Za-z0-9_]*)\s+)?"([^"]+)"\s*,?\s*$')
+IMPORT = re.compile(r'^\s*import\s+(?:([A-Za-z_][A-Za-z0-9_]*)\s+)?"([^"]+)"\s*(?://.*)?$')
+IMPORT_GROUP = re.compile(r"^\s*import\s*\(\s*(?://.*)?$")
+GROUPED = re.compile(r'^\s*(?:([A-Za-z_][A-Za-z0-9_]*)\s+)?"([^"]+)"\s*,?\s*(?://.*)?$')
 
 
 def imports_in(path):
@@ -229,6 +221,11 @@ def body_start(signature):
     return -1
 
 
+def private(attributes):
+    """Whether an attribute list, `private` or `private = "file"` among its parts, makes a declaration private."""
+    return any(part.split("=")[0].strip() == "private" for part in attributes.split(","))
+
+
 def declarations(path):
     """Yields the public top-level names of a file with each declaration's surface: a procedure's signature up to its
     body, a type's or a group's whole text, and the first line of a constant or a variable."""
@@ -248,11 +245,17 @@ def declarations(path):
             stripped = code.strip()
             attr = ATTR.match(code)
             if attr and not open_braces and current is None:
-                attributes = {part.strip() for part in attr.group(1).split(",")}
-                if any(a == "private" or a.startswith("private ") for a in attributes):
-                    pending_private = True
+                pending_private = pending_private or private(attr.group(1))
                 continue
             top = all(open_braces)
+            if open_braces and top:
+                # A declaration inside a `when` block is indented.
+                code, text = code.lstrip(), text.lstrip()
+            # An attribute on the declaration's own line, `@(require_results) name :: proc`.
+            while top and current is None and (attr := LEADING_ATTRIBUTE.match(code)):
+                pending_private = pending_private or private(attr.group(1) or attr.group(2))
+                code = code[attr.end():]
+                text = text[LEADING_ATTRIBUTE.match(text).end():]
             found = DECL.match(code) if top and current is None else None
             if found:
                 name = found.group(1)
@@ -262,7 +265,7 @@ def declarations(path):
             elif stripped and not stripped.startswith("@"):
                 pending_private = False
             # A block built only for tests (`when ODIN_TEST ...`) holds no surface.
-            when = re.match(r"^(when|else)\b", stripped) is not None and "ODIN_TEST" not in stripped
+            when = re.match(r"^(\}\s*)?(when|else)\b", stripped) is not None and "ODIN_TEST" not in stripped
             for c in code:
                 if c == "{":
                     open_braces.append(when and all(open_braces))
@@ -686,7 +689,7 @@ def mutable_globals(path):
                 found += 1
             if text:
                 attributes = set()
-            when = re.match(r"^(when|else|foreign)\b", text) is not None
+            when = re.match(r"^(\}\s*)?(when|else|foreign)\b", text) is not None
             for c in code:
                 if c in "({[":
                     open_brackets.append(c == "{" and when and top)

@@ -73,7 +73,7 @@ class Check:
     cwd: str = ROOT
     arch: str = HOST
     trees: list = dataclasses.field(default_factory=list)  # Whole directories, hashed as they are.
-    also: str = ""  # A second architecture whose sources the check compiles.
+    also: tuple = ()  # Other architectures whose sources the check compiles.
     cli: bool = False  # Runs build/stury, which must be the binary the current sources make.
     slots: int = 1  # The -j slots its own threads fill.
 
@@ -194,16 +194,21 @@ def compiler_of(odin):
     return Compiler(digest.hexdigest(), root)
 
 
+def portable(arg):
+    """A command's argument as every worktree spells it: paths under the root relative to it, and the compiler's path
+    left out, since the key holds the compiler's identity."""
+    return re.sub(r"^(ODIN=|--odin=).*", r"\1", arg.replace(ROOT + os.sep, ""))
+
+
 def key_of(check, compiler):
     digest = hashlib.sha256()
     digest.update(compiler.identity.encode())
     digest.update(check.name.encode())
-    digest.update(repr(check.cmd).encode())
+    digest.update(repr([portable(arg) for arg in check.cmd]).encode())
     digest.update(repr(sorted((k, v) for k, v in os.environ.items() if k.startswith("STURY_"))).encode())
     hash_tree(digest, os.path.join(check.cwd, "Makefile"))
-    hash_closure(digest, check.roots, check.arch, compiler)
-    if check.also:
-        hash_closure(digest, check.roots, check.also, compiler)
+    for arch in (check.arch, *check.also):
+        hash_closure(digest, check.roots, arch, compiler)
     for tree in check.trees:
         hash_tree(digest, tree)
     return digest.hexdigest()
@@ -232,8 +237,9 @@ def make(odin, target, **variables):
 
 
 def rosetta():
-    """Whether this machine runs x86-64 programs."""
-    return platform.machine() == "x86_64" or os.path.exists("/Library/Apple/usr/libexec/oah/libRosettaRuntime")
+    """Whether this machine runs macOS x86-64 programs, which the x86 test packages build."""
+    native = platform.machine() == "x86_64" or os.path.exists("/Library/Apple/usr/libexec/oah/libRosettaRuntime")
+    return platform.system() == "Darwin" and native
 
 
 def cli_suites(absent, odin):
@@ -278,9 +284,10 @@ def checks(odin):
     out = []
     absent = []
     examples = sorted(entry.path for entry in os.scandir(at("examples")) if entry.is_dir())
-    # `checks.py imports` reads every tracked source, the examples' among them.
+    # `checks.py imports` reads every tracked source, the examples' among them, and `api` reads names.txt and the docs.
     every = [at(p) for p in LIB_PKGS + TEST_PKGS + BENCH_PKGS + [CLI]] + examples
-    out.append(Check("lint", 0, every, make(odin, "lint"), trees=[at("tools/checks.py"), at("API.txt"), at("API_SHARED.txt")], also="amd64", slots=2))
+    read = ["tools/checks.py", "tools/names.txt", "API.txt", "API_SHARED.txt", "README.md", "docs/guide.md"]
+    out.append(Check("lint", 0, every, make(odin, "lint"), trees=[at(p) for p in read], also=("amd64", "riscv64"), slots=2))
     if shutil.which("node"):
         out.append(Check("ecma node diff", 2, [at("core/regex"), at("core/regex/test/oracle")], make(odin, "ecma-diff"), trees=[at("core/regex/test/ecma_diff.py")]))
     else:
@@ -309,7 +316,7 @@ def checks(odin):
                 gate = 1 if (opt == "none") == (tier == 0) else 2
                 out.append(Check(f"{name} x86 v{tier + 2} {opt}", gate, root, make(odin, target), arch="amd64", trees=golden))
     if not rosetta():
-        absent.append("the x86 test packages (no Rosetta, and this is not an x86-64 machine)")
+        absent.append("the x86 test packages (they run on macOS, on x86-64 or under Rosetta)")
     # Alone, since each fills every core.
     out.append(Check("json-test full sweeps", 2, [at("json/test")], make(odin, "test-sweep"), slots=EVERY_SLOT))
     out.append(Check("f32 exhaustive", 2, [at("core/spell"), at("core/spell/test")], make(odin, "test-f32"), slots=EVERY_SLOT))

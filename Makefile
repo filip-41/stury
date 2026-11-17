@@ -67,11 +67,9 @@ BENCH_FILES ?=
 RECORD_FILES ?=
 LANES ?=
 
-# `$(call odin_each,VERB,PACKAGES,FLAGS,LABEL)` runs `odin VERB` over each package and stops at the first failure.
-define odin_each
-@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && for p in $(2); do \
-	echo "== $$p$(4)"; $(ODIN) $(1) $$p $(3) $(if $(filter test,$(1)),-out:$$d/test) || exit 1; \
-done
+# `$(call odin_check,PACKAGES,FLAGS,LABEL)` runs `odin check` over each package and stops at the first failure.
+define odin_check
+@for p in $(1); do echo "== $$p$(3)"; $(ODIN) check $$p $(2) || exit 1; done
 endef
 
 # The command line at $(OPT). STURY_VERSION names the version `-V` prints, the commit's short hash by default.
@@ -282,20 +280,20 @@ lint:
 	python3 tools/checks.py words
 	python3 tools/checks.py globals
 	python3 tools/checks.py api
-	$(call odin_each,check,$(LIB_PKGS) $(filter-out html/test,$(TEST_PKGS)) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS),)
+	$(call odin_check,$(LIB_PKGS) $(filter-out html/test,$(TEST_PKGS)) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS),)
 	$(ODIN) check html/test -no-entry-point $(LINT_FLAGS) $(HTML_INTERNALS)
-	$(call odin_each,check,$(BENCH_PKGS),$(LINT_FLAGS),)
+	$(call odin_check,$(BENCH_PKGS),$(LINT_FLAGS),)
 	$(ODIN) check cmd/stury $(LINT_FLAGS)
 	$(ODIN) check cmd/stury $(LINT_FLAGS) -target:linux_amd64
 	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && echo "== cmd/stury (windows_amd64 objects)" && \
 		$(ODIN) build cmd/stury -build-mode:obj -target:windows_amd64 -windows-sdk-root:$$d $(LINT_FLAGS) -out:$$d/stury.obj
-	$(call odin_each,check,$(LIB_PKGS) $(filter-out html/test,$(TEST_PKGS)) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_amd64, (linux_amd64))
+	$(call odin_check,$(LIB_PKGS) $(filter-out html/test,$(TEST_PKGS)) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_amd64, (linux_amd64))
 	$(ODIN) check html/test -no-entry-point $(LINT_FLAGS) $(HTML_INTERNALS) -target:linux_amd64
 	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && for p in $(TIER_PKGS); do for o in none speed; do \
 		echo "== $$p (linux_amd64 v4 -o:$$o)"; \
 		$(ODIN) test $$p -build-mode:obj -target:linux_amd64 -define:TIER=2 -o:$$o $(LINT_FLAGS) -out:$$d/t.o || exit 1; \
 	done; done
-	$(call odin_each,check,$(LIB_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_riscv64, (linux_riscv64))
+	$(call odin_check,$(LIB_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_riscv64, (linux_riscv64))
 
 # The public declarations of each library package, sorted. `api` compares their signatures with API.txt and
 # API_SHARED.txt, and `python3 tools/checks.py api --write` regenerates both.
