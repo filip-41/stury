@@ -13,21 +13,20 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.La
 	return doc, core.error_of(err)
 }
 
-// What the first walk of a build counts, and whether the text declares a namespace, in which case a key is compared
-// through `key_is`, which resolves an expanded name.
+// What a build's walk writes through: the builder, and whether the text declares a namespace, in which case a key is
+// compared through `key_is`, which resolves an expanded name.
 @(private)
-Counter :: struct {
-	count:      engine.Count,
-	src:        []u8,
+Reading :: struct {
+	build:      engine.Builder,
 	namespaced: bool,
 }
 
 @(private)
-count_hook :: proc "contextless" (c: ^Counter, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	if t.role == .Attribute && declares_ns(raw_data(c.src[t.lo:]), name_length(c.src, t.lo)) {
-		c.namespaced = true
+reading_hook :: proc "contextless" (r: ^Reading, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	if t.role == .Attribute && declares_ns(raw_data(r.build.doc.src[t.lo:]), name_length(r.build.doc.src, t.lo)) {
+		r.namespaced = true
 	}
-	return engine.builder_hook_count(&c.count, s, t)
+	return engine.builder_hook_growing(&r.build, s, t)
 }
 
 // Moves the sealed DTD `state` from the default heap into `doc`'s allocator when `keep`, or frees it. Returns false when
@@ -57,32 +56,28 @@ build_handle :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator:
 	return build_spec(src, Spec(as.spec), as, refuse_duplicates, allocator)
 }
 
-// Reads `src` as `spec` into a document that holds the handle `handle`: the text is walked to size the document and
-// walked again to write it.
+// Reads `src` as `spec` into a document that holds the handle `handle`. The nodes are reserved at JSON's bound and the
+// hook grows past it, since a text of short elements, or a reference to an entity, makes more nodes than half its bytes.
 @(private)
 build_spec :: proc(src: []u8, spec: Spec, handle: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	opts := options_of(handle)
-	c := Counter {
-		src = src,
+	depth := min(core.reserve_depth(opts.max_depth, len(src)), core.MAX_DEPTH)
+	frames: [core.MAX_DEPTH]u64 = ---
+	r := Reading {
+		build = engine.builder_start(src, handle, refuse_duplicates, allocator, (len(src) + depth) / 2 + 16, depth, 0, frames[:]),
 	}
-	counted: core.Hook_Regs
-	_, fault := walk(src, 0, .Xml, opts, &c, &counted, count_hook)
-	if f, bad := fault.?; bad {
-		return {}, core.fault_error(f)
-	}
-	b := engine.builder_start(src, handle, refuse_duplicates, allocator, c.count.nodes, c.count.deepest, c.count.facts)
-	if len(b.doc.nodes) == 0 {
-		return engine.builder_end(&b, engine.BUILDER_REGS, nil)
+	if len(r.build.doc.nodes) == 0 {
+		return engine.builder_end(&r.build, engine.BUILDER_REGS, nil)
 	}
 	regs := engine.BUILDER_REGS
-	state: []u8
-	b.root_close, fault, state = walk_keeping(src, 0, opts, &b, &regs, engine.builder_hook)
-	doc, err := engine.builder_end(&b, regs, fault)
+	root_close, fault, state := walk_keeping(src, 0, opts, &r, &regs, reading_hook)
+	r.build.root_close = root_close
+	doc, err := engine.builder_end(&r.build, regs, fault)
 	if !keep_state(&doc, state, err.kind == .None, allocator) {
 		core.destroy(&doc)
 		return {}, {kind = .No_Memory}
 	}
-	if err.kind == .None && c.namespaced {
+	if err.kind == .None && r.namespaced {
 		for &n in doc.nodes {
 			if n.role == .Key {
 				n.spelling |= core.SPELLING_DECODE
