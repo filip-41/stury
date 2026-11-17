@@ -169,12 +169,6 @@ conflict :: proc(c: ^Commit, at: u64) -> bool {
 	return false
 }
 
-@(private = "file")
-put :: proc(out: ^[dynamic]u8, b: []u8) -> bool {
-	_, failed := append(out, ..b)
-	return failed == nil
-}
-
 // Writes node `i`'s item with its tags: its bytes as they are when no edit reaches it, else its edits' text.
 @(private = "file")
 put_item :: proc(c: ^Commit, out: ^[dynamic]u8, i: core.Node_Index) -> bool {
@@ -209,7 +203,7 @@ put_item :: proc(c: ^Commit, out: ^[dynamic]u8, i: core.Node_Index) -> bool {
 	if tag >= 0 {
 		put_tags(c, out, c.edits[tag]) or_return
 	} else {
-		put(out, doc.src[tags:lo]) or_return
+		compose.push_all(out, doc.src[tags:lo]) or_return
 	}
 	if set >= 0 {
 		if shaped || inside < end {
@@ -219,10 +213,10 @@ put_item :: proc(c: ^Commit, out: ^[dynamic]u8, i: core.Node_Index) -> bool {
 		if e.role == .Key {
 			return edit_key_text(doc, e.text, out)
 		}
-		return put(out, e.text)
+		return compose.push_all(out, e.text)
 	}
 	if !shaped && inside == end {
-		return put(out, doc.src[lo:hi])
+		return compose.push_all(out, doc.src[lo:hi])
 	}
 	return put_container(c, out, i, lo, hi)
 }
@@ -239,7 +233,7 @@ put_tags :: proc(c: ^Commit, out: ^[dynamic]u8, e: core.Edit) -> bool {
 		return false
 	}
 	head: [9]u8
-	return put(out, head[:write.put_head(raw_data(head[:]), tag, TREE, .Tag)])
+	return compose.push_all(out, head[:write.put_head(raw_data(head[:]), tag, TREE, .Tag)])
 }
 
 // The number decimal `digits` spell, when they are one to twenty digits that fit a u64.
@@ -307,7 +301,7 @@ put_container :: proc(c: ^Commit, out: ^[dynamic]u8, i: core.Node_Index, lo, hi:
 		head_hi = lo + u64(width)
 	}
 	if ai == 31 || len(entries) == n {
-		put(out, src[lo:head_hi]) or_return
+		compose.push_all(out, src[lo:head_hi]) or_return
 	} else {
 		put_count(out, b >> 5, len(entries), ai if c.spec == .Cbor else 0) or_return
 	}
@@ -318,7 +312,7 @@ put_container :: proc(c: ^Commit, out: ^[dynamic]u8, i: core.Node_Index, lo, hi:
 			put_member(c, out, members[:], inserts, k) or_return
 		}
 	}
-	return ai != 31 || put(out, src[hi - 1:hi])
+	return ai != 31 || compose.push_all(out, src[hi - 1:hi])
 }
 
 // Member `k` of a container, its own when `k` is below the count of `members`, else insert `k - len(members)`.
@@ -335,7 +329,7 @@ put_member :: proc(c: ^Commit, out: ^[dynamic]u8, members: []Member, inserts: []
 	if e.role == .Key && !edit_key_text(c.doc, e.key, out) {
 		return false
 	}
-	return put(out, e.text)
+	return compose.push_all(out, e.text)
 }
 
 // Writes the members `entries` names in the order of their encoded keys, as the commit's spec sorts them.
@@ -357,7 +351,7 @@ put_sorted :: proc(c: ^Commit, out: ^[dynamic]u8, members: []Member, inserts: []
 		if k < len(members) {
 			put_item(c, &buf, members[k].value) or_return
 		} else {
-			put(&buf, c.edits[inserts[k - len(members)]].text) or_return
+			compose.push_all(&buf, c.edits[inserts[k - len(members)]].text) or_return
 		}
 		spans[j].hi = len(buf)
 	}
@@ -370,7 +364,7 @@ put_sorted :: proc(c: ^Commit, out: ^[dynamic]u8, members: []Member, inserts: []
 		slice.sort_by(spans, proc(a, b: Written) -> bool {return key_before(a.key, b.key, .Deterministic)})
 	}
 	for s in spans {
-		put(out, buf[s.lo:s.hi]) or_return
+		compose.push_all(out, buf[s.lo:s.hi]) or_return
 	}
 	return true
 }
@@ -460,5 +454,5 @@ put_count :: proc(out: ^[dynamic]u8, major: u8, count: int, ai: u8) -> bool {
 	for k in 0 ..< width {
 		head[1 + k] = u8(n >> (8 * uint(width - 1 - k)))
 	}
-	return put(out, head[:1 + width])
+	return compose.push_all(out, head[:1 + width])
 }

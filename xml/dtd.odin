@@ -339,38 +339,20 @@ dtd_bytes :: proc "contextless" (d: ^Dtd, b: []u8) -> (lo: u64, ok: bool) {
 	return lo, true
 }
 
-// Appends an entity. Returns its index, `NO_DECL` when memory runs out.
+// Appends `v` to the array `items` of `n` used and `cap` room. Returns its index, `NO_DECL` when memory runs out.
 @(private)
-dtd_entity :: proc "contextless" (d: ^Dtd, e: Entity) -> u32 {
-	if d.built.entities == d.ent_cap {
-		cap := max(16, 2 * d.ent_cap)
-		fresh := runtime.heap_resize(d.ents, int(cap) * size_of(Entity))
+dtd_push :: proc "contextless" (d: ^Dtd, items: ^[^]$T, n, cap: ^u32, v: T) -> u32 {
+	if n^ == cap^ {
+		room := max(16, 2 * cap^)
+		fresh := runtime.heap_resize(items^, int(room) * size_of(T))
 		if fresh == nil {
 			return NO_DECL
 		}
-		d.ents, d.ent_cap = ([^]Entity)(fresh), cap
+		items^, cap^ = ([^]T)(fresh), room
 	}
-	i := d.built.entities
-	d.ents[i] = e
-	d.built.entities += 1
-	dtd_refresh(d)
-	return i
-}
-
-// Appends an attribute-list declaration. Returns its index, `NO_DECL` when memory runs out.
-@(private)
-dtd_attr :: proc "contextless" (d: ^Dtd, a: Attr_Decl) -> u32 {
-	if d.built.attrs == d.att_cap {
-		cap := max(16, 2 * d.att_cap)
-		fresh := runtime.heap_resize(d.atts, int(cap) * size_of(Attr_Decl))
-		if fresh == nil {
-			return NO_DECL
-		}
-		d.atts, d.att_cap = ([^]Attr_Decl)(fresh), cap
-	}
-	i := d.built.attrs
-	d.atts[i] = a
-	d.built.attrs += 1
+	i := n^
+	items^[i] = v
+	n^ += 1
 	dtd_refresh(d)
 	return i
 }

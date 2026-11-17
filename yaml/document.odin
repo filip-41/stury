@@ -1,6 +1,7 @@
 #+private
 package yaml
 
+import "base:intrinsics"
 import spell "../core/spell"
 import core "../core"
 
@@ -42,20 +43,14 @@ rules_of :: proc "contextless" () -> ^core.Rules {
 // The handle of `spec` read with `opts` over `readers`.
 as_of :: proc "contextless" (readers: ^core.Readers, spec: Spec, opts: Options) -> core.As {
 	a := core.As{readers = readers, spec = u8(spec), max_depth = opts.max_depth}
-	limit := opts.alias_limit
-	for i in 0 ..< 8 {
-		a.opts[i] = u8(limit >> (8 * uint(i)))
-	}
+	intrinsics.unaligned_store((^u64)(&a.opts), opts.alias_limit)
 	a.opts[8] = u8(opts.merge_keys)
 	return a
 }
 
 options_of :: #force_inline proc "contextless" (as: core.As) -> Options {
-	limit: u64
-	for i in 0 ..< 8 {
-		limit |= u64(as.opts[i]) << (8 * uint(i))
-	}
-	return {max_depth = as.max_depth, alias_limit = limit, merge_keys = as.opts[8] != 0}
+	as := as
+	return {max_depth = as.max_depth, alias_limit = intrinsics.unaligned_load((^u64)(&as.opts)), merge_keys = as.opts[8] != 0}
 }
 
 is_yaml :: #force_inline proc "contextless" (doc: ^core.Document) -> bool {

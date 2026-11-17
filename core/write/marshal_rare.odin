@@ -16,18 +16,27 @@ import "../typed"
 // `w.n_ptrs` are pointers' and `any`s', which no depth counts.
 @(private)
 leaf :: #force_no_inline proc(w: ^Walker, f: ^typed.Field, v: uintptr, top, nest: int, $P: bool, $T: Tree, $put: Put) -> core.Typed_Error_Kind #no_bounds_check {
+	BIN :: len(T[.Heads]) != 0
 	out := &w.out
 	m := &w.meta[f.meta]
 	p := room(out, LEAF_ROOM)
 	#partial switch f.kind {
 	case .I8, .I16, .I32, .U8, .U16, .U32, .U64:
-		out.cursor += int_text(p, f.kind, v)
+		when BIN {
+			out.cursor += int_head(p, f.kind, v, T)
+		} else {
+			out.cursor += int_text(p, f.kind, v)
+		}
 	case .F32:
 		x := (^f32)(v)^
-		if x - x != 0 {
-			return .Non_Finite
+		when BIN {
+			out.cursor += put_float(p, f64(x), T)
+		} else {
+			if x - x != 0 {
+				return .Non_Finite
+			}
+			out.cursor += spell.f32_text(p, x)
 		}
-		out.cursor += spell.f32_text(p, x)
 	case .Bool_Wide:
 		out.cursor += put_bool(p, loaded(v, int(m.size)) != 0, T)
 	case .Cstring:
@@ -38,10 +47,15 @@ leaf :: #force_no_inline proc(w: ^Walker, f: ^typed.Field, v: uintptr, top, nest
 		}
 		return put(out, p, string(cs), &w.opts)
 	case .Enum:
-		return put_enum(w, m.enum_info, enum_value(m.enum_info, v), put)
+		return put_enum(w, m.enum_info, enum_value(m.enum_info, v), T, put)
 	case .Raw:
-		return put_raw(w, string((^typed.Raw)(v)^), top - w.n_ptrs, T)
+		when BIN {
+			return binary_raw(w, string((^typed.Raw)(v)^), top - w.n_ptrs, T)
+		} else {
+			return put_raw(w, string((^typed.Raw)(v)^), top - w.n_ptrs, T)
+		}
 	case .Value:
+		// A built value is written by the format's token write, which a binary format's plans hold.
 		text, err := value_text(w.plan, (^core.Value)(v)^, context.temp_allocator)
 		if err.kind == .None {
 			put_text(&w.out, string(text))
@@ -50,18 +64,26 @@ leaf :: #force_no_inline proc(w: ^Walker, f: ^typed.Field, v: uintptr, top, nest
 	case .Number_Text:
 		return put_number_text(w, (^core.Number_Text)(v).text, top - w.n_ptrs, T)
 	case .Number:
-		return put_number_as(&w.out, (^core.Number)(v)^, T)
+		when BIN {
+			return put_binary_number(out, (^core.Number)(v)^, T)
+		} else {
+			return put_number_as(out, (^core.Number)(v)^, T)
+		}
 	case .Bytes:
-		stack: [512]u8
-		text, ok := bytes_text(cast([]u8)(^typed.Bytes)(v)^, stack[:])
-		if !ok {
-			return .No_Memory
+		when BIN {
+			return binary_bytes(out, cast([]u8)(^typed.Bytes)(v)^, T)
+		} else {
+			stack: [512]u8
+			text, ok := bytes_text(cast([]u8)(^typed.Bytes)(v)^, stack[:])
+			if !ok {
+				return .No_Memory
+			}
+			when len(T[.Bytes_Tag]) != 0 {
+				out.cursor += put_word(p, T[.Bytes_Tag])
+				p = room(out, LEAF_ROOM)
+			}
+			return put(out, p, text, &w.opts)
 		}
-		when len(T[.Bytes_Tag]) != 0 {
-			out.cursor += put_word(p, T[.Bytes_Tag])
-			p = room(out, LEAF_ROOM)
-		}
-		return put(out, p, text, &w.opts)
 	case .Scalar:
 		s := (^typed.Scalar)(v)^
 		if text, is_text := s.(core.Number_Text); is_text {
@@ -118,13 +140,21 @@ enum_spelled :: proc(plan: ^typed.Plan, info: ^runtime.Type_Info_Enum, value: i6
 	return string(p[:spell.i64_text(p, value)]), .None
 }
 
-// An enum as `enum_spelled` spells it.
+// An enum as `enum_spelled` spells it. A binary tree writes the integer as its head.
 @(private)
-put_enum :: proc(w: ^Walker, info: ^runtime.Type_Info_Enum, value: i64, $put: Put) -> core.Typed_Error_Kind {
+put_enum :: proc(w: ^Walker, info: ^runtime.Type_Info_Enum, value: i64, $T: Tree, $put: Put) -> core.Typed_Error_Kind {
 	p := room(&w.out, LEAF_ROOM)
 	name := enum_spelled(w.plan, info, value, p) or_return
 	if typed.enum_by_number(w.plan, info) {
-		w.out.cursor += len(name)
+		when len(T[.Heads]) != 0 {
+			if base, ok := runtime.type_info_base(info.base).variant.(runtime.Type_Info_Integer); ok && !base.signed {
+				w.out.cursor += put_head(p, u64(value), T, .Uint)
+			} else {
+				w.out.cursor += put_int(p, value, T)
+			}
+		} else {
+			w.out.cursor += len(name)
+		}
 		return .None
 	}
 	return put(&w.out, p, name, &w.opts)
@@ -134,6 +164,7 @@ put_enum :: proc(w: ^Walker, info: ^runtime.Type_Info_Enum, value: i64, $put: Pu
 // refused, as a read refuses it. The array counts toward the depth.
 @(private)
 put_bit_set :: proc(w: ^Walker, m: ^typed.Meta, v: uintptr, top, nest: int, $P: bool, $T: Tree, $put: Put) -> core.Typed_Error_Kind #no_bounds_check {
+	BIN :: len(T[.Heads]) != 0
 	out := &w.out
 	if top == core.MAX_DEPTH {
 		return .Too_Deep
@@ -141,34 +172,44 @@ put_bit_set :: proc(w: ^Walker, m: ^typed.Meta, v: uintptr, top, nest: int, $P: 
 	e := &w.meta[m.block]
 	bits: u128
 	runtime.mem_copy_non_overlapping(&bits, rawptr(v), int(m.size))
-	put_byte(out, T[.Open_Array][0])
-	written := 0
+	when BIN {
+		out.cursor += put_head(room(out, 9), u64(intrinsics.count_ones(bits)), T, .Array)
+	} else {
+		put_byte(out, T[.Open_Array][0])
+	}
 	for b := bits; b != 0; b &= b - 1 {
 		value := e.lower + i64(intrinsics.count_trailing_zeros(b))
-		p := room(out, 2 + LINE_ROOM + 16)
-		if written > 0 {
-			p[0] = T[.Comma][0]
-			out.cursor += 1
-			p = p[1:]
+		when !BIN {
+			p := room(out, 2 + LINE_ROOM + 16)
+			if b != bits {
+				p[0] = T[.Comma][0]
+				out.cursor += 1
+				p = p[1:]
+			}
+			when P {
+				line(w, p, nest + 1)
+			}
 		}
-		written += 1
-		when P {
-			line(w, p, nest + 1)
-		}
-		if e.enum_info == nil {
-			out.cursor += spell.i64_text(room(out, LEAF_ROOM), value)
+		if e.enum_info != nil {
+			put_enum(w, e.enum_info, value, T, put) or_return
 		} else {
-			put_enum(w, e.enum_info, value, put) or_return
+			when BIN {
+				out.cursor += put_int(room(out, 9), value, T)
+			} else {
+				out.cursor += spell.i64_text(room(out, LEAF_ROOM), value)
+			}
 		}
 	}
-	p := room(out, 1 + LINE_ROOM + 16)
-	when P {
-		if written > 0 {
-			p = line(w, p, nest)
+	when !BIN {
+		p := room(out, 1 + LINE_ROOM + 16)
+		when P {
+			if bits != 0 {
+				p = line(w, p, nest)
+			}
 		}
+		p[0] = T[.Close_Array][0]
+		out.cursor += 1
 	}
-	p[0] = T[.Close_Array][0]
-	out.cursor += 1
 	return .None
 }
 
@@ -308,13 +349,18 @@ put_raw :: proc(w: ^Walker, s: string, top: int, $T: Tree) -> core.Typed_Error_K
 	return .None
 }
 
-// A `Number_Text`, checked as a `Raw` is and refused unless it is a number. An empty one is null.
+// A `Number_Text`, checked as a `Raw` is and refused unless it is a number. An empty one is null. A binary tree writes it
+// as `put_binary_number_text` does.
 @(private)
 put_number_text :: proc(w: ^Walker, s: string, top: int, $T: Tree) -> core.Typed_Error_Kind {
-	if len(s) != 0 && s[0] != '-' && (s[0] < '0' || s[0] > '9') {
-		return .Bad_Raw
+	when len(T[.Heads]) != 0 {
+		return put_binary_number_text(&w.out, s, T)
+	} else {
+		if len(s) != 0 && s[0] != '-' && (s[0] < '0' || s[0] > '9') {
+			return .Bad_Raw
+		}
+		return put_raw(w, s, top, T)
 	}
-	return put_raw(w, s, top, T)
 }
 
 // The text of float `x` at `p` as the tree spells it: JSON's layout, a `Point_Zero` after text that reads as an integer, and
@@ -520,6 +566,12 @@ union_arm :: proc(m: ^typed.Meta, v: uintptr) -> ^typed.Arm {
 add_entry :: proc(w: ^Walker, name: string, value: uintptr, rec: ^typed.Field, $put: Put) -> core.Typed_Error_Kind {
 	at := w.keys.cursor
 	put(&w.keys, room(&w.keys, 18), name, &w.opts) or_return
+	return push_entry(w, at, name, value, rec)
+}
+
+// Adds the entry whose key's written bytes are in `keys` from `at` to its end, with the key's own bytes `name` after them.
+@(private)
+push_entry :: proc(w: ^Walker, at: int, name: string, value: uintptr, rec: ^typed.Field) -> core.Typed_Error_Kind {
 	size := w.keys.cursor - at
 	put_text(&w.keys, name)
 	if _, failed := append(&w.entries, Entry{at = at, size = size, named = len(name), value = value, rec = rec}); failed != nil {
@@ -587,19 +639,24 @@ sort_words :: proc(items: []Sort_Item, entries: []Entry, d: int) #no_bounds_chec
 			low, high = high, low
 		}
 		sort_words(low, entries, d)
-		mid := items[lt:gt]
-		// A zero last byte says the keys end inside the word, or hold a NUL there. Their text is compared instead.
-		if pivot & 0xFF == 0 {
-			insertion_sort(mid, entries)
-		} else {
-			for &it in mid {
-				it.word = key_word(entries[it.entry].text, d + 8)
-			}
-			sort_words(mid, entries, d + 8)
-		}
+		sort_run(items[lt:gt], pivot, entries, d)
 		items = high
 	}
 	insertion_sort(items, entries)
+}
+
+// Sorts the items that share the word `word` of the entries' text from `d`. A zero last byte says the keys end inside the
+// word, or hold a NUL there, and their text is compared instead.
+@(private)
+sort_run :: proc(run: []Sort_Item, word: u64, entries: []Entry, d: int) #no_bounds_check {
+	if word & 0xFF == 0 {
+		insertion_sort(run, entries)
+		return
+	}
+	for &it in run {
+		it.word = key_word(entries[it.entry].text, d + 8)
+	}
+	sort_words(run, entries, d + 8)
 }
 
 @(private)
@@ -678,19 +735,16 @@ add_map_entries :: proc(w: ^Walker, f: ^typed.Field, m: ^typed.Meta, v: uintptr,
 		if m.key_kind == .String {
 			add_entry(w, (^string)(key)^, value, rec, put) or_return
 		} else {
-			when len(T[.Heads]) != 0 {
-				binary_key_entry(w, m, key, value, rec, T, put) or_return
-			} else {
-				add_key_entry(w, m, key, value, rec, put) or_return
-			}
+			add_key_entry(w, m, key, value, rec, T, put) or_return
 		}
 	}
 	return .None
 }
 
-// `add_entry` for a key that is not a string. Its text is held in the call, which `put` copies.
+// `add_entry` for a key that is not a string. Its text is held in the call, which `put` copies. A binary tree writes an
+// integer key, and an enum's under `enum_by_number`, as an integer and not through `put`.
 @(private)
-add_key_entry :: proc(w: ^Walker, m: ^typed.Meta, key, value: uintptr, rec: ^typed.Field, $put: Put) -> core.Typed_Error_Kind {
+add_key_entry :: proc(w: ^Walker, m: ^typed.Meta, key, value: uintptr, rec: ^typed.Field, $T: Tree, $put: Put) -> core.Typed_Error_Kind {
 	text: [spell.INT_ROOM]u8
 	name: string
 	#partial switch m.key_kind {
@@ -700,6 +754,18 @@ add_key_entry :: proc(w: ^Walker, m: ^typed.Meta, key, value: uintptr, rec: ^typ
 		name = enum_spelled(w.plan, m.enum_info, enum_value(m.enum_info, key), &text[0]) or_return
 	case:
 		name = string(text[:int_text(&text[0], m.key_kind, key)])
+	}
+	when len(T[.Heads]) != 0 {
+		if m.key_kind != .Cstring && (m.key_kind != .Enum || typed.enum_by_number(w.plan, m.enum_info)) {
+			at := w.keys.cursor
+			p := room(&w.keys, 9)
+			if m.key_kind == .Enum {
+				w.keys.cursor += put_int(p, enum_value(m.enum_info, key), T)
+			} else {
+				w.keys.cursor += int_head(p, m.key_kind, key, T)
+			}
+			return push_entry(w, at, name, value, rec)
+		}
 	}
 	return add_entry(w, name, value, rec, put)
 }
@@ -985,16 +1051,7 @@ sort_words_radix :: proc(items: []Sort_Item, entries: []Entry, d: int) -> bool #
 			hi += 1
 		}
 		if hi - lo > 1 {
-			run := items[lo:hi]
-			// A zero last byte says the keys end inside the word, or hold a NUL there. Their text is compared instead.
-			if items[lo].word & 0xFF == 0 {
-				insertion_sort(run, entries)
-			} else {
-				for &it in run {
-					it.word = key_word(entries[it.entry].text, d + 8)
-				}
-				sort_words(run, entries, d + 8)
-			}
+			sort_run(items[lo:hi], items[lo].word, entries, d)
 		}
 		lo = hi
 	}

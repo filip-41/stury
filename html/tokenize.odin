@@ -393,6 +393,7 @@ Tokenizer :: struct($H: typeid) {
 	back:       Back, // the text state a failed end tag returns to
 	ret:        Return, // the state a character reference returns to
 	quote:      u8, // the quote a DOCTYPE identifier ends at
+	system:     bool, // the DOCTYPE identifier being read is the system identifier, else the public one
 	in_foreign: bool, // the adjusted current node is outside the HTML namespace
 	kept:       bool, // the current attribute is no duplicate, so its value is stored
 	wide:       bool, // a span was longer than 4 GiB

@@ -2,7 +2,6 @@ package json_tests
 
 import "base:runtime"
 import "core:fmt"
-import "core:io"
 import "core:math/rand"
 import "core:mem"
 import "core:slice"
@@ -94,8 +93,8 @@ records_scan_a_stream :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := "{\"a\":1}\n{\"b\":2}\n{\"a\":[3]} {\"a\":4\n"
 	path, _ := core.parse_path(".a", context.temp_allocator)
-	c := Chunked{src = transmute([]u8)src, sizes = {3}, fail_at = -1}
-	it := records.open_stream(chunked(&c), json.as(.Json), .Concatenated)
+	c := walktest.Chunked{src = transmute([]u8)src, sizes = {3}}
+	it := records.open_stream(walktest.chunked(&c), json.as(.Json), .Concatenated)
 	defer records.close(&it)
 	got: [dynamic]string
 	defer delete(got)
@@ -119,8 +118,8 @@ records_scan_clone_owns_answers :: proc(t: ^testing.T) {
 	src := "{\"a\":1}\n{\"b\":2}\n"
 	path, _ := core.parse_path(".a", context.temp_allocator)
 	for streamed in ([]bool{false, true}) {
-		c := Chunked{src = transmute([]u8)src, sizes = {3}, fail_at = -1}
-		it := records.open_stream(chunked(&c), json.as(.Json)) if streamed else records.open(transmute([]u8)src, json.as(.Json))
+		c := walktest.Chunked{src = transmute([]u8)src, sizes = {3}}
+		it := records.open_stream(walktest.chunked(&c), json.as(.Json)) if streamed else records.open(transmute([]u8)src, json.as(.Json))
 		_, doc, _, _ := records.scan(&it, path)
 		kept, err := core.clone(&doc)
 		testing.expect_value(t, err, nil)
@@ -322,40 +321,6 @@ records_build_places_faults :: proc(t: ^testing.T) {
 	testing.expect_value(t, walktest.fault_of(err), Maybe(core.Fault)(core.Fault{at = 17, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Expected_Value)}))
 }
 
-// An input that gives at most `sizes[i % len(sizes)]` bytes on its `i`-th read, a random count up to 16 when `sizes`
-// is empty, and fails with `.Unknown` once `fail_at` bytes are read.
-@(private = "file")
-Chunked :: struct {
-	src:     []u8,
-	sizes:   []int,
-	gen:     rand.Generator,
-	reads:   int,
-	at:      int,
-	fail_at: int,
-}
-
-@(private = "file")
-chunked :: proc(c: ^Chunked) -> io.Reader {
-	return {data = c, procedure = proc(data: rawptr, mode: io.Stream_Mode, p: []u8, _: i64, _: io.Seek_From) -> (i64, io.Error) {
-		c := (^Chunked)(data)
-		if mode != .Read {
-			return 0, .Unsupported
-		}
-		if c.at == c.fail_at {
-			return 0, .Unknown
-		}
-		if c.at == len(c.src) {
-			return 0, .EOF
-		}
-		k := c.sizes[c.reads % len(c.sizes)] if len(c.sizes) > 0 else 1 + rand.int_max(16, c.gen)
-		c.reads += 1
-		k = min(k, c.fail_at - c.at) if c.fail_at >= 0 else k
-		n := copy(p[:min(len(p), k)], c.src[c.at:])
-		c.at += n
-		return i64(n), nil
-	}}
-}
-
 @(private = "file")
 Got :: struct {
 	recs:  [dynamic]records.Record,
@@ -388,8 +353,8 @@ expect_window_law :: proc(t: ^testing.T, src: string, framing: core.Framing, spe
 	mem := records.open(transmute([]u8)src, json.as(spec), framing, entries = entries)
 	defer records.close(&mem)
 	want := drain(&mem)
-	c := Chunked{src = transmute([]u8)src, sizes = sizes, gen = gen, fail_at = -1}
-	st := records.open_stream(chunked(&c), json.as(spec), framing, {entries = entries})
+	c := walktest.Chunked{src = transmute([]u8)src, sizes = sizes, gen = gen}
+	st := records.open_stream(walktest.chunked(&c), json.as(spec), framing, {entries = entries})
 	defer records.close(&st)
 	got := drain(&st)
 	n := len(got.recs)
@@ -537,8 +502,8 @@ records_stream_read :: proc(t: ^testing.T) {
 		src := seeded_text(gen, framing)
 		for spec in json.Spec {
 			mem := records.open(transmute([]u8)src, json.as(spec), framing)
-			c := Chunked{src = transmute([]u8)src, sizes = {1 + round % 5}, fail_at = -1}
-			st := records.open_stream(chunked(&c), json.as(spec), framing)
+			c := walktest.Chunked{src = transmute([]u8)src, sizes = {1 + round % 5}}
+			st := records.open_stream(walktest.chunked(&c), json.as(spec), framing)
 			ms, ss: typed.Sink
 			ms.errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)
 			ss.errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)
@@ -579,8 +544,8 @@ records_stream_holds_a_cut_record :: proc(t: ^testing.T) {
 		framing := core.Framing(i)
 		src := strings.concatenate({head, last}, context.temp_allocator)
 		for k in len(head) + 1 ..< len(src) {
-			c := Chunked{src = transmute([]u8)src[:k], sizes = {3}, fail_at = -1}
-			it := records.open_stream(chunked(&c), json.as(.Json), framing)
+			c := walktest.Chunked{src = transmute([]u8)src[:k], sizes = {3}}
+			it := records.open_stream(walktest.chunked(&c), json.as(.Json), framing)
 			n := 0
 			for _ in records.next(&it) {
 				n += 1
@@ -591,8 +556,8 @@ records_stream_holds_a_cut_record :: proc(t: ^testing.T) {
 			records.close(&it)
 		}
 		// A whole last record with no end byte is a record.
-		c := Chunked{src = transmute([]u8)src, sizes = {3}, fail_at = -1}
-		it := records.open_stream(chunked(&c), json.as(.Json), framing)
+		c := walktest.Chunked{src = transmute([]u8)src, sizes = {3}}
+		it := records.open_stream(walktest.chunked(&c), json.as(.Json), framing)
 		n := 0
 		for _ in records.next(&it) {
 			n += 1
@@ -607,8 +572,8 @@ records_stream_limits_and_failures :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := strings.concatenate({"1\n22\n\"", strings.repeat("a", 100, context.temp_allocator), "\"\n4\n"}, context.temp_allocator)
 	for limit in ([]int{32, 200}) {
-		c := Chunked{src = transmute([]u8)src, sizes = {7}, fail_at = -1}
-		it := records.open_stream(chunked(&c), json.as(.Json), .Lines, {max_bytes = limit})
+		c := walktest.Chunked{src = transmute([]u8)src, sizes = {7}}
+		it := records.open_stream(walktest.chunked(&c), json.as(.Json), .Lines, {max_bytes = limit})
 		n := 0
 		for _ in records.next(&it) {
 			n += 1
@@ -625,8 +590,8 @@ records_stream_limits_and_failures :: proc(t: ^testing.T) {
 	// whole once a byte past it is read.
 	for framing in ([]core.Framing{.Lines, .Concatenated, .Entries}) {
 		text := "[1,22,333,4444,55555,666666]" if framing == .Entries else "1\n22\n333\n4444\n55555\n666666\n"
-		c := Chunked{src = transmute([]u8)text, sizes = {2}, fail_at = 24}
-		it := records.open_stream(chunked(&c), json.as(.Json), framing)
+		c := walktest.Chunked{src = transmute([]u8)text, sizes = {2}, fail_at = 24}
+		it := records.open_stream(walktest.chunked(&c), json.as(.Json), framing)
 		got := make([dynamic]string, context.temp_allocator)
 		for rec in records.next(&it) {
 			append(&got, strings.clone(string(rec.text), context.temp_allocator))
@@ -665,8 +630,8 @@ records_open_at_an_offset :: proc(t: ^testing.T) {
 		mem := records.open(transmute([]u8)c.src, json.as(.Json), c.framing, c.at)
 		from := drain(&mem)
 		records.close(&mem)
-		ch := Chunked{src = transmute([]u8)c.src[c.at:], sizes = {2}, fail_at = -1}
-		st := records.open_stream(chunked(&ch), json.as(.Json), c.framing, at = c.at)
+		ch := walktest.Chunked{src = transmute([]u8)c.src[c.at:], sizes = {2}}
+		st := records.open_stream(walktest.chunked(&ch), json.as(.Json), c.framing, at = c.at)
 		streamed := drain(&st)
 		records.close(&st)
 		testing.expectf(t, fmt.tprint(from.recs[:]) == fmt.tprint(want.recs[:]) && from.fault == fault, "%q at %d: %v %v, want %v %v", c.src, c.at, from.recs[:], from.fault, want.recs[:], fault)
@@ -686,8 +651,8 @@ records_next_window :: proc(t: ^testing.T) {
 		mem := records.open(transmute([]u8)src, json.as(.Json), framing)
 		want := drain(&mem)
 		records.close(&mem)
-		c := Chunked{src = transmute([]u8)src, sizes = {1 + round % 9}, fail_at = -1}
-		st := records.open_stream(chunked(&c), json.as(.Json), framing)
+		c := walktest.Chunked{src = transmute([]u8)src, sizes = {1 + round % 9}}
+		st := records.open_stream(walktest.chunked(&c), json.as(.Json), framing)
 		n := 0
 		end := u64(0)
 		for window, base in records.next_window(&st) {

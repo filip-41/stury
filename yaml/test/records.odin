@@ -163,8 +163,8 @@ entries_read_anchors_out_of_the_window :: proc(t: ^testing.T) {
 		it := records.open(transmute([]u8)src, as, .Entries, entries = {"l"})
 		want := walktest.entries_lines(&it)
 		walktest.expect_entries(t, src, as, {"l"}, want)
-		trickle := walktest.Trickle{src = transmute([]u8)src, size = 64}
-		stream := records.open_stream(walktest.trickle_reader(&trickle), as, .Entries, {entries = {"l"}})
+		trickle := walktest.Chunked{src = transmute([]u8)src, sizes = {64}}
+		stream := records.open_stream(walktest.chunked(&trickle), as, .Entries, {entries = {"l"}})
 		given := make([dynamic]records.Record, context.temp_allocator)
 		then := make([dynamic]string, context.temp_allocator)
 		window, since := stream.src, 0
@@ -200,8 +200,8 @@ entries_read_anchors_out_of_the_window :: proc(t: ^testing.T) {
 	src = strings.to_string(b)
 	it = records.open(transmute([]u8)src, as, .Entries, entries = {"l"})
 	want := walktest.entries_lines(&it)
-	trickle := walktest.Trickle{src = transmute([]u8)src, size = 64}
-	stream := records.open_stream(walktest.trickle_reader(&trickle), as, .Entries, {entries = {"l"}})
+	trickle := walktest.Chunked{src = transmute([]u8)src, sizes = {64}}
+	stream := records.open_stream(walktest.chunked(&trickle), as, .Entries, {entries = {"l"}})
 	testing.expect_value(t, walktest.entries_lines(&stream), want)
 }
 
@@ -238,8 +238,8 @@ entries_read_across_window_moves :: proc(t: ^testing.T) {
 		}
 		fmt.sbprintf(&want, "%d  \"k\"\nend", len(b.buf) + 2)
 		strings.write_string(&b, "- *keep\n")
-		trickle := walktest.Trickle{src = b.buf[:], size = size}
-		it := records.open_stream(walktest.trickle_reader(&trickle), as, .Entries, {entries = {"l"}})
+		trickle := walktest.Chunked{src = b.buf[:], sizes = {size}}
+		it := records.open_stream(walktest.chunked(&trickle), as, .Entries, {entries = {"l"}})
 		testing.expect_value(t, walktest.entries_lines(&it), strings.to_string(want))
 	}
 }

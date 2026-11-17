@@ -292,7 +292,7 @@ strings_after_strings_keep_every_byte :: proc(t: ^testing.T) {
 a_refusing_stream_fails_the_write :: proc(t: ^testing.T) {
 	spill: [write.ROOM_MAX]u8 = ---
 	out: write.Out
-	write.init(&out, &spill, stream = io.Stream{procedure = refusing_stream})
+	write.init(&out, &spill, stream = io.Stream{procedure = walktest.refusing_stream})
 	s := make([]u8, 200_000)
 	defer delete(s)
 	slice.fill(s, 'a')

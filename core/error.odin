@@ -290,7 +290,11 @@ refusal_of_typed :: #force_no_inline proc(e: Typed_Refusal, allocator: runtime.A
 write_code :: proc(w: io.Writer, err: Error) -> io.Error {
 	switch e in err {
 	case Fault:
-		return write_fault_code(w, e)
+		if e.rules != nil {
+			io.write_string(w, e.rules.format) or_return
+			io.write_byte(w, '.') or_return
+		}
+		return write_coded(w, "", rule_of(e).code)
 	case runtime.Allocator_Error:
 		return write_coded(w, "", KIND_RULES[.No_Memory].code if e == .Out_Of_Memory else "allocator_error")
 	case Document_Error:

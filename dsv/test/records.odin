@@ -3,9 +3,7 @@ package dsv_tests
 import "base:runtime"
 import "core:bytes"
 import "core:fmt"
-import "core:io"
 import "core:math/rand"
-import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -229,26 +227,6 @@ rows_across_batches :: proc(t: ^testing.T) {
 // A text read in pieces on threads against the same text read on one, and `records.validate_parallel` against `validate`: the
 // same faults at the same bytes, at every width. The tests build pieces of one byte, so every byte is a cut, inside
 // quoted cells and CRLF pairs among them.
-@(private = "file")
-expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, spec: dsv.Spec, opts: dsv.Options) -> bool {
-	text, as := transmute([]u8)src, dsv.as(spec, opts)
-	serial, _ := records.validate(text, as, .Lines, context.temp_allocator)
-	whole := walktest.fault_of(core.validate(text, as))
-	if v := records.validate_parallel(text, as); !testing.expectf(t, v == whole, "%v %v %q: validate %v, want %v", spec, opts, src, v, whole) {
-		return false
-	}
-	for &pool in pools {
-		got, _ := records.validate(text, as, .Lines, context.temp_allocator, &pool.runner)
-		if !testing.expectf(t, slice.equal(got, serial), "%v %v %q at width %d: %v, want %v", spec, opts, src, pool.runner.threads + 1, got, serial) {
-			return false
-		}
-		if v := records.validate_parallel(text, as, &pool.runner); !testing.expectf(t, v == whole, "%v %v %q at width %d: validate %v, want %v", spec, opts, src, pool.runner.threads + 1, v, whole) {
-			return false
-		}
-	}
-	return walktest.expect_each_law(t, pools, text, as, .Lines)
-}
-
 @(test)
 records_validate_on_threads :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -272,7 +250,7 @@ records_validate_on_threads :: proc(t: ^testing.T) {
 				buf[i] = breakers[rand.int_max(len(breakers), gen)]
 			}
 			for opts in LAYOUTS {
-				if !expect_chain_law(t, pools[:], string(buf), spec, opts) {
+				if !walktest.expect_chain_law(t, pools[:], buf, dsv.as(spec, opts), .Lines) {
 					return
 				}
 			}
@@ -281,7 +259,7 @@ records_validate_on_threads :: proc(t: ^testing.T) {
 	}
 	// Past a bare quote, quoted cells hold text that a piece cut inside them reads as rows.
 	cells := strings.repeat("2,\"a\n7,8\n9,10\nb\"\n", 4, context.temp_allocator)
-	expect_chain_law(t, pools[:], strings.concatenate({"h,k\n0,ok\n1,x\"y\n", cells}, context.temp_allocator), .Csv, {})
+	walktest.expect_chain_law(t, pools[:], transmute([]u8)strings.concatenate({"h,k\n0,ok\n1,x\"y\n", cells}, context.temp_allocator), dsv.as(.Csv), .Lines)
 }
 
 @(private = "file")
@@ -379,8 +357,8 @@ rows_name_wide_cells_by_position :: proc(t: ^testing.T) {
 	path, _ := core.parse_path(`.["4"]`, context.temp_allocator)
 	same, _ := core.parse_path(`.["3"]`, context.temp_allocator)
 	for stream in ([]bool{false, true}) {
-		c := Chunked{src = transmute([]u8)src, sizes = {1}}
-		it := records.open_stream(chunked(&c), as) if stream else records.open(transmute([]u8)src, as)
+		c := walktest.Chunked{src = transmute([]u8)src, sizes = {1}}
+		it := records.open_stream(walktest.chunked(&c), as) if stream else records.open(transmute([]u8)src, as)
 		testing.expect_value(t, records.column(&it, "3"), 0)
 		testing.expect_value(t, records.column(&it, "4"), 3)
 		testing.expect_value(t, records.column(&it, "2"), -1)
@@ -410,9 +388,9 @@ rows_give_all_their_cells :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := "a,b,c,d\n,\"\",x,\"p\"\"q\"\n1,2,3,4\n"
 	for stream in ([]bool{false, true}) {
-		c := Chunked{src = transmute([]u8)src, sizes = {1}}
+		c := walktest.Chunked{src = transmute([]u8)src, sizes = {1}}
 		as := dsv.as(.Csv)
-		it := records.open_stream(chunked(&c), as) if stream else records.open(transmute([]u8)src, as)
+		it := records.open_stream(walktest.chunked(&c), as) if stream else records.open(transmute([]u8)src, as)
 		buf: [8]u8
 		rec, _ := records.next(&it)
 		// A row split short of its end gives the cells past the split when they are asked for.
@@ -698,34 +676,6 @@ rows_read_as_unmarshal :: proc(t: ^testing.T) {
 	}
 }
 
-// A reader that gives `sizes[n]` bytes at a time, cycling, or random sizes when `sizes` is empty.
-@(private = "file")
-Chunked :: struct {
-	src:   []u8,
-	sizes: []int,
-	gen:   rand.Generator,
-	reads: int,
-	at:    int,
-}
-
-@(private = "file")
-chunked :: proc(c: ^Chunked) -> io.Reader {
-	return {data = c, procedure = proc(data: rawptr, mode: io.Stream_Mode, p: []u8, _: i64, _: io.Seek_From) -> (i64, io.Error) {
-		c := (^Chunked)(data)
-		if mode != .Read {
-			return 0, .Unsupported
-		}
-		if c.at == len(c.src) {
-			return 0, .EOF
-		}
-		k := c.sizes[c.reads % len(c.sizes)] if len(c.sizes) > 0 else 1 + rand.int_max(16, c.gen)
-		c.reads += 1
-		n := copy(p[:min(len(p), k)], c.src[c.at:])
-		c.at += n
-		return i64(n), nil
-	}}
-}
-
 @(private = "file")
 Got :: struct {
 	rows:  [dynamic]string,
@@ -766,8 +716,8 @@ expect_stream :: proc(t: ^testing.T, src: string, spec: dsv.Spec, opts: dsv.Opti
 	mem := records.open(transmute([]u8)src, dsv.as(spec, opts))
 	defer records.close(&mem)
 	want := drain(&mem)
-	c := Chunked{src = transmute([]u8)src, sizes = sizes, gen = gen}
-	st := records.open_stream(chunked(&c), dsv.as(spec, opts))
+	c := walktest.Chunked{src = transmute([]u8)src, sizes = sizes, gen = gen}
+	st := records.open_stream(walktest.chunked(&c), dsv.as(spec, opts))
 	defer records.close(&st)
 	got := drain(&st)
 	n := len(got.rows)
@@ -840,8 +790,8 @@ rows_stream_at_every_chunk_size_and_cut :: proc(t: ^testing.T) {
 			}
 		}
 	}
-	c := Chunked{src = transmute([]u8)string("a,b\n1,\xc3"), sizes = {2}}
-	it := records.open_stream(chunked(&c), dsv.as(.Csv))
+	c := walktest.Chunked{src = transmute([]u8)string("a,b\n1,\xc3"), sizes = {2}}
+	it := records.open_stream(walktest.chunked(&c), dsv.as(.Csv))
 	defer records.close(&it)
 	n := 0
 	for _ in records.next(&it) {
@@ -904,8 +854,8 @@ rows_stream_read_as_in_memory :: proc(t: ^testing.T) {
 		plan, _ := dsv.plan_make(Required_Record_Row, spec, allocator = context.temp_allocator)
 		mplan, _ := dsv.plan_make(map[string]string, spec, allocator = context.temp_allocator)
 		mem := records.open(transmute([]u8)src, dsv.as(spec, opts))
-		c := Chunked{src = transmute([]u8)src, sizes = {1 + round % 7}}
-		st := records.open_stream(chunked(&c), dsv.as(spec, opts))
+		c := walktest.Chunked{src = transmute([]u8)src, sizes = {1 + round % 7}}
+		st := records.open_stream(walktest.chunked(&c), dsv.as(spec, opts))
 		ms, ss: typed.Sink
 		ms.errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)
 		ss.errors = make([dynamic]core.Typed_Refusal, context.temp_allocator)
@@ -1088,8 +1038,8 @@ records_keep_their_keys_past_the_first_window :: proc(t: ^testing.T) {
 				}
 				for size in ([]int{1, 700, 1 << 20}) {
 					got := fresh(way, &plan, path, name)
-					c := Chunked{src = src, sizes = {size}}
-					st := records.open_stream(chunked(&c), as, allocator = heap)
+					c := walktest.Chunked{src = src, sizes = {size}}
+					st := records.open_stream(walktest.chunked(&c), as, allocator = heap)
 					gather(&got, &st, 0)
 					records.close(&st)
 					expect_same_answers(t, fmt.tprint(spec, opts, way, "stream of", size), got.by_at, want.by_at)

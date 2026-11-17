@@ -102,8 +102,7 @@ markup_content :: proc(doc: ^core.Document, m: ^Markup, node: core.Node_Index) -
 
 // Writes the decoded name `name`, which a commit judges as the name of a new element.
 markup_key_text :: proc(_: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bool {
-	_, failed := append(text, ..name)
-	return failed == nil
+	return push_all(text, name)
 }
 
 // Whether value `v` is a text run, the value of a member `#text`, whose key is the node before it.

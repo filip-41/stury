@@ -3,6 +3,7 @@ package json_tests
 import "core:fmt"
 import "core:math/rand"
 import "core:slice"
+import "core:strings"
 import "core:testing"
 import core "../../core"
 import walktest "../../walktest"
@@ -33,24 +34,15 @@ answers_agree :: proc(t: ^testing.T) {
 answers_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 	state := rand.create(11)
 	context.random_generator = rand.default_random_generator(&state)
-	texts := [?]string{".[]", ".[].a", ".a", "...a", "limit(2; ...b)", ".[1:]", ".[-1]", ".."}
-	paths: [len(texts)]core.Path
-	for text, i in texts {
-		e: core.Error
-		paths[i], e = core.parse_path(text)
-		testing.expectf(t, e == nil, "%s: %v", text, e)
+	texts: [70]string
+	defer for text in texts {
+		delete(text)
 	}
-	defer for &p in paths {
-		core.path_destroy(&p)
-	}
-	want, got: [dynamic]core.Token_Answer
-	defer delete(want)
-	defer delete(got)
 	text, broken: [dynamic]u8
 	defer delete(text)
 	defer delete(broken)
 	fixed := []string{`{"b": [{"a": 1, "b": 2, "a": 3}, {"a": [4, {"b": 5}]}], "a": {"a": 6, "a": 7}}`, `[[1, 2, 3], [], [4, [5, 6]], 7, {"a": 8}]`}
-	for round in 0 ..< 70 {
+	for round in 0 ..< len(texts) {
 		clear(&text)
 		if round < 60 {
 			gen.text(&text, 1 + round % 6, S)
@@ -69,23 +61,20 @@ answers_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 			walktest.mutate(&broken, text[:], gen.SHARP)
 			src = broken[:]
 		}
-		for path, i in paths {
-			read := core.Path_Options{dups = .First if round % 3 == 0 else .Last}
-			clear(&want)
-			err := json.each_answer(src, S, path, &want, walktest.collect_answer, read = read)
-			for batch in ([]int{1, 3, 64}) {
-				it := json.answers(src, S, path, read = read)
-				it.max_batch = batch
-				got_err := drain(&it, &got)
-				ok := testing.expectf(t, slice.equal(got[:], want[:]), "%v %q %s batch %d: %d answers, want %d", S, src, texts[i], batch, len(got), len(want))
-				ok &&= testing.expectf(t, same_error(got_err, err), "%v %q %s batch %d: %v, want %v", S, src, texts[i], batch, got_err, err)
-				if !ok {
-					return false
-				}
-			}
-		}
+		texts[round] = strings.clone(string(src))
 	}
-	return true
+	// A variant's duplicate policy: the first of a repeated key, then the last.
+	run := walktest.Answer_Run {
+		each = proc(src: []u8, paths: []core.Path, variant: int, early: bool, out: ^[dynamic]core.Token_Answer) -> core.Error {
+			return json.each_answer(src, S, paths, out, walktest.collect_answer, read = {dups = .Last if variant == 1 else .First, stop_early = early})
+		},
+		iter = proc(src: []u8, paths: []core.Path, variant: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
+			it := json.answers(src, S, paths, read = {dups = .Last if variant == 1 else .First, stop_early = early})
+			it.max_batch = batch
+			return drain(&it, out)
+		},
+	}
+	return walktest.expect_answers_agree(t, texts[:], {".[]", ".[].a", ".a", "...a", "limit(2; ...b)", ".[1:]", ".[-1]", ".."}, 2, run)
 }
 
 // A fault after three answers comes after them, in `err` once the loop ends.

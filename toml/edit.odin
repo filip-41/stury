@@ -147,8 +147,7 @@ edit_value :: proc(v: ^core.Token_View, src: []u8, allocator: runtime.Allocator)
 edit_key_text :: proc(_: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bool {
 	spelled := spell_key(name, context.allocator)
 	defer delete(spelled)
-	_, failed := append(text, ..spelled)
-	return failed == nil
+	return compose.push_all(text, spelled)
 }
 
 @(private = "file")
@@ -433,17 +432,6 @@ add :: proc(cx: ^Cx, lo, hi: u64, text: []u8) {
 }
 
 @(private = "file")
-add_text :: proc(cx: ^Cx, lo, hi: u64, text: string) {
-	add(cx, lo, hi, transmute([]u8)text)
-}
-
-@(private = "file")
-key_source :: proc(cx: ^Cx, key: u32) -> string {
-	k := cx.doc.nodes[key]
-	return string(cx.src[k.lo:k.lo + u64(k.n)])
-}
-
-@(private = "file")
 member_text :: proc(cx: ^Cx, e: core.Edit, keyed: bool) -> string {
 	if !keyed {
 		return string(e.text)
@@ -480,9 +468,9 @@ set_value :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	switch form_of(cx.doc, i) {
 	case .Scalar:
 		lo, hi := core.scalar_ends(n)
-		add_text(cx, lo, hi, literal_as_before(cx, n, e))
+		add(cx, lo, hi, transmute([]u8)literal_as_before(cx, n, e))
 	case .Inline:
-		add_text(cx, n.lo, node_end(cx, i), string(e.text))
+		add(cx, n.lo, node_end(cx, i), e.text)
 	case .Root, .Header, .Dotted, .Implicit, .Tables:
 		return refuse_edit(cx, e.node, .Table_Replaced)
 	}
@@ -693,7 +681,8 @@ header_path :: proc(cx: ^Cx, i: u32) -> (path: string, ok: bool) {
 		if form_of(cx.doc, p) == .Inline {
 			return "", false
 		}
-		append(&parts, key_source(cx, cur - 1))
+		k := cx.doc.nodes[cur - 1]
+		append(&parts, string(cx.src[k.lo:k.lo + u64(k.n)]))
 		cur = p
 	}
 	b := make([dynamic]u8, cx.a)

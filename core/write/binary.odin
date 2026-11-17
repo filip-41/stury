@@ -218,100 +218,16 @@ written_members :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> (n: u64) {
 	return
 }
 
-// `leaf` of a binary tree.
+// The integer of `kind` at `v` as the head of binary tree `T`, at `p`, which holds 9 bytes, and its length.
 @(private)
-binary_leaf :: #force_no_inline proc(w: ^Walker, f: ^typed.Field, v: uintptr, top: int, $T: Tree, $put: Put) -> core.Typed_Error_Kind #no_bounds_check {
-	out := &w.out
-	m := &w.meta[f.meta]
-	p := room(out, LEAF_ROOM)
-	#partial switch f.kind {
-	case .I8, .I16, .I32:
-		out.cursor += put_int(p, i64(loaded(v, 1 << (uint(f.kind) - uint(typed.Read_Kind.I8)), true)), T)
-	case .U8, .U16, .U32, .U64:
-		out.cursor += put_head(p, loaded(v, 1 << (uint(f.kind) - uint(typed.Read_Kind.U8))), T, .Uint)
-	case .F32:
-		out.cursor += put_float(p, f64((^f32)(v)^), T)
-	case .Bool_Wide:
-		out.cursor += put_bool(p, loaded(v, int(m.size)) != 0, T)
-	case .Cstring:
-		cs := (^cstring)(v)^
-		if cs == nil {
-			out.cursor += put_word(p, T[.Null])
-			return .None
-		}
-		return put(out, p, string(cs), &w.opts)
-	case .Enum:
-		return binary_enum(w, m.enum_info, enum_value(m.enum_info, v), T, put)
-	case .Raw:
-		return binary_raw(w, string((^typed.Raw)(v)^), top - w.n_ptrs, T)
-	case .Value:
-		// A built value is written by the format's token write, which a binary format's plans hold.
-		text, err := value_text(w.plan, (^core.Value)(v)^, context.temp_allocator)
-		if err.kind == .None {
-			put_text(&w.out, string(text))
-		}
-		return err.kind
-	case .Number_Text:
-		return put_binary_number_text(&w.out, (^core.Number_Text)(v).text, T)
-	case .Number:
-		return put_binary_number(out, (^core.Number)(v)^, T)
-	case .Bytes:
-		return binary_bytes(out, cast([]u8)(^typed.Bytes)(v)^, T)
-	case .Scalar:
-		s := (^typed.Scalar)(v)^
-		if text, is_text := s.(core.Number_Text); is_text {
-			return put_binary_number_text(&w.out, text.text, T)
-		}
-		_, k := any_value(w, any{rawptr(v), scalar_type(s)}, T, put)
-		return k
-	case .Bit_Set:
-		return binary_bit_set(w, m, v, top - w.n_ptrs, T, put)
-	case:
-		return .Unsupported
+int_head :: proc(p: [^]u8, kind: typed.Read_Kind, v: uintptr, $T: Tree) -> int {
+	if kind == .I64 {
+		return put_int(p, (^i64)(v)^, T)
 	}
-	return .None
-}
-
-// An enum as `enum_spelled` spells it: its name as a text string, or under `.Int` its integer.
-@(private)
-binary_enum :: proc(w: ^Walker, info: ^runtime.Type_Info_Enum, value: i64, $T: Tree, $put: Put) -> core.Typed_Error_Kind {
-	p := room(&w.out, LEAF_ROOM)
-	if typed.enum_by_number(w.plan, info) {
-		if typed.enum_member(info, value) < 0 {
-			return .Not_A_Member
-		}
-		if base, ok := runtime.type_info_base(info.base).variant.(runtime.Type_Info_Integer); ok && !base.signed {
-			w.out.cursor += put_head(p, u64(value), T, .Uint)
-		} else {
-			w.out.cursor += put_int(p, value, T)
-		}
-		return .None
+	if kind < .I64 {
+		return put_int(p, i64(loaded(v, 1 << (uint(kind) - uint(typed.Read_Kind.I8)), true)), T)
 	}
-	text: [spell.INT_ROOM]u8
-	name := enum_spelled(w.plan, info, value, &text[0]) or_return
-	return put(&w.out, p, name, &w.opts)
-}
-
-// A bit set as an array of its elements in ascending order, as `put_bit_set` writes one.
-@(private)
-binary_bit_set :: proc(w: ^Walker, m: ^typed.Meta, v: uintptr, top: int, $T: Tree, $put: Put) -> core.Typed_Error_Kind {
-	out := &w.out
-	if top == core.MAX_DEPTH {
-		return .Too_Deep
-	}
-	e := &w.meta[m.block]
-	bits: u128
-	runtime.mem_copy_non_overlapping(&bits, rawptr(v), int(m.size))
-	out.cursor += put_head(room(out, 9), u64(intrinsics.count_ones(bits)), T, .Array)
-	for b := bits; b != 0; b &= b - 1 {
-		value := e.lower + i64(intrinsics.count_trailing_zeros(b))
-		if e.enum_info == nil {
-			out.cursor += put_int(room(out, 9), value, T)
-		} else {
-			binary_enum(w, e.enum_info, value, T, put) or_return
-		}
-	}
-	return .None
+	return put_head(p, loaded(v, 1 << (uint(kind) - uint(typed.Read_Kind.U8))), T, .Uint)
 }
 
 // A byte string's head and its bytes.
@@ -533,50 +449,6 @@ binary_any :: proc(w: ^Walker, a: any, p: [^]u8, $T: Tree, $put: Put) -> (kind: 
 		return .None, false
 	}
 	return .None, true
-}
-
-// A map key that is not a string, written as the tree writes its value: an integer as an integer and an enum by its
-// spelling. Its text follows its written bytes in `keys`, as `add_entry` leaves a string key's.
-@(private)
-binary_key_entry :: proc(w: ^Walker, m: ^typed.Meta, key, value: uintptr, rec: ^typed.Field, $T: Tree, $put: Put) -> core.Typed_Error_Kind {
-	text: [spell.INT_ROOM]u8
-	name: string
-	#partial switch m.key_kind {
-	case .Cstring:
-		return add_entry(w, string((^cstring)(key)^), value, rec, put)
-	case .Enum:
-		if !typed.enum_by_number(w.plan, m.enum_info) {
-			name = enum_spelled(w.plan, m.enum_info, enum_value(m.enum_info, key), &text[0]) or_return
-			return add_entry(w, name, value, rec, put)
-		}
-	}
-	at := w.keys.cursor
-	p := room(&w.keys, 9)
-	signed := m.key_kind == .Enum || m.key_kind >= .I8 && m.key_kind <= .I64
-	x: i64
-	if m.key_kind == .Enum {
-		x = enum_value(m.enum_info, key)
-		if typed.enum_member(m.enum_info, x) < 0 {
-			return .Not_A_Member
-		}
-		name = string(text[:spell.i64_text(&text[0], x)])
-	} else {
-		name = string(text[:int_text(&text[0], m.key_kind, key)])
-		if signed {
-			x = i64(loaded(key, 1 << (uint(m.key_kind) - uint(typed.Read_Kind.I8)), true))
-		}
-	}
-	if signed {
-		w.keys.cursor += put_int(p, x, T)
-	} else {
-		w.keys.cursor += put_head(p, loaded(key, 1 << (uint(m.key_kind) - uint(typed.Read_Kind.U8))), T, .Uint)
-	}
-	size := w.keys.cursor - at
-	put_text(&w.keys, name)
-	if _, failed := append(&w.entries, Entry{at = at, size = size, named = len(name), value = value, rec = rec}); failed != nil {
-		return .No_Memory
-	}
-	return w.keys.err
 }
 
 // Sorts the entries from `first` by their written keys, the length first under `.Length_First`.

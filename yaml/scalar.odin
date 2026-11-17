@@ -45,6 +45,26 @@ style_bits :: #force_inline proc "contextless" (s: Style) -> u16 {
 @(private)
 KEY_MAX :: 1024
 
+// The byte past the closing quote of the quoted scalar whose opening quote is at `from`, or the end of `text`. A double
+// quote skips the byte after a backslash, and a single quote reads two of them as one.
+@(private)
+quoted_end :: proc "contextless" (text: string, from: int) -> int {
+	quote := text[from]
+	for at := from + 1; at < len(text); {
+		switch {
+		case quote == '"' && text[at] == '\\':
+			at += 2
+		case text[at] != quote:
+			at += 1
+		case quote == '\'' && at + 1 < len(text) && text[at + 1] == '\'':
+			at += 2
+		case:
+			return at + 1
+		}
+	}
+	return len(text)
+}
+
 // Whether the scalar may start with the byte at the cursor. A `?`, `:` or `-` starts one only before a character a
 // plain scalar may hold.
 @(private)
@@ -66,29 +86,9 @@ plain_first :: proc "contextless" (p: ^Parser, flow: bool) -> bool {
 scan_plain :: proc "contextless" (p: ^Parser, n: int, flow, multiline: bool) -> (lines: bool, ok: bool) {
 	i, last, eol := scan_plain_line(p, step(p, p.pos) or_return, flow) or_return
 	for eol && multiline && i < u64(len(p.src)) {
-		k := break_end(p, i)
-		line := k
-		w := k
-		ind := 0
-		found := false
-		for {
-			m := skip_spaces(p, line)
-			ind = int(m - line)
-			w = m
-			for w < u64(len(p.src)) && is_white(p.src[w]) {
-				w += 1
-			}
-			if w >= u64(len(p.src)) {
-				break
-			}
-			if is_break(p.src[w]) {
-				line = break_end(p, w)
-				continue
-			}
-			found = true
-			break
-		}
-		if !found || ind <= n || ind == 0 && marker_at(p, line) != 0 {
+		line, m, w := blank_lines_end(p, break_end(p, i))
+		ind := int(m - line)
+		if w >= u64(len(p.src)) || ind <= n || ind == 0 && marker_at(p, line) != 0 {
 			break
 		}
 		c := p.src[w]
@@ -101,6 +101,25 @@ scan_plain :: proc "contextless" (p: ^Parser, n: int, flow, multiline: bool) -> 
 	}
 	p.pos = last
 	return lines, true
+}
+
+// Moves from the start of a line past the lines of white space alone. Returns the start of the first line with text, the
+// first byte of it that is no space, and the first that is no white space, which is the text's end when none is left.
+@(private)
+blank_lines_end :: proc "contextless" (p: ^Parser, line: u64) -> (start, m, w: u64) {
+	start = line
+	for {
+		m = skip_spaces(p, start)
+		w = m
+		for w < u64(len(p.src)) && is_white(p.src[w]) {
+			w += 1
+		}
+		if w < u64(len(p.src)) && is_break(p.src[w]) {
+			start = break_end(p, w)
+			continue
+		}
+		return
+	}
 }
 
 // Reads a double-quoted scalar at the cursor, judging its escapes and the indentation of its lines past `n`. Returns
@@ -155,29 +174,18 @@ scan_double :: proc "contextless" (p: ^Parser, n: int) -> (spelling: u16, ok: bo
 // markers and the indentation, and starts that line.
 @(private)
 fold_to_next_line :: proc "contextless" (p: ^Parser, i: u64, n: int) -> (u64, bool) {
-	line := break_end(p, i)
-	for {
-		m := skip_spaces(p, line)
-		w := m
-		for w < u64(len(p.src)) && is_white(p.src[w]) {
-			w += 1
-		}
-		if w >= u64(len(p.src)) {
-			return w, fault(p, i, .Truncated, .Open_String)
-		}
-		if is_break(p.src[w]) {
-			line = break_end(p, w)
-			continue
-		}
-		if line == m && marker_at(p, line) != 0 {
-			return w, fault(p, line, .Bad_Char, .Marker_In_Scalar)
-		}
-		if int(m - line) <= n {
-			return w, fault(p, w, .Bad_Char, .Bad_Indent)
-		}
-		p.ls = line
-		return w, true
+	line, m, w := blank_lines_end(p, break_end(p, i))
+	if w >= u64(len(p.src)) {
+		return w, fault(p, i, .Truncated, .Open_String)
 	}
+	if line == m && marker_at(p, line) != 0 {
+		return w, fault(p, line, .Bad_Char, .Marker_In_Scalar)
+	}
+	if int(m - line) <= n {
+		return w, fault(p, w, .Bad_Char, .Bad_Indent)
+	}
+	p.ls = line
+	return w, true
 }
 
 // Reads a single-quoted scalar at the cursor. Returns the token's `spelling`.

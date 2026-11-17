@@ -438,7 +438,7 @@ declare_attribute :: proc "contextless" (d: ^Dtd, element, name: []u8, a: Attr_D
 		return {kind = .No_Memory}
 	}
 	a.name_lo, a.name_n = u32(lo), u16(len(name))
-	i := dtd_attr(d, a)
+	i := dtd_push(d, &d.atts, &d.built.attrs, &d.att_cap, a)
 	if i == NO_DECL {
 		return {kind = .No_Memory}
 	}
@@ -654,7 +654,7 @@ entity_declaration :: proc "contextless" (d: ^Dtd, p, end: [^]u8, stored: bool) 
 			e.flags += {.Stored}
 		}
 	}
-	i := dtd_entity(d, e)
+	i := dtd_push(d, &d.ents, &d.built.entities, &d.ent_cap, e)
 	if i == NO_DECL || !dtd_put(d, kind, i) {
 		return q, {kind = .No_Memory}
 	}

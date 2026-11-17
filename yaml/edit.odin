@@ -193,8 +193,7 @@ edit_key_text :: proc(_: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bool
 	if !ok {
 		return false
 	}
-	_, failed := append(text, ..spelled)
-	return failed == nil
+	return compose.push_all(text, spelled)
 }
 
 // The spelling of the key `name` in a block or a flow collection, in the style `keeps` when it holds one, or false for
@@ -237,8 +236,7 @@ edit_prefix :: proc(_: ^core.Document, role: core.Role, body: []u8, text: ^[dyna
 	case:
 		return false
 	}
-	_, failed := append(text, ..body)
-	return failed == nil
+	return compose.push_all(text, body)
 }
 
 // The bytes node `node` has at a site of the document: its own, with the lines after its first dedented by the column

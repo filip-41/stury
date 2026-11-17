@@ -425,6 +425,11 @@ Found_Count :: struct {
 	found: int,
 }
 
+// Stops the read at the first answer.
+take_first :: proc(state: rawptr, a: core.Token_Answer) -> bool {
+	return false
+}
+
 count_found :: proc(state: rawptr, a: core.Token_Answer) -> bool {
 	if a.outcome == .Found {
 		(^Found_Count)(state).found += 1

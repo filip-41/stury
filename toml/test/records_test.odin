@@ -69,15 +69,7 @@ every_record_form_reads_a_text :: proc(t: ^testing.T) {
 @(test)
 a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
 	spec :: toml.Spec.Toml_1_1
-	empty := toml.records_open(nil, spec)
-	defer toml.records_close(&empty)
-	_, more := toml.records_next(&empty)
-	testing.expect(t, !more && empty.fault == nil)
-	src := transmute([]u8)string("# lead\na = 1\nb = 2\n")
-	from := toml.records_open(src, spec, at = 7)
-	defer toml.records_close(&from)
-	rec, ok := toml.records_next(&from)
-	testing.expect(t, ok && rec.at == 7 && string(rec.text) == "a = 1\nb = 2\n")
+	walktest.expect_record_is_the_rest(t, "# lead\na = 1\nb = 2\n", 7, toml.as(spec))
 	bad := transmute([]u8)string("a = 1\nb = 2\na = 3\n")
 	faults, err := toml.records_validate(bad, spec)
 	defer delete(faults)
@@ -102,17 +94,8 @@ a_stream_is_read_as_one_text :: proc(t: ^testing.T) {
 		}
 	}
 	whole := strings.to_string(b)
-	for text in ([]string{RECORD_TEXT, whole}) {
-		r: strings.Reader
-		it := toml.records_open_stream(strings.to_reader(&r, text), toml.Spec.Toml_1_1, stream = {max_bytes = 1 << 22})
-		defer toml.records_close(&it)
-		n := 0
-		for rec in records.next(&it) {
-			testing.expect(t, string(rec.text) == text && rec.at == 0)
-			n += 1
-		}
-		testing.expect(t, n == 1 && it.fault == nil)
-	}
+	walktest.expect_stream_is_one_record(t, RECORD_TEXT, toml.as(.Toml_1_1))
+	walktest.expect_stream_is_one_record(t, whole, toml.as(.Toml_1_1))
 	strings.write_string(&b, "[t17]\n")
 	r: strings.Reader
 	it := toml.records_open_stream(strings.to_reader(&r, strings.to_string(b)), toml.Spec.Toml_1_1, stream = {max_bytes = 1 << 22})

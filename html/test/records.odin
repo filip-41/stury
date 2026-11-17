@@ -3,7 +3,6 @@
 package html_tests
 
 import "core:fmt"
-import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -40,14 +39,7 @@ a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, html.records_each(src, .Document, .Concatenated, walktest.count_records, &each))
 	testing.expect_value(t, each, 1)
 
-	empty := html.records_open(nil, .Document)
-	defer html.records_close(&empty)
-	_, more := html.records_next(&empty)
-	testing.expect(t, !more && empty.fault == nil)
-	from := html.records_open(src, html.Spec.Fragment, at = 28)
-	defer html.records_close(&from)
-	rec, ok := html.records_next(&from)
-	testing.expect(t, ok && rec.at == 28 && strings.has_prefix(string(rec.text), "<p>1"))
+	walktest.expect_record_is_the_rest(t, RECORD_TEXT, 28, html.as(.Fragment))
 
 	defer free_all(context.temp_allocator)
 	b: strings.Builder
@@ -56,54 +48,27 @@ a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
 		fmt.sbprintf(&b, "<li id=%d>t", i)
 	}
 	whole := strings.to_string(b)
-	r: strings.Reader
-	stream := html.records_open_stream(strings.to_reader(&r, whole), html.Spec.Fragment, stream = {max_bytes = 1 << 22})
-	defer html.records_close(&stream)
-	n = 0
-	for got in html.records_next(&stream) {
-		testing.expect(t, string(got.text) == whole && got.at == 0)
-		n += 1
-	}
-	testing.expect(t, n == 1 && stream.fault == nil)
+	walktest.expect_stream_is_one_record(t, whole, html.as(.Fragment))
 }
 
-@(private = "file")
-collect_answer :: proc(state: rawptr, a: core.Token_Answer) -> bool {
-	append((^[dynamic]core.Token_Answer)(state), a)
-	return true
-}
-
-// The iterator gives the answers `each_answer` gives and ends with its error, whatever its largest batch.
+// The iterator gives the answers `each_answer` gives and ends with its error, whatever its largest batch, for each
+// duplicate policy.
 @(test)
 answers_agree_with_each_answer :: proc(t: ^testing.T) {
-	texts := [?]string{".html.body.p", ".html.body[]", "..", ".html.body.table.tbody.tr.td", ".z"}
-	want, got: [dynamic]core.Token_Answer
-	defer delete(want)
-	defer delete(got)
-	src := transmute([]u8)string(RECORD_TEXT)
-	for text in texts {
-		path, perr := html.parse_path(text)
-		walktest.expect_nil(t, perr)
-		defer html.destroy(&path)
-		for dups in ([]core.Duplicates{.Last, .Refuse}) {
-			read := core.Path_Options{dups = dups}
-			clear(&want)
-			err := html.each_answer(src, .Document, path, &want, collect_answer, {}, read)
-			for batch in ([]int{1, 64}) {
-				it := html.answers(src, .Document, path, {}, read)
-				it.max_batch = batch
-				clear(&got)
-				for a in html.next(&it) {
-					append(&got, a)
-				}
-				ok := testing.expectf(t, slice.equal(got[:], want[:]), "%s batch %d: %d answers, want %d", text, batch, len(got), len(want))
-				ok &&= testing.expectf(t, fmt.tprint(it.err) == fmt.tprint(err), "%s batch %d: %v, want %v", text, batch, it.err, err)
-				if !ok {
-					return
-				}
+	run := walktest.Answer_Run {
+		each = proc(src: []u8, paths: []core.Path, variant: int, early: bool, out: ^[dynamic]core.Token_Answer) -> core.Error {
+			return html.each_answer(src, .Document, paths, out, walktest.collect_answer, {}, {dups = .Refuse if variant == 1 else .Last, stop_early = early})
+		},
+		iter = proc(src: []u8, paths: []core.Path, variant: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
+			it := html.answers(src, .Document, paths, {}, {dups = .Refuse if variant == 1 else .Last, stop_early = early})
+			it.max_batch = batch
+			for a in html.next(&it) {
+				append(out, a)
 			}
-		}
+			return it.err
+		},
 	}
+	walktest.expect_answers_agree(t, {RECORD_TEXT}, {".html.body.p", ".html.body[]", "..", ".html.body.table.tbody.tr.td", ".z"}, 2, run)
 }
 
 // `.Entries` gives the members of the element a path of names reaches, each read from the whole tree, with the ends

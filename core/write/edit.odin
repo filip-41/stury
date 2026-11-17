@@ -138,40 +138,28 @@ set_node :: proc(list: ^core.Edit_List, node: core.Node_Index, v: $T, plan: ^typ
 
 // Makes `v` the value of the member of `obj` named `name`.
 set_member :: proc(list: ^core.Edit_List, obj: core.Node_Index, name: string, v: $T, plan: ^typed.Plan = nil, dups := core.Duplicates.Last) -> core.Error {
-	when T == typed.Raw {
-		return core.set_member_input(list, obj, name, {text = string(v), raw = true}, dups)
-	} else {
-		scratch: Scratch
-		defer runtime.arena_destroy(&scratch)
-		in_ := edit_input(v, plan, &scratch) or_return
-		return core.set_member_input(list, obj, name, in_, dups)
-	}
+	scratch: Scratch
+	defer runtime.arena_destroy(&scratch)
+	in_ := edit_input(v, plan, &scratch) or_return
+	return core.set_member_input(list, obj, name, in_, dups)
 }
 
 // Inserts `v` into the array `container` before its element `at`, or after its last when `at` is its length. In a
 // flat text's root `v` is a record: an array or an object of cells.
 insert_element :: proc(list: ^core.Edit_List, container: core.Node_Index, at: int, v: $T, plan: ^typed.Plan = nil) -> core.Error {
-	when T == typed.Raw {
-		return core.insert_input(list, container, at, "", false, {text = string(v), raw = true})
-	} else {
-		scratch: Scratch
-		defer runtime.arena_destroy(&scratch)
-		in_ := edit_input(v, plan, &scratch) or_return
-		return core.insert_input(list, container, at, "", false, in_)
-	}
+	scratch: Scratch
+	defer runtime.arena_destroy(&scratch)
+	in_ := edit_input(v, plan, &scratch) or_return
+	return core.insert_input(list, container, at, "", false, in_)
 }
 
 // Inserts `key` and `v` as a member of the object `container` before its member `at`, or after its last when `at` is its
 // length.
 insert_member :: proc(list: ^core.Edit_List, container: core.Node_Index, at: int, key: string, v: $T, plan: ^typed.Plan = nil) -> core.Error {
-	when T == typed.Raw {
-		return core.insert_input(list, container, at, key, true, {text = string(v), raw = true})
-	} else {
-		scratch: Scratch
-		defer runtime.arena_destroy(&scratch)
-		in_ := edit_input(v, plan, &scratch) or_return
-		return core.insert_input(list, container, at, key, true, in_)
-	}
+	scratch: Scratch
+	defer runtime.arena_destroy(&scratch)
+	in_ := edit_input(v, plan, &scratch) or_return
+	return core.insert_input(list, container, at, key, true, in_)
 }
 
 insert :: proc {

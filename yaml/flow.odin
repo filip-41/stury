@@ -26,19 +26,13 @@ flow_lines :: proc(p: ^Parser, n: int, after_value: bool) -> bool {
 		if is_break(b) {
 			consume_break(p)
 			same_line = false
-			m := p.pos
-			for m < u64(len(p.src)) && p.src[m] == ' ' {
-				m += 1
-			}
-			w := m
-			for w < u64(len(p.src)) && is_white(p.src[w]) {
-				w += 1
-			}
-			if w < u64(len(p.src)) && !is_break(p.src[w]) {
-				if m == p.pos && marker_at(p, m) != 0 {
+			line, m, w := blank_lines_end(p, p.pos)
+			p.ls = line
+			if w < u64(len(p.src)) {
+				if m == line && marker_at(p, m) != 0 {
 					return fault(p, m, .Bad_Char, .Marker_In_Scalar)
 				}
-				if p.src[w] != '#' && int(m - p.pos) <= n {
+				if p.src[w] != '#' && int(m - line) <= n {
 					return fault(p, w, .Bad_Char, .Bad_Indent)
 				}
 			}

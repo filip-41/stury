@@ -84,7 +84,7 @@ plain_fits :: proc(s: string, flow: bool) -> bool {
 	case ',', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@', '`':
 		return false
 	case '-', '?', ':':
-		if len(s) == 1 || s[1] == ' ' || flow && is_flow_byte(s[1]) {
+		if len(s) == 1 || s[1] == ' ' || flow && is_flow_indicator(s[1]) {
 			return false
 		}
 	}
@@ -94,7 +94,7 @@ plain_fits :: proc(s: string, flow: bool) -> bool {
 	for i in 0 ..< len(s) {
 		switch s[i] {
 		case ':':
-			if i + 1 < len(s) && (s[i + 1] == ' ' || flow && is_flow_byte(s[i + 1])) {
+			if i + 1 < len(s) && (s[i + 1] == ' ' || flow && is_flow_indicator(s[i + 1])) {
 				return false
 			}
 		case '#':
@@ -108,11 +108,6 @@ plain_fits :: proc(s: string, flow: bool) -> bool {
 		}
 	}
 	return true
-}
-
-@(private)
-is_flow_byte :: #force_inline proc "contextless" (b: u8) -> bool {
-	return b == ',' || b == '[' || b == ']' || b == '{' || b == '}'
 }
 
 // Whether a reader of the core schema or of YAML 1.1 reads the plain scalar `s` as anything but a string: a null, a
@@ -331,10 +326,7 @@ block_fits :: proc(s: string, f: Facts, place: Place) -> bool {
 	if !place.block || place.key || place.flow || f.escapes || len(s) == 0 || s[0] == ' ' || s[0] == '\n' || s[0] == '\t' {
 		return false
 	}
-	body := s
-	for len(body) > 0 && body[len(body) - 1] == '\n' {
-		body = body[:len(body) - 1]
-	}
+	body := strings.trim_right(s, "\n")
 	if len(body) == 0 {
 		return false
 	}
@@ -458,10 +450,7 @@ put_scalar :: proc(out: ^write.Out, s: string, shape: Shape, ascii: bool) {
 // break between two lines that start with no white space as a space, so each line end of `s` there takes one more.
 @(private)
 put_block :: proc(out: ^write.Out, s: string, shape: Shape, ind: int) {
-	body := s
-	for len(body) > 0 && body[len(body) - 1] == '\n' {
-		body = body[:len(body) - 1]
-	}
+	body := strings.trim_right(s, "\n")
 	ends := len(s) - len(body)
 	write.put_byte(out, '>' if shape == .Folded else '|')
 	switch {

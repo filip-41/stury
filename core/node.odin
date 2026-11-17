@@ -220,22 +220,10 @@ int_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (i64, bool) {
 // sign. Returns false for a `Wide` number and a node that is no number.
 float_value :: proc(doc: ^Document, i: Node_Index) -> (f64, bool) {
 	n, ok := number(doc, i)
-	if !ok {
+	if !ok || n.kind == .Wide {
 		return 0, false
 	}
-	switch n.kind {
-	case .Int:
-		if n.bits == 0 && doc.src[doc.nodes[i].lo] == '-' {
-			return -0.0, true
-		}
-		return f64(i64(n.bits)), true
-	case .Uint:
-		return f64(n.bits), true
-	case .Float:
-		return transmute(f64)n.bits, true
-	case .Wide:
-	}
-	return 0, false
+	return number_f64(n, string(doc.src[doc.nodes[i].lo:])), true
 }
 
 // A `Child_Iter` walks one container's member values. `children` starts it and `child_next` returns the next value.

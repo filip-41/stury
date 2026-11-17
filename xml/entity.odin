@@ -221,20 +221,26 @@ measure :: proc "contextless" (d: ^Dtd, i: u32, nest: int) -> (size: u64, flags:
 	return
 }
 
+// The text that ends the comment, processing instruction or CDATA section `s` opens, empty when it opens none.
+@(private)
+markup_close :: proc "contextless" (s: string) -> string {
+	switch {
+	case len(s) >= 4 && s[:4] == "<!--":
+		return "-->"
+	case len(s) >= 9 && s[:9] == "<![CDATA[":
+		return "]]>"
+	case len(s) >= 2 && s[1] == '?':
+		return "?>"
+	}
+	return ""
+}
+
 // One past the comment, processing instruction or CDATA section at `q`, a `<`, or `q` for any other markup. The text
 // was judged, or is judged where its markup is walked, so an unclosed one ends at `end`.
 @(private)
 markup_end :: proc "contextless" (q, end: [^]u8) -> [^]u8 #no_bounds_check {
-	room := intrinsics.ptr_sub(end, q)
-	close: string
-	switch {
-	case room >= 4 && string(q[:4]) == "<!--":
-		close = "-->"
-	case room >= 9 && string(q[:9]) == "<![CDATA[":
-		close = "]]>"
-	case room >= 2 && q[1] == '?':
-		close = "?>"
-	case:
+	close := markup_close(string(q[:intrinsics.ptr_sub(end, q)]))
+	if close == "" {
 		return q
 	}
 	for s := q[2:]; s < end; s = s[1:] {
@@ -283,15 +289,8 @@ respelled :: proc "contextless" (lit: []u8) -> bool #no_bounds_check {
 		switch place {
 		case .Data:
 			if c == '<' {
-				rest := string(lit[i:])
-				switch {
-				case len(rest) >= 4 && rest[:4] == "<!--":
-					place, close = .Close, "-->"
-				case len(rest) >= 9 && rest[:9] == "<![CDATA[":
-					place, close = .Close, "]]>"
-				case len(rest) >= 2 && rest[1] == '?':
-					place, close = .Close, "?>"
-				case:
+				place, close = .Close, markup_close(string(lit[i:]))
+				if close == "" {
 					place = .Tag
 				}
 			}

@@ -49,7 +49,8 @@ st_rcdata :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($
 		switch q[0] {
 		case '<':
 			t.text_hi = at(t, q)
-			return #must_tail st_rcdata_lt(q[1:], end, t, on)
+			t.back = .Rcdata
+			return #must_tail st_text_lt(q[1:], end, t, on)
 		case '&':
 			t.ret = .Rcdata
 			return #must_tail st_char_ref(q, end, t, on)
@@ -80,7 +81,8 @@ st_rawtext :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer(
 		switch q[0] {
 		case '<':
 			t.text_hi = at(t, q)
-			return #must_tail st_rawtext_lt(q[1:], end, t, on)
+			t.back = .Rawtext
+			return #must_tail st_text_lt(q[1:], end, t, on)
 		case 0:
 			t.text_flags += {.Nul}
 			if report(t, on, q, .Unexpected_Null_Character) {
@@ -242,14 +244,13 @@ st_tag_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer
 	}
 }
 
-// `p` is past a `<` of the RCDATA state.
+// `p` is past a `<` of the RCDATA or RAWTEXT state, `t.back` the state.
 @(private, enable_target_feature = STATE_FEATURES)
-st_rcdata_lt :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
+st_text_lt :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	if p < end && p[0] == '/' {
-		t.back = .Rcdata
 		return #must_tail st_text_end_open(p[1:], end, t, on)
 	}
-	return #must_tail st_rcdata(p, end, t, on)
+	return #must_tail st_back(p, end, t, on)
 }
 
 // The end tag open state of RCDATA, RAWTEXT, script data and escaped script data. `p` is past `</`.
@@ -291,16 +292,6 @@ st_text_end_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Toke
 		}
 	}
 	return #must_tail st_back(q, end, t, on)
-}
-
-// `p` is past a `<` of the RAWTEXT state.
-@(private, enable_target_feature = STATE_FEATURES)
-st_rawtext_lt :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p < end && p[0] == '/' {
-		t.back = .Rawtext
-		return #must_tail st_text_end_open(p[1:], end, t, on)
-	}
-	return #must_tail st_rawtext(p, end, t, on)
 }
 
 // `p` is past a `<` of the script data state.
@@ -1093,10 +1084,12 @@ st_after_doctype_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: 
 	}
 	left := int(at(t, end) - at(t, q))
 	if left >= 6 && fold_equal(q, transmute([]u8)string("public")) {
-		return #must_tail st_after_doctype_public_keyword(q[6:], end, t, on)
+		t.system = false
+		return #must_tail st_after_doctype_keyword(q[6:], end, t, on)
 	}
 	if left >= 6 && fold_equal(q, transmute([]u8)string("system")) {
-		return #must_tail st_after_doctype_system_keyword(q[6:], end, t, on)
+		t.system = true
+		return #must_tail st_after_doctype_keyword(q[6:], end, t, on)
 	}
 	if doctype_error(t, on, q, end, .Invalid_Character_Sequence_After_Doctype_Name, true) {
 		return halt(t, q)
@@ -1105,33 +1098,33 @@ st_after_doctype_name :: #force_no_inline proc "contextless" (p, end: [^]u8, t: 
 }
 
 @(private, enable_target_feature = STATE_FEATURES)
-st_after_doctype_public_keyword :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
+st_after_doctype_keyword :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	if p >= end {
 		return eof_in_doctype(t, on, end)
 	}
 	switch {
 	case CLASS[p[0]] & C_WS != 0:
-		return #must_tail st_before_doctype_public_id(p[1:], end, t, on)
+		return #must_tail st_before_doctype_id(p[1:], end, t, on)
 	case p[0] == '"' || p[0] == '\'':
-		if report(t, on, p, .Missing_Whitespace_After_Doctype_Public_Keyword) {
+		if report(t, on, p, .Missing_Whitespace_After_Doctype_System_Keyword if t.system else .Missing_Whitespace_After_Doctype_Public_Keyword) {
 			return halt(t, p)
 		}
 		open_id(t, p)
-		return #must_tail st_doctype_public_id(p[1:], end, t, on)
+		return #must_tail st_doctype_id(p[1:], end, t, on)
 	case p[0] == '>':
-		if doctype_error(t, on, p, end, .Missing_Doctype_Public_Identifier, false) {
+		if doctype_error(t, on, p, end, .Missing_Doctype_System_Identifier if t.system else .Missing_Doctype_Public_Identifier, false) {
 			return halt(t, p)
 		}
 		return #must_tail st_doctype_close(p, end, t, on)
 	}
-	if doctype_error(t, on, p, end, .Missing_Quote_Before_Doctype_Public_Identifier, true) {
+	if doctype_error(t, on, p, end, .Missing_Quote_Before_Doctype_System_Identifier if t.system else .Missing_Quote_Before_Doctype_Public_Identifier, true) {
 		return halt(t, p)
 	}
 	return #must_tail st_bogus_doctype(p, end, t, on)
 }
 
 @(private, enable_target_feature = STATE_FEATURES)
-st_before_doctype_public_id :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
+st_before_doctype_id :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	q := skip_ws(p, end)
 	if q >= end {
 		return eof_in_doctype(t, on, end)
@@ -1139,36 +1132,46 @@ st_before_doctype_public_id :: #force_no_inline proc "contextless" (p, end: [^]u
 	switch q[0] {
 	case '"', '\'':
 		open_id(t, q)
-		return #must_tail st_doctype_public_id(q[1:], end, t, on)
+		return #must_tail st_doctype_id(q[1:], end, t, on)
 	case '>':
-		if doctype_error(t, on, q, end, .Missing_Doctype_Public_Identifier, false) {
+		if doctype_error(t, on, q, end, .Missing_Doctype_System_Identifier if t.system else .Missing_Doctype_Public_Identifier, false) {
 			return halt(t, q)
 		}
 		return #must_tail st_doctype_close(q, end, t, on)
 	}
-	if doctype_error(t, on, q, end, .Missing_Quote_Before_Doctype_Public_Identifier, true) {
+	if doctype_error(t, on, q, end, .Missing_Quote_Before_Doctype_System_Identifier if t.system else .Missing_Quote_Before_Doctype_Public_Identifier, true) {
 		return halt(t, q)
 	}
 	return #must_tail st_bogus_doctype(q, end, t, on)
 }
 
 // The DOCTYPE public identifier states, double- and single-quoted. The identifier starts at `t.lo`.
+// The DOCTYPE public or system identifier states, double- and single-quoted, by `t.system`. The identifier starts at
+// `t.lo`.
 @(private, enable_target_feature = STATE_FEATURES)
-st_doctype_public_id :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
+st_doctype_id :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	q, stop := doctype_id(t, on, p, end)
 	if stop {
 		return halt(t, q)
 	}
-	t.tok.public_id = span_of(t, t.lo, at(t, q), .Raw, t.flags)
+	id := span_of(t, t.lo, at(t, q), .Raw, t.flags)
+	if t.system {
+		t.tok.system_id = id
+	} else {
+		t.tok.public_id = id
+	}
 	if q >= end {
 		return eof_in_doctype(t, on, end)
 	}
 	if q[0] == '>' {
 		t.tok.flags += {.Force_Quirks}
-		if report(t, on, q, .Abrupt_Doctype_Public_Identifier) {
+		if report(t, on, q, .Abrupt_Doctype_System_Identifier if t.system else .Abrupt_Doctype_Public_Identifier) {
 			return halt(t, q)
 		}
 		return #must_tail st_doctype_close(q, end, t, on)
+	}
+	if t.system {
+		return #must_tail st_after_doctype_system_id(q[1:], end, t, on)
 	}
 	return #must_tail st_after_doctype_public_id(q[1:], end, t, on)
 }
@@ -1188,7 +1191,8 @@ st_after_doctype_public_id :: #force_no_inline proc "contextless" (p, end: [^]u8
 			return halt(t, p)
 		}
 		open_id(t, p)
-		return #must_tail st_doctype_system_id(p[1:], end, t, on)
+		t.system = true
+		return #must_tail st_doctype_id(p[1:], end, t, on)
 	}
 	if doctype_error(t, on, p, end, .Missing_Quote_Before_Doctype_System_Identifier, true) {
 		return halt(t, p)
@@ -1207,55 +1211,8 @@ st_between_doctype_ids :: #force_no_inline proc "contextless" (p, end: [^]u8, t:
 		return #must_tail st_doctype_close(q, end, t, on)
 	case '"', '\'':
 		open_id(t, q)
-		return #must_tail st_doctype_system_id(q[1:], end, t, on)
-	}
-	if doctype_error(t, on, q, end, .Missing_Quote_Before_Doctype_System_Identifier, true) {
-		return halt(t, q)
-	}
-	return #must_tail st_bogus_doctype(q, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_after_doctype_system_keyword :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	if p >= end {
-		return eof_in_doctype(t, on, end)
-	}
-	switch {
-	case CLASS[p[0]] & C_WS != 0:
-		return #must_tail st_before_doctype_system_id(p[1:], end, t, on)
-	case p[0] == '"' || p[0] == '\'':
-		if report(t, on, p, .Missing_Whitespace_After_Doctype_System_Keyword) {
-			return halt(t, p)
-		}
-		open_id(t, p)
-		return #must_tail st_doctype_system_id(p[1:], end, t, on)
-	case p[0] == '>':
-		if doctype_error(t, on, p, end, .Missing_Doctype_System_Identifier, false) {
-			return halt(t, p)
-		}
-		return #must_tail st_doctype_close(p, end, t, on)
-	}
-	if doctype_error(t, on, p, end, .Missing_Quote_Before_Doctype_System_Identifier, true) {
-		return halt(t, p)
-	}
-	return #must_tail st_bogus_doctype(p, end, t, on)
-}
-
-@(private, enable_target_feature = STATE_FEATURES)
-st_before_doctype_system_id :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q := skip_ws(p, end)
-	if q >= end {
-		return eof_in_doctype(t, on, end)
-	}
-	switch q[0] {
-	case '"', '\'':
-		open_id(t, q)
-		return #must_tail st_doctype_system_id(q[1:], end, t, on)
-	case '>':
-		if doctype_error(t, on, q, end, .Missing_Doctype_System_Identifier, false) {
-			return halt(t, q)
-		}
-		return #must_tail st_doctype_close(q, end, t, on)
+		t.system = true
+		return #must_tail st_doctype_id(q[1:], end, t, on)
 	}
 	if doctype_error(t, on, q, end, .Missing_Quote_Before_Doctype_System_Identifier, true) {
 		return halt(t, q)
@@ -1264,26 +1221,6 @@ st_before_doctype_system_id :: #force_no_inline proc "contextless" (p, end: [^]u
 }
 
 // The DOCTYPE system identifier states, double- and single-quoted. The identifier starts at `t.lo`.
-@(private, enable_target_feature = STATE_FEATURES)
-st_doctype_system_id :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
-	q, stop := doctype_id(t, on, p, end)
-	if stop {
-		return halt(t, q)
-	}
-	t.tok.system_id = span_of(t, t.lo, at(t, q), .Raw, t.flags)
-	if q >= end {
-		return eof_in_doctype(t, on, end)
-	}
-	if q[0] == '>' {
-		t.tok.flags += {.Force_Quirks}
-		if report(t, on, q, .Abrupt_Doctype_System_Identifier) {
-			return halt(t, q)
-		}
-		return #must_tail st_doctype_close(q, end, t, on)
-	}
-	return #must_tail st_after_doctype_system_id(q[1:], end, t, on)
-}
-
 @(private, enable_target_feature = STATE_FEATURES)
 st_after_doctype_system_id :: #force_no_inline proc "contextless" (p, end: [^]u8, t: ^Tokenizer($H), $on: proc "contextless" (h: ^H, t: ^Html_Token) -> Token_Action) -> u64 {
 	q := skip_ws(p, end)

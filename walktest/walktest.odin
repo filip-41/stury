@@ -779,6 +779,27 @@ expect_each_law :: proc(t: ^testing.T, pools: []host.Pool, src: []u8, as: core.A
 	return true
 }
 
+// `records.validate` on each pool gives the faults it gives on one thread, `records.validate_parallel` gives the fault
+// `core.validate` gives, at every width, and `expect_each_law` holds. A byte cut inside a cell or string is among the
+// texts a caller passes.
+expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: []u8, as: core.As, framing: core.Framing, loc := #caller_location) -> bool {
+	serial, _ := records.validate(src, as, framing, context.temp_allocator)
+	whole := fault_of(core.validate(src, as))
+	if v := records.validate_parallel(src, as); !testing.expectf(t, v == whole, "%v %q: validate %v, want %v", framing, src, v, whole, loc = loc) {
+		return false
+	}
+	for &pool in pools {
+		got, _ := records.validate(src, as, framing, context.temp_allocator, &pool.runner)
+		if !testing.expectf(t, slice.equal(got, serial), "%v %q at width %d: %v, want %v", framing, src, pool.runner.threads + 1, got, serial, loc = loc) {
+			return false
+		}
+		if v := records.validate_parallel(src, as, &pool.runner); !testing.expectf(t, v == whole, "%v %q at width %d: validate %v, want %v", framing, src, pool.runner.threads + 1, v, whole, loc = loc) {
+			return false
+		}
+	}
+	return expect_each_law(t, pools, src, as, framing)
+}
+
 // The records `it` gives, a line each: the offset, the key as written and the record's document written as JSON, then
 // `end`, or `fault` and its offset. It closes `it`.
 entries_lines :: proc(it: ^records.Reader) -> string {
@@ -795,26 +816,66 @@ entries_lines :: proc(it: ^records.Reader) -> string {
 	return strings.to_string(b)
 }
 
-// An input that gives `size` bytes a read, so a stream's window moves between the records.
-Trickle :: struct {
-	src:  []u8,
-	at:   int,
-	size: int,
+// An input that gives at most `sizes[i % len(sizes)]` bytes on its `i`-th read, a random count up to 16 when `sizes`
+// is empty, and fails with `.Unknown` once `fail_at` bytes are read, when it is above 0.
+Chunked :: struct {
+	src:     []u8,
+	sizes:   []int,
+	gen:     rand.Generator,
+	reads:   int,
+	at:      int,
+	fail_at: int,
 }
 
-trickle_reader :: proc(t: ^Trickle) -> io.Reader {
-	return {data = t, procedure = proc(data: rawptr, mode: io.Stream_Mode, p: []u8, _: i64, _: io.Seek_From) -> (i64, io.Error) {
-		t := (^Trickle)(data)
+chunked :: proc(c: ^Chunked) -> io.Reader {
+	return {data = c, procedure = proc(data: rawptr, mode: io.Stream_Mode, p: []u8, _: i64, _: io.Seek_From) -> (i64, io.Error) {
+		c := (^Chunked)(data)
 		if mode != .Read {
 			return 0, .Unsupported
 		}
-		if t.at == len(t.src) {
+		if c.fail_at > 0 && c.at == c.fail_at {
+			return 0, .Unknown
+		}
+		if c.at == len(c.src) {
 			return 0, .EOF
 		}
-		n := copy(p[:min(len(p), t.size)], t.src[t.at:])
-		t.at += n
+		k := c.sizes[c.reads % len(c.sizes)] if len(c.sizes) > 0 else 1 + rand.int_max(16, c.gen)
+		c.reads += 1
+		k = min(k, c.fail_at - c.at) if c.fail_at > 0 else k
+		n := copy(p[:min(len(p), k)], c.src[c.at:])
+		c.at += n
 		return i64(n), nil
 	}}
+}
+
+// A stream whose every write is refused and every other call fails.
+refusing_stream :: proc(data: rawptr, mode: io.Stream_Mode, p: []u8, offset: i64, whence: io.Seek_From) -> (i64, io.Error) {
+	return 0, .Permission_Denied if mode == .Write else .Unknown
+}
+
+// An input of no bytes holds no record, and a record read from byte `at` of `src` is the rest of `src` and starts there.
+expect_record_is_the_rest :: proc(t: ^testing.T, src: string, at: u64, as: core.As, loc := #caller_location) {
+	empty := records.open(nil, as, .Concatenated)
+	defer records.close(&empty)
+	_, more := records.next(&empty)
+	testing.expect(t, !more && empty.fault == nil, loc = loc)
+	from := records.open(transmute([]u8)src, as, .Concatenated, at)
+	defer records.close(&from)
+	rec, ok := records.next(&from)
+	testing.expectf(t, ok && rec.at == at && string(rec.text) == src[at:], "%v at %d: %q", ok, rec.at, rec.text, loc = loc)
+}
+
+// A stream whose input holds `text` gives one record, the whole text from byte 0, once the input has ended.
+expect_stream_is_one_record :: proc(t: ^testing.T, text: string, as: core.As, loc := #caller_location) {
+	r: strings.Reader
+	it := records.open_stream(strings.to_reader(&r, text), as, .Concatenated, {max_bytes = 1 << 22})
+	defer records.close(&it)
+	n := 0
+	for rec in records.next(&it) {
+		testing.expect(t, string(rec.text) == text && rec.at == 0, loc = loc)
+		n += 1
+	}
+	testing.expect(t, n == 1 && it.fault == nil, loc = loc)
 }
 
 // The framings `caps` names are those the records of `as` open in.
@@ -838,8 +899,8 @@ expect_entries :: proc(t: ^testing.T, src: string, as: core.As, names: []string,
 	stream := records.open_stream(strings.to_reader(&r, src), as, .Entries, {entries = names})
 	ok &&= testing.expect_value(t, entries_lines(&stream), want, loc)
 	for size in 1 ..= 3 {
-		trickle := Trickle{src = transmute([]u8)src, size = size}
-		slow := records.open_stream(trickle_reader(&trickle), as, .Entries, {entries = names})
+		trickle := Chunked{src = transmute([]u8)src, sizes = {size}}
+		slow := records.open_stream(chunked(&trickle), as, .Entries, {entries = names})
 		ok &&= testing.expect_value(t, entries_lines(&slow), want, loc)
 	}
 	if strings.has_suffix(want, "end") {

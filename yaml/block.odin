@@ -90,38 +90,21 @@ parse_node :: proc(p: ^Parser, n: int, compact, seq_same: bool, role: core.Role)
 // Reads a node whose content starts on the line of its indicator, after the properties `props`.
 @(private)
 parse_same_line :: proc(p: ^Parser, n, ind: int, lo: u64, compact: bool, role: core.Role, props: ^Props) -> bool {
-	switch at(p, p.pos) {
+	switch c := at(p, p.pos); c {
 	case '|', '>':
 		return parse_block_scalar(p, n, role, props)
-	case '-':
-		if indicator_at(p, p.pos) {
-			if !compact || !props_empty(props) {
+	case '-', '?', ':':
+		if indicator_at(p, p.pos) && (c != ':' || props_empty(props)) {
+			if !compact || c != ':' && !props_empty(props) {
 				return fault(p, p.pos, .Bad_Char, .Block_In_Line)
 			}
 			if p.sep_tab {
 				return fault(p, p.pos, .Bad_Char, .Tab_Indent)
 			}
-			return open_seq(p, ind, role, &Props{})
-		}
-	case '?':
-		if indicator_at(p, p.pos) {
-			if !compact || !props_empty(props) {
-				return fault(p, p.pos, .Bad_Char, .Block_In_Line)
+			if c == '-' {
+				return open_seq(p, ind, role, &Props{})
 			}
-			if p.sep_tab {
-				return fault(p, p.pos, .Bad_Char, .Tab_Indent)
-			}
-			return open_map(p, ind, lo, role, &Props{}, &Props{}, .Explicit, 0)
-		}
-	case ':':
-		if indicator_at(p, p.pos) && props_empty(props) {
-			if !compact {
-				return fault(p, p.pos, .Bad_Char, .Block_In_Line)
-			}
-			if p.sep_tab {
-				return fault(p, p.pos, .Bad_Char, .Tab_Indent)
-			}
-			return open_map(p, ind, lo, role, &Props{}, &Props{}, .Empty_Key, 0)
+			return open_map(p, ind, lo, role, &Props{}, &Props{}, .Explicit if c == '?' else .Empty_Key, 0)
 		}
 	}
 	return parse_inline_entry(p, n, ind, lo, compact, role, &Props{}, props)
@@ -133,28 +116,14 @@ parse_same_line :: proc(p: ^Parser, n, ind: int, lo: u64, compact: bool, role: c
 parse_block_at :: proc(p: ^Parser, ind, n: int, role: core.Role, outer: ^Props, seq_same: bool) -> bool {
 	lo := p.pos
 	p.sep_tab = false
-	switch at(p, p.pos) {
-	case '-':
-		if indicator_at(p, p.pos) {
-			if p.nl.tab {
-				return fault(p, p.pos, .Bad_Char, .Tab_Indent)
-			}
+	if c := at(p, p.pos); (c == '-' || c == '?' || c == ':') && indicator_at(p, p.pos) {
+		if p.nl.tab {
+			return fault(p, p.pos, .Bad_Char, .Tab_Indent)
+		}
+		if c == '-' {
 			return open_seq(p, ind, role, outer)
 		}
-	case '?':
-		if indicator_at(p, p.pos) {
-			if p.nl.tab {
-				return fault(p, p.pos, .Bad_Char, .Tab_Indent)
-			}
-			return open_map(p, ind, lo, role, outer, &Props{}, .Explicit, 0)
-		}
-	case ':':
-		if indicator_at(p, p.pos) {
-			if p.nl.tab {
-				return fault(p, p.pos, .Bad_Char, .Tab_Indent)
-			}
-			return open_map(p, ind, lo, role, outer, &Props{}, .Empty_Key, 0)
-		}
+		return open_map(p, ind, lo, role, outer, &Props{}, .Explicit if c == '?' else .Empty_Key, 0)
 	}
 	inner: Props
 	parse_props(p, &inner, false) or_return

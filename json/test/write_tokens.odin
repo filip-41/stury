@@ -288,7 +288,7 @@ tokens_to_a_stream :: proc(t: ^testing.T) {
 tokens_to_a_failing_stream :: proc(t: ^testing.T) {
 	v := token_sample()
 	tw: write.Tokens
-	write.tokens_init(&tw, json.as(.Json), stream = io.Stream{procedure = refusing_stream})
+	write.tokens_init(&tw, json.as(.Json), stream = io.Stream{procedure = walktest.refusing_stream})
 	write_sample(&tw, v)
 	_, err := write.tokens_finish(&tw)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Write_Failed)

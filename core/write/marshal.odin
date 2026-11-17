@@ -672,8 +672,6 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 				case:
 					when V {
 						k = visit_leaf(w, vf, va)
-					} else when BIN {
-						k = binary_leaf(w, vf, va, top, T, put)
 					} else {
 						k = leaf(w, vf, va, top, nest, P, T, put)
 					}

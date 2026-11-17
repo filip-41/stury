@@ -186,10 +186,8 @@ read_directive :: proc(p: ^Parser) -> bool {
 		if p.pos == plo {
 			return fault(p, plo, .Bad_Char, .Bad_Directive)
 		}
-		for h in p.handles {
-			if h.handle == handle {
-				return fault(p, lo, .Bad_Char, .Duplicate_Directive)
-			}
+		if handle_declared(p, lo, lo + u64(len(handle))) {
+			return fault(p, lo, .Bad_Char, .Duplicate_Directive)
 		}
 		append(&p.handles, Handle{handle, string(p.src[plo:p.pos])})
 	case:

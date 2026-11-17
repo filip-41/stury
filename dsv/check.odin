@@ -28,10 +28,15 @@ Check_Cells :: struct {
 	infer: bool, // a cell that is exactly a JSON number, `true` or `false` is that kind
 }
 
-// The token of the value cell `t` as the check judges it: its one kind, unless the check keeps readings.
+// The token of the value cell `t` as the check judges it: `null` for an empty unquoted cell, else its one kind, unless
+// the check keeps readings.
 @(private)
 cell_token :: #force_inline proc "contextless" (h: ^Check_Cells, t: core.Token) -> core.Token {
 	t := t
+	if t.n == 0 && t.spelling & core.SPELLING_QUOTED == 0 {
+		t.kind = .Null
+		return t
+	}
 	if h.c.readings != nil {
 		return t
 	}
@@ -65,20 +70,13 @@ on_check_cell :: #force_inline proc "contextless" (h: ^Check_Cells, regs: core.H
 		}
 		return typed.on_token_check(&h.c, regs, t)
 	}
-	empty := t.n == 0 && t.spelling & core.SPELLING_QUOTED == 0
 	switch {
 	case t.role == .Key:
 		h.key, h.held = t, true
 	case t.role != .Value:
 	case !h.held:
 		// An element of a row with no header.
-		t := t
-		if empty {
-			t.kind = .Null
-		} else {
-			t = cell_token(h, t)
-		}
-		return typed.on_token_check(&h.c, regs, t)
+		return typed.on_token_check(&h.c, regs, cell_token(h, t))
 	case:
 		column := h.col
 		h.col, h.held = column + 1, false
@@ -90,13 +88,7 @@ on_check_cell :: #force_inline proc "contextless" (h: ^Check_Cells, regs: core.H
 			// A key the check passed over takes its cell with it.
 			return out, .Stop if action == .Stop else .Next
 		}
-		t := t
-		if empty {
-			t.kind = .Null
-		} else {
-			t = cell_token(h, t)
-		}
-		return typed.on_token_check(&h.c, out, t)
+		return typed.on_token_check(&h.c, out, cell_token(h, t))
 	}
 	return regs, .Next
 }

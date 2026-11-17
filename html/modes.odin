@@ -1528,6 +1528,18 @@ in_cell :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 	return in_body(t, tok)
 }
 
+// Reports `tok`, which a mode after the body has no rule for, and reads it again in "in body".
+@(private)
+reread_in_body :: proc(t: ^Html_Tree, tok: ^Html_Token) -> bool {
+	unexpected(t, tok)
+	t.mode = .In_Body
+	// An end tag of the body or the document again leaves the body and takes nothing, so the body ends where it first did.
+	if tok.kind != .End_Tag || t.tag != .Body && t.tag != .Html {
+		t.body_end, t.html_hi = {}, 0
+	}
+	return true
+}
+
 @(private)
 after_body :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 	switch tok.kind {
@@ -1558,13 +1570,7 @@ after_body :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 	case EOF:
 		return false
 	}
-	unexpected(t, tok)
-	t.mode = .In_Body
-	// An end tag of the body or the document again leaves the body and takes nothing, so the body ends where it first did.
-	if tok.kind != .End_Tag || t.tag != .Body && t.tag != .Html {
-		t.body_end, t.html_hi = {}, 0
-	}
-	return true
+	return reread_in_body(t, tok)
 }
 
 @(private)
@@ -1663,13 +1669,7 @@ after_after_body :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 	case EOF:
 		return false
 	}
-	unexpected(t, tok)
-	t.mode = .In_Body
-	// An end tag of the body or the document again leaves the body and takes nothing, so the body ends where it first did.
-	if tok.kind != .End_Tag || t.tag != .Body && t.tag != .Html {
-		t.body_end, t.html_hi = {}, 0
-	}
-	return true
+	return reread_in_body(t, tok)
 }
 
 @(private)

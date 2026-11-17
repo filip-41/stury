@@ -9,6 +9,7 @@ package yaml
 import "base:runtime"
 import "core:slice"
 import "core:strings"
+import spell "../core/spell"
 import core "../core"
 import rules "../core/rules"
 import typed "../core/typed"
@@ -189,47 +190,11 @@ number_form :: proc(text: []u8) -> u16 {
 	case .Inf: return 10
 	case .Nan: return 12
 	}
-	at := 1 if text[0] == '-' else 0
-	digits := at
-	for digits < len(text) && text[digits] >= '0' && text[digits] <= '9' {
-		digits += 1
-	}
-	whole := digits - at
-	if whole == 0 || whole > 1 && text[at] == '0' {
+	int_digits, frac_digits, has_exp, ok := spell.number_shape_strict(text, 0, u64(len(text)))
+	if !ok {
 		return core.NUMBER_DECIMAL
 	}
-	frac, exp := 0, false
-	if digits < len(text) && text[digits] == '.' {
-		end := digits + 1
-		for end < len(text) && text[end] >= '0' && text[end] <= '9' {
-			end += 1
-		}
-		frac = end - digits - 1
-		if frac == 0 {
-			return core.NUMBER_DECIMAL
-		}
-		digits = end
-	}
-	if digits < len(text) {
-		if text[digits] | 0x20 != 'e' {
-			return core.NUMBER_DECIMAL
-		}
-		exp = true
-		at = digits + 1
-		if at < len(text) && (text[at] == '+' || text[at] == '-') {
-			at += 1
-		}
-		if at == len(text) {
-			return core.NUMBER_DECIMAL
-		}
-		for b in text[at:] {
-			if b < '0' || b > '9' {
-				return core.NUMBER_DECIMAL
-			}
-		}
-	}
-	form := core.number_spelling(0, u64(whole), u64(frac))
-	return form | core.NUMBER_EXP if exp else form
+	return core.number_spelling(0, int_digits, frac_digits) | (core.NUMBER_EXP if has_exp else 0)
 }
 
 // Writes `value` as YAML into new bytes from `allocator`, as `write` says: a struct or map as a mapping, a list as a

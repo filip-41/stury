@@ -840,11 +840,6 @@ tolerated_strings_through_the_row_walk :: proc(t: ^testing.T) {
 	testing.expect(t, string(again) == want)
 }
 
-@(private)
-refusing_stream :: proc(data: rawptr, mode: io.Stream_Mode, p: []u8, offset: i64, whence: io.Seek_From) -> (i64, io.Error) {
-	return 0, .Permission_Denied if mode == .Write else .Unknown
-}
-
 // A stream that fails reports the write's end through the tree writer and the row walk, and a failed write counts no drop.
 @(test)
 document_write_to_a_failing_stream :: proc(t: ^testing.T) {
@@ -852,7 +847,7 @@ document_write_to_a_failing_stream :: proc(t: ^testing.T) {
 		doc, err := core.build(transmute([]u8)src, json.as(.Jsonc))
 		defer core.destroy(&doc)
 		walktest.expect_nil(t, err)
-		dropped, serr := core.write_stream(io.Stream{procedure = refusing_stream}, &doc, {}, json.as(.Json))
+		dropped, serr := core.write_stream(io.Stream{procedure = walktest.refusing_stream}, &doc, {}, json.as(.Json))
 		walktest.expect_kind(t, serr, core.Typed_Error_Kind.Write_Failed)
 		testing.expect_value(t, walktest.typed_of(serr).cause, io.Error.Permission_Denied)
 		testing.expect_value(t, dropped, 0)

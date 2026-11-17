@@ -34,37 +34,13 @@ pools_close :: proc(pools: ^[len(WIDTHS)]host.Pool) {
 }
 
 @(private = "file")
-whole_fault :: proc(src: []u8, spec: json.Spec) -> Maybe(core.Fault) {
-	switch spec {
-	case .Json:  return walktest.fault_of(json.validate(src, .Json))
-	case .Jsonc: return walktest.fault_of(json.validate(src, .Jsonc))
-	case .Json5: return walktest.fault_of(json.validate(src, .Json5))
-	}
-	return nil
-}
-
-@(private = "file")
 expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, framing: core.Framing, spec: json.Spec) -> bool {
-	text := transmute([]u8)src
-	serial, _ := records.validate(text, json.as(spec), framing, context.temp_allocator)
-	whole := whole_fault(text, spec)
-	if !testing.expectf(t, records.validate_parallel(text, json.as(spec)) == whole, "%v %q: validate %v, want %v", spec, src, records.validate_parallel(text, json.as(spec)), whole) {
+	text, as := transmute([]u8)src, json.as(spec)
+	if !walktest.expect_chain_law(t, pools, text, as, framing) {
 		return false
 	}
-	for &pool in pools {
-		got, _ := records.validate(text, json.as(spec), framing, context.temp_allocator, &pool.runner)
-		if !testing.expectf(t, slice.equal(got, serial), "%v %v %q at width %d: %v, want %v", framing, spec, src, pool.runner.threads + 1, got, serial) {
-			return false
-		}
-		if v := records.validate_parallel(text, json.as(spec), &pool.runner); !testing.expectf(t, v == whole, "%v %q at width %d: validate %v, want %v", spec, src, pool.runner.threads + 1, v, whole) {
-			return false
-		}
-	}
-	if !walktest.expect_each_law(t, pools, text, json.as(spec), framing) {
-		return false
-	}
-	at, _, ok := json.spine(text, json.as(spec))
-	return framing != .Entries || !ok || walktest.expect_each_law(t, pools, text, json.as(spec), .Entries, at)
+	at, _, ok := json.spine(text, as)
+	return framing != .Entries || !ok || walktest.expect_each_law(t, pools, text, as, .Entries, at)
 }
 
 // Strings of commas and brackets, arrays inside entries and faults near either end.

@@ -64,18 +64,6 @@ rule_of :: proc "contextless" (f: Fault) -> Rule {
 	return KIND_RULES[f.kind]
 }
 
-// Writes the fault's code to `w`: `f.rules.format`, a dot when `rules` is set, then `rule_of(f).code`, as in
-// `json.literal` or `dsv.bad_char`. Returns the writer's error.
-@(private)
-write_fault_code :: proc(w: io.Writer, f: Fault) -> io.Error {
-	if f.rules != nil {
-		io.write_string(w, f.rules.format) or_return
-		io.write_byte(w, '.') or_return
-	}
-	_, err := io.write_string(w, rule_of(f).code)
-	return err
-}
-
 // A count of a text's lines up to byte `at`, kept between faults met in offset order so that `locate` scans each byte
 // once. The zero value starts at the text's first byte.
 Lines :: struct {

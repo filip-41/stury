@@ -58,19 +58,8 @@ fold_flow :: proc "contextless" (o: ^Decoded, s: []u8, style: Style) {
 		switch {
 		case c == '\n' || c == '\r':
 			o.n = keep
-			empties := 0
-			i = skip_break(s, i)
-			for {
-				for i < len(s) && is_white(s[i]) {
-					i += 1
-				}
-				if i < len(s) && is_break(s[i]) {
-					i = skip_break(s, i)
-					empties += 1
-					continue
-				}
-				break
-			}
+			empties: int
+			i, empties = skip_empty_lines(s, skip_break(s, i))
 			if empties == 0 {
 				put(o, ' ')
 			}
@@ -82,19 +71,8 @@ fold_flow :: proc "contextless" (o: ^Decoded, s: []u8, style: Style) {
 			i += 1
 			e := s[i]
 			if e == '\n' || e == '\r' {
-				i = skip_break(s, i)
-				empties := 0
-				for {
-					for i < len(s) && is_white(s[i]) {
-						i += 1
-					}
-					if i < len(s) && is_break(s[i]) {
-						i = skip_break(s, i)
-						empties += 1
-						continue
-					}
-					break
-				}
+				empties: int
+				i, empties = skip_empty_lines(s, skip_break(s, i))
 				for _ in 0 ..< empties {
 					put(o, '\n')
 				}
@@ -138,6 +116,24 @@ fold_flow :: proc "contextless" (o: ^Decoded, s: []u8, style: Style) {
 				keep = o.n
 			}
 		}
+	}
+}
+
+// Moves from the start of a line over its white space and the empty lines after it, and returns where the first line
+// with text starts, with the count of the empty lines.
+@(private)
+skip_empty_lines :: proc "contextless" (s: []u8, i: int) -> (at, empties: int) {
+	at = i
+	for {
+		for at < len(s) && is_white(s[at]) {
+			at += 1
+		}
+		if at < len(s) && is_break(s[at]) {
+			at = skip_break(s, at)
+			empties += 1
+			continue
+		}
+		return
 	}
 }
 

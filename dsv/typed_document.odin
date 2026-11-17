@@ -139,11 +139,7 @@ bind_record_keys :: proc(d: ^Document_Cells, rec: core.Node_Index) {
 	delete(h.cols, context.temp_allocator)
 	h.cols, h.keys = nil, nil
 	nodes := d.doc.nodes[rec:][:d.doc.nodes[rec].n]
-	count := 0
-	for n in nodes[1:] {
-		count += int(n.role == .Key)
-	}
-	keys, failed := make([]core.Token, count, context.temp_allocator)
+	keys, failed := make([]core.Token, len(nodes) - 1, context.temp_allocator)
 	if failed != nil {
 		return
 	}
@@ -154,7 +150,7 @@ bind_record_keys :: proc(d: ^Document_Cells, rec: core.Node_Index) {
 			c += 1
 		}
 	}
-	h.keys = keys
+	h.keys = keys[:c]
 }
 
 @(private)

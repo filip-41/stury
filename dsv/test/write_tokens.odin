@@ -186,7 +186,7 @@ rows_to_a_stream :: proc(t: ^testing.T) {
 
 @(test)
 rows_to_a_failing_stream :: proc(t: ^testing.T) {
-	_, err := token_rows(TOKEN_ROWS[:], .Csv, {}, io.Stream{procedure = refusing_stream})
+	_, err := token_rows(TOKEN_ROWS[:], .Csv, {}, io.Stream{procedure = walktest.refusing_stream})
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Write_Failed)
 	testing.expect_value(t, err.cause, io.Error.Permission_Denied)
 }

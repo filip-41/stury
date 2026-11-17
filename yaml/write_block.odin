@@ -365,26 +365,8 @@ flow_from_lines :: proc(out: ^write.Out, text: string) {
 @(private)
 scalar_end :: proc(text: string, from: int) -> int {
 	at := from
-	switch text[at] {
-	case '"':
-		at += 1
-		for at < len(text) && text[at] != '"' {
-			at += 2 if text[at] == '\\' else 1
-		}
-		return min(at + 1, len(text))
-	case '\'':
-		at += 1
-		for at < len(text) {
-			if text[at] == '\'' {
-				if at + 1 < len(text) && text[at + 1] == '\'' {
-					at += 2
-					continue
-				}
-				break
-			}
-			at += 1
-		}
-		return min(at + 1, len(text))
+	if text[at] == '"' || text[at] == '\'' {
+		return quoted_end(text, at)
 	}
 	for at < len(text) {
 		switch text[at] {

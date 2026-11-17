@@ -26,11 +26,6 @@ ENTRY_TEXT :: "a: 1\nb: [2, 3]\n"
 @(private = "file")
 ENTRY_EDITED :: "a: 7\nb: [2, 3]\n"
 
-@(private = "file")
-take_first :: proc(state: rawptr, a: yaml.Token_Answer) -> bool {
-	return false
-}
-
 // What `constant_forms` leaves out of the reads, the one-call edit and the marshal of a text through the forms the
 // group `spec` picks.
 @(private = "file")
@@ -116,8 +111,8 @@ constant_forms :: proc(t: ^testing.T, $S: yaml.Spec) {
 	mdoc, merr := yaml.scan(src, S, paths[:])
 	walktest.expect_nil(t, merr)
 	yaml.destroy(&mdoc)
-	walktest.expect_nil(t, yaml.each_answer(src, S, path, nil, take_first))
-	walktest.expect_nil(t, yaml.each_answer(src, S, paths[:], nil, take_first))
+	walktest.expect_nil(t, yaml.each_answer(src, S, path, nil, walktest.take_first))
+	walktest.expect_nil(t, yaml.each_answer(src, S, paths[:], nil, walktest.take_first))
 	fdoc, found, ferr := yaml.find(src, S, path)
 	walktest.expect_nil(t, ferr)
 	testing.expect(t, found.outcome == .Found)

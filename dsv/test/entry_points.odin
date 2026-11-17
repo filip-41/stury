@@ -15,10 +15,6 @@ Entry_Row :: struct {
 	b: i64,
 }
 
-take_first :: proc(state: rawptr, a: core.Token_Answer) -> bool {
-	return false
-}
-
 @(test)
 plan_and_marshal_accept_valid_input :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("a,b\n1,2\n")
@@ -76,8 +72,8 @@ constant_forms :: proc(t: ^testing.T, $S: dsv.Spec, text, edited: string) {
 	mdoc, merr := dsv.scan(src, S, paths[:])
 	walktest.expect_nil(t, merr)
 	core.destroy(&mdoc)
-	walktest.expect_nil(t, dsv.each_answer(src, S, path, nil, take_first))
-	walktest.expect_nil(t, dsv.each_answer(src, S, paths[:], nil, take_first))
+	walktest.expect_nil(t, dsv.each_answer(src, S, path, nil, walktest.take_first))
+	walktest.expect_nil(t, dsv.each_answer(src, S, paths[:], nil, walktest.take_first))
 	fdoc, found, ferr := dsv.find(src, S, path)
 	walktest.expect_nil(t, ferr)
 	testing.expect(t, found.outcome == .Found)

@@ -484,23 +484,8 @@ flow_end :: proc "contextless" (src: []u8, lo: u64) -> u64 {
 			if depth == 0 {
 				return at
 			}
-		case '"':
-			for at < u64(len(src)) && src[at] != '"' {
-				at += 2 if src[at] == '\\' else 1
-			}
-			at += 1
-		case '\'':
-			for at < u64(len(src)) {
-				if src[at] == '\'' {
-					if at + 1 < u64(len(src)) && src[at + 1] == '\'' {
-						at += 2
-						continue
-					}
-					break
-				}
-				at += 1
-			}
-			at += 1
+		case '"', '\'':
+			at = u64(quoted_end(string(src), int(at) - 1))
 		case '#':
 			if kernel.is_ws(src[at - 2]) {
 				for at < u64(len(src)) && src[at] != '\n' && src[at] != '\r' {

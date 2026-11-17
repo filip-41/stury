@@ -407,11 +407,12 @@ missing_cell :: #force_no_inline proc "contextless" (h: ^Cells_Of($H), regs: cor
 	return read_token(h, regs, t)
 }
 
-// The byte past the cell `t` as written, where the entry of a refused cell ends.
+// Refuses cell `t` of the field `at` names. Its entry ends where the cell is written to end.
 @(private)
-cell_end :: #force_inline proc "contextless" (t: core.Token) -> u64 {
+refuse_cell :: proc "contextless" (h: ^Cells_Of($H), at: core.Hook_Regs, kind: core.Typed_Error_Kind, t: core.Token) -> core.Action {
 	_, hi := core.scalar_ends(t)
-	return hi
+	_, action := typed.refuse(&h.r, at, {kind = kind, at = t.lo}, hi)
+	return action
 }
 
 // A cell no hot read took: an empty cell, a kind or a spelling the hot reads leave out, a cell near the text's end, and
@@ -437,8 +438,7 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells_Of($H), regs: core.H
 			if reason == .None {
 				return next, .Next
 			}
-			_, action := typed.refuse(&h.r, at, {kind = reason, at = t.lo}, cell_end(t))
-			return next, action
+			return next, refuse_cell(h, at, reason, t)
 		}
 		if !h.no_header {
 			// A headed row's cursor stands here past the header's last column only under `.Ragged`, at a column the row
@@ -454,8 +454,7 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells_Of($H), regs: core.H
 			}
 			kind, at.b = .Wrong_Length, at.b - size_of(typed.Field)
 		}
-		_, action := typed.refuse(&h.r, at, {kind = kind, at = t.lo}, cell_end(t))
-		return regs, action
+		return regs, refuse_cell(h, at, kind, t)
 	}
 	map_row := h.row.kind == .Map
 	when H == typed.Check {
@@ -475,8 +474,7 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells_Of($H), regs: core.H
 	}
 	if t.n == 0 {
 		if col.required {
-			_, action := typed.refuse(&h.r, at, {kind = .Missing_Field, at = t.lo}, cell_end(t))
-			return next, action
+			return next, refuse_cell(h, at, .Missing_Field, t)
 		}
 		if map_row {
 			return next, .Next
@@ -491,8 +489,7 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells_Of($H), regs: core.H
 		slot, reason = typed.map_slot(&h.r, &h.r.plan.meta[h.row.meta], (^runtime.Raw_Map)(f.data), col.name, col.key, typed.field_at(at.b), false)
 		at.c = u64(uintptr(slot))
 		if reason != .None {
-			_, action := typed.refuse(&h.r, at, {kind = reason, at = t.lo}, cell_end(t))
-			return next, action
+			return next, refuse_cell(h, at, reason, t)
 		}
 	} else if regs.c >= regs.a {
 		at, reason = typed.grow_list(&h.r, at)

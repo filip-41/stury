@@ -3,7 +3,6 @@
 package xml_tests
 
 import "core:fmt"
-import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -52,15 +51,7 @@ every_record_form_reads_a_text :: proc(t: ^testing.T) {
 // reader's fault at its byte in the input, and a stream is one record once its input has ended.
 @(test)
 a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
-	empty := xml.records_open(nil, .Xml)
-	defer xml.records_close(&empty)
-	_, more := xml.records_next(&empty)
-	testing.expect(t, !more && empty.fault == nil)
-	src := transmute([]u8)string("<a/><b>1</b>")
-	from := xml.records_open(src, .Xml, at = 4)
-	defer xml.records_close(&from)
-	rec, ok := xml.records_next(&from)
-	testing.expect(t, ok && rec.at == 4 && string(rec.text) == "<b>1</b>")
+	walktest.expect_record_is_the_rest(t, "<a/><b>1</b>", 4, xml.as(.Xml))
 	bad := transmute([]u8)string("<a><b></c></a>")
 	faults, err := xml.records_validate(bad, .Xml)
 	defer delete(faults)
@@ -74,58 +65,28 @@ a_record_is_the_rest_of_the_input :: proc(t: ^testing.T) {
 	}
 	strings.write_string(&b, "</r>")
 	whole := strings.to_string(b)
-	r: strings.Reader
-	stream := xml.records_open_stream(strings.to_reader(&r, whole), xml.Spec.Xml, stream = {max_bytes = 1 << 22})
-	defer xml.records_close(&stream)
-	n := 0
-	for got in xml.records_next(&stream) {
-		testing.expect(t, string(got.text) == whole && got.at == 0)
-		n += 1
-	}
-	testing.expect(t, n == 1 && stream.fault == nil)
+	walktest.expect_stream_is_one_record(t, whole, xml.as(.Xml))
 }
 
-@(private = "file")
-collect_answer :: proc(state: rawptr, a: core.Token_Answer) -> bool {
-	append((^[dynamic]core.Token_Answer)(state), a)
-	return true
-}
-
-// The iterator gives the answers `each_answer` gives and ends with its error, whatever its largest batch, and a loop
-// that ends after the first answer frees the read with `destroy`.
+// The iterator gives the answers `each_answer` gives and ends with its error, whatever its largest batch, for each
+// duplicate policy, and a loop that ends after the first answer frees the read with `destroy`.
 @(test)
 answers_agree_with_each_answer :: proc(t: ^testing.T) {
-	texts := [?]string{".a.b", ".a[]", "..", ".a.c", ".a[\"#text\"]", ".z"}
-	srcs := [?]string{RECORD_TEXT, "<a>x<b>1</b>y<b>2</b></a>", "<a><b>1</b><b>2</b></a", "<a><b>1</b></a><a/>"}
-	want, got: [dynamic]core.Token_Answer
-	defer delete(want)
-	defer delete(got)
-	for text in texts {
-		path, perr := xml.parse_path(text)
-		walktest.expect_nil(t, perr)
-		defer xml.destroy(&path)
-		for s in srcs {
-			src := transmute([]u8)s
-			for dups in ([]core.Duplicates{.Last, .Refuse}) {
-				read := core.Path_Options{dups = dups}
-				clear(&want)
-				err := xml.each_answer(src, .Xml, path, &want, collect_answer, {}, read)
-				for batch in ([]int{1, 3, 64}) {
-					it := xml.answers(src, .Xml, path, {}, read)
-					it.max_batch = batch
-					clear(&got)
-					for a in xml.next(&it) {
-						append(&got, a)
-					}
-					ok := testing.expectf(t, slice.equal(got[:], want[:]), "%q %s batch %d: %d answers, want %d", s, text, batch, len(got), len(want))
-					ok &&= testing.expectf(t, fmt.tprint(it.err) == fmt.tprint(err), "%q %s batch %d: %v, want %v", s, text, batch, it.err, err)
-					if !ok {
-						return
-					}
-				}
+	run := walktest.Answer_Run {
+		each = proc(src: []u8, paths: []core.Path, variant: int, early: bool, out: ^[dynamic]core.Token_Answer) -> core.Error {
+			return xml.each_answer(src, .Xml, paths, out, walktest.collect_answer, {}, {dups = .Refuse if variant == 1 else .Last, stop_early = early})
+		},
+		iter = proc(src: []u8, paths: []core.Path, variant: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
+			it := xml.answers(src, .Xml, paths, {}, {dups = .Refuse if variant == 1 else .Last, stop_early = early})
+			it.max_batch = batch
+			for a in xml.next(&it) {
+				append(out, a)
 			}
-		}
+			return it.err
+		},
 	}
+	srcs := [?]string{RECORD_TEXT, "<a>x<b>1</b>y<b>2</b></a>", "<a><b>1</b><b>2</b></a", "<a><b>1</b></a><a/>"}
+	walktest.expect_answers_agree(t, srcs[:], {".a.b", ".a[]", "..", ".a.c", ".a[\"#text\"]", ".z"}, 2, run)
 	path, _ := xml.parse_path(".a[]")
 	defer xml.destroy(&path)
 	src := transmute([]u8)string("<a><b>1</b><c>2</c></a>")
@@ -209,8 +170,8 @@ entries_build_after_later_members :: proc(t: ^testing.T) {
 	walktest.expect_entries_built_later(t, "<r xmlns:n=\"u\"><n:a>1</n:a><b k=\"2\"/><c><d>3</d></c></r>", xml.as(.Xml), {"r"})
 	walktest.expect_entries_built_later(t, "<!DOCTYPE r [<!ENTITY e \"x\"><!ATTLIST b d CDATA \"v\">]><r><b>&e;</b><b/><c>&e;</c></r>", xml.as(.Xml), {"r"})
 	src := strings.concatenate({"<r>", strings.repeat("<b>0123456789</b>", 2000, context.temp_allocator), "</r>"}, context.temp_allocator)
-	trickle := walktest.Trickle{src = transmute([]u8)src, size = 1000}
-	it := records.open_stream(walktest.trickle_reader(&trickle), xml.as(.Xml), .Entries, {entries = {"r"}})
+	trickle := walktest.Chunked{src = transmute([]u8)src, sizes = {1000}}
+	it := records.open_stream(walktest.chunked(&trickle), xml.as(.Xml), .Entries, {entries = {"r"}})
 	defer records.close(&it)
 	first, given := records.next(&it)
 	testing.expect(t, given)

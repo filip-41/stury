@@ -433,14 +433,10 @@ failed_write_counts_nothing :: proc(t: ^testing.T) {
 	walktest.expect_nil(t, kerr)
 	testing.expect_value(t, string(counted), "a\n1\n")
 	testing.expect_value(t, dropped, 1)
-	closed := io.Stream{procedure = refusing_stream}
+	closed := io.Stream{procedure = walktest.refusing_stream}
 	lost, serr := core.write_stream(closed, &doc, as = dsv.as(.Csv))
 	walktest.expect_kind(t, serr, core.Typed_Error_Kind.Write_Failed)
 	testing.expect_value(t, lost, 0)
-}
-
-refusing_stream :: proc(data: rawptr, mode: io.Stream_Mode, p: []u8, offset: i64, whence: io.Seek_From) -> (i64, io.Error) {
-	return 0, .Permission_Denied if mode == .Write else .Unknown
 }
 
 // `core.write_stream` gives the bytes of the text in memory, in the read spec and in another.

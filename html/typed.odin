@@ -26,16 +26,11 @@ marshal_once :: proc(value: any, spec := Spec.Document, opts := Options{}, write
 	return typed.marshal_planned(&plan, core.error_of(refusal), v.data, write, allocator)
 }
 
-@(private)
-reads :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
-	return reads_of(.Fragment) if S == .Fragment else reads_of(.Document)
-}
-
 // Returns the checks of `spec` read with `opts`, for `model.compile` and `schema.bind`: the reads, which check a text or
 // a document by a plan made from a description or a model, and the handle its plans read by, which reaches no service.
 // A struct's member takes its name from the tag key `html`.
 checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Checks {
-	return {reads(S), bound_as(S, opts)}
+	return {reads_of(S), bound_as(S, opts)}
 }
 
 // Reads and compiles the schema `text`, a text of spec `S` read with `opts` that outlives the result, with `load`: where
