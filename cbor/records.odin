@@ -11,6 +11,7 @@ import "../core/records"
 FRAMING := records.Framing_Services {
 	next   = {.Lines = nil, .Seq = nil, .Concatenated = next_item, .Entries = records.entries_walked},
 	judge  = records.no_judge,
+	guess  = guess_item,
 	close  = records.entries_walked_close,
 	closed = {.Lines = false, .Seq = false, .Concatenated = true, .Entries = true},
 	entry_step = step_entries,
@@ -115,6 +116,10 @@ held_map :: proc "contextless" (s: ^Held, k: int) -> bool {
 	return frame & FLAG_OBJECT != 0
 }
 
+// The most bytes an item of a piece spans, as a piece starts at a guess, where a misplaced head may hold a count whose
+// walk spans the text.
+PIECE_ITEM :: 64 * 1024
+
 // Frames the item at the reader's position: the bytes from there through the item's end, judged by the walk that
 // frames them.
 next_item :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) {
@@ -122,15 +127,22 @@ next_item :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) {
 	if lo >= u64(len(it.src)) {
 		return
 	}
+	src := it.src[:min(u64(len(it.src)), lo + PIECE_ITEM)] if it.guessed else it.src
 	h: core.No_Hooks
 	regs: core.Hook_Regs
-	hi, fault := walk_rules(it.src, lo, handle_rules(it.as), &h, &regs, core.no_hook)
+	hi, fault := walk_rules(src, lo, handle_rules(it.as), &h, &regs, core.no_hook)
 	if fault != nil {
 		it.fault = fault
 		return
 	}
 	it.pos = hi
 	return {text = it.src[lo:hi], at = lo}, true
+}
+
+// Any byte may start an item, so a piece's records start where it starts, and `records` takes them only once a
+// record of the text is one of them.
+guess_item :: proc(it: ^records.Reader, to: u64) -> bool {
+	return it.pos < to
 }
 
 build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {

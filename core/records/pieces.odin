@@ -50,14 +50,31 @@ FAN_AFTER :: #config(RECORDS_FAN_AFTER, 8)
 @(private)
 SPARSE :: #config(RECORDS_SPARSE, SLICE / 4)
 
-// What the chain of records from a piece's first guess found: the offset of its first record, 0 when no chain reached
-// the piece's end or the text's with no fault, where it arrived past its last record, and the faults of its records.
+// The bytes past a piece's start where a chain from a misplaced guess, as at any byte of CBOR, has most likely come to
+// the records of the text.
+@(private)
+SETTLE :: SLICE / 128
+
+// What the chain of records from a piece's last guess found: where the guess placed the reader, with its state, its
+// first record and the first records past `SETTLE`, `held` in all, where the records read in source order may meet it,
+// none when no chain reached the piece's end or the text's with no fault, where it arrived past its last record, and
+// the faults of its records.
 @(private)
 Piece :: struct {
-	first:  u64,
+	from:   u64,
+	start:  [8]u8,
+	starts: [16]Start,
+	held:   int,
 	pos:    u64,
 	state:  [8]u8,
 	faults: [dynamic]core.Fault,
+}
+
+// A record of a chain, and the number of faults its chain found before it.
+@(private)
+Start :: struct {
+	at:     u64,
+	faults: int,
 }
 
 @(private)
@@ -88,16 +105,32 @@ judge_all :: proc(src: []u8, as: core.As, services: ^Framing_Services, framing: 
 	// piece's guess to land on one.
 	origin, seen := it.pos, 0
 	sampling := runner != nil && runner.threads > 0 && it.services.guess != nil && !by_tree(it.services, framing) && u64(len(src)) >= it.pos + 2 * SLICE
+	// A format whose guess finds a record's start by the text alone loses nothing to sparse records, and its first record
+	// is read in a piece as well.
+	if sampling && it.services.cut != nil {
+		sampling = false
+		c.start = it
+		c.pieces = make([]Piece, (u64(len(src)) - it.pos + SLICE - 1) / SLICE, runtime.heap_allocator()) or_return
+		fan(runner, chain_pieces, &c)
+	}
 	for {
+		// A reader where a piece's guess placed one, in the same state, reads the records the piece's chain read.
+		if c.pieces != nil && it.fault == nil {
+			if p := piece_of_place(&c, it.pos); p != nil && p.held > 0 && p.from == it.pos && p.start == it.state {
+				append(out, ..p.faults[:]) or_return
+				it.pos, it.state = p.pos, p.state
+				continue
+			}
+		}
 		rec, more := next_span(&it, to)
 		fault := it.fault
 		if more {
-			// A record before the pieces' start wraps `k` past them.
-			k := (rec.at - c.start.pos) / SLICE
-			if k < u64(len(c.pieces)) && c.pieces[k].first == rec.at {
-				append(out, ..c.pieces[k].faults[:]) or_return
-				it.pos, it.state = c.pieces[k].pos, c.pieces[k].state
-				continue
+			if p := piece_of_place(&c, rec.at); p != nil {
+				if i, found := slice.binary_search_by(p.starts[:p.held], rec.at, start_order); found {
+					append(out, ..p.faults[p.starts[i].faults:]) or_return
+					it.pos, it.state = p.pos, p.state
+					continue
+				}
 			}
 			fault = it.services.judge(&it, rec)
 			// The pieces start past the sampled records, where the reader knows the framing's state.
@@ -117,7 +150,7 @@ judge_all :: proc(src: []u8, as: core.As, services: ^Framing_Services, framing: 
 			to = max(u64)
 			switch {
 			case c.pieces != nil:
-				to = c.start.pos + (k + 1) * SLICE if rec.at >= c.start.pos else c.start.pos
+				to = c.start.pos + ((rec.at - c.start.pos) / SLICE + 1) * SLICE if rec.at >= c.start.pos else c.start.pos
 			case sampling:
 				to = it.pos + 1
 			}
@@ -132,7 +165,8 @@ judge_all :: proc(src: []u8, as: core.As, services: ^Framing_Services, framing: 
 }
 
 // Claims pieces until none is left, and chains records from each piece's first guess until the next record starts past
-// the piece, then from the next guess past where a chain that a fault ended stopped.
+// the piece, then from the next guess past where a chain that a fault ended stopped. The first piece starts where the
+// reader stands, so it needs no guess.
 @(private)
 chain_pieces :: proc(arg: rawptr) {
 	c := (^Chain)(arg)
@@ -147,13 +181,14 @@ chain_pieces :: proc(arg: rawptr) {
 		hi := min(lo + SLICE, u64(len(c.start.src)))
 		for from := lo; from < hi; {
 			it := c.start
-			it.pos, it.guessed = from, true
-			if !it.services.guess(&it, hi) {
+			it.pos, it.guessed = from, k > 0 || from > lo
+			if it.guessed && !it.services.guess(&it, hi) {
 				break
 			}
+			guessed, start := it.pos, it.state
 			from = it.pos + 1
-			first: u64
 			clear(&p.faults)
+			p.held = 0
 			for {
 				pos, state := it.pos, it.state
 				rec, more := next_span(&it, hi)
@@ -161,7 +196,10 @@ chain_pieces :: proc(arg: rawptr) {
 					it.pos, it.state = pos, state
 					break
 				}
-				first = first if first != 0 else rec.at
+				if p.held == 0 || p.held < len(p.starts) && rec.at >= lo + SETTLE {
+					p.starts[p.held] = {rec.at, len(p.faults)}
+					p.held += 1
+				}
 				if f, bad := it.services.judge(&it, rec).?; bad {
 					if _, e := append(&p.faults, f); e != nil {
 						it.fault = core.Fault{kind = .No_Memory}
@@ -170,12 +208,25 @@ chain_pieces :: proc(arg: rawptr) {
 				}
 			}
 			if it.fault == nil {
-				p.first, p.pos, p.state = first, it.pos, it.state
+				p.from, p.start, p.pos, p.state = guessed, start, it.pos, it.state
 				break
 			}
+			p.held = 0
 			from = max(from, it.pos)
 		}
 	}
+}
+
+// The piece whose bytes hold `at`, nil for none. A place before the pieces' start wraps past them.
+@(private)
+piece_of_place :: #force_inline proc(c: ^Chain, at: u64) -> ^Piece {
+	k := (at - c.start.pos) / SLICE
+	return &c.pieces[k] if k < u64(len(c.pieces)) else nil
+}
+
+@(private)
+start_order :: proc(s: Start, at: u64) -> slice.Ordering {
+	return slice.cmp(s.at, at)
 }
 
 // Returns the next record, or with the format's `span` service the records up to the first at or past `to` as one.

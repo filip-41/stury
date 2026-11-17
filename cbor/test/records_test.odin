@@ -3,8 +3,10 @@ package cbor_tests
 
 import "core:bytes"
 import "core:fmt"
+import "core:slice"
 import "core:testing"
 import core "../../core"
+import host "../../host"
 import records "../../core/records"
 import testkit "../../testkit"
 import cbor ".."
@@ -177,4 +179,47 @@ sequence_items_read_into_values :: proc(t: ^testing.T) {
 	testkit.expect_nil(t, err)
 	testing.expect(t, more)
 	testing.expect_value(t, v.a, 3)
+}
+
+// A sequence read in pieces on threads against the same sequence read on one: the same faults at the same bytes, at every
+// width. The tests cut pieces of a few bytes, so each starts inside an item, where its bytes read as other items.
+@(test)
+records_validate_on_threads :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	pools: [3]host.Pool
+	for w, i in ([3]int{2, 6, 18}) {
+		host.pool_init(&pools[i], w)
+	}
+	defer for &p in pools {
+		host.pool_destroy(&p)
+	}
+	item := hex("a3 6474696d65 1a00010203 636d7367 6b68656c6c6f20776f726c64 6474616773 83 61 61 f5 9f 01 02 ff")
+	src := make([dynamic]u8, context.temp_allocator)
+	for _ in 0 ..< 24 {
+		append(&src, ..item)
+	}
+	breakers := hex("ff 1c 9b 7a 61 c3")
+	buf := make([]u8, len(src), context.temp_allocator)
+	for i in -1 ..< len(src) {
+		for b in breakers {
+			copy(buf, src[:])
+			if i >= 0 {
+				buf[i] = b
+			}
+			serial, _ := records.validate(buf, cbor.as(.Cbor), .Concatenated, context.temp_allocator)
+			whole := records.validate_parallel(buf, cbor.as(.Cbor))
+			for &pool in pools {
+				got, _ := records.validate(buf, cbor.as(.Cbor), .Concatenated, context.temp_allocator, &pool.runner)
+				if !testing.expectf(t, slice.equal(got, serial), "%d %x at width %d: %v, want %v", i, b, pool.runner.threads + 1, got, serial) {
+					return
+				}
+				if v := records.validate_parallel(buf, cbor.as(.Cbor), &pool.runner); !testing.expectf(t, v == whole, "%d %x at width %d: %v, want %v", i, b, pool.runner.threads + 1, v, whole) {
+					return
+				}
+			}
+			if i < 0 {
+				break
+			}
+		}
+	}
 }
