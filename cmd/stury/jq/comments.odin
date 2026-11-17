@@ -11,6 +11,7 @@ package jq
 // the last step: `.a.@comment` is the path `["a", {"fact": "comment"}]`. `.@` reads only the names in the catalogue. An
 // attribute's step names it too: `.&k` is `{"fact": "attribute", "name": "k"}`.
 
+import "core:strings"
 import core_pkg "../../../core"
 
 // Every fact `.@` names is a `core.Fact_Kind`, by its `core.FACTS` name. `.@attrs` reads `Attribute` as an object of
@@ -36,6 +37,58 @@ fact_named :: proc(name: string) -> (Fact, bool) {
 		}
 	}
 	return .Comment, false
+}
+
+// The names `.@` reads, for the message of an unknown one.
+fact_list :: proc() -> string {
+	b := strings.builder_make()
+	for info, f in core_pkg.FACTS {
+		if f != .Comment {
+			strings.write_string(&b, ", ")
+		}
+		strings.write_string(&b, info.name)
+	}
+	for a in FACT_ALIASES {
+		strings.write_string(&b, ", ")
+		strings.write_string(&b, a.name)
+	}
+	return strings.to_string(b)
+}
+
+unknown_fact :: proc(ip: ^Interp, name: string) -> Signal {
+	return fail(ip, "unknown fact .@%s, the facts are %s", name, fact_list())
+}
+
+// The path step of the fact `.@(name)` names.
+fn_fact_step :: proc(ip: ^Interp, _: string, _: Value, args: []Value) -> (Value, Signal) {
+	name, is_text := string_of(args[0])
+	if !is_text {
+		return nil, fail(ip, "a fact name is a string, not %s (%s)", type_name(args[0]), brief(ip, args[0]))
+	}
+	fact, known := fact_named(name)
+	if !known {
+		return nil, unknown_fact(ip, name)
+	}
+	return fact_key(fact), .Go
+}
+
+// The path step of the attribute `.&[name]` names.
+fn_attribute_step :: proc(ip: ^Interp, _: string, _: Value, args: []Value) -> (Value, Signal) {
+	name, is_text := string_of(args[0])
+	if !is_text {
+		return nil, fail(ip, "an attribute name is a string, not %s (%s)", type_name(args[0]), brief(ip, args[0]))
+	}
+	return attribute_key(name), .Go
+}
+
+// The name of a path step that spells a fact, an object with a `fact` member, which the catalogue lacks.
+unknown_fact_step :: proc(key: Value) -> (name: string, unknown: bool) {
+	if _, is_fact := fact_step(key); is_fact || kind(key) != .Object || length_of(key) != 1 {
+		return
+	}
+	fact, _ := object_get(key, "fact")
+	name, unknown = string_of(fact)
+	return
 }
 
 // `v` with `role` written as `bodies`: a string is one body, an array of strings one per element, and null or an

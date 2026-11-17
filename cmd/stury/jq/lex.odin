@@ -8,7 +8,6 @@ import "core:strings"
 import "core:unicode/utf8"
 import "../../../core/spell"
 import "../../../core/kernel"
-import core_pkg "../../../core"
 import "../message"
 
 @(private)
@@ -99,34 +98,26 @@ fact_accessor :: proc(rest: string) -> (name: string, known: bool) {
 	return name, known
 }
 
-// The names `.@` reads, for the message of an unknown one.
-@(private = "file")
-fact_list :: proc() -> string {
-	b := strings.builder_make()
-	for info, f in core_pkg.FACTS {
-		if f != .Comment {
-			strings.write_string(&b, ", ")
-		}
-		strings.write_string(&b, info.name)
-	}
-	for a in FACT_ALIASES {
-		strings.write_string(&b, ", ")
-		strings.write_string(&b, a.name)
-	}
-	return strings.to_string(b)
-}
-
 @(private = "file")
 lex_token :: proc(p: ^Parser) -> (Sym, Sem) {
 	s := p.src
 	start := p.pos
 	c := s[start]
 	next: u8 = s[start + 1] if start + 1 < len(s) else 0
+	after: u8 = s[start + 2] if start + 2 < len(s) else 0
 	fact, known := "", true
 	if c == '.' && next == '@' {
 		fact, known = fact_accessor(s[start + 1:])
 	}
 	switch {
+	case c == '.' && (next == '@' && after == '(' || next == '&' && after == '['):
+		p.computed[start + 2] = .Fact if next == '@' else .Attribute
+		p.pos += 2
+		return .Dot, {}
+	case c == '(' && p.computed[start] == .Fact:
+		p.pos += 1
+		append(&p.modes, Mode.Fact)
+		return .LBracket, {}
 	case is_digit(c) || (c == '.' && is_digit(next)):
 		return .Literal, {value = lex_number(p)}
 	case !known && len(fact) > 1:
@@ -223,7 +214,7 @@ close :: proc(p: ^Parser, c: u8) -> Sym {
 	CLOSING := [Mode]struct {
 		c:   u8,
 		sym: Sym,
-	}{.Paren = {')', .RParen}, .Bracket = {']', .RBracket}, .Brace = {'}', .RBrace}, .Interp = {')', .QQ_Interp_End}, .String = {}}
+	}{.Paren = {')', .RParen}, .Bracket = {']', .RBracket}, .Brace = {'}', .RBrace}, .Interp = {')', .QQ_Interp_End}, .Fact = {')', .RBracket}, .String = {}}
 	if len(p.modes) == 0 || CLOSING[p.modes[len(p.modes) - 1]].c != c {
 		return .Invalid
 	}

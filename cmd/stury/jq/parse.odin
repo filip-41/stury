@@ -43,6 +43,15 @@ Mode :: enum u8 {
 	Brace,
 	Interp,
 	String,
+	Fact, // the parentheses of `.@(name)`, which close as a bracket does
+}
+
+// The two spellings of a fact step with a computed name, `.@(name)` and `.&[name]`, found by where their bracket opens.
+@(private)
+Dynamic_Step :: enum u8 {
+	None,
+	Fact,
+	Attribute,
 }
 
 // A symbol's semantic value: what a token carries, or what a rule built.
@@ -67,6 +76,7 @@ Parser :: struct {
 	last:   Loc, // the span the lexer matched last, where the end of the program is reported
 	errors: [dynamic]Compile_Error,
 	prog:   Program,
+	computed: map[int]Dynamic_Step,
 	file:   string, // the module's path, "" for the program
 	ip:     Interp, // folds constants
 }

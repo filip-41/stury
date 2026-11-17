@@ -174,6 +174,9 @@ index_value :: proc(ip: ^Interp, t: Value, key: Value) -> (Value, Signal) {
 				}
 				return fact_value(t, fact), .Go
 			}
+			if name, unknown := unknown_fact_step(key); unknown {
+				return nil, unknown_fact(ip, name)
+			}
 			if tk == .Null {
 				return nil, .Go
 			}

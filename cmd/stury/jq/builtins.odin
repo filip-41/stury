@@ -110,6 +110,8 @@ fill_table :: proc() {
 	put("path", {1}, {native = native_path})
 	put("getpath", {1}, {gen = gen_getpath})
 	put("setpath", {2}, {fn = fn_setpath})
+	put("_fact_step", {1}, {fn = fn_fact_step})
+	put("_attribute_step", {1}, {fn = fn_attribute_step})
 	put("delpaths", {1}, {fn = fn_delpaths})
 	put("limit skip", {2}, {native = native_count})
 	put("first", {1}, {native = native_first})

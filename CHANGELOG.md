@@ -23,6 +23,8 @@
 
 ### Command line
 
+- `.@(name)` and `.&[name]` read and write a fact or an attribute by a computed name, as `.@name` and `.&name` do. A
+  path step that names a fact the catalogue lacks is an error in `getpath`, `setpath` and `delpaths`, on `null` too.
 - `fmt --from csv --comment C --to jsonc` keeps a comment line as a line comment above its row, as `--to yaml` does,
   and the table's last comments after the last row. JSON5 output keeps them too.
 

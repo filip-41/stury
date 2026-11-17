@@ -135,9 +135,9 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 		report(p, at, `try .["field"] instead of .field for unusually named fields`)
 		r = {node = node(.Identity, at = at)}
 	case 74, 75:
-		r = {node = index(v[1].node, v[3].node, rule == 74, at)}
+		r = {node = index(v[1].node, dynamic_step(p, v[3].node, l[2]), rule == 74, at)}
 	case 76, 77:
-		r = {node = index(v[1].node, v[4].node, rule == 76, at)}
+		r = {node = index(v[1].node, dynamic_step(p, v[4].node, l[3]), rule == 76, at)}
 	case 78, 79, 80, 81:
 		r = {node = new_clone(Node{kind = .Iterate, a = v[1].node, opt = rule == 78 || rule == 80, loc = at})}
 	case 82, 85:
@@ -319,6 +319,20 @@ index :: proc(target, key: ^Node, opt: bool, at: Loc) -> ^Node {
 		return new_clone(Node{kind = .Field, a = target, name = name, opt = opt, loc = at})
 	}
 	return new_clone(Node{kind = .Index, a = target, b = key, opt = opt, loc = at})
+}
+
+// The key `.@(name)` or `.&[name]` gives, `key` as written when `bracket`, where it opens, is neither: the step of the
+// fact or attribute `key` names, made when the filter runs.
+@(private = "file")
+dynamic_step :: proc(p: ^Parser, key: ^Node, bracket: Loc) -> ^Node {
+	step := p.computed[bracket.start]
+	if step == .None {
+		return key
+	}
+	name := "_fact_step" if step == .Fact else "_attribute_step"
+	args := make([]^Node, 1)
+	args[0] = key
+	return new_clone(Node{kind = .Call, name = name, args = args, loc = key.loc})
 }
 
 // `target.name`. A fact accessor, which the lexer reads as a field named `@...` (`fact_accessor`) and only for a name of

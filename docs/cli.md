@@ -1198,8 +1198,13 @@ these places:
 | `.@pi`, `.@doctype` | the processing instructions before a node (`target data`), an array, and the document type declaration, read only |
 | `.@directives` | the document markers on the root, an array: YAML's `%YAML` and `%TAG` lines and an explicit `---` or `...`, and the XML declaration, read only |
 | `.&name`, `.&"name"` | the value of the element's attribute `name` as written, a string or `null` |
+| `.&[expr]` | the same, with the name computed: `.&["aria-label"]` |
+| `.@(expr)` | the fact whose name `expr` gives, a string of the table above: `.@("com" + "ment")` is `.@comment` |
 
-`.@comment_head` is `.@comment`. A name that is not in the table is a compile error. The property accessors give
+`.@comment_head` is `.@comment`. A name that is not in the table is a compile error, or with `.@(expr)` an error when the
+filter runs, as is a name that is not a string, and so is a path step `{"fact": "name"}` of a name the table lacks in
+`getpath`, `setpath` and `delpaths`. `expr` runs on the input of the whole filter, as the index of `.[expr]` does, and
+`.@(expr)` and `.&[expr]` are steps of a path as `.@name` and `.&name` are. The property accessors give
 `null` in a format that holds none, which includes JSON, JSONC and the tables, and so do the markup accessors outside
 XML and HTML. A write of a markup fact other than an attribute or of `.@directives`, `del` included, is the error
 `A markup name, namespace, content, instruction, doctype or document marker cannot be written`. A repeated name's array is no element, so its facts

@@ -441,6 +441,11 @@ delete_keys :: proc(ip: ^Interp, t: Value, keys: []Value, owned: ^Owned) -> (Val
 		}
 		return remove_facts(ip, v, facts)
 	}
+	for key in keys {
+		if name, unknown := unknown_fact_step(key); unknown {
+			return nil, unknown_fact(ip, name)
+		}
+	}
 	if c, is_commented := t.(^Commented); is_commented && len(keys) > 0 {
 		inner, sig := delete_keys(ip, c.v, keys, owned)
 		if sig != .Go {
