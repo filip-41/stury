@@ -13,6 +13,9 @@ import core ".."
 // whether the value at node `i` of the container `open` has a key in the table's header and which, and is called only for
 // a document that has them. `open` is `core.NO_NODE` unless `$OPEN`.
 //
+// After a `Skip` of an element, `leap` may move the replay on to a later node of the open container, up to its end, and
+// returns the registers it changed. The leap must give the registers the replay would hold on arriving there.
+//
 // The hook's stacks hold at least the depths `ends` holds. A container that leaves `ends` room for no deeper level
 // grows it, and `deepen` grows the hook's stacks by as many levels. Returns false when either cannot grow.
 feed_nodes :: proc "contextless" (
@@ -25,6 +28,7 @@ feed_nodes :: proc "contextless" (
 	$keyed: proc "contextless" (h: ^H, regs: core.Hook_Regs, i, open: core.Node_Index) -> (core.Node_Index, bool),
 	$deepen: proc "contextless" (h: ^H, extra: int) -> bool,
 	$OPEN: bool,
+	$leap: proc "contextless" (h: ^H, regs: core.Hook_Regs, next, end: u32) -> (u32, core.Hook_Regs),
 ) -> bool {
 	when OPEN {
 		STRIDE :: 2
@@ -94,6 +98,9 @@ feed_nodes :: proc "contextless" (
 				t = nodes[i]
 			}
 			i += t.n if t.kind > .Plain else 1
+			if depth > 0 {
+				i, regs = leap(h, regs, i, ends[(depth - 1) * STRIDE])
+			}
 		case .Next, .Keep:
 			if t.kind > .Plain {
 				if (depth + 2) * STRIDE > len(ends) {
@@ -131,6 +138,11 @@ grow_ends :: proc "contextless" (ends: []u32, owned: bool, n: int) -> ([]u32, bo
 		copy(wide, ends)
 	}
 	return wide, true
+}
+
+// The `leap` of a hook that steps over every sibling.
+no_leap :: #force_inline proc "contextless" (_: ^$H, regs: core.Hook_Regs, next, _: u32) -> (u32, core.Hook_Regs) {
+	return next, regs
 }
 
 // The `deepen` of a hook with no stack.

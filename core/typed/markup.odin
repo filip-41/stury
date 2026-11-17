@@ -210,7 +210,7 @@ element_children :: proc "contextless" (d: ^Document_Read($H), regs: core.Hook_R
 	defer delete(e.spill)
 	// The children open no container but at a record that is not `Checked`, so the ends rarely grow.
 	ends: [4]u32 = ---
-	if !build.feed_nodes(d.doc, u32(at) + 1, u32(at) + t.n, &e, &next, ends[:], child_step, child_keyed, child_deepen, true) {
+	if !build.feed_nodes(d.doc, u32(at) + 1, u32(at) + t.n, &e, &next, ends[:], child_step, child_keyed, child_deepen, true, build.no_leap) {
 		d.short = true
 	}
 	if e.stopped || d.short {

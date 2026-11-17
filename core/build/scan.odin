@@ -640,9 +640,9 @@ first_answer :: proc(doc: ^core.Document) -> core.Answer {
 @(private)
 replay :: proc "contextless" ($MANY: bool, h: ^Scan, from, to: u32, out: ^core.Hook_Regs, ends: []u32) {
 	when MANY {
-		fed := feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_many, replay_keyed, scan_deepen, false)
+		fed := feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_many, replay_keyed, scan_deepen, false, no_leap)
 	} else {
-		fed := feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_one, replay_keyed, scan_deepen, false)
+		fed := feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_one, replay_keyed, scan_deepen, false, replay_leap)
 	}
 	if !fed {
 		h.b.err = {kind = .No_Memory}
@@ -653,6 +653,25 @@ replay :: proc "contextless" ($MANY: bool, h: ^Scan, from, to: u32, out: ^core.H
 replay_step_one :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
 	h.at = at
 	return scan_step(false, .Replay, h, s, t)
+}
+
+// Past the element an `Index` step picked, no sibling of an array is read, so the replay goes on at the array's close
+// with its true count.
+@(private)
+replay_leap :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, next, end: u32) -> (u32, core.Hook_Regs) {
+	d := int(s.c)
+	if d < 1 || d > h.path.n || next >= end {
+		return next, s
+	}
+	index, indexed := h.path.steps[d - 1].(core.Index)
+	doc := &h.b.doc
+	open := core.Node_Index(s.b >> 32)
+	if !indexed || index < 0 || int(u32(s.b)) <= int(index) || doc.nodes[open].kind != .Array || doc.nodes[open].spelling == core.MAX_CHILDREN || core.header_of(doc) != 0 {
+		return next, s
+	}
+	s := s
+	s.b = s.b & ~u64(max(u32)) | u64(doc.nodes[open].spelling)
+	return end, s
 }
 
 @(private)

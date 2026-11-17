@@ -246,7 +246,7 @@ feed_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	h.format = &d
 	h.find_tag = document_tag
 	to := u32(node) + (doc.nodes[node].n if doc.nodes[node].kind > .Plain else 1)
-	if !build.feed_nodes(doc, u32(node), to, &d, &regs, ends[:], document_step, document_keyed, document_deepen, true) || d.short {
+	if !build.feed_nodes(doc, u32(node), to, &d, &regs, ends[:], document_step, document_keyed, document_deepen, true, build.no_leap) || d.short {
 		return {kind = .No_Memory}
 	}
 	return read_end(h, regs, nil)
@@ -331,7 +331,7 @@ document_tag :: proc(h: ^Reader, _: u64, name: string) -> Tag_Scan {
 	regs: core.Hook_Regs
 	// The replay opens the object alone, so it needs no more than two levels of ends.
 	ends: [2]u32
-	build.feed_nodes(d.doc, u32(d.at), u32(d.at) + d.doc.nodes[d.at].n, &s, &regs, ends[:], tag_step, tag_keyed, build.no_deepen, false)
+	build.feed_nodes(d.doc, u32(d.at), u32(d.at) + d.doc.nodes[d.at].n, &s, &regs, ends[:], tag_step, tag_keyed, build.no_deepen, false, build.no_leap)
 	return s
 }
 

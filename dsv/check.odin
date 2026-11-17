@@ -189,7 +189,7 @@ document_check :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, ta
 	}
 	// A row holds scalars, so the replay never nests past the root and a record.
 	ends: [2 * 4]u32 = ---
-	if !build.feed_nodes(doc, u32(node), u32(node) + doc.nodes[node].n, &d, &regs, ends[:], check_step, check_keyed, build.no_deepen, true) {
+	if !build.feed_nodes(doc, u32(node), u32(node) + doc.nodes[node].n, &d, &regs, ends[:], check_step, check_keyed, build.no_deepen, true, build.no_leap) {
 		return {kind = .No_Memory}
 	}
 	return typed.read_end(&h.c, regs, nil)
