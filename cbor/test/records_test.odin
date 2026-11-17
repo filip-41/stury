@@ -94,3 +94,26 @@ entries_hold_one_member :: proc(t: ^testing.T) {
 	item := "\xa2bidcabcdtagsx\x64" + "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"
 	testkit.expect_entries_bounded(t, cbor.as(.Cbor), nil, "\x9f", item, "\xff", true)
 }
+
+// A reader reads each member under `.Entries` into a value, opened by handle or by constant spec.
+@(test)
+entries_read_into_values :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	src := hex("83 01 02 03")
+	plan, perr := cbor.plan_make(i32)
+	testkit.expect_nil(t, perr)
+	for reader in ([2]records.Reader{records.open(src, cbor.as(.Cbor), framing = .Entries), cbor.records_open(src, .Cbor, framing = .Entries)}) {
+		it := reader
+		defer records.close(&it)
+		for want in 1 ..= 3 {
+			v: i32
+			err, more := records.read(&it, &v, &plan)
+			testkit.expect_nil(t, err)
+			testing.expect(t, more)
+			testing.expect_value(t, int(v), want)
+		}
+		v: i32
+		_, more := records.read(&it, &v, &plan)
+		testing.expect(t, !more && it.fault == nil)
+	}
+}
