@@ -2,6 +2,7 @@
 // point, the layout of sections, comments and datetimes, the token write, and the typed write and read.
 package toml_tests
 
+import "base:runtime"
 import "core:encoding/json"
 import "core:strings"
 import "core:testing"
@@ -506,4 +507,37 @@ token_write_keeps_the_comments_inside_the_tables_of_an_array :: proc(t: ^testing
 	testkit.expect_nil(t, rerr)
 	defer core.destroy(&back)
 	testing.expect_value(t, comment_count(&back), 2)
+}
+
+@(private)
+Marshal_Try :: struct {
+	cfg:  Config,
+	opts: core.Write_Options,
+}
+
+@(private)
+marshal_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
+	m := (^Marshal_Try)(data)
+	text, err := toml.marshal(m.cfg, write = m.opts, allocator = allocator)
+	return text, testkit.typed_kind(err)
+}
+
+@(test)
+marshal_under_failing_allocators :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	cfg := Config {
+		title   = "t",
+		debug   = true,
+		ratio   = 0.5,
+		servers = {{"a", 1, {"x", "y"}}, {"b", 2, nil}},
+		inner   = {name = "n"},
+	}
+	cfg.limits = make(map[string]int, allocator = context.temp_allocator)
+	cfg.limits["m"] = 1
+	for opts in ([?]core.Write_Options{{}, {pretty = true, indent = 2}}) {
+		try := Marshal_Try{cfg, opts}
+		want, err := toml.marshal(cfg, write = opts, allocator = context.temp_allocator)
+		testkit.expect_nil(t, err)
+		testkit.sweep_write(t, marshal_try, &try, string(want))
+	}
 }

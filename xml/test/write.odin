@@ -1,6 +1,7 @@
 // `xml.write` of an XML document, which reads back as the document it was written from, and of a JSON document.
 package xml_tests
 
+import "base:runtime"
 import "core:fmt"
 import "core:os"
 import "core:strings"
@@ -277,4 +278,37 @@ conformance_documents_read_back :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, written > 100)
 	testing.expectf(t, failures == 0, "%d documents", failures)
+}
+
+@(private)
+Sweep_Value :: struct {
+	r: struct {
+		a:  string,
+		n:  int,
+		i:  []string,
+	},
+}
+
+@(private)
+Sweep_Try :: struct {
+	value: Sweep_Value,
+	opts:  core.Write_Options,
+}
+
+@(private)
+sweep_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
+	m := (^Sweep_Try)(data)
+	text, err := xml.marshal(m.value, write = m.opts, allocator = allocator)
+	return text, testkit.typed_kind(err)
+}
+
+@(test)
+marshal_under_failing_allocators :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	for opts in ([?]core.Write_Options{{}, {pretty = true, indent = 2}}) {
+		try := Sweep_Try{Sweep_Value{r = {a = "t&u", n = 8, i = {"x", "y"}}}, opts}
+		want, err := xml.marshal(try.value, write = opts, allocator = context.temp_allocator)
+		testkit.expect_nil(t, err)
+		testkit.sweep_write(t, sweep_try, &try, string(want))
+	}
 }

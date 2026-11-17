@@ -48,6 +48,9 @@ Block_Writer :: struct {
 @(private)
 block_new :: proc(out: ^write.Out, opts: core.Write_Options) -> ^Block_Writer {
 	b := new(Block_Writer)
+	if b == nil {
+		return nil
+	}
 	b.out, b.ascii, b.ended = out, opts.ascii, true
 	b.step = int(opts.indent) if opts.indent > 0 else 2
 	return b

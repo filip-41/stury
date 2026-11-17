@@ -1,6 +1,7 @@
 // The writers of CBOR: the document writer under each encoding, the token writer's heads, and the typed write and read.
 package cbor_tests
 
+import "base:runtime"
 import "core:bytes"
 import "core:encoding/json"
 import "core:io"
@@ -656,4 +657,38 @@ keys_read_by_their_bytes_or_by_lookup :: proc(t: ^testing.T) {
 	testkit.expect_nil(t, perr)
 	pair: Pair
 	testing.expect(t, cbor.unmarshal(hex("a2 61ff 01 6162 " + X15), .Cbor, &pair, &plan) != nil)
+}
+
+@(private)
+Sweep_Value :: struct {
+	title: string,
+	port:  int,
+	tags:  []string,
+	inner: struct {
+		label: string,
+	},
+}
+
+@(private)
+Sweep_Try :: struct {
+	value: Sweep_Value,
+	opts:  core.Write_Options,
+}
+
+@(private)
+sweep_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
+	m := (^Sweep_Try)(data)
+	text, err := cbor.marshal(m.value, write = m.opts, allocator = allocator)
+	return text, testkit.typed_kind(err)
+}
+
+@(test)
+marshal_under_failing_allocators :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	for opts in ([?]core.Write_Options{{}, {pretty = true, indent = 2}}) {
+		try := Sweep_Try{Sweep_Value{title = "t", port = 8, tags = {"x", "y"}, inner = {label = "n"}}, opts}
+		want, err := cbor.marshal(try.value, write = opts, allocator = context.temp_allocator)
+		testkit.expect_nil(t, err)
+		testkit.sweep_write(t, sweep_try, &try, string(want))
+	}
 }

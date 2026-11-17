@@ -1,6 +1,7 @@
 // The write of a document as HTML: the standard's serialization over a markup document's shape, read back.
 package html_tests
 
+import "base:runtime"
 import "core:testing"
 import core "../../core"
 import write "../../core/write"
@@ -234,4 +235,36 @@ an_empty_run_writes_its_comments_as_the_foot :: proc(t: ^testing.T) {
 	tokens, terr := write.tokens_finish(&w)
 	testing.expect_value(t, terr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(tokens), "<ul><!-- z --></ul>")
+}
+
+@(private)
+Sweep_Value :: struct {
+	ul: struct {
+		li: []string,
+	},
+	p:  int,
+}
+
+@(private)
+Sweep_Try :: struct {
+	value: Sweep_Value,
+	opts:  core.Write_Options,
+}
+
+@(private)
+sweep_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
+	m := (^Sweep_Try)(data)
+	text, err := html.marshal(m.value, write = m.opts, allocator = allocator)
+	return text, testkit.typed_kind(err)
+}
+
+@(test)
+marshal_under_failing_allocators :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	for opts in ([?]core.Write_Options{{}, {pretty = true, indent = 2}}) {
+		try := Sweep_Try{Sweep_Value{ul = {li = {"a<b", "c"}}, p = 2}, opts}
+		want, err := html.marshal(try.value, write = opts, allocator = context.temp_allocator)
+		testkit.expect_nil(t, err)
+		testkit.sweep_write(t, sweep_try, &try, string(want))
+	}
 }

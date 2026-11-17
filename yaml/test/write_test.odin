@@ -3,6 +3,7 @@
 // and read back over generated values, the token write, and the typed write.
 package yaml_tests
 
+import "base:runtime"
 import "core:fmt"
 import "core:math/rand"
 import "core:strings"
@@ -582,4 +583,38 @@ token_write_nests_blocks :: proc(t: ^testing.T) {
 	bytes, err := write.tokens_finish(&w)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(bytes), "- - 1\n  - 2\n- a: {}\n  b: |-\n    x\n    y\n  c: []\n")
+}
+
+@(private)
+Sweep_Value :: struct {
+	title: string,
+	port:  int,
+	tags:  []string,
+	inner: struct {
+		label: string,
+	},
+}
+
+@(private)
+Sweep_Try :: struct {
+	value: Sweep_Value,
+	opts:  core.Write_Options,
+}
+
+@(private)
+sweep_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
+	m := (^Sweep_Try)(data)
+	text, err := yaml.marshal(m.value, write = m.opts, allocator = allocator)
+	return text, testkit.typed_kind(err)
+}
+
+@(test)
+marshal_under_failing_allocators :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	for opts in ([?]core.Write_Options{{}, {pretty = true, indent = 2}}) {
+		try := Sweep_Try{Sweep_Value{title = "t", port = 8, tags = {"x", "y: z"}, inner = {label = "n"}}, opts}
+		want, err := yaml.marshal(try.value, write = opts, allocator = context.temp_allocator)
+		testkit.expect_nil(t, err)
+		testkit.sweep_write(t, sweep_try, &try, string(want))
+	}
 }
