@@ -421,6 +421,9 @@ constructed :: proc(doc: ^core.Document, v: core.Node_Index) -> bool {
 Reread :: struct {
 	doc:       ^core.Document,
 	written:   [dynamic]Written,
+	// A bit per node of `doc`, set for each node `written` or `respelled` names, so the walk over the tree searches them
+	// at those nodes alone.
+	marked:    []u64,
 	respelled: [dynamic]core.Node_Index,
 	at:        Maybe(u64),
 }
@@ -482,6 +485,17 @@ reread :: proc(list: ^core.Edit_List, out: []u8) -> core.Document_Error {
 			}
 		}
 		append(&r.written, w)
+	}
+	bits, merr := make([]u64, (len(doc.nodes) + 63) / 64)
+	if merr != nil {
+		return {kind = .No_Memory}
+	}
+	r.marked = bits
+	for w in r.written {
+		mark(&r, w.node)
+	}
+	for v in r.respelled {
+		mark(&r, v)
 	}
 	built, berr := build_handle(out, doc.as, false, context.allocator)
 	if berr.kind != .None {
@@ -552,7 +566,8 @@ same :: proc(r: ^Reread, x: ^core.Document, a: core.Node_Index, y: ^core.Documen
 	defer if !ok && r != nil && r.at == nil {
 		r.at = y.nodes[b].lo
 	}
-	if r != nil {
+	hit := marked(r, a)
+	if hit {
 		for w in r.written {
 			if w.node == a {
 				return same_content(r.doc, y, b) && (!w.counted || elements(y, b) == elements(x, a) + w.delta)
@@ -560,13 +575,23 @@ same :: proc(r: ^Reread, x: ^core.Document, a: core.Node_Index, y: ^core.Documen
 		}
 	}
 	na, nb := x.nodes[a], y.nodes[b]
-	if na.kind != nb.kind || !(r != nil && slice.contains(r.respelled[:], a)) && !same_attributes(x, a, y, b) {
+	if na.kind != nb.kind || !(hit && slice.contains(r.respelled[:], a)) && !same_attributes(x, a, y, b) {
 		return false
 	}
 	if na.kind != .Object {
 		return core.node_string(x, a) == core.node_string(y, b)
 	}
 	return same_members(r, x, a, y, b)
+}
+
+@(private = "file")
+mark :: #force_inline proc "contextless" (r: ^Reread, v: core.Node_Index) {
+	r.marked[v >> 6] |= 1 << (u64(v) & 63)
+}
+
+@(private = "file")
+marked :: #force_inline proc "contextless" (r: ^Reread, v: core.Node_Index) -> bool {
+	return r != nil && r.marked[v >> 6] & (1 << (u64(v) & 63)) != 0
 }
 
 @(private = "file")
@@ -578,7 +603,7 @@ same_members :: proc(r: ^Reread, x: ^core.Document, a: core.Node_Index, y: ^core
 		if more != also || !more {
 			return more == also
 		}
-		respelled := r != nil && slice.contains(r.respelled[:], va)
+		respelled := marked(r, va) && slice.contains(r.respelled[:], va)
 		if !respelled && !same_key(x, ka, y, kb) || !same(r, x, va, y, vb) {
 			return false
 		}
