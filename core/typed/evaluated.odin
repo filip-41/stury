@@ -346,8 +346,8 @@ evaluated_records :: proc(e: ^Evaluates, arena: runtime.Allocator) {
 
 // What a node evaluates of every value that passes it, through its own keywords, its `$ref` and its `allOf`: names,
 // patterns, the prefix length, and whether every member or element is evaluated. `varies` is set when an `anyOf`,
-// `oneOf`, `if`, `dependentSchemas` or `$dynamicRef` in that closure, or a `contains` when `items` asks, makes the set
-// depend on the value.
+// `oneOf` or `if` arm that evaluates something, a `dependentSchemas` or `$dynamicRef` in that closure, or a `contains`
+// when `items` asks, makes the set depend on the value. `empty` caches whether an arm evaluates nothing.
 @(private)
 Static_Set :: struct {
 	names:                  [dynamic]string,
@@ -357,6 +357,7 @@ Static_Set :: struct {
 	varies:                 bool,
 	// The nodes already added, false while their targets are still being added. A node reached many ways is added once.
 	added:                  map[rules.Node_Index]bool,
+	empty:                  ^map[rules.Node_Index]bool,
 }
 
 // Adds to `s` what `node` evaluates through its own keywords, its `$ref` and its `allOf`. `own` leaves out the node's
@@ -381,7 +382,18 @@ static_set :: proc(d: ^rules.Description, node: rules.Node_Index, s: ^Static_Set
 	}
 	s.added[node] = false
 	defer s.added[node] = true
-	s.varies ||= len(n.any_of) > 0 || len(n.one_of) > 0 || n.cond.test != nil || n.dynamic_ref != nil
+	s.varies ||= n.dynamic_ref != nil
+	for x in n.any_of {
+		s.varies ||= !evaluates_nothing(d, x, s, items, depth)
+	}
+	for x in n.one_of {
+		s.varies ||= !evaluates_nothing(d, x, s, items, depth)
+	}
+	for x in ([?]Maybe(rules.Node_Index){n.cond.test, n.cond.then, n.cond.other}) {
+		if y, has := x.?; has {
+			s.varies ||= !evaluates_nothing(d, y, s, items, depth)
+		}
+	}
 	if !own {
 		s.all_members ||= n.unevaluated_properties != nil
 		s.all_items ||= n.unevaluated_items != nil
@@ -411,6 +423,26 @@ static_set :: proc(d: ^rules.Description, node: rules.Node_Index, s: ^Static_Set
 	for x in n.all_of {
 		static_set(d, x, s, items, false, depth + 1)
 	}
+}
+
+// Whether the arm `node` of a node `static_set` adds to `s` evaluates nothing of any value, so whether it passes leaves
+// the set as it is.
+@(private = "file")
+evaluates_nothing :: proc(d: ^rules.Description, node: rules.Node_Index, s: ^Static_Set, items: bool, depth: int) -> bool {
+	if s.empty == nil {
+		s.empty = new(map[rules.Node_Index]bool, context.temp_allocator)
+		s.empty.allocator = context.temp_allocator
+	}
+	if known, met := s.empty[node]; met {
+		return known
+	}
+	// An arm met again while it is being judged recurses, so it counts as evaluating.
+	s.empty[node] = false
+	arm := Static_Set{names = make([dynamic]string, context.temp_allocator), patterns = make([dynamic]rules.Pattern, context.temp_allocator), empty = s.empty}
+	static_set(d, node, &arm, items, false, depth + 1)
+	nothing := !arm.varies && len(arm.names) == 0 && len(arm.patterns) == 0 && arm.prefix == 0 && !arm.all_members && !arm.all_items
+	s.empty[node] = nothing
+	return nothing
 }
 
 @(private = "file")
