@@ -17,6 +17,7 @@ package xml
 // white space into one that holds text. Members keep their order whatever `sort_keys` says, since the order is the
 // elements'.
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:io"
 import "core:slice"
@@ -135,6 +136,9 @@ put_element :: proc(w: ^Writer, key, value: core.Node_Index, depth: int, laid: b
 	at := w.doc.nodes[key].lo
 	flush(w, at, depth, .Indent if laid else .None) or_return
 	indent(w, laid, depth)
+	if put_leaf(w, name, value) {
+		return .None
+	}
 	write.put_byte(&w.out, '<')
 	write.put_text(&w.out, string(name))
 	// An attribute that stands before the element's name is a default its doctype declares. A read of the written text
@@ -170,6 +174,37 @@ put_element :: proc(w: ^Writer, key, value: core.Node_Index, depth: int, laid: b
 	return .None
 }
 
+// Writes the element of `name` and value node `value` whole when it is a text copied as it stands, has no attribute and
+// fits one room of the output, with one copy per part. Returns false, having written nothing, for any other element.
+@(private)
+put_leaf :: #force_inline proc(w: ^Writer, name: []u8, value: core.Node_Index) -> bool {
+	t := w.doc.nodes[value]
+	if t.kind != .Plain || !write.copies_raw(w.opts) || len(core.all_facts(w.doc, value)) != 0 {
+		return false
+	}
+	span := core.span(w.doc, value)
+	n := len(name)
+	total := 2 * n + len(span) + 5
+	if len(span) == 0 || total > write.ROOM_MAX {
+		return false
+	}
+	hi := u64(uintptr(raw_data(span)) - uintptr(raw_data(w.doc.src))) + u64(len(span))
+	for ; w.next < len(w.facts) && w.facts[w.next].lo < hi; w.next += 1 {
+		w.kept += 1
+	}
+	p := write.room(&w.out, total)
+	p[0] = '<'
+	intrinsics.mem_copy_non_overlapping(p[1:], raw_data(name), n)
+	p[1 + n] = '>'
+	intrinsics.mem_copy_non_overlapping(p[2 + n:], raw_data(span), len(span))
+	q := p[2 + n + len(span):]
+	q[0], q[1] = '<', '/'
+	intrinsics.mem_copy_non_overlapping(q[2:], raw_data(name), n)
+	q[2 + n] = '>'
+	w.out.cursor += total
+	return true
+}
+
 // Writes the members of an element in order. Returns whether they stand on lines of their own, which only the members
 // of an element with no text do, and whether the last one is an element.
 @(private)
@@ -185,7 +220,7 @@ put_children :: proc(w: ^Writer, value: core.Node_Index, depth: int) -> (laid, l
 		if !last_element {
 			flush(w, w.doc.nodes[child].lo, depth + 1, .None) or_return
 			put_own_text(w, child, true) or_return
-		} else if core.kind(w.doc, child) != .Array {
+		} else if w.doc.nodes[child].kind != .Array {
 			put_element(w, key, child, depth + 1, laid) or_return
 		} else {
 			items := core.children(w.doc, child)
@@ -601,9 +636,8 @@ is_head :: #force_inline proc(role: core.Role) -> bool {
 }
 
 @(private)
-is_text :: proc(w: ^Writer, key: core.Node_Index) -> bool {
-	text, ok := core.text(w.doc, key, w.buf[:])
-	return ok && text == core.MARKUP_TEXT
+is_text :: #force_inline proc(w: ^Writer, key: core.Node_Index) -> bool {
+	return w.doc.nodes[key].spelling & core.SPELLING_SYNTHETIC == core.SPELLING_SYNTHETIC
 }
 
 // Whether `s` is an XML name with no colon, which a reader with namespaces takes with no declaration.
