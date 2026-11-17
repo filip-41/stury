@@ -5,12 +5,12 @@ package toml
 // of their table, a table is a `[header]` section after the lines, and a non-empty array of tables is one `[[header]]`
 // section per element, so the keys of a table may be written in another order than the document holds them. Null has no
 // TOML spelling and is `.Unwritable`, as is a key a table repeats. Only TOML 1.0 forms are written: a datetime has its
-// seconds, and a string has no `\e` or `\x`. A string read from TOML keeps its literal quotes unless `respell_strings`
-// is set, and a datetime string that carries a `Tag` is written as the bare datetime. A comment is written when the
-// document holds it: above the line or section it stands before, on the line it ends, and at the end of a table. A
-// comment inside a table or an array that is an element of an array stands above that element, since TOML 1.0 has no
-// multi-line inline table. A comment the output has no other place for, and one with a line end in its body, is
-// dropped and counted.
+// seconds, and a string has no `\e` or `\x`. A string read from TOML keeps its literal quotes, and a basic one its
+// escapes, unless `respell_strings` is set, and a datetime string that carries a `Tag` is written as the bare datetime.
+// A comment is written when the document holds it: above the line or section it stands before, on the line it ends, and
+// at the end of a table. A comment inside a table or an array that is an element of an array stands above that element,
+// since TOML 1.0 has no multi-line inline table. A comment the output has no other place for, and one with a line end
+// in its body, is dropped and counted.
 
 import "base:runtime"
 import "core:io"
@@ -27,6 +27,7 @@ Layout :: struct {
 	prefix:    string, // the header path as written that the keys of `path` follow, for sections placed in a text
 	path:      [dynamic]string, // the decoded keys of the open section
 	own:       bool, // the document is TOML
+	raw:       bool, // a basic string the TOML document spells in 1.0 forms is copied from its source
 	commented: bool, // the document holds a comment
 	tagged:    bool, // the document is of another format and holds a tag
 	kept:      int, // the facts written
@@ -65,6 +66,7 @@ write_table_text :: proc(doc: ^core.Document, opts: core.Write_Options, node: co
 	}
 	spill: [write.ROOM_MAX]u8 = ---
 	l := Layout{doc = doc, opts = opts, own = doc.readers.format == rules_of, laid = laid}
+	l.raw = l.own && write.copies_raw(opts)
 	l.tagged = !l.own && .Tag in doc.readers.holds && core.has_tags(doc)
 	l.arena.backing_allocator = context.allocator
 	defer runtime.arena_destroy(&l.arena)
@@ -164,7 +166,7 @@ put_lines :: proc(l: ^Layout, members: []write.Node_Member, keys: ^[dynamic]stri
 				put_key(&l.out, k)
 				write.put_byte(&l.out, '.')
 			}
-			put_key(&l.out, m.name)
+			put_member_key(l, m)
 			write.put_text(&l.out, " = ")
 			if elements_commented(l, m.value) {
 				put_lined_array(l, m.value) or_return
@@ -322,7 +324,8 @@ Inline_Open :: struct {
 // stack in the context allocator, not calls, so the native stack does not grow with the value's depth.
 @(private)
 put_inline :: proc(l: ^Layout, node: core.Node_Index) -> core.Typed_Error_Kind {
-	opens := make([dynamic]Inline_Open, 0, 16)
+	// A scalar opens nothing, so the stack is allocated by the first container.
+	opens: [dynamic]Inline_Open
 	defer delete(opens)
 	inline_start(l, &opens, node) or_return
 	for len(opens) > 0 {
@@ -339,7 +342,7 @@ put_inline :: proc(l: ^Layout, node: core.Node_Index) -> core.Typed_Error_Kind {
 			}
 			m := o.members[o.at]
 			o.at += 1
-			put_key(&l.out, m.name)
+			put_member_key(l, m)
 			write.put_text(&l.out, " = ")
 			next = m.value
 		} else {
@@ -404,6 +407,12 @@ inline_start :: proc(l: ^Layout, opens: ^[dynamic]Inline_Open, node: core.Node_I
 
 @(private)
 put_string_node :: proc(l: ^Layout, node: core.Node_Index) -> core.Typed_Error_Kind {
+	if span, copied := raw_span(l, node); copied {
+		if _, tagged := core.fact_value(l.doc, node, .Tag); !tagged {
+			write.put_text(&l.out, span)
+			return .None
+		}
+	}
 	buf: [512]u8
 	text := write.node_text(l.doc, node, buf[:], runtime.arena_allocator(&l.arena)) or_return
 	// A datetime tag of another format whose text is no TOML datetime of its type is dropped.
@@ -438,6 +447,45 @@ literal_ok :: proc(s: string) -> bool {
 	return true
 }
 
+// The source bytes of the string `node` when `l.raw` and they are a basic string in TOML 1.0 forms, which `put_basic`
+// would write again as they are, but for the escapes it respells.
+@(private)
+raw_span :: #force_inline proc(l: ^Layout, node: core.Node_Index) -> (string, bool) {
+	if !l.raw {
+		return "", false
+	}
+	t := l.doc.nodes[node]
+	if t.spelling & core.SPELLING_DECODE == 0 || style_of(t.spelling) != .Basic {
+		return "", false
+	}
+	span := string(l.doc.src[t.lo:t.lo + u64(t.n)])
+	return span, Spec(l.doc.as.spec) == .Toml_1_0 || escapes_1_0(span)
+}
+
+// Whether every escape of the basic string `span` is one TOML 1.0 reads, which has no `\e` and no `\x`.
+@(private)
+escapes_1_0 :: proc(span: string) -> bool {
+	for i := 0; i < len(span); i += 1 {
+		if span[i] == '\\' {
+			i += 1
+			if span[i] == 'e' || span[i] == 'x' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// The key of member `m`. A bare key of a TOML document is its name, which `put_key` would write as it is.
+@(private)
+put_member_key :: #force_inline proc(l: ^Layout, m: write.Node_Member) {
+	if l.own && l.doc.nodes[m.key].spelling & core.SPELLING_DECODE == 0 {
+		write.put_text(&l.out, m.name)
+	} else {
+		put_key(&l.out, m.name)
+	}
+}
+
 // A bare key stays bare, any other is a basic string.
 @(private)
 put_key :: proc(out: ^write.Out, name: string) {
@@ -459,6 +507,10 @@ put_basic :: proc(out: ^write.Out, s: string, opts: core.Write_Options) -> core.
 	write.put_byte(out, '"')
 	run := 0
 	for i := 0; i < len(s); {
+		if plain := plain_run(transmute([]u8)s, i, '"'); plain > 0 {
+			i += plain
+			continue
+		}
 		c := s[i]
 		escape: string
 		switch {

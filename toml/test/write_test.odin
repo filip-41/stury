@@ -150,6 +150,13 @@ layout_keeps_literal_strings_unless_respelled :: proc(t: ^testing.T) {
 }
 
 @(test)
+layout_keeps_basic_strings_as_read_in_1_0_forms :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	testing.expect_value(t, text_of("a = \"x\\u0041\\ty\"\n"), "a = \"x\\u0041\\ty\"\n")
+	testing.expect_value(t, text_of("a = \"\\e\\x41\"\n"), "a = \"\\u001bA\"\n")
+}
+
+@(test)
 strings_escape_what_toml_requires :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	testing.expect_value(t, text_of("a = \"q\\\"\\t\\u0001\\u007f\\u00e9\"\n", {respell_strings = true}), "a = \"q\\\"\\t\\u0001\\u007fé\"\n")
