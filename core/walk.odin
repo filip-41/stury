@@ -91,9 +91,10 @@ Action :: enum u8 {
 	Stop,
 }
 
-// Three `u64` words of hook state passed in the walk's argument registers. A hook receives them and returns them
-// with its `Action`, so a cursor or count kept here needs no load or store. On arm64 all three fit beside the walk's
-// five arguments in registers, while on x86-64 SysV two words spill to the stack under contextless calling.
+// Three `u64` words of hook state. They pass between the walk's states in argument registers on arm64 and x86-64, since
+// the states use `preserve/none` and their eight arguments fit its registers, so a cursor or count kept here needs no
+// load or store from one state to the next. A hook that is not inlined takes them through memory on both targets, as
+// the calling convention of `contextless` passes the 24-byte struct by pointer and returns it through a result slot.
 // Anything a pointer reaches stays in the hook's state.
 Hook_Regs :: struct {
 	a, b, c: u64,
