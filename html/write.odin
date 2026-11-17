@@ -208,12 +208,14 @@ put_members :: proc(w: ^Writer, v: core.Value, depth: int, in_foreign: bool, kee
 	laid := w.opts.pretty && !keep
 	n := 0
 	if r, is_node := v.(core.Node_Ref); is_node {
-		it := core.pairs(r.doc, r.node)
-		for key in core.pair_next(&it) {
-			laid &&= core.node_string(r.doc, key) != core.MARKUP_TEXT
-			n += 1
+		n = core.length(r.doc, r.node)
+		if laid {
+			it := core.pairs(r.doc, r.node)
+			for key in core.pair_next(&it) {
+				laid &&= core.node_string(r.doc, key) != core.MARKUP_TEXT
+			}
 		}
-		it = core.pairs(r.doc, r.node)
+		it := core.pairs(r.doc, r.node)
 		for key, child in core.pair_next(&it) {
 			put_member(w, core.node_string(r.doc, key), core.Node_Ref{r.doc, child}, depth, in_foreign, laid) or_return
 		}
@@ -300,8 +302,7 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 		}
 		put_bodies(w, bodies)
 	}
-	write.put_byte(&w.out, '<')
-	write.put_text(&w.out, name)
+	put_framed(w, "<", name, "")
 	attributes, rebuilt := core.rebuilt_attributes(v)
 	if attributes != nil {
 		for key, i in attributes.keys {
@@ -352,9 +353,7 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 		if closing {
 			write.put_line(&w.out, w.opts, depth)
 		}
-		write.put_text(&w.out, "</")
-		write.put_text(&w.out, name)
-		write.put_byte(&w.out, '>')
+		put_framed(w, "</", name, ">")
 	}
 	if !bare {
 		put_comments(w, v, facts, .Comment_Inline) or_return
@@ -408,6 +407,23 @@ is_bare :: #force_inline proc(v: core.Value, facts: []core.Fact) -> bool {
 	return true
 }
 
+// Writes `lead`, `name` and `tail` with one reservation of room, as it is for a tag.
+@(private)
+put_framed :: #force_inline proc(w: ^Writer, lead, name, tail: string) {
+	n := len(lead) + len(name) + len(tail)
+	if n > write.ROOM_MAX {
+		write.put_text(&w.out, lead)
+		write.put_text(&w.out, name)
+		write.put_text(&w.out, tail)
+		return
+	}
+	p := write.room(&w.out, n)
+	intrinsics.mem_copy_non_overlapping(p, raw_data(lead), len(lead))
+	intrinsics.mem_copy_non_overlapping(&p[len(lead)], raw_data(name), len(name))
+	intrinsics.mem_copy_non_overlapping(&p[len(lead) + len(name)], raw_data(tail), len(tail))
+	w.out.cursor += n
+}
+
 @(private)
 value_facts :: proc(v: core.Value) -> []core.Fact {
 	if r, is_node := core.plain(v).(core.Node_Ref); is_node {
@@ -428,11 +444,11 @@ own_node :: proc(v: core.Value) -> bool {
 put_attribute :: proc(w: ^Writer, v: core.Value, f: core.Fact) -> core.Typed_Error_Kind {
 	r := core.plain(v).(core.Node_Ref)
 	w.kept += 1
-	write.put_byte(&w.out, ' ')
 	if own_node(v) {
-		write.put_text(&w.out, string(r.doc.src[f.lo:][:f.n]))
+		put_framed(w, " ", string(r.doc.src[f.lo:][:f.n]), "")
 		return .None
 	}
+	write.put_byte(&w.out, ' ')
 	name_token, value_token := r.doc.readers.attribute(r.doc, f)
 	name, named := core.token_text(r.doc.readers, &r.doc.view, name_token, context.temp_allocator)
 	text, read := core.token_text(r.doc.readers, &r.doc.view, value_token, context.temp_allocator)
