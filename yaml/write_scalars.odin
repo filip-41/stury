@@ -277,7 +277,8 @@ plainly_safe :: proc(s: string) -> bool {
 // Chooses how `s` is spelled in `place`. A string that is no UTF-8 is `.Invalid_Utf8`.
 @(private)
 shape_of :: proc(s: string, place: Place) -> (Shape, core.Typed_Error_Kind) {
-	if place.keeps == nil && plainly_safe(s) && !reads_as_other(s) {
+	// A scalar of the source's plain style stays plain under the same test, so only the other styles take the long path.
+	if (place.keeps == nil || place.keeps == .Plain) && plainly_safe(s) && !reads_as_other(s) {
 		return .Plain, .None
 	}
 	f := facts_of_text(s, place.ascii)

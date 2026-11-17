@@ -384,7 +384,7 @@ has_fact :: proc(l: ^Layout, node: core.Node_Index, role: core.Role) -> bool {
 // as an explicit key, `? key`.
 @(private)
 put_key :: proc(l: ^Layout, key: core.Node_Index, flow: bool) -> (explicit: bool, kind: core.Typed_Error_Kind) {
-	buf: [512]u8
+	buf: [512]u8 = ---
 	text := write.node_text(l.doc, key, buf[:], runtime.arena_allocator(&l.arena)) or_return
 	explicit = len(text) > KEY_MAX
 	if explicit {
@@ -427,7 +427,7 @@ own_style :: proc(l: ^Layout, node: core.Node_Index) -> Maybe(Style) {
 put_leaf :: proc(l: ^Layout, node: core.Node_Index, flow, key: bool, ind: int, tagged: bool) -> (ended: bool, kind: core.Typed_Error_Kind) {
 	#partial switch core.kind(l.doc, node) {
 	case .String:
-		buf: [512]u8
+		buf: [512]u8 = ---
 		text := write.node_text(l.doc, node, buf[:], runtime.arena_allocator(&l.arena)) or_return
 		keeps := own_style(l, node)
 		folded := keeps == .Block && l.doc.src[l.doc.nodes[node].lo] == '>'
@@ -447,7 +447,7 @@ put_leaf :: proc(l: ^Layout, node: core.Node_Index, flow, key: bool, ind: int, t
 	case .Null:
 		write.put_text(&l.out, own_text(l, node, "null"))
 	case .Bytes:
-		stack: [512]u8
+		stack: [512]u8 = ---
 		text, ok := write.node_bytes_text(l.doc, node, stack[:])
 		if !ok {
 			return false, .No_Memory
