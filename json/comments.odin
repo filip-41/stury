@@ -261,7 +261,7 @@ comments_before :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc
 // `p` is at a comment where a value must start. Reads the run up to the value, and gives each comment the value's
 // role, or the array's `Comment_Foot` before its close (an empty array or a trailing comma). Then reads the value.
 @(private, enable_target_feature = STATE_FEATURES)
-st_comments_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_comments_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, done, result := comments_before(w, on, &hs, p, end, d, ind, ']' if d & 1 == 0 && d >= 2 else 0, .None, .Comments_Value)
 	if done {
@@ -273,7 +273,7 @@ st_comments_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 // `p` is at a comment where an object's key must start. Reads the run up to the key, and gives each comment the
 // member's role, or the object's `Comment_Foot` before its close. Then reads the key.
 @(private, enable_target_feature = STATE_FEATURES)
-st_comments_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_comments_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, done, result := comments_before(w, on, &hs, p, end, d, ind, '}', .Identifier if .Es5 in FEATURES[S] else .None, .Comments_Key)
 	if done {
@@ -285,7 +285,7 @@ st_comments_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 // `p` is at a comment between a key and its colon. Reads the run up to the colon, gives each comment the member's
 // value's role, then reads the colon.
 @(private, enable_target_feature = STATE_FEATURES)
-st_comments_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_comments_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, done, result := comments_before(w, on, &hs, p, end, d, ind, 0, .Colon, .Comments_Colon)
 	if done {
@@ -307,7 +307,7 @@ st_comments_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 // document's root no comma is crossed: a comment past the root's line is its foot when the text ends after it or a
 // 0x1E follows it, else it belongs to the next document and stays unread.
 @(private, enable_target_feature = STATE_FEATURES)
-st_comments_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_comments_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	crossed := w.crossed
 	q, more, kind := comment_run(w.resume, end, d >= 2 && !crossed, S)

@@ -558,6 +558,9 @@ key_word :: #force_inline proc "contextless" (s: string, d: int) -> u64 #no_boun
 // word equals the pivot go on from `d + 8`, so a long common prefix costs one pass per word.
 @(private)
 sort_words :: proc(items: []Sort_Item, entries: []Entry, d: int) #no_bounds_check {
+	if len(items) >= RADIX_MIN && sort_words_radix(items, entries, d) {
+		return
+	}
 	items, d := items, d
 	for len(items) > 12 {
 		n := len(items)
@@ -930,4 +933,70 @@ refused :: proc(w: ^Walker, open: Frame, top: int, kind: core.Typed_Error_Kind) 
 	}
 	typed.path_close(&w.err)
 	return kind
+}
+
+// The items from which `sort_words` sorts by radix, whose passes cost no mispredicted branch.
+@(private)
+RADIX_MIN :: #config(RADIX_MIN, 1024)
+
+// `sort_words` by a least-significant-byte radix sort of the words, a pass per byte that differs between them, then each
+// run of one word as the quicksort's equal run. Returns false, sorting nothing, when the scratch copy is refused.
+@(private)
+sort_words_radix :: proc(items: []Sort_Item, entries: []Entry, d: int) -> bool #no_bounds_check {
+	n := len(items)
+	tmp, err := make([]Sort_Item, n)
+	if err != nil {
+		return false
+	}
+	defer delete(tmp)
+	all_or, all_and := u64(0), ~u64(0)
+	for it in items {
+		all_or |= it.word
+		all_and &= it.word
+	}
+	varying := all_or ~ all_and
+	src, dst := items, tmp
+	for b in uint(0) ..< 8 {
+		shift := 8 * b
+		if varying >> shift & 0xFF == 0 {
+			continue
+		}
+		counts: [256]int
+		for it in src {
+			counts[it.word >> shift & 0xFF] += 1
+		}
+		sum := 0
+		for &c in counts {
+			c, sum = sum, sum + c
+		}
+		for it in src {
+			k := it.word >> shift & 0xFF
+			dst[counts[k]] = it
+			counts[k] += 1
+		}
+		src, dst = dst, src
+	}
+	if raw_data(src) != raw_data(items) {
+		copy(items, src)
+	}
+	for lo := 0; lo < n; {
+		hi := lo + 1
+		for hi < n && items[hi].word == items[lo].word {
+			hi += 1
+		}
+		if hi - lo > 1 {
+			run := items[lo:hi]
+			// A zero last byte says the keys end inside the word, or hold a NUL there. Their text is compared instead.
+			if items[lo].word & 0xFF == 0 {
+				insertion_sort(run, entries)
+			} else {
+				for &it in run {
+					it.word = key_word(entries[it.entry].text, d + 8)
+				}
+				sort_words(run, entries, d + 8)
+			}
+		}
+		lo = hi
+	}
+	return true
 }

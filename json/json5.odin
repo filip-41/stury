@@ -30,7 +30,7 @@ number_spelling_of :: #force_inline proc "contextless" (spelling: u16) -> Number
 
 // `p` is at a number JSON's leaf refused or read only up to an `x`. Reads the JSON5 number, then what follows it.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_number5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_number5 :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, spelling, kind, _ := number_run(p, end, S, true, false)
 	if kind != .None {

@@ -1,6 +1,9 @@
 package json
 
 import "base:intrinsics"
+import "core:simd"
+import "core:strings"
+import "core:sys/info"
 import kernel "../core/kernel"
 import core "../core"
 import write "../core/write"
@@ -70,7 +73,7 @@ dense_sample :: proc "contextless" (src: []u8, nodes: int) -> bool {
 	scratch: [DENSE_SEGMENT + 64]u8 = ---
 	state: Dense_State
 	hi := min(len(src), DENSE_SEGMENT)
-	kept, _ := dense_run_tier(kernel.tier(), raw_data(scratch[:]), src, 0, hi, &state, .Escapes)
+	kept, _ := dense_run_tier(kernel.tier(), false, raw_data(scratch[:]), src, 0, hi, &state, .Escapes)
 	return (hi - kept) * 16 < hi && (len(src) < DENSE_BYTES_PER_NODE * nodes || state.escapes == 0)
 }
 
@@ -83,7 +86,7 @@ dense_sample :: proc "contextless" (src: []u8, nodes: int) -> bool {
 // with no space drops every byte below 0x21, since only a space can be inside a string, and so its string state is
 // owed to whoever runs the next block with a space.
 @(private)
-dense_run :: #force_inline proc "contextless" ($T: kernel.Tier, out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $MODE: Dense_Mode) -> (w, i: int) {
+dense_run :: #force_inline proc "contextless" ($T: kernel.Tier, out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $MODE: Dense_Mode, $VB: bool) -> (w, i: int) {
 	in_string, odd, escapes := s.in_string, s.odd, u64(0)
 	for i = lo; i < hi; i += 64 {
 		b := kernel.load_block(T, src, i)
@@ -109,7 +112,12 @@ dense_run :: #force_inline proc "contextless" ($T: kernel.Tier, out: [^]u8, src:
 			intrinsics.unaligned_store((^kernel.Block)(out[w:]), b)
 			w += 64
 		} else {
-			w += kernel.compress(b, ~drop, out[w:])
+			when VB {
+				simd.masked_compress_store((^u8)(out[w:]), transmute(#simd[64]u8)b, lanes_of(~drop))
+				w += int(intrinsics.count_ones(~drop))
+			} else {
+				w += kernel.compress(b, ~drop, out[w:])
+			}
 		}
 	}
 	when MODE != .Blind {
@@ -125,29 +133,39 @@ dense_run :: #force_inline proc "contextless" ($T: kernel.Tier, out: [^]u8, src:
 when ODIN_ARCH == .amd64 {
 	@(private, enable_target_feature = kernel.FEATURES[.V2])
 	dense_run_v2 :: #force_no_inline proc "contextless" (out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $E: Dense_Mode) -> (int, int) {
-		return dense_run(.V2, out, src, lo, hi, s, E)
+		return dense_run(.V2, out, src, lo, hi, s, E, false)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V3])
 	dense_run_v3 :: #force_no_inline proc "contextless" (out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $E: Dense_Mode) -> (int, int) {
-		return dense_run(.V3, out, src, lo, hi, s, E)
+		return dense_run(.V3, out, src, lo, hi, s, E, false)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V4])
 	dense_run_v4 :: #force_no_inline proc "contextless" (out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $E: Dense_Mode) -> (int, int) {
-		return dense_run(.V4, out, src, lo, hi, s, E)
+		return dense_run(.V4, out, src, lo, hi, s, E, false)
 	}
+	@(private, enable_target_feature = kernel.FEATURES[.V4] + ",avx512vbmi2")
+	dense_run_v4b :: #force_no_inline proc "contextless" (out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $E: Dense_Mode) -> (int, int) {
+		return dense_run(.V4, out, src, lo, hi, s, E, true)
+	}
+
 } else {
 	@(private)
 	dense_run_base :: #force_no_inline proc "contextless" (out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $E: Dense_Mode) -> (int, int) {
-		return dense_run(.Base, out, src, lo, hi, s, E)
+		return dense_run(.Base, out, src, lo, hi, s, E, false)
 	}
 }
 
 @(private)
-dense_run_tier :: #force_inline proc "contextless" (tier: kernel.Tier, out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $E: Dense_Mode) -> (int, int) {
+dense_run_tier :: #force_inline proc "contextless" (tier: kernel.Tier, store: bool, out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $E: Dense_Mode) -> (int, int) {
 	when ODIN_ARCH == .amd64 {
 		switch tier {
 		case .V4:
-			return dense_run_v4(out, src, lo, hi, s, E)
+			// With `store`, `vpcompressb` stores each block. Else the V3 loop runs: the V4 loop's 128-bit shuffles in
+			// `kernel.compress` lose a port to its 512-bit compares on Intel cores, and run slower than the V3 loop's.
+			if store {
+				return dense_run_v4b(out, src, lo, hi, s, E)
+			}
+			return dense_run_v3(out, src, lo, hi, s, E)
 		case .V3:
 			return dense_run_v3(out, src, lo, hi, s, E)
 		case .V2:
@@ -165,6 +183,7 @@ dense_run_tier :: #force_inline proc "contextless" (tier: kernel.Tier, out: [^]u
 @(private)
 write_dense :: proc(out: ^write.Out, src: []u8) {
 	tier := kernel.tier()
+	store := dense_store()
 	state: Dense_State
 	i := int(core.text_start(src, 0))
 	owed, gap := i, 0
@@ -174,22 +193,49 @@ write_dense :: proc(out: ^write.Out, src: []u8) {
 		if gap > 0 {
 			gap -= 1
 		} else {
-			w, i = dense_run_tier(tier, at, src, i, hi, &state, .Blind)
+			w, i = dense_run_tier(tier, store, at, src, i, hi, &state, .Blind)
 			gap = DENSE_PROBE_GAP if i < hi else 0
 		}
 		if i < hi {
 			scratch: [DENSE_SEGMENT + 64]u8 = ---
 			for ; owed < i; owed += DENSE_SEGMENT {
-				dense_run_tier(tier, raw_data(scratch[:]), src, owed, min(owed + DENSE_SEGMENT, i), &state, .Escapes)
+				dense_run_tier(tier, store, raw_data(scratch[:]), src, owed, min(owed + DENSE_SEGMENT, i), &state, .Escapes)
 			}
 			if state.escapes == 0 {
-				n, j := dense_run_tier(tier, at[w:], src, i, hi, &state, .Plain)
+				n, j := dense_run_tier(tier, store, at[w:], src, i, hi, &state, .Plain)
 				w, i = w + n, j
 			}
-			n, _ := dense_run_tier(tier, at[w:], src, i, hi, &state, .Escapes)
+			n, _ := dense_run_tier(tier, store, at[w:], src, i, hi, &state, .Escapes)
 			w, owed = w + n, hi
 		}
 		out.cursor += w
 		i = hi
 	}
+}
+
+// Whether `vpcompressb` stores a dense block: on an Intel CPU with VBMI2, named by the brand string `core:sys/info`
+// read at start-up. Its store form is slow on AMD's, which take the V3 loop.
+@(private)
+dense_store :: proc() -> bool {
+	when ODIN_ARCH == .amd64 {
+		vbmi2 := .avx512vbmi2 in info.cpu_features()
+	} else {
+		vbmi2 := false
+	}
+	return vbmi2 && strings.contains(info.cpu_name(), "Intel")
+}
+
+// 0xFF in lane i where bit i of `m` is set. LLVM folds it to one `kmovq` when a masked operation takes it.
+@(private)
+lanes_of :: #force_inline proc "contextless" (m: u64) -> #simd[64]u8 {
+	BIT :: #simd[64]u8{
+		0 = 1, 1 = 2, 2 = 4, 3 = 8, 4 = 16, 5 = 32, 6 = 64, 7 = 128, 8 = 1, 9 = 2, 10 = 4, 11 = 8, 12 = 16, 13 = 32, 14 = 64, 15 = 128,
+		16 = 1, 17 = 2, 18 = 4, 19 = 8, 20 = 16, 21 = 32, 22 = 64, 23 = 128, 24 = 1, 25 = 2, 26 = 4, 27 = 8, 28 = 16, 29 = 32, 30 = 64, 31 = 128,
+		32 = 1, 33 = 2, 34 = 4, 35 = 8, 36 = 16, 37 = 32, 38 = 64, 39 = 128, 40 = 1, 41 = 2, 42 = 4, 43 = 8, 44 = 16, 45 = 32, 46 = 64, 47 = 128,
+		48 = 1, 49 = 2, 50 = 4, 51 = 8, 52 = 16, 53 = 32, 54 = 64, 55 = 128, 56 = 1, 57 = 2, 58 = 4, 59 = 8, 60 = 16, 61 = 32, 62 = 64, 63 = 128,
+	}
+	q := transmute(#simd[64]u8)(#simd[8]u64)(m)
+	v := simd.shuffle(q, q, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3,
+		4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7)
+	return simd.lanes_ne(simd.bit_and(v, BIT), (#simd[64]u8)(0))
 }

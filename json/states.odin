@@ -11,7 +11,7 @@ import build "../core/build"
 
 // `p` is where a value must start, past whitespace.
 @(private, enable_target_feature = STATE_FEATURES)
-st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	if p >= end {
 		return fault(w, hs, end, .Truncated)
@@ -104,7 +104,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 
 // `p` is where an object's key must start, past whitespace. Reads the key, its colon and the value after it.
 @(private, enable_target_feature = STATE_FEATURES)
-st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	if p >= end {
 		return fault(w, hs, end, .Truncated)
@@ -209,7 +209,7 @@ colon_fast :: #force_inline proc "contextless" (q, end: [^]u8) -> [^]u8 {
 // Reads the value string at `p` that `string_short` did not vouch for, which is longer than 32 bytes, not ASCII, or
 // faulty, with no backslash in its first 32 bytes. `string_lean` is inlined, so a plain ASCII string makes no call.
 @(private, enable_target_feature = STATE_FEATURES)
-st_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, escape := string_lean(p, end, '"')
 	if q == nil {
@@ -231,7 +231,7 @@ st_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w:
 // Reads the value string at `p` from the block at `w.resume`, which holds its first backslash. A separate state, so
 // the mask registers are saved only for a string with an escape.
 @(private, enable_target_feature = STATE_FEATURES)
-st_string_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q := string_escaped(w.resume, end)
 	if q == nil {
@@ -248,7 +248,7 @@ st_string_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 
 // `st_key_string_escaped` reads a key the way `st_string_escaped` reads a value.
 @(private, enable_target_feature = STATE_FEATURES)
-st_key_string_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_key_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, at := key_escaped_head(w.resume, end)
 	if q == nil {
@@ -272,7 +272,7 @@ st_key_string_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, d, 
 
 // Reads the value string at `p` that `string_lean` did not vouch for.
 @(private, enable_target_feature = STATE_FEATURES)
-st_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, esc, lax, kind := string_long(w, p, end)
 	if kind != .None {
@@ -289,7 +289,7 @@ st_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 
 // `st_key_string` reads a key the way `st_string` reads a value.
 @(private, enable_target_feature = STATE_FEATURES)
-st_key_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_key_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, escape := string_lean(p, end, '"')
 	if q == nil {
@@ -314,7 +314,7 @@ st_key_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 
 // `st_key_string_long` reads a key the way `st_string_long` reads a value.
 @(private, enable_target_feature = STATE_FEATURES)
-st_key_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_key_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, esc, lax, kind := string_long(w, p, end)
 	if kind != .None {
@@ -335,7 +335,7 @@ st_key_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind
 
 // `p` is right after a key read by `st_key`. Reads whitespace, the colon, whitespace, then the member's value.
 @(private, enable_target_feature = STATE_FEATURES)
-st_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	// Reads a pretty printer's `": "` without entering `colon`.
 	if intrinsics.ptr_sub(end, p) > 2 && p[0] == ':' && p[1] == ' ' && p[2] > ' ' {
@@ -355,7 +355,7 @@ st_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 
 // `p` is right after an open bracket, and `d` is already the new container's.
 @(private, enable_target_feature = STATE_FEATURES)
-st_open :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	ind := ind
 	q := indent_fast(p, end, &ind, .Open)
@@ -378,7 +378,7 @@ st_open :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 // `p` is at an open bracket past the depth the walk checks. Raises the check, or faults at the limit, and opens the
 // bracket again in `st_value`.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_deepen :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_deepen :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	if k := deepen(w); k != .None {
 		return fault(w, {s0, s1, s2}, p, k)
 	}
@@ -387,7 +387,7 @@ st_deepen :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w:
 
 // `st_deepen` for an open bracket in a run, opened again in `st_open_run`.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_deepen_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_deepen_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	if k := deepen(w); k != .None {
 		return fault(w, {s0, s1, s2}, p, k)
 	}
@@ -396,7 +396,7 @@ st_deepen_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 
 // `p` is at an open bracket right after another. Pushes the whole run of `[` in this state.
 @(private, enable_target_feature = STATE_FEATURES)
-st_open_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_open_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	p, d := p, d
 	for {
@@ -425,7 +425,7 @@ st_open_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, 
 // `st_open_ws` is `st_open` where whitespace follows the bracket. It is kept out of the hot states, whose entry would
 // build its vectors.
 @(private, enable_target_feature = STATE_FEATURES)
-st_open_ws :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_open_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	ind := ind
 	q := skip_indent(p, end, &ind, .Open)
@@ -440,7 +440,7 @@ st_open_ws :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w
 
 // `p` is right after a value. Reads a comma and the next member, the container's close, or the document's end.
 @(private, enable_target_feature = STATE_FEATURES)
-st_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	ind := ind
 	if d < 2 {
@@ -493,7 +493,7 @@ st_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 
 // `st_after_ws` is `st_after` where whitespace follows the value.
 @(private, enable_target_feature = STATE_FEATURES)
-st_after_ws :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_after_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	ind := ind
 	q := skip_indent(p, end, &ind, .Close)
@@ -523,7 +523,7 @@ st_after_ws :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, 
 
 // `p` is right after a comma, at whitespace or the text's end.
 @(private, enable_target_feature = STATE_FEATURES)
-st_member_ws :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_member_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	ind := ind
 	q := skip_indent(p, end, &ind, .Member)
@@ -535,7 +535,7 @@ st_member_ws :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64,
 
 // `p` is at the close bracket of container `d`. Reads it and the run of closes after it in this state.
 @(private, enable_target_feature = STATE_FEATURES)
-st_close :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_close :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	p := p
 	// The depth is carried apart from the kind bit, so the next close does not wait on the stack's load.
@@ -557,7 +557,7 @@ st_close :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 // `p` is at a literal that `literal` refused, where it breaks. Kept out of `st_value`, whose entry would save
 // registers for the call.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_bad_literal :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_bad_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, kind := literal_fault(p, end)
 	return fault(w, hs, q, kind, .Literal if kind == .Bad_Char else .None)
@@ -566,19 +566,19 @@ st_bad_literal :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 // `p` is where a value must start, at a byte that starts none. The fault's detail is chosen here, so the states that
 // send a fault here compile none of that choice.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_bad_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_bad_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	return fault(w, core.Hook_Regs{s0, s1, s2}, p, .Bad_Char, value_detail(p, end, d))
 }
 
 // `st_bad_key` is `st_bad_value` where an object's key must start.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_bad_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_bad_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	return fault(w, core.Hook_Regs{s0, s1, s2}, p, .Bad_Char, key_detail(p, end))
 }
 
 // `st_bad_after` is `st_bad_value` after a value, at a byte that is no comma and no close of its container.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_bad_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_bad_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	return fault(w, core.Hook_Regs{s0, s1, s2}, p, .Bad_Char, after_detail(p, d))
 }
 
@@ -586,7 +586,7 @@ st_bad_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64,
 // a close bracket after a trailing comma, one of JSON5's own starts, or faults. A separate state, so `st_value` compiles
 // none of it.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_value_spec :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_value_spec :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	if gap(p, end, S) {
 		return #must_tail st_comments_value(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
@@ -619,7 +619,7 @@ st_value_spec :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 // object's close after a trailing comma, or faults, and in JSON5 a single-quoted or unquoted key, then its colon. In
 // JSON5 a byte that starts no key faults `Bad_Char` with detail `.Identifier`.
 @(private, enable_target_feature = STATE_FEATURES)
-st_key_spec :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_key_spec :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	if gap(p, end, S) {
 		return #must_tail st_comments_key(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
@@ -675,7 +675,7 @@ st_key_spec :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, 
 // `p` is right after the open bracket of a container whose hook returned `Skip`, and `d` is the container's. The walk
 // without hooks reads up to its close, and this walk continues after it.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_skip :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_skip :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	parent := d >> 1 - 1
 	r := pass_over(w, p, end, parent, 2 | d & 1, ind, true)
@@ -690,7 +690,7 @@ st_skip :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 // comments gives its tokens to the builder's plain hook, under the bound `build` reserves by, with no scan step between,
 // and this walk continues after its close. Any other walk reads on through its hook.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_keep :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_keep :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	when H == build.Scan && .Comments not_in FEATURES[S] {
 		bytes := intrinsics.ptr_sub(end, p)
@@ -719,7 +719,7 @@ st_keep :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 
 // Reads the value string at `p` of a member whose key was skipped, which `string_short` did not vouch for.
 @(private, enable_target_feature = STATE_FEATURES)
-st_skip_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_skip_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, _ := string_lean(p, end, '"')
 	if q == nil {
@@ -739,7 +739,7 @@ st_skip_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 // path reads goes straight to what follows it, since a skip of every member of a large object lands here. Anything else
 // reads the colon, then the value with the walk without hooks, and continues after it.
 @(private, enable_target_feature = STATE_FEATURES)
-st_skip_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_skip_member :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	if r := colon_fast(p, end); r != nil {
 		if r[0] == '"' {
@@ -789,7 +789,7 @@ st_skip_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 // `st_after` so the states every document uses keep their size and placement. The separator rules are `st_after`'s,
 // and a change there belongs here too.
 @(private, enable_target_feature = STATE_FEATURES)
-st_after_number :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_after_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	ind := ind
 	if d < 2 {
@@ -847,7 +847,7 @@ st_after_number :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 // run of number elements stays in this state, so the byte after each comma is tested here and no state boundary lies
 // between two elements.
 @(private, enable_target_feature = STATE_FEATURES)
-st_number_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_number_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	p := p
 	q: [^]u8
@@ -896,7 +896,7 @@ st_number_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 // that follows is a number, the key, colon, value and separator stay in this state, so no key or value state lies
 // between two members. Anything else passes the rest of the walk to the states that read it.
 @(private, enable_target_feature = STATE_FEATURES)
-st_member_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	ind := ind
 	p := p

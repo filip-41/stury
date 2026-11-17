@@ -20,6 +20,13 @@
   it returned.
 - A comment edit written on a line of its own trims only its own blanks. It took the text of the edit written before
   it, which moved that text to another place or made the commit refuse its output.
+- JSON's walk passes its state between states in registers, by the `preserve/none` calling convention. On x86-64 two
+  of a state's eight words went through the stack at each state, and `citm_catalog.json` builds about 1.25 times
+  faster.
+- A compact write of a JSON source with blanks drops them with `vpcompressb` on an Intel CPU with AVX512-VBMI2, and
+  with the AVX2 loop on another AVX-512 CPU, where the AVX-512 loop ran no faster than the SSE one: `pretty.json`
+  writes about three times faster.
+- A map of 1024 keys or more is written sorted by a radix sort of its key words.
 
 ### Command line
 

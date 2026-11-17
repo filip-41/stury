@@ -15,7 +15,7 @@ FLOOR_LEVELS :: 8
 // `st_after` from the last comma passed, or from `p`, so the states read every byte the masks did not vouch for, give
 // every token not given yet, and fault where they would. Only a hook that takes every token with `Next` enters it.
 @(private, enable_target_feature = STATE_FEATURES)
-st_number_blocks :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 #no_bounds_check {
+st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 #no_bounds_check {
 	hs := core.Hook_Regs{s0, s1, s2}
 	dep := d >> 1
 	// A close may bring the walk down to `floor`: every container from it to `dep` is an array, and depth 0 is the
