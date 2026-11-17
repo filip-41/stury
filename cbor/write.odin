@@ -43,7 +43,7 @@ document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.A
 	if verbatim {
 		put_verbatim(&e, node)
 	} else if !e.sorted && core.header_of(doc) == 0 {
-		kind = put_preorder(&e, node)
+		kind = put_plain_preorder(&e, node) if e.own && len(doc.facts) == 0 else put_preorder(&e, node)
 	} else {
 		kind = put_node(&e, node, 0)
 	}
@@ -103,6 +103,57 @@ put_preorder :: proc(e: ^Emit, i: core.Node_Index) -> core.Typed_Error_Kind {
 		}
 	}
 	return e.out.err
+}
+
+// `put_preorder` for a document read from CBOR that holds no facts, so no node has a tag. A string whose head is already
+// the shortest and a one-byte integer are copied as the bytes they were read from, and any other node is written as
+// `put_preorder` writes it.
+@(private)
+put_plain_preorder :: proc(e: ^Emit, i: core.Node_Index) -> core.Typed_Error_Kind {
+	doc := e.doc
+	end := i + core.Node_Index(core.subtree_size(doc, i))
+	src := raw_data(doc.src)
+	for j in i ..< end {
+		n := doc.nodes[j]
+		#partial switch n.kind {
+		case .Array, .Object:
+			count := u64(n.spelling) if n.spelling != core.MAX_CHILDREN else u64(core.length(doc, j))
+			p := write.room(&e.out, 9)
+			e.out.cursor += write.put_head(p, count, TREE, .Array) if n.kind == .Array else write.put_head(p, count, TREE, .Map)
+			continue
+		case .String:
+			head := int(n.spelling >> HEAD_SHIFT & 15)
+			if n.spelling & (STR_INDEF | core.SPELLING_LAX | INT_KEY) == 0 && head == head_length(n.n) && n.n <= write.ROOM_MAX - 9 {
+				whole := head + int(n.n)
+				p := write.room(&e.out, whole)
+				intrinsics.mem_copy_non_overlapping(p, src[n.lo - u64(head):], whole)
+				e.out.cursor += whole
+				continue
+			}
+		case .Number:
+			if n.spelling & core.NUMBER_KIND_MASK == CN_INT && n.n == 1 {
+				write.room(&e.out, 1)[0] = src[n.lo]
+				e.out.cursor += 1
+				continue
+			}
+		}
+		put_leaf(e, j, core.kind(doc, j)) or_return
+	}
+	return e.out.err
+}
+
+// The length of the shortest head of an item whose argument is `n`.
+@(private)
+head_length :: #force_inline proc "contextless" (n: u32) -> int {
+	switch {
+	case n < 24:
+		return 1
+	case n < 1 << 8:
+		return 2
+	case n < 1 << 16:
+		return 3
+	}
+	return 5
 }
 
 // Writes node `i`, `depth` containers deep, with its tags.
