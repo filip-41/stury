@@ -699,7 +699,7 @@ st_keep :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w:
 			parent := d >> 1 - 1
 			regs := hs
 			v := Walk(S, build.Builder){w.base, &w.hooks.b, w.stack[parent:], &regs, w.depth - parent, w.tier, false, w.tolerate, w.finite, false, false, nil, 0, w.limit - parent}
-			r := st_open(p, end, 2 | d & 1, ind, &v, hs.a, hs.b, hs.c, build.builder_hook_plain)
+			r := enter(.Open, p, end, 2 | d & 1, ind, &v, hs.a, hs.b, hs.c, build.builder_hook_plain)
 			if v.owned {
 				drop_stack(v.stack)
 			}

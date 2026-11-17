@@ -491,7 +491,7 @@ walk_saving :: proc "contextless" (src: []u8, q: [^]u8, $S: Spec, opts: Options,
 	}
 	w := cursor_walk(src, cursor, S, opts, h)
 	w.depth = depth_held(h, &cursor.regs, w.limit, w.limit)
-	r := st_value(q, w.base[len(src):], 0, INDENT_START, &w, cursor.regs.a, cursor.regs.b, cursor.regs.c, on)
+	r := enter(.Value, q, w.base[len(src):], 0, INDENT_START, &w, cursor.regs.a, cursor.regs.b, cursor.regs.c, on)
 	regs^ = cursor.regs
 	hi, fault, _ = core.result_of(r, &RULES)
 	if f, bad := fault.?; bad {
@@ -519,11 +519,11 @@ resume_document :: proc "contextless" (src: []u8, cursor: ^Cursor, next: Follow,
 	switch next {
 	case .None:
 	case .After:
-		return st_after(p, end, d, ind, &w, hs.a, hs.b, hs.c, on)
+		return enter(.After, p, end, d, ind, &w, hs.a, hs.b, hs.c, on)
 	case .Open:
-		return st_open(p, end, d, ind, &w, hs.a, hs.b, hs.c, on)
+		return enter(.Open, p, end, d, ind, &w, hs.a, hs.b, hs.c, on)
 	case .Colon:
-		return st_colon(p, end, d, ind, &w, hs.a, hs.b, hs.c, on)
+		return enter(.Colon, p, end, d, ind, &w, hs.a, hs.b, hs.c, on)
 	case .Comments_Value, .Comments_Key, .Comments_Colon, .Comments_After:
 		q := w.base[cursor.run_end:]
 		r, stop, wide, inline := emit_comments(&w, on, &hs, p, q, cursor.inline, cursor.role)
@@ -535,11 +535,11 @@ resume_document :: proc "contextless" (src: []u8, cursor: ^Cursor, next: Follow,
 		}
 		#partial switch next {
 		case .Comments_Value:
-			return st_value(q, end, d, ind, &w, hs.a, hs.b, hs.c, on)
+			return enter(.Value, q, end, d, ind, &w, hs.a, hs.b, hs.c, on)
 		case .Comments_Key:
-			return st_key(q, end, d, ind, &w, hs.a, hs.b, hs.c, on)
+			return enter(.Key, q, end, d, ind, &w, hs.a, hs.b, hs.c, on)
 		case .Comments_Colon:
-			return st_colon(q, end, d, ind, &w, hs.a, hs.b, hs.c, on)
+			return enter(.Colon, q, end, d, ind, &w, hs.a, hs.b, hs.c, on)
 		}
 		// The root's walk ends past its last comment emitted, and the rest of the run is the next document's.
 		if d < 2 {
@@ -547,7 +547,7 @@ resume_document :: proc "contextless" (src: []u8, cursor: ^Cursor, next: Follow,
 		}
 		// The run is read, so `st_comments_after` reads none of it again and goes on to what follows it.
 		w.resume, w.crossed = q, cursor.crossed
-		return st_comments_after(q, end, d, ind, &w, hs.a, hs.b, hs.c, on)
+		return enter(.Comments_After, q, end, d, ind, &w, hs.a, hs.b, hs.c, on)
 	}
 	return core.fault_at(0, .Bad_Option)
 }
@@ -644,7 +644,7 @@ walk_document :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec
 	stack: [core.MAX_DEPTH]u8 = ---
 	depth := u64(opts.max_depth) if opts.max_depth != 0 else core.MAX_DEPTH
 	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth_held(h, regs, depth, core.MAX_DEPTH), kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, false, nil, 0, depth}
-	r := st_value(p, w.base[len(src):], 0, INDENT_START, &w, regs.a, regs.b, regs.c, on)
+	r := enter(.Value, p, w.base[len(src):], 0, INDENT_START, &w, regs.a, regs.b, regs.c, on)
 	if w.owned {
 		drop_stack(w.stack)
 	}
@@ -668,14 +668,57 @@ pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, 
 	regs: core.Hook_Regs
 	v := Walk(S, core.No_Hooks){w.base, &h, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, false, false, nil, 0, w.limit - slot}
 	when open {
-		r := st_open(p, end, d, ind, &v, 0, 0, 0, core.no_hook)
+		r := enter(.Open, p, end, d, ind, &v, 0, 0, 0, core.no_hook)
 	} else {
-		r := st_value(p, end, d, ind, &v, 0, 0, 0, core.no_hook)
+		r := enter(.Value, p, end, d, ind, &v, 0, 0, 0, core.no_hook)
 	}
 	if v.owned {
 		drop_stack(v.stack)
 	}
 	return r
+}
+
+// The state a walk enters from a frame that is not a state.
+@(private)
+Entry :: enum u8 {
+	Value,
+	Key,
+	Open,
+	Colon,
+	After,
+	Comments_After,
+}
+
+// Calls state `at` from a frame that is not a state. A "preserve/none" call keeps no register, and LLVM saves no frame
+// base pointer across one. A frame the address sanitizer realigns keeps one, so under it the call goes through a frame
+// of its own, which holds no locals.
+@(private)
+enter_state :: #force_inline proc "contextless" ($at: Entry, p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	when at == .Value {
+		return st_value(p, end, d, ind, w, s0, s1, s2, on)
+	} else when at == .Key {
+		return st_key(p, end, d, ind, w, s0, s1, s2, on)
+	} else when at == .Open {
+		return st_open(p, end, d, ind, w, s0, s1, s2, on)
+	} else when at == .Colon {
+		return st_colon(p, end, d, ind, w, s0, s1, s2, on)
+	} else when at == .After {
+		return st_after(p, end, d, ind, w, s0, s1, s2, on)
+	} else {
+		return st_comments_after(p, end, d, ind, w, s0, s1, s2, on)
+	}
+}
+
+when .Address in ODIN_SANITIZER_FLAGS {
+	@(private)
+	enter :: #force_no_inline proc "contextless" ($at: Entry, p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+		return enter_state(at, p, end, d, ind, w, s0, s1, s2, on)
+	}
+} else {
+	@(private)
+	enter :: #force_inline proc "contextless" ($at: Entry, p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+		return enter_state(at, p, end, d, ind, w, s0, s1, s2, on)
+	}
 }
 
 // Passes the token over `p..q` to the hook and returns its `Action`. The readers refuse a token wider than `Token.n`
