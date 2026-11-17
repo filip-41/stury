@@ -83,12 +83,12 @@ plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: run
 	return p, err
 }
 
-// The typed reads of a plan read as spec `S`: a text is built and its nodes are read, and a document's nodes are read by
+// The typed reads of a plan read as spec `S`: a text's tree is replayed to the reader, and a document's nodes are read by
 // the generic route, which compares a key by its decoded text.
 @(private)
 reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 	@(static, rodata) r := typed.Format_Reads {
-		read       = proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {return typed.read_built_text(src, as, build_handle, target, T, plan, read, allocator)},
+		read       = text_read,
 		check      = text_check,
 		node_read  = typed.read_nodes,
 		node_check = typed.check_nodes,
@@ -96,6 +96,91 @@ reads_of :: proc "contextless" ($S: Spec) -> ^typed.Format_Reads {
 		plan       = proc(T: typeid, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Refusal) {return plan_built(T, S, {}, opts, reads_of(S), allocator)},
 	}
 	return &r
+}
+
+// The read the replay of a text's tree gives the reader's hook, and the tree for a union's tag.
+@(private)
+Tree_Read :: struct {
+	reader: typed.Reader,
+	parser: ^Parser,
+	replay: ^Replay,
+	last:   u64, // one past the last value given, or a container's first byte when it holds none yet
+}
+
+// Reads `src` into `target` by replaying its table tree to the reader's hook, with no document. The text is read whole
+// first, since a table's members may be written apart.
+@(private)
+text_read :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Refusal {
+	if as.spec > u8(max(Spec)) {
+		return {kind = .Bad_Option}
+	}
+	read := read
+	if read.dups == .Refuse {
+		// A repeated key is a fault of the text, so no read meets one to refuse.
+		read.dups = .Last
+	}
+	frames: [core.MAX_DEPTH + 2]typed.Frame = ---
+	h: Tree_Read
+	regs, started := typed.read_start(&h.reader, src, plan, as, T, target, read, frames[:], allocator, false)
+	if started.kind != .None {
+		return started
+	}
+	defer typed.read_release(&h.reader, frames[:])
+	limit := depth_limit(options_of(as))
+	if int(limit) + 2 > len(frames) {
+		if _, grown := typed.grow_frames(&h.reader, len(frames), int(limit) + 2); !grown {
+			return {kind = .No_Memory}
+		}
+	}
+	p: Parser
+	defer parser_destroy(&p)
+	if !parser_init(&p, src, Spec(as.spec) == .Toml_1_1, limit) {
+		return {kind = .No_Memory}
+	}
+	if !parse(&p, 0) {
+		_, fault, _ := core.result_of(p.fail, &RULES)
+		return typed.read_end(&h.reader, regs, fault)
+	}
+	s: Replay
+	defer delete(s.frames)
+	h.parser, h.replay = &p, &s
+	h.reader.format, h.reader.find_tag = &h, tree_tag
+	_, fault, _ := core.result_of(replay(&p, &s, &h, &regs, tree_step), &RULES)
+	return typed.read_end(&h.reader, regs, fault)
+}
+
+// A token as the reader's hook takes it: a number's digits folded, and a close at the last byte of the container's
+// last value, which is where the end of a table that has no bracket of its own is read.
+@(private)
+tree_step :: proc "contextless" (h: ^Tree_Read, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	t := t
+	if t.role == .Value {
+		#partial switch t.kind {
+		case .End:
+			t.lo, t.n = (t.lo if h.replay.id == 0 else h.last) - 1, 1
+		case .Object, .Array:
+			h.last = t.lo
+		case .Number:
+			if t.spelling & core.NUMBER_KIND_MASK == 0 {
+				h.reader.mant = typed.fold_digits(h.reader.src, t)
+			}
+			h.last = t.lo + u64(t.n)
+		case:
+			h.last = t.lo + u64(t.n)
+		}
+	}
+	return typed.on_token_spelled(&h.reader, regs, t)
+}
+
+// The reader's `find_tag`: the member `name` of the table the replay has just opened.
+@(private)
+tree_tag :: proc(r: ^typed.Reader, _: u64, name: string) -> typed.Tag_Scan {
+	h := (^Tree_Read)(r.format)
+	s := typed.Tag_Scan{view = {src = r.src, as = r.plan.as}, name = name}
+	if id := find_child(&h.parser.tree, h.replay.id, name); id != NIL {
+		s.found, s.value = 1, h.parser.tree.nodes[id].value
+	}
+	return s
 }
 
 @(private)
@@ -106,12 +191,18 @@ text_check :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typ
 @(private)
 unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
 	plan, refusal := plan_make(T, S, opts)
-	return typed.unmarshal_planned(&plan, refusal, src, bound_as(S, opts), build_handle, target, T, read, allocator)
+	if refusal != nil {
+		return refusal
+	}
+	defer typed.plan_destroy(&plan)
+	err := text_read(src, bound_as(S, opts), target, T, &plan, read, allocator)
+	typed.own_errors(&err, read.sink)
+	return core.error_of(err)
 }
 
 @(private)
 unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
-	return core.error_of(typed.read_built_text(src, bound_as(S, opts), build_handle, target, T, plan, read, allocator))
+	return core.error_of(text_read(src, bound_as(S, opts), target, T, plan, read, allocator))
 }
 
 // Reads `src` into `target` by `plan` as `unmarshal` does, with every refusal in `read.sink.entries`, and returns the

@@ -302,8 +302,8 @@ needs_close :: #force_inline proc "contextless" (f: ^Frame) -> bool {
 	return false
 }
 
-// The integer a plain number's integer and fraction digits spell, which wraps past 19 digits.
-@(private)
+// The integer a plain number's integer and fraction digits spell, which wraps past 19 digits: the `mant` the hook reads,
+// for a format whose walk does not fold it.
 fold_digits :: #force_inline proc "contextless" (src: []u8, t: core.Token) -> (mant: u64) #no_bounds_check {
 	p := raw_data(src)[t.lo:]
 	end := p[t.n:]
