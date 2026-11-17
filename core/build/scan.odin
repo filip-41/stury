@@ -92,9 +92,9 @@ Scan :: struct {
 	opts:       rawptr, // the format's walk options, which `rewalk` reads
 	ends:       []u32, // the container ends a `$MANY` replay holds, a frame per depth
 	marks:      [core.MAX_STEPS]Scan_Mark,
-	leap_at:    [core.MAX_STEPS]u32, // the count past which a replay leaps to the close of the container at each depth
-	leap_names: u64, // the steps whose leap waits for their key
-	leaps:      bool, // some step of the path can leap
+	cut_idx:    u64, // the steps that are a non-negative `Index`, past whose element a replay reads no sibling
+	cut_names:  u64, // the steps that are a `Name` of a first-wins read, past whose key a replay reads no member
+	cut_end:    [core.MAX_STEPS]u32, // where a replay goes on after a container it cut short, 0 for one not cut
 	slots:      [core.MAX_STEPS]u32, // the `Child_Count` reserved for the container open at each depth
 	first:      [8]core.Answer, // `answers` until they outgrow it, so a read of few allocates no list
 }
@@ -124,15 +124,11 @@ scan_plan :: proc(h: ^Scan, paths: []core.Path, read: core.Path_Options, depth: 
 	h.free = h.path.n
 	h.keep = h.free
 	for step, k in h.path.steps {
-		h.leap_at[k] = max(u32)
 		switch x in step {
 		case core.Index:
-			h.leap_at[k] = u32(x) if x >= 0 else max(u32)
-			h.leaps ||= x >= 0
+			h.cut_idx |= u64(x >= 0) << uint(k)
 		case core.Name:
-			if !h.last && !h.every_key {
-				h.leap_at[k], h.leap_names, h.leaps = 0, h.leap_names | 1 << uint(k), true
-			}
+			h.cut_names |= u64(!h.last && !h.every_key) << uint(k)
 		case core.Index_Or_Name, core.All, core.Slice, core.Descend:
 		}
 	}
@@ -657,14 +653,9 @@ first_answer :: proc(doc: ^core.Document) -> core.Answer {
 replay :: proc "contextless" ($MANY: bool, h: ^Scan, from, to: u32, out: ^core.Hook_Regs, ends: []u32) {
 	fed: bool
 	when MANY {
-		fed = feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_many, replay_keyed, scan_deepen, false, no_leap)
+		fed = feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_many, replay_keyed, scan_deepen, false, no_cut, no_resume)
 	} else {
-		// A path with no step to leap on keeps the loop it had.
-		if h.leaps {
-			fed = feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_one, replay_keyed, scan_deepen, false, replay_leap)
-		} else {
-			fed = feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_one, replay_keyed, scan_deepen, false, no_leap)
-		}
+		fed = feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_one, replay_keyed, scan_deepen, false, replay_cut, replay_resume)
 	}
 	if !fed {
 		h.b.err = {kind = .No_Memory}
@@ -677,24 +668,42 @@ replay_step_one :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs
 	return scan_step(false, .Replay, h, s, t)
 }
 
-// Past what its step can still pick, no sibling of the open container is read, so the replay goes on at the container's
-// close with its true count. An `Index` has picked at its index, and a `Name` under a first-wins read at its first key.
+// The node a container closes at once the element or key its step picks is read: after an `Index` element, and after the
+// value of the first key of a `Name` read first-wins. No later sibling can be picked, so none is read.
 @(private)
-replay_leap :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, next, end: u32) -> (u32, core.Hook_Regs) {
-	d := int(s.c)
-	#no_bounds_check if d < 1 || u32(s.b) <= h.leap_at[d - 1] || next >= end {
-		return next, s
+replay_cut :: #force_inline proc "contextless" (h: ^Scan, _: core.Hook_Regs, depth: int, i: u32, t: core.Token, container_end: u32) -> u32 {
+	// A depth past the path's steps has no bit set.
+	bit := u64(1) << uint(depth - 1)
+	if (h.cut_idx | h.cut_names) & bit == 0 {
+		return max(u32)
 	}
-	bit := u64(1) << uint(d - 1)
 	doc := &h.b.doc
-	open := core.Node_Index(s.b >> 32)
-	named := h.leap_names & bit != 0
-	if named && h.matched & bit == 0 || doc.nodes[open].kind != (.Object if named else .Array) || doc.nodes[open].spelling == core.MAX_CHILDREN || core.header_of(doc) != 0 {
-		return next, s
+	end := i
+	switch {
+	case h.cut_idx & bit != 0 && t.role != .Key:
+		end += t.n if t.kind > .Plain else 1
+	case h.cut_names & bit != 0 && t.role == .Key && h.matched & bit != 0:
+		v := doc.nodes[i + 1]
+		end += 1 + (v.n if v.kind > .Plain else 1)
+	case:
+		return max(u32)
 	}
-	s := s
-	s.b = s.b & ~u64(max(u32)) | u64(doc.nodes[open].spelling)
-	return end, s
+	if core.header_of(doc) != 0 || h.cut_end[depth - 1] != 0 || end >= container_end {
+		return max(u32)
+	}
+	h.cut_end[depth - 1] = container_end
+	return end
+}
+
+// After the container at 0-based depth `k` closes, the node past it when its replay cut it short.
+@(private)
+replay_resume :: #force_inline proc "contextless" (h: ^Scan, k: int) -> u32 {
+	if k >= h.path.n {
+		return 0
+	}
+	#no_bounds_check at := h.cut_end[k]
+	h.cut_end[k] = 0
+	return at
 }
 
 @(private)

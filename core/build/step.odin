@@ -2,6 +2,7 @@
 package build
 
 import "base:intrinsics"
+import "base:runtime"
 import spell "../spell"
 import core ".."
 
@@ -572,6 +573,12 @@ scan_close :: proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, s: core.Ho
 	s := s
 	d := int(s.c)
 	count := int(u32(s.b))
+	when SINK == .Replay && !MANY {
+		if h.cut_end[d - 1] != 0 {
+			count = cut_count(h, core.Node_Index(s.b >> 32))
+			s.b = s.b & ~u64(max(u32)) | u64(count)
+		}
+	}
 	when MANY {
 		m := h.many
 		#no_bounds_check f := &m.frames[d]
@@ -650,4 +657,11 @@ scan_push :: #force_inline proc "contextless" (h: ^Scan, list: ^[]$T, n: ^int, v
 	}
 	#no_bounds_check list[n^] = v
 	n^ += 1
+}
+
+// The member count of the container `open` that a replay cut short.
+@(private = "file", cold)
+cut_count :: #force_no_inline proc "contextless" (h: ^Scan, open: core.Node_Index) -> int {
+	context = runtime.default_context()
+	return core.length(&h.b.doc, open)
 }
