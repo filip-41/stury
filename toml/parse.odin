@@ -72,8 +72,10 @@ refused :: proc "contextless" (p: ^Parser, r: Refusal, at: int) -> bool {
 
 // Gives the comments above the next node to node `id`.
 take_heads :: proc "contextless" (p: ^Parser, id: u32) {
-	n := &p.tree.nodes[id]
-	n.head, n.heads = p.pending, u32(len(p.tree.comments)) - p.pending
+	if heads := u32(len(p.tree.comments)) - p.pending; heads > 0 {
+		n := notes_for(&p.tree, id)
+		n.head, n.heads = p.pending, heads
+	}
 	p.pending = u32(len(p.tree.comments))
 }
 
@@ -99,8 +101,11 @@ blanks :: proc "contextless" (p: ^Parser, newlines: bool) -> bool {
 			}
 			c := Comment{u64(p.pos), u32(end - p.pos)}
 			if p.inline_ok && p.last != NIL {
-				p.tree.nodes[p.last].inline = c
 				p.tree.inlines += 1
+				if !reserve_notes(&p.tree) {
+					return fault(p, 0, .No_Memory, .None)
+				}
+				notes_for(&p.tree, p.last).inline = c
 			} else if !push_comment(&p.tree, c) {
 				return fault(p, 0, .No_Memory, .None)
 			}
@@ -140,7 +145,7 @@ root_heads :: proc "contextless" (p: ^Parser) {
 		i -= 1
 	}
 	if i > 0 && p.src[i - 1] == '\n' {
-		root := &p.tree.nodes[0]
+		root := notes_for(&p.tree, 0)
 		root.head, root.heads = 0, u32(len(p.tree.comments))
 		p.pending = root.heads
 	}
@@ -321,8 +326,10 @@ header :: proc "contextless" (p: ^Parser) -> bool {
 close_top :: proc "contextless" (p: ^Parser) {
 	context = runtime.default_context()
 	top := pop(&p.stack)
-	n := &p.tree.nodes[top]
-	n.foot, n.foots = p.pending, u32(len(p.tree.comments)) - p.pending
+	if foots := u32(len(p.tree.comments)) - p.pending; foots > 0 {
+		n := notes_for(&p.tree, top)
+		n.foot, n.foots = p.pending, foots
+	}
 	p.pending = u32(len(p.tree.comments))
 	p.pos += 1
 	p.last, p.inline_ok = top, true
@@ -528,8 +535,10 @@ statement :: proc "contextless" (p: ^Parser) -> bool {
 	blanks(p, true) or_return
 	if p.pos >= len(p.src) {
 		// The comments past the last member end the table open at the text's end, the root when no header opened one.
-		last := &p.tree.nodes[p.cur]
-		last.foot, last.foots = p.pending, u32(len(p.tree.comments)) - p.pending
+		if foots := u32(len(p.tree.comments)) - p.pending; foots > 0 {
+			last := notes_for(&p.tree, p.cur)
+			last.foot, last.foots = p.pending, foots
+		}
 		p.pending = u32(len(p.tree.comments))
 		p.done = true
 		return true

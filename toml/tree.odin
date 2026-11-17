@@ -50,16 +50,23 @@ Table_Node :: struct {
 	name:                             string, // the key's decoded text
 	parent, first, last, next, chain: u32,
 	count, depth:                     u32,
-	head, heads:                      u32, // the comments above, a range of `Table_Tree.comments`
-	foot, foots:                      u32, // the comments before the close
-	inline:                           Comment, // the comment on the line where the value ends
+	notes:                            u32, // its comments, 1 past their index in `Table_Tree.notes`, 0 for none
 	kind:                             Node_Kind,
 	flags:                            bit_set[Flag; u8],
+}
+#assert(size_of(Table_Node) == 88)
+
+// The comments of a node that has any.
+Notes :: struct {
+	head, heads: u32, // the comments above, a range of `Table_Tree.comments`
+	foot, foots: u32, // the comments before the close
+	inline:      Comment, // the comment on the line where the value ends
 }
 
 Table_Tree :: struct {
 	nodes:     [dynamic]Table_Node,
 	comments:  [dynamic]Comment,
+	notes:     [dynamic]Notes,
 	index:     map[u64]u32,
 	names:     runtime.Arena,
 	members:   int, // the members the index reserves for
@@ -99,6 +106,7 @@ tree_destroy :: proc "contextless" (t: ^Table_Tree) {
 	context = runtime.default_context()
 	delete(t.nodes)
 	delete(t.comments)
+	delete(t.notes)
 	delete(t.index)
 	runtime.arena_destroy(&t.names)
 }
@@ -290,5 +298,30 @@ sealed :: proc "contextless" (t: ^Table_Tree, id: u32) -> bool {
 push_comment :: proc "contextless" (t: ^Table_Tree, c: Comment) -> bool {
 	context = runtime.default_context()
 	_, err := append(&t.comments, c)
-	return err == nil
+	return err == nil && reserve_notes(t)
+}
+
+// Makes room for the notes of one more node. A node's notes are made by a comment, so a tree holds no more of them than
+// comments and inline comments, and `notes_for` never allocates past this.
+reserve_notes :: proc "contextless" (t: ^Table_Tree) -> bool {
+	context = runtime.default_context()
+	need := len(t.comments) + t.inlines + 1
+	return need <= cap(t.notes) || reserve(&t.notes, max(need, 2 * cap(t.notes))) == nil
+}
+
+// The notes of node `id`, made on first use.
+notes_for :: proc "contextless" (t: ^Table_Tree, id: u32) -> ^Notes {
+	context = runtime.default_context()
+	n := &t.nodes[id]
+	if n.notes == 0 {
+		append(&t.notes, Notes{})
+		n.notes = u32(len(t.notes))
+	}
+	return &t.notes[n.notes - 1]
+}
+
+// The notes of node `id`, empty for a node with no comment.
+notes_of :: #force_inline proc "contextless" (t: ^Table_Tree, id: u32) -> Notes {
+	n := t.nodes[id].notes
+	return t.notes[n - 1] if n != 0 else {}
 }

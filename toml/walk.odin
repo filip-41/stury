@@ -291,9 +291,9 @@ replay :: proc "contextless" (p: ^Parser, s: ^Replay, h: ^$H, hs: ^core.Hook_Reg
 	for {
 		switch s.phase {
 		case .Open:
-			if s.k < nodes[0].heads {
+			if x := notes_of(&p.tree, 0); s.k < x.heads {
 				s.k += 1
-				emit(h, on, hs, &r, comment_token(p.tree.comments[nodes[0].head + s.k - 1], .Comment))
+				emit(h, on, hs, &r, comment_token(p.tree.comments[x.head + s.k - 1], .Comment))
 				break
 			}
 			if _, e := append(&s.frames, Frame{0, NIL}); e != nil {
@@ -323,7 +323,7 @@ replay :: proc "contextless" (p: ^Parser, s: ^Replay, h: ^$H, hs: ^core.Hook_Reg
 			}
 			continue
 		case .Head:
-			x := &nodes[s.id]
+			x := notes_of(&p.tree, s.id)
 			if s.k == x.heads {
 				s.phase = .Key
 				continue
@@ -352,11 +352,11 @@ replay :: proc "contextless" (p: ^Parser, s: ^Replay, h: ^$H, hs: ^core.Hook_Reg
 			}
 		case .Inline:
 			s.phase = .Pick
-			if c := nodes[s.id].inline; c.n != 0 {
+			if c := notes_of(&p.tree, s.id).inline; c.n != 0 {
 				emit(h, on, hs, &r, comment_token(c, .Comment_Inline))
 			}
 		case .Foot:
-			x := &nodes[s.id]
+			x := notes_of(&p.tree, s.id)
 			if s.k == x.foots {
 				s.phase = .End
 				continue
