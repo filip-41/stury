@@ -725,9 +725,13 @@ put_marked_comment :: proc(out: ^Out, role: core.Role, text: string) -> core.Typ
 // A markup format's write of a built value as `opts` say, to `stream` or into new bytes from `allocator`.
 Markup_Put :: proc(v: core.Value, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal)
 
+// A markup format's write of the text a typed write made in `MARKUP_TREE`, for a text that holds no comment.
+Markup_Tree_Put :: proc(tree: string, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal)
+
 // A markup format's `marshal`: the typed write makes `value` in `MARKUP_TREE` with `put_marked`'s strings, which `put`
-// writes as `put_markup` reads it.
-marshal_markup :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, omits: ^typed.Omits, put: Markup_Put) -> ([]u8, core.Typed_Refusal) {
+// writes as `put_markup` reads it. A format with a `direct` write takes a text with no comment from it, with no value
+// built.
+marshal_markup :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, omits: ^typed.Omits, put: Markup_Put, direct: Markup_Tree_Put = nil) -> ([]u8, core.Typed_Refusal) {
 	flat := opts
 	flat.pretty, flat.sort_keys = false, false
 	tree, err := marshal_as(plan, value, flat, {}, context.allocator, MARKUP_TREE, put_marked, put_marked, omits)
@@ -735,6 +739,9 @@ marshal_markup :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Option
 		return nil, err
 	}
 	defer delete(tree)
+	if direct != nil && strings.index_byte(string(tree), MARKUP_COMMENT) < 0 {
+		return direct(string(tree), opts, stream, allocator)
+	}
 	return put_markup(string(tree), opts, stream, allocator, put)
 }
 

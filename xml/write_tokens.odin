@@ -6,6 +6,7 @@ package xml
 
 import "base:runtime"
 import "core:io"
+import "core:strings"
 import core "../core"
 import typed "../core/typed"
 import write "../core/write"
@@ -70,6 +71,49 @@ TOKENS := write.Token_Spelling {
 
 @(private)
 marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, omits: ^typed.Omits) -> ([]u8, core.Typed_Refusal) {
-	return write.marshal_markup(plan, value, opts, stream, allocator, omits, value_write)
+	return write.marshal_markup(plan, value, opts, stream, allocator, omits, value_write, tree_write)
+}
+
+// Writes `tree`, the text a typed write made in `MARKUP_TREE` with no comment, through the element write as it reads:
+// a container, a key, or a scalar, which is a string up to its NUL or a bare word.
+@(private)
+tree_write :: proc(tree: string, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
+	spill: [write.ROOM_MAX]u8 = ---
+	out: write.Out
+	write.init(&out, &spill, context.allocator if opts.pretty else allocator, {} if opts.pretty else stream)
+	e: Elements
+	elements_init(&e, &out, opts)
+	return elements_finish(&e, put_tree(&e, tree), opts, stream, allocator)
+}
+
+@(private)
+put_tree :: proc(e: ^Elements, tree: string) -> core.Typed_Error_Kind {
+	for i := 0; i < len(tree); i += 1 {
+		switch tree[i] {
+		case ' ', '\t', '\n', ',', ':':
+		case '}', ']':
+			el_close(e) or_return
+		case '{', '[':
+			el_open(e, tree[i] == '{') or_return
+		case '"':
+			end := i + 1 + strings.index_byte(tree[i + 1:], 0)
+			text := tree[i + 1:end]
+			i = end
+			if i + 1 < len(tree) && tree[i + 1] == ':' {
+				el_key(e, text) or_return
+			} else {
+				el_value(e, text) or_return
+			}
+		case:
+			end := i
+			for end < len(tree) && strings.index_byte(",}] \t\n", tree[end]) < 0 {
+				end += 1
+			}
+			word := tree[i:end]
+			i = end - 1
+			el_value(e, "" if word == "null" else word, word == "null") or_return
+		}
+	}
+	return e.out.err
 }
 
