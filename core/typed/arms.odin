@@ -41,14 +41,16 @@ Apply :: struct {
 }
 
 // How a verdict judges an arm. `.Run` runs its record, `.Presence` checks which names the object has, `.Choice` lets the
-// object's first member pick one of the arms it stands for, and `.Never` fails every member or element of an
-// unevaluated arm whose record takes no value.
+// object's first member pick one of the arms it stands for, `.Never` fails every member or element of an unevaluated
+// arm whose record takes no value, and `.Members` judges an object by the names it has and by each member value its
+// record names, each by that member's leaf, with no run.
 @(private)
 Judge :: enum u8 {
 	Run,
 	Presence,
 	Choice,
 	Never,
+	Members,
 }
 
 // What `Judge` reads. For `.Presence`, `present` lists the members an object must have, when that is all the arm's
@@ -60,6 +62,8 @@ Judge :: enum u8 {
 Judging :: struct {
 	present: []string,
 	places:  []i32,
+	// For `.Members`, the record of each member the arm's record names, in its block. `present` holds its `required`.
+	members: []i32,
 	of:      i32,
 	choices: []Apply,
 	keys:    []string,
@@ -337,11 +341,80 @@ choose_arms :: proc(b: ^Builder, arena: runtime.Allocator) {
 		any := choices_of(b, arena, list, .Any)
 		one := choices_of(b, arena, any if any != nil else list, .One)
 		if one != nil {
-			u.verdict = one
+			list, u.verdict = one, one
 		} else if any != nil {
-			u.verdict = any
+			list, u.verdict = any, any
+		}
+		if judged := by_members(b, list, arena); judged != nil {
+			u.verdict = judged
 		}
 	}
+}
+
+// A copy of `list` in which each arm whose record judges an object only by the names it has and by member values each
+// of that member's leaf alone judges is judged by `.Members`, nil when no arm is. A member value that is a container
+// passes such a leaf when its kind does: the member's record reads nothing inside it, or its leaf refuses containers.
+@(private)
+by_members :: proc(b: ^Builder, list: []Apply, arena: runtime.Allocator) -> []Apply {
+	MEMBER_JUDGED :: bit_set[Apply_Kind]{.Any, .One, .Not, .If, .Then, .Else}
+	// Whether record `at` reads nothing inside a value beyond its members: no arms, no rules of the other members, no
+	// names rule, and no elements.
+	plain :: proc(b: ^Builder, at: i32) -> bool {
+		if int(at) >= len(b.uses) {
+			return true
+		}
+		u := &b.uses[at]
+		return len(u.applies) == 0 && u.additional == 0 && u.pattern == 0 && u.keys == 0 && !u.inside && len(u.requires) == 0
+	}
+	counts :: proc(b: ^Builder, x: ^Meta) -> bool {
+		if x.rule_set == 0 {
+			return false
+		}
+		l := &b.leaves[x.rule_set - 1]
+		return l.min_items > 0 || l.max_items < max(u64) || l.min_members > 0 || l.max_members < max(u64)
+	}
+	out: []Apply
+	for a, i in list {
+		if a.kind not_in MEMBER_JUDGED || a.judge != .Run || a.rec < 0 || a.eval != nil {
+			continue
+		}
+		fld := b.fields[a.rec]
+		m := &b.meta[fld.meta]
+		if fld.kind != .Checked || m.members == 0 || m.counted || !plain(b, i32(fld.meta)) {
+			continue
+		}
+		members := make([]i32, m.members, arena)
+		judged := true
+		for j in 0 ..< m.members {
+			at := b.fields[m.block + j].meta
+			x := &b.meta[at]
+			if int(at) < len(b.uses) && len(b.uses[at].applies) > 0 {
+				judged = false
+				break
+			}
+			whole := x.members == 0 && !counts(b, x) && plain(b, i32(at))
+			if !whole && (x.rule_set == 0 || b.leaves[x.rule_set - 1].kinds & {.Object, .Array} != {}) {
+				judged = false
+				break
+			}
+			members[j] = m.block + j
+		}
+		if !judged {
+			continue
+		}
+		present := make([dynamic]string, arena)
+		if m.required_end > 0 {
+			for at in b.meta[m.block + m.members].required {
+				append(&present, b.meta[m.block + at].name)
+			}
+		}
+		if out == nil {
+			out = make([]Apply, len(list), arena)
+			copy(out, list)
+		}
+		out[i].judge, out[i].by = .Members, new_clone(Judging{present = present[:], members = members}, arena)
+	}
+	return out
 }
 
 // Gives each held use its `judging` and `judging_all` ids. Uses whose arms match in everything but their keyword steps
@@ -1108,8 +1181,9 @@ Fork :: struct {
 	scratch:    regex.Scratch,
 	takes:      bool,
 	taken:      Apply_Kind,
-	// Whether an arm is judged by the names the object has.
+	// Whether an arm is judged by the names the object has, and whether one by its member values with no run.
 	presence:   bool,
+	members_arms: bool,
 	outer:      ^Fork,
 	// The fork made before this one.
 	older:      ^Fork,
@@ -1537,7 +1611,7 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 		}
 	}
 	fk.takes, fk.outer = h.sink == nil && container, nil
-	fk.waiting, fk.opened, fk.first_key, fk.level, fk.per_member, fk.names_arms, fk.presence = 0, t, nil, level, false, false, false
+	fk.waiting, fk.opened, fk.first_key, fk.level, fk.per_member, fk.names_arms, fk.presence, fk.members_arms = 0, t, nil, level, false, false, false, false
 	clear(&fk.names)
 	clear(&fk.spans)
 	clear(&fk.seen)
@@ -1546,7 +1620,7 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 	reserve(&fk.arms, len(applies))
 	for &a in applies {
 		// An arm judged by the names waits for the close.
-		fk.takes &&= a.kind <= .One && a.eval == nil && (a.judge != .Presence || a.by.places != nil)
+		fk.takes &&= a.kind <= .One && a.eval == nil && (a.judge != .Presence || a.by.places != nil) && a.judge != .Members
 		fk.presence ||= a.judge == .Presence
 		arm_add(h, fk, &a, a.kind, a.rec, level, t)
 		if a.eval != nil {
@@ -1676,12 +1750,21 @@ arm_add :: proc(h: ^Check, fk: ^Fork, a: ^Apply, kind: Apply_Kind, rec: i32, lev
 		runtime.arena_free_all(x.space)
 	}
 	judge := a.judge if a != nil else .Run
+	if judge == .Members && !members_judge(h, t) {
+		judge = .Run
+	}
 	switch judge {
 	case .Choice:
 		x.waiting = true
 		fk.waiting += 1
 		return
 	case .Presence:
+		return
+	case .Members:
+		// The object's own kind and enum are judged at its open, its members' values as they come.
+		m := &h.plan.meta[h.plan.fields[rec].meta]
+		x.dead = m.rule_set > 0 && container_fails(&h.plan.leaves[m.rule_set - 1], .Object) != {}
+		fk.members_arms = true
 		return
 	case .Run, .Never:
 	}
@@ -2332,6 +2415,9 @@ fork_step :: #force_inline proc "contextless" (h: ^Check, t: core.Token) -> core
 		fork_release(h, fk)
 		return .Stop
 	}
+	if value && !end && fk.depth == 1 && fk.members_arms {
+		members_value(h, fk, t)
+	}
 	if value && !end && fk.depth == 1 {
 		member_start(h, fk, MEMBER_ARMS, at = t.lo)
 	}
@@ -2392,11 +2478,63 @@ fork_step :: #force_inline proc "contextless" (h: ^Check, t: core.Token) -> core
 	if h.fatal != .None {
 		return held_fault(h, fk, h.fatal, fk.lo, fk.lo)
 	}
-	if t.role == .Key && fork_passes_over(fk, t) {
+	if t.role == .Key && !(fk.members_arms && fk.depth == 1 && members_want(h, fk)) && fork_passes_over(fk, t) {
 		fk.skipped = t.lo
 		return .Skip
 	}
 	return .Next
+}
+
+// Whether a check judges an arm by `.Members` at the held value `t`: an object, read with no readings, whose repeated
+// keys the check does not judge one against the other.
+@(private)
+members_judge :: proc "contextless" (h: ^Check, t: core.Token) -> bool {
+	return t.kind == .Object && h.sink == nil && h.readings == nil && h.repeats != .Judge && !h.refuse_unknown
+}
+
+// Whether an arm judged by `.Members` names the member whose key the fork just read.
+@(private)
+members_want :: proc "contextless" (h: ^Check, fk: ^Fork) -> bool {
+	for &x in fk.arms[:fk.n] {
+		if a := x.apply; a != nil && a.judge == .Members && x.run == nil && !x.dead && member_named(h.plan, a, fk.key) >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// The record of the member `key` among those the `.Members` arm `a` names in `plan`, -1 for none.
+@(private)
+member_named :: #force_inline proc "contextless" (plan: ^Plan, a: ^Apply, key: string) -> i32 {
+	for rec in a.by.members {
+		if plan.meta[plan.fields[rec].meta].name == key {
+			return rec
+		}
+	}
+	return -1
+}
+
+// Judges the member value `t` of the held object by each arm judged by `.Members` that names its key: a scalar by the
+// member's record, a container by its leaf's kind and enum.
+@(private)
+members_value :: proc "contextless" (h: ^Check, fk: ^Fork, t: core.Token) {
+	for &x in fk.arms[:fk.n] {
+		a := x.apply
+		if a == nil || a.judge != .Members || x.run != nil || x.dead {
+			continue
+		}
+		rec := member_named(h.plan, a, fk.key)
+		if rec < 0 {
+			continue
+		}
+		if t.kind == .Object || t.kind == .Array {
+			m := &h.plan.meta[h.plan.fields[rec].meta]
+			x.dead = m.rule_set > 0 && container_fails(&h.plan.leaves[m.rule_set - 1], t.kind) != {}
+		} else {
+			passed, _, _ := record_passes(h, rec, t, fk.level + 1)
+			x.dead = !passed
+		}
+	}
 }
 
 // Names `name` as the operand of the entries `c` took from `from` on, which a name rule failed at the object's path.
@@ -2828,7 +2966,7 @@ fork_finish :: proc(h: ^Check, fk: ^Fork, hi: u64) -> core.Action {
 		if x.twin >= 0 {
 			x.passed = fk.arms[x.twin].passed
 		}
-		if a := x.apply; a != nil && a.judge == .Presence && fk.kind == .Object {
+		if a := x.apply; a != nil && (a.judge == .Presence || a.judge == .Members && x.run == nil) && fk.kind == .Object {
 			for name in a.by.present {
 				x.passed &&= slice.contains(fk.names[:], name)
 			}
