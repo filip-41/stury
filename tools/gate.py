@@ -70,7 +70,6 @@ class Check:
     tier: int
     roots: list  # Package directories, whose imports are followed.
     cmd: list
-    cwd: str = ROOT
     arch: str = HOST
     trees: list = dataclasses.field(default_factory=list)  # Whole directories, hashed as they are.
     also: tuple = ()  # Other architectures whose sources the check compiles.
@@ -206,7 +205,7 @@ def key_of(check, compiler):
     digest.update(check.name.encode())
     digest.update(repr([portable(arg) for arg in check.cmd]).encode())
     digest.update(repr(sorted((k, v) for k, v in os.environ.items() if k.startswith("STURY_"))).encode())
-    hash_tree(digest, os.path.join(check.cwd, "Makefile"))
+    hash_tree(digest, os.path.join(ROOT, "Makefile"))
     for arch in (check.arch, *check.also):
         hash_closure(digest, check.roots, arch, compiler)
     for tree in check.trees:
@@ -402,7 +401,7 @@ def run_checks(ordered, builder, slots, passed):
                     break
                 waiting.remove(check)
                 free -= width(check)
-                proc = subprocess.Popen(check.cmd, cwd=check.cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+                proc = subprocess.Popen(check.cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
                 running[proc] = (check, time.monotonic())
                 threading.Thread(target=lambda proc=proc: finished.put((proc, proc.communicate()[0])), daemon=True).start()
             proc, output = finished.get()
@@ -443,7 +442,6 @@ def main():
     # The makes the checks start need not ask the compiler again.
     os.environ["ODIN_CHECKED"] = "1"
     stamps = stamp_directory()
-    os.makedirs(os.path.join(ROOT, "build", "test"), exist_ok=True)
     compiler = compiler_of(args.odin)
     every, absent = checks(args.odin)
     wanted = [c for c in every if c.tier <= TIERS[args.tier]]

@@ -644,7 +644,7 @@ LEADING_ATTRIBUTE = re.compile(r"@(?:\(([^)]*)\)|([A-Za-z_]\w*))\s*")
 SAFE_ATTRIBUTES = {"rodata"}
 # A format's `HANDLE` and `SERVICES` point at its other tables, and `@(rodata)` refuses an address in its initializer. It is set once
 # by the compiler's static initialization and no code writes it.
-POINTING_TABLES = {"json/document.odin": {"HANDLES", "SERVICES"}, "dsv/document.odin": {"HANDLES", "SERVICES"}, "toml/document.odin": {"HANDLES", "SERVICES"}, "xml/document.odin": {"HANDLES", "SERVICES"}, "yaml/document.odin": {"HANDLES", "SERVICES"}, "cbor/document.odin": {"HANDLE", "SERVICES"}, "html/document.odin": {"HANDLES", "SERVICES"}}
+POINTING_TABLES = {f"{fmt}/document.odin": {"HANDLE" if fmt == "cbor" else "HANDLES", "SERVICES"} for fmt in sorted(FORMATS)}
 
 
 def is_variable(rest):

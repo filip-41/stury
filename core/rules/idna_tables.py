@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Write the tables/idna*.bin blobs format_idna.odin loads: what IDNA2008 allows in a label, and the mapping UTS 46 gives a name.
+"""Write the tables/idna*.bin blobs format_idna.odin loads: what IDNA2008 allows in a label, and the mapping UTS 46
+gives a name.
 
 All of it is one Unicode version, 12.0.0, the version IANA's IDNA tables registry is based on:
   IANA idna-tables-properties.csv: each code point's derived property (PVALID, CONTEXTJ, CONTEXTO, DISALLOWED or

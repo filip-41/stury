@@ -1,6 +1,5 @@
 stury ships the MIT-licensed code in LICENSE, and code and data derived from the projects below. Each section names
-what stury carries and reproduces the notice that project's licence requires. Two of them ship their own
-LICENSE beside the files they cover; those are named rather than copied.
+what stury carries and reproduces the notice that project's licence requires.
 
 ----------------------------------------------------------------------------------------------------
 Oniguruma — https://github.com/kkos/oniguruma

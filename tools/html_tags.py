@@ -7,8 +7,9 @@ in a second table of the same shape.
 
 A name's slot is `((w ~ n) * MUL) >> (64 - BITS)`, `w` its first eight bytes with each byte's 0x20 bit set (ASCII
 letters lowered) loaded little-endian and padded with zeros, `n` its length. A slot holds 0 for none or 1 + an entry,
-and a lookup steps to the next slot until it finds the name or a 0. The multiplier is the first one, counting up from
-a fixed seed, whose longest probe is the shortest found within the search, and among those whose probes sum least.
+and a lookup steps to the next slot until it finds the name or a 0. The multiplier is the first, of 4096 from a
+congruential sequence started at a fixed seed, whose longest probe is the shortest, and among those whose probes sum
+least.
 
 Run from the repository root:
     python3 tools/html_tags.py

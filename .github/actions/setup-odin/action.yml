@@ -1,5 +1,5 @@
 name: Set up Odin
-description: Odin at a pinned release, built against a pinned LLVM and cached, and that LLVM
+description: Odin at a pinned release, built against a pinned LLVM
 inputs:
   version:
     default: dev-2026-11a

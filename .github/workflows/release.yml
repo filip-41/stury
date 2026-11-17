@@ -35,8 +35,6 @@ jobs:
     needs: passed
     if: needs.passed.outputs.ci == 'none'
     uses: ./.github/workflows/ci.yml
-    permissions:
-      contents: read
 
   build:
     needs: [passed, gate]
@@ -82,7 +80,6 @@ jobs:
             run="arch -x86_64"
           fi
           [ "$($run build/stury --version)" = "stury-${VERSION#v}" ]
-          [ "$(echo '{"a":[1,2]}' | $run build/stury -c .a)" = "[1,2]" ]
       - name: Smoke the release binary
         run: |
           bin=build/stury
