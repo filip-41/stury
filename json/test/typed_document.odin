@@ -458,3 +458,23 @@ a_read_borrows_the_source_and_not_the_document :: proc(t: ^testing.T) {
 	testing.expect_value(t, borrowed.n.text, "12345678901234567890123")
 	testing.expect_value(t, copied.keys[1], "esc\n")
 }
+
+// A document built through the format's constant-spec `build` holds no services, so a read of it takes a plan and a nil
+// plan is refused, while a document from `core.build` makes the plan itself.
+@(test)
+forwarder_document_reads_with_a_plan :: proc(t: ^testing.T) {
+	src := transmute([]u8)string(`{"x":1,"y":2}`)
+	plan, perr := json.plan_make(Pt, allocator = context.temp_allocator)
+	testkit.expect_nil(t, perr)
+	forwarded, err := json.build(src, .Json, allocator = context.temp_allocator)
+	testkit.expect_nil(t, err)
+	p: Pt
+	testkit.expect_nil(t, typed.unmarshal(&forwarded, core.ROOT, &p, &plan, {}, context.temp_allocator))
+	testing.expect_value(t, p, Pt{1, 2})
+	testkit.expect_kind(t, typed.unmarshal(&forwarded, core.ROOT, &p, nil, {}, context.temp_allocator), core.Typed_Error_Kind.Bad_Option)
+	handled, herr := core.build(src, json.as(.Json), allocator = context.temp_allocator)
+	testkit.expect_nil(t, herr)
+	q: Pt
+	testkit.expect_nil(t, typed.unmarshal(&handled, core.ROOT, &q, nil, {}, context.temp_allocator))
+	testing.expect_value(t, q, Pt{1, 2})
+}

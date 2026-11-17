@@ -15,7 +15,8 @@ import build "../build"
 // outlives `core.destroy(doc)` and needs `doc.src` only for what it borrowed.
 
 // Reads the value at `node` of `doc` into `target`, with `plan`, or with a nil `plan` by one `plan_make` builds for
-// the call from `doc.as` with `context.allocator` and frees. See `Read_Options` for the options. A plan built for
+// the call from `doc.as` with `context.allocator` and frees. A document that holds no services, as one from a format's
+// constant-spec `build` does, takes no nil `plan`: that is `.Bad_Option`. See `Read_Options` for the options. A plan built for
 // another type, for another format than `doc`'s, or not by `dsv.plan_make` for a delimited document, is `.Plan_Mismatch`,
 // and a nil target, a nil document, a node past
 // the document, a key and `.Refuse` are `.Bad_Option`: a document that must hold no repeated key is built under
