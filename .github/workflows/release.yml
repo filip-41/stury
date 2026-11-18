@@ -64,7 +64,7 @@ jobs:
         shell: bash
     env:
       VERSION: ${{ github.ref_name }}
-      EXE: ${{ runner.os == 'Windows' && '.exe' || '' }}
+      EXE: ${{ startsWith(matrix.os, 'windows') && '.exe' || '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
@@ -90,7 +90,7 @@ jobs:
             file build/stury | grep x86_64 > /dev/null
             run="arch -x86_64"
           fi
-          [ "$($run build/stury$EXE --version)" = "stury-${VERSION#v}" ]
+          [ "$($run build/stury"$EXE" --version)" = "stury-${VERSION#v}" ]
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Smoke the release binary
         env:
@@ -108,7 +108,7 @@ jobs:
         run: |
           d="stury-${VERSION#v}-${{ matrix.name }}"
           mkdir "$d"
-          cp build/stury$EXE LICENSE THIRD_PARTY_NOTICES README.md CHANGELOG.md "$d/"
+          cp "build/stury$EXE" LICENSE THIRD_PARTY_NOTICES README.md CHANGELOG.md "$d/"
           cp -R docs "$d/"
           # Links to repository files the archive does not carry point at the tag on GitHub.
           # Windows' python3 is a stub that opens the Store.
