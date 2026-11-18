@@ -3,6 +3,7 @@
 # `make lint test` and `make build-cli` run.
 /.github/ export-ignore
 # Conformance cases and test vectors are compared byte for byte, so a checkout keeps their line ends as committed.
+/json/test/conformance/** -text
 /toml/test/conformance/** -text
 /xml/test/conformance/cases.tsv -text
 /yaml/test/suite/** -text
