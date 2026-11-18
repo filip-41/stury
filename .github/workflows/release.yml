@@ -150,6 +150,8 @@ jobs:
 
   release:
     needs: build
+    # A skipped gate skips every job after it unless the job says otherwise.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
