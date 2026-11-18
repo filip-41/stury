@@ -121,7 +121,8 @@ def run_fixture(name, schema, instances, arms, rounds, notes):
 
 GENERATED = ["logs.json", "logs.ndjson", "schema/logs.schema.json", "schema/twitter.schema.json", "schema/citm.schema.json",
              "schema/applicator.schema.json", "schema/applicator.ndjson", "schema/twitter.json", "schema/citm.json",
-             "schema/logs.json"]
+             "schema/logs.json", "schema/logs.document.schema.json", "schema/logs.xml.schema.json", "logs.yaml", "logs.toml",
+             "logs.cbor", "logs.xml"]
 
 
 def main(rounds, wanted, arm_names):

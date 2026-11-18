@@ -1,0 +1,15 @@
+[package]
+name = "write-rust-xml"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "write-rust-xml"
+path = "main.rs"
+
+[dependencies]
+timing.workspace = true
+xmlview.path = "../../../xmlview"
+quick-xml.workspace = true
+roxmltree.workspace = true
+serde.workspace = true

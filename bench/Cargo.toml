@@ -5,15 +5,30 @@
 # serde_json's default features.
 [workspace]
 resolver = "3"
-members = ["timing", "lanes/doc/rust", "lanes/paths/rust", "lanes/typed/rust", "lanes/records/rust", "lanes/write/rust"]
+members = ["timing", "html_shape", "lanes/doc/rust", "lanes/paths/rust", "lanes/typed/rust", "lanes/records/rust", "lanes/write/rust",
+	"lanes/edit/rust", "lanes/model/rust", "xmlview", "lanes/doc/rust-xml", "lanes/paths/rust-xml", "lanes/typed/rust-xml",
+	"lanes/write/rust-xml"]
 exclude = ["lanes/schema/rust"]
 
 [workspace.dependencies]
 timing = { path = "timing" }
 sonic-rs = "0.5.10"
 simd-csv = "=0.14.0"
+garde = { version = "=0.23.0", features = ["derive", "regex"] }
+toml_edit = "=0.25.19"
+toml = { version = "=1.2.1", features = ["fast_hash"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+quick-xml = { version = "=0.42.0", features = ["serialize"] }
+roxmltree = "=0.21.2"
+ciborium = "=0.2.2"
+minicbor = { version = "=2.3.1", features = ["std", "derive", "half"] }
+
+# HTML arms
+html5ever = "=0.40.1"
+markup5ever_rcdom = "=0.40.1"
+scraper = "=0.29.0"
+lol_html = "=3.0.3"
 
 [profile.release]
 lto = "fat"

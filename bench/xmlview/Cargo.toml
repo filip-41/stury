@@ -1,0 +1,12 @@
+[package]
+name = "xmlview"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+timing.workspace = true
+quick-xml.workspace = true
+roxmltree.workspace = true

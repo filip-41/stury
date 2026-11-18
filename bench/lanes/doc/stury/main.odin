@@ -1,6 +1,7 @@
 // `doc <lane> <file>`: stury's document under one lane, gb_per_s from the median of ten timed calls after two
-// warm-ups, and a checksum of what the lane read. A `.csv` or `.tsv` file is a headed dsv text, and `.jsonc` and
-// `.json5` pick their spec.
+// warm-ups, and a checksum of what the lane read. A `.csv` or `.tsv` file is a headed dsv text, `.jsonc` and `.json5`
+// pick their spec, and a `.yaml`, `.toml`, `.xml`, `.html` or `.cbor` file is read through `core` as that format, each
+// node as the kind the format resolves it to.
 package doc
 
 import "core:fmt"
@@ -9,6 +10,7 @@ import "core:os"
 import "core:strings"
 import "core:time"
 import core "../../../../core"
+import "../../../formats"
 import "../../../timing"
 import dsv "../../../../dsv"
 import json "../../../../json"
@@ -24,59 +26,31 @@ key_answers, key_objects: u64
 key_name: string
 key_name_buf: [128]u8
 
+// The handle of a file that is neither JSON nor dsv, which is read through `core`.
+generic: bool
+handle: core.As
+
 Arena :: struct {
 	arena: mem.Arena,
 	alloc: mem.Allocator,
-}
-
-// The binary64 bits of a number's value, the form every arm's reader holds. Zero folds as +0, since one arm's reader
-// keeps no sign on it, and a `Wide` number has no binary64 value and folds as 0.
-number_bits :: proc(num: core.Number) -> u64 {
-	v: f64
-	switch num.kind {
-	case .Int:
-		v = f64(i64(num.bits))
-	case .Uint:
-		v = f64(num.bits)
-	case .Float:
-		v = transmute(f64)num.bits
-	case .Wide:
-		return 0
-	}
-	if v == 0 {
-		return 0
-	}
-	return transmute(u64)v
-}
-
-// The byte each value adds, matching the other arms' visitors.
-value_tag :: #force_inline proc(kind: core.Kind) -> u8 {
-	switch kind {
-	case .Object:
-		return 'o'
-	case .Array:
-		return 'a'
-	case .String, .Bytes, .Plain:
-		return 's'
-	case .Number:
-		return 'n'
-	case .True:
-		return 't'
-	case .False:
-		return 'f'
-	case .Null:
-		return 'z'
-	case .End:
-		return 0
-	}
-	return 0
 }
 
 // The build lane's check: the node count, then each node's kind tag and role in document order.
 document_check :: proc(doc: ^core.Document) -> u64 {
 	h := timing.fnv_u64(timing.CHECK_OFFSET, u64(len(doc.nodes)))
 	for n in doc.nodes {
-		h = timing.fnv(h, value_tag(n.kind))
+		h = timing.fnv(h, formats.value_tag(n.kind))
+		h = timing.fnv(h, u8(n.role))
+	}
+	return h
+}
+
+// `document_check` with each node's kind as its format resolves it, so a YAML plain scalar counts as the string, number,
+// boolean or null it reads as.
+resolved_check :: proc(doc: ^core.Document) -> u64 {
+	h := timing.fnv_u64(timing.CHECK_OFFSET, u64(len(doc.nodes)))
+	for n, i in doc.nodes {
+		h = timing.fnv(h, formats.value_tag(core.kind(doc, core.Node_Index(i))))
 		h = timing.fnv(h, u8(n.role))
 	}
 	return h
@@ -98,8 +72,10 @@ run_lane :: proc(a: ^Arena, lane: string, src: []u8, tsv: bool, dsv_text: bool, 
 			lane_key(a, src, tsv, dsv_text, spec)
 		case "infer":
 			lane_infer(a, src, tsv, dsv_text, spec)
+		case "validate":
+			lane_validate(src)
 		case:
-			fmt.eprintln("lane: build, read, key or infer")
+			fmt.eprintln("lane: build, read, key, infer or validate")
 			os.exit(2)
 		}
 		d := i64(time.tick_since(start))
@@ -108,6 +84,16 @@ run_lane :: proc(a: ^Arena, lane: string, src: []u8, tsv: bool, dsv_text: bool, 
 		}
 	}
 	return timing.median(&times)
+}
+
+// Judges the text and builds nothing. Its check is 1 for a text the format accepts.
+lane_validate :: #force_no_inline proc(src: []u8) {
+	if err := core.validate(src, handle); err != nil {
+		core.render(os.to_writer(os.stderr), src, err)
+		fmt.eprintln()
+		os.exit(1)
+	}
+	check = 1
 }
 
 lane_build :: #force_no_inline proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
@@ -130,7 +116,9 @@ lane_key :: #force_no_inline proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spe
 build :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec, infer := false) -> core.Document {
 	doc: core.Document
 	err: core.Error
-	if dsv_text {
+	if generic {
+		doc, err = core.build(src, handle, .Last, a.alloc)
+	} else if dsv_text {
 		if tsv {
 			doc, err = dsv.build(src, .Tsv, {infer = infer}, .Last, a.alloc)
 		} else {
@@ -164,37 +152,49 @@ read_all :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec, $HA
 	when HASH {
 		check = timing.CHECK_OFFSET
 	}
-	if !dsv_text && spec == .Json {
-		if read_nodes(a, &doc, buf[:], true, HASH, false) {
+	if generic {
+		if read_nodes(a, &doc, buf[:], false, HASH, false, true) {
 			when HASH {
 				check = timing.CHECK_OFFSET
 			}
-			read_nodes(a, &doc, buf[:], true, HASH, true)
+			read_nodes(a, &doc, buf[:], false, HASH, true, true)
+		}
+	} else if !dsv_text && spec == .Json {
+		if read_nodes(a, &doc, buf[:], true, HASH, false, false) {
+			when HASH {
+				check = timing.CHECK_OFFSET
+			}
+			read_nodes(a, &doc, buf[:], true, HASH, true, false)
 		}
 	} else {
-		if read_nodes(a, &doc, buf[:], false, HASH, false) {
+		if read_nodes(a, &doc, buf[:], false, HASH, false, false) {
 			when HASH {
 				check = timing.CHECK_OFFSET
 			}
-			read_nodes(a, &doc, buf[:], false, HASH, true)
+			read_nodes(a, &doc, buf[:], false, HASH, true, false)
 		}
 	}
 }
 
 // `DIRECT` picks the format's own readers, which inline for a caller that knows the format, or the format-agnostic
-// `core` readers, as dsv cells need.
+// `core` readers, as dsv cells need. `RESOLVE` takes each node as the kind its format resolves it to, which a YAML plain
+// scalar or an XML text needs and a JSON or dsv text does not.
 // Reads every value. `FALLBACK` false is the fast lane, which stops and returns true at the first text too long for
 // `buf`. `FALLBACK` true is the slow lane, which clones such a text and frees it. A document whose texts all fit pays
 // for one lane only, and a text that does not fit is read by the slow lane from the start.
-read_nodes :: proc(a: ^Arena, doc: ^core.Document, buf: []u8, $DIRECT: bool, $HASH: bool, $FALLBACK: bool) -> (long: bool) {
+read_nodes :: proc(a: ^Arena, doc: ^core.Document, buf: []u8, $DIRECT: bool, $HASH: bool, $FALLBACK: bool, $RESOLVE: bool) -> (long: bool) {
 	for n, i in doc.nodes {
 		if n.role != .Value {
 			continue
 		}
-		when HASH {
-			check = timing.fnv(check, value_tag(n.kind))
+		kind := n.kind
+		when RESOLVE {
+			kind = core.kind(doc, core.Node_Index(i))
 		}
-		if n.kind == .String || n.kind == .Plain {
+		when HASH {
+			check = timing.fnv(check, formats.value_tag(kind))
+		}
+		if kind == .String || kind == .Plain || (RESOLVE && kind == .Bytes) {
 			text_ok: bool
 			size := 0
 			when DIRECT {
@@ -224,7 +224,7 @@ read_nodes :: proc(a: ^Arena, doc: ^core.Document, buf: []u8, $DIRECT: bool, $HA
 			}
 			continue
 		}
-		if n.kind == .Number {
+		if kind == .Number {
 			num: core.Number
 			when DIRECT {
 				num, _ = json.token_number(&doc.view, doc.nodes[i])
@@ -232,7 +232,7 @@ read_nodes :: proc(a: ^Arena, doc: ^core.Document, buf: []u8, $DIRECT: bool, $HA
 				num, _ = core.number(doc, core.Node_Index(i))
 			}
 			when HASH {
-				check = timing.fnv_u64(check, number_bits(num))
+				check = timing.fnv_u64(check, formats.number_bits(num))
 			} else {
 				sink = sink ~ num.bits ~ u64(num.kind)
 			}
@@ -288,7 +288,7 @@ json_member :: proc(doc: ^core.Document, obj: core.Node_Index, name: string) -> 
 key_lookup :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
 	doc := build(a, src, tsv, dsv_text, spec)
 	buf: [4096]u8
-	inline := !dsv_text && spec == .Json
+	inline := !generic && !dsv_text && spec == .Json
 	name: string
 	found := false
 	key_answers = 0
@@ -401,7 +401,7 @@ key_lookup :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
 
 main :: proc() {
 	if len(os.args) != 3 {
-		fmt.eprintln("usage: doc <build|read|key> <file>")
+		fmt.eprintln("usage: doc <build|read|key|validate> <file>")
 		os.exit(2)
 	}
 	src, err := os.read_entire_file_from_path(os.args[2], context.allocator)
@@ -433,6 +433,10 @@ main :: proc() {
 	} else if strings.has_suffix(path, ".json5") {
 		spec = .Json5
 	}
+	if kind := formats.of_path(path); kind >= .Yaml {
+		generic = true
+		handle = formats.handle(kind)
+	}
 	ns := run_lane(&a, os.args[1], src, tsv, dsv_text, spec)
 	if ns <= 0 {
 		ns = 1
@@ -442,7 +446,7 @@ main :: proc() {
 	case "build":
 		a.arena.offset = 0
 		doc := build(&a, src, tsv, dsv_text, spec)
-		check = document_check(&doc)
+		check = resolved_check(&doc) if generic else document_check(&doc)
 	case "read":
 		a.arena.offset = 0
 		read_all(&a, src, tsv, dsv_text, spec, true)

@@ -21,7 +21,7 @@ endif
 LIB_PKGS  := core/spell core/regex core host core/kernel core/compose core/diff core/rules core/css core/build core/typed core/write core/records core/schema core/model json dsv toml xml yaml cbor html
 TEST_PKGS := core/spell/test core/regex/test host/test core/kernel/test core/test core/diff/test core/model/test core/schema/test core/css/test core/write/test core/records/test json/test dsv/test toml/test xml/test yaml/test cbor/test html/test
 # The packages the tests share, checked by `lint`
-SUPPORT_PKGS := testkit bench/timing tools/tests/oracles/xml tools/tests/oracles/model tools/tests/oracles/regex tools/tests/oracles/schema/csv tools/tests/oracles/schema/gen
+SUPPORT_PKGS := testkit bench/timing bench/formats tools/tests/oracles/xml tools/tests/oracles/model tools/tests/oracles/regex tools/tests/oracles/schema/csv tools/tests/oracles/schema/gen
 BENCH_PKGS := $(wildcard bench/lanes/*/stury)
 HTML_INTERNALS := -define:STURY_HTML_INTERNALS=true
 TIER_PKGS := core/kernel/test
@@ -49,7 +49,7 @@ X86_TARGETS   := $(foreach o,$(X86_OPTS),$(foreach t,0 1,$(foreach p,$(TEST_PKGS
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: help check gate build-cli test test-examples test-lib test-one test-py test-cli test-jq diff diff-suite diff-schema diff-schema-csv diff-schema-gen diff-model ecma-diff diff-xml test-x86 test-wide test-asan test-asan-lib test-tsan test-f32 test-sweep lint lint-man lint-fixtures names-write bench bench-doc bench-paths bench-typed bench-records bench-schema bench-schema-peers bench-write bench-edit bench-peers bench-cli fixtures \
+.PHONY: help check gate build-cli test test-examples test-lib test-one test-py test-cli test-jq diff diff-suite diff-schema diff-schema-csv diff-schema-gen diff-model ecma-diff diff-xml test-x86 test-wide test-asan test-asan-lib test-tsan test-f32 test-sweep lint lint-man lint-fixtures names-write bench bench-doc bench-paths bench-typed bench-records bench-schema bench-schema-peers bench-write bench-edit bench-model bench-peers bench-cli fixtures \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
 
 # The bench lanes: ROUNDS, ARMS, CASES, COUNT and TIER reach the runner as environment variables, ROWS names rows
@@ -90,7 +90,7 @@ help:
 	@echo "make diff-schema-csv  the check of CSV and TSV against a Python cell-rule converter and jsonschema (needs uv)"
 	@echo "make diff-schema-gen  the check over generated schemas against jsonschema (needs uv)"
 	@echo "make diff-model       the errors of model.load against pydantic (needs uv)"
-	@echo "make bench-doc, bench-paths, bench-typed, bench-records, bench-schema, bench-write, bench-edit, bench-cli   see bench/README.md"
+	@echo "make bench-doc, bench-paths, bench-typed, bench-records, bench-schema, bench-write, bench-edit, bench-model, bench-cli   see bench/README.md"
 	@echo "ODIN=<path> names the compiler, and needs release $(MIN_ODIN) or later."
 
 check:
@@ -281,7 +281,7 @@ bench:
 fixtures:
 	uv run --project bench bench fixtures
 
-bench-doc bench-paths bench-typed bench-records bench-write bench-schema bench-edit:
+bench-doc bench-paths bench-typed bench-records bench-write bench-schema bench-edit bench-model:
 	$(BENCH_RUN) $(@:bench-%=%) $(ROWS)
 
 bench-peers:

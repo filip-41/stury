@@ -253,7 +253,8 @@ Options:
       --in-place            rewrite each file in place;
       --check               write nothing, name each file that is not
                             already formatted, and exit 1;
-      --indent n            use n spaces for indentation (0 to 7);
+      --indent n            use n spaces for indentation (at most 7;
+                            -1 is --tab);
       --tab                 use tabs for indentation;
       --grow-header         with --to csv or tsv, write a header of every key;
       --max-depth n         refuse nesting past n levels (default 1024);
@@ -298,7 +299,7 @@ edited. Every file is edited, and each file's first fault is reported.
 
 Options:
       --from format         read json (default), jsonc, json5, ndjson,
-                            csv, tsv, toml, yaml or cbor;
+                            csv, tsv, toml, yaml, xml, cbor or html;
       --seq                 edit each record after a 0x1E separator;
   -R, --raw-input           edit each line as a string;
   -s, --slurp               run the filter once on the array of records;
@@ -311,7 +312,8 @@ Options:
                             difference;
   -a, --ascii-output        write built values with ASCII escapes;
   -S, --sort-keys           sort the keys of every object, and the columns;
-      --indent n            write built values with n spaces (0 to 7);
+      --indent n            write built values with n spaces (at most 7;
+                            -1 is --tab);
       --tab                 write built values with a tab;
   -e, --exit-status         set the exit status by the last output;
       --max-depth n         refuse nesting past n levels (default 1024);

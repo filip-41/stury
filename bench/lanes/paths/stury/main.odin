@@ -1,5 +1,7 @@
-// `paths <scan|stop|query|build_query|each|iter> <file> <paths> [batch] [largest]`: one read of `paths`, separated by
-// `;`, and a checksum of the answers' spans. A timed sample is `batch` calls (1 by default), each releasing what it made,
+// `paths <scan|stop|query|build_query|each|iter> <file> <paths> [batch] [largest|dups]`: one read of `paths`, separated by
+// `;`, and a checksum of the answers' spans. A `.yaml`, `.toml`, `.xml`, `.html` or `.cbor` file is read through `core`
+// as that format by every lane but `each` and `iter`, and its checksum is of the answers' values as text (see
+// `fold_text`). `dups` is `first` or `last` for those lanes: the repeat of a key the paths answer. A timed sample is `batch` calls (1 by default), each releasing what it made,
 // and ns is the median sample over two warm-ups and ten samples, divided by `batch`. `scan` runs `json.scan` over the
 // text and judges all of it. `stop` reads under `.First` with `stop_early`, as a reader that leaves the rest unread
 // does. `query` builds the document once outside the clock and times `core.query`. `build_query` times the build and
@@ -14,8 +16,53 @@ import "core:strings"
 import "core:time"
 import core "../../../../core"
 import engine "../../../../core/build"
+import "../../../formats"
 import "../../../timing"
 import json "../../../../json"
+
+// The handle of a file that is not JSON, which `scan`, `stop`, `query` and `build_query` read through `core`. `each` and
+// `iter` read JSON only.
+generic: bool
+handle: core.As
+
+// Which of a repeated key a path answers, where the row names one: `first` or `last`. A markup name that repeats among
+// its siblings, as every `log` of logs.xml does, is answered by position only through this.
+dups: core.Duplicates
+
+// The check of a file that is not JSON: each answer found, in text order, as its value's text followed by a newline.
+// A string is its decoded text, a number its decimal digits, and a true, false or null its word, so a library that reads
+// the value can hash the same bytes.
+fold_text :: proc(doc: ^core.Document, answers: []core.Answer) -> u64 {
+	h := timing.CHECK_OFFSET
+	buf: [4096]u8
+	for a in answers {
+		if a.outcome != .Found {
+			continue
+		}
+		text: string
+		ok := true
+		#partial switch core.kind(doc, a.node) {
+		case .String, .Bytes:
+			text, ok = core.text(doc, a.node, buf[:])
+		case .Number:
+			text, ok = core.doc_number_text(doc, a.node, buf[:])
+		case .True:
+			text = "true"
+		case .False:
+			text = "false"
+		case .Null:
+			text = "null"
+		case:
+			ok = false
+		}
+		if !ok {
+			fmt.eprintln("answer is not a scalar of at most 4096 bytes")
+			os.exit(1)
+		}
+		h = timing.fnv(timing.fnv_bytes(h, transmute([]u8)text), '\n')
+	}
+	return h
+}
 
 fold :: proc(doc: ^core.Document, answers: []core.Answer) -> u64 {
 	h := timing.CHECK_OFFSET
@@ -31,12 +78,22 @@ fold :: proc(doc: ^core.Document, answers: []core.Answer) -> u64 {
 
 // One call of `scan` or `stop`. The answers are folded only where `want_check` is set, which is outside the clock.
 scan_call :: proc(src: []byte, paths: []core.Path, read: core.Path_Options, want_check: bool) -> u64 {
-	doc, err := json.scan(src, .Json, paths, read = read)
+	doc: core.Document
+	err: core.Error
+	if generic {
+		doc, err = engine.scan(src, handle, paths, read)
+	} else {
+		doc, err = json.scan(src, .Json, paths, read = read)
+	}
 	if err != nil {
-		fmt.eprintln("scan:", err)
+		core.render(os.to_writer(os.stderr), src, err)
+		fmt.eprintln()
 		os.exit(1)
 	}
-	check := fold(&doc, doc.answers) if want_check else 0
+	check: u64
+	if want_check {
+		check = fold_text(&doc, doc.answers) if generic else fold(&doc, doc.answers)
+	}
 	core.destroy(&doc)
 	return check
 }
@@ -86,12 +143,15 @@ query_call :: proc(built: ^core.Document, src: []byte, paths: []core.Path, want_
 		own = build_document(src)
 		doc = &own
 	}
-	answers, err := json.query(doc, paths)
+	answers, err := json.query(doc, paths, core.Query_Options{dups = dups})
 	if err != nil {
 		fmt.eprintln("query:", err)
 		os.exit(1)
 	}
-	check := fold(doc, answers) if want_check else 0
+	check: u64
+	if want_check {
+		check = fold_text(doc, answers) if generic else fold(doc, answers)
+	}
 	delete(answers)
 	if built == nil {
 		core.destroy(&own)
@@ -109,6 +169,14 @@ main :: proc() {
 		fmt.eprintln("lane: scan, stop, query, build_query, each or iter")
 		os.exit(2)
 	}
+	if kind := formats.of_path(os.args[2]); kind >= .Yaml {
+		if lane == "each" || lane == "iter" {
+			fmt.eprintln("each and iter read JSON only")
+			os.exit(2)
+		}
+		generic = true
+		handle = formats.handle(kind)
+	}
 	src, read_err := os.read_entire_file_from_path(os.args[2], context.allocator)
 	if read_err != nil {
 		fmt.eprintln("cannot read", os.args[2])
@@ -119,8 +187,17 @@ main :: proc() {
 		batch, _ = strconv.parse_int(os.args[4])
 	}
 	largest := engine.ANSWER_BATCH
-	if len(os.args) == 6 {
+	if len(os.args) == 6 && (lane == "each" || lane == "iter") {
 		largest, _ = strconv.parse_int(os.args[5])
+	}
+	if len(os.args) == 6 && lane != "each" && lane != "iter" {
+		switch os.args[5] {
+		case "first": dups = .First
+		case "last": dups = .Last
+		case:
+			fmt.eprintln("dups: first or last")
+			os.exit(2)
+		}
 	}
 	texts := strings.split(os.args[3], ";")
 	paths := make([]core.Path, len(texts))
@@ -132,7 +209,7 @@ main :: proc() {
 		}
 		paths[i] = p
 	}
-	read := core.Path_Options{dups = .First, stop_early = true} if lane == "stop" else {}
+	read := core.Path_Options{dups = .First, stop_early = true} if lane == "stop" else {dups = dups}
 	built: core.Document
 	prebuilt: ^core.Document
 	if lane == "query" {
@@ -169,7 +246,13 @@ main :: proc() {
 }
 
 build_document :: proc(src: []byte) -> core.Document {
-	doc, err := json.build(src, .Json)
+	doc: core.Document
+	err: core.Error
+	if generic {
+		doc, err = core.build(src, handle)
+	} else {
+		doc, err = json.build(src, .Json)
+	}
 	if err != nil {
 		fmt.eprintln("build:", err)
 		os.exit(1)

@@ -1,0 +1,12 @@
+[package]
+name = "html-shape"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+timing.workspace = true
+html5ever.workspace = true
+markup5ever_rcdom.workspace = true

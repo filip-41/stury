@@ -1,5 +1,5 @@
 // `schema-rust verdict|errors FILE SCHEMA jsonschema|boon`: each job makes WARMUP + TIMED passes, each parsing every instance
-// of FILE (a JSONL text, else one document) with serde_json and judging it, dropping it before the next. `check` is the
+// of FILE (a JSONL text, else one document) with serde_json (the toml crate for a `.toml` file) and judging it, dropping it before the next. `check` is the
 // number of instances the schema accepts and `errors` the errors listed. `verdict` is the bool form, jsonschema's is_valid
 // and boon's validate().is_ok(), and `errors` lists every error, jsonschema's iter_errors and boon's basic output.
 // BENCH_PASSES=N makes N untimed passes and prints `check` alone, for the runner's instruction counts. BENCH_VERDICTS=PATH
@@ -11,12 +11,29 @@ use timing::{report, time_runs};
 use serde_json::Value;
 
 // The instance texts of FILE: one per line of a JSONL text, else the whole text.
-fn pieces<'a>(path: &str, text: &'a str) -> Vec<&'a str> {
+fn pieces<'a>(path: &str, text: &'a [u8]) -> Vec<&'a [u8]> {
     if path.ends_with(".jsonl") || path.ends_with(".ndjson") {
-        text.lines().filter(|l| !l.is_empty()).collect()
+        text.split(|b| *b == b'\n').filter(|l| !l.is_empty()).collect()
     } else {
         vec![text]
     }
+}
+
+// One instance from its text: serde_yaml_ng for a `.yaml` file, the toml crate for a `.toml` file, ciborium for a
+// `.cbor` file, whose one data item must end the text, and serde_json for any other.
+fn parse(path: &str, text: &[u8]) -> Result<Value, String> {
+    if path.ends_with(".yaml") {
+        return serde_yaml_ng::from_slice(text).map_err(|e| e.to_string());
+    }
+    if path.ends_with(".toml") {
+        return toml::from_slice(text).map_err(|e| e.to_string());
+    }
+    if !path.ends_with(".cbor") {
+        return serde_json::from_slice(text).map_err(|e| e.to_string());
+    }
+    let mut rest = text;
+    let v = ciborium::from_reader(&mut rest).map_err(|e| e.to_string())?;
+    if rest.is_empty() { Ok(v) } else { Err("data after the item".into()) }
 }
 
 // What a library does with a compiled schema.
@@ -82,7 +99,7 @@ fn run(args: &[String]) -> Result<(), String> {
         return Err("usage: schema-rust verdict|errors FILE SCHEMA jsonschema|boon".into());
     };
     let judge = compile(lib, &std::fs::read_to_string(schema_path).map_err(|e| e.to_string())?)?;
-    let text = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
+    let text = std::fs::read(file).map_err(|e| e.to_string())?;
     let texts = pieces(file, &text);
     let all_errors = match job.as_str() {
         "verdict" => false,
@@ -92,7 +109,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let pass = || -> Result<(u64, usize), String> {
         let (mut valid, mut errors) = (0u64, 0usize);
         for t in &texts {
-            let instance: Value = serde_json::from_str(black_box(t)).map_err(|e| e.to_string())?;
+            let instance = parse(file, black_box(t))?;
             if all_errors {
                 let n = judge.errors(&instance);
                 valid += (n == 0) as u64;
@@ -106,7 +123,7 @@ fn run(args: &[String]) -> Result<(), String> {
     if let Some(path) = std::env::var_os("BENCH_VERDICTS") {
         let mut marks = String::with_capacity(texts.len());
         for t in &texts {
-            let instance: Value = serde_json::from_str(t).map_err(|e| e.to_string())?;
+            let instance = parse(file, t)?;
             marks.push(if judge.accepts(&instance) { '1' } else { '0' });
         }
         std::fs::write(path, marks).map_err(|e| e.to_string())?;

@@ -4,7 +4,7 @@ import sys
 
 from . import cases, fixtures, kernel, lane, probes, schema
 
-TIMED_LANES = ["doc", "paths", "typed", "records", "write", "edit"]
+TIMED_LANES = ["doc", "paths", "typed", "records", "write", "edit", "model"]
 ALL_LANES = ["kernel", *TIMED_LANES, "schema", "cli"]
 
 
@@ -33,7 +33,7 @@ def parser():
             lp.add_argument("--no-count", action="store_true", default=os.environ.get("COUNT") == "0")
         elif name == "cli":
             lp.add_argument("--runs", type=int, default=int(os.environ.get("RUNS") or 2), help="timings per tool in a round")
-            lp.add_argument("--suite", choices=["jq", "csv"], default="jq")
+            lp.add_argument("--suite", choices=["jq", "csv", "xml", "yaml", "html", "toml"], default="jq")
             lp.add_argument("--cases", default=os.environ.get("CASES", "."), help="regex that keeps the cases whose name matches")
         else:
             lp.add_argument("--arms", default=os.environ.get("ARMS"), help="comma-separated arms to run")

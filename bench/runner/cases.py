@@ -143,10 +143,12 @@ def main(rounds, runs, suite, only):
     if not stury.exists():
         sys.exit(f"no {stury}: run make build-cli")
     cases = [c for c in spec["case"] if c["suite"] == suite and re.search(only, c["name"])]
-    needed = {"hyperfine", *(t for c in cases for t in c["tools"] if t != "stury")}
-    missing = sorted(t for t in needed if not shutil.which(t))
-    if missing:
-        sys.exit(f"no {' '.join(missing)} on PATH: the comparison needs every tool")
+    if not shutil.which("hyperfine"):
+        sys.exit("no hyperfine on PATH")
+    absent = sorted({t for c in cases for t in c["tools"] if t != "stury" and not shutil.which(t)})
+    if absent:
+        print(f"not on PATH, left out: {' '.join(absent)}", file=sys.stderr)
+    cases = [{**c, "tools": [t for t in c["tools"] if t not in absent]} for c in cases]
     shutil.rmtree(OUT, ignore_errors=True)
     OUT.mkdir(parents=True)
     fields = {"S": str(stury), "jsonc": str(OUT / "logs.jsonc"), "strip": str(STRIP)}

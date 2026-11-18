@@ -1,21 +1,20 @@
 // `edit set <file> <edits>` records `edits` sets on a document of the file, commits their splice three times and
 // prints the best commit's time as `ns` and its GB/s, `check` as a hash of the committed text, and the recording's time
-// per edit. A `.csv` or `.tsv` file builds a headed dsv text,
-// `.json5` and `.jsonc` build a json text of that spec, and any other suffix a `.Json` text. The edits are spread over
-// the file's `String`, `Number` and `Plain` value nodes.
+// per edit. A file is built as the format its suffix names (`formats.of_path`), a `.csv` or `.tsv` file as a headed dsv
+// text, and any suffix none names as a `.Json` text. The edits are spread over
+// the file's `String`, `Number` and `Plain` value nodes, the empty ones of an HTML text left out.
 package edit
 
 import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:time"
+import "../../../formats"
 import "../../../timing"
 import core "../../../../core"
 import compose "../../../../core/compose"
 import typed "../../../../core/typed"
 import write "../../../../core/write"
-import dsv "../../../../dsv"
-import json "../../../../json"
 
 main :: proc() {
 	if len(os.args) != 4 || os.args[1] != "set" {
@@ -34,20 +33,8 @@ main :: proc() {
 	}
 	suffix := os.args[2]
 	dsv_text := strings.has_suffix(suffix, ".csv") || strings.has_suffix(suffix, ".tsv")
-	doc: core.Document
-	derr: core.Error
-	switch {
-	case strings.has_suffix(suffix, ".tsv"):
-		doc, derr = core.build(src, dsv.as(.Tsv))
-	case strings.has_suffix(suffix, ".csv"):
-		doc, derr = core.build(src, dsv.as(.Csv))
-	case strings.has_suffix(suffix, ".json5"):
-		doc, derr = core.build(src, json.as(.Json5))
-	case strings.has_suffix(suffix, ".jsonc"):
-		doc, derr = core.build(src, json.as(.Jsonc))
-	case:
-		doc, derr = core.build(src, json.as(.Json))
-	}
+	kind := formats.of_path(suffix)
+	doc, derr := core.build(src, formats.handle(kind))
 	defer core.destroy(&doc)
 	if derr != nil {
 		fmt.eprintln("build:", derr)
@@ -57,6 +44,10 @@ main :: proc() {
 	defer delete(nodes)
 	for n, i in doc.nodes {
 		if n.role != .Value || (n.kind != .String && n.kind != .Number && n.kind != .Plain) {
+			continue
+		}
+		// An empty HTML element, a void one among them, holds no content to set.
+		if kind == .Html && n.n == 0 {
 			continue
 		}
 		append(&nodes, core.Node_Index(i))

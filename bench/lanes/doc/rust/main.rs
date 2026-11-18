@@ -2,6 +2,11 @@
 // key in every object. File I/O and dropping each decoded value are outside the clock.
 use std::hint::black_box;
 
+mod cbor;
+mod yaml;
+mod html;
+mod toml_arm;
+
 use timing::{CHECK_OFFSET, fnv_byte, fnv_bytes, fnv_u64, report, time_runs};
 
 // Parses one sonic_rs::Value. The input is black-boxed inside the clock, as the other arms do.
@@ -252,10 +257,19 @@ fn key_job(data: &[u8]) -> Result<(), String> {
 }
 
 fn run(args: &[String]) -> Result<(), String> {
+    if let [_, lane, file, lib] = &args[..] {
+        return cbor::run(lane, &std::fs::read(file).map_err(|e| e.to_string())?, lib);
+    }
     let [_, lane, file] = &args[..] else {
-        return Err("usage: doc-rust build|read|key FILE".into());
+        return Err("usage: doc-rust build|read|key FILE [ciborium|minicbor]".into());
     };
     let data = std::fs::read(file).map_err(|e| e.to_string())?;
+    if file.ends_with(".html") {
+        return html::run(lane, &data);
+    }
+    if file.ends_with(".toml") {
+        return toml_arm::run(lane, &data);
+    }
     match lane.as_str() {
         "build" => dom(&data),
         "read" => dom_read(&data),
@@ -266,7 +280,8 @@ fn run(args: &[String]) -> Result<(), String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if let Err(e) = run(&args) {
+    let result = if args.len() == 4 && args[3] == "saphyr" { yaml::run(&args) } else { run(&args) };
+    if let Err(e) = result {
         eprintln!("doc-rust: {e}");
         std::process::exit(1);
     }

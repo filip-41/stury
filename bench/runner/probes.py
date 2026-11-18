@@ -21,22 +21,25 @@ def lane_toml(lane):
 
 
 def binary(lane, source):
-    """The program a lane's arm runs, from the arm's `source` (a directory of Odin, a C or C++ file, or `rust`)."""
-    if source == "rust":
+    """The program a lane's arm runs, from the arm's `source` (a directory of Odin, a C or C++ file, a Python script
+    beside `lane.toml`, or `rust`)."""
+    if source.endswith(".py"):
+        return LANES / lane / source
+    if source.startswith("rust"):
         target = CARGO["schema" if lane == "schema" else ""]
-        return target / "release" / f"{lane}-rust"
+        return target / "release" / f"{lane}-{source}"
     return BUILD / f"{lane}-{source.partition('.')[0]}"
 
 
 def fixture(name):
-    """The path of a fixture by name, looking in fixtures/ and then fixtures/corpus/, else NAME as a path."""
-    for d in (FIXTURES, FIXTURES / "corpus"):
+    """The path of a fixture by name, looking in fixtures/, fixtures/corpus/ and fixtures/natural/, else NAME as a path."""
+    for d in (FIXTURES, FIXTURES / "corpus", FIXTURES / "natural"):
         if (d / name).exists():
             return str(d / name)
     if os.path.exists(name):
         return os.path.abspath(name)
-    sys.exit(f"no fixture {name}: looked in bench/fixtures and bench/fixtures/corpus. `bench fixtures` fetches the corpus "
-             "and generates the rest")
+    sys.exit(f"no fixture {name}: looked in bench/fixtures, bench/fixtures/corpus and bench/fixtures/natural. `bench fixtures` "
+             "fetches the downloaded ones and generates the rest")
 
 
 def run_build(cmd, what, cwd=None, env=None):
@@ -67,7 +70,7 @@ def build(lanes):
     elif native:
         print("C and C++ drivers: left out (cmake is not on PATH)")
     for schema, flag in ((False, ""), (True, "schema")):
-        packages = sorted(f"{lane}-rust" for lane, s in sources if s == "rust" and (lane == "schema") == schema)
+        packages = sorted(f"{lane}-{s}" for lane, s in sources if s.startswith("rust") and (lane == "schema") == schema)
         if not packages:
             continue
         if not shutil.which("cargo"):

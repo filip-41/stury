@@ -10,3 +10,6 @@ path = "main.rs"
 [dependencies]
 timing.workspace = true
 sonic-rs.workspace = true
+ciborium.workspace = true
+minicbor.workspace = true
+scraper.workspace = true

@@ -1,7 +1,7 @@
 // `schema <verdict|errors> <file> <schema>`: the schema lane's stury arm, `gb_per_s`, `ns` and `check` (the instances
 // accepted) from the median of ten timed calls after two warm-ups. FILE is judged one instance per line when it is a
-// `.jsonl` or `.ndjson` text, else as one document. `BENCH_PASSES=N` makes N untimed passes and prints `check` alone, for
-// the runner's instruction counts. `BENCH_VERDICTS=PATH` writes one 0 or 1 per instance, in order, to PATH.
+// `.jsonl` or `.ndjson` text, else as one document, read in the format its suffix names. `BENCH_PASSES=N` makes N untimed
+// passes and prints `check` alone, for the runner's instruction counts. `BENCH_VERDICTS=PATH` writes one 0 or 1 per instance, in order, to PATH.
 //
 // `verdict` asks `schema.valid` of each instance and `errors` collects each instance's errors with `schema.check`. A
 // schema the check does not bind exits 3 with the keyword it refuses.
@@ -13,6 +13,7 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:time"
+import "../../../formats"
 import "../../../timing"
 import typed "../../../../core/typed"
 import records "../../../../core/records"
@@ -69,7 +70,7 @@ main :: proc() {
 		fmt.eprintln(os.args[3], cerr)
 		os.exit(1)
 	}
-	if bound, cerr = schema.bind(compiled, json.checks(.Json)); cerr != nil {
+	if bound, cerr = schema.bind(compiled, formats.checks(formats.of_path(os.args[2]))); cerr != nil {
 		fmt.eprintln(os.args[3], cerr)
 		os.exit(3)
 	}

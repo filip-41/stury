@@ -1,8 +1,27 @@
 # Binary formats
 
-The binary formats read through the same interface as the text ones: a walk that sends tokens to a hook, a document
-built from it, path reads, records, typed reads and the writers. This page holds what differs for a format whose text
-is bytes rather than characters. The format is CBOR (RFC 8949), in package `cbor`.
+CBOR (RFC 8949), in package `cbor`, reads and writes through the same interface as the text formats: a walk that sends
+tokens to a hook, a document built from it, path reads, records, typed reads and the writers. This page holds what
+differs for a format whose text is bytes rather than characters.
+
+## Command line
+
+```sh
+$ stury -c . x.cbor
+{"1":"a","b":"aGk=","c":1700000000,"d":18446744073709551616,"e":27315e-2,"f":null,"g":[1,2],"h":1.5}
+$ stury -c '.c | .@tag' x.cbor
+1
+```
+
+- **Byte strings** read as the string of their base64, and a byte string key as its bytes.
+- **Integer keys** read as their decimal text, and `--to cbor` writes them back as integers.
+- **Tags** read as their content, and `.@tag` gives the number. A bignum, a decimal fraction and a bigfloat read as
+  numbers.
+- **Simple values** other than `false`, `true` and `null`, `undefined` included, read as `null`.
+- **Sequences** (RFC 8742) are one input per item, and `--to cbor` of several outputs writes a sequence.
+- **Output** is in preferred serialization. `--to cbor:deterministic` and `--to cbor:length_first` sort map keys, and
+  `--from cbor:preferred` refuses an item in another serialization.
+- **Faults** are placed by line and column of the bytes, as `Two-byte simple value below 32` at 1:1 for `f8 10`.
 
 ## What a binary format changes
 
@@ -12,9 +31,9 @@ is bytes rather than characters. The format is CBOR (RFC 8949), in package `cbor
 - `Readers.binary` is true, so a `String` token is text and never bytes: a `typed.Bytes` target refuses a text string
   as `.Wrong_Kind`, where a text format reads it from base64. A record reader does not skip a byte order mark at the
   start of such a text, since the bytes are not characters.
-- A number is read by the format's own `number` reader. A value that no `Number` holds exactly reads as `Wide`, and
-  `cbor.doc_number_text` gives its decimal digits through `Readers.number_text`. `core.equal`, `compare`, `hash` and a
-  schema's `uniqueItems` take such a number by its digits, so `1` as a one-byte and as a two-byte integer are one value.
+- A value that no `Number` holds exactly reads as `Wide`, and `cbor.doc_number_text` gives its decimal digits through
+  `Readers.number_text`. `core.equal`, `compare`, `hash` and a schema's `uniqueItems` take such a number by its digits,
+  so `1` as a one-byte and as a two-byte integer are one value.
 - A tag is a fact before its content, of role `Tag` and kind `Number`. `cbor.fact_value(&doc, node, .Tag)` gives the
   tag nearest the item as its decimal digits, with `numeric` set, and `fact_number` reads a tag fact as a `Number`.
 - `Readers.key_bytes` gives the bytes a member name is written with, a text string head and the name, so a typed read
@@ -23,17 +42,15 @@ is bytes rather than characters. The format is CBOR (RFC 8949), in package `cbor
 ## CBOR
 
 ```odin
-cbor.validate    :: proc "contextless" (src: []u8, $S: cbor.Spec, opts := cbor.Options{}) -> core.Error
-cbor.walk        :: proc "contextless" (src: []u8, lo: u64, $S: cbor.Spec, opts := cbor.Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^cbor.Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault))
-cbor.walk_resume :: proc "contextless" (src: []u8, cursor: ^cbor.Cursor, $S: cbor.Spec, opts := cbor.Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
-cbor.build       :: proc(src: []u8, $S: cbor.Spec, opts := cbor.Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error)
-cbor.set         :: proc(src: []u8, $S: cbor.Spec, path: core.Path, v: any, plan: ^typed.Plan = nil, opts := cbor.Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error)
-cbor.write       :: proc(doc: ^core.Document, $S: cbor.Spec, write := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error)
-cbor.as          :: proc "contextless" (spec: cbor.Spec, opts := cbor.Options{}) -> core.As
-cbor.find, cbor.scan, cbor.answers, cbor.each_answer, cbor.query, cbor.can_resume, cbor.edit_list_init
-cbor.marshal, cbor.unmarshal, cbor.check, cbor.plan_make, cbor.plan_of, cbor.tokens_init, cbor.checks, cbor.bind_schema
-cbor.records_open, cbor.records_open_stream, cbor.records_validate, cbor.writer_init
+cbor.validate :: proc "contextless" (src: []u8, $S: cbor.Spec, opts := cbor.Options{}) -> core.Error
+cbor.walk     :: proc "contextless" (src: []u8, lo: u64, $S: cbor.Spec, opts := cbor.Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), cursor: ^cbor.Cursor = nil) -> (hi: u64, fault: Maybe(core.Fault))
+cbor.build    :: proc(src: []u8, $S: cbor.Spec, opts := cbor.Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error)
+cbor.write    :: proc(doc: ^core.Document, $S: cbor.Spec, write := core.Write_Options{}, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error)
+cbor.as       :: proc "contextless" (spec: cbor.Spec, opts := cbor.Options{}) -> core.As
 ```
+
+The other passes (`find`, `scan`, `query`, `set`, `marshal`, `unmarshal`, `check`, `records_open` and the rest) have the
+text formats' names and signatures.
 
 Each entry point takes a `cbor.Spec`, the rules an item is judged and written by, and links only the passes it names.
 `cbor.as(spec, opts)` is the handle that reaches every pass, which the calls in `core` take. `src` is exactly one data item. A sequence of items (RFC 8742) reads as records under `.Concatenated`, the one framing the
@@ -97,16 +114,16 @@ serialization its spec reads:
 | `.Deterministic` | the same with each map's keys in bytewise order of their encodings, and every NaN as `f97e00`. A key two members write alike is `.Unwritable` |
 | `.Length_First` | the same with the keys in length-first order |
 
-A tag is written back from its fact, and `Kind.Bytes` is a byte string. From a text format, an integer past 64 bits is
+`json.write(&doc, .Json)` writes a CBOR document as JSON, with the reads of the table above: a byte string is base64
+text and a tag is dropped and counted. A tag is written back from its fact, and `Kind.Bytes` is a byte string. From a text format, an integer past 64 bits is
 a bignum, and a number past binary64's range, or one binary64 rounds to zero, is a decimal fraction of its digits, so
 it reads back as the same value. A comment, a text format's tag and any other fact CBOR has no place for is dropped and
 counted in `dropped`. The layout options have no meaning in a binary text.
 
-The token writer (`cbor.tokens_init(&t, spec)`) holds each container's head as one byte and patches it at the close,
-once the count is known, moving the container's bytes when a count of 24 or more needs a wider head. Writing to a
-stream, a container still open when the buffer must be flushed is written with an indefinite length, which only `.Cbor`
-with unsorted keys allows: under any other spec that write returns `.Unsupported`. `cbor.writer_init` writes a CBOR
-sequence, nothing between the items.
+The token writer (`cbor.tokens_init(&t, spec)`) patches each container's head at the close, once the count is known.
+Writing to a stream, a container still open when the buffer must be flushed is written with an indefinite length, which
+only `.Cbor` with unsorted keys allows: under any other spec that write returns `.Unsupported`. `cbor.writer_init`
+writes a CBOR sequence, nothing between the items.
 
 ### Typed values
 
@@ -119,28 +136,19 @@ either form for any struct, and an array longer than the struct's members has it
 a map's keys sorted by their encoded bytes, and under `.Deterministic` and `.Length_First` a struct's members are
 sorted as a map's keys are. A nil `any` is written as null.
 
-A `typed.Raw` member holds the whole item, its head and tags included, and a `core.Value` member reads a bignum as a
-number. `core.Value` has no byte string arm, so a byte string read into one is the string of its base64, and a tag
-inside it is dropped. A positional struct behind a pointer, a `Maybe` or a union is written positionally but read only
-as a map.
+A `typed.Raw` member holds the whole item, its head and tags included. `core.Value` has no byte string arm, so a byte
+string read into one is the string of its base64, and a tag inside it is dropped. A positional struct behind a pointer,
+a `Maybe` or a union is written positionally but read only as a map.
 
 `cbor.checks(.Cbor)` gives `model.compile` CBOR's reads, so a model loads and dumps CBOR, and
 `cbor.bind_schema(s, .Cbor)` binds a JSON Schema that `json.load_schema` compiled, so `check_schema` judges an item and
-a byte string counts as a string in it. `cbor.check` reads an item by a plan as a check, and `cbor.plan_of` builds the
-plan of a `rules.Description`, as `json.plan_of` does.
-
-### Writing as another format
-
-`json.write(&doc, .Json)` writes a CBOR document as JSON. A byte string is base64 text, a bignum, decimal fraction and
-bigfloat are numbers, a tag is dropped and counted, and a simple value other than `false`, `true` and `null` is
-`null`.
+a byte string counts as a string in it.
 
 ### Editing
 
 `cbor.set` and `cbor.edit_list_init` edit an item as the text formats' edits do, and the format commits its edits
 itself: a container's head holds its count, so the commit writes the item again from the root. It copies the bytes of
-every item no edit reaches, and writes a container an edit reaches as its head, with the count it ends with, its members
-in their new order and an indefinite container's break. A changed count keeps the width of its head where it fits under
+every item no edit reaches and rewrites each container an edit reaches with its new count. A changed count keeps the width of its head where it fits under
 `.Cbor`, and takes the shortest head under the other specs. A deterministic spec writes the members of a map an edit
 reaches in the order of their encoded keys. A tag is a fact of the item it stands before, so a set keeps the item's tags
 and a tag edit replaces them, but the tag of a bignum, a decimal fraction or a bigfloat is its number's. The result is
@@ -148,27 +156,10 @@ read again by the walk, so an edit that breaks a rule of the spec is `.Bad_Resul
 
 ### Resuming a walk
 
-A hook that returns `.Stop` fills the walk's `cursor` with the open containers and the place the walk stood at, on the
-heap, and `cbor.walk_resume` continues from the token after the stop over the same item, judging the bytes past it as it
-reads them. A walk that ends frees what its cursor holds, `cbor.destroy(&cursor)` frees a cursor no resume ended, and a
-resume on another text is refused with `.Bad_Option`. `cbor.answers` reads a path's answers a batch at a time on it.
+A hook that returns `.Stop` fills the walk's `cursor`, and `cbor.walk_resume` continues from the token after the stop
+over the same item. The rules are those of `walk.md`, and `cbor.destroy(&cursor)` frees a cursor no resume ended.
+`cbor.answers` reads a path's answers a batch at a time on it.
 
 ### What CBOR does not do
 
-A built CBOR document has no typed read (`typed.unmarshal` of one is `.Plan_Mismatch`), and a record reader frames,
-judges and builds records but does not read or scan them.
-
-### Tests
-
-`cbor/test` holds the Appendix A table (`vectors/appendix_a.json`, from github.com/cbor/test-vectors), the malformed
-items of Appendix F, the encoding rules, the limits, integer-key paths and repeats, the nearest tag as the tag fact, a
-differential against Odin's `core:encoding/cbor` over generated and mutated items, and the skipping law: a path read and
-`cbor.validate` fault at the same byte over the Appendix A and F items and mutations of them, with and without
-`stop_early`. The writer's tests write each Appendix A row back (its own bytes under `.Cbor`, and under `.Preferred` for
-the rows already in it), respell items for each encoding, write JSON as CBOR and back, keep a deterministic text
-deterministic, patch token heads at each width, fall back to indefinite lengths on a stream, round-trip a struct of every
-`Read_Kind` in both forms, and read a key the plan matches by its bytes as the lookup reads it, out of order, unknown,
-with a longer head or not valid UTF-8. `entry_points_test.odin` covers the bound entry points against the handle, and
-`records_test.odin` the record entry points and their framing. `cursor_test.odin` stops a walk after
-each token and resumes it, and reads answers as `each_answer` gives them, `check_test.odin` covers `check` and `plan_of`,
-and `edit_test.odin` sets, removes, inserts and reorders members, edits tags and refuses edits that meet.
+A built CBOR document has no typed read (`typed.unmarshal` of one is `.Plan_Mismatch`).

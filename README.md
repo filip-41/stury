@@ -1,6 +1,6 @@
 # stury
 
-**stury** is a query engine for jq filters across eleven formats.
+**stury** is a query engine and a lossless editing tool for jq filters across eleven formats.
 
 ![stury editing YAML, selecting from HTML and comparing two schemas](docs/demo/intro.gif)
 
@@ -18,7 +18,7 @@
 - **Schema diff:** compare two versions of a schema and get a proven answer on backward and forward compatibility,
   with a value that breaks it when it does not hold.
 - **Speed:** a filter that names a path reads only that path, and a large input is split across cores. On the
-  command-line benchmark stury is 1.8 to 250 times faster than jq, jaq, gojq and yq, and the library builds a JSON
+  command-line benchmark stury is 2.4 to 290 times faster than jq, jaq, gojq and yq, and the library builds a JSON
   document faster than yyjson and simdjson ([benchmarks](docs/benchmarks.md)).
 
 Formats:
@@ -503,6 +503,29 @@ The complete programs are in [examples/](examples), and `make test-examples` run
 | [model](examples/model/main.odin) | a model's load, problem document, patch and dump |
 
 ## Documentation
+
+| Page | Covers |
+| --- | --- |
+| [docs/guide.md](docs/guide.md) | the library's packages and calls, by task and by format |
+| [docs/cli.md](docs/cli.md) | the command line options, subcommands, formats, and differences from jq |
+| [docs/stury.1](docs/stury.1) | the manual page |
+| [docs/benchmarks.md](docs/benchmarks.md) | what each benchmark measures, and its figures |
+| [bench/README.md](bench/README.md) | how to run the benchmarks and add to them |
+
+### Internals
+
+| Page | Covers |
+| --- | --- |
+| [docs/walk.md](docs/walk.md) | the walk every read is built on, and the JSON, CSV, TOML and YAML walks |
+| [docs/kernel.md](docs/kernel.md) | the SIMD kernels and CPU tiers |
+| [docs/document.md](docs/document.md) | the document a build makes, and its readers |
+| [docs/edits.md](docs/edits.md) | edit lists and the commit that writes them |
+| [docs/paths.md](docs/paths.md) | path queries without a document |
+| [docs/typed.md](docs/typed.md) | `unmarshal` and the typed read during the walk |
+| [docs/writer.md](docs/writer.md) | the writers and `marshal` |
+| [docs/records.md](docs/records.md) | reading a text one record at a time |
+| [docs/markup.md](docs/markup.md) | XML and HTML |
+| [docs/binary.md](docs/binary.md) | CBOR |
 
 ## Development
 

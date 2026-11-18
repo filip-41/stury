@@ -13,3 +13,5 @@ sonic-rs.workspace = true
 simd-csv.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ciborium.workspace = true
+minicbor.workspace = true

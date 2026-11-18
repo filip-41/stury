@@ -13,6 +13,27 @@ simdjson = { source = "simdjson.cpp", args = ["doc", "{file}"], when = { mode = 
 simd_min = { source = "simdjson.cpp", args = ["minify", "{file}"], when = { mode = "doc", pretty = "" }, unchecked = ["*"] }
 sonic = { source = "rust", args = ["{mode}", "{file}", "{pretty}", "sonic"] }
 serde = { source = "rust", args = ["{mode}", "{file}", "{pretty}", "serde"] }
+# CBOR arms, on .cbor files only. tinycbor has no document type, so it has no `doc` job.
+ciborium = { source = "rust", args = ["{mode}", "{file}", "ciborium"], files = ["*.cbor"] }
+minicbor = { source = "rust", args = ["{mode}", "{file}", "minicbor"], files = ["*.cbor"] }
+tinycbor = { source = "tinycbor.c", args = ["{mode}", "{file}"], files = ["*.cbor"], when = { mode = "typed" } }
+
+# The XML arms. pugixml saves its tree without indentation, and quick-xml's `Writer` writes the elements and texts of a
+# roxmltree tree. `typed` is quick-xml's serde serializer, which has no peer here. Each arm's check is the read check of its
+# own output read back with its own parser.
+pugixml = { source = "pugixml.cpp", args = ["doc", "{file}"], files = ["*.xml"], when = { mode = "doc" } }
+quickxml = { source = "rust-xml", args = ["{mode}", "{file}"], files = ["*.xml"] }
+
+# YAML: rapidyaml's emit_yaml of a Tree (the typed row builds the tree from C++ structs inside the clock) and serde_yaml_ng's
+# to_writer of the logs struct or of a Value.
+ryml = { source = "rapidyaml.cpp", args = ["{mode}", "{file}"], files = ["*.yaml"] }
+serde_yaml = { source = "rust", args = ["{mode}", "{file}", "yaml"], files = ["*.yaml"] }
+
+lexbor = { source = "lexbor.cpp", args = ["{mode}", "{file}"], files = ["*.html"], when = { mode = "doc" } }
+html5ever = { source = "rust", args = ["{mode}", "{file}", "{pretty}", "html5ever"], files = ["*.html"], when = { mode = "doc" } }
+
+tomlpp = { source = "tomlpp.cpp", args = ["doc", "{file}"], when = { mode = "doc", pretty = "" }, files = ["*.toml"] }
+toml = { source = "rust", args = ["{mode}", "{file}", "{pretty}", "toml"], files = ["*.toml"] }
 
 [[group]]
 title = "typed"
@@ -23,3 +44,82 @@ variant = [{ title = "compact", mode = "typed" }, { title = "pretty", mode = "ty
 title = "doc"
 rows = ["logs.json", "twitter.json", "citm_catalog.json", "canada.json", "pretty.json", "utf8.json", { file = "escape.json", unchecked = true }, "longtext.json"]
 variant = [{ title = "compact", mode = "doc" }, { title = "pretty", mode = "doc", pretty = "pretty" }]
+
+# The groups below write the logs records and documents of the other formats, stury alone since no other arm writes them
+# yet. Writers of one format spell the same values their own ways (a YAML quote style, a TOML float, an XML indent), so
+# the check is not the output's bytes. It is the read check of the text written, read back as its own format through
+# `core.build`, taken outside the clock: in document order each value's kind tag as its format resolves it (o a s n t f z),
+# then for a string its decoded byte count and for a number the bits of its binary64 value (zero as +0). A library
+# checks its own output by reading it back with any parser and folding the values so. The read check of a fixture is the
+# doc lane's `read`, so a writer that keeps every value prints the check of the fixture it wrote (logs.yaml, logs.toml
+# and logs.cbor print logs.json's read check, logs.xml its own). `typed` marshals the logs struct read from
+# the fixture, with CBOR in its preferred spelling (shortest integers and floats), and `doc` writes the document built
+# from the fixture. logs.xml holds the records as the `log` children of a `logs` element, and its struct has that shape.
+# The html group writes the document parsed from an HTML text through lexbor's and html5ever's serializers, which write
+# the whole tree where stury writes the document it built, and each is checked by the read check of its output read back
+# by the same library's tree (lanes/doc/html_shape.hpp, html_shape/lib.rs), so the arms agree when their trees do.
+# stury's doc build of logs.html passes the runner's 1 GiB resident cap, so the runner stops at that row unless ARMS
+# leaves stury out.
+
+[[group]]
+title = "typed formats"
+arms = ["stury", "toml"]
+rows = ["logs.yaml", "logs.toml", "logs.xml", "logs.cbor"]
+variant = [{ title = "compact", mode = "typed" }]
+
+[[group]]
+title = "doc formats"
+arms = ["stury", "tomlpp", "toml"]
+rows = ["logs.yaml", "logs.toml", "logs.xml", "logs.cbor"]
+variant = [{ title = "compact", mode = "doc" }]
+
+# The logs of logs.xml against the other libraries.
+
+[[group]]
+title = "xml typed"
+arms = ["stury", "quickxml"]
+rows = ["logs.xml"]
+variant = [{ title = "compact", mode = "typed" }]
+
+[[group]]
+title = "xml doc"
+arms = ["stury", "pugixml", "quickxml"]
+rows = ["logs.xml"]
+variant = [{ title = "compact", mode = "doc" }]
+
+# CBOR against the other libraries' writers. Every arm prints the read check of the text it wrote, which is stury's: the
+# value tags, string lengths and number bits of logs.json. A library spells integers and floats its own way, so the
+# bytes are not compared. `typed` writes the logs records from a struct: serde through ciborium, a hand-written `Encode`
+# through minicbor (its derive writes integer map keys and the fixture's keys are text) and tinycbor's encoder from C
+# structs. `doc` writes a parsed document: ciborium's `Value`, and for minicbor the flat tape of its decoder's tokens,
+# since it has no document type. tinycbor has none either, so it has no `doc` row.
+
+[[group]]
+title = "cbor typed"
+arms = ["stury", "ciborium", "minicbor", "tinycbor"]
+rows = ["logs.cbor"]
+variant = [{ title = "compact", mode = "typed" }]
+
+[[group]]
+title = "cbor doc"
+arms = ["stury", "ciborium", "minicbor"]
+rows = ["logs.cbor"]
+variant = [{ title = "compact", mode = "doc" }]
+
+[[group]]
+title = "yaml typed"
+arms = ["stury", "ryml", "serde_yaml"]
+rows = ["logs.yaml"]
+variant = [{ title = "compact", mode = "typed" }]
+
+[[group]]
+title = "yaml doc"
+arms = ["stury", "ryml", "serde_yaml"]
+rows = ["logs.yaml"]
+variant = [{ title = "compact", mode = "doc" }]
+
+[[group]]
+title = "doc html"
+arms = ["stury", "lexbor", "html5ever"]
+rows = ["logs.html", "whatwg-html.html", "wikipedia-united-states.html", "wikipedia-world-war-ii.html"]
+variant = [{ title = "compact", mode = "doc" }]

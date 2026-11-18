@@ -1,0 +1,15 @@
+[package]
+name = "typed-rust-xml"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "typed-rust-xml"
+path = "main.rs"
+
+[dependencies]
+timing.workspace = true
+typed-rust.path = "../rust"
+quick-xml.workspace = true
+serde.workspace = true
+serde_json.workspace = true

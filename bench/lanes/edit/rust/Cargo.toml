@@ -1,0 +1,13 @@
+[package]
+name = "edit-rust"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "edit-rust"
+path = "main.rs"
+
+[dependencies]
+timing.workspace = true
+lol_html.workspace = true
+toml_edit.workspace = true

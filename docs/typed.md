@@ -1,7 +1,8 @@
 # Typed reads
 
-A typed read fills an Odin value from a text during the walk, with no document between them. `core/typed` holds
-everything format-neutral and names no format.
+A typed read fills an Odin value from a text during the walk, with no document between them. The format-neutral part is
+package `core/typed`, which names no format. The guide's [Read into Odin values](guide.md#read-into-odin-values)
+section shows the calls in use, and [writer.md](writer.md) covers `marshal`.
 
 ## Vocabulary
 
@@ -15,22 +16,17 @@ everything format-neutral and names no format.
 
 ```odin
 json.unmarshal :: proc {unmarshal_once, unmarshal_plan}
-unmarshal_once :: proc(src: []u8, spec: json.Spec, target: ^$T, opts := json.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
-unmarshal_plan :: proc(src: []u8, spec: json.Spec, target: ^$T, plan: ^typed.Plan, opts := json.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
+unmarshal_once :: proc(src: []u8, $S: json.Spec, target: ^$T, opts := json.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
+unmarshal_plan :: proc(src: []u8, $S: json.Spec, target: ^$T, plan: ^typed.Plan, opts := json.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
 
-json.plan_make  :: proc(T: typeid, spec := json.Spec.Json, opts := json.Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error)
+json.plan_make  :: proc(T: typeid, spec := json.Spec.Json, opts := json.Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error)
 typed.plan_make :: proc(T: typeid, as: core.As, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error)
 typed.plan_destroy :: proc(p: ^typed.Plan)
 
-dsv.unmarshal :: proc {unmarshal_once, unmarshal_plan}
-unmarshal_once :: proc(src: []u8, spec: dsv.Spec, target: ^$T, opts := dsv.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
-unmarshal_plan :: proc(src: []u8, spec: dsv.Spec, target: ^$T, plan: ^typed.Plan, opts := dsv.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
-
-dsv.plan_make :: proc(T: typeid, spec := dsv.Spec.Csv, opts := dsv.Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error)
 ```
 
-`S` is `.Json`, `.Jsonc` or `.Json5`, or for dsv `.Csv`, `.Tsv` or `.Plain`, and `opts` the walk's own options, as for
-`build`. The argument order follows the path entries.
+`dsv.unmarshal` and `dsv.plan_make` have the same shape over `dsv.Spec` and `dsv.Options`. `S` is a constant `.Json`, `.Jsonc` or `.Json5`, or for dsv `.Csv`, `.Tsv` or `.Plain`, and `opts` the walk's own options, as
+for `build`. `reads` (`json.reads(S)`) lets the plan read a `core.Value`.
 
 A built document is read by one call for every format, in `core/typed`:
 
@@ -50,19 +46,11 @@ reader and writer given it. A plan for another type or format is `.Plan_Mismatch
 plan `json.plan_make` or `dsv.plan_make` gives. dsv's checks that the type is a list of rows or a row, and a dsv read
 refuses a plan from `typed.plan_build`, the plan with nothing a format adds, as `.Plan_Mismatch`.
 
-```odin
-Plan_Options :: struct {
-	enums:     Enum_Spelling, // .Name reads a member's name, .Int its backing integer
-	union_tag: string,        // the member that names a struct arm of a union
-	tag_names: []Tag_Name,    // names that replace the arms' type names
-	hooks:     []Type_Hook,   // types read by the caller's proc
-	rename:    Rename,        // .None, .Camel, .Pascal, .Kebab or .Screaming, for a field with no name in its tag
-}
-```
-
-`plan_make` refuses a type it cannot read, with the path of member names to it: `.Unsupported`, `.Ambiguous_Union` or `.Bad_Tag`.
-The refused plan holds that error in `err`, and a read or write given it returns it. The strings and slices of `opts` are
-read during the call only.
+`Plan_Options` sets how enums are spelled (`enums`: `.Name` or `.Int`), the member that names a union's struct arm
+(`union_tag`) and the names that replace the arms' type names (`tag_names`), the types read by the caller's procs
+(`hooks`), and a field renaming for a field with no name in its tag (`rename`: `.Camel`, `.Pascal`, `.Kebab`, `.Screaming`
+or `.Snake`). `plan_make` refuses a type it cannot read, with the path of member names to it: `.Unsupported`,
+`.Ambiguous_Union` or `.Bad_Tag`. The refused plan holds that error in `err`, and a read or write given it returns it.
 
 ## Fields and tags
 
@@ -78,8 +66,10 @@ Item :: struct {
 
 - The value is `name,flag,flag`. `-` leaves the field out. An empty name keeps the field's own, renamed by
   `Plan_Options.rename`. In the name a backslash makes the next byte literal, so a comma is `\,` and a backslash `\\`.
-- `omitempty` is a writer's flag, see `docs/writer.md`, and a read accepts it and does nothing with it. `required` makes an absent member `.Missing_Field`, and with `omitempty` on the same member the plan is `.Unsupported`, since the write would leave out what the read then finds missing. `unknown` on a
-  `map[string]Raw` field captures every member the type does not name, and `required` on it is `.Bad_Tag`, as is any other flag.
+- `omitempty` and `omitunset` are writer flags, see [writer.md](writer.md), and a read accepts them and does nothing with
+  them. `required` makes an absent member `.Missing_Field`, and `required` with either of them on one member is
+  `.Unsupported`, since the write would leave out what the read then finds missing. `unknown` on a `map[string]typed.Raw` field
+  captures every member the type does not name. `required` or any other flag on it is `.Bad_Tag`.
 - An absent member keeps what the target holds. That is how defaults work: fill the target, then read.
 - `Read_Options.unknown` is `.Ignore` or `.Refuse`, which makes a member the type does not name `.Unknown_Field`.
   Capture takes the member first.
@@ -109,21 +99,18 @@ Item :: struct {
 | union | the arm its value's class picks, or under `union_tag` the arm its tag names |
 | a type in `Plan_Options.hooks` | any value, through the hook, so as a union's arm it takes every class and shares them with the other arms |
 
-Refused at the plan: `f16`, 128-bit integers, `rune` as a text, other-endian numbers, `#raw_union`, `#soa`, a list or
-fixed array whose element has no size, a type of 4 GiB or more, and the rest of Odin's kinds that hold no data a text spells.
+`plan_make` refuses `f16`, 128-bit integers, `rune` as a text, other-endian numbers, `#raw_union`, `#soa`, and the rest of
+Odin's kinds that hold no data a text spells.
 
 - `null` is a value for `^T`, `Maybe`, `any`, `Raw`, `cstring` (nil), `Number_Text` (empty), `Scalar`, a union with a nil, and a hook. Every
   other target refuses it as `.Wrong_Kind`, a struct, a list and a map included.
 - Two arms of a union may not take one class of value. Named struct arms share objects only under `union_tag`, and no
-  member of an arm may have its key, by tag, `rename` or a `using` member. An object with no tag member is `.Missing_Tag`, with two `.Repeated_Tag`, and a name
-  no arm has `.Not_A_Member`. A model's union of several arms refuses each of these, and a value of a kind no arm takes,
-  as `.No_Arm`, the kind its schema's `anyOf` gives.
+  member of an arm may have its key. An object with no tag member is `.Missing_Tag`, with two `.Repeated_Tag`, and a name
+  no arm has `.Not_A_Member`.
 - A repeated member follows `Read_Options.dups`: `.Last` by default, `.First`, or `.Refuse`. `.All` is `.Bad_Option`.
   Under `.Last` a repeat that opens a struct, map or array, or fills a pointer, `Maybe`, union or `any`, resets the
-  member first. Any other repeat is stored over the earlier value, so a hook's `dest` holds it and a refused repeat
-  leaves it. `.First` still judges the later value against the type, and keeps the first of a repeated unknown member a `unknown`
-  field captures (a key the destination's map already holds counts as met). `.Refuse` reads the whole text once first, into a
-  temporary document, and is `.Duplicate_Key` on any repeat anywhere in it, skipped members included.
+  member first. `.First` still judges the later value against the type. `.Refuse` notes the keys of every object the
+  read walks, skipped members included, and is `.Duplicate_Key` on any repeat anywhere in the text, as the only refusal.
 - A path is not an entry: a text is read from its root, and a path's value from the answer it gave.
 
 ## Strings and who owns them
@@ -132,17 +119,14 @@ A string, `Raw`, `Number_Text`, `Bytes` and map key are copied with the read's a
 with nothing to decode, and a `Raw`, `Number_Text` or a binary format's `Bytes` not in chunks, a slice of `src`, so `src` must outlive the target. A string with an
 escape is always decoded into the allocator, and `Bytes` from base64 text is always a copy, which the caller frees with `delete`.
 
-The fastest form is an arena allocator with `borrow_strings`. To free the input after such a read, or to keep a read's
-strings independent of a large buffer, read without `borrow_strings`, or clone `src` into the same arena first and read
-from the clone: the arena then owns everything, and a single free ends both.
+The fastest form is an arena allocator with `borrow_strings`. To free the input after such a read, read without
+`borrow_strings`, or clone `src` into the same arena first and read from the clone.
 
-A read allocates lists, maps, pointers and strings with `allocator`. The read does not know what the target held, so
-it frees only what it stored itself and a later repeat replaces: a string member's text, and a map entry's key copy and
-text in a map that was empty when the read opened it. Any other value a repeat replaces, a list, map, pointer or `any`,
-is left to the allocator, and an arena is the advised allocator for any text not trusted to be free of repeats.
-`unmarshal` with no plan builds its plan with `context.allocator` and frees it. A decoded key's text, an error's
-names go to `context.temp_allocator` in both forms, and the frames of a raised `max_depth` to the default heap, freed
-when the read returns.
+A read allocates lists, maps, pointers and strings with `allocator`. The read does not know what the target held, so it
+frees only a string or map entry it stored itself and a later repeat replaces. Any other value a repeat replaces is left
+to the allocator, and an arena is the advised allocator for any text not trusted to be free of repeats. `unmarshal` with no
+plan builds its plan with `context.allocator` and frees it. A decoded key's text and an error's names go to
+`context.temp_allocator`.
 
 ## Refusal
 
@@ -158,20 +142,15 @@ Typed_Error :: struct {
 }
 ```
 
-`Typed_Error` is the arm of `core.Error` a read or a write returns. A reader, a writer and a sink hold the same fields
-as a `Typed_Refusal`, whose path is in line (`steps[:n_steps]` of `[MAX_ERROR_STEPS]Step`), so a refusal allocates
-nothing until `core.error_of` copies the path for the caller, to `context.temp_allocator`, or to the reader's own
-memory for a record read in a loop, where it lasts until the next call on the reader.
+`Typed_Error` is the arm of `core.Error` a read or a write returns. A refusal allocates nothing until `core.error_of`
+copies its path for the caller, to `context.temp_allocator`.
 
-`at` is the value's byte, a string's opening quote for a string. `steps` is the path from the target, the
-innermost `MAX_ERROR_STEPS` (8) when `truncated` says more were cut. A step's name lives as long as `src` or the plan,
-or, for a decoded key, as long as `context.temp_allocator`'s block. `detail` holds one of three by kind: `.Walk`'s fault
-in `inner`, the two formats or the plan's type a `.Plan_Mismatch` met in `plans`, and `want` for the rest. `want.type`
-is the type a `.Wrong_Kind`, `.Above_Maximum`, `.Below_Minimum`, `.Out_Of_Range` or `.Not_A_Member` read wanted, `found` the kind of the value, and
-`want.text` the scalar's source text. `want.text` is also the flag a `.Bad_Tag` names and why a type is
-`.Unsupported` or a union `.Ambiguous_Union`. `core.render` and `core.write_code` take the error, as they do every other
-error of the library, and the path renders as path text, `.[0].population`. A write returns the same type, see
-`writer.md`.
+`at` is the value's byte, a string's opening quote for a string. `steps` is the path from the target, the innermost
+`MAX_ERROR_STEPS` (8) when `truncated` says more were cut. `detail` holds by kind the `.Walk` fault in `inner`, the two
+formats or the plan's type a `.Plan_Mismatch` met in `plans`, or `want` for the rest: the type a read wanted, `found` the
+kind of the value, and the scalar's source text. `core.render` and `core.write_code` take the error, as they do every
+other error of the library, and the path renders as path text, `.[0].population`. A write returns the same type, see
+[writer.md](writer.md).
 
 ```
 1:12: Expected i64, found string at .user_id
@@ -188,10 +167,11 @@ Plan is for json, the read is csv
 | `.Out_Of_Range` | a value other than a number past what the target holds: a map key that spells no integer, a cstring with a NUL |
 | `.Not_A_Member` | a name or number no enum or union arm has |
 | `.Too_Few`, `.Too_Many` | an element count a fixed array or capacity does not take |
+| `.Wrong_Length` | a delimited row holds more cells than its type, or a second record where one row is read |
 | `.Missing_Field` | a `required` member is absent, the last step names it |
 | `.Unknown_Field` | a key the type does not name under `.Refuse` |
 | `.Missing_Tag`, `.Repeated_Tag` | a union's tag member absent or repeated |
-| `.Duplicate_Key` | `.Refuse` met a repeat |
+| `.Duplicate_Key` | `.Refuse` met a repeat. A text read returns it as a `Fault` of that kind, code `duplicate_key` |
 | `.No_Memory` | the allocator failed |
 | `.Bad_Option`, `.Plan_Mismatch` | a nil target, a plan for another type or format, at no byte |
 | `.Unsupported`, `.Ambiguous_Union`, `.Bad_Tag` | `plan_make`'s refusals, at no byte |
@@ -200,24 +180,12 @@ The default sink stops at the first refusal. A refused read leaves the target pa
 refusal holds its elements so far, so all the read allocated is reachable from the target. What a refused read left is
 otherwise not a contract.
 
-```odin
-Sink :: struct {
-	errors:     [dynamic]core.Typed_Refusal,
-	entries:    [dynamic]core.Error_Entry, // what a `check_text` read reports
-	max_errors: int,  // 100 for 0
-	record:     i64,  // the record index an entry takes
-	truncated:  bool, // set past max_errors
-	fatal:      core.Typed_Refusal, // the fault that ended a read, kept whatever max_errors drops
-}
-```
-
-`Read_Options.sink` reads past a refusal. Each goes into `errors`, and the walk passes over the refused value and
-still judges it. A member keeps what it held, and a list's element is zero. A `.Walk` fault ends the read. The returned
-error is the first refusal. The caller frees the arrays with `sink_destroy`, which use their own allocator, the read's
-when they have none.
+`Read_Options.sink`, a `Sink`, reads past a refusal. Each goes into `errors` (up to `max_errors`, 100 for 0), and the walk
+passes over the refused value and still judges it. A member keeps what it held, and a list's element is zero. A `.Walk` fault ends the read. The returned
+error is the first refusal. The caller frees the arrays with `sink_destroy`.
 
 `check_text` reads the same way and adds a `core.Error_Entry` to `entries` for each refusal: its byte span, the record,
-and the path of any depth with its names copied. It needs a plan of a format that has a check read.
+and the path with its names copied. It needs a plan of a format that has a check read.
 
 ## From a document
 
@@ -227,7 +195,9 @@ a text: the same fields, tags, refusals, `Typed_Error` and sinks, and the same v
 it nothing but the handle `doc.as` its document holds.
 
 - The plan must be built for the type of `target` and the document's format, else `.Plan_Mismatch`. A nil plan is
-  one `typed.plan_make(T, doc.as)` builds and frees for the call.
+  one `typed.plan_make(T, doc.as)` builds and frees for the call. That needs a handle with services: a document built with
+  `core.build(src, json.as(S))` takes a nil plan, and one built with `json.build(src, S)` gives `.Bad_Option`, so pass a
+  plan from `json.plan_make`.
 - `.Bad_Option` is a nil document, target or a document with no format, a node past the document or a key, an answer
   that is not `.Found`, and `.Refuse`. A document that holds no repeated key is built under `.Refuse`, and a repeat it
   kept reads by `Read_Options.dups`.
@@ -236,25 +206,17 @@ it nothing but the handle `doc.as` its document holds.
   has. Reading its root gives the kept members and elements, in order.
 
 A read borrows `doc.src` and nothing of the document itself. With `borrow_strings` a string with nothing to decode is a
-slice of `doc.src`, which must outlive the target. Every other string, a decoded one included, and every list, map and
-pointer is the read's `allocator`'s. So the target outlives `core.destroy(&doc)`, and a document is destroyed as soon as
-its values are read.
+slice of `doc.src`, which must outlive the target. Every other string and every list, map and pointer is the read's
+`allocator`'s, so the target outlives `core.destroy(&doc)`.
 
-A delimited document reads as its text does, through `dsv`'s own hook, since a cell has no kind of its own: the value is
-the one `dsv.unmarshal` gives over the same text, and a refusal the same refusal. The format gives it as
-`Plan.node_read`, which `dsv.plan_make` sets and `typed.unmarshal` calls for a plan of the document's format. The node read is the root, which reads as
-the list of rows, or a record, which reads as a list of that one row. A cell is `.Unsupported`, since `dsv.plan_make`
-refuses a type that is no list of rows. A list of rows reads the header row as its first row, as the text does.
+A delimited document reads as its text does, through `dsv`'s own hook, since a cell has no kind of its own: the value and
+the refusals are those of `dsv.unmarshal` over the same text. The node read is the root, which reads as the list of rows,
+or a record, which reads as a list of that one row. A cell is `.Unsupported`. A partial delimited document has no shared
+keys: a headed record binds its columns from the keys beside the cells it kept, so a field no kept cell names keeps its
+value.
 
-A partial delimited document has no shared keys. A headed record binds its columns from the keys beside the cells it
-kept, so a field no kept cell names keeps its value. A record kept by position reads a cell it did not keep as an empty
-unquoted one, which is absent, and a list row holds it as an empty string.
-
-For a plan without `node_read`, the read is the hook of a read of a text, fed by `build.feed_nodes` from `doc.nodes`. The replay restores each `End` from a
-stack of container ends and each key a record shares from the table's header, which is how a path query over a document
-is fed too. The read gives the hook what the walk would have: a partial container is a value, a close has its bracket's
-byte where a refusal, a `required` check or a value read whole reads it, and a plain number has its digits folded in
-`Reader.mant`. A union that reads by its tag finds the member by replaying the object alone.
+For any other plan, the read is the hook of a read of a text, fed by `build.feed_nodes` from `doc.nodes`, which is how a
+path query over a document is fed too.
 
 ## Hooks
 
@@ -266,51 +228,37 @@ Hook_Value :: struct {
 }
 Unmarshal_Hook :: #type proc(v: Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Typed_Error_Kind)
 Marshal_Hook :: #type proc(v: rawptr, allocator: runtime.Allocator) -> (stand_in: any, refuse: core.Typed_Error_Kind)
-Type_Hook :: struct { type: typeid, read: Unmarshal_Hook, write: Marshal_Hook }
+Type_Hook :: struct { type: typeid, read: Unmarshal_Hook, write: Marshal_Hook, data: rawptr, carrier: typeid }
 ```
 
 A hook reads one whole value of its type, containers included. `dest` holds what the target held. `text` and `decoded`
-live for the call. Nil reads the value, and a kind refuses it at the value's byte.
+live for the call. A nil return reads the value, and a kind refuses it at the value's byte. A nil `read` or `write`
+refuses the type on that side as `.Unsupported`. `data` is `context.user_ptr` during a call when it is not nil. `carrier`
+is a type whose values are the values `read` takes, which a union's arm of the hook's type picks by, nil for a hook that
+takes every value.
 
 ## The read
 
-The read is a walk hook, `on_token`, on the same walks as `build`. Its state is in `Hook_Regs`:
+The read is a walk hook, `on_token`, on the same walks as `build`. Its state is three registers: the end of the open
+list's capacity, the record that reads the next value, and the struct or list being filled.
 
-| Register | Holds |
-|---|---|
-| `a` | one past a list's capacity, or `NO_LIMIT` outside a list, so one compare guards every value |
-| `b` | the record after the one that reads the next value |
-| `c` | the struct being read, or the list's next element |
-
-- A plan's records sit in order, a struct's members then a `Never` record, so `b` moves one record per member in the
-  type's order and a value needs no lookup. `Reader.expect` tells the walk that `b` points at an `Expected_Key` record:
-  the walk compares a key's bytes against it before the key scan and moves `b` on a match. See `docs/walk.md`.
-- A key that misses reaches `on_key`, which finds the member by a linear pass behind a one-word filter (`Meta.names`)
-  and starts tracking which members were read, in `Frame.seen`. Until then the cursor says.
-- A number's digits fold into `Reader.mant` during the walk, which needs a hook field of that name. The store is hot
-  for `i64`, `u64`, `f64` and the smaller integers.
+- A plan's records sit in order, a struct's members then a `Never` record, so the record register moves one record per
+  member in the type's order and a value needs no lookup. The walk compares a key's bytes against the expected record
+  before the key scan and moves on a match. See [walk.md](walk.md).
+- A key that misses reaches `on_key`, which finds the member by a linear pass behind a one-word filter and starts tracking
+  which members were read.
+- A number's digits fold into `Reader.mant` during the walk, which needs a hook field of that name.
 - A kind past `F64` fails every hot compare and goes to `indirect`. A type that holds none of them pays nothing for
-  them, and neither does a type with no out-of-order key. Rare work is `@(cold)` and not inlined, and a value's open
-  takes no call.
+  them. Rare work is `@(cold)` and not inlined, and a value's open takes no call.
 - Under `.First`, a repeat is read into scratch by `Plan.solo`'s records, so it is judged and dropped.
-- `Frame.owner` and `Frame.target` say where a container's list header goes when a wrapper (`Ptr`, `Maybe`, union,
-  `any`) holds it, so the hot close stays a struct's or a list's.
 
 ## What a format gives
 
-| Piece | Purpose |
-|---|---|
-| `Readers.tag_key` | the format's struct tag key |
-| `Readers.key_open`, `key_close` | what a key is written between, empty for a format whose keys the hook finds itself |
-| `Readers.key_bytes` | the bytes a member's key is written with, for a binary format, which the plan compares in place of `key_open + name + key_close` |
-| `Readers.binary` | that a `String` token is never bytes, so `Bytes` refuses it |
-| a walk calling `$on` with `Hook_Regs` | tokens. `expect` and `mant` on the hook are used when the format's walk has them |
-| `find_tag` on the `Reader` | the member `union_tag` of an object at a byte, by a walk with `on_tag_token` |
-| an entry | builds a stack of `MAX_DEPTH + 2` `Frame`s, calls `read_start`, the walk and `read_end` |
-| `Readers.text`, `close_end` | a decoded string, and a container's closing byte, for a read of a document |
-
-A format with unquoted tokens handles them before the hook, which has no `.Plain` case. A format that needs the
-original spelling of a number (JSON5) uses `on_token_spelled`.
+A format supplies the walk, which calls the hook with the hook's registers, and its `Readers`: `tag_key`, the struct tag
+key, `key_open` and `key_close`, what a key is written between, `key_bytes` and `binary` for a binary format, and `text`
+and `close_end` for a read of a document. The entry builds a stack of `MAX_DEPTH + 2` frames and calls `read_start`, the
+walk and `read_end`. A format with unquoted tokens handles them before the hook, which has no `.Plain` case, and one that
+needs the original spelling of a number (JSON5) uses `on_token_spelled`.
 
 ## Delimited text
 
@@ -320,7 +268,7 @@ text `dsv.marshal` writes of it. A row is a struct whose fields the header names
 `T` as `.Unsupported`, and a cell of a type with no text: nested containers, pointers, `any`, `Raw`, `Number_Text`, `Number`,
 `Scalar`, `rune`, a union of more than one arm. `Maybe` of a cell type reads.
 
-A cell has no kind of its own, so `dsv/typed.odin` reads it by its column's field, before the hook sees a token. The
+A cell has no kind of its own, so dsv reads it by its column's field, before the hook sees a token. The
 columns are bound once, when the walk reaches the first record, or the text's end, so the header takes no second pass.
 
 | Cell | Reads as |
@@ -333,32 +281,20 @@ columns are bound once, when the walk reaches the first record, or the text's en
 | enum | its name, or with `enums = .Int` its value |
 | string, `cstring`, hook | the cell's decoded text |
 
-- With a header, a column no field names passes, or under `.Refuse` is `.Unknown_Field` at its header cell, its name
-  as spelled. A required field no column names is `.Missing_Field` at the header's first byte, ahead of any fault in the
-  records.
-- A repeated column reads as its last occurrence, as its first under `.First`, and `.Refuse` makes it
-  `.Duplicate_Key` at the repeat. The other occurrence's cells are read into a scratch value, so they are judged against
-  the field's type as a skipped repeat is in JSON.
-- Under `.Ragged` a wide record's cell past the header's last is the column named by its 1-based position, which the
-  read binds when the first record that wide reaches it. A refusal for that column (`.Unknown_Field`,
-  `.Duplicate_Key`) is at the header's first byte. A header cell of the same name still reads a narrower record's
-  cell, and in a wide record the duplicate policy picks between the two.
+- With a header, a column no field names passes, or under `.Refuse` is `.Unknown_Field` at its header cell. A required
+  field no column names is `.Missing_Field` at the header's first byte, ahead of any fault in the records.
+- A repeated column reads as its last occurrence, as its first under `.First`, and `.Refuse` makes it `.Duplicate_Key` at
+  the repeat.
+- Under `.Ragged` a wide record's cell past the header's last is the column named by its 1-based position. A refusal for
+  that column is at the header's first byte.
 - `no_header` reads a struct's fields in order. A list row takes every record, with or without `no_header`. A map row
-  needs a header, and `no_header` on one is `.Unsupported`, in a write as in a read. A plan of a row reads a built
-  document as it reads a text: the first record, and a later one is `.Wrong_Length`.
-- A text with a header and no record leaves an empty list, and a row as it was. A text with no header line where one is wanted leaves the
-  target as it was.
-- A row's path is its index, then the field or key. Two faults in one row refuse by the first in the text, since a cell
-  is read as the walk passes it.
-- A row keeps the cells read before a walk's fault, so a refused read's allocations stay reachable from the target.
-- A map row's keys are owned per map unless the read borrows, as JSON's are. A decoded key is always a copy.
+  needs a header, and `no_header` on one is `.Unsupported`, in a write as in a read.
+- A text with a header and no record leaves an empty list, and a row as it was.
+- A row's path is its index, then the field or key.
 
 ## Limits
 
-- Depth is the walk's: `MAX_DEPTH`, or `Options.max_depth`. Past `MAX_DEPTH` the frames grow on the default heap
-  with the depth the text reaches, not with its length, and so do a document read's.
-- A struct tracks 63 members in a word and the rest in a block from the read's allocator, allocated only when a key
-  arrives out of order past the 63rd.
-- `.First` on a map tracks keys in a temporary map.
+- Depth is the walk's: `MAX_DEPTH`, or `Options.max_depth`. Past `MAX_DEPTH` the frames grow on the default heap with the
+  depth the text reaches, not with its length.
 - `.Refuse` builds a document on JSON, so it costs one on top of the read. dsv checks the header alone.
 - Nothing is global: a read's state is its `Reader` and its frames.

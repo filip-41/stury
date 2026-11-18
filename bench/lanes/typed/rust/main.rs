@@ -1,5 +1,5 @@
 // `typed-rust LANE FILE borrow|copy LIB`: each job makes WARMUP + TIMED reads of one file into the fixture's struct type,
-// chosen by the lane's name. GB/s counts the source's bytes. LIB is `serde` (serde_json) or `sonic` (sonic-rs), and LANE
+// chosen by the lane's name. GB/s counts the source's bytes. LIB is `serde` (serde_json), `sonic` (sonic-rs) or `toml` (the toml crate, on a `.toml` file), and LANE
 // `logs`, `twitter` or `citm`. `copy` reads every string into
 // a `String`, and `borrow` into a `Text`, borrowed from the input when it has no escape. `check` folds the value read, as
 // the probe's does: an object's members sorted by key, then each value's kind and bytes.
@@ -9,6 +9,8 @@ use std::hint::black_box;
 
 use timing::{CHECK_OFFSET, fnv_bytes as fold_bytes, fnv_u64 as fold_u64, report, time_runs};
 use typed_rust::*;
+
+mod cbor;
 
 fn fold_text(h: u64, s: &str) -> u64 {
     fold_bytes(fold_u64(fold_bytes(h, b"s"), s.len() as u64), s.as_bytes())
@@ -37,6 +39,8 @@ fn read<'a, T: Deserialize<'a> + Serialize>(lib: &str, data: &'a [u8]) -> Result
         match lib {
             "serde" => serde_json::from_slice(black_box(data)).map_err(|e| e.to_string()),
             "sonic" => sonic_rs::from_slice(black_box(data)).map_err(|e| e.to_string()),
+            "yaml" => serde_yaml_ng::from_slice(black_box(data)).map_err(|e| e.to_string()),
+            "toml" => toml::from_slice(black_box(data)).map_err(|e| e.to_string()),
             _ => Err(format!("unknown LIB {lib}")),
         }
     })?;
@@ -50,6 +54,9 @@ fn run(args: &[String]) -> Result<(), String> {
         return Err("usage: typed-rust logs|twitter|citm FILE borrow|copy serde|sonic".into());
     };
     let data = std::fs::read(file).map_err(|e| e.to_string())?;
+    if matches!(lib.as_str(), "ciborium" | "minicbor") {
+        return cbor::run(lane, &data, mode, lib);
+    }
     match (lane.as_str(), mode.as_str()) {
         ("logs", "copy") => read::<Logs>(lib, &data),
         ("logs", "borrow") => read::<Logs<Text>>(lib, &data),

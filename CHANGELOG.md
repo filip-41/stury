@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-11-18)
 
 ### Library
 
@@ -21,12 +21,29 @@
   value found, and a writer's refusal names its reason in the format's words.
 - A format package takes its spec in `format`, as `json.format(src, .Json5)`, and forwards `comment`, `end_record`,
   `reorder` and `set_facts`. The edit list's setter is `write.set_node` in every format.
-- `core/records` reads and writes records of every format, including CSV and TSV through `records.Writer` with
-  `Write_Options.grow_header`, and reads the records under a path of keys with `.Entries`.
+- `core/records` reads and writes records of every format, into documents or typed values, including CSV and TSV
+  through `records.Writer` with `Write_Options.grow_header`, and reads the records under a path of keys with `.Entries`.
 - A repeated key follows one `dups` field of the read's options in every format.
 - A hex, octal or binary integer, or one with underscores, compares equal to its decimal.
 - JSON's walk passes its state in registers between states, a compact write drops blanks with `vpcompressb` on an
   Intel CPU with AVX512-VBMI2, and a map of 1024 keys or more is written sorted by a radix sort.
+- `unmarshal` of TOML, and of YAML whose members read from their tokens alone, builds no document. A TOML path read
+  under `stop_early` parses only the statements its answer needs.
+- A TOML or XML build walks its text once. A TOML table tree keeps its comments apart, and an HTML tree grows in chunks
+  that are never copied, so both builds hold less memory.
+- A typed TOML write lays out its tables in one pass and writes a bare key bare, and a typed XML write writes its
+  elements with no value built in between.
+- A document read from CBOR, YAML, XML or TOML is written without examining again what its read already judged: a CBOR
+  string or small integer, a YAML plain or single-quoted scalar and a TOML basic string are copied as they were read.
+  A TOML basic string keeps its escapes, as a JSON string does, unless `respell_strings` or `ascii` is set.
+- An HTML write and an HTML edit check what they wrote by comparing the tree it reads back, with no second write.
+- A query over a built document stops reading an array once the element or the first key its step picks has passed.
+- `records.validate` reads a YAML stream or a CBOR sequence in pieces on threads, and a CBOR sequence's items are
+  judged by the walk that frames them.
+- A JSON Schema whose `anyOf`, `oneOf`, `not` or `if` arms read only member names and those members' own values is
+  judged with no branch run for them, and `unevaluatedProperties` beside such arms is settled when the schema compiles.
+- A buffer output starts at 1 KiB, and a compact write reserves no room for line breaks, so many small writes into one
+  arena hold less memory.
 
 ### Command line
 

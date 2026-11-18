@@ -1,0 +1,54 @@
+[lane]
+legend = "Each call loads or dumps every record of the file, one JSON record to a line. GB/s is the source's bytes over time (the bytes written, for dump): the best of {rounds} rounds of each arm's median of ten calls after two warm-ups. The Python arms run in the harness's interpreter with the collector off, and the objects they build count as their job."
+
+# The same rules sit in each arm, written in its library's way: bounds, lengths and patterns on most members, every
+# member required but two that have a default. stury reads with `model.load`, which judges as it reads, pydantic with
+# `model_validate_json`, msgspec with a `Struct` of `Meta` constraints, and serde_json with garde decodes first and then
+# judges. A refused record gives every failure it holds in `load`, which stury, pydantic and garde can list. msgspec
+# stops at the first failure of a record, and so does `first`, which stury also has (a load with no sink), so the two
+# are timed there. The check is the count of accepted records, the sum of one member over them, and how many records
+# refused each member path.
+
+[arm]
+stury = { source = "stury", args = ["{shape}", "{file}", "{mode}"] }
+pydantic = { source = "pydantic_arm.py", args = ["{shape}", "{file}", "{mode}"] }
+msgspec = { source = "msgspec_arm.py", args = ["{shape}", "{file}", "{msgspec_mode}"] }
+garde = { source = "rust", args = ["{shape}", "{file}", "{mode}"] }
+
+[[group]]
+title = "load valid"
+rss = true
+variant = [{ mode = "load", msgspec_mode = "first" }]
+rows = [
+	{ label = "logs", shape = "logs", file = "model/logs.valid.ndjson" },
+	{ label = "twitter", shape = "twitter", file = "model/twitter.valid.ndjson" },
+]
+
+[[group]]
+title = "load invalid, every failure"
+arms = ["stury", "pydantic", "garde"]
+rss = true
+variant = [{ mode = "load" }]
+rows = [
+	{ label = "logs", shape = "logs", file = "model/logs.invalid.ndjson" },
+	{ label = "twitter", shape = "twitter", file = "model/twitter.invalid.ndjson" },
+]
+
+[[group]]
+title = "load invalid, first failure"
+arms = ["stury", "msgspec"]
+rss = true
+variant = [{ mode = "first", msgspec_mode = "first" }]
+rows = [
+	{ label = "logs", shape = "logs", file = "model/logs.invalid.ndjson" },
+	{ label = "twitter", shape = "twitter", file = "model/twitter.invalid.ndjson" },
+]
+
+[[group]]
+title = "dump"
+rss = true
+variant = [{ mode = "dump", msgspec_mode = "dump" }]
+rows = [
+	{ label = "logs", shape = "logs", file = "model/logs.valid.ndjson" },
+	{ label = "twitter", shape = "twitter", file = "model/twitter.valid.ndjson" },
+]

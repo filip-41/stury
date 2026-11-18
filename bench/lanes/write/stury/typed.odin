@@ -7,7 +7,9 @@ import "core:mem/virtual"
 import "core:os"
 import "core:time"
 import core "../../../../core"
+import "../../../formats"
 import "../../../timing"
+import typed "../../../../core/typed"
 import write "../../../../core/write"
 import records "../../../../core/records"
 import json "../../../../json"
@@ -21,6 +23,12 @@ Log_Record :: struct {
 }
 Logs :: struct {
 	logs: []Log_Record,
+}
+// The records of logs.xml: a `logs` element of `log` elements.
+Logs_Xml :: struct {
+	logs: struct {
+		log: []Log_Record,
+	},
 }
 Tweet_Metadata :: struct {
 	result_type, iso_language_code: string,
@@ -92,20 +100,24 @@ Nested_Record :: struct {
 	ok:     bool,
 }
 
-typed_lane :: proc(src: []u8, name: string, pretty, dump: bool) {
+typed_lane :: proc(src: []u8, name: string, pretty, dump: bool, kind: formats.Kind) {
 	switch name {
 	case "logs":
-		lane(Logs, src, pretty, dump)
+		if kind == .Xml {
+			lane(Logs_Xml, src, pretty, dump, kind)
+		} else {
+			lane(Logs, src, pretty, dump, kind)
+		}
 	case "twitter":
-		lane(Twitter, src, pretty, dump)
+		lane(Twitter, src, pretty, dump, kind)
 	case "citm_catalog":
-		lane(Citm, src, pretty, dump)
+		lane(Citm, src, pretty, dump, kind)
 	case "canada":
-		lane(Canada, src, pretty, dump)
+		lane(Canada, src, pretty, dump, kind)
 	case "nested":
-		lane([]Nested_Record, src, pretty, dump)
+		lane([]Nested_Record, src, pretty, dump, kind)
 	case "wide":
-		lane(map[string]i64, src, pretty, dump)
+		lane(map[string]i64, src, pretty, dump, kind)
 	case:
 		fmt.eprintln("no type for", name)
 		os.exit(2)
@@ -129,14 +141,57 @@ fixed_output_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alig
 	return nil, nil
 }
 
-// With `dump`, the pass is `model.dump` of the value by a model of `T` with no rules, in place of `write.marshal`.
-lane :: proc($T: typeid, src: []u8, pretty, dump: bool) {
-	value: T
-	if err := json.unmarshal(src, .Json, &value); err != nil {
-		fmt.eprintln("read:", err)
-		os.exit(1)
+// A writer that takes more than one block from its allocator, as TOML's does, gets each from the bytes in turn. A pass
+// starts again at the first byte, so every pass writes over the same bytes.
+Bump_Output :: struct {
+	bytes: []u8,
+	used:  int,
+}
+
+bump_output_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, align: int, old: rawptr, old_size: int, loc := #caller_location) -> ([]byte, runtime.Allocator_Error) {
+	b := (^Bump_Output)(data)
+	#partial switch mode {
+	case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
+		at := mem.align_forward_int(b.used, max(align, 1))
+		if at + size > len(b.bytes) {
+			return nil, .Out_Of_Memory
+		}
+		b.used = at + size
+		block := b.bytes[at:at + size]
+		if old != nil {
+			copy(block, ([^]u8)(old)[:min(old_size, size)])
+		}
+		return block, nil
 	}
-	plan, perr := json.plan_make(T, plan = {}, allocator = context.allocator)
+	return nil, nil
+}
+
+// With `dump`, the pass is `model.dump` of the value by a model of `T` with no rules, in place of `write.marshal`.
+lane :: proc($T: typeid, src: []u8, pretty, dump: bool, kind: formats.Kind) {
+	value: T
+	if kind == .Json {
+		if err := json.unmarshal(src, .Json, &value); err != nil {
+			fmt.eprintln("read:", err)
+			os.exit(1)
+		}
+	} else {
+		reading, rerr := formats.plan(T, kind)
+		if rerr != nil {
+			fmt.eprintln("plan:", rerr)
+			os.exit(1)
+		}
+		if err := typed.unmarshal_text(src, &value, T, &reading, {}, context.allocator); err != nil {
+			fmt.eprintln("read:", err)
+			os.exit(1)
+		}
+	}
+	plan: typed.Plan
+	perr: core.Error
+	if kind == .Json {
+		plan, perr = json.plan_make(T, plan = {}, allocator = context.allocator)
+	} else {
+		plan, perr = formats.plan(T, kind, true)
+	}
 	if perr != nil {
 		fmt.eprintln("plan:", perr)
 		os.exit(1)
@@ -148,6 +203,10 @@ lane :: proc($T: typeid, src: []u8, pretty, dump: bool) {
 	}
 	output := Fixed_Output{make([]u8, 16 * len(src) + 64 * mem.Kilobyte)}
 	fixed := runtime.Allocator{fixed_output_proc, &output}
+	bump := Bump_Output{bytes = output.bytes}
+	if kind != .Json {
+		fixed = runtime.Allocator{bump_output_proc, &bump}
+	}
 	opts := core.Write_Options{pretty = pretty, indent = 2}
 	times: [timing.TIMED]i64
 	text: []u8
@@ -157,6 +216,7 @@ lane :: proc($T: typeid, src: []u8, pretty, dump: bool) {
 	_ = virtual.arena_init_growing(&scratch)
 	for i in 0 ..< timing.WARMUP + timing.TIMED {
 		context.allocator = virtual.arena_allocator(&scratch)
+		bump.used = 0
 		start := time.tick_now()
 		out: []u8
 		err: core.Error
@@ -176,7 +236,7 @@ lane :: proc($T: typeid, src: []u8, pretty, dump: bool) {
 			times[i - timing.WARMUP] = d
 		}
 	}
-	h := checksum(text)
+	h := checksum(text) if kind == .Json else readback(text, kind)
 	median := timing.median(&times)
 	fmt.printfln("gb_per_s=%.3f best=%.3f ns=%d out=%d check=%d", f64(len(text)) / f64(median), f64(len(text)) / f64(times[0]), median, len(text), h)
 }

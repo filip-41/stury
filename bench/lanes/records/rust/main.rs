@@ -7,6 +7,8 @@ use std::hint::black_box;
 
 use timing::{report, time_runs};
 
+mod cbor;
+
 // Counts the records of a stream, dropping each one as the next is read.
 fn drain<T, E: ToString>(stream: impl Iterator<Item = Result<T, E>>) -> Result<u64, String> {
     let mut n = 0;
@@ -44,6 +46,9 @@ fn run(args: &[String]) -> Result<(), String> {
         return Err("usage: records-rust validate|value|frame FILE serde|sonic|csv".into());
     };
     let data = std::fs::read(file).map_err(|e| e.to_string())?;
+    if matches!(lib.as_str(), "ciborium" | "minicbor") {
+        return cbor::run(job, &data, lib);
+    }
     let (ns, n) = match (lib.as_str(), job.as_str()) {
         ("serde", "value") => time_runs(|| serde_stream::<serde_json::Value>(&data))?,
         ("serde", "validate") => time_runs(|| serde_stream::<IgnoredAny>(&data))?,

@@ -57,7 +57,9 @@ def run(cmd, env=None, timeout=None, cwd=None):
     started."""
     # Files rather than pipes: the wait loop does not read, and an answer past a pipe's buffer would block the child.
     out_file, err_file = tempfile.TemporaryFile("w+"), tempfile.TemporaryFile("w+")
-    p = subprocess.Popen(cmd, stdout=out_file, stderr=err_file, text=True, cwd=cwd, start_new_session=True,
+    # An empty stdin, since a tool that reads stdin when it is open (dasel) would wait on a runner started in the
+    # background.
+    p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out_file, stderr=err_file, text=True, cwd=cwd, start_new_session=True,
                          env={**os.environ, **(env or {})})
     start = time.monotonic()
     while True:

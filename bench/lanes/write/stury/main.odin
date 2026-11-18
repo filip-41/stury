@@ -14,7 +14,8 @@
 // typed.odin.
 //
 // `write typed <file> [pretty]`: `json.marshal` of the file's struct type, chosen by its name, the fields the other
-// libraries' lanes use. One buffer is reused, so a pass counts neither growth nor page faults. GB/s counts output bytes.
+// libraries' lanes use. A `.yaml`, `.toml`, `.xml` or `.cbor` file holds the logs and is written as its own format by the
+// plan of `core`, and then the check is the read check of the text written, see `readback`. One buffer is reused, so a pass counts neither growth nor page faults. GB/s counts output bytes.
 // `write dump <file> [pretty]` is the same lane through `model.dump` by a model of the type with no rules.
 package write_bench
 
@@ -23,6 +24,7 @@ import "core:os"
 import "core:path/filepath"
 import "core:time"
 import core "../../../../core"
+import "../../../formats"
 import "../../../timing"
 import write "../../../../core/write"
 import json "../../../../json"
@@ -30,6 +32,19 @@ import json "../../../../json"
 // FNV-1a of the output text, taken outside the clock.
 checksum :: proc(text: []u8) -> u64 {
 	return timing.fnv_bytes(timing.CHECK_OFFSET, text)
+}
+
+// The check of a text of a format other than JSON, taken outside the clock: the read check of `text` read back as `kind`.
+// Writers of one format spell a value their own ways, so the values are what compares.
+readback :: proc(text: []u8, kind: formats.Kind) -> u64 {
+	doc, err := core.build(text, formats.handle(kind))
+	if err != nil {
+		core.render(os.to_writer(os.stderr), text, err)
+		fmt.eprintln()
+		os.exit(1)
+	}
+	defer core.destroy(&doc)
+	return formats.read_check(&doc)
 }
 
 main :: proc() {
@@ -51,11 +66,15 @@ main :: proc() {
 		return
 	}
 	if os.args[1] == "typed" || os.args[1] == "dump" {
-		typed_lane(src, filepath.stem(os.args[2]), len(os.args) > 3 && os.args[3] == "pretty", os.args[1] == "dump")
+		typed_lane(src, filepath.stem(os.args[2]), len(os.args) > 3 && os.args[3] == "pretty", os.args[1] == "dump", formats.of_path(os.args[2]))
 		return
 	}
 	if os.args[1] == "doc" || os.args[1] == "format" {
-		doc_lane(src, os.args[1] == "format", len(os.args) > 3 && os.args[3] == "pretty")
+		if kind := formats.of_path(os.args[2]); kind >= .Yaml {
+			doc_lane(src, os.args[1] == "format", false, true, kind)
+		} else {
+			doc_lane(src, os.args[1] == "format", len(os.args) > 3 && os.args[3] == "pretty", false, kind)
+		}
 		return
 	}
 	strs, total := strings_of(src)

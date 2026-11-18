@@ -6,19 +6,21 @@ legend = "GB/s is the source's bytes over time (the bytes written, in the write 
 # escapes or number syntax of what it skips. serde_validate and sonic_validate run a StreamDeserializer to IgnoredAny,
 # serde_value and sonic_value to a Value. csv_frame is simd-csv's Splitter, each record's bytes and no cells.
 # Every arm of a fixture prints the number of records it passed as `check`. logs.json has none to compare: `validate`
-# reads it as one document and `each` as the entries of its spine.
+# reads it as one document and `each` as the entries of its spine. The yaml and cbor rows run on stury alone: a YAML file
+# is a stream of `---` documents and a CBOR file a sequence of data items (RFC 8742), each one record, and `check` is the
+# number of records. `read`, `refuse` and `write` run on `logs.seq.cbor`, the records of `logs.ndjson`.
 
 [arm]
-frame = { source = "stury", files = ["*.ndjson", "*.csv"], sub = "frame" }
-check = { source = "stury", files = ["*.ndjson", "*.csv"], sub = "check" }
-threads = { source = "stury", files = ["*.ndjson", "*.csv"], sub = "threads" }
-each = { source = "stury", files = ["*.ndjson", "*.csv", "logs.json"], sub = "each" }
-validate = { source = "stury", files = ["*.csv", "logs.json"], sub = "validate" }
-build = { source = "stury", files = ["*.ndjson"], sub = "build" }
-stream = { source = "stury", files = ["*.ndjson"], sub = "stream" }
-read = { source = "stury", files = ["logs.ndjson"], sub = "read" }
-refuse = { source = "stury", files = ["logs.ndjson"], sub = "refuse" }
-write = { source = "stury", files = ["logs.ndjson", "table.csv", "text.csv"], sub = "write" }
+frame = { source = "stury", files = ["*.ndjson", "*.csv", "*.yaml", "*.cbor"], sub = "frame" }
+check = { source = "stury", files = ["*.ndjson", "*.csv", "*.yaml", "*.cbor"], sub = "check" }
+threads = { source = "stury", files = ["*.ndjson", "*.csv", "*.yaml", "*.cbor"], sub = "threads" }
+each = { source = "stury", files = ["*.ndjson", "*.csv", "*.yaml", "*.cbor", "logs.json"], sub = "each" }
+validate = { source = "stury", files = ["*.csv", "*.yaml", "*.cbor", "logs.json"], sub = "validate" }
+build = { source = "stury", files = ["*.ndjson", "*.yaml", "*.cbor"], sub = "build" }
+stream = { source = "stury", files = ["*.ndjson", "*.yaml", "*.cbor"], sub = "stream" }
+read = { source = "stury", files = ["logs.ndjson", "logs.seq.cbor"], sub = "read" }
+refuse = { source = "stury", files = ["logs.ndjson", "logs.seq.cbor"], sub = "refuse" }
+write = { source = "stury", files = ["logs.ndjson", "logs.seq.cbor", "table.csv", "text.csv"], sub = "write" }
 cells = { source = "stury", files = ["*.csv"], sub = "cells" }
 rows = { source = "stury", files = ["table.csv"], sub = "rows" }
 text = { source = "stury", files = ["text.csv"], sub = "text" }
@@ -30,7 +32,17 @@ serde_validate = { source = "rust", args = ["{sub}", "{file}", "serde"], files =
 serde_value = { source = "rust", args = ["{sub}", "{file}", "serde"], files = ["*.ndjson"], sub = "value" }
 sonic_validate = { source = "rust", args = ["{sub}", "{file}", "sonic"], files = ["*.ndjson"], sub = "validate" }
 sonic_value = { source = "rust", args = ["{sub}", "{file}", "sonic"], files = ["*.ndjson"], sub = "value" }
+# CBOR sequence arms, on .cbor files only. ciborium reads each item to an IgnoredAny (validate) or a Value, minicbor skips
+# each item, which judges its structure and the UTF-8 of its text. minicbor has no document type, so no value arm.
+ciborium_validate = { source = "rust", args = ["{sub}", "{file}", "ciborium"], files = ["*.cbor"], sub = "validate" }
+ciborium_value = { source = "rust", args = ["{sub}", "{file}", "ciborium"], files = ["*.cbor"], sub = "value" }
+minicbor_validate = { source = "rust", args = ["{sub}", "{file}", "minicbor"], files = ["*.cbor"], sub = "validate" }
 csv_frame = { source = "rust", args = ["{sub}", "{file}", "csv"], files = ["table.csv", "text.csv"], sub = "frame" }
+# YAML streams: rapidyaml parses the stream into one Tree of document nodes. libyaml's `check` counts document events and
+# builds nothing, and its `build` loads each document into a yaml_document_t. Each arm prints the number of records.
+ryml_build = { source = "rapidyaml.cpp", files = ["*.yaml"], sub = "build" }
+libyaml_check = { source = "libyaml.cpp", files = ["*.yaml"], sub = "check" }
+libyaml_build = { source = "libyaml.cpp", files = ["*.yaml"], sub = "build" }
 
 [[group]]
 rows = [
@@ -46,3 +58,25 @@ tables = [
 	{ title = "document per record, NDJSON", files = ["logs.ndjson", "docs.ndjson", "twitter.ndjson"], arms = ["build", "serde_value", "sonic_value"] },
 	{ title = "frame, CSV", files = ["table.csv", "text.csv"], arms = ["frame", "csv_frame"] },
 ]
+
+[[group]]
+title = "YAML and CBOR streams"
+arms = ["frame", "check", "build", "stream", "read", "refuse", "write", "threads", "validate", "each"]
+rows = ["k8s-prometheus-operator.yaml", "k8s-argo-cd.yaml", "logs.seq.cbor"]
+
+# CBOR sequences (RFC 8742) against ciborium and minicbor. Every arm prints the number of data items it read.
+
+[[group]]
+title = "CBOR sequences"
+arms = ["frame", "check", "build", "stream", "threads", "validate", "each", "ciborium_validate", "minicbor_validate", "ciborium_value"]
+rows = ["logs.seq.cbor"]
+tables = [
+	{ title = "check, one thread", arms = ["check", "ciborium_validate", "minicbor_validate"] },
+	{ title = "document per record", arms = ["build", "ciborium_value"] },
+	{ title = "other stury lanes", arms = ["frame", "stream", "threads", "validate", "each"] },
+]
+
+[[group]]
+title = "YAML streams, other libraries"
+arms = ["check", "build", "ryml_build", "libyaml_check", "libyaml_build"]
+rows = ["k8s-prometheus-operator.yaml", "k8s-argo-cd.yaml"]

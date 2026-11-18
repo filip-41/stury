@@ -278,3 +278,171 @@ name = "to_json"
 suite = "csv"
 tools = ["stury", "mlr"]
 cmd = { stury = "{S} --from csv -c . table.csv", mlr = "mlr --icsv --ojsonl -S cat table.csv" }
+
+# The xml suite: the XML tools each answer the same question over logs.xml and the natural documents. A tool's command is
+# the case's own, since the tools spell a query three ways. stury reads the text as `--from xml`, and `--attributes` for the
+# attributes of an element. yq reads it with `-p xml`, where an attribute is a member named `+@name`. xmlstarlet and
+# xmllint answer an XPath expression, and xmllint prints a text or a number with no line end, which only a single answer
+# compares. An answer a case names `_raw` is a line of text each. A tool that is not installed is left out. No case reads nasa.xml, since yq passes the runner's resident cap on it.
+
+[[case]]
+name = "xml_count"
+suite = "xml"
+tools = ["stury", "yq", "xmlstarlet", "xmllint"]
+cmd = { stury = "{S} --from xml -c '.logs.log | length' logs.xml", yq = "yq -p xml -o json '.logs.log | length' logs.xml", xmlstarlet = "xmlstarlet sel -t -v 'count(/logs/log)' -n logs.xml", xmllint = "xmllint --xpath 'count(/logs/log)' logs.xml" }
+
+[[case]]
+name = "xml_first_id_raw"
+suite = "xml"
+tools = ["stury", "yq", "xmlstarlet", "xmllint"]
+cmd = { stury = "{S} --from xml -r '.logs.log[0].id' logs.xml", yq = "yq -p xml -oy '.logs.log[0].id' logs.xml", xmlstarlet = "xmlstarlet sel -t -v '/logs/log[1]/id' -n logs.xml", xmllint = "xmllint --xpath '/logs/log[1]/id/text()' logs.xml" }
+
+[[case]]
+name = "xml_last_id_raw"
+suite = "xml"
+tools = ["stury", "yq", "xmlstarlet", "xmllint"]
+cmd = { stury = "{S} --from xml -r '.logs.log[-1].id' logs.xml", yq = "yq -p xml -oy '.logs.log[-1].id' logs.xml", xmlstarlet = "xmlstarlet sel -t -v '/logs/log[last()]/id' -n logs.xml", xmllint = "xmllint --xpath '/logs/log[last()]/id/text()' logs.xml" }
+
+[[case]]
+name = "xml_ids_raw"
+suite = "xml"
+tools = ["stury", "yq", "xmlstarlet"]
+cmd = { stury = "{S} --from xml -r '.logs.log[].id' logs.xml", yq = "yq -p xml -oy '.logs.log[].id' logs.xml", xmlstarlet = "xmlstarlet sel -t -v '/logs/log/id' -n logs.xml" }
+
+[[case]]
+name = "xml_select_count"
+suite = "xml"
+tools = ["stury", "yq", "xmlstarlet", "xmllint"]
+cmd = { stury = "{S} --from xml -c '[.logs.log[] | select(.level == \"error\")] | length' logs.xml", yq = "yq -p xml -o json '[.logs.log[] | select(.level == \"error\")] | length' logs.xml", xmlstarlet = "xmlstarlet sel -t -v \"count(/logs/log[level='error'])\" -n logs.xml", xmllint = "xmllint --xpath \"count(/logs/log[level='error'])\" logs.xml" }
+
+[[case]]
+name = "xml_osm_count"
+suite = "xml"
+tools = ["stury", "yq", "xmlstarlet", "xmllint"]
+cmd = { stury = "{S} --from xml -c '.osm.node | length' natural/osm-beatty.xml", yq = "yq -p xml -o json '.osm.node | length' natural/osm-beatty.xml", xmlstarlet = "xmlstarlet sel -t -v 'count(/osm/node)' -n natural/osm-beatty.xml", xmllint = "xmllint --xpath 'count(/osm/node)' natural/osm-beatty.xml" }
+
+[[case]]
+name = "xml_osm_user_raw"
+suite = "xml"
+tools = ["stury", "yq", "xmlstarlet", "xmllint"]
+cmd = { stury = "{S} --from xml --attributes -r '.osm.node[0].\"@user\"' natural/osm-beatty.xml", yq = "yq -p xml -oy '.osm.node[0].\"+@user\"' natural/osm-beatty.xml", xmlstarlet = "xmlstarlet sel -t -v '/osm/node[1]/@user' -n natural/osm-beatty.xml", xmllint = "xmllint --xpath 'string(/osm/node[1]/@user)' natural/osm-beatty.xml" }
+
+# The yaml suite: stury against yq (mikefarah, `-o json -I0`) and dasel (v3, `--compact`, the file read as a variable since
+# dasel reads a file only as stdin or a variable) on the YAML fixtures. Each query gives one JSON answer, so the tools'
+# answers compare as values. dasel has no raw output and reads one document of a stream, so it is left out of the `_raw`
+# and stream cases. A case named `*_raw` prints raw strings, compared line by line.
+
+[[case]]
+name = "yaml_logs_id"
+suite = "yaml"
+tools = ["stury", "yq", "dasel"]
+cmd = { stury = "{S} -c '[.logs[].id]' logs.yaml", yq = "yq -o json -I0 '[.logs[].id]' logs.yaml", dasel = "dasel -o json --compact --var d=yaml:file:logs.yaml '$d.logs.map(id)'" }
+
+[[case]]
+name = "yaml_logs_count"
+suite = "yaml"
+tools = ["stury", "yq", "dasel"]
+cmd = { stury = "{S} -c '.logs | length' logs.yaml", yq = "yq -o json -I0 '.logs | length' logs.yaml", dasel = "dasel -o json --compact --var d=yaml:file:logs.yaml 'len($d.logs)'" }
+
+[[case]]
+name = "yaml_logs_filter"
+suite = "yaml"
+tools = ["stury", "yq", "dasel"]
+cmd = { stury = "{S} -c '[.logs[] | select(.status >= 500) | .id]' logs.yaml", yq = "yq -o json -I0 '[.logs[] | select(.status >= 500) | .id]' logs.yaml", dasel = "dasel -o json --compact --var d=yaml:file:logs.yaml '$d.logs.filter(status >= 500).map(id)'" }
+
+[[case]]
+name = "yaml_logs_first"
+suite = "yaml"
+tools = ["stury", "yq", "dasel"]
+cmd = { stury = "{S} -c '.logs[0]' logs.yaml", yq = "yq -o json -I0 '.logs[0]' logs.yaml", dasel = "dasel -o json --compact --var d=yaml:file:logs.yaml '$d.logs[0]'" }
+
+[[case]]
+name = "yaml_logs_msg_raw"
+suite = "yaml"
+tools = ["stury", "yq"]
+cmd = { stury = "{S} -r '.logs[].msg' logs.yaml", yq = "yq -r '.logs[].msg' logs.yaml" }
+
+[[case]]
+name = "yaml_twitter_json"
+suite = "yaml"
+tools = ["stury", "yq", "dasel"]
+cmd = { stury = "{S} -c . twitter.yaml", yq = "yq -o json -I0 . twitter.yaml", dasel = "dasel -o json --compact --var d=yaml:file:twitter.yaml '$d'" }
+
+[[case]]
+name = "yaml_citm_json"
+suite = "yaml"
+tools = ["stury", "yq", "dasel"]
+cmd = { stury = "{S} -c . citm.yaml", yq = "yq -o json -I0 . citm.yaml", dasel = "dasel -o json --compact --var d=yaml:file:citm.yaml '$d'" }
+
+[[case]]
+name = "yaml_stripe_paths"
+suite = "yaml"
+tools = ["stury", "yq", "dasel"]
+cmd = { stury = "{S} -c '.paths | length' natural/openapi-stripe.yaml", yq = "yq -o json -I0 '.paths | length' natural/openapi-stripe.yaml", dasel = "dasel -o json --compact --var d=yaml:file:natural/openapi-stripe.yaml 'len($d.paths)'" }
+
+[[case]]
+name = "yaml_stripe_operations"
+suite = "yaml"
+tools = ["stury", "yq"]
+cmd = { stury = "{S} -c '[.paths[][].operationId] | length' natural/openapi-stripe.yaml", yq = "yq -o json -I0 '[.paths[][].operationId] | length' natural/openapi-stripe.yaml" }
+
+[[case]]
+name = "yaml_argo_kinds_raw"
+suite = "yaml"
+tools = ["stury", "yq"]
+cmd = { stury = "{S} -r '.kind' natural/k8s-argo-cd.yaml", yq = "yq -N -r '.kind' natural/k8s-argo-cd.yaml" }
+
+# The html suite reads logs.html through each tool's CSS selector and prints the text of every match, a line each. htmlq's
+# `-t` and pup's `text{}` print the text of a td, which holds one text node, so the three agree line by line.
+[[case]]
+name = "html_first_cell_raw"
+suite = "html"
+tools = ["stury", "htmlq", "pup"]
+cmd = { stury = "{S} --from html -r 'css(\"tbody tr > td:first-child\")' logs.html", htmlq = "htmlq -f logs.html -t 'tbody tr > td:first-child'", pup = "pup -f logs.html 'tbody tr > td:first-child text{}'" }
+
+[[case]]
+name = "html_last_cell_raw"
+suite = "html"
+tools = ["stury", "htmlq", "pup"]
+cmd = { stury = "{S} --from html -r 'css(\"tbody tr > td:last-child\")' logs.html", htmlq = "htmlq -f logs.html -t 'tbody tr > td:last-child'", pup = "pup -f logs.html 'tbody tr > td:last-child text{}'" }
+
+# The toml suite reads TOML with stury, yq and dasel and compares the answers as JSON values. dasel reads only its standard
+# input, so its commands run under `sh -c`, whose start is inside its timings. An answer is one array or one value, so
+# the tools' different ways of printing a stream of answers do not matter. yq has no arm on logs.toml: its TOML reader
+# ran past forty CPU minutes on that 8 MB file without answering.
+
+[[case]]
+name = "toml_cargo_names"
+suite = "toml"
+tools = ["stury", "yq", "dasel"]
+cmd = { stury = "{S} --from toml -c '[.package[].name]' natural/cargo-lock-zed.toml", yq = "yq -p toml -o json -I0 '[.package[].name]' natural/cargo-lock-zed.toml", dasel = "sh -c \"dasel -i toml -o json --compact 'package.map(name)' < natural/cargo-lock-zed.toml\"" }
+
+[[case]]
+name = "toml_cargo_count"
+suite = "toml"
+tools = ["stury", "yq", "dasel"]
+cmd = { stury = "{S} --from toml -c '.package | length' natural/cargo-lock-zed.toml", yq = "yq -p toml -o json -I0 '.package | length' natural/cargo-lock-zed.toml", dasel = "sh -c \"dasel -i toml -o json --compact 'len(package)' < natural/cargo-lock-zed.toml\"" }
+
+[[case]]
+name = "toml_uv_names"
+suite = "toml"
+tools = ["stury", "yq", "dasel"]
+cmd = { stury = "{S} --from toml -c '[.package[].name]' natural/uv-lock-airflow.toml", yq = "yq -p toml -o json -I0 '[.package[].name]' natural/uv-lock-airflow.toml", dasel = "sh -c \"dasel -i toml -o json --compact 'package.map(name)' < natural/uv-lock-airflow.toml\"" }
+
+[[case]]
+name = "toml_pyproject_name"
+suite = "toml"
+tools = ["stury", "yq", "dasel"]
+cmd = { stury = "{S} --from toml -c '.project.name' natural/pyproject-airflow.toml", yq = "yq -p toml -o json -I0 '.project.name' natural/pyproject-airflow.toml", dasel = "sh -c \"dasel -i toml -o json --compact 'project.name' < natural/pyproject-airflow.toml\"" }
+
+[[case]]
+name = "toml_pyproject_json"
+suite = "toml"
+tools = ["stury", "yq", "dasel"]
+cmd = { stury = "{S} --from toml -c . natural/pyproject-airflow.toml", yq = "yq -p toml -o json -I0 . natural/pyproject-airflow.toml", dasel = "sh -c \"dasel -i toml -o json --compact < natural/pyproject-airflow.toml\"" }
+
+[[case]]
+name = "toml_logs_ids"
+suite = "toml"
+tools = ["stury", "dasel"]
+cmd = { stury = "{S} --from toml -c '[.logs[].id]' logs.toml", dasel = "sh -c \"dasel -i toml -o json --compact 'logs.map(id)' < logs.toml\"" }

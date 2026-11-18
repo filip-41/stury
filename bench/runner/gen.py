@@ -8,6 +8,13 @@ import io
 import json
 import os
 import random
+import re
+import xml.etree.ElementTree as ET
+from html import escape
+
+import cbor2
+import tomli_w
+import yaml
 
 from .layout import FIXTURES
 
@@ -573,6 +580,13 @@ def _logs_document():
     return json.loads(_generated("logs.json"))
 
 
+def _logs_xml_document():
+    """The tree of logs.xml as a reader of XML gives it: every element's text a string, and the records the `log` array of
+    `logs`."""
+    records = [{k: v if isinstance(v, str) else repr(v) for k, v in r.items()} for r in _logs_document()["logs"]]
+    return {"logs": {"log": records}}
+
+
 def gen_closed_schema(source) -> bytes:
     schema = {"$schema": "https://json-schema.org/draft/2020-12/schema"}
     schema.update(infer_closed(source()))
@@ -655,6 +669,134 @@ def gen_applicator_events(target: int) -> bytes:
     return bytes(out)
 
 
+class _Dumper(yaml.SafeDumper):
+    """PyYAML's dumper, which quotes a string by YAML 1.1's resolution, told the YAML 1.2 core forms 1.1 reads as strings
+    (a float with no dot, `0o` octal), so a string such as `3E4415` is quoted and reads back as a string."""
+
+
+_Dumper.add_implicit_resolver("tag:yaml.org,2002:float", re.compile(r"^[-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?$"),
+                              list("-+0123456789."))
+_Dumper.add_implicit_resolver("tag:yaml.org,2002:int", re.compile(r"^0o[0-7]+$"), ["0"])
+
+
+def _yaml(value) -> bytes:
+    """Block style from PyYAML's pure Python dumper, so the bytes do not depend on libyaml."""
+    return yaml.dump(value, Dumper=_Dumper, default_flow_style=False, sort_keys=False, allow_unicode=True,
+                     width=2**31 - 1).encode("utf-8")
+
+
+def gen_yaml(source) -> bytes:
+    return _yaml(source())
+
+
+def gen_cbor(source) -> bytes:
+    return cbor2.dumps(source())
+
+
+def gen_cbor_sequence(source) -> bytes:
+    """RFC 8742: the data items one after another, each record a map, with no array around them."""
+    return b"".join(cbor2.dumps(item) for item in source())
+
+
+def gen_logs_toml() -> bytes:
+    """A top-level `logs` array of tables, one `[[logs]]` table per record."""
+    return tomli_w.dumps({"logs": _logs_document()["logs"]}).encode("utf-8")
+
+
+def gen_logs_xml() -> bytes:
+    """`<logs>` holding one `<log>` per record, each member a child element named after its key and holding its value as
+    text: strings as written, numbers as the shortest round-trip decimal."""
+    root = ET.Element("logs")
+    for rec in _logs_document()["logs"]:
+        log = ET.SubElement(root, "log")
+        for key, value in rec.items():
+            ET.SubElement(log, key).text = value if isinstance(value, str) else repr(value)
+    ET.indent(root, space="  ")
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True) + b"\n"
+
+
+def gen_logs_html() -> bytes:
+    """An HTML document with one table: a header row of the member names, then one row per record with a cell per
+    member, in the document's own whitespace between rows."""
+    records = _logs_document()["logs"]
+    columns = list(records[0])
+    out = ['<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<title>logs</title>\n</head>\n<body>\n'
+           '<table id="logs">\n<thead>\n<tr>' + "".join("<th>%s</th>" % c for c in columns) + "</tr>\n</thead>\n<tbody>\n"]
+    for rec in records:
+        out.append("<tr>" + "".join("<td>%s</td>" % escape(str(rec[c])) for c in columns) + "</tr>\n")
+    out.append("</tbody>\n</table>\n</body>\n</html>\n")
+    return "".join(out).encode("utf-8")
+
+
+# The model lane's fixtures (lanes/model): the records of logs.ndjson and the twitter corpus, one per line. The invalid
+# variant breaks a share of its records by the rules of the model: values out of bounds or length, texts off their
+# pattern, and a member left out.
+INVALID_SHARE = 0.3
+
+
+def _wrong_logs(rec, rnd):
+    return {
+        "ts": lambda: rec.update(ts="yesterday"),
+        "level": lambda: rec.update(level="verbose"),
+        "service": lambda: rec.update(service=""),
+        "msg": lambda: rec.update(msg="x" * 300),
+        "status": lambda: rec.update(status=rnd.choice([42, 600 + rnd.randrange(400)])),
+        "bytes": lambda: rec.update(bytes=-1 - rnd.randrange(1000)),
+        "duration_ms": lambda: rec.update(duration_ms=-1.5),
+        "id": lambda: rec.update(id="req-xyz"),
+    }
+
+
+def _wrong_tweet(rec, rnd):
+    user = rec["user"]
+    return {
+        "metadata.result_type": lambda: rec["metadata"].update(result_type="stale"),
+        "created_at": lambda: rec.update(created_at="yesterday"),
+        "id_str": lambda: rec.update(id_str="x" + rec["id_str"]),
+        "text": lambda: rec.update(text="y" * 300),
+        "retweet_count": lambda: rec.update(retweet_count=-1 - rnd.randrange(50)),
+        "lang": lambda: rec.update(lang="JAPANESE"),
+        "user.screen_name": lambda: user.update(screen_name="not a handle!"),
+        "user.name": lambda: user.update(name=""),
+        "user.followers_count": lambda: user.update(followers_count=-1),
+        "user.created_at": lambda: user.update(created_at="long ago"),
+    }
+
+
+def _left_out_logs(rec):
+    return {name: lambda name=name: rec.pop(name) for name in ("ts", "service", "id")}
+
+
+def _left_out_tweet(rec):
+    return {"created_at": lambda: rec.pop("created_at"), "user.id": lambda: rec["user"].pop("id")}
+
+
+def gen_model_records(target: int, source, invalid: bool, wrong, left_out) -> bytes:
+    """Returns NDJSON of the records `source()` gives, cycled up to `target` bytes. With INVALID, each record is broken
+    with the chance INVALID_SHARE: two to four members get a wrong value, from WRONG, and one time in three another
+    member is left out, from LEFT_OUT."""
+    rnd = random.Random(0x40DE1 if invalid else 0x40DE0)
+    base = source()
+    out = bytearray()
+    i = 0
+    while len(out) < target:
+        rec = json.loads(json.dumps(base[i % len(base)]))
+        i += 1
+        if invalid and rnd.random() < INVALID_SHARE:
+            breaks = wrong(rec, rnd)
+            for name in rnd.sample(sorted(breaks), rnd.randrange(2, 5)):
+                breaks[name]()
+            drops = left_out(rec)
+            if rnd.random() < 1 / 3:
+                drops[rnd.choice(sorted(drops))]()
+        out += _dump(rec) + b"\n"
+    return bytes(out)
+
+
+def _tweets():
+    return _corpus_json("twitter.json")["statuses"]
+
+
 def gen_compact(source) -> bytes:
     return _dump(source())
 
@@ -678,7 +820,21 @@ FIXTURES = {
     "logs.ndjson": (gen_ndjson, [8 * MIB, lambda: json.loads(gen_logs_json(8 * MIB))["logs"]]),
     "docs.ndjson": (gen_ndjson, [8 * MIB, lambda: json.loads(gen_documents_json(8 * MIB))]),
     "twitter.ndjson": (gen_ndjson, [16 * MIB, lambda: _corpus_json("twitter.json")["statuses"]]),
+    # twitter and citm have no TOML or XML form: both hold null, which TOML lacks, and citm names members by numbers,
+    # which XML cannot name an element by.
+    "logs.yaml": (gen_yaml, [_logs_document]),
+    "logs.toml": (gen_logs_toml, []),
+    "logs.xml": (gen_logs_xml, []),
+    "logs.html": (gen_logs_html, []),
+    "logs.cbor": (gen_cbor, [_logs_document]),
+    "logs.seq.cbor": (gen_cbor_sequence, [_logs_records]),
+    "twitter.yaml": (gen_yaml, [lambda: _corpus_json("twitter.json")]),
+    "twitter.cbor": (gen_cbor, [lambda: _corpus_json("twitter.json")]),
+    "citm.yaml": (gen_yaml, [lambda: _corpus_json("citm_catalog.json")]),
+    "citm.cbor": (gen_cbor, [lambda: _corpus_json("citm_catalog.json")]),
     "schema/logs.schema.json": (gen_closed_schema, [_logs_records]),
+    "schema/logs.document.schema.json": (gen_closed_schema, [lambda: [_logs_document()]]),
+    "schema/logs.xml.schema.json": (gen_closed_schema, [lambda: [_logs_xml_document()]]),
     "schema/twitter.schema.json": (gen_closed_schema, [lambda: [_corpus_json("twitter.json")]]),
     "schema/citm.schema.json": (gen_closed_schema, [lambda: [_corpus_json("citm_catalog.json")]]),
     "schema/applicator.schema.json": (gen_applicator_schema, []),
@@ -686,6 +842,10 @@ FIXTURES = {
     "schema/twitter.json": (gen_compact, [lambda: _corpus_json("twitter.json")]),
     "schema/citm.json": (gen_compact, [lambda: _corpus_json("citm_catalog.json")]),
     "schema/logs.json": (gen_compact, [_logs_document]),
+    "model/logs.valid.ndjson": (gen_model_records, [8 * MIB, _logs_records, False, _wrong_logs, _left_out_logs]),
+    "model/logs.invalid.ndjson": (gen_model_records, [8 * MIB, _logs_records, True, _wrong_logs, _left_out_logs]),
+    "model/twitter.valid.ndjson": (gen_model_records, [8 * MIB, _tweets, False, _wrong_tweet, _left_out_tweet]),
+    "model/twitter.invalid.ndjson": (gen_model_records, [8 * MIB, _tweets, True, _wrong_tweet, _left_out_tweet]),
 }
 
 

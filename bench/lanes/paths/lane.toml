@@ -8,14 +8,34 @@ legend = "ns per call is the best of {rounds} rounds of each arm's median of ten
 # byte and gives each answer to a callback. iter gives the answers through `next`, a batch a walk.
 
 [arm]
-scan = { source = "stury", sub = "scan", args = ["{sub}", "{file}", "{dotkey}{path}", "{batch}"] }
-stop = { source = "stury", sub = "stop", args = ["{sub}", "{file}", "{dotkey}{path}", "{batch}"] }
-build_query = { source = "stury", sub = "build_query", args = ["{sub}", "{file}", "{dotkey}{path}", "{batch}"] }
-query = { source = "stury", sub = "query", args = ["{sub}", "{file}", "{path}"] }
+scan = { source = "stury", sub = "scan", args = ["{sub}", "{file}", "{dotkey}{path}", "{batch}", "{dups}"] }
+stop = { source = "stury", sub = "stop", args = ["{sub}", "{file}", "{dotkey}{path}", "{batch}", "{dups}"] }
+build_query = { source = "stury", sub = "build_query", args = ["{sub}", "{file}", "{dotkey}{path}", "{batch}", "{dups}"] }
+query = { source = "stury", sub = "query", args = ["{sub}", "{file}", "{path}", "{batch}", "{dups}"] }
 each = { source = "stury", sub = "each", args = ["{sub}", "{file}", "{path}", "{batch}", "{largest}"] }
 iter = { source = "stury", sub = "iter", args = ["{sub}", "{file}", "{path}", "{batch}", "{largest}"] }
 simd = { source = "simdjson.cpp", args = ["get", "{file}", "{key}", "{batch}"] }
 sonic = { source = "rust", args = ["get", "{file}", "{key}", "{batch}"] }
+# CBOR arm, on .cbor files only: minicbor's decoder walks to the answer, decoding the keys it meets and skipping the rest.
+minicbor = { source = "rust", args = ["path", "{file}", "{path}", "{batch}"], files = ["*.cbor"] }
+
+# The XML arms. `_nv` arms are not validating. pugixml_nv builds a tree and runs one XPath query on it, pugixml_nv_query
+# only the query on a tree built outside the clock. quickxml_nv pulls events to the element, and to the end for the last one.
+pugixml_nv = { source = "pugixml.cpp", args = ["get", "{file}", "{path}", "{dups}"], files = ["*.xml"] }
+pugixml_nv_query = { source = "pugixml.cpp", args = ["query", "{file}", "{path}", "{dups}"], files = ["*.xml"] }
+quickxml_nv = { source = "rust-xml", args = ["{file}", "{path}", "{dups}"], files = ["*.xml"] }
+
+# rapidyaml parses the whole text to a Tree, so its lookup arms are `build_query`'s and `query`'s: the text parsed and one
+# lookup per call, and one lookup in a tree built outside the clock.
+ryml_build_query = { source = "rapidyaml.cpp", args = ["build_query", "{file}", "{path}", "{batch}"], files = ["*.yaml"] }
+ryml_query = { source = "rapidyaml.cpp", args = ["query", "{file}", "{path}", "{qbatch}"], files = ["*.yaml"] }
+
+lexbor = { source = "lexbor.cpp", sub = "build_select", args = ["{sub}", "{file}", "{selector}", "{batch}"], files = ["*.html"] }
+lexbor_query = { source = "lexbor.cpp", sub = "select", args = ["{sub}", "{file}", "{selector}", "{batch}"], files = ["*.html"] }
+scraper = { source = "rust", sub = "build_select", args = ["{sub}", "{file}", "{selector}", "{batch}"], files = ["*.html"] }
+scraper_query = { source = "rust", sub = "select", args = ["{sub}", "{file}", "{selector}", "{batch}"], files = ["*.html"] }
+
+tomlpp = { source = "tomlpp.cpp", args = ["path", "{file}", "{path}", "{batch}"], files = ["*.toml"] }
 
 [[group]]
 title = "get"
@@ -55,3 +75,137 @@ rows = [
 	{ label = "stream .logs[].id", file = "logs.json", path = ".logs[].id", batch = "1", largest = "" },
 ]
 tables = [{ title = "every answer taken as it comes", throughput = true }]
+
+# The groups below answer one field of the logs records in the other formats, stury alone since no other arm reads
+# them yet. The probe reads the text through `core` with its format's handle. Its check is the FNV-1a of each answer in
+# text order, the value's text then a newline byte: a string's decoded text, a number's decimal digits, and true,
+# false or null as the word. The field is `id`, a string in every format, so the early row's check is the same for
+# every format that answers the first record's id and the late row's for every format that answers the last record's
+# (logs.xml reads the same record). `dups` names which repeat of a markup name the path answers, since a path names
+# the members of a markup document and not the positions of its repeats: `first` or `last`. Early rows are the first record, late rows the
+# last (index 36972 of 36973). `stop` reads up to the first answer, so it has no late row. XML's path is
+# `.logs.log.id`. The html group below holds logs.html. stury's scan of it passes the runner's 1 GiB resident cap over the
+# timed calls, so the runner stops at its row unless ARMS leaves the stury arms out.
+
+[[group]]
+title = "early field"
+metric = "ns"
+arms = ["scan", "build_query", "tomlpp", "query", "stop"]
+rows = [
+	{ label = "yaml .logs[0].id", file = "logs.yaml", path = ".logs[0].id", batch = "1" },
+	{ label = "toml .logs[0].id", file = "logs.toml", path = ".logs[0].id", batch = "1" },
+	{ label = "cbor .logs[0].id", file = "logs.cbor", path = ".logs[0].id", batch = "1" },
+	{ label = "xml .logs.log.id", file = "logs.xml", path = ".logs.log.id", batch = "1", dups = "first" },
+]
+tables = [
+	{ title = "the whole text read", arms = ["scan", "build_query", "tomlpp"], throughput = true },
+	{ title = "a document built outside the clock", arms = ["query"] },
+	{ title = "the text read up to the answer", arms = ["stop"] },
+]
+
+[[group]]
+title = "late field"
+metric = "ns"
+arms = ["scan", "build_query", "tomlpp", "query"]
+rows = [
+	{ label = "yaml .logs[36972].id", file = "logs.yaml", path = ".logs[36972].id", batch = "1" },
+	{ label = "toml .logs[36972].id", file = "logs.toml", path = ".logs[36972].id", batch = "1" },
+	{ label = "cbor .logs[36972].id", file = "logs.cbor", path = ".logs[36972].id", batch = "1" },
+	{ label = "xml .logs.log.id", file = "logs.xml", path = ".logs.log.id", batch = "1", dups = "last" },
+]
+tables = [
+	{ title = "the whole text read", arms = ["scan", "build_query", "tomlpp"], throughput = true },
+	{ title = "a document built outside the clock", arms = ["query"] },
+]
+
+# The XML rows again, with the other libraries' arms. The path is `.logs.log.id`, the first record's id or the last.
+
+[[group]]
+title = "xml early field"
+metric = "ns"
+arms = ["scan", "build_query", "query", "stop", "pugixml_nv", "pugixml_nv_query", "quickxml_nv"]
+rows = [{ label = "xml .logs.log.id", file = "logs.xml", path = ".logs.log.id", batch = "1", dups = "first" }]
+tables = [
+	{ title = "the whole text read", arms = ["scan", "build_query", "pugixml_nv"], throughput = true },
+	{ title = "a document built outside the clock", arms = ["query", "pugixml_nv_query"] },
+	{ title = "the text read up to the answer", arms = ["stop", "quickxml_nv"] },
+]
+
+[[group]]
+title = "xml late field"
+metric = "ns"
+arms = ["scan", "build_query", "query", "pugixml_nv", "pugixml_nv_query", "quickxml_nv"]
+rows = [{ label = "xml .logs.log.id", file = "logs.xml", path = ".logs.log.id", batch = "1", dups = "last" }]
+tables = [
+	{ title = "the whole text read", arms = ["scan", "build_query", "pugixml_nv", "quickxml_nv"], throughput = true },
+	{ title = "a document built outside the clock", arms = ["query", "pugixml_nv_query"] },
+]
+
+# CBOR against minicbor's skip-decode. `skip` judges what it passes (structure and the UTF-8 of every text), as stury's
+# `stop` does, and neither reads the text after the answer. The check is the same as the rows above.
+
+[[group]]
+title = "cbor early field"
+metric = "ns"
+arms = ["scan", "build_query", "query", "stop", "minicbor"]
+rows = [{ label = "cbor .logs[0].id", file = "logs.cbor", path = ".logs[0].id", batch = "1" }]
+tables = [
+	{ title = "the whole text read", arms = ["scan", "build_query"], throughput = true },
+	{ title = "a document built outside the clock", arms = ["query"] },
+	{ title = "the text read up to the answer", arms = ["stop", "minicbor"] },
+]
+
+[[group]]
+title = "cbor late field"
+metric = "ns"
+arms = ["scan", "build_query", "query", "minicbor"]
+rows = [{ label = "cbor .logs[36972].id", file = "logs.cbor", path = ".logs[36972].id", batch = "1" }]
+tables = [
+	{ title = "the whole text read", arms = ["scan", "build_query"], throughput = true },
+	{ title = "a document built outside the clock", arms = ["query"] },
+	{ title = "the text read up to the answer", arms = ["minicbor"] },
+]
+
+# YAML beside rapidyaml's lookup. The check is the answer's text and a newline, as above. `qbatch` is the calls a sample
+# of `ryml_query`: a lookup of the first record is under a tick of the clock.
+[[group]]
+title = "yaml early field"
+metric = "ns"
+arms = ["scan", "build_query", "query", "stop", "ryml_build_query", "ryml_query"]
+rows = [{ label = "yaml .logs[0].id", file = "logs.yaml", path = ".logs[0].id", batch = "1", qbatch = "100000" }]
+tables = [
+	{ title = "the whole text read", arms = ["scan", "build_query", "ryml_build_query"], throughput = true },
+	{ title = "a document built outside the clock", arms = ["query", "ryml_query"] },
+	{ title = "the text read up to the answer", arms = ["stop"] },
+]
+
+[[group]]
+title = "yaml late field"
+metric = "ns"
+arms = ["scan", "build_query", "query", "ryml_build_query", "ryml_query"]
+rows = [{ label = "yaml .logs[36972].id", file = "logs.yaml", path = ".logs[36972].id", batch = "1", qbatch = "1" }]
+tables = [
+	{ title = "the whole text read", arms = ["scan", "build_query", "ryml_build_query"], throughput = true },
+	{ title = "a document built outside the clock", arms = ["query", "ryml_query"] },
+]
+
+# logs.html's cells. stury's path names the td members of the tr members of the table, and `dups` picks the first or the last
+# of each repeat, so the early row answers the first record's first cell and the late row the last record's last cell. The
+# libraries take the first element their CSS selector matches (lexbor's selectors and scraper's), which is the same cell.
+# lexbor and scraper parse and select in each call, lexbor_query and scraper_query select on a document parsed outside the
+# clock, and the check is the same FNV-1a of the cell's text. The scraper arm that parses in each call is left out of the
+# group: its repeated builds of logs.html pass the runner's 1 GiB resident cap (one document is 190 MiB), as stury's do.
+
+[[group]]
+title = "html cell"
+metric = "ns"
+arms = ["scan", "build_query", "query", "stop", "lexbor", "lexbor_query", "scraper_query"]
+rows = [
+	{ label = "html first cell", file = "logs.html", path = ".html.body.table.tbody.tr.td", selector = "tbody tr:first-child td:first-child", batch = "1", dups = "first" },
+	{ label = "html last cell", file = "logs.html", path = ".html.body.table.tbody.tr.td", selector = "tbody tr:last-child td:last-child", batch = "1", dups = "last", arms = ["scan", "build_query", "query", "lexbor", "lexbor_query", "scraper_query"] },
+]
+tables = [
+	{ title = "the whole text read", arms = ["scan", "build_query", "lexbor"], throughput = true },
+	{ title = "a document built outside the clock", arms = ["query", "lexbor_query", "scraper_query"] },
+	{ title = "the text read up to the answer", arms = ["stop"] },
+]

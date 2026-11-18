@@ -1,0 +1,12 @@
+[package]
+name = "paths-rust-xml"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "paths-rust-xml"
+path = "main.rs"
+
+[dependencies]
+timing.workspace = true
+quick-xml.workspace = true

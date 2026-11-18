@@ -15,7 +15,7 @@ write.destroy :: proc(out: ^write.Out)
 `room` returns a pointer to at least `n` free bytes at `out.cursor`, `n` at most `ROOM_MAX` (4096), and the caller moves
 `out.cursor` past what it wrote. When the buffer has `n` bytes free that is all `room` does. Otherwise its one branch
 goes to a cold proc: a buffer output doubles its buffer, and a stream output writes the buffer to the stream and starts
-it again. So a stream costs the hot path nothing. An output is not copied after `init`.
+it again. An output is not copied after `init`.
 
 A buffer output allocates at its first `room`, and `finish` returns the bytes, which the caller owns. `hint` is the size
 a writer expects the text to have, and the first allocation takes it when it is more than `ROOM_MAX`. A writer that knows
@@ -25,8 +25,8 @@ holds `STREAM_BUFFER` (64 KiB) and `finish` flushes the rest and returns no byte
 ## Failure
 
 An allocation or a stream that refuses sets `out.err` to `.No_Memory` or `.Write_Failed` and keeps it. The buffer is
-freed, and later `room` calls return the `spill` the creator gave `init`, a `ROOM_MAX` array that outlives the output and is discarded, so the writer needs no check at
-each call and tests `out.err` where it can stop. `finish` returns the error.
+freed, and later `room` calls return the `spill` the creator gave `init`, a `ROOM_MAX` array that outlives the output and
+is discarded. A writer needs no check at each call and tests `out.err` where it can stop. `finish` returns the error.
 
 - A buffer entry is all or nothing: on an error `finish` returns nil bytes.
 - A stream refusal may leave a prefix in the stream. `out.flushed` counts the bytes it took.
@@ -79,20 +79,12 @@ keeps. That form is `write.marshal`, so it is the same for every format. A plan 
 text comes from `allocator`. What lasts only the call, the key text, stand-ins and side plans, comes from
 `context.allocator`.
 
-The walk is `write.walk` in `core/write/marshal.odin`, one loop over the plan's records with one stack of frames. It
-takes a format's text at compile time: `Tree`, the bytes of a tree, and `Put`, its string writer, so strings and
-punctuation are in line. `Plan.marshal` holds a format's instance, set by its `plan_make`, so a caller of `write.marshal`
-names no format. A plan with no `marshal` is `.Unsupported`. A walker is set up once (`walker_init`), writes values
-(`walker_value`, which picks one of four instances: compact or pretty, each with the plain string writer or the one for
-`ascii` and `escape_html`) and is released once. `marshal_as` holds its stacks for one value, and a record writer keeps
-one walker, with its stacks on the heap, for all its values.
-
-A list of structs keeps one frame open: the next element takes over the frame of the one that closed, so a list does not
-push and pop per element. A struct's members are written from the records' key text with no call. A member with `key_size` 0 is the rest: it has
-`omitempty`, it ends the struct, its name is not letters, digits, `_` and `-`, or its key is past `KEY_SIZE_MAX`. The
-last two go through the string writer. A map, a struct under `sort_keys`, a struct with a captured map and a tagged union
-arm are listed first as entries, their keys written to a second buffer and sorted by eight bytes of the key at a time,
-then written as an object.
+The walk (`core/write/marshal.odin`) is one loop over the plan's records with one stack of frames, specialised at
+compile time on a format's text (`Tree`, its bytes, and `Put`, its string writer). `Plan.marshal` holds the format's
+instance, set by its `plan_make`, so a caller of `write.marshal` names no format. A plan with no `marshal` is
+`.Unsupported`. A list of structs keeps one frame open, so a list does not push and pop per element. A map, a struct
+under `sort_keys`, a struct with a captured map and a tagged union arm are listed first as entries, their keys sorted
+by eight bytes at a time, then written as an object.
 
 | Value | Text |
 |---|---|
@@ -149,54 +141,29 @@ its span, which `core.subtree_facts` returns, in the spelling and layout the roo
 does not hold and, for a delimited target, a node that is not an array are `.Unsupported`. The row walk stops at the
 subtree's end, and the dense path runs over the subtree's span.
 
-A document has no close nodes: a container's `n` is its subtree size, so the walk keeps a stack of `{end, close}` and
-writes a container's close bracket when the next row is past its subtree. The stack holds `MAX_DEPTH` levels on the
-stack of the call, and a document read under a raised `max_depth` takes one allocation of its depth.
+A document has no close nodes: a container's `n` is its subtree size, so the walk writes a container's close bracket
+when the next row is past its subtree.
 
-A string and a number read from a source keep their source spelling and are copied from it in 16-byte blocks, a string
-with the quotes around its span, so a string with an escape keeps the escape. The punctuation and the whitespace are
-made again, which is the whole of the difference between a source and its compact text. A number of a document of
-another format is spelled by `core/spell` as a computed number is, and `-0.0` from a source stays as written. A string is
-spelled again, through `put_string` or the row loop's own block test, when `ascii`, `escape_del`, `escape_html` or `respell_strings` is
-set and when it carries a tolerated ill-formed sequence. `respell_strings` alone writes every string in the writer's own
-escapes, the shortest JSON has, so `"\u00e9\/"` is written `"é/"` as a computed string is. A number keeps its spelling,
-and a comment is written as it was read.
+A string and a number read from a source keep their source spelling, so a string with an escape keeps the escape, and
+the punctuation and the whitespace are made again, which is the whole of the difference between a source and its compact
+text. A number of a document of another format is spelled by `core/spell` as a computed number is, and `-0.0` from a
+source stays as written. A string is spelled again when `ascii`, `escape_del`, `escape_html` or `respell_strings` is set
+and when it carries a tolerated ill-formed sequence. `respell_strings` alone writes every string in the writer's own
+escapes, so `"\u00e9\/"` is written `"é/"`. A comment is written as it was read.
 
-The common case calls nothing. `rows` hands `rows_run` chunks of rows that the output's room holds: a chunk counts every
-row at `1 << ROW_ROOM_SHIFT` bytes and the closes of the containers open at its start, so no row tests room. `rows_run`
-holds the cursor in a local, writes a key and its value in one step, and a close, the comma and the line before a row
-are one test, of `c.end`, which is held at the chunk's end. Anything else stops it with nothing written, and `rare_row`
-or `rare_close` writes that one token at any size and in any spelling through the output's `room`. These are a
-token that needs another spelling, a line past `NODE_ROOM`, a document of another format, where every token is rare, and
-a row whose block copy would load past the end of the source: the first such row is found once, before the walk. A
-string or number past `TOKEN_LONG` is copied by `copy_long`, between `rows_run`'s chunks, when the room after it holds.
+A compact write of a document with short tokens runs over the source's bytes in 64-byte blocks (`json/write_dense.odin`),
+and any other write walks the rows. The two paths write the same bytes, and a leading byte order mark is left out by
+both. The dense path is taken for a document read as `.Json` with no tolerance, with `ascii`, `escape_del`,
+`escape_html`, `respell_strings` and `pretty` off.
 
-Pretty text writes a line break and the indent before each row that starts a line. The line break and 15 bytes of fill are
-one 16-byte store, and each further 16 bytes of indent another. A container with no member is `{}` or `[]`, and a key's
-colon is followed by a space.
-
-A compact write of a document whose tokens are short is not made from its rows. `write_dense` in `json/write_dense.odin`
-runs over the source's bytes in 64-byte blocks: `kernel` masks of the quotes, the backslashes and the bytes below 0x21
-give the bytes inside strings, the blanks outside them are dropped, and `kernel.compress` stores the rest. The block's
-string mask comes from the quotes no backslash escapes, and a byte below 0x21 inside a string can only be a space, which
-stays. The route is one test at entry, with the document read as `.Json` and with no
-tolerance (`as.tolerate` empty), and `ascii`, `escape_del`, `escape_html`,
-`respell_strings` and `pretty` off. The test takes a source under 11 bytes per node, and one under 26 bytes per node when the blanks outside strings in
-its first 2 KB are under a sixteenth of those bytes, since each blank costs the dense path a compress and the rows win on
-text of longer tokens, and one under 128 bytes per node when those 2 KB also hold no backslash, since the rows win on long
-strings that hold escapes. A run of 2 KB starts without the escape mask when the run before met no backslash, and hands
-the rest of its bytes to a run with the mask at the first block that holds one, so a text with no backslash pays none. A longer-token document, any other spec and any other option take the rows. The two paths write the same bytes, a
-leading byte order mark is left out by both, and a text nested past `MAX_DEPTH` is written by the dense path with no
-stack. The path has a copy per x86 tier, as the string writer's `wide_run` has, and `kernel.compress` shuffles by a
-table at every tier, since `vpcompressb` needs VBMI2, which the `.V4` tier does not promise.
+Pretty text writes a line break and the indent before each row that starts a line. A container with no member is `{}`
+or `[]`, and a key's colon is followed by a space.
 
 `core.format` builds a document from the text as `as` says and writes it as `core.write` does in the same spec, for every
 format. A fault in the text is `.Walk` with the fault in `inner`.
 
-A document with comments (`facts`), a table header, JSON5 spelling or `sort_keys` is written by `write_tree`, a writer
-that is not on the common case's path: the row walk never sees it, and `write_text` picks it before the walk. It keeps
-a frame for each open container on a stack that grows with the depth, and writes every depth the document's
-`max_depth` reads.
+A document with comments, a table header, JSON5 spelling or `sort_keys` is written by `write_tree`
+(`json/write_tree.odin`), which keeps a frame for each open container on a stack that grows with the depth.
 
 A comment is written where it was read: before a key on a line of its own, between a key and its value, after a value on
 the value's line, and before a close on a line of its own. A comment after the root stays on a line of its own. A line comment is followed by a
@@ -217,8 +184,30 @@ once for each. A partial document keeps no comments. A delimited text with a hea
 Each cell is what `core.kind` reads it as: an empty unquoted cell is `null`, and for a text read with `dsv.Options.infer` `true` and `false` are booleans and
 a cell that is exactly a JSON number is a number in its source spelling. Any other cell, a quoted one included, stays a string, so the
 text is JSON and no value changes.
-The size hint of a document write is its source length, and for pretty text eight levels of
-indent on every node, so a write rarely regrows.
+The size hint of a document write is its source length, so a write rarely regrows.
+
+## Conversion
+
+`core.write` with another format's `as` writes a document in that format. A fact the target has no place for is dropped
+and counted in `dropped`. The command line reports the count as a warning (`yaml cannot hold 1 comment, tag or
+attribute of the input, so it is dropped`) in `fmt`. A filter run warns only for a node it writes as YAML, TOML, XML,
+HTML or CBOR, and for the attributes of an XML or HTML node it writes as JSON.
+What each target writes:
+
+| Target | Comments | Tags and anchors | Attributes | Byte strings |
+|---|---|---|---|---|
+| JSON, NDJSON | dropped | dropped | dropped | base64 string |
+| JSONC, JSON5 | written | dropped | dropped | base64 string |
+| YAML | written | written (`!!timestamp`, `!!binary`, `!!set`, anchors and aliases) | dropped | `!!binary` |
+| TOML | written | datetime types written bare, the rest dropped | dropped | base64 string |
+| XML | written as `<!-- -->` | dropped | written | base64 text |
+| HTML | written as `<!-- -->` | dropped | written | base64 text |
+| CBOR | dropped | tags written (a TOML or YAML datetime becomes tag 0 or 1004, `!!binary` a byte string) | dropped | byte string |
+| CSV, TSV | dropped, or comment lines under a comment byte | dropped | dropped | base64 string |
+
+An XML or HTML document read with `--attributes` holds its attributes as `@NAME` members, which another format keeps as
+members. XML takes a document with one root member. A delimited target takes a document whose root is an array of objects
+or of arrays.
 
 ## Tokens
 
@@ -262,11 +251,9 @@ bytes, as `finish` does for an output that failed. A stream that failed leaves a
   null is an empty cell. `end_record` writes the layout's line end, and a record that wrote no byte is `.Unwritable`.
   `open_object`, `open_array`, `close` and `key` are `.Unsupported`. `tokens_finish` with cells waiting for `end_record` is
   `.Out_Of_Order`. A header is a record of strings the caller writes.
-- A format supplies a `write.Token_Spelling` through `core.Services.tokens`: its tree, one `value` procedure that writes a
-  string, a number or a word, `record`, which writes a typed value with no frame, `stop`, `comment`, and for a flat format
-  `start` and `line`. `end` turns the finished text into the format's own, for a format whose grammar fixes an order the
-  calls cannot know (TOML), and so runs only on a buffer. `layout`, called at each `Layout_Step`, lays the text out
-  while the format's state is set (YAML's block style), in place of the tree's punctuation.
+- A format supplies a `write.Token_Spelling` through `core.Services.tokens`. TOML's `end` turns the finished text into
+  the format's own, since its grammar fixes an order the calls cannot know, so it runs only on a buffer. YAML's `layout`
+  lays the text out in block style as the calls arrive.
 - `comment` writes a comment of a role: a lead before the next item, an inline comment on the line of the item last
   written and a foot after the last item of the open container, or after a whole root. JSONC and JSON5 write block
   comments, YAML and TOML `#` lines, which break a flow line and, as TOML 1.1 does, the inline table the TOML calls build before
@@ -319,8 +306,7 @@ records.marshal_stream :: proc(w: io.Stream, list: []$E, plan: ^typed.Plan, as: 
   `writer_destroy` frees a writer `writer_end` did not end.
 - `records.marshal` stops at the first refused element and returns no text. `marshal_stream` may leave a prefix.
 
-A writer sets up once: the walker, its stacks and a delimited text's columns live as long as it does, so a record costs
-the value's text and one walk entry.
+A writer sets up once, so a record costs the value's text and one walk entry.
 
 ## Delimited text
 
@@ -330,11 +316,10 @@ the value's text and one walk entry.
 and `.Bad_Option` refuses options that spec cannot read. `sort_keys` orders a struct row's
 columns, and a document's, as below.
 
-A plan of one row writes a text of that one row. A struct row writes a header of its field names, then a record per element. A list row writes its cells and no header. A
-map row writes the sorted union of its keys as the header and a cell per key, an empty one where a record lacks it, and a
-cell that is present and empty is `.Unwritable`. The loop is dsv's own in `dsv/write.odin`, and the cells are the leaves of
-`core/write` (`int_text`, `enum_value`, `union_arm`, `put_text`), so a number or an enum has one spelling in every format.
-A hook's stand-in is written by a plan built for it, and a value that is no cell is `.Unsupported`.
+A plan of one row writes a text of that one row. A struct row writes a header of its field names, then a record per
+element. A list row writes its cells and no header. A map row writes the sorted union of its keys as the header and a
+cell per key, an empty one where a record lacks it, and a cell that is present and empty is `.Unwritable`. A hook's
+stand-in is written by a plan built for it, and a value that is no cell is `.Unsupported`.
 
 The rules that keep a text readable:
 
@@ -349,17 +334,19 @@ The rules that keep a text readable:
 - A record that writes no byte would read back as no record, so it is `.Unwritable`. A refusal's path is `[record].field`,
   `[record][cell]` or `[record].key`.
 
-`core.write` with `dsv.as(spec, opts)`, or with no `as` on a dsv document, writes the records of a document.
-A dsv document with no `as` is written in the spec and layout it was read in, with the line end of its first row, header or record.
-With a comment byte in the output's options, which a write with no `as` takes from the read, the document's comments are
-written as comment lines where an edit writes them: a comment on the list above the header when a record follows it, one
-on a record above the record, and the list's foot below the last record, one comment line for each line of its body. A
-comment with no such place, as one on a cell or an inline one, one whose body holds a control byte other than a tab or
-a line end, and every comment when the output has no comment byte, is dropped and counted in `dropped`. A document of another
-format whose root is an array of objects or of arrays is written through its `text` and spans: the objects' keys in first-seen
-order are the header, null is an empty cell, a number is its source spelling, and a container is `.Unsupported`. A JSON5 number JSON does not spell so is written as JSON writes it, `0x10` as `16` and `.5` as `0.5`, and an infinity or NaN is `.Non_Finite`. A partial
-document is `.Unsupported`. `sort_keys` puts the columns in byte order of their names, stable, as the JSON writer orders an
-object's members.
+`core.write` with `dsv.as(spec, opts)`, or with no `as` on a dsv document, writes the records of a document in the spec
+and layout it was read in, with the line end of its first row. Under a comment byte in the output's options, which a
+write with no `as` takes from the read, the document's comments are written as comment lines: a comment on the list
+above the header when a record follows it, one on a record above the record, and the list's foot below the last
+record. A comment with no such place, as one on a cell or an inline one, one whose body holds a control byte other than
+a tab or a line end, and every comment when the output has no comment byte, is dropped and counted in `dropped`.
+
+A document of another format whose root is an array of objects or of arrays is written through its spans. The first
+object's keys are the header, a later object's missing key is an empty cell, and a key the header lacks is
+`.Unknown_Field` unless `grow_header` is set, which takes every key in first-seen order. Null is an empty cell, a number
+is its source spelling (a JSON5 number JSON does not spell is written as JSON writes it, and an infinity or NaN is
+`.Non_Finite`), and a container is `.Unsupported`, as is a partial document. `sort_keys` puts the columns in byte order
+of their names.
 
 ## TOML
 
@@ -368,7 +355,7 @@ object's members.
 `core.write` with `toml.as(spec)`, writes a document of any format, and the token write (`write.tokens_init` with
 `toml.as(spec)`) writes a text call by call. All three lay the value out the same way: TOML fixes an order the calls
 cannot know, so the typed write and the token write write the value as one inline table and read it back, and
-`toml/write_document.odin` lays the document out. A token write to a stream is `.Unsupported`, since the layout needs
+a document writer lays the document out. A token write to a stream is `.Unsupported`, since the layout needs
 the whole text in a buffer.
 
 The root must be an object, else the write is `.Unwritable`. A scalar, an array that is not all tables and an empty
@@ -377,31 +364,27 @@ array of tables is a `[[header]]` section per element, so a table's keys may be 
 document holds them. A table that holds only sections has no header of its own. Null has no TOML spelling and a key a
 table repeats cannot be written, both `.Unwritable`. A key is bare when it can be, else a basic string.
 
-A string is a basic string, with the quote, the backslash and the control bytes escaped, DEL always as `\u007f`, and
-under `ascii` every rune past U+007F. A string read from TOML in literal quotes keeps them unless `respell_strings` is
-set. A float is written so that it reads back as a float: `1.0` for 1, `-0.0`, and `inf`, `-inf` and `nan`, in the
-typed and the token write. A number of a document is its source spelling, and a number of another format that TOML
-spells differently is written as JSON spells it. A string node whose `Tag` is a datetime type is written bare, with the
-seconds a time lacks added, since only TOML 1.1 reads a time without them, and `write.value_tagged(t, text, tag)` is the
-token write of one. Only TOML 1.0 forms are written. A byte string is the string of its base64.
+A string is a basic string, with the quote, the backslash and the control bytes escaped, and under `ascii` every rune
+past U+007F. A string read from TOML keeps its quotes and its escapes unless `ascii` or `respell_strings` is set, and a
+TOML 1.1 escape (`\e`, `\x`) is spelled again for 1.0. A float is written so that it reads back as a float: `1.0` for 1,
+`-0.0`, `inf`, `-inf` and `nan`. A number a jq filter computes has no float kind, so the command line writes a whole one
+as `1`. A number of a document is its source spelling. A string node whose `Tag` is a datetime type is written bare,
+with the seconds a time lacks added, since only TOML 1.1 reads a time without them. Only TOML 1.0 forms are written. A
+byte string is the string of its base64.
 
 Comments are written where TOML reads them back: a head comment above its line or section, an inline comment after its
-value or its header, and a table's foot comments after a blank line, the form that reads back as the head of what
-follows. An array that has a comment on an element or inside one, or a foot comment, is written one element a line,
-each element's comments above it and after it, and the foot comments before the close. TOML 1.0 has no multi-line
-inline table, so a comment inside a table or an array that is an element of an array stands on a line above that element,
-in document order. A comment whose body holds line ends is
-written as one `#` line for each of its lines. The inline comments of one value or header are joined into one, their
-bodies a space apart, as `a = 1 # a b`. An inline
-comment with a line end, one whose body holds a control byte other than a tab or a line end, and the head comments of a
-table whose header is omitted and which has no line are dropped and counted in `dropped`. `sort_keys` orders the
-members of every table.
+value or its header, and a table's foot comments after a blank line. An array with a comment on an element is written
+one element a line, each element's comments above it. TOML 1.0 has no multi-line inline table, so a comment inside a
+table that is an element of an array stands on a line above that element. A comment whose body holds line ends is
+written as one `#` line for each, and the inline comments of one value are joined into one. An inline comment with a
+line end, one whose body holds a control byte other than a tab or a line end, and the head comments of a table whose
+header is omitted are dropped and counted in `dropped`. `sort_keys` orders the members of every table.
 
 ## YAML
 
 `yaml.marshal`, `yaml.write(&doc, .Yaml_1_2)` (or `core.write` with `yaml.as(.Yaml_1_2)`) and the token write
 (`yaml.tokens_init`) write YAML. Pretty text is block style, one member or element a line with `indent` spaces a level,
-laid out by `yaml/write_block.odin` as the calls arrive, and ends with a line end. Compact text is flow style on one
+laid out as the calls arrive, and ends with a line end. Compact text is flow style on one
 line. A collection read from a flow collection stays one.
 
 A string is plain when its text reads back as the same string under the 1.2 core schema and under a 1.1 reader, so
@@ -413,13 +396,11 @@ null is `null` or the spelling a YAML source had, and a byte string of the typed
 A key an object repeats is `.Unwritable`.
 
 Tags and anchors are written back from the facts, and an alias where its anchor stands before it. A comment is written
-when the document holds it: above the line it heads, after the value it ends, at the end of a block collection, and
-after an empty collection for its foot comment when no inline one is there. A
-comment the output has no place for, and an inline one with a line end in its body, is dropped and counted. Any other
-comment whose body holds line ends is written as one `#` line for each of its lines. The inline comments of one node
-are joined into one at the end of its line, their bodies a space apart, as `a: 1 # a b`. A token write that
-stands at a site of a document is block text at column 0, which the edit indents to the site or turns to flow inside a
-flow collection.
+above the line it heads, after the value it ends, at the end of a block collection, and after an empty collection. A
+comment the output has no place for, and an inline one with a line end in its body, is dropped and counted. A comment
+whose body holds line ends is written as one `#` line for each, and the inline comments of one node are joined into
+one. A token write that stands at a site of a document is block text at column 0, which the edit indents to the site or
+turns to flow inside a flow collection.
 
 ## Markup
 
@@ -433,125 +414,17 @@ that text back as a built value for the format's writer. [markup.md](markup.md) 
 `cbor.write`, `cbor.marshal`, `cbor.tokens_init` and `cbor.writer_init` write CBOR. [binary.md](binary.md) holds the
 encodings, the token write's head patching and the typed write's struct forms.
 
-## Number text
+## Number text and strings
 
-`core/spell` writes a float or an integer as decimal text straight into the caller's memory. The caller reserves the room
-the procedure names, writes, and advances by the count it returns. Nothing allocates and nothing checks bounds, so a
-caller that reserves less than the named room writes past its buffer.
+A computed float is the shortest decimal that reads back as the same bits, in jq 1.8.2's layout, so the library and the
+command line print it one way: `0`, `-0`, fixed text for moderate exponents (`0.0001`, `123.45`, `1000000000000000`, an
+integral value with no `.0`) and `1e+16`, `1e-05`, `5e-324` otherwise. A float read from input keeps its source text. A
+non-finite float is the caller's to refuse. `core/spell` writes the text straight into the caller's room and does not
+check bounds, so a caller reserves `F64_ROOM` (34 bytes) or `INT_ROOM` (20).
 
-| Name | Writes | Room |
-|---|---|---|
-| `f64_text(dst, f)` | a finite `f64` | `F64_ROOM`, 34 bytes |
-| `f32_text(dst, f)` | a finite `f32`, at its own width | `F64_ROOM` |
-| `i64_text(dst, v)` | an `i64` | `INT_ROOM`, 20 bytes |
-| `u64_text(dst, v)` | a `u64` | `INT_ROOM` |
-
-Each procedure stores whole words, so it writes bytes past the count it returns, inside the room. A non-finite float
-is the caller's to refuse. Neither float procedure tests for it, and a NaN or an infinity gives text that reads as a
-different number.
-
-### Floats
-
-The text is the shortest decimal that reads back as the same bits, and the closest to the value among the shortest.
-`f64_text` takes the digits from a port of the zmij crate's `to_decimal` (`zmij.odin`), a Schubfach variant: the
-significand is scaled by a power of ten from the 128-bit table, the integral part of the product is a 15- or 16-digit
-candidate, and the 17th digit is read off the fraction when the candidate does not read back.
-
-- The power-of-ten significands are `POW10_SIG` (`zmij_tables.odin`), the 128-bit floor of 10^k for -342 <= k <= 341,
-  which `tools/generators/zmij_tables.py` writes with exact integer arithmetic.
-- `EXP_SHIFT` (`zmij_tables.odin`, from the same script) holds the shift the scaling needs for each biased exponent of a
-  regular double. It replaces a multiply and a shift on every value. A subnormal reads the entry of biased exponent 1.
-  A power of two, whose lower neighbour is closer, computes the shift.
-- The 16 or 17 digits are made by `sixteen_text`, which splits two 8-digit halves into digit values in one 16-byte vector.
-  The count of significant digits comes from a scalar split of the half that ends the digits, so that it does not wait
-  on the vector. Digits past the last significant one are `'0'`.
-- `f32_text` takes its digits from the port's binary32 path, `to_decimal_f32`, which scales into a 64-bit product
-  with a 34-bit fraction. They are at most 9, and the bytes after them are `'0'`, so one 16-byte load fills the digit
-  slots.
-
-Both procedures hand `layout` the digits d1..dk at `p[1..]`, with the decimal point after digit `n`. It places them with
-whole-word stores:
-
-| Case | Text |
-|---|---|
-| zero | `0`, and `-0` for negative zero |
-| `-3 <= n <= k + 15` | fixed: `0.0001`, `123.45`, `1000000000000000`. An integral value has no `.0`. |
-| otherwise | `d.ddde+xx`, or `de+xx` for one digit, with an exponent of at least two digits: `1e+16`, `1e-05`, `5e-324` |
-
-The range test is one unsigned compare, `u64(n + 3) <= u64(k + 18)`. The layout is jq 1.8.2's, so the library and the
-command line print a computed float one way. A float read from input keeps its source text and does not come here.
-
-### Integers
-
-`u64_text` writes left to right in groups of eight digits. A value under 10^8 is one group. A value under 10^16 is a
-leading group and one group of eight. A longer value has up to four digits above the low sixteen, then those sixteen in
-one `sixteen_text` store. The leading group is written from its digit values and shifted past its leading zeros, with no
-branch on the length. `i64_text` stores the `-` either way and keeps it only for a negative value, and negates in `u64`, which
-is exact for the minimum.
-
-### Checks
-
-`core/spell/test` holds the checks:
-
-- Decided samples of both widths. The `f64` texts are what jq 1.8.2 prints for the same values.
-- A model oracle. Every text must read back, through `strconv`, as the same bits. Its significant digits must be
-  the shortest: neither neighbour of the digits on the next coarser decimal grid may read back as the same bits. An
-  `f64`'s digits must equal the exact value rounded to as many digits by `strconv`'s big decimal arithmetic, whenever
-  that rounding reads back. Its layout must equal a slow rebuild from the digits and the decimal point. A canary after `F64_ROOM` shows any store past
-  the room.
-- Inputs: both edges and the middle of every binade of both widths, powers of two and ten with their neighbours,
-  the layout thresholds, subnormals, random bit patterns, short decimals and exact integers.
-- Integers against `strconv`, at the powers of ten and two with their neighbours, at every length, and at random.
-- `f32_exhaustive` reads back and checks every `f32` pattern with `-define:F32_STRIDE=1`, and a sample of them by
-  default. `make test-f32` runs all 2^32 on `F32_THREADS` threads, and `python3 tools/gate.py full` runs that when the
-  package or its test changes.
-
-### Lanes
-
-`bench/spell.odin` times the number text with `float_random`, `float_canada`, `float_price` and `float_int` (one
-value per unit) and `int_random <digits>`. `float_canada` reads `bench/fixtures/corpus/canada.json`, which `make
-fixtures` fetches. Run them with `CASES=float python3 bench/run.py build/kernelbench` after `make bench`.
-
-### Architectures
-
-The layer has no per-tier code. `sixteen_text` is generic `#simd[16]u8` code and Odin builds it for the target's baseline
-vectors, NEON on arm64 and SSE2 at x86-64-v2. The zmij port multiplies 64-bit words into 128 bits.
-
-## JSON strings
-
-```odin
-json.put_string :: proc(out: ^write.Out, s: string, opts := core.Write_Options{}) -> core.Typed_Error_Kind
-```
-
-Writes `s` as a JSON string at the cursor, quotes included. It returns `.Invalid_Utf8` when `s` is not UTF-8, and then the
-output holds a prefix of the string, so a caller that fails the write discards the output. Every string is checked.
-Escapes are `\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t` and `\u00xx` in lowercase hex for any other byte below 0x20. DEL
-and every other valid byte are written as they are.
-
-`opts.ascii` writes each rune past U+007F as `\uXXXX`, a surrogate pair past U+FFFF. `opts.escape_html` writes `<`, `>`,
-`&`, U+2028 and U+2029 the same way, and `opts.escape_del` writes DEL as `\u007f`, which `ascii` does as well. A string takes
-`put_escaped`, built for the options in force, under `ascii` or `escape_html`.
-It tests a block of the string at a time, copies a block with no stop whole, and goes byte by byte through a block with one. The
-document write keeps these options in its row loop, which tests a string's blocks the same way.
-
-A string without those options takes one of three paths by what it holds. Under `escape_del` each path counts DEL as a
-stop, and a 16-byte block that holds one is written through `ESC_SEQ` with DEL's entry replaced:
-
-1. Under 16 bytes, `put_short` loads 16 bytes at the string in one read when that read stays in the string's page,
-   otherwise it builds the block from loads inside the string, then tests the block and stores it.
-   It runs under the 18 bytes the caller reserved with `room`, so a format's walk calls it after one `room` for a whole
-   member.
-2. From 16 bytes while the text is plain ASCII, `put_string_mid` copies 16-byte blocks and ends with a store of the last
-   16 bytes, which overlaps the one before. It reserves the whole string, so it takes strings up to `MID_MAX`.
-3. Anything else goes to `put_mixed`. It reserves `SEGMENT` (512) source bytes at a time, so a string of any length is
-   written under the cap `ROOM_MAX` puts on `room`, and carries its UTF-8 state from one segment to the next. It steps
-   16 bytes at a time. A block with a stop is written byte by byte through the `ESC_SEQ` table, whose entry is a byte's
-   spelling and its length. A block without one is stored whole. Once 80 bytes pass without a stop it tries 64-byte
-   blocks with the kernel's operations (`wide_run`), which copy a block with no stop and check the UTF-8 of a block with
-   bytes past 0x7F. The tier is chosen once per call from `kernel.tier()` for strings of 64 bytes or more.
-
-UTF-8 is checked a 16-byte window at a time with `kernel.utf8_window`, which is the kernel's table check on 16 lanes.
-A window is checked only when it, or the one before it, holds a byte past 0x7F. `kernel.is_ascii16` tests the 16 bytes
-with one instruction on both architectures.
-
-A member name in an edit goes through the same writer, so a decoded key that is not UTF-8 cannot be set.
+A JSON string is checked as it is written, and a string that is not UTF-8 is `.Invalid_Utf8`. The escapes are `\"`, `\\`,
+`\b`, `\f`, `\n`, `\r`, `\t` and lower-case `\u00xx` for any other byte below 0x20. DEL and every other valid byte stay as
+they are. `ascii` writes each rune past U+007F as `\uXXXX`, a surrogate pair past U+FFFF, `escape_html` writes `<`, `>`,
+`&`, U+2028 and U+2029 so, and `escape_del` writes DEL as `\u007f`, which `ascii` does as well. The document write
+applies the same options, and a member name in an edit goes through the same writer, so a decoded key that is not UTF-8
+cannot be set. `json.put_string` in `json/put_string.odin` is the writer.

@@ -12,6 +12,7 @@ import "core:reflect"
 import "core:slice"
 import "core:time"
 import core "../../../../core"
+import "../../../formats"
 import "../../../timing"
 import typed "../../../../core/typed"
 import dsv "../../../../dsv"
@@ -25,6 +26,12 @@ Log_Record :: struct {
 }
 Logs_Doc :: struct {
 	logs: []Log_Record,
+}
+// The records of logs.xml: a `logs` element of `log` elements, which the read takes as one list of records.
+Logs_Xml :: struct {
+	logs: struct {
+		log: []Log_Record,
+	},
 }
 // `Log_Record` with every member `required`, which the hot read opens like a struct and closes through the check.
 Required_Record :: struct {
@@ -99,8 +106,9 @@ Text_Row :: struct {
 
 ARENA_BYTES :: 1 << 30
 
-// A dsv lane's `T` is a list of rows.
-lane :: proc($T: typeid, src: []u8, borrow: bool, $DSV: bool) {
+// A dsv lane's `T` is a list of rows. A lane with `OTHER` set reads the YAML, TOML, XML or CBOR text `kind` names through
+// `core`'s plan and `typed.unmarshal_text`, and an XML text's records are folded as the list a JSON text holds.
+lane :: proc($T: typeid, src: []u8, borrow: bool, $DSV: bool, $OTHER: bool, kind := formats.Kind.Json) {
 	backing, failed := make([]u8, ARENA_BYTES)
 	if failed != nil {
 		fmt.eprintln("no arena")
@@ -111,6 +119,8 @@ lane :: proc($T: typeid, src: []u8, borrow: bool, $DSV: bool) {
 	alloc := mem.arena_allocator(&ar)
 	when DSV {
 		plan, err := dsv.plan_make(T, .Csv)
+	} else when OTHER {
+		plan, err := formats.plan(T, kind)
 	} else {
 		plan, err := json.plan_make(T)
 	}
@@ -129,6 +139,8 @@ lane :: proc($T: typeid, src: []u8, borrow: bool, $DSV: bool) {
 		t0 := time.tick_now()
 		when DSV {
 			e := dsv.unmarshal(src, .Csv, &d, &plan, read = read, opts = {}, allocator = alloc)
+		} else when OTHER {
+			e := typed.unmarshal_text(src, &d, T, &plan, read, alloc)
 		} else {
 			e := json.unmarshal(src, .Json, &d, &plan, read = read, opts = {}, allocator = alloc)
 		}
@@ -142,7 +154,12 @@ lane :: proc($T: typeid, src: []u8, borrow: bool, $DSV: bool) {
 			ts[i - timing.WARMUP] = elapsed
 		}
 		if i == timing.WARMUP + timing.TIMED - 1 {
-			check = fold(timing.CHECK_OFFSET, &d, type_info_of(T))
+			when T == Logs_Xml {
+				as_json := Logs_Doc{d.logs.log}
+				check = fold(timing.CHECK_OFFSET, &as_json, type_info_of(Logs_Doc))
+			} else {
+				check = fold(timing.CHECK_OFFSET, &d, type_info_of(T))
+			}
 		}
 	}
 	median := timing.median(&ts)
@@ -220,12 +237,20 @@ main :: proc() {
 	}
 	borrow := os.args[3] == "borrow"
 	switch os.args[1] {
-	case "logs": lane(Logs_Doc, src, borrow, false)
-	case "logs_required": lane(Required_Logs, src, borrow, false)
-	case "twitter": lane(Twitter, src, borrow, false)
-	case "citm": lane(CITM, src, borrow, false)
-	case "table": lane([]Table_Row, src, borrow, true)
-	case "text": lane([]Text_Row, src, borrow, true)
+	case "logs":
+		#partial switch kind := formats.of_path(os.args[2]); kind {
+		case .Json: lane(Logs_Doc, src, borrow, false, false)
+		case .Xml: lane(Logs_Xml, src, borrow, false, true, kind)
+		case .Yaml, .Toml, .Cbor: lane(Logs_Doc, src, borrow, false, true, kind)
+		case:
+			fmt.eprintln("no typed read of logs for", os.args[2])
+			os.exit(2)
+		}
+	case "logs_required": lane(Required_Logs, src, borrow, false, false)
+	case "twitter": lane(Twitter, src, borrow, false, false)
+	case "citm": lane(CITM, src, borrow, false, false)
+	case "table": lane([]Table_Row, src, borrow, true, false)
+	case "text": lane([]Text_Row, src, borrow, true, false)
 	case:
 		fmt.eprintln("no lane", os.args[1], "(lanes: logs, logs_required, twitter, citm, table, text)")
 		os.exit(2)

@@ -2,11 +2,18 @@
 // reused. Reading the fixture into the value is outside the clock. `doc` is a parsed document (LIB's Value) to text and
 // `typed` the fixture's struct type to text, chosen by the file's name. LIB is `serde` (serde_json) or `sonic` (sonic-rs).
 // A document's GB/s counts the source file's bytes and a typed value's counts the output's.
+mod toml_write;
+
 use serde::{Deserialize, Serialize};
 use std::hint::black_box;
 
+mod yaml;
+mod html;
+
 use timing::{CHECK_OFFSET, fnv_bytes, report, time_runs};
 use typed_rust::*;
+
+mod cbor;
 
 // One write of `v` into `buf` by `lib`. The buffer keeps its capacity across calls.
 fn put<T: Serialize>(lib: &str, pretty: bool, v: &T, buf: &mut Vec<u8>) -> Result<(), String> {
@@ -60,6 +67,15 @@ fn run(args: &[String]) -> Result<(), String> {
         return Err("usage: write-rust doc|typed FILE [pretty] serde|sonic".into());
     };
     let data = std::fs::read(file).map_err(|e| e.to_string())?;
+    if matches!(lib.as_str(), "ciborium" | "minicbor") {
+        return cbor::run(mode, &data, lib);
+    }
+    if lib.as_str() == "html5ever" {
+        return html::run(&data);
+    }
+    if file.ends_with(".toml") {
+        return toml_write::run(mode, file, &data);
+    }
     match mode.as_str() {
         "doc" => document(lib, pretty, &data),
         "typed" => {
@@ -80,7 +96,8 @@ fn run(args: &[String]) -> Result<(), String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if let Err(e) = run(&args) {
+    let result = if args.len() == 4 && args[3] == "yaml" { yaml::run(&args) } else { run(&args) };
+    if let Err(e) = result {
         eprintln!("write-rust: {e}");
         std::process::exit(1);
     }

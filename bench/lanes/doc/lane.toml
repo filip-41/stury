@@ -6,8 +6,150 @@ stury = { source = "stury" }
 yyjson = { source = "yyjson.c", files = ["*.json"] }
 simdjson = { source = "simdjson.cpp", files = ["*.json"] }
 sonic = { source = "rust", files = ["*.json"] }
+# CBOR arms, on .cbor files only.
+ciborium = { source = "rust", files = ["*.cbor"], args = ["{sub}", "{file}", "ciborium"] }
+minicbor = { source = "rust", files = ["*.cbor"], args = ["{sub}", "{file}", "minicbor"] }
+tinycbor = { source = "tinycbor.c", files = ["*.cbor"] }
+qcbor = { source = "qcbor.c", files = ["*.cbor"] }
+libcbor = { source = "libcbor.c", files = ["*.cbor"] }
+
+# The XML arms. An arm named `_nv` does not check what stury checks: pugixml's parse stops at a mismatched tag and no more,
+# and quick-xml checks the nesting of tags and no more (not names, repeated attributes, entities or namespaces).
+pugixml_nv = { source = "pugixml.cpp", files = ["*.xml"] }
+libxml2 = { source = "libxml2.cpp", files = ["*.xml"] }
+expat = { source = "expat.cpp", args = ["validate", "{file}"], files = ["*.xml"] }
+libxml2_sax = { source = "libxml2.cpp", args = ["validate", "{file}"], files = ["*.xml"] }
+roxmltree = { source = "rust-xml", args = ["roxmltree", "{sub}", "{file}"], files = ["*.xml"] }
+quickxml_nv = { source = "rust-xml", args = ["quickxml", "{sub}", "{file}"], files = ["*.xml"] }
+
+# The YAML libraries read the YAML fixtures, each walking its own tree and typing a plain scalar by the core schema, so a
+# row's check is stury's. rapidyaml parses with parse_in_arena into a Tree, which filters every scalar in place.
+# libfyaml builds a fy_document and libyaml loads a yaml_document_t, the document API of each. saphyr loads a `Yaml` tree.
+rapidyaml = { source = "rapidyaml.cpp", files = ["*.yaml"] }
+libfyaml = { source = "libfyaml.cpp", files = ["*.yaml"] }
+libyaml = { source = "libyaml.cpp", files = ["*.yaml"] }
+saphyr = { source = "rust", args = ["{sub}", "{file}", "saphyr"], files = ["*.yaml"] }
+
+lexbor = { source = "lexbor.cpp", files = ["*.html"] }
+gumbo = { source = "gumbo.cpp", files = ["*.html"] }
+html5ever = { source = "rust", files = ["*.html"] }
+
+tomlpp = { source = "tomlpp.cpp", files = ["*.toml"] }
+toml11 = { source = "toml11.cpp", files = ["*.toml"] }
+toml = { source = "rust", files = ["*.toml"] }
 
 [[group]]
 rows = ["logs.json", "citm_catalog.json", "table.csv", "logs.jsonc", "logs.json5"]
+rss = true
+variant = [{ title = "build", sub = "build" }, { title = "read", sub = "read" }, { title = "key", sub = "key" }]
+
+# The groups below read the other formats, stury alone since no other arm reads them yet. `core.build` reads the text
+# with its format's handle, and each node counts as the kind the format resolves it to. The checks:
+#
+# build: the node count, then each node's kind tag (o a s n t f z) and role (value or key) in document order, over the
+# tree a text reads as. logs.yaml, logs.toml and logs.cbor read as the tree logs.json does, so their check is
+# logs.json's. An XML or HTML element reads as `stury --from xml|html -c .` prints it: a member named for the element,
+# whose value is a string for an element with only text, an object for one with child elements, and an array for a
+# name that repeats among its siblings. The root element is a member of the root object, attributes are no nodes, and
+# a number is a string. logs.xml reads as {"logs":{"log":[{"ts":"..",..}]}}, and logs.html as {"html":{"head":..,
+# "body":{"table":{"thead":{"tr":{"th":[..]}},"tbody":{"tr":[{"td":[..]},..]}}}}}.
+# read: the build's order, the kind tag of each value, then for a string its decoded byte count and for a number the
+# bits of its binary64 value (zero as +0). A YAML plain scalar and a CBOR integer or float count as the string, number,
+# boolean or null they read as, and a CBOR byte string as a string of its payload.
+# key: the first key of the first object, then the number of objects with a member of that name and the number of
+# objects. The first object is the root, so the answer count is 1 and the key is the root's first member.
+#
+# k8s-prometheus-operator.yaml and k8s-argo-cd.yaml are no rows here: a text of several documents is no one document,
+# and `core.build` refuses it at the second `---`. The records lane reads them.
+#
+# The html group's other arms (lexbor, gumbo, html5ever) build the tree a WHATWG tree construction gives, and their check
+# is the same over it: lanes/doc/html_shape.hpp and html_shape/lib.rs hold the one fold, which counts and reads the document
+# as stury's build reads an HTML text. An element with no child element is a value of its text (null when empty), one with
+# child elements an object of each child element under its name and a `#text` member for each run of text between them that
+# holds a character other than HTML white space, and attributes, comments and the document type are no nodes.
+# stury's build of logs.html ends past the runner's 1 GiB resident cap (about 1.1 GiB over the timed calls, where logs.xml
+# stays at 30 MiB), so the runner stops at its row unless ARMS leaves stury out.
+
+[[group]]
+title = "logs"
+arms = ["stury"]
+rows = ["logs.json", "logs.yaml", "logs.xml", "logs.cbor"]
+rss = true
+variant = [{ title = "build", sub = "build" }, { title = "read", sub = "read" }, { title = "key", sub = "key" }]
+
+[[group]]
+title = "twitter, citm"
+arms = ["stury"]
+rows = ["twitter.yaml", "twitter.cbor", "citm.yaml", "citm.cbor"]
+rss = true
+variant = [{ title = "build", sub = "build" }, { title = "read", sub = "read" }, { title = "key", sub = "key" }]
+
+[[group]]
+title = "natural"
+arms = ["stury"]
+rows = ["openapi-stripe.yaml", "osm-beatty.xml", "nasa.xml"]
+rss = true
+variant = [{ title = "build", sub = "build" }, { title = "read", sub = "read" }, { title = "key", sub = "key" }]
+
+# XML against the other libraries. Each arm reads the tree stury reads: build is the parse alone, read visits every value,
+# key looks one name up in every object. The `_nv` arms are not validating. expat builds no tree, so it has the validate
+# rows alone, where stury judges the text and builds nothing.
+
+[[group]]
+title = "xml"
+arms = ["stury", "pugixml_nv", "libxml2", "roxmltree", "quickxml_nv"]
+rows = ["logs.xml", "osm-beatty.xml", "nasa.xml"]
+rss = true
+variant = [{ title = "build", sub = "build" }, { title = "read", sub = "read" }, { title = "key", sub = "key" }]
+
+[[group]]
+title = "xml validate"
+arms = ["stury", "expat", "libxml2_sax", "quickxml_nv"]
+rows = ["logs.xml", "osm-beatty.xml", "nasa.xml"]
+variant = [{ title = "validate", sub = "validate" }]
+
+# CBOR against the other libraries, on the same bytes. Every arm prints the check of the build, read and key lanes above.
+# ciborium reads into its `Value`, minicbor's decoder into a tree of its own (it has no document type) and libcbor into its
+# item tree, so those build a document as stury does. tinycbor and QCBOR build none: tinycbor's build lane is
+# `cbor_value_validate` alone and its read and key lanes validate, then read in place with its parser (the check comes from
+# an untimed walk of the same parser), and QCBOR's lanes are one pass of `QCBORDecode_GetNext` over every item.
+# ciborium, minicbor and tinycbor judge the structure, the UTF-8 of every text string and the end of the data, as stury does.
+# libcbor and QCBOR do not judge the UTF-8 of text strings, so they sit in a table of their own. Every arm refuses data
+# after the item.
+
+[[group]]
+title = "cbor"
+arms = ["stury", "ciborium", "minicbor", "tinycbor", "qcbor", "libcbor"]
+rows = ["logs.cbor", "twitter.cbor", "citm.cbor"]
+rss = true
+variant = [{ title = "build", sub = "build" }, { title = "read", sub = "read" }, { title = "key", sub = "key" }]
+tables = [
+	{ title = "judging text, a document built", arms = ["stury", "ciborium", "minicbor"] },
+	{ title = "judging text, no document", arms = ["stury", "tinycbor"] },
+	{ title = "not judging text", arms = ["stury", "qcbor", "libcbor"] },
+]
+
+[[group]]
+title = "yaml"
+arms = ["stury", "rapidyaml", "libfyaml", "libyaml", "saphyr"]
+rows = ["logs.yaml", "twitter.yaml", "citm.yaml", "openapi-stripe.yaml"]
+rss = true
+variant = [{ title = "build", sub = "build" }, { title = "read", sub = "read" }, { title = "key", sub = "key" }]
+
+[[group]]
+title = "html"
+arms = ["stury", "lexbor", "gumbo", "html5ever"]
+rows = ["logs.html", "whatwg-html.html", "wikipedia-united-states.html", "wikipedia-world-war-ii.html"]
+rss = true
+variant = [{ title = "build", sub = "build" }, { title = "read", sub = "read" }, { title = "key", sub = "key" }]
+
+# The TOML rows, with the other libraries that read TOML. toml++ keeps a table's members in key order, so its checks walk
+# them in the order the text first names them, by each node's source position. toml11 runs with a type config that keeps
+# text order and drops comments, and takes its text as a byte vector, copied inside the clock. The toml crate parses
+# with from_slice and its fast_hash feature, which keeps text order. Dates and times count as strings.
+[[group]]
+title = "toml"
+arms = ["stury", "tomlpp", "toml11", "toml"]
+rows = ["logs.toml", "cargo-lock-zed.toml", "uv-lock-airflow.toml", "pyproject-airflow.toml"]
 rss = true
 variant = [{ title = "build", sub = "build" }, { title = "read", sub = "read" }, { title = "key", sub = "key" }]

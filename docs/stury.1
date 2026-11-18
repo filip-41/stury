@@ -1,4 +1,4 @@
-.TH STURY 1 "2026-11-11" "stury 0.1.1" "General Commands Manual"
+.TH STURY 1 "2026-11-17" "stury 0.2.0" "General Commands Manual"
 .SH NAME
 stury \- JSON, YAML, TOML, XML, HTML, CSV and CBOR codec with a jq 1.8.2\-compatible command line
 .SH SYNOPSIS
@@ -27,7 +27,7 @@ fmt
 .br
 .B stury
 edit
-[\-\-from format|\-\-seq] [\-\-in\-place|\-\-check|\-\-diff] [\-\-max\-depth n] [\-f file] [\-L dir] [\-\-arg name value] <jq filter> [file...]
+[\-\-from format|\-\-seq|\-R] [\-s] [\-\-in\-place|\-\-check|\-\-diff] [\-\-max\-depth n] [\-f file] [\-L dir] [\-\-arg name value] <jq filter> [file...]
 .br
 .B stury
 diff
@@ -43,7 +43,7 @@ diff
 .br
 .B stury
 schema infer
-[\-\-from format] [\-\-infer] [\-\-ranges] [\-\-threads n] [layout options] [file...]
+[\-\-from format] [\-\-to format] [\-\-infer] [\-\-ranges] [\-\-threads n] [layout options] [file...]
 .br
 .B stury
 schema sample
@@ -78,9 +78,12 @@ one compact value per line. Between these formats only the layout changes: each 
 as it was, and every member of an object is kept, a repeated key included. csv and tsv are a header and one record
 per row, re-spelled by the cell writer, each file a table of its own. A leading byte order mark is not written. A JSON text whose root is an array is
 written to csv or tsv as a list of rows. Every file is formatted, and each file's first fault is reported. The run is
-idempotent, and a file already in that layout comes back byte for byte. \-c is \-\-indent 0. \fBstury fmt \-\-help\fR lists its options.
+idempotent, and a file already in that layout comes back byte for byte. Comments, tags and attributes the output format cannot hold are dropped, and fmt warns on stderr with the count for every target, JSON included. A filter run warns the same for a node written as YAML, TOML, XML, HTML or CBOR, but drops them without a warning when it writes JSON, JSONC, JSON5 or NDJSON, except the attributes of an XML or HTML node. \-c is \-\-indent 0. \fBstury fmt \-\-help\fR lists its options.
 .PP
 With \fB\-\-schema\fR \fIfile\fR, fmt judges each file against the JSON Schema as check \-\-schema does (a csv or tsv cell by \-\-infer, never by the schema) and formats a file that passes as plain fmt does. A file that fails is told as check \-\-schema tells it, with at most \-\-max\-errors n failures, is not written, and makes the exit 1. A table written is judged again as it reads back, under \-\-infer when the input is no table, which quotes a text that reads as a number, true or false, and a failure there is told against \fIname\fR (output). \-\-in\-place and \-\-check leave a file with a failure as it is.
+.PP
+.B stury diff
+tells what differs between two inputs read as one format, a line each: + for an added member or element, \- for a removed one, ~ for a changed value, with its path, and exits 1 when something differs. Objects match by member name, numbers by value and arrays as sequences; \-\-set, \-\-position and \-\-key member change how elements match, \-\-facts also tells changes of comments, attributes, tags and anchors, and \-\-json writes one record a line. \-\-shape compares the shapes the two inputs infer to. With \-\-old\-schema and \-\-new\-schema, diff compares two schemas: each change names the keyword and whether it widens or narrows what the schema takes, and backward and forward tell whether the new schema takes what the old one does and the reverse, each yes, no with a value that shows it, or unknown. \-\-compat backward|forward|full exits 1 unless that direction is proven. A schema and one data file judge the data by the schema and tell the members the schema does not describe. \fBstury diff \-\-help\fR lists its options.
 .PP
 .B stury schema infer
 writes the JSON Schema every record of its inputs passes: the kinds met at each position, a member required where every object had it, an empty csv cell a null. \-\-ranges also keeps the least and greatest number and length. An input that does not parse, an empty one, and one whose schema would nest past the depth a JSON text may have exit 5. The schema is written in the format \-\-to names, JSON by default, and not as csv or tsv.
@@ -210,14 +213,14 @@ Write how the filter runs and what the run did to stderr, as lines \fBstury: exp
 .TP
 .B \-V
 Print stury\- and the version it was built with: a release version, or the short commit hash from a source build (dev outside a checkout).
-.SH BUILTINS BEYOND JQ
-Besides jq 1.8.2's: fromrfc3339, torfc3339, sha1, sha256, sha512, md5, hmac_sha256(key), hmac_sha512(key), crc32, hex_encode, hex_decode, base64url_encode, base64url_decode, uuid_v4, uuid_v7, parse_url, parse_query_string, parse_logfmt, numfmt(spec), ip_valid, ip_class, ip_canonical, ip_in_cidr(cidr) and json_pointer(ptr). Each is described in docs/cli.md, "Builtins beyond jq".
 .SH INPUT DIFFERENCES FROM JQ
 A number prints as it was written (1E2 stays 1E2), where jq prints 1E+2. A file of 1 MiB or more is answered on every core when the filter works one record or entry at a time, with the output of a serial run.
 .PP
 stury reads strict RFC 8259 JSON. It rejects, with exit 5, these inputs that jq accepts: 01, 1., NaN, nan, Infinity, invalid UTF\-8 in a string, a lone low surrogate escape, a NUL after a value, and nesting past \-\-max\-depth. A parse error names the fault and the position of the byte where it was found. Each file ends its texts, except under \-\-seq. The full list is in docs/cli.md, "Differences from jq".
 .SH BUILTINS BEYOND JQ
-Statistics over an array, or over f of each element: avg, median, quantile(p), variance and stddev (population), each with an f form, null for no numbers, an error for a value that is not a number. frequency(f) gives [{value, count}], the largest count first. union(b), intersect(b) and except(b) give sorted sets. fill_forward replaces a null by the last value before it that was not null, per member for objects. melt($ids; $var; $val) turns wide rows to long and pivot($ids; $var; $val) long to wide. See docs/cli.md, "Builtins beyond jq".
+Besides jq 1.8.2's: fromrfc3339, torfc3339, sha1, sha256, sha512, md5, hmac_sha256(key), hmac_sha512(key), crc32, hex_encode, hex_decode, base64url_encode, base64url_decode, uuid_v4, uuid_v7, parse_url, parse_query_string, parse_logfmt, numfmt(spec), ip_valid, ip_class, ip_canonical, ip_in_cidr(cidr) and json_pointer(ptr).
+.PP
+Statistics over an array, or over f of each element: avg, median, quantile(p), variance and stddev (population), each with an f form, null for no numbers, an error for a value that is not a number. frequency(f) gives [{value, count}], the largest count first. union(b), intersect(b) and except(b) give sorted sets. fill_forward replaces a null by the last value before it that was not null, per member for objects. melt($ids; $var; $val) turns wide rows to long and pivot($ids; $var; $val) long to wide. docs/cli.md describes each.
 .PP
 css(selector) gives each element of an XML or HTML input that a CSS selector matches, in document order, and is a path expression, so path(css("a")), css("a").&href |= ..., del(css(".ad")) and stury edit reach the matched elements alone. Another input, and a selector out of the static part of Selectors Level 4, are errors. See docs/cli.md, "Builtins beyond jq".
 .SH EXIT STATUS

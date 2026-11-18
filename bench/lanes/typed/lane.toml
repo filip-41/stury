@@ -5,6 +5,20 @@ legend = "GB/s is the source's bytes over time: the best of {rounds} rounds of e
 stury = { source = "stury", args = ["{lane}", "{file}", "{mode}"] }
 serde = { source = "rust", args = ["{lane}", "{file}", "{mode}", "serde"], files = ["*.json"] }
 sonic = { source = "rust", args = ["{lane}", "{file}", "{mode}", "sonic"], files = ["*.json"] }
+# CBOR arms, on .cbor files only, in the "formats" rows below. ciborium reads through serde from a reader and hands every
+# string over owned, so its borrow and copy rows read alike. minicbor borrows in `borrow`, through a hand-written `Decode`
+# (its derive maps fields by integer index, and the fixture's keys are text).
+ciborium = { source = "rust", args = ["{lane}", "{file}", "{mode}", "ciborium"], files = ["*.cbor"] }
+minicbor = { source = "rust", args = ["{lane}", "{file}", "{mode}", "minicbor"], files = ["*.cbor"] }
+
+# quick-xml's serde reader reads the nesting of tags and no more (not names, repeated attributes, entities or namespaces),
+# so its arm is not validating.
+quickxml_nv = { source = "rust-xml", args = ["{lane}", "{file}", "{mode}"], files = ["*.xml"] }
+
+# serde_yaml_ng reads YAML into the same structs. It hands every string over decoded and owned, so `borrow` copies too.
+serde_yaml = { source = "rust", args = ["{lane}", "{file}", "{mode}", "yaml"], files = ["*.yaml"] }
+
+toml = { source = "rust", args = ["{lane}", "{file}", "{mode}", "toml"], files = ["*.toml"] }
 
 [[group]]
 rows = [
@@ -14,5 +28,22 @@ rows = [
 	{ label = "citm", lane = "citm", file = "citm_catalog.json" },
 	{ label = "table", lane = "table", file = "table.csv" },
 	{ label = "text", lane = "text", file = "text.csv" },
+]
+variant = [{ title = "borrow", mode = "borrow" }, { title = "copy", mode = "copy" }]
+
+# The logs records of every other format, read by stury alone since no other arm reads them yet, through `core`'s plan
+# and `typed.unmarshal_text`. Every row reads the `Log_Record` list of `logs` and prints the check of logs.json's row,
+# the fold of the value read: an object's members sorted by key, each value's kind tag and its bytes (a string's length
+# and bytes, an integer's 64 bits, a float's binary64 bits, a boolean's tag). logs.xml holds the records as `logs`
+# elements' `log` children and reads into a struct of that shape, whose list is folded as the list of the JSON row;
+# an XML number is text that the read parses into the integer or float its field names. HTML has no typed read.
+[[group]]
+title = "formats"
+rows = [
+	{ label = "logs json", lane = "logs", file = "logs.json", arms = ["stury"] },
+	{ label = "logs yaml", lane = "logs", file = "logs.yaml" },
+	{ label = "logs toml", lane = "logs", file = "logs.toml" },
+	{ label = "logs xml", lane = "logs", file = "logs.xml" },
+	{ label = "logs cbor", lane = "logs", file = "logs.cbor" },
 ]
 variant = [{ title = "borrow", mode = "borrow" }, { title = "copy", mode = "copy" }]

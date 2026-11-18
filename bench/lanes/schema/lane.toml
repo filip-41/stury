@@ -7,11 +7,24 @@ legend = "Single thread, parse + judge per instance. GB/s: the best of {rounds} 
 # error: Blaze's SimpleOutput over an Exhaustive template, jsonschema's iter_errors, boon's basic output. The schema of a
 # benchmark fixture is its schema-noformat.json, so no `format` is asserted.
 
+# The logs.yaml, logs.toml and logs.cbor rows are one document each, read in its own format by stury and judged
+# against schema/logs.document.schema.json, which closes the logs.json document. The other arms read JSON only, so they
+# are left out of these rows. A format's values are judged as that format types them, and the check is the number of
+# instances accepted, 1 per file. The jsonschema and boon drivers read a `.cbor` file with ciborium into a
+# serde_json::Value and judge that, so logs.cbor has their arms too: parse, then judge, as users check a CBOR text.
+
+# The logs.yaml row is also judged by jsonschema and boon: each parses the text with serde_yaml_ng into a serde_json `Value`
+# and judges that, the way a YAML file is checked against a schema without stury. Blaze reads JSON only.
+
 [arm]
-stury = { source = "stury", args = ["{sub}", "{file}", "{schema}"] }
+stury ={ source = "stury", args = ["{sub}", "{file}", "{schema}"] }
 blaze = { source = "blaze.cc", args = ["{sub}", "{file}", "{schema}"] }
 jsonschema = { source = "rust", args = ["{sub}", "{file}", "{schema}", "jsonschema"] }
 boon = { source = "rust", args = ["{sub}", "{file}", "{schema}", "boon"] }
+
+# jsonschema_xml reads logs.xml with roxmltree into the value stury reads (each element's text a string, a repeated name an
+# array), then judges it with jsonschema.
+jsonschema_xml = { source = "rust-xml", args = ["{sub}", "{file}", "{schema}", "jsonschema"], files = ["*.xml"] }
 
 [[group]]
 rows = [
@@ -34,4 +47,10 @@ rows = [
 	{ label = "twitter", file = "schema/twitter.json", schema = "schema/twitter.schema.json" },
 	{ label = "citm", file = "schema/citm.json", schema = "schema/citm.schema.json" },
 	{ label = "applicator", file = "schema/applicator.ndjson", schema = "schema/applicator.schema.json" },
+	{ label = "logs.yaml", file = "logs.yaml", schema = "schema/logs.document.schema.json" },
+	{ label = "logs.toml", file = "logs.toml", schema = "schema/logs.document.schema.json" },
+	{ label = "logs.cbor", file = "logs.cbor", schema = "schema/logs.document.schema.json" },
+	# logs.xml is read as XML by stury and judged against schema/logs.xml.schema.json, which closes the tree of the text,
+	# every text a string. jsonschema_xml parses the text first.
+	{ label = "logs.xml", file = "logs.xml", schema = "schema/logs.xml.schema.json" },
 ]

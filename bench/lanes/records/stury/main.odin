@@ -2,11 +2,12 @@
 // records of the file and prints best and median GB/s. A `.csv` file is read as CSV by `frame`, `check`, `threads`,
 // `validate` and `each`. `frame` frames each record and reads no value, `check` judges each one, `build` builds the
 // document of each, `threads` is `check` on a pool of `width` threads (6 by default), `stream` judges each one through a
-// stream's window, `read` reads each one of `logs.ndjson` into a `Log_Record`, strings borrowed. `validate` judges a
-// whole text on the pool, and `each` is `check` through `each` on the pool, a `.json` file read as the entries of its
-// spine. On CSV, `cells` reads each row's first cell, and `rows` reads each row of `table.csv` into a `Table_Row`,
-// strings borrowed. `write` reads the records of `logs.ndjson`, `table.csv` or `text.csv` into a list outside the clock,
-// then times `records.marshal` of the list, and its GB/s counts the bytes written.
+// stream's window, `read` reads each one of `logs.ndjson` or `logs.seq.cbor` into a `Log_Record`, strings borrowed.
+// `validate` judges a whole text on the pool, and `each` is `check` through `each` on the pool, a `.json` file read as
+// the entries of its spine. On CSV, `cells` reads each row's first cell, and `rows` reads each row of `table.csv` into a `Table_Row`,
+// strings borrowed. `write` reads the records of `logs.ndjson`, `logs.seq.cbor`, `table.csv` or `text.csv` into a list
+// outside the clock, then times `records.marshal` of the list, and its GB/s counts the bytes written. A `.yaml` file is a
+// stream of `---` documents and a `.cbor` file a sequence of data items (RFC 8742), each read as one record by every lane.
 //
 // It prints `gb_per_s=` (the median), `ns=` and `check=`, the number of records of the file, which the peers' counts
 // are compared with.
@@ -23,6 +24,7 @@ import "core:strings"
 import "core:sync"
 import "core:time"
 import core "../../../../core"
+import "../../../formats"
 import "../../../timing"
 import host "../../../../host"
 import typed "../../../../core/typed"
@@ -30,11 +32,13 @@ import records "../../../../core/records"
 import json "../../../../json"
 import dsv "../../../../dsv"
 
-// The handle every lane but `rows`, `text` and `cells` reads the file by.
+// The handle every lane but `rows`, `text` and `cells` reads the file by, how its records are framed, and its format.
 handle: core.As
+framing: core.Framing
+kind: formats.Kind
 
 frame :: proc(src: []u8) -> int {
-	it := records.open(src, handle)
+	it := records.open(src, handle, framing)
 	defer records.close(&it)
 	n := 0
 	for rec in records.next(&it) {
@@ -56,7 +60,7 @@ count :: proc(src: []u8) -> int {
 
 // The document of each record, dropped as the next is built.
 build :: proc(src: []u8) -> int {
-	it := records.open(src, handle)
+	it := records.open(src, handle, framing)
 	defer records.close(&it)
 	n := 0
 	for rec in records.next(&it) {
@@ -68,7 +72,7 @@ build :: proc(src: []u8) -> int {
 }
 
 check :: proc(src: []u8) -> int {
-	faults, _ := records.validate(src, handle, .Lines, context.temp_allocator)
+	faults, _ := records.validate(src, handle, framing, context.temp_allocator)
 	defer free_all(context.temp_allocator)
 	return len(faults)
 }
@@ -76,7 +80,7 @@ check :: proc(src: []u8) -> int {
 pool: host.Pool
 
 threads :: proc(src: []u8) -> int {
-	faults, _ := records.validate(src, handle, .Lines, context.temp_allocator, &pool.runner)
+	faults, _ := records.validate(src, handle, framing, context.temp_allocator, &pool.runner)
 	defer free_all(context.temp_allocator)
 	return len(faults)
 }
@@ -107,7 +111,7 @@ each :: proc(src: []u8) -> int {
 // `check`'s work on a stream of the text in memory, read through the 64 KiB window.
 stream :: proc(src: []u8) -> int {
 	r: bytes.Reader
-	it := records.open_stream(bytes.reader_init(&r, src), json.as(.Json))
+	it := records.open_stream(bytes.reader_init(&r, src), handle, framing)
 	defer records.close(&it)
 	n := 0
 	for rec in records.next(&it) {
@@ -129,12 +133,12 @@ Log_Record :: struct {
 log_plan: typed.Plan
 
 read :: proc(src: []u8) -> int {
-	return load(src, json.as(.Json), &log_plan, (^[dynamic]Log_Record)(nil))
+	return load(src, handle, &log_plan, (^[dynamic]Log_Record)(nil))
 }
 
 // `read` with a repeated key refused, which builds each record before it reads it.
 refuse :: proc(src: []u8) -> int {
-	return load(src, json.as(.Json), &log_plan, (^[dynamic]Log_Record)(nil), .Refuse)
+	return load(src, handle, &log_plan, (^[dynamic]Log_Record)(nil), .Refuse)
 }
 
 cells :: proc(src: []u8) -> int {
@@ -177,7 +181,7 @@ text :: proc(src: []u8) -> int {
 // Reads every record of `src` into a `T`, strings borrowed, appending to `list` when it is not nil. The result is the
 // number of refused records.
 load :: proc(src: []u8, as: core.As, plan: ^typed.Plan, list: ^[dynamic]$T, dups := core.Duplicates.Default) -> int {
-	it := records.open(src, as)
+	it := records.open(src, as, framing)
 	defer records.close(&it)
 	n := 0
 	v: T
@@ -202,7 +206,7 @@ output: virtual.Arena
 
 // `records.marshal` of the list as records, one for each element.
 write :: proc(list: []$T, plan: ^typed.Plan) -> int {
-	text, err := records.marshal(list, plan, handle, allocator = virtual.arena_allocator(&output))
+	text, err := records.marshal(list, plan, formats.handle(kind, true), framing, allocator = virtual.arena_allocator(&output))
 	written = len(text)
 	virtual.arena_free_all(&output)
 	return int(err != nil)
@@ -223,7 +227,10 @@ main :: proc() {
 		os.exit(1)
 	}
 	lane: proc(src: []u8) -> int
-	handle = dsv.as(.Csv) if strings.has_suffix(os.args[2], ".csv") else json.as(.Json)
+	kind = formats.of_path(os.args[2])
+	handle = formats.handle(kind)
+	framing = formats.framing(kind)
+	each_framing = framing
 	switch os.args[1] {
 	case "frame": lane = frame
 	case "check": lane = check
@@ -242,7 +249,7 @@ main :: proc() {
 	case "stream": lane = stream
 	case "read", "refuse":
 		lane = read if os.args[1] == "read" else refuse
-		log_plan, _ = json.plan_make(Log_Record)
+		log_plan, _ = formats.plan(Log_Record, kind)
 	case "cells": lane = cells
 	case "rows":
 		lane = rows
@@ -253,10 +260,10 @@ main :: proc() {
 	case "write":
 		// One block holds a pass, so the output grows in place.
 		_ = virtual.arena_init_growing(&output, uint(4 * len(src)))
-		switch filepath.stem(os.args[2]) {
+		switch filepath.short_stem(os.args[2]) {
 		case "logs":
 			lane = write_logs
-			log_plan, _ = json.plan_make(Log_Record)
+			log_plan, _ = formats.plan(Log_Record, kind)
 			load(src, handle, &log_plan, &logs_list)
 		case "table":
 			lane = write_rows

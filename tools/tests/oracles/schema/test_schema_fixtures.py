@@ -1,6 +1,6 @@
 """stury check against jsonschema on the schema lane's fixtures: the verdict of each of the first INSTANCES instances of
-a fixture must be the same. The fixtures are the rows of bench/lanes/schema/lane.toml, read from --bench-fixtures. The
-other libraries' verdicts are the lane's own agreement check.
+a fixture must be the same. The fixtures are the JSON rows of bench/lanes/schema/lane.toml, read from --bench-fixtures.
+The other libraries' verdicts, and those of the rows in other formats, are the lane's own agreement check.
 
 The suite test holds jsonschema itself to the expected verdicts of the vendored JSON-Schema-Test-Suite, so a difference
 above is stury's. A case whose schema jsonschema cannot compile or resolve is left out.
@@ -34,7 +34,7 @@ KNOWN_WRONG = {
 }
 
 with open(os.path.join(ROOT, "bench", "lanes", "schema", "lane.toml"), "rb") as f:
-    ROWS = tomllib.load(f)["group"][0]["rows"]
+    ROWS = [r for r in tomllib.load(f)["group"][0]["rows"] if r["file"].endswith((".json", ".jsonl", ".ndjson"))]
 
 
 def fixture_path(root, name):

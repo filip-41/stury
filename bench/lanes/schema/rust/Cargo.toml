@@ -13,10 +13,18 @@ timing = { path = "../../../timing" }
 jsonschema = { version = "=0.60.2", default-features = false }
 boon = "=0.6.1"
 serde_json = "1"
+roxmltree = "=0.21.2"
+ciborium = "=0.2.2"
+serde_yaml_ng = "=0.10.0"
+toml = "=1.2.1"
 
 [[bin]]
 name = "schema-rust"
 path = "main.rs"
+
+[[bin]]
+name = "schema-rust-xml"
+path = "xml.rs"
 
 [profile.release]
 lto = "fat"

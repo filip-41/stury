@@ -11,6 +11,16 @@
 "logs.ndjson" = "28c0b370e9401d50352d1f847aae2a056a4d90ad9b29bd747d81c75fc2f82154"
 "logs.json5" = "aa14ad09304f3a85082a561c093b73a33109e2e5ab815f624064e073c4863822"
 "logs.jsonc" = "28d8d5def185102f9ddeb1cc72c829da6456a922edf04519ab7cabdbb89728a4"
+"logs.yaml" = "c871def307175c462907120adc74de105f4bb41bc9f062fa22b532e2d13974ce"
+"logs.toml" = "925c326ac25fc84487e616e2371f22e2b3e5d0b43dfafe7f873eb3c3b6baccaa"
+"logs.xml" = "0271aca6880ab2a85002fd65678a4d43a5cfe7844dec2ea005d3d0c304e989f7"
+"logs.html" = "5af891a86c3a3b2bd4bb4ecc257f16be639bf1b8a7156e49b8bb738594a47e58"
+"logs.cbor" = "ebf38f3ac8eef31bf0bb066e5bab974dfae9ebdc37b84eb332de0945702db07f"
+"logs.seq.cbor" = "d53a75b1db15dad390c2530312f5f06ac1738e0ba4b583eedf60189325ace760"
+"twitter.yaml" = "ece0193f56e4791bd205fd95cc05401d2f0310f4f0742e1c6cd78a1e1e9eb568"
+"twitter.cbor" = "f5f5d97edcfef852ccc85782d57834306d18525bf0357884ecf944d36332873d"
+"citm.yaml" = "a91fcc4278903fff1d0e308d8d8d4ba50dbcb17f3f61305d794627cd6e7da90d"
+"citm.cbor" = "f7a09710fba1e3ee2aad3227415d081c5b0d74aae0159a8534feda0379ad26be"
 "longtext.json" = "bb93928792010d98658a9250e6824394d2e1c4b45bb5a26e86b4b4e54f6181e7"
 "nested.json" = "bd0d6756421a3f1853bb8b26cd0b2b829cd9ae84717a98a55e9c86f3c1eb94d2"
 "pretty.json" = "dc96c6eaab05dfb92c29ae0026afbba614a28b68435e7752dbe5a9d943063af9"
@@ -21,12 +31,18 @@
 "utf8.json" = "ae9245882bb66fb0240945fd8ee50e95027985c3d6099dfe5171fee31140fab7"
 "wide.csv" = "a308045be8319f69479da2aa08813f4eeee298585542a2ac1fc357a27d91b56e"
 "wide.json" = "c837ba6cfc65706091933974941421a58009894404bedba12ba7f5747943b2e7"
+"model/logs.invalid.ndjson" = "d14aa721170c4f59ec7719ff1a3e706838fff72524d719ad9b4dde4d3f2e81c8"
+"model/logs.valid.ndjson" = "28c0b370e9401d50352d1f847aae2a056a4d90ad9b29bd747d81c75fc2f82154"
+"model/twitter.invalid.ndjson" = "6eefd38320fb59adc1bd46c29b012ad941068bbe93f61340bb3179f81a73a025"
+"model/twitter.valid.ndjson" = "2dd6c53f9ea8381abb39d4961cd43c21d79dba794b1087e9b589a186ba5d3a81"
 "schema/applicator.ndjson" = "26d7ca239eaa30d4fb831242b36f7fba3c6689416c6edf3c9c51d4bd70364db1"
 "schema/applicator.schema.json" = "17645382819050f27cbf39524c638451467802f43212757a76770d0e19f5adbc"
 "schema/citm.json" = "831f4a8f271d6650d49b87c3af6b6adaaea122e563dd85fa03dc62b03c3ab7ef"
 "schema/citm.schema.json" = "eed9cfdac64c4ef84db5ba4e01909fd01fe8089dfbe3c949ba391ce6f5215350"
+"schema/logs.document.schema.json" = "a1dc6f615cea1a216340c8a409b4cca245d2cf7fd60f4581fcbd4e35a5b1563d"
 "schema/logs.json" = "336e60f846cc676b434e951464f581882837e63f20a7d74e13e92e588699405c"
 "schema/logs.schema.json" = "9467fb9e558aa30ebc6b4293c53034dbba14b157f63eac572197b447021cad8c"
+"schema/logs.xml.schema.json" = "0ba7d31cacc9a06ab955ae2b03faea013348bf2f8f2688fd471aeb3d29032324"
 "schema/twitter.json" = "9592597c0cb898aca1eb3549ed31b50088f32e0f581d1bfaa79f4a7610171482"
 "schema/twitter.schema.json" = "014590edf0e601d2b7e3988c9fe3c27d74c3e55ecb683696fe55814fbb784ed7"
 
@@ -76,3 +92,96 @@ base = "https://raw.githubusercontent.com/sourcemeta-research/jsonschema-benchma
 "aws-cdk/instances.jsonl" = "a9581d49d475e99b5d77d445f1d060d9a96269ddef6866942a368710bd24f733"
 "babelrc/schema.json" = "e347cbd2d5375be71320da5a4984f70ce9ccd4f905894141845c369dfa37901b"
 "babelrc/instances.jsonl" = "7f4ddd26a06e0c7e2cab9385abf86264deb670ad875806269b230dbaee9ee92e"
+
+# The real documents of the YAML, TOML, XML and HTML lanes, each at a commit or at an exact web.archive.org snapshot
+# (an `id_` URL serves the captured bytes) so the bytes never move. A `save` entry names the local file where the
+# remote name has no extension stury reads by.
+[[download]]
+group = "natural"
+dir = "natural"
+base = "https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/0419af3a5d49080c246785c760053a205d97f45c"
+[download.files]
+"bundle.yaml" = "36118bb15e8948dd87d32b80568d80d4ea80330a9d965de77374783a6d330f1d"
+[download.save]
+"bundle.yaml" = "k8s-prometheus-operator.yaml"
+
+[[download]]
+group = "natural"
+dir = "natural"
+base = "https://raw.githubusercontent.com/argoproj/argo-cd/87e817276060bfe1a5675ee8de906fdf900589e4/manifests"
+[download.files]
+"install.yaml" = "8705e827c5b023885b63affdab4397ad5190f82c1a43443d56daba7de6a56005"
+[download.save]
+"install.yaml" = "k8s-argo-cd.yaml"
+
+[[download]]
+group = "natural"
+dir = "natural"
+base = "https://raw.githubusercontent.com/stripe/openapi/a045100cf4af0acb548cb9c6f236bb117f83458f/latest"
+[download.files]
+"openapi.spec3.yaml" = "9f4af6778fa1e9a868da5a14c643a05de8528dfc3205645e2438955761c2680c"
+[download.save]
+"openapi.spec3.yaml" = "openapi-stripe.yaml"
+
+[[download]]
+group = "natural"
+dir = "natural"
+base = "https://raw.githubusercontent.com/zed-industries/zed/b525067c80efa4657d29da3d5bde75350c4efbb6"
+[download.files]
+"Cargo.lock" = "2d7e1da2b2ce35963350fd3080374d1c65d147c535e332110ce5d3a0062ed8e5"
+[download.save]
+"Cargo.lock" = "cargo-lock-zed.toml"
+
+[[download]]
+group = "natural"
+dir = "natural"
+base = "https://raw.githubusercontent.com/apache/airflow/3b35135afe9549e99088c4d557c62e5deafb125b"
+[download.files]
+"uv.lock" = "bdf45072ff617cdaf0f57748ad9d39c03812ce92ce8209dbc5e0ca9ddacc9675"
+"pyproject.toml" = "2624f7ca2fbec5b0806712b7c1e2fce8f72ba10b423229dd0600131f18f43a02"
+[download.save]
+"uv.lock" = "uv-lock-airflow.toml"
+"pyproject.toml" = "pyproject-airflow.toml"
+
+[[download]]
+group = "natural"
+dir = "natural"
+base = "https://raw.githubusercontent.com/graphhopper/graphhopper/be1fa242a903ed417c834979c4f44da235ecc9ae/reader-gtfs/files"
+[download.files]
+"beatty.osm" = "7975e54fa0b30f5b1e23305c2c4d4fd8a04f63ba991bc18404ba0f4111ddb56f"
+[download.save]
+"beatty.osm" = "osm-beatty.xml"
+
+[[download]]
+group = "natural"
+dir = "natural"
+base = "https://web.archive.org/web/20200920210259id_/http://aiweb.cs.washington.edu/research/projects/xmltk/xmldata/data/nasa"
+[download.files]
+"nasa.xml" = "6991713decbff76ac3044d2633c356d4717f9b43a210a8043803779f9852f243"
+
+[[download]]
+group = "natural"
+dir = "natural"
+base = "https://web.archive.org/web/20250101084954id_/https://html.spec.whatwg.org"
+[download.files]
+"" = "f8a3d6a1794d7dee872b37d02790457bfdac597270e717bcc3d660b8f439013b"
+[download.save]
+"" = "whatwg-html.html"
+
+[[download]]
+group = "natural"
+dir = "natural"
+base = "https://web.archive.org/web/20250101234610id_/https://en.wikipedia.org/wiki"
+[download.files]
+"United_States" = "162c454c6e20afef4f6071eb9f19a7f30a3bfa37357abe78ef4e1b05f03cf237"
+[download.save]
+"United_States" = "wikipedia-united-states.html"
+
+[[download]]
+group = "natural"
+dir = "natural"
+base = "https://web.archive.org/web/20250102235058id_/https://en.wikipedia.org/wiki"
+[download.files]
+"World_War_II" = "dffc115d3fef88a61460b2990b256e5576c4e08cbb2538ddc824e40ed1df582a"
+[download.save]
+"World_War_II" = "wikipedia-world-war-ii.html"

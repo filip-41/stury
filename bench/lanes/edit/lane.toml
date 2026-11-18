@@ -1,10 +1,25 @@
 [lane]
 legend = "GB/s is the source's bytes over the best of three commits of 1000 edits spread over the file's values, then the best of {rounds} rounds."
 
+# The probe sets `0` on 1000 of the document's value nodes, spread over the file, and the check is the FNV-1a of the
+# committed text. Each file is built in the format its suffix names. An HTML text's targets leave out the empty value
+# nodes, since an empty element, a void one among them, holds no content to set. lol_html rewrites the text in one streaming
+# pass that sets the content of the same elements to `0`: the `selector` of a row names the elements that hold the text of the
+# value nodes (title, th and td in logs.html), and element k*N/1000 of the N that match is set, as the probe picks its nodes.
+# stury's time is its commit of the recorded edits, and lol_html's the whole pass that finds the elements and writes the text.
+
 [arm]
 stury = { source = "stury", args = ["set", "{file}", "{edits}"] }
+lol_html = { source = "rust", args = ["set", "{file}", "{edits}", "{selector}"], files = ["*.html"] }
+
+toml_edit = { source = "rust", args = ["set", "{file}", "{edits}"], files = ["*.toml"] }
 
 [[group]]
 title = "edit"
-rows = ["logs.json", "twitter.json", "table.csv", "logs.json5"]
+rows = ["logs.json", "twitter.json", "table.csv", "logs.json5", "logs.yaml", "logs.toml", "logs.xml"]
+variant = [{ edits = "1000" }]
+
+[[group]]
+title = "edit html"
+rows = [{ file = "logs.html", selector = "title, th, td" }]
 variant = [{ edits = "1000" }]

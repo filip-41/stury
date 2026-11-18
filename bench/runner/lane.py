@@ -48,7 +48,9 @@ def rows_of(group, variant):
 
 def command(lane, arm, row):
     sub = arm.get("sub", row.get("sub", ""))
-    return [str(probes.binary(lane, arm["source"])), *expand(arm.get("args", PROBE_ARGS), {**row, "sub": sub})]
+    program = probes.binary(lane, arm["source"])
+    launcher = [sys.executable] if program.suffix == ".py" else []
+    return [*launcher, str(program), *expand(arm.get("args", PROBE_ARGS), {**row, "sub": sub})]
 
 
 def runs_on(name, arm, row):
@@ -101,7 +103,7 @@ def tables_of(group, results, title, metric):
     for t in group.get("tables", [{}]):
         names = t.get("files")
         rows = [(r, s) for r, s in results if not names or r["name"] in names]
-        wanted = t.get("arms") or group.get("arms") or list(results[0][1])
+        wanted = t.get("arms") or group.get("arms") or list(dict.fromkeys(a for _, s in results for a in s))
         columns = [a for a in wanted if any(a in s for _, s in rows)]
         if not columns:
             continue
