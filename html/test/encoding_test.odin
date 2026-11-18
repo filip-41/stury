@@ -77,6 +77,6 @@ encoding_faults :: proc(t: ^testing.T) {
 	tree, fault := html.internal_build(transmute([]u8)string("\xef\xbb\xbfx"))
 	defer html.internal_tree_destroy(&tree)
 	testing.expect(t, fault == nil)
-	body := tree.nodes[tree.nodes[tree.nodes[1].first].last]
-	testing.expect_value(t, html.internal_decoded(&tree, tree.pieces[tree.nodes[body.first].a].span), "x")
+	body := html.internal_node(&tree, html.internal_node(&tree, html.internal_node(&tree, 1).first).last)^
+	testing.expect_value(t, html.internal_decoded(&tree, tree.pieces[html.internal_node(&tree, body.first).a].span), "x")
 }

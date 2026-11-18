@@ -8,7 +8,7 @@ package html
 // Copies option `n`'s children into its select's enabled `selectedcontent` when `n` is the option its select selects.
 @(private, cold)
 show_selected_option :: proc(t: ^Html_Tree, n: u32) {
-	if t.nodes[n].ns != .Html {
+	if tree_node(t, n).ns != .Html {
 		return
 	}
 	sel := nearest_select(t, n)
@@ -19,10 +19,10 @@ show_selected_option :: proc(t: ^Html_Tree, n: u32) {
 	if content == 0 {
 		return
 	}
-	for c := t.nodes[content].first; c != 0; c = t.nodes[content].first {
+	for c := tree_node(t, content).first; c != 0; c = tree_node(t, content).first {
 		unlink(t, c)
 	}
-	for c := t.nodes[n].first; c != 0 && !t.oom; c = t.nodes[c].next {
+	for c := tree_node(t, n).first; c != 0 && !t.oom; c = tree_node(t, c).next {
 		copy_tree(t, c, content)
 	}
 }
@@ -32,8 +32,8 @@ show_selected_option :: proc(t: ^Html_Tree, n: u32) {
 @(private)
 nearest_select :: proc(t: ^Html_Tree, n: u32) -> u32 {
 	optgroup := false
-	for a := t.nodes[n].parent; a != 0; a = t.nodes[a].parent {
-		node := &t.nodes[a]
+	for a := tree_node(t, n).parent; a != 0; a = tree_node(t, a).parent {
+		node := tree_node(t, a)
 		if node.ns != .Html {
 			continue
 		}
@@ -57,7 +57,7 @@ nearest_select :: proc(t: ^Html_Tree, n: u32) -> u32 {
 selected_option :: proc(t: ^Html_Tree, sel: u32) -> u32 {
 	first, chosen := u32(0), u32(0)
 	for m := next_in(t, sel, sel); m != 0; m = next_in(t, sel, m) {
-		node := &t.nodes[m]
+		node := tree_node(t, m)
 		if !is_html(node, .Option) || nearest_select(t, m) != sel {
 			continue
 		}
@@ -65,7 +65,7 @@ selected_option :: proc(t: ^Html_Tree, sel: u32) -> u32 {
 			chosen = m
 		}
 		parent := node.parent
-		if first == 0 && !node_has_attr(t, m, "disabled") && !(is_html(&t.nodes[parent], .Optgroup) && node_has_attr(t, parent, "disabled")) {
+		if first == 0 && !node_has_attr(t, m, "disabled") && !(is_html(tree_node(t, parent), .Optgroup) && node_has_attr(t, parent, "disabled")) {
 			first = m
 		}
 	}
@@ -76,11 +76,11 @@ selected_option :: proc(t: ^Html_Tree, sel: u32) -> u32 {
 @(private)
 enabled_selectedcontent :: proc(t: ^Html_Tree, sel: u32) -> u32 {
 	for m := next_in(t, sel, sel); m != 0; m = next_in(t, sel, m) {
-		if !is_html(&t.nodes[m], .Selectedcontent) {
+		if !is_html(tree_node(t, m), .Selectedcontent) {
 			continue
 		}
-		for a := t.nodes[m].parent; a != 0; a = t.nodes[a].parent {
-			if is_html(&t.nodes[a], .Select) {
+		for a := tree_node(t, m).parent; a != 0; a = tree_node(t, a).parent {
+			if is_html(tree_node(t, a), .Select) {
 				return m if a == sel else 0
 			}
 		}
@@ -91,11 +91,11 @@ enabled_selectedcontent :: proc(t: ^Html_Tree, sel: u32) -> u32 {
 // The node after `m` in tree order within `root`, 0 past its last.
 @(private)
 next_in :: proc(t: ^Html_Tree, root, m: u32) -> u32 {
-	if f := t.nodes[m].first; f != 0 {
+	if f := tree_node(t, m).first; f != 0 {
 		return f
 	}
-	for n := m; n != root; n = t.nodes[n].parent {
-		if next := t.nodes[n].next; next != 0 {
+	for n := m; n != root; n = tree_node(t, n).parent {
+		if next := tree_node(t, n).next; next != 0 {
 			return next
 		}
 	}
@@ -104,7 +104,7 @@ next_in :: proc(t: ^Html_Tree, root, m: u32) -> u32 {
 
 @(private)
 node_has_attr :: proc(t: ^Html_Tree, n: u32, name: string) -> bool {
-	node := &t.nodes[n]
+	node := tree_node(t, n)
 	found, _ := attr_value_is(t, t.attrs[node.a:][:node.b], name, "")
 	return found
 }
@@ -112,7 +112,7 @@ node_has_attr :: proc(t: ^Html_Tree, n: u32, name: string) -> bool {
 // Appends a copy of node `n` and its descendants to `parent`.
 @(private)
 copy_tree :: proc(t: ^Html_Tree, n, parent: u32) {
-	c := t.nodes[n]
+	c := tree_node(t, n)^
 	c.parent, c.first, c.last, c.prev, c.next = 0, 0, 0, 0, 0
 	c.flags = c.flags - {.Open, .Moved} + {.Cloned}
 	if c.kind == .Text {
@@ -132,7 +132,7 @@ copy_tree :: proc(t: ^Html_Tree, n, parent: u32) {
 		return
 	}
 	link(t, parent, m, 0)
-	for k := t.nodes[n].first; k != 0 && !t.oom; k = t.nodes[k].next {
+	for k := tree_node(t, n).first; k != 0 && !t.oom; k = tree_node(t, k).next {
 		copy_tree(t, k, m)
 	}
 }

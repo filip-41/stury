@@ -105,8 +105,8 @@ indent :: proc(b: ^strings.Builder, depth: int) {
 // Prints the children of node `n` at `depth` as the format does. A template's contents follow a `content` line.
 @(private)
 print_tree :: proc(b: ^strings.Builder, t: ^html.Internal_Tree, n: u32, depth: int) {
-	for c := t.nodes[n].first; c != 0; c = t.nodes[c].next {
-		node := &t.nodes[c]
+	for c := html.internal_node(t, n).first; c != 0; c = html.internal_node(t, c).next {
+		node := html.internal_node(t, c)
 		indent(b, depth)
 		switch node.kind {
 		case .Document:
@@ -214,7 +214,7 @@ run_tree_file :: proc(t: ^testing.T, file: string, data: []u8, tally: ^Tree_Tall
 			defer html.internal_tree_destroy(&tree)
 			b := strings.builder_make()
 			// A fragment's nodes are the children of its root, the document's one element.
-			print_tree(&b, &tree, tree.nodes[1].first if c.fragment else 1, 0)
+			print_tree(&b, &tree, html.internal_node(&tree, 1).first if c.fragment else 1, 0)
 			got := strings.trim_right(strings.to_string(b), "\n")
 			passed ||= got == c.document
 			if listed {
@@ -252,7 +252,7 @@ read_document :: proc(t: ^testing.T, file: string, c: Tree_Case, scripting: bool
 	}
 	defer core.destroy(&doc)
 	testing.expectf(t, (core.validate(src, html.as(spec, context_options(c, scripting))) == nil) == (len(tree.errors) == 0), "%s #%d %q: validate disagrees with the tree", file, c.number, c.data)
-	elements := tree_elements(tree, tree.nodes[1].first if c.fragment else 1)
+	elements := tree_elements(tree, html.internal_node(tree, 1).first if c.fragment else 1)
 	next := 0
 	for n, i in doc.nodes {
 		node := core.Node_Index(i)
@@ -261,7 +261,7 @@ read_document :: proc(t: ^testing.T, file: string, c: Tree_Case, scripting: bool
 			s, ok := core.text(&doc, node, buf)
 			testing.expectf(t, ok, "%s #%d %q: node %d does not read", file, c.number, c.data, i)
 			if n.role == .Key && s != html.TEXT_KEY && testing.expectf(t, next < len(elements), "%s #%d %q: key %q past the tree's elements", file, c.number, c.data, s) {
-				e := &tree.nodes[elements[next]]
+				e := html.internal_node(tree, elements[next])
 				next += 1
 				testing.expectf(t, s == html.internal_element_name(tree, e), "%s #%d %q: key %q, element %q", file, c.number, c.data, s, html.internal_element_name(tree, e))
 				testing.expectf(t, core.key_equals(&doc, node, s), "%s #%d %q: key %q does not equal its text", file, c.number, c.data, s)
@@ -303,8 +303,8 @@ read_document :: proc(t: ^testing.T, file: string, c: Tree_Case, scripting: bool
 @(private)
 element_text :: proc(tree: ^html.Internal_Tree, e: ^html.Internal_Node) -> string {
 	b := strings.builder_make()
-	for c := e.first; c != 0; c = tree.nodes[c].next {
-		n := &tree.nodes[c]
+	for c := e.first; c != 0; c = html.internal_node(tree, c).next {
+		n := html.internal_node(tree, c)
 		if n.kind != .Text {
 			continue
 		}
@@ -323,19 +323,19 @@ element_text :: proc(tree: ^html.Internal_Tree, e: ^html.Internal_Node) -> strin
 tree_elements :: proc(tree: ^html.Internal_Tree, top: u32) -> []u32 {
 	out := make([dynamic]u32)
 	stack := make([dynamic]u32)
-	if first := tree.nodes[top].first; first != 0 {
+	if first := html.internal_node(tree, top).first; first != 0 {
 		append(&stack, first)
 	}
 	for len(stack) > 0 {
 		n := pop(&stack)
-		if next := tree.nodes[n].next; next != 0 {
+		if next := html.internal_node(tree, n).next; next != 0 {
 			append(&stack, next)
 		}
-		if tree.nodes[n].kind != .Element {
+		if html.internal_node(tree, n).kind != .Element {
 			continue
 		}
 		append(&out, n)
-		if first := tree.nodes[n].first; first != 0 {
+		if first := html.internal_node(tree, n).first; first != 0 {
 			append(&stack, first)
 		}
 	}
@@ -394,7 +394,7 @@ tree_fragment_states :: proc(t: ^testing.T) {
 			continue
 		}
 		b := strings.builder_make()
-		print_tree(&b, &tree, tree.nodes[1].first, 0)
+		print_tree(&b, &tree, html.internal_node(&tree, 1).first, 0)
 		got := strings.trim_right(strings.to_string(b), "\n")
 		testing.expectf(t, got == c.want, "%s, scripting %v: got\n%s\nwant\n%s", c.context_name, c.scripting, got, c.want)
 		html.internal_tree_destroy(&tree)
@@ -408,7 +408,7 @@ tree_faults :: proc(t: ^testing.T) {
 	tree, fault := html.internal_build(transmute([]u8)src, opts = {max_depth = 8})
 	f, faulted := fault.?
 	testing.expect(t, faulted && f.kind == .Too_Deep && f.at == 5 * 6, "a tree past max_depth")
-	testing.expect(t, len(tree.nodes) == 0)
+	testing.expect(t, tree.count == 0)
 	tree, fault = html.internal_build(transmute([]u8)src, opts = {max_depth = 64})
 	testing.expect(t, fault == nil)
 	html.internal_tree_destroy(&tree)

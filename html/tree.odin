@@ -1,5 +1,6 @@
 package html
 
+import "base:intrinsics"
 import "base:runtime"
 import spell "../core/spell"
 import core "../core"
@@ -100,7 +101,8 @@ Parse_Error :: struct {
 @(private)
 Html_Tree :: struct {
 	src:             []u8,
-	nodes:           [dynamic]Tree_Node,
+	nodes:           Node_Chunks,
+	count:           u32, // the nodes made, node 0 among them
 	attrs:           [dynamic]Attribute,
 	pieces:          [dynamic]Piece,
 	stack:           [dynamic]u32, // the stack of open elements, the current node last
@@ -227,15 +229,19 @@ build_tree :: proc(src: []u8, spec: Spec, opts: Read, lo := u64(0), allocator :=
 	t.scripting = opts.scripting
 	t.frameset_ok = true
 	estimate := len(src) / 32 + 16
-	t.nodes = make([dynamic]Tree_Node, 0, estimate)
 	t.pieces = make([dynamic]Piece, 0, estimate / 2)
 	t.attrs = make([dynamic]Attribute, 0, estimate / 2)
 	t.stack = make([dynamic]u32, 0, 64)
-	if t.nodes == nil || t.pieces == nil || t.attrs == nil || t.stack == nil {
+	if t.pieces == nil || t.attrs == nil || t.stack == nil {
 		tree_destroy(&t)
 		return {}, core.Fault{rules = &RULES, kind = .No_Memory}
 	}
-	append(&t.nodes, Tree_Node{}, Tree_Node{kind = .Document})
+	new_node(&t, {})
+	new_node(&t, {kind = .Document})
+	if t.oom {
+		tree_destroy(&t)
+		return {}, core.Fault{rules = &RULES, kind = .No_Memory}
+	}
 	append(&t.pieces, Piece{})
 	start := Content.Data
 	if spec == .Fragment {
@@ -311,7 +317,11 @@ begin_fragment :: proc(t: ^Html_Tree, c: Context) -> (start: Content) {
 
 @(private)
 tree_destroy :: proc(t: ^Html_Tree) {
-	delete(t.nodes)
+	for chunk, k in t.nodes {
+		if chunk != nil {
+			runtime.mem_free_with_size(chunk, chunk_size(k) * size_of(Tree_Node), t.ctx.allocator)
+		}
+	}
 	delete(t.attrs)
 	delete(t.pieces)
 	delete(t.stack)
@@ -336,13 +346,47 @@ misplaced :: #force_inline proc(t: ^Html_Tree, d: Detail) {
 	parse_error(t, d, t.at)
 }
 
+// The tree's nodes, in chunks that never move: chunk `k` holds `chunk_size(k)` nodes, twice the one before, so that
+// a growth adds a chunk and copies none, and holds no old block beside a new one.
+@(private)
+Node_Chunks :: [32 - CHUNK_SHIFT][^]Tree_Node
+
+@(private)
+CHUNK_SHIFT :: 6
+
+@(private)
+chunk_size :: #force_inline proc "contextless" (k: int) -> int {
+	return 1 << uint(CHUNK_SHIFT + k)
+}
+
+// Node `n` of the tree, which must have been made.
+@(private)
+tree_node :: #force_inline proc "contextless" (t: ^Html_Tree, n: u32) -> ^Tree_Node #no_bounds_check {
+	m := u64(n) + (1 << CHUNK_SHIFT)
+	k := 63 - intrinsics.count_leading_zeros(m) - CHUNK_SHIFT
+	return &t.nodes[k][m - (1 << CHUNK_SHIFT << k)]
+}
+
 @(private)
 new_node :: proc(t: ^Html_Tree, n: Tree_Node) -> u32 {
-	if _, err := append(&t.nodes, n); err != nil {
+	i := t.count
+	m := u64(i) + (1 << CHUNK_SHIFT)
+	k := int(63 - intrinsics.count_leading_zeros(m) - CHUNK_SHIFT)
+	if k >= len(t.nodes) {
 		t.oom = true
 		return 0
 	}
-	return u32(len(t.nodes) - 1)
+	if t.nodes[k] == nil {
+		chunk, err := runtime.mem_alloc_non_zeroed(chunk_size(k) * size_of(Tree_Node), align_of(Tree_Node), t.ctx.allocator)
+		if err != nil {
+			t.oom = true
+			return 0
+		}
+		t.nodes[k] = ([^]Tree_Node)(raw_data(chunk))
+	}
+	t.count += 1
+	tree_node(t, i)^ = n
+	return i
 }
 
 // A new element for start tag `tok`, its attributes copied, since a token's attributes live only during the hook.
@@ -364,7 +408,7 @@ implied :: proc(t: ^Html_Tree, tag: Tag) -> u32 {
 // A new element for the token `n` was made for, sharing its attributes.
 @(private)
 clone_node :: proc(t: ^Html_Tree, n: u32) -> u32 {
-	c := t.nodes[n]
+	c := tree_node(t, n)^
 	c.parent, c.first, c.last, c.prev, c.next = 0, 0, 0, 0, 0
 	c.flags = c.flags - {.Open, .Moved} + {.Cloned}
 	return new_node(t, c)
@@ -373,52 +417,50 @@ clone_node :: proc(t: ^Html_Tree, n: u32) -> u32 {
 // Inserts `n` into `parent` before `before`, or last for 0.
 @(private)
 link :: proc(t: ^Html_Tree, parent, n, before: u32) {
-	nodes := t.nodes[:]
 	// A comment, an instruction or a DOCTYPE takes nothing into the elements open where it is put.
-	if nodes[n].kind == .Element {
+	if tree_node(t, n).kind == .Element {
 		taken(t)
 	}
-	nodes[n].parent = parent
-	nodes[n].next = before
-	prev := nodes[before].prev if before != 0 else nodes[parent].last
-	nodes[n].prev = prev
+	tree_node(t, n).parent = parent
+	tree_node(t, n).next = before
+	prev := tree_node(t, before).prev if before != 0 else tree_node(t, parent).last
+	tree_node(t, n).prev = prev
 	if prev != 0 {
-		nodes[prev].next = n
+		tree_node(t, prev).next = n
 	} else {
-		nodes[parent].first = n
+		tree_node(t, parent).first = n
 	}
 	if before != 0 {
-		nodes[before].prev = n
+		tree_node(t, before).prev = n
 	} else {
-		nodes[parent].last = n
+		tree_node(t, parent).last = n
 	}
 }
 
 // Removes `n` from its parent, if it has one.
 @(private)
 unlink :: proc(t: ^Html_Tree, n: u32) {
-	nodes := t.nodes[:]
-	parent := nodes[n].parent
+	parent := tree_node(t, n).parent
 	if parent == 0 {
 		return
 	}
-	prev, next := nodes[n].prev, nodes[n].next
+	prev, next := tree_node(t, n).prev, tree_node(t, n).next
 	if prev != 0 {
-		nodes[prev].next = next
+		tree_node(t, prev).next = next
 	} else {
-		nodes[parent].first = next
+		tree_node(t, parent).first = next
 	}
 	if next != 0 {
-		nodes[next].prev = prev
+		tree_node(t, next).prev = prev
 	} else {
-		nodes[parent].last = prev
+		tree_node(t, parent).last = prev
 	}
-	nodes[n].parent, nodes[n].prev, nodes[n].next = 0, 0, 0
+	tree_node(t, n).parent, tree_node(t, n).prev, tree_node(t, n).next = 0, 0, 0
 }
 
 @(private)
 is_inclusive_ancestor :: proc(t: ^Html_Tree, a, n: u32) -> bool {
-	for m := n; m != 0; m = t.nodes[m].parent {
+	for m := n; m != 0; m = tree_node(t, m).parent {
 		if m == a {
 			return true
 		}
@@ -433,7 +475,7 @@ current :: #force_inline proc(t: ^Html_Tree) -> u32 {
 
 @(private)
 current_node :: #force_inline proc(t: ^Html_Tree) -> ^Tree_Node {
-	return &t.nodes[t.stack[len(t.stack) - 1]]
+	return tree_node(t, t.stack[len(t.stack) - 1])
 }
 
 @(private)
@@ -446,7 +488,7 @@ push :: proc(t: ^Html_Tree, n: u32) {
 		t.oom = true
 		return
 	}
-	t.nodes[n].flags += {.Open}
+	tree_node(t, n).flags += {.Open}
 	taken(t)
 }
 
@@ -462,7 +504,7 @@ taken :: #force_inline proc "contextless" (t: ^Html_Tree) {
 pop_current :: #force_inline proc(t: ^Html_Tree) {
 	n := pop(&t.stack)
 	unstacked(t, n)
-	if t.nodes[n].tag == .Option && t.selected {
+	if tree_node(t, n).tag == .Option && t.selected {
 		show_selected_option(t, n)
 	}
 }
@@ -471,7 +513,7 @@ pop_current :: #force_inline proc(t: ^Html_Tree) {
 @(private)
 unstacked :: #force_inline proc(t: ^Html_Tree, n: u32) {
 	taken(t)
-	node := &t.nodes[n]
+	node := tree_node(t, n)
 	node.flags -= {.Open}
 	if node.ns != .Html {
 		t.foreign_open -= 1
@@ -482,7 +524,7 @@ unstacked :: #force_inline proc(t: ^Html_Tree, n: u32) {
 // Sets the end of element `n`, which the current token closes: past it when it is the element's end tag.
 @(private)
 ended :: proc "contextless" (t: ^Html_Tree, n: u32) {
-	node := &t.nodes[n]
+	node := tree_node(t, n)
 	end := t.at
 	if tok := t.tok; tok != nil && tok.kind == .End_Tag && node.tag == t.tag && (node.tag != .Other || names_equal(raw_data(t.src), node.name, tok.name)) {
 		end = tok.hi
@@ -555,7 +597,7 @@ TABLE_SCOPE :: Tag_Classes{.Table_Scope}
 @(private)
 in_scope :: proc(t: ^Html_Tree, tags: Tags, bound := SCOPE) -> bool {
 	#reverse for m in t.stack {
-		n := &t.nodes[m]
+		n := tree_node(t, m)
 		if n.tag in tags && n.ns == .Html {
 			return true
 		}
@@ -572,7 +614,7 @@ node_in_scope :: proc(t: ^Html_Tree, target: u32, bound := SCOPE) -> bool {
 		if m == target {
 			return true
 		}
-		if classes(&t.nodes[m]) & bound != {} {
+		if classes(tree_node(t, m)) & bound != {} {
 			return false
 		}
 	}
@@ -606,7 +648,7 @@ pop_closed :: proc(t: ^Html_Tree, tag: Tag, until := Tags{}, except := Tag.Other
 @(private)
 has_template :: proc(t: ^Html_Tree) -> bool {
 	#reverse for m in t.stack {
-		if is_html(&t.nodes[m], .Template) {
+		if is_html(tree_node(t, m), .Template) {
 			return true
 		}
 	}
@@ -625,7 +667,7 @@ in_template_contents :: #force_inline proc(t: ^Html_Tree) -> bool {
 // ignored.
 @(private)
 in_select_context :: #force_inline proc(t: ^Html_Tree) -> bool {
-	return t.context_element != 0 && is_html(&t.nodes[t.context_element], .Select)
+	return t.context_element != 0 && is_html(tree_node(t, t.context_element), .Select)
 }
 
 // Pops until the current node is an HTML element of the `context` category.
@@ -654,7 +696,7 @@ close_open_p :: #force_inline proc(t: ^Html_Tree) {
 @(private)
 check_open_at_end :: proc(t: ^Html_Tree) {
 	for m in t.stack {
-		if .Open_At_End not_in classes(&t.nodes[m]) {
+		if .Open_At_End not_in classes(tree_node(t, m)) {
 			misplaced(t, .Unclosed_Element)
 			return
 		}
@@ -666,11 +708,11 @@ check_open_at_end :: proc(t: ^Html_Tree) {
 @(private)
 place :: proc(t: ^Html_Tree, target: u32 = 0) -> (parent, before: u32, fostered: bool) {
 	parent = target if target != 0 else current(t)
-	if !t.foster || .Foster not_in classes(&t.nodes[parent]) {
+	if !t.foster || .Foster not_in classes(tree_node(t, parent)) {
 		return parent, 0, false
 	}
 	#reverse for m, i in t.stack {
-		n := &t.nodes[m]
+		n := tree_node(t, m)
 		if is_html(n, .Template) {
 			return m, 0, true
 		}
@@ -694,7 +736,7 @@ insert_node :: proc(t: ^Html_Tree, n: u32) {
 	parent, before, fostered := place(t)
 	link(t, parent, n, before)
 	if fostered {
-		t.nodes[n].flags += {.Moved}
+		tree_node(t, n).flags += {.Moved}
 	}
 	push(t, n)
 }
@@ -722,15 +764,15 @@ insert_text :: proc(t: ^Html_Tree, s: Span) {
 		return
 	}
 	parent, before, fostered := place(t)
-	if t.nodes[parent].kind == .Document {
+	if tree_node(t, parent).kind == .Document {
 		return
 	}
 	// White space a text takes inside the run of tokens the tree took nothing from does not end the run.
 	if t.tail == 0 || space_prefix(t, s) < s.n {
 		t.taken_to = max(t.taken_to, s.lo + u64(s.n))
 	}
-	prev := t.nodes[before].prev if before != 0 else t.nodes[parent].last
-	if prev != 0 && t.nodes[prev].kind == .Text {
+	prev := tree_node(t, before).prev if before != 0 else tree_node(t, parent).last
+	if prev != 0 && tree_node(t, prev).kind == .Text {
 		extend_text(t, prev, s)
 		return
 	}
@@ -753,17 +795,17 @@ add_piece :: proc(t: ^Html_Tree, s: Span) -> u32 {
 // Appends `s` to text `n`, growing its last piece when `s` continues it in the source.
 @(private)
 extend_text :: proc(t: ^Html_Tree, n: u32, s: Span) {
-	text := &t.nodes[n]
+	text := tree_node(t, n)
 	last := &t.pieces[text.b]
 	if last.span.lo + u64(last.span.n) == s.lo && last.span.mode == s.mode && u64(last.span.n) + u64(s.n) <= u64(max(u32)) {
 		last.span.n += s.n
 		last.span.flags += s.flags
 	} else {
 		p := add_piece(t, s)
-		t.pieces[t.nodes[n].b].next = p
-		t.nodes[n].b = p
+		t.pieces[tree_node(t, n).b].next = p
+		tree_node(t, n).b = p
 	}
-	t.nodes[n].hi = s.lo + u64(s.n)
+	tree_node(t, n).hi = s.lo + u64(s.n)
 }
 
 // Inserts comment or instruction `tok` into `parent`, or at the appropriate place for 0.
@@ -788,7 +830,7 @@ insert_misc :: proc(t: ^Html_Tree, tok: ^Html_Token, parent: u32 = 0) {
 @(private)
 merge_attrs :: proc(t: ^Html_Tree, n: u32, tok: ^Html_Token) {
 	for attr in tok.attrs {
-		node := &t.nodes[n]
+		node := tree_node(t, n)
 		if has_attr(t, node, attr.name) {
 			continue
 		}
@@ -799,13 +841,13 @@ merge_attrs :: proc(t: ^Html_Tree, n: u32, tok: ^Html_Token) {
 				t.oom = true
 				return
 			}
-			t.nodes[n].a = u32(a)
+			tree_node(t, n).a = u32(a)
 		}
 		if _, err := append(&t.attrs, attr); err != nil {
 			t.oom = true
 			return
 		}
-		t.nodes[n].b += 1
+		tree_node(t, n).b += 1
 		taken(t)
 	}
 }
@@ -888,7 +930,7 @@ push_active :: proc(t: ^Html_Tree, n: u32) {
 		if e == 0 {
 			break
 		}
-		x, y := &t.nodes[e], &t.nodes[n]
+		x, y := tree_node(t, e), tree_node(t, n)
 		if x.tag == y.tag && x.ns == y.ns && (x.tag != .Other || names_equal(raw_data(t.src), x.name, y.name)) && same_attrs(t, x, y) {
 			same += 1
 			earliest = i
@@ -935,7 +977,7 @@ active_after_marker :: proc(t: ^Html_Tree, tag: Tag) -> int {
 		if e == 0 {
 			return -1
 		}
-		if is_html(&t.nodes[e], tag) {
+		if is_html(tree_node(t, e), tag) {
 			return i
 		}
 	}
@@ -951,13 +993,13 @@ reconstruct :: proc(t: ^Html_Tree) {
 		return
 	}
 	last := t.active[n - 1]
-	if last == 0 || .Open in t.nodes[last].flags {
+	if last == 0 || .Open in tree_node(t, last).flags {
 		return
 	}
 	i := n - 1
 	for i > 0 {
 		e := t.active[i - 1]
-		if e == 0 || .Open in t.nodes[e].flags {
+		if e == 0 || .Open in tree_node(t, e).flags {
 			break
 		}
 		i -= 1
@@ -1000,7 +1042,7 @@ adoption_agency :: proc(t: ^Html_Tree, tag: Tag) -> (other: bool) {
 		}
 		furthest := u32(0)
 		for m in t.stack[si + 1:] {
-			if .Special in classes(&t.nodes[m]) {
+			if .Special in classes(tree_node(t, m)) {
 				furthest = m
 				break
 			}
@@ -1035,9 +1077,9 @@ adoption_agency :: proc(t: ^Html_Tree, tag: Tag) -> (other: bool) {
 			if t.oom {
 				return false
 			}
-			t.nodes[node].flags -= {.Open}
+			tree_node(t, node).flags -= {.Open}
 			ended(t, node)
-			t.nodes[c].flags += {.Open}
+			tree_node(t, c).flags += {.Open}
 			t.active[ai] = c
 			t.stack[ni] = c
 			if bookmark == 0 {
@@ -1045,14 +1087,14 @@ adoption_agency :: proc(t: ^Html_Tree, tag: Tag) -> (other: bool) {
 			}
 			unlink(t, last)
 			link(t, c, last, 0)
-			t.nodes[last].flags += {.Moved}
+			tree_node(t, last).flags += {.Moved}
 			last = c
 		}
 		parent, before, _ := place(t, common)
 		unlink(t, last)
 		if !is_inclusive_ancestor(t, last, parent) {
 			link(t, parent, last, before)
-			t.nodes[last].flags += {.Moved}
+			tree_node(t, last).flags += {.Moved}
 		}
 		fresh := clone_node(t, formatting)
 		if t.oom {
@@ -1066,11 +1108,11 @@ adoption_agency :: proc(t: ^Html_Tree, tag: Tag) -> (other: bool) {
 		}
 		remove_from_stack(t, formatting)
 		inject_at(&t.stack, stack_index(t, furthest) + 1, fresh)
-		t.nodes[fresh].flags += {.Open}
-		for child := t.nodes[furthest].first; child != 0; child = t.nodes[furthest].first {
+		tree_node(t, fresh).flags += {.Open}
+		for child := tree_node(t, furthest).first; child != 0; child = tree_node(t, furthest).first {
 			unlink(t, child)
 			link(t, fresh, child, 0)
-			t.nodes[child].flags += {.Moved}
+			tree_node(t, child).flags += {.Moved}
 		}
 		link(t, furthest, fresh, 0)
 	}
@@ -1082,7 +1124,7 @@ adoption_agency :: proc(t: ^Html_Tree, tag: Tag) -> (other: bool) {
 reset_insertion_mode :: proc(t: ^Html_Tree) {
 	#reverse for m, i in t.stack {
 		last := i == 0
-		n := &t.nodes[t.context_element if last && t.context_element != 0 else m]
+		n := tree_node(t, t.context_element if last && t.context_element != 0 else m)
 		if n.ns != .Html {
 			continue
 		}

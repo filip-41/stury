@@ -245,10 +245,10 @@ emit_tree :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_
 	t := e.t
 	top := DOCUMENT
 	if e.spec == .Fragment {
-		top = t.nodes[DOCUMENT].first
+		top = tree_node(t, DOCUMENT).first
 	}
 	parent := top
-	child := t.nodes[top].first
+	child := tree_node(t, top).first
 	prev, opening := false, true
 	for !e.stopped {
 		next, shut := content(e, on, parent, child, prev, opening, top)
@@ -257,7 +257,7 @@ emit_tree :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_
 		}
 		if next == 0 {
 			if !shut {
-				lo := u64(len(t.src)) if parent == top else t.nodes[parent].end
+				lo := u64(len(t.src)) if parent == top else tree_node(t, parent).end
 				if give(e, on, .End, .Value, lo, 0) == .Stop {
 					return
 				}
@@ -271,15 +271,15 @@ emit_tree :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_
 			if parent == top {
 				return
 			}
-			child, parent = t.nodes[parent].next, t.nodes[parent].parent
+			child, parent = tree_node(t, parent).next, tree_node(t, parent).parent
 			prev, opening = true, false
 			continue
 		}
 		if !element(e, on, next) {
-			child, prev, opening = t.nodes[next].next, true, false
+			child, prev, opening = tree_node(t, next).next, true, false
 			continue
 		}
-		parent, child = next, t.nodes[next].first
+		parent, child = next, tree_node(t, next).first
 		prev, opening = false, true
 	}
 }
@@ -292,14 +292,13 @@ emit_tree :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_
 @(private)
 content :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), parent, from: u32, prev, opening: bool, top: u32) -> (next: u32, shut: bool) {
 	t := e.t
-	nodes := t.nodes[:]
 	end := from
 	last_text := u32(0)
-	for end != 0 && nodes[end].kind != .Element {
-		if nodes[end].kind == .Text && has_char(t, end) {
+	for end != 0 && tree_node(t, end).kind != .Element {
+		if tree_node(t, end).kind == .Text && has_char(t, end) {
 			last_text = end
 		}
-		end = nodes[end].next
+		end = tree_node(t, end).next
 	}
 	if opening && parent != top && end != 0 && !give_open(e, on, parent, end, top) {
 		return 0, true
@@ -310,11 +309,11 @@ content :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Re
 	seen := last_text == 0
 	text_seen := false
 	next_line := !prev
-	for k := from; k != end; k = nodes[k].next {
+	for k := from; k != end; k = tree_node(t, k).next {
 		if k == lead && !give_open(e, on, parent, end, top) {
 			return 0, true
 		}
-		n := &nodes[k]
+		n := tree_node(t, k)
 		switch n.kind {
 		case .Text:
 			if k == last_text {
@@ -357,10 +356,10 @@ content :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Re
 		return 0, true
 	}
 	if last_text != 0 {
-		if give(e, on, .String, .Key, nodes[last_text].lo, 0, core.SPELLING_SYNTHETIC) == .Stop {
+		if give(e, on, .String, .Key, tree_node(t, last_text).lo, 0, core.SPELLING_SYNTHETIC) == .Stop {
 			return 0, true
 		}
-		if !text_value(e, on, from, end, 0, nodes[parent].end if parent != top else max(u64)) {
+		if !text_value(e, on, from, end, 0, tree_node(t, parent).end if parent != top else max(u64)) {
 			return 0, true
 		}
 	}
@@ -371,13 +370,12 @@ content :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Re
 // DOCTYPE among them, `end` for none, read for the document's own run. Those before it are the document's head.
 @(private)
 head_end :: proc(e: ^Emitter($H), from, end: u32) -> u32 {
-	nodes := e.t.nodes[:]
 	lead := from
-	for k := from; k != end; k = nodes[k].next {
-		next := nodes[k].next
-		if nodes[k].kind == .Doctype {
+	for k := from; k != end; k = tree_node(e.t, k).next {
+		next := tree_node(e.t, k).next
+		if tree_node(e.t, k).kind == .Doctype {
 			lead = next
-		} else if next != 0 && nodes[next].lo > nodes[k].hi && kernel.count_byte(e.t.src[nodes[k].hi:nodes[next].lo], '\n') > 1 {
+		} else if next != 0 && tree_node(e.t, next).lo > tree_node(e.t, k).hi && kernel.count_byte(e.t.src[tree_node(e.t, k).hi:tree_node(e.t, next).lo], '\n') > 1 {
 			lead = next
 		}
 	}
@@ -388,12 +386,11 @@ head_end :: proc(e: ^Emitter($H), from, end: u32) -> u32 {
 // the hook stopped the walk or skipped the element.
 @(private)
 give_open :: #force_inline proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), parent, end, top: u32) -> bool {
-	nodes := e.t.nodes[:]
 	lo, n: u64
 	if parent == top {
-		lo = nodes[end].lo if end != 0 && e.spec == .Document else 0
+		lo = tree_node(e.t, end).lo if end != 0 && e.spec == .Document else 0
 	} else {
-		p := &nodes[parent]
+		p := tree_node(e.t, parent)
 		lo, n = p.lo, p.hi - p.lo
 	}
 	at := e.node
@@ -414,7 +411,7 @@ give_open :: #force_inline proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H,
 @(private)
 element :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), n: u32) -> bool {
 	t := e.t
-	node := &t.nodes[n]
+	node := tree_node(t, n)
 	key := key_of(t, node)
 	if a := give(e, on, .String, .Key, key.lo, u64(key.n), key.spelling, n); a != .Next {
 		return false
@@ -426,8 +423,8 @@ element :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Re
 		}
 	}
 	parent := false
-	for c := node.first; c != 0; c = t.nodes[c].next {
-		if t.nodes[c].kind == .Element {
+	for c := node.first; c != 0; c = tree_node(t, c).next {
+		if tree_node(t, c).kind == .Element {
 			parent = true
 			break
 		}
@@ -435,8 +432,8 @@ element :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook_Re
 	if parent {
 		return true
 	}
-	for c := node.first; c != 0; c = t.nodes[c].next {
-		child := &t.nodes[c]
+	for c := node.first; c != 0; c = tree_node(t, c).next {
+		child := tree_node(t, c)
 		#partial switch child.kind {
 		case .Comment:
 			if give(e, on, .Plain, .Comment_Foot, child.lo, child.hi - child.lo, markers(child.lo, child.hi, child.name.lo, child.name.lo + u64(child.name.n))) == .Stop {
@@ -468,8 +465,8 @@ text_value :: proc(e: ^Emitter($H), $on: proc "contextless" (h: ^H, s: core.Hook
 	lo, hi := empty_at, empty_at
 	decoded := false
 	frozen := false
-	for k := from; k != end; k = t.nodes[k].next {
-		n := &t.nodes[k]
+	for k := from; k != end; k = tree_node(t, k).next {
+		n := tree_node(t, k)
 		if n.kind != .Text {
 			continue
 		}
@@ -587,7 +584,7 @@ markers :: proc "contextless" (lo, hi, body_lo, body_hi: u64) -> u16 {
 // Whether text node `n` holds a character other than whitespace.
 @(private)
 has_char :: proc(t: ^Html_Tree, n: u32) -> bool {
-	node := &t.nodes[n]
+	node := tree_node(t, n)
 	for p := node.a;; p = t.pieces[p].next {
 		s := t.pieces[p].span
 		text := t.src[s.lo:s.lo + u64(s.n)] if s.flags & DECODED == {} else transmute([]u8)decoded(t, s, 0)

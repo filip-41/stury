@@ -789,13 +789,13 @@ body_start_tag :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 		return in_head(t, tok)
 	case .Body:
 		misplaced(t, .Unexpected_Start_Tag)
-		if len(t.stack) > 1 && is_html(&t.nodes[t.stack[1]], .Body) && !has_template(t) {
+		if len(t.stack) > 1 && is_html(tree_node(t, t.stack[1]), .Body) && !has_template(t) {
 			t.frameset_ok = false
 			merge_attrs(t, t.stack[1], tok)
 		}
 	case .Frameset:
 		misplaced(t, .Unexpected_Start_Tag)
-		if len(t.stack) > 1 && is_html(&t.nodes[t.stack[1]], .Body) && t.frameset_ok {
+		if len(t.stack) > 1 && is_html(tree_node(t, t.stack[1]), .Body) && t.frameset_ok {
 			unlink(t, t.stack[1])
 			pop_to(t, 1)
 			insert_for(t, tok)
@@ -860,7 +860,7 @@ body_start_tag :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 			if j := active_index(t, a); j >= 0 {
 				ordered_remove(&t.active, j)
 			}
-			if .Open in t.nodes[a].flags {
+			if .Open in tree_node(t, a).flags {
 				remove_from_stack(t, a)
 			}
 		}
@@ -1033,7 +1033,7 @@ body_start_tag :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 @(private)
 close_list_item :: proc(t: ^Html_Tree, tags: Tags) {
 	#reverse for m in t.stack {
-		n := &t.nodes[m]
+		n := tree_node(t, m)
 		if n.tag in tags && n.ns == .Html {
 			pop_closed(t, n.tag, except = n.tag)
 			return
@@ -1132,7 +1132,7 @@ close_element :: proc(t: ^Html_Tree, tag: Tag, bound: Tag_Classes) -> bool {
 @(private)
 any_other_end_tag :: proc(t: ^Html_Tree, tok: ^Html_Token) {
 	#reverse for m, i in t.stack {
-		n := &t.nodes[m]
+		n := tree_node(t, m)
 		if n.ns == .Html && n.tag == t.tag && (t.tag != .Other || names_equal(raw_data(t.src), n.name, tok.name)) {
 			close_implied(t, t.tag)
 			if m != current(t) {

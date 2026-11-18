@@ -107,7 +107,7 @@ foreign_flags :: proc "contextless" (f: ^Foreign_Name, ns: Namespace, html: bool
 @(private)
 adjusted_current :: #force_inline proc(t: ^Html_Tree) -> ^Tree_Node {
 	if t.context_element != 0 && len(t.stack) == 1 {
-		return &t.nodes[t.context_element]
+		return tree_node(t, t.context_element)
 	}
 	return current_node(t)
 }
@@ -156,7 +156,7 @@ insert_foreign :: proc(t: ^Html_Tree, tok: ^Html_Token, ns: Namespace) {
 			_, html = attr_value_is(t, tok.attrs, "encoding", "application/xhtml+xml")
 		}
 	}
-	t.nodes[n].flags += foreign_flags(f, ns, html)
+	tree_node(t, n).flags += foreign_flags(f, ns, html)
 	insert_node(t, n)
 	t.foreign_open += 1
 }
@@ -231,16 +231,16 @@ pop_to_html :: proc(t: ^Html_Tree) {
 @(private)
 foreign_end_tag :: proc(t: ^Html_Tree, tok: ^Html_Token) -> (again: bool) {
 	i := len(t.stack) - 1
-	if !same_name(t, &t.nodes[t.stack[i]], tok) {
+	if !same_name(t, tree_node(t, t.stack[i]), tok) {
 		misplaced(t, .Unexpected_End_Tag)
 	}
 	for i > 0 {
-		if same_name(t, &t.nodes[t.stack[i]], tok) {
+		if same_name(t, tree_node(t, t.stack[i]), tok) {
 			pop_to(t, i)
 			return false
 		}
 		i -= 1
-		if t.nodes[t.stack[i]].ns == .Html {
+		if tree_node(t, t.stack[i]).ns == .Html {
 			return true
 		}
 	}

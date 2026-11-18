@@ -25,6 +25,10 @@ when ODIN_TEST || INTERNALS {
 		return tokenize(src, h, on, start, last_start_tag, allocator = allocator)
 	}
 
+	internal_node :: proc "contextless" (t: ^Html_Tree, n: u32) -> ^Tree_Node {
+		return tree_node(t, n)
+	}
+
 	internal_decode :: proc "contextless" (src: []u8, s: Span, buf: []u8) -> (text: string, ok: bool) #optional_ok {
 		return decode(src, s, buf)
 	}
