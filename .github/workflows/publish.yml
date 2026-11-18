@@ -1,0 +1,94 @@
+name: publish
+
+# A release's packages, once its draft (release.yml) is published: the wheels to PyPI and the formula to the tap.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  packages:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Wheels and formula from the release's archives
+        run: |
+          gh release download "$TAG" -p 'stury-*' -D dist
+          python3 tools/packages.py wheels dist wheels
+          python3 tools/packages.py formula dist > stury.rb
+      - name: Run the wheel this runner installs
+        run: |
+          python3 -m venv venv
+          venv/bin/pip install -q wheels/*-manylinux_*_x86_64.whl
+          [ "$(venv/bin/stury --version)" = "stury-${TAG#v}" ]
+          [ "$(echo '{"a":2}' | venv/bin/stury .a)" = 2 ]
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wheels
+          path: wheels/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: formula
+          path: stury.rb
+
+  # PyPI trusts this workflow and environment as the project's publisher, so no token is kept.
+  pypi:
+    needs: packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wheels
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+  # TAP_TOKEN may write filip-41/homebrew-tap and nothing else.
+  tap:
+    needs: packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: filip-41/homebrew-tap
+          token: ${{ secrets.TAP_TOKEN }}
+          path: tap
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: formula
+          path: tap/Formula
+      - name: Push the formula
+        working-directory: tap
+        run: |
+          git add Formula/stury.rb
+          # A rerun of the same release has nothing to commit.
+          git diff --cached --quiet && exit 0
+          git -c user.name="Filip Szewczyk" -c user.email=filip-41@users.noreply.github.com commit -q -m "stury ${TAG#v}"
+          git push
+
+  # The tap's formula installed as a user installs it, and its test run.
+  brew:
+    needs: tap
+    strategy:
+      matrix:
+        os: [macos-15, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - name: Install from the tap
+        run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv 2>/dev/null || brew shellenv)"
+          brew install filip-41/tap/stury
+          brew test filip-41/tap/stury
