@@ -1,5 +1,6 @@
 import contextlib
 import fcntl
+import functools
 import os
 import re
 import signal
@@ -7,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
 from typing import NamedTuple
 
 import psutil
@@ -14,6 +16,8 @@ import psutil
 from .layout import BUILD
 
 LOCK = BUILD / "timing.lock"
+PEAK_SOURCE = Path(__file__).with_name("peak.c")
+PEAK = BUILD / "peak"
 CAP_BYTES = 1 << 30
 POLL_SECONDS = 0.005
 LINUX = sys.platform.startswith("linux")
@@ -38,6 +42,18 @@ def locked():
         yield
 
 
+@functools.cache
+def peak_launcher():
+    """The launcher `run` starts every command through, built from peak.c when it is missing or older than its source."""
+    if not PEAK.exists() or PEAK.stat().st_mtime < PEAK_SOURCE.stat().st_mtime:
+        BUILD.mkdir(parents=True, exist_ok=True)
+        # Built beside its final path and renamed, since another runner may be starting it.
+        building = PEAK.with_name(f"peak.{os.getpid()}")
+        subprocess.run([os.environ.get("CC", "cc"), "-O2", "-o", building, PEAK_SOURCE], check=True)
+        os.replace(building, PEAK)
+    return PEAK
+
+
 def over_cap(pid):
     """The pid, size and name of the first of `pid` and its descendants above the cap, else None."""
     try:
@@ -53,17 +69,18 @@ def over_cap(pid):
 
 def run(cmd, env=None, timeout=None, cwd=None):
     """Runs one command in a session of its own under the 1 GiB live RSS cap and returns its output and its peak RSS in
-    MiB (from wait4), or raises Failed with why. A command over the cap or the time limit is killed with everything it
-    started."""
+    MiB (from the launcher's wait4), or raises Failed with why. A command over the cap or the time limit is killed with
+    everything it started."""
     # Files rather than pipes: the wait loop does not read, and an answer past a pipe's buffer would block the child.
-    out_file, err_file = tempfile.TemporaryFile("w+"), tempfile.TemporaryFile("w+")
+    out_file, err_file, peak_file = (tempfile.TemporaryFile("w+") for _ in range(3))
+    report = peak_file.fileno()
     # An empty stdin, since a tool that reads stdin when it is open (dasel) would wait on a runner started in the
     # background.
-    p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out_file, stderr=err_file, text=True, cwd=cwd, start_new_session=True,
-                         env={**os.environ, **(env or {})})
+    p =subprocess.Popen([peak_launcher(), str(report), *cmd], stdin=subprocess.DEVNULL, stdout=out_file, stderr=err_file,
+                         text=True, cwd=cwd, start_new_session=True, pass_fds=(report,), env={**os.environ, **(env or {})})
     start = time.monotonic()
     while True:
-        pid, status, usage = os.wait4(p.pid, os.WNOHANG)
+        pid, status, _ = os.wait4(p.pid, os.WNOHANG)
         if pid == p.pid:
             break
         why = f"over the memory cap: {offender}" if (offender := over_cap(p.pid)) else \
@@ -74,14 +91,13 @@ def run(cmd, env=None, timeout=None, cwd=None):
             os.wait4(p.pid, 0)
             raise Failed(why)
         time.sleep(POLL_SECONDS)
-    out_file.seek(0)
-    err_file.seek(0)
+    for f in (out_file, err_file, peak_file):
+        f.seek(0)
     out, err = out_file.read(), err_file.read()
     code = os.waitstatus_to_exitcode(status)
     if code != 0:
         raise Failed((err.strip().splitlines() or ["exit %d" % code])[-1][:100])
-    peak = usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss * 1024
-    return Run(out, err, peak / (1 << 20))
+    return Run(out, err, int(peak_file.read()) / (1 << 20))
 
 
 def counts(cmd, events, env=None, timeout=None):
