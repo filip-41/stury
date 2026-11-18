@@ -377,7 +377,7 @@ def test_pipe(s, name, code, want, first, rest, args, early):
 @pytest.mark.parametrize("name, stdin, message", (
     ("text", IDS + '{"id":\n,}\n', "stury: parse error: Expected value before ',' at line 6002, column 1\n,}\n^\n"),
     ("filter", IDS + "7", 'stury: error (at <stdin>:6000): Cannot index number with string ("id")\n'),
-))
+), ids=("text", "filter"))
 def test_pipe_fault_after_many_records(s, name, stdin, message):
     """The answers before a fault print, and the fault names its place."""
     got = s.run("-c", ".id", stdin=stdin)
