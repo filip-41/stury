@@ -46,10 +46,10 @@ stury is pre-1.0. Options, output and the library API can change in any release.
 
 ## Install
 
-Download `stury-VERSION-OS-ARCH.tar.gz` (`linux` or `darwin`, `amd64` or `arm64`) from
-[GitHub Releases](https://github.com/filip-41/stury/releases), or build it with
-[Odin](https://odin-lang.org/docs/install/) `dev-2026-11` or later: `make build-cli` writes `build/stury`. On Windows,
-build from source. The manual page is `docs/stury.1`.
+Download `stury-VERSION-OS-ARCH.tar.gz` (`linux` or `darwin`, `amd64` or `arm64`) or
+`stury-VERSION-windows-amd64.zip` from [GitHub Releases](https://github.com/filip-41/stury/releases), or build it with
+[Odin](https://odin-lang.org/docs/install/) `dev-2026-11` or later: `make build-cli` writes `build/stury`. The manual
+page is `docs/stury.1`.
 
 The library needs a 64-bit little-endian target. Clone it into your project and add it as a collection:
 

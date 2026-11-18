@@ -58,7 +58,7 @@ fmt_files :: proc(run: ^Run, ins: ^Inputs) {
 	c := run.convert
 	held := out.held
 	for path in ins.files {
-		spent, read := file_bytes(path, "fmt")
+		spent, read := file_bytes(path, "fmt", o.in_place)
 		if !read {
 			ins.failures += 1
 			continue

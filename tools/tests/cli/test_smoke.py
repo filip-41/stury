@@ -581,6 +581,7 @@ def test_fmt_pieces(s, f, whole):
     s.check(0, "", "fmt", "--check", s.files.write(f"pieces-{f}.got", s.run("fmt", pieces)[1]))
 
 
+@pytest.mark.skipif(os.name != "posix", reason="/dev/stdin is POSIX's")
 def test_pipe_dev_stdin(s):
     """A path that names an anonymous pipe (/dev/stdin, a process substitution's /dev/fd/N) reads as a file does."""
     s.check(0, "[1]", "-c", ".", "/dev/stdin", stdin="[1]\n")
@@ -588,6 +589,7 @@ def test_pipe_dev_stdin(s):
     s.check(0, '"3\\n"', "-nc", "--rawfile", "r", "/dev/stdin", "$r", stdin="3\n")
 
 
+@pytest.mark.skipif(os.name != "posix", reason="process substitution reads /dev/fd, which is POSIX's")
 @pytest.mark.parametrize("script, want", (('"$0" -c . <(echo "[6]")', "[6]"), ('"$0" -n -f <(echo "7")', "7")), ids=("process_substitution", "program_file"))
 def test_pipe_process_substitution(s, script, want):
     got = subprocess.run(["bash", "-c", script, s.stury], capture_output=True, text=True)

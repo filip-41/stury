@@ -638,11 +638,15 @@ open_file :: proc(path: string, command := "") -> (f: ^os.File, ok: bool) {
 }
 
 // The bytes of the file `path` names, "-" being stdin, as `open_file` opens it: its mapping where it maps, else all of
-// it on the heap, and the file closed but for stdin. False, told, when it does not open or read.
-file_bytes :: proc(path: string, command := "") -> (d: Spent, ok: bool) {
+// it on the heap, and the file closed but for stdin. A file the run is to replace (`replaced`) is read where a mapping
+// would keep it from being replaced. False, told, when it does not open or read.
+file_bytes :: proc(path: string, command := "", replaced := false) -> (d: Spent, ok: bool) {
 	f := open_file(path, command) or_return
 	mapped: bool
-	if d.data, _, mapped = map_file(f); !mapped {
+	if !replaced || REPLACES_MAPPED {
+		d.data, _, mapped = map_file(f)
+	}
+	if !mapped {
 		d.data = read_file(f) or_return
 		return d, true
 	}

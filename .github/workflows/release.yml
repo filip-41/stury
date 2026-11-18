@@ -55,10 +55,16 @@ jobs:
           - os: macos-15
             name: darwin-amd64
             opt: -o:speed -target:darwin_amd64
+          - os: windows-2025
+            name: windows-amd64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
     env:
       VERSION: ${{ github.ref_name }}
+      EXE: ${{ runner.os == 'Windows' && '.exe' || '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
@@ -66,7 +72,11 @@ jobs:
         env:
           TARGET_OPT: ${{ matrix.opt }}
         run: |
-          if [ -n "$TARGET_OPT" ]; then
+          if [ "$RUNNER_OS" = Windows ]; then
+            # The Makefile's link flags are POSIX's: Windows takes its own from platform_windows.odin.
+            mkdir -p build
+            odin build cmd/stury -o:speed -define:STURY_VERSION="\"${VERSION#v}\"" -out:build/stury.exe
+          elif [ -n "$TARGET_OPT" ]; then
             make build-cli STURY_VERSION="${VERSION#v}" OPT="$TARGET_OPT"
           else
             make build-cli STURY_VERSION="${VERSION#v}"
@@ -76,14 +86,17 @@ jobs:
           set -e
           run=""
           if [ "${{ matrix.name }}" = "darwin-amd64" ]; then
-            file build/stury | grep -q x86_64
+            # Under pipefail, grep -q stopping early would fail `file`.
+            file build/stury | grep x86_64 > /dev/null
             run="arch -x86_64"
           fi
-          [ "$($run build/stury --version)" = "stury-${VERSION#v}" ]
+          [ "$($run build/stury$EXE --version)" = "stury-${VERSION#v}" ]
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Smoke the release binary
+        env:
+          PYTHONUTF8: "1"
         run: |
-          bin=build/stury
+          bin=build/stury$EXE
           if [ "${{ matrix.name }}" = "darwin-amd64" ]; then
             # The smoke tests take the binary as one word: wrap the Intel one.
             printf '#!/bin/sh\nexec arch -x86_64 "%s/build/stury" "$@"\n' "$PWD" > build/stury-rosetta
@@ -95,10 +108,13 @@ jobs:
         run: |
           d="stury-${VERSION#v}-${{ matrix.name }}"
           mkdir "$d"
-          cp build/stury LICENSE THIRD_PARTY_NOTICES README.md CHANGELOG.md "$d/"
+          cp build/stury$EXE LICENSE THIRD_PARTY_NOTICES README.md CHANGELOG.md "$d/"
           cp -R docs "$d/"
           # Links to repository files the archive does not carry point at the tag on GitHub.
-          python3 - "$d" "https://github.com/${{ github.repository }}/blob/$VERSION" <<'PY'
+          # Windows' python3 is a stub that opens the Store.
+          py=python3
+          [ "$RUNNER_OS" != Windows ] || py=python
+          $py - "$d" "https://github.com/${{ github.repository }}/blob/$VERSION" <<'PY'
           import os, re, sys
           root, base = sys.argv[1], sys.argv[2]
           for dirpath, _, names in os.walk(root):
@@ -116,12 +132,21 @@ jobs:
                   text = re.sub(r"\]\((?!https?:|#|mailto:)([^)#\s]+)(#[^)\s]*)?\)", fix, text)
                   open(path, "w", encoding="utf-8").write(text)
           PY
-          tar -czf "$d.tar.gz" "$d"
-          shasum -a 256 "$d.tar.gz" > "$d.tar.gz.sha256"
+          if [ "$RUNNER_OS" = Windows ]; then
+            archive="$d.zip"
+            7z a -tzip "$archive" "$d" > /dev/null
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            archive="$d.tar.gz"
+            tar -czf "$archive" "$d"
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.name }}
-          path: stury-*.tar.gz*
+          path: |
+            stury-*.tar.gz*
+            stury-*.zip*
 
   release:
     needs: build

@@ -112,7 +112,7 @@ edit_files :: proc(run: ^Run, ins: ^Inputs) {
 	exit := 0
 	for path in ins.files {
 		code := EXIT_USAGE
-		if spent, read := file_bytes(path); read {
+		if spent, read := file_bytes(path, replaced = run.opts.in_place); read {
 			ins.data, ins.name = spent.data, file_name(path)
 			switch {
 			case run.opts.raw_input:
