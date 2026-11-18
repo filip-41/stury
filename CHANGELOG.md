@@ -1,13 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 (2026-11-18)
+
+### Install
+
+- Each release carries a Windows amd64 build, `stury-VERSION-windows-amd64.zip`.
+- The command line installs from PyPI on macOS, Linux and Windows (`uv tool install stury`, `pipx install stury`, or
+  `uvx stury` to run it once).
+- The command line installs from a Homebrew tap on macOS and Linux (`brew install filip-41/tap/stury`), with its
+  manual page.
 
 ### Command line
 
-- Releases carry a Windows amd64 build, `stury-VERSION-windows-amd64.zip`. On Windows the command line maps the files it
-  reads, as on darwin and linux, and its process heap is the segment heap.
-- The command line installs from PyPI (`uv tool install stury`, `pipx install stury`) and from a Homebrew tap
-  (`brew install filip-41/tap/stury`).
+- On Windows the command line maps the files it reads, as on darwin and linux, and takes its process heap from the
+  segment heap.
 
 ## 0.2.0 (2026-11-18)
 

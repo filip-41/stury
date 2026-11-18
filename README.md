@@ -46,15 +46,18 @@ stury is pre-1.0. Options, output and the library API can change in any release.
 
 ## Install
 
+The command line, on macOS 15 or later, Linux with glibc 2.35 or later, and Windows:
+
 ```sh
-brew install filip-41/tap/stury   # macOS 15 or later, and Linux
-uv tool install stury             # or pipx install stury, or uvx stury to run it once
+brew install filip-41/tap/stury     # macOS and Linux, with the manual page
+uv tool install stury               # or pipx install stury
+uvx stury '.version' package.json   # run it once without installing
 ```
 
-Or download `stury-VERSION-OS-ARCH.tar.gz` (`linux` or `darwin`, `amd64` or `arm64`) or
-`stury-VERSION-windows-amd64.zip` from [GitHub Releases](https://github.com/filip-41/stury/releases), or build it with
-[Odin](https://odin-lang.org/docs/install/) `dev-2026-11` or later: `make build-cli` writes `build/stury`. The manual
-page is `docs/stury.1`.
+Each [release](https://github.com/filip-41/stury/releases) also has `stury-VERSION-OS-ARCH.tar.gz` for `darwin` and
+`linux` on `amd64` and `arm64`, and `stury-VERSION-windows-amd64.zip`. Each archive holds the binary and the manual page,
+`docs/stury.1`. To build from source, use [Odin](https://odin-lang.org/docs/install/) `dev-2026-11` or later:
+`make build-cli` writes `build/stury`.
 
 The library needs a 64-bit little-endian target. Clone it into your project and add it as a collection:
 
