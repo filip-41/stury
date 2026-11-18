@@ -497,7 +497,8 @@ reread :: proc(list: ^core.Edit_List, out: []u8) -> core.Document_Error {
 	for v in r.respelled {
 		mark(&r, v)
 	}
-	built, berr := build_handle(out, doc.as, false, context.allocator)
+	// The edits change the source's nodes and facts by a few each, so the read sizes the output's document by them.
+	built, berr := build_spec(out, Spec(doc.as.spec), doc.as, false, context.allocator, len(doc.nodes) + 4 * len(list.edits) + 16, len(doc.facts) + 16)
 	if berr.kind != .None {
 		if berr.kind == .No_Memory {
 			return berr

@@ -21,28 +21,38 @@ build_handle :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator:
 }
 
 // Reads `src` as `spec` into a document that holds the handle `handle`. The tree is built on the heap, as `tree_allocator` gives it, and freed
-// after the build. Its tokens are given twice, once to size the document and once to write it.
+// after the build. Its tokens are given twice, once to size the document and once to write it. With `nodes` past 0,
+// the document's likely nodes and facts, they are given once, to a document that grows past those sizes.
 @(private)
-build_spec :: proc(src: []u8, spec: Spec, handle: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+build_spec :: proc(src: []u8, spec: Spec, handle: core.As, refuse_duplicates: bool, allocator: runtime.Allocator, nodes := 0, facts := 0) -> (core.Document, core.Document_Error) {
 	t, fault := build_tree(src, spec, options_of(handle), 0, tree_allocator())
 	if f, bad := fault.?; bad {
 		return {}, core.fault_error(f)
 	}
 	defer tree_destroy(&t)
-	c: engine.Count
-	counter := Emitter(engine.Count){t = &t, h = &c, spec = spec}
-	defer delete(counter.run)
-	emit_tree(&counter, engine.builder_hook_count)
-	if f, bad := counter.fault.?; bad {
-		return {}, core.fault_error(f)
+	b: engine.Builder
+	if nodes > 0 {
+		b = engine.builder_start(src, handle, refuse_duplicates, allocator, nodes, 16, facts)
+	} else {
+		c: engine.Count
+		counter := Emitter(engine.Count){t = &t, h = &c, spec = spec}
+		defer delete(counter.run)
+		emit_tree(&counter, engine.builder_hook_count)
+		if f, bad := counter.fault.?; bad {
+			return {}, core.fault_error(f)
+		}
+		b = engine.builder_start(src, handle, refuse_duplicates, allocator, c.nodes, c.deepest, c.facts)
 	}
-	b := engine.builder_start(src, handle, refuse_duplicates, allocator, c.nodes, c.deepest, c.facts)
 	kept: Kept
 	defer kept_destroy(&kept)
 	writer := Emitter(engine.Builder){t = &t, h = &b, regs = engine.BUILDER_REGS, spec = spec, keep = &kept}
 	defer delete(writer.run)
 	if b.err.kind == .None {
-		emit_tree(&writer, engine.builder_hook)
+		if nodes > 0 {
+			emit_tree(&writer, engine.builder_hook_growing)
+		} else {
+			emit_tree(&writer, engine.builder_hook)
+		}
 	}
 	b.root_close = u64(len(src))
 	doc, err := engine.builder_end(&b, writer.regs, writer.fault)
