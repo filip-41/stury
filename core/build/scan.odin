@@ -367,7 +367,11 @@ query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Option
 		stack: [core.MAX_STEPS + 2]u64
 		ends: [core.MAX_STEPS + 2]u32
 		h.b.stack, h.b.borrowed = stack[:], true
-		replay(false, &h, 0, u32(len(doc.nodes)), &regs, ends[:])
+		if h.cut_idx | h.cut_names != 0 {
+			replay(false, true, &h, 0, u32(len(doc.nodes)), &regs, ends[:])
+		} else {
+			replay(false, false, &h, 0, u32(len(doc.nodes)), &regs, ends[:])
+		}
 	} else {
 		h.rewalk = replay_rewalk
 		no_stack, no_ends: runtime.Allocator_Error
@@ -376,7 +380,7 @@ query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Option
 		if no_stack != nil || no_ends != nil {
 			h.b.err = {kind = .No_Memory}
 		} else {
-			replay(true, &h, 0, u32(len(doc.nodes)), &regs, h.ends)
+			replay(true, false, &h, 0, u32(len(doc.nodes)), &regs, h.ends)
 		}
 		if h.b.err.kind == .None {
 			many_answers(&h)
@@ -496,7 +500,7 @@ set_element :: proc(list: ^core.Edit_List, arr: core.Node_Index, k: int, in_: co
 @(private)
 replay_rewalk :: proc "contextless" (h: ^Scan, s: ^core.Hook_Regs, lo: u64, at: core.Node_Index) {
 	// The replay that holds this one may have grown its stacks past `ends`.
-	replay(true, h, u32(at), u32(at) + h.b.doc.nodes[at].n, s, h.ends[min(int(s.c), len(h.ends)):])
+	replay(true, false, h, u32(at), u32(at) + h.b.doc.nodes[at].n, s, h.ends[min(int(s.c), len(h.ends)):])
 }
 
 // A format's `Services.scan` for a text it reads by building it whole: answers `paths` over `doc`, which the build gave
@@ -650,12 +654,14 @@ first_answer :: proc(doc: ^core.Document) -> core.Answer {
 // Feeds the step logic the tokens of nodes `from ..< to` by `feed_nodes`. Only the containers on the path open, so `ends`
 // holds a frame per step, or one per depth with a `Descend`.
 @(private)
-replay :: proc "contextless" ($MANY: bool, h: ^Scan, from, to: u32, out: ^core.Hook_Regs, ends: []u32) {
+replay :: proc "contextless" ($MANY: bool, $CUTS: bool, h: ^Scan, from, to: u32, out: ^core.Hook_Regs, ends: []u32) {
 	fed: bool
 	when MANY {
 		fed = feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_many, replay_keyed, scan_deepen, false, no_cut, no_resume)
-	} else {
+	} else when CUTS {
 		fed = feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_one, replay_keyed, scan_deepen, false, replay_cut, replay_resume)
+	} else {
+		fed = feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_one, replay_keyed, scan_deepen, false, no_cut, no_resume)
 	}
 	if !fed {
 		h.b.err = {kind = .No_Memory}
@@ -671,11 +677,11 @@ replay_step_one :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs
 // The node a container closes at once the element or key its step picks is read: after an `Index` element, and after the
 // value of the first key of a `Name` read first-wins. No later sibling can be picked, so none is read.
 @(private)
-replay_cut :: #force_inline proc "contextless" (h: ^Scan, _: core.Hook_Regs, depth: int, i: u32, t: core.Token, container_end: u32) -> u32 {
+replay_cut :: #force_inline proc "contextless" (h: ^Scan, _: core.Hook_Regs, depth: int, i: u32, t: core.Token, ends: []u32) {
 	// A depth past the path's steps has no bit set.
 	bit := u64(1) << uint(depth - 1)
 	if (h.cut_idx | h.cut_names) & bit == 0 {
-		return max(u32)
+		return
 	}
 	doc := &h.b.doc
 	end := i
@@ -686,13 +692,13 @@ replay_cut :: #force_inline proc "contextless" (h: ^Scan, _: core.Hook_Regs, dep
 		v := doc.nodes[i + 1]
 		end += 1 + (v.n if v.kind > .Plain else 1)
 	case:
-		return max(u32)
+		return
 	}
-	if core.header_of(doc) != 0 || h.cut_end[depth - 1] != 0 || end >= container_end {
-		return max(u32)
+	if core.header_of(doc) != 0 || h.cut_end[depth - 1] != 0 || end >= ends[depth - 1] {
+		return
 	}
-	h.cut_end[depth - 1] = container_end
-	return end
+	h.cut_end[depth - 1] = ends[depth - 1]
+	ends[depth - 1] = end
 }
 
 // After the container at 0-based depth `k` closes, the node past it when its replay cut it short.

@@ -13,10 +13,11 @@ import core ".."
 // whether the value at node `i` of the container `open` has a key in the table's header and which, and is called only for
 // a document that has them. `open` is `core.NO_NODE` unless `$OPEN`.
 //
-// After a step that does not skip, `cut` may name the node at which the open container ends sooner than it did: no later
-// sibling is read, and the container closes there. It gets the depth of the open container, its end, and the node's index. It
-// returns `max(u32)` for no cut. The hook's close must then know that its count is the container's, and `resume` gives,
-// after the close of the container at 0-based depth `k`, the node the replay goes on at, or 0 when it was not cut.
+// After a step that does not skip, `cut` may lower the end the open container holds in `ends[depth - 1]`, so that no later
+// sibling is read and the container closes there. It gets the depth of the open container and the node's index. The
+// hook's close must then know that its count is the container's, and `resume` gives, after the close of the container
+// at 0-based depth `k`, the node the replay goes on at, or 0 when it was not cut. A hook with `$OPEN` has a frame of two
+// words per depth, so `cut` is for hooks without it.
 //
 // The hook's stacks hold at least the depths `ends` holds. A container that leaves `ends` room for no deeper level
 // grows it, and `deepen` grows the hook's stacks by as many levels. Returns false when either cannot grow.
@@ -30,7 +31,7 @@ feed_nodes :: proc "contextless" (
 	$keyed: proc "contextless" (h: ^H, regs: core.Hook_Regs, i, open: core.Node_Index) -> (core.Node_Index, bool),
 	$deepen: proc "contextless" (h: ^H, extra: int) -> bool,
 	$OPEN: bool,
-	$cut: proc "contextless" (h: ^H, regs: core.Hook_Regs, depth: int, i: u32, t: core.Token, end: u32) -> u32,
+	$cut: proc "contextless" (h: ^H, regs: core.Hook_Regs, depth: int, i: u32, t: core.Token, ends: []u32),
 	$resume: proc "contextless" (h: ^H, k: int) -> u32,
 ) -> bool {
 	when OPEN {
@@ -104,9 +105,7 @@ feed_nodes :: proc "contextless" (
 			i += t.n if t.kind > .Plain else 1
 		case .Next, .Keep:
 			if depth > 0 {
-				if c := cut(h, regs, depth, i, t, ends[(depth - 1) * STRIDE]); c < ends[(depth - 1) * STRIDE] {
-					ends[(depth - 1) * STRIDE] = c
-				}
+				cut(h, regs, depth, i, t, ends)
 			}
 			if t.kind > .Plain {
 				if (depth + 2) * STRIDE > len(ends) {
@@ -147,8 +146,7 @@ grow_ends :: proc "contextless" (ends: []u32, owned: bool, n: int) -> ([]u32, bo
 }
 
 // The `cut` of a hook that reads every sibling.
-no_cut :: #force_inline proc "contextless" (_: ^$H, _: core.Hook_Regs, _: int, _: u32, _: core.Token, _: u32) -> u32 {
-	return max(u32)
+no_cut :: #force_inline proc "contextless" (_: ^$H, _: core.Hook_Regs, _: int, _: u32, _: core.Token, _: []u32) {
 }
 
 // The `resume` of a hook that cuts nothing.
