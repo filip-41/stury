@@ -415,7 +415,9 @@ piece_inner :: proc(out: ^write.Out, n: int, s: ^Piece_Slot) -> bool {
 	return true
 }
 
-// The entries `text` of a spine array built inside `n` arrays, so each sits at the depth it has in the text.
+// The entries `text` of a spine array built inside `n` arrays, so each sits at the depth it has in the text. The text is
+// copied between the brackets, since the print route writes the arrays whole; `collect_entries`, which reads only the
+// entries, builds them in place with `json.build_entries`.
 @(private = "file")
 spine_build :: proc(text: []u8, n: int, plain: core.As) -> (core.Document, Maybe(core.Fault)) {
 	wrapped := make([]u8, len(text) + 2 * n)
@@ -551,9 +553,11 @@ collect_entries :: proc(job: ^Spine_Job, text: []u8, s: ^Piece_Slot) -> bool {
 	}
 	// What `f` makes, temporary or not, lives as long as the serial route keeps it: until the input is answered.
 	context.allocator, context.temp_allocator = values, values
+	// The piece's document lives until the input is answered, so it is read where it lies in the text: a wrapped copy
+	// would hold a second copy of the whole input by then.
 	doc := new(core.Document)
 	fault: Maybe(core.Fault)
-	if doc^, fault = spine_build(text, job.levels, job.plain); fault != nil {
+	if doc^, fault = jq.judge_build(json.build_entries(text, job.levels, job.plain)); fault != nil {
 		return false
 	}
 	ip := job.ip

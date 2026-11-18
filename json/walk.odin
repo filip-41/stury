@@ -236,6 +236,55 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.La
 	return doc, core.error_of(err)
 }
 
+// Builds `src` as `core.build` builds it wrapped in `levels` arrays, `[[` and `]]` for two, with no copy of the text:
+// the elements of a spine array, cut into pieces by `records`, each at its depth in the whole text. It refuses what
+// the wrapped text refuses. A node stands `levels` bytes before its place in the wrapped text, a fault's byte is in
+// `src`, and the wrapping arrays own no byte of `src`, so a reader takes their children and no span of theirs. `as`
+// must be strict JSON, `.Bad_Spec` otherwise.
+build_entries :: proc(src: []u8, levels: int, as: core.As, allocator := context.allocator) -> (core.Document, core.Error) {
+	if Spec(as.spec) != .Json {
+		return {}, core.Document_Error{kind = .Bad_Spec}
+	}
+	opts := options_of(as)
+	// The bound `build_spec` reserves for the wrapped text.
+	wrapped := len(src) + 2 * levels
+	depth := core.reserve_depth(opts.max_depth, wrapped)
+	if levels < 1 || levels >= min(depth, core.MAX_DEPTH) {
+		return {}, core.Document_Error{kind = .Walk, inner = {rules = &RULES, kind = .Too_Deep}}
+	}
+	frames: [core.MAX_DEPTH]u64 = ---
+	b := engine.builder_start(src, as, false, allocator, (wrapped + depth) / 2 + 16, min(depth, core.MAX_DEPTH), 0, frames[:])
+	if len(b.doc.nodes) == 0 {
+		doc, err := engine.builder_end(&b, engine.BUILDER_REGS, nil)
+		return doc, core.error_of(err)
+	}
+	regs := engine.BUILDER_REGS
+	for _ in 0 ..< levels {
+		regs, _ = engine.builder_hook_plain(&b, regs, core.Token{0, 1, .Array, .Value, 0})
+	}
+	end := raw_data(src)[len(src):]
+	fault: Maybe(core.Fault)
+	// Text with no element is empty arrays. Otherwise a list of elements ends at the text's end right after a whole
+	// element, with only the wrapping arrays open, where the walk faults `.Truncated`. An element cut short at the end
+	// faults the same, and a comma at the end does too, but neither sets `ended`.
+	if p := kernel.skip_ws(raw_data(src), end); p < end {
+		r, ended := walk_entries(src, p, levels, opts, &b, &regs, engine.builder_hook_plain)
+		_, walked, stopped := core.result_of(r, &RULES)
+		f, faulted := walked.?
+		if !faulted || stopped || !ended || f.kind != .Truncated || f.at != u64(len(src)) || regs.c != u64(levels) {
+			fault = describe(src, f, .Json) if faulted else core.Fault{at = u64(len(src)), rules = &RULES, kind = .Truncated}
+		}
+	}
+	if fault == nil {
+		for _ in 0 ..< levels {
+			regs, _ = engine.builder_hook_plain(&b, regs, core.Token{u64(len(src)), 1, .End, .Value, 0})
+		}
+		b.root_close = u64(len(src))
+	}
+	doc, err := engine.builder_end(&b, regs, fault)
+	return doc, core.error_of(err)
+}
+
 // The path reads of `core/build`. `scan`, `each_answer`, `find` and `set` take `spec` and `opts`.
 scan :: proc {scan_one, scan_many}
 
@@ -505,7 +554,7 @@ walk_saving :: proc "contextless" (src: []u8, q: [^]u8, $S: Spec, opts: Options,
 @(private)
 cursor_walk :: #force_inline proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts: Options, h: ^$H) -> Walk(S, H) {
 	limit := min(u64(opts.max_depth) if opts.max_depth != 0 else core.MAX_DEPTH, u64(len(cursor.stack)))
-	return Walk(S, H){raw_data(src), h, raw_data(cursor.stack), &cursor.regs, 0, kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, true, nil, 0, limit}
+	return Walk(S, H){raw_data(src), h, raw_data(cursor.stack), &cursor.regs, 0, kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, true, false, nil, 0, limit}
 }
 
 // Enters state `next` at the place `cursor` saved, in a walk whose stack and registers are the cursor's.
@@ -626,6 +675,9 @@ Walk :: struct($S: Spec, $H: typeid) {
 	// Whether `stack` and `regs` are a `Cursor`'s, which a stop fills. The stack does not move, since it holds
 	// `limit` levels.
 	saving:   bool,
+	// Whether the text ended right after a whole value inside a container, which `st_after_ws` sets as it faults
+	// `.Truncated` there. `walk_entries` reads it to tell entries that end from an entry cut short, which faults the same.
+	ended:    bool,
 	// Where the next state continues: for `string_escaped`, the block holding the string's first backslash, for
 	// `st_comments_after`, the run's first comment, which the previous state has read up to.
 	resume:   [^]u8,
@@ -643,12 +695,30 @@ walk_document :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec
 	// `= ---` leaves the array unwritten, where a struct would be zeroed. Every slot is written before it is read.
 	stack: [core.MAX_DEPTH]u8 = ---
 	depth := u64(opts.max_depth) if opts.max_depth != 0 else core.MAX_DEPTH
-	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth_held(h, regs, depth, core.MAX_DEPTH), kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, false, nil, 0, depth}
+	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth_held(h, regs, depth, core.MAX_DEPTH), kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, false, false, nil, 0, depth}
 	r := enter(.Value, p, w.base[len(src):], 0, INDENT_START, &w, regs.a, regs.b, regs.c, on)
 	if w.owned {
 		drop_stack(w.stack)
 	}
 	return r
+}
+
+// Reads `src`, the elements of an array `levels` arrays deep, as the walk reads them between those arrays' brackets,
+// which `src` does not hold. The builder holds the arrays open already, so the walk's depth is its own. Returns the
+// walk's result and whether the text ended right after a whole element, the end that `build_entries` accepts.
+@(private)
+walk_entries :: proc "contextless" (src: []u8, p: [^]u8, levels: int, opts: Options, b: ^engine.Builder, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^engine.Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (r: u64, ended: bool) {
+	stack: [core.MAX_DEPTH]u8 = ---
+	limit := u64(opts.max_depth) if opts.max_depth != 0 else core.MAX_DEPTH
+	for i in 0 ..< levels {
+		stack[i] = 0
+	}
+	w := Walk(.Json, engine.Builder){raw_data(src), b, raw_data(stack[:]), regs, min(limit, core.MAX_DEPTH, u64(len(b.stack))), kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, false, false, nil, 0, limit}
+	r = enter(.Value, p, w.base[len(src):], u64(levels) << 1, INDENT_START, &w, regs.a, regs.b, regs.c, on)
+	if w.owned {
+		drop_stack(w.stack)
+	}
+	return r, w.ended
 }
 
 // `STATE_TIER` is the CPU tier every state is built for, the lowest: `V2` on x86-64, `Base` elsewhere.
@@ -667,11 +737,11 @@ pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, 
 	regs: core.Hook_Regs
 	// A read that refuses repeats notes the keys of what it skips.
 	when intrinsics.type_has_field(H, "open_keys") {
-		v := Walk(S, typed.Open_Keys){w.base, &w.hooks.open_keys, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, false, false, nil, 0, w.limit - slot}
+		v := Walk(S, typed.Open_Keys){w.base, &w.hooks.open_keys, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, false, false, false, nil, 0, w.limit - slot}
 		on :: typed.on_open_key
 	} else {
 		h: core.No_Hooks
-		v := Walk(S, core.No_Hooks){w.base, &h, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, false, false, nil, 0, w.limit - slot}
+		v := Walk(S, core.No_Hooks){w.base, &h, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, false, false, false, nil, 0, w.limit - slot}
 		on :: core.no_hook
 	}
 	when open {
