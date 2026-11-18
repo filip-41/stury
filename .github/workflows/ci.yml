@@ -183,7 +183,7 @@ jobs:
           for p in $(sed -n 's/^TEST_PKGS *:= *//p' Makefile | tr -d '\r' | tr ' ' '\n'); do
             odin test $p -o:minimal $stack -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:RECORDS_SLICE=1 -define:RECORDS_FAN_AFTER=1 -define:RECORDS_SPARSE=1000000000 -out:test.exe
           done
-          odin build cmd/stury -o:speed $stack -resource:cmd/stury/stury.rc -define:STURY_VERSION='"ci"' -out:stury.exe
+          odin build cmd/stury -o:speed $stack -resource:cmd/stury/stury.rc -define:STURY_VERSION="\"$(git log -1 --format=%h)\"" -out:stury.exe
       - name: Answers through files and pipes
         shell: bash
         run: |
