@@ -53,7 +53,13 @@ runs:
         echo "commit=$commit" >> "$GITHUB_OUTPUT"
         echo "windows_sha256=$windows" >> "$GITHUB_OUTPUT"
         echo "asset=odin-$os-${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-        echo "key=odin-$os-${{ inputs.version }}-llvm${{ inputs.llvm }}" >> "$GITHUB_OUTPUT"
+        # The OS release is in the key: an Odin built on a newer Ubuntu needs a newer glibc than an older one has.
+        case "${{ runner.os }}" in
+          Linux) release=$(. /etc/os-release && echo "$ID$VERSION_ID") ;;
+          macOS) release=macos$(sw_vers -productVersion | cut -d. -f1) ;;
+          *) release=any ;;
+        esac
+        echo "key=odin-$os-$release-${{ inputs.version }}-llvm${{ inputs.llvm }}" >> "$GITHUB_OUTPUT"
 
     - name: Cache Odin
       id: cache

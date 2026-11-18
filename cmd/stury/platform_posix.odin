@@ -237,6 +237,9 @@ platform_error_text :: proc(e: os.Platform_Error) -> string {
 	return string(posix.strerror(posix.Errno(i32(e))))
 }
 
+// A rename replaces a mapped file's name, and the mapping keeps the bytes of the file it had.
+REPLACES_MAPPED :: true
+
 // Regular file `f`, from its current offset `at` to its end, mapped read-only: nothing writes into an input. It returns
 // false if it does not map (nothing left, a file system that maps none), and it is to be read. Stdin is mapped too,
 // and left at its end as a read would leave it. The mapping starts at the page before the offset (`unmap_file` finds

@@ -13,6 +13,10 @@ import pytest
 from capped import SANITIZED, peak
 
 POOL = (os.cpu_count() or 1) >= 2
+# The memory caps are set against rusage's peak, on POSIX. Elsewhere only the answers count.
+CAPPED_PEAK = not SANITIZED and os.name == "posix"
+# Only POSIX keeps a file's mode bits.
+MODES = os.name == "posix"
 needs_pool = pytest.mark.skipif(not POOL, reason="a one-core host reads no pieces")
 
 
@@ -103,7 +107,7 @@ class Files:
 class Runner:
     def __init__(self, stury, directory):
         self.stury, self.dir, self.files = stury, directory, Files(directory)
-        self.idle = 0 if SANITIZED else self.run("-n", "empty", cpu=10)[3]
+        self.idle = self.run("-n", "empty", cpu=10)[3] if CAPPED_PEAK else 0
 
     def run(self, *args, stdin=None, cpu=None, merged=False, **kw):
         """(exit status, stdout, stderr, peak resident MB) of `stury ARGS`. `stdin` is text written through a pipe."""
@@ -144,7 +148,7 @@ class Runner:
     def capped(self, cap, want, *args, stdin=None, idle=None):
         """The answer is `want` and the peak is under CAP MB above the binary's own peak doing nothing."""
         code, out, _, mb = self.run(*args, stdin=stdin, cpu=None if SANITIZED else 10)
-        mb = 0 if SANITIZED else mb - (self.idle if idle is None else idle)
+        mb = mb - (self.idle if idle is None else idle) if CAPPED_PEAK else 0
         assert not code < 0 and text(out) == want and mb < cap, f"exit {code}, {mb} MB above idle\n got: {text(out)[:300]}\nwant: {want[:300]}"
 
     def piped(self, code, want, first, rest, *args, early=False):
@@ -373,7 +377,7 @@ def test_pipe(s, name, code, want, first, rest, args, early):
 @pytest.mark.parametrize("name, stdin, message", (
     ("text", IDS + '{"id":\n,}\n', "stury: parse error: Expected value before ',' at line 6002, column 1\n,}\n^\n"),
     ("filter", IDS + "7", 'stury: error (at <stdin>:6000): Cannot index number with string ("id")\n'),
-))
+), ids=("text", "filter"))
 def test_pipe_fault_after_many_records(s, name, stdin, message):
     """The answers before a fault print, and the fault names its place."""
     got = s.run("-c", ".id", stdin=stdin)
@@ -503,7 +507,7 @@ def test_fmt_in_place_spelling(s):
     s.run("fmt", "--in-place", path)
     assert s.files.read(path) == '{\n  "b": 1,\n  "a": 2,\n  "b": 3,\n  "n": 1e2,\n  "s": "\\u00e9\\/"\n}\n'
     s.check(0, "", "fmt", "--check", path)
-    assert os.stat(path).st_mode & 0o777 == 0o640
+    assert not MODES or os.stat(path).st_mode & 0o777 == 0o640
 
 
 def test_fmt_in_place_deep_untouched(s):
@@ -529,7 +533,7 @@ def test_fmt_in_place_bare_name(s):
     assert done.returncode == 0
 
 
-@pytest.mark.skipif(os.name != "posix", reason="modes are POSIX's")
+@pytest.mark.skipif(not MODES, reason="modes are POSIX's")
 @pytest.mark.parametrize("name, args", (("fmt", ["fmt", "--in-place"]), ("edit", ["edit", "--in-place", ".[0].a = 2"])))
 def test_in_place_temporary_is_private(s, name, args):
     """The temporary file is the owner's alone from its creation until the run ends, under a umask that allows everything."""
@@ -562,7 +566,7 @@ def test_edit_in_place_bytes(s):
     os.chmod(path, 0o640)
     s.run("edit", "--from", "jsonc", "--in-place", ".b = 2", path)
     assert s.files.read(path) == '// lead\n{"b":2, "a":"\\u00e9\\/", "n":1e2}\n'
-    assert os.stat(path).st_mode & 0o777 == 0o640
+    assert not MODES or os.stat(path).st_mode & 0o777 == 0o640
     s.check(0, "", "edit", "--from", "jsonc", "--check", ".b = 2", path)
     s.check(1, "", "edit", "--from", "jsonc", "--check", ".b = 3", path)
 
@@ -581,6 +585,7 @@ def test_fmt_pieces(s, f, whole):
     s.check(0, "", "fmt", "--check", s.files.write(f"pieces-{f}.got", s.run("fmt", pieces)[1]))
 
 
+@pytest.mark.skipif(os.name != "posix", reason="/dev/stdin is POSIX's")
 def test_pipe_dev_stdin(s):
     """A path that names an anonymous pipe (/dev/stdin, a process substitution's /dev/fd/N) reads as a file does."""
     s.check(0, "[1]", "-c", ".", "/dev/stdin", stdin="[1]\n")
@@ -588,6 +593,7 @@ def test_pipe_dev_stdin(s):
     s.check(0, '"3\\n"', "-nc", "--rawfile", "r", "/dev/stdin", "$r", stdin="3\n")
 
 
+@pytest.mark.skipif(os.name != "posix", reason="process substitution reads /dev/fd, which is POSIX's")
 @pytest.mark.parametrize("script, want", (('"$0" -c . <(echo "[6]")', "[6]"), ('"$0" -n -f <(echo "7")', "7")), ids=("process_substitution", "program_file"))
 def test_pipe_process_substitution(s, script, want):
     got = subprocess.run(["bash", "-c", script, s.stury], capture_output=True, text=True)

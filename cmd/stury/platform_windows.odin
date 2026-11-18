@@ -189,11 +189,57 @@ peak_rss :: proc() -> int {
 	return int(counters.PeakWorkingSetSize)
 }
 
-// Every file is read.
+// Windows refuses to rename over a file while a view of it is mapped.
+REPLACES_MAPPED :: false
+
+// Regular file `f`, from its current offset `at` to its end, mapped read-only, as platform_posix.odin maps it, and left
+// at its end. The view starts at the allocation granule before the offset, which `unmap_file` finds again. Windows
+// refuses to truncate a file while a view of it is mapped, so no page of the view loses its bytes.
 map_file :: proc(f: ^os.File) -> (data: []byte, at: i64, ok: bool) {
-	return
+	if !is_regular_file(f) {
+		return
+	}
+	size, err := os.file_size(f)
+	if err != nil {
+		return
+	}
+	if at, err = os.seek(f, 0, .Current); err != nil || size <= at {
+		return
+	}
+	granule := i64(system_info().dwAllocationGranularity)
+	lo := at / granule * granule
+	m := win.CreateFileMappingW(win.HANDLE(os.fd(f)), nil, win.PAGE_READONLY, 0, 0, nil)
+	if m == nil {
+		return
+	}
+	p := win.MapViewOfFile(m, win.FILE_MAP_READ, win.DWORD(u64(lo) >> 32), win.DWORD(u64(lo)), uint(size - lo))
+	// The view holds the mapping open.
+	win.CloseHandle(m)
+	if p == nil {
+		return
+	}
+	os.seek(f, size, .Start)
+	return ([^]byte)(p)[at - lo:size - lo], at, true
 }
 
-map_afresh :: proc(f: ^os.File, data: []byte, at: i64, from, to: int) {}
+// The whole pages of data[from:to], and the page data[from] is in, dropped from the working set: VirtualUnlock on pages
+// that are not locked removes them from it and returns ERROR_NOT_LOCKED, which is no failure here. A read of them maps
+// them again from the file.
+map_afresh :: proc(f: ^os.File, data: []byte, at: i64, from, to: int) {
+	page := i64(system_info().dwPageSize)
+	lo, hi := (at + i64(from)) / page * page, (at + i64(to)) / page * page
+	if lo < hi {
+		win.VirtualUnlock(rawptr(uintptr(raw_data(data)) + uintptr(lo - at)), uint(hi - lo))
+	}
+}
 
-unmap_file :: proc(data: []byte) {}
+unmap_file :: proc(data: []byte) {
+	granule := uintptr(system_info().dwAllocationGranularity)
+	win.UnmapViewOfFile(rawptr(uintptr(raw_data(data)) / granule * granule))
+}
+
+@(private = "file")
+system_info :: proc() -> (info: win.SYSTEM_INFO) {
+	win.GetSystemInfo(&info)
+	return
+}

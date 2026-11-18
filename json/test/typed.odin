@@ -1269,21 +1269,33 @@ types_the_plan_refuses :: proc(t: ^testing.T) {
 	Bits :: bit_field u8 {
 		a: u8 | 8,
 	}
-	Huge :: struct {
-		big: [1 << 29]u64,
-		x:   i32,
-	}
-	Past_4_Gib :: [1 << 32 + 8]u8
 	refused := []typeid {
 		[]Empty, [dynamic]Empty, [2]Empty, rawptr, Maybe(rawptr), []Maybe(rawptr), [^]i32, proc(), typeid, Bits, #simd[4]f32,
-		matrix[2, 2]f32, complex64, quaternion256, rune, string16, #soa[]Point, Huge, []Past_4_Gib, ^Huge, map[string]Past_4_Gib,
+		matrix[2, 2]f32, complex64, quaternion256, rune, string16, #soa[]Point,
 	}
 	for T in refused {
 		_, err := json.plan_make(T, plan = {}, allocator = context.temp_allocator)
 		testkit.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
 	}
-	for T in ([]typeid{map[string]Empty, [1 << 32 - 1]u8}) {
-		_, err := json.plan_make(T, plan = {}, allocator = context.temp_allocator)
+	_, err := json.plan_make(map[string]Empty, plan = {}, allocator = context.temp_allocator)
+	testkit.expect_nil(t, err)
+}
+
+// Odin's Windows build refuses the array counts these types take (1 << 29 and more).
+when ODIN_OS != .Windows {
+	@(test)
+	types_past_4_gib :: proc(t: ^testing.T) {
+		defer free_all(context.temp_allocator)
+		Huge :: struct {
+			big: [1 << 29]u64,
+			x:   i32,
+		}
+		Past_4_Gib :: [1 << 32 + 8]u8
+		for T in ([]typeid{Huge, []Past_4_Gib, ^Huge, map[string]Past_4_Gib}) {
+			_, err := json.plan_make(T, plan = {}, allocator = context.temp_allocator)
+			testkit.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
+		}
+		_, err := json.plan_make([1 << 32 - 1]u8, plan = {}, allocator = context.temp_allocator)
 		testkit.expect_nil(t, err)
 	}
 }

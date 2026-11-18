@@ -58,11 +58,20 @@ os.write(report, b"%d %d" % (status, usage.ru_maxrss))
 
 def peak(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, cpu=None):
     """(exit status, stderr, peak resident bytes) of a run, read from its rusage, with at most `cpu` seconds of CPU.
-    `stdin` given as bytes is written through a pipe."""
-    import resource  # POSIX only
-
+    `stdin` given as bytes is written through a pipe. Windows has no rusage and no CPU limit: the peak is the process's
+    peak working set and `cpu` is not enforced."""
     fed = isinstance(stdin, bytes)
     source = subprocess.PIPE if fed else stdin
+    if os.name == "nt":
+        p = subprocess.Popen(argv, stdin=source, stdout=stdout, stderr=stderr)
+        _, err = p.communicate(stdin if fed else None)
+        counters = (ctypes.c_size_t * 9)()  # PROCESS_MEMORY_COUNTERS, as resident_mb reads it: the peak working set is slot 1
+        counters[0] = ctypes.sizeof(counters)
+        # The process handle Popen keeps open past the wait, so its counters can still be read.
+        held = counters[1] if _kernel32.K32GetProcessMemoryInfo(int(p._handle), counters, ctypes.sizeof(counters)) else 0
+        return p.returncode, err or b"", held
+    import resource  # POSIX only
+
     if FORK_FRESH:
         report, written = os.pipe()
         fresh = [sys.executable, "-I", "-c", FRESH_FORK, str(written), str(cpu or 0), *argv]
