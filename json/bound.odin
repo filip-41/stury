@@ -114,6 +114,7 @@ framing_of :: proc "contextless" ($S: Spec) -> ^records.Framing_Services {
 			.Entries      = proc(it: ^records.Reader) -> (records.Record, bool) {return next_walked_spec(it, S)},
 		},
 		judge = proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) {return judge_spec(it, rec, S)},
+		judge_run = proc(it: ^records.Reader, to: u64) {judge_run_spec(it, to, S)},
 		guess = guess_start,
 		exact = exact_cut,
 		piece = piece_of,

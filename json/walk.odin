@@ -554,7 +554,7 @@ walk_saving :: proc "contextless" (src: []u8, q: [^]u8, $S: Spec, opts: Options,
 @(private)
 cursor_walk :: #force_inline proc "contextless" (src: []u8, cursor: ^Cursor, $S: Spec, opts: Options, h: ^$H) -> Walk(S, H) {
 	limit := min(u64(opts.max_depth) if opts.max_depth != 0 else core.MAX_DEPTH, u64(len(cursor.stack)))
-	return Walk(S, H){raw_data(src), h, raw_data(cursor.stack), &cursor.regs, 0, kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, true, false, nil, 0, limit}
+	return Walk(S, H){raw_data(src), h, raw_data(cursor.stack), &cursor.regs, 0, kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, true, false, nil, 0, limit, nil}
 }
 
 // Enters state `next` at the place `cursor` saved, in a walk whose stack and registers are the cursor's.
@@ -686,6 +686,8 @@ Walk :: struct($S: Spec, $H: typeid) {
 	// The deepest nesting the text may have from this walk's root. `depth` is less while the stacks hold fewer
 	// levels, and `deepen` grows them as the text nests.
 	limit:    u64,
+	// The run of NDJSON lines this walk reads on into past each root's end, nil for a walk of one text.
+	run:      ^Line_Run,
 }
 
 // Reads the document whose first byte is `p`. Keeps the depth stack in this frame, which `deepen` grows on the default
@@ -695,12 +697,27 @@ walk_document :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec
 	// `= ---` leaves the array unwritten, where a struct would be zeroed. Every slot is written before it is read.
 	stack: [core.MAX_DEPTH]u8 = ---
 	depth := u64(opts.max_depth) if opts.max_depth != 0 else core.MAX_DEPTH
-	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth_held(h, regs, depth, core.MAX_DEPTH), kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, false, false, nil, 0, depth}
+	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth_held(h, regs, depth, core.MAX_DEPTH), kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, false, false, nil, 0, depth, nil}
 	r := enter(.Value, p, w.base[len(src):], 0, INDENT_START, &w, regs.a, regs.b, regs.c, on)
 	if w.owned {
 		drop_stack(w.stack)
 	}
 	return r
+}
+
+// Reads the lines of `src` from `lo` as one walk of strict JSON with no hooks, which `run` carries on from each root's end
+// to the next line's while each line holds one value, and ends where `run` does or at the first fault.
+@(private)
+walk_run :: proc "contextless" (src: []u8, lo: u64, run: ^Line_Run, opts: Options) {
+	stack: [core.MAX_DEPTH]u8 = ---
+	h: core.No_Hooks
+	regs: core.Hook_Regs
+	depth := u64(opts.max_depth) if opts.max_depth != 0 else core.MAX_DEPTH
+	w := Walk(.Json, core.No_Hooks){raw_data(src), &h, raw_data(stack[:]), &regs, min(depth, core.MAX_DEPTH), kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, false, false, nil, 0, depth, run}
+	enter(.Value, raw_data(src)[lo:], w.base[len(src):], 0, INDENT_START, &w, 0, 0, 0, core.no_hook)
+	if w.owned {
+		drop_stack(w.stack)
+	}
 }
 
 // Reads `src`, the elements of an array `levels` arrays deep, as the walk reads them between those arrays' brackets,
@@ -713,7 +730,7 @@ walk_entries :: proc "contextless" (src: []u8, p: [^]u8, levels: int, opts: Opti
 	for i in 0 ..< levels {
 		stack[i] = 0
 	}
-	w := Walk(.Json, engine.Builder){raw_data(src), b, raw_data(stack[:]), regs, min(limit, core.MAX_DEPTH, u64(len(b.stack))), kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, false, false, nil, 0, limit}
+	w := Walk(.Json, engine.Builder){raw_data(src), b, raw_data(stack[:]), regs, min(limit, core.MAX_DEPTH, u64(len(b.stack))), kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, false, false, nil, 0, limit, nil}
 	r = enter(.Value, p, w.base[len(src):], u64(levels) << 1, INDENT_START, &w, regs.a, regs.b, regs.c, on)
 	if w.owned {
 		drop_stack(w.stack)
@@ -737,11 +754,11 @@ pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, 
 	regs: core.Hook_Regs
 	// A read that refuses repeats notes the keys of what it skips.
 	when intrinsics.type_has_field(H, "open_keys") {
-		v := Walk(S, typed.Open_Keys){w.base, &w.hooks.open_keys, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, false, false, false, nil, 0, w.limit - slot}
+		v := Walk(S, typed.Open_Keys){w.base, &w.hooks.open_keys, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, false, false, false, nil, 0, w.limit - slot, nil}
 		on :: typed.on_open_key
 	} else {
 		h: core.No_Hooks
-		v := Walk(S, core.No_Hooks){w.base, &h, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, false, false, false, nil, 0, w.limit - slot}
+		v := Walk(S, core.No_Hooks){w.base, &h, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, false, false, false, nil, 0, w.limit - slot, nil}
 		on :: core.no_hook
 	}
 	when open {

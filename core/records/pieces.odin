@@ -105,6 +105,9 @@ judge_all :: proc(src: []u8, as: core.As, services: ^Framing_Services, framing: 
 	// piece's guess to land on one.
 	origin, seen := it.pos, 0
 	sampling := runner != nil && runner.threads > 0 && it.services.guess != nil && !by_tree(it.services, framing) && u64(len(src)) >= it.pos + 2 * SLICE
+	// The records a read with no pieces judges alone before it tries a run again, doubled by each run that accepts none,
+	// so a text whose runs keep stopping at their first record judges that record twice only now and then.
+	wait, stalls := 0, 0
 	// A format whose guess finds a record's start by the text alone loses nothing to sparse records, and its first record
 	// is read in a piece as well.
 	if sampling && it.services.cut != nil {
@@ -121,6 +124,19 @@ judge_all :: proc(src: []u8, as: core.As, services: ^Framing_Services, framing: 
 				it.pos, it.state = p.pos, p.state
 				continue
 			}
+		}
+		if c.pieces == nil && to == max(u64) && it.services.judge_run != nil && it.fault == nil {
+			if wait == 0 {
+				from := it.pos
+				it.services.judge_run(&it, to)
+				if it.pos > from {
+					stalls = 0
+					continue
+				}
+				stalls = min(stalls + 1, 16)
+				wait = 1 << uint(stalls)
+			}
+			wait -= 1
 		}
 		rec, more := next_span(&it, to)
 		fault := it.fault
