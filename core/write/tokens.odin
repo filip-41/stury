@@ -408,6 +408,9 @@ NUMBER_TEXT_MAX :: 1 << 26
 // infinity or a NaN is written with tree `T`'s word, and is `.Non_Finite` when `T` has none, unless `jq_numbers` writes
 // it as jq does: a NaN as null, an infinity as the largest double of its sign.
 put_number_node :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index, $T: Tree, own := false, forms := Number_Forms{}, jq_numbers := false) -> core.Typed_Error_Kind {
+	if .Int_64 in forms && !own {
+		return put_number_node_int_64(out, doc, node, T, forms - {.Int_64}, jq_numbers)
+	}
 	t := doc.nodes[node]
 	span := string(core.span(doc, node))
 	if own || doc.readers.number_text == nil && (t.kind != .Number || t.spelling & core.NUMBER_KIND_MASK == 0) {
@@ -445,7 +448,7 @@ put_number_node :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index, $
 }
 
 // The number spellings past a JSON decimal that a format's grammar has and its writer keeps from a source that spells a
-// number so: a hex, octal or binary integer (`0xFF`, `0o17`, `0b101`), a leading plus (`+1`), a point with no digit
+// number so, and `Int_64` for a format whose integers hold 64 bits: a hex, octal or binary integer (`0xFF`, `0o17`, `0b101`), a leading plus (`+1`), a point with no digit
 // before it (`.5`) and one with no digit after it (`5.`).
 Number_Form :: enum u8 {
 	Hex,
@@ -454,6 +457,7 @@ Number_Form :: enum u8 {
 	Plus,
 	Lead_Point,
 	Bare_Point,
+	Int_64, // the format's integers are signed 64 bits, see `put_int_64_text`
 }
 Number_Forms :: bit_set[Number_Form; u8]
 
@@ -541,6 +545,84 @@ put_spelled_decimal :: proc(out: ^Out, lit: string, p: int, forms: Number_Forms)
 	}
 	put_text(out, lit)
 	return true
+}
+
+// `put_number_node` for a format whose integers are signed 64 bits: the number is spelled as the format's other forms say,
+// then checked by `put_int_64_text`.
+@(private)
+put_number_node_int_64 :: #force_no_inline proc(out: ^Out, doc: ^core.Document, node: core.Node_Index, $T: Tree, forms: Number_Forms, jq_numbers: bool) -> core.Typed_Error_Kind {
+	spill: [ROOM_MAX]u8 = ---
+	digits: Out
+	init(&digits, &spill, context.temp_allocator)
+	text, err := finish(&digits, {kind = put_number_node(&digits, doc, node, T, false, forms, jq_numbers)})
+	if err.kind != .None {
+		return err.kind
+	}
+	return put_int_64_text(out, string(text))
+}
+
+// Writes number text `lit` for a format whose integers are signed 64 bits and which has floats: an integer past them is
+// `.Unwritable`, naming it, and an integer `-0`, whose sign a 64-bit integer cannot keep, is the float `-0.0`. Any other
+// number is written as it stands.
+put_int_64_text :: proc(out: ^Out, lit: string) -> core.Typed_Error_Kind {
+	magnitude, negative, integer := integer_magnitude(lit)
+	switch {
+	case !integer:
+	case magnitude > u64(max(i64)) + u64(negative):
+		out.what = strings.concatenate({lit, " is an integer past 64 bits"}, context.temp_allocator)
+		return .Unwritable
+	case negative && magnitude == 0:
+		put_text(out, "-0.0")
+		return .None
+	}
+	put_text(out, lit)
+	return .None
+}
+
+// Writes unsigned `n` as `put_int_64_text` writes an integer: past `max(i64)` it is `.Unwritable`.
+put_int_64_unsigned :: proc(out: ^Out, n: u64) -> core.Typed_Error_Kind {
+	stack: [32]u8
+	return put_int_64_text(out, string(stack[:spell.u64_text(raw_data(stack[:]), n)]))
+}
+
+// The magnitude of integer text `lit`, a decimal or a prefixed integer with underscores, saturated at `max(u64)`, and
+// whether it is negative. `integer` is false for any other text.
+@(private)
+integer_magnitude :: proc(lit: string) -> (magnitude: u64, negative, integer: bool) {
+	i := 0
+	if len(lit) > 0 && (lit[0] == '+' || lit[0] == '-') {
+		negative, i = lit[0] == '-', 1
+	}
+	base := u64(10)
+	if i + 1 < len(lit) && lit[i] == '0' {
+		switch lit[i + 1] | 0x20 {
+		case 'x':
+			base, i = 16, i + 2
+		case 'o':
+			base, i = 8, i + 2
+		case 'b':
+			base, i = 2, i + 2
+		}
+	}
+	if i == len(lit) {
+		return 0, false, false
+	}
+	for ; i < len(lit); i += 1 {
+		c := lit[i]
+		if c == '_' {
+			continue
+		}
+		d := u64(c - '0') if c - '0' < 10 else u64((c | 0x20) - 'a' + 10) if (c | 0x20) - 'a' < 6 else 99
+		if d >= base {
+			return 0, false, false
+		}
+		if magnitude > (max(u64) - d) / base {
+			magnitude = max(u64)
+		} else {
+			magnitude = magnitude * base + d
+		}
+	}
+	return magnitude, negative, true
 }
 
 // Returns the text of node `node`, in `buf` when it fits and else in a copy made with `allocator`.
@@ -850,7 +932,8 @@ note :: proc(at: ^core.Value, role: core.Role, text: string) {
 @(private = "file")
 last_item :: proc(up: core.Value) -> ^core.Value {
 	if o, is_object := up.(^core.Object); is_object {
-		return &o.vals[len(o.vals) - 1]
+		vals := core.object_vals(o)
+		return &vals[len(vals) - 1]
 	}
 	a := up.(^core.Array)
 	return &a.items[len(a.items) - 1]

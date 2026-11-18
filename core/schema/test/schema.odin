@@ -2337,3 +2337,20 @@ schema_arms_of_one_container_do_not_follow_themselves :: proc(t: ^testing.T) {
 	defer checked_destroy(ch)
 	testing.expect(t, schema.valid(&ch.bound, transmute([]u8)string(`{"a": {"a": 5, "ab": "abc", "b": false}, "c": []}`)))
 }
+
+// A sink reused after a check that ended on a fault gives the next check its own outcome.
+@(test)
+schema_sink_reused_after_a_fault :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	c, err := schema.compile(transmute([]u8)string(`{"type": "array"}`), json.as(.Json))
+	defer schema.destroy(c)
+	testing.expect(t, err == nil)
+	b, berr := schema.bind(c, json.checks(.Json))
+	defer schema.unbind(&b)
+	testing.expect(t, berr == nil)
+	sink: typed.Sink
+	defer typed.sink_destroy(&sink)
+	testing.expect(t, schema.check(&b, transmute([]u8)string(`[1,`), &sink) != nil)
+	testing.expect(t, sink.fatal.kind != .None)
+	testing.expect(t, schema.check(&b, transmute([]u8)string(`[1]`), &sink) == nil)
+}

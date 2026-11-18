@@ -2,9 +2,9 @@ package toml
 
 // The token write of TOML. TOML fixes an order the calls cannot know, since a table's keys stand before the sections of
 // its tables, so the calls write the value as an inline table behind `r = `, and `end` reads that back and lays it out
-// as `write_document.odin` does. The typed write lays out its inline table in one pass, `lay_out_inline`, where it can. A write that stands at a site of a document is the inline text as it is. Null is a word
-// TOML has no reading for, so a write that holds one is `.Unwritable`, and a write to a stream is `.Unsupported`, since
-// `end` has the whole text to lay out only in a buffer.
+// as `write_document.odin` does. The typed write lays out its inline table in one pass, `lay_out_inline`, where it can. A write that stands at a site of a document is the inline text as it is. TOML has no null, so
+// `TREE` spells it with no text: a typed write leaves out a member that holds one, any other null is `.Unwritable`, and
+// a write to a stream is `.Unsupported`, since `end` has the whole text to lay out only in a buffer.
 
 import "base:runtime"
 import "core:io"
@@ -22,7 +22,7 @@ TREE :: write.Tree {
 	.Comma        = ",",
 	.Colon        = "=",
 	.After_Colon  = " ",
-	.Null         = "null",
+	.Null         = "",
 	.True         = "true",
 	.False        = "false",
 	.Point_Zero   = ".0",
@@ -35,7 +35,7 @@ TREE :: write.Tree {
 
 // The number spellings of TOML past JSON's.
 @(private)
-NUMBER_FORMS :: write.Number_Forms{.Hex, .Octal, .Binary, .Plus}
+NUMBER_FORMS :: write.Number_Forms{.Hex, .Octal, .Binary, .Plus, .Int_64}
 
 @(private, rodata)
 TOKENS := write.Token_Spelling {
@@ -63,9 +63,12 @@ TOKENS := write.Token_Spelling {
 			text, ok := write.bytes_text(cast([]u8)x, stack[:])
 			return put_basic(t.out, text, t.opts) if ok else .No_Memory
 		case core.Number:
+			if x.kind == .Uint {
+				return write.put_int_64_unsigned(t.out, x.bits)
+			}
 			return write.put_number(t.out, x, TREE)
 		case write.Number_Literal:
-			write.put_text(t.out, x.text)
+			return write.put_int_64_text(t.out, x.text)
 		case write.Tagged_Text:
 			// A tag that is no TOML type leaves a string, and so does another format's datetime that no TOML one spells.
 			tag := DATETIME_TAGS[x.meaning] if x.meaning != .Own else x.tag
@@ -74,6 +77,9 @@ TOKENS := write.Token_Spelling {
 			}
 			return put_datetime(t.out, x.text, tag)
 		case write.Tree_Part:
+			if x == .Null {
+				return .Unwritable
+			}
 			write.put_text(t.out, t.spell.tree[x])
 		}
 		return .None
@@ -178,7 +184,7 @@ inline_text :: proc(bytes: []u8, allocator: runtime.Allocator) -> ([]u8, core.Ty
 	}
 	spill: [write.ROOM_MAX]u8 = ---
 	l := Layout{doc = &doc, own = true}
-	l.arena.backing_allocator = context.allocator
+	l.arena = {backing_allocator = context.allocator, minimum_block_size = ARENA_BLOCK}
 	defer runtime.arena_destroy(&l.arena)
 	l.path.allocator = runtime.arena_allocator(&l.arena)
 	write.init(&l.out, &spill, allocator)

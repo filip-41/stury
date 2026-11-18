@@ -295,3 +295,29 @@ a_new_table_in_crlf_text_keeps_its_line_ends :: proc(t: ^testing.T) {
 	testkit.expect_nil(t, err)
 	testing.expect_value(t, out, "a = 1\r\n[t]\r\nx = 1\r\n\r\n[u]\r\ny = 2\r\n")
 }
+
+// A container the removals empty is written, so it reads back as empty and not as absent.
+@(test)
+removing_every_member_keeps_the_container :: proc(t: ^testing.T) {
+	Row :: struct {
+		src, want: string,
+		plan:      Plan,
+	}
+	rows := []Row{
+		{"[[x]]\nn = 1\n", "x = []\n\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+			x := member(d, core.ROOT, "x")
+			return core.remove(l, core.child_at(d, x, 0) or_else 0)
+		}},
+		{"a.b.c = 5\nz = 1\n", "a.b = {}\nz = 1\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+			return core.remove(l, member(d, member(d, member(d, core.ROOT, "a"), "b"), "c"))
+		}},
+		{"[tool.x]\nk = 1\n", "[tool]\n\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+			return core.remove(l, member(d, member(d, core.ROOT, "tool"), "x"))
+		}},
+	}
+	for r in rows {
+		out, err := edited(r.src, r.plan)
+		testkit.expect_nil(t, err)
+		testing.expect_value(t, out, r.want)
+	}
+}

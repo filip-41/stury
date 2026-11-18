@@ -57,6 +57,64 @@ gen_getpath :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^
 	return out.emit(out, {v = v, path = p})
 }
 
+// jq's `tostream`, which walks the input once: `[path, leaf]` for each scalar and empty container in document order, and
+// after a container's members `[path]` of its last member. The containers being walked are a stack of their own, so a
+// deep input takes no frame per level.
+gen_tostream :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal {
+	Level :: struct {
+		members: Members,
+		array:   bool,
+		count:   int,
+	}
+	open := make([dynamic]Level)
+	keys := make([dynamic]Value)
+	v := input.v
+	for {
+		k := kind(v)
+		members: Members
+		if k == .Array || k == .Object {
+			members = iterate(v)
+		}
+		if members.n > 0 {
+			append(&open, Level{members = members, array = k == .Array})
+			append(&keys, nil)
+		} else if sig := emit_value(ip, out, stream_event(keys[:], v, true), track); sig != .Go {
+			return sig
+		}
+		for len(open) > 0 {
+			top := &open[len(open) - 1]
+			key, m, ok := next_member(&top.members)
+			if ok {
+				keys[len(keys) - 1] = num(f64(top.count)) if top.array else Value(key)
+				top.count += 1
+				v = m
+				break
+			}
+			if sig := emit_value(ip, out, stream_event(keys[:], nil, false), track); sig != .Go {
+				return sig
+			}
+			pop(&open)
+			pop(&keys)
+		}
+		if len(open) == 0 {
+			return .Go
+		}
+	}
+}
+
+// A `tostream` event: `[path, leaf]`, or `[path]` without a leaf.
+@(private = "file")
+stream_event :: proc(keys: []Value, leaf: Value, has_leaf: bool) -> Value {
+	path := new_array(len(keys))
+	append(&path.items, ..keys)
+	event := new_array(2)
+	append(&event.items, path)
+	if has_leaf {
+		append(&event.items, leaf)
+	}
+	return event
+}
+
 fn_setpath :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	owned: Owned
 	return setpath_value(ip, v, args[0], args[1], &owned)

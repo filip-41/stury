@@ -196,8 +196,7 @@ object_direct :: proc(ip: ^Interp, n: ^Node, v: Value, env: ^Env) -> (o: ^Object
 		}
 	}
 	o = new_object()
-	o.keys = make([dynamic]string, 0, len(n.args) / 2)
-	o.vals = make([dynamic]Value, 0, len(n.args) / 2)
+	object_reserve(o, len(n.args) / 2)
 	for i := 0; i < len(n.args); i += 2 {
 		k, value := n.args[i].value.(string), n.args[i + 1]
 		val: Value
@@ -298,8 +297,7 @@ args_done :: #force_no_inline proc(x: ^Args_Sink) -> Signal {
 		return emit_made(x.out, x.input, string(s), x.track)
 	case .Object:
 		o := new_object()
-		o.keys = make([dynamic]string, 0, len(x.vals) / 2)
-		o.vals = make([dynamic]Value, 0, len(x.vals) / 2)
+		object_reserve(o, len(x.vals) / 2)
 		for i := 0; i < len(x.vals); i += 2 {
 			object_put(o, x.vals[i].(string), x.vals[i + 1])
 		}

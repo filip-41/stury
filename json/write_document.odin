@@ -396,22 +396,27 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, n
 	out: write.Out
 	write.init(&out, &spill, allocator, stream, hint)
 	kind: core.Typed_Error_Kind
+	fail: core.Node_Index
 	switch {
 	// The tree writes what the row walk does not: a partial document, another format's, comments, sorted keys and JSON5.
 	case doc.partial || doc.readers.format != rules_of || len(core.subtree_facts(doc, node)) != 0 || opts.sort_keys || Spec(doc.as.spec) == .Json5:
-		kept, kind = write_tree(doc, opts, &out, Spec(as.spec), node)
+		kept, kind, fail = write_tree(doc, opts, &out, Spec(as.spec), node)
 	case dense_route(doc, opts, src, count):
 		write_dense(&out, src)
 	case:
-		kind = write_rows(doc, opts, &out, node)
+		kind, fail = write_rows(doc, opts, &out, node)
 	}
-	text, err = write.finish((^write.Out)(rawptr(&out)), {kind = kind})
+	refusal := core.Typed_Refusal{kind = kind}
+	if kind == .Unwritable || kind == .Non_Finite || kind == .Invalid_Utf8 {
+		write.node_path(&refusal, doc, fail)
+	}
+	text, err = write.finish((^write.Out)(rawptr(&out)), refusal)
 	return text, kept, err
 }
 
 // Writes node `node` of `doc` by its rows.
 @(private)
-write_rows :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Out, node: core.Node_Index) -> core.Typed_Error_Kind {
+write_rows :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Out, node: core.Node_Index) -> (kind: core.Typed_Error_Kind, fail: core.Node_Index) {
 	// The stack holds the open containers and the sentinel under them.
 	local: [core.MAX_DEPTH + 1]Open = ---
 	// A small source is copied to room past its end, so no row is near enough to the end to take the rare path.
@@ -428,9 +433,9 @@ write_rows :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Ou
 	defer if e.cap > core.MAX_DEPTH {
 		free(e.c.stack, e.out.allocator)
 	}
-	kind := rows(&e, doc, u32(node))
+	rows_kind, at := rows(&e, doc, u32(node))
 	settle(&e)
-	return kind
+	return rows_kind, core.Node_Index(at)
 }
 
 // The first row `rows_run` leaves to the rare path because a block copy of it or a later row would load past the source.
@@ -453,13 +458,13 @@ rows_stop :: proc(doc: ^core.Document, room: int) -> u32 {
 // A chunk starts on a row inside the innermost container, the one state `rows_run` can stop in and account for: the close
 // of a container that ends at `i`, an empty one the rare path opened among them, is `rare_close`'s.
 @(private)
-rows :: proc(e: ^Emit, doc: ^core.Document, node: u32) -> core.Typed_Error_Kind {
+rows :: proc(e: ^Emit, doc: ^core.Document, node: u32) -> (core.Typed_Error_Kind, u32) {
 	count := u32(len(doc.nodes))
 	// No chunk runs past the subtree, since `rows_run` writes on past the close of the container it entered first.
 	stop := min(rows_stop(doc, len(e.src)), node + (1 if doc.nodes[node].kind < .Array else doc.nodes[node].n))
 	c := &e.c
 	if kind := rare_row(e, doc.nodes[node], node); kind != .None {
-		return kind
+		return kind, node
 	}
 	i := node + 1
 	for c.top > 0 {
@@ -505,13 +510,13 @@ rows :: proc(e: ^Emit, doc: ^core.Document, node: u32) -> core.Typed_Error_Kind 
 		} else {
 			if !copy_long(e, doc.nodes[i]) {
 				if kind := rare_row(e, doc.nodes[i], i); kind != .None {
-					return kind
+					return kind, i
 				}
 			}
 			i += 1
 		}
 	}
-	return .None
+	return .None, 0
 }
 
 // Closes every container that ends before row `i` and writes what comes before that row. Returns false with `after` set

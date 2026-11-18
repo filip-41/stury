@@ -7,7 +7,9 @@ package xml
 
 import "base:runtime"
 import "core:io"
+import "core:strings"
 import core "../core"
+import typed "../core/typed"
 import write "../core/write"
 
 // The state of an element write. `names` holds the names of the open elements and of the member waiting for its value,
@@ -24,7 +26,19 @@ Elements :: struct {
 	text:     bool, // the waiting member is `#text`
 	tag:      bool, // the start tag of the next element is written and open for attributes
 	key_next: bool, // the token write's next string is a key
+	prefixed: bool, // a name with a prefix or a declaration was taken, so each start tag's prefixes are judged at its end
 	why:      string, // why a key or attribute name is refused, where the refusal's kind alone does not say
+	// The prefixes the open elements declare, and the prefixes the open start tag uses, each ended by a zero byte. A
+	// start tag's uses are judged when it ends, since its own declarations may follow them.
+	bound:    [dynamic]Binding,
+	prefixes: [dynamic]u8,
+	uses:     [dynamic]u8,
+}
+
+// A prefix that the element at level `level` declares, at `prefixes[lo:hi]`.
+@(private)
+Binding :: struct {
+	level, lo, hi: int,
 }
 
 // An open level: the document's object, an element's object, an array whose items are elements of its name, or the
@@ -60,6 +74,9 @@ el_open :: proc(e: ^Elements, object: bool) -> core.Typed_Error_Kind {
 	}
 	if object {
 		el_start(e) or_return
+		if e.prefixed {
+			judge_uses(e) or_return
+		}
 		write.put_byte(e.out, '>')
 	}
 	e.levels[e.top] = {kind = .Object if object else .Array, lo = lo, hi = hi}
@@ -73,6 +90,9 @@ el_open :: proc(e: ^Elements, object: bool) -> core.Typed_Error_Kind {
 @(private)
 el_close :: proc(e: ^Elements) -> core.Typed_Error_Kind {
 	e.top -= 1
+	if e.prefixed {
+		drop_scopes(e)
+	}
 	l := e.levels[e.top]
 	if l.count == 0 {
 		return .Unwritable
@@ -100,8 +120,7 @@ el_key :: proc(e: ^Elements, name: string) -> core.Typed_Error_Kind {
 		return .Unwritable if l.kind == .Root else .None
 	}
 	if !is_name(transmute([]u8)name) || l.kind == .Root && l.count > 0 {
-		e.why = UNBOUND_PREFIX if is_prefixed_name(name) else ""
-		return .Unwritable
+		key_refused(e, name, l^) or_return
 	}
 	l.count += 1
 	e.at, e.keyed = len(e.names), true
@@ -111,11 +130,31 @@ el_key :: proc(e: ^Elements, name: string) -> core.Typed_Error_Kind {
 	return .None
 }
 
+// Whether `name`, which is no plain XML name or names a second root, is refused: it is taken when it is an element's
+// name with a prefix, and noted so each start tag's prefixes are judged.
+@(private = "file")
+key_refused :: #force_no_inline proc(e: ^Elements, name: string, l: Level) -> core.Typed_Error_Kind {
+	e.why = ""
+	if l.kind == .Root && l.count > 0 || !is_element_qname(name) {
+		return .Unwritable
+	}
+	e.prefixed = true
+	return .None
+}
+
 @(private)
 el_attribute :: proc(e: ^Elements, name, value: string) -> core.Typed_Error_Kind {
 	if !is_name(transmute([]u8)name) {
-		e.why = UNBOUND_PREFIX if is_prefixed_name(name) else ""
-		return .Unwritable
+		prefix, local, qualified := split_qname(name)
+		switch {
+		case !qualified:
+			e.why = ""
+			return .Unwritable
+		case prefix == "xmlns":
+			el_bind(e, local, value) or_return
+		case:
+			note_use(e, prefix) or_return
+		}
 	}
 	el_start(e) or_return
 	write.put_byte(e.out, ' ')
@@ -144,6 +183,9 @@ el_value :: proc(e: ^Elements, s: string, null := false, open := false) -> core.
 		lo, hi = l.lo, l.hi
 	}
 	el_start(e) or_return
+	if e.prefixed {
+		judge_uses(e, leaf = !open) or_return
+	}
 	if null && !open {
 		write.put_text(e.out, "/>")
 	} else {
@@ -200,23 +242,105 @@ el_start :: proc(e: ^Elements) -> core.Typed_Error_Kind {
 	return .None
 }
 
+// Declares prefix `prefix` for the element that is being written, to the end of its scope. A declaration that XML
+// refuses, such as an empty name, a prefix `xmlns` or an `xml` that is not bound to its own name, is `.Unwritable`.
+@(private)
+el_bind :: proc(e: ^Elements, prefix, name: string) -> core.Typed_Error_Kind {
+	if name == "" || prefix == "xmlns" || prefix == "xml" && name != XML_NAMESPACE || prefix != "xml" && name == XML_NAMESPACE {
+		e.why = BAD_BINDING
+		return .Unwritable
+	}
+	e.prefixed = true
+	lo := len(e.prefixes)
+	_, err := append(&e.prefixes, prefix)
+	if err == nil {
+		append(&e.prefixes, 0)
+		_, err = append(&e.bound, Binding{e.top, lo, len(e.prefixes) - 1})
+	}
+	return .No_Memory if err != nil else .None
+}
+
+// Notes that the open start tag uses `prefix`, which `judge_uses` finds bound or refuses.
+@(private)
+note_use :: proc(e: ^Elements, prefix: string) -> core.Typed_Error_Kind {
+	e.prefixed = true
+	if prefix == "xml" {
+		return .None
+	}
+	_, err := append(&e.uses, prefix)
+	if err == nil {
+		_, err = append(&e.uses, 0)
+	}
+	return .No_Memory if err != nil else .None
+}
+
+// Judges the open start tag, which `el_start` wrote, once a prefix was taken: each prefix it uses must be declared by it
+// or an element that holds it. The declarations of a `leaf`, which holds no element, end with its tag.
+@(private = "file")
+judge_uses :: #force_no_inline proc(e: ^Elements, leaf := false) -> core.Typed_Error_Kind {
+	defer clear(&e.uses)
+	l := e.levels[e.top - 1]
+	name := e.names[l.lo:l.hi] if l.kind == .Array else e.names[e.at:]
+	if prefix, _, qualified := split_qname(string(name)); qualified {
+		note_use(e, prefix) or_return
+	}
+	for rest := string(e.uses[:]); len(rest) > 0; {
+		n := strings.index_byte(rest, 0)
+		found := false
+		for b in e.bound {
+			found ||= string(e.prefixes[b.lo:b.hi]) == rest[:n]
+		}
+		if !found {
+			e.why = UNBOUND_PREFIX
+			return .Unwritable
+		}
+		rest = rest[n + 1:]
+	}
+	if leaf {
+		drop_scopes(e)
+	}
+	return .None
+}
+
+// Ends the scope of the declarations of the elements at `e.top` and deeper, which are closed.
+@(private = "file")
+drop_scopes :: #force_no_inline proc(e: ^Elements) {
+	for len(e.bound) > 0 && e.bound[len(e.bound) - 1].level >= e.top {
+		resize(&e.prefixes, e.bound[len(e.bound) - 1].lo)
+		pop(&e.bound)
+	}
+}
+
+// Frees what the write holds.
+@(private)
+el_release :: proc(e: ^Elements) {
+	delete(e.names)
+	delete(e.bound)
+	delete(e.prefixes)
+	delete(e.uses)
+}
+
 // Starts an element write into `out`. `names` lives in `context.allocator` memory for the length of the write.
 @(private)
 elements_init :: proc(e: ^Elements, out: ^write.Out, opts: core.Write_Options) {
 	e^ = {out = out, ascii = opts.ascii}
-	e.names.allocator = context.allocator
+	e.names.allocator, e.bound.allocator, e.prefixes.allocator, e.uses.allocator = context.allocator, context.allocator, context.allocator, context.allocator
 }
 
 // Ends the element write `e` made into `out` and returns its text, laid out as `opts` says, to `stream` or in new bytes
 // from `allocator`. A compact write already went to `stream`.
 @(private)
 elements_finish :: proc(e: ^Elements, kind: core.Typed_Error_Kind, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Refusal) {
-	delete(e.names)
+	refusal := core.Typed_Refusal{kind = kind}
+	if kind == .Unwritable || kind == .Non_Finite || kind == .Invalid_Utf8 {
+		el_path(e, &refusal)
+	}
+	el_release(e)
 	kind := kind
 	if kind == .None && e.top != 0 {
 		kind = .Out_Of_Order
+		refusal.kind = kind
 	}
-	refusal := core.Typed_Refusal{kind = kind}
 	if kind == .Unwritable {
 		refusal.want.text = e.why
 	}
@@ -226,6 +350,29 @@ elements_finish :: proc(e: ^Elements, kind: core.Typed_Error_Kind, opts: core.Wr
 	}
 	defer delete(text, e.out.allocator)
 	return lay_out(text, opts, stream, allocator)
+}
+
+// Gives `refusal` the path of the element the write stands at: the names of the open levels, an index for an item of
+// an array, and the name of a member that waits for its value. The names are copies in `context.temp_allocator`.
+@(cold)
+@(private)
+el_path :: proc(e: ^Elements, refusal: ^core.Typed_Refusal) {
+	name :: proc(e: ^Elements, lo, hi: int) -> core.Step {
+		return core.Name(strings.clone(string(e.names[lo:hi]), context.temp_allocator))
+	}
+	for i in 1 ..< e.top {
+		l, up := e.levels[i], e.levels[i - 1]
+		if up.kind == .Array {
+			typed.path_add(refusal, core.Index(max(up.count - 1, 0)))
+		} else if l.kind == .Text {
+			typed.path_add(refusal, core.Name("#text"))
+		} else {
+			typed.path_add(refusal, name(e, l.lo, l.hi))
+		}
+	}
+	if e.top > 0 && e.keyed && e.at <= len(e.names) {
+		typed.path_add(refusal, name(e, e.at, len(e.names)))
+	}
 }
 
 // The compact text `text` laid out as `opts` says: read back as a document and written from its spans.

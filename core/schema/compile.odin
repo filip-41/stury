@@ -135,6 +135,9 @@ check :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink = nil, runner: ^core.Runne
 	if b.plan.check == nil {
 		return core.error_of(core.Typed_Refusal{kind = .Plan_Mismatch})
 	}
+	if sink != nil {
+		sink.fatal = {}
+	}
 	if parallel(b, runner) {
 		from := len(sink.entries) if sink != nil else 0
 		if err, done := check_elements(b, src, sink, runner); done {

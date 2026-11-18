@@ -96,11 +96,16 @@ Array :: struct {
 	lent:  bool,
 }
 
-// `index` maps a key to its slot once the object has `INDEX_FROM` members.
+// An object's members in order. Read them through `object_keys` and `object_length`, or at a slot `object_slot` gave,
+// never by walking the slots: a delete leaves a dead slot, which `object_keys` compacts away before it returns them.
+// `index` maps a key to its slot once the object has `INDEX_FROM` members, and only an indexed object leaves dead
+// slots. `repeats` says a key has more than one slot, as `Duplicates.All` builds.
 Object :: struct {
-	keys:  [dynamic]string,
-	vals:  [dynamic]Value,
-	index: map[string]int,
+	slot_keys: [dynamic]string,
+	slot_vals: [dynamic]Value,
+	index:     map[string]int,
+	dead:      i32,
+	repeats:   bool,
 }
 
 kind :: proc {
@@ -184,7 +189,7 @@ value_length :: #force_inline proc(v: Value) -> int {
 	case ^Array:
 		return len(x.items)
 	case ^Object:
-		return len(x.keys)
+		return object_length(x)
 	case Node_Ref:
 		n := doc_length(x.doc, x.node)
 		if n > 1 && is_markup(x.doc) && has_repeated_key(x) {
@@ -231,7 +236,7 @@ value_member :: #force_inline proc(v: Value, name: string, dups := Duplicates.La
 		if i < 0 {
 			return nil, false
 		}
-		return x.vals[i], true
+		return x.slot_vals[i], true
 	case Node_Ref:
 		if is_markup(x.doc) {
 			context.allocator = context.temp_allocator
@@ -248,7 +253,8 @@ value_member :: #force_inline proc(v: Value, name: string, dups := Duplicates.La
 
 @(private = "file")
 first_slot :: proc(o: ^Object, k: string) -> int {
-	for key, i in o.keys {
+	keys := object_keys(o)
+	for key, i in keys {
 		if key == k {
 			return i
 		}
@@ -293,9 +299,9 @@ value_child_next :: #force_inline proc(it: ^Value_Iter) -> (Value, bool) {
 			return x.items[it.i - 1], true
 		}
 	case ^Object:
-		if it.i < len(x.vals) {
+		if vals := object_vals(x); it.i < len(vals) {
 			it.i += 1
-			return x.vals[it.i - 1], true
+			return vals[it.i - 1], true
 		}
 	case Node_Ref:
 		if node, ok := doc_child_next(&it.nodes); ok {
@@ -326,9 +332,9 @@ value_pairs :: proc(v: Value) -> Value_Iter {
 value_pair_next :: #force_inline proc(it: ^Value_Iter) -> (key: string, val: Value, ok: bool) {
 	#partial switch x in it.v {
 	case ^Object:
-		if it.i < len(x.keys) {
+		if keys, vals := object_keys(x), object_vals(x); it.i < len(keys) {
 			it.i += 1
-			return x.keys[it.i - 1], x.vals[it.i - 1], true
+			return keys[it.i - 1], vals[it.i - 1], true
 		}
 	case Node_Ref:
 		if k, n, has := doc_pair_next(&it.pairs); has {

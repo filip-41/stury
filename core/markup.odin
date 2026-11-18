@@ -184,13 +184,13 @@ markup_put :: proc(o: ^Object, k: string, v: Value) {
 		object_append(o, k, v)
 		return
 	}
-	if group, grouped := o.vals[i].(^Array); grouped {
+	if group, grouped := o.slot_vals[i].(^Array); grouped {
 		array_append(group, v)
 		return
 	}
 	group := new_array(2)
-	append(&group.items, o.vals[i], v)
-	o.vals[i] = group
+	append(&group.items, o.slot_vals[i], v)
+	o.slot_vals[i] = group
 }
 
 // Whether object node `r` has a key that one before it has.
@@ -327,8 +327,8 @@ markup_grouped :: proc(r: Node_Ref, allocator := context.allocator) -> Document 
 			close(nodes[:], &counts, f.group_at, len(f.group.items))
 			f.group = nil
 		}
-		if f.next < len(f.members.vals) {
-			v := f.members.vals[f.next]
+		if vals := object_vals(f.members); f.next < len(vals) {
+			v := vals[f.next]
 			f.next += 1
 			if group, grouped := v.(^Array); grouped {
 				first := group.items[0].(Node_Ref).node
@@ -342,7 +342,7 @@ markup_grouped :: proc(r: Node_Ref, allocator := context.allocator) -> Document 
 			put(src, node, &nodes, &facts, &stack)
 			continue
 		}
-		close(nodes[:], &counts, f.at, len(f.members.keys))
+		close(nodes[:], &counts, f.at, object_length(f.members))
 		pop(&stack)
 	}
 	// Nodes and so facts are appended in node order, and a container's count when it closes, after its children's.

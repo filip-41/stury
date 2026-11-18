@@ -161,7 +161,7 @@ path_of :: proc(m: ^Matcher, f, base: i32, allocator: runtime.Allocator) -> (pat
 			if item := at.key - BUILT; item > 0 {
 				append(&steps, f64(item - 1)) or_return
 			}
-			name = core.plain(parent_value(m, at)).(^core.Object).keys[at.value]
+			name = core.object_keys(core.plain(parent_value(m, at)).(^core.Object))[at.value]
 		} else {
 			parent := core.plain(parent_value(m, at)).(core.Node_Ref)
 			name, _ = core.token_text(m.doc.readers, &m.doc.view, m.doc.nodes[at.key], allocator)
@@ -254,12 +254,13 @@ next_node :: #force_inline proc(m: ^Matcher, it: ^Children) -> (Frame, bool) {
 
 @(private)
 next_built :: proc(it: ^Children) -> (Frame, bool) {
-	for int(it.i) < len(it.obj.keys) {
-		if _, _, is_attribute := core.member_attribute(it.obj.keys[it.i], it.obj.vals[it.i]); is_attribute || it.obj.keys[it.i] == core.MARKUP_TEXT {
+	keys, vals := core.object_keys(it.obj), core.object_vals(it.obj)
+	for int(it.i) < len(keys) {
+		if _, _, is_attribute := core.member_attribute(keys[it.i], vals[it.i]); is_attribute || keys[it.i] == core.MARKUP_TEXT {
 			it.i += 1
 			continue
 		}
-		a, is_array := core.plain(it.obj.vals[it.i]).(^core.Array)
+		a, is_array := core.plain(vals[it.i]).(^core.Array)
 		if !is_array {
 			it.i += 1
 			return {key = BUILT, value = core.Node_Index(it.i - 1)}, true
@@ -278,7 +279,7 @@ frame_value :: #force_inline proc(m: ^Matcher, f: Frame) -> core.Value {
 	if f.key < BUILT {
 		return core.Node_Ref{m.doc, f.value}
 	}
-	v := core.plain(parent_value(m, f)).(^core.Object).vals[f.value]
+	v := core.object_vals(core.plain(parent_value(m, f)).(^core.Object))[f.value]
 	if item := f.key - BUILT; item > 0 {
 		return core.plain(v).(^core.Array).items[item - 1]
 	}
@@ -289,7 +290,7 @@ frame_value :: #force_inline proc(m: ^Matcher, f: Frame) -> core.Value {
 @(private)
 frame_name :: #force_inline proc(m: ^Matcher, f: Frame, buf: []u8) -> string {
 	if f.key >= BUILT {
-		return core.plain(parent_value(m, f)).(^core.Object).keys[f.value]
+		return core.object_keys(core.plain(parent_value(m, f)).(^core.Object))[f.value]
 	}
 	return token_string(m.doc, m.doc.nodes[f.key], buf)
 }
@@ -467,8 +468,8 @@ test :: proc(m: ^Matcher, t: Test, f: i32) -> bool {
 			buf: [256]u8
 			return n.spelling & core.SPELLING_DECODE != 0 && len(token_string(v.doc, n, buf[:])) == 0
 		case ^core.Object:
-			for k, i in v.keys {
-				if _, _, is_attribute := core.member_attribute(k, v.vals[i]); !is_attribute {
+			for k, i in core.object_keys(v) {
+				if _, _, is_attribute := core.member_attribute(k, core.object_vals(v)[i]); !is_attribute {
 					return false
 				}
 			}
@@ -519,17 +520,17 @@ attribute :: proc(m: ^Matcher, t: Test, f: Frame) -> bool {
 		if written == nil {
 			return false
 		}
-		for name, i in written.keys {
+		for name, i in core.object_keys(written) {
 			if names_equal(m.fold, name, want) {
-				have, _ := written.vals[i].(string)
+				have, _ := core.object_vals(written)[i].(string)
 				return t.op == .Exists || value_matches(t, have, text(m, t.value))
 			}
 		}
 		return false
 	}
 	if o, is_built := core.plain(v).(^core.Object); is_built {
-		for k, i in o.keys {
-			if name, have, is_attribute := core.member_attribute(k, o.vals[i]); is_attribute && names_equal(m.fold, name, want) {
+		for k, i in core.object_keys(o) {
+			if name, have, is_attribute := core.member_attribute(k, core.object_vals(o)[i]); is_attribute && names_equal(m.fold, name, want) {
 				return t.op == .Exists || value_matches(t, have, text(m, t.value))
 			}
 		}

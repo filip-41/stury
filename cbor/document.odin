@@ -235,14 +235,8 @@ decode :: proc "contextless" (src: []u8, t: core.Token, buf: []u8) -> (s: string
 		return "", false
 	}
 	span := src[t.lo:t.lo + u64(t.n)]
-	if t.spelling & INT_KEY != 0 {
-		// `core.text_room` sizes the buffer from the key's span, which holds its digits but may be under 21 bytes.
-		digits: [24]u8
-		spelled, _ := integer_text(span, digits[:])
-		if len(spelled) > len(buf) {
-			return "", false
-		}
-		return string(buf[:copy(buf, spelled)]), true
+	if t.spelling & (INT_KEY | BYTES_KEY) != 0 {
+		return key_text(span, t, buf)
 	}
 	if t.spelling & core.SPELLING_DECODE == 0 {
 		return string(span), true
@@ -280,6 +274,48 @@ decode :: proc "contextless" (src: []u8, t: core.Token, buf: []u8) -> (s: string
 		}
 	}
 	return string(buf[:w]), true
+}
+
+// The text of key `t` that is not a text string: an integer key's decimal digits, or the base64 of a byte string key.
+@(private)
+key_text :: proc "contextless" (span: []u8, t: core.Token, buf: []u8) -> (s: string, ok: bool) {
+	if t.spelling & INT_KEY != 0 {
+		// `core.text_room` sizes the buffer from the key's span, which holds its digits but may be under 21 bytes.
+		digits: [24]u8
+		spelled, _ := integer_text(span, digits[:])
+		if len(spelled) > len(buf) {
+			return "", false
+		}
+		return string(buf[:copy(buf, spelled)]), true
+	}
+	return bytes_key_text(span, t.spelling & STR_INDEF != 0, buf)
+}
+
+// The base64 of the payload of a byte string key, whose `span` is its chunks when `indef`. A chunked payload is joined at
+// the end of `buf` first, and `buf` holds it with its base64 at three bytes per span byte, as `core.text_room` gives.
+@(private)
+bytes_key_text :: proc "contextless" (span: []u8, indef: bool, buf: []u8) -> (s: string, ok: bool) {
+	payload := span
+	if indef {
+		size := 0
+		counted := chunks_run(span)
+		for chunk in chunk_next(&counted) {
+			size += len(chunk)
+		}
+		if size + spell.base64_room(size) > len(buf) {
+			return "", false
+		}
+		payload = buf[len(buf) - size:]
+		at := 0
+		joined := chunks_run(span)
+		for chunk in chunk_next(&joined) {
+			at += copy(payload[at:], chunk)
+		}
+	}
+	if spell.base64_room(len(payload)) > len(buf) {
+		return "", false
+	}
+	return string(buf[:spell.base64_text(buf, payload)]), true
 }
 
 // Whether the decoded text of key `t` is `name`. A key longer than the stack buffer decodes on the heap.

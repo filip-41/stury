@@ -7,6 +7,8 @@ import core "../core"
 reset_document :: proc(p: ^Parser) {
 	clear(&p.handles)
 	clear(&p.anchors)
+	clear(&p.names)
+	p.indexed = 0
 	clear(&p.log)
 	clear(&p.open)
 	clear(&p.keys.frames)

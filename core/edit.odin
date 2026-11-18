@@ -66,6 +66,8 @@ Edit_List :: struct {
 	parents:   []Node_Index,
 	// The copies of the edits' values, made at the first value edit from `allocator`.
 	kept:      ^runtime.Arena,
+	// The line end new lines take, empty until `line_end_of` first finds it.
+	eol:       string,
 }
 
 // Returns an edit list over `doc`. It allocates nothing until the first edit is recorded.

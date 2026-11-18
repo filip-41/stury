@@ -303,7 +303,11 @@ arms_changed :: proc(w: ^Walk, keyword: string, xs, ys: []rules.Node_Index, remo
 	left, right := make([dynamic]rules.Node_Index, context.temp_allocator), slice.clone_to_dynamic(ys, context.temp_allocator)
 	for x in xs {
 		found := -1
+		// Past the budget no pair is the same, so the scan of the rest would only be quadratic.
 		for y, i in right {
+			if w.forward.exhausted {
+				break
+			}
 			if same_node(&w.forward, x, y) {
 				found = i
 				break

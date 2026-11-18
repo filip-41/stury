@@ -317,9 +317,17 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 		p: [^]u8
 		if cur.mode == .Members {
 			r := cur.r
+			// A tree with no word for null leaves out a member that holds one. A member it leaves out for being empty
+			// has no `key_size`, so the loop below skips the nulls among those.
+			NULLS :: T[.Null] != ""
+			when !NULLS {
+				for (r.kind in NULL_KINDS) && holds_null(&w.meta[r.meta], r.kind, cur.at + uintptr(r.offset)) {
+					r = intrinsics.ptr_offset(r, 1)
+				}
+			}
 			if r.key_size == 0 {
 				// A positional struct writes every member, so its array head holds its member count.
-				for !(BIN && w.positional) && r.omit && is_empty(w, r, cur.at + uintptr(r.offset)) {
+				for !(BIN && w.positional) && (r.omit && is_empty(w, r, cur.at + uintptr(r.offset)) || !NULLS && r.kind in NULL_KINDS && holds_null(&w.meta[r.meta], r.kind, cur.at + uintptr(r.offset))) {
 					r = intrinsics.ptr_offset(r, 1)
 				}
 				if r.kind == .Never {
@@ -607,7 +615,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 							// A pointer that refuses null.
 							k = .Wrong_Kind if w.meta[vf.meta].no_nil else .None
 						} else {
-							out.cursor += put_word(p, T[.Null])
+							k = put_null(out, p, T)
 						}
 					} else {
 						e := elem_of(vf)
@@ -626,7 +634,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					when V {
 						k = .Wrong_Kind if w.meta[vf.meta].no_nil else .None
 					} else {
-						out.cursor += put_word(p, T[.Null])
+						k = put_null(out, p, T)
 					}
 				case .Union:
 					arm := union_arm(&w.meta[vf.meta], va)
@@ -634,7 +642,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 						when V {
 							k = .Wrong_Kind if w.meta[vf.meta].no_nil else .None
 						} else {
-							out.cursor += put_word(p, T[.Null])
+							k = put_null(out, p, T)
 						}
 					} else if len(arm.name) == 0 {
 						vf = &w.plan.fields[arm.fields]
@@ -751,6 +759,17 @@ elem_of :: #force_inline proc "contextless" (f: ^typed.Field) -> ^typed.Field {
 put_word :: #force_inline proc "contextless" (p: [^]u8, text: string) -> int {
 	intrinsics.mem_copy_non_overlapping(p, raw_data(text), len(text))
 	return len(text)
+}
+
+// Writes tree `T`'s null at `p`, which a tree with no word for it refuses as `.Unwritable`.
+@(private)
+put_null :: #force_inline proc(out: ^Out, p: [^]u8, $T: Tree) -> core.Typed_Error_Kind {
+	when T[.Null] == "" {
+		return .Unwritable
+	} else {
+		out.cursor += put_word(p, T[.Null])
+		return .None
+	}
 }
 
 @(private)

@@ -109,6 +109,7 @@ fill_table :: proc() {
 		}, in_jq = true, typed = .Kinds})
 	put("path", {1}, {native = native_path})
 	put("getpath", {1}, {gen = gen_getpath})
+	put("tostream", {0}, {gen = gen_tostream})
 	put("setpath", {2}, {fn = fn_setpath})
 	put("_fact_step", {1}, {fn = fn_fact_step})
 	put("_attribute_step", {1}, {fn = fn_attribute_step})
@@ -373,7 +374,6 @@ def INDEX(idx_expr): INDEX(.[]; idx_expr);
 def JOIN($idx; idx_expr): [.[] | [., $idx[idx_expr]]];
 def JOIN($idx; stream; idx_expr): stream | [., $idx[idx_expr]];
 def JOIN($idx; stream; idx_expr; join_expr): stream | [., $idx[idx_expr]] | join_expr;
-def tostream: path(def r: (.[]? | r), .; r) as $p | getpath($p) | reduce path(.[]?) as $q ([$p, .]; [$p + $q]);
 def fromstream(f): { x: null, e: false } as $init
   | foreach f as $i ($init;
       if .e then $init else . end

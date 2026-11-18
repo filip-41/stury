@@ -287,7 +287,7 @@ put_binary_number :: proc(out: ^Out, n: core.Number, $T: Tree) -> core.Typed_Err
 }
 
 // The JSON number `s` in binary tree `T`: an integer that 64 bits hold, a fraction or an exponent as binary64 reads it,
-// an integer past 64 bits as a bignum, and a number past binary64's range, or one that binary64 rounds to zero, as the
+// an integer `-0` as the float, an integer past 64 bits as a bignum, and a number past binary64's range, or one that binary64 rounds to zero, as the
 // decimal fraction of its exponent and its significand. An empty one is null, and any other text is `.Bad_Raw`.
 put_binary_number_text :: proc(out: ^Out, s: string, $T: Tree) -> core.Typed_Error_Kind {
 	if len(s) == 0 {
@@ -314,6 +314,10 @@ put_binary_number_text :: proc(out: ^Out, s: string, $T: Tree) -> core.Typed_Err
 	}
 	integer := point == len(digits) && exp_at == len(digits)
 	finite := n.bits & F64_EXPONENT != F64_EXPONENT
+	if neg && zero && integer {
+		// An integer has no negative zero, so it is the float that has.
+		return put_binary_number(out, {1 << 63, .Float}, T)
+	}
 	if n.kind == .Int || n.kind == .Uint || n.kind == .Float && !integer && finite && (zero || n.bits << 1 != 0) {
 		return put_binary_number(out, n, T)
 	}

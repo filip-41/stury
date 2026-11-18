@@ -742,7 +742,7 @@ array_of :: proc(items: [dynamic]core.Value) -> ^core.Array {
 @(private = "file")
 object_of :: proc(keys: [dynamic]string, vals: [dynamic]core.Value) -> ^core.Object {
 	o := new(core.Object)
-	o.keys, o.vals = keys, vals
+	o.slot_keys, o.slot_vals = keys, vals
 	return o
 }
 
@@ -841,6 +841,15 @@ object :: proc(g: ^Gen, parts: []Part, list: []^rules.Rules, depth: int) -> (v: 
 		for b in blocks {
 			if b.additional != rules.NONE {
 				append(&e.parts, Part{node = b.additional})
+			}
+		}
+		// A member no block lists is what `unevaluatedProperties` judges where no `additionalProperties` does.
+		for p in parts {
+			if p.node == rules.NONE {
+				continue
+			}
+			if u, has := g.d.nodes[p.node].unevaluated_properties.?; has {
+				append(&e.parts, Part{node = u})
 			}
 		}
 		if named(wanted[:], e.name) {
@@ -950,8 +959,9 @@ broken :: proc(g: ^Gen, b: ^Bound, as: core.As, v: ^core.Value, opts: Sample_Opt
 		case is_array && len(items.items) > 0 && below(g, 3) != 0:
 			at = &items.items[below(g, len(items.items))]
 			continue
-		case is_object && len(object.vals) > 0 && below(g, 3) != 0:
-			at = &object.vals[below(g, len(object.vals))]
+		case is_object && len(core.object_vals(object)) > 0 && below(g, 3) != 0:
+			vals := core.object_vals(object)
+			at = &vals[below(g, len(vals))]
 			continue
 		}
 		break
@@ -966,10 +976,11 @@ broken :: proc(g: ^Gen, b: ^Bound, as: core.As, v: ^core.Value, opts: Sample_Opt
 		}
 		append(&mutants, array_of(with(x.items[:], nil)))
 	case ^core.Object:
-		for _, i in x.vals {
-			append(&mutants, object_of(without(x.keys[:], i), without(x.vals[:], i)))
+		keys, vals := core.object_keys(x), core.object_vals(x)
+		for _, i in vals {
+			append(&mutants, object_of(without(keys, i), without(vals, i)))
 		}
-		append(&mutants, object_of(with(x.keys[:], "stray"), with(x.vals[:], nil)))
+		append(&mutants, object_of(with(keys, "stray"), with(vals, nil)))
 	case string:
 		append(&mutants, strings.concatenate({x, x, "x"}))
 	}

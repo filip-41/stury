@@ -171,6 +171,27 @@ emit_props :: proc(p: ^Parser, pr: ^Props) -> bool {
 	return true
 }
 
+// The anchors a document declares before an alias is looked up through a map of their names.
+@(private)
+ANCHORS_SCANNED :: 32
+
+// The index of the latest anchor named `name`, or -1.
+@(private)
+find_anchor :: proc(p: ^Parser, name: string) -> int {
+	if p.by_scan || len(p.anchors) <= ANCHORS_SCANNED {
+		for k := len(p.anchors) - 1; k >= 0; k -= 1 {
+			if anchor_name(p, p.anchors[k]) == name {
+				return k
+			}
+		}
+		return -1
+	}
+	for ; p.indexed < len(p.anchors); p.indexed += 1 {
+		p.names[anchor_name(p, p.anchors[p.indexed])] = p.indexed
+	}
+	return p.names[name] or_else -1
+}
+
 // Reads an alias at the cursor and sends it as a fact followed by the tokens of the node it names. The node's first
 // token takes `role`.
 @(private)
@@ -178,13 +199,7 @@ parse_alias :: proc(p: ^Parser, role: core.Role) -> bool {
 	lo := p.pos
 	read_name(p) or_return
 	name := p.src[lo + 1:p.pos]
-	found := -1
-	for k := len(p.anchors) - 1; k >= 0; k -= 1 {
-		if anchor_name(p, p.anchors[k]) == string(name) {
-			found = k
-			break
-		}
-	}
+	found := find_anchor(p, string(name))
 	if found < 0 {
 		return fault(p, lo, .Bad_Char, .Undefined_Alias)
 	}

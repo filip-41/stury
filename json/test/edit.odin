@@ -981,6 +981,39 @@ edit_inline_comment_survives :: proc(t: ^testing.T) {
 	edit_rows(t, .Json5, {{"[1, /*x*/ 2,]", "[1 /*x*/,]", .Remove, 2, 0, "", ""}})
 }
 
+// A separator after the removed last member stays before the previous member's line comment, not alone on a line.
+@(test)
+edit_trailing_separator_after_line_comment :: proc(t: ^testing.T) {
+	edit_rows(t, .Jsonc, {
+		{"[\n  1, // one\n  2,\n]", "[\n  1, // one\n]", .Remove, 2, 0, "", ""},
+	})
+}
+
+// A built value's lines end as the document's first line does.
+@(test)
+edit_built_value_follows_crlf :: proc(t: ^testing.T) {
+	src := "{\r\n  \"a\": 1\r\n}\r\n"
+	doc, err := read_json(transmute([]u8)src, json.Spec.Json)
+	defer core.destroy(&doc)
+	if !testing.expectf(t, err == nil, "%v", err) {
+		return
+	}
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	plan, perr := json.plan_make([]int, reads = json.reads(.Json))
+	defer typed.plan_destroy(&plan)
+	testkit.expect_nil(t, perr)
+	testkit.expect_nil(t, write.insert(&list, 0, 1, "b", []int{1, 2}, &plan))
+	out, _, cerr := compose.commit(&list)
+	defer delete(out)
+	testkit.expect_nil(t, cerr)
+	for b, i in out {
+		if b == '\n' {
+			testing.expectf(t, i > 0 && out[i - 1] == '\r', "bare LF at %d in %q", i, string(out))
+		}
+	}
+}
+
 // `commit` allocates from its own allocator, not the list's: a list whose allocator refuses every allocation still
 // commits.
 @(test)

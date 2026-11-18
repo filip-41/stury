@@ -26,6 +26,7 @@ Out :: struct {
 	err:       core.Typed_Error_Kind, // `.No_Memory` or `.Write_Failed`, set once and kept
 	cause:     io.Error, // what the stream answered, for `.Write_Failed`
 	hint:      int, // a buffer output's first allocation, in bytes
+	what:      string, // the value an `.Unwritable` refusal names, which `finish` gives `want.text` when the refusal names none
 	spill:     ^[ROOM_MAX]u8,
 }
 
@@ -41,7 +42,7 @@ copies_raw :: #force_inline proc "contextless" (opts: core.Write_Options) -> boo
 // share one.
 init :: proc(out: ^Out, spill: ^[ROOM_MAX]u8, allocator := context.allocator, stream := io.Stream{}, hint := 0) {
 	out.buf, out.size, out.cursor, out.flushed, out.err, out.cause, out.spill = nil, 0, 0, 0, .None, .None, spill
-	out.stream, out.allocator, out.hint = stream, allocator, hint
+	out.stream, out.allocator, out.hint, out.what = stream, allocator, hint, ""
 }
 
 // Returns a pointer to at least `n` free bytes at the cursor, `n` at most `ROOM_MAX`. The caller writes up to `n`
@@ -61,6 +62,9 @@ finish :: proc(out: ^Out, refused := core.Typed_Refusal{}) -> (bytes: []u8, err:
 		destroy(out)
 		err = refused
 		err.cause = out.cause
+		if err.kind == .Unwritable && err.want.text == "" {
+			err.want.text = out.what
+		}
 		return
 	}
 	if out.stream.procedure != nil {

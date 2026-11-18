@@ -150,13 +150,18 @@ sort_items :: proc(cx: ^Compose) {
 	slice.sort_by(cx.items[:], proc(a, b: Item) -> bool { return a.lo < b.lo })
 }
 
+// The line end a new line takes.
+new_line :: proc(cx: ^Compose) -> []u8 {
+	return transmute([]u8)core.line_end_of(cx.list)
+}
+
 // Writes `b`, ending a line comment first when `b` does not.
 put_text :: proc(cx: ^Compose, b: []u8) -> bool {
 	if len(b) == 0 {
 		return true
 	}
 	if cx.in_line && line_end_len(b, 0) == 0 {
-		push(&cx.text, '\n') or_return
+		push_all(&cx.text, new_line(cx)) or_return
 		cx.value_line = false
 	}
 	cx.in_line = false
@@ -211,7 +216,7 @@ write_fact :: proc(cx: ^Compose, e: core.Edit, lo, hi: u64) -> bool {
 		}
 	}
 	if cx.in_line {
-		push(&cx.text, '\n') or_return
+		push_all(&cx.text, new_line(cx)) or_return
 	}
 	if lead {
 		// A comment on a line of its own leaves no blanks at the end of the line before it, of the text no chunk or segment
@@ -220,7 +225,7 @@ write_fact :: proc(cx: ^Compose, e: core.Edit, lo, hi: u64) -> bool {
 		for t := len(cx.text); t > held && (cx.text[t - 1] == ' ' || cx.text[t - 1] == '\t'); t -= 1 {
 			resize(&cx.text, t - 1)
 		}
-		push(&cx.text, '\n') or_return
+		push_all(&cx.text, new_line(cx)) or_return
 		push_all(&cx.text, indent) or_return
 	}
 	// A comment written over one keeps the blanks before it.
@@ -238,14 +243,14 @@ write_fact :: proc(cx: ^Compose, e: core.Edit, lo, hi: u64) -> bool {
 		if wrote > 0 && inline {
 			push(&cx.text, ' ') or_return
 		} else if wrote > 0 {
-			push(&cx.text, '\n') or_return
+			push_all(&cx.text, new_line(cx)) or_return
 			push_all(&cx.text, indent) or_return
 		}
 		put_comment(cx, body, line, e.padded) or_return
 		wrote += 1
 	}
 	if fresh {
-		push(&cx.text, '\n') or_return
+		push_all(&cx.text, new_line(cx)) or_return
 		push_all(&cx.text, indent) or_return
 	}
 	cx.in_line = line && !fresh
@@ -306,7 +311,7 @@ emit_range :: proc(cx: ^Compose, lo, hi: u64, fresh: bool) -> bool {
 		case .Keep:
 			if fresh && cx.value_line && !core.is_property(it.role) {
 				indent, _ := line_shape(cx.doc, it.lo)
-				put_text(cx, transmute([]u8)string("\n")) or_return
+				put_text(cx, new_line(cx)) or_return
 				push_all(&cx.text, indent) or_return
 			}
 			put_text(cx, src[it.lo:it.hi]) or_return
@@ -415,7 +420,7 @@ learn_layout :: proc(cx: ^Compose, c: core.Node_Index, lo: u64) {
 write_member :: proc(cx: ^Compose, e: core.Edit) -> bool {
 	edit := cx.edit
 	if cx.in_line {
-		put_text(cx, transmute([]u8)string("\n")) or_return
+		put_text(cx, new_line(cx)) or_return
 	}
 	if e.role == .Key {
 		if cx.bare_keys && edit.bare_key(cx.spec, e.key) {
@@ -510,10 +515,13 @@ compose_junction :: proc(cx: ^Compose, c: core.Node_Index, open, close: u64, l, 
 		cz = gap_comma(cx, b_lo, hi, sep_text[0])
 	}
 	joined := ca != NO_BYTE && following
-	if ca != NO_BYTE && !following {
+	// A trailing separator on a later line than the left member's inline comment stays where the member's own is, before
+	// the comment, so no line holds a separator alone.
+	trailing := ca != NO_BYTE && !following && cz != NO_BYTE && cz > l_end && bytes.index_any(doc.src[l_end:cz], transmute([]u8)string("\r\n")) >= 0
+	if ca != NO_BYTE && !following && !trailing {
 		push(&cx.items, Item{lo = ca, hi = ca + 1, action = .Cut}) or_return
 	}
-	if cz != NO_BYTE && len(inserts) == 0 && (joined || !has_left) {
+	if cz != NO_BYTE && len(inserts) == 0 && (joined || !has_left || trailing) {
 		push(&cx.items, Item{lo = cz, hi = cz + 1, action = .Cut}) or_return
 	}
 	if new_inline >= 0 {
@@ -556,7 +564,7 @@ compose_junction :: proc(cx: ^Compose, c: core.Node_Index, open, close: u64, l, 
 		write_fact(cx, cx.list.edits[edit], hi, hi) or_return
 	}
 	if cx.in_line && hi < u64(len(doc.src)) && line_end_len(doc.src, hi) == hi {
-		push(&cx.text, '\n') or_return
+		push_all(&cx.text, new_line(cx)) or_return
 	}
 	cx.in_line = false
 	return emit_chunk(cx, lo, hi, from, .Head if has_right || !has_left else .Tail)

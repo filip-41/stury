@@ -259,13 +259,20 @@ INDEF_COUNT :: u64(1) << 55
 
 // A string token's `spelling`: bit 0 `SPELLING_DECODE` when the text is not the span as it stands, bit 2 `SPELLING_LAX`
 // for a tolerated ill-formed sequence, bit 3 `STR_INDEF` for a span that is the chunks of an indefinite string, bits 4 to 7
-// the length of the string's head, and bit 8 `INT_KEY` for a key that is an integer, whose text is its decimal digits.
+// the length of the string's head, bit 8 `INT_KEY` for a key that is an integer, whose text is its decimal digits, and bit 10
+// `BYTES_KEY` for a key that is a byte string, whose text is its base64.
 @(private)
 STR_INDEF :: u16(8)
 @(private)
 HEAD_SHIFT :: 4
 @(private)
 INT_KEY :: u16(1 << 8)
+@(private)
+BYTES_KEY :: u16(1 << 10)
+// The bits a byte string key adds to its spelling, as the `String` key whose text is its base64. The walk sets them in
+// line, since a call there changes how the hot loop compiles.
+@(private)
+BYTES_KEY_SPELLING :: core.SPELLING_DECODE | core.SPELLING_LAX | BYTES_KEY
 
 // A number token's kind in `spelling`, above `core.NUMBER_DECIMAL`, so every CBOR number reads through `number`. `FRACTION`
 // marks a number that is not spelled as an integer, a float, a decimal fraction and a bigfloat, in the bits
@@ -657,6 +664,9 @@ run :: proc "contextless" (src: []u8, lo: u64, opts: Walk_Rules, h: ^$H, regs: ^
 			}
 			q := i + hl
 			t := core.Token{lo = u64(q), n = u32(arg), kind = .Bytes, role = role, spelling = u16(hl) << HEAD_SHIFT}
+			if key_due {
+				t.kind, t.spelling = .String, t.spelling | BYTES_KEY_SPELLING
+			}
 			i = q + int(arg)
 			if send(&o, h, t, d, on) {
 				halt = stopped(t)
@@ -794,6 +804,9 @@ run :: proc "contextless" (src: []u8, lo: u64, opts: Walk_Rules, h: ^$H, regs: ^
 				return fault(i, .Bad_Char, .Not_Preferred)
 			}
 			t := core.Token{lo = s.lo, n = u32(s.n), kind = .Bytes if major == 2 else .String, role = role, spelling = s.spelling}
+			if key_due && major == 2 {
+				t.kind, t.spelling = .String, t.spelling | BYTES_KEY_SPELLING
+			}
 			i = s.end
 			if send(&o, h, t, d, on) {
 				halt = stopped(t)

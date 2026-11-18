@@ -101,7 +101,7 @@ put_content :: proc(w: ^Writer, value: core.Value, top: bool) -> core.Typed_Erro
 		// The element whose content this is stands open around the members.
 		e: Elements
 		elements_init(&e, &w.out, w.opts)
-		defer delete(e.names)
+		defer el_release(&e)
 		e.levels[0], e.levels[1], e.top = {kind = .Root}, {kind = .Object}, 2
 		put_members(w, &e, v) or_return
 		return .None if e.levels[1].count > 0 else .Unwritable

@@ -20,6 +20,7 @@ package xml
 import "base:intrinsics"
 import "base:runtime"
 import "core:io"
+import "core:simd"
 import "core:slice"
 import "core:strings"
 import "core:unicode/utf8"
@@ -346,8 +347,8 @@ put_value :: proc(w: ^Writer, e: ^Elements, value: core.Value, lead: []core.Fact
 		written, is_rebuilt := core.rebuilt_attributes(value)
 		rebuilt += {.Attribute} if is_rebuilt else {}
 		if written != nil {
-			for name, i in written.keys {
-				el_attribute(e, name, written.vals[i].(string) or_else "") or_return
+			for name, i in core.object_keys(written) {
+				el_attribute(e, name, core.object_vals(written)[i].(string) or_else "") or_return
 			}
 		}
 	}
@@ -525,12 +526,8 @@ put_text :: proc(out: ^write.Out, s: string, among, ascii: bool) -> core.Typed_E
 @(private)
 put_escaped :: proc(out: ^write.Out, s: string, attribute, ascii: bool) -> core.Typed_Error_Kind {
 	run := 0
-	for i := 0; i < len(s); {
+	for i := plain_run(s); i < len(s); i += plain_run(s[i:]) {
 		c := s[i]
-		if c >= 0x20 && c < 0x80 && c != '&' && c != '<' && c != '>' && c != '"' {
-			i += 1
-			continue
-		}
 		write.put_text(out, s[run:i])
 		r, size := rune(c), 1
 		if c >= 0x80 {
@@ -565,6 +562,32 @@ put_escaped :: proc(out: ^write.Out, s: string, attribute, ascii: bool) -> core.
 	}
 	write.put_text(out, s[run:])
 	return .None
+}
+
+// The length of the run at the start of `s` that `put_escaped` copies as it stands: the bytes from 0x20 to 0x7F but `&`,
+// `<`, `>` and `"`. It reads 16 bytes at a time.
+@(private)
+plain_run :: #force_inline proc "contextless" (s: string) -> int #no_bounds_check {
+	stops :: #force_inline proc "contextless" (v: #simd[16]u8) -> #simd[16]u8 {
+		return kernel.control_or_high16(v, false) | simd.lanes_eq(v, '&') | simd.lanes_eq(v, '<') | simd.lanes_eq(v, '>') | simd.lanes_eq(v, '"')
+	}
+	src, n := raw_data(s), len(s)
+	i := 0
+	for ; i + 16 <= n; i += 16 {
+		if m := stops(kernel.load16(src[i:])); kernel.any_lane16(m) {
+			return i + int(kernel.first_lane16(m))
+		}
+	}
+	if i == n {
+		return n
+	}
+	if v, live, ok := kernel.head16(src[i:], n - i); ok {
+		return min(n, i + int(kernel.first_lane16(stops(v) & live)))
+	}
+	for i < n && src[i] >= 0x20 && src[i] < 0x80 && src[i] != '&' && src[i] != '<' && src[i] != '>' && src[i] != '"' {
+		i += 1
+	}
+	return i
 }
 
 @(private)
@@ -679,19 +702,32 @@ is_name :: proc(s: []u8) -> bool {
 	return fault == .None && !colon && q == p[len(s):]
 }
 
-// Whether `s` is an XML name with a colon, whose prefix no declaration of the written text binds.
+// Splits `s`, an XML name with one colon between two names, into its prefix and local name.
 @(private)
-is_prefixed_name :: proc(s: string) -> bool {
-	if len(s) == 0 {
-		return false
+split_qname :: proc(s: string) -> (prefix, local: string, ok: bool) {
+	i := strings.index_byte(s, ':')
+	if i <= 0 || i == len(s) - 1 {
+		return
 	}
-	p := raw_data(s)
-	q, fault, colon := name_end_colon(p, p[len(s):])
-	return fault == .None && colon && q == p[len(s):]
+	prefix, local = s[:i], s[i + 1:]
+	return prefix, local, is_name(transmute([]u8)prefix) && is_name(transmute([]u8)local)
+}
+
+// Whether `s` is an element's name with a prefix, which any prefix but `xmlns` may be.
+@(private)
+is_element_qname :: proc(s: string) -> bool {
+	prefix, _, ok := split_qname(s)
+	return ok && prefix != "xmlns"
 }
 
 @(private)
-UNBOUND_PREFIX :: "a name with a prefix, which no declaration binds"
+UNBOUND_PREFIX :: "a name with a prefix, which no declaration of an enclosing element binds"
+
+@(private)
+BAD_BINDING :: "a namespace declaration that binds an empty name, the prefix xmlns, or xml or its name wrongly"
+
+@(private)
+XML_NAMESPACE :: "http://www.w3.org/XML/1998/namespace"
 
 @(private)
 only_whitespace :: proc(s: string) -> bool {

@@ -36,6 +36,27 @@ from_json :: proc(src: string, opts := core.Write_Options{}) -> (string, int, co
 	return string(text), dropped, werr
 }
 
+// A text is escaped wherever its special byte stands, at each place before, across and after the 16-byte blocks the
+// writer reads at once.
+@(test)
+a_text_is_escaped_wherever_its_special_byte_stands :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Case :: struct {
+		json, xml: string,
+	}
+	cases := [?]Case{{"&", "&amp;"}, {"<", "&lt;"}, {">", "&gt;"}, {`\"`, `"`}, {`\r`, "&#xd;"}, {"é", "é"}}
+	for c in cases {
+		for size in 1 ..= 40 {
+			for at in 0 ..< size {
+				before, after := strings.repeat("a", at, context.temp_allocator), strings.repeat("b", size - at - 1, context.temp_allocator)
+				got, _, err := from_json(strings.concatenate({`{"r": "`, before, c.json, after, `"}`}, context.temp_allocator))
+				testkit.expect_nil(t, err)
+				testing.expect_value(t, got, strings.concatenate({"<r>", before, c.xml, after, "</r>"}, context.temp_allocator))
+			}
+		}
+	}
+}
+
 // An XML document keeps its declaration, doctype, comments, instructions, attributes, namespace declarations and references as
 // written, drops the white space between elements, and pretty output indents only elements with no text.
 @(test)
@@ -98,7 +119,7 @@ a_json_document_is_written_as_elements :: proc(t: ^testing.T) {
 	back, berr := rewritten(got)
 	testkit.expect_nil(t, berr)
 	testing.expect_value(t, back, got)
-	for refused in ([]string{`[1]`, `{"a": 1, "b": 2}`, `{"a": [1]}`, `{"r": {"a": [[1]]}}`, `{"r": {"a": []}}`, `{"r": {"a": [/* z */]}}`, `{"r": {}}`, `{"r": ""}`, `{"r": {"#text": "x"}}`, `{"a:b": 1}`, `{"1a": 1}`, `{"r": "\u0001"}`}) {
+	for refused in ([]string{`[1]`, `{"a": 1, "b": 2}`, `{"a": [1]}`, `{"r": {"a": [[1]]}}`, `{"r": {"a": []}}`, `{"r": {"a": [/* z */]}}`, `{"r": {}}`, `{"r": ""}`, `{"r": {"#text": "x"}}`, `{"a:b": 1}`, `{"r": {"p:a": 1}}`, `{"1a": 1}`, `{"r": "\u0001"}`}) {
 		_, _, rerr := from_json(refused)
 		e, typed_err := rerr.(core.Typed_Error)
 		testing.expectf(t, typed_err && (e.kind == .Unwritable || e.kind == .Unsupported), "%s: %v", refused, rerr)
@@ -310,5 +331,38 @@ marshal_under_failing_allocators :: proc(t: ^testing.T) {
 		want, err := xml.marshal(try.value, write = opts, allocator = context.temp_allocator)
 		testkit.expect_nil(t, err)
 		testkit.sweep_write(t, sweep_try, &try, string(want))
+	}
+}
+
+// A nil `Maybe` and a nil pointer are written as an empty element, which reads back as null.
+@(test)
+marshal_writes_a_nil_optional_member_as_an_empty_element :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Item :: struct {
+		id:  string,
+		opt: Maybe(int),
+		ptr: ^int,
+	}
+	text, err := xml.marshal(struct {
+			r: Item,
+		}{Item{id = "x"}}, allocator = context.temp_allocator)
+	testkit.expect_nil(t, err)
+	testing.expect_value(t, string(text), "<r><id>x</id><opt/><ptr/></r>")
+}
+
+@(test)
+marshal_names_the_element_an_empty_string_stands_at :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	_, err := xml.marshal(struct {
+			r: struct {
+				id: string,
+			},
+		}{}, allocator = context.temp_allocator)
+	e, _ := err.(core.Typed_Error)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Unwritable)
+	testing.expect_value(t, len(e.steps), 2)
+	if len(e.steps) == 2 {
+		testing.expect_value(t, e.steps[0], core.Step(core.Name("r")))
+		testing.expect_value(t, e.steps[1], core.Step(core.Name("id")))
 	}
 }

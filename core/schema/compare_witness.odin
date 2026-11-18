@@ -108,7 +108,9 @@ gather :: proc(h: ^Hints, d: ^rules.Description) {
 		number(h, r.maximum)
 		number(h, r.multiple_of)
 		for c in ([?]u64{r.min_items, r.min_length, r.min_members, r.max_items.? or_else 0, r.max_length.? or_else 0, r.max_members.? or_else 0}) {
-			append(&h.counts, int(c), int(c) + 1)
+			// A count past what a witness builds stays a count `arrays` skips, not one that wraps negative.
+			n := int(min(c, 1 << 20))
+			append(&h.counts, n, n + 1)
 		}
 		if r.min_length > 0 || r.max_length != nil {
 			for c in ([?]u64{r.min_length, r.min_length + 1, r.max_length.? or_else 0, (r.max_length.? or_else 0) + 1}) {
@@ -333,7 +335,7 @@ objects :: proc(s: ^Search, an: []^rules.Node, depth: int) -> []core.Value {
 		picks := fitting(s, member_nodes(blocks[:], name), depth + 1)
 		for v in picks[:min(4, len(picks))] {
 			o := object_with(base[:], name, v)
-			s.budget -= len(o.keys)
+			s.budget -= len(core.object_keys(o))
 			append(&out, o)
 		}
 	}
@@ -350,17 +352,17 @@ Member_Value :: struct {
 @(private = "file")
 object_with :: proc(base: []Member_Value, name: string, value: core.Value = nil) -> ^core.Object {
 	o := new(core.Object, context.temp_allocator)
-	o.keys = make([dynamic]string, context.temp_allocator)
-	o.vals = make([dynamic]core.Value, context.temp_allocator)
+	o.slot_keys = make([dynamic]string, context.temp_allocator)
+	o.slot_vals = make([dynamic]core.Value, context.temp_allocator)
 	for m in base {
 		if m.name != name {
-			append(&o.keys, m.name)
-			append(&o.vals, m.value)
+			append(&o.slot_keys, m.name)
+			append(&o.slot_vals, m.value)
 		}
 	}
 	if name != "" {
-		append(&o.keys, name)
-		append(&o.vals, value)
+		append(&o.slot_keys, name)
+		append(&o.slot_vals, value)
 	}
 	return o
 }

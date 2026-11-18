@@ -217,8 +217,8 @@ kept :: proc(d: ^Differ, v: core.Value) -> core.Value {
 		return c
 	case ^core.Object:
 		c := core.new_object()
-		for k, i in x.keys {
-			core.object_append(c, strings.clone(k), kept(d, x.vals[i]))
+		for k, i in core.object_keys(x) {
+			core.object_append(c, strings.clone(k), kept(d, core.object_vals(x)[i]))
 		}
 		return c
 	}

@@ -507,16 +507,16 @@ apply_changes :: proc(changes: []diff.Change, old: core.Value, new_at, old_at: ^
 			}
 			append(new_at, core.Name(k))
 			append(old_at, core.Name(k))
-			append(&out.keys, k)
-			append(&out.vals, apply_changes(changes, v, new_at, old_at))
+			append(&out.slot_keys, k)
+			append(&out.slot_vals, apply_changes(changes, v, new_at, old_at))
 			pop(new_at)
 			pop(old_at)
 		}
 		for c in changes {
 			if c.op == .Added && len(c.path) == len(new_at) + 1 && path_is(c.path[:len(new_at)], new_at[:]) {
 				if name, named := c.path[len(new_at)].(core.Name); named {
-					append(&out.keys, string(name))
-					append(&out.vals, c.new)
+					append(&out.slot_keys, string(name))
+					append(&out.slot_vals, c.new)
 				}
 			}
 		}

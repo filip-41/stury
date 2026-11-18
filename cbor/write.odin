@@ -274,6 +274,10 @@ put_number :: proc(e: ^Emit, i: core.Node_Index) -> core.Typed_Error_Kind {
 	if !ok {
 		return .Unwritable
 	}
+	if v.kind == .Int && v.bits == 0 && n.kind == .Number && !doc.readers.binary && doc.src[n.lo] == '-' {
+		// An integer has no negative zero, so it is the float that has.
+		return write.put_binary_number(&e.out, {1 << 63, .Float}, TREE)
+	}
 	// A float, and an integer `Int` holds, written again from its value is as short as preferred serialization asks.
 	if (v.kind == .Wide || number_tagged(e, i)) && put_copied(e, i) {
 		return e.out.err
@@ -323,7 +327,20 @@ put_string_node :: proc(e: ^Emit, i: core.Node_Index, k: core.Kind) -> core.Type
 	}
 	// A definite string read from CBOR is valid as it stands, and only its head may be other than the shortest.
 	text: string
-	if e.own && n.spelling & (STR_INDEF | core.SPELLING_LAX) == 0 {
+	if e.own && n.spelling & BYTES_KEY != 0 {
+		k = .Bytes
+		span := doc.src[n.lo:n.lo + u64(n.n)]
+		if n.spelling & STR_INDEF == 0 {
+			text = string(span)
+		} else {
+			joined := make([dynamic]u8, 0, len(span), context.temp_allocator)
+			it := chunks_run(span)
+			for chunk in chunk_next(&it) {
+				append(&joined, ..chunk)
+			}
+			text = string(joined[:])
+		}
+	} else if e.own && n.spelling & (STR_INDEF | core.SPELLING_LAX) == 0 {
 		text = string(doc.src[n.lo:n.lo + u64(n.n)])
 	} else {
 		buf, failed := make([]u8, core.text_room(doc, i), context.temp_allocator)

@@ -173,17 +173,22 @@ spell :: proc(list: ^Edit_List, v: Value, target: Node_Index, into: bool, at: u6
 		return text, true, nil
 	}
 	indent := line_indent(doc.src, at)
-	if len(indent) == 0 {
+	crlf := line_end_of(list) == "\r\n"
+	if len(indent) == 0 && !crlf {
 		return text, true, nil
 	}
 	lines := kernel.count_byte(text, '\n')
-	spaced, merr := make([]u8, len(text) + lines * len(indent), list.allocator)
+	spaced, merr := make([]u8, len(text) + lines * (len(indent) + int(crlf)), list.allocator)
 	if merr != nil {
 		delete(text, list.allocator)
 		return nil, false, refused(.No_Memory)
 	}
 	at_ := 0
 	for b in text {
+		if b == '\n' && crlf {
+			spaced[at_] = '\r'
+			at_ += 1
+		}
 		spaced[at_] = b
 		at_ += 1
 		if b == '\n' {
@@ -192,6 +197,17 @@ spell :: proc(list: ^Edit_List, v: Value, target: Node_Index, into: bool, at: u6
 	}
 	delete(text, list.allocator)
 	return spaced, true, nil
+}
+
+// The line end new lines of `list`'s document take, its first line's: LF unless that line ends in CR LF. The search
+// runs once per list, since a one-line text is read to its end.
+line_end_of :: proc(list: ^Edit_List) -> string {
+	if list.eol == "" {
+		src := list.doc.src
+		i := bytes.index_byte(src, '\n')
+		list.eol = "\r\n" if i > 0 && src[i - 1] == '\r' else "\n"
+	}
+	return list.eol
 }
 
 // The container of each node of `list`'s document, `NO_NODE` for the root, kept in `list` for its next call, or nil

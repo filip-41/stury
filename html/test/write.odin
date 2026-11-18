@@ -2,6 +2,7 @@
 package html_tests
 
 import "base:runtime"
+import "core:strings"
 import "core:testing"
 import core "../../core"
 import write "../../core/write"
@@ -270,5 +271,56 @@ marshal_under_failing_allocators :: proc(t: ^testing.T) {
 		want, err := html.marshal(try.value, write = opts, allocator = context.temp_allocator)
 		testkit.expect_nil(t, err)
 		testkit.sweep_write(t, sweep_try, &try, string(want))
+	}
+}
+
+// The file `fmt` writes, with its line end, formats to itself, so that `fmt --check` passes. An HTML reader puts the
+// white space after the end tags into the text that ends the body.
+@(test)
+a_pretty_write_with_a_line_end_formats_to_itself :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	sources := [?]string {
+		"<body><p>a</p>tail</body>", "<body><p>a</p>tail\n</body>", "<body><p>a</p>tail\n\n</body>\n", "<body>  tail  </body>",
+		"<body>tail</body>", "<body><div>x\n</div>\n</body>", "<body><ul><li>a</li>\n<li>b\n</li>\n</ul></body>",
+		"<body><table><tr><td>a\n</td></tr></table>tail</body>",
+	}
+	for src in sources {
+		formats_to_itself(t, src, .Document)
+		formats_to_itself(t, src, .Fragment)
+	}
+	formats_to_itself(t, "<body><p>a</p>tail <!-- c --></body>", .Document)
+}
+
+@(private = "file")
+formats_to_itself :: proc(t: ^testing.T, src: string, $S: html.Spec) {
+	once, err := html.format(transmute([]u8)src, S, write = core.PRETTY)
+	testkit.expect_nil(t, err)
+	// The CLI ends a file with a line end unless the text ends with one.
+	file := string(once) if strings.has_suffix(string(once), "\n") else strings.concatenate({string(once), "\n"})
+	again, err2 := html.format(transmute([]u8)file, S, write = core.PRETTY)
+	file_again := string(again) if strings.has_suffix(string(again), "\n") else strings.concatenate({string(again), "\n"})
+	testkit.expect_nil(t, err2)
+	testing.expectf(t, file_again == file, "%q as %v: %q then %q", src, S, file, file_again)
+}
+
+// A pretty write of a body that ends in text and a line end is read back as the same value with no line end added.
+@(test)
+a_pretty_write_of_a_body_text_with_a_line_end_reads_back_whole :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	for text in ([]string{"tail\n", "tail", "tail\n\n", "  tail  \n"}) {
+		src := strings.concatenate({"<body><p>a</p>", text, "</body>"})
+		doc, err := html.build(transmute([]u8)src, .Document)
+		testkit.expect_nil(t, err)
+		written, _, werr := html.write(&doc, .Document, core.PRETTY)
+		testkit.expect_nil(t, werr)
+		back, berr := html.build(written, .Document)
+		testkit.expect_nil(t, berr)
+		a, _, _ := core.write(&doc, {}, json.as(.Json), allocator = context.temp_allocator)
+		b, _, _ := core.write(&back, {}, json.as(.Json), allocator = context.temp_allocator)
+		testing.expectf(t, string(a) == string(b), "%q: %q then %q", text, a, b)
+		core.destroy(&doc)
+		core.destroy(&back)
 	}
 }

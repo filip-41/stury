@@ -13,7 +13,7 @@ $ stury -c '.c | .@tag' x.cbor
 1
 ```
 
-- **Byte strings** read as the string of their base64, and a byte string key as its bytes.
+- **Byte strings** read as the string of their base64, and so does a byte string key.
 - **Integer keys** read as their decimal text, and `--to cbor` writes them back as integers.
 - **Tags** read as their content, and `.@tag` gives the number. A bignum, a decimal fraction and a bigfloat read as
   numbers.

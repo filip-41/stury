@@ -35,6 +35,11 @@ Program :: struct {
 @(private = "file")
 MAX_PARSE_DEPTH :: 10000
 
+// A tree nested deeper is "memory exhausted" too: past the longest operator chain jq 1.8.2 compiles, and within what
+// the recursive passes over the tree fit in a thread's stack.
+@(private = "file")
+MAX_NEST :: 2 * MAX_PARSE_DEPTH
+
 // The lexer's start conditions, innermost last: inside (), [], {}, an interpolation, or a string.
 @(private)
 Mode :: enum u8 {
@@ -86,10 +91,42 @@ Parser :: struct {
 parse :: proc(src: string, file := "") -> (Program, []Compile_Error) {
 	p := Parser{src = src, file = file}
 	run(&p)
+	if len(p.errors) == 0 {
+		for n in ([]^Node{p.prog.defs, p.prog.body}) {
+			if at := past_depth(n, MAX_NEST); at != nil {
+				report(&p, at.loc, "memory exhausted")
+				break
+			}
+		}
+	}
 	for &e in p.errors {
 		e.file, e.src = file, src
 	}
 	return p.prog, p.errors[:]
+}
+
+// A node of `n` nested deeper than `room` levels, definitions' bodies counted, or nil. A chain of left-associative
+// operators or postfix steps parses in a few states but nests one level per step, and the passes over the tree recurse.
+@(private = "file")
+past_depth :: proc(n: ^Node, room: int) -> ^Node {
+	if n == nil || room == 0 {
+		return n
+	}
+	at: ^Node
+	if n.kind == .Def {
+		at = past_depth(n.fn.body, room - 1)
+	}
+	Nest :: struct {
+		room: int,
+		at:   ^^Node,
+	}
+	if at == nil {
+		any_child(n, Nest{room - 1, &at}, proc(sub: ^^Node, d: Nest) -> bool {
+			d.at^ = past_depth(sub^, d.room)
+			return d.at^ != nil
+		})
+	}
+	return at
 }
 
 // `e` as jq reports it (locfile_locate): the message, its line and column, the line, and carets under

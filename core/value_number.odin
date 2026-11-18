@@ -120,11 +120,11 @@ prefixed_decimal :: proc(text: string, buf: []u8) -> (digits: string, ok: bool) 
 	case 'b': base = 2
 	case: return
 	}
-	// Least significant word first, each word nine decimal digits.
+	// The value in binary, least significant word first, which its digits fill from the last one up.
 	stack: [16]u32
 	words := stack[:]
-	if len(s) / 7 + 1 > len(stack) {
-		made, err := make([]u32, len(s) / 7 + 1)
+	if len(s) / 8 + 2 > len(stack) {
+		made, err := make([]u32, len(s) / 8 + 2)
 		if err != nil {
 			return
 		}
@@ -133,44 +133,55 @@ prefixed_decimal :: proc(text: string, buf: []u8) -> (digits: string, ok: bool) 
 	defer if raw_data(words) != raw_data(stack[:]) {
 		delete(words)
 	}
-	n := 0
-	for c in transmute([]u8)s[2:] {
+	bits_per_digit := u32(4) if base == 16 else 3 if base == 8 else 1
+	at_bit := u32(0)
+	#reverse for c in transmute([]u8)s[2:] {
 		if c == '_' {
 			continue
 		}
-		d := u64(spell.HEX_NIBBLE[c])
-		if d >= base {
+		d := u32(spell.HEX_NIBBLE[c])
+		if u64(d) >= base {
 			return
 		}
-		for &w in words[:n] {
-			x := u64(w) * base + d
-			w, d = u32(x % WORD), x / WORD
+		w, shift := int(at_bit / 32), at_bit % 32
+		words[w] |= d << shift
+		if shift + bits_per_digit > 32 {
+			words[w + 1] |= d >> (32 - shift)
 		}
-		if d > 0 {
-			words[n] = u32(d)
-			n += 1
-		}
+		at_bit += bits_per_digit
 	}
+	n := len(words)
+	for n > 0 && words[n - 1] == 0 {
+		n -= 1
+	}
+	// Each division by a billion leaves nine decimal digits, least significant first.
 	at := len(buf)
-	for k in 0 ..< n {
-		w := words[k]
+	for n > 0 {
+		rem := u64(0)
+		for k := n - 1; k >= 0; k -= 1 {
+			x := rem << 32 | u64(words[k])
+			words[k], rem = u32(x / WORD), x % WORD
+		}
+		for n > 0 && words[n - 1] == 0 {
+			n -= 1
+		}
 		for _ in 0 ..< 9 {
-			if k + 1 == n && w == 0 {
+			if n == 0 && rem == 0 {
 				break
 			}
 			if at == 0 {
 				return
 			}
 			at -= 1
-			buf[at], w = u8('0' + w % 10), w / 10
+			buf[at], rem = u8('0' + rem % 10), rem / 10
 		}
 	}
-	if n == 0 || neg {
+	if at == len(buf) || neg {
 		if at == 0 {
 			return
 		}
 		at -= 1
-		buf[at] = '0' if n == 0 else '-'
+		buf[at] = '0' if at + 1 == len(buf) else '-'
 	}
 	return string(buf[at:]), true
 }

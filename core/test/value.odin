@@ -85,8 +85,8 @@ repeated_key_reads_alike_in_both_forms :: proc(t: ^testing.T) {
 	testkit.expect_nil(t, err)
 	defer core.destroy(&doc)
 	built := core.new_object()
-	append(&built.keys, "a", "b", "a")
-	append(&built.vals, core.Value(core.number_text("1")), core.Value(true), core.Value(f64(2)))
+	append(&built.slot_keys, "a", "b", "a")
+	append(&built.slot_vals, core.Value(core.number_text("1")), core.Value(true), core.Value(f64(2)))
 	node := core.Value(core.Node_Ref{&doc, core.ROOT})
 	for v in ([]core.Value{node, built}) {
 		last, _ := core.member(v, "a")
@@ -603,6 +603,39 @@ hex_integers_are_their_decimals :: proc(t: ^testing.T) {
 	testing.expect(t, !core.equal(at(&big, 0), at(&big, 2)))
 }
 
+// A hex, octal or binary integer of thousands of digits spells the decimal that `core:math/big` reads from the same digits.
+@(test)
+long_prefixed_integers_are_their_decimals :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	Radix :: struct {
+		prefix: string,
+		radix:  int,
+		digits: string,
+	}
+	for r in ([]Radix{{"0x", 16, "0123456789abcdefABCDEF"}, {"0o", 8, "01234567"}, {"0b", 2, "01"}}) {
+		for count in ([]int{1, 7, 8, 9, 4000}) {
+			digits := make([]u8, count)
+			for &d, k in digits {
+				d = r.digits[(k * 7 + k / 3) % len(r.digits)]
+			}
+			text := strings.concatenate({"-", r.prefix, string(digits)})
+			buf := make([]u8, count * 2 + 4)
+			got, ok := core.prefixed_decimal(text, buf)
+			testing.expect(t, ok)
+			want: big.Int
+			testing.expect_value(t, big.int_atoi(&want, string(digits), i8(r.radix)), nil)
+			wanted, werr := big.int_itoa_string(&want)
+			testing.expect_value(t, werr, nil)
+			wanted = strings.trim_right_null(wanted)
+			if wanted != "0" {
+				wanted = strings.concatenate({"-", wanted})
+			}
+			testing.expectf(t, got == wanted, "%s%d digits: %s", r.prefix, count, got)
+		}
+	}
+}
+
 // A decimal a format spells with a sign, a point of its own or underscores, and a hex, octal or binary integer with
 // underscores, equals and hashes as the JSON number it spells, and a write of it in another format writes that number.
 @(test)
@@ -673,6 +706,103 @@ a_number_reads_back_as_its_type :: proc(t: ^testing.T) {
 				testing.expectf(t, known && reads == wants, "%q: %v reads back from %q as %v", r.src, want.v, got_src, reads)
 				testing.expectf(t, core.reads_back_as(want.v, g) == wants, "%q: %v reads back as %q", r.src, want.v, got_src)
 			}
+		}
+	}
+}
+
+// An object put to, appended to and deleted from many times reads as a list of its members kept beside it: members in
+// order, a repeated key's each time, a lookup the last member of the name and `.First` the first, the length, and the
+// text the writer gives. The deletes leave dead slots, which no reader sees.
+@(test)
+object_reads_alike_after_many_deletes :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	Member :: struct {
+		key: string,
+		val: f64,
+	}
+	gen := rand.create(7)
+	context.random_generator = rand.default_random_generator(&gen)
+	for repeats in ([]bool{false, true}) {
+		o := core.new_object()
+		model: [dynamic]Member
+		for step in 0 ..< 6000 {
+			k := fmt.tprintf("k%d", rand.int_max(300))
+			v := f64(step)
+			switch r := rand.int_max(10); {
+			case r < 4:
+				core.object_put(o, k, v)
+				at := -1
+				#reverse for m, i in model {
+					if m.key == k {
+						at = i
+						break
+					}
+				}
+				if at >= 0 {
+					model[at].val = v
+				} else {
+					append(&model, Member{k, v})
+				}
+			case r < 5 && repeats:
+				core.object_append(o, k, v)
+				append(&model, Member{k, v})
+			case r < 9:
+				core.object_delete(o, k)
+				#reverse for m, i in model {
+					if m.key == k {
+						ordered_remove(&model, i)
+						break
+					}
+				}
+			case:
+				gone := make(map[string]bool)
+				gone[k], gone["k1"] = true, true
+				core.object_delete_all(o, gone)
+				for i := 0; i < len(model); {
+					if gone[model[i].key] {
+						ordered_remove(&model, i)
+					} else {
+						i += 1
+					}
+				}
+			}
+			if step % 97 != 0 {
+				continue
+			}
+			testing.expect_value(t, core.object_length(o), len(model))
+			for name in ([]string{"k0", "k1", "k7", "k150", "k299", k}) {
+				want_last, want_first, found := 0.0, 0.0, false
+				for m in model {
+					if m.key == name {
+						want_last = m.val
+						if !found {
+							want_first = m.val
+						}
+						found = true
+					}
+				}
+				last, has := core.member(core.Value(o), name)
+				first, _ := core.member(core.Value(o), name, .First)
+				testing.expect_value(t, has, found)
+				if found {
+					testing.expect_value(t, last.(f64), want_last)
+					testing.expect_value(t, first.(f64), want_first)
+				}
+			}
+			keys, vals := core.object_keys(o), core.object_vals(o)
+			testing.expect_value(t, len(keys), len(model))
+			want := strings.builder_make()
+			strings.write_byte(&want, '{')
+			for m, i in model {
+				testing.expect_value(t, keys[i], m.key)
+				testing.expect_value(t, vals[i].(f64), m.val)
+				fmt.sbprintf(&want, `%s"%s":%d`, "," if i > 0 else "", m.key, int(m.val))
+			}
+			strings.write_byte(&want, '}')
+			text, werr := json.write_value(o, .Json)
+			testkit.expect_nil(t, werr)
+			testing.expect_value(t, string(text), strings.to_string(want))
 		}
 	}
 }

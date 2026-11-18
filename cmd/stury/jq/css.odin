@@ -55,7 +55,7 @@ markup_document :: proc(v: Value, depth := 0) -> ^core_pkg.Document {
 	}
 	members: []Value
 	#partial switch x in plain(v) {
-	case ^Object: members = x.vals[:]
+	case ^Object: members = object_vals(x)[:]
 	case ^Array:  members = x.items[:]
 	}
 	for m in members {

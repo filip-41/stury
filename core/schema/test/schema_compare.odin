@@ -344,3 +344,13 @@ compare_witness_from_format_grammar :: proc(t: ^testing.T) {
 	testing.expectf(t, c.old_in_new.verdict == .No && c.new_in_old.verdict == .No, "got %v and %v", c.old_in_new.verdict, c.new_in_old.verdict)
 	free_all(context.temp_allocator)
 }
+
+// A count too large for an int is one the witness search skips, and the comparison answers.
+@(test)
+compare_counts_past_the_integers :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	for keyword in ([?]string{"minItems", "maxItems", "minLength", "minProperties"}) {
+		_, ok := compare_texts(t, fmt.tprintf(`{{"type": "array", "%s": 1000000000000000000000000000000}}`, keyword), `{"type": "array"}`)
+		testing.expect(t, ok)
+	}
+}

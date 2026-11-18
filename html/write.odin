@@ -27,6 +27,15 @@ import core "../core"
 import typed "../core/typed"
 import write "../core/write"
 
+// What a member ends in a pretty document: the text that `</html>` is followed by when it is written, which an HTML
+// reader puts into the text that ends the body.
+@(private)
+Ending :: enum u8 {
+	None,
+	Chain, // the member ends the document, and so does its last member when it is `html`, or `body` with text
+	Text,  // a text member ends the document's body
+}
+
 @(private)
 Writer :: struct {
 	out:       write.Out,
@@ -37,6 +46,8 @@ Writer :: struct {
 	foot_line: bool,
 	foot_depth: int, // with `foot_line`, the depth a comment's line starts at, 0 for no indent, as in a compact write
 	ended:     int, // the output's length after the last element and its inline comments
+	glued:     bool, // the body's end tag follows its text, so a line before `</html>` would read back into that text
+	line_end:  bool, // the text's last line end is written after `</html>`, where it reads back into the body's text
 	facts:     Fact_Cursor,
 	buf:       [512]u8,
 }
@@ -251,21 +262,41 @@ put_root :: proc(w: ^Writer, root: core.Value) -> core.Typed_Error_Kind {
 	if lead {
 		write.put_text(&w.out, "\n\n")
 	}
-	_ = put_members(w, root, 0, false) or_return
+	tail := Ending.None
+	if w.opts.pretty {
+		tail = .Chain if is_document(root) else .None
+	}
+	_ = put_members(w, root, 0, false, tail = tail) or_return
+	if w.line_end {
+		write.put_byte(&w.out, '\n')
+	}
 	put_comments(w, root, facts, .Comment_Inline) or_return
 	put_comments(w, root, facts, .Comment_Foot) or_return
 	w.foot_line = false
 	return w.out.err
 }
 
+// Takes the text that ends a document's body. White space after `</html>` reads back into it, so its last line end is
+// written there, and none stands between the end tags.
+@(private)
+end_text :: proc(w: ^Writer, text: string) -> string {
+	w.glued = true
+	if strings.has_suffix(text, "\n") {
+		w.line_end = true
+		return text[:len(text) - 1]
+	}
+	return text
+}
+
 // Writes the members of object `v` in order, a node's as its document holds them, a repeated name each time. They are
 // laid on lines of their own when the output is pretty, they hold no text, and `keep` does not hold their white space.
 // `closing` says that they were, so the caller ends the line of the element's end tag after the element's foot comments.
+// `tail` says what the last member ends in the output.
 @(private)
-put_members :: proc(w: ^Writer, v: core.Value, depth: int, in_foreign: bool, keep := false) -> (closing: bool, kind: core.Typed_Error_Kind) {
+put_members :: proc(w: ^Writer, v: core.Value, depth: int, in_foreign: bool, keep := false, tail := Ending.None) -> (closing: bool, kind: core.Typed_Error_Kind) {
 	context.allocator = context.temp_allocator
 	laid := w.opts.pretty && !keep
-	n := 0
+	n, i := 0, 0
 	if r, is_node := v.(core.Node_Ref); is_node {
 		n = core.length(r.doc, r.node)
 		if laid {
@@ -276,7 +307,8 @@ put_members :: proc(w: ^Writer, v: core.Value, depth: int, in_foreign: bool, kee
 		}
 		it := core.pairs(r.doc, r.node)
 		for key, child in core.pair_next(&it) {
-			put_member(w, core.node_string(r.doc, key), core.Node_Ref{r.doc, child}, depth, in_foreign, laid) or_return
+			put_member(w, core.node_string(r.doc, key), core.Node_Ref{r.doc, child}, depth, in_foreign, laid, tail if i == n - 1 else .None) or_return
+			i += 1
 		}
 	} else {
 		it := core.pairs(v)
@@ -286,7 +318,8 @@ put_members :: proc(w: ^Writer, v: core.Value, depth: int, in_foreign: bool, kee
 		}
 		it = core.pairs(v)
 		for key, child in core.pair_next(&it) {
-			put_member(w, key, child, depth, in_foreign, laid) or_return
+			put_member(w, key, child, depth, in_foreign, laid, tail if i == n - 1 else .None) or_return
+			i += 1
 		}
 	}
 	w.foot_line = !laid && !keep && n > 0 && w.ended == w.out.cursor + w.out.flushed
@@ -295,9 +328,9 @@ put_members :: proc(w: ^Writer, v: core.Value, depth: int, in_foreign: bool, kee
 }
 
 @(private)
-put_member :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign, laid: bool) -> core.Typed_Error_Kind {
+put_member :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign, laid: bool, ending := Ending.None) -> core.Typed_Error_Kind {
 	if core.kind(v) != .Array {
-		return put_node(w, name, v, depth, in_foreign, laid)
+		return put_node(w, name, v, depth, in_foreign, laid, ending = ending)
 	}
 	// The run's comments read back as those of its first and last elements.
 	n := core.length(v)
@@ -307,7 +340,7 @@ put_member :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_forei
 		if core.kind(item) == .Array {
 			return .Unwritable
 		}
-		put_node(w, name, item, depth, in_foreign, laid, v if i == 0 else nil, v if i == n - 1 else nil) or_return
+		put_node(w, name, item, depth, in_foreign, laid, v if i == 0 else nil, v if i == n - 1 else nil, ending if i == n - 1 else .None) or_return
 	}
 	return .None
 }
@@ -340,9 +373,13 @@ put_empty_runs :: proc(w: ^Writer, v: core.Value, depth: int, laid: bool) -> cor
 // Writes element `name` of value `v`, with the lead comments of `lead` before it and the foot and inline comments of
 // `tail` after its own.
 @(private)
-put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign, laid: bool, lead: core.Value = nil, tail: core.Value = nil) -> core.Typed_Error_Kind {
+put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign, laid: bool, lead: core.Value = nil, tail: core.Value = nil, ending := Ending.None) -> core.Typed_Error_Kind {
 	if len(name) > 0 && name[0] == '#' && name == core.MARKUP_TEXT {
-		return put_escaped(w, write.value_scalar_text(core.plain(v), w.buf[:], write.MARKUP_TREE) or_return, false)
+		text := write.value_scalar_text(core.plain(v), w.buf[:], write.MARKUP_TREE) or_return
+		if ending == .Text {
+			text = end_text(w, text)
+		}
+		return put_escaped(w, text, false)
 	}
 	// A comment on the line of the element before is that element's.
 	if laid && w.out.cursor + w.out.flushed > 0 {
@@ -364,9 +401,9 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 	put_framed(w, "<", name, "")
 	attributes, rebuilt := core.rebuilt_attributes(v)
 	if attributes != nil {
-		for key, i in attributes.keys {
+		for key, i in core.object_keys(attributes) {
 			write.put_byte(&w.out, ' ')
-			put_attribute_text(w, key, attributes.vals[i].(string) or_else "") or_return
+			put_attribute_text(w, key, core.object_vals(attributes)[i].(string) or_else "") or_return
 		}
 	}
 	for f in facts {
@@ -383,13 +420,23 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 		if void {
 			return .Unwritable
 		}
-		closing = put_members(w, x, depth + 1, in_foreign || is_foreign_root(name), keeps_space(name)) or_return
+		members_end := Ending.None
+		switch {
+		case ending == .Chain && name == "html":
+			members_end = .Chain
+		case ending == .Chain && name == "body":
+			members_end = .Text
+		}
+		closing = put_members(w, x, depth + 1, in_foreign || is_foreign_root(name), keeps_space(name), members_end) or_return
 	case .Null:
 	case:
 		if void {
 			return .Unwritable
 		}
 		text := write.value_scalar_text(x, w.buf[:], write.MARKUP_TREE) or_return
+		if ending == .Chain && name == "body" {
+			text = end_text(w, text)
+		}
 		if keeps_space(name) && strings.has_prefix(text, "\n") {
 			write.put_byte(&w.out, '\n')
 		}
@@ -409,7 +456,7 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 			put_comments(w, tail, tail_facts, .Comment_Foot) or_return
 		}
 		w.foot_line, w.foot_depth = false, 0
-		if closing {
+		if closing && !w.glued {
 			write.put_line(&w.out, w.opts, depth)
 		}
 		put_framed(w, "</", name, ">")

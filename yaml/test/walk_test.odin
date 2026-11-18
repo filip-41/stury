@@ -155,3 +155,22 @@ decoded_text_follows_the_quoting :: proc(t: ^testing.T) {
 		testing.expectf(t, found && ok && got == c[1], "%q reads as %q, got %q", c[0], c[1], got)
 	}
 }
+
+// A text with more anchors than a lookup scans names its alias's most recent anchor of that name, and refuses a name no
+// anchor before it declares.
+@(test)
+aliases_name_the_latest_anchor_among_many :: proc(t: ^testing.T) {
+	b := strings.builder_make(context.temp_allocator)
+	for i in 0 ..< 50 {
+		strings.write_string(&b, "- &a")
+		strings.write_int(&b, i)
+		strings.write_string(&b, " 1\n")
+	}
+	strings.write_string(&b, "- &a3 7\n- *a3\n- *a0\n")
+	got, _, fault := tokens_of(strings.to_string(b))
+	testing.expect_value(t, fault == nil, true)
+	testing.expect(t, strings.has_suffix(got, "Alias:*a3 Plain:7 Alias:*a0 Plain:1 End"), got)
+	strings.write_string(&b, "- *a50\n")
+	_, _, fault = tokens_of(strings.to_string(b))
+	testing.expect_value(t, fault != nil, true)
+}

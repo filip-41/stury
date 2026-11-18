@@ -28,6 +28,10 @@ new_array :: core_pkg.new_array
 new_object :: core_pkg.new_object
 lent :: core_pkg.lent
 object_slot :: core_pkg.object_slot
+object_keys :: core_pkg.object_keys
+object_vals :: core_pkg.object_vals
+object_length :: core_pkg.object_length
+object_reserve :: core_pkg.object_reserve
 object_put :: core_pkg.object_put
 object_append :: core_pkg.object_append
 object_delete :: core_pkg.object_delete
@@ -301,7 +305,7 @@ length_of :: proc(v: Value) -> int {
 	case Path:
 		return x.depth
 	case ^Object:
-		return len(x.keys)
+		return len(object_keys(x))
 	case Ref:
 		n := core_pkg.length(x.doc, x.node)
 		if n > 1 && core_pkg.kind(x.doc, x.node) == .Object && has_repeated_key(x) {
@@ -344,7 +348,7 @@ index_shared :: proc(v: Value) {
 			index_shared(item)
 		}
 	case ^Object:
-		for val in x.vals {
+		for val in object_vals(x) {
 			index_shared(val)
 		}
 	case ^Commented:
@@ -391,7 +395,7 @@ object_get :: proc(v: Value, k: string) -> (Value, bool) {
 		if i < 0 {
 			return nil, false
 		}
-		return x.vals[i], true
+		return x.slot_vals[i], true
 	case Ref:
 		if core_pkg.is_markup(x.doc) {
 			return core_pkg.markup_member(x, k)
@@ -458,17 +462,17 @@ own :: proc(value: Value) -> Value {
 		// `iterate` yields each key once, so the members are appended as they come, and indexed once.
 		o := new_object()
 		if x, is_object := v.(^Object); is_object {
-			o.keys, o.vals = slice.clone_to_dynamic(x.keys[:]), slice.clone_to_dynamic(x.vals[:])
+			o.slot_keys, o.slot_vals = slice.clone_to_dynamic(object_keys(x)), slice.clone_to_dynamic(object_vals(x))
 		} else {
 			it := iterate(v)
-			reserve(&o.keys, it.n)
-			reserve(&o.vals, it.n)
+			reserve(&o.slot_keys, it.n)
+			reserve(&o.slot_vals, it.n)
 			for k, m in next_member(&it) {
-				append(&o.keys, k)
-				append(&o.vals, m)
+				append(&o.slot_keys, k)
+				append(&o.slot_vals, m)
 			}
 		}
-		if len(o.keys) >= INDEX_FROM {
+		if object_length(o) >= INDEX_FROM {
 			reindex(o)
 		}
 		return o
@@ -506,7 +510,7 @@ iterate :: proc(value: Value) -> Members {
 			it.dupes = has_repeated_key(r)
 			if it.dupes && core_pkg.is_markup(r.doc) {
 				members := core_pkg.markup_members(r)
-				return Members{v = members, n = len(members.keys)}
+				return Members{v = members, n = len(object_keys(members))}
 			}
 			if it.dupes {
 				it.last = new(map[string]core_pkg.Node_Index)
@@ -522,7 +526,8 @@ iterate :: proc(value: Value) -> Members {
 
 // Whether an object in the subtree of `r` repeats a key.
 repeats_key :: proc(r: Ref) -> bool {
-	end := r.node + core_pkg.Node_Index(r.doc.nodes[r.node].n)
+	t := r.doc.nodes[r.node]
+	end := r.node + (1 if t.kind < .Array else core_pkg.Node_Index(t.n))
 	for i := r.node; i < end; i += 1 {
 		if r.doc.nodes[i].kind == .Object && has_repeated_key({r.doc, i}) {
 			return true
@@ -584,7 +589,7 @@ next_member :: #force_inline proc(it: ^Members) -> (key: string, v: Value, ok: b
 			it.v = a
 			return "", a.items[i], true
 		case ^Object:
-			return x.keys[i], x.vals[i], true
+			return object_keys(x)[i], object_vals(x)[i], true
 		case Ref:
 			if it.array {
 				node, _ := core_pkg.child_next(&it.items)

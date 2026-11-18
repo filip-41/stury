@@ -33,6 +33,7 @@ Layout :: struct {
 	kept:      int, // the facts written
 	glue:      bool, // comments of an omitted header were written, which the next header follows without a blank line
 	laid:      bool, // a collection the document writes in line or through dotted keys is written so
+	fail:      core.Node_Index, // the node a refusal stands at, for its path
 }
 
 // Writes node `node` of `doc` as TOML, as `core.write` does with `as(spec)`. A document of another format is written
@@ -51,6 +52,10 @@ write_stream :: proc(w: io.Stream, doc: ^core.Document, $S: Spec, write := core.
 	return core.write_stream(w, doc, write, as(S), node, allocator)
 }
 
+// The least an arena block of a write holds, so a text of one small record asks the allocator for little.
+@(private)
+ARENA_BLOCK :: 16 * 1024
+
 // The handle's `write`: node `node` of `doc` as TOML.
 @(private)
 document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
@@ -68,13 +73,17 @@ write_table_text :: proc(doc: ^core.Document, opts: core.Write_Options, node: co
 	l := Layout{doc = doc, opts = opts, own = doc.readers.format == rules_of, laid = laid}
 	l.raw = l.own && write.copies_raw(opts)
 	l.tagged = !l.own && .Tag in doc.readers.holds && core.has_tags(doc)
-	l.arena.backing_allocator = context.allocator
+	l.arena = {backing_allocator = context.allocator, minimum_block_size = ARENA_BLOCK}
 	defer runtime.arena_destroy(&l.arena)
 	l.path.allocator = runtime.arena_allocator(&l.arena)
 	write.init(&l.out, &spill, allocator, stream, len(doc.src) + write.ROOM_MAX if l.own else 0)
 	l.commented = len(core.subtree_facts(doc, node)) > 0
 	kind := put_table(&l, node, false)
-	text, err = write.finish(&l.out, {kind = kind})
+	refusal := core.Typed_Refusal{kind = kind}
+	if kind == .Unwritable {
+		write.node_path(&refusal, doc, l.fail)
+	}
+	text, err = write.finish(&l.out, refusal)
 	if err.kind != .None {
 		return nil, 0, err
 	}
@@ -397,6 +406,7 @@ inline_start :: proc(l: ^Layout, opens: ^[dynamic]Inline_Open, node: core.Node_I
 		}
 		return put_basic(&l.out, text, l.opts)
 	case .Null, .Plain, .End:
+		l.fail = node
 		return .Unwritable
 	}
 	if _, failed := append(opens, o); failed != nil {

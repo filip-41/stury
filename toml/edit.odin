@@ -214,6 +214,9 @@ Cx :: struct {
 	comments: [dynamic]u64, // where each comment starts, sorted
 	splices:  [dynamic]compose.Splice,
 	seen:     map[u64]struct{},
+	removed:  map[u32]struct{}, // the nodes a remove edit names
+	grown:    map[u32]struct{}, // the containers an insert edit names
+	emptied:  map[u32]struct{}, // the containers whose emptiness is already written
 	inline:   map[u32]Inline_Edits,
 	foot_at:  u64, // where the root's foot comments start, or the end of the text
 	err:      core.Document_Error,
@@ -837,42 +840,116 @@ insert_element :: proc(cx: ^Cx, e: core.Edit, arr: u32) -> bool {
 remove_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	v := u32(e.node)
 	p := cx.parent[v]
+	at: u64
 	switch form_of(cx.doc, p) {
 	case .Inline:
 		append(&inline_edits(cx, p).removed, v)
+		return true
 	case .Tables:
-		remove_sections(cx, v)
+		at = remove_sections(cx, v)
 	case .Root, .Header, .Dotted, .Implicit, .Scalar:
 		switch form_of(cx.doc, v) {
 		case .Scalar, .Inline, .Dotted:
-			remove_lines(cx, v)
+			at = remove_lines(cx, v)
 		case .Header, .Implicit, .Tables:
-			remove_sections(cx, v)
+			at = remove_sections(cx, v)
 		case .Root:
 		}
+	}
+	if left_empty(cx, p) {
+		return write_empty(cx, e, p, at)
+	}
+	return true
+}
+
+// Whether the removals leave the container `p` with no member, so that it must be written for the value to read back: it
+// holds only removed members, takes no insert, and neither it nor a container above it is removed. A table with its own
+// header and the root stay written without it, and an inline container stays as `{}` or `[]`.
+@(private = "file")
+left_empty :: proc(cx: ^Cx, p: u32) -> bool {
+	if p == 0 || form_of(cx.doc, p) == .Header || p in cx.emptied || p in cx.grown {
+		return false
+	}
+	for a := p; a != NIL; a = cx.parent[a] {
+		if a in cx.removed {
+			return false
+		}
+	}
+	if cx.doc.nodes[p].kind == .Object {
+		it := core.pairs(cx.doc, core.Node_Index(p))
+		for _, w in core.pair_next(&it) {
+			if u32(w) not_in cx.removed {
+				return false
+			}
+		}
+		return true
+	}
+	it := core.children(cx.doc, core.Node_Index(p))
+	for w in core.child_next(&it) {
+		if u32(w) not_in cx.removed {
+			return false
+		}
+	}
+	return true
+}
+
+// Writes the container `p` that the removals empty, in the form it had: a dotted key set to `{}` in place of the lines
+// it owned, a header for a table only its members' headers named, and a key set to `[]` for an array of tables. `at` is
+// where a removal began.
+@(private = "file")
+write_empty :: proc(cx: ^Cx, e: core.Edit, p: u32, at: u64) -> bool {
+	cx.emptied[p] = {}
+	switch form_of(cx.doc, p) {
+	case .Dotted:
+		key := cx.doc.nodes[p - 1]
+		ls := compose.line_start(cx.src, key.lo)
+		lead := ls
+		for lead < u64(len(cx.src)) && (cx.src[lead] == ' ' || cx.src[lead] == '\t') {
+			lead += 1
+		}
+		b := make([dynamic]u8, cx.a)
+		compose.puts(&b, string(cx.src[lead:key.lo + u64(key.n)]), " = {}")
+		put_line_at(cx, at, string(b[:]), false)
+	case .Implicit:
+		path, ok := header_path(cx, p)
+		if !ok {
+			return refuse_edit(cx, e.node, .Misplaced)
+		}
+		b := make([dynamic]u8, cx.a)
+		compose.puts(&b, "[", path, "]")
+		put_section_at(cx, at, b[:])
+	case .Tables:
+		q := cx.parent[p]
+		key := cx.doc.nodes[p - 1]
+		member := core.Edit{node = core.Node_Index(q), op = .Insert, at = max(u32), key = cx.src[key.lo:key.lo + u64(key.n)], text = transmute([]u8)string("[]")}
+		return insert_line(cx, member, q)
+	case .Root, .Header, .Inline, .Scalar:
 	}
 	return true
 }
 
 // The lines of a member of a table, with the comments directly above them.
 @(private = "file")
-remove_lines :: proc(cx: ^Cx, v: u32) {
+remove_lines :: proc(cx: ^Cx, v: u32) -> (head: u64) {
 	if form_of(cx.doc, v) == .Dotted {
+		head = max(u64)
 		it := core.pairs(cx.doc, core.Node_Index(v))
 		for _, w in core.pair_next(&it) {
-			remove_lines(cx, u32(w))
+			head = min(head, remove_lines(cx, u32(w)))
 		}
-		return
+		return head
 	}
 	ls := compose.line_start(cx.src, cx.doc.nodes[v - 1].lo)
-	add(cx, head_start(cx, ls), statement_end(cx, v), nil)
+	head = head_start(cx, ls)
+	add(cx, head, statement_end(cx, v), nil)
+	return head
 }
 
 // Every section the table `v` or the array of tables `v` owns, each with the comments above its header. A section that
-// ends the text takes the blank lines before it.
+// ends the text takes the blank lines before it. Returns where the first section began.
 @(private = "file")
-remove_sections :: proc(cx: ^Cx, v: u32) {
-	first, last := u64(0), u64(0)
+remove_sections :: proc(cx: ^Cx, v: u32) -> (first: u64) {
+	last := u64(0)
 	count := 0
 	for i in v ..< v + cx.doc.nodes[v].n {
 		k := cx.sec_of[i]
@@ -897,6 +974,7 @@ remove_sections :: proc(cx: ^Cx, v: u32) {
 	if lo < first {
 		add(cx, lo, first, nil)
 	}
+	return
 }
 
 @(private = "file")
@@ -1065,6 +1143,17 @@ edit_commit :: proc(list: ^core.Edit_List, _: u8, allocator: runtime.Allocator) 
 	}
 	build_sections(&cx)
 	cx.inline = make(map[u32]Inline_Edits, cx.a)
+	cx.removed = make(map[u32]struct{}, cx.a)
+	cx.grown = make(map[u32]struct{}, cx.a)
+	cx.emptied = make(map[u32]struct{}, cx.a)
+	for e in list.edits {
+		#partial switch e.op {
+		case .Remove:
+			cx.removed[u32(e.node)] = {}
+		case .Insert:
+			cx.grown[u32(e.node)] = {}
+		}
+	}
 	for e in list.edits {
 		if !apply(&cx, e) {
 			return nil, 0, cx.err

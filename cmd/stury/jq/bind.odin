@@ -72,7 +72,7 @@ Bind_Sink :: struct {
 bind_emit :: proc(s: ^Sink, it: Item) -> Signal {
 	x := (^Bind_Sink)(s)
 	if p := x.n.patterns[0]; len(x.n.patterns) == 1 && p.kind == .Var {
-		e := Env{parent = x.env, kind = .Var, name = p.name, value = it.v}
+		e := Env{parent = x.env, kind = .Var, name = p.name, value = it.v, keys = member_keys(it.v)}
 		// A scope on the stack, which the call reads only until it returns: `release_scopes` gives back only the scopes
 		// made below it.
 		return eval(x.ip, x.n.b, x.input, (^Env)(rawptr(&e)), x.track, x.out)
@@ -94,7 +94,7 @@ bind_alternatives :: proc(x: ^Bind_Sink, v: Value, body: proc(x: ^Bind_Sink, e: 
 		if p := pats[0]; p.kind == .Var {
 			// A scope lives only while the evaluation that made it runs (no value holds one), so the
 			// commonest binding, one per reduce or `as` step, needs no allocation.
-			e := Env{parent = x.env, kind = .Var, name = p.name, value = v}
+			e := Env{parent = x.env, kind = .Var, name = p.name, value = v, keys = member_keys(v)}
 			return body(x, &e, st)
 		}
 		b := Binder{ip = x.ip, keys = x.env, base = x.env, x = x, body = body}
@@ -141,7 +141,7 @@ bind_nulls :: proc(ip: ^Interp, pats: []^Pattern, env: ^Env) -> ^Env {
 
 bind_var :: proc(ip: ^Interp, env: ^Env, name: string, v: Value) -> ^Env {
 	e := new_env(ip)
-	e^ = {parent = env, kind = .Var, name = name, value = v}
+	e^ = {parent = env, kind = .Var, name = name, value = v, keys = member_keys(v)}
 	return e
 }
 

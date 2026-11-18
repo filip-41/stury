@@ -64,10 +64,88 @@ index_key_emit :: proc(s: ^Sink, it: Item) -> Signal {
 
 // `n.a`'s outputs, each indexed by `at`.
 index_targets :: proc(x: ^Index_Sink, at: Value) -> Signal {
+	if a := x.n.a; !x.track && a != nil && a.kind == .Var {
+		if v, read := index_var(a.name, x.env, at); read {
+			return x.out.emit(x.out, {v = v})
+		}
+	}
 	inner := x^
 	inner.sink.emit = index_target_emit
 	inner.at = at
 	return eval(x.ip, x.n.a, x.input, x.env, x.track, &inner)
+}
+
+// The names of a wide object of a document that a variable holds, counted at each read by name and hashed at the
+// READS_HASHED_AFTER th, each to the value of its last member as `core.member` reads it. It lives in the memory the
+// variable's scope was made in, which outlives every read of the variable, and so does its hash.
+Member_Keys :: struct {
+	reads:     int,
+	hashed:    bool,
+	allocator: runtime.Allocator,
+	slots:     map[string]core_pkg.Node_Index,
+}
+
+// An object narrower than this is scanned at each read, which costs about what a hash lookup does.
+@(private = "file")
+MEMBERS_HASHED_FROM :: 64
+
+@(private = "file")
+READS_HASHED_AFTER :: 16
+
+// What a scope binding `v` keeps of its names: nil but for a wide object of a document.
+member_keys :: proc(v: Value) -> ^Member_Keys {
+	r, is_ref := plain(v).(Ref)
+	if !is_ref || core_pkg.kind(r.doc, r.node) != .Object || core_pkg.length(r.doc, r.node) < MEMBERS_HASHED_FROM ||
+	   core_pkg.header_of(r.doc) != 0 || core_pkg.is_markup(r.doc) {
+		return nil
+	}
+	return new_clone(Member_Keys{allocator = context.allocator})
+}
+
+// `$name[key]` read from the hash of the names of the object `$name` holds, and whether the hash answered: false for a
+// key that is not a string and a variable with no `Member_Keys`, and until the hash is made.
+@(private = "file")
+index_var :: proc(name: string, env: ^Env, key: Value) -> (Value, bool) {
+	k, is_str := key.(string)
+	if !is_str {
+		return nil, false
+	}
+	e := env
+	for e != nil && (e.kind != .Var || e.name != name) {
+		e = e.parent
+	}
+	if e == nil || e.keys == nil {
+		return nil, false
+	}
+	m := e.keys
+	r := plain(e.value).(Ref)
+	if !m.hashed {
+		m.reads += 1
+		if m.reads != READS_HASHED_AFTER || !hash_members(m, r) {
+			return nil, false
+		}
+		m.hashed = true
+	}
+	node, has := m.slots[k]
+	return Ref{r.doc, node} if has else nil, true
+}
+
+// Fills `m.slots` from object `r`, its names borrowed from the source. False for a name that needs decoding, which the
+// format's `key_equals` compares.
+@(private = "file")
+hash_members :: proc(m: ^Member_Keys, r: Ref) -> bool {
+	doc := r.doc
+	m.slots = make(map[string]core_pkg.Node_Index, core_pkg.length(doc, r.node), m.allocator)
+	end := r.node + core_pkg.Node_Index(doc.nodes[r.node].n)
+	for j := r.node + 1; j < end; {
+		key := doc.nodes[j]
+		if key.role != .Key || key.spelling & core_pkg.SPELLING_DECODE != 0 {
+			return false
+		}
+		m.slots[string(doc.src[key.lo:key.lo + u64(key.n)])] = j + 1
+		j += 1 + core_pkg.Node_Index(core_pkg.subtree_size(doc, j + 1))
+	}
+	return true
 }
 
 index_target_emit :: proc(s: ^Sink, it: Item) -> Signal {

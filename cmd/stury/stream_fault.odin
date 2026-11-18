@@ -60,6 +60,7 @@ Lexing :: enum u8 {
 @(private = "file")
 Parser :: struct {
 	src:          []byte,
+	max_depth:    int, // the deepest an array or object may nest, as the reader's limit
 	events:       [dynamic]Fault_Event, // the events made and not yet given
 	staged:       [dynamic]jq.Value, // those of the byte being scanned, dropped if jq refuses it
 	path:         [dynamic]jq.Value, // an array's index, an object's key once known, else null
@@ -86,7 +87,7 @@ Place :: struct {
 // wait for the separator, starts afresh on the next byte. `reset_each` is a parser jq starts afresh at every call (a
 // cut byte order mark leaves it so under --seq). The walk is the heap's and lives for the run, made in `spare` when
 // one is given: a walk that has ended, whose arrays and arenas' first blocks are kept.
-fault_walk :: proc(src: []byte, line, column: int, seq, rs_follows, reset_each: bool, spare: ^Fault_Walk = nil) -> ^Fault_Walk {
+fault_walk :: proc(src: []byte, max_depth, line, column: int, seq, rs_follows, reset_each: bool, spare: ^Fault_Walk = nil) -> ^Fault_Walk {
 	heap := runtime.heap_allocator()
 	w := spare
 	if w == nil {
@@ -101,6 +102,7 @@ fault_walk :: proc(src: []byte, line, column: int, seq, rs_follows, reset_each: 
 	w^ = Fault_Walk {
 		p = Parser {
 			src = src,
+			max_depth = max_depth,
 			events = w.p.events,
 			staged = w.p.staged,
 			path = w.p.path,
@@ -423,6 +425,9 @@ stream_token :: proc(p: ^Parser, ch: byte) -> string {
 		open := ch == '['
 		if open && p.has_next || !open && p.last == .Value {
 			return "Expected a separator between values"
+		}
+		if len(p.path) >= p.max_depth {
+			return "Exceeds depth limit for parsing"
 		}
 		if p.last == .Open_Object {
 			return message.build("%s%c'", "Expected string key after '{', not '", ch)

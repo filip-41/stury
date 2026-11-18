@@ -56,3 +56,39 @@ bound_entry_points_answer_as_the_handle :: proc(t: ^testing.T) {
 	testing.expect_value(t, terr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, hex_of(tokens), "8120")
 }
+
+// A byte string key reads as the base64 of its payload, as a byte string value does, whether it is one chunk or many.
+@(test)
+byte_string_key_reads_as_base64 :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	// {h'ff': h'ff', (h'01' h'0203'): 1}
+	doc, err := cbor.build(hex("a2 41ff 41ff 5f 4101 420203 ff 01"), .Cbor)
+	testkit.expect_nil(t, err)
+	it := core.pairs(&doc, core.ROOT)
+	want := [2]string{"/w==", "AQID"}
+	for k, _ in core.pair_next(&it) {
+		buf: [64]u8
+		text, ok := core.text(&doc, k, buf[:])
+		testing.expect(t, ok)
+		testing.expect_value(t, text, want[0])
+		want[0], want[1] = want[1], ""
+	}
+	testing.expect_value(t, want[1], "")
+	testing.expect_value(t, want[0], "")
+}
+
+// A byte string key is written back to CBOR as a byte string, whether it was read in one chunk or many.
+@(test)
+byte_string_key_writes_back_as_byte_string :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	for item in ([]string{"a1 41ff 01", "a2 41ff 41ff 5f 4101 420203 ff 01"}) {
+		doc, err := cbor.build(hex(item), .Cbor)
+		testkit.expect_nil(t, err)
+		text, _, werr := cbor.write(&doc, .Cbor)
+		testkit.expect_nil(t, werr)
+		testing.expect_value(t, hex_of(text), hex_of(hex(item)))
+		preferred, _, perr := cbor.write(&doc, .Preferred)
+		testkit.expect_nil(t, perr)
+		testing.expect_value(t, hex_of(preferred), hex_of(hex(item if len(item) < 12 else "a2 41ff 41ff 43010203 01")))
+	}
+}

@@ -66,6 +66,8 @@ Parser :: struct {
 	stage:      [dynamic]core.Token,
 	pending:    [dynamic]Comment,
 	anchors:    [dynamic]Anchor,
+	names:      map[string]int, // the last anchor of each name among the first `indexed`, once many anchors are declared
+	indexed:    int,
 	log:        [dynamic]core.Token,
 	open:       [dynamic]Open_Anchor,
 	handles:    [dynamic]Handle,
@@ -109,6 +111,7 @@ Parser_State :: struct {
 	pause:      bool,
 	typed:      bool, // a key of the text resolves to no string
 	masks:      Masks,
+	by_scan:    bool, // aliases look their anchor up by a scan: a saved walk drops and moves anchors
 	far:        []u8, // the bytes a stream's cursor copied out of its window, which offsets from `FAR` name
 }
 
@@ -128,6 +131,7 @@ parser_destroy :: proc(p: ^Parser) {
 	delete(p.stage)
 	delete(p.pending)
 	delete(p.anchors)
+	delete(p.names)
 	delete(p.log)
 	delete(p.open)
 	delete(p.handles)

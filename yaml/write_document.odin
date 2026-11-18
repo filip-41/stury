@@ -19,6 +19,7 @@ Layout :: struct {
 	out:       write.Out,
 	doc:       ^core.Document,
 	opts:      core.Write_Options,
+	fail:      core.Node_Index, // the node a refusal stands at, for its path
 	arena:     runtime.Arena,
 	step:      int, // the spaces of one block level
 	own:       bool, // the document is YAML
@@ -55,19 +56,27 @@ Properties :: struct {
 	spelled:            bool,
 }
 
+// The least an arena block of a write holds, so a text of one small record asks the allocator for little.
+@(private)
+ARENA_BLOCK :: 16 * 1024
+
 // The handle's `write`: node `node` of `doc` as YAML.
 @(private)
 document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, kept: int, err: core.Typed_Refusal) {
 	spill: [write.ROOM_MAX]u8 = ---
 	l := Layout{doc = doc, opts = opts, own = is_yaml(doc), step = int(opts.indent) if opts.indent > 0 else 2}
-	l.arena.backing_allocator = context.allocator
+	l.arena = {backing_allocator = context.allocator, minimum_block_size = ARENA_BLOCK}
 	defer runtime.arena_destroy(&l.arena)
 	l.defined.allocator = runtime.arena_allocator(&l.arena)
 	write.init(&l.out, &spill, allocator, stream, len(doc.src) + write.ROOM_MAX if l.own else 0)
 	l.commented = len(core.subtree_facts(doc, node)) > 0
 	l.tagged = !l.own && .Tag in doc.readers.holds && core.has_tags(doc)
 	kind := put_root(&l, node)
-	text, err = write.finish(&l.out, {kind = kind})
+	refusal := core.Typed_Refusal{kind = kind}
+	if kind == .Unwritable || kind == .Non_Finite {
+		write.node_path(&refusal, doc, l.fail)
+	}
+	text, err = write.finish(&l.out, refusal)
 	if err.kind != .None {
 		return nil, 0, err
 	}
@@ -489,7 +498,11 @@ put_leaf :: proc(l: ^Layout, node: core.Node_Index, k: core.Kind, flow, key: boo
 		}
 		put_scalar(&l.out, text, shape, l.opts.ascii)
 	case .Number:
-		return false, write.put_number_node(&l.out, l.doc, node, TREE, l.own, NUMBER_FORMS)
+		refused := write.put_number_node(&l.out, l.doc, node, TREE, l.own, NUMBER_FORMS)
+		if refused != .None {
+			l.fail = node
+		}
+		return false, refused
 	case .True:
 		write.put_text(&l.out, own_text(l, node, "true"))
 	case .False:
@@ -505,6 +518,7 @@ put_leaf :: proc(l: ^Layout, node: core.Node_Index, k: core.Kind, flow, key: boo
 		write.put_text(&l.out, "!!binary ")
 		put_scalar(&l.out, text, .Plain if len(text) > 0 else .Double, false)
 	case:
+		l.fail = node
 		return false, .Unwritable
 	}
 	return false, .None

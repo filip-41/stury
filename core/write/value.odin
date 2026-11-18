@@ -143,13 +143,14 @@ value_plain :: proc(t: ^Tokens, v: core.Value, notes: bool) -> core.Typed_Error_
 		return close_noted(t, v, notes)
 	case ^core.Object:
 		open_object(t) or_return
-		if t.opts.sort_keys && len(x.keys) > 1 {
-			for m in sorted(x.keys[:], x.vals[:]) {
+		keys, vals := core.object_keys(x), core.object_vals(x)
+		if t.opts.sort_keys && len(keys) > 1 {
+			for m in sorted(keys, vals) {
 				member(t, m.key, m.val, notes) or_return
 			}
 		} else {
-			for k, i in x.keys {
-				member(t, k, x.vals[i], notes) or_return
+			for k, i in keys {
+				member(t, k, vals[i], notes) or_return
 			}
 		}
 		return close_noted(t, v, notes)

@@ -312,6 +312,10 @@ write_typed_message :: proc(w: io.Writer, e: Typed_Refusal) -> io.Error {
 				io.write_string(w, " in ") or_return
 				reflect.write_typeid(w, e.want.type) or_return
 			}
+			if strings.has_prefix(e.want.text, "@") {
+				_, err := io.write_string(w, ": a markup attribute is named without the @, as in `xml:\"id\"`")
+				return err
+			}
 			if strings.has_prefix(e.want.text, "pattern") && strings.contains_rune(e.want.text, ',') {
 				_, err := io.write_string(w, ": pattern= takes the rest of the tag, commas included, so put it last or add the rule with register_field")
 				return err

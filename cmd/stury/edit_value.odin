@@ -278,7 +278,7 @@ Edit_New :: struct {
 
 @(private = "file")
 edit_object :: proc(w: ^Edit_State, node: core.Node_Index, obj: ^jq.Object) -> bool {
-	if len(obj.keys) > 0 && edit_bare(w, node) {
+	if len(core.object_keys(obj)) > 0 && edit_bare(w, node) {
 		return edit_set(w, node, obj)
 	}
 	members := edit_members(w, node) or_return
@@ -287,9 +287,13 @@ edit_object :: proc(w: ^Edit_State, node: core.Node_Index, obj: ^jq.Object) -> b
 	}
 	// The member a filter reads for a name is its last, as the CLI reads a repeated key.
 	read: map[string]int
+	// Wide objects chain each member to the previous one of its name, so a repeated name costs its own count.
+	before: []int
 	if len(members) > 8 {
 		read = make(map[string]int, len(members), context.temp_allocator)
+		before = make([]int, len(members), context.temp_allocator)
 		for m, i in members {
+			before[i] = read[m.name] if m.name in read else -1
 			read[m.name] = i
 		}
 	}
@@ -304,7 +308,7 @@ edit_object :: proc(w: ^Edit_State, node: core.Node_Index, obj: ^jq.Object) -> b
 		}
 		return -1
 	}
-	keys := obj.keys[:]
+	keys := core.object_keys(obj)[:]
 	if w.sorted {
 		keys = slice.clone(keys, context.temp_allocator)
 		slice.sort(keys)
@@ -315,9 +319,17 @@ edit_object :: proc(w: ^Edit_State, node: core.Node_Index, obj: ^jq.Object) -> b
 		value, _ := jq.object_get(obj, key)
 		if i := read_of(members, read, key); i >= 0 {
 			// A repeated name's other members keep their bytes and go just before the one the filter read.
-			for m, k in members[:i] {
-				if m.name == key {
+			if before != nil {
+				first := len(entries)
+				for k := before[i]; k >= 0; k = before[k] {
 					append(&entries, k)
+				}
+				slice.reverse(entries[first:])
+			} else {
+				for m, k in members[:i] {
+					if m.name == key {
+						append(&entries, k)
+					}
 				}
 			}
 			edit_tree(w, members[i].node, value) or_return
@@ -359,7 +371,7 @@ edit_elements :: proc(w: ^Edit_State, node: core.Node_Index, members: []Source_M
 	news := make([dynamic]Edit_New, context.temp_allocator)
 	moved := false
 	prior, high := -1, -1
-	for key in obj.keys {
+	for key in core.object_keys(obj) {
 		value, _ := jq.object_get(obj, key)
 		group := named[key][:] if key in named else nil
 		if len(group) == 0 {
@@ -669,25 +681,21 @@ edit_valid :: proc(v: jq.Value) -> jq.Value {
 		return var if var != nil else x
 	case ^jq.Object:
 		var: ^jq.Object
-		for val, i in x.vals {
-			key := x.keys[i]
+		for val, i in core.object_vals(x) {
+			key := core.object_keys(x)[i]
 			fixed_key := key if kernel.utf8_valid(transmute([]u8)key) else jq.valid_utf8(key)
 			fixed := edit_valid(val)
 			if var == nil && (fixed_key != key || !edit_same(fixed, val)) {
 				var = new(jq.Object)
-				var.keys = slice.clone_to_dynamic(x.keys[:])
-				var.vals = slice.clone_to_dynamic(x.vals[:])
-				if x.index != nil {
-					var.index = make(map[string]int)
-				}
+				var.slot_keys = slice.clone_to_dynamic(core.object_keys(x))
+				var.slot_vals = slice.clone_to_dynamic(core.object_vals(x))
 			}
 			if var != nil {
-				var.keys[i] = fixed_key
-				var.vals[i] = fixed
-				if var.index != nil {
-					var.index[fixed_key] = i
-				}
+				var.slot_keys[i], var.slot_vals[i] = fixed_key, fixed
 			}
+		}
+		if var != nil && len(x.index) > 0 {
+			core.reindex(var)
 		}
 		return var if var != nil else x
 	}

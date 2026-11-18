@@ -22,6 +22,12 @@ leaf :: #force_no_inline proc(w: ^Walker, f: ^typed.Field, v: uintptr, top, nest
 	p := room(out, LEAF_ROOM)
 	#partial switch f.kind {
 	case .I8, .I16, .I32, .U8, .U16, .U32, .U64:
+		// A tree with no null is TOML's, whose integers are signed 64 bits.
+		when T[.Null] == "" {
+			if f.kind == .U64 && (^u64)(v)^ > u64(max(i64)) {
+				return put_int_64_unsigned(out, (^u64)(v)^)
+			}
+		}
 		when BIN {
 			out.cursor += int_head(p, f.kind, v, T)
 		} else {
@@ -42,8 +48,7 @@ leaf :: #force_no_inline proc(w: ^Walker, f: ^typed.Field, v: uintptr, top, nest
 	case .Cstring:
 		cs := (^cstring)(v)^
 		if cs == nil {
-			out.cursor += put_word(p, T[.Null])
-			return .None
+			return put_null(out, p, T)
 		}
 		return put(out, p, string(cs), &w.opts)
 	case .Enum:
@@ -327,6 +332,9 @@ put_comment_inline :: proc(out: ^Out, doc: ^core.Document, node: core.Node_Index
 @(private)
 put_raw :: proc(w: ^Walker, s: string, top: int, $T: Tree) -> core.Typed_Error_Kind {
 	if len(s) == 0 {
+		when T[.Null] == "" {
+			return .Unwritable
+		}
 		put_text(&w.out, T[.Null])
 		return .None
 	}
@@ -400,6 +408,12 @@ number_text :: proc(p: [^]u8, n: core.Number, $T: Tree) -> (size: int, kind: cor
 
 // A `core.Number` by its value, a float as the tree `T` spells it.
 put_number :: proc(out: ^Out, n: core.Number, $T: Tree) -> core.Typed_Error_Kind {
+	// A tree with no null is TOML's, whose integers are signed 64 bits.
+	when T[.Null] == "" {
+		if n.kind == .Uint && n.bits > u64(max(i64)) {
+			return put_int_64_unsigned(out, n.bits)
+		}
+	}
 	size, kind := number_text(room(out, LEAF_ROOM), n, T)
 	out.cursor += size
 	return kind
@@ -513,9 +527,12 @@ left_out :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> bool {
 	return typed.extra_at(w.plan, r.meta).access == .Write_Only || w.omits != nil && w.omits.call(w.omits, w.plan, r, v)
 }
 
+// The kinds whose value `holds_null` may find null.
+NULL_KINDS :: bit_set[typed.Read_Kind; u64]{.Ptr, .Cstring, .Maybe, .Union, .Any}
+
 // Whether the value at `v` of a record of `kind` and meta `m` is written as null: a nil pointer, `Maybe`, union, `any` or
 // cstring.
-holds_null :: proc(m: ^typed.Meta, kind: typed.Read_Kind, v: uintptr) -> bool {
+holds_null :: #force_no_inline proc(m: ^typed.Meta, kind: typed.Read_Kind, v: uintptr) -> bool {
 	#partial switch kind {
 	case .Ptr, .Cstring:
 		return (^rawptr)(v)^ == nil
@@ -774,6 +791,11 @@ list_struct :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, tag: ^string, $T: T
 	for ; r.kind != .Never; r = intrinsics.ptr_offset(r, 1) {
 		at := v + uintptr(r.offset)
 		if !r.omit || !is_empty(w, r, at) {
+			when T[.Null] == "" {
+				if (r.kind in NULL_KINDS) && holds_null(&w.meta[r.meta], r.kind, at) {
+					continue
+				}
+			}
 			add_entry(w, w.meta[r.meta].name, at, r, put) or_return
 		}
 	}
@@ -864,6 +886,9 @@ enter_target :: proc(w: ^Walker, target: rawptr, rec: ^typed.Field) -> core.Type
 any_value :: proc(w: ^Walker, a: any, $T: Tree, $put: Put) -> (rec: ^typed.Field, kind: core.Typed_Error_Kind) {
 	out := &w.out
 	if a.id == nil || a.data == nil {
+		when T[.Null] == "" {
+			return nil, .Unwritable
+		}
 		put_text(out, T[.Null])
 		return nil, .None
 	}

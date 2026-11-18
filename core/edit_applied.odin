@@ -394,8 +394,8 @@ applied :: proc(a: ^Applied, n: Node_Index) -> Value {
 		applied_put(&b, key, applied(a, members[i].v))
 	}
 	// An element the edits leave with no child element reads as its text, and with none as null.
-	if b.markup && n != ROOT && (len(b.o.keys) == 0 || len(b.o.keys) == 1 && b.o.keys[0] == MARKUP_TEXT) {
-		return b.o.vals[0] if len(b.o.keys) == 1 else nil
+	if keys, vals := object_keys(b.o), object_vals(b.o); b.markup && n != ROOT && (len(keys) == 0 || len(keys) == 1 && keys[0] == MARKUP_TEXT) {
+		return vals[0] if len(keys) == 1 else nil
 	}
 	return b.o if object else b.arr
 }
@@ -433,7 +433,7 @@ applied_put :: proc(b: ^Applied_Build, key: string, v: Value) {
 		markup_put(b.o, key, v)
 		return
 	}
-	at := &b.o.vals[object_slot(b.o, key)]
+	at := &b.o.slot_vals[object_slot(b.o, key)]
 	if group, grouped := at.(^Array); grouped {
 		at = &group.items[len(group.items) - 1]
 	}

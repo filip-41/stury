@@ -603,7 +603,7 @@ $ stury diff old.json new.json
 - **`xml` faults and limits:** a prefix with no declaration, a reserved prefix or namespace, and two attributes with one expanded name are parse errors. The internal subset is read: a declared entity expands where it is referred to, and an attribute the subset gives a default is an attribute of every element that lacks it. References that expand past 8 MiB in all, or past a hundred times the text's size when that is more, are a parse error, or past `--expansion-limit N` bytes. No external subset or entity is read: a reference to an entity only one of them could declare is a parse error, or with `--unread-entities` reads as its own text (`&e;`).
 - **`html`:** the tree is read in XML's shape, with a browser's scripting disabled. Elements are members named in canonical case (`<IMAGE>` is `img`), including the elements the tree adds (`html`, `head`, `body`, `tbody`). A valueless attribute is `""` and a repeated one reads as its first. Every element has a `.@namespace` (HTML, SVG or MathML).
 - **`html` input:** any text reads. A parse error is recovered from as the tree says, and only `check` tells it. A text in an encoding other than UTF-8 is a fault. `--from html:fragment` reads a fragment.
-- **`cbor`:** an empty input has no item. Any well-formed and valid item reads, in any serialization. A byte string reads as the string of its base64 (RFC 4648), and a byte string key as its bytes. An integer key reads as its decimal text. A tag reads as its content, and `.@tag` gives its number. A bignum reads as its number, `undefined` and a simple value as `null`. A fault is placed by line and column, counting 0x0A bytes as line ends.
+- **`cbor`:** an empty input has no item. Any well-formed and valid item reads, in any serialization. A byte string reads as the string of its base64 (RFC 4648), and so does a byte string key. An integer key reads as its decimal text. A tag reads as its content, and `.@tag` gives its number. A bignum reads as its number, `undefined` and a simple value as `null`. A fault is placed by line and column, counting 0x0A bytes as line ends.
 - **`ndjson`:** a blank line is no text. A line that is not one text, or holds two, is a parse error, where jq would read on.
 - **Refused options:** `--follow`, `--seq` and `-R` are refused with `toml`, `xml` and `html`, and `--seq` and `-R` with `yaml` and `cbor`.
 
@@ -1147,6 +1147,8 @@ Each of these is a case in `tools/tests/cli/cases/cli.tsv`.
   the stream goes on from the next line. A string a raw line break cuts gives `Unfinished string at EOF at line 2,
   column 0` and then the next line's own fault, where jq reads on through the string. A fault after the first is told
   at its line and column in the stream, where jq tells a later fault short of its place.
+- Under `--stream-errors` a nesting past the depth limit is a fault, `Exceeds depth limit for parsing`, as under `--stream`,
+  where jq's streaming parser has no limit.
 - A number cut by `0x1E` or the stream's end is refused under `--stream` too (`Potentially truncated top-level numeric
   value`), where jq reads it. `check --seq` refuses it the same way.
 - `check` fails on a JSON input of no text (`No JSON text`), but under `--seq` an empty input, like one of separators

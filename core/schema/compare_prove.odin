@@ -524,7 +524,7 @@ same_node :: proc(p: ^Prover, a, b: rules.Node_Index) -> bool {
 	if a == rules.NONE || b == rules.NONE {
 		return a == b
 	}
-	if p.nested >= MAX_SAME_NESTING {
+	if p.nested >= MAX_SAME_NESTING || p.exhausted {
 		return false
 	}
 	p.nested += 1

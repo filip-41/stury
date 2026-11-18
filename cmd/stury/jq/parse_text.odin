@@ -103,12 +103,12 @@ fn_parse_query_string :: proc(ip: ^Interp, name: string, v: Value, args: []Value
 		i := object_slot(out, key)
 		if i < 0 {
 			object_put(out, key, value)
-		} else if values, repeated := out.vals[i].(^Array); repeated {
+		} else if values, repeated := out.slot_vals[i].(^Array); repeated {
 			append(&values.items, value)
 		} else {
 			values = new_array(2)
-			append(&values.items, out.vals[i], value)
-			out.vals[i] = values
+			append(&values.items, out.slot_vals[i], value)
+			out.slot_vals[i] = values
 		}
 	}
 	return out, .Go

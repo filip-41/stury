@@ -399,7 +399,8 @@ record_value :: proc(ins: ^Inputs, rec: records.Record, own: bool) -> (jq.Value,
 	}
 	// An own scalar's document is let go once its value is taken, so `[inputs]` of numbers holds only the numbers. Only
 	// a JSON-like text tells a scalar by its first byte.
-	own_scalar := own && !stream && !reads_own(&ins.run.opts) && len(rec.text) > 0 && rec.text[0] != '[' && rec.text[0] != '{'
+	// A slurped scalar reads so too, viewing the input's bytes, which `pinned` keeps.
+	own_scalar := (own || ins.slurp) && !stream && !reads_own(&ins.run.opts) && len(rec.text) > 0 && rec.text[0] != '[' && rec.text[0] != '{'
 	built, err := records.build(&ins.texts, rec, runtime.heap_allocator() if stream || own_scalar else context.allocator)
 	doc, fault := jq.judge_build(built, err)
 	if f, bad := fault.?; bad {
@@ -410,6 +411,7 @@ record_value :: proc(ins: ^Inputs, rec: records.Record, own: bool) -> (jq.Value,
 		heap := runtime.heap_allocator()
 		d := new_clone(doc, heap)
 		v := jq.scalar(jq.Ref{d, core.ROOT})
+		ins.pinned ||= !own
 		core.destroy(d)
 		free(d, heap)
 		return v, "", .Value

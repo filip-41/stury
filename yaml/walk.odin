@@ -305,6 +305,7 @@ walk_saving :: proc "contextless" (src: []u8, lo: u64, opts: Options, h: ^$H, re
 	}
 	p := &held.parser
 	parser_init(p, src, opts, hook_sink(H, on), &w)
+	p.by_scan = true
 	p.pos = start
 	p.ls = start
 	ok: bool

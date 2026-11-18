@@ -24,6 +24,7 @@ Tree_Writer :: struct {
 	close:   u64, // the byte past `root`, where the document root's feet that follow it begin
 	kept:    int, // the facts the target holds
 	kind:    core.Typed_Error_Kind, // what stopped the write
+	fail:    core.Node_Index, // the node it stopped at, for the refusal's path
 	json:    bool, // the document is JSON's, in any spec
 	keep:    bool, // facts are written as comments
 	respell: bool, // a number of JSON5 or of another format is spelled again for JSON, and a JSON5 string
@@ -44,7 +45,7 @@ Pair :: struct {
 
 // Writes node `node` of `doc` as spec `as` into `out`. The count is the facts `as` holds.
 @(private)
-write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Out, as: Spec, node: core.Node_Index) -> (kept: int, kind: core.Typed_Error_Kind) {
+write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Out, as: Spec, node: core.Node_Index) -> (kept: int, kind: core.Typed_Error_Kind, fail: core.Node_Index) {
 	w := Tree_Writer{doc = doc, root = node, out = out, opts = opts, json = doc.readers.format == rules_of}
 	w.keep = as != .Json && !doc.partial
 	w.respell = !w.json || Spec(doc.as.spec) == .Json5 && as != .Json5
@@ -63,9 +64,9 @@ write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Ou
 		}
 	}
 	if !tree_walk(&w, node) {
-		return 0, w.kind
+		return 0, w.kind, w.fail
 	}
-	return w.kept, .None
+	return w.kept, .None, 0
 }
 
 // Writes fact `f` with its markers. A line comment ends its line in compact text, since nothing may follow it there.
@@ -227,6 +228,7 @@ tree_head :: #force_inline proc(w: ^Tree_Writer, i, key: core.Node_Index, depth:
 	if key != core.NO_NODE {
 		w.kind = put_token_string(w.out, doc.src, doc, key, doc.nodes[key], w.opts, w.json, w.copy)
 		if w.kind != .None {
+			w.fail = key
 			return
 		}
 		write.put_text(w.out, ": " if w.opts.pretty else ":")
@@ -300,9 +302,11 @@ tree_scalar :: #force_inline proc(w: ^Tree_Writer, i: core.Node_Index) -> bool {
 	cell.kind = doc.readers.resolve(doc, i) if t.kind == .Plain && (w.resolve || t.n == 0) else t.kind
 	if w.respell && cell.kind == .Number {
 		w.kind = write.put_number_node(w.out, doc, i, TREE, false, w.forms, w.opts.jq_numbers)
+		w.fail = i
 		return w.kind == .None
 	}
 	w.kind = put_token(w.out, doc.src, doc, i, cell, w.opts, w.json, w.copy)
+	w.fail = i
 	return w.kind == .None
 }
 

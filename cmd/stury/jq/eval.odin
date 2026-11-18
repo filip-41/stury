@@ -58,6 +58,8 @@ Env :: struct {
 	node:       ^Node,  // a `Closure`'s filter argument
 	scope:      ^Env,   // a `Closure`'s scope, the caller's
 	label:      int,    // a `Label`'s id, which `Interp.brk` names to unwind to it
+	// A `Var` an `as` binds to a wide object of a document: the object's names, read by `$name[k]` (`index_var`).
+	keys:       ^Member_Keys,
 }
 
 Input_Source :: struct {

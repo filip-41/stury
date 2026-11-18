@@ -162,7 +162,7 @@ disown :: proc(v: Value, owned: ^Owned) {
 	case ^Array:
 		members = x.items[:]
 	case ^Object:
-		members = x.vals[:]
+		members = object_vals(x)[:]
 	}
 	for m in members {
 		if p := container(m); p != nil && owned[p] {
@@ -299,7 +299,7 @@ set_key :: proc(ip: ^Interp, t: Value, key: Value, v: Value, owned: ^Owned) -> (
 				o = owned_copy(t, owned).(^Object)
 			}
 			if i := object_slot(o, k); i >= 0 {
-				o.vals[i] = keep_facts(o.vals[i], v)
+				o.slot_vals[i] = keep_facts(o.slot_vals[i], v)
 			} else {
 				object_append(o, k, v)
 			}

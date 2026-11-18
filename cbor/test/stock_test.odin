@@ -4,6 +4,7 @@
 // tags inside tags.
 package cbor_tests
 
+import "core:encoding/base64"
 import "core:encoding/cbor"
 import "core:fmt"
 import "core:math/rand"
@@ -195,7 +196,7 @@ stock_dump :: proc(b: ^strings.Builder, v: cbor.Value, key := false) -> bool {
 			fmt.sbprintf(b, "%q", string(x^))
 			return true
 		case ^cbor.Bytes:
-			hex_text(b, x^)
+			fmt.sbprintf(b, "%q", base64.encode(x^, allocator = context.temp_allocator))
 			return true
 		}
 		return false

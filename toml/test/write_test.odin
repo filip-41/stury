@@ -430,8 +430,8 @@ marshal_refuses_a_key_a_table_repeats :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	context.allocator = context.temp_allocator
 	o := new(core.Object)
-	append(&o.keys, "k", "k")
-	append(&o.vals, core.Value(1.0), core.Value(2.0))
+	append(&o.slot_keys, "k", "k")
+	append(&o.slot_vals, core.Value(1.0), core.Value(2.0))
 	_, err := toml.marshal(struct {
 			v: core.Value,
 		}{o})

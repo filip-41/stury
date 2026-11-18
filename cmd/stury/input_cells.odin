@@ -195,17 +195,15 @@ repeated_header :: proc(name: string, data: []byte, doc: ^core.Document) -> (msg
 	if core.kind(doc, core.ROOT) != .Object {
 		return
 	}
-	names := make([dynamic]string, context.temp_allocator)
+	names := make(map[string]struct{}, context.temp_allocator)
 	it := core.pairs(doc, core.ROOT)
 	for k in core.pair_next(&it) {
 		key := jq.node_string(doc, k)
-		for seen in names {
-			if seen == key {
-				line, col := core.locate(data, doc.nodes[k].lo)
-				return message.build_temp("%s:%d:%d: Duplicate header name %q", name, line, col, key), true
-			}
+		if key in names {
+			line, col := core.locate(data, doc.nodes[k].lo)
+			return message.build_temp("%s:%d:%d: Duplicate header name %q", name, line, col, key), true
 		}
-		append(&names, key)
+		names[key] = {}
 	}
 	return
 }

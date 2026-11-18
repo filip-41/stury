@@ -32,13 +32,14 @@ array_append :: proc(a: ^Array, v: Value) {
 	append(&a.items, v)
 }
 
-// The slot of the last member of `o` named `k`, or -1.
+// The slot of the last member of `o` named `k`, or -1. A dead slot is never found: it has left the index, and an object
+// with no index has no dead slot.
 object_slot :: proc(o: ^Object, k: string) -> int {
 	if len(o.index) > 0 {
 		i, has := o.index[k]
 		return i if has else -1
 	}
-	#reverse for key, i in o.keys {
+	#reverse for key, i in o.slot_keys {
 		if key == k {
 			return i
 		}
@@ -46,10 +47,33 @@ object_slot :: proc(o: ^Object, k: string) -> int {
 	return -1
 }
 
+// The keys of `o`'s members in order, valid until the next insert or delete. Dead slots are compacted away first, which
+// writes `o`: an object read on several threads is never deleted from, since a delete changes only an object its caller
+// owns.
+object_keys :: #force_inline proc(o: ^Object) -> []string {
+	if o.dead > 0 {
+		compact(o)
+	}
+	return o.slot_keys[:]
+}
+
+// The values of `o`'s members, in the order of `object_keys`, under the same terms.
+object_vals :: #force_inline proc(o: ^Object) -> []Value {
+	if o.dead > 0 {
+		compact(o)
+	}
+	return o.slot_vals[:]
+}
+
+// The number of `o`'s members.
+object_length :: #force_inline proc(o: ^Object) -> int {
+	return len(o.slot_keys) - int(o.dead)
+}
+
 // Set `k` in an object being built, in place: a key it has keeps its slot and takes the new value.
 object_put :: proc(o: ^Object, k: string, v: Value) {
 	if i := object_slot(o, k); i >= 0 {
-		o.vals[i] = v
+		o.slot_vals[i] = v
 		return
 	}
 	object_append(o, k, v)
@@ -57,23 +81,38 @@ object_put :: proc(o: ^Object, k: string, v: Value) {
 
 // `k` added to `o` as a member of its own, set to `v`, whether `o` has the name or not.
 object_append :: #force_inline proc(o: ^Object, k: string, v: Value) {
-	make_room(&o.keys)
-	make_room(&o.vals)
-	append(&o.keys, k)
-	append(&o.vals, v)
+	make_room(&o.slot_keys)
+	make_room(&o.slot_vals)
+	append(&o.slot_keys, k)
+	append(&o.slot_vals, v)
 	if len(o.index) > 0 {
-		o.index[k] = len(o.keys) - 1
-	} else if len(o.keys) == INDEX_FROM {
+		index_slot(o, k, len(o.slot_keys) - 1)
+	} else if len(o.slot_keys) == INDEX_FROM {
 		reindex(o)
 	}
 }
 
-// `o`'s key index made again from its keys, a repeated key's at its last slot.
+// Room in `o` for `n` members in all.
+object_reserve :: proc(o: ^Object, n: int) {
+	reserve(&o.slot_keys, n)
+	reserve(&o.slot_vals, n)
+}
+
+// `o`'s key index made again from its keys, a repeated key's at its last slot. `o` has no dead slot.
 reindex :: proc(o: ^Object) {
 	clear(&o.index)
-	for key, i in o.keys {
-		o.index[key] = i
+	o.repeats = false
+	for key, i in o.slot_keys {
+		index_slot(o, key, i)
 	}
+}
+
+// Points `o`'s index at slot `i` for `k`, noting a key that already had one.
+@(private = "file")
+index_slot :: #force_inline proc(o: ^Object, k: string, i: int) {
+	n := len(o.index)
+	o.index[k] = i
+	o.repeats ||= len(o.index) == n
 }
 
 // Room in `a` for one more, doubling from 2 where append reserves 8, since built arrays and objects are mostly small
@@ -84,32 +123,75 @@ make_room :: #force_inline proc(a: ^[dynamic]$T) {
 	}
 }
 
+// The key of a dead slot, told from every other key by where its bytes are.
+@(private = "file")
+dead_byte: u8
+
+@(private = "file")
+is_dead :: #force_inline proc(k: string) -> bool {
+	return raw_data(k) == &dead_byte
+}
+
+// Removes `k`'s last member from `o`. An indexed object with no repeated key leaves the slot dead, its key out of the
+// index, so the other slots keep their place and a delete costs a hash lookup. The dead slots are compacted once they
+// are half the slots, or at the next read through `object_keys`.
 object_delete :: proc(o: ^Object, k: string) {
 	i := object_slot(o, k)
 	if i < 0 {
 		return
 	}
-	ordered_remove(&o.keys, i)
-	ordered_remove(&o.vals, i)
-	if len(o.index) > 0 {
-		reindex(o)
+	if len(o.index) == 0 || o.repeats {
+		if o.dead > 0 {
+			compact(o)
+			i = object_slot(o, k)
+		}
+		ordered_remove(&o.slot_keys, i)
+		ordered_remove(&o.slot_vals, i)
+		if len(o.index) > 0 {
+			reindex(o)
+		}
+		return
 	}
+	delete_key(&o.index, k)
+	o.slot_keys[i] = string(([^]u8)(&dead_byte)[:0])
+	o.slot_vals[i] = nil
+	o.dead += 1
+	if int(o.dead) * 2 >= len(o.slot_keys) {
+		compact(o)
+	}
+}
+
+// `o` with its dead slots dropped and its index made again.
+@(private = "file")
+compact :: proc(o: ^Object) {
+	kept := 0
+	for k, i in o.slot_keys {
+		if !is_dead(k) {
+			o.slot_keys[kept], o.slot_vals[kept] = k, o.slot_vals[i]
+			kept += 1
+		}
+	}
+	resize(&o.slot_keys, kept)
+	resize(&o.slot_vals, kept)
+	o.dead = 0
+	reindex(o)
 }
 
 // `o` without the keys in `gone`, in one pass however many there are.
 object_delete_all :: proc(o: ^Object, gone: map[string]bool) {
+	keys, vals := object_keys(o), object_vals(o)
 	kept := 0
-	for k, i in o.keys {
+	for k, i in keys {
 		if !gone[k] {
-			o.keys[kept], o.vals[kept] = k, o.vals[i]
+			keys[kept], vals[kept] = k, vals[i]
 			kept += 1
 		}
 	}
-	if kept == len(o.keys) {
+	if kept == len(keys) {
 		return
 	}
-	resize(&o.keys, kept)
-	resize(&o.vals, kept)
+	resize(&o.slot_keys, kept)
+	resize(&o.slot_vals, kept)
 	if len(o.index) > 0 {
 		reindex(o)
 	}
@@ -199,8 +281,9 @@ kept_value :: proc(v: Value, keep: ^Document = nil, dups := Duplicates.Default) 
 		return a
 	case ^Object:
 		o := new_object()
-		for k, i in x.keys {
-			object_append(o, strings.clone(k), kept_value(x.vals[i], keep, dups))
+		keys, vals := object_keys(x), object_vals(x)
+		for k, i in keys {
+			object_append(o, strings.clone(k), kept_value(vals[i], keep, dups))
 		}
 		return o
 	case Node_Ref:

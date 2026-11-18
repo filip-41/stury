@@ -166,8 +166,9 @@ attributes_as_members :: proc(v: Value) -> Value {
 		return a
 	case ^Object:
 		o := new_object()
-		for k, i in x.keys {
-			object_append(o, k, attributes_as_members(x.vals[i]))
+		keys, vals := object_keys(x), object_vals(x)
+		for k, i in keys {
+			object_append(o, k, attributes_as_members(vals[i]))
 		}
 		return o
 	case Node_Ref:
@@ -181,14 +182,15 @@ attributes_as_members :: proc(v: Value) -> Value {
 		}
 		o := new_object()
 		if attributes != nil {
-			for k, i in attributes.keys {
-				object_append(o, strings.concatenate({"@", k}), attributes.vals[i])
+			akeys, avals := object_keys(attributes), object_vals(attributes)
+			for k, i in akeys {
+				object_append(o, strings.concatenate({"@", k}), avals[i])
 			}
 		}
 		if element {
-			members := markup_members(x)
-			for k, i in members.keys {
-				object_append(o, k, attributes_as_members(members.vals[i]))
+			mkeys, mvals := object_keys(markup_members(x)), object_vals(markup_members(x))
+			for k, i in mkeys {
+				object_append(o, k, attributes_as_members(mvals[i]))
 			}
 		} else if value_kind(v) != .Null {
 			object_append(o, MARKUP_TEXT, v)
@@ -213,23 +215,25 @@ members_as_attributes :: proc(v: Value) -> Value {
 	case ^Object:
 		bodies := make([dynamic]string)
 		o := new_object()
-		for k, i in x.keys {
-			if name, s, is_attribute := member_attribute(k, x.vals[i]); is_attribute {
+		keys, vals := object_keys(x), object_vals(x)
+		for k, i in keys {
+			if name, s, is_attribute := member_attribute(k, vals[i]); is_attribute {
 				append(&bodies, attribute_body(name, s))
 			} else if len(k) < 2 || k[0] != '@' {
-				object_append(o, k, members_as_attributes(x.vals[i]))
-			} else if value_kind(x.vals[i]) != .Null {
-				object_append(o, k, x.vals[i])
+				object_append(o, k, members_as_attributes(vals[i]))
+			} else if value_kind(vals[i]) != .Null {
+				object_append(o, k, vals[i])
 			}
 		}
 		if len(bodies) == 0 {
 			return o
 		}
 		content: Value = o
-		if len(o.keys) == 0 {
+		okeys, ovals := object_keys(o), object_vals(o)
+		if len(okeys) == 0 {
 			content = nil
-		} else if len(o.keys) == 1 && o.keys[0] == MARKUP_TEXT {
-			content = o.vals[0]
+		} else if len(okeys) == 1 && okeys[0] == MARKUP_TEXT {
+			content = ovals[0]
 		}
 		return noted(content, .Attribute, bodies[:])
 	case Node_Ref:

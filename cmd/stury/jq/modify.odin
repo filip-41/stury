@@ -448,7 +448,7 @@ holds_owned :: proc(v: Value, owned: ^Owned, budget: ^int) -> bool {
 	case ^Array:
 		members = x.items[:]
 	case ^Object:
-		members = x.vals[:]
+		members = object_vals(x)[:]
 	case ^Commented:
 		return holds_owned(x.v, owned, budget)
 	}

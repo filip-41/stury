@@ -692,3 +692,15 @@ marshal_under_failing_allocators :: proc(t: ^testing.T) {
 		testkit.sweep_write(t, sweep_try, &try, string(want))
 	}
 }
+
+// An integer has no negative zero, so JSON's `-0` is written as the float that has.
+@(test)
+negative_zero_integer_is_written_as_a_float :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	doc, berr := stury_json.build(transmute([]u8)string(`[0,-0,-0.0,-1]`), .Json)
+	testkit.expect_nil(t, berr)
+	text, _, err := cbor.write(&doc, .Preferred)
+	testkit.expect_nil(t, err)
+	testing.expect_value(t, spaced(text), "84 00 f9 80 00 f9 80 00 20")
+}

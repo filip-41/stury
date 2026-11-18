@@ -35,7 +35,7 @@ hex :: proc(text: string) -> []u8 {
 
 // Writes node `i` of `doc` as text both the document and the stock decoder's value can be written to: integers as
 // `i:<value>`, floats as `f:<bits>` or `nan`, strings quoted, byte strings as `h:<hex>`, a simple value as `simple(n)`,
-// and a key as its text.
+// and a key as its text, a byte string key as its base64.
 @(private)
 dump :: proc(b: ^strings.Builder, doc: ^core.Document, i: core.Node_Index) {
 	switch core.kind(doc, i) {
@@ -98,13 +98,8 @@ dump :: proc(b: ^strings.Builder, doc: ^core.Document, i: core.Node_Index) {
 			}
 			first = false
 			buf: [4096]u8
-			if core.kind(doc, k) == .Bytes {
-				p, _ := core.doc_bytes(doc, k, buf[:])
-				hex_text(b, p)
-			} else {
-				s, _ := core.text(doc, k, buf[:])
-				fmt.sbprintf(b, "%q", s)
-			}
+			s, _ := core.text(doc, k, buf[:])
+			fmt.sbprintf(b, "%q", s)
 			strings.write_byte(b, ':')
 			dump(b, doc, v)
 		}

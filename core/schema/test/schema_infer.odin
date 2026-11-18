@@ -304,6 +304,8 @@ sample_passes_its_check :: proc(t: ^testing.T) {
 		`{"type": "object", "required": ["a", "b"], "properties": {"a": {"type": "integer"}, "b": {"type": "string"}, "c": {"type": "null"}}, "additionalProperties": false}`,
 		`{"type": "object", "additionalProperties": {"type": "integer"}, "minProperties": 2, "propertyNames": {"pattern": "^k[0-9]$"}}`,
 		`{"type": "object", "patternProperties": {"^x-": {"type": "string"}}, "minProperties": 1}`,
+		`{"type": "object", "unevaluatedProperties": {"type": "integer"}, "minProperties": 3}`,
+		`{"type": "object", "properties": {"a": {"type": "string"}}, "patternProperties": {"^x-": {"type": "string"}}, "unevaluatedProperties": {"type": "integer"}, "minProperties": 5}`,
 		`{"type": "object", "properties": {"a": {}}, "required": ["a"], "dependentRequired": {"a": ["z"]}}`,
 		`{"anyOf": [{"type": "integer"}, {"type": "string"}]}`,
 		`{"oneOf": [{"type": "integer", "minimum": 10}, {"type": "string"}]}`,

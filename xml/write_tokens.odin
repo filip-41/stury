@@ -55,7 +55,7 @@ TOKENS := write.Token_Spelling {
 	},
 	stop = proc(t: ^write.Tokens) {
 		if e := (^Elements)(t.state); e != nil {
-			delete(e.names)
+			el_release(e)
 			free(e, t.base.allocator)
 			t.state = nil
 		}

@@ -23,7 +23,7 @@ Field_Tag :: struct {
 // Reads a field's tag: `name,flag,flag`, or `-` to leave the field out. An empty name keeps the field's own, renamed by
 // `Plan_Options.rename`. In the name a backslash makes the byte after it literal, so a comma or a backslash is written
 // `\,` or `\\`. The flags are `omitempty` and `omitunset`, which only a writer reads, `required` and `unknown`. Any other
-// is returned in `bad_flag`.
+// is returned in `bad_flag`, and so is a markup name that starts with `@`.
 @(private)
 field_tag :: proc(b: ^Builder, name, tag: string) -> (t: Field_Tag, bad_flag: string) {
 	value, found := reflect.struct_tag_lookup(reflect.Struct_Tag(tag), b.p.readers.tag_key)
@@ -51,6 +51,11 @@ field_tag :: proc(b: ^Builder, name, tag: string) -> (t: Field_Tag, bad_flag: st
 		append(&out, value[i])
 	}
 	t.named = len(out) > 0
+	// A markup member reads an attribute by its plain name, so `@name` would match no node.
+	if b.p.readers.attribute != nil && len(out) > 1 && out[0] == '@' {
+		bad := owned(b, out[:])
+		return {}, bad
+	}
 	t.name = owned(b, out[:]) if t.named else renamed(b, name)
 	if !t.named {
 		delete(out)

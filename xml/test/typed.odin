@@ -252,3 +252,29 @@ plans_read_xml :: proc(t: ^testing.T) {
 	_, empty := xml.plan_of(&rules.Description{})
 	testkit.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 }
+
+// An attribute is read by its plain name, so a tag that names it `@id` is refused when the plan is made, with the
+// spelling to use, where it would read nothing.
+@(test)
+a_tag_spelled_as_an_attribute_member_is_refused :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	Order :: struct {
+		id: string `xml:"@id"`,
+	}
+	_, err := xml.plan_make(Order)
+	testkit.expect_kind(t, err, core.Typed_Error_Kind.Bad_Tag)
+	typed_err, _ := err.(core.Typed_Error)
+	testing.expect_value(t, typed_err.want.text, "@id")
+	Plain :: struct {
+		order: struct {
+			id: string `xml:"id"`,
+		},
+	}
+	plan, perr := xml.plan_make(Plain)
+	testkit.expect_nil(t, perr)
+	defer typed.plan_destroy(&plan)
+	v: Plain
+	testkit.expect_nil(t, xml.unmarshal(transmute([]u8)string(`<order id="7"/>`), .Xml, &v, &plan))
+	testing.expect_value(t, v.order.id, "7")
+}

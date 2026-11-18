@@ -827,17 +827,16 @@ copy_value :: proc(c: ^Copier, v: Value) -> Value {
 			return shared(c, m)
 		}
 		o := new_object()
-		o.keys = make([dynamic]string, 0, len(x.keys))
-		o.vals = make([dynamic]Value, 0, len(x.vals))
-		for k, i in x.keys {
-			append(&o.keys, copy_string(c, k))
-			append(&o.vals, copy_value(c, x.vals[i]))
+		keys, vals := object_keys(x), object_vals(x)
+		o.slot_keys = make([dynamic]string, 0, len(keys))
+		o.slot_vals = make([dynamic]Value, 0, len(vals))
+		for k, i in keys {
+			append(&o.slot_keys, copy_string(c, k))
+			append(&o.slot_vals, copy_value(c, vals[i]))
 		}
 		if len(x.index) > 0 {
-			o.index = make(map[string]int, len(o.keys))
-			for k, i in o.keys {
-				o.index[k] = i
-			}
+			o.index = make(map[string]int, len(keys))
+			reindex(o)
 		}
 		return made_container(c, x, o)
 	case ^Commented:
