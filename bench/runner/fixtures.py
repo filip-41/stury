@@ -71,13 +71,13 @@ def fetch(group):
 
 
 def generate(names, check):
-    """Fetches the downloaded fixtures (only the corpus the generators read when NAMES is given), then writes the
-    fixtures NAMES (all when empty). Returns the process
-    status: 1 when a pinned fixture came out with other bytes."""
+    """Fetches the downloaded fixtures (only the corpus the generators read when NAMES is given or CHECK is set), then
+    writes the fixtures NAMES (all when empty). Returns the process status: 1 when a pinned fixture came out with other
+    bytes."""
     unknown = [n for n in names if n not in gen.FIXTURES]
     if unknown:
         sys.exit("unknown fixture: " + ", ".join(unknown))
-    fetch(None if not names else "corpus")
+    fetch("corpus" if names or check else None)
     off = gen.write(names or gen.FIXTURES, table()["generated"], check)
     if off:
         print("not the pinned bytes: " + ", ".join(off), file=sys.stderr)

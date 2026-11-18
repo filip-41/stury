@@ -166,8 +166,8 @@ answers matched.
 
 ## Fixtures
 
-`make fixtures` writes every input into `bench/fixtures/`, and `bench fixtures --check` verifies them without writing.
-Each file's SHA-256 is pinned in `fixtures.toml`.
+`make fixtures` writes every input into `bench/fixtures/`, and `bench fixtures --check` verifies the generated ones
+without writing them, fetching only the corpus they read. Each file's SHA-256 is pinned in `fixtures.toml`.
 
 - **Downloaded:** the twitter, citm and canada corpus, the jsonschema-benchmark schemas, and real YAML, TOML, XML and
   HTML documents (Kubernetes manifests, an OpenAPI spec, lock files, an OpenStreetMap extract, the WHATWG spec,
