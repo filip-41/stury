@@ -75,7 +75,7 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then
             # The Makefile's link flags are POSIX's: Windows takes its own from platform_windows.odin.
             mkdir -p build
-            odin build cmd/stury -o:speed -define:STURY_VERSION="\"${VERSION#v}\"" -out:build/stury.exe
+            odin build cmd/stury -o:speed -resource:cmd/stury/stury.rc -define:STURY_VERSION="\"${VERSION#v}\"" -out:build/stury.exe
           elif [ -n "$TARGET_OPT" ]; then
             make build-cli STURY_VERSION="${VERSION#v}" OPT="$TARGET_OPT"
           else

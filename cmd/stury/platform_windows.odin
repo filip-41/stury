@@ -10,9 +10,8 @@ import win "core:sys/windows"
 import "core:time"
 
 // The main thread gets the 8 MiB of stack POSIX gives it, not the linker's 1 MiB: a schema's read and bind recurse
-// there as deep as their depth bound. stury.manifest, embedded, takes the process heap from the segment heap on
-// Windows 10 2004 and later, which ignore it before.
-@(extra_linker_flags = "/STACK:8388608 /MANIFEST:EMBED /MANIFESTINPUT:\"" + #directory + "stury.manifest\"")
+// there as deep as their depth bound.
+@(extra_linker_flags = "/STACK:8388608")
 foreign import kernel32 "system:Kernel32.lib"
 
 @(private = "file", default_calling_convention = "system")
