@@ -7,7 +7,7 @@ import "core:slice"
 import core "../../core"
 import engine "../../core/build"
 import records "../../core/records"
-import "jq"
+import "../../jq"
 
 // Why a filter is the interpreter's. `--explain` lists them in this order.
 Route_Why :: enum u8 {
@@ -50,10 +50,7 @@ Route :: struct {
 	scanning: bool,
 	path:     core.Path,
 	// select(PATH op LITERAL): a text prints whole when its answer compares so. `op` is `.None` for any other filter.
-	select:   struct {
-		op:      jq.Op,
-		literal: jq.Value,
-	},
+	select:   jq.Selection,
 	whys:     bit_set[Route_Why],
 	columns:  ^Columns, // a delimited input's filter that reads only columns
 	using explain: Explain,
@@ -93,7 +90,7 @@ choose_route :: proc(run: ^Run, text: string) {
 		r.path = path
 		return
 	}
-	r.whys += {.Not_Path} if perr == nil else selected_path(run, text)
+	r.whys += {.Not_Path} if perr == nil else selected_path(run)
 	// `select` under JSONC or JSON5 is the interpreter's.
 	if FORMATS[o.from].spec != .Json {
 		r.whys += {.Dialect_Select}
@@ -111,36 +108,40 @@ is_unscanned :: proc(s: core.Step) -> bool {
 	return false
 }
 
-// Sets `run.route`'s path and select when the filter `text` is `select(P op LITERAL)`, P a path of names and indexes
-// and LITERAL no array or object, else returns why not.
+// Sets `run.route`'s path and select when the filter is `select(P op LITERAL)`, P a path of names and indexes and
+// LITERAL no array or object, else returns why not.
 @(private = "file")
-selected_path :: proc(run: ^Run, text: string) -> bit_set[Route_Why] {
-	n := run.prog
-	if n.kind != .Call || n.name != "select" || len(n.args) != 1 {
-		return {.Not_Path}
+selected_path :: proc(run: ^Run) -> bit_set[Route_Why] {
+	sel, faults := run.shape.selection, run.shape.select_faults
+	if faults != {} {
+		return whys_of(faults)
 	}
-	if b, bound := n.native.?; !bound || b.native != jq.native_select {
-		return {.Select_Redefined}
-	}
-	cmp := n.args[0]
-	if cmp.kind != .Binary || cmp.op < .Eq || cmp.op > .Ge || cmp.b.kind != .Literal {
-		return {.Select_Compare}
-	}
-	if k := jq.kind(cmp.b.value); k == .Array || k == .Object {
-		return {.Select_Compare}
-	}
-	for x := cmp.a; x.kind != .Identity; x = x.a {
-		if x.kind != .Field && x.kind != .Index || x.opt {
-			return {.Select_Path}
-		}
-	}
-	path, perr := core.parse_path(text[cmp.a.loc.start:cmp.a.loc.end])
+	path, perr := core.parse_path(sel.path)
 	if perr != nil || path.limit != nil || len(path.steps) == 0 {
 		return {.Select_Path}
 	}
 	run.route.path = path
-	run.route.select = {cmp.op, cmp.b.value}
+	run.route.select = sel
 	return {}
+}
+
+// Why the filter is the interpreter's, from why it is not the shape a route asked.
+whys_of :: proc(faults: bit_set[jq.Shape_Fault]) -> (whys: bit_set[Route_Why]) {
+	@(static, rodata)
+	WHY := [jq.Shape_Fault]Route_Why {
+		.Not_Select     = .Not_Path,
+		.Redefined      = .Select_Redefined,
+		.Not_Comparison = .Select_Compare,
+		.Not_Path       = .Select_Path,
+		.Not_Columns    = .Not_Columns,
+		.Select_Columns = .Select_Columns,
+		.Object_Key     = .Object_Key,
+		.Object_Member  = .Object_Member,
+	}
+	for f in faults {
+		whys += {WHY[f]}
+	}
+	return
 }
 
 // Answers the scanned filter over the text `data` and prints its outputs, as `run_once` would. Returns false, with
@@ -154,7 +155,7 @@ answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
 	err: core.Error
 	if !scans(route.path) {
 		fault: Maybe(core.Fault)
-		if doc, fault = jq.build_text(data, r, context.temp_allocator); fault != nil {
+		if doc, fault = build_text(data, r, context.temp_allocator); fault != nil {
 			err = core.error_of(fault)
 		} else if len(route.path.steps) == 0 && route.path.limit == nil {
 			answers = root[:] // `.`
@@ -208,25 +209,19 @@ answer :: proc(run: ^Run, doc: ^core.Document, answers: []core.Answer, err: core
 		return false
 	}
 	sel := route.select
-	eq := sel.op == .Eq || sel.op == .Ne
 	for a in answers {
-		value: jq.Value
+		value: core.Value
 		if a.outcome == .Found {
-			value = jq.Ref{doc, a.node}
+			value = core.Node_Ref{doc, a.node}
 		}
 		if sel.op == .None {
 			emit(&run.output, value) or_return
 			continue
 		}
-		// A container is above every literal the filter may hold.
-		c := 1
-		if a.outcome != .Found || doc.nodes[a.node].kind < .Array {
-			c = jq.compare(jq.scalar(value), sel.literal, eq = eq)
-		}
-		if jq.compared(sel.op, c) {
-			whole, _ := jq.build_text(data, r, context.temp_allocator)
+		if jq.selects(sel, value) {
+			whole, _ := build_text(data, r, context.temp_allocator)
 			defer core.destroy(&whole)
-			emit(&run.output, jq.Ref{&whole, core.ROOT}) or_return
+			emit(&run.output, core.Node_Ref{&whole, core.ROOT}) or_return
 		}
 	}
 	finish_input(&run.output)

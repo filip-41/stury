@@ -15,7 +15,7 @@ import core "../../core"
 import "../../core/write"
 import records "../../core/records"
 import json "../../json"
-import "jq"
+import "../../jq"
 
 // Answers the whole JSON text `ins.data` through the entries of its spine array on the pool's threads, when the text
 // is long and the filter is `.NAME...[]` followed by steps or a pipe, which each entry answers alone. False, with
@@ -27,15 +27,14 @@ entries_pieces :: proc(ins: ^Inputs) -> bool {
 	if !found || run.route.select.op != .None {
 		return false
 	}
-	names := make([dynamic]string, context.temp_allocator)
-	prog, spined := strip_spine(run.prog, &names)
-	if !spined || len(names) != levels {
+	names := run.shape.spine.names
+	if run.shape.spine.kind != .Entries || len(names) != levels {
 		return false
 	}
 	ps: Pieces
 	pieces_init(&ps, run, ins.as, .Entries)
 	defer free_slots(ps.run, ps.slots)
-	ps.entries, ps.template.prog = true, prog
+	ps.entries, ps.template.prog = true, run.shape.spine.each.?
 	if run.route.scanning {
 		path := &ps.template.route.path
 		if path.limit != nil || len(path.steps) <= levels {
@@ -53,7 +52,7 @@ entries_pieces :: proc(ins: ^Inputs) -> bool {
 		path.optional = transmute(bit_set[0 ..< core.MAX_STEPS;u64])(transmute(u64)path.optional >> uint(levels + 1))
 	}
 	flush_some(&run.output, force = true)
-	if records.each(data, ins.as, .Entries, piece_task, &ps, run_pool(run), at) != nil || ps.stopped || !spine_named(data, at, ps.slots[:], ps.plain, names[:]) {
+	if records.each(data, ins.as, .Entries, piece_task, &ps, run_pool(run), at) != nil || ps.stopped || !spine_named(data, at, ps.slots[:], ps.plain, names) {
 		return false
 	}
 	answered, interpreted := 0, false
@@ -72,42 +71,6 @@ entries_pieces :: proc(ins: ^Inputs) -> bool {
 		finish_input(&run.output)
 	}
 	return true
-}
-
-// `n` with the iteration of the spine array at its start, `.NAME...[]`, made `.`, and the names appended to `names`:
-// the filter each entry answers what the text answers through the array. False for any other filter, and for a step
-// whose argument is not a literal, which reads the text and not the entry.
-@(private = "file")
-strip_spine :: proc(n: ^jq.Node, names: ^[dynamic]string) -> (stripped: ^jq.Node, ok: bool) {
-	if n == nil {
-		return nil, false
-	}
-	#partial switch n.kind {
-	case .Iterate:
-		lead := n.a
-		for lead.kind == .Field {
-			lead = lead.a
-		}
-		if lead.kind == .Identity {
-			for f := n.a; f.kind == .Field; f = f.a {
-				inject_at(names, 0, f.name)
-			}
-			return new_clone(jq.Node{kind = .Identity}, runtime.heap_allocator()), true
-		}
-	case .Index, .Slice:
-		for arg in ([]^jq.Node{n.b, n.c}) {
-			if arg != nil && arg.kind != .Literal {
-				return nil, false
-			}
-		}
-	case .Pipe, .Field:
-	case:
-		return nil, false
-	}
-	a := strip_spine(n.a, names) or_return
-	stripped = new_clone(n^, runtime.heap_allocator())
-	stripped.a = a
-	return stripped, true
 }
 
 // The spine array of the open file's one text, at `at` inside `levels` objects, when the text is a long strict JSON
@@ -155,7 +118,7 @@ spine_named :: proc(data: []byte, at: u64, slots: []Piece_Slot, plain: core.As, 
 @(private = "file")
 spine_walk :: proc(data: []byte, at: u64, slots: []Piece_Slot, plain: core.As, names: []string) -> (doc: core.Document, node: core.Node_Index, found: bool) {
 	fault: Maybe(core.Fault)
-	if doc, fault = jq.build_text(shell_of(data, at, slots, ""), plain, context.temp_allocator); fault != nil {
+	if doc, fault = build_text(shell_of(data, at, slots, ""), plain, context.temp_allocator); fault != nil {
 		return
 	}
 	for name in names {
@@ -179,9 +142,8 @@ Spine_Job :: struct {
 	plain:  core.As,
 	levels: int, // the arrays a piece's entries are built inside: one per object around the spine array, and its own
 	put:    Spine_Put,
-	ip:     jq.Interp,
 	id:     int, // `run.collects` when a collect started
-	f:      ^jq.Node,
+	each:   Maybe(jq.Program), // a collect's, none to collect the entries themselves
 	print:  bool,
 	lock:   sync.Mutex,
 	slots:  [dynamic]Piece_Slot,
@@ -224,7 +186,7 @@ spine_print :: proc(ins: ^Inputs, put: Spine_Put) -> bool {
 	if !found || !spine_run(ins, &job, at) || entries_of(job.slots[:]) == 0 {
 		return false
 	}
-	doc, fault := jq.build_text(shell_of(ins.data, at, job.slots[:], MARKER), ins.as, context.temp_allocator)
+	doc, fault := build_text(shell_of(ins.data, at, job.slots[:], MARKER), ins.as, context.temp_allocator)
 	if fault != nil {
 		return false
 	}
@@ -265,7 +227,7 @@ put_joined :: proc(run: ^Run, text: []u8, slots: []Piece_Slot, dot: bool) -> boo
 			continue
 		}
 		if !first {
-			jq.put_byte(&o.buf, ',')
+			write.put_byte(&o.buf, ',')
 		}
 		first = false
 		// A piece's text is written from its own buffer, but into a held output.
@@ -285,7 +247,7 @@ put_joined :: proc(run: ^Run, text: []u8, slots: []Piece_Slot, dot: bool) -> boo
 		end_output(o)
 		finish_input(o)
 	} else {
-		jq.put_byte(&o.buf, '\n')
+		write.put_byte(&o.buf, '\n')
 		flush_some(o)
 	}
 	return true
@@ -296,9 +258,8 @@ put_joined :: proc(run: ^Run, text: []u8, slots: []Piece_Slot, dot: bool) -> boo
 // is not.
 spine_length :: proc(ins: ^Inputs) -> bool {
 	run := ins.run
-	names := make([dynamic]string, context.temp_allocator)
-	n := run.prog
-	if !jq.is_length(n) && (n.kind != .Pipe || !jq.is_length(n.b) || !names_of(n.a, &names) || len(names) == 0) {
+	names := run.shape.spine.names
+	if run.shape.spine.kind != .Length {
 		return false
 	}
 	at, levels, found := spine_of(ins)
@@ -310,19 +271,19 @@ spine_length :: proc(ins: ^Inputs) -> bool {
 	count := entries_of(job.slots[:])
 	if levels > 0 {
 		// The names lead to the array or to an object, whose length is its keys.
-		doc, node, walked := spine_walk(ins.data, at, job.slots[:], ins.as, names[:])
+		doc, node, walked := spine_walk(ins.data, at, job.slots[:], ins.as, names)
 		if !walked {
 			return false
 		}
 		if t := doc.nodes[node]; t.kind == .Object {
-			count = jq.length_of(jq.Ref{&doc, node})
+			count = jq.length_of(core.Node_Ref{&doc, node})
 		} else if t.kind != .Array || u64(t.lo) != at {
 			return false
 		}
 	}
 	run.route.interpreted += 1
 	run.route.pieces += len(job.slots)
-	emit(&run.output, jq.num(f64(count)))
+	emit(&run.output, core.Value(f64(count)))
 	finish_input(&run.output)
 	return true
 }
@@ -425,7 +386,7 @@ spine_build :: proc(text: []u8, n: int, plain: core.As) -> (core.Document, Maybe
 		wrapped[i], wrapped[len(wrapped) - 1 - i] = '[', ']'
 	}
 	copy(wrapped[n:], text)
-	return jq.build_text(wrapped, plain)
+	return build_text(wrapped, plain)
 }
 
 // Answers the open file's one text on the pool's threads when it is a long strict JSON text and the filter collects `f`
@@ -436,9 +397,8 @@ spine_build :: proc(text: []u8, n: int, plain: core.As) -> (core.Document, Maybe
 // `f` fails, halts or writes a message on an entry, which leaves the text to the serial route whole.
 collect_pieces :: proc(ins: ^Inputs) -> bool {
 	run := ins.run
-	names := make([dynamic]string, context.temp_allocator)
-	f, tail, shaped := collect_shape(run.prog, &names)
-	if !shaped {
+	using spine := run.shape.spine
+	if kind != .Collect {
 		return false
 	}
 	at, levels, found := spine_of(ins)
@@ -447,14 +407,13 @@ collect_pieces :: proc(ins: ^Inputs) -> bool {
 	}
 	layout := run.output.layout
 	run.collects += 1
-	job := Spine_Job{ip = run.ip, id = run.collects, f = f, levels = len(names) + 1}
-	job.print = tail == nil && layout.colors == nil && !layout.comments && run.output.table == nil && !writes_texts(&run.opts)
-	jq.detach_memory(&job.ip)
+	job := Spine_Job{id = run.collects, each = each, levels = len(names) + 1}
+	job.print = !tailed && layout.colors == nil && !layout.comments && run.output.table == nil && !writes_texts(&run.opts)
 	defer {
 		free_slots(run, job.slots)
 		run.ip.err = nil // an error the tail raised may lie in a piece arena
 	}
-	if !spine_run(ins, &job, at) || !spine_named(ins.data, at, job.slots[:], ins.as, names[:]) {
+	if !spine_run(ins, &job, at) || !spine_named(ins.data, at, job.slots[:], ins.as, names) {
 		return false
 	}
 	n := 0
@@ -468,7 +427,7 @@ collect_pieces :: proc(ins: ^Inputs) -> bool {
 		frame: write.Out
 		spare: [write.ROOM_MAX]u8
 		write.init(&frame, &spare, context.temp_allocator)
-		marked := jq.Array{}
+		marked := core.Array{}
 		append(&marked.items, string("\x01stury"))
 		layout.spill = nil
 		jq.write_value(&frame, &marked, layout)
@@ -477,63 +436,21 @@ collect_pieces :: proc(ins: ^Inputs) -> bool {
 			return true
 		}
 	}
-	joined := jq.new_array(n)
+	joined := core.new_array(n)
 	for s in job.slots {
 		append(&joined.items, ..s.items[:])
 	}
-	identity := jq.Node{kind = .Identity}
 	prog := run.prog
-	run.prog = tail if tail != nil else &identity
+	run.prog = tail
 	run_once(run, joined)
 	run.prog = prog
 	return true
 }
 
-// The filter `n` split into the collected filter `f` and the `tail` run on the array of its outputs, nil for none, the
-// names that lead to the iterated array appended to `names`. False when `n` is no such filter.
-@(private = "file")
-collect_shape :: proc(n: ^jq.Node, names: ^[dynamic]string) -> (f, tail: ^jq.Node, ok: bool) {
-	c := n
-	for c.kind == .Pipe && names_of(c.a, names) {
-		c = c.b
-	}
-	if c.kind == .Pipe {
-		c, tail = c.a, c.b
-	}
-	switch {
-	case c.kind == .Call && c.name == "map" && len(c.args) == 1 && c.def != nil && c.def.in_prelude:
-		f = c.args[0]
-	case c.kind == .Array && c.a != nil:
-		it := c.a
-		for it.kind == .Pipe && names_of(it.a, names) {
-			it = it.b
-		}
-		if it.kind == .Pipe {
-			it, f = it.a, it.b
-		}
-		if it.kind != .Iterate || it.opt || !names_of(it.a, names) {
-			return
-		}
-	case:
-		return
-	}
-	return f, tail, true
-}
-
-// Whether `n` is `.` or `.NAME...` with no `?`, whose names are appended to `names`.
-@(private = "file")
-names_of :: proc(n: ^jq.Node, names: ^[dynamic]string) -> bool {
-	at := len(names)
-	x := n
-	for ; x.kind == .Field && !x.opt; x = x.a {
-		inject_at(names, at, x.name)
-	}
-	if x.kind != .Identity {
-		resize(names, at)
-		return false
-	}
-	return true
-}
+// The interpreter a thread's collects run on, cloned over for each piece, so a pattern compiles once per thread. Not
+// freed, as the piece arenas are not.
+@(private = "file", thread_local)
+collect_ip: jq.Interp
 
 // The collect job whose outputs the thread's piece arena holds.
 @(private = "file", thread_local)
@@ -557,32 +474,25 @@ collect_entries :: proc(job: ^Spine_Job, text: []u8, s: ^Piece_Slot) -> bool {
 	// would hold a second copy of the whole input by then.
 	doc := new(core.Document)
 	fault: Maybe(core.Fault)
-	if doc^, fault = jq.judge_build(json.build_entries(text, job.levels, job.plain)); fault != nil {
+	if doc^, fault = core.refuse_key_clash(json.build_entries(text, job.levels, job.plain)); fault != nil {
 		return false
 	}
-	ip := job.ip
 	node := core.ROOT
 	for _ in 1 ..< job.levels {
 		c := core.children(doc, node)
 		node, _ = core.child_next(&c)
 	}
-	s.items = make([dynamic]jq.Value, 0, s.entries if job.f == nil else 0)
-	collect := jq.region_collect(&ip, job.f, ip.globals, &s.items)
-	defer jq.free_regions(&ip)
-	sig := jq.Signal.Go
-	ch := core.children(doc, node)
-	for e in core.child_next(&ch) {
-		if job.f == nil {
-			append(&s.items, jq.Ref{doc, e})
-		} else if sig = collect.emit(&collect, {v = jq.Ref{doc, e}}); sig != .Go {
-			break
+	s.items = make([dynamic]core.Value, 0, s.entries if job.each == nil else 0)
+	if each, collects := job.each.?; !collects {
+		ch := core.children(doc, node)
+		for e in core.child_next(&ch) {
+			append(&s.items, core.Node_Ref{doc, e})
 		}
-	}
-	if jq.end_region_collect(&collect, sig) != .Go {
-		return false
-	}
-	if len(ip.messages) > 0 || ip.halted != nil {
-		return false
+	} else {
+		jq.clone(&job.run.ip, &collect_ip)
+		if jq.collect(&collect_ip, each, core.Node_Ref{doc, node}, &s.items) != .Done {
+			return false
+		}
 	}
 	if !job.print || len(s.items) == 0 {
 		return true
@@ -592,7 +502,7 @@ collect_entries :: proc(job: ^Spine_Job, text: []u8, s: ^Piece_Slot) -> bool {
 	out: write.Out
 	spare: [write.ROOM_MAX]u8
 	piece_out(&out, &spare, job.run, len(text), s.k)
-	a := jq.Array{items = s.items}
+	a := core.Array{items = s.items}
 	jq.write_value(&out, &a, layout)
 	return out.err == .None && piece_inner(&out, 1, s)
 }
@@ -604,7 +514,7 @@ put_dot :: proc(run: ^Run, doc: ^core.Document, out: ^write.Out) -> bool {
 		return false
 	}
 	layout.spill = nil
-	jq.write_value(out, jq.Ref{doc, core.ROOT}, layout)
+	jq.write_value(out, core.Node_Ref{doc, core.ROOT}, layout)
 	return out.err == .None
 }
 

@@ -18,6 +18,21 @@ Fault_Kind :: enum u8 {
 	Duplicate_Key, // json, dsv: a build, a read or a scan under `.Refuse` met a key that repeats one of its object's, at the second key's first byte. No walk raises it: the library makes it from the refusal
 }
 
+// The length of the UTF-8 sequence lead byte `c` begins: 1 to 4, or 0 for a byte that begins none.
+utf8_length :: proc "contextless" (c: byte) -> int {
+	switch c {
+	case 0x00 ..= 0x7f:
+		return 1
+	case 0xc2 ..= 0xdf:
+		return 2
+	case 0xe0 ..= 0xef:
+		return 3
+	case 0xf0 ..= 0xf4:
+		return 4
+	}
+	return 0
+}
+
 // U+FFFD in UTF-8, the character a tolerated ill-formed sequence or lone surrogate half reads as.
 REPLACEMENT :: [4]u8{0xEF, 0xBF, 0xBD, 0}
 

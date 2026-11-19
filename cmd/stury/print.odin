@@ -9,7 +9,7 @@ import "core:strings"
 import core "../../core"
 import "../../core/write"
 import records "../../core/records"
-import "jq"
+import "../../jq"
 import "message"
 
 // Output is held here and written once it passes FLUSH_AT bytes, and at exit.
@@ -55,7 +55,7 @@ init_output :: proc(o: ^Output, run: ^Run) {
 		o := (^Output)(s)
 		// jq's message goes to stderr at once and its output waits in a buffer: an output's messages come before it,
 		// never after all of the run's output.
-		jq.flush_messages(o.ip)
+		flush_messages()
 		if !emit(o, it.v) {
 			return .Fail
 		}
@@ -70,11 +70,11 @@ init_output :: proc(o: ^Output, run: ^Run) {
 // JSON in ASCII). After it a newline, but under -j, and a NUL under --raw-output0, which refuses a string that holds
 // one: false then, with nothing printed and the reason in the interpreter's error. Under a `--to` format with a writer
 // of its own the output is a text of that format.
-emit :: proc(o: ^Output, v: jq.Value) -> bool {
+emit :: proc(o: ^Output, v: core.Value) -> bool {
 	v := v
 	if o.whole.it != nil {
 		built, _ := records.build(o.whole.it, o.whole.rec, context.allocator)
-		v = jq.document_value(built)
+		v = core.document_value(built)
 	}
 	if o.table != nil {
 		emit_row(o, v)
@@ -94,16 +94,16 @@ emit :: proc(o: ^Output, v: jq.Value) -> bool {
 	}
 	switch {
 	case is_str && opts.ascii:
-		jq.put_string(out, s, {ascii = true})
+		jq.write_value(out, s, {opts = {ascii = true}})
 	case is_str:
 		if opts.raw0 && strings.index_byte(s, 0) >= 0 {
-			o.ip.err = "Cannot dump a string containing NUL with --raw-output0 option"
+			jq.raise(o.ip, "Cannot dump a string containing NUL with --raw-output0 option")
 			return false
 		}
 		write.put_text(out, s)
 	case:
 		if opts.seq {
-			jq.put_byte(out, 0x1e)
+			write.put_byte(out, 0x1e)
 		}
 		jq.write_value(out, v, o.layout)
 		// A line comment the value ends with ended its line.
@@ -124,8 +124,8 @@ tell_dropped :: proc(name: string, to: Format, dropped: int) {
 // Tells on stderr that the attributes of `v`, a node of a markup document, are not in its JSON output, and what reads
 // them. Its comments go unmentioned, as a JSON output of any format drops them.
 @(private = "file")
-tell_attributes_dropped :: proc(v: jq.Value) {
-	ref, is_ref := v.(jq.Ref)
+tell_attributes_dropped :: proc(v: core.Value) {
+	ref, is_ref := v.(core.Node_Ref)
 	if !is_ref || !core.is_markup(ref.doc) {
 		return
 	}
@@ -142,12 +142,12 @@ tell_attributes_dropped :: proc(v: jq.Value) {
 // which keeps what the document spells beyond JSON, and any other value by its token writer, which keeps the tags of
 // its strings. A value the format has no spelling for fails the run, with the reason.
 @(private = "file")
-emit_text :: proc(o: ^Output, v: jq.Value) -> bool {
+emit_text :: proc(o: ^Output, v: core.Value) -> bool {
 	as := text_written_as(o.opts)
 	v := core.members_as_attributes(v) if o.opts.attributes && (o.opts.to == .Xml || o.opts.to == .Html) else v
 	text: []u8
 	err: core.Error
-	if ref, is_ref := v.(jq.Ref); is_ref {
+	if ref, is_ref := v.(core.Node_Ref); is_ref {
 		dropped: int
 		text, dropped, err = core.write(ref.doc, o.layout.opts, as, ref.node, context.temp_allocator)
 		tell_dropped("", o.opts.to, dropped)
@@ -156,7 +156,7 @@ emit_text :: proc(o: ^Output, v: jq.Value) -> bool {
 	}
 	if err != nil {
 		why := mistag_text(as.readers, FORMATS[o.opts.to].title, v) if write_refusal_kind(err) == .Bad_Raw else ""
-		o.ip.err = why if why != "" else edit_error_text(nil, err)
+		jq.raise(o.ip, why if why != "" else edit_error_text(nil, err))
 		return false
 	}
 	put_format_text(o, as, text, true)
@@ -165,11 +165,11 @@ emit_text :: proc(o: ^Output, v: jq.Value) -> bool {
 
 // Why a writer refused `v` as `.Bad_Raw` where a string in it holds a tag its text is no type of by `readers`, as
 // `"text" is not a TOML date-local`, and "" where none does.
-mistag_text :: proc(readers: ^core.Readers, title: string, v: jq.Value) -> string {
+mistag_text :: proc(readers: ^core.Readers, title: string, v: core.Value) -> string {
 	if readers == nil || readers.tag_fits == nil {
 		return ""
 	}
-	p := jq.plain(v)
+	p := core.plain(v)
 	#partial switch jq.kind(p) {
 	case .String:
 		tag, tagged := jq.string_of(jq.property_value(v, .Tag))
@@ -197,7 +197,7 @@ put_format_text :: proc(o: ^Output, as: core.As, text: []u8, parted: bool) {
 	}
 	write.put_text(&o.buf, string(text))
 	if !as.readers.binary && len(text) > 0 && text[len(text) - 1] != '\n' {
-		jq.put_byte(&o.buf, '\n')
+		write.put_byte(&o.buf, '\n')
 	}
 	flush_some(o)
 }
@@ -206,10 +206,10 @@ put_format_text :: proc(o: ^Output, as: core.As, text: []u8, parted: bool) {
 // under --raw-output0.
 end_output :: proc(o: ^Output, ended := false) {
 	if !o.opts.join && !ended {
-		jq.put_byte(&o.buf, '\n')
+		write.put_byte(&o.buf, '\n')
 	}
 	if o.opts.raw0 {
-		jq.put_byte(&o.buf, 0)
+		write.put_byte(&o.buf, 0)
 	}
 	flush_some(o)
 }
@@ -273,3 +273,4 @@ output_failed :: proc(err: os.Error) -> ! {
 	message.write_stderr("stury: error: writing output failed: %s\n", strerror(err))
 	os.exit(EXIT_USAGE)
 }
+

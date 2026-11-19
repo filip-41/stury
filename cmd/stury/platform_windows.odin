@@ -3,11 +3,14 @@ package main
 // The command line's calls into the system on Windows. platform_posix.odin has POSIX's. Reads and writes go through
 // core:os, which calls ReadFile and WriteFile, so stdin and stdout are binary as they are on POSIX.
 
+import "core:c/libc"
 import "core:io"
 import "core:os"
+import "core:strings"
 import "core:sync"
 import win "core:sys/windows"
 import "core:time"
+import "../../jq"
 
 // The main thread gets the 8 MiB of stack POSIX gives it, not the linker's 1 MiB: a schema's read and bind recurse
 // there as deep as their depth bound.
@@ -242,4 +245,28 @@ unmap_file :: proc(data: []byte) {
 system_info :: proc() -> (info: win.SYSTEM_INFO) {
 	win.GetSystemInfo(&info)
 	return
+}
+
+// $HOME, or else %USERPROFILE%, as jq finds the home directory on Windows.
+home_dir :: proc(_: rawptr) -> (string, bool) {
+	home := libc.getenv("HOME")
+	if home == nil {
+		home = libc.getenv("USERPROFILE")
+	}
+	return string(home), home != nil
+}
+
+path_kind :: proc(_: rawptr, path: string) -> jq.Path_Kind {
+	attrs := win.GetFileAttributesW(win.utf8_to_wstring(path, context.temp_allocator))
+	if attrs == win.INVALID_FILE_ATTRIBUTES {
+		e := win.GetLastError()
+		return .Missing if e == win.ERROR_FILE_NOT_FOUND || e == win.ERROR_PATH_NOT_FOUND else .Unreadable
+	}
+	return .Dir if attrs & win.FILE_ATTRIBUTE_DIRECTORY != 0 else .File
+}
+
+// `path` made absolute (Windows's _fullpath, as jq takes for realpath there), or `path` itself when it cannot be.
+real_path :: proc(_: rawptr, path: string, allocator := context.allocator) -> string {
+	full, err := os.get_absolute_path(path, allocator)
+	return full if err == nil else strings.clone(path, allocator)
 }

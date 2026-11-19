@@ -9,12 +9,13 @@ package main
 import "base:runtime"
 import "core:mem/virtual"
 import "core:strings"
-import "jq"
+import core "../../core"
+import "../../jq"
 import "message"
 
 // An event of a faulty text and the byte of the text jq's parser reads to make it, which tells the line jq's reader is on.
 Fault_Event :: struct {
-	value: jq.Value,
+	value: core.Value,
 	at:    int,
 	error: bool, // `[message, path]`
 	late:  bool, // an error at the end that jq gives after the event the last byte left pending, which -s therefore keeps out of its array
@@ -62,10 +63,10 @@ Parser :: struct {
 	src:          []byte,
 	max_depth:    int, // the deepest an array or object may nest, as the reader's limit
 	events:       [dynamic]Fault_Event, // the events made and not yet given
-	staged:       [dynamic]jq.Value, // those of the byte being scanned, dropped if jq refuses it
-	path:         [dynamic]jq.Value, // an array's index, an object's key once known, else null
+	staged:       [dynamic]core.Value, // those of the byte being scanned, dropped if jq refuses it
+	path:         [dynamic]core.Value, // an array's index, an object's key once known, else null
 	last:         Last_Seen,
-	next:         jq.Value, // the value read last, held until a separator shows it done
+	next:         core.Value, // the value read last, held until a separator shows it done
 	has_next:     bool,
 	token_start:  int, // the literal being read, if token_open
 	token_open:   bool,
@@ -143,9 +144,9 @@ renew :: proc(w: ^Fault_Walk) {
 	w.gen = 1 - old
 	context.allocator = virtual.arena_allocator(&w.arenas[w.gen])
 	for &s in w.p.path {
-		s = jq.event_clone(s)
+		s = event_clone(s)
 	}
-	w.p.next = jq.event_clone(w.p.next)
+	w.p.next = event_clone(w.p.next)
 	w.held = w.arenas[w.gen].total_used
 	virtual.arena_free_all(&w.arenas[old])
 }
@@ -213,7 +214,7 @@ step :: proc(w: ^Fault_Walk) {
 			p.events[len(p.events) - 1].late = w.late
 			w.errored = true
 		} else if p.has_next { // a literal the end of the text ends
-			append(&p.events, Fault_Event{value = jq.event_of(path_copy(p), p.next), at = w.at})
+			append(&p.events, Fault_Event{value = event_of(path_copy(p), p.next), at = w.at})
 		}
 	}
 }
@@ -228,7 +229,7 @@ at_separator :: proc(p: ^Parser, at: int) -> string {
 	_, is_string := p.next.(string)
 	if len(p.path) > 0 || p.has_next && !is_string {
 		if check_literal(p, at) == "" && len(p.path) == 0 && jq.kind(p.next) == .Number {
-			return jq.TRUNCATED_NUMBER_NOTE
+			return TRUNCATED_NUMBER_NOTE
 		}
 		return "Truncated value"
 	}
@@ -236,7 +237,7 @@ at_separator :: proc(p: ^Parser, at: int) -> string {
 		return msg
 	}
 	if p.lexing == .Normal && len(p.path) == 0 && p.has_next {
-		append(&p.events, Fault_Event{value = jq.event_of(path_copy(p), p.next), at = at})
+		append(&p.events, Fault_Event{value = event_of(path_copy(p), p.next), at = at})
 	}
 	return ""
 }
@@ -244,7 +245,7 @@ at_separator :: proc(p: ^Parser, at: int) -> string {
 // The error as an event, `[message, path]`, and the parser afresh, as jq's `parser_reset` leaves it.
 @(private = "file")
 fail :: proc(p: ^Parser, text: string, at: int) {
-	ev := jq.new_array(2)
+	ev := core.new_array(2)
 	append(&ev.items, text, path_copy(p))
 	append(&p.events, Fault_Event{value = ev, at = at, error = true})
 	reset(p)
@@ -258,8 +259,8 @@ reset :: proc(p: ^Parser) {
 }
 
 @(private = "file")
-path_copy :: proc(p: ^Parser) -> ^jq.Array {
-	a := jq.new_array(len(p.path))
+path_copy :: proc(p: ^Parser) -> ^core.Array {
+	a := core.new_array(len(p.path))
 	append(&a.items, ..p.path[:])
 	return a
 }
@@ -334,14 +335,14 @@ scan :: proc(p: ^Parser, i: int) -> string {
 @(private = "file")
 emit_scalar :: proc(p: ^Parser) {
 	if len(p.path) == 0 && p.has_next {
-		append(&p.staged, jq.event_of(path_copy(p), p.next))
+		append(&p.staged, event_of(path_copy(p), p.next))
 		p.next, p.has_next = nil, false
 	}
 }
 
 // The value just read: refused where another is held, or follows a member's value with no separator.
 @(private = "file")
-value :: proc(p: ^Parser, v: jq.Value) -> string {
+value :: proc(p: ^Parser, v: core.Value) -> string {
 	if p.has_next || p.last == .Value {
 		return "Expected separator between values"
 	}
@@ -358,7 +359,7 @@ check_literal :: proc(p: ^Parser, end: int) -> string {
 	}
 	tok := string(p.src[p.token_start:end])
 	pattern: string
-	v: jq.Value
+	v: core.Value
 	switch tok[0] {
 	case 't':
 		pattern, v = "true", true
@@ -397,7 +398,7 @@ found_string :: proc(p: ^Parser, i: int) -> string {
 	if msg := jq.decode_string(&out, string(p.src[p.string_start + 1:i]), &stury_only_at); msg != "" {
 		if stury_only_at >= 0 { // a refusal of stury's own, put where the library puts it: at the backslash
 			p.refusal = {p.line0, p.column0}
-			jq.advance(&p.refusal.line, &p.refusal.column, p.src[:p.string_start + stury_only_at + 2])
+			core.advance_position(&p.refusal.line, &p.refusal.column, p.src[:p.string_start + stury_only_at + 2])
 		}
 		return msg
 	}
@@ -436,7 +437,7 @@ stream_token :: proc(p: ^Parser, ch: byte) -> string {
 			return message.build("Expected string key after ',' in object, not '%c'", ch)
 		}
 		if open {
-			append(&p.path, jq.num(0))
+			append(&p.path, core.Value(0))
 			p.last = .Open_Array
 		} else {
 			append(&p.path, nil)
@@ -470,7 +471,7 @@ stream_token :: proc(p: ^Parser, ch: byte) -> string {
 			return "Objects must consist of key:value pairs"
 		}
 		if p.has_next {
-			append(&p.staged, jq.event_of(path_copy(p), p.next))
+			append(&p.staged, event_of(path_copy(p), p.next))
 			p.next, p.has_next = nil, false
 		}
 		if index, is_index := p.path[top].(f64); is_index {
@@ -489,7 +490,7 @@ stream_token :: proc(p: ^Parser, ch: byte) -> string {
 		if !path_is_index(p) {
 			return "Unmatched ']' in the middle of an object"
 		}
-		close_container(p, jq.new_array())
+		close_container(p, core.new_array())
 	case '}':
 		if len(p.path) == 0 {
 			return "Unmatched '}' at the top-level"
@@ -508,7 +509,7 @@ stream_token :: proc(p: ^Parser, ch: byte) -> string {
 		case !p.has_next && p.last != .Value && p.last != .Open_Object:
 			return "Unmatched '}'"
 		}
-		close_container(p, jq.new_object())
+		close_container(p, core.new_object())
 	}
 	return ""
 }
@@ -516,18 +517,21 @@ stream_token :: proc(p: ^Parser, ch: byte) -> string {
 // A container's end: the event of the member held, if any, then `[path]` for the container. A container with no
 // member is a leaf, `[path, [] or {}]`, once it is popped.
 @(private = "file")
-close_container :: proc(p: ^Parser, empty: jq.Value) {
+close_container :: proc(p: ^Parser, empty: core.Value) {
 	was_empty := p.last == .Open_Array || p.last == .Open_Object
 	if p.has_next {
-		append(&p.staged, jq.event_of(path_copy(p), p.next))
+		append(&p.staged, event_of(path_copy(p), p.next))
 	}
 	if !was_empty {
-		append(&p.staged, jq.event_of(path_copy(p)))
+		append(&p.staged, event_of(path_copy(p)))
 	}
 	p.next, p.has_next = nil, false
 	pop(&p.path)
 	if was_empty {
-		append(&p.staged, jq.event_of(path_copy(p), empty))
+		append(&p.staged, event_of(path_copy(p), empty))
 	}
 	p.last = .None if len(p.path) == 0 else .Value
 }
+
+// What jq says for a top-level number in a --seq record with no whitespace or separator after it.
+TRUNCATED_NUMBER_NOTE :: "Potentially truncated top-level numeric value"

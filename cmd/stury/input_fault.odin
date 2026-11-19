@@ -11,7 +11,7 @@ import kernel "../../core/kernel"
 import core "../../core"
 import records "../../core/records"
 import json "../../json"
-import "jq"
+import "../../jq"
 import "message"
 
 // jq's message for the fault `f` of `data`, a record of which ends at `end`, in a plain run over the JSON texts of one
@@ -27,7 +27,7 @@ fault_message :: proc(ins: ^Inputs, data: []byte, f: core.Fault, end := -1) -> s
 
 // The fault `found` of the text at or after data[at:] as jq tells it, or under --stream the events jq's parser makes of
 // the text before it. An NDJSON record ends at `end`.
-text_fault :: proc(ins: ^Inputs, found: core.Fault, at: int, end := -1) -> (jq.Value, string, jq.Parse_Status) {
+text_fault :: proc(ins: ^Inputs, found: core.Fault, at: int, end := -1) -> (core.Value, string, jq.Input_Status) {
 	data := ins.data
 	if reads_cells(&ins.run.opts) {
 		return cells_fault(ins, found)
@@ -76,7 +76,7 @@ text_fault :: proc(ins: ^Inputs, found: core.Fault, at: int, end := -1) -> (jq.V
 		ins.fault_error = strings.clone(fault_message(ins, data, f), runtime.heap_allocator())
 	}
 	l, c := ins.parsed.line, ins.parsed.column
-	jq.advance(&l, &c, data[:at])
+	core.advance_position(&l, &c, data[:at])
 	ins.pinned = true
 	ins.walk, ins.walk_at = fault_walk(text, int(ins.run.opts.max_depth) if ins.run.opts.max_depth != 0 else core.MAX_DEPTH, l, c, seq && errors, seq && errors && resume < len(data), ins.bom_broken, ins.walk_spare), at
 	if !seq && errors {
@@ -102,11 +102,11 @@ faults_counted :: proc(ins: ^Inputs, data: []byte) -> ^core.Lines {
 }
 
 // --stream-errors under --seq: the event jq gives at the end of a stream with no separator, its place past `counted`.
-abandoned :: proc(ins: ^Inputs, counted: []byte) -> (jq.Value, string, jq.Parse_Status) {
+abandoned :: proc(ins: ^Inputs, counted: []byte) -> (core.Value, string, jq.Input_Status) {
 	l, c := ins.parsed.line, ins.parsed.column
-	jq.advance(&l, &c, counted)
-	ev := jq.new_array(2)
-	append(&ev.items, message.build("Unfinished abandoned text at EOF at line %d, column %d", l, c), jq.new_array())
+	core.advance_position(&l, &c, counted)
+	ev := core.new_array(2)
+	append(&ev.items, message.build("Unfinished abandoned text at EOF at line %d, column %d", l, c), core.new_array())
 	return ev, "", .Value
 }
 

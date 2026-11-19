@@ -148,7 +148,7 @@ SOFTWARE.
 jq 1.8.2 — https://jqlang.github.io/jq/
 
     tools/tests/cli/cases/jq-1.8.2/jq.test and onig.test (jq's own suites, verbatim) and the parser tables
-    cmd/stury/jq/grammar_tables.odin derives from jq's src/parser.c. jq's licence text ships beside the
+    jq/grammar_tables.odin derives from jq's src/parser.c. jq's licence text ships beside the
     suites, in tools/tests/cli/cases/jq-1.8.2/COPYING. (tools/tests/cli/cases/modules is stury's own, remade from what jq.test's
     module cases require.)
 

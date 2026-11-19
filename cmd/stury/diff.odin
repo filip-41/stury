@@ -15,7 +15,7 @@ import "../../core/diff"
 import "../../core/write"
 import "../../core/records"
 import json "../../json"
-import "jq"
+import "../../jq"
 import "message"
 
 Compat :: enum u8 {
@@ -229,7 +229,7 @@ read_operand :: proc(o: ^Opts, src: Source, path: string) -> core.Value {
 		text = records_array(data, src)
 	}
 	heap := runtime.heap_allocator()
-	doc, fault := jq.build_text(text, src.as, heap)
+	doc, fault := build_text(text, src.as, heap)
 	if f, is_fault := fault.?; is_fault && src.framing == .Concatenated && !table_source(src) && !source_whole(src.format) {
 		if own {
 			if !texts_follow(f, src.format) {
@@ -239,13 +239,13 @@ read_operand :: proc(o: ^Opts, src: Source, path: string) -> core.Value {
 			return records_value(o, src, path, data)
 		}
 		exit_on_fault(o, src, path, data)
-		doc, fault = jq.build_text(records_array(data, src), src.as, heap)
+		doc, fault = build_text(records_array(data, src), src.as, heap)
 	}
 	if bad, is_fault := fault.?; is_fault {
 		tell_operand_fault(o, src, path, data, bad)
 		os.exit(EXIT_INPUT)
 	}
-	return core.Node_Ref{new_clone(doc, heap), core.ROOT}
+	return core.document_value(doc, heap)
 }
 
 // The records of `data`, the file `path`, in a format read with a handle of its own, as the array of their documents'
@@ -258,12 +258,12 @@ records_value :: proc(o: ^Opts, src: Source, path: string, data: []byte) -> core
 	it := records.open(data, src.as, src.framing, allocator = heap)
 	for rec in records.next(&it) {
 		built, err := records.build(&it, rec, heap)
-		doc, fault := jq.judge_build(built, err)
+		doc, fault := core.refuse_key_clash(built, err)
 		if bad, is_fault := fault.?; is_fault {
 			tell_operand_fault(o, src, path, data, bad)
 			os.exit(EXIT_INPUT)
 		}
-		append(&all.items, core.Node_Ref{new_clone(doc, heap), core.ROOT})
+		append(&all.items, core.document_value(doc, heap))
 	}
 	if bad, is_fault := it.fault.?; is_fault {
 		tell_operand_fault(o, src, path, data, bad)
@@ -411,13 +411,13 @@ write_value_changes :: proc(b: ^strings.Builder, as_json: bool, changes: []diff.
 // `edit --diff`: the value changes the edit makes of `src`, told under a `--- path` line. A text of several documents
 // has each compared with the document the edit made of it, its changes under the document's index.
 diff_preview :: proc(run: ^Run, path: string, src, out: []u8) {
-	source := input_source(&run.opts, run.ip.reading)
+	source := input_source(&run.opts, json_reading_of(&run.opts))
 	heap := runtime.heap_allocator()
 	sb := strings.builder_make(heap)
 	defer strings.builder_destroy(&sb)
 	file := file_name(path)
-	a, a_fault := jq.build_text(src, source.as, heap)
-	b, b_fault := jq.build_text(out, source.as, heap)
+	a, a_fault := build_text(src, source.as, heap)
+	b, b_fault := build_text(out, source.as, heap)
 	if a_fault == nil && b_fault == nil {
 		write_document_changes(&sb, core.Node_Ref{&a, core.ROOT}, core.Node_Ref{&b, core.ROOT}, nil, file)
 		core.destroy(&a)

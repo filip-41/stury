@@ -14,10 +14,14 @@ package main
 // terminal. The exit codes are jq's: 2 for a usage or file error, 3 for a filter that does not compile, 5 for invalid
 // input or an error the filter raises. Under `-e`, 1 when the last output is false or null and 4 when there is none.
 
+import "core:crypto"
 import "core:os"
 import "core:slice"
+import "core:time"
+import "../../core/spell"
+import core "../../core"
 import host "../../host"
-import "jq"
+import "../../jq"
 import "message"
 
 EXIT_USAGE :: 2
@@ -27,16 +31,16 @@ EXIT_INPUT :: 5
 Run :: struct {
 	opts:        Opts,
 	colors:      [8]string, // when opts.color, jq's colours (DEFAULT_COLORS) as $JQ_COLORS sets them
-	prog:        ^jq.Node,
+	prog:        jq.Program,
+	shape:       jq.Shape, // the program's, which the routes read
 	// The filter and the command line's variables, which `ready_interpreter` parses, checks and binds.
 	program:     struct {
 		text:               string,
 		names:              []string,
-		values, positional: []jq.Value,
+		values, positional: []core.Value,
 		named:              int, // the first `named` of names are $ARGS.named
 		typed:              bool, // the filter is --filter's, which no mistyped command gives
 	},
-	home_module: bool, // `~/.jq`, or what stands for it, is a module every filter includes
 	route:       Route,
 	ip:          jq.Interp,
 	output:      Output,
@@ -50,8 +54,6 @@ Run :: struct {
 }
 
 main :: proc() {
-	// Before any thread but this one runs.
-	jq.set_origin()
 	run: Run
 	run.opts.indent = 2
 	cli := parse_args(&run.opts, command_args()[1:])
@@ -84,21 +86,28 @@ main :: proc() {
 	if cli.command >= .Schema {
 		schema_main(&run, &cli)
 	}
-	if dirs, given := cli.lib_dirs.?; given {
-		run.ip.search_list = dirs[:]
-	}
-	run.ip.reading = cli.json_reading
-	run.ip.load_file = load_file
-	run.ip.debug_layout = output_layout(&run)
-	run.ip.debug_layout.opts.pretty = false
 	text, has := cli.filter.?
 	typed, typing := cli.schema.filter.?
 	if typing {
 		text, has = typed, true
 	}
+	debug := output_layout(&run)
+	debug.opts.pretty = false
+	interp := jq.Options {
+		hooks      = interpreter_hooks(),
+		executable = os.args[0],
+		name       = "stury",
+		reading    = cli.json_reading,
+		debug      = debug,
+		file       = text if has && o.from_file else "",
+	}
+	if dirs, given := cli.lib_dirs.?; given {
+		interp.search = dirs[:]
+	}
+	jq.init(&run.ip, interp)
 	switch {
 	case has && o.from_file:
-		text = program_file(&run.ip, text)
+		text = program_file(text)
 	case !has && !o.from_file && !(is_terminal(os.stdin) && is_terminal(os.stdout)):
 		// As jq: no filter is `.`, unless both stdin and stdout are a terminal.
 		text = "."
@@ -113,7 +122,6 @@ main :: proc() {
 	}
 	run.program = {text, cli.var_names[:], cli.var_values[:], cli.positional[:], named, typing}
 	explain_filter(&run)
-	run.home_module = jq.home_module(&run.ip)
 	ready_interpreter(&run)
 	if cli.command == .Edit {
 		edit_main(&run, &cli)
@@ -135,7 +143,6 @@ main :: proc() {
 	}
 	bind_inputs(&run.ip, &ins)
 	init_output(&run.output, &run)
-	reserve(&run.ip.messages, 1 << 12)
 	// The interpreter recurses, and so does printing an answer.
 	run_deep(&run, &ins, run_filter)
 	// jq's exit status: the last input's result, 5 after a text that does not parse, 2 after a file that did not
@@ -152,18 +159,27 @@ main :: proc() {
 }
 
 // Report the filter's compile errors as jq does and exit, if there are any. A filter that is no --filter's and is a word
-// near a command is told as that command mistyped.
-compile_errors :: proc(text: string, errors: []jq.Compile_Error, typed: bool) {
+// near a command, and that fails as a filter, is told as that command mistyped.
+compile_errors :: proc(text: string, errors: []jq.Error, typed: bool) {
 	if len(errors) == 0 {
 		return
 	}
+	count := 0
 	for e in errors {
-		message.write_stderr("stury: error: %s\n", jq.locate(text, e))
+		count += 0 if e.uncounted else 1
+		switch e.fault {
+		case .Filter, .Empty, .Library:
+			message.write_stderr("stury: error: %s\n", e.msg)
+		case .Module:
+			message.write_stderr("stury: error: %s\n\n", e.msg)
+		case .Data_File:
+			message.write_stderr("stury: error loading data file %s: %s\n\n", e.path, e.msg)
+		}
 	}
-	if command := "" if typed else near_command(text); command != "" {
+	if command := "" if typed || errors[0].fault != .Filter else near_command(text); command != "" {
 		message.write_stderr("stury: %s is not a command: did you mean stury %s?\n", text, command)
 	}
-	exit_compile(len(errors))
+	exit_compile(count)
 }
 
 // The command a filter of one word is a letter or two from, as a mistyped `stury chek FILE` gives, or "".
@@ -174,7 +190,7 @@ near_command :: proc(text: string) -> string {
 			return ""
 		}
 	}
-	return message.nearest({"check", "fmt", "edit", "diff", "schema"}, text)
+	return spell.nearest_word({"check", "fmt", "edit", "diff", "schema"}, text)
 }
 
 // jq's count of compile errors, then exit as it does.
@@ -183,53 +199,46 @@ exit_compile :: proc(count: int) -> ! {
 	exit_closing_stdout(EXIT_COMPILE)
 }
 
-// Parse and check the filter and bind its globals, before the interpreter first runs.
+// Compile the filter with the command line's variables and $ARGS, before the interpreter first runs, or exit as jq
+// does when it does not compile.
 ready_interpreter :: proc(run: ^Run) {
-	parsed, errors := jq.parse(run.program.text)
+	names, values, positional := run.program.names, run.program.values, run.program.positional
+	named := core.new_object()
+	vars := make([]jq.Var, len(names))
+	for name, i in names {
+		vars[i] = {name, values[i]}
+		if i < run.program.named {
+			core.object_put(named, name, values[i])
+		}
+	}
+	args := core.new_object()
+	listed := core.new_array()
+	append(&listed.items, ..positional)
+	core.object_put(args, "positional", listed)
+	core.object_put(args, "named", named)
+	prog, errors := jq.compile(&run.ip, run.program.text, vars, args)
 	compile_errors(run.program.text, errors, run.program.typed)
-	if parsed.body == nil {
-		message.write_stderr("stury: error: Top-level program not given (try \".\")\n")
-		exit_compile(1)
-	}
-	// The modules the filter imports, and `~/.jq`, loaded, or exit as jq does when one cannot be.
-	linked: jq.Linked
-	if len(parsed.deps) > 0 || run.home_module {
-		linked = jq.link(&run.ip, parsed.deps, jq.program_origin(&run.ip))
-		if linked.errors > 0 {
-			message.write_stderr("%s", linked.messages)
-			exit_compile(linked.errors)
-		}
-	}
-	prog, check_errors, prelude := jq.check(parsed.body, run.program.names, linked)
-	compile_errors(run.program.text, check_errors, run.program.typed)
-	run.prog = prog
-	run.ip.globals = prelude
-	bind_cli_vars(run)
-	// A module sees the command line's variables, never its importer's.
-	for lib in linked.libs {
-		if lib.bottom != nil {
-			lib.bottom.parent = run.ip.globals
-		}
-	}
-	run.ip.globals = jq.bind_data(run.ip.globals, linked.imports)
+	run.prog, run.shape = prog, jq.shape(prog)
 }
 
-// The command line's variables, and $ARGS, over the globals so far.
-bind_cli_vars :: proc(run: ^Run) {
-	names, values, positional := run.program.names, run.program.values, run.program.positional
-	named := jq.new_object()
-	for name, i in names {
-		run.ip.globals = jq.bind_var(&run.ip, run.ip.globals, name, values[i])
-		if i < run.program.named {
-			jq.object_put(named, name, values[i])
-		}
+// The interpreter's way to the system: the command line's inputs are bound later (`bind_inputs`).
+interpreter_hooks :: proc() -> jq.Hooks {
+	return {
+		messages = hold_message,
+		environ = proc(_: rawptr, allocator := context.allocator) -> ([]string, string) {
+			vars, err := os.environ(allocator)
+			if err != nil {
+				return nil, message.build("%v", err, allocator = allocator)
+			}
+			return vars, ""
+		},
+		load_file = load_file,
+		path_kind = path_kind,
+		real_path = real_path,
+		home = home_dir,
+		now = proc(_: rawptr) -> f64 {return f64(time.time_to_unix_nano(time.now())) / 1e9},
+		random = proc(_: rawptr, buf: []byte) {crypto.rand_bytes(buf)},
 	}
-	args := jq.new_object()
-	listed := jq.new_array()
-	append(&listed.items, ..positional)
-	jq.object_put(args, "positional", listed)
-	jq.object_put(args, "named", named)
-	run.ip.globals = jq.bind_var(&run.ip, run.ip.globals, "ARGS", args)
 }
 
 finish :: proc(run: ^Run, code: int) -> ! {

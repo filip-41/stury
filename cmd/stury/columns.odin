@@ -13,21 +13,11 @@ import core "../../core"
 import "../../core/write"
 import records "../../core/records"
 import json "../../json"
-import "jq"
-
-Column_Shape :: enum u8 {
-	Column, // `.a, .b`: each cell is an output
-	Array, // `[.a, .b]`
-	Object, // `{a, b: .c}`, and `.` with `every`
-	Select, // `select(F)`
-}
+import "../../jq"
 
 Columns :: struct {
-	shape:   Column_Shape,
-	every:   bool, // `.`: an object of every column, its names the open file's header
-	// The columns read in output order, or those `select`'s F reads, and an object's key for each.
-	names:   [dynamic]string,
-	keys:    [dynamic]string,
+	// What the filter reads. Under `every` the names and keys are the open file's header.
+	using read: jq.Columns_Read,
 	// The open file's index of each name, -1 for one its header lacks, the cells up to the last of them, and an object's
 	// members in the order compact JSON prints them: sorted under -S, each led by `{"key":` or `,"key":`.
 	at:      []int,
@@ -62,8 +52,10 @@ choose_columns :: proc(run: ^Run) {
 	// The columns live for the run, and a file's header names are set when it opens.
 	cols := new(Columns)
 	cols.ragged = .Ragged in o.cells_in.tolerate
+	faults: bit_set[jq.Shape_Fault]
+	cols.read, faults = run.shape.columns, run.shape.column_faults
 	cols.names.allocator, cols.keys.allocator = context.allocator, context.allocator
-	r.whys += columns_of(run.prog, cols)
+	r.whys += whys_of(faults)
 	// The record passes through, and with it the comment lines above it, to an output that writes them.
 	writes_notes := o.cells_out.comment != 0 if writes_cells(o) else .Comment in holds_out(o)
 	if r.whys == {} && o.cells_in.comment != 0 && writes_notes && (cols.every || cols.shape == .Select) {
@@ -72,105 +64,6 @@ choose_columns :: proc(run: ^Run) {
 	if r.whys == {} {
 		r.columns = cols
 	}
-}
-
-@(private = "file")
-columns_of :: proc(n: ^jq.Node, cols: ^Columns) -> bit_set[Route_Why] {
-	#partial switch n.kind {
-	case .Identity:
-		cols.shape, cols.every = .Object, true
-	case .Call:
-		if n.name != "select" || len(n.args) != 1 {
-			return {.Not_Columns}
-		}
-		// Bound to the builtin, it is no `select` that `~/.jq` or a module defines.
-		if b, bound := n.native.?; !bound || b.native != jq.native_select {
-			return {.Select_Redefined}
-		}
-		cols.shape = .Select
-		if !only_columns(n.args[0], &cols.names) {
-			return {.Select_Columns}
-		}
-	case .Object:
-		cols.shape = .Object
-		whys: bit_set[Route_Why]
-		for i := 0; i < len(n.args); i += 2 {
-			key, value := n.args[i], n.args[i + 1]
-			k, is_text := key.value.(string)
-			if key.kind != .Literal || !is_text {
-				whys += {.Object_Key}
-			}
-			if value != nil && !is_column(value) {
-				whys += {.Object_Member}
-			}
-			name := k if value == nil else value.name
-			// A repeated key keeps its place and takes the later value, as in jq.
-			if at, repeated := slice.linear_search(cols.keys[:], k); repeated {
-				cols.names[at] = name
-				continue
-			}
-			append(&cols.keys, k)
-			append(&cols.names, name)
-		}
-		return whys
-	case:
-		cols.shape = .Array if n.kind == .Array else .Column
-		if !add_columns(&cols.names, n.a if n.kind == .Array else n) {
-			return {.Not_Columns}
-		}
-	}
-	return {}
-}
-
-// Whether `n` is `.name`.
-@(private = "file")
-is_column :: proc(n: ^jq.Node) -> bool {
-	return n.kind == .Field && !n.opt && n.a.kind == .Identity
-}
-
-// Appends the columns of `n`, `.a` or `.a, .b`, to `names` in order. Returns false for any other `n`.
-@(private = "file")
-add_columns :: proc(names: ^[dynamic]string, n: ^jq.Node) -> bool {
-	switch {
-	case n == nil:
-	case n.kind == .Comma:
-		return add_columns(names, n.a) && add_columns(names, n.b)
-	case is_column(n):
-		append(names, n.name)
-		return true
-	}
-	return false
-}
-
-// Whether the expression `n`, run on a record, reads it only as `.name`, whose names it appends to `watch`. The right
-// side of a `|` does not run on the record. Any other use of `.`, a call that reads `.`, a binding, or an `if` without
-// `else` reads more. A nested `select` runs its argument on the same input as `n`.
-@(private = "file")
-only_columns :: proc(n: ^jq.Node, watch: ^[dynamic]string) -> bool {
-	if n == nil {
-		return true
-	}
-	#partial switch n.kind {
-	case .Field:
-		if n.a.kind != .Identity {
-			return only_columns(n.a, watch)
-		}
-		if !slice.contains(watch[:], n.name) {
-			append(watch, n.name)
-		}
-		return true
-	case .Literal, .Var:
-		return true
-	case .Pipe, .Try:
-		return only_columns(n.a, watch)
-	case .Index, .Slice, .Iterate, .Array, .Neg, .Comma, .Binary, .And, .Or, .Alt:
-		return only_columns(n.a, watch) && only_columns(n.b, watch) && only_columns(n.c, watch)
-	case .If:
-		return n.c != nil && only_columns(n.a, watch) && only_columns(n.b, watch) && only_columns(n.c, watch)
-	case .Call:
-		return n.name == "select" && len(n.args) == 1 && only_columns(n.args[0], watch)
-	}
-	return false
 }
 
 // Finds the open file's index of each column the filter reads, once its first record `header`, keyed by the header,
@@ -183,7 +76,7 @@ place_columns :: proc(run: ^Run, cols: ^Columns, texts: ^records.Reader, header:
 		clear(&cols.keys)
 		it := core.pairs(header, core.ROOT)
 		for k in core.pair_next(&it) {
-			name := strings.clone(jq.node_string(header, k), heap)
+			name := strings.clone(core.node_string(header, k), heap)
 			append(&cols.names, name)
 			append(&cols.keys, name)
 		}
@@ -246,7 +139,7 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 	o := &run.output
 	if cols.whole {
 		built, _ := records.build(it, rec, context.allocator)
-		run_once(run, jq.document_value(built))
+		run_once(run, core.document_value(built))
 		return
 	}
 	short: [256]u8 = ---
@@ -265,7 +158,7 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 			}
 		}
 	case .Array:
-		a := jq.new_array(len(cols.at))
+		a := core.new_array(len(cols.at))
 		for at in cols.at {
 			append(&a.items, value_of(column_cell(it, rec, row, at, buf)))
 		}
@@ -288,9 +181,9 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 				}
 			}
 			if len(cols.members) == 0 {
-				jq.put_byte(&o.buf, '{')
+				write.put_byte(&o.buf, '{')
 			}
-			jq.put_byte(&o.buf, '}')
+			write.put_byte(&o.buf, '}')
 			o.result = JQ_OK
 			end_output(o)
 		case o.table != nil && !o.opts.grow_header:
@@ -311,14 +204,14 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 			}
 		case cols.every:
 			built, _ := records.build(it, rec, context.allocator)
-			if !emit(o, jq.document_value(built)) {
+			if !emit(o, core.document_value(built)) {
 				refuse_record(run)
 				return
 			}
 		case:
-			obj := jq.new_object()
+			obj := core.new_object()
 			for at, i in cols.at {
-				jq.object_put(obj, cols.keys[i], value_of(column_cell(it, rec, row, at, buf)))
+				core.object_put(obj, cols.keys[i], value_of(column_cell(it, rec, row, at, buf)))
 			}
 			if !emit(o, obj) {
 				refuse_record(run)
@@ -326,9 +219,9 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 			}
 		}
 	case .Select:
-		watched := jq.new_object()
+		watched := core.new_object()
 		for name, i in cols.names {
-			jq.object_put(watched, name, value_of(column_cell(it, rec, row, cols.at[i], buf)))
+			core.object_put(watched, name, value_of(column_cell(it, rec, row, cols.at[i], buf)))
 		}
 		o.whole = {it, rec}
 		run_once(run, watched)
@@ -342,7 +235,7 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 @(private = "file")
 refuse_record :: proc(run: ^Run) {
 	flush_some(&run.output, force = true)
-	tell_filter_error(&run.ip, (^Inputs)(run.ip.inputs.data))
+	tell_filter_error(&run.ip, (^Inputs)(jq.inputs(&run.ip).data))
 	finish_input(&run.output, EXIT_INPUT)
 }
 
@@ -367,7 +260,7 @@ column_cell :: #force_inline proc(it: ^records.Reader, rec: records.Record, row:
 }
 
 @(private = "file")
-value_of :: #force_inline proc(cell: write.Scalar) -> jq.Value {
+value_of :: #force_inline proc(cell: write.Scalar) -> core.Value {
 	if s, text := cell.(string); text {
 		return s
 	}

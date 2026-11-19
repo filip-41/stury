@@ -16,15 +16,30 @@ import "core:strings"
 import "core:sync"
 import "core:time"
 import "core:sys/posix"
+import spell "../../core/spell"
 import kernel "../../core/kernel"
 import core "../../core"
 import records "../../core/records"
 import json "../../json"
-import "jq"
+import "../../jq"
 import "message"
 
 @(rodata)
 STDIN_ONLY := []string{"-"}
+
+// `src` as one text's document, as jq reads it, or the fault that it is not one.
+build_text :: proc(src: []byte, r: core.As, allocator := context.allocator) -> (doc: core.Document, fault: Maybe(core.Fault)) {
+	return core.refuse_key_clash(core.build(src, r, allocator = allocator))
+}
+
+// `src` as one text, or the fault that it is not one.
+read_text :: proc(src: []byte, r: core.As) -> (core.Value, Maybe(core.Fault)) {
+	d, fault := build_text(src, r)
+	if fault != nil {
+		return nil, fault
+	}
+	return core.document_value(d), nil
+}
 
 // The files a command reads, or stdin when it names none. With none named and stdin and stdout both a terminal, the
 // help is told rather than a wait on the keyboard, as a run with no filter tells it.
@@ -131,7 +146,7 @@ Inputs :: struct {
 	line_end:   int, // --stream: the byte after the newline `line` counts last
 	// --stream: the open text's events while some are left: a document's, whose text starts at `events_at`, or those
 	// jq's parser makes of the bytes before a fault, which plain --stream ends with the fault's message
-	events:      ^jq.Events,
+	events:      ^Events,
 	events_at:   int,
 	walk:        ^Fault_Walk,
 	walk_at:     int,
@@ -148,7 +163,7 @@ Inputs :: struct {
 // soon as there is one. A --stream-errors error that jq gives after the event the text's last byte left pending comes
 // after the array. An `own` value, which `input` reads, holds a copy of its text, so the bytes it was read from can go
 // while it lives on.
-next_input :: proc(ins: ^Inputs, own := false) -> (jq.Value, string, jq.Parse_Status) {
+next_input :: proc(ins: ^Inputs, own := false) -> (core.Value, string, jq.Input_Status) {
 	// A --stream event is no row, so it holds no comment.
 	noted := ins.run.opts.cells_in.comment != 0 && !ins.run.opts.stream
 	if !ins.slurp {
@@ -162,7 +177,7 @@ next_input :: proc(ins: ^Inputs, own := false) -> (jq.Value, string, jq.Parse_St
 		ins.slurp = false
 		return next_raw(ins, true)
 	}
-	all := jq.new_array()
+	all := core.new_array()
 	read: for {
 		if slurp_table(ins, all) {
 			continue
@@ -184,7 +199,7 @@ next_input :: proc(ins: ^Inputs, own := false) -> (jq.Value, string, jq.Parse_St
 			tell_ignored(ins, msg)
 		case .Value:
 			append(&all.items, v)
-		case .More:
+		case .End:
 			break read
 		}
 	}
@@ -196,7 +211,7 @@ next_input :: proc(ins: ^Inputs, own := false) -> (jq.Value, string, jq.Parse_St
 // False when the file is not read so: a pipe's window, a file a record of which is read, comments or the column route
 // asked for, or a text that does not build or names a column twice, whose records' reader then tells the fault.
 @(private = "file")
-slurp_table :: proc(ins: ^Inputs, all: ^jq.Array) -> bool {
+slurp_table :: proc(ins: ^Inputs, all: ^core.Array) -> bool {
 	o := &ins.run.opts
 	if !reads_cells(o) || o.cells_in.comment != 0 || ins.run.route.columns != nil || o.stream {
 		return false
@@ -208,14 +223,14 @@ slurp_table :: proc(ins: ^Inputs, all: ^jq.Array) -> bool {
 		return false
 	}
 	// A long table is built on the pool's threads.
-	doc, fault := jq.judge_build(records.build(ins.data, ins.as, allocator = context.allocator, runner = pool_for(ins.run, ins.data)))
+	doc, fault := core.refuse_key_clash(records.build(ins.data, ins.as, allocator = context.allocator, runner = pool_for(ins.run, ins.data)))
 	if _, bad := fault.?; bad {
 		return false
 	}
 	d := new_clone(doc)
 	it := core.children(d, core.ROOT)
 	for rec in core.child_next(&it) {
-		append(&all.items, jq.Value(jq.Ref{d, rec}))
+		append(&all.items, core.Value(core.Node_Ref{d, rec}))
 	}
 	ins.has_text, ins.pinned, ins.text_end = true, true, len(ins.data)
 	close_file(ins)
@@ -229,7 +244,7 @@ tell_ignored :: proc(ins: ^Inputs, msg: string) {
 }
 
 // The next text, or under --stream its next event, passing over a file that does not open or holds only space.
-next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Status) {
+next_value :: proc(ins: ^Inputs, own: bool) -> (core.Value, string, jq.Input_Status) {
 	if ins.run.opts.raw_input {
 		return next_raw(ins, false)
 	}
@@ -238,7 +253,7 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 	}
 	for {
 		if !ins.open && !open_next(ins) {
-			return nil, "", .More
+			return nil, "", .End
 		}
 		if k := cut_bom_len(ins.data); k > 0 && ins.run.opts.stream_errors && ins.framing != .Lines && ins.next_file == 1 && !ins.has_text && ins.file_lines == 0 && !ins.bom_broken {
 			// jq's parser drops the bytes of the mark it matched, and refuses the stream whole when more follow, but
@@ -344,14 +359,14 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 				return v, msg, status
 			}
 			if ins.failures > 0 || ins.run.halted {
-				return nil, "", .More
+				return nil, "", .End
 			}
 			continue
 		}
 		if route.scanning && answer_record(ins.run, rec, &part, read, scanned, ins.as) {
 			// As jq's main loop, which reads one input past a file that did not open.
 			if ins.failures > 0 {
-				return nil, "", .More
+				return nil, "", .End
 			}
 			continue
 		}
@@ -362,10 +377,10 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 // The next --stream event of the text read last, or of the faulty text's walk, then the walk's fault. False when
 // neither has one left.
 @(private = "file")
-held_event :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_Status, held: bool) {
+held_event :: proc(ins: ^Inputs) -> (v: core.Value, msg: string, status: jq.Input_Status, held: bool) {
 	if ins.events != nil {
-		if ev, more := jq.next_event(ins.events); more {
-			lines_through(ins, ins.events_at + jq.event_trigger(ins.events))
+		if ev, more := next_event(ins.events); more {
+			lines_through(ins, ins.events_at + event_trigger(ins.events))
 			return ev, "", .Value, true
 		}
 		ins.events = nil
@@ -374,7 +389,7 @@ held_event :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 		ev, more := fault_peek(ins.walk)
 		if more && (ins.fault_error == "" || !ev.error && ev.at < len(ins.walk.p.src)) {
 			ins.walk.given += 1
-			ev.value = jq.event_clone(ev.value)
+			ev.value = event_clone(ev.value)
 			lines_through(ins, ins.walk_at + ev.at)
 			return ev.value, "", .Value, true
 		}
@@ -390,7 +405,7 @@ held_event :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 // The value of the record `rec` of the open file, built, or the fault that it does not build. With `own` the value
 // outlives the window.
 @(private = "file")
-record_value :: proc(ins: ^Inputs, rec: records.Record, own: bool) -> (jq.Value, string, jq.Parse_Status) {
+record_value :: proc(ins: ^Inputs, rec: records.Record, own: bool) -> (core.Value, string, jq.Input_Status) {
 	rec := rec
 	// --stream's document lives until its last event, past the memory of the input that reads it.
 	stream := ins.run.opts.stream
@@ -402,7 +417,7 @@ record_value :: proc(ins: ^Inputs, rec: records.Record, own: bool) -> (jq.Value,
 	// A slurped scalar reads so too, viewing the input's bytes, which `pinned` keeps.
 	own_scalar := (own || ins.slurp) && !stream && !reads_own(&ins.run.opts) && len(rec.text) > 0 && rec.text[0] != '[' && rec.text[0] != '{'
 	built, err := records.build(&ins.texts, rec, runtime.heap_allocator() if stream || own_scalar else context.allocator)
-	doc, fault := jq.judge_build(built, err)
+	doc, fault := core.refuse_key_clash(built, err)
 	if f, bad := fault.?; bad {
 		return text_fault(ins, f, int(rec.at), int(rec.at) + len(rec.text) if ins.framing == .Lines else -1)
 	}
@@ -410,7 +425,7 @@ record_value :: proc(ins: ^Inputs, rec: records.Record, own: bool) -> (jq.Value,
 		ins.text_end = int(rec.at) + int(doc.nodes[0].lo) + len(core.span(&doc, core.ROOT))
 		heap := runtime.heap_allocator()
 		d := new_clone(doc, heap)
-		v := jq.scalar(jq.Ref{d, core.ROOT})
+		v := jq.scalar(core.Node_Ref{d, core.ROOT})
 		ins.pinned ||= !own
 		core.destroy(d)
 		free(d, heap)
@@ -422,7 +437,7 @@ record_value :: proc(ins: ^Inputs, rec: records.Record, own: bool) -> (jq.Value,
 // The open file's first text, when the file is whole: as one build reads it when it is the file's only text, which
 // most files are. Returns false when there is none, or when another text follows it, which `texts` then reads.
 @(private = "file")
-first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_Status, read: bool) {
+first_text :: proc(ins: ^Inputs) -> (v: core.Value, msg: string, status: jq.Input_Status, read: bool) {
 	data := ins.data
 	if ins.framing != .Concatenated || !ins.last {
 		return
@@ -440,7 +455,7 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	fallback := route.fallback
 	if !stray_bom && (dot && spine_print(ins, put_dot) || spine_length(ins) || entries_pieces(ins) || collect_pieces(ins) || route.scanning && answer_path(run, data, ins.as)) {
 		close_file(ins)
-		return nil, "", .More, ins.failures > 0
+		return nil, "", .End, ins.failures > 0
 	}
 	doc: core.Document
 	fault: Maybe(core.Fault)
@@ -471,7 +486,7 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 // text, so that `data` is read as texts one after another.
 build_whole :: proc(data: []byte, src: Source, allocator: runtime.Allocator, pool: ^core.Runner = nil, pieces: ^int = nil) -> (doc: core.Document, fault: Maybe(core.Fault), texts: bool) {
 	cut: int
-	doc, fault = jq.judge_build(records.build(data, src.as, allocator = allocator, runner = pool, pieces = &cut))
+	doc, fault = core.refuse_key_clash(records.build(data, src.as, allocator = allocator, runner = pool, pieces = &cut))
 	if pieces != nil {
 		pieces^ += cut
 	}
@@ -490,30 +505,30 @@ texts_follow :: proc(f: core.Fault, format: Format) -> bool {
 
 // The value of the document `doc` of a text at data[at:], or its first --stream event.
 @(private = "file")
-text_value :: proc(ins: ^Inputs, built: core.Document, at: int, own: bool) -> (jq.Value, string, jq.Parse_Status) {
+text_value :: proc(ins: ^Inputs, built: core.Document, at: int, own: bool) -> (core.Value, string, jq.Input_Status) {
 	doc := built
 	end := int(doc.nodes[0].lo) + len(core.span(&doc, core.ROOT))
 	if ins.run.opts.stream {
 		ins.pinned = true
-		ins.events = jq.value_events_start(doc, end - 1) if core.is_markup(&doc) else jq.events_start(doc)
+		ins.events = value_events_start(doc, end - 1) if core.is_markup(&doc) else events_start(doc)
 		ins.events_at = at
 		return next_value(ins, own)
 	}
 	ins.pinned ||= !own
 	ins.text_end = at + end
 	if ins.run.opts.attributes {
-		return core.attributes_as_members(jq.document_value(doc)), "", .Value
+		return core.attributes_as_members(core.document_value(doc)), "", .Value
 	}
-	return jq.document_value(doc), "", .Value
+	return core.document_value(doc), "", .Value
 }
 
 // -R: the next line of the input as a string, as jq's raw reader reads it: the bytes before a newline, a line running
 // on from one file into the next, and each piece fgets reads made valid UTF-8 on its own. The last line without its
 // newline. With `whole`, all of the input as one string.
 @(private = "file")
-next_raw :: proc(ins: ^Inputs, whole: bool) -> (jq.Value, string, jq.Parse_Status) {
+next_raw :: proc(ins: ^Inputs, whole: bool) -> (core.Value, string, jq.Input_Status) {
 	if ins.raw_done {
-		return nil, "", .More
+		return nil, "", .End
 	}
 	line := strings.builder_make()
 	read := false
@@ -542,7 +557,7 @@ next_raw :: proc(ins: ^Inputs, whole: bool) -> (jq.Value, string, jq.Parse_Statu
 	}
 	ins.raw_done = whole
 	if !read && !whole {
-		return nil, "", .More
+		return nil, "", .End
 	}
 	return strings.to_string(line), "", .Value
 }
@@ -562,7 +577,7 @@ next_piece :: proc(left: []byte) -> (n: int, newline: bool) {
 	for i >= 0 && window[i] & 0xc0 == 0x80 {
 		i -= 1
 	}
-	missing := 0 if i < 0 else max(jq.utf8_length(window[i]) - (len(window) - i), 0)
+	missing := 0 if i < 0 else max(spell.utf8_length(window[i]) - (len(window) - i), 0)
 	return FGETS_MAX + min(missing, len(left) - FGETS_MAX), false
 }
 
@@ -796,7 +811,7 @@ take_data :: proc(ins: ^Inputs, carry: []byte) {
 advance_past :: proc(ins: ^Inputs, to: int) {
 	settle_line(ins)
 	line := ins.parsed.line
-	jq.advance(&ins.parsed.line, &ins.parsed.column, ins.data[min(len(ins.head), to) if ins.headed else 0:to])
+	core.advance_position(&ins.parsed.line, &ins.parsed.column, ins.data[min(len(ins.head), to) if ins.headed else 0:to])
 	ins.file_lines += ins.parsed.line - line
 }
 
@@ -1065,9 +1080,9 @@ cut_bom_len :: proc(data: []byte) -> int {
 
 // What `input`, `inputs`, `input_filename` and `input_line_number` read.
 bind_inputs :: proc(ip: ^jq.Interp, ins: ^Inputs) {
-	ip.inputs = {
+	jq.set_inputs(ip, {
 		data = ins,
-		next = proc(data: rawptr) -> (jq.Value, string, jq.Parse_Status) {
+		next = proc(data: rawptr) -> (core.Value, string, jq.Input_Status) {
 			return next_input((^Inputs)(data), own = true)
 		},
 		position = proc(data: rawptr) -> (string, int) {
@@ -1075,7 +1090,7 @@ bind_inputs :: proc(ip: ^jq.Interp, ins: ^Inputs) {
 			settle_line(ins)
 			return ins.name, ins.line
 		},
-	}
+	})
 }
 
 // All of file `f`, to its end. os.read_entire_file reads as many bytes as fstat gives, which for a pipe is

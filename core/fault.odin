@@ -95,6 +95,16 @@ locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines = nil) -> (
 	return l.line + 1, at - l.line_lo + 1
 }
 
+// Moves a line, counted from 1, and a column, the bytes before a byte of its line, past `text`, as `locate` counts them.
+advance_position :: proc "contextless" (line, column: ^int, text: []u8) {
+	if l, c := locate(text, u64(len(text))); l > 1 {
+		line^ += int(l - 1)
+		column^ = int(c - 1)
+	} else {
+		column^ += int(c - 1)
+	}
+}
+
 // Writes `line:col: ` of byte `at` in `src`, or `at byte N: ` with no `src`, which has no lines to count.
 @(private)
 write_position :: proc(w: io.Writer, src: []u8, at: u64, lines: ^Lines) -> io.Error {

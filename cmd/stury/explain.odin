@@ -7,7 +7,7 @@ package main
 import "core:strings"
 import "core:time"
 import core "../../core"
-import "jq"
+import "../../jq"
 import "message"
 
 Explain :: struct {
@@ -144,7 +144,7 @@ explain_route :: proc(run: ^Run, framing: core.Framing) {
 }
 
 @(private = "file")
-op_text :: proc(op: jq.Op) -> string {
+op_text :: proc(op: jq.Comparison) -> string {
 	#partial switch op {
 	case .Eq:
 		return "=="

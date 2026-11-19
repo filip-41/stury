@@ -13,7 +13,6 @@ import core "../../core"
 import "../../core/rules"
 import "../../core/schema"
 import json "../../json"
-import "jq"
 import "message"
 
 // The options of the schema verbs.
@@ -87,7 +86,7 @@ refuse_unlisted :: proc(d: ^rules.Description, format: Format, verb: string) {
 // input. A fault is told on stderr as the plain check tells it, and gives false.
 infer_read :: proc(inf: ^schema.Inferred, src: Source, path: string, data: []byte, o: ^Opts, runner: ^core.Runner = nil) -> bool {
 	if source_whole(src.format) {
-		doc, fault := jq.build_text(data, src.as, runtime.heap_allocator())
+		doc, fault := build_text(data, src.as, runtime.heap_allocator())
 		if bad, is_fault := fault.?; is_fault {
 			tell_operand_fault(o, src, path, data, bad)
 			return false

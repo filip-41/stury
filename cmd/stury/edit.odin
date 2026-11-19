@@ -15,7 +15,7 @@ import core "../../core"
 import compose "../../core/compose"
 import records "../../core/records"
 import json "../../json"
-import "jq"
+import "../../jq"
 import "message"
 
 // What the outputs say for `-e`: whether the filter made one, and whether the last was false or null.
@@ -35,7 +35,7 @@ Edit_Run :: struct {
 @(private = "file")
 Edit_Sink :: struct {
 	using sink: jq.Sink,
-	values:     [dynamic]jq.Value,
+	values:     [dynamic]core.Value,
 }
 
 @(private = "file")
@@ -46,8 +46,8 @@ edit_emit :: proc(s: ^jq.Sink, it: jq.Item) -> jq.Signal {
 }
 
 // The filter may call `input`, but there is no text after the one being edited.
-edit_no_input :: proc(data: rawptr) -> (jq.Value, string, jq.Parse_Status) {
-	return nil, "", .More
+edit_no_input :: proc(data: rawptr) -> (core.Value, string, jq.Input_Status) {
+	return nil, "", .End
 }
 
 // The file and the line of the record being edited, which a filter error names.
@@ -100,15 +100,14 @@ edit_files :: proc(run: ^Run, ins: ^Inputs) {
 		layout = {opts = {pretty = !o.compact, indent = u8(max(o.indent, 0)), tab = o.indent < 0, ascii = o.ascii, sort_keys = o.sort_keys}},
 	}
 	er := &edit
-	run.ip.printer = nil
-	run.ip.inputs = {data = ins, next = edit_no_input, position = edit_position}
+	jq.set_inputs(&run.ip, {data = ins, next = edit_no_input, position = edit_position})
 	values, temp: virtual.Arena
 	if virtual.arena_init_growing(&values) != nil || virtual.arena_init_growing(&temp) != nil {
 		message.write_stderr("stury: error: out of memory\n")
 		os.exit(EXIT_INPUT)
 	}
-	context.allocator = jq.arena_allocator(&values)
-	context.temp_allocator = jq.arena_allocator(&temp)
+	context.allocator = jq.run_allocator(&values)
+	context.temp_allocator = jq.run_allocator(&temp)
 	exit := 0
 	for path in ins.files {
 		code := EXIT_USAGE
@@ -139,18 +138,16 @@ edit_files :: proc(run: ^Run, ins: ^Inputs) {
 }
 
 // Runs the filter on `input` and returns its outputs, or false, told, when it fails.
-edit_outputs :: proc(er: ^Edit_Run, input: jq.Value) -> ([]jq.Value, bool) {
+edit_outputs :: proc(er: ^Edit_Run, input: core.Value) -> ([]core.Value, bool) {
 	ip := &er.run.ip
-	ip.free_envs = nil
 	sink := Edit_Sink{sink = {emit = edit_emit}}
-	sig := jq.eval(ip, er.run.prog, {v = input}, ip.globals, false, &sink.sink)
-	if len(ip.messages) > 0 {
-		jq.flush_messages(ip)
-	}
-	if code, halted := ip.halted.?; halted {
-		os.exit(code)
-	}
-	if sig == .Fail {
+	outcome := jq.run(ip, er.run.prog, input, &sink.sink)
+	flush_messages()
+	switch outcome {
+	case .Done:
+	case .Halted:
+		os.exit(ip.halted.?)
+	case .Raised:
 		tell_filter_error(ip, nil)
 		return nil, false
 	}
@@ -162,12 +159,12 @@ edit_outputs :: proc(er: ^Edit_Run, input: jq.Value) -> ([]jq.Value, bool) {
 }
 
 // Under `-s` the filter's outputs are arrays of records, which follow one another.
-edit_slurped :: proc(er: ^Edit_Run, w: ^Edit_State, input: jq.Value) -> (items, outs: []jq.Value, ok: bool) {
+edit_slurped :: proc(er: ^Edit_Run, w: ^Edit_State, input: core.Value) -> (items, outs: []core.Value, ok: bool) {
 	outs, ok = edit_outputs(er, input)
 	if !ok {
 		return nil, nil, false
 	}
-	kept := make([dynamic]jq.Value, context.temp_allocator)
+	kept := make([dynamic]core.Value, context.temp_allocator)
 	for v in outs {
 		if jq.kind(v) != .Array {
 			message.write_stderr("stury: error: %s: under -s each output is an array of records, not %s\n", w.name, jq.type_name(v))
@@ -199,7 +196,7 @@ edit_document :: proc(er: ^Edit_Run, path: string) -> int {
 	ins := er.ins
 	src := ins.data
 	heap := runtime.heap_allocator()
-	doc, fault := jq.build_text(src, ins.as, heap)
+	doc, fault := build_text(src, ins.as, heap)
 	if f, bad := fault.?; bad && FORMATS[ins.format].whole_as != nil && FORMATS[ins.format].caps.follows != nil && FORMATS[ins.format].caps.follows(f) {
 		return edit_records(er, path)
 	} else if bad {
@@ -212,11 +209,11 @@ edit_document :: proc(er: ^Edit_Run, path: string) -> int {
 	w := edit_state(er, &doc, &list)
 	w.defers = true
 	ins.line = 1
-	root := jq.scalar(jq.Ref{&doc, core.ROOT})
-	outs: []jq.Value
+	root := jq.scalar(core.Node_Ref{&doc, core.ROOT})
+	outs: []core.Value
 	ok: bool
 	if er.run.opts.slurp {
-		a := jq.new_array(1)
+		a := core.new_array(1)
 		append(&a.items, root)
 		outs, _, ok = edit_slurped(er, &w, a)
 	} else {
@@ -256,9 +253,9 @@ edit_document :: proc(er: ^Edit_Run, path: string) -> int {
 // The comments of the values the first pass wrote new, written on the nodes the edited text `text` holds for them:
 // the text `text` becomes, `owned` when it is a new heap allocation.
 @(private = "file")
-edit_later_comments :: proc(er: ^Edit_Run, text: []u8, v: jq.Value) -> (out: []u8, owned, ok: bool) {
+edit_later_comments :: proc(er: ^Edit_Run, text: []u8, v: core.Value) -> (out: []u8, owned, ok: bool) {
 	heap := runtime.heap_allocator()
-	doc, fault := jq.build_text(text, er.ins.as, heap)
+	doc, fault := build_text(text, er.ins.as, heap)
 	if _, bad := fault.?; bad {
 		message.write_stderr("stury: error: %s: The edited text does not read\n", er.ins.name)
 		return nil, false, false
@@ -490,9 +487,9 @@ edit_records :: proc(er: ^Edit_Run, path: string) -> int {
 	defer edit_joiner_destroy(&join)
 	slurp := er.run.opts.slurp
 	if !slurp {
-		er.run.ip.inputs = {data = &r, next = edit_read_input, position = edit_reader_position}
+		jq.set_inputs(&er.run.ip, {data = rawptr(&r), next = edit_read_input, position = edit_reader_position})
 	}
-	defer er.run.ip.inputs = {data = ins, next = edit_no_input, position = edit_position}
+	defer jq.set_inputs(&er.run.ip, {data = ins, next = edit_no_input, position = edit_position})
 	for {
 		doc, more := edit_read(&r)
 		if !more {
@@ -502,7 +499,7 @@ edit_records :: proc(er: ^Edit_Run, path: string) -> int {
 			continue
 		}
 		i := len(r.spans) - 1
-		outs, ran := edit_outputs(er, jq.scalar(jq.Ref{doc, core.ROOT}))
+		outs, ran := edit_outputs(er, jq.scalar(core.Node_Ref{doc, core.ROOT}))
 		if !ran || edit_read_failed(&r) {
 			return EXIT_INPUT
 		}
@@ -524,13 +521,13 @@ edit_records :: proc(er: ^Edit_Run, path: string) -> int {
 	}
 	if slurp {
 		docs := r.docs[:]
-		sources := make([]jq.Value, len(docs), context.temp_allocator)
+		sources := make([]core.Value, len(docs), context.temp_allocator)
 		owner := make(map[^core.Document]int, len(docs), context.temp_allocator)
 		for d, i in docs {
-			sources[i] = jq.scalar(jq.Ref{d, core.ROOT})
+			sources[i] = jq.scalar(core.Node_Ref{d, core.ROOT})
 			owner[d] = i
 		}
-		a := jq.new_array(len(docs))
+		a := core.new_array(len(docs))
 		append(&a.items, ..sources)
 		ins.line = 1
 		probe := Edit_State{name = ins.name}
@@ -541,7 +538,7 @@ edit_records :: proc(er: ^Edit_Run, path: string) -> int {
 		claims := make([]int, len(items), context.temp_allocator)
 		for v, j in items {
 			claims[j] = -1
-			if ref, is_ref := v.(jq.Ref); is_ref && ref.node == core.ROOT {
+			if ref, is_ref := v.(core.Node_Ref); is_ref && ref.node == core.ROOT {
 				claims[j] = owner[ref.doc] if ref.doc in owner else -1
 			}
 		}
@@ -598,7 +595,7 @@ edit_read :: proc(r: ^Edit_Reader) -> (doc: ^core.Document, more: bool) {
 	r.counted = rec.at
 	line := r.line + 1
 	built, err := records.build(&r.it, rec, heap)
-	d, fault := jq.judge_build(built, err)
+	d, fault := core.refuse_key_clash(built, err)
 	if f, bad := fault.?; bad {
 		r.fault = f
 		return nil, false
@@ -619,18 +616,18 @@ edit_read :: proc(r: ^Edit_Reader) -> (doc: ^core.Document, more: bool) {
 
 // `input` while records are edited: the next record, whose place the outputs of the record being edited take.
 @(private = "file")
-edit_read_input :: proc(data: rawptr) -> (jq.Value, string, jq.Parse_Status) {
+edit_read_input :: proc(data: rawptr) -> (core.Value, string, jq.Input_Status) {
 	r := (^Edit_Reader)(data)
 	if r.fault != nil {
-		return nil, "", .More
+		return nil, "", .End
 	}
 	if doc, more := edit_read(r); more {
-		return jq.scalar(jq.Ref{doc, core.ROOT}), "", .Value
+		return jq.scalar(core.Node_Ref{doc, core.ROOT}), "", .Value
 	}
 	if f, bad := r.fault.?; bad {
 		return nil, fault_told(r.ins.name, r.ins.data, f), .Error
 	}
-	return nil, "", .More
+	return nil, "", .End
 }
 
 // Reads a file's lines one at a time, for the edit's loop and for the filter's `input`.
@@ -660,11 +657,11 @@ edit_line :: proc(r: ^Edit_Line_Reader) -> (line: string, more: bool) {
 }
 
 @(private = "file")
-edit_line_input :: proc(data: rawptr) -> (jq.Value, string, jq.Parse_Status) {
+edit_line_input :: proc(data: rawptr) -> (core.Value, string, jq.Input_Status) {
 	if line, more := edit_line((^Edit_Line_Reader)(data)); more {
 		return line, "", .Value
 	}
-	return nil, "", .More
+	return nil, "", .End
 }
 
 // Whether the text had a fault, told here, so the file is not written.
@@ -681,11 +678,11 @@ edit_read_failed :: proc(r: ^Edit_Reader) -> bool {
 // spelling, a value taken from a record keeping that record's bytes. `fresh` says the text is a heap allocation, which
 // outlives the record's arena.
 @(private = "file")
-edit_record_text :: proc(er: ^Edit_Run, doc: ^core.Document, src: []u8, span: Edit_Span, line: int, v: jq.Value, kept: bool) -> (text: []u8, fresh, ok: bool) {
+edit_record_text :: proc(er: ^Edit_Run, doc: ^core.Document, src: []u8, span: Edit_Span, line: int, v: core.Value, kept: bool) -> (text: []u8, fresh, ok: bool) {
 	heap := runtime.heap_allocator()
 	// A record read with `input` keeps its bytes wherever it goes.
 	stream := er.ins.framing == .Concatenated
-	if r, is_ref := v.(jq.Ref); is_ref && (!kept || r.doc != doc) && !er.run.opts.sort_keys {
+	if r, is_ref := v.(core.Node_Ref); is_ref && (!kept || r.doc != doc) && !er.run.opts.sort_keys {
 		if stream {
 			return edit_moved_document(er, r)
 		}
@@ -716,7 +713,7 @@ edit_record_text :: proc(er: ^Edit_Run, doc: ^core.Document, src: []u8, span: Ed
 // A stream's document made of value `r` of a record: the whole record, or the value's bytes moved to column 0. The
 // joiner starts it with a marker line when it has none.
 @(private = "file")
-edit_moved_document :: proc(er: ^Edit_Run, r: jq.Ref) -> (text: []u8, fresh, ok: bool) {
+edit_moved_document :: proc(er: ^Edit_Run, r: core.Node_Ref) -> (text: []u8, fresh, ok: bool) {
 	if r.node == core.ROOT {
 		return r.doc.src, false, true
 	}
@@ -756,8 +753,8 @@ edit_marked :: proc(text: []u8) -> bool {
 
 // A document a stream's filter adds: the value as the format's document writer writes it, in block style.
 @(private = "file")
-edit_new_document :: proc(er: ^Edit_Run, v: jq.Value) -> (text: []u8, fresh, ok: bool) {
-	built, fault := jq.build_text(transmute([]u8)jq.to_json(v, {}, context.temp_allocator), json.as(.Json), context.temp_allocator)
+edit_new_document :: proc(er: ^Edit_Run, v: core.Value) -> (text: []u8, fresh, ok: bool) {
+	built, fault := build_text(transmute([]u8)jq.to_json(v, {}, context.temp_allocator), json.as(.Json), context.temp_allocator)
 	body: []u8
 	err: core.Error
 	if fault == nil {
@@ -786,7 +783,7 @@ edit_lines :: proc(er: ^Edit_Run, path: string) -> int {
 		delete(r.spans)
 		edit_joiner_destroy(&join)
 	}
-	raw :: proc(v: jq.Value) -> []u8 {
+	raw :: proc(v: core.Value) -> []u8 {
 		if s, is_string := jq.string_of(v); is_string {
 			return transmute([]u8)s
 		}
@@ -805,8 +802,8 @@ edit_lines :: proc(er: ^Edit_Run, path: string) -> int {
 		}
 		return edit_publish(er.run, path, src, out[:])
 	}
-	er.run.ip.inputs = {data = &r, next = edit_line_input, position = edit_reader_position}
-	defer er.run.ip.inputs = {data = ins, next = edit_no_input, position = edit_position}
+	jq.set_inputs(&er.run.ip, {data = rawptr(&r), next = edit_line_input, position = edit_reader_position})
+	defer jq.set_inputs(&er.run.ip, {data = ins, next = edit_no_input, position = edit_position})
 	for {
 		line, more := edit_line(&r)
 		if !more {

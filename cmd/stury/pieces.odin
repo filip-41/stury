@@ -10,13 +10,12 @@ package main
 
 import "base:runtime"
 import "core:mem/virtual"
-import "core:slice"
 import "core:sync"
 import core "../../core"
 import host "../../host"
 import "../../core/write"
 import records "../../core/records"
-import "jq"
+import "../../jq"
 
 // The least input read on the pool's threads: on a shorter one, starting them costs more than they save.
 POOLED_BYTES :: #config(STURY_POOLED_BYTES, 1 << 20)
@@ -24,16 +23,7 @@ POOLED_BYTES :: #config(STURY_POOLED_BYTES, 1 << 20)
 // The run's pool, started at its first use. A pool that could not start runs every piece on the caller.
 run_pool :: proc(run: ^Run) -> ^core.Runner {
 	if run.pool == nil {
-		// Indexed before any thread starts, so the threads' reads of these values write nothing.
-		for v in run.program.values {
-			jq.index_shared(v)
-		}
-		for v in run.program.positional {
-			jq.index_shared(v)
-		}
-		for v in run.ip.data {
-			jq.index_shared(v)
-		}
+		jq.share(&run.ip, run.prog)
 		run.pool = new(host.Pool, runtime.heap_allocator())
 		host.pool_init(run.pool, run.opts.threads)
 	}
@@ -63,7 +53,7 @@ Piece_Slot :: struct {
 	// thread's piece arena.
 	inner:         []u8,
 	entries:       int,
-	items:         [dynamic]jq.Value,
+	items:         [dynamic]core.Value,
 }
 
 Pieces :: struct {
@@ -89,44 +79,11 @@ parallel :: proc(run: ^Run) -> bool {
 		return p
 	}
 	o := &run.opts
-	walk: Serial_Walk
-	defer delete(walk.on)
-	defer delete(walk.done)
 	// A piece builds its records alone, without the comment lines above them that the interpreter's filter may read.
 	comments := reads_cells(o) && o.cells_in.comment != 0 && run.route.columns == nil
-	p := !(o.null_input || o.slurp || o.raw_input || o.stream || o.stream_errors || o.unbuffered || o.grow_header || o.attributes || comments || writes_texts(o)) && o.max_depth <= core.MAX_DEPTH && !serial_node(&run.prog, &walk)
+	p := !(o.null_input || o.slurp || o.raw_input || o.stream || o.stream_errors || o.unbuffered || o.grow_header || o.attributes || comments || writes_texts(o)) && o.max_depth <= core.MAX_DEPTH && !run.shape.serial
 	run.parallel = p
 	return p
-}
-
-@(rodata)
-SERIAL_CALLS := []string{"input", "inputs", "debug", "stderr", "halt", "halt_error", "input_filename", "input_line_number"}
-
-Serial_Walk :: struct {
-	on, done: [dynamic]^jq.Func, // the functions whose bodies are being walked, and those walked
-}
-
-// Whether the filter `p^` calls one of SERIAL_CALLS, `recurse` with a filter, or a function that calls itself.
-@(private = "file")
-serial_node :: proc(p: ^^jq.Node, w: ^Serial_Walk) -> bool {
-	n := p^
-	if n == nil {
-		return false
-	}
-	if n.kind == .Call && (slice.contains(SERIAL_CALLS, n.name) || n.name == "recurse" && len(n.args) > 0) {
-		return true
-	}
-	// A call of a filter parameter runs its argument, which the walk sees where it is passed.
-	if f := n.callee; n.kind == .Call && f != nil && !n.is_param && !slice.contains(w.done[:], f) {
-		recursive := slice.contains(w.on[:], f)
-		append(&w.on, f)
-		if recursive || serial_node(&f.body, w) {
-			return true
-		}
-		pop(&w.on)
-		append(&w.done, f)
-	}
-	return jq.any_child(n, w, serial_node)
 }
 
 // The output buffers of the pieces written, kept by piece number for the next file's pieces, which are cut alike and so
@@ -166,7 +123,6 @@ give_spare :: proc(spares: ^Spare_Outs, out: []u8, room: int, k: int) {
 pieces_init :: proc(ps: ^Pieces, run: ^Run, plain: core.As, framing: core.Framing) {
 	ps.run, ps.template, ps.plain, ps.framing = run, run^, plain, framing
 	ps.template.route.explain = {on = run.route.on}
-	jq.detach_memory(&ps.template.ip)
 	ps.slots.allocator = runtime.heap_allocator()
 }
 
@@ -233,12 +189,17 @@ records_run :: proc(ins: ^Inputs, framing: core.Framing, from: u64, cells: bool)
 @(private = "file", thread_local)
 piece_values, piece_temp: virtual.Arena
 
+// The interpreter a thread's pieces run on, each a copy of the run's made over the last (`jq.clone`), so a filter's
+// patterns compile once per thread and not once per piece. Not freed, as the arenas above.
+@(private = "file", thread_local)
+piece_ip: jq.Interp
+
 // The calling thread's piece arenas as allocators, false when they could not be mapped.
 piece_arenas :: proc() -> (values, temp: runtime.Allocator, ok: bool) {
 	if piece_temp.curr_block == nil && (virtual.arena_init_growing(&piece_values) != nil || virtual.arena_init_growing(&piece_temp) != nil) {
 		return
 	}
-	return jq.arena_allocator(&piece_values), jq.arena_allocator(&piece_temp), true
+	return jq.run_allocator(&piece_values), jq.run_allocator(&piece_temp), true
 }
 
 // A piece's records answered as the serial route answers them, into the piece's own output, up to the first it cannot
@@ -246,6 +207,8 @@ piece_arenas :: proc() -> (values, temp: runtime.Allocator, ok: bool) {
 // a record and not a cut.
 piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 	r := ps.template
+	jq.clone(&ps.run.ip, &piece_ip)
+	r.ip = piece_ip
 	o := &r.output
 	table := o.table
 	init_output(o, &r)
@@ -320,7 +283,7 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 		slot.hi, slot.stopped = lo, true
 	}
 	slot.out = out
-	jq.free_detached(&r.ip)
+	piece_ip = r.ip
 	publish(ps, k, slot)
 	return !slot.stopped
 }
@@ -334,12 +297,12 @@ piece_record :: proc(r: ^Run, it: ^records.Reader, rec: records.Record, part: ^c
 		answer_columns(r, it, rec)
 	} else if cells || !r.route.scanning || !answer_record(r, rec, part, read, scanned, plain) {
 		built, err := records.build(it, rec, context.allocator)
-		doc, fault := jq.judge_build(built, err)
+		doc, fault := core.refuse_key_clash(built, err)
 		if fault != nil {
 			return false
 		}
 		r.route.interpreted += 1
-		run_once(r, jq.document_value(doc))
+		run_once(r, core.document_value(doc))
 	}
 	return !o.refused
 }

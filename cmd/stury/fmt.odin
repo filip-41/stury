@@ -16,7 +16,7 @@ import "core:strings"
 import core "../../core"
 import records "../../core/records"
 import json "../../json"
-import "jq"
+import "../../jq"
 import "message"
 
 // fmt --check's exit status: a file is not already in the printer's layout.
@@ -142,12 +142,12 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 	// Where the records written as cells end, which a table cut short at a fault is written up to.
 	cut := -1
 	// A table's record written as a value waits for the next record, so the last takes the comment lines after it.
-	held: jq.Value
+	held: core.Value
 	noted := cells && o.cells_in.comment != 0
 	for {
 		rec, more := records.next(&it)
 		if held != nil {
-			put_value(run, ins, held if more else jq.noted(held, .Comment_Foot, cells_notes(ins, cut, len(data)))) or_return
+			put_value(run, ins, held if more else core.noted(held, .Comment_Foot, cells_notes(ins, cut, len(data)))) or_return
 			held = nil
 		}
 		if !more {
@@ -156,7 +156,7 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 		// A record's document lives until the next record is read.
 		free_all(context.temp_allocator)
 		built, err := records.build(&it, rec, context.temp_allocator)
-		doc, fault := jq.judge_build(built, err)
+		doc, fault := core.refuse_key_clash(built, err)
 		if f, bad := fault.?; bad {
 			cells_cut(run, ins, cut)
 			tell_fault(ins, f)
@@ -170,10 +170,10 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 		case cells == writes_cells(o):
 			put_document(run, ins, &doc) or_return
 		case noted:
-			held = jq.noted(jq.document_value(doc), .Comment, cells_notes(ins, cut, int(rec.at)))
+			held = core.noted(core.document_value(doc), .Comment, cells_notes(ins, cut, int(rec.at)))
 			cut = int(rec.at) + len(rec.text)
 		case cells:
-			put_value(run, ins, jq.document_value(doc)) or_return
+			put_value(run, ins, core.document_value(doc)) or_return
 		case:
 			put_rows(run, ins, &doc) or_return
 		}
@@ -191,7 +191,7 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 @(private = "file")
 put_rows :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
 	if ins.framing != .Concatenated || core.is_markup(doc) || doc.nodes[core.ROOT].kind != .Array {
-		return put_value(run, ins, jq.document_value(doc^))
+		return put_value(run, ins, core.document_value(doc^))
 	}
 	if run.convert != nil {
 		run.convert.table = true
@@ -202,7 +202,7 @@ put_rows :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
 
 // The value `v` of the open file written as an output, or false, told, when the output's format cannot hold it.
 @(private = "file")
-put_value :: proc(run: ^Run, ins: ^Inputs, v: jq.Value) -> bool {
+put_value :: proc(run: ^Run, ins: ^Inputs, v: core.Value) -> bool {
 	if emit(&run.output, v) {
 		return true
 	}
@@ -223,7 +223,7 @@ cells_cut :: proc(run: ^Run, ins: ^Inputs, cut: int) {
 	if end < 0 {
 		end = bytes.index_byte(ins.data, '\n') + 1
 	}
-	if doc, fault := jq.build_text(ins.data[:end], ins.as, runtime.heap_allocator()); fault == nil {
+	if doc, fault := build_text(ins.data[:end], ins.as, runtime.heap_allocator()); fault == nil {
 		_ = put_document(run, ins, &doc)
 	}
 }

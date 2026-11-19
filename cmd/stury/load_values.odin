@@ -7,12 +7,12 @@ import "core:os"
 import "core:strings"
 import core "../../core"
 import records "../../core/records"
-import "jq"
+import "../../jq"
 import "message"
 
 // A JSON text given to `option` on the command line, read as `r` says: exactly one value.
-json_arg :: proc(r: core.As, text, option: string) -> jq.Value {
-	v, fault := jq.read_text(transmute([]byte)text, r)
+json_arg :: proc(r: core.As, text, option: string) -> core.Value {
+	v, fault := read_text(transmute([]byte)text, r)
 	if f, bad := fault.?; bad {
 		usage_error("invalid JSON text passed to %s: %s", option, jq.parse_message(transmute([]byte)text, f))
 	}
@@ -20,14 +20,14 @@ json_arg :: proc(r: core.As, text, option: string) -> jq.Value {
 }
 
 // jq's jv_load_file: file `path` as one string (`raw`) or as the array of its JSON text, read as `r` says, or jq's
-// message for why not.
-load_file :: proc(path: string, raw: bool, r: core.As) -> (v: jq.Value, msg: string) {
+// message for why not. The interpreter's hook (`jq.Hooks`).
+load_file :: proc(_: rawptr, path: string, raw: bool, r: core.As) -> (v: core.Value, msg: string) {
 	v, msg, _ = load(path, raw, r)
 	return
 }
 
 // `load_file`, and whether the file opened and read, so that a message tells the file's text from the file.
-load :: proc(path: string, raw: bool, r: core.As) -> (v: jq.Value, msg: string, read: bool) {
+load :: proc(path: string, raw: bool, r: core.As) -> (v: core.Value, msg: string, read: bool) {
 	f, err := open_input(path)
 	if err != nil {
 		return nil, message.build_temp("Could not open %s: %s", path, strerror(err)), false
@@ -44,7 +44,7 @@ load :: proc(path: string, raw: bool, r: core.As) -> (v: jq.Value, msg: string, 
 		return jq.valid_utf8(string(data)), "", true
 	}
 	// Every text of the file, as jq reads its input.
-	all := jq.new_array()
+	all := core.new_array()
 	texts := records.open(data, r, .Concatenated)
 	defer records.close(&texts)
 	for {
@@ -53,11 +53,11 @@ load :: proc(path: string, raw: bool, r: core.As) -> (v: jq.Value, msg: string, 
 			break
 		}
 		built, err := records.build(&texts, rec)
-		doc, fault := jq.judge_build(built, err)
+		doc, fault := core.refuse_key_clash(built, err)
 		if f, bad := fault.?; bad {
 			return nil, jq.parse_message(data, f, column = -int(core.text_start(data, 0))), true
 		}
-		append(&all.items, jq.document_value(doc))
+		append(&all.items, core.document_value(doc))
 	}
 	if f, bad := texts.fault.?; bad {
 		return nil, jq.parse_message(data, f, column = -int(core.text_start(data, 0))), true
@@ -65,10 +65,9 @@ load :: proc(path: string, raw: bool, r: core.As) -> (v: jq.Value, msg: string, 
 	return all, "", true
 }
 
-// -f: the filter in file `path` as jq loads it, or jq's message and exit 2. The file's directory is where
-// `get_prog_origin` says the filter came from.
-program_file :: proc(ip: ^jq.Interp, path: string) -> string {
-	v, msg := load_file(path, true, {})
+// -f: the filter in file `path` as jq loads it, or jq's message and exit 2.
+program_file :: proc(path: string) -> string {
+	v, msg := load_file(nil, path, true, {})
 	if msg != "" {
 		message.write_stderr("stury: %s\n", msg)
 		exit_closing_stdout(EXIT_USAGE)
@@ -78,6 +77,5 @@ program_file :: proc(ip: ^jq.Interp, path: string) -> string {
 		message.write_stderr("stury: program file contains NUL bytes\n")
 		exit_closing_stdout(EXIT_USAGE)
 	}
-	ip.prog_origin = jq.real_path(jq.dir_name(path))
 	return text
 }

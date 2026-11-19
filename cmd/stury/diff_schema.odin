@@ -10,7 +10,6 @@ import "../../core/rules"
 import "../../core/write"
 import "../../core/schema"
 import json "../../json"
-import "jq"
 import "message"
 
 // The description that every record of the file `path` passes, or an exit telling why not.
@@ -118,7 +117,7 @@ write_inclusion :: proc(b: ^strings.Builder, as_json: bool, name: string, in_: s
 		json_word(&l, "verdict", word(in_.verdict))
 		if in_.witness != "" {
 			write.key(&l.t, "witness")
-			witness, fault := jq.build_text(transmute([]u8)in_.witness, json.as(.Json), context.temp_allocator)
+			witness, fault := build_text(transmute([]u8)in_.witness, json.as(.Json), context.temp_allocator)
 			if fault == nil {
 				write.value_of(&l.t, core.Node_Ref{&witness, core.ROOT})
 			} else {

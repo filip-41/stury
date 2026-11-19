@@ -18,8 +18,8 @@ endif
 .DEFAULT_GOAL := gate
 
 # The library packages
-LIB_PKGS  := core/spell core/regex core host core/kernel core/compose core/diff core/rules core/css core/build core/typed core/write core/records core/schema core/model json dsv toml xml yaml cbor html
-TEST_PKGS := core/spell/test core/regex/test host/test core/kernel/test core/test core/diff/test core/model/test core/schema/test core/css/test core/write/test core/records/test json/test dsv/test toml/test xml/test yaml/test cbor/test html/test
+LIB_PKGS  := core/spell core/regex core host core/kernel core/compose core/diff core/rules core/css core/build core/typed core/write core/records core/schema core/model json dsv toml xml yaml cbor html jq
+TEST_PKGS := core/spell/test core/regex/test host/test core/kernel/test core/test core/diff/test core/model/test core/schema/test core/css/test core/write/test core/records/test json/test dsv/test toml/test xml/test yaml/test cbor/test html/test jq/test
 # The packages the tests share, checked by `lint`
 SUPPORT_PKGS := testkit bench/timing bench/formats tools/tests/oracles/xml tools/tests/oracles/model tools/tests/oracles/regex tools/tests/oracles/schema/csv tools/tests/oracles/schema/gen
 BENCH_PKGS := $(wildcard bench/lanes/*/stury)

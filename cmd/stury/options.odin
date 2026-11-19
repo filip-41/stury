@@ -10,7 +10,7 @@ import "../../core/spell"
 import core "../../core"
 import dsv "../../dsv"
 import json "../../json"
-import "jq"
+import "../../jq"
 import "message"
 
 Opts :: struct {
@@ -61,8 +61,8 @@ Cli :: struct {
 	files:      [dynamic]string,
 	// --arg, --argjson, --slurpfile and --rawfile, the first of a name standing.
 	var_names:  [dynamic]string,
-	var_values: [dynamic]jq.Value,
-	positional: [dynamic]jq.Value, // --args and --jsonargs
+	var_values: [dynamic]core.Value,
+	positional: [dynamic]core.Value, // --args and --jsonargs
 	// How --argjson, --jsonargs, --slurpfile and `fromjson` read their texts, as --from and --max-depth say: as JSON, or
 	// the JSON dialect --from names.
 	json_reading: core.As,
@@ -327,7 +327,6 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 }
 
 // How --argjson, --jsonargs, --slurpfile and `fromjson` read their texts under the format `o.from`.
-@(private = "file")
 json_reading_of :: proc(o: ^Opts) -> core.As {
 	return json.as(FORMATS[o.from].spec, {max_depth = o.max_depth, refuse_non_finite = true})
 }
@@ -438,7 +437,7 @@ bind_variable_option :: proc(cli: ^Cli, args: []string, i: int) {
 	if slice.contains(cli.var_names[:], args[i + 1]) {
 		return
 	}
-	v: jq.Value
+	v: core.Value
 	switch name {
 	case "arg":
 		v = jq.valid_utf8(args[i + 2])
@@ -587,7 +586,7 @@ add_lib_dir :: proc(cli: ^Cli, dir: string) {
 	if cli.lib_dirs == nil {
 		cli.lib_dirs = make([dynamic]string)
 	}
-	append(&cli.lib_dirs.?, jq.real_path(dir))
+	append(&cli.lib_dirs.?, real_path(nil, dir))
 }
 
 // --indent's number as jq's strtol reads it: a sign, then decimal digits to the end, from -1 to 7.

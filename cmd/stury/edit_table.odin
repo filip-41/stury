@@ -12,14 +12,14 @@ import "core:strings"
 import core "../../core"
 import typed "../../core/typed"
 import write "../../core/write"
-import "jq"
+import "../../jq"
 import "message"
 
 // A record the outputs write: the source record it edits, or -1 for a new one, its value, and the line it is told at.
 @(private = "file")
 Edit_Placed :: struct {
 	rec:   int,
-	value: jq.Value,
+	value: core.Value,
 	line:  int,
 }
 
@@ -27,7 +27,7 @@ edit_table :: proc(er: ^Edit_Run, path: string) -> int {
 	ins := er.ins
 	src := ins.data
 	heap := runtime.heap_allocator()
-	doc, fault := jq.build_text(src, ins.as, heap)
+	doc, fault := build_text(src, ins.as, heap)
 	if f, bad := fault.?; bad {
 		tell_fault(ins, f)
 		return EXIT_INPUT
@@ -53,19 +53,19 @@ edit_table :: proc(er: ^Edit_Run, path: string) -> int {
 	}
 	placed := make([dynamic]Edit_Placed, context.temp_allocator)
 	if er.run.opts.slurp {
-		sources := make([]jq.Value, n, context.temp_allocator)
+		sources := make([]core.Value, n, context.temp_allocator)
 		for rec, i in recs {
-			sources[i] = jq.Ref{&doc, rec}
+			sources[i] = core.Node_Ref{&doc, rec}
 		}
 		ins.line = 1
-		items, outs, ok := edit_slurped(er, &w, jq.scalar(jq.Ref{&doc, core.ROOT}))
+		items, outs, ok := edit_slurped(er, &w, jq.scalar(core.Node_Ref{&doc, core.ROOT}))
 		if !ok {
 			return EXIT_INPUT
 		}
 		// The table's own comments are the ones an output array writes, above the header and after the last record.
 		for v in outs {
 			for role in core.COMMENT_ROLES {
-				if bodies, from := jq.comments(v, role); from == .Written && !edit_role(&w, core.ROOT, role, bodies) {
+				if bodies, from := core.comments(v, role); from == .Written && !edit_role(&w, core.ROOT, role, bodies) {
 					message.write_stderr("stury: error: %s: %s\n", w.name, w.err)
 					return EXIT_INPUT
 				}
@@ -76,13 +76,13 @@ edit_table :: proc(er: ^Edit_Run, path: string) -> int {
 		}
 	} else {
 		r := Edit_Row_Reader{ins, &doc, recs, lines_at, 0}
-		er.run.ip.inputs = {data = &r, next = edit_row_input, position = edit_reader_position}
-		defer er.run.ip.inputs = {data = ins, next = edit_no_input, position = edit_position}
+		jq.set_inputs(&er.run.ip, {data = rawptr(&r), next = edit_row_input, position = edit_reader_position})
+		defer jq.set_inputs(&er.run.ip, {data = ins, next = edit_no_input, position = edit_position})
 		for r.next < n {
 			i := r.next
 			r.next += 1
 			ins.line = lines_at[i]
-			outs, ok := edit_outputs(er, jq.scalar(jq.Ref{&doc, recs[i]}))
+			outs, ok := edit_outputs(er, jq.scalar(core.Node_Ref{&doc, recs[i]}))
 			if !ok {
 				return EXIT_INPUT
 			}
@@ -148,7 +148,7 @@ new_comments :: proc(placed: []Edit_Placed) -> bool {
 			continue
 		}
 		for role in core.COMMENT_ROLES {
-			if bodies, _ := jq.comments(p.value, role); len(bodies) > 0 {
+			if bodies, _ := core.comments(p.value, role); len(bodies) > 0 {
 				return true
 			}
 		}
@@ -160,7 +160,7 @@ new_comments :: proc(placed: []Edit_Placed) -> bool {
 @(private = "file")
 edit_table_comments :: proc(er: ^Edit_Run, text: []u8, placed: []Edit_Placed) -> (out: []u8, ok: bool) {
 	heap := runtime.heap_allocator()
-	doc, fault := jq.build_text(text, er.ins.as, heap)
+	doc, fault := build_text(text, er.ins.as, heap)
 	if f, bad := fault.?; bad {
 		tell_fault(er.ins, f)
 		return nil, false
@@ -201,14 +201,14 @@ Edit_Row_Reader :: struct {
 }
 
 @(private = "file")
-edit_row_input :: proc(data: rawptr) -> (jq.Value, string, jq.Parse_Status) {
+edit_row_input :: proc(data: rawptr) -> (core.Value, string, jq.Input_Status) {
 	r := (^Edit_Row_Reader)(data)
 	if r.next >= len(r.recs) {
-		return nil, "", .More
+		return nil, "", .End
 	}
 	r.ins.line = r.lines_at[r.next]
 	r.next += 1
-	return jq.scalar(jq.Ref{r.doc, r.recs[r.next - 1]}), "", .Value
+	return jq.scalar(core.Node_Ref{r.doc, r.recs[r.next - 1]}), "", .Value
 }
 
 // The header's decoded names, or nil for a table without one.
@@ -231,13 +231,13 @@ edit_header :: proc(w: ^Edit_State) -> (names: []string, ok: bool) {
 // column, and a headerless one an array, which an object fills with its values in key order. The record keeps the
 // comments the filter wrote on the output.
 @(private = "file")
-edit_row_value :: proc(w: ^Edit_State, v: jq.Value, names: []string) -> (jq.Value, bool) {
+edit_row_value :: proc(w: ^Edit_State, v: core.Value, names: []string) -> (core.Value, bool) {
 	k := jq.kind(v)
 	headed := core.header_of(w.doc) != 0
 	if headed && k == .Object || !headed && k == .Array {
 		return v, true
 	}
-	cells := make([dynamic]jq.Value, context.temp_allocator)
+	cells := make([dynamic]core.Value, context.temp_allocator)
 	switch k {
 	case .Object, .Array:
 		it := jq.iterate(v)
@@ -248,7 +248,7 @@ edit_row_value :: proc(w: ^Edit_State, v: jq.Value, names: []string) -> (jq.Valu
 		append(&cells, v)
 	}
 	if !headed {
-		a := jq.new_array(len(cells))
+		a := core.new_array(len(cells))
 		append(&a.items, ..cells[:])
 		return with_comments(v, a), true
 	}
@@ -256,18 +256,18 @@ edit_row_value :: proc(w: ^Edit_State, v: jq.Value, names: []string) -> (jq.Valu
 		w.err = message.build_temp("the output fills %d cells, and the header names %d columns", len(cells), len(names))
 		return nil, false
 	}
-	obj := jq.new_object()
+	obj := core.new_object()
 	for c, i in cells {
-		jq.object_put(obj, names[i], c)
+		core.object_put(obj, names[i], c)
 	}
 	return with_comments(v, obj), true
 }
 
 // `record`, with the comments the filter wrote on `v`.
 @(private = "file")
-with_comments :: proc(v, record: jq.Value) -> jq.Value {
-	if c, is_commented := v.(^jq.Commented); is_commented {
-		return jq.rewrap(c, record)
+with_comments :: proc(v, record: core.Value) -> core.Value {
+	if c, is_commented := v.(^core.Commented); is_commented {
+		return core.rewrap(c, record)
 	}
 	return record
 }
@@ -321,7 +321,7 @@ edit_table_moves :: proc(w: ^Edit_State, placed: []Edit_Placed, names: []string)
 @(private = "file")
 edit_table_place :: proc(er: ^Edit_Run, w0: ^Edit_State, text: []u8, placed: []Edit_Placed) -> (out: []u8, ok: bool) {
 	heap := runtime.heap_allocator()
-	doc, fault := jq.build_text(text, er.ins.as, heap)
+	doc, fault := build_text(text, er.ins.as, heap)
 	if f, bad := fault.?; bad {
 		tell_fault(er.ins, f)
 		return nil, false
@@ -353,7 +353,7 @@ edit_table_place :: proc(er: ^Edit_Run, w0: ^Edit_State, text: []u8, placed: []E
 		pw := edit_state(er, &doc, &short)
 		padded, _ = edit_commit(&pw, text, text, 0) or_return
 		core.destroy(&doc)
-		doc, fault = jq.build_text(padded, er.ins.as, heap)
+		doc, fault = build_text(padded, er.ins.as, heap)
 		if f, bad := fault.?; bad {
 			tell_fault(er.ins, f)
 			return nil, false
@@ -449,7 +449,7 @@ edit_record_insert :: proc(w: ^Edit_State, at: int, text: string) -> bool {
 // A new record's line: its cells in the `final` columns, or in its own order for a table without a header, each spelled
 // as the library spells a record, a cell taken from the table keeping its bytes.
 @(private = "file")
-edit_row_text :: proc(w: ^Edit_State, v: jq.Value, final: []string) -> (text: string, ok: bool) {
+edit_row_text :: proc(w: ^Edit_State, v: core.Value, final: []string) -> (text: string, ok: bool) {
 	row := edit_row_cells(w, v, final) or_return
 	spelled, owned, e := core.insert_text(w.list, core.ROOT, row)
 	if !edit_check(w, e, row, true) {
@@ -464,11 +464,11 @@ edit_row_text :: proc(w: ^Edit_State, v: jq.Value, final: []string) -> (text: st
 
 // A new record's cells.
 @(private = "file")
-edit_row_cells :: proc(w: ^Edit_State, v: jq.Value, final: []string) -> (row: jq.Value, ok: bool) {
-	cells := jq.new_array(len(final))
+edit_row_cells :: proc(w: ^Edit_State, v: core.Value, final: []string) -> (row: core.Value, ok: bool) {
+	cells := core.new_array(len(final))
 	if jq.kind(v) == .Object && final != nil {
 		for name in final {
-			cell, _ := jq.object_get(v, name)
+			cell, _ := core.member(v, name)
 			edit_note_comments(w, cell) or_return
 			append(&cells.items, cell)
 		}
@@ -484,7 +484,7 @@ edit_row_cells :: proc(w: ^Edit_State, v: jq.Value, final: []string) -> (row: jq
 
 // An object output's keys in its order, none for another value.
 @(private = "file")
-edit_keys :: proc(v: jq.Value) -> []string {
+edit_keys :: proc(v: core.Value) -> []string {
 	if jq.kind(v) != .Object {
 		return nil
 	}

@@ -29,6 +29,11 @@ Node_Ref :: struct {
 	node: Node_Index,
 }
 
+// The root of `doc` as a value, the document moved into `allocator`, which `destroy` gives back with what it holds.
+document_value :: proc(doc: Document, allocator := context.allocator) -> Value {
+	return Node_Ref{new_clone(doc, allocator), ROOT}
+}
+
 // "No such node": answer on a miss. A node index never takes it.
 NO_NODE :: Node_Index(max(u32))
 // The root value's node is node 0.
@@ -311,6 +316,26 @@ build :: proc(src: []u8, as: As, dups := Duplicates.Last, allocator := context.a
 	}
 	doc, err := services_of(as).build(src, as, dups == .Refuse, allocator)
 	return doc, error_of(err)
+}
+
+// A build's `doc` and `err` narrowed to the document or the fault that refuses it, as a reader by name takes them. An
+// object whose key has the text of another of its keys (`clash`, as YAML's `1` and `"1"`) is `.Duplicate_Key` at that
+// key, and the document is destroyed. A build's only error that is no fault of the text is an allocator's, which is
+// `.No_Memory`.
+refuse_key_clash :: proc(doc: Document, err: Error) -> (Document, Maybe(Fault)) {
+	switch e in err {
+	case nil:
+		if at := doc.clash; at != 0 {
+			doc := doc
+			destroy(&doc)
+			return {}, Fault{at = at, kind = .Duplicate_Key}
+		}
+		return doc, nil
+	case Fault:
+		return {}, e
+	case runtime.Allocator_Error, Document_Error, Path_Error, Typed_Error, Typed_Error_Kind:
+	}
+	return {}, Fault{kind = .No_Memory}
 }
 
 // Judges `src` as `as` says without building or allocating. Returns the first fault, or nil for a text that reads. A

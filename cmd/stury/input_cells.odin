@@ -10,13 +10,13 @@ import "core:strings"
 import core "../../core"
 import records "../../core/records"
 import "../../dsv"
-import "jq"
+import "../../jq"
 import "message"
 
 // The value of the open file's record `rec`, or the fault that ends the run, or with `answered` none, as the column
 // route has printed its outputs. The first record built of a file shows whether its header names a column twice, which
 // a build takes as the last of the two.
-cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: string, status: jq.Parse_Status, answered: bool) {
+cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: core.Value, msg: string, status: jq.Input_Status, answered: bool) {
 	ins.text_end = int(rec.at) + len(rec.text)
 	end := rec.at + u64(len(rec.text))
 	end += u64(end < u64(len(ins.data)) && ins.data[end] == '\r')
@@ -26,7 +26,7 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: str
 	if cols == nil || !ins.header_judged {
 		// --stream's document lives until its last event.
 		built, err := records.build(&ins.texts, rec, runtime.heap_allocator() if ins.run.opts.stream else context.allocator)
-		doc, fault := jq.judge_build(built, err)
+		doc, fault := core.refuse_key_clash(built, err)
 		if f, bad := fault.?; bad {
 			v, msg, status = cells_fault(ins, f)
 			return
@@ -48,11 +48,11 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: str
 			// The value lies in the file's bytes until its outputs are printed. What the column route prints holds none.
 			ins.pinned = true
 			if ins.run.opts.stream {
-				ins.events, ins.events_at = jq.value_events_start(doc, len(rec.text) - 1), int(rec.at)
+				ins.events, ins.events_at = value_events_start(doc, len(rec.text) - 1), int(rec.at)
 				v, msg, status = next_value(ins, false)
 				return
 			}
-			return jq.document_value(doc), "", .Value, false
+			return core.document_value(doc), "", .Value, false
 		}
 	}
 	answer_columns(ins.run, &ins.texts, rec)
@@ -63,7 +63,7 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: str
 
 // The row `v` `cells_value` built, with the comment lines before it as its `.@comment`: those between the previous row, or
 // the header, and the row. The first row of a file also finds the lines before the header, which are the table's.
-row_noted :: #force_no_inline proc(ins: ^Inputs, v: ^jq.Value) {
+row_noted :: #force_no_inline proc(ins: ^Inputs, v: ^core.Value) {
 	if !reads_cells(&ins.run.opts) {
 		return
 	}
@@ -81,7 +81,7 @@ row_noted :: #force_no_inline proc(ins: ^Inputs, v: ^jq.Value) {
 	}
 	notes := comment_lines(ins.data[from:], cells.comment)
 	if len(notes) > 0 {
-		v^ = jq.noted(v^, .Comment, notes)
+		v^ = core.noted(v^, .Comment, notes)
 	}
 }
 
@@ -169,20 +169,20 @@ file_notes :: proc(ins: ^Inputs, notes: []string, foot: bool) {
 
 // The slurped array `all` with the comments its files hold outside their records: the first file's before its header as
 // `.@comment` and the files' after their last record as `.@comment_foot`.
-slurped :: proc(ins: ^Inputs, all: ^jq.Array) -> jq.Value {
-	v: jq.Value = all
+slurped :: proc(ins: ^Inputs, all: ^core.Array) -> core.Value {
+	v: core.Value = all
 	if len(ins.head_notes) > 0 {
-		v = jq.noted(v, .Comment, ins.head_notes[:])
+		v = core.noted(v, .Comment, ins.head_notes[:])
 	}
 	if len(ins.foot_notes) > 0 {
-		v = jq.noted(v, .Comment_Foot, ins.foot_notes[:])
+		v = core.noted(v, .Comment_Foot, ins.foot_notes[:])
 	}
 	ins.head_notes, ins.foot_notes = nil, nil
 	return v
 }
 
 // The fault `f` of the open file, told as `NAME:LINE:COLUMN: SENTENCE`. The file is read past.
-cells_fault :: proc(ins: ^Inputs, f: core.Fault) -> (jq.Value, string, jq.Parse_Status) {
+cells_fault :: proc(ins: ^Inputs, f: core.Fault) -> (core.Value, string, jq.Input_Status) {
 	msg := fault_told(ins.name, ins.data, f, ins.file_lines, faults_counted(ins, ins.data))
 	set_note(ins, fault_note(ins.name, ins.data, f, nil, &ins.run.opts, lead_of(ins), runtime.heap_allocator()))
 	close_file(ins)
@@ -198,7 +198,7 @@ repeated_header :: proc(name: string, data: []byte, doc: ^core.Document) -> (msg
 	names := make(map[string]struct{}, context.temp_allocator)
 	it := core.pairs(doc, core.ROOT)
 	for k in core.pair_next(&it) {
-		key := jq.node_string(doc, k)
+		key := core.node_string(doc, k)
 		if key in names {
 			line, col := core.locate(data, doc.nodes[k].lo)
 			return message.build_temp("%s:%d:%d: Duplicate header name %q", name, line, col, key), true

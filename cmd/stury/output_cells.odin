@@ -18,7 +18,7 @@ import spell "../../core/spell"
 import core "../../core"
 import "../../core/write"
 import records "../../core/records"
-import "jq"
+import "../../jq"
 import "message"
 
 // The run's output table, on the heap, as it outlives each input's arena. The library's writer holds the rows, and its
@@ -40,7 +40,7 @@ table_start :: proc(run: ^Run) -> ^Table {
 }
 
 // Writes the output `v` as a table row, or ends the run on what the table refuses.
-emit_row :: proc(o: ^Output, v: jq.Value) {
+emit_row :: proc(o: ^Output, v: core.Value) {
 	t := o.table
 	o.result = JQ_OK if jq.truthy(v) else JQ_OK_NULL_KIND
 	context.allocator = context.temp_allocator
@@ -81,11 +81,11 @@ table_notes :: proc(o: ^Output, bodies: []string, foot: bool) {
 
 // The lines of the comments of `role` on `v` that the table holds: none when it has no comment character.
 @(private = "file")
-table_comments :: proc(o: ^Output, v: jq.Value, role: core.Role) -> []string {
+table_comments :: proc(o: ^Output, v: core.Value, role: core.Role) -> []string {
 	if o.opts.cells_out.comment == 0 {
 		return nil
 	}
-	bodies, _ := jq.comments(v, role)
+	bodies, _ := core.comments(v, role)
 	kept := make([dynamic]string, 0, len(bodies), context.temp_allocator)
 	if _, kind := records.comment_lines(bodies, &kept); kind != .None {
 		put_written(o, kind)
@@ -149,7 +149,7 @@ refusal_text :: proc(t: ^Table, kind: core.Typed_Error_Kind) -> string {
 
 // The cell `v` writes as, an array or object as the open of its kind, which the table refuses.
 @(private = "file")
-cell_of :: proc(v: jq.Value) -> write.Scalar {
+cell_of :: proc(v: core.Value) -> write.Scalar {
 	switch jq.kind(v) {
 	case .Null:
 		return nil
@@ -162,7 +162,7 @@ cell_of :: proc(v: jq.Value) -> write.Scalar {
 		return s
 	case .Number:
 		// NaN is an empty cell, as in jq's @csv.
-		if n, _ := jq.number_of(v); math.is_nan(n.f) {
+		if f, _, _ := core.double_of(v); math.is_nan(f) {
 			return nil
 		}
 		return write.Number_Literal{jq.to_json(v)}

@@ -12,7 +12,7 @@ import "core:strings"
 import kernel "../../core/kernel"
 import core "../../core"
 import "../../core/write"
-import "jq"
+import "../../jq"
 import "message"
 
 // One document's edit: the edit list the filter's output is recorded on, why it stopped when it fails, the file it is
@@ -38,16 +38,16 @@ edit_place :: proc(w: ^Edit_State) -> string {
 }
 
 // `node` as `v`, in place where the source has the same kind of container, and as one replacement otherwise.
-edit_tree :: proc(w: ^Edit_State, node: core.Node_Index, value: jq.Value) -> bool {
-	v := jq.plain(value)
-	r, is_ref := v.(jq.Ref)
+edit_tree :: proc(w: ^Edit_State, node: core.Node_Index, value: core.Value) -> bool {
+	v := core.plain(value)
+	r, is_ref := v.(core.Node_Ref)
 	same := is_ref && r.doc == w.doc && r.node == node
-	c, is_commented := value.(^jq.Commented)
+	c, is_commented := value.(^core.Commented)
 	if is_commented {
 		edit_comments(w, node, c, same) or_return
 		// A tag the text of a value written new spells goes with it.
 		if !same && .Tag in c.written && core.tags_in_text(w.list) {
-			return edit_set(w, node, jq.noted(v, .Tag, c.bodies[.Tag]))
+			return edit_set(w, node, core.noted(v, .Tag, c.bodies[.Tag]))
 		}
 	}
 	// A tag spelled before its node is no part of the value's text, so a value written new that brings none drops it.
@@ -67,18 +67,18 @@ edit_tree :: proc(w: ^Edit_State, node: core.Node_Index, value: jq.Value) -> boo
 			v = edit_members_of(v)
 		}
 	}
-	if _, still_ref := v.(jq.Ref); !still_ref {
+	if _, still_ref := v.(core.Node_Ref); !still_ref {
 		switch jq.kind(v) {
 		case .Object:
 			if core.kind(w.doc, node) == .Object {
-				return edit_object(w, node, v.(^jq.Object))
+				return edit_object(w, node, v.(^core.Object))
 			}
 		case .Array:
-			if a, is_array := v.(^jq.Array); is_array && core.kind(w.doc, node) == .Array {
+			if a, is_array := v.(^core.Array); is_array && core.kind(w.doc, node) == .Array {
 				return edit_array(w, node, a.items[:])
 			}
 		case .Null, .False, .True, .Number, .String:
-			if jq.compare(v, jq.Ref{w.doc, node}) == 0 && core.same_number_type(v, jq.Ref{w.doc, node}) {
+			if core.compare(v, core.Node_Ref{w.doc, node}) == 0 && core.same_number_type(v, core.Node_Ref{w.doc, node}) {
 				return true
 			}
 		}
@@ -91,7 +91,7 @@ edit_tree :: proc(w: ^Edit_State, node: core.Node_Index, value: jq.Value) -> boo
 // `// body`, or `/* body */` where a line comment cannot end. A tag that the text spells is written with the text
 // unless `same` says the value is the node.
 @(private = "file")
-edit_comments :: proc(w: ^Edit_State, node: core.Node_Index, c: ^jq.Commented, same: bool) -> bool {
+edit_comments :: proc(w: ^Edit_State, node: core.Node_Index, c: ^core.Commented, same: bool) -> bool {
 	for role in c.written {
 		if role == .Tag && !same && core.tags_in_text(w.list) {
 			continue
@@ -133,7 +133,7 @@ edit_property :: proc(w: ^Edit_State, node: core.Node_Index, role: core.Role, bo
 
 // The edit that makes `bodies` the comments of `node` with `role`, none when they already are.
 edit_role :: proc(w: ^Edit_State, node: core.Node_Index, role: core.Role, bodies: []string) -> bool {
-	have, _ := jq.comments(jq.Ref{w.doc, node}, role)
+	have, _ := core.comments(core.Node_Ref{w.doc, node}, role)
 	if slice.equal(bodies, have) {
 		return true
 	}
@@ -143,18 +143,18 @@ edit_role :: proc(w: ^Edit_State, node: core.Node_Index, role: core.Role, bodies
 // Whether `v` carries a comment that its text does not write: its own, or one of a value nested in it, which a value
 // taken from the document keeps in its bytes unless `kept` is false, when its text is spelled new.
 @(private = "file")
-carries_comments :: proc(w: ^Edit_State, v: jq.Value, kept: bool) -> bool {
+carries_comments :: proc(w: ^Edit_State, v: core.Value, kept: bool) -> bool {
 	for role in core.COMMENT_ROLES {
-		if bodies, _ := jq.comments(v, role); len(bodies) > 0 {
+		if bodies, _ := core.comments(v, role); len(bodies) > 0 {
 			return true
 		}
 	}
-	p := jq.plain(v)
+	p := core.plain(v)
 	k := jq.kind(p)
 	if k != .Object && k != .Array {
 		return false
 	}
-	r, is_ref := p.(jq.Ref)
+	r, is_ref := p.(core.Node_Ref)
 	spelled := !kept || !is_ref || r.doc != w.doc || w.sorted && k == .Object
 	if !spelled {
 		return false
@@ -171,14 +171,14 @@ carries_comments :: proc(w: ^Edit_State, v: jq.Value, kept: bool) -> bool {
 // The second pass: the comment edits that give `node` of the edited text, which holds the output value `v`, the
 // comments `v` carries, and the same for the values nested in it. A comment the filter wrote is written, removed when
 // it wrote none, and one `v` takes from a source node is written over the node's own.
-edit_comment_tree :: proc(w: ^Edit_State, node: core.Node_Index, v: jq.Value) -> bool {
+edit_comment_tree :: proc(w: ^Edit_State, node: core.Node_Index, v: core.Value) -> bool {
 	for role in core.COMMENT_ROLES {
-		bodies, from := jq.comments(v, role)
+		bodies, from := core.comments(v, role)
 		if from == .Written || from == .Source && len(bodies) > 0 {
 			edit_role(w, node, role, bodies) or_return
 		}
 	}
-	p := jq.plain(v)
+	p := core.plain(v)
 	#partial switch jq.kind(p) {
 	case .Object:
 		if core.kind(w.doc, node) != .Object {
@@ -212,8 +212,8 @@ edit_comment_tree :: proc(w: ^Edit_State, node: core.Node_Index, v: jq.Value) ->
 
 // Whether `v` carries a comment the filter wrote.
 @(private = "file")
-writes_comment :: proc(v: jq.Value) -> bool {
-	c, is_commented := v.(^jq.Commented)
+writes_comment :: proc(v: core.Value) -> bool {
+	c, is_commented := v.(^core.Commented)
 	if !is_commented {
 		return false
 	}
@@ -228,36 +228,36 @@ writes_comment :: proc(v: jq.Value) -> bool {
 // Whether `v` carries a tag, an anchor or an alias the filter wrote or kept from the value it replaced, other than a tag
 // its text spells.
 @(private = "file")
-writes_property :: proc(w: ^Edit_State, v: jq.Value) -> bool {
-	c, is_commented := v.(^jq.Commented)
+writes_property :: proc(w: ^Edit_State, v: core.Value) -> bool {
+	c, is_commented := v.(^core.Commented)
 	spelled := bit_set[core.Role]{.Tag} if core.tags_in_text(w.list) else {}
 	return is_commented && c.written - core.COMMENT_ROLES - spelled != {}
 }
 
 // `v` as a value written new: each string made UTF-8 (`edit_valid`), with the tag it writes where its text spells one.
 @(private = "file")
-edit_written :: proc(w: ^Edit_State, v: jq.Value) -> jq.Value {
-	fixed := edit_valid(jq.plain(v))
-	if c, is_commented := v.(^jq.Commented); is_commented && .Tag in c.written && core.tags_in_text(w.list) {
-		return jq.noted(fixed, .Tag, c.bodies[.Tag])
+edit_written :: proc(w: ^Edit_State, v: core.Value) -> core.Value {
+	fixed := edit_valid(core.plain(v))
+	if c, is_commented := v.(^core.Commented); is_commented && .Tag in c.written && core.tags_in_text(w.list) {
+		return core.noted(fixed, .Tag, c.bodies[.Tag])
 	}
 	return fixed
 }
 
 // A copy of the container `v` whose members are `v`'s own values.
 @(private = "file")
-edit_members_of :: proc(v: jq.Value) -> jq.Value {
+edit_members_of :: proc(v: core.Value) -> core.Value {
 	it := jq.iterate(v)
 	if jq.kind(v) == .Array {
-		a := jq.new_array()
+		a := core.new_array()
 		for _, m in jq.next_member(&it) {
 			append(&a.items, m)
 		}
 		return a
 	}
-	o := jq.new_object()
+	o := core.new_object()
 	for key, m in jq.next_member(&it) {
-		jq.object_put(o, key, m)
+		core.object_put(o, key, m)
 	}
 	return o
 }
@@ -273,11 +273,11 @@ Source_Member :: struct {
 @(private = "file")
 Edit_New :: struct {
 	key:   string,
-	value: jq.Value,
+	value: core.Value,
 }
 
 @(private = "file")
-edit_object :: proc(w: ^Edit_State, node: core.Node_Index, obj: ^jq.Object) -> bool {
+edit_object :: proc(w: ^Edit_State, node: core.Node_Index, obj: ^core.Object) -> bool {
 	if len(core.object_keys(obj)) > 0 && edit_bare(w, node) {
 		return edit_set(w, node, obj)
 	}
@@ -316,7 +316,7 @@ edit_object :: proc(w: ^Edit_State, node: core.Node_Index, obj: ^jq.Object) -> b
 	entries := make([dynamic]int, 0, len(keys), context.temp_allocator)
 	news := make([dynamic]Edit_New, context.temp_allocator)
 	for key in keys {
-		value, _ := jq.object_get(obj, key)
+		value, _ := core.member(obj, key)
 		if i := read_of(members, read, key); i >= 0 {
 			// A repeated name's other members keep their bytes and go just before the one the filter read.
 			if before != nil {
@@ -341,7 +341,7 @@ edit_object :: proc(w: ^Edit_State, node: core.Node_Index, obj: ^jq.Object) -> b
 		append(&entries, -1 - (len(news) - 1))
 	}
 	for m in members {
-		if _, kept := jq.object_get(obj, m.name); !kept {
+		if _, kept := core.member(obj, m.name); !kept {
 			edit_check(w, core.remove(w.list, m.node)) or_return
 		}
 	}
@@ -354,7 +354,7 @@ edit_object :: proc(w: ^Edit_State, node: core.Node_Index, obj: ^jq.Object) -> b
 // name before one that stands earlier or an element before another of its name. A new element of a name goes after the
 // one before it in the output's array, or before the name's first, and a new name after every member before it.
 @(private = "file")
-edit_elements :: proc(w: ^Edit_State, node: core.Node_Index, members: []Source_Member, obj: ^jq.Object) -> bool {
+edit_elements :: proc(w: ^Edit_State, node: core.Node_Index, members: []Source_Member, obj: ^core.Object) -> bool {
 	named := make(map[string][dynamic]int, len(members), context.temp_allocator)
 	for m, i in members {
 		if m.name not_in named {
@@ -372,7 +372,7 @@ edit_elements :: proc(w: ^Edit_State, node: core.Node_Index, members: []Source_M
 	moved := false
 	prior, high := -1, -1
 	for key in core.object_keys(obj) {
-		value, _ := jq.object_get(obj, key)
+		value, _ := core.member(obj, key)
 		group := named[key][:] if key in named else nil
 		if len(group) == 0 {
 			edit_note_comments(w, value) or_return
@@ -382,7 +382,7 @@ edit_elements :: proc(w: ^Edit_State, node: core.Node_Index, members: []Source_M
 		}
 		moved ||= group[0] < prior
 		prior = group[0]
-		items, is_array := jq.plain(value).(^jq.Array)
+		items, is_array := core.plain(value).(^core.Array)
 		if !is_array {
 			edit_tree(w, members[group[0]].node, value) or_return
 			append(&placed, Placed{2 * group[0], group[0]})
@@ -392,15 +392,15 @@ edit_elements :: proc(w: ^Edit_State, node: core.Node_Index, members: []Source_M
 			}
 			continue
 		}
-		if c, is_commented := value.(^jq.Commented); is_commented && c.written != {} {
+		if c, is_commented := value.(^core.Commented); is_commented && c.written != {} {
 			w.err = "a repeated name's array is no element and holds no attribute or comment: write each element's"
 			return false
 		}
 		nodes := make([]core.Node_Index, len(group), context.temp_allocator)
-		sources := make([]jq.Value, len(group), context.temp_allocator)
+		sources := make([]core.Value, len(group), context.temp_allocator)
 		for i, k in group {
 			nodes[k] = members[i].node
-			sources[k] = jq.Ref{w.doc, nodes[k]}
+			sources[k] = core.Node_Ref{w.doc, nodes[k]}
 		}
 		pairs := match_items(sources, items.items[:], edit_claims(items.items[:], w.doc, nodes))
 		used := make([]bool, len(group), context.temp_allocator)
@@ -428,7 +428,7 @@ edit_elements :: proc(w: ^Edit_State, node: core.Node_Index, members: []Source_M
 		}
 	}
 	for m in members {
-		if _, kept := jq.object_get(obj, m.name); !kept {
+		if _, kept := core.member(obj, m.name); !kept {
 			edit_check(w, core.remove(w.list, m.node)) or_return
 		}
 	}
@@ -492,19 +492,19 @@ edit_insert :: proc(w: ^Edit_State, node: core.Node_Index, at: int, n: Edit_New)
 // An array's elements: an element the output takes from it is kept and may move, one the output repeats or builds is
 // matched by value or by place with one it does not take, and the rest are removed or inserted.
 @(private = "file")
-edit_array :: proc(w: ^Edit_State, node: core.Node_Index, items: []jq.Value) -> bool {
+edit_array :: proc(w: ^Edit_State, node: core.Node_Index, items: []core.Value) -> bool {
 	if len(items) > 0 && edit_bare(w, node) {
-		built := jq.new_array(len(items))
+		built := core.new_array(len(items))
 		append(&built.items, ..items)
 		return edit_set(w, node, built)
 	}
 	have := core.length(w.doc, node)
 	children := make([]core.Node_Index, have, context.temp_allocator)
-	sources := make([]jq.Value, have, context.temp_allocator)
+	sources := make([]core.Value, have, context.temp_allocator)
 	it := core.children(w.doc, node)
 	for i in 0 ..< have {
 		children[i], _ = core.child_next(&it)
-		sources[i] = jq.Ref{w.doc, children[i]}
+		sources[i] = core.Node_Ref{w.doc, children[i]}
 	}
 	pairs := match_items(sources, items, edit_claims(items, w.doc, children))
 	used := make([]bool, have, context.temp_allocator)
@@ -530,11 +530,11 @@ edit_array :: proc(w: ^Edit_State, node: core.Node_Index, items: []jq.Value) -> 
 }
 
 // For each of `items`, the position in the sorted `nodes` of `doc` it was taken from, or -1.
-edit_claims :: proc(items: []jq.Value, doc: ^core.Document, nodes: []core.Node_Index) -> []int {
+edit_claims :: proc(items: []core.Value, doc: ^core.Document, nodes: []core.Node_Index) -> []int {
 	claims := make([]int, len(items), context.temp_allocator)
 	for v, j in items {
 		claims[j] = -1
-		if r, is_ref := v.(jq.Ref); is_ref && r.doc == doc {
+		if r, is_ref := v.(core.Node_Ref); is_ref && r.doc == doc {
 			if i, found := slice.binary_search(nodes, r.node); found {
 				claims[j] = i
 			}
@@ -546,7 +546,7 @@ edit_claims :: proc(items: []jq.Value, doc: ^core.Document, nodes: []core.Node_I
 // Pairs each of `items` with the source it edits, or -1 for a new one. `claims` names the source an item was taken
 // from, and the first item to take a source keeps it. The rest are matched in order: equal ends first, so an insert
 // or removal keeps the tail's bytes, then by place.
-match_items :: proc(sources, items: []jq.Value, claims: []int) -> []int {
+match_items :: proc(sources, items: []core.Value, claims: []int) -> []int {
 	pairs := make([]int, len(items), context.temp_allocator)
 	taken := make([]bool, len(sources), context.temp_allocator)
 	free_items := make([dynamic]int, 0, len(items), context.temp_allocator)
@@ -566,8 +566,8 @@ match_items :: proc(sources, items: []jq.Value, claims: []int) -> []int {
 		}
 	}
 	fi, fs := free_items[:], free_sources[:]
-	equal :: proc(a, b: jq.Value) -> bool {
-		return jq.compare(a, b) == 0
+	equal :: proc(a, b: core.Value) -> bool {
+		return core.compare(a, b, max_depth = jq.MAX_DEPTH) == 0
 	}
 	prefix := 0
 	for prefix < min(len(fi), len(fs)) && equal(sources[fs[prefix]], items[fi[prefix]]) {
@@ -644,7 +644,7 @@ edit_members :: proc(w: ^Edit_State, node: core.Node_Index) -> ([]Source_Member,
 
 // Whether an edit was recorded, with its refusal in `w.err` when not. `v` is the value the edit wrote, and `record` says
 // it is a record's cells.
-edit_check :: proc(w: ^Edit_State, e: core.Error, v: jq.Value = nil, record := false) -> bool {
+edit_check :: proc(w: ^Edit_State, e: core.Error, v: core.Value = nil, record := false) -> bool {
 	if e != nil {
 		w.err = edit_refusal_text(w, e, v, record)
 		return false
@@ -654,7 +654,7 @@ edit_check :: proc(w: ^Edit_State, e: core.Error, v: jq.Value = nil, record := f
 
 // `v` as the node `node`, spelled by the document's format.
 @(private = "file")
-edit_set :: proc(w: ^Edit_State, node: core.Node_Index, v: jq.Value) -> bool {
+edit_set :: proc(w: ^Edit_State, node: core.Node_Index, v: core.Value) -> bool {
 	edit_note_comments(w, v) or_return
 	return edit_check(w, write.set_node(w.list, node, edit_written(w, v)), v)
 }
@@ -662,16 +662,16 @@ edit_set :: proc(w: ^Edit_State, node: core.Node_Index, v: jq.Value) -> bool {
 // `v` with each string that is not UTF-8 made one as jq makes it, U+FFFD for each bad sequence: the library refuses such
 // a string, and a document must stay valid. A value with no such string is returned as it is.
 @(private = "file")
-edit_valid :: proc(v: jq.Value) -> jq.Value {
+edit_valid :: proc(v: core.Value) -> core.Value {
 	#partial switch x in v {
 	case string:
 		return x if kernel.utf8_valid(transmute([]u8)x) else jq.valid_utf8(x)
-	case ^jq.Array:
-		var: ^jq.Array
+	case ^core.Array:
+		var: ^core.Array
 		for item, i in x.items {
 			fixed := edit_valid(item)
 			if var == nil && !edit_same(fixed, item) {
-				var = new(jq.Array)
+				var = new(core.Array)
 				var.items = slice.clone_to_dynamic(x.items[:])
 			}
 			if var != nil {
@@ -679,14 +679,14 @@ edit_valid :: proc(v: jq.Value) -> jq.Value {
 			}
 		}
 		return var if var != nil else x
-	case ^jq.Object:
-		var: ^jq.Object
+	case ^core.Object:
+		var: ^core.Object
 		for val, i in core.object_vals(x) {
 			key := core.object_keys(x)[i]
 			fixed_key := key if kernel.utf8_valid(transmute([]u8)key) else jq.valid_utf8(key)
 			fixed := edit_valid(val)
 			if var == nil && (fixed_key != key || !edit_same(fixed, val)) {
-				var = new(jq.Object)
+				var = new(core.Object)
 				var.slot_keys = slice.clone_to_dynamic(core.object_keys(x))
 				var.slot_vals = slice.clone_to_dynamic(core.object_vals(x))
 			}
@@ -704,16 +704,16 @@ edit_valid :: proc(v: jq.Value) -> jq.Value {
 
 // Whether `edit_valid` left `a` as `b`: only a string, array or object can differ.
 @(private = "file")
-edit_same :: proc(a, b: jq.Value) -> bool {
+edit_same :: proc(a, b: core.Value) -> bool {
 	#partial switch x in a {
 	case string:
 		y, is_string := b.(string)
 		return is_string && raw_data(x) == raw_data(y)
-	case ^jq.Array:
-		y, is_array := b.(^jq.Array)
+	case ^core.Array:
+		y, is_array := b.(^core.Array)
 		return is_array && x == y
-	case ^jq.Object:
-		y, is_object := b.(^jq.Object)
+	case ^core.Object:
+		y, is_object := b.(^core.Object)
 		return is_object && x == y
 	}
 	return true
@@ -721,7 +721,7 @@ edit_same :: proc(a, b: jq.Value) -> bool {
 
 // Notes the comments a value written new carries. A value written new has no node to hold its comments until the second
 // pass, and none to hold a property.
-edit_note_comments :: proc(w: ^Edit_State, value: jq.Value) -> bool {
+edit_note_comments :: proc(w: ^Edit_State, value: core.Value) -> bool {
 	if writes_property(w, value) {
 		w.err = "cannot write a tag, an anchor or an alias on a value the file does not hold"
 		return false
@@ -746,7 +746,7 @@ edit_cell_refused :: proc(e: core.Error) -> bool {
 }
 
 // Why `e` refused an edit of `v`, in the words of the command line.
-edit_refusal_text :: proc(w: ^Edit_State, e: core.Error, v: jq.Value, record: bool) -> string {
+edit_refusal_text :: proc(w: ^Edit_State, e: core.Error, v: core.Value, record: bool) -> string {
 	if why := mistag_text(w.doc.readers, w.title, v); why != "" && write_refusal_kind(e) == .Bad_Raw {
 		return why
 	}
@@ -758,9 +758,9 @@ edit_refusal_text :: proc(w: ^Edit_State, e: core.Error, v: jq.Value, record: bo
 	if !core.is_flat(w.doc) {
 		return "the format cannot spell the value" if refusal.reason == .No_Spelling else edit_error_text(w.doc.src, e)
 	}
-	cell := jq.plain(v)
-	if items, is_array := cell.(^jq.Array); record && is_array && int(refusal.at) < len(items.items) {
-		cell = jq.plain(items.items[refusal.at])
+	cell := core.plain(v)
+	if items, is_array := cell.(^core.Array); record && is_array && int(refusal.at) < len(items.items) {
+		cell = core.plain(items.items[refusal.at])
 	}
 	#partial switch refusal.reason {
 	case .Not_Scalar:

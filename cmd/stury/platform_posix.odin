@@ -9,6 +9,7 @@ import "core:strings"
 import "core:sync"
 import "core:sys/posix"
 import "core:time"
+import "../../jq"
 import "message"
 
 @(private = "file")
@@ -279,4 +280,28 @@ unmap_file :: proc(data: []byte) {
 	page := uintptr(posix.sysconf(._PAGESIZE))
 	base := uintptr(raw_data(data)) / page * page
 	posix.munmap(rawptr(base), uint(len(data)) + uint(uintptr(raw_data(data)) - base))
+}
+
+// $HOME, as jq finds the home directory on POSIX.
+home_dir :: proc(_: rawptr) -> (string, bool) {
+	home := posix.getenv("HOME")
+	return string(home), home != nil
+}
+
+path_kind :: proc(_: rawptr, path: string) -> jq.Path_Kind {
+	st: posix.stat_t
+	if posix.stat(strings.clone_to_cstring(path, context.temp_allocator), &st) == .OK {
+		return .Dir if posix.S_ISDIR(st.st_mode) else .File
+	}
+	return .Missing if posix.errno() == .ENOENT else .Unreadable
+}
+
+// `path` made real, or `path` itself when it cannot be.
+real_path :: proc(_: rawptr, path: string, allocator := context.allocator) -> string {
+	real := posix.realpath(strings.clone_to_cstring(path, context.temp_allocator))
+	if real == nil {
+		return strings.clone(path, allocator)
+	}
+	defer posix.free(real)
+	return strings.clone_from_cstring(real, allocator)
 }

@@ -1,0 +1,568 @@
+#+private
+package jq
+
+// Sorting, grouping, uniqueness, and extrema (`sort`, `unique`, `sort_by`, `group_by`, `unique_by`,
+// `min`, `max`, `min_by`, `max_by`).
+
+import "core:hash"
+import "core:math"
+import "core:slice"
+import core_pkg "../core"
+
+// One element of a sort key, resolved once: a document string or number is read out of its row before
+// the sort rather than at each of its comparisons. An object atom's `f` is set by `sort_object_keys`,
+// which must run before any key is compared.
+Sort_Atom :: struct {
+	kind: Kind,
+	s:    string, // a string, or a literal's digits
+	f:    f64, // a number's double, or an object's place in its sort's `members`
+	v:    core_pkg.Value,
+}
+
+// `key` is the sort key's elements (`by`'s array), or the element itself as the one atom.
+@(private = "file")
+Keyed :: struct {
+	key: []Sort_Atom,
+	v:   core_pkg.Value,
+}
+
+// A sort under way. `depth` is the one compare() sees an atom at: inside the key array, or the element itself.
+// `members` are the sorted members of the objects among its atoms, each sorted once for the sort and not at each of
+// its comparisons, kept beside the atoms, whose size sort_by on numbers pays for. They are made in the sort's
+// allocator, which may be an input's or a reduce's arena.
+Sort_Run :: struct {
+	too_deep: ^bool,
+	depth:    int,
+	members:  [dynamic][]core_pkg.Member,
+}
+
+sort_atom :: proc(v: core_pkg.Value) -> Sort_Atom {
+	// A number of a document is read from its literal, so it is not made anew.
+	if r, is_ref := core_pkg.plain(v).(core_pkg.Node_Ref); is_ref && node_kind(r.doc, r.node) == .Number {
+		if node := r.doc.nodes[r.node]; node.kind == .Number && node.spelling & core_pkg.NUMBER_KIND_MASK != 0 || r.doc.readers.number_text != nil {
+			f, digits, _ := core_pkg.double_of(v, make([]u8, core_pkg.HEX_ROOM))
+			return {kind = .Number, f = f, s = digits, v = v}
+		}
+		lit := string(core_pkg.span(r.doc, r.node))
+		return {kind = .Number, f = core_pkg.text_f64(lit), s = lit, v = v}
+	}
+	x := scalar(v)
+	a := Sort_Atom{kind = kind(x), v = x}
+	#partial switch y in x {
+	case string:
+		a.s = y
+	case f64:
+		a.f = y
+	case core_pkg.Number_View:
+		a.f, a.s = core_pkg.view_f64(y), core_pkg.view_text(y)
+	}
+	return a
+}
+
+// compare() of the two atoms' values, with strings and differing numbers settled here.
+compare_atoms :: proc(s: ^Sort_Run, a, b: Sort_Atom) -> int {
+	if a.kind != b.kind {
+		return -1 if a.kind < b.kind else 1
+	}
+	#partial switch a.kind {
+	case .Null, .False, .True:
+		return 0
+	case .String:
+		return core_pkg.text_order(a.s, b.s)
+	case .Object:
+		return compare_members(s.too_deep, s.members[int(a.f)], s.members[int(b.f)], s.depth, false)
+	case .Number:
+		if a.f < b.f {
+			return -1
+		}
+		if a.f > b.f {
+			return 1
+		}
+		if a.f == b.f && a.s == b.s {
+			return 0 // only two numbers that differ in digits are compared as decimals
+		}
+	}
+	return compare(s.too_deep, a.v, b.v, s.depth)
+}
+
+// compare() of the two sort keys: element-wise, then the shorter first.
+@(private = "file")
+compare_keys :: proc(s: ^Sort_Run, a, b: []Sort_Atom) -> int {
+	for i in 0 ..< min(len(a), len(b)) {
+		if c := compare_atoms(s, a[i], b[i]); c != 0 {
+			return c
+		}
+	}
+	return -1 if len(a) < len(b) else (1 if len(a) > len(b) else 0)
+}
+
+// The places of `xs` in order: a bottom-up merge sort that takes the right element first only when the left is `above`
+// it, so equal elements keep input order.
+@(private = "file")
+merge_order :: proc(xs: []$T, data: $D, $above: proc(data: D, a, b: T) -> bool) -> []int {
+	n := len(xs)
+	a, b := make([]int, n), make([]int, n)
+	for i in 0 ..< n {
+		a[i] = i
+	}
+	for width := 1; width < n; width *= 2 {
+		for lo := 0; lo < n; lo += 2 * width {
+			mid, hi := min(lo + width, n), min(lo + 2 * width, n)
+			i, j, k := lo, mid, lo
+			for i < mid && j < hi {
+				if above(data, xs[a[i]], xs[a[j]]) {
+					b[k], j = a[j], j + 1
+				} else {
+					b[k], i = a[i], i + 1
+				}
+				k += 1
+			}
+			k += copy(b[k:], a[i:mid])
+			copy(b[k:], a[j:hi])
+		}
+		a, b = b, a
+	}
+	return a
+}
+
+// The places of keys that are each one null, boolean or number, none nan: an LSD radix sort of the numbers' bits,
+// as stable as the merge. It is nil when a key is anything else, or when two numbers of one double differ as decimals. The keys are `ks`', or with `items` the items
+// themselves, read without making their atoms. `ties` marks each place whose key is the one before it.
+@(private = "file")
+number_key_order :: proc(s: ^Sort_Run, ks: []Keyed, items: []core_pkg.Value = nil) -> (order: []int, ties: []bool) {
+	n := len(items) if items != nil else len(ks)
+	if n < 64 {
+		return nil, nil
+	}
+	// Keys of another kind are met in the first as soon as in any, before anything is made for them.
+	if first, one := key_atom(ks, items, 0); !one || first.kind != .Null && first.kind != .False && first.kind != .True && first.kind != .Number {
+		return nil, nil
+	}
+	Placed :: struct {
+		bits: u64,
+		at:   int,
+	}
+	a, b := make([]Placed, n), make([]Placed, n)
+	all_of, any_of := ~u64(0), u64(0)
+	exact := true // every literal is its double's value, so equal numbers are equal decimals
+	for i in 0 ..< n {
+		key, one := key_atom(ks, items, i)
+		if !one {
+			return nil, nil
+		}
+		u: u64
+		switch key.kind {
+		case .Null, .False, .True:
+			u = u64(key.kind) // below every number's bits, -inf's 0x000f_ffff_ffff_ffff
+		case .Number:
+			f := key.f
+			if math.is_nan(f) {
+				return nil, nil
+			}
+			if f == 0 {
+				f = 0 // -0 is 0's equal, and keeps its place among them
+			}
+			// The bits in the numbers' order: a negative's all flipped, a positive's sign set.
+			u = transmute(u64)f
+			u ~= ~u64(0) if u >> 63 != 0 else 1 << 63
+		case .String, .Array, .Object:
+			return nil, nil
+		}
+		a[i] = {u, i}
+		all_of &= u
+		any_of |= u
+		exact = exact && short_integer(key.s)
+	}
+	for d in 0 ..< 8 {
+		shift := 8 * uint(d)
+		if ((all_of ~ any_of) >> shift) & 0xff == 0 {
+			continue // every number has this byte
+		}
+		c: [256]int
+		for p in a {
+			c[(p.bits >> shift) & 0xff] += 1
+		}
+		at := 0
+		for &x in c {
+			x, at = at, at + x
+		}
+		for p in a {
+			digit := (p.bits >> shift) & 0xff
+			b[c[digit]] = p
+			c[digit] += 1
+		}
+		a, b = b, a
+	}
+	order, ties = make([]int, n), make([]bool, n)
+	lit, first := -1, Sort_Atom{} // the first number of the current run of one double, and its key
+	for p, i in a {
+		order[i] = p.at
+		ties[i] = i > 0 && a[i - 1].bits == p.bits
+		if exact {
+			continue
+		}
+		if !ties[i] {
+			lit = -1
+		}
+		key, _ := key_atom(ks, items, p.at)
+		switch {
+		case lit < 0:
+			lit, first = p.at, key
+		case compare_atoms(s, first, key) != 0:
+			return nil, nil
+		}
+	}
+	return order, ties
+}
+
+// The sort key at place `i`, `ks`' or with `items` the item itself, and whether it is one atom.
+@(private = "file")
+key_atom :: #force_inline proc(ks: []Keyed, items: []core_pkg.Value, i: int) -> (Sort_Atom, bool) {
+	if items != nil {
+		return sort_atom(items[i]), true
+	}
+	if len(ks[i].key) != 1 {
+		return {}, false
+	}
+	return ks[i].key[0], true
+}
+
+// A literal of at most 15 digits, and no point or exponent, or none: a number its double holds exactly.
+@(private = "file")
+short_integer :: proc(lit: string) -> bool {
+	digits := lit[1:] if len(lit) > 0 && lit[0] == '-' else lit
+	if len(digits) > 15 {
+		return false
+	}
+	for c in transmute([]byte)digits {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// The places of keys that are each one string: the distinct strings sorted, and every element counted into its
+// string's place. It is nil when the keys are not all one string. `ties` as number_key_order() gives them.
+@(private = "file")
+string_key_order :: proc(ks: []Keyed) -> (order: []int, ties: []bool) {
+	n := len(ks)
+	if n < 64 {
+		return nil, nil
+	}
+	if len(ks[0].key) != 1 || ks[0].key[0].kind != .String {
+		return nil, nil
+	}
+	// Each distinct string gets the next id, its first place in `names`. `slots` holds id + 1 by the string's hash, 0
+	// for none, and is kept at least twice as long as `names`.
+	names := make([dynamic]string, 0, 64)
+	codes := make([dynamic]u64, 0, 64)
+	slots := make([]u32, 128)
+	group := make([]u32, n)
+	for k, i in ks {
+		if len(k.key) != 1 || k.key[0].kind != .String {
+			return nil, nil
+		}
+		s := k.key[0].s
+		code := hash.fnv64a(transmute([]u8)s)
+		mask := u64(len(slots) - 1)
+		at := code & mask
+		for slots[at] != 0 && (codes[slots[at] - 1] != code || names[slots[at] - 1] != s) {
+			at = (at + 1) & mask
+		}
+		if slots[at] != 0 {
+			group[i] = slots[at] - 1
+			continue
+		}
+		group[i] = u32(len(names))
+		append(&names, s)
+		append(&codes, code)
+		slots[at] = u32(len(names))
+		if 2 * len(names) > len(slots) {
+			slots = rehashed(codes[:], 2 * len(slots))
+		}
+	}
+	// Each element's id becomes its string's place in order, so one pass counts the places and one more puts every
+	// element at its place's next slot, in input order.
+	rank := make([]u32, len(names))
+	for id, r in merge_order(names[:], 0, proc(_: int, a, b: string) -> bool {return a > b}) {
+		rank[id] = u32(r)
+	}
+	start := make([]int, len(names))
+	for &g in group {
+		g = rank[g]
+		start[g] += 1
+	}
+	order, ties = make([]int, n), make([]bool, n)
+	at := 0
+	for &s in start {
+		s, at = at, at + s
+	}
+	slice.fill(ties, true)
+	for s in start {
+		ties[s] = false
+	}
+	for g, i in group {
+		order[start[g]] = i
+		start[g] += 1
+	}
+	return order, ties
+}
+
+// string_key_order()'s slots for strings of hashes `codes`, ids in order, in a table of `size` slots, a power of two.
+@(private = "file")
+rehashed :: proc(codes: []u64, size: int) -> []u32 {
+	slots := make([]u32, size)
+	mask := u64(size - 1)
+	for code, id in codes {
+		at := code & mask
+		for slots[at] != 0 {
+			at = (at + 1) & mask
+		}
+		slots[at] = u32(id + 1)
+	}
+	return slots
+}
+
+// The elements paired with themselves as their sort keys, one atom each.
+@(private = "file")
+keys_of :: proc(items: []core_pkg.Value) -> []Keyed {
+	ks := make([]Keyed, len(items))
+	atoms := make([]Sort_Atom, len(items))
+	for x, i in items {
+		atoms[i] = sort_atom(x)
+		ks[i] = {key = atoms[i:i + 1], v = x}
+	}
+	return ks
+}
+
+@(private = "file")
+sort_object_keys :: proc(s: ^Sort_Run, ks: []Keyed) {
+	s.members = make([dynamic][]core_pkg.Member)
+	for i in 0 ..< len(ks) {
+		atoms := ks[i].key
+		for j in 0 ..< len(atoms) {
+			if atoms[j].kind == .Object {
+				atoms[j].f = f64(len(s.members))
+				append(&s.members, core_pkg.sorted_members(atoms[j].v))
+			}
+		}
+	}
+}
+
+// The places of `ks` in their keys' stable order, and which places' keys are the one before, where the
+// sort knows that without comparing (nil where it does not).
+@(private = "file")
+sort_keyed :: proc(ip: ^Interp, s: ^Sort_Run, ks: []Keyed) -> (order: []int, ties: []bool, sig: Signal) {
+	ip.too_deep = false
+	order, ties = number_key_order(s, ks)
+	if order == nil {
+		order, ties = string_key_order(ks)
+	}
+	if order == nil {
+		sort_object_keys(s, ks)
+		// The left key is asked whether it is above the right, as jq's qsort asks: a nan is below every key, another nan
+		// too, so keys of nan keep their input order.
+		order = merge_order(ks, s, proc(s: ^Sort_Run, a, b: Keyed) -> bool {return compare_keys(s, a.key, b.key) > 0})
+	}
+	if ip.too_deep {
+		return nil, nil, fail(ip, "Comparison too deep")
+	}
+	return order, ties, .Go
+}
+
+@(private = "file")
+Sort_Shape :: enum {
+	Sorted,
+	Grouped,
+	Unique,
+}
+
+// What the sort builtin of `shape` makes of the elements in sort_keyed()'s order: them in order, runs of equal
+// keys as groups (group_by), or each run's first (unique). The elements are `ks`' when it is given, else `items`,
+// and `ks` are their keys, compared where `ties` is nil.
+@(private = "file")
+sorted_result :: proc(s: ^Sort_Run, shape: Sort_Shape, items: []core_pkg.Value, ks: []Keyed, order: []int, ties: []bool) -> core_pkg.Value {
+	element :: #force_inline proc(items: []core_pkg.Value, ks: []Keyed, at: int) -> core_pkg.Value {
+		return ks[at].v if ks != nil else items[at]
+	}
+	if shape == .Sorted {
+		a := core_pkg.new_array(len(order))
+		for at in order {
+			append(&a.items, element(items, ks, at))
+		}
+		return a
+	}
+	// A run of equal keys at a time, so that its group is made at its size.
+	a := core_pkg.new_array()
+	for i := 0; i < len(order); {
+		j := i + 1
+		for j < len(order) && (ties[j] if ties != nil else compare_keys(s, ks[order[j - 1]].key, ks[order[j]].key) == 0) {
+			j += 1
+		}
+		if shape == .Unique {
+			append(&a.items, element(items, ks, order[i]))
+		} else {
+			group := core_pkg.new_array(j - i)
+			for at in order[i:j] {
+				append(&group.items, element(items, ks, at))
+			}
+			append(&a.items, group)
+		}
+		i = j
+	}
+	return a
+}
+
+// `sort` and `unique`.
+fn_sort :: proc(ip: ^Interp, name: string, v: core_pkg.Value, args: []core_pkg.Value) -> (core_pkg.Value, Signal) {
+	shape: Sort_Shape = .Unique if name == "unique" else .Sorted
+	if kind(v) != .Array {
+		return nil, fail(ip, "%s (%s) cannot be sorted, as it is not an array", type_name(v), brief(ip, v))
+	}
+	items := elements(v)
+	s := Sort_Run{too_deep = &ip.too_deep}
+	// Numbers are sorted from themselves without making their keys first.
+	if order, ties := number_key_order(&s, nil, items); order != nil {
+		return sorted_result(&s, shape, items, nil, order, ties), .Go
+	}
+	ks := keys_of(items)
+	order, ties, sig := sort_keyed(ip, &s, ks)
+	if sig != .Go {
+		return nil, sig
+	}
+	return sorted_result(&s, shape, items, ks, order, ties), .Go
+}
+
+@(private = "file")
+not_both_arrays :: proc(ip: ^Interp, v, keys: core_pkg.Value) -> Signal {
+	return fail(ip, "%s (%s) and %s (%s) cannot be sorted, as they are not both arrays", type_name(v), brief(ip, v), type_name(keys), brief(ip, keys))
+}
+
+Atom_Sink :: struct {
+	using sink: Sink,
+	atoms:      ^[dynamic]Sort_Atom,
+}
+
+// The elements of `v` each with its sort key under `f`: its outputs on that element, read into their atoms without
+// building the arrays jq's `map([f])` makes. A document's elements are listed in the pass that keys them, so each
+// element's node is read while its members are.
+@(private = "file")
+keys_by :: proc(ip: ^Interp, f: ^Node, v: core_pkg.Value, env: ^Env) -> ([]Keyed, Signal) {
+	n := length_of(v)
+	ks := make([dynamic]Keyed, 0, n)
+	atoms := make([dynamic]Sort_Atom, 0, n)
+	ends := make([dynamic]int, 0, n)
+	s := Atom_Sink{sink = {emit = proc(s: ^Sink, it: Item) -> Signal {
+				append((^Atom_Sink)(s).atoms, sort_atom(it.v))
+				return .Go
+			}}, atoms = &atoms}
+	it := iterate(v)
+	for _, x in next_member(&it) {
+		append(&ks, Keyed{v = x})
+		if sig := eval(ip, f, {v = x}, env, false, &s); sig != .Go {
+			return nil, sig
+		}
+		append(&ends, len(atoms))
+	}
+	for &k, i in ks {
+		k.key = atoms[ends[i - 1] if i > 0 else 0:ends[i]]
+	}
+	return ks[:], .Go
+}
+
+// `ks`' keys as the arrays jq's `map([f])` would have made, for an error message.
+@(private = "file")
+keys_array :: proc(ks: []Keyed) -> ^core_pkg.Array {
+	keys := core_pkg.new_array(len(ks))
+	for key in ks {
+		a := core_pkg.new_array(len(key.key))
+		for atom in key.key {
+			append(&a.items, atom.v)
+		}
+		append(&keys.items, a)
+	}
+	return keys
+}
+
+// The elements of `input` that sort_by and min_by iterate, each with its key under `f`.
+@(private = "file")
+keyed_elements :: proc(ip: ^Interp, f: ^Node, input: Item, env: ^Env) -> (keyed: []Keyed, sig: Signal) {
+	iterable(ip, input.v) or_return
+	return keys_by(ip, f, input.v, env)
+}
+
+// `sort_by(f)`, `group_by(f)` and `unique_by(f)`, which jq defines as their `_impl` of `map([f])`: the
+// same keys, each `f`'s outputs on an element, read into their atoms without building the arrays.
+sort_by :: proc($shape: Sort_Shape) -> Native {
+	return proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
+		ks, sig := keyed_elements(ip, n.args[0], input, env)
+		if sig != .Go {
+			return sig
+		}
+		if kind(input.v) != .Array {
+			return not_both_arrays(ip, input.v, keys_array(ks))
+		}
+		s := Sort_Run{too_deep = &ip.too_deep, depth = 1}
+		order, ties, sorted_sig := sort_keyed(ip, &s, ks)
+		if sorted_sig != .Go {
+			return sorted_sig
+		}
+		return emit_made(out, input, sorted_result(&s, shape, nil, ks, order, ties), track)
+	}
+}
+
+// The place of the first least element of `xs` under `cmp`, or of the last greatest, as jq's min and max keep.
+@(private = "file")
+extreme_place :: proc(xs: []$T, want_max: bool, data: $D, $cmp: proc(data: D, a, b: T) -> int) -> int {
+	best := -1
+	for i in 0 ..< len(xs) {
+		if best < 0 {
+			best = i
+			continue
+		}
+		c := cmp(data, xs[i], xs[best])
+		if (want_max && c >= 0) || (!want_max && c < 0) {
+			best = i
+		}
+	}
+	return best
+}
+
+// `min_by(f)` and `max_by(f)`, jq's `_min_by_impl(map([f]))` over the same keys as sort_by: the first least
+// element, or the last greatest, found in one pass.
+extreme_by :: proc($want_max: bool) -> Native {
+	return proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
+		ks, sig := keyed_elements(ip, n.args[0], input, env)
+		if sig != .Go {
+			return sig
+		}
+		if kind(input.v) != .Array {
+			keys := keys_array(ks)
+			return fail(ip, "%s (%s) and %s (%s) cannot be iterated over", type_name(input.v), brief(ip, input.v), type_name(keys), brief(ip, keys))
+		}
+		ip.too_deep = false
+		s := Sort_Run{too_deep = &ip.too_deep, depth = 1}
+		sort_object_keys(&s, ks)
+		best := extreme_place(ks, want_max, &s, proc(s: ^Sort_Run, a, b: Keyed) -> int {return compare_keys(s, a.key, b.key)})
+		if failed := compare_failed(ip, false); failed != .Go {
+			return failed
+		}
+		return emit_made(out, input, ks[best].v if best >= 0 else nil, track)
+	}
+}
+
+// `min` and `max`.
+fn_extreme :: proc(ip: ^Interp, name: string, v: core_pkg.Value, args: []core_pkg.Value) -> (core_pkg.Value, Signal) {
+	want_max := name == "max"
+	if kind(v) != .Array {
+		return nil, fail(ip, "%s (%s) and %s (%s) cannot be iterated over", type_name(v), brief(ip, v), type_name(v), brief(ip, v))
+	}
+	items := elements(v)
+	ip.too_deep = false
+	best := extreme_place(items, want_max, &ip.too_deep, proc(too_deep: ^bool, a, b: core_pkg.Value) -> int {return compare(too_deep, a, b)})
+	if sig := compare_failed(ip, false); sig != .Go {
+		return nil, sig
+	}
+	return items[best] if best >= 0 else nil, .Go
+}

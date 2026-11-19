@@ -7,7 +7,7 @@ package main
 import "core:os"
 import "../../core/schema"
 import json "../../json"
-import "jq"
+import "../../jq"
 import "message"
 
 // Exits 0, or 1 after a refusal, or 2 when the schema or the options do not serve.
@@ -28,19 +28,16 @@ check_filter_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		cells      = reads_cells(o),
 		infer      = o.cells_in.infer,
 		no_header  = o.cells_in.no_header,
-		names      = run.program.names,
-		values     = run.program.values,
-		text       = run.program.text,
 	}
-	typing := jq.type_filter(run.prog, sc.compiled.description, opts)
-	for e in typing.refusals {
-		message.write_stderr("stury: error: %s\n", jq.locate(run.program.text, e))
+	outputs, refusals := jq.check_types(run.prog, sc.compiled.description, opts)
+	for e in refusals {
+		message.write_stderr("stury: error: %s\n", e)
 	}
-	text, err := schema.write(&typing.d, json.as(.Json), output_layout(run).opts)
+	text, err := schema.write(&outputs, json.as(.Json), output_layout(run).opts)
 	if err != nil {
 		message.write_stderr("stury: error: %s\n", edit_error_text(nil, err))
 		os.exit(EXIT_USAGE)
 	}
 	message.write_stdout("%s\n", string(text))
-	exit_closing_stdout(1 if len(typing.refusals) > 0 else 0)
+	exit_closing_stdout(1 if len(refusals) > 0 else 0)
 }

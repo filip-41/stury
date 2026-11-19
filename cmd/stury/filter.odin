@@ -4,8 +4,10 @@ package main
 
 import "base:runtime"
 import "core:mem/virtual"
+import "core:os"
 import "core:strings"
-import "jq"
+import core "../../core"
+import "../../jq"
 import "message"
 
 // jq's process() results, which its exit status comes from.
@@ -36,8 +38,8 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 		message.write_stderr("stury: error: out of memory\n")
 		finish(run, EXIT_INPUT)
 	}
-	context.allocator = jq.arena_allocator(&inputs)
-	context.temp_allocator = jq.arena_allocator(&temp)
+	context.allocator = jq.run_allocator(&inputs)
+	context.temp_allocator = jq.run_allocator(&temp)
 	if run.opts.null_input {
 		run_once(run, nil)
 		return
@@ -47,7 +49,7 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 	for fetched := false; (ins.failures == 0 || !fetched) && !run.halted; fetched = true {
 		v, msg, status := next_input(ins)
 		// A text that does not parse is the interpreter's, which tells its fault.
-		run.route.interpreted += int(status != .More)
+		run.route.interpreted += int(status != .End)
 		switch status {
 		case .Value:
 			run_once(run, v)
@@ -59,7 +61,7 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 				return
 			}
 			tell_ignored(ins, msg)
-		case .More:
+		case .End:
 			return
 		}
 		free_all(context.allocator)
@@ -68,31 +70,55 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 	}
 }
 
+// The filter's `debug`, `stderr` and `halt_error` text, held until the next output, so the two streams interleave as
+// jq's do, or until a chunk of it is held, so a long run's memory stays flat. Only the serial route writes it: a filter
+// that calls those runs on no other thread.
+@(private = "file")
+held_messages: [dynamic]byte
+
+@(private = "file")
+MESSAGES_HELD :: 1 << 16
+
+// The interpreter's messages hook.
+hold_message :: proc(_: rawptr, text: []byte) {
+	// The heap's, as the messages outlive the input whose run wrote them.
+	held_messages.allocator = runtime.heap_allocator()
+	append(&held_messages, ..text)
+	if len(held_messages) >= MESSAGES_HELD {
+		flush_messages()
+	}
+}
+
+// Writes the messages held to stderr.
+flush_messages :: #force_inline proc() {
+	if len(held_messages) == 0 {
+		return
+	}
+	os.write(os.stderr, held_messages[:])
+	clear(&held_messages)
+}
+
 // Runs the filter on one input, prints its outputs and reports its error, as jq's process() does.
-run_once :: proc(run: ^Run, v: jq.Value) {
+run_once :: proc(run: ^Run, v: core.Value) {
 	ip := &run.ip
-	ip.free_envs = nil // the last input's, emptied with its memory
-	ip.printer = &run.output
-	sig := jq.eval(ip, run.prog, {v = v}, ip.globals, false, &run.output)
-	ip.printer = nil
-	if run.output.piece && (sig == .Fail || ip.halted != nil) {
+	outcome := jq.run(ip, run.prog, v, &run.output, transient = true)
+	if run.output.piece && outcome != .Done {
 		run.output.refused = true
 		return
 	}
-	if len(ip.messages) > 0 {
-		jq.flush_messages(ip)
+	if len(held_messages) > 0 {
+		flush_messages()
 		flush_some(&run.output, force = true)
 	}
 	ended: Maybe(int)
-	#partial switch sig {
-	case .Fail:
+	switch outcome {
+	case .Done:
+	case .Raised:
 		flush_some(&run.output, force = true)
-		tell_filter_error(ip, (^Inputs)(ip.inputs.data))
+		tell_filter_error(ip, (^Inputs)(jq.inputs(ip).data))
 		ended = EXIT_INPUT
-	case .Break:
-		if code, halted := ip.halted.?; halted {
-			ended, run.halted = code, true
-		}
+	case .Halted:
+		ended, run.halted = ip.halted, true
 	}
 	finish_input(&run.output, ended)
 }
@@ -100,7 +126,8 @@ run_once :: proc(run: ^Run, v: jq.Value) {
 // The error the filter stopped with, told at the input's position as jq's process() tells it. `ins` is the run's
 // inputs when `input` reads them, nil when an edit's reader does.
 tell_filter_error :: proc(ip: ^jq.Interp, ins: ^Inputs) {
-	name, line := ip.inputs.position(ip.inputs.data)
+	bound := jq.inputs(ip)
+	name, line := bound.position(bound.data)
 	// No input, as under -n, is no place, where jq says `(at <unknown>)`.
 	at := message.build_temp(" (at %s:%d)", name, line) if name != "" else ""
 	if msg, is_str := jq.string_of(ip.err); is_str {

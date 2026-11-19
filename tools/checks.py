@@ -24,7 +24,7 @@ def makefile_list(name):
 
 # The library packages, and the order imports of them take. json and dsv share a rank, under core/model.
 PACKAGES = makefile_list("LIB_PKGS")
-RANK = {"core/spell": 0, "core/regex": 1, "core/kernel": 1, "core": 2, "host": 3, "core/compose": 3, "core/diff": 3, "core/rules": 3, "core/css": 3, "core/build": 4, "core/typed": 5, "core/write": 6, "core/records": 7, "core/schema": 8, "json": 9, "dsv": 9, "core/model": 10, "toml": 9, "xml": 9, "yaml": 9, "cbor": 9, "html": 9}
+RANK = {"core/spell": 0, "core/regex": 1, "core/kernel": 1, "core": 2, "host": 3, "core/compose": 3, "core/diff": 3, "core/rules": 3, "core/css": 3, "core/build": 4, "core/typed": 5, "core/write": 6, "core/records": 7, "core/schema": 8, "json": 9, "dsv": 9, "core/model": 10, "toml": 9, "xml": 9, "yaml": 9, "cbor": 9, "html": 9, "jq": 11}
 FORMATS = {"json", "dsv", "toml", "xml", "yaml", "cbor", "html"}
 
 DECL = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(::|:=|:)")
