@@ -796,6 +796,20 @@ next_document :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) {
 	return {text = it.src[lo:hi], at = lo}, true
 }
 
+// A faulting document ends where the next starts, at the fault's line when it is a `---` line or past it, as
+// `cut_document` finds the start. Under `.Entries` a fault leaves no level to go on at.
+@(private)
+resume_document :: proc(it: ^records.Reader, fault: u64) -> (u64, bool) {
+	if it.framing != .Concatenated {
+		return 0, false
+	}
+	ls := u64(bytes.last_index_byte(it.src[:fault], '\n') + 1)
+	if at, found := cut_document(it, ls - 1 if ls > it.pos else it.pos, u64(len(it.src))); found && at > it.pos {
+		return at, true
+	}
+	return max(u64), true
+}
+
 // Moves a piece's reader to the first document start at or past `it.pos` and before `to`.
 @(private)
 guess_document :: proc(it: ^records.Reader, to: u64) -> bool {

@@ -251,6 +251,24 @@ def test_explain_many_files(s):
                 "-c", ".a", s.files.small, s.files.small)
 
 
+SKIP_BAD_FILES = (("filter", ["-c", "--from", "ndjson", ".a"]), ("each", ["-c", "--from", "ndjson", "--each", ".a"]),
+                  ("check", ["check", "--from", "ndjson"]))
+SKIP_BAD_FLAGS = (["--skip-bad"], ["--quarantine", "/dev/stdout"])
+
+
+@pytest.mark.parametrize("name, args", SKIP_BAD_FILES, ids=[f[0] for f in SKIP_BAD_FILES])
+@pytest.mark.parametrize("flags", SKIP_BAD_FLAGS, ids=["skip", "quarantine"])
+def test_skip_bad_files_answer_at_every_width(s, name, args, flags):
+    """Many files with records that do not read answer as one thread does, at every width: the output, the messages, the
+    quarantine and the status."""
+    texts = ['{"a":%d}\n{bad}\n{"a":2}\n\n{"a":\n{"a":3}\n', '{"a":%d}\n{"a":2}\n', '{"a":1}\n[1,}\n{"a":%d}\n', '{"a":%d}\n\udcff\n']
+    paths = [s.files.write(f"skip{i}.ndjson", texts[i % 4].replace("%d", str(i))) for i in range(60)]
+    want = s.run("--threads", "1", *flags, *args, *paths)[:3]
+    assert want[0] == 5
+    for width in ("2", "18"):
+        assert s.run("--threads", width, *flags, *args, *paths)[:3] == want, f"--threads {width}"
+
+
 @pytest.mark.parametrize("args, want", ((["-c", ".a"], f"stury: explain: ran: 1 input, 1 read by path and 0 built\n{ONE}"),
                                         (["-c", ".a | tostring"], f"stury: explain: ran: 1 input, each built\n{ONE}")), ids=["path", "interpreter"])
 def test_explain_small_file(s, args, want):

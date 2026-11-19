@@ -166,6 +166,11 @@ Framing_Services :: struct {
 	// it were well-formed, for a format whose cuts no `exact` scan finds. A separator's verdict depends on the text alone,
 	// not on `lo` or `hi`, and the call only reads `it`, from any thread. nil for a format with `exact`.
 	cut:    proc(it: ^Reader, lo, hi: u64) -> (u64, bool),
+	// For a reader whose records ended on a fault at byte `fault` of `it.src`, with `it.pos` at or before the faulting
+	// record's first byte: the first byte past that record where one may start whatever the bytes before it, as the
+	// framing marks one, `max(u64)` when the window holds none. It sets back what the format keeps for the next
+	// record. False under a framing with no such mark, and nil for a format with none.
+	resume: proc(it: ^Reader, fault: u64) -> (u64, bool),
 }
 
 // The `judge` of a format whose `next` judges each record it frames.

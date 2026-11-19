@@ -13,6 +13,7 @@ import "../../core/spell"
 import core "../../core"
 import "../../core/typed"
 import "../../core/write"
+import records "../../core/records"
 import "../../core/schema"
 import json "../../json"
 import "../../core/model"
@@ -189,15 +190,33 @@ refuses_reference :: proc(err: core.Error) -> bool {
 	return keyword == "$ref" || keyword == "$dynamicRef" || keyword == "$recursiveRef"
 }
 
+// What --skip-bad adds to the check of one input: the records that did not read, in input order, which the check goes on
+// past, and the options their reports read.
+Skipping :: struct {
+	o:      ^Opts,
+	bad:    [dynamic]records.Bad_Record,
+	passed: int, // the records told as passed over
+}
+
+// The failures a check keeps when --max-errors is not given.
+DEFAULT_MAX_ERRORS :: 100
+
+// The failures a check keeps for --quarantine, which holds every failure of the input where a report holds `max_errors`.
+QUARANTINE_ENTRIES :: 1 << 30
+
 // Judges `data`, the file `name`, against the schema and tells what it finds. A report names the file, and a valid file has a basic report and no problem document.
 // A fault is left for the plain check to tell, and is returned for the case it finds nothing.
-schema_judge :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, data: []byte, src: Source, runner: ^core.Runner) -> (Verdict, core.Error) {
+schema_judge :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, data: []byte, src: Source, runner: ^core.Runner, skipping: ^Skipping = nil) -> (Verdict, core.Error) {
 	sink := typed.Sink {
-		max_errors = s.max_errors,
+		max_errors = QUARANTINE_ENTRIES if skipping != nil && quarantine != nil else s.max_errors,
 		entries    = make([dynamic]core.Error_Entry, runtime.heap_allocator()),
 	}
 	defer typed.sink_destroy(&sink)
-	records, err := check_input(sc, data, src, runner, &sink)
+	count, err := check_input(sc, data, src, runner, &sink, skipping)
+	if skipping != nil {
+		return judge_skipping(sc, s, name, data, src, &sink, skipping, count, err)
+	}
+	records := count
 	// A fault cuts a text past the records counted, so a fault past one whole record still makes two.
 	_, faulted := err.(core.Fault)
 	by_record := !table_source(src) && (src.framing != .Concatenated || records > 1 || records == 1 && faulted)
@@ -242,19 +261,127 @@ table_source :: proc(src: Source) -> bool {
 // and returns how many records it read. A concatenated text that does not check as one is read again value by value,
 // unless its format reads one document from an input.
 @(private = "file")
-check_input :: proc(sc: ^Schema_Check, data: []byte, src: Source, runner: ^core.Runner, sink: ^typed.Sink) -> (records: i64, err: core.Error) {
+check_input :: proc(sc: ^Schema_Check, data: []byte, src: Source, runner: ^core.Runner, sink: ^typed.Sink, skipping: ^Skipping) -> (records: i64, err: core.Error) {
+	bad := &skipping.bad if skipping != nil else nil
 	if table_source(src) {
 		return 1, schema.check(&sc.bound, data, sink, runner)
 	}
 	if src.framing != .Concatenated {
-		return schema.check_records(&sc.bound, data, src.framing, sink, runner)
+		return schema.check_records(&sc.bound, data, src.framing, sink, runner, bad)
 	}
 	err = schema.check(&sc.bound, data, sink, runner)
 	if _, parse := err.(core.Fault); !parse || source_whole(src.format) {
 		return 1, err
 	}
 	typed.sink_restore(sink, {})
-	return schema.check_records(&sc.bound, data, .Concatenated, sink, runner)
+	return schema.check_records(&sc.bound, data, .Concatenated, sink, runner, bad)
+}
+
+// The verdict of a check that goes on past the records that do not read. Each of them is told as passed over, the
+// failures of the others as the report says, and with --quarantine the records are split. A fault that ends the records
+// is the plain check's to tell, as it is where nothing is passed over.
+@(private = "file")
+judge_skipping :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, data: []byte, src: Source, sink: ^typed.Sink, skipping: ^Skipping, count: i64, err: core.Error) -> (Verdict, core.Error) {
+	counted: core.Lines
+	for b in skipping.bad {
+		pass_over(name, data, b.fault, src, skipping.o, counted = &counted, passed = &skipping.passed)
+	}
+	entries := make([dynamic]core.Error_Entry, 0, len(sink.entries), context.temp_allocator)
+	for e in sink.entries {
+		if e.kind != .Walk {
+			append(&entries, e)
+		}
+	}
+	ended, fault := ends_records(err, skipping.bad[:])
+	if quarantine != nil {
+		split_records(name, data, src, entries[:], skipping.bad[:])
+		if limit := s.max_errors if s.max_errors != 0 else DEFAULT_MAX_ERRORS; len(entries) > limit {
+			resize(&entries, limit)
+			sink.truncated = true
+		}
+	}
+	if len(entries) > 0 {
+		by_record := !table_source(src) && (src.framing != .Concatenated || count > 1 || count == 1 && ended)
+		tell(sc, s, name, data, entries[:], by_record, sink)
+	}
+	switch {
+	case ended:
+		return .Fault, fault
+	case len(entries) > 0:
+		for e in entries {
+			if e.kind == .Pattern_Undecided {
+				return .Refused, err
+			}
+		}
+		return .Invalid, nil
+	}
+	if _, skipped := err.(core.Fault); err != nil && !skipped {
+		message.write_stderr("stury: %s: %s\n", name, edit_error_text(data, err))
+		return .Refused, err
+	}
+	if count == 0 && src.framing == .Concatenated {
+		return .Fault, nil
+	}
+	if s.report == .Basic {
+		report(sc, s, name, entries[:], false)
+	}
+	return .Valid, nil
+}
+
+// The fault that ended the records of a check, when `err` is one that is not of a record passed over in `bad`.
+@(private = "file")
+ends_records :: proc(err: core.Error, bad: []records.Bad_Record) -> (ended: bool, fault: core.Fault) {
+	fault, ended = err.(core.Fault)
+	for b in bad {
+		if ended && b.fault.at == fault.at {
+			return false, {}
+		}
+	}
+	return
+}
+
+// Writes each record of `data` that is valid to standard output as its own bytes and a line, and the others to the
+// quarantine: a record that fails the schema with its `entries`, which are in record order, and one that does not read
+// with its fault, which `bad` lists in input order.
+@(private = "file")
+split_records :: proc(name: string, data: []byte, src: Source, entries: []core.Error_Entry, bad: []records.Bad_Record) {
+	it := records.open(data, src.as, src.framing, allocator = runtime.heap_allocator())
+	defer records.close(&it)
+	counted: core.Lines
+	n: i64
+	next, passed := 0, 0
+	for {
+		rec, more := records.next(&it)
+		if more {
+			first := next
+			for next < len(entries) && entries[next].record == n {
+				next += 1
+			}
+			n += 1
+			if passed < len(bad) && rec.at >= bad[passed].at && rec.at < max(bad[passed].end, bad[passed].at + 1) {
+				// A record the framing gives whole, whose text does not read.
+				quarantine_bad({n, fault_place(name, data, bad[passed].fault, 0, &counted), bad[passed].text}, fault_sentence(data, bad[passed].fault))
+				passed += 1
+			} else if first == next {
+				put_stdout(rec.text)
+				put_stdout({'\n'})
+			} else {
+				line, col := core.locate(data, rec.at, &counted)
+				quarantine_invalid({n, message.build_temp("%s:%d:%d", name, line, col), rec.text}, entries[first:next])
+			}
+			continue
+		}
+		if _, faulted := it.fault.?; !faulted {
+			return
+		}
+		skipped, went := records.skip(&it)
+		if !went {
+			return
+		}
+		n += 1
+		passed += 1
+		quarantine_bad({n, fault_place(name, data, skipped.fault, 0, &counted), skipped.text}, fault_sentence(data, skipped.fault))
+	}
 }
 
 // The entries of a check that ended on a fault, without the entry that places the fault among them.
@@ -273,7 +400,7 @@ tell :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, data: []byte, e
 	if s.report == .Lines {
 		told(name, data, entries)
 		if sink.truncated {
-			message.write_stderr("%s: more failures past --max-errors %d\n", name, len(sink.entries))
+			message.write_stderr("%s: more failures past --max-errors %d\n", name, s.max_errors if s.max_errors != 0 else DEFAULT_MAX_ERRORS)
 		}
 	} else {
 		report(sc, s, name, entries, by_record, sink.truncated)

@@ -51,11 +51,21 @@ Piece_Slot :: struct {
 	sum:           Piece_Sum,
 	done, stopped: bool,
 	crossed:       bool, // it stopped on a text that runs past its end
+	bad:           [dynamic]Piece_Bad, // under --skip-bad, the records it passed over, in source order
 	// A spine piece's: the text of `out` between the innermost brackets, its entries, and a collect's outputs, in the
 	// thread's piece arena.
 	inner:         []u8,
 	entries:       int,
 	items:         [dynamic]core.Value,
+}
+
+// A record of a piece that does not read, passed over where `out` held `at` bytes, with `before` records of the piece
+// before it, the records passed over included.
+Piece_Bad :: struct {
+	at, before: int,
+	rec_at:     u64,
+	fault:      core.Fault,
+	text:       []byte,
 }
 
 Pieces :: struct {
@@ -172,8 +182,9 @@ records_pieces :: proc(ins: ^Inputs) -> bool {
 		records.close(&ins.texts)
 		ins.texts = records.open(ins.data, ins.as, ins.framing, at, runtime.heap_allocator())
 	}
-	// Past the record a piece stopped at, which the serial route reads first.
-	ins.parallel_from = at + max(POOLED_BYTES, 1)
+	// Past the record a piece stopped at, which the serial route reads first. Under --skip-bad that record may be one that
+	// does not read, and after pieces that read a long way the next pieces start right past it.
+	ins.parallel_from = at + (1 if run.opts.skip_bad && at - from >= POOLED_BYTES else max(POOLED_BYTES, 1))
 	return true
 }
 
@@ -232,6 +243,11 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 	// A piece's records end at its text's end, or at `to` for a format that reads past it.
 	stop := min(it.to, u64(len(it.src))) if it.to != 0 else u64(len(it.src))
 	scanned := r.route.scanning && scans(r.route.path) && !reads_cells(&r.opts)
+	// A piece passes over a record that does not read only where records are cut at the ends of their lines or rows, which
+	// a bad record cannot move: elsewhere the serial route passes over it and the pieces start again.
+	skips := r.opts.skip_bad && (ps.framing == .Lines || r.opts.from == .Tsv)
+	passed: [dynamic]Piece_Bad
+	passed.allocator = runtime.heap_allocator()
 	n, before_at, stopped, crossed := 0, lo, failed, false
 	before := piece_sum(&r, n)
 	for !stopped {
@@ -255,8 +271,15 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 			continue
 		}
 		before, before_at = piece_sum(&r, n), rec.at
-		if !piece_record(&r, it, rec, &part, read, scanned, ps.plain) {
-			stop, stopped = rec.at, true
+		unread: Maybe(core.Fault)
+		if !piece_record(&r, it, rec, &part, read, scanned, ps.plain, &unread) {
+			if f, faulted := unread.?; faulted && skips {
+				// A record passed over is none answered.
+				append(&passed, Piece_Bad{o.buf.cursor, n + len(passed), rec.at, f, rec.text})
+				n -= 1
+			} else {
+				stop, stopped = rec.at, true
+			}
 		}
 		n += 1
 		end = rec.at + u64(len(rec.text))
@@ -272,11 +295,14 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 		// The records past those `before` counts undone.
 		o.buf.cursor, o.ret, o.last_result, r.route.explain, n = before.cursor, before.ret, before.last_result, before.explain, before.records
 		o.refused = false
+		for len(passed) > 0 && passed[len(passed) - 1].rec_at >= stop {
+			pop(&passed)
+		}
 		if o.table != nil {
 			o.table.wr.table.rows = before.rows
 		}
 	}
-	slot := Piece_Slot{lo = lo, hi = stop, end = end, sum = piece_sum(&r, n), stopped = stopped, crossed = crossed}
+	slot := Piece_Slot{lo = lo, hi = stop, end = end, sum = piece_sum(&r, n), stopped = stopped, crossed = crossed, bad = passed}
 	if o.table != nil {
 		// The header is the run's table's.
 		o.table.wr.table.header = {}
@@ -295,8 +321,9 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 }
 
 // Answers one record of a piece, as the serial route does, or returns false with what it printed left to be undone.
+// A record whose text does not read is answered with the fault it holds in `unread`.
 @(private = "file")
-piece_record :: proc(r: ^Run, it: ^records.Reader, rec: records.Record, part: ^core.Document, read: core.Error, scanned: bool, plain: core.As) -> bool {
+piece_record :: proc(r: ^Run, it: ^records.Reader, rec: records.Record, part: ^core.Document, read: core.Error, scanned: bool, plain: core.As, unread: ^Maybe(core.Fault)) -> bool {
 	o := &r.output
 	cells := reads_cells(&r.opts)
 	if cells && r.route.columns != nil {
@@ -304,6 +331,7 @@ piece_record :: proc(r: ^Run, it: ^records.Reader, rec: records.Record, part: ^c
 	} else if cells || !r.route.scanning || !answer_record(r, rec, part, read, scanned, plain) {
 		doc, fault := core.refuse_key_clash(records.build(it, rec, context.allocator))
 		if fault != nil {
+			unread^ = fault
 			return false
 		}
 		r.route.interpreted += 1
@@ -383,12 +411,24 @@ write_piece :: proc(ps: ^Pieces, s: ^Piece_Slot) {
 		explain_add(r, p)
 	}
 	r.pieces += 1
-	if len(s.out) > 0 {
+	if len(s.out) > 0 || len(s.bad) > 0 {
 		host.writing(run.pool, true)
-		write_out(s.out)
+		at := 0
+		for b in s.bad {
+			write_out(s.out[at:b.at])
+			at = b.at
+			ps.ins.record_no += i64(b.before + 1)
+			bad_told(ps.ins, b.fault, b.text)
+			ps.ins.record_no -= i64(b.before + 1)
+		}
+		write_out(s.out[at:])
 		host.writing(run.pool, false)
 		o.written += len(s.out)
 	}
+	if ps.ins != nil && !ps.entries {
+		ps.ins.record_no += i64(s.sum.records + len(s.bad))
+	}
+	delete(s.bad)
 	give_spare(&run.spares, s.out, s.room, s.k)
 	s.out = nil
 	ps.at = s.hi

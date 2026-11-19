@@ -28,6 +28,10 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: core.Value, msg: s
 		built, err := records.build(&ins.texts, rec, runtime.heap_allocator() if ins.run.opts.stream else context.allocator)
 		doc, fault := core.refuse_key_clash(built, err)
 		if f, bad := fault.?; bad {
+			if ins.run.opts.skip_bad {
+				cells_skip(ins, f, rec.text)
+				return nil, "", .Value, true
+			}
 			v, msg, status = cells_fault(ins, f)
 			return
 		}
@@ -38,6 +42,11 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: core.Value, msg: s
 				ins.head = bytes.clone(ins.data[:rec.at], runtime.heap_allocator())
 			}
 			if text, twice := repeated_header(ins.name, ins.data, &doc); twice {
+				if ins.run.opts.skip_bad {
+					message.write_stderr("stury: parse error: %s\n", text)
+					end_file(ins)
+					return nil, "", .Value, true
+				}
 				return nil, text, .Error, false
 			}
 			if cols != nil {
@@ -59,6 +68,18 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: core.Value, msg: s
 	free_all(context.allocator)
 	free_all(context.temp_allocator)
 	return nil, "", .Value, true
+}
+
+// Goes on past the row `text` of the open file that holds the fault `f`, which ends the file when no row has been read
+// to hold the header.
+@(private = "file")
+cells_skip :: proc(ins: ^Inputs, f: core.Fault, text: []byte) {
+	if ins.header_judged {
+		bad_record(ins, f, text)
+		return
+	}
+	tell_fault(ins, f)
+	end_file(ins)
 }
 
 // The row `v` `cells_value` built, with the comment lines before it as its `.@comment`: those between the previous row, or

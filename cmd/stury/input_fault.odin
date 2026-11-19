@@ -119,15 +119,26 @@ tell_fault :: proc(ins: ^Inputs, fault: core.Fault) {
 	message.write_stderr("stury: parse error: %s\n%s", fault_told(ins.name, ins.data, f, ins.file_lines, faults_counted(ins, ins.data)), fault_note(ins.name, ins.data, f, ins.spec, &run.opts, lead_of(ins)))
 }
 
-// The fault `f` of the text `data` of file `name` told as `NAME:LINE:COLUMN: SENTENCE`, its line counted on from the
-// `lines` before `data` and through `data` from where `counted` stands, or as `NAME: SENTENCE` when it is at no byte. A fault at the text's end is at its last byte's
-// column, or at column 0 of the line after a newline, as jq places it. A record cut short by its line's end is at the
-// line's last byte.
+// The fault `f` of the text `data` of file `name` told as `NAME:LINE:COLUMN: SENTENCE`, or as `NAME: SENTENCE` when it
+// is at no byte. See `fault_place`.
 fault_told :: proc(name: string, data: []byte, f: core.Fault, lines := 0, counted: ^core.Lines = nil) -> string {
+	return message.build_temp("%s: %s", fault_place(name, data, f, lines, counted), fault_sentence(data, f))
+}
+
+// What the fault `f` of the text `data` says, without its place.
+fault_sentence :: proc(data: []byte, f: core.Fault) -> string {
 	b := strings.builder_make(context.temp_allocator)
 	core.write_fault_message(strings.to_writer(&b), data, f)
+	return strings.to_string(b)
+}
+
+// The place of the fault `f` of the text `data` of file `name`, as `NAME:LINE:COLUMN` with its line counted on from the
+// `lines` before `data` and through `data` from where `counted` stands, or `NAME` when it is at no byte. A fault at the
+// text's end is at its last byte's column, or at column 0 of the line after a newline, as jq places it. A record cut
+// short by its line's end is at the line's last byte.
+fault_place :: proc(name: string, data: []byte, f: core.Fault, lines := 0, counted: ^core.Lines = nil) -> string {
 	if f.kind in core.AT_NO_BYTE {
-		return message.build_temp("%s: %s", name, strings.to_string(b))
+		return name
 	}
 	at, past_newline := f.at, false
 	if n := u64(len(data)); f.at >= n && n > 0 {
@@ -139,7 +150,7 @@ fault_told :: proc(name: string, data: []byte, f: core.Fault, lines := 0, counte
 	if past_newline {
 		line, col = line + 1, 0
 	}
-	return message.build_temp("%s:%d:%d: %s", name, line + u64(lines), col, strings.to_string(b))
+	return message.build_temp("%s:%d:%d", name, line + u64(lines), col)
 }
 
 // The fault `f` of the records of `data` framed by `framing`, but under `.Lines` and `.Seq` a word cut short by its

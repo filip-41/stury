@@ -34,8 +34,12 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 			o.from = from
 		}
 	}
+	if o.quarantine != "" && cr.sc != nil && o.froms & {.Csv, .Tsv} != {} {
+		usage_error("--quarantine splits an input into records, and a CSV or TSV table is judged as one whole against a schema")
+	}
 	fc := Files_Call{run = run, files = input_files(cli.files[:], cli.walked), job = check_file, data = &cr}
 	each_file(&fc, true)
+	tell_skipped(run, bad_tally.skipped)
 	os.exit(fc.code)
 }
 
@@ -55,10 +59,17 @@ check_file :: proc(fc: ^Files_Call, r: ^Run, k: int, slot: ^File_Slot) {
 	data := spent.data
 	runner := pool_for(r, data)
 	verdict, why := Verdict.Fault, core.Error(nil)
+	judged := false
+	skipping := Skipping{o = o}
+	defer delete(skipping.bad)
 	if sc := cr.sc; sc != nil && !(reads_cells(o) && header_fault(file_name(path), data, src.as) != "") {
 		bound := sc^
 		bound.bound = sc.bounds[src.format].? or_else sc.bound
-		verdict, why = schema_judge(&bound, cr.cli.schema, file_name(path), data, src, runner)
+		verdict, why = schema_judge(&bound, cr.cli.schema, file_name(path), data, src, runner, &skipping if o.skip_bad else nil)
+		judged = true
+	}
+	defer if slot.skipped + skipping.passed > 0 {
+		slot.code = worse(slot.code, EXIT_INPUT)
 	}
 	switch verdict {
 	case .Valid:
@@ -67,7 +78,9 @@ check_file :: proc(fc: ^Files_Call, r: ^Run, k: int, slot: ^File_Slot) {
 	case .Refused:
 		slot.code = EXIT_USAGE
 	case .Fault:
-		if msg := check_text(file_name(path), data, src, o, runner); msg != "" {
+		if o.skip_bad && !reads_whole(o) {
+			check_skipping(r, file_name(path), data, src, judged, why, slot)
+		} else if msg := check_text(file_name(path), data, src, o, runner); msg != "" {
 			message.write_stderr("stury: parse error: %s", msg)
 			slot.code = EXIT_INPUT
 		} else if why != nil {
@@ -75,6 +88,67 @@ check_file :: proc(fc: ^Files_Call, r: ^Run, k: int, slot: ^File_Slot) {
 			slot.code = EXIT_INPUT
 		}
 	}
+}
+
+// Judges the records of file `name` as a filter run reads them, passing over each that does not read, with --skip-bad.
+// A fault that ends the records, which a schema check `judged` has found and returned as `ended`, is told as a parse error.
+@(private = "file")
+check_skipping :: proc(r: ^Run, name: string, data: []byte, src: Source, judged: bool, ended: core.Error, slot: ^File_Slot) {
+	o := &r.opts
+	if f, fault := ended.(core.Fault); fault {
+		tell_ended(name, data, f, src, o, slot)
+		return
+	}
+	msg := blank_told(name, data, src, o)
+	if msg == "" && !judged && reads_cells(o) {
+		msg = header_fault(name, data, src.as)
+	}
+	if msg != "" {
+		message.write_stderr("stury: parse error: %s", msg)
+		slot.code = EXIT_INPUT
+		return
+	}
+	if judged {
+		return
+	}
+	it := records.open(data, src.as, src.framing, allocator = runtime.heap_allocator())
+	defer records.close(&it)
+	counted: core.Lines
+	n: i64
+	for {
+		rec, more := records.next(&it)
+		if more {
+			n += 1
+			built, err := records.build(&it, rec, context.temp_allocator)
+			_, fault := core.refuse_key_clash(built, err)
+			if f, bad := fault.?; bad {
+				place, sentence := pass_over(name, data, f, src, o, counted = &counted, passed = &slot.skipped)
+				quarantine_bad({n, place, rec.text}, sentence)
+			}
+			free_all(context.temp_allocator)
+			continue
+		}
+		f, faulted := it.fault.?
+		if !faulted {
+			return
+		}
+		n += 1
+		b, went := records.skip(&it)
+		if !went {
+			tell_ended(name, data, f, src, o, slot)
+			return
+		}
+		place, sentence := pass_over(name, data, b.fault, src, o, counted = &counted, passed = &slot.skipped)
+		quarantine_bad({n, place, b.text}, sentence)
+	}
+}
+
+// Tells the `fault` that ended the records of file `name` as a parse error.
+@(private = "file")
+tell_ended :: proc(name: string, data: []byte, fault: core.Fault, src: Source, o: ^Opts, slot: ^File_Slot) {
+	f := literal_cut(data, fault, src.framing)
+	message.write_stderr("stury: parse error: %s\n%s", fault_told(name, data, f), fault_note(name, data, f, src.spec, o))
+	slot.code = EXIT_INPUT
 }
 
 // The first fault of the text `data` of file `name`, read as `src` reads it, told with its note and a newline, or "".

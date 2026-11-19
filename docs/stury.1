@@ -3,7 +3,7 @@
 stury \- JSON, YAML, TOML, XML, HTML, CSV and CBOR codec with a jq 1.8.2\-compatible command line
 .SH SYNOPSIS
 .B stury
-[\-bcCMnRrsSaejV] [\-\-tab|\-\-indent n] [\-\-arg name value] [\-\-argjson name value] [\-\-slurpfile name file] [\-\-rawfile name file] [\-f file] [\-L dir] [\-\-seq] [\-\-stream|\-\-stream\-errors] [\-\-from format] [\-\-to format] [\-\-grow\-header] [\-\-attributes] [csv options] [\-\-max\-depth n] [\-\-threads n] [\-\-follow] [\-\-explain] [yaml and xml options] [stury options] <jq filter> [file...]
+[\-bcCMnRrsSaejV] [\-\-tab|\-\-indent n] [\-\-arg name value] [\-\-argjson name value] [\-\-slurpfile name file] [\-\-rawfile name file] [\-f file] [\-L dir] [\-\-seq] [\-\-stream|\-\-stream\-errors] [\-\-from format] [\-\-to format] [\-\-grow\-header] [\-\-attributes] [csv options] [\-\-max\-depth n] [\-\-threads n] [\-\-follow] [\-\-skip\-bad] [\-\-quarantine file] [\-\-explain] [yaml and xml options] [stury options] <jq filter> [file...]
 .br
 .B stury
 .B check
@@ -222,6 +222,12 @@ With \-\-to csv or tsv, end each written record with CR LF.
 .TP
 .B \-\-follow
 With one named file, answer each record as it is appended, like tail \-f FILE | stury FILTER without the pipe. It reads NDJSON, \-\-seq, \-R, jq's texts per file, CSV, TSV, YAML streams and CBOR sequences. A record cut short waits for its delimiter, the output is written after each record, and a file that shrinks is read again from its start with a note on stderr. SIGINT and SIGTERM end the run once the answers so far are written, by the signal, as they end jq. Not with standard input, several files, \-s, \-n, \-\-stream, JSONC, JSON5, TOML, XML, HTML, check or fmt.
+.TP
+.B \-\-skip\-bad
+With a filter run or check, tell an input record whose text does not read as \fBstury: ignoring parse error: FILE:LINE:COL: SENTENCE\fR with its source line, go on at the next record, and exit 5 at the end after \fBstury: N bad records skipped\fR. A record is the next text of a stream of texts, the next line of NDJSON, the next \-\-seq record, the next row of CSV or TSV and the next document of a YAML stream, and a stream of texts goes on at the line after the fault. A fault where the format has no next record (a root array or object, TOML, XML, HTML, a CBOR sequence, a CSV header) ends that file as a parse error and the run goes on with the next file, exit 5. A record that parses but fails a schema or a filter is no bad record. Many files and long inputs are read on the pool's threads, and their messages come in the order of the input. With \-\-follow it is on. Not with \-\-stream\-errors, fmt or edit.
+.TP
+.BI \-\-quarantine " file"
+As \-\-skip\-bad, and write each record that does not read to \fIfile\fR as a line of JSON, {"record":N,"at":"FILE:LINE:COL","text":"...","problem":{...}}, N counting the file's records from 1 and problem being an RFC 9457 document with an errors array. With check \-\-schema, the records that fail the schema go there too, with the failures as the problem's errors, and each valid record goes to standard output as its own bytes and a line, so the valid records, in input order, are what check writes. /dev/stdout and /dev/stderr name the run's own streams. Not with a csv or tsv table under \-\-schema.
 .TP
 .B \-\-explain
 Write how the filter runs and what the run did to stderr, as lines \fBstury: explain: KEY: SENTENCE\fR, and run the filter as without it. Before the run: filter, input, plan (reading only a path, reading only named columns, or building each input), because (each reason an input is built), decides (what the speed and memory follow). After it: ran (inputs read by path and built), threads, fallback (the first input a path plan built after all, and why), time and used (peak memory, bytes read and written). The keys and reasons are listed in docs/cli.md. Not with check or fmt.

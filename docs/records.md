@@ -16,8 +16,9 @@ records.column :: proc(it: ^records.Reader, name: string) -> int
 records.cell   :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool)
 records.cells  :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto := max(int)) -> ([]write.Scalar, bool)
 records.next_window :: proc(it: ^records.Reader) -> (window: []u8, base: u64, ok: bool)
+records.skip  :: proc(it: ^records.Reader) -> (bad: records.Bad_Record, ok: bool)
 records.close :: proc(it: ^records.Reader)
-records.validate :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0, services: ^records.Framing_Services = nil) -> (faults: []core.Fault, err: runtime.Allocator_Error)
+records.validate :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0, services: ^records.Framing_Services = nil, skip := false) -> (faults: []core.Fault, err: runtime.Allocator_Error)
 records.validate_parallel :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault)
 records.each :: proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0, services: ^records.Framing_Services = nil) -> core.Error
 json.spine :: proc(src: []u8, as: core.As) -> (at: u64, levels: int, ok: bool)
@@ -170,6 +171,22 @@ the records. Under `.Entries` that fault is the one `validate` gives for the who
 `validate` judges every record from `at` and returns the faults of the refused ones in source order, then the fault that
 ended the records, if any. `validate_parallel` returns the fault the format's `validate` gives for the whole text, read as the
 entries of its spine or its root, and `.Bad_Option` for a format that does not take it.
+
+`skip` goes on past the record a fault ended the records on and returns it as a `Bad_Record`: its text, its span in the
+input and the fault. The next `next`, `read` or `scan` reads the record after it. The bad record ends where the framing
+marks the next record's start whatever came before:
+
+| Format, framing | The next record starts |
+|---|---|
+| JSON `.Concatenated` | at the line after the fault, or at the fault's own line when the fault is its first byte that is no whitespace |
+| dsv `.Lines` | at the line after the fault |
+| YAML `.Concatenated` | at the next document past the fault's line, or at the fault's line when it is a `---` line |
+
+A bad record with no such place after it runs to the input's end. `.Entries`, CBOR and the formats read as one document
+have none, and `skip` returns false with the fault kept, as it does for a fault in a dsv header. Under `.Lines` and `.Seq`
+in JSON a record's fault comes from what reads it, and the reader goes on with no `skip`. A record counts as one, bad or
+not, so a caller numbers them as it reads them. `validate(..., skip = true)` and `check_each(..., bad_records = &list)`
+go on the same way, on threads too, and give the bad records in source order.
 
 ## Spines
 

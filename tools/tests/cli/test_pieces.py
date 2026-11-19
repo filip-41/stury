@@ -83,6 +83,25 @@ def nested_text(at):
     return "[" + ",".join(entries) + "]"
 
 
+# Records that do not read, one in every BAD_EVERY: the pieces pass over what the serial run passes over.
+BAD_EVERY = 211
+BAD_RUNS = [["--skip-bad"], ["--quarantine", "/dev/stdout"]]
+BAD_FILTERS = [".v", ".v + 1", "select(.i % 3 == 0) | .s"]
+
+
+def bad_texts():
+    """Each input with records that do not read among those that do: its name, its text, the options that read it and
+    the filters run on it."""
+    bad = ['{"i":%d,"v":01}', '{"i":%d,"v":', '{"i":%d,"v":tru}', '{"i":%d,"v":1,"v":2,}']
+    lines = [record(i) if i % BAD_EVERY != 5 else bad[i // BAD_EVERY % 4] % i for i in range(COUNT)]
+    rows = ["id\tqty\tname"] + ["%d\t%d\tn %d" % (i, i * 3, i) if i % BAD_EVERY != 5 else "%d\t7" % i for i in range(COUNT)]
+    csv = ["id,qty,name"] + ['%d,%d,"n %d"' % (i, i * 3, i) if i % BAD_EVERY != 5 else '%d,"7' % i for i in range(COUNT)]
+    return [("bad.ndjson", "\n".join(lines) + "\n", ["--from", "ndjson"], BAD_FILTERS),
+            ("bad-texts.json", "\n".join(lines) + "\n", [], BAD_FILTERS),
+            ("bad.seq", "".join("\x1e" + l + "\n" for l in lines), ["--seq"], BAD_FILTERS),
+            ("bad.tsv", "\n".join(rows) + "\n", ["--from", "tsv"], CSV), ("bad.csv", "\n".join(csv) + "\n", ["--from", "csv"], CSV)]
+
+
 def cases():
     """The inputs of every case, written once to build/pieces-law, and each run as the arguments after the binary."""
     directory = os.path.join(ROOT, "build", "pieces-law")
@@ -115,6 +134,10 @@ def cases():
                                             ["-c", ".logs | map(.v)", spine], ["-c", ".", arr], ["length", spine],
                                             ["-c", ".logs[].v", spine], ["-c", ".[] | .v + 1", arr], ["-c", DOCUMENT[0], arr],
                                             ["-c", SPINE_DOCUMENT[0], spine], ["--from", "csv", "-c", ".id", table])]
+    for name, text, opts, filters in bad_texts():
+        path = file(name, text)
+        out += [run + opts + ["-c", f, path] for run in BAD_RUNS for f in filters]
+        out += [["--explain", "--skip-bad"] + opts + ["-c", filters[0], path]]
     # The spine names one key twice, and jq reads the last.
     twice = file("twice.json", '{"logs":%s,"logs":[1,2]}' % array_text(None, False))
     # A key repeated in an entry, and at the root around the array.
@@ -163,6 +186,6 @@ def test_pieces_answer_as_the_serial_run(binaries, case):
         got = run(binaries[w], ["--threads", str(w)] + case)
         differ = [name for name, a, b in zip(("stdout", "stderr", "status"), got, want) if a != b]
         assert not differ, f"threads={w} {' '.join(differ)} differ from the serial run"
-    if "--explain" in case and case[-1].endswith("-none" + os.path.splitext(case[-1])[1]):
+    if "--explain" in case and (case[-1].endswith("-none" + os.path.splitext(case[-1])[1]) or os.path.basename(case[-1]).startswith("bad") and not case[-1].endswith(".seq")):
         stderr = subprocess.run([binaries[WIDTHS[-1]], "--threads", str(WIDTHS[-1])] + case, capture_output=True).stderr.decode()
         assert POOLED.search(stderr), "no pieces"

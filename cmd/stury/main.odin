@@ -78,6 +78,9 @@ main :: proc() {
 	if cli.command == .Diff {
 		diff_main(&run, &cli)
 	}
+	if o.quarantine != "" {
+		open_quarantine(o.quarantine)
+	}
 	if o.follow {
 		refuse_follow(o, &cli)
 	}
@@ -154,6 +157,7 @@ main :: proc() {
 		finish(&run, run.output.ret)
 	}
 	run_deep(&run, &ins, run_filter)
+	tell_skipped(&run, bad_tally.skipped)
 	code := run_status(&run, ins.failures)
 	// A run over a directory may have meant each file on its own. Only a failing run says so, and on stderr.
 	if cli.walked && (code == EXIT_INPUT || code == EXIT_USAGE) {
@@ -165,7 +169,7 @@ main :: proc() {
 // jq's exit status: the last input's result, 5 after a text that does not parse, 2 after `failures` files that did not
 // open. Under -e, from the last output when the last input had none.
 run_status :: proc(run: ^Run, failures: int) -> int {
-	code := EXIT_USAGE if failures > 0 else run.output.ret
+	code := EXIT_USAGE if failures > 0 else skipped_status(run.output.ret, failures)
 	if !run.opts.exit_status {
 		return max(code, 0)
 	}

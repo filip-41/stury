@@ -68,10 +68,12 @@ write_stderr :: proc(format: string, args: ..any) {
 }
 
 // What one file of many writes while it runs on a thread of its own: its stdout bytes, and each message at the length
-// of stdout it was told at, so the run writes the two streams interleaved as one thread would.
+// of stdout it was told at, so the run writes the two streams interleaved as one thread would. `side` is what the file
+// writes to --quarantine's file, which no other stream is interleaved with.
 Held :: struct {
 	out:   [dynamic]u8,
 	marks: [dynamic]Mark,
+	side:  [dynamic]u8,
 }
 
 Mark :: struct {
@@ -109,6 +111,7 @@ write_held :: proc(h: ^Held, write_stdout: proc(p: []byte)) {
 	}
 	clear(&h.out)
 	clear(&h.marks)
+	clear(&h.side)
 }
 
 // Writes `format` filled with `args` to standard output, in one write.

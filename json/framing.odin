@@ -49,6 +49,33 @@ piece_of :: proc(it: ^records.Reader, lo, hi: u64) -> bool {
 	return true
 }
 
+// Under `.Concatenated` a faulting record ends at the LF past the fault, where jq's parser goes on, or before the
+// fault's line when the fault is its first byte that is no whitespace, which starts a text the record could not take.
+// `.Lines` and `.Seq` frame a record whatever its text, and an `.Entries` fault leaves no level to go on at.
+@(private)
+resume_spec :: proc(it: ^records.Reader, fault: u64, $S: Spec) -> (u64, bool) {
+	if it.framing != .Concatenated {
+		return 0, false
+	}
+	src := it.src
+	n := u64(len(src))
+	if fault < n {
+		q, _ := document_start(src, it.pos, S)
+		first := u64(intrinsics.ptr_sub(gap_end(q, raw_data(src)[n:], S), raw_data(src)))
+		ls := fault
+		for ls > first && (src[ls - 1] == ' ' || src[ls - 1] == '\t' || src[ls - 1] == '\r') {
+			ls -= 1
+		}
+		if ls > first && src[ls - 1] == '\n' {
+			return ls, true
+		}
+	}
+	if lf := find_byte(src, fault, '\n'); lf < n {
+		return lf + 1, true
+	}
+	return max(u64), true
+}
+
 // Moves a piece's reader to the first place at or past `it.pos` and before `to` where a record may start: under
 // `.Lines` and `.Seq` past the next end byte unless one is before `it.pos`, under `.Concatenated` past the next LF,
 // and under `.Entries` at the next comma, read as following an entry. A piece starts past the first record.
@@ -160,13 +187,17 @@ frame_document :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, reg
 	}
 	q = gap_end(q, raw_data(src)[len(src):], S)
 	hi, fault, stop := walk_from(src, q, S, opts, h, regs, on)
-	it.pos = hi
 	if fault == nil && !stop && runs_on(src, q, hi, S, true) {
 		fault = core.Fault{at = hi, rules = &RULES, kind = .Bad_Char, detail = u8(Detail.Trailing)}
 	}
-	at := u64(intrinsics.ptr_sub(q, raw_data(src)))
-	if fault != nil || at == u64(len(src)) {
+	if fault != nil {
+		// `it.pos` stays before the record, where `records.skip` names it from.
 		it.fault = fault
+		return
+	}
+	it.pos = hi
+	at := u64(intrinsics.ptr_sub(q, raw_data(src)))
+	if at == u64(len(src)) {
 		return
 	}
 	return {text = src[at:hi], at = at}, true, stop

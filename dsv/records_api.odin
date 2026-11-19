@@ -27,6 +27,7 @@ framing_of :: proc "contextless" ($S: Spec) -> ^records.Framing_Services {
 		piece = piece_rows,
 		whole = proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64) {return as, .Lines, 0},
 		close = close_rows,
+		resume = resume_row,
 	}
 	return &f
 }

@@ -113,6 +113,21 @@ def test_follow_seq(follow, tmp_path):
     assert run.get() == "\x1e6"
 
 
+def test_follow_goes_on_past_a_bad_record(follow, tmp_path):
+    """--follow skips a bad record without being asked, and still holds a record that is cut short."""
+    path = str(tmp_path / "skip")
+    write(path, '{"a":1}\n')
+    run = follow(path, ["-c", "--from", "ndjson", ".a"])
+    assert run.get() == "1"
+    run.append("{bad}\n")
+    assert run.get(run.errors) == f"stury: ignoring parse error: {path}:2:2: Object keys must be strings"
+    run.append('{"a":')
+    run.expect_quiet()
+    run.append("2}\n")
+    assert run.get() == "2"
+    assert run.end() == -signal.SIGTERM
+
+
 def test_follow_error_ends_by_signal(follow, tmp_path):
     """A signal ends the run by the signal, after an error too."""
     path = str(tmp_path / "bad")

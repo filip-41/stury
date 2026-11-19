@@ -41,6 +41,7 @@ File_Slot :: struct {
 	serial:  bool, // left to the serial route
 	rest:    bool, // left to the serial route with every file after it
 	ends:    bool, // a filter run's: the file ends the run, on a fault
+	skipped: int, // a check's: the records of the file passed over
 	explain: Explain, // a filter run's: the counts of the file's inputs
 	changed: bool, // fmt's and edit's: --check found the file would change, or --in-place changed it
 	done:    bool, // set last, once the fields above are the file's
@@ -221,6 +222,7 @@ each_one :: proc(fc: ^Files_Call, r: ^Run, k: int, slot: ^File_Slot) {
 		put_stdout({'\n'})
 	}
 	release_spent(ins)
+	tell_skipped(r, ins.skipped, ins.name if r.labels else "")
 	slot.code = run_status(r, ins.failures)
 	if r.halted {
 		finish(r, o.ret)
@@ -260,13 +262,14 @@ each_file :: proc(fc: ^Files_Call, parallel: bool) {
 	heap := runtime.heap_allocator()
 	fc.slots = make([]File_Slot, FILES_AHEAD * (fc.pool.runner.threads + 1), heap)
 	for &s in fc.slots {
-		s.held.out.allocator, s.held.marks.allocator = {held_pages, nil}, heap
+		s.held.out.allocator, s.held.marks.allocator, s.held.side.allocator = {held_pages, nil}, heap, heap
 	}
 	fc.out.allocator, fc.flushes = heap, is_terminal(os.stdout)
 	defer {
 		for &s in fc.slots {
 			delete(s.held.out)
 			delete(s.held.marks)
+			delete(s.held.side)
 		}
 		delete(fc.slots, heap)
 		delete(fc.out)
@@ -359,7 +362,7 @@ files_task :: proc(arg: rawptr) {
 @(private = "file")
 run_file :: proc(fc: ^Files_Call, r: ^Run, k: int) {
 	s := slot_of(fc, k)
-	s.code, s.last, s.text, s.serial, s.rest, s.ends, s.changed = 0, 0, false, false, false, false, false
+	s.code, s.last, s.text, s.serial, s.rest, s.ends, s.changed, s.skipped = 0, 0, false, false, false, false, false, 0
 	if read_ahead(fc, k) == .Long {
 		s.serial = true
 	} else {
@@ -526,6 +529,9 @@ put_slot :: proc(fc: ^Files_Call, s: ^File_Slot) {
 		at = m.at
 	}
 	gather_written(fc, s.held.out[at:])
+	if len(s.held.side) > 0 {
+		write_quarantine(s.held.side[:])
+	}
 	message.write_held(&s.held, nil)
 	if cap(s.held.out) > SLOT_KEPT {
 		shrink(&s.held.out, 0)

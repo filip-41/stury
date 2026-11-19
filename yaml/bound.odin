@@ -99,4 +99,5 @@ FRAMING := records.Framing_Services {
 	piece = piece_documents,
 	whole = whole_stream,
 	cut   = cut_document,
+	resume = resume_document,
 }

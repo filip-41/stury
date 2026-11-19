@@ -119,6 +119,7 @@ framing_of :: proc "contextless" ($S: Spec) -> ^records.Framing_Services {
 		exact = exact_cut,
 		piece = piece_of,
 		whole = proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64) {return whole_spec(src, as, S)},
+		resume = proc(it: ^records.Reader, fault: u64) -> (u64, bool) {return resume_spec(it, fault, S)},
 	}
 	return &f
 }

@@ -92,6 +92,8 @@ Inputs :: struct {
 	next_file: int,
 	name:      string, // the file opened last, "" before the first
 	failures:  int, // files that did not open or read
+	skipped:   int, // the records passed over, under --skip-bad
+	record_no: i64, // the records read of the open file, under --skip-bad, which numbers them in the quarantine
 	has_text:  bool, // a file before this one held a text, so a byte order mark opening this one is no mark
 	stray_bom: bool, // the open file opens with a byte order mark after a text, which is a fault
 	slurp:     bool,
@@ -335,6 +337,10 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (core.Value, string, jq.Input_Sta
 				if route.scanning {
 					explain_fallback(route, .Bad_Text)
 				}
+				if ins.run.opts.skip_bad {
+					skip_text(ins, f)
+					continue
+				}
 				return text_fault(ins, f, int(from))
 			}
 			if !ins.last {
@@ -355,6 +361,7 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (core.Value, string, jq.Input_Sta
 			return text_fault(ins, {at = rec.at, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Expected_Value)}, int(rec.at))
 		}
 		ins.has_text = true
+		ins.record_no += 1
 		if reads_cells(&ins.run.opts) {
 			v, msg, status, answered := cells_value(ins, rec)
 			if !answered {
@@ -372,7 +379,11 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (core.Value, string, jq.Input_Sta
 			}
 			continue
 		}
-		return record_value(ins, rec, own)
+		v, msg, status, skipped := record_value(ins, rec, own)
+		if skipped {
+			continue
+		}
+		return v, msg, status
 	}
 }
 
@@ -404,10 +415,10 @@ held_event :: proc(ins: ^Inputs) -> (v: core.Value, msg: string, status: jq.Inpu
 	return
 }
 
-// The value of the record `rec` of the open file, built, or the fault that it does not build. With `own` the value
-// outlives the window.
+// The value of the record `rec` of the open file, built, or the fault that it does not build, or with `skipped` none,
+// as --skip-bad passed over the record. With `own` the value outlives the window.
 @(private = "file")
-record_value :: proc(ins: ^Inputs, rec: records.Record, own: bool) -> (core.Value, string, jq.Input_Status) {
+record_value :: proc(ins: ^Inputs, rec: records.Record, own: bool) -> (core.Value, string, jq.Input_Status, bool) {
 	rec := rec
 	// --stream's document lives until its last event, past the memory of the input that reads it.
 	stream := ins.run.opts.stream
@@ -421,7 +432,12 @@ record_value :: proc(ins: ^Inputs, rec: records.Record, own: bool) -> (core.Valu
 	built, err := records.build(&ins.texts, rec, runtime.heap_allocator() if stream || own_scalar else context.allocator)
 	doc, fault := core.refuse_key_clash(built, err)
 	if f, bad := fault.?; bad {
-		return text_fault(ins, f, int(rec.at), int(rec.at) + len(rec.text) if ins.framing == .Lines else -1)
+		if ins.run.opts.skip_bad {
+			bad_record(ins, f, rec.text)
+			return nil, "", .Value, true
+		}
+		v, msg, status := text_fault(ins, f, int(rec.at), int(rec.at) + len(rec.text) if ins.framing == .Lines else -1)
+		return v, msg, status, false
 	}
 	if own_scalar {
 		ins.text_end = int(rec.at) + int(doc.nodes[0].lo) + len(core.span(&doc, core.ROOT))
@@ -431,9 +447,10 @@ record_value :: proc(ins: ^Inputs, rec: records.Record, own: bool) -> (core.Valu
 		ins.pinned ||= !own
 		core.destroy(d)
 		free(d, heap)
-		return v, "", .Value
+		return v, "", .Value, false
 	}
-	return text_value(ins, doc, int(rec.at), own)
+	v, msg, status := text_value(ins, doc, int(rec.at), own)
+	return v, msg, status, false
 }
 
 // The open file's first text, when the file is whole: as one build reads it when it is the file's only text, which
@@ -595,7 +612,7 @@ open_next :: proc(ins: ^Inputs) -> bool {
 			ins.source = src
 			reroute(ins.run, src.framing)
 		}
-		ins.name, ins.line, ins.line_end, ins.file_lines, ins.text_end, ins.lead_len = file_name(path), 0, 0, 0, 0, 0
+		ins.name, ins.line, ins.line_end, ins.file_lines, ins.text_end, ins.lead_len, ins.record_no = file_name(path), 0, 0, 0, 0, 0, 0
 		delete(ins.head, runtime.heap_allocator())
 		ins.head = nil
 		if data, read := task_bytes(path); read {
@@ -724,7 +741,7 @@ set_data :: proc(ins: ^Inputs, data: []byte, mapped := false) {
 	}
 	// A window that opens with the header is a file's whose header is judged.
 	ins.data, ins.mapped, ins.pinned, ins.raw_at, ins.pieces, ins.faults_counted, ins.header_judged, ins.parallel_from, ins.skip_below, ins.rows_end = data, mapped, false, 0, {}, {}, ins.headed, 0, 0, 0
-	ins.several = ins.framing != .Concatenated || !ins.last
+	ins.several = ins.framing != .Concatenated || !ins.last || ins.run.opts.skip_bad
 	ins.texts = records.open(data, ins.as, ins.framing, allocator = runtime.heap_allocator())
 	// jq counts a column from past the input's byte order mark.
 	if ins.parsed == {line = 1} {

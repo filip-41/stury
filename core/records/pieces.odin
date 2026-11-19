@@ -11,10 +11,11 @@ import engine "../build"
 // Returns the fault of each refused record of `src` read from byte `at`, in source order, and last the fault that ended
 // the records, if any. The slice is allocated with `allocator`. An allocation that fails returns its error and no
 // faults. With a `runner`, a long text is read in pieces on its threads, with the same answer. A format that binds its
-// framing at compile time gives it as `services`, and then `as` need hold none.
-validate :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0, services: ^Framing_Services = nil) -> (faults: []core.Fault, err: runtime.Allocator_Error) {
+// framing at compile time gives it as `services`, and then `as` need hold none. With `skip`, a fault that ends the
+// records is one more refused record wherever `skip` goes on past it, and the records go on after it.
+validate :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0, services: ^Framing_Services = nil, skip := false) -> (faults: []core.Fault, err: runtime.Allocator_Error) {
 	out := make([dynamic]core.Fault, allocator)
-	if err = judge_all(src, as, services, framing, at, runner, &out); err != nil {
+	if err = judge_all(src, as, services, framing, at, runner, &out, skip); err != nil {
 		delete(out)
 		return nil, err
 	}
@@ -90,7 +91,7 @@ Chain :: struct {
 // place its chain arrived at, which the reading jumps to. So a guess counts only where a chain from a true start
 // reached it, and the answer is the one a serial read gives.
 @(private)
-judge_all :: proc(src: []u8, as: core.As, services: ^Framing_Services, framing: core.Framing, at: u64, runner: ^core.Runner, out: ^[dynamic]core.Fault) -> runtime.Allocator_Error {
+judge_all :: proc(src: []u8, as: core.As, services: ^Framing_Services, framing: core.Framing, at: u64, runner: ^core.Runner, out: ^[dynamic]core.Fault, skipping := false) -> runtime.Allocator_Error {
 	it := open_with(src, as, services if services != nil else services_of(as), docs_of(as), framing, at)
 	defer close(&it)
 	// The first record comes alone, so the pieces can start past it.
@@ -175,7 +176,12 @@ judge_all :: proc(src: []u8, as: core.As, services: ^Framing_Services, framing: 
 			append(out, f) or_return
 		}
 		if !more {
-			return nil
+			if !skipping {
+				return nil
+			}
+			if _, went_on := skip(&it); !went_on {
+				return nil
+			}
 		}
 	}
 }

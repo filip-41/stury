@@ -19,11 +19,11 @@ The examples assume `stury` is on `PATH`. Otherwise use `build/stury` (`make bui
 stury [-c] [-r] [-j] [--raw-output0] [-a] [-S] [-C|-M] [--tab|--indent N] [--unbuffered] [-b]
       [-n] [-R] [-s] [-e] [-f FILE] [-L DIR] [--seq] [--stream|--stream-errors]
       [--from FORMAT] [--to FORMAT] [--grow-header] [--attributes]
-      [--max-depth N] [--threads N] [--follow] [--explain]
+      [--max-depth N] [--threads N] [--follow] [--skip-bad] [--quarantine FILE] [--explain]
       [--alias-limit N] [--merge-keys] [--expansion-limit N] [--unread-entities]
       [--arg NAME VALUE] [--argjson NAME JSON] [--slurpfile NAME FILE] [--rawfile NAME FILE]
       [FILTER] [FILE...] [--args STRING...|--jsonargs JSON...]
-stury check [--from FORMAT|--seq] [--max-depth N] [--threads N] [--schema FILE [--schema-ref DIR] [--schema-draft D] [--format-assert]
+stury check [--from FORMAT|--seq] [--max-depth N] [--threads N] [--skip-bad] [--quarantine FILE] [--schema FILE [--schema-ref DIR] [--schema-draft D] [--format-assert]
             [--max-errors N] [--report lines|basic|problem]] [FILE...]
 stury check --filter FILTER --schema FILE [--from FORMAT] [-n] [-s] [-R] [--arg...] [-c]
 stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--schema-draft D] [--format-assert] [--max-errors N]] [--in-place|--check] [--indent N|--tab] [--max-depth N] [--threads N] [FILE...]
@@ -109,6 +109,7 @@ runner and bytecode listings), and adds its own. Each short option has jq's long
 | `--max-depth N` | Refuse nesting past N levels (1024 by default, up to 2^20, where jq's limit is 10000). A value deeper than the default also runs on one thread. |
 | `--threads N` | `N` threads share a long input, or many files, the calling thread counted (`N` is 1 or more, one per core by default). `--threads 1` starts no other thread. It applies to a filter run, `check`, `fmt`, `edit` and `schema infer`, and the output, exit status and `--explain` counts are the same at every `N`. A run that starts a thread for stack depth (`--max-depth` past 1024) starts it whatever `N` is. |
 | `--follow` | With one named file, answer each record as it is appended ([`--follow`](#--follow)). |
+| `--skip-bad`, `--quarantine FILE` | A filter run and `check` only: go on past an input record that does not read ([Bad records](#bad-records)). |
 | `-g GLOB`, `--glob GLOB` | Pick the files a directory's walk reads ([Many files](#many-files)). |
 | `--no-ignore` | Read the files of a walk that ignore rules skip ([Many files](#many-files)). |
 | `--files-from FILE` | Read the files FILE lists after the file arguments ([Many files](#many-files)). |
@@ -242,6 +243,7 @@ The `fallback` reasons are three. A step met a value it does not apply to (`.a` 
 | --- | --- |
 | `--from FORMAT` | Judge the input as `stury --from FORMAT .` reads it, to the same limits. |
 | `--seq` | Judge one record per `0x1E` separator, each record being one text. Each `FILE` is read alone, so a text cut at a file's end is a fault. |
+| `--skip-bad`, `--quarantine FILE` | Tell every record that does not read and go on, exit 5 ([Bad records](#bad-records)). With `--schema`, `--quarantine` splits the records. |
 | `--max-depth N`, `--threads N` | As [above](#sturys-own-options). |
 | `--schema FILE` | Also check each input against the JSON Schema in `FILE` (drafts 4 to 2020-12). See [Schema check](#schema-check). |
 
@@ -257,7 +259,7 @@ What each `--from` judges:
 - **`csv`, `tsv`:** a fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An empty input is valid, and so is a header alone.
 - **CSV cells:** a cell is a string, or under `--infer` a number, `true` or `false` when its text is exactly one. So `type: integer` takes the cell `1` only with `--infer`. An empty unquoted cell is `null`, and a quoted `""` is the empty string. `schema infer` reads cells the same way, so a schema it writes with `--infer` is checked with `--infer`.
 
-Exit codes: 0 on success, 5 when any input is invalid, 2 for a usage or file error (which wins over 5). With
+Exit codes: 0 on success, 5 when any input is invalid or `--skip-bad` skipped a record, 2 for a usage or file error (which wins over 5). With
 `--schema`, 1 when an input parses and the schema fails it.
 
 ### Schema check
@@ -720,6 +722,36 @@ no pipe.
 - It is a usage error (exit 2) with standard input or more than one file, `-s`, `-n`, `--stream`, JSONC, JSON5, TOML,
   XML, HTML, `check` and `fmt`.
 
+### Bad records
+
+`--skip-bad` and `--quarantine FILE` (which turns `--skip-bad` on) go on past an input record whose text does not
+read, in a filter run and in `check`. `--follow` has `--skip-bad` on.
+
+- **What a bad record is:** a text that does not parse, nests past `--max-depth`, is not valid UTF-8, or holds a key
+  that `Duplicates` refuses. A record that parses but fails a `--schema` is an invalid record, and an error the filter
+  raises is the filter's, as without the flag. A record past a stream's byte limit is not skipped.
+- **Where the run goes on:** NDJSON at the next line, `--seq` at the next `0x1E`, a stream of JSON texts at the line
+  after the fault (as jq goes on, exact for one text per line and a best effort otherwise), YAML at the next `---` or
+  `...`, CSV and TSV at the line after the fault. Where the format has no next record (a root array or object, TOML,
+  XML, HTML, a CBOR sequence, a CSV or TSV header) the fault ends that file, told as `stury: parse error: ...`, and
+  the run goes on with the next file.
+- **What is written:** each bad record as `stury: ignoring parse error: NAME:LINE:COLUMN: SENTENCE`, the line
+  and a caret, as `--seq` tells one, then `stury: N bad records skipped` at the end (`stury: FILE: N bad records
+  skipped` after each file under `--each`).
+- **Exit status:** 5 when any record was bad or a file ended on a fault, `--seq` included. It outranks the 1 and 4
+  of `-e` and the 1 of a schema failure, and a file that did not open still gives 2.
+- **`--stream`:** a bad record gives no events. `--stream-errors` tells a fault as an event, so it is a usage error
+  with these flags (exit 2).
+- **Many files and long input:** the threads of the pool read them as without the flags, and the messages and the
+  quarantine follow the input's order.
+- **`--quarantine FILE`:** writes one line of JSON for each record that does not read, `{"record":N,"at":"NAME:LINE:COLUMN","text":"...","problem":{...}}`.
+  `N` counts the records of the file from 1, `text` is the record's bytes and `problem` is an RFC 9457 document with an
+  `errors` array. `FILE` is emptied first. `/dev/stdout` and `/dev/stderr` name the run's own streams.
+- **`check --schema` with `--quarantine`:** the valid records go to standard output as their own bytes with a line
+  end, in input order. A record that fails the schema goes to `FILE` with the failures as its problem's `errors`, and
+  is told on stderr as without the flag. `--max-errors N` limits what stderr tells, not what `FILE` holds. A CSV or
+  TSV table is judged whole against its schema, so `--quarantine` refuses it (exit 2).
+
 ### Records and events
 
 | Option | Behaviour |
@@ -994,7 +1026,7 @@ trailing comma, a comment or nesting past `--max-depth` adds the flag that would
 | 2 | A usage or file error, or output that cannot be written |
 | 3 | A filter that does not compile |
 | 4 | Under `-e`: there is no output |
-| 5 | Invalid input, or an error on the last input |
+| 5 | Invalid input, or an error on the last input, or under `--skip-bad` a bad record skipped |
 
 ## Comments in the CLI
 

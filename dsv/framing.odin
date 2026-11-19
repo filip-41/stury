@@ -103,14 +103,41 @@ refill :: proc(it: ^records.Reader, $S: Spec) -> bool {
 		b = fresh
 		it.format = b
 	}
+	// A fault is in the row past the last one given, where `records.skip` names it from.
+	lo := past_row(it.src, b.rows[b.n - 1]) if b.n > 0 else it.pos
+	first := b.width == 0
 	b.n, b.at, b.split_row, b.from, b.to = 0, 0, 0, it.pos, max(u64)
 	if !b.done {
 		frame_batch(it, b, S, options_of(it.as))
 	}
-	if b.n == 0 {
-		it.fault = b.fault
+	if b.n == 0 && b.fault != nil {
+		if first && b.head.hi > b.head.at {
+			lo = max(lo, past_row(it.src, b.head))
+		}
+		it.fault, it.pos = b.fault, lo
 	}
 	return b.n > 0
+}
+
+// The byte past the line end of `row`.
+@(private)
+past_row :: #force_inline proc "contextless" (src: []u8, row: Batch_Row) -> u64 {
+	return u64(min(int(row.hi) + 1 + int(int(row.hi) < len(src) && src[row.hi] == '\r'), len(src)))
+}
+
+// A row's fault ends its record at the LF past the fault, unless no header has been read where one is.
+@(private)
+resume_row :: proc(it: ^records.Reader, fault: u64) -> (u64, bool) {
+	b := (^Batch)(it.format)
+	width := b.width if b != nil else int(intrinsics.unaligned_load((^u32)(&it.state[0])))
+	if width == 0 && !options_of(it.as).no_header {
+		return 0, false
+	}
+	if b != nil {
+		b.n, b.at, b.split_row, b.done, b.fault, b.past = 0, 0, 0, false, nil, true
+	}
+	i := kernel.index_byte(it.src[fault:], '\n')
+	return max(u64) if i < 0 else fault + u64(i) + 1, true
 }
 
 // Frames rows from `it.pos` into `b` and leaves `it.pos` past them.
@@ -188,7 +215,7 @@ next_row_spec :: #force_inline proc(it: ^records.Reader, $S: Spec) -> (records.R
 	row := b.rows[b.at]
 	b.at += 1
 	if stream {
-		it.pos = u64(min(int(row.hi) + 1 + int(int(row.hi) < len(it.src) && it.src[row.hi] == '\r'), len(it.src)))
+		it.pos = past_row(it.src, row)
 		b.moves = it.moves
 	}
 	return {text = it.src[row.at:row.hi], at = row.at}, true

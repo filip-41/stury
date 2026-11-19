@@ -140,6 +140,10 @@ stury's own options:
                             no DTD read declares as its own text;
       --follow              with one file, answer each record as it is
                             appended, like tail -f FILE | stury;
+      --skip-bad            tell an input record that does not read, go on
+                            at the next one, and exit 5 at the end;
+      --quarantine file     as --skip-bad, writing each such record to file
+                            as a line of JSON;
       --explain             write how the filter runs and what the run did
                             to stderr, and run the filter.
 
@@ -180,6 +184,11 @@ Options:
       --max-depth n         refuse nesting past n levels (default 1024);
       --threads n           share a long input among n threads, this one
                             counted (default: one per core);
+      --skip-bad            tell an input record that does not read, go on
+                            at the next one, and exit 5 at the end;
+      --quarantine file     as --skip-bad, writing each such record to file
+                            as a line of JSON, and with --schema the records
+                            that fail it too, the valid ones going to stdout;
       --schema file         also check each input against a JSON Schema and
                             tell every failure, exit 1. For csv and tsv the
                             schema describes the table, an array of rows;

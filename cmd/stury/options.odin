@@ -57,6 +57,8 @@ Opts :: struct {
 	each:             bool, // --each: each file is a run of its own
 	no_filename:      bool, // --no-filename: --each writes no labels
 	no_ignore:        bool, // --no-ignore: a walk reads the files ignore rules skip
+	skip_bad:         bool, // --skip-bad, --quarantine and --follow: a record that does not read is told and passed over
+	quarantine:       string, // --quarantine: the file the records that do not read, or fail a schema, are written to
 }
 
 // What the command line gives besides the options.
@@ -281,6 +283,10 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			o.no_filename = true
 		case "no-ignore":
 			o.no_ignore = true
+		case "skip-bad":
+			o.skip_bad = true
+		case "quarantine":
+			o.quarantine = args[i + 1]
 		case "in-place":
 			o.in_place = true
 		case "check":
@@ -373,6 +379,11 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	}
 	o.cells_out.delimiter = cli.out_delimiter.? or_else o.cells_out.delimiter
 	o.cells_out.comment = cli.out_comment.? or_else o.cells_out.comment
+	o.skip_bad ||= o.quarantine != ""
+	if o.skip_bad && o.stream_errors {
+		usage_error("--stream-errors tells a bad record as an event, so --skip-bad and --quarantine cannot go with it")
+	}
+	o.skip_bad ||= o.follow
 	return
 }
 
@@ -554,7 +565,7 @@ subcommand_index :: proc(args: []string) -> int {
 @(private = "file")
 option_arity :: proc(a: string) -> int {
 	switch a {
-	case "--indent", "--max-depth", "--glob", "-g", "--files-from", "--threads", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--filter", "--seed", "--count", "--package", "--old-schema", "--new-schema", "--compat", "--key", "--alias-limit", "--expansion-limit":
+	case "--indent", "--max-depth", "--glob", "-g", "--files-from", "--threads", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--filter", "--seed", "--count", "--package", "--old-schema", "--new-schema", "--compat", "--key", "--alias-limit", "--expansion-limit", "--quarantine":
 		return 1
 	case "--arg", "--argjson", "--slurpfile", "--rawfile":
 		return 2
@@ -731,6 +742,7 @@ OWNED_OPTIONS := [?]Owned_Options {
 	{{"files-from"}, {.Run, .Check, .Fmt, .Edit, .Infer}, "it reads the list of files to read"},
 	{{"attributes"}, {.Run}, "it reads and writes the attributes of each element as members"},
 	{{"each", "no-filename"}, {.Run}, "it runs the filter on each file on its own"},
+	{{"skip-bad", "quarantine"}, {.Run, .Check}, "it goes on past an input record that does not read"},
 	{{"in-place", "check"}, {.Fmt, .Edit}, "it writes each file back, or tells whether it would change"},
 }
 
