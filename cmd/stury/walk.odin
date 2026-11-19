@@ -63,7 +63,6 @@ Walked :: struct {
 	// Rung by a publish while a reader waits for one.
 	bell:      sync.Futex,
 	waiting:   i32,
-	thread:    ^thread.Thread,
 }
 
 walked: Walked
@@ -141,11 +140,11 @@ walk_files :: proc(files: ^[dynamic]string, kept: int, globs: []Glob, from: Mayb
 		publish(path, w.kinds[i])
 	}
 	dirs = w.from_dir < len(w.named)
-	walked.thread = thread.create(walk_rest) if dirs else nil
-	if walked.thread != nil {
-		thread.start(walked.thread)
+	// Detached, so a run that exits before the walk ends neither waits for it nor leaves a thread unjoined.
+	if dirs {
+		thread.create_and_start(walk_rest, self_cleanup = true)
 	} else {
-		walk_rest(nil)
+		walk_rest()
 	}
 	walk_streams = streams && dirs
 	files^ = nil
@@ -158,7 +157,7 @@ walk_files :: proc(files: ^[dynamic]string, kept: int, globs: []Glob, from: Mayb
 
 // The named paths from the first directory on, published from the walk's thread when it has one.
 @(private = "file")
-walk_rest :: proc(_: ^thread.Thread) {
+walk_rest :: proc() {
 	w := &the_walk
 	for path, i in w.named[w.from_dir:] {
 		if kind := w.kinds[w.from_dir + i]; kind == .Dir {
@@ -199,11 +198,7 @@ walk_path :: proc(k: int) -> (path: string, kind: Entry_Kind, ok: bool) {
 
 // Every path of the run's files, once the walk has listed them.
 walk_end :: proc() -> []string {
-	if t := walked.thread; t != nil {
-		thread.join(t)
-		thread.destroy(t)
-		walked.thread = nil
-	}
+	walk_path(max(int))
 	walk_streams = false
 	return walked.paths[:walked.count]
 }
