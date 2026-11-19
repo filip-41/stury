@@ -5,6 +5,7 @@ package jq
 // are found and loaded from. A nil procedure is a system the caller does not give: no inputs, no messages, an empty
 // environment, no module or data file, no home directory.
 
+import "core:c/libc"
 import "core:strings"
 import core_pkg "../core"
 
@@ -25,6 +26,10 @@ Hooks :: struct {
 	home:      proc(data: rawptr) -> (string, bool),
 	// The time in seconds since the Unix epoch, which `now` and `uuid_v7` read.
 	now:       proc(data: rawptr) -> f64,
+	// The zone in force at the instant `secs` seconds since the Unix epoch, and whether it can be had. Everything the
+	// interpreter reads as local time (`localtime`, `strflocaltime`, `%Z`, `%s` and `%z` of a local time, `mktime` of a
+	// local broken-down time, strptime's `%s` on Windows) is this zone's. Nil is the process's own time zone.
+	zone:      proc(data: rawptr, secs: i64) -> (zone: Zone, ok: bool),
 	// `buf` filled with random bytes, which the uuids are made of.
 	random:    proc(data: rawptr, buf: []byte),
 }
@@ -74,4 +79,45 @@ load_file :: proc(ip: ^Interp, path: string, raw: bool) -> (core_pkg.Value, stri
 		return nil, strings.concatenate({"Could not open ", path, ": no files are given"})
 	}
 	return ip.hooks.load_file(ip.hooks.data, path, raw, ip.reading)
+}
+
+// A time zone at one instant: its offset east of UTC in seconds, its abbreviation, and whether it is daylight time.
+Zone :: struct {
+	offset: int,
+	name:   string,
+	dst:    bool,
+}
+
+// `t` as broken-down local time, in the hook's zone when there is one, else the process's.
+@(private)
+local_tm :: proc(ip: ^Interp, t: libc.time_t, tm: ^libc.tm) -> bool {
+	if ip.hooks.zone == nil {
+		return local_time(t, tm)
+	}
+	z, ok := ip.hooks.zone(ip.hooks.data, i64(t))
+	if !ok || !utc_time(t + libc.time_t(z.offset), tm) {
+		return false
+	}
+	tm.tm_isdst = 1 if z.dst else 0
+	return true
+}
+
+// Normalizes `tm`, read as local time, as mktime does, and gives the zone in force at it. Without a zone hook it is
+// the C library's mktime, and the zone comes back empty.
+@(private)
+local_mktime_in :: proc(ip: ^Interp, tm: ^libc.tm) -> (z: Zone, ok: bool) {
+	if ip.hooks.zone == nil {
+		local_mktime(tm)
+		return {}, true
+	}
+	// The offset at the wall-clock time read as UTC names the instant, unless the zone changes between the two.
+	wall := tm^
+	t0 := i64(timegm(&wall))
+	z = ip.hooks.zone(ip.hooks.data, t0) or_return
+	t := t0 - i64(z.offset)
+	if again, found := ip.hooks.zone(ip.hooks.data, t); found && again.offset != z.offset {
+		z = again
+		t = t0 - i64(z.offset)
+	}
+	return z, local_tm(ip, libc.time_t(t), tm)
 }

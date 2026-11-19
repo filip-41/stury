@@ -67,6 +67,7 @@ lower :: proc(c: byte) -> byte {
 // What strptime has read so far, and what it has yet to settle at the end.
 @(private = "file")
 Parse :: struct {
+	ip:       ^Interp, // whose hooks give the zone of `%s`
 	s:        []byte,
 	at:       int,
 	century:  int, // -1 until %C
@@ -114,8 +115,9 @@ name :: proc(p: ^Parse, names: []string) -> (int, bool) {
 }
 
 // strptime in the C locale: the text after what `format` read, or nil when the input does not match it.
-strptime :: proc(input, format: cstring, tm: ^libc.tm) -> cstring {
+strptime :: proc(input, format: cstring, tm: ^libc.tm, ip: ^Interp) -> cstring {
 	p := Parse {
+		ip      = ip,
 		s       = transmute([]byte)string(input),
 		century = -1,
 		year2   = -1,
@@ -242,7 +244,7 @@ conversions :: proc(p: ^Parse, format: []byte, tm: ^libc.tm) -> bool {
 		case 'R':
 			ok = conversions(p, transmute([]byte)string("%H:%M"), tm)
 		case 's':
-			// Seconds since the epoch, as local time.
+			// Seconds since the epoch, as local time in the interpreter's zone.
 			neg := p.at < len(p.s) && p.s[p.at] == '-'
 			if neg {
 				p.at += 1
@@ -253,7 +255,7 @@ conversions :: proc(p: ^Parse, format: []byte, tm: ^libc.tm) -> bool {
 				secs = secs * 10 + i64(p.s[p.at] - '0')
 				p.at += 1
 			}
-			ok = p.at > start && local_time(libc.time_t(-secs if neg else secs), tm)
+			ok = p.at > start && local_tm(p.ip, libc.time_t(-secs if neg else secs), tm)
 		case 'S':
 			v, ok = number(p, 0, 61, 2)
 			set(&tm.tm_sec, v)

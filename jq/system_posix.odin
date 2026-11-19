@@ -59,6 +59,6 @@ c_strftime :: proc(buf: []byte, format: cstring, tm: ^libc.tm) -> uint {
 	return libc.strftime(raw_data(buf), len(buf), format, tm)
 }
 
-strptime :: proc(input, format: cstring, tm: ^libc.tm) -> cstring {
+strptime :: proc(input, format: cstring, tm: ^libc.tm, _: ^Interp) -> cstring {
 	return posix.strptime(([^]u8)(rawptr(input)), format, tm)
 }

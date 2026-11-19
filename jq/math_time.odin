@@ -82,7 +82,7 @@ fn_bsearch :: proc(ip: ^Interp, name: string, v: core_pkg.Value, args: []core_pk
 broken_time :: proc(ip: ^Interp, secs: f64, local: bool) -> (core_pkg.Value, Signal) {
 	t := libc.time_t(double_to_i64(secs)) // as C converts a double to time_t on this machine
 	tm: libc.tm
-	if !(local_time(t, &tm) if local else utc_time(t, &tm)) {
+	if !(local_tm(ip, t, &tm) if local else utc_time(t, &tm)) {
 		return nil, fail(ip, "error converting number of seconds since epoch to datetime")
 	}
 	return tm_value(tm, f64(tm.tm_sec) + (secs - math.floor(secs))), .Go
@@ -98,23 +98,25 @@ tm_value :: proc(tm: libc.tm, sec: f64) -> ^core_pkg.Array {
 // jq's jv2tm: up to eight numbers, each clamped to a C int, normalized by mktime as local time or by timegm
 // as UTC.
 @(private = "file")
-tm_of :: proc(v: core_pkg.Value, local: bool) -> (tm: libc.tm, ok: bool) {
+tm_of :: proc(ip: ^Interp, v: core_pkg.Value, local: bool) -> (tm: libc.tm, z: Zone, ok: bool) {
 	fields := [8]^libc.int{&tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min, &tm.tm_sec, &tm.tm_wday, &tm.tm_yday}
 	for x, i in elements(v)[:min(8, length_of(v))] {
 		n, is_num := number_of(x)
 		if !is_num || math.is_nan(n.f) {
-			return {}, false
+			return {}, {}, false
 		}
 		d := n.f - 1900 if i == 0 else n.f
 		fields[i]^ = libc.int(clamp(d, f64(min(libc.int)), f64(max(libc.int))))
 	}
 	if local {
 		tm.tm_isdst = -1
-		local_mktime(&tm)
+		if z, ok = local_mktime_in(ip, &tm); !ok {
+			return {}, {}, false
+		}
 	} else {
 		timegm(&tm)
 	}
-	return tm, true
+	return tm, z, true
 }
 
 fn_gmtime :: proc(ip: ^Interp, name: string, v: core_pkg.Value, args: []core_pkg.Value) -> (core_pkg.Value, Signal) {
@@ -129,7 +131,7 @@ fn_mktime :: proc(ip: ^Interp, name: string, v: core_pkg.Value, args: []core_pkg
 	if kind(v) != .Array {
 		return nil, fail(ip, "mktime requires array inputs")
 	}
-	tm, ok := tm_of(v, false)
+	tm, _, ok := tm_of(ip, v, false)
 	if !ok {
 		return nil, fail(ip, "mktime requires parsed datetime inputs")
 	}
@@ -156,26 +158,35 @@ fn_strftime :: proc(ip: ^Interp, name: string, v: core_pkg.Value, args: []core_p
 	if !is_str {
 		return nil, fail(ip, "%s/1 requires a string format", name)
 	}
-	tm, ok := tm_of(v, local)
+	tm, z, ok := tm_of(ip, v, local)
 	if !ok {
 		return nil, fail(ip, "%s/1 requires parsed datetime inputs", name)
 	}
 	// As jq, C's format ends at a NUL, and an output past 100 bytes more than it is a failure.
 	format := strings.clone_to_cstring(f, context.temp_allocator)
 	buf := make([]byte, len(format) + 100)
-	n := c_strftime(buf, format, &tm) if local else strftime_utc(buf, format, &tm)
+	n: uint
+	switch {
+	case !local:
+		n = strftime_in(buf, format, &tm, 0, "UTC", ODIN_OS == .Windows)
+	case ip.hooks.zone != nil:
+		n = strftime_in(buf, format, &tm, z.offset, z.name, true)
+	case:
+		n = c_strftime(buf, format, &tm)
+	}
 	if n == 0 && len(format) > 0 {
 		return nil, fail(ip, "%s/1: unknown system failure", name)
 	}
 	return string(buf[:n]), .Go
 }
 
-// libc's strftime with the fields read as UTC on every OS, as with TZ set to UTC for the call (jq does that on macOS
-// only and reads them as local time elsewhere). The C library reads the process's zone for `%s` and `%z`, and the
-// UCRT for `%Z` too, so each conversion the C library would read as one of those is written here, padded as it pads
-// a number. Any other conversion, and a spelling it reads as none, goes to it as written.
+// libc's strftime with the fields read in the zone `offset` seconds east of UTC, and for UTC on every OS, as with TZ
+// set to UTC for the call (jq does that on macOS only and reads them as local time elsewhere). The C library reads the
+// process's zone for `%s` and `%z`, and the UCRT for `%Z` too, so each conversion the C library would read as one of
+// those is written here, padded as it pads a number, `%Z` as `name` when `named`. Any other conversion, and a spelling
+// it reads as none, goes to it as written.
 @(private = "file")
-strftime_utc :: proc(buf: []byte, format: cstring, tm: ^libc.tm) -> uint {
+strftime_in :: proc(buf: []byte, format: cstring, tm: ^libc.tm, offset: int, name: string, named: bool) -> uint {
 	f := string(format)
 	b := strings.builder_make(context.temp_allocator)
 	for i := 0; i < len(f); {
@@ -188,11 +199,12 @@ strftime_utc :: proc(buf: []byte, format: cstring, tm: ^libc.tm) -> uint {
 		switch {
 		case letter == 's':
 			t := tm^
-			put_padded(&b, "", i64(timegm(&t)), width, pad)
+			put_padded(&b, "", i64(timegm(&t)) - i64(offset), width, pad)
 		case letter == 'z':
-			put_padded(&b, "+", 0, max(width - 1, 4), pad)
-		case letter == 'Z' && ODIN_OS == .Windows:
-			strings.write_string(&b, "UTC")
+			hhmm := i64(abs(offset) / 3600 * 100 + abs(offset) % 3600 / 60)
+			put_padded(&b, "+", -hhmm if offset < 0 else hhmm, max(width - 1, 4), pad)
+		case letter == 'Z' && named:
+			strings.write_string(&b, name)
 		case:
 			strings.write_string(&b, f[i:][:max(n, 1)])
 		}
@@ -264,7 +276,7 @@ fn_strptime :: proc(ip: ^Interp, name: string, v: core_pkg.Value, args: []core_p
 	input := strings.clone_to_cstring(s, context.temp_allocator)
 	format := strings.clone_to_cstring(f, context.temp_allocator)
 	tm: libc.tm
-	end := strptime(input, format, &tm)
+	end := strptime(input, format, &tm, ip)
 	rest := string(end)
 	if end == nil || len(rest) > 0 && strings.index_byte(" \t\n\v\f\r", rest[0]) < 0 {
 		return nil, fail(ip, "date \"%s\" does not match format \"%s\"", input, format)

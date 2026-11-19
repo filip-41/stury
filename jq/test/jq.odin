@@ -213,6 +213,12 @@ compiled :: proc(ip: ^jq.Interp, text: string, vars: []jq.Var = nil) -> jq.Progr
 	return prog
 }
 
+// `text` compiled on an interpreter that is already initialized, with the hooks it was given.
+compile_only :: proc(ip: ^jq.Interp, text: string) -> jq.Program {
+	prog, _ := jq.compile(ip, text)
+	return prog
+}
+
 // The JSON text `text` as a value.
 parsed :: proc(text: string) -> core.Value {
 	doc, _ := core.refuse_key_clash(core.build(transmute([]u8)text, json.as(.Json)))
@@ -461,4 +467,38 @@ env_outlives_its_interpreter :: proc(t: ^testing.T) {
 		testing.expect_value(t, jq.to_json(keep.values[2 * i], allocator = context.temp_allocator), `{"A":"1","B":"two"}`)
 		testing.expect_value(t, jq.to_json(keep.values[2 * i + 1], allocator = context.temp_allocator), `"two"`)
 	}
+}
+
+// Every local time reads the zone hook: `localtime`, and in `strflocaltime` the broken-down time of a number or an
+// array (read back to an instant across the zone's change of offset) with `%Z`, `%z` and `%s`. Without the hook it is
+// the process's zone.
+@(test)
+local_time_is_a_hook :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	ip: jq.Interp
+	jq.init(&ip, {hooks = {zone = proc(_: rawptr, secs: i64) -> (jq.Zone, bool) {
+				if secs < 1_000_000 {
+					return {offset = 3600, name = "AAA"}, true
+				}
+				return {offset = -12600, name = "BBB", dst = true}, true
+			}}})
+	defer jq.destroy(&ip)
+	run_all :: proc(ip: ^jq.Interp, text: string) -> string {
+		c := collect()
+		jq.run(ip, compile_only(ip, text), nil, &c)
+		return strings.join(c.answers[:], " ")
+	}
+	testing.expect_value(t, run_all(&ip, `0 | localtime`), `[1970,0,1,1,0,0,4,0]`)
+	testing.expect_value(t, run_all(&ip, `0 | strflocaltime("%H:%M %Z %z %s")`), `"01:00 AAA +0100 0"`)
+	testing.expect_value(t, run_all(&ip, `2000000 | strflocaltime("%H:%M %Z %z %s")`), `"00:03 BBB -0330 2000000"`)
+	testing.expect_value(t, run_all(&ip, `[1970,0,24,0,3,20,0,0] | strflocaltime("%Z %s")`), `"BBB 2000000"`)
+	testing.expect_value(t, run_all(&ip, `[1970,0,1,1,0,0,0,0] | strflocaltime("%Z %s")`), `"AAA 0"`)
+	refuse: jq.Interp
+	jq.init(&refuse, {hooks = {zone = proc(_: rawptr, _: i64) -> (jq.Zone, bool) {return {}, false}}})
+	defer jq.destroy(&refuse)
+	refused := collect()
+	testing.expect_value(t, jq.run(&refuse, compile_only(&refuse, "0 | localtime"), nil, &refused), jq.Outcome.Raised)
+	testing.expect_value(t, jq.to_json(refuse.err), `"error converting number of seconds since epoch to datetime"`)
+	testing.expect_value(t, jq.run(&refuse, compile_only(&refuse, `[1970,0,1,0,0,0,0,0] | strflocaltime("%H")`), nil, &refused), jq.Outcome.Raised)
+	testing.expect_value(t, jq.to_json(refuse.err), `"strflocaltime/1 requires parsed datetime inputs"`)
 }
