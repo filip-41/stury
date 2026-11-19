@@ -144,6 +144,9 @@ trim :: proc(h: ^Hints) {
 	once :: proc(list: ^[dynamic]$T) {
 		kept := 0
 		for x in list^ {
+			if kept == MAX_HINTS {
+				break
+			}
 			if !slice.contains(list[:kept], x) {
 				list[kept] = x
 				kept += 1
@@ -298,16 +301,20 @@ objects :: proc(s: ^Search, an: []^rules.Node, depth: int) -> []core.Value {
 		}
 	}
 	names := make([dynamic]string, context.temp_allocator)
+	// The place of each name in `names`, -1 for a hint's.
+	listed := make(map[string]int, context.temp_allocator)
 	for blk in blocks {
 		for m in blk.members {
-			if !slice.contains(names[:], m.name) {
+			if m.name not_in listed {
+				listed[m.name] = len(names)
 				append(&names, m.name)
 			}
 		}
 	}
+	named := names_of_blocks(blocks[:])
 	required := make([dynamic]string, context.temp_allocator)
 	for name in names {
-		if required_in(blocks[:], name) {
+		if required_in(blocks[:], named, name) {
 			append(&required, name)
 		}
 	}
@@ -317,22 +324,24 @@ objects :: proc(s: ^Search, an: []^rules.Node, depth: int) -> []core.Value {
 	resize(&names, min(len(names), MAX_LISTED))
 	s.cut ||= len(required) > MAX_LISTED
 	resize(&required, min(len(required), MAX_LISTED))
+	kept := len(names)
 	for name in s.hints.names {
-		if !slice.contains(names[:], name) {
+		if at, seen := listed[name]; !seen || at >= kept {
+			listed[name] = -1
 			append(&names, name)
 		}
 	}
 	append(&names, "zz")
 	base := make([dynamic]Member_Value, context.temp_allocator)
 	for name in required {
-		if picks := fitting(s, member_nodes(blocks[:], name), depth + 1); len(picks) > 0 {
+		if picks := fitting(s, member_nodes(blocks[:], named, name), depth + 1); len(picks) > 0 {
 			append(&base, Member_Value{name, picks[0]})
 		}
 	}
 	out := make([dynamic]core.Value, context.temp_allocator)
 	append(&out, object_with(base[:], ""))
 	for name in names {
-		picks := fitting(s, member_nodes(blocks[:], name), depth + 1)
+		picks := fitting(s, member_nodes(blocks[:], named, name), depth + 1)
 		for v in picks[:min(4, len(picks))] {
 			o := object_with(base[:], name, v)
 			s.budget -= len(core.object_keys(o))

@@ -76,7 +76,7 @@ comparison_destroy :: proc(c: ^Comparison) {
 	c^ = {}
 }
 
-// The checks one side binds, each of which holds a copy of the whole description.
+// The checks one side binds, each of which reads the whole description when it is bound.
 @(private)
 MAX_JUDGES :: 64
 

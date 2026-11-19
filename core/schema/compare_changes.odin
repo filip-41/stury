@@ -400,8 +400,10 @@ object_changed :: proc(w: ^Walk, x, y: i32) {
 		return
 	}
 	a, b := &w.old.d.objects[x], &w.new.d.objects[y]
+	in_a, in_b := rules.member_names(a.members, context.temp_allocator), rules.member_names(b.members, context.temp_allocator)
 	for m in a.members {
-		if n, found := find_member(b, m.name); found {
+		if k := rules.first_named(&in_b, m.name); k >= 0 {
+			n := b.members[k]
 			member_changed(w, m, n)
 		} else {
 			append(&w.path, core.Name(m.name))
@@ -415,7 +417,7 @@ object_changed :: proc(w: ^Walk, x, y: i32) {
 		}
 	}
 	for n in b.members {
-		if _, found := find_member(a, n.name); !found {
+		if rules.first_named(&in_a, n.name) < 0 {
 			append(&w.path, core.Name(n.name))
 			effect := relation(w, nodes_or_none(a.additional), nodes_or_none(n.node if !n.only_required else b.additional)) if len(a.patterns) == 0 else Effect.Unknown
 			emit(w, "properties", "", "defined", effect)
@@ -435,16 +437,6 @@ object_changed :: proc(w: ^Walk, x, y: i32) {
 	if len(a.dependents) + len(b.dependents) > 0 && !same_object(&w.forward, a, b) {
 		emit_numbers(w, "dependentRequired", fmt.tprint(len(a.dependents)), fmt.tprint(len(b.dependents)), .Unknown)
 	}
-}
-
-@(private)
-find_member :: proc(o: ^rules.Object, name: string) -> (m: rules.Member, found: bool) {
-	for n in o.members {
-		if n.name == name {
-			return n, true
-		}
-	}
-	return
 }
 
 @(private = "file")

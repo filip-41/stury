@@ -457,7 +457,7 @@ held_nesting :: proc(b: ^Builder) {
 		if nesting_of(b, known, &edges, &u, 0) <= MAX_HELD {
 			continue
 		}
-		refuse_plan(b, .Too_Deep, text = "the schema applies more than 256 subschemas to one value one inside the other")
+		refuse_plan(b, .Too_Deep, text = "the schema applies more than 1024 subschemas to one value one inside the other")
 		steps := make([dynamic]core.Step, context.temp_allocator)
 		append(&steps, ..u.site)
 		at := &u
@@ -1137,10 +1137,11 @@ pool_allocator :: proc(p: ^Pool) -> runtime.Allocator {
 }
 
 // The most held values a check nests one inside the other. A plan that nests more is refused when bound, and a schema that
-// applies itself to the same value without end fails there as `.Too_Deep`. The bind recurses once per nested subschema,
-// and a sanitized build's thread stack holds only about 1000 levels.
+// applies itself to the same value without end fails there as `.Too_Deep`. It is `core.MAX_DEPTH`, as many as a schema's
+// document nests. The bind's passes over held records and a check's verdict on a scalar recurse once per held value,
+// which an 8 MiB stack holds this many of under a sanitizer too.
 @(private)
-MAX_HELD :: 256
+MAX_HELD :: core.MAX_DEPTH
 
 // The bytes of machine stack the runs of a check may use below its outermost held value. Past it, a held value that
 // opens in a run fails as `.Too_Deep`. Each run that holds a value calls the next one in, so a check of a deep text whose
@@ -1567,7 +1568,7 @@ fork_open :: proc "contextless" (h: ^Check, regs, next: core.Hook_Regs, u: ^Use,
 	if h.run == nil {
 		h.stack = here
 	} else if level == MAX_HELD {
-		return next, fork_fault(h, regs, .Too_Deep, lo, hi, "more than 256 subschemas judge the value one inside the other")
+		return next, fork_fault(h, regs, .Too_Deep, lo, hi, "more than 1024 subschemas judge the value one inside the other")
 	} else if int(h.stack) - int(here) > STACK_BUDGET {
 		return next, fork_fault(h, regs, .Too_Deep, lo, hi, "the subschemas that judge the value nest deeper than the check's stack holds")
 	}

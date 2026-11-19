@@ -189,6 +189,58 @@ Member :: struct {
 	only_required: bool,
 }
 
+// The members of an object by name: `first` holds a name's first member and `next` chains each member to the next of
+// its name, -1 past the last.
+Member_Names :: struct {
+	first: map[string]int,
+	next:  [dynamic]int,
+}
+
+member_names :: proc(members: []Member, allocator := context.allocator) -> (names: Member_Names) {
+	names.first = make(map[string]int, len(members), allocator)
+	names.next = make([dynamic]int, len(members), allocator)
+	#reverse for m, k in members {
+		names.next[k] = names.first[m.name] or_else -1
+		names.first[m.name] = k
+	}
+	return
+}
+
+// The first member named `name`, -1 for none.
+first_named :: proc(names: ^Member_Names, name: string) -> int {
+	visit()
+	return names.first[name] or_else -1
+}
+
+// The next member of member `k`'s name, -1 past the last.
+next_named :: proc(names: ^Member_Names, k: int) -> int {
+	visit()
+	return names.next[k]
+}
+
+// The members, operands and arms the lookups of this thread visited, which a test build counts so a test can tell
+// a lookup's work from a scan's without a clock.
+when ODIN_TEST {
+	@(thread_local)
+	visits: int
+}
+
+// Counts one visit of a lookup, in a test build only.
+visit :: #force_inline proc "contextless" () {
+	when ODIN_TEST {
+		visits += 1
+	}
+}
+
+// The visits this thread's lookups made so far, 0 outside a test build.
+visited :: proc "contextless" () -> int {
+	when ODIN_TEST {
+		return visits
+	} else {
+		return 0
+	}
+}
+
 // A description owns its nodes, blocks and slices, allocated with `allocator`, and the strings in `texts`. It borrows
 // its other strings from where it was made: a plan, a schema's document.
 Description :: struct {

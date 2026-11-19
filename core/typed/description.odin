@@ -1,6 +1,7 @@
 package typed
 
 import "base:runtime"
+import "core:mem/virtual"
 import spell "../spell"
 import core ".."
 import rules "../rules"
@@ -29,11 +30,18 @@ plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, 
 		b.uses.allocator = arena
 		b.programs = make(rules.Programs, arena)
 	}
+	// What only the build reads, which a bind of one node of a large description would otherwise keep as large as the
+	// whole description.
+	tables: virtual.Arena
+	if virtual.arena_init_growing(&tables) != nil {
+		refuse_plan(&b, .No_Memory)
+	}
+	defer virtual.arena_destroy(&tables)
 	if d.root < 0 || int(d.root) >= len(d.nodes) {
 		refuse_plan(&b, .Bad_Option)
 	} else if b.err.kind == .None && root_block(&b) {
 		if opts.checking {
-			x := conjoin_description(&b, d, arena)
+			x := conjoin_description(&b, d, arena, virtual.arena_allocator(&tables))
 			fill_checked(&b, &x, arena, 0, d.root, "", {}, {})
 			fill_pending(&b, &x, arena)
 		} else {
@@ -288,13 +296,10 @@ fill_one :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, x
 	b.fields[at], b.meta[at], b.uses[at] = f, m, u
 }
 
-// Grows `b.uses` to one `Use` per record, with room for the records to come, since an arena keeps the copy a resize leaves.
+// Grows `b.uses` to one `Use` per record.
 @(private)
 cover_uses :: proc(b: ^Builder) -> bool {
-	if cap(b.uses) < len(b.meta) && reserve(&b.uses, 2 * len(b.meta)) != nil {
-		return false
-	}
-	return resize(&b.uses, len(b.meta)) == nil
+	return grown(&b.uses, len(b.meta))
 }
 
 // The markup node a member's record reads: what the used node, the node it reaches or the rules the use adds name

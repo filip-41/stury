@@ -180,7 +180,7 @@ evaluated_too_deep :: proc(b: ^Builder, site: []core.Step) {
 	if b.err.kind != .None {
 		return
 	}
-	refuse_plan(b, .Too_Deep, text = "an unevaluated keyword reads what more than 256 subschemas evaluate one inside the other")
+	refuse_plan(b, .Too_Deep, text = "an unevaluated keyword reads what more than 1024 subschemas evaluate one inside the other")
 	steps := make([dynamic]core.Step, context.temp_allocator)
 	append(&steps, ..b.err.steps[:b.err.n_steps])
 	append(&steps, ..site)

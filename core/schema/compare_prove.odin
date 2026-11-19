@@ -368,13 +368,13 @@ array_included :: proc(p: ^Prover, an: []^rules.Node, have: ^rules.Rules, b: ^ru
 // The nodes that judge the member `name` in the object blocks `blocks`: its own where a block names it, and the block's
 // other members' otherwise.
 @(private)
-member_nodes :: proc(blocks: []^rules.Object, name: string) -> []rules.Node_Index {
+member_nodes :: proc(blocks: []^rules.Object, names: []rules.Member_Names, name: string) -> []rules.Node_Index {
 	out := make([dynamic]rules.Node_Index, context.temp_allocator)
-	for blk in blocks {
+	for blk, j in blocks {
 		node := blk.additional
-		for m in blk.members {
-			if m.name == name && !m.only_required {
-				node = m.node
+		for k := rules.first_named(&names[j], name); k >= 0; k = rules.next_named(&names[j], k) {
+			if !blk.members[k].only_required {
+				node = blk.members[k].node
 			}
 		}
 		if node != rules.NONE {
@@ -385,15 +385,25 @@ member_nodes :: proc(blocks: []^rules.Object, name: string) -> []rules.Node_Inde
 }
 
 @(private)
-required_in :: proc(blocks: []^rules.Object, name: string) -> bool {
-	for blk in blocks {
-		for m in blk.members {
-			if m.name == name && m.required {
+required_in :: proc(blocks: []^rules.Object, names: []rules.Member_Names, name: string) -> bool {
+	for blk, j in blocks {
+		for k := rules.first_named(&names[j], name); k >= 0; k = rules.next_named(&names[j], k) {
+			if blk.members[k].required {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// Each block's members by name, in the temp allocator.
+@(private)
+names_of_blocks :: proc(blocks: []^rules.Object) -> []rules.Member_Names {
+	names := make([]rules.Member_Names, len(blocks), context.temp_allocator)
+	for blk, j in blocks {
+		names[j] = rules.member_names(blk.members, context.temp_allocator)
+	}
+	return names
 }
 
 @(private = "file")
@@ -433,14 +443,15 @@ object_included :: proc(p: ^Prover, an: []^rules.Node, have: ^rules.Rules, b: ^r
 			named[m.name] = {}
 		}
 	}
+	names := names_of_blocks(blocks[:])
 	for m in want.members {
 		named[m.name] = {}
-		if m.required && !required_in(blocks[:], m.name) {
+		if m.required && !required_in(blocks[:], names, m.name) {
 			return refuse(p, "required")
 		}
 		target := want.additional if m.only_required else m.node
-		have := member_nodes(blocks[:], m.name)
-		if m.rules != {} && !member_rules_kept(blocks[:], m) {
+		have := member_nodes(blocks[:], names, m.name)
+		if m.rules != {} && !member_rules_kept(blocks[:], names, m) {
 			return refuse(p, m.name)
 		}
 		if target != rules.NONE && !included(p, have, {target}, depth + 1) {
@@ -448,8 +459,9 @@ object_included :: proc(p: ^Prover, an: []^rules.Node, have: ^rules.Rules, b: ^r
 		}
 	}
 	if want.additional != rules.NONE {
+		wanted := rules.member_names(want.members, context.temp_allocator)
 		for name in named {
-			if _, listed := find_member(want, name); !listed && !included(p, member_nodes(blocks[:], name), {want.additional}, depth + 1) {
+			if rules.first_named(&wanted, name) < 0 && !included(p, member_nodes(blocks[:], names, name), {want.additional}, depth + 1) {
 				return false
 			}
 		}
@@ -483,10 +495,10 @@ object_included :: proc(p: ^Prover, an: []^rules.Node, have: ^rules.Rules, b: ^r
 }
 
 @(private = "file")
-member_rules_kept :: proc(blocks: []^rules.Object, want: rules.Member) -> bool {
-	for blk in blocks {
-		for m in blk.members {
-			if m.name == want.name && m.rules == want.rules {
+member_rules_kept :: proc(blocks: []^rules.Object, names: []rules.Member_Names, want: rules.Member) -> bool {
+	for blk, j in blocks {
+		for k := rules.first_named(&names[j], want.name); k >= 0; k = rules.next_named(&names[j], k) {
+			if blk.members[k].rules == want.rules {
 				return true
 			}
 		}
@@ -620,12 +632,12 @@ same_object :: proc(p: ^Prover, x, y: ^rules.Object) -> bool {
 	if len(x.members) != len(y.members) || len(x.patterns) != len(y.patterns) || len(x.dependents) != len(y.dependents) {
 		return false
 	}
+	names := rules.member_names(y.members, context.temp_allocator)
 	for m in x.members {
 		found := false
-		for n in y.members {
-			if n.name == m.name {
-				found = n.rules == m.rules && n.required == m.required && n.only_required == m.only_required && same_nodes(p, {m.node}, {n.node})
-			}
+		for k := rules.first_named(&names, m.name); k >= 0; k = rules.next_named(&names, k) {
+			n := y.members[k]
+			found = n.rules == m.rules && n.required == m.required && n.only_required == m.only_required && same_nodes(p, {m.node}, {n.node})
 		}
 		if !found {
 			return false

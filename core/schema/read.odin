@@ -99,6 +99,8 @@ Reader :: struct {
 	indexes:   map[[2]int]map[string]core.Node_Index,
 	anything:  Maybe(rules.Node_Index),
 	path:      [dynamic]core.Step,
+	// The objects being read, outermost first, each inside the subschema of the one before it.
+	frames:    [dynamic]Frame,
 	// The base a root directory gives a schema that has no retrieval URI, which names no resource.
 	local:     string,
 	err:       core.Error,
@@ -171,18 +173,39 @@ read_root :: proc(r: ^Reader, source: int, at: core.Node_Index, uri: string) {
 	read_schema(r, sc, at)
 }
 
+// Reads the schema at `at`, and every subschema in it, into nodes in the order of a depth-first walk. The objects it is
+// inside of are kept on `r.frames`, not on the machine stack, so a schema nests as deep as its document does.
 @(private)
 read_schema :: proc(r: ^Reader, sc: Scope, at: core.Node_Index, steps: ..core.Step) -> rules.Node_Index {
-	if r.err != nil {
-		return 0
-	}
-	site := Site{sc.source, at}
-	if i, ok := r.memo[site]; ok {
+	i, opened := schema_enter(r, sc, at, steps)
+	if !opened {
 		return i
 	}
+	for base := len(r.frames) - 1; len(r.frames) > base; {
+		if r.err == nil {
+			frame_step(r)
+			continue
+		}
+		f := pop(&r.frames)
+		resize(&r.path, f.path)
+	}
+	return i
+}
+
+// Starts the read of the schema at `at`: its node, and for an object the frame that reads its keywords, which is
+// `opened`. A schema read before is its node again.
+@(private)
+schema_enter :: proc(r: ^Reader, sc: Scope, at: core.Node_Index, steps: []core.Step) -> (i: rules.Node_Index, opened: bool) {
+	if r.err != nil {
+		return 0, false
+	}
+	site := Site{sc.source, at}
+	if known, ok := r.memo[site]; ok {
+		return known, false
+	}
+	path := len(r.path)
 	append(&r.path, ..steps)
-	defer resize(&r.path, len(r.path) - len(steps))
-	i := rules.Node_Index(len(r.d.nodes))
+	i = rules.Node_Index(len(r.d.nodes))
 	append(&r.d.nodes, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1, resource = sc.resource})
 	r.memo[site] = i
 	doc := r.sources[sc.source]
@@ -193,11 +216,14 @@ read_schema :: proc(r: ^Reader, sc: Scope, at: core.Node_Index, steps: ..core.St
 		}
 		r.d.nodes[i].kinds = {} if core.kind(doc, at) == .False else rules.EVERY_KIND
 	case .Object:
-		read_object(r, sc, at, i)
+		if frame_open(r, sc, at, i, path) {
+			return i, true
+		}
 	case:
 		fail(r, site, "schema", "must be an object or a boolean")
 	}
-	return i
+	resize(&r.path, path)
+	return i, false
 }
 
 // What the keywords of one object collect before they become the node's blocks.
@@ -214,8 +240,38 @@ Shape :: struct {
 	is_array:   bool,
 }
 
+// An object being read: its scope, node and what its keywords collected, the length `r.path` goes back to when it is
+// read, and the keyword whose subschemas are being read with the next of them, `keyword` "" for none.
 @(private)
-read_object :: proc(r: ^Reader, sc: Scope, at: core.Node_Index, i: rules.Node_Index) {
+Frame :: struct {
+	sc:         Scope,
+	at:         core.Node_Index,
+	i:          rules.Node_Index,
+	path:       int,
+	n:          rules.Node,
+	sh:         Shape,
+	it:         core.Pair_Iter,
+	overridden: bool,
+	keyword:    string,
+	subs:       [dynamic]Sub,
+	next:       int,
+	list:       [dynamic]rules.Node_Index,
+}
+
+// A subschema of the open keyword: its value, its member name or its place as the step to it, and whether it may be a
+// draft 4 boolean.
+@(private)
+Sub :: struct {
+	v:       core.Node_Index,
+	key:     string,
+	step:    core.Step,
+	stepped: bool,
+	boolean: bool,
+}
+
+// Reads what comes before the keywords of the object at `at` and opens its frame, false when that read failed.
+@(private)
+frame_open :: proc(r: ^Reader, sc: Scope, at: core.Node_Index, i: rules.Node_Index, path: int) -> bool {
 	doc := r.sources[sc.source]
 	sc := sc
 	sc.boolean = false
@@ -223,12 +279,12 @@ read_object :: proc(r: ^Reader, sc: Scope, at: core.Node_Index, i: rules.Node_In
 		uri, is_text := string_of(r, doc, v)
 		if !is_text {
 			fail(r, {sc.source, v}, "$schema", "must be a string")
-			return
+			return false
 		}
 		draft, vocab, why := dialect(r, uri_resolve(sc.base, uri))
 		if why != "" {
 			fail(r, {sc.source, v}, "$schema", why)
-			return
+			return false
 		}
 		sc.draft, sc.vocab = draft, vocab
 	}
@@ -248,35 +304,214 @@ read_object :: proc(r: ^Reader, sc: Scope, at: core.Node_Index, i: rules.Node_In
 			register_resource(r, sc, retrieved)
 		}
 	}
-	sh := Shape {
-		object = {additional = rules.NONE, keys = rules.NONE},
-		array = {items = rules.NONE},
-	}
-	n := rules.Node {
-		kinds    = rules.EVERY_KIND,
-		array    = -1,
-		object   = -1,
-		resource = sc.resource,
-	}
-	it := core.pairs(doc, at)
-	for r.err == nil {
-		k, v, more := core.pair_next(&it)
-		if !more {
-			break
+	append(&r.frames, Frame {
+		sc = sc,
+		at = at,
+		i = i,
+		path = path,
+		n = {kinds = rules.EVERY_KIND, array = -1, object = -1, resource = sc.resource},
+		sh = {object = {additional = rules.NONE, keys = rules.NONE}, array = {items = rules.NONE}},
+		it = core.pairs(doc, at),
+		overridden = overridden,
+	})
+	return true
+}
+
+// Takes one step of the innermost frame's read: its open keyword's next subschema, or the close of that keyword, or its
+// next keyword, or with none left the node it reads.
+@(private)
+frame_step :: proc(r: ^Reader) {
+	at := len(r.frames) - 1
+	f := &r.frames[at]
+	if f.keyword != "" {
+		if f.next == len(f.subs) {
+			keyword_close(r, f)
+			f.keyword = ""
+			pop(&r.path)
+			return
 		}
-		name, _ := core.text_clone(doc, k)
-		if !is_keyword(name, sc.draft, sc.vocab) || (overridden && name != "$ref" && name != "$defs" && name != "definitions") {
-			continue
+		sub := f.subs[f.next]
+		f.next += 1
+		if !sub_before(r, f, sub) {
+			return
 		}
-		append(&r.path, core.Name(name))
-		read_keyword(r, sc, i, at, &n, &sh, name, v)
-		pop(&r.path)
-	}
-	if r.err != nil {
+		sc := f.sc
+		sc.boolean = sub.boolean
+		steps := [1]core.Step{sub.step}
+		i, _ := schema_enter(r, sc, sub.v, steps[:1 if sub.stepped else 0])
+		sub_read(r, &r.frames[at], sub, i)
 		return
 	}
-	finish_blocks(r, &n, &sh)
-	r.d.nodes[i] = n
+	doc := r.sources[f.sc.source]
+	k, v, more := core.pair_next(&f.it)
+	if !more {
+		finish_blocks(r, &f.n, &f.sh)
+		r.d.nodes[f.i] = f.n
+		resize(&r.path, f.path)
+		pop(&r.frames)
+		return
+	}
+	name, _ := core.text_clone(doc, k)
+	if !is_keyword(name, f.sc.draft, f.sc.vocab) || (f.overridden && name != "$ref" && name != "$defs" && name != "definitions") {
+		return
+	}
+	append(&r.path, core.Name(name))
+	if !keyword_open(r, f, name, v) {
+		read_keyword(r, f.sc, f.i, f.at, &f.n, &f.sh, name, v)
+		pop(&r.path)
+	}
+}
+
+// Opens keyword `name` of `f` when its value holds subschemas, listing them, and says whether it did.
+@(private)
+keyword_open :: proc(r: ^Reader, f: ^Frame, name: string, v: core.Node_Index) -> bool {
+	sc := f.sc
+	doc := r.sources[sc.source]
+	clear(&f.subs)
+	clear(&f.list)
+	f.next = 0
+	switch name {
+	case "$defs", "definitions", "properties", "patternProperties", "dependentSchemas", "dependentRequired", "dependencies":
+		if name != "$defs" && name != "definitions" {
+			f.sh.is_object = true
+		}
+		if name == "dependentSchemas" || name == "dependentRequired" || name == "dependencies" {
+			f.sh.object.dependencies = name == "dependencies"
+		}
+		for e in members_of(r, sc, v, name) {
+			append(&f.subs, Sub{v = e.v, key = e.key, step = core.Name(e.key), stepped = true})
+		}
+	case "prefixItems", "items":
+		f.sh.is_array = true
+		if name == "prefixItems" || core.kind(doc, v) == .Array && sc.draft != .D2020_12 {
+			f.sh.array.tuple = name == "items"
+			subs_of_array(r, f, v, name)
+		} else {
+			append(&f.subs, Sub{v = v})
+		}
+	case "allOf", "anyOf", "oneOf":
+		subs_of_array(r, f, v, name)
+	case "additionalItems":
+		// It judges the elements past a tuple, which only a tuple `items` has.
+		if items, ok := core.member(doc, f.at, "items"); ok && core.kind(doc, items) == .Array {
+			f.sh.is_array = true
+			append(&f.subs, Sub{v = v, boolean = true})
+		}
+	case "contains":
+		f.sh.is_array = true
+		append(&f.subs, Sub{v = v})
+	case "additionalProperties":
+		f.sh.is_object = true
+		append(&f.subs, Sub{v = v, boolean = true})
+	case "propertyNames":
+		f.sh.is_object = true
+		append(&f.subs, Sub{v = v})
+	case "if", "then", "else", "not", "unevaluatedItems", "unevaluatedProperties":
+		append(&f.subs, Sub{v = v})
+	case:
+		return false
+	}
+	f.keyword = name
+	return true
+}
+
+// Lists the schemas of the non-empty array at `v` as the subschemas of `f`'s keyword `name`.
+@(private)
+subs_of_array :: proc(r: ^Reader, f: ^Frame, v: core.Node_Index, name: string) {
+	doc := r.sources[f.sc.source]
+	if core.kind(doc, v) != .Array || core.length(doc, v) == 0 {
+		fail(r, {f.sc.source, v}, name, "must be an array with a schema in it")
+		return
+	}
+	it := core.children(doc, v)
+	for c in core.child_next(&it) {
+		append(&f.subs, Sub{v = c, step = core.Index(len(f.subs)), stepped = true})
+	}
+}
+
+// Whether `sub` of `f`'s open keyword is read as a schema. A name `patternProperties` cannot match is refused, and a
+// dependency's list of names is taken as it is.
+@(private)
+sub_before :: proc(r: ^Reader, f: ^Frame, sub: Sub) -> bool {
+	switch f.keyword {
+	case "patternProperties":
+		if why := pattern_refusal(sub.key); why != "" {
+			fail(r, {f.sc.source, sub.v}, f.keyword, strings.concatenate({"holds a name that is no regular expression: ", why}, context.temp_allocator))
+			return false
+		}
+	case "dependentSchemas", "dependentRequired", "dependencies":
+		// An array of names or a schema, as the keyword allows.
+		names := core.kind(r.sources[f.sc.source], sub.v) == .Array
+		switch {
+		case names && f.keyword == "dependentSchemas", !names && f.keyword == "dependentRequired":
+			fail(r, {f.sc.source, sub.v}, f.keyword, "holds a value its keyword does not take")
+			return false
+		case names:
+			if required, ok := strings_of(r, f.sc, sub.v, f.keyword); ok {
+				append(&f.sh.dependents, rules.Dependent{name = keep(r, sub.key), required = required})
+			}
+			return false
+		}
+	}
+	return true
+}
+
+// Files node `i`, the schema read for `sub`, where `f`'s open keyword takes it.
+@(private)
+sub_read :: proc(r: ^Reader, f: ^Frame, sub: Sub, i: rules.Node_Index) {
+	switch f.keyword {
+	case "$defs", "definitions":
+		named(r, i, sub.key)
+	case "properties":
+		append(&f.sh.members, rules.Member{name = keep(r, sub.key), node = i})
+	case "patternProperties":
+		append(&f.sh.patterns, rules.Pattern{keep(r, sub.key), i})
+	case "dependentSchemas", "dependentRequired", "dependencies":
+		append(&f.sh.dependents, rules.Dependent{name = keep(r, sub.key), node = i})
+	case "prefixItems", "items", "allOf", "anyOf", "oneOf":
+		if sub.stepped {
+			append(&f.list, i)
+		} else {
+			f.sh.array.items = i
+		}
+	case "additionalItems":
+		f.sh.array.items = i
+	case "contains":
+		f.sh.array.contains = i
+	case "additionalProperties":
+		f.sh.object.additional = i
+	case "propertyNames":
+		f.sh.object.keys = i
+	case "if":
+		f.n.cond.test = i
+	case "then":
+		f.n.cond.then = i
+	case "else":
+		f.n.cond.other = i
+	case "not":
+		f.n.not = i
+	case "unevaluatedItems":
+		f.n.unevaluated_items = i
+	case "unevaluatedProperties":
+		f.n.unevaluated_properties = i
+	}
+}
+
+// Takes what the subschemas of `f`'s open keyword made once each is read.
+@(private)
+keyword_close :: proc(r: ^Reader, f: ^Frame) {
+	switch f.keyword {
+	case "prefixItems", "items":
+		append(&f.sh.prefix, ..f.list[:])
+	case "contains":
+		f.sh.array.evaluates_contains = f.sc.draft >= .D2020_12
+	case "allOf":
+		f.n.all_of = own(r, f.list[:])
+	case "anyOf":
+		f.n.any_of = own(r, f.list[:])
+	case "oneOf":
+		f.n.one_of = own(r, f.list[:])
+	}
 }
 
 // Whether the object at `at` starts a schema resource: the root of a retrieval, or an object with an `$id` of its own.
@@ -411,73 +646,10 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 		if kind != .Object {
 			fail(r, site, name, "must be an object")
 		}
-	case "$defs", "definitions":
-		for e in members_of(r, sc, v, name) {
-			named(r, read_schema(r, sc, e.v, core.Name(e.key)), e.key)
-		}
-	case "prefixItems", "items":
-		sh.is_array = true
-		if name == "prefixItems" || kind == .Array && sc.draft != .D2020_12 {
-			sh.array.tuple = name == "items"
-			append(&sh.prefix, ..schemas_of(r, sc, v, name))
-		} else {
-			sh.array.items = read_schema(r, sc, v)
-		}
-	case "additionalItems":
-		// It judges the elements past a tuple, which only a tuple `items` has.
-		if items, ok := core.member(doc, at, "items"); ok && core.kind(doc, items) == .Array {
-			sh.is_array = true
-			boolean := sc
-			boolean.boolean = true
-			sh.array.items = read_schema(r, boolean, v)
-		}
-	case "contains":
-		sh.is_array = true
-		sh.array.contains = read_schema(r, sc, v)
-		sh.array.evaluates_contains = sc.draft >= .D2020_12
 	case "maxContains":
 		sh.array.max_contains, _ = count_of(r, doc, site, name)
 	case "minContains":
 		sh.array.min_contains, _ = count_of(r, doc, site, name)
-	case "additionalProperties":
-		sh.is_object = true
-		boolean := sc
-		boolean.boolean = true
-		sh.object.additional = read_schema(r, boolean, v)
-	case "propertyNames":
-		sh.is_object = true
-		sh.object.keys = read_schema(r, sc, v)
-	case "properties":
-		sh.is_object = true
-		for e in members_of(r, sc, v, name) {
-			append(&sh.members, rules.Member{name = keep(r, e.key), node = read_schema(r, sc, e.v, core.Name(e.key))})
-		}
-	case "patternProperties":
-		sh.is_object = true
-		for e in members_of(r, sc, v, name) {
-			if why := pattern_refusal(e.key); why == "" {
-				append(&sh.patterns, rules.Pattern{keep(r, e.key), read_schema(r, sc, e.v, core.Name(e.key))})
-			} else {
-				fail(r, {sc.source, e.v}, name, strings.concatenate({"holds a name that is no regular expression: ", why}, context.temp_allocator))
-			}
-		}
-	case "dependentSchemas", "dependentRequired", "dependencies":
-		// An array of names or a schema, as the keyword allows.
-		sh.is_object = true
-		sh.object.dependencies = name == "dependencies"
-		for e in members_of(r, sc, v, name) {
-			names := core.kind(doc, e.v) == .Array
-			switch {
-			case names && name == "dependentSchemas", !names && name == "dependentRequired":
-				fail(r, {sc.source, e.v}, name, "holds a value its keyword does not take")
-			case names:
-				if required, ok := strings_of(r, sc, e.v, name); ok {
-					append(&sh.dependents, rules.Dependent{name = keep(r, e.key), required = required})
-				}
-			case:
-				append(&sh.dependents, rules.Dependent{name = keep(r, e.key), node = read_schema(r, sc, e.v, core.Name(e.key))})
-			}
-		}
 	case "required":
 		sh.is_object = true
 		if names, ok := strings_of(r, sc, v, name); ok {
@@ -487,24 +659,6 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 			append(&sh.required, ..names)
 			delete(names, r.d.allocator)
 		}
-	case "if":
-		n.cond.test = read_schema(r, sc, v)
-	case "then":
-		n.cond.then = read_schema(r, sc, v)
-	case "else":
-		n.cond.other = read_schema(r, sc, v)
-	case "not":
-		n.not = read_schema(r, sc, v)
-	case "allOf":
-		n.all_of = own(r, schemas_of(r, sc, v, name))
-	case "anyOf":
-		n.any_of = own(r, schemas_of(r, sc, v, name))
-	case "oneOf":
-		n.one_of = own(r, schemas_of(r, sc, v, name))
-	case "unevaluatedItems":
-		n.unevaluated_items = read_schema(r, sc, v)
-	case "unevaluatedProperties":
-		n.unevaluated_properties = read_schema(r, sc, v)
 	case "type":
 		n.kinds = types_of(r, doc, site)
 		n.integer_spelled = sc.draft == .D04 && .Integer in n.kinds
@@ -638,15 +792,18 @@ finish_blocks :: proc(r: ^Reader, n: ^rules.Node, sh: ^Shape) {
 		n.array = i32(len(d.arrays))
 		append(&d.arrays, sh.array)
 	}
-	for required in sh.required {
-		found := false
-		for &m in sh.members {
-			if m.name == required {
-				m.required, found = true, true
+	if len(sh.required) > 0 {
+		names := rules.member_names(sh.members[:])
+		for required in sh.required {
+			if k := rules.first_named(&names, required); k >= 0 {
+				for ; k >= 0; k = rules.next_named(&names, k) {
+					sh.members[k].required = true
+				}
+			} else {
+				names.first[required] = len(sh.members)
+				append(&names.next, -1)
+				append(&sh.members, rules.Member{name = required, node = any_node(r), required = true, only_required = true})
 			}
-		}
-		if !found {
-			append(&sh.members, rules.Member{name = required, node = any_node(r), required = true, only_required = true})
 		}
 	}
 	if sh.is_object {
@@ -810,22 +967,6 @@ keep :: proc(r: ^Reader, s: string) -> string {
 @(private)
 own :: proc(r: ^Reader, xs: []$T) -> []T {
 	return slice.clone(xs, r.d.allocator) if len(xs) > 0 else nil
-}
-
-// The schemas of the non-empty array at `v`.
-@(private)
-schemas_of :: proc(r: ^Reader, sc: Scope, v: core.Node_Index, name: string) -> []rules.Node_Index {
-	doc := r.sources[sc.source]
-	if core.kind(doc, v) != .Array || core.length(doc, v) == 0 {
-		fail(r, {sc.source, v}, name, "must be an array with a schema in it")
-		return nil
-	}
-	out := make([dynamic]rules.Node_Index)
-	it := core.children(doc, v)
-	for c in core.child_next(&it) {
-		append(&out, read_schema(r, sc, c, core.Index(len(out))))
-	}
-	return out[:]
 }
 
 // The strings of the array at `v` as the description's own.

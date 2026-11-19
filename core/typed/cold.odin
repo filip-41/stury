@@ -6,6 +6,7 @@ import "core:strconv"
 import "core:strings"
 import spell "../spell"
 import core ".."
+import rules "../rules"
 
 // A value whose token the record's kind does not read at once. The element of a `Ptr`, a `Maybe`, a `Union` or an `Any`
 // reads through the hook with registers of its own, and a container it opens returns to this record. A `Check` judges a
@@ -1369,7 +1370,19 @@ missing_member :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, regs
 	if !seen {
 		from = max(from, i32((uintptr(regs.b) - uintptr(owner.first)) / size_of(Field)))
 	}
-	for at in end.required {
+	// `required` ascends, so a long one is searched for its first index past `from`.
+	lo, hi := 0, len(end.required)
+	for hi - lo > 16 {
+		rules.visit()
+		mid := (lo + hi) / 2
+		if end.required[mid] < from {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	for at in end.required[lo:] {
+		rules.visit()
 		if at >= from && !(seen && seen_has(f, int(at))) {
 			return at
 		}

@@ -871,8 +871,8 @@ schema_unevaluated_memory :: proc(t: ^testing.T) {
 	}
 }
 
-// A check judges one value by up to 256 held records one inside the other: a chain of 100 `not` arms, two records a
-// level, is judged to its end, and one of 300 is refused when bound.
+// A check judges one value by up to 1024 held records one inside the other: a chain of 100 `not` arms is judged to its
+// end, and one of 1100 is refused when bound.
 @(test)
 schema_held_nesting :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -883,9 +883,9 @@ schema_held_nesting :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, schema.check(&ch.bound, transmute([]u8)string("1")) == nil)
 	testing.expect(t, schema.check(&ch.bound, transmute([]u8)string(`"s"`)) != nil)
-	deep, deep_err := checked_make(shared_chain("not", `{"type": "integer"}`, 300))
+	deep, deep_err := checked_make(shared_chain("not", `{"type": "integer"}`, 1100))
 	defer checked_destroy(deep)
-	testing.expectf(t, deep_err != nil, "a chain of 300 bound: %v", deep_err)
+	testing.expectf(t, deep_err != nil, "a chain of 1100 bound: %v", deep_err)
 }
 
 // A schema nested past what a check judges one inside the other is refused at bind, and the bind holds its depth off
@@ -904,6 +904,105 @@ schema_deep_bind :: proc(t: ^testing.T) {
 	defer checked_destroy(ch)
 	if testing.expectf(t, err == nil, "contains 400 deep: %v", err) {
 		testing.expect(t, schema.check(&ch.bound, transmute([]u8)string("1")) == nil)
+	}
+	// Subschemas nested as deep as a document nests read and bind, and a check of a scalar judges every one.
+	LEVELS :: core.MAX_DEPTH - 1
+	for link in ([]string{`{"not": `, `{"items": `}) {
+		deep_text := fmt.tprintf("%s%s%s", strings.repeat(link, LEVELS, context.temp_allocator), `{"type": "integer"}`, strings.repeat("}", LEVELS, context.temp_allocator))
+		deep, deep_err := checked_make(deep_text)
+		defer checked_destroy(deep)
+		if testing.expectf(t, deep_err == nil, "%s %d deep: %v", link, LEVELS, deep_err) {
+			// An odd number of `not`s refuses what the innermost takes.
+			testing.expect_value(t, schema.valid(&deep.bound, transmute([]u8)string("1")), link != `{"not": `)
+		}
+	}
+}
+
+// A wide schema's bind, check, comparison and Odin types do work in proportion to its width: eight times the members,
+// operands or arms visit and allocate well under the 64 times a scan of the others for each would.
+@(test)
+schema_wide_scales :: proc(t: ^testing.T) {
+	Shape :: enum {
+		Required,
+		Conjoined,
+		Compared,
+		Enum_Type,
+		Arms_Type,
+	}
+	text_of :: proc(shape: Shape, n: int) -> string {
+		b := strings.builder_make(context.temp_allocator)
+		list :: proc(b: ^strings.Builder, n: int, item: string) {
+			for i in 0 ..< n {
+				fmt.sbprintf(b, "%s", ", " if i > 0 else "")
+				fmt.sbprintf(b, item, i)
+			}
+		}
+		switch shape {
+		case .Required, .Compared:
+			strings.write_string(&b, `{"properties": {`)
+			list(&b, n, `"p%d": {{"type": "integer"}}`)
+			strings.write_string(&b, `}, "required": [`)
+			list(&b, n, `"p%d"`)
+			strings.write_string(&b, "]}")
+		case .Conjoined:
+			strings.write_string(&b, `{"allOf": [{"properties": {`)
+			list(&b, n, `"p%d": {{"type": "integer"}}`)
+			strings.write_string(&b, `}}, {"properties": {`)
+			list(&b, n, `"p%d": {{"minimum": 0}}`)
+			strings.write_string(&b, `}}]}`)
+		case .Enum_Type:
+			strings.write_string(&b, `{"enum": [`)
+			list(&b, n, "%d")
+			strings.write_string(&b, "]}")
+		case .Arms_Type:
+			strings.write_string(&b, `{"anyOf": [`)
+			list(&b, n, `{{"const": %d}}`)
+			strings.write_string(&b, "]}")
+		}
+		return strings.to_string(b)
+	}
+	// The lookups' visits and the bytes allocated of one run.
+	Work :: [2]i64
+	run :: proc(t: ^testing.T, shape: Shape, text: string) -> Work {
+		tracking: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&tracking, context.allocator)
+		defer mem.tracking_allocator_destroy(&tracking)
+		context.allocator = mem.tracking_allocator(&tracking)
+		visits := rules.visited()
+		switch shape {
+		case .Required, .Conjoined:
+			ch, err := checked_make(text)
+			defer checked_destroy(ch)
+			if testing.expectf(t, err == nil, "%v: %v", shape, err) {
+				sink: typed.Sink
+				defer typed.sink_destroy(&sink)
+				testing.expect(t, schema.check(&ch.bound, transmute([]u8)string(`{"p0": -1}`), &sink) != nil)
+			}
+		case .Compared:
+			c, err := schema.compile(transmute([]u8)text, json.as(.Json))
+			defer schema.destroy(c)
+			if testing.expectf(t, err == nil, "%v: %v", shape, err) {
+				comparison, cerr := schema.compare(c.description, c.description, {as = json.as(.Json)})
+				defer schema.comparison_destroy(&comparison)
+				testing.expectf(t, cerr == nil, "%v: %v", shape, cerr)
+			}
+		case .Enum_Type, .Arms_Type:
+			c, err := schema.compile(transmute([]u8)text, json.as(.Json))
+			defer schema.destroy(c)
+			if testing.expectf(t, err == nil, "%v: %v", shape, err) {
+				_, werr := schema.write_odin(c.description, "p", json.as(.Json), false, context.temp_allocator)
+				testing.expectf(t, werr == nil, "%v: %v", shape, werr)
+			}
+		}
+		return {i64(rules.visited() - visits), tracking.total_memory_allocated}
+	}
+	N :: 1000
+	for shape in Shape {
+		defer free_all(context.temp_allocator)
+		narrow, wide := run(t, shape, text_of(shape, N)), run(t, shape, text_of(shape, 8 * N))
+		for x, i in ([?]string{"visits", "bytes"}) {
+			testing.expectf(t, wide[i] < 16 * max(narrow[i], 1), "%v: %d %s for %d, %d for %d", shape, narrow[i], x, N, wide[i], 8 * N)
+		}
 	}
 }
 
@@ -930,12 +1029,12 @@ schema_unevaluated_chain :: proc(t: ^testing.T) {
 		testing.expectf(t, schema.check(&ch.bound, transmute([]u8)string(`{"a": 1}`)) == nil, "%d links: .a refused", links)
 		testing.expectf(t, schema.check(&ch.bound, transmute([]u8)string(`{"a": 1, "c": 2}`)) != nil, "%d links: .c passed", links)
 	}
-	ch, err := checked_make(chain(`"a%d": {{"allOf": [{{"$ref": "#/$defs/a%d"}}]}}, `, 1000))
+	ch, err := checked_make(chain(`"a%d": {{"allOf": [{{"$ref": "#/$defs/a%d"}}]}}, `, 2000))
 	defer checked_destroy(ch)
 	f, typed_err := err.(core.Typed_Error)
 	// The refusal says what nests and names the keyword path it nests along.
-	testing.expectf(t, typed_err && f.kind == .Too_Deep && f.detail.want.text != "", "allOf 1000 links: %v", err)
-	testing.expectf(t, typed_err && len(f.steps) > 2 && f.steps[len(f.steps) - 1] == core.Name("$ref") && f.steps[len(f.steps) - 2] == core.Index(0), "allOf 1000 links: %v", err)
+	testing.expectf(t, typed_err && f.kind == .Too_Deep && f.detail.want.text != "", "allOf 2000 links: %v", err)
+	testing.expectf(t, typed_err && len(f.steps) > 2 && f.steps[len(f.steps) - 1] == core.Name("$ref") && f.steps[len(f.steps) - 2] == core.Index(0), "allOf 2000 links: %v", err)
 }
 
 // A subschema many arms share is judged once at bind and once at a value, a sink's entries included.

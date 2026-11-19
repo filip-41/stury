@@ -1318,8 +1318,11 @@ enum_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 	defer regex.scratch_destroy(&scratch)
 	texts := make([dynamic]string)
 	numbers := make([dynamic]i64)
+	listed_texts := make(map[string]struct{})
+	listed_numbers := make(map[i64]struct{})
 	truth: [2]bool
 	for v in values {
+		rules.visit()
 		switch core.kind(v) {
 		case .Null:
 			out.null ||= .Null in kinds
@@ -1331,7 +1334,8 @@ enum_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 				resize(&room, core.text_room(ref.doc, ref.node))
 			}
 			text, _ := core.text(v, room[:])
-			if .String in kinds && rules.judge_string(&leaf, text, &scratch) == {} && !slice.contains(texts[:], text) {
+			if .String in kinds && rules.judge_string(&leaf, text, &scratch) == {} && text not_in listed_texts {
+				listed_texts[text] = {}
 				append(&texts, text)
 			}
 		case .Number:
@@ -1351,7 +1355,8 @@ enum_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 			case !whole || !fits:
 				// An Odin enum holds integers, and the model writes an enum's operands as doubles.
 				refuse(s, keyword)
-			case !slice.contains(numbers[:], x):
+			case x not_in listed_numbers:
+				listed_numbers[x] = {}
 				append(&numbers, x)
 			}
 		case .Array, .Object, .Bytes, .Plain, .End:
@@ -1474,10 +1479,10 @@ arms_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 			append(&arms, Arm{x, nil, arm.kinds + ({.Integer} if .Number in arm.kinds else {}) - {.Null}})
 		}
 	}
-	for a, j in arms {
-		for b in arms[j + 1:] {
-			overlap ||= a.kinds & b.kinds != {}
-		}
+	taken: rules.Kinds
+	for a in arms {
+		overlap ||= a.kinds & taken != {}
+		taken += a.kinds
 	}
 	switch {
 	case null_twice:
@@ -1496,6 +1501,7 @@ arms_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 	k := declare(s, part_of(s, i), hint)
 	name := s.decls[k].name
 	types := make([dynamic]string)
+	listed := make(map[string]struct{})
 	for a, j in arms {
 		arm_hint := strings.concatenate({name, "_", KIND_NAMES[a.kind.?] if a.kind != nil else int_text(j + 1)})
 		value := kind_spelled(s, a.node, a.kind.?, arm_hint, true) if a.kind != nil else odin_type(s, a.node, arm_hint, true)
@@ -1506,7 +1512,9 @@ arms_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 		null ||= value.null
 		value.null = false
 		// Two `oneOf` arms of one type pass the same values, so no value of theirs passes.
-		if t := member_type(s, value); !slice.contains(types[:], t) {
+		rules.visit()
+		if t := member_type(s, value); t not_in listed {
+			listed[t] = {}
 			append(&types, t)
 		} else if len(n.one_of) > 0 {
 			refuse(s, "oneOf")

@@ -959,12 +959,22 @@ block_of :: proc(b: ^Builder, n: int, key: Block_Key) -> (at: i32, fresh: bool) 
 	}
 	first := len(b.fields)
 	_, slot, _, no_slot := map_entry(&b.blocks, key)
-	if no_slot != nil || resize(&b.fields, first + n) != nil || resize(&b.meta, first + n) != nil || len(b.extra) > 0 && resize(&b.extra, first + n) != nil {
+	if no_slot != nil || !grown(&b.fields, first + n) || !grown(&b.meta, first + n) || len(b.extra) > 0 && !grown(&b.extra, first + n) {
 		refuse_plan(b, .No_Memory)
 		return -1, false
 	}
 	slot^ = i32(first)
 	return i32(first), true
+}
+
+// Sets the length of `xs` to `n` with room for as many again, since a resize grows the capacity to the length only, and
+// growing one block at a time would copy the array for each.
+@(private)
+grown :: proc(xs: ^$T/[dynamic]$E, n: int) -> bool {
+	if cap(xs) < n && reserve(xs, 2 * n) != nil {
+		return false
+	}
+	return resize(xs, n) == nil
 }
 
 @(private)

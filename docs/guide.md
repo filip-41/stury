@@ -849,7 +849,7 @@ rules. `json.Options.refuse_non_finite` refuses JSON5's `Infinity` and `NaN`, fo
 |---|---|
 | Nesting depth | `json.MAX_DEPTH`, 1024. `Options.max_depth` raises or lowers it per call. A depth beyond `MAX_DEPTH` allocates one byte per level |
 | Children counted in a node | `json.MAX_CHILDREN`, 65535. A larger container is still read in full, and its true count is `json.length_exact` |
-| Subschemas applied to one value | 256 nested held subschemas. A schema that nests more, or applies itself to the same value without end, is refused with `.Too_Deep` when bound |
+| Subschemas applied to one value | 1024 (`core.MAX_DEPTH`) nested held subschemas. A schema that nests more, or applies itself to the same value without end, is refused with `.Too_Deep` when bound |
 | Reading a schema | recurses once per nested subschema, which a build with the address sanitizer cuts off at about 1000 levels |
 | Numbers | a number too large for binary64 or over the digit and scale caps comes back as `.Wide`, and the caller reads its span |
 

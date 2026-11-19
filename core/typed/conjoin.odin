@@ -17,21 +17,22 @@ Conjoined :: struct {
 	arms:   []rules.Node_Index,
 }
 
-// A copy of `d` in `arena` with its fixed evaluated sets settled and a conjoined node added for each holder whose arms
-// conjoin, recorded in `b.conjoined`. Nodes that `kept_apart` marks are not conjoined.
+// A copy of `d` with its fixed evaluated sets settled and a conjoined node added for each holder whose arms conjoin,
+// recorded in `b.conjoined`. Nodes that `kept_apart` marks are not conjoined. The tables of nodes and blocks and what
+// only the plan's build reads are in `tables`, which the plan does not keep, and what the plan may keep is in `arena`.
 @(private)
-conjoin_description :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator) -> rules.Description {
+conjoin_description :: proc(b: ^Builder, d: ^rules.Description, arena, tables: runtime.Allocator) -> rules.Description {
 	x := d^
-	x.nodes, x.objects, x.arrays = make([dynamic]rules.Node, arena), make([dynamic]rules.Object, arena), make([dynamic]rules.Array, arena)
+	x.nodes, x.objects, x.arrays = make([dynamic]rules.Node, tables), make([dynamic]rules.Object, tables), make([dynamic]rules.Array, tables)
 	append(&x.nodes, ..d.nodes[:])
 	append(&x.objects, ..d.objects[:])
 	append(&x.arrays, ..d.arrays[:])
 	x.allocator = arena
-	b.conjoined.allocator, b.pairs.allocator, b.inline.allocator, b.stripped.allocator, b.chain_ends.allocator = arena, arena, arena, arena, arena
-	b.nothing.allocator = arena
+	b.conjoined.allocator, b.pairs.allocator, b.inline.allocator, b.stripped.allocator, b.chain_ends.allocator = tables, tables, tables, tables, tables
+	b.nothing.allocator = tables
 	settle_unevaluated(b, &x, arena)
 	inline_patterns(b, &x, arena)
-	kept := kept_apart(&x, arena)
+	kept := kept_apart(&x, tables)
 	// Conjoining appends nodes for pairs of member values, and the loop visits those too.
 	for i := 0; i < len(x.nodes); i += 1 {
 		if i < len(kept) && kept[i] {
@@ -44,7 +45,7 @@ conjoin_description :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.A
 		if n.ref == nil && len(n.all_of) == 0 && !spread || !own_plain(b, &x, &n) {
 			continue
 		}
-		c := Conjoining{parts = make([dynamic]rules.Node_Index, arena), held = make([dynamic]rules.Node_Index, arena), lifted = make([dynamic]rules.Node_Index, arena), seen = make(map[rules.Node_Index]struct{}, arena)}
+		c := Conjoining{parts = make([dynamic]rules.Node_Index, tables), held = make([dynamic]rules.Node_Index, arena), lifted = make([dynamic]rules.Node_Index, arena), seen = make(map[rules.Node_Index]struct{}, tables)}
 		conjoin_into(b, &x, rules.Node_Index(i), &c, 0)
 		spread &&= len(c.held) == 0 && len(c.lifted) == 0 && len(c.parts) > 0
 		if !spread && (len(c.parts) < 2 && len(c.lifted) == 0 || len(c.parts) == 0) {
@@ -323,25 +324,27 @@ conjoin_objects :: proc(b: ^Builder, d: ^rules.Description, parts: []rules.Node_
 	ANY :: rules.Object{additional = rules.NONE, keys = rules.NONE}
 	out := ANY
 	members, dependents := make([dynamic]rules.Member, arena), make([dynamic]rules.Dependent, arena)
-	for p in parts {
+	listed := make(map[string]struct{}, arena)
+	named := make([]rules.Member_Names, len(parts), arena)
+	for p, j in parts {
 		o := d.objects[d.nodes[p].object] if d.nodes[p].object >= 0 else ANY
 		out.additional = conjoin_pair(b, d, out.additional, o.additional)
 		out.keys = conjoin_pair(b, d, out.keys, o.keys)
 		append(&dependents, ..o.dependents)
 		for m in o.members {
-			if !has_member(members[:], m.name) {
+			if m.name not_in listed {
+				listed[m.name] = {}
 				append(&members, rules.Member{name = m.name, node = rules.NONE, only_required = true})
 			}
 		}
+		named[j] = rules.member_names(o.members, arena)
 	}
 	for &m in members {
-		for p in parts {
+		for p, j in parts {
 			o := d.objects[d.nodes[p].object] if d.nodes[p].object >= 0 else ANY
 			value := o.additional
-			for x in o.members {
-				if x.name != m.name {
-					continue
-				}
+			for k := rules.first_named(&named[j], m.name); k >= 0; k = rules.next_named(&named[j], k) {
+				x := o.members[k]
 				m.required ||= x.required
 				value = o.additional if x.only_required else x.node
 				if x.rules != {} {
@@ -361,16 +364,6 @@ conjoin_objects :: proc(b: ^Builder, d: ^rules.Description, parts: []rules.Node_
 	}
 	out.members, out.dependents = members[:], dependents[:]
 	return out, true
-}
-
-@(private = "file")
-has_member :: proc(members: []rules.Member, name: string) -> bool {
-	for m in members {
-		if m.name == name {
-			return true
-		}
-	}
-	return false
 }
 
 // The array block of the conjoined parts: each position valued by what all parts take there.
