@@ -463,6 +463,13 @@ st_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 				return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
 		}
+		when FEATURES[S] == {} {
+			if w.run != nil {
+				if q := run_next(w.run, p); q != nil {
+					return #must_tail st_value(q, end, 0, ind, w, hs.a, hs.b, hs.c, on)
+				}
+			}
+		}
 		return fault(w, hs, p, .None)
 	}
 	q := indent_fast(p, end, &ind, .Close)
@@ -509,6 +516,7 @@ st_after_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64
 	ind := ind
 	q := skip_indent(p, end, &ind, .Close)
 	if q >= end {
+		w.ended = true
 		return fault(w, hs, end, .Truncated)
 	}
 	if q[0] == ',' {
@@ -709,7 +717,7 @@ st_keep :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w:
 			// The builder's walk reads the container as a document's root, as `pass_over` does.
 			parent := d >> 1 - 1
 			regs := hs
-			v := Walk(S, build.Builder){w.base, &w.hooks.b, w.stack[parent:], &regs, w.depth - parent, w.tier, false, w.tolerate, w.finite, false, false, nil, 0, w.limit - parent}
+			v := Walk(S, build.Builder){w.base, &w.hooks.b, w.stack[parent:], &regs, w.depth - parent, w.tier, false, w.tolerate, w.finite, false, false, false, nil, 0, w.limit - parent, nil}
 			r := enter(.Open, p, end, 2 | d & 1, ind, &v, hs.a, hs.b, hs.c, build.builder_hook_plain)
 			if v.owned {
 				drop_stack(v.stack)
@@ -808,6 +816,13 @@ st_after_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind:
 			if x := kernel.skip_ws(p, end); x < end && gap_lead(x, S) {
 				w.resume, w.crossed = x, false
 				return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+		}
+		when FEATURES[S] == {} {
+			if w.run != nil {
+				if q := run_next(w.run, p); q != nil {
+					return #must_tail st_value(q, end, 0, ind, w, hs.a, hs.b, hs.c, on)
+				}
 			}
 		}
 		return fault(w, hs, p, .None)

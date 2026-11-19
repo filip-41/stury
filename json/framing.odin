@@ -488,6 +488,76 @@ judge_spec :: #force_inline proc(it: ^records.Reader, rec: records.Record, $S: S
 	return seq_fault(it, rec, fault) if it.framing == .Seq else fault
 }
 
+// The most bytes a run of NDJSON records that `judge_run_spec` reads in one walk starts before its last line.
+@(private)
+RUN :: 64 * 1024
+
+// A run of NDJSON lines read as one walk, which goes on from each record's root to the next line's: up to `stop`, a line's
+// start or the text's end, while each line holds one value and only whitespace after it.
+@(private)
+Line_Run :: struct {
+	stop:     [^]u8,
+	// The end of the last line whose record the run accepted, and the records accepted.
+	accepted: [^]u8,
+	records:  u64,
+}
+
+// The next line's value after a root that ended at `p`, or nil where the run ends: at `stop`, or at a line that holds
+// more than the root or starts with no value, which `next` and `judge` read alone.
+@(private)
+run_next :: #force_inline proc "contextless" (run: ^Line_Run, p: [^]u8) -> [^]u8 #no_bounds_check {
+	q := p
+	for q < run.stop && (q[0] == ' ' || q[0] == '\t' || q[0] == '\r') {
+		q = q[1:]
+	}
+	if q < run.stop {
+		if q[0] != '\n' {
+			return nil
+		}
+		q = q[1:]
+	}
+	run.accepted = q
+	run.records += 1
+	// A blank line, a line's leading whitespace and a control byte are `frame_line`'s and `judge`'s to read.
+	if q >= run.stop || q[0] <= ' ' {
+		return nil
+	}
+	return q
+}
+
+// `judge_run` of strict JSON under `.Lines`: judges the records from `it.pos` to the end of the line at
+// or past `to` and at most `RUN` bytes on, in one walk, and moves `it.pos` past the last line whose record it accepted,
+// so each record before it is one `judge` accepts. A fault, or a line that holds no value alone, ends the run before
+// that line. A record whose whitespace holds an LF reads as one value across lines, which `judge` refuses line by line,
+// so a run whose lines outnumber its records accepts none.
+@(private)
+judge_run_spec :: proc(it: ^records.Reader, to: u64, $S: Spec) {
+	when FEATURES[S] == {} {
+		src := it.src
+		n := u64(len(src))
+		if it.framing != .Lines || it.pos >= n {
+			return
+		}
+		// The whitespace and blank lines before a record are `frame_line`'s to pass over too.
+		lo := u64(intrinsics.ptr_sub(kernel.skip_ws(raw_data(src)[it.pos:], raw_data(src)[n:]), raw_data(src)))
+		if lo >= n || src[lo] < ' ' {
+			return
+		}
+		hi := min(to, lo + RUN)
+		hi = n if hi >= n else min(find_byte(src, hi, '\n') + 1, n)
+		run := Line_Run{stop = raw_data(src)[hi:], accepted = raw_data(src)[lo:]}
+		walk_run(src, lo, &run, options_of(it.as))
+		upto := u64(intrinsics.ptr_sub(run.accepted, raw_data(src)))
+		lines := u64(kernel.count_byte(src[lo:upto], '\n'))
+		if upto == n && upto > lo && src[n - 1] != '\n' {
+			lines += 1
+		}
+		if lines == run.records {
+			it.pos = upto
+		}
+	}
+}
+
 // A `.Seq` record of the bytes before the first 0x1E, in `it.state[1]`.
 @(private)
 UNFRAMED :: 1

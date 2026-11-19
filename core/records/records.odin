@@ -121,6 +121,11 @@ Framing_Services :: struct {
 	next:   [core.Framing]proc(it: ^Reader) -> (Record, bool),
 	// The fault of a record `next` gave, or nil, as the format's validate of the record's text at its place says.
 	judge:  proc(it: ^Reader, rec: Record) -> Maybe(core.Fault),
+	// Judges the records from `it.pos` toward the first that starts at or past `to` in one pass, and moves `it.pos` past
+	// the last it accepted: each record before the new `it.pos` is one `judge` accepts. A record the pass cannot vouch for
+	// stays at `it.pos` for `next` and `judge`, which give its fault. A read with no pieces takes it. nil judges each
+	// record alone.
+	judge_run: proc(it: ^Reader, to: u64),
 	// Moves a copy of a reader to the first place at or past its `pos` and before `to` where a record may start, and
 	// marks it as a piece's, whose `next` may end on any fault with no cost to find the one `validate` gives. Returns
 	// false when there is none. nil reads a text on the calling thread alone.

@@ -64,13 +64,36 @@ sixteen_text :: #force_inline proc "contextless" (dst: [^]u8, high, low: u64) {
 	low_fours := low + (1 << 32 - 10000) * ((low * QUOTIENT) >> 40)
 	fours := transmute(#simd[4]u32)(#simd[2]u64{high_fours, low_fours})
 	fours = simd.shuffle(fours, fours, 1, 0, 3, 2) // the quotient first
-	pairs := simd.shr(fours * ((1 << 19) / 100 + 1), 19)
-	pair_rems := fours - pairs * 100
-	both := transmute(#simd[8]u16)(pairs | simd.shl(pair_rems, 16))
+	both := hundreds(fours)
 	tens := simd.shr(both * ((1 << 10) / 10 + 1), 10)
 	ones := both - tens * 10
 	digits := transmute(#simd[16]u8)(tens | simd.shl(ones, 8))
 	intrinsics.unaligned_store((^#simd[16]u8)(dst), digits | 0x30)
+}
+
+// Splits each lane of `fours`, each below 10^4, into its hundreds, in the lane's low 16 bits, and the rest, in its high
+// 16. x86 multiplies 32-bit lanes in about 10 cycles and 16-bit lanes in 5, and every lane fits 16 bits, so there the
+// hundreds are a 16-bit multiply-high by 2^22 / 100 rounded up, then a shift by 6, exact below 10^4.
+@(private = "file")
+hundreds :: #force_inline proc "contextless" (fours: #simd[4]u32) -> #simd[8]u16 {
+	when ODIN_ARCH == .amd64 {
+		H :: #simd[8]u16
+		v := transmute(H)fours
+		h := simd.shr(pmulhuw(v, H((1 << 22) / 100 + 1)), 6)
+		return transmute(H)(transmute(#simd[4]u32)h | simd.shl(transmute(#simd[4]u32)(v - h * 100), 16))
+	} else {
+		pairs := simd.shr(fours * ((1 << 19) / 100 + 1), 19)
+		return transmute(#simd[8]u16)(pairs | simd.shl(fours - pairs * 100, 16))
+	}
+}
+
+when ODIN_ARCH == .amd64 {
+	// SSE2's 16-bit multiply-high, which every x86-64 CPU has. LLVM does not select it from a widened multiply here.
+	@(private = "file", default_calling_convention = "none")
+	foreign _ {
+		@(link_name = "llvm.x86.sse2.pmulhu.w")
+		pmulhuw :: proc(a, b: #simd[8]u16) -> #simd[8]u16 ---
+	}
 }
 
 // `x` < 10^8 as eight digit values 0..9, the most significant in the low byte.

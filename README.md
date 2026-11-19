@@ -18,8 +18,9 @@
 - **Schema diff:** compare two versions of a schema and get a proven answer on backward and forward compatibility,
   with a value that breaks it when it does not hold.
 - **Speed:** a filter that names a path reads only that path, and a large input is split across cores. On the
-  command-line benchmark stury is 2.4 to 290 times faster than jq, jaq, gojq and yq, and the library builds a JSON
-  document faster than yyjson and simdjson ([benchmarks](docs/benchmarks.md)).
+  command-line benchmark stury is 2.2 to 290 times faster than jq, jaq, gojq and yq on an Apple M5 Max and an x86-64
+  Xeon. The library builds a JSON document faster than yyjson on both, and than simdjson on the M5, within 5% of it on
+  the Xeon ([benchmarks](docs/benchmarks.md)).
 
 Formats:
 

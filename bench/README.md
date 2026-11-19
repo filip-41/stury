@@ -22,6 +22,13 @@ ones with Cargo. A driver whose toolchain is missing is left out with a note. `m
 drivers, and the first build downloads the pinned C, C++ and Rust sources. The command line comparisons also need
 hyperfine and the other tools on `PATH`.
 
+On x86-64 the other libraries should be built for the host CPU, as the published x86-64 figures were, so each has its
+widest vector kernels. Remove `build/bench/cmake` first, since CMake keeps the flags of its first configure:
+
+```sh
+CFLAGS=-march=native CXXFLAGS=-march=native RUSTFLAGS='-C target-cpu=native' make bench-peers
+```
+
 ## How a figure is made
 
 - **Timing:** each arm's figure is the median of ten calls after two warm-ups, and a lane prints the best of `ROUNDS`
