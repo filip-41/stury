@@ -1,8 +1,9 @@
 # Benchmarks
 
 This page describes what the harness in [bench/](../bench/README.md) measures and how, what each comparison holds
-equal for every tool, and the figures measured on the released tree. They come from one machine, named with the set.
-Other data, filters and hardware give other numbers. A figure that is not on this page was not measured.
+equal for every tool, and the figures measured on two machines: an Apple M5 Max on the released tree, and an x86-64
+Xeon on the tree after it, each named with its set. Other data, filters and hardware give other numbers. A figure
+that is not on this page was not measured.
 
 ## What is compared
 
@@ -16,7 +17,7 @@ Other data, filters and hardware give other numbers. A figure that is not on thi
 | Edit lane | commit 1000 edits spread over a file's values | lol_html, toml_edit | `make bench-edit` |
 | Schema lane | judge instances against JSON Schemas | Blaze, jsonschema-rs, boon | `make bench-schema` |
 | Model lane | load and dump records through a model with rules | pydantic, msgspec, serde_json with garde | `make bench-model` |
-| Command line | filters over files, end to end | jq, jaq, gojq, yq, qsv, Miller, xmllint, dasel, htmlq, pup | `make bench-cli`, `bench cli --suite NAME` |
+| Command line | filters over files, end to end | jq, jaq, gojq, yq, qsv, Miller, xmllint, xmlstarlet, dasel, htmlq, pup | `make bench-cli`, `bench cli --suite NAME` |
 
 The fixtures are pinned: the corpus files and the other libraries' sources by URL and SHA-256 (`bench/CMakeLists.txt`,
 `bench/fixtures.toml`), and the synthetic files by `bench/fixtures.toml` (`bench fixtures --check`). The synthetic files
@@ -35,8 +36,11 @@ format.
 - Every arm prints a check of what it read or wrote, and no row is timed unless the checks agree. A row that cannot be
   checked says why in its `lane.toml`.
 - Each other library is built from its pinned source with `-O3 -DNDEBUG`, the Rust arms in release with fat LTO, and
-  stury at `-o:speed`. A library whose toolchain or sources are missing is reported as left out.
-- Memory figures are the peak RSS of each child, taken from `wait4`, the median over the rounds.
+  stury at `-o:speed`. A library whose toolchain or sources are missing is reported as left out. On x86-64 the other
+  libraries are also built for the host CPU (`-march=native`, `-C target-cpu=native`), so each has its widest vector
+  kernels, as stury picks its own when it runs.
+- Memory figures are the peak RSS of each child, taken from `wait4`, the median over the rounds. On Linux that peak
+  includes the image of the runner that forked the child, so the x86-64 set gives none.
 
 ## Fairness rules
 
@@ -66,7 +70,7 @@ Each pair does the same work under the same guarantee, or the table names the di
   1 MiB or more on every core, as it does for a user. Every tool must give the same answers before it is timed, and a
   tool that cannot spell a filter is left out of that row.
 
-## Results
+## Results on an Apple M5 Max
 
 Measured on 2026-11-18 on an Apple M5 Max (18 cores), macOS 27.2, with Odin dev-2026-11 at `-o:speed` and five rounds
 for the library lanes. Every runner prints the Odin version, the CPU and the date it ran with. Every other library was
@@ -495,6 +499,369 @@ time.
 yq differs on `toml_pyproject_json`: it reads the keys of `pyproject-airflow.toml`'s `extend-per-file-ignores` table into
 other members, where stury and Python's `tomllib` agree. yq has no arm on `logs.toml`, which it did not answer in forty
 CPU minutes.
+
+## Results on x86-64
+
+Measured on 2026-11-18 on an Intel Xeon at 2.10 GHz with AVX-512, four vCPUs of a KVM guest, Ubuntu 24.04 with Linux
+6.18, with Odin dev-2026-11 at `-o:speed` and five rounds for the library lanes. The tree is the one after the release,
+so its figures include changes the M5 set does not. Every other library is built for the host CPU. The set differs
+from the M5's in these ways:
+
+- It gives no memory figures, since on Linux each child's peak includes the runner's own image.
+- The four files the corpus takes from web.archive.org (`nasa.xml`, `whatwg-html.html` and the two Wikipedia pages)
+  could not be fetched, so their rows are absent.
+- qsv did not build, so the csv suite has no qsv arm. xmlstarlet is in the xml suite.
+- The toml suite ran on 2026-11-19 on a Xeon at 2.30 GHz, after the guest moved host, against the same builds.
+- The threaded record lanes run six threads on four vCPUs, and the command line answers on four cores where the M5
+  has 18. Each command line figure is therefore against a stury with fewer cores than on the M5.
+
+simdjson's stage 1 widens with AVX-512, while stury's document walk goes a token at a time, so simdjson, which trails
+stury on the M5, draws level with it here and passes it in a few rows.
+
+### JSON documents
+
+| Build | stury | yyjson | simdjson | sonic-rs |
+| --- | ---: | ---: | ---: | ---: |
+| logs.json | 2.59 | 1.47 | 2.71 | 1.18 |
+| citm_catalog.json | 4.23 | 2.35 | 4.39 | 2.05 |
+| table.csv | 1.67 | - | - | - |
+| logs.jsonc | 1.92 | - | - | - |
+| logs.json5 | 1.98 | - | - | - |
+
+| Read every value | stury | yyjson | simdjson | sonic-rs |
+| --- | ---: | ---: | ---: | ---: |
+| logs.json | 1.54 | 1.47 | 1.93 | 0.71 |
+| citm_catalog.json | 3.00 | 2.05 | 2.62 | 1.52 |
+| table.csv | 0.64 | - | - | - |
+| logs.jsonc | 1.81 | - | - | - |
+| logs.json5 | 1.22 | - | - | - |
+
+| Look up one key | stury | yyjson | simdjson | sonic-rs |
+| --- | ---: | ---: | ---: | ---: |
+| logs.json | 2.10 | 1.34 | 1.90 | 0.88 |
+| citm_catalog.json | 3.17 | 2.45 | 2.95 | 1.58 |
+| table.csv | 0.98 | - | - | - |
+| logs.jsonc | 1.56 | - | - | - |
+| logs.json5 | 1.61 | - | - | - |
+
+simdjson builds both JSON fixtures 4 to 5% faster than stury, and reads every value of `logs.json` 25% faster. stury is
+ahead on `citm_catalog.json`'s read and on both key lanes. yyjson and sonic-rs trail in every lane.
+
+### JSON paths
+
+ns per call, the arms as in the M5 set.
+
+| The whole text read | scan | build_query | simd |
+| --- | ---: | ---: | ---: |
+| get early | 3,786,424 | 8,614,034 | 653,983 |
+| get middle | 3,653,898 | 8,998,465 | 1,553,665 |
+| get late | 3,886,307 | 7,993,328 | 2,090,084 |
+| get absent | 3,906,350 | 8,662,761 | 2,065,667 |
+| get last root key | 153,659 | 171,914 | 81,416 |
+
+| The text read up to the answer | stop | sonic |
+| --- | ---: | ---: |
+| get early | 226 | 39 |
+| get middle | 1,984,074 | 2,228,157 |
+| get late | 3,211,214 | 4,874,836 |
+| get absent | 3,993,897 | 10,159,482 |
+| get last root key | 155,186 | 327,749 |
+
+| Path | scan | query |
+| --- | ---: | ---: |
+| .logs[].id | 5,737,310 | 2,214,160 |
+| .logs[][] | 15,149,445 | 3,836,673 |
+| .logs[-1] | 3,824,698 | 1,031,332 |
+| .logs[-20] | 3,817,437 | 1,238,356 |
+| five keys per record | 21,197,135 | 10,173,320 |
+
+simdjson's `find_field` is ahead of the scan on every key here, 1.9 to 5.8 times, judging less. sonic-rs's `get` is
+ahead on the early key, and stury's stopped scan on every other.
+
+### JSON typed read
+
+| Borrow | stury | serde_json | sonic-rs |
+| --- | ---: | ---: | ---: |
+| logs.json | 2.59 | 0.67 | 1.15 |
+| twitter.json | 2.20 | 1.13 | 1.61 |
+| citm_catalog.json | 3.45 | 1.53 | 2.04 |
+| table.csv | 0.66 | - | - |
+| text.csv | 0.95 | - | - |
+
+| Copy | stury | serde_json | sonic-rs |
+| --- | ---: | ---: | ---: |
+| logs.json | 1.39 | 0.69 | 1.01 |
+| twitter.json | 2.20 | 1.06 | 1.93 |
+| citm_catalog.json | 3.48 | 1.23 | 2.53 |
+| table.csv | 0.49 | - | - |
+| text.csv | 0.64 | - | - |
+
+### JSON records
+
+| Judge, one thread | stury | simd | simd_od | serde_json | sonic-rs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| logs.ndjson | 2.95 | 2.15 | 4.00 | 1.52 | 0.69 |
+| docs.ndjson | 0.48 | 0.74 | 1.54 | 0.58 | 0.46 |
+| twitter.ndjson | 3.11 | 3.64 | 5.15 | 2.62 | 0.86 |
+
+| Judge, threaded | stury, 6 threads | simd | simd_od |
+| --- | ---: | ---: | ---: |
+| logs.ndjson | 7.44 | 2.48 | 4.21 |
+| docs.ndjson | 1.76 | 0.83 | 1.98 |
+| twitter.ndjson | 8.17 | 3.94 | 5.21 |
+
+| A document per record | stury | serde_json `Value` | sonic-rs `Value` |
+| --- | ---: | ---: | ---: |
+| logs.ndjson | 0.78 | 0.24 | 0.07 |
+| docs.ndjson | 0.36 | 0.13 | 0.13 |
+| twitter.ndjson | 2.52 | 0.22 | 0.44 |
+
+| Frame CSV records | stury | simd-csv |
+| --- | ---: | ---: |
+| table.csv | 4.07 | 4.23 |
+| text.csv | 3.83 | 2.31 |
+
+On one thread simdjson's On-Demand skip, judging less, is ahead on all three files, its tape on `docs.ndjson` and
+`twitter.ndjson`, and serde_json on `docs.ndjson`. Threaded, stury leads on `logs.ndjson` and
+`twitter.ndjson`, and the On-Demand skip on `docs.ndjson`. simd-csv frames `table.csv` 4% faster.
+
+### JSON writes
+
+| Typed, compact | stury | yyjson | sonic-rs | serde_json |
+| --- | ---: | ---: | ---: | ---: |
+| logs.json | 3.69 | 0.77 | 2.02 | 1.39 |
+| twitter.json | 3.81 | 1.77 | 3.57 | 1.34 |
+| citm_catalog.json | 2.42 | 1.55 | 1.86 | 1.38 |
+| canada.json | 0.79 | 0.53 | 0.93 | 1.22 |
+| nested.json | 1.16 | 0.44 | 0.99 | 1.04 |
+| wide.json | 0.071 | 0.068 | 0.105 | 0.100 |
+
+| Document, compact | stury | yyjson | simdjson | simdjson minify | sonic-rs | serde_json |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| logs.json | 11.73 | 2.09 | 0.58 | 10.96 | 1.52 | 0.51 |
+| twitter.json | 11.89 | 6.50 | 1.44 | 23.43 | 3.09 | 1.64 |
+| citm_catalog.json | 10.53 | 8.50 | 2.79 | 19.55 | 2.65 | 2.51 |
+| canada.json | 13.25 | 1.10 | 0.56 | 12.18 | 1.00 | 0.68 |
+| pretty.json | 13.96 | 4.21 | 0.72 | 14.27 | 1.26 | 1.21 |
+| utf8.json | 12.47 | 0.53 | 0.71 | 12.18 | 10.84 | 3.31 |
+| escape.json | 11.50 | 0.84 | 0.41 | 12.47 | 0.51 | 0.29 |
+| longtext.json | 12.47 | 3.45 | 0.77 | 13.41 | 12.60 | 3.27 |
+
+stury writes a document ahead of every library that writes a value it holds, except sonic-rs on `longtext.json`, by 1%.
+simdjson's minifier, which does not judge, is ahead on five files. serde_json and sonic-rs are ahead on the typed
+`canada.json` and `wide.json`, and on the pretty writes every library is ahead on `wide.json`, the sorted map of 342,658
+keys.
+
+### Other formats: documents
+
+| YAML build | stury | rapidyaml | libfyaml | libyaml | saphyr |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| logs.yaml | 0.34 | 0.09 | 0.03 | 0.06 | 0.05 |
+| twitter.yaml | 0.38 | 0.14 | 0.05 | 0.09 | 0.05 |
+| citm.yaml | 0.18 | 0.07 | 0.02 | 0.05 | 0.03 |
+| openapi-stripe.yaml | 0.42 | 0.13 | 0.06 | 0.08 | 0.06 |
+
+| TOML build | stury | toml++ | toml11 | toml |
+| --- | ---: | ---: | ---: | ---: |
+| logs.toml | 0.33 | 0.04 | 0.002 | 0.06 |
+| cargo-lock-zed.toml | 0.42 | 0.05 | 0.004 | 0.12 |
+| uv-lock-airflow.toml | 0.44 | 0.06 | 0.008 | 0.12 |
+| pyproject-airflow.toml | 0.45 | 0.07 | 0.008 | 0.18 |
+
+| XML build | stury | pugixml_nv | quickxml_nv | libxml2 | roxmltree |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| logs.xml | 0.74 | 0.45 | 0.41 | 0.08 | 0.18 |
+| osm-beatty.xml | 0.85 | 0.75 | 1.05 | 0.08 | 0.23 |
+
+| XML validate | stury | expat | libxml2 SAX | quickxml_nv |
+| --- | ---: | ---: | ---: | ---: |
+| logs.xml | 1.14 | 0.25 | 0.33 | 0.46 |
+| osm-beatty.xml | 1.15 | 0.24 | 0.30 | 1.05 |
+
+| logs.html | stury | lexbor | gumbo | html5ever |
+| --- | ---: | ---: | ---: | ---: |
+| build | 0.094 | 0.102 | 0.027 | 0.065 |
+| read | 0.095 | 0.098 | 0.024 | 0.056 |
+| key | 0.093 | 0.115 | 0.023 | 0.068 |
+
+| CBOR build | stury | ciborium | minicbor | tinycbor | QCBOR | libcbor |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| logs.cbor | 2.52 | 0.22 | 0.47 | 0.57 | 0.91 | 0.28 |
+| twitter.cbor | 2.59 | 0.22 | 0.57 | 0.55 | 1.02 | 0.28 |
+| citm.cbor | 1.02 | 0.09 | 0.32 | 0.38 | 0.41 | 0.10 |
+
+stury builds YAML, TOML, XML and CBOR faster than their libraries that judge the same, and is ahead of pugixml on both
+XML files.
+quickxml_nv, judging less, builds `osm-beatty.xml` 23% faster. lexbor is ahead on `logs.html` in all three lanes, by 3
+to 24%.
+
+### Other formats: paths
+
+ns per call over the logs records, as in the M5 set.
+
+| The whole text read | stury scan | stury build_query | other libraries |
+| --- | ---: | ---: | --- |
+| YAML early | 19,285,856 | 24,722,653 | rapidyaml build and query 100,935,759 |
+| YAML late | 19,118,014 | 25,436,530 | rapidyaml build and query 101,453,560 |
+| TOML early | 24,641,733 | 28,885,461 | toml++ 265,775,454 |
+| TOML late | 25,648,166 | 33,983,594 | toml++ 285,434,979 |
+| XML early | 9,436,462 | 13,991,404 | pugixml_nv 38,647,501 |
+| XML late | 12,207,721 | 20,486,853 | pugixml_nv 44,345,781, quickxml_nv 27,219,676 |
+| CBOR early | 2,885,777 | 5,036,201 |  |
+| CBOR late | 2,421,569 | 6,099,915 | minicbor, stopping at the answer, 6,350,464 |
+| HTML first cell | 101,024,838 | 101,937,033 | lexbor 88,847,763 |
+| HTML last cell | 104,079,176 | 104,520,087 | lexbor 99,162,666 |
+
+| The text read up to the answer | stury stop | other libraries |
+| --- | ---: | --- |
+| YAML early | 1,163 |  |
+| TOML early | 5,890 |  |
+| XML early | 845 | quickxml_nv 688,706 |
+| CBOR early | 486 | minicbor 198 |
+| HTML first cell | 99,026,347 |  |
+
+lexbor is ahead on both HTML cells, and minicbor on the early CBOR field.
+
+### Other formats: typed reads and writes
+
+| Typed read, borrow | stury | other libraries |
+| --- | ---: | --- |
+| logs.yaml | 0.21 | serde_yaml_ng 0.04 |
+| logs.toml | 0.18 | toml 0.06 |
+| logs.xml | 0.33 | quickxml_nv 0.19 |
+| logs.cbor | 1.49 | ciborium 0.35, minicbor 1.23 |
+
+| Typed read, copy | stury | other libraries |
+| --- | ---: | --- |
+| logs.yaml | 0.20 | serde_yaml_ng 0.04 |
+| logs.toml | 0.18 | toml 0.07 |
+| logs.xml | 0.13 | quickxml_nv 0.17 |
+| logs.cbor | 0.81 | ciborium 0.35, minicbor 0.71 |
+
+| Typed write | stury | other libraries |
+| --- | ---: | --- |
+| logs.yaml | 0.41 | rapidyaml 0.22, serde_yaml_ng 0.07 |
+| logs.toml | 0.50 | toml 0.55 |
+| logs.xml | 0.29 | quick-xml 0.34 |
+| logs.cbor | 2.90 | ciborium 2.23, minicbor 4.55, tinycbor 1.49 |
+
+| Document write | stury | other libraries |
+| --- | ---: | --- |
+| logs.yaml | 0.41 | rapidyaml 0.96, serde_yaml_ng 0.07 |
+| logs.toml | 0.57 | toml++ 0.15, toml 0.31 |
+| logs.xml | 2.08 | pugixml 1.34, quick-xml 0.41 |
+| logs.cbor | 2.26 | ciborium 1.31, minicbor 1.85 |
+| logs.html | 0.07 | lexbor 0.27, html5ever 0.26 |
+
+stury reads every format into a type faster than its libraries, except quick-xml when the XML strings are copied. The
+writes trail on the TOML, XML and CBOR typed writes and on the YAML and HTML documents.
+
+### Other formats: records
+
+| Judge, one thread | stury | other libraries |
+| --- | ---: | --- |
+| logs.seq.cbor | 2.49 | ciborium 0.34, minicbor 1.09 |
+| k8s-prometheus-operator.yaml | 0.86 | libyaml 0.18 |
+| k8s-argo-cd.yaml | 0.66 | libyaml 0.18 |
+
+| A document per record | stury | other libraries |
+| --- | ---: | --- |
+| logs.seq.cbor | 0.71 | ciborium `Value` 0.22 |
+| k8s-prometheus-operator.yaml | 0.33 | rapidyaml 0.24, libyaml 0.15 |
+| k8s-argo-cd.yaml | 0.30 | rapidyaml 0.18, libyaml 0.10 |
+
+### Edits
+
+| Edit | stury | other libraries |
+| --- | ---: | --- |
+| logs.json | 0.96 |  |
+| twitter.json | 1.52 |  |
+| table.csv | 0.48 |  |
+| logs.json5 | 0.88 |  |
+| logs.yaml | 0.20 |  |
+| logs.toml | 0.17 | toml_edit 0.12 |
+| logs.xml | 0.67 |  |
+| logs.html | 0.09 | lol_html 0.13 |
+
+lol_html is 37% ahead on HTML, and stury 39% ahead of toml_edit.
+
+### JSON Schema
+
+| Verdict | stury | Blaze | jsonschema-rs | boon |
+| --- | ---: | ---: | ---: | ---: |
+| geojson | 0.51 | 0.11 | 0.16 | 0.06 |
+| openapi | 0.17 | 0.23 | 0.21 | 0.14 |
+| draft-04 | 0.41 | 0.22 | 0.20 | 0.14 |
+| cmake-presets | 0.19 | 0.16 | 0.07 | 0.02 |
+| ui5-manifest | 0.10 | 0.11 | 0.14 | - |
+| helm-chart-lock | 0.57 | 0.23 | 0.28 | 0.23 |
+| cspell | 0.41 | 0.20 | 0.16 | - |
+| deno | 0.72 | 0.20 | 0.29 | 0.24 |
+| code-climate | 0.48 | 0.13 | 0.13 | 0.14 |
+| pulumi | 0.40 | 0.17 | 0.21 | 0.17 |
+| aws-cdk | 1.49 | 0.32 | 0.26 | 0.24 |
+| ansible-meta | 0.13 | 0.12 | 0.13 | 0.03 |
+| clang-format | 0.35 | 0.23 | 0.21 | 0.17 |
+| babelrc | 0.40 | 0.12 | 0.16 | 0.11 |
+| krakend | - | 0.14 | 0.16 | 0.12 |
+| logs | 0.52 | 0.30 | 0.36 | 0.23 |
+| twitter | 0.57 | 0.19 | 0.16 | 0.15 |
+| citm | 0.77 | 0.17 | 0.12 | 0.11 |
+| applicator | 0.04 | 0.07 | 0.08 | 0.04 |
+| logs.yaml | 0.18 | - | 0.03 | 0.03 |
+| logs.toml | 0.16 | - | 0.05 | 0.05 |
+| logs.cbor | 0.50 | - | 0.11 | 0.09 |
+| logs.xml | 0.28 | - | 0.07 | - |
+| geomean over Blaze | 2.04 | 1.00 | 1.01 | 0.66 |
+
+The refusals are as in the M5 set. Blaze and jsonschema-rs are ahead on `openapi`, `ui5-manifest` and `applicator`.
+
+### Models
+
+|  | stury | pydantic | msgspec | garde |
+| --- | ---: | ---: | ---: | ---: |
+| load valid, logs | 0.36 | 0.09 | 0.15 | 0.12 |
+| load valid, twitter | 0.86 | 0.37 | 0.56 | 0.58 |
+| load invalid, every failure, logs | 0.22 | 0.06 | - | 0.13 |
+| load invalid, every failure, twitter | 0.81 | 0.26 | - | 0.56 |
+| load invalid, first failure, logs | 0.42 | - | 0.20 | - |
+| load invalid, first failure, twitter | 0.92 | - | 0.87 | - |
+| dump, logs | 0.90 | 0.21 | 0.61 | 0.82 |
+| dump, twitter | 1.90 | 0.28 | 1.46 | 1.26 |
+
+stury leads every row.
+
+### Command line
+
+The jq suite:
+
+| Tool | cases | geomean × stury | min × stury | answer differs |
+| --- | ---: | ---: | ---: | ---: |
+| jq | 30 | 13.41 | 3.98 | 0 |
+| jaq | 30 | 7.62 | 2.23 | 0 |
+| gojq | 30 | 11.83 | 4.18 | 0 |
+| yq | 11 | 56.36 | 13.78 | 0 |
+
+The closest cases to jaq are `twitter_select` (2.23×), `twitter_pretty` (2.55×) and `twitter_names` (2.70×).
+
+The other suites:
+
+| Suite | Tool | cases | geomean × stury | min × stury | answer differs |
+| --- | --- | ---: | ---: | ---: | ---: |
+| csv | jq | 2 | 39.37 | 16.12 | 0 |
+| csv | Miller | 4 | 14.93 | 9.19 | 0 |
+| xml | xmllint | 6 | 4.28 | 0.97 | 0 |
+| xml | xmlstarlet | 7 | 7.58 | 1.44 | 0 |
+| xml | yq | 7 | 43.23 | 10.66 | 0 |
+| toml | dasel | 6 | 7.15 | 3.59 | 0 |
+| toml | yq | 4 | 1449.93 | 21.99 | 1 |
+| yaml | dasel | 7 | 20.37 | 11.08 | 0 |
+| yaml | yq | 10 | 15.11 | 5.43 | 0 |
+| html | htmlq | 2 | 2.19 | 2.17 | 0 |
+| html | pup | 2 | 1.93 | 1.90 | 0 |
+
+xmllint is 1.03 times faster than stury on `xml_osm_user_raw`, one attribute of a 380 KB file, where process start is
+most of the time. yq differs on `toml_pyproject_json` as in the M5 set, and has no arm on `logs.toml`.
 
 ## Running
 
