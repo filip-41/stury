@@ -4,6 +4,8 @@ fixed width. Each file is long enough to be answered in pieces on the pool's thr
 
 import json
 import os
+import subprocess
+import sys
 
 import pytest
 
@@ -115,3 +117,14 @@ def test_files_ahead_hold_bounded_output(stury, tmp_path, files, lines):
     filter = '(reduce range(.slow) as $i (0; . + 1) | empty), (range(.lines) | "%s")' % ("x" * 100)
     held = peak_over(stury, ["--threads", str(POOL_WIDTH), "-r", filter], [str(tmp_path)])
     assert held <= HELD_PEAK, f"{held >> 20} MiB"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="macOS enforces no RLIMIT_AS")
+@pytest.mark.parametrize("limit", [3 << 30, 1 << 30])
+def test_run_under_address_space_limit(stury, limit):
+    """The interpreter's stack is a reservation of address space: a run under `ulimit -v` takes a smaller one."""
+    import resource
+
+    cap = lambda: resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+    p = subprocess.run([stury, "-n", "-c", "[1, 2] | map(. + 1)"], capture_output=True, preexec_fn=cap)
+    assert (p.returncode, p.stdout, p.stderr) == (0, b"[2,3]\n", b"")

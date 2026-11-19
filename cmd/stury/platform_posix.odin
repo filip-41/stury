@@ -15,12 +15,16 @@ import "message"
 @(private = "file")
 STACK_GUARD :: 1 << 20
 @(private = "file")
+MIN_DEEP_STACK :: 16 << 20
+@(private = "file")
 stack_guard: [2]uintptr
 @(private = "file")
 fault_stack: [1 << 16]byte
 
-// `body` on the interpreter's stack. If that cannot be had, the run ends as one that is out of memory, since a
-// filter on this thread's stack would have no guard against its recursion.
+// `body` on the interpreter's stack, DEEP_STACK reserved or the largest of its quarters, down to MIN_DEEP_STACK, that
+// the address space allows (a run under `ulimit -v`). The guard sits at the bottom of what was got, so a deep recursion
+// ends as jq's does at any size. If none can be had, the run ends as one that is out of memory, since a filter on this
+// thread's stack would have no guard against its recursion.
 run_deep :: proc(run: ^Run, ins: ^Inputs, body: proc(run: ^Run, ins: ^Inputs)) {
 	// Process-wide, so it covers every thread and the fallbacks below. The interpreter's thread adds its alternate
 	// stack.
@@ -29,18 +33,23 @@ run_deep :: proc(run: ^Run, ins: ^Inputs, body: proc(run: ^Run, ins: ^Inputs)) {
 	posix.sigaction(.SIGBUS, &act, nil)
 	MAP_NORESERVE :: 0x4000 when ODIN_OS == .Linux else 0 // a reservation, not memory set aside
 	flags := transmute(posix.Map_Flags)i32(posix.MAP_PRIVATE | posix.MAP_ANONYMOUS | MAP_NORESERVE)
-	base := posix.mmap(nil, DEEP_STACK, {.READ, .WRITE}, flags, -1, 0)
+	size := uint(DEEP_STACK)
+	base := posix.mmap(nil, size, {.READ, .WRITE}, flags, -1, 0)
+	for base == posix.MAP_FAILED && size > MIN_DEEP_STACK {
+		size /= 4
+		base = posix.mmap(nil, size, {.READ, .WRITE}, flags, -1, 0)
+	}
 	if base == posix.MAP_FAILED {
 		out_of_memory()
 	}
 	if posix.mprotect(base, STACK_GUARD, {}) != .OK {
-		posix.munmap(base, DEEP_STACK)
+		posix.munmap(base, size)
 		out_of_memory()
 	}
 	stack_guard = {uintptr(base), uintptr(base) + STACK_GUARD}
 	attr: posix.pthread_attr_t
 	posix.pthread_attr_init(&attr)
-	posix.pthread_attr_setstack(&attr, ([^]byte)(base)[STACK_GUARD:], DEEP_STACK - STACK_GUARD)
+	posix.pthread_attr_setstack(&attr, ([^]byte)(base)[STACK_GUARD:], size - STACK_GUARD)
 	job := Deep_Job{run, ins, body, context}
 	t: posix.pthread_t
 	started := posix.pthread_create(&t, &attr, proc "c" (arg: rawptr) -> rawptr {
@@ -53,7 +62,7 @@ run_deep :: proc(run: ^Run, ins: ^Inputs, body: proc(run: ^Run, ins: ^Inputs)) {
 		return nil
 	}, &job)
 	if started != .NONE {
-		posix.munmap(base, DEEP_STACK)
+		posix.munmap(base, size)
 		out_of_memory()
 	}
 	posix.pthread_join(t, nil)
