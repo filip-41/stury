@@ -27,8 +27,9 @@ Edit_Status :: struct {
 Edit_Run :: struct {
 	run:    ^Run,
 	ins:    ^Inputs,
-	layout: jq.Layout,
-	status: Edit_Status,
+	layout:  jq.Layout,
+	status:  Edit_Status,
+	changed: bool, // the edit would change the file, or changed it
 }
 
 // Holds the filter's outputs.
@@ -71,7 +72,7 @@ refuse_edit :: proc(o: ^Opts) {
 
 // `stury edit`, which edits each file in turn and exits.
 edit_main :: proc(run: ^Run, cli: ^Cli) -> ! {
-	files := input_files(cli.files[:])
+	files := input_files(cli.files[:], cli.walked)
 	if run.opts.in_place {
 		refuse_in_place_inputs(files)
 	}
@@ -89,7 +90,8 @@ edit_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	os.exit(0)
 }
 
-// Each of the files edited in turn, each telling its own fault. The exit is the worst file's, or under `-e` the last
+// Each of the files edited, on the pool's threads unless -e reads the last file's outputs or the filter halts or
+// recurses past the library's cap, each telling its own fault. The exit is the worst file's, or under `-e` the last
 // output's when every file was edited.
 @(private = "file")
 edit_files :: proc(run: ^Run, ins: ^Inputs) {
@@ -99,41 +101,58 @@ edit_files :: proc(run: ^Run, ins: ^Inputs) {
 		ins    = ins,
 		layout = {opts = {pretty = !o.compact, indent = u8(max(o.indent, 0)), tab = o.indent < 0, ascii = o.ascii, sort_keys = o.sort_keys}},
 	}
-	er := &edit
-	jq.set_inputs(&run.ip, {data = ins, next = edit_no_input, position = edit_position})
 	values, temp: virtual.Arena
 	if virtual.arena_init_growing(&values) != nil || virtual.arena_init_growing(&temp) != nil {
 		out_of_memory()
 	}
 	context.allocator = jq.run_allocator(&values)
 	context.temp_allocator = jq.run_allocator(&temp)
-	exit := 0
-	for path in ins.files {
-		code := EXIT_USAGE
-		if spent, read := file_bytes(path, replaced = run.opts.in_place); read {
-			ins.data, ins.name = spent.data, file_name(path)
-			switch {
-			case run.opts.raw_input:
-				code = edit_lines(er, path)
-			case reads_cells(&run.opts):
-				code = edit_table(er, path)
-			case ins.framing == .Concatenated:
-				code = edit_document(er, path)
-			case:
-				code = edit_records(er, path)
-			}
-			free_spent(spent)
-		}
-		exit = max(exit, code)
-		free_all(context.allocator)
-		free_all(context.temp_allocator)
-	}
+	fc := Files_Call{run = run, files = ins.files, job = edit_file, data = &edit, interp = true}
+	each_file(&fc, !o.exit_status && run.shape.serial & {.Halts, .Recurses} == {} && o.max_depth <= core.MAX_DEPTH)
+	tell_changed(&fc)
 	virtual.arena_destroy(&values)
 	virtual.arena_destroy(&temp)
-	if exit == 0 && run.opts.exit_status {
-		exit = 4 if !er.status.any else 1 if er.status.falsy else 0
+	exit := fc.code
+	if exit == 0 && o.exit_status {
+		exit = 4 if !edit.status.any else 1 if edit.status.falsy else 0
 	}
 	os.exit(exit)
+}
+
+// File `k` edited on `r`, its status in `slot`.
+@(private = "file")
+edit_file :: proc(fc: ^Files_Call, r: ^Run, k: int, slot: ^File_Slot) {
+	base := (^Edit_Run)(fc.data)
+	path := fc.files[k]
+	// The interpreter's inputs, which outlive the values a record's edit frees.
+	ins := new_clone(Inputs{files = fc.files[k:k + 1], run = r}, runtime.heap_allocator())
+	defer free(ins, runtime.heap_allocator())
+	ins.source, _ = file_source(&r.opts, path, base.ins.source)
+	er := Edit_Run{r, ins, base.layout, base.status, false}
+	jq.set_inputs(&r.ip, {data = ins, next = edit_no_input, position = edit_position})
+	defer free_all(context.allocator)
+	defer free_all(context.temp_allocator)
+	spent, read := file_bytes(path, replaced = r.opts.in_place)
+	if !read {
+		slot.code = EXIT_USAGE
+		return
+	}
+	defer free_spent(spent)
+	ins.data, ins.name = spent.data, file_name(path)
+	switch {
+	case r.opts.raw_input:
+		slot.code = edit_lines(&er, path)
+	case reads_cells(&r.opts):
+		slot.code = edit_table(&er, path)
+	case ins.framing == .Concatenated:
+		slot.code = edit_document(&er, path)
+	case:
+		slot.code = edit_records(&er, path)
+	}
+	if r == fc.run {
+		base.status = er.status
+	}
+	slot.changed = er.changed
 }
 
 // Runs the filter on `input` and returns its outputs, or false, told, when it fails.
@@ -246,7 +265,7 @@ edit_document :: proc(er: ^Edit_Run, path: string) -> int {
 			out = later
 		}
 	}
-	return edit_publish(er.run, path, src, out)
+	return edit_publish(er, path, src, out)
 }
 
 // The comments of the values the first pass wrote new, written on the nodes the edited text `text` holds for them:
@@ -313,7 +332,9 @@ edit_writes_fact :: proc(list: ^core.Edit_List) -> bool {
 
 // Writes the edited text, or under `--check` names the file when it differs, or under `--in-place` replaces the file
 // with it.
-edit_publish :: proc(run: ^Run, path: string, src, out: []u8) -> int {
+edit_publish :: proc(er: ^Edit_Run, path: string, src, out: []u8) -> int {
+	run := er.run
+	er.changed = !bytes.equal(out, src) && (run.opts.check || run.opts.in_place)
 	if run.opts.diff {
 		diff_preview(run, path, src, out)
 		if !run.opts.in_place {
@@ -322,13 +343,14 @@ edit_publish :: proc(run: ^Run, path: string, src, out: []u8) -> int {
 	}
 	switch {
 	case run.opts.check:
-		if bytes.equal(out, src) {
+		if !er.changed {
 			return 0
 		}
 		message.write_stderr("stury: %s would change\n", file_name(path))
 		return FMT_EXIT_DIFFERS
 	case run.opts.in_place:
-		if !bytes.equal(out, src) && !rewrite_file(path, out) {
+		if er.changed && !rewrite_file(path, out) {
+			er.changed = false
 			return EXIT_USAGE
 		}
 	case:
@@ -555,7 +577,7 @@ edit_records :: proc(er: ^Edit_Run, path: string) -> int {
 			edit_join(&join, r.spans[:], text, fresh)
 		}
 	}
-	return edit_publish(er.run, path, src, edit_join_end(&join, r.spans[:]))
+	return edit_publish(er, path, src, edit_join_end(&join, r.spans[:]))
 }
 
 // Reads a file's records one at a time, for the edit's loop and for the filter's `input`, keeping each one's document,
@@ -798,7 +820,7 @@ edit_lines :: proc(er: ^Edit_Run, path: string) -> int {
 		for v in outs {
 			append(&out, ..raw(v))
 		}
-		return edit_publish(er.run, path, src, out[:])
+		return edit_publish(er, path, src, out[:])
 	}
 	jq.set_inputs(&er.run.ip, {data = rawptr(&r), next = edit_line_input, position = edit_reader_position})
 	defer jq.set_inputs(&er.run.ip, {data = ins, next = edit_no_input, position = edit_position})
@@ -815,7 +837,7 @@ edit_lines :: proc(er: ^Edit_Run, path: string) -> int {
 			edit_join(&join, r.spans[:], raw(v), false)
 		}
 	}
-	return edit_publish(er.run, path, src, edit_join_end(&join, r.spans[:]))
+	return edit_publish(er, path, src, edit_join_end(&join, r.spans[:]))
 }
 
 // The refusal `err` of an edit in a text that starts `by` bytes into the file.

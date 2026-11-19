@@ -133,7 +133,10 @@ diff_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	case cli.files[0] == "-" && cli.files[1] == "-":
 		usage_error("diff reads standard input once, and - names it twice")
 	}
-	a, b := read_operand(o, src, cli.files[0]), read_operand(o, src, cli.files[1])
+	src_a, _ := file_source(o, cli.files[0], src)
+	a := read_operand(o, src_a, cli.files[0])
+	src_b, _ := file_source(o, cli.files[1], src_a)
+	b := read_operand(o, src_b, cli.files[1])
 	r, err := diff.values(a, b, {arrays = d.arrays, keys = d.keys[:], facts = d.facts})
 	if err != nil {
 		out_of_memory()

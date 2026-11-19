@@ -27,7 +27,7 @@ stury check [--from FORMAT|--seq] [--max-depth N] [--threads N] [--schema FILE [
             [--max-errors N] [--report lines|basic|problem]] [FILE...]
 stury check --filter FILTER --schema FILE [--from FORMAT] [-n] [-s] [-R] [--arg...] [-c]
 stury fmt [--from FORMAT] [--to FORMAT] [--schema FILE [--schema-ref DIR] [--schema-draft D] [--format-assert] [--max-errors N]] [--in-place|--check] [--indent N|--tab] [--max-depth N] [--threads N] [FILE...]
-stury edit [--from FORMAT|--seq|-R] [-s] [--in-place|--check|--diff] [--max-depth N] [-f FILE] [-L DIR] [--arg...] FILTER [FILE...]
+stury edit [--from FORMAT|--seq|-R] [-s] [--in-place|--check|--diff] [--max-depth N] [--threads N] [-f FILE] [-L DIR] [--arg...] FILTER [FILE...]
 stury diff [--from FORMAT] [--set|--position] [--key [PATH=]MEMBER]... [--facts] [--json] OLD NEW
 stury diff --old-schema FILE --new-schema FILE [--compat backward|forward|full] [--json]
 stury diff --old-schema FILE DATA | stury diff DATA --new-schema FILE
@@ -98,8 +98,8 @@ runner and bytecode listings), and adds its own. Each short option has jq's long
 | `check`, `validate`, `fmt`, `edit`, `diff`, `schema` | Subcommands, recognised when one is the first argument that is not an option, before any `--` (under `-f` that argument is the program file). See [`check`](#check), [`fmt`](#fmt), [`edit`](#edit), [`diff`](#diff) and [`schema`](#schema). |
 | `--from FORMAT` | Read `json` (the default), `jsonc`, `json5`, `ndjson`, `csv`, `tsv`, `toml`, `yaml`, `xml`, `cbor` or `html`, with a spec after a colon where the format has one, as `toml:1.0` ([Formats](#formats)). With no `--from`, the extension of the named files picks the format ([below](#--from-by-extension)). |
 | `--to FORMAT` | Write `json` (the default), `jsonc`, `json5`, `ndjson`, `csv`, `tsv`, `toml`, `yaml`, `xml`, `cbor` or `html`. `fmt` writes the `--from` format when `--to` is not given. Each format's output rules are under [Formats](#formats). |
-| `--in-place` | `fmt` and `edit` only: rewrite each file through a temporary one and a rename, when `--to` is `--from`. |
-| `--check` | `fmt` and `edit` only: write nothing, name each file that would change on stderr, and exit 1. |
+| `--in-place` | `fmt` and `edit` only: rewrite each file through a temporary one and a rename, when `--to` is `--from`. Over more than one file, `stury: N of M files changed` follows on stderr. |
+| `--check` | `fmt` and `edit` only: write nothing, name each file that would change on stderr, and exit 1. Over more than one file, `stury: N of M files would change` follows. |
 | `--grow-header` | With `--to csv` or `--to tsv`, write a header of every key of every object output ([CSV and TSV output](#csv-and-tsv-output)). |
 | `--attributes` | With `--from` or `--to` `xml` or `html`, read each attribute as a member `@NAME` of its element, and write such a member as an attribute ([XML output](#xml-output)). |
 | `--delimiter C`, `--no-header`, `--comment C`, `--infer`, `--ragged`, `--lazy-quotes` | How `--from csv` or `--from tsv` reads ([CSV and TSV options](#csv-and-tsv-options)). `--infer` also types the text of `--from xml` and `--from html`. |
@@ -107,8 +107,12 @@ runner and bytecode listings), and adds its own. Each short option has jq's long
 | `--alias-limit N`, `--merge-keys` | How `--from yaml` reads: the bytes aliases may read again (1 or more), and `<<` as a merge key. |
 | `--expansion-limit N`, `--unread-entities` | How `--from xml` reads: the bytes entity references may expand to in all (1 or more), and a reference to an entity no declaration stury read names, read as its own text. |
 | `--max-depth N` | Refuse nesting past N levels (1024 by default, up to 2^20, where jq's limit is 10000). A value deeper than the default also runs on one thread. |
-| `--threads N` | `N` threads share a long input, the calling thread counted (`N` is 1 or more, one per core by default). `--threads 1` starts no other thread. It applies to a filter run, `check`, `fmt` and `schema infer`, and the output, exit status and `--explain` counts are the same at every `N`. A run that starts a thread for stack depth (`--max-depth` past 1024) starts it whatever `N` is. |
+| `--threads N` | `N` threads share a long input, or many files, the calling thread counted (`N` is 1 or more, one per core by default). `--threads 1` starts no other thread. It applies to a filter run, `check`, `fmt`, `edit` and `schema infer`, and the output, exit status and `--explain` counts are the same at every `N`. A run that starts a thread for stack depth (`--max-depth` past 1024) starts it whatever `N` is. |
 | `--follow` | With one named file, answer each record as it is appended ([`--follow`](#--follow)). |
+| `-g GLOB`, `--glob GLOB` | Pick the files a directory's walk reads ([Many files](#many-files)). |
+| `--no-ignore` | Read the files of a walk that ignore rules skip ([Many files](#many-files)). |
+| `--files-from FILE` | Read the files FILE lists after the file arguments ([Many files](#many-files)). |
+| `--each`, `--no-filename` | Run the filter on each file on its own, its output labelled with the file's name ([Many files](#many-files)). |
 | `--explain` | Write the plan the filter runs under and what the run did to stderr, and run the filter as without it ([`--explain`](#--explain)). |
 
 An option of one format given with another `--from` is a usage error that names the format, as `--merge-keys applies to --from yaml`.
@@ -129,9 +133,11 @@ An option of one format given with another `--from` is a usage error that names 
 
 - **Case:** upper case extensions count too.
 - **Other names:** any other extension reads as JSON, and so does standard input when no file is named. A `-` among the files reads in their format.
-- **Mixed files:** files that name two formats are a usage error: `stury: a.yaml reads as yaml and b.toml as toml: --from FORMAT reads every file as one`.
+- **Mixed files:** each file reads in the format its extension names, so `stury -s . a.json b.yaml` is one array of
+  both. `--explain` tells the input and plan again where the format changes.
 - **Overrides:** `--from` always wins. `-R` and `--seq` read JSON text whatever the extension.
-- **Format options:** the options of one format are checked against the format the extensions name, so `--delimiter` with `a.csv` reads it.
+- **Format options:** the options of one format apply to its files, and are refused when no file names that format,
+  so `--delimiter` with `a.csv` reads it.
 
 ### Options that differ from jq
 
@@ -664,6 +670,41 @@ text with a fault, or one that does not divide into pieces, is answered whole on
 `--explain` shows the count of pieces in `ran`. Under `-s` a long CSV or TSV table is built on all cores unless it is
 read with `--comment` or `--ragged`, and the filter then runs on one thread.
 
+### Many files
+
+A directory among the FILE arguments is walked, by a filter run, `check`, `fmt`, `edit` and `schema infer`, and its
+files are read at its place among the arguments. `diff` refuses a directory.
+
+- **Order:** the byte order of the paths, so a subdirectory's files come at its place among its siblings, as its name
+  and a `/`. A walked file's name is the argument as typed joined to the names below it with `/`, on every system:
+  `stury . d` reads `d/a.json`.
+- **What is read:** a regular file whose extension names a format ([`--from` by extension](#--from-by-extension)),
+  or under `--from` that format. Hidden files are read. A symlink is not followed, and `.git`, `.hg`, `.svn` and
+  `.jj` are not entered. A file is judged by its name, never by its bytes.
+- **`-g GLOB`:** a glob in gitignore's syntax, matched against the path below the directory (`*.json` at any depth,
+  `s/*.json` from the top, `**` across directories), case-blind on macOS and Windows. A file a glob matches is read whatever its extension, and once
+  a glob reads files, only those a glob matches are. `!GLOB` skips the files and directories it matches. The last
+  glob that matches decides.
+- **Ignore rules:** inside a git work tree, a directory with a `.git` at or above the walked one, a walk skips what git
+  ignores: the `.gitignore` of every directory, the repository's `info/exclude` and the user's excludes file
+  (`core.excludesFile` of `~/.gitconfig`, else `$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`). They match
+  case-blind where `-g` does, and a `-g` does not read a file they skip. `--no-ignore` turns them off.
+- **Named files:** a file named as an argument is read whatever these rules say, a symlink through to its target.
+- **`--files-from FILE`:** the files FILE lists are named files, read after the file arguments: one a line, a CR
+  before the LF dropped, or the names between NULs when the list holds one (`git ls-files -z`). `-` reads the list
+  from stdin, which then holds no input. An empty list reads nothing.
+- **Errors:** a directory that cannot be listed is told as `stury: error: Could not open directory D: REASON` at its
+  place, and counts as a file that did not open (exit 2).
+- **One stream:** without `--each` the files are one stream of inputs, as jq reads them: `-s` slurps them all, a
+  parse error ends the run, and the exit status is the last input's. A run over a directory that ends with exit 2 or 5
+  adds `stury: hint: --each runs each file on its own` on stderr.
+- **`--each`:** each file is a run of its own, as one `stury` per file would be: `-s`, `-n`, `input`, `inputs` and
+  `input_filename` (from the start, under `-n` too) see one file, a file that does not parse or does not open ends
+  only its own run, and the exit status is the worst file's: 2, then 5, then 4, then 1, then 0. When more than one
+  file is read, each line a file's output writes opens with its name and a colon (`d/a.json:{"a":1}`), in magenta
+  under `-C`, or each output under `-j`, `--raw-output0` and `--seq`. `--no-filename` writes no names, and is needed
+  with `--to cbor`. `halt` and `halt_error` end the run once the files before are written. Not with `--follow`.
+
 ### `--follow`
 
 `stury --follow FILTER FILE` answers each record as it is appended to `FILE`, like `tail -f FILE | stury FILTER` with
@@ -930,7 +971,7 @@ The exit codes are jq's, but the messages are stury's.
 
 | Fault | Message |
 | --- | --- |
-| A file that cannot be opened | `stury: error: Could not open file NAME: REASON`. A directory says `Is a directory`, where jq says `jq: error: Is a directory`. `.` under `check` or `fmt` adds `(check takes no filter)` |
+| A file that cannot be opened | `stury: error: Could not open file NAME: REASON`. A directory that cannot be listed says `Could not open directory NAME: REASON` |
 | An error the filter raises | `stury: error (at FILE:LINE): MSG` as jq. With no input to name, as under `-n`, `stury: error: MSG`, where jq says `(at <unknown>)`. `input` past the last input says `No more inputs`, where jq prints the `break` that `inputs` catches (`try input catch .` still gives `"break"`) |
 | `--rawfile` or `--slurpfile` naming a file that does not open | `stury: --rawfile NAME FILE: Could not open FILE: REASON`, where jq calls it `Bad JSON in --rawfile ...` |
 | A filter of one word a letter or two from `check` or `fmt` | jq's compile error, then `stury: chek is not a command: did you mean stury check?` |
@@ -1103,6 +1144,11 @@ Each file ends its texts, except under `--seq` ([below](#--seq-reads-each-record
 one file and `2` in the next as `12`. A parse error in a file after the first names the file
 and counts its line and column in that file (`b.json:1:3: Invalid literal` for `2 x`), where jq counts on across the
 files it joins.
+
+#### A directory is walked
+
+jq refuses a directory argument (`jq: error: Is a directory`, exit 2). stury reads the files under it
+([Many files](#many-files)), so `stury -s . d` is the array of d's texts.
 
 #### `--seq` reads each record as one text
 

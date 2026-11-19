@@ -2,6 +2,7 @@ import collections
 import decimal
 import json
 import math
+import os
 import re
 import shutil
 import statistics
@@ -40,8 +41,8 @@ def command(spec, case, tool, fields):
         template = case["cmd"][tool]
     else:
         template = spec["template"][tool]
-    values = {**case, **fields}
-    return re.sub(r"\{(S|jsonc|strip|stury|yq|flags|filter|file)\}", lambda m: values.get(m.group(1), ""), template)
+    values = {"P": str(os.cpu_count()), "n": "4", "ext": "json", **case, **fields}
+    return re.sub(r"\{(S|jsonc|strip|stury|yq|flags|filter|file|P|n|ext)\}", lambda m: str(values.get(m.group(1), "")), template)
 
 
 def values(text):
@@ -74,14 +75,17 @@ def answer(text, raw, spell=None):
 def verdicts_of(case, answers):
     """Each tool's verdict against stury's answer: `same`, `same, reordered` (gojq iterates an object's members in key
     order), `same as float64` (yq writes 43.420273000000009 as 43.42027300000001) or `DIFFERS`."""
-    raw = case["name"].endswith("_raw")
+    raw = case["name"].endswith("_raw") or case.get("raw", False)
     want = answer(answers["stury"], raw)
-    if not want and not case["name"].startswith("validate"):
+    if not want and not case["name"].startswith("validate") and not case.get("silent", False):
         sys.exit(f"stury printed nothing for case {case['name']}: nothing to check the others against")
     out = {"stury": f"{len(want)} answers"}
     for tool, text in answers.items():
         if tool == "stury":
             continue
+        # Processes run side by side may cut each other's lines, so a parallel arm takes its serial arm's verdict.
+        if f"{tool}_serial" in answers:
+            text = answers[f"{tool}_serial"]
         got = answer(text, raw)
         if got == want:
             out[tool] = "same"
@@ -136,16 +140,17 @@ def report(table, summary):
     return not differs
 
 
-def main(rounds, runs, suite, only):
-    with open(BENCH / "lanes" / "cli" / "cases.toml", "rb") as f:
+def main(lane, rounds, runs, suite, only):
+    with open(BENCH / "lanes" / lane / "cases.toml", "rb") as f:
         spec = tomllib.load(f)
     stury = ROOT / "build" / "stury"
     if not stury.exists():
         sys.exit(f"no {stury}: run make build-cli")
-    cases = [c for c in spec["case"] if c["suite"] == suite and re.search(only, c["name"])]
+    cases = [c for c in spec["case"] if c.get("suite") == suite and re.search(only, c["name"])]
     if not shutil.which("hyperfine"):
         sys.exit("no hyperfine on PATH")
-    absent = sorted({t for c in cases for t in c["tools"] if t != "stury" and not shutil.which(t)})
+    # A tool's other arms (`jq_serial`) run the same program.
+    absent = sorted({t for c in cases for t in c["tools"] if t != "stury" and not shutil.which(t.partition("_")[0])})
     if absent:
         print(f"not on PATH, left out: {' '.join(absent)}", file=sys.stderr)
     cases = [{**c, "tools": [t for t in c["tools"] if t not in absent]} for c in cases]

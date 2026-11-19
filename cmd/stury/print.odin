@@ -34,6 +34,8 @@ Output :: struct {
 	result, ret: int,
 	last_result: int, // jq's: -1 before any output, else whether the last input with outputs ended truthy
 	table:       ^Table, // under --to csv or tsv
+	parted_at:   int, // where the last text `put_format_text` wrote ends, or -1, so a text written there is parted from it
+
 	// The column route's `select(F)`: the record each output of F stands for.
 	whole:       struct {
 		it:  ^records.Reader,
@@ -49,6 +51,7 @@ init_output :: proc(o: ^Output, run: ^Run) {
 		result = JQ_OK_NO_OUTPUT,
 		ret = JQ_OK_NO_OUTPUT,
 		last_result = -1,
+		parted_at = -1,
 		table = table_start(run) if writes_cells(&run.opts) else nil,
 	}
 	o.emit = proc(s: ^jq.Sink, it: jq.Item) -> jq.Signal {
@@ -83,6 +86,9 @@ emit :: proc(o: ^Output, v: core.Value) -> bool {
 	opts := o.opts
 	out := &o.buf
 	o.result = JQ_OK if jq.truthy(v) else JQ_OK_NULL_KIND
+	if l := current_label(); l.text != "" && !l.lines {
+		write.put_text(out, l.text)
+	}
 	if writes_texts(opts) {
 		return emit_text(o, v)
 	}
@@ -189,16 +195,17 @@ mistag_text :: proc(readers: ^core.Readers, title: string, v: core.Value) -> str
 }
 
 // A `text` the writer of the output format `as` made, written after what parts it from the text before it when
-// `parted` and it is not the output's first, and a newline after it unless it ends with one, is empty, or is an item of
-// a binary format, which ends itself.
+// `parted` and the output's last bytes are such a text, and a newline after it unless it ends with one, is empty, or is
+// an item of a binary format, which ends itself.
 put_format_text :: proc(o: ^Output, as: core.As, text: []u8, parted: bool) {
-	if between := FORMATS[o.opts.to].parted; parted && between != nil && o.written + o.buf.cursor > 0 {
+	if between := FORMATS[o.opts.to].parted; parted && between != nil && o.parted_at == o.written + o.buf.cursor {
 		write.put_text(&o.buf, between(text))
 	}
 	write.put_text(&o.buf, string(text))
 	if !as.readers.binary && len(text) > 0 && text[len(text) - 1] != '\n' {
 		write.put_byte(&o.buf, '\n')
 	}
+	o.parted_at = o.written + o.buf.cursor if parted else -1
 	flush_some(o)
 }
 
@@ -251,9 +258,51 @@ flush_some :: proc(o: ^Output, force := false) {
 	}
 }
 
-// `p` written to stdout in full, or the run ended as jq ends it when its output cannot be written: its message, and
-// the exit status of a system error.
+// --each: the label of the file written, which opens each line written to stdout when `lines`, else each output `emit`
+// writes, and whether the bytes written last end inside a line.
+Label :: struct {
+	text:        string,
+	lines, open: bool,
+}
+
+// The label of the file the calling thread writes, and of the file a thread's task holds, which every route's writes
+// to stdout take.
+run_label: Label
+@(thread_local)
+task_label: Label
+
+// The label the writes of this thread take.
+current_label :: proc() -> ^Label {
+	return &task_label if message.holding != nil else &run_label
+}
+
+// `p` written to stdout, each line opened with the file's label under --each.
 write_out :: proc(p: []byte) {
+	l := current_label()
+	if l.text == "" || !l.lines {
+		put_stdout(p)
+		return
+	}
+	from := 0
+	for c, i in p {
+		if !l.open {
+			put_stdout(p[from:i])
+			put_stdout(transmute([]byte)l.text)
+			from, l.open = i, true
+		}
+		l.open = c != '\n'
+	}
+	put_stdout(p[from:])
+}
+
+// `p` written to stdout in full, or held, or the run ended as jq ends it when its output cannot be written: its
+// message, and the exit status of a system error.
+put_stdout :: proc(p: []byte) {
+	if h := message.holding; h != nil {
+		append(&h.out, ..p)
+		held_more(len(p))
+		return
+	}
 	if err := write_stdout(p); err != nil {
 		output_failed(err)
 	}

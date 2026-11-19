@@ -1,0 +1,120 @@
+# Each case asks every tool the same question of many files, end to end: the walk, every file opened and read, the
+# query, and every answer printed to /dev/null. jq, jaq and gojq read the files `find` lists through `xargs`: their
+# fastest route runs one process per core at once (`-P`), each with a few files (`-n`), and their `_serial` arm runs
+# them as one process with all the files, as a plain script over a tree would. yq runs one file a process, as given
+# several it answers a file's query over the files before it too.
+#
+# `sized` is a few hundred files of the logs shape from 1 KiB to 2 MiB, where the query's own work is most of a run.
+# `tree` is a repository of about 34,000 files, most of them small, where opening a file is most of a run. ripgrep
+# opens and reads the files stury does and parses none.
+
+[template]
+stury = "{S} {stury} {flags} '{filter}' {file}"
+jq = "sh -c 'find {file} -name node_modules -prune -o -name \"*.{ext}\" -print0 | xargs -0 -P {P} -n {n} jq {flags} \"$0\"' '{filter}'"
+jaq = "sh -c 'find {file} -name node_modules -prune -o -name \"*.{ext}\" -print0 | xargs -0 -P {P} -n {n} jaq {flags} \"$0\"' '{filter}'"
+gojq = "sh -c 'find {file} -name node_modules -prune -o -name \"*.{ext}\" -print0 | xargs -0 -P {P} -n {n} gojq {flags} \"$0\"' '{filter}'"
+yq = "sh -c 'find {file} -name \"*.{ext}\" -print0 | xargs -0 -P {P} -n 1 yq {flags} \"$0\"' '{filter}'"
+jq_serial = "sh -c 'find {file} -name node_modules -prune -o -name \"*.{ext}\" -print0 | xargs -0 jq {flags} \"$0\"' '{filter}'"
+jaq_serial = "sh -c 'find {file} -name node_modules -prune -o -name \"*.{ext}\" -print0 | xargs -0 jaq {flags} \"$0\"' '{filter}'"
+gojq_serial = "sh -c 'find {file} -name node_modules -prune -o -name \"*.{ext}\" -print0 | xargs -0 gojq {flags} \"$0\"' '{filter}'"
+yq_serial = "sh -c 'find {file} -name \"*.{ext}\" -print0 | xargs -0 -n 1 yq {flags} \"$0\"' '{filter}'"
+
+[[case]]
+name = "sized_ids"
+flags = "-r"
+filter = ".logs[].id"
+file = "sized/json"
+n = 8
+raw = true
+tools = ["stury", "jq", "jq_serial", "jaq", "jaq_serial", "gojq", "gojq_serial"]
+
+[[case]]
+name = "sized_select"
+flags = "-r"
+filter = '.logs[] | select(.level == "error") | .id'
+file = "sized/json"
+n = 8
+raw = true
+tools = ["stury", "jq", "jq_serial", "jaq", "jaq_serial", "gojq", "gojq_serial"]
+
+[[case]]
+name = "sized_sum"
+flags = ""
+filter = "[.logs[].status] | add"
+file = "sized/json"
+n = 8
+tools = ["stury", "jq", "jq_serial", "jaq", "jaq_serial", "gojq", "gojq_serial"]
+
+[[case]]
+name = "sized_project"
+flags = "-c"
+filter = ".logs[] | {id, level, ms: .duration_ms}"
+file = "sized/json"
+n = 8
+tools = ["stury", "jq", "jq_serial", "jaq", "jaq_serial", "gojq", "gojq_serial"]
+
+[[case]]
+name = "sized_group"
+flags = "-c"
+filter = ".logs | group_by(.service) | map({service: .[0].service, n: length})"
+file = "sized/json"
+n = 8
+tools = ["stury", "jq", "jq_serial", "jaq", "jaq_serial", "gojq", "gojq_serial"]
+
+[[case]]
+name = "sized_each"
+flags = ""
+stury = "--each --no-filename"
+filter = ".logs | length"
+file = "sized/json"
+n = 8
+tools = ["stury", "jq", "jq_serial", "jaq", "jaq_serial", "gojq", "gojq_serial"]
+
+[[case]]
+name = "sized_check"
+flags = ""
+filter = "empty"
+file = "sized/json"
+n = 8
+silent = true
+tools = ["stury", "jq", "jq_serial", "jaq", "jaq_serial", "gojq", "gojq_serial"]
+cmd = { stury = "{S} check sized/json" }
+
+[[case]]
+name = "sized_yaml"
+flags = "-r"
+filter = ".logs[].id"
+file = "sized/yaml"
+ext = "yaml"
+raw = true
+tools = ["stury", "yq", "yq_serial"]
+
+[[case]]
+name = "files_version"
+flags = "-r"
+stury = "--each --no-filename"
+filter = ".version? // empty"
+file = "tree"
+n = 400
+raw = true
+tools = ["stury", "jq", "jq_serial", "jaq", "jaq_serial", "gojq", "gojq_serial", "rg"]
+cmd = { rg = "rg -N --no-filename -o -r '$1' '\"version\": \"([^\"]*)\"' tree" }
+
+[[case]]
+name = "files_tiny"
+flags = "-c"
+filter = "."
+file = "tree/tiny"
+n = 400
+tools = ["stury", "jq", "jq_serial", "jaq", "jaq_serial", "gojq", "gojq_serial"]
+
+[[case]]
+name = "files_walk"
+flags = ""
+filter = "."
+file = "tree"
+ext = "none"
+n = 400
+silent = true
+tools = ["stury", "jq", "jq_serial", "jaq", "jaq_serial", "gojq", "gojq_serial"]
+cmd = { stury = "{S} -g '*.none' . tree" }

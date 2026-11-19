@@ -98,6 +98,14 @@ choose_route :: proc(run: ^Run, text: string) {
 	r.scanning = r.whys == {}
 }
 
+// The route chosen afresh, and told, for the format the inputs read from now on, keeping what --explain counts.
+reroute :: proc(run: ^Run, framing: core.Framing) {
+	run.route = {explain = run.route.explain}
+	run.parallel = nil
+	choose_route(run, run.program.text)
+	explain_route(run, framing)
+}
+
 // Whether the scan answers step `s` other than jq: a slice is one array in jq, and `..` comes in another order.
 @(private = "file")
 is_unscanned :: proc(s: core.Step) -> bool {

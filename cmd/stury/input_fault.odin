@@ -19,7 +19,7 @@ import "message"
 @(private = "file")
 fault_message :: proc(ins: ^Inputs, data: []byte, f: core.Fault, end := -1) -> string {
 	o := &ins.run.opts
-	if ins.spec != .Json || ins.framing != .Concatenated || o.null_input || len(ins.files) > 1 {
+	if ins.spec != .Json || ins.framing != .Concatenated || o.null_input || len(ins.files) > 1 || ins.many {
 		return fault_told(ins.name, data, f, ins.file_lines, faults_counted(ins, data))
 	}
 	return jq.parse_message(data, f, ins.parsed.line, ins.parsed.column, end)
@@ -32,12 +32,12 @@ text_fault :: proc(ins: ^Inputs, found: core.Fault, at: int, end := -1) -> (core
 	if reads_cells(&ins.run.opts) {
 		return cells_fault(ins, found)
 	}
-	if ins.spec != .Json {
-		tell_fault(ins, found)
-		finish(ins.run, EXIT_INPUT)
-	}
 	f := literal_cut(data, found, ins.framing)
 	set_note(ins, fault_note(ins.name, data, f, ins.spec, &ins.run.opts, lead_of(ins), runtime.heap_allocator()))
+	if ins.spec != .Json {
+		ins.told = strings.clone(fault_told(ins.name, data, f, ins.file_lines, faults_counted(ins, data)), runtime.heap_allocator())
+		return nil, ins.told, .Error
+	}
 	stop := min(int(f.at), len(data))
 	nl := bytes.index_byte(data[stop:], '\n')
 	resume := len(data) if nl < 0 else stop + nl + 1

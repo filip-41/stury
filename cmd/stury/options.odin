@@ -32,7 +32,10 @@ Opts :: struct {
 	seq:              bool, // jq's --seq: texts after record separators, and outputs too
 	stream:           bool, // jq's --stream: each input as [path, leaf] events
 	stream_errors:    bool, // and an error as a [message, path] event
-	from:             Format, // how the input is read
+	from:             Format, // how the input is read, under `by_extension` the open file's format
+	froms:            bit_set[Format], // the formats the inputs read in, which a format's options need one of
+	by_extension:     bool, // each file reads as its extension names
+	to_by_file:       bool, // fmt with no --to, and edit: each file is written in its own format
 	to:               Format, // how the outputs are written
 	from_spec:        Maybe(u8), // the spec of `from` that `--from FORMAT:SPEC` names
 	to_spec:          Maybe(u8), // the spec of `to` that `--to FORMAT:SPEC` names
@@ -51,6 +54,9 @@ Opts :: struct {
 	merge_keys:       bool, // --merge-keys
 	expansion_limit:  u64, // --expansion-limit, 0 for the XML reader's own
 	unread_entities:  bool, // --unread-entities
+	each:             bool, // --each: each file is a run of its own
+	no_filename:      bool, // --no-filename: --each writes no labels
+	no_ignore:        bool, // --no-ignore: a walk reads the files ignore rules skip
 }
 
 // What the command line gives besides the options.
@@ -89,6 +95,9 @@ Cli :: struct {
 	// text (--expansion-limit, --unread-entities).
 	yaml_flag, xml_flag: string,
 	out_delimiter, out_comment: Maybe(byte),
+	globs:  [dynamic]Glob, // -g's, which pick the files a walk reads
+	list:   string, // --files-from's file, "" for none
+	walked: bool, // a directory among the files was walked, so no file is no stdin
 	// `check`'s schema options, which `diff` takes too.
 	schema: Schema_Options,
 	diff:   Diff_Options,
@@ -148,6 +157,9 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			args_done = true
 			continue
 		}
+		if a == "-g" {
+			a = "--glob"
+		}
 		if a[1] != '-' {
 			i = short_options(o, &cli, args, i)
 			continue
@@ -202,6 +214,10 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			diff_option(&cli.diff, args, i)
 		case "diff":
 			o.diff = true
+		case "glob":
+			append(&cli.globs, glob_of(args[i + 1]))
+		case "files-from":
+			cli.list = args[i + 1]
 		case "grow-header":
 			o.grow_header = true
 		case "attributes":
@@ -259,6 +275,12 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			o.explain = true
 		case "follow":
 			o.follow = true
+		case "each":
+			o.each = true
+		case "no-filename":
+			o.no_filename = true
+		case "no-ignore":
+			o.no_ignore = true
 		case "in-place":
 			o.in_place = true
 		case "check":
@@ -292,20 +314,48 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		case "gen":    cli.command = .Gen
 		}
 	}
-	// Without --from the files' extensions name the format. -R and --seq read JSON text whatever the file is, and a
-	// verb's schema file names its own format.
+	// A directory among the files is walked, but for diff, which compares two documents, and the verbs that read a
+	// schema file.
+	#partial switch cli.command {
+	case .Run, .Check, .Fmt, .Edit, .Infer:
+		if cli.list != "" {
+			list_files(&cli.files, cli.list)
+		}
+		if cli.schema.filter == nil {
+			cli.walked = walk_files(&cli.files, int(cli.command == .Infer), cli.globs[:], cli.formats.from, !o.no_ignore, streams(o, &cli)) || cli.list != ""
+		}
+	}
+	// Without --from each file reads as its extension names, a file of any other extension as JSON and "-" as the file
+	// before it, and the run starts in the first file's format. -R and --seq read JSON text whatever the file is, and a
+	// verb's schema file names its own format. Under a walk that streams, the formats are the first file's alone, as no
+	// option the run takes then reads the others.
+	o.froms = {o.from}
 	if cli.formats.from == nil && !o.raw_input && !o.seq {
 		files := cli.files[:]
 		if cli.command >= .Schema {
 			files = files[min(1, len(files)):] if cli.command == .Infer else nil
 		}
-		if f, named := format_of_files(files); named {
-			o.from = f
-			cli.json_reading = json_reading_of(o)
+		if walk_streams {
+			first, _, listed := walk_path(0)
+			files = []string{first} if listed else nil
 		}
+		o.by_extension, o.froms = true, {}
+		for name in files {
+			if name == "-" {
+				continue
+			}
+			f, _ := format_of_file(name)
+			if o.froms == {} {
+				o.from = f
+			}
+			o.froms += {f}
+		}
+		o.froms = o.froms if o.froms != {} else {.Json}
+		cli.json_reading = json_reading_of(o)
 	}
 	// fmt writes each input as its own format unless --to says otherwise, so its --to follows --from when --to
 	// was not given. `--to ndjson` is what sets the compact layout here, since fmt refuses -c.
+	o.to_by_file = cli.command == .Edit || cli.command == .Fmt && cli.formats.to == nil
 	if cli.command == .Fmt && cli.formats.to == nil {
 		o.to = o.from
 	}
@@ -324,6 +374,22 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	o.cells_out.delimiter = cli.out_delimiter.? or_else o.cells_out.delimiter
 	o.cells_out.comment = cli.out_comment.? or_else o.cells_out.comment
 	return
+}
+
+// Whether a run may read a walk's files while it lists them: a filter run, a check or fmt --check with no schema, or
+// an edit that replaces no file, given no option whose check reads every file's format, and no stdin or followed file
+// among the files. --in-place refuses a file it cannot replace before it writes any, and fmt writing to stdout runs
+// in turn when a format among the files parts its texts.
+@(private = "file")
+streams :: proc(o: ^Opts, cli: ^Cli) -> bool {
+	run: bool
+	#partial switch cli.command {
+	case .Run:   run = true
+	case .Check: run = cli.schema.flag == ""
+	case .Fmt:   run = o.check && cli.schema.flag == ""
+	case .Edit:  run = !o.in_place
+	}
+	return run && cli.cells_flag == "" && cli.infer_flag == "" && cli.yaml_flag == "" && cli.xml_flag == "" && !o.follow && !slice.contains(cli.files[:], "-")
 }
 
 // How --argjson, --jsonargs, --slurpfile and `fromjson` read their texts under the format `o.from`.
@@ -488,7 +554,7 @@ subcommand_index :: proc(args: []string) -> int {
 @(private = "file")
 option_arity :: proc(a: string) -> int {
 	switch a {
-	case "--indent", "--max-depth", "--threads", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--filter", "--seed", "--count", "--package", "--old-schema", "--new-schema", "--compat", "--key", "--alias-limit", "--expansion-limit":
+	case "--indent", "--max-depth", "--glob", "-g", "--files-from", "--threads", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment", "--schema", "--schema-ref", "--schema-draft", "--max-errors", "--report", "--filter", "--seed", "--count", "--package", "--old-schema", "--new-schema", "--compat", "--key", "--alias-limit", "--expansion-limit":
 		return 1
 	case "--arg", "--argjson", "--slurpfile", "--rawfile":
 		return 2
@@ -659,9 +725,12 @@ OWNED_OPTIONS := [?]Owned_Options {
 	{{"invalid", "comments", "seed", "count"}, {.Sample}, "it shapes the samples"},
 	{{"package"}, {.Gen}, "it names the package of the Odin types"},
 	{{"old-schema", "new-schema", "compat", "key", "set", "position", "facts", "json", "shape"}, {.Diff}, "it shapes what diff compares and tells"},
-	{{"threads"}, {.Run, .Check, .Fmt, .Infer}, "it sets the threads that share a long input"},
+	{{"threads"}, {.Run, .Check, .Fmt, .Edit, .Infer}, "it sets the threads that share a long input"},
 	{{"diff"}, {.Edit}, "it previews the changes of an edit"},
+	{{"glob", "no-ignore"}, {.Run, .Check, .Fmt, .Edit, .Infer}, "it picks the files a directory's walk reads"},
+	{{"files-from"}, {.Run, .Check, .Fmt, .Edit, .Infer}, "it reads the list of files to read"},
 	{{"attributes"}, {.Run}, "it reads and writes the attributes of each element as members"},
+	{{"each", "no-filename"}, {.Run}, "it runs the filter on each file on its own"},
 	{{"in-place", "check"}, {.Fmt, .Edit}, "it writes each file back, or tells whether it would change"},
 }
 
@@ -753,7 +822,7 @@ command_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
 // named, a filter run, and an input that is records rather than whole texts.
 refuse_follow :: proc(o: ^Opts, cli: ^Cli) {
 	other := command_name(cli)
-	other = other if other != "" else "--slurp" if o.slurp else "--null-input" if o.null_input else "--stream" if o.stream else ""
+	other = other if other != "" else "--each" if o.each else "--slurp" if o.slurp else "--null-input" if o.null_input else "--stream" if o.stream else ""
 	if other != "" {
 		usage_error("--follow answers each record of a file as it is appended: it cannot be combined with %s", other)
 	}

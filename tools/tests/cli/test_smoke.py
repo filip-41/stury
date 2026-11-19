@@ -141,7 +141,7 @@ class Runner:
         code, out, err, _ = self.run("--explain", *args)
         lines = err.decode("utf-8", "surrogateescape").splitlines(keepends=True)
         rest = "".join(l for l in lines if not l.startswith("stury: explain: ")).encode("utf-8", "surrogateescape")
-        seen = "".join(re.sub(r"threads: [1-9][0-9]* pieces? over [0-9]+ threads", "threads: some pieces over some threads", l)
+        seen = "".join(re.sub(r"threads: [1-9][0-9]* (pieces?|files?) over [0-9]+ threads", r"threads: some \1 over some threads", l)
                        for l in lines if re.match("stury: explain: (ran|threads|fallback):", l))
         assert (code, out, rest) == self.run(*args)[:3] and seen.rstrip("\n") == want, f"exit {code}\n got: {seen}\nwant: {want}"
 
@@ -242,6 +242,13 @@ EXPLAIN = [
 @pytest.mark.parametrize("name, file, args, want", EXPLAIN, ids=[e[0] for e in EXPLAIN])
 def test_explain_pieces(s, name, file, args, want):
     s.explained(want, *args, getattr(s.files, file))
+
+
+@needs_pool
+def test_explain_many_files(s):
+    """Files answered on the pool's threads are counted in the run's lines."""
+    s.explained("stury: explain: ran: 2 inputs, 2 read by path and 0 built\nstury: explain: threads: some files over some threads",
+                "-c", ".a", s.files.small, s.files.small)
 
 
 @pytest.mark.parametrize("args, want", ((["-c", ".a"], f"stury: explain: ran: 1 input, 1 read by path and 0 built\n{ONE}"),

@@ -51,6 +51,7 @@ Run :: struct {
 	parallel:    Maybe(bool), // whether the filter runs on pieces, once `parallel` has decided it
 	collects:    int, // the collect jobs started, which number them from 1
 	convert:     ^Conversion, // fmt --schema: the schema a conversion follows
+	labels:      bool, // --each: each file's outputs open with its name, as more than one file is read
 }
 
 main :: proc() {
@@ -68,6 +69,9 @@ main :: proc() {
 	}
 	refuse_format_clashes(o, &cli)
 	refuse_unowned(&cli)
+	if o.each && !o.no_filename && o.to == .Cbor {
+		usage_error("--each labels the lines of its output, and --to cbor writes none: add --no-filename")
+	}
 	if flag := command_refused_option(o, &cli); flag != "" && cli.command != .Run {
 		usage_error("%s has no use with %s: %s", flag, command_name(&cli), command_writes(&cli))
 	}
@@ -133,7 +137,7 @@ main :: proc() {
 	ins := Inputs {
 		source  = input_source(o, cli.json_reading),
 		parsed  = {line = 1},
-		files   = cli.files[:] if len(cli.files) > 0 else STDIN_ONLY,
+		files   = cli.files[:] if len(cli.files) > 0 || cli.walked else STDIN_ONLY,
 		slurp   = o.slurp,
 		run     = &run,
 	}
@@ -144,18 +148,32 @@ main :: proc() {
 	bind_inputs(&run.ip, &ins)
 	init_output(&run.output, &run)
 	// The interpreter recurses, and so does printing an answer.
-	run_deep(&run, &ins, run_filter)
-	// jq's exit status: the last input's result, 5 after a text that does not parse, 2 after a file that did not
-	// open. Under -e, from the last output when the last input had none.
-	code := EXIT_USAGE if ins.failures > 0 else run.output.ret
-	if o.exit_status {
-		if code == JQ_OK_NO_OUTPUT {
-			last := run.output.last_result
-			code = JQ_OK_NO_OUTPUT if last < 0 else JQ_OK_NULL_KIND if last == 0 else JQ_OK
-		}
-		finish(&run, abs(code))
+	if o.each {
+		run.labels = !o.no_filename && (len(ins.files) > 1 || cli.walked)
+		run_deep(&run, &ins, each_files)
+		finish(&run, run.output.ret)
 	}
-	finish(&run, max(code, 0))
+	run_deep(&run, &ins, run_filter)
+	code := run_status(&run, ins.failures)
+	// A run over a directory may have meant each file on its own. Only a failing run says so, and on stderr.
+	if cli.walked && (code == EXIT_INPUT || code == EXIT_USAGE) {
+		message.write_stderr("stury: hint: --each runs each file on its own\n")
+	}
+	finish(&run, code)
+}
+
+// jq's exit status: the last input's result, 5 after a text that does not parse, 2 after `failures` files that did not
+// open. Under -e, from the last output when the last input had none.
+run_status :: proc(run: ^Run, failures: int) -> int {
+	code := EXIT_USAGE if failures > 0 else run.output.ret
+	if !run.opts.exit_status {
+		return max(code, 0)
+	}
+	if code == JQ_OK_NO_OUTPUT {
+		last := run.output.last_result
+		code = JQ_OK_NO_OUTPUT if last < 0 else JQ_OK_NULL_KIND if last == 0 else JQ_OK
+	}
+	return abs(code)
 }
 
 // Report the filter's compile errors as jq does and exit, if there are any. A filter that is no --filter's and is a word

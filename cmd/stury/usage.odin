@@ -122,6 +122,15 @@ stury's own options:
       --max-depth n         refuse nesting past n levels (default 1024);
       --threads n           share a long input among n threads, this one
                             counted (default: one per core);
+  -g, --glob glob           read the files of a directory's walk that the
+                            glob matches, or with !glob skip them;
+      --no-ignore           read the files of a walk inside a git work tree
+                            that its ignore files skip;
+      --files-from file     read the files the file lists, one a line or
+                            between NULs, after the file arguments;
+      --each                run the filter on each file on its own, each
+                            output line opened with the file's name;
+      --no-filename         with --each, write no file names;
       --alias-limit n       with --from yaml, refuse aliases that read
                             more than n bytes again;
       --merge-keys          with --from yaml, read << as a merge key;
@@ -317,6 +326,8 @@ Options:
       --tab                 write built values with a tab;
   -e, --exit-status         set the exit status by the last output;
       --max-depth n         refuse nesting past n levels (default 1024);
+      --threads n           edit the files on n threads, this one counted
+                            (default: one per core);
   -f, --from-file           load the filter from a file;
   -L, --library-path dir    search modules from the directory;
       --arg name value      set $name to the string value, and --argjson,

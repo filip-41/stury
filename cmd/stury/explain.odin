@@ -21,6 +21,7 @@ Explain :: struct {
 	},
 	input:       int, // bytes read
 	pieces:      int, // pieces answered on the pool's threads
+	files:       int, // files answered on the pool's threads
 }
 
 // Why a filter builds each input, as `because` says it.
@@ -195,6 +196,15 @@ explain_fallback :: proc(r: ^Route, why: Fallback) {
 	}
 }
 
+// Adds the counts `p` of a piece or a file, answered after the inputs the route has counted.
+explain_add :: proc(r: ^Route, p: Explain) {
+	if p.fallback.text > 0 && r.fallback.text == 0 {
+		r.fallback = {r.scanned + r.interpreted + p.fallback.text, p.fallback.why}
+	}
+	r.scanned += p.scanned
+	r.interpreted += p.interpreted
+}
+
 explain_end :: proc(run: ^Run) {
 	r := &run.route
 	if !r.on || r.ran == {} {
@@ -209,7 +219,9 @@ explain_end :: proc(run: ^Run) {
 	} else {
 		explain_line("ran: %s, each built", plural(r.interpreted, "input"))
 	}
-	if r.pieces > 0 && run.pool != nil {
+	if r.files > 0 && run.pool != nil {
+		explain_line("threads: %s over %d threads", plural(r.files, "file"), run.pool.runner.threads + 1)
+	} else if r.pieces > 0 && run.pool != nil {
 		explain_line("threads: %s over %d threads", plural(r.pieces, "piece"), run.pool.runner.threads + 1)
 	} else {
 		explain_line("threads: one")

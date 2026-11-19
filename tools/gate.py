@@ -256,6 +256,7 @@ def cli_suites(absent, odin):
         suite("cli types law", "cli/test_types.py"),
         suite("cli gen law", "cli/test_gen.py", f"--odin={odin}"),
         suite("cli follow", "cli/test_follow.py"),
+        suite("cli walk", "cli/test_walk.py"),
         suite("cli memory", "cli/test_memory.py"),
     ]
     has_jq = shutil.which("jq") and subprocess.run(["jq", "--version"], capture_output=True, text=True).stdout.strip() == "jq-1.8.2"
@@ -268,6 +269,7 @@ def cli_suites(absent, odin):
     if not has_jq:
         absent.append("cli jq diff (no jq 1.8.2 on PATH)")
     oracle = lambda name: [at(p) for p in TEST_SHARED + [f"{TESTS}/oracles/{name}"]]
+    out.append(Check("gitignore git diff", 1, [at(CLI)], pytest_command(stury, "oracles/gitignore"), trees=oracle("gitignore"), cli=True))
     out.append(Check("xml expat diff", 1, [at("xml"), at(f"{TESTS}/oracles/xml")], make(odin, "diff-xml"), trees=oracle("xml")))
     out.append(Check("model pydantic diff", 2, [at("core/model"), at(f"{TESTS}/oracles/model")], make(odin, "diff-model"), trees=oracle("model")))
     schema_trees = oracle("schema") + [at("bench/lanes/schema/lane.toml")]

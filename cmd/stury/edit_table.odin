@@ -122,7 +122,7 @@ edit_table :: proc(er: ^Edit_Run, path: string) -> int {
 		delete(text, heap)
 	}
 	if !edit_table_moves(&w, placed[:], names) {
-		return edit_publish(er.run, path, src, text)
+		return edit_publish(er, path, src, text)
 	}
 	out, placed_ok := edit_table_place(er, &w, text, placed[:])
 	if !placed_ok {
@@ -130,14 +130,14 @@ edit_table :: proc(er: ^Edit_Run, path: string) -> int {
 	}
 	defer delete(out, heap)
 	if !new_comments(placed[:]) {
-		return edit_publish(er.run, path, src, out)
+		return edit_publish(er, path, src, out)
 	}
 	commented, commented_ok := edit_table_comments(er, out, placed[:])
 	if !commented_ok {
 		return EXIT_INPUT
 	}
 	defer delete(commented, heap)
-	return edit_publish(er.run, path, src, commented)
+	return edit_publish(er, path, src, commented)
 }
 
 // Whether a new record's output carries a comment.

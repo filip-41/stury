@@ -219,4 +219,4 @@ jobs:
         env:
           PYTHONUTF8: "1"
           STURY_TEST_TIMEOUT: "30"
-        run: uv run --frozen --directory tools/tests pytest -n auto --stury="$PWD/stury.exe" cli/test_smoke.py cli/test_jq.py
+        run: uv run --frozen --directory tools/tests pytest -n auto --stury="$PWD/stury.exe" cli/test_smoke.py cli/test_jq.py cli/test_walk.py oracles/gitignore

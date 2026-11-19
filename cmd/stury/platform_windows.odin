@@ -270,3 +270,56 @@ real_path :: proc(_: rawptr, path: string, allocator := context.allocator) -> st
 	full, err := os.get_absolute_path(path, allocator)
 	return full if err == nil else strings.clone(path, allocator)
 }
+
+// Whether `path` names a directory, and its size. False when it names nothing.
+path_stat :: proc(path: string) -> (kind: Entry_Kind, ok: bool) {
+	info, err := os.stat(path, context.temp_allocator)
+	if info.type == .Regular {
+		return .Long if int(info.size) >= FILES_LONG else .File, err == nil
+	}
+	return .Dir if info.type == .Directory else .Other, err == nil
+}
+
+// The bytes of the regular file `path`, read whole into `buf` when it holds fewer than `limit`. `.Left` when it is
+// longer, is not a regular file or does not open or read, which the caller then opens as any other.
+read_short :: proc(path: string, buf: ^[dynamic]byte, limit: int) -> (data: []byte, read: Short_Read) {
+	f, err := os.open(path)
+	if err != nil {
+		return nil, .Left
+	}
+	defer os.close(f)
+	size, serr := os.file_size(f)
+	if serr != nil || !is_regular_file(f) {
+		return nil, .Left
+	}
+	if size >= i64(limit) {
+		return nil, .Long
+	}
+	// One byte past the size, so a file that grew since its size was taken is read to its end or found long.
+	non_zero_resize(buf, int(size) + 1)
+	n := 0
+	for n < len(buf) {
+		got, rerr := os.read(f, buf[n:])
+		if got == 0 || rerr == io.Error.EOF {
+			return buf[:n], .Read
+		}
+		if rerr != nil {
+			return nil, .Left
+		}
+		n += got
+	}
+	return nil, .Long
+}
+
+// The entries of directory `path` but `.` and `..`, each of the kind its directory entry gives.
+list_dir :: proc(path: string) -> (entries: [dynamic]Dir_Entry, err: os.Error) {
+	infos := os.read_all_directory_by_path(path, context.allocator) or_return
+	defer os.file_info_slice_delete(infos, context.allocator)
+	for fi in infos {
+		#partial switch fi.type {
+		case .Regular:   append(&entries, Dir_Entry{strings.clone(fi.name), .File})
+		case .Directory: append(&entries, Dir_Entry{strings.clone(fi.name), .Dir})
+		}
+	}
+	return
+}

@@ -42,7 +42,8 @@ Schema_Options :: struct {
 Schema_Check :: struct {
 	text:     []byte,
 	compiled: ^schema.Compiled,
-	bound:    schema.Bound,
+	bound:    schema.Bound, // to the format of the input judged
+	bounds:   [Format]Maybe(schema.Bound), // to each format met
 }
 
 // What a schema check of one input found. A fault is the plain check's to tell, and a refusal is anything else that
@@ -98,12 +99,22 @@ schema_option :: proc(s: ^Schema_Options, args: []string, i: int) {
 // The schema `s` names, read, compiled and bound to the inputs' format, or a usage error telling why not.
 schema_open :: proc(s: Schema_Options, src: Source, option := "--schema") -> ^Schema_Check {
 	sc := schema_read(s, option)
+	schema_bind(sc, s, src, option)
+	return sc
+}
+
+// `sc` bound to the inputs of `src`'s format, once a format, or an exit telling why it does not bind.
+schema_bind :: proc(sc: ^Schema_Check, s: Schema_Options, src: Source, option := "--schema") {
+	if bound, done := sc.bounds[src.format].?; done {
+		sc.bound = bound
+		return
+	}
 	err: core.Error
 	if sc.bound, err = schema.bind(sc.compiled, {layout = src.as}); err != nil {
 		message.write_stderr("stury: error: %s %s: %s\n", option, s.file, edit_error_text(sc.text, err))
 		os.exit(EXIT_USAGE)
 	}
-	return sc
+	sc.bounds[src.format] = sc.bound
 }
 
 // The directory of the schema file `path`, where its references are read from: `.` for a bare name, which `filepath.dir`
@@ -137,7 +148,7 @@ schema_read :: proc(s: Schema_Options, option := "--schema") -> ^Schema_Check {
 	if s.file == "" {
 		usage_error("%s needs --schema", s.flag)
 	}
-	spent, read := file_bytes(s.file, "check")
+	spent, read := file_bytes(s.file)
 	if !read {
 		os.exit(EXIT_USAGE)
 	}
@@ -278,10 +289,10 @@ told :: proc(name: string, data: []byte, entries: []core.Error_Entry, counted: ^
 	fresh: core.Lines
 	lines := counted if counted != nil else &fresh
 	b := strings.builder_make(context.temp_allocator)
-	defer os.write_string(os.stderr, strings.to_string(b))
+	defer message.stderr_text(strings.to_string(b))
 	for e in entries {
 		if strings.builder_len(b) >= TOLD_CHUNK {
-			os.write_string(os.stderr, strings.to_string(b))
+			message.stderr_text(strings.to_string(b))
 			strings.builder_reset(&b)
 		}
 		strings.write_string(&b, name)
@@ -303,6 +314,6 @@ report :: proc(sc: ^Schema_Check, s: Schema_Options, file: string, entries: []co
 		model.write_problem(&t, entries, {title = "Invalid input", status = 422}, r)
 	}
 	text, _ := write.tokens_finish(&t)
-	os.write(os.stdout, text)
-	os.write_string(os.stdout, "\n")
+	write_out(text)
+	write_out({'\n'})
 }

@@ -224,8 +224,10 @@ programs_tell_their_shape :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	ip: jq.Interp
 	defer jq.destroy(&ip)
-	testing.expect(t, !jq.shape(compiled(&ip, ".a | length")).serial)
-	testing.expect(t, jq.shape(compiled(&ip, "def f: input; [f]")).serial)
+	testing.expect_value(t, jq.shape(compiled(&ip, ".a | length")).serial, bit_set[jq.Serial]{})
+	testing.expect_value(t, jq.shape(compiled(&ip, "def f: input; [f]")).serial, bit_set[jq.Serial]{.Inputs})
+	testing.expect_value(t, jq.shape(compiled(&ip, "input_filename, debug, halt")).serial, bit_set[jq.Serial]{.Position, .Messages, .Halts})
+	testing.expect_value(t, jq.shape(compiled(&ip, "def f: f; f, recurse(.a)")).serial, bit_set[jq.Serial]{.Recurses})
 	s := jq.shape(compiled(&ip, "select(.a[0] < 3)"))
 	testing.expect_value(t, s.select_faults, bit_set[jq.Shape_Fault]{})
 	testing.expect_value(t, s.selection.path, ".a[0]")

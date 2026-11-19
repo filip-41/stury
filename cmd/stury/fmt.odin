@@ -25,7 +25,7 @@ FMT_EXIT_DIFFERS :: 1
 // `stury fmt`, which reads and writes the files and exits.
 fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	o := &run.opts
-	files := input_files(cli.files[:])
+	files := input_files(cli.files[:], cli.walked)
 	switch {
 	case o.in_place && o.to != o.from:
 		usage_error("--in-place writes each file back as its own format: %s, not --to %s", FORMATS[o.from].name, FORMATS[o.to].name)
@@ -43,69 +43,105 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	init_output(&run.output, run)
 	run.output.held = o.check || o.in_place
 	// Past the library's nesting cap the printer recurses, so it runs on the interpreter's stack, as a filter run does.
-	run.output.ret = 0
 	run_deep(run, &ins, fmt_files)
-	finish(run, EXIT_USAGE if ins.failures > 0 else run.output.ret)
+	finish(run, run.output.ret)
 }
 
-// Each of `ins.files` formatted in turn. `ins.failures` counts the files that did not open, read or write or that the
-// schema could not judge, and the output comes to EXIT_INPUT after a file with a fault, else to 1 after one that fails
-// the schema or, under --check, differs, which it names. A file that fails the schema or faults under it is not written.
+// What each file's format reads: the run's source, whether its outputs are held, and -c, which NDJSON's lines are
+// written compact without.
+@(private = "file")
+Fmt_Run :: struct {
+	src:           Source,
+	held, compact: bool,
+}
+
+// Each of `ins.files` formatted, on the pool's threads unless a schema judges them, the printer may recurse past the
+// library's cap, or a text of one file is parted from the last of the file before. The output comes to the worst
+// file's status: 2 after a file that did not open, read or write or that the schema could not judge, else EXIT_INPUT
+// after a fault, else 1 after one that fails the schema or, under --check, differs, which it names. A file that fails
+// the schema or faults under it is not written.
 @(private = "file")
 fmt_files :: proc(run: ^Run, ins: ^Inputs) {
 	o := &run.opts
-	out := &run.output
-	c := run.convert
-	held := out.held
-	for path in ins.files {
-		spent, read := file_bytes(path, "fmt", o.in_place)
-		if !read {
-			ins.failures += 1
-			continue
-		}
-		ins.data, ins.name = spent.data, file_name(path)
-		judged := conversion_judge(run, ins) if c != nil else .Valid
-		cells := c != nil && c.cells_as.readers != nil
-		if cells {
-			c.table = reads_cells(o)
-		}
-		// A file the schema judged is held until it passes, and one it found a fault in is formatted only to tell the
-		// fault, as fmt tells it.
-		out.held = held || cells || judged == .Fault
-		formatted := (judged == .Valid || judged == .Fault) && fmt_text(run, ins)
-		table_end(out)
-		if out.table != nil {
-			out.table = table_start(run)
-		}
-		text := out.buf.buf[:out.buf.cursor]
-		passes := !formatted || !cells || conversion_cells_pass(c, ins, text)
-		out.held = held
-		switch {
-		case judged == .Refused:
-			ins.failures += 1
-		case judged == .Invalid || !passes:
-			out.ret = max(out.ret, 1)
-		case !formatted:
-			out.ret = EXIT_INPUT
-			if judged == .Valid {
-				flush_some(out, force = true)
-			}
-		case o.check:
-			if !bytes.equal(text, ins.data) {
-				message.write_stderr("stury: %s is not formatted\n", ins.name)
-				out.ret = max(out.ret, FMT_EXIT_DIFFERS)
-			}
-		case o.in_place:
-			if !bytes.equal(text, ins.data) && !rewrite_file(path, text) {
-				ins.failures += 1
-			}
-		case:
+	fr := Fmt_Run{ins.source, run.output.held, o.compact && !writes_lines(o)}
+	fc := Files_Call{run = run, files = ins.files, job = fmt_file, data = &fr}
+	parted := FORMATS[o.to].parted != nil
+	for f in o.froms {
+		parted ||= o.to_by_file && FORMATS[f].parted != nil
+	}
+	each_file(&fc, run.convert == nil && o.max_depth <= core.MAX_DEPTH && (fr.held || !parted))
+	tell_changed(&fc)
+	run.output.ret = fc.code
+}
+
+// Under --check or --in-place over more than one file, how many of them would change or changed.
+tell_changed :: proc(fc: ^Files_Call) {
+	if o := &fc.run.opts; (o.check || o.in_place) && len(fc.files) > 1 {
+		message.write_stderr("stury: %d of %d files %s\n", fc.changed, len(fc.files), "would change" if o.check else "changed")
+	}
+}
+
+// File `k` formatted on `r`, its status in `slot`.
+@(private = "file")
+fmt_file :: proc(fc: ^Files_Call, r: ^Run, k: int, slot: ^File_Slot) {
+	fr := (^Fmt_Run)(fc.data)
+	o, out, c, path := &r.opts, &r.output, r.convert, fc.files[k]
+	ins := Inputs{files = fc.files[k:k + 1], run = r}
+	from := o.from
+	if ins.source, _ = file_source(o, path, fr.src); o.from != from {
+		o.compact = fr.compact || writes_lines(o)
+		out.layout.opts.pretty, out.layout.comments = !o.compact, writes_comments(o)
+		out.table, out.parted_at = table_start(r) if writes_cells(o) else nil, -1
+	}
+	spent, read := file_bytes(path, o.in_place)
+	if !read {
+		slot.code = EXIT_USAGE
+		return
+	}
+	defer free_spent(spent)
+	defer free_all(context.temp_allocator)
+	ins.data, ins.name = spent.data, file_name(path)
+	judged := conversion_judge(r, &ins) if c != nil else .Valid
+	cells := c != nil && c.cells_as.readers != nil
+	if cells {
+		c.table = reads_cells(o)
+	}
+	// A file the schema judged is held until it passes, and one it found a fault in is formatted only to tell the
+	// fault, as fmt tells it.
+	out.held = fr.held || cells || judged == .Fault
+	formatted := (judged == .Valid || judged == .Fault) && fmt_text(r, &ins)
+	table_end(out)
+	if out.table != nil {
+		out.table = table_start(r)
+	}
+	text := out.buf.buf[:out.buf.cursor]
+	passes := !formatted || !cells || conversion_cells_pass(c, &ins, text)
+	out.held = fr.held
+	switch {
+	case judged == .Refused:
+		slot.code = EXIT_USAGE
+	case judged == .Invalid || !passes:
+		slot.code = 1
+	case !formatted:
+		slot.code = EXIT_INPUT
+		if judged == .Valid {
 			flush_some(out, force = true)
 		}
-		out.buf.cursor = 0
-		free_spent(spent)
-		free_all(context.temp_allocator)
+	case o.check:
+		if slot.changed = !bytes.equal(text, ins.data); slot.changed {
+			message.write_stderr("stury: %s is not formatted\n", ins.name)
+			slot.code = FMT_EXIT_DIFFERS
+		}
+	case o.in_place:
+		slot.changed = !bytes.equal(text, ins.data)
+		if slot.changed && !rewrite_file(path, text) {
+			slot.code, slot.changed = EXIT_USAGE, false
+		}
+	case:
+		flush_some(out, force = true)
 	}
+	// A held file's text is a file of its own, parted from no other.
+	out.buf.cursor, out.parted_at = 0, -1 if fr.held else out.parted_at
 }
 
 // The texts of the open file written, or the texts before its first fault and the fault told, and false. A text
@@ -267,6 +303,9 @@ written_as :: proc(o: ^Opts) -> core.As {
 // would block on a pipe.
 refuse_in_place_inputs :: proc(files: []string) {
 	for path in files {
+		if path in unlisted {
+			continue
+		}
 		if path == "-" {
 			usage_error("--in-place needs a FILE: it cannot rewrite standard input")
 		}

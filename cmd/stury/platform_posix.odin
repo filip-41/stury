@@ -305,3 +305,81 @@ real_path :: proc(_: rawptr, path: string, allocator := context.allocator) -> st
 	defer posix.free(real)
 	return strings.clone_from_cstring(real, allocator)
 }
+
+// The kind of file `path` names, by a stat that does not open it, which would take a FIFO's bytes from its reader.
+// False when it names nothing.
+path_stat :: proc(path: string) -> (kind: Entry_Kind, ok: bool) {
+	st: posix.stat_t
+	if posix.stat(strings.clone_to_cstring(path, context.temp_allocator), &st) != .OK {
+		return
+	}
+	if posix.S_ISREG(st.st_mode) {
+		return .Long if int(st.st_size) >= FILES_LONG else .File, true
+	}
+	return .Dir if posix.S_ISDIR(st.st_mode) else .Other, true
+}
+
+// The bytes of `path`, a regular file as the walk found it, read whole into `buf` when it holds fewer than `limit`,
+// with no more calls than its open, its reads to its end and its close, and a stat once it fills `READ_FIRST`.
+// `.Long` when it holds `limit` or more, and `.Left` when it does not open or read, which the caller then opens as any
+// other file.
+read_short :: proc(path: string, buf: ^[dynamic]byte, limit: int) -> (data: []byte, read: Short_Read) {
+	READ_FIRST :: POOLED_BYTES
+	cpath := strings.clone_to_cstring(path, context.temp_allocator)
+	fd := posix.open(cpath, {.NOCTTY, .CLOEXEC})
+	if fd < 0 {
+		return nil, .Left
+	}
+	defer posix.close(fd)
+	non_zero_resize(buf, min(limit, READ_FIRST))
+	n := 0
+	for {
+		if n == len(buf) {
+			st: posix.stat_t
+			if n == limit || posix.fstat(fd, &st) != .OK {
+				return nil, .Long if n == limit else .Left
+			}
+			if int(st.st_size) >= limit {
+				return nil, .Long
+			}
+			// One byte past the size, so a file that grew since its stat is read to its end or sized again.
+			non_zero_resize(buf, min(limit, max(int(st.st_size) + 1, n * 2)))
+		}
+		left := buf[n:]
+		got := int(posix.read(fd, raw_data(left), uint(len(left))))
+		if got < 0 {
+			return nil, .Left
+		}
+		if got == 0 {
+			return buf[:n], .Read
+		}
+		n += got
+	}
+}
+
+// The entries of directory `path` but `.` and `..`, each of the kind its directory entry gives.
+list_dir :: proc(path: string) -> (entries: [dynamic]Dir_Entry, err: os.Error) {
+	dir := posix.opendir(strings.clone_to_cstring(path, context.temp_allocator))
+	if dir == nil {
+		return nil, os.Platform_Error(posix.errno())
+	}
+	defer posix.closedir(dir)
+	for {
+		posix.set_errno(nil)
+		e := posix.readdir(dir)
+		if e == nil {
+			if errno := posix.errno(); errno != nil {
+				err = os.Platform_Error(errno)
+			}
+			return
+		}
+		name := string(cstring(raw_data(e.d_name[:])))
+		if name != "." && name != ".." {
+			#partial switch e.d_type {
+			case .REG:     append(&entries, Dir_Entry{strings.clone(name), .File})
+			case .DIR:     append(&entries, Dir_Entry{strings.clone(name), .Dir})
+			case .UNKNOWN: append(&entries, Dir_Entry{strings.clone(name), .Unknown})
+			}
+		}
+	}
+}

@@ -7,14 +7,12 @@ import core_pkg "../core"
 import "../core/rules"
 
 // What a program asks of its inputs:
-//	serial     it needs them in order, on one thread: it reads inputs (`input`, `inputs`, `input_filename`,
-//	           `input_line_number`), writes messages (`debug`, `stderr`), halts, runs `recurse` with a filter, or
-//	           calls a function that calls itself
+//	serial     why it needs them in order, on one thread, none when it does not
 //	selection  it is `select(PATH op LITERAL)`, unless `select_faults` says why not
 //	columns    what it reads of a record whose members are its columns, unless `column_faults` says it reads more
 //	spine      it is a filter over the entries of an array that a text's names lead to
 Shape :: struct {
-	serial:        bool,
+	serial:        bit_set[Serial],
 	selection:     Selection,
 	select_faults: bit_set[Shape_Fault],
 	columns:       Columns_Read,
@@ -34,6 +32,20 @@ Spine :: struct {
 	each:   Maybe(Program),
 	tail:   Program,
 	tailed: bool,
+}
+
+// Why a program runs on one thread, its inputs in order:
+//	Inputs    it reads inputs (`input`, `inputs`)
+//	Position  it reads where its input is (`input_filename`, `input_line_number`)
+//	Messages  it writes messages (`debug`, `stderr`)
+//	Halts     it halts (`halt`, `halt_error`)
+//	Recurses  it runs `recurse` with a filter, or calls a function that calls itself, which needs a deep stack
+Serial :: enum u8 {
+	Inputs,
+	Position,
+	Messages,
+	Halts,
+	Recurses,
 }
 
 // The shape of `prog`, its lists and the programs it makes in `allocator`.
@@ -67,12 +79,13 @@ shaped :: proc(s: Shape, spine: Spine, names: [dynamic]string) -> Shape {
 }
 
 @(private = "file")
-serial :: proc(prog: Program) -> bool {
+serial :: proc(prog: Program) -> bit_set[Serial] {
 	w: Serial_Walk
 	defer delete(w.on)
 	defer delete(w.done)
 	body := prog.body
-	return serial_node(&body, &w)
+	serial_node(&body, &w)
+	return w.why
 }
 
 @(private = "file")
@@ -83,29 +96,45 @@ with_body :: proc(prog: Program, body: ^Node) -> Program {
 }
 
 @(private = "file", rodata)
-SERIAL_CALLS := []string{"input", "inputs", "debug", "stderr", "halt", "halt_error", "input_filename", "input_line_number"}
+SERIAL_CALLS := [?]struct {
+	name: string,
+	why:  Serial,
+}{
+	{"input", .Inputs},
+	{"inputs", .Inputs},
+	{"input_filename", .Position},
+	{"input_line_number", .Position},
+	{"debug", .Messages},
+	{"stderr", .Messages},
+	{"halt", .Halts},
+	{"halt_error", .Halts},
+}
 
 @(private = "file")
 Serial_Walk :: struct {
 	on, done: [dynamic]^Func, // the functions whose bodies are being walked, and those walked
+	why:      bit_set[Serial],
 }
 
+// Adds why the node `p^` and those under it run on one thread to `w.why`. Returns false, so every node is walked.
 @(private = "file")
 serial_node :: proc(p: ^^Node, w: ^Serial_Walk) -> bool {
 	n := p^
-	if n == nil {
-		return false
+	if n == nil || n.kind != .Call {
+		return n != nil && any_child(n, w, serial_node)
 	}
-	if n.kind == .Call && (slice.contains(SERIAL_CALLS, n.name) || n.name == "recurse" && len(n.args) > 0) {
-		return true
+	for c in SERIAL_CALLS {
+		w.why += {c.why} if n.name == c.name else {}
 	}
+	w.why += {.Recurses} if n.name == "recurse" && len(n.args) > 0 else {}
 	// A call of a filter parameter runs its argument, which the walk sees where it is passed.
-	if f := n.callee; n.kind == .Call && f != nil && !n.is_param && !slice.contains(w.done[:], f) {
-		recursive := slice.contains(w.on[:], f)
-		append(&w.on, f)
-		if recursive || serial_node(&f.body, w) {
-			return true
+	if f := n.callee; f != nil && !n.is_param && !slice.contains(w.done[:], f) {
+		if slice.contains(w.on[:], f) {
+			w.why += {.Recurses}
+			return false
 		}
+		append(&w.on, f)
+		serial_node(&f.body, w)
 		pop(&w.on)
 		append(&w.done, f)
 	}

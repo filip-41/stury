@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Command line
+
+- A directory argument is walked: its files of a format's extension, in the byte order of their paths, by a filter run,
+  `check`, `fmt`, `edit` and `schema infer`. `-g GLOB` picks the files a walk reads, and inside a git work tree a
+  walk skips what git ignores unless `--no-ignore`. `--files-from FILE` reads a list of files.
+- `fmt` and `edit` over more than one file under `--check` or `--in-place` end with how many files would change or
+  changed.
+- Without `--from` each file reads in the format its extension names, where files of two formats were a usage error.
+- A filter run, `check`, `fmt` and `edit` answer many files on the pool's threads, with the output, messages and exit status of one
+  thread.
+- `--each` runs the filter on each file on its own, each output line labelled with the file's name, and exits with
+  the worst file's status. A failing run over a directory without it says that `--each` exists.
+
+
 ## 0.2.1 (2026-11-18)
 
 ### Install

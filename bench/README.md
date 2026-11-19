@@ -55,6 +55,7 @@ CFLAGS=-march=native CXXFLAGS=-march=native RUSTFLAGS='-C target-cpu=native' mak
 | `model` | `model.load` of valid and invalid records, and `model.dump` | pydantic, msgspec, serde_json with garde |
 | `kernel` | the SIMD block kernels and the number writers, in ns, instructions and cycles per unit | none |
 | `cli` | whole commands, process start included | jq, jaq, gojq, yq; qsv, Miller |
+| `files` | whole commands over 200 files of 1 KiB to 2 MiB and a tree of about 34,000 files | jq, jaq, gojq, yq over find and xargs, side by side and serial; ripgrep |
 
 The other formats' rows run beside these libraries:
 

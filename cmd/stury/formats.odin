@@ -231,23 +231,19 @@ format_of_file :: proc(name: string) -> (f: Format, ok: bool) {
 	}
 }
 
-// The one format the extensions of `files` name, as a run with no --from reads them, and none when they name no format
-// but JSON. A file of any other extension names JSON, and "-" names none. Files that name two formats are a usage error.
-format_of_files :: proc(files: []string) -> (f: Format, ok: bool) {
-	first: string
-	for name in files {
-		if name == "-" {
-			continue
-		}
-		named, _ := format_of_file(name)
-		switch {
-		case first == "":
-			f, first = named, name
-		case named != f:
-			usage_error("%s reads as %s and %s as %s: --from FORMAT reads every file as one", first, FORMATS[f].name, name, FORMATS[named].name)
-		}
+// How the file `path` reads: as `src`, unless each file reads as its extension names and this one names another format
+// than `src` or `o.from`, which `o.from` then is, and `o.to` too where each file is written in its own format. Returns
+// whether the format changed.
+file_source :: proc(o: ^Opts, path: string, src: Source) -> (Source, bool) {
+	f, _ := format_of_file(path)
+	if !o.by_extension || path == "-" || f == src.format && f == o.from {
+		return src, false
 	}
-	return f, f != .Json
+	o.from = f
+	if o.to_by_file {
+		o.to = f
+	}
+	return input_source(o, json_reading_of(o)), true
 }
 
 // Returns the comma-separated format names for `--from` and `--to` messages.
@@ -394,25 +390,25 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 	if o.attributes && o.stream {
 		usage_error("--attributes cannot be combined with --stream, whose events are each a leaf")
 	}
-	if cli.cells_flag != "" && !reads_cells(o) {
+	if cli.cells_flag != "" && o.froms & {.Csv, .Tsv} == {} {
 		usage_error("%s applies to --from csv or tsv", cli.cells_flag)
 	}
 	// schema sample takes --infer for a table it writes, whose cells it draws as --infer reads them.
-	if cli.infer_flag != "" && !reads_cells(o) && o.from != .Xml && o.from != .Html && !(cli.command >= .Schema && writes_cells(o)) {
+	if cli.infer_flag != "" && o.froms & {.Csv, .Tsv, .Xml, .Html} == {} && !(cli.command >= .Schema && writes_cells(o)) {
 		usage_error("%s applies to --from csv, tsv, xml or html", cli.infer_flag)
 	}
-	if cli.yaml_flag != "" && o.from != .Yaml {
+	if cli.yaml_flag != "" && .Yaml not_in o.froms {
 		usage_error("%s applies to --from yaml", cli.yaml_flag)
 	}
-	if cli.xml_flag != "" && o.from != .Xml {
+	if cli.xml_flag != "" && .Xml not_in o.froms {
 		usage_error("%s applies to --from xml", cli.xml_flag)
 	}
 	// check and edit refuse the options that write a table as options they have no use for.
 	if cli.cells_out_flag != "" && !writes_cells(o) && cli.command != .Check && cli.command != .Edit {
 		usage_error("%s applies to --to csv or tsv", cli.cells_out_flag)
 	}
-	if reads_cells(o) {
-		refuse_cell_bytes(cells_spec(o.from), o.cells_in, from, "--delimiter", "--comment")
+	for f in o.froms & {.Csv, .Tsv} {
+		refuse_cell_bytes(cells_spec(f), o.cells_in, FORMATS[f].name, "--delimiter", "--comment")
 	}
 	if writes_cells(o) {
 		refuse_cell_bytes(cells_spec(o.to), o.cells_out, to, "--out-delimiter" if cli.out_delimiter != nil else "--delimiter", "--out-comment" if cli.out_comment != nil else "--comment")

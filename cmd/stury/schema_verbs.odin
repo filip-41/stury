@@ -125,8 +125,9 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 		ranges = cli.verbs.ranges,
 	}
 	failures, faults := 0, 0
-	for path in input_files(files) {
-		spent, read := file_bytes(path, "schema infer")
+	for path in input_files(files, cli.walked) {
+		src, _ = file_source(&run.opts, path, src)
+		spent, read := file_bytes(path)
 		if !read {
 			failures += 1
 			continue

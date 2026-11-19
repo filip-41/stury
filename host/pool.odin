@@ -36,6 +36,9 @@ Pool :: struct {
 	spin:        bool,
 	// How many tasks are in a write (`writing`).
 	in_write:    int,
+	// Calls keep their width while set: a caller that ends a call early for work of its own (a run of many files at
+	// a long one) waits for the tasks in flight, which says nothing of the host's load.
+	steady:      bool,
 }
 
 // Tell the pool a task is (`on`) or is no longer in a write that may block on its reader, so that `finish` sleeps
@@ -227,7 +230,7 @@ adapt_width :: proc(pool: ^Pool, span, wait: time.Duration) {
 	// A call the caller held below the width says nothing about it. A width of none has nothing to shrink: below
 	// none, the next call hands out a negative count of helpers.
 	w := &pool.current.width
-	if pool.handed != w^ {
+	if pool.handed != w^ || pool.steady {
 		return
 	}
 	if wait * WAIT_HIGH > span && w^ > 0 {

@@ -16,6 +16,7 @@ import host "../../host"
 import "../../core/write"
 import records "../../core/records"
 import "../../jq"
+import "message"
 
 // The least input read on the pool's threads: on a shorter one, starting them costs more than they save.
 POOLED_BYTES :: #config(STURY_POOLED_BYTES, 1 << 20)
@@ -30,9 +31,10 @@ run_pool :: proc(run: ^Run) -> ^core.Runner {
 	return &run.pool.runner
 }
 
-// The run's pool for an input of `data`, or nil for one too short to share.
+// The run's pool for an input of `data`, or nil for one too short to share or one a task of many files reads, whose
+// pool runs the files.
 pool_for :: proc(run: ^Run, data: []byte) -> ^core.Runner {
-	return run_pool(run) if len(data) >= POOLED_BYTES else nil
+	return run_pool(run) if len(data) >= POOLED_BYTES && message.holding == nil else nil
 }
 
 // What a piece's records came to, merged into the run's in source order. `cursor` is the bytes its outputs hold.
@@ -73,15 +75,19 @@ Pieces :: struct {
 }
 
 // Whether the filter can run on pieces of the input, decided at its first use. A filter that reads inputs, writes
-// messages, halts, recurses or runs a deep input needs the serial run's state or the stack it runs on.
+// messages, halts, recurses or runs a deep input needs the serial run's state or the stack it runs on. A task of many
+// files runs its file alone, its pool running the files.
 parallel :: proc(run: ^Run) -> bool {
+	if message.holding != nil {
+		return false
+	}
 	if p, known := run.parallel.?; known {
 		return p
 	}
 	o := &run.opts
 	// A piece builds its records alone, without the comment lines above them that the interpreter's filter may read.
 	comments := reads_cells(o) && o.cells_in.comment != 0 && run.route.columns == nil
-	p := !(o.null_input || o.slurp || o.raw_input || o.stream || o.stream_errors || o.unbuffered || o.grow_header || o.attributes || comments || writes_texts(o)) && o.max_depth <= core.MAX_DEPTH && !run.shape.serial
+	p := !(o.null_input || o.slurp || o.raw_input || o.stream || o.stream_errors || o.unbuffered || o.grow_header || o.attributes || comments || writes_texts(o)) && o.max_depth <= core.MAX_DEPTH && run.shape.serial == {}
 	run.parallel = p
 	return p
 }
@@ -374,11 +380,7 @@ write_piece :: proc(ps: ^Pieces, s: ^Piece_Slot) {
 	}
 	r := &run.route
 	if p := s.sum.explain; !ps.entries {
-		if p.fallback.text > 0 && r.fallback.text == 0 {
-			r.fallback = {r.scanned + r.interpreted + p.fallback.text, p.fallback.why}
-		}
-		r.scanned += p.scanned
-		r.interpreted += p.interpreted
+		explain_add(r, p)
 	}
 	r.pieces += 1
 	if len(s.out) > 0 {

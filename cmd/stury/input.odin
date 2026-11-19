@@ -41,10 +41,10 @@ read_text :: proc(src: []byte, r: core.As) -> (core.Value, Maybe(core.Fault)) {
 	return core.document_value(d), nil
 }
 
-// The files a command reads, or stdin when it names none. With none named and stdin and stdout both a terminal, the
-// help is told rather than a wait on the keyboard, as a run with no filter tells it.
-input_files :: proc(files: []string) -> []string {
-	if len(files) > 0 {
+// The files a command reads, or stdin when it names none and walked no directory. With none named and stdin and stdout
+// both a terminal, the help is told rather than a wait on the keyboard, as a run with no filter tells it.
+input_files :: proc(files: []string, walked: bool) -> []string {
+	if len(files) > 0 || walked {
 		return files
 	}
 	if is_terminal(os.stdin) && is_terminal(os.stdout) {
@@ -93,6 +93,7 @@ Inputs :: struct {
 	name:      string, // the file opened last, "" before the first
 	failures:  int, // files that did not open or read
 	has_text:  bool, // a file before this one held a text, so a byte order mark opening this one is no mark
+	stray_bom: bool, // the open file opens with a byte order mark after a text, which is a fault
 	slurp:     bool,
 	run:       ^Run, // under the path scan, a text it answers is printed and passed over
 	// The open file. `data` is its bytes in memory, whole (`last`) or a window of whole lines, and the inputs own them:
@@ -113,6 +114,7 @@ Inputs :: struct {
 	pipe:      ^Pipe,
 	texts:     records.Reader,
 	several:   bool,
+	many:      bool, // the run reads more than these `files`, so a fault is told with its file's name
 	parallel_from: u64, // where pieces may start again, past a record they stopped at
 	skip_below: u64, // a delimited text's records before it are answered by pieces
 	rows_end:   u64, // a delimited window's records read end here, past their line ends
@@ -446,7 +448,8 @@ first_text :: proc(ins: ^Inputs) -> (v: core.Value, msg: string, status: jq.Inpu
 		close_file(ins)
 		return
 	}
-	stray_bom := ins.has_text && bytes.has_prefix(data, BOM)
+	ins.stray_bom = ins.has_text && bytes.has_prefix(data, BOM)
+	stray_bom := ins.stray_bom
 	ins.has_text = true
 	run := ins.run
 	route := &run.route
@@ -464,7 +467,7 @@ first_text :: proc(ins: ^Inputs) -> (v: core.Value, msg: string, status: jq.Inpu
 		fault = core.Fault{rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Expected_Value)}
 	} else {
 		// A long strict text's array is built on the pool's threads.
-		pool := run_pool(run) if len(data) >= POOLED_BYTES && ins.spec == .Json else nil
+		pool := pool_for(run, data) if ins.spec == .Json else nil
 		doc, fault, texts = build_whole(data, ins.source, runtime.heap_allocator() if run.opts.stream else context.allocator, pool, &route.pieces)
 	}
 	if texts {
@@ -588,9 +591,19 @@ open_next :: proc(ins: ^Inputs) -> bool {
 	for ins.next_file < len(ins.files) {
 		path := ins.files[ins.next_file]
 		ins.next_file += 1
+		if src, changed := file_source(&ins.run.opts, path, ins.source); changed {
+			ins.source = src
+			reroute(ins.run, src.framing)
+		}
 		ins.name, ins.line, ins.line_end, ins.file_lines, ins.text_end, ins.lead_len = file_name(path), 0, 0, 0, 0, 0
 		delete(ins.head, runtime.heap_allocator())
 		ins.head = nil
+		if data, read := task_bytes(path); read {
+			ins.run.route.input += len(data)
+			ins.open, ins.last = true, true
+			set_data(ins, data)
+			return true
+		}
 		f, opened := open_file(path)
 		if !opened {
 			ins.failures += 1
@@ -634,21 +647,24 @@ file_name :: proc(path: string) -> string {
 	return "<stdin>" if path == "-" else path
 }
 
-// The file `path` names opened, "-" being stdin, or false, told, when it does not open or is a directory. `.` given
-// to a `command` is most likely a filter, which the note says it takes none of.
-open_file :: proc(path: string, command := "") -> (f: ^os.File, ok: bool) {
+// The file `path` names opened, "-" being stdin, or false, told, when it does not open, is a directory, or is one a
+// walk could not list.
+open_file :: proc(path: string) -> (f: ^os.File, ok: bool) {
 	if path == "-" {
 		return os.stdin, true
 	}
-	err: os.Error
+	err, unread := unlisted_error(path)
+	if unread {
+		message.write_stderr("stury: error: Could not open directory %s: %s\n", path, strerror(err))
+		return nil, false
+	}
 	if f, err = open_input(path); err != nil {
 		message.write_stderr("stury: error: Could not open file %s: %s\n", path, strerror(err))
 		return nil, false
 	}
 	if info, ferr := os.fstat(f, context.temp_allocator); ferr == nil && info.type == .Directory {
 		os.close(f)
-		note := message.build_temp("(%s takes no filter)\n", command) if command != "" && path == "." else ""
-		message.write_stderr("stury: error: Could not open file %s: Is a directory\n%s", path, note)
+		message.write_stderr("stury: error: Could not open file %s: Is a directory\n", path)
 		return nil, false
 	}
 	return f, true
@@ -657,8 +673,11 @@ open_file :: proc(path: string, command := "") -> (f: ^os.File, ok: bool) {
 // The bytes of the file `path` names, "-" being stdin, as `open_file` opens it: its mapping where it maps, else all of
 // it on the heap, and the file closed but for stdin. A file the run is to replace (`replaced`) is read where a mapping
 // would keep it from being replaced. False, told, when it does not open or read.
-file_bytes :: proc(path: string, command := "", replaced := false) -> (d: Spent, ok: bool) {
-	f := open_file(path, command) or_return
+file_bytes :: proc(path: string, replaced := false) -> (d: Spent, ok: bool) {
+	if data, read := task_bytes(path); read {
+		return {data, false}, true
+	}
+	f := open_file(path) or_return
 	mapped: bool
 	if !replaced || REPLACES_MAPPED {
 		d.data, _, mapped = map_file(f)
@@ -879,7 +898,7 @@ Spent :: struct {
 free_spent :: proc(d: Spent) {
 	if d.mapped {
 		unmap_file(d.data)
-	} else {
+	} else if !task_holds(d.data) {
 		delete(d.data, runtime.heap_allocator())
 	}
 }

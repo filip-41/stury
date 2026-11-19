@@ -101,3 +101,17 @@ def test_many_files_hold_one_files_memory(stury, inputs, lane, kind, args):
     one, many = peak_over(stury, width + args, inputs[kind][:base]), peak_over(stury, width + args, inputs[kind])
     assert many <= one + SLACK + arenas, f"{base} files {one >> 20} MiB, {COPIES} files {many >> 20} MiB"
     assert args[0] not in ("check", "fmt") or one <= SCHEMA_PEAK, f"{one >> 20} MiB for one file"
+
+
+# Files answered on the pool's threads while the first is still running hold at most 64 MiB of their output, whether
+# they are many with little output each or few with much.
+HELD_PEAK = 96 << 20
+
+
+@pytest.mark.parametrize("files, lines", [(5000, 40), (90, 50000)])
+def test_files_ahead_hold_bounded_output(stury, tmp_path, files, lines):
+    for i in range(files):
+        (tmp_path / f"f{i:05}.json").write_text('{"slow": %d, "lines": %d}' % (20000000 if i == 0 else 0, lines))
+    filter = '(reduce range(.slow) as $i (0; . + 1) | empty), (range(.lines) | "%s")' % ("x" * 100)
+    held = peak_over(stury, ["--threads", str(POOL_WIDTH), "-r", filter], [str(tmp_path)])
+    assert held <= HELD_PEAK, f"{held >> 20} MiB"

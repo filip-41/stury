@@ -4,7 +4,6 @@ package main
 
 import "base:runtime"
 import "core:mem/virtual"
-import "core:os"
 import "core:strings"
 import core "../../core"
 import "../../jq"
@@ -41,11 +40,19 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 	context.allocator = jq.run_allocator(&inputs)
 	context.temp_allocator = jq.run_allocator(&temp)
 	if run.opts.null_input {
+		ins.files = whole_files(ins.files)
 		run_once(run, nil)
 		return
 	}
-	// jq's main loop: until a file has failed, the files end, a text does not parse, or the filter halts. The first
-	// input is fetched whatever the files before it did, as jq tests its errors before a fetch and not in it.
+	if !stream_files(run, ins) {
+		ins.files = whole_files(ins.files)
+		run_inputs(run, ins)
+	}
+}
+
+// jq's main loop: until a file has failed, the files end, a text does not parse, or the filter halts. The first
+// input is fetched whatever the files before it did, as jq tests its errors before a fetch and not in it.
+run_inputs :: proc(run: ^Run, ins: ^Inputs) {
 	for fetched := false; (ins.failures == 0 || !fetched) && !run.halted; fetched = true {
 		v, msg, status := next_input(ins)
 		// A text that does not parse is the interpreter's, which tells its fault.
@@ -81,6 +88,11 @@ MESSAGES_HELD :: 1 << 16
 
 // The interpreter's messages hook.
 hold_message :: proc(_: rawptr, text: []byte) {
+	// A file run on a thread of its own holds them with its output.
+	if message.holding != nil {
+		message.stderr_text(string(text))
+		return
+	}
 	// The heap's, as the messages outlive the input whose run wrote them.
 	held_messages.allocator = runtime.heap_allocator()
 	append(&held_messages, ..text)
@@ -94,7 +106,7 @@ flush_messages :: #force_inline proc() {
 	if len(held_messages) == 0 {
 		return
 	}
-	os.write(os.stderr, held_messages[:])
+	message.stderr_text(string(held_messages[:]))
 	clear(&held_messages)
 }
 

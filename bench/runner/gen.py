@@ -801,7 +801,64 @@ def gen_compact(source) -> bytes:
     return _dump(source())
 
 
+def gen_tree() -> dict:
+    """Returns a repository-like tree as {path: bytes}: small package.json files, tiny JSON files, YAML and TOML
+    configs four directories deep, larger JSON files, one long file, a node_modules its .gitignore skips, and files of
+    no format's extension. Only the package.json files outside node_modules have a "version"."""
+    rnd = random.Random(2026)
+    word = lambda n: "".join(rnd.choice("abcdefghijklmnop") for _ in range(n))
+    deep = lambda i: f"c{i % 10}/c{i % 7}/c{i % 5}/c{i % 3}"
+    tree = {".git/HEAD": b"ref: refs/heads/main\n", ".gitignore": b"node_modules/\n"}
+    for i in range(2000):
+        deps = {word(10): f"^{rnd.randrange(9)}.{rnd.randrange(20)}.0" for _ in range(40)}
+        tree[f"packages/p{i:04}/package.json"] = (json.dumps({"name": f"p{i}", "version": f"1.{i}.0", "dependencies": deps}, indent=2) + "\n").encode()
+    for i in range(10000):
+        tree[f"tiny/t{i:05}.json"] = _dump({"id": i, "ok": i % 3 == 0, "tag": word(20)})
+    for i in range(8000):
+        tree[f"configs/{deep(i)}/f{i:04}.yaml"] = yaml.safe_dump({"name": word(12), "replicas": i % 9, "labels": {word(8): word(16) for _ in range(20)}}).encode()
+    for i in range(2000):
+        tree[f"configs/{deep(i)}/t{i:04}.toml"] = tomli_w.dumps({"name": word(12), "port": 8000 + i, "env": {word(8): word(16) for _ in range(20)}}).encode()
+    for i in range(4000):
+        tree[f"data/d{i:04}.json"] = _dump([{"id": j, "v": rnd.random(), "s": word(24)} for j in range(60)])
+    tree["big/logs.json"] = gen_logs_json(8 * MIB)
+    for i in range(5000):
+        tree[f"node_modules/m{i:04}/package.json"] = _dump({"name": f"m{i}", "version": "0.0.1", "main": word(600)})
+    for i in range(1500):
+        tree[f"docs/d{i:04}.md"] = f"# {word(10)}\n\n{word(600)}\n".encode()
+        tree[f"assets/a{i:04}.png"] = rnd.randbytes(700)
+    return tree
+
+
+def gen_sized() -> dict:
+    """Returns {path: bytes}: 160 JSON files of the logs shape, `{"logs": [record, ...]}` with the records of logs.json,
+    their sizes log-uniform from 1 KiB to 2 MiB, compact and pretty in turn, and the same records as 40 YAML files of
+    1 KiB to 512 KiB."""
+    rnd = random.Random(2027)
+    records = _logs_records()
+    # A work tree of its own, so the ignore rules of the checkout the fixtures lie in do not apply.
+    tree = {".git/HEAD": b"ref: refs/heads/main\n"}
+
+    def document(target, write):
+        # A record's size is its bytes as written alone, so a file comes within one record of its target.
+        at, logs, size = rnd.randrange(len(records)), [], 0
+        while size < target or not logs:
+            rec = records[(at + len(logs)) % len(records)]
+            logs.append(rec)
+            size += len(write({"logs": [rec]})) - len(write({"logs": []}))
+        return write({"logs": logs})
+
+    pretty = lambda v: (json.dumps(v, indent=2) + "\n").encode()
+    for i in range(160):
+        target = int(1024 * 2048 ** rnd.random())
+        tree[f"json/s{i:03}.json"] = document(target, pretty if i % 2 else _dump)
+    for i in range(40):
+        tree[f"yaml/s{i:02}.yaml"] = document(int(1024 * 512 ** rnd.random()), _yaml)
+    return tree
+
+
 FIXTURES = {
+    "tree": (gen_tree, []),
+    "sized": (gen_sized, []),
     "nested.json": (gen_nested_json, [16 * MIB]),
     "wide.json": (gen_wide_json, [8 * MIB]),
     "escape.json": (gen_escape_json, [8 * MIB]),
@@ -856,11 +913,17 @@ def write(names, pinned, check):
     for name in sorted(names):
         gen, args = FIXTURES[name]
         data = gen(*args)
-        if not check:
-            os.makedirs(os.path.dirname(os.path.join(OUT, name)), exist_ok=True)
-            with open(os.path.join(OUT, name), "wb") as f:
-                f.write(data)
-        digest = hashlib.sha256(data).hexdigest()
+        # A tree is pinned by one digest over its sorted paths and their bytes.
+        tree = not isinstance(data, bytes)
+        files = {f"{name}/{p}": b for p, b in sorted(data.items())} if tree else {name: data}
+        h = hashlib.sha256()
+        for path, b in files.items():
+            if not check:
+                os.makedirs(os.path.dirname(os.path.join(OUT, path)), exist_ok=True)
+                with open(os.path.join(OUT, path), "wb") as f:
+                    f.write(b)
+            h.update(path.encode() + b"\0" + b if tree else b)
+        digest = h.hexdigest()
         if digest != pinned.get(name):
             off.append(name)
         print('"%s" = "%s"' % (name, digest))

@@ -3,6 +3,8 @@
 # and refuses one whose SHA-256 differs; the files carry their publishers' terms, so they are fetched, not committed.
 
 [generated]
+"tree" = "60aac3a86fb79e0b057c2931b4ed9e598a7a2a7e0bc4a73dbdb8fc000582784b"
+"sized" = "e00ac099db460d9a6a559716ab5660f164be4a6dc27f829532c9f8f5baee3437"
 "deep.json" = "dc0739bb7d9e33108a5dee40613013564484a11ce03e67f0a557556c8a04d2a7"
 "documents.json" = "2e260477c90cb95594891b7544902e43e271dc27c38cee06b729276382f4b1f5"
 "docs.ndjson" = "d41bd0aff3d16736692591241f94c96ddce14fbbe703797d5abe7b2e2b510978"

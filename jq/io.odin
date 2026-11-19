@@ -44,7 +44,8 @@ fn_input_position :: proc(ip: ^Interp, name: string, v: core_pkg.Value, args: []
 	if name == "input_line_number" {
 		return num(f64(line)), .Go
 	}
-	return file if file != "" else nil, .Go
+	// A name that is not UTF-8 reads with U+FFFD, as jq makes a string of it.
+	return valid_utf8(file) if file != "" else nil, .Go
 }
 
 native_inputs :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {

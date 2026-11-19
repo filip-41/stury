@@ -12,47 +12,69 @@ import core "../../core"
 import records "../../core/records"
 import "message"
 
-// Each file in turn. Exits 0, 2 after a file that did not open or read, or else 5 after a fault, or else 1 after a schema failure.
+// What each file's check reads: the run's source, and the schema bound to each format the files read in.
+@(private = "file")
+Check_Run :: struct {
+	cli: ^Cli,
+	src: Source,
+	sc:  ^Schema_Check,
+}
+
+// Each file in turn, or on the pool's threads. Exits with the worst file's status: 2 after a file that did not open
+// or read, or else 5 after a fault, or else 1 after a schema failure.
 check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	o := &run.opts
-	files := input_files(cli.files[:])
-	src := input_source(o, cli.json_reading)
-	failures, faults, invalid := 0, 0, 0
-	sc: ^Schema_Check
+	cr := Check_Run{cli, input_source(o, cli.json_reading), nil}
 	if cli.schema.flag != "" {
-		sc = schema_open(cli.schema, src)
+		cr.sc = schema_open(cli.schema, cr.src)
+		for f in o.froms {
+			from := o.from
+			o.from = f
+			schema_bind(cr.sc, cli.schema, input_source(o, json_reading_of(o)))
+			o.from = from
+		}
 	}
-	for path in files {
-		spent, read := file_bytes(path, "check")
-		if !read {
-			failures += 1
-			continue
-		}
-		data := spent.data
-		runner := pool_for(run, data)
-		verdict, why := Verdict.Fault, core.Error(nil)
-		if sc != nil && !(reads_cells(o) && header_fault(file_name(path), data, src.as) != "") {
-			verdict, why = schema_judge(sc, cli.schema, file_name(path), data, src, runner)
-		}
-		switch verdict {
-		case .Valid:
-		case .Invalid:
-			invalid += 1
-		case .Refused:
-			failures += 1
-		case .Fault:
-			if msg := check_text(file_name(path), data, src, o, runner); msg != "" {
-				message.write_stderr("stury: parse error: %s", msg)
-				faults += 1
-			} else if why != nil {
-				message.write_stderr("stury: parse error: %s: %s\n", file_name(path), edit_error_text(data, why))
-				faults += 1
-			}
-		}
-		free_spent(spent)
-		free_all(context.temp_allocator)
+	fc := Files_Call{run = run, files = input_files(cli.files[:], cli.walked), job = check_file, data = &cr}
+	each_file(&fc, true)
+	os.exit(fc.code)
+}
+
+// Judges file `k`, its first fault told, or a schema's failures.
+@(private = "file")
+check_file :: proc(fc: ^Files_Call, r: ^Run, k: int, slot: ^File_Slot) {
+	cr := (^Check_Run)(fc.data)
+	o, path := &r.opts, fc.files[k]
+	src, _ := file_source(o, path, cr.src)
+	spent, read := file_bytes(path)
+	if !read {
+		slot.code = EXIT_USAGE
+		return
 	}
-	os.exit(EXIT_USAGE if failures > 0 else EXIT_INPUT if faults > 0 else 1 if invalid > 0 else 0)
+	defer free_spent(spent)
+	defer free_all(context.temp_allocator)
+	data := spent.data
+	runner := pool_for(r, data)
+	verdict, why := Verdict.Fault, core.Error(nil)
+	if sc := cr.sc; sc != nil && !(reads_cells(o) && header_fault(file_name(path), data, src.as) != "") {
+		bound := sc^
+		bound.bound = sc.bounds[src.format].? or_else sc.bound
+		verdict, why = schema_judge(&bound, cr.cli.schema, file_name(path), data, src, runner)
+	}
+	switch verdict {
+	case .Valid:
+	case .Invalid:
+		slot.code = 1
+	case .Refused:
+		slot.code = EXIT_USAGE
+	case .Fault:
+		if msg := check_text(file_name(path), data, src, o, runner); msg != "" {
+			message.write_stderr("stury: parse error: %s", msg)
+			slot.code = EXIT_INPUT
+		} else if why != nil {
+			message.write_stderr("stury: parse error: %s: %s\n", file_name(path), edit_error_text(data, why))
+			slot.code = EXIT_INPUT
+		}
+	}
 }
 
 // The first fault of the text `data` of file `name`, read as `src` reads it, told with its note and a newline, or "".

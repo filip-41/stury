@@ -64,7 +64,51 @@ write :: proc(b: ^strings.Builder, format: string, args: ..any) {
 
 // Writes `format` filled with `args` to standard error, in one write.
 write_stderr :: proc(format: string, args: ..any) {
-	os.write_string(os.stderr, build_temp(format, ..args))
+	stderr_text(build_temp(format, ..args))
+}
+
+// What one file of many writes while it runs on a thread of its own: its stdout bytes, and each message at the length
+// of stdout it was told at, so the run writes the two streams interleaved as one thread would.
+Held :: struct {
+	out:   [dynamic]u8,
+	marks: [dynamic]Mark,
+}
+
+Mark :: struct {
+	at:   int,
+	text: string,
+}
+
+// The thread's held output, nil when its writes go to stdout and stderr.
+@(thread_local)
+holding: ^Held
+
+// Writes `text` to standard error, or holds it.
+stderr_text :: proc(text: string) {
+	if h := holding; h != nil {
+		append(&h.marks, Mark{len(h.out), strings.clone(text, runtime.heap_allocator())})
+		return
+	}
+	os.write_string(os.stderr, text)
+}
+
+// Writes what `h` holds, the stdout bytes and the messages in their order, or with no `write_stdout` drops it, and
+// empties it, keeping its buffers.
+write_held :: proc(h: ^Held, write_stdout: proc(p: []byte)) {
+	at := 0
+	for m in h.marks {
+		if write_stdout != nil {
+			write_stdout(h.out[at:m.at])
+			os.write_string(os.stderr, m.text)
+		}
+		delete(m.text, runtime.heap_allocator())
+		at = m.at
+	}
+	if write_stdout != nil {
+		write_stdout(h.out[at:])
+	}
+	clear(&h.out)
+	clear(&h.marks)
 }
 
 // Writes `format` filled with `args` to standard output, in one write.
