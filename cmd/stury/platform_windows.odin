@@ -120,7 +120,17 @@ keep_owner :: proc(f: ^os.File, path: string) {}
 
 // os.open for a file the user names.
 open_input :: proc(path: string) -> (^os.File, os.Error) {
-	return os.open(path)
+	return os.open(long_path(path))
+}
+
+// `path`, made absolute when it is too long to be taken as relative: core:os gives a long absolute path the `\\?\`
+// prefix that lifts MAX_PATH, and leaves a relative one as it is.
+long_path :: proc(path: string) -> string {
+	if len(path) < 248 {
+		return path
+	}
+	full, err := os.get_absolute_path(path, context.temp_allocator)
+	return full if err == nil else path
 }
 
 // Ctrl-C and Ctrl-Break set `stopped`, which a --follow run takes as its file's end, as SIGINT does on POSIX.
@@ -273,7 +283,7 @@ real_path :: proc(_: rawptr, path: string, allocator := context.allocator) -> st
 
 // Whether `path` names a directory, and its size. False when it names nothing.
 path_stat :: proc(path: string) -> (kind: Entry_Kind, ok: bool) {
-	info, err := os.stat(path, context.temp_allocator)
+	info, err := os.stat(long_path(path), context.temp_allocator)
 	if info.type == .Regular {
 		return .Long if int(info.size) >= FILES_LONG else .File, err == nil
 	}
@@ -283,7 +293,7 @@ path_stat :: proc(path: string) -> (kind: Entry_Kind, ok: bool) {
 // The bytes of the regular file `path`, read whole into `buf` when it holds fewer than `limit`. `.Left` when it is
 // longer, is not a regular file or does not open or read, which the caller then opens as any other.
 read_short :: proc(path: string, buf: ^[dynamic]byte, limit: int) -> (data: []byte, read: Short_Read) {
-	f, err := os.open(path)
+	f, err := os.open(long_path(path))
 	if err != nil {
 		return nil, .Left
 	}
@@ -313,7 +323,7 @@ read_short :: proc(path: string, buf: ^[dynamic]byte, limit: int) -> (data: []by
 
 // The entries of directory `path` but `.` and `..`, each of the kind its directory entry gives.
 list_dir :: proc(path: string) -> (entries: [dynamic]Dir_Entry, err: os.Error) {
-	infos := os.read_all_directory_by_path(path, context.allocator) or_return
+	infos := os.read_all_directory_by_path(long_path(path), context.allocator) or_return
 	defer os.file_info_slice_delete(infos, context.allocator)
 	for fi in infos {
 		#partial switch fi.type {

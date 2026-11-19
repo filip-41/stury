@@ -47,7 +47,7 @@ open_quarantine :: proc(path: string) {
 
 // The run's status when it passed over a record or ended a file on a fault: 5, unless a file did not open.
 skipped_status :: proc(code, failures: int) -> int {
-	if (bad_tally.skipped > 0 || bad_tally.ended) && failures == 0 && code < EXIT_INPUT {
+	if (sync.atomic_load(&bad_tally.skipped) > 0 || sync.atomic_load(&bad_tally.ended)) && failures == 0 && code < EXIT_INPUT {
 		return EXIT_INPUT
 	}
 	return code

@@ -615,7 +615,7 @@ class_match :: proc(p: string, c: byte) -> bool {
 @(private = "file")
 global_excludes :: proc() -> string {
 	temp := context.temp_allocator
-	home, _ := os.user_home_dir(temp)
+	home, _ := home_dir(nil)
 	if text, err := os.read_entire_file(strings.concatenate({home, "/.gitconfig"}, temp), temp); err == nil {
 		s, section := string(text), ""
 		for raw in strings.split_lines_iterator(&s) {
@@ -639,7 +639,7 @@ global_excludes :: proc() -> string {
 // comment after `#`, with its trailing spaces cut unless a backslash keeps the last, and its CR before a LF.
 @(private = "file")
 read_ignores :: proc(w: ^Walk, path, base: string) {
-	text, err := os.read_entire_file(path, context.allocator)
+	text, err := os.read_entire_file(long_path(path), context.allocator)
 	if err != nil {
 		return
 	}

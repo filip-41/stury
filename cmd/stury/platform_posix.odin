@@ -315,6 +315,11 @@ real_path :: proc(_: rawptr, path: string, allocator := context.allocator) -> st
 	return strings.clone_from_cstring(real, allocator)
 }
 
+// `path` as the system calls take it, whatever its length.
+long_path :: proc(path: string) -> string {
+	return path
+}
+
 // The kind of file `path` names, by a stat that does not open it, which would take a FIFO's bytes from its reader.
 // False when it names nothing.
 path_stat :: proc(path: string) -> (kind: Entry_Kind, ok: bool) {
