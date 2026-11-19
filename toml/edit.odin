@@ -10,6 +10,7 @@ package toml
 
 import "base:runtime"
 import "core:bytes"
+import "core:encoding/endian"
 import "core:slice"
 import core "../core"
 import compose "../core/compose"
@@ -22,7 +23,8 @@ Edit_Detail :: enum u8 {
 	None,
 	Table_Replaced, // a set of a table or of the document
 	Table_Key, // a rename of the key of a table
-	Reordered, // a reorder of a table's members
+	Reordered, // a reorder that puts a member written as sections before one written as lines
+	Apart, // a reorder of a member whose lines or sections lie apart, around another member's
 	Inline_Comment, // a comment inside an inline table or array
 	Foot_Comment, // a foot comment of a table
 	No_Statement, // a comment on a node that has no line of its own
@@ -40,7 +42,8 @@ EDIT_RULES := core.Rules{"toml_edit", {
 	{},
 	{"table_replaced", "A TOML table is not replaced by a value, and a TOML document is a table: change its members"},
 	{"table_key", "The key of a TOML table is written in more than one place"},
-	{"reordered", "A TOML table keeps its members in the order its lines and sections have"},
+	{"reordered", "A TOML table's lines stand before its sections: a section moved before a line would take that line into its own table"},
+	{"apart", "This member's lines or sections lie apart, around another member's, so they do not move as one"},
 	{"inline_comment", "A comment inside an inline table or array is not edited"},
 	{"foot_comment", "A TOML table has no foot comment: a comment after its last line is the head of what follows"},
 	{"no_statement", "This node has no line of its own to hold a comment"},
@@ -215,18 +218,21 @@ Cx :: struct {
 	splices:  [dynamic]compose.Splice,
 	seen:     map[u64]struct{},
 	removed:  map[u32]struct{}, // the nodes a remove edit names
-	grown:    map[u32]struct{}, // the containers an insert edit names
+	grown:    map[u32]int, // the containers an insert edit names, with their count of inserts
+	orders:   map[u32][]u8, // the containers a reorder edit names, with the order
 	emptied:  map[u32]struct{}, // the containers whose emptiness is already written
 	inline:   map[u32]Inline_Edits,
 	foot_at:  u64, // where the root's foot comments start, or the end of the text
 	err:      core.Document_Error,
 }
 
-// The members or elements an inline container loses and gets, spliced once its edits are all recorded.
+// The members or elements an inline container loses and gets, and the order a reorder gives them, spliced once its
+// edits are all recorded.
 @(private = "file")
 Inline_Edits :: struct {
 	removed: [dynamic]u32,
 	inserts: [dynamic]compose.Flow_Insert,
+	order:   []u8,
 }
 
 @(private = "file")
@@ -452,7 +458,14 @@ apply :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	case .Remove:
 		return remove_edit(cx, e)
 	case .Reorder:
-		return refuse_edit(cx, e.node, .Reordered)
+		compose.claim(&cx.seen, &cx.err, u64(e.node) << 8 | 0xfe) or_return
+		switch form_of(cx.doc, u32(e.node)) {
+		case .Inline:
+			inline_edits(cx, u32(e.node)).order = e.text
+		case .Root, .Header, .Dotted, .Implicit, .Tables:
+			return reorder_table(cx, u32(e.node), e.text)
+		case .Scalar:
+		}
 	case .Set_Fact, .Remove_Fact:
 		return fact_edit(cx, e)
 	}
@@ -546,7 +559,7 @@ insert_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 @(private = "file")
 inline_edits :: proc(cx: ^Cx, c: u32) -> ^Inline_Edits {
 	if c not_in cx.inline {
-		cx.inline[c] = {make([dynamic]u32, cx.a), make([dynamic]compose.Flow_Insert, cx.a)}
+		cx.inline[c] = {removed = make([dynamic]u32, cx.a), inserts = make([dynamic]compose.Flow_Insert, cx.a)}
 	}
 	return &cx.inline[c]
 }
@@ -565,6 +578,20 @@ splice_inline :: proc(cx: ^Cx) -> bool {
 			return refuse_edit(cx, core.Node_Index(c), .Inline_Comment)
 		}
 		slice.stable_sort_by(g.inserts[:], proc(a, b: compose.Flow_Insert) -> bool {return a.at < b.at})
+		if g.order != nil && len(items) > 0 {
+			if e := compose.order_check(g.order, removed, len(g.inserts), cx.a); e.kind != .None {
+				cx.err = e
+				return false
+			}
+			texts := make([][]u8, len(g.inserts), cx.a)
+			for t, k in g.inserts {
+				texts[k] = t.text
+			}
+			if !compose.flow_order(&cx.splices, cx.src, items, g.order, texts, cx.eol, cx.a) {
+				return refuse_edit(cx, core.Node_Index(c), .Inline_Comment)
+			}
+			continue
+		}
 		compose.flow_splices(&cx.splices, cx.src, items, removed, g.inserts[:], lo, hi, cx.eol, cx.doc.nodes[c].kind == .Object, cx.a)
 	}
 	return true
@@ -735,7 +762,7 @@ value_sections :: proc(cx: ^Cx, text: []u8, prefix: string, name: []u8, element:
 	copy(wrapped, "r = ")
 	copy(wrapped[4:], text)
 	wrapped[len(wrapped) - 1] = '\n'
-	doc, err := build_text(wrapped, bound_as(.Toml_1_0), cx.a)
+	doc, err := build_text(wrapped, cx.doc.as, cx.a)
 	if err.kind != .None {
 		return nil, false
 	}
@@ -840,6 +867,10 @@ insert_element :: proc(cx: ^Cx, e: core.Edit, arr: u32) -> bool {
 remove_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	v := u32(e.node)
 	p := cx.parent[v]
+	// A reordered table leaves out the members it does not place.
+	if p in cx.orders && form_of(cx.doc, p) != .Inline {
+		return true
+	}
 	at: u64
 	switch form_of(cx.doc, p) {
 	case .Inline:
@@ -975,6 +1006,133 @@ remove_sections :: proc(cx: ^Cx, v: u32) -> (first: u64) {
 		add(cx, lo, first, nil)
 	}
 	return
+}
+
+// Puts the members of the table or array of tables `c` in `order`: a member's position, or past them an insert, which
+// goes where an insert goes without one. A member keeps its lines, or its sections, with the comments above them, and
+// the lines between two places stay there. A member written as lines moves among those, and one written as sections
+// among those, which follow every line of the table.
+@(private = "file")
+reorder_table :: proc(cx: ^Cx, c: u32, order: []u8) -> bool {
+	src := cx.src
+	members := make([dynamic]u32, cx.a)
+	if cx.doc.nodes[c].kind == .Object {
+		it := core.pairs(cx.doc, core.Node_Index(c))
+		for _, v in core.pair_next(&it) {
+			append(&members, u32(v))
+		}
+	} else {
+		it := core.children(cx.doc, core.Node_Index(c))
+		for v in core.child_next(&it) {
+			append(&members, u32(v))
+		}
+	}
+	n := len(members)
+	removed := make([]bool, n, cx.a)
+	lo := make([]u64, n, cx.a)
+	hi := make([]u64, n, cx.a)
+	lines := make([]bool, n, cx.a)
+	for v, j in members {
+		removed[j] = v in cx.removed
+		switch form_of(cx.doc, v) {
+		case .Scalar, .Inline, .Dotted:
+			lo[j], hi[j], _ = lines_of(cx, v)
+			lines[j] = true
+		case .Header, .Implicit, .Tables:
+			first, last := -1, -1
+			for i in v ..< v + cx.doc.nodes[v].n {
+				if k := int(cx.sec_of[i]); k >= 0 {
+					first = k if first < 0 else min(first, k)
+					last = max(last, k)
+				}
+			}
+			owned := 0
+			for i in v ..< v + cx.doc.nodes[v].n {
+				owned += int(cx.sec_of[i] >= 0)
+			}
+			if first < 0 || last - first + 1 != owned {
+				return refuse_edit(cx, core.Node_Index(v), .Apart)
+			}
+			lo[j], hi[j] = cx.sections[first].head, section_end(cx, last)
+			floor := compose.next_line(src, cx.sections[last].ls)
+			for hi[j] > floor && compose.blank_line(src, compose.line_start(src, hi[j] - 1)) {
+				hi[j] = compose.line_start(src, hi[j] - 1)
+			}
+		case .Root:
+		}
+		if j > 0 && (lines[j] && !lines[j - 1] || lines[j] == lines[j - 1] && lo[j] < hi[j - 1]) {
+			return refuse_edit(cx, core.Node_Index(v), .Apart)
+		}
+	}
+	if e := compose.order_check(order, removed, cx.grown[c], cx.a); e.kind != .None {
+		cx.err = e
+		return false
+	}
+	kept := make([dynamic]int, cx.a)
+	for p in 0 ..< len(order) / 4 {
+		k := int(endian.unchecked_get_u32le(order[4 * p:]))
+		if k >= n {
+			continue
+		}
+		if len(kept) > 0 && lines[k] && !lines[kept[len(kept) - 1]] {
+			return refuse_edit(cx, core.Node_Index(members[k]), .Reordered)
+		}
+		append(&kept, k)
+	}
+	split := 0
+	for split < n && lines[split] {
+		split += 1
+	}
+	taken := 0
+	for k in kept {
+		taken += int(lines[k])
+	}
+	// Members of a kind the order keeps none of go as a removal takes them.
+	for v, j in members {
+		switch {
+		case lines[j] && taken == 0:
+			remove_lines(cx, v)
+		case !lines[j] && taken == len(kept):
+			remove_sections(cx, v)
+		}
+	}
+	place_members(cx, lo[:split], hi[:split], kept[:taken], 0)
+	place_members(cx, lo[split:], hi[split:], kept[taken:], split)
+	return true
+}
+
+// Writes the members that `kept` names, each `base` past its index in `lo` and `hi`, at the places those ranges hold
+// in source order, with the bytes between two places kept there. A text whose last place ends with no line end gives
+// the member from there a line end where it moves up, and takes one from the member that moves there.
+@(private = "file")
+place_members :: proc(cx: ^Cx, lo, hi: []u64, kept: []int, base: int) {
+	n := len(lo)
+	if len(kept) == 0 {
+		return
+	}
+	src := cx.src
+	end := hi[n - 1]
+	open_end := end > 0 && src[end - 1] != '\n'
+	moves := make([dynamic]compose.Move, 0, 2 * len(kept), cx.a)
+	for k, p in kept {
+		if p > 0 && hi[p - 1] < lo[p] {
+			append(&moves, compose.Move{text = src[hi[p - 1]:lo[p]], written = true})
+		}
+		j := k - base
+		from, to := lo[j], hi[j]
+		last := p == len(kept) - 1
+		if open_end && last && j != n - 1 {
+			to -= 1
+			if to > from && src[to - 1] == '\r' {
+				to -= 1
+			}
+		}
+		append(&moves, compose.Move{lo = from, hi = to})
+		if open_end && !last && j == n - 1 {
+			append(&moves, compose.Move{text = transmute([]u8)cx.eol, written = true})
+		}
+	}
+	append(&cx.splices, compose.Splice{lo = lo[0], hi = end, moves = moves[:], seq = len(cx.splices)})
 }
 
 @(private = "file")
@@ -1144,14 +1302,17 @@ edit_commit :: proc(list: ^core.Edit_List, _: u8, allocator: runtime.Allocator) 
 	build_sections(&cx)
 	cx.inline = make(map[u32]Inline_Edits, cx.a)
 	cx.removed = make(map[u32]struct{}, cx.a)
-	cx.grown = make(map[u32]struct{}, cx.a)
+	cx.grown = make(map[u32]int, cx.a)
+	cx.orders = make(map[u32][]u8, cx.a)
 	cx.emptied = make(map[u32]struct{}, cx.a)
 	for e in list.edits {
 		#partial switch e.op {
 		case .Remove:
 			cx.removed[u32(e.node)] = {}
 		case .Insert:
-			cx.grown[u32(e.node)] = {}
+			cx.grown[u32(e.node)] += 1
+		case .Reorder:
+			cx.orders[u32(e.node)] = e.text
 		}
 	}
 	for e in list.edits {

@@ -13,8 +13,8 @@ import "core:os"
 import kernel "../../core/kernel"
 import core "../../core"
 import compose "../../core/compose"
+import write "../../core/write"
 import records "../../core/records"
-import json "../../json"
 import "../../jq"
 import "message"
 
@@ -372,13 +372,15 @@ Edit_Span :: struct {
 // which is known once that record is read, so an output past the records read so far waits. A gap past the file's own
 // is its last gap between records, or past a file's one record its line end and a record separator under `--seq`.
 // A stream of a format that parts its texts, YAML's, has each document start on a line of its own, after a line end the
-// joiner adds when the text before it lacks one, and one after the first start with a `---` line, which the joiner adds
-// when the document has none. A stream of no document, a text of comments, is kept as it is.
+// joiner adds when the text before it lacks one, and one after the first start as the format parts its texts: with a
+// `---` line the joiner adds when the document has none, after a `...` line when the document has directives. A stream
+// of no document, a text of comments, is kept as it is.
 @(private = "file")
 Edit_Joiner :: struct {
 	src:     []u8,
 	seq:     bool,
 	stream:  bool,
+	format:  Format,
 	out:     [dynamic]u8,
 	written: int,
 	waiting: [dynamic]Edit_Text,
@@ -394,7 +396,7 @@ Edit_Text :: struct {
 @(private = "file")
 edit_joiner :: proc(src: []u8, framing: core.Framing, format: Format) -> Edit_Joiner {
 	heap := runtime.heap_allocator()
-	return {src = src, seq = framing == .Seq, stream = framing == .Concatenated && FORMATS[format].parted != nil, out = make([dynamic]u8, 0, len(src), heap), waiting = make([dynamic]Edit_Text, heap)}
+	return {src = src, seq = framing == .Seq, stream = framing == .Concatenated && FORMATS[format].parted != nil, format = format, out = make([dynamic]u8, 0, len(src), heap), waiting = make([dynamic]Edit_Text, heap)}
 }
 
 @(private = "file")
@@ -443,8 +445,9 @@ edit_join_write :: proc(j: ^Edit_Joiner, gap: []u8, t: Edit_Text) {
 		if j.out[len(j.out) - 1] != '\n' {
 			append(&j.out, '\n')
 		}
-		if j.written > 0 && !edit_marked(t.text) {
-			append(&j.out, "---\n")
+		// Only YAML parts a text with `...`, which the document before ends with itself when its text holds one.
+		if part := FORMATS[j.format].parted(t.text); j.written > 0 && (part != "...\n" || !FORMATS[j.format].ended(j.out[:])) {
+			append(&j.out, part)
 		}
 	}
 	append(&j.out, ..t.text)
@@ -749,40 +752,20 @@ edit_moved_document :: proc(er: ^Edit_Run, r: core.Node_Ref) -> (text: []u8, fre
 	return moved, true, true
 }
 
-// Whether the stream document `text` starts with a `---` or directive line, after its blank and comment lines.
-@(private = "file")
-edit_marked :: proc(text: []u8) -> bool {
-	for ls := 0; ls < len(text); {
-		nl := bytes.index_byte(text[ls:], '\n')
-		line := text[ls:] if nl < 0 else text[ls:ls + nl]
-		lead := bytes.trim_left(line, {' ', '\t', '\r'})
-		switch {
-		case len(lead) == 0 || lead[0] == '#':
-		case line[0] == '%':
-			return true
-		case:
-			return bytes.has_prefix(line, transmute([]u8)string("---")) && (len(line) == 3 || kernel.is_ws(line[3]))
-		}
-		if nl < 0 {
-			break
-		}
-		ls += nl + 1
-	}
-	return false
-}
-
-// A document a stream's filter adds: the value as the format's document writer writes it, in block style.
+// A document a stream's filter adds: the value as the format's writer writes it, in block style, with its comments.
 @(private = "file")
 edit_new_document :: proc(er: ^Edit_Run, v: core.Value) -> (text: []u8, fresh, ok: bool) {
-	built, fault := build_text(transmute([]u8)jq.to_json(v, {}, context.temp_allocator), json.as(.Json), context.temp_allocator)
+	heap := runtime.heap_allocator()
+	opts := er.layout.opts
+	opts.pretty = true
 	body: []u8
 	err: core.Error
-	if fault == nil {
-		opts := er.layout.opts
-		opts.pretty = true
-		body, _, err = core.write(&built, opts, er.ins.as, core.ROOT, runtime.heap_allocator())
+	if ref, is_ref := v.(core.Node_Ref); is_ref {
+		body, _, err = core.write(ref.doc, opts, er.ins.as, ref.node, heap)
+	} else {
+		body, err = write.write_value(v, er.ins.as, opts, heap)
 	}
-	if fault != nil || err != nil {
+	if err != nil {
 		message.write_stderr("stury: error: %s: the format cannot spell the value\n", er.ins.name)
 		return nil, false, false
 	}

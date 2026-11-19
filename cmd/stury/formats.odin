@@ -113,23 +113,30 @@ yaml_written :: proc "contextless" (o: ^Opts) -> core.As {
 	return yaml.as(yaml.Spec(o.to_spec.? or_else u8(yaml.Spec.Yaml_1_2)), {max_depth = o.max_depth})
 }
 
-// A YAML text of a run starts its own document, as `---`, or as `...` before the directives of one that has them. The
-// text's head comments stand before either.
+// A YAML text of a run or of an edited stream starts its own document, as `---`, or as `...` before the directives of
+// one that has them. The text's head comment and blank lines stand before either.
 @(private = "file")
 yaml_parted :: proc "contextless" (text: []u8) -> string {
-	at := 0
-	for at < len(text) && (text[at] == '#' || text[at] == '\n') {
-		for at < len(text) && text[at] != '\n' {
-			at += 1
+	for ls := 0; ls < len(text); {
+		end := ls
+		for end < len(text) && text[end] != '\n' {
+			end += 1
 		}
-		at += 1
-	}
-	rest := text[min(at, len(text)):]
-	switch {
-	case len(rest) > 0 && rest[0] == '%':
-		return "...\n"
-	case len(rest) >= 3 && string(rest[:3]) == "---":
-		return ""
+		line := text[ls:end]
+		lead := 0
+		for lead < len(line) && (line[lead] == ' ' || line[lead] == '\t' || line[lead] == '\r') {
+			lead += 1
+		}
+		switch {
+		case lead == len(line) || line[lead] == '#':
+		case line[0] == '%':
+			return "...\n"
+		case len(line) >= 3 && string(line[:3]) == "---" && (len(line) == 3 || line[3] == ' ' || line[3] == '\t' || line[3] == '\r'):
+			return ""
+		case:
+			return "---\n"
+		}
+		ls = end + 1
 	}
 	return "---\n"
 }

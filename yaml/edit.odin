@@ -20,7 +20,7 @@ Edit_Detail :: enum u8 {
 	Aliased, // a node inside the value an alias reads
 	Anchored, // an anchored node an alias reads, or a node inside one
 	Merged, // a text read with merge keys that holds a `<<`
-	Reordered, // a reorder of a collection's members
+	Reordered, // a reorder that moves an alias or an anchor past an anchor of its name
 	Alias_Node, // a member, a tag or an anchor added to an alias, or its alias removed
 	No_Line, // a comment where the node has no line of its own
 	Flow_Comment, // a comment inside a flow collection
@@ -35,7 +35,7 @@ EDIT_RULES := core.Rules{"yaml_edit", {
 	{"aliased", "This node is what an alias reads: edit the anchored node, or set the alias"},
 	{"anchored", "An alias reads this node, so an edit would change the alias's value too"},
 	{"merged", "A text read with merge keys has members no line of it holds: edit it without merge keys"},
-	{"reordered", "A YAML collection keeps its members in the order of its lines"},
+	{"reordered", "An alias reads the last anchor of its name before it, so this order would change what an alias reads"},
 	{"alias_node", "An alias holds no members, tag or anchor of its own: set it instead"},
 	{"no_line", "This node has no line of its own to hold a comment"},
 	{"flow_comment", "A comment inside a flow collection is not edited"},
@@ -345,11 +345,12 @@ Node_Flag :: enum u8 {
 @(private)
 Node_Flags :: bit_set[Node_Flag;u8]
 
-// The members a container loses and gains.
+// The members a container loses and gains, and the order a reorder gives them.
 @(private)
 Group :: struct {
 	removed: [dynamic]int,
 	inserts: [dynamic]core.Edit,
+	order:   []u8,
 }
 
 // A member of a mapping or an element of a sequence: its key (`NIL` for an element) and value, where it starts (its
@@ -802,7 +803,11 @@ apply :: proc(cx: ^Cx, e: core.Edit) -> bool {
 			}
 		}
 	case .Reorder:
-		return refuse_edit(cx, i, .Reordered)
+		if .Alias in cx.flags[i] {
+			return refuse_edit(cx, i, .Alias_Node)
+		}
+		compose.claim(&cx.seen, &cx.err, u64(i) << 8 | 0xfe) or_return
+		group_of(cx, i).order = e.text
 	case .Set_Fact, .Remove_Fact:
 		compose.claim(&cx.seen, &cx.err, u64(i) << 8 | u64(e.role)) or_return
 		return fact_edit(cx, e)

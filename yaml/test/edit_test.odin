@@ -24,6 +24,7 @@ Op :: enum u8 {
 	Remove,
 	Fact,
 	Unfact,
+	Reorder, // `text` the order, one digit per entry
 }
 
 // One edit of `src` at the node `path` names, a dotted run of keys and indexes, with the text it gives or the code of
@@ -109,6 +110,12 @@ apply :: proc(r: Rule, opts := yaml.Options{}) -> (out: string, err: core.Docume
 		err = document_error(core.set_fact(&list, n, r.role, r.text, padded = true))
 	case .Unfact:
 		err = document_error(core.remove_fact(&list, n, r.role))
+	case .Reorder:
+		order := make([]u32, len(r.text), context.temp_allocator)
+		for c, i in transmute([]u8)r.text {
+			order[i] = u32(c - '0')
+		}
+		err = document_error(core.reorder(&list, n, order))
 	}
 	if err.kind != .None {
 		return "", err
@@ -232,6 +239,26 @@ flow_members_take_their_separators :: proc(t: ^testing.T) {
 		// A collection its last member leaves is written empty, and one member on its own line puts the next on another.
 		{src = "f: { a: 1 }\n", op = .Remove, path = "f.a", want = "f: {}\n"},
 		{src = "[\n  1\n]\n", op = .Insert, path = "", at = 1, text = "2", want = "[\n  1,\n  2\n]\n"},
+	})
+}
+
+// A reordered collection's member moves with its lines: its head comments, its inline comment and the lines of its
+// value, a block scalar's too. The blank lines before each place stay there, and an item of a flow collection on lines
+// of its own moves with them. An order that would change what an alias reads is refused.
+@(test)
+reorders_move_members_with_their_lines :: proc(t: ^testing.T) {
+	expect_rules(t, {
+		{src = "a: 1 # one\n\n# about b\nb: |\n  x\n  y\n", op = .Reorder, text = "10", want = "# about b\nb: |\n  x\n  y\n\na: 1 # one\n"},
+		{src = "l:\n  - 1\n  - k: 2\n    j: 3\nm: 4", op = .Reorder, path = "l", text = "10", want = "l:\n  - k: 2\n    j: 3\n  - 1\nm: 4"},
+		{src = "- x\n- y", op = .Reorder, text = "10", want = "- y\n- x"},
+		{src = "- b: 1\n  a: 2\n", op = .Reorder, path = "0", text = "10", want = "- a: 2\n  b: 1\n"},
+		{src = "- b: 1\n  # a\n  a: 2\n", op = .Reorder, path = "0", text = "10", refused = "no_line"},
+		{src = "f: [1, 2,  3]\n", op = .Reorder, path = "f", text = "210", want = "f: [3, 2,  1]\n"},
+		{src = "f: {a: 1, b: 2}\n", op = .Reorder, path = "f", text = "10", want = "f: {b: 2, a: 1}\n"},
+		{src = "f: [\n  1, # one\n  2\n  ]\n", op = .Reorder, path = "f", text = "10", want = "f: [\n  2,\n  1 # one\n  ]\n"},
+		{src = "f: [1, # one\n  2]\n", op = .Reorder, path = "f", text = "10", refused = "flow_comment"},
+		{src = "l:\n  - &x 1\n  - 2\nb: *x\n", op = .Reorder, path = "l", text = "10", want = "l:\n  - 2\n  - &x 1\nb: *x\n"},
+		{src = "l:\n  - &x 1\n  - &x 2\nb: *x\n", op = .Reorder, path = "l", text = "10", refused = "reordered"},
 	})
 }
 
@@ -428,7 +455,7 @@ became :: proc(a: ^core.Document, an: core.Node_Index, b: ^core.Document, bn: co
 				return false
 			}
 		}
-	case .Fact, .Unfact:
+	case .Fact, .Unfact, .Reorder:
 	}
 	return false
 }

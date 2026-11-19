@@ -185,10 +185,47 @@ tag_facts_and_reorders_are_refused :: proc(t: ^testing.T) {
 		return core.set_fact(l, member(d, core.ROOT, "a"), .Tag, "!x")
 	})
 	testkit.expect_kind(t, err, core.Document_Error_Kind.Frozen)
-	_, err = edited("a = 1\nb = 2\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+	_, err = edited("a = 1\n[t]\nx = 1\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
 		return core.reorder(l, core.ROOT, {1, 0})
 	})
 	testkit.expect_kind(t, err, core.Document_Error_Kind.Frozen)
+}
+
+// A reordered table's member moves with its lines, or its sections, and the comments above them, and an inline
+// table's or an array's with its bytes, or its line where each stands on one. The blank lines before each place stay.
+// A member written as sections cannot move before one written as lines, nor one whose lines lie apart.
+@(test)
+reorders_move_members_with_their_lines :: proc(t: ^testing.T) {
+	Case :: struct {
+		src, name: string,
+		order:     []u32,
+		want:      string,
+	}
+	cases := []Case {
+		{"# a\na = 1 # one\n\nb = 2\n", "", {1, 0}, "b = 2\n\n# a\na = 1 # one\n"},
+		{"a = 1\nb = 2", "", {1, 0}, "b = 2\na = 1"},
+		{"t = {z = 1, y = 2}\n", "t", {1, 0}, "t = {y = 2, z = 1}\n"},
+		{"a = [3, 1, 2]\n", "a", {1, 2, 0}, "a = [1, 2, 3]\n"},
+		{"a = [\n  3, # three\n  # one\n  1\n]\n", "a", {1, 0}, "a = [\n  # one\n  1,\n  3 # three\n]\n"},
+		{"# a\n[a]\nx = 1\n\n[b]\ny = 2\n[b.c]\nz = 3\n", "", {1, 0}, "[b]\ny = 2\n[b.c]\nz = 3\n\n# a\n[a]\nx = 1\n"},
+		{"[[p]]\nn = 1\n[p.s]\nq = 1\n\n[[p]]\nn = 2", "p", {1, 0}, "[[p]]\nn = 2\n\n[[p]]\nn = 1\n[p.s]\nq = 1"},
+		{"a = 1\n[t]\nx = 1\n", "", {1, 0}, ""},
+		{"a.x = 1\nb = 2\na.y = 3\n", "", {1, 0}, ""},
+	}
+	for c in cases {
+		doc, berr := toml.build(transmute([]u8)c.src, .Toml_1_1, allocator = context.temp_allocator)
+		testkit.expect_nil(t, berr)
+		list := toml.edit_list_init(&doc, .Toml_1_1, context.temp_allocator)
+		node := core.ROOT if c.name == "" else member(&doc, core.ROOT, c.name)
+		testkit.expect_nil(t, core.reorder(&list, node, c.order))
+		out, _, err := compose.commit(&list, allocator = context.temp_allocator)
+		if c.want == "" {
+			testkit.expect_kind(t, err, core.Document_Error_Kind.Frozen)
+			continue
+		}
+		testkit.expect_nil(t, err)
+		testing.expectf(t, string(out) == c.want, "%q: got %q, want %q", c.src, string(out), c.want)
+	}
 }
 
 @(test)

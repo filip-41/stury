@@ -8,6 +8,7 @@ package yaml
 // separator.
 
 import "core:bytes"
+import "core:encoding/endian"
 import "core:slice"
 import kernel "../core/kernel"
 import core "../core"
@@ -463,10 +464,169 @@ regroup :: proc(cx: ^Cx, c: u32, g: ^Group) -> bool {
 		removed[k] = true
 	}
 	slice.stable_sort_by(g.inserts[:], proc(a, b: core.Edit) -> bool {return a.at < b.at})
+	order := g.order if len(items) > 0 else nil
+	if order != nil {
+		if e := compose.order_check(order, removed, len(g.inserts), cx.a); e.kind != .None {
+			cx.err = e
+			return false
+		}
+		if names_cross(cx, items, order) {
+			return refuse_edit(cx, c, .Reordered)
+		}
+	}
 	if .Bracket in cx.flags[c] {
-		return regroup_flow(cx, c, items, removed, g.inserts[:])
+		return regroup_flow(cx, c, items, removed, g.inserts[:], order)
+	}
+	if order != nil {
+		return reorder_block(cx, c, items, g.inserts[:], order)
 	}
 	return regroup_block(cx, c, items, removed, g.inserts[:])
+}
+
+// Whether `order` puts two members of a collection out of their source order where both hold an anchor or an alias
+// of one name, when the text holds an alias: an alias reads the last anchor of its name before it.
+@(private = "file")
+names_cross :: proc(cx: ^Cx, items: []Item, order: []u8) -> bool {
+	doc := cx.doc
+	aliased := false
+	for f in doc.facts {
+		aliased ||= f.role == .Alias
+	}
+	if !aliased {
+		return false
+	}
+	Named :: struct {
+		place: int,
+		names: [dynamic]string,
+	}
+	named := make([dynamic]Named, cx.a)
+	place := make([]int, len(items), cx.a)
+	for p in 0 ..< len(order) / 4 {
+		if k := order_at(order, p); k < len(items) {
+			place[k] = p
+		}
+	}
+	for it, k in items {
+		names := make([dynamic]string, cx.a)
+		first := it.key if it.key != NIL else it.value
+		for i in first ..< it.value + u32(core.subtree_size(doc, core.Node_Index(it.value))) {
+			for f in core.all_facts(doc, core.Node_Index(i)) {
+				if f.role == .Anchor || f.role == .Alias {
+					name := cx.src[f.lo:f.lo + u64(f.n)]
+					append(&names, string(name[1:] if len(name) > 0 && (name[0] == '&' || name[0] == '*') else name))
+				}
+			}
+		}
+		if len(names) > 0 {
+			append(&named, Named{place[k], names})
+		}
+	}
+	for a, i in named {
+		for b in named[i + 1:] {
+			if b.place > a.place {
+				continue
+			}
+			for x in a.names {
+				if slice.contains(b.names[:], x) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+@(private = "file")
+order_at :: #force_inline proc(order: []u8, p: int) -> int {
+	return int(endian.unchecked_get_u32le(order[4 * p:]))
+}
+
+// Writes the members of a block collection in `order`: a member's position, or `len(items) + k` for `inserts[k]`. A
+// member keeps its lines, from its head comments through the lines of its value, and the blank lines before each
+// place stay there. A compact first member's place takes a member without its indent, and refuses one with head
+// comments, which would stand above the line the collection shares.
+@(private = "file")
+reorder_block :: proc(cx: ^Cx, c: u32, items: []Item, inserts: []core.Edit, order: []u8) -> bool {
+	src := cx.src
+	n := len(items)
+	object := cx.doc.nodes[c].kind == .Object
+	col := column_of(src, items[0].start)
+	compact := !compose.first_on_line(src, items[0].start)
+	lo := make([]u64, n, cx.a)
+	hi := make([]u64, n, cx.a)
+	for j := n - 1; j >= 0; j -= 1 {
+		switch {
+		case j > 0:
+			lo[j] = compose.line_start(src, head_of(cx, items, j))
+		case compact:
+			lo[j] = items[0].start
+		case:
+			h := items[0].start
+			for f in core.all_facts(cx.doc, core.Node_Index(items[0].value)) {
+				if f.role == .Comment && f.lo < h && compose.first_on_line(src, f.lo) {
+					h = f.lo
+				}
+			}
+			lo[j] = compose.line_start(src, h)
+		}
+		hi[j] = member_end(cx, items[j], col)
+		if j + 1 < n {
+			hi[j] = min(hi[j], lo[j + 1])
+		}
+	}
+	// A text whose last member ends with no line end gives that member one where it moves up, and takes the line end
+	// from the member that moves last.
+	end := hi[n - 1]
+	open_end := end > 0 && src[end - 1] != '\n'
+	count := len(order) / 4
+	moves := make([dynamic]compose.Move, 0, 3 * count, cx.a)
+	for p in 0 ..< count {
+		if p > 0 && p < n && hi[p - 1] < lo[p] {
+			append(&moves, compose.Move{text = src[hi[p - 1]:lo[p]], written = true})
+		}
+		last := p == count - 1
+		k := order_at(order, p)
+		if k >= n {
+			m, ok := member_text(cx, inserts[k - n], object, col)
+			if !ok {
+				return false
+			}
+			b := make([dynamic]u8, cx.a)
+			if !(compact && p == 0) {
+				put_spaces_to(&b, col)
+			}
+			append(&b, ..m)
+			if !(last && open_end) {
+				compose.puts(&b, cx.eol)
+			}
+			append(&moves, compose.Move{text = b[:], written = true})
+			continue
+		}
+		from, to := lo[k], hi[k]
+		if compact && p == 0 && k != 0 {
+			if compose.line_start(src, from) != compose.line_start(src, items[k].start) {
+				return refuse_edit(cx, items[k].value, .No_Line)
+			}
+			from = items[k].start
+		}
+		if compact && p != 0 && k == 0 {
+			b := make([dynamic]u8, cx.a)
+			put_spaces_to(&b, col)
+			append(&moves, compose.Move{text = b[:], written = true})
+		}
+		if open_end && last && k != n - 1 {
+			to -= 1
+			if to > from && src[to - 1] == '\r' {
+				to -= 1
+			}
+		}
+		append(&moves, compose.Move{lo = from, hi = to})
+		if open_end && !last && k == n - 1 {
+			append(&moves, compose.Move{text = transmute([]u8)cx.eol, written = true})
+		}
+	}
+	append(&cx.splices, compose.Splice{lo = lo[0], hi = end, moves = moves[:], seq = len(cx.splices)})
+	return true
 }
 
 @(private = "file")
@@ -636,7 +796,7 @@ member_text :: proc(cx: ^Cx, e: core.Edit, object: bool, col: int) -> ([]u8, boo
 }
 
 @(private = "file")
-regroup_flow :: proc(cx: ^Cx, c: u32, items: []Item, removed: []bool, inserts: []core.Edit) -> bool {
+regroup_flow :: proc(cx: ^Cx, c: u32, items: []Item, removed: []bool, inserts: []core.Edit, order: []u8) -> bool {
 	object := cx.doc.nodes[c].kind == .Object
 	texts := make([]compose.Flow_Insert, len(inserts), cx.a)
 	for e, k in inserts {
@@ -652,6 +812,13 @@ regroup_flow :: proc(cx: ^Cx, c: u32, items: []Item, removed: []bool, inserts: [
 		}
 		append(&m, ..flow_text(cx, c, t, shape_text(cx, t)))
 		texts[k] = {int(e.at), m[:]}
+	}
+	if order != nil {
+		spelled := make([][]u8, len(texts), cx.a)
+		for t, k in texts {
+			spelled[k] = t.text
+		}
+		return compose.flow_order(&cx.splices, cx.src, items, order, spelled, cx.eol, cx.a) || refuse_edit(cx, c, .Flow_Comment)
 	}
 	compose.flow_splices(&cx.splices, cx.src, items, removed, texts, cx.lo[c] + 1, cx.hi[c] - 1, cx.eol, false, cx.a)
 	return true

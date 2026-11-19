@@ -370,14 +370,24 @@ applied :: proc(a: ^Applied, n: Node_Index) -> Value {
 		}
 	}
 	members := read[:]
-	if order, reordered := entry_of(a.orders, n); reordered {
-		members = make([]Member, len(read))
-		for &m, i in members {
-			m = read[endian.unchecked_get_u32le(order.order[4 * i:])]
-		}
-	}
 	b := Applied_Build{object = object, markup = object && is_markup(doc), o = new_object(), arr = new_array(len(members))}
 	inserts := of_node(a.inserts, n)
+	// A reorder names each member it keeps by its position and each insert by its index past the members.
+	if order, reordered := entry_of(a.orders, n); reordered {
+		for i in 0 ..< len(order.order) / 4 {
+			k := int(endian.unchecked_get_u32le(order.order[4 * i:]))
+			if k >= len(read) {
+				applied_put(&b, inserts[k - len(read)].key, inserts[k - len(read)].v)
+				continue
+			}
+			key := read[k].key
+			if renamed, is_renamed := entry_of(a.renames, read[k].v); is_renamed {
+				key = renamed.key
+			}
+			applied_put(&b, key, applied(a, read[k].v))
+		}
+		return b.o if object else b.arr
+	}
 	for i in 0 ..= len(members) {
 		for p in inserts {
 			if int(p.at) == i {

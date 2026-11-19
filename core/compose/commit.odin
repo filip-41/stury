@@ -286,25 +286,57 @@ push_src :: proc(out: ^[dynamic]u8, doc: ^core.Document, seps: []u64, lo, hi: u6
 }
 
 // A replacement of the source bytes `lo` through `hi` by `text`, for a format that commits its edits itself. A splice
-// with `lo` equal to `hi` is an insert, and splices at one byte apply in the order of `seq`.
+// with `lo` equal to `hi` is an insert, and splices at one byte apply in the order of `seq`. A splice with `moves`
+// writes them in place of `lo` through `hi`, the splices inside those bytes each applied within the move that holds it.
 Splice :: struct {
 	lo, hi: u64,
 	text:   []u8,
 	seq:    int,
+	moves:  []Move,
 }
 
-// Returns `src` with `splices` applied, in one allocation of `allocator`. Two splices that overlap are
-// `.Conflicting_Edits` at the later one's first byte. The splices are sorted in place.
+// A piece of a reordered range: the source bytes `lo` through `hi` with the splices inside them, or `text` when
+// `written`. An insert at a byte where one source move ends and another starts goes with the one that starts there.
+Move :: struct {
+	lo, hi:  u64,
+	text:    []u8,
+	written: bool,
+}
+
+// Returns `src` with `splices` applied, in one allocation of `allocator`. Two splices that overlap, and one inside a
+// splice with moves that no move holds, are `.Conflicting_Edits` at the later one's first byte. The splices are sorted
+// in place.
 apply_splices :: proc(src: []u8, splices: []Splice, allocator: runtime.Allocator) -> (out: []u8, err: core.Document_Error) {
+	moved := false
+	for s in splices {
+		moved ||= s.moves != nil
+	}
+	// A splice with moves comes before the inserts at its first byte, which it holds.
 	slice.sort_by(splices, proc(a, b: Splice) -> bool {
 		if a.lo != b.lo {
 			return a.lo < b.lo
 		}
+		if (a.moves != nil) != (b.moves != nil) {
+			return a.moves != nil
+		}
 		if a.hi != b.hi {
-			return a.hi < b.hi
+			return a.hi < b.hi if a.moves == nil else a.hi > b.hi
 		}
 		return a.seq < b.seq
 	})
+	if moved {
+		arena := runtime.Arena{backing_allocator = allocator}
+		defer runtime.arena_destroy(&arena)
+		grown, failed := make([dynamic]u8, 0, len(src), allocator)
+		if failed != nil {
+			return nil, {kind = .No_Memory}
+		}
+		if err = splice_moves(&grown, src, splices, 0, u64(len(src)), runtime.arena_allocator(&arena)); err.kind != .None {
+			delete(grown)
+			return nil, err
+		}
+		return grown[:], {}
+	}
 	reach := u64(0)
 	size := len(src)
 	for s in splices {
@@ -327,6 +359,92 @@ apply_splices :: proc(src: []u8, splices: []Splice, allocator: runtime.Allocator
 	}
 	copy(out[w:], src[at:])
 	return out, {}
+}
+
+// Appends the source bytes `lo` through `hi` with `splices`, sorted as `apply_splices` sorts them, which lie inside
+// them, applied.
+@(private)
+splice_moves :: proc(out: ^[dynamic]u8, src: []u8, splices: []Splice, lo, hi: u64, scratch: runtime.Allocator) -> core.Document_Error {
+	NO_MEMORY :: core.Document_Error{kind = .No_Memory}
+	// A source move, and the run of the inner splices it holds, `from` -1 for none.
+	Held :: struct {
+		lo, hi:         u64,
+		move, from, to: int,
+	}
+	at := lo
+	for i := 0; i < len(splices); {
+		s := splices[i]
+		if s.lo < at {
+			return {kind = .Conflicting_Edits, at = s.lo}
+		}
+		if !push_all(out, src[at:s.lo]) {
+			return NO_MEMORY
+		}
+		i += 1
+		at = s.hi
+		if s.moves == nil {
+			if !push_all(out, s.text) {
+				return NO_MEMORY
+			}
+			continue
+		}
+		j := i
+		for j < len(splices) && splices[j].lo < s.hi {
+			j += 1
+		}
+		inner := splices[i:j]
+		i = j
+		held, herr := make([dynamic]Held, 0, len(s.moves), scratch)
+		of, oerr := make([]int, len(s.moves), scratch)
+		if herr != nil || oerr != nil {
+			return NO_MEMORY
+		}
+		for m, k in s.moves {
+			of[k] = -1
+			if !m.written && m.hi > m.lo && !push(&held, Held{lo = m.lo, hi = m.hi, move = k, from = -1}) {
+				return NO_MEMORY
+			}
+		}
+		slice.sort_by(held[:], proc(a, b: Held) -> bool {return a.lo < b.lo})
+		for h, k in held {
+			of[h.move] = k
+		}
+		t := 0
+		for x, n in inner {
+			for t < len(held) && held[t].hi < x.lo {
+				t += 1
+			}
+			k := t
+			if k < len(held) && held[k].hi == x.lo && (x.hi > x.lo || k + 1 < len(held) && held[k + 1].lo == x.lo) {
+				k += 1
+			}
+			if k >= len(held) || x.lo < held[k].lo || x.hi > held[k].hi {
+				return {kind = .Conflicting_Edits, at = x.lo}
+			}
+			if held[k].from < 0 {
+				held[k].from = n
+			}
+			held[k].to = n + 1
+		}
+		for m, k in s.moves {
+			switch {
+			case m.written:
+				if !push_all(out, m.text) {
+					return NO_MEMORY
+				}
+			case of[k] >= 0:
+				h := held[of[k]]
+				run := inner[h.from:h.to] if h.from >= 0 else nil
+				if e := splice_moves(out, src, run, m.lo, m.hi, scratch); e.kind != .None {
+					return e
+				}
+			}
+		}
+	}
+	if !push_all(out, src[at:hi]) {
+		return NO_MEMORY
+	}
+	return {}
 }
 
 // The number of bodies a fact set writes.
@@ -470,10 +588,128 @@ Flow_Insert :: struct {
 	text: []u8,
 }
 
+// The separator new items of a bracketed collection take: the first gap when it holds a comma and no comment, else a
+// line end and the indent when the first item starts a line, and ", " otherwise.
+@(private)
+flow_sep :: proc(src: []u8, items: []$T, eol: string, allocator: runtime.Allocator) -> string {
+	gap: []u8
+	if len(items) >= 2 {
+		gap = src[items[0].end:items[1].start]
+	}
+	if bytes.index_byte(gap, '#') < 0 && bytes.index_byte(gap, ',') >= 0 {
+		return string(gap)
+	}
+	if len(items) > 0 && first_on_line(src, items[0].start) {
+		b := make([dynamic]u8, allocator)
+		puts(&b, ",", eol, string(src[line_start(src, items[0].start):items[0].start]))
+		return string(b[:])
+	}
+	return ", "
+}
+
+// Adds the splice that puts the items of a bracketed collection in `order`: a source item's position, or `len(items)
+// + k` for `inserts[k]`. Each item keeps its bytes, and the gap before each place is the source's gap there, or past
+// the source's gaps the separator `flow_sep` gives. Items that each stand on lines of their own move with those lines
+// (`flow_lines`). False when a gap holds a comment that belongs to no one item.
+flow_order :: proc(splices: ^[dynamic]Splice, src: []u8, items: []$T, order: []u8, inserts: [][]u8, eol: string, allocator: runtime.Allocator) -> bool {
+	n := len(items)
+	if flow_lines(splices, src, items, order, inserts, eol, allocator) {
+		return true
+	}
+	for j in 1 ..< n {
+		if bytes.index_byte(src[items[j - 1].end:items[j].start], '#') >= 0 {
+			return false
+		}
+	}
+	sep := transmute([]u8)flow_sep(src, items, eol, allocator)
+	count := len(order) / 4
+	moves := make([dynamic]Move, 0, 2 * count, allocator)
+	for p in 0 ..< count {
+		if p > 0 {
+			gap := src[items[p - 1].end:items[p].start] if p < n else sep
+			append(&moves, Move{text = gap, written = true})
+		}
+		if k := int(endian.unchecked_get_u32le(order[4 * p:])); k < n {
+			append(&moves, Move{lo = items[k].start, hi = items[k].end})
+		} else {
+			append(&moves, Move{text = inserts[k - n], written = true})
+		}
+	}
+	append(splices, Splice{lo = items[0].start, hi = items[n - 1].end, moves = moves[:], seq = len(splices)})
+	return true
+}
+
+// Adds the splice `flow_order` makes when each item starts a line and only its comma and a comment follow it there:
+// an item moves with that line and the comment lines right above it, the blank lines before each place stay there,
+// and the last place has a comma when the last item had one. False for another layout.
+@(private = "file")
+flow_lines :: proc(splices: ^[dynamic]Splice, src: []u8, items: []$T, order: []u8, inserts: [][]u8, eol: string, allocator: runtime.Allocator) -> bool {
+	n := len(items)
+	lo := make([]u64, n, allocator)
+	hi := make([]u64, n, allocator)
+	comma := make([]u64, n, allocator)
+	for it, j in items {
+		if !first_on_line(src, it.start) || j > 0 && line_start(src, it.start) < hi[j - 1] {
+			return false
+		}
+		comma[j] = NO_BYTE
+		q := blanks_end(src, it.end, u64(len(src)))
+		if q < u64(len(src)) && src[q] == ',' {
+			comma[j] = q
+			q = blanks_end(src, q + 1, u64(len(src)))
+		}
+		if q < u64(len(src)) && src[q] != '#' && src[q] != '\r' && src[q] != '\n' || comma[j] == NO_BYTE && j < n - 1 {
+			return false
+		}
+		hi[j] = next_line(src, q)
+		lo[j] = line_start(src, it.start)
+		for lo[j] > (hi[j - 1] if j > 0 else 0) {
+			above := line_start(src, lo[j] - 1)
+			if !comment_only(src, above) {
+				break
+			}
+			lo[j] = above
+		}
+	}
+	indent := src[line_start(src, items[0].start):items[0].start]
+	last_comma := comma[n - 1] != NO_BYTE
+	count := len(order) / 4
+	moves := make([dynamic]Move, 0, 3 * count, allocator)
+	for p in 0 ..< count {
+		if p > 0 && p < n && hi[p - 1] < lo[p] {
+			append(&moves, Move{text = src[hi[p - 1]:lo[p]], written = true})
+		}
+		want := p < count - 1 || last_comma
+		k := int(endian.unchecked_get_u32le(order[4 * p:]))
+		if k >= n {
+			b := make([dynamic]u8, allocator)
+			puts(&b, string(indent), string(inserts[k - n]), "," if want else "", eol)
+			append(&moves, Move{text = b[:], written = true})
+			continue
+		}
+		switch {
+		case (comma[k] != NO_BYTE) == want:
+			append(&moves, Move{lo = lo[k], hi = hi[k]})
+		case want:
+			append(&moves, Move{lo = lo[k], hi = items[k].end}, Move{text = transmute([]u8)string(","), written = true}, Move{lo = items[k].end, hi = hi[k]})
+		case:
+			append(&moves, Move{lo = lo[k], hi = comma[k]}, Move{lo = comma[k] + 1, hi = hi[k]})
+		}
+	}
+	append(splices, Splice{lo = lo[0], hi = hi[n - 1], moves = moves[:], seq = len(splices)})
+	return true
+}
+
+// Whether the line at `ls` holds a comment and nothing else but blanks.
+@(private = "file")
+comment_only :: proc(src: []u8, ls: u64) -> bool {
+	i := blanks_end(src, ls, u64(len(src)))
+	return i < u64(len(src)) && src[i] == '#'
+}
+
 // Adds the splices that take the items `removed` marks out of a bracketed collection, whose interior runs from `open`
 // to `close`, and put `inserts`, sorted by `at`, in. A run of removed items goes with the separator after it, or before
-// it for the last run. New items are separated as the first gap is when it holds a comma and no comment, else by a line
-// end and the indent when the first item starts a line, and by ", " otherwise. A collection left with no item and no comment
+// it for the last run. New items are separated by `flow_sep`'s separator. A collection left with no item and no comment
 // is written whole as its inserts, inside a space each side when `pad`.
 flow_splices :: proc(splices: ^[dynamic]Splice, src: []u8, items: []$T, removed: []bool, inserts: []Flow_Insert, open, close: u64, eol: string, pad: bool, allocator: runtime.Allocator) {
 	n := len(items)
@@ -492,18 +728,7 @@ flow_splices :: proc(splices: ^[dynamic]Splice, src: []u8, items: []$T, removed:
 		append(splices, Splice{lo = open, hi = close, text = b[:], seq = len(splices)})
 		return
 	}
-	sep := ", "
-	gap: []u8
-	if n >= 2 {
-		gap = src[items[0].end:items[1].start]
-	}
-	if bytes.index_byte(gap, '#') < 0 && bytes.index_byte(gap, ',') >= 0 {
-		sep = string(gap)
-	} else if n > 0 && first_on_line(src, items[0].start) {
-		b := make([dynamic]u8, allocator)
-		puts(&b, ",", eol, string(src[line_start(src, items[0].start):items[0].start]))
-		sep = string(b[:])
-	}
+	sep := flow_sep(src, items, eol, allocator)
 	// Where each slot's inserts go, and whether they follow an item there or precede one.
 	pos := make([]u64, n + 1, allocator)
 	follows := make([]bool, n + 1, allocator)
