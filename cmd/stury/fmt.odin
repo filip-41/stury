@@ -65,7 +65,7 @@ fmt_files :: proc(run: ^Run, ins: ^Inputs) {
 	o := &run.opts
 	fr := Fmt_Run{ins.source, run.output.held, o.compact && !writes_lines(o)}
 	fc := Files_Call{run = run, files = ins.files, job = fmt_file, data = &fr}
-	parted := FORMATS[o.to].parted != nil
+	parted := FORMATS[o.to].parted != nil || writes_one_document(o)
 	for f in o.froms {
 		parted ||= o.to_by_file && FORMATS[f].parted != nil
 	}
@@ -282,6 +282,9 @@ put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
 			message.write_stderr("stury: error: %s: %s\n", ins.name, edit_error_text(nil, err))
 		}
 		return false
+	}
+	if writes_one_document(&run.opts) {
+		refuse_second_document(out, "the input gave a second text; --in-place writes each file as its own")
 	}
 	put_format_text(out, as, text, FORMATS[run.opts.to].caps.follows != nil)
 	return true

@@ -75,6 +75,9 @@ init_output :: proc(o: ^Output, run: ^Run) {
 // of its own the output is a text of that format.
 emit :: proc(o: ^Output, v: core.Value) -> bool {
 	v := v
+	if writes_one_document(o.opts) {
+		refuse_second_document(o, "the filter gave a second output; collect the outputs into one value with [...]")
+	}
 	if o.whole.it != nil {
 		built, _ := records.build(o.whole.it, o.whole.rec, context.allocator)
 		v = core.document_value(built)
@@ -117,6 +120,27 @@ emit :: proc(o: ^Output, v: core.Value) -> bool {
 	}
 	end_output(o, ended)
 	return true
+}
+
+// Reports whether the outputs are texts of TOML, XML or HTML, of which a stream holds one, unless each input is written
+// to a file of its own.
+writes_one_document :: proc(o: ^Opts) -> bool {
+	return (o.to == .Toml || o.to == .Xml || o.to == .Html) && !o.in_place && !o.check
+}
+
+// The texts a run has written to one stream in a format that holds one.
+documents_written: int
+
+// Counts the text the run is about to write, and for a second one ends the run after the output before it, with
+// exit status 5 and `why`.
+refuse_second_document :: proc(o: ^Output, why: string) {
+	documents_written += 1
+	if documents_written == 1 {
+		return
+	}
+	flush_some(o, force = true)
+	message.write_stderr("stury: error: --to %s writes one document: %s\n", FORMATS[o.opts.to].name, why)
+	exit_closing_stdout(EXIT_INPUT)
 }
 
 // Tells on stderr that `dropped` facts of input `name`, or of the input when it is empty, are not in the output,

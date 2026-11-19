@@ -185,7 +185,7 @@ stream_fold :: proc(fc: ^Files_Call, k: int, slot: ^File_Slot) {
 each_files :: proc(run: ^Run, ins: ^Inputs) {
 	o := &run.opts
 	fc := Files_Call{run = run, files = ins.files, job = each_one, data = ins, interp = true}
-	each_file(&fc, run.shape.serial & {.Halts, .Recurses} == {} && o.max_depth <= core.MAX_DEPTH && !o.explain && !o.unbuffered)
+	each_file(&fc, run.shape.serial & {.Halts, .Recurses} == {} && o.max_depth <= core.MAX_DEPTH && !o.explain && !o.unbuffered && !writes_one_document(o))
 	ins.files = fc.files
 	run.output.ret = fc.code
 }

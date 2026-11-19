@@ -592,10 +592,10 @@ $ stury diff old.json new.json
 | `json` | One JSON text after another, as jq reads (the default). | Pretty-printed, or as `-c`, `--tab` and `--indent` say (the default). |
 | `jsonc` | JSONC: comments and trailing commas, one text after another ([Comments in the CLI](#comments-in-the-cli)). | Each value with the comments it was read with. |
 | `json5` | JSON5 1.0.0, one text after another, comments kept. | Each value with its comments, in JSON's spelling. |
-| `toml` | TOML 1.1, one document per input. | Each output as a TOML text ([TOML output](#toml-output)). |
+| `toml` | TOML 1.1, one document per input. | One output as a TOML text ([TOML output](#toml-output)). |
 | `yaml` | YAML 1.2 core schema, one input per document. | Each output as one document ([YAML output](#yaml-output)). |
-| `xml` | XML 1.0 with its internal subset, one document per input. | Each output as an XML text ([XML output](#xml-output)). |
-| `html` | HTML as a browser builds its tree, one document per input. | The WHATWG serialization ([HTML output](#html-output)). |
+| `xml` | XML 1.0 with its internal subset, one document per input. | One output as an XML text ([XML output](#xml-output)). |
+| `html` | HTML as a browser builds its tree, one document per input. | One output by the WHATWG serialization ([HTML output](#html-output)). |
 | `cbor` | CBOR (RFC 8949), each item of an RFC 8742 sequence one input. | Each output as one CBOR item ([CBOR output](#cbor-output)). |
 | `ndjson` | One JSON text per line. | One compact value per line, as `-c`. |
 | `csv`, `tsv` | The first record names the fields, each later record is one input ([CSV and TSV](#csv-and-tsv)). | Each output is one record ([CSV and TSV output](#csv-and-tsv-output)). |
@@ -864,20 +864,20 @@ $ stury --from csv --to csv 'select(.n | tonumber > 1)' people.csv
 
 ### TOML output
 
-`--to toml` writes each output as a TOML text, and `fmt` writes a file as TOML. The output must be an object, which is a
+`--to toml` writes the output as a TOML text, and `fmt` writes a file as TOML. The output must be an object, which is a
 table. Only TOML 1.0 forms are written, so a time without seconds gets `:00`.
 
 - **Layout:** scalars, and arrays that are not all tables, are `key = value` lines at the top of a table, a nested object is a `[section]` after them, and an array of objects is a `[[section]]` per element. A table's keys may come out in another order than the input has them.
 - **From a TOML input:** a value that is a node of a TOML input is written from the document, which keeps its comments, a string's quoting, a number's form (`0xff` stays `0xff`), a datetime bare, and each table written in line, through dotted keys or as a section as the input has it.
 - **From another input:** a node keeps a number form TOML has: YAML's `0o17`, a hex integer and a leading `+` stay, and `5.` or `.5` are written `5.0` and `0.5`. A YAML flow mapping is an inline table, unless a comment inside it needs a line of its own, which makes it a section. A comment inside a table or an array that is an element of an array is written on a line above that element, since TOML 1.0 has no multi-line inline table.
 - **Built values:** a value a filter built is a new text, with no comments, inline tables or number forms, but its strings keep their tags: a datetime stays bare, and `"2020-01-01" | .@tag = "date-local"` writes one. A text that is not of its tag's type ends the run, `"2020-13-01" is not a TOML date-local`.
-- **Several outputs:** several texts with a blank line between them, which is one TOML file only when no key repeats.
+- **Several outputs:** refused, as a TOML file is one document: the first is written and the run exits 5 with `stury: error: --to toml writes one document: the filter gave a second output; collect the outputs into one value with [...]`. Several files under `fmt` are refused the same way, unless `--in-place` writes each as its own.
 - **Options:** `-S` sorts the keys of every table, and `-a` writes every character past ASCII as an escape (`é`). `stury edit` keeps every byte the filter does not reach.
 - **Refused (exit 5):** an output that is no object (`a TOML text is a table, so its root is an object`), or holds `null` or repeats a key (`TOML has no spelling for null or for a key a table repeats`). The error is `stury: error: Value cannot be written in the format: REASON`.
 
 ### XML output
 
-`--to xml` writes each output as an XML text, and `fmt` writes a file as XML. The output must be an object of one
+`--to xml` writes the output as an XML text, and `fmt` writes a file as XML. The output must be an object of one
 member, the root element, so `{"r": ...}` writes `<r>...</r>`.
 
 - **Members:** a member is an element of its name, an array one element of the name per item, and a `#text` member the text that stands there among its siblings, an array its runs one after another. An object is an element's children, `null` an empty element (`<e/>`), and a scalar its text, escaped.
@@ -885,7 +885,7 @@ member, the root element, so `{"r": ...}` writes `<r>...</r>`.
 - **From an XML input:** the document, written whole (`.`), keeps its doctype, comments, processing instructions, attributes, namespace declarations and references as written. An update of it keeps the attributes and comments of every element it leaves alone, and of one it replaces, with those it writes (`.r.c |= "C"`, `del(.r.d)`, `.r.&k = "w"`, `.r.c.@comment = ["n"]`).
 - **Built values:** a value a filter built is written from its JSON. It has no attributes but under `--attributes`, and its comments come before, after or at the end of the element of the value that holds them.
 - **Layout:** pretty output, the default, puts an element whose children are all elements on lines of its own and lays no white space into one that holds text. `-c` writes no white space between elements, `--indent N` sets the indent, `--tab` indents by a tab, and `-a` writes every character past ASCII as a reference (`&#xe9;`). `-S` is refused, as members keep their order.
-- **Several outputs:** several texts one after another. An XML text holds one root, so such a run is no one XML file.
+- **Several outputs:** refused as TOML's are, as an XML text holds one root: the first is written and the run exits 5 with `stury: error: --to xml writes one document: ...`.
 - **Refused (exit 5):** an output that is no object (`an XML document is one element, so its root is an object`), or one XML cannot spell so that it reads back (`XML has no element or text for the value`): an object of more or less than one member at the root, a key that is no XML name or holds a colon, an array in an array or an empty array, an empty string or object, an object of only `#text`, and a character XML 1.0 does not allow.
 
 `--attributes` reads the attributes of each element of an XML or HTML input as its first members, `@` and the name
@@ -899,12 +899,13 @@ and `edit` refuse the option.
 
 ### HTML output
 
-`--to html` writes each output as HTML, and `fmt` writes a file as HTML, by the WHATWG serialization of a tree.
+`--to html` writes the output as HTML, and `fmt` writes a file as HTML, by the WHATWG serialization of a tree.
 
 - **Shape:** the output must be an object. One of one `html` member is a document, and any other is the children of a `body`, as XML's shape reads them. A member is an element, an array one element per item, `#text` the text there, `null` an empty element and a scalar its text.
 - **Elements and text:** a void element (`br`, `img`) has no end tag, and a raw text element (`script`, `style`) holds its text as it stands. Any other text and attribute value is escaped (`&amp;`, `&nbsp;`, `&lt;`, `&quot;`).
 - **From an HTML input:** the document is written as the browser built it, with the elements the tree adds (`tbody`), and keeps its doctype, comments and attributes as written. An update of it keeps attributes and comments as an XML one does.
 - **Layout:** pretty output, the default, puts an element whose children are all elements on lines of its own, and lays nothing into `pre`, `listing`, `textarea` or an element that holds text. `-c`, `--indent N`, `--tab` and `-a` (`&#233;`) work as for XML.
+- **Several outputs:** refused as TOML's are: the first is written and the run exits 5 with `stury: error: --to html writes one document: ...`.
 - **Refused (exit 5):** an output that is no object (`an HTML text is a tree of elements, so its root is an object`), or one whose text a browser reads as another tree (`HTML has no text that reads back as the value`): a `td` outside a table, a `div` in a `p`, a void element with content, a raw text holding its end tag, a name or attribute with an upper-case letter, and an array in an array.
 
 ### YAML output
