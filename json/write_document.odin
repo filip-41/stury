@@ -398,8 +398,9 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, n
 	kind: core.Typed_Error_Kind
 	fail: core.Node_Index
 	switch {
-	// The tree writes what the row walk does not: a partial document, another format's, comments, sorted keys and JSON5.
-	case doc.partial || doc.readers.format != rules_of || len(core.subtree_facts(doc, node)) != 0 || opts.sort_keys || Spec(doc.as.spec) == .Json5:
+	// The tree writes what the row walk does not: a partial document but a value its read kept whole, another format's,
+	// comments, sorted keys and JSON5.
+	case doc.partial && doc.nodes[node].role != .Value || doc.readers.format != rules_of || len(core.subtree_facts(doc, node)) != 0 || opts.sort_keys || Spec(doc.as.spec) == .Json5:
 		kept, kind, fail = write_tree(doc, opts, &out, Spec(as.spec), node)
 	case dense_route(doc, opts, src, count):
 		write_dense(&out, src)
@@ -438,11 +439,11 @@ write_rows :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Ou
 	return rows_kind, core.Node_Index(at)
 }
 
-// The first row `rows_run` leaves to the rare path because a block copy of it or a later row would load past the source.
-// Scalar rows are in source order, so one that fits has only fitting rows before it.
+// The first row before `end` that `rows_run` leaves to the rare path because a block copy of it or a later row would load
+// past the source. The scalar rows of a subtree are in source order, so one that fits has only fitting rows before it.
 @(private)
-rows_stop :: proc(doc: ^core.Document, room: int) -> u32 {
-	stop := len(doc.nodes)
+rows_stop :: proc(doc: ^core.Document, room: int, end: u32) -> u32 {
+	stop := end
 	for ; stop > 0; stop -= 1 {
 		t := &doc.nodes[stop - 1]
 		if t.kind < .Array && t.role != .Key && t.lo + max(u64(t.n), COPY_MIN) + 16 <= u64(room) {
@@ -461,7 +462,7 @@ rows_stop :: proc(doc: ^core.Document, room: int) -> u32 {
 rows :: proc(e: ^Emit, doc: ^core.Document, node: u32) -> (core.Typed_Error_Kind, u32) {
 	count := u32(len(doc.nodes))
 	// No chunk runs past the subtree, since `rows_run` writes on past the close of the container it entered first.
-	stop := min(rows_stop(doc, len(e.src)), node + (1 if doc.nodes[node].kind < .Array else doc.nodes[node].n))
+	stop := rows_stop(doc, len(e.src), node + (1 if doc.nodes[node].kind < .Array else doc.nodes[node].n))
 	c := &e.c
 	if kind := rare_row(e, doc.nodes[node], node); kind != .None {
 		return kind, node

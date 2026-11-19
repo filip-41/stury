@@ -203,7 +203,7 @@ write_node :: proc(p: ^Printer, v: core_pkg.Value) -> bool {
 	heap := runtime.heap_allocator()
 	// A value shorter than the library's stream buffer is written whole and copied, which takes one allocation of its
 	// size where a stream takes one of the buffer's.
-	if size := len(core_pkg.span(r.doc, r.node)); size < STREAM_FROM {
+	if size := text_size(r); size < STREAM_FROM {
 		// The writer's buffer is the value's size and a room. A value that fits the frame buffer with that is written
 		// in it, and a pretty layout that outgrows it is written again on the heap.
 		frame: [FRAME_TEXT]u8 = ---
@@ -239,6 +239,18 @@ write_node :: proc(p: ^Printer, v: core_pkg.Value) -> bool {
 	_, err := core_pkg.write_stream(to_out, r.doc, opts, as, r.node, heap)
 	// Only an allocation fails, and the printer walks the value when the writer handed it nothing.
 	return err == nil || p.streamed
+}
+
+// About the bytes of node `r`'s text: a container's from its open to its last descendant's end, which leaves out the
+// closes after it and reads no byte, where its span walks a partial document's text.
+@(private = "file")
+text_size :: proc(r: core_pkg.Node_Ref) -> int {
+	t := r.doc.nodes[r.node]
+	if t.kind < .Array {
+		return len(core_pkg.span(r.doc, r.node))
+	}
+	_, hi := core_pkg.scalar_ends(r.doc.nodes[r.node + core_pkg.Node_Index(t.n) - 1])
+	return int(hi) - int(t.lo)
 }
 
 // `text` in the colour `color`.

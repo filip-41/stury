@@ -200,6 +200,9 @@ has_repeated_key :: proc(r: Node_Ref) -> bool {
 		return false
 	}
 	it := doc_pairs(r.doc, r.node)
+	if n <= KEY_MASKED && keys_distinct(it) {
+		return false
+	}
 	if n <= KEY_TABLE / 2 {
 		return repeats_in_table(&it)
 	}
@@ -232,6 +235,35 @@ next_key :: #force_inline proc(it: ^Pair_Iter) -> (string, bool) {
 		return "", false
 	}
 	return node_string(it.doc, k), true
+}
+
+// The most members whose keys `keys_distinct` tells apart.
+@(private = "file")
+KEY_MASKED :: 16
+
+// Whether no two keys of the object `it` reads meet on a bit of a mask, picked by a key's length and its first and last
+// bytes, so that none repeats. A key that a decode spells differently answers false, as a meeting does.
+@(private = "file")
+keys_distinct :: proc(it: Pair_Iter) -> bool {
+	it := it
+	src := it.doc.src
+	seen: u64
+	for k, _ in doc_pair_next(&it) {
+		t := it.doc.nodes[k]
+		if t.spelling & SPELLING_DECODE != 0 {
+			return false
+		}
+		sig := u64(t.n)
+		if t.n > 0 {
+			sig |= u64(src[t.lo]) << 32 | u64(src[t.lo + u64(t.n) - 1]) << 40
+		}
+		bit := u64(1) << ((sig * 0x9E3779B97F4A7C15) >> 58)
+		if seen & bit != 0 {
+			return false
+		}
+		seen |= bit
+	}
+	return true
 }
 
 // Slots of `repeats_in_table`'s open-addressed table, kept at most half full.
