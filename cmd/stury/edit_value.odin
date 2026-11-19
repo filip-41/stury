@@ -55,6 +55,10 @@ edit_tree :: proc(w: ^Edit_State, node: core.Node_Index, value: core.Value) -> b
 		edit_property(w, node, .Tag, nil) or_return
 	}
 	if is_ref {
+		// A style written on a node of the file respells it.
+		if same && is_commented && .Value in c.written {
+			return edit_check(w, write.set_node(w.list, node, edit_written(w, value)), value)
+		}
 		if same {
 			return !w.sorted || edit_sort(w, node)
 		}
@@ -92,7 +96,7 @@ edit_tree :: proc(w: ^Edit_State, node: core.Node_Index, value: core.Value) -> b
 // unless `same` says the value is the node.
 @(private = "file")
 edit_comments :: proc(w: ^Edit_State, node: core.Node_Index, c: ^core.Commented, same: bool) -> bool {
-	for role in c.written {
+	for role in c.written - {.Value} {
 		if role == .Tag && !same && core.tags_in_text(w.list) {
 			continue
 		}
@@ -231,15 +235,20 @@ writes_comment :: proc(v: core.Value) -> bool {
 writes_property :: proc(w: ^Edit_State, v: core.Value) -> bool {
 	c, is_commented := v.(^core.Commented)
 	spelled := bit_set[core.Role]{.Tag} if core.tags_in_text(w.list) else {}
-	return is_commented && c.written - core.COMMENT_ROLES - spelled != {}
+	return is_commented && c.written - core.COMMENT_ROLES - spelled - {.Value} != {}
 }
 
-// `v` as a value written new: each string made UTF-8 (`edit_valid`), with the tag it writes where its text spells one.
+// `v` as a value written new: each string made UTF-8 (`edit_valid`), with the style it writes and the tag it writes
+// where its text spells one.
 @(private = "file")
 edit_written :: proc(w: ^Edit_State, v: core.Value) -> core.Value {
 	fixed := edit_valid(core.plain(v))
-	if c, is_commented := v.(^core.Commented); is_commented && .Tag in c.written && core.tags_in_text(w.list) {
-		return core.noted(fixed, .Tag, c.bodies[.Tag])
+	c, is_commented := v.(^core.Commented)
+	if is_commented && .Tag in c.written && core.tags_in_text(w.list) {
+		fixed = core.noted(fixed, .Tag, c.bodies[.Tag])
+	}
+	if is_commented && .Value in c.written {
+		fixed = core.noted(fixed, .Value, c.bodies[.Value])
 	}
 	return fixed
 }

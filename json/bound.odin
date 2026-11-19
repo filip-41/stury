@@ -21,11 +21,12 @@ readers_of :: proc "contextless" ($S: Spec) -> ^core.Readers {
 		close_end = proc(doc: ^core.Document, i: core.Node_Index) -> u64 {return close_end_spec(doc, i, S)},
 		tag_key = "json", key_open = "\"", key_close = "\":",
 		holds = HOLDS[S], fact = number_style,
+		styles = {{"integer", .None}, {"float", .None}, {"inf", .None}, {"nan", .None}, {"hex", .Hex}},
 	}
 	return &r
 }
 
-// The facts a text of each spec holds: JSON5 numbers also have a `Style`.
+// The facts a text of each spec holds: JSON5 numbers also have a `Style`, whose names `styles` gives every spec.
 @(private = "file")
 HOLDS :: [Spec]bit_set[core.Fact_Kind]{.Json = {}, .Jsonc = core.COMMENT_FACTS, .Json5 = core.COMMENT_FACTS + {.Style}}
 

@@ -640,7 +640,8 @@ long_prefixed_integers_are_their_decimals :: proc(t: ^testing.T) {
 }
 
 // A decimal a format spells with a sign, a point of its own or underscores, and a hex, octal or binary integer with
-// underscores, equals and hashes as the JSON number it spells, and a write of it in another format writes that number.
+// underscores, equals and hashes as the JSON number it spells, and a write of it in another format reads back as that
+// number.
 @(test)
 spelled_numbers_are_the_numbers_they_spell :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -665,9 +666,42 @@ spelled_numbers_are_the_numbers_they_spell :: proc(t: ^testing.T) {
 			testing.expectf(t, core.equal(a, b) && core.hash(a) == core.hash(b), "%s: %v against %v", x.src, a, b)
 			text, werr := write.write_value(a, yaml.as(.Yaml_1_2))
 			testkit.expect_nil(t, werr)
-			written, _ := write.write_value(b, yaml.as(.Yaml_1_2))
-			testing.expect_value(t, string(text), string(written))
+			back, berr := core.build(text, yaml.as(.Yaml_1_2))
+			testkit.expect_nil(t, berr)
+			testing.expectf(t, core.equal(core.Node_Ref{&back, core.ROOT}, b), "%s: %s", x.src, text)
 		}
+	}
+}
+
+// A value built of a document's nodes writes each scalar in its node's style where the output format has that spelling:
+// a quoting and a base, as JSON5, YAML and TOML read them. `respell_strings` writes strings in the writer's own quotes.
+@(test)
+built_values_keep_their_nodes_styles :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	Kept :: struct {
+		from, to:  core.As,
+		src, want: string,
+		opts:      core.Write_Options,
+	}
+	cases := []Kept {
+		{json.as(.Json5), json.as(.Json5), "{a: 0xff, b: 1}", `{"a":0xff,"b":1}`, {}},
+		{yaml.as(.Yaml_1_2), json.as(.Json5), "a: 0x1F\nb: 0o17\n", `{"a":0x1f,"b":15}`, {}},
+		{yaml.as(.Yaml_1_2), toml.as(.Toml_1_0), "a: 0x1F\nb: 0o17\nc: 'x'\n", "a = 0x1f\nb = 0o17\nc = 'x'\n", {}},
+		{toml.as(.Toml_1_0), yaml.as(.Yaml_1_2), "a = 'x'\nb = 0b11\n", "{a: 'x', b: 3}", {}},
+		{toml.as(.Toml_1_0), toml.as(.Toml_1_0), "a = 'x'\nb = 0b11\n", "a = \"x\"\nb = 0b11\n", {respell_strings = true}},
+	}
+	for c in cases {
+		doc, err := core.build(transmute([]u8)c.src, c.from)
+		testkit.expect_nil(t, err)
+		built := core.new_object()
+		it := core.pairs(core.Node_Ref{&doc, core.ROOT})
+		for k, v in core.pair_next(&it) {
+			core.object_put(built, k, v)
+		}
+		text, werr := write.write_value(built, c.to, c.opts)
+		testkit.expect_nil(t, werr)
+		testing.expect_value(t, string(text), c.want)
 	}
 }
 

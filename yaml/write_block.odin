@@ -255,19 +255,21 @@ block_key :: proc(b: ^Block_Writer, name: string) -> core.Typed_Error_Kind {
 	return .None
 }
 
-// Writes the string `s` as the next item, after `tag` when it is given, as a plain, quoted or literal scalar.
+// Writes the string `s` as the next item, after `tag` when it is given, as a plain, quoted or block scalar, in the
+// YAML style of `style` where the text still reads back in it.
 @(private)
-block_string :: proc(b: ^Block_Writer, s: string, tag := "") -> core.Typed_Error_Kind {
+block_string :: proc(b: ^Block_Writer, s: string, tag := "", style := core.Scalar_Style.None) -> core.Typed_Error_Kind {
 	at := block_lead(b, false)
 	if tag != "" {
 		write.put_text(b.out, tag)
 		write.put_byte(b.out, ' ')
 	}
-	shape, kind := shape_of(s, {block = true, tagged = tag != "", ascii = b.ascii})
+	keeps, folded := style_kept(style)
+	shape, kind := shape_of(s, {block = true, tagged = tag != "", ascii = b.ascii, keeps = keeps, folded = folded})
 	if kind != .None {
 		return kind
 	}
-	if shape == .Literal {
+	if shape == .Literal || shape == .Folded {
 		put_block(b.out, s, shape, at)
 		b.ended = true
 	} else {

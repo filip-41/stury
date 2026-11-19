@@ -2,8 +2,8 @@ package yaml
 
 // The write of a document as YAML. Pretty text is block style, with one member or element a line, and a collection read
 // from a flow collection stays one. Compact text is flow style on one line. A scalar read from YAML keeps its style
-// unless `respell_strings` is set, and any other string takes the style `shape_of` picks, which reads back as the same
-// string under the 1.2 core schema and a 1.1 reader. Tags and anchors are written back from the facts, and an alias where
+// unless `respell_strings` is set, one of another format the style its own names (`style_kept`), and any other string
+// takes the style `shape_of` picks, which reads back as the same string under the 1.2 core schema and a 1.1 reader. Tags and anchors are written back from the facts, and an alias where
 // its anchor stands before it. A comment is written when the document holds it, above the line it heads, after the value
 // it ends and at the end of a collection, and compact text breaks its flow line at a comment. A comment the output has
 // no place for, and one with a line end in its body, is dropped and counted. Null is `null`, or the spelling a YAML
@@ -445,7 +445,12 @@ put_key :: proc(l: ^Layout, key: core.Node_Index, flow: bool) -> (explicit: bool
 	if explicit {
 		write.put_text(&l.out, "? ")
 	}
-	place := Place{flow = flow, key = true, ascii = l.opts.ascii, keeps = own_style(l, key)}
+	// A key keeps the style it was read in from YAML, and takes the one `shape_of` picks otherwise.
+	keeps: Maybe(Style)
+	if l.own && !l.opts.respell_strings {
+		keeps = style_of(l.doc.nodes[key].spelling)
+	}
+	place := Place{flow = flow, key = true, ascii = l.opts.ascii, keeps = keeps}
 	shape := shape_of(text, place) or_return
 	if shape == .Plain && explicit {
 		shape = .Single
@@ -468,13 +473,36 @@ kept_flow :: proc(l: ^Layout, node: core.Node_Index) -> bool {
 	return style.text == "flow" && !write.holds_inner_fact(l.doc, node)
 }
 
-// The style a scalar was read in, for a document read from YAML whose strings are not respelled.
+// The style a scalar keeps, and whether its block is folded, where strings are not respelled: the one it was read in
+// from YAML, and the one its style names in another format (`style_kept`).
 @(private)
-own_style :: proc(l: ^Layout, node: core.Node_Index) -> Maybe(Style) {
-	if l.own && !l.opts.respell_strings {
-		return style_of(l.doc.nodes[node].spelling)
+kept_style :: proc(l: ^Layout, node: core.Node_Index) -> (keeps: Maybe(Style), folded: bool) {
+	switch {
+	case l.opts.respell_strings:
+	case l.own:
+		t := l.doc.nodes[node]
+		return style_of(t.spelling), style_of(t.spelling) == .Block && l.doc.src[t.lo] == '>'
+	case:
+		return style_kept(core.value_style(core.Node_Ref{l.doc, node}))
 	}
-	return nil
+	return nil, false
+}
+
+// The YAML style a scalar of style `s` keeps where its text still reads back, and whether its block is folded: quotes
+// for a quoted one-line text, a block for lines, and `nil` for a style YAML has no spelling of.
+@(private)
+style_kept :: proc "contextless" (s: core.Scalar_Style) -> (keeps: Maybe(Style), folded: bool) {
+	#partial switch s {
+	case .Single:
+		return .Single, false
+	case .Double:
+		return .Double, false
+	case .Literal, .Multiline:
+		return .Block, false
+	case .Folded:
+		return .Block, true
+	}
+	return nil, false
 }
 
 // Writes the scalar at `node` as `put_node` places it. A block scalar ends its lines itself, which is `ended`.
@@ -488,8 +516,7 @@ put_leaf :: proc(l: ^Layout, node: core.Node_Index, k: core.Kind, flow, key: boo
 		}
 		buf: [512]u8 = ---
 		text := write.node_text(l.doc, node, buf[:], runtime.arena_allocator(&l.arena)) or_return
-		keeps := own_style(l, node)
-		folded := keeps == .Block && l.doc.src[l.doc.nodes[node].lo] == '>'
+		keeps, folded := kept_style(l, node)
 		place := Place{flow = flow, key = key, block = l.opts.pretty && !flow && !key, ascii = l.opts.ascii, keeps = keeps, folded = folded, tagged = tagged}
 		shape := shape_of(text, place) or_return
 		if shape == .Literal || shape == .Folded {

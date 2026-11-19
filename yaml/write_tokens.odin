@@ -51,22 +51,27 @@ TOKENS := write.Token_Spelling {
 		if b != nil {
 			return block_value(t, b, v)
 		}
+		keeps, _ := style_kept(t.style)
 		switch x in v {
 		case string:
-			return put_flow_string(t.out, x, t.opts)
+			return put_scalar_shaped(t.out, x, {flow = true, ascii = t.opts.ascii, keeps = keeps})
 		case typed.Bytes:
 			return put_bytes(t.out, x)
 		case core.Number:
-			return write.put_number(t.out, x, TREE)
+			if !write.put_based(t.out, x, t.style, NUMBER_FORMS) {
+				return write.put_number(t.out, x, TREE)
+			}
 		case write.Number_Literal:
-			write.put_text(t.out, x.text)
+			if !write.put_based(t.out, x, t.style, NUMBER_FORMS) {
+				write.put_text(t.out, x.text)
+			}
 		case write.Tagged_Text:
-			if tag := meaning_tag(x.text, x.meaning); tag != "" {
+			tag := meaning_tag(x.text, x.meaning)
+			if tag != "" {
 				write.put_text(t.out, tag)
 				write.put_byte(t.out, ' ')
-				return put_scalar_shaped(t.out, x.text, {flow = true, tagged = true, ascii = t.opts.ascii})
 			}
-			return put_flow_string(t.out, x.text, t.opts)
+			return put_scalar_shaped(t.out, x.text, {flow = true, tagged = tag != "", ascii = t.opts.ascii, keeps = keeps})
 		case write.Tree_Part:
 			write.put_text(t.out, t.spell.tree[x])
 		}
@@ -130,9 +135,9 @@ block_value :: proc(t: ^write.Tokens, b: ^Block_Writer, v: write.Scalar) -> core
 			b.key_next = false
 			return block_key(b, x)
 		}
-		return block_string(b, x)
+		return block_string(b, x, "", t.style)
 	case write.Tagged_Text:
-		return block_string(b, x.text, meaning_tag(x.text, x.meaning))
+		return block_string(b, x.text, meaning_tag(x.text, x.meaning), t.style)
 	case typed.Bytes:
 		block_lead(b, false)
 		kind := put_bytes(t.out, x)
@@ -140,11 +145,18 @@ block_value :: proc(t: ^write.Tokens, b: ^Block_Writer, v: write.Scalar) -> core
 		return kind
 	case core.Number:
 		block_lead(b, false)
-		kind := write.put_number(t.out, x, TREE)
+		kind: core.Typed_Error_Kind
+		if !write.put_based(t.out, x, t.style, NUMBER_FORMS) {
+			kind = write.put_number(t.out, x, TREE)
+		}
 		block_end_root(b)
 		return kind
 	case write.Number_Literal:
-		block_raw(b, x.text)
+		block_lead(b, false)
+		if !write.put_based(t.out, x, t.style, NUMBER_FORMS) {
+			write.put_text(t.out, x.text)
+		}
+		block_end_root(b)
 	case write.Tree_Part:
 		block_raw(b, t.spell.tree[x])
 	}

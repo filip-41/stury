@@ -364,9 +364,9 @@ table repeats cannot be written, both `.Unwritable`. A key is bare when it can b
 
 A string is a basic string, with the quote, the backslash and the control bytes escaped, and under `ascii` every rune
 past U+007F. A string read from TOML keeps its quotes and its escapes unless `ascii` or `respell_strings` is set, and a
-TOML 1.1 escape (`\e`, `\x`) is spelled again for 1.0. A float is written so that it reads back as a float: `1.0` for 1,
-`-0.0`, `inf`, `-inf` and `nan`. A number a jq filter computes has no float kind, so the command line writes a whole one
-as `1`. A number of a document is its source spelling. A string node whose `Tag` is a datetime type is written bare,
+TOML 1.1 escape (`\e`, `\x`) is spelled again for 1.0. A YAML block scalar is a multi-line string. A float is written
+so that it reads back as a float: `1.0` for 1, `-0.0`, `inf`, `-inf` and `nan`. A number a jq filter computes has no
+float kind, so the command line writes a whole one as `1`. A number of a document is its source spelling. A string node whose `Tag` is a datetime type is written bare,
 with the seconds a time lacks added, since only TOML 1.1 reads a time without them. Only TOML 1.0 forms are written. A
 byte string is the string of its base64.
 

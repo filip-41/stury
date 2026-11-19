@@ -17,11 +17,11 @@ tags_in_text :: proc(list: ^Edit_List) -> bool {
 }
 
 // Makes the comments `c` writes the comments of node `node`: a role's bodies replace the node's, and a role whose
-// bodies are the node's own makes no edit. A tag the value's text spells is no fact edit.
+// bodies are the node's own makes no edit. A style, and a tag the value's text spells, is no fact edit.
 @(private)
 set_comments :: proc(list: ^Edit_List, node: Node_Index, c: ^Commented) -> Error {
 	for role in c.written {
-		if role == .Tag && tags_in_text(list) {
+		if role == .Value || role == .Tag && tags_in_text(list) {
 			continue
 		}
 		have, _ := comments(Node_Ref{list.doc, node}, role)
@@ -144,9 +144,10 @@ member_start :: proc(doc: ^Document, c: Node_Index) -> u64 {
 spell :: proc(list: ^Edit_List, v: Value, target: Node_Index, into: bool, at: u64, record: bool) -> (text: []u8, owned: bool, err: Error) {
 	doc := list.doc
 	p := plain(v)
-	// A tag written on the value that its text spells is written with it, so its node's bytes are not its text.
+	// A tag written on the value that its text spells is written with it, and so is a style, so its node's bytes are
+	// not its text.
 	c, is_commented := v.(^Commented)
-	retagged := is_commented && .Tag in c.written && tags_in_text(list)
+	retagged := is_commented && (.Tag in c.written && tags_in_text(list) || .Value in c.written)
 	if r, is_ref := p.(Node_Ref); is_ref && r.doc == doc && !retagged && !(list.write.sort_keys && value_kind(p) == .Object) {
 		if list.edit == nil || list.edit.relocate == nil {
 			return span(doc, r.node), false, nil

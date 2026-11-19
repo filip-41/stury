@@ -5,8 +5,10 @@ package toml
 // of their table, a table is a `[header]` section after the lines, and a non-empty array of tables is one `[[header]]`
 // section per element, so the keys of a table may be written in another order than the document holds them. Null has no
 // TOML spelling and is `.Unwritable`, as is a key a table repeats. Only TOML 1.0 forms are written: a datetime has its
-// seconds, and a string has no `\e` or `\x`. A string read from TOML keeps its literal quotes, and a basic one its
-// escapes, unless `respell_strings` is set, and a datetime string that carries a `Tag` is written as the bare datetime.
+// seconds, and a string has no `\e` or `\x`. A string read from TOML keeps its literal or multi-line quotes, and a basic
+// one its escapes, and one of another format takes the quoting its style names (`quoting_of`), unless
+// `respell_strings` is set. A datetime string
+// that carries a `Tag` is written as the bare datetime.
 // A comment is written when the document holds it: above the line or section it stands before, on the line it ends, and
 // at the end of a table. A comment inside a table or an array that is an element of an array stands above that element,
 // since TOML 1.0 has no multi-line inline table. A comment the output has no other place for, and one with a line end
@@ -14,6 +16,7 @@ package toml
 
 import "base:runtime"
 import "core:io"
+import "core:strings"
 import "core:unicode/utf8"
 import core "../core"
 import write "../core/write"
@@ -29,6 +32,7 @@ Layout :: struct {
 	own:       bool, // the document is TOML
 	raw:       bool, // a basic string the TOML document spells in 1.0 forms is copied from its source
 	commented: bool, // the document holds a comment
+	styled:    bool, // the document is of another format and holds a style
 	tagged:    bool, // the document is of another format and holds a tag
 	kept:      int, // the facts written
 	glue:      bool, // comments of an omitted header were written, which the next header follows without a blank line
@@ -73,6 +77,7 @@ write_table_text :: proc(doc: ^core.Document, opts: core.Write_Options, node: co
 	l := Layout{doc = doc, opts = opts, own = doc.readers.format == rules_of, laid = laid}
 	l.raw = l.own && write.copies_raw(opts)
 	l.tagged = !l.own && .Tag in doc.readers.holds && core.has_tags(doc)
+	l.styled = !l.own && .Style in doc.readers.holds
 	l.arena = {backing_allocator = context.allocator, minimum_block_size = ARENA_BLOCK}
 	defer runtime.arena_destroy(&l.arena)
 	l.path.allocator = runtime.arena_allocator(&l.arena)
@@ -434,23 +439,76 @@ put_string_node :: proc(l: ^Layout, node: core.Node_Index) -> core.Typed_Error_K
 			}
 		}
 	}
-	if l.own {
-		t := l.doc.nodes[node]
-		if t.spelling & core.SPELLING_DECODE != 0 && !l.opts.respell_strings && style_of(t.spelling) == .Literal && literal_ok(text) {
-			write.put_byte(&l.out, '\'')
-			write.put_text(&l.out, text)
-			write.put_byte(&l.out, '\'')
-			return .None
-		}
-	}
-	return put_basic(&l.out, text, l.opts)
+	return put_styled(&l.out, text, kept_style(l, node), l.opts)
 }
 
-// Whether `s` can stand between single quotes: no quote, no control byte but tab.
+// Writes `text` as a string of quoting `style` where the text can take it: a literal holds no quote, a multi-line
+// literal no run of three, and neither a control byte but tab and, in lines, line feed. A multi-line literal that
+// cannot hold it is a multi-line basic string, and any other a basic one.
 @(private)
-literal_ok :: proc(s: string) -> bool {
+put_styled :: proc(out: ^write.Out, text: string, style: Style, opts: core.Write_Options) -> core.Typed_Error_Kind {
+	switch style {
+	case .Basic:
+	case .Literal:
+		if literal_ok(text, false, opts.ascii) {
+			write.put_byte(out, '\'')
+			write.put_text(out, text)
+			write.put_byte(out, '\'')
+			return .None
+		}
+	case .Multiline_Literal:
+		if literal_ok(text, true, opts.ascii) {
+			write.put_text(out, "'''\n" if strings.index_byte(text, '\n') >= 0 else "'''")
+			write.put_text(out, text)
+			write.put_text(out, "'''")
+			return .None
+		}
+		return put_quoted(out, text, opts, true)
+	case .Multiline:
+		return put_quoted(out, text, opts, true)
+	}
+	return put_basic(out, text, opts)
+}
+
+// The quoting the string `node` keeps: its own when it was read from TOML, the one its style names in another format
+// (`quoting_of`), and basic when `respell_strings` is set.
+@(private)
+kept_style :: proc(l: ^Layout, node: core.Node_Index) -> Style {
+	switch {
+	case l.opts.respell_strings:
+	case l.own:
+		if t := l.doc.nodes[node]; t.spelling & core.SPELLING_DECODE != 0 {
+			return style_of(t.spelling)
+		}
+	case l.styled:
+		return quoting_of(core.value_style(core.Node_Ref{l.doc, node}))
+	}
+	return .Basic
+}
+
+// The quoting TOML spells a string of style `s` with: a literal for a one-line text with no escapes, a multi-line
+// literal for a block, folded or not, a multi-line basic string for lines with escapes, and basic for any other.
+@(private)
+quoting_of :: proc "contextless" (s: core.Scalar_Style) -> Style {
+	#partial switch s {
+	case .Single:
+		return .Literal
+	case .Literal, .Folded:
+		return .Multiline_Literal
+	case .Multiline:
+		return .Multiline
+	}
+	return .Basic
+}
+
+// Whether `s` can stand between single quotes, or between `'''` when `lines`: no quote, or in `lines` no run of three,
+// no control byte but tab, and line feed in `lines`, and with `ascii` no byte past U+007F, which a literal cannot escape.
+@(private)
+literal_ok :: proc(s: string, lines := false, ascii := false) -> bool {
+	quotes := 0
 	for b in transmute([]u8)s {
-		if b == '\'' || b < 0x20 && b != '\t' || b == 0x7f {
+		quotes = quotes + 1 if b == '\'' else 0
+		if quotes > (2 if lines else 0) || b < 0x20 && b != '\t' && (b != '\n' || !lines) || b == 0x7f || b >= 0x80 && ascii {
 			return false
 		}
 	}
@@ -510,12 +568,24 @@ put_key :: proc(out: ^write.Out, name: string) -> core.Typed_Error_Kind {
 	return put_basic(out, name, {})
 }
 
-// Writes `s` as a basic string. Quote, backslash and the control bytes are escaped, DEL always, and with `ascii` every
-// rune past U+007F too. Bytes that are no UTF-8 are `.Invalid_Utf8`.
+// Writes `s` as a basic string, see `put_quoted`.
 @(private)
-put_basic :: proc(out: ^write.Out, s: string, opts: core.Write_Options) -> core.Typed_Error_Kind {
-	write.put_byte(out, '"')
+put_basic :: #force_inline proc(out: ^write.Out, s: string, opts: core.Write_Options) -> core.Typed_Error_Kind {
+	return put_quoted(out, s, opts, false)
+}
+
+// Writes `s` as a basic string, or a multi-line one when `lines`, whose line feeds stand as they are and whose quotes
+// are escaped only where three would end it. Quote, backslash and the control bytes are escaped, DEL always, and with
+// `ascii` every rune past U+007F too. Bytes that are no UTF-8 are `.Invalid_Utf8`.
+@(private)
+put_quoted :: proc(out: ^write.Out, s: string, opts: core.Write_Options, $lines: bool) -> core.Typed_Error_Kind {
+	when lines {
+		write.put_text(out, `"""` + "\n" if strings.index_byte(s, '\n') >= 0 else `"""`)
+	} else {
+		write.put_byte(out, '"')
+	}
 	run := 0
+	quotes, quotes_end := 0, -1
 	for i := 0; i < len(s); {
 		if plain := plain_run(transmute([]u8)s, i, '"'); plain > 0 {
 			i += plain
@@ -524,6 +594,14 @@ put_basic :: proc(out: ^write.Out, s: string, opts: core.Write_Options) -> core.
 		c := s[i]
 		escape: string
 		switch {
+		case lines && c == '\n':
+			i += 1
+			continue
+		case lines && c == '"' && (quotes_end != i || quotes < 2):
+			quotes = quotes + 1 if quotes_end == i else 1
+			i += 1
+			quotes_end = i
+			continue
 		case c == '"':
 			escape = `\"`
 		case c == '\\':
@@ -568,7 +646,7 @@ put_basic :: proc(out: ^write.Out, s: string, opts: core.Write_Options) -> core.
 		run = i
 	}
 	write.put_text(out, s[run:])
-	write.put_byte(out, '"')
+	write.put_text(out, `"""` if lines else `"`)
 	return .None
 }
 

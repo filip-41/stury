@@ -57,6 +57,7 @@ READERS := core.Readers {
 	fact         = spelling_fact,
 	tag_fits     = tag_fits,
 	tag_meaning  = tag_name_meaning,
+	styles       = {{"basic", .None}, {"literal", .Single}, {"multiline", .Multiline}, {"multiline_literal", .Literal}, {"integer", .None}, {"float", .None}, {"inf", .None}, {"nan", .None}, {"hex", .Hex}, {"octal", .Octal}, {"binary", .Binary}},
 }
 
 // TOML's fault table, which names the format whatever the spec.

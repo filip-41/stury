@@ -131,6 +131,58 @@ Tag_Meaning :: enum u8 {
 	Binary,
 }
 
+// What a scalar's `Style` says, which each format names in its own words (`Readers.styles`) and writes in its own
+// spelling where it has one, and in its default where it has none. `None` is a format's default spelling.
+Scalar_Style :: enum u8 {
+	None,
+	Single, // one line between quotes with no escapes: YAML's single-quoted, TOML's literal
+	Double, // one line between quotes with escapes: YAML's double-quoted
+	Literal, // lines as written with no escapes: YAML's `|`, TOML's `'''`
+	Folded, // YAML's `>`
+	Multiline, // lines with escapes: TOML's `"""`
+	Hex,
+	Octal,
+	Binary,
+}
+
+// A format's name of a scalar style.
+Style_Name :: struct {
+	name:  string,
+	style: Scalar_Style,
+}
+
+// The scalar style named `name` in the format `readers` reads, and false for a name it has none of.
+style_named :: proc "contextless" (readers: ^Readers, name: string) -> (Scalar_Style, bool) {
+	if readers != nil && .Style in readers.holds {
+		for s in readers.styles {
+			if s.name == name {
+				return s.style, true
+			}
+		}
+	}
+	return .None, false
+}
+
+// The style `v` is written in: the one written on it, else its node's, read in the words of the value's format.
+value_style :: proc(v: Value) -> Scalar_Style {
+	r, is_ref := facts_node(v)
+	if !is_ref || .Style not_in r.doc.readers.holds {
+		return .None
+	}
+	name: string
+	if c, is_commented := v.(^Commented); is_commented && .Value in c.written {
+		name = c.bodies[.Value][0] if len(c.bodies[.Value]) > 0 else ""
+	} else {
+		fv, held := fact_value(r.doc, r.node, .Style)
+		if !held {
+			return .None
+		}
+		name = fv.text
+	}
+	style, _ := style_named(r.doc.readers, name)
+	return style
+}
+
 // Returns the value of node `i`'s property `name`: the body of its span fact of that role when it holds one (`Tag`,
 // `Anchor` and `Alias`), else what the format's `fact` service reads from the node's spelling. Returns false for a node
 // that has none and for a format with no such service. A `Number` fact, a binary format's tag, is read by the format's

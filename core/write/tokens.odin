@@ -88,6 +88,7 @@ Tokens :: struct {
 	spill:  [ROOM_MAX]u8,
 	object: [core.MAX_DEPTH]bool, // per open level, whether it is an object
 	spec:   u8, // the format's spec
+	style:  core.Scalar_Style, // the style of the scalar `value` writes, which a format spells where it has it
 	notes:  bool, // the spec holds comments and the spelling writes them
 	top:    int, // the open levels
 	inline: int, // the output offset just past the text of the last one-line inline comment, 0 after any other write
@@ -107,7 +108,7 @@ Tokens :: struct {
 tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}, spell: ^Token_Spelling = nil, site := core.Site{}) -> core.Typed_Error_Kind {
 	// The spill and the levels are not zeroed: a level is read only below `top`.
 	t.opts, t.spell, t.state, t.top, t.mark, t.inline, t.first, t.keyed, t.done, t.err = opts, nil, nil, 0, 0, 0, true, false, false, .None
-	t.spec, t.led, t.site = as.spec, false, site
+	t.spec, t.led, t.site, t.style = as.spec, false, site, .None
 	services := core.services_of(as)
 	t.words = services.words if services != nil else {}
 	init(&t.base, &t.spill, allocator, stream)
@@ -298,7 +299,7 @@ value :: proc(t: ^Tokens, v: Scalar) -> core.Typed_Error_Kind {
 		}
 	}
 	refuse(t, t.spell.value(t, v))
-	t.first, t.done = false, t.top == 0
+	t.first, t.done, t.style = false, t.top == 0, .None
 	return refuse(t, t.out.err)
 }
 
@@ -583,6 +584,57 @@ put_int_64_text :: proc(out: ^Out, lit: string) -> core.Typed_Error_Kind {
 put_int_64_unsigned :: proc(out: ^Out, n: u64) -> core.Typed_Error_Kind {
 	stack: [32]u8
 	return put_int_64_text(out, string(stack[:spell.u64_text(raw_data(stack[:]), n)]))
+}
+
+// Writes number `v` in the base `style` names, with its lowercase prefix, when `forms` hold that base and `v` is an
+// integer from 0 to `max(i64)`, which every format here reads in a base, and returns false, writing nothing, otherwise.
+put_based :: proc(out: ^Out, v: Scalar, style: core.Scalar_Style, forms: Number_Forms) -> bool {
+	form: Number_Form
+	shift: u64
+	#partial switch style {
+	case .Hex:
+		form, shift = .Hex, 4
+	case .Octal:
+		form, shift = .Octal, 3
+	case .Binary:
+		form, shift = .Binary, 1
+	case:
+		return false
+	}
+	if form not_in forms {
+		return false
+	}
+	n: u64
+	#partial switch x in v {
+	case Number_Literal:
+		magnitude, negative, integer := integer_magnitude(x.text)
+		if !integer || negative || magnitude > u64(max(i64)) {
+			return false
+		}
+		n = magnitude
+	case core.Number:
+		if x.kind != .Int && x.kind != .Uint || x.bits > u64(max(i64)) {
+			return false
+		}
+		n = x.bits
+	case:
+		return false
+	}
+	mask := u64(1) << shift - 1
+	numerals := "0123456789abcdef"
+	digits: [64]u8
+	at := len(digits)
+	for {
+		at -= 1
+		digits[at] = numerals[n & mask]
+		n >>= shift
+		if n == 0 {
+			break
+		}
+	}
+	put_text(out, "0x" if form == .Hex else "0o" if form == .Octal else "0b")
+	put_text(out, string(digits[at:]))
+	return true
 }
 
 // The magnitude of integer text `lit`, a decimal or a prefixed integer with underscores, saturated at `max(u64)`, and

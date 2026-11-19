@@ -145,8 +145,75 @@ layout_keeps_the_comments_of_arrays_and_headers :: proc(t: ^testing.T) {
 @(test)
 layout_keeps_literal_strings_unless_respelled :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	testing.expect_value(t, text_of("a = 'x\\y'\nb = \"\"\"m\nl\"\"\"\n"), "a = 'x\\y'\nb = \"m\\nl\"\n")
+	testing.expect_value(t, text_of("a = 'x\\y'\nb = \"\"\"m\nl\"\"\"\n"), "a = 'x\\y'\nb = \"\"\"\nm\nl\"\"\"\n")
 	testing.expect_value(t, text_of("a = 'x\\y'\n", {respell_strings = true}), "a = \"x\\\\y\"\n")
+	testing.expect_value(t, text_of("a = 'é'\n", {ascii = true}), "a = \"\\u00e9\"\n")
+}
+
+@(test)
+layout_keeps_multi_line_strings :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := `a = """
+one "two" ""\"
+three\\ \r\u0001"""
+b = """x"""
+c = """\nlead"""
+d = """end"" """
+e = '''
+raw \n 'q' ''x
+'''
+f = '''x'''
+h = { i = """p
+q""", j = ['''r
+s'''] }
+`
+	want := `a = """
+one "two" ""\"
+three\\ \r\u0001"""
+b = """x"""
+c = """
+
+lead"""
+d = """end"" """
+e = '''
+raw \n 'q' ''x
+'''
+f = '''x'''
+h = { i = """
+p
+q""", j = ['''
+r
+s'''] }
+`
+	testing.expect_value(t, text_of(src), want)
+	testing.expect_value(t, text_of(want), want)
+	testing.expect_value(t, text_of("a = '''\nm\tl\n'''\n", {respell_strings = true}), "a = \"m\\tl\\n\"\n")
+	testing.expect_value(t, text_of("a = '''\né\n'''\n", {ascii = true}), "a = \"\"\"\n\\u00e9\n\"\"\"\n")
+}
+
+@(test)
+yaml_block_scalars_are_multi_line_strings :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "a: |\n  one\n  two\nb: >\n  folded\n  text\nc: |-\n  has ''' run\nd: 'single'\n"
+	doc, err := yaml.build(transmute([]u8)src, .Yaml_1_2)
+	testkit.expect_nil(t, err)
+	defer core.destroy(&doc)
+	got, werr := written(&doc)
+	testkit.expect_nil(t, werr)
+	testing.expect_value(t, got, "a = '''\none\ntwo\n'''\nb = '''\nfolded text\n'''\nc = \"\"\"has ''' run\"\"\"\nd = 'single'\n")
+}
+
+// YAML chooses a block scalar by the text, so a multi-line string with a line end is one in a block collection, and a
+// flow collection, which holds no block scalar, quotes it.
+@(test)
+multi_line_strings_are_yaml_block_scalars :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	doc, err := toml.build(transmute([]u8)string("a = \"\"\"\none\ntwo\n\"\"\"\nb = '''x'''\nc = { d = \"\"\"e\nf\"\"\" }\n"), .Toml_1_0)
+	testkit.expect_nil(t, err)
+	defer core.destroy(&doc)
+	text, _, werr := core.write(&doc, {pretty = true}, yaml.as(.Yaml_1_2), allocator = context.temp_allocator)
+	testkit.expect_nil(t, werr)
+	testing.expect_value(t, string(text), "a: |\n  one\n  two\nb: x\nc: {d: \"e\\nf\"}\n")
 }
 
 @(test)

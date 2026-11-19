@@ -70,7 +70,8 @@ As :: struct {
 // `tag_fits` says whether a value `v` put in place of a node tagged `tag` keeps a tag, and which, for a format whose
 // tags state a type, see `kept_tag`. It is nil for a format whose tags stay on any value. `tag_meaning` gives the
 // meaning of node `i`'s tag `tag` that a span holds as text, see `Tag_Meaning`. It is nil for a format whose `fact`
-// gives the meaning with the tag, and for one whose tags have none.
+// gives the meaning with the tag, and for one whose tags have none. `styles` names the scalar styles `fact` gives and an
+// edit may write, nil for a format with none.
 Readers :: struct {
 	text:         proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
 	key_equals:   proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool,
@@ -97,6 +98,7 @@ Readers :: struct {
 	room:         proc(v: ^Token_View, lo: u64, n: u32) -> int,
 	tag_fits:     proc(tag: string, v: Value) -> (kept: string, fits: bool),
 	tag_meaning:  proc(doc: ^Document, i: Node_Index, tag: string) -> Tag_Meaning,
+	styles:       []Style_Name,
 }
 
 // `r` with `services`: the readers of a handle, which reach the format's services.

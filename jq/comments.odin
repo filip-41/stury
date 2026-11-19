@@ -221,8 +221,7 @@ markup_facts :: proc(v: core_pkg.Value, role: core_pkg.Role, many: bool) -> core
 }
 
 // `v` with the fact of path step `step` written as `nv`: the comment bodies of `write_comments`, for a property a string
-// or null, and a number for a tag, which is held as its digits, and for an attribute a string or null. A style is
-// written only as the one `v` has.
+// or null, and a number for a tag, which is held as its digits, and for an attribute a string or null.
 write_fact :: proc(ip: ^Interp, v: core_pkg.Value, step: core_pkg.Value, nv: core_pkg.Value) -> (core_pkg.Value, Signal) {
 	name, _ := fact_step(step)
 	if is_attribute_step(step) {
@@ -253,7 +252,7 @@ write_fact :: proc(ip: ^Interp, v: core_pkg.Value, step: core_pkg.Value, nv: cor
 		if compare(&ip.too_deep, property_value(v, name), core_pkg.plain(nv)) == 0 {
 			return v, .Go
 		}
-		return nil, fail(ip, "cannot write a style: the format has no spelling for it")
+		return write_style(ip, v, text, kind(nv) == .Null)
 	}
 	if kind(nv) == .Null {
 		return core_pkg.noted(v, role, nil), .Go
@@ -261,6 +260,33 @@ write_fact :: proc(ip: ^Interp, v: core_pkg.Value, step: core_pkg.Value, nv: cor
 	bodies := make([]string, 1)
 	bodies[0] = text
 	return core_pkg.noted(v, role, bodies), .Go
+}
+
+// `v` written in the style its format names `name`, or in the format's default under `none`. A style is one of a value
+// a document holds, a quoting a string's and a base an integer's from 0 to `max(i64)`.
+@(private = "file")
+write_style :: proc(ip: ^Interp, v: core_pkg.Value, name: string, none: bool) -> (core_pkg.Value, Signal) {
+	if none {
+		return core_pkg.noted(v, .Value, nil), .Go
+	}
+	r, is_node := core_pkg.facts_node(v)
+	style, named := core_pkg.style_named(r.doc.readers if is_node else nil, name)
+	if !named {
+		return nil, fail(ip, "cannot write a style: the format has no spelling for it")
+	}
+	#partial switch style {
+	case .Single, .Double, .Literal, .Folded, .Multiline:
+		named = kind(v) == .String
+	case .Hex, .Octal, .Binary:
+		n, is_number := core_pkg.number(v)
+		named = is_number && kind(v) == .Number && (n.kind == .Int || n.kind == .Uint) && n.bits <= u64(max(i64))
+	}
+	if !named {
+		return nil, fail(ip, "cannot write a style: a quoting is a string's, and a base a non-negative integer's")
+	}
+	bodies := make([]string, 1)
+	bodies[0] = name
+	return core_pkg.noted(v, .Value, bodies), .Go
 }
 
 // `v` with its attribute `name` written as `nv`, or removed by null: in place of one of that name, else after the others.

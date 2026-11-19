@@ -544,7 +544,7 @@ next_member :: #force_inline proc(it: ^Members) -> (key: string, v: core_pkg.Val
 // `v`'s property `name`: the filter's write, else the value of its node's fact, a number when the fact spells one.
 property_value :: proc(v: core_pkg.Value, name: core_pkg.Fact_Kind) -> core_pkg.Value {
 	if c, is_commented := v.(^core_pkg.Commented); is_commented {
-		if role := core_pkg.FACTS[name].role; role != .Value && role in c.written {
+		if role := core_pkg.FACTS[name].role; role in c.written && (role != .Value || name == .Style) {
 			return c.bodies[role][0] if len(c.bodies[role]) > 0 else nil
 		}
 	}

@@ -26,6 +26,7 @@ READERS := core.Readers {
 	number_text  = number_text,
 	tag_fits     = tag_fits,
 	tag_meaning  = tag_meaning,
+	styles       = {{"plain", .None}, {"single", .Single}, {"double", .Double}, {"literal", .Literal}, {"folded", .Folded}, {"hex", .Hex}, {"octal", .Octal}},
 }
 
 // The handle of `spec` read with `opts`, over `READERS`.

@@ -1,7 +1,8 @@
 package write
 
 // A value written in any format with a token writer. A node is written by the readers, as a built value is, so its
-// text is spelled new. An object's members are written in order, a repeated key each time. A string with a tag, written
+// text is spelled new, in the style its node or the value holds (`core.value_style`), strings but under
+// `respell_strings`. An object's members are written in order, a repeated key each time. A string with a tag, written
 // on it or its node's, is a `Tagged_Text`.
 
 import "base:runtime"
@@ -196,6 +197,7 @@ put_node :: proc(t: ^Tokens, r: core.Node_Ref, v: core.Value, notes: bool) -> co
 	case .True:
 		return value_bool(t, true)
 	case .Number:
+		t.style = core.value_style(v)
 		// The digits of a number whose span is not a JSON number are read into `spelled`.
 		spelled: [core.HEX_ROOM]u8
 		if _, digits, _ := core.double_of(r, spelled[:]); digits != "" {
@@ -212,6 +214,9 @@ put_node :: proc(t: ^Tokens, r: core.Node_Ref, v: core.Value, notes: bool) -> co
 		payload, held := core.doc_bytes(r.doc, r.node, joined)
 		return value_bytes(t, payload) if held else .No_Memory
 	case .String:
+		if !t.opts.respell_strings {
+			t.style = core.value_style(v)
+		}
 		if tag, tagged := string_tag(v); tagged {
 			return value(t, Tagged_Text{core.node_string(r.doc, r.node), tag.text, tag.meaning})
 		}

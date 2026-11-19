@@ -57,17 +57,23 @@ TOKENS := write.Token_Spelling {
 	value = proc(t: ^write.Tokens, v: write.Scalar) -> core.Typed_Error_Kind {
 		switch x in v {
 		case string:
-			return put_basic(t.out, x, t.opts)
+			return put_styled(t.out, x, quoting_of(t.style), t.opts)
 		case typed.Bytes:
 			stack: [512]u8
 			text, ok := write.bytes_text(cast([]u8)x, stack[:])
 			return put_basic(t.out, text, t.opts) if ok else .No_Memory
 		case core.Number:
+			if write.put_based(t.out, x, t.style, NUMBER_FORMS) {
+				return .None
+			}
 			if x.kind == .Uint {
 				return write.put_int_64_unsigned(t.out, x.bits)
 			}
 			return write.put_number(t.out, x, TREE)
 		case write.Number_Literal:
+			if write.put_based(t.out, x, t.style, NUMBER_FORMS) {
+				return .None
+			}
 			return write.put_int_64_text(t.out, x.text)
 		case write.Tagged_Text:
 			// A tag that is no TOML type leaves a string, and so does another format's datetime that no TOML one spells.
