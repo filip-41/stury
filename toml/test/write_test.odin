@@ -553,19 +553,6 @@ token_write_keeps_the_comments_inside_the_tables_of_an_array :: proc(t: ^testing
 	testing.expect_value(t, comment_count(&back), 2)
 }
 
-@(private)
-Marshal_Try :: struct {
-	cfg:  Config,
-	opts: core.Write_Options,
-}
-
-@(private)
-marshal_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
-	m := (^Marshal_Try)(data)
-	text, err := toml.marshal(m.cfg, write = m.opts, allocator = allocator)
-	return text, testkit.typed_kind(err)
-}
-
 @(test)
 marshal_under_failing_allocators :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -578,10 +565,9 @@ marshal_under_failing_allocators :: proc(t: ^testing.T) {
 	}
 	cfg.limits = make(map[string]int, allocator = context.temp_allocator)
 	cfg.limits["m"] = 1
-	for opts in ([?]core.Write_Options{{}, {pretty = true, indent = 2}}) {
-		try := Marshal_Try{cfg, opts}
-		want, err := toml.marshal(cfg, write = opts, allocator = context.temp_allocator)
-		testkit.expect_nil(t, err)
-		testkit.sweep_write(t, marshal_try, &try, string(want))
-	}
+	testkit.sweep_marshal(t, proc(value: any, write: core.Write_Options, allocator: runtime.Allocator) -> ([]u8, core.Error) {
+		return toml.marshal(value, write = write, allocator = allocator)
+	},
+		cfg,
+		{{}, {pretty = true, indent = 2}})
 }

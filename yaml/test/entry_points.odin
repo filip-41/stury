@@ -303,9 +303,7 @@ a_repeated_key_follows_the_duplicate_policy_of_every_read :: proc(t: ^testing.T)
 
 		it := yaml.answers(src, spec, path, read = read)
 		pulled := make([dynamic]yaml.Token_Answer)
-		for a in yaml.next(&it) {
-			append(&pulled, a)
-		}
+		_ = testkit.drain_answers(&it, &pulled)
 		testing.expectf(t, (it.err != nil) == refused && (refused || answer_texts(src, pulled[:]) == want), "answers under %v: %v %s", c.dups, it.err, answer_texts(src, pulled[:]))
 
 		fdoc, found, ferr := yaml.find(src, spec, path, read = read)

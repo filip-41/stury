@@ -84,11 +84,11 @@ members, not by the grouped value.
 ## Selectors
 
 `core/css` matches CSS selectors over a markup document, and `xml` and `html` forward it. `css.compile` compiles a
-selector list once into a `Selector`, which `css.destroy` frees, and `css.select(&doc, &sel, from)` gives the value
-node of each element it matches among the descendants of node `from`, the root by default, in document order. It
+selector list once into a `Selector`, which `css.destroy` frees, and `css.select_value(v, &sel, fold, paths)` gives
+the value of each element it matches among the descendants of `v`, in document order. Over a node (`core.Node_Ref`) it
 matches on the document, not the grouped value, so siblings and positions count across names as the text orders them.
-`css.select_value(v, &sel, fold, paths)` matches over a value instead, a node or the value an update made of one, whose
-built members are read as the update left them and whose nodes as the document has them, and gives each match's value,
+Over the value an update made of one, built members are read as the update left them and nodes as the document has
+them. It gives each match's value,
 with its path from `v` through the grouped members when `paths` is set. A value an update put in place of an element keeps that element's
 name and attributes where it writes none (`core.in_place_of`).
 

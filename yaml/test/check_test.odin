@@ -6,7 +6,6 @@ import "core:fmt"
 import "core:strings"
 import "core:testing"
 import core "../../core"
-import rules "../../core/rules"
 import typed "../../core/typed"
 import schema "../../core/schema"
 import json_pkg "../../json"
@@ -210,25 +209,6 @@ a_schema_binds_to_a_handle_chosen_at_run_time :: proc(t: ^testing.T) {
 	nodes: typed.Sink
 	testing.expect(t, schema.check_node(&bound, &doc, core.ROOT, &nodes) != nil)
 	testing.expectf(t, spelled(&nodes) == "Wrong_Kind/name;Below_Minimum/port;", "built: got %s", spelled(&nodes))
-}
-
-@(test)
-a_plan_of_a_description_reads_yaml :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	Server :: struct {
-		name: string,
-		port: int,
-	}
-	plan, _ := yaml.plan_make(Server, allocator = context.temp_allocator)
-	m := model.Model(struct{}){plan = plan}
-	m.plan.model_plan = .None
-	d, derr := model.schema(&m, .Load, context.temp_allocator)
-	testkit.expect_nil(t, derr)
-	again, built := yaml.plan_of(&d, allocator = context.temp_allocator)
-	testkit.expect_nil(t, built)
-	testing.expect(t, again.read != nil || again.marshal != nil)
-	_, empty := yaml.plan_of(&rules.Description{})
-	testkit.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 }
 
 // A check of a text the walk refuses holds the fault as its one entry, as a check that met it inside a value does.

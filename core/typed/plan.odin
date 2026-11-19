@@ -318,8 +318,6 @@ Rename :: enum u8 {
 // arms, and `tag_names` the names that replace the arms' type names.
 Plan_Options :: struct {
 	enums:     Enum_Spelling,
-	// Builds a description's plan as a check reads it: each record `Checked`, judging its use of its node.
-	checking:  bool,
 	// The model whose rules the members' records take, nil for none. A built plan holds nil here, so the plans a write
 	// builds for a type met in an `any` hold no rules. A read by the plan does not check them.
 	model:     ^Model_Rules,
@@ -451,6 +449,8 @@ Plan :: struct {
 	key_frame: u32,
 	key_slack: u32,
 	model_plan: Model_Plan,
+	// A description's plan, which reads as a check does: each record `Checked`, judging its use of its node.
+	checking:  bool,
 	// The name bytes of records and of renamed or unescaped names, and the enums a model renames with their names.
 	strings:   [dynamic]string,
 	allocator: runtime.Allocator,
@@ -785,7 +785,7 @@ plan_start :: proc(b: ^Builder, trail: ^[TRAIL_MAX]string, p: ^Plan, as: core.As
 	b^ = {options = &p.options, p = p, trail = trail}
 	hooks, no_hooks := make([]Type_Hook, len(opts.hooks))
 	tag_names, no_names := make([]Tag_Name, len(opts.tag_names))
-	p.options = {enums = opts.enums, model = opts.model, checking = opts.checking, union_tag = owned_copy(b, opts.union_tag), rename = opts.rename, hooks = hooks, tag_names = tag_names}
+	p.options = {enums = opts.enums, model = opts.model, union_tag = owned_copy(b, opts.union_tag), rename = opts.rename, hooks = hooks, tag_names = tag_names}
 	copy(hooks, opts.hooks)
 	for &t, i in tag_names {
 		t = {opts.tag_names[i].type, owned_copy(b, opts.tag_names[i].name)}
@@ -877,7 +877,7 @@ stamp_as :: proc(as: core.As, opts: Plan_Options) -> u64 {
 	for b in as.opts {
 		stamp_mix(&h, u64(b))
 	}
-	stamp_mix(&h, u64(opts.enums) | u64(opts.rename) << 8 | u64(opts.model != nil) << 16 | u64(opts.checking) << 17)
+	stamp_mix(&h, u64(opts.enums) | u64(opts.rename) << 8 | u64(opts.model != nil) << 16)
 	stamp_text(&h, opts.union_tag)
 	for t in opts.tag_names {
 		stamp_mix(&h, transmute(u64)t.type)

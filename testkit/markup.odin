@@ -294,6 +294,14 @@ collect_answer :: proc(state: rawptr, a: core.Token_Answer) -> bool {
 	return true
 }
 
+// Takes every answer of `it` into `out`, and returns the error the read ended with.
+drain_answers :: proc(it: ^build.Answer_Iter, out: ^[dynamic]core.Token_Answer) -> core.Error {
+	for a in build.answers_next(it) {
+		append(out, a)
+	}
+	return it.err
+}
+
 // Checks that the iterator gives the answers `each_answer` gives and ends with its error, at batch 1, 3 and 64 and
 // with the stop at the last answer on and off, over each of `texts` under each spec number below `variants`, for each
 // of the paths `path_texts` alone and for all of them together, and that some read gave an answer.

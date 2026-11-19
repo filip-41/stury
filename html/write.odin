@@ -251,10 +251,10 @@ put_root :: proc(w: ^Writer, root: core.Value) -> core.Typed_Error_Kind {
 	bodies, written := core.rebuilt_comments(root, .Comment)
 	lead := len(bodies) > 0
 	for f in facts {
-		if is_head(f.role) && !(written && f.role == .Comment) || f.role == .Doctype && own_node(root) {
+		if write.is_head(f.role) && !(written && f.role == .Comment) || f.role == .Doctype && own_node(root) {
 			before := w.kept
 			put_fact(w, root, f) or_return
-			lead = is_head(f.role) && w.kept > before || lead && f.role != .Doctype
+			lead = write.is_head(f.role) && w.kept > before || lead && f.role != .Doctype
 		}
 	}
 	put_bodies(w, bodies)
@@ -392,7 +392,7 @@ put_node :: proc(w: ^Writer, name: string, v: core.Value, depth: int, in_foreign
 		put_comments(w, lead, value_facts(lead), .Comment) or_return
 		bodies, written := core.rebuilt_comments(v, .Comment)
 		for f in facts {
-			if is_head(f.role) && !(written && f.role == .Comment) {
+			if write.is_head(f.role) && !(written && f.role == .Comment) {
 				put_fact(w, v, f) or_return
 			}
 		}
@@ -730,12 +730,6 @@ has_special :: #force_inline proc(x: u64) -> bool {
 	zero :: #force_inline proc(v: u64) -> u64 {return (v - ONES) & ~v}
 	found := zero(x ~ (ONES * '&')) | zero(x ~ (ONES * '<')) | zero(x ~ (ONES * '>')) | zero(x ~ (ONES * '"')) | x
 	return found & HIGH != 0
-}
-
-// Whether a fact of `role` stands before the value it is held by.
-@(private)
-is_head :: #force_inline proc(role: core.Role) -> bool {
-	return role == .Comment || role == .Instruction
 }
 
 // Whether HTML element `name` is void, written with no end tag and no content.

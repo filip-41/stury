@@ -5,7 +5,6 @@ package toml
 
 import "base:runtime"
 import core "../core"
-import rules "../core/rules"
 import typed "../core/typed"
 import write "../core/write"
 
@@ -46,16 +45,6 @@ checks :: proc "contextless" ($S: Spec, opts := Options{}) -> typed.Format_Check
 plan_make :: proc(T: typeid, spec := Spec.Toml_1_0, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error) {
 	made, err := plan_built(T, spec, opts, plan, reads, allocator)
 	return made, core.error_of(err)
-}
-
-// Builds the plan that reads values of description `d` as `spec`, as `typed.plan_of` does. The reads are the plan's with
-// `reads`, as for `plan_make`.
-plan_of :: proc(d: ^rules.Description, spec := Spec.Toml_1_0, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error) {
-	made, err := typed.plan_of(d, bound_as(spec, {}), reads, opts, allocator)
-	if err == nil {
-		plan_bind(&made)
-	}
-	return made, err
 }
 
 // The plan of `T` over `READERS`, with TOML's writer and document read, and the reads `reads` holds.

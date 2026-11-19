@@ -4,6 +4,7 @@ package cbor_tests
 import "base:runtime"
 import "core:fmt"
 import "core:strings"
+import spell "../../core/spell"
 import core "../../core"
 
 // The bytes of hex text, ignoring spaces, in the temporary allocator.
@@ -12,15 +13,8 @@ hex :: proc(text: string) -> []u8 {
 	out := make([dynamic]u8, 0, len(text) / 2, context.temp_allocator)
 	high := -1
 	for c in transmute([]u8)text {
-		v: int
-		switch c {
-		case '0' ..= '9':
-			v = int(c - '0')
-		case 'a' ..= 'f':
-			v = int(c - 'a' + 10)
-		case 'A' ..= 'F':
-			v = int(c - 'A' + 10)
-		case:
+		v := int(spell.HEX_NIBBLE[c])
+		if v == 0xFF {
 			continue
 		}
 		if high < 0 {

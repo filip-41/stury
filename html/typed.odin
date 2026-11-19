@@ -4,7 +4,6 @@ package html
 
 import "base:runtime"
 import core "../core"
-import rules "../core/rules"
 import typed "../core/typed"
 import write "../core/write"
 import schema "../core/schema"
@@ -48,16 +47,6 @@ bind_schema :: proc(s: ^Schema, $S: Spec, opts := Options{}, allocator := contex
 plan_make :: proc(T: typeid, spec := Spec.Document, opts := Options{}, plan := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error) {
 	made, err := plan_built(T, spec, opts, plan, reads, allocator)
 	return made, core.error_of(err)
-}
-
-// Builds the plan that reads values of description `d` as `spec`, as `typed.plan_of` does. The reads are the plan's with
-// `reads`, as for `plan_make`.
-plan_of :: proc(d: ^rules.Description, spec := Spec.Document, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error) {
-	made, err := typed.plan_of(d, as_of(&READERS, spec, {}), reads, opts, allocator)
-	if err == nil {
-		plan_bind(&made)
-	}
-	return made, err
 }
 
 // Builds the plan of `T` with HTML's writer and document read, and `reads` as its reads.

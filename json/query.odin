@@ -164,14 +164,6 @@ answers_fill :: proc "contextless" ($S: Spec) -> proc(it: ^engine.Answer_Iter) {
 				engine.answers_fail(it, core.error_of(core.path_error(sep_error(src, sep))))
 				return
 			}
-			if it.read.dups == .Refuse {
-				built, e := build(src, S, opts, .Refuse, it.allocator)
-				core.destroy(&built)
-				if e != nil {
-					engine.answers_fail(it, e)
-					return
-				}
-			}
 			it.stack = it.stack_room[:]
 			if opts.max_depth > core.MAX_DEPTH {
 				stack, e := make([]u8, opts.max_depth, it.allocator)
@@ -181,7 +173,7 @@ answers_fill :: proc "contextless" ($S: Spec) -> proc(it: ^engine.Answer_Iter) {
 				}
 				it.stack = stack
 			}
-			if !engine.answers_start(it, false, min(core.reserve_depth(opts.max_depth, len(src)), core.MAX_DEPTH)) {
+			if !engine.answers_start(it, false, min(core.reserve_depth(opts.max_depth, len(src)), core.MAX_DEPTH), edit_of(S).build) {
 				return
 			}
 			cursor^ = {stack = it.stack}

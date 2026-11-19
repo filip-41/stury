@@ -117,10 +117,10 @@ refused_record_is_taken_back :: proc(t: ^testing.T) {
 	testing.expect_value(t, records.write(&wr, Entry{name = "half", score = math.nan_f64()}, &plan), core.Typed_Error_Kind.Non_Finite)
 	testing.expect_value(t, wr.err.n_steps, 1)
 	testing.expect_value(t, records.write(&wr, 7, &plan), core.Typed_Error_Kind.Plan_Mismatch)
-	records.write_text(&wr, transmute([]u8)string(`{"id":9}`))
+	records.write(&wr, ENTRIES[3], &plan)
 	text, end := records.writer_end(&wr)
 	testkit.expect_nil(t, end)
-	testing.expect_value(t, string(text), "\x1e{\"id\":1,\"name\":\"plain\",\"ok\":true,\"score\":0.5}\n\x1e{\"id\":9}\n")
+	testing.expect_value(t, string(text), "\x1e{\"id\":1,\"name\":\"plain\",\"ok\":true,\"score\":0.5}\n\x1e{\"id\":4,\"name\":\"\",\"ok\":false,\"score\":0}\n")
 }
 
 @(test)
@@ -139,7 +139,6 @@ refusal_after_a_flush_is_final :: proc(t: ^testing.T) {
 	defer records.writer_destroy(&wr)
 	testing.expect_value(t, records.write(&wr, Long{long, math.nan_f64()}, &plan), core.Typed_Error_Kind.Non_Finite)
 	testing.expect_value(t, records.write(&wr, Long{"ok", 1}, &plan), core.Typed_Error_Kind.Non_Finite)
-	testing.expect_value(t, records.write_text(&wr, {'1'}), core.Typed_Error_Kind.Non_Finite)
 	_, err := records.writer_end(&wr)
 	testkit.expect_kind(t, err, core.Typed_Error_Kind.Non_Finite)
 	typed_err := testkit.typed_of(err)
@@ -206,7 +205,7 @@ cells_keep_the_old_guards :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(records.writer_take(&wr)), "\"" + BOM + "a\",b\na,,\"x,y\"\n\"\"\n" + BOM + "not first\n")
 	// A refusal after a take goes back to its own record, which no take passed.
 	testing.expect_value(t, records.write_cells(&wr, {"ok", "\xff"}), core.Typed_Error_Kind.Invalid_Utf8)
-	records.write_text(&wr, transmute([]u8)string("p,q"))
+	records.write_cells(&wr, {"p", "q"})
 	text, err := records.writer_end(&wr)
 	testkit.expect_nil(t, err)
 	testing.expect_value(t, string(text), "p,q\n")
@@ -244,7 +243,7 @@ cells_keep_the_old_guards :: proc(t: ^testing.T) {
 writer_refuses_what_no_record_holds :: proc(t: ^testing.T) {
 	wr: records.Writer
 	testing.expect_value(t, records.writer_init(&wr, {}, json.as(.Json), .Entries), core.Typed_Error_Kind.Unsupported)
-	testing.expect_value(t, records.write_text(&wr, {'1'}), core.Typed_Error_Kind.Unsupported)
+	testing.expect_value(t, records.write_cells(&wr, {"1"}), core.Typed_Error_Kind.Unsupported)
 	_, err := records.writer_end(&wr)
 	testkit.expect_kind(t, err, core.Typed_Error_Kind.Unsupported)
 	testing.expect_value(t, records.writer_init(&wr, {}, dsv.as(.Csv), .Seq), core.Typed_Error_Kind.Unsupported)
@@ -312,7 +311,6 @@ calls_after_the_end_are_out_of_order :: proc(t: ^testing.T) {
 	_, end := records.writer_end(&wr)
 	testkit.expect_nil(t, end)
 	testing.expect_value(t, records.write(&wr, ENTRIES[1], &plan), core.Typed_Error_Kind.Out_Of_Order)
-	testing.expect_value(t, records.write_text(&wr, {'1'}), core.Typed_Error_Kind.Out_Of_Order)
 	testing.expect_value(t, records.write_cells(&wr, {"a"}), core.Typed_Error_Kind.Out_Of_Order)
 	_, end = records.writer_end(&wr)
 	testkit.expect_kind(t, end, core.Typed_Error_Kind.Out_Of_Order)
@@ -327,7 +325,7 @@ typed_row_after_written_cells_binds_without_a_header :: proc(t: ^testing.T) {
 	records.writer_init(&wr, {}, dsv.as(.Csv), allocator = context.temp_allocator)
 	records.write_cells(&wr, {"x", "y", "z", "w"})
 	testing.expect_value(t, records.write(&wr, ENTRIES[0], &plan), core.Typed_Error_Kind.None)
-	records.write_text(&wr, transmute([]u8)string("p,q"))
+	records.write_cells(&wr, {"p", "q"})
 	testing.expect_value(t, records.write(&wr, ENTRIES[3], &plan), core.Typed_Error_Kind.None)
 	text, _ := records.writer_end(&wr)
 	testing.expect_value(t, string(text), "x,y,z,w\n1,plain,true,0.5\np,q\n4,\"\",false,0\n")

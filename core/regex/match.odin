@@ -151,9 +151,7 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch
 	resize(&scratch.slots, re.slots)
 	resize(&scratch.counts, len(re.callouts))
 	m := Matcher{re = re, s = s, start = start, slots = scratch.slots[:], counts = scratch.counts[:], stack = &scratch.stack, caps = caps, best_len = -1, limit = len(s), lo = lo, width = width, first_start = first_start, last_start = last_start}
-	for &n in m.counts {
-		n = 0
-	}
+	slice.zero(m.counts)
 	// The visited set is bounded by the text, so the memory cap replaces the retry limit and the jq stack cap. The set
 	// persists across starts, so a search where a pair's outcome depends on the start (`longest`, `not_empty`) runs
 	// without it, and so does a jq program whose set would pass the cap.
@@ -388,9 +386,7 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 	re, s := m.re, m.s
 	insts := re.insts
 	slots := m.slots
-	for &x in slots {
-		x = -1
-	}
+	slice.fill(slots, -1)
 	slots[0] = at
 	for c, i in re.callouts {
 		if c.kind != .Total_Count {

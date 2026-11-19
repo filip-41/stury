@@ -1,6 +1,7 @@
 package schema
 
 import "base:runtime"
+import "core:slice"
 import core "../"
 import "../rules"
 import "../typed"
@@ -114,7 +115,7 @@ bind :: proc(c: ^Compiled, checks: typed.Format_Checks, allocator := context.all
 	}
 	b.compiled = c
 	b.allocator = allocator
-	b.plan, err = typed.plan_of(c.description, as, reads, {checking = true}, allocator)
+	b.plan, err = typed.plan_of(c.description, as, reads, allocator)
 	if err == nil && (b.plan.check == nil || b.plan.node_check == nil && as.readers != nil && as.readers.flat) {
 		// A handle whose services hold no checks binds no schema.
 		typed.plan_destroy(&b.plan)
@@ -193,26 +194,16 @@ unbind :: proc(b: ^Bound) {
 	b^ = {}
 }
 
-// The nodes of a description that format assertion is switched on for when `on`, which are the ones that did not
-// assert. `asserted_restore` switches them back.
+// `d` with format assertion switched on when `on`: a copy that shares what `d` holds, its nodes copied in
+// `context.temp_allocator` when `on`, so that `d` is left as it is.
 @(private)
-asserting :: proc(d: ^rules.Description, on: bool) -> (switched: [dynamic]rules.Node_Index) {
-	switched.allocator = context.temp_allocator
-	if !on {
-		return
-	}
-	for &n, i in d.nodes {
-		if !n.rules.assert_format && !n.rules.format_foreign {
-			n.rules.assert_format = true
-			append(&switched, rules.Node_Index(i))
+asserting :: proc(d: ^rules.Description, on: bool) -> rules.Description {
+	out := d^
+	if on {
+		out.nodes = slice.clone_to_dynamic(d.nodes[:], context.temp_allocator)
+		for &n in out.nodes {
+			n.rules.assert_format ||= !n.rules.format_foreign
 		}
 	}
-	return
-}
-
-@(private)
-asserted_restore :: proc(d: ^rules.Description, switched: [dynamic]rules.Node_Index) {
-	for i in switched {
-		d.nodes[i].rules.assert_format = false
-	}
+	return out
 }

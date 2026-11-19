@@ -54,40 +54,6 @@ Matcher :: struct {
 	err:    runtime.Allocator_Error,
 }
 
-// The value nodes of the elements of `doc` that `sel` matches, in document order, in `allocator`: the descendants of
-// node `from`, an element's value or the root, matched within the whole document, as `querySelectorAll` matches. A
-// document of a format with no attributes, and a `from` with no child elements, has none. Under the document's
-// `Readers.fold_names`, as HTML's, names compare ASCII case-insensitively. An attribute value compares as written
-// unless the selector's `i` flag says otherwise.
-//
-// The walk reads each element once and allocates only for its frames. `:has` walks the element's subtree, or its
-// following siblings' for `+` and `~`, `~` and the counts of `:nth-last-*` and `*-of-type` read the element's
-// siblings, and a decode of an attribute value longer than 256 bytes is made in the temp allocator.
-select :: proc(doc: ^core.Document, sel: ^Selector, from := core.ROOT, allocator := context.allocator) -> (found: []core.Node_Index, err: runtime.Allocator_Error) {
-	if !core.is_markup(doc) || int(from) >= len(doc.nodes) || doc.nodes[from].kind != .Object {
-		return nil, nil
-	}
-	m := Matcher{doc = doc, sel = sel, root = core.Node_Ref{doc, core.ROOT}, fold = doc.readers.fold_names}
-	defer delete(m.frames)
-	defer delete(m.levels)
-	out := make([dynamic]core.Node_Index, allocator)
-	start(&m, doc, from)
-	for f in walk_next(&m, 0, false) {
-		if !match_list(&m, sel.list, f, -1) {
-			continue
-		}
-		if _, e := append(&out, m.frames[f].value); e != nil {
-			m.err = e
-			break
-		}
-	}
-	if m.err != nil {
-		delete(out)
-		return nil, m.err
-	}
-	return out[:], nil
-}
-
 // An element `select_value` matched: its value, and the path to it from the value read, each step a name, then the
 // element's index when its name reads as an array.
 Match :: struct {
@@ -95,11 +61,15 @@ Match :: struct {
 	path:  []core.Value,
 }
 
-// `select` of the elements of value `v`, in `allocator`: the descendants of an element of a markup document within the
+// The elements of value `v` that `sel` matches, in document order, in `allocator`: the descendants of an element of a markup document within the
 // whole document, or of a built object, as an edit of one leaves it, within it. The elements of a built object are
 // those its members read as, so a built member's comments and attributes are those written on it. `fold` says names
-// compare ASCII case-insensitively, as `Readers.fold_names` says for a document, whose own is used for a node. Each
-// match's path is left nil unless `paths` asks for it, which reads the members of each element's name in its parent.
+// compare ASCII case-insensitively, as `Readers.fold_names` says for a document, whose own is used for a node, and an
+// attribute value compares as written unless the selector's `i` flag says otherwise. Each match's path is left nil
+// unless `paths` asks for it, which reads the members of each element's name in its parent. The walk reads each
+// element once and allocates only for its frames. `:has` walks the element's subtree, or its following siblings' for
+// `+` and `~`, `~` and the counts of `:nth-last-*` and `*-of-type` read the element's siblings, and a decode of an
+// attribute value longer than 256 bytes is made in the temp allocator.
 select_value :: proc(v: core.Value, sel: ^Selector, fold: bool, paths: bool, allocator := context.allocator) -> (found: []Match, err: runtime.Allocator_Error) {
 	m := Matcher{sel = sel, root = v, fold = fold}
 	defer delete(m.frames)
@@ -115,7 +85,7 @@ select_value :: proc(v: core.Value, sel: ^Selector, fold: bool, paths: bool, all
 		append(&m.levels, Level{children = children_of(&m, v), frame = -1})
 	}
 	out := make([dynamic]Match, allocator)
-	for f in walk_next(&m, 0, true) {
+	for f in walk_next(&m, 0) {
 		if !match_list(&m, sel.list, f, -1) {
 			continue
 		}
@@ -321,19 +291,12 @@ push_frame :: proc(m: ^Matcher, f: Frame) -> bool {
 	return true
 }
 
-// The frame of the next element in preorder of the levels past `base`, which it leaves when they are walked. Without
-// `BUILT` every level is an object node's.
+// The frame of the next element in preorder of the levels past `base`, which it leaves when they are walked.
 @(private)
-walk_next :: proc(m: ^Matcher, base: int, $BUILT: bool) -> (frame: i32, ok: bool) {
+walk_next :: proc(m: ^Matcher, base: int) -> (frame: i32, ok: bool) {
 	for len(m.levels) > base && m.err == nil {
 		lv := &m.levels[len(m.levels) - 1]
-		f: Frame
-		more: bool
-		when BUILT {
-			f, more = next_element(m, &lv.children)
-		} else {
-			f, more = next_node(m, &lv.children)
-		}
+		f, more := next_element(m, &lv.children)
 		if !more {
 			pop(&m.levels)
 			continue
@@ -343,9 +306,8 @@ walk_next :: proc(m: ^Matcher, base: int, $BUILT: bool) -> (frame: i32, ok: bool
 		resize(&m.frames, lv.top)
 		push_frame(m, f) or_break
 		frame = i32(len(m.frames) - 1)
-		if is_object(m, f) when BUILT else m.doc.nodes[f.value].kind == .Object {
-			children := frame_children(m, f) when BUILT else Children{pairs = core.pairs(m.doc, f.value)}
-			if _, err := append(&m.levels, Level{children = children, frame = frame, top = len(m.frames)}); err != nil {
+		if is_object(m, f) {
+			if _, err := append(&m.levels, Level{children = frame_children(m, f), frame = frame, top = len(m.frames)}); err != nil {
 				m.err = err
 				break
 			}
@@ -712,7 +674,7 @@ subtree_matches :: proc(m: ^Matcher, c: Complex, g: i32, anchor: i32) -> bool {
 		return false
 	}
 	found := false
-	for d in walk_next(m, base, true) {
+	for d in walk_next(m, base) {
 		if match_at(m, c, int(c.compounds.n) - 1, d, anchor) {
 			found = true
 			break

@@ -333,17 +333,6 @@ documents_write :: proc(t: ^testing.T) {
 	}
 }
 
-Marshal_Try :: struct {
-	value: any,
-	opts:  core.Write_Options,
-}
-
-marshal_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
-	m := (^Marshal_Try)(data)
-	text, err := dsv.marshal(m.value, .Csv, {}, write = m.opts, allocator = allocator)
-	return text, testkit.typed_kind(err)
-}
-
 Sweep_Row :: struct {
 	id:   int,
 	name: string,
@@ -357,12 +346,11 @@ marshal_under_failing_allocators :: proc(t: ^testing.T) {
 	second := make(map[string]string, context.temp_allocator)
 	second["z"] = "3"
 	keyed := []map[string]string{first, second}
-	for c in ([?]Marshal_Try{{rows, {}}, {rows, {sort_keys = true}}, {keyed, {}}}) {
-		c := c
-		want, err := dsv.marshal(c.value, .Csv, {}, write = c.opts, allocator = context.temp_allocator)
-		testkit.expect_nil(t, err)
-		testkit.sweep_write(t, marshal_try, &c, string(want))
+	csv :: proc(value: any, write: core.Write_Options, allocator: runtime.Allocator) -> ([]u8, core.Error) {
+		return dsv.marshal(value, .Csv, {}, write = write, allocator = allocator)
 	}
+	testkit.sweep_marshal(t, csv, rows, {{}, {sort_keys = true}})
+	testkit.sweep_marshal(t, csv, keyed, {{}})
 }
 
 document_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {

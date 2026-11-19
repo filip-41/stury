@@ -90,10 +90,7 @@ answers_agree_with_each_answer :: proc(t: ^testing.T) {
 		iter = proc(src: []u8, paths: []core.Path, variant: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
 			it := yaml.answers(src, .Yaml_1_2, paths, {merge_keys = variant == 1}, {stop_early = early})
 			it.max_batch = batch
-			for a in yaml.next(&it) {
-				append(out, a)
-			}
-			return it.err
+			return testkit.drain_answers(&it, out)
 		},
 	}
 	texts := [?]string {

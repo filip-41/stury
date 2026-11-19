@@ -303,13 +303,13 @@ parse_compound :: proc(p: ^Parser, comb: Combinator) -> (c: Compound, ok: bool) 
 			if !ident_starts(p) {
 				return {}, refuse(p, p.at, .Syntax)
 			}
-			t = {kind = .Attribute, op = .Equals, name = put_text(p, "id") or_return, value = parse_name(p) or_return}
+			t = {kind = .Attribute, op = .Equals, name = put_run(p, &p.sel.text, transmute([]u8)string("id")) or_return, value = parse_name(p) or_return}
 		case '.':
 			p.at += 1
 			if !ident_starts(p) {
 				return {}, refuse(p, p.at, .Syntax)
 			}
-			t = {kind = .Attribute, op = .Includes, name = put_text(p, "class") or_return, value = parse_name(p) or_return}
+			t = {kind = .Attribute, op = .Includes, name = put_run(p, &p.sel.text, transmute([]u8)string("class")) or_return, value = parse_name(p) or_return}
 		case '[':
 			t = parse_attribute(p) or_return
 		case ':':
@@ -621,13 +621,3 @@ put_rune :: proc(p: ^Parser, r: rune) -> bool {
 	_, err := append(&p.sel.text, ..b[:n])
 	return err == nil || no_memory(p)
 }
-
-@(private)
-put_text :: proc(p: ^Parser, s: string) -> (Run, bool) {
-	lo := len(p.sel.text)
-	if _, err := append(&p.sel.text, s); err != nil {
-		return {}, no_memory(p)
-	}
-	return {u32(lo), u32(len(s))}, true
-}
-

@@ -358,6 +358,7 @@ take_ident :: proc(p: ^Parser) -> string {
 
 // `text` as decNumber reads a number (jv_number_with_literal): a sign, then digits with a point and an exponent,
 // `Inf` or `Infinity`, or `NaN` with no payload. It returns false if it is none of them, or if it holds a NUL.
+@(private)
 read_number :: proc(text: string) -> (core_pkg.Value, bool) {
 	return read_literal(text, 0)
 }
@@ -424,6 +425,7 @@ json_integer :: #force_inline proc(text: string) -> bool {
 // The body of a JSON string decoded into `out` as jq's JSON parser decodes it, or why it cannot be, in jq's
 // words. A lone low surrogate, which jq takes and the library refuses, sets `lone_low_surrogate_at` to its backslash's
 // offset.
+@(private)
 decode_string :: proc(out: ^strings.Builder, in_: string, lone_low_surrogate_at: ^int = nil) -> string {
 	s := transmute([]byte)in_
 	for i := 0; i < len(s); {

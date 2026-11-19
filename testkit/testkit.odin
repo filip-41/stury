@@ -277,32 +277,6 @@ FACT_ROLES := [?]core.Role{.Comment, .Comment_Inline, .Comment_Foot}
 // line end.
 FACT_BODIES := [?]string{"c", "two words", "", "one\ntwo", "a\rb", "x\n*/", "a*/b", "*", "#", "a\xE2\x80\xA8b"}
 
-// Whether a set, insert or removal touches `node`. With `allow_remove` set a removal is skipped, so a round can name a
-// fact on a node the same list removes and check the commit's refusal.
-tree_touched :: proc(doc: ^core.Document, list: ^core.Edit_List, node: core.Node_Index, allow_remove: bool) -> bool {
-	for e in list.edits {
-		if e.op >= .Set_Fact {
-			continue
-		}
-		if e.op == .Insert {
-			if e.node == node {
-				return true
-			}
-			continue
-		}
-		if e.op == .Remove && allow_remove {
-			continue
-		}
-		if int(e.node) >= len(doc.nodes) {
-			continue
-		}
-		if e.node <= node && node < e.node + core.Node_Index(core.subtree_size(doc, e.node)) {
-			return true
-		}
-	}
-	return false
-}
-
 // Whether a tree edit writes over fact `f`'s bytes. A removal takes the removed subtree and the comments on it. A set
 // takes the node's own span, so a head comment before that span and an inline comment after it stay, and a comment
 // inside the span goes.
@@ -327,19 +301,6 @@ tree_written :: proc(doc: ^core.Document, list: ^core.Edit_List, f: Fact_Model) 
 		}
 	}
 	return false
-}
-
-// Whether `node` and every touched node are outside each other's subtrees, so neither is the other's ancestor.
-nodes_disjoint :: proc(doc: ^core.Document, touched: []core.Node_Index, node: core.Node_Index) -> bool {
-	for t in touched {
-		if t <= node && node < t + core.Node_Index(core.subtree_size(doc, t)) {
-			return false
-		}
-		if node <= t && t < node + core.Node_Index(core.subtree_size(doc, node)) {
-			return false
-		}
-	}
-	return true
 }
 
 // Whether `body` holds a line end a JSON line comment ends at.
@@ -684,6 +645,33 @@ sweep_write :: proc(t: ^testing.T, try: Write_Try, data: rawptr, want: string, l
 				}
 			}
 		}
+	}
+}
+
+// A format's `marshal` of `value` under `write`, which `sweep_marshal` fails the allocations of.
+Marshal :: proc(value: any, write: core.Write_Options, allocator: runtime.Allocator) -> ([]u8, core.Error)
+
+@(private)
+Marshal_Try :: struct {
+	marshal: Marshal,
+	value:   any,
+	write:   core.Write_Options,
+}
+
+@(private)
+marshal_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
+	m := (^Marshal_Try)(data)
+	text, err := m.marshal(m.value, m.write, allocator)
+	return text, typed_kind(err)
+}
+
+// Runs `sweep_write` over `marshal` of `value` under each of the write options `writes`.
+sweep_marshal :: proc(t: ^testing.T, marshal: Marshal, value: any, writes: []core.Write_Options, loc := #caller_location) {
+	for write in writes {
+		try := Marshal_Try{marshal, value, write}
+		want, err := marshal(value, write, context.temp_allocator)
+		expect_nil(t, err, loc)
+		sweep_write(t, marshal_try, &try, string(want), loc)
 	}
 }
 

@@ -6,17 +6,16 @@ import spell "../spell"
 import core ".."
 import rules "../rules"
 
-// Builds the plan that reads values of description `d` for format `as`, allocating with `allocator`. The plan stores
-// nothing: its type is nil, and each record's kind reads what its node takes. A struct block is shared by the uses of
-// one object block, a list block by those of one array block, a union block by those of one node. `d` must outlive the
-// plan, whose names are its strings. Under `opts.checking` each record is `Checked`, as a check reads it: a pattern that
-// does not compile, and a `const` or `enum` operand that is a container, refuse the plan as `.Unsupported` with the
-// keyword in `want.text`.
-plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Error) {
+// Builds the plan that reads values of description `d` for format `as` as a check reads them, allocating with
+// `allocator`. The plan stores nothing: its type is nil, and each record is `Checked`, judging its use of its node. `d`
+// must outlive the plan, whose names are its strings. A pattern that does not compile, and a `const` or `enum` operand
+// that is a container, refuse the plan as `.Unsupported` with the keyword in `want.text`.
+plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, allocator := context.allocator) -> (p: Plan, err: core.Error) {
 	context.allocator = allocator
 	b: Builder
 	trail: [TRAIL_MAX]string = ---
-	plan_start(&b, &trail, &p, as, opts)
+	plan_start(&b, &trail, &p, as, {})
+	p.checking = true
 	plan_reads(&p, reads)
 	arena, made := plan_arena(&p)
 	if made {
@@ -26,10 +25,8 @@ plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, 
 		refuse_plan(&b, .No_Memory)
 		return p, core.error_of(plan_finish(&b, 0))
 	}
-	if opts.checking {
-		b.uses.allocator = arena
-		b.programs = make(rules.Programs, arena)
-	}
+	b.uses.allocator = arena
+	b.programs = make(rules.Programs, arena)
 	// What only the build reads, which a bind of one node of a large description would otherwise keep as large as the
 	// whole description.
 	tables: virtual.Arena
@@ -40,92 +37,31 @@ plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, 
 	if d.root < 0 || int(d.root) >= len(d.nodes) {
 		refuse_plan(&b, .Bad_Option)
 	} else if b.err.kind == .None && root_block(&b) {
-		if opts.checking {
-			x := conjoin_description(&b, d, arena, virtual.arena_allocator(&tables))
-			fill_checked(&b, &x, arena, 0, d.root, "", {}, {})
-			fill_pending(&b, &x, arena)
-		} else {
-			fill_node(&b, d, 0, d.root, "")
+		x := conjoin_description(&b, d, arena, virtual.arena_allocator(&tables))
+		fill_checked(&b, &x, arena, 0, d.root, "", {}, {})
+		fill_pending(&b, &x, arena)
+	}
+	choose_arms(&b, arena)
+	judging_ids(&b, arena)
+	held_nesting(&b)
+	shared_uses(&b)
+	for u in b.uses {
+		if len(u.applies) > 0 {
+			if ext := plan_ext(&p); ext != nil {
+				ext.fork = fork_record(&b)
+			}
+			break
 		}
 	}
-	if opts.checking {
-		choose_arms(&b, arena)
-		judging_ids(&b, arena)
-		held_nesting(&b)
-		shared_uses(&b)
-		for u in b.uses {
-			if len(u.applies) > 0 {
-				if ext := plan_ext(&p); ext != nil {
-					ext.fork = fork_record(&b)
-				}
-				break
-			}
-		}
-		if resize(&b.uses, len(b.meta)) != nil {
-			refuse_plan(&b, .No_Memory)
-		}
+	if resize(&b.uses, len(b.meta)) != nil {
+		refuse_plan(&b, .No_Memory)
 	}
 	if ext := plan_ext(&p); ext != nil {
 		ext.leaves, ext.uses = b.leaves[:], b.uses[:]
 	} else {
 		refuse_plan(&b, .No_Memory)
 	}
-	return p, core.error_of(plan_finish(&b, description_stamp(d, as, opts)))
-}
-
-// Fills record `at` for a use of node `at_node` named `name`, which reads the node's null when `null` is set and else
-// leaves it to the `Maybe` record that holds it.
-@(private)
-fill_node :: proc(b: ^Builder, d: ^rules.Description, at: int, at_node: rules.Node_Index, name: string, null := true) {
-	depth := enter(b, name)
-	defer b.depth = depth
-	n := d.nodes[at_node]
-	f := Field{meta = u32(at)}
-	m := Meta{name = name, block = -1, capture = -1}
-	expect_name(b, &f, name)
-	kinds := n.kinds + (rules.Kinds{.Integer} if .Number in n.kinds else {})
-	leaf := kinds - {.Null}
-	o := d.objects[n.object] if n.object >= 0 else rules.Object{additional = rules.NONE}
-	switch {
-	case len(n.any_of) > 0:
-		f.kind = .Union
-		m.block = node_union(b, d, at_node, &m)
-	case kinds == {.Null, .Integer, .Number}:
-		f.kind = .Number_Text
-	case kinds == {.Null, .Bool, .Integer, .Number, .String}:
-		f.kind = .Scalar
-	case kinds == rules.EVERY_KIND:
-		f.kind = .Any
-	case null && .Null in kinds:
-		f.kind = .Maybe
-		node_list(b, d, block_key(typeid_of(Maybe(rules.Node)), i32(at_node), 0), at_node, &m, false)
-	case leaf == {.Object} && n.object >= 0 && (len(o.members) > 0 || o.additional == rules.NONE):
-		key := block_key(typeid_of(rules.Object), n.object, 0)
-		if !known_struct(b, key, &f, &m) {
-			if first := struct_block(b, key, &f, &m, o.members, false); first >= 0 {
-				for x, i in o.members {
-					fill_node(b, d, int(first) + i, x.node, x.name)
-				}
-			}
-		}
-	case leaf == {.Object}:
-		f.kind = .Map
-		node_list(b, d, block_key(typeid_of(rules.Object), n.object, 0), o.additional, &m)
-	case leaf == {.Array}:
-		f.kind = .Slice
-		node_list(b, d, block_key(typeid_of(rules.Array), n.array, 0), d.arrays[n.array].items if n.array >= 0 else rules.NONE, &m)
-	case leaf == {.Bool}:
-		f.kind = .Bool
-	case leaf == {.Integer}:
-		f.kind = .I64
-	case leaf == {.Integer, .Number}:
-		f.kind = .F64
-	case leaf == {.String}:
-		f.kind = .String
-	case:
-		refuse_plan(b, .Unsupported)
-	}
-	b.fields[at], b.meta[at] = f, m
+	return p, core.error_of(plan_finish(&b, description_stamp(d, as)))
 }
 
 // Fills record `at` as a check reads a use of node `use` named `name`, with `edge` the rules the use adds and `site` the
@@ -492,82 +428,10 @@ checked_block :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocat
 	return at + 1
 }
 
-// A list's, map's or `Maybe`'s block: its element's record, then a `Never` record.
-@(private)
-node_list :: proc(b: ^Builder, d: ^rules.Description, key: Block_Key, elem: rules.Node_Index, m: ^Meta, null := true) {
-	m.list = true
-	fresh: bool
-	if m.block, fresh = block_of(b, 2, key); !fresh {
-		return
-	}
-	never(b, int(m.block) + 1)
-	if elem == rules.NONE {
-		b.meta[m.block] = {block = -1, capture = -1}
-		b.fields[m.block] = {kind = .Any, meta = u32(m.block)}
-	} else {
-		fill_node(b, d, int(m.block), elem, "", null)
-	}
-}
-
-// A union's block holds one record per arm that takes more than null, then a `Never` record. An arm takes the classes
-// of its node's kinds, and an arm of null alone makes the union take null.
-@(private)
-node_union :: proc(b: ^Builder, d: ^rules.Description, at_node: rules.Node_Index, m: ^Meta) -> i32 {
-	all := d.nodes[at_node].any_of
-	count := 0
-	for arm in all {
-		count += 0 if d.nodes[arm].kinds == {.Null} else 1
-	}
-	made, failed := make([]Arm, count)
-	if failed != nil {
-		refuse_plan(b, .No_Memory)
-		return -1
-	}
-	m.arms, m.no_nil = made, count == len(all)
-	key := block_key(typeid_of(rules.Node), i32(at_node), 0)
-	at, fresh := block_of(b, count + 1, key)
-	if at < 0 {
-		return -1
-	}
-	if fresh {
-		never(b, int(at) + count)
-	}
-	k := 0
-	for arm in all {
-		kinds := d.nodes[arm].kinds
-		if kinds == {.Null} {
-			continue
-		}
-		for c in Value_Class {
-			if kinds & CLASS_KINDS[c] != {} {
-				made[k].classes += {c}
-			}
-		}
-		made[k].tag, made[k].fields = u32(k), at + i32(k)
-		if fresh {
-			fill_node(b, d, int(at) + k, arm, "")
-		}
-		k += 1
-	}
-	refuse_overlap(b, m)
-	return at
-}
-
-// The kinds of value each class holds.
-@(private)
-@(rodata)
-CLASS_KINDS := [Value_Class]rules.Kinds {
-	.Bool   = {.Bool},
-	.Number = {.Integer, .Number},
-	.String = {.String},
-	.Object = {.Object},
-	.Array  = {.Array},
-}
-
 // A hash of the format and of everything `d` says, so plans of descriptions that say the same share a stamp.
 @(private)
-description_stamp :: proc(d: ^rules.Description, as: core.As, opts: Plan_Options) -> u64 {
-	h := stamp_as(as, opts)
+description_stamp :: proc(d: ^rules.Description, as: core.As) -> u64 {
+	h := stamp_as(as, {})
 	limits :: proc(h: ^u64, r: rules.Rules) {
 		for s in ([?]string{r.minimum, r.maximum, r.multiple_of, r.pattern, r.format}) {
 			stamp_text(h, s)

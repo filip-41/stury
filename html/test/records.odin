@@ -63,10 +63,7 @@ answers_agree_with_each_answer :: proc(t: ^testing.T) {
 		iter = proc(src: []u8, paths: []core.Path, variant: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
 			it := html.answers(src, .Document, paths, {}, {dups = .Refuse if variant == 1 else .Last, stop_early = early})
 			it.max_batch = batch
-			for a in html.next(&it) {
-				append(out, a)
-			}
-			return it.err
+			return testkit.drain_answers(&it, out)
 		},
 	}
 	testkit.expect_answers_agree(t, {RECORD_TEXT}, {".html.body.p", ".html.body[]", "..", ".html.body.table.tbody.tr.td", ".z"}, 2, run)

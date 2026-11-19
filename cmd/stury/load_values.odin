@@ -52,8 +52,7 @@ load :: proc(path: string, raw: bool, r: core.As) -> (v: core.Value, msg: string
 		if !more {
 			break
 		}
-		built, err := records.build(&texts, rec)
-		doc, fault := core.refuse_key_clash(built, err)
+		doc, fault := core.refuse_key_clash(records.build(&texts, rec))
 		if f, bad := fault.?; bad {
 			return nil, jq.parse_message(data, f, column = -int(core.text_start(data, 0))), true
 		}

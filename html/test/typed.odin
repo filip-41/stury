@@ -4,10 +4,8 @@ package html_tests
 
 import "core:testing"
 import core "../../core"
-import rules "../../core/rules"
 import typed "../../core/typed"
 import html ".."
-import json "../../json"
 import testkit "../../testkit"
 
 @(private = "file")
@@ -139,18 +137,4 @@ a_nil_any_is_refused_as_a_null :: proc(t: ^testing.T) {
 	text, err := html.marshal(nothing, allocator = context.temp_allocator)
 	testing.expect(t, text == nil)
 	testkit.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
-}
-
-// A plan of a description holds HTML's reads when it is given them, and an empty description is refused.
-@(test)
-a_plan_of_a_description_reads_html :: proc(t: ^testing.T) {
-	s, err := json.load_schema(transmute([]u8)string(`{"properties": {"a": {"type": "integer"}}}`), .Json)
-	testkit.expect_nil(t, err)
-	defer json.destroy(s)
-	plan, built := html.plan_of(s.description, reads = html.checks(.Document).reads)
-	testkit.expect_nil(t, built)
-	defer html.destroy(&plan)
-	testing.expect(t, plan.read != nil && plan.marshal != nil)
-	_, empty := html.plan_of(&rules.Description{})
-	testkit.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 }

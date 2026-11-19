@@ -17,7 +17,6 @@ Array :: core.Array
 As :: core.As
 Attribute_Iter :: core.Attribute_Iter
 Child_Count :: core.Child_Count
-Child_Index :: core.Child_Index
 Child_Iter :: core.Child_Iter
 Comment_Syntax :: core.Comment_Syntax
 Commented :: core.Commented
@@ -28,13 +27,11 @@ Document_Error_Kind :: core.Document_Error_Kind
 Duplicates :: core.Duplicates
 Edit :: core.Edit
 Edit_List :: core.Edit_List
-Edit_Op :: core.Edit_Op
 Edit_Reason :: core.Edit_Reason
 Error :: core.Error
 Error_Entry :: core.Error_Entry
 Expected_Key :: core.Expected_Key
 Fact :: core.Fact
-Fact_Iter :: core.Fact_Iter
 Fact_Kind :: core.Fact_Kind
 Fact_Value :: core.Fact_Value
 Fault :: core.Fault
@@ -50,7 +47,6 @@ MAX_CHILDREN :: core.MAX_CHILDREN
 MAX_DEPTH :: core.MAX_DEPTH
 MAX_ERROR_STEPS :: core.MAX_ERROR_STEPS
 MAX_STEPS :: core.MAX_STEPS
-Member_Iter :: core.Member_Iter
 Missing_Name :: core.Missing_Name
 Name :: core.Name
 Node :: core.Node
@@ -68,7 +64,6 @@ Path_Error :: core.Path_Error
 Path_Error_Kind :: core.Path_Error_Kind
 Path_Options :: core.Path_Options
 Path_Reason :: core.Path_Reason
-Plan_Clash :: core.Plan_Clash
 Presence :: core.Presence
 Query_Options :: core.Query_Options
 ROOT :: core.ROOT
@@ -82,11 +77,9 @@ Token :: core.Token
 Token_Answer :: core.Token_Answer
 Token_View :: core.Token_View
 Tolerance :: core.Tolerance
-Typed_Detail :: core.Typed_Detail
 Typed_Error :: core.Typed_Error
 Typed_Error_Kind :: core.Typed_Error_Kind
 Typed_Refusal :: core.Typed_Refusal
-Typed_Want :: core.Typed_Want
 Value :: core.Value
 Write_Options :: core.Write_Options
 array_append :: core.array_append
@@ -142,9 +135,8 @@ write_pointer :: core.write_pointer
 Pool :: host.Pool
 pool_init :: host.pool_init
 
-Selector :: css.Selector
 compile_selector :: css.compile
-select :: css.select
+select_value :: css.select_value
 
 Answer_Iter :: build.Answer_Iter
 next :: build.answers_next
@@ -155,8 +147,6 @@ Bytes :: typed.Bytes
 Enum_Spelling :: typed.Enum_Spelling
 Field :: typed.Field
 Hook_Value :: typed.Hook_Value
-Marshal_Hook :: typed.Marshal_Hook
-Marshal_Text :: typed.Marshal_Text
 Meta :: typed.Meta
 Null :: typed.Null
 Plan :: typed.Plan
@@ -167,11 +157,7 @@ Read_Options :: typed.Read_Options
 Rename :: typed.Rename
 Sink :: typed.Sink
 Sink_Mark :: typed.Sink_Mark
-Tag_Name :: typed.Tag_Name
 Type_Hook :: typed.Type_Hook
-Unknown_Fields :: typed.Unknown_Fields
-Unmarshal_Hook :: typed.Unmarshal_Hook
-Value_Class :: typed.Value_Class
 own_names :: typed.own_names
 refuse :: typed.refuse
 

@@ -103,8 +103,7 @@ edit_files :: proc(run: ^Run, ins: ^Inputs) {
 	jq.set_inputs(&run.ip, {data = ins, next = edit_no_input, position = edit_position})
 	values, temp: virtual.Arena
 	if virtual.arena_init_growing(&values) != nil || virtual.arena_init_growing(&temp) != nil {
-		message.write_stderr("stury: error: out of memory\n")
-		os.exit(EXIT_INPUT)
+		out_of_memory()
 	}
 	context.allocator = jq.run_allocator(&values)
 	context.temp_allocator = jq.run_allocator(&temp)
@@ -594,8 +593,7 @@ edit_read :: proc(r: ^Edit_Reader) -> (doc: ^core.Document, more: bool) {
 	r.line += kernel.count_byte(r.ins.data[r.counted:rec.at], '\n')
 	r.counted = rec.at
 	line := r.line + 1
-	built, err := records.build(&r.it, rec, heap)
-	d, fault := core.refuse_key_clash(built, err)
+	d, fault := core.refuse_key_clash(records.build(&r.it, rec, heap))
 	if f, bad := fault.?; bad {
 		r.fault = f
 		return nil, false

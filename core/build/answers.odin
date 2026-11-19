@@ -90,10 +90,18 @@ answers_destroy :: proc(it: ^Answer_Iter) {
 	it.buffer, it.at = nil, 0
 }
 
-// Starts the scan of a fill whose `state` is `.Fresh`, with the stack `depth` levels deep. Under `.Refuse` the fill has
-// built the whole text with its options first, so a fault there comes before any answer. Returns false, with the read
-// ended, when the scan cannot start.
-answers_start :: proc(it: ^Answer_Iter, positional: bool, depth: int) -> bool {
+// Starts the scan of a fill whose `state` is `.Fresh`, with the stack `depth` levels deep. Under `.Refuse` it builds
+// the whole text with `build`, the format's `Services.build`, first, so a fault there comes before any answer. Returns
+// false, with the read ended, when the scan cannot start.
+answers_start :: proc(it: ^Answer_Iter, positional: bool, depth: int, build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error)) -> bool {
+	if it.read.dups == .Refuse {
+		built, e := build(it.src, it.as, true, it.allocator)
+		core.destroy(&built)
+		if e.kind != .None {
+			answers_fail(it, core.error_of(e))
+			return false
+		}
+	}
 	it.batch = max(it.batch, 1)
 	it.max_batch = max(it.max_batch, it.batch)
 	// A batch fits without growing, and only a burst past `max_batch` appends.

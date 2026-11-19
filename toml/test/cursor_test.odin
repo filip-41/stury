@@ -75,10 +75,7 @@ answers_agree_with_each_answer :: proc(t: ^testing.T) {
 		iter = proc(src: []u8, paths: []core.Path, _: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
 			it := toml.answers(src, .Toml_1_1, paths, {}, {stop_early = early})
 			it.max_batch = batch
-			for a in toml.next(&it) {
-				append(out, a)
-			}
-			return it.err
+			return testkit.drain_answers(&it, out)
 		},
 	}
 	testkit.expect_answers_agree(t, CURSOR_TEXTS[:], {".a", ".[]", ".arr[].x", "...x", ".arr[-1]", "..", "limit(2; ...x)", ".t.u.z", ".b[]"}, 1, run)

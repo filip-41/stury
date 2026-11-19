@@ -227,9 +227,9 @@ value_child_at :: proc(v: Value, k: int) -> (Value, bool) {
 }
 
 // The value of the member of object `v` named `name`, the first under `.First` and else the last. A markup node's is
-// its `markup_member`, under any `dups`, whose array is made in the temp allocator.
+// its `markup_member`, under any `dups`, whose array is made in `allocator`.
 @(private)
-value_member :: #force_inline proc(v: Value, name: string, dups := Duplicates.Last) -> (Value, bool) {
+value_member :: #force_inline proc(v: Value, name: string, dups := Duplicates.Last, allocator := context.temp_allocator) -> (Value, bool) {
 	#partial switch x in plain(v) {
 	case ^Object:
 		i := object_slot(x, name) if dups != .First else first_slot(x, name)
@@ -239,7 +239,7 @@ value_member :: #force_inline proc(v: Value, name: string, dups := Duplicates.La
 		return x.slot_vals[i], true
 	case Node_Ref:
 		if is_markup(x.doc) {
-			context.allocator = context.temp_allocator
+			context.allocator = allocator
 			return markup_member(x, name)
 		}
 		node, ok := doc_member(x.doc, x.node, name, dups)

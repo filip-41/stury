@@ -62,6 +62,7 @@ value_text :: proc(plan: ^typed.Plan, v: core.Value, allocator: runtime.Allocato
 
 // `v` of type `T` as a built value by `plan`, which a format built, in `allocator`: the value of the text `marshal`
 // writes, read back as `core.built_value` reads a node. A plan with no build, which its reads give, is `.Unsupported`.
+@(private)
 marshal_value :: proc(v: $T, plan: ^typed.Plan, allocator := context.allocator) -> (core.Value, core.Error) {
 	v := v
 	if plan == nil || typed.plan_text_build(plan) == nil {
@@ -145,7 +146,7 @@ value_plain :: proc(t: ^Tokens, v: core.Value, notes: bool) -> core.Typed_Error_
 		open_object(t) or_return
 		keys, vals := core.object_keys(x), core.object_vals(x)
 		if t.opts.sort_keys && len(keys) > 1 {
-			for m in sorted(keys, vals) {
+			for m in sorted(x) {
 				member(t, m.key, m.val, notes) or_return
 			}
 		} else {
@@ -224,19 +225,13 @@ put_node :: proc(t: ^Tokens, r: core.Node_Ref, v: core.Value, notes: bool) -> co
 		return close_noted(t, v, notes)
 	case .Object:
 		open_object(t) or_return
-		it := core.pairs(r)
 		if t.opts.sort_keys {
-			keys := make([dynamic]string, context.temp_allocator)
-			vals := make([dynamic]core.Value, context.temp_allocator)
-			for k, m in core.pair_next(&it) {
-				append(&keys, k)
-				append(&vals, m)
-			}
-			for m in sorted(keys[:], vals[:]) {
+			for m in sorted(r) {
 				member(t, m.key, m.val, notes) or_return
 			}
 			return close_noted(t, v, notes)
 		}
+		it := core.pairs(r)
 		for k, m in core.pair_next(&it) {
 			member(t, k, m, notes) or_return
 		}
@@ -251,13 +246,14 @@ Member :: struct {
 	val: core.Value,
 }
 
-// The members of an object in key order, a repeated key staying in its order.
+// The members of object `v` in key order, a repeated key staying in its order, in the temp allocator.
 @(private = "file")
-sorted :: proc(keys: []string, vals: []core.Value) -> []Member {
-	members := make([]Member, len(keys), context.temp_allocator)
-	for k, i in keys {
-		members[i] = {k, vals[i]}
+sorted :: proc(v: core.Value) -> []Member {
+	members := make([dynamic]Member, context.temp_allocator)
+	it := core.pairs(v)
+	for k, m in core.pair_next(&it) {
+		append(&members, Member{k, m})
 	}
-	slice.stable_sort_by(members, proc(a, b: Member) -> bool {return a.key < b.key})
-	return members
+	slice.stable_sort_by(members[:], proc(a, b: Member) -> bool {return a.key < b.key})
+	return members[:]
 }

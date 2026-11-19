@@ -14,15 +14,6 @@ same_error :: proc(a, b: core.Error) -> bool {
 	return fmt.tprint(a) == fmt.tprint(b)
 }
 
-// Takes every answer of `it` into `out`, and returns the error the read ended with.
-drain :: proc(it: ^json.Answer_Iter, out: ^[dynamic]core.Token_Answer) -> core.Error {
-	clear(out)
-	for a in json.next(it) {
-		append(out, a)
-	}
-	return it.err
-}
-
 // An iterator gives the answers `each_answer` gives and ends with its error, whatever its largest batch, over generated
 // texts of the three specs, broken ones among them, with paths that answer at once, at a container's close and all at
 // the text's end.
@@ -71,7 +62,7 @@ answers_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 		iter = proc(src: []u8, paths: []core.Path, variant: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
 			it := json.answers(src, S, paths, read = {dups = .Last if variant == 1 else .First, stop_early = early})
 			it.max_batch = batch
-			return drain(&it, out)
+			return testkit.drain_answers(&it, out)
 		},
 	}
 	return testkit.expect_answers_agree(t, texts[:], {".[]", ".[].a", ".a", "...a", "limit(2; ...b)", ".[1:]", ".[-1]", ".."}, 2, run)
@@ -86,7 +77,7 @@ answers_fault_after_three :: proc(t: ^testing.T) {
 	it := json.answers(src, .Json, path)
 	got: [dynamic]core.Token_Answer
 	defer delete(got)
-	err := drain(&it, &got)
+	err := testkit.drain_answers(&it, &got)
 	testing.expect_value(t, len(got), 3)
 	testing.expectf(t, err != nil && same_error(err, json.each_answer(src, .Json, path, nil, proc(_: rawptr, _: core.Token_Answer) -> bool {return true})),"%v", err)
 }
@@ -104,7 +95,7 @@ answers_refuse :: proc(t: ^testing.T) {
 
 	repeated := transmute([]u8)string(`[{"a": 1}, {"a": 2, "a": 3}]`)
 	it := json.answers(repeated, .Json, path, read = read)
-	err := drain(&it, &got)
+	err := testkit.drain_answers(&it, &got)
 	testing.expectf(t, len(got) == 0 && err != nil, "%d answers, %v", len(got), err)
 
 	deep: [dynamic]u8
@@ -120,7 +111,7 @@ answers_refuse :: proc(t: ^testing.T) {
 	want_err := json.each_answer(deep[:], .Json, path, &want, testkit.collect_answer, opts, read)
 	testing.expectf(t, want_err == nil && len(want) > 1500, "each_answer: %d answers, %v", len(want), want_err)
 	it = json.answers(deep[:], .Json, path, opts, read)
-	err = drain(&it, &got)
+	err = testkit.drain_answers(&it, &got)
 	testing.expectf(t, slice.equal(got[:], want[:]) && err == nil, "%d answers, want %d: %v", len(got), len(want), err)
 }
 

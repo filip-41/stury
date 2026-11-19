@@ -46,7 +46,7 @@ elements_of :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads, alloc
 		return nil
 	}
 	planned: core.Error
-	e.plan, planned = typed.plan_of(&view, as, reads, {checking = true}, allocator)
+	e.plan, planned = typed.plan_of(&view, as, reads, allocator)
 	if planned != nil || e.plan.check == nil {
 		if planned == nil {
 			typed.plan_destroy(&e.plan)
@@ -65,7 +65,7 @@ elements_of :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads, alloc
 		e.arrays[n.array].items = rules.NONE
 		counted := d^
 		counted.arrays = e.arrays
-		counts, counted_err := typed.plan_of(&counted, as, reads, {checking = true}, allocator)
+		counts, counted_err := typed.plan_of(&counted, as, reads, allocator)
 		if counted_err != nil {
 			elements_destroy(e, allocator)
 			return nil

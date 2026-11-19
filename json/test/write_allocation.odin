@@ -47,29 +47,15 @@ sweep_value :: proc() -> (v: Sweep_Value, inner: Sweep_Inner, other: Sweep_Other
 	return
 }
 
-@(private)
-Marshal_Try :: struct {
-	value: any,
-	opts:  core.Write_Options,
-}
-
-@(private)
-marshal_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
-	m := (^Marshal_Try)(data)
-	text, err := json.marshal(m.value, write = m.opts, allocator = allocator)
-	return text, testkit.typed_kind(err)
-}
-
 @(test)
 marshal_under_failing_allocators :: proc(t: ^testing.T) {
 	v, inner, other := sweep_value()
 	v.first, v.second, v.arm = inner, other, inner
-	for opts in ([?]core.Write_Options{{}, {sort_keys = true}, {pretty = true, sort_keys = true, ascii = true}}) {
-		try := Marshal_Try{v, opts}
-		want, err := json.marshal(v, write = opts, allocator = context.temp_allocator)
-		testkit.expect_nil(t, err)
-		testkit.sweep_write(t, marshal_try, &try, string(want))
-	}
+	testkit.sweep_marshal(t, proc(value: any, write: core.Write_Options, allocator: runtime.Allocator) -> ([]u8, core.Error) {
+		return json.marshal(value, write = write, allocator = allocator)
+	},
+		v,
+		{{}, {sort_keys = true}, {pretty = true, sort_keys = true, ascii = true}})
 }
 
 @(private)

@@ -212,7 +212,7 @@ judging_of :: proc(reg: ^Registry, whole: ^typed.Plan, reads: ^typed.Format_Read
 		append(&j.judged, x) or_return
 		x.type, x.unique = k.type, k.unique
 		fragment(j, x, allocator) or_return
-		x.plan = typed.plan_of(&x.d, whole.as, reads, {checking = true}, allocator) or_return
+		x.plan = typed.plan_of(&x.d, whole.as, reads, allocator) or_return
 	}
 	for &m in whole.meta {
 		m.judged = m.type != nil && judged_of(j, m.type, m.rule_set > 0 && whole.rule_sets[m.rule_set - 1].unique) != nil

@@ -1,6 +1,7 @@
 #+private
 package toml
 
+import spell "../core/spell"
 import core "../core"
 
 // The number kinds in bits 0 to 3 of a number token's `spelling`: a decimal that is also a JSON number, a decimal
@@ -36,17 +37,7 @@ run_end :: #force_inline proc "contextless" (src: []u8, i: int) -> int {
 }
 
 digit_in_base :: #force_inline proc "contextless" (b: u8, base: u64) -> (v: u64, ok: bool) {
-	d: u64
-	switch {
-	case b >= '0' && b <= '9':
-		d = u64(b - '0')
-	case b >= 'a' && b <= 'f':
-		d = u64(b - 'a') + 10
-	case b >= 'A' && b <= 'F':
-		d = u64(b - 'A') + 10
-	case:
-		return 0, false
-	}
+	d := u64(spell.HEX_NIBBLE[b])
 	return d, d < base
 }
 

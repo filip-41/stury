@@ -11,7 +11,6 @@ package cbor
 import "base:intrinsics"
 import "base:runtime"
 import "core:io"
-import "core:slice"
 import spell "../core/spell"
 import kernel "../core/kernel"
 import core "../core"
@@ -424,7 +423,7 @@ DEFAULT_NAN :: "\xf9\x7e\x00"
 // A member of a map a deterministic write sorts: the bytes its key is written with, and its nodes.
 @(private)
 Pair :: struct {
-	key:   []u8,
+	text:  string, // its encoded key, which the members sort by
 	k, v:  core.Node_Index,
 	end:   int, // where its key ends in the scratch
 }
@@ -468,21 +467,15 @@ put_map :: proc(e: ^Emit, i: core.Node_Index, depth: int) -> core.Typed_Error_Ki
 	}
 	at := 0
 	for &m in members {
-		m.key = scratch.buf[at:m.end]
+		m.text = string(scratch.buf[at:m.end])
 		at = m.end
 	}
-	if e.enc == .Length_First {
-		slice.sort_by(members[:], proc(a, b: Pair) -> bool {
-			return len(a.key) < len(b.key) || len(a.key) == len(b.key) && string(a.key) < string(b.key)
-		})
-	} else {
-		slice.sort_by(members[:], proc(a, b: Pair) -> bool {return string(a.key) < string(b.key)})
-	}
+	write.sort_encoded(members[:], e.enc == .Length_First)
 	for m, j in members {
-		if j > 0 && string(m.key) == string(members[j - 1].key) {
+		if j > 0 && m.text == members[j - 1].text {
 			return .Unwritable
 		}
-		write.put_text(&e.out, string(m.key))
+		write.put_text(&e.out, m.text)
 		put_node(e, m.v, depth + 1) or_return
 	}
 	return e.out.err

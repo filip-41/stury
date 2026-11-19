@@ -296,8 +296,7 @@ piece_record :: proc(r: ^Run, it: ^records.Reader, rec: records.Record, part: ^c
 	if cells && r.route.columns != nil {
 		answer_columns(r, it, rec)
 	} else if cells || !r.route.scanning || !answer_record(r, rec, part, read, scanned, plain) {
-		built, err := records.build(it, rec, context.allocator)
-		doc, fault := core.refuse_key_clash(built, err)
+		doc, fault := core.refuse_key_clash(records.build(it, rec, context.allocator))
 		if fault != nil {
 			return false
 		}

@@ -57,7 +57,7 @@ run :: proc(src: []u8) -> json.Error {
 | `core/records` | NDJSON, RFC 7464 and CSV-style text as a sequence of records, reached through each format package |
 | `core/typed` | plans and the options of a typed read |
 | `core/model` | models: rules on an Odin type, with load, patch, dump and problem documents |
-| `core/schema` | JSON Schema: check, infer, sample, compare, convert and Odin types, with the checks reached from a format package |
+| `core/schema` | JSON Schema: check, infer, sample, compare and Odin types, with the checks reached from a format package |
 | `core/rules` | the description of the values a node allows, which an Odin type, a model, a JSON Schema and inference give, and the string formats |
 | `core/diff` | the changes between two values of any format |
 | `core/css` | CSS selectors over XML and HTML documents, forwarded by `xml` and `html` |
@@ -749,8 +749,8 @@ for a in found.answers {
 
 ### Select by CSS
 
-`compile_selector` compiles a CSS selector list once, and `select` gives the value node of each element of a
-document it matches, in document order, which a caller reads, paths or edits as any node. Both are `core/css`'s,
+`compile_selector` compiles a CSS selector list once, and `select_value` gives the value of each element it
+matches below a value, in document order, which a caller reads, paths or edits as any value. Both are `core/css`'s,
 forwarded by `xml` and `html`. A selector out of scope or malformed is a `Fault` at the byte that breaks it.
 
 ```odin
@@ -758,16 +758,16 @@ sel := html.compile_selector("ul.todo > li:not(.done)") or_return
 defer html.destroy(&sel)
 doc := html.build(transmute([]u8)string(`<ul class=todo><li>pens<li class=done>ink<li>nibs</ul>`), .Document) or_return
 defer html.destroy(&doc)
-found := html.select(&doc, &sel) or_return
+found := html.select_value(html.Node_Ref{&doc, html.ROOT}, &sel, false, false) or_return
 defer delete(found)
 buf: [32]u8
-for node in found {
-	text, _ := html.text(&doc, node, buf[:])
+for m in found {
+	text, _ := html.text(m.value, buf[:])
 	fmt.println(text) // pens, then nibs
 }
 ```
 
-`select(&doc, &sel, from)` matches the descendants of the element whose value is `from`, as `querySelectorAll` does. [markup.md](markup.md#selectors) holds what a selector may hold and its costs.
+A `Node_Ref` of an element's value matches its descendants, as `querySelectorAll` does, and `paths` gives each match's path from it. [markup.md](markup.md#selectors) holds what a selector may hold and its costs.
 
 ## CBOR
 

@@ -8,6 +8,7 @@ import "../spell"
 import "../regex"
 import core "../"
 import "../rules"
+import "../typed"
 
 // Writes the Odin source of package `package_name`: types a model compiled from them reads `d`'s values with, and a
 // procedure `register` that adds the rules no tag holds to a `model.Registry`. The root's type comes first, else an
@@ -187,9 +188,7 @@ refuse :: proc(s: ^Source, keyword: string) {
 		return
 	}
 	s.refused = {kind = .Unsupported, want = {text = keyword}}
-	from := max(0, len(s.path) - core.MAX_ERROR_STEPS)
-	s.refused.truncated = from > 0
-	s.refused.n_steps = u8(copy(s.refused.steps[:], s.path[from:]))
+	typed.path_keep(&s.refused, s.path[:])
 }
 
 // The Odin type of node `at`'s values, `hint` naming a declaration it needs. Where `held`, no member's tag holds its

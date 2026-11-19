@@ -123,17 +123,6 @@ writer_take :: proc(wr: ^Writer) -> []u8 {
 	return text
 }
 
-// Writes `text` as one record, framed. It is the caller's text of one value or row and is written as it is, not judged.
-write_text :: proc(wr: ^Writer, text: []u8) -> core.Typed_Error_Kind {
-	t := &wr.tokens
-	if wr.final {
-		return wr.err.kind
-	}
-	begin(wr)
-	cw.put_text(t.out, string(text))
-	return end(wr, t.spell.line(t) if t.spell.line != nil else .None, false)
-}
-
 // Writes node `node` of `doc` as the rows of a delimited text's table, see `write_rows`. A document of a delimited text
 // with a header, or a markup document, is written whole by `core.write` in the writer's layout. A writer of another
 // format is `.Unsupported`. Returns the kind of the first refusal.

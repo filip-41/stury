@@ -146,8 +146,7 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 	}
 	d, derr := schema.inferred(&inf)
 	if derr != nil {
-		message.write_stderr("stury: error: out of memory\n")
-		os.exit(EXIT_INPUT)
+		out_of_memory()
 	}
 	as := written_as(&run.opts)
 	text, err := schema.write(&d, as, output_layout(run).opts)

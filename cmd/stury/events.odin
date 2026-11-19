@@ -161,13 +161,13 @@ member_event :: proc(e: ^Events, leaf: core.Value, closing: bool) -> core.Value 
 	}
 	switch {
 	case closing:
-		return event_of(path)
+		return jq.event_of(path)
 	case jq.kind(leaf) == .Array:
-		return event_of(path, core.new_array())
+		return jq.event_of(path, core.new_array())
 	case jq.kind(leaf) == .Object:
-		return event_of(path, core.new_object())
+		return jq.event_of(path, core.new_object())
 	}
-	return event_of(path, event_clone(jq.scalar(leaf)))
+	return jq.event_of(path, jq.event_clone(jq.scalar(leaf)))
 }
 
 // The byte of the text whose reading makes the event returned last, as jq's streaming parser has it: a container's
@@ -220,40 +220,13 @@ event :: proc(e: ^Events, leaf: core.Node_Index) -> core.Value {
 		}
 	}
 	if leaf == core.NO_NODE {
-		return event_of(path)
+		return jq.event_of(path)
 	}
 	#partial switch e.doc.nodes[leaf].kind {
 	case .Array:
-		return event_of(path, core.new_array())
+		return jq.event_of(path, core.new_array())
 	case .Object:
-		return event_of(path, core.new_object())
+		return jq.event_of(path, core.new_object())
 	}
-	return event_of(path, event_clone(jq.scalar(core.Node_Ref{&e.doc, leaf})))
-}
-
-// A `--stream` event: `[path, leaf]`, or `[path]` with no leaf, after a container's last member.
-event_of :: proc(path: ^core.Array, leaf: ..core.Value) -> core.Value {
-	ev := core.new_array(2)
-	append(&ev.items, path)
-	append(&ev.items, ..leaf)
-	return ev
-}
-
-// An event or a part of one, made anew in the context allocator. An event's container leaf is empty.
-event_clone :: proc(v: core.Value) -> core.Value {
-	#partial switch x in v {
-	case core.Number_View:
-		return core.view_copy(x)
-	case string:
-		return strings.clone(x)
-	case ^core.Array:
-		a := core.new_array(len(x.items))
-		for m in x.items {
-			append(&a.items, event_clone(m))
-		}
-		return a
-	case ^core.Object:
-		return core.new_object()
-	}
-	return v
+	return jq.event_of(path, jq.event_clone(jq.scalar(core.Node_Ref{&e.doc, leaf})))
 }

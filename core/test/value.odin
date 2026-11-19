@@ -124,8 +124,11 @@ typed_bridges_round_trip :: proc(t: ^testing.T) {
 	plan, perr := json.plan_make(S, reads = json.reads(.Json))
 	testkit.expect_nil(t, perr)
 	in_value := S{n = 7, f = 2.5, s = "x", big = 1 << 60 + 1, xs = {1, -2}}
-	v, merr := write.marshal_value(in_value, &plan)
+	text, merr := write.marshal(in_value, &plan)
 	testkit.expect_nil(t, merr)
+	doc, berr := json.build(text, .Json)
+	testkit.expect_nil(t, berr)
+	v := core.built_value({&doc, core.ROOT})
 	n, _ := core.member(v, "n")
 	big, _ := core.member(v, "big")
 	_, is_double := n.(f64)

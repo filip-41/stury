@@ -1,8 +1,8 @@
+#+feature dynamic-literals
 package model_tests
 
 import "base:runtime"
-import "core:fmt"
-import "core:strings"
+import "core:mem"
 import "core:testing"
 import core "../.."
 import rules "../../rules"
@@ -11,19 +11,12 @@ import json "../../../json"
 import model ".."
 import testkit "../../../testkit"
 
-// A type's description, `model.schema`, and the plan built from it, `plan_of`, agree on the plan's shape.
+// A type's description, bound as a check, judges the texts the type writes and reads.
 
 @(private = "file")
 Zoo_Inner :: struct {
 	n: i32,
 	s: string,
-}
-
-@(private = "file")
-Zoo_Tree :: struct {
-	name: string,
-	kids: []Zoo_Tree,
-	up:   ^Zoo_Tree,
 }
 
 @(private = "file")
@@ -37,54 +30,38 @@ Zoo_Color :: enum u8 {
 
 @(private = "file")
 Zoo :: struct {
-	i_8:       i8,
-	i_16:      i16,
-	i_32:      i32,
-	i_64:      i64,
-	u_8:       u8,
-	u_16:      u16,
-	u_32:      u32,
-	u_64:      u64,
-	f_32:      f32,
-	f_64:      f64,
-	yes:       bool,
-	wide:      b32,
-	s:         string,
-	c:         cstring,
-	req:       i32 `json:"req,required"`,
-	inner:     Zoo_Inner,
-	again:     Zoo_Inner,
-	may_inner: Maybe(Zoo_Inner),
-	ptr:       ^Zoo_Inner,
-	may_ptr:   Maybe(^Zoo_Inner),
-	tree:      Zoo_Tree,
-	list:      []i32,
-	may_list:  Maybe([]i32),
-	dyn:       [dynamic]string,
-	fixed:     [3]i32,
-	capped:    [dynamic; 4]i32,
-	maybes:    []Maybe(string),
-	by_name:   map[string]Zoo_Inner,
-	by_int:    map[i32]bool,
-	classed:   union {
+	i_8:      i8,
+	u_64:     u64,
+	f_32:     f32,
+	yes:      bool,
+	s:        string,
+	c:        cstring,
+	req:      i32 `json:"req,required"`,
+	inner:    Zoo_Inner,
+	may:      Maybe(Zoo_Inner),
+	ptr:      ^Zoo_Inner,
+	list:     []i32,
+	dyn:      [dynamic]string,
+	fixed:    [3]i32,
+	maybes:   []Maybe(string),
+	by_name:  map[string]Zoo_Inner,
+	by_int:   map[i32]bool,
+	classed:  union {
 		i64,
 		string,
 		[]i32,
 	},
-	no_nil:    union #no_nil {
+	no_nil:   union #no_nil {
 		bool,
 		f64,
 	},
-	anything:  any,
-	raw:       typed.Raw,
-	color:     Zoo_Color,
-	bits:      bit_set[0 ..< 8],
-	colors:    bit_set[Zoo_Color],
-	num:       core.Number,
-	num_text:  core.Number_Text,
-	scalar:    typed.Scalar,
-	hooked:    Zoo_Hooked,
-	captured:  struct {
+	raw:      typed.Raw,
+	color:    Zoo_Color,
+	colors:   bit_set[Zoo_Color],
+	num_text: core.Number_Text,
+	scalar:   typed.Scalar,
+	hooked:   Zoo_Hooked,
+	captured: struct {
 		a:    i32,
 		rest: map[string]typed.Raw `json:",unknown"`,
 	},
@@ -95,107 +72,98 @@ read_zoo_hooked :: proc(v: typed.Hook_Value, dest: rawptr, allocator: runtime.Al
 	return nil
 }
 
-// A plan's shape: its root record, then each struct and union block in the order a walk from the root meets it. A
-// record is its class of value, `?` when it also takes null, and its block: `#k` names a struct or union block, a list
-// or map shows its element in line. A `Maybe` or pointer folds into its element. A type plan's blocks of one type are
-// one block, which folds those that differ only in rule set.
+// Whether `src` passes the check `plan` of a description.
 @(private = "file")
-Projection :: struct {
-	plan:     ^typed.Plan,
-	ordinals: map[Projected]int,
-	blocks:   [dynamic]string,
+passes :: proc(plan: ^typed.Plan, src: string) -> bool {
+	target: u8
+	return typed.check_text(transmute([]u8)src, &target, nil, plan, {}) == nil
 }
 
-@(private = "file")
-Projected :: struct {
-	type:  typeid,
-	block: i32,
+@(test)
+a_types_description_checks_what_the_type_writes_and_reads :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	hooks := []typed.Type_Hook{{type = Zoo_Hooked, read = read_zoo_hooked}}
+	read_plan, planned := json.plan_make(Zoo, plan = {hooks = hooks}, allocator = context.temp_allocator)
+	testkit.expect_nil(t, planned)
+	d, described := testkit.description_of(&read_plan, context.temp_allocator)
+	testkit.expect_nil(t, described)
+	as := json.checks(.Json)
+	check, built := typed.plan_of(&d, as.layout, as.reads, context.temp_allocator)
+	testkit.expect_nil(t, built)
+
+	inner := Zoo_Inner{1, "in"}
+	filled := Zoo {
+		i_8      = -3,
+		u_64     = 1 << 40,
+		f_32     = 1.5,
+		yes      = true,
+		s        = "text",
+		c        = "cs",
+		req      = 7,
+		inner    = inner,
+		may      = inner,
+		ptr      = &inner,
+		list     = []i32{1, 2},
+		dyn      = {"a", "b"},
+		fixed    = {1, 2, 3},
+		maybes   = []Maybe(string){"x", nil},
+		by_name  = {"k" = inner},
+		by_int   = {4 = true},
+		classed  = []i32{5},
+		no_nil   = 2.5,
+		raw      = typed.Raw("[1,{\"a\":null}]"),
+		color    = .Green,
+		colors   = {.Red},
+		num_text = {"12", 12},
+		scalar   = typed.Scalar(true),
+		hooked   = 9,
+		captured = {a = 1, rest = {"z" = typed.Raw("2")}},
+	}
+	named := filled
+	named.classed = "named"
+	for value, i in ([]Zoo{{}, filled, named}) {
+		value := value
+		out, wrote := json.marshal(value, allocator = context.temp_allocator)
+		testkit.expect_nil(t, wrote)
+		testing.expectf(t, passes(&check, string(out)), "value %d: %s", i, out)
+	}
+
+	wrong := [?]string {
+		`[]`,
+		`{"i_8":"x"}`,
+		`{"list":{}}`,
+		`{"classed":true}`,
+		`{"color":"Blue"}`,
+		`{"req":null}`,
+		`{"by_int":{"1":"x"}}`,
+		`{"inner":{"n":"x"}}`,
+		`{"no_nil":null}`,
+	}
+	for text in wrong {
+		zoo: Zoo
+		refused := json.unmarshal(transmute([]u8)text, .Json, &zoo, allocator = context.temp_allocator) != nil
+		testing.expectf(t, refused, "the type reads %s", text)
+		testing.expectf(t, !passes(&check, text), "the description passes %s", text)
+	}
 }
 
-@(private = "file")
-project :: proc(plan: ^typed.Plan) -> string {
-	p := Projection{plan = plan}
-	p.ordinals.allocator = context.temp_allocator
-	p.blocks.allocator = context.temp_allocator
-	root := project_record(&p, 0)
-	return fmt.tprint(root, p.blocks[:])
-}
-
-// The class of value a record's kind reads, and whether the kind reads null itself.
-@(private = "file")
-class :: proc(plan: ^typed.Plan, f: typed.Field, m: typed.Meta) -> (string, bool) {
-	#partial switch f.kind {
-	case .String:
-		return "str", false
-	case .Cstring:
-		return "str", true
-	case .Bool, .Bool_Wide:
-		return "bool", false
-	case .I8 ..= .U64:
-		return "int", false
-	case .F32, .F64, .Number:
-		return "num", false
-	case .Number_Text:
-		return "num", true
-	case .Scalar:
-		return "scalar", true
-	case .Enum, .Bit_Elem:
-		return "str" if m.enum_info != nil && !typed.enum_by_number(plan, m.enum_info) else "int", false
-	case .Struct, .Required, .Map:
-		return "obj", false
-	case .Slice, .Dynamic, .Array, .Fixed_List, .Bit_Set:
-		return "arr", false
-	case .Union:
-		return "", !m.no_nil
-	case .Any, .Raw, .Hook:
-		return "any", true
-	}
-	return fmt.tprint(f.kind), false
-}
-
-@(private = "file")
-project_record :: proc(p: ^Projection, at: i32) -> string {
-	at, nullable := at, false
-	for p.plan.fields[at].kind == .Maybe || p.plan.fields[at].kind == .Ptr {
-		at, nullable = p.plan.meta[at].block, true
-	}
-	f, m := p.plan.fields[at], p.plan.meta[at]
-	text, null := class(p.plan, f, m)
-	shape := ""
-	#partial switch f.kind {
-	case .Struct, .Required:
-		shape = project_block(p, m, false)
-	case .Union:
-		shape = project_block(p, m, true)
-	case .Slice, .Dynamic, .Array, .Fixed_List, .Bit_Set, .Map:
-		shape = fmt.tprintf("<%s>", project_record(p, m.block))
-	}
-	return fmt.tprintf("%s%s%s", text, "?" if nullable || null else "", shape)
-}
-
-@(private = "file")
-project_block :: proc(p: ^Projection, m: typed.Meta, union_block: bool) -> string {
-	key := Projected{m.type, -1} if p.plan.type != nil else Projected{nil, m.block}
-	if k, ok := p.ordinals[key]; ok {
-		return fmt.tprintf("#%d", k)
-	}
-	k := len(p.blocks)
-	p.ordinals[key] = k
-	append(&p.blocks, "")
-	b := strings.builder_make(context.temp_allocator)
-	if union_block {
-		for arm in m.arms {
-			fmt.sbprintf(&b, "| %s ", project_record(p, arm.fields))
-		}
-	} else {
-		for j in 0 ..< m.members {
-			at := m.block + j
-			fmt.sbprintf(&b, "%s: %s, ", p.plan.meta[at].name, project_record(p, at))
-		}
-		fmt.sbprintf(&b, "required %v", p.plan.meta[m.block + m.members].required)
-	}
-	p.blocks[k] = fmt.tprintf("#%d %s", k, strings.to_string(b))
-	return fmt.tprintf("#%d", k)
+@(test)
+describe_and_plan_of_free_what_they_allocate :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	a := mem.tracking_allocator(&track)
+	plan, _ := json.plan_make(Zoo, plan = {hooks = {{type = Zoo_Hooked, read = read_zoo_hooked}}}, allocator = a)
+	d, described := testkit.description_of(&plan, a)
+	testkit.expect_nil(t, described)
+	as := json.checks(.Json)
+	check, built := typed.plan_of(&d, as.layout, as.reads, a)
+	testkit.expect_nil(t, built)
+	typed.plan_destroy(&check)
+	rules.description_destroy(&d)
+	typed.plan_destroy(&plan)
+	testing.expectf(t, len(track.allocation_map) == 0, "%d allocations live", len(track.allocation_map))
 }
 
 // Why `T`'s model does not compile.
@@ -213,74 +181,6 @@ Ruled :: struct {
 	small: i8,
 	bits:  bit_set[0 ..< 8],
 	keyed: map[i8]bool,
-}
-
-@(private = "file")
-Ruled_Union :: struct {
-	a: union {
-		i64,
-		string,
-	} `model:">=1"`,
-	b: union {
-		i64,
-		string,
-	},
-}
-
-@(test)
-a_plan_of_a_types_description_has_the_types_plan_shape :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	hooks := []typed.Type_Hook{{type = Zoo_Hooked, read = read_zoo_hooked}}
-	cases := [?]struct {
-		type:  typeid,
-		opts:  typed.Plan_Options,
-		model: Maybe(typed.Plan),
-	} {
-		{Zoo, {hooks = hooks}, nil},
-		{Zoo, {enums = .Int, hooks = hooks}, nil},
-		{Zoo_Tree, {}, nil},
-		{[]Maybe(Zoo_Inner), {}, nil},
-		{map[string]any, {}, nil},
-		{Ruled, {}, testkit.ruled_plan(Ruled)},
-		{Ruled_Union, {}, testkit.ruled_plan(Ruled_Union)},
-	}
-	for c in cases {
-		plan, ruled := c.model.?
-		if !ruled {
-			planned: core.Error
-			plan, planned = json.plan_make(c.type, plan = c.opts, allocator = context.temp_allocator)
-			testkit.expect_nil(t, planned)
-		}
-		d, described := testkit.description_of(&plan, context.temp_allocator)
-		testkit.expect_nil(t, described)
-		again, built := json.plan_of(&d, .Json, c.opts, allocator = context.temp_allocator)
-		testkit.expect_nil(t, built)
-		want, got := project(&plan), project(&again)
-		testing.expectf(t, want == got, "%v:\nplan        %s\ndescription %s", c.type, want, got)
-	}
-}
-
-@(private = "file")
-Shown :: struct {
-	n: Maybe(i32),
-	t: core.Number_Text,
-	e: Zoo_Color,
-	u: union {
-		bool,
-		string,
-	},
-	l: []Shown,
-}
-
-@(test)
-a_type_and_its_description_read_the_classes_the_type_reads :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	plan, _ := json.plan_make(Shown, allocator = context.temp_allocator)
-	d, _ := testkit.description_of(&plan, context.temp_allocator)
-	again, _ := json.plan_of(&d, allocator = context.temp_allocator)
-	want := "obj#0 [\"#0 n: ?#1, t: num?, e: str, u: ?#2, l: arr<obj#0>, required []\", \"#1 | int \", \"#2 | bool | str \"]"
-	testing.expect_value(t, project(&plan), want)
-	testing.expect_value(t, project(&again), want)
 }
 
 @(test)
@@ -336,26 +236,6 @@ a_model_tag_it_cannot_hold_refuses_the_plan :: proc(t: ^testing.T) {
 	for err, i in refusals {
 		testing.expectf(t, testkit.typed_kind(err) == .Bad_Tag, "%d: %v", i, err)
 	}
-}
-
-@(test)
-describe_and_plan_of_free_what_they_allocate :: proc(t: ^testing.T) {
-	plan, _ := json.plan_make(Zoo, plan = {hooks = {{type = Zoo_Hooked, read = read_zoo_hooked}}})
-	defer typed.plan_destroy(&plan)
-	d, _ := testkit.description_of(&plan)
-	defer rules.description_destroy(&d)
-	again, built := json.plan_of(&d)
-	testkit.expect_nil(t, built)
-	typed.plan_destroy(&again)
-	_, empty := json.plan_of(&rules.Description{})
-	testkit.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
-	arms := [2]rules.Node_Index{1, 2}
-	objects := rules.Description{}
-	defer delete(objects.nodes)
-	append(&objects.nodes, rules.Node{kinds = rules.EVERY_KIND, any_of = arms[:], array = -1, object = -1})
-	append(&objects.nodes, rules.Node{kinds = {.Object}, array = -1, object = -1}, rules.Node{kinds = {.Object}, array = -1, object = -1})
-	_, ambiguous := json.plan_of(&objects)
-	testkit.expect_kind(t, ambiguous, core.Typed_Error_Kind.Ambiguous_Union)
 }
 
 @(private = "file")

@@ -155,8 +155,7 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 		}
 		// A record's document lives until the next record is read.
 		free_all(context.temp_allocator)
-		built, err := records.build(&it, rec, context.temp_allocator)
-		doc, fault := core.refuse_key_clash(built, err)
+		doc, fault := core.refuse_key_clash(records.build(&it, rec, context.temp_allocator))
 		if f, bad := fault.?; bad {
 			cells_cut(run, ins, cut)
 			tell_fault(ins, f)

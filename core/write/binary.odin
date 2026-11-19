@@ -462,12 +462,15 @@ sort_written :: proc(w: ^Walker, first: int) {
 	for &e in entries {
 		e.text = string(w.keys.buf[e.at:][:e.size])
 	}
-	if w.key_order == .Length_First {
-		slice.sort_by(entries, proc(a, b: Entry) -> bool {
-			return len(a.text) < len(b.text) || len(a.text) == len(b.text) && a.text < b.text
-		})
+	sort_encoded(entries, w.key_order == .Length_First)
+}
+
+// Sorts `xs` by their encoded keys, `text`, the length first under `length_first`.
+sort_encoded :: proc(xs: []$T, length_first: bool) {
+	if length_first {
+		slice.sort_by(xs, proc(a, b: T) -> bool {return len(a.text) < len(b.text) || len(a.text) == len(b.text) && a.text < b.text})
 	} else {
-		slice.sort_by(entries, proc(a, b: Entry) -> bool {return a.text < b.text})
+		slice.sort_by(xs, proc(a, b: T) -> bool {return a.text < b.text})
 	}
 }
 

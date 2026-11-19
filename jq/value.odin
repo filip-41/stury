@@ -323,58 +323,18 @@ index_shared :: proc(v: core_pkg.Value) {
 // Element `i` of an array, or null past its end.
 @(private)
 array_at :: proc(v: core_pkg.Value, i: int) -> core_pkg.Value {
-	switch x in v {
-	case ^core_pkg.Array:
-		return x.items[i] if i >= 0 && i < len(x.items) else nil
-	case core_pkg.Node_Ref:
-		// Only an array `index_shared` would index, so a shared document is never written here.
-		if i >= INDEX_MEMBERS_FROM && i < core_pkg.length(x.doc, x.node) {
-			core_pkg.index_children(x.doc, x.node)
-		}
-		if node, ok := core_pkg.child_at(x.doc, x.node, i); ok {
-			return core_pkg.Node_Ref{x.doc, node}
-		}
-		return nil
-	case core_pkg.Trail:
-		if i < 0 || i >= x.depth {
-			return nil
-		}
-		s := (^core_pkg.Trail_Step)(x)
-		for s.depth > i + 1 {
-			s = s.parent
-		}
-		return s.key
-	case ^core_pkg.Commented:
-		return array_at(x.v, i)
-	case nil, bool, f64, core_pkg.Number_View, string, ^core_pkg.Object:
+	// Only an array `index_shared` would index, so a shared document is never written here.
+	if x, is_ref := core_pkg.plain(v).(core_pkg.Node_Ref); is_ref && i >= INDEX_MEMBERS_FROM && i < core_pkg.length(x.doc, x.node) {
+		core_pkg.index_children(x.doc, x.node)
 	}
-	return nil
+	m, _ := core_pkg.child_at(v, i)
+	return m
 }
 
 // Member `k` of an object, and whether it is there.
 @(private)
 object_get :: proc(v: core_pkg.Value, k: string) -> (core_pkg.Value, bool) {
-	switch x in v {
-	case ^core_pkg.Object:
-		i := core_pkg.object_slot(x, k)
-		if i < 0 {
-			return nil, false
-		}
-		return x.slot_vals[i], true
-	case core_pkg.Node_Ref:
-		if core_pkg.is_markup(x.doc) {
-			return core_pkg.markup_member(x, k)
-		}
-		node, ok := core_pkg.member(x.doc, x.node, k)
-		if !ok {
-			return nil, false
-		}
-		return core_pkg.Node_Ref{x.doc, node}, true
-	case ^core_pkg.Commented:
-		return object_get(x.v, k)
-	case nil, bool, f64, core_pkg.Number_View, string, ^core_pkg.Array, core_pkg.Trail:
-	}
-	return nil, false
+	return core_pkg.member(v, k, allocator = context.allocator)
 }
 
 // Elements `lo` to `hi` of an array as a new array, for `lo <= hi <= length_of(v)`.

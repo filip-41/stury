@@ -172,15 +172,7 @@ answers_fill :: proc(it: ^engine.Answer_Iter) {
 	src := it.src
 	rules := handle_rules(it.as)
 	if it.state == .Fresh {
-		if it.read.dups == .Refuse {
-			built, e := build_item(src, it.as, true, it.allocator)
-			core.destroy(&built)
-			if e.kind != .None {
-				engine.answers_fail(it, core.error_of(e))
-				return
-			}
-		}
-		if !engine.answers_start(it, false, min(core.reserve_depth(rules.max_depth, len(src)), core.MAX_DEPTH)) {
+		if !engine.answers_start(it, false, min(core.reserve_depth(rules.max_depth, len(src)), core.MAX_DEPTH), build_item) {
 			return
 		}
 		cursor^ = {src = raw_data(src), n = u64(len(src))}

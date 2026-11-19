@@ -347,7 +347,7 @@ def names_files():
 # The entries every format declares. Each takes the same parameters in the same order as the others' once the format's
 # own package name is read as `F`, with the defaults left out, a format choosing its own (a framing, say).
 ENTRIES = (
-    "validate build find scan each_answer answers set edit_list_init write marshal unmarshal check plan_make plan_of reads "
+    "validate build find scan each_answer answers set edit_list_init write marshal unmarshal check plan_make reads "
     "checks bind_schema load_schema record_docs records_open records_open_stream records_validate records_each writer_init "
     "tokens_init"
 ).split()

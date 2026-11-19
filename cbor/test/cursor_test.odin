@@ -85,10 +85,7 @@ answers_agree_with_each_answer :: proc(t: ^testing.T) {
 		iter = proc(src: []u8, paths: []core.Path, _: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
 			it := cbor.answers(src, .Cbor, paths, {}, {stop_early = early})
 			it.max_batch = batch
-			for a in cbor.next(&it) {
-				append(out, a)
-			}
-			return it.err
+			return testkit.drain_answers(&it, out)
 		},
 	}
 	texts: [len(CURSOR_TEXTS)]string

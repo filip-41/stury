@@ -119,14 +119,6 @@ answers_fill :: proc "contextless" ($S: Spec) -> proc(it: ^engine.Answer_Iter) {
 		hi: u64
 		fault: Maybe(core.Fault)
 		if it.state == .Fresh {
-			if it.read.dups == .Refuse {
-				built, e := build(src, S, opts, .Refuse, it.allocator)
-				core.destroy(&built)
-				if e != nil {
-					engine.answers_fail(it, e)
-					return
-				}
-			}
 			if _, bad := option_fault(S, opts).?; !bad && !opts.no_header {
 				keys, failed := make([]core.Token, header_cells(src, int(core.text_start(src, 0)), S, opts), it.allocator)
 				if failed != nil {
@@ -136,7 +128,7 @@ answers_fill :: proc "contextless" ($S: Spec) -> proc(it: ^engine.Answer_Iter) {
 				it.held = keys
 			}
 			// A record is a container inside the document's array, so a dsv text nests at most two containers.
-			if !engine.answers_start(it, true, 8) {
+			if !engine.answers_start(it, true, 8, edit_of(S).build) {
 				return
 			}
 			cursor^ = {keys = it.held}

@@ -136,10 +136,7 @@ report :: proc(j: ^Judging, k: core.Typed_Error_Kind, under: []core.Step = nil, 
 	}
 	if j.first.kind == .None {
 		j.first.kind = k
-		#reverse for s in j.steps {
-			typed.path_add(&j.first, s)
-		}
-		typed.path_close(&j.first)
+		typed.path_keep(&j.first, j.steps[:])
 		// A map key's name is the walker's, which the walk frees.
 		typed.own_names(&j.first)
 	}

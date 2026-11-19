@@ -286,22 +286,7 @@ next_text :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) {
 
 // The reads of a record's value: its build, which every spec shares. A scan of a record builds it.
 record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
-	return &RECORD_DOCS
-}
-
-@(private, rodata)
-RECORD_DOCS := records.Record_Docs {
-	read  = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
-		return records.read_built(it, target, T, plan, read, allocator, err, build_handle)
-	},
-	build = build_record,
-}
-
-@(private)
-build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
-	doc, err := build_spec(rec.text, .Xml, it.as, false, allocator)
-	core.move_document_error(&err, rec.at)
-	return doc, err
+	return records.built_docs(build_handle)
 }
 
 // Opens `src` for its records, as `records.open` does with `as(spec, opts)`, and under `.Entries` the

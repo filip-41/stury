@@ -3,6 +3,7 @@ package html
 import "base:runtime"
 import core "../core"
 import typed "../core/typed"
+import "../core/records"
 
 // HTML's document holds the tokens of the tree a text builds (emit.odin), over the caller's bytes, read through core's
 // readers, core's markup readers and HTML's handles, in the shape XML's document has for the same markup. The state
@@ -42,7 +43,7 @@ handle_services :: proc "contextless" (reads: ^typed.Format_Reads) -> core.Servi
 		reads    = reads,
 		tokens   = &TOKENS,
 		records  = &FRAMING,
-		docs     = &RECORD_DOCS,
+		docs     = records.built_docs(build_handle),
 	}
 }
 

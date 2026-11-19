@@ -80,8 +80,7 @@ sample_each :: proc(d: ^rules.Description, as: core.As, opts: Sample_Options, si
 	opts := opts
 	opts.write.grow_header = true
 	asserted := asserting(d, opts.format_assert)
-	defer asserted_restore(d, asserted)
-	c := Compiled{description = d}
+	c := Compiled{description = &asserted}
 	b := bind(&c, {opts.reads, as}) or_return
 	defer unbind(&b)
 	arena: virtual.Arena
@@ -90,7 +89,7 @@ sample_each :: proc(d: ^rules.Description, as: core.As, opts: Sample_Options, si
 	}
 	defer virtual.arena_destroy(&arena)
 	g := Gen {
-		d        = d,
+		d        = &asserted,
 		source   = {opts.seed},
 		comments = opts.comments,
 	}
@@ -146,9 +145,7 @@ no_sample :: proc(g: ^Gen, kind: core.Typed_Error_Kind, allocator: runtime.Alloc
 		seen   = make([]bool, len(g.d.nodes), context.temp_allocator),
 	}
 	if reaches(&search, g.d.root) {
-		kept := steps[max(0, len(steps) - core.MAX_ERROR_STEPS):]
-		e.n_steps, e.truncated = u8(len(kept)), len(kept) < len(steps)
-		copy(e.steps[:], kept)
+		typed.path_keep(&e, steps[:])
 	}
 	return core.error_of(e, allocator)
 }

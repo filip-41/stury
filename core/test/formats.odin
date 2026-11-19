@@ -142,51 +142,6 @@ string_literal_and_variable_edit_alike :: proc(t: ^testing.T) {
 	}
 }
 
-// A toy format over JSONC's: a property is spelled `/*!body*/` before its node, and every node reads the style "toy".
-toy_prefix :: proc(doc: ^core.Document, role: core.Role, body: []u8, text: ^[dynamic]u8) -> bool {
-	append(text, "/*!")
-	append(text, ..body)
-	append(text, "*/")
-	return true
-}
-
-toy_fact :: proc(doc: ^core.Document, i: core.Node_Index, name: core.Fact_Kind) -> (core.Fact_Value, bool) {
-	return {text = "toy"}, name == .Style
-}
-
-// A property fact set through a format that spells one is written just before its node, once, and one removed or
-// replaced goes with its spelling. A spelling-borne fact is read through `Readers.fact`, a span fact over it.
-@(test)
-property_fact_is_written_before_its_node :: proc(t: ^testing.T) {
-	doc, err := core.build(transmute([]u8)string(`{"a": 1, "b": 2}`), json.as(.Jsonc))
-	defer core.destroy(&doc)
-	testkit.expect_nil(t, err)
-	edit := core.services_of(doc.as).edit^
-	edit.prefix = toy_prefix
-	readers := doc.readers^
-	readers.fact = toy_fact
-	doc.readers = &readers
-
-	a, _ := core.member(&doc, core.ROOT, "a")
-	b, _ := core.member(&doc, core.ROOT, "b")
-	style, held := core.fact_value(&doc, a, .Style)
-	testing.expect(t, held && style.text == "toy")
-	_, tagged := core.fact_value(&doc, a, .Tag)
-	testing.expect(t, !tagged)
-
-	list := core.edit_list_init(&doc)
-	defer core.edit_list_destroy(&list)
-	list.edit = &edit
-	testkit.expect_nil(t, core.set_fact(&list, a, .Tag, "t"))
-	testkit.expect_nil(t, core.set_fact(&list, b, .Anchor, "x"))
-	testkit.expect_nil(t, core.set_fact(&list, b, .Tag, "y"))
-	out, dropped, cerr := compose.commit(&list)
-	defer delete(out)
-	testkit.expect_nil(t, cerr)
-	testing.expect_value(t, dropped, 0)
-	testing.expect_value(t, string(out), `{"a": /*!t*/ 1, "b": /*!x*/ /*!y*/ 2}`)
-}
-
 // A property body is one non-empty line.
 @(test)
 property_fact_body_is_one_line :: proc(t: ^testing.T) {

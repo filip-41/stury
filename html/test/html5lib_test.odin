@@ -9,6 +9,7 @@ import "core:mem/virtual"
 import "core:slice"
 import "core:strings"
 import "core:testing"
+import spell "../../core/spell"
 import html ".."
 
 @(private)
@@ -135,22 +136,7 @@ unescape :: proc(s: string) -> (string, bool) {
 		if len(s) < 6 || s[0] != '\\' || s[1] != 'u' {
 			return 0, false
 		}
-		v: u32
-		for c in transmute([]u8)s[2:6] {
-			d: u32
-			switch c {
-			case '0' ..= '9':
-				d = u32(c - '0')
-			case 'a' ..= 'f':
-				d = u32(c - 'a' + 10)
-			case 'A' ..= 'F':
-				d = u32(c - 'A' + 10)
-			case:
-				return 0, false
-			}
-			v = v << 4 | d
-		}
-		return v, true
+		return spell.hex4(raw_data(s[2:]))
 	}
 	for i := 0; i < len(s); {
 		v, ok := hex(s[i:])

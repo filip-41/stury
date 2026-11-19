@@ -132,15 +132,15 @@ put_lead :: #force_inline proc(out: ^write.Out, lead: string) #no_bounds_check {
 	out.cursor += len(lead)
 }
 
-// Answers the filter on the record `rec` that `it` read and prints its outputs, as `run_once` would. What it allocates
-// is the caller's to free.
-answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
+// Answers the filter on the record `rec` that `it` read and prints its outputs, as `run_once` would, or returns false once
+// the writer refuses one. What it allocates is the caller's to free.
+answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) -> bool {
 	cols := run.route.columns
 	o := &run.output
 	if cols.whole {
 		built, _ := records.build(it, rec, context.allocator)
 		run_once(run, core.document_value(built))
-		return
+		return true
 	}
 	short: [256]u8 = ---
 	buf := short[:len(rec.text)] if len(rec.text) <= len(short) else make([]u8, len(rec.text))
@@ -152,20 +152,14 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 	switch cols.shape {
 	case .Column:
 		for at in cols.at {
-			if !emit(o, value_of(column_cell(it, rec, row, at, buf))) {
-				refuse_record(run)
-				return
-			}
+			emit_record(run, value_of(column_cell(it, rec, row, at, buf))) or_return
 		}
 	case .Array:
 		a := core.new_array(len(cols.at))
 		for at in cols.at {
 			append(&a.items, value_of(column_cell(it, rec, row, at, buf)))
 		}
-		if !emit(o, a) {
-			refuse_record(run)
-			return
-		}
+		emit_record(run, a) or_return
 	case .Object:
 		l := o.layout
 		switch {
@@ -204,19 +198,13 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 			}
 		case cols.every:
 			built, _ := records.build(it, rec, context.allocator)
-			if !emit(o, core.document_value(built)) {
-				refuse_record(run)
-				return
-			}
+			emit_record(run, core.document_value(built)) or_return
 		case:
 			obj := core.new_object()
 			for at, i in cols.at {
 				core.object_put(obj, cols.keys[i], value_of(column_cell(it, rec, row, at, buf)))
 			}
-			if !emit(o, obj) {
-				refuse_record(run)
-				return
-			}
+			emit_record(run, obj) or_return
 		}
 	case .Select:
 		watched := core.new_object()
@@ -226,17 +214,23 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 		o.whole = {it, rec}
 		run_once(run, watched)
 		o.whole = {}
-		return
+		return true
 	}
 	finish_input(o)
+	return true
 }
 
-// Ends the record whose output the writer refused, as `run_once` ends an input whose filter fails.
+// Prints an output of the record, or ends the record when the writer refuses it, as `run_once` ends an input whose
+// filter fails.
 @(private = "file")
-refuse_record :: proc(run: ^Run) {
+emit_record :: proc(run: ^Run, v: core.Value) -> bool {
+	if emit(&run.output, v) {
+		return true
+	}
 	flush_some(&run.output, force = true)
 	tell_filter_error(&run.ip, (^Inputs)(jq.inputs(&run.ip).data))
 	finish_input(&run.output, EXIT_INPUT)
+	return false
 }
 
 // The cell at column `at` of `rec` as the record's object holds it: its text, or nil for an empty unquoted cell and for

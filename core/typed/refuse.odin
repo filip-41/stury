@@ -396,6 +396,14 @@ path_add :: proc "contextless" (e: ^core.Typed_Refusal, s: core.Step) {
 	e.n_steps += 1
 }
 
+// Sets the path of `e` to the innermost `MAX_ERROR_STEPS` of `steps`, outermost first, and `e.truncated` when it drops
+// one.
+path_keep :: proc "contextless" (e: ^core.Typed_Refusal, steps: []core.Step) {
+	kept := steps[max(0, len(steps) - core.MAX_ERROR_STEPS):]
+	e.n_steps = u8(copy(e.steps[:], kept))
+	e.truncated ||= len(kept) < len(steps)
+}
+
 // Turns the path `path_add` built from the innermost step to read from the outermost.
 path_close :: proc "contextless" (e: ^core.Typed_Refusal) {
 	for i in 0 ..< int(e.n_steps) / 2 {

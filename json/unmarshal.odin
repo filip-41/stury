@@ -2,7 +2,6 @@ package json
 
 import "base:runtime"
 import core "../core"
-import rules "../core/rules"
 import typed "../core/typed"
 import write "../core/write"
 
@@ -48,16 +47,6 @@ plan_written :: #force_inline proc(T: typeid, spec: Spec, opts: Options, plan: t
 		return made, nil
 	}
 	return made, core.error_of(refusal)
-}
-
-// Builds the plan that reads values of description `d` as `spec`, as `typed.plan_of` does. The reads are the plan's with
-// `reads`, as for `plan_make`.
-plan_of :: proc(d: ^rules.Description, spec := Spec.Json, opts := typed.Plan_Options{}, reads: ^typed.Format_Reads = nil, allocator := context.allocator) -> (typed.Plan, core.Error) {
-	made, err := typed.plan_of(d, plan_handle(spec, {}), reads, opts, allocator)
-	if err == nil {
-		plan_bind(&made, nil)
-	}
-	return made, err
 }
 
 // The handle a plan holds: the plan's readers, which carry no `close_end` and no services, and the spec and option bytes.

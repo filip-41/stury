@@ -90,8 +90,7 @@ Side :: struct {
 	judges: map[rules.Node_Index]^Bound,
 }
 
-// Compares `old` and `new`. Both are borrowed for the call: `format` assertion follows the options for the call and is
-// restored after it. A check of a node temporarily makes it the root.
+// Compares `old` and `new`, which are borrowed for the call and left as they are.
 compare :: proc(old, new: ^rules.Description, opts := Compare_Options{}) -> (r: Comparison, err: runtime.Allocator_Error) {
 	virtual.arena_init_growing(&r.arena) or_return
 	scratch: virtual.Arena
@@ -102,10 +101,8 @@ compare :: proc(old, new: ^rules.Description, opts := Compare_Options{}) -> (r: 
 	defer virtual.arena_destroy(&scratch)
 	context.temp_allocator = virtual.arena_allocator(&scratch)
 	old_on, new_on := asserting(old, opts.format_assert), asserting(new, opts.format_assert)
-	defer asserted_restore(old, old_on)
-	defer asserted_restore(new, new_on)
-	a := Side{d = old, c = {description = old}, as = opts.as, reads = opts.reads}
-	b := Side{d = new, c = {description = new}, as = opts.as, reads = opts.reads}
+	a := Side{d = &old_on, c = {description = &old_on}, as = opts.as, reads = opts.reads}
+	b := Side{d = &new_on, c = {description = &new_on}, as = opts.as, reads = opts.reads}
 	defer side_destroy(&a)
 	defer side_destroy(&b)
 	arena := virtual.arena_allocator(&r.arena)

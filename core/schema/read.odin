@@ -11,6 +11,7 @@ import "../spell"
 import "../regex"
 import core "../"
 import "../rules"
+import "../typed"
 
 // Where a schema's references may lead and how a file they name is read.
 @(private)
@@ -1032,13 +1033,11 @@ fail :: proc(r: ^Reader, site: Site, keyword, why: string) {
 		at   = u64(r.sources[site.source].nodes[site.at].lo),
 	}
 	e.want.text = strings.concatenate({keyword, ": ", why}, context.temp_allocator)
-	kept := r.path[max(0, len(r.path) - core.MAX_ERROR_STEPS):]
-	for s, k in kept {
-		e.steps[k] = s
+	typed.path_keep(&e, r.path[:])
+	for &s in e.steps[:e.n_steps] {
 		if name, named := s.(core.Name); named {
-			e.steps[k] = core.Name(strings.clone(string(name), context.temp_allocator))
+			s = core.Name(strings.clone(string(name), context.temp_allocator))
 		}
 	}
-	e.n_steps, e.truncated = u8(len(kept)), len(kept) < len(r.path)
 	r.err = core.error_of(e)
 }

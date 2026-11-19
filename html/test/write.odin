@@ -250,28 +250,14 @@ Sweep_Value :: struct {
 	p:  int,
 }
 
-@(private)
-Sweep_Try :: struct {
-	value: Sweep_Value,
-	opts:  core.Write_Options,
-}
-
-@(private)
-sweep_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
-	m := (^Sweep_Try)(data)
-	text, err := html.marshal(m.value, write = m.opts, allocator = allocator)
-	return text, testkit.typed_kind(err)
-}
-
 @(test)
 marshal_under_failing_allocators :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	for opts in ([?]core.Write_Options{{}, {pretty = true, indent = 2}}) {
-		try := Sweep_Try{Sweep_Value{ul = {li = {"a<b", "c"}}, p = 2}, opts}
-		want, err := html.marshal(try.value, write = opts, allocator = context.temp_allocator)
-		testkit.expect_nil(t, err)
-		testkit.sweep_write(t, sweep_try, &try, string(want))
-	}
+	testkit.sweep_marshal(t, proc(value: any, write: core.Write_Options, allocator: runtime.Allocator) -> ([]u8, core.Error) {
+		return html.marshal(value, write = write, allocator = allocator)
+	},
+		Sweep_Value{ul = {li = {"a<b", "c"}}, p = 2},
+		{{}, {pretty = true, indent = 2}})
 }
 
 // The file `fmt` writes, with its line end, formats to itself, so that `fmt --check` passes. An HTML reader puts the

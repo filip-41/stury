@@ -2,6 +2,7 @@ package xml
 
 import "base:intrinsics"
 import core "../core"
+import "../core/records"
 
 // XML's document holds the walk's tokens over the caller's bytes, read through core's readers and XML's handles. The
 // document is an `Object` of one member, the root element. An element is a member under its name: its value is its
@@ -33,7 +34,7 @@ SERVICES := [Spec]core.Services {
 		reads    = &READS,
 		tokens   = &TOKENS,
 		records  = &FRAMING,
-		docs     = &RECORD_DOCS,
+		docs     = records.built_docs(build_handle),
 	},
 }
 

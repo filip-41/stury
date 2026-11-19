@@ -453,6 +453,21 @@ read_built :: proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, re
 	return true
 }
 
+// The reads of a record of a format that reads its value only by building the text whole, `build` its `Services.build`.
+built_docs :: proc "contextless" ($build: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error)) -> ^Record_Docs {
+	@(static, rodata) d := Record_Docs {
+		read  = proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Refusal) -> bool {
+			return read_built(it, target, T, plan, read, allocator, err, build)
+		},
+		build = proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+			doc, err := build(rec.text, it.as, false, allocator)
+			core.move_document_error(&err, rec.at)
+			return doc, err
+		},
+	}
+	return &d
+}
+
 // Frames the next record for a read that takes its text, or ends the records with `.Bad_Option` under a framing the
 // format does not take.
 frame_text :: proc(it: ^Reader) -> (Record, bool) {

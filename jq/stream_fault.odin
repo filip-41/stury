@@ -1,21 +1,20 @@
-package main
+package jq
 
 // --stream on a text that does not parse: jq's streaming parser (jv_parse.c, `stream_token` and its scanner) run
 // over the faulty text, which gives the events of everything before the fault and then, for --stream-errors, the
 // error as an event, `[message, path]`, in jq's words and count of lines and columns. The library validates a text
 // whole and so cannot say which events precede a fault. This walk is reached only for a text it has refused, so a
-// valid stream never pays for it. Plain --stream ends the events with the library's report (input.odin).
+// valid stream never pays for it. Plain --stream ends the events with the library's report (cmd/stury/input.odin).
 
 import "base:runtime"
+import "core:fmt"
 import "core:mem/virtual"
 import "core:strings"
-import core "../../core"
-import "../../jq"
-import "message"
+import core_pkg "../core"
 
 // An event of a faulty text and the byte of the text jq's parser reads to make it, which tells the line jq's reader is on.
 Fault_Event :: struct {
-	value: core.Value,
+	value: core_pkg.Value,
 	at:    int,
 	error: bool, // `[message, path]`
 	late:  bool, // an error at the end that jq gives after the event the last byte left pending, which -s therefore keeps out of its array
@@ -36,10 +35,6 @@ Fault_Walk :: struct {
 	gen:          int,
 	held:         uint, // what renew moved: the next renew waits until the arena holds twice as much
 }
-
-// Bytes past which the walk's arena is renewed, once every event made in it is given.
-@(private = "file")
-WALK_ARENA_RENEW :: 1 << 20
 
 @(private = "file")
 Last_Seen :: enum u8 {
@@ -63,10 +58,10 @@ Parser :: struct {
 	src:          []byte,
 	max_depth:    int, // the deepest an array or object may nest, as the reader's limit
 	events:       [dynamic]Fault_Event, // the events made and not yet given
-	staged:       [dynamic]core.Value, // those of the byte being scanned, dropped if jq refuses it
-	path:         [dynamic]core.Value, // an array's index, an object's key once known, else null
+	staged:       [dynamic]core_pkg.Value, // those of the byte being scanned, dropped if jq refuses it
+	path:         [dynamic]core_pkg.Value, // an array's index, an object's key once known, else null
 	last:         Last_Seen,
-	next:         core.Value, // the value read last, held until a separator shows it done
+	next:         core_pkg.Value, // the value read last, held until a separator shows it done
 	has_next:     bool,
 	token_start:  int, // the literal being read, if token_open
 	token_open:   bool,
@@ -128,7 +123,8 @@ fault_peek :: proc(w: ^Fault_Walk) -> (Fault_Event, bool) {
 		}
 		clear(&w.p.events)
 		w.given = 0
-		if w.arenas[w.gen].total_used > max(WALK_ARENA_RENEW, 2 * w.held) {
+		// Past a MiB the walk's arena is renewed, once every event made in it is given.
+		if w.arenas[w.gen].total_used > max(1 << 20, 2 * w.held) {
 			renew(w)
 		}
 		context.allocator = virtual.arena_allocator(&w.arenas[w.gen])
@@ -187,7 +183,7 @@ step :: proc(w: ^Fault_Walk) {
 		w.errored, w.late = true, false
 		at := Place{p.line, p.column} if p.refusal.line == 0 else p.refusal
 		p.refusal = {}
-		fail(p, message.build("%s at line %d, column %d%s", msg, at.line, at.column, " (need RS to resync)" if w.seq else ""), w.at)
+		fail(p, fmt.aprintf("%s at line %d, column %d%s", msg, at.line, at.column, " (need RS to resync)" if w.seq else ""), w.at)
 		if w.seq {
 			w.at += 1
 		} else {
@@ -200,7 +196,7 @@ step :: proc(w: ^Fault_Walk) {
 	switch {
 	case w.rs_follows:
 		if msg := at_separator(p, w.at); msg != "" {
-			fail(p, message.build("%s at line %d, column %d", msg, p.line, p.column), w.at)
+			fail(p, fmt.aprintf("%s at line %d, column %d", msg, p.line, p.column), w.at)
 			w.errored = true
 		}
 	case w.reset_each: // the call that finds the end begins afresh, with nothing held
@@ -210,7 +206,7 @@ step :: proc(w: ^Fault_Walk) {
 			msg = "Unfinished JSON term"
 		}
 		if msg != "" {
-			fail(p, message.build("%s at EOF at line %d, column %d", msg, p.line, p.column), w.at)
+			fail(p, fmt.aprintf("%s at EOF at line %d, column %d", msg, p.line, p.column), w.at)
 			p.events[len(p.events) - 1].late = w.late
 			w.errored = true
 		} else if p.has_next { // a literal the end of the text ends
@@ -228,8 +224,8 @@ at_separator :: proc(p: ^Parser, at: int) -> string {
 	}
 	_, is_string := p.next.(string)
 	if len(p.path) > 0 || p.has_next && !is_string {
-		if check_literal(p, at) == "" && len(p.path) == 0 && jq.kind(p.next) == .Number {
-			return TRUNCATED_NUMBER_NOTE
+		if check_literal(p, at) == "" && len(p.path) == 0 && kind(p.next) == .Number {
+			return "Potentially truncated top-level numeric value" // a top-level number in a --seq record with nothing after it
 		}
 		return "Truncated value"
 	}
@@ -245,7 +241,7 @@ at_separator :: proc(p: ^Parser, at: int) -> string {
 // The error as an event, `[message, path]`, and the parser afresh, as jq's `parser_reset` leaves it.
 @(private = "file")
 fail :: proc(p: ^Parser, text: string, at: int) {
-	ev := core.new_array(2)
+	ev := core_pkg.new_array(2)
 	append(&ev.items, text, path_copy(p))
 	append(&p.events, Fault_Event{value = ev, at = at, error = true})
 	reset(p)
@@ -259,8 +255,8 @@ reset :: proc(p: ^Parser) {
 }
 
 @(private = "file")
-path_copy :: proc(p: ^Parser) -> ^core.Array {
-	a := core.new_array(len(p.path))
+path_copy :: proc(p: ^Parser) -> ^core_pkg.Array {
+	a := core_pkg.new_array(len(p.path))
 	append(&a.items, ..p.path[:])
 	return a
 }
@@ -342,7 +338,7 @@ emit_scalar :: proc(p: ^Parser) {
 
 // The value just read: refused where another is held, or follows a member's value with no separator.
 @(private = "file")
-value :: proc(p: ^Parser, v: core.Value) -> string {
+value :: proc(p: ^Parser, v: core_pkg.Value) -> string {
 	if p.has_next || p.last == .Value {
 		return "Expected separator between values"
 	}
@@ -359,7 +355,7 @@ check_literal :: proc(p: ^Parser, end: int) -> string {
 	}
 	tok := string(p.src[p.token_start:end])
 	pattern: string
-	v: core.Value
+	v: core_pkg.Value
 	switch tok[0] {
 	case 't':
 		pattern, v = "true", true
@@ -377,7 +373,7 @@ check_literal :: proc(p: ^Parser, end: int) -> string {
 			return "Invalid literal"
 		}
 	} else {
-		n, ok := jq.read_number(tok)
+		n, ok := read_number(tok)
 		if !ok {
 			return "Invalid numeric literal"
 		}
@@ -395,14 +391,14 @@ check_literal :: proc(p: ^Parser, end: int) -> string {
 found_string :: proc(p: ^Parser, i: int) -> string {
 	out := strings.builder_make()
 	stury_only_at := -1
-	if msg := jq.decode_string(&out, string(p.src[p.string_start + 1:i]), &stury_only_at); msg != "" {
+	if msg := decode_string(&out, string(p.src[p.string_start + 1:i]), &stury_only_at); msg != "" {
 		if stury_only_at >= 0 { // a refusal of stury's own, put where the library puts it: at the backslash
 			p.refusal = {p.line0, p.column0}
-			core.advance_position(&p.refusal.line, &p.refusal.column, p.src[:p.string_start + stury_only_at + 2])
+			core_pkg.advance_position(&p.refusal.line, &p.refusal.column, p.src[:p.string_start + stury_only_at + 2])
 		}
 		return msg
 	}
-	return value(p, jq.valid_utf8(strings.to_string(out)))
+	return value(p, valid_utf8(strings.to_string(out)))
 }
 
 @(private = "file")
@@ -431,13 +427,13 @@ stream_token :: proc(p: ^Parser, ch: byte) -> string {
 			return "Exceeds depth limit for parsing"
 		}
 		if p.last == .Open_Object {
-			return message.build("%s%c'", "Expected string key after '{', not '", ch)
+			return fmt.aprintf("%s%c'", "Expected string key after '{', not '", ch)
 		}
 		if p.last == .Comma && !path_is_index(p) {
-			return message.build("Expected string key after ',' in object, not '%c'", ch)
+			return fmt.aprintf("Expected string key after ',' in object, not '%c'", ch)
 		}
 		if open {
-			append(&p.path, core.Value(0))
+			append(&p.path, core_pkg.Value(0))
 			p.last = .Open_Array
 		} else {
 			append(&p.path, nil)
@@ -490,7 +486,7 @@ stream_token :: proc(p: ^Parser, ch: byte) -> string {
 		if !path_is_index(p) {
 			return "Unmatched ']' in the middle of an object"
 		}
-		close_container(p, core.new_array())
+		close_container(p, core_pkg.new_array())
 	case '}':
 		if len(p.path) == 0 {
 			return "Unmatched '}' at the top-level"
@@ -509,7 +505,7 @@ stream_token :: proc(p: ^Parser, ch: byte) -> string {
 		case !p.has_next && p.last != .Value && p.last != .Open_Object:
 			return "Unmatched '}'"
 		}
-		close_container(p, core.new_object())
+		close_container(p, core_pkg.new_object())
 	}
 	return ""
 }
@@ -517,7 +513,7 @@ stream_token :: proc(p: ^Parser, ch: byte) -> string {
 // A container's end: the event of the member held, if any, then `[path]` for the container. A container with no
 // member is a leaf, `[path, [] or {}]`, once it is popped.
 @(private = "file")
-close_container :: proc(p: ^Parser, empty: core.Value) {
+close_container :: proc(p: ^Parser, empty: core_pkg.Value) {
 	was_empty := p.last == .Open_Array || p.last == .Open_Object
 	if p.has_next {
 		append(&p.staged, event_of(path_copy(p), p.next))
@@ -533,5 +529,29 @@ close_container :: proc(p: ^Parser, empty: core.Value) {
 	p.last = .None if len(p.path) == 0 else .Value
 }
 
-// What jq says for a top-level number in a --seq record with no whitespace or separator after it.
-TRUNCATED_NUMBER_NOTE :: "Potentially truncated top-level numeric value"
+// A `--stream` event: `[path, leaf]`, or `[path]` with no leaf, after a container's last member.
+event_of :: proc(path: ^core_pkg.Array, leaf: ..core_pkg.Value) -> core_pkg.Value {
+	ev := core_pkg.new_array(2)
+	append(&ev.items, path)
+	append(&ev.items, ..leaf)
+	return ev
+}
+
+// An event or a part of one, made anew in the context allocator. An event's container leaf is empty.
+event_clone :: proc(v: core_pkg.Value) -> core_pkg.Value {
+	#partial switch x in v {
+	case core_pkg.Number_View:
+		return core_pkg.view_copy(x)
+	case string:
+		return strings.clone(x)
+	case ^core_pkg.Array:
+		a := core_pkg.new_array(len(x.items))
+		for m in x.items {
+			append(&a.items, event_clone(m))
+		}
+		return a
+	case ^core_pkg.Object:
+		return core_pkg.new_object()
+	}
+	return v
+}

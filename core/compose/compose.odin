@@ -17,12 +17,10 @@ import core ".."
 NO_BYTE :: max(u64)
 
 // The order of chunks at one byte, which only a member of no bytes makes possible: what comes before a line, what comes
-// before a member, what comes just before a node's first byte (its tag, anchor or alias), a set, what comes after a
-// member, what comes after a line.
+// before a member, a set, what comes after a member, what comes after a line.
 Rank :: enum u8 {
 	Line_Head,
 	Head,
-	Prefix,
 	Set,
 	Tail,
 	Line_Tail,
@@ -820,7 +818,7 @@ group_edits :: proc(cx: ^Compose, groups: ^[dynamic]Target) -> bool {
 			foot := fact && e.role == .Comment_Foot
 			switch {
 			case e.op == .Set:
-			// A property stands before its node, in a chunk of its own that no junction composes.
+			// A property is dropped, as no output here holds one.
 			case fact && core.is_property(e.role):
 			// A flat text's root holds all of its comments.
 			case e.op == .Insert, e.op == .Reorder, fact && node == core.ROOT && core.is_flat(doc):
@@ -880,8 +878,6 @@ compose_tree :: proc(cx: ^Compose) -> bool {
 			push(&keys, Fact_Key{key = u64(e.node) << 8 | u64(e.role), edit = i}) or_return
 			if e.op == .Set_Fact && !fact_slot(cx, e.node, e.role) {
 				cx.dropped += 1
-			} else if core.is_property(e.role) {
-				property_chunks(cx, e) or_return
 			}
 		}
 	}
@@ -920,36 +916,6 @@ compose_tree :: proc(cx: ^Compose) -> bool {
 	return true
 }
 
-// Writes the chunks of a property fact edit: the node's first fact of the role becomes the edit's body, or is cut for a
-// removal, any other of the role is cut, and a node with none gets the body just before its first byte. A removal also
-// takes the blanks after the fact, so the node's line keeps its indent.
-property_chunks :: proc(cx: ^Compose, e: core.Edit) -> bool {
-	doc := cx.doc
-	first := true
-	for f in core.all_facts(doc, e.node) {
-		if f.role != e.role {
-			continue
-		}
-		lo, hi := f.lo, f.lo + u64(f.n)
-		from := len(cx.text)
-		if first && e.op == .Set_Fact {
-			cx.edit.prefix(doc, e.role, e.text, &cx.text) or_return
-		} else {
-			hi = blanks_end(doc.src, hi, u64(len(doc.src)))
-		}
-		push(&cx.chunks, Chunk{lo = lo, hi = hi, from = from, to = len(cx.text), rank = .Prefix, cut = !first || e.op == .Remove_Fact}) or_return
-		first = false
-	}
-	if first && e.op == .Set_Fact {
-		at := core.node_start(doc.nodes[e.node])
-		from := len(cx.text)
-		cx.edit.prefix(doc, e.role, e.text, &cx.text) or_return
-		push(&cx.text, ' ') or_return
-		push(&cx.chunks, Chunk{lo = at, hi = at, from = from, to = len(cx.text), rank = .Prefix}) or_return
-	}
-	return true
-}
-
 // Sorts the chunks and refuses two that overlap or two edits of one node. A cut inside a chunk that covers it writes
 // nothing. A fact the output cannot hold is counted here, unless a set's bytes hold it. A reordered container's chunk
 // comes before the chunks inside it, which must not overlap one another.
@@ -981,7 +947,7 @@ order_chunks :: proc(cx: ^Compose) -> bool {
 			c = Chunk{lo = at, hi = at}
 			continue
 		}
-		if have && (c.lo < at || c.lo == prev.lo && c.hi == prev.hi && c.rank == prev.rank && c.rank != .Prefix) {
+		if have && (c.lo < at || c.lo == prev.lo && c.hi == prev.hi && c.rank == prev.rank) {
 			return refuse(cx, {kind = .Conflicting_Edits, at = c.lo})
 		}
 		prev = c
@@ -1066,16 +1032,13 @@ line_shape :: proc(doc: ^core.Document, pos: u64) -> (indent: []u8, lead: bool) 
 	return src[lo:hi], hi < pos
 }
 
-// Whether the output can hold a fact of `role` on `node`. A property (`Tag`, `Anchor`, `Alias`) is held when the format
-// spells it with `prefix` and its `fact_slot`, if any, agrees. A tree writes a foot on a container or the root, whose close
+// Whether the output can hold a fact of `role` on `node`. No format this commit composes holds a property (`Tag`,
+// `Anchor`, `Alias`). A tree writes a foot on a container or the root, whose close
 // or text's end it precedes, and on no other node. A format with a `fact_slot` says its own. An output with no marker
 // holds no fact. The role's shape and the body's spelling are checked where the fact is written.
 fact_slot :: #force_inline proc(cx: ^Compose, node: core.Node_Index, role: core.Role) -> bool {
 	edit, doc := cx.edit, cx.doc
-	if core.is_property(role) {
-		return edit != nil && edit.prefix != nil && (edit.fact_slot == nil || edit.fact_slot(doc, node, role, cx.emptied))
-	}
-	if !core.has_comments(cx.syntax) {
+	if core.is_property(role) || !core.has_comments(cx.syntax) {
 		return false
 	}
 	if edit != nil && edit.fact_slot != nil {

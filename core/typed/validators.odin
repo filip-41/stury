@@ -138,10 +138,7 @@ failed_under :: proc(entries: []core.Error_Entry, path: []core.Step, name: strin
 refusal_at :: proc(kind: core.Typed_Error_Kind, steps: []core.Step, message: string, at: u64) -> core.Typed_Refusal {
 	e := core.Typed_Refusal{kind = kind, at = at}
 	e.want.text = message
-	#reverse for s in steps {
-		path_add(&e, s)
-	}
-	path_close(&e)
+	path_keep(&e, steps)
 	return e
 }
 

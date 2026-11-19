@@ -5,7 +5,6 @@ import "core:strings"
 import "core:testing"
 import "core:time"
 import core "../../core"
-import rules "../../core/rules"
 import typed "../../core/typed"
 import schema "../../core/schema"
 import json_pkg "../../json"
@@ -194,23 +193,6 @@ a_plan_checks_a_text :: proc(t: ^testing.T) {
 	testkit.expect_nil(t, rerr)
 	testkit.expect_nil(t, typed.unmarshal_text(transmute([]u8)string("a = 3\n"), &good, Pair, &read, {}))
 	testing.expect_value(t, good.a, 3)
-}
-
-// A plan of a description reads TOML, and an empty description is refused.
-@(test)
-a_plan_of_a_description_reads_toml :: proc(t: ^testing.T) {
-	context.allocator = context.temp_allocator
-	defer free_all(context.temp_allocator)
-	reg: model.Registry
-	m, compiled := model.compile(&reg, Service, toml.checks(.Toml_1_1))
-	testkit.expect_nil(t, compiled)
-	d, derr := model.schema(&m, .Load, context.temp_allocator)
-	testkit.expect_nil(t, derr)
-	plan, built := toml.plan_of(&d, .Toml_1_1, reads = toml.reads(.Toml_1_1))
-	testkit.expect_nil(t, built)
-	testing.expect(t, plan.read != nil && plan.marshal != nil)
-	_, empty := toml.plan_of(&rules.Description{})
-	testkit.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 }
 
 // A read or a check with no plan is a plan mismatch.

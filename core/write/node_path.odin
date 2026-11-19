@@ -39,10 +39,5 @@ node_path :: proc(refusal: ^core.Typed_Refusal, doc: ^core.Document, node: core.
 		}
 		break
 	}
-	kept := steps[max(0, len(steps) - core.MAX_ERROR_STEPS):]
-	refusal.truncated = len(kept) < len(steps)
-	refusal.n_steps = 0
-	for s in kept {
-		typed.path_add(refusal, s)
-	}
+	typed.path_keep(refusal, steps[:])
 }

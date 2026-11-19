@@ -4,10 +4,8 @@ package xml_tests
 
 import "core:testing"
 import core "../../core"
-import rules "../../core/rules"
 import typed "../../core/typed"
 import xml ".."
-import json "../../json"
 import testkit "../../testkit"
 
 @(private = "file")
@@ -227,8 +225,7 @@ a_nil_any_is_refused_as_a_null :: proc(t: ^testing.T) {
 	testkit.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
 }
 
-// A plan from `plan_make` reads a text, a plan of a description holds XML's reads when it is given them, and an empty
-// description is refused.
+// A plan from `plan_make` reads a text.
 @(test)
 plans_read_xml :: proc(t: ^testing.T) {
 	Doc :: struct {
@@ -242,15 +239,6 @@ plans_read_xml :: proc(t: ^testing.T) {
 	v: Doc
 	testkit.expect_nil(t, xml.unmarshal(transmute([]u8)string(`<a><n>4</n></a>`), .Xml, &v, &plan))
 	testing.expect_value(t, v.a.n, 4)
-	s, err := json.load_schema(transmute([]u8)string(`{"properties": {"a": {"type": "object"}}}`), .Json)
-	testkit.expect_nil(t, err)
-	defer json.destroy(s)
-	described, built := xml.plan_of(s.description, reads = xml.checks(.Xml).reads)
-	testkit.expect_nil(t, built)
-	defer xml.destroy(&described)
-	testing.expect(t, described.read != nil && described.marshal != nil)
-	_, empty := xml.plan_of(&rules.Description{})
-	testkit.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 }
 
 // An attribute is read by its plain name, so a tag that names it `@id` is refused when the plan is made, with the

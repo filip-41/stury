@@ -669,28 +669,14 @@ Sweep_Value :: struct {
 	},
 }
 
-@(private)
-Sweep_Try :: struct {
-	value: Sweep_Value,
-	opts:  core.Write_Options,
-}
-
-@(private)
-sweep_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
-	m := (^Sweep_Try)(data)
-	text, err := cbor.marshal(m.value, write = m.opts, allocator = allocator)
-	return text, testkit.typed_kind(err)
-}
-
 @(test)
 marshal_under_failing_allocators :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	for opts in ([?]core.Write_Options{{}, {pretty = true, indent = 2}}) {
-		try := Sweep_Try{Sweep_Value{title = "t", port = 8, tags = {"x", "y"}, inner = {label = "n"}}, opts}
-		want, err := cbor.marshal(try.value, write = opts, allocator = context.temp_allocator)
-		testkit.expect_nil(t, err)
-		testkit.sweep_write(t, sweep_try, &try, string(want))
-	}
+	testkit.sweep_marshal(t, proc(value: any, write: core.Write_Options, allocator: runtime.Allocator) -> ([]u8, core.Error) {
+		return cbor.marshal(value, write = write, allocator = allocator)
+	},
+		Sweep_Value{title = "t", port = 8, tags = {"x", "y"}, inner = {label = "n"}},
+		{{}, {pretty = true, indent = 2}})
 }
 
 // An integer has no negative zero, so JSON's `-0` is written as the float that has.

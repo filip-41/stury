@@ -21,9 +21,7 @@ answers_refuse :: proc(t: ^testing.T) {
 	defer delete(want)
 
 	it := dsv.answers(transmute([]u8)string("a,a\n1,2\n"), .Csv, path, read = read)
-	for a in dsv.next(&it) {
-		append(&got, a)
-	}
+	_ = testkit.drain_answers(&it, &got)
 	testing.expectf(t, len(got) == 0 && it.err != nil, "%d answers, %v", len(got), it.err)
 
 	ragged := transmute([]u8)string("a,b\n1,2,3\n4\n5,6\n")
@@ -32,9 +30,7 @@ answers_refuse :: proc(t: ^testing.T) {
 	testing.expectf(t, want_err == nil && len(want) == 3, "each_answer: %d answers, %v", len(want), want_err)
 	it = dsv.answers(ragged, .Csv, path, opts, read)
 	clear(&got)
-	for a in dsv.next(&it) {
-		append(&got, a)
-	}
+	_ = testkit.drain_answers(&it, &got)
 	testing.expectf(t, slice.equal(got[:], want[:]) && it.err == nil, "%d answers, want %d: %v", len(got), len(want), it.err)
 }
 
@@ -79,10 +75,7 @@ answers_agree :: proc(t: ^testing.T) {
 			opts := dsv.Options{no_header = variant >= 2}
 			it := dsv.answers(src, .Tsv, paths, opts, {stop_early = early}) if variant % 2 == 1 else dsv.answers(src, .Csv, paths, opts, {stop_early = early})
 			it.max_batch = batch
-			for a in dsv.next(&it) {
-				append(out, a)
-			}
-			return it.err
+			return testkit.drain_answers(&it, out)
 		},
 	}
 	testkit.expect_answers_agree(t, texts[:], {".[]", ".[][0]", ".[1:]", ".[-1]", ".[0][]", ".."}, 4, run)

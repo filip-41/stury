@@ -644,6 +644,11 @@ holds_inner_fact :: proc(doc: ^core.Document, node: core.Node_Index) -> bool {
 	return false
 }
 
+// Whether a markup fact of `role` stands before the value it is held by.
+is_head :: #force_inline proc(role: core.Role) -> bool {
+	return role == .Comment || role == .Instruction
+}
+
 // A member of an object node as a document writer lays it out: its key, its value and the key's text.
 Node_Member :: struct {
 	key, value: core.Node_Index,

@@ -78,7 +78,7 @@ text_fault :: proc(ins: ^Inputs, found: core.Fault, at: int, end := -1) -> (core
 	l, c := ins.parsed.line, ins.parsed.column
 	core.advance_position(&l, &c, data[:at])
 	ins.pinned = true
-	ins.walk, ins.walk_at = fault_walk(text, int(ins.run.opts.max_depth) if ins.run.opts.max_depth != 0 else core.MAX_DEPTH, l, c, seq && errors, seq && errors && resume < len(data), ins.bom_broken, ins.walk_spare), at
+	ins.walk, ins.walk_at = jq.fault_walk(text, int(ins.run.opts.max_depth) if ins.run.opts.max_depth != 0 else core.MAX_DEPTH, l, c, seq && errors, seq && errors && resume < len(data), ins.bom_broken, ins.walk_spare), at
 	if !seq && errors {
 		records.close(&ins.texts)
 		ins.texts = records.open(data, ins.as, ins.framing, u64(resume), runtime.heap_allocator())

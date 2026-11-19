@@ -79,10 +79,7 @@ answers_agree_with_each_answer :: proc(t: ^testing.T) {
 		iter = proc(src: []u8, paths: []core.Path, variant: int, early: bool, batch: int, out: ^[dynamic]core.Token_Answer) -> core.Error {
 			it := xml.answers(src, .Xml, paths, {}, {dups = .Refuse if variant == 1 else .Last, stop_early = early})
 			it.max_batch = batch
-			for a in xml.next(&it) {
-				append(out, a)
-			}
-			return it.err
+			return testkit.drain_answers(&it, out)
 		},
 	}
 	srcs := [?]string{RECORD_TEXT, "<a>x<b>1</b>y<b>2</b></a>", "<a><b>1</b><b>2</b></a", "<a><b>1</b></a><a/>"}

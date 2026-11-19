@@ -148,9 +148,9 @@ Inputs :: struct {
 	// jq's parser makes of the bytes before a fault, which plain --stream ends with the fault's message
 	events:      ^Events,
 	events_at:   int,
-	walk:        ^Fault_Walk,
+	walk:        ^jq.Fault_Walk,
 	walk_at:     int,
-	walk_spare:  ^Fault_Walk, // a walk that has ended, whose memory the next one takes
+	walk_spare:  ^jq.Fault_Walk, // a walk that has ended, whose memory the next one takes
 	fault_error: string,
 	bom_broken:  bool, // --stream-errors --seq: a cut byte order mark began the stream, so jq's parser restarts at every call
 	note:        string, // what the parse error that ends the run adds on the lines after it
@@ -183,7 +183,7 @@ next_input :: proc(ins: ^Inputs, own := false) -> (core.Value, string, jq.Input_
 			continue
 		}
 		if ins.walk != nil && ins.fault_error == "" {
-			if ev, more := fault_peek(ins.walk); more && ev.late {
+			if ev, more := jq.fault_peek(ins.walk); more && ev.late {
 				break
 			}
 		}
@@ -386,10 +386,10 @@ held_event :: proc(ins: ^Inputs) -> (v: core.Value, msg: string, status: jq.Inpu
 		ins.events = nil
 	}
 	if ins.walk != nil {
-		ev, more := fault_peek(ins.walk)
+		ev, more := jq.fault_peek(ins.walk)
 		if more && (ins.fault_error == "" || !ev.error && ev.at < len(ins.walk.p.src)) {
 			ins.walk.given += 1
-			ev.value = event_clone(ev.value)
+			ev.value = jq.event_clone(ev.value)
 			lines_through(ins, ins.walk_at + ev.at)
 			return ev.value, "", .Value, true
 		}

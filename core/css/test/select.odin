@@ -41,11 +41,12 @@ described :: proc(t: ^testing.T, doc: ^core.Document, selector: string, from: co
 		return ""
 	}
 	defer css.destroy(&sel)
-	found, e := css.select(doc, &sel, from)
+	found, e := css.select_value(core.Node_Ref{doc, from}, &sel, doc.readers.fold_names, false)
 	testing.expectf(t, e == nil, "%v", e, loc = loc)
 	defer delete(found)
 	b := strings.builder_make(context.temp_allocator)
-	for v, i in found {
+	for match, i in found {
+		v := match.value.(core.Node_Ref).node
 		if i > 0 {
 			strings.write_byte(&b, ' ')
 		}
@@ -190,15 +191,16 @@ a_select_reaches_inside_its_node :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	first, _ := css.compile("#c")
 	defer css.destroy(&first)
-	found, _ := css.select(&doc, &first)
+	found, _ := css.select_value(core.Node_Ref{&doc, core.ROOT}, &first, false, false)
 	defer delete(found)
 	if !testing.expect_value(t, len(found), 1) {
 		return
 	}
-	testing.expect_value(t, described(t, &doc, "*", found[0]), "title")
-	testing.expect_value(t, described(t, &doc, "lib > book > title", found[0]), "title")
-	testing.expect_value(t, described(t, &doc, "book", found[0]), "")
-	testing.expect_value(t, described(t, &doc, "title:only-child", found[0] + 1), "")
+	inside := found[0].value.(core.Node_Ref).node
+	testing.expect_value(t, described(t, &doc, "*", inside), "title")
+	testing.expect_value(t, described(t, &doc, "lib > book > title", inside), "title")
+	testing.expect_value(t, described(t, &doc, "book", inside), "")
+	testing.expect_value(t, described(t, &doc, "title:only-child", inside + 1), "")
 }
 
 @(test)

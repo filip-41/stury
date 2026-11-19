@@ -257,8 +257,7 @@ records_value :: proc(o: ^Opts, src: Source, path: string, data: []byte) -> core
 	all := core.new_array()
 	it := records.open(data, src.as, src.framing, allocator = heap)
 	for rec in records.next(&it) {
-		built, err := records.build(&it, rec, heap)
-		doc, fault := core.refuse_key_clash(built, err)
+		doc, fault := core.refuse_key_clash(records.build(&it, rec, heap))
 		if bad, is_fault := fault.?; is_fault {
 			tell_operand_fault(o, src, path, data, bad)
 			os.exit(EXIT_INPUT)

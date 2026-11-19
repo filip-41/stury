@@ -274,7 +274,7 @@ put_document :: proc(w: ^Writer, e: ^Elements, node: core.Node_Index) -> core.Ty
 	}
 	before := w.kept
 	for f in facts {
-		if is_head(f.role) {
+		if write.is_head(f.role) {
 			put_fact(w, f) or_return
 			write.put_byte(&w.out, '\n')
 		}
@@ -312,7 +312,7 @@ put_value :: proc(w: ^Writer, e: ^Elements, value: core.Value, lead: []core.Fact
 	if kind == .Array {
 		run_lead.allocator, run_tail.allocator = context.temp_allocator, context.temp_allocator
 		for f in facts {
-			append(&run_lead if is_head(f.role) else &run_tail, f)
+			append(&run_lead if write.is_head(f.role) else &run_tail, f)
 		}
 		facts = nil
 	}
@@ -329,7 +329,7 @@ put_value :: proc(w: ^Writer, e: ^Elements, value: core.Value, lead: []core.Fact
 		}
 	}
 	for f in facts {
-		if is_head(f.role) && f.role not_in rebuilt {
+		if write.is_head(f.role) && f.role not_in rebuilt {
 			put_fact(w, f) or_return
 			if e.top == 1 {
 				write.put_byte(&w.out, '\n')
@@ -678,12 +678,6 @@ put_escaped_comment :: proc(out: ^write.Out, body: string) -> core.Typed_Error_K
 	}
 	write.put_text(out, body)
 	return .None
-}
-
-// Whether a fact of `role` stands before the value it is held by.
-@(private)
-is_head :: #force_inline proc(role: core.Role) -> bool {
-	return role == .Comment || role == .Instruction
 }
 
 @(private)

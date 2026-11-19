@@ -26,6 +26,24 @@ Counted :: struct {
 	given: int,
 }
 
+// An `on` that passes the answers past the first `skip` to `on`.
+@(private)
+Skipping :: struct {
+	state: rawptr,
+	on:    proc(state: rawptr, a: core.Token_Answer) -> bool,
+	skip:  int,
+}
+
+@(private)
+skip_answer :: proc(state: rawptr, a: core.Token_Answer) -> bool {
+	s := (^Skipping)(state)
+	if s.skip > 0 {
+		s.skip -= 1
+		return true
+	}
+	return s.on(s.state, a)
+}
+
 @(private)
 count_answer :: proc(state: rawptr, a: core.Token_Answer) -> bool {
 	c := (^Counted)(state)
@@ -65,54 +83,8 @@ scan_as :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_
 @(private)
 answer_built :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_Options, counted: ^Counted, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
 	built, berr := build_as(src, handle, false, allocator)
-	if berr.kind != .None {
-		return {}, core.path_error(berr)
-	}
-	doc, err := built_answers(&built, paths, read.dups)
-	if err.kind != .None || counted.on == nil {
-		return doc, err
-	}
-	for a in doc.answers[min(counted.given, len(doc.answers)):] {
-		if !counted.on(counted.state, token_answer(&doc, a)) {
-			break
-		}
-	}
-	return doc, {}
-}
-
-// Answers `paths` over the document `built`, which it returns with the answers, or destroys on an error.
-@(private)
-built_answers :: proc(built: ^core.Document, paths: []core.Path, dups: core.Duplicates) -> (core.Document, core.Path_Error) {
-	answers, e := engine.query(built, paths, {dups}, built.allocator)
-	if e.kind == .None {
-		defer delete(answers, built.allocator)
-		built.answers, built.kept, built.missing = answers, nil, nil
-		if core.own_reads(built) == nil {
-			return built^, {}
-		}
-		e = {kind = .No_Memory}
-	}
-	core.destroy(built)
-	return {}, e
-}
-
-// The answer `each_answer` gives for answer `a` of the built document `doc`.
-@(private)
-token_answer :: proc(doc: ^core.Document, a: core.Answer) -> core.Token_Answer {
-	t := core.Token{kind = .Null}
-	lo, hi: u64
-	if a.node != core.NO_NODE && (a.outcome == .Found || a.outcome == .Wrong_Kind) {
-		t = doc.nodes[a.node]
-		if a.outcome == .Found {
-			lo, hi = core.scalar_ends(t)
-			if t.kind > .Plain {
-				lo, hi = t.lo, close_end(doc, a.node)
-			}
-		}
-	} else if a.owner != core.NO_NODE {
-		t = core.Token{lo = close_end(doc, a.owner), kind = .End}
-	}
-	return {t, lo, hi, a.path, a.outcome}
+	skipping := Skipping{counted.state, counted.on, counted.given}
+	return engine.scan_built(&built, berr, paths, read, &skipping, skip_answer if counted.on != nil else nil, allocator)
 }
 
 // Walks the document at `lo` of `src` with the hook of the read `h` of `paths`, the stream's when `stream` is set, from
@@ -176,15 +148,7 @@ answers_fill :: proc(it: ^engine.Answer_Iter) {
 	fault: Maybe(core.Fault)
 	found := true
 	if it.state == .Fresh {
-		if it.read.dups == .Refuse {
-			built, e := build_as(src, it.as, true, it.allocator)
-			core.destroy(&built)
-			if e.kind != .None {
-				engine.answers_fail(it, core.error_of(core.path_error(e)))
-				return
-			}
-		}
-		if !engine.answers_start(it, false, min(core.reserve_depth(opts.max_depth, len(src)), core.MAX_DEPTH)) {
+		if !engine.answers_start(it, false, min(core.reserve_depth(opts.max_depth, len(src)), core.MAX_DEPTH), build_as) {
 			return
 		}
 		aw, e := new(Answer_Walk, it.allocator)
@@ -237,22 +201,29 @@ answers_built :: proc(it: ^engine.Answer_Iter, given: int, hi: u64) {
 	_ = engine.scan_end(&it.scan, it.regs, 0, core.Fault{at = hi, rules = &RULES, kind = .Truncated}, &doc)
 	core.destroy(&doc)
 	built, berr := build_as(it.src, it.as, false, it.allocator)
-	if berr.kind != .None {
-		engine.answers_fail(it, core.error_of(core.path_error(berr)))
-		return
-	}
 	paths := it.paths if it.paths != nil else ([^]core.Path)(&it.one)[:1]
-	answered, err := built_answers(&built, paths, it.read.dups)
+	buffered := Buffered{it = it}
+	skipping := Skipping{&buffered, buffer_answer, given}
+	answered, err := engine.scan_built(&built, berr, paths, it.read, &skipping, skip_answer, it.allocator)
 	defer core.destroy(&answered)
-	if err.kind == .None {
-		for a in answered.answers[min(given, len(answered.answers)):] {
-			if _, e := append(&it.buffer, token_answer(&answered, a)); e != nil {
-				err = {kind = .No_Memory}
-				break
-			}
-		}
+	if err.kind == .None && buffered.failed {
+		err = {kind = .No_Memory}
 	}
 	engine.answers_fail(it, core.error_of(err))
+}
+
+@(private)
+Buffered :: struct {
+	it:     ^engine.Answer_Iter,
+	failed: bool,
+}
+
+@(private)
+buffer_answer :: proc(state: rawptr, a: core.Token_Answer) -> bool {
+	b := (^Buffered)(state)
+	_, e := append(&b.it.buffer, a)
+	b.failed = e != nil
+	return !b.failed
 }
 
 // The iterator's `release`: frees its walk.
@@ -386,9 +357,6 @@ built_record :: proc(it: ^records.Reader, h: ^engine.Scan, regs: core.Hook_Regs,
 		return
 	}
 	built, berr := build_document(it, rec, it.allocator)
-	if berr.kind != .None {
-		return rec, core.path_error(berr), true
-	}
-	last^, err = built_answers(&built, paths, read.dups)
+	last^, err = engine.scan_built(&built, berr, paths, read, nil, nil, it.allocator)
 	return rec, err, true
 }
