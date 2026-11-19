@@ -1,5 +1,6 @@
 package dsv_tests
 
+import "core:fmt"
 import "core:math/rand"
 import "core:mem"
 import "core:strings"
@@ -909,5 +910,45 @@ leaf_kinds_off :: proc(t: ^testing.T) {
 	testkit.expect_nil(t, err)
 	for c in 0 ..< 3 {
 		testing.expect_value(t, doc.nodes[cell_node(&doc, 0, c)].kind, core.Kind.Plain)
+	}
+}
+
+// Header names that differ only in their middle land in different slots, so a column lookup probes a few slots.
+@(test)
+similar_header_names_spread :: proc(t: ^testing.T) {
+	b: strings.Builder
+	strings.builder_init(&b)
+	defer strings.builder_destroy(&b)
+	COLUMNS :: 200
+	for col in 1 ..= COLUMNS {
+		if col > 1 {
+			strings.write_byte(&b, ',')
+		}
+		strings.write_string(&b, fmt.tprintf("col_%03d_val", col))
+	}
+	strings.write_string(&b, "\n")
+	for col in 1 ..= COLUMNS {
+		if col > 1 {
+			strings.write_byte(&b, ',')
+		}
+		strings.write_int(&b, col)
+	}
+	strings.write_string(&b, "\n")
+	doc, err := build(strings.to_string(b), .Csv)
+	defer core.destroy(&doc)
+	testkit.expect_nil(t, err)
+	slots := doc.tables_at[0].key_slots
+	testing.expect(t, len(slots) != 0)
+	longest, run := 0, 0
+	for s in slots {
+		run = s != 0 ? run + 1 : 0
+		longest = max(longest, run)
+	}
+	testing.expectf(t, longest < 24, "longest run of occupied key slots is %d", longest)
+	rec, _ := core.child_at(&doc, core.ROOT, 0)
+	for col in 1 ..= COLUMNS {
+		name := fmt.tprintf("col_%03d_val", col)
+		v, ok := core.member(&doc, rec, name)
+		testing.expectf(t, ok && v == rec + core.Node_Index(col), "%s -> %v %v", name, v, ok)
 	}
 }

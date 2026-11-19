@@ -240,14 +240,14 @@ index_keys :: proc(doc: ^Document, t: ^Table) -> runtime.Allocator_Error {
 	return nil
 }
 
-// Hashes a key by its length and its first and last bytes, which tell most header names apart.
+// Hashes every byte of a key, as header names often differ only in their middle.
 @(private)
 key_hash :: #force_inline proc "contextless" (s: string) -> u32 {
 	h := u32(len(s))
-	if len(s) > 0 {
-		h = h * 0x9E3779B1 ~ u32(s[0]) << 8 ~ u32(s[len(s) - 1])
+	for c in transmute([]u8)s {
+		h = (h ~ u32(c)) * 0x9E3779B1
 	}
-	return (h * 0x9E3779B1) >> 16
+	return h >> 15
 }
 
 // The tables of a partial document, whose records are positional and whose rows have no common width.
