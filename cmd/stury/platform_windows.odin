@@ -123,8 +123,8 @@ open_input :: proc(path: string) -> (^os.File, os.Error) {
 	return os.open(long_path(path))
 }
 
-// `path`, made absolute when it is too long to be taken as relative: core:os gives a long absolute path the `\\?\`
-// prefix that lifts MAX_PATH, and leaves a relative one as it is.
+// `path`, made absolute when it is too long to be taken as relative: where LongPathsEnabled is off, core:os gives a
+// long absolute path the `\\?\` prefix that lifts MAX_PATH, and leaves a relative one as it is.
 long_path :: proc(path: string) -> string {
 	if len(path) < 248 {
 		return path
