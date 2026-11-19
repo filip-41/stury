@@ -51,7 +51,8 @@ live16 :: #force_inline proc "contextless" (n: int) -> V #no_bounds_check {
 
 // Loads the 16 bytes at `src` in one instruction, with the mask of its first `n` lanes, for `n` below 16. The lanes
 // past `n` hold whatever follows `src` in its page. `ok` is false for a nil `src`, under the address sanitizer, and
-// when the 16 bytes could cross a 4096-byte page.
+// when the 16 bytes could cross a 4096-byte page. A page-aligned `src` is refused too, on purpose: the `- 1` makes a
+// nil `src` wrap to the largest offset, so one test refuses both.
 head16 :: #force_inline proc "contextless" (src: [^]u8, n: int) -> (v, live: V, ok: bool) {
 	when .Address in ODIN_SANITIZER_FLAGS {
 		return

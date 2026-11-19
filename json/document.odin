@@ -68,7 +68,8 @@ build_spec :: proc(src: []u8, $S: Spec, handle: core.As, refuse_duplicates: bool
 	// Every node takes two bytes of the text but an open container that stays open, which takes one: a closed container
 	// its brackets, a key its colon, and a scalar its comma or its parent's close. A walk faults at the first byte past
 	// a token, so the last token may be missing its second byte. So a text makes at most `(len(src) + 1 + depth) / 2`
-	// nodes, the hooks test no capacity, and `builder_end` returns the unused tail.
+	// nodes, the hooks test no capacity, and `builder_end` cuts `nodes` to the count made, leaving the unused tail in
+	// `nodes_alloc` until the document is destroyed.
 	depth := core.reserve_depth(opts.max_depth, len(src))
 	doc, err := build_reserved(src, q, S, handle, refuse_duplicates, allocator, (len(src) + depth) / 2 + 16, min(depth, core.MAX_DEPTH), 0)
 	if err.kind != .No_Memory {
