@@ -15,6 +15,15 @@
 - `--each` runs the filter on each file on its own, each output line labelled with the file's name, and exits with
   the worst file's status. A failing run over a directory without it says that `--each` exists.
 
+### Edits
+
+- XML and HTML edits move elements for a change of member order (`.r |= {c, a}`, `.r.b |= reverse`), where they were
+  refused. An element that holds text still keeps its order.
+- A YAML anchored node whose aliases the edit removes or replaces takes edits (`del(.base, .use)`). Under
+  `--merge-keys` only a document that holds a `<<` key refuses edits, not one with `<<` in a string or a comment.
+- TOML removals of several sections that end the file (`del(.t, .u)`, `.p |= .[:1]` on an array of tables) are made,
+  where they were refused as conflicting edits.
+
 
 ## 0.2.1 (2026-11-18)
 

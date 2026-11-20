@@ -588,8 +588,18 @@ content_an_element_cannot_hold_is_refused :: proc(t: ^testing.T) {
 		return write.set_node(l, at(d, "div", "p"), testkit.from_json(`{"B": 1}`))
 	})
 	expect_no_spelling(t, err)
-	_, err = edited(SRC, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+}
+
+// A reorder moves each element with its tags as the source spells them, and an element that holds text keeps its order.
+@(test)
+a_reorder_moves_the_elements :: proc(t: ^testing.T) {
+	out, err := edited(SRC, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
 		return core.reorder(l, at(d, "div"), {1, 0, 2})
+	})
+	testkit.expect_nil(t, err)
+	testing.expect_value(t, out, "<div id=a>\n  <br>\n  <p class=x>t</p>\n  <script>run()</script>\n</div>")
+	_, err = edited("<p>a<b>x</b>c<i>y</i></p>", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+		return core.reorder(l, at(d, "p"), {0, 3, 2, 1})
 	})
 	expect_frozen(t, err, .Reordered)
 }

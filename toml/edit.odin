@@ -198,11 +198,13 @@ Form :: enum u8 {
 	Tables, // an array of tables
 }
 
-// A header and the lines after it, in source order. `head` is where its head comments start.
+// A header and the lines after it, in source order. `head` is where its head comments start, and `cut` says a removal
+// takes it.
 @(private = "file")
 Section :: struct {
 	ls, head: u64,
 	node:     u32,
+	cut:      bool,
 }
 
 @(private = "file")
@@ -976,28 +978,38 @@ remove_lines :: proc(cx: ^Cx, v: u32) -> (head: u64) {
 	return head
 }
 
-// Every section the table `v` or the array of tables `v` owns, each with the comments above its header. A section that
-// ends the text takes the blank lines before it. Returns where the first section began.
+// Every section the table `v` or the array of tables `v` owns, each with the comments above its header. Returns where
+// the first section began.
 @(private = "file")
 remove_sections :: proc(cx: ^Cx, v: u32) -> (first: u64) {
-	last := u64(0)
 	count := 0
 	for i in v ..< v + cx.doc.nodes[v].n {
 		k := cx.sec_of[i]
 		if k < 0 {
 			continue
 		}
-		lo, hi := cx.sections[k].head, section_end(cx, int(k))
 		if count == 0 {
-			first = lo
+			first = cx.sections[k].head
 		}
 		count += 1
-		last = hi
-		add(cx, lo, hi, nil)
+		cx.sections[k].cut = true
+		add(cx, cx.sections[k].head, section_end(cx, int(k)), nil)
 	}
-	if count == 0 || last < cx.foot_at {
+	return
+}
+
+// The removed sections that end the text take the blank lines before the first of them. Each removal names its own
+// sections, so the run is known once every edit is applied.
+@(private = "file")
+cut_trailing_blanks :: proc(cx: ^Cx) {
+	k := len(cx.sections)
+	for k > 0 && cx.sections[k - 1].cut {
+		k -= 1
+	}
+	if k == len(cx.sections) {
 		return
 	}
+	first := cx.sections[k].head
 	lo := first
 	for lo > 0 && compose.blank_line(cx.src, compose.line_start(cx.src, lo - 1)) {
 		lo = compose.line_start(cx.src, lo - 1)
@@ -1005,7 +1017,6 @@ remove_sections :: proc(cx: ^Cx, v: u32) -> (first: u64) {
 	if lo < first {
 		add(cx, lo, first, nil)
 	}
-	return
 }
 
 // Puts the members of the table or array of tables `c` in `order`: a member's position, or past them an insert, which
@@ -1320,6 +1331,7 @@ edit_commit :: proc(list: ^core.Edit_List, _: u8, allocator: runtime.Allocator) 
 			return nil, 0, cx.err
 		}
 	}
+	cut_trailing_blanks(&cx)
 	if !splice_inline(&cx) {
 		return nil, 0, cx.err
 	}

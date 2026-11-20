@@ -349,7 +349,7 @@ text_before_read_on :: proc(doc: ^core.Document, lo: u64) -> u64 {
 @(private)
 edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 	for e in list.edits {
-		if at := written_at(list.doc, e); constructed(list.doc, at) {
+		if at := written_at(list.doc, e); constructed(list.doc, at) || e.op == .Reorder && moves_constructed(list.doc, e.node) {
 			return nil, 0, {kind = .Frozen, at = u64(e.node), inner = {rules = &RULES, detail = u8(Detail.Constructed)}}
 		}
 	}
@@ -402,6 +402,18 @@ written_at :: proc(doc: ^core.Document, e: core.Edit) -> core.Node_Index {
 		return e.node + 1
 	}
 	return e.node
+}
+
+// Whether a reorder of element `c` would move a member the tree construction made.
+@(private = "file")
+moves_constructed :: proc(doc: ^core.Document, c: core.Node_Index) -> bool {
+	it := core.pairs(doc, c)
+	for _, v in core.pair_next(&it) {
+		if constructed(doc, v) {
+			return true
+		}
+	}
+	return false
 }
 
 // Whether the tree construction implied, moved or copied member value `v`, or moved its text. No bytes of the source

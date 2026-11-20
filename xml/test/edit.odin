@@ -242,12 +242,23 @@ edits_xml_cannot_hold_are_refused :: proc(t: ^testing.T) {
 		return write.insert(l, core.ROOT, 1, "s", 1)
 	})
 	testkit.expect_kind(t, err, core.Document_Error_Kind.Bad_Result)
-	_, err = edited(SRC, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
-		return core.reorder(l, root(d), {1, 0})
-	})
-	testkit.expect_kind(t, err, core.Document_Error_Kind.Frozen)
 	_, err = edited("<!DOCTYPE r [<!ENTITY e \"<p>1</p>\">]><r>&e;</r>", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
 		return write.set_node(l, member(d, root(d), "p"), 2)
+	})
+	testkit.expect_kind(t, err, core.Document_Error_Kind.Frozen)
+}
+
+// A reorder moves each element with its attributes and the comment above it, and the white space between the places
+// stays. An element that holds text keeps its order.
+@(test)
+a_reorder_moves_the_elements :: proc(t: ^testing.T) {
+	out, err := edited("<r>\n  <!-- x -->\n  <x k=\"v\">t</x>\n  <y/>\n  <x>u</x>\n</r>\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+		return core.reorder(l, root(d), {2, 1, 0})
+	})
+	testkit.expect_nil(t, err)
+	testing.expect_value(t, out, "<r>\n  <x>u</x>\n  <y/>\n  <!-- x -->\n  <x k=\"v\">t</x>\n</r>\n")
+	_, err = edited("<r>a<x>t</x>b<y/></r>", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+		return core.reorder(l, root(d), {0, 3, 2, 1})
 	})
 	testkit.expect_kind(t, err, core.Document_Error_Kind.Frozen)
 }

@@ -28,7 +28,7 @@ Markup_Element :: struct {
 
 // Why a markup edit is refused, which a format names as a `Frozen` detail of its rules.
 Markup_Refusal :: enum u8 {
-	Reordered, // a reorder of an element's children
+	Reordered, // a reorder of an element that holds text, or that moves a member a new inline comment follows
 	Not_Name, // a rename of `#text`, or a name the format cannot spell
 	Text_Markup, // a text given an element or an array, or an element that holds text only given an element
 	Nested_Array, // an array set as the document, which has one root element
@@ -62,6 +62,8 @@ Cx :: struct {
 	a:       runtime.Allocator,
 	splices: [dynamic]Splice,
 	seen:    map[u64]struct{},
+	// The elements a reorder edit names, with the inserts into each, which the reorder places.
+	orders:  map[core.Node_Index][dynamic]core.Edit,
 	err:     core.Document_Error,
 }
 
@@ -76,8 +78,19 @@ markup_commit :: proc(list: ^core.Edit_List, m: ^Markup, allocator: runtime.Allo
 	context.allocator = cx.a
 	cx.splices = make([dynamic]Splice, cx.a)
 	cx.seen = make(map[u64]struct{}, cx.a)
+	cx.orders = make(map[core.Node_Index][dynamic]core.Edit, cx.a)
 	for e in list.edits {
-		if !apply(&cx, e) {
+		if e.op == .Reorder {
+			cx.orders[e.node] = make([dynamic]core.Edit, cx.a)
+		}
+	}
+	for e in list.edits {
+		if e.op == .Insert && e.node in cx.orders {
+			append(&cx.orders[e.node], e)
+		}
+	}
+	for e in list.edits {
+		if !apply(&cx, list, e) {
 			return nil, cx.err
 		}
 	}
@@ -271,7 +284,7 @@ drop_layout :: proc(cx: ^Cx, lo, hi: u64) {
 }
 
 @(private = "file")
-apply :: proc(cx: ^Cx, e: core.Edit) -> bool {
+apply :: proc(cx: ^Cx, list: ^core.Edit_List, e: core.Edit) -> bool {
 	switch e.op {
 	case .Set:
 		if e.role == .Key {
@@ -279,11 +292,12 @@ apply :: proc(cx: ^Cx, e: core.Edit) -> bool {
 		}
 		return set_value(cx, e.node, string(e.text))
 	case .Insert:
-		return insert_edit(cx, e)
+		// A reorder places the inserts into its element.
+		return e.node in cx.orders || insert_edit(cx, e)
 	case .Remove:
 		drop(cx, e.node)
 	case .Reorder:
-		return refuse_edit(cx, e.node, .Reordered)
+		return reorder(cx, list, e)
 	case .Set_Fact, .Remove_Fact:
 		return fact_edit(cx, e)
 	}
@@ -360,6 +374,97 @@ rename :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	if el.end_tag {
 		add(cx, el.close + 2, el.close + 1 + el.name - el.lo, string(e.text))
 	}
+	return true
+}
+
+// Puts the members of element `e.node` in the order `e.text` gives, with the inserts into it. A member keeps its bytes
+// from its first head comment through its inline comment, an edit inside it still applies, and the gaps between the
+// places of the members the order keeps stay where they are, with the members a removal takes. An insert past those
+// places follows the last, laid out by the white space before it. An element that holds text is refused, as moving a
+// run would join it to another.
+@(private = "file")
+reorder :: proc(cx: ^Cx, list: ^core.Edit_List, e: core.Edit) -> bool {
+	c := e.node
+	claim(&cx.seen, &cx.err, u64(c) << 8 | 0xfe) or_return
+	members := make([dynamic]core.Node_Index, cx.a)
+	index := make(map[core.Node_Index]int, cx.a)
+	it := core.pairs(cx.doc, c)
+	for _, v in core.pair_next(&it) {
+		if is_run(cx.doc, v) {
+			return refuse_edit(cx, c, .Reordered)
+		}
+		index[v] = len(members)
+		append(&members, v)
+	}
+	removed := make([]bool, len(members), cx.a)
+	// A new inline comment goes at a member's end, where the gap after its place starts, so a moved member takes none.
+	commented := make([]bool, len(members), cx.a)
+	for x in list.edits {
+		if i, member := index[x.node]; member {
+			removed[i] ||= x.op == .Remove
+			commented[i] ||= x.role == .Comment_Inline && (x.op == .Set_Fact || x.op == .Remove_Fact)
+		}
+	}
+	inserts := cx.orders[c][:]
+	slice.stable_sort_by(inserts, proc(a, b: core.Edit) -> bool {return a.at < b.at})
+	if err := order_check(e.text, removed, len(inserts), cx.a); err.kind != .None {
+		cx.err = err
+		return false
+	}
+	// Each member's bytes, and the places of the members the order keeps, in source order.
+	lo := make([]u64, len(members), cx.a)
+	hi := make([]u64, len(members), cx.a)
+	places := make([dynamic]int, cx.a)
+	for v, i in members {
+		el := cx.m.element(cx.doc, v)
+		lo[i], hi[i] = el.lo, el.hi
+		for f in core.all_facts(cx.doc, v) {
+			#partial switch f.role {
+			case .Comment:
+				lo[i] = min(lo[i], f.lo)
+			case .Comment_Inline:
+				hi[i] = max(hi[i], f.lo + u64(f.n))
+			}
+		}
+		if !removed[i] {
+			append(&places, i)
+		}
+	}
+	count := len(e.text) / 4
+	if len(places) == 0 {
+		for j in 0 ..< count {
+			insert_edit(cx, inserts[order_at(e.text, j) - len(members)]) or_return
+		}
+		return true
+	}
+	last := places[len(places) - 1]
+	lead, at, _ := extent(cx, members[last])
+	sep := string(cx.src[lead:at])
+	moves := make([dynamic]Move, cx.a)
+	for j in 0 ..< count {
+		k := order_at(e.text, j)
+		switch {
+		case j == 0:
+		case j < len(places):
+			append(&moves, Move{lo = hi[places[j - 1]], hi = lo[places[j]]})
+		case:
+			append(&moves, Move{text = transmute([]u8)sep, written = true})
+		}
+		if k >= len(members) {
+			x := inserts[k - len(members)]
+			if string(x.key) == core.MARKUP_TEXT || !cx.m.is_name(x.key) {
+				return refuse_edit(cx, c, .Reordered if string(x.key) == core.MARKUP_TEXT else .Not_Name)
+			}
+			written := elements(cx, c, string(x.key), items_of(cx, string(x.text)), sep) or_return
+			append(&moves, Move{text = transmute([]u8)written, written = true})
+			continue
+		}
+		if commented[k] && (j >= len(places) || places[j] != k) {
+			return refuse_edit(cx, c, .Reordered)
+		}
+		append(&moves, Move{lo = lo[k], hi = hi[k]})
+	}
+	append(&cx.splices, Splice{lo = lo[places[0]], hi = hi[last], moves = moves[:], seq = len(cx.splices)})
 	return true
 }
 

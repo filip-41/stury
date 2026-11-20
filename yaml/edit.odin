@@ -19,7 +19,7 @@ Edit_Detail :: enum u8 {
 	None,
 	Aliased, // a node inside the value an alias reads
 	Anchored, // an anchored node an alias reads, or a node inside one
-	Merged, // a text read with merge keys that holds a `<<`
+	Merged, // a text read with merge keys that holds a `<<` key
 	Reordered, // a reorder that moves an alias or an anchor past an anchor of its name
 	Alias_Node, // a member, a tag or an anchor added to an alias, or its alias removed
 	No_Line, // a comment where the node has no line of its own
@@ -276,26 +276,52 @@ edit_relocate :: proc(doc: ^core.Document, node: core.Node_Index, _: core.Site, 
 	return out[:], true
 }
 
-// Marks the nodes an edit may not touch: every node of a text read with merge keys that holds a `<<`, each node of an
-// alias's copy, and each node of an anchored node an alias reads. A copy starts where its anchored node starts, with its
-// kind, and only aliases and copies share both.
+// Marks the nodes an edit may not touch: every node of a text whose `<<` keys are read as merge keys, each node of an
+// alias's copy, and each node of an anchored node an alias reads that `edits` neither remove nor set. A copy starts
+// where its anchored node starts, with its kind, and only aliases and copies share both.
 @(private = "file")
-mark_frozen :: proc(cx: ^Cx) {
+mark_frozen :: proc(cx: ^Cx, edits: []core.Edit) {
 	doc := cx.doc
 	nodes := doc.nodes
 	cx.frozen = make([]Edit_Detail, len(nodes), cx.a)
-	if options_of(doc.as).merge_keys && bytes.contains(cx.src, transmute([]u8)string("<<")) {
+	if options_of(doc.as).merge_keys && holds_merge_key(cx.src, options_of(doc.as)) {
 		for &d in cx.frozen {
 			d = .Merged
 		}
 		return
 	}
-	read := make(map[[2]u64]struct{}, cx.a)
+	aliases := make([dynamic]u32, cx.a)
 	for i := u32(0); i < u32(len(nodes)); i += 1 {
 		if .Alias in cx.flags[i] && cx.frozen[i] == .None {
 			for j in i + 1 ..< i + u32(core.subtree_size(doc, core.Node_Index(i))) {
 				cx.frozen[j] = .Aliased
 			}
+			append(&aliases, i)
+		}
+	}
+	if len(aliases) == 0 {
+		return
+	}
+	// A node the edits remove or set, or one inside it, reads nothing once they are applied. An edit that writes an
+	// alias, as a fact or a `*` in a value, may read any anchor, so then every alias of the source still reads.
+	gone := make([]bool, len(nodes), cx.a)
+	writes_alias := false
+	for e in edits {
+		writes_alias ||= e.op == .Set_Fact && e.role == .Alias || (e.op == .Insert || e.op == .Set && e.role != .Key) && bytes.contains(e.text, transmute([]u8)string("*"))
+	}
+	if !writes_alias {
+		for e in edits {
+			if e.op == .Remove || e.op == .Set && e.role != .Key {
+				gone[e.node] = true
+			}
+		}
+		for i in 1 ..< len(nodes) {
+			gone[i] ||= gone[cx.parent[i]]
+		}
+	}
+	read := make(map[[2]u64]struct{}, cx.a)
+	for i in aliases {
+		if !gone[i] {
 			read[{nodes[i].lo, u64(nodes[i].kind)}] = {}
 		}
 	}
@@ -310,6 +336,30 @@ mark_frozen :: proc(cx: ^Cx) {
 			}
 		}
 	}
+}
+
+// Whether the document at the start of `src` holds a plain `<<` key, which a read under merge keys may take as a merge.
+// The text is walked without merge keys, so the key comes as a token of its own.
+@(private = "file")
+holds_merge_key :: proc(src: []u8, opts: Options) -> bool {
+	if !bytes.contains(src, transmute([]u8)string("<<")) {
+		return false
+	}
+	Seek :: struct {
+		src:   []u8,
+		found: bool,
+	}
+	seek := Seek{src = src}
+	plain := opts
+	plain.merge_keys = false
+	walk(src, 0, .Yaml_1_2, plain, &seek, nil, proc "contextless" (h: ^Seek, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+		if t.role == .Key && t.kind == .Plain && t.n == 2 && h.src[t.lo] == '<' && h.src[t.lo + 1] == '<' && style_of(t.spelling) == .Plain {
+			h.found = true
+			return s, .Stop
+		}
+		return s, .Next
+	})
+	return seek.found
 }
 
 // The commit's view of the text: each node's parent, last child, first and past-last byte and flags.
@@ -758,7 +808,7 @@ edit_commit :: proc(list: ^core.Edit_List, _: u8, allocator: runtime.Allocator) 
 	cx.groups = make(map[u32]Group, cx.a)
 	cx.items = make(map[u32][]Item, cx.a)
 	build_geometry(&cx)
-	mark_frozen(&cx)
+	mark_frozen(&cx, list.edits[:])
 	for e in list.edits {
 		if !apply(&cx, e) {
 			return nil, 0, cx.err

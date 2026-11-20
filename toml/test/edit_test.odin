@@ -256,6 +256,24 @@ remove_takes_every_element_of_an_array_of_tables :: proc(t: ^testing.T) {
 	testing.expect_value(t, out, "a = 1\n")
 }
 
+// Removals of sections that end the text, each its own edit, take the blank lines before the first of them once.
+@(test)
+removals_of_the_last_sections_take_the_blank_lines_before_them :: proc(t: ^testing.T) {
+	out, err := edited("a = 1\n\n[s]\nk = 1\n\n[t]\nk = 2\n\n[u]\nk = 3\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+		core.remove(l, member(d, core.ROOT, "u")) or_return
+		return core.remove(l, member(d, core.ROOT, "t"))
+	})
+	testkit.expect_nil(t, err)
+	testing.expect_value(t, out, "a = 1\n\n[s]\nk = 1\n")
+	out, err = edited("[[p]]\nk = 1\n\n[[p]]\nk = 2\n\n[[p]]\nk = 3\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+		p := member(d, core.ROOT, "p")
+		core.remove(l, core.child_at(d, p, 1) or_else 0) or_return
+		return core.remove(l, core.child_at(d, p, 2) or_else 0)
+	})
+	testkit.expect_nil(t, err)
+	testing.expect_value(t, out, "[[p]]\nk = 1\n")
+}
+
 @(test)
 removing_every_member_and_inserting_rewrites_the_inline_table :: proc(t: ^testing.T) {
 	out, err := edited("a = {x = 1}\nb = [1, 2]\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {

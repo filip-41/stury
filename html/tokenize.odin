@@ -139,7 +139,7 @@ Detail :: enum u8 {
 	Encoding, // `Bad_Char`: a byte order mark or a `meta` names an encoding other than UTF-8, at the label
 	Constructed, // `Frozen`: a node the tree construction implied, moved or copied, which no bytes of the source spell where it stands
 	Split, // `Frozen`: a text the tree construction joined across a tag
-	Reordered, // `Frozen`: a reorder of an element's children
+	Reordered, // `Frozen`: a reorder of an element that holds text, or one that moves a member a new inline comment follows
 	Not_Name, // `Frozen`: a rename of `#text`, or to a name HTML does not read as written
 	Text_Markup, // `Frozen`: a text run or a raw text element given an element or an array
 	Nested_Array, // `Frozen`: an array set as the document, which has one root element
@@ -217,7 +217,7 @@ RULES := core.Rules{"html", {
 	{"encoding", "Encoding other than UTF-8"},
 	{"constructed", "Node is implied, moved or copied by the tree construction"},
 	{"split", "Text is joined across a tag by the tree construction"},
-	{"reordered", "An element's children keep their order"},
+	{"reordered", "An element that holds text keeps its children's order, and a moved element takes no new inline comment"},
 	{"not_name", "An element's name is a lower-case HTML name, and `#text` is no element"},
 	{"text_markup", "Text holds no element and no array"},
 	{"nested_array", "An element holds no array: an array is the elements of one name"},

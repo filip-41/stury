@@ -301,7 +301,62 @@ aliases_and_merges_freeze_what_they_read :: proc(t: ^testing.T) {
 		{src = "a: &x 1\nb: 2\n", path = "a", text = "2", want = "a: &x 2\nb: 2\n"},
 		{src = "a: 1\nb: 2\n", path = "a", text = "1", op = .Remove, want = "b: 2\n"},
 	})
-	expect_rules(t, {{src = "a: &x {k: 1}\nb:\n  <<: *x\n  l: 2\n", path = "b.l", text = "3", refused = "merged"}}, {merge_keys = true})
+	expect_rules(t, {
+		{src = "a: &x {k: 1}\nb:\n  <<: *x\n  l: 2\n", path = "b.l", text = "3", refused = "merged"},
+		{src = "a: 1\nb: \"<<\"\nc: |\n  << x\n# <<\n", path = "a", text = "2", want = "a: 2\nb: \"<<\"\nc: |\n  << x\n# <<\n"},
+	}, {merge_keys = true})
+}
+
+// An anchored node no alias reads once the edits are applied takes edits: its aliases are removed or set with it.
+@(test)
+an_anchor_whose_aliases_go_takes_edits :: proc(t: ^testing.T) {
+	doc, _ := build("a: &x\n  k: 1\nb: *x\nc: [*x]\nd: 3\n")
+	defer core.destroy(&doc)
+	list := core.edit_list_init(&doc, context.temp_allocator)
+	a, _ := core.member(&doc, core.ROOT, "a")
+	k, _ := core.member(&doc, a, "k")
+	b, _ := core.member(&doc, core.ROOT, "b")
+	c, _ := core.member(&doc, core.ROOT, "c")
+	testing.expect_value(t, set(&list, k, "2").kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, set(&list, b, "0").kind, core.Document_Error_Kind.None)
+	_, _, err := commit(&list)
+	testing.expect_value(t, core.rule_of(err.inner).code, "anchored")
+	testing.expect_value(t, document_error(core.remove(&list, c)).kind, core.Document_Error_Kind.None)
+	out, _, cerr := commit(&list)
+	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, string(out), "a: &x\n  k: 2\nb: 0\nd: 3\n")
+	removal := core.edit_list_init(&doc, context.temp_allocator)
+	for name in ([]string{"a", "b", "c"}) {
+		v, _ := core.member(&doc, core.ROOT, name)
+		testing.expect_value(t, document_error(core.remove(&removal, v)).kind, core.Document_Error_Kind.None)
+	}
+	out, _, cerr = commit(&removal)
+	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, string(out), "d: 3\n")
+	// A value the edits write that spells an alias may read the anchor.
+	written := core.edit_list_init(&doc, context.temp_allocator)
+	testing.expect_value(t, set(&written, k, "2").kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, document_error(core.remove(&written, b)).kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, document_error(core.remove(&written, c)).kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, insert(&written, core.ROOT, 4, "e", true, "*x").kind, core.Document_Error_Kind.None)
+	_, _, cerr = commit(&written)
+	testing.expect_value(t, core.rule_of(cerr.inner).code, "anchored")
+}
+
+// An order of the members an edit keeps is judged without the members it removes.
+@(test)
+an_order_skips_the_removed_aliases :: proc(t: ^testing.T) {
+	doc, _ := build("a: 1\nb: &x 2\nc: *x\nd: 3\n")
+	defer core.destroy(&doc)
+	list := core.edit_list_init(&doc, context.temp_allocator)
+	for name in ([]string{"b", "c"}) {
+		v, _ := core.member(&doc, core.ROOT, name)
+		testing.expect_value(t, document_error(core.remove(&list, v)).kind, core.Document_Error_Kind.None)
+	}
+	testing.expect_value(t, document_error(core.reorder(&list, core.ROOT, {3, 0})).kind, core.Document_Error_Kind.None)
+	out, _, err := commit(&list)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, string(out), "d: 3\na: 1\n")
 }
 
 @(test)

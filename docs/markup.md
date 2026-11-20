@@ -317,7 +317,7 @@ before its first token.
   insert between two `p` in an implied `body`, or a set of an element whose implied descendants it replaces, is made.
   A text read across a start tag the tree dropped, as `html` inside a `p`, is refused as `split`, since its span holds
   the tag's effect.
-- Content in a void element is `void`, an array in an array `nested_array`, and a change of member order `reordered`.
+- Content in a void element is `void`, an array in an array `nested_array`, and a change of member order in an element that holds text `reordered`. A reorder elsewhere moves each element with its tags, the comments above it and the comment on its line, and the white space between the places stays.
 - - The output is built again with the document's options and compared with the source document. A node no edit wrote
   reads as it did, and the content an edit wrote reads as it reads alone as a fragment in its element. A result that
   differs is `.Bad_Result` with the detail `reread` at the first byte that differs, so a `div` or `p` in a `p`, a `td`

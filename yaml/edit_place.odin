@@ -470,7 +470,7 @@ regroup :: proc(cx: ^Cx, c: u32, g: ^Group) -> bool {
 			cx.err = e
 			return false
 		}
-		if names_cross(cx, items, order) {
+		if names_cross(cx, items, removed, order) {
 			return refuse_edit(cx, c, .Reordered)
 		}
 	}
@@ -483,10 +483,10 @@ regroup :: proc(cx: ^Cx, c: u32, g: ^Group) -> bool {
 	return regroup_block(cx, c, items, removed, g.inserts[:])
 }
 
-// Whether `order` puts two members of a collection out of their source order where both hold an anchor or an alias
-// of one name, when the text holds an alias: an alias reads the last anchor of its name before it.
+// Whether `order` puts two members of a collection that `removed` keeps out of their source order where both hold an
+// anchor or an alias of one name, when the text holds an alias: an alias reads the last anchor of its name before it.
 @(private = "file")
-names_cross :: proc(cx: ^Cx, items: []Item, order: []u8) -> bool {
+names_cross :: proc(cx: ^Cx, items: []Item, removed: []bool, order: []u8) -> bool {
 	doc := cx.doc
 	aliased := false
 	for f in doc.facts {
@@ -507,6 +507,9 @@ names_cross :: proc(cx: ^Cx, items: []Item, order: []u8) -> bool {
 		}
 	}
 	for it, k in items {
+		if removed[k] {
+			continue
+		}
 		names := make([dynamic]string, cx.a)
 		first := it.key if it.key != NIL else it.value
 		for i in first ..< it.value + u32(core.subtree_size(doc, core.Node_Index(it.value))) {

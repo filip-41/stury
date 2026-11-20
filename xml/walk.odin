@@ -78,7 +78,7 @@ Detail :: enum u8 {
 	Subset, // `Bad_Char`: a byte in the internal subset that begins no declaration, reference or comment
 	Parameter_Reference, // `Bad_Char`: a parameter-entity reference inside a declaration or an internal entity's value
 	Replacement, // `Frozen`: a node whose bytes are an entity's literal or an attribute-list default in the DTD
-	Reordered, // `Frozen`: a reorder of an element's children
+	Reordered, // `Frozen`: a reorder of an element that holds text, or one that moves a member a new inline comment follows
 	Not_Name, // `Frozen`: a rename of `#text`, or to a name that is no XML name or has a colon
 	Text_Markup, // `Frozen`: a text run given an element or an array
 	Nested_Array, // `Frozen`: an array set as the document, which has one root element
@@ -137,7 +137,7 @@ RULES := core.Rules {
 		{"subset", "Invalid internal subset"},
 		{"parameter_reference", "Parameter-entity reference inside a declaration"},
 		{"replacement", "Node is an entity's replacement text or a declared default"},
-		{"reordered", "An element's children keep their order"},
+		{"reordered", "An element that holds text keeps its children's order, and a moved element takes no new inline comment"},
 		{"not_name", "An element's name is an XML name with no colon, and `#text` is no element"},
 		{"text_markup", "Text holds no element and no array"},
 		{"nested_array", "An element holds no array: an array is the elements of one name"},
