@@ -126,15 +126,11 @@ side_destroy :: proc(s: ^Side) {
 // Whether `from` takes only values `to` takes.
 @(private = "file")
 inclusion :: proc(from, to: ^Side, allocator: mem.Allocator) -> (in_: Inclusion) {
-	p := Prover {
-		from    = from,
-		to      = to,
-		running = make(map[string]struct{}, context.temp_allocator),
-	}
+	p := prover_of(from, to)
 	if included(&p, {from.d.root}, {to.d.root}, 0) && !p.exhausted {
 		return {verdict = .Yes}
 	}
-	text, found, searched_out := refute(from, to)
+	text, found, searched_out := refute(from, to, p.foci[:])
 	switch {
 	case found:        return {verdict = .No, witness = strings.clone(text, allocator)}
 	case searched_out: return {verdict = .Unknown, reason = p.why if p.why != "" else "search"}

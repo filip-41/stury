@@ -124,6 +124,16 @@ is_run :: proc(doc: ^core.Document, v: core.Node_Index) -> bool {
 	return v != core.ROOT && core.key_equals(doc, v - 1, core.MARKUP_TEXT)
 }
 
+// The start of the white space that ends at `at`.
+@(private = "file")
+ws_before :: proc(src: []u8, at: u64) -> u64 {
+	lo := at
+	for lo > 0 && kernel.is_markup_ws(src[lo - 1]) {
+		lo -= 1
+	}
+	return lo
+}
+
 // The bytes member value `v` stands on: a text run's own, or its element's after the white space a reader drops before
 // it, which stands between the element and the markup before it.
 @(private = "file")
@@ -134,9 +144,7 @@ extent :: proc(cx: ^Cx, v: core.Node_Index) -> (lead, lo, hi: u64) {
 	}
 	e := cx.m.element(cx.doc, v)
 	lead = e.lo
-	for lead > 0 && kernel.is_markup_ws(cx.src[lead - 1]) {
-		lead -= 1
-	}
+	lead = ws_before(cx.src, lead)
 	if lead == 0 || cx.src[lead - 1] != '>' {
 		lead = e.lo
 	}
@@ -514,6 +522,75 @@ insert_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	return true
 }
 
+// Writes the attribute bodies of `e` over `own`, the attributes in an element's start tag: an attribute whose body is
+// the same keeps its bytes, a changed one is written where it stands, one the bodies drop goes with the white space
+// before it, and new ones follow the last. False when the bodies put the attributes in another order or a new one before
+// one the element has, for the caller to write them all. `keys` are the names of `own` as the source spells them.
+@(private = "file")
+attributes_in_place :: proc(cx: ^Cx, e: core.Edit, own: []core.Fact, keys: []string, count: int) -> bool {
+	if len(own) == 0 {
+		return false
+	}
+	matched := make([]int, len(own), cx.a)
+	slice.fill(matched, -1)
+	previous, added := -1, false
+	for k in 0 ..< count {
+		name := body_name(string(fact_body(e, k)))
+		found := -1
+		for key, i in keys {
+			if matched[i] < 0 && key == name {
+				found = i
+				break
+			}
+		}
+		if found < 0 {
+			added = true
+			continue
+		}
+		if found < previous || added {
+			return false
+		}
+		matched[found], previous = k, found
+	}
+	// A dropped attribute goes with the white space after it, and the dropped ones that end the tag with the white space
+	// before the first of them.
+	tail := len(own)
+	for tail > 0 && matched[tail - 1] < 0 {
+		tail -= 1
+	}
+	for f, i in own {
+		hi := f.lo + u64(f.n)
+		switch {
+		case matched[i] < 0:
+			lo := ws_before(cx.src, f.lo) if i == tail else f.lo
+			if i + 1 < len(own) {
+				hi = own[i + 1].lo
+			}
+			add(cx, lo, hi, "")
+		case string(fact_body(e, matched[i])) != core.attribute_source_body(cx.doc, f):
+			add(cx, f.lo, hi, string(fact_body(e, matched[i])))
+		}
+	}
+	if added {
+		b := make([dynamic]u8, cx.a)
+		for k in 0 ..< count {
+			if !slice.contains(matched, k) {
+				puts(&b, " ", string(fact_body(e, k)))
+			}
+		}
+		at := own[len(own) - 1].lo + u64(own[len(own) - 1].n)
+		add(cx, at, at, string(b[:]))
+	}
+	return true
+}
+
+// The name of attribute body `body`, what stands before its `=`.
+@(private = "file")
+body_name :: proc(body: string) -> string {
+	eq := strings.index_byte(body, '=')
+	return strings.trim_right_space(body[:eq if eq >= 0 else len(body)])
+}
+
 // Replaces the comments or the attributes of `e.node` of `e.role`: the first where it stands, the others with the white
 // space before them. New ones go before an element, after an element, before an end tag or the text's end, or after an
 // element's name.
@@ -528,9 +605,31 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 	el := cx.m.element(cx.doc, v)
 	b := make([dynamic]u8, cx.a)
 	count := 0 if e.op == .Remove_Fact else fact_count(e)
+	mine := make([dynamic]core.Fact, cx.a)
+	keys := make([dynamic]string, cx.a)
+	for f in core.all_facts(cx.doc, v) {
+		if f.role == e.role && (f.role != .Attribute || f.lo >= el.lo) {
+			append(&mine, f)
+			if f.role == .Attribute {
+				key, _ := cx.doc.readers.attribute(cx.doc, f)
+				append(&keys, string(cx.src[key.lo:][:key.n]))
+			}
+		}
+	}
+	named := make([dynamic]string, cx.a)
 	for k in 0 ..< count {
 		body := string(fact_body(e, k))
-		if !cx.m.fact(e.role, body) {
+		// A name the element's source spells reads as it does there, so a body of that name is judged under one that
+		// needs no folding, unless it adds an attribute of that name beside the source's.
+		judged := body
+		if name := body_name(body); e.role == .Attribute && slice.contains(keys[:], name) {
+			append(&named, name)
+			if slice.count(named[:], name) > slice.count(keys[:], name) {
+				return refuse_edit(cx, v, .Attribute_Body)
+			}
+			judged = strings.concatenate({"a", body[len(name):]}, cx.a)
+		}
+		if !cx.m.fact(e.role, judged) {
 			return refuse_edit(cx, v, .Attribute_Body if e.role == .Attribute else .Comment_Body)
 		}
 		if e.role == .Attribute {
@@ -539,15 +638,13 @@ fact_edit :: proc(cx: ^Cx, e: core.Edit) -> bool {
 			spell_comment(&b, core.MARKUP_COMMENTS, transmute([]u8)body, false, false)
 		}
 	}
+	if e.role == .Attribute && v != core.ROOT && count > 0 && attributes_in_place(cx, e, mine[:], keys[:], count) {
+		return true
+	}
+	// A removed comment goes with the white space before it, and a replaced one keeps the first's.
 	first := true
-	for f in core.all_facts(cx.doc, v) {
-		if f.role != e.role || f.role == .Attribute && f.lo < el.lo {
-			continue
-		}
-		lo := f.lo
-		for lo > 0 && kernel.is_markup_ws(cx.src[lo - 1]) && (f.role == .Attribute || !first) {
-			lo -= 1
-		}
+	for f in mine {
+		lo := ws_before(cx.src, f.lo) if f.role == .Attribute || !first || len(b) == 0 else f.lo
 		add(cx, lo, f.lo + u64(f.n), string(b[:]) if first else "")
 		first = false
 	}

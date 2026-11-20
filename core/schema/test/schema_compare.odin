@@ -105,6 +105,70 @@ compare_arrays_and_objects :: proc(t: ^testing.T) {
 	expect_verdicts(t, `{"type":"object","properties":{"a":{"type":"integer"}},"required":["a"]}`, `{"type":"object","properties":{"a":{"type":"number"},"b":{"type":"string"}},"required":["a"]}`, .No, .No)
 }
 
+// A `oneOf` takes a value when one arm takes all of it and no other arm shares a value with that arm: their kinds
+// differ, or a member both require holds constants that differ. Arms that may share a value prove nothing.
+@(test)
+compare_one_of :: proc(t: ^testing.T) {
+	defs :: `"$defs":{"cat":{"type":"object","properties":{"kind":{"const":"cat"}},"required":["kind"]},"dog":{"type":"object","properties":{"kind":{"const":"dog"}},"required":["kind"]},"bird":{"type":"object","properties":{"kind":{"enum":["bird"]}},"required":["kind"]}}`
+	two :: `{"oneOf":[{"$ref":"#/$defs/cat"},{"$ref":"#/$defs/dog"}],` + defs + `}`
+	three :: `{"oneOf":[{"$ref":"#/$defs/cat"},{"$ref":"#/$defs/dog"},{"$ref":"#/$defs/bird"}],` + defs + `}`
+	expect_verdicts(t, two, three, .Yes, .No, {"", `{"kind":"bird"}`})
+	expect_verdicts(t, two, `{"anyOf":[{"$ref":"#/$defs/cat"},{"$ref":"#/$defs/dog"}],` + defs + `}`, .Yes, .Yes)
+	expect_verdicts(t, `{"type":"object","properties":{"a":{"type":"string"}}}`, `{"type":"object","properties":{"a":{"oneOf":[{"type":"string"},{"type":"null"}]}}}`, .Yes, .No, {"", `{"a":null}`})
+	expect_verdicts(t, `{"oneOf":[{"type":"string"},{"type":"integer"}]}`, `{"anyOf":[{"type":"string"},{"type":"integer"}]}`, .Yes, .Yes)
+	expect_verdicts(t, `{"type":"integer"}`, `{"oneOf":[{"type":"integer"},{"type":"number","minimum":0}]}`, .No, .No, {"0", "0.5"})
+	untyped :: `{"oneOf":[{"properties":{"k":{"const":"a"}},"required":["k"]},{"properties":{"k":{"const":"b"}},"required":["k"]}]}`
+	expect_verdicts(t, `{}`, untyped, .No, .Yes, {"{}", ""})
+}
+
+// An `if` holds where its `then` and its `else` both hold, or where the `if` and the `then` do.
+@(test)
+compare_conditionals :: proc(t: ^testing.T) {
+	zip :: `{"type":"object","properties":{"zip":{"type":"string"}},"required":["zip"]`
+	cond :: `"if":{"properties":{"country":{"const":"US"}},"required":["country"]},"then":{"required":["zip"]}`
+	expect_verdicts(t, zip + `}`, zip + `,` + cond + `}`, .Yes, .Yes)
+	us :: `{"type":"object","properties":{"country":{"const":"US"},"zip":{}},"required":["country","zip"]}`
+	expect_verdicts(t, us, `{` + cond + `,"else":{"type":"string"}}`, .Yes, .No)
+	expect_verdicts(t, `{"type":"object","properties":{"country":{"type":"string"}}}`, `{"type":"object","properties":{"country":{"type":"string"}},` + cond + `}`, .No, .Yes, {`{"country":"US"}`, ""})
+}
+
+// A member is judged by its own node and by each pattern its name matches, and a name no schema names by the pattern
+// spelled the same in both, or by the other members' node.
+@(test)
+compare_pattern_properties :: proc(t: ^testing.T) {
+	ext :: `{"type":"object","patternProperties":{"^x-":{"type":"string"}}}`
+	expect_verdicts(t, ext, `{"type":"object","patternProperties":{"^x-":{"type":["string","number"]}}}`, .Yes, .No)
+	expect_verdicts(t, ext, `{"type":"object"}`, .Yes, .No)
+	named :: `{"type":"object","properties":{"x-a":{"type":"integer"}},"patternProperties":{"^x-":{"type":"number"}}}`
+	expect_verdicts(t, named, `{"type":"object","patternProperties":{"^x-":{"type":"number"}}}`, .Yes, .No, {"", `{"x-a":0.5}`})
+	closed :: `{"type":"object","properties":{"a":{"type":"string"}},"patternProperties":{"^x-":{"type":"string"}},"additionalProperties":false}`
+	expect_verdicts(t, closed, `{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"integer"}},"patternProperties":{"^x-":{"type":"string"}},"additionalProperties":false}`, .Yes, .No, {"", `{"b":0}`})
+}
+
+// `unevaluatedProperties` takes the members of what the node reaches through `$ref` and `allOf` as evaluated. An
+// `additionalProperties` reached evaluates every member, so a closed rule beside it closes nothing.
+@(test)
+compare_unevaluated_properties :: proc(t: ^testing.T) {
+	defs :: `"$defs":{"base":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}`
+	old :: `{"allOf":[{"$ref":"#/$defs/base"}],"properties":{"name":{"type":"string"}},"unevaluatedProperties":false,` + defs + `}`
+	new :: `{"allOf":[{"$ref":"#/$defs/base"}],"properties":{"name":{"type":"string"},"tag":{"type":"string"}},"unevaluatedProperties":false,` + defs + `}`
+	expect_verdicts(t, old, new, .Yes, .No)
+	open :: `{"type":"object","additionalProperties":true,"unevaluatedProperties":false}`
+	expect_verdicts(t, open, `{"type":"object","properties":{"a":{}},"unevaluatedProperties":false}`, .No, .Yes, {`{"zz":null}`, ""})
+}
+
+// A witness is looked for first at the place the proof stopped at, set into a value of the whole.
+@(test)
+compare_witness_at_the_place :: proc(t: ^testing.T) {
+	address :: `{"type":"object","properties":{"street":{"type":"string"},"city":{"type":"string"},"zip":{"type":"string"}},"required":["street","city"]}`
+	wider :: `{"type":"object","properties":{"street":{"type":"string"},"city":{"type":"string"},"zip":{"type":"string"},"country":{"type":"string"}},"required":["street","city"]}`
+	holder :: proc(target: string) -> string {
+		return fmt.tprintf(`{{"type":"object","properties":{{"home":{{"$ref":"#/$defs/a"}}}},"$defs":{{"a":%s}}}}`, target)
+	}
+	expect_verdicts(t, holder(address), holder(wider), .No, .Yes)
+	expect_verdicts(t, `{"type":"array","prefixItems":[{"type":"number"},{"type":"number"}]}`, `{"type":"array","prefixItems":[{"type":"number"},{"type":"number"},{"type":"number"}]}`, .No, .Yes)
+}
+
 // One side of a change as JSON, or `none` when the change has no such side.
 side_json :: proc(side: Maybe(core.Value)) -> string {
 	v, present := side.?
@@ -176,6 +240,12 @@ compare_yes_is_never_refuted :: proc(t: ^testing.T) {
 		`{"type":"object","required":["a"],"additionalProperties":false,"properties":{"a":{"type":"integer"}}}`,
 		`{"allOf":[{"type":"integer"},{"minimum":2}]}`,
 		`{"not":{"type":"null"}}`,
+		`{"oneOf":[{"type":"string"},{"type":"integer","minimum":0}]}`,
+		`{"oneOf":[{"type":"integer"},{"type":"number","minimum":0}]}`,
+		`{"type":"object","patternProperties":{"^a":{"type":"integer"}}}`,
+		`{"type":"object","properties":{"a":{"type":"integer"}},"unevaluatedProperties":false}`,
+		`{"if":{"type":"integer"},"then":{"minimum":2},"else":{"type":"string"}}`,
+		`{"type":"object","properties":{"a":{"const":1}},"required":["a"]}`,
 	}
 	pool := [?]string {
 		`null`, `true`, `0`, `1`, `3`, `7`, `-1`, `1.5`, `""`, `"a"`, `"abc"`, `[]`, `[1]`, `[0,1]`, `[1,2,3]`, `["a"]`, `{}`, `{"a":1}`, `{"a":1.5}`, `{"a":"x"}`, `{"b":1}`, `{"a":1,"b":2}`,

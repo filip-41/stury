@@ -379,10 +379,10 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 			usage_error("--from %s cannot be combined with %s", from, other)
 		}
 	}
+	if cli.command == .Check && cli.formats.to != nil && cli.schema.filter == nil {
+		usage_error("check writes nothing: --to %s has no use there", to)
+	}
 	if o.to != .Json {
-		if cli.command == .Check {
-			usage_error("check writes nothing: --to %s has no use there", to)
-		}
 		other := unhonoured_flag(cli, FORMATS[o.to].caps.writes) if writes_cells(o) || writes_texts(o) else "--seq" if o.seq else cli.layout_flag if writes_lines(o) else ""
 		if other != "" {
 			usage_error("%s cannot be combined with --to %s", other, to)

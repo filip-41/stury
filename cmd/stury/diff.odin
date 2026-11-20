@@ -94,7 +94,8 @@ key_rule :: proc(spec: string) -> diff.Key_Rule {
 }
 
 // `stury diff`, which tells the difference and exits.
-diff_main :: proc(run: ^Run, cli: ^Cli) -> ! {
+diff_main :: proc(run: ^Run, ins: ^Inputs) {
+	cli := ins.cli
 	d := &cli.diff
 	o := &run.opts
 	src := input_source(o, cli.json_reading)
@@ -137,10 +138,11 @@ diff_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	a := read_operand(o, src_a, cli.files[0])
 	src_b, _ := file_source(o, cli.files[1], src_a)
 	b := read_operand(o, src_b, cli.files[1])
-	r, err := diff.values(a, b, {arrays = d.arrays, keys = d.keys[:], facts = d.facts})
+	r, err := diff.values(a, b, {arrays = d.arrays, keys = d.keys[:], facts = d.facts, max_depth = int(o.max_depth)})
 	if err != nil {
 		out_of_memory()
 	}
+	refuse_too_deep(r)
 	for unused in r.unused_keys {
 		usage_error("--key %s matches no array in both files; a bare MEMBER keys the root array, and PATH=MEMBER the array at PATH", d.keys[unused].member)
 	}
@@ -151,6 +153,14 @@ diff_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		message.write_stderr("stury: an array differs by more edits than are told, and is reported as replaced\n")
 	}
 	os.exit(1 if len(r.changes) > 0 else 0)
+}
+
+// Exits telling that a value nests past what the diff was given, which the readers' --max-depth keeps from happening.
+refuse_too_deep :: proc(r: diff.Result) {
+	if r.too_deep {
+		message.write_stderr("stury: error: a value nests deeper than --max-depth allows\n")
+		os.exit(EXIT_INPUT)
+	}
 }
 
 out_of_memory :: proc() -> ! {
@@ -421,14 +431,14 @@ diff_preview :: proc(run: ^Run, path: string, src, out: []u8) {
 	a, a_fault := build_text(src, source.as, heap)
 	b, b_fault := build_text(out, source.as, heap)
 	if a_fault == nil && b_fault == nil {
-		write_document_changes(&sb, core.Node_Ref{&a, core.ROOT}, core.Node_Ref{&b, core.ROOT}, nil, file)
+		write_document_changes(&sb, core.Node_Ref{&a, core.ROOT}, core.Node_Ref{&b, core.ROOT}, nil, file, int(run.opts.max_depth))
 		core.destroy(&a)
 		core.destroy(&b)
 	} else {
 		xs := records_value(&run.opts, source, path, src).(^core.Array).items[:]
 		ys := records_value(&run.opts, source, path, out).(^core.Array).items[:]
 		for x, k in xs[:min(len(xs), len(ys))] {
-			if write_document_changes(&sb, x, ys[k], {core.Index(k)}, file) {
+			if write_document_changes(&sb, x, ys[k], {core.Index(k)}, file, int(run.opts.max_depth)) {
 				file = ""
 			}
 		}
@@ -439,11 +449,12 @@ diff_preview :: proc(run: ^Run, path: string, src, out: []u8) {
 // Writes the changes from `a` to `b`, their paths under `at`, after the `--- file` line when `file` is not "". Returns
 // whether there were any.
 @(private = "file")
-write_document_changes :: proc(sb: ^strings.Builder, a, b: core.Value, at: []core.Step, file: string) -> bool {
-	r, err := diff.values(a, b)
+write_document_changes :: proc(sb: ^strings.Builder, a, b: core.Value, at: []core.Step, file: string, max_depth: int) -> bool {
+	r, err := diff.values(a, b, {max_depth = max_depth})
 	if err != nil {
 		out_of_memory()
 	}
+	refuse_too_deep(r)
 	defer diff.result_destroy(&r)
 	for &c in r.changes {
 		c.path = slice.concatenate([][]core.Step{at, c.path}, context.temp_allocator)

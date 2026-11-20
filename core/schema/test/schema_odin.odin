@@ -77,7 +77,7 @@ odin_enums_unions_and_defs :: proc(t: ^testing.T) {
 		"Root_Kind :: enum {\n\tRead_Only,\n\tAdmin,\n\tEmpty,\n}\n",
 		"Root_Level :: enum i64 {\n\tV1 = 1,\n\tVM2 = -2,\n}\n",
 		"Root_Id :: union #no_nil {uuid.Identifier, i64}\n",
-		"Point :: struct {\n\tx: Maybe(core.Number_Text) `json:\",omitempty\" model:\"optional,not_null\"`,\n}\n",
+		"Point :: struct {\n\tx: Maybe(core.Number_Text) `json:\",omitempty\" model:\"optional,not_null\"`,\n\tset: model.Fields_Set,\n}\n",
 		"\tat: Maybe(Point) `json:\",omitempty\" model:\"optional,not_null\"`,\n",
 		"[]model.Enum_Rename{{\"Read_Only\", \"read-only\"}, {\"Admin\", \"admin\"}, {\"Empty\", \"\"}}",
 		"model.register_enum(reg, {Root_Level, true, nil})",
@@ -111,10 +111,11 @@ odin_refusals_name_the_keyword :: proc(t: ^testing.T) {
 		{`{"oneOf": [{"type": "integer"}, {"type": "integer"}, {"type": "string"}]}`, "oneOf", 0},
 		{`{"oneOf": [{"type": "integer"}, {"type": "integer"}]}`, "oneOf", 0},
 		{`{"oneOf": [{"type": "integer"}, {"type": "null"}], "not": {"const": null}}`, "not", 0},
-		{`{"type": "object", "patternProperties": {"^x": {}}, "additionalProperties": {"type": "string"}}`, "patternProperties", 0},
 		{`{"type": "array", "items": {"type": "null"}}`, "type", 1},
-		{`{"enum": [9007199254740993]}`, "enum", 0},
-		{`{"type": "array", "prefixItems": [{"type": "integer"}]}`, "prefixItems", 0},
+		{`{"type": "object", "properties": {"a": {"type": "string", "readOnly": true, "writeOnly": true}}}`, "writeOnly", 1},
+		{`{"type": "object", "properties": {"a": {"enum": ["x", "y"], "default": "z"}}}`, "default", 0},
+		{`{"$defs": {"a": {"$dynamicAnchor": "n", "type": "string"}, "b": {"$id": "b", "$dynamicAnchor": "n", "type": "integer"}}, "$dynamicRef": "#n"}`, "$dynamicRef", 0},
+		{`{"type": "array", "prefixItems": [{"type": "integer"}], "allOf": [{"prefixItems": [{"type": "integer"}]}]}`, "prefixItems", 0},
 		{`{"type": "object", "properties": {"": {}}}`, "properties", 1},
 		{`{"type": "object", "required": ["z"], "additionalProperties": false}`, "required", 0},
 		{`{"type": "object", "properties": {"a": {}}, "additionalProperties": {"type": "string"}, "allOf": [{"properties": {"b": {}}}]}`, "additionalProperties", 0},
@@ -263,4 +264,60 @@ odin_refuses_a_default_or_a_range_no_member_type_holds :: proc(t: ^testing.T) {
 	}
 	source, err := odin_of(t, `{"type": "object", "properties": {"n": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}}}`)
 	testing.expectf(t, err == nil && strings.contains(source, "Maybe(u64)"), "%v\n%s", err, source)
+}
+
+// A member's `readOnly` and `writeOnly` are its tag's roles, beside `required`: a load reads no read_only member and a
+// dump writes no write_only one. Every struct holds a set, so `model.patch` takes it.
+@(test)
+odin_tags_a_members_role_and_sets_every_struct :: proc(t: ^testing.T) {
+	source, err := odin_of(t, `{"type": "object", "required": ["id", "password"], "properties": {"id": {"type": "integer", "readOnly": true},
+		"password": {"type": "string", "writeOnly": true}, "note": {"$ref": "#/$defs/Note"}}, "$defs": {"Note": {"type": "string", "readOnly": true}}}`)
+	testing.expectf(t, err == nil, "%v", err)
+	expect_contains(t, source, {
+		"\tid: i64 `model:\"read_only\"`,\n",
+		"\tpassword: string `model:\"write_only\"`,\n",
+		"\tnote: Maybe(string) `json:\",omitempty\" model:\"optional,not_null,read_only\"`,\n",
+		"\tset: model.Fields_Set,\n",
+	})
+}
+
+@(test)
+odin_registers_an_enums_default :: proc(t: ^testing.T) {
+	source, err := odin_of(t, `{"type": "object", "properties": {"role": {"enum": ["admin", "member"], "default": "member"},
+		"level": {"enum": [1, 2], "default": 2.0}, "mixed": {"enum": ["a", 1], "default": 1}, "any": {"enum": ["a", 1.5, true], "default": true},
+		"on": {"const": true, "default": true}}}`)
+	testing.expectf(t, err == nil, "%v", err)
+	expect_contains(t, source, {
+		"\tmodel.register_default(reg, Root, \"role\", Root_Role.Member) or_return\n",
+		"\tmodel.register_default(reg, Root, \"level\", Root_Level.V2) or_return\n",
+		"\tmodel.register_default(reg, Root, \"mixed\", Root_Mixed(Root_Mixed_Integer.V1)) or_return\n",
+		"\tmodel.register_default(reg, Root, \"any\", Root_Any(bool(true))) or_return\n",
+		"\tmodel.register_default(reg, Root, \"on\", Root_On(true)) or_return\n",
+	})
+}
+
+// What no Odin type spells is the type of the values it takes, and a fragment judges the rest: an `enum` or `const` no
+// Odin enum holds, a `prefixItems` no fixed array holds, pattern members beside a rule on the other members.
+@(test)
+odin_judges_what_no_type_spells :: proc(t: ^testing.T) {
+	Case :: struct {
+		text:  string,
+		wants: []string,
+	}
+	for c in ([]Case{
+		{`{"const": false}`, {"Root :: distinct bool\n", `"const":false}`}},
+		{`{"const": 1.5}`, {"Root :: distinct core.Number_Text\n", `"const":1.5}`}},
+		{`{"enum": [9007199254740993]}`, {"Root :: distinct i64\n", `"enum":[9007199254740993]}`}},
+		{`{"enum": [{"a": 1}, [1]]}`, {"[]core.Value", "map[string]core.Value", `"enum":[{"a":1},[1]]}`}},
+		{`{"type": "array", "prefixItems": [{"type": "string"}, {"type": "integer"}], "items": false}`,
+			{"Root_Value_Item :: union #no_nil {string, i64}\n", "Root_Value :: distinct []Root_Value_Item\n", `"prefixItems":[{"type":"string"},{"type":"integer"}],"items":false}`}},
+		{`{"type": "array", "prefixItems": [{"type": "integer"}]}`, {"Root :: distinct []core.Value\n", `"prefixItems":[{"type":"integer"}]}`}},
+		{`{"type": "object", "properties": {"a": {"type": "string"}}, "patternProperties": {"^x": {"type": "integer"}, "^y": {}}, "additionalProperties": false}`,
+			{"\textra: map[string]core.Value `json:\",unknown\"`,\n", `"properties":{"a":{}},"patternProperties":{"^x":{"type":"integer"},"^y":{}},"additionalProperties":false}`}},
+		{`{"$defs": {"s": {"$dynamicAnchor": "n", "type": "string"}}, "$dynamicRef": "#n"}`, {"Root :: string\n"}},
+	}) {
+		source, err := odin_of(t, c.text)
+		testing.expectf(t, err == nil, "%s: %v", c.text, err)
+		expect_contains(t, source, c.wants)
+	}
 }

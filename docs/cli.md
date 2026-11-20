@@ -107,13 +107,13 @@ runner and bytecode listings), and adds its own. Each short option has jq's long
 | `--alias-limit N`, `--merge-keys` | How `--from yaml` reads: the bytes aliases may read again (1 or more), and `<<` as a merge key. |
 | `--expansion-limit N`, `--unread-entities` | How `--from xml` reads: the bytes entity references may expand to in all (1 or more), and a reference to an entity no declaration stury read names, read as its own text. |
 | `--max-depth N` | Refuse nesting past N levels (1024 by default, up to 2^20, where jq's limit is 10000). A value deeper than the default also runs on one thread. |
-| `--threads N` | `N` threads share a long input, or many files, the calling thread counted (`N` is 1 or more, one per core by default). `--threads 1` starts no other thread. It applies to a filter run, `check`, `fmt`, `edit` and `schema infer`, and the output, exit status and `--explain` counts are the same at every `N`. A run that starts a thread for stack depth (`--max-depth` past 1024) starts it whatever `N` is. |
+| `--threads N` | `N` threads share a long input, or many files, the calling thread counted (`N` is 1 or more, one per core by default). `--threads 1` starts no other thread, and no run starts more threads than it has files or pieces to share. It applies to a filter run, `check`, `fmt`, `edit` and `schema infer`, and the output, exit status and `--explain` counts are the same at every `N`. A run that starts a thread for stack depth (`--max-depth` past 1024) starts it whatever `N` is. |
 | `--follow` | With one named file, answer each record as it is appended ([`--follow`](#--follow)). |
 | `--skip-bad`, `--quarantine FILE` | A filter run and `check` only: go on past an input record that does not read ([Bad records](#bad-records)). |
 | `-g GLOB`, `--glob GLOB` | Pick the files a directory's walk reads ([Many files](#many-files)). |
 | `--no-ignore` | Read the files of a walk that ignore rules skip ([Many files](#many-files)). |
 | `--files-from FILE` | Read the files FILE lists after the file arguments ([Many files](#many-files)). |
-| `--each`, `--no-filename` | Run the filter on each file on its own, its output labelled with the file's name ([Many files](#many-files)). |
+| `--each`, `--no-filename` | Run the filter on each file on its own, its output labelled with the file's name, which `--no-filename` leaves out and needs `--each` ([Many files](#many-files)). |
 | `--explain` | Write the plan the filter runs under and what the run did to stderr, and run the filter as without it ([`--explain`](#--explain)). |
 
 An option of one format given with another `--from` is a usage error that names the format, as `--merge-keys applies to --from yaml`.
@@ -237,7 +237,7 @@ The `fallback` reasons are three. A step met a value it does not apply to (`.a` 
   serial read tells.
 - It refuses every option that shapes a filter run, as `fmt` does (`-n`, `-r`, `-c`, `-C`, `--arg`, `-L`, ...), and
   the layout options `--indent` and `--tab`: exit 2. `check` without `--schema` writes nothing, so `--to` with another
-  format is a usage error too.
+  format is a usage error too, and so is `--to json`. `check --filter` writes a schema and takes `--to`.
 
 | Flag | Effect |
 | --- | --- |
@@ -286,11 +286,11 @@ These options need `--schema`, which `check` and [`fmt`](#fmt) take.
 
 A schema that does not read, compile or bind, or a keyword the check does not judge, is a usage error (exit 2) naming it.
 The check reads no network: a `$ref`, `$dynamicRef` or `$schema` resolves within the schema, to a draft's meta-schema,
-or to a file under `--schema-ref`, and a reference to anything else is refused. A `pattern` with look-behind or a back
-reference is refused too. A schema that applies more than 256 subschemas to one value one inside the other does not
-bind, and the error names the keyword path where it nests deepest. A value that `uniqueItems`, `const` or `enum`
-compares whole fails as `Exceeds the depth limit` past 1024 levels, whatever `--max-depth` allows. A `pattern` search
-that runs out of memory on a long string is told as `The pattern could not be decided on the string` and exits 2, not 1,
+or to a file under `--schema-ref`, and a reference to anything else is refused. A schema that applies more than 256
+subschemas to one value one inside the other does not bind, and the error names the keyword path where it nests
+deepest. A value that `uniqueItems`, `const` or `enum` compares whole fails as `Exceeds the depth limit` past 1024
+levels, whatever `--max-depth` allows. A `pattern` search that runs out of memory on a long string, or with a back
+reference passes 10,000,000 retries, is told as `The pattern could not be decided on the string` and exits 2, not 1,
 since the input is neither valid nor failed.
 
 ### `check --filter`
@@ -354,7 +354,7 @@ A schema file, for `check --schema`, `fmt --schema`, `diff` and the schema verbs
 - **`--comments`:** writes a node's `description` as a comment where the format has comments (`--to jsonc`).
 - **Layout:** each value is a line, compact unless a layout option asks for more. A CSV or TSV value is a table, so those take `--count 1`.
 - **CSV and TSV:** `--infer` reads the sample's cells as `check --infer` does, so a column of numbers or booleans can be written.
-- **No value found:** a schema for which the bounded search finds no passing value is exit 1 and names the keyword path of the node the search stopped at. Under `--invalid` the same holds for no failing value.
+- **No value found:** a schema for which the bounded search finds no passing value is exit 1 and names the keyword path of the node the search stopped at. Under `--invalid` the same holds for no failing value, and a schema no value passes, such as `false`, is failed by any value.
 - **Options:** `--max-depth` is refused, as sample reads no input. `--schema-draft` and `--schema-ref` read as `check` reads them.
 
 ### `schema gen`
@@ -362,16 +362,18 @@ A schema file, for `check --schema`, `fmt --schema`, `diff` and the schema verbs
 `stury schema gen SCHEMA` writes the Odin source of the types a model reads the schema's values with, and a procedure `register` that adds the rules no tag holds to a `model.Registry`, as `schema.write_odin` writes them. It takes no layout option and no filter.
 
 - **Objects:** an object with members is a struct. Its tags name each member (`json:`), say it may be left out, and hold its rules (`model:`). An `extra: map[string]T` member holds the members an `additionalProperties` schema judges, and an object with no members is a map.
-- **Enums and unions:** `enum` and `const` are an enum. `anyOf`, `oneOf` and a list of kinds are a union, read by the first arm that reads a value, and under `oneOf` it refuses a value two arms read.
-- **Arrays:** `uniqueItems` is a `unique` tag, and `prefixItems` of one type and that length is a fixed array.
-- **Fragments:** `not`, `if`, `contains`, `propertyNames`, `patternProperties`, `dependentRequired` and `dependentSchemas` are a named type with a `register_fragment` line, which hands `model.register_schema` those keywords as a JSON Schema fragment. A struct of such a type keeps the members it does not name in `extra: map[string]core.Value` (tagged `json:",unknown"`), so what the type writes is what it read.
-- **Optional members:** a member that may be left out and takes no null is a `Maybe` tagged `omitempty` and `not_null`. A struct whose optional members take null holds `set: model.Fields_Set` and tags each such member `omitunset`, so a member the text left out stays out and a null stays null when written back. Gen refuses such a struct past 128 members.
-- **Merging:** `allOf` and a `$ref` with siblings are merged into one node. `$defs` are named types.
+- **Enums and unions:** `enum` and `const` of strings, integers within 2^53, both booleans or null are an enum. Other operands (one boolean, a number with a fraction or past 2^53, an array, an object) are the type of their kinds with the `enum` or `const` as a fragment. `anyOf`, `oneOf` and a list of kinds are a union, read by the first arm that reads a value, and under `oneOf` it refuses a value two arms read.
+- **Arrays:** `uniqueItems` is a `unique` tag. `prefixItems` of one type and that length is a fixed array, and any other is a list of a union of the prefix's and the other elements' types, with `prefixItems` and `items` as a fragment.
+- **Fragments:** `not`, `if`, `contains`, `propertyNames`, `patternProperties`, `dependentRequired` and `dependentSchemas` are a named type with a `register_fragment` line, which hands `model.register_schema` those keywords as a JSON Schema fragment. A struct of such a type keeps the members it does not name in `extra: map[string]core.Value` (tagged `json:",unknown"`), so what the type writes is what it read. Beside `patternProperties`, an `additionalProperties` that judges the other members joins the fragment.
+- **Roles:** a member's `readOnly` is a `read_only` tag and its `writeOnly` a `write_only` tag, so a load never reads a `readOnly` member, required or not, and a dump never writes a `writeOnly` one, which a load still requires where the schema does. Both on one member exit 1. On a value that is no member they only annotate.
+- **Optional members:** a member that may be left out and takes no null is a `Maybe` tagged `omitempty` and `not_null`. A struct whose optional members take null tags each such member `omitunset`, so a member the text left out stays out and a null stays null when written back.
+- **Sets:** a struct holds `set: model.Fields_Set`, which records the members a load read, so `model.patch` takes it. A struct past 128 members holds none, and gen refuses one whose optional members take null.
+- **Merging:** `allOf`, a `$ref` with siblings, and a `$dynamicRef` that reaches one node wherever it is evaluated are merged into one node. `$defs` are named types.
 - **Formats:** `format` only annotates, as `check` reads it: the member is a string with a `// format:` comment. With `--format-assert` the formats a type reads are `time.Time`, `uuid.Identifier` and `model.Email`, and the others a `format=` rule. `contentEncoding: base64` is `model.Base64`.
-- **Defaults:** a member's `default` that is a string, a number or a boolean is a `model.register_default` line in `register`, so a load gives the member that value where the text leaves it out.
+- **Defaults:** a member's `default` that is a string, a number or a boolean its type holds, an operand of its enum among them, is a `model.register_default` line in `register`, so a load gives the member that value where the text leaves it out.
 - **Integers:** an integer whose lower bound is at least 0 and whose range passes `i64`'s is `u64`. Any other integer is `i64`, so a model refuses one past `i64`'s range, which the schema takes.
 - **Package:** `--package NAME`, by default the file's name in snake case (`my-types.schema.json` is `my_types`). It must be an Odin identifier that is no keyword and no package the types import (`model`, `time`, `core`, ...).
-- **Exit 1:** a keyword no type spells, told with the path of the node that holds it, such as `not` or `if` on a union whose arms take a null they refuse, a `oneOf` with two arms of one type, `prefixItems` beside `items`, an integer enum value past 2^53, an integer whose bounds no `i64` or `u64` holds, or a `default` of an array or an object.
+- **Exit 1:** a keyword no type spells, told with the path of the node that holds it, such as `not` or `if` on a union whose arms take a null they refuse, a `oneOf` with two arms of one type, `prefixItems` in two schemas `allOf` joins, a `$dynamicRef` whose target the dynamic scope picks among several, since a type is one node's, an integer whose bounds no `i64` or `u64` holds, or a `default` of an array or an object or one the member's type does not hold.
 - **Nesting:** every object nested in another is a struct held by value, and Odin's compiler takes time exponential in that depth, so types of objects nested past about 24 levels compile slowly.
 
 ## `fmt`
@@ -525,7 +527,7 @@ stury: <stdin> would change
 - **TOML:** a kept value keeps its bytes, and a string set over a literal string stays literal when it holds no `'` or control character. A table is not replaced by a value, and `null` is refused with the reason (`Value cannot be written in the format`). A new member is a `key = value` line after the table's last line, before its sub-tables. A built table is a `[section]` after the last section of the table it joins, and a built array of tables is a `[[section]]` per element. It stays inline (`{ y = 2 }`) in an inline container, a dotted table or a value replaced in place. A dropped line goes with the comments directly above it, and a dropped `[table]` with its lines and sub-tables. A moved member takes its lines, or its sections, and the comments directly above them, and an element of an array on lines of its own takes its line. A member written as sections cannot move before one written as lines, which would join its table, and one whose lines or sections lie around another member's does not move (exit 5).
 - **YAML:** each document of a stream is edited as a record. A document with no output is dropped, each output past the first is a new document after it, and a new or moved document starts with a `---` line when it has none. Each site is edited at its indentation, a comment stays with its line, and a built collection is written in block form on the lines under its key, or in flow form inside a flow collection. A string set over a quoted string keeps its quotes when they hold it, and one line of text over a folded block keeps its `>`. Other scalars take the style YAML's writer picks (`"yes"` is `'yes'`). `--diff` tells the changes of a stream's documents under their indexes (`.[1].a`). A moved member takes its lines and the comments above them, and an item of a flow collection on lines of its own takes its line. An edit inside a value an alias reads, or of an anchored node an alias still reads after the edit, and an order that would change which anchor an alias reads, are refused with the reason (exit 5). An anchored node whose aliases the edit removes or replaces takes edits. Under `--merge-keys` a document that holds a `<<` key is not edited.
 - **CBOR:** each item of a sequence is edited as a record, and the bytes of every item and value the output does not change are copied. A changed value is written in preferred serialization.
-- **XML:** a changed value is written between its element's tags, which keep their attributes, and `#text` is the text run it names. A string is escaped and `null` is an empty element. A new member is an element after the member before it, laid out by the white space before that member, and a dropped member goes with the white space before it. A name is one member of the output, and a repeated one an array of its elements in document order, so `.r.b[1]` edits the second `b`. An array on a name writes item k into the name's k-th element, drops the elements past the items, and adds an element for each new item. Any other value is written into the first element and drops the rest. `.r.c.&k = "v"` writes the attribute `k` in `c`'s start tag and `del(.r.c.&k)` removes it. Writing an element's attributes as a whole respells them all, one space apart.
+- **XML:** a changed value is written between its element's tags, which keep their attributes, and `#text` is the text run it names. A string is escaped and `null` is an empty element. A new member is an element after the member before it, laid out by the white space before that member, and a dropped member goes with the white space before it. A name is one member of the output, and a repeated one an array of its elements in document order, so `.r.b[1]` edits the second `b`. An array on a name writes item k into the name's k-th element, drops the elements past the items, and adds an element for each new item. Any other value is written into the first element and drops the rest. `.r.c.&k = "v"` writes the attribute `k` in `c`'s start tag and `del(.r.c.&k)` removes it. The other attributes keep their bytes, and a new one follows the last. Writing attributes in another order respells them all, one space apart.
 - **XML order:** a moved member takes its element with its attributes, and the comments above it and on its line. `{c, a}` and `.r.b |= reverse` move elements, and the white space between their places stays.
 - **XML refusals (exit 5):** an empty string, a key that is no XML name, an array inside an array, an element inside `#text`, and a change of member order in an element that holds text.
 - **HTML:** edits as XML does and writes a changed value as `--to html` writes it. An end tag the source leaves out stays out.
@@ -922,7 +924,7 @@ and `edit` refuse the option.
 ### CBOR output
 
 `--to cbor` writes each output as one CBOR item (RFC 8949) in preferred serialization, and `fmt` writes a file as one.
-Several outputs are a CBOR sequence (RFC 8742), nothing between the items, and no line end follows an item. An integer
+Several outputs are a CBOR sequence (RFC 8742), nothing between the items, and no line end follows an item. Standard output that is a terminal is refused (exit 2), as the bytes are not text. An integer
 past 64 bits is a bignum, a number past binary64's range a decimal fraction, and a float the shortest of half, single
 and double precision that holds it exactly. `-S` sorts the keys of every map.
 
@@ -1008,6 +1010,7 @@ The exit codes are jq's, but the messages are stury's.
 | A file that cannot be opened | `stury: error: Could not open file NAME: REASON`. A directory that cannot be listed says `Could not open directory NAME: REASON` |
 | An error the filter raises | `stury: error (at FILE:LINE): MSG` as jq. With no input to name, as under `-n`, `stury: error: MSG`, where jq says `(at <unknown>)`. `input` past the last input says `No more inputs`, where jq prints the `break` that `inputs` catches (`try input catch .` still gives `"break"`) |
 | `--rawfile` or `--slurpfile` naming a file that does not open | `stury: --rawfile NAME FILE: Could not open FILE: REASON`, where jq calls it `Bad JSON in --rawfile ...` |
+| An unknown option | `stury: Unknown option --indnet, did you mean --indent?`, the suggestion only when a long option is a letter or two away |
 | A filter of one word a letter or two from `check` or `fmt` | jq's compile error, then `stury: chek is not a command: did you mean stury check?` |
 | A JSON text that does not parse, in a filter run on standard input or one file | `stury: parse error: MSG at line L, column C`, as jq |
 | Any other text that does not parse: under `check` and `fmt`, under `--from` another format or `ndjson`, under `--seq`, several files, or `input` under `-n` | `stury: parse error: NAME:L:C: SENTENCE`, NAME `<stdin>` for standard input, counted in that file, such as `<stdin>:1:10: Leading zero in a number` |
@@ -1277,8 +1280,9 @@ Each of these is a case in `tools/tests/cli/cases/cli.tsv`.
 ### Regular expressions
 
 Regular expressions run on stury's own engine for Oniguruma syntax, and answer as jq's do for look-around,
-backreferences and conditions, named groups, `\g<name>` calls, the absent operator, callouts, case folds that
-change a text's length, and the script, emoji and other Unicode properties. Two cases answer differently:
+backreferences and conditions, named groups, subexpression calls and recursion (`\g<name>`, `\g'1'`, `\g<-1>`,
+`(?&name)`, `(?1)`, `(?-1)`, `(?R)`), comments, the absent operator, callouts, case folds that change a text's length,
+and the script, emoji and other Unicode properties. Two cases answer differently:
 
 - a lazy `{n,}?` with n of 2 or more over a body that can match the empty string and holds a capture;
 - a callout that reads which start positions are tried (`(*ERROR)` with a code other than -1, `(*TOTAL_COUNT)` read
@@ -1293,7 +1297,7 @@ jq's limit.
 
 A JSON Schema `pattern` is not Oniguruma but ECMA-262 with the `u` flag: an escape outside a class names only a syntax
 character (`^$\.*+?()[]{}|`) or `/`, and inside a class also `-`, and any other (`\&`, `\%`) is
-refused with the escape and its offset.
+refused with the escape and its offset. Look-behind of any length and back references match as ECMA-262's do.
 
 ## For library users
 

@@ -20,6 +20,16 @@ BUILD_CONFIGURATION ::
 OPTIMIZATION ::
 	"-o:speed" when ODIN_OPTIMIZATION_MODE == .Speed else "-o:aggressive" when ODIN_OPTIMIZATION_MODE == .Aggressive else "-o:size" when ODIN_OPTIMIZATION_MODE == .Size else "-o:minimal" when ODIN_OPTIMIZATION_MODE == .Minimal else "-o:none"
 
+// The options that choose which files a walk reads, which the verbs share.
+@(private = "file")
+WALK_OPTIONS :: `  -g, --glob glob           read the files of a directory's walk that the
+                            glob matches, or with !glob skip them;
+      --no-ignore           read the files of a walk inside a git work tree
+                            that its ignore files skip;
+      --files-from file     read the files the file lists, one a line or
+                            between NULs, after the file arguments;
+`
+
 // jq's usage(): this, then the options or where to find them.
 @(private = "file")
 HELP_HEAD :: "stury - command-line JSON, YAML, TOML, XML, HTML, CSV and CBOR processor [version " + VERSION + `]
@@ -122,13 +132,7 @@ stury's own options:
       --max-depth n         refuse nesting past n levels (default 1024);
       --threads n           share a long input among n threads, this one
                             counted (default: one per core);
-  -g, --glob glob           read the files of a directory's walk that the
-                            glob matches, or with !glob skip them;
-      --no-ignore           read the files of a walk inside a git work tree
-                            that its ignore files skip;
-      --files-from file     read the files the file lists, one a line or
-                            between NULs, after the file arguments;
-      --each                run the filter on each file on its own, each
+` + WALK_OPTIONS + `      --each                run the filter on each file on its own, each
                             output line opened with the file's name;
       --no-filename         with --each, write no file names;
       --alias-limit n       with --from yaml, refuse aliases that read
@@ -184,7 +188,7 @@ Options:
       --max-depth n         refuse nesting past n levels (default 1024);
       --threads n           share a long input among n threads, this one
                             counted (default: one per core);
-      --skip-bad            tell an input record that does not read, go on
+` + WALK_OPTIONS + `      --skip-bad            tell an input record that does not read, go on
                             at the next one, and exit 5 at the end;
       --quarantine file     as --skip-bad, writing each such record to file
                             as a line of JSON, and with --schema the records
@@ -268,6 +272,7 @@ Options:
                             csv, tsv, toml, yaml, xml, cbor or html;
       --to format           write json, jsonc, json5, ndjson, csv, tsv, toml,
                             yaml, xml, cbor or html (default the --from format);
+  -c, --compact-output      compact instead of pretty-printed output;
       --in-place            rewrite each file in place;
       --check               write nothing, name each file that is not
                             already formatted, and exit 1;
@@ -278,7 +283,7 @@ Options:
       --max-depth n         refuse nesting past n levels (default 1024);
       --threads n           share a long input among n threads, this one
                             counted (default: one per core);
-      --schema file         judge each input against this JSON Schema as
+` + WALK_OPTIONS + `      --schema file         judge each input against this JSON Schema as
                             stury check --schema does, and write only an
                             input that passes it;
       --schema-ref dir      the directory a file reference may read, the schema's by default;
@@ -330,6 +335,7 @@ Options:
                             difference;
   -a, --ascii-output        write built values with ASCII escapes;
   -S, --sort-keys           sort the keys of every object, and the columns;
+  -c, --compact-output      write built values compactly;
       --indent n            write built values with n spaces (at most 7;
                             -1 is --tab);
       --tab                 write built values with a tab;
@@ -337,7 +343,7 @@ Options:
       --max-depth n         refuse nesting past n levels (default 1024);
       --threads n           edit the files on n threads, this one counted
                             (default: one per core);
-  -f, --from-file           load the filter from a file;
+` + WALK_OPTIONS + `  -f, --from-file           load the filter from a file;
   -L, --library-path dir    search modules from the directory;
       --arg name value      set $name to the string value, and --argjson,
                             --slurpfile, --rawfile, --args, --jsonargs as in

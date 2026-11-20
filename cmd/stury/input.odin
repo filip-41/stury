@@ -42,13 +42,13 @@ read_text :: proc(src: []byte, r: core.As) -> (core.Value, Maybe(core.Fault)) {
 }
 
 // The files a command reads, or stdin when it names none and walked no directory. With none named and stdin and stdout
-// both a terminal, the help is told rather than a wait on the keyboard, as a run with no filter tells it.
-input_files :: proc(files: []string, walked: bool) -> []string {
+// both a terminal, the help of `command` is told rather than a wait on the keyboard, as a run with no filter tells it.
+input_files :: proc(files: []string, walked: bool, command: string) -> []string {
 	if len(files) > 0 || walked {
 		return files
 	}
 	if is_terminal(os.stdin) && is_terminal(os.stdout) {
-		usage(EXIT_USAGE, true)
+		usage(EXIT_USAGE, true, command)
 	}
 	return STDIN_ONLY
 }
@@ -98,6 +98,7 @@ Inputs :: struct {
 	stray_bom: bool, // the open file opens with a byte order mark after a text, which is a fault
 	slurp:     bool,
 	run:       ^Run, // under the path scan, a text it answers is printed and passed over
+	cli:       ^Cli, // the command line, which diff and schema read on the deep stack
 	// The open file. `data` is its bytes in memory, whole (`last`) or a window of whole lines, and the inputs own them:
 	// once read past they are freed, or, while a value the main loop read lies in them (`pinned`), kept in `spent`
 	// until that value's outputs are printed (`release_spent`). `texts` reads its texts, past the first when the file

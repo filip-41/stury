@@ -43,9 +43,13 @@ resolve_refs :: proc(p: ^Parser, referenced: []bool) {
 				fail(p, "invalid backref number/name")
 				return
 			}
-		} else if p.flags.ecma && !slice.contains(p.names[1:], n.name) {
-			fail(p, "invalid named reference")
-			return
+		} else if p.flags.ecma {
+			g, found := slice.linear_search(p.names[1:], n.name)
+			if !found {
+				fail(p, "invalid named reference")
+				return
+			}
+			append(&n.refs, g + 1)
 		}
 		if n.kind == .Cond {
 			referenced[n.group] = true
@@ -123,12 +127,10 @@ parse_backref_name :: proc(p: ^Parser) -> ^Node {
 	return n
 }
 
-// At `<` or `'` after \g: a call of a group by number, by number relative to the groups opened so far
-// (`-1` the last, `+1` the next), or by name, read as Oniguruma's fetch_name reads one, with its messages.
-// A name of odd characters is still a name, which no group has.
-parse_call :: proc(p: ^Parser) -> ^Node {
-	close: rune = '>' if peek(p) == '<' else '\''
-	p.i += 1
+// A call's name up to `close`, after `\g<`, `\g'` or `(?&`, or at the number of `(?1)`: a group by number, by
+// number relative to the groups opened so far (`-1` the last, `+1` the next), or by name, read as Oniguruma's
+// fetch_name reads one, with its messages. A name of odd characters is still a name, which no group has.
+parse_call :: proc(p: ^Parser, close: rune) -> ^Node {
 	start := p.i
 	if at_end(p) || rune(peek(p)) == close {
 		return fail(p, "group name is empty")
@@ -136,12 +138,7 @@ parse_call :: proc(p: ^Parser) -> ^Node {
 	c := next_rune(p)
 	numeric, sign := c >= '0' && c <= '9', c == '-' || c == '+'
 	if !numeric && !sign && !is_word(c) {
-		for !at_end(p) {
-			if c = next_rune(p); c == close || c == ')' {
-				break
-			}
-		}
-		return fail(p, strings.concatenate({"invalid char in group name <", p.src[start:p.i], ">"}))
+		return refuse_name(p, start, close, "invalid char in group name <")
 	}
 	numeric ||= sign
 	name_end := len(p.src)
@@ -155,6 +152,9 @@ parse_call :: proc(p: ^Parser) -> ^Node {
 	name := p.src[start:name_end]
 	if c != close {
 		return fail(p, strings.concatenate({"invalid group name <", name, ">"}))
+	}
+	if close == ')' && !numeric && name[0] <= '9' {
+		return fail(p, "invalid group name <>") // `(?1x)`, a number of (?n) that runs on, as Oniguruma words it
 	}
 	n := new_node(.Call)
 	n.name, n.group = name, -1
@@ -183,4 +183,20 @@ parse_call :: proc(p: ^Parser) -> ^Node {
 		return fail(p, strings.concatenate({"undefined group <", name, "> reference"}))
 	}
 	return n
+}
+
+// Fails with `msg` and the name from `start`, read up to `close` or `)`, or to the pattern's end when that comes
+// first or right after, as Oniguruma words a name it refuses.
+refuse_name :: proc(p: ^Parser, start: int, close: rune, msg: string) -> ^Node {
+	name_end := len(p.src)
+	for !at_end(p) {
+		name_end = p.i
+		if c := next_rune(p); c == close || c == ')' {
+			break
+		}
+	}
+	if at_end(p) {
+		name_end = len(p.src)
+	}
+	return fail(p, strings.concatenate({msg, p.src[start:name_end], ">"}))
 }

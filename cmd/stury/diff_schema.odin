@@ -166,8 +166,8 @@ diff_contract :: proc(o: ^Opts, cli: ^Cli, src: Source) -> ! {
 	out := strings.builder_make(runtime.heap_allocator())
 	drifted := false
 	for ch in c.changes {
-		// Only a member that no keyword of the schema takes up is undescribed: where a pattern may describe it the effect is unknown.
-		if ch.keyword != "properties" || ch.old != nil || ch.effect != .Narrows {
+		// Only a member that no keyword of the schema takes up is undescribed, whether the schema allows or refuses it: where a pattern may describe it the effect is unknown.
+		if ch.keyword != "properties" || ch.old != nil || ch.effect == .Unknown {
 			continue
 		}
 		drifted = true

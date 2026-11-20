@@ -21,20 +21,26 @@ import "message"
 // The least input read on the pool's threads: on a shorter one, starting them costs more than they save.
 POOLED_BYTES :: #config(STURY_POOLED_BYTES, 1 << 20)
 
-// The run's pool, started at its first use. A pool that could not start runs every piece on the caller.
-run_pool :: proc(run: ^Run) -> ^core.Runner {
+// The run's pool, started at its first use for `units` of work, which an explicit --threads is cut to so a large
+// count starts no thread without work. A pool that could not start runs every piece on the caller.
+run_pool :: proc(run: ^Run, units: int) -> ^core.Runner {
 	if run.pool == nil {
 		jq.share(&run.ip, run.prog)
 		run.pool = new(host.Pool, runtime.heap_allocator())
-		host.pool_init(run.pool, run.opts.threads)
+		host.pool_init(run.pool, min(run.opts.threads, max(units, 1)) if run.opts.threads > 0 else 0)
 	}
 	return &run.pool.runner
+}
+
+// The pieces `data` is shared in at most.
+pieces_of :: proc(data: []byte) -> int {
+	return len(data) / max(POOLED_BYTES, 1) + 1
 }
 
 // The run's pool for an input of `data`, or nil for one too short to share or one a task of many files reads, whose
 // pool runs the files.
 pool_for :: proc(run: ^Run, data: []byte) -> ^core.Runner {
-	return run_pool(run) if len(data) >= POOLED_BYTES && message.holding == nil else nil
+	return run_pool(run, pieces_of(data)) if len(data) >= POOLED_BYTES && message.holding == nil else nil
 }
 
 // What a piece's records came to, merged into the run's in source order. `cursor` is the bytes its outputs hold.
@@ -197,7 +203,7 @@ records_run :: proc(ins: ^Inputs, framing: core.Framing, from: u64, cells: bool)
 	defer free_slots(ps.run, ps.slots)
 	// A delimited text's pieces read its header at its start.
 	ps.start, ps.at, ps.ins = from, 0 if cells else from, ins
-	records.each(ins.data, ins.as, framing, piece_task, &ps, run_pool(ins.run), ps.at)
+	records.each(ins.data, ins.as, framing, piece_task, &ps, run_pool(ins.run, pieces_of(ins.data)), ps.at)
 	return ps.at, ps.crossed
 }
 

@@ -554,8 +554,8 @@ run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 				resize(m.stack, w)
 				// A look-behind continues where its body ends. Oniguruma's look-behind of one length does not
 				// restore the position, which leaves it where it began, or past that when it began within a
-				// character.
-				if Look_Kind(insts[bar.pc].a) == .Ahead {
+				// character. ECMA's matches leftwards, so it is restored.
+				if kind := Look_Kind(insts[bar.pc].a); kind == .Ahead || kind == .Behind && re.ecma {
 					pos = bar.a
 				}
 				pc += 1
@@ -923,7 +923,9 @@ assert_at :: proc(m: ^Matcher, kind: Assert_Kind, pos: int) -> bool {
 	return false
 }
 
-// Returns the position after the text of the latest of the backreference's groups that matches at `pos`, or -1.
+// Returns the position after the text of the latest of the backreference's groups that matches at `pos`, or -1. Under
+// ECMA a group that has not matched matches the empty string, and in a look-behind the text is read leftwards, ending
+// at `pos`.
 @(private = "file")
 backref :: proc(m: ^Matcher, ins: Inst, pos: int) -> int {
 	s := m.s[:m.limit] // the group's text may lie past the limit, but the match reads only up to it
@@ -931,6 +933,9 @@ backref :: proc(m: ^Matcher, ins: Inst, pos: int) -> int {
 	#reverse for g in groups {
 		lo, hi := m.slots[2 * g], m.slots[2 * g + 1]
 		if lo < 0 || hi < 0 {
+			if m.re.ecma {
+				return pos
+			}
 			continue
 		}
 		text := m.s[lo:hi]
@@ -939,6 +944,9 @@ backref :: proc(m: ^Matcher, ins: Inst, pos: int) -> int {
 				return pos + len(text)
 			}
 			continue
+		}
+		if m.re.ecma {
+			return pos - len(text) if strings.has_suffix(s[:pos], text) else -1
 		}
 		p := pos
 		matched := true

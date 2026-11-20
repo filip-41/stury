@@ -72,7 +72,7 @@ refuse_edit :: proc(o: ^Opts) {
 
 // `stury edit`, which edits each file in turn and exits.
 edit_main :: proc(run: ^Run, cli: ^Cli) -> ! {
-	files := input_files(cli.files[:], cli.walked)
+	files := input_files(cli.files[:], cli.walked, command_name(cli))
 	if run.opts.in_place {
 		refuse_in_place_inputs(files)
 	}

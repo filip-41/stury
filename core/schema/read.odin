@@ -654,9 +654,6 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 	case "required":
 		sh.is_object = true
 		if names, ok := strings_of(r, sc, v, name); ok {
-			if sc.draft == .D04 && len(names) == 0 {
-				fail(r, site, name, "must name at least one property in draft 4")
-			}
 			append(&sh.required, ..names)
 			delete(names, r.d.allocator)
 		}
@@ -666,6 +663,16 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 	case "const":
 		n.const_of = core.Value(core.Node_Ref{doc, v})
 	case "enum":
+		// Draft 4's meta-schema takes an enum of at least one value, none repeated.
+		switch {
+		case sc.draft != .D04 || kind != .Array:
+		case core.length(doc, v) == 0:
+			fail(r, site, name, "must hold at least one value in draft 4")
+			return
+		case !typed.unique(doc, v, context.temp_allocator, false, .Last):
+			fail(r, site, name, "must not repeat a value in draft 4")
+			return
+		}
 		n.enum_of, n.has_enum = values_of(r, doc, site, name), true
 	case "multipleOf":
 		if text, ok := number_of(r, doc, site, name); ok {
@@ -722,15 +729,13 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 		} else {
 			n.rules.pattern = keep(r, text)
 		}
-	case "description":
-		if text, ok := string_of(r, doc, v); ok {
-			n.description = keep(r, text)
-		}
-	case "title", "contentEncoding", "contentMediaType":
+	case "$comment", "title", "description", "contentEncoding", "contentMediaType":
 		if text, ok := string_of(r, doc, v); ok {
 			switch name {
 			case "title":
 				n.title = keep(r, text)
+			case "description":
+				n.description = keep(r, text)
 			case "contentEncoding":
 				n.content_encoding = keep(r, text)
 			case "contentMediaType":
@@ -970,12 +975,20 @@ own :: proc(r: ^Reader, xs: []$T) -> []T {
 	return slice.clone(xs, r.d.allocator) if len(xs) > 0 else nil
 }
 
-// The strings of the array at `v` as the description's own.
+// The strings of the array at `v` as the description's own, which every draft's meta-schema takes as names that do not
+// repeat, and draft 4's as at least one.
 @(private)
 strings_of :: proc(r: ^Reader, sc: Scope, v: core.Node_Index, name: string) -> (names: []string, ok: bool) {
 	doc := r.sources[sc.source]
-	if core.kind(doc, v) != .Array {
+	switch {
+	case core.kind(doc, v) != .Array:
 		fail(r, {sc.source, v}, name, "must be an array of names")
+		return
+	case sc.draft == .D04 && core.length(doc, v) == 0:
+		fail(r, {sc.source, v}, name, "must name at least one property in draft 4")
+		return
+	case !typed.unique(doc, v, context.temp_allocator, false, .Last):
+		fail(r, {sc.source, v}, name, "must not name a property twice")
 		return
 	}
 	out := make([dynamic]string, r.d.allocator)

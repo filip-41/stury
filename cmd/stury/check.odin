@@ -37,7 +37,7 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	if o.quarantine != "" && cr.sc != nil && o.froms & {.Csv, .Tsv} != {} {
 		usage_error("--quarantine splits an input into records, and a CSV or TSV table is judged as one whole against a schema")
 	}
-	fc := Files_Call{run = run, files = input_files(cli.files[:], cli.walked), job = check_file, data = &cr}
+	fc := Files_Call{run = run, files = input_files(cli.files[:], cli.walked, command_name(cli)), job = check_file, data = &cr}
 	each_file(&fc, true)
 	tell_skipped(run, bad_tally.skipped)
 	os.exit(fc.code)

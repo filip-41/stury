@@ -6,6 +6,7 @@ uses, over short texts of the characters the patterns name.
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 
@@ -18,6 +19,9 @@ CASES = 6000
 # Where Node answers otherwise against the spec: V8 tries a negative look-ahead between the two halves of a surrogate
 # pair, so `(?!.)` finds "😀" at 1.
 INSIDE = "Node stopping inside a surrogate pair"
+# A back reference keeps the search off the visited set, so it backtracks within a retry limit, where V8 has none and
+# takes exponential time.
+RETRIES = "a backtracking search past its retry limit"
 
 NODE = r"""
 for (const [p, s] of JSON.parse(require("fs").readFileSync(0, "utf8"))) {
@@ -34,6 +38,7 @@ for (const [p, s] of JSON.parse(require("fs").readFileSync(0, "utf8"))) {
 ATOMS = ["a", "b", "c", ".", "[^a]", "[a-c]", "[\\d\\s]", "\\w", "\\W", "é", "😀", "\\p{L}", "\\P{Ll}", "\\u{1F600}",
          "\\x61", "[\\u0061-b]"]
 ASSERTIONS = ["^", "$", "\\b", "\\B"]
+BACKREFS = ["\\1", "\\1", "\\2", "\\3"]
 QUANTIFIERS = ["", "", "", "*", "+", "?", "*?", "+?", "??", "{2}", "{1,3}", "{2,}", "{0,2}?", "{0}", "{3}?"]
 # Alternatives of characters no text holds, which change no match but make a group's body long enough that a count
 # of it runs as a counter loop rather than written out.
@@ -44,9 +49,11 @@ COUNTED = ["{4}", "{1,4}", "{0,4}?", "{4,}", "{2,5}", "{3,6}?"]
 def pattern(rng, depth):
     out = []
     for _ in range(rng.randint(1, 3)):
-        k = rng.randrange(14)
+        k = rng.randrange(17)
         repeatable = True
-        if k < 6 or depth == 0:
+        if k == 16:
+            atom = rng.choice(BACKREFS)
+        elif k < 6 or depth == 0:
             atom = rng.choice(ATOMS)
         elif k == 6:
             atom, repeatable = rng.choice(ASSERTIONS), False
@@ -59,7 +66,8 @@ def pattern(rng, depth):
         elif k == 11:
             atom = "(?:" + pattern(rng, depth - 1) + "|)"
         else:
-            atom, repeatable = rng.choice(["(?=", "(?!"]) + pattern(rng, depth - 1) + ")", False
+            looks = ["(?=", "(?!"] if k < 14 else ["(?<=", "(?<!"]
+            atom, repeatable = rng.choice(looks) + pattern(rng, depth - 1) + ")", False
         if repeatable and atom.startswith("(") and rng.randrange(8) == 0:
             out.append(atom[:-1] + FILL + ")" + rng.choice(COUNTED))
         else:
@@ -81,7 +89,9 @@ def text(rng):
 
 def known(p, ours, node):
     """Why `ours` may differ from `node` on purpose, or None."""
-    return INSIDE if node == "inside" else None
+    if node == "inside":
+        return INSIDE
+    return RETRIES if ours == "E retry-limit-in-match over" and re.search(r"\\[1-9k]", p) else None
 
 
 @pytest.fixture(scope="module")

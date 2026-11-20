@@ -692,3 +692,30 @@ diff_work_is_bounded_across_arrays :: proc(t: ^testing.T) {
 	testing.expectf(t, r.truncated && matched > 0 && matched + replaced == 120 && replaced > matched, "truncated %v, %d arrays matched, %d replaced", r.truncated, matched, replaced)
 	free_all(context.temp_allocator)
 }
+
+@(private = "file")
+deep_array :: proc(levels: int, leaf: string) -> string {
+	return strings.concatenate({strings.repeat("[", levels, context.temp_allocator), leaf, strings.repeat("]", levels, context.temp_allocator)}, context.temp_allocator)
+}
+
+// Values nested well past the default depth are compared to the bottom when `max_depth` allows them, and are refused,
+// not told equal, when it does not.
+@(test)
+diff_deep_values :: proc(t: ^testing.T) {
+	LEVELS :: 3000
+	as := json.as(.Json, {max_depth = 4096})
+	a, a_err := core.build(transmute([]u8)deep_array(LEVELS, "0"), as)
+	b, b_err := core.build(transmute([]u8)deep_array(LEVELS, "1"), as)
+	defer core.destroy(&a)
+	defer core.destroy(&b)
+	defer free_all(context.temp_allocator)
+	if !testing.expect(t, a_err == nil && b_err == nil) {
+		return
+	}
+	r, _ := diff.values(core.Node_Ref{&a, core.ROOT}, core.Node_Ref{&b, core.ROOT}, {max_depth = 4096})
+	testing.expect(t, !r.too_deep && len(r.changes) == 1 && len(r.changes[0].path) == LEVELS)
+	diff.result_destroy(&r)
+	r, _ = diff.values(core.Node_Ref{&a, core.ROOT}, core.Node_Ref{&b, core.ROOT})
+	testing.expect(t, r.too_deep)
+	diff.result_destroy(&r)
+}

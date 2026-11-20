@@ -76,9 +76,7 @@ comments :: proc(v: Value, role: Role) -> (bodies: []string, from: Comment_From)
 			continue
 		}
 		if role == .Attribute {
-			name, value := r.doc.readers.attribute(r.doc, f)
-			quoted := r.doc.src[value.lo - 1:][:value.n + 2]
-			append(&texts, strings.concatenate({string(r.doc.src[name.lo:][:name.n]), "=", string(quoted)}))
+			append(&texts, attribute_source_body(r.doc, f))
 			continue
 		}
 		text, _ := comment_text(r.doc, f)
@@ -88,6 +86,22 @@ comments :: proc(v: Value, role: Role) -> (bodies: []string, from: Comment_From)
 		return nil, .None
 	}
 	return texts[:], .Source
+}
+
+// The body of attribute fact `f` as its source spells it: its name, then `=` and its value with the quotes around it, or
+// the name alone for an attribute with no value. Made in the context allocator.
+attribute_source_body :: proc(doc: ^Document, f: Fact) -> string {
+	name, value := doc.readers.attribute(doc, f)
+	src := doc.src
+	quote := src[value.lo - 1] if value.lo > 0 else 0
+	end := value.lo + u64(value.n)
+	switch {
+	case (quote == '"' || quote == '\'') && end < u64(len(src)) && src[end] == quote:
+		return strings.concatenate({string(src[name.lo:][:name.n]), "=", string(src[value.lo - 1:end + 1])})
+	case value.n == 0:
+		return strings.clone(string(src[name.lo:][:name.n]))
+	}
+	return strings.concatenate({string(src[name.lo:][:name.n]), "=", string(src[value.lo:end])})
 }
 
 // `v` with its comments of `role` written as `bodies`, an empty list removing the role.

@@ -340,6 +340,32 @@ sample_passes_its_check :: proc(t: ^testing.T) {
 	}
 }
 
+// A description no value passes is failed by every value, so an invalid sample of it is any value, and one every value
+// passes has none.
+@(test)
+sample_fails_a_description_no_value_passes :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	for text in ([?]string{`false`, `{"not": {}}`, `{"enum": []}`, `{"type": "integer", "minimum": 3, "maximum": 2}`, `true`}) {
+		d, _, rerr := read_text(text)
+		testing.expectf(t, rerr == nil, "%s: %v", text, rerr)
+		got, err := schema.sample(&d, json.as(.Json), {count = 3, seed = 2, invalid = true})
+		if text == `true` {
+			e, typed := err.(core.Typed_Error)
+			testing.expectf(t, typed && e.kind == .No_Invalid_Sample, "%s: %v", text, err)
+			continue
+		}
+		testing.expectf(t, err == nil && len(got) == 3, "%s: %v", text, err)
+		c, _ := schema.compile_description(&d)
+		defer schema.destroy(c)
+		b, _ := schema.bind(c, {layout = json.as(.Json)})
+		defer schema.unbind(&b)
+		for s in got {
+			testing.expectf(t, !schema.valid(&b, s), "%s: %s", text, s)
+		}
+	}
+}
+
 // A sampled multiple of a step is spelled as `spell.write_decimal` spells its value.
 @(test)
 sample_spells_a_multiple_canonically :: proc(t: ^testing.T) {

@@ -45,7 +45,7 @@ Op :: enum u8 {
 	Save, // slot a = the position (captures, loop marks, and \K as slot 0). b: a group's start, which unsets its end
 	Set, // slot a = the position, kept as the match backs past it: a group's bound Oniguruma writes in place
 	Assert, // Assert_Kind(a). A callout's data at callouts[b]
-	Backref, // the text of one of refs[a]'s groups. b: folded
+	Backref, // the text of one of refs[a]'s groups. b: folded, or under ECMA read leftwards
 	Look, // a look-around or atomic group, Look_Kind(a), ending at the Look_End at b
 	Look_End,
 	Back, // a runes back, for a look-behind

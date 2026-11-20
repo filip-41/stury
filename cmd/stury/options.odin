@@ -306,8 +306,10 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 				}
 			}
 			if c == 0 || !letter_option(o, &cli, c) {
-				message.write_stderr("stury: Unknown option %s\n", a)
-				die()
+				if near := near_long_option(name); near != "" {
+					usage_error("Unknown option %s, did you mean --%s?", a, near)
+				}
+				usage_error("Unknown option %s", a)
 			}
 		}
 		i += option_arity(a)
@@ -594,6 +596,30 @@ LONG_LETTERS := [?]struct {
 	{"exit-status", 'e'},
 	{"help", 'h'},
 	{"version", 'V'},
+}
+
+// The long options that no letter stands for.
+@(private = "file", rodata)
+LONG_ONLY_OPTIONS := [?]string{
+	"tab", "indent", "max-depth", "raw-output0", "unbuffered", "arg", "argjson", "slurpfile", "rawfile", "args", "jsonargs",
+	"build-configuration", "library-path", "from", "to", "schema", "schema-ref", "schema-draft", "max-errors", "report",
+	"format-assert", "filter", "ranges", "invalid", "comments", "seed", "count", "package", "old-schema", "new-schema",
+	"compat", "key", "set", "position", "facts", "json", "shape", "diff", "glob", "files-from", "grow-header", "attributes",
+	"delimiter", "comment", "out-delimiter", "out-comment", "no-header", "ragged", "lazy-quotes", "infer", "threads",
+	"alias-limit", "expansion-limit", "merge-keys", "unread-entities", "out-no-header", "crlf", "explain", "follow", "each",
+	"no-filename", "no-ignore", "skip-bad", "quarantine", "in-place", "check", "seq", "stream", "stream-errors",
+}
+
+// The long option, without its dashes, that `name` is a misspelling of, or "".
+@(private = "file")
+near_long_option :: proc(name: string) -> string {
+	known: [len(LONG_ONLY_OPTIONS) + len(LONG_LETTERS)]string
+	copy(known[:], LONG_ONLY_OPTIONS[:])
+	for l, i in LONG_LETTERS {
+		known[len(LONG_ONLY_OPTIONS) + i] = l.name
+	}
+	// A long option is no word to a reader, so only a slip of a letter or two is told.
+	return spell.nearest_word(known[:], name, max(len(name) / 3, 1))
 }
 
 // The option of letter `c` (but `L`), or false if there is none.

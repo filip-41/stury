@@ -154,14 +154,14 @@ lay_out_rows :: proc(v: ^Visited, rows: []int, radix: []int) {
 // More rows than a visited set within MAX_BYTES holds over one place.
 MAX_ROWS :: MAX_BYTES * 8 + 1
 
-// Whether a linear search with a visited set applies to a program. Under ECMA it does with a loop, a look-ahead, two
-// choices, or one choice in a search that tries more than one start. Under jq it does with a choice inside a loop,
-// the shape that backtracks past polynomial time, and only when each instruction's outcome depends on the position
-// alone: no look-around, back reference, counter, call or callout, and no empty check, whose exit Oniguruma takes
-// where ECMA fails.
+// Whether a linear search with a visited set applies to a program. Under ECMA it does with a loop, a look-around, two
+// choices, or one choice in a search that tries more than one start, and no back reference, whose outcome depends on
+// the groups the way there set. Under jq it does with a choice inside a loop, the shape that backtracks past
+// polynomial time, and only when each instruction's outcome depends on the position alone: no look-around, back
+// reference, counter, call or callout, and no empty check, whose exit Oniguruma takes where ECMA fails.
 linear_ops :: proc(insts: []Inst, ecma: bool, anchored: bool) -> bool {
 	for ins in insts {
-		allowed := ecma
+		allowed := ecma && ins.op != .Backref
 		#partial switch ins.op {
 		case .Match, .Str, .Char_Fold, .Any, .Any_All, .Class, .Split, .Split_Head, .Jmp, .Set, .Linebreak, .Rep, .Rep_Lazy:
 			allowed = true

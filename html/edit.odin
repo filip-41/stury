@@ -210,8 +210,8 @@ edit_content :: proc(name, text: string, allocator: runtime.Allocator) -> (out: 
 	return out, false, nil
 }
 
-// Whether `body` is a comment that HTML reads back as written, or with `.Attribute` a single attribute. HTML folds
-// capitals in an attribute's name.
+// Whether `body` is a comment that HTML reads back as written, or with `.Attribute` a single attribute whose name has
+// no capitals, which HTML would fold.
 @(private = "file")
 edit_fact :: proc(role: core.Role, body: string) -> bool {
 	if role != .Attribute {
@@ -220,6 +220,7 @@ edit_fact :: proc(role: core.Role, body: string) -> bool {
 	Tag_Read :: struct {
 		tags, attrs, errors: int,
 		hi:                  u64,
+		name:                Span,
 	}
 	on :: proc "contextless" (r: ^Tag_Read, t: ^Html_Token) -> Token_Action {
 		#partial switch t.kind {
@@ -227,6 +228,9 @@ edit_fact :: proc(role: core.Role, body: string) -> bool {
 			r.errors += 1
 		case .Start_Tag:
 			r.tags, r.attrs, r.hi = r.tags + 1, len(t.attrs), t.hi
+			if len(t.attrs) > 0 {
+				r.name = t.attrs[0].name
+			}
 		case:
 			r.tags += 1
 		}
@@ -235,7 +239,15 @@ edit_fact :: proc(role: core.Role, body: string) -> bool {
 	tag := strings.concatenate({"<x ", body, ">"}, context.temp_allocator)
 	r: Tag_Read
 	_, fault, _ := tokenize(transmute([]u8)tag, &r, on, allocator = context.temp_allocator)
-	return fault == nil && r.errors == 0 && r.tags == 1 && r.attrs == 1 && r.hi == u64(len(tag))
+	if fault != nil || r.errors != 0 || r.tags != 1 || r.attrs != 1 || r.hi != u64(len(tag)) {
+		return false
+	}
+	for c in tag[r.name.lo:][:r.name.n] {
+		if 'A' <= c && c <= 'Z' {
+			return false
+		}
+	}
+	return true
 }
 
 @(private = "file")

@@ -52,6 +52,8 @@ Options :: struct {
 	// and the result is `truncated`, as it is when the arrays of a diff together take more than a fixed number of steps
 	// to match.
 	max_edits:  int,
+	// The deepest nesting either value may hold, `core.MAX_DEPTH` for 0. A value nested past it is `too_deep`.
+	max_depth:  int,
 }
 
 // One change. `path` places it in the new value, and in the old one for a removal. `old_path` is the place in the old
@@ -71,6 +73,8 @@ Change :: struct {
 Result :: struct {
 	changes:   []Change,
 	truncated: bool,
+	// A value nests past `Options.max_depth`, so the changes are not told.
+	too_deep:  bool,
 	// The indexes of the `Options.keys` that named no array present in both values.
 	unused_keys: []int,
 	arena:     virtual.Arena,
@@ -88,6 +92,7 @@ Differ :: struct {
 	old, new:  [dynamic]core.Step,
 	changes:   [dynamic]Change,
 	truncated: bool,
+	too_deep:  bool,
 	memos:    [dynamic]Memo,
 	// The steps left for matching arrays.
 	work:      int,
@@ -119,8 +124,11 @@ values :: proc(a, b: core.Value, opts := Options{}) -> (r: Result, err: runtime.
 	if d.opts.max_edits <= 0 {
 		d.opts.max_edits = DEFAULT_MAX_EDITS
 	}
+	if d.opts.max_depth <= 0 {
+		d.opts.max_depth = core.MAX_DEPTH
+	}
 	walk(&d, a, b, 0)
-	r.changes, r.truncated = d.changes[:], d.truncated
+	r.changes, r.truncated, r.too_deep = d.changes[:], d.truncated, d.too_deep
 	unused := make([dynamic]int, d.allocator)
 	for named, i in d.named {
 		if !named {
@@ -167,18 +175,18 @@ walk :: proc(d: ^Differ, a, b: core.Value, depth: int) {
 	switch {
 	case ca != cb:
 		emit(d, .Changed, a, b, true)
-	case ca == .Object && depth < core.MAX_DEPTH:
+	case ca == .Object && depth < d.opts.max_depth:
 		if equal(d, a, b) && (!d.opts.facts || quiet(a, b)) {
 			return
 		}
 		objects(d, a, b, depth)
-	case ca == .Array && depth < core.MAX_DEPTH:
+	case ca == .Array && depth < d.opts.max_depth:
 		key_rule(d)
 		if equal(d, a, b) && (!d.opts.facts || quiet(a, b)) {
 			return
 		}
 		arrays(d, a, b, depth)
-	case !core.equal(a, b):
+	case !exact(d, a, b):
 		emit(d, .Changed, a, b, false)
 	}
 }

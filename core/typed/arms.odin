@@ -3027,7 +3027,7 @@ fork_finish :: proc(h: ^Check, fk: ^Fork, hi: u64) -> core.Action {
 				fork_note(h, fk, .Not_A_Member, hi, "const" if a.constant else "enum")
 			}
 		case .Unique:
-			if fk.kind == .Array && !unique(&doc, fork_space(fk), h.readings != nil, held_dups(h)) {
+			if fk.kind == .Array && !unique(&doc, core.ROOT, fork_space(fk), h.readings != nil, held_dups(h)) {
 				fork_note(h, fk, .Not_Unique, hi, "uniqueItems")
 			}
 		case .Contains:
@@ -3269,17 +3269,16 @@ held_dups :: proc(h: ^Check) -> core.Duplicates {
 	return .First if h.first_key else .Last
 }
 
-// Whether no two elements of the root array of `doc` are equal, comparing those whose hashes agree, with a `Plain` one read
-// as the kind of the other when `read_plain`, and a repeated key of each object counting with the value `dups` keeps.
-@(private)
-unique :: proc(doc: ^core.Document, allocator: runtime.Allocator, read_plain: bool, dups: core.Duplicates) -> bool {
+// Whether no two elements of the array at `at` of `doc` are equal, comparing those whose hashes agree, with a `Plain` one
+// read as the kind of the other when `read_plain`, and a repeated key of each object counting with the value `dups` keeps.
+unique :: proc(doc: ^core.Document, at: core.Node_Index, allocator: runtime.Allocator, read_plain: bool, dups: core.Duplicates) -> bool {
 	context.allocator = allocator
 	Hashed :: struct {
 		hash: u64,
 		node: core.Node_Index,
 	}
 	all := make([dynamic]Hashed)
-	it := core.children(doc, core.ROOT)
+	it := core.children(doc, at)
 	for x in core.child_next(&it) {
 		append(&all, Hashed{core.hash(core.Node_Ref{doc, x}, dups = dups), x})
 	}

@@ -255,7 +255,7 @@ each_file :: proc(fc: ^Files_Call, parallel: bool) {
 		}
 		return
 	}
-	run_pool(fc.run)
+	run_pool(fc.run, FILES_AHEAD if fc.streams else len(fc.files))
 	fc.pool = fc.run.pool
 	fc.pool.steady = true
 	defer fc.pool.steady = false

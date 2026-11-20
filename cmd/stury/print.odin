@@ -226,7 +226,13 @@ put_format_text :: proc(o: ^Output, as: core.As, text: []u8, parted: bool) {
 		write.put_text(&o.buf, between(text))
 	}
 	write.put_text(&o.buf, string(text))
-	if !as.readers.binary && len(text) > 0 && text[len(text) - 1] != '\n' {
+	end_format_text(o, as, text[len(text) - 1] if len(text) > 0 else 0, parted)
+}
+
+// Ends a text whose last byte is `last`, 0 for none: a newline unless it ends with one, is empty, or is an item of a
+// binary format.
+end_format_text :: proc(o: ^Output, as: core.As, last: u8, parted: bool) {
+	if !as.readers.binary && last != 0 && last != '\n' {
 		write.put_byte(&o.buf, '\n')
 	}
 	o.parted_at = o.written + o.buf.cursor if parted else -1

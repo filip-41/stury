@@ -546,10 +546,10 @@ if json.check_schema(&b, src, &sink) != nil {
 ### Patterns
 
 A `pattern` and a `patternProperties` name are read as ECMA-262 regular expressions with the `u` flag. An escape outside
-a class names only a syntax character or `/`, so `\&` refuses the schema when it is loaded. Look-behind and back
-references are refused too, since the search does not backtrack, though `format: "regex"` accepts them and the jq
-functions run them. A search that runs out of memory, or whose counted repeats nest past what memory bounds, is not a
-verdict: the check reports `pattern_undecided` and `stury check` exits 2.
+a class names only a syntax character or `/`, so `\&` refuses the schema when it is loaded. Look-behind of any length
+and back references match as ECMA-262's do, and a pattern with a back reference backtracks within a limit of
+10,000,000 retries. A search that passes that limit, runs out of memory, or whose counted repeats nest past what memory
+bounds, is not a verdict: the check reports `pattern_undecided` and `stury check` exits 2.
 
 ### Infer, sample and generate
 

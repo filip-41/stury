@@ -275,6 +275,12 @@ value_text :: proc(g: ^Gen, b: ^Bound, as: core.As, opts: Sample_Options, scratc
 			return
 		}
 	}
+	if opts.invalid {
+		v: core.Value
+		if text, ok = broken(g, b, as, &v, opts, scratch); ok {
+			return
+		}
+	}
 	return nil, empty
 }
 

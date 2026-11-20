@@ -4,6 +4,7 @@ import "core:mem/virtual"
 import "core:slice"
 import "core:strings"
 import "../spell"
+import "../regex"
 import core "../"
 import "../rules"
 
@@ -11,18 +12,13 @@ import "../rules"
 // `$ref` and its `allOf`) and a disjunction of branches (its `anyOf`), and the proof checks each branch of the first
 // against some branch of the second, facet by facet. A pair the proof cannot decide is refused, never assumed.
 
-@(private)
-MAX_BRANCHES :: 32
+@(private) MAX_BRANCHES :: 32
+@(private) MAX_DEPTH :: 24
+@(private) MAX_SAME_NESTING :: 512 // The deepest `same_node` goes before it says the nodes differ
 
-@(private)
-MAX_DEPTH :: 24
-
-// The values of an enum a proof judges one by one.
-@(private = "file")
-MAX_FINITE :: 8192
-
-@(private = "file")
-STEP_BUDGET :: 40_000
+@(private = "file") MAX_FINITE :: 8192 // The values of an enum a proof judges one by one
+@(private = "file") STEP_BUDGET :: 40_000
+@(private = "file") MAX_FOCI :: 8 // The places a refusal names that a proof keeps
 
 // The two descriptions of a proof: the one whose values must be taken is `from`, the one that must take them `to`.
 @(private)
@@ -34,15 +30,40 @@ Prover :: struct {
 	exhausted: bool,
 	// The keyword of the first facet a refusal named.
 	why:      string,
-	// The pairs under proof. A pair met again inside its own proof holds, as a recursive schema's proof needs.
-	running:  map[string]struct{},
+	// The pairs under proof, each with the depth of value it is proven at. A pair met again deeper inside its own proof
+	// holds, as a recursive schema's proof needs, and one met again at its own depth proves nothing.
+	running:  map[string]int,
+	// The compiled pattern of each `patternProperties` expression a proof matched names against.
+	patterns: rules.Programs,
+	scratch:  regex.Scratch,
+	// The steps from the root to the value under proof, the conjunctions under proof at each, innermost last, and the
+	// first places a refusal named, which the search for a witness starts from.
+	path:     [dynamic]core.Step,
+	frames:   [dynamic][2][]rules.Node_Index,
+	foci:     [dynamic]Focus,
 	// How many `same_node` calls are open, which a chain of references would otherwise carry to the stack's end.
 	nested:   int,
 }
 
-// The deepest `same_node` goes before it says the nodes differ, which is always safe to say.
+// A place a proof stopped at: the steps from the root to a value and the conjunctions of each side judging it there.
 @(private)
-MAX_SAME_NESTING :: 512
+Focus :: struct {
+	path: []core.Step,
+	a, b: []rules.Node_Index,
+}
+
+@(private)
+prover_of :: proc(from, to: ^Side) -> Prover {
+	return {
+		from = from,
+		to = to,
+		running = make(map[string]int, context.temp_allocator),
+		patterns = make(rules.Programs, context.temp_allocator),
+		path = make([dynamic]core.Step, context.temp_allocator),
+		frames = make([dynamic][2][]rules.Node_Index, context.temp_allocator),
+		foci = make([dynamic]Focus, context.temp_allocator),
+	}
+}
 
 // Counts a step of the proof, and reports whether the budget is gone.
 @(private)
@@ -60,7 +81,23 @@ refuse :: proc(p: ^Prover, why: string) -> bool {
 	if p.why == "" {
 		p.why = why
 	}
+	if len(p.frames) > 0 && len(p.foci) < MAX_FOCI {
+		top := p.frames[len(p.frames) - 1]
+		if n := len(p.foci); n > 0 && slice.equal(p.foci[n - 1].a, top[0]) && slice.equal(p.foci[n - 1].b, top[1]) {
+			return false
+		}
+		// The conjunctions may be literals of a caller's frame, which a focus outlives.
+		append(&p.foci, Focus{path = slice.clone(p.path[:], context.temp_allocator), a = slice.clone(top[0], context.temp_allocator), b = slice.clone(top[1], context.temp_allocator)})
+	}
 	return false
+}
+
+// Whether every value of `a` at `step` inside the value of the conjunction under proof is a value of `b`.
+@(private)
+included_at :: proc(p: ^Prover, step: core.Step, a, b: []rules.Node_Index, depth: int) -> bool {
+	append(&p.path, step)
+	defer pop(&p.path)
+	return included(p, a, b, depth + 1)
 }
 
 // Whether every value of the conjunction `a` of nodes of `p.from` is a value of the conjunction `b` of nodes of `p.to`.
@@ -76,12 +113,19 @@ included :: proc(p: ^Prover, a, b: []rules.Node_Index, depth: int) -> bool {
 		return true
 	}
 	key := strings.concatenate({conjunction_key(p.from.d, a), "|", conjunction_key(p.to.d, b)}, context.temp_allocator)
-	if key in p.running {
-		return true
+	if at, held := p.running[key]; held {
+		return at < depth || refuse(p, "$ref")
 	}
-	p.running[key] = {}
+	p.running[key] = depth
 	defer delete_key(&p.running, key)
-	as, a_fits := rules.branches(p.from.d, a, false, MAX_BRANCHES)
+	append(&p.frames, [2][]rules.Node_Index{a, b})
+	defer pop(&p.frames)
+	// Every value of `a` passes all of some branch of its choices, so the branches of `a` may split its `oneOf` and
+	// `if` and leave out what they do not split.
+	as, a_fits := rules.branches(p.from.d, a, true, MAX_BRANCHES)
+	if !a_fits {
+		as, a_fits = rules.branches(p.from.d, a, false, MAX_BRANCHES)
+	}
 	bs, b_fits := rules.branches(p.to.d, b, false, MAX_BRANCHES)
 	if !a_fits || !b_fits {
 		return refuse(p, "anyOf")
@@ -145,8 +189,8 @@ branch_included :: proc(p: ^Prover, a, b: []rules.Node_Index, ab, bb: [dynamic]r
 		return true
 	}
 	for n in slice.concatenate([][]^rules.Node{an, bn}, context.temp_allocator) {
-		if has_enum(n) {
-			return finite_included(p, an, a, b, ka)
+		if n.has_enum || n.const_of != nil {
+			return finite_included(p, ab[:], a, b, ka)
 		}
 	}
 	if ka - kb != {} {
@@ -160,64 +204,179 @@ branch_included :: proc(p: ^Prover, a, b: []rules.Node_Index, ab, bb: [dynamic]r
 		for m in ab {
 			matched ||= same_node(p, m, bb[i])
 		}
-		if negated, has := n.not.?; has && !matched {
-			matched = ka & rules.kinds_of(p.to.d, {negated}) == {}
-		}
-		if !matched {
+		_, _, lowered := unevaluated_block(p.to.d, n)
+		if !matched && (n.dynamic_ref != nil || n.unevaluated_items != nil || n.unevaluated_properties != nil && !lowered) {
 			return refuse(p, "$dynamicRef" if n.dynamic_ref != nil else "applicator")
+		}
+		if !matched && !applicators_hold(p, ab[:], ka, n, depth) {
+			return false
 		}
 	}
 	return facets_included(p, an, bn, ka, depth)
 }
 
+// Whether every value of the branch `ab` of kinds `ka` passes the `oneOf`, `not` and `if` of `n`: all of one arm of the
+// `oneOf` that no other arm shares a value with, and the `then` and the `else` of the `if`, or its `if` and its `then`.
 @(private = "file")
-has_enum :: proc(n: ^rules.Node) -> bool {
-	return n.has_enum || n.const_of != nil
+applicators_hold :: proc(p: ^Prover, ab: []rules.Node_Index, ka: rules.Kinds, n: ^rules.Node, depth: int) -> bool {
+	if negated, has := n.not.?; has && ka & rules.kinds_of(p.to.d, {negated}) != {} {
+		return refuse(p, "not")
+	}
+	// An arm or a branch that does not hold is no refusal of its keyword, which names the reason when none holds.
+	why := p.why
+	one_holds := len(n.one_of) == 0
+	for arm, i in n.one_of {
+		if !included(p, ab, {arm}, depth) {
+			continue
+		}
+		one_holds = true
+		for other, j in n.one_of {
+			one_holds &&= i == j || disjoint(p, p.to.d, arm, other)
+		}
+		break
+	}
+	test, has_test := n.cond.test.?
+	cond_holds := !has_test || !one_holds
+	if !cond_holds {
+		cond_holds = included(p, ab, nodes_or_none(n.cond.then.? or_else rules.NONE), depth) &&
+			(included(p, ab, nodes_or_none(n.cond.other.? or_else rules.NONE), depth) || included(p, ab, {test}, depth))
+	}
+	if !p.exhausted {
+		p.why = why
+	}
+	if !one_holds {
+		return refuse(p, "oneOf")
+	}
+	return cond_holds || refuse(p, "if")
+}
+
+// Whether no value passes both `x` and `y` of `d`, which holds when no branch of one shares a value with one of the other.
+@(private = "file")
+disjoint :: proc(p: ^Prover, d: ^rules.Description, x, y: rules.Node_Index) -> bool {
+	xs, x_fits := rules.branches(d, {x}, true, MAX_BRANCHES)
+	ys, y_fits := rules.branches(d, {y}, true, MAX_BRANCHES)
+	if !x_fits || !y_fits {
+		return false
+	}
+	for bx in xs {
+		for by in ys {
+			if spent(p) || !branches_disjoint(p, d, bx[:], by[:]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+@(private = "file")
+branches_disjoint :: proc(p: ^Prover, d: ^rules.Description, x, y: []rules.Node_Index) -> bool {
+	shared := rules.kinds_of(d, x) & rules.kinds_of(d, y)
+	if shared == {} || finite_apart(d, x, y) {
+		return true
+	}
+	if shared - {.Object} != {} {
+		return false
+	}
+	x_blocks, y_blocks := object_blocks(d, nodes_of(d, x))[:], object_blocks(d, nodes_of(d, y))[:]
+	x_names, y_names := names_of_blocks(x_blocks), names_of_blocks(y_blocks)
+	for blk in x_blocks {
+		for m in blk.members {
+			if !m.required || !required_in(y_blocks, y_names, m.name) {
+				continue
+			}
+			x_nodes, _ := judging_nodes(p, x_blocks, x_names, m.name)
+			y_nodes, _ := judging_nodes(p, y_blocks, y_names, m.name)
+			if finite_apart(d, x_nodes, y_nodes) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// The values of the first node of `ids` that is finite in them, each `$ref` that holds nothing else followed, and not
+// `finite` for none.
+@(private = "file")
+finite_of :: proc(d: ^rules.Description, ids: []rules.Node_Index) -> (values: []core.Value, finite: bool) {
+	for id in ids {
+		at, _ := rules.ref_end(d, id)
+		if at == rules.NONE {
+			continue
+		}
+		n := &d.nodes[at]
+		if c, has := n.const_of.?; has {
+			return slice.clone([]core.Value{c}, context.temp_allocator), true
+		}
+		if n.has_enum {
+			return n.enum_of, true
+		}
+	}
+	return nil, false
+}
+
+// Whether the conjunctions `x` and `y` of `d` are each finite in values and share none.
+@(private = "file")
+finite_apart :: proc(d: ^rules.Description, x_ids, y_ids: []rules.Node_Index) -> bool {
+	x, x_finite := finite_of(d, x_ids)
+	y, y_finite := finite_of(d, y_ids)
+	if !x_finite || !y_finite {
+		return false
+	}
+	for a in x {
+		for b in y {
+			if core.equal(a, b) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// The object blocks of `nodes` of `d`.
+@(private)
+object_blocks :: proc(d: ^rules.Description, nodes: []^rules.Node) -> [dynamic]^rules.Object {
+	blocks := make([dynamic]^rules.Object, context.temp_allocator)
+	for n in nodes {
+		if n.object >= 0 {
+			append(&blocks, &d.objects[n.object])
+		}
+	}
+	return blocks
 }
 
 // Whether the values that `an` is finite in, an enum, a constant or the null and booleans, are all values of `b`, which
 // the check of each value decides. A value `a` refuses is no concern.
 @(private = "file")
-finite_included :: proc(p: ^Prover, an: []^rules.Node, a, b: []rules.Node_Index, ka: rules.Kinds) -> bool {
-	values := make([dynamic]core.Value, context.temp_allocator)
-	finite := false
-	for n in an {
-		if has_enum(n) {
-			finite = true
-			append(&values, ..n.enum_of)
-			if c, has := n.const_of.?; has {
-				append(&values, c)
-			}
-			break
-		}
-	}
+finite_included :: proc(p: ^Prover, ab, a, b: []rules.Node_Index, ka: rules.Kinds) -> bool {
+	values, finite := finite_of(p.from.d, ab)
 	if !finite && ka - {.Null, .Bool} == {} {
-		append(&values, nil, false, true)
-		finite = true
+		values, finite = []core.Value{nil, false, true}, true
 	}
 	if !finite || len(values) > MAX_FINITE {
 		return refuse(p, "enum")
 	}
 	// The scratch arena of the compare in progress, whose texts are freed after each value.
 	scratch := (^virtual.Arena)(context.temp_allocator.data)
+	// The refusal is made past the value's texts, as what it keeps would go with them.
+	held := true
 	for v in values {
 		mark := virtual.arena_temp_begin(scratch)
 		defer virtual.arena_temp_end(mark)
 		text, written := text_of(p.from, v)
-		if !written {
-			return refuse(p, "enum")
-		}
-		taken, known := accepts(p.from, a, text)
-		if !known {
-			return refuse(p, "enum")
-		}
-		if taken {
-			if fits, decided := accepts(p.to, b, text); !fits || !decided {
-				return refuse(p, "enum")
+		held = written
+		if held {
+			taken, known := accepts(p.from, a, text)
+			held = known
+			if taken {
+				fits, decided := accepts(p.to, b, text)
+				held &&= fits && decided
 			}
 		}
+		if !held {
+			break
+		}
 	}
-	return true
+	return held || refuse(p, "enum")
 }
 
 // Whether some node of `an` makes a facet of `b` certain.
@@ -347,7 +506,7 @@ array_included :: proc(p: ^Prover, an: []^rules.Node, have: ^rules.Rules, b: ^ru
 				append(&have, e)
 			}
 		}
-		if !included(p, have[:], {target}, depth + 1) {
+		if !included_at(p, core.Index(i), have[:], {target}, depth) {
 			return false
 		}
 	}
@@ -415,63 +574,140 @@ object_included :: proc(p: ^Prover, an: []^rules.Node, have: ^rules.Rules, b: ^r
 	if !at_most(have.max_members, r.max_members) {
 		return refuse(p, "maxProperties")
 	}
-	if b.object < 0 {
-		return true
-	}
-	want := &p.to.d.objects[b.object]
-	blocks := make([dynamic]^rules.Object, context.temp_allocator)
+	blocks := object_blocks(p.from.d, an)
 	for a in an {
-		if a.object >= 0 {
-			append(&blocks, &p.from.d.objects[a.object])
+		if block, exact, has := unevaluated_block(p.from.d, a); has && exact {
+			append(&blocks, new_clone(block, context.temp_allocator))
 		}
 	}
-	patterned := len(want.patterns) > 0
-	for blk in blocks {
-		patterned ||= len(blk.patterns) > 0
+	if b.object >= 0 && !members_included(p, blocks[:], &p.to.d.objects[b.object], depth) {
+		return false
 	}
-	if patterned {
-		for blk in blocks {
-			if same_object(p, blk, want) {
-				return true
+	if block, _, has := unevaluated_block(p.to.d, b); has && !members_included(p, blocks[:], &block, depth) {
+		return false
+	}
+	return true
+}
+
+// The nodes a node reaches through `$ref` and `allOf` that `unevaluated_block` reads at most.
+@(private = "file")
+MAX_EVALUATING :: 256
+
+// The `unevaluatedProperties` of `n` of `d` as an object block over what `n` reaches through `$ref` and `allOf`. It is
+// `exact` where nothing reached may evaluate more, as an `anyOf`, `oneOf`, `if`, `$dynamicRef`, dependent schema or
+// nested `unevaluatedProperties` may, and holds less than the keyword otherwise. `has` is false for a node without the
+// keyword, or one that reaches past `MAX_EVALUATING`.
+@(private = "file")
+unevaluated_block :: proc(d: ^rules.Description, n: ^rules.Node) -> (block: rules.Object, exact, has: bool) {
+	others, holds := n.unevaluated_properties.?
+	if !holds {
+		return
+	}
+	members := make([dynamic]rules.Member, context.temp_allocator)
+	patterns := make([dynamic]rules.Pattern, context.temp_allocator)
+	reached := make([dynamic]^rules.Node, context.temp_allocator)
+	append(&reached, n)
+	exact = true
+	for i := 0; i < len(reached); i += 1 {
+		if len(reached) > MAX_EVALUATING {
+			return {}, false, false
+		}
+		x := reached[i]
+		exact &&= len(x.any_of) == 0 && len(x.one_of) == 0 && x.cond == {} && x.dynamic_ref == nil && (i == 0 || x.unevaluated_properties == nil)
+		if x.object >= 0 {
+			o := &d.objects[x.object]
+			if o.additional != rules.NONE {
+				return {additional = rules.NONE, keys = rules.NONE}, true, true
+			}
+			for m in o.members {
+				if !m.only_required {
+					append(&members, rules.Member{name = m.name, node = rules.NONE})
+				}
+			}
+			for q in o.patterns {
+				append(&patterns, rules.Pattern{expression = q.expression, node = rules.NONE})
+			}
+			for dep in o.dependents {
+				exact &&= dep.node == nil
 			}
 		}
-		return refuse(p, "patternProperties")
+		next := make([dynamic]rules.Node_Index, context.temp_allocator)
+		if id, is := x.ref.?; is {
+			append(&next, id)
+		}
+		append(&next, ..x.all_of)
+		for id in next {
+			if !slice.contains(reached[:], &d.nodes[id]) {
+				append(&reached, &d.nodes[id])
+			}
+		}
 	}
+	return {members = members[:], patterns = patterns[:], additional = others, keys = rules.NONE}, exact, true
+}
+
+// Whether every object of the blocks `blocks` of `p.from` passes the members, patterns, names and dependents of `want`.
+@(private = "file")
+members_included :: proc(p: ^Prover, blocks: []^rules.Object, want: ^rules.Object, depth: int) -> bool {
 	named := make(map[string]struct{}, context.temp_allocator)
 	for blk in blocks {
 		for m in blk.members {
 			named[m.name] = {}
 		}
 	}
-	names := names_of_blocks(blocks[:])
+	names := names_of_blocks(blocks)
 	for m in want.members {
 		named[m.name] = {}
-		if m.required && !required_in(blocks[:], names, m.name) {
+		if m.required && !required_in(blocks, names, m.name) {
 			return refuse(p, "required")
 		}
-		target := want.additional if m.only_required else m.node
-		have := member_nodes(blocks[:], names, m.name)
-		if m.rules != {} && !member_rules_kept(blocks[:], names, m) {
+		if m.rules != {} && !member_rules_kept(blocks, names, m) {
 			return refuse(p, m.name)
 		}
-		if target != rules.NONE && !included(p, have, {target}, depth + 1) {
+	}
+	wanted := names_of_blocks({want})
+	for name in named {
+		targets, decided := judging_nodes(p, {want}, wanted, name)
+		if !decided {
+			return refuse(p, "patternProperties")
+		}
+		if len(targets) > 0 {
+			have, _ := judging_nodes(p, blocks, names, name)
+			if !included_at(p, core.Name(name), have, targets, depth) {
+				return false
+			}
+		}
+	}
+	// A name no block names passes each pattern it matches, or the other members' node where it matches none. A block
+	// judges such a name by the pattern spelled as one of `want`'s, and by its other members' node when it has no
+	// pattern that `want` lacks, as the name then matches none of its patterns.
+	for pat in want.patterns {
+		have := make([dynamic]rules.Node_Index, context.temp_allocator)
+		for blk in blocks {
+			if twin, has := pattern_node(blk.patterns, pat.expression); has {
+				if twin != rules.NONE {
+					append(&have, twin)
+				}
+			} else if len(blk.patterns) == 0 && blk.additional != rules.NONE {
+				append(&have, blk.additional)
+			}
+		}
+		if pat.node != rules.NONE && !included_at(p, core.Name(name_of_pattern(pat.expression)), have[:], {pat.node}, depth) {
 			return false
 		}
 	}
 	if want.additional != rules.NONE {
-		wanted := rules.member_names(want.members, context.temp_allocator)
-		for name in named {
-			if rules.first_named(&wanted, name) < 0 && !included(p, member_nodes(blocks[:], names, name), {want.additional}, depth + 1) {
-				return false
-			}
-		}
 		others := make([dynamic]rules.Node_Index, context.temp_allocator)
 		for blk in blocks {
-			if blk.additional != rules.NONE {
+			apart := blk.additional != rules.NONE
+			for q in blk.patterns {
+				_, shared := pattern_node(want.patterns, q.expression)
+				apart &&= shared
+			}
+			if apart {
 				append(&others, blk.additional)
 			}
 		}
-		if !included(p, others[:], {want.additional}, depth + 1) {
+		if !included_at(p, core.Name(OTHER_NAME), others[:], {want.additional}, depth) {
 			return false
 		}
 	}
@@ -487,11 +723,72 @@ object_included :: proc(p: ^Prover, an: []^rules.Node, have: ^rules.Rules, b: ^r
 		}
 	}
 	for dep in want.dependents {
-		if !dependent_kept(p, blocks[:], dep, depth) {
+		if !dependent_kept(p, blocks, dep, depth) {
 			return refuse(p, "dependentRequired")
 		}
 	}
 	return true
+}
+
+// The node of the pattern of `patterns` spelled `expression`.
+@(private = "file")
+pattern_node :: proc(patterns: []rules.Pattern, expression: string) -> (rules.Node_Index, bool) {
+	for q in patterns {
+		if q.expression == expression {
+			return q.node, true
+		}
+	}
+	return rules.NONE, false
+}
+
+// The nodes that judge the member `name` in the object blocks `blocks`: in each block its own node where the block
+// names it, the node of each pattern it matches, and the block's other members' node where it is neither. A block whose
+// patterns could not all be matched against `name` gives only its own node, and `decided` is false.
+@(private)
+judging_nodes :: proc(p: ^Prover, blocks: []^rules.Object, names: []rules.Member_Names, name: string) -> (out: []rules.Node_Index, decided: bool) {
+	nodes := make([dynamic]rules.Node_Index, context.temp_allocator)
+	decided = true
+	for blk, j in blocks {
+		own := rules.NONE
+		named := false
+		for k := rules.first_named(&names[j], name); k >= 0; k = rules.next_named(&names[j], k) {
+			if !blk.members[k].only_required {
+				own, named = blk.members[k].node, true
+			}
+		}
+		matched, known := false, true
+		for q in blk.patterns {
+			hit, judged := name_matches(p, q.expression, name)
+			known &&= judged
+			if hit && judged {
+				matched = true
+				if q.node != rules.NONE {
+					append(&nodes, q.node)
+				}
+			}
+		}
+		decided &&= known
+		if !named && !matched && known {
+			own = blk.additional
+		}
+		if own != rules.NONE {
+			append(&nodes, own)
+		}
+	}
+	return nodes[:], decided
+}
+
+// Whether the name `name` matches the pattern `expression`, which is not `decided` where the pattern does not compile
+// or its match gives up.
+@(private = "file")
+name_matches :: proc(p: ^Prover, expression, name: string) -> (matched, decided: bool) {
+	context.allocator = context.temp_allocator
+	re, compile_err := rules.program_of(&p.patterns, expression, context.temp_allocator)
+	if compile_err != "" {
+		return false, false
+	}
+	found, err := regex.search((^regex.Regex)(re), name, 0, nil, &p.scratch)
+	return found, err == ""
 }
 
 @(private = "file")
@@ -545,7 +842,7 @@ same_node :: proc(p: ^Prover, a, b: rules.Node_Index) -> bool {
 	if key in p.running {
 		return true
 	}
-	p.running[key] = {}
+	p.running[key] = 0
 	defer delete_key(&p.running, key)
 	if spent(p) {
 		return false

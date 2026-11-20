@@ -50,7 +50,8 @@ verb_option :: proc(v: ^Verb_Options, args: []string, i: int) {
 }
 
 // Runs the verb that `cli.files` opens with and exits.
-schema_main :: proc(run: ^Run, cli: ^Cli) -> ! {
+schema_main :: proc(run: ^Run, ins: ^Inputs) {
+	cli := ins.cli
 	verb := cli.files[0] if len(cli.files) > 0 else ""
 	if verb != "infer" && verb != "sample" && verb != "gen" {
 		usage_error("schema takes infer, sample or gen")
@@ -125,7 +126,7 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 		ranges = cli.verbs.ranges,
 	}
 	failures, faults := 0, 0
-	for path in input_files(files, cli.walked) {
+	for path in input_files(files, cli.walked, command_name(cli)) {
 		src, _ = file_source(&run.opts, path, src)
 		spent, read := file_bytes(path)
 		if !read {
@@ -149,15 +150,20 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 	if derr != nil {
 		out_of_memory()
 	}
+	write_schema(run, &d, "schema infer", 0)
+}
+
+// Writes the schema `d` in the format --to names and exits with `code`. `who` is the verb that tells a failure.
+write_schema :: proc(run: ^Run, d: ^rules.Description, who: string, code: int) -> ! {
 	as := written_as(&run.opts)
-	text, err := schema.write(&d, as, output_layout(run).opts)
+	text, err := schema.write(d, as, output_layout(run).opts)
 	if e, refused := err.(core.Typed_Error); refused && e.kind == .Too_Deep {
 		// A schema nests a level or two for each level of its values, so one of a deep input may pass the writer's limit.
-		message.write_stderr("stury: error: schema infer: the schema of the input nests past %d levels, which a schema written as %s may not\n", core.MAX_DEPTH, FORMATS[run.opts.to].title)
+		message.write_stderr("stury: error: %s: the schema of the input nests past %d levels, which a schema written as %s may not\n", who, core.MAX_DEPTH, FORMATS[run.opts.to].title)
 		os.exit(EXIT_INPUT)
 	}
 	if err != nil {
-		message.write_stderr("stury: error: schema infer: %s\n", edit_error_text(nil, err))
+		message.write_stderr("stury: error: %s: %s\n", who, edit_error_text(nil, err))
 		os.exit(EXIT_USAGE)
 	}
 	if !as.readers.binary && (len(text) == 0 || text[len(text) - 1] != '\n') {
@@ -165,7 +171,7 @@ infer_main :: proc(run: ^Run, cli: ^Cli, files: []string) -> ! {
 	} else {
 		write_out(text)
 	}
-	exit_closing_stdout(0)
+	exit_closing_stdout(code)
 }
 
 // Values for the schema in the one file `files` names, a line each in the format --to names.

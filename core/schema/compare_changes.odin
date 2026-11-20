@@ -37,8 +37,8 @@ changes_of :: proc(old, new: ^Side, allocator: mem.Allocator) -> (changes: []Cha
 	w := Walk {
 		old       = old,
 		new       = new,
-		forward   = {from = old, to = new, running = make(map[string]struct{}, context.temp_allocator)},
-		backward  = {from = new, to = old, running = make(map[string]struct{}, context.temp_allocator)},
+		forward   = prover_of(old, new),
+		backward  = prover_of(new, old),
 		out       = make([dynamic]Change, allocator),
 		visited   = make(map[[2]rules.Node_Index]struct{}, context.temp_allocator),
 		path      = make([dynamic]core.Step, context.temp_allocator),

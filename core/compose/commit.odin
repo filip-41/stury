@@ -700,6 +700,14 @@ flow_lines :: proc(splices: ^[dynamic]Splice, src: []u8, items: []$T, order: []u
 	return true
 }
 
+// Where a comment past the comma of the gap `gap` between two items starts, the comment ending the line of the item
+// before, which stays when the gap goes, else -1.
+@(private = "file")
+line_comment :: proc(gap: []u8) -> int {
+	comma, hash := bytes.index_byte(gap, ','), bytes.index_byte(gap, '#')
+	return hash if 0 <= comma && comma < hash else -1
+}
+
 // Whether the line at `ls` holds a comment and nothing else but blanks.
 @(private = "file")
 comment_only :: proc(src: []u8, ls: u64) -> bool {
@@ -728,6 +736,27 @@ flow_splices :: proc(splices: ^[dynamic]Splice, src: []u8, items: []$T, removed:
 		append(splices, Splice{lo = open, hi = close, text = b[:], seq = len(splices)})
 		return
 	}
+	// Items that each stand on lines of their own go and come as whole lines, with their comments.
+	if n > 0 {
+		order := make([dynamic]u8, 0, 4 * (left + len(inserts)), allocator)
+		texts := make([][]u8, len(inserts), allocator)
+		k := 0
+		for j in 0 ..= n {
+			for k < len(inserts) && inserts[k].at == j {
+				texts[k] = inserts[k].text
+				word := transmute([4]u8)u32le(n + k)
+				append(&order, ..word[:])
+				k += 1
+			}
+			if j < n && !removed[j] {
+				word := transmute([4]u8)u32le(j)
+				append(&order, ..word[:])
+			}
+		}
+		if flow_lines(splices, src, items, order[:], texts, eol, allocator) {
+			return
+		}
+	}
 	sep := flow_sep(src, items, eol, allocator)
 	// Where each slot's inserts go, and whether they follow an item there or precede one.
 	pos := make([]u64, n + 1, allocator)
@@ -748,16 +777,26 @@ flow_splices :: proc(splices: ^[dynamic]Splice, src: []u8, items: []$T, removed:
 		}
 		s := j - 1
 		lo, hi := items[r].start, items[s].end
+		after := line_comment(src[hi:items[s + 1].start]) if s < n - 1 else -1
+		before := line_comment(src[items[r - 1].end:lo]) if r > 0 else -1
 		switch {
-		case s < n - 1:
-			hi = items[s + 1].start
+		case s < n - 1 && (after < 0 || r == 0 || before >= 0):
+			hi = items[s + 1].start if after < 0 else hi + u64(after)
 			for k in r + 1 ..= s {
 				pos[k] = hi
 			}
-		case r > 0:
+		case r > 0 && before < 0:
 			lo = items[r - 1].end
 			for k in r ..= n {
 				pos[k], follows[k] = hi, true
+			}
+		case r > 0:
+			lo = line_start(src, lo)
+			if q := blanks_end(src, hi, close); q < close && (src[q] == '\n' || src[q] == '\r') {
+				hi = next_line(src, q)
+			}
+			for k in r ..= n {
+				pos[k], follows[k] = items[r - 1].end, true
 			}
 		case:
 			// With every item goes the separator the last one leaves.

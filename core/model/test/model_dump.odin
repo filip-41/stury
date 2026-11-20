@@ -73,6 +73,35 @@ a_dump_leaves_out_what_each_option_excludes :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(text), `{"id":0,"name":"ada","level":8,"nick":null,"tags":[],"home":{"city":"x","zip":null},"aa":[2],"zz":1}`)
 }
 
+// The members `schema gen` writes for a required `readOnly` and `writeOnly`.
+@(private = "file")
+Login :: struct {
+	id:       i64 `model:"read_only"`,
+	password: string `model:"write_only"`,
+	set:      model.Fields_Set,
+}
+
+// A required read_only member is written and never read, so a text without it loads, and a required write_only member
+// is read as required and never written.
+@(test)
+a_required_role_binds_one_direction :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	reg: model.Registry
+	m, err := model.compile(&reg, Login, json.checks(.Json))
+	testkit.expect_nil(t, err)
+	v: Login
+	testkit.expect_nil(t, model.load(&m, transmute([]u8)string(`{"password": "pw"}`), &v))
+	missing := model.load(&m, transmute([]u8)string(`{"id": 1}`), &v)
+	f, failed := missing.(core.Typed_Error)
+	testing.expectf(t, failed && f.kind == .Missing_Field && len(f.steps) == 1 && f.steps[0] == core.Step(core.Name("password")), "%v", missing)
+	v.id = 4
+	text, _ := model.dump(&m, &v)
+	testing.expect_value(t, string(text), `{"id":4}`)
+	testkit.expect_nil(t, model.patch(&m, &v, transmute([]u8)string(`{"password": "q"}`)))
+	testing.expect(t, v.password == "q" && v.id == 4)
+}
+
 @(test)
 a_dump_with_check_refuses_an_invalid_value_and_writes_nothing :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)

@@ -21,6 +21,7 @@ Compiler :: struct {
 	open:       [dynamic]int, // the groups being emitted, innermost last
 	ecma:       bool, // set under ECMA: no counter loops, no Rep in a look-ahead, an empty iteration fails
 	looking:    int, // the number of look-arounds being emitted, nested
+	leftwards:  bool, // emitting an ECMA look-behind's body, which matches leftwards from where the look-behind is
 	loops:      [dynamic][2]i32, // `Regex.loops`
 	loop_of:    [dynamic]i32, // under ECMA, per instruction: the index into `loops` of its loop, -1 for none
 	loop:       int, // the index into `loops` of the loop being emitted, -1 for none
@@ -37,14 +38,13 @@ Compiler :: struct {
 	addr:       []int, // by group number: a called group's first instruction, -1 until emitted
 }
 
-// Whether `pattern` is well formed under `flags`. It builds no program, frees what it allocated, and under `ecma`
-// accepts back references and look-behind as syntax, since a JSON Schema pattern may hold them.
+// Whether `pattern` is well formed under `flags`. It builds no program and frees what it allocated.
 valid :: proc(pattern: string, flags: Flags) -> bool {
 	arena: mem.Dynamic_Arena
 	mem.dynamic_arena_init(&arena)
 	defer mem.dynamic_arena_destroy(&arena)
 	context.allocator = mem.dynamic_arena_allocator(&arena)
-	_, err := parse(pattern, flags, true)
+	_, err := parse(pattern, flags)
 	return err == ""
 }
 
@@ -245,6 +245,16 @@ emit :: proc(c: ^Compiler, n: ^Node) {
 	if c.err != "" {
 		return
 	}
+	if c.leftwards && (n.kind == .Char || n.kind == .Str || n.kind == .Any || n.kind == .Class) {
+		// Steps back over as many characters as it reads, reads them, and steps back to before them again.
+		back := utf8.rune_count_in_string(n.text) if n.kind == .Str else 1
+		add(c, .Back, back)
+		c.leftwards = false
+		emit(c, n)
+		c.leftwards = true
+		add(c, .Back, back)
+		return
+	}
 	switch n.kind {
 	case .Empty:
 	case .Char, .Str:
@@ -271,6 +281,12 @@ emit :: proc(c: ^Compiler, n: ^Node) {
 		append(&c.classes, cls)
 		add(c, .Class, len(c.classes) - 1)
 	case .Cat:
+		if c.leftwards {
+			#reverse for k in n.kids {
+				emit(c, k)
+			}
+			break
+		}
 		for i := 0; i < len(n.kids); {
 			if j := literal_run_end(n.kids[:], i); j > i {
 				emit_str(c, n.kids[i:j])
@@ -327,7 +343,7 @@ emit :: proc(c: ^Compiler, n: ^Node) {
 		emit_look(c, n)
 	case .Backref:
 		append(&c.refs, n.refs[:])
-		add(c, .Backref, len(c.refs) - 1, int(n.fold))
+		add(c, .Backref, len(c.refs) - 1, int(n.fold || c.leftwards))
 	case .Keep:
 		add(c, .Save, 0)
 	case .Cond:
@@ -359,6 +375,10 @@ emit_group :: proc(c: ^Compiler, n: ^Node) {
 		add(c, .Mem_Start, g)
 		emit(c, n.kids[0])
 		add(c, .Mem_End, g)
+	case c.leftwards: // its end is reached first, while its start is still unset
+		add(c, .Save, 2 * g + 1)
+		emit(c, n.kids[0])
+		add(c, .Save, 2 * g)
 	case c.undone[g]:
 		add(c, .Save, 2 * g, int(c.referenced[g]))
 		emit(c, n.kids[0])
@@ -491,7 +511,7 @@ emit_repeat :: proc(c: ^Compiler, n: ^Node) {
 	patch(c, loop, loop + 1 if n.greedy else exit, exit if n.greedy else loop + 1)
 	if empty {
 		patch(c, check, mark, -1 if c.ecma else exit)
-	} else if h := head_literal(x); h != nil && (h.kind == .Str || h.kind == .Char && !h.fold && utf8.valid_rune(h.r)) && n.greedy && n.min <= 1 {
+	} else if h := head_literal(x); h != nil && !c.leftwards && (h.kind == .Str || h.kind == .Char && !h.fold && utf8.valid_rune(h.r)) && n.greedy && n.min <= 1 {
 		// Oniguruma's OP_PUSH_OR_JUMP_EXACT1: when the body starts with an exact character (no class, no case
 		// folding), no alternative is pushed for an iteration that cannot start, and Oniguruma's retry limit counts
 		// that.
@@ -664,7 +684,8 @@ emit_counter_loop :: proc(c: ^Compiler, x: ^Node, least, most: int, greedy: bool
 emit_look :: proc(c: ^Compiler, n: ^Node) {
 	body := n.kids[0]
 	back := 0
-	if n.look == .Behind || n.look == .Not_Behind {
+	behind := n.look == .Behind || n.look == .Not_Behind
+	if behind && !c.ecma {
 		ok: bool
 		body, c.err = tune_behind(body, n.look == .Not_Behind)
 		if c.err != "" {
@@ -681,14 +702,17 @@ emit_look :: proc(c: ^Compiler, n: ^Node) {
 	if back > 0 {
 		add(c, .Back, back)
 	}
-	// The visited set may carry an ECMA look-ahead on at its end with its groups unset (match.odin), so the groups are
+	// The visited set may carry an ECMA look-around on at its end with its groups unset (match.odin), so the groups are
 	// unset from its start too.
-	if last := last_group(body); c.ecma && last > 0 && n.look == .Ahead {
+	if last := last_group(body); c.ecma && last > 0 && (n.look == .Ahead || n.look == .Behind) {
 		add(c, .Unset, 2 * first_group(body), 2 * last + 2)
 	}
+	leftwards := c.leftwards
+	c.leftwards = c.ecma && behind
 	c.looking += 1
 	emit(c, body)
 	c.looking -= 1
+	c.leftwards = leftwards
 	end := add(c, .Look_End)
 	patch(c, look, int(n.look), end)
 }

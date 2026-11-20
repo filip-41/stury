@@ -47,7 +47,8 @@ parse_escape :: proc(p: ^Parser) -> ^Node {
 		}
 	case 'g':
 		if peek(p) == '<' || peek(p) == '\'' {
-			return parse_call(p)
+			p.i += 1
+			return parse_call(p, '>' if p.src[p.i - 1] == '<' else '\'')
 		}
 	case 'Q':
 		cat := new_node(.Cat)
@@ -97,10 +98,7 @@ ecma_escape :: proc(p: ^Parser, c: byte) -> ^Node {
 		it, ok := parse_property(p, c == 'P')
 		return prop_node(it) if ok else nil
 	case 'k', '1' ..= '9':
-		if !p.syntax_only {
-			return fail(p, "back references are not supported")
-		}
-		// When only syntax is judged, `resolve_refs` still checks at the end that the reference names a group.
+		// `resolve_refs` checks at the end that the reference names a group, before or after it.
 		n := new_node(.Backref)
 		if c != 'k' {
 			p.i -= 1
@@ -119,7 +117,7 @@ ecma_escape :: proc(p: ^Parser, c: byte) -> ^Node {
 			}
 		}
 		append(&p.refs, n)
-		return char_node(p, 0)
+		return n
 	}
 	r, ok := ecma_char(p, c)
 	return char_node(p, r) if ok else nil

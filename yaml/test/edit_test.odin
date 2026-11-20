@@ -210,6 +210,8 @@ block_members_go_at_their_indentation :: proc(t: ^testing.T) {
 block_members_go_with_their_lines :: proc(t: ^testing.T) {
 	expect_rules(t, {
 		{src = "a: 1\n# about b\nb: 2\nc: 3\n", op = .Remove, path = "b", want = "a: 1\nc: 3\n"},
+		{src = "# about a\na: 1\n# about b\nb: 2\n", op = .Remove, path = "a", want = "# about b\nb: 2\n"},
+		{src = "# about 1\n- 1\n# about 2\n- 2\n", op = .Remove, path = "0", want = "# about 2\n- 2\n"},
 		{src = "a: 1\nb: 2\n# foot\n", op = .Remove, path = "b", want = "a: 1\n# foot\n"},
 		{src = "a: 1\nb:\n  k: 1\n  # inner\nc: 3\n", op = .Remove, path = "b", want = "a: 1\nc: 3\n"},
 		{src = "m:\n  a: 1\nn: 2\n", op = .Remove, path = "m.a", want = "m: {}\nn: 2\n"},

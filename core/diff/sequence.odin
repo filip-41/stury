@@ -51,7 +51,7 @@ hashes :: proc(d: ^Differ, vs: []core.Value) -> []u64 {
 @(private = "file")
 same :: #force_inline proc(s: ^Sequence, i, j: int) -> bool {
 	s.d.work -= 1
-	return s.hx[i] == s.hy[j] && core.equal(s.xs[i], s.ys[j])
+	return s.hx[i] == s.hy[j] && exact(s.d, s.xs[i], s.ys[j])
 }
 
 // Marks the elements of `xs[x0:x1]` and `ys[y0:y1]` that no longest common subsequence keeps. False when a part needs more

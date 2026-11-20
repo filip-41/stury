@@ -13,7 +13,8 @@ import "../typed"
 // Writes the Odin source of package `package_name`: types a model compiled from them reads `d`'s values with, and a
 // procedure `register` that adds the rules no tag holds to a `model.Registry`. The root's type comes first, else an
 // alias `Root` names it. An object with members is a struct whose tags name a member in JSON (`json:`) and hold its
-// rules (`model:`), with an `extra` map for the other members where a schema judges them, and one with none is a map.
+// rules and its `readOnly` or `writeOnly` role (`model:`), with an `extra` map for the other members where a schema
+// judges them and a `model.Fields_Set` up to 128 members, and one with none is a map.
 // A member that may be left out and takes no null is a `Maybe` that a write leaves out when nil. A value that may be
 // null is a `Maybe`, null alone the empty union `Null`, a struct that holds itself a pointer, a format that asserts
 // (under `format_assert`, or the schema's vocabulary) a carrier where the model has one (`time.Time`,
@@ -21,9 +22,10 @@ import "../typed"
 // `f64` when both bounds are finite doubles and `core.Number_Text` otherwise, an `enum` or `const` an Odin enum or
 // `bool` (a union of them for operands of several kinds), an `anyOf`, a `oneOf` and a list of kinds a union, and a
 // value of any kind `core.Value`. An `allOf` and a `$ref` beside other keywords are one value that passes each. A rule
-// where no tag stands makes a distinct type, and `not`, `if`, `contains`, `propertyNames`, `patternProperties` and the
-// dependents make a named type whose JSON Schema fragment of them, written in `as`, which is JSON's, `register` adds
-// with `model.register_schema`. A member's scalar `default` is a `model.register_default` line. Annotations are left
+// where no tag stands makes a distinct type, and `not`, `if`, `contains`, `propertyNames`, `patternProperties`, the
+// dependents, a `prefixItems` no fixed array holds and an `enum` or `const` no Odin enum holds make a named type whose
+// JSON Schema fragment of them, written in `as`, which is JSON's, `register` adds with `model.register_schema`. A
+// member's scalar `default` is a `model.register_default` line. Annotations are left
 // out but for `description` and a format that does not assert, which are comments. A keyword no model spells is
 // refused as `.Unsupported`, naming it in `want.text`, at the path of the value. A package name that is no Odin
 // identifier, or that names a package a program holding the source imports, is refused as `.Bad_Option`.
@@ -170,6 +172,11 @@ Decl :: struct {
 	open: bool,
 	// The value may be null, which the declared type does not take.
 	null: bool,
+	// An enum's literals, or a union's of enums, by the operand each stands for: `s` and a string, `n` and an integer's
+	// digits, or `true` or `false`.
+	literals: map[string]string,
+	// A union's arms of one kind each, by that kind.
+	arms:     map[rules.Kind]Spelled,
 }
 
 // A value's Odin type, without its null, the rules a member's tag adds to it, and the format it only annotates.
@@ -283,8 +290,6 @@ unspelled :: proc(s: ^Source, n: ^rules.Node) -> string {
 	switch {
 	case n.integer_spelled:
 		return "type"
-	case n.dynamic_ref != nil:
-		return "$dynamicRef"
 	case n.unevaluated_items != nil:
 		return "unevaluatedItems"
 	case n.unevaluated_properties != nil:
@@ -300,10 +305,10 @@ unspelled :: proc(s: ^Source, n: ^rules.Node) -> string {
 }
 
 // Whether node `n` holds an applicator that a model registers on its type: `not`, `if`, `contains`, `propertyNames`,
-// `patternProperties` or a dependent.
+// `patternProperties`, a dependent, or an `enum` or `const` no Odin enum spells.
 @(private = "file")
 judged :: proc(s: ^Source, n: ^rules.Node) -> bool {
-	if n.not != nil || n.cond != {} {
+	if enums, _ := enum_judged(s, n); n.not != nil || n.cond != {} || enums {
 		return true
 	}
 	if n.array >= 0 && .Array in n.kinds && s.d.arrays[n.array].contains != nil {
@@ -316,11 +321,7 @@ judged :: proc(s: ^Source, n: ^rules.Node) -> bool {
 	return false
 }
 
-// The named type of node `i` without its applicators, and the `register_fragment` line that adds them to the type as a
-// JSON Schema fragment, each operand as the schema states it. A `Maybe` reads null before its type, so a node of kinds that holds null is a `Maybe`
-// where null passes its applicators and leaves null out where it fails them. Pattern members beside a rule on the
-// other members, which an `extra` map would read, are refused, and so is a node of arms that takes a null that `not`
-// or `if` refuses.
+// The named type of node `i` without its applicators, and the `register_fragment` line that adds them as a JSON Schema fragment.
 @(private = "file")
 judged_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string, held: bool) -> (out: Spelled) {
 	out.decl = -1
@@ -328,6 +329,11 @@ judged_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string, held: bool
 	outer := part_of(s, i)
 	base := n
 	base.not, base.cond = nil, {}
+	enums, operands := enum_judged(s, &n)
+	if enums {
+		base.has_enum, base.enum_of, base.const_of = false, nil, nil
+		base.kinds = operands.kinds
+	}
 	kinds_null := .Null in n.kinds && len(n.any_of) == 0 && len(n.one_of) == 0
 	if kinds_null {
 		base.kinds -= {.Null}
@@ -342,20 +348,19 @@ judged_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string, held: bool
 	o := rules.Object{additional = rules.NONE, keys = rules.NONE}
 	// The members past the declared ones are an `extra` map of the one pattern's type where no other may stand, and the
 	// names the struct holds are the declared ones and the pattern's.
-	pattern_extra := false
+	pattern_extra, pattern_other := false, false
 	if n.object >= 0 && .Object in n.kinds {
 		o = s.d.objects[n.object]
 		kinds, plain := kinds_only(s, o.additional)
 		pattern_extra = len(o.patterns) == 1 && o.keys == rules.NONE && o.additional != rules.NONE && plain && kinds == {}
-		if len(o.patterns) > 0 && o.additional != rules.NONE && (!plain || kinds != rules.EVERY_KIND) && !pattern_extra {
-			refuse(s, "patternProperties")
-			return
-		}
+		pattern_other = len(o.patterns) > 0 && o.additional != rules.NONE && (!plain || kinds != rules.EVERY_KIND) && !pattern_extra
 		x := o
 		x.keys, x.patterns, x.dependents = rules.NONE, nil, nil
 		if pattern_extra {
 			x.additional = o.patterns[0].node
 			o.keys = names_node(s, o)
+		} else if pattern_other {
+			x.additional = rules.NONE
 		}
 		base.object = block(&s.d.objects, x)
 	}
@@ -387,28 +392,50 @@ judged_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string, held: bool
 	s.of_node[outer] = out.decl
 	// The fragment holds the node's applicators, with the operands as the schema states them.
 	f := rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1, not = n.not, cond = n.cond, resource = n.resource}
+	if enums {
+		f.has_enum, f.enum_of, f.const_of = n.has_enum, n.enum_of, n.const_of
+	}
 	if c, has := a.contains.?; has {
 		f.array = block(&s.d.arrays, rules.Array{items = rules.NONE, contains = c, min_contains = a.min_contains, max_contains = a.max_contains})
 	}
 	if o.keys != rules.NONE || len(o.patterns) > 0 || len(o.dependents) > 0 {
 		// The `extra` map reads the members the pattern names as its type, so the names are what is left to judge.
-		f.object = block(&s.d.objects, rules.Object{additional = rules.NONE, keys = o.keys, patterns = nil if pattern_extra else o.patterns, dependents = o.dependents})
+		x := rules.Object{additional = rules.NONE, keys = o.keys, patterns = nil if pattern_extra else o.patterns, dependents = o.dependents}
+		if pattern_other {
+			// The other members' rule judges what neither a declared name nor a pattern names.
+			names := make([dynamic]rules.Member)
+			any_value := any_node(s)
+			for m in o.members {
+				if !m.only_required {
+					append(&names, rules.Member{name = m.name, node = any_value})
+				}
+			}
+			x.members, x.additional = names[:], o.additional
+		}
+		f.object = block(&s.d.objects, x)
 	}
-	append(&s.d.nodes, f)
+	first := "not" if n.not != nil else "if" if n.cond != {} else "enum" if n.has_enum else "const" if enums else "contains" if a.contains != nil else "propertyNames"
+	fragment_registered(s, out.type, f, first)
+	return
+}
+
+// Adds to `register` the line that adds node `f`, which joins the description, to the rules of `type` as a JSON Schema
+// fragment, or refuses the keyword the fragment's writing refuses, `first` where it names none.
+@(private = "file")
+fragment_registered :: proc(s: ^Source, type: string, f: rules.Node, first: string) {
+	root := node_added(s, f)
 	fragment := s.d^
-	fragment.root = rules.Node_Index(len(s.d.nodes) - 1)
+	fragment.root = root
 	text, err := write(&fragment, s.as)
 	if err != nil {
 		e, _ := err.(core.Typed_Error)
-		first := "not" if n.not != nil else "if" if n.cond != {} else "contains" if a.contains != nil else "propertyNames"
 		refuse(s, e.want.text if e.want.text != "" else first)
 		return
 	}
 	s.fragments = true
-	put(&s.registers, "\tregister_fragment(reg, ", out.type, ", ")
+	put(&s.registers, "\tregister_fragment(reg, ", type, ", ")
 	literal(&s.registers, string(text))
 	strings.write_string(&s.registers, ") or_return\n")
-	return
 }
 
 // Writes `text` as an Odin string: a raw one where it holds no backquote and no control byte but a tab, or a newline
@@ -459,17 +486,33 @@ settled :: proc(s: ^Source, i: rules.Node_Index) -> rules.Node_Index {
 		return i
 	}
 	n := s.d.nodes[i]
-	if len(n.all_of) == 0 && n.ref == nil && n.not == nil && n.unevaluated_items == nil && n.unevaluated_properties == nil {
+	conjunction := len(n.all_of) > 0 || n.ref != nil || n.dynamic_ref != nil
+	if !conjunction && n.not == nil && n.unevaluated_items == nil && n.unevaluated_properties == nil {
 		return i
 	}
 	conjuncts := []rules.Node_Index{i}
-	if len(n.all_of) > 0 || n.ref != nil {
-		ways, complete := rules.branches(s.d, {i}, false, 1)
+	// A dynamic reference that reaches one node wherever it is evaluated joins that node's conjunction.
+	roots := make([dynamic]rules.Node_Index)
+	append(&roots, i)
+	for grown := conjunction; grown; {
+		ways, complete := rules.branches(s.d, roots[:], false, 1)
 		if !complete || len(ways) != 1 {
 			refuse(s, "allOf" if len(n.all_of) > 0 else "$ref")
 			return i
 		}
-		conjuncts = ways[0][:]
+		conjuncts, grown = ways[0][:], false
+		for c in conjuncts {
+			if s.d.nodes[c].dynamic_ref != nil {
+				end := dynamic_end(s, &s.d.nodes[c])
+				if end == rules.NONE {
+					return i
+				}
+				if !slice.contains(conjuncts, end) {
+					append(&roots, end)
+					grown = true
+				}
+			}
+		}
 	}
 	key := strings.builder_make()
 	sorted := slice.clone(conjuncts)
@@ -482,9 +525,28 @@ settled :: proc(s: ^Source, i: rules.Node_Index) -> rules.Node_Index {
 	if k, ok := s.joined[strings.to_string(key)]; ok {
 		return k
 	}
-	j := joined_node(s, i, conjuncts, len(n.all_of) > 0 || n.ref != nil)
+	j := joined_node(s, i, conjuncts, conjunction)
 	s.joined[strings.to_string(key)] = j
 	return j
+}
+
+// The node the dynamic reference of `n` reaches wherever it is evaluated, or NONE, refused, where the dynamic scope picks
+// among the dynamic anchors of its target's name, since a type is one node's.
+@(private = "file")
+dynamic_end :: proc(s: ^Source, n: ^rules.Node) -> rules.Node_Index {
+	end := n.dynamic_ref.?
+	if .Dynamic_Static in n.spelled {
+		return end
+	}
+	for a in s.d.anchors {
+		for b in s.d.anchors {
+			if a.node == end && b.name == a.name && b.node != end {
+				refuse(s, rules.dynamic_keyword(n))
+				return rules.NONE
+			}
+		}
+	}
+	return end
 }
 
 @(private = "file")
@@ -537,10 +599,6 @@ joined_node :: proc(s: ^Source, top: rules.Node_Index, conjuncts: []rules.Node_I
 			clash = "if" if out.cond != {} else clash
 			out.cond = x.cond
 		}
-		if x.dynamic_ref != nil {
-			clash = "$dynamicRef" if out.dynamic_ref != nil else clash
-			out.dynamic_ref = x.dynamic_ref
-		}
 		if c != top && x.unevaluated_items != nil {
 			clash = "unevaluatedItems"
 		} else if c != top && x.unevaluated_properties != nil {
@@ -576,7 +634,7 @@ joined_node :: proc(s: ^Source, top: rules.Node_Index, conjuncts: []rules.Node_I
 		}
 	}
 	keyword := "unevaluatedProperties" if t.unevaluated_properties != nil else "unevaluatedItems" if t.unevaluated_items != nil else ""
-	if keyword != "" && (len(out.any_of) > 0 || len(out.one_of) > 0 || out.cond != {} || out.dynamic_ref != nil || out.not != nil) {
+	if keyword != "" && (len(out.any_of) > 0 || len(out.one_of) > 0 || out.cond != {} || out.not != nil) {
 		refuse(s, keyword)
 		return top
 	}
@@ -669,7 +727,18 @@ joined_of :: proc(s: ^Source, nodes: []rules.Node_Index) -> rules.Node_Index {
 	case 1:
 		return nodes[0]
 	}
-	append(&s.d.nodes, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1, all_of = slice.clone(nodes)})
+	return node_added(s, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1, all_of = slice.clone(nodes)})
+}
+
+// A new node that takes any value.
+@(private = "file")
+any_node :: proc(s: ^Source) -> rules.Node_Index {
+	return node_added(s, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1})
+}
+
+@(private = "file")
+node_added :: proc(s: ^Source, n: rules.Node) -> rules.Node_Index {
+	append(&s.d.nodes, n)
 	return rules.Node_Index(len(s.d.nodes) - 1)
 }
 
@@ -792,16 +861,18 @@ CARRIED := #partial [rules.String_Format]string {
 	.Email     = "model.Email",
 }
 
-// A declaration of `spelled.type` as a distinct type with `spelled.rules`, which `register` adds.
+// A declaration of `spelled.type` as a distinct type with `spelled.rules`, which `register` adds where there are any.
 @(private = "file")
 distinct_spelled :: proc(s: ^Source, part: Part, spelled: Spelled, hint: string) -> Spelled {
 	k := declare(s, part, hint)
 	name := s.decls[k].name
 	s.decls[k].text = strings.concatenate({name, " :: distinct ", spelled.type, "\n"})
 	s.decls[k].open = false
-	put(&s.registers, "\tmodel.register_type(reg, {", name, ", ")
-	strings.write_quoted_string(&s.registers, tag_items(s, spelled.rules))
-	strings.write_string(&s.registers, "}) or_return\n")
+	if items := tag_items(s, spelled.rules); items != "" {
+		put(&s.registers, "\tmodel.register_type(reg, {", name, ", ")
+		strings.write_quoted_string(&s.registers, items)
+		strings.write_string(&s.registers, "}) or_return\n")
+	}
 	return {type = name, decl = k}
 }
 
@@ -959,7 +1030,9 @@ whole_text :: proc(v: i128) -> string {
 	return strings.concatenate({"-", uint_text(u64(-v))}) if v < 0 else uint_text(u64(v))
 }
 
-// A list of the node's items, or a fixed array where the node closes a prefix whose elements are of one type.
+// A list of the node's items, a fixed array where the node closes a prefix whose elements are of one type, or a
+// tuple: a list of the prefix's and the other elements' types, whose named type a fragment of the prefix judges.
+// A prefix's elements are spelled whole, since the fragment judges what the list writes.
 @(private = "file")
 array_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Part, r: rules.Rules, hint: string, held: bool) -> Spelled {
 	n := s.d.nodes[i]
@@ -968,37 +1041,44 @@ array_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Part, r: rules.Rule
 	element := strings.concatenate({hint, "_Item"})
 	append(&s.path, core.All{})
 	// A unique list's elements are compared as they are written.
-	s.whole += int(r.unique)
-	unfixed := false
-	if len(a.prefix) > 0 {
+	s.whole += int(r.unique) + int(len(a.prefix) > 0)
+	tuple := len(a.prefix) > 0 && (r.min_items != u64(len(a.prefix)) || (r.max_items.? or_else 0) != u64(len(a.prefix)))
+	if len(a.prefix) > 0 && !tuple {
 		element_type := ""
-		unfixed = r.min_items != u64(len(a.prefix)) || (r.max_items.? or_else 0) != u64(len(a.prefix))
 		for x, j in a.prefix {
-			item := odin_type(s, x, element, true)
-			t := member_type(s, item)
+			t := member_type(s, odin_type(s, x, element, true))
 			// A pointer element takes null, which a fixed array's element may not.
-			unfixed ||= j > 0 && t != element_type || strings.has_prefix(t, "^") && !takes_null(s, x)
+			tuple ||= j > 0 && t != element_type || strings.has_prefix(t, "^") && !takes_null(s, x)
 			element_type = t
 		}
 		out.type = strings.concatenate({"[", int_text(len(a.prefix)), "]", element_type})
 		out.rules.min_items, out.rules.max_items = 0, nil
-	} else {
-		item := odin_type(s, a.items, element, true)
-		out.type = strings.concatenate({"[]", held_type(item)})
+	}
+	if len(a.prefix) == 0 || tuple {
+		items := a.items
+		if tuple {
+			arms := slice.clone_to_dynamic(a.prefix)
+			append(&arms, a.items if a.items != rules.NONE else any_node(s))
+			items = node_added(s, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1, any_of = arms[:]})
+		}
+		item := odin_type(s, items, element, true)
+		out.type, out.rules = strings.concatenate({"[]", held_type(item)}), r
 		// A list's element has a size.
 		if item.type == s.null_type && !item.null {
 			refuse(s, "type")
 		}
 	}
-	s.whole -= int(r.unique)
+	s.whole -= int(r.unique) + int(len(a.prefix) > 0)
 	pop(&s.path)
-	if unfixed {
-		refuse(s, "prefixItems")
-	}
-	if !held || rules_on(out.rules, .Array) == {} {
+	if !tuple && (!held || rules_on(out.rules, .Array) == {}) {
 		return out
 	}
-	return distinct_spelled(s, part, out, hint)
+	out = distinct_spelled(s, part, out, hint)
+	if tuple {
+		f := rules.Node{kinds = rules.EVERY_KIND, array = block(&s.d.arrays, rules.Array{prefix = a.prefix, items = a.items}), object = -1, resource = n.resource}
+		fragment_registered(s, out.type, f, "prefixItems")
+	}
+	return out
 }
 
 // A map of the node's other members where it names none, else a struct of its members, with a map of the other
@@ -1051,6 +1131,13 @@ object_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Part, r: rules.Rul
 		if clash != "" {
 			refuse(s, clash)
 		}
+		if at := settled(s, target(s, node)); at != rules.NONE {
+			value.rules.read_only ||= s.d.nodes[at].rules.read_only
+			value.rules.write_only ||= s.d.nodes[at].rules.write_only
+		}
+		if value.rules.read_only && value.rules.write_only {
+			refuse(s, "writeOnly")
+		}
 		pop(&s.path)
 		field := unique(&fields, spelled_as_is(m.name, false) if spelled_as_is(m.name, false) != "" else "member")
 		if at := target(s, node); at != rules.NONE {
@@ -1077,11 +1164,11 @@ object_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Part, r: rules.Rul
 			default_spelled(s, name, field, node, value)
 		}
 	}
-	if n_unset > 0 {
-		if len(o.members) > 128 {
-			refuse(s, "properties")
-		}
+	// A set holds 128 members.
+	if len(o.members) <= 128 {
 		put(&b, "\t", unique(&fields, "set"), ": model.Fields_Set,\n")
+	} else if n_unset > 0 {
+		refuse(s, "properties")
 	}
 	// A whole struct keeps the members it does not declare.
 	if (other != rules.NONE || part.whole) && !forbids {
@@ -1099,8 +1186,8 @@ object_spelled :: proc(s: ^Source, i: rules.Node_Index, part: Part, r: rules.Rul
 }
 
 // Adds to `register` the `default` of node `at`, the value of member `field` of `owner`, which `v` spells: a string, a
-// number or a boolean of a member whose type is that scalar. A null default is the zero of the optional member, and any
-// other default, which no literal of the member's type holds, is refused.
+// number or a boolean of a member whose type is that scalar, or an operand of the member's enum. A null default is the
+// zero of the optional member, and any other default, which no literal of the member's type holds, is refused.
 @(private = "file")
 default_spelled :: proc(s: ^Source, owner, field: string, at: rules.Node_Index, v: Spelled) {
 	x, has := s.d.nodes[at].default_of.?
@@ -1109,51 +1196,98 @@ default_spelled :: proc(s: ^Source, owner, field: string, at: rules.Node_Index, 
 			x, has = s.d.nodes[found].default_of.?
 		}
 	}
-	kind := core.kind(x)
-	if !has || kind == .Null {
+	if !has || core.kind(x) == .Null {
 		return
 	}
-	base := v.type
-	if v.decl >= 0 {
-		base = strings.trim_space(strings.trim_prefix(s.decls[v.decl].text, strings.concatenate({v.type, " :: distinct "})))
-	}
-	b := strings.builder_make()
 	x = core.plain(x)
-	#partial switch kind {
-	case .String:
-		if base != "string" && base != "model.Email" {
-			refuse(s, "default")
-			return
+	value, held := "", false
+	switch {
+	case v.decl >= 0 && s.decls[v.decl].literals != nil:
+		value, held = s.decls[v.decl].literals[operand_key(x)]
+	case v.decl >= 0 && len(s.decls[v.decl].arms) > 0:
+		// A union's default is a value of its arm of the default's kind, an integer's arm before a number's.
+		for arm_kind in ([?]rules.Kind{.String, .Bool, .Integer, .Number}) {
+			if arm, found := s.decls[v.decl].arms[arm_kind]; found {
+				if value, held = scalar_literal(s, arm, x); held {
+					break
+				}
+			}
 		}
-		node, is_node := x.(core.Node_Ref)
-		put(&b, v.type, "(")
-		literal(&b, core.node_string(node.doc, node.node) if is_node else x.(string) or_else "")
-		strings.write_byte(&b, ')')
-	case .Number:
-		text, held := default_number(x, base)
-		if !held {
-			refuse(s, "default")
-			return
-		}
-		if base == NUMBER_TEXT {
-			strings.write_string(&b, text)
-		} else {
-			put(&b, v.type, "(", text, ")")
-		}
-	case .True, .False:
-		if base != "bool" {
-			refuse(s, "default")
-			return
-		}
-		put(&b, v.type, "(true)" if kind == .True else "(false)")
+		value = strings.concatenate({v.type, "(", value, ")"})
 	case:
+		value, held = scalar_literal(s, v, x)
+	}
+	if !held {
 		refuse(s, "default")
 		return
 	}
 	s.defaults = true
 	put(&s.registers, "\tmodel.register_default(reg, ", owner, ", ")
 	strings.write_quoted_string(&s.registers, field)
-	put(&s.registers, ", ", strings.to_string(b), ") or_return\n")
+	put(&s.registers, ", ", value, ") or_return\n")
+}
+
+// The key of an enum's literals for the operand `x`, "" for one no enum holds.
+@(private = "file")
+operand_key :: proc(x: core.Value) -> string {
+	#partial switch core.kind(x) {
+	case .String:
+		return strings.concatenate({"s", default_text(x)})
+	case .Number:
+		if digits, whole := default_number(x, "i64"); whole {
+			return strings.concatenate({"n", digits})
+		}
+	case .True:
+		return "true"
+	case .False:
+		return "false"
+	}
+	return ""
+}
+
+// The text of the string default `x`.
+@(private = "file")
+default_text :: proc(x: core.Value) -> string {
+	node, is_node := x.(core.Node_Ref)
+	return core.node_string(node.doc, node.node) if is_node else x.(string) or_else ""
+}
+
+// The Odin literal of the scalar `x` as a value of `v`'s type, and whether the type holds it.
+@(private = "file")
+scalar_literal :: proc(s: ^Source, v: Spelled, x: core.Value) -> (string, bool) {
+	base := v.type
+	if v.decl >= 0 {
+		base = strings.trim_space(strings.trim_prefix(s.decls[v.decl].text, strings.concatenate({v.type, " :: distinct "})))
+	}
+	b := strings.builder_make()
+	kind := core.kind(x)
+	#partial switch kind {
+	case .String:
+		if base != "string" && base != "model.Email" {
+			return "", false
+		}
+		put(&b, v.type, "(")
+		literal(&b, default_text(x))
+		strings.write_byte(&b, ')')
+	case .Number:
+		text, held := default_number(x, base)
+		if !held {
+			return "", false
+		}
+		if v.type == NUMBER_TEXT {
+			strings.write_string(&b, text)
+		} else {
+			put(&b, v.type, "(", text, ")")
+		}
+	case .True, .False:
+		if base != "bool" {
+			return "", false
+		}
+		put(&b, v.type, "(true)" if kind == .True else "(false)")
+	case:
+		return "", false
+	}
+	return strings.to_string(b), true
 }
 
 // The type of a member's number that a double may not hold, which keeps the number's text.
@@ -1200,8 +1334,9 @@ default_number :: proc(x: core.Value, base: string) -> (string, bool) {
 }
 
 // The tag of member `m`: its JSON name where the field's differs, `omitempty` where a write leaves it out when nil,
-// `optional` where it is not required, `not_null` on a `Maybe` or a pointer that does not take null, and its rules. A tag Odin's raw
-// string cannot hold is a quoted one.
+// `optional` where it is not required, `not_null` on a `Maybe` or a pointer that does not take null, `read_only` or
+// `write_only` for its node's `readOnly` or `writeOnly`, and its rules. A tag Odin's raw string cannot hold is a quoted
+// one.
 @(private = "file")
 member_tag :: proc(s: ^Source, b: ^strings.Builder, owner: string, m: rules.Member, field: string, r: rules.Rules, not_null: bool, omit := false, unset := false) {
 	r := r
@@ -1238,7 +1373,7 @@ member_tag :: proc(s: ^Source, b: ^strings.Builder, owner: string, m: rules.Memb
 	}
 }
 
-// `r` as the items of a `model:` tag, the pattern last since it takes the rest of the tag.
+// `r` as the items of a `model:` tag, a member's role among them, the pattern last since it takes the rest of the tag.
 @(private = "file")
 tag_items :: proc(s: ^Source, r: rules.Rules, optional := false, not_null := false) -> string {
 	b := strings.builder_make()
@@ -1253,6 +1388,9 @@ tag_items :: proc(s: ^Source, r: rules.Rules, optional := false, not_null := fal
 	}
 	if not_null {
 		item(&b, "not_null")
+	}
+	if r.read_only || r.write_only {
+		item(&b, "read_only" if r.read_only else "write_only")
 	}
 	if r.minimum != "" {
 		item(&b, ">" if r.exclusive_minimum else ">=", r.minimum)
@@ -1292,41 +1430,43 @@ tag_items :: proc(s: ^Source, r: rules.Rules, optional := false, not_null := fal
 	return strings.to_string(b)
 }
 
-// The type of an `enum` or `const`: an enum of its strings by their names, one of its integers by number, `bool` for
-// both booleans, null alone `Null`, and a union of these for operands of several kinds. The operands that fail the
-// node's kinds or rules are left out.
+// The operands of an `enum` or `const` that pass the node's kinds and rules: its strings, its integers, its booleans
+// and whether null is one. `kinds` holds the kinds of those operands, `.Number` for a number with a fraction, and
+// `unspelled` the kinds of those no Odin enum holds: a number with a fraction or past 2^53, which a model writes as a
+// double, an array, an object, and a boolean without the other.
 @(private = "file")
-enum_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spelled) {
-	n := s.d.nodes[i]
-	out.decl = -1
+Operands :: struct {
+	texts:     [dynamic]string,
+	numbers:   [dynamic]i64,
+	truth:     [2]bool,
+	null:      bool,
+	kinds:     rules.Kinds,
+	unspelled: rules.Kinds,
+}
+
+// The operands of node `n`'s `enum` or `const`, or the keyword of a rule or an operand no check judges.
+@(private = "file")
+operands_of :: proc(s: ^Source, n: ^rules.Node) -> (o: Operands, refused: string) {
 	keyword := "enum" if n.has_enum else "const"
 	values := n.enum_of if n.has_enum else []core.Value{n.const_of.?}
-	if n.has_enum && n.const_of != nil {
-		refuse(s, "const")
-		return
-	}
 	kinds := n.kinds + ({.Integer} if .Number in n.kinds else {})
 	judged := rules.Node{kinds = n.kinds, rules = n.rules, array = -1, object = -1}
 	judged.rules.assert_format ||= s.format_assert && !n.rules.format_foreign
-	leaf, refused := rules.leaf_of(&judged, {})
-	if refused != "" {
-		refuse(s, refused)
+	leaf: rules.Leaf
+	if leaf, refused = rules.leaf_of(&judged, {}); refused != "" {
 		return
 	}
 	scratch: regex.Scratch
 	defer regex.scratch_destroy(&scratch)
-	texts := make([dynamic]string)
-	numbers := make([dynamic]i64)
 	listed_texts := make(map[string]struct{})
 	listed_numbers := make(map[i64]struct{})
-	truth: [2]bool
 	for v in values {
 		rules.visit()
 		switch core.kind(v) {
 		case .Null:
-			out.null ||= .Null in kinds
+			o.null ||= .Null in kinds
 		case .True, .False:
-			truth[int(core.kind(v) == .True)] ||= .Bool in kinds
+			o.truth[int(core.kind(v) == .True)] ||= .Bool in kinds
 		case .String:
 			room: [dynamic]u8
 			if ref, is_ref := v.(core.Node_Ref); is_ref {
@@ -1335,7 +1475,7 @@ enum_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 			text, _ := core.text(v, room[:])
 			if .String in kinds && rules.judge_string(&leaf, text, &scratch) == {} && text not_in listed_texts {
 				listed_texts[text] = {}
-				append(&texts, text)
+				append(&o.texts, text)
 			}
 		case .Number:
 			f, digits, _ := core.double_of(v)
@@ -1352,27 +1492,61 @@ enum_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 			switch {
 			case !passes || .Integer not_in kinds || !whole && .Number not_in kinds:
 			case !whole || !fits:
-				// An Odin enum holds integers, and the model writes an enum's operands as doubles.
-				refuse(s, keyword)
+				o.kinds += {.Integer if whole else .Number}
+				o.unspelled += {.Number}
 			case x not_in listed_numbers:
 				listed_numbers[x] = {}
-				append(&numbers, x)
+				append(&o.numbers, x)
 			}
-		case .Array, .Object, .Bytes, .Plain, .End:
-			refuse(s, keyword)
-			return
+		case .Array, .Object:
+			kind := rules.Kind.Array if core.kind(v) == .Array else .Object
+			if kind in kinds {
+				o.kinds += {kind}
+				o.unspelled += {kind}
+			}
+		case .Bytes, .Plain, .End:
+			return o, keyword
 		}
 	}
-	if truth[0] != truth[1] {
-		refuse(s, keyword)
+	o.kinds += ({.String} if len(o.texts) > 0 else {}) + ({.Integer} if len(o.numbers) > 0 else {}) + ({.Null} if o.null else {})
+	if o.truth[0] || o.truth[1] {
+		o.kinds += {.Bool}
+		o.unspelled += {} if o.truth[0] == o.truth[1] else {.Bool}
+	}
+	return
+}
+
+// Whether node `n`'s `enum` or `const` holds an operand no Odin enum holds, or it has both, so a fragment judges them.
+@(private = "file")
+enum_judged :: proc(s: ^Source, n: ^rules.Node) -> (judged: bool, o: Operands) {
+	if !n.has_enum && n.const_of == nil {
 		return
 	}
+	refused: string
+	o, refused = operands_of(s, n)
+	return refused == "" && (o.unspelled != {} || n.has_enum && n.const_of != nil), o
+}
+
+// The type of an `enum` or `const` whose operands an Odin enum holds: an enum of its strings by their names, one of its
+// integers by number, `bool` for both booleans, null alone `Null`, and a union of these for operands of several kinds.
+// The operands that fail the node's kinds or rules are left out.
+@(private = "file")
+enum_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spelled) {
+	n := s.d.nodes[i]
+	out.decl = -1
+	o, refused := operands_of(s, &n)
+	if refused != "" {
+		refuse(s, refused)
+		return
+	}
+	texts, numbers, truth := o.texts, o.numbers, o.truth
+	out.null = o.null
 	classes := int(len(texts) > 0) + int(len(numbers) > 0) + int(truth[0])
 	switch {
 	case classes == 0 && out.null:
 		return {type = null_type(s), decl = -1}
 	case classes == 0:
-		refuse(s, keyword)
+		refuse(s, "enum" if n.has_enum else "const")
 		return
 	case classes == 1 && truth[0]:
 		out.type = "bool"
@@ -1387,17 +1561,31 @@ enum_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 	b := strings.builder_make()
 	comment(&b, "", n.description)
 	put(&b, name, " :: union {" if out.null else " :: union #no_nil {")
+	literals := make(map[string]string)
 	if len(texts) > 0 {
 		arm := enum_declared(s, part_of(s, i, .String), "", texts[:], nil, strings.concatenate({name, "_String"}))
 		strings.write_string(&b, s.decls[arm].name)
+		union_literals(&literals, name, s.decls[arm].literals)
 	}
 	if len(numbers) > 0 {
 		arm := enum_declared(s, part_of(s, i, .Integer), "", nil, numbers[:], strings.concatenate({name, "_Integer"}))
 		put(&b, ", " if len(texts) > 0 else "", s.decls[arm].name)
+		union_literals(&literals, name, s.decls[arm].literals)
 	}
 	strings.write_string(&b, ", bool}\n" if truth[0] else "}\n")
-	s.decls[k].text, s.decls[k].open = strings.to_string(b), false
+	if truth[0] {
+		literals["true"], literals["false"] = strings.concatenate({name, "(true)"}), strings.concatenate({name, "(false)"})
+	}
+	s.decls[k].text, s.decls[k].open, s.decls[k].literals = strings.to_string(b), false, literals
 	return {type = name, decl = k}
+}
+
+// Adds each of an arm's `literals` to `out` as a value of the union `name`.
+@(private = "file")
+union_literals :: proc(out: ^map[string]string, name: string, literals: map[string]string) {
+	for operand, value in literals {
+		out[operand] = strings.concatenate({name, "(", value, ")"})
+	}
 }
 
 // The declaration of an enum of `texts` by their names, or of `numbers`, with what `register` adds for it.
@@ -1409,13 +1597,17 @@ enum_declared :: proc(s: ^Source, part: Part, description: string, texts: []stri
 	comment(&b, "", description)
 	put(&b, name, " :: enum i64 {\n" if len(numbers) > 0 else " :: enum {\n")
 	members := make(map[string]bool)
+	literals := make(map[string]string)
 	renames := strings.builder_make()
 	for x in numbers {
-		put(&b, "\tV", "M" if x < 0 else "", uint_text(u64(abs(x))), " = ", int_text(int(x)), ",\n")
+		member := strings.concatenate({"V", "M" if x < 0 else "", uint_text(u64(abs(x)))})
+		put(&b, "\t", member, " = ", int_text(int(x)), ",\n")
+		literals[strings.concatenate({"n", int_text(int(x))})] = strings.concatenate({name, ".", member})
 	}
 	for x in texts {
 		member := unique(&members, enum_member(x))
 		put(&b, "\t", member, ",\n")
+		literals[strings.concatenate({"s", x})] = strings.concatenate({name, ".", member})
 		if member != x {
 			strings.write_string(&renames, "{" if strings.builder_len(renames) == 0 else ", {")
 			strings.write_quoted_string(&renames, member)
@@ -1425,7 +1617,7 @@ enum_declared :: proc(s: ^Source, part: Part, description: string, texts: []stri
 		}
 	}
 	strings.write_string(&b, "}\n")
-	s.decls[k].text, s.decls[k].open = strings.to_string(b), false
+	s.decls[k].text, s.decls[k].open, s.decls[k].literals = strings.to_string(b), false, literals
 	if len(numbers) > 0 || strings.builder_len(renames) > 0 {
 		put(&s.registers, "\tmodel.register_enum(reg, {", name)
 		if len(numbers) > 0 {
@@ -1501,9 +1693,13 @@ arms_spelled :: proc(s: ^Source, i: rules.Node_Index, hint: string) -> (out: Spe
 	name := s.decls[k].name
 	types := make([dynamic]string)
 	listed := make(map[string]struct{})
+	s.decls[k].arms = make(map[rules.Kind]Spelled)
 	for a, j in arms {
 		arm_hint := strings.concatenate({name, "_", KIND_NAMES[a.kind.?] if a.kind != nil else int_text(j + 1)})
 		value := kind_spelled(s, a.node, a.kind.?, arm_hint, true) if a.kind != nil else odin_type(s, a.node, arm_hint, true)
+		if kind, one := a.kind.?; one {
+			s.decls[k].arms[kind] = value
+		}
 		// A union's nil reads null, so no arm of a `oneOf` may take null as well.
 		if len(n.one_of) > 0 && !value.null && takes_null(s, a.node) {
 			refuse(s, "oneOf")

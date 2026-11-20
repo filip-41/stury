@@ -699,9 +699,19 @@ def test_terminal(stury, jq, diff, row):
     stdin_tty, stdout_tty, opts, feed, env, pinned = row
     code, out, err = run_tty(stury, opts, stdin_tty, stdout_tty, feed, env)
     if stdin_tty and stdout_tty:
-        usage = err.startswith(b"stury - command-line JSON, YAML, TOML, XML, HTML, CSV and CBOR processor") and err.endswith(b"For listing the command options, use stury --help.\n")
+        if opts:
+            usage = err.startswith(b"Usage:\tstury " + opts[0].encode())
+        else:
+            usage = err.startswith(b"stury - command-line JSON, YAML, TOML, XML, HTML, CSV and CBOR processor") and err.endswith(b"For listing the command options, use stury --help.\n")
         assert (code, out) == (2, b"") and usage, f"exit {code} out {out!r} err {err!r}, want the usage and exit 2"
     else:
         want = run_tty(jq, opts, stdin_tty, stdout_tty, feed, env) if diff else None
         ok = code == 0 and out and out == (pinned or out) and (want is None or (code, out, err) == want)
         assert ok, f"exit {code} out {out!r} err {err!r}, jq {want or pinned}"
+
+
+@pytest.mark.skipif(not ptys_here(), reason="this host has no pseudo-terminal devices")
+def test_cbor_to_terminal_refused(stury):
+    """CBOR is bytes, so a terminal is told to redirect it, as gzip does."""
+    code, out, err = run_tty(stury, ["--to", "cbor", "."], False, True, b"1\n", {})
+    assert (code, out) == (2, b"") and b"--to cbor writes raw bytes: redirect the output" in err, f"exit {code} out {out!r} err {err!r}"

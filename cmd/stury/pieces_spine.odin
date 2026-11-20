@@ -52,7 +52,7 @@ entries_pieces :: proc(ins: ^Inputs) -> bool {
 		path.optional = transmute(bit_set[0 ..< core.MAX_STEPS;u64])(transmute(u64)path.optional >> uint(levels + 1))
 	}
 	flush_some(&run.output, force = true)
-	if records.each(data, ins.as, .Entries, piece_task, &ps, run_pool(run), at) != nil || ps.stopped || !spine_named(data, at, ps.slots[:], ps.plain, names) {
+	if records.each(data, ins.as, .Entries, piece_task, &ps, run_pool(run, pieces_of(data)), at) != nil || ps.stopped || !spine_named(data, at, ps.slots[:], ps.plain, names) {
 		return false
 	}
 	answered, interpreted := 0, false
@@ -163,7 +163,7 @@ WHITE := " \t\r\n"
 spine_run :: proc(ins: ^Inputs, job: ^Spine_Job, at: u64) -> bool {
 	job.run, job.plain = ins.run, ins.as
 	job.slots.allocator = runtime.heap_allocator()
-	return records.each(ins.data, ins.as, .Entries, spine_task, job, run_pool(ins.run), at) == nil && !job.failed
+	return records.each(ins.data, ins.as, .Entries, spine_task, job, run_pool(ins.run, pieces_of(ins.data)), at) == nil && !job.failed
 }
 
 // The entries the pieces `slots` hold.

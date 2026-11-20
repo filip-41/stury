@@ -641,12 +641,18 @@ regroup_block :: proc(cx: ^Cx, c: u32, items: []Item, removed: []bool, inserts: 
 	for r in removed {
 		left -= int(r)
 	}
+	col := column_of(src, items[0].start)
+	compact := !compose.first_on_line(src, items[0].start)
 	if left == 0 && len(inserts) == 0 {
+		// Outside a mapping, which places its value from its key on, the text placed starts at the first member, after
+		// that member's head comments.
+		p := cx.parent[c]
+		if h := compose.line_start(src, head_of(cx, items, 0)); (p == NIL || cx.doc.nodes[p].kind != .Object) && !compact && h < compose.line_start(src, items[0].start) {
+			add(cx, h, compose.line_start(src, items[0].start), nil)
+		}
 		place(cx, c, transmute([]u8)string("{}" if object else "[]"), {form = .Inline})
 		return true
 	}
-	col := column_of(src, items[0].start)
-	compact := !compose.first_on_line(src, items[0].start)
 	// A compact first member removed leaves its dash's line to the next member, or ends the line at the dash.
 	joined := false
 	if compact && removed[0] {
@@ -720,7 +726,7 @@ inserts_at :: proc(inserts: []core.Edit, at: u32) -> bool {
 slot_at :: proc(cx: ^Cx, items: []Item, j: int, compact: bool) -> u64 {
 	switch {
 	case j == 0:
-		return items[0].start if compact else compose.line_start(cx.src, items[0].start)
+		return items[0].start if compact else compose.line_start(cx.src, head_of(cx, items, 0))
 	case j < len(items):
 		return compose.line_start(cx.src, head_of(cx, items, j))
 	}
@@ -731,8 +737,9 @@ slot_at :: proc(cx: ^Cx, items: []Item, j: int, compact: bool) -> u64 {
 @(private = "file")
 head_of :: proc(cx: ^Cx, items: []Item, j: int) -> u64 {
 	h := items[j].start
+	after := items[j - 1].end if j > 0 else 0
 	for f in core.all_facts(cx.doc, core.Node_Index(items[j].value)) {
-		if f.role == .Comment && f.lo < h && f.lo >= items[j - 1].end {
+		if f.role == .Comment && f.lo < h && f.lo >= after {
 			h = f.lo
 		}
 	}

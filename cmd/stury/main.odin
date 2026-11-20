@@ -72,11 +72,18 @@ main :: proc() {
 	if o.each && !o.no_filename && o.to == .Cbor {
 		usage_error("--each labels the lines of its output, and --to cbor writes none: add --no-filename")
 	}
+	if o.no_filename && !o.each {
+		usage_error("--no-filename has no use without --each")
+	}
+	if o.to == .Cbor && !o.in_place && !o.check && !o.diff && is_terminal(os.stdout) {
+		usage_error("--to cbor writes raw bytes: redirect the output to a file or a pipe")
+	}
 	if flag := command_refused_option(o, &cli); flag != "" && cli.command != .Run {
 		usage_error("%s has no use with %s: %s", flag, command_name(&cli), command_writes(&cli))
 	}
+	// Both recurse on the values they read, which --max-depth lets nest past the main thread's stack.
 	if cli.command == .Diff {
-		diff_main(&run, &cli)
+		run_deep(&run, &Inputs{run = &run, cli = &cli}, diff_main)
 	}
 	if o.quarantine != "" {
 		open_quarantine(o.quarantine)
@@ -91,7 +98,7 @@ main :: proc() {
 		fmt_main(&run, &cli)
 	}
 	if cli.command >= .Schema {
-		schema_main(&run, &cli)
+		run_deep(&run, &Inputs{run = &run, cli = &cli}, schema_main)
 	}
 	text, has := cli.filter.?
 	typed, typing := cli.schema.filter.?
@@ -115,6 +122,8 @@ main :: proc() {
 	switch {
 	case has && o.from_file:
 		text = program_file(text)
+	case !has && cli.command == .Edit:
+		usage_error("edit needs a filter")
 	case !has && !o.from_file && !(is_terminal(os.stdin) && is_terminal(os.stdout)):
 		// As jq: no filter is `.`, unless both stdin and stdout are a terminal.
 		text = "."

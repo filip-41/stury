@@ -5,8 +5,8 @@ package spell
 import "core:strings"
 
 // The one of `candidates` nearest `word` by edit distance, ignoring case, when it is near enough to be a misspelling of
-// it, or "". Allocates only in `context.temp_allocator`.
-nearest_word :: proc(candidates: []string, word: string) -> string {
+// it, or "". A `max_distance` below the default limit narrows it. Allocates only in `context.temp_allocator`.
+nearest_word :: proc(candidates: []string, word: string, max_distance := max(int)) -> string {
 	best, distance := "", max(int)
 	lower := strings.to_lower(word, context.temp_allocator)
 	for c in candidates {
@@ -14,5 +14,5 @@ nearest_word :: proc(candidates: []string, word: string) -> string {
 			best, distance = c, d
 		}
 	}
-	return best if distance <= min((len(word) + 1) / 2, 3) && distance < len(best) else ""
+	return best if distance <= min((len(word) + 1) / 2, 3, max_distance) && distance < len(best) else ""
 }

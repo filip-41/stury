@@ -131,6 +131,7 @@ KEYWORDS := [?]Row {
 	{"$recursiveRef", .Core, .D2019_09, .D2019_09},
 	{"$recursiveAnchor", .Core, .D2019_09, .D2019_09},
 	{"$vocabulary", .Core, .D2019_09, .D2020_12},
+	{"$comment", .Core, .D07, .D2020_12},
 	{"$defs", .Core, .D2019_09, .D2020_12},
 	{"definitions", .Core, .D04, .D07},
 	{"prefixItems", .Applicator, .D2020_12, .D2020_12},

@@ -9,11 +9,13 @@ package main
 
 import "base:runtime"
 import "core:bytes"
+import "core:io"
 import "core:math/rand"
 import "core:os"
 import "core:strconv"
 import "core:strings"
 import core "../../core"
+import "../../core/write"
 import records "../../core/records"
 import json "../../json"
 import "../../jq"
@@ -25,7 +27,7 @@ FMT_EXIT_DIFFERS :: 1
 // `stury fmt`, which reads and writes the files and exits.
 fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	o := &run.opts
-	files := input_files(cli.files[:], cli.walked)
+	files := input_files(cli.files[:], cli.walked, command_name(cli))
 	switch {
 	case o.in_place && o.to != o.from:
 		usage_error("--in-place writes each file back as its own format: %s, not --to %s", FORMATS[o.from].name, FORMATS[o.to].name)
@@ -271,9 +273,26 @@ cells_cut :: proc(run: ^Run, ins: ^Inputs, cut: int) {
 put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
 	as := written_as(&run.opts)
 	out := &run.output
-	text, dropped, err := core.write(doc, out.layout.opts, as, allocator = context.temp_allocator)
+	// A text with no text before it to part it from, and none that holds it back, goes to stdout as it is made, so its
+	// size is not held.
+	follows := FORMATS[run.opts.to].caps.follows != nil
+	streamed := !out.held && !writes_one_document(&run.opts) && (FORMATS[run.opts.to].parted == nil || out.parted_at != out.written + out.buf.cursor)
+	text: []u8
+	dropped: int
+	err: core.Error
+	sent := Document_Sent{out = out}
+	start, written := out.buf.cursor, out.written
+	if streamed {
+		dropped, err = core.write_stream(sent_stream(&sent), doc, out.layout.opts, as, allocator = context.temp_allocator)
+	} else {
+		text, dropped, err = core.write(doc, out.layout.opts, as, allocator = context.temp_allocator)
+	}
 	tell_dropped(ins.name, run.opts.to, dropped)
 	if err != nil {
+		if out.written == written {
+			// What the refused text put in the buffer is not output.
+			out.buf.cursor = start
+		}
 		flush_some(out, force = true)
 		kind := write_refusal_kind(err)
 		if kind == .Too_Deep {
@@ -286,8 +305,38 @@ put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
 	if writes_one_document(&run.opts) {
 		refuse_second_document(out, "the input gave a second text; --in-place writes each file as its own")
 	}
-	put_format_text(out, as, text, FORMATS[run.opts.to].caps.follows != nil)
+	if streamed {
+		end_format_text(out, as, sent.last, follows)
+		return true
+	}
+	put_format_text(out, as, text, follows)
 	return true
+}
+
+// The bytes a document's writer has made, which `sent_stream` puts into the output and flushes as they pass FLUSH_AT.
+@(private = "file")
+Document_Sent :: struct {
+	out:  ^Output,
+	last: u8, // the last byte put, 0 while none is
+}
+
+@(private = "file")
+sent_stream :: proc(sent: ^Document_Sent) -> io.Stream {
+	return {data = sent, procedure = proc(data: rawptr, mode: io.Stream_Mode, p: []byte, _: i64, _: io.Seek_From) -> (i64, io.Error) {
+		#partial switch mode {
+		case .Write:
+			sent := (^Document_Sent)(data)
+			write.put_text(&sent.out.buf, string(p))
+			if len(p) > 0 {
+				sent.last = p[len(p) - 1]
+			}
+			flush_some(sent.out)
+			return i64(len(p)), nil
+		case .Query:
+			return io.query_utility({.Write, .Query})
+		}
+		return 0, .Empty
+	}}
 }
 
 // The format fmt and the schema verbs write in, as --to and the output options say.

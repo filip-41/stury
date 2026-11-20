@@ -133,6 +133,53 @@ test_ecma_rules :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_ecma_look_behind_and_back_references :: proc(t: ^testing.T) {
+	Case :: struct {
+		pattern, text: string,
+		lo, hi:        int, // -1 for no match
+		g1, g1_end:    int,
+	}
+	cases := [?]Case {
+		{`(?<=\$)\d+`, "cost $10", 6, 8, -1, -1},
+		{`(?<!a)b`, "abcb", 3, 4, -1, -1},
+		{`(?<=a+)b`, "caaab", 4, 5, -1, -1}, // of any length
+		{`(?<=(a+))b`, "aaab", 3, 4, 0, 3}, // matched leftwards, so a greedy repeat takes all it can to the left
+		{`(?<=(a+?))b`, "aaab", 3, 4, 2, 3},
+		{`(?<=(\d+)\d+)$`, "1053", 4, 4, 0, 1},
+		{`(?<=(ab|b))c`, "abc", 2, 3, 0, 2},
+		{`(?<=(b|ab))c`, "abc", 2, 3, 1, 2},
+		{`(?<=\ud83d\ude00)a`, "\U0001f600a", 4, 5, -1, -1},
+		{`(?<=.{2})a`, "\U0001f600\u00e9a", 6, 7, -1, -1},
+		{`(?<=.{3})a`, "\U0001f600\u00e9a", -1, -1, -1, -1},
+		{`(?<=(?<=a)b)c`, "bbcabc", 5, 6, -1, -1}, // nested
+		{`(?<=a(?!b))..`, "acab", 1, 3, -1, -1}, // a look-ahead inside reads rightwards
+		{`(?<=$)`, "a", 1, 1, -1, -1},
+		{`(a)\1`, "abaa", 2, 4, 2, 3},
+		{`(\ud83d\ude00)\1`, "\U0001f600\U0001f600", 0, 8, 0, 4},
+		{`\1(a)`, "a", 0, 1, 0, 1}, // a group that has not matched matches empty
+		{`(a\1)`, "a", 0, 1, 0, 1},
+		{`(?:(a)|b)\1`, "b", 0, 1, -1, -1},
+		{`(?:(a)|(b))+\1\2`, "abb", 0, 3, -1, -1}, // an iteration unsets the groups a reference reads
+		{`(?<a>x)\k<a>`, "xx", 0, 2, 0, 1},
+		{`\k<a>(?<a>x)`, "x", 0, 1, 0, 1},
+		{`(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)\10`, "abcdefghijj", 0, 11, 0, 1},
+		{`(?<=\1(a))b`, "aab", 2, 3, 1, 2}, // a reference in a look-behind reads leftwards, after the group to its right
+		{`(?<=\1(a))b`, "cab", -1, -1, -1, -1},
+		{`(?<=(a)\1)b`, "ab", 1, 2, 0, 1},
+		{`(.)(?<=\1\1)`, "abb", 2, 3, 2, 3},
+		{`(?=(a+))a*b\1`, "baaabac", 3, 6, 3, 4},
+	}
+	for c in cases {
+		for linear in ([2]bool{true, false}) {
+			f := search(c.pattern, c.text, linear)
+			testing.expectf(t, f.lo == c.lo && f.hi == c.hi && f.g1 == c.g1 && f.g1_end == c.g1_end, "%q on %.20q (linear %v): got %d..%d (%d..%d) %s, want %d..%d (%d..%d)", c.pattern, c.text, linear, f.lo, f.hi, f.g1, f.g1_end, f.err, c.lo, c.hi, c.g1, c.g1_end)
+		}
+	}
+	// A back reference keeps the search off the visited set, so an exponential search stops at the retry limit.
+	testing.expect_value(t, search(`^(a|a)*\1$`, strings.concatenate({strings.repeat("a", 40, context.temp_allocator), "b"}, context.temp_allocator)).err, "retry-limit-in-match over")
+}
+
+@(test)
 test_ecma_group_names :: proc(t: ^testing.T) {
 	Case :: struct {
 		pattern, name: string, // the name of group 1, "" for a pattern that is refused
@@ -232,7 +279,7 @@ test_regex_jq_group_names :: proc(t: ^testing.T) {
 @(test)
 test_ecma_refusals :: proc(t: ^testing.T) {
 	refused := [?]string {
-		`(a)\1`, `\k<x>`, `(?<x>a)\k<x>`, `(?<=a)b`, `(?<!a)b`, `a{`, `a{2,1}`, `]`, `}`, `\q`, `[b-a]`, `[\d-z]`,
+		`\k<x>`, `(a)\2`, `(?<x>a)\k<x`, `(?<=a)*`, `(?<!a)+b`, `(?<=a){2}`, `a{`, `a{2,1}`, `]`, `}`, `\q`, `[b-a]`, `[\d-z]`,
 		`\u{110000}`, `\p{Nope}`, `\p{scx=Nope}`, `\p{scx}`, `\p{letter}`, `\p{Greek}`, `\p{Word}`, `\p{gc=Greek}`, `(?<1>a)`,
 		`(?<n>a)(?<n>b)`, `(?=a)*`, `^*`, `a**`, `(a`, `a)`, `(?x)`, `\c1`, `\00`, `\-?`, `a+?\-`,
 		`\&`, `\%`, `[\&]`, `[\%]`, `\#`, `\ `, `\!`, `\"`, `\,`, `\:`, `\;`, `\<`, `\=`, `\>`, `\@`, `\~`, `\_`, `\'`, `[\_]`,
@@ -257,6 +304,7 @@ test_ecma_valid_back_references :: proc(t: ^testing.T) {
 	accepted := [?]string{`(a)\1`, `\1(a)`, `\k<a>(?<a>x)`, `(?<a>x)\k<a>`, `(?<a>x)\k<\u0061>`, `(?<=a)b`, `(?<!a)b`}
 	for pattern in accepted {
 		testing.expectf(t, regex.valid(pattern, {ecma = true}), "%q is not valid", pattern)
+		testing.expectf(t, regex.refusal(pattern, {ecma = true}, context.temp_allocator) == "", "%q does not compile", pattern)
 	}
 }
 

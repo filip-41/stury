@@ -365,6 +365,21 @@ def test_version_config_help(s):
     assert code == 2 and text(err).splitlines()[-1:] == ["For listing the command options, use stury --help."], f"-f with no file: exit {code}"
 
 
+@pytest.mark.parametrize("verb", ("check", "fmt", "edit"))
+def test_verb_help_lists_walk_options(s, verb):
+    """Each verb's help lists the options that pick its files, and fmt and edit list -c."""
+    usage = text(s.run(verb, "--help")[1])
+    for opt in ("-g, --glob glob", "--no-ignore", "--files-from file"):
+        assert opt in usage, f"{verb} --help lists {opt}"
+    assert ("-c, --compact-output" in usage) == (verb != "check"), f"{verb} --help and -c"
+
+
+def test_threads_cut_to_the_files(s):
+    """A thread count past the work starts only the threads the work has."""
+    err = s.run("--threads", "99999", "--explain", ".", s.files.small, s.files.small)[2].decode()
+    assert "threads: 2 files over 2 threads" in err, err
+
+
 IDS = "".join('{"id":%d}\n' % i for i in range(6000))
 # A pipe is read as it comes: the answer to what came first is out before the rest arrives. A text cut where the pipe
 # pauses reads as jq reads it whole, and a byte order mark stays behind when a text on the stream's first line is read on.

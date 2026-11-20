@@ -1,6 +1,6 @@
 """The seeded grammar of random regular expressions and texts for jq's regex builtins (Oniguruma): look-around, backreferences
 and conditions, named groups, greedy, lazy and possessive quantifiers, \\K, \\R, \\X, class intersection, properties, anchors,
-inline options, subexpression calls \\g<...> and \\g'...', the absent operator (?~...) in its four forms, the callouts
+inline options, subexpression calls \\g<...>, \\g'...', (?&name) and (?n), the absent operator (?~...) in its four forms, the callouts
 (*FAIL), (*MISMATCH), (*SKIP), (*ERROR), and (*COUNT), (*TOTAL_COUNT), (*MAX) and (*CMP) with their tags, a set of jq's
 flags (g, i, x, n, s, l, m, p) and a text of ASCII and multi-byte characters, run through one of match, test, capture,
 scan, splits, sub or gsub. SKIP lists what stury differs in on purpose."""
@@ -105,7 +105,12 @@ class Gen:
             to = self.r.choice(["-", "+"]) + str(self.r.randint(0, 2))
         else:
             to = str(self.r.randint(0, self.groups + 1))
-        return f"\\g'{to}'" if self.r.random() < 0.2 else f"\\g<{to}>"
+        spelling = self.r.random()
+        if spelling < 0.2:
+            return f"\\g'{to}'"
+        if spelling < 0.35:
+            return f"(?&{to})" if to[0].isalpha() else f"(?{to})"
+        return f"\\g<{to}>"
 
     def absent(self, d):
         self.in_absent = True

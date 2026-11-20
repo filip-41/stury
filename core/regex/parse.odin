@@ -3,9 +3,7 @@ package regex
 
 // Parses Oniguruma's pattern syntax as jq compiles it (ONIG_SYNTAX_PERL_NT, UTF-8, ONIG_OPTION_CAPTURE_GROUP) into a
 // tree. A syntax error is Oniguruma's own message, which jq prints after "Regex failure: ". Under `Flags.ecma` the
-// grammar is ECMA-262's with the `u` flag, as a JSON Schema `pattern` uses it, and back references and look-behind are
-// refused. Without them the outcome of a program at an instruction and a position does not depend on how the search got
-// there, which the linear search relies on (match.odin).
+// grammar is ECMA-262's with the `u` flag, as a JSON Schema `pattern` uses it.
 
 import "core:slice"
 import "core:strings"
@@ -32,13 +30,12 @@ Parser :: struct {
 	callouts: [dynamic]^Callout,
 	err:    string,
 	depth:  int, // nesting of the groups being parsed, 2 per group, checked against MAX_PARSE_DEPTH
-	syntax_only: bool, // only syntax is judged (`valid`): ECMA back references and look-behind are accepted
 	head:   bool, // at the first atom of an absent or condition branch, where `(?:...)` stays a group (group_head)
 }
 
 // Returns the pattern's tree, or Oniguruma's message when it does not compile.
-parse :: proc(src: string, flags: Flags, syntax_only := false) -> (pat: Pattern, err: string) {
-	p := Parser{src = src, flags = flags, syntax_only = syntax_only}
+parse :: proc(src: string, flags: Flags) -> (pat: Pattern, err: string) {
+	p := Parser{src = src, flags = flags}
 	append(&p.names, "")
 	append(&p.groups, nil)
 	root := parse_alt(&p)
@@ -124,7 +121,7 @@ parse_cat :: proc(p: ^Parser) -> ^Node {
 		}
 	}
 	for {
-		skip_extended(p)
+		skip_ignored(p)
 		if at_end(p) || peek(p) == '|' || peek(p) == ')' {
 			break
 		}
@@ -248,10 +245,22 @@ escaped_punctuation :: proc(c: byte, ecma: bool) -> bool {
 	return c < 0x80
 }
 
-// Under (?x), skips white space and `#` comments between tokens.
+// Skips what lies between tokens: `(?#...)` comments, which leave a quantifier after them to the atom before, and
+// under (?x) white space and `#` comments. An unclosed `(?#` is left to parse_group to refuse.
 @(private = "file")
-skip_extended :: proc(p: ^Parser) {
-	for p.flags.extend && !at_end(p) {
+skip_ignored :: proc(p: ^Parser) {
+	for !at_end(p) {
+		if !p.flags.ecma && strings.has_prefix(p.src[p.i:], "(?#") {
+			end := strings.index_byte(p.src[p.i:], ')')
+			if end < 0 {
+				return
+			}
+			p.i += end + 1
+			continue
+		}
+		if !p.flags.extend {
+			return
+		}
 		switch peek(p) {
 		case ' ', '\t', '\n', '\r', '\f', '\v':
 			p.i += 1
@@ -270,7 +279,7 @@ parse_quantifiers :: proc(p: ^Parser, atom: ^Node) -> ^Node {
 	atom := atom
 	quantifiers := 0
 	for {
-		skip_extended(p)
+		skip_ignored(p)
 		if at_end(p) {
 			return atom
 		}
@@ -570,27 +579,34 @@ parse_group :: proc(p: ^Parser) -> ^Node {
 		return look_node(p, .Atomic)
 	case '<', '\'':
 		if c == '<' && (peek(p) == '=' || peek(p) == '!') {
-			if p.flags.ecma && !p.syntax_only {
-				return fail(p, "look-behind is not supported")
-			}
 			p.i += 1
 			return look_node(p, .Behind if p.src[p.i - 1] == '=' else .Not_Behind)
 		}
 		name, ok := group_name(p, '>' if c == '<' else '\'')
 		return capture_node(p, name) if ok else nil
-	case '#':
-		for !at_end(p) && peek(p) != ')' {
-			p.i += 1
-		}
-		if at_end(p) {
-			return fail(p, "end pattern in group")
-		}
-		p.i += 1
-		return nil
+	case '#': // skip_ignored took every closed comment
+		return fail(p, "end pattern in group")
 	case '(':
 		return parse_cond(p)
 	case '~':
 		return parse_absent(p)
+	case '&':
+		if c = peek(p); c >= '0' && c <= '9' || c == '-' || c == '+' {
+			return refuse_name(p, p.i, ')', "invalid group name <")
+		}
+		return parse_call(p, ')')
+	case 'R':
+		// Oniguruma leaves the `)` of (?R) unread, so it closes an outer group or is unmatched.
+		if peek(p) == ')' {
+			n := new_node(.Call)
+			append(&p.calls, n)
+			return n
+		}
+	case '0' ..= '9', '-', '+':
+		if c >= '0' || peek(p) >= '0' && peek(p) <= '9' {
+			p.i -= 1
+			return parse_call(p, ')')
+		}
 	}
 	p.i -= 1
 	return parse_options(p)

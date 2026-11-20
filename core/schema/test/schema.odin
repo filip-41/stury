@@ -134,7 +134,7 @@ schema_refusals :: proc(t: ^testing.T) {
 		{`{"multipleOf": 0}`, "multipleOf", ""},
 		{`{"allOf": []}`, "allOf", ""},
 		{`{"pattern": "(a"}`, "pattern", ""},
-		{`{"pattern": "(a)\\1"}`, "pattern", ""},
+		{`{"pattern": "(a)\\2"}`, "pattern", ""},
 		{`{"$ref": "#/$defs/missing"}`, "$ref", ""},
 		{`{"$ref": "https://example.com/other.json"}`, "$ref", ""},
 		{`{"$schema": "https://example.com/unknown"}`, "$schema", ""},
@@ -186,11 +186,44 @@ schema_refuses_draft_4_forms :: proc(t: ^testing.T) {
 		{`{"items": true}`, "schema", true},
 		{`{"additionalProperties": false, "properties": {"a": {}}}`, "", false},
 		{`{"items": [{}], "additionalItems": false}`, "", false},
+		{`{"dependencies": {"a": []}}`, "dependencies", true},
+		{`{"enum": []}`, "enum", true},
+		{`{"enum": [1, 1.0]}`, "enum", true},
 	}
 	for c in cases {
 		_, res, err := read_text(c.text, .D04)
 		defer schema.destroy(res)
 		testing.expectf(t, (err != nil) == c.refused && refused_keyword(err) == c.keyword, "%s: %v", c.text, err)
+	}
+}
+
+// What each draft's meta-schema refuses of the annotations and the lists of names: a `description`, `title` or
+// `$comment` that is no string, and a name a list of names repeats. An empty `enum` is valid past draft 4, and `$id` is
+// a `format` of its meta-schema, which only annotates.
+@(test)
+schema_refuses_what_a_meta_schema_refuses :: proc(t: ^testing.T) {
+	cases := [?]struct {
+		text, keyword: string,
+		draft:         schema.Draft,
+	} {
+		{`{"description": 1}`, "description", .D2020_12},
+		{`{"description": 1}`, "description", .D04},
+		{`{"title": {}}`, "title", .D07},
+		{`{"$comment": 1}`, "$comment", .D2019_09},
+		{`{"$comment": 1}`, "", .D06},
+		{`{"required": ["a", "a"]}`, "required", .D2020_12},
+		{`{"required": ["a", "a"]}`, "required", .D06},
+		{`{"dependentRequired": {"a": ["b", "b"]}}`, "dependentRequired", .D2019_09},
+		{`{"dependencies": {"a": ["b", "b"]}}`, "dependencies", .D07},
+		{`{"required": []}`, "", .D2020_12},
+		{`{"enum": []}`, "", .D2020_12},
+		{`{"enum": [1, 1]}`, "", .D06},
+		{`{"$id": "not a uri"}`, "", .D2020_12},
+	}
+	for c in cases {
+		_, res, err := read_text(c.text, c.draft)
+		defer schema.destroy(res)
+		testing.expectf(t, (err != nil) == (c.keyword != "") && refused_keyword(err) == c.keyword, "%s in %v: %v", c.text, c.draft, err)
 	}
 }
 

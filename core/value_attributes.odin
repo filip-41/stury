@@ -71,10 +71,16 @@ rebuilt_attributes :: proc(v: Value) -> (attributes: ^Object, rebuilt: bool) {
 }
 
 // The attribute bodies of the element `v` with its attribute `name` given the value `text`, in place of one of that
-// name, else after the others, or removed when `text` is nil. A new body is quoted, with the markup, the quote and the
-// white space a reader would fold to a space written as references.
+// name, else after the others, or removed when `text` is nil. An attribute that already holds `text` keeps its body. A
+// new body is quoted, with the markup, the quote and the white space a reader would fold to a space written as
+// references.
 attribute_bodies :: proc(v: Value, name: string, text: Maybe(string)) -> []string {
 	have, _ := comments(v, .Attribute)
+	if want, is_text := text.?; is_text {
+		if current, held := attributes_value(v, name, true).(string); held && current == want {
+			return have
+		}
+	}
 	bodies := make([dynamic]string, 0, len(have) + 1)
 	text, is_text := text.?
 	found := false

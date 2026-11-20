@@ -149,6 +149,24 @@ inline_arrays_keep_their_separators :: proc(t: ^testing.T) {
 	testing.expect_value(t, out, "a = [1]\nb = [1,2,3]\nc = [\n  1,\n  2,\n  3\n]\n")
 }
 
+// In an array whose elements stand on lines of their own, an element goes and comes as its line, so a comment on an
+// element's line stays with it.
+@(test)
+array_lines_keep_their_comments :: proc(t: ^testing.T) {
+	src := "a = [\n  1,\n  2,\n  3, # three\n]\n"
+	out, err := edited(src, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+		return write.insert(l, member(d, core.ROOT, "a"), 3, typed.Raw("4"))
+	})
+	testkit.expect_nil(t, err)
+	testing.expect_value(t, out, "a = [\n  1,\n  2,\n  3, # three\n  4,\n]\n")
+	out, err = edited(src, proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {
+		v, _ := core.child_at(d, member(d, core.ROOT, "a"), 2)
+		return core.remove(l, v)
+	})
+	testkit.expect_nil(t, err)
+	testing.expect_value(t, out, "a = [\n  1,\n  2,\n]\n")
+}
+
 @(test)
 rename_a_key :: proc(t: ^testing.T) {
 	out, err := edited("a = 1 # n\n", proc(l: ^core.Edit_List, d: ^core.Document) -> core.Error {

@@ -4,9 +4,6 @@ package main
 // tells each step that no input S describes can take, as a compile error is told, and writes the schema every output
 // of F passes. The input options say what F reads: a record of a table under `--from csv` holds the cells it reads.
 
-import "core:os"
-import "../../core/schema"
-import json "../../json"
 import "../../jq"
 import "message"
 
@@ -33,11 +30,5 @@ check_filter_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	for e in refusals {
 		message.write_stderr("stury: error: %s\n", e)
 	}
-	text, err := schema.write(&outputs, json.as(.Json), output_layout(run).opts)
-	if err != nil {
-		message.write_stderr("stury: error: %s\n", edit_error_text(nil, err))
-		os.exit(EXIT_USAGE)
-	}
-	message.write_stdout("%s\n", string(text))
-	exit_closing_stdout(1 if len(refusals) > 0 else 0)
+	write_schema(run, &outputs, "check --filter", 1 if len(refusals) > 0 else 0)
 }
