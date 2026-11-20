@@ -49,7 +49,7 @@ X86_TARGETS   := $(foreach o,$(X86_OPTS),$(foreach t,0 1,$(foreach p,$(TEST_PKGS
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: help check gate build-cli test test-examples test-lib test-one test-py test-cli test-jq diff diff-suite diff-schema diff-schema-csv diff-schema-gen diff-model ecma-diff diff-xml test-x86 test-wide test-asan test-asan-lib test-tsan test-f32 test-sweep lint lint-man lint-fixtures names-write bench bench-doc bench-paths bench-typed bench-records bench-schema bench-schema-peers bench-write bench-edit bench-model bench-peers bench-cli bench-files fixtures \
+.PHONY: help check gate build-cli build-cli-minimal test test-examples test-lib test-one test-py test-cli test-jq diff diff-suite diff-schema diff-schema-csv diff-schema-gen diff-model ecma-diff diff-xml test-x86 test-wide test-asan test-asan-lib test-tsan test-f32 test-sweep lint lint-man lint-fixtures names-write bench bench-doc bench-paths bench-typed bench-records bench-schema bench-schema-peers bench-write bench-edit bench-model bench-peers bench-cli bench-files fixtures \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
 
 # The bench lanes: ROUNDS, ARMS, CASES, COUNT and TIER reach the runner as environment variables, ROWS names rows
@@ -73,6 +73,11 @@ build-cli:
 	@mkdir -p $(BUILD)
 	$(ODIN) build cmd/stury $(OPT) $(CLI_LINK) $(CLI_DEFINES) -out:$(BUILD)/stury
 
+# The command line at -o:minimal, for trying what a change answers: it compiles in seconds, where -o:speed takes minutes.
+build-cli-minimal:
+	@mkdir -p $(BUILD)
+	$(ODIN) build cmd/stury $(TEST_OPT) $(CLI_LINK) $(CLI_DEFINES) -out:$(BUILD)/stury-minimal
+
 help:
 	@echo "make check        the checks the files you changed can reach (seconds)"
 	@echo "make gate         everything a branch passes before it lands (python3 tools/gate.py full adds the long runs)"
@@ -86,6 +91,7 @@ help:
 	@echo "make names-write  regenerate each format's names.odin from tools/names.txt"
 	@echo "make test-asan, test-tsan, test-x86, test-wide, test-f32   sanitizers, x86 tiers, binary32"
 	@echo "make build-cli    build/stury (OPT=, STURY_VERSION=)"
+	@echo "make build-cli-minimal   build/stury-minimal, built in seconds for trying a change (not for timing)"
 	@echo "make diff-schema  the check on the schema lane's fixtures against the Python jsonschema package (needs uv)"
 	@echo "make diff-schema-csv  the check of CSV and TSV against a Python cell-rule converter and jsonschema (needs uv)"
 	@echo "make diff-schema-gen  the check over generated schemas against jsonschema (needs uv)"

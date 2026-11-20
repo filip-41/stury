@@ -648,15 +648,24 @@ unevaluated_block :: proc(d: ^rules.Description, n: ^rules.Node) -> (block: rule
 // Whether every object of the blocks `blocks` of `p.from` passes the members, patterns, names and dependents of `want`.
 @(private = "file")
 members_included :: proc(p: ^Prover, blocks: []^rules.Object, want: ^rules.Object, depth: int) -> bool {
+	// A map's order follows its addresses, so the names are walked in the order first met: the first refusal, and the
+	// witness found from it, is then the same on every run.
 	named := make(map[string]struct{}, context.temp_allocator)
+	order := make([dynamic]string, context.temp_allocator)
 	for blk in blocks {
 		for m in blk.members {
-			named[m.name] = {}
+			if m.name not_in named {
+				named[m.name] = {}
+				append(&order, m.name)
+			}
 		}
 	}
 	names := names_of_blocks(blocks)
 	for m in want.members {
-		named[m.name] = {}
+		if m.name not_in named {
+			named[m.name] = {}
+			append(&order, m.name)
+		}
 		if m.required && !required_in(blocks, names, m.name) {
 			return refuse(p, "required")
 		}
@@ -665,7 +674,7 @@ members_included :: proc(p: ^Prover, blocks: []^rules.Object, want: ^rules.Objec
 		}
 	}
 	wanted := names_of_blocks({want})
-	for name in named {
+	for name in order {
 		targets, decided := judging_nodes(p, {want}, wanted, name)
 		if !decided {
 			return refuse(p, "patternProperties")
