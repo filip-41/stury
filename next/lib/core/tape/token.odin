@@ -64,3 +64,11 @@ Child_Count :: struct {
 SPELLING_DECODE :: u16(1)
 SPELLING_QUOTED :: u16(2)
 SPELLING_LAX :: u16(4)
+
+NUMBER_EXP :: u16(1 << 14) // in a number's spelling, the number has an exponent
+
+// The spelling of a number token. Bits 0 to 3 hold the format's number kind (0 for its plain decimal), bits 4 to 8 the
+// integer digits and bits 9 to 13 the fraction digits, each count saturated at 31.
+number_spelling :: #force_inline proc "contextless" (kind: u16, int_digits, frac_digits: u64) -> u16 {
+	return kind | u16(min(int_digits, 31)) << 4 | u16(min(frac_digits, 31)) << 9
+}

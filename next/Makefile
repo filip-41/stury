@@ -12,7 +12,9 @@ TEST_FLAGS := $(COLLECTION) -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 
 # Tests need an OS (`core:testing` imports `core:os`), so only the library is checked for wasm.
 TEST_LINT_TARGETS := linux_amd64 windows_amd64 linux_riscv64
-LINT_TARGETS := $(TEST_LINT_TARGETS) freestanding_wasm32
+# The walks' states end in `#must_tail` calls, which WebAssembly runs with its tail-call feature. `odin check` takes no
+# target features, so the library is built for wasm instead.
+WASM_FEATURES := -target-features:tail-call
 
 # Test packages whose kernels pick an x86-64 tier, run at each tier and `X86_OPTS` level. On an x86-64 machine these
 # runs replace the plain one.
@@ -36,9 +38,10 @@ check: lint test
 lint:
 	@for p in $(LIB_PKGS); do \
 		echo "== $$p"; $(ODIN) check $$p -no-entry-point $(LINT_FLAGS) || exit 1; \
-		for t in $(LINT_TARGETS); do \
+		for t in $(TEST_LINT_TARGETS); do \
 			echo "== $$p ($$t)"; $(ODIN) check $$p -no-entry-point $(LINT_FLAGS) -target:$$t || exit 1; \
 		done; \
+		echo "== $$p (freestanding_wasm32)"; $(ODIN) build $$p -build-mode:obj -no-entry-point $(LINT_FLAGS) -target:freestanding_wasm32 $(WASM_FEATURES) -out:build/wasm.o || exit 1; \
 	done
 	@for p in $(TEST_PKGS); do \
 		echo "== $$p"; $(ODIN) check $$p -no-entry-point $(LINT_FLAGS) || exit 1; \

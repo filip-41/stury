@@ -21,6 +21,17 @@ Document :: struct {
 	flags:      Doc_Flags,
 }
 
+// Frees what `doc` holds and leaves it zero. The source is freed only under `.Owns_Src`.
+destroy :: proc(doc: ^Document) {
+	free(raw_data(doc.nodes), doc.allocator)
+	free(raw_data(doc.facts), doc.allocator)
+	free(raw_data(doc.counts), doc.allocator)
+	if .Owns_Src in doc.flags {
+		free(raw_data(doc.src), doc.allocator)
+	}
+	doc^ = {}
+}
+
 // How a document was built.
 Doc_Flag :: enum u8 {
 	Kinds_Stored, // every cell has its final kind: a `Plain` cell is a string or null
