@@ -3,7 +3,6 @@
 #+vet !unused-imports
 package kernel
 
-import "base:intrinsics"
 import "core:simd"
 
 // The one tier of a target with no x86 tiers: NEON on arm64, LLVM's lowering elsewhere.
@@ -28,11 +27,6 @@ tier :: proc "contextless" () -> Tier {
 @(private)
 lookup :: #force_inline proc "contextless" ($T: Tier, t, i: V) -> V {
 	return simd.runtime_swizzle(t, i)
-}
-
-// `src[lo:]` zero-padded to a block, for `0 < len(src) - lo < 64`.
-load_padded :: #force_inline proc "contextless" ($T: Tier, src: []u8, lo: int) -> Block {
-	return copied_tail(src, lo)
 }
 
 @(private)

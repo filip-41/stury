@@ -204,3 +204,51 @@ utf8_window_every_pair :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// Each lead byte at every position of a text of several blocks, followed by none to four continuation bytes, so the
+// bytes it makes continuations cross every register and block boundary, and ASCII blocks follow it.
+@(test)
+utf8_lead_every_position :: proc(t: ^testing.T) {
+	buf: [300]u8
+	for at in 0 ..< len(buf) {
+		for lead in ([]u8{0xc2, 0xe1, 0xed, 0xf0, 0xf4}) {
+			for conts in 0 ..= 4 {
+				for &b in buf {
+					b = 'a'
+				}
+				buf[at] = lead
+				for i in 1 ..= conts {
+					if at + i < len(buf) {
+						buf[at + i] = 0x90 if lead == 0xf0 && i == 1 else 0x80
+					}
+				}
+				check_utf8(t, buf[:])
+			}
+		}
+	}
+}
+
+// Whether the block after `prev`, read from `utf8_after`'s state, is UTF-8.
+@(enable_target_feature = FEATURES)
+utf8_after :: proc(prev, next: [64]u8) -> bool {
+	prev, next := prev, next
+	s := k.utf8_after(k.load(raw_data(prev[:])))
+	high := true
+	b := k.load(raw_data(next[:]))
+	k.utf8_next(T, b, k.is_ascii(b), &s, &high)
+	return k.utf8_ok(s)
+}
+
+// Checks `utf8_after`, for a caller that carries the last block between texts, against a sequence the block leaves
+// open: E2 at its end, then 82 41 or 82 AC.
+@(test)
+utf8_after_reads_open_sequence :: proc(t: ^testing.T) {
+	prev, next: [64]u8
+	for i in 0 ..< 64 {
+		prev[i], next[i] = 'a', 'a'
+	}
+	prev[63], next[0], next[1] = 0xe2, 0x82, 0x41
+	testing.expect(t, !utf8_after(prev, next), "E2 82 41 read as UTF-8")
+	next[1] = 0xac
+	testing.expect(t, utf8_after(prev, next), "E2 82 AC read as an error")
+}

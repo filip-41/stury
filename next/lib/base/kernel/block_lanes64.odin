@@ -29,8 +29,11 @@ pack :: #force_inline proc "contextless" (m: Block) -> u64 {
 	return transmute(u64)simd.extract_msbs(transmute(W)m)
 }
 
+// By one `pmovmskb` of the block's registers ORed together: a 64-lane `extract_msbs` takes one per register and joins
+// the results in general registers.
 is_ascii :: #force_inline proc "contextless" (b: Block) -> bool {
-	return simd.extract_msbs(transmute(W)b) == {}
+	h := transmute([2]#simd[32]u8)b
+	return transmute(u32)simd.extract_msbs(simd.bit_or(h[0], h[1])) == 0
 }
 
 // By `ptest`; a max reduction is a shuffle tree on x86.

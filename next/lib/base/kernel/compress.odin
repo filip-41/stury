@@ -77,7 +77,7 @@ KEEP_LANES: [256]u64 = {
 // `out`, so the caller keeps that room free.
 compress :: #force_inline proc "contextless" (b: Block, keep: u64, out: [^]u8) -> int #no_bounds_check {
 	counts := transmute(u64)simd.count_ones(transmute(#simd[8]u8)keep)
-	// Byte k of `running` counts the lanes the groups below k keep; byte 7 of `counts * ONES` counts them all.
+	// Byte k of `running` counts the lanes the groups below k keep.
 	ONES :: 0x0101_0101_0101_0101
 	running := (counts * ONES) << 8
 	#unroll for k in 0 ..< 4 {
@@ -91,5 +91,5 @@ compress :: #force_inline proc "contextless" (b: Block, keep: u64, out: [^]u8) -
 		intrinsics.unaligned_store((^u64)(out[int(running >> shift & 0xff):]), packed[0])
 		intrinsics.unaligned_store((^u64)(out[int(running >> (shift + 8) & 0xff):]), packed[1])
 	}
-	return int((counts * ONES) >> 56)
+	return int(running >> 56 + counts >> 56)
 }

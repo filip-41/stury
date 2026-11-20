@@ -2,6 +2,7 @@ package kernel_tests
 
 import "base:intrinsics"
 import "core:math/rand"
+import "core:mem/virtual"
 import "core:testing"
 import k "stury:lib/base/kernel"
 
@@ -563,5 +564,50 @@ scans_ignore_bytes_around :: proc(t: ^testing.T) {
 				testing.expectf(t, k.count_chars(text) == want, "chars n %d at %d", n, at)
 			}
 		}
+	}
+}
+
+// Checks every scan on texts that end where readable memory ends, so a read past them faults, against copies far from
+// a page end, where the tail loads read past the text. Every other text is whole UTF-8 sequences.
+@(test)
+scans_stop_at_unmapped_memory :: proc(t: ^testing.T) {
+	SIZE :: 64 * 1024
+	region, err := virtual.reserve(2 * SIZE)
+	if !testing.expect_value(t, err, nil) {
+		return
+	}
+	defer virtual.release(raw_data(region), 2 * SIZE)
+	if !testing.expect_value(t, virtual.commit(raw_data(region), SIZE), nil) {
+		return
+	}
+	state := rand.create(17)
+	context.random_generator = rand.default_random_generator(&state)
+	pieces := [?]string{"\"", "\\", "[", "]", "{", "}", ",", " ", "\xc3\xa9", "\xe2\x82\xac", "a", "b"}
+	for n in 0 ..< 280 {
+		edge := region[SIZE - n:SIZE]
+		for i := 0; i < n; {
+			piece := pieces[rand.int_max(len(pieces))]
+			if n % 2 == 1 || len(piece) > n - i {
+				piece = piece[:1] if n % 2 == 1 else "a"
+			}
+			i += copy(edge[i:], piece)
+		}
+		mid := region[1024:1024 + n]
+		copy(mid, edge)
+		testing.expectf(t, k.index_byte(edge, ',') == k.index_byte(mid, ','), "index_byte %d", n)
+		testing.expectf(t, k.last_index_byte(edge, ',') == k.last_index_byte(mid, ','), "last_index_byte %d", n)
+		testing.expectf(t, k.count_byte(edge, '"') == k.count_byte(mid, '"'), "count_byte %d", n)
+		testing.expectf(t, k.count_chars(edge) == k.count_chars(mid), "count_chars %d", n)
+		testing.expectf(t, k.utf8_valid(edge) == k.utf8_valid(mid), "utf8_valid %d", n)
+		for nest in ([2]bool{false, true}) {
+			cut := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = nest}
+			testing.expectf(t, k.quote_cut(edge, cut) == k.quote_cut(mid, cut), "quote_cut %d nest %v", n, nest)
+			a, b := k.Quotes{quote = '"', escape = '\\', nest = nest}, k.Quotes{quote = '"', escape = '\\', nest = nest}
+			k.quote_run(edge, &a)
+			k.quote_run(mid, &b)
+			testing.expectf(t, a == b, "quote_run %d nest %v", n, nest)
+		}
+		p, q := raw_data(edge), raw_data(mid)
+		testing.expectf(t, intrinsics.ptr_sub(k.skip_ws(p, p[n:]), p) == intrinsics.ptr_sub(k.skip_ws(q, q[n:]), q), "skip_ws %d", n)
 	}
 }

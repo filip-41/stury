@@ -76,14 +76,15 @@ clmul_prefix_xor :: proc "contextless" (x: u64) -> u64 {
 	return u64(simd.extract(p, 0))
 }
 
-// `src[lo:]` zero-padded to a block, for `0 < len(src) - lo < 64`.
-load_padded :: #force_inline proc "contextless" ($T: Tier, src: []u8, lo: int) -> Block {
-	return copied_tail(src, lo)
-}
-
-// `scan_op` built for the CPU's tier, each copy out of line with its tier's features.
+// `scan_op` built for the CPU's tier, each copy out of line with its tier's features. Searches and counts shorter than a
+// block, where no tier's loop runs, inline into the caller.
 @(private)
 scan :: #force_inline proc "contextless" (src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int {
+	when OP <= .Continuations {
+		if len(src) < 64 {
+			return scan_op(.V2, src, c, s, OP)
+		}
+	}
 	if tier() == .V3 {
 		return scan_v3(src, c, s, OP)
 	}

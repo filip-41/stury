@@ -34,34 +34,46 @@ any_lane16 :: #force_inline proc "contextless" (m: V) -> bool {
 	return !is_ascii16(m)
 }
 
-// A load at `16 - n` gives the mask of the first `n` lanes.
+// A load at `64 - n` gives the mask of the first `n` lanes.
 @(private, rodata)
-LIVE_LANES := [32]u8{0 ..< 16 = 0xFF, 16 ..< 32 = 0}
+LIVE_LANES := [128]u8{0 ..< 64 = 0xFF, 64 ..< 128 = 0}
 
 // The mask of the first `n` lanes, for `n` up to 16.
 live16 :: #force_inline proc "contextless" (n: int) -> V #no_bounds_check {
-	return load16(raw_data(LIVE_LANES[16 - n:]))
+	return load16(raw_data(LIVE_LANES[64 - n:]))
 }
 
-// The 16 bytes at `src` in one load, with the mask of its first `n` lanes, for `n` below 16. Lanes past `n` hold
-// whatever follows in the page. `ok` is false for a nil `src`, under the address sanitizer, and where the load could
-// cross a 4096-byte page; the `- 1` makes a nil `src` wrap, so one test refuses both, and a page-aligned `src` too.
-head16 :: #force_inline proc "contextless" (src: [^]u8, n: int) -> (v, live: V, ok: bool) {
-	when .Address in ODIN_SANITIZER_FLAGS {
-		return
+// Whether `size` bytes at `p` may be read past the end of the slice they start: they stay in `p`'s 4096-byte page,
+// `p` is not nil, and no sanitizer watches the bytes past the end. The `- 1` makes a nil `p` wrap, so one test refuses
+// both, and a page-aligned `p` too.
+@(private)
+over_read :: #force_inline proc "contextless" (p: [^]u8, $size: uintptr) -> bool {
+	when ODIN_SANITIZER_FLAGS & {.Address, .Thread} != {} {
+		return false
 	} else {
-		if (uintptr(src) - 1) & 4095 >= 4080 {
-			return
-		}
-		return load16(src), live16(n), true
+		return (uintptr(p) - 1) & 4095 < 4096 - size
 	}
 }
 
-// `src[lo:]` copied into a zeroed 64-byte buffer and loaded as a block.
-@(private)
-copied_tail :: #force_inline proc "contextless" (src: []u8, lo: int) -> Block {
+// The 16 bytes at `src` in one load, with the mask of its first `n` lanes, for `n` below 16. Lanes past `n` hold
+// whatever follows in the page. `ok` is false where `over_read` refuses.
+head16 :: #force_inline proc "contextless" (src: [^]u8, n: int) -> (v, live: V, ok: bool) {
+	if !over_read(src, 16) {
+		return
+	}
+	return load16(src), live16(n), true
+}
+
+// `src[lo:]` zero-padded to a block, for `0 < len(src) - lo < 64`: one load masked to its live lanes where `over_read`
+// allows, else a copy into a zeroed buffer.
+load_padded :: #force_inline proc "contextless" (src: []u8, lo: int) -> Block #no_bounds_check {
+	n := len(src) - lo
+	p := raw_data(src)[lo:]
+	if over_read(p, 64) {
+		return transmute(Block)simd.bit_and(transmute(W)load(p), transmute(W)load(raw_data(LIVE_LANES[64 - n:])))
+	}
 	buf: [64]u8
-	intrinsics.mem_copy_non_overlapping(&buf, raw_data(src[lo:]), len(src) - lo)
+	intrinsics.mem_copy_non_overlapping(&buf, p, n)
 	return load(raw_data(buf[:]))
 }
 
@@ -81,6 +93,6 @@ control_or_high16 :: #force_inline proc "contextless" (v: V, $del: bool) -> V {
 // The 64 bytes of `src` from `lo`, zero-padded past its end, for `lo` below `len(src)`. Both loads go through one
 // 64-lane vector, since x86 merges two blocks through general registers.
 load_block :: #force_inline proc "contextless" ($T: Tier, src: []u8, lo: int) -> Block {
-	w := transmute(W)load(raw_data(src)[lo:]) if len(src) - lo >= 64 else transmute(W)load_padded(T, src, lo)
+	w := transmute(W)load(raw_data(src)[lo:]) if len(src) - lo >= 64 else transmute(W)load_padded(src, lo)
 	return transmute(Block)w
 }
