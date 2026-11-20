@@ -367,9 +367,14 @@ outputs_outlive_their_interpreter :: proc(t: ^testing.T) {
 	testing.expect_value(t, jq.to_json(keep.values[1]), `"g"`)
 }
 
+// Held by the tests that set `TZ` or format a time: `setenv` frees the text a concurrent `tzset` in `strftime` reads.
+@(private = "file")
+zone_env: sync.Mutex
+
 // `strftime` reads every spelling of `%s` and `%z` as UTC, whatever the process's zone.
 @(test)
 strftime_is_utc_in_any_zone :: proc(t: ^testing.T) {
+	sync.guard(&zone_env)
 	context.allocator = context.temp_allocator
 	before, had := os.lookup_env("TZ", context.allocator)
 	defer if had {
@@ -474,6 +479,7 @@ env_outlives_its_interpreter :: proc(t: ^testing.T) {
 // the process's zone.
 @(test)
 local_time_is_a_hook :: proc(t: ^testing.T) {
+	sync.guard(&zone_env)
 	context.allocator = context.temp_allocator
 	ip: jq.Interp
 	jq.init(&ip, {hooks = {zone = proc(_: rawptr, secs: i64) -> (jq.Zone, bool) {
