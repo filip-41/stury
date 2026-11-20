@@ -32,6 +32,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
+      # The x86-64 tier tests run under Rosetta.
+      - if: runner.os == 'macOS'
+        run: arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license
       - run: make -C next test
 
   # The test packages `make -C next test` runs, found the same way, without make.
