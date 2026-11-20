@@ -660,8 +660,12 @@ def run_tty(binary, args, stdin_tty, stdout_tty, feed, env={}):
     if stdin_tty:
         os.write(master, feed)
     else:
-        p.stdin.write(feed)
-        p.stdin.close()
+        # A refusal can exit before reading its input.
+        try:
+            p.stdin.write(feed)
+            p.stdin.close()
+        except BrokenPipeError:
+            pass
     try:
         code = p.wait(timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
