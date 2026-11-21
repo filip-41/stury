@@ -72,3 +72,8 @@ NUMBER_EXP :: u16(1 << 14) // in a number's spelling, the number has an exponent
 number_spelling :: #force_inline proc "contextless" (kind: u16, int_digits, frac_digits: u64) -> u16 {
 	return kind | u16(min(int_digits, 31)) << 4 | u16(min(frac_digits, 31)) << 9
 }
+
+// The integer and fraction digit counts in a number token's spelling, each saturated at 31.
+number_digits :: #force_inline proc "contextless" (spelling: u16) -> (int_digits, frac_digits: int) {
+	return int(spelling >> 4 & 31), int(spelling >> 9 & 31)
+}

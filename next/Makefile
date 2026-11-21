@@ -31,6 +31,9 @@ X86_RUNS := 1
 PLAIN_PKGS := $(filter-out $(TIER_PKGS),$(TEST_PKGS))
 endif
 
+# Test packages whose walks also build without member gaps
+GAP_PKGS := json/test
+
 .PHONY: check lint test
 
 check: lint test
@@ -59,6 +62,9 @@ lint:
 test:
 	@mkdir -p build; for p in $(PLAIN_PKGS); do \
 		echo "== $$p"; $(ODIN) test $$p -o:minimal $(TEST_FLAGS) -out:build/test-$$(echo $$p | tr / -) || exit 1; \
+	done
+	@for p in $(GAP_PKGS); do \
+		echo "== $$p (no gaps)"; $(ODIN) test $$p -o:minimal $(TEST_FLAGS) -define:JSON_GAPS=false -out:build/test-$$(echo $$p | tr / -)-nogaps || exit 1; \
 	done
 ifdef X86_RUNS
 	@for p in $(TIER_PKGS); do for o in $(X86_OPTS); do for t in $(X86_TIERS); do \
