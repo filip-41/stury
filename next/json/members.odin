@@ -15,6 +15,7 @@ import "stury:lib/core/tape"
 // has a slot of its own.
 
 // Whether the walk learns member gaps.
+@(private)
 GAPS :: #config(JSON_GAPS, true)
 
 // Rows in a walk's gap table
@@ -74,7 +75,7 @@ Gaps :: struct {
 
 // The first slot of the row for objects in slot `m`'s value, or 0 before one opens; `m` without gaps.
 @(private)
-gap_child :: #force_inline proc "contextless" (w: ^Walk($H), m: u64, $G: bool) -> u64 #no_bounds_check {
+gap_child :: #force_inline proc "contextless" (w: ^Walk($S, $H), m: u64, $G: bool) -> u64 #no_bounds_check {
 	when !G {
 		return m
 	}
@@ -106,7 +107,7 @@ gap_next :: #force_inline proc "contextless" (m: u64, $G: bool) -> u64 {
 // The start of the value after `p` when the text at `p` repeats slot `m`'s gap, with the key token the gap holds; nil
 // otherwise. Each gap length has a branch with constant offsets, so the value's start does not wait on the slot's load.
 @(private)
-gap_match :: #force_inline proc "contextless" (w: ^Walk($H), p, end: [^]u8, m: u64) -> (r: [^]u8, key: tape.Token, nl: bool) #no_bounds_check {
+gap_match :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, m: u64) -> (r: [^]u8, key: tape.Token, nl: bool) #no_bounds_check {
 	if intrinsics.ptr_sub(end, p) <= GAP_MAX + 8 {
 		return nil, {}, false
 	}
@@ -181,9 +182,8 @@ word :: #force_inline proc "contextless" (p: [^]u8) -> u64 {
 // `q`. A first miss only marks the slot and a second in a row replaces its gap. `stop` when the walk's misses pass
 // their limit, after which it reads on without gaps.
 @(private)
-gap_learn :: #force_inline proc "contextless" (w: ^Walk($H), m: u64, p, q, r: [^]u8) -> (stop: bool) #no_bounds_check {
-	w.gaps.misses += 1
-	if w.gaps.misses > GAP_MISS_FLOOR + at(w, p) / GAP_MISS_BYTES {
+gap_learn :: #force_inline proc "contextless" (w: ^Walk($S, $H), m: u64, p, q, r: [^]u8) -> (stop: bool) #no_bounds_check {
+	if gap_miss(w, p) {
 		return true
 	}
 	s := &w.gaps.slots[m]
@@ -208,4 +208,12 @@ gap_learn :: #force_inline proc "contextless" (w: ^Walk($H), m: u64, p, q, r: [^
 		s^ = {u32(lo), u8(n), u8(key_off) | (GAP_NEWLINE if nl else 0), u8(intrinsics.ptr_sub(q, p) - 2), (s.miss & ~GAP_SUSPECT) + 1}
 	}
 	return
+}
+
+// Counts a member at `p` read with no match. True when the walk's misses pass their limit, after which it reads on
+// without gaps.
+@(private)
+gap_miss :: #force_inline proc "contextless" (w: ^Walk($S, $H), p: [^]u8) -> bool {
+	w.gaps.misses += 1
+	return w.gaps.misses > GAP_MISS_FLOOR + at(w, p) / GAP_MISS_BYTES
 }

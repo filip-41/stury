@@ -48,3 +48,12 @@ digit_end :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bound
 	}
 	return q
 }
+
+// The end of the run of hex digits at `p`.
+hex_digit_end :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_check {
+	q := p
+	for q < end && HEX_NIBBLE[q[0]] != 0xff {
+		q = q[1:]
+	}
+	return q
+}

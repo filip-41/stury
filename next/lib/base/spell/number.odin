@@ -1,6 +1,7 @@
 package spell
 
 import "base:intrinsics"
+import "core:math"
 import "core:strconv"
 
 // A number's value, read from its decimal text.
@@ -306,4 +307,44 @@ wide_number :: #force_no_inline proc(span: string) -> Number {
 		return {0, .Wide}
 	}
 	return {transmute(u64)v, .Float}
+}
+
+// The value of the hex digits `digits`, negated when `neg`: an integer while one holds it, else the correctly rounded
+// binary64, `Wide` past its range.
+number_hex :: proc(digits: []u8, neg: bool) -> Number #no_bounds_check {
+	i := 0
+	for i < len(digits) && digits[i] == '0' {
+		i += 1
+	}
+	mant: u64
+	n := 0
+	for ; i < len(digits) && n < 16; i += 1 {
+		mant = mant << 4 | u64(HEX_NIBBLE[digits[i]])
+		n += 1
+	}
+	if i == len(digits) {
+		if !neg {
+			return {mant, .Int if mant <= u64(max(i64)) else .Uint}
+		}
+		if mant <= u64(1) << 63 {
+			return {u64(0) - mant, .Int}
+		}
+	}
+	// The digits past the first sixteen scale the value and only break a tie in its rounding.
+	rest := len(digits) - i
+	sticky := false
+	for ; i < len(digits); i += 1 {
+		sticky ||= digits[i] != '0'
+	}
+	lz := intrinsics.count_leading_zeros(mant)
+	mant <<= lz
+	top, low := mant >> 11, mant & 0x7FF
+	if low > 0x400 || low == 0x400 && (sticky || top & 1 != 0) {
+		top += 1
+	}
+	f := math.ldexp(f64(top), 11 + 4 * rest - int(lz))
+	if math.is_inf(f) {
+		return {0, .Wide}
+	}
+	return {transmute(u64)f | u64(neg) << 63, .Float}
 }

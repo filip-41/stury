@@ -15,33 +15,33 @@ too_wide :: #force_inline proc "contextless" (p, q: [^]u8) -> bool {
 	return u64(intrinsics.ptr_sub(q, p)) > u64(max(u32))
 }
 
-// The lanes of `v` holding a quote, `\`, a control byte or a byte past 0x7F.
+// The lanes of `v` holding the closing quote `quote`, `\`, a control byte or a byte past 0x7F.
 @(private)
-string_stops :: #force_inline proc "contextless" (v: V) -> V {
-	return simd.bit_or(simd.bit_or(simd.lanes_eq(v, V('"')), simd.lanes_eq(v, V('\\'))), kernel.control_or_high16(v, false))
+string_stops :: #force_inline proc "contextless" (v: V, $quote: u8) -> V {
+	return simd.bit_or(simd.bit_or(simd.lanes_eq(v, V(quote)), simd.lanes_eq(v, V('\\'))), kernel.control_or_high16(v, false))
 }
 
 @(private)
-string_stops_block :: #force_inline proc "contextless" (b: kernel.Block) -> kernel.Block {
-	return {string_stops(b[0]), string_stops(b[1]), string_stops(b[2]), string_stops(b[3])}
+string_stops_block :: #force_inline proc "contextless" (b: kernel.Block, $quote: u8) -> kernel.Block {
+	return {string_stops(b[0], quote), string_stops(b[1], quote), string_stops(b[2], quote), string_stops(b[3], quote)}
 }
 
-// One past the closing quote of the string at `p` when it closes within 32 bytes as printable ASCII. Otherwise nil,
-// whether a backslash came first, and the first byte that is neither printable ASCII nor a quote, nil when none is
-// within 32 bytes.
+// One past the closing quote of the string at `p`, which closes at `quote`, when it closes within 32 bytes as
+// printable ASCII. Otherwise nil, whether a backslash came first, and the first byte that is neither printable ASCII
+// nor a quote, nil when none is within 32 bytes.
 @(private)
-string_short :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, escaped: bool, stop: [^]u8) #no_bounds_check {
+string_short :: #force_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> (q: [^]u8, escaped: bool, stop: [^]u8) #no_bounds_check {
 	if intrinsics.ptr_sub(end, p) <= 32 {
 		return nil, false, nil
 	}
-	k := kernel.first_lane16(string_stops(kernel.load16(p[1:])))
+	k := kernel.first_lane16(string_stops(kernel.load16(p[1:]), quote))
 	if k == 16 {
-		k = 16 + kernel.first_lane16(string_stops(kernel.load16(p[17:])))
+		k = 16 + kernel.first_lane16(string_stops(kernel.load16(p[17:]), quote))
 		if k == 32 {
 			return nil, false, nil
 		}
 	}
-	if p[1 + k] != '"' {
+	if p[1 + k] != quote {
 		if p[1 + k] == '\\' {
 			return nil, true, p[1 + k:]
 		}
@@ -107,19 +107,19 @@ key_escaped_head :: #force_inline proc "contextless" (bs, end: [^]u8) -> (q, at:
 	return nil, e
 }
 
-// One past the closing quote of the string at `p` when it is plain ASCII, read 64 bytes a step while 64 remain;
-// otherwise nil and, when the first stop is a backslash, that backslash.
+// One past the closing quote of the string at `p`, which closes at `quote`, when it is plain ASCII, read 64 bytes a
+// step while 64 remain; otherwise nil and, when the first stop is a backslash, that backslash.
 @(private)
-string_lean :: #force_inline proc "contextless" (p, end: [^]u8) -> (q, escape: [^]u8) #no_bounds_check {
+string_lean :: #force_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> (q, escape: [^]u8) #no_bounds_check {
 	bs := p[1:]
 	for intrinsics.ptr_sub(end, bs) >= 64 {
-		sv := string_stops_block(kernel.load(bs))
+		sv := string_stops_block(kernel.load(bs), quote)
 		if !kernel.any_lane(sv) {
 			bs = bs[64:]
 			continue
 		}
 		k := intrinsics.count_trailing_zeros(kernel.pack(sv))
-		if bs[k] == '"' {
+		if bs[k] == quote {
 			return bs[k + 1:], nil
 		}
 		return nil, bs[k:] if bs[k] == '\\' else nil
@@ -136,7 +136,7 @@ string_escaped :: #force_inline proc "contextless" (bs, end: [^]u8) -> [^]u8 #no
 	odd: u64
 	for intrinsics.ptr_sub(end, bs) >= 64 {
 		b := kernel.load(bs)
-		sv := string_stops_block(b)
+		sv := string_stops_block(b, '"')
 		if odd == 0 && !kernel.any_lane(sv) {
 			bs = bs[64:]
 			continue
@@ -235,49 +235,72 @@ SURROGATE_CLASSES := kernel.Nibble_Table {
 	hi = {0x00, 0x00, 0x00, 0x01, 0x06, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 }
 
-// One past the closing quote of the string at `p` and whether it holds an escape, or the fault. The CPU's block reader
-// tries first and `string_exact` settles what it refuses.
+// One past the closing quote of the string at `p` and its spelling, or the fault. The CPU's block reader tries first,
+// and `string_exact` settles what it refuses, or in JSON5 `string5`. A string the block reader accepts is a JSON5
+// string of the same span. The tier switch is `string_block`'s written out, because a call through `string_block`
+// leaves a dead fault test on the block reader's path.
 @(private)
-string_long :: #force_inline proc "contextless" (w: ^Walk($H), p, end: [^]u8) -> (q: [^]u8, esc: bool, kind: tape.Fault_Kind) {
+string_long :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) {
+	esc: bool
 	when ODIN_ARCH == .amd64 {
 		switch w.tier {
 		case .V3:
-			q, esc = string_span_v3(p, end)
+			q, esc = string_span_v3(p, end, '"')
 		case .V2:
-			q, esc = string_span_v2(p, end)
+			q, esc = string_span_v2(p, end, '"')
 		}
 	} else {
-		q, esc = string_span_base(p, end)
+		q, esc = string_span_base(p, end, '"')
 	}
 	if q == nil {
-		return string_exact(p, end)
+		when S == .Json5 {
+			return string5(p, end)
+		} else {
+			q, esc, kind = string_exact(p, end)
+		}
 	}
-	return q, esc, .None
+	return q, tape.SPELLING_DECODE if esc else 0, kind
+}
+
+// The `string_span` of the CPU's tier, for a string closed by `quote`.
+@(private)
+string_block :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, $quote: u8) -> ([^]u8, bool) {
+	when ODIN_ARCH == .amd64 {
+		switch w.tier {
+		case .V3:
+			return string_span_v3(p, end, quote)
+		case .V2:
+			return string_span_v2(p, end, quote)
+		}
+		return nil, false
+	} else {
+		return string_span_base(p, end, quote)
+	}
 }
 
 // `string_span` has a copy per tier, each out of line with its tier's target features, since the states are built for
 // the floor tier.
 when ODIN_ARCH == .amd64 {
 	@(private, enable_target_feature = kernel.FEATURES[.V2])
-	string_span_v2 :: #force_no_inline proc "contextless" (p, end: [^]u8) -> ([^]u8, bool) {
-		return string_span(.V2, p, end)
+	string_span_v2 :: #force_no_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> ([^]u8, bool) {
+		return string_span(.V2, p, end, quote)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V3])
-	string_span_v3 :: #force_no_inline proc "contextless" (p, end: [^]u8) -> ([^]u8, bool) {
-		return string_span(.V3, p, end)
+	string_span_v3 :: #force_no_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> ([^]u8, bool) {
+		return string_span(.V3, p, end, quote)
 	}
 } else {
 	@(private)
-	string_span_base :: #force_no_inline proc "contextless" (p, end: [^]u8) -> ([^]u8, bool) {
-		return string_span(.Base, p, end)
+	string_span_base :: #force_no_inline proc "contextless" (p, end: [^]u8, $quote: u8) -> ([^]u8, bool) {
+		return string_span(.Base, p, end, quote)
 	}
 }
 
-// One past the closing quote of the string at `p` and whether it holds an escape; nil when the block reader cannot
-// vouch for it (a control byte, an escape it does not accept, invalid UTF-8, the text's end), which `string_exact`
-// settles. Blocks are read back to back from `p + 1`, so the UTF-8 state carries from one to the next.
+// One past the closing quote `quote` of the string at `p` and whether it holds an escape; nil when the block reader
+// cannot vouch for it (a control byte, an escape it does not accept, invalid UTF-8, the text's end), which
+// `string_exact` settles. Blocks are read back to back from `p + 1`, so the UTF-8 state carries from one to the next.
 @(private)
-string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8) -> (q: [^]u8, esc: bool) #no_bounds_check {
+string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8, $quote: u8) -> (q: [^]u8, esc: bool) #no_bounds_check {
 	bs := p[1:]
 	skip: u64
 	u: kernel.Utf8_State
@@ -295,7 +318,7 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8)
 		} else {
 			return nil, false
 		}
-		sv := kernel.either(kernel.either(kernel.eq(b, '"'), kernel.eq(b, '\\')), kernel.below(b, 0x20))
+		sv := kernel.either(kernel.either(kernel.eq(b, quote), kernel.eq(b, '\\')), kernel.below(b, 0x20))
 		ascii := kernel.is_ascii(b)
 		// A block with no stop is skipped without packing its mask, unless an escape ran into it.
 		if skip == 0 && !kernel.any_lane(sv) {
@@ -311,7 +334,7 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8)
 				return nil, false
 			}
 			c := bs[k]
-			if c == '"' {
+			if c == quote {
 				// The string ends in this block, so only the vectors up to its quote are read.
 				if !kernel.utf8_stop(T, b, ascii, &u, high, k) {
 					return nil, false
@@ -395,7 +418,7 @@ escape_exact :: proc "contextless" (e, end: [^]u8) -> (q: [^]u8, kind: tape.Faul
 		return q, .Bad_Escape
 	}
 	unit: u32
-	if unit, q, kind = escape_digits(q[1:], end); kind != .None {
+	if unit, q, kind = escape_digits(q[1:], end, 4); kind != .None {
 		return q, kind
 	}
 	if spell.low_surrogate(unit) {
@@ -419,12 +442,12 @@ escape_exact :: proc "contextless" (e, end: [^]u8) -> (q: [^]u8, kind: tape.Faul
 	return q, .None
 }
 
-// The value of the four hex digits at `q` and one past them, or `Bad_Escape` at the first that is no hex digit, or
+// The value of the `n` hex digits at `q` and one past them, or `Bad_Escape` at the first that is no hex digit, or
 // `Truncated` when the text ends first.
 @(private)
-escape_digits :: #force_inline proc "contextless" (q, end: [^]u8) -> (unit: u32, r: [^]u8, kind: tape.Fault_Kind) #no_bounds_check {
+escape_digits :: #force_inline proc "contextless" (q, end: [^]u8, $n: int) -> (unit: u32, r: [^]u8, kind: tape.Fault_Kind) #no_bounds_check {
 	r = q
-	for _ in 0 ..< 4 {
+	for _ in 0 ..< n {
 		if r >= end {
 			return unit, end, .Truncated
 		}

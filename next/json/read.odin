@@ -1,6 +1,7 @@
 package json
 
 import "base:intrinsics"
+import "base:runtime"
 import "stury:lib/base/kernel"
 import "stury:lib/base/spell"
 import "stury:lib/core/tape"
@@ -12,12 +13,15 @@ node_number :: #force_inline proc(doc: ^tape.Document, t: tape.Node) -> (spell.N
 	}
 	lo, hi := t.lo, t.lo + u64(t.n)
 	int_digits, frac_digits := tape.number_digits(t.spelling)
-	// Bits 9 and up hold the fraction digits and the exponent bit, so 0 there is a plain integer.
-	if t.spelling >> 9 == 0 {
+	// Bits 9 and up hold the fraction digits and the exponent bit, so 0 there and in the kind is a plain integer.
+	if t.spelling & (tape.NUMBER_KIND | ~u16(0x1FF)) == 0 {
 		if num, ok := spell.number_int(doc.src, lo, hi, int_digits); ok {
 			return num, true
 		}
 		return number_long(doc.src, lo, hi), true
+	}
+	if t.spelling & tape.NUMBER_KIND != 0 {
+		return number5_value(doc.src, lo, hi, t.spelling), true
 	}
 	if t.spelling & tape.NUMBER_EXP != 0 {
 		return spell.number_exponent(doc.src, lo, hi, int_digits, frac_digits), true
@@ -44,6 +48,9 @@ node_text :: #force_inline proc(doc: ^tape.Document, t: tape.Node, buf: []u8) ->
 	// An escape decodes to no more bytes than it spells, so a buffer as long as the span holds the text.
 	if int(t.n) > len(buf) {
 		return "", false
+	}
+	if t.spelling & SPELLING_JSON5 != 0 {
+		return string(buf[:decode5(buf, doc.src, t.lo, t.lo + u64(t.n))]), true
 	}
 	if t.n < 256 {
 		return string(buf[:decode_bytes(buf, 0, doc.src, t.lo, t.lo + u64(t.n))]), true
@@ -231,4 +238,116 @@ copy_short :: #force_inline proc "contextless" (dst: []u8, w: int, src: [^]u8, p
 	case n == 1:
 		dst[w] = src[p]
 	}
+}
+
+// The value of a JSON5 number past JSON's grammar: a loose decimal, hex, `Infinity` or `NaN`. `Wide` when memory for a
+// long decimal is refused.
+@(private, cold)
+number5_value :: #force_no_inline proc(src: []u8, lo, hi: u64, spelling: u16) -> spell.Number #no_bounds_check {
+	k := Number_Spelling(spelling & tape.NUMBER_KIND)
+	neg := src[lo] == '-'
+	p := lo + u64(src[lo] == '-' || src[lo] == '+')
+	#partial switch k {
+	case .Infinity:
+		return {0x7ff0_0000_0000_0000 | u64(neg) << 63, .Float}
+	case .Nan:
+		// A quiet NaN with a zero sign, whatever sign it is written with.
+		return {0x7ff8_0000_0000_0000, .Float}
+	case .Hex:
+		return spell.number_hex(src[p + 2:hi], neg)
+	}
+	// A decimal JSON refuses for its `+`, or for a point with no digit before or after it, is read as its digits
+	// respelled in JSON, at most one byte longer.
+	room: [128]u8
+	buf := room[:]
+	if int(hi - lo) + 1 > len(room) {
+		err: runtime.Allocator_Error
+		if buf, err = make([]u8, int(hi - lo) + 1); err != nil {
+			return {0, .Wide}
+		}
+	}
+	defer if raw_data(buf) != raw_data(room[:]) {
+		delete(buf)
+	}
+	n := 0
+	if neg {
+		buf[0] = '-'
+		n = 1
+	}
+	if src[p] == '.' {
+		buf[n] = '0'
+		n += 1
+	}
+	for i := p; i < hi; i += 1 {
+		if src[i] == '.' && (i + 1 == hi || src[i + 1] | 0x20 == 'e') {
+			continue
+		}
+		buf[n] = src[i]
+		n += 1
+	}
+	num, _ := spell.number_strict(buf[:n], 0, u64(n))
+	if spelling & tape.NUMBER_POINT != 0 {
+		// A trailing point (`5.`) makes a float, and `-0.` keeps its sign.
+		if num.kind == .Int {
+			num = {transmute(u64)f64(i64(num.bits)) | u64(neg) << 63, .Float}
+		} else if num.kind == .Uint {
+			num = {transmute(u64)f64(num.bits), .Float}
+		}
+	}
+	return num
+}
+
+// The end in `dst` of JSON5's text `src[p:end]` decoded from `dst[0]`. JSON5 adds `\v`, `\0`, `\x` and two hex
+// digits, a backslash before a line end, which spells nothing, and a backslash before any other character, which
+// spells that character.
+@(private, cold)
+decode5 :: #force_no_inline proc(dst: []u8, src: []u8, p, end: u64) -> int #no_bounds_check {
+	base := raw_data(src)
+	out := raw_data(dst)
+	p := p
+	w := 0
+	for p < end {
+		c := base[p]
+		if c != '\\' || p + 1 >= end {
+			out[w] = c
+			w += 1
+			p += 1
+			continue
+		}
+		e := base[p + 1]
+		switch {
+		case spell.ESCAPED[e] != 0:
+			out[w] = spell.ESCAPED[e]
+			w, p = w + 1, p + 2
+		case e == 'u':
+			w, p = decode_unicode_into(base, p, end, out, w)
+		case e == 'x':
+			unit := u32(spell.HEX_NIBBLE[base[p + 2]]) << 4 | u32(spell.HEX_NIBBLE[base[p + 3]])
+			if unit < 0x80 {
+				out[w] = u8(unit)
+				w += 1
+			} else {
+				out[w], out[w + 1] = 0xC0 | u8(unit >> 6), 0x80 | u8(unit & 0x3F)
+				w += 2
+			}
+			p += 4
+		case e == 'v':
+			out[w] = 0x0B
+			w, p = w + 1, p + 2
+		case e == '0':
+			out[w] = 0
+			w, p = w + 1, p + 2
+		case e == '\n':
+			p += 2
+		case e == '\r':
+			p += 3 if p + 2 < end && base[p + 2] == '\n' else 2
+		case e == 0xE2 && p + 3 < end && base[p + 2] == 0x80 && base[p + 3] | 1 == 0xA9:
+			p += 4
+		case:
+			// The escaped character itself. The other bytes of a UTF-8 character follow as plain bytes.
+			out[w] = e
+			w, p = w + 1, p + 2
+		}
+	}
+	return w
 }

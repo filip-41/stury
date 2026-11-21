@@ -70,11 +70,11 @@ json5_suite_verdicts :: proc(t: ^testing.T) {
 	testing.expect(t, count > 100)
 }
 
-// A comment's role says where it stands, and its fact belongs to the node the role names: a comment before a value or
-// a member is that value's, one on the line where a value ends is the value's inline comment, and one before a
-// container's close, or past the root's line, is the container's foot.
+// A comment's fact kind says where it stands, and its fact belongs to the node the kind names: a comment before a
+// value or a member is that value's, one on the line where a value ends is the value's inline comment, and one before
+// a container's close, or past the root's line, is the container's foot.
 @(test)
-comments_have_roles :: proc(t: ^testing.T) {
+comments_have_kinds :: proc(t: ^testing.T) {
 	src := "// head\n{\"a\": 1, // one\n /* b */ \"b\": [2, /* two */ 3,], \"c\" /*k*/ : /*v*/ 4\n // foot\n} // root\n// tail"
 	doc, err := build_as(t, src, .Jsonc)
 	defer tape.destroy(&doc)
@@ -82,7 +82,7 @@ comments_have_roles :: proc(t: ^testing.T) {
 	Want :: struct {
 		text: string,
 		node: tape.Node_Index,
-		role: tape.Role,
+		kind: tape.Fact_Kind,
 	}
 	want := []Want {
 		{"// head", 0, .Comment},
@@ -98,11 +98,12 @@ comments_have_roles :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(doc.facts), len(want))
 	for w, i in want[:min(len(want), len(doc.facts))] {
 		f := doc.facts[i]
-		testing.expectf(t, src[f.lo:][:f.n] == w.text && f.node == w.node && f.role == w.role, "fact %d: %v, want %v", i, f, w)
+		testing.expectf(t, src[f.lo:][:f.n] == w.text && f.node == w.node && f.kind == w.kind, "fact %d: %v, want %v", i, f, w)
 		testing.expect_value(t, f.spelling, u16(2) if w.text[1] == '/' else u16(2) | 2 << 8)
 	}
 	testing.expect_value(t, doc.present, tape.Facts{.Comment, .Comment_Inline, .Comment_Foot})
 	testing.expect_value(t, doc.format.name, "jsonc")
+	testing.expect_value(t, doc.format.facts, tape.COMMENTS)
 }
 
 // A comment on the line where a container closes is the container's inline comment, and a comment in an empty
@@ -112,7 +113,7 @@ comments_after_containers :: proc(t: ^testing.T) {
 	Case :: struct {
 		src:  string,
 		node: tape.Node_Index,
-		role: tape.Role,
+		kind: tape.Fact_Kind,
 	}
 	cases := []Case {
 		{"[[1] // c\n]", 1, .Comment_Inline},
@@ -128,7 +129,7 @@ comments_after_containers :: proc(t: ^testing.T) {
 		testing.expectf(t, err == nil && len(doc.facts) == 1, "%q: %v, %d facts", c.src, err, len(doc.facts))
 		if len(doc.facts) == 1 {
 			f := doc.facts[0]
-			testing.expectf(t, f.node == c.node && f.role == c.role, "%q: %v", c.src, f)
+			testing.expectf(t, f.node == c.node && f.kind == c.kind, "%q: %v", c.src, f)
 		}
 		tape.destroy(&doc)
 	}

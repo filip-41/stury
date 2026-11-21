@@ -5,9 +5,9 @@ import "stury:lib/base/spell"
 import "stury:lib/core/tape"
 
 // The end and spelling of the number at `p`, which starts with `-` or a digit, or the fault and the byte it is at. The
-// spelling is 0 unless `SPELLED`.
+// spelling is 0 unless `SPELLED`. JSON's grammar, with a `0x` refused in JSON5, whose own numbers `st_number5` reads.
 @(private)
-number :: #force_inline proc "contextless" (p, end: [^]u8, $SPELLED: bool) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) #no_bounds_check {
+number :: #force_inline proc "contextless" (p, end: [^]u8, $SPELLED: bool, $S: Spec) -> (q: [^]u8, spelling: u16, kind: tape.Fault_Kind) #no_bounds_check {
 	q = p
 	if q[0] == '-' {
 		q = q[1:]
@@ -18,7 +18,7 @@ number :: #force_inline proc "contextless" (p, end: [^]u8, $SPELLED: bool) -> (q
 	int_at := q
 	if q[0] == '0' {
 		q = q[1:]
-		if q < end && q[0] - '0' < 10 {
+		if q < end && (q[0] - '0' < 10 || S == .Json5 && q[0] | 0x20 == 'x') {
 			return q, 0, .Bad_Number
 		}
 	} else {

@@ -14,7 +14,7 @@ FLOOR_LEVELS :: 8
 // comma given, or from `p`, so the states read every byte the masks did not judge. Only a hook that answers every token
 // with `Next` enters it.
 @(private, enable_target_feature = STATE_FEATURES)
-st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result #no_bounds_check {
+st_number_blocks :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result #no_bounds_check {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	dep := d >> 1
 	// The depth a close may bring the walk down to, with every container from it to `dep` an array. Depth 0 is the
@@ -118,7 +118,7 @@ Block_Tokens :: struct {
 // Gives the hook the tokens of `t` in text order. A number's end and a close at one byte give the number first. A
 // number with no `[` or `,` before it in `t` starts at `start` and has its `.` at `dot_at`, from the block before.
 @(private = "file")
-block_tokens :: #force_inline proc "contextless" (w: ^Walk($H), $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action), hs: ^tape.Hook_Regs, t: Block_Tokens, start, dot_at: [^]u8) #no_bounds_check {
+block_tokens :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action), hs: ^tape.Hook_Regs, t: Block_Tokens, start, dot_at: [^]u8) #no_bounds_check {
 	for ev := (t.ends | t.opens | t.closes) & t.keep; ev != 0; ev &= ev - 1 {
 		bit := ev & -ev
 		x := t.base[intrinsics.count_trailing_zeros(ev):]

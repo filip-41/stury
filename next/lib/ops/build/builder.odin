@@ -1,13 +1,17 @@
 package build
 
 import "base:runtime"
+import "core:slice"
 import "stury:lib/core/tape"
 
-// The hook that stores a walk's tokens as a document's nodes. In its registers `a` is the next node's address, `b`
-// the open container's index above its child count and `c` the count of open containers.
+// The hook that stores a walk's tokens as a document's nodes, and with `builder_hook_facts` its fact tokens as the
+// document's facts. In its registers `a` is the next node's address, `b` the open container's index above its child
+// count and `c` the count of open containers.
 Builder :: struct {
 	doc:       tape.Document,
 	stack:     []u64, // the frames of the open containers' parents, `b` as it was at their open
+	facts:     []tape.Fact, // the facts' buffer, of which `doc.facts` is the part in use
+	closed:    tape.Node_Index, // the container closed last, `NO_NODE` before one closes; kept by `builder_hook_facts`
 	err:       runtime.Allocator_Error,
 	borrowed:  bool, // `stack` is the caller's, which `builder_end` does not free
 	wide:      tape.Child_Count, // the first container whose `spelling` saturated, count 0 for none
@@ -25,7 +29,7 @@ builder_regs :: #force_inline proc "contextless" (h: ^Builder) -> tape.Hook_Regs
 // open stack. A refused allocation leaves `err` set.
 builder_start :: proc(src: []u8, format: ^tape.Format, nodes: int, frames: []u64, allocator: runtime.Allocator) -> (b: Builder) {
 	b.doc = {src = src, format = format, allocator = allocator, flags = {.Kinds_Stored, .In_Order}}
-	b.stack, b.borrowed = frames, true
+	b.stack, b.borrowed, b.closed = frames, true, tape.NO_NODE
 	raw, err := runtime.mem_alloc_non_zeroed(max(nodes, 16) * size_of(tape.Node), align_of(tape.Node), allocator)
 	if err != nil {
 		b.err = err
@@ -37,7 +41,20 @@ builder_start :: proc(src: []u8, format: ^tape.Format, nodes: int, frames: []u64
 
 // Stores `t` as a node, or for an end writes its container's subtree size and child count into the container's node.
 // The walk ends only containers it opened.
-builder_hook :: #force_inline proc "contextless" (h: ^Builder, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action) #no_bounds_check {
+builder_hook :: #force_inline proc "contextless" (h: ^Builder, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action) {
+	return builder_step(h, s, t, false)
+}
+
+// `builder_hook` for a walk that also gives fact tokens, a token whose role is past `Key`, which it stores as facts.
+builder_hook_facts :: #force_inline proc "contextless" (h: ^Builder, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action) {
+	if t.role > .Key {
+		return s, builder_fact(h, s, t)
+	}
+	return builder_step(h, s, t, true)
+}
+
+@(private)
+builder_step :: #force_inline proc "contextless" (h: ^Builder, s: tape.Hook_Regs, t: tape.Token, $FACTS: bool) -> (tape.Hook_Regs, tape.Action) #no_bounds_check {
 	s := s
 	if t.kind <= .Plain {
 		((^tape.Node)(uintptr(s.a)))^ = t
@@ -58,6 +75,9 @@ builder_hook :: #force_inline proc "contextless" (h: ^Builder, s: tape.Hook_Regs
 	}
 	open := int(s.b >> 32)
 	count := u32(s.b)
+	when FACTS {
+		h.closed = tape.Node_Index(open)
+	}
 	n := &h.doc.nodes[open]
 	n.n = u32(a - open)
 	n.spelling = u16(min(count, u32(tape.MAX_CHILDREN)))
@@ -71,6 +91,85 @@ builder_hook :: #force_inline proc "contextless" (h: ^Builder, s: tape.Hook_Regs
 	s.c -= 1
 	s.b = h.stack[s.c]
 	return s, .Next
+}
+
+// Stores the fact token `t`, a comment, as a fact of the node it describes. A comment before a value waits in
+// `builder_end` for the node it marks, an inline comment belongs to the last value completed and a foot to the
+// innermost open container, or to the root after it. `Stop` when memory for the facts is refused.
+@(private, cold)
+builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: tape.Hook_Regs, t: tape.Token) -> tape.Action {
+	a := tape.Node_Index((uintptr(s.a) - uintptr(raw_data(h.doc.nodes))) / size_of(tape.Node))
+	node := a
+	kind := tape.fact_kind(t.role)
+	#partial switch kind {
+	case .Comment:
+	case .Comment_Inline:
+		// The container closed last is the last value completed when no node was stored after its subtree.
+		node = a - 1
+		if h.closed != tape.NO_NODE && h.closed + tape.Node_Index(h.doc.nodes[h.closed].n) == a {
+			node = h.closed
+		}
+	case .Comment_Foot:
+		node = tape.Node_Index(s.b >> 32)
+		if node == tape.NO_NODE {
+			node = tape.ROOT
+		}
+	case:
+		return .Next
+	}
+	n := len(h.doc.facts)
+	if n == len(h.facts) && !builder_grow_facts(h) {
+		return .Stop
+	}
+	h.facts[n] = tape.Fact{lo = t.lo, node = node, n = t.n, kind = kind, spelling = t.spelling}
+	h.doc.facts = h.facts[:n + 1]
+	if kind != .Comment {
+		h.doc.present += {kind}
+	}
+	return .Next
+}
+
+// Doubles the room for facts, or sets `err` when memory is refused.
+@(private, cold)
+builder_grow_facts :: proc "contextless" (h: ^Builder) -> bool {
+	context = runtime.default_context()
+	want := max(2 * len(h.facts), 16)
+	raw, err := runtime.non_zero_mem_resize(raw_data(h.facts), len(h.facts) * size_of(tape.Fact), want * size_of(tape.Fact), align_of(tape.Fact), h.doc.allocator)
+	if err != nil {
+		h.err = err
+		return false
+	}
+	h.facts = ([^]tape.Fact)(raw_data(raw))[:want]
+	h.doc.facts = h.facts[:len(h.doc.facts)]
+	return true
+}
+
+// Gives each comment that waits for the value it marks that value's node: the node after it, or after a key the key's
+// value. A comment no node follows, past a stop, belongs to the root as its foot. Then sorts the facts by node.
+@(private, cold)
+builder_place_facts :: proc(h: ^Builder, count: int) {
+	facts := h.doc.facts
+	for &f in facts {
+		if f.kind != .Comment {
+			continue
+		}
+		if int(f.node) < count && h.doc.nodes[f.node].role == .Key {
+			f.node += 1
+		}
+		if int(f.node) >= count {
+			f.node, f.kind = tape.ROOT, .Comment_Foot
+			h.doc.present += {.Comment_Foot}
+		} else {
+			h.doc.present += {.Comment}
+		}
+	}
+	// Facts arrive mostly in node order, and a stable sort of an ordered list changes nothing.
+	for i in 1 ..< len(facts) {
+		if facts[i].node < facts[i - 1].node {
+			slice.stable_sort_by(facts, proc(a, b: tape.Fact) -> bool { return a.node < b.node })
+			break
+		}
+	}
 }
 
 // Gives the document the true child counts of its containers in `nodes` whose `spelling` saturated.
@@ -158,7 +257,11 @@ builder_end :: proc(h: ^Builder, regs: tape.Hook_Regs, root_close: u64, err: tap
 			e = refused
 		}
 	}
+	if e == nil && len(h.doc.facts) > 0 {
+		builder_place_facts(h, count)
+	}
 	if e != nil {
+		h.doc.facts = h.facts
 		tape.destroy(&h.doc)
 		return {}, e
 	}

@@ -65,7 +65,9 @@ SPELLING_DECODE :: u16(1)
 SPELLING_QUOTED :: u16(2)
 SPELLING_LAX :: u16(4)
 
+NUMBER_KIND :: u16(0xF) // in a number's spelling, the format's number kind, 0 for its plain decimal
 NUMBER_EXP :: u16(1 << 14) // in a number's spelling, the number has an exponent
+NUMBER_POINT :: u16(1 << 15) // in a number's spelling, a point with no digit after it (`5.`), which makes a float
 
 // The spelling of a number token. Bits 0 to 3 hold the format's number kind (0 for its plain decimal), bits 4 to 8 the
 // integer digits and bits 9 to 13 the fraction digits, each count saturated at 31.

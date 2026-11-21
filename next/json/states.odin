@@ -11,7 +11,7 @@ import "stury:lib/ops/build"
 
 // The state at the start of a value, past white space.
 @(private, enable_target_feature = STATE_FEATURES)
-st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	if p >= end {
 		return fault(w, hs, end, .Truncated)
@@ -19,7 +19,7 @@ st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 	// Branches on the first byte's class, so `true`, `false` and `null` share a branch.
 	#partial switch VALUE_CLASS[p[0]] {
 	case .String:
-		q, escaped, stop := string_short(p, end)
+		q, escaped, stop := string_short(p, end, '"')
 		if q == nil {
 			if escaped {
 				w.resume = stop
@@ -36,8 +36,11 @@ st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 		}
 		return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 	case .Number:
-		q, spelling, kind := number(p, end, H != tape.No_Hooks)
+		q, spelling, kind := number(p, end, H != tape.No_Hooks, S)
 		if kind != .None {
+			when S == .Json5 {
+				return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+			}
 			return fault(w, hs, q, kind)
 		}
 		if too_wide(p, q) {
@@ -88,17 +91,33 @@ st_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 		}
 		return #must_tail st_open(p[1:], end, (d | 1) + 1, ind, w, hs.a, hs.b, hs.c, m, G, on)
 	}
+	when S == .Json5 {
+		switch p[0] {
+		case '\'':
+			return #must_tail st_string5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+		case '+', '.', 'I', 'N':
+			return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+		}
+	}
+	when S != .Json {
+		return #must_tail st_spec_value(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+	}
 	return #must_tail st_bad_value(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 }
 
 // The state at an object's key, past white space, which reads on through the colon to the value.
 @(private, enable_target_feature = STATE_FEATURES)
-st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_key :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	if p >= end {
 		return fault(w, hs, end, .Truncated)
 	}
 	if p[0] != '"' {
+		when S == .Json5 {
+			return #must_tail st_key_ident(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+		} else when S != .Json {
+			return #must_tail st_spec_key(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+		}
 		return fault(w, hs, p, .Bad_Char)
 	}
 	q, escaped, stop := string_probe(p, end)
@@ -149,9 +168,9 @@ colon_fast :: #force_inline proc "contextless" (q, end: [^]u8) -> [^]u8 {
 // The state at a value string that `string_short` refused, with no backslash in its first 32 bytes. `string_lean` is
 // inlined, so a plain ASCII string makes no call.
 @(private, enable_target_feature = STATE_FEATURES)
-st_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
-	q, escape := string_lean(p, end)
+	q, escape := string_lean(p, end, '"')
 	if q == nil {
 		if escape != nil {
 			w.resume = escape
@@ -170,7 +189,7 @@ st_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, 
 
 // The state at a value string whose first escape is at `w.resume`.
 @(private, enable_target_feature = STATE_FEATURES)
-st_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	q := string_escaped(w.resume, end)
 	if q == nil {
@@ -187,16 +206,16 @@ st_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, in
 
 // The state at a value string past ASCII, or one the faster readers refused.
 @(private, enable_target_feature = STATE_FEATURES)
-st_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
-	q, esc, kind := string_long(w, p, end)
+	q, spelling, kind := string_long(w, p, end)
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
 	if too_wide(p, q) {
 		return fault(w, hs, p, .Too_Wide)
 	}
-	if emit_string(w, on, &hs, .Value, p, q, tape.SPELLING_DECODE if esc else 0) == .Stop {
+	if emit_string(w, on, &hs, .Value, p, q, spelling) == .Stop {
 		return stopped(w, hs, q)
 	}
 	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
@@ -204,9 +223,9 @@ st_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: 
 
 // The state at a key `string_probe` refused, longer than `PROBE_MAX` or past printable ASCII.
 @(private, enable_target_feature = STATE_FEATURES)
-st_key_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_key_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
-	q, escape := string_lean(p, end)
+	q, escape := string_lean(p, end, '"')
 	if q == nil {
 		if escape != nil {
 			w.resume = escape
@@ -225,7 +244,7 @@ st_key_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 
 // The state at a key whose first escape is at `w.resume`.
 @(private, enable_target_feature = STATE_FEATURES)
-st_key_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_key_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	q, at := key_escaped_head(w.resume, end)
 	if q == nil {
@@ -245,16 +264,16 @@ st_key_string_escaped :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d
 
 // The state at a key past ASCII, or one the faster readers refused.
 @(private, enable_target_feature = STATE_FEATURES)
-st_key_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_key_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
-	q, esc, kind := string_long(w, p, end)
+	q, spelling, kind := string_long(w, p, end)
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
 	if too_wide(p, q) {
 		return fault(w, hs, p, .Too_Wide)
 	}
-	if emit_string(w, on, &hs, .Key, p, q, tape.SPELLING_DECODE if esc else 0) == .Stop {
+	if emit_string(w, on, &hs, .Key, p, q, spelling) == .Stop {
 		return stopped(w, hs, q)
 	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, gap_next(m, G), G, on)
@@ -262,13 +281,18 @@ st_key_string_long :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, i
 
 // The state right after a key.
 @(private, enable_target_feature = STATE_FEATURES)
-st_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	if intrinsics.ptr_sub(end, p) > 2 && p[0] == ':' && p[1] == ' ' && p[2] > ' ' {
 		return #must_tail st_value(p[2:], end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 	}
 	q, kind := colon(p, end)
 	if kind != .None {
+		when S != .Json {
+			if kind == .Bad_Char {
+				return #must_tail st_spec_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+			}
+		}
 		return fault(w, hs, q, kind)
 	}
 	return #must_tail st_value(q, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
@@ -276,7 +300,7 @@ st_colon :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 
 // The state right after an open bracket.
 @(private, enable_target_feature = STATE_FEATURES)
-st_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_open :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	ind := ind
 	when G {
@@ -325,7 +349,7 @@ level :: #force_inline proc "contextless" (d, m: u64) -> u32 {
 }
 
 @(private)
-emit_key :: #force_inline proc "contextless" (w: ^Walk($H), $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action), hs: ^tape.Hook_Regs, key: tape.Token) -> tape.Action {
+emit_key :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action), hs: ^tape.Hook_Regs, key: tape.Token) -> tape.Action {
 	a: tape.Action
 	hs^, a = on(w.hooks, hs^, key)
 	return a
@@ -334,26 +358,26 @@ emit_key :: #force_inline proc "contextless" (w: ^Walk($H), $on: proc "contextle
 // The state that leaves gap matching for a walk whose keys do not repeat, entering the states without gaps through a
 // frame with no locals, as `-sanitize:address` loses its stack state across a `preserve/none` call from one with them.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_stop_gaps :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_stop_gaps :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	return enter_no_gaps(p, end, d, ind, w, s0, s1, s2, m, on)
 }
 
 // The call into the states without gaps for `st_stop_gaps`.
 @(private, cold)
-enter_no_gaps :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+enter_no_gaps :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	return st_value(p, end, d, ind, w, s0, s1, s2, m, false, on)
 }
 
 // The state at an object's open bracket whose parent slot has no row yet.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_open_new_row :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_open_new_row :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	row := gap_new_row(&w.gaps, m)
 	return #must_tail st_open(p, end, d, ind, w, s0, s1, s2, row * GAP_MEMBERS, G, on)
 }
 
 // The state at an open bracket past the levels the walk holds.
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_deepen :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_deepen :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	if k := deepen(w); k != 0 {
 		return too_deep(w, {s0, s1, s2}, p, k)
 	}
@@ -361,7 +385,7 @@ st_deepen :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, 
 }
 
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_deepen_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_deepen_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	if k := deepen(w); k != 0 {
 		return too_deep(w, {s0, s1, s2}, p, k)
 	}
@@ -370,7 +394,7 @@ st_deepen_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 
 // The state at an array's first element when it is an array, which reads the run of open brackets.
 @(private, enable_target_feature = STATE_FEATURES)
-st_open_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_open_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	p, d := p, d
 	stack, depth := w.stack, w.depth
@@ -393,7 +417,7 @@ st_open_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64
 
 // `st_open` where white space follows the open bracket.
 @(private, enable_target_feature = STATE_FEATURES)
-st_open_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_open_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	ind := ind
 	q := skip_indent(p, end, &ind, .Open)
@@ -408,7 +432,7 @@ st_open_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64,
 
 // The state right after a value, which reads a comma and the next member, the container's close, or the root's end.
 @(private, enable_target_feature = STATE_FEATURES)
-st_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	ind := ind
 	if d < 2 {
@@ -450,12 +474,15 @@ st_after :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 	if q[0] == ']' | u8(d & 1) << 5 {
 		return #must_tail st_close(q, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 	}
+	when S != .Json {
+		return #must_tail st_spec_after(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+	}
 	return fault(w, hs, q, .Bad_Char)
 }
 
 // `st_after` once no gap matches, which reads a comma and the next member, the container's close, or the root's end.
 @(private, enable_target_feature = STATE_FEATURES)
-st_after_unmatched :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_after_unmatched :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	ind := ind
 	q := indent_fast(p, end, &ind, .Close)
@@ -475,15 +502,18 @@ st_after_unmatched :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, i
 	if q[0] == ']' | u8(d & 1) << 5 {
 		return #must_tail st_close(q, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 	}
+	when S != .Json {
+		return #must_tail st_spec_after(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+	}
 	return fault(w, hs, q, .Bad_Char)
 }
 
 // The state at a string value whose member's gap matched, which matches the gap after it too.
 @(private, enable_target_feature = STATE_FEATURES)
-st_hit_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_hit_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	#assert(G)
 	hs := tape.Hook_Regs{s0, s1, s2}
-	q, escaped, stop := string_short(p, end)
+	q, escaped, stop := string_short(p, end, '"')
 	if q == nil {
 		if escaped {
 			w.resume = stop
@@ -518,11 +548,14 @@ st_hit_string :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 
 // The state at a number value whose member's gap matched, which matches the gap after it too.
 @(private, enable_target_feature = STATE_FEATURES)
-st_hit_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_hit_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	#assert(G)
 	hs := tape.Hook_Regs{s0, s1, s2}
-	q, spelling, kind := number(p, end, H != tape.No_Hooks)
+	q, spelling, kind := number(p, end, H != tape.No_Hooks, S)
 	if kind != .None {
+		when S == .Json5 {
+			return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+		}
 		return fault(w, hs, q, kind)
 	}
 	if too_wide(p, q) {
@@ -552,7 +585,7 @@ st_hit_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 
 // The state at a literal value whose member's gap matched, which matches the gap after it too.
 @(private, enable_target_feature = STATE_FEATURES)
-st_hit_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_hit_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	#assert(G)
 	hs := tape.Hook_Regs{s0, s1, s2}
 	q, k := literal(p, end)
@@ -583,7 +616,7 @@ st_hit_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: 
 
 // `st_after` where white space follows the value.
 @(private, enable_target_feature = STATE_FEATURES)
-st_after_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_after_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	ind := ind
 	q := skip_indent(p, end, &ind, .Close)
@@ -596,12 +629,15 @@ st_after_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64
 	if q[0] == ']' | u8(d & 1) << 5 {
 		return #must_tail st_close(q, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 	}
+	when S != .Json {
+		return #must_tail st_spec_after(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+	}
 	return fault(w, hs, q, .Bad_Char)
 }
 
 // The state right after a comma, at white space or the text's end.
 @(private, enable_target_feature = STATE_FEATURES)
-st_member_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_member_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	ind := ind
 	q := skip_indent(p, end, &ind, .Member)
@@ -613,7 +649,7 @@ st_member_ws :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u6
 
 // The state at the close bracket of container `d`, which reads the run of closes after it too.
 @(private, enable_target_feature = STATE_FEATURES)
-st_close :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_close :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	p := p
 	// The depth is carried apart from the kind bit, so the next close does not wait on the stack's load.
@@ -636,7 +672,7 @@ st_close :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w
 // The state right after a number in an array, or without gap matching in an object. Runs of numbers in an array go on
 // in `st_number_run`, and runs of flush members with number values in `st_member_run`.
 @(private, enable_target_feature = STATE_FEATURES)
-st_after_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_after_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	ind := ind
 	if d < 2 {
@@ -668,21 +704,27 @@ st_after_number :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind:
 	if q[0] == ']' | u8(d & 1) << 5 {
 		return #must_tail st_close(q, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 	}
+	when S != .Json {
+		return #must_tail st_spec_after(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+	}
 	return fault(w, hs, q, .Bad_Char)
 }
 
 // The state at a number after a comma in an array, which reads numbers while each is followed by a comma and, after at
 // most one space, another number.
 @(private, enable_target_feature = STATE_FEATURES)
-st_number_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_number_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	hs := tape.Hook_Regs{s0, s1, s2}
 	p := p
 	q: [^]u8
 	for {
 		spelling: u16
 		kind: tape.Fault_Kind
-		q, spelling, kind = number(p, end, H != tape.No_Hooks)
+		q, spelling, kind = number(p, end, H != tape.No_Hooks, S)
 		if kind != .None {
+			when S == .Json5 {
+				return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+			}
 			return fault(w, hs, q, kind)
 		}
 		if too_wide(p, q) {
@@ -714,7 +756,7 @@ st_number_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 // The state at a key flush after a comma, which reads members while each is flush against the last and has a number
 // value. A walk with gaps matches them in `st_after` instead.
 @(private, enable_target_feature = STATE_FEATURES)
-st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	#assert(!G)
 	hs := tape.Hook_Regs{s0, s1, s2}
 	ind := ind
@@ -741,8 +783,11 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 		if r[0] != '-' && r[0] - '0' >= 10 {
 			return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
 		}
-		n, spelling, kind := number(r, end, H != tape.No_Hooks)
+		n, spelling, kind := number(r, end, H != tape.No_Hooks, S)
 		if kind != .None {
+			when S == .Json5 {
+				return #must_tail st_number5(r, end, d, ind, w, hs.a, hs.b, hs.c, m, G, on)
+			}
 			return fault(w, hs, n, kind)
 		}
 		if too_wide(r, n) {
@@ -763,13 +808,13 @@ st_member_run :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u
 }
 
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_bad_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_bad_literal :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	q, kind := literal_fault(p, end)
 	return fault(w, tape.Hook_Regs{s0, s1, s2}, q, kind)
 }
 
 @(private, cold, enable_target_feature = STATE_FEATURES)
-st_bad_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+st_bad_value :: #force_no_inline proc "preserve/none" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2, m: u64, $G: bool, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	return fault(w, tape.Hook_Regs{s0, s1, s2}, p, .Bad_Char)
 }
 

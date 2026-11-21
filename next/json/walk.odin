@@ -15,7 +15,7 @@ FRAME_DEPTH :: 1024
 
 // A walk's state outside its registers.
 @(private)
-Walk :: struct($H: typeid) {
+Walk :: struct($S: Spec, $H: typeid) {
 	base:   [^]u8,
 	hooks:  ^H,
 	stack:  [^]u32, // per open level, its parent's close bracket in the low byte and gap slot above, restored at its close
@@ -38,10 +38,10 @@ STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 
 // The result of walking the root value at `p`, past white space.
 @(private)
-walk_value :: #force_inline proc "contextless" (src: []u8, p: [^]u8, limit: u64, h: ^$H, regs: ^tape.Hook_Regs, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+walk_value :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, limit: u64, h: ^$H, regs: ^tape.Hook_Regs, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 	stack: [FRAME_DEPTH]u32 = ---
 	// Left unzeroed, as `gap_new_row` zeroes each row it makes.
-	w: Walk(H) = ---
+	w: Walk(S, H) = ---
 	w.base, w.hooks, w.stack, w.regs, w.limit, w.owned = raw_data(src), h, raw_data(stack[:]), regs, limit, false
 	when ODIN_ARCH == .amd64 {
 		w.tier = kernel.tier()
@@ -68,18 +68,18 @@ held_depth :: #force_inline proc "contextless" (h: ^$H, regs: ^tape.Hook_Regs, r
 
 when .Address in ODIN_SANITIZER_FLAGS {
 	@(private)
-	enter :: #force_no_inline proc "contextless" (p, end: [^]u8, w: ^Walk($H), hs: tape.Hook_Regs, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+	enter :: #force_no_inline proc "contextless" (p, end: [^]u8, w: ^Walk($S, $H), hs: tape.Hook_Regs, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 		return st_value(p, end, 0, INDENT_START, w, hs.a, hs.b, hs.c, 0, GAPS, on)
 	}
 } else {
 	@(private)
-	enter :: #force_inline proc "contextless" (p, end: [^]u8, w: ^Walk($H), hs: tape.Hook_Regs, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
+	enter :: #force_inline proc "contextless" (p, end: [^]u8, w: ^Walk($S, $H), hs: tape.Hook_Regs, $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action)) -> tape.Walk_Result {
 		return st_value(p, end, 0, INDENT_START, w, hs.a, hs.b, hs.c, 0, GAPS, on)
 	}
 }
 
 @(private)
-emit :: #force_inline proc "contextless" (w: ^Walk($H), $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action), hs: ^tape.Hook_Regs, kind: tape.Kind, role: tape.Role, p, q: [^]u8, spelling: u16) -> tape.Action {
+emit :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action), hs: ^tape.Hook_Regs, kind: tape.Kind, role: tape.Role, p, q: [^]u8, spelling: u16) -> tape.Action {
 	a: tape.Action
 	hs^, a = on(w.hooks, hs^, tape.Token{at(w, p), u32(intrinsics.ptr_sub(q, p)), kind, role, spelling})
 	return a
@@ -88,19 +88,19 @@ emit :: #force_inline proc "contextless" (w: ^Walk($H), $on: proc "contextless" 
 // Emits the string whose opening quote is at `p` and that ends at `q`, one past its closing quote. Its token spans the
 // bytes between the quotes.
 @(private)
-emit_string :: #force_inline proc "contextless" (w: ^Walk($H), $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action), hs: ^tape.Hook_Regs, role: tape.Role, p, q: [^]u8, spelling: u16) -> tape.Action {
+emit_string :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: tape.Hook_Regs, t: tape.Token) -> (tape.Hook_Regs, tape.Action), hs: ^tape.Hook_Regs, role: tape.Role, p, q: [^]u8, spelling: u16) -> tape.Action {
 	return emit(w, on, hs, .String, role, p[1:], q[-1:], spelling | tape.SPELLING_QUOTED)
 }
 
 @(private)
-at :: #force_inline proc "contextless" (w: ^Walk($H), p: [^]u8) -> u64 {
+at :: #force_inline proc "contextless" (w: ^Walk($S, $H), p: [^]u8) -> u64 {
 	return u64(intrinsics.ptr_sub(p, w.base))
 }
 
 // Doubles the levels the walk and its hook hold, up to `limit`. Returns 0, or the outcome when the limit is reached or
 // memory is refused.
 @(private, cold)
-deepen :: #force_no_inline proc "contextless" (w: ^Walk($H)) -> u8 {
+deepen :: #force_no_inline proc "contextless" (w: ^Walk($S, $H)) -> u8 {
 	if w.depth >= w.limit {
 		return tape.WALK_TOO_DEEP
 	}
@@ -123,27 +123,27 @@ deepen :: #force_no_inline proc "contextless" (w: ^Walk($H)) -> u8 {
 }
 
 @(private)
-fault :: #force_inline proc "contextless" (w: ^Walk($H), hs: tape.Hook_Regs, p: [^]u8, kind: tape.Fault_Kind) -> tape.Walk_Result {
+fault :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: tape.Hook_Regs, p: [^]u8, kind: tape.Fault_Kind) -> tape.Walk_Result {
 	w.regs^ = hs
 	return tape.walk_result(at(w, p), u8(kind))
 }
 
 // The result `deepen` gave at the bracket `p`.
 @(private, cold)
-too_deep :: #force_no_inline proc "contextless" (w: ^Walk($H), hs: tape.Hook_Regs, p: [^]u8, outcome: u8) -> tape.Walk_Result {
+too_deep :: #force_no_inline proc "contextless" (w: ^Walk($S, $H), hs: tape.Hook_Regs, p: [^]u8, outcome: u8) -> tape.Walk_Result {
 	w.regs^ = hs
 	return tape.walk_result(at(w, p), outcome)
 }
 
 @(private)
-stopped :: #force_inline proc "contextless" (w: ^Walk($H), hs: tape.Hook_Regs, p: [^]u8) -> tape.Walk_Result {
+stopped :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: tape.Hook_Regs, p: [^]u8) -> tape.Walk_Result {
 	w.regs^ = hs
 	return tape.walk_result(at(w, p), tape.WALK_STOPPED)
 }
 
 // The walk's result for a root value that ends at `p`.
 @(private)
-done :: #force_inline proc "contextless" (w: ^Walk($H), hs: tape.Hook_Regs, p: [^]u8) -> tape.Walk_Result {
+done :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: tape.Hook_Regs, p: [^]u8) -> tape.Walk_Result {
 	w.regs^ = hs
 	return tape.walk_result(at(w, p), 0)
 }
