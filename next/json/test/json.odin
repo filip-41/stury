@@ -8,8 +8,8 @@ import "stury:lib/core/tape"
 
 // The document and error of building `src`, checked against `validate`'s answer.
 build :: proc(t: ^testing.T, src: string, opts := json.Options{}) -> (tape.Document, tape.Error) {
-	doc, err := json.build(transmute([]u8)src, opts)
-	testing.expectf(t, fmt.tprint(json.validate(transmute([]u8)src, opts)) == fmt.tprint(err), "validate and build disagree on %q", src)
+	doc, err := json.build(transmute([]u8)src, .Json, opts)
+	testing.expectf(t, fmt.tprint(json.validate(transmute([]u8)src, .Json, opts)) == fmt.tprint(err), "validate and build disagree on %q", src)
 	return doc, err
 }
 
